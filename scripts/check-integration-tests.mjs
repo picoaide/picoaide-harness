@@ -101,6 +101,13 @@ const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
  * （精确清单会让每次补夹具都要改两处，代价大于收益）。
  */
 const ELECTRON_SHOTS_MIN_FIXTURES = 24
+/**
+ * `electron-shots.mjs` 里"以判据 id 为首参的调用点"数量下限（当前 10 处）。
+ *
+ * 棘轮：删调用点 = 运行期不再判那条判据（既有的"id 必须出现在源码里"判据连**注释**里
+ * 出现都算），所以必须按调用点计数。增删判据调用时同步改这个常量并进 diff。
+ */
+const ELECTRON_SHOTS_MIN_RUNTIME_CALLS = 10
 
 /**
  * 用例脚本的绝对路径。
@@ -584,7 +591,50 @@ for (const file of mjsFiles) {
   check(localReportFn === null,
     '形态⑤: electron-shots.mjs 里出现了本地定义的 `report = …`'
       + `（${JSON.stringify(localReportFn?.[0]?.trim())}）—— 判定结论必须直接来自通道，不得经运行期脚本的包装`)
-  // `--self-check` 必须把**同一批绑定**交给自检（自检另建通道 = 证明的不是运行期那条）。
+
+  // -------------------------------------------------------------------------
+  // 1c-4. 判定通道的**调用点**判据（2026-09-23 第六轮复审 §3.5 的 D-1-1 / D-1-3 收紧）
+  //
+  // 复审实测留下的两条残余（当时都 EXIT=0）：
+  //   · **D-1-1｜异名恒真包装**：保留解构绑定，只把 10 处 `report(` 换成
+  //     `const verdictOf = (id, o) => ({ ok: !false })` ⇒ 上面那条"写死 `ok: true|false`"
+  //     的字面量判据不命中（没有字面量），运行期自检也不命中（自检消费夹具自带的
+  //     observation，与调用点无关）。
+  //   · **D-1-3｜调用点篡改观测**：`report('script-completed', { error: scriptError })`
+  //     → `report('script-completed', {})` ⇒ 两条通道都 EXIT=0：运行期真的少传了观测。
+  //
+  // 处置（低成本且有判别力的那一半，三条都是静态判据）：
+  //   ① **被调方必须是 `report`**：任何"以判据 id 字符串字面量为首参"的调用点，被调方
+  //      必须逐字是 `report` —— 换成 `verdictOf(`/`check(`/`assert(` 一并红；
+  //   ② **观测不得为空**：调用点必须传非空对象字面量（`{}` = 没把运行期观测传进来）；
+  //   ③ **调用点数下限**：10 处（棘轮）—— 删调用点与 ①② 属同一类掏空。
+  //
+  // **诚实边界（认账残余，不假装被覆盖）**：把观测换成"非空但错"的表达式
+  // （`{ error: null }`、`{ phaseOk: true }`）静态判据看不见；`report(id, obs)` 的
+  // **观测内容**只有真机跑 `electron-shots.mjs` 才判得了（需要打包产物 + Xvfb + 真服务端），
+  // 门禁里做不到。这里钉住的是"调用点还在、还走通道、还传了观测"这三条。
+  // -------------------------------------------------------------------------
+  const assertionCalls = [...shotsSource.matchAll(
+    /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(['"])([^'"]+)\2\s*,/gu,
+  )].filter(match => ids.includes(match[3]))
+  const foreignCallees = [...new Set(assertionCalls
+    .filter(match => match[1] !== 'report')
+    .map(match => `${match[1]}(${JSON.stringify(match[3])}, …)`))]
+  check(foreignCallees.length === 0,
+    '形态⑤: 以判据 id 为首参的调用点，被调方必须是 `report`（判定通道的唯一入口）——'
+      + ` 实得 ${foreignCallees.join(' / ')}`
+      + '\n  ⇒ 换一个名字的包装（`verdictOf(...)` 这类"异名恒真"）会让运行期结论不再来自'
+      + ' report()：静态字面量判据与运行期自检都看不见它（第六轮复审 D-1-1 的残余形态）。')
+  check(assertionCalls.length >= ELECTRON_SHOTS_MIN_RUNTIME_CALLS,
+    `形态⑤: 运行期只剩 ${assertionCalls.length} 处以判据 id 为首参的调用（下限 `
+      + `${ELECTRON_SHOTS_MIN_RUNTIME_CALLS}）—— 判据调用点被删到没有覆盖；`
+      + '确实要下调请同时改 ELECTRON_SHOTS_MIN_RUNTIME_CALLS 并写明理由')
+  const emptyObservations = [...shotsSource.matchAll(/report\(\s*(['"])([^'"]+)\1\s*,\s*\{\s*\}\s*\)/gu)]
+    .filter(match => ids.includes(match[2]))
+  check(emptyObservations.length === 0,
+    `形态⑤: 这些调用点传了**空观测** \`{}\`：${emptyObservations.map(match => match[2]).join(', ')}`
+      + '\n  ⇒ 不传运行期观测 = 判据对着 `undefined` 求值（第六轮复审 D-1-3 的形态：'
+      + '`report(\'script-completed\', {})` 当时两条通道都 EXIT=0）。')
   check(/runReporterSelfCheck\(\s*\{[^}]*\breport\b[^}]*\}\s*\)/u.test(shotsSource),
     '形态⑤: `--self-check` 必须把运行期解构出来的 `report`（连同 failures/lines）交给'
       + ' runReporterSelfCheck —— 自检另建通道就是 R5-D-1 的假绿形态')
