@@ -20,6 +20,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/goccy/go-yaml"
+
+	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 稳定错误码:直接进 serverauth.WriteError 的 envelope,客户端按码分流、
@@ -87,15 +89,19 @@ const (
 //
 // 上游没有 MaxDepth 选项(内部 maxDecodeDepth=10000 只在 AST **建成之后**的
 // 解码阶段生效,拦不住解析期的爆炸),所以在把文本交给解析器之前必须先按字符
-// 统计把它挡掉。三层闸门,从最便宜到最贵:
+// 统计把它挡掉。四层闸门,从最便宜到最贵:
 //
 //  1. MaxSkillMDBytes            —— O(1) 长度上限,兜住一切形态的输入规模;
 //  2. checkFrontmatterComplexity —— O(n) 单遍字符统计,零分配,先于解析器;
-//  3. yaml.Unmarshal             —— 只有通过上面两关的文本才会进解析器。
+//  3. checkFrontmatterMergeKey   —— O(n) 拒绝 merge key(`<<`)。字符统计对它
+//     无效:merge key 的代价落在**解码期**的映射合并(fanout^k),与文本里
+//     有多少括号/锚点无关(审计 2026-09-23 G-P1:2732 字节 → 86~143 秒 CPU);
+//  4. yaml.Unmarshal             —— 只有通过上面三关的文本才会进解析器。
 //
 // 阈值不误伤的理由:合法的技能 frontmatter 是**扁平映射**(最多
 // `tags: [a, b, c]` 一层),嵌套深度 ≤ 2、流式集合 ≤ 2 个、块序列指示符
-// ≤ MaxTags(30) 个、锚点/别名/标签 0 个 —— 下面留了一个数量级的余量。
+// ≤ MaxTags(30) 个、锚点/别名/标签 0 个、merge key 0 个 —— 下面留了一个
+// 数量级的余量。
 const (
 	// MaxSkillMDBytes 是一份 SKILL.md / preset.yml 交给解析器的字节上限。
 	// 与 sharedskills/agentshare 的 maxFilePreviewBytes 同值:审核预览上限
@@ -214,14 +220,45 @@ func checkManifestSize(raw, field, what string) error {
 	return nil
 }
 
+// reMergeKey 命中 YAML 的 merge key(`<<`),也就是**唯一**能在 goccy 的
+// 解码器里触发指数级映射合并的构造。
+//
+// 为什么必须单独禁掉它(审计 2026-09-23 G-P1):`checkFrontmatterComplexity`
+// 的三个计数器只数**字符**(括号/块序列指示符/锚点),而 merge key 的代价不在
+// 字符上 —— `<<: [*a0, *a0, …]` 里没有任何被计数的增量,爆炸发生在
+// **解码期**:goccy 的 `keyToNodeMap` 对每个 merge 引用逐键拷贝被合并的映射,
+// 嵌套时按 fanout^k 膨胀。实测 2732 字节的 frontmatter 烧掉 **86~143 秒 CPU**
+// 且 `Parse` 返回 err=nil(会正常入库)。同一攻击类在姊妹模块
+// `agentshare/composition.go` 已被当作真实漏洞修掉(那里用 AST 预算 + 墙钟
+// 预算 + 解码槽位);frontmatter 的字段集是**封闭的扁平映射**,合法包实测
+// 0 个 merge key,所以这里用最省的那条修法:直接拒。
+//
+// 检测口径与 goccy 的 scanner 对齐(scanner.go 的 isMergeKey):merge key 是
+// 字面量 `<<`(恰好两个 `<`),后跟**任意个空格**,再跟 `:`,再跟空格/换行。
+// 它**不要求出现在行首** —— `{<<: *a}` 这种流式映射同样会被合并(审计探针
+// 用的正是这一形态),所以匹配不能锚在行首。反向的误伤面极小:只有当
+// frontmatter 里出现 `<<` 紧跟(可含空格)冒号时才会命中,而 frontmatter 是
+// 键值对清单,`<<` 只可能是 merge key。
+var reMergeKey = regexp.MustCompile(`<<[ ]*:`)
+
 // parseManifestYAML 是 frontmatter / preset.yml 进入 YAML 解析器的**唯一
-// 入口**:先过长度上限与字符统计闸,再解析。Parse 与 ParseAgent 共用,
-// 避免以后新增解析路径时忘记加闸。
+// 入口**:先过长度上限与字符统计闸,再拒 merge key,最后解析。Parse 与
+// ParseAgent 共用,避免以后新增解析路径时忘记加闸。
+//
+// 三层闸门的顺序是"从最便宜到最贵",而且**全部在解析器之前**(只有通过三关
+// 的文本才会进 yaml.Unmarshal):
+//
+//  1. checkManifestSize            —— O(1) 字节上限;
+//  2. checkFrontmatterComplexity   —— O(n) 字符统计(深度/流式集合/锚点);
+//  3. checkFrontmatterMergeKey     —— O(n) merge key 拒绝(解码期指数合并)。
 func parseManifestYAML(raw, field, what string) (map[string]any, error) {
 	if err := checkManifestSize(raw, field, what); err != nil {
 		return nil, err
 	}
 	if err := checkFrontmatterComplexity(raw, field); err != nil {
+		return nil, err
+	}
+	if err := checkFrontmatterMergeKey(raw, field, what); err != nil {
 		return nil, err
 	}
 	var data map[string]any
@@ -231,16 +268,47 @@ func parseManifestYAML(raw, field, what string) (map[string]any, error) {
 	return data, nil
 }
 
+// checkFrontmatterMergeKey 拒绝含 YAML merge key(`<<`)的 frontmatter。
+//
+// 合法包实测 0 个(见 reMergeKey 的注释),所以这是一条零误杀的硬拒绝:
+// 技能/智能体的元数据是**扁平键值清单**,没有任何"继承另一份映射"的合法用途;
+// 真正需要 merge 的编排文件走 agentshare 的 composition 校验(那条路径有
+// AST 预算 + 墙钟预算),两条路径的守卫都指向同一个已知的 goccy 行为。
+//
+// 变异验证:注释掉本函数(或放宽 reMergeKey)后,含 merge key 的 frontmatter
+// 会重新进入解码器 —— `TestMergeKeyFrontmatterRejected` 必须变红。
+func checkFrontmatterMergeKey(raw, field, what string) error {
+	if !strings.Contains(raw, "<<") {
+		return nil
+	}
+	if !reMergeKey.MatchString(raw) {
+		return nil
+	}
+	return newErr(CodeFrontmatterInvalid, field,
+		"%s 不允许 YAML merge key(<<):它会在解码期对映射做逐键合并,是最容易被滥用的指数构造;"+
+			"技能元数据必须是扁平键值清单,请把被合并的字段直接写全", what)
+}
+
 // ProvenanceKey 是安装器写入的溯源块键名;包内自带即视为伪造归属。
 const ProvenanceKey = "picoaide"
 
 // ProvenanceDir 是安装器写入的溯源目录(归档内出现即拒)。
 const ProvenanceDir = ".picoaide/"
 
-// appIDRe 与上游 @deepseek-ai/dsh-skill 的 SKILL_NAME 逐字一致。
-// 上游:/^[a-z0-9]+(?:-[a-z0-9]+)*$/ —— 不允许大写、点、下划线、
-// 连续横线与首尾横线。任何比它宽松的校验都会放进「装了加载不了」的包。
-var appIDRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+// appIDRe 是 app_id / 技能名 / 智能体名共用的**形态**规则。
+//
+// 真源唯一:`wasmapp/limits.AppIDPattern`(平台全部标识数值/形态的唯一真源,
+// 见该包的文件头铁律)。此前这里是**第三份字面量副本**,注释还把真源指向
+// 上游 SKILL_NAME —— 而 limits.go 的注释又把真源指向这里,两份注释互相指认、
+// 谁都不是真源(审计 2026-09-23 ID-03)。现在改为引用真源常量,形态只有一处;
+// 与上游 @deepseek-ai/dsh-skill 的 SKILL_NAME 逐字一致这件事由
+// `TestAppIDShapeHasASingleSource`(serverstore 包,读源码全集合对拍)钉住。
+//
+// 与上游 @deepseek-ai/dsh-skill 的 SKILL_NAME 的语义:不允许大写、点、下划线、
+// 连续横线与首尾横线 —— 任何比它宽松的校验都会放进「装了加载不了」的包。
+// (上游那一条正则本身不再逐字抄在这里:形态只有 limits 一处定义,本文件出现
+// 第二份字面量会被 serverstore 的 TestAppIDShapeHasASingleSource 打红。)
+var appIDRe = regexp.MustCompile(limits.AppIDPattern)
 
 // versionRe 是严格 semver(可带预发布后缀)。旧实现用
 // `^[0-9a-zA-Z.-]{1,64}$`,`v1`/`abc` 都能入库,导致版本无法比较大小、

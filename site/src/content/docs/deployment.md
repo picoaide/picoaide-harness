@@ -60,7 +60,7 @@ https://release.picoaide.com/<渠道>/releases/<版本>/SHA256SUMS          ← 
 |---|---|
 | `channel_id` | 该清单属于哪个渠道（服务端会强制比对，见[渠道与白标](/deployment/channels/)） |
 | `server.version` | 目标版本（不带 `v`，如 `2.7.0`） |
-| `server.image_tag` | 镜像 tag（带 `v`，如 `v2.7.0`）；导入后 `2.7.0` 与 `v2.7.0` 两个 tag 都在 |
+| `server.image_tag` | 镜像 tag（带 `v`，如 `v2.7.0`）；导入后 `2.7.0` 与 `v2.7.0` 两个 tag 都在，另有一个渠道专属 tag `<channel-id>-<版本>`（同机多栈必须用它，见[升级、备份与回滚](/deployment/upgrade/)） |
 | `server.image_asset` | 镜像压缩包下载地址 |
 | `client.version` | 随该版本镜像发布的客户端版本（与服务端同源） |
 

@@ -465,6 +465,20 @@ export default function Apps() {
   const [diagError, setDiagError] = useState('')
 
   const loadSeq = useRef(0)
+  /**
+   * 详情抽屉的请求序号(WEB-3,2026-09-23 审计 P1)。
+   *
+   * 三个 loader(`loadPending`/`loadRejected`/`loadDiagnostics`)**原先没有任何
+   * 序号守卫**:打开 A 详情(其 `/releases` 慢)→ 关闭 → 打开 B 详情(B 的响应先到)
+   * → A 的迟到响应落地,把 A 的待审清单(与 `currentVersionShown`)写进 **B 的抽屉**。
+   * 而「通过」按钮把 `detail`(=当前应用 B)与 `rel`(=A 的版本号)拼成一条请求:
+   * `POST /wasm-apps/B/releases/<A 的版本>/approve` —— 版本号只在**应用内**唯一
+   * (首发普遍都是 1.0.0),所以这不是必然 404,而是**批准了一个从未在审批界面
+   * 展示过的版本**。
+   *
+   * 与同文件 `load` 的 `loadSeq` 同形:只有"当前抽屉"的响应能落地。
+   */
+  const detailSeq = useRef(0)
 
   // 体验层能力判定:服务端 RequirePermission 才是护栏(见页面头注释)。
   const canRead = hasPermission(PERM_CAP_READ)
@@ -560,11 +574,13 @@ export default function Apps() {
 
   /** 详情抽屉打开时拉取该应用的待审版本(筛选变更/审核后重拉同一份)。 */
   const loadPending = useCallback(async (appId: string) => {
+    const current = detailSeq.current // WEB-3:本次响应只属于发起时的那个抽屉
     setPendingError('')
     try {
       const out = await request<ReleasesResponse>(
         `${ADMIN_API}/wasm-apps/${appId}/releases?status=pending`,
       )
+      if (current !== detailSeq.current) return // WEB-3:抽屉已换应用 ⇒ 丢弃
       const releases = requireReleases(out)
       if (releases === null) {
         // F6（审计第二轮 A2-F6）：形状漂移不能显示成"没有待审版本"。
@@ -577,6 +593,7 @@ export default function Apps() {
       setPendingCurrent(out.current_version ?? '')
       setPendingLoaded(true)
     } catch (err: any) {
+      if (current !== detailSeq.current) return // WEB-3:过期响应不写错误/不误报"读取失败"
       setPending([])
       setPendingLoaded(false)
       setPendingError(errorText(err, '读取待审版本失败'))
@@ -592,11 +609,13 @@ export default function Apps() {
    * ②被拒清单读失败不会把待审队列一起打成错误态(两条错误各自可见)。
    */
   const loadRejected = useCallback(async (appId: string) => {
+    const current = detailSeq.current // WEB-3:同 loadPending 的抽屉归属判定
     setRejectedError('')
     try {
       const out = await request<ReleasesResponse>(
         `${ADMIN_API}/wasm-apps/${appId}/releases?status=rejected`,
       )
+      if (current !== detailSeq.current) return // WEB-3:抽屉已换应用 ⇒ 丢弃
       const releases = requireReleases(out)
       if (releases === null) {
         // 与客户端半边同口径（`app-releases.ts` 对同样响应返回 UNEXPECTED_RESPONSE）：
@@ -607,6 +626,7 @@ export default function Apps() {
       }
       setRejected(releases)
     } catch (err: any) {
+      if (current !== detailSeq.current) return
       setRejected([])
       setRejectedError(errorText(err, '读取被拒版本失败'))
     }
@@ -614,19 +634,23 @@ export default function Apps() {
 
   /** 详情抽屉打开时拉取运行诊断(P1-9:管理端此前没有任何排障入口)。 */
   const loadDiagnostics = useCallback(async (appId: string) => {
+    const current = detailSeq.current // WEB-3:同 loadPending 的抽屉归属判定
     setDiagError('')
     try {
       const out = await request<{ diagnostics: Diagnostics }>(
         `${ADMIN_API}/wasm-apps/${appId}/diagnostics`,
       )
+      if (current !== detailSeq.current) return // WEB-3:抽屉已换应用 ⇒ 丢弃
       setDiag(out.diagnostics)
     } catch (err: any) {
+      if (current !== detailSeq.current) return
       setDiag(null)
       setDiagError(errorText(err, '读取运行诊断失败'))
     }
   }, [])
 
   const openDetail = (row: WasmApp) => {
+    detailSeq.current += 1 // WEB-3:从此上一个应用的在飞响应一律作废
     setDetail(row)
     setPending([])
     setPendingCurrent(row.current_version ?? '')
@@ -752,6 +776,12 @@ export default function Apps() {
   /** 审核通过:成功后刷新列表与抽屉(待审清单、积压数、当前生效版本都变了)。 */
   const approveRelease = async (row: WasmApp, rel: PendingRelease) => {
     if (busy || !canWrite) return
+    // WEB-3:待审清单没读到(或不属于当前抽屉)时,`rel` 无从证明属于 `row` ——
+    // 原地拒绝,不发 `POST /wasm-apps/<row>/releases/<别的应用的版本>/approve`。
+    if (!pendingLoaded || detail?.app_id !== row.app_id) {
+      setDetailFeedback({ kind: 'err', text: '待审清单未加载成功,审核已锁定——请关闭抽屉后重新打开该应用。' })
+      return
+    }
     setBusy(`${row.app_id}:approve`)
     setDetailFeedback(null)
     setError('')
@@ -785,6 +815,11 @@ export default function Apps() {
     const row = detail
     const rel = rejectTarget
     if (!row || !rel || busy || !canWrite) return
+    // WEB-3:与 approveRelease 同一判据 —— `rel` 必须来自**当前抽屉**读到的待审清单。
+    if (!pendingLoaded) {
+      setRejectError('待审清单未加载成功,审核已锁定——请关闭抽屉后重新打开该应用。')
+      return
+    }
     const reason = rejectReason.trim()
     if (reason === '') {
       // 兜底:按钮已禁用,但**回车提交/程序化点击**仍可能到这儿 —— 原地给文案而不是
@@ -1646,12 +1681,14 @@ export default function Apps() {
                         )}
                       </div>
                       {/* 无写权限时**禁用而不是隐藏**(与开关同风格):待审清单本身是
-                          只读可见的信息,按钮消失会让只读账号以为"没有待审"。 */}
+                          只读可见的信息,按钮消失会让只读账号以为"没有待审"。
+                          WEB-3:再加 `!pendingLoaded` —— 这份清单必须真的属于当前抽屉
+                          (读失败/未落地时不能拿它去批准任何版本)。 */}
                       <div className="flex items-center gap-1">
                         <Button
                           size="sm"
                           data-testid={`pending-approve-${rel.version}`}
-                          disabled={!canWrite || busy !== ''}
+                          disabled={!canWrite || busy !== '' || !pendingLoaded}
                           aria-describedby={!canWrite ? 'pending-write-note' : undefined}
                           title={canWrite ? '通过:该版本上线' : '没有 capability:write 权限'}
                           onClick={() => { void approveRelease(detail, rel) }}
@@ -1662,7 +1699,7 @@ export default function Apps() {
                           size="sm"
                           variant="destructive"
                           data-testid={`pending-reject-${rel.version}`}
-                          disabled={!canWrite || busy !== ''}
+                          disabled={!canWrite || busy !== '' || !pendingLoaded}
                           aria-describedby={!canWrite ? 'pending-write-note' : undefined}
                           title={canWrite ? '拒绝:释放归档字节(不可恢复)' : '没有 capability:write 权限'}
                           onClick={() => { setRejectReason(''); setRejectTarget(rel) }}

@@ -17,8 +17,9 @@
 # 环境:
 #   CHANNELS_REPO_TOKEN   读私有渠道仓的令牌(细粒度 PAT,Contents:Read 即可)
 #   GITHUB_REF            GitHub 注入的完整 ref(`refs/tags/…` / `refs/heads/…` /
-#                         `refs/pull/…`);**只有 `refs/tags/` 前缀才算 tag**
-#   GITHUB_REF_NAME       tag 名(决定渠道集);非 tag 时本脚本一律当空处理
+#                         `refs/pull/…`);**只有 `refs/tags/` 前缀才算 tag**,也是
+#                         `ci-release-policy.sh` 判形态与渠道集的唯一依据
+#   GITHUB_REF_NAME       tag 名(交给 ci-release-policy.sh 判定;形态不认识即中止)
 #   CI_CHANNELS_SOURCE    已有检出目录(本地测试用;给了就跳过克隆)
 #   CI_CHANNELS_REPO      渠道仓 slug(缺省 picoaide/channels)
 #
@@ -37,9 +38,9 @@ while [ $# -gt 0 ]; do
 done
 
 REPO="${CI_CHANNELS_REPO:-picoaide/channels}"
-REF_NAME="${GITHUB_REF_NAME:-}"
-# 原始名字留着只用于告警(见下),不参与渠道集判定。
-RAW_REF_NAME="$REF_NAME"
+# 原始名字留着只用于告警(见下);**渠道集判定不在这里**,交给唯一真源
+# `scripts/ci-release-policy.sh`(它自己按 `GITHUB_REF` 的类型前缀判是不是 tag)。
+RAW_REF_NAME="${GITHUB_REF_NAME:-}"
 IS_TAG=0
 case "${GITHUB_REF:-}" in
   refs/tags/*) IS_TAG=1 ;;
@@ -48,15 +49,14 @@ esac
 # **只有真正的 tag 才决定渠道集**(2026-09-12 审计 P1-1)。
 #
 # 为什么不能只看 `GITHUB_REF_NAME` 的名字形状:分支 push 上它等于**分支名**,而
-# 一个叫 `v2.7.2` 的分支会被下面的 `v[0-9]*.[0-9]*.[0-9]*` glob 当成正式 tag ⇒
-# 选中**全部**渠道(含品牌渠道);同一轮里把品牌产物搬出 `client-assets/` 的
-# transfer 步骤带 `startsWith(github.ref,'refs/tags/v')` 守卫、分支上被跳过 ⇒
-# 客户品牌安装包进了一个**匿名可读**的公开 artifact。
+# 一个叫 `v2.7.2` 的分支会被"像 tag 就当正式版"的判据当成正式 tag ⇒ 选中**全部**
+# 渠道(含品牌渠道);同一轮里把品牌产物搬出 `client-assets/` 的 transfer 步骤带
+# `startsWith(github.ref,'refs/tags/v')` 守卫、分支上被跳过 ⇒ 客户品牌安装包进了一个
+# **匿名可读**的公开 artifact。
 #
 # `GITHUB_REF` 由 GitHub 注入且带类型前缀,是唯一无歧义的判据;非 tag(分支/PR)
-# 一律当空 → 落到 `*)` → 只发 official。缺 `GITHUB_REF`(本地直跑)按**非 tag**
-# 处理:安全缺省是"只发 official",绝不能因为名字像 tag 就把品牌渠道发出去。
-[ "$IS_TAG" -eq 1 ] || REF_NAME=""
+# 只发 official。缺 `GITHUB_REF`(本地直跑)按**非 tag** 处理:安全缺省是"只发
+# official",绝不能因为名字像 tag 就把品牌渠道发出去。
 SOURCE="${CI_CHANNELS_SOURCE:-}"
 
 # 渠道 id 形状(与客户端 CHANNEL_ID_PATTERN / 服务端 IsChannelID 同源)。
@@ -143,23 +143,21 @@ while IFS= read -r id; do
   ALL+=("$id")
 done < <(printf '%s\n' "${FOUND[@]}" | LC_ALL=C sort)
 
-# tag → 渠道集(用户定案):
+# ref 形态 → 渠道集(用户定案):
 #   beta 预发布 tag  → 只发 beta 渠道(beta 是独立渠道,复用官方品牌内容)
 #   正式 tag vX.Y.Z  → 发**所有**渠道(发一个正式版 = 所有渠道都发布)
 #   非 tag(PR/分支) → 只做 official(与现状一致)
 #
-# 名字形状 → 渠道集的映射只此一处(`tag_channel_set`),因为它在下面要用两次:
-# 一次决定本轮发什么,一次判断"名字像 tag 但 ref 不是 tag"并给告警 —— 两处各写一份
-# glob 就会漂移,而漂移的后果是发错渠道。
-tag_channel_set() {
-  case "$1" in
-    *-beta|*-beta.*|*-rc|*-rc.*|*-alpha|*-alpha.*) printf 'beta' ;;
-    v[0-9]*.[0-9]*.[0-9]*) printf 'all' ;;
-    *) printf 'official' ;;
-  esac
-}
+# **判定不在这里**:唯一真源是 `scripts/ci-release-policy.sh`(2026-09-23 审计 K-04)。
+# 这条规则曾经被写成两份(本文件的 bash glob + `ci.yml` 里 release job 的 `if:`),
+# 两者对"名字带 `-` 但后缀不认识"的 tag 结论相反(这里当正式版全渠道构建、那边跳过
+# 整个 release job)⇒ 40 分钟构建 + 零交付 + R2 中转前缀无人清理。现在本文件只消费
+# 它的输出;形态不认识时它退出 1,`set -e` 让本步骤当场中止(不再"猜一个渠道集")。
+POLICY="$(dirname "$0")/ci-release-policy.sh"
+CHANNEL_SET="$(bash "$POLICY" --ref "${GITHUB_REF:-}" --ref-name "$RAW_REF_NAME" --field channel_set)"
+
 SELECTED=()
-case "$(tag_channel_set "$REF_NAME")" in
+case "$CHANNEL_SET" in
   beta)
     SELECTED=("beta") ;;
   all)
@@ -172,15 +170,14 @@ esac
 # (`git push origin v2.7.3` 少了 `refs/tags/`,或从 tag 建了同名分支)。按上面的
 # 判据这里只发 official —— 这是**对的**(绝不能凭名字把品牌渠道发出去),但这种
 # 输入几乎总是误操作,静默会让"发布渠道少了"在很久以后才被发现,所以给一条中性
-# 告警。**不回显名字**:分支名可能带客户信息(本仓历史上有过渠道内容进公开日志
-# 的事故),渠道 CI 一律不输出渠道侧字符串。
-if [ "$IS_TAG" -ne 1 ]; then
-  case "$(tag_channel_set "$RAW_REF_NAME")" in
-    beta|all)
-      # 用中文引号,避免在双引号字符串里嵌套 ASCII 引号(实测会被 bash 拆成
-      # 相邻词再拼回去,内容碰巧正确但读起来像 bug)。
-      echo "::warning::当前 ref 不是 tag(缺 refs/tags/ 前缀)——已按「非 tag 只发 official」处理;若这是一次发布,请用 tag 触发(分支名不能决定渠道集)" >&2 ;;
-  esac
+# 告警。判据同样取自唯一真源(`looks_like_release_tag`),不在这里写第二份 glob。
+# **不回显名字**:分支名可能带客户信息(本仓历史上有过渠道内容进公开日志的事故),
+# 渠道 CI 一律不输出渠道侧字符串。
+if [ "$IS_TAG" -ne 1 ] \
+  && [ "$(bash "$POLICY" --ref "${GITHUB_REF:-}" --ref-name "$RAW_REF_NAME" --field looks_like_release_tag)" = "true" ]; then
+  # 用中文引号,避免在双引号字符串里嵌套 ASCII 引号(实测会被 bash 拆成
+  # 相邻词再拼回去,内容碰巧正确但读起来像 bug)。
+  echo "::warning::当前 ref 不是 tag(缺 refs/tags/ 前缀)——已按「非 tag 只发 official」处理;若这是一次发布,请用 tag 触发(分支名不能决定渠道集)" >&2
 fi
 
 # 断言:要发的渠道必须在渠道仓里真实存在(缺失 = 配置事故,不是"跳过"),

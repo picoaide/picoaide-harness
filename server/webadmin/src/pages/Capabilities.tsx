@@ -379,7 +379,12 @@ export default function Capabilities() {
                         {row.status !== 'approved' && (
                           <Button size="sm" disabled={isBusy} onClick={() => { setConfirm(row); setConfirmKind('approve') }}>通过</Button>
                         )}
-                        {row.status !== 'rejected' && (
+                        {/* 拒绝只对待审版本开放(ID-01,审计 2026-09-23):拒绝与
+                            「释放归档字节」是同一条 UPDATE,对**已通过且在服务中**
+                            的版本执行它会不可恢复地销毁归档(该版本对全员 404、版本号
+                            烧毁)。要停服务用「下架」(可逆)。服务端在 DAO 层同样拒绝
+                            并回 409 APPROVED_NOT_REJECTABLE,这里只是不让入口出现。 */}
+                        {row.status === 'pending' && (
                           <Button size="sm" variant="outline" disabled={isBusy} onClick={() => { setReason(''); setConfirm(row); setConfirmKind('reject') }}>拒绝</Button>
                         )}
                         <Button size="sm" variant="destructive" disabled={isBusy} onClick={() => { setConfirm(row); setConfirmKind('delete') }}>删除</Button>
@@ -416,7 +421,7 @@ export default function Capabilities() {
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             {confirmKind === 'approve' && '通过后该版本将按授权可见可安装。'}
-            {confirmKind === 'reject' && '拒绝后仅上传者可见并可重新上传。请填写理由,上传者可见。'}
+            {confirmKind === 'reject' && '拒绝后仅上传者可见；该版本的归档字节会被释放且不可恢复。如需停止服务请改用「下架」（可恢复）。请填写理由，上传者可见。'}
             {confirmKind === 'delete' && '删除后记录与归档将被移除,不可恢复。'}
           </p>
           {confirmKind === 'reject' && (

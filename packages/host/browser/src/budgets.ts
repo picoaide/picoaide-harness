@@ -72,3 +72,33 @@ export const BROWSER_WAIT_FOR_DEADLINE_MS = USER_GATE_TIMEOUT_MS + WAIT_FOR_MAX_
  * 两段等待，必须**相加**留在预算内（5s + 10s = 15s，余下 15s 跑真正的开页）。
  */
 export const TAB_SLOT_WAIT_TIMEOUT_MS = 5_000
+
+/**
+ * Margin kept between an internal wait and the registered tool deadline (ms).
+ *
+ * timeout-policy 在 deadline **到达时**替换整条结果，所以内部等待必须在它之前
+ * 收手：留 1s 给结果投影、op-log 记录、账本落盘与回程。
+ */
+export const TOOL_DEADLINE_MARGIN_MS = 1_000
+
+/**
+ * Upper bound for the page load raced INSIDE the critical section by
+ * `browser_open` / `browser_navigate` (ms).
+ *
+ * 2026-09-23 审计 BR-3：`budgets.ts` 自述的不变量是"闸门 + 槽位 + 真正要跑的
+ * 那一段都要**相加**留在工具预算内"，但真正跑开页的等待用的是
+ * `DEFAULT_LOAD_TIMEOUT_MS = 20s`（各自独立的预算）⇒ 最坏情况
+ * `browser_navigate` = 10s + 20s = 30s（== 预算，不是"显著短于"）、
+ * `browser_open` = 10s + 5s + 20s = 35s（> 预算），上游 timeout-policy 照旧会把
+ * 工具自己的、可执行的结果换成笼统的 `tool call timed out after 30000ms` ——
+ * 正是这份文件存在的唯一理由（2026-09-16 客户现场）。
+ *
+ * 取值 = 工具预算 − 用户闸 − 槽位 − 余量（30 − 10 − 5 − 1 = 14s）。加载竞速到点
+ * 只表示"这一次不继续等了"，页面仍在后台加载（`navigateInternal` 的 `pending`
+ * 分支不报错），所以变短不改变功能语义，只把"等待"收回预算内。
+ *
+ * 运行期还会再按**剩余额度**收紧一次（`deadlineAt − now − 余量`）：排队/等闸/
+ * 等槽位已经花掉的时间不会被重复花掉。两个判据都要满足，取最小值。
+ */
+export const NAVIGATE_LOAD_BOUND_MS =
+  BROWSER_TOOL_TIMEOUT_MS - USER_GATE_TIMEOUT_MS - TAB_SLOT_WAIT_TIMEOUT_MS - TOOL_DEADLINE_MARGIN_MS

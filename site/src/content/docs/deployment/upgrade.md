@@ -89,7 +89,7 @@ unzip -p /tmp/pa.zip image.tar | docker load
 ```bash
 cd /opt/picoaide
 # 用 latest.json 的 server.image_tag（权威，形如 v2.7.0）；
-# 镜像里 2.7.0 与 v2.7.0 两个 tag 都在，写哪个都能起来
+# 镜像里 2.7.0 与 v2.7.0 两个 tag 都在，写哪个都能起来（同机多栈必须用渠道 tag，见本章「同一台服务器上跑多个渠道栈」）
 sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${VER}|" .env
 grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${VER}" >> .env
 
@@ -104,6 +104,48 @@ docker compose up -d
   先清旧再写（否则 `client/` 里会同时留着两个版本的安装器）；`.env` 与全部数据目录一律不动；
 - **宿主机已有反代时**（见[运维与排障](/deployment/operations/#宿主机已有反向代理)）：只重建本产品容器
   `docker compose up -d postgres server`，别把共享反代牵进来。
+
+### 同一台服务器上跑多个渠道栈
+
+渠道差异在**镜像内容**（品牌、随包客户端、镜像内的渠道标记），**不在 tag**：每个渠道的
+镜像归档内部都带同一个 `picoaide-harness-server:v<版本>`。因此同一台机器上导入第二个渠道的
+包时，后 `docker load` 的那一份会**覆盖**先前的 tag，此后任一栈
+`docker compose up -d server` 都可能用**另一个渠道**的镜像重建 —— 品牌与随包安装包全错，
+而该栈 `.env` 里的 `SERVER_IMAGE` 看起来完全正确。
+
+每个渠道的归档从 2026-09-23 起**额外**带一个渠道专属 tag
+`picoaide-harness-server:<channel-id>-<版本>`。多栈宿主机的正确顺序：
+
+```bash
+VER=<本次版本，不带 v>
+IMAGE=picoaide-harness-server
+STACK=/opt/picoaide            # ← 本栈部署目录
+CT=picoaide-server             # ← 本栈 server 容器名
+
+# 1) 导入本渠道的包（两栈各 load 自己渠道的包）
+unzip -p /tmp/pa.zip image.tar | docker load
+
+# 2) 用**本栈正在运行的容器**取 image id，重打成渠道专属 tag
+#    （变量名别用 GID/UID：远端 zsh 里它们是只读特殊变量）
+IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+
+# 3) 本栈 .env 指向渠道 tag（不要留裸 `v<版本>`）
+cd "$STACK"
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+docker compose up -d server
+
+# 4) 核对这一栈跑的确实是本渠道
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # 镜像内置的渠道标记
+curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 应与之一致
+```
+
+首次部署（还没有运行中的容器）时，`docker load` 之后**立刻**按刚导入的 tag 取 id 再重打
+（`docker inspect --format '{{.Id}}' ${IMAGE}:${VER}`），不要等另一栈先动手。回滚锚点同理要留
+**渠道 tag**：裸 `v<旧版本>` 在同机多栈时可能已指向别的渠道的镜像。渠道与部署的一致性判据见
+[渠道与白标](/deployment/channels/)。
+
 
 ## 6. 升级后验证（三项全过才算成功）
 

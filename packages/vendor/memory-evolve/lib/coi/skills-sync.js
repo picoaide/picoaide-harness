@@ -16,13 +16,49 @@ import { writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets
 
 /**
  * 换入过程中的两个临时目录名（都与目标同父目录，同一文件系统才能 rename）：
- *   - `<destDir>.staging-<pid>-<ts>`：新内容先全部写这里，写完整体换入；
- *   - `<destDir>.old-<pid>-<ts>`：旧目录先原子改名到这里"旁置"，换入成功后再删。
+ *   - `.staging-<name>-<pid>-<ts>`：新内容先全部写这里，写完整体换入；
+ *   - `.old-<name>-<pid>-<ts>`：旧目录先原子改名到这里"旁置"，换入成功后再删。
  * 两个名字都带 pid/时间戳：既是并发同步的隔离（互不覆盖），也是崩溃残留的
  * 清扫判据（见 {@link sweepStaleSwapDirs}）。
+ *
+ * ⚠️ **前导点（A16 修复，2026-09-23 独立审计）**：这两个目录此前是
+ * `<name>.staging-<pid>-<ts>`（无前导点，形如 `memory-consolidate.staging-…`）。
+ * 那个名字**命中**客户端的 `SKILL_NAME_PATTERN`（`^[a-z0-9][a-z0-9._-]{0,63}$`）
+ * 且内部有完整 SKILL.md ⇒ 换入被 SIGKILL 打断的窗口期内，能力中心的
+ * `listInstalledSkills` 会把它报成"一个已安装技能"、上游发现器也会加载它
+ * （同名重复候选），直到下次启动清扫。前导点让它在两条路径上同时消失
+ * （客户端与上游的名字规则都要求首字符是 [a-z0-9]）。
+ * 旧命名仍被 {@link parseSwapDirName} 解析：升级后盘上可能还留着旧版本写下的
+ * 残留，不认它们就等于让这些幽灵目录永久占位。
  */
 const STAGING_INFIX = '.staging-'
 const ASIDE_INFIX = '.old-'
+
+/**
+ * 安装器写在技能目录里的**非技能内容**（A9 修复，2026-09-23 独立审计）：
+ * 整目录换入时必须从旧目录搬进新内容，否则——
+ *   - `.picoaide/release.json`（来源徽章 + 「是否被本地修改」的判据）消失，
+ *     同步后该技能在能力中心退回"用户自制"；
+ *   - `.install-version`（遥测读的已装版本）消失。
+ * 两者都由客户端安装器写，本插件只负责**不丢**它们。
+ */
+const INSTALLER_MARKERS = ['.picoaide', '.install-version']
+
+/**
+ * 本插件写下的溯源目录/文件名，与 enterprise 安装器的
+ * `PROVENANCE_DIR` / `release.json` **同值**：跨包 import 禁止（本插件是随包
+ * vendored 副本，不依赖企业包），所以这里是本地常量而不是 import。
+ */
+const PROVENANCE_DIR = '.picoaide'
+const PROVENANCE_FILE = 'release.json'
+
+/**
+ * 本插件来源的渠道取值（A9 修复）：`SkillProvenance.channel` 的取值域由
+ * `'market' | 'org' | 'builtin'` 扩展为 `'market' | 'org' | 'builtin' | 'plugin'`
+ * （跨泳道契约，由企业包的 `readProvenance` 接受）。装上之后能力中心据此知道
+ * 这份技能是**插件随包**装上的，而不是用户自制。
+ */
+const PLUGIN_CHANNEL = 'plugin'
 
 /**
  * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
@@ -229,8 +265,8 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
  * 单文件原子写在失败时保留旧文件，属回归）。
  *
  * **换入是三步可恢复的（S13-3 复核，2026-09-17）**：
- *   1) `rename(old → <name>.old-<pid>-<ts>)` 把旧目录原子旁置（不再先 rm）；
- *   2) `rename(staging → dest)` 让新内容就位；
+ *   1) `rename(old → .old-<name>-<pid>-<ts>)` 把旧目录原子旁置（不再先 rm）；
+ *   2) `rename(.staging-<name>-<pid>-<ts> → dest)` 让新内容就位；
  *   3) 删除旁置副本（尽力而为，删不掉留给下次同步清扫）。
  * 因此失败面只有两种，且都不丢内容：
  *   - 第 2 步失败 → 先把旁置副本改回原处再抛原始错误（旧技能原封不动，暂存副本
@@ -242,11 +278,16 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
  * SIGKILL/断电打断（不走 catch）时目录状态取决于断点，残留由下次同步开头的
  * {@link sweepStaleSwapDirs} 收拾。
  *
+ * A9（2026-09-23）追加一条：换入前后**安装器标记不丢**——旧目录的
+ * `.picoaide/`.install-version 先搬进新内容，再补一份本插件自己的 provenance
+ * （channel: 'plugin'），见 {@link stashInstallerMarkers} / {@link writePluginProvenance}。
+ *
  * @param {string} srcDir - 插件包内技能目录。
  * @param {string} destDir - 用户技能库内的目标目录。
  * @param {string} anchorDir - 技能库根（落点断言的基准）。
  */
 function syncSkillDirSafe(srcDir, destDir, anchorDir) {
+  const name = basename(destDir)
   let hadDest = false
   try {
     const stat = lstatSync(destDir)
@@ -262,17 +303,29 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
   const planted = findSymlinkEntry(destDir)
   if (planted !== null) throw writeTargetRefusedError(join(destDir, planted))
   // 暂存目录与目标同父目录（同一文件系统，rename 才能原子换入）；落点仍在
-  // 技能库根之下，逐文件断言（anchorDir）照旧生效。
-  const stagingDir = `${destDir}${STAGING_INFIX}${process.pid}-${Date.now()}`
+  // 技能库根之下，逐文件断言（anchorDir）照旧生效。名字**以点开头**（A16）：
+  // 窗口期内既不被能力中心当成"已安装技能"，也不被上游发现器加载。
+  const stamp = `${process.pid}-${Date.now()}`
+  const stagingDir = join(anchorDir, `${STAGING_INFIX}${name}-${stamp}`)
   let asideDir = null
+  /** 从旧目录搬进暂存目录的安装器标记（回滚时要搬回去）。 */
+  let stashedMarkers = []
   try {
     mkdirSync(stagingDir, { recursive: true })
+    const srcText = readFileSync(join(srcDir, 'SKILL.md'), 'utf8')
     for (const rel of listFilesRel(srcDir)) {
       writeFileAtomicSafeAt(join(stagingDir, rel), readFileSync(join(srcDir, rel)), { anchorDir })
     }
+    // A9（2026-09-23）：整目录换入**不丢安装器标记**——旧目录里的 `.picoaide/`
+    // 与 `.install-version` 先搬进新内容，随同一次原子 rename 回到位；目标没有
+    // provenance 时再补一份本插件自己的（channel: 'plugin'），使能力中心不会把
+    // 随包装上的技能当成"用户自制"。两步都在换入之前完成，所以没有"换入成功但
+    // 溯源丢了"的中间态。
+    stashedMarkers = stashInstallerMarkers(destDir, stagingDir)
+    writePluginProvenance(stagingDir, name, skillVersion(srcText), anchorDir)
     // 1) 旧目录旁置（原子；不再有"rm 之后 rename 失败 ⇒ 技能消失"的窗口）
     if (hadDest) {
-      asideDir = `${destDir}${ASIDE_INFIX}${process.pid}-${Date.now()}`
+      asideDir = join(anchorDir, `${ASIDE_INFIX}${name}-${stamp}`)
       renameSync(destDir, asideDir)
     }
     // 2) 新内容就位；失败先把旧目录改回来（回滚再失败 → 抛可恢复错误）
@@ -292,6 +345,10 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
       try { rmSync(asideDir, { recursive: true, force: true }) } catch { /* 留给清扫 */ }
     }
   } catch (error) {
+    // 回滚成功（或目标一直都在）时，把搬进暂存目录的安装器标记原样搬回目标目录——
+    // 清理暂存副本不能顺手带走用户的溯源。目标缺失（SkillSwapRecoveryError 那一路）
+    // 时两份副本刻意保留，标记随暂存副本一起留在盘上，可人工恢复。
+    if (existsSync(destDir)) restoreInstallerMarkers(destDir, stagingDir, stashedMarkers)
     // 只有"目标目录仍然在盘上（旧内容在位 / 回滚成功 / 新内容已就位）"或
     // "本来就没有旧目录"时才删暂存副本；目标缺失时暂存目录是这份内容的唯一
     // 完整副本，必须保留并在错误里点名（S13-3 复核：否则技能将凭空消失）。
@@ -299,6 +356,77 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
       try { rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 残留由下次同步清扫 */ }
     }
     throw error
+  }
+}
+
+/**
+ * 把旧目标目录里的安装器标记搬进新内容暂存目录（A9 修复，2026-09-23）。
+ *
+ * 只搬**真实存在的**目录/文件，且暂存目录里已有同名条目时不动（源包自带的
+ * 优先）。搬不动（跨设备/权限）就留在旧目录里——随后它会被旁置副本带着走，
+ * 内容不丢，只是下一次同步不再被保留。
+ *
+ * @param {string} destDir - 技能库内的旧技能目录。
+ * @param {string} stagingDir - 已写好新内容的暂存目录。
+ * @returns {string[]} 实际搬走的条目名（供 {@link restoreInstallerMarkers} 回滚）。
+ */
+function stashInstallerMarkers(destDir, stagingDir) {
+  const moved = []
+  for (const marker of INSTALLER_MARKERS) {
+    const from = join(destDir, marker)
+    const to = join(stagingDir, marker)
+    if (existsSync(to) || !existsSync(from)) continue
+    try {
+      renameSync(from, to)
+      moved.push(marker)
+    } catch { /* 搬不动：留在旧目录（内容不丢） */ }
+  }
+  return moved
+}
+
+/**
+ * 换入失败并回滚后，把搬进暂存目录的安装器标记原样搬回目标目录。
+ * @param {string} destDir - 已复原的技能目录。
+ * @param {string} stagingDir - 暂存目录（即将被清理）。
+ * @param {string[]} moved - {@link stashInstallerMarkers} 的返回值。
+ * @returns {void}
+ */
+function restoreInstallerMarkers(destDir, stagingDir, moved) {
+  for (const marker of moved) {
+    const back = join(destDir, marker)
+    if (existsSync(back)) continue
+    try { renameSync(join(stagingDir, marker), back) } catch { /* 尽力；清不掉也不影响同步 */ }
+  }
+}
+
+/**
+ * 补齐本插件自己的来源溯源（A9 修复，2026-09-23）。
+ *
+ * 目标没有 `.picoaide/release.json` 时写一份 `channel: 'plugin'` 的：
+ * 字段与 enterprise 安装器 `writeProvenance` 一致（`appId` / `version` /
+ * `channel` / `installedAt`），版本号取 SKILL.md 的 `x-version`（没有则 `''`）。
+ * `archiveChecksum` 刻意不写：它必须与企业侧 `computeSkillContentHash`
+ * 逐字节同源，而跨包 import 禁止，第二份实现算错反而会让「是否被本地修改」
+ * 的判据出错——宁缺勿错。
+ * `.install-version` 只在缺失时补写（有版本才写，与安装器同口径），
+ * 已有的一律原样保留（安装器/旧版本写下的记录优先）。
+ *
+ * @param {string} stagingDir - 暂存目录（换入前）。
+ * @param {string} name - 技能名。
+ * @param {number} xVersion - SKILL.md 的 `x-version`（缺失为 0）。
+ * @param {string} anchorDir - 技能库根（落点断言的基准）。
+ * @returns {void}
+ */
+function writePluginProvenance(stagingDir, name, xVersion, anchorDir) {
+  const version = xVersion > 0 ? String(xVersion) : ''
+  const releaseFile = join(stagingDir, PROVENANCE_DIR, PROVENANCE_FILE)
+  if (!existsSync(releaseFile)) {
+    const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString() }
+    writeFileAtomicSafeAt(releaseFile, `${JSON.stringify(info, null, 2)}\n`, { anchorDir })
+  }
+  const versionFile = join(stagingDir, '.install-version')
+  if (version !== '' && !existsSync(versionFile)) {
+    writeFileAtomicSafeAt(versionFile, version, { anchorDir })
   }
 }
 
@@ -329,12 +457,26 @@ export class SkillSwapRecoveryError extends Error {
 }
 
 /**
- * 解析换入临时目录名（`<skill>.staging-<pid>-<ts>` / `<skill>.old-<pid>-<ts>`）。
+ * 解析换入临时目录名。
+ *
+ * **新命名**（A16 修复，2026-09-23，写入时一律用这一种；前导点让目录对
+ * `SKILL_NAME_PATTERN` 与上游发现器的目录名契约都不可见）：
+ *   `.staging-<skill>-<pid>-<ts>` / `.old-<skill>-<pid>-<ts>`
+ * **旧命名**（升级前写下的崩溃残留，仍要能清掉）：
+ *   `<skill>.staging-<pid>-<ts>` / `<skill>.old-<pid>-<ts>`
+ *
  * @param {string} name - 技能库根下的目录名。
  * @returns {{skillName:string, pid:number, ts:number, aside:boolean}|null}
  */
 function parseSwapDirName(name) {
   for (const [infix, aside] of [[STAGING_INFIX, false], [ASIDE_INFIX, true]]) {
+    // 新命名：<infix><skill>-<pid>-<ts>（以点开头、隐藏）。贪婪匹配让技能名里的
+    // 连字符不被吃进 pid/ts。
+    const hidden = new RegExp(`^\\${infix}(.+)-(\\d+)-(\\d+)$`).exec(name)
+    if (hidden !== null) {
+      return { skillName: hidden[1], pid: Number(hidden[2]), ts: Number(hidden[3]), aside }
+    }
+    // 旧命名：<skill><infix><pid>-<ts>（无前导点）
     const at = name.lastIndexOf(infix)
     if (at <= 0) continue
     const match = /^(\d+)-(\d+)$/.exec(name.slice(at + infix.length))
@@ -364,8 +506,10 @@ function isPidAlive(pid) {
  * 清扫上次同步留下的暂存/旁置目录（S13-3 复核，2026-09-17）。
  *
  * 判据三条同时成立才删，且只在本插件自己的命名空间内动手：
- *   - **同父目录 + 名字形状匹配**：`<BUILTIN_SKILLS 成员>.staging-<pid>-<ts>` /
- *     `.old-<pid>-<ts>`（技能名限定在内置清单里，绝不碰用户自己的目录）；
+ *   - **同父目录 + 名字形状匹配**：`.staging-<BUILTIN_SKILLS 成员>-<pid>-<ts>` /
+ *     `.old-…`（新命名），以及升级前留下的 `<成员>.staging-<pid>-<ts>` /
+ *     `<成员>.old-<pid>-<ts>`（旧命名，见 {@link parseSwapDirName}）；技能名限定
+ *     在内置清单里，绝不碰用户自己的目录；
  *   - **陈旧**：pid 已不存在，或目录年龄超过 {@link STALE_SWAP_MAX_AGE_MS}
  *     （pid 复用兜底）；仍在跑的并发同步（活 pid + 新时间戳）不动；
  *   - **旁置副本额外要求真技能目录还在**：真目录缺失时那个旁置目录是旧内容的

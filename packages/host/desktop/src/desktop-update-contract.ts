@@ -43,7 +43,9 @@ export interface DesktopUpdateStateResponse {
 /** Failure categories surfaced to the user for update checks and downloads.
  * `checksum-*`/`invalid-artifact` are download-time causes that used to be
  * flattened into `network` (P2-63). `not-signed-in` 是"还没有可问的服务端"——
- * 客户端只从登录的那台服务端取更新，未登录不是网络故障，不能报成网络错误。 */
+ * 客户端只从登录的那台服务端取更新，未登录不是网络故障，不能报成网络错误。
+ * `storage`（B-07，2026-09-23）是**本地永久失败**（磁盘满/配额、权限、只读挂载、
+ * 路径形态不可用）：重试不会成功，也不能告诉用户"网络问题"。 */
 export type DesktopUpdateErrorCategory =
   | 'network'
   | 'not-signed-in'
@@ -52,6 +54,7 @@ export type DesktopUpdateErrorCategory =
   | 'unsupported'
   | 'checksum-mismatch'
   | 'invalid-artifact'
+  | 'storage'
 
 /** Byte-level download progress served to the renderer badge. */
 interface UpdateDownloadProgressState {

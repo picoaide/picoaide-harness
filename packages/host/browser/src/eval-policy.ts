@@ -44,6 +44,8 @@
 import acorn from './vendor/acorn.cjs'
 import { browserError } from './errors.ts'
 import { SECRET_VALUE } from './sensitive.ts'
+// EV-1：片段级 `key=value` 打码复用 store 的唯一实现（词表与 URL/摘要面同源）。
+import { maskSensitiveKeyValueText } from './store.ts'
 
 /** Max expression length (host-side bound, far below page cost). */
 export const MAX_EVAL_EXPRESSION = 8192
@@ -777,18 +779,86 @@ function looksLikeCookieString(value: string): boolean {
   return SESSION_COOKIE_NAME.test(first.slice(0, first.indexOf('=')))
 }
 
+/**
+ * 整串**就是**一个凭据的形态（EV-1：只有整串符合这些形状才整串打码）。
+ *
+ * 每条都要求整个字符串就是那个凭据，而不是"提到了某个词"：
+ *  - HTTP 认证头取值（`Bearer <token>` / `Basic <base64>`）：方案的尾巴必须是
+ *    一个不带空格的凭据串 —— `Bearer of good news` 这类散文因此不命中；
+ *  - JWT（三段 base64url）；
+ *  - 带**公认前缀**的 API key（`sk-`/`ghp_`/`glpat-`/`xoxb-`/`AKIA…`）：前缀本身就
+ *    是"这是凭据"的声明，前缀之后还要求 ≥12 位，slug/CSS 类名不会命中。
+ *
+ * 认账边界（EV-1 的取舍）：**裸的、不带前缀也不含数字的不透明串**不再整串打码
+ * （`dXNlcjpwYXNz` 这类 base64 凭据）。旧实现也不打码（`SECRET_VALUE` 只认关键词），
+ * 所以这不是覆盖度回退；而放宽整串规则换来的是"普通正文不再被抹成 ****"。真正
+ * 需要兜住的两条仍在：①注入凭据走 `project`（值级精确脱敏）；②`Authorization: Basic …`
+ * 这类形态由下面的 `key=value`/`key: value` 片段规则擦掉值。
+ */
+const CREDENTIAL_VALUE_SHAPES: readonly RegExp[] = [
+  /^bearer\s+[A-Za-z0-9._~+/=-]{8,}$/iu,
+  /^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/u,
+  /^(?:sk|pk|rk|ghp|gho|ghu|ghs|glpat|xox[baprs]|AKIA|ASIA)[-_][A-Za-z0-9_-]{12,}$/u,
+]
+
+/**
+ * 敏感关键词后紧跟的 opaque 片段（`token abc123def456` / `Bearer eyJ…`）：
+ * 只擦**这个片段**，不是整串（EV-1）。
+ */
+const KEYWORD_SPAN = /(\b(?:token|secret|password|passwd|pwd|authorization|api[_-]?key|apikey|session[_-]?id|access[_-]?key|refresh[_-]?token|private[_-]?key|bearer|credential)\b\s*(?:[:=]\s*)?["']?)([A-Za-z0-9_+/.=-]{8,})/giu
+
+/**
+ * 一个片段是否"不透明到不可能是英文词"（EV-1 的形态判据）。
+ *
+ * `authentication`（14 个字母、无数字）不算；`abc123def456`、`sk-1234567890abcdef`
+ * 算。长度下限 12 是刻意的：`token budgets`（7 个字母）、`password reset`、
+ * `the secret garden` 这些散文都不许命中 —— 那正是 EV-1 报的缺陷形态。
+ */
+function isCredentialSpan(span: string): boolean {
+  if (CREDENTIAL_VALUE_SHAPES.some((shape) => shape.test(span))) return true
+  if (span.length < 12) return false
+  return /[0-9]/u.test(span) && /[A-Za-z]/u.test(span)
+}
+
+/**
+ * 片段级凭据打码（2026-09-23 审计 EV-1）。
+ *
+ * 旧实现：`SECRET_VALUE.test(value) && value.length >= 6` ⇒ **整串** `****`。
+ * `SECRET_VALUE` 是无词边界的子串正则，于是任何"提到"这些词的普通正文都变成零信息
+ * ——`browser_eval` 读 `document.body.innerText`/`document.title` 时，页面里出现
+ * "password reset"、"token budgets"、"the secret garden" 这类措辞，模型拿到的是
+ * `****`；而**同一段文本**经 `browser_get_text` 是正常可读的 ⇒ 两个工具对同一数据
+ * 自相矛盾。
+ *
+ * 现在的口径（与 `browser_get_text`/op log 同族：先形态、再片段）：
+ *  1. 整串是 cookie 串或凭据形态 ⇒ 整串打码（**不变**：cookie 值本身无键可依，
+ *     键名匹配永远指不到它，这条是 P1-18 的回归面）；
+ *  2. 否则只擦片段：`key=value`/`key: value` 里的敏感值（复用 store 的唯一实现
+ *     {@link maskSensitiveKeyValueText}，与 URL/摘要面同一张词表）＋ 敏感关键词后
+ *     紧跟的 opaque 片段；
+ *  3. 其余正文原样保留。
+ *
+ * 顺序不变（F-5）：**先掩码后截断**，`project` 仍然在 4 KB 上限之前跑 —— 跨截断点
+ * 的凭据只会以 `****` 的形式出现。
+ */
+function maskCredentialFragments(value: string): string {
+  const pairs = maskSensitiveKeyValueText(value)
+  return pairs.replace(KEYWORD_SPAN, (match, prefix: string, span: string) =>
+    isCredentialSpan(span) ? `${prefix}${MASK}` : match)
+}
+
 function maskString(value: string, project?: EvalValueProjection): string {
   if (value.length === 0) return value
   // Detect BEFORE truncating: a >4 KB value (a routine cookie jar, a long
   // response body) used to be sliced and returned with its credential in the
   // clear — the P1-18 cookie-shape detector never ran (2026-09-11 audit).
-  if (SECRET_VALUE.test(value) && value.length >= 6) return MASK
-  if (looksLikeCookieString(value)) return MASK
+  if (looksLikeCookieString(value) || CREDENTIAL_VALUE_SHAPES.some((shape) => shape.test(value))) return MASK
+  const masked = maskCredentialFragments(value)
   // F-5 (2026-09-13 round 2): the caller's value-level projection runs BEFORE
   // the cap. The other order (slice, then let `runtime.eval` redact the
   // serialized text) left the head of a credential that straddled the cut in
   // the clear, followed by `…` so the R7 tail backstop could not see it either.
-  const projected = project === undefined ? value : project(value)
+  const projected = project === undefined ? masked : project(masked)
   if (projected.length > 4096) return `${projected.slice(0, 4096)}…`
   return projected
 }

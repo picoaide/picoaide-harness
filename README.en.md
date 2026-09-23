@@ -53,19 +53,36 @@ PicoAide Harness packages DeepSeek Harness local agents, the Host service, its p
 
 ## Download and install
 
-Current release installers support Windows x64, macOS (Apple Silicon), and Linux x64 (AppImage and deb). Ordinary users do not need to install Node.js, pnpm, or DSH separately.
+Client installers **ship inside the server image** (they are not posted to a separate download page) and cover Windows x64, macOS (Apple Silicon), and Linux x64 (AppImage). Ordinary users do not need to install Node.js, pnpm, or DSH separately.
 
-> Downloads link to the [latest Release](https://github.com/picoaide/picoaide-harness/releases/latest): asset names embed the version (`PicoAide-Harness-<version>-…`), so a hardcoded-version direct link breaks as soon as the next release ships (P2-55).
-
-| Platform | Download | Installation |
+| Platform | Installer | Installation |
 | --- | --- | --- |
-| Windows x64 | [Download installer](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-x64-Setup.exe`) | Run the NSIS installer and follow its prompts |
-| macOS | [Download DMG](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-mac.dmg`) | Open the DMG and drag PicoAide Harness into Applications |
-| Linux x64 | [Download AppImage](https://github.com/picoaide/picoaide-harness/releases/latest) (asset `PicoAide-Harness-<version>-x86_64.AppImage`, or `PicoAide-Harness-<version>-amd64.deb`) | Grant execute permission and run (install deb with `sudo dpkg -i`) |
+| Windows x64 | `PicoAide-Harness-<version>-x64-Setup.exe` | Run the NSIS installer and follow its prompts |
+| macOS (Apple Silicon) | `PicoAide-Harness-<version>-mac.dmg` | Open the DMG and drag PicoAide Harness into Applications |
+| Linux x64 | `PicoAide-Harness-<version>-x86_64.AppImage` | Grant execute permission and run |
 
-Client upgrades and first-time installs can also fetch packages straight from **the server the client signs in to** (`GET /api/client/v2/updates/manifest`), so employee machines need no outbound internet at all in an enterprise deployment. The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. See the [Desktop Client](https://www.picoaide.com/en/docs/desktop/) and [FAQ](https://www.picoaide.com/en/docs/faq/) on the official wiki for plugin commands, platform details, and troubleshooting.
+There are only two ways to obtain them:
 
-> Note: the Windows installers and Linux packages published automatically by CI are not code-signed yet (the macOS release builds are signed/notarized). Windows SmartScreen may show an "unknown publisher" warning on first run — fetch `SHA256SUMS.txt` from the release and verify the digest before running; the same applies to Linux packages.
+1. **Your enterprise server** (recommended): once deployed, employees open `https://<your-domain>/` and the portal lists all three platforms for download;
+2. **The official image package** (trial / single machine): take the **server image package** from the update server or from the [GitHub Release](https://github.com/picoaide/picoaide-harness/releases), then unpack the installers from that image:
+
+```bash
+VER=<version, from server.version in latest.json>   # for a prerelease channel, use beta instead of official
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"
+sha256sum -c SHA256SUMS                            # <- verify the downloaded image package with SHA256SUMS
+unzip -p "picoaide-server-${VER}-amd64.zip" image.tar | docker load
+mkdir -p ./picoaide-stack
+docker run --rm -v "$PWD/picoaide-stack:/out" -e PICOAI_UNPACK_STACK=/out \
+  "picoaide-harness-server:${VER}"
+ls -1 ./picoaide-stack/client                       # installers for all three platforms + CLIENT-RELEASE.json
+```
+
+> The GitHub Release attachments are the **server image package** (`picoaide-server-<version>-amd64.zip`) and the checksum file `SHA256SUMS` — the client installers live inside that image, not in the Release attachments, and the checksum file has no `.txt` suffix.
+
+Client upgrades and first-time installs can also fetch packages straight from **the server the client signs in to** (`GET /api/client/v2/updates/manifest`), so employee machines need no outbound internet at all in an enterprise deployment. The first launch creates the default `desktop` profile and starts the official DSH Web interface locally. Full steps (taking packages from the image, air-gapped deployment, channel delivery) are in [Getting started](https://www.picoaide.com/en/getting-started/) and [Client delivery and upgrades](https://www.picoaide.com/en/deployment/client-delivery/); plugin commands and troubleshooting are in the [Desktop Client](https://www.picoaide.com/en/docs/desktop/) and [FAQ](https://www.picoaide.com/en/docs/faq/) pages.
+
+> Note: the Windows installer and Linux packages published automatically by CI are not code-signed yet (the macOS release builds are signed/notarized). Windows SmartScreen may show an "unknown publisher" warning on first run — verify the image package with the `SHA256SUMS` sitting next to it (the installers are unpacked from that image) before running; the same applies to the Linux packages.
 
 ## Core advantages
 

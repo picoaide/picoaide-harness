@@ -1,6 +1,6 @@
 /** PicoAide Harness executable: minimal Electron bootstrap around the Host Cordis root. */
 
-import { app, crashReporter, safeStorage } from 'electron'
+import { app, crashReporter, dialog, safeStorage, shell } from 'electron'
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import {
@@ -37,6 +37,7 @@ import {
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
 import { provideAppAiRunner } from './app-ai-runner.ts'
 import { assertRequiredRowsActive } from './startup-rows.ts'
+import { reportFatalBootFailure, type FatalBootChoice } from './fatal-boot.ts'
 import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
@@ -83,6 +84,13 @@ import {
 } from './windows-volume-diagnostics.ts'
 
 const BIN_NAME = 'dsh-plugin-desktop'
+/**
+ * 致命启动对话框里显示的堆栈上限（字符）。
+ *
+ * 原生错误面的详情区不是日志文件：几百 KB 的堆栈既看不完也读不出来，
+ * 完整内容始终在 `<userData>/logs`（对话框里给的就是这个目录）。
+ */
+const MAX_FATAL_BOOT_REASON_CHARS = 1_500
 /**
  * 随包分发的渠道包（`build/channel.json`），**读一次**给下面几个常量共用。
  *
@@ -163,6 +171,53 @@ function warnWindowsVolumeConcerns(logger: DesktopLogger, concerns: readonly Win
   for (const concern of concerns) {
     logger.error(`${BIN_NAME}: Windows volume warning: ${formatWindowsVolumeConcern(concern)}`)
   }
+}
+
+/**
+ * B-02（2026-09-23 审计 P1）：致命启动失败的**用户可见出口**。
+ *
+ * 打包 GUI（Windows 双击 / macOS 启动台）没有 stderr 接收方，也没有任何窗口；
+ * 只 `errorCause` + `exit 1` 等于"双击之后什么都没有"。这里把那次失败变成一个
+ * 原生错误面（打开日志 / 重试 / 退出），文案与日志路径同源（`tray-locale.ts`
+ * 的 `desktopStartupCopy` + `<userData>/logs`）。
+ *
+ * 详情先过 `maskSecrets`：错误串里可能出现带凭据的 URL（启动期的服务端地址、
+ * 渠道配置），原生弹窗是渠道客户可见面，不能比日志更"诚实"。
+ * @param cause - the failure that aborted startup.
+ * @param runtime - mounted runtime (product name + active locale).
+ * @param logger - stderr/file sink used when the native surface is unavailable.
+ * @returns the user's exit: relaunch the process, or quit non-zero.
+ */
+async function reportFatalStartupFailure(
+  cause: unknown,
+  runtime: ElectronDesktopRuntime,
+  logger: DesktopLogger,
+): Promise<FatalBootChoice> {
+  const copy = desktopStartupCopy(runtime.locale)
+  const product = runtime.productName
+  const logDirectory = join(app.getPath('userData'), 'logs')
+  const reason = maskSecrets(
+    cause instanceof Error ? (cause.stack ?? cause.message) : String(cause),
+  ).slice(0, MAX_FATAL_BOOT_REASON_CHARS)
+  return await reportFatalBootFailure(
+    {
+      showMessageBoxSync: options => dialog.showMessageBoxSync(options),
+      showErrorBox: (title, content) => { dialog.showErrorBox(title, content) },
+      openPath: async path => await shell.openPath(path),
+    },
+    {
+      copy: {
+        title: copy.fatalBootTitle(product),
+        message: copy.fatalBootMessage(product),
+        detail: copy.fatalBootDetail(reason, logDirectory),
+        openLogs: copy.fatalBootOpenLogs,
+        retry: copy.fatalBootRetry,
+        quit: copy.fatalBootQuit,
+      },
+      logDirectory,
+      log: message => { logger.error(message) },
+    },
+  )
 }
 
 /** Notify once after the UI is ready; stderr carries the exact paths. */
@@ -513,7 +568,17 @@ async function start(): Promise<void> {
     notifyWindowsVolumeConcerns(runtime, electronLogger, windowsVolumeConcerns)
   } catch (cause) {
     electronLogger.errorCause(cause)
-    await shutdown.request(1)
+    // B-02（2026-09-23 审计 P1）：这里**必须**有用户可见出口。此前只有
+    // `errorCause` + `shutdown.request(1)`，而 `startup-rows.ts` 的注释一直自称
+    // 致命路径会走"`electronLogger.errorCause` + 恢复对话框"——注释与实现不一致，
+    // 打包 GUI 上"必要行没激活 / 数据根不可写 / YAML 解析失败"全都表现为
+    // 双击之后什么都没有。
+    // 现在弹原生错误面，并保证退出语义只有两种：用户选「重试」→ 走既有的
+    // relaunch 通道（`createDesktopExitCoordinator` 只在 code 0 时真重启）；其余
+    // 一律非零码退出 —— 绝不静默退出，绝不以 0 码假装成功。
+    const action = await reportFatalStartupFailure(cause, runtime, electronLogger)
+    if (action === 'retry') nativeExit.requestRelaunch()
+    await shutdown.request(action === 'retry' ? 0 : 1)
   }
 }
 

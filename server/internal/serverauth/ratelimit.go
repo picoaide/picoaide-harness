@@ -20,9 +20,15 @@ import (
 // loginRateLimit bounds login attempts per key (ip+username).
 // Sliding window: maxAttempts per window; bounded table with lazy cleanup.
 //
-// 2026-09-08 P1-3:只对**失败**尝试计数(allow 不再记账;认证失败后调
-// record,成功后 reset)。此前成功登录也占配额,正常用户 5 分钟内第 11 次
-// 登录会被 429,而未认证者 10 次错密即可把任意账号(含 super_admin)锁死。
+// 2026-09-08 P1-3:只有**失败**尝试计数,成功登录 reset —— 此前成功登录也占
+// 配额,正常用户 5 分钟内第 11 次登录会被 429,而未认证者 10 次错密即可把
+// 任意账号(含 super_admin)锁死。
+//
+// 2026-09-23 E-01:"只对失败计数"必须由 **allow 判定即记账(原子)** 实现,
+// 不能是"allow 只判定 + 业务失败后 record":后者在并发下,一批请求会在第一个
+// record 落表之前**全部**通过判定(实测 20 并发错密穿透到 16 次、200 并发稳定
+// 16~18 次,声明上限 10/5min),判定永远看到突发开始前的快照。现在允许 =
+// 同一临界区内记账、拒绝 = 不记账、成功 = reset(失败分支不再二次记账)。
 type loginLimiter struct {
 	mu          sync.Mutex
 	attempts    map[string][]time.Time
@@ -120,11 +126,15 @@ func newRateLimiter(maxAttempts int) *loginLimiter {
 	}
 }
 
-// allow reports whether the attempt may proceed. It does NOT record the
-// attempt — callers record failures with record() and clear the window with
-// reset() after a successful authentication.
-// When the table is full, the key with the oldest window start is evicted
-// (a sweep of distinct usernames must not DoS login for everyone).
+// allow reports whether the attempt may proceed and, when it may, records it
+// in the same critical section (2026-09-23 E-01:判定与记账必须原子 —— 只判定
+// 不记账会让并发突发穿透失败预算)。Callers clear the budget with reset() after
+// a successful authentication, so a legitimate login never consumes it; a
+// refused attempt is never recorded again.
+// When the table is full, the key with the oldest window start **among the keys
+// that are not saturated yet** is evicted (a sweep of distinct usernames must
+// not DoS login for everyone; evicting a saturated key would wash a target's
+// failure budget, E-05).
 // 清扫摊销:每次调用只清理当前 key;全局过期清扫每分钟至多一次(审计2026-M9:
 // 每次调用 O(n) 全表扫描,攻击者填满 1 万键后每次登录尝试放大 1 万倍 CPU)。
 func (l *loginLimiter) allow(key string) bool {
@@ -162,26 +172,47 @@ func (l *loginLimiter) allow(key string) bool {
 		return false
 	}
 	if _, exists := l.attempts[key]; !exists && len(l.attempts) >= l.maxEntries {
-		// Table full: evict the key with the oldest window start instead of
-		// refusing the new key (C-2).
-		var victim string
-		var oldest time.Time
-		for k, ts := range l.attempts {
-			if len(ts) > 0 && (victim == "" || ts[0].Before(oldest)) {
-				victim, oldest = k, ts[0]
-			}
-		}
-		delete(l.attempts, victim)
+		// Table full: evict one key instead of refusing the new key (C-2).
+		l.evictOneLocked()
 	}
-	if len(kept) == 0 {
-		delete(l.attempts, key)
-	} else {
-		l.attempts[key] = kept
-	}
+	l.attempts[key] = append(kept, now)
 	return true
 }
 
+// evictOneLocked 释放一个键位。受害者取**未饱和**(窗口内尝试次数 < 上限)的
+// 键里窗口起点最早的那个:表满时"窗口起点最早"几乎必然是已经打满预算的键,
+// 按它驱逐等于**清空目标的失败预算**(审计 2026-09-23 E-05,可被主动洗预算)。
+// 只有整张表都已饱和时才回落到"窗口起点最早的键"(表必须有界,不能因为
+// 攻击者填表就无限增长)。
+func (l *loginLimiter) evictOneLocked() {
+	limit := l.limit()
+	victim, oldest := "", time.Time{}
+	fallback, fallbackOldest := "", time.Time{}
+	for k, ts := range l.attempts {
+		if len(ts) == 0 {
+			continue
+		}
+		if fallback == "" || ts[0].Before(fallbackOldest) {
+			fallback, fallbackOldest = k, ts[0]
+		}
+		if len(ts) >= limit {
+			continue
+		}
+		if victim == "" || ts[0].Before(oldest) {
+			victim, oldest = k, ts[0]
+		}
+	}
+	if victim == "" {
+		victim = fallback
+	}
+	if victim != "" {
+		delete(l.attempts, victim)
+	}
+}
+
 // record notes one failed attempt against the key.
+// 生产路径已不再需要它(allow 判定即记账);保留给测试预置桶状态以及"额外补记
+// 一次失败"的显式语义 —— 对一个 allow 已经记账的键再调 record 会重复计数。
 func (l *loginLimiter) record(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -282,11 +313,15 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 // 为什么必须导出：WASM 应用平台的员工浏览器登录页（internal/wasmapp/session）
 // 走的是 net/http 而不是 gin，如果它自己不做预算，就等于**在客户端面
 // /auth/login 之外新开了一个没有爆破防护的密码入口** —— 同一份账号密码、
-// 同一套 provider，防护却只覆盖其中一个入口。这三个方法让新入口复用
-// **完全相同**的三个桶（host|username / u:username / ip:host），
-// 因此两处入口共享同一份失败预算（在一个入口上的失败会同时收紧另一个）。
+// 同一套 provider，防护却只覆盖其中一个入口。这三个键与 gin 入口
+// **完全相同**（host|username / u:username / ip:host），因此两处入口共享同一份
+// 失败预算（在一个入口上的失败会同时收紧另一个）。
+//
+// 2026-09-23 E-01:AllowLoginAttempt 判定通过即**原子记账**（与 gin 入口的
+// loginAllowed 同形），不再需要、也**不得**再调用失败记账 —— 那会重复计数
+// 并把预算减半。RecordLoginFailure 因此已删除。
 
-// AllowLoginAttempt 判定一次登录尝试是否在失败预算内。
+// AllowLoginAttempt 判定一次登录尝试是否在失败预算内；允许时立即记账。
 // host 传客户端 IP（反代下由 gin 的 ClientIP 语义决定，调用方负责取值）。
 func (a *API) AllowLoginAttempt(username, host string) bool {
 	scope := dbLimiterScope(a.DB)
@@ -295,28 +330,12 @@ func (a *API) AllowLoginAttempt(username, host string) bool {
 		a.loginIPLimiter.allow(loginIPBudgetKeyForHost(a.DB, host))
 }
 
-// RecordLoginFailure 记一次登录失败（三个桶同时计数）。
-func (a *API) RecordLoginFailure(username, host string) {
-	scope := dbLimiterScope(a.DB)
-	a.limiter.record(scope + host + "|" + username)
-	a.limiter.record(scope + "u:" + username)
-	a.loginIPLimiter.record(loginIPBudgetKeyForHost(a.DB, host))
-}
-
 // ResetLoginSuccess 在认证成功后清空三个桶（合法登录不应消耗失败预算）。
 func (a *API) ResetLoginSuccess(username, host string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.reset(scope + host + "|" + username)
 	a.limiter.reset(scope + "u:" + username)
 	a.loginIPLimiter.reset(loginIPBudgetKeyForHost(a.DB, host))
-}
-
-// loginFailed records a failed authentication against all three buckets.
-func (a *API) loginFailed(c *gin.Context, username string) {
-	scope := dbLimiterScope(a.DB)
-	a.limiter.record(scope + loginKey(c, username))
-	a.limiter.record(scope + "u:" + username)
-	a.loginIPLimiter.record(loginIPBudgetKey(a.DB, c))
 }
 
 // loginSucceeded clears the buckets after a successful authentication
@@ -330,18 +349,14 @@ func (a *API) loginSucceeded(c *gin.Context, username string) {
 }
 
 // oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only
-// bucket (P0-2). Failures are recorded by the caller; success resets it.
+// bucket (P0-2). allow 判定即记账(2026-09-23 E-01:此前"只对失败回调计数"由
+// 调用方 record,并发回调同样会穿透);成功回调由 oidcCallbackSucceeded 清空。
 func (a *API) oidcCallbackAllowed(c *gin.Context) bool {
 	if !a.callbackLimiter.allow(clientIPKey(c)) {
 		writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录尝试过于频繁,请稍后再试")
 		return false
 	}
 	return true
-}
-
-// oidcCallbackFailed records one failed callback attempt (IP bucket).
-func (a *API) oidcCallbackFailed(c *gin.Context) {
-	a.callbackLimiter.record(clientIPKey(c))
 }
 
 // oidcCallbackSucceeded clears the callback bucket for this IP.

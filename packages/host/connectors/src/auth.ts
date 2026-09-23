@@ -621,9 +621,26 @@ interface AuthProbe {
   isConnected: () => Promise<boolean>
 }
 
+/**
+ * Device-flow probe: the flow is stateless (2026-08-25 decision — the CLI
+ * connector was removed and no device-token endpoint is polled), so "the flow
+ * finished" is all this can observe.
+ *
+ * 2026-09-23 审计 CN-3 was about the ROW claiming `connected` without any
+ * authorization artifact — the probe was never the right place to fix that:
+ * the URL policy of `verificationUrl` is enforced HERE (before the poll) and
+ * `tests/device-verification-url-policy.spec.ts` pins that a well-formed
+ * verification address resolves, while the artifact question is answered where
+ * the credential is judged (`index.ts`: `credentialUsable` + the post-flow
+ * gate, which leaves the row `unauthorized` and registers nothing when a
+ * device connector holds neither a declared field value, an access token nor
+ * the public-endpoint marker). Keeping the two apart is what makes both
+ * invariants testable: a bad URL fails HERE, a missing artifact fails THERE.
+ * @param def - connector definition.
+ * @param options - the connect request.
+ * @returns the probe the poll loop asks.
+ */
 function createProbe(def: ConnectorDef, options: AuthRunOptions): AuthProbe {
-  // 决策 2026-08-25:CLI 连接器已删除(CLI 即 skill)——device 连接器默认
-  // 无状态探测,完成后立即成功。
   void def
   void options
   return { isConnected: async () => true }

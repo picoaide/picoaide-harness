@@ -243,13 +243,14 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// P2-4:未认证的 /auth/{oidc,openid}/login 是"流程表 + 出站 discovery"
 		// 的双重放大器,必须限流(IP 桶,与回调桶同量级)。
+		// 2026-09-23 E-01:allow 判定即记账(原子);此处**不得**再 record,
+		// 否则每次流程启动记两次、预算减半。
 		ipKey := "oidc-login-ip:" + c.ClientIP()
 		if !a.loginIPLimiter.allow(ipKey) {
 			_ = serverstore.AuditLog(a.DB, "oidc-login", "login_fail", "rate_limited ip="+c.ClientIP())
 			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 			return
 		}
-		a.loginIPLimiter.record(ipKey)
 		state, err := randomHex(16)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
@@ -334,7 +335,9 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		})
 		// v3b §2.6: OIDC 回调限流(按来源 IP; 防 IdP 妥协后暴力回调)。
 		// 2026-09-08 P0-2:改用独立 IP 桶(不再占用全局 u:oidc-callback 登录桶,
-		// 否则全组织 SSO 每 5 分钟只能登录 10 次),且只对失败回调计数。
+		// 否则全组织 SSO 每 5 分钟只能登录 10 次)。
+		// 2026-09-23 E-01:allow 判定即记账(成功回调由 oidcCallbackSucceeded 清空)
+		// —— 旧"只对失败回调计数"由调用方 record,并发回调同样能穿透。
 		if !a.oidcCallbackAllowed(c) {
 			_ = serverstore.AuditLog(a.DB, "oidc-callback", "login_fail", "rate_limited ip="+c.ClientIP())
 			return
@@ -343,12 +346,10 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)
 		if errors.Is(err, errOIDCState) {
-			a.oidcCallbackFailed(c)
 			writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
 			return
 		}
 		if err != nil {
-			a.oidcCallbackFailed(c)
 			// v3b 审计: OIDC 失败留痕。
 			_ = serverstore.AuditLog(a.DB, "oidc", "login_fail", "ip="+c.ClientIP())
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")

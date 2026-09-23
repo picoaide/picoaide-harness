@@ -489,11 +489,23 @@ func decide(db *sql.DB, status serverstore.AgentPresetStatus, auditAction string
 		// 只会得到「员工看得见、下载 500」的坏行。这里的预检只为了让**顺序**
 		// 复现(误拒后点通过)拿到友好的 409 文案;真正的不变量由 DAO 的
 		// 条件 UPDATE 保证(见 approveNeedsArchive 与 SetReleaseStatus)。
+		//
+		// 反方向(拒绝一个已 approved 的版本)同样由 DAO 挡下并返回
+		// ErrReleaseApprovedNotRejectable(ID-01),这里**不再**复制那份判定 ——
+		// 三条审核面各写一份守卫正是 ID-01 的根因。
 		if !approveNeedsArchive(c, db, status, p.Name, p.Version) {
 			return
 		}
 		if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindAgent, p.Name, p.Version, string(status), reasonOf(c)); err != nil {
 			writeDecideError(c, err)
+			return
+		}
+		// 审核落定后重算 apps 行的展示投影(审计 2026-09-23 G-P2-3):
+		// approve 切到新生效版本、reject 恢复到仍生效的那一版。见
+		// serverstore.RecomputeAppProjection 的注释(与 sharedskills/WASM 同形)。
+		if _, perr := serverstore.RecomputeAppProjection(db, serverstore.AppKindAgent, p.Name); perr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL",
+				"审核结果已落库,但智能体投影更新失败(请重试一次)")
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, p.Name+"@"+p.Version)
@@ -532,6 +544,13 @@ func decideVersioned(db *sql.DB, status serverstore.AgentPresetStatus, auditActi
 		}
 		if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindAgent, name, version, string(status), reasonOf(c)); err != nil {
 			writeDecideError(c, err)
+			return
+		}
+		// 审核落定后重算 apps 行的展示投影(与 decide 同一步,见
+		// serverstore.RecomputeAppProjection)。
+		if _, perr := serverstore.RecomputeAppProjection(db, serverstore.AppKindAgent, name); perr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL",
+				"审核结果已落库,但智能体投影更新失败(请重试一次)")
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name+"@"+version)
@@ -616,12 +635,21 @@ func approveNeedsArchive(c *gin.Context, db *sql.DB, status serverstore.AgentPre
 	return false
 }
 
-// writeDecideError 把审核写入的错误映射成稳定的 HTTP 语义。N-4 的关键一条:
-// 两个管理员并发 approve/reject 时,后来者可能在 DAO 的条件 UPDATE 上发现
-// 「归档已经在上一个事务里被释放」—— 那不是服务器错误,而是「该版本已不可
-// 通过」,必须回 409 ARCHIVE_CLEARED(与预检同码同文案),而不是 500。
+// writeDecideError 把审核写入的错误映射成稳定的 HTTP 语义。两条关键:
+//
+//   - N-4:两个管理员并发 approve/reject 时,后来者可能在 DAO 的条件 UPDATE
+//     上发现「归档已经在上一个事务里被释放」—— 那不是服务器错误,而是「该
+//     版本已不可通过」,必须回 409 ARCHIVE_CLEARED(与预检同码同文案),而不是 500。
+//   - ID-01(审计 2026-09-23):拒绝一个**已通过审核**的版本会被 DAO 挡下
+//     (`status <> 'approved'`)—— 拒绝与释放归档是同一条 UPDATE,对正在服务
+//     的版本执行它等于不可恢复地销毁归档字节并烧掉版本号。这里回 409 并指路
+//     (下架可逆),文案取自 serverstore 的共享常量,与 sharedskills / wasmapp
+//     三面逐字一致 —— 「已 approved 不可拒绝」的判定只有 DAO 一处实现。
 func writeDecideError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, serverstore.ErrReleaseApprovedNotRejectable):
+		serverauth.WriteError(c, http.StatusConflict, serverstore.CodeReleaseNotRejectable,
+			serverstore.MsgReleaseNotRejectable+"。"+serverstore.HintReleaseNotRejectable)
 	case errors.Is(err, serverstore.ErrReleaseArchiveCleared):
 		serverauth.WriteError(c, http.StatusConflict, "ARCHIVE_CLEARED",
 			"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")

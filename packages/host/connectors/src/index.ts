@@ -10,7 +10,7 @@ import { ConnectorStore, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
-import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens } from './mcp-oauth-provider.ts'
+import { createOAuthProvider, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath } from './user-scope.ts'
@@ -430,10 +430,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       && credential.expiresAt - Date.now() > REFRESH_LEAD_MS
       && target.tokenUrl !== undefined
     ) {
+      // CN-2 (audit 2026-09-23): this branch used to build the provider with NO
+      // discovery state, and the SDK then re-discovered the authorization server
+      // from the MCP URL — `WWW-Authenticate: resource_metadata` of the RESOURCE
+      // server's choosing, then its `authorization_servers[0]` — and POSTed the
+      // stored refresh token to whatever token endpoint came back. The
+      // definition's own `tokenUrl` is the authority instead, and resolving it
+      // is pure policy checking: no round trip, so the fast path this branch
+      // exists for is preserved.
+      const staticResolved = resolveStaticAuthorizationServer(target, locale())
+      if (staticResolved.discovery === undefined) {
+        ctx.logger?.warn(`pico-connectors: ${def.id} 静态端点不可用（${staticResolved.failure?.message ?? 'unknown'}）`)
+        return {}
+      }
       const baseline: { current: ConnectorCredential } = { current: credential }
       const created = createOAuthProvider({
         credential,
         target,
+        discovery: staticResolved.discovery,
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
         // **必须 await 落盘**（2026-09-17 flake 定案）：`saveTokens` 是 SDK 自己
         // 续期后唯一的持久化点，而 provider 的 `tokens()` 又会把内存里的新令牌
@@ -541,7 +555,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /** Install (or replace) the live handle of one registered server. */
   function installLiveProvider(id: string, serverName: string, handle: LiveProviderHandle): void {
     const byServer = liveProviders.get(id) ?? new Map<string, LiveProviderHandle>()
-    byServer.set(serverName, handle)
+    byServer.set(mcpServerKey(id, serverName), handle)
     liveProviders.set(id, byServer)
   }
 
@@ -549,7 +563,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   function dropLiveProvider(id: string, serverName: string): void {
     const byServer = liveProviders.get(id)
     if (byServer === undefined) return
-    byServer.delete(serverName)
+    byServer.delete(mcpServerKey(id, serverName))
     if (byServer.size === 0) liveProviders.delete(id)
   }
 
@@ -679,7 +693,71 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
-  const mcpDisposers = new Map<string, () => void>()
+  /** Composite key of one MCP server inside ONE connector (live providers). */
+  const mcpServerKey = (id: string, serverName: string): string => JSON.stringify([id, serverName])
+  /**
+   * Dead-grant terminal state: connector id → the credential generation
+   * (`updatedAt`) that was rejected with `invalid_grant`/`invalid_client`.
+   *
+   * In memory on purpose: the marker is an optimization of the AUTOMATIC sweep
+   * (one probe per process is acceptable, a probe per minute forever is not),
+   * while the durable facts (row `unauthorized` + the stored credential) already
+   * survive a restart. A successful re-authorization writes a new generation, so
+   * the entry stops matching and automatic recovery is re-armed without any
+   * explicit clearing.
+   */
+  const deadGrants = new Map<string, number>()
+  /**
+   * Live MCP registrations, keyed by **serverName** — the namespace upstream
+   * `mcp-client` reserves for exactly ONE live instance.
+   *
+   * The key stays the bare name on purpose: `tests/lifecycle.spec.ts > disposes
+   * the previous registration when the same server key is registered again`
+   * (P2-23) pins that a later registration of the same key retires the previous
+   * one before it loads — upstream's plugin throws "serverName is already in
+   * use" otherwise, and a credential refresh re-registers through exactly this
+   * path.
+   *
+   * CN-4 (audit 2026-09-23) is the other half of that event: the row whose
+   * transport was taken over kept claiming `connected` while its tools were
+   * gone. The VALUE therefore carries the owning connector id, so
+   * {@link retireServerName} can tell the vacated row the truth instead of
+   * leaving it lying.
+   */
+  interface McpRegistration {
+    /** Connector that owns the live registration. */
+    id: string
+    dispose: () => void
+  }
+  const mcpRegistrations = new Map<string, McpRegistration>()
+
+  /**
+   * Retire whatever live registration owns `serverName`, and — when it belonged
+   * to ANOTHER connector — stop that connector's row from claiming `connected`.
+   *
+   * Called before every load (`registerMcp`), so the name is always free for the
+   * new instance.
+   * @param serverName - the upstream-reserved name being (re)registered.
+   * @param ownerId - the connector performing the registration.
+   * @param ownerName - its display name (named in the vacated row's message).
+   */
+  const retireServerName = (serverName: string, ownerId: string, ownerName: string): void => {
+    const previous = mcpRegistrations.get(serverName)
+    if (previous === undefined) return
+    dropLiveProvider(previous.id, serverName)
+    try { previous.dispose() } catch { /* teardown never throws */ }
+    mcpRegistrations.delete(serverName)
+    if (previous.id === ownerId) return
+    // Upstream allows one live instance per name, so taking the name over
+    // disposes the other connector's transport — and with it every tool of that
+    // row. Reporting `connected` from here on would be a lie.
+    setState(previous.id, {
+      status: 'error',
+      everConnected: true,
+      error: copy('flow.serverNameTaken', { serverName, by: ownerName }),
+      errorCode: undefined,
+    })
+  }
   /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
   const pendingFlows = new Map<string, AbortController>()
   /**
@@ -861,10 +939,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
     liveProviders.clear()
     latestRefresh.clear()
-    for (const dispose of mcpDisposers.values()) {
-      try { dispose() } catch { /* teardown never throws */ }
+    for (const registration of mcpRegistrations.values()) {
+      try { registration.dispose() } catch { /* teardown never throws */ }
     }
-    mcpDisposers.clear()
+    mcpRegistrations.clear()
     for (const flow of pendingFlows.values()) flow.abort(new Error(copy('flow.userSwitchedConnect')))
     pendingFlows.clear()
     // BUG-02: connect/submit intents started under the previous session must
@@ -1316,10 +1394,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // The old transport is gone (or about to be): its handle must not keep
         // receiving adopted tokens.
         dropLiveProvider(def.id, server.serverName)
-        const disposer = mcpDisposers.get(server.serverName)
-        if (disposer === undefined) return
-        try { disposer() } catch { /* teardown never throws */ }
-        mcpDisposers.delete(server.serverName)
+        retireServerName(server.serverName, def.id, def.name)
       }
       retire()
       // `ctx.plugin` returns `Fiber & PromiseLike<Fiber>` (not a real Promise),
@@ -1365,9 +1440,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         installLiveProvider(def.id, server.serverName, auth.handle)
         adoptLatestRefresh(def.id, auth.handle, credential)
       }
-      // P2-23 kept: the map holds at most one disposer per server key, so the
-      // fiber recorded here is the only live instance for that name.
-      mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
+      // P2-23 kept: the map holds at most one registration per server key, so
+      // the fiber recorded here is the only live instance for that name — and
+      // the owner id is what lets the NEXT takeover stop the previous row from
+      // claiming `connected` (CN-4).
+      mcpRegistrations.set(server.serverName, { id: def.id, dispose: () => { void fiber?.dispose?.() } })
     }
     return { rejected }
   }
@@ -1375,11 +1452,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const unregisterMcp = async (def: ConnectorDef): Promise<void> => {
     for (const server of def.mcp) {
       dropLiveProvider(def.id, server.serverName)
-      const dispose = mcpDisposers.get(server.serverName)
-      if (dispose) {
-        dispose()
-        mcpDisposers.delete(server.serverName)
-      }
+      const registration = mcpRegistrations.get(server.serverName)
+      // Only this connector's own registration: if another row has since taken
+      // the name over, disconnecting here must not tear down ITS transport
+      // (CN-4). That takeover already marked this row not-connected.
+      if (registration === undefined || registration.id !== def.id) continue
+      try { registration.dispose() } catch { /* teardown never throws */ }
+      mcpRegistrations.delete(server.serverName)
     }
   }
 
@@ -1399,6 +1478,22 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
 
   /**
+   * Whether a `device` credential carries an authorization artifact at all.
+   *
+   * The connect path may look at more than this (a declared-field form is
+   * published separately), but "does the row have anything to authenticate
+   * with" must have ONE answer: an access token, the public-endpoint marker, or
+   * at least one declared field value. An empty credential (the stateless
+   * device flow's `{updatedAt}`) is not an authorization — see CN-3.
+   * @param credential - the stored credential.
+   * @returns true when at least one artifact is present.
+   */
+  const hasDeviceAuthorization = (credential: ConnectorCredential): boolean =>
+    (typeof credential.accessToken === 'string' && credential.accessToken !== '')
+    || credential.publicMcp === true
+    || Object.keys(credential.fields ?? {}).length > 0
+
+  /**
    * Whether a stored credential can be registered on startup.
    *
    * OAuth/server-side credentials authenticate with `accessToken`; token and
@@ -1415,7 +1510,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): boolean => {
     if (credential === null || credential === undefined) return false
     if (missingDeclaredFields(def, credential).length > 0) return false
-    if (def.authMode === 'token' || def.authMode === 'device') return true
+    if (def.authMode === 'token') return true
+    // CN-3 (audit 2026-09-23): `device` used to pass through unconditionally, so
+    // a device flow that produced nothing but `{updatedAt}` registered its MCP
+    // servers on every restart and the row read `connected` while every tool
+    // call was guaranteed to fail. A device credential is usable only when it
+    // carries something the tools can actually use.
+    if (def.authMode === 'device') return hasDeviceAuthorization(credential)
     // A public MCP endpoint answers without an authorization challenge, so the
     // discovery result is the whole credential: requiring an accessToken here
     // dropped its tools on every restart (2026-09-15 audit, BUG-06).
@@ -1533,6 +1634,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // 'connecting' rather than registering MCP servers that cannot work.
       if (missingDeclaredFields(def, merged).length > 0) {
         requestDeclaredFields(id, def)
+        return
+      }
+      // CN-3: nothing declared to fill in AND nothing stored to authenticate
+      // with (a `device` flow that only wrote `{updatedAt}`) — registering here
+      // is what told the user "connected" while every tool call would fail.
+      // Say what is wrong and stay unauthorized instead.
+      if (!credentialUsable(def, merged)) {
+        setState(id, {
+          status: 'unauthorized',
+          everConnected: true,
+          error: copy('auth.deviceUnverifiable'),
+          errorCode: 'auth-required',
+        })
         return
       }
       // conn-1: the flow may have been overtaken (logout / user switch) while
@@ -1677,6 +1791,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // handles): the cached refresh result must not be adopted by a later
     // re-registration under a NEW authorization.
     latestRefresh.delete(id)
+    deadGrants.delete(id)
     liveProviders.delete(id)
     // 断开必须连分类一起清（2026-09-17 S04-3 审计）：只清 error 会留下
     // `errorCode:'auth-required'`，下一次未分类失败就会被渲染成"需要重新授权"。
@@ -1718,11 +1833,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
         // then register the MCP servers.
         const effective = credential.refreshToken === undefined
+          || deadGrants.get(def.id) === credential.updatedAt
           ? credential
           : await (async () => {
               const outcome = await tokenRefresher.refresh(def.id)
               if (stale()) return credential
               if (!outcome.ok && outcome.reason === 'reauthorize') {
+                // CN-5: remember the generation so the sweep stops re-presenting
+                // a revoked refresh token (the row below is the durable signal).
+                deadGrants.set(def.id, credential.updatedAt)
                 // The grant is gone: say so on the row instead of registering
                 // MCP servers that are guaranteed to 401.
                 setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
@@ -1732,6 +1851,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })()
         if (stale() || effective === null) continue
         if (stale()) return
+        // A credential whose grant is known dead must not be registered (every
+        // tool call would 401); the row keeps demanding a fresh authorization.
+        if (deadGrants.get(def.id) === effective.updatedAt) {
+          setState(def.id, { status: 'unauthorized', everConnected: true, errorCode: 'auth-required' })
+          continue
+        }
         if (credentialUsable(def, effective)) {
           const outcome = await registerMcp(def, { signal: teardownController.signal })
           // A newer registration for THIS connector (user pressed connect on it)
@@ -1776,8 +1901,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
       liveProviders.clear()
       latestRefresh.clear()
-      for (const dispose of mcpDisposers.values()) dispose()
-      mcpDisposers.clear()
+      for (const registration of mcpRegistrations.values()) {
+        try { registration.dispose() } catch { /* teardown never throws */ }
+      }
+      mcpRegistrations.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
       // lingering OAuth/device flow would keep the callback server up and
       // (on a later disconnect) could write back credentials after teardown.
@@ -1811,6 +1938,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /**
    * 一次扫掠：把"该刷新的连接器刷一遍"串在生命周期队列里（与连接/断开互斥），
    * 刷新失败的 `reauthorize` 落 `unauthorized`。定时器与测试注入共用这一份。
+   *
+   * CN-5（2026-09-23 审计）：死 grant 必须进**终态**。此前 `unauthorized` 也在
+   * 扫掠白名单里，于是被吊销的 refresh token 每 60s 再被出示一次（审计探针实测
+   * 5 次扫掠 = 40 次打到 IdP），对那些做异常登录检测的 IdP 看起来就是持续攻击。
+   * 现在：`invalid_grant`/`invalid_client` 记在 {@link deadGrants} 上（键是**凭据
+   * 代次** `updatedAt`），只要盘上还是同一份凭据就不再自动重试；用户重新授权会
+   * 写入新凭据（新代次）⇒ 自动恢复尝试；面板的「刷新」按钮走 `force`，一直可用。
    * @returns 扫掠完成的 Promise。
    */
   async function runRefreshSweep(): Promise<void> {
@@ -1820,8 +1954,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
         const credential = await store.readCredential(def.id)
         if (!credential || !tokenNeedsRefresh(credential)) continue
+        // 终态：同一代凭据已经证明授权被吊销 ⇒ 停止心跳（不静默、行状态仍是
+        // 「需要重新授权」，只是不再拿死 token 去打 IdP）。
+        if (deadGrants.get(def.id) === credential.updatedAt) continue
         const outcome = await tokenRefresher.refresh(def.id, { locale: locale() })
-        if (!outcome.ok && outcome.reason === 'reauthorize') {
+        if (outcome.ok) {
+          deadGrants.delete(def.id)
+          continue
+        }
+        if (outcome.reason === 'reauthorize') {
+          deadGrants.set(def.id, credential.updatedAt)
           setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
         }
       }

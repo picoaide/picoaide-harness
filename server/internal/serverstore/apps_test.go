@@ -1,6 +1,7 @@
 package serverstore
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -295,5 +296,241 @@ func TestSetAppTitleKeepsOwnershipAndFlags(t *testing.T) {
 	}
 	if err := SetAppTitle(db, AppKindAgent, "missing", "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing app err = %v, want ErrNotFound", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ID-01(审计 2026-09-23,P0):「审核拒绝一个版本」在三个面上三份实现,只有
+// WASM 面带前置条件 —— 组织面对**已通过且在服务中**的版本点「拒绝」会走
+// `archive = NULL, size = 0` 这条无前置条件的 UPDATE,不可恢复地销毁归档字节、
+// 让该版本对全员 404、并烧掉版本号(同版本号永久占位,不能重提)。
+//
+// 修法:前置条件下沉到 DAO(全仓唯一实现),三个审核面都只把 sentinel 映射成
+// 409。本用例是**跨面一致性**判据 —— 三种 kind 走同一组 (status, action)
+// 矩阵,结论必须逐条一致;这正是此前缺失的那条对拍。
+//
+// 变异验证:去掉 rejected 分支的 `AND status <> ?`(或把它恒真)⇒ 本用例红。
+// ---------------------------------------------------------------------------
+
+// reviewFaces 是共享审核内核的三个消费面(技能 / 智能体 / wasm 应用)。
+var reviewFaces = []struct {
+	name string
+	kind string
+}{
+	{"skill", AppKindSkill},
+	{"agent", AppKindAgent},
+	{"wasm_app", AppKindWasmApp},
+}
+
+func TestRejectGuardIsSharedByAllReviewFaces(t *testing.T) {
+	for _, face := range reviewFaces {
+		t.Run(face.name, func(t *testing.T) {
+			db, cleanup := NewTestDB(t)
+			t.Cleanup(cleanup)
+			appID := "id01-" + face.name
+
+			// wasm 应用不经 UpsertApp(skill/agent 专用入口,kind 白名单),但它
+			// 与技能/智能体共用 apps/app_releases 两张表,所以这里直接落一行占位
+			// (app_releases 有指向 (kind,app_id) 的外键)。
+			if _, err := db.Exec(`INSERT INTO apps (kind, app_id, title, owner, channel, enabled)
+				VALUES (?, ?, 'T', 'alice', ?, 1)`, face.kind, appID, AppChannelOrg); err != nil {
+				t.Fatal(err)
+			}
+			// v1:待审 → 通过(成为"在服务中"的版本)。
+			if _, err := CreateRelease(db, &Release{Kind: face.kind, AppID: appID, Version: "1.0.0",
+				Title: "T", Publisher: "alice", Status: ReleaseStatusPending,
+				Archive: []byte("v1-bytes")}); err != nil {
+				t.Fatal(err)
+			}
+			if err := SetReleaseStatusForReview(db, face.kind, appID, "1.0.0", ReleaseStatusApproved, ""); err != nil {
+				t.Fatalf("approve v1: %v", err)
+			}
+
+			// 核心断言①:拒绝一个已 approved 的版本必须被拒,且**不动归档**。
+			err := SetReleaseStatusForReview(db, face.kind, appID, "1.0.0", ReleaseStatusRejected, "误点拒绝")
+			if !errors.Is(err, ErrReleaseApprovedNotRejectable) {
+				t.Fatalf("reject approved = %v, want ErrReleaseApprovedNotRejectable", err)
+			}
+			row, err := GetRelease(db, face.kind, appID, "1.0.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Status != ReleaseStatusApproved {
+				t.Fatalf("status = %s, want approved(拒绝不得改变已生效版本的状态)", row.Status)
+			}
+			if len(row.Archive) == 0 || row.Size == 0 {
+				t.Fatalf("归档被销毁: archive=%d size=%d(ID-01 的 P0 后果)", len(row.Archive), row.Size)
+			}
+
+			// 核心断言②:判定函数与 SQL 同源(Go 侧唯一判定)。
+			if ReleaseRejectable(row.Status) {
+				t.Fatalf("ReleaseRejectable(%s) = true,与 DAO 的判定分叉", row.Status)
+			}
+
+			// 控制组:待审版本仍必须可被正常拒绝(修复不能把"拒绝"整个关掉 ——
+			// 「拒绝即释放归档」是 agentshare-5 的存储上界)。
+			if _, err := CreateRelease(db, &Release{Kind: face.kind, AppID: appID, Version: "2.0.0",
+				Title: "T2", Publisher: "alice", Status: ReleaseStatusPending,
+				Archive: []byte("v2-bytes")}); err != nil {
+				t.Fatal(err)
+			}
+			if err := SetReleaseStatusForReview(db, face.kind, appID, "2.0.0", ReleaseStatusRejected, "不合规"); err != nil {
+				t.Fatalf("reject pending = %v, want nil", err)
+			}
+			pending, err := GetRelease(db, face.kind, appID, "2.0.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending.Status != ReleaseStatusRejected || len(pending.Archive) != 0 || pending.Size != 0 {
+				t.Fatalf("待审版本的拒绝语义被破坏: status=%s archive=%d size=%d",
+					pending.Status, len(pending.Archive), pending.Size)
+			}
+			// 已拒绝的行重复拒绝仍幂等(不是"0 行 ⇒ 一律报已通过")。
+			if err := SetReleaseStatusForReview(db, face.kind, appID, "2.0.0", ReleaseStatusRejected, "再拒"); err != nil {
+				t.Fatalf("re-reject rejected = %v, want nil(幂等)", err)
+			}
+			// 不存在的版本仍是 ErrNotFound(不能与"已通过不可拒"混淆)。
+			if err := SetReleaseStatusForReview(db, face.kind, appID, "9.9.9", ReleaseStatusRejected, "x"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("reject missing = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+// TestRecomputeAppProjectionFollowsLatestApproved 钉住投影重算的唯一判据
+// (审计 2026-09-23 G-P2-3):apps.title/description 必须**恒等于**"最新
+// approved 版本"的值;没有任何 approved 版本时回落 app_id 占位。
+//
+// 变异验证:把 RecomputeAppProjection 改成"取最新版本"(丢掉 status 过滤)⇒ 红。
+func TestRecomputeAppProjectionFollowsLatestApproved(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	const appID = "proj-app"
+
+	if err := UpsertApp(db, &App{Kind: AppKindSkill, AppID: appID, Title: appID,
+		Description: "", Owner: "alice", Channel: AppChannelOrg, Enabled: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// v1 通过。
+	if _, err := CreateRelease(db, &Release{Kind: AppKindSkill, AppID: appID, Version: "1.0.0",
+		Title: "V1 标题", Description: "v1 描述", Publisher: "alice",
+		Status: ReleaseStatusApproved, Archive: []byte("a")}); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := RecomputeAppProjection(db, AppKindSkill, appID); err != nil || v != "1.0.0" {
+		t.Fatalf("recompute v1 = %q err=%v", v, err)
+	}
+	app, _ := GetApp(db, AppKindSkill, appID)
+	if app.Title != "V1 标题" || app.Description != "v1 描述" {
+		t.Fatalf("投影未切到 v1: %+v", app)
+	}
+
+	// 幂等且最小写入:值没变时不得触碰 updated_at。
+	if _, err := RecomputeAppProjection(db, AppKindSkill, appID); err != nil {
+		t.Fatal(err)
+	}
+	before := rawUpdatedAt(t, db, appID)
+	if _, err := RecomputeAppProjection(db, AppKindSkill, appID); err != nil {
+		t.Fatal(err)
+	}
+	if after := rawUpdatedAt(t, db, appID); after != before {
+		t.Fatalf("值未变时仍写了行: updated_at %s → %s", before, after)
+	}
+
+	// v2 待审(发布内核不投影它)⇒ 再重算仍必须回到 v1。
+	if _, err := CreateRelease(db, &Release{Kind: AppKindSkill, AppID: appID, Version: "2.0.0",
+		Title: "V2 未审", Description: "v2 描述", Publisher: "alice",
+		Status: ReleaseStatusPending, Archive: []byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := RecomputeAppProjection(db, AppKindSkill, appID); err != nil || v != "1.0.0" {
+		t.Fatalf("recompute with pending v2 = %q err=%v, want 1.0.0", v, err)
+	}
+	app, _ = GetApp(db, AppKindSkill, appID)
+	if app.Title != "V1 标题" {
+		t.Fatalf("待审版本污染了投影: %q", app.Title)
+	}
+
+	// v3 通过 ⇒ 投影切到 v3;软删 v3 ⇒ 回落到 v1(仍是 approved 的最高版本)。
+	if _, err := CreateRelease(db, &Release{Kind: AppKindSkill, AppID: appID, Version: "3.0.0",
+		Title: "V3 标题", Description: "v3 描述", Publisher: "alice",
+		Status: ReleaseStatusApproved, Archive: []byte("c")}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := RecomputeAppProjection(db, AppKindSkill, appID); v != "3.0.0" {
+		t.Fatalf("recompute v3 = %q", v)
+	}
+	if err := SoftDeleteRelease(db, AppKindSkill, appID, "3.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := RecomputeAppProjection(db, AppKindSkill, appID); v != "1.0.0" {
+		t.Fatalf("软删后 recompute = %q, want 1.0.0", v)
+	}
+	app, _ = GetApp(db, AppKindSkill, appID)
+	if app.Title != "V1 标题" {
+		t.Fatalf("软删后投影 = %q, want V1 标题", app.Title)
+	}
+
+	// 首版待审被拒(没有任何 approved 版本)⇒ app_id 占位,不是空标题。
+	const freshID = "proj-fresh"
+	if err := UpsertApp(db, &App{Kind: AppKindAgent, AppID: freshID, Title: "脏标题",
+		Description: "脏描述", Owner: "alice", Channel: AppChannelOrg, Enabled: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateRelease(db, &Release{Kind: AppKindAgent, AppID: freshID, Version: "1.0.0",
+		Title: "脏标题", Description: "脏描述", Publisher: "alice",
+		Status: ReleaseStatusRejected, Archive: nil}); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := RecomputeAppProjection(db, AppKindAgent, freshID); err != nil || v != "" {
+		t.Fatalf("recompute without approved = %q err=%v, want 空版本号", v, err)
+	}
+	fresh, _ := GetApp(db, AppKindAgent, freshID)
+	if fresh.Title != freshID || fresh.Description != "" {
+		t.Fatalf("无 approved 版本时投影 = %q/%q, want app_id 占位", fresh.Title, fresh.Description)
+	}
+}
+
+// rawUpdatedAt 读 apps.updated_at 的文本形态(精确到 PG 的微秒精度,不受
+// Go 侧时间解析截断影响),用于断言"值没变就不写"。
+func rawUpdatedAt(t *testing.T, db *sql.DB, appID string) string {
+	t.Helper()
+	var s string
+	if err := db.QueryRow(`SELECT updated_at::text FROM apps WHERE kind = ? AND app_id = ?`,
+		AppKindSkill, appID).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// TestSetAppOfficialRejectsForbiddenState 钉住官方归属的唯一合法形态
+// (审计 2026-09-23 G-P2-1):`official=1 ∧ owner≠''` 是禁止状态 —— 它会让
+// is_owner 对 owner 为 true 而发布仍被 OFFICIAL_LOCKED 拒,客户端预检与
+// 服务端判定分叉。守卫放在唯一的写入点,任何未来调用者都造不出来。
+func TestSetAppOfficialRejectsForbiddenState(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	if err := UpsertApp(db, &App{Kind: AppKindSkill, AppID: "official-guard",
+		Title: "T", Owner: "alice", Channel: AppChannelOrg, Enabled: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAppOfficial(db, AppKindSkill, "official-guard", true, "alice"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("official=1 ∧ owner≠'' = %v, want ErrValidation", err)
+	}
+	if app, _ := GetApp(db, AppKindSkill, "official-guard"); app.Official != 0 || app.Owner != "alice" {
+		t.Fatalf("被拒的写入改变了行: %+v", app)
+	}
+	// 两种合法形态仍照常工作。
+	if err := SetAppOfficial(db, AppKindSkill, "official-guard", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := GetApp(db, AppKindSkill, "official-guard"); app.Official != 1 || app.Owner != "" {
+		t.Fatalf("转官方 = %+v", app)
+	}
+	if err := SetAppOfficial(db, AppKindSkill, "official-guard", false, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if app, _ := GetApp(db, AppKindSkill, "official-guard"); app.Official != 0 || app.Owner != "bob" {
+		t.Fatalf("转用户 = %+v", app)
 	}
 }

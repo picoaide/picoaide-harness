@@ -266,6 +266,38 @@ describe('Capabilities 能力中心(统一审批)', () => {
     })
   })
 
+
+  // ID-01(审计 2026-09-23,P0):已通过审核的版本**不得**提供「拒绝」入口 ——
+  // 拒绝与释放归档是同一条 UPDATE,对在服务的版本执行它会不可恢复地销毁归档
+  // 字节、让该版本对全员 404、并烧掉版本号;可逆动作是「下架」。
+  // 同时确认文案必须与事实一致(不能写「可重新上传」)。
+  it('已通过行不渲染拒绝按钮,拒绝文案与事实一致(不可恢复 + 指路下架)', async () => {
+    const u = userEvent.setup()
+    const live = { ...SKILL_ROWS[0]!, status: 'approved' as const, enabled: true }
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [live] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Capabilities />)
+    await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
+    await screen.findByText('CodeQL 审计')
+    expect(screen.queryByText('拒绝')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下架' })).toBeInTheDocument()
+  })
+
+  it('待审行渲染拒绝按钮,确认文案说明归档释放不可恢复且指路下架', async () => {
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    const rejectBtns = screen.getAllByText('拒绝')
+    fireEvent.click(rejectBtns[0]!)
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('不可恢复')
+    expect(dialog).toHaveTextContent('下架')
+    // 误导文案(曾写「可重新上传」)不得复现。
+    expect(dialog).not.toHaveTextContent('可重新上传')
+  })
+
   it('转移归属:未选择时确认按钮禁用,当前归属人不可选', async () => {
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')

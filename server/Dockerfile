@@ -9,13 +9,25 @@
 # PicoAide 服务端多阶段构建(架构设计 §2 目录、计划 Task 4.6)
 # 运行镜像含 /data 挂载卷;密钥/数据库落在 /data,部署时以 volume 持久化。
 #
-# 构建(本地单平台):
-#   docker build -t ghcr.io/picoaide/picoaide-harness-server:<tag> .
-# 构建(带版本号,--version 输出一致):
-#   docker build --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 .
-# 构建(单平台 amd64,CI 用):
+# ⚠️ 本文件依赖**两个命名构建上下文**(缺了 BuildKit 会把名字当镜像引用去拉取,
+# 报错完全不指向真实原因 —— 本项目历史上正是被 Docker Hub 可达性坑过):
+#   clientassets   客户端安装包 + CLIENT-RELEASE.json(随镜像分发;目录必须存在,可为空)
+#   channelassets  渠道内容目录(内含 <CHANNEL>/;目录必须存在,可为空)
+#
+# 构建(本地单平台;`make docker-image` 就是这条,CHANNEL 缺省 official):
+#   mkdir -p client-assets/client channels-context/official   # 空目录合法
+#   docker build --build-arg VERSION=0.4.0 --build-arg CHANNEL=official \
+#     --build-context clientassets=./client-assets \
+#     --build-context channelassets=./channels-context \
+#     -t picoaide-harness-server:v0.4.0 .
+# 构建(单平台 amd64,CI 用;渠道内容只放本渠道一个目录):
 #   docker buildx build --platform linux/amd64 \
-#     --build-arg VERSION=0.4.0 -t ghcr.io/picoaide/picoaide-harness-server:v0.4.0 --push .
+#     --build-arg VERSION=0.4.0 --build-arg CHANNEL=<channel-id> \
+#     --build-context clientassets=./client-assets \
+#     --build-context channelassets=./channels-context \
+#     -t picoaide-harness-server:v0.4.0 --load .
+# 发布镜像不经任何镜像仓库:CI 在 tag 时逐渠道构建 → docker save → zip → 更新服务器
+# (scripts/ci-build-channel-images.sh);客户侧 docker load,见 docs/deploy/AI-DEPLOY.md。
 
 # --- Stage 1: webadmin(go:embed dist 需要预构建产物) ---
 FROM node:24-alpine AS webadmin

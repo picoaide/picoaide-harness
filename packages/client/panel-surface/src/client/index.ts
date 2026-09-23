@@ -20,6 +20,7 @@ export {
 } from '../index.ts'
 
 export {
+  hasInnerModal,
   mountPanelSurface,
   type PanelSurfaceApi,
   type PanelSurfaceHandle,

@@ -151,7 +151,11 @@ export interface StartupAuditContext {
  *
  * 抛错（而不是 warn）是刻意的：`auditStartupEntries` 已经替上游警告过一遍，
  * 再警告一次就是我们要修的那个静默形态。上游没有 stderr 的平台上，
- * 这里抛出的错误会走桌面自己的致命路径（`electronLogger.errorCause` + 恢复对话框）。
+ * 这里抛出的错误会走桌面自己的致命路径 —— `src/main.ts` 的
+ * `reportFatalStartupFailure`（`electronLogger.errorCause` + 原生错误面：
+ * 打开日志 / 重试 / 退出，实现在 `src/fatal-boot.ts`，行为由
+ * `tests/fatal-boot.spec.ts` 钉住）。2026-09-23（B-02）之前这里只写了
+ * `errorCause` + 退出，注释与实现不一致了三个版本。
  * @param ctx - settled Cordis root context.
  * @param required - required row ids (defaults to this shell's list).
  */

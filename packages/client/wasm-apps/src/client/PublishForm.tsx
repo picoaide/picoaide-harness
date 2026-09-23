@@ -519,7 +519,12 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
     } finally {
       submittingRef.current = false
     }
-  }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, verifyAppIdBeforeSubmit, version, whitelistText])
+  // 依赖数组必须列全 `window*Text` 三个 state（审计 C-02）：窗口那一行是配置区的
+  // **最后一行**，自然填写顺序就是"窗口最后填"，而漏掉依赖时 `submit` 闭包读到的是
+  // 上一次重建时的快照 ⇒ `windowSpecFromText('','','')` 返回 undefined，作者声明的
+  // 窗口几何被静默丢弃（改版路径更糟：把上一版的预填旧值当成新值重新提交，而 UI
+  // 显示的是作者刚敲的新值）。回归用例：「窗口几何最后填也进请求体」。
+  }, [access, accessChanged, accessConfirmed, appId, changelog, dataSensitivity, file, onPublished, owner, purpose, title, verifyAppIdBeforeSubmit, version, whitelistText, windowHeightText, windowRatioText, windowWidthText])
 
   const cancel = useCallback((): void => {
     if (busy) {

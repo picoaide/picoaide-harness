@@ -614,3 +614,85 @@ func TestAdminSkillFirstArchiveSameVersion(t *testing.T) {
 		t.Fatalf("同内容再传 = %d %s, want 409", w.Code, w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// G-P2-1(审计 2026-09-23):一次元数据 `PUT /api/server/admin/skills/:name
+// {author}` 就是一次**无审计的归属转移** —— 它把请求体里的自由文本直接写进
+// `apps.owner`(发布权的唯一真源),不校验目标用户是否存在、official 行也照改,
+// 能造出 `official=1 ∧ owner≠''` 这个被 0059/P2-21 明令禁止的状态;而 webadmin
+// 的文案写的是「此处仅改署名展示」。智能体孪生端点正确保留 owner ⇒ 是遗漏。
+//
+// 修法:归属只允许走唯一合规入口 PUT /apps/:kind/:app_id/owner;本端点拒绝
+// **变更**归属(表单回填同值仍放行),DAO 层同时不再写 owner 列。
+//
+// 变异验证:把 updateSkillAdmin 的 author 校验去掉(或让 UpdateSkillMeta 重新
+// 写 owner 列)⇒ 本用例红。
+// ---------------------------------------------------------------------------
+func TestAdminSkillMetadataPutCannotTransferOwner(t *testing.T) {
+	r, db, hdr := marketAdminSetup(t)
+	defer db.Close()
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/skills", `{"name":"own-demo","version":"1.0.0"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create skill: %d", w.Code)
+	}
+	// 造一个真实归属人 + 一个 official 行。
+	if _, err := db.Exec(`UPDATE apps SET owner = 'alice' WHERE kind = 'skill' AND app_id = 'own-demo'`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := serverstore.GetApp(db, serverstore.AppKindSkill, "own-demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 变更归属必须被拒(400 + 指路),且**不得**写库、不得写 app_owner_transfer。
+	w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/own-demo", `{"author":"carol"}`, hdr)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("改归属 = %d %s, want 400(唯一合规入口是 apps/:kind/:id/owner)", w.Code, w.Body.String())
+	}
+	after, err := serverstore.GetApp(db, serverstore.AppKindSkill, "own-demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Owner != before.Owner {
+		t.Fatalf("owner 被元数据 PUT 改写: %q → %q", before.Owner, after.Owner)
+	}
+	if logs, _, _ := serverstore.ListAuditLogsPagedFiltered(db, 0, 200, "app_owner_transfer", ""); len(logs) != 0 {
+		t.Fatalf("元数据 PUT 写了 %d 条 app_owner_transfer 审计(它不是归属转移入口)", len(logs))
+	}
+
+	// ② 不存在的用户同样不能成为归属人(即使请求值恰好不存在)。
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/own-demo", `{"author":"no-such-user-xyz"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("未知用户 = %d, want 400", w.Code)
+	}
+	after, _ = serverstore.GetApp(db, serverstore.AppKindSkill, "own-demo")
+	if after.Owner != "alice" {
+		t.Fatalf("owner = %q, want alice", after.Owner)
+	}
+
+	// ③ 表单回填同值(前端行为)必须放行,否则任何一次改描述都会被拒。
+	w, out := mreq(t, r, "PUT", "/api/server/admin/skills/own-demo",
+		`{"author":"alice","description":"新描述"}`, hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("回填同值 = %d %s, want 200", w.Code, w.Body.String())
+	}
+	if skill, ok := out["skill"].(map[string]any); ok {
+		if skill["author"] != "alice" {
+			t.Fatalf("响应里的 author = %v, want alice(必须回显真实归属)", skill["author"])
+		}
+	}
+	after, _ = serverstore.GetApp(db, serverstore.AppKindSkill, "own-demo")
+	if after.Owner != "alice" || after.Description != "新描述" {
+		t.Fatalf("合法元数据编辑未生效/越界: %+v", after)
+	}
+
+	// ④ official=1 的行同样不能被这条路径造出 official=1 ∧ owner≠'' 的禁止状态。
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "own-demo", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/skills/own-demo", `{"author":"carol"}`, hdr); w.Code != http.StatusBadRequest {
+		t.Fatalf("official 行改归属 = %d, want 400", w.Code)
+	}
+	official, _ := serverstore.GetApp(db, serverstore.AppKindSkill, "own-demo")
+	if official.Official != 1 || official.Owner != "" {
+		t.Fatalf("禁止状态被造出: official=%d owner=%q", official.Official, official.Owner)
+	}
+}

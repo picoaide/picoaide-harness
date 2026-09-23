@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -570,4 +572,126 @@ func TestCapabilitiesOfficialScore(t *testing.T) {
 		t.Fatal("ListSkills missing official projection")
 	}
 	_ = adminHdr
+}
+
+// ---------------------------------------------------------------------------
+// G-P2-5(审计 2026-09-23):组织渠道的 appendSharedSkill 漏拷 `official` 与
+// `Downloads`/`Calls` —— 官方技能在员工端永远不显示蓝标(客户端按
+// item.official === true 渲染),评分恒 0(calls*3+downloads)因而在合并目录里
+// 恒垫底。孪生函数 appendSharedAgent 两个字段都正确 ⇒ 是遗漏不是设计。
+//
+// 变异验证:删掉 appendSharedSkill 里新增的三行 ⇒ 本用例红。
+// ---------------------------------------------------------------------------
+func TestOrgSharedSkillProjectsOfficialAndCounters(t *testing.T) {
+	r, db, _, userTokens := setupRouter(t)
+	defer db.Close()
+	if _, err := serverstore.CreateSharedSkill(db, &serverstore.SharedSkill{
+		Name: "org-official", Version: "1.0.0", Author: "alice",
+		Status: serverstore.SharedSkillApproved, DisplayName: "组织官方技能",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 计数列由统计路径累加:直接置值(与市场侧用例同款)。
+	if _, err := db.Exec(`UPDATE app_releases SET downloads = ?, calls = ?
+		WHERE kind = 'skill' AND app_id = 'org-official' AND version = '1.0.0'`, 42, 7); err != nil {
+		t.Fatal(err)
+	}
+	// 官方属性挂 App 级(0059)。
+	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "org-official", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	aliceHdr := map[string]string{"Authorization": "Bearer " + userTokens["alice"]}
+	w := doGet(t, r, "/api/client/v2/capabilities?source=org", aliceHdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []CapabilityItem `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items=%+v, want 1", resp.Items)
+	}
+	it := resp.Items[0]
+	if !it.Official {
+		t.Errorf("组织技能丢失官方标记(official=false)⇒ 员工端蓝标永不渲染")
+	}
+	if it.Downloads != 42 || it.Calls != 7 {
+		t.Errorf("组织技能丢失计数: downloads=%d calls=%d, want 42/7", it.Downloads, it.Calls)
+	}
+	if it.Score != 7*3+42 {
+		t.Errorf("score=%d, want calls*3+downloads=%d(否则组织行恒垫底)", it.Score, 7*3+42)
+	}
+}
+
+// TestAppendSharedPathsProjectTheSameFields 用反射钉住"组织渠道两个 append
+// 函数投影的字段集相等"(审计 2026-09-23 G-P2-5 的收口判据):只要有人在其中一个
+// 函数里漏掉/新增字段,本用例立刻红 —— 而不是等员工端发现少了一个徽标。
+//
+// 判据口径:构造两个**所有可投影字段都非零**的夹具行,比较两个函数实际写出的
+// CapabilityItem 中"非零字段集合";Kind/Source 天然不同,显式豁免。
+func TestAppendSharedPathsProjectTheSameFields(t *testing.T) {
+	versions := map[string][]string{}
+	var out []CapabilityItem
+	appendSharedSkill(&out, serverstore.SharedSkill{
+		Name: "n", Version: "v", DisplayName: "d", Description: "desc", Author: "a",
+		Status: serverstore.SharedSkillApproved, Reason: "r", Quality: "featured",
+		Downloads: 1, Calls: 2,
+	}, versions, true, true)
+	appendSharedAgent(&out, serverstore.AgentPreset{
+		Name: "n", Version: "v", DisplayName: "d", Description: "desc", Author: "a",
+		Status: serverstore.AgentPresetApproved, Reason: "r", Quality: "featured",
+		Downloads: 1,
+	}, versions, true, true)
+	if len(out) != 2 {
+		t.Fatalf("out = %d", len(out))
+	}
+	fieldsOf := func(it CapabilityItem) map[string]bool {
+		set := map[string]bool{}
+		v := reflect.ValueOf(it)
+		ty := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			switch ty.Field(i).Name {
+			case "Kind", "Source": // 组织渠道内的技能 vs 智能体,本就不同
+				continue
+			}
+			if !v.Field(i).IsZero() {
+				set[ty.Field(i).Name] = true
+			}
+		}
+		return set
+	}
+	skill, agent := fieldsOf(out[0]), fieldsOf(out[1])
+	// AgentPreset DTO 没有 Calls 列(旧表只统计 downloads),所以
+	// CapabilityItem.Calls 是**唯一**允许不对称的字段:差异集合必须恰好是它。
+	// 任何"漏拷一个字段"都会落进 agentOnly(例如漏 official/downloads),
+	// 任何"给 agent 新增了可投影字段却忘了 skill"都会落进 skillOnly。
+	var skillOnly, agentOnly []string
+	for name := range skill {
+		if !agent[name] {
+			skillOnly = append(skillOnly, name)
+		}
+	}
+	for name := range agent {
+		if !skill[name] {
+			agentOnly = append(agentOnly, name)
+		}
+	}
+	sort.Strings(skillOnly)
+	sort.Strings(agentOnly)
+	if len(agentOnly) != 0 {
+		t.Errorf("appendSharedSkill 漏拷字段 %v(appendSharedAgent 有值)—— 组织技能的投影不完整", agentOnly)
+	}
+	if len(skillOnly) != 1 || skillOnly[0] != "Calls" {
+		t.Errorf("两个 append 函数的差异集 = %v, want 恰好 [Calls](AgentPreset DTO 无 Calls 列);"+
+			"其它差异说明有一个函数漏拷字段", skillOnly)
+	}
+	// 夹具本身必须真的覆盖到易漏字段,否则上面是恒真断言。
+	for _, f := range []string{"Official", "Downloads", "Calls"} {
+		if !skill[f] {
+			t.Fatalf("夹具没有覆盖 %s,判据失效: %v", f, skill)
+		}
+	}
 }

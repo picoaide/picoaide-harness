@@ -369,13 +369,33 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请用「上传新版」随归档一起更改版本")
 		return
 	}
+	// 归属(owner)= 发布权的唯一真源,前端把它当「署名」展示(webadmin 的
+	// 文案就是「此处仅改署名展示」),但它的实际语义是"谁有权续传新版本"。
+	// 因此这里**不接受**归属变更(审计 2026-09-23 G-P2-1):
+	//
+	//   - 此前 `s.Author = req.Author` 会被 UpdateSkill 写进 apps.owner ⇒ 一次
+	//     普通元数据 PUT 变成**无审计的归属转移**(不校验用户是否存在、official
+	//     行也照改,能造出 official=1 ∧ owner≠'' 的禁止状态);
+	//   - 智能体孪生端点(agent_api.go 的 updateAgentAdmin)明确保留
+	//     `Owner: a.Owner`,两条姊妹端点行为必须一致;
+	//   - 合规入口只有一个:PUT /api/server/admin/apps/:kind/:app_id/owner
+	//     (appstore/admin.go:目标用户存在性校验 + owner/official 互斥 + 同归属
+	//     幂等 + app_owner_transfer 审计),webadmin 的「转移归属」按钮走它。
+	//
+	// 表单会回填当前归属,所以「值没变」必须放行(否则任何一次编辑描述都会被
+	// 拒绝);只有**真的想改归属**才回 400 并指路 —— 静默忽略比报错更糟:
+	// 管理员会以为改成功了。
+	if req.Author != "" && req.Author != s.Author {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+			"归属(负责人)不能在这里修改:它决定谁能续传新版本,请用「转移归属」")
+		return
+	}
 	if req.Description != "" {
 		s.Description = req.Description
 	}
-	if req.Author != "" {
-		s.Author = req.Author
-	}
-	if err := serverstore.UpdateSkill(db, s); err != nil {
+	// UpdateSkillMeta 只写展示列(title/description/enabled),不碰 owner ——
+	// 让"元数据 PUT 无意中改写归属"在 DAO 层结构上不可能(唯一真源在 DAO)。
+	if err := serverstore.UpdateSkillMeta(db, s); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}

@@ -371,9 +371,8 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
 	release()
 	if err != nil || !u.HasManagementAccess() {
-		lim.record(ipKey)
-		lim.record(userKey)
-		a.ipLimiter().record(srcIPKey)
+		// 2026-09-23 E-01:三个桶的记账已由上面的 allow **判定即记账**原子完成
+		// (此前在此处 record,并发请求会在首个 record 落表前全部通过判定)。
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
@@ -437,8 +436,9 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 	}
 	secret, err := decryptMFASecret(u.TotpSecret)
 	if err != nil || !verifyAndConsumeTOTP(a.DB, u.ID, secret, req.Code) {
-		lim.record(mfaIPKey)
-		lim.record(mfaUserKey)
+		// 2026-09-23 E-01:mfa-ip / mfa-user 两个桶的记账已在两处 allow 里原子
+		// 完成(此前"第二次判定在若干次 DB 往返之后"只是意外串行化屏障,
+		// 并发 40 张票据时并非真正的上限)。
 		_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "fail ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误或已失效")
 		return
@@ -1395,6 +1395,16 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			return
 		}
 		seen[p] = true
+	}
+	// WEB-2(审计 2026-09-23,与 E-02 同一根因):**至少一个有效提供方**。
+	// 旧实现里 `{"enabled":","}`(或 " , ")每一项 trim 后都是空串,上面的循环
+	// 全部 `continue` 跳过且不报错 ⇒ 空列表落库,`enabledProviderNames` 解出空集,
+	// `clientPasswordOrder()` 又因"空集"回落遗留兜底 ["ldap","local"] ⇒ 员工面
+	// **重新接受本地密码**。空集合同时被当成"还没配置过"与"配置成什么都没有",
+	// 这两件事必须分开:HTTP 面显式拒绝空集合,运行期只对"从未配置过"保留兜底。
+	if len(seen) == 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "auth.enabled 至少需要一个提供方(local|ldap|openid|oidc)")
+		return
 	}
 	// min_password_length 校验必须在写库前(F14:不允许写一半再 400)。
 	if req.MinPasswordLength != nil {

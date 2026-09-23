@@ -25,8 +25,10 @@
  *
  * ## 两条硬约束
  *
- * - **守卫自身不得内嵌任何客户域名**（否则它变成新的泄漏点）：本文件的合成样串一律
- *   **运行时拼接**（见 `selfTest`），示例一律用 `example.com` 保留命名空间。
+ * - **守卫自身不得内嵌任何客户域名**（否则它变成新的泄漏点）：本文件的负例语料一律
+ *   **运行时随机生成**（`syntheticHostname` / `syntheticPublicIpv4`，见 `selfTest`），
+ *   示例一律用 `example.com` 保留命名空间与 RFC 5737 文档网段。**运行时拼接不算豁免**
+ *   （2026-09-23 审计 G-9：拼接真实串仍然把字符串逐段留在了公开仓源码里）。
  * - **输出默认脱敏**：CI 日志是公开的，守卫若把命中的 host 原样打在日志里，等于换了个
  *   地方泄漏（本仓已有"外部命令输出必须先捕获、脱敏、再打印"的先例）。本地排障用
  *   `--unmasked`。
@@ -43,6 +45,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 
@@ -320,8 +323,56 @@ function trackedFiles(root) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 自证（防假绿）：合成样串一律运行时拼接，源码里不出现完整客户域名
+// 自证（防假绿）：负例语料一律**运行时随机生成**的合成目标
+//
+// 为什么是"随机生成"而不是"写死一个假串"、更不是"拼接一个真串"：
+//   - 写死的假串迟早会撞上某个真实注册（或被人当成"这就是那个客户域名"的证据）；
+//   - 拼接真串（旧实现，2026-09-23 审计 G-9）**只是骗过守卫自己的扫描**，
+//     字符串仍然逐段存在于公开仓源码里 —— 四段十进制 IP 更是明文数字字面量。
+//     `AGENTS.md` 铁律 0 对此没有豁免：任何位置、任何形态都不允许。
+//   - 负例真正需要的性质只有两条：**必然未登记**、**公网形态**。随机标签 + 显式
+//     断言"不在允许集合内"恰好给出这两条，且每次运行的目标都不同。
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** 合成负例用的随机标签（源码里没有完整域名/IP，只有一个 8 位十六进制片段）。 */
+function syntheticLabel() {
+  return `audit-${randomUUID().replace(/-/gu, '').slice(0, 8)}`
+}
+
+/**
+ * 合成主机名：随机标签 + 一个**非保留、非白名单**的 TLD（`.com`）。
+ *
+ * 每次运行都不同 ⇒ 必然未登记；`.com` 不在 `SPECIAL_SUFFIXES`（RFC 2606/6761）
+ * 也不在 `ALLOWED_DOMAINS` ⇒ 必须被判红。
+ *
+ * @returns {string} 形如 `<随机标签>.com`（源码里不留任何可直接匹配的主机名 token）
+ */
+function syntheticHostname() {
+  return `${syntheticLabel()}.com`
+}
+
+/**
+ * 合成公网形态 IPv4：循环随机抽样直到 `!ipv4Allowed(ip)`。
+ *
+ * 负例要的是"一个公网形态且不在允许集合内的地址"，不需要（也不允许）任何真实
+ * 地址。抽样上限只是防死循环 —— 命中保留/登记网段的概率极低（256 次全中的概率
+ * 可以忽略），真的耗尽时返回 `null`，调用处的断言会 fail-loud 而不是悄悄放行。
+ *
+ * @returns {string|null} 公网形态地址；抽样耗尽时为 null。
+ */
+function syntheticPublicIpv4() {
+  for (let attempt = 0; attempt < 256; attempt += 1) {
+    const octets = [
+      1 + Math.floor(Math.random() * 223), // 1..223：跳过 0/224+（"本网络"/组播/保留/广播）
+      Math.floor(Math.random() * 256),
+      Math.floor(Math.random() * 256),
+      1 + Math.floor(Math.random() * 254), // 1..254：避开 .0/.255 形态
+    ]
+    const candidate = octets.join('.')
+    if (!ipv4Allowed(candidate)) return candidate
+  }
+  return null
+}
 
 /**
  * 自证走的是**与扫描完全同一套** candidatesInLine/isAllowedCandidate，
@@ -331,11 +382,18 @@ function trackedFiles(root) {
  */
 function selfTest() {
   const failures = []
-  const [a, b, c, d, e] = ['har', 'ness.', 'mo', 'kahr', '.vip']
-  const syntheticHost = `${a}${b}${c}${d}${e}` // 运行时拼接，源码里没有完整域名
+  const syntheticHost = syntheticHostname()
   const syntheticUrl = `https://${syntheticHost}/updates/manifest`
-  const syntheticIp = ['101', '42', '228', '128'].join('.')
+  const syntheticIp = syntheticPublicIpv4()
   const expect = (condition, message) => { if (!condition) failures.push(message) }
+
+  // 语料前置断言：负例必须"必然未登记/不在允许集合内"，否则判据会变成假绿
+  // （白名单放行）或假红（守卫判对了、用例判错了）。
+  expect(!isAllowedHost(syntheticHost), `合成主机名落进了白名单（随机标签撞车）：${syntheticHost}`)
+  expect(
+    syntheticIp !== null && !ipv4Allowed(syntheticIp),
+    `未能在 256 次抽样内生成"不在允许集合内的公网形态地址"：${String(syntheticIp)}`,
+  )
 
   // 负例 1（URL）：合成客户域名必须被判红（URL 判据与裸主机名判据都会命中，故断言"至少一条且来自 URL"）。
   const urlHits = candidatesInLine(syntheticUrl).filter(hit => !isAllowedCandidate(hit))
@@ -348,10 +406,13 @@ function selfTest() {
   const bareHits = candidatesInLine(`DOMAIN=${syntheticHost}`).filter(hit => !isAllowedCandidate(hit))
   expect(bareHits.some(hit => hit.host === syntheticHost), `合成裸主机名负例未被判红：${syntheticHost}`)
 
-  // 负例 3（公网 IPv4）：被投递环境 IP 必须被判红（IP 只在 URL authority 里判，见 candidatesInLine 注释）。
-  const ipHits = candidatesInText(`server_url = https://${syntheticIp}/api`, 'deploy.sh')
-    .filter(hit => !isAllowedCandidate(hit))
-  expect(ipHits.some(hit => hit.host === syntheticIp), `合成公网 IP 负例未被判红：${syntheticIp}`)
+  // 负例 3（公网 IPv4）：随机生成的公网形态地址必须被判红（IP 只在 URL authority
+  // 里判，见 candidatesInLine 注释）。地址是随机的、且上面已断言不在允许集合内。
+  if (syntheticIp !== null) {
+    const ipHits = candidatesInText(`server_url = https://${syntheticIp}/api`, 'deploy.sh')
+      .filter(hit => !isAllowedCandidate(hit))
+    expect(ipHits.some(hit => hit.host === syntheticIp), `合成公网 IP 负例未被判红：${syntheticIp}`)
+  }
 
   // 负例 4（提交信息路径）：同一条合成串在 message 扫描里也必须红。
   const messageHits = candidatesInText(`deploy: point client at ${syntheticHost}`, 'COMMIT_EDITMSG')
@@ -360,10 +421,10 @@ function selfTest() {
 
   // 负例 5（守 2026-09-20 新加的「多段公共后缀自身不是主机名」跳过规则）：两段式后缀
   // 本身不再判红（否则守卫扫到自己的 `MULTI_LABEL_SUFFIXES` 语料就红，实测 EXIT=1），
-  // **但带真实标签的三段式主机名必须照旧判红** —— 判据不能靠"新规则看起来只跳过后缀"，
-  // 必须实测两个方向；串一律运行时拼接（与上面同样的理由：源码里不留完整域名）。
+  // **但三段式主机名必须照旧判红** —— 判据不能靠"新规则看起来只跳过后缀"，必须实测
+  // 两个方向；标签同样是随机生成的合成标签（与上面同样的理由：不留任何真实身份）。
   const cnSuffixBare = ['com', '.cn'].join('')
-  const cnHostBare = ['inn', 'er.', cnSuffixBare].join('')
+  const cnHostBare = `${syntheticLabel()}.${cnSuffixBare}`
   expect(
     candidatesInLine(`suffix ${cnSuffixBare}`).length === 0,
     `多段公共后缀自身被误判为主机名：${cnSuffixBare}`,
@@ -408,10 +469,12 @@ function selfTest() {
     }
   }
 
-  // 脱敏自证：命中输出不得原样回显 host。
+  // 脱敏自证：命中输出不得原样回显 host（本轮语料是随机的，就用本轮的随机标签当判据）。
   const masked = maskHost(syntheticHost)
-  expect(!masked.includes(d), `脱敏输出仍含原始标签：${masked}`)
-  expect(masked.endsWith(e), `脱敏输出应保留 TLD：${masked}`)
+  const syntheticFirstLabel = syntheticHost.split('.')[0]
+  expect(!masked.includes(syntheticFirstLabel), `脱敏输出仍含原始标签：${masked}`)
+  expect(masked !== syntheticHost, `脱敏输出与原始 host 相同：${masked}`)
+  expect(masked.endsWith('.com'), `脱敏输出应保留 TLD：${masked}`)
   return failures
 }
 

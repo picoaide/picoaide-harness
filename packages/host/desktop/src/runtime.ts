@@ -133,6 +133,20 @@ export interface UpdateDownloadProgressSnapshot {
 }
 
 /**
+ * 一次安装包传输的时间预算（B-08，2026-09-23 审计 P1）。
+ *
+ * 由更新插件按配置下发（`downloadStallTimeoutMs`/`downloadTotalTimeoutMs`），
+ * 下载器据此把"永不到来的字节"变成可重试的失败。适配器实现可以忽略它
+ * （可选参数），但那样就只有插件层的 attempt 看门狗兜底。
+ */
+export interface DesktopUpdateTransferBudget {
+  /** 无字节进展多久算停滞（毫秒）。 */
+  readonly stallTimeoutMs: number
+  /** 整份传输的绝对预算（毫秒）。 */
+  readonly totalTimeoutMs: number
+}
+
+/**
  * 一次更新检查/下载使用的更新源。
  *
  * **客户端只从它登录的那台服务端取更新**（2026-09-10 定案）：更新源不是一个
@@ -170,9 +184,16 @@ export interface DesktopUpdateAdapter {
    * @param source - 本次下载使用的更新源（服务端清单地址 + 期望渠道）。
    * @param signal - caller-owned cancellation.
    * @param onProgress - optional byte-progress callback while streaming.
+   * @param budget - 停滞/总时间预算（B-08）；省略时下载器用自己的缺省值。
    * @returns absolute path of the completed, verified installer.
    */
-  downloadUpdate(version: string, source: DesktopUpdateSource, signal: AbortSignal, onProgress?: (progress: UpdateDownloadProgressSnapshot) => void): Promise<string>
+  downloadUpdate(
+    version: string,
+    source: DesktopUpdateSource,
+    signal: AbortSignal,
+    onProgress?: (progress: UpdateDownloadProgressSnapshot) => void,
+    budget?: DesktopUpdateTransferBudget,
+  ): Promise<string>
   /**
    * Tell the user that `version` is downloaded and waiting, once.
    *

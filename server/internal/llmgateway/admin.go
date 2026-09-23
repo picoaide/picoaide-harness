@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -386,6 +387,10 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 			p.Enabled = 0
 		}
 	}
+	// models 行的"运营方配置"快照(价格/缓存价/峰谷折扣/default_params/模态),
+	// 用于把"价格被改/被清"纳入本次审计(G-01)。必须在上面的 provider 写入与
+	// 下面的清单同步**之前**取,否则拿不到被清空前的值。
+	modelConfigBefore := providerModelConfigSnapshot(db, p.ID)
 	if err := serverstore.UpdateGatewayProvider(db, p); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "上游名称已存在")
@@ -394,15 +399,23 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
-	// 模型清单变更同步到 models 表(单一数据源)。仅两种情形触发:
-	//  1. 请求显式携带 models 字段(手动型清单编辑);
+	// 模型清单变更同步到 models 表(单一数据源)。仅三种情形触发:
+	//  1. 请求显式携带 models 字段**且与既有清单不同**(手动型清单编辑);
 	//  2. 渠道型切回手动型(wasChannel != "" → p.Channel == ""):清空旧渠道
 	//     同步来的模型,避免残留路由。
 	// 启停/改名等其它更新不得用空清单清空手动型上游的模型(审计修复后回归:
 	// PUT {"enabled":false} 曾把该上游模型全部删除)。
 	// channel provider 的模型由渠道同步维护,不走 provider.models 列表覆盖。
+	//
+	// 2026-09-23(G-01,P0):清单与既有清单**逐字相同**时必须跳过这一步。webadmin
+	// 的编辑弹窗会**无条件**把预填的 models 列表回传,于是"改个名字/切个启用/原样
+	// 保存"也会走一次清单同步;旧 SyncProviderModels 是"删全部 + 只插三列",一次
+	// 就把该上游全部价格/缓存价/峰谷折扣/default_params/input_modalities 清零,
+	// 此后调用照常 200、token 照记、cost=0。同步语义本身已在 serverstore 侧改成
+	// upsert + 剪枝,这里再保证"没有变化就不动库"(不重建行、不打回 display_name)。
 	clearingChannelModels := wasChannel != "" && p.Channel == ""
-	if (req.Models != nil || clearingChannelModels) && p.Channel == "" {
+	modelsUnchanged := req.Models != nil && slices.Equal(req.Models, orig.Models)
+	if p.Channel == "" && (clearingChannelModels || (req.Models != nil && !modelsUnchanged)) {
 		names := p.Models
 		if clearingChannelModels {
 			names = nil
@@ -440,10 +453,141 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if !slices.Equal(orig.Models, p.Models) {
 		ch = append(ch, fmt.Sprintf("models:%d→%d", len(orig.Models), len(p.Models)))
 	}
+	// 2026-09-23(G-01):价格类字段(输入/输出/缓存价、峰谷折扣)以及
+	// default_params/input_modalities 的变化必须留痕。旧实现的 changes 只覆盖
+	// name/base_url/channel/protocol/enabled/api_key/models 数量 —— 价格被清零时
+	// 一个字都不写(全部字段未变时连 len(ch)==0 都没有审计),这正是 P0 能"静默
+	// 破产"的原因。这里按 provider 下逐模型比对变更前后的快照。
+	if priceChanges := diffProviderModelConfig(modelConfigBefore, providerModelConfigSnapshot(db, p.ID)); len(priceChanges) > 0 {
+		ch = append(ch, priceChanges...)
+	}
 	if len(ch) > 0 {
 		_ = serverstore.AuditLog(db, auditActor(c), "provider_update", p.Name+": "+strings.Join(ch, ", "))
 	}
 	c.JSON(http.StatusOK, gin.H{"provider": providerJSON(*p), "sync": syncRes})
+}
+
+// providerModelConfig 是 models 行上"运营方配置"的审计用快照。
+// 价格字段用字符串存(未定价 = "-"),这样快照可以直接比较且能原样进审计。
+type providerModelConfig struct {
+	In         string // input_price_per_1m
+	Out        string // output_price_per_1m
+	Cache      string // cache_input_price_per_1m
+	Offpeak    string // offpeak_discount
+	Params     string // default_params
+	Modalities string // input_modalities
+}
+
+// priceKey 是"价格类字段"的比较键(参数/模态另算:它们不是钱,但同样是管理员配置)。
+func (c providerModelConfig) priceKey() string {
+	return "in=" + c.In + ",out=" + c.Out + ",cache=" + c.Cache + ",off=" + c.Offpeak
+}
+
+func (c providerModelConfig) String() string {
+	return c.priceKey() + ",dp=" + c.Params + ",mod=" + c.Modalities
+}
+
+// hasPrice 表示该行至少配过一个价格类字段(显式 0 也算:那是管理员定的"未定价")。
+func (c providerModelConfig) hasPrice() bool {
+	return c.In != "-" || c.Out != "-" || c.Cache != "-" || c.Offpeak != "-"
+}
+
+// providerModelConfigSnapshot 读 provider 下每个模型的运营方配置(审计基线)。
+// 读失败时不阻塞更新:返回已读到的部分(审计退化为"没有可比基线"),并记日志。
+func providerModelConfigSnapshot(db *sql.DB, providerID int64) map[string]providerModelConfig {
+	out := map[string]providerModelConfig{}
+	rows, err := db.Query(`SELECT name, input_price_per_1m, output_price_per_1m,
+		cache_input_price_per_1m, offpeak_discount, COALESCE(default_params, ''),
+		COALESCE(input_modalities, '["text"]')
+		FROM models WHERE provider_id = ?`, providerID)
+	if err != nil {
+		log.Printf("gateway provider audit: 读取 provider=%d 模型配置快照失败(本次不记录价格变更): %v", providerID, err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, params, modalities string
+		var in, outPrice, cache, off sql.NullFloat64
+		if err := rows.Scan(&name, &in, &outPrice, &cache, &off, &params, &modalities); err != nil {
+			log.Printf("gateway provider audit: 扫描 provider=%d 模型配置快照失败(本次不记录价格变更): %v", providerID, err)
+			return out
+		}
+		out[name] = providerModelConfig{
+			In: nullPriceKey(in), Out: nullPriceKey(outPrice),
+			Cache: nullPriceKey(cache), Offpeak: nullPriceKey(off),
+			Params: params, Modalities: modalities,
+		}
+	}
+	return out
+}
+
+// nullPriceKey 把可空价格格式化成审计串(NULL = 未定价)。
+func nullPriceKey(v sql.NullFloat64) string {
+	if !v.Valid {
+		return "-"
+	}
+	return strconv.FormatFloat(v.Float64, 'g', -1, 64)
+}
+
+// diffProviderModelConfig 比较变更前后的模型配置快照,返回审计 changes 片段:
+//   - `price:<name>:<old>→<new>`(价格类字段变了;行被移除记 `→已移除`);
+//   - `params:<name>`(只有 default_params/input_modalities 变了);
+//   - `models_prices:<N>项变更`(价格类变更的汇总计数)。
+//
+// 明细最多 8 条(一次批量操作不该把审计 detail 撑爆),汇总里的 N 始终是全量。
+// 新增一个**完全未定价**的模型不算价格变更(models:N→M 已覆盖"新增"这件事)。
+func diffProviderModelConfig(before, after map[string]providerModelConfig) []string {
+	names := make([]string, 0, len(before)+len(after))
+	seen := make(map[string]bool, len(before)+len(after))
+	for n := range before {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	for n := range after {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	var details []string
+	priceChanges := 0
+	for _, n := range names {
+		b, okBefore := before[n]
+		a, okAfter := after[n]
+		if okBefore && okAfter && b == a {
+			continue
+		}
+		switch {
+		case !okAfter:
+			details = append(details, "price:"+n+":"+b.String()+"→已移除")
+			priceChanges++
+		case !okBefore && !a.hasPrice():
+			// 新增的未定价模型:不是价格变更(避免把"加了几个模型"误报成改价)
+		case b.priceKey() != a.priceKey():
+			old := "未登记"
+			if okBefore {
+				old = b.String()
+			}
+			details = append(details, "price:"+n+":"+old+"→"+a.String())
+			priceChanges++
+		default:
+			details = append(details, "params:"+n)
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	out := details
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	if priceChanges > 0 {
+		out = append(out, fmt.Sprintf("models_prices:%d项变更", priceChanges))
+	}
+	return out
 }
 
 func deleteProvider(c *gin.Context, db *sql.DB) {

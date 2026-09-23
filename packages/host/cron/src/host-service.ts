@@ -52,8 +52,18 @@ export class HostCronService implements PicoCronService {
     return this.username
   }
 
+  /**
+   * Start ticking — only while the master switch is on (2026-09-23 CR-4).
+   *
+   * `apply()` calls `setConfiguration(enabled, catchUpMissed)` and then
+   * `start()`; without this check a composition/settings config of
+   * `{enabled: false, catchUpMissed: true}` would run the very first tick
+   * *before* the trailing `sync()` stops the scheduler again — and that tick's
+   * catch-up branch spawns agent sessions for a feature that is configured off.
+   * `setConfiguration(true, …)` remains the only other starter.
+   */
   start(): void {
-    this.scheduler.start()
+    if (this.active) this.scheduler.start()
   }
 
   setConfiguration(active: boolean, catchUpMissed: boolean): void {

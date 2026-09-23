@@ -402,10 +402,20 @@ export const APP_AI_CONSENT_PREFIX = 'picoaide.wasm-apps.ai-consent.v1'
 export const APP_AI_IDENTITY_PATH = '/api/pico/auth/state'
 
 /**
- * 取当前登录身份（`<username>@<serverURL>` 形态的作用域串）。
+ * 取当前登录身份（= **宿主闸门的作用域串**）。
  *
- * 维度取 **用户名 + 服务端地址**（与 §7.5 的 `session-scope` 同一精神）：同一台机器上
- * 换账号或换服务端都不得继承上一个人的 AI 授权。
+ * ## 为什么只取 `username`，不带服务端地址（审计 C-25）
+ *
+ * 真正的闸门在宿主：`wasm-apps-host` 的 `ai-authorization` 按 `session.username`
+ * 记授权（`aiConsentKey(user, app)`），`handleAiChat` 先查它再碰模型。本函数返回的串
+ * 只用于**渲染层的那份 UI 记忆**（决定"还要不要再弹一次说明卡"）。
+ *
+ * 此前这里返回 `<username>@<serverURL>`：只要用户改了服务端地址（登录页支持的界面
+ * 动作）或清了站点数据，客户端 key 就与宿主不再匹配 ⇒ 面板重新弹卡、用户点
+ * 「不允许」得到"这个应用不能使用 AI"，而**宿主闸门仍然开着**（应用照样花他的额度）。
+ * 两端的授权作用域必须同源，而唯一能改的这一端就是这里 —— 所以 align 到宿主的
+ * `username`。宿主那份记录本来就是同一台机器上的同一个文件（随安装，不随服务端），
+ * 因此这不会引入比宿主更强的跨服务端继承。
  * @param deps - 可注入 fetch（测试用）。
  * @returns 作用域串；未登录 / 形状不符 / 网络失败 ⇒ `''`（fail-closed）。
  */
@@ -419,12 +429,11 @@ export async function loadAppAiIdentity(deps: AppAiDeps = { fetch: (...args: Par
     if (!response.ok) return ''
     const payload = await response.json()
     if (payload === null || typeof payload !== 'object') return ''
-    const row = payload as { loggedIn?: unknown, username?: unknown, serverURL?: unknown }
+    const row = payload as { loggedIn?: unknown, username?: unknown }
     if (row.loggedIn !== true) return ''
     const username = typeof row.username === 'string' ? row.username.trim() : ''
-    const serverURL = typeof row.serverURL === 'string' ? row.serverURL.trim() : ''
     if (username === '') return ''
-    return serverURL === '' ? username : `${username}@${serverURL}`
+    return username
   } catch {
     return ''
   }

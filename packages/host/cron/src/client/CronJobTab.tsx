@@ -22,6 +22,7 @@ import {
   icons,
 } from '@picoaide/dsh-panel-surface/client'
 import type { JobRecord } from '../jobs.ts'
+import { jobIsRunning } from '../jobs.ts'
 import type { CronController, CronViewSnapshot } from './controller.ts'
 import { styles } from './styles.ts'
 import { JobEditor } from './JobEditor.tsx'
@@ -125,13 +126,22 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
       {/* P1-13: a corrupt ledger reset must be loudly visible — the scheduler
           error field carries "ledger was corrupt and reset"; the user needs
           to know the restore path (.corrupt-* file) instead of a silent
-          empty list. */}
-      {snapshot.scheduler.error !== undefined && (
-        <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-          <icons.IconAlert size={14} />
-          <span>{t('settings.ledgerCorrupt', { error: snapshot.scheduler.error })}</span>
-        </div>
-      )}
+          empty list. 2026-09-23 CR-1: a ledger that could not be *read* is a
+          different state (nothing was reset, nothing may be written), so it
+          gets its own notice instead of the corrupt/reset wording. */}
+      {snapshot.scheduler.readOnly === true
+        ? (
+            <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <icons.IconAlert size={14} />
+              <span>{t('settings.ledgerReadOnly', { error: snapshot.scheduler.error ?? '' })}</span>
+            </div>
+          )
+        : snapshot.scheduler.error !== undefined && (
+            <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <icons.IconAlert size={14} />
+              <span>{t('settings.ledgerCorrupt', { error: snapshot.scheduler.error })}</span>
+            </div>
+          )}
       {snapshot.transportError !== undefined && (
         <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <icons.IconAlert size={14} />
@@ -220,6 +230,10 @@ function JobCard({ job, pending, controller, onEdit, openSession }: {
   const recent = job.executions.slice(-5).reverse()
   const latest = recent[0]
   const latestLabel = latest === undefined ? null : executionLabel(latest)
+  // 2026-09-23 CR-2：正在执行的任务不能删——删除不会取消已 spawn 的会话，
+  // 执行记录（会话 id / 提示词 / 结果）会凭空消失。判据与工具面、账本 delete
+  // 闸共用 jobs.ts 的 jobIsRunning（单一实现）。
+  const running = jobIsRunning(job)
 
   return (
     <Card interactive style={{ display: 'flex', flexDirection: 'column', gap: 10, borderRadius: 14, padding: '13px 14px' }}>
@@ -281,7 +295,8 @@ function JobCard({ job, pending, controller, onEdit, openSession }: {
           size="sm"
           variant="danger"
           icon={<icons.IconTrash size={13} />}
-          disabled={pending}
+          disabled={pending || running}
+          title={running ? t('job.deleteRunning') : undefined}
           onClick={() => {
             // P3-2: destructive actions need a confirmation step.
             if (!window.confirm(t('job.deleteConfirm'))) return

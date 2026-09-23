@@ -360,16 +360,17 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 		if !requireOrgSkill(c, db, name) {
 			return
 		}
-		// F2-N3 / N-4:与 agentshare 侧同一条不变量 —— 审核通过意味着版本对
-		// 员工可见可安装,必须有归档字节。拒绝已把字节释放(agentshare-5 的
-		// 存储上界),再点「通过」只会得到 status=approved + archive_bytes=0
-		// 的坏行:员工清单可见、下载 500、管理员预览 404。
+		// F2-N3 / N-4 / ID-01(2026-09-23):与 agentshare 侧同一条不变量 ——
+		// 审核通过意味着版本对员工可见可安装,必须有归档字节;而**审核拒绝
+		// 只能作用于尚未生效的待审版本** —— approved 版本可能正在服务、也可能
+		// 是唯一可回滚的历史版本,对它执行拒绝会在同一条 UPDATE 里永久释放
+		// 归档字节并烧掉版本号(不可恢复)。
 		//
-		// N-4:这个「先读归档长度、再写状态」的判定是 check-then-act,两个
-		// 管理员并发 approve/reject 时它会交错出坏行(实测 12 轮里 6~7 轮)。
-		// 这里保留它只是为了**顺序路径**的友好 409 文案;并发下的真正防线是
-		// serverstore.SetReleaseStatus 的条件 UPDATE(见 apps.go),写入返回
-		// ErrReleaseArchiveCleared 时下面同样回 409 而不是 500。
+		// 那条前置条件的**唯一实现**在 DAO(serverstore.SetReleaseStatusForReview
+		// 的 `AND status <> 'approved'`),本函数不再自己判一遍状态位:三份
+		// check-then-act 守卫正是 ID-01 的根因(只有 WASM 面写了那一份)。
+		// 下面这个「归档为空」的预检只是**顺序路径**的友好 409 文案,并发下的
+		// 真正防线是 DAO 的条件 UPDATE(见 apps.go)。
 		// 拒绝不再单独调用 DeleteSharedSkillArchive:拒绝与释放归档已经在
 		// 同一条 UPDATE 里完成(否则「置 rejected」与「清 archive」之间仍有
 		// 一个可被并发 approve 穿过的窗口)。
@@ -384,7 +385,29 @@ func decide(db *sql.DB, status serverstore.SharedSkillStatus, auditAction string
 					"该版本归档已在拒绝时清理,无法再通过审核(拒绝即释放存储):请让作者上传新版本")
 				return
 			}
+			// ID-01:拒绝一个已通过审核的版本 = 销毁正在服务的归档字节,必须
+			// 409 并指路(下架可逆)。文案取自 serverstore 的共享常量,与
+			// agentshare / wasmapp 三面逐字一致。
+			if errors.Is(err, serverstore.ErrReleaseApprovedNotRejectable) {
+				serverauth.WriteError(c, http.StatusConflict, serverstore.CodeReleaseNotRejectable,
+					serverstore.MsgReleaseNotRejectable+"。"+serverstore.HintReleaseNotRejectable)
+				return
+			}
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
+		// 审核落定之后把 apps 行的**展示投影**重算为"最新 approved 版本"
+		// (审计 2026-09-23 G-P2-3):approve 让新版本生效 ⇒ 投影切到它;
+		// reject 让被拒版本永不生效 ⇒ 投影恢复成仍在生效的那一版。漏掉这一步
+		// 会让"待审时被刻意冻结的投影"永远停在旧值/脏值上(WASM 面早就有
+		// recomputeProjection,本面从未接)。实现与理由见
+		// serverstore.RecomputeAppProjection(app_releases 是三面共用的真相表)。
+		//
+		// 失败语义:状态已经落库,只是投影没跟上 —— 这不是"审核失败"而是平台侧
+		// 写入故障,如实回 500 请管理员重试(重试会再次走到这里,幂等)。
+		if _, perr := serverstore.RecomputeAppProjection(db, serverstore.AppKindSkill, name); perr != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL",
+				"审核结果已落库,但技能投影更新失败(请重试一次)")
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), auditAction, name+"@"+version)

@@ -19,7 +19,7 @@ import { browserError } from './errors.ts'
 import type { BrowserSurface } from './surface.ts'
 import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
-import { BROWSER_TOOL_TIMEOUT_MS, BROWSER_WAIT_FOR_DEADLINE_MS, WAIT_FOR_MAX_MS } from './budgets.ts'
+import { BROWSER_TOOL_TIMEOUT_MS, BROWSER_WAIT_FOR_DEADLINE_MS, TOOL_DEADLINE_MARGIN_MS, WAIT_FOR_MAX_MS } from './budgets.ts'
 import type { BrowserWaitUntil } from './types.ts'
 
 /** Valid waitUntil values for navigation tools. */
@@ -241,6 +241,19 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
   }
 
   /**
+   * 本次调用的 deadline（epoch ms）—— BR-3（2026-09-23）。
+   *
+   * 先例是 `browser_wait_for` 的 `startedAt + BROWSER_WAIT_FOR_DEADLINE_MS − 1000`。
+   * 注册预算在**调度时刻**武装，而工具拿到执行权之前可能已经排过队；所以 deadline
+   * 在 `execute` 入口算出后交给 runtime，由它按**剩余额度**收紧临界区内的加载等待
+   * （`loadBoundMs`）。这样"排队 + 用户闸 + 槽位 + 真正加载"之和不会再超过注册预算，
+   * 上游 timeout-policy 就不会把工具自己的、可执行的结果换成笼统超时。
+   * @param startedAt - 调用开始时刻（测试可注入）。
+   */
+  const callDeadline = (startedAt: number = Date.now()): number =>
+    startedAt + BROWSER_TOOL_TIMEOUT_MS - TOOL_DEADLINE_MARGIN_MS
+
+  /**
    * 显式应用窗口寻址（§16.1 冻结）：只有 `app_id` 能把操作指向应用窗口。
    *
    * 为什么做成"必须显式"：默认寻址指向浏览器当前标签，是唯一不会误伤的安全默认
@@ -303,7 +316,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       const { url } = args as { url?: string }
       noteAgent(runtime, exec.agent)
-      const tab = await runtime.open(url, exec.signal)
+      // BR-3（2026-09-23）：deadline 在 dispatch 时刻算好 —— 排队、等用户闸、等槽位
+      // 花掉的时间会从"真正加载"的额度里扣掉，内部等待之和不再能超过注册预算。
+      const tab = await runtime.open(url, exec.signal, false, undefined, callDeadline())
       exec.signal.throwIfAborted()
       return { tab: tab.id, url: tab.url, title: tab.title }
     },
@@ -338,11 +353,11 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       // 浏览器当前标签。两条路径的返回值形状一致（url/title/loading），但落点绝不互换。
       const target = await resolveSurfaceTarget({ tab, ...(appId === undefined ? {} : { app_id: appId }) })
       if (target.kind === 'app') {
-        const state = await runtime.navigateAppSurface(target.surface, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
+        const state = await runtime.navigateAppSurface(target.surface, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal, callDeadline())
         exec.signal.throwIfAborted()
         return state
       }
-      await runtime.navigate(target.tab, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal)
+      await runtime.navigate(target.tab, url.trim(), waitUntil ?? 'domcontentloaded', exec.signal, false, callDeadline())
       exec.signal.throwIfAborted()
       const state = runtime.tabState(target.tab)
       return { url: state.url, title: state.title, loading: state.loading }
@@ -363,7 +378,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.reload(tabId, exec.signal)
+      await runtime.reload(tabId, exec.signal, false, callDeadline())
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -383,7 +398,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.goBack(tabId, exec.signal)
+      await runtime.goBack(tabId, exec.signal, false, callDeadline())
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -403,7 +418,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf((args as { tab?: number }).tab)
-      await runtime.goForward(tabId, exec.signal)
+      await runtime.goForward(tabId, exec.signal, false, callDeadline())
       exec.signal.throwIfAborted()
       return { url: runtime.tabState(tabId).url }
     },
@@ -433,6 +448,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
                 title: { type: 'string' },
                 loading: { type: 'boolean' },
                 active: { type: 'boolean' },
+                // BR-2（2026-09-23）：自动崩溃恢复放弃之后，模型必须能看见"这个
+                // 标签不会再自己回来了，用 browser_reload 显式重试"。
+                crashed: { type: 'boolean', description: 'Automatic crash recovery gave up on this tab (the page kept killing its renderer). Nothing reloads it any more — retry explicitly with browser_reload.' },
               },
             },
           },
@@ -488,6 +506,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         title: t.title,
         loading: t.loading,
         active: t.visible,
+        crashed: t.crashed,
       }))
       const appTabs = (runtime.surfaces?.appSurfaces() ?? []).map(surface => ({
         id: surface.id,
@@ -497,6 +516,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         title: '',
         loading: false,
         active: false,
+        // 应用窗口不在浏览器标签池里、也没有"崩溃自动重载"，所以恒为 false
+        // （字段在两个 kind 上都存在，模型不需要按行判形状）。
+        crashed: false,
       }))
       return {
         tabs: [...browserTabs, ...appTabs],
@@ -1357,13 +1379,32 @@ function formatText(value: unknown): string {
 
 function formatTabs(value: unknown): string {
   const v = value as {
-    tabs?: Array<{ id: number; url: string; title: string; loading: boolean; active: boolean }>
-    control?: { controlled?: boolean; busy?: boolean; busyTool?: string; awaitingRelease?: boolean; awaitingReleaseTool?: string }
+    tabs?: Array<{ id: number; kind?: string; app_id?: string; url: string; title: string; loading: boolean; active: boolean; crashed?: boolean }>
+    control?: {
+      controlled?: boolean
+      busy?: boolean
+      busyTool?: string
+      awaitingRelease?: boolean
+      awaitingReleaseTool?: string
+      userHeldSurfaces?: Array<{ id: number; appId: string }>
+    }
   }
   const tabs = v.tabs ?? []
+  // 2026-09-23 审计 CP-1：render 必须与 JSON 出口**同构**。此前这里只渲染
+  // `title || url`，而应用窗口那两格被刻意置空（§16.1：应用窗口没有浏览器标签的
+  // URL/标题）⇒ 模型看到的是 `"7: "` 这样的空白行，`kind`/`app_id` 只存在于模型
+  // 永远读不到的 JSON 里 ⇒ 应用窗口寻址对模型断路。行形状与快照的
+  // `index: [kind] text` 一致：`<id>: [<kind>] <label>`。
   const lines = tabs.length === 0
     ? ['No tabs open in this window.']
-    : tabs.map((t) => `${t.id}: ${t.title || t.url}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}`)
+    : tabs.map((t) => {
+        const isApp = t.kind === 'app'
+        const kind = isApp ? 'app' : 'browser-tab'
+        const label = isApp
+          ? `app_id=${t.app_id !== undefined && t.app_id !== '' ? t.app_id : '(unknown)'}`
+          : (t.title || t.url)
+        return `${t.id}: [${kind}] ${label}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}${t.crashed === true ? ' [crashed — retry with browser_reload]' : ''}`
+      })
   // 2026-09-16：把"用户拿着控制权"直接写在模型看得到的地方（此前只有被拒的
   // 工具调用会带这个信息，而现场那条出口被工具预算吞掉了）。
   const control = v.control
@@ -1374,6 +1415,15 @@ function formatTabs(value: unknown): string {
       + (blocked
         ? ` An earlier call was already refused${control.awaitingReleaseTool ? ` (${control.awaitingReleaseTool})` : ''} — ask the user to hand control back, do NOT retry blindly.`
         : ''),
+    )
+  }
+  // §16.1 第 3 条：应用窗口的用户闸是**按 surface**记的，而这一段此前只存在于
+  // JSON（`control.userHeldSurfaces`）—— render 与 JSON 出口的单侧漂移同 CP-1。
+  const held = control?.userHeldSurfaces ?? []
+  if (held.length > 0) {
+    const list = held.map((surface) => `${surface.appId !== '' ? surface.appId : `#${surface.id}`}`).join(', ')
+    lines.push(
+      `USER HOLDS CONTROL OF APPLICATION WINDOW(S): ${list}. browser_navigate calls against those app_ids are refused until the user hands that window back; browser tabs are unaffected.`,
     )
   }
   return lines.join('\n')

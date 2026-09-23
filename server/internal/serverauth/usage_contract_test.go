@@ -60,7 +60,16 @@ func usageContractKeys(t *testing.T) []string {
 		}
 	}
 	if err != nil {
-		t.Skipf("客户端契约文件不可达(独立构建 server 目录时跳过): %v", err)
+		// 文件不可达 = **仓库结构事故**（包目录被搬走/改名），不是"环境差异"。
+		// 2026-09-23 审计 T-04 实测：旧实现用 t.Skipf 静默跳过 —— 把
+		// packages/client/account-card/src/usage-contract.ts 改名/移动即可让这条**唯一**
+		// 的跨语言契约守卫变成 no-op，而 `go test ./...` / `make check` / CI 全绿
+		// （本仓历史上包目录搬过多次）。按本仓规则：**文件缺席即红，不是 skip**。
+		wd, _ := os.Getwd()
+		t.Fatalf("客户端契约文件不可达(测试工作目录 = %s，候选 %v): %v\n"+
+			"这是仓库结构事故(契约文件被改名/移动)，不是环境差异 —— 请把 "+
+			"packages/client/account-card/src/usage-contract.ts 放回上面候选路径之一。",
+			wd, candidates, err)
 	}
 	re := regexp.MustCompile(`(?s)USAGE_PAYLOAD_KEYS\s*=\s*\[(.*?)\]`)
 	m := re.FindSubmatch(raw)

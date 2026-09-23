@@ -224,11 +224,68 @@ func TestEmbedderFailover(t *testing.T) {
 	_ = r
 
 	e := NewEmbedder(db)
-	vecs, _, err := e.Embed(context.Background(), "bge-m3", []string{"x"})
+	// G-03:EmbedWithProvider 必须回传**真正服务**的 provider(provider 1 已 500)。
+	vecs, _, providerID, err := e.EmbedWithProvider(context.Background(), "bge-m3", []string{"x"})
 	if err != nil {
 		t.Fatalf("failover embed: %v", err)
 	}
 	if len(vecs) != 1 || vecs[0][0] != 1.0 {
 		t.Fatalf("vecs = %v", vecs)
+	}
+	if providerID != 2 {
+		t.Fatalf("EmbedWithProvider providerID = %d, want 2(命中的服务方)", providerID)
+	}
+}
+
+// G-03(审计 2026-09-23 P1):embedding 落账必须带**实际命中的 provider**。
+//
+// 同名模型挂两个 provider、价格相差 100×(provider 1 = 100 元/1M 且返回 500,
+// provider 2 = 1 元/1M 且真正服务 1,000,000 prompt tokens):旧实现 providerID
+// 固定 0 ⇒ 取价回退 ModelPrices(name)(ORDER BY provider_id LIMIT 1 ⇒ provider 1)
+// ⇒ 按别家价格多收 100×,且 usage.provider_id 留 0 让 group=provider 报表把
+// embedding 归到"未配置渠道"。
+func TestEmbeddingsRouteBillsActualProviderAfterFailover(t *testing.T) {
+	expensive := newFakeUpstream(t)
+	expensive.status = http.StatusInternalServerError // provider 1:被 failover 跳过
+	cheap := newFakeUpstream(t)
+	cheap.nonStream = `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"model":"bge-m3","usage":{"prompt_tokens":1000000,"total_tokens":1000000}}`
+
+	r, db, token := newGateway(t, expensive) // provider 1 = expensive
+	defer db.Close()
+	seedEmbeddingModel(t, db, expensive) // provider 1 也挂 bge-m3
+
+	if _, err := db.Exec(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models) VALUES ('cheap', ?, ?, '["bge-m3"]')`, cheap.baseURL, upstreamKey); err != nil {
+		t.Fatal(err)
+	}
+	// provider 2 = cheap(同名模型,价 1 元/1M);provider 1 提到 100 元/1M(差 100×)
+	if _, err := db.Exec(`INSERT INTO models (name, provider_id, input_price_per_1m, output_price_per_1m) VALUES ('bge-m3', 2, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 100, output_price_per_1m = 100 WHERE name = 'bge-m3' AND provider_id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	serverstore.InvalidateModelConfig()
+	InvalidateUpstreams()
+
+	w := doPost(t, r, "/v1/embeddings", `{"model":"bge-m3","input":["hello"]}`, token, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
+	}
+
+	var providerID, pt int64
+	var cost float64
+	var estimated bool
+	if err := db.QueryRow(`SELECT provider_id, cost, prompt_tokens, estimated FROM usage ORDER BY id DESC LIMIT 1`).
+		Scan(&providerID, &cost, &pt, &estimated); err != nil {
+		t.Fatal(err)
+	}
+	if providerID != 2 {
+		t.Fatalf("usage.provider_id = %d, want 2(真实服务方;0 ⇒ 按 provider 1 的 100 元/1M 取价)", providerID)
+	}
+	if cost != 1.0 {
+		t.Fatalf("cost = %v, want 1(provider 2 的 1 元/1M × 1e6 tokens;100 = 按别家价格多收 100×)", cost)
+	}
+	if pt != 1_000_000 || estimated {
+		t.Fatalf("pt = %d estimated = %v, want 1000000/false", pt, estimated)
 	}
 }

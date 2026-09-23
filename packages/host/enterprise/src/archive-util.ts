@@ -7,7 +7,7 @@
  * 老行兼容）双支持——按魔数嗅探,老归档仍可安装,新归档统一走 zip。
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
@@ -36,6 +36,17 @@ const LINK_TYPES = new Set(['SymbolicLink', 'Link', 'CharacterDevice', 'BlockDev
 /** Unix S_IFLNK extracted from a zip entry's packed attribute. */
 const ZIP_MODE_TYPE = 0o170000
 const ZIP_S_IFLNK = 0o120000
+
+/**
+ * 归档条目里允许落盘的权限位（**两条通道共用同一份口径**）。
+ *
+ * `0o7000` 是 setuid/setgid/sticky：技能包里没有任何合法用途，而"解包器会把它
+ * 原样落盘"正是提权原语（客户端在部分部署里以 root/服务账号运行）。zip 通道早就
+ * 掩掉了它（见 {@link extractZip}），tar 通道此前用 node-tar 默认值
+ * （`preserveMode` ⇒ 归档写 0o4755 就落 0o4755）——**独立审计 2026-09-23 A8 实测
+ * 两条通道行为不一致**：zip 落 755、tar 落 4755。
+ */
+export const ARCHIVE_MODE_MASK = 0o777
 
 /** Sniff the archive format from its magic bytes. */
 export function archiveFormat(data: Buffer): 'zip' | 'tar.gz' | null {
@@ -239,7 +250,45 @@ export async function extractZip(archive: Buffer, destDir: string): Promise<void
       throw new Error(`unpacked archive too large (${writtenBytes} bytes)`)
     }
     const unix = entry.attr >>> 16
-    const mode = (unix & 0o777) === 0 ? 0o600 : unix & 0o777
+    const mode = (unix & ARCHIVE_MODE_MASK) === 0 ? 0o600 : unix & ARCHIVE_MODE_MASK
     await writeFile(target, content, { mode })
+  }
+}
+
+/**
+ * Extract a previously-validated gzipped tar into `destDir` with the **same
+ * mode policy as {@link extractZip}**: every entry lands with
+ * `entry.mode & 0o777`, so setuid/setgid/sticky can never reach the disk.
+ *
+ * 为什么不是"解开之后再剥"：node-tar 默认 `preserveMode` 会先把 0o4755 落到盘上，
+ * 再 chmod 就存在"setuid 文件已存在"的窗口（本地攻击者可在这个窗口里执行它）。
+ * 这里用 `noChmod: true` 让 node-tar 完全不按归档改权限（文件按 `open(0o666)`、
+ * 目录按 `mkdir(mode | 0o700)` 创建），事后再按记录下来的 `mode & 0o777` 逐条
+ * chmod —— **落到盘上的任何一刻都不含 0o7000 位**。
+ *
+ * 顺序：按路径深度**从深到浅** chmod。归档里若把父目录写成 0o500，先收紧父目录
+ * 会让子项的 chmod 依赖"属主可 chmod"这一 POSIX 语义（成立，但没必要冒险）。
+ * @param archiveFile - the tar.gz already written to disk.
+ * @param destDir - the extraction root (already created by the caller).
+ * @throws Error when the archive cannot be read (callers treat it as a refusal).
+ */
+export async function extractTar(archiveFile: string, destDir: string): Promise<void> {
+  const modes: Array<{ path: string; mode: number }> = []
+  await tar.x({
+    file: archiveFile,
+    cwd: destDir,
+    noChmod: true,
+    onentry: (entry) => {
+      // 路径安全已由 assertArchiveSafe 的 listing 通过;这里再归一化一次只为
+      // 防止把越界路径交给 chmod(它在 destDir 之外也会成功)。
+      const safe = posixNormalize(entry.path ?? '')
+      if (safe === '' || safe.split('/').includes('..')) return
+      const raw = typeof entry.mode === 'number' ? entry.mode : 0o644
+      modes.push({ path: safe, mode: raw & ARCHIVE_MODE_MASK })
+    },
+  })
+  modes.sort((a, b) => b.path.split('/').length - a.path.split('/').length)
+  for (const { path, mode } of modes) {
+    await chmod(join(destDir, ...path.split('/')), mode === 0 ? 0o600 : mode).catch(() => { /* 权限只是尽力;条目本身已落盘 */ })
   }
 }

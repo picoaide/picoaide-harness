@@ -177,8 +177,9 @@ describe('browser_list_tabs 报告控制权（2026-09-16）', () => {
     expect(text).not.toContain('我来操作')
     // 已经被拒过的那次调用要被点名，模型才知道"别瞎重试"
     expect(text).toContain('browser_eval')
-    // 标签页信息本身不受影响
-    expect(text).toContain('3: 首页')
+    // 标签页信息本身不受影响。2026-09-23 审计 CP-1：render 与 JSON 出口同构，
+    // 行首补上 `[kind]`（应用窗口那半边的 `app_id` 同理），所以这里跟着更新。
+    expect(text).toContain('3: [browser-tab] 首页')
   })
 
   it('没有控制权争议时不出现任何提示（防止误报）', async () => {
@@ -187,7 +188,7 @@ describe('browser_list_tabs 报告控制权（2026-09-16）', () => {
       [{ id: 1, url: 'https://a.example', title: 'A', loading: false, visible: true }],
     )
     const text = render(tool, await tool.execute({}, exec))
-    expect(text).toBe('1: A (active)')
+    expect(text).toBe('1: [browser-tab] A (active)')
     expect(text).not.toContain('USER HOLDS CONTROL')
   })
 

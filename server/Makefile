@@ -3,6 +3,9 @@ BIN := bin/picoaide-server
 # 服务端镜像名(GHCR,与仓库同名);TAG 默认 latest
 IMAGE ?= ghcr.io/picoaide/picoaide-harness-server
 TAG ?= latest
+# 渠道(镜像内容的一部分):Dockerfile 的 channelassets 上下文取
+# channels-context/<CHANNEL>/(CI 从私有渠道仓检出;本地为空目录 = 不带渠道内容)。
+CHANNEL ?= official
 # 注入镜像内 --version 的版本号(默认取 git describe;可显式覆盖 VERSION=0.4.0)
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 
@@ -91,13 +94,26 @@ webadmin:
 
 # 服务端 Docker 镜像(计划 Task 4.6):本地构建单平台,带版本注入(--version 输出 VERSION)
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
+#      CHANNEL=<渠道 id>(缺省 official;渠道内容取 channels-context/<id>/)
+#
+# **两个命名构建上下文是必需的**(2026-09-23 审计 K-05):Dockerfile 里
+# `COPY --from=clientassets …`(客户端安装包随镜像分发)与
+# `COPY --from=channelassets …`(渠道内容)。`COPY --from=<name>` 的 <name> 若不是
+# stage、也不是用户命名上下文,BuildKit 会把它当**镜像引用**去拉取 —— 于是
+# `docker build .` 会停在"拉取 clientassets"上(报错完全不指向真实原因,本项目历史上
+# 正是被 Docker Hub 可达性坑过)。两个目录**允许为空**(语义 = 本地镜像不带客户端/渠道
+# 内容,服务端回落内置文案),但目录必须存在:目录形式的 COPY 对空目录合法,对**不存在**
+# 的目录直接构建失败。
 docker-image:
-	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
+	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION) CHANNEL=$(CHANNEL))"
 	@# 内置技能资产（镜像内 /opt/picoaide/skills）就在本构建上下文里：
 	@# server/skills/<name>/ —— 随镜像分发，客户端在能力中心按需安装。
 	@# 曾经用 --build-context skillassets=../packages/vendor/memory-evolve 从
 	@# 客户端 vendored 插件包取，2026-09-19 起源头归位服务端，不再需要该上下文。
-	docker build --build-arg VERSION=$(VERSION) \
+	@mkdir -p client-assets/client "channels-context/$(CHANNEL)"
+	docker build --build-arg VERSION=$(VERSION) --build-arg CHANNEL=$(CHANNEL) \
+	  --build-context clientassets=./client-assets \
+	  --build-context channelassets=./channels-context \
 	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,

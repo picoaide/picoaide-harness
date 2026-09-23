@@ -80,6 +80,16 @@ description: PicoAide Harness 的渠道机制：官方 / 预发布 / 企业定�
 > 从旧版本升级过来的部署注意：compose 的默认值**不再写死渠道**。如果 `.env` 里手工留着
 > `PICOAI_CHANNEL=official`，定制渠道部署会被判为不一致 —— 删掉这一行即可。
 
+### 同机多栈时，镜像 tag 是第四个要自洽的值
+
+渠道差异在**镜像内容**里，**不在 tag** 里：每个渠道的归档都带同一个
+`picoaide-harness-server:v<版本>`。一台机器上跑两个渠道栈时，后 `docker load` 的会覆盖这个
+tag，此后任一栈 `docker compose up -d server` 都可能用**另一个渠道**的镜像重建（品牌与随包
+安装包全错，而 `.env` 看起来完全正确）。因此每个归档还带一个渠道专属 tag
+`picoaide-harness-server:<channel-id>-<版本>`：让每栈的 `SERVER_IMAGE` 指向自己的渠道 tag。
+步骤与改完后的核对方式见[升级、备份与回滚](/deployment/upgrade/)。
+
+
 ## 排障
 
 | 现象 | 原因 |

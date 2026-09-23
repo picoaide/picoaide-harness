@@ -10,7 +10,10 @@ import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
 import {
   computeSkillContentHash,
+  describeSkillFailure,
+  INSTALL_VERSION_FILE,
   installSkillArchive,
+  isStoreProvenance,
   listInstalledSkills,
   listLocalSkills,
   packSkill,
@@ -1015,7 +1018,7 @@ export function loginServerSwitchConflict(current: Session | null, requestedServ
 export async function readInstalledPresetVersion(presetDir: string): Promise<string | undefined> {
   const prov = await readProvenance(presetDir)
   if (prov !== undefined && prov.version !== '') return prov.version
-  const marker = await readFile(join(presetDir, '.install-version'), 'utf8').then(s => s.trim()).catch(() => undefined)
+  const marker = await readFile(join(presetDir, INSTALL_VERSION_FILE), 'utf8').then(s => s.trim()).catch(() => undefined)
   return marker !== undefined && marker !== '' ? marker : undefined
 }
 
@@ -1034,6 +1037,27 @@ export function installedVersionFor(
   presetVersions: ReadonlyMap<string, string | undefined>,
 ): string | undefined {
   return kind === 'skill' ? skillVersions.get(name) : presetVersions.get(name)
+}
+
+/**
+ * 按 kind 选"本机那一份的来源"表（审计 2026-09-23 A2/A3）。
+ *
+ * 客户端用它决定"更新到 vX / 卸载"要不要先弹确认条：`store` = 能力中心装的，
+ * 直接替换/删除；`local` = 本机自制（或缺溯源），必须先由用户确认，宿主也会
+ * 在缺 `?overwrite=1` 时以 409 `LOCAL_CONTENT` 拒绝。
+ * @param kind - 目录行的 kind('skill' | 'agent')。
+ * @param name - 目录行名。
+ * @param skillOrigins - 技能来源表。
+ * @param presetOrigins - 共享 Agent 来源表。
+ * @returns `'store'` / `'local'`，未知（未安装/读不到）为 undefined。
+ */
+export function installedOriginFor(
+  kind: string,
+  name: string,
+  skillOrigins: ReadonlyMap<string, 'store' | 'local'>,
+  presetOrigins: ReadonlyMap<string, 'store' | 'local'>,
+): 'store' | 'local' | undefined {
+  return kind === 'skill' ? skillOrigins.get(name) : presetOrigins.get(name)
 }
 
 /**
@@ -1764,7 +1788,20 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'GET' && !writeGuard()) {
             return json(res, 403, { error: 'auditor cannot modify' })
           }
-          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const pathname = url.pathname
+          /**
+           * **显式覆盖确认标记**（审计 2026-09-23 A2/A3/A15）。
+           *
+           * 面板在用户点过确认条之后才把 `?overwrite=1` 拼进 URL；宿主据此决定
+           * 要不要拒绝"无确认的整树替换 / 删除本机内容"。契约（两端共用）：
+           *  - 目标目录**不是**能力中心装的（无 provenance / 渠道非商店来源 /
+           *    appId 对不上）⇒ 没有这个标记一律 409 `LOCAL_CONTENT`；
+           *  - 目标目录是商店来源 ⇒ 不需要标记（正常更新/重装/卸载）。
+           * ⚠️ 它与历史上的 `?force=1` **不是**一回事：那一个宿主从来没读过，
+           * 是纯死面（R2-SK-5 记录在案）；这一个两端都必须读/写。
+           */
+          const overwrite = url.searchParams.get('overwrite') === '1'
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
               const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token, locale: hostLocale(req) })
@@ -1848,6 +1885,8 @@ export function apply(ctx: Context, config: Config): void {
                 // 溯源(D6)：标记为 builtin，与市场/组织区分开。
                 channel: 'builtin',
                 server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
               })
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
@@ -1855,10 +1894,40 @@ export function apply(ctx: Context, config: Config): void {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              // 与市场安装同口径：校验/解包类拒绝是客户端错误，网关/IO 是上游错误。
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码的唯一实现（审计 A12/A13）：拒绝 422、
+              // 需要确认 409、系统级错误 502 且文案里没有本机路径。
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
+            }
+            return
+          }
+          // POST /api/pico/skills/builtin/:name/uninstall -> local removal.
+          // 审计 2026-09-23 A6：内置技能此前**只能装不能卸**（没有这条路由），
+          // 装完在「我的」里变成一张本地卡、只有「上传」按钮，产品内没有任何
+          // 入口能移除它。与市场卸载同口径：本地删除 + 来源校验 + 显式确认。
+          const builtinUninstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/uninstall$/u.exec(pathname)
+            : null
+          if (builtinUninstallMatch !== null) {
+            const name = decodeURIComponent(builtinUninstallMatch[1]!)
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              // Purely local operation — no gateway round-trip needed.
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -1896,18 +1965,25 @@ export function apply(ctx: Context, config: Config): void {
                 // 溯源(D6):记录渠道与来源服务端,客户端据此显示归属。
                 channel: 'market',
                 server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
               })
+              // 审计 2026-09-23 A11：**回传真实安装版本**。市场归档端点只按
+              // "当前 approved 最高版"取（服务端不支持按版本安装），请求里带的
+              // 版本号与真实落盘版本可能不同；面板据这里的 `version` 记账，而不是
+              // 据"用户点的那一个版本"。
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              // Install refusals (checksum, unsafe archive, no SKILL.md) are
-              // client errors; gateway/IO failures are upstream errors.
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码的唯一实现（拒绝 422 / 需确认 409 / 系统级 502）。
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -1923,11 +1999,15 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               // Purely local operation — no gateway round-trip needed.
-              await uninstallSkill(resolveSkillsDir(), name)
+              // `overwrite` = 用户已确认删除本机自制内容（审计 A3）。
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2064,8 +2144,13 @@ export function apply(ctx: Context, config: Config): void {
                         : 422)
                 return json(res, status, { error: cause.message })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+              // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
+              // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2196,7 +2281,10 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'GET' && !writeGuard()) {
             return json(res, 403, { error: 'auditor cannot modify' })
           }
-          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const sharedUrl = new URL(req.url ?? '/', 'http://localhost')
+          const pathname = sharedUrl.pathname
+          // 显式覆盖确认标记：审计 A2/A3/A15 的两端契约，见 /api/pico/skills 分支的注释。
+          const overwrite = sharedUrl.searchParams.get('overwrite') === '1'
           const skillsDir = resolveSkillsDir()
 
           if (pathname === '/api/pico/shared-skills' && req.method === 'GET') {
@@ -2258,8 +2346,13 @@ export function apply(ctx: Context, config: Config): void {
                         : 422)
                 return json(res, status, { error: cause.message })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+              // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
+              // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2292,16 +2385,29 @@ export function apply(ctx: Context, config: Config): void {
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
               const ver = upstream.headers.get('x-skill-version') ?? version
-              await installSkillArchive({ name, archive: content, checksum, skillsDir, version: ver, channel: 'org', server: s.serverURL })
-              json(res, 200, { ok: true, name, version: ver })
+              const result = await installSkillArchive({
+                name,
+                archive: content,
+                checksum,
+                skillsDir,
+                version: ver,
+                channel: 'org',
+                server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
+              })
+              // 真实落盘版本以响应为准（审计 A11：请求里的版本可能被服务端忽略）。
+              json(res, 200, { ok: true, name, version: result.version ?? ver })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2313,11 +2419,14 @@ export function apply(ctx: Context, config: Config): void {
           if (uninstallMatch !== null) {
             const name = decodeURIComponent(uninstallMatch[1]!)
             try {
-              await uninstallSkill(skillsDir, name)
+              await uninstallSkill(skillsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeSkillFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2368,6 +2477,9 @@ export function apply(ctx: Context, config: Config): void {
             // installedVersion:优先读安装器写的 .install-version 标记
             // (可靠);否则退回 SKILL.md frontmatter 的 version(best-effort)。
             const localSkillVersions = new Map<string, string | undefined>()
+            /** 本机那一份的来源：'store'（能力中心装的）/'local'（用户自制）——审计 A2/A3。 */
+            const skillOrigins = new Map<string, 'store' | 'local'>()
+            const presetOrigins = new Map<string, 'store' | 'local'>()
             // 审计 2026-09-12 P1-6:共享 Agent 的已装版本此前**恒为 undefined**
             // (`kind === 'skill' ? localSkillVersions.get(name) : undefined`),而
             // 客户端 `hasUpdateFor()` 一见 undefined 就返回 false ⇒ 能力中心
@@ -2382,6 +2494,9 @@ export function apply(ctx: Context, config: Config): void {
             for (const r of localSkills) {
               const dir = join(skillsDir, r.name)
               const prov = await readProvenance(dir)
+              // 来源判定（审计 A2/A3）：面板据 installedOrigin 决定"更新/卸载要不要确认"。
+              // 与安装器/卸载器的判据同一份实现（isStoreProvenance）。
+              skillOrigins.set(r.name, isStoreProvenance(prov, r.name) ? 'store' : 'local')
               if (prov !== undefined) {
                 let dirty = false
                 if (prov.archiveChecksum !== undefined) {
@@ -2392,7 +2507,7 @@ export function apply(ctx: Context, config: Config): void {
                 localSkillVersions.set(r.name, prov.version !== '' ? prov.version : r.version)
                 continue
               }
-              const marker = join(dir, '.install-version')
+              const marker = join(dir, INSTALL_VERSION_FILE)
               const mv = await readFile(marker, 'utf8').then(s => s.trim()).catch(() => undefined)
               localSkillVersions.set(r.name, mv ?? r.version)
             }
@@ -2401,8 +2516,11 @@ export function apply(ctx: Context, config: Config): void {
             // 「frontmatter 兜底」这一层——读不到就留 undefined,由客户端
             // hasUpdateFor 保守判 false(宁可不提示,不可误报)。
             for (const l of localPresets) {
-              const v = await readInstalledPresetVersion(join(presetsDir, l.name))
+              const dir = join(presetsDir, l.name)
+              const v = await readInstalledPresetVersion(dir)
               if (v !== undefined) localPresetVersions.set(l.name, v)
+              // 与技能同一份来源判据（共享 Agent 的 provenance 同格式）。
+              presetOrigins.set(l.name, isStoreProvenance(await readProvenance(dir), l.name) ? 'store' : 'local')
             }
 
             // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
@@ -2421,6 +2539,8 @@ export function apply(ctx: Context, config: Config): void {
                 description: l.description ?? '', author: '',
                 // 归属与本地改动(D6):面板据此显示「来自市场 · vX · 已本地修改」。
                 ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty: prov.dirty },
+                // 本机那一份的来源（审计 A2/A3）。builtin/plugin 的本地行靠它渲染「卸载」。
+                installedOrigin: skillOrigins.get(l.name) ?? 'local',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
@@ -2440,6 +2560,7 @@ export function apply(ctx: Context, config: Config): void {
                 version: prov?.version !== undefined && prov.version !== '' ? prov.version : '1.0.0',
                 description: l.description ?? '', author: '',
                 ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty },
+                installedOrigin: presetOrigins.get(l.name) ?? 'local',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
@@ -2474,6 +2595,13 @@ export function apply(ctx: Context, config: Config): void {
                       (i as { name?: string }).name ?? '',
                       localSkillVersions,
                       localPresetVersions,
+                    ),
+                    // 来源（审计 A2/A3）：与 enriched 分支同源（同一个 helper）。
+                    installedOrigin: installedOriginFor(
+                      (i as { kind?: string }).kind ?? '',
+                      (i as { name?: string }).name ?? '',
+                      skillOrigins,
+                      presetOrigins,
                     ),
                     // 0059 官方字段透传(与 enriched 同构)。
                     official: (i as { official?: boolean }).official ?? false,
@@ -2513,6 +2641,8 @@ export function apply(ctx: Context, config: Config): void {
                 score: Number((i as { score?: number }).score ?? 0),
                 installed,
                 installedVersion,
+                // 来源（审计 A2/A3）：只对"本机真的装了"的行给，未装时 undefined。
+                installedOrigin: installed ? installedOriginFor(kind, name, skillOrigins, presetOrigins) : undefined,
                 hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
               }
             })

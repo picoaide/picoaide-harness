@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HostCronService } from './host-service.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
+import { jobIsRunning } from './jobs.ts'
 import { hostLocaleOf, hostT, type CronHostCopyKey } from './host-copy.ts'
 
 /** Host-side collaborators of the tools. */
@@ -128,8 +129,21 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       },
     },
     async execute(args) {
+      // Owner pre-check, same contract as cron_run/cron_remove (2026-09-23
+      // CR-3): a job this account cannot see is reported as missing. Without
+      // it, a nonexistent id reached the ledger, the mutation was a silent
+      // no-op and the tool still answered "enabled" (fake success), while a
+      // *foreign* id threw the ledger's internal "belongs to another account"
+      // string — a cross-account existence oracle and the only tool that
+      // answered differently for "not mine" vs "does not exist".
+      const before = service.listVisibleJobs().find(job => job.id === args.jobId)
+      if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
+      // Already in the requested state: report the verified state, do not
+      // claim a change that did not happen.
+      if (before.enabled === args.enabled) return { jobId: args.jobId, enabled: before.enabled }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: args.enabled ? 'enable' : 'disable', jobId: args.jobId })
-      return { jobId: args.jobId, enabled: args.enabled }
+      const after = service.listVisibleJobs().find(job => job.id === args.jobId)
+      return { jobId: args.jobId, enabled: after?.enabled ?? args.enabled }
     },
   })))
 
@@ -151,7 +165,10 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // (a cross-account jobId is treated as "does not exist", not a leak).
       const before = service.listVisibleJobs().find(job => job.id === args.jobId)
       if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
-      if (before.executions.some(execution => execution.endedAt === undefined)) {
+      // The shared "a live run must not lose its record" judgement (CR-2):
+      // `jobIsRunning` is the same predicate the ledger's delete guard and the
+      // panel button use.
+      if (jobIsRunning(before)) {
         throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'run', jobId: args.jobId })
@@ -181,7 +198,10 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // A live execution is not cancelled by deleting its job (`settle()`
       // tolerates the missing record), so the run would keep going while its
       // history disappears. Refuse instead of losing the record silently.
-      if (before.executions.some(execution => execution.endedAt === undefined)) {
+      // The shared "a live run must not lose its record" judgement (CR-2):
+      // `jobIsRunning` is the same predicate the ledger's delete guard and the
+      // panel button use.
+      if (jobIsRunning(before)) {
         throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'delete', jobId: args.jobId })

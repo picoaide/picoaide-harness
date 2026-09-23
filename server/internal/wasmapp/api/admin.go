@@ -590,6 +590,17 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 				WithHint("请让应用发布者上传新版本（版本号永久占位，不能复用）")
 			e.HTTP = http.StatusConflict
 			writeErr(c, e)
+		case errors.Is(err, serverstore.ErrReleaseApprovedNotRejectable):
+			// 并发下两个管理员一个通过、一个拒绝：后来者撞到 DAO 的原子前置条件
+			//（rejected 分支的 `AND status <> 'approved'`）。与 sharedskills/agentshare
+			// 同码同语义：409 而非 500——这不是"服务出错"，而是"该版本已不可拒绝"。
+			// 归档字节未被销毁（守卫在 UPDATE 之前生效），撤回请走下架流程。
+			e := apperr.New(apperr.CodeValidation,
+				"该版本已通过审核，不能再拒绝；要停止服务请用下架（unpublish）或冻结（freeze）").
+				WithDetail("app_id", appID).WithDetail("version", version).
+				WithHint("归档字节未被销毁；撤回请走下架流程")
+			e.HTTP = http.StatusConflict
+			writeErr(c, e)
 		default:
 			writeErr(c, internalErr("审核写入失败", err))
 		}

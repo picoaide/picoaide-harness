@@ -9,6 +9,7 @@
  * @module @picoaide/dsh-browser
  */
 
+import { NAVIGATE_LOAD_BOUND_MS, TOOL_DEADLINE_MARGIN_MS } from './budgets.ts'
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, ensureSessionGuard, isLocalHostname, looksLikeAbsoluteUrl } from './guard.ts'
@@ -134,6 +135,43 @@ const MAX_CREDENTIAL_ORIGIN_RECORDS = 32
  * download list itself is pruned by `downloadLimit`. */
 const DOWNLOAD_DISPLAY_PATH_LIMIT = 200
 
+/**
+ * Renderer-crash recovery budget (2026-09-23 审计 BR-2).
+ *
+ * 现场：`render-process-gone` 的处理是"立刻重载同一 URL"，没有计数、没有退避、
+ * 没有终态。页面若**确定性**杀死自己的渲染进程（OOM / 渲染器缺陷），新进程再崩
+ * → 再重载……探针实测 100ms 内 4999 次重载（探针自设上限，即"无界"），
+ * `browser_page_crash` 把只有 200 条的 op log 冲满、每次 `ops` 事件还广播 SSE，
+ * shell 反复重拉 `/state`。
+ *
+ * 与主窗口同族缺陷的正确形态（`desktop/src/electron-runtime.ts:996-1035`：至多
+ * 一次重试 + 终态错误页 + 手动重试）在本模块的等价物：
+ *  · 第一次崩溃立即重载一次（瞬时崩溃=最常见的真实形态）；
+ *  · `CRASH_LOOP_WINDOW_MS` 内再次崩溃 ⇒ 退避 `CRASH_RETRY_BACKOFF_MS × (n−1)` 后
+ *    重载，最多 {@link CRASH_MAX_RELOADS} 次重载；
+ *  · 越过上限 ⇒ **停止自动重载**，把标签标记成 `crashed`、在 op log 写下可执行的
+ *    提示（用户看得到），模型在 `browser_list_tabs` 里看到同一个标记；
+ *  · 只有显式 `browser_reload`（人/模型主动重试）或一次新的 `browser_navigate`
+ *    才重置计数 —— 崩溃循环不再自己喂自己。
+ */
+const CRASH_MAX_RELOADS = 2
+/** 崩溃窗口（ms）：窗口之外的一次崩溃按"新的一次"重新计数（长时间稳定后偶发崩溃不该累计）。 */
+const CRASH_LOOP_WINDOW_MS = 5 * 60_000
+/** 第 2 次及以后重载前的退避基数（ms，× 次数递增）。 */
+const CRASH_RETRY_BACKOFF_MS = 250
+
+/** 一个标签的崩溃恢复状态（内存；标签销毁即丢弃）。 */
+interface CrashRecoveryState {
+  /** 当前窗口内的崩溃次数（含第一次）。 */
+  attempts: number
+  /** 最近一次崩溃时刻（判定窗口用）。 */
+  lastAt: number
+  /** 重载定时器（退避中），标签销毁/释放时必须清掉，否则会加载进已销毁的视图。 */
+  timer?: ReturnType<typeof setTimeout> | undefined
+  /** 已达上限：自动重载已停止（终态），等显式重试。 */
+  terminal: boolean
+}
+
 interface BrowserTab {
   readonly id: number
   readonly view: NativeView
@@ -194,6 +232,12 @@ interface BrowserTab {
   oopifFrames: Map<string, { frameId: string; url: string; parentId: string | undefined; tree: RawFrameNode }>
   /** Whether `Target.setAutoAttach` + the attach listeners are installed. */
   frameTrackingReady: boolean
+  /**
+   * 崩溃终态（2026-09-23 审计 BR-2）：自动重载次数越过上限后为 `true`，直到显式
+   * `browser_reload`/新的 `browser_navigate` 重新开始。投影进
+   * {@link BrowserTabState.crashed}，用户（op log）与模型（`browser_list_tabs`）都能看到。
+   */
+  crashed: boolean
 }
 
 interface EvalResult {
@@ -418,6 +462,19 @@ export class BrowserRuntime {
   private pendingLedgerTabs: Array<{ tabId: number; url: string; title: string }> = []
   private materializing = false
   private materializeEpoch = 0
+  /**
+   * **作用域世代**（2026-09-23 审计 BR-1）：换号/换分区/换 store/重放账本/关全部
+   * 都自增。异步收尾（导航加载、reload/goBack/goForward、建标签）在每个 `await`
+   * 之后、写 op log / history / 标签状态**之前**复检它；不匹配即中止，绝不把上一个
+   * 账号的 URL 写进新账号的 store。
+   *
+   * 为什么 `assertAgentStillAllowed` 不够：它只看 `pool.controlled`（用户是否接管），
+   * 而换号期间 `closeAll(user=true)` 会把控制权临时置真又置假 —— 挂起的加载恢复时读
+   * 到的是"没人接管"，于是照旧落库。用户路径（`actor === 'user'`）根本不查那个闸。
+   */
+  private scopeEpoch = 0
+  /** 每个标签的崩溃恢复状态（BR-2；`destroyTab`/`dispose` 清理）。 */
+  private readonly crashRecovery = new Map<number, CrashRecoveryState>()
   private readonly guard: BrowserGuard
   private windowResizeDisposer: (() => void) | null = null
   private windowClosedDisposer: (() => void) | null = null
@@ -647,6 +704,8 @@ export class BrowserRuntime {
     // 注意必须放在 `ledger === undefined` 早退**之前**：新账号的空账本同样要让
     // 上一个账号的在飞恢复作废。
     this.materializeEpoch++
+    // BR-1 (2026-09-23)：账本是"谁在看浏览器"的一部分，重放账本同样是换代点。
+    this.scopeEpoch++
     const ledger = this.store.getGroupLedger()
     if (ledger === undefined) return
     const ledgerTabs = ledger.tabs ?? []
@@ -783,11 +842,17 @@ export class BrowserRuntime {
   setPartition(partition: string): void {
     if (this.partition === partition) return
     this.partition = partition
+    // BR-1 (2026-09-23)：分区只对**新**视图生效，所以"换分区"意味着所有在飞的
+    // 异步收尾都属于上一个作用域 —— 换代让它们中止。
+    this.scopeEpoch++
   }
 
   /** Switch the per-user store (session change): re-point ledger/stores. */
   setStore(store: BrowserStore): void {
+    if (this.store === store) return
     this.store = store
+    // BR-1 (2026-09-23)：换 store = 换归属。落库前的世代复检靠这个自增。
+    this.scopeEpoch++
   }
 
   // ------------------------------------------------------------ tab creation
@@ -891,7 +956,7 @@ export class BrowserRuntime {
    * every child text exit value-scrubbed too; eval/screenshot stay available
    * because nothing was injected into that document.
    */
-  async open(url: string | undefined, signal?: AbortSignal, user = false, inheritSecretsFrom?: number): Promise<BrowserTabState> {
+  async open(url: string | undefined, signal?: AbortSignal, user = false, inheritSecretsFrom?: number, deadlineAt?: number): Promise<BrowserTabState> {
     if (this.disposed) throw new Error('browser: runtime disposed')
     if (user) {
       const reservation = this.pool.tryReserveTab()
@@ -899,7 +964,7 @@ export class BrowserRuntime {
         throw browserError('quota', 'browser: tab limit reached — close a tab first')
       }
       try {
-        return await this.createTabReal(url, signal, undefined, 'user', inheritSecretsFrom, reservation)
+        return await this.createTabReal(url, signal, undefined, 'user', inheritSecretsFrom, reservation, deadlineAt)
       } catch (error) {
         // 令牌幂等：导航失败时 createTabReal 已经 removeTab（槽位还回去了），
         // 这里再退一次不能把预留计数也抹掉（否则池子静默缩容，P0-2）。
@@ -910,7 +975,7 @@ export class BrowserRuntime {
     return await this.withAgentAttribution('browser_open', async () => {
       const reservation = await this.pool.reserveTab(signal)
       try {
-        return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom, reservation)
+        return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom, reservation, deadlineAt)
       } catch (error) {
         this.pool.releaseReservation(reservation)
         throw error
@@ -918,8 +983,11 @@ export class BrowserRuntime {
     }, signal)
   }
 
-  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number, reservation?: TabReservation): Promise<BrowserTabState> {
+  private async createTabReal(url: string | undefined, signal: AbortSignal | undefined, fixedId: number | undefined, actor: RecordActor, inheritSecretsFrom?: number, reservation?: TabReservation, deadlineAt?: number): Promise<BrowserTabState> {
     const id = fixedId ?? this.nextTabId++
+    // BR-1（2026-09-23）：建标签路径上的**所有** await 之后都要复检作用域（见
+    // assertScopeUnchanged）。这里取世代快照；每一处 await 之后各复检一次。
+    const scope = this.scopeGeneration()
     const view = this.adapter.createView(this.partition)
     // Every CDP command is bounded by the tool budget: a wedged renderer
     // rejects the call instead of holding the global mutex forever (P0-4).
@@ -930,7 +998,7 @@ export class BrowserRuntime {
       try { view.destroy() } catch { /* teardown never throws */ }
       throw cause
     }
-    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], credentialWindow: false, oopifFrames: new Map(), frameTrackingReady: false }
+    const tab: BrowserTab = { id, view, cdp, ownerSession: this.lastAgentId, url: '', title: '', favicon: '', loading: false, canGoBack: false, canGoForward: false, disposers: [], filledSecrets: [], credentialWindow: false, oopifFrames: new Map(), frameTrackingReady: false, crashed: false }
     // R-5 (F7): inherit the opener's redaction value set (never its window).
     if (inheritSecretsFrom !== undefined) {
       const opener = this.tabs.get(inheritSecretsFrom)
@@ -957,6 +1025,9 @@ export class BrowserRuntime {
       // The user's own + / address-bar path is allowed to create/load tabs
       // while they hold control; only agent/restore work is interruptible.
       if (actor !== 'user') this.assertAgentStillAllowed('browser_open')
+      // BR-1：窗口/attach 的两个 await 之后立刻复检（换号期间不许继续建一个
+      // 属于旧作用域的标签；下面的 catch 会把它拆干净）。
+      this.assertScopeUnchanged(scope, 'browser_open', tab)
 
       // `target=_blank` / window.open must not silently vanish (P2-30): open
       // the URL as a new tab through the normal path (quota, gate, navigation
@@ -1061,12 +1132,49 @@ export class BrowserRuntime {
         this.emitAll('tab-meta')
       })
       const wc = view.webContents
+      // 2026-09-23 审计 BR-2：崩溃后**有界**重载（计数 + 退避 + 终态），见
+      // CRASH_MAX_RELOADS 的注释。旧实现无条件 `wc.loadURL(target)`：确定性崩溃的
+      // 页面会"崩溃 → 重载 → 崩溃"活锁，op log 被 browser_page_crash 冲满。
       view.webContents.on('render-process-gone', () => {
         const target = tab.url
-        this.record('browser_page_crash', id, 'page process gone — rebuilding')
-        if (target !== '' && !wc.isDestroyed()) {
-          void wc.loadURL(target).catch(() => {})
+        const now = Date.now()
+        const previous = this.crashRecovery.get(id)
+        const withinWindow = previous !== undefined && now - previous.lastAt <= CRASH_LOOP_WINDOW_MS
+        const attempts = withinWindow ? previous.attempts + 1 : 1
+        const state: CrashRecoveryState = { attempts, lastAt: now, terminal: false }
+        const prior = previous?.timer
+        if (prior !== undefined) clearTimeout(prior)
+        this.crashRecovery.set(id, state)
+        tab.crashed = attempts > CRASH_MAX_RELOADS
+        if (attempts > CRASH_MAX_RELOADS) {
+          // 终态：不再自动重载。用户与模型都要能看到**原因**与**出路**。
+          state.terminal = true
+          this.record('browser_page_crash', id, hostCopy(
+            this.locale(),
+            `页面连续崩溃 ${attempts} 次，已停止自动重载 —— 用 browser_reload 手动重试，或关掉这个标签页`,
+            `the page crashed ${attempts} times in a row — automatic reload stopped; retry with browser_reload or close the tab`,
+          ), true)
+          this.emitAll('state')
+          return
         }
+        this.record('browser_page_crash', id, hostCopy(
+          this.locale(),
+          `页面进程崩溃 —— 第 ${attempts}/${CRASH_MAX_RELOADS} 次自动重载`,
+          `page process gone — automatic reload ${attempts}/${CRASH_MAX_RELOADS}`,
+        ), true)
+        // 第一次立即重载（瞬时崩溃是最常见的真实形态）；之后按次数退避，避免
+        // 确定性崩溃把 CPU/进程创建打满（探针：无退避时 100ms 内 4999 次）。
+        const delay = attempts <= 1 ? 0 : CRASH_RETRY_BACKOFF_MS * (attempts - 1)
+        if (target === '' || wc.isDestroyed()) return
+        const timer = setTimeout(() => {
+          state.timer = undefined
+          // 退避期间可能已经换号/关标签/销毁：只有"还是这个标签、还没被销毁"才加载。
+          if (this.tabs.get(id) !== tab || wc.isDestroyed()) return
+          void wc.loadURL(target).catch(() => { /* a failed recovery reload is not fatal */ })
+        }, delay)
+        timer.unref?.()
+        state.timer = timer
+        this.emitAll('state')
       })
 
       // Credential-activity window, CDP half (R-4): the model-facing definition
@@ -1097,8 +1205,12 @@ export class BrowserRuntime {
       }, this.downloadRecorder(), '', actor, this.options.downloadDir))
 
       if (url !== undefined && url !== '') {
-        await this.navigateInternal(id, url, 'domcontentloaded', actor)
+        await this.navigateInternal(id, url, 'domcontentloaded', actor, deadlineAt)
       }
+      // BR-1：换号可能发生在 ensureWindow/attach/加载期间 —— 此时这个标签已经
+      // 属于上一个作用域，它的 URL 不得写进新账号的 op log（探针
+      // br-session-switch-race 实测：旧实现会写进去，然后才抛 `unknown tab`）。
+      this.assertScopeUnchanged(scope, 'browser_open', tab)
       this.updateTabState(tab)
       this.record('browser_open', id, url === undefined || url === '' ? 'new tab' : url, false, actor)
       void signal
@@ -1821,6 +1933,7 @@ export class BrowserRuntime {
       favicon: redactFilledSecretsText(tab, stripSensitiveUrl(tab.favicon), { verbatim: true }),
       canGoBack: tab.canGoBack,
       canGoForward: tab.canGoForward,
+      crashed: tab.crashed,
     }
   }
 
@@ -1942,9 +2055,9 @@ export class BrowserRuntime {
 
   // navigation family --------------------------------------------------------
 
-  async navigate(tabId: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal, user = false): Promise<void> {
+  async navigate(tabId: number, url: string, waitUntil: BrowserWaitUntil = 'domcontentloaded', signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
     const body = async (): Promise<void> => {
-      await this.navigateInternal(tabId, url, waitUntil, user ? 'user' : 'ai')
+      await this.navigateInternal(tabId, url, waitUntil, user ? 'user' : 'ai', deadlineAt)
     }
     if (user) return await body()
     return await this.agentRun('browser_navigate', body, signal)
@@ -1960,7 +2073,34 @@ export class BrowserRuntime {
     await this.navigate(tab, url, 'domcontentloaded', undefined, true)
   }
 
-  private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor): Promise<void> {
+  /**
+   * 本次"临界区内的真实加载"允许花多久（ms）—— BR-3（2026-09-23）的唯一实现。
+   *
+   * 三个上限取最小值，缺一不可：
+   *  ① `options.loadTimeoutMs`（调用方配置的等待意愿，默认 20s）；
+   *  ② {@link NAVIGATE_LOAD_BOUND_MS}（预算序关系：工具预算 − 闸门 − 槽位 − 余量）；
+   *  ③ **剩余额度** `deadlineAt − now − 余量` —— 排队、等用户闸、等槽位已经花掉的
+   *     时间不会被重复花掉。`deadlineAt` 由工具层在 dispatch 时刻算出（先例：
+   *     `browser_wait_for` 的 `deadlineAt`），缺席（用户路径）时只剩前两个。
+   *
+   * 到点只是"不再继续等"：{@link navigateInternal} 的 `pending` 分支不报错，页面
+   * 仍在后台加载。
+   */
+  private loadBoundMs(deadlineAt?: number): number {
+    const remaining = deadlineAt === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, deadlineAt - Date.now() - TOOL_DEADLINE_MARGIN_MS)
+    return Math.max(0, Math.min(this.options.loadTimeoutMs, NAVIGATE_LOAD_BOUND_MS, remaining))
+  }
+
+  /** 本次调用还剩多少工具预算（ms）：超时预算与调用方 deadline 取小。 */
+  private remainingToolBudgetMs(deadlineAt: number | undefined, startedAt: number): number {
+    const byTimeout = Math.max(0, this.options.timeoutMs - (Date.now() - startedAt))
+    if (deadlineAt === undefined) return byTimeout
+    return Math.min(byTimeout, Math.max(0, deadlineAt - Date.now() - TOOL_DEADLINE_MARGIN_MS))
+  }
+
+  private async navigateInternal(id: number, url: string, waitUntil: BrowserWaitUntil, actor: RecordActor, deadlineAt?: number): Promise<void> {
     if (!this.navigationAllowed(url)) {
       // R-1: the refusal text is model-facing (tool error) — echo the
       // *redacted* URL, exactly like history/op-log do.
@@ -1969,6 +2109,12 @@ export class BrowserRuntime {
     const tab = this.tab(id)
     const wc = tab.view.webContents
     const started = Date.now()
+    // BR-1（2026-09-23）：await 之前取世代，写 op log/history 之前复检。
+    const scope = this.scopeGeneration()
+    // BR-2：一次显式的导航是"重新开始"——崩溃计数与退避中的重载一起清掉
+    // （否则退避定时器会把**旧 URL** 加载回来，把模型刚导航到的页面顶掉）。
+    this.clearCrashState(id)
+    tab.crashed = false
     if (actor !== 'user') this.assertAgentStillAllowed('browser_navigate')
     let loadError: unknown
     const outcome = await Promise.race([
@@ -1976,8 +2122,12 @@ export class BrowserRuntime {
         () => 'loaded' as const,
         (cause: unknown) => { loadError = cause; return 'failed' as const },
       ),
-      sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+      sleep(this.loadBoundMs(deadlineAt)).then(() => 'pending' as const),
     ])
+    // 换号优先于加载结果（BR-1）：这次加载属于**上一个作用域**，它的 URL 不得
+    // 落进新账号的 op log / history。放在接管检查之前——换号期间 `controlled`
+    // 会被临时置真再置假，那一层判据看不见这件事。
+    this.assertScopeUnchanged(scope, 'browser_navigate', tab)
     // A user takeover while loadURL was pending wins over the load result:
     // the operation is reported as interrupted, not as a successful navigation
     // to whatever page happens to be left in the view. (The user's own
@@ -1990,8 +2140,9 @@ export class BrowserRuntime {
     if (waitUntil !== 'domcontentloaded') {
       // 'load' settles on did-finish-load (or immediately when already done);
       // 'networkidle' waits a quiet window (800ms) after the last load event.
-      const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
-      await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
+      const budget = this.remainingToolBudgetMs(deadlineAt, started)
+      await this.waitForLoad(wc, waitUntil)(Math.min(budget, this.loadBoundMs(deadlineAt)))
+      this.assertScopeUnchanged(scope, 'browser_navigate', tab)
     }
     this.updateTabState(tab)
     this.record('browser_navigate', id, hostCopy(this.locale(), `打开网页：${url}`, `navigate: ${url}`), false, actor, NAVIGATE_SUMMARY_LIMIT)
@@ -2090,6 +2241,7 @@ export class BrowserRuntime {
     url: string,
     waitUntil: BrowserWaitUntil = 'domcontentloaded',
     signal?: AbortSignal,
+    deadlineAt?: number,
   ): Promise<{ url: string, title: string, loading: boolean }> {
     if (surface.kind !== 'app') {
       throw browserError('policy', `browser: application-surface navigation requires a kind:'app' surface (got ${surface.kind}) — refusing to guess a target`)
@@ -2108,14 +2260,20 @@ export class BrowserRuntime {
     return await this.agentRun('browser_navigate', async () => {
       this.assertSurfaceAgentStillAllowed(surface, 'browser_navigate')
       const started = Date.now()
+      // 应用窗口是**别的 webContents**（由 wasm-apps-host 持有），换号会关掉它，
+      // 所以这里同样需要作用域世代复检（BR-1）：换号后不许把旧 URL 写进新账号的 op log。
+      const scope = this.scopeGeneration()
       let loadError: unknown
       const outcome = await Promise.race([
         wc.loadURL(url).then(
           () => 'loaded' as const,
           (cause: unknown) => { loadError = cause; return 'failed' as const },
         ),
-        sleep(this.options.loadTimeoutMs).then(() => 'pending' as const),
+        // BR-3：加载等待按剩余额度收紧（与浏览器标签同一实现）。
+        sleep(this.loadBoundMs(deadlineAt)).then(() => 'pending' as const),
       ])
+      // 换号压过加载结果（BR-1）。
+      this.assertScopeUnchanged(scope, 'browser_navigate')
       // 接管压过加载结果（与浏览器标签同一条判据）。
       this.assertSurfaceAgentStillAllowed(surface, 'browser_navigate')
       if (outcome === 'failed') {
@@ -2123,8 +2281,8 @@ export class BrowserRuntime {
         throw browserError('network', `browser: navigation failed — ${stripSensitiveUrl(detail).slice(0, 200)}`)
       }
       if (waitUntil !== 'domcontentloaded') {
-        const budget = Math.max(0, this.options.timeoutMs - (Date.now() - started))
-        await this.waitForLoad(wc, waitUntil)(Math.min(budget, Math.max(0, this.options.loadTimeoutMs)))
+        const budget = this.remainingToolBudgetMs(deadlineAt, started)
+        await this.waitForLoad(wc, waitUntil)(Math.min(budget, this.loadBoundMs(deadlineAt)))
       }
       // op log 用 tab 0（与 browser_takeover 同口径）：应用窗口不是浏览器标签，
       // 塞一个 surface id 进 tab 字段会让"按标签看时间线"的界面指向不存在的标签。
@@ -2163,13 +2321,20 @@ export class BrowserRuntime {
     throw browserError('window-controlled', gateRefusal(this.locale()))
   }
 
-  async reload(tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+  async reload(tabId: number, signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
     const body = async (): Promise<void> => {
       const tab = this.tab(tabId)
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
+      // 显式重载 = 人/模型主动重试 ⇒ 崩溃计数归零（BR-2 的"出路"）。
+      this.clearCrashState(tabId)
+      tab.crashed = false
+      const scope = this.scopeGeneration()
       wc.reload()
-      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      await this.waitForLoad(wc, 'domcontentloaded')(this.loadBoundMs(deadlineAt))
+      // BR-1：换号后恢复执行时，这个标签已经属于上一个作用域（它的 `tab.url`
+      // 是旧账号的地址）—— 不许写进新账号的 op log。
+      this.assertScopeUnchanged(scope, 'browser_reload', tab)
       // BUG-05：用户在一次已在跑的 reload 期间点「我来操作」时，旧实现照样把
       // 结果记成成功；接管必须让长操作中止（与 navigate/eval/wait_for 同口径）。
       if (!user) this.assertAgentStillAllowed('browser_reload')
@@ -2180,13 +2345,15 @@ export class BrowserRuntime {
     return await this.agentRun('browser_reload', body, signal)
   }
 
-  async goBack(tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+  async goBack(tabId: number, signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
     const body = async (): Promise<void> => {
       const tab = this.tab(tabId)
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
+      const scope = this.scopeGeneration()
       wc.goBack()
-      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      await this.waitForLoad(wc, 'domcontentloaded')(this.loadBoundMs(deadlineAt))
+      this.assertScopeUnchanged(scope, 'browser_go_back', tab)
       if (!user) this.assertAgentStillAllowed('browser_go_back')
       this.updateTabState(tab)
       this.record('browser_go_back', tabId, `back to ${tab.url}`, false, user ? 'user' : 'ai')
@@ -2195,13 +2362,15 @@ export class BrowserRuntime {
     return await this.agentRun('browser_go_back', body, signal)
   }
 
-  async goForward(tabId: number, signal?: AbortSignal, user = false): Promise<void> {
+  async goForward(tabId: number, signal?: AbortSignal, user = false, deadlineAt?: number): Promise<void> {
     const body = async (): Promise<void> => {
       const tab = this.tab(tabId)
       const wc = tab.view.webContents
       if (wc.isDestroyed()) return
+      const scope = this.scopeGeneration()
       wc.goForward()
-      await this.waitForLoad(wc, 'domcontentloaded')(this.options.timeoutMs)
+      await this.waitForLoad(wc, 'domcontentloaded')(this.loadBoundMs(deadlineAt))
+      this.assertScopeUnchanged(scope, 'browser_go_forward', tab)
       if (!user) this.assertAgentStillAllowed('browser_go_forward')
       this.updateTabState(tab)
       this.record('browser_go_forward', tabId, `forward to ${tab.url}`, false, user ? 'user' : 'ai')
@@ -2235,6 +2404,8 @@ export class BrowserRuntime {
   }
 
   private destroyTab(id: number): void {
+    // BR-2：标签没了，崩溃计数与退避定时器一起丢（定时器不然会加载进已销毁视图）。
+    this.clearCrashState(id)
     const tab = this.tabs.get(id)
     if (tab !== undefined) {
       try {
@@ -2266,6 +2437,10 @@ export class BrowserRuntime {
       // Cancel in-flight ledger materialization (a previous user's restore
       // must not resurrect tabs after the pool was cleared).
       this.materializeEpoch++
+      // BR-1 (2026-09-23)：换号/关全部 = 作用域换代。任何正在 `await loadURL`
+      // 的 agent/用户操作恢复时必须看到这个新世代，否则它会把上一个账号的 URL
+      // 写进**新账号**的 history 与 op log（探针 br-session-switch-race 复现）。
+      this.scopeEpoch++
       this.pendingLedgerTabs = []
       try {
         for (const id of [...this.tabs.keys()]) this.destroyTab(id)
@@ -3559,6 +3734,51 @@ export class BrowserRuntime {
     ))
   }
 
+  /** Snapshot the current scope generation (BR-1). Call BEFORE an `await` and
+   * pass the value to {@link assertScopeUnchanged} after it. */
+  private scopeGeneration(): number {
+    return this.scopeEpoch
+  }
+
+  /**
+   * 清掉一个标签的崩溃恢复状态（BR-2）：计数归零，**退避中的重载定时器一并取消**
+   * （否则它会把旧 URL 加载回来）。显式 `browser_reload` / 新的 `browser_navigate`
+   * 与标签销毁都走这里。
+   */
+  private clearCrashState(id: number): void {
+    const state = this.crashRecovery.get(id)
+    if (state?.timer !== undefined) clearTimeout(state.timer)
+    this.crashRecovery.delete(id)
+  }
+
+  /**
+   * 落库前的**作用域世代复检**（2026-09-23 审计 BR-1）。
+   *
+   * 异步收尾（导航加载竞速、reload/goBack/goForward 的等待、建标签）恢复执行时，
+   * 世界可能已经换了一个账号：`runSessionSwitch` = `closeAll(true)` →
+   * `applyUserScope()`（换分区+换 store）→ `clearOps()` → `prewarm()`，全部在旧操作
+   * 挂起期间完成。此时**写 op log / history 就是跨账号数据污染**（上一个账号的 URL
+   * 落进新账号的 `history.jsonl`，并出现在活动面板与 `browser_history_search` 里）。
+   *
+   * 两层判据缺一不可：①世代未变（分区/store/账本/关全部任一变化都会自增）；
+   * ②这个 id 仍然指向**同一个** tab 对象（关掉再开出同 id 的标签不能被误认成原标签）。
+   *
+   * `assertAgentStillAllowed` 不覆盖这条：它只问"用户是否接管"，而换号期间
+   * `controlled` 会被临时置真再置假（读到时为假），用户路径更是根本不查它。
+   * @param generation - {@link scopeGeneration} 在 await 之前取的值。
+   * @param operation - 工具名（进错误文案）。
+   * @param tab - 该操作操作的标签对象（await 之前的那个）。应用窗口 surface 不是
+   *   池里的标签（它由 `wasm-apps-host` 持有），只判世代，所以可缺席。
+   */
+  private assertScopeUnchanged(generation: number, operation: string, tab?: BrowserTab): void {
+    if (generation === this.scopeEpoch && (tab === undefined || this.tabs.get(tab.id) === tab)) return
+    throw browserError('interrupted', hostCopy(
+      this.locale(),
+      `browser: 会话已切换，${operation} 的结果已丢弃（不写入新账号的历史与操作日志）`,
+      `browser: the session changed while ${operation} was in flight — its result was discarded (nothing was written to the new account)`,
+    ))
+  }
+
   /** Stop pending page loads when the user takes over (navigation is not cancellable via a JS signal). */
   private stopPendingLoads(): void {
     for (const tab of this.tabs.values()) {
@@ -3819,6 +4039,11 @@ export class BrowserRuntime {
     this.disposed = true
     this.materializeEpoch++
     this.pendingLedgerTabs = []
+    // BR-2：退避中的崩溃重载定时器不许比 runtime 活得久（它会去加载一个已销毁的视图）。
+    for (const state of this.crashRecovery.values()) {
+      if (state.timer !== undefined) clearTimeout(state.timer)
+    }
+    this.crashRecovery.clear()
     // 兜底超时不许比 runtime 活得久（测试进程会因此挂着一个 pending timer）。
     this.overlayNotice = false
     this.clearOverlayNoticeTimer()

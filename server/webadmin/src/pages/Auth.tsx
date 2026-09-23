@@ -70,6 +70,14 @@ export default function Auth() {
   const [authMsg, setAuthMsg] = useFlash(4000)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
+  // 2026-09-23 审计 WEB-2(P0):`finally { setLoading(false) }` 曾是整页**唯一**的
+  // 渲染闸门 ⇒ `GET /auth` 失败后表单照样渲染并解锁,而此时的初值是最空的一份
+  // (`enabled=['local']`、`EMPTY_FORM`、`secrets={}`),前端校验只遍历"启用中的
+  // 非 local"(空循环直接过)⇒ 一次「保存认证配置」就把 `auth.enabled` 收敛成
+  // `local`、清空 LDAP/OIDC/OpenID 全部字段,并用**空串的密文覆盖已存密钥**
+  // (不可恢复,全员 SSO/LDAP 登录当场失败)。与 Gateway/ErrorMonitoring 同口径:
+  // **成功才解锁**。`cfgLoaded` 只在成功分支置 true,失败分支置 false。
+  const [cfgLoaded, setCfgLoaded] = useState(false)
   const [tab, setTab] = useState('local')
   // 密码/密钥是否「已设置」(服务端掩码 *** 表示已存值,不能回填进输入框)
   const [secrets, setSecrets] = useState<Record<string, 'has-value' | 'unset'>>({})
@@ -77,6 +85,8 @@ export default function Auth() {
   const [clearedSecrets, setClearedSecrets] = useState<Record<string, boolean>>({})
 
   const load = useCallback(async () => {
+    setLoading(true)
+    setAuthErr('')
     try {
       const r = await request(`${ADMIN_API}/auth`) as { auth?: AuthConfig }
       const a = r.auth ?? {}
@@ -94,8 +104,10 @@ export default function Auth() {
         oidc_secret: isSet(a.oidc?.client_secret),
         openid_secret: isSet(a.openid?.client_secret),
       })
+      setCfgLoaded(true) // WEB-2:读到真配置才解锁写面
     } catch (err: any) {
       setAuthErr(err.message)
+      setCfgLoaded(false) // WEB-2:失败保持锁定(空初值不是"当前配置")
     } finally {
       setLoading(false)
     }
@@ -159,6 +171,12 @@ export default function Auth() {
 
   async function saveAuth() {
     if (busy) return
+    // WEB-2:没读到真配置时,表单里那份空初值不是"当前配置" —— 原地拒绝,
+    // 不发那个必然抹掉 SSO 与密钥的请求(按钮/fieldset 已禁用,这里是兜底)。
+    if (!cfgLoaded) {
+      setAuthErr('认证配置未加载成功,保存已锁定(避免用空配置覆盖现有认证方式与已存密钥)。请点击「重新加载配置」后重试。')
+      return
+    }
     setAuthErr('')
     // 启用中的 IdP 必须配置完整(前端校验; 服务端亦有校验)
     for (const key of enabled.filter((k) => k !== 'local')) {
@@ -218,7 +236,16 @@ export default function Auth() {
         </CardHeader>
         <CardContent className="space-y-4">
           {authErr && <div className="text-sm text-destructive">{authErr}</div>}
+          {/* WEB-2:失败时明说"整表已锁定",否则空表单读起来像"当前没有任何认证方式"。 */}
+          {!cfgLoaded && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+              认证配置未加载成功,表单已锁定:此时表单里是最空的一份初值(仅本地账号、LDAP/OIDC/OpenID
+              字段为空、密钥标记为未设置),保存会用空配置覆盖服务端现有的认证方式与已存密钥。
+            </div>
+          )}
           {authMsg && <div className="text-sm text-green-600">{authMsg}</div>}
+          {/* 写面闸门(WEB-2):fieldset disabled 一次罩住全部输入;下方保存按钮再显式禁用一次。 */}
+          <fieldset disabled={!cfgLoaded} className="space-y-4">
           <div className="flex flex-wrap gap-3 rounded-md border p-3">
             {Object.keys(METHOD_META).map((keyRaw) => {
               const key = keyRaw as 'local' | 'ldap' | 'oidc' | 'openid'
@@ -331,10 +358,10 @@ export default function Auth() {
           </Tabs>
 
           <div className="flex gap-2">
-            <Button variant="outline" onClick={testConnection} disabled={testing || tab === 'local'}>
+            <Button variant="outline" onClick={testConnection} disabled={testing || tab === 'local' || !cfgLoaded}>
               {testing ? '测试中…' : '测试连接'}
             </Button>
-            <Button onClick={saveAuth} disabled={busy}>{busy ? '保存中…' : '保存认证配置'}</Button>
+            <Button onClick={saveAuth} disabled={busy || !cfgLoaded}>{busy ? '保存中…' : '保存认证配置'}</Button>
           </div>
           {testMsg && <div className={`text-[13px] ${testMsg.startsWith('✓') ? 'text-green-600' : 'text-red-600'}`}>{testMsg}</div>}
           {testDetail && testDetail.ok && (
@@ -358,6 +385,13 @@ export default function Auth() {
                 </div>
               )}
               <div className="mt-1.5 text-xs text-muted-foreground">保存后立即同步一次, 之后每 1 小时自动同步(新员工/离职/组变更 1 小时内生效)。</div>
+            </div>
+          )}
+          </fieldset>
+          {/* WEB-2:重试入口必须在 fieldset **外面** —— 锁定时它是唯一可点的按钮。 */}
+          {!cfgLoaded && (
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => void load()} disabled={loading}>重新加载配置</Button>
             </div>
           )}
         </CardContent>

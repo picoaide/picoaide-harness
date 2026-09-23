@@ -98,7 +98,13 @@ export function AppAiPanel({ appId, userId, store, deps }: {
   const [consented, setConsented] = useState(() => hasAppAiConsent(userId, appId, storage))
   const [denied, setDenied] = useState(false)
   const [revoked, setRevoked] = useState(false)
-  const [syncFailed, setSyncFailed] = useState<string | null>(null)
+  /**
+   * 写宿主失败的方向（**不是**一句话）：三个方向各有各的真实后果与文案。
+   *
+   * 审计 C-24：此前只有一个 `syncFailed` 字符串，撤销失败时既宣称"已撤销"、
+   * 又渲染"这次不能放行"（那是"允许"失败的方向）—— 与宿主闸门**仍然开着**的事实相反。
+   */
+  const [syncFailure, setSyncFailure] = useState<'allow' | 'revoke' | 'deny' | null>(null)
   const [messages, setMessages] = useState<AppAiMessage[]>([])
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState('')
@@ -125,11 +131,11 @@ export function AppAiPanel({ appId, userId, store, deps }: {
     void (async () => {
       const synced = await syncAppAiConsent(appId, true, deps)
       if (!synced.ok) {
-        setSyncFailed(synced.message)
+        setSyncFailure('allow')
         setConsented(false)
         return
       }
-      setSyncFailed(null)
+      setSyncFailure(null)
       grantAppAiConsent(userId, appId, storage)
       setDenied(false)
       setRevoked(false)
@@ -137,16 +143,49 @@ export function AppAiPanel({ appId, userId, store, deps }: {
     })()
   }, [appId, deps, storage, userId])
 
+  /**
+   * 撤销授权（与「不允许」同一条写面路径）。
+   *
+   * **失败必须如实报错且不改变任何状态**（审计 C-24）：宿主写失败 ⇒ 闸门仍然放行，
+   * 此时宣称"已撤销"并把撤销入口收起来，等于把用户唯一的补救动作（重试撤销）也拿掉，
+   * 而下一次调用其实还是能花他的额度。只有 `synced.ok` 才清 UI 记忆、置 `revoked`。
+   */
   const revoke = useCallback((): void => {
-    // 撤销先落宿主（闸门立刻拒绝），再清 UI 记忆 —— 反过来的话，写失败会留下
-    // "界面已撤销、宿主还记着"的窗口。
     void (async () => {
       const synced = await syncAppAiConsent(appId, false, deps)
+      if (!synced.ok) {
+        setSyncFailure('revoke')
+        return
+      }
       revokeAppAiConsent(userId, appId, storage)
+      setSyncFailure(null)
       setConsented(false)
       setDenied(false)
       setRevoked(true)
-      setSyncFailed(synced.ok ? null : synced.message)
+    })()
+  }, [appId, deps, storage, userId])
+
+  /**
+   * 不允许（审计 C-25）：**必须真的关掉宿主闸门**。
+   *
+   * 此前它只 `setDenied(true)` —— 一句界面标记而已：用户读到"这个应用不能使用 AI"，
+   * 而应用照样能经 `/__picoaide/ai/chat` 花掉他的额度。现在与「允许」走**同一条写面
+   * 路径**（`syncAppAiConsent(appId, false)`），并同步清掉渲染层的 UI 记忆（否则下次
+   * 打开面板会因为 localStorage 里还留着 `granted` 而跳过说明卡，与关掉的闸门自相矛盾）。
+   * 写失败 ⇒ 不宣称已拒绝（闸门可能还开着），如实报错。
+   */
+  const deny = useCallback((): void => {
+    void (async () => {
+      const synced = await syncAppAiConsent(appId, false, deps)
+      if (!synced.ok) {
+        setSyncFailure('deny')
+        return
+      }
+      revokeAppAiConsent(userId, appId, storage)
+      setSyncFailure(null)
+      setConsented(false)
+      setRevoked(false)
+      setDenied(true)
     })()
   }, [appId, deps, storage, userId])
 
@@ -206,7 +245,9 @@ export function AppAiPanel({ appId, userId, store, deps }: {
           {denied && <div data-role="ai-denied">{t('appCenter.ai.denied')}</div>}
           {revoked && !denied && <div data-role="ai-revoked">{t('appCenter.ai.revoked')}</div>}
           {/* 宿主没记住授权（写失败/拿不到持有性证明）：如实说，不放行输入框。 */}
-          {syncFailed !== null && <div data-role="ai-consent-failed">{t('appCenter.ai.consentFailed')}</div>}
+          {syncFailure === 'allow' && <div data-role="ai-consent-failed">{t('appCenter.ai.consentFailed')}</div>}
+          {/* 「不允许」没能关掉闸门：不许宣称已拒绝（审计 C-25）。 */}
+          {syncFailure === 'deny' && <div data-role="ai-deny-failed">{t('appCenter.ai.denyFailed')}</div>}
           {/*
             身份未就绪时的「允许」是**静默 no-op**（2026-09-21 审计）：授权按 用户×应用 记，
             `grantAppAiConsent`/`hasAppAiConsent` 在 userId 为空串时直接早退 ⇒ 点击后
@@ -225,7 +266,7 @@ export function AppAiPanel({ appId, userId, store, deps }: {
             >
               {t('appCenter.ai.allow')}
             </button>
-            <button type="button" className="pico-app-ai-deny" data-action="ai-deny" style={BUTTON} onClick={() => { setDenied(true); setRevoked(false) }}>
+            <button type="button" className="pico-app-ai-deny" data-action="ai-deny" style={BUTTON} onClick={deny}>
               {t('appCenter.ai.deny')}
             </button>
           </div>
@@ -234,6 +275,11 @@ export function AppAiPanel({ appId, userId, store, deps }: {
 
       {consented && (
         <div style={{ marginTop: 8 }}>
+          {/*
+            撤销写宿主失败（审计 C-24）：闸门**仍然开着**，所以这里既不能宣称"已撤销"、
+            也不能收掉撤销按钮；如实说明失败并让用户重试。
+          */}
+          {syncFailure === 'revoke' && <div data-role="ai-revoke-failed">{t('appCenter.ai.revokeFailed')}</div>}
           {messages.length === 0 && streaming === '' && (
             <div style={{ color: 'var(--dsw-alias-label-tertiary)' }} data-role="ai-empty">{t('appCenter.ai.empty')}</div>
           )}

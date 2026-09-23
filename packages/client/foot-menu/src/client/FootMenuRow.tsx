@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useId, useReducer, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { PANEL_ACTIVE_ATTR, activePanelId } from '@picoaide/dsh-panel-surface/client'
+import { PANEL_ACTIVE_ATTR, activePanelId, hasInnerModal } from '@picoaide/dsh-panel-surface/client'
 import { currentFootMenuService, type FootMenuEntry } from './contract.ts'
 import { CHECK_GLYPH, CHEVRON_GLYPH, FootMenuGlyph, MORE_GLYPH } from './glyphs.tsx'
 import { t } from './locales.ts'
@@ -270,9 +270,10 @@ export function FootMenuRow(props: PropsRuntime<'sidebar.footer.action'>): JSX.E
     if (!open || typeof document === 'undefined') return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
-        // 浮层里可能再开一层真正的模态（确认框/表单）：那时 Esc 归那一层
-        //（与 `mountPanelSurface` 的既有写法一致）。
-        if (document.querySelector('[role="dialog"][aria-modal="true"]') !== null) return
+        // 浮层里可能再开一层真正的模态（确认框/表单）：那时 Esc 归那一层。
+        // 判据来自装载器（`hasInnerModal`，dialog **与** alertdialog 都算模态）——
+        // **不许**在这里再抄一份选择器：复制件正是"alertdialog 漏网"的成因。
+        if (hasInnerModal(document)) return
         // 焦点已经不在本浮层/锚点上（另一层浮层抢走了焦点，或程序化点击把用户带到
         // 别处）：Esc 归当前最上层，这里不许把别人的 Esc 吃掉。
         const focused = document.activeElement

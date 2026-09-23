@@ -149,7 +149,15 @@ func (ft funcType) signature() string {
 	return strings.Join(ft.params, "") + "_" + strings.Join(ft.results, "")
 }
 
+// hexDigits 是 valueTypeName 未知取值分支用的十六进制字母表。
+const hexDigits = "0123456789abcdef"
+
 // valueTypeName 把 wasm 值类型字节映射成签名里的短名。
+//
+// ⚠️ 未知取值**不得**用 `fmt.Sprintf`（2026-09-23 审计 WASM-1，P1）：这个函数在
+// 类型段解析里按**形参/结果个数**调用，而那个计数只受"≤ 剩余载荷字节"约束 ⇒
+// 每个形参一次 `Sprintf` 就是一次堆分配，把一个 32 MiB 模块放大成 GiB 级分配。
+// 已知取值全部返回**驻留常量**（零分配），未知取值手写 3 字节十六进制（一次小分配）。
 func valueTypeName(b byte) string {
 	switch b {
 	case 0x7f:
@@ -167,7 +175,8 @@ func valueTypeName(b byte) string {
 	case 0x6f:
 		return "externref"
 	default:
-		return fmt.Sprintf("t%02x", b)
+		// 与 `fmt.Sprintf("t%02x", b)` 逐字节相同，但无格式化开销。
+		return string([]byte{'t', hexDigits[b>>4], hexDigits[b&0x0f]})
 	}
 }
 
@@ -291,6 +300,12 @@ func Parse(data []byte) (*ModuleInfo, error) {
 
 		if id == SectionCustom {
 			// 自定义段：负载开头是名字（u32 长度 + UTF-8）。
+			//
+			// 条数上界：自定义段可以重复出现，而每个最小段只占 3 字节 ⇒ 没有常数上界时
+			// "合法上限体积"能换出 GiB 级宿主分配（见 MaxCustomSections 的实测数字）。
+			if e := checkCountMax(SectionCustom, "自定义段条数", uint32(len(info.Sections)+1), MaxCustomSections); e != nil {
+				return nil, e.WithDetail("offset", sectionStart)
+			}
 			name, n, err := readName(payload)
 			if err != nil {
 				return nil, malformedf("自定义段（偏移 %d）的段名非法：%v", sectionStart, err).
@@ -469,9 +484,16 @@ func Parse(data []byte) (*ModuleInfo, error) {
 			info.MemoryDeclared = true
 		}
 		// 逐条校验 limits 编码，避免"声明了但编码非法"被当成合法。
+		//
+		// 走 parseLimitsRaw 而不是 parseLimits：这里的描述串会被丢弃，而条目数
+		// 只受"≤ 剩余载荷"约束 ⇒ 用会格式化的那个版本等于给宿主加一条
+		// "每条一次 Sprintf"的放大路径（2026-09-23 审计 WASM-1 同族）。
 		rest := memoryPayload[used:]
+		if e := checkCountMax(SectionMemory, "内存段条目数", n, MaxMemoryEntries); e != nil {
+			return nil, e
+		}
 		for i := uint32(0); i < n; i++ {
-			_, consumed, err := parseLimits(rest)
+			_, _, _, _, consumed, err := parseLimitsRaw(rest)
 			if err != nil {
 				return nil, malformedf("内存段第 %d 条 limits 非法：%v", i, err).
 					WithDetail("section", SectionName(SectionMemory)).
@@ -523,6 +545,79 @@ func checkVecCount(section byte, what string, n uint32, rest []byte) error {
 	return nil
 }
 
+// ===== 计数向量的**常数**上界（2026-09-23 审计 WASM-1，P1）=====
+//
+// 为什么"≤ 剩余载荷字节"这一层不够（同族缺陷的**第二层**）：单个元素在宿主侧的
+// 字节代价远大于它在字节流里的最小编码长度 ——
+//
+//	向量          元素最小编码   宿主侧每条代价（64 位）    放大
+//	类型段条目    3 B（空 functype）  16 B 切片头 + 两次 append   ~10×
+//	形参/结果     1 B            16 B 切片头（外加每个未知值类型一次分配） ~16×
+//	导入段条目    3 B            4×string = 64 B              ~21×
+//	导出段条目    3 B            16 B + 一个 map 条目（≈50 B）  ~22×
+//
+// 于是一个**恰好合法**的 32 MiB 模块（平台允许的最大体积）可以被放大成宿主进程内
+// GiB 级分配：修复前实测 `TotalAlloc 2.00 GiB`（导入向量）/`+590 MiB RSS`（类型向量），
+// 且这条路径在 **API server 进程内**（`POST /api/client/v2/apps/wasm/validate`
+// → `api/publish.go` → `compile.ValidateWasm`，该文件明写"不发子进程"）⇒
+// 任意已登录员工（bearer）即可触发进程级内存事故。
+// 结构判据（每元素 ≥1 字节）消不掉放大倍数，所以这里给**常数**上界。
+//
+// 取值校准（2026-09-23 实测 7940 个真实产物 = wazero@v1.12 全部 testdata（Go/TinyGo/
+// Zig/Rust/emscripten/assemblyscript 工具链产物 + W3C spectest 模块）+ 平台参考实现
+// 用真 Go wasip1 工具链编译：`cd temp/audit-2026-09-23/probes/wasm && go run . calib`）：
+//
+//	类型段条数  实测最大 38    → 上界 1024（26×；真实工具链产物 ≤38）
+//	单函数形参  实测最大 100   → 上界 256（2.5×；真实工具链产物 ≤17）
+//	单函数结果  实测最大 138   → 上界 256（1.9×；真实工具链产物 ≤16）
+//	导入段条数  实测最大 35    → 上界 1024（29×）
+//	导出段条数  实测最大 479   → 上界 4096（8.5×）
+//
+// 乘积界：1024 类型 × (256 形参 + 256 结果) × 16 B ≈ 8 MiB ⇒ 最坏情形下解析期分配
+// 与模块体积（≤32 MiB）同量级，不再是 64× 放大。
+//
+// ⚠️ 这些是**解析器自身的放大防线**，不是平台能力上限：它们不进 limits 包、
+// 不进 limitsspec 生成物、不对外宣告（真实工具链离它们有一个数量级）。
+const (
+	// MaxFuncTypeEntries 是类型段条目数上限（见上面的校准表）。
+	MaxFuncTypeEntries = 1024
+	// MaxFuncParams 是单个函数类型的形参个数上限。
+	MaxFuncParams = 256
+	// MaxFuncResults 是单个函数类型的结果个数上限。
+	MaxFuncResults = 256
+	// MaxImportEntries 是导入段条目数上限（Go wasip1 实测 35 条）。
+	MaxImportEntries = 1024
+	// MaxExportEntries 是导出段条目数上限。
+	MaxExportEntries = 4096
+	// MaxMemoryEntries 是内存段条目数上限（规范允许 n>1 但校验器只接受 0/1；
+	// 取 16 与"每应用库上限"同量级，远高于任何真实产物）。
+	MaxMemoryEntries = 16
+	// MaxCustomSections 是自定义段条数上限。
+	//
+	// 这一条不在报告列举的三个向量里，但**同在本次审计的这条路径上且放大更大**：
+	// 一个最小自定义段（id=0 + 长度 1 + 段名长度 0）在字节流里只占 **3 B**，而宿主
+	// 为它 append 一个 `Section`（32 B）并写一个 map 计数条目 ⇒ 实测
+	// "32 MiB 模块 = 11 184 808 个自定义段 ⇒ TotalAlloc **2408 MiB**、err=nil"
+	// （2026-09-23 本机实测，探针见交付报告）。真源工具链产物的自定义段是个位数
+	// （name/producers/target_features + 平台自己的资源段），4096 已是三个数量级余量。
+	MaxCustomSections = 4096
+)
+
+// checkCountMax 校验"段内/元素内计数"不超过**常数**上界（见上面的校准表）。
+//
+// 判据与 checkVecCount 互补：那条是"结构不可能"（计数 > 剩余字节），这条是
+// "宿主侧代价不可能"（计数 > 解析器为它预留的预算）。两层的错误文案必须可区分，
+// 否则排障时会以为是同一个病根。
+func checkCountMax(section byte, what string, n uint32, max int) *apperr.Error {
+	if uint64(n) > uint64(max) {
+		return malformedf("%s %d 超过解析器上限 %d（该计数在宿主侧的字节代价远大于其编码长度）", what, n, max).
+			WithDetail("section", SectionName(section)).
+			WithDetail("declared_count", n).
+			WithDetail("parser_max", max)
+	}
+	return nil
+}
+
 // parseTypes 解析类型段：vec of functype(0x60)。
 func parseTypes(payload []byte) ([]funcType, error) {
 	n, used, err := readU32(payload)
@@ -531,6 +626,10 @@ func parseTypes(payload []byte) ([]funcType, error) {
 	}
 	rest := payload[used:]
 	if err := checkVecCount(SectionType, "类型段", n, rest); err != nil {
+		return nil, err
+	}
+	// 第二层：常数上界（见 MaxFuncTypeEntries 的长注释）。
+	if err := checkCountMax(SectionType, "类型段条目数", n, MaxFuncTypeEntries); err != nil {
 		return nil, err
 	}
 	out := make([]funcType, 0, n)
@@ -554,6 +653,12 @@ func parseTypes(payload []byte) ([]funcType, error) {
 			return nil, malformedf("类型段第 %d 条形参越界（声明 %d 个）", i, np).
 				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
 		}
+		// 第二层：常数上界。单个形参在宿主侧 = 16 B 切片头（外加值类型名），
+		// 而它在字节流里只占 1 B ⇒ 没有常数上界就是 16× 放大（WASM-1）。
+		if e := checkCountMax(SectionType,
+			fmt.Sprintf("类型段第 %d 条形参个数", i), np, MaxFuncParams); e != nil {
+			return nil, e.WithDetail("index", i)
+		}
 		ft := funcType{params: make([]string, 0, np)}
 		for k := uint32(0); k < np; k++ {
 			ft.params = append(ft.params, valueTypeName(rest[k]))
@@ -568,6 +673,11 @@ func parseTypes(payload []byte) ([]funcType, error) {
 		if uint64(nr) > uint64(len(rest)) {
 			return nil, malformedf("类型段第 %d 条结果越界（声明 %d 个）", i, nr).
 				WithDetail("section", SectionName(SectionType)).WithDetail("index", i)
+		}
+		// 第二层：常数上界（与形参同源；结果数在宿主侧同样是 16 B/个的切片头）。
+		if e := checkCountMax(SectionType,
+			fmt.Sprintf("类型段第 %d 条结果个数", i), nr, MaxFuncResults); e != nil {
+			return nil, e.WithDetail("index", i)
 		}
 		ft.results = make([]string, 0, nr)
 		for k := uint32(0); k < nr; k++ {
@@ -587,6 +697,10 @@ func parseImports(payload []byte, types []funcType) ([]Import, error) {
 	}
 	rest := payload[used:]
 	if err := checkVecCount(SectionImport, "导入段", n, rest); err != nil {
+		return nil, err
+	}
+	// 第二层：常数上界（一条 Import = 4×string = 64 B，是放大倍数最高的一类）。
+	if err := checkCountMax(SectionImport, "导入段条目数", n, MaxImportEntries); err != nil {
 		return nil, err
 	}
 	out := make([]Import, 0, n)
@@ -675,6 +789,10 @@ func parseExports(payload []byte) ([]string, map[string]string, error) {
 	if err := checkVecCount(SectionExport, "导出段", n, rest); err != nil {
 		return nil, nil, err
 	}
+	// 第二层：常数上界（一条导出 = 16 B 切片头 + 一个 map 条目 ≈50 B）。
+	if err := checkCountMax(SectionExport, "导出段条目数", n, MaxExportEntries); err != nil {
+		return nil, nil, err
+	}
 	names := make([]string, 0, n)
 	kinds := make(map[string]string, n)
 	for i := uint32(0); i < n; i++ {
@@ -723,28 +841,48 @@ func parseExports(payload []byte) ([]string, map[string]string, error) {
 	return names, kinds, nil
 }
 
-// parseLimits 解析 limits 编码（flags 字节 + min [+ max]），返回描述串与消耗字节数。
-func parseLimits(b []byte) (string, int, error) {
+// parseLimitsRaw 解析 limits 编码（flags 字节 + min [+ max]）的**结构**，
+// 只返回值与消耗字节数，不构造描述串。
+//
+// 为什么要与描述串分开（2026-09-23 审计 WASM-1 同族）：内存段逐条校验时**丢弃**
+// 描述串（它只有导入签名用得上），而条目数只受"≤ 剩余载荷"约束 ⇒ 32 MiB 载荷
+// 可以让上千万条 limits 各走一次 `fmt.Sprintf`（一次格式化 = 一次堆分配 + 反射式
+// 格式化开销），这是与 np/nr 同族的"宿主侧每元素代价 ≫ 编码长度"放大。
+func parseLimitsRaw(b []byte) (flags byte, min, max uint32, hasMax bool, used int, err error) {
 	if len(b) == 0 {
-		return "", 0, errTruncated
+		return 0, 0, 0, false, 0, errTruncated
 	}
-	flags := b[0]
+	flags = b[0]
 	if flags > 0x03 {
-		return "", 0, fmt.Errorf("limits flags 非法：0x%02x", flags)
+		return 0, 0, 0, false, 0, fmt.Errorf("limits flags 非法：0x%02x", flags)
 	}
-	used := 1
+	used = 1
 	min, n, err := readU32(b[used:])
+	if err != nil {
+		return 0, 0, 0, false, 0, err
+	}
+	used += n
+	if flags&0x01 != 0 {
+		m, n, merr := readU32(b[used:])
+		if merr != nil {
+			return 0, 0, 0, false, 0, merr
+		}
+		used += n
+		max, hasMax = m, true
+	}
+	return flags, min, max, hasMax, used, nil
+}
+
+// parseLimits 解析 limits 编码（flags 字节 + min [+ max]），返回描述串与消耗字节数。
+//
+// 描述串只用于导入签名（条目数已被 MaxImportEntries 封顶）⇒ 这里的格式化不是热路径。
+func parseLimits(b []byte) (string, int, error) {
+	flags, min, max, hasMax, used, err := parseLimitsRaw(b)
 	if err != nil {
 		return "", 0, err
 	}
-	used += n
 	out := fmt.Sprintf("%d..", min)
-	if flags&0x01 != 0 {
-		max, n, err := readU32(b[used:])
-		if err != nil {
-			return "", 0, err
-		}
-		used += n
+	if hasMax {
 		out += fmt.Sprintf("%d", max)
 	} else {
 		out += "∞"

@@ -1,15 +1,23 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   avatarColor,
   compareVersions,
   hasUpdateFor,
   installEndpoint,
+  installNeedsConfirm,
+  installRequestUrl,
   itemsForTab,
   latestApprovedVersionByName,
+  localRemoveEndpoint,
   mergeItems,
   nameTakenError,
+  needsOverwriteConfirm,
   planSectionCards,
   uninstallEndpoint,
+  versionInstallSupported,
+  withOverwrite,
   type CapabilityItem,
   type SectionCard,
 } from '../src/client/CapabilityCenterPanel.tsx'
@@ -319,5 +327,200 @@ describe('内置技能的分区归属（2026-09-20 用户口径）', () => {
     const cards = planSectionCards({ rows: [agent], builtinCards: updateCards() })
     expect(cards).toHaveLength(2)
     expect(cards.filter(c => c.type === 'item')).toHaveLength(1)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// 独立审计 2026-09-23 A2/A3/A6/A11/A15 —— 覆盖确认与"按版本安装"的纯判据
+// ---------------------------------------------------------------------------
+
+describe('A15 覆盖确认判据（needsOverwriteConfirm）', () => {
+  const base: CapabilityItem = {
+    kind: 'skill', source: 'market', name: 'foo', displayName: '', version: '1.2.0',
+    description: '', author: '', versions: ['1.2.0'], installed: true,
+  }
+
+  it('商店来源（store）⇒ 直接更新/重装，不打扰用户', () => {
+    expect(needsOverwriteConfirm({ ...base, installedOrigin: 'store' })).toBe(false)
+  })
+
+  it('本机自制 / 来源不明（缺 installedOrigin 的历史载荷）⇒ 必须确认', () => {
+    expect(needsOverwriteConfirm({ ...base, installedOrigin: 'local' })).toBe(true)
+    expect(needsOverwriteConfirm(base)).toBe(true)
+  })
+
+  it('未安装 ⇒ 不涉及覆盖', () => {
+    expect(needsOverwriteConfirm({ ...base, installed: false, installedOrigin: undefined })).toBe(false)
+  })
+})
+
+describe('覆盖标记只由"用户已确认"产生（withOverwrite，A2/A3 两端契约）', () => {
+  it('installRequestUrl 是唯一的 URL 拼装入口：确认前不带、确认后才带 overwrite', () => {
+    const store: CapabilityItem = { kind: 'skill', source: 'market', name: 'foo', displayName: '', version: '1.2.0', description: '', author: '', versions: ['1.2.0'], installed: true, installedOrigin: 'store' }
+    const local: CapabilityItem = { ...store, installedOrigin: 'local' }
+    // 商店来源的正常更新：不需要确认 ⇒ 不带标记。
+    expect(installRequestUrl(store)).toBe('/api/pico/skills/foo/install')
+    // 本机自制同名：未确认不带、确认后才带（面板与宿主两端契约）。
+    expect(installRequestUrl(local)).toBe('/api/pico/skills/foo/install')
+    expect(installRequestUrl(local, { overwrite: true })).toBe('/api/pico/skills/foo/install?overwrite=1')
+    // 用户在详情弹层点选的版本必须跟着走（A11：确认后重放的是同一发）。
+    expect(installRequestUrl({ ...local, kind: 'skill', source: 'org' }, { overwrite: true, version: '1.0.0' }))
+      .toBe('/api/pico/shared-skills/foo/1.0.0/install?overwrite=1')
+  })
+
+  it('installNeedsConfirm 是"确认条可达"的唯一判定入口（A15）', () => {
+    const base: CapabilityItem = { kind: 'skill', source: 'market', name: 'foo', displayName: '', version: '1.2.0', description: '', author: '', versions: ['1.2.0'], installed: true }
+    expect(installNeedsConfirm({ ...base, installedOrigin: 'store' })).toBe(false)
+    expect(installNeedsConfirm({ ...base, installedOrigin: 'local' })).toBe(true)
+    // 用户在确认条上点过之后就不再要确认（否则会自锁成死循环）。
+    expect(installNeedsConfirm({ ...base, installedOrigin: 'local' }, { overwrite: true })).toBe(false)
+  })
+
+  it('未确认时端点保持无 query（历史死参数 ?force=1 不得回来）', () => {
+    const url = installEndpoint({ kind: 'skill', source: 'market', name: 'foo', displayName: '', version: '1.0.0', description: '', author: '', versions: [], installed: false }, '1.0.0')
+    expect(withOverwrite(url, false)).toBe('/api/pico/skills/foo/install')
+    expect(withOverwrite(url, false)).not.toContain('?')
+  })
+
+  it('确认后带上宿主真的会读的 ?overwrite=1', () => {
+    expect(withOverwrite('/api/pico/skills/foo/install', true)).toBe('/api/pico/skills/foo/install?overwrite=1')
+    expect(withOverwrite('/api/pico/skills/foo/uninstall', true)).toBe('/api/pico/skills/foo/uninstall?overwrite=1')
+    expect(withOverwrite('/api/pico/shared-skills/foo/1.0.0/install', true)).toContain('overwrite=1')
+  })
+})
+
+describe('A11 「按版本安装」只在端点真的接受版本时出现', () => {
+  const base: CapabilityItem = { kind: 'skill', source: 'org', name: 'codeql', displayName: '', version: '1.0.0', description: '', author: '', versions: ['1.0.0', '1.2.0'], installed: false }
+
+  it('组织共享技能（端点带版本）⇒ 支持', () => {
+    expect(versionInstallSupported(base)).toBe(true)
+  })
+
+  it('市场技能（归档端点只按最高 approved 取）⇒ 不支持按版本安装', () => {
+    expect(versionInstallSupported({ ...base, source: 'market' })).toBe(false)
+  })
+
+  it('智能体（端点不带版本）⇒ 不支持', () => {
+    expect(versionInstallSupported({ ...base, kind: 'agent' })).toBe(false)
+  })
+})
+
+describe('A6 + 跨泳道契约 S2 本机内置技能的卸载端点', () => {
+  const base: CapabilityItem = { kind: 'skill', source: 'local', name: 'app-builder', displayName: '', version: '2.5.0', description: '', author: '', versions: [], isLocal: true, installedOrigin: 'store' }
+
+  it('builtin ⇒ 新增的内置技能卸载路由', () => {
+    const item = { ...base, originChannel: 'builtin' }
+    expect(localRemoveEndpoint(item)).toBe('/api/pico/skills/builtin/app-builder/uninstall')
+    expect(uninstallEndpoint(item, '2.5.0')).toBe('/api/pico/skills/builtin/app-builder/uninstall')
+  })
+
+  it('plugin（随客户端内置）⇒ 纯本地删除端点，绝不走市场端点', () => {
+    const item = { ...base, originChannel: 'plugin' }
+    expect(localRemoveEndpoint(item)).toBe('/api/pico/skills/app-builder/uninstall')
+    expect(uninstallEndpoint(item, '2.5.0')).toBe('/api/pico/skills/app-builder/uninstall')
+  })
+
+  it('自制 / 市场 / 组织来源 ⇒ 不给本机内置的卸载入口（沿用既有规则）', () => {
+    expect(localRemoveEndpoint(base)).toBeUndefined()
+    expect(localRemoveEndpoint({ ...base, originChannel: 'market' })).toBeUndefined()
+    expect(localRemoveEndpoint({ ...base, kind: 'agent', originChannel: 'plugin' })).toBeUndefined()
+  })
+})
+
+
+/**
+ * 接线判据（渲染层无法当纯函数测的四条链路）。
+ *
+ * 本仓既有先例：渲染层里"某个回调传了什么"只能靠读源码钉住（`wasm-app-open-route-parity`
+ * 读 main.ts、`sandbox-acl-grant-hint` 读产物）。这里钉的正是审计 A2/A3/A11/A15 的
+ * 现场 —— 旧实现里"更新按钮硬编码 force"这一行是死代码的来源，而它不会被任何
+ * 纯函数用例抓到。
+ */
+describe('A2/A3/A11/A15 接线判据（源码级）', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+
+  it('更新按钮不再硬编码覆盖确认（确认条才是唯一的覆盖来源）', () => {
+    const update = /needUpdate \? \(([\s\S]*?)\) : renderUninstall/u.exec(source)
+    expect(update, '更新按钮的渲染分支必须存在').not.toBeNull()
+    // 更新路径必须走 install() 自己的来源判定：**不传任何选项**（旧实现传了 force）。
+    expect(update![1]).toContain('onClick={() => { void install(item) }}')
+    expect(update![1]).not.toMatch(/install\(item, \{/u)
+  })
+
+  it('确认条是唯一的"用户已确认"出口，重放的是同一发安装', () => {
+    const strip = /\{installConfirm !== null && \(([\s\S]*?)\n        \)\}/u.exec(source)
+    expect(strip, '确认条必须存在').not.toBeNull()
+    // 唯一的放行点：点「覆盖安装 / 仍要覆盖」才 run(true)（= 才带 ?overwrite=1）。
+    expect(strip![1]).toContain('void pending.run(true)')
+    expect(strip![1]).toContain('installConfirm.localConflict')
+    // 真正发请求的 performInstall 经 installRequestUrl（唯一 URL 拼装入口）。
+    const perform = /const performInstall = async \([\s\S]*?\n  \}/u.exec(source)
+    expect(perform, 'performInstall 必须存在').not.toBeNull()
+    expect(perform![0]).toContain('const url = installRequestUrl(item, opts)')
+    // 闸门：install() 先问 installNeedsConfirm，再交给 performInstall。
+    const installBody = /const install = async \([\s\S]*?\n  \}/u.exec(source)
+    expect(installBody![0]).toContain('if (installNeedsConfirm(item, opts))')
+    expect(installBody![0]).toContain('await performInstall(item, opts)')
+    // 409（宿主说目标是本机内容）必须回到确认条，而不是当成失败。
+    expect(perform![0]).toContain('localConflict: true')
+  })
+
+  it('A11：安装成功后按响应里的真实版本记账，拿不到就留空并重载', () => {
+    expect(source).toContain('const appliedVersion = typeof data.version === \'string\' && data.version !== \'\' ? data.version : undefined')
+    expect(source).toContain('installedVersion: appliedVersion')
+    expect(source).toContain('if (appliedVersion === undefined) loadAll()')
+  })
+
+  it('A3：卸载的第二段（用户已确认）才带 overwrite', () => {
+    expect(source).toContain('withOverwrite(base, true)')
+  })
+
+  it('内置技能入口卡的安装/更新也走同一条确认条（否则「更新到 vX」绕过确认被宿主 409）', () => {
+    expect(source).toContain('const activateBuiltinCard = (card: BuiltinCard): void => {')
+    expect(source).toContain('await builtin.install(card.skill, overwrite)')
+    // 两处按钮都必须经 activateBuiltinCard，不得直接调 builtin.install(skill)。
+    expect(source).not.toContain('builtin.install(skill)')
+    // 确认条只有一处调用 run(true)。
+    expect(source).toContain('void pending.run(true)')
+  })
+})
+
+/**
+ * 审计 C-03（P2）：详情弹层的按版本按钮必须接**站级闸**。
+ *
+ * 缺陷：`install()` 第一行对"有动作在飞"是静默 `return`，而弹层里的按版本按钮只收到
+ * own-key 的 `busy` ⇒ A 卡安装在飞时打开 B 卡详情，按钮是启用态，点下去不发请求、
+ * 不改状态、不报错（死按钮）。修法＝把 `inFlight` 传进弹层并置灰 + 说明原因。
+ *
+ * **为什么是源码级守卫**：本包的测试环境是 node（没有 jsdom / react-dom），跑不了
+ * 真实挂载；行为级复现与验证由审计探针
+ * `temp/audit-2026-09-23/probes/client/version-button-silent-swallow.spec.tsx` 承担
+ * （jsdom + react，修前红 / 修后绿）。本守卫只钉"接线没被拆掉"，与同文件其它
+ * 源码级用例（A3/A11/内置卡入口）同一形态。
+ *
+ * ---- 变异验证 ----
+ *   - 弹层按钮改回 `disabled={busy}` ⇒ 第一条红；
+ *   - 调用点去掉 `blocked={inFlight}` ⇒ 第二条红；
+ *   - 去掉 `title` 说明 ⇒ 第三条红。
+ */
+describe('C-03：详情弹层的动作按钮必须与 install() 的站级闸同源', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
+
+  it('弹层里的按版本按钮同时吃 own-key busy 与站级 blocked', () => {
+    expect(source).toContain('disabled={busy || blocked}')
+  })
+
+  it('调用点把站级 inFlight 传进弹层', () => {
+    expect(source).toContain('blocked={inFlight}')
+    // 弹层的 props 里必须有这一项（否则传了也不生效）。
+    expect(source).toContain('blocked: boolean')
+  })
+
+  it('禁用时给出原因文案（不能是"点了没反应"）', () => {
+    expect(source).toContain("title={blocked && !busy ? t('capability.busyHint') : undefined}")
+    // 文案必须走字典（locales-hygiene 会同时钉 zh/en 与引用点）。
+    const locales = readFileSync(fileURLToPath(new URL('../src/client/locales.ts', import.meta.url)), 'utf8')
+    expect(locales).toContain("'capability.busyHint'")
   })
 })

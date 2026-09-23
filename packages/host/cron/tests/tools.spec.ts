@@ -25,7 +25,18 @@ describe('cron tools surface', () => {
     expect(source).toContain("kind: 'delete', jobId: args.jobId")
     expect(source).toContain('service.listVisibleJobs()')
     // 正在执行的任务拒删：delete 不取消在跑的会话，只让它的执行记录凭空消失。
-    expect(source).toContain('execution.endedAt === undefined')
+    // 2026-09-23 CR-2：判据抽到 jobs.ts 的 `jobIsRunning`（工具 / 账本 delete /
+    // 面板按钮共用一处），这里钉住工具侧仍走同一个判据而不是各自内联。
+    expect(source).toContain('jobIsRunning(before)')
+    expect(source).not.toContain('execution.endedAt === undefined')
+  })
+
+  it('cron_set_enabled pre-checks the owner-filtered roster (CR-3)', () => {
+    // 2026-09-23 CR-3：缺预检 ⇒ 不存在的 id 假成功、别人的 id 抛账本内部串
+    // （跨账号存在性预言机）。三个工具必须同口径：看不见 = 按不存在报错。
+    const execute = source.slice(source.indexOf("name: 'cron_set_enabled'"))
+    expect(execute).toContain('service.listVisibleJobs()')
+    expect(execute).toContain("copy('tool.jobMissing'")
   })
 
   it('has no command/shell/executable parameter fields', () => {

@@ -30,6 +30,7 @@ export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): 
     && a.clientSecret === b.clientSecret
     && a.expiresAt === b.expiresAt
     && a.refreshedAt === b.refreshedAt
+    && a.issuer === b.issuer
     && a.publicMcp === b.publicMcp
     && fields(a) === fields(b)
 }
@@ -62,6 +63,19 @@ export interface ConnectorCredential {
   expiresAt?: number
   /** When the last successful token refresh happened (epoch ms). */
   refreshedAt?: number
+  /**
+   * The SDK's SEP-2352 `issuer` stamp: the authorization server this credential
+   * was issued by.
+   *
+   * The SDK stamps every value it hands to `saveTokens` and checks the stamp on
+   * every read (`discardIfIssuerMismatch`) — a credential stamped for another
+   * authorization server reads back as "no tokens", which is what stops a
+   * credential from being replayed against a different AS. The provider used to
+   * drop it on the way to disk, so the isolation never engaged and the SDK
+   * warned on every read (audit 2026-09-23, CN-2). Absent on credentials written
+   * before this field existed; the SDK back-stamps them on first use.
+   */
+  issuer?: string
   /**
    * The MCP endpoint answered without an authorization challenge during
    * discovery (spec 2025-06-18 "public" server), so no token exists or is ever

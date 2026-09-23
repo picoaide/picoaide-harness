@@ -138,11 +138,24 @@ for channel in "${CHANNELS[@]}"; do
       --tag "${IMAGE}:v${VER}" \
       --load \
       server || return 1
-    # 双 tag:tar 里同时带 vX.Y.Z 与 X.Y.Z。CI 内部与 latest.json 的 image_tag 用
-    # 带 v 的形式,而部署文档 §3/§6 的示例用不带 v 的形式 —— 只打一个,照文档敲的
-    # 人就会去 docker.io 拉取(隔离网/镜像代理下直接 403,2026-09-10 实测)。
+    # 三 tag:tar 里同时带 vX.Y.Z、X.Y.Z 与**渠道专属** `<channel>-X.Y.Z`。
+    # CI 内部与 latest.json 的 image_tag 用带 v 的形式,部署文档 §3/§6 的示例用不带
+    # v 的形式 —— 只打一个,照文档敲的人就会去 docker.io 拉取(隔离网/镜像代理下
+    # 直接 403,2026-09-10 实测)。
+    #
+    # 渠道 tag 是**同机多栈**的唯一防线(2026-09-23 审计 K-02):渠道差异在**内容**
+    # (/opt/picoaide/channel + 烘焙的渠道标识),不在 tag —— 归档内部 tag 恒为
+    # `picoaide-harness-server:v<ver>`。同一台宿主机部署两个渠道时,后 `docker load`
+    # 的会**覆盖**前者那个 tag,此后任一栈 `docker compose up -d server` 都会用
+    # **另一渠道**的镜像重建(品牌、随包客户端全错,`.env` 里的 SERVER_IMAGE 看起来
+    # 却完全正确)。带上渠道 tag 后,部署侧只要把该栈 `.env` 写成
+    # `<channel>-<ver>` 就与别的栈彻底隔离(步骤见 docs/deploy/AI-DEPLOY.md §6.5)。
+    #
+    # 渠道 id 只在 tag 里(运行时变量,不进日志:渠道轮输出被重定向);产物 zip 的
+    # 文件名保持中性,公开面不新增任何渠道身份。
     docker tag "${IMAGE}:v${VER}" "${IMAGE}:${VER}" || return 1
-    docker save "${IMAGE}:v${VER}" "${IMAGE}:${VER}" -o "$img_tar" || return 1
+    docker tag "${IMAGE}:v${VER}" "${IMAGE}:${channel}-${VER}" || return 1
+    docker save "${IMAGE}:v${VER}" "${IMAGE}:${VER}" "${IMAGE}:${channel}-${VER}" -o "$img_tar" || return 1
     ( cd "$OUT/$channel" && zip -1 -q "$ARCHIVE" "$img_tar" -j ) || return 1
     rm -f "$img_tar"
     ( cd "$OUT/$channel" && sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS ) || return 1

@@ -158,15 +158,35 @@ func GetSkill(db *sql.DB, name string) (*Skill, error) {
 	return &out, nil
 }
 
-// UpdateSkill 更新元数据(不触碰版本与归档:内容一律由发布写入)。
-func UpdateSkill(db *sql.DB, s *Skill) error {
+// UpdateSkillMeta 更新市场技能的**展示元数据**(title/description/enabled)。
+//
+// 只改投影里的展示列,不触碰版本、归档,也**不触碰 `apps.owner`**
+// (审计 2026-09-23 G-P2-1)。
+//
+// 为什么 owner 被显式排除:owner 是**发布权的唯一真源**——
+//   - `appstore.Publish` 用 `existingApp.Owner != req.Publisher → 409 NAME_TAKEN`
+//     判定"谁能续传新版本"(internal/appstore/publish.go);
+//   - 能力中心用它算 `is_owner`;
+//   - `official=1 ∧ owner≠''` 是被迁移 0059 与 SetAppOfficial 契约禁止的状态。
+//
+// 因此任何改写 owner 的路径都必须**视同归属转移**:走唯一合规入口
+// `PUT /api/server/admin/apps/:kind/:app_id/owner`(appstore/admin.go),那里
+// 有目标用户存在性校验、owner/official 互斥、同归属幂等与 `app_owner_transfer`
+// 审计。此前本函数把 `s.Author` 写进 owner,任何一次元数据 PUT 都变成一次
+// **无审计的归属转移**,还能造出 `official=1 ∧ owner≠''`(禁止状态)——
+// 智能体孪生端点(marketplace/agent_api.go 明确保留 `Owner: a.Owner`)没有这个洞,
+// 所以这是遗漏而非设计。
+//
+// `Skill.Author` 字段仍保留(读路径用它承接 `apps.owner`),但本函数**忽略**它;
+// 调用方若想改署名,应指向归属转移端点,而不是静默丢弃这个输入。
+func UpdateSkillMeta(db *sql.DB, s *Skill) error {
 	title := s.DisplayName
 	if title == "" {
 		title = s.Name
 	}
-	res, err := db.Exec(`UPDATE apps SET title = ?, description = ?, owner = ?, enabled = ?,
+	res, err := db.Exec(`UPDATE apps SET title = ?, description = ?, enabled = ?,
 		updated_at = `+NowExpr()+` WHERE kind = ? AND app_id = ?`,
-		title, s.Description, s.Author, s.Enabled, AppKindSkill, s.Name)
+		title, s.Description, s.Enabled, AppKindSkill, s.Name)
 	if err != nil {
 		return err
 	}

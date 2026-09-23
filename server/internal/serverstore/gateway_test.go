@@ -1,7 +1,12 @@
 package serverstore
 
 import (
+	"bytes"
+	"database/sql"
 	"errors"
+	"log"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -599,5 +604,209 @@ func TestUpdateModelRenameSyncsProviderJSON(t *testing.T) {
 	}
 	if raw != `["new-name"]` {
 		t.Fatalf("provider JSON = %s, want [\"new-name\"]", raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// G-01(P0)/G-02(P1) 回归(审计 2026-09-23):模型清单同步**不得摧毁运营方定价**
+// ---------------------------------------------------------------------------
+
+// modelRowByName 取一行模型(缺行即失败:以下用例关心的正是"行还在")。
+func modelRowByName(t *testing.T, db *sql.DB, pid int64, name string) *Model {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM models WHERE provider_id = ? AND name = ?`, pid, name).Scan(&id); err != nil {
+		t.Fatalf("模型行 %s(provider=%d)不存在: %v", name, pid, err)
+	}
+	m, err := GetModel(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// assertModelConfigKept 断言价格/缓存价/峰谷折扣/default_params/模态逐字未变。
+// want 传 nil = 该字段必须仍为 NULL。
+func assertModelConfigKept(t *testing.T, m *Model, in, out, cache, off *float64, params string, modalities []string) {
+	t.Helper()
+	check := func(label string, got, want *float64) {
+		t.Helper()
+		if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+			t.Fatalf("%s: got %v, want %v(模型 %s)", label, ptrFloatStr(got), ptrFloatStr(want), m.Name)
+		}
+	}
+	check("input_price_per_1m", m.InputPricePer1M, in)
+	check("output_price_per_1m", m.OutputPricePer1M, out)
+	check("cache_input_price_per_1m", m.CacheInputPricePer1M, cache)
+	check("offpeak_discount", m.OffpeakDiscount, off)
+	if m.DefaultParams != params {
+		t.Fatalf("default_params: got %q, want %q(模型 %s)", m.DefaultParams, params, m.Name)
+	}
+	if len(m.InputModalities) != len(modalities) {
+		t.Fatalf("input_modalities: got %v, want %v(模型 %s)", m.InputModalities, modalities, m.Name)
+	}
+	for i := range modalities {
+		if m.InputModalities[i] != modalities[i] {
+			t.Fatalf("input_modalities: got %v, want %v(模型 %s)", m.InputModalities, modalities, m.Name)
+		}
+	}
+}
+
+func ptrFloatStr(p *float64) string {
+	if p == nil {
+		return "NULL"
+	}
+	return strconv.FormatFloat(*p, 'g', -1, 64)
+}
+
+// TestSyncProviderModelsKeepsPricingAndParams 覆盖 G-01 的服务端根因:
+// 旧 SyncProviderModels 是"DELETE 该 provider 全部 models 行 + 只插三列
+// (name, provider_id, display_name)",于是 webadmin 的「编辑上游 → 保存」
+// (弹窗**无条件**回传预填的 models 列表)会把该上游全部模型的价格/缓存价/
+// 峰谷折扣/default_params/input_modalities 清零 —— 之后调用照常 200、
+// token 照记、cost=0。修法 = 按 name upsert + 只剪枝清单外的行。
+func TestSyncProviderModelsKeepsPricingAndParams(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-keep", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	id := modelRowByName(t, db, pid, "m1").ID
+	in, out, cache, off := 30.0, 60.0, 3.0, 0.5
+	const params = `{"max_output":123,"context_length":65536}`
+	if err := UpdateModel(db, &Model{
+		ID: id, Name: "m1", ProviderID: pid, DisplayName: "M1",
+		DefaultParams: params, InputModalities: []string{"text", "image"},
+		InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &cache, OffpeakDiscount: &off,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 同一清单再同步一次:「编辑上游 → 原样保存」的服务端路径,必须是无操作。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+
+	// ② 清单**真的**新增模型时,既有行同样不得被重建(upsert 语义)。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2", "m3"}); err != nil {
+		t.Fatal(err)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+
+	// ③ 剪枝:管理员从清单里删掉的模型必须真的不再路由(行删除)。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m3"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE provider_id = ? AND name = 'm2'`, pid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("m2 行数 = %d, want 0(不在清单里的行必须被剪枝)", n)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+}
+
+// TestRemoveMissingProviderModelsKeepsPricedRows 覆盖 G-02:
+// 上游 /models 目录**部分抖动**(一轮超时/降级/返回子集)不得物理删除带运营方
+// 定价/参数的行 —— 旧行为是 DELETE(价格一并消失),下一轮目录恢复时以新行插回
+// (价格 NULL)⇒ 该模型**永久免费**,而且无日志无审计。
+func TestRemoveMissingProviderModelsKeepsPricedRows(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-bounce", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const params = `{"context_length":128000,"max_output":8192}`
+	if err := SyncProviderModel(db, pid, "priced", params); err != nil {
+		t.Fatal(err)
+	}
+	in, out := 3.0, 7.0
+	if err := UpdateModel(db, &Model{
+		ID: modelRowByName(t, db, pid, "priced").ID, Name: "priced", ProviderID: pid,
+		DisplayName: "priced", DefaultParams: params, InputModalities: []string{"text", "image"},
+		InputPricePer1M: &in, OutputPricePer1M: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 对照:一个不带任何运营方配置的行(同步默认参数为空、无价)仍按旧行为物理删除
+	if err := SyncProviderModel(db, pid, "bare", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_providers SET models = ? WHERE id = ?`, `["priced","bare"]`, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	prevWriter := log.Writer()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevWriter) })
+
+	// 目录抖动:一轮里两个模型都不在上游目录中
+	removed, err := RemoveMissingProviderModels(db, pid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2(1 行标记停用 + 1 行物理删除)", removed)
+	}
+	// ① 有价行仍在,价格/参数/模态一字未改
+	priced := modelRowByName(t, db, pid, "priced")
+	assertModelConfigKept(t, priced, &in, &out, nil, nil, params, []string{"text", "image"})
+	// ② 标记为"目录缺失"(路由与客户端目录据此过滤)
+	if !priced.CatalogMissing {
+		t.Fatalf("catalog_missing = false, want true(有价行必须被标记停用而不是删除)")
+	}
+	// ③ provider JSON 里的名字已移除(否则仍会被路由匹配到)
+	var raw string
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "priced") {
+		t.Fatalf("provider JSON = %s, want 不含 priced", raw)
+	}
+	// ④ 未带运营方配置的行仍物理删除
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE provider_id = ? AND name = 'bare'`, pid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("bare 行数 = %d, want 0", n)
+	}
+	// ⑤ 停用有价行必须留下**可检索的 warning 日志**(含 provider id 与模型名)
+	logged := buf.String()
+	for _, want := range []string{"catalog_missing", "priced", strconv.FormatInt(pid, 10)} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("目录缺失告警日志缺少 %q: %q", want, logged)
+		}
+	}
+	// ⑥ 幂等:再删一轮不得重复计数(已标记的行不参与第二轮)
+	again, err := RemoveMissingProviderModels(db, pid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Fatalf("removed(第二轮) = %d, want 0", again)
+	}
+	// ⑦ 目录恢复:同名 upsert 清标记、名字回到 provider JSON,价格不变
+	if err := SyncProviderModel(db, pid, "priced", params); err != nil {
+		t.Fatal(err)
+	}
+	recovered := modelRowByName(t, db, pid, "priced")
+	if recovered.CatalogMissing {
+		t.Fatalf("目录恢复后 catalog_missing 仍为 true(模型永久不可路由)")
+	}
+	assertModelConfigKept(t, recovered, &in, &out, nil, nil, params, []string{"text", "image"})
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "priced") {
+		t.Fatalf("provider JSON = %s, want 含 priced(目录恢复后名字应回到清单)", raw)
 	}
 }

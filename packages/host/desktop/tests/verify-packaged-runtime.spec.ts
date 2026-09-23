@@ -20,6 +20,8 @@ import {
   REQUIRED_ASAR_EXPORTS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
+  NATIVE_PLATFORM_FAMILIES,
+  NATIVE_FAMILY_EXEMPT_ENTRIES,
   nativeAddonPlatformPackages,
   nativeAddonRequirement,
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
@@ -115,6 +117,17 @@ function listFilesRel(dir: string, prefix = ''): string[] {
 
 /** 我方品牌 SVG(内容断言由专门的用例覆盖,其余用例只关心条目/导出逻辑)。 */
 const BRAND_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254"><rect fill="#000000"/></svg>'
+
+/**
+ * linux/x64 真实产物里 `app.asar.unpacked` 的原生条目（清单里除
+ * `@deepseek-ai/node-addon-system*` 之外的全部）。
+ *
+ * 那一族由"架构感知的原生家族"用例按需摆布（x64 / arm64 / 缺失），这里只提供
+ * 其余家族的"齐备"基线 —— G-1 的家族适用性断言上线后，fixture 再写"精简树"
+ * 会被 `@img/sharp-linux-x64` 这类家族当场打红（判据在正常工作）。
+ */
+const LINUX_X64_NATIVE_FILES = REQUIRED_UNPACKED_RUNTIME_ENTRIES
+  .filter(entry => !entry.startsWith('node_modules/@deepseek-ai/node-addon-system-'))
 
 /**
  * `verifyPackagedRuntime` 的品牌内容读缝打桩:默认返回我方 SVG。
@@ -334,6 +347,85 @@ describe('上游补丁目标的静态 import 必须在打包必需清单里（G-
   })
 })
 
+describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）', () => {
+  // 审计实测（J-test-efficacy §G-2）：从清单里删掉一条 = **同时删掉那条断言**
+  // （`it.each(REQUIRED_PACKAGED_RUNTIME_ENTRIES)` 是自同义反复：删条目就少一个用例）。
+  // 实测静默的删条目：`…/dsh-web-frontend/dist/index.html`、`build/app-icon-mac.png`、
+  // `lib/preload/renderer-error.cjs` —— 三条都落在"文件确实随包、缺了会静默坏"的面上
+  // （`lib/preload/renderer-error.cjs` 正是清单注释里写着"必须在打包断言里逐条钉住"
+  // 的那一条，而它当时没有任何独立判据）。
+  //
+  // 这里的 oracle **不看清单**：从仓库里真实应当随包的东西（构建产物目录 + 打包
+  // 排除规则）推导应有集合，再断言清单覆盖它；反向断言清单里没有死条目。
+  // 与既有的三条 oracle（@picoaide 子路径 / 补丁目标 import / memory-evolve skills）
+  // 同一形态，只把覆盖面推广到可枚举的产物目录。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const manifest = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+
+  /**
+   * 「整个目录随包」族：目录里每个真实文件都必须在清单里。
+   *
+   * `exclude` 的每一条都要写明理由（排除 = 一次显式决定）；`files.length > 0` 是
+   * 前置断言 —— 目录缺失/为空时判据会空转，而本仓规则是**文件缺席即红，不是 skip**
+   * （构建未跑时这里会红，提示先跑 build）。
+   */
+  const SHIPPED_DIRECTORY_FAMILIES = [
+    {
+      label: 'build/（brand-prepare 的构建期产物）',
+      dir: 'build',
+      exclude: [/^channel\.json$/u],
+      why: 'channel.json 只有渠道构建产出，官方构建里不存在；它的随包断言在 verify-channel-package.ts',
+    },
+    {
+      label: 'lib/preload/（沙箱预加载脚本）',
+      dir: 'lib/preload',
+      exclude: [/\.map$/u],
+      why: 'sourcemap 由 FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS 明令禁止随包',
+    },
+    {
+      label: '@deepseek-ai/dsh-web-frontend/dist（稳定名入口文档）',
+      dir: 'node_modules/@deepseek-ai/dsh-web-frontend/dist',
+      exclude: [/^assets\//u, /\.map$/u, /^preview/u],
+      why: 'assets/ 是内容哈希 chunk（名字随上游每次升级变化，由产物驱动的 import 判据覆盖）；preview* 被上游自己的 files 排除',
+    },
+  ] as const
+
+  it.each(SHIPPED_DIRECTORY_FAMILIES)(
+    '$label：目录里每个真实文件都必须在清单里，清单里每条也必须真实存在',
+    (family) => {
+      const files = listFilesRel(join(desktopRoot, family.dir))
+        .filter(rel => !family.exclude.some(pattern => pattern.test(rel)))
+      expect(
+        files.length,
+        `${family.dir} 里没有可枚举文件（构建未跑？）—— 判据不能空转`,
+      ).toBeGreaterThan(0)
+      const prefix = `${family.dir}/`
+      const missing = files.filter(rel => !manifest.has(`${prefix}${rel}`))
+      expect(
+        missing,
+        `这些文件真的随包（${family.dir}），但打包必需清单里没有：\n  ${missing.join('\n  ')}\n`
+        + `（排除规则：${family.exclude.map(String).join(', ')}；理由：${family.why}）`,
+      ).toEqual([])
+      const dead = [...manifest]
+        .filter(entry => entry.startsWith(prefix))
+        .filter(entry => !existsSync(join(desktopRoot, entry)))
+      expect(
+        dead,
+        `清单里有 ${family.dir} 下的死条目（文件已不存在）：\n  ${dead.join('\n  ')}`,
+      ).toEqual([])
+    },
+  )
+
+  it('清单条数棘轮：批量删条目必须是有意识的决定（下限只随新增条目上调）', () => {
+    // 细粒度覆盖由上面的目录 oracle 与另外三条来源 oracle 负责；这条只兜"整段
+    // 注释掉/删除"这种批量形态（例如把 build/ 那一段整体删掉而各处仍绿）。
+    expect(
+      REQUIRED_PACKAGED_RUNTIME_ENTRIES.length,
+      `清单当前 ${REQUIRED_PACKAGED_RUNTIME_ENTRIES.length} 条（下限 82）`,
+    ).toBeGreaterThanOrEqual(82)
+  })
+})
+
 describe('packaged desktop runtime verification', () => {
   it('fails the diagnostic Worker smoke when its archive omits the crash dump', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
@@ -505,7 +597,10 @@ describe('packaged desktop runtime verification', () => {
       const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
       mkdirSync(unpackedRoot, { recursive: true })
       // 至少一条必需原生条目存在,否则会先被"no native unpacked entries"拦下。
-      writeUnpacked(unpackedRoot, ['node_modules/node-pty/prebuilds/linux-x64/pty.node', ...files])
+      // G-1（2026-09-23）：还要**除被测家族外全都齐** —— 家族适用性断言上线后，
+      // 只写一条 pty.node 的"精简树"会被 @img/sharp-linux-x64 等家族当场打红，
+      // 那是判据在正常工作，不是 fixture 该省的事。
+      writeUnpacked(unpackedRoot, [...LINUX_X64_NATIVE_FILES, ...files])
       return runtimeContext
     }
 
@@ -555,6 +650,160 @@ describe('packaged desktop runtime verification', () => {
       ])
       expect(() => verifyWithBrandStub(missing, () => completeArchiveEntries()))
         .toThrow(/missing required native files.*node-addon-system-darwin-arm64\/bin\/system\.node/su)
+    })
+  })
+
+  describe('按平台存在的原生家族：整包缺失必须红（G-1，2026-09-23 补）', () => {
+    // 审计实测（J-test-efficacy §G-1）：旧判据是「**整包目录不存在** ⇒ 这一条不算
+    // 缺失」，于是整包删掉 `@img/sharp-linux-x64` / `@koromix/koffi-linux-x64` /
+    // `node-pty` / `@vscode/ripgrep-linux-x64` /
+    // `node-addon-require-builtin-linux-x64-gnu` 之后 afterPack **全部 PASS**，
+    // 唯一会发现它的时机是运行期的 dlopen / execFile 失败。
+    // 这里用一棵"逐路径回答存在性"的假文件系统**精确复现"整包目录被删"**：
+    // 删除 = 该包目录下所有条目一起消失（目录本身也消失），完全等价于现场形态。
+    /** fake 路径下的 unpacked 根（linux/win32 布局是 `<appOutDir>/resources/...`）。 */
+    const FAKE_ROOT = resolvePackagedUnpackedRoot(context('/build', 'linux', 1))
+    const ALL_UNPACKED_ENTRIES = [
+      ...REQUIRED_UNPACKED_RUNTIME_ENTRIES,
+      ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
+    ]
+
+    /** 以条目集合为真源的 FileProbe（root = 该平台的 app.asar.unpacked）：文件存在、其所有祖先目录也存在。 */
+    function treeProbe(root: string, tree: ReadonlySet<string>): FileProbe {
+      const files = [...tree]
+      return (filename: string): boolean => {
+        const normalized = filename.replaceAll('\\', '/')
+        if (normalized === root) return true
+        const prefix = `${root}/`
+        if (!normalized.startsWith(prefix)) return false
+        const rel = normalized.slice(prefix.length)
+        return tree.has(rel) || files.some(entry => entry.startsWith(`${rel}/`))
+      }
+    }
+
+    /** 删掉整个包目录（= 现场 `rm -rf node_modules/<pkg>`）后剩下的树。 */
+    function withoutPackage(entries: readonly string[], packageDir: string): Set<string> {
+      return new Set(entries.filter(entry => entry !== packageDir && !entry.startsWith(`${packageDir}/`)))
+    }
+
+    function expectPass(platform: string, arch: number, entries: readonly string[]): void {
+      expect(() => verifyWithBrandStub(
+        context('/build', platform, arch),
+        () => completeArchiveEntries(),
+        treeProbe(resolvePackagedUnpackedRoot(context('/build', platform, arch)), new Set(entries)),
+      )).not.toThrow()
+    }
+
+    it('家族表与清单逐条对齐（无未分类条目、无死条目）', () => {
+      // 这条是家族表自己的 oracle：删掉一行家族（= 悄悄解除一族断言）会被下面
+      // 两个方向同时打红 —— 那些条目变成"未分类"，而它也不再被任何用例覆盖。
+      const classified = new Set<string>()
+      for (const family of NATIVE_PLATFORM_FAMILIES) {
+        expect(family.entries.length, `${family.id} 没有任何条目`).toBeGreaterThan(0)
+        expect(family.purpose.length, `${family.id} 没写清承载什么`).toBeGreaterThan(0)
+        for (const entry of family.entries) {
+          expect(classified.has(entry), `${entry} 被两个家族重复登记`).toBe(false)
+          classified.add(entry)
+        }
+      }
+      for (const [entry, owner] of NATIVE_FAMILY_EXEMPT_ENTRIES) {
+        expect(owner.length, `${entry} 的豁免没写负责方`).toBeGreaterThan(0)
+        expect(classified.has(entry), `${entry} 既在家族表里又被豁免`).toBe(false)
+        classified.add(entry)
+      }
+      const manifest = new Set<string>(ALL_UNPACKED_ENTRIES)
+      expect(
+        ALL_UNPACKED_ENTRIES.filter(entry => !classified.has(entry)),
+        '这些原生必需条目没有被任何家族/豁免项分类（新增条目必须显式决定它归谁管）',
+      ).toEqual([])
+      expect(
+        [...classified].filter(entry => !manifest.has(entry)),
+        '这些家族/豁免条目不在打包必需清单里（死条目）',
+      ).toEqual([])
+    })
+
+    it('适用性矩阵：家族只在声明的平台/架构上生效', () => {
+      const applies = (id: string, platform: string, arch?: number): boolean => {
+        const family = NATIVE_PLATFORM_FAMILIES.find(candidate => candidate.id === id)
+        expect(family, `家族表里没有 ${id}`).toBeDefined()
+        return family!.applies(platform, arch)
+      }
+      const linuxFamilies = NATIVE_PLATFORM_FAMILIES
+        .filter(family => family.id !== 'node-pty（win32-x64 prebuild）')
+        .map(family => family.id)
+      for (const id of linuxFamilies) {
+        expect(applies(id, 'linux', 1), `${id} 在 linux/x64 上应当适用`).toBe(true)
+        expect(applies(id, 'linux'), `${id} 在未声明 arch 的 linux 上应当适用（历史形态 = x64）`).toBe(true)
+        expect(applies(id, 'linux', 3), `${id} 在 linux/arm64 上不适用（本仓不构建该目标）`).toBe(false)
+        expect(applies(id, 'win32', 1), `${id} 在 win32 上不适用`).toBe(false)
+        expect(applies(id, 'darwin', 3), `${id} 在 darwin 上不适用`).toBe(false)
+      }
+      expect(applies('node-pty（win32-x64 prebuild）', 'win32', 1)).toBe(true)
+      expect(applies('node-pty（win32-x64 prebuild）', 'win32')).toBe(true)
+      expect(applies('node-pty（win32-x64 prebuild）', 'linux', 1)).toBe(false)
+    })
+
+    it('linux/x64 基线通过，而删掉任一原生家族的整包目录必红', () => {
+      expectPass('linux', 1, REQUIRED_UNPACKED_RUNTIME_ENTRIES)
+      // 只对**这一平台上适用**的家族提要求：win32 的 ConPTY 一族在 linux 上不适用。
+      const applicable = NATIVE_PLATFORM_FAMILIES
+        .filter(family => family.applies('linux', 1)
+          && !family.packageDir.includes('node-addon-system'))
+        .map(family => family.packageDir)
+      expect(applicable.length, 'linux/x64 上没有任何适用家族，判据会空转').toBeGreaterThan(0)
+      for (const packageDir of applicable) {
+        expect(
+          () => verifyWithBrandStub(
+            context('/build', 'linux', 1),
+            () => completeArchiveEntries(),
+            treeProbe(FAKE_ROOT, withoutPackage(REQUIRED_UNPACKED_RUNTIME_ENTRIES, packageDir)),
+          ),
+          `整包删掉 ${packageDir} 后门禁必须红（G-1 的假绿形态）`,
+        ).toThrow(/missing the .* native family/u)
+      }
+    })
+
+    it('win32/x64：删掉 linux 专属家族不红，删掉 ConPTY 一族必红', () => {
+      // 反向：平台不适用的家族缺席必须合法（否则 Windows 打包会被 linux 条目打红）。
+      for (const packageDir of [
+        'node_modules/@img/sharp-linux-x64',
+        'node_modules/@koromix/koffi-linux-x64',
+        'node_modules/node-addon-require-builtin-linux-x64-gnu',
+        'node_modules/@vscode/ripgrep-linux-x64',
+      ]) {
+        expect(
+          () => verifyWithBrandStub(
+            context('/build', 'win32', 1),
+            () => completeArchiveEntries(),
+            treeProbe(FAKE_ROOT, withoutPackage(ALL_UNPACKED_ENTRIES, packageDir)),
+          ),
+          `${packageDir} 在 win32 上不适用，缺席不该红`,
+        ).not.toThrow()
+      }
+      expect(
+        () => verifyWithBrandStub(
+          context('/build', 'win32', 1),
+          () => completeArchiveEntries(),
+          treeProbe(FAKE_ROOT, withoutPackage(ALL_UNPACKED_ENTRIES, 'node_modules/node-pty/prebuilds/win32-x64')),
+        ),
+        'win32 目标的 ConPTY 一族整包缺失必须红',
+      ).toThrow(/missing the node-pty（win32-x64 prebuild） native family/u)
+    })
+
+    it('darwin 目标不受 linux/win32 家族影响（darwin 走绝对路径断言）', () => {
+      const darwinTree = new Set<string>([
+        // 任一条必需条目在即可过"has no native unpacked entries"（G-1 的家族表里
+        // 没有 darwin 条目：darwin 的原生文件以 `resolveNativeEntry` 的**绝对路径**
+        // 进 `requiredPhysicalEntries`，本来就不受"整包不存在跳过"影响，另有
+        // verify-mac-smoke / verify-mac-release 覆盖）。
+        'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      expect(() => verifyWithBrandStub(
+        context('/build', 'darwin', 3),
+        () => completeArchiveEntries(),
+        treeProbe(resolvePackagedUnpackedRoot(context('/build', 'darwin', 3)), darwinTree),
+      )).not.toThrow()
     })
   })
 

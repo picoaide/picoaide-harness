@@ -100,12 +100,28 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      # ref 形态 → 渠道集 / 是否发布的**唯一真源**(2026-09-23 审计 K-04)。
+      #
+      # 为什么放在 gate 的第一步:这条规则曾经有两份实现(ci-channels.sh 的 bash
+      # glob + release job 的 `if:`),两者对"名字带 `-` 但后缀不认识"的 tag 结论
+      # 相反 —— 一个 `v2.8.2-hotfix` 会跑满三平台构建(含品牌渠道),而 release job
+      # 整体被跳过:零交付 + 客户侧零信号,品牌产物还留在 R2 中转前缀里没人清理。
+      # 现在形态判定只有 `scripts/ci-release-policy.sh` 一处:不认识就**当场红**
+      # (1 分钟内),desktop-* / release 因 `needs: gate` 全部跳过 ⇒ 不会再有
+      # "构建了却不发布"的空转。判据与渠道集见该脚本头部注释。
+      - name: Classify the release tag (single source of truth)
+        id: release_policy
+        run: |
+          set -euo pipefail
+          bash scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
       # 正式 tag 必须有策展发布说明(2026-09-11 定案):GitHub Release 页是**公开面**,
       # 缺 docs/releases/<tag>.md 时 release job 会回退自动生成的 PR 列表 —— 版本页
       # 变成 CI 日志(v2.7.0 的实际情况)。这条检查放在 gate 的第一步:tag 打错时
       # 1 分钟内就报,不必等三平台构建 40 分钟才在最后一步失败。预发 tag 允许缺失。
+      # 「正式 / 预发」同样取自上面的唯一真源,不再写 `!contains(ref_name,'-')` 这类
+      # 名字形状判断 —— 那种写在 `if:` 里的第二份判据正是 K-04 的根因形态。
       - name: Require curated release notes for stable tags
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+        if: steps.release_policy.outputs.release_kind == 'stable'
         run: |
           set -euo pipefail
           test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
@@ -765,8 +781,14 @@ jobs:
     name: Release (server image archive)
     # 只对 beta 与 official 发布到 GitHub Release(2026-09-10 定案):
     # 品牌渠道是客户定制交付,不进公开 Releases(客户从更新服务器自己的渠道目录取)。
-    # 渠道由 tag 形态决定,与 resolve 步骤同源。
-    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || !contains(github.ref_name, '-'))
+    #
+    # **这里只判"是不是 v 开头的 tag",不再判 tag 形态**(2026-09-23 审计 K-04):
+    # 形态 → 渠道集/是否发布的映射是 `scripts/ci-release-policy.sh` 一份实现,由
+    # gate 的第一步执行(未知形态当场红 ⇒ 本 job 因 `needs` 被跳过)。
+    # 曾经这里写着第二份判据 `… || !contains(github.ref_name, '-')`,它与渠道脚本
+    # 对 `v2.8.2-hotfix` 结论相反:全渠道构建 + 零发布(客户侧零信号、R2 中转前缀
+    # 无人清理)。**不要**再把名字形状判断写回这个 `if:`。
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 45

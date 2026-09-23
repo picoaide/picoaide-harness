@@ -1,21 +1,31 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import {
+  classifyInstalledSkill,
   computeSkillContentHash,
+  describeSkillFailure,
   installSkillArchive,
+  isLoadableSkillName,
   listInstalledSkills,
+  listLocalSkills,
   packSkill,
   readProvenance,
   resolveSkillsDir,
+  sanitizeSkillErrorText,
   SKILL_NAME_PATTERN,
+  SkillInstallRefusal,
+  sweepStaleSkillTemps,
   synthesizeSkillFrontmatter,
   uninstallSkill,
   validateSkillName,
+  writeProvenance,
 } from '../src/skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from '../src/archive-util.ts'
 
@@ -84,7 +94,15 @@ describe('validateSkillName', () => {
   it('accepts safe single-segment names', () => {
     expect(validateSkillName('code-review')).toBe('code-review')
     expect(validateSkillName('a1')).toBe('a1')
-    expect(SKILL_NAME_PATTERN.test('skill.v2_3')).toBe(true)
+    expect(validateSkillName('skill-v2')).toBe('skill-v2')
+    // 审计 A1:安装器的名字规则必须与运行时**逐字一致**——点号/下划线/连续连字符
+    // 装得上但运行时永远不加载,因此这里一律拒绝。
+    expect(SKILL_NAME_PATTERN.test('skill.v2_3')).toBe(false)
+    expect(() => validateSkillName('skill.v2_3')).toThrow(/invalid skill name/)
+    expect(() => validateSkillName('my_skill')).toThrow(/invalid skill name/)
+    expect(() => validateSkillName('alpha--beta')).toThrow(/invalid skill name/)
+    expect(() => validateSkillName('skill-')).toThrow(/invalid skill name/)
+    expect(() => validateSkillName('-lead')).toThrow(/invalid skill name/)
   })
 
   it('rejects traversal, absolute, and empty names', () => {
@@ -109,8 +127,9 @@ describe('installSkillArchive', () => {
       const result = await installSkillArchive({ name: 'demo-skill', archive, checksum, skillsDir, version: '1.0.0' })
       expect(result.targetDir).toBe(join(skillsDir, 'demo-skill'))
       const installedMd = await readFile(join(skillsDir, 'demo-skill', 'SKILL.md'), 'utf8')
-      // metadata.yaml supplies name: demo; description falls back.
-      expect(installedMd).toMatch(/^---\nname: demo\ndescription: demo-skill skill(\nversion: 1\.0\.0)?\n---\n# Demo Skill/)
+      // 审计 A1:合成出来的 frontmatter `name` 恒等于技能 ID(目录名),metadata.yaml 的
+      // 展示名进 title —— 旧实现照抄 `name: demo` 会让运行时判 invalid skill name。
+      expect(installedMd).toMatch(/^---\nname: demo-skill\ndescription: demo-skill skill\ntitle: demo\nversion: 1\.0\.0\n---\n# Demo Skill/)
       expect(installedMd).toContain(SKILL_MD)
       expect(await readFile(join(skillsDir, 'demo-skill', 'scripts', 'run.sh'), 'utf8')).toContain('echo hi')
     } finally {
@@ -305,13 +324,34 @@ describe('listInstalledSkills', () => {
 })
 
 describe('uninstallSkill', () => {
-  it('removes an installed skill directory', async () => {
+  it('removes an installed skill directory (商店来源无需确认)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
     try {
       await mkdir(join(root, 'alpha'), { recursive: true })
       await writeFile(join(root, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: demo\n---\n# a\n')
+      // 带能力中心写的溯源 ⇒ 直接删(不带 overwrite 也允许)。
+      await writeProvenance(join(root, 'alpha'), {
+        appId: 'alpha', version: '1.0.0', channel: 'market', installedAt: new Date().toISOString(),
+      })
       await expect(uninstallSkill(root, 'alpha')).resolves.toBe(join(root, 'alpha'))
       await expect(readFile(join(root, 'alpha', 'SKILL.md'), 'utf8')).rejects.toThrow()
+      expect(await listInstalledSkills(root)).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('本机自制同名技能必须显式确认才能卸载(审计 A3)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-skill-root-'))
+    try {
+      await mkdir(join(root, 'self-made'), { recursive: true })
+      await writeFile(join(root, 'self-made', 'SKILL.md'), '---\nname: self-made\ndescription: demo\n---\n# mine\n')
+      await writeFile(join(root, 'self-made', 'notes.md'), 'my notes\n')
+      // 无溯源 = 用户自制:默认拒绝,且不许动磁盘上任何东西。
+      await expect(uninstallSkill(root, 'self-made')).rejects.toThrow(/not installed by the Capability Hub/)
+      await expect(readFile(join(root, 'self-made', 'notes.md'), 'utf8')).resolves.toBe('my notes\n')
+      // 用户确认后才删。
+      await expect(uninstallSkill(root, 'self-made', { overwrite: true })).resolves.toBe(join(root, 'self-made'))
       expect(await listInstalledSkills(root)).toEqual([])
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -443,5 +483,349 @@ describe('溯源标记与本地改动检测', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 独立审计 2026-09-23 A1 / A2 / A3 / A7 / A8 / A12 / A13 + 跨泳道契约 S2 的回归
+// ---------------------------------------------------------------------------
+
+/** Frontmatter with an arbitrary `name` (used by the loadability gate matrix). */
+function skillMdWith(name: string, extra = ''): string {
+  return `---\nname: ${name}\n${extra}description: demo skill body\n---\n# body\n`
+}
+
+/** 造一个"能力中心装的"技能目录（带溯源标记）。 */
+async function makeStoreSkill(root: string, name: string, channel: 'market' | 'org' | 'builtin' | 'plugin' = 'market'): Promise<string> {
+  const dir = join(root, name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'SKILL.md'), skillMdWith(name, 'version: 1.0.0\n'))
+  await writeProvenance(dir, { appId: name, version: '1.0.0', channel, installedAt: new Date().toISOString() })
+  return dir
+}
+
+describe('A1 安装期"可加载性"门禁（装得上就必须加载得到）', () => {
+  let root: string
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a1-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('名字规则与 pinned 上游 isSkillName 逐字一致（运行时规则单一真源）', async () => {
+    const upstream = await import('@deepseek-ai/dsh-skill')
+    const matrix = [
+      'a', 'a1', 'alpha-skill', 'skill-v2', 'con',
+      'my.skill', 'my_skill', 'alpha--beta', 'skill-', '-lead', 'A', 'a/b', '', 'a..b', 'a.', 'ünïcode', 'a b', '.hidden',
+    ]
+    for (const name of matrix) {
+      expect(isLoadableSkillName(name), `name=${JSON.stringify(name)}`).toBe(upstream.isSkillName(name))
+    }
+    // 长度上限是我们额外加的（上游正则不限长），只对超长名断言"我们更严"。
+    const long = 'x'.repeat(65)
+    expect(upstream.isSkillName(long)).toBe(true)
+    expect(isLoadableSkillName(long)).toBe(false)
+  })
+
+  it('缺 description / frontmatter 非法 / name 与技能 ID 不一致 ⇒ 拒绝安装（附人话原因）', async () => {
+    const cases: Array<{ label: string, files: Record<string, string> }> = [
+      // 注意：完全没有 frontmatter **不是**拒绝项 —— 旧网关格式靠 metadata.yaml/技能 ID
+      // 合成（见 synthesizeSkillFrontmatter 的用例），只有"有 frontmatter 但不可加载"才拒。
+      { label: 'missing-description', files: { 'SKILL.md': '---\nname: gated\n---\n# body\n' } },
+      { label: 'dotted-name', files: { 'SKILL.md': skillMdWith('my.skill') } },
+      { label: 'underscore-name', files: { 'SKILL.md': skillMdWith('my_skill') } },
+      { label: 'name-mismatch', files: { 'SKILL.md': skillMdWith('other-skill') } },
+      { label: 'broken-yaml', files: { 'SKILL.md': '---\nname: [unclosed\n---\n# body\n' } },
+    ]
+    for (const c of cases) {
+      const archive = await makeArchive(c.files)
+      await expect(
+        installSkillArchive({ name: 'gated', archive, skillsDir: root }),
+        c.label,
+      ).rejects.toThrow(/frontmatter|not a loadable skill name|must equal the skill id/u)
+      // 拒绝必须 fail-loud 且**不留任何落盘**（含 staging）。
+      expect(await listInstalledSkills(root), c.label).toEqual([])
+    }
+    expect(await readdir(root)).toEqual([])
+  })
+
+  it('frontmatter 完整且 name == 技能 ID ⇒ 安装成功（对照组）', async () => {
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('gated', 'version: 1.0.0\n') })
+    await expect(installSkillArchive({ name: 'gated', archive, skillsDir: root })).resolves.toMatchObject({ name: 'gated' })
+    expect(await listInstalledSkills(root)).toEqual(['gated'])
+  })
+
+  it('metadata.yaml 的展示名不再顶替 frontmatter name（进 title）', async () => {
+    const archive = await makeArchive({
+      'SKILL.md': '# body\n',
+      'metadata.yaml': 'name: "Epsilon 技能"\nversion: 1.0.0\n',
+    })
+    await installSkillArchive({ name: 'epsilon-skill', archive, skillsDir: root })
+    const md = await readFile(join(root, 'epsilon-skill', 'SKILL.md'), 'utf8')
+    expect(md).toContain('name: epsilon-skill')
+    expect(md).toContain('title: Epsilon 技能')
+  })
+})
+
+describe('A2/A3 覆盖与删除按 provenance 判定（本机自制内容必须显式确认）', () => {
+  let root: string
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a23-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('安装到同名本机自制目录 ⇒ 无 overwrite 一律拒绝，且用户内容一字不动', async () => {
+    await mkdir(join(root, 'mine'), { recursive: true })
+    await writeFile(join(root, 'mine', 'SKILL.md'), skillMdWith('mine'))
+    await writeFile(join(root, 'mine', 'notes.md'), 'my own notes\n')
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('mine', 'version: 1.0.0\n') })
+    await expect(installSkillArchive({ name: 'mine', archive, skillsDir: root })).rejects.toThrow(/not installed by the Capability Hub/u)
+    expect(await readFile(join(root, 'mine', 'notes.md'), 'utf8')).toBe('my own notes\n')
+    // 用户确认后才整树替换（用户文件按设计消失，但这一次是用户点过确认的）。
+    await expect(installSkillArchive({ name: 'mine', archive, skillsDir: root, overwrite: true })).resolves.toMatchObject({ name: 'mine' })
+    await expect(readFile(join(root, 'mine', 'notes.md'), 'utf8')).rejects.toThrow()
+    expect((await readProvenance(join(root, 'mine')))?.channel).toBe('market')
+  })
+
+  it('同名但 provenance.appId 对不上（目录被改名/被占用）⇒ 同样按自制内容处理', async () => {
+    const dir = await makeStoreSkill(root, 'squatter')
+    await writeProvenance(dir, { appId: 'someone-else', version: '1.0.0', channel: 'market', installedAt: '' })
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('squatter', 'version: 2.0.0\n') })
+    await expect(installSkillArchive({ name: 'squatter', archive, skillsDir: root })).rejects.toThrow(/not installed by the Capability Hub/u)
+  })
+
+  it('商店来源（market/org/builtin/plugin 四种）不需要确认即可更新/卸载', async () => {
+    for (const channel of ['market', 'org', 'builtin', 'plugin'] as const) {
+      await makeStoreSkill(root, `store-${channel}`, channel)
+      const archive = await makeArchive({ 'SKILL.md': skillMdWith(`store-${channel}`, 'version: 2.0.0\n') })
+      await expect(
+        installSkillArchive({ name: `store-${channel}`, archive, skillsDir: root, version: '2.0.0' }),
+        channel,
+      ).resolves.toMatchObject({ name: `store-${channel}` })
+      await expect(uninstallSkill(root, `store-${channel}`), channel).resolves.toBe(join(root, `store-${channel}`))
+    }
+    expect(await listInstalledSkills(root)).toEqual([])
+  })
+
+  it('readProvenance 把 plugin 原样返回（不回落成 market，跨泳道契约 S2）', async () => {
+    const dir = await makeStoreSkill(root, 'bundled-skill', 'plugin')
+    expect((await readProvenance(dir))?.channel).toBe('plugin')
+    expect(await classifyInstalledSkill(dir, 'bundled-skill')).toBe('store')
+    // 未知渠道不回落成 market：按"非商店来源"处理。
+    await writeProvenance(dir, { appId: 'bundled-skill', version: '1.0.0', channel: 'unknown-channel', installedAt: '' })
+    expect((await readProvenance(dir))?.channel).toBe('unknown-channel')
+    expect(await classifyInstalledSkill(dir, 'bundled-skill')).toBe('local')
+  })
+})
+
+describe('A7 并发与残留目录（备份目录不再污染技能库）', () => {
+  let root: string
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a7-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('staging/备份都在 .skill-tmp 之下：listInstalledSkills 与运行时都看不到它们', async () => {
+    // 模拟"换入被打断"：备份目录里有完整 SKILL.md（旧实现会把它当技能加载）。
+    await mkdir(join(root, '.skill-tmp', 'install-abc123', 'backup'), { recursive: true })
+    await writeFile(join(root, '.skill-tmp', 'install-abc123', 'backup', 'SKILL.md'), skillMdWith('ghost'))
+    // 旧布局的残留（≤2.8.1）：点号开头的 staging 与 `.<name>.backup-<pid>-<ts>`。
+    await mkdir(join(root, '.install-ghost-def456', 'unpacked'), { recursive: true })
+    await writeFile(join(root, '.install-ghost-def456', 'unpacked', 'SKILL.md'), skillMdWith('ghost'))
+    await mkdir(join(root, '.ghost.backup-123-456'), { recursive: true })
+    await writeFile(join(root, '.ghost.backup-123-456', 'SKILL.md'), skillMdWith('ghost'))
+    expect(await listInstalledSkills(root)).toEqual([])
+  })
+
+  it('源码判据：staging 与备份都在 .skill-tmp 之下，备份名不再以技能名开头（A7 的原始形态）', () => {
+    // 为什么这条必须读源码：备份目录一旦是技能库的**直接子目录**（旧形态
+    // `<skills>/.<name>.backup-<pid>-<ts>`），唯一能观测到它的消费者是上游运行时
+    // `skill-filesystem`（本包的用例驱动不到它）；而"它在直接子目录层级"这件事
+    // 正是 p13 探针实测出"卸载后技能仍然可用"的根因。位置契约在这里钉死。
+    const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
+    expect(source).toContain("const staging = await mkdtemp(join(tempRoot, 'install-'))")
+    expect(source).toContain("const backupDir = join(staging, 'backup')")
+    expect(source).toContain('const tempRoot = join(skillsDir, SKILL_TEMP_DIR)')
+    // 旧形态（备份是技能库直接子目录、名字以技能名开头）不得回来。
+    expect(source).not.toMatch(/join\(skillsDir, `?\.\$\{name\}\.backup-/u)
+  })
+
+  it('卸载后立刻 list 不再出现该技能（含同名备份残留）', async () => {
+    await makeStoreSkill(root, 'zeta-skill')
+    // 卸载期间留下的备份残留（同名、含真 frontmatter）。
+    await mkdir(join(root, '.skill-tmp', 'install-x', 'backup'), { recursive: true })
+    await writeFile(join(root, '.skill-tmp', 'install-x', 'backup', 'SKILL.md'), skillMdWith('zeta-skill'))
+    await uninstallSkill(root, 'zeta-skill')
+    expect(await listInstalledSkills(root)).toEqual([])
+    // 备份残留仍在磁盘上（由清扫器按年龄处理），但**任何**列表/发现都不得把它算成技能。
+    expect(await listLocalSkills(root)).toEqual([])
+  })
+
+  it('并发 install + uninstall 被 per-name 锁串行化：最后一次操作说了算，且无孤儿备份', async () => {
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('race-skill', 'version: 2.0.0\n') })
+    await makeStoreSkill(root, 'race-skill')
+    const [installed, uninstalled] = await Promise.all([
+      installSkillArchive({ name: 'race-skill', archive, skillsDir: root, version: '2.0.0' }),
+      uninstallSkill(root, 'race-skill'),
+    ])
+    expect(installed.name).toBe('race-skill')
+    expect(uninstalled).toBe(join(root, 'race-skill'))
+    // 调用顺序 = 锁获取顺序 ⇒ 后到的卸载是最终态（旧实现会"两边都成功但技能还在"）。
+    expect(await listInstalledSkills(root)).toEqual([])
+    // 技能库里除 .skill-tmp（安装器私有区）之外不得留下任何东西。
+    const leftovers = (await readdir(root)).filter(name => name !== '.skill-tmp')
+    expect(leftovers).toEqual([])
+  })
+
+  it('sweepStaleSkillTemps 清陈旧暂存、留新鲜的、永不碰 orphan-*', async () => {
+    const stale = join(root, '.skill-tmp', 'install-stale')
+    const fresh = join(root, '.skill-tmp', 'install-fresh')
+    const orphan = join(root, '.skill-tmp', 'orphan-123-keepme')
+    for (const dir of [stale, fresh, orphan]) {
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'SKILL.md'), skillMdWith('x'))
+    }
+    // 把 stale 的 mtime 拨到 3 天前。
+    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+    await utimes(stale, old, old)
+    const legacy = join(root, '.install-legacy-abc')
+    await mkdir(legacy, { recursive: true })
+    await utimes(legacy, old, old)
+    expect(await sweepStaleSkillTemps(root)).toBe(2)
+    expect(await readdir(join(root, '.skill-tmp'))).toEqual(['install-fresh', 'orphan-123-keepme'])
+    await expect(stat(legacy)).rejects.toThrow()
+  })
+})
+
+describe('A8 tar 通道与 zip 通道权限口径一致（剥掉 setuid/setgid/sticky）', () => {
+  let root: string
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a8-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('归档里的 0o4755 / 0o2755 / 0o1777 落盘后不含 0o7000 位（两条通道同判据）', async () => {
+    // tar：真实文件带 setuid/setgid/sticky 位 → tar.c 记录进头。
+    const src = await mkdtemp(join(tmpdir(), 'pico-a8-src-'))
+    try {
+      await writeFile(join(src, 'SKILL.md'), skillMdWith('mode-skill', 'version: 1.0.0\n'))
+      await writeFile(join(src, 'suid.sh'), '#!/bin/sh\necho hi\n', { mode: 0o4755 })
+      await writeFile(join(src, 'sgid.sh'), '#!/bin/sh\necho hi\n', { mode: 0o2755 })
+      await writeFile(join(src, 'sticky.sh'), '#!/bin/sh\necho hi\n', { mode: 0o1777 })
+      const archive = await packDir(src)
+      await installSkillArchive({ name: 'mode-skill', archive, skillsDir: root })
+      for (const file of ['suid.sh', 'sgid.sh', 'sticky.sh']) {
+        const st = await stat(join(root, 'mode-skill', file))
+        expect(st.mode & 0o7000, `${file} mode=${st.mode.toString(8)}`).toBe(0)
+      }
+      // 可执行位必须保留（0o4755 → 0o755，不是 0o644）。
+      expect((await stat(join(root, 'mode-skill', 'suid.sh'))).mode & 0o111).not.toBe(0)
+    } finally {
+      await rm(src, { recursive: true, force: true })
+    }
+
+    // zip：同一位在 external attr 里（zip 通道本来就有 & 0o777 掩码，这里对拍防漂移）。
+    const zip = new AdmZip()
+    zip.addFile('SKILL.md', Buffer.from(skillMdWith('zip-mode-skill', 'version: 1.0.0\n')), '', 0o644)
+    zip.addFile('suid.sh', Buffer.from('#!/bin/sh\n'), '', 0o4755)
+    await installSkillArchive({ name: 'zip-mode-skill', archive: zip.toBuffer(), skillsDir: root })
+    expect((await stat(join(root, 'zip-mode-skill', 'suid.sh'))).mode & 0o7000).toBe(0)
+  })
+})
+
+describe('A12 失败文案脱敏 + 陈旧 staging 清扫', () => {
+  it('sanitizeSkillErrorText 去掉本机路径、保留 errno 与原因', () => {
+    const raw = "ENOTEMPTY: directory not empty, rename '/home/user/.picoaide-harness/skills/.install-x/unpacked' -> '/home/user/.picoaide-harness/skills/zeta'"
+    const clean = sanitizeSkillErrorText(raw)
+    expect(clean).toBe('ENOTEMPTY: target directory not empty (a concurrent install/uninstall may be running)')
+    expect(clean).not.toContain('/home')
+    // 未知 errno / 无 errno 的文案：整体脱敏，路径只剩 basename。
+    const other = sanitizeSkillErrorText("EACCES: permission denied, open '/root/secret/skills/a/SKILL.md'")
+    expect(other).toBe('EACCES: permission denied')
+    const weird = sanitizeSkillErrorText("boom at '/tmp/one/two/three.txt' and C:\\Users\\me\\x.txt")
+    expect(weird).not.toContain('/tmp/one')
+    expect(weird).not.toContain('C:\\Users')
+    expect(weird).toContain('three.txt')
+  })
+
+  it('describeSkillFailure 把失败映射成稳定状态码（409/422/404/413/502）', () => {
+    expect(describeSkillFailure(new SkillInstallRefusal('LOCAL_CONTENT', 'x'))).toMatchObject({ status: 409, code: 'LOCAL_CONTENT', refusal: true })
+    expect(describeSkillFailure(new SkillInstallRefusal('NOT_INSTALLED', 'x'))).toMatchObject({ status: 404, code: 'NOT_INSTALLED' })
+    expect(describeSkillFailure(new SkillInstallRefusal('ARCHIVE_TOO_LARGE', 'x'))).toMatchObject({ status: 413 })
+    expect(describeSkillFailure(new SkillInstallRefusal('CHECKSUM_MISMATCH', 'archive checksum mismatch; refused'))).toMatchObject({ status: 422 })
+    // archive-util 的普通 Error 也是拒绝（关键词兜底），不是上游 502。
+    expect(describeSkillFailure(new Error('parent traversal in archive: ../evil'))).toMatchObject({ status: 422, refusal: true })
+    const system = describeSkillFailure(new Error("EACCES: permission denied, mkdir '/home/u/.picoaide-harness/skills'"))
+    expect(system).toMatchObject({ status: 502, refusal: false })
+    expect(system.message).not.toContain('/home/u')
+  })
+
+  it('系统级失败的裸错误不把本机绝对路径透给 UI（真实安装失败用例）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-a12-'))
+    try {
+      // skillsDir 指向一个**文件**：mkdir/mkdtemp 必然失败，错误里带本机路径。
+      const asFile = join(root, 'not-a-dir')
+      await writeFile(asFile, 'x')
+      const archive = await makeArchive({ 'SKILL.md': skillMdWith('x', 'version: 1.0.0\n') })
+      const cause = await installSkillArchive({ name: 'x', archive, skillsDir: asFile }).catch((e: unknown) => e)
+      const described = describeSkillFailure(cause)
+      expect(described.status).toBe(502)
+      expect(described.message).not.toContain(root)
+      expect(described.message).not.toContain(asFile)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('安装入口顺手清掉陈旧的 .install-* 残留（SIGKILL 遗留）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-a12sweep-'))
+    try {
+      const stale = join(root, '.install-legacy-zzz')
+      await mkdir(stale, { recursive: true })
+      const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+      await utimes(stale, old, old)
+      const archive = await makeArchive({ 'SKILL.md': skillMdWith('fresh', 'version: 1.0.0\n') })
+      await installSkillArchive({ name: 'fresh', archive, skillsDir: root })
+      await expect(stat(stale)).rejects.toThrow()
+      expect(await listInstalledSkills(root)).toEqual(['fresh'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('A13 安装器自有标记文件净化（打包与安装两端）', () => {
+  let root: string
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a13-')) })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  it('packSkill 不再把 .install-version 打进上传包', async () => {
+    // 手工造一个能过 packSkill 预检的目录（预检要求 title/author/category/正文长度）。
+    const dir = join(root, 'packed-skill')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'SKILL.md'), [
+      '---',
+      'name: packed-skill',
+      'version: 1.0.0',
+      'title: 打包用例',
+      'description: 用于打包用例的技能描述,长度必须超过预检的下限要求。',
+      'author: tester',
+      'category: 测试',
+      '---',
+      '',
+      '本技能只用于单元测试:正文需要足够长才能通过空壳校验,因此这里补充说明文字,确保长度稳稳超过五十字的下限要求,避免因为正文过短而被预检拒绝。',
+      '',
+    ].join('\n'))
+    await writeFile(join(dir, '.install-version'), '1.0.0\n')
+    const packed = await packSkill(root, 'packed-skill')
+    const names = new AdmZip(packed.archive).getEntries().map(e => e.entryName)
+    expect(names).toContain('SKILL.md')
+    expect(names).not.toContain('.install-version')
+    expect(names.some(n => n.startsWith('.picoaide'))).toBe(false)
+  })
+
+  it('归档自带的 .install-version / .picoaide 会被安装器丢弃（不能伪造版本与来源）', async () => {
+    const archive = await makeArchive({
+      'SKILL.md': skillMdWith('forged-skill', 'version: 1.0.0\n'),
+      '.install-version': '9.9.9',
+      '.picoaide/release.json': JSON.stringify({ appId: 'forged-skill', version: '9.9.9', channel: 'builtin', installedAt: '' }),
+    })
+    // 服务端没给版本头（x-skill-version 缺失是可能状态，见 A11 调查）。
+    await installSkillArchive({ name: 'forged-skill', archive, skillsDir: root, channel: 'market' })
+    await expect(readFile(join(root, 'forged-skill', '.install-version'), 'utf8')).rejects.toThrow()
+    const prov = await readProvenance(join(root, 'forged-skill'))
+    expect(prov?.channel).toBe('market')
+    expect(prov?.version).toBe('')
   })
 })

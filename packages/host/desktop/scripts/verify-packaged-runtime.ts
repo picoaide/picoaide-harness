@@ -74,8 +74,22 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/document-lock-recovery.js',
   'build/app-icon.png',
   'build/app-icon-mac.png',
+  // G-2（2026-09-23 审计）：`build/` 是**可枚举的构建期产物目录**，而清单此前只
+  // 挑了其中 6 条 —— 删掉 `build/app-icon-mac.png` 这类条目**没有任何判据会红**
+  // （其他用例 `it.each(清单)` 只证明"清单里的条目存在"，删条目=同时删用例）。
+  // 现在由 `tests/verify-packaged-runtime.spec.ts` 的「清单必须覆盖可枚举产物
+  // 目录」用例从磁盘枚举反推：目录里每个真实文件都必须在清单里
+  // （`build/channel.json` 除外 —— 它只有渠道构建才产出，由
+  // verify-channel-package.ts 负责）。这里把 brand-prepare 真实产出的多倍率托盘
+  // 位图与 NSIS 安装文案补齐（2026-09-23 在真实 dist/linux-unpacked 的 app.asar
+  // 上逐条核对过它们确实随包）。
   'build/tray-iconTemplate.png',
+  'build/tray-iconTemplate@2x.png',
   'build/tray-icon-blue.png',
+  'build/tray-icon-blue@1.25x.png',
+  'build/tray-icon-blue@1.5x.png',
+  'build/tray-icon-blue@2x.png',
+  'build/assistedMessages.yml',
   // 品牌几何真源在包内的落点(`brand-prepare.mjs` 产出:官方构建 = brands/official/logo.svg
   // 的逐字节副本,渠道构建 = 该渠道自己的 mark)。被服务的 favicon 曾经是上游鱼(P0-2),
   // 这里同时断言"存在"与"内容不带上游特征"(见 assertBrandAssetSvg)。
@@ -91,7 +105,15 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
   'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
+  // G-2（2026-09-23 审计）：前端 dist 的**稳定名入口文档**必须随包。`index.html`
+  // 之外的这两份是固定路径（不是内容哈希 chunk）—— 它们被 `/favicon.svg`、
+  // `/manifest.webmanifest` 这类固定 URL 语义引用（桌面壳另用 brand-web-route 覆盖
+  // 同名路由，文件本身仍是前端构建的一部分）。内容哈希 chunk 的名字随上游每次升级
+  // 变化，**不**进本清单（进清单 = 每次升级都要改清单），它们由「归档里每个
+  // lib/*.js 的 import 都必须在包里」那条产物驱动判据覆盖。
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg',
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/manifest.webmanifest',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   // 内置 COI 技能必须随包（P1，2026-09-16）：`dsh-memory-evolve` 启动时把包内
   // `skills/` 目录同步到用户技能库（`lib/coi/index.js` 的 PLUGIN_SKILLS_DIR，
@@ -500,6 +522,152 @@ export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
+/** x64 目标（含"调用方没给 arch"的历史形态，与本文件其余 arch 判据同口径）。 */
+function targetIsX64(arch: number | undefined): boolean {
+  return arch === undefined || arch === 1
+}
+
+/**
+ * 一个「按平台/架构存在的原生包家族」（G-1，2026-09-23 审计）。
+ *
+ * 为什么需要它：`REQUIRED_UNPACKED_RUNTIME_ENTRIES` 混装了多个**只在特定平台/架构
+ * 才存在**的原生包（`node-pty` 的 linux-x64 prebuild、`@img/sharp-linux-x64`、
+ * `@koromix/koffi-linux-x64`、`@vscode/ripgrep-linux-x64`、
+ * `node-addon-require-builtin-linux-x64-gnu`），而完整性与否的判据是
+ * 「**整包目录存在**才逐条判」⇒ 整包被删（上游拆包/改名、`asarUnpack` glob 失效、
+ * `supportedArchitectures` 变化 —— 0.1.5 的 `node-addon-landlock-run` →
+ * `node-addon-system` 改名就是这个形态）时 afterPack **全部 PASS**：审计实测整包
+ * 删掉上面五个家族后门禁依然全绿，唯一会发现的是运行期的 dlopen / execFile 失败。
+ *
+ * 现在每个家族都带**显式的适用性判据**：
+ *   - `applies` 为真 ⇒ 家族内每一条都必须在产物里（整包目录不在 = 更直白的诊断）；
+ *   - `applies` 为假 ⇒ 平台/架构确实不适用，缺席合法。
+ * 「不适用」不再是"目录碰巧不在"这种隐式推断，而是一行可审阅的声明。
+ */
+export interface NativePlatformFamily {
+  /** 家族名（报错信息用）。 */
+  readonly id: string
+  /** 家族所属包目录（相对 unpacked 根）：整包在此 ⇒ 全族资产都掉出产物。 */
+  readonly packageDir: string
+  /** 该家族在清单里登记的必需条目（相对 unpacked 根）。 */
+  readonly entries: readonly string[]
+  /** 这一族承载什么（报错时说明后果）。 */
+  readonly purpose: string
+  /** 该家族在当前平台/架构下是否**必须存在**。 */
+  readonly applies: (electronPlatformName: string, arch: number | undefined) => boolean
+}
+
+/**
+ * 原生包家族表（G-1）。
+ *
+ * 覆盖：`REQUIRED_UNPACKED_RUNTIME_ENTRIES` ∪ `REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES`
+ * 里除 `@deepseek-ai/node-addon-system*` 之外的每一条 —— 后者有更严的架构感知断言
+ * （见 {@link NATIVE_FAMILY_EXEMPT_ENTRIES} 与 `verifyPackagedRuntime` 里
+ * `family-and-launcher` 那段）。两向完备性由
+ * `tests/verify-packaged-runtime.spec.ts` 的「家族表覆盖清单每一条」用例钉住。
+ */
+export const NATIVE_PLATFORM_FAMILIES: readonly NativePlatformFamily[] = [
+  {
+    id: 'node-pty（linux-x64 prebuild）',
+    packageDir: 'node_modules/node-pty',
+    entries: ['node_modules/node-pty/prebuilds/linux-x64/pty.node'],
+    purpose: '本机命令执行与终端托管走 node-pty 的 linux-x64 prebuild（subprocess-local）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@img/sharp-linux-x64',
+    packageDir: 'node_modules/@img/sharp-linux-x64',
+    entries: ['node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.3.node'],
+    purpose: '托盘/应用图标的位图派生走 sharp（缺它品牌图与图标派生整类失败）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@koromix/koffi-linux-x64',
+    packageDir: 'node_modules/@koromix/koffi-linux-x64',
+    entries: ['node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node'],
+    purpose: 'koffi 承载本机调用（缺它相关原生调用在运行期才炸）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: 'node-addon-require-builtin-linux-x64-gnu',
+    packageDir: 'node_modules/node-addon-require-builtin-linux-x64-gnu',
+    entries: ['node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt/linux-x64-gnu-napi-v9.node'],
+    purpose: 'requireBuiltin 的 linux-x64 glibc 变体（缺它对应能力在运行期才炸）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@vscode/ripgrep-linux-x64',
+    packageDir: 'node_modules/@vscode/ripgrep-linux-x64',
+    entries: ['node_modules/@vscode/ripgrep-linux-x64/bin/rg'],
+    purpose: '文件搜索（glob/grep 工具）execFile 的物理二进制；它不可能从 asar 里执行',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: 'node-pty（win32-x64 prebuild）',
+    packageDir: 'node_modules/node-pty',
+    entries: REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
+    purpose: 'Windows 的 ConPTY 原生面（pty.node / conpty* / OpenConsole.exe / conpty.dll）',
+    applies: (platform, arch) => platform === 'win32' && targetIsX64(arch),
+  },
+]
+
+/**
+ * 不归家族表管的清单条目（每条写明由谁负责）—— 让"家族表覆盖清单"是**全等**
+ * 而不是"至少覆盖一部分"：清单新增一条原生条目却没人分类 ⇒ 红。
+ */
+export const NATIVE_FAMILY_EXEMPT_ENTRIES: ReadonlyArray<readonly [string, string]> = [
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run',
+    '架构感知的 node-addon-system 断言（nativeAddonPlatformPackages + family-and-launcher）',
+  ],
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/glibc/system.node',
+    '架构感知的 node-addon-system 断言（NATIVE_ADDON_PLATFORM_FILES）',
+  ],
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/musl/system.node',
+    '架构感知的 node-addon-system 断言（NATIVE_ADDON_PLATFORM_FILES）',
+  ],
+]
+
+/**
+ * 逐家族断言「按平台存在的原生包」真的在产物里（G-1）。
+ *
+ * 与 `verifyPackagedRuntime` 里那条「包目录存在才逐条判」的过滤互补：那条对
+ * **整包缺失**是静默的，而整包缺失恰是最可能的真实故障形态。这里按家族再判一次，
+ * `applies` 为真时整包缺席即红。
+ *
+ * 不在本表的两类：`@deepseek-ai/node-addon-system*`（上面有更严的架构感知断言）、
+ * darwin 的原生文件（它们以**绝对路径**进 `requiredPhysicalEntries`，本来就不受
+ * "整包不存在跳过"影响，另由 verify-mac-smoke / verify-mac-release 覆盖）。
+ * @param electronPlatformName - Electron's `process.platform` value.
+ * @param arch - Electron Builder target arch（undefined = 老调用方/未声明）。
+ * @param unpackedRoot - `app.asar.unpacked` 根。
+ * @param exists - physical-file probe（生产 = `fs.existsSync`）。
+ * @returns Nothing; failure rejects the package before signing.
+ */
+export function assertNativePlatformFamilies(
+  electronPlatformName: string,
+  arch: number | undefined,
+  unpackedRoot: string,
+  exists: FileProbe = existsSync,
+): void {
+  // 整棵 unpacked 树都不在时不动手：那种形态由「has no native unpacked entries」
+  // 拦下（单测也用"注入探针 + 不存在的伪路径"跑正例，这里不能误报）。
+  if (!exists(unpackedRoot)) return
+  for (const family of NATIVE_PLATFORM_FAMILIES) {
+    if (!family.applies(electronPlatformName, arch)) continue
+    const missing = family.entries.filter(entry => !exists(join(unpackedRoot, entry)))
+    if (missing.length === 0) continue
+    const wholePackage = !exists(join(unpackedRoot, family.packageDir))
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing the ${family.id} native family: `
+      + `${missing.join(', ')}`
+      + (wholePackage ? `（整包目录 ${family.packageDir} 不存在 —— 全族资产都掉出产物了）` : '')
+      + ` — ${family.purpose}`,
+    )
+  }
+}
 
 
 /** Injectable archive listing seam used by focused tests. */
@@ -1036,7 +1204,20 @@ export function verifyPackagedRuntime(
   }
   // P2-52: 逐条断言——旧实现只判断「至少一项存在」,清单里写错或漏打的路径会被
   // 静默过滤掉(afterPack 门禁形同空转)。某原生包目录存在时,该包清单内每条必需
-  // 文件都必须存在;整包不存在 = 平台不适用(例如 Windows 产物里的 linux-x64 包),跳过。
+  // 文件都必须存在。
+  //
+  // G-1（2026-09-23 审计）:上面这条的「**整包目录不存在 ⇒ 跳过**」是假绿口子 ——
+  // 整包删掉 `@img/sharp-linux-x64` / `@koromix/koffi-linux-x64` / `node-pty` /
+  // `@vscode/ripgrep-linux-x64` / `node-addon-require-builtin-linux-x64-gnu` 后
+  // afterPack 全部 PASS。缺席的合法性现在由**显式的家族适用性判据**决定
+  // （NATIVE_PLATFORM_FAMILIES），不再由"目录碰巧不在"隐式推断。放在这条之前跑，
+  // 好让"整包缺失"给出点名家族的诊断。
+  assertNativePlatformFamilies(
+    context.electronPlatformName,
+    context.arch,
+    unpackedRoot,
+    exists,
+  )
   const missingNativeEntries = requiredPhysicalEntries.filter((entry) => {
     if (!exists(join(unpackedRoot, unpackedPackageDir(entry)))) return false
     return !exists(join(unpackedRoot, entry))

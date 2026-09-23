@@ -66,6 +66,13 @@ func (d *DB) Query(ctx context.Context, p abi.SQLParams) (abi.QueryResult, error
 		// 计量按**剥离后**的行/字节统计（否则应用看到的数字与实际拿到的结果不一致）。
 		keep, projCols := projectColumns(cols)
 		out = abi.QueryResult{Columns: projCols}
+		// 扫描目标：**每个列一个 rawCell**（复用，不随行数增长），只接住驱动的原始值
+		// （[]byte 不复制）；`[]any` 形态的 `ptrs` 也在这里一次分配（修复前每行一次）。
+		cells := make([]rawCell, len(cols))
+		cellPtrs := make([]any, len(cols))
+		for i := range cells {
+			cellPtrs[i] = &cells[i]
+		}
 		var totalBytes int64
 		truncated := false
 		for rows.Next() {
@@ -82,24 +89,33 @@ func (d *DB) Query(ctx context.Context, p abi.SQLParams) (abi.QueryResult, error
 				truncated = true
 				break
 			}
-			raw := make([]any, len(cols))
-			ptrs := make([]any, len(cols))
-			for i := range raw {
-				ptrs[i] = &raw[i]
-			}
-			if err := rows.Scan(ptrs...); err != nil {
+			if err := rows.Scan(cellPtrs...); err != nil {
 				return d.mapStmtError(cctx, err)
 			}
-			row := make([]any, 0, len(keep))
+			// **预算在复制之前**（2026-09-23 审计 WDB-1，P1）：修复前是
+			// "整行 []any 物化 + 每个 []byte 转一次 string" **之后**才比上限，于是
+			// `SELECT zeroblob(1048576) ×128`（单行 128 MiB，SQLITE_LIMIT_COLUMN×
+			// SQLITE_LIMIT_LENGTH 的上界）实测一次查询分配 **384 MiB**（8 MiB 上限的
+			// 48 倍）、耗时 446 ms，而应用侧收益为零（0 行 + Truncated）。现在只按
+			// **原始长度**累加（rawCell.n，零复制），超预算立刻停手；`[]byte→string`
+			// 只在"这行确实要留下"时发生（每行最多 8 MiB，与上限同阶）。
 			var rowBytes int64
 			for _, i := range keep {
-				v := normalizeValue(raw[i])
-				row = append(row, v)
-				rowBytes += valueBytes(v)
+				rowBytes += int64(cells[i].n)
 			}
-			if totalBytes+rowBytes > limits.SQLMaxResultBytes {
+			if rowBytes > limits.SQLMaxResultBytes-totalBytes {
+				// 单行就吃掉整份结果预算 ⇒ 应用拿不到任何数据（0 行 + Truncated 从来
+				// 不是有用的结果），而这正是"纯放大型查询"的形态。给一条可操作的
+				// 结构化错误（DB_LIMIT，§7.4 的"行数/结果超限"档），而不是静默空结果。
+				if len(out.Rows) == 0 {
+					return queryResultTooLarge(rowBytes, len(keep))
+				}
 				truncated = true
 				break
+			}
+			row := make([]any, 0, len(keep))
+			for _, i := range keep {
+				row = append(row, cells[i].value())
 			}
 			out.Rows = append(out.Rows, row)
 			totalBytes += rowBytes
@@ -230,31 +246,96 @@ func normalizeArgs(args []any) ([]any, *apperr.Error) {
 }
 
 // normalizeValue 把驱动返回值规整成 ABI 友好的 JSON 值。
-func normalizeValue(v any) any {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case []byte:
-		// 列类型枚举里没有 BLOB；驱动对部分 TEXT 表达式会回 []byte，
-		// 统一成 string，避免 encoding/json 把它编成 base64。
-		return string(t)
-	case time.Time:
-		return t.UTC().Format(time.RFC3339Nano)
-	default:
-		return v
-	}
-}
+// 结果计量口径（**唯一一份**）：一个值进响应后的字节数。
+//
+// 修复前是 `normalizeValue`（先 []byte→string 复制，再 valueBytes 计量）两步；
+// 现在由 rawCell（扫描期，零复制）与 valueBytes（测试侧独立复算）共用这三个常量
+// 与同一条 switch —— 两边漂移会让"预算"与"实测"对不上，所以口径必须同源。
+const (
+	bytesOfNull   = 4 // "null"
+	bytesOfBool   = 5 // "false"
+	bytesOfNumber = 8 // int64 / float64 的十进制上界估计（与旧口径逐字一致）
+)
 
 // valueBytes 估算一个返回值在响应里的字节数（用于 8 MiB 返回上限的计量）。
+//
+// ⚠️ 生产路径不再调用它（`Query` 在扫描期就用 rawCell.n 累加，见 rawCell 的长注释）；
+// 保留它是**计量口径的第二实现**，供测试独立复算"返回字节数 ≤ 上限"这条不变量。
 func valueBytes(v any) int64 {
 	switch t := v.(type) {
 	case nil:
-		return 4 // "null"
+		return bytesOfNull
 	case string:
 		return int64(len(t))
 	case bool:
-		return 5 // "false"
+		return bytesOfBool
 	default:
-		return 8
+		return bytesOfNumber
 	}
+}
+
+// ===== 结果预算（WDB-1，2026-09-23）=====
+
+// rawCell 是"按原始形态接住一列"的扫描目标。
+//
+// 存在的理由（审计 WDB-1）：结果预算是 **8 MiB**，而修复前每个值都要先
+// `[]byte → string` 复制一份才轮到预算判定，于是"合法上限输入"（128 列 × 1 MiB
+// zeroblob）能换出 384 MiB 宿主分配（3× 于数据本身），而应用侧 0 收益。
+// 这里把 []byte 原样挂在 bin 上（**不复制**），复制推迟到 value()，即"这一行确实
+// 要进结果"之后。其余类型的归一化口径与修复前的 normalizeValue 逐字相同
+// （time.Time → UTC/RFC3339Nano；nil/bool/数值按上面的常量计量）。
+type rawCell struct {
+	// other 是非 []byte 列的原始值（nil / string / int64 / float64 / bool / time.Time
+	// 归一化后的 string）。
+	other any
+	// bin 是 []byte 列的原始字节（与驱动内部缓冲共享；只在本次 rows.Next() 有效）。
+	bin []byte
+	// n 是该列在响应里的字节数（与 valueBytes 同口径），供预算累加。
+	n int
+}
+
+// Scan 实现 sql.Scanner：接住驱动给的原始值，**不做任何复制**。
+func (c *rawCell) Scan(src any) error {
+	switch t := src.(type) {
+	case []byte:
+		c.bin, c.other, c.n = t, nil, len(t)
+	case string:
+		c.bin, c.other, c.n = nil, t, len(t)
+	case nil:
+		c.bin, c.other, c.n = nil, nil, bytesOfNull
+	case time.Time:
+		// 与旧 normalizeValue 同口径（UTC + RFC3339Nano）；字符串长度就是计量。
+		s := t.UTC().Format(time.RFC3339Nano)
+		c.bin, c.other, c.n = nil, s, len(s)
+	case bool:
+		c.bin, c.other, c.n = nil, t, bytesOfBool
+	default:
+		// int64 / float64（以及驱动将来可能新增的数值类型）。
+		c.bin, c.other, c.n = nil, t, bytesOfNumber
+	}
+	return nil
+}
+
+// value 返回该列进结果时的值：唯一一处 `[]byte → string` 复制。
+func (c *rawCell) value() any {
+	if c.bin != nil {
+		return string(c.bin)
+	}
+	return c.other
+}
+
+// queryResultTooLarge 是"单行就超过整份结果预算"的结构化错误。
+//
+// 码用**既有的** DB_LIMIT（§7.4 的"行数/结果超限"档，与 §4.5 同源），不新增码：
+// 它是 `details.reason` 区分具体病因。语义比"0 行 + Truncated"强 —— 后者让应用
+// 完全无从判断"是我查错了还是结果太大"。
+func queryResultTooLarge(rowBytes int64, columns int) *apperr.Error {
+	return apperr.Newf(apperr.CodeDBLimit,
+		"单行结果 %d 字节超过整份结果上限 %d 字节（无法返回任何行）", rowBytes, limits.SQLMaxResultBytes).
+		WithDetail("reason", "result_too_large").
+		WithDetail("row_bytes", rowBytes).
+		WithDetail("max", limits.SQLMaxResultBytes).
+		WithDetail("columns", columns).
+		WithHint("把大列从结果里去掉（别用 SELECT *），只取需要的列或子串（substr）").
+		WithHint("按主键/时间分页读取（LIMIT/OFFSET），或让 SQL 侧做聚合/统计")
 }

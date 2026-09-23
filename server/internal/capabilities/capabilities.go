@@ -196,6 +196,16 @@ func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[st
 
 // appendSharedSkill merges one shared-skill row (already visibility-filtered
 // by the caller) with its quality tag and status.
+//
+// 投影字段必须与孪生函数 appendSharedAgent **逐字段对齐**(审计 2026-09-23
+// G-P2-5):此前本函数漏了 Official 与 Downloads/Calls —— 于是组织渠道的官方
+// 技能在员工端**永远不显示蓝标**(客户端按 item.official === true 渲染,缺省
+// 为 false)、评分恒 0(calls*3+downloads)因而在合并后的目录里恒垫底;而
+// 「官方」机制(0059)的可见性承诺、以及管理端审批队列(对同一批行正确下发这
+// 两个字段)都说明数据源本来就有值 —— 是投影遗漏而不是设计。
+//
+// `TestAppendSharedPathsProjectTheSameFields` 用反射钉住"组织渠道两个 append
+// 函数实际非零投影的字段集相等",避免再漏字段。
 func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool, official bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	item := CapabilityItem{
@@ -209,6 +219,9 @@ func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, version
 		Status:      string(s.Status),
 		Reason:      s.Reason,
 		Quality:     s.Quality,
+		Official:    official,
+		Downloads:   s.Downloads,
+		Calls:       s.Calls,
 		IsOwner:     isOwner,
 	}
 	*out = append(*out, item)

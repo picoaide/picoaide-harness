@@ -26,6 +26,8 @@ export const zh = {
   'capability.sourceMarket': '市场',
   'capability.sourceOrg': '组织',
   'capability.sourceBuiltin': '平台内置',
+  // 随客户端内置：随包插件同步进技能库的技能（跨泳道契约 S2），不是用户作品。
+  'capability.sourcePlugin': '随客户端内置',
   'capability.sourceLocal': '自制',
   'capability.sourceOther': '其他安装',
   'capability.officialLocked': '官方内容仅管理员可更新',
@@ -66,6 +68,16 @@ export const zh = {
   'capability.uploadedName': '已上传 {name}，等待审核',
   'capability.conflictConfirm': '已存在同名内容「{name}」，安装将覆盖本地目录。确定继续？',
   'capability.forceInstall': '覆盖安装',
+  // 本机自制同名（审计 A2/A3/A15）：措辞必须让用户看出"这份是你自己写的"。
+  'capability.conflictConfirmLocal': '本机存在同名自制技能「{name}」（不是能力中心安装的），安装会覆盖它、你写的内容会丢失。确定继续？',
+  'capability.forceInstallLocal': '仍要覆盖',
+  'capability.confirmUninstallLocal': '「{name}」是本机自制技能（不是能力中心安装的），删除会连同你自己的文件一起移除。',
+  'capability.deleteLocal': '仍要删除',
+  // 市场技能的归档端点只按当前 approved 最高版取（审计 A11）：不给"按版本安装"的假入口。
+  'capability.marketLatestOnly': '市场技能只能安装当前最新版。',
+  // 站级闸（审计 C-03）：`install()` 对"有动作在飞"静默 return ⇒ 按钮必须禁用并说明原因，
+  // 而不是点了没反应。
+  'capability.busyHint': '有另一个安装/卸载正在进行，完成后再试。',
   'account.current': '当前账号',
   'account.server': '服务端地址',
   'account.unknown': '未知',
@@ -138,6 +150,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.sourceMarket': 'Market',
   'capability.sourceOrg': 'Org',
   'capability.sourceBuiltin': 'Built-in',
+  'capability.sourcePlugin': 'Bundled',
   'capability.sourceLocal': 'Local',
   'capability.sourceOther': 'Other install',
   'capability.officialLocked': 'Official content: updates by admin only',
@@ -176,6 +189,17 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.uploadedName': 'Uploaded {name}; awaiting review',
   'capability.conflictConfirm': 'A "{name}" already exists locally; installing will overwrite it. Continue?',
   'capability.forceInstall': 'Overwrite install',
+  // Locally authored same-name content (audit A2/A3/A15): the wording must make clear
+  // that this copy is the user's own work, not something the Capability Hub installed.
+  'capability.conflictConfirmLocal': 'A locally authored skill "{name}" exists on this machine (it was not installed from the Capability Hub). Installing will overwrite it and your own content will be lost. Continue?',
+  'capability.forceInstallLocal': 'Overwrite anyway',
+  'capability.confirmUninstallLocal': '"{name}" is a locally authored skill on this machine (not installed from the Capability Hub). Deleting it removes your own files too.',
+  'capability.deleteLocal': 'Delete anyway',
+  // The marketplace archive endpoint only serves the current highest approved version (audit A11).
+  'capability.marketLatestOnly': 'Marketplace skills install the current latest version only.',
+  // Station-wide gate (audit C-03): `install()` silently returns while another action is in
+  // flight, so the button must be disabled with a reason instead of doing nothing on click.
+  'capability.busyHint': 'Another install or uninstall is in progress; try again when it finishes.',
   'account.current': 'Current account',
   'account.server': 'Server URL',
   'account.unknown': 'Unknown',

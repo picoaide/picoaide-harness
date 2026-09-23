@@ -50,12 +50,16 @@ const zh = {
   'outbound.blocked': '{what} 指向内网/链路本地/元数据地址，已拒绝: {target}',
   'outbound.notLoopback': '{what} 使用 http 但主机不是回环地址: {target}',
   'outbound.localHostname': '{what} 指向本机主机名，已拒绝: {target}',
+  'outbound.blockedResolved': '{what} 的域名解析到内网/链路本地/回环地址，已拒绝: {target} -> {address}',
+  'outbound.mcpFenceOrigin': 'MCP 传输缝拒绝向未登记的来源发请求: {what} {target}（本连接器允许的来源: {allowed}）',
+  'outbound.mcpFenceOriginNone': '（无）',
   'outbound.badDeadline': '出站请求截止时间非法（timeoutMs={timeoutMs}），必须为正数',
   'outbound.timeout': '{what} 出站请求超时（{timeoutMs}ms 内未完成），已中止: {host}',
   'outbound.redirect': '{what} 返回重定向（{detail}），按出站策略拒绝跟随: {host}',
 
   // ---- flow-step labels embedded into the messages above ------------------
   'step.mcpEndpoint': 'MCP 端点',
+  'step.mcpTransportRequest': 'MCP 传输请求',
   'step.registrationEndpoint': 'OAuth 客户端注册端点',
   'step.authorizationEndpoint': 'OAuth 授权端点',
   'step.tokenEndpoint': 'OAuth token 端点',
@@ -77,6 +81,7 @@ const zh = {
   'auth.tokenExchangeFailed': 'OAuth token 换取失败: HTTP {status}',
   'auth.tokenMissingAccessToken': 'OAuth token 响应缺少 access_token',
   'auth.pollTimeout': '授权轮询超时，请重试',
+  'auth.deviceUnverifiable': '该连接器声明为设备码授权但未定义任何凭据字段，无法验证授权是否完成；请改用具名 token 字段或 OAuth 模式',
   'auth.serverMissingFetchToken': '服务端连接器定义缺少 fetchToken 回调',
   'auth.serverNoToken': '服务端未返回 token',
 
@@ -136,6 +141,9 @@ const zh = {
   'fence.notHardened': 'MCP streamable-http 传输不可加固: {error}',
   'fence.verificationFailed': 'MCP streamable-http 重定向栅栏校验失败: {error}',
   'fence.oursLabel': '本包',
+  'fence.policyNotApplied': 'MCP streamable-http 传输未施加出站 URL 策略（SDK 给的 URL 会被真实请求，凭据头随之外送）',
+  'fence.sameOriginHeadersDropped': 'MCP streamable-http 传输把连接器自带的请求头丢掉了（同源请求收不到凭据头）',
+  'fence.credentialHeaderCrossOrigin': 'MCP streamable-http 传输把连接器自带凭据头发给了其它来源',
 
   // ---- plugin lifecycle / auth-flow outcomes (src/index.ts) ---------------
   'flow.superseded': '连接意图已被更新的请求取代',
@@ -151,6 +159,7 @@ const zh = {
   'flow.authRequired': '需要先完成授权：当前凭据被服务端拒绝（点击「连接」重新授权）',
   'flow.fenceUnavailable': '{serverName}: streamable-http 出站重定向栅栏不可用，拒绝连接（{error}）',
   'flow.refreshUnsupported': '该连接器不支持令牌刷新',
+  'flow.serverNameTaken': '本地 MCP 名「{serverName}」已被连接器「{by}」接管（服务端要求 serverName 唯一），本连接器的 MCP 注册已停止',
 } as const
 
 /** English mirror — every key of {@link zh}, same parameter names. */
@@ -161,11 +170,15 @@ const en: Record<keyof typeof zh, string> = {
   'outbound.blocked': '{what} points at a private, link-local or metadata address and was refused: {target}',
   'outbound.notLoopback': '{what} uses http but the host is not a loopback address: {target}',
   'outbound.localHostname': "{what} points at this machine's own hostname and was refused: {target}",
+  'outbound.blockedResolved': '{what} resolves to a private, link-local or loopback address and was refused: {target} -> {address}',
+  'outbound.mcpFenceOrigin': 'The MCP transport fence refused a request to an origin this connector never registered: {what} {target} (allowed origins: {allowed})',
+  'outbound.mcpFenceOriginNone': '(none)',
   'outbound.badDeadline': 'Invalid outbound request deadline (timeoutMs={timeoutMs}); it must be a positive number',
   'outbound.timeout': '{what} outbound request timed out (not finished within {timeoutMs}ms) and was aborted: {host}',
   'outbound.redirect': '{what} answered with a redirect ({detail}); the outbound policy refuses to follow it: {host}',
 
   'step.mcpEndpoint': 'MCP endpoint',
+  'step.mcpTransportRequest': 'MCP transport request',
   'step.registrationEndpoint': 'OAuth client registration endpoint',
   'step.authorizationEndpoint': 'OAuth authorization endpoint',
   'step.tokenEndpoint': 'OAuth token endpoint',
@@ -186,6 +199,7 @@ const en: Record<keyof typeof zh, string> = {
   'auth.tokenExchangeFailed': 'OAuth token exchange failed: HTTP {status}',
   'auth.tokenMissingAccessToken': 'OAuth token response has no access_token',
   'auth.pollTimeout': 'Authorization polling timed out; please retry',
+  'auth.deviceUnverifiable': 'This connector uses device-code authorization but declares no credential field, so completion cannot be verified; declare a token field or use the OAuth mode instead',
   'auth.serverMissingFetchToken': 'The server-side connector definition has no fetchToken callback',
   'auth.serverNoToken': 'The server returned no token',
 
@@ -239,6 +253,9 @@ const en: Record<keyof typeof zh, string> = {
   'fence.notHardened': 'The MCP streamable-http transport cannot be hardened: {error}',
   'fence.verificationFailed': 'MCP streamable-http redirect fence verification failed: {error}',
   'fence.oursLabel': 'this package',
+  'fence.policyNotApplied': 'The MCP streamable-http transport does not apply the outbound URL policy (a URL the resource server names would really be requested, taking the credential headers with it)',
+  'fence.sameOriginHeadersDropped': 'The MCP streamable-http transport dropped the connector\'s own request headers (the same-origin request no longer carries its credential header)',
+  'fence.credentialHeaderCrossOrigin': 'The MCP streamable-http transport sent the connector\'s credential headers to another origin',
 
   'flow.superseded': 'The connect request was superseded by a newer one',
   'flow.userSwitchedRegistration': 'The user changed; connector registration was aborted',
@@ -253,6 +270,7 @@ const en: Record<keyof typeof zh, string> = {
   'flow.authRequired': 'Authorization is required first: the server rejected the current credential (click "Connect" to authorize again)',
   'flow.fenceUnavailable': '{serverName}: the streamable-http outbound redirect fence is unavailable; connection refused ({error})',
   'flow.refreshUnsupported': 'This connector does not support token refresh',
+  'flow.serverNameTaken': 'The local MCP name "{serverName}" was taken over by connector "{by}" (serverName must be unique); this connector\'s MCP registration has stopped',
 }
 
 /** Every host copy key of this package. */
@@ -309,6 +327,7 @@ export function hostT(locale: HostLocale, key: HostCopyKey, params?: Record<stri
  */
 const EN_STEP_LABELS: Record<string, string> = {
   [zh['step.mcpEndpoint']]: en['step.mcpEndpoint'],
+  [zh['step.mcpTransportRequest']]: en['step.mcpTransportRequest'],
   [zh['step.registrationEndpoint']]: en['step.registrationEndpoint'],
   [zh['step.authorizationEndpoint']]: en['step.authorizationEndpoint'],
   [zh['step.tokenEndpoint']]: en['step.tokenEndpoint'],

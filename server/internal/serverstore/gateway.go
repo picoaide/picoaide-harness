@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,6 +49,12 @@ type Model struct {
 	ProviderName    string `json:"provider_name"`
 	ProviderChannel string `json:"provider_channel"`
 	ProviderEnabled bool   `json:"provider_enabled"`
+	// CatalogMissing 表示"该行已不在上游目录里"(0080,审计 2026-09-23 G-02):
+	// 渠道同步发现目录缺失时**不再物理删除**带定价/参数的行,而是打这个标记 ——
+	// 价格与管理员配置保留、路由与客户端目录按可用性过滤掉它;目录恢复时由
+	// SyncProviderModel 清标记并把名字加回 provider JSON。管理端仍能看到该行
+	// (带价格),便于判断"上游真的下架了"还是"目录抖动了一轮"。
+	CatalogMissing bool `json:"catalog_missing"`
 }
 
 // scanProvider 扫描 gateway_providers 一行。
@@ -298,9 +306,21 @@ func DeleteGatewayProvider(db *sql.DB, id int64) error {
 	return nil
 }
 
-// SyncProviderModels replaces the models table rows for a provider so it
-// mirrors the provider's models JSON list. This keeps a single source of
-// truth: the provider's model list is the model list the client sees.
+// SyncProviderModels makes the models table rows mirror the provider's models
+// JSON list (single source of truth: the provider's model list is the model
+// list the client sees).
+//
+// 2026-09-23(审计 G-01,P0):实现是**按 name upsert + 只剪枝清单外的行**,与
+// SyncProviderModel 同语义 —— 命中既有行时只更新 display_name 与"目录缺失"
+// 标记,**绝不覆盖/清空**价格、缓存价、峰谷折扣、default_params 与
+// input_modalities。旧实现是「DELETE 该 provider 全部行 + 只插三列」,于是
+// webadmin 的「编辑上游 → 保存」(弹窗无条件回传预填清单)一次就把该上游全部
+// 定价清零;此后调用照常 200、token 照记、cost=0,且不留任何审计痕迹。
+//
+// 剪枝本身保持物理删除:那是**管理员显式**把名字从清单里删掉(含渠道型切回
+// 手动型时的清空),显式意图必须让路由立刻不再匹配该模型。目录抖动触发的
+// "目录缺失"走 RemoveMissingProviderModels 的标记路径,两者不要混。
+//
 // 重名模型按首次出现去重(UNIQUE(provider_id,name) 约束),避免半同步 + 500。
 func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 	seen := make(map[string]bool, len(names))
@@ -312,46 +332,161 @@ func SyncProviderModels(db *sql.DB, providerID int64, names []string) error {
 		seen[name] = true
 		deduped = append(deduped, name)
 	}
+	keep := make(map[string]bool, len(deduped))
+	for _, name := range deduped {
+		keep[name] = true
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("DELETE FROM models WHERE provider_id = ?", providerID); err != nil {
-		return err
-	}
+	// ① upsert:既有行只动 display_name 与目录缺失标记(写进清单即"要它可用"),
+	//    价格/参数/模态一律保留。
 	for _, name := range deduped {
-		if _, err := tx.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES (?, ?, ?)`,
+		if _, err := tx.Exec(`INSERT INTO models (name, provider_id, display_name) VALUES (?, ?, ?)
+			ON CONFLICT (provider_id, name) DO UPDATE
+			SET display_name = excluded.display_name, catalog_missing = FALSE`,
 			name, providerID, name); err != nil {
 			return err
 		}
 	}
+	// ② 剪枝:只删不在清单里的行(含此前被标记 catalog_missing 的行 —— 管理员
+	//    重新给出清单就是最终口径)。
+	rows, err := providerModelRowsTx(tx, providerID)
+	if err != nil {
+		return err
+	}
+	var prunedPriced []string
+	for _, r := range rows {
+		if keep[r.Name] {
+			continue
+		}
+		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.ID); err != nil {
+			return err
+		}
+		if r.HasOperatorConfig {
+			prunedPriced = append(prunedPriced, r.Name)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	// 删掉带定价的行 = 真金白银的配置被移除,必须留一条可检索的告警(审计 G-01
+	// 的"零痕迹"问题:此前连审计都没有)。
+	if len(prunedPriced) > 0 {
+		log.Printf("gateway: WARNING provider=%d 模型清单更新移除了 %d 个带定价/参数的行: %s",
+			providerID, len(prunedPriced), strings.Join(prunedPriced, ","))
 	}
 	InvalidateModelConfig()
 	InvalidateModelsChanged()
 	return nil
 }
 
+// modelRowBrief 是同步路径关心的最小行信息(剪枝与"目录缺失"判定共用)。
+type modelRowBrief struct {
+	ID   int64
+	Name string
+	// HasOperatorConfig = 该行带运营方配置(价格/缓存价/峰谷折扣/default_params/
+	// input_modalities 任一被配置过)。目录抖动时这种行绝不物理删除(G-02)。
+	HasOperatorConfig bool
+	CatalogMissing    bool
+}
+
+// providerModelRowsTx 读 provider 下全部模型行的同步视图(事务内)。
+func providerModelRowsTx(tx *sql.Tx, providerID int64) ([]modelRowBrief, error) {
+	rows, err := tx.Query(`SELECT id, name, input_price_per_1m, output_price_per_1m,
+		cache_input_price_per_1m, offpeak_discount, COALESCE(default_params, ''),
+		COALESCE(input_modalities, '["text"]'), catalog_missing
+		FROM models WHERE provider_id = ?`, providerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []modelRowBrief{}
+	for rows.Next() {
+		var r modelRowBrief
+		var in, outPrice, cache, off sql.NullFloat64
+		var params, modalities string
+		if err := rows.Scan(&r.ID, &r.Name, &in, &outPrice, &cache, &off, &params, &modalities, &r.CatalogMissing); err != nil {
+			return nil, err
+		}
+		r.HasOperatorConfig = hasOperatorModelConfig(in, outPrice, cache, off, params, modalities)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// hasOperatorModelConfig 判断一行是否带"运营方配置"。价格类字段非 NULL(含
+// 显式 0 = 管理员定的"未定价")、default_params 非空且非 '{}'、input_modalities
+// 非默认值,任一成立即为真。
+func hasOperatorModelConfig(in, out, cache, off sql.NullFloat64, params, modalities string) bool {
+	if in.Valid || out.Valid || cache.Valid || off.Valid {
+		return true
+	}
+	if p := strings.TrimSpace(params); p != "" && p != "{}" {
+		return true
+	}
+	return strings.TrimSpace(modalities) != `["text"]`
+}
+
 // SyncProviderModel upsert 一个模型的 display_name 与 default_params(幂等)。
 // P2-18:已存在的行只更新 display_name——default_params 与 input_modalities
 // 同语义,是管理员配置(如 concurrency_target),渠道同步不得覆盖清空;
 // 只有新行才写入同步给出的默认参数。
+//
+// 2026-09-23(审计 G-02):同名行若上一轮被标记 catalog_missing(上游目录抖动
+// 时的"停用"),本轮命中即视为**重新出现在上游目录** —— 清标记并把名字加回
+// provider JSON(RemoveMissingProviderModels 曾把它移出),价格与参数分毫不动。
 func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
-	_, err := db.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(provider_id, name) DO UPDATE SET display_name=excluded.display_name`,
-		name, providerID, name, defaultParams)
-	if err == nil {
-		InvalidateModelConfig()
-		InvalidateModelsChanged()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	var wasMissing bool
+	err = tx.QueryRow(`SELECT catalog_missing FROM models WHERE provider_id = ? AND name = ?`,
+		providerID, name).Scan(&wasMissing)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO models (name, provider_id, display_name, default_params)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(provider_id, name) DO UPDATE
+		SET display_name = excluded.display_name, catalog_missing = FALSE`,
+		name, providerID, name, defaultParams); err != nil {
+		return err
+	}
+	if wasMissing {
+		if err := addProviderModelName(tx, providerID, name); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if wasMissing {
+		log.Printf("gateway: provider=%d 模型 %s 已回到上游目录,清除 catalog_missing(定价与参数保留)", providerID, name)
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return nil
 }
 
-// RemoveMissingProviderModels 删除 provider 下不在 keep 列表中的模型。
-// 若被删的是 gateway.default_model,重置为空串。返回删除数量。
+// RemoveMissingProviderModels 处理 provider 下不在上游目录 keep 列表里的行。
+//
+// 2026-09-23(审计 G-02,P1):上游 /models 目录**部分抖动**(一轮超时/降级/返回
+// 子集)不得摧毁运营方配置 ——
+//   - 仍带定价/参数的行:只标记 catalog_missing = TRUE(停用),价格/参数/模态
+//     全部保留,下一轮目录恢复时由 SyncProviderModel 清标记复原;
+//   - 不带任何运营方配置的行:按旧行为物理删除(丢的只是上游目录信息);
+//   - 两条路径都必须把名字从 provider 的 models JSON 移除:路由用的是
+//     「JSON ∪ models 表」,行还在(停用)时也必须让路由侧看不到它,否则会路由到
+//     一个上游目录里已不存在的模型;
+//   - 停用/删除带定价的行必须打一条可检索的 warning(含 provider id 与模型名)。
+//
+// 已标记的行不重复处理(幂等:同一轮抖动重复触发只计一次)。若被处理的行正是
+// gateway.default_model,重置为空串。返回"不再可路由的行数"(停用 + 删除)。
 func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (int, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -363,39 +498,36 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 	for _, k := range keep {
 		keepSet[k] = true
 	}
-	rows, err := tx.Query(`SELECT id, name FROM models WHERE provider_id = ?`, providerID)
+	rows, err := providerModelRowsTx(tx, providerID)
 	if err != nil {
 		return 0, err
 	}
-	type row struct {
-		id   int64
-		name string
-	}
-	var doomed []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.name); err != nil {
-			rows.Close()
-			return 0, err
+	var doomed []modelRowBrief
+	for _, r := range rows {
+		if keepSet[r.Name] || r.CatalogMissing {
+			continue
 		}
-		if !keepSet[r.name] {
-			doomed = append(doomed, r)
-		}
+		doomed = append(doomed, r)
 	}
-	rows.Close()
 
 	deletedDefault := false
+	var disabledPriced []string
 	for _, r := range doomed {
-		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.id); err != nil {
+		if r.HasOperatorConfig {
+			if _, err := tx.Exec("UPDATE models SET catalog_missing = TRUE WHERE id = ?", r.ID); err != nil {
+				return 0, err
+			}
+			disabledPriced = append(disabledPriced, r.Name)
+		} else if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.ID); err != nil {
 			return 0, err
 		}
 		// 2026-09-08(P1-8 同类):渠道同步删行时也必须从 provider 的 models JSON
 		// 移除该名,否则路由仍匹配到它而 models 表无价 → 可调用且 cost=0。
-		if err := removeProviderModelName(tx, providerID, r.name); err != nil {
+		if err := removeProviderModelName(tx, providerID, r.Name); err != nil {
 			return 0, err
 		}
 		var dm string
-		if err := tx.QueryRow("SELECT value FROM settings WHERE key = 'gateway.default_model'").Scan(&dm); err == nil && dm == r.name {
+		if err := tx.QueryRow("SELECT value FROM settings WHERE key = 'gateway.default_model'").Scan(&dm); err == nil && dm == r.Name {
 			deletedDefault = true
 		}
 	}
@@ -406,6 +538,10 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	if len(disabledPriced) > 0 {
+		log.Printf("gateway: WARNING provider=%d 上游目录中缺少 %d 个带定价/参数的模型,已标记 catalog_missing(定价与参数保留,路由与客户端目录已排除): %s",
+			providerID, len(disabledPriced), strings.Join(disabledPriced, ","))
 	}
 	InvalidateModelConfig()
 	InvalidateSettings()
@@ -453,7 +589,7 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	var pEnabled int
 	var modalities string
 	if err := scan.Scan(&m.ID, &m.Name, &m.ProviderID, &m.DisplayName, &m.DefaultParams, &modalities,
-		&in, &out, &cache, &off, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
+		&in, &out, &cache, &off, &m.CatalogMissing, &m.ProviderName, &m.ProviderChannel, &pEnabled); err != nil {
 		return nil, err
 	}
 	m.InputModalities = ParseInputModalities(modalities)
@@ -478,7 +614,7 @@ func GetModel(db *sql.DB, id int64) (*Model, error) {
 	row := db.QueryRow(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
 		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
 		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
-		p.name, p.channel, p.enabled
+		m.catalog_missing, p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -860,7 +996,7 @@ func ListAdminModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
 		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
 		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
-		p.name, p.channel, p.enabled
+		m.catalog_missing, p.name, p.channel, p.enabled
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
 		ORDER BY m.id`)
 	if err != nil {

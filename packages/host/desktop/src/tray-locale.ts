@@ -249,6 +249,18 @@ export interface DesktopStartupCopy {
   /** Notification: a configured path sits on a volume that may break sandboxing. */
   readonly volumeTitle: string
   readonly volumeBody: (label: string) => string
+  /**
+   * 致命启动失败的原生错误面（B-02，2026-09-23 审计）。
+   *
+   * 这一段必须存在且被真正调用：`startup-rows.ts` 的模块注释一直自称致命路径会弹
+   * "恢复对话框"，而实现里只有 `errorCause` + 退出 —— 打包 GUI 上等于双击没反应。
+   */
+  readonly fatalBootTitle: (product: string) => string
+  readonly fatalBootMessage: (product: string) => string
+  readonly fatalBootDetail: (reason: string, logDirectory: string) => string
+  readonly fatalBootOpenLogs: string
+  readonly fatalBootRetry: string
+  readonly fatalBootQuit: string
 }
 
 const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
@@ -265,6 +277,14 @@ const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
     skippedPluginBody: (name, suffix) => `${name} is not installed in this profile${suffix}.`,
     volumeTitle: 'Storage May Be Unsupported',
     volumeBody: label => `${label} is on a volume that may break sandboxed commands or plugin installs.`,
+    fatalBootTitle: product => `${product} could not start`,
+    fatalBootMessage: product => `${product} failed to start and was closed.`,
+    fatalBootDetail: (reason, logDirectory) =>
+      `${reason}\n\nLogs: ${logDirectory}\n\n`
+      + 'Open the log folder to see the full error, then choose Retry. If it keeps failing, quit and report the log.',
+    fatalBootOpenLogs: 'Open Logs',
+    fatalBootRetry: 'Retry',
+    fatalBootQuit: 'Quit',
   },
   zh: {
     pluginRecoveryTitle: '插件恢复',
@@ -281,6 +301,14 @@ const startupCopy: Record<DesktopLocale, DesktopStartupCopy> = {
     skippedPluginBody: (name, suffix) => `${name}${suffix}未安装在此配置中。`,
     volumeTitle: '存储位置可能不受支持',
     volumeBody: label => `${label} 所在的卷可能导致沙箱命令或插件安装失败。`,
+    fatalBootTitle: product => `${product} 无法启动`,
+    fatalBootMessage: product => `${product} 启动失败，已关闭。`,
+    fatalBootDetail: (reason, logDirectory) =>
+      `${reason}\n\n日志目录：${logDirectory}\n\n`
+      + '可点「打开日志」查看完整错误，处理后点「重试」；若持续失败请退出并把日志反馈给我们。',
+    fatalBootOpenLogs: '打开日志',
+    fatalBootRetry: '重试',
+    fatalBootQuit: '退出',
   },
 }
 

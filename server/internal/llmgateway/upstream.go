@@ -139,8 +139,11 @@ func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
 }
 
 // syncedModelNames returns the model names a provider has in the models table.
+// 2026-09-23(审计 G-02):排除 catalog_missing = TRUE 的行 —— 它们已不在上游
+// 目录里(渠道同步发现目录缺失时停用而非删除,以保住定价),路由池必须按可用性
+// 过滤掉,否则会把请求发往一个上游目录中已不存在的模型。
 func syncedModelNames(db *sql.DB, providerID int64) ([]string, error) {
-	rows, err := db.Query(`SELECT name FROM models WHERE provider_id = ?`, providerID)
+	rows, err := db.Query(`SELECT name FROM models WHERE provider_id = ? AND catalog_missing = FALSE`, providerID)
 	if err != nil {
 		return nil, err
 	}

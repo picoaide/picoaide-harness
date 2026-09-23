@@ -339,6 +339,155 @@ describe('内置技能：清单与按需安装（服务端下发 → 本机技�
   })
 })
 
+/**
+ * 市场技能归档的假服务端（`/api/client/v2/marketplace/skills/:name/archive`）。
+ * `x-skill-version` 是**归档的真实版本**：服务端只按当前 approved 最高版取，
+ * 客户端必须据它记账（审计 A11）。
+ */
+function stubMarketServer(archive: Buffer, opts: { version?: string | null, checksum?: string | null } = {}): void {
+  const checksum = opts.checksum === undefined ? createHash('sha256').update(archive).digest('hex') : opts.checksum
+  const version = opts.version === undefined ? '2.0.0' : opts.version
+  vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+    const href = String(url)
+    if (href.includes('/api/client/v2/marketplace/skills/') && href.endsWith('/archive')) {
+      const headers: Record<string, string> = { 'content-type': 'application/gzip' }
+      if (checksum !== null) headers['x-skill-checksum'] = checksum
+      if (version !== null) headers['x-skill-version'] = version
+      return new Response(archive, { status: 200, headers })
+    }
+    if (href.endsWith('/api/client/v2/skills/builtin')) {
+      return new Response(JSON.stringify({ skills: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } })
+  }))
+}
+
+/** 造一个"本机自制"技能目录（无溯源标记 ⇒ 覆盖/删除都必须显式确认）。 */
+async function makeLocalSkill(name: string, body = 'my own notes\n'): Promise<string> {
+  const dir = join(resolveSkillsDir(), name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: locally authored\n---\n# mine\n`)
+  await writeFile(join(dir, 'notes.md'), body)
+  return dir
+}
+
+describe('A6 内置技能能装也能卸（新增卸载路由）+ A2/A3 来源校验 + A11 真实版本回传', () => {
+  const marketArchive = (name: string, version: string): Buffer => packRawTarGz([
+    { name: 'SKILL.md', body: `---\nname: ${name}\nversion: ${version}\ndescription: demo skill\n---\nbody\n` },
+  ])
+
+  it('装 → 卸 往返：卸载后目录消失、清单里的 installed 也清空', async () => {
+    const archive = await packSkillTarGz(SOURCE_SKILL_DIR)
+    stubServer(archive)
+    const h = harness(SESSION)
+    const installed = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
+    expect(installed.code, JSON.stringify(installed.body)).toBe(200)
+    expect(await isBuiltinSkillInstalled()).toBe(true)
+
+    const removed = await h.call('/api/pico/skills/builtin/app-builder/uninstall', 'POST')
+    expect(removed.code, JSON.stringify(removed.body)).toBe(200)
+    expect(removed.body).toMatchObject({ ok: true, name: 'app-builder' })
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
+
+    const list = await h.call('/api/pico/skills/builtin')
+    expect(list.code).toBe(200)
+    expect(list.body.installed).toEqual([])
+    // 技能库根上不留安装器私有目录。
+    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.'))).toEqual([])
+  })
+
+  it('内置技能卸载也看来源：同名本机自制内容无确认 ⇒ 409 LOCAL_CONTENT 且不删', async () => {
+    await makeLocalSkill('app-builder')
+    stubServer(await packSkillTarGz(SOURCE_SKILL_DIR))
+    const h = harness(SESSION)
+    const refused = await h.call('/api/pico/skills/builtin/app-builder/uninstall', 'POST')
+    expect(refused.code).toBe(409)
+    expect(refused.body.code).toBe('LOCAL_CONTENT')
+    expect(await readFile(join(resolveSkillsDir(), 'app-builder', 'notes.md'), 'utf8')).toBe('my own notes\n')
+
+    const confirmed = await h.call('/api/pico/skills/builtin/app-builder/uninstall?overwrite=1', 'POST')
+    expect(confirmed.code, JSON.stringify(confirmed.body)).toBe(200)
+    await expect(stat(join(resolveSkillsDir(), 'app-builder'))).rejects.toThrow()
+  })
+
+  it('内置技能安装：同名本机自制内容无确认 ⇒ 409，带 ?overwrite=1 才整树替换', async () => {
+    await makeLocalSkill('app-builder')
+    stubServer(await packSkillTarGz(SOURCE_SKILL_DIR))
+    const h = harness(SESSION)
+    const refused = await h.call('/api/pico/skills/builtin/app-builder/install', 'POST')
+    expect(refused.code).toBe(409)
+    expect(refused.body.code).toBe('LOCAL_CONTENT')
+    expect(await readFile(join(resolveSkillsDir(), 'app-builder', 'notes.md'), 'utf8')).toBe('my own notes\n')
+
+    const confirmed = await h.call('/api/pico/skills/builtin/app-builder/install?overwrite=1', 'POST')
+    expect(confirmed.code, JSON.stringify(confirmed.body)).toBe(200)
+    await expect(readFile(join(resolveSkillsDir(), 'app-builder', 'notes.md'), 'utf8')).rejects.toThrow()
+    expect((await readProvenance(join(resolveSkillsDir(), 'app-builder')))?.channel).toBe('builtin')
+  })
+
+  it('卸载未安装的技能 ⇒ 404 NOT_INSTALLED（不是 500）', async () => {
+    stubServer(await packSkillTarGz(SOURCE_SKILL_DIR))
+    const h = harness(SESSION)
+    const res = await h.call('/api/pico/skills/builtin/app-builder/uninstall', 'POST')
+    expect(res.code).toBe(404)
+    expect(res.body.code).toBe('NOT_INSTALLED')
+  })
+
+  it('市场安装遇到同名本机自制技能 ⇒ 409（面板据此弹确认条），确认后才整树替换', async () => {
+    await makeLocalSkill('codeql')
+    stubMarketServer(marketArchive('codeql', '2.0.0'))
+    const h = harness(SESSION)
+    const refused = await h.call('/api/pico/skills/codeql/install', 'POST')
+    expect(refused.code).toBe(409)
+    expect(refused.body.code).toBe('LOCAL_CONTENT')
+    expect(await readFile(join(resolveSkillsDir(), 'codeql', 'notes.md'), 'utf8')).toBe('my own notes\n')
+
+    const confirmed = await h.call('/api/pico/skills/codeql/install?overwrite=1', 'POST')
+    expect(confirmed.code, JSON.stringify(confirmed.body)).toBe(200)
+    expect((await readProvenance(join(resolveSkillsDir(), 'codeql')))?.channel).toBe('market')
+    // 用户自己的文件按"用户点过确认"的语义被替换掉了。
+    await expect(readFile(join(resolveSkillsDir(), 'codeql', 'notes.md'), 'utf8')).rejects.toThrow()
+  })
+
+  it('A11：回传的是归档的真实版本（x-skill-version），不是请求里那一个', async () => {
+    stubMarketServer(marketArchive('codeql', '2.0.0'), { version: '2.0.0' })
+    const h = harness(SESSION)
+    const res = await h.call('/api/pico/skills/codeql/install', 'POST')
+    expect(res.code, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.version).toBe('2.0.0')
+    expect((await readProvenance(join(resolveSkillsDir(), 'codeql')))?.version).toBe('2.0.0')
+  })
+
+  it('A12：安装失败的文案不含本机绝对路径，且清理掉安装器暂存目录', async () => {
+    const traversing = packRawTarGz([
+      { name: '../evil.txt', body: 'pwned' },
+      { name: 'SKILL.md', body: '---\nname: codeql\ndescription: x\n---\nbody' },
+    ])
+    stubMarketServer(traversing)
+    const h = harness(SESSION)
+    const res = await h.call('/api/pico/skills/codeql/install', 'POST')
+    expect(res.code).toBe(422)
+    const message = String(res.body.error)
+    expect(message).not.toContain(home)
+    expect(message).not.toContain('/tmp/')
+    expect((await readdir(resolveSkillsDir())).filter(n => n.startsWith('.'))).toEqual([])
+  })
+
+  it('A13：归档自带的 .install-version 不会留成"已装版本"（无版本头时不得伪造）', async () => {
+    const forged = packRawTarGz([
+      { name: '.install-version', body: '9.9.9' },
+      { name: 'SKILL.md', body: '---\nname: codeql\nversion: 1.0.0\ndescription: demo\n---\nbody\n' },
+    ])
+    stubMarketServer(forged, { version: null })
+    const h = harness(SESSION)
+    const res = await h.call('/api/pico/skills/codeql/install', 'POST')
+    expect(res.code, JSON.stringify(res.body)).toBe(200)
+    const dir = join(resolveSkillsDir(), 'codeql')
+    await expect(readFile(join(dir, '.install-version'), 'utf8')).rejects.toThrow()
+    expect((await readProvenance(dir))?.version).toBe('')
+  })
+})
+
 describe('工具面用的共享判定：技能装了没有 + 指路文案', () => {
   it('isBuiltinSkillInstalled 只看磁盘事实（<dshHome>/skills/<name>/SKILL.md）', async () => {
     expect(APP_BUILDER_SKILL).toBe('app-builder')
@@ -383,6 +532,9 @@ describe('内置技能区：按钮语义与端点（纯函数）', () => {
     expect(builtinInstallEndpoint(skill.name)).not.toContain('?')
     // 名字里的路径字符必须被转义（不给服务端拼路径的机会）。
     expect(builtinInstallEndpoint('../evil')).toBe('/api/pico/skills/builtin/..%2Fevil/install')
+    // 用户确认覆盖本机同名自制内容后，才带上宿主真的会读的 ?overwrite=1（审计 A2/A3）。
+    expect(builtinInstallEndpoint('app-builder', true)).toBe('/api/pico/skills/builtin/app-builder/install?overwrite=1')
+    expect(builtinInstallEndpoint('app-builder', false)).not.toContain('?')
   })
 })
 

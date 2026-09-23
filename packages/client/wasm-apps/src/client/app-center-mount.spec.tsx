@@ -34,12 +34,16 @@
  *   - 发布表单的 `access` 初值改回硬编码 `DEFAULT_ACCESS`、`data_sensitivity` 改回
  *     `'internal'`（P1-3 前的实现）⇒ 预填/留空两组用例红；
  *   - 去掉"访问范围改动需确认"的闸 ⇒ 「改动访问范围」那条红；
- *   - 选文件时不判 `size`（P1-10 前的实现）⇒ 「33 MiB 不读字节」红。
+ *   - 选文件时不判 `size`（P1-10 前的实现）⇒ 「33 MiB 不读字节」红；
+ *   - `hasInnerModal`（panel-surface）去掉 `[role="alertdialog"]` 分支 ⇒
+ *     「装载器层（审计 C-01）」红：确认框在屏上按 Esc 会把整个应用中心关掉。
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PANEL_ACTIVE_ATTR, PANEL_SURFACE_ATTR, activePanelId } from '@picoaide/dsh-panel-surface/client'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
+import { APP_CENTER_PANEL_ID, mountAppCenterPanel, openAppCenterPanel } from './app-center-surface.tsx'
 import { PublishForm } from './PublishForm.tsx'
 import { OPEN_APP_PATH } from './open-app.ts'
 import { APP_CHANNEL_PATH, type AppChannel } from './channel-seam.ts'
@@ -1539,5 +1543,155 @@ describe('应用标识查重：填 app_id 时异步问、提交前复检', () =>
     // 既有应用的 app_id 不做查重（它必然"存在"），提交直接走发布。
     expect(calls.filter(call => call.url.includes('/availability'))).toHaveLength(0)
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
+  })
+
+  /**
+   * 审计 C-02（P1）：窗口几何**最后**填也必须进请求体。
+   *
+   * `submit` 是 `useCallback`，依赖数组漏了 `windowRatioText/windowWidthText/
+   * windowHeightText` ⇒ 闭包读到的永远是**上一次重建时**的快照。而窗口那一行是配置区
+   * 的最后一行（其后只有提交按钮），自然填写顺序就是"窗口最后填" ⇒ 作者声明的几何被
+   * 静默丢弃，应用按"作者没声明"发布（宿主回落 1280×720、不锁比例）。
+   *
+   * 判据取**请求体**而不是界面：界面本来就显示作者敲的值（这正是"静默丢弃"的伪装）。
+   * 变异验证：把三个 window state 从依赖数组里删掉 ⇒ 本用例红（`config.window` 变
+   * `undefined`）。
+   */
+  it('窗口比例/尺寸最后填也进请求体（A：首版发布）', async () => {
+    stubFetch((url) => {
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED })
+    // 窗口行**最后**填（与真实填写顺序一致）。
+    await type('.pico-app-center-window-ratio', '16:9')
+    await type('.pico-app-center-window-width', '1280')
+    await type('.pico-app-center-window-height', '720')
+    await click('.pico-app-center-submit')
+    const publish = calls.filter(call => call.url === PUBLISH_PATH)
+    expect(publish).toHaveLength(1)
+    const body = JSON.parse(String(publish[0]!.init.body)) as { config?: { window?: unknown } }
+    expect(body.config?.window, '最后填的窗口几何必须进请求体').toEqual({ ratio: 16 / 9, width: 1280, height: 720 })
+  })
+
+  /**
+   * 审计 C-02 的另一半（改版路径更糟）：新发版时窗口三个输入框**预填上一版的值**，
+   * 漏依赖时作者改完提交上去的是**旧值**，而界面显示新值 —— 用户看到的与发出去的不是
+   * 一回事。变异验证同上（删依赖 ⇒ 本用例红：期望 2、实得 1.5）。
+   */
+  it('发新版：作者改过的窗口比例不被上一版预填值覆盖（B：改版）', async () => {
+    const catalogWithWindow = {
+      apps: [
+        { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [], window: { ratio: 1.5 } },
+      ],
+    }
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, catalogWithWindow)
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-publish-new')
+    await pickFile('.pico-app-center-file', 'roster.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ version: '2.0.0', changelog: '改了窗口', sensitivity: 'internal' })
+    // 上一版是 1.5（预填）；作者最后改成 2。
+    expect(container.querySelector<HTMLInputElement>('.pico-app-center-window-ratio')!.value).toBe('1.5')
+    await type('.pico-app-center-window-ratio', '2')
+    await click('.pico-app-center-submit')
+    const publish = calls.filter(call => call.url === PUBLISH_PATH)
+    expect(publish).toHaveLength(1)
+    const body = JSON.parse(String(publish[0]!.init.body)) as { config?: { window?: { ratio?: number } } }
+    expect(body.config?.window?.ratio, '提交的必须是作者刚敲的值，不是上一版的预填值').toBe(2)
+  })
+})
+
+/**
+ * 装载器层回归（审计 C-01）：Esc 的让位判据必须认 `role="alertdialog"`。
+ *
+ * **为什么必须挂装载器**：上面那条「确认块的 Esc」用例用 `createRoot` 直接渲染
+ * `AppCenterPanel` —— 装载器根本不在树上，于是 `closeCount` 恒不变，无论装载器认不认
+ * alertdialog 都会通过（典型的"只挂面板、不挂装载器"假绿；审计实测产线里同一次按键的
+ * 行为相反：确认框在屏上按 Esc 会把整个应用中心关掉）。
+ *
+ * 本用例走**真实集成点** `mountAppCenterPanel`（= `mountPanelSurface` + 真
+ * `AppCenterPanel`，与 `index.ts` 的 `ctx.effect` 同一个调用），判据取自装载器的激活态
+ * 属性（不是面板自己的 `onClose` 计数）。
+ *
+ * ---- 变异验证 ----
+ *   - `hasInnerModal` 里删掉 `[role="alertdialog"][aria-modal="true"]`（回到只认
+ *     `dialog` 的旧判据）⇒ 本用例红（`activePanelId` 变成 null）；
+ *   - 确认块改回非模态（去掉 `aria-modal`）⇒ 本用例红（同一次按键没人接住）；
+ *   - 装载器改成查 `[role="dialog"]`（丢掉 `aria-modal` 条件）⇒ 本用例仍绿，但
+ *     `panel-surface/tests` 的"非模态 dialog 不该吃掉 Esc"会红。
+ */
+describe('装载器层（审计 C-01）：确认框上的 Esc 只收起确认框，不关整页应用中心', () => {
+  /** 一条归当前用户所有的应用（`is_owner` ⇒ 卡片出管理按钮）。 */
+  const LOADER_CATALOG = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [] },
+    ],
+  }
+
+  it('role=alertdialog aria-modal=true 的内层模态让装载器让位', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, LOADER_CATALOG)
+      throw new Error(`unexpected url: ${url}`)
+    })
+    // 装载器把面板插进**中列**，所以中列必须先存在（真实壳里它由框架挂载）。
+    const column = document.createElement('div')
+    column.setAttribute('data-pane', 'conversation')
+    document.body.appendChild(column)
+    let dispose: () => void = () => undefined
+    // 装载本身也会渲染一次（面板还没激活 ⇒ 渲染 null）：同样要包在 act 里。
+    await act(async () => { dispose = mountAppCenterPanel() })
+    try {
+      await act(async () => { openAppCenterPanel() })
+      // 目录请求（useEffect 里的 load()）落地：多给几轮微任务/宏任务。
+      for (let round = 0; round < 4; round += 1) {
+        await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+      }
+      expect(activePanelId(document), '面板应已激活').toBe(APP_CENTER_PANEL_ID)
+
+      const surfaceEl = column.querySelector<HTMLElement>(`[${PANEL_SURFACE_ATTR}="${APP_CENTER_PANEL_ID}"]`)
+      expect(surfaceEl, '装载器应把面板容器插进中列').not.toBeNull()
+      const trigger = surfaceEl!.querySelector<HTMLButtonElement>('.pico-app-center-take-offline')
+      expect(trigger, '目录里应渲染出下架按钮').not.toBeNull()
+      await act(async () => { trigger!.click() })
+
+      const confirm = surfaceEl!.querySelector<HTMLElement>('[data-role="confirm-take-offline"]')
+      expect(confirm, '确认块应已出现').not.toBeNull()
+      // 被这条缺陷推翻的信念：确认块声明成 `role="alertdialog" aria-modal="true"`。
+      expect(confirm!.getAttribute('role')).toBe('alertdialog')
+      expect(confirm!.getAttribute('aria-modal')).toBe('true')
+
+      // 真键盘路径：确认块把焦点移进"确认下架"，Esc 从**获得焦点的元素**上冒泡。
+      const focused = document.activeElement
+      expect(confirm!.contains(focused), '焦点应在确认块内').toBe(true)
+      await act(async () => {
+        focused!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      })
+
+      expect(surfaceEl!.querySelector('[data-role="confirm-take-offline"]'), '确认块应被自己的 window 监听收起').toBeNull()
+      expect(activePanelId(document), 'Esc 应归内层 alertdialog：整页面板不许被关掉').toBe(APP_CENTER_PANEL_ID)
+      expect(calls.filter(call => call.url.endsWith('/unpublish')), 'Esc 取消不得发出任何写请求').toHaveLength(0)
+
+      // 对照：确认块收起之后，同一次按键就该按设计关掉面板（让位判据不是"永远让位"）。
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      })
+      expect(activePanelId(document), '没有内层模态时，Esc 按设计关掉面板').toBeNull()
+    } finally {
+      // 收尾：让面板里还在飞的只读请求（渠道/身份/证明）落地后再卸载，避免
+      // "act 之外的 state 更新"噪音。
+      for (let round = 0; round < 3; round += 1) {
+        await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+      }
+      await act(async () => { dispose() })
+      column.remove()
+      document.documentElement.removeAttribute(PANEL_ACTIVE_ATTR)
+    }
   })
 })

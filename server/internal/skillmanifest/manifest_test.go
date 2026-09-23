@@ -2,8 +2,10 @@ package skillmanifest
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // goodBody 是合规正文;单独抽出常量,便于「空壳」用例精确替换掉它。
@@ -321,3 +323,102 @@ func TestIsAppIDLengthBounds(t *testing.T) {
 }
 
 func mustErr(_ *Manifest, err error) error { return err }
+
+// ---------------------------------------------------------------------------
+// G-P1(审计 2026-09-23):YAML merge key(`<<:`)解码炸弹。
+//
+// 前置闸门只统计**字符**(括号/块序列指示符/锚点),而 merge key 的代价落在
+// **解码期**:goccy 的 keyToNodeMap 对每个 merge 引用逐键拷贝被合并的映射,
+// 嵌套时按 fanout^k 膨胀。实测 2732 字节的 frontmatter 烧掉 86~143 秒 CPU
+// 且 Parse 返回 err=nil(会正常入库);普通员工 Bearer 即可触发,爆炸点在
+// 发布咨询锁之前。姊妹模块 agentshare/composition.go 已修过同一类。
+//
+// 修法:frontmatter 是封闭的扁平键值清单(合法包实测 0 个 merge key),直接拒。
+// 变异验证:注释掉 parseManifestYAML 里的 checkFrontmatterMergeKey ⇒ 本用例红。
+// ---------------------------------------------------------------------------
+
+// mergeBombFrontmatter 构造审计探针用的同一形态:嵌套的 `<<: [*a0, *a0, …]`。
+// 注意 merge key **不在行首**(`{<<: [...]}` 是流式映射),所以检测不能锚行首。
+func mergeBombFrontmatter(levels, fanout int) string {
+	var b strings.Builder
+	b.WriteString("name: merge-bomb\n")
+	b.WriteString("title: merge bomb\n")
+	b.WriteString("version: 1.0.0\n")
+	b.WriteString("description: 员工手册与报销制度的知识库索引与读取规则。\n")
+	b.WriteString("author: probe\n")
+	b.WriteString("category: 测试\n")
+	b.WriteString("a0: &a0 {")
+	for i := 0; i < fanout; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "k%d: 1", i)
+	}
+	b.WriteString("}\n")
+	for l := 1; l <= levels; l++ {
+		fmt.Fprintf(&b, "a%d: &a%d {<<: [", l, l)
+		for i := 0; i < fanout; i++ {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "*a%d", l-1)
+		}
+		fmt.Fprintf(&b, "], m%d: 1}\n", l)
+	}
+	return b.String()
+}
+
+func TestMergeKeyFrontmatterRejected(t *testing.T) {
+	// 两个形态都必须被拒:流式映射里的 merge key(审计探针形态)与块映射的
+	// 行首 `<<:`。
+	cases := map[string]string{
+		"flow-style merge key": mergeBombFrontmatter(6, 9),
+		"block-style merge key": "name: x\nversion: 1.0.0\ntitle: t\n" +
+			"description: 描述足够长可以通过校验。\nauthor: a\ncategory: 测试\n" +
+			"defaults: &d\n  category: 测试\n<<: *d\n",
+	}
+	for label, front := range cases {
+		if !reMergeKey.MatchString(front) {
+			t.Fatalf("%s: 检测正则没命中,判据失效", label)
+		}
+		start := time.Now()
+		_, err := parseManifestYAML(front, "", "SKILL.md 的 frontmatter")
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Errorf("%s: 含 merge key 的 frontmatter 被放行(会进解码器做指数合并)", label)
+			continue
+		}
+		var e *Error
+		if !errors.As(err, &e) || e.Code != CodeFrontmatterInvalid {
+			t.Errorf("%s: err = %v, want %s", label, err, CodeFrontmatterInvalid)
+		}
+		if !strings.Contains(e.Message, "merge key") {
+			t.Errorf("%s: 错误信息没有说明是 merge key: %s", label, e.Message)
+		}
+		// 炸弹必须在毫秒级被拒(而不是"被拒但已经烧了 CPU")。
+		if elapsed > 2*time.Second {
+			t.Errorf("%s: 拒绝耗时 %s,闸门没能在解析前生效", label, elapsed)
+		}
+	}
+}
+
+// TestMergeKeyNotMatchedInsideProse 是防误杀的正向对照:`<<` 出现在
+// description 正文里但不构成 merge key 时必须照常通过。
+func TestMergeKeyNotMatchedInsideProse(t *testing.T) {
+	for _, front := range []string{
+		"name: x\ntitle: t\nversion: 1.0.0\n" +
+			"description: 本文用 a << b 表示远小于,a <<b 亦然,<<x 也一样。\n" +
+			"author: a\ncategory: 测试\n",
+		"name: x\ntitle: t\nversion: 1.0.0\n" +
+			"description: C++ 里 cout << x; 与位移 1 << 3 都是常见写法。\n" +
+			"author: a\ncategory: 测试\n",
+	} {
+		if _, err := parseManifestYAML(front, "", "frontmatter"); err != nil {
+			t.Errorf("合法 frontmatter 被误拒: %v\n%s", err, front)
+		}
+	}
+	// 只含 `<<` 而不含 `<<:` 的文本不得被 reMergeKey 命中。
+	if reMergeKey.MatchString("description: a << b 与 1 << 3") {
+		t.Fatal("reMergeKey 误命中非 merge key 的 `<<`")
+	}
+}

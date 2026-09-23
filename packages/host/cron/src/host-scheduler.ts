@@ -8,7 +8,9 @@
  * Recovery semantics: on first tick or after a long gap (suspend/restart),
  * due instants are skipped and rolled forward — never queued for replay.
  * With `catchUpMissed` enabled, the single most recent missed occurrence is
- * fired instead of skipped.
+ * fired instead of skipped. 2026-09-23 CR-6: the same policy covers a job that
+ * was due while it was not visible to the current session (owner signed out),
+ * so "becoming visible again" cannot fire an overdue occurrence in real time.
  */
 import { lastRunAtMs } from './cron.ts'
 import type { HostCronLedger } from './host-ledger.ts'
@@ -79,11 +81,10 @@ export class HostCronScheduler {
       // (transient failures must not stay visible forever).
       this.ledger.setScheduler({ lastTickAt: now, error: undefined })
       if (recovered) {
-        // First tick after boot has no in-memory previousTick; catch-up is
-        // still meaningful there (the persisted nextRunAt is the anchor), so
-        // fall back to `now` and let lastMatchAt use its own lower bound.
+        // First tick after boot has no in-memory previousTick; the persisted
+        // nextRunAt is the anchor, so catch-up scans backwards from `now`.
         if (this.catchUpMissed) {
-          this.catchUp(previousTick ?? now, now)
+          this.catchUp(now)
         } else {
           this.ledger.skipMissed(now)
         }
@@ -92,6 +93,17 @@ export class HostCronScheduler {
       for (const job of this.ledger.state().jobs) {
         if (!this.visible(job)) continue
         if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
+        // 2026-09-23 CR-6: a due instant that was already past at the previous
+        // tick was not fired then, because the job was not visible to this
+        // session (owner signed out / session not restored yet). The normal
+        // path would otherwise fire it in real time (`triggeredAt == now`),
+        // bypassing the documented "missed triggers are skipped, never
+        // replayed" policy. Apply the recovery policy instead.
+        if (previousTick !== undefined && job.nextRunAt <= previousTick) {
+          if (this.catchUpMissed) this.catchUpJob(job, now)
+          else this.ledger.skipMissedFor(job.id, now)
+          continue
+        }
         const opened = this.ledger.openScheduled(job.id, `sched-${crypto.randomUUID()}`, now)
         if (opened !== undefined) void this.fire(opened.job, opened.execution)
       }
@@ -110,25 +122,37 @@ export class HostCronScheduler {
   }
 
   /**
-   * Catch-up path: for each due job, fire the single most recent matching
-   * instant inside the missed window, then roll forward. Bounded: the window
-   * scan walks at most 100 matches.
+   * Catch-up path: for each visible due job, fire the single most recent
+   * matching instant at/before `now`, then roll forward. Bounded: the scan
+   * walks at most 100 matches.
    */
-  private catchUp(windowStart: number, now: number): void {
+  private catchUp(now: number): void {
     for (const job of this.ledger.state().jobs) {
       if (!this.visible(job)) continue
       if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
-      const lastMatch = this.lastMatchAt(job, windowStart, now)
-      if (lastMatch === undefined) continue
-      const opened = this.ledger.openScheduled(job.id, `catchup-${crypto.randomUUID()}`, lastMatch)
-      if (opened !== undefined) void this.fire(opened.job, opened.execution)
-      // Roll forward past now so the regular path does not re-fire.
-      this.ledger.skipMissedFor(job.id, now)
+      this.catchUpJob(job, now)
     }
   }
 
-  private lastMatchAt(job: JobRecord, windowStart: number, now: number): number | undefined {
-    void windowStart
+  /**
+   * Fire one due job's most recent missed occurrence, then roll it past `now`.
+   *
+   * Rolling forward is unconditional (2026-09-23 CR-6): when no matching
+   * instant is found — a schedule whose matches fall outside the scan horizon —
+   * leaving `nextRunAt` in the past would fire the job late on the next
+   * ordinary tick, i.e. exactly the replay this path exists to prevent.
+   */
+  private catchUpJob(job: JobRecord, now: number): void {
+    const lastMatch = this.lastMatchAt(job, now)
+    if (lastMatch !== undefined) {
+      const opened = this.ledger.openScheduled(job.id, `catchup-${crypto.randomUUID()}`, lastMatch)
+      if (opened !== undefined) void this.fire(opened.job, opened.execution)
+    }
+    // Roll forward past now so the regular path does not re-fire.
+    this.ledger.skipMissedFor(job.id, now)
+  }
+
+  private lastMatchAt(job: JobRecord, now: number): number | undefined {
     if (job.nextRunAt === undefined || job.nextRunAt > now) return undefined
     // Most recent matching minute at/before now, not the 100th match walked
     // forward from nextRunAt. `job.nextRunAt` is the last-known due instant;

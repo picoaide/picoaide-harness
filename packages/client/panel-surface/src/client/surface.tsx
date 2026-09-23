@@ -35,6 +35,28 @@ import {
 } from '../index.ts'
 import { PANEL_STYLE_ATTR, panelStylesheet } from './stylesheet.ts'
 
+/**
+ * 文档里是否存在**内层模态**（确认框/表单）—— 存在时 Esc 归那一层，装载器让位。
+ *
+ * 本判据只有**这一个实现**：装载器的 Esc 守卫与底部「更多」浮层
+ * （`@picoaide/dsh-foot-menu` 的 `FootMenuRow`）都调它。此前两边各写各的，
+ * 于是同一次按键在两个包里得到不同答案 —— 那正是这条缺陷的成因。
+ *
+ * **两个角色都要认**：`[role="dialog"]` 是**精确值**属性选择器，`alertdialog`
+ * 不命中它。应用中心的「下架 / 删除」两个二次确认块写的正是 `role="alertdialog"`
+ * （ARIA 里"需要用户立即确认"的正确角色）：只查 `dialog` 时确认框在屏上、装载器的
+ * 让位判据却是 `null` ⇒ 按 Esc 把整个应用中心关掉，用户以为在取消确认、实际丢掉了
+ * 目录的筛选与滚动位置。
+ *
+ * 只认 `aria-modal="true"` 的模态：`aria-modal` 缺席的 dialog 是**非模态**的
+ * （页面上可能同时存在多个），那时 Esc 不该被它吃掉。
+ * @param doc - 目标文档（测试注入）。
+ * @returns true = 存在一个模态的 dialog / alertdialog。
+ */
+export function hasInnerModal(doc: Document): boolean {
+  return doc.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]') !== null
+}
+
 /** 面板拿到的操作面（目前只有"返回会话区"）。 */
 export interface PanelSurfaceApi {
   /** 关闭本面板、把中列还给会话区。 */
@@ -150,7 +172,8 @@ export function mountPanelSurface(options: PanelSurfaceOptions): PanelSurfaceHan
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || activePanelId(document) !== id) return
     // 面板里可能再开一层真正的模态（确认框/表单）：那时 Esc 归那一层。
-    if (document.querySelector('[role="dialog"][aria-modal="true"]') !== null) return
+    // 判据在 `hasInnerModal` 一处（dialog **与** alertdialog 都算模态）。
+    if (hasInnerModal(document)) return
     event.preventDefault()
     close()
   }

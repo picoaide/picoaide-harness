@@ -19,6 +19,14 @@ export interface CronSchedulerSnapshot {
   ledgerId?: string
   lastTickAt?: number
   error?: string
+  /**
+   * Set when the Host could not read its ledger at startup (a non-ENOENT errno,
+   * or a corrupt file whose bytes could not be isolated): reads answer from an
+   * empty in-memory state and **every write is refused**, so the stored jobs are
+   * never overwritten. The panel renders this as its own notice instead of the
+   * "corrupt and reset" one (2026-09-23 CR-1).
+   */
+  readOnly?: boolean
 }
 
 export interface CronSnapshot {

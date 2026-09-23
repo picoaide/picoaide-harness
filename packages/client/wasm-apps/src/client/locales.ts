@@ -88,10 +88,14 @@ export const zh = {
   'appCenter.ai.toolsNote': '应用 AI 只有对话：没有工具、不能读写文件、不能使用连接器与记忆。',
   'appCenter.ai.allow': '允许',
   'appCenter.ai.deny': '不允许',
-  'appCenter.ai.denied': '已拒绝：这个应用不能使用 AI。改主意就点「撤销授权」。',
+  'appCenter.ai.denied': '已拒绝：这个应用不能使用 AI。改主意就点「允许」。',
   'appCenter.ai.revoke': '撤销授权',
   'appCenter.ai.revoked': '已撤销：下次调用会重新询问。',
   'appCenter.ai.consentFailed': '授权没能保存到本机，这次不能放行：请重启客户端后重试。',
+  // 审计 C-24/C-25：撤销与「不允许」失败时的话只说**真实后果**（宿主闸门还开着），
+  // 且与「允许」失败分开 —— 拿「这次不能放行」描述撤销失败是反的。
+  'appCenter.ai.revokeFailed': '撤销没有生效：闸门仍然允许这个应用使用 AI，请重试。',
+  'appCenter.ai.denyFailed': '拒绝没有生效：没能关掉本机的 AI 闸门，请重试。',
   'appCenter.ai.identityPending': '正在确认登录身份，确认后即可授权（授权按 用户×应用 记录）。',
   'appCenter.ai.placeholder': '给应用 AI 发一条消息',
   'appCenter.ai.send': '发送',
@@ -420,10 +424,14 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.ai.toolsNote': 'App AI is chat only: no tools, no file access, no connectors and no memory.',
   'appCenter.ai.allow': 'Allow',
   'appCenter.ai.deny': 'Do not allow',
-  'appCenter.ai.denied': 'Denied: this app cannot use AI. Use "Revoke consent" to change your mind.',
+  'appCenter.ai.denied': 'Denied: this app cannot use AI. Use "Allow" to change your mind.',
   'appCenter.ai.revoke': 'Revoke consent',
   'appCenter.ai.revoked': 'Revoked: the next call asks again.',
   'appCenter.ai.consentFailed': 'The consent could not be saved on this device, so it was not granted. Restart the client and try again.',
+  // Audit C-24/C-25: a failed revoke / deny states the real consequence (the gate is still open)
+  // and must not reuse the allow direction's copy.
+  'appCenter.ai.revokeFailed': 'The revocation did not take effect: the gate still lets this app use AI. Try again.',
+  'appCenter.ai.denyFailed': 'The denial did not take effect: the local AI gate could not be closed. Try again.',
   'appCenter.ai.identityPending': 'Confirming your sign-in identity; you can grant consent once it is ready (consent is recorded per user and app).',
   'appCenter.ai.placeholder': 'Send a message to the app AI',
   'appCenter.ai.send': 'Send',

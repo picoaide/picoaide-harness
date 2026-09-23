@@ -95,6 +95,7 @@
     "cordis.patch.yml",
     "docs/**",
     "lib/**/*.js",
+    "lib/**/*.cjs",
     "lib/**/*.map",
     "lib/types/**/*.d.ts",
     "README.md",

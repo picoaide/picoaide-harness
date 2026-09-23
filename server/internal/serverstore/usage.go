@@ -503,22 +503,34 @@ func dayFill(from, to time.Time) []string {
 	return out
 }
 
+// weekFill 生成 from..to 覆盖到的所有**周桶**(桶名 = 该周周一)。
+//
+// G-05(审计 2026-09-23):起点必须对齐到 from 所在周的周一 —— SQL 侧按
+// date_trunc('week', …)(周一)分桶,若从 from 起逐周 +7(旧实现),窗口尾部
+// 那个"不完整周"(如 from=周三、to=下周二)的桶号与 SQL 行对不上,补零重建
+// 时该周**已聚合的数据被整体丢弃**(实测 3 次/600 token 报成 1 次/100)。
+// 对齐后每个重叠周恰好一个桶:既不丢尾部,也不产生重复/空桶。
 func weekFill(from, to time.Time) []string {
 	out := []string{}
-	for d := from; !d.After(to); d = d.AddDate(0, 0, 7) {
-		out = append(out, weekMonday(d))
+	for d := weekMondayDay(from); !d.After(to); d = d.AddDate(0, 0, 7) {
+		out = append(out, d.Format(dateFmt))
 	}
 	return out
+}
+
+// weekMondayDay 返回该日期所在周的周一(保留日期值形态)。from/to 已由
+// normalizeDayRange 归一为北京日期值,这里只做日期运算,与进程/PG 会话
+// 时区无关。
+func weekMondayDay(d time.Time) time.Time {
+	// 周一前推 wd-1 天;Sunday(wd=0)前推 6 天
+	return d.AddDate(0, 0, -((int(d.Weekday()) + 6) % 7))
 }
 
 // weekMonday 返回该日期所在周的周一日期(YYYY-MM-DD)。SQL 侧用
 // date(created_at,'weekday 0','-6 days') 得到同一周一,两者严格对齐,
 // 免疫 ISO/%W 的跨年边界差异(审计2026-E2)。
 func weekMonday(d time.Time) string {
-	wd := int(d.Weekday()) // 0=Sunday..6=Saturday
-	// 周一前推 wd-1 天;Sunday(wd=0)前推 6 天
-	back := (wd + 6) % 7
-	return d.AddDate(0, 0, -back).Format("2006-01-02")
+	return weekMondayDay(d).Format(dateFmt)
 }
 
 func monthFill(from, to time.Time) []string {

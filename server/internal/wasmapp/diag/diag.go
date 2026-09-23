@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -324,7 +325,12 @@ var hintTable = map[apperr.Code][]string{
 	},
 	apperr.CodeRuntimeOutputOverrun: {
 		fmt.Sprintf("协议帧单行上限 %d MiB:不要把大对象一次性写进响应,分页或改走 db 查询", limits.ProtocolLineMaxBytes>>20),
-		fmt.Sprintf("应用响应体上限 %d MiB,超出的部分客户端也拿不到", limits.AppResponseBodyMaxBytes>>20),
+		// ⚠️ 口径是"**可交付**"而不是"总输出闸门"（2026-09-23 审计 ABI-1）：
+		// 响应体必须装进**一个**帧（pump 读到第一个响应帧即结束），所以能交付的体量
+		// 远小于 limits.AppResponseBodyMaxBytes(8 MiB)——那个数是平台侧的总输出闸门，
+		// 不是"能拿到多少"。写 8 MiB 会把作者引到错的方向。
+		fmt.Sprintf("应用响应体必须装进**一个**帧:单帧负载上限 %d MiB,实际可用约 %d KiB(含响应头与 JSON 转义开销)",
+			abi.MaxFrameBytes>>20, abi.MaxResponseBodyBytes>>10),
 	},
 	apperr.CodeHostCallOverBudget: {
 		fmt.Sprintf("宿主调用超过预算(%s):缩小输入或拆成多次调用", limits.HostCallBudgetDefault),

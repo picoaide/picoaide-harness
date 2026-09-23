@@ -89,7 +89,7 @@ For environments without internet access, see [Air-gapped deployment](/en/deploy
 ```bash
 cd /opt/picoaide
 # Use server.image_tag from latest.json (authoritative, e.g. v2.7.0);
-# the image carries both tags (2.7.0 and v2.7.0), so either one starts fine
+# the image carries both tags (2.7.0 and v2.7.0), so either one starts fine (on a multi-stack host use the channel tag — see "Running multiple channel stacks on one server" below)
 sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${VER}|" .env
 grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${VER}" >> .env
 
@@ -104,6 +104,49 @@ docker compose up -d
   are cleared before being written (otherwise `client/` would keep installers from two versions at once); `.env` and all data directories are never touched;
 - **When the host already has a reverse proxy** (see [Operations & troubleshooting § The host already runs a reverse proxy](/en/deployment/operations/#the-host-already-runs-a-reverse-proxy)): recreate only this product's containers with
   `docker compose up -d postgres server`, and do not drag the shared reverse proxy into it.
+
+### Running multiple channel stacks on one server
+
+A channel differs in the **image contents** (branding, bundled clients, the channel marker baked
+into the image), **not in the tag**: every channel's image archive carries the same
+`picoaide-harness-server:v<version>`. So when you import a second channel's package on the same
+machine, the later `docker load` **overwrites** that tag, and from then on any stack running
+`docker compose up -d server` may be rebuilt from **another channel's** image — wrong branding and
+wrong bundled installers, while that stack's `SERVER_IMAGE` in `.env` still looks perfectly correct.
+
+Since 2026-09-23 every channel archive additionally carries a channel-scoped tag
+`picoaide-harness-server:<channel-id>-<version>`. Correct order on a multi-stack host:
+
+```bash
+VER=<target version, without the v>
+IMAGE=picoaide-harness-server
+STACK=/opt/picoaide            # <- this stack's deployment directory
+CT=picoaide-server             # <- this stack's server container name
+
+# 1) Import this channel's package (each stack loads its own channel package)
+unzip -p /tmp/pa.zip image.tar | docker load
+
+# 2) Read the image id from THIS stack's running container and re-tag it with the channel tag
+#    (do not name the variable GID/UID: they are read-only specials in zsh on some hosts)
+IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+
+# 3) Point this stack's .env at the channel tag (never leave a bare `v<version>`)
+cd "$STACK"
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+docker compose up -d server
+
+# 4) Verify that this stack really runs this channel
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # channel marker baked into the image
+curl -sk "https://<this-stack-domain>/api/client/v2/channel" | head -c 300   # channel_id must match
+```
+
+For a first-time deployment (no running container yet), re-tag **immediately** after `docker load`
+using the tag you just imported (`docker inspect --format '{{.Id}}' ${IMAGE}:${VER}`) instead of
+waiting for another stack to act. Rollback anchors must be **channel tags** too: on a multi-stack
+host a bare `v<old-version>` may already point at another channel's image. See
+[Channels and white-labelling](/en/deployment/channels/) for the channel consistency checks.
 
 ## 6. Post-upgrade verification (all three must pass)
 

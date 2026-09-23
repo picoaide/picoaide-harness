@@ -455,9 +455,11 @@ export class WasmAppsCache {
   /**
    * 仅静态子资源可被 304/本地直出短路（§7.5 冻结）。
    *
-   * `false` 的三种情形：`/api/*`（一律回源，否则本地缓存成了 API 的第二入口）、
+   * `false` 的四种情形：`/api/*`（一律回源，否则本地缓存成了 API 的第二入口）、
    * 文档导航（`Accept: text/html` 的请求或 `Content-Type: text/html` 的响应 ——
-   * 背后可能是准入/下架页）、既没有静态扩展名也不是静态 `Content-Type` 的路径。
+   * 背后可能是准入/下架页）、**文档入口 `/`**（2026-09-23 审计 WS-2：它在非导航
+   * 形态下也曾被判成静态子资源，于是平台下架/拒绝之后仍被本地直出）、既没有静态
+   * 扩展名也不是静态 `Content-Type` 的路径。
    */
   isStaticSubresource(path: string, headers: Record<string, string>): boolean {
     const raw = typeof path === 'string' ? path.trim() : ''
@@ -474,7 +476,12 @@ export class WasmAppsCache {
     if (contentType !== undefined && contentType.toLowerCase().includes(HTML_CONTENT_TYPE)) return false
 
     const last = pathname.split('/').filter((segment) => segment.length > 0).pop()
-    if (last === undefined) return true
+    // 2026-09-23 审计 WS-2：`/`（以及 `/a/b/` 这类以斜杠结尾的路径）没有"最后一段"，
+    // 旧实现把它当成静态子资源 ⇒ **非导航形态**的 `GET /`（应用自己的
+    // `fetch('/')`/XHR，`Accept: */*`）会命中缓存直接 200 且**不出网**，即便平台此刻
+    // 返回 410（下架）或拒绝（准入）—— 本地缓存于是成了绕过平台准入的第二入口。
+    // 文档语义（同函数 doc）：`/` 是**文档入口**，不是静态子资源 ⇒ 回源。
+    if (last === undefined) return false
     const dot = last.lastIndexOf('.')
     if (dot > 0 && dot < last.length - 1 && isStaticExtension(last.slice(dot + 1))) return true
     if (contentType !== undefined) {

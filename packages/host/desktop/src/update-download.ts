@@ -38,6 +38,38 @@ export { serverManifestURL } from './desktop-release.ts'
 /** Maximum accepted installer size, in bytes. */
 export const MAX_UPDATE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 
+/**
+ * 两个 chunk 之间允许的最长间隔（停滞预算），毫秒。
+ *
+ * B-08（2026-09-23 审计 P1）：安装包传输此前**没有任何停滞/超时检测** ——
+ * 只有调用方的 `signal` 能中止它，而那个 signal 只在 effect disposal 时被 abort。
+ * 于是一条"服务端接受了连接、之后一个字节都不发"的黑洞连接会让整条更新流程
+ * 卡死一个会话：托盘永远停在"下载中"、`downloadTask` 占位让后台检查与手动检查
+ * 全部早退、且没有取消入口（探针 `probe-download-stall-real.mjs` 实测 6 秒后仍
+ * pending，磁盘上留下 `.partial` / `.partial.json`）。
+ *
+ * 停滞（而不是总时长）才是判据：几百 MB 的安装包在慢链路上本来就要跑几分钟，
+ * 用总时长一刀切会把正常下载判死。
+ */
+export const DEFAULT_UPDATE_STALL_TIMEOUT_MS = 60_000
+
+/**
+ * 传输必须达到的最低平均速度（字节/秒）。
+ *
+ * 与服务端下发客户端包时的写截止地板同量级（64 KiB/s）：低于它的链路不值得等，
+ * 而且用它推导总预算是"有界"而不是"拍一个数字"。
+ */
+export const MIN_UPDATE_TRANSFER_BYTES_PER_SECOND = 64 * 1024
+
+/**
+ * 整份传输的总预算（毫秒），由体积上限与速度地板推导。
+ *
+ * 1 GiB / 64 KiB/s ≈ 4.55 小时：任何合法传输都远在它之内，而一个"永远在慢慢发
+ * 但永远发不完"的对端（停滞检测抓不到它）仍然被有界终止。
+ */
+export const DEFAULT_UPDATE_TOTAL_TIMEOUT_MS
+  = Math.ceil(MAX_UPDATE_DOWNLOAD_BYTES / MIN_UPDATE_TRANSFER_BYTES_PER_SECOND) * 1000
+
 /** Failure categories exposed to the update coordinator. */
 export type UpdateDownloadErrorCode =
   | 'aborted'
@@ -49,6 +81,12 @@ export type UpdateDownloadErrorCode =
   | 'network'
   | 'release-missing'
   | 'response-too-large'
+  /**
+   * 本地永久失败（B-07，2026-09-23 审计 P1）：磁盘满/配额（ENOSPC/EDQUOT）、
+   * 权限（EACCES/EPERM）、只读文件系统（EROFS）、路径不可用（ENOTDIR/ENAMETOOLONG/
+   * EINVAL/非法参数）。重试改变不了结果，用户也不是网络问题。
+   */
+  | 'storage'
 
 /** Fetch-compatible request boundary supplied by the Electron adapter or a test. */
 export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<Response>
@@ -83,6 +121,16 @@ export interface DownloadDesktopUpdateOptions {
    * download path and keeps both from disagreeing on the asset.
    */
   readonly manifest?: DesktopReleaseManifest
+  /**
+   * 无字节进展多久算停滞（毫秒，缺省 {@link DEFAULT_UPDATE_STALL_TIMEOUT_MS}）。
+   * 停滞失败归入可重试的 `network`：`.partial` 与 sidecar 都保留，下一次续传。
+   */
+  readonly stallTimeoutMs?: number
+  /**
+   * 整份传输的总预算（毫秒，缺省 {@link DEFAULT_UPDATE_TOTAL_TIMEOUT_MS}）。
+   * 它兜住"永远在慢慢发、永远发不完"的对端——停滞检测看不见这种形态。
+   */
+  readonly totalTimeoutMs?: number
 }
 
 /** Inputs for one resumable installer transfer. */
@@ -113,6 +161,10 @@ export interface FetchUpdateInstallerOptions {
    * resume offset and the completed-file decision from being computed twice.
    */
   readonly installed?: InstalledUpdate
+  /** 停滞预算（毫秒，见 {@link DEFAULT_UPDATE_STALL_TIMEOUT_MS}）。 */
+  readonly stallTimeoutMs?: number
+  /** 总预算（毫秒，见 {@link DEFAULT_UPDATE_TOTAL_TIMEOUT_MS}）。 */
+  readonly totalTimeoutMs?: number
 }
 
 /** Where one version's installer lives, and whether it is already complete. */
@@ -147,7 +199,8 @@ export class UpdateDownloadError extends Error {
    * Transport failures, 5xx responses, an empty or oversized body, and a digest
    * mismatch (the transfer was cut short, and its partial file is kept) are
    * retriable; a 4xx response, a release without this platform's asset,
-   * malformed options, and a structurally invalid artifact are not.
+   * malformed options, a structurally invalid artifact, and a **local storage
+   * failure** (disk full / permissions / read-only mount) are not.
    */
   readonly retriable: boolean
 
@@ -187,7 +240,32 @@ const DEFAULT_RETRIABLE: Readonly<Record<UpdateDownloadErrorCode, boolean>> = {
   network: true,
   'release-missing': false,
   'response-too-large': true,
+  // B-07:本地永久失败重试没有意义(磁盘满不会因为再问一次而变空)。
+  storage: false,
 }
+
+/**
+ * 本地存储失败的错误码（errno / Node 参数错误）。
+ *
+ * 全是"再试一次还是同样的结果"的形态：磁盘/配额满、权限、只读挂载、路径形态
+ * 不合法。传输类错误（ECONNRESET/ETIMEDOUT/ENOTFOUND…）**不在**这里 ——
+ * 它们仍然按 `network` 重试。
+ */
+const STORAGE_ERRNO_CODES: ReadonlySet<string> = new Set([
+  'EDQUOT',
+  'EACCES',
+  'EEXIST',
+  'EINVAL',
+  'EISDIR',
+  'ENAMETOOLONG',
+  'ENOSPC',
+  'ENOTDIR',
+  'EPERM',
+  'EROFS',
+  // Node 在文件名/参数非法时抛的 TypeError 码(不是 errno)。
+  'ERR_INVALID_ARG_VALUE',
+  'ERR_INVALID_ARG_TYPE',
+])
 
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
@@ -244,18 +322,26 @@ interface TransferResult {
  *   and invalid installers.
  */
 export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOptions): Promise<string> {
-  const transferred = await fetchUpdateInstaller({
-    platform: options.platform,
-    version: options.version,
-    userDataPath: options.userDataPath,
-    request: options.request,
-    manifestURL: options.manifestURL,
-    ...(options.expectedChannel === undefined ? {} : { expectedChannel: options.expectedChannel }),
-    ...(options.manifest === undefined ? {} : { manifest: options.manifest }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-  })
-  return transferred.path
+  try {
+    const transferred = await fetchUpdateInstaller({
+      platform: options.platform,
+      version: options.version,
+      userDataPath: options.userDataPath,
+      request: options.request,
+      manifestURL: options.manifestURL,
+      ...(options.expectedChannel === undefined ? {} : { expectedChannel: options.expectedChannel }),
+      ...(options.manifest === undefined ? {} : { manifest: options.manifest }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+      ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
+    })
+    return transferred.path
+  } catch (cause) {
+    // B-07 兜底：本地文件系统错误(打开/写入/改名/删除/stat)必须归到 `storage`,
+    // 不能逃出类型契约被上层当成可重试的网络故障。
+    throw classifyTransferFailure(cause)
+  }
 }
 
 /**
@@ -274,9 +360,10 @@ export async function resolveUpdateInstaller(
 ): Promise<InstalledUpdate> {
   const platform = validatedPlatform(options.platform)
   const version = validatedVersion(options.version)
-  const userDataPath = await validatedUserDataPath(options.userDataPath)
   // 本地目标先校验、再联网:畸形/符号链接的 user-data 路径必须在发出任何
   // 请求之前就被拒(否则会先建立网络连接再报"参数非法",也给了探测面)。
+  // B-07:`lstat` 的 ENOENT/EACCES 是本地永久失败,归 `storage` 而不是 `network`。
+  const userDataPath = await classifyLocalFailure(validatedUserDataPath(options.userDataPath))
   throwIfAborted(options.signal)
 
   const manifest = options.manifest ?? await fetchManifestFor(options)
@@ -300,11 +387,11 @@ export async function resolveUpdateInstaller(
     )
   }
 
-  const paths = await prepareDownloadPaths(
+  const paths = await classifyLocalFailure(prepareDownloadPaths(
     userDataPath,
     version,
     installerFileName(downloadURL, normalizedVersion, platform),
-  )
+  ))
   const size = asset.size > 0 ? asset.size : 0
   const shared = {
     version,
@@ -347,12 +434,12 @@ export async function fetchUpdateInstaller(
 
   const platform = validatedPlatform(options.platform)
   const version = validatedVersion(options.version)
-  const userDataPath = await validatedUserDataPath(options.userDataPath)
-  const paths = await prepareDownloadPaths(
+  const userDataPath = await classifyLocalFailure(validatedUserDataPath(options.userDataPath))
+  const paths = await classifyLocalFailure(prepareDownloadPaths(
     userDataPath,
     version,
     installerFileName(installed.downloadURL, version.replace(/^v/u, ''), platform),
-  )
+  ))
   const progress = options.onProgress
   const startBytes = installed.resumeBytes
   if (startBytes > 0) progress?.({ receivedBytes: startBytes, totalBytes: installed.size > 0 ? installed.size : undefined })
@@ -365,13 +452,15 @@ export async function fetchUpdateInstaller(
     startBytes,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(progress === undefined ? {} : { onProgress: progress }),
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
   })
   if (failure !== undefined) throw failure
   // 传输自身通过(可能整段都在本地):完成件必须先通过平台魔数校验才交出。
   // 内容与清单哈希一致、却不是本平台的安装包容器 —— 这份字节没有续传价值
   // (重试还是同一份),必须删掉,不能留在待安装位置。
   try {
-    await validateArtifact(paths.completed, platform)
+    await classifyLocalFailure(validateArtifact(paths.completed, platform))
   } catch (cause) {
     await unlinkIfPresent(paths.completed)
     throw cause
@@ -636,12 +725,13 @@ async function streamInstaller(
       totalBytes,
       ...(transfer.signal === undefined ? {} : { signal: transfer.signal }),
       ...(transfer.onProgress === undefined ? {} : { onProgress: transfer.onProgress }),
+      // B-08:停滞/总预算必须真的传到读循环里(漏传 = "修复形状在、能力不在")。
+      ...(transfer.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: transfer.stallTimeoutMs }),
+      ...(transfer.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: transfer.totalTimeoutMs }),
     })
   } catch (cause) {
     if (abortedBeforeStreaming || isAbortFailure(cause)) return aborted(cause)
-    return cause instanceof UpdateDownloadError
-      ? cause
-      : new UpdateDownloadError('network', 'The update installer could not be downloaded.', { cause })
+    return classifyTransferFailure(cause)
   } finally {
     await response.body.cancel().catch(() => undefined)
   }
@@ -686,10 +776,61 @@ interface Transfer {
   readonly startBytes: number
   readonly signal?: AbortSignal
   readonly onProgress?: (progress: UpdateDownloadProgress) => void
+  /** 无字节进展的预算（毫秒）；缺省 {@link DEFAULT_UPDATE_STALL_TIMEOUT_MS}。 */
+  readonly stallTimeoutMs?: number
+  /** 整份传输的总预算（毫秒）；缺省 {@link DEFAULT_UPDATE_TOTAL_TIMEOUT_MS}。 */
+  readonly totalTimeoutMs?: number
+}
+
+/**
+ * 把一个"永不到来的 chunk"变成一次可重试的失败（B-08）。
+ *
+ * 读操作与停滞/总预算竞速：预算到点即以 `network` 失败返回，`.partial` 与
+ * sidecar 原样保留（续传材料不丢），`writeTransfer` 的 `finally` 负责关句柄。
+ * 定时器在每次读到 chunk 后重新计时 —— 判据是**字节进展**，不是总时长。
+ * @param stallTimeoutMs - 两个 chunk 之间允许的最长间隔。
+ * @param totalTimeoutMs - 整份传输的总预算。
+ * @returns a read function that fails instead of hanging forever.
+ */
+function boundedReads(stallTimeoutMs: number, totalTimeoutMs: number): {
+  read<R>(reader: ReadableStreamDefaultReader<R>): Promise<ReadableStreamReadResult<R>>
+} {
+  const deadline = Date.now() + totalTimeoutMs
+  return {
+    async read<R>(reader: ReadableStreamDefaultReader<R>): Promise<ReadableStreamReadResult<R>> {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        throw new UpdateDownloadError(
+          'network',
+          `The update download exceeded its total time budget of ${String(totalTimeoutMs)} ms.`,
+        )
+      }
+      const idleBudget = Math.min(stallTimeoutMs, remaining)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let failStall!: (cause: unknown) => void
+      const stalled = new Promise<never>((_resolve, reject) => { failStall = reject })
+      timer = setTimeout(() => {
+        failStall(new UpdateDownloadError(
+          'network',
+          idleBudget === stallTimeoutMs
+            ? `The update download stalled: no bytes arrived for ${String(stallTimeoutMs)} ms.`
+            : `The update download exceeded its total time budget of ${String(totalTimeoutMs)} ms.`,
+        ))
+      }, idleBudget)
+      try {
+        return await Promise.race([reader.read(), stalled])
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    },
+  }
 }
 
 /**
  * 写入响应体并同步 sidecar,返回写入的总字节数。
+ *
+ * B-08：每一次 `reader.read()` 都在**停滞预算 + 总预算**之内（`boundedReads`）——
+ * 此前这里是无界等待，一条黑洞连接就能把整个更新流程卡死一个会话。
  * @returns 完成件 + 本次新增的字节数。
  */
 async function writeTransfer(input: {
@@ -702,9 +843,15 @@ async function writeTransfer(input: {
   readonly totalBytes: number | undefined
   readonly signal?: AbortSignal
   readonly onProgress?: (progress: UpdateDownloadProgress) => void
+  readonly stallTimeoutMs?: number
+  readonly totalTimeoutMs?: number
 }): Promise<number> {
   const handle = await open(input.filename, input.offset === 0 ? 'w' : 'r+')
   const reader = input.body.getReader()
+  const reads = boundedReads(
+    input.stallTimeoutMs ?? DEFAULT_UPDATE_STALL_TIMEOUT_MS,
+    input.totalTimeoutMs ?? DEFAULT_UPDATE_TOTAL_TIMEOUT_MS,
+  )
   let received = input.offset
   let reported: PartialTransferState = input.partial
   try {
@@ -712,7 +859,7 @@ async function writeTransfer(input: {
     await writePartialState(input.stateFilename, input.partial)
     while (true) {
       throwIfAborted(input.signal)
-      const chunk = await reader.read()
+      const chunk = await reads.read(reader)
       throwIfAborted(input.signal)
       if (chunk.done) break
       if (chunk.value.byteLength > MAX_UPDATE_DOWNLOAD_BYTES - received) {
@@ -968,8 +1115,13 @@ function installerFileName(
     candidate = ''
   }
   // 只接受单段、非隐藏、无路径分隔符、无上跳的文件名;否则回退到中性名。
+  // B-07:清单里解码出来的名字还要过 NUL 与**字节长度**两道闸 —— `length` 是
+  // UTF-16 码元数,一个多字节 basename 可以在 128 码元以内却超过 NAME_MAX(255 字节),
+  // 于是 `open()` 直接抛 `ENAMETOOLONG`(本地永久失败,被误报成网络问题)。
   if (candidate === ''
     || candidate.length > 128
+    || Buffer.byteLength(candidate) > 200
+    || candidate.includes('\0')
     || candidate.startsWith('.')
     || candidate.includes('/')
     || candidate.includes('\\')
@@ -1057,6 +1209,50 @@ function invalidArtifact(platform: DesktopDownloadPlatform): UpdateDownloadError
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted !== true) return
   throw aborted(signal.reason)
+}
+
+/** One `errno`-style code from an unknown thrown value, if any. */
+function errorCodeOf(cause: unknown): string | undefined {
+  const code = (cause as NodeJS.ErrnoException | null | undefined)?.code
+  return typeof code === 'string' && code !== '' ? code : undefined
+}
+
+/**
+ * 本地存储失败的归一（B-07，2026-09-23 审计 P1）。
+ *
+ * 缺陷形态：`streamInstaller` 的兜底 `catch` 把**任何**非 `UpdateDownloadError`
+ * 都压成可重试的 `network`，于是
+ *   `ENOSPC|EDQUOT`（磁盘满/配额）、`EACCES|EPERM`（权限）、`EROFS`（只读挂载）、
+ *   `ENAMETOOLONG|ENOTDIR|EINVAL` 与 `ERR_INVALID_ARG_VALUE`（路径/参数形态）
+ * 会被按网络故障退避重试 6 次，最后告诉用户"网络问题"——真因在本地磁盘/权限，
+ * 而重试永远不会成功（探针 `probe-fs-error-as-network.mjs` 实测 6 次尝试 +
+ * `lastError: network`）。
+ *
+ * 现在：本地永久失败 → 不可重试的 `storage`（准确文案），瞬时传输故障
+ * （ECONNRESET/ETIMEDOUT/ENOTFOUND…）仍按 `network` 重试。
+ * @param cause - thrown value from the transfer or the local filesystem.
+ * @returns the typed failure to surface.
+ */
+function classifyTransferFailure(cause: unknown): UpdateDownloadError {
+  if (cause instanceof UpdateDownloadError) return cause
+  const code = errorCodeOf(cause)
+  if (code !== undefined && STORAGE_ERRNO_CODES.has(code)) {
+    return new UpdateDownloadError(
+      'storage',
+      `The update installer could not be written to disk (${code}). Free up disk space or fix the update folder permissions.`,
+      { cause },
+    )
+  }
+  return new UpdateDownloadError('network', 'The update installer could not be downloaded.', { cause })
+}
+
+/** Normalize a rejected promise from a local-filesystem call into the typed contract. */
+async function classifyLocalFailure<T>(operation: Promise<T>): Promise<T> {
+  try {
+    return await operation
+  } catch (cause) {
+    throw classifyTransferFailure(cause)
+  }
 }
 
 function aborted(cause: unknown): UpdateDownloadError {

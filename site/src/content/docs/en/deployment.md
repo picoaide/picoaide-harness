@@ -59,7 +59,7 @@ Key fields of `latest.json`:
 |---|---|
 | `channel_id` | Which channel this manifest belongs to (the server enforces the comparison, see [Channels & white-label](/en/deployment/channels/)) |
 | `server.version` | Target version (without `v`, e.g. `2.7.0`) |
-| `server.image_tag` | Image tag (with `v`, e.g. `v2.7.0`); after import both the `2.7.0` and `v2.7.0` tags exist |
+| `server.image_tag` | Image tag (with `v`, e.g. `v2.7.0`); after import both the `2.7.0` and `v2.7.0` tags exist, plus a channel-scoped `<channel-id>-<version>` tag (required when two channel stacks share a host — see [Upgrade, backup and rollback](/en/deployment/upgrade/)) |
 | `server.image_asset` | Download URL of the image archive |
 | `client.version` | Client version released with this image version (same source as the server) |
 

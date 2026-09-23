@@ -109,15 +109,15 @@ export function builtinRowProgress(
 /**
  * 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。
  *
- * ⚠️ **不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（`auth-gate` 的
- * `/^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/`），从不读 `?force=1`；
- * "更新"之所以能生效，靠的是 `installSkillArchive` 本身的**整树替换**语义
- * （备份旧目录 → rename 新的进来），而不是某个强制刷新开关。留一个没人读的
- * 参数只会让人以为它能强制刷新（曾如此）。
+ * 端点本身不带参数（R2-SK-5：宿主按 pathname 分发，历史上的 `?force=1` 谁都没读）；
+ * `overwrite=true` 时由本函数拼上 `?overwrite=1` —— 那个参数宿主**真的读**
+ * （审计 2026-09-23 A2/A3 的两端契约：覆盖本机自制内容必须有用户确认）。
  * @param name - 技能名（服务端清单里的 `name`）。
+ * @param overwrite - 用户已确认覆盖本机同名内容。
  */
-export function builtinInstallEndpoint(name: string): string {
-  return `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
+export function builtinInstallEndpoint(name: string, overwrite = false): string {
+  const base = `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
+  return overwrite ? `${base}?overwrite=1` : base
 }
 
 /**
@@ -176,12 +176,13 @@ export function useBuiltinSkills(onInstalled?: () => void) {
    * `installSkillArchive` 会把整棵树替换成服务端那一份（R1-pm-8 的"更新真的装得上"
    * 就靠它）。端点不带参数（R2-SK-5）—— 宿主不读 `?force=1`，别再加回来。
    * @param skill - 清单行。
+   * @param overwrite - 用户已在本机确认覆盖同名自制内容（宿主缺它会 409 拒绝）。
    */
-  const install = async (skill: BuiltinSkill): Promise<void> => {
+  const install = async (skill: BuiltinSkill, overwrite = false): Promise<void> => {
     setBusy(skill.name)
     setFailed(null)
     try {
-      const res = await fetch(builtinInstallEndpoint(skill.name), { method: 'POST' })
+      const res = await fetch(builtinInstallEndpoint(skill.name, overwrite), { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({})) as { error?: string }
         throw new Error(data.error ?? `HTTP ${String(res.status)}`)

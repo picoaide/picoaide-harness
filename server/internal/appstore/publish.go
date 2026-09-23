@@ -275,11 +275,33 @@ func Publish(db *sql.DB, req PublishRequest) (*Result, error) {
 		// 管理后台上架 = 已审核(与旧市场语义一致:上架即可分发)。
 		status = serverstore.ReleaseStatusApproved
 	}
+	// 投影(审计 2026-09-23 G-P2-3):apps 行是**目录对全员下发的投影**
+	// (title/description 直接来自这一行),而 app_releases 才是真相。
+	// **待审版本没有生效,投影就必须一字不动** —— 否则作者提交一个"改名成
+	// IT 密码重置"的待审版本,全公司立刻在目录里看到它(审核只剩"卡制品"),
+	// 而它被拒绝后还会永久留在投影行上(没有任何自愈路径)。
+	//
+	// 这里刻意**显式传现值**(而不是靠 upsertApp 的冲突分支"恰好"不写这两列):
+	// 不变量必须在调用方成立,与 DAO 的列集改动无关。取值与 WASM 面
+	// (wasmapp/api/publish.go 的 projTitle/projDescription)逐条同形:
+	//   - approved(管理员直发):投影就是本版元数据;
+	//   - pending 且已有行    :投影保持现有值(读到的现值);
+	//   - pending 且首版      :app_id 占位(空标题不是可接受的终态)。
+	projTitle, projDescription := req.Manifest.Title, req.Manifest.Description
+	if status == serverstore.ReleaseStatusPending {
+		projTitle, projDescription = req.AppID, ""
+		if appErr == nil {
+			projTitle, projDescription = existingApp.Title, existingApp.Description
+			if strings.TrimSpace(projTitle) == "" {
+				projTitle = req.AppID
+			}
+		}
+	}
 	// P2-3:占名 + 建版本在同一事务内完成,CreateRelease 失败不会留下
 	// 「占名无版本」的悬挂 App(名称被永久占用却无任何版本)。
 	if _, err := serverstore.UpsertAppAndCreateReleaseOn(tx, &serverstore.App{
-		Kind: req.Kind, AppID: req.AppID, Title: req.Manifest.Title,
-		Description: req.Manifest.Description, Owner: owner, Channel: req.Channel, Enabled: enabled,
+		Kind: req.Kind, AppID: req.AppID, Title: projTitle,
+		Description: projDescription, Owner: owner, Channel: req.Channel, Enabled: enabled,
 	}, &serverstore.Release{
 		Kind: req.Kind, AppID: req.AppID, Version: req.Manifest.Version,
 		Title: req.Manifest.Title, Description: req.Manifest.Description,

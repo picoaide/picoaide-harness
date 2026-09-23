@@ -49,6 +49,12 @@ type API struct {
 	providers        map[string]PasswordProvider
 	browsers         map[string]BrowserProvider
 	enabledProviders map[string]bool
+	// providersConfigured 区分"**从未配置过**"与"配置成空集"(WEB-2 审计 2026-09-23)。
+	// `New()` 起 enabledProviders 就是非 nil 空 map ⇒ 判不了 nil;而空集在 fail-open
+	// 方向恰恰是最危险的取值(`auth.enabled=","` 落库 ⇒ 空集 ⇒ 旧兜底返回
+	// ["ldap","local"] ⇒ 员工面重新接受本地密码)。SetEnabledProviders /
+	// ReloadProviders 一旦被调用即置位,之后空集按 fail-closed 处理(空顺序)。
+	providersConfigured bool
 
 	// OnSessionRevoked / OnUserSessionsRevoked 是**会话键失效**的回调
 	// （契约 §8.2 / R1-SRV-5，2026-09-19）。
@@ -104,6 +110,7 @@ func (a *API) SetEnabledProviders(names []string) {
 	}
 	a.mu.Lock()
 	a.enabledProviders = set
+	a.providersConfigured = true // 空集从此是"配置成空"而不是"没配置过"
 	a.mu.Unlock()
 }
 
@@ -131,6 +138,7 @@ func (a *API) ReloadProviders(db *sql.DB) error {
 	a.providers = providers
 	a.browsers = bs
 	a.enabledProviders = enabled
+	a.providersConfigured = true
 	a.mu.Unlock()
 	return nil
 }
@@ -138,13 +146,18 @@ func (a *API) ReloadProviders(db *sql.DB) error {
 // clientPasswordOrder returns the provider names the CLIENT surface may use.
 // auth.enabled is authoritative (2026-09-08 P1-5): the local provider stays
 // registered for the admin surface, but a deployment that enables ldap/oidc
-// only must not accept local passwords on the employee surface. An empty set
-// (API built without ConfigureProviders, e.g. unit tests) keeps the legacy
-// order so existing behaviour is preserved.
+// only must not accept local passwords on the employee surface.
+//
+// WEB-2(审计 2026-09-23):"从未配置过"的最小装配(`New()` 之后没人调过
+// SetEnabledProviders/ReloadProviders,例如单测)保留遗留顺序 ["ldap","local"];
+// **已经配置过**而集合为空 ⇒ 返回空顺序(fail-closed),不再回落成"ldap+local"。
+// 旧实现按 `len(enabledProviders)==0` 判断,把"没配置过"和"配置成什么都没有"
+// 混为一谈 ⇒ `auth.enabled=","`(HTTP 面现已 400)会让员工面重新接受本地口令。
+// 管理后台不受影响:它走 AuthenticateConfiguredAdmin(独立于本函数)。
 func (a *API) clientPasswordOrder() []string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if len(a.enabledProviders) == 0 {
+	if !a.providersConfigured {
 		return []string{"ldap", "local"}
 	}
 	order := make([]string, 0, 2)
@@ -313,7 +326,8 @@ func (a *API) handleLogin(c *gin.Context) {
 	if err != nil {
 		// 2026-09-08 P1-3:只有失败尝试才计入限流预算(此前成功也计数,
 		// 正常用户第 11 次登录会被 429)。
-		a.loginFailed(c, req.Username)
+		// 2026-09-23 E-01:记账已由 loginAllowed 里的 allow **判定即记账**原子
+		// 完成,此处不得再记一次(重复记账会让预算减半);成功分支仍清空。
 		// v3b 审计: 登录失败留痕(合规要求; 含来源 IP)。
 		_ = serverstore.AuditLog(a.DB, req.Username, "login_fail", "ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")

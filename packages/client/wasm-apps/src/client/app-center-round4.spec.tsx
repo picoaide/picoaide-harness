@@ -695,6 +695,79 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     expect(aiCalls).toEqual([])
   })
 
+  /**
+   * 审计 C-25（P2，安全向）：「不允许」必须**真的关掉宿主闸门**。
+   *
+   * 此前它只 `setDenied(true)` —— 一句界面标记：用户读到"这个应用不能使用 AI"，而应用
+   * 照样能经 `/__picoaide/ai/chat` 花掉他的额度。修法＝与「允许」走同一条写面路径
+   * （`syncAppAiConsent(appId, false)`）并同步清掉渲染层的 UI 记忆。
+   *
+   * 变异验证：把 `deny` 改回 `setDenied(true)` ⇒ 本条红（`consentCalls` 为空）。
+   */
+  it('「不允许」真的写宿主（granted:false），不是只置一个界面标记', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount({ consent: memoryConsent() })
+    await click('.pico-app-center-detail')
+    await allowAi()
+    expect(consentCalls).toEqual([{ app_id: 'shift-notes', granted: true }])
+    // 重新打开说明卡：撤销后再点「不允许」。
+    await click('.pico-app-ai-revoke')
+    await settle()
+    await click('.pico-app-ai-deny')
+    await settle()
+    expect(consentCalls).toEqual([
+      { app_id: 'shift-notes', granted: true },
+      { app_id: 'shift-notes', granted: false },
+      { app_id: 'shift-notes', granted: false },
+    ])
+    expect(container.querySelector('[data-role="ai-denied"]')).not.toBeNull()
+  })
+
+  /**
+   * 审计 C-25：写宿主失败时**不许宣称已拒绝**（闸门可能还开着）。
+   * 变异验证：失败分支也 `setDenied(true)` ⇒ 本条红。
+   */
+  it('「不允许」写宿主失败 ⇒ 如实报错，不渲染"已拒绝"', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount()
+    consentReply = () => jsonResponse(500, { error: { code: 'CONSENT_NOT_PERSISTED' } })
+    await click('.pico-app-center-detail')
+    await click('.pico-app-ai-deny')
+    await settle()
+    expect(consentCalls).toEqual([{ app_id: 'shift-notes', granted: false }])
+    expect(container.querySelector('[data-role="ai-denied"]'), '不得宣称已拒绝').toBeNull()
+    expect(container.querySelector('[data-role="ai-deny-failed"]'), '必须如实报错').not.toBeNull()
+  })
+
+  /**
+   * 审计 C-24（P2，安全向）：撤销写宿主**失败**时不得宣称"已撤销"。
+   *
+   * 此前无论成败都清 UI 记忆、置 `revoked`（并渲染"已撤销：下次调用会重新询问"），
+   * 而宿主闸门其实还开着、应用照样能花用户的额度；同时撤销入口消失、只剩「允许」，
+   * 用户最自然的下一步反而是**重新授权**。修法＝失败不改变任何状态、只报错。
+   *
+   * 变异验证：把失败分支改回"无条件清状态 + setRevoked(true)" ⇒ 本条红。
+   */
+  it('撤销写宿主失败 ⇒ 闸门态不变、撤销入口留着、如实报错（不宣称已撤销）', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount({ consent: memoryConsent() })
+    await click('.pico-app-center-detail')
+    await allowAi()
+    expect(container.querySelector('.pico-app-ai-input')).not.toBeNull()
+    consentReply = () => jsonResponse(500, { error: { code: 'CONSENT_NOT_PERSISTED' } })
+    await click('.pico-app-ai-revoke')
+    await settle()
+    expect(consentCalls).toEqual([
+      { app_id: 'shift-notes', granted: true },
+      { app_id: 'shift-notes', granted: false },
+    ])
+    expect(container.querySelector('[data-role="ai-revoked"]'), '不得宣称已撤销').toBeNull()
+    expect(container.querySelector('[data-role="ai-consent-failed"]'), '撤销失败不许用"允许"方向的文案').toBeNull()
+    expect(container.querySelector('[data-role="ai-revoke-failed"]'), '必须如实报错').not.toBeNull()
+    expect(container.querySelector('.pico-app-ai-revoke'), '撤销入口必须留着（唯一补救动作是重试）').not.toBeNull()
+    expect(container.querySelector('.pico-app-ai-input'), '闸门还开着 ⇒ 交互态不变').not.toBeNull()
+  })
+
   it('SSE 流式渲染：增量按序出现，done 收尾后成为一条完整回复', async () => {
     stubCatalog(() => jsonResponse(200, CATALOG))
     stubAi(() => sse([

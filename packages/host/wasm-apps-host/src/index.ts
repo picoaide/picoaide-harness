@@ -310,6 +310,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     const hash = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 32)
     return { serverHash: hash(session.serverURL), userHash: hash(session.username ?? '') }
   }
+  /**
+   * 会话**作用域键**（2026-09-23 审计 WS-1）：服务端地址 + 用户名。
+   *
+   * 为什么不是"是否登录"：登出会走到 `currentSession() === null`，而**直接换账号**
+   * （A→B，不经过登出）两边都非 null —— 旧实现在那种情况下什么都不做，于是 B 聚焦并
+   * 继续使用 A 分区里的窗口。分区是 `persist:` 的、且 Electron 的 session 在
+   * webContents 创建后**不能改指**，所以这不是"下次打开时再判"能补救的事。
+   */
+  const scopeKey = (): string | null => {
+    const session = currentSession()
+    return session === null ? null : `${session.serverURL}\u0000${session.username ?? ''}`
+  }
 
   // ---- 应用 AI 桥（§21）：本地处理，绝不转发平台 ----
   const aiRunner = ctx.get(WASM_APPS_AI_RUNNER_SERVICE) as AiChatTurnRunner | undefined
@@ -568,21 +580,43 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 
   // ---- 会话跟随：分区随用户切换；登录后消费待打开队列 ----
+  //
+  // §7.2 冻结：登出 / **切账号** / 切渠道 ⇒ 关闭全部应用窗口并清空映射。
+  // 2026-09-23 审计 WS-1：判据必须是"**作用域**变了"而不是"变成未登录" ——
+  // `enterprise/src/auth-gate.ts` 的 `/login` 允许同一服务端直接换账号（`setSession`
+  // 不经 `clear` ⇒ 事件载荷非 null），旧实现的 `currentSession() === null` 分支走不到，
+  // 于是：探针 probe-a-user-switch.mjs 实测 A→B 后 `closeAppWindow` 调用 0 次，B
+  // `open()` 命中 A 的窗口走 `focusAppWindow`，B 就落在 **A 的分区**上（那份 jar 里是
+  // A 在该应用里的 cookie/localStorage/IndexedDB）。
+  let lastScope = scopeKey()
   ctx.effect(() => subscribePicoSession(ctx, service, () => {
     syncPartitions()
-    drainPendingLinks()
     // 目录兜底按（服务端 + 令牌）缓存：会话一变就必须作废（切租户不得复用上一台的目录）。
     windowCatalog.invalidate()
-    if (currentSession() === null) {
-      // 登出/切账号：上一个用户的待打开目标不得在新用户下打开（§7.2 同精神）。
-      pendingLinks.clear()
-      appProof?.invalidate()
+    const scope = scopeKey()
+    if (scope !== lastScope) {
+      const previous = lastScope
+      lastScope = scope
+      // 窗口是**作用域资产**：webContents 与它的 session 分区创建即固定，留在映射里
+      // 等于"新用户继续用上一个用户的身份"。关掉（`closeAll` 同时注销 surface 与
+      // webContents 映射）之后，下一次 open 才会按当前分区新建。
       void windows?.closeAll()
-      // §7.5「会话切换清空」：缓存路径里已经有 session-scope（双保险），但登出仍要
-      // 把落盘的内容删掉 —— 它装着员工业务页面，留着等于"登出后还能从磁盘上读回来"
-      // （磁盘可能被同机另一个本地账户/取证工具看到）。
-      void cache?.clearAll()
+      appProof?.invalidate()
+      // 会话作用域内的目录缓存（版本/应用名）同样作废：它们是上一个账号的可见信息。
+      knownVersions.clear()
+      knownTitles.clear()
+      // 下面两件只在**离开一个已登录作用域**时做（登出/切账号）：待打开队列里的目标
+      // 属于上一个用户；落盘内容也不该留着（`cache.ts` 的路径里另有 session-scope
+      // 双保险）。未登录→登录 **不清**：§7.6 明确要求"未登录入队、登录后打开"，
+      // 清掉等于把用户点过的深链吞了；每次登录都 rm -rf 也会打掉热缓存。
+      if (previous !== null) {
+        pendingLinks.clear()
+        void cache?.clearAll()
+      }
     }
+    // 消费待打开队列必须放在**拆卸之后**：换号时的 `closeAll` 会把刚按新账号打开的
+    // 窗口一起关掉（深链在未登录时入队，登录后应立即打开一次）。
+    drainPendingLinks()
   }), 'pico wasm apps host: partition follow')
 
   // ---- 本机请求面（唯一 seam；§22.2 R1/R2） ----
