@@ -17,6 +17,8 @@
 | 合计 | 109 | 80 | 30 | 102 | 11 | **332** |
 
 > 口径：一条 = 一个可独立处置的缺陷。J 路的 22 条 P1 是**门禁/测试自身**的判别力缺陷（不直接是产品缺陷），单独计数以便区分处置节奏。B 路的 P1 含子代理补充条目（B-09/B-10/B-26）。
+>
+> **读法**：§1–§6 是第一轮的结论与修复状态；**第二、三轮与"收口批"在 §7**（§7.1 二轮 / §7.2 三轮 / §7.3 处置拍板 / §7.35–§7.37 用户现场项、结构库、**收口批与逐条独立复审** / **§7.4 收敛判定与冻结态门禁数字**）。第三轮 0 P0 + 19 P1 已全部闭环，但**尚未跑第四轮**，因此"连续两轮零新增 P0/P1"的收敛条件**未达成**。
 
 **一句话总判**：没有人身安全或不可恢复的越权/沙箱逃逸级缺陷，但存在**6 条 P0**——四条会造成**静默、不可逆的数据/配置/计费损失**（provider 价格被清零、cron 任务账本被覆盖、webadmin 部门归属被清空、LDAP/OIDC 配置被抹除），一条会**销毁已发布归档**，一条**公开仓身份纪律**违规。客户端技能库链路确实存在用户可感知的实质缺陷（5 条 P1，含"装完永远加载不到""同名自制技能被静默覆盖/删除""符号链接写穿技能库"）。
 
@@ -230,7 +232,7 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 | **R3-B** | 客户端与宿主：`desktop` / `browser` / `connectors` / `cron` / `client/*`（锚定 `7e7ac1c27d`） | **0** | **1**（B-2 cron 封笔） | `R3-B-client-host.md`（0/1，另 P2×2、P3×3）；子报告 `R3-B2-connectors.md`、`R3-B3-cron.md` |
 | **R3-C** | 门禁完整性：`yarn check` 全组成（编排器 + 14 个根守卫）、CI、打包验证脚本、`server/Makefile`（五泳道：本泳道 + CI / 打包 / 中等守卫 / WASM 门禁） | **0** | **15** | `R3-C-gate-integrity.md` + `sub/{C-ci,P-packaging,G-medium-guards,W-wasm-gate}.md` |
 | **V1** | 对抗性复审：技能库两个提交（用户点名区） | — | 判 `920c62f02a` **部分成立**（F1 TOCTOU / F3 与安装器不互斥） | `temp/verify-skill-r3/VERIFY.md` |
-| **V2** | 对抗性复审：provider PUT 原子化（`0dd74681b7`） | 待回填 | 待回填 | `temp/verify-put-r3/VERIFY.md` |
+| **V2** | 对抗性复审：provider PUT 原子化（`0dd74681b7`） | 判**修复成立**（358 行报告；事务边界、15 条 `return`、5 条错误分支全回滚、事务内零出网、审计链可混排；新用例在父提交上必红） | 另留 3 条排队项（见 §7.3） | `temp/verify-put-r3/VERIFY.md` |
 
 **R3-C 的四条 P1（全部是"假绿门禁"，即会让其他所有结论失去支撑的那一类）**
 
@@ -247,7 +249,7 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 
 **R3-A（服务端核心）的两条 P1（已派修复）**：**A-1** 宿主→guest 方向只有 `assets.read` 修了"单帧预算"桥 ⇒ `db.query` 结果（平台允许 1–8 MiB）被写成超帧，应用收不到结果，官方技能骨架下表现为 10 s `RUNTIME_TIMEOUT` 且**应用已写好的响应被丢弃**；**A-2** `POST /api/client/v2/apps/wasm/validate` **无归属校验** ⇒ 任意已登录员工可用最简 config 换回**他人应用**的生效配置（`whitelist`/`purpose`/`data_sensitivity`/`owner`/`sensitive_columns`）并附 `first_release` 存在性 oracle。另 8 条 P2 中最具代表性的是 **A-6**（`abi.MaxResponseBodyBytes` 512 KiB 自称"保证可交付"被 JSON 转义证伪：`<`×512 KiB 编码后 3,145,840 B > 1 MiB 帧，而钉住它的回归用例用的是**零转义夹具** ⇒ 假绿）与 **A-10**（两个版本比较器对同一对版本给出**相反**结论：`util.CompareSemVer("1.0.0-1","1.0.0")=+1` 而 `registry.CompareVersions=-1`）。R3-A 明确结论：**新增 P0 = 0**（无进程级崩溃/静默计费错误/沙箱逃逸）。
 
-**R3-B（客户端/宿主）的其余发现与处置**：B-1（P2，设备码定义缺 `verificationUrl` 时被判 `connected` 且注册 MCP —— CN-3 缺陷类经另一扇门回归，`ae1bccc222^` 的 A/B 证明是回归）**已修**：连接期 fail-loud（`4b8d808fa9`），判据同时钉两侧（坏形状必须拒绝且零 request；"完全没有 auth 块"的形状保持既有语义），变异验证把源码回退到修复前 ⇒ 新用例红（`expected 'resolved' to match /verificationUrl/`）且对照用例仍绿；包级 41 文件 / 362 用例 EXIT=0。B-3（P2，`deadGrants` 按连接器 id 记账而事实属账号凭据世代）**已修并独立复核**：修复提交 `28e2062e38`；复核方式=用**审计方自己的探针**（`temp/round3-2026-09-23/connectors-probes/p4-deadgrant.mjs`，非修复方的测试）重跑 ⇒ 打印 `VERDICT: not reproduced`（账号 B 由 `unauthorized`+0 注册变为 `connected`+注册成功、对照账号 C 仍正常）。B-2（cron 封笔）**已修**（`eb981016cb`：`dispose()` 改为 flush → 封笔 → 放锁 的硬顺序，写路径统一走 `assertOpen()` 抛 `ledger is disposed: write refused`；8 条回归用例修复前 4 红 4 绿、6 个变异全杀、包级 22 文件/203 用例 EXIT=0、审计方原探针复跑 `DISK LOST job-2 : false`）。B-4/B-5 **已修**（`cd1f8971c4`）：B-4 把唯一判据收敛到 `jobs.ts` 的 `isUsableJobName()` 且工具面/协议面都调它（空名/纯空白 fail-loud、零落盘，反向用例 `'  Nightly report  '` 照常创建）；B-5 按拍板「如实跳过 + 改注释 + 可观测」落地 —— 判据只报告缺口**不改任何命中时刻**，缺口记录写进 ledger 的 `skippedOccurrences`（有界 8 条、按 (jobId,wallClock) 去重、跨重启回读）+ 可 grep 的 Host 日志 + 面板 3 天内提示。行为等价性用 11 时区 × 18,720 = **205,920 次 `nextRunAtMs` 比对、mismatch=0** 证明（且探针在 7 个时区检出 476 条缺口记录 ⇒ 非空转）；5 个变异全杀；包级 23 文件/220 用例 EXIT=0。B-4（P3，`cron_create` 接受空白名，与 `protocol.ts` 的 GUI 面判据不一致）、B-5（P3，`cron.ts` 注释声称 DST 缺口"forward 归一"而实现零触发、静默丢触发）**待随 cron 批次处置**。审计方另**撤回**上一轮 B-20（mac afterPack 原生件校验死代码：mac 目标只有 arm64，而 `verify-mac-smoke.ts` 对同一份清单逐个 exists+lipo 已补偿），并确认 SH-1（真实适配器未实现 `webContents.stop` ⇒ `stopPendingLoads()` 静默 no-op）仍未修。
+**R3-B（客户端/宿主）的其余发现与处置**：B-1（P2，设备码定义缺 `verificationUrl` 时被判 `connected` 且注册 MCP —— CN-3 缺陷类经另一扇门回归，`ae1bccc222^` 的 A/B 证明是回归）**已修**：连接期 fail-loud（`4b8d808fa9`），判据同时钉两侧（坏形状必须拒绝且零 request；"完全没有 auth 块"的形状保持既有语义），变异验证把源码回退到修复前 ⇒ 新用例红（`expected 'resolved' to match /verificationUrl/`）且对照用例仍绿；包级 41 文件 / 362 用例 EXIT=0。B-3（P2，`deadGrants` 按连接器 id 记账而事实属账号凭据世代）**已修并独立复核**：修复提交 `28e2062e38`；复核方式=用**审计方自己的探针**（`temp/round3-2026-09-23/connectors-probes/p4-deadgrant.mjs`，非修复方的测试）重跑 ⇒ 打印 `VERDICT: not reproduced`（账号 B 由 `unauthorized`+0 注册变为 `connected`+注册成功、对照账号 C 仍正常）。B-2（cron 封笔）**已修**（`eb981016cb`：`dispose()` 改为 flush → 封笔 → 放锁 的硬顺序，写路径统一走 `assertOpen()` 抛 `ledger is disposed: write refused`；8 条回归用例修复前 4 红 4 绿、6 个变异全杀、包级 22 文件/203 用例 EXIT=0、审计方原探针复跑 `DISK LOST job-2 : false`）。B-4/B-5 **已修**（`cd1f8971c4`）：B-4 把唯一判据收敛到 `jobs.ts` 的 `isUsableJobName()` 且工具面/协议面都调它（空名/纯空白 fail-loud、零落盘，反向用例 `'  Nightly report  '` 照常创建）；B-5 按拍板「如实跳过 + 改注释 + 可观测」落地 —— 判据只报告缺口**不改任何命中时刻**，缺口记录写进 ledger 的 `skippedOccurrences`（有界 8 条、按 (jobId,wallClock) 去重、跨重启回读）+ 可 grep 的 Host 日志 + 面板 3 天内提示。行为等价性用 11 时区 × 18,720 = **205,920 次 `nextRunAtMs` 比对、mismatch=0** 证明（且探针在 7 个时区检出 476 条缺口记录 ⇒ 非空转）；5 个变异全杀；包级 23 文件/220 用例 EXIT=0。B-4/B-5（P3，当时记为"待随 cron 批次处置"）**已在同一批次修完**（`cd1f8971c4`）：B-4 把唯一判据收敛到 `jobs.ts` 的 `isUsableJobName()` 且工具面/协议面都调它（空名/纯空白 fail-loud、零落盘，反向用例 `'  Nightly report  '` 照常创建）；B-5 按拍板「如实跳过 + 改注释 + 可观测」落地 —— 判据只报告缺口**不改任何命中时刻**，缺口记录写进 ledger 的 `skippedOccurrences`（有界 8 条、按 (jobId,wallClock) 去重、跨重启回读）+ 可 grep 的 Host 日志 + 面板 3 天内提示。行为等价性用 11 时区 × 18,720 = **205,920 次 `nextRunAtMs` 比对、mismatch=0** 证明（且探针在 7 个时区检出 476 条缺口记录 ⇒ 非空转）；5 个变异全杀；包级 23 文件/220 用例 EXIT=0。审计方另**撤回**上一轮 B-20（mac afterPack 原生件校验死代码：mac 目标只有 arm64，而 `verify-mac-smoke.ts` 对同一份清单逐个 exists+lipo 已补偿），并确认 SH-1（真实适配器未实现 `webContents.stop` ⇒ `stopPendingLoads()` 静默 no-op）仍未修。
 
 **R3-B3 的一条 P1（cron）**：`HostCronLedger.dispose()` **不封笔** —— dispose 之后的写入越过已释放的锁，覆写**继任世代**的 `ledger.json`（探测到机制级证据；正常退出路径窗口小，HMR / 同进程重建路径窗口大，故定 P1 而非 P0）。
 
@@ -272,21 +274,22 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 | `deadGrants` 修复的两条认账（`28e2062e38`） | **接受** | ①标记生命周期＝每（账号, 连接器）一条、随插件实例存活**不清理**（上界极小）；若要有界只能只留当前作用域，代价是切回旧账号会再向 IdP 出示一次已吊销的 refresh token（正是 CN-5 修掉的形态）⇒ 不采用。②作用域取 `store.dir`（凭据文件身份）：显式 `storeBaseDir` 的嵌入方多账号共用目录即共用标记（那里本就是同一份凭据文件）。 |
 | `lastAnnouncedToken`（与 deadGrants 同族怀疑） | **不构成已证明缺陷，保持现状** | 其值就是 access token 本身（自带账号身份），跨账号误判要求两份凭据的令牌逐字相同＝同一份材料 ⇒ 无法构造真实越权/误判。 |
 | **门禁面最严重的一条（`check-patch-pin` 断言从未执行）** | **已修**（`2f6eda18a1`） | 本仓 `nmHoistingLimits: workspaces` ⇒ patched 包**不落在仓库根 `node_modules/`**（根下只有 `yaml`），实际装在 `packages/*/*/node_modules/@deepseek-ai/…`；旧代码只查 `<root>/node_modules/<name>`，因此「已安装的补丁目标版本 == pin」这条断言**在本仓从未真正执行过一次**，且因根 `node_modules` 存在连"未安装"提示都不打印（这正是主控独立复现到的 `EXIT=0` 的真身）。修后：按"仓库根 + 每个 workspace 的 node_modules"逐份断言版本 == pin（真仓库实测校验 **10 份拷贝**、`OK` 且条数可见），未安装依赖时**默认 fail-loud**（要只查接线必须显式 `--skip-installed`），并每次运行自带 `selfTest()` 5 例（缺/空 node_modules 必红、已装==pin 必绿、已装≠pin 必红点名）。**教训**：`EXIT=0` 的守卫可能是"断言从未跑过"，而不只是"判据太弱"。 |
-| **A-11 的 webadmin 半边** | **排队（一行级）** | 服务端已改为"省略 `enabled` 即保持现值"，`server/webadmin/src/pages/Connectors.tsx:481-484` 那个**绕过补丁**应当删掉；判据=表单不回传 `enabled` 时保存后仍为停用。 |
-| **A-8 / A-9 未做**（本批已逐条回报） | **排队（判据已给）** | A-8：市场命名空间 4 个文件 + `router.go` 期间被他人改动故排除；建议 5 端点加渠道守卫（镜像 `agentshare.requireOrgAgent`），判据=org 行在 market 命名空间 404、market 行仍 200。A-9：需读 `apps.official` 或补 official 分支，而 `WasmApp` DTO 无该列、`internal/serverstore` 不在该泳道；建议二选一（`commitRelease` 补 official 分支 / `SetAppOfficial(true)` 清 owner 并写 `app_owner_transfer`）。 |
+| **A-11 的 webadmin 半边** | **已修**（`657f2da55b`） | 服务端已改为"省略 `enabled` 即保持现值"，`server/webadmin/src/pages/Connectors.tsx` 那个**绕过补丁**已删除；判据=表单不回传 `enabled` 时保存后仍为停用（已补用例）。 |
+| **A-8 / A-9 未做**（本批已逐条回报） | **已修 + 已独立复验** | A-8：`eae1d08774`（5 个逐名端点补 `requireMarketAgent`，org 行 404 且与"不存在"逐字节同形）+ `2251df8dbb`（agentshare 管理面归档只服务 org 行）+ `5e9001f4ab`（逐端点/坏 body 用例）+ `d24e473b2a`（**生产路由表** ↔ 渠道口径清单双向对拍，关闭"只改 `internal/router` 就绕过守门"的盲区）+ `231914b841`（CI 用例级零 skip 范围纳入两个包）。A-9：`b09ef41659`（official=1 ⇒ owner 恒空 + 归属转移审计带 app_id + 第二写入口守卫）+ `c0e951c6a6`（拒绝提示点名可执行端点）。复验 `temp/verify-a8a11-gaps/VERIFY.md`：**F1/F2/F3/F4/F8 全部成立**，且复验方自己的 MG1/MG6/MG2/MF4 变异均红在贴切的那一条上。 |
 | **R3-A 的 8 条 P2 / 3 条 P3**（A-3~A-13） | **已并入 wasmapp 修复泳道，按优先级止损** | 已随 A-1/A-2 一并交办并给了判据：A-6/A-7 可交付响应体口径（保证值 ≈170 KiB、1 MiB 仅为原始帧上限，同步 abi 注释/作者手册/客户端常量并让 parity 用例真钉 `response_body_bytes_max`）、A-10 收编到一个 SemVer §11 正确的比较器、A-11 省略 `enabled` = 保持现值、A-8 最小处置（该文件刚被 `f4a9a7774b` 改过，须先看 HEAD 内容）。优先级 A-2 → A-1 → A-11 → A-10 → A-6/7 → A-8/9，**未做的必须逐条回报"未做 + 原因 + 建议判据"**。其中 **A-6 与 A-3 是本轮最值得注意的两条**：前者是"自称保证可交付"的常量被平台自己的 JSON 转义证伪，且**钉住它的回归用例用零转义夹具 ⇒ 假绿**；后者是审核开关**读取失败被当作"审核关"**（fail-open，未审批版本直接 `approved`）。 |
 | **技能库收口的四条拍板**（`fa49eb7f5b`） | **接受** | ①技能库根留下点开头的空 `.skill-locks/`：**接受** —— 发现器与清单看不见它；改成释放时 `rmdir` 会引入 `mkdir→open(wx)` 的 ENOENT 竞争面（两端都要加重建重试），代价大于收益（已按它放行三处旧断言并新增"锁不得残留"断言）。②**安装器侧有界等待 5s / 同步侧零等待**的有意不对称：**接受** —— 同步跑在 `apply()` 启动路径且与安装器同进程，忙等会饿死异步持锁者（自锁）；只可调大常量，**不得改成无界**。③**F5**（面板按 409 状态码而非 `data.code` 判覆盖确认）：**保持推迟**（牵动确认条渲染与 61 例面板 spec）。④复审 §6.6 其余遗留（卸载不持久、面板预判、`provenance.version` 陈旧、W4 §6 的 P2-1~P2-4）**本批未动，保持排队**。 |
-| **守卫面仍存的 6 处静默通过形态**（`2f6eda18a1` 同批认账，**未修**） | **认账并排队** | 逐条：①`verify-licenses` 空依赖树时通过；②`check-no-leftover-mutants --root` 指向不存在目录时通过；③`check-no-real-domains` 空仓（无被跟踪文件）时通过；④两条以**异常栈**形式失败的守卫（报错形态不统一，难以被机器判读）；⑤`electron-shots` 无静态覆盖；⑥真机端到端未跑。它们的修法与 4 处已修的同类（"扫不到 ⇒ 拒绝宣称一致"），但**本批未做**，不得读作"守卫面已全部硬化"。 |
+| **守卫面仍存的 6 处静默通过形态**（`2f6eda18a1` 同批认账） | **5 处已修，1 处认账** | ①`verify-licenses` 空依赖树 ⇒ `0b42da1088` fail-loud（+ `--allow-empty` 显式入口）；②`check-no-leftover-mutants --root` 指向不存在目录 ⇒ 已 EXIT=2（实测）；③`check-no-real-domains` 空仓 ⇒ `898fecb98e` EXIT=3 且不打印"零命中 ✅"；④两条以异常栈失败的守卫 ⇒ `0b42da1088` 改具名断言（glitchtip 目标缺失 / verify-patches 缺 adm-zip / verify-licenses 空树三条实测：具名、零栈帧、退出码 1）；⑤`electron-shots` 无静态覆盖 ⇒ `ce2139171b`（语法/接线/SKIP 契约 + 聚合层 77 码）；⑥**真机端到端仍未跑**（需 Docker + 真实服务端 + Xvfb + 打包产物，本机不具备）——**认账，不得读作"已验"**。 |
 | **V2 复审的 P2：审计不可写 ⇒ 配置保存整体失败**（原为 `200` + 静默丢审计） | **接受（fail-closed，不加代码旁路）** | 对"改配置即改钱"的路径，宁可保存失败也不能静默丢审计 —— 后者正是本次修掉的那一类。**明确不做**运营侧旁路开关：那会把"静默丢审计"重新引入。运维出路是修审计存储（锁/磁盘），不是绕过。要求错误文案可行动（点名审计链写入失败及其可能原因）。 |
-| **V2 复审的 P3-a：丢失更新窗口被放大**（事务外读 → 事务内整行写回；确定性复现：并发改名把刚轮换的密钥写回旧密文） | **排队修（一行级）** | 建议修法：事务内 `SELECT … FOR UPDATE` 重读作为写入基线。本轮未做（V2 明确"不构成本次回归"），但属真实数据完整性风险，列为下一批首选项。 |
-| **V2 复审的 P3-b：行锁持有时间 O(清单长度)**（2000 模型 ⇒ 941 ms） | **接受并记录上界** | 上界由 `adminMaxBodyBytes`(1 MiB) 约束；建议后续给 models 加显式上限或改增量 diff。 |
-| **`POST /providers` 仍是同族半提交**（`AddGatewayProvider` + 独立事务同步 + 补偿删除 `_ =` + 异步审计 `_ =`） | **排队修（对称收口成本低）** | 三个 `Tx` 变体已在手（V2 指出），建议下一批对称收口。 |
+| **V2 复审的 P3-a：丢失更新窗口被放大**（事务外读 → 事务内整行写回） | **已修 + 已独立复验**（`1f9c621b98`） | 基线读改到事务内并取 `SELECT … FOR UPDATE`（并发改名不再把刚轮换的密钥/刚改的 base_url 写回旧快照）；复验 `temp/verify-provider-writes/VERIFY.md` 用外部连接持锁 + `pg_stat_activity` 观测的确定性交错证明"承重的是行锁"（自做变异 M-B2"事务内读但不取锁"同样红）。 |
+| **V2 复审的 P3-b：行锁持有时间 O(清单长度)**（2000 模型 ⇒ 941 ms） | **接受并记录上界** | 上界由 `adminMaxBodyBytes`(1 MiB) 约束；本次新增的只有一次主键等值查找 + 行锁（`EXPLAIN ANALYZE` 0.137 ms），主导项与提交态一致。增量同步属独立的性能/行为变更，未做。 |
+| **`POST /providers` 仍是同族半提交**（`AddGatewayProvider` + 独立事务同步 + 补偿删除 `_ =` + 异步审计 `_ =`） | **已修 + 已独立复验**（`1f9c621b98`） | 手动型收敛为「插行 + `SyncProviderModelsTx` + `AuditLogTx`」单事务（补偿删除整段删除）；渠道型出网同步移到 `Commit` 之后并写明不对称理由。复验自建注入：把 `audit_logs` 改名使审计不可写 ⇒ 修复态 500 + 零行零审计，父提交态 **200 + provider 行已落库 + 零审计**。同批还修了 `AddExcludedModel` 读-改-写竞争（并发删除丢项、下轮同步复活被删模型）与掩码密钥回写（`api_key=="***"` ⇒ 400 VALIDATION，父提交态 **200 + 真密钥被写成 `***`**）。 |
 | **分支保护新增必需检查**（CI 泳道建议） | **需用户在 GitHub 侧处置** | 新 job「Gate (root guards, every change)」建议一并加入必需检查；**不加也已关上**（原 Gate 会连带红，因为 gate 的第一步就是"守卫未成功即 exit 1"）。与 C-10 一起做最省事：配 CODEOWNERS + 必需评审人数 ≥1 + 把该 job 设为必需。 |
 | **CI 泳道三条取舍** | **接受** | ①C-4 的 fail-loud 对本地浅克隆同样生效（EXIT=3），逃生门是显式 `--no-commit-range`；②`--concurrency`/`--full-output` 刻意放行（不减覆盖面、只影响日志）；③`ci-channel-transfer.sh` 刻意不算"对外上传"（R2 上只是 run 级临时中转前缀、由 release job 的 `always()` 销毁），否则三个桌面打包 job 都要加发布说明检查。 |
-| **C-5/C-6/C-8/C-9（P2/P3）** | **排队** | 多在别的泳道文件里；本轮未做，登记在案。 |
+| **C-5/C-6/C-8/C-9（P2/P3）** | **已修 + 已独立复验** | C-5（域名守卫扫描面「已跟踪 + 未跟踪未忽略」+ 空扫描面 fail-loud）`898fecb98e`；C-6（迁移区间守卫零文档/缺 `AGENTS.md` fail-loud）`1305dcf450`；C-8（编排器"软降级"进 CI 摘要，有界）+ C-1/C-2（`needs` 成环/打错不再静默丢包、调度表自检）`8844d42963`；C-9（变异守卫的输入/扫描面判据）+ 跨守卫合成正负例 `c6be2b42bd`。复验 `temp/verify-guards-final/VERIFY.md`：**5/5 成立**，且修复前形态可逐字复现（旧版成环 `EXIT=0` + "7 个任务:7 通过、0 失败、0 跳过"）。 |
  + 分支保护必需评审人数为 0 | **需用户在 GitHub 侧处置（本会话不可改仓库设置）** | 现状：同一个提交既能往 `ALLOWED_DOMAINS` 加白名单条目、又能让守卫放行，且无需任何人工评审 ⇒ 铁律 0 的第一道防线完全依赖"提交者自觉"。代码侧可做的缓解（每条白名单必须带 owner+理由、白名单变更与守卫变更不得同提交）无法真正阻止有写权限者；**建议**给 `scripts/check-no-real-domains.mjs`（及其白名单）配 CODEOWNERS，并把 `required_approving_review_count` 提到 ≥1。 |
-| **P-1** 打包必需清单"单条删除＝同时删断言" | **已派修复** | 要求反向 oracle（归档里每个 `@picoaide/*/lib/**` 真实 specifier 都必须被清单覆盖）+ 每包条数棘轮，使"悄悄删条目"必然红；3 组变异验证。 |
-| **W-1~W-5**（WASM 门禁：树移出扫描面/三方对拍改名退化为 PENDING/桶上限来自 env/组 3 与组 6 从不执行） | **排队**（等 `verify-wasm-client-only.sh` 从 L-B 释放） | 组 3 的 `check-go-test-json.mjs` 与组 6 的 4 个协议探针**本机 4/4 PASS、21s 却从不被 CI 执行** ⇒ 属"有能力、没接线"的假保证；接线归 CI 泳道（已并入 L-F）。 |
+| **P-1** 打包必需清单"单条删除＝同时删断言" | **已修 + 已独立复验**（`51e37828e0`，续 `17652dad3e`/`5ce4d18ec3`） | 反向 oracle（归档里每个 `@picoaide/*/lib/**` 真实 specifier 都必须被清单覆盖）+ 每包条数棘轮 ⇒ 删条目必红（复验实测：删一条仍需 **24 failed**）；后续把"暂存层接线"判据升级为**能力级**（不注入替身、断言 builder 那一刻 `--config.directories.app` 指向真实暂存目录）⇒ 审计原两种注入形态修前 `17 passed`/`34 passed`、修后必红。 |
+| **W-1~W-5**（WASM 门禁：树移出扫描面/三方对拍改名退化为 PENDING/桶上限来自 env/组 3 与组 6 从不执行） | **已修 + 已独立复验 + 已接线** | 判定层 `a910bf9f19`（删除面清单驱动 + 包清单双向断言 + 旧能力结构指纹；桶上限真源移入仓内 JSON，env 只能收紧；判定脚本三段退出码；全组 SKIP 即失败）；CI 接线 `70360f5a33`（`WASM_GATE_EXPECT_HEAD=${{ github.sha }}` 接进 gate 的两处入口 + `check-workflows` [SK-12]③ + `verify-ci-scripts` 静态/动态双判据）⇒ "有能力、没接线"这条形态闭合。 |
+| 组 8 载体措辞扫描面 | **已收口**（`bf82c7d03e`） | 扫描面 4 根/148 文件 → 6 根/877 文件（含 `packages/**` 源码，反向保留 vendored `memory-evolve/lib`），当场红出 6 处"应用由内置浏览器承载"的错误模型并逐条改注释（**零豁免**）；缩面两条独立判据（登记值 + `package.json#workspaces`）缺任一即 exit 2。 |
 | `check:wasm-channels` 是否"声明了却从不运行" | **核实为误判（无孤儿守卫）** | 它由 `verify-wasm-client-only.sh:361` 间接调用，而 `check:wasm-client-only` 在编排器 `GUARDS` 内。逐条核对 package.json 的 `check:*` ↔ 编排器后：**无孤儿守卫**。 |
 
 ### 7.35 用户现场新增（2.8.1，客户端技能库）：`skill_manage create` 在默认沙箱下永久失败且报错误导
@@ -308,9 +311,60 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 - **认账的不确定性**：①仓库有并发写者，`docs/AUDIT-*` 收尾时仍在被追加 ⇒ 该模块会再次显示 fingerprint-drift（预期，可 `normify_module_refresh` 消掉）；②`verify-packaged-runtime.ts` 当时有未提交改动，4 个 runtime-verify 叶子的行段按当时 HEAD 给出，落地后需再刷一轮；③`update-download.ts` 的两条修复当时只在 `origin/master` 而不在工作树。
 - **发现的引擎侧系统性缺陷 6 条（供后续修 normify 本身）**：①`revision` 是单值 SHA 且校验器原本硬编码它 ⇒ 增量刷新必然产生混合值、会把 483 个模块误报成缺陷（校验器已改为接受"生成 revision 或 HEAD 的任一祖先"）；②`module_patch`/`batch` **不重算也不校验** fingerprint ⇒ 改 source 后必须固定跑 second-step `module_refresh`；③"叶子 API 键全项目唯一"与"实现收敛成 re-export"天然冲突，垫片必须用来源前缀键；④`change_close` 对活工作树校验，并发写者下可能永远等不到 0 error 的瞬间（本次被打断 3 次）；⑤子代理工具传输**传不了数组参数**（3 个代理命中 `args/missing: items`，绕法=逐条 patch）；⑥`sync` 的 `affected` 既漏（行号越界类）又过（测试文件类），两端都要独立只读扫描补。
 
+### 7.37 第三轮收口批（同日）：36 个提交，每条修复都由**另一名子代理**独立复审
+
+第三轮的三份审计报告（R3-A/R3-B/R3-C）与三份对抗性复审（V1/V2/verifier 报告）给出**全部 P0/P1 与各条 P2/P3** 后，本节记录"修复 → 独立复审 → 复审发现 → 再修 → 再验"的闭环。所有提交都在本地 `master`（**未 push**）；每条修复都要求"回归测试 + 变异验证（把实现改回旧行为，对应用例必须变红）"。
+
+**十个面与本批提交**
+
+| 面 | 提交 | 独立复审结论 |
+|---|---|---|
+| R3-A 服务端核心（A-3/A-4/A-5/A-8/A-9/A-11/A-12/A-13） | `ff6ee6893f` `b09ef41659` `eae1d08774` `657f2da55b` `777d366fed` `f18548e7dd` `792a503a14` `7b48de77a7` `36e70219c9` `c0e951c6a6` `c532bd93bb` `2260a9d492` `32b15a7b26` | `temp/verify-r3a-p2p3/VERIFY.md`（409 行）：**7 成立 / 1 部分成立**（A-4 漏第三个消费面 ⇒ 已修 `c57998be18`）；`temp/verify-wasm-tail/VERIFY.md`：A-4 客户端半边与 A-5 文档**成立**（并指出文档面未收干净 ⇒ `2260a9d492`/`32b15a7b26`） |
+| A-8 复审缺口（F1 生产路由表对拍 / F2·F3 逐端点与坏 body / F4 归档归属 / F6 口径 / F8 CI 范围） | `d24e473b2a` `5e9001f4ab` `2251df8dbb` `231914b841` | 由**发现该缺口的原验证者**复验（`temp/verify-a8a11-gaps/VERIFY.md`，240 行）：**F1/F2/F3/F4/F8 全部成立**，MG1 复现为"修后必红且红在最贴切的那条"，反向对照 MG1b 证明双向断言非恒真 |
+| 门禁 C-1/C-2/C-5/C-8/C-9 + 六处静默通过形态 | `8844d42963` `898fecb98e` `0b42da1088` `c6be2b42bd` `ce2139171b` | `temp/verify-guards-final/VERIFY.md`：**5/5 成立**；修复前形态逐字可复现（旧版成环注入 ⇒ `EXIT=0` + 「7 个任务:7 通过、0 失败、0 跳过」）；复验方另跑 10 条自设计变异逐条反证；全量门禁 31/31、0 失败、0 跳过 |
+| 门禁精度次生（降级行假阳性 / PATH_OWNERS 文案与自检 / 域名守卫读穿软链） | `9290a3f437` `f8c5984f47` | `temp/verify-tail-guards/VERIFY.md`（426 行）：**成立**；5 条假阳性一条不剩、13 条合成真阳性全收；`--changed` 归属逐字节未变；六问（软链/已跟踪/可见性/扫描面/普通文件/已跟踪文件）全过 |
+| WASM 门禁 W-6~W-9 + CI 接线 + 扫描面 | `45281e94e3` `70360f5a33` `bf82c7d03e` | 同上报告：**成立**；SKIP 记账真、PASS 文案动态、W-7a/b 与 W-9 必红、`WASM_GATE_EXPECT_HEAD` 七形态退出码全对、扫描根三条 fail-loud、五桶与 inventory 逐值一致且**清单零改动** |
+| 打包 P-2/P-4/P-5/P-6 + 次生 N-1/N-2 | `17652dad3e` `757c07bb5f` `5ce4d18ec3` | `temp/verify-tail-pack/VERIFY.md`：**成立**；审计原两种注入修前 `17 passed`/`34 passed` ⇒ 修后必红；P-4 两处真源逐字同源、单侧改动必红；并抓出修复自身引入的两条回归（渠道覆盖文件进 asar / `invokedDirectly` 经符号链接静默 exit 0）⇒ 已修 |
+| 跨端判词闸 F1~F4 | `079771b9c5` | 同 `verify-tail-guards`：**成立**；四种躲过形态（常量型终态/大写 reason/实现放宽 `.htm`/文档多列）全部红，等价重构 4/4 假红的代价已量化 |
+| provider/模型写路径 A/B/C/D | `1f9c621b98` | `temp/verify-provider-writes/VERIFY.md`：**A/B/C/D 全部成立**，且用自建注入证明承重机制（审计不可写 ⇒ 修复态 500+零行零审计 ↔ 父提交 200+行已落库+零审计；`FOR UPDATE` 是丢更新与名单丢项的承重点） |
+| A-4 残留 + A-12/A-13/A-3/M-A9b 判据加固 | `c57998be18` `4babc6cd75` | `temp/verify-final-batch/VERIFY.md`（本批末复验） |
+| 装配函数直挂 `/api` 残差 + SKILL 数值纪律回归 + limits 真源/作者手册漂移 | `2e22601c0a` `0de1f4cb93` `9f670cc635` | 同上；SKILL 回归与 limits 漂移都是**本批自己引入/自己查出**的门禁红（见下） |
+
+**复审抓出并已修掉的次生问题（这就是"修复也要独立复审"的价值）**
+
+1. **A-4 只修了两个消费面**：`POST /apps/wasm/validate` 对冻结/退役应用仍回 `200 {"ok":true}`，而 publish 回 403/404 —— 正是 A-4 要消灭的"预查说可以、发布被拒" ⇒ `c57998be18`（validate 在归属校验后调**同一个** `publishBlockOf`，与真发一次 publish 的错误响应**逐字节相同**；下架不拦）。
+2. **A-12 判据测不到时序缺陷**：断言落在 `httptest.ResponseRecorder.Header()`（活 map）上，且测试路由树只注册 GET 而生产注册 GET+HEAD ⇒ `4babc6cd75`（改 `w.Result().Header` 快照 + 补 HEAD + 真实 TCP 用例；时序变异下新判据红、旧判据绿的对照可复现）。
+3. **A-13 扫描面按目录名 skip 过宽**：真消费方放进 `packages/vendor/memory-evolve/lib/`（**入库源码**）时用例存活 ⇒ `4babc6cd75`（改结构位置判据 + 扫描面下限）。
+4. **A-3 取值无法识别时静默按关**（`""`/`"tru"`）⇒ 加可 grep 的 fail-loud 日志；顺带修掉"平台自己写的 `"false"` 会被误报成无法识别"这一噪音源（返回值逐字相同）。
+5. **M-A9b（api 层冗余被删也测不到）**：跨层行为用例对"删任一侧"都存活 ⇒ 补源码级**双侧**判据（Go AST）。
+6. **门禁精度三连**：`[DEGRADED]` 把成功摘要误判成降级（9 行里 5 行假阳性）⇒ 排除谓词；`PATH_OWNERS` 注释/报错写"最长前缀优先"而实现是 `find` 先声明者胜、且不拦"嵌套前缀归属另一包" ⇒ 文案改事实 + 新自检；域名守卫对未跟踪软链**读穿**被忽略目标（顺带修好"已跟踪软链"的旧漏报）。
+7. **WASM 门禁四条 + 两条未接线**：SKIP 不计账且 PASS 文案说反话、组 8 五条是固定枚举（台账里"已闭合"的写法没进本门禁）、"结论绑定 HEAD"只自洽不绑权威、反向 grep 吞 rc≥2 且扫描根含不存在文件 ⇒ 全部修；另把 `WASM_GATE_EXPECT_HEAD` 真正接进 CI 两处入口、扫描面从 148 扩到 877 个文件并当场红出 6 处错误模型（零豁免）。
+8. **打包四条 + 两条回归**：暂存层守卫是字符串匹配（"保留标识符 + 换实现"整体绕过）⇒ 升为能力级；CI 的 gofmt 不覆盖 `server/demoapps` ⇒ 与 Makefile 同源并加同源对拍；"asar bigint 冒烟"在本线不存在且无任何"产物 Electron 版本"判据 ⇒ 补版本断言（bigint 那半留给 `origin/master` 的 #138，见线序事实）；asar 损坏被当成"物理布局"、错误指向不存在的路径 ⇒ 显式区分 `ENOENT` + 布局开关。修复自身又引入两条（渠道覆盖文件进 asar；18 个入口经符号链接目录调用**静默 exit 0**）⇒ `5ce4d18ec3`。
+9. **跨端判词闸"抠不出才 throw"** ⇒ 改为**写入点计数**（新增常量型终态 / 大写 reason 都会红）。
+10. **装配函数直挂 `/api` 残差**：复核方原描述偏宽（`/api/server/admin/*` 未申报其实会被 `TestAdminRouterNoFallOpen` 抓住），真正对**全部**既有守卫不可见的是另三种带鉴权直挂（员工面 BearerAuth / 非 admin 的 `/api/server/*` / 经 `AdminRoute` 直挂）⇒ `2e22601c0a`（AST 扫描 + 双向白名单 + 反射对拍 gin 方法表 + 扫描面为空 fail-loud；18 条变异实跑）。
+11. **本批自己引入的 Go 门禁红**：A-5 收尾把 SKILL 的"8 条自检"改成"9 条自检"，撞上 `TestSkillDiscipline` 的"SKILL 里每个『数字+单位』都必须来自 limits 表"纪律（`8` 当年是撞上 counts 里的 8）⇒ `0de1f4cb93`（改成不产生"数字+单位"的表述；判据一字未放宽；SKILL 版本 2.8.0→2.8.1 + 新目录摘要登记）。同一排查还发现两条**一直存在**的漂移 ⇒ `9f670cc635`：①行浏览分页上限 `rowsMaxLimit=200` 是真平台限制却不在 limits 表里（作者手册那句"一页最多 200 行"能过判据纯属撞上 `diagnostics_max_limit=200`）⇒ 纳入真源（`RowsPageMax` + `rows_page_max` 走生成链）并新增**三方锚定**判据（`rows.go` ↔ `limits` ↔ 作者手册那一句；把文档改成 256 或把真源改成 300 都必红）；②作者手册"5000 行 / 8 MiB（超出截断并**报错**）"与真源不符（真值 **172032 B = 168 KiB** 且只置 `truncated`、不报错，`abi.md` 早在 A-6/A-7 已改对）⇒ 连同同文件另外 4 处同族漂移一并纠偏（`db.query` 原语表、响应体口径"总输出 8 MiB / 保证可交付 168 KiB"、保留期只覆盖调用事件、退役快照"后台任务尚未实现"）。SKILL 版本 2.8.1→2.9.0 + 新摘要登记。
+12. **A-4 修法收益的顺序契约**（终态应用不该白耗一次真编译与发布额度）：复审查出"把 `publishBlockOf` 挪到编译之后"这一变异**存活**（用例全绿）⇒ 补一条**行为级**判据把顺序钉住（见下）。
+
+**线序事实（必须与结论一起读）**
+
+- 本地审计线就是**本地 `master`**：`git rev-list --left-right --count origin/master...HEAD` = **`1  96`** —— 领先 `origin/master` 96 个提交、落后 **1** 个（`6e964b9323` = PR #138，issue #130/#128 修复）。回归审计的冻结态门禁跑的是**这条线**，因此结论**不得**读作"对 `origin/master` 已验证"。
+- 直接后果一：`origin/master` **已经**实现了 afterPack 的 asar bigint 门禁（`smokePackagedAsarBigintSemantics` + `scripts/asar-bigint-probe.mjs`），所以 P-5 的"这份门禁不存在"**只对本地线成立**；本批只补了它没有的"产物实际 Electron 版本 == `devDependencies.electron`"断言，**没有**重复实现 bigint 那半。
+- 直接后果二（合并面，已实测）：`git merge-tree` 显示 `verify-packaged-runtime.ts` **自动合并、0 冲突块**（bigint 冒烟与版本断言共存）；真正的冲突面是 `tests/verify-packaged-runtime.spec.ts` 的 2 处 import 列表（**取并集**）与 `src/updates.ts`（来自本地线其它提交，与本次两提交无关）。
+
+**认账边界（"已修"不等于"这类问题从此不存在"）**
+
+- `[DEGRADED]` 的排除谓词是**整行**判据：`SKIP 0` 与 `: OK —` 两支无锚点 ⇒ 复审构造的 9 种"真降级与摘要同行"形态 9/9 不被收集；但 16 个根守卫完整输出的普查显示被排除的 12 条逐条都是真摘要 ⇒ **真实树零误伤**。这是有意的精度取舍，已在代码注释里记边界。
+- 装配函数直挂判据拦不住：函数值/方法值转手（`reg := r.GET`）、反射调用、把 `*gin.Engine` 传进 `internal/**` helper、以及 `NoRoute`/`Use` 这类"不注册路由但改全局行为"。
+- 跨端判词闸是**文本级**判据：等价重构（字面量→常量/单出口 helper）会**假红**（4/4 实测）；`read.go` 若把响应对象搬到别的文件构造，计数 `0==0` 仍可能静默（`publish.go` 侧已用全文件计数堵上）。
+- provider 写路径的行为变更（认账）：`PUT /providers/:id` 的"不存在 id + 任何坏体"由 404 变 **400**（合法体仍 404）；`deleteModel` 的读错误由"吞掉继续删"收紧为 404/500（FK 保证实测不可达）；`AddExcludedModel`/`SyncProviderModels` 两个非事务变体现在**已无生产调用方**（只剩定义与测试）⇒ 后续新调用方容易绕过"同事务/提交后失效缓存"约定，登记为待办。
+- 打包面：Windows/macOS 全部只能**静态判定**（本机 Linux）；`PACKAGED_RUNTIME_LAYOUT` 目前只有测试与显式开关用；经**硬链接**调用入口被设计成 fail-loud（不做"识别并执行"）。
+- **真机端到端仍未跑**（需 Docker + 真实服务端 + Xvfb + 打包产物）——与本报告 §7.4 的口径一致，不得读作"已验"。
+
 ### 7.4 收敛判定
 
 **判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、**第三轮 0 P0 + 19 P1**（R3-A 2 / R3-B 1 / R3-B3 1 / R3-C 15）—— 第三轮不是干净轮，按口径干净的一对必须顺延到第四、五轮。
+
+**收口批之后的状态（2026-09-23 同日）**：第三轮的全部 P0/P1 与本轮新增的各条 P2/P3 都已修复、且每条都过了**另一名子代理**的独立复审（§7.37，含"复审发现 → 再修 → 再验"的两轮：如 A-4 的第三个消费面、打包修复自身引入的渠道文件进 asar、以及本批自己撞出的 `TestSkillDiscipline` 门禁红）。但**这不等于收敛**：按本报告口径，"连续两轮零新增 P0/P1"要求的是**新的独立审计轮次**（第四、五轮）在同一冻结态上都不再产出 P0/P1 —— 本轮做的是"第三轮发现项的闭环 + 复审"，**尚未跑第四轮**。因此本会话结束时的准确状态是：**待跑第四轮审计**（范围建议：R3-C 未覆盖的组 4/5/6/7 深水区、客户端技能库/能力中心的端到端行为、`internal/serverstore` 与网关计费的并发面、以及"本轮新增守卫自身"的对抗性审计）。
 
 **第三轮新增 P1 的归属与本轮处置**
 
@@ -319,19 +373,26 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 | R3-A 服务端核心 | 2（A-1 帧预算只修一条桥、A-2 `validate` 无归属校验） | 已派修复泳道（要求枚举全部 host→guest 返回路径；归属校验与既有 owner-only 404 同形且不泄露存在性；≥4 变异） |
 | R3-B 客户端/宿主 | 1（B-2 cron `dispose()` 不封笔） | **已修** `eb981016cb`（flush → 封笔 → 放锁 硬顺序；8 用例修复前 4 红、6 变异全杀、包级 22 文件/203 用例 EXIT=0；审计方原探针复跑 `DISK LOST job-2 : false`） |
 | R3-B3 cron | 1（同 B-2） | 同上；B-4（空白名）/B-5（DST 静默丢触发）已另派（B-5 定调"如实跳过 + 改注释 + 让跳过可观测"） |
-| R3-C 门禁完整性 | 15（C-1/C-3/C-4/C-7 + CI-C1~C3 + P-1 + G-1/G-2/G-8 + W-1~W-5） | 已派：CI 面 7 条、中等守卫 3 条、打包 P-1；**排队**：C-1/C-2 与 W-1~W-5（其所需文件被一条仍在运行的泳道持有，主控不向活写者动手） |
+| R3-C 门禁完整性 | 15（C-1/C-3/C-4/C-7 + CI-C1~C3 + P-1 + G-1/G-2/G-8 + W-1~W-5） | **全部已修**：CI 面 7 条 + 中等守卫 3 条 + 打包 P-1（`51e37828e0`）+ C-1/C-2/C-5/C-8/C-9（`8844d42963`/`898fecb98e`/`0b42da1088`/`c6be2b42bd`）+ W-1~W-5（`a910bf9f19`）及其 CI 接线（`70360f5a33`）；每条都有独立复审（§7.37） |
 
 **同轮独立复核（修复方不得自证）**：**provider PUT 原子化（`0dd74681b7`）⇒ 总判"修复成立"**（`temp/verify-put-r3/VERIFY.md`，358 行：事务边界 `Begin→UpdateGatewayProviderTx→SyncProviderModelsTx→tx 读快照→AuditLogTx→Commit`、15 条 return 逐条核对、事务开始后 5 条错误分支**全部回滚**、事务内零出网；契约面动作名与明细串逐字未变、审计链可混排；新用例在父提交上**必红**且红在"provider 行 + 密钥已落库"；13 条自写边界用例修复态 13/13 绿、其中 4 条在父提交上红；包级 `llmgateway` ok 369.5s、`serverstore` ok 202.1s）。技能库两提交 ⇒ `4f49f31237` 成立、`920c62f02a` 部分成立（三个口子已派修）；provider PUT 原子化 ⇒ 独立复审进行中；connectors 死授权 ⇒ 用**审计方自己的探针**复跑得 `VERDICT: not reproduced`（修复前 REPRODUCED）。
 
 **已落地的修复（第三轮窗口内）**：`7e7ac1c27d`（建流失败不再遗留回调服务器与定时器）、`4b8d808fa9`（设备码定义缺验证地址 fail-loud）、`28e2062e38`（死授权按账号记账）、`8f8e88c7aa`（真实适配器 `stop` 透传）、`eb981016cb`（cron 封笔）、`f4a9a7774b`（市场归档端点）、`0dd74681b7`（provider PUT 事务化）、`1305dcf450`（迁移区间守卫 fail-loud）、`d6a891f1b4`/`30b5c85c82`/`ca5a7c3e56`（文档与数字真值 + 新守卫）、`920c62f02a`（内容同一性采纳）、`4f49f31237`（随包同步闸门 + 渠道互斥）、`2f6eda18a1`（4 条根守卫 fail-loud：空扫描面/缺失输入不再静默通过；含 `check-patch-pin` 那条**从未执行过**的断言）、`322be5186d`（integration-tests 两条不可达断言改为有判别力 + 缺环境显式 `exit 77`）、`812f539923`（集成测试判据自检 + 假网关正反例接入门禁）、`d73a421bfe`（编排器 GUARDS 登记 `check:integration-tests`）、`8f07fcd1ff`（账户浮层补齐 ARIA 契约，一次 Esc 只关一层）、`aea28fbae1`（中等守卫三条假绿：零字节补丁/丢整段/glitchtip 自测不驱动 ssh 与容器判定；并自行发现并修掉「容器不可达只打 UNKNOWN 却 exit 0」这条同族 fail-open）、`ec0121f543`（webadmin 审计 sink 白名单补 `AuditLogTx`，修 provider PUT 事务化引入的跨面真红）、`579e8e6bc5`/`579b785923`/`89026689ba`/`ac9e7e2c60`/`0027bfef2f`（**R3-A 的 A-2/A-1/A-11/A-10/A-6+A-7**：A-2 预检补归属校验、非归属人**404 且与 owner-only 读面逐字节同形**、不再继承/回显他人配置；A-1 枚举并收敛"宿主→guest 全部返回路径"到**唯一写出口**（源码级守卫钉住）+ 三层桥（≤帧原样 / `db.query` 按**编码后**字节丢尾行并标 `Truncated` / 其余结构化错误），生产者侧 `SQLMaxResultBytes` 8 MiB → **172032** 与帧预算同源；A-11 省略 `enabled` 即保持现值（顺带把"不存在"从静默/500 修成 404）；A-10 版本比较**收编为唯一实现**并按 SemVer §11 纠正（认账 `1.0.0-rc10 < 1.0.0-rc2` 的行为变更）；A-6/A-7 口径统一为"**保证可交付 168 KiB**、1 MiB 只是原始字节帧上限"并让跨端对拍真钉两个数；8 变异全红、32 包 `go test` EXIT=0、客户端 24 文件/311 用例绿）、`a910bf9f19`（**WASM 门禁面 W-1~W-5**：删除面/扫描面按**清单 + 结构指纹**判定（树移出扫描面 ⇒ 红）、route-parity 缺一端 fail-loud、桶上限**真源移入仓内 JSON**（`BUDGET=999` 之类 env 不再能把红翻绿）、判定脚本三段退出码（前置缺失 = 2 而不是通过）、**全组 SKIP 即失败**；五条都在隔离副本复现「修前假绿 → 修后必红」，另补了 `tests/` 目录洞；**`corepack yarn check` 31/31、0 失败、0 跳过（334.6s）**；W-4/W-5 的 CI 接线按拍板未动 `.github`，已另行派工）、`51e37828e0`（**打包泳道 P-1**：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 改为**反向 oracle**（从包声明的入口面 + 产物里真实的 `@picoaide/*` specifier 推导期望面，不看清单）+ **每包计数棘轮**（不读产物 ⇒ CI 干净检出同样成立）；并**顺带抓出并补齐 8 条此前不在任何一张表里的真实缺口** —— 其中 `dsh-browser/lib/guard.js` 缺失会导致打包版**启动期 `ERR_MODULE_NOT_FOUND`**；删一条清单条目的变异：修复前 `78 passed / EXIT=0`（假绿）→ 修复后 `24 failed / EXIT=1`；真 asar 的 afterPack 路径同样由红变绿；包级 97 文件/1106 用例 EXIT=0）、`048cc554de`/`ef4e1ba22c`（**W-4/W-5 接线**：`go test -json` 落盘 + `check-go-test-json.mjs --scope internal/wasmapp,internal/router --require <三条>`，与 Gate job 的 `WASM_GATE_REQUIRE_COVERED_PLATFORM=1 … --groups 6`；新增 `[SK-12]` 十项静态判据（含"锚点用文件名 `ci.yml` 而非内容"——内容锚点会随接线一起消失）+ `verify-ci-scripts` §1d 行为回归（范围外 skip 不影响结论、范围内 skip 必红、少一条关键用例必红）；10 个变异全红。**关键判断：W-4 不能按"整份报告零用例级 skip"接** —— 全仓 83 处 `t.Skip*`，其中 `serverstore` 的"本机时区无夏令时"在 UTC runner 上**必然 skip**，原样接会每次必红（假红的下场通常是判据被关掉），故改为"同一条判据 + 显式范围"；`--scope` 缺省行为不变（组 3 不受影响）且前缀不得带尾斜杠（`internal/router/` 会漏掉根包 65 个事件）。实测 scoped `go test` 4m29s EXIT=0、6454 事件、用例级 pass 1457；全量 `yarn check` **31/31、0 失败、0 跳过（342.9s）**）、`642858f92e`/`304c8f540b`/`7545fb0ac5`（**CI 门禁面 6 条**：docs-only 也跑根守卫且新增**结构上不可跳过**的 `gate-guards` job、gate 取全历史 + 守卫侧 base 解析重写（浅克隆 ⇒ EXIT=3 而不是假绿）、新增 `[SK-8]`/`[SK-9]`/`[SK-10]`/`[SK-11]` 静态策略、两道策展发布说明检查真跑；15 条注入中 **14 条在修复前是 GREEN（真漏）**，修复后全 RED；全量 `yarn check` **31/31 EXIT=0**）、`cd1f8971c4`（cron B-4/B-5：空名判据收敛到唯一真源 + DST 缺口可观测且**不改触发时刻**）、`fa49eb7f5b`（**独立复审在用户点名区打出的三个缺口全部收口**：随包同步与安装器共用 per-name 锁、采纳写溯源后复检同一性、标记读取加类型/体积闸门）。
 
-**冻结态实测（提交 `ed30ce6baf`，工作树安静后取得；这是本轮唯一一次「冻结状态下的门禁」）**
+**冻结态实测（两次：`ed30ce6baf` 与收口批末的 `52ea7fbf54`）**
 
-- **冻结合法性**：`temp/round3-2026-09-23/freeze-snapshot.sh` 取 **A**（跑前）→ 跑门禁 → 取 **B**（跑后）→ 补取 **C**（全部测试跑完后）：**三份 1918 个文件逐文件 sha256 完全一致**，且期间 HEAD 未变 ⇒ 结论绑定在该提交上、零写入（排除了本仓反复出现的"并发泳道假红/假绿"）。
-- **`corepack yarn check`：31 个任务 / 31 通过 / 0 失败 / 0 跳过，260.4s，EXIT=0** ⇒ 目标口径里的「绿 = FAIL=0 **且** SKIP=0」首次被真正满足（此前所有"绿"都带着在途改动或跳过）。
-- **`cd server && make check`：EXIT=0** —— `gofmt -l` 零命中、`go vet ./cmd/... ./internal/... ./demoapps/...` 无输出、**Go 52 个包 `ok` / 0 `FAIL` / 0 `--- SKIP`**（`PG_DSN_TEST` 指向独立真实库，DB 用例真跑而非跳过）、**webadmin 37 文件 / 626 用例全通过** + 构建产物。
-  - 附一条环境坑：`make check` 首跑红是**环境**问题——Makefile 直接调 PATH 上的 `go`（1.26.5），而 `server/go.mod` 要 ≥1.26.6，第一道 `go vet` 就报 `go.mod requires go >= 1.26.6`。把 1.26.6 工具链 bin **前置到 PATH**（而不是只 export `GO=`）后 EXIT=0。
-- **仍未验证（≠ 通过）**：Windows/macOS 打包与 afterPack 的反向注入、渠道真打包、tag 发布链与 R2、真机图形 E2E、WASM 组 3 在 CI 上的真 PG 路径（脚本侧已在本机跑绿）。这些没有冻结态证据，不得写成"已验证"。
+第一次（第三轮窗口内，提交 `ed30ce6baf`）：`freeze-snapshot.sh` A→门禁→B→C **三份 1918 个文件逐文件 sha256 完全一致**；`corepack yarn check` **31 个任务 / 31 通过 / 0 失败 / 0 跳过，260.4s，EXIT=0**；`cd server && make check` **EXIT=0**（`gofmt -l` 零命中、`go vet` 无输出、Go 52 包 `ok`/0 `FAIL`、webadmin 37 文件 / 626 用例全通过）。附一条环境坑：`make check` 首跑红是**环境**问题——Makefile 直接调 PATH 上的 `go`（1.26.5），而 `server/go.mod` 要 ≥1.26.6，第一道 `go vet` 就报 `go.mod requires go >= 1.26.6`；把 1.26.6 工具链 bin **前置到 PATH**（而不是只 export `GO=`）后 EXIT=0。
+
+第二次（**收口批全部落地后**，提交 `52ea7fbf54`，脚本 `temp/round3-2026-09-23/final-gate.sh`，日志 `final-*.log` / `final-go-test.json`）：
+
+- **冻结合法性**：A（跑前）→ 双门禁 → B（跑后）→ C（全部测试后）**三份 1943 个文件逐文件 sha256 完全一致**，期间 HEAD 未变 ⇒ 结论绑定在该提交、零写入。
+- **`corepack yarn check`：31 个任务 / 31 通过 / 0 失败 / 0 跳过，209.8s，EXIT=0**（`[DEGRADED]` 7 行，全是**显式**的按设计降级声明：portable 模式范围、未提供真实渠道仓的 dry-run SKIP 及其计数、submodule gitlink 不扫内容等）。**注意 `yarn check` 不跑 Go 测试** ⇒ Go 侧的结论必须来自下面这条。
+- **`cd server && make check`：EXIT=0** —— `gofmt -l cmd internal demoapps` 零命中、`go vet` 无输出、**webadmin 37 文件 / 628 用例全通过** + 构建产物。
+- **Go 用例级统计**（同一门禁之外**再单跑一遍** `go test ./internal/... ./cmd/... -count=1 -p 4 -timeout 25m -json`）：**pass 3979 / fail 0 / skip 4**，包级 52 `ok` / 0 `FAIL`。4 条跳过**逐条都是设计内的显式 opt-in**（`TestMigration0028AuditCleanupOldDB`、`TestSummarizeWasmAppOpensTrendUVAcrossDSTDay`、`TestZoneNameHelperProcess`、`TestExportArchiveForE2E`），仓库自带的 `scripts/wasm/check-go-test-json.mjs` 对登记过的 opt-in 跳过判"通过"；**没有一条属于本轮被修包的功能用例**。⇒ Go 侧的准确口径是"**FAIL=0，SKIP 4（全部登记在案）**"，**不是**"SKIP=0"。
+- **两条口径勘误（都是本轮实测踩出来的，写给下一轮）**：
+  1. **非 `-v`/`-json` 的 `go test` 日志根本不打印被跳过的用例** ⇒ 上面第一次实测写的"0 `--- SKIP`"**不能**由普通日志得出（旧写法是错的，本轮已改成用 `-json` 事件统计；这也是"绿 = FAIL=0 且 SKIP=0"这条口径在 Go 侧必须换量具的原因）。
+  2. **绝不要把 `-json` 放进 `GOFLAGS`**（本轮第一次跑就是这么干的，结果 234 个假失败）：被测试自己 shell 出去的 `go`（定位模块根 `go list -m`、构建编译子进程 `go build`）会继承 `GOFLAGS` 并同样输出 JSON ⇒ `helpers_test.go` 解析失败、编译子进程"不存在"。`-json` 只能加在**外层 `go test` 的命令行**上。
+- **仍未验证（≠ 通过）**：Windows/macOS 打包与 afterPack 的反向注入、渠道真打包（本机只打过 Linux `--dir` 与 official/合成渠道）、tag 发布链与 R2、真机图形 E2E、WASM 组 3 在 CI 上的真 PG 路径（脚本侧已在本机跑绿）、`electron-builder` 真渠道打包的 asar 条目清点（本机 `ELECTRON_CACHE` 无 44.4.3）。这些没有冻结态证据，不得写成"已验证"。
 
 **判定口径（写给下一轮的执行者）**
 1. **"绿" = FAIL=0 且 SKIP=0** —— 编排器在某包失败时会**级联跳过**依赖它的包，跳过等于没验证。
