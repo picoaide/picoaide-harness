@@ -1,6 +1,6 @@
 ---
 name: app-builder
-version: 2.7.0
+version: 2.8.0
 title: 应用构建（WASM 应用）
 description: 把业务同事的一句话想法做成应用平台上的 WASM 应用并发布（员工自建小工具）。分轮次访谈需求、多角色评审设计、写成静态前端 + wasm JSON API、一条命令链打包发布。当用户说"做个内部小工具/应用/登记表/页面"、"把这个流程做成应用"、"发布到应用中心"、"能不能在平台上加个功能"时用本技能。
 author: 平台内置
@@ -245,7 +245,7 @@ node preview.mjs dist/shared-notes-packed.wasm --dump-tables            # 看本
   （`--db <file>` / `--data-dir <dir>` 换位置，`--fresh` 清空重来）。闸门也与线上同向：
   单语句、`db.query` 只读、保留列 `_row_id` 不可提及也不出现在结果里。
 - 它**不是**线上：没有 AI（wasm 侧本就没有）、没有并发/配额，名单判定仍是应用自己的事。
-  改过预览逻辑或升级 Node 后，可以跑 `node preview.mjs --selftest` 确认语义没漂（8 条自检）。
+  改过预览逻辑或升级 Node 后，可以跑 `node preview.mjs --selftest` 确认语义没漂（9 条自检）。
 
 **看到 `package fmt is not in std` 时不要怀疑 Go 装坏了**：唯一原因是第 ①步的四条环境变量
 没生效。回到上面重跑一遍。

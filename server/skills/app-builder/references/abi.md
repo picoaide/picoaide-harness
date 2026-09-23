@@ -359,8 +359,9 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 ## 8. 页面怎么产出：静态前端 + JSON API（模板是例外用法）
 
 **默认形态是前后端分离**：`web/index.html` + `web/app.css` + `web/app.js` 作为随包资源，
-由宿主按路径直出（§3.7 的直出规则），wasm 只回 JSON。入口文档（`/`、`/index.html`）
-由 wasm 自己答（先判名单，再 `assets.read("index.html")` 作为响应体）——
+由宿主按路径直出（§3.7 的直出规则），wasm 只回 JSON。
+**入口文档（`/`、`/index.html`、`<目录>/`）一律由 wasm 自己答**：
+先判名单，再 `assets.read("index.html")`（子目录入口读的是 `<目录>/index.html`）作为响应体 ——
 这样不在名单里的人才会看到应用自己写的 403 错误应答，而不是一个空壳。
 
 `html/template` / `text/template` **仍然被放行**（白名单覆盖 Go 运行时发出的 WASI 导入面，

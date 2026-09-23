@@ -206,6 +206,22 @@ var seededSkillDigests = map[string]string{
 	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
 	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
 	"bd4a7c2a7e195f670119ca3cd29388ee3326323e0ac0a9874f4e23c7fb58807e": "2.7.0",
+
+	// 2.8.0 = **入口文档形态三处对齐**（2026-09-23 R3-A 审计 A-5 的收尾）：
+	// 平台实现把"入口文档"的判据从"根 `index.html`"改成"文档名是 `index.html`"
+	// （`appserver.isEntryDocument`：`/`、`/index.html`、`<目录>/` 都是入口），
+	// 而技能里还有两处与实现不一致的表述/实现：
+	//   - `references/abi.md` §8：仍写"入口文档（`/`、`/index.html`）"两形态
+	//     （同文件 §3.7 那张表早已是"三形态"，属同技能内自相矛盾）⇒ 补齐 `<目录>/`；
+	//   - `examples/go/preview.mjs` 的 `isEntryPath`：只认 `/` 与 `/index.html`，
+	//     注释却自称"与平台 serveStatic 规则 5 同口径" ⇒ 改为 `endsWith('/index.html')`
+	//     （`/admin/index.html` 这类子目录入口不再被本地预览当资源直出），并在
+	//     `--selftest` 里新增第 9 条（入口形态 + 子资源仍直出）把行为钉住；
+	//   - `SKILL.md`：自测说明的条数随之由 8 改 9（`version` 提到 2.8.0 也在该文件）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册与本地工具，已安装的客户端靠
+	// version 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。防漂移判据在
+	// `internal/wasmapp/appserver/entry_contract_test.go`（四个契约面的枚举行必须列全三形态）。
+	"f1c39e1d49b403477973e9cea93bc15d595b861f2fd2273255f0758ccd15d633": "2.8.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的
