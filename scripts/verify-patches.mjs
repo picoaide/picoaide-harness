@@ -446,9 +446,37 @@ function runGuardSelfCheck(tempRoot) {
   return problems
 }
 
-const admZip = loadAdmZip()
-const { targets, failures: parseFailures } = readPatchTargets(root)
-failures.push(...parseFailures)
+// 六处形态④（2026-09-23 三轮审计 R3-C）：**依赖目标 / 输入缺失必须具名收尾**。
+// 旧形态：`loadAdmZip()` 抛出的 Error 直接冒到顶层 ⇒ 以**未捕获异常栈**结束
+// （退出码是对的 = 1，但读日志的人看到的是 `at ModuleJob.run` 这类栈帧，指不到病根）。
+// 退出码保持不变（1），文案换成具名原因 + 处置。
+/** 去掉内层错误信息里自带的 `verify-patches: ` 前缀（避免重复两遍）。 */
+const detailOf = error => String(error?.message ?? error).replace(/^verify-patches:\s*/u, '')
+
+let admZip
+try {
+  admZip = loadAdmZip()
+} catch (error) {
+  process.stderr.write(
+    `verify-patches: 缺少解压 yarn cache 的依赖目标（adm-zip）—— ${detailOf(error)}\n`
+    + '  处置:在仓库根跑 `corepack yarn install --immutable`'
+    + '（它会把 adm-zip 装进 packages/host/desktop/node_modules）。\n',
+  )
+  process.exit(1)
+}
+
+let targets
+try {
+  const parsed = readPatchTargets(root)
+  targets = parsed.targets
+  failures.push(...parsed.failures)
+} catch (error) {
+  process.stderr.write(
+    `verify-patches: 读取补丁目标失败（resolutions ↔ patches/）—— ${detailOf(error)}\n`
+    + '  处置:确认仓库根的 package.json 存在且是合法 JSON（resolutions 是补丁目标的唯一声明处）。\n',
+  )
+  process.exit(1)
+}
 
 if (targets.length === 0) {
   fail('resolutions 里没有任何 patch 目标,但 patches/ 下有文件 —— 补丁不会生效')

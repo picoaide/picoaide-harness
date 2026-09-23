@@ -41,7 +41,16 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const checkScript = join(root, 'scripts', 'glitchtip-ops-check.mjs')
+/**
+ * 被测脚本（对生产只读的 GlitchTip 核查工具）的路径。
+ *
+ * 测试缝（**CI 不得设置**）：`CHECK_GLITCHTIP_SCRIPT` 可把它指向别处的副本 —— 用来做
+ * "目标缺失 / 修复前副本"的对照取证（本文件里那条"目标缺失必须具名报错"的用例就靠它）；
+ * 默认永远是仓库里的真脚本。
+ */
+const checkScript = process.env.CHECK_GLITCHTIP_SCRIPT !== undefined && process.env.CHECK_GLITCHTIP_SCRIPT !== ''
+  ? resolve(root, process.env.CHECK_GLITCHTIP_SCRIPT)
+  : join(root, 'scripts', 'glitchtip-ops-check.mjs')
 const failures = []
 const scratch = []
 
@@ -53,6 +62,42 @@ function fail(message) {
 function check(condition, message) {
   if (!condition) fail(message)
   return condition
+}
+
+// 六处形态④（2026-09-23 三轮审计 R3-C）：**目标缺失必须以具名断言收尾**。
+// 旧形态：目标脚本不在 ⇒ 子进程 stdout 为空 ⇒ 下面某处裸 `JSON.parse('')` 抛
+// `SyntaxError: Unexpected end of JSON input`，以**未捕获异常栈**结束。退出码虽然是对的
+// （1），但读日志的人看到的是 JSON 解析错，指不到"核查脚本根本没跑起来"。
+// 退出码保持 1（与"有断言失败"同码），只是文案换成具名的原因与处置。
+if (!existsSync(checkScript)) {
+  process.stderr.write(
+    `verify-glitchtip-ops-check: 目标脚本不存在:${checkScript}\n`
+    + '  —— 这条守卫的**全部**判据都对着它跑；缺了它不是"没发现问题"，而是"没判"。\n'
+    + '  处置:确认 scripts/glitchtip-ops-check.mjs 在仓库里（它是对生产只读的核查工具）；\n'
+    + '        若这是测试缝 CHECK_GLITCHTIP_SCRIPT 指过来的路径，检查该副本是否存在。\n',
+  )
+  process.exit(1)
+}
+
+/**
+ * 解析子进程的 `--json` 报告；**解析不了就记一条具名断言**，绝不抛未捕获异常。
+ *
+ * 六处形态④：目标脚本崩溃/提前退出时 stdout 会是空的或半截的，裸 `JSON.parse` 会把
+ * "核查脚本没跑起来"伪装成 JSON 语法错。
+ * @param {{ status: number | null, stdout: string, stderr: string }} result - 子进程结果。
+ * @param {string} label - 断言标签。
+ * @returns 解析出的报告对象，或 null（已记失败）。
+ */
+function parseReport(result, label) {
+  try {
+    return JSON.parse(result.stdout)
+  } catch (error) {
+    fail(`${label}: 核查脚本的 --json 输出无法解析（${error?.message ?? String(error)}）`
+      + `；exit=${String(result.status)}`
+      + `；stdout=${JSON.stringify(result.stdout.slice(0, 120))}`
+      + `；stderr=${JSON.stringify(result.stderr.slice(-200))}`)
+    return null
+  }
 }
 
 /** 造一个临时目录(进程退出时清理)。 */
@@ -141,7 +186,7 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
   await api.close()
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -164,7 +209,7 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
   const loopResult = await runCheck(['--base-url', loop.baseUrl, '--cookies', loopJar, '--json'])
   const loopServed = loop.state.requests.length
   await loop.close()
-  const loopReport = JSON.parse(loopResult.stdout)
+  const loopReport = parseReport(loopResult, 'S15-2(loopback 正例)')
   check(loopServed === 1, `S15-2: 假 keys API 应收到 1 个请求，实际 ${loopServed}`)
   check(loopResult.status === 1, `S15-2: loopback DSN 必须仍是 exit 1(FAIL 优先级，实际 ${loopResult.status})`)
   check(
@@ -194,7 +239,7 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
     await api.close()
     let report = null
     try {
-      report = JSON.parse(result.stdout)
+      report = parseReport(result, '用例')
     } catch {
       /* 断言里报错 */
     }
@@ -217,7 +262,7 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
     await api.close()
     let report = null
     try {
-      report = JSON.parse(result.stdout)
+      report = parseReport(result, '用例')
     } catch {
       /* 断言里报错 */
     }
@@ -238,7 +283,7 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
   await api.close()
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -267,7 +312,7 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   await api.close()
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -311,7 +356,7 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   check(result.status === 0, `S15-2-R2(大 DSN): 非 loopback DSN 应 exit 0(实际 ${result.status})`)
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -395,7 +440,7 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   const served = api.state.requests.length
   const cookie = api.state.requests[0]?.cookie ?? null
   await api.close()
-  const report = JSON.parse(result.stdout)
+  const report = parseReport(result, 'S15-7/容器 env 用例')
   check(served === 1, `S15-9: 假 keys API 应收到 1 个请求，实际 ${served}`)
   check(result.status === 0, `S15-9: 非 loopback DSN 应 exit 0(实际 ${result.status})`)
   check(cookie !== null, 'S15-9: 匹配目标站点的 cookie 必须发出')
@@ -426,7 +471,7 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   ])
   const result = await runCheck(['--base-url', api.baseUrl, '--cookies', jar, '--json'])
   await api.close()
-  const report = JSON.parse(result.stdout)
+  const report = parseReport(result, 'S15-7/容器 env 用例')
   check(result.status === 0, `S15-9-N1: 全部 cookie 匹配时应 exit 0(实际 ${result.status})`)
   check(
     Array.isArray(report.notes) && !report.notes.some(note => String(note).includes('已跳过')),
@@ -444,7 +489,7 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   const result = await runCheck(['--base-url', 'http://127.0.0.1:1', '--cookies', jar, '--json'])
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -586,7 +631,7 @@ async function runContainerCase({ workPrefix, envLines = [], sshStatus = 0, sshS
   await api.close()
   let report = null
   try {
-    report = JSON.parse(result.stdout)
+    report = parseReport(result, '用例')
   } catch {
     /* 断言里报错 */
   }
@@ -698,6 +743,25 @@ async function runContainerCase({ workPrefix, envLines = [], sshStatus = 0, sshS
   check(result.status === 0, `G-8(e): API 侧正常时 exit 0(实际 ${result.status})`)
 }
 
+{
+  // 六处形态④（2026-09-23 三轮审计 R3-C）：**目标缺失必须具名收尾**，不得以未捕获异常栈
+  // 结束。旧形态：目标脚本不在 ⇒ 子进程空 stdout ⇒ 裸 JSON.parse('') 抛 SyntaxError
+  // （退出码是对的、文案不对）。这里用测试缝 CHECK_GLITCHTIP_SCRIPT 指向一个不存在的
+  // 路径，直接跑**本文件自己**并断言"具名原因 + 无异常栈"。
+  const missing = join(tempDir('glitchtip-missing-target-'), 'no-such-check.mjs')
+  const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+    cwd: root,
+    encoding: 'utf8',
+    // 子进程会立刻在"目标缺失"的前置断言处退出（不会递归跑用例）。
+    env: { ...cleanEnv(), CHECK_GLITCHTIP_SCRIPT: missing },
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  check(result.status === 1, `六处形态④: 目标缺失必须 exit 1（退出码保持不变），实际 ${result.status}`)
+  check(output.includes('目标脚本不存在'), `六处形态④: 目标缺失必须给出具名原因，实际 ${JSON.stringify(output.slice(0, 300))}`)
+  check(!output.includes('SyntaxError'), `六处形态④: 目标缺失不得以 JSON 解析异常收尾，实际 ${JSON.stringify(output.slice(0, 300))}`)
+  check(!/^\s+at .*\(node:/mu.test(output), `六处形态④: 目标缺失不得打印未捕获异常栈，实际 ${JSON.stringify(output.slice(0, 300))}`)
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
@@ -708,5 +772,6 @@ process.stdout.write(
   'verify-glitchtip-ops-check: OK — 不可解析 DSN=fail-closed(UNKNOWN/exit 2)、坏转义不崩、'
   + 'cookie 按 domain/path/secure 过滤、容器名与 compose 目录按字面量传递(注入惰性)、'
   + '容器 env 判定被假 ssh 双向驱动(三者皆空 ⇒ FAIL/exit 1，APP_URL/GLITCHTIP_URL ⇒ OK 且来源正确)、'
-  + 'loopback 覆盖 127.0.0.0/8 · ::1 · 0.0.0.0 · *.localhost\n',
+  + 'loopback 覆盖 127.0.0.0/8 · ::1 · 0.0.0.0 · *.localhost、'
+  + '目标脚本缺失 ⇒ 具名原因 + exit 1(不以异常栈收尾)\n',
 )
