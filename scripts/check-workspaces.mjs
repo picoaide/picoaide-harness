@@ -133,7 +133,11 @@ const PACKAGES = [
   { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
-  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
+  // 2026-09-23：账户浮层的 Esc 分层回归（`panel-esc.spec.tsx`）**挂真的装载器**
+  // （不是在测试里另写一份"遇到模态就让位"的替身：这条缺陷的全部机制就在装载器认不认
+  // 这层模态上）⇒ 该用例 import `@picoaide/dsh-panel-surface/client`，于是多了一条
+  // 真实构建边（测试读它的 lib）。`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
+  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise', '@picoaide/dsh-panel-surface'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 四个客户端面板共用的**中列整页装载器 + 视觉语言**叶子包（2026-09-20）：
@@ -241,6 +245,8 @@ const DEPENDENTS = {
     '@picoaide/dsh-connectors',
     '@picoaide/dsh-cron',
     '@picoaide/dsh-wasm-apps',
+    // 2026-09-23：account-card 的 Esc 分层回归挂真的装载器 ⇒ 它也算消费方。
+    '@picoaide/dsh-account-card',
     '@picoaide/dsh-foot-menu',
   ],
   // 底部并道行：五个面板插件的 tsc 读它的 `./client` 声明（type-only），

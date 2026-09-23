@@ -403,6 +403,10 @@ function useOutsidePointerDismissal(
  *
  * 2026-09-21：收缩为一行（34px，几何同「更多」行），原 140px 卡片内容**逐字**
  * 搬进点击后向上弹出的 `role="dialog"` 浮层；数据/轮询/退出/刷新语义不变。
+ *
+ * 2026-09-23：该浮层是**内层模态**（`role="dialog"` + `aria-modal="true"`，自己接住
+ * Esc 并还焦点给行）。`aria-modal` 同时是面板装载器"把 Esc 让给内层模态"的判据 ——
+ * 少了它，浮层开着时按一次 Esc 会把整个整页面板一起关掉（回归见 panel-esc.spec.tsx）。
  * @param props - sidebar column state from the foot slot owner.
  */
 export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
@@ -478,26 +482,62 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   // Outside pointerdown (row and popover both count as inside) closes it.
   useOutsidePointerDismissal(rowRef, open, setOpen, popoverRef)
 
-  // Escape closes it and hands focus back to the row.
+  // Esc 收起浮层并把焦点还给触发它的行 —— **这份浮层是"内层模态"，Esc 必须自己接住**
+  // （2026-09-23 修复「按一次 Esc 弹层与整页面板一起关掉」）。
+  //
+  // 整页面板的 Esc 唯一权威是装载器 `@picoaide/dsh-panel-surface`：它在 `document` 上
+  // 按 `[role="dialog"][aria-modal="true"]`（或 alertdialog）**让位**给内层模态。
+  // 本浮层此前只写了 `role="dialog"`、没有 `aria-modal` ⇒ 装载器不认它，同一次按键被
+  // 两层各处理一次（两个监听器都在 `document` 上，装载器注册得更早 ⇒ 先关整页、
+  // 再关浮层）。`stopPropagation` 拦不住**同一 target 上**的另一份监听器
+  // （那要 `stopImmediatePropagation`），所以"抢注册顺序"这条路走不通 —— 契约只有
+  // 一个：ARIA 模态标记（见下面浮层的属性），装载器的判据就是照它写的。
+  //
+  // 监听分两层：
+  //   ① **浮层元素上的那份是主判据**。真实键盘事件由 `document.activeElement` 派发、
+  //      沿 DOM 冒泡，因此它必然早于 `document`/`window` 上的任何一层；在这里
+  //      `stopPropagation()` 之后，同一次按键不可能再被更外层当成"自己的 Esc"——
+  //      这个结论**不依赖任何注册顺序**。
+  //   ② **`document` 上的那份是兜底**：焦点已经离开浮层时（Tab 走开，或测试/自动化
+  //      直接在 `document` 上派发）①收不到事件。它只在①没消费掉这次按键时才会跑到，
+  //      所以两层不会对同一次按键各关一次。
   useEffect(() => {
     if (!open) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
+    const closeOnEscape = (): void => {
       setOpen(false)
       rowRef.current?.focus()
     }
-    document.addEventListener('keydown', onKeyDown)
-    return () => { document.removeEventListener('keydown', onKeyDown) }
-  }, [open])
+    const onPopoverKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      closeOnEscape()
+    }
+    const onDocumentKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      closeOnEscape()
+    }
+    const popover = popoverElement
+    popover?.addEventListener('keydown', onPopoverKeyDown)
+    document.addEventListener('keydown', onDocumentKeyDown)
+    return () => {
+      popover?.removeEventListener('keydown', onPopoverKeyDown)
+      document.removeEventListener('keydown', onDocumentKeyDown)
+    }
+  }, [open, popoverElement])
 
   const placement = useUpwardPopover(rowElement, open)
 
   // 打开时把焦点移进浮层：浮层是 body 的最后一个子节点，不搬焦点的话键盘用户
   // 要 tab 穿过整个文档才够得到「刷新 / 退出登录」。焦点落在容器（tabIndex=-1）
   // 而不是第一个控件上 —— 刷新按钮在请求期间是 disabled，聚焦容器永远可行，
-  // 也让读屏先读到 `role="dialog"` 的名字。**不加 `aria-modal`**：兄弟「更多」
-  // 行的 Esc 守卫会礼让 `[role="dialog"][aria-modal="true"]`，标成模态会让那一行
-  // 的 Esc 静默失效。
+  // 也让读屏先读到 `role="dialog"` 的名字。
+  //
+  // **必须标 `aria-modal="true"`**（2026-09-23）：它不只是无障碍标注，还是面板装载器
+  // 判断"把 Esc 让给内层模态"的**唯一**判据（同形契约）。少了它，浮层开着时按 Esc
+  // 会把整页面板一起关掉（回归用例见 panel-esc.spec.tsx）。
+  // 老注释担心"标成模态会让兄弟「更多」行的 Esc 静默失效"：那一行的守卫除了让位
+  // 还要"焦点在本层"，而两个浮层也不可能同时开着（各自的外部 pointerdown 会把另一个
+  // 关掉）⇒ 这份担心不成立，代价只是模态期间窗口拖拽区按既有 CSS 让位。
   useEffect(() => {
     if (open && popoverElement !== null) popoverElement.focus()
   }, [open, popoverElement])
@@ -628,6 +668,8 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
         <div
           ref={attachPopover}
           role="dialog"
+          // 见上面 Esc effect 的长注释：装载器的让位判据就是这一对（role + aria-modal）。
+          aria-modal="true"
           aria-label={t('account.title')}
           tabIndex={-1}
           style={{ ...placement, ...CARD }}
