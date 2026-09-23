@@ -207,6 +207,22 @@ func fmtAgentUploadAudit(name, version, title, checksum string) string {
 }
 
 // updateAgentAdmin 更新元数据(不触碰版本与归档)。
+//
+// **顺序口径(2026-09-23 复审 F6 订正)**:本端点是市场命名空间 10 条逐名路由里
+// **唯一**「先 body 解析、后过渠道守卫」的一条(其余 9 条守卫都在任何实际工作之前)。
+// 此前注释把它算进"守卫一律先于 body 解析"是**不实口径** —— 事实是:
+//
+//	name 形状(400) → ShouldBindJSON(坏 body ⇒ 400) → marketAgentApp(守卫) → 写库
+//
+// 保留该顺序是**有意**的,且实测**不泄露存在性**:坏 body 下 org 行与"该名字不存在"
+// 逐字节同为 `400 {"code":"VALIDATION","message":"请求体错误"}`(守卫在 body 之后,
+// 两侧都先撞同一处 body 解析);合法 body 下两侧同为 404。守卫仍在**任何 DB 读/写
+// 之前**,所以不存在"先写后 404"这类副作用面。
+// 判据:`TestAgentUpdateMetaHidesOrgChannelRow` 用
+// `assertBadBodyIsIndistinguishable` 钉住"两侧同形"这条不变量 —— 任何"按行是否
+// 存在分流"的漂移(先查行、org 行回 404、不存在的名字仍走 body 解析回 400)立刻红。
+// 若日后把守卫提到 body 解析之前,两侧一起变 404(收紧),该用例仍绿,只把本注释
+// 的顺序描述改成事实即可。
 func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
 	if !util.SafePathSegment(name) {

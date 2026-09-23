@@ -10,15 +10,30 @@ package marketplace
 //
 // 本文件的三层判据：
 //
-//  1. **逐端点**（6 条路由，每条路由**一个独立用例**，不许一个用例覆盖五个）：
+//  1. **逐端点**（10 条逐名路由，每条路由**一个独立用例**，不许一个用例覆盖五个）：
 //     org 行 ⇒ 404，且与「该名字不存在」**逐字节同形**（不泄露存在性），并断言
 //     org 行零副作用；market 行 ⇒ 行为不变（状态码 + 载荷 + 真实落库副作用）。
-//  2. **反向**：market 行在全部 6 条路由上照常工作 —— 反向判据内联在每条
-//     逐端点用例里（同一夹具、同一时刻对拍），不是另写一份乐观断言。
-//  3. **完整性**：市场命名空间的智能体路由集合与显式清单
+//     update/delete/enable/archive 四条是 2026-09-23 复审 F2 补上的 —— 清单里标了
+//     `market-only/guard` 只是**标签，不是判据**：摘掉 `downloadAgentArchiveAdmin`
+//     的守卫时，原先 8 条用例全绿（复审 MG6）。
+//  2. **反向**：market 行在全部逐名路由上照常工作 —— 反向判据内联在每条逐端点
+//     用例里（同一夹具、同一时刻对拍），不是另写一份乐观断言。
+//  3. **顺序契约**（F3）：守卫必须**先于 body 解析 / 主体校验**。写面用例各带一个
+//     「坏 body」与「不存在的授权主体」变体 —— 两者都不得成为"org 行存在"的
+//     oracle。复审判定：把守卫挪到 body 解析之后（复审 MG2）在原 8 条用例下**全绿**，
+//     而该形态下 `PUT /agents/<org>/grant {"username":"ghost"}` ⇒ 400、
+//     `PUT /agents/<不存在>/grant …` ⇒ 404，**存在性可被区分**（真泄露）。
+//     `PUT /agents/:name`（updateAgentAdmin）是唯一的顺序例外：它先解析 body、后过
+//     守卫，实测仍然两侧同形（复审 F6）—— 那一条由 `assertBadBodyIsIndistinguishable`
+//     单独钉住，口径见 `agent_api.go` 的注释。
+//  4. **完整性**：市场命名空间的智能体路由集合与显式清单
 //     `marketAgentRoutePolicy` **双向**相等 —— 新增路由不登记即红，
 //     跨渠道条目必须写依据（既防「漏一个端点没人发现」，也防日后给
 //     跨渠道面误加守卫）。
+//
+// **判据的枚举面**：本文件全部走 `marketplace.RegisterAdminRoutes`（**测试镜像树**）。
+// 生产真源是 `internal/router/router.go`，那一面由该包的
+// `TestProductionAgentRoutesMatchMarketplacePolicy` 对拍（复审 F1/MG1）。
 
 import (
 	"database/sql"
@@ -172,6 +187,36 @@ func grantSubjects(t *testing.T, db *sql.DB, appID string) map[string]bool {
 	return out
 }
 
+// assertBadBodyIsIndistinguishable 断言**坏 body**（或坏授权主体）下 org 行与
+// 「该名字不存在」的响应逐字节相同，并返回这对响应共有的状态码。
+//
+// 与 `assertOrgRowIsHidden` 的唯一区别是"必须是什么码"：
+//   - 守卫在前的路由，坏 body 也必须是 404（body 根本不该被解析）；
+//   - `updateAgentAdmin`（`PUT /agents/:name`）是**先解析 body、后过守卫**的顺序例外
+//     （复审 F6；口径与理由写在 `agent_api.go` 的注释里），坏 body 下两侧同为
+//     400 `{"code":"VALIDATION","message":"请求体错误"}`。
+//
+// 所以本助手只钉两条不变量：①**两侧逐字节同形**（这就是"防日后漂移成可探测"的判据）；
+// ②同形响应是一个**干净的拒绝码**（400 body 解析拒绝 / 404 守卫拒绝），不是 2xx/5xx。
+// **刻意不钉"必须是 400"**：把守卫提到 body 解析之前（两侧一起变 404）是收紧，不该被
+// 本用例判红；会红的只有"org 行与不存在的名字走了不同分支"这类**不对称**漂移。
+func assertBadBodyIsIndistinguishable(t *testing.T, r http.Handler, hdr map[string]string, method, pathTmpl, body string) int {
+	t.Helper()
+	orgPath := strings.ReplaceAll(pathTmpl, "{name}", orgAgentName)
+	missingPath := strings.ReplaceAll(pathTmpl, "{name}", missingAgentName)
+	orgW, _ := mreq(t, r, method, orgPath, body, hdr)
+	missingW, _ := mreq(t, r, method, missingPath, body, hdr)
+	if orgW.Code != missingW.Code || orgW.Body.String() != missingW.Body.String() {
+		t.Fatalf("%s %s：坏 body %q 下 org 行与「不存在的名字」响应不同形（这本身就是存在性泄露）:\n org     = %d %s\n missing = %d %s",
+			method, orgPath, body, orgW.Code, orgW.Body.String(), missingW.Code, missingW.Body.String())
+	}
+	if orgW.Code != http.StatusBadRequest && orgW.Code != http.StatusNotFound {
+		t.Fatalf("%s %s：坏 body %q 下同形响应 = %d %s，既不是 400（body 解析拒绝）也不是 404（守卫拒绝）—— 要么引入了新故障，要么判据失效",
+			method, orgPath, body, orgW.Code, orgW.Body.String())
+	}
+	return orgW.Code
+}
+
 // ---------------------------------------------------------------------------
 // 1. 逐端点：org 行 ⇒ 404 同形；market 行 ⇒ 行为不变（反向判据内联）
 // ---------------------------------------------------------------------------
@@ -243,6 +288,14 @@ func TestAgentReplaceGrantsHidesOrgChannelRow(t *testing.T) {
 	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grants",
 		`{"groups":["研发部"]}`)
 
+	// 顺序契约（F3）：守卫先于 body 解析与主体校验 —— 坏 body 与"不存在的部门"都
+	// 不得成为 org 行存在性的 oracle。MG2（守卫挪到 body 解析/主体校验之后）下
+	// 这里会变成 400，本断言即红。
+	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grants",
+		`{"groups":[`)
+	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grants",
+		`{"groups":["不存在的部门"]}`)
+
 	// 反向：市场行的整组替换照常生效
 	if w, _ := mreq(t, r, "PUT", "/api/server/admin/agents/"+marketAgentName+"/grants",
 		`{"groups":["研发部"]}`, hdr); w.Code != http.StatusOK {
@@ -260,6 +313,13 @@ func TestAgentSetGrantHidesOrgChannelRow(t *testing.T) {
 	r, db, hdr := agentChannelFixture(t)
 	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grant",
 		`{"username":"carol"}`)
+
+	// 顺序契约（F3）：这一对正是复审 MG2 泄露形态的判据 —— 守卫挪到主体校验之后时
+	// org ⇒ 400「用户不存在: ghost」、不存在 ⇒ 404，两侧不同形，本断言红。
+	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grant",
+		`{`)
+	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}/grant",
+		`{"username":"ghost"}`)
 
 	// 反向：市场行的单条授权照常生效
 	if w, _ := mreq(t, r, "PUT", "/api/server/admin/agents/"+marketAgentName+"/grant",
@@ -283,6 +343,13 @@ func TestAgentRemoveGrantHidesOrgChannelRow(t *testing.T) {
 	assertOrgRowIsHidden(t, r, hdr, "DELETE", "/api/server/admin/agents/{name}/grant",
 		`{"username":"carol"}`)
 
+	// 顺序契约（F3）：DELETE 也带 body —— 坏 body 与不存在的授权主体同样不得泄露
+	// org 行的存在性（守卫在 body 解析之前）。
+	assertOrgRowIsHidden(t, r, hdr, "DELETE", "/api/server/admin/agents/{name}/grant",
+		`{`)
+	assertOrgRowIsHidden(t, r, hdr, "DELETE", "/api/server/admin/agents/{name}/grant",
+		`{"username":"ghost"}`)
+
 	// 反向：市场行的撤销照常生效
 	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/agents/"+marketAgentName+"/grant",
 		`{"username":"carol"}`, hdr); w.Code != http.StatusOK {
@@ -290,6 +357,106 @@ func TestAgentRemoveGrantHidesOrgChannelRow(t *testing.T) {
 	}
 	if subjects := grantSubjects(t, db, marketAgentName); subjects[string(serverstore.GranteeUser)+":carol"] {
 		t.Fatalf("market 行授权未被撤销: %v", subjects)
+	}
+	assertOrgRowUntouched(t, db)
+}
+
+// A-8-⑦：GET /agents/:name/archive（归档下载；F2 补的行为用例）
+//
+// 复审实测（MG6）：这条路由在清单里被标为 `market-only/guard`，但**登记类别是标签、
+// 不是判据** —— 摘掉 `downloadAgentArchiveAdmin` 的渠道守卫后，原先 8 条用例全绿，
+// 只有复审自写探针红。本用例把那个标签变成行为判据。
+func TestAgentArchiveHidesOrgChannelRow(t *testing.T) {
+	r, db, hdr := agentChannelFixture(t)
+	assertOrgRowIsHidden(t, r, hdr, "GET", "/api/server/admin/agents/{name}/archive", "")
+
+	// 反向：市场行照常下发归档（真二进制流 + 版本/校验和头 + 字节可解析）
+	w, _ := mreq(t, r, "GET", "/api/server/admin/agents/"+marketAgentName+"/archive", "", hdr)
+	if w.Code != http.StatusOK {
+		t.Fatalf("market 行 archive = %d %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/zip") {
+		t.Fatalf("market 行 archive content-type = %q，want application/zip", ct)
+	}
+	if v := w.Header().Get("X-Preset-Version"); v != "1.0.0" {
+		t.Fatalf("market 行 archive 版本头 = %q，want 1.0.0", v)
+	}
+	if w.Header().Get("X-Preset-Checksum") == "" {
+		t.Fatal("market 行 archive 缺少校验和头（客户端安装器靠它做 sha256 对照）")
+	}
+	if _, _, err := agentshare.ListArchiveContents(w.Body.Bytes()); err != nil {
+		t.Fatalf("market 行 archive 字节不可解析（空流/半截也算通过？）: %v", err)
+	}
+	assertOrgRowUntouched(t, db)
+}
+
+// A-8-⑧：PUT /agents/:name（元数据更新；F2 补行为用例 + F6 钉住顺序例外）
+func TestAgentUpdateMetaHidesOrgChannelRow(t *testing.T) {
+	r, db, hdr := agentChannelFixture(t)
+	assertOrgRowIsHidden(t, r, hdr, "PUT", "/api/server/admin/agents/{name}",
+		`{"description":"组织行不得被市场命名空间改写"}`)
+
+	// 反向：市场行元数据照常更新并落库
+	if w, _ := mreq(t, r, "PUT", "/api/server/admin/agents/"+marketAgentName,
+		`{"description":"市场行新描述"}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("market 行 update = %d %s", w.Code, w.Body.String())
+	}
+	market, err := serverstore.GetApp(db, serverstore.AppKindAgent, marketAgentName)
+	if err != nil {
+		t.Fatalf("读取市场行: %v", err)
+	}
+	if market.Description != "市场行新描述" {
+		t.Fatalf("market 行描述未落库: %q", market.Description)
+	}
+
+	// F6：updateAgentAdmin 是**先 body 解析、后过守卫**（9 条逐名端点里唯一的顺序
+	// 例外，理由写在 agent_api.go）。实测不泄露：坏 body 下 org 与"不存在"同为
+	// 400 同形。本断言把那一条口径钉住 —— 任何"按行是否存在分流"的漂移
+	// （例如先查行、org 行回 404、不存在的名字仍走 body 解析回 400）立刻红。
+	if code := assertBadBodyIsIndistinguishable(t, r, hdr, "PUT",
+		"/api/server/admin/agents/{name}", `{"description":`); code != http.StatusBadRequest {
+		t.Logf("updateAgentAdmin 的坏 body 口径已变（%d，不再是 body 先解析的 400）—— 属收紧，本用例仍绿", code)
+	}
+	assertOrgRowUntouched(t, db)
+}
+
+// A-8-⑨：DELETE /agents/:name（下架；F2 补行为用例）
+func TestAgentDeleteHidesOrgChannelRow(t *testing.T) {
+	r, db, hdr := agentChannelFixture(t)
+	assertOrgRowIsHidden(t, r, hdr, "DELETE", "/api/server/admin/agents/{name}", "")
+
+	// 反向：市场行照常下架并落库（org 行仍上架 —— 同形断言不是"两边都没动"）
+	if w, _ := mreq(t, r, "DELETE", "/api/server/admin/agents/"+marketAgentName, "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("market 行下架 = %d %s", w.Code, w.Body.String())
+	}
+	market, err := serverstore.GetApp(db, serverstore.AppKindAgent, marketAgentName)
+	if err != nil {
+		t.Fatalf("读取市场行: %v", err)
+	}
+	if market.Enabled != 0 {
+		t.Fatalf("market 行未被下架: enabled=%d", market.Enabled)
+	}
+	assertOrgRowUntouched(t, db)
+}
+
+// A-8-⑩：POST /agents/:name/enable（重新上架；F2 补行为用例）
+func TestAgentEnableHidesOrgChannelRow(t *testing.T) {
+	r, db, hdr := agentChannelFixture(t)
+	// 市场行先下架，"重新上架"才有可断言的落库副作用（否则 200 也可能是幂等空转）。
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, marketAgentName, false); err != nil {
+		t.Fatalf("夹具下架: %v", err)
+	}
+	assertOrgRowIsHidden(t, r, hdr, "POST", "/api/server/admin/agents/{name}/enable", "")
+
+	if w, _ := mreq(t, r, "POST", "/api/server/admin/agents/"+marketAgentName+"/enable", "", hdr); w.Code != http.StatusOK {
+		t.Fatalf("market 行重新上架 = %d %s", w.Code, w.Body.String())
+	}
+	market, err := serverstore.GetApp(db, serverstore.AppKindAgent, marketAgentName)
+	if err != nil {
+		t.Fatalf("读取市场行: %v", err)
+	}
+	if market.Enabled != 1 {
+		t.Fatalf("market 行未被重新上架: enabled=%d", market.Enabled)
 	}
 	assertOrgRowUntouched(t, db)
 }
@@ -389,11 +556,15 @@ func TestAgentAdminRoutesAreMarketOnlyOrRegistered(t *testing.T) {
 		t.Fatalf("测试镜像树与渠道口径清单不一致（%d 条）：\n  %s",
 			len(violations), strings.Join(violations, "\n  "))
 	}
-	// 五条"A-8 补守卫"的路由必须在清单里体现为守卫类（防止有人把某一条悄悄改成
+	// 全部 10 条逐名路由必须在清单里体现为守卫类（防止有人把某一条悄悄改成
 	// 清单过滤或跨渠道而用例还在测 404 —— 那种改动会先在这里红）。
 	for _, key := range []string{
+		"PUT /api/server/admin/agents/:name",
+		"DELETE /api/server/admin/agents/:name",
+		"POST /api/server/admin/agents/:name/enable",
 		"GET /api/server/admin/agents/:name/preview",
 		"GET /api/server/admin/agents/:name/file",
+		"GET /api/server/admin/agents/:name/archive",
 		"GET /api/server/admin/agents/:name/grants",
 		"PUT /api/server/admin/agents/:name/grants",
 		"PUT /api/server/admin/agents/:name/grant",
@@ -401,10 +572,20 @@ func TestAgentAdminRoutesAreMarketOnlyOrRegistered(t *testing.T) {
 	} {
 		rule, ok := marketAgentRoutePolicy[key]
 		if !ok {
-			t.Fatalf("A-8 的 %s 不在清单里", key)
+			t.Fatalf("逐名守卫路由 %s 不在清单里", key)
 		}
 		if rule.Policy != policyMarketOnlyByGuard {
-			t.Fatalf("A-8 的 %s 渠道口径 = %q，want %q", key, rule.Policy, policyMarketOnlyByGuard)
+			t.Fatalf("逐名守卫路由 %s 渠道口径 = %q，want %q", key, rule.Policy, policyMarketOnlyByGuard)
+		}
+	}
+	// 反向：跨渠道那两条必须仍是跨渠道（它们靠读 org 行回 409，加守卫会把 409 降级
+	// 成 404 —— `TestAgentNameExclusionRoutesStayCrossChannel` 是行为判据，这里是清单判据）。
+	for _, key := range []string{
+		"POST /api/server/admin/agents",
+		"POST /api/server/admin/agents/:name/archive",
+	} {
+		if rule, ok := marketAgentRoutePolicy[key]; !ok || rule.Policy != policyCrossChannelNameExclusion {
+			t.Fatalf("跨源同名互斥路由 %s 的渠道口径 = %q，want %q", key, rule.Policy, policyCrossChannelNameExclusion)
 		}
 	}
 }
