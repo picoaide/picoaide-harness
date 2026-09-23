@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +80,11 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 		log.Printf("gateway: file reaper: list expired rows failed: %v", err)
 		return 0, 0
 	}
+	// R5-A-12（审计 2026-09-23，P1）：把"上游在持续拒绝的对象"从"只是还没轮到"里
+	// 分出来。候选排序已经改成"尝试次数升序"（从未失败的行永远优先），所以失败行不再
+	// 阻塞批次；但它们本身**不会自愈**，必须有人看见 —— 这里每轮点名（计数 + 前若干
+	// 条 id），否则配额泄漏只剩"日志里每轮 500 failed"这一条线索。
+	logReapBacklog(a.DB)
 	if len(ids) == 0 {
 		return 0, 0
 	}
@@ -189,6 +196,28 @@ var fileDeleteTimeout = 30 * time.Second
 
 // errUnusableReapFileID：台账行里的 id 形状非法（无法拼出合法上游 URL）。
 var errUnusableReapFileID = errors.New("reaper: unusable file id shape")
+
+// logReapBacklog 每轮记一次回收积压（R5-A-12）：只在"有行已被上游反复拒绝"时出声，
+// 正常情况（没有卡住的行）保持零噪音 —— 静默的配额泄漏才是这条缺陷真正贵的部分。
+func logReapBacklog(db *sql.DB) {
+	bl, err := serverstore.GatewayFileReapBacklogStats(db)
+	if err != nil {
+		log.Printf("gateway: file reaper: backlog stats failed: %v", err)
+		return
+	}
+	if bl.Stuck == 0 {
+		return
+	}
+	sample := make([]string, 0, len(bl.StuckSample))
+	for _, s := range bl.StuckSample {
+		sample = append(sample, fmt.Sprintf("%s(gen=%d)", s.FileID, s.Attempts))
+	}
+	log.Printf("gateway: file reaper: %d expired file(s) have failed reaping >=%d times "+
+		"(max attempts=%d, expired total=%d, ever-retried=%d) — 上游在持续拒绝这些对象,自动回收救不回来,"+
+		"需人工处置(管理端按 id / 条件清理);样例: %s",
+		bl.Stuck, serverstore.GatewayFileReapStuckThreshold, bl.MaxAttempts, bl.Expired, bl.Retrying,
+		strings.Join(sample, ", "))
+}
 
 // deleteUpstreamFile 删上游文件：404/410 视为成功（上游已自然过期/被删）。
 func deleteUpstreamFile(client *http.Client, up Upstream, fileID string) error {

@@ -560,7 +560,24 @@ func GatewayFileTotals(db *sql.DB) (files, bytes, expired int64, err error) {
 	return files, bytes, expired, err
 }
 
-// ListExpiredGatewayFiles 取一批已过期行（自动回收/管理端清理用），按过期时间升序。
+// ListExpiredGatewayFiles 取一批已过期行（自动回收/管理端清理用）。
+//
+// 排序 = **尝试次数升序**（`reap_gen`），再按过期时间升序（R5-A-12，审计 2026-09-23，P1）。
+//
+// 缺陷形态（修复前只按 `expires_at ASC`）：单条上游 DELETE 永久失败（典型：轮换上游
+// key 后旧对象对新 key 返回 403、或个别 id 被上游拒绝）时，回收器释放认领 ⇒ 该行下轮
+// **同时**满足"已过期 + 标记不在租约内"，而 `expires_at` 不变 ⇒ 重新排回最前。于是
+// ≥批次上限（500）条永久失败行把每一轮的批次占满，更晚过期的文件**永不进入候选**，
+// 上游共享配额（每 key 25 GiB / 10000 文件）单调泄漏，日志固定是
+// `500 expired file(s) reclaimed, 500 failed`，不会自己好。
+//
+// 为什么用 `reap_gen` 而不是新列：它就是**单调递增的尝试次数**（每次认领 +1，见
+// `ClaimExpiredGatewayFile`；同时充当 R4-C-1 的 fencing token），所以分层排序不需要
+// 新列、新状态或新迁移。语义保证：**从未失败过的行（gen=0）永远排在失败过的行之前**
+// —— 新过期的文件因此绝不会被永久失败行挡住；失败行只在"没有更低世代的候选"时才占
+// 批次位，且每被尝试一次世代 +1 ⇒ 最坏情况下健康行也只被推迟一轮。
+//
+// 注意：这一列是**两用**的（fencing token + 尝试次数），改认领语义时必须同时看这里。
 func ListExpiredGatewayFiles(db *sql.DB, limit int) ([]string, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
@@ -568,7 +585,7 @@ func ListExpiredGatewayFiles(db *sql.DB, limit int) ([]string, error) {
 	rows, err := db.Query(`SELECT file_id FROM gateway_files
 	                        WHERE expires_at IS NOT NULL AND expires_at <= now()
 	                          AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
-	                        ORDER BY expires_at ASC LIMIT ?`, ReapClaimLease.Seconds(), limit)
+	                        ORDER BY reap_gen ASC, expires_at ASC LIMIT ?`, ReapClaimLease.Seconds(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -580,6 +597,71 @@ func ListExpiredGatewayFiles(db *sql.DB, limit int) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// GatewayFileReapStuckThreshold 是"进入人工处置清单"的尝试次数阈值：一条已过期行被
+// 认领（= 尝试删上游）达到这个次数还在，说明上游在持续拒绝它，自动回收救不回来。
+const GatewayFileReapStuckThreshold = 5
+
+// gatewayFileStuckSampleLimit 是"点名"时最多列出的行数（日志可读性；计数不受它限制）。
+const gatewayFileStuckSampleLimit = 10
+
+// GatewayFileReapStuck 是被点名的一条"回收不动"的行。
+type GatewayFileReapStuck struct {
+	FileID   string
+	Attempts int64
+}
+
+// GatewayFileReapBacklog 是回收积压的**可观测口径**（R5-A-12）：用于把"上游在持续
+// 拒绝的对象"从"只是还没轮到"里分出来 —— 后者会自愈，前者只能人工处置（管理端的
+// 单条删除/按条件清理）。
+//
+// 全部字段都是"已过期行"（`expires_at <= now()`）上的统计，与回收器的候选集合同源。
+type GatewayFileReapBacklog struct {
+	// Expired 是已过期行总数（含正在被认领的）。
+	Expired int64
+	// Retrying 是至少被尝试过一次（reap_gen > 0）的行数。
+	Retrying int64
+	// Stuck 是尝试次数 ≥ GatewayFileReapStuckThreshold 的行数（需人工处置）。
+	Stuck int64
+	// MaxAttempts 是单行最大尝试次数。
+	MaxAttempts int64
+	// StuckSample 是按尝试次数降序的前若干条（最多 gatewayFileStuckSampleLimit 条），
+	// 供日志/管理面**点名**；为空表示没有达到阈值的行。
+	StuckSample []GatewayFileReapStuck
+}
+
+// GatewayFileReapBacklogStats 采集回收积压口径（回收器每轮调用一次，只读）。
+func GatewayFileReapBacklogStats(db *sql.DB) (GatewayFileReapBacklog, error) {
+	var out GatewayFileReapBacklog
+	if err := db.QueryRow(`SELECT count(*),
+	                              count(*) FILTER (WHERE reap_gen > 0),
+	                              count(*) FILTER (WHERE reap_gen >= ?),
+	                              COALESCE(max(reap_gen), 0)
+	                         FROM gateway_files
+	                        WHERE expires_at IS NOT NULL AND expires_at <= now()`,
+		GatewayFileReapStuckThreshold).Scan(&out.Expired, &out.Retrying, &out.Stuck, &out.MaxAttempts); err != nil {
+		return GatewayFileReapBacklog{}, err
+	}
+	if out.Stuck == 0 {
+		return out, nil
+	}
+	rows, err := db.Query(`SELECT file_id, reap_gen FROM gateway_files
+	                        WHERE expires_at IS NOT NULL AND expires_at <= now() AND reap_gen >= ?
+	                        ORDER BY reap_gen DESC, expires_at ASC LIMIT ?`,
+		GatewayFileReapStuckThreshold, gatewayFileStuckSampleLimit)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s GatewayFileReapStuck
+		if err := rows.Scan(&s.FileID, &s.Attempts); err != nil {
+			return out, err
+		}
+		out.StuckSample = append(out.StuckSample, s)
 	}
 	return out, rows.Err()
 }
