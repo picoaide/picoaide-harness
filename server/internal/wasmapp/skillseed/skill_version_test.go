@@ -246,6 +246,21 @@ var seededSkillDigests = map[string]string{
 	// 且行数/字节超限只置 `truncated` 不报错）—— 8 MiB 撞的是另一条表项
 	// （`app_response_body_max_bytes`），判据咬不到，本轮只报告不改。
 	"e5ad99023496f6c0bd940d6d809b40d4fe553a8473c98312c73e45ffd435331a": "2.8.1",
+
+	// 2.9.0 = **作者数据面分页上限进真源 + 作者指南返回体口径纠偏**（2026-09-23，R3 审计
+	// A/B 两项的收尾）：
+	//   - `references/limits.md`（生成物，真源 `limits/limitsspec.go` + `limits.go`）：
+	//     新增 `rows_page_max` = 200 —— 行浏览（`wasm_app_rows` / `GET …/rows`）单页行数
+	//     上限此前只写在 `api/rows.go` 的常量里、不在 limits 表里，作者文档那句
+	//     「一页最多 200 行」能过数值判据纯属撞上 `diagnostics_max_limit`；
+	//   - 生成器一次写全部产物 ⇒ `references/app-config.md` 也随之重写（内容未变）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	// 「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	// 同轮修掉的旧认账项：上一版 2.8.1 条目里登记的"`docs/wasm-app-authoring.md` §7 的
+	// 5000 行 / 8 MiB（超出截断并报错）与真源不符，只报告不改" —— 本轮已按真源改成
+	// 5000 行 / 168 KiB + "只截断并置 `truncated`，不报错"，并同步该文件的 `db.query`
+	// 一行、响应体一行、日志保留一行与退役快照一行（见交付报告）。
+	"079468e60c5650bba633f52986fb368026f0fa5b6dc0e0a100232bed7ec1c1c4": "2.9.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

@@ -763,6 +763,14 @@
       "Note": ""
     },
     {
+      "Key": "rows_page_max",
+      "Value": "200",
+      "Unit": "count",
+      "Section": "§5.9",
+      "Title": "作者数据面单页行数上限",
+      "Note": "行浏览（`wasm_app_rows` / `GET …/wasm/:app_id/rows`）一页最多多少行；与 sql_max_rows 的 5000 是两件事（那是应用自己查库的上限，这是给人/AI 看的浏览面）"
+    },
+    {
       "Key": "stderr_tail_bytes",
       "Value": "2048",
       "Unit": "bytes",

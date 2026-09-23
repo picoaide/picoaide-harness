@@ -101,6 +101,7 @@
 | `call_event_batch_max` | 512 | count | §4.9 | 调用事件单批上限 |  |
 | `diagnostics_default_limit` | 50 | count | §4.9 | 诊断默认条数 |  |
 | `diagnostics_max_limit` | 200 | count | §4.9 | 诊断条数上限 |  |
+| `rows_page_max` | 200 | count | §5.9 | 作者数据面单页行数上限 | 行浏览（`wasm_app_rows` / `GET …/wasm/:app_id/rows`）一页最多多少行；与 sql_max_rows 的 5000 是两件事（那是应用自己查库的上限，这是给人/AI 看的浏览面） |
 | `stderr_tail_bytes` | 2048 | bytes | §4.9 | stderr 尾巴上限 | 诊断回给作者 |
 | `readyz_snapshot_ttl` | 5 | seconds | §4.9 | /readyz 快照缓存时长 | 未认证端点；缓存整次采集（目录 walk + statfs + db.Ping） |
 | `retirement_snapshot_retention_days` | 90 | days | §5.3 | 退役快照保留 | 冻结/退役后保留快照的时长；到期由平台回收 |

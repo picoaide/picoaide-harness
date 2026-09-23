@@ -428,6 +428,23 @@ const (
 	DiagnosticsDefaultLimit = 50
 	// DiagnosticsMaxLimit 是诊断 API 上限。
 	DiagnosticsMaxLimit = 200
+	// RowsPageMax 是**作者数据面**「行浏览」单页返回行数上限（§5.9）：一页最多 200 行
+	// （`GET …/wasm/:app_id/rows` 与工具 `wasm_app_rows`）。
+	//
+	// 为什么与 SQLMaxRows（5000）是两个数：那是**应用自己查库**的上限（appdb 的语句
+	// 预算），这是平台给人/AI 看的**浏览面分页**上限 —— 浏览不是数据导出（导出是另一个
+	// 产品决策，当前没有），所以刻意收得更紧。
+	//
+	// ⚠️ 这个数是**平台限制**，因此真源在 limits 表里（而不是只写在 `api/rows.go`）：
+	// 它随生成链进 `limits.md` / 技能 `references/limits.md`，并被三处判据绑住 ——
+	//   - 生成链逐字节门禁（`limits_gen_test.go` 的 (a)）：提交的生成物必须与 Table() 一致；
+	//   - `internal/wasmapp/api/rows_page_limit_binding_test.go`：rows.go 的 `rowsMaxLimit`
+	//     ↔ 本值 ↔ `docs/wasm-app-authoring.md` 的「一页最多 N 行」（**键锚定**，不是
+	//     "某个 200 存在即可"）；
+	//   - `internal/wasmapp/api/rows_test.go` 的 `TestRowsLimitsMatchAuthorFacingDocs`：
+	//     技能随包散文（`references/publishing.md` / `references/diagnostics.md`）的
+	//     "缺省 N / 最多 N" ↔ rows.go 常量。
+	RowsPageMax = 200
 	// StderrTailBytes 是诊断里回给作者的 stderr 尾巴上限（§4.9/§7.4）。
 	StderrTailBytes = 2 << 10
 	// ReadyzSnapshotTTL 是 `/readyz` **快照缓存**的有效期（R1-rt-4）。
