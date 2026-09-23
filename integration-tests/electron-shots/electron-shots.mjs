@@ -78,16 +78,27 @@ if (args.includes('--help')) {
 }
 
 /**
- * 判定通道(2026-09-23 第五轮审计 N7):判定与失败计数**下沉**到 `./report.mjs`,
- * 本文件只做接线(逐条 `report(id, observation)`)。`--self-check` 用同一条通道把
- * 全部夹具跑一遍 —— 把 `report()` 掏成恒真,`--self-check` 必然非零
- * (`check-integration-tests.mjs` 会跑它,并在变异副本上要求它变红)。
+ * 判定通道(2026-09-23 第五轮审计 N7，复审 D-1 收口):判定与失败计数**下沉**到
+ * `./report.mjs`,本文件只做接线 —— 而且**只允许解构绑定**通道自己的方法
+ * (`const { report, … } = reporter`),不允许在这里再包一层
+ * (`const report = (id, observation) => reporter.report(id, observation)`)。
+ *
+ * 为什么(复审 D-1 的现场):那层包装是一句**可变代码**。把它改成"返回常量对象、
+ * 且 `ok` 不落在首键"(键序变形)或 early-return 恒真之后 —— 9 处 `report(id, …)`
+ * 引用一字未改 —— `check-integration-tests.mjs` 仍然 **EXIT=0**:静态判据当时只认
+ * "`ok` 是对象字面量**首键**"这一种形态,而当时的 `--self-check` 走的是
+ * `report.mjs` **内部另建**的通道,不经过这句包装。
+ * 现在两条腿同时收口:
+ *   · `--self-check` 把**本文件解构出来的同一批绑定**交给 `runReporterSelfCheck`,
+ *     包装被换掉 ⇒ 夹具结论与 `expect` 不符 ⇒ 非零;
+ *   · `scripts/check-integration-tests.mjs` 另有结构判据(必须是解构绑定、不得自写
+ *     `report` 函数)与两条**针对本文件**的端到端变异(键序变形 / early-return)。
  */
 const reporter = createReporter()
-const report = (id, observation) => reporter.report(id, observation)
+const { report, failures, lines, exitCode } = reporter
 
 if (args.includes('--self-check')) {
-  const selfCheck = runReporterSelfCheck()
+  const selfCheck = runReporterSelfCheck({ report, failures, lines })
   for (const failure of selfCheck.failures) console.error(`[FAIL] ${failure}`)
   console.log(`reporter self-check: ${selfCheck.passed}/${selfCheck.total} 条夹具经 report() 求值符合预期`)
   process.exit(selfCheck.failures.length === 0 ? EXIT_PASS : EXIT_FAIL)
@@ -277,8 +288,10 @@ try {
 report('script-completed', { error: scriptError })
 
 // 退出码判据来自判定通道(不在本文件里另算一份);EXIT_FAIL 必须与通道的 exitCode() 同值。
-if (reporter.exitCode() !== EXIT_PASS) {
-  console.error(`RESULT: FAIL(${reporter.failures()} 项断言失败)`)
+// 这里的 `exitCode` / `failures` 与上面的 `report` 一样,都是**解构绑定**自同一个通道
+// (不允许在本文件里再包一层 —— 那层包装就是 D-1 的逃逸点)。
+if (exitCode() !== EXIT_PASS) {
+  console.error(`RESULT: FAIL(${failures()} 项断言失败)`)
   process.exit(EXIT_FAIL)
 }
 console.log('RESULT: PASS')

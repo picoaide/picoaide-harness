@@ -39,6 +39,15 @@
 # `group <n> pass=… fail=… skip=…`，每处跳过写一行 `group-skip <n> <理由>`；
 # 收尾按这份独立来源复算条数，与内存计数不符即判"SKIP 记账协议坏了"。
 #
+# **组级台账对账（R5 N2-X1，2026-09-23 第五轮复审）**：组级不变量**在组块体内部**，
+# 所以"整块停用"能绕过它 —— 把某个组的 `if want` 判据整块短路（改成 `if false`）得到
+# `PASS 0 ｜ FAIL 0 ｜ SKIP 0` + `全部通过 ✅` + **EXIT=0**（与上一段声明的"每个被
+# 选中的组都至少有 1 条 PASS"矛盾），而 `--self-check` 与外部静态 needle 都咬不住。
+# 现在结论段把 `GROUPS_SELECTED` 与绑定文件里的 `group <n> …` 台账行对拍（见
+# `ledger_reconcile`）：缺一具名红 / 台账 pass=0 红 / 未选中的组产出台账红 /
+# 台账 pass 合计 ≠ 内存 PASS 红。对账本身由 `--self-check` 的合成台账样本打坏
+# （`LEDGER_SELFTEST_CASES`），并有一条**接线**判据（必须接在"全部通过"之前）。
+#
 # 用法：
 #   bash scripts/verify-wasm-client-only.sh                 # 全量（1–8）
 #   bash scripts/verify-wasm-client-only.sh --portable      # 与产物/PG/显示器无关的子集（1,2,7,8）
@@ -161,6 +170,20 @@ GROUP6_SELFTEST_CASES=(
 # 样本后，剩下的样本照样全部通过 —— 只看"跑到的 == 登记的"是抓不住缩面的。
 PROBE_EVIDENCE_MIN_SAMPLES=10
 GROUP6_MIN_SAMPLES=6
+
+# 组级台账对账的自证样本（R5 N2-X1，`id|期望|被选中的组|台账行（\n 分隔）|内存 PASS 计数`）。
+# 期望 `reject:<必须出现的具名> `= 必须判红且具名；`accept` = 必须通过（正对照）。
+# 第一条就是 N2-X1 的原形态：组 6 被选中，而台账里（因为整块 `if want 6` 被短路）
+# 一行都没有 ⇒ 必须判红并点名组 6 —— 只看 `FAIL == 0` 的旧结论段在这里会打「全部通过 ✅」。
+LEDGER_SELFTEST_CASES=(
+  "healthy|accept|6|group 6 pass=3 fail=0 skip=0|3"
+  "selected-group-missing-ledger|reject:组 6|6||0"
+  "selected-group-zero-pass|reject:组 6|6|group 6 pass=0 fail=1 skip=1|0"
+  "unselected-group-has-ledger|reject:组 5|6|group 6 pass=2 fail=0 skip=0\ngroup 5 pass=1 fail=0 skip=0|3"
+  "pass-total-mismatch|reject:不符|6|group 6 pass=2 fail=0 skip=0|3"
+  "two-groups-one-missing|reject:组 7|1 7|group 1 pass=2 fail=0 skip=0|2"
+)
+LEDGER_MIN_SAMPLES=6
 
 # 从证据行里取字段（`key=value`，空格分隔）。
 attest_field() { # <line> <key>
@@ -321,6 +344,172 @@ probe_evidence_selftest() {
   return 0
 }
 
+# ── 组级台账对账（R5 N2-X1，2026-09-23 第五轮复审）─────────────────────────────
+#
+# 现场：结论段只按 `FAIL == 0` 打印「全部通过 ✅」。组级不变量（"该组 PASS ≥ 1"）
+# 与探针集合不变量**都在组块体内部**，于是把整块短路掉
+# （把组 6 的 `if want` 整块短路成 `if false`）就得到
+# `PASS 0 ｜ FAIL 0 ｜ SKIP 0` + 「全部通过 ✅」+ **EXIT=0** —— 脚本自己声明的
+# 退出码契约（"每个被选中的组都至少有 1 条 PASS"）被违反而无人察觉；
+# `--self-check` 与 `verify-ci-scripts.mjs` 的静态 needle 也都咬不住它。
+#
+# 处置：结论段把 `GROUPS_SELECTED` 与脚本自己写进绑定文件的 `group <n> …` 台账行
+# **对拍**（台账是独立来源，不是内存计数）：
+#   ① 每个被选中的组必须有恰好一行台账行（缺 = 该组整块没执行：被短路/删除）；
+#   ② 该行 `pass` 必须 ≥ 1（零断言不得当通过 —— 与 group_settle 同一口径）；
+#   ③ 未选中的组不得产出台账行（组调度偏离 GROUPS_SELECTED 的另一种形态）；
+#   ④ 台账 `pass` 合计必须等于内存 PASS 计数（PASS 只出现在组块内 ⇒ 两个真源必须相等，
+#      抓"计数面被掏空"与"台账被写死"两种形态）。
+# `ledger_reconcile` 是**纯函数**（只读文件与参数），由 `--self-check` 的合成台账样本
+# 独立打坏；`ledger_reconcile_into_fail` 是唯一的接线入口（违规 ⇒ 具名 `fail()`）。
+
+# 取某组台账行的 pass 计数（无该行时输出空）。
+ledger_pass_of() { # <绑定文件> <组号>
+  sed -n "s/^group $2 pass=\([0-9][0-9]*\) fail=.*/\1/p" "$1" | head -n 1
+}
+
+# 组级台账对账。打印 `ledger-ok:…` 或逐条 `ledger-violation:…`；返回 0 = 通过。
+# 参数：<绑定文件> <内存 PASS 计数|-> <被选中的组…>
+ledger_reconcile() {
+  local file="$1" expect_pass_total="$2"; shift 2
+  local violations=0 g n lines gp selected
+  # ① + ②：被选中的组逐组具名对账。
+  for g in "$@"; do
+    lines="$(grep -c "^group ${g} " "$file" 2>/dev/null || true)"; lines="${lines:-0}"
+    if [ "$lines" -ne 1 ]; then
+      printf 'ledger-violation:组 %s 被选中，但组级台账里没有恰好一行 `group %s …`（实得 %s 行）—— 该组的整块代码没有执行（被短路/停用/删除），本次结论里这一组零覆盖\n' \
+        "$g" "$g" "$lines"
+      violations=$((violations + 1))
+      continue
+    fi
+    gp="$(ledger_pass_of "$file" "$g")"
+    if [ "${gp:-0}" -lt 1 ]; then
+      printf 'ledger-violation:组 %s 的台账行 pass=%s —— 该组一条断言都没跑成（零 PASS 不得当通过）\n' "$g" "${gp:-0}"
+      violations=$((violations + 1))
+    fi
+  done
+  # ③：未选中的组不得产出台账行。
+  for n in 1 2 3 4 5 6 7 8; do
+    selected=0
+    for g in "$@"; do
+      if [ "$g" = "$n" ]; then selected=1; fi
+    done
+    if [ "$selected" -eq 1 ]; then continue; fi
+    lines="$(grep -c "^group ${n} " "$file" 2>/dev/null || true)"; lines="${lines:-0}"
+    if [ "$lines" -ne 0 ]; then
+      printf 'ledger-violation:未选中的组 %s 却产出了 %s 行台账（组调度偏离 GROUPS_SELECTED —— 没选中的组不该跑）\n' "$n" "$lines"
+      violations=$((violations + 1))
+    fi
+  done
+  # ④：台账 pass 合计 == 内存 PASS 计数（两个真源互校）。
+  if [ "$expect_pass_total" != "-" ]; then
+    local total=0 tag grp pfield rest
+    while read -r tag grp pfield rest; do
+      case "$tag" in group) ;; *) continue ;; esac
+      case "$pfield" in pass=*) total=$((total + ${pfield#pass=})) ;; esac
+    done < <(grep -E '^group [0-9]+ ' "$file" 2>/dev/null || true)
+    if [ "$total" -ne "$expect_pass_total" ]; then
+      printf 'ledger-violation:台账 pass 之和（%s）与内存 PASS 计数（%s）不符 —— 计数面与台账面不同源\n' \
+        "$total" "$expect_pass_total"
+      violations=$((violations + 1))
+    fi
+  fi
+  if [ "$violations" -eq 0 ]; then
+    printf 'ledger-ok:选中 %s 组，逐组台账齐备且 pass 合计 %s\n' "$*" "$expect_pass_total"
+    return 0
+  fi
+  return 1
+}
+
+# 结论段唯一接线入口：对账通过 ⇒ note 一行；每条违规 ⇒ 具名 fail()（进 FAIL 计票）。
+ledger_reconcile_into_fail() {
+  local out line
+  out="$(ledger_reconcile "$BINDING" "$PASS_COUNT" $GROUPS_SELECTED 2>&1 || true)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      ledger-ok:*) note "${line#ledger-ok:}" ;;
+      ledger-violation:*) fail "${line#ledger-violation:}" ;;
+      *) fail "组级台账对账返回了无法识别的行：${line}" ;;
+    esac
+  done <<<"$out"
+}
+
+# 自证：组级台账对账（N2-X1 的"可被打坏"面）。全部用合成台账，不需要 Electron/PG。
+# 判据两条：
+#   · 每种坏形态必须判红**且具名**（第一条就是 N2-X1 的原形态），健康样本必须通过；
+#   · 违规必须真的走 `fail()` 计票通道（在子壳里用与真 `fail()` 同契约的桩计数），
+#     否则"对账"再对也不会进结论段的 FAIL 判据。
+ledger_selftest() {
+  local dir="$LOG_DIR/ledger-selftest"
+  rm -rf "$dir"; mkdir -p "$dir"
+  local failures=0 observed=0 spec id expect groups lines expect_pass
+  local file out fail_count verdict
+  for spec in "${LEDGER_SELFTEST_CASES[@]}"; do
+    IFS='|' read -r id expect groups lines expect_pass <<<"$spec"
+    file="$dir/$id.binding"
+    printf '%b\n' "$lines" | sed '/^[[:space:]]*$/d' >"$file"
+    observed=$((observed + 1))
+    # 在子壳里跑"对账 + fail() 计票"的同一入口（fail/note 的桩与真实现同契约：
+    # FAIL += 1 / 打印一行；`--self-check` 分支早于报告原语的定义，故在这里注入）。
+    out="$(FAIL=0; PASS_COUNT="${expect_pass:-0}"
+           fail() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; }
+           note() { printf '  %s\n' "$1"; }
+           BINDING="$file"; GROUPS_SELECTED="$groups"
+           ledger_reconcile_into_fail
+           printf '__FAIL__%s' "$FAIL")"
+    fail_count="${out##*__FAIL__}"
+    verdict="${out%__FAIL__*}"
+    case "$expect" in
+      accept)
+        if [ "${fail_count:-1}" -ne 0 ]; then
+          printf 'ledger 自证: 样本 %s 期望接受，却判红 %s 条（%s）\n' "$id" "$fail_count" "$verdict" >&2
+          failures=$((failures + 1))
+        fi ;;
+      reject:*)
+        local needle="${expect#reject:}"
+        if [ "${fail_count:-0}" -lt 1 ]; then
+          printf 'ledger 自证: 样本 %s 期望判红，却一条 FAIL 都没有（对账被掏空）\n' "$id" >&2
+          failures=$((failures + 1))
+          continue
+        fi
+        case "$verdict" in
+          *"$needle"*) ;;
+          *) printf 'ledger 自证: 样本 %s 判红了但**没有具名**（期望输出含 %s，实得 %s）\n' \
+               "$id" "$needle" "$verdict" >&2
+             failures=$((failures + 1)) ;;
+        esac ;;
+      *)
+        printf 'ledger 自证: 样本 %s 的期望值无法识别（%s）\n' "$id" "$expect" >&2
+        failures=$((failures + 1)) ;;
+    esac
+  done
+  # 登记表下限（棘轮）+ 实跑条数对拍：删样本会让"跑到的 == 登记的"这条看不出缩面。
+  if [ "${#LEDGER_SELFTEST_CASES[@]}" -lt "$LEDGER_MIN_SAMPLES" ]; then
+    printf 'ledger 自证: 样本被删到没有判别力（%s < %s）\n' \
+      "${#LEDGER_SELFTEST_CASES[@]}" "$LEDGER_MIN_SAMPLES" >&2
+    failures=$((failures + 1))
+  fi
+  if [ "$observed" -ne "${#LEDGER_SELFTEST_CASES[@]}" ]; then
+    printf 'ledger 自证: 样本数不符（实跑 %s / 登记 %s）—— 自证被删/短路\n' \
+      "$observed" "${#LEDGER_SELFTEST_CASES[@]}" >&2
+    failures=$((failures + 1))
+  fi
+  # 接线（结构判据）：对账必须**在收尾路径上**被调用，且在打印「全部通过」之前 ——
+  # 函数再正确，没有接线也不参与结论（"判据没接线"= 假绿，正是 N2-X1 的形态）。
+  local src="${BASH_SOURCE[0]}" call_line print_line
+  call_line="$(grep -n '^ledger_reconcile_into_fail # 组级台账对账' "$src" | head -n 1 | cut -d: -f1)"
+  print_line="$(grep -n '^  echo "全部通过 ✅"$' "$src" | head -n 1 | cut -d: -f1)"
+  if [ -z "$call_line" ] || [ -z "$print_line" ] || [ "$call_line" -ge "$print_line" ]; then
+    printf 'ledger 自证: 组级台账对账没有接在收尾路径上（调用行=%s，全部通过行=%s）—— 函数在，结论不用它\n' \
+      "${call_line:-<缺失>}" "${print_line:-<缺失>}" >&2
+    failures=$((failures + 1))
+  fi
+  printf 'ledger self-check: cases=%s/%s failures=%s\n' "$observed" "${#LEDGER_SELFTEST_CASES[@]}" "$failures"
+  if [ "$failures" -ne 0 ]; then return 1; fi
+  return 0
+}
+
 
 # ---------------------------------------------------------------------------
 # 参数
@@ -383,9 +572,14 @@ case "$MODE" in
     printf '%s\n' "${GROUP_NAMES[@]}"
     exit 0 ;;
   self-check)
-    # 探针证据协议的自证（R4-A N2）：不需要 Electron / 显示器 / PG —— 供 CI 与
-    # `verify-ci-scripts.mjs` 独立驱动（"拆掉自证 ⇒ 红"要靠外部守卫跑它）。
-    if probe_evidence_selftest; then
+    # 探针证据协议的自证（R4-A N2）+ 组级台账对账的自证（R5 N2-X1）：不需要
+    # Electron / 显示器 / PG —— 供 CI 与 `verify-ci-scripts.mjs` 独立驱动
+    # （"拆掉自证 ⇒ 红"要靠外部守卫跑它）。
+    probe_ok=1
+    ledger_ok=1
+    probe_evidence_selftest || probe_ok=0
+    ledger_selftest || ledger_ok=0
+    if [ "$probe_ok" -eq 1 ] && [ "$ledger_ok" -eq 1 ]; then
       echo "verify-wasm-client-only: 探针证据自证通过（--self-check）✅"
       exit 0
     fi
@@ -1032,6 +1226,10 @@ if grep -q '^group ' "$BINDING" 2>/dev/null; then
   note "组级台账（每组至少要有 1 条 PASS；零 PASS 的组在上面已被判红）："
   grep -E '^group ' "$BINDING" | sed 's/^/    /'
 fi
+# R5 N2-X1：**组级台账对账**必须在结论段真的跑（且跑在「全部通过」之前）——
+# 只看 `FAIL == 0` 时，把某个组的整块（`if want N; then` → `if false; then`）
+# 短路掉会得到 `PASS 0 ｜ FAIL 0 ｜ SKIP 0` + 「全部通过 ✅」+ EXIT=0。
+ledger_reconcile_into_fail # 组级台账对账（R5 N2-X1）：缺组即具名红
 if [ "$FAIL" -eq 0 ]; then
   echo "全部通过 ✅"
   exit 0

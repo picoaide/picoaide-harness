@@ -567,15 +567,39 @@ for (const file of mjsFiles) {
     '形态⑤: electron-shots.mjs 必须从 ./report.mjs 引入判定通道（否则"运行期真的按表判"没有单一入口）')
   check(!/\.evaluate\s*\(/u.test(shotsSource),
     '形态⑤: electron-shots.mjs 里出现了 `.evaluate(` —— 判定逻辑必须只在 report.mjs 一处（自带判定逻辑 = 可被单点掏空）')
-  check(!/\{\s*ok:\s*(?:true|false)\b/u.test(shotsSource),
-    '形态⑤: electron-shots.mjs 里出现了写死的 `{ ok: true|false }` —— 判定结论不得在运行期脚本里被伪造')
+  // 2026-09-23 复审 D-1：**字面量判据不得只认首键**。原判据
+  // `/\{\s*ok:\s*(?:true|false)\b/` 只咬得住 `ok` 在首键的那一种写法，
+  // 把它挪到非首键（`({ detail: 'MUTATED', ok: true })`）就逃逸。
+  // 现在只要**单行对象字面量里任意位置**出现 `ok: true|false` 就红。
+  const forgedJudge = /\{[^{}]*\bok\s*:\s*(?:true|false)\b[^{}]*\}/u.exec(shotsSource)
+  check(forgedJudge === null,
+    '形态⑤: electron-shots.mjs 里出现了写死的 `ok: true|false` —— 判定结论不得在运行期脚本里被伪造'
+      + `：${JSON.stringify(forgedJudge?.[0])}`)
+  // 单一入口的**结构**判据（D-1）：运行期绑定必须解构自通道对象，不得自写 `report` 函数
+  // —— 那层自写包装是"运行期结论可被一句替换掉"的逃逸点（键序变形 / early-return 都从它进）。
+  check(/const\s*\{[^}]*\breport\b[^}]*\}\s*=\s*reporter\b/u.test(shotsSource),
+    '形态⑤: electron-shots.mjs 的 `report` 必须**解构绑定**自 createReporter() 的通道对象'
+      + '（`const { report, … } = reporter`）—— 自写包装层 = 判定结论可在运行期脚本里被整句替换（D-1）')
+  const localReportFn = /(?:^|[\s;{])(?:const|let|var)\s+report\s*=/mu.exec(shotsSource)
+  check(localReportFn === null,
+    '形态⑤: electron-shots.mjs 里出现了本地定义的 `report = …`'
+      + `（${JSON.stringify(localReportFn?.[0]?.trim())}）—— 判定结论必须直接来自通道，不得经运行期脚本的包装`)
+  // `--self-check` 必须把**同一批绑定**交给自检（自检另建通道 = 证明的不是运行期那条）。
+  check(/runReporterSelfCheck\(\s*\{[^}]*\breport\b[^}]*\}\s*\)/u.test(shotsSource),
+    '形态⑤: `--self-check` 必须把运行期解构出来的 `report`（连同 failures/lines）交给'
+      + ' runReporterSelfCheck —— 自检另建通道就是 R5-D-1 的假绿形态')
 
-  // 变异副本:**判定通道的两种掏空形态**都必须让 `--self-check` 非零 ——
+  // 变异副本:**判定通道的四种掏空形态**都必须让 `--self-check` 非零 ——
   //   ① 恒真形态(N7 / R4-A 现场):`const { ok, detail } = { ok: true, … }`;
   //   ② **只改计票侧**(R5-D-4 现场):`if (!ok) failures += 1` → `+= 0` ——
   //      判据照旧求值、结论照旧打印,只有失败计数不再增长 ⇒ 运行期退出码恒 0。
+  //   ③④ **运行期包装被替换**(R5-D-1 现场,复审新发现):把
+  //      `electron-shots.mjs` 的解构绑定换成一句恒真包装 —— 键序变形
+  //      (`({ detail: 'MUTATED', ok: true })`)与 early-return 两种写法都要被咬住。
+  //      ③④ 是本轮的关键补课:旧自检在 report.mjs 内部**另建**通道,③④ 一律存活。
   // 判定通道对 ② 的处置是**两条独立通道**:`report()` 的返回值(结论)与 `failures()`
-  // (计票)必须互相印证,`runReporterSelfCheck()` 对每条夹具断言两者一致。
+  // (计票)必须互相印证,`runReporterSelfCheck()` 对每条夹具断言两者一致;
+  // 对 ③④ 的处置是自检消费**运行期解构出来的同一批绑定**。
   const BREAK_CASES = [
     {
       id: 'report-tautology',
@@ -591,20 +615,39 @@ for (const file of mjsFiles) {
       replacement: '      if (!ok) failures += 0',
       expect: /判定结论.*与失败计数.*不一致/u,
     },
+    {
+      id: 'runtime-wrapper-keyorder',
+      label: '运行期包装换成一、键序变形（D-1 原形态）',
+      file: 'electron-shots.mjs',
+      needle: 'const { report, failures, lines, exitCode } = reporter',
+      replacement: "const report = (id, observation) => ({ detail: 'MUTATED', ok: true })\n"
+        + 'const { failures, lines, exitCode } = reporter',
+      expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
+    },
+    {
+      id: 'runtime-wrapper-early-return',
+      label: '运行期包装换成二、early-return 恒真（D-1 变体）',
+      file: 'electron-shots.mjs',
+      needle: 'const { report, failures, lines, exitCode } = reporter',
+      replacement: 'const report = (id) => { if (id) return { ok: true }; return { ok: false } }\n'
+        + 'const { failures, lines, exitCode } = reporter',
+      expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
+    },
   ]
   for (const breakCase of BREAK_CASES) {
     const mutantDir = tempDir(`shots-mutant-${breakCase.id}-`)
     for (const file of ['electron-shots.mjs', 'assertions.mjs', 'report.mjs']) {
       copyFileSync(join(ROOT, 'integration-tests', 'electron-shots', file), join(mutantDir, file))
     }
-    const mutantReporter = join(mutantDir, 'report.mjs')
-    const reporterSource = readFileSync(mutantReporter, 'utf8')
-    if (!reporterSource.includes(breakCase.needle)) {
-      fail(`形态⑤: 变异副本 \`${breakCase.id}\` 的注入锚点失效（report.mjs 的形状变了）`
+    const targetName = breakCase.file ?? 'report.mjs'
+    const mutantTarget = join(mutantDir, targetName)
+    const targetSource = readFileSync(mutantTarget, 'utf8')
+    if (!targetSource.includes(breakCase.needle)) {
+      fail(`形态⑤: 变异副本 \`${breakCase.id}\` 的注入锚点失效（${targetName} 的形状变了）`
         + ' —— 判定通道的端到端变异验证无法开展，请同步本守卫的锚点，不要直接删掉这段')
       continue
     }
-    writeFileSync(mutantReporter, reporterSource.replace(breakCase.needle, breakCase.replacement))
+    writeFileSync(mutantTarget, targetSource.replace(breakCase.needle, breakCase.replacement))
     const mutantRun = spawnSync(process.execPath, [join(mutantDir, 'electron-shots.mjs'), '--self-check'],
       { cwd: ROOT, encoding: 'utf8' })
     const mutantOutput = `${mutantRun.stdout ?? ''}${mutantRun.stderr ?? ''}`
