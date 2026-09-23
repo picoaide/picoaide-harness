@@ -553,6 +553,14 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	serverauth.AdminRoute(authed, "GET", "/skills/:name/archive", serverauth.PermMarketRead, d.Market.DownloadSkillArchiveAdmin)
 	serverauth.AdminRoute(authed, "POST", "/skills/:name/normalize", serverauth.PermMarketWrite, d.Market.NormalizeSkillAdmin)
 	// 市场智能体管理(G4 2026-09-04):与市场技能同构。
+	//
+	// 渠道边界(A-8,2026-09-23 第三轮审计):这一片是**市场命名空间**,只服务
+	// `apps.channel='market'` 的智能体行 —— 逐名端点统一过
+	// `marketplace.requireMarketAgent`(org 行 ⇒ 404,与"不存在"逐字节同形);
+	// 组织共享库的孪生端点走 `agentshare.requireOrgAgent`(反方向)。
+	// "哪些面经论证**故意**跨渠道"(登记/上传新版靠读 org 行回 409 跨源同名互斥)
+	// 的唯一真源 = `internal/marketplace/channel.go` 的 `marketAgentRoutePolicy`,
+	// 由 `TestAgentAdminRoutesAreMarketOnlyOrRegistered` 与运行时路由表双向对拍。
 	serverauth.AdminRoute(authed, "GET", "/agents", serverauth.PermMarketRead, d.Market.ListAgentsAdmin)
 	serverauth.AdminRoute(authed, "POST", "/agents", serverauth.PermMarketWrite, d.Market.CreateAgentAdmin)
 	serverauth.AdminRoute(authed, "POST", "/agents/:name/archive", serverauth.PermMarketWrite, d.Market.UploadAgentArchiveAdmin)
