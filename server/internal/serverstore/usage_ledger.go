@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -194,8 +195,102 @@ func ParseRetentionMonths(v string) (int, error) {
 	return n, nil
 }
 
+// usageMonthTables 是一次"usage 月关系"扫描的结果（R4-C-8，审计 2026-09-23）。
+//
+// 为什么要有它：月分区是**写时惰性创建**的（ensureUsagePartition 在当月第一次计量
+// 写入时才建），所以"某个月完全没有用量"的部署会在表名序列里留下一个**洞**。旧实现
+// 从 cutoffMonth-1 逐月往回走、在第一个缺失月份就 `break`（注释理由是"更早月份已没有
+// 表"），于是洞一旦落在要清理的区间里，更早的分区**永远不会**被清理 —— 该月已经过去，
+// created_at 不会再落进去，分区不会被重建 ⇒ 洞是永久的，`usage.retention_months`
+// 对更早月份静默失效（只占磁盘、不丢数据，因为 DROP 前已重建账本）。
+//
+// 修法：**枚举实际存在的关系**（事实），不按名字猜连续性（假设）。
+type usageMonthTables struct {
+	// Partitions 是挂在 usage 下的**叶子**月分区（relispartition=true 且
+	// relkind='r'），按关系名升序 —— 升序即时间升序（YYYYMM）。
+	Partitions []string
+	// Orphans 是名为 usage_<YYYYMM> 但**不**挂在 usage 下的关系（F11 的 DETACH
+	// 残留、或被手工换成 VIEW 的异常形态）。它们没有分区身份，但同样占着名字：
+	// 留着会让该月的新写入撞同名关系而失败，所以清理必须一并处理。
+	Orphans []string
+}
+
+// usageMonthRelationOf 解析关系名 usage_<YYYYMM>，返回该月（UTC 月首）与是否合法。
+// 严格六位数字 + 合法月号：名字像 usage_2026（年）+ 后缀、或 usage_daily_2026
+// 这类兄弟关系一律不参与月分区判定。
+func usageMonthRelationOf(rel string) (time.Time, bool) {
+	const prefix = "usage_"
+	if !strings.HasPrefix(rel, prefix) {
+		return time.Time{}, false
+	}
+	key := rel[len(prefix):]
+	if len(key) != 6 {
+		return time.Time{}, false
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < '0' || key[i] > '9' {
+			return time.Time{}, false
+		}
+	}
+	year, month := 0, 0
+	for i := 0; i < 6; i++ {
+		d := int(key[i] - '0')
+		if i < 4 {
+			year = year*10 + d
+		} else {
+			month = month*10 + d
+		}
+	}
+	if month < 1 || month > 12 {
+		return time.Time{}, false
+	}
+	return time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC), true
+}
+
+// scanUsageMonthTables 枚举 public 模式下全部名为 usage_<YYYYMM> 的关系，分成
+// 「真分区」与「孤儿」两桶（见 usageMonthTables 的说明）。
+//
+// 只读一次 catalog（pg_class + pg_inherits）：比旧实现逐月一条查询更省往返，
+// 且判据是**事实**（枚举）而不是**假设**（名字连续）—— R4-C-8 的根因正是后者。
+func scanUsageMonthTables(db *sql.DB) (usageMonthTables, error) {
+	rows, err := db.Query(`SELECT c.relname, COALESCE(p.relname, ''), c.relispartition, c.relkind
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
+LEFT JOIN pg_class p ON p.oid = i.inhparent
+WHERE n.nspname = 'public' AND c.relname LIKE 'usage\_%'
+ORDER BY c.relname`)
+	if err != nil {
+		return usageMonthTables{}, err
+	}
+	defer rows.Close()
+	out := usageMonthTables{}
+	for rows.Next() {
+		var rel, parent, kind string
+		var isPartition sql.NullBool
+		if err := rows.Scan(&rel, &parent, &isPartition, &kind); err != nil {
+			return usageMonthTables{}, err
+		}
+		if _, ok := usageMonthRelationOf(rel); !ok {
+			continue // usage_daily_2026 之类的兄弟关系
+		}
+		if isPartition.Valid && isPartition.Bool && parent == "usage" && kind == "r" {
+			out.Partitions = append(out.Partitions, rel)
+			continue
+		}
+		out.Orphans = append(out.Orphans, rel)
+	}
+	return out, rows.Err()
+}
+
 // CleanupUsageRetention DROP 过期月份分区(先校验该月日账已生成,防丢账)。
 // 保留 N 个月 = 删除 created_at 早于"当前北京月 - N 个月"的整分区。
+//
+// R4-C-8(审计 2026-09-23,P3):判据从"逐月回溯、遇到缺表即 break"改成
+// **枚举实际存在的关系**。旧实现把"某月没有表"当成"已到边界",而月分区是写时
+// 惰性创建的 —— 零用量月本来就没有分区,那个洞会让更早的分区**永久**不被清理
+// (该月已过去 ⇒ 分区不会被重建 ⇒ 洞永久)。现在既不 break、也不会漏月,并且把
+// 区间里缺席的月份**显式记录**下来(运维可据此核对"保留期是否真的覆盖到边界")。
 func CleanupUsageRetention(db *sql.DB) error {
 	n, err := EffectiveRetentionMonths(db)
 	if err != nil {
@@ -208,53 +303,78 @@ func CleanupUsageRetention(db *sql.DB) error {
 	// 北京月界(不依赖进程 TZ:UTC 容器在每月 1 日 00:00-08:00 会把 cutoff
 	// 算到上一个月,导致多删一个月的明细)。
 	cutoffMonth := BeijingMonth(time.Now()).AddDate(0, -n, 0)
-	for m := cutoffMonth.AddDate(0, -1, 0); ; m = m.AddDate(0, -1, 0) {
-		key := monthKey(m)
-		if key >= monthKey(cutoffMonth) {
+	tables, err := scanUsageMonthTables(db)
+	if err != nil {
+		return err
+	}
+	// F11(审计 2026-09-11):孤儿关系(DETACH 成功但 DROP 失败留下的表、或被换成
+	// VIEW 的异常形态)先清掉 —— 它们没有分区身份，留着会让该月的新写入撞同名关系
+	// 而失败。清理失败照旧上抛(不静默跳过)。
+	for _, rel := range tables.Orphans {
+		m, ok := usageMonthRelationOf(rel)
+		if !ok || !m.Before(cutoffMonth) {
 			continue
 		}
-		// F11(审计 2026-09-11):
-		//   - 用 pg_class.relispartition 区分「真分区」与「孤儿表」;
-		//   - DETACH 失败不再静默 continue(旧实现把所有错误当"已删过",
-		//     锁冲突/权限错误会被吞掉,分区清理永远停摆);
-		//   - 上次 DETACH 成功但 DROP 失败留下的孤儿表直接清掉并继续,
-		//     不再让它卡住后续月份(否则该表所在月的新写入会 500)。
-		var isPartition sql.NullBool
-		perr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&isPartition)
-		if errors.Is(perr, sql.ErrNoRows) {
-			break // 更早月份已没有表(DROP 已到边界)
+		if _, derr := db.Exec("DROP TABLE IF EXISTS " + rel); derr != nil {
+			return derr
 		}
-		if perr != nil {
-			return perr
-		}
-		if isPartition.Valid && !isPartition.Bool {
-			// 孤儿 detached 表:DROP 后继续清理更早月份。
-			if _, derr := db.Exec("DROP TABLE IF EXISTS usage_" + key); derr != nil {
-				return derr
-			}
+		log.Printf("usage retention: dropped detached relation %s (not a partition of usage)", rel)
+	}
+	existing := make(map[string]bool, len(tables.Partitions))
+	var oldest time.Time
+	for _, rel := range tables.Partitions {
+		m, ok := usageMonthRelationOf(rel)
+		if !ok {
 			continue
+		}
+		existing[monthKey(m)] = true
+		if oldest.IsZero() || m.Before(oldest) {
+			oldest = m
+		}
+	}
+	dropped := 0
+	for _, rel := range tables.Partitions {
+		m, ok := usageMonthRelationOf(rel)
+		if !ok || !m.Before(cutoffMonth) {
+			continue // 保留期内(或名字不合法,前一步已排除)
 		}
 		// 先重建该月日账/月账(幂等,防明细删除后账本丢)。
-		monthStartT := m
-		if err := RebuildUsageLedger(db, monthStartT, monthStartT.AddDate(0, 1, -1)); err != nil {
+		if err := RebuildUsageLedger(db, m, m.AddDate(0, 1, -1)); err != nil {
 			return err
 		}
-		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION usage_" + key); derr != nil {
+		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION " + rel); derr != nil {
 			// 复检:并发清理/重复执行时可能已经不是分区 → 继续 DROP;
 			// 仍是分区说明 DETACH 真失败 → 上抛,不静默跳过。
 			var again sql.NullBool
 			rerr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = ? AND n.nspname = 'public'`, "usage_"+key).Scan(&again)
+WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&again)
 			if rerr != nil || !again.Valid || again.Bool {
-				return fmt.Errorf("detach usage_%s: %w", key, derr)
+				return fmt.Errorf("detach %s: %w", rel, derr)
 			}
 		}
-		if _, derr := db.Exec("DROP TABLE IF EXISTS usage_" + key); derr != nil {
+		if _, derr := db.Exec("DROP TABLE IF EXISTS " + rel); derr != nil {
 			return derr
 		}
+		dropped++
+	}
+	// 显式记录"跳过的月份"(R4-C-8):保留区间里没有被清掉的空缺月份 —— 该月零用量
+	// (写路径惰性建分区)或早已被清过。日志让"洞"可被运维看见,而不是靠读代码推。
+	if !oldest.IsZero() {
+		var gaps []string
+		for m := oldest; m.Before(cutoffMonth); m = m.AddDate(0, 1, 0) {
+			if key := monthKey(m); !existing[key] {
+				gaps = append(gaps, key)
+			}
+		}
+		if len(gaps) > 0 {
+			log.Printf("usage retention: %d month(s) in the cleanup range have no detail partition (zero-usage months or already cleaned): %s",
+				len(gaps), strings.Join(gaps, ","))
+		}
+	}
+	if dropped > 0 || len(tables.Orphans) > 0 {
+		log.Printf("usage retention: dropped %d expired month partition(s) and %d detached relation(s) (retention=%d months, cutoff=%s)",
+			dropped, len(tables.Orphans), n, monthKey(cutoffMonth))
 	}
 	return nil
 }
@@ -270,43 +390,82 @@ func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts
 		// 无起始边界:直接查账本(覆盖全部历史,明细窗口内已并入日账)
 		return UsageAggregateFromLedger(db, from, to, group, opts...)
 	}
-	// from/to 归一到北京日期值(允许调用方传瞬时):cutoff 比较与明细/账本
-	// 分段都建立在同一套日口径上(2026-09-10 时区缺陷修复)。
+	// from/to 归一到北京日期值(允许调用方传瞬时):分段边界与明细/账本
+	// 两套口径都建立在同一套日口径上(2026-09-10 时区缺陷修复)。
 	from, to = normalizeDayRange(from, to)
-	retention, err := EffectiveRetentionMonths(db)
+	// R4-C-4(审计 2026-09-23,P2):分段依据是"该月明细分区**是否还在**"(事实),
+	// 不是配置的 retention(假设)。旧实现用一个 configured cutoffDay 把窗口切成
+	// "账本段 + 明细段":一旦把保留期调大(6→24)或关掉(0=永久),早被旧保留期
+	// DROP 掉的月份会被判成"在保留期内",于是只去查一个已经空了的明细表 ——
+	// 报表给出 `rows=1, cost=0.00`(**不是空集**),而永久日账里还有金额
+	// (CleanupUsageRetention 一定先 RebuildUsageLedger 再 DROP ⇒ 账本完整)。
+	//
+	// 为什么是**逐月分段**而不是两个大段:分区可能只在中段缺失(零用量月没有分区、
+	// 或历史某月被清过而前后仍在)。两个大段的切分点无法表达"中间有个洞" ——
+	// 洞所在月会被划进明细段,于是既读不到明细(分区没了)也读不到账本(没去读)。
+	// 逐月判定 + 相邻同源合并后:每个"分区仍在"的月读明细,每个"分区不在"的月读
+	// 账本,两侧都不会漏、也不会重复(段与段的天区间严格不相交)。
+	segments, err := usageAggregateSegments(db, from, to)
 	if err != nil {
 		return nil, err
 	}
-	if retention <= 0 {
-		// 0 = 永久保留明细:明细即完整事实源(账本仅兜底),只查明细,
-		// 避免与账本重复计数。
-		return UsageAggregate(db, from, to, group, opts...)
+	var merged []UsageAggregateRow
+	for _, seg := range segments {
+		var rows []UsageAggregateRow
+		if seg.detail {
+			rows, err = UsageAggregate(db, seg.from, seg.to, group, opts...)
+		} else {
+			rows, err = UsageAggregateFromLedger(db, seg.from, seg.to, group, opts...)
+		}
+		if err != nil {
+			return nil, err
+		}
+		merged = mergeUsageRows(merged, rows)
 	}
-	// 保留边界 = 北京"今天"往前 N 个月的同一北京日(等价旧口径但不受进程 TZ
-	// 影响:旧写法先对瞬时做 AddDate,UTC 容器下会差一天)。
-	cutoffDay := BeijingDay(time.Now()).AddDate(0, -retention, 0)
-	if !from.Before(cutoffDay) {
-		// 窗口整体在保留期内:明细完整,无需账本
-		return UsageAggregate(db, from, to, group, opts...)
-	}
-	// 账本段 = [from, min(cutoffDay-1, to)]:窗口整体早于保留边界时不得超过 to
-	ledgerTo := cutoffDay.AddDate(0, 0, -1)
-	if ledgerTo.After(to) {
-		ledgerTo = to
-	}
-	ledger, err := UsageAggregateFromLedger(db, from, ledgerTo, group, opts...)
+	return merged, nil
+}
+
+// usageAggregateSegment 是 [from, to] 里的一个同源日区间(detail=true 走明细,
+// false 走永久账本)。段边界必定落在月首/月末(分区是月粒度的)。
+type usageAggregateSegment struct {
+	from, to time.Time
+	detail   bool
+}
+
+// usageAggregateSegments 把闭区间 [from, to] 按"该月明细分区是否存在"切成
+// **相邻同源合并**后的段序列(R4-C-4 的唯一判据实现)。
+//
+// 判据来源是 scanUsageMonthTables 的枚举结果(实际挂在 usage 下的叶子月分区),
+// 不是配置值。相邻同源合并让常规布局(近 N 月 + 更早全无分区)只产生 2 段 ——
+// 与旧实现同样数量的查询;只有中间真有洞时才会多出几段。
+func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSegment, error) {
+	tables, err := scanUsageMonthTables(db)
 	if err != nil {
 		return nil, err
 	}
-	if to.Before(cutoffDay) {
-		// 明细段为空(窗口整体早于保留边界)
-		return ledger, nil
+	present := make(map[string]bool, len(tables.Partitions))
+	for _, rel := range tables.Partitions {
+		if m, ok := usageMonthRelationOf(rel); ok {
+			present[monthKey(m)] = true
+		}
 	}
-	detailRows, err := UsageAggregate(db, cutoffDay, to, group, opts...)
-	if err != nil {
-		return nil, err
+	segments := make([]usageAggregateSegment, 0, 2)
+	for cur := from; !cur.After(to); {
+		monthStart := dayKey(cur)
+		nextMonth := monthStart.AddDate(0, 1, 0)
+		segEnd := nextMonth.AddDate(0, 0, -1) // 当月最后一个北京日
+		if segEnd.After(to) {
+			segEnd = to
+		}
+		detail := present[monthKey(monthStart)]
+		if n := len(segments); n > 0 && segments[n-1].detail == detail {
+			segments[n-1].to = segEnd
+		} else {
+			segments = append(segments, usageAggregateSegment{from: cur, to: segEnd, detail: detail})
+		}
+		cur = nextMonth
 	}
-	return mergeUsageRows(ledger, detailRows), nil
+	return segments, nil
 }
 
 // ledgerWindowEmpty 探测日账表在 [from, to] 闭区间内**是否一行都没有**。

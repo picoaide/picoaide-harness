@@ -102,7 +102,7 @@ func TestPurgeOldAuditLogsKeepsAnchor(t *testing.T) {
 	h2 := insert(h1, "old-2", now.AddDate(0, 0, -199))
 	insert(h2, "new-1", now)
 
-	if err := PurgeOldAuditLogs(db, now.AddDate(0, 0, -180)); err != nil {
+	if _, err := PurgeOldAuditLogs(db, now.AddDate(0, 0, -180)); err != nil {
 		t.Fatalf("PurgeOldAuditLogs: %v", err)
 	}
 	// old-1 删除、old-2(锚)保留、new-1 保留

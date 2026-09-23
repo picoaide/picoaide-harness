@@ -814,12 +814,21 @@ func InvalidateModelConfig() { modelConfigCache.invalidateAll() }
 // 有一行非缺失),但把"只剩目录缺失行"的退化情形钉成"未找到"(调用方回落 128K
 // 补估上限),而不是把已停用行的参数当生效配置 —— 将来若有人把本函数接到管理端
 // 预览或 bootstrap 兜底路径上,也不会重现"停用行仍参与取参"。
+//
+// R4-C-3(审计 2026-09-23,P2):同名模型出现在多个 provider 时,必须与两个同族
+// 函数(ModelPrices / ModelCachePrice)**逐字同序**取参 —— 追加同样的
+// `ORDER BY provider_id LIMIT 1`。没有它,返回的是 PG 结果集的第一行(堆序):
+// 一次语义中性的 UPDATE 就能让返回值在 A 家 {context_length:4096} 与 B 家
+// {context_length:900000} 之间翻转;而本函数唯一的消费者是 llmgateway 的
+// promptEstimateCapForModel(上游漏报 usage 时的**输入侧补估上限**),于是同一条
+// 请求的补估 token 数与费用可以差两个数量级,并与同族取价函数的口径分叉
+// (30s 的 modelConfigCache 只是把"这一次碰巧读到的那一份"钉住,放大可见性而非修复)。
 func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 	if v := modelConfigCache.get(db, "dp:"+name); v != nil {
 		return v.(string), nil
 	}
 	var params string
-	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ? AND catalog_missing = FALSE`, name).Scan(&params)
+	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}

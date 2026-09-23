@@ -108,3 +108,24 @@ func openTestDBWithSessionTZ(t *testing.T, db *sql.DB, tz string) *sql.DB {
 	t.Cleanup(func() { h.Close() })
 	return h
 }
+
+// dropUsageMonthPartition 按**生产清理路径**摘掉某月明细分区(DETACH + DROP)，
+// 用于"模拟该月明细已被保留策略清掉"的用例（R4-C-4 修复后，"分区还在但行被
+// DELETE 掉"不再等价于 DROP 分区 —— 分段的判据就是分区是否存在）。
+//
+// 为什么必须用真 DROP 而不是 DELETE FROM usage：UsageAggregateWithLedger 按
+// **分区是否存在**决定该月读明细还是读永久账本（事实优先，见 usage_ledger.go 的
+// usageAggregateSegments）。用 DELETE 模拟时分区仍在 ⇒ 该月仍走明细 ⇒ 用例会
+// "读到 0"而不是"回落到账本"，测的就不再是保留期跨界的行为了。
+//
+// 调用前该月分区必须存在（夹具里先 ensureUsagePartition 或先写一行）。
+func dropUsageMonthPartition(t *testing.T, db *sql.DB, month time.Time) {
+	t.Helper()
+	rel := "usage_" + monthKey(BeijingMonth(month))
+	if _, err := db.Exec("ALTER TABLE usage DETACH PARTITION " + rel); err != nil {
+		t.Fatalf("detach %s: %v", rel, err)
+	}
+	if _, err := db.Exec("DROP TABLE " + rel); err != nil {
+		t.Fatalf("drop %s: %v", rel, err)
+	}
+}

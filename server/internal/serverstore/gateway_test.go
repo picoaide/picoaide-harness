@@ -907,3 +907,100 @@ func TestModelConfigLookupsSkipCatalogMissingRows(t *testing.T) {
 		t.Fatalf("目录恢复后 ModelCachePrice(solo) = %v, want %v", got, cache)
 	}
 }
+
+// TestModelDefaultParamsIsDeterministicAcrossProviders 是 R4-C-3 的回归判据
+// （审计 2026-09-23，P2：`ModelDefaultParams` 缺 `ORDER BY`，同名多 provider 时
+// 取参随物理行序漂移）。
+//
+// 为什么必须钉：该值的唯一生产消费者是 llmgateway 的 promptEstimateCapForModel
+// —— 上游漏报 usage 时的**输入侧补估上限**。上限在 {context_length:4096} 与
+// {context_length:900000} 之间翻转 ⇒ 同一条请求的补估 token 数与费用可差两个数量级
+// （minPromptEstimateCap=1024 下限只保护极小的一侧），且与同族取价函数
+// （ModelPrices / ModelCachePrice，两者都有 `ORDER BY provider_id LIMIT 1`）的口径分叉。
+//
+// 判据三条（缺一条就退化成"只钉字符串"）：
+//  1. 取值必须等于 **provider_id 最小** 的那一行（与两个同族函数同序，不是"随便第一行"）；
+//  2. 行序扰动（PG 的 UPDATE = 新版本行，会改变堆内物理位置）之后取值不变；
+//  3. 两个同族函数在同一个夹具上取到的也是同一 provider 的口径（三处同序）。
+//
+// 变异验证：把 `ORDER BY provider_id LIMIT 1` 从 SQL 里去掉 ⇒ 本用例红
+// （夹具刻意**先插 provider B 的行、后插 provider A 的行**，堆序第一行是 B）。
+func TestModelDefaultParamsIsDeterministicAcrossProviders(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+
+	const paramsA = `{"context_length":4096}`
+	const paramsB = `{"context_length":900000}`
+	const cacheA, cacheB = 1.25, 9.75
+	inA, outA := 2.0, 3.0
+	inB, outB := 20.0, 30.0
+
+	mkProvider := func(name string) int64 {
+		pid, err := AddGatewayProvider(db, &GatewayProvider{
+			Name: name, BaseURL: "http://" + name + ".example.com", APIKeyEnc: "k", Enabled: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+	// 先建 provider B（id 更小? 不 —— 先建的 id 更小，所以这里反过来：
+	// 先插入**参数更极端**的那一行，让"堆序第一行"与"provider_id 最小行"分叉）。
+	pidEarly := mkProvider("dup-early")
+	pidLate := mkProvider("dup-late")
+	if pidEarly >= pidLate {
+		t.Fatalf("夹具失效：先建的 provider 应有更小的 id（%d vs %d）", pidEarly, pidLate)
+	}
+	add := func(pid int64, params string, cache float64, in, out float64) {
+		t.Helper()
+		if _, err := db.Exec(
+			`INSERT INTO models (name, provider_id, display_name, default_params, cache_input_price_per_1m,
+			                     input_price_per_1m, output_price_per_1m)
+			 VALUES ('dup-model', ?, 'dup-model', ?, ?, ?, ?)`,
+			pid, params, cache, in, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 插入顺序 = pidLate 在前、pidEarly 在后：默认堆序（无 ORDER BY 时的第一行）
+	// 指向 pidLate（900000），而正确口径必须取 pidEarly（4096）。
+	add(pidLate, paramsB, cacheB, inB, outB)
+	add(pidEarly, paramsA, cacheA, inA, outA)
+
+	readParams := func(label string) string {
+		t.Helper()
+		InvalidateModelConfig()
+		got, err := ModelDefaultParams(db, "dup-model")
+		if err != nil {
+			t.Fatalf("%s: ModelDefaultParams error: %v", label, err)
+		}
+		return got
+	}
+
+	first := readParams("first")
+	if first != paramsA {
+		t.Fatalf("ModelDefaultParams = %s，期望 provider_id 最小那一行的 %s —— "+
+			"取值面是结果集第一行（堆序）而不是确定序：同名多 provider 时补估上限会随物理行序漂移",
+			first, paramsA)
+	}
+
+	// 行序扰动：PG 的 UPDATE 会写新版本行，物理位置随之后移。
+	if _, err := db.Exec(`UPDATE models SET display_name = display_name WHERE provider_id = ?`, pidEarly); err != nil {
+		t.Fatal(err)
+	}
+	second := readParams("after-heap-move")
+	if second != first {
+		t.Fatalf("搬动物理行之后 ModelDefaultParams 从 %s 变成 %s —— 取值不确定", first, second)
+	}
+
+	// 三处同序：同族取价函数在同一个夹具上必须落到同一 provider（provider_id 最小）。
+	InvalidateModelConfig()
+	gotIn, gotOut, _ := ModelPrices(db, "dup-model")
+	if gotIn != inA || gotOut != outA {
+		t.Fatalf("ModelPrices = (%v,%v)，期望 (%v,%v)（provider_id 最小行）—— 取价与取参的口径分叉",
+			gotIn, gotOut, inA, outA)
+	}
+	if got := ModelCachePrice(db, "dup-model"); got != cacheA {
+		t.Fatalf("ModelCachePrice = %v，期望 %v（provider_id 最小行）", got, cacheA)
+	}
+	t.Logf("同名多 provider：取参=%s 取价=(%v,%v) 缓存价=%v —— 三处同序且行序扰动后不变",
+		second, gotIn, gotOut, cacheA)
+}

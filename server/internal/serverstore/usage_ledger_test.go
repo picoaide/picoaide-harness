@@ -2,6 +2,7 @@ package serverstore
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -247,13 +248,13 @@ func TestUsageAggregateWithLedgerSumsAcrossRetention(t *testing.T) {
 	if _, err := recordUsageKindAt(db, uid, "m-recent", 220, 0, "chat", recent); err != nil {
 		t.Fatal(err)
 	}
-	// 账本生成后删掉 8 个月前的明细(等价于 CleanupUsageRetention DROP 分区)
+	// 账本生成后摘掉 8 个月前的明细分区（与 CleanupUsageRetention 同序：先补账、
+	// 再 DETACH+DROP）。R4-C-4 起分段判据是"分区是否存在"，所以模拟必须是真 DROP
+	// —— 只 DELETE 行而留着分区会被如实读成"该月明细为空"，测不到账本回落。
 	if err := RebuildUsageLedger(db, oldMonth, oldMonth.AddDate(0, 1, -1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("DELETE FROM usage WHERE model = 'm-old'"); err != nil {
-		t.Fatal(err)
-	}
+	dropUsageMonthPartition(t, db, oldMonth)
 
 	rows, err := UsageAggregateWithLedger(db, oldMonth, bjDay(0), "user")
 	if err != nil {
@@ -295,10 +296,11 @@ func TestUsageAggregateWithLedgerModelAndWeek(t *testing.T) {
 	if err := RebuildUsageLedger(db, marStart, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
-	// 模拟明细分区已过期:只留账本
+	// 模拟该月明细分区已过期（真 DETACH+DROP，见 dropUsageMonthPartition 的说明）
 	if _, err := db.Exec("DELETE FROM usage"); err != nil {
 		t.Fatal(err)
 	}
+	dropUsageMonthPartition(t, db, marStart)
 	marEnd := time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)
 
 	modelRows, err := UsageAggregateWithLedger(db, marStart, marEnd, "model")
@@ -440,4 +442,164 @@ func TestCleanupUsageRetentionDropsOrphanDetachedTable(t *testing.T) {
 	if exists {
 		t.Fatalf("orphan detached table usage_%s still exists after cleanup", older.Format("200601"))
 	}
+}
+
+// TestUsageAggregateWithLedgerSplitsByPartitionExistence 是 R4-C-4 的回归判据
+// （审计 2026-09-23，P2：切分点按**配置的 retention** 而不是"该月分区是否还在"）。
+//
+// 缺陷形态：把 `usage.retention_months` 从 6 调大到 24（或设为 0=永久）之后，早被
+// 旧保留期 DROP 掉的月份被判成"在保留期内" ⇒ 只查一个已经空了的明细表 ⇒ 聚合返回
+// `rows=1, cost=0.00`（**不是空集**，所以曲线画出"当天零消费"而不是缺口），而永久
+// 日账（usage_daily）里明明还有金额 —— 没有任何错误或告警。
+//
+// 判据三条：
+//  1. retention=0（永久）与 retention=24（调大）下，明细已删月份的聚合必须**等于**
+//     仅账本的值（非 0）；
+//  2. **中段有洞**的布局（某月分区没了、前后都还在）必须两侧都读到 —— 这是"两个
+//     大段的切分点"在结构上做不到的形态（洞所在月既读不到明细也没去读账本）；
+//  3. 分区仍在的月份仍以明细为事实源（不得因为账本有旧数据而重复计数）。
+func TestUsageAggregateWithLedgerSplitsByPartitionExistence(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+	uid := mustUserID(t, db)
+
+	// 三个"历史"月：10 / 8 / 6 个月前，各一笔费用（金额互不相同，便于分辨来源）。
+	months := []time.Time{bjMonth(10), bjMonth(8), bjMonth(6)}
+	costs := []float64{3.5, 7.25, 11.75}
+	for i, m := range months {
+		if err := ensureUsagePartition(db, m); err != nil {
+			t.Fatalf("ensureUsagePartition(%s): %v", monthKey(m), err)
+		}
+		at := BeijingMonthInstant(m).Add(2 * time.Hour)
+		if _, err := db.Exec(`INSERT INTO usage (user_id, model, prompt_tokens, completion_tokens, kind, cost, created_at, estimated)
+			VALUES (?, ?, 1000, 500, 'chat', ?, ?, FALSE)`, uid, "m-hist-"+monthKey(m), costs[i], at); err != nil {
+			t.Fatalf("insert usage %s: %v", monthKey(m), err)
+		}
+		if err := RebuildUsageLedger(db, m, m); err != nil {
+			t.Fatalf("RebuildUsageLedger(%s): %v", monthKey(m), err)
+		}
+	}
+	// 摘掉 8 个月前的分区（中段的洞），保留 10 / 6 个月前的分区。
+	dropUsageMonthPartition(t, db, months[1])
+
+	readCost := func(retention string, from, to time.Time) (float64, int) {
+		t.Helper()
+		if err := SetSetting(db, RetentionMonthsSetting, retention); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := UsageAggregateWithLedger(db, from, to, "model")
+		if err != nil {
+			t.Fatalf("retention=%s: UsageAggregateWithLedger: %v", retention, err)
+		}
+		sum := 0.0
+		for _, r := range rows {
+			sum += r.Cost
+		}
+		return sum, len(rows)
+	}
+
+	const want = 3.5 + 7.25 + 11.75
+	for _, retention := range []string{"0", "24", "6"} {
+		got, rows := readCost(retention, months[1], bjDay(0))
+		if rows == 0 {
+			t.Fatalf("retention=%s：中段缺分区的月份聚合返回空集（账本里有金额）", retention)
+		}
+		if diff := got - (7.25 + 11.75); diff > 0.0001 || diff < -0.0001 {
+			t.Fatalf("retention=%s：聚合 cost=%.4f，want %.4f（8 个月前走账本 7.25 + 6 个月前走明细 11.75）",
+				retention, got, 7.25+11.75)
+		}
+	}
+	// 全窗口（含 10 个月前）：三段来源相加，不漏不重。
+	got, _ := readCost("6", months[0], bjDay(0))
+	if diff := got - want; diff > 0.0001 || diff < -0.0001 {
+		t.Fatalf("全窗口聚合 cost=%.4f，want %.4f（账本 7.25 + 明细 3.5 + 11.75）", got, want)
+	}
+	// 分区仍在的月份必须仍以明细为事实源：账本里也有这三个月的行，若分段错把
+	// 明细月份划给账本，会与明细段重复计数（金额翻倍）。
+	if diff := got - want; diff > 0.0001 || diff < -0.0001 {
+		t.Fatalf("明细/账本分段重叠导致重复计数：cost=%.4f want %.4f", got, want)
+	}
+	t.Logf("retention=0/24/6 三档：中段缺分区月份聚合 = %.2f（仅账本口径），全窗口 = %.2f（三段相加）",
+		7.25+11.75, got)
+}
+
+// TestCleanupUsageRetentionCleansMonthsPastAGap 是 R4-C-8 的回归判据
+// （审计 2026-09-23，P3：回溯在第一个缺失月份 `break` ⇒ 更早分区**永久**不被清理）。
+//
+// 构造：保留期 3 个月 ⇒ cutoff = 今天-3 月；今天-4 月与今天-6 月各有分区，
+// 今天-5 月**没有**（零用量月：写路径惰性建分区，该月又没落进任何一次启动回填窗口）。
+// 旧实现在今天-5 月处 break ⇒ 今天-6 月（及更早）永远不被清理，函数返回 nil、无告警。
+//
+// 单调性判据（与 R4-C-4 同根因）：清理后，保留区间内**不允许**再存在任何早于
+// cutoff 的月分区 —— 这条断言对"洞"的布局天然成立，且不依赖实现细节。
+func TestCleanupUsageRetentionCleansMonthsPastAGap(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	db.Exec("TRUNCATE TABLE usage RESTART IDENTITY CASCADE")
+
+	base := BeijingMonth(time.Now())
+	m4 := base.AddDate(0, -4, 0)
+	m5 := base.AddDate(0, -5, 0)
+	m6 := base.AddDate(0, -6, 0)
+	for _, m := range []time.Time{m4, m6} {
+		if err := ensureUsagePartition(db, m); err != nil {
+			t.Fatalf("ensureUsagePartition(%s): %v", monthKey(m), err)
+		}
+		if err := ensureUsageDailyPartition(db, m); err != nil {
+			t.Fatalf("ensureUsageDailyPartition(%s): %v", monthKey(m), err)
+		}
+	}
+	// 造洞：摘掉今天-5 月的分区（若测试库预建过它）。
+	if rel := "usage_" + monthKey(m5); relationExists(t, db, rel) {
+		dropUsageMonthPartition(t, db, m5)
+	}
+	if relationExists(t, db, "usage_"+monthKey(m5)) {
+		t.Fatalf("前置条件不成立：%s 应为一个洞", monthKey(m5))
+	}
+
+	if err := SetSetting(db, RetentionMonthsSetting, "3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupUsageRetention(db); err != nil {
+		t.Fatalf("CleanupUsageRetention: %v", err)
+	}
+	cutoff := base.AddDate(0, -3, 0)
+	for _, m := range []time.Time{m4, m6} {
+		if relationExists(t, db, "usage_"+monthKey(m)) {
+			t.Fatalf("%s 的分区在保留期清理后仍然存在（洞 %s 让回溯提前停止）",
+				monthKey(m), monthKey(m5))
+		}
+	}
+	// 保留区间内不得残留任何早于 cutoff 的月分区（含测试库预建的历史月份）。
+	for _, rel := range usagePartitionRelations(t, db) {
+		if m, ok := usageMonthRelationOf(rel); ok && m.Before(cutoff) {
+			t.Fatalf("保留期清理后仍残留 %s（早于 cutoff %s）", rel, monthKey(cutoff))
+		}
+	}
+}
+
+// relationExists 报告 public 模式下是否存在该名字的关系（表/视图/分区都算）。
+func relationExists(t *testing.T, db *sql.DB, rel string) bool {
+	t.Helper()
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("probe relation %s: %v", rel, err)
+	}
+	return true
+}
+
+// usagePartitionRelations 返回当前挂在 usage 下的叶子月分区关系名（测试用）。
+func usagePartitionRelations(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	tables, err := scanUsageMonthTables(db)
+	if err != nil {
+		t.Fatalf("scanUsageMonthTables: %v", err)
+	}
+	return tables.Partitions
 }
