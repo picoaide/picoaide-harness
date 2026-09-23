@@ -165,12 +165,12 @@ export const SKILL_ENDPOINTS: Record<SkillAction, ChannelBuilders> = {
     market: (ref) => req('GET', `${skillMarket}/${seg(ref.name)}/file`),
     org: (ref) => orgVersioned(ref, (name, version) => `${skillOrg}/${name}/${version}/file`),
   },
-  // 归档下载(预览弹窗里「文件过大 → 下载归档」用得到):组织侧是版本级资源。
-  // **市场侧没有这个端点** —— router 只声明了 `POST /skills/:name/archive`(上传新版),
-  // 员工侧的下载在 `/api/client/v2/marketplace/skills/:name/archive`。属既有缺口
-  // (不在本次 P1 范围,预览弹窗仅在文件 >1MB 时才渲染该链接),由 spec 显式钉住。
+  // 归档下载(预览弹窗里「文件过大 → 下载归档」用得到):**两个渠道都有**。
+  // 市场是 name 级(`GET /skills/:name/archive`,2026-09-23 补齐 —— 此前该命名
+  // 空间只有 `POST …/archive`(上传新版),市场行点「下载归档」必 404);组织侧是
+  // 版本级资源(`GET /shared-skills/:name/:version/archive`)。
   archive: {
-    market: () => null,
+    market: (ref) => req('GET', `${skillMarket}/${seg(ref.name)}/archive`),
     org: (ref) => orgVersioned(ref, (name, version) => `${skillOrg}/${name}/${version}/archive`),
   },
   // 上下架:市场用动词表达(POST /enable 与 DELETE /:name),
@@ -223,12 +223,12 @@ export const AGENT_ENDPOINTS: Record<AgentAction, ChannelBuilders> = {
     market: (ref) => req('GET', `${agentMarket}/${seg(ref.name)}/file`),
     org: (ref) => orgVersioned(ref, (name, version) => `${agentOrg}/${name}/${version}/file`),
   },
-  // 市场智能体**没有**归档下载端点(router 只声明了 POST /agents/:name/archive
-  // = 上传新版);组织侧有 GET /agent-presets/:name/:version/archive。
-  // 已知缺口(不在本次范围):预览弹窗「文件过大 → 下载归档」在市场智能体上会 404,
-  // 由 spec 显式钉住(加路由即红,提示更新本表)。
+  // 市场智能体**有**归档下载端点(2026-09-23 补齐):路由
+  // `GET /agents/:name/archive`。此前该命名空间只有 `POST /agents/:name/archive`
+  // (上传新版)⇒ 预览弹窗「文件过大 → 下载归档」在市场智能体上必 404。
+  // 组织侧对应端点是版本级 `GET /agent-presets/:name/:version/archive`。
   archive: {
-    market: () => null,
+    market: (ref) => req('GET', `${agentMarket}/${seg(ref.name)}/archive`),
     org: (ref) => orgVersioned(ref, (name, version) => `${agentOrg}/${name}/${version}/archive`),
   },
   enable: {

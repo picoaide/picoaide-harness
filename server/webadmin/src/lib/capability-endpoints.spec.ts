@@ -319,28 +319,28 @@ describe('跨端对拍 · 每个动作按行 channel 选命名空间', () => {
       expect(skillRequest(action, orgSkill), `组织技能不应有 ${action} 端点`).toBeNull()
       expect(agentRequest(action, orgAgent), `组织智能体不应有 ${action} 端点`).toBeNull()
     }
-    // 市场智能体没有归档下载端点（router 只声明 POST /agents/:name/archive = 上传新版）。
-    // 这是**已知缺口**（预览弹窗「文件过大 → 下载归档」在市场智能体上会 404），
-    // 用断言钉住：服务端一旦补上该路由，本用例变红并提示更新动作表。
-    expect(agentRequest('archive', SAMPLE.agent.market)).toBeNull()
-    expect(hit(PROD_ROUTES, 'GET', `${CAPABILITY_ROOTS.agent.market}/ppt-gen/archive`)).toBe(false)
-    expect(hit(PROD_ROUTES, 'POST', `${CAPABILITY_ROOTS.agent.market}/ppt-gen/archive`)).toBe(true)
   })
 
-  it('市场渠道没有管理面归档下载端点（既有缺口，钉住形态，勿以此为由回落命名空间）', () => {
-    // 预览弹窗的「文件过大 → 下载归档」链接 = fileBase + '/archive'。市场两个命名空间
-    // 都**只声明了 POST …/archive（上传新版）**，GET 未声明 ⇒ 该链接在超大文件分支会
-    // 404。这是本次 P1 之外的既有缺口（现场证据里的 20 次 404 全在卡片按钮上），
-    // 本用例把它钉住：谁补了 GET 路由，这里变红并提示同步动作表；谁想"顺手"回落到
-    // 另一个命名空间，第 2/5 条会先红。
+  it('市场渠道的归档下载端点已补齐（2026-09-23：预览弹层「下载归档」不再 404）', () => {
+    // 现场缺陷：预览弹层的「文件过大 → 下载归档」链接 = 预览基路径 + `/archive`。
+    // 市场行的基路径是 `/api/server/admin/skills/:name`（技能）与 `/agents/:name`
+    // （智能体），而这两个命名空间此前**只声明了 `POST …/archive`（上传新版）** ⇒
+    // 市场行点下去 404（组织行走 `/shared-skills/:name/:version/archive` 正常）。
+    //
+    // 本用例钉住三件事（缺一条这条链接就重新变成死链）：
+    //  ① 动作表必须给出 GET（不是 null，更不是回落到另一个命名空间）；
+    //  ② 该 GET 必须命中生产路由表；
+    //  ③ 上传新版的 POST 仍在同一路径上（两条动作靠动词区分，谁也不许挤掉对方）。
     for (const [kind, sample] of [
       ['skill', SAMPLE.skill.market],
       ['agent', SAMPLE.agent.market],
     ] as const) {
       const built = kind === 'skill' ? skillRequest('archive', sample) : agentRequest('archive', sample)
-      expect(built, `市场${kind === 'skill' ? '技能' : '智能体'}不应有归档下载端点`).toBeNull()
+      expect(built, `市场${kind === 'skill' ? '技能' : '智能体'}必须有归档下载端点`).not.toBeNull()
+      expect(built!.method).toBe('GET')
       const root = CAPABILITY_ROOTS[kind].market
-      expect(hit(PROD_ROUTES, 'GET', `${root}/${sample.name}/archive`)).toBe(false)
+      expect(built!.url).toBe(`${root}/${sample.name}/archive`)
+      requireMatch(PROD_ROUTES, 'GET', built!.url, `市场 ${kind} 归档下载`)
       expect(hit(PROD_ROUTES, 'POST', `${root}/${sample.name}/archive`)).toBe(true)
     }
   })
@@ -398,9 +398,13 @@ describe('跨端对拍 · 对话框基路径', () => {
         const base = previewFileBase(kind, ref)
         expect(base, `${kind}(${channel}) 的文件基路径`).not.toBeNull()
         requireMatch(PROD_ROUTES, 'GET', `${base}${FILE_SUFFIXES.file}`, `单文件预览 ${kind}(${channel})`)
-        // 归档链接:市场渠道没有该端点(已知缺口,上一条用例已钉住),组织渠道必须命中。
+        // 归档链接 = 预览基路径 + `/archive`（ArchivePreviewDialog 里那一行
+        // `${fileBase}/archive`）。**两个渠道都必须命中**：2026-09-23 之前市场渠道
+        // 没有 GET 端点，超大文件分支点「下载归档」必 404 —— 这里不再有 `continue`
+        // 逃逸口（曾经的写法就是"市场没有就跳过"，等于把死链判据关掉）。
         const archive = kind === 'skill' ? skillRequest('archive', ref) : agentRequest('archive', ref)
-        if (archive === null) continue
+        expect(archive, `${kind}(${channel}) 缺少归档下载端点（预览弹层会出现死链）`).not.toBeNull()
+        expect(archive!.url).toBe(`${base}${FILE_SUFFIXES.archive}`)
         requireMatch(PROD_ROUTES, 'GET', `${base}${FILE_SUFFIXES.archive}`, `归档下载 ${kind}(${channel})`)
       }
     }

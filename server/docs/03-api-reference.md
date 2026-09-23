@@ -168,6 +168,13 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | GET/POST | `/api/server/admin/skills` | 列表/上架技能(`{name, description, author}`;内容经 `POST /skills/:name/archive` 上传,元数据以包内 SKILL.md 为准) |
 | PUT/DELETE | `/api/server/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
 | POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 zip)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
+| GET | `/api/server/admin/skills/:name/archive` | 管理员下载归档核查(原样二进制流:zip ⇒ `application/zip`,否则 `application/gzip`;附 `X-Skill-Checksum` / `X-Skill-Version`) |
+| GET | `/api/server/admin/agents/:name/archive` | 市场智能体的同名端点(当前 approved 版本;附 `X-Preset-Checksum` / `X-Preset-Version`) |
+
+> 最后两条 `GET …/:name/archive` 是 webadmin 归档预览弹层「文件过大 → 下载归档」的落点
+> (链接 = 预览基路径 + `/archive`,基路径按行的 channel 推导;组织行走
+> `/shared-skills/:name/:version/archive` 与 `/agent-presets/:name/:version/archive`)。
+> 2026-09-23 补齐前,市场命名空间只有 `POST …/archive`(上传新版),市场行点该链接必 404。
 
 ## 8. 共享 Agent(客户端用,Bearer,多版本)
 

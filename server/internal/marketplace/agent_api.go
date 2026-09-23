@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
@@ -308,6 +310,60 @@ func archEntryText(data []byte, target string) (string, error) {
 	return content, nil
 }
 
+// downloadAgentArchiveAdmin 管理面下载市场智能体的归档（2026-09-23，与技能侧
+// downloadSkillArchiveAdmin 同形、同权限、同响应契约）。
+//
+// 落点同上：webadmin 归档预览弹层「文件过大 → 下载归档」= 预览基路径 + `/archive`，
+// 市场智能体的基路径是 `/api/server/admin/agents/:name`，此前只声明了 POST（上传新版）
+// ⇒ 市场行 404。组织侧对应端点是 `/agent-presets/:name/:version/archive`。
+//
+// 取"当前展示版本"（最高 approved 且未软删）——与同命名空间的 preview/file 两面
+// 同一条解析（CurrentMarketReleaseFor），因此三面看到的永远是同一份内容。
+func downloadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	// 市场命名空间的渠道守卫：市场行 = apps.channel='market'（与 listAgentsAdmin 的
+	// 过滤同一判据）。技能侧的守卫来自 serverstore.GetSkill 自身；智能体侧的其它读取
+	// 面（preview/file）没有这一条，这里**不跟着漏** —— 否则组织的智能体会从市场
+	// 命名空间的 URL 下走归档，正是「按行 channel 选命名空间」要杜绝的越渠道形态。
+	a, err := serverstore.GetApp(db, serverstore.AppKindAgent, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if a.Channel != serverstore.AppChannelMarket {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+		return
+	}
+	r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, name, true)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if r == nil || len(r.Archive) == 0 {
+		// 尚未发布版本 / 归档缺失：与预览面同措辞的 JSON 404（不是空 body、不是 405）。
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体尚未发布版本")
+		return
+	}
+	// 按归档实际格式回响应（zip 推荐 / tar.gz 兼容），头名与组织侧
+	// agentshare.serveArchive 一致（X-Preset-*），客户端安装器靠它做对照。
+	dispName := name + "-" + r.Version + ".tar.gz"
+	contentType := "application/gzip"
+	if archiveutil.Format(r.Archive) == "zip" {
+		dispName = name + "-" + r.Version + ".zip"
+		contentType = "application/zip"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
+	c.Header("X-Preset-Version", r.Version)
+	c.Header("X-Preset-Checksum", r.Checksum)
+	_, _ = serverstore.IncrementAgentPresetDownload(db, name, r.Version)
+	c.Data(http.StatusOK, contentType, r.Archive)
+}
+
 // fileContentAgentAdmin 按路径返回归档内文件内容(与技能预览同语义)。
 func fileContentAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
@@ -335,7 +391,12 @@ func fileContentAgentAdmin(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if tooLarge {
-		c.JSON(http.StatusOK, gin.H{"size": size, "tooLarge": true})
+		// 键名是**跨端契约**：webadmin 的 FileContentData.too_large 读它，组织侧的
+		// `/agent-presets/:name/:version/file`（agentshare）与技能侧
+		// （fileContentSkillAdmin）产出的也是 `too_large`。这里曾写成驼峰 `tooLarge`
+		// ⇒ 市场智能体的超大文件**永不显示**「文件过大 → 下载归档」入口（三段里只有
+		// 这一段静默失效，两端各自"自证"都测不出来）。别改回驼峰。
+		c.JSON(http.StatusOK, gin.H{"size": size, "too_large": true})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"content": content, "size": size})

@@ -343,14 +343,20 @@ var sweepNonAPIRoutes = map[string]sweepExpect{
 // 这两族路由在扫描里逐条都是 JSON 401 —— 若不写清，读者会以为"扫描没覆盖到"。
 var sweepAuthGatedNonJSONSurfaces = map[string]string{
 	// application/gzip（archiveutil 打包的技能/智能体归档）
-	"GET /api/client/v2/skills/builtin/:name/archive":            "内置技能归档（application/gzip）",
-	"GET /api/client/v2/marketplace/skills/:name/archive":        "商城技能归档（application/gzip）",
-	"GET /api/client/v2/agent-presets/:name/archive":             "智能体预设归档（application/gzip）",
-	"GET /api/client/v2/agent-presets/:name/:version/archive":    "智能体预设指定版本归档（application/gzip）",
-	"GET /api/client/v2/shared-skills/:name/:version/archive":    "组织共享技能归档（application/gzip）",
-	"POST /api/server/admin/skills/:name/archive":                "管理端技能归档（application/gzip，重新打包）",
-	"GET /api/server/admin/skills/:name/file":                    "管理端技能单文件（原样字节）",
-	"GET /api/server/admin/agents/:name/file":                    "管理端智能体单文件（原样字节）",
+	"GET /api/client/v2/skills/builtin/:name/archive":         "内置技能归档（application/gzip）",
+	"GET /api/client/v2/marketplace/skills/:name/archive":     "商城技能归档（application/gzip）",
+	"GET /api/client/v2/agent-presets/:name/archive":          "智能体预设归档（application/gzip）",
+	"GET /api/client/v2/agent-presets/:name/:version/archive": "智能体预设指定版本归档（application/gzip）",
+	"GET /api/client/v2/shared-skills/:name/:version/archive": "组织共享技能归档（application/gzip）",
+	"POST /api/server/admin/skills/:name/archive":             "管理端技能归档（application/gzip，重新打包）",
+	"GET /api/server/admin/skills/:name/file":                 "管理端技能单文件（原样字节）",
+	"GET /api/server/admin/agents/:name/file":                 "管理端智能体单文件（原样字节）",
+	// 2026-09-23：归档预览弹层「文件过大 → 下载归档」的落点（链接 = 预览基路径
+	// + /archive）。市场命名空间此前只有 POST …/archive（上传新版）⇒ 市场行点下去
+	// 404；组织行一直有（下面 shared-skills / agent-presets 那几条）。
+	// 正向举证在 admin_archive_evidence_test.go（带真管理会话断言原样 zip 字节）。
+	"GET /api/server/admin/skills/:name/archive":                 "管理端市场技能归档（application/gzip；zip 归档时为 application/zip 原样字节）",
+	"GET /api/server/admin/agents/:name/archive":                 "管理端市场智能体归档（application/gzip；zip 归档时为 application/zip 原样字节）",
 	"GET /api/server/admin/agent-presets/:name/archive":          "管理端预设归档（application/gzip）",
 	"GET /api/server/admin/agent-presets/:name/:version/archive": "管理端预设指定版本归档（application/gzip）",
 	"GET /api/server/admin/agent-presets/:name/:version/file":    "管理端预设单文件（原样字节）",
