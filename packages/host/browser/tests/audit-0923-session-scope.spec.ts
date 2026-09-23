@@ -29,7 +29,19 @@ import {
 import type { ElectronAdapter, NativeBounds, NativeSession, NativeView } from '../src/electron-adapter.ts'
 import type { CdpTransport } from '../src/cdp.ts'
 
-const PREV_URL = 'https://prev-account.example/secret-page'
+const PREV_HOST = 'prev-account.example'
+const PREV_URL = `https://${PREV_HOST}/secret-page`
+
+/** op 摘要里出现的 URL 主机名（解析后取 hostname，不做 URL 子串匹配）。 */
+function hostsInSummary(summary: string): string[] {
+  return [...summary.matchAll(/https?:\/\/[^\s"'<>)\]]+/gu)].map((match) => {
+    try {
+      return new URL(match[0]).hostname
+    } catch {
+      return match[0]
+    }
+  })
+}
 
 class MockTransport implements CdpTransport {
   attached = false
@@ -205,7 +217,8 @@ describe('BR-1 换号期间在飞的导航不得落进新账号（2026-09-23 审
     expect(h.store.queryHistory({}).map((entry) => entry.url)).not.toContain(PREV_URL)
     expect(storeNext.queryHistory({}).map((entry) => entry.url)).not.toContain(PREV_URL)
     const ops = (h.runtime as unknown as { ops: Array<{ tool: string, summary: string }> }).ops
-    expect(ops.some((op) => op.summary.includes(PREV_URL))).toBe(false)
+    // 新账号的 op log 里不得出现**旧账号主机名**（按解析后的 hostname 判，不看子串）。
+    expect(ops.flatMap((op) => hostsInSummary(op.summary))).not.toContain(PREV_HOST)
     // 结果本身必须是**明确的**中断错误，而不是"看起来成功了"或一个内部串。
     expect(outcome).toBeInstanceOf(Error)
     expect((outcome as { code?: string }).code).toBe('interrupted')

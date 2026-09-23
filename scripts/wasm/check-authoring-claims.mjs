@@ -396,7 +396,14 @@ for (const rel of SCAN_DIR_ROOTS) {
   let matched = 0
   const rootEntries = readdirSync(ROOT, { withFileTypes: true })
   for (const glob of SCAN_ROOT_GLOBS) {
-    const regex = new RegExp(`^${glob.replace(/[.]/gu, '\\.').replace(/[*]/gu, '.*')}$`, 'u')
+    // 逐段转义后再把 `*` 展开成 `.*`：旧写法只转义 `.`（`[.]`），反斜杠与 `+?()[]{}|^$`
+    // 都会原样进正则 —— 一旦根通配里出现这些字符，判据会**静默变成另一个模式**
+    // （CodeQL js/incomplete-sanitization 报的正是这条；此处按段转义从构造上消除）。
+    const pattern = String(glob)
+      .split('*')
+      .map(segment => segment.replace(/[.*+?^${}()|[\]\\]/gu, character => `\\${character}`))
+      .join('.*')
+    const regex = new RegExp(`^${pattern}$`, 'u')
     for (const entry of rootEntries) {
       if (!entry.isFile() || !regex.test(entry.name)) continue
       matched += 1
