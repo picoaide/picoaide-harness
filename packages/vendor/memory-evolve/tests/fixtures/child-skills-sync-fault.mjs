@@ -43,9 +43,20 @@ const destDir = join(userSkills, NAME)
 // 换入临时目录的残留（S13-3 复核，2026-09-17）：`.staging-*` = 未就位的新副本，
 // `.old-*` = 未删掉的旧副本。连同各自 SKILL.md 正文一起报出来，父进程才能断言
 // "内容还在盘上（可人工恢复）"，而不是只看目录名。
-const leftovers = existsSync(userSkills)
-  ? readdirSync(userSkills).filter((name) => name.includes('.staging-') || name.includes('.old-'))
-  : []
+// R4-B-2（2026-09-23 第四轮）：落点从技能库根改到**第二层**私有目录
+// `.skill-tmp/`（运行时只认直接子目录），所以两处都要扫：只扫根会把"残留藏在
+// 私有目录里"当成"没有残留"。返回的 key 以 `.skill-tmp/` 前缀区分落点。
+const swapLeftovers = () => {
+  const root = existsSync(userSkills)
+    ? readdirSync(userSkills).filter((name) => name.includes('.staging-') || name.includes('.old-'))
+    : []
+  const tempDir = join(userSkills, '.skill-tmp')
+  const temp = existsSync(tempDir)
+    ? readdirSync(tempDir).filter((name) => name.includes('.staging-') || name.includes('.old-')).map((name) => `.skill-tmp/${name}`)
+    : []
+  return [...root, ...temp]
+}
+const leftovers = swapLeftovers()
 console.log(JSON.stringify({
   entry: results.find((r) => r.name === NAME),
   destExists: existsSync(destDir),

@@ -48,13 +48,24 @@ writeFileSync(join(userSkills, NAME, 'notes.md'), 'USER DATA\n')
 const results = syncBuiltinSkills(pluginSkills, userSkills)
 const dest = join(userSkills, NAME)
 const readIf = (path) => (existsSync(path) ? readFileSync(path, 'utf8') : null)
+// 换入临时副本的残留：新落点是技能库**第二层**私有目录 `.skill-tmp/`（R4-B-2），
+// 旧落点是技能库根（升级前写下的形态）。两处都要报 —— 只扫根会把"新布局把残留
+// 藏进私有目录"读成"没有残留"（假绿）。
+const swapLeftovers = () => {
+  const root = existsSync(userSkills)
+    ? readdirSync(userSkills).filter((n) => n.includes('.staging-') || n.includes('.old-'))
+    : []
+  const tempDir = join(userSkills, '.skill-tmp')
+  const temp = existsSync(tempDir)
+    ? readdirSync(tempDir).filter((n) => n.includes('.staging-') || n.includes('.old-')).map((n) => `.skill-tmp/${n}`)
+    : []
+  return [...root, ...temp]
+}
 
 console.log(JSON.stringify({
   entry: results.find((r) => r.name === NAME),
   destSkill: readIf(join(dest, 'SKILL.md')),
   provenance: readIf(join(dest, '.picoaide', 'release.json')),
   installVersion: readIf(join(dest, '.install-version')),
-  leftovers: existsSync(userSkills)
-    ? readdirSync(userSkills).filter((n) => n.includes('.staging-') || n.includes('.old-'))
-    : [],
+  leftovers: swapLeftovers(),
 }))

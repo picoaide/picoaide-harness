@@ -34,24 +34,63 @@ import { basename, join } from 'node:path'
 import { isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
 
 /**
- * 换入过程中的两个临时目录名（都与目标同父目录，同一文件系统才能 rename）：
+ * 换入过程中的两个临时目录名：
  *   - `.staging-<name>-<pid>-<ts>`：新内容先全部写这里，写完整体换入；
  *   - `.old-<name>-<pid>-<ts>`：旧目录先原子改名到这里"旁置"，换入成功后再删。
  * 两个名字都带 pid/时间戳：既是并发同步的隔离（互不覆盖），也是崩溃残留的
  * 清扫判据（见 {@link sweepStaleSwapDirs}）。
  *
- * ⚠️ **前导点（A16 修复，2026-09-23 独立审计）**：这两个目录此前是
- * `<name>.staging-<pid>-<ts>`（无前导点，形如 `memory-consolidate.staging-…`）。
- * 那个名字**命中**客户端的 `SKILL_NAME_PATTERN`（`^[a-z0-9][a-z0-9._-]{0,63}$`）
- * 且内部有完整 SKILL.md ⇒ 换入被 SIGKILL 打断的窗口期内，能力中心的
- * `listInstalledSkills` 会把它报成"一个已安装技能"、上游发现器也会加载它
- * （同名重复候选），直到下次启动清扫。前导点让它在两条路径上同时消失
- * （客户端与上游的名字规则都要求首字符是 [a-z0-9]）。
- * 旧命名仍被 {@link parseSwapDirName} 解析：升级后盘上可能还留着旧版本写下的
- * 残留，不认它们就等于让这些幽灵目录永久占位。
+ * ⚠️ **落点 = 技能库的第二层私有目录 `<skills>/.skill-tmp/`（R4-B-2 修复，
+ * 2026-09-23 第四轮独立审计）**。这两个目录此前直接建在技能库**根**上
+ * （先是 `<name>.staging-<pid>-<ts>`，A16 改成前导点形态
+ * `.staging-<name>-<pid>-<ts>`）。
+ *
+ * A16 的前提"上游发现器看不见点号目录"**与 pinned 上游不符**：
+ * `deepseek-harness/packages/skill/skill-filesystem/src/index.ts` 的 `discoverRoot`
+ * 遍历技能库的**全部直接子目录**、只跳过 `skipSystem && name === '.system'`，
+ * 技能名取自 frontmatter（`isSkillName`）—— 它与**目录名**无关；同文件按
+ * `entries.sort((a, b) => a.name.localeCompare(b.name))` 排序，`skill/src` 的
+ * `compareIndexedCandidates` 对同名候选是"先到先得"，而
+ * `'.staging-x'.localeCompare('x') < 0` ⇒ 前导点形态排在真目录**之前**、
+ * **赢下注册表**（交付态实测：旧命名 REAL / 新命名 GHOST）；随后同一轮同步删掉
+ * 临时目录，本次会话里那个技能的 `path` / `resourceBase` 就指向不存在的目录。
+ *
+ * 真契约是**只有技能库的直接子目录会被发现**（层数，不是目录名）⇒ 把临时副本
+ * 放进第二层即可结构上不可见 —— 与安装器的 `.skill-tmp/install-*` 同形。
+ * 判据在 `packages/host/enterprise/tests/skill-staging-invisibility.spec.ts`：
+ * **真跑 pinned 上游** `SkillRegistry` + `SkillFileSystem`，并保留"根上就是幽灵"
+ * 的反向对照（上游一旦改成递归发现，那条对照即红）。
+ *
+ * 旧命名（无前导点的 `<name>.staging-…`）与 A16 的根上形态（`.staging-…`）
+ * 仍被 {@link parseSwapDirName} 解析并由 {@link sweepStaleSwapDirs} 清扫：
+ * 升级后盘上可能还留着旧版本写下的残留，不认它们就等于让这些幽灵目录永久占位。
  */
 const STAGING_INFIX = '.staging-'
 const ASIDE_INFIX = '.old-'
+
+/**
+ * 换入临时区的私有目录名（**跨包契约**，与 enterprise `skill-install.ts` 的
+ * `SKILL_TEMP_DIR` 同值；由 `tests/skill-channel-parity.spec.ts` 读源码对拍）。
+ *
+ * 为什么必须与安装器同值、又各自用自己的前缀：两边都要把"未就位的副本"藏在
+ * 技能库第二层（运行时只认直接子目录）；而安装器的清扫只删自己的 `install-*`、
+ * 本插件的清扫只删自己的 `<infix><name>-<pid>-<ts>` ⇒ 互不误删对方正在用的副本。
+ */
+const SKILL_TEMP_DIR = '.skill-tmp'
+
+/**
+ * "用户显式卸载随包技能"的墓碑目录（**跨包契约**，与 enterprise `skill-install.ts`
+ * 的 `SKILL_REMOVED_DIR` 同值；读对方源码对拍）。
+ *
+ * 背景（R4-B-4，第四轮独立审计）：能力中心对 `channel === 'plugin'` 的本地行给了
+ * 「卸载」入口，而卸载只是纯本地删目录 —— 下次开机本同步看到落点不存在，就走
+ * "首次安装"路径原样装回（用户视角：卸载后重启技能又回来了，全程零提示）。墓碑
+ * 是"用户已明确移除"的**持久终态**：`<skills>/.skill-removed/<name>.json`。
+ *
+ * 落点与既有的安装器私有区同源（技能库根下的点号私有目录，读写都不进技能发现
+ * 与能力中心列表），与 `.skill-locks` / `.skill-tmp` / `.picoaide` 同类。
+ */
+const SKILL_REMOVED_DIR = '.skill-removed'
 
 /**
  * 安装器写在技能目录里的**非技能内容**（A9 修复，2026-09-23 独立审计）：
@@ -150,11 +189,16 @@ const STORE_CHANNELS = ['market', 'org', 'builtin', PLUGIN_CHANNEL]
  *     正在装/卸同名技能，或另一次同步在跑），或锁落点被符号链接占位 ⇒ 本轮**不碰
  *     这个落点**。宁可少同步一轮，也不与安装器并发换入（复审 r3 F3：并发终态是
  *     "内容是插件版 + 溯源是市场版"，且此后永久 `SKILL_CHANNEL_CONFLICT`、不会自愈）。
+ *   - {@link SKILL_USER_REMOVED}：用户**显式卸载过**这个随包技能（技能库里有墓碑，
+ *     见 {@link SKILL_REMOVED_DIR}）⇒ 本轮 `action: 'skipped'`、不落盘。这是用户
+ *     意图的持久终态，不是失败：**唯一**的解除方式是用户重新安装该技能（安装器会
+ *     在成功安装后清掉墓碑），或手工删除墓碑文件。
  */
 const SKILL_LOCAL_CONTENT = 'SKILL_LOCAL_CONTENT'
 const SKILL_CHANNEL_CONFLICT = 'SKILL_CHANNEL_CONFLICT'
 const SKILL_ADOPT_FAILED = 'SKILL_ADOPT_FAILED'
 const SKILL_LOCKED = 'SKILL_LOCKED'
+const SKILL_USER_REMOVED = 'SKILL_USER_REMOVED'
 
 /**
  * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
@@ -245,7 +289,7 @@ function skillVersion(text) {
  *
  * @param {string} file - 文件绝对路径。
  * @param {number} maxBytes - 体积上限。
- * @returns {{status:'ok', text:string}|{status:'absent'}|{status:'unreadable'}}
+ * @returns {{status:'ok', text:string, bytes:Buffer}|{status:'absent'}|{status:'unreadable'}}
  */
 function readSmallRegularFile(file, maxBytes) {
   let stat
@@ -261,7 +305,10 @@ function readSmallRegularFile(file, maxBytes) {
     fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     const opened = fstatSync(fd)
     if (!opened.isFile() || opened.size > maxBytes) return { status: 'unreadable' }
-    return { status: 'ok', text: readFileSync(fd, 'utf8') }
+    // 一次读成 Buffer、再解出文本：`bytes` 供"回滚时逐字节还原"用（R4-B-1），
+    // 二次读同一 fd 既慢又可能读到被截断的中间态。
+    const bytes = readFileSync(fd)
+    return { status: 'ok', text: bytes.toString('utf8'), bytes }
   } catch {
     return { status: 'unreadable' }
   } finally {
@@ -626,12 +673,50 @@ function acquireSkillDirLock(userSkillsDir, name) {
 }
 
 /**
+ * 读"用户显式卸载过这个随包技能"的墓碑（R4-B-4 修复，第四轮独立审计）。
+ *
+ * 落点 `<userSkillsDir>/.skill-removed/<name>.json`（见 {@link SKILL_REMOVED_DIR}），
+ * 由能力中心的卸载链路在**删除随包技能成功之后**写（enterprise
+ * `skill-install.ts` 的 `uninstallSkill`）。这里只**读**：同步侧绝不创建、也绝不
+ * 删除墓碑 —— 解除用户的选择只有两条路（用户重新安装该技能 / 手工删墓碑文件），
+ * 都不能由开机同步在背后替他决定。
+ *
+ * 判据（三个条件同时成立才算墓碑）：文件可读 + 是 JSON 对象 + `appId` 等于技能名
+ * 且 `channel === 'plugin'`。**读不出/JSON 坏/appId 不符/渠道不是 plugin 一律按
+ * "没有墓碑"处理**（fail-open，回到升级前的行为：装回去），而不是按"有墓碑"处理 ——
+ * 反过来会让一个坏文件永久停掉内置技能同步，且用户完全看不出原因。读取本身复用
+ * {@link readSmallRegularFile} 的类型/体积闸门（FIFO 不会把开机同步挂住）。
+ *
+ * @param {string} userSkillsDir - 用户技能库目录。
+ * @param {string} name - 技能名。
+ * @returns {object|null} 解析出的墓碑对象；不算墓碑时 null。
+ */
+function readSkillTombstone(userSkillsDir, name) {
+  const read = readSmallRegularFile(join(userSkillsDir, SKILL_REMOVED_DIR, `${name}.json`), MARKER_MAX_BYTES)
+  if (read.status !== 'ok') return null
+  let parsed
+  try {
+    parsed = JSON.parse(read.text)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object') return null
+  if (parsed.appId !== name || parsed.channel !== PLUGIN_CHANNEL) return null
+  return parsed
+}
+
+/**
  * 同步内置技能到用户技能库。
  * 覆盖策略（保护用户内容）：目标缺失 → 复制；目标存在且溯源渠道就是 `plugin`、
  * 且 x-version 更低 → 整目录覆盖（插件升级，SKILL.md 与 scripts/ 等辅助文件一起
  * 更新）；版本一致 → 不动；**目标是用户自制内容或另一条商店渠道的同名技能 →
  * 拒收**（`refused`，见 {@link classifySyncTarget}）；目标没有任何溯源但内容与
  * 随包技能**逐字相同** → 采纳（补写溯源后报 `adopted`）。
+ *
+ * 逐技能三道闸门、**顺序不可换**：①墓碑（用户显式卸载过 ⇒ `skipped`，
+ * {@link readSkillTombstone}）；②来源（目标存在时按 {@link classifySyncTarget} 判定，
+ * 另有内容同一性采纳的兼容路径）；③版本（`x-version` 更高才整树换入）。每条出口都在
+ * per-name 锁之内，互斥对象是能力中心的安装器（同一把锁、同一落点）。
  *
  * 落点（NF-1，2026-09-13 审计加固；2026-09-16 与上游整目录语义合流）：
  * `<userSkillsDir>/<name>` 是本插件**自有内容**的固定落点，必须先过断言——
@@ -655,13 +740,20 @@ function acquireSkillDirLock(userSkillsDir, name) {
  * 此后走正常更新路径。这是给"旧版插件同步落下、还没写溯源"的目录的一次性兼容；
  * 同一性不成立（多/少文件、任何字节差异、符号链接、读失败）一律照旧 `refused`。
  *
+ * **墓碑闸门（R4-B-4 修复，第四轮独立审计）**：技能库里有该技能的墓碑
+ * （{@link SKILL_REMOVED_DIR}）⇒ 本轮**一行都不写**、如实记
+ * `skipped` + `SKILL_USER_REMOVED`（见 {@link readSkillTombstone}）。
+ *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
  * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
- * @returns {Array<{name:string, action:'synced'|'unchanged'|'adopted'|'missing'|'refused', message?:string, code?:string}>}
+ * @returns {Array<{name:string, action:'synced'|'unchanged'|'adopted'|'missing'|'refused'|'skipped', message?:string, code?:string}>}
  *   `adopted` = 内容与随包技能逐字相同、本次只补写了溯源（未换入）。
+ *   `skipped` = 用户**显式卸载过**这个技能（技能库里有墓碑）⇒ 本轮刻意不落盘，
+ *   见 {@link SKILL_REMOVED_DIR}；它不是失败，是用户的持久选择。
  *   `code` 只在可区分的失败上出现：换入+回滚双失败的
  *   `SKILL_SWAP_RECOVERY_FAILED`（见 {@link SkillSwapRecoveryError}），以及来源闸门
- *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT` / `SKILL_ADOPT_FAILED`。
+ *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT` / `SKILL_ADOPT_FAILED`
+ *   与墓碑的 `SKILL_USER_REMOVED`。
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
@@ -700,6 +792,16 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
       let code
       /** 本次是否走了"内容同一性采纳"（决定 unchanged 是否报成 adopted）。 */
       let adopted = false
+      // 墓碑闸门（R4-B-4，第四轮独立审计）：用户显式卸载过这个随包技能 ⇒ 本轮
+      // 一行都不写。必须放在**最前**（先于"目标是否存在"与来源判定）：卸载之后
+      // 落点正是**不存在**的，而那恰恰是"首次安装"的形态 —— 不认墓碑就会原样装回。
+      if (readSkillTombstone(userSkillsDir, name) !== null) {
+        const reason = `${name} 被用户显式卸载过（技能库里有墓碑 ${join(userSkillsDir, SKILL_REMOVED_DIR, `${name}.json`)}）—— 尊重该选择，`
+          + '本次不落盘。重新安装该技能（能力中心/上传同名技能）或删除墓碑文件即可恢复同步。'
+        console.log(`[dsh-memory-evolve] 内置技能 ${name} 跳过（${SKILL_USER_REMOVED}）：${reason}`)
+        results.push({ name, action: 'skipped', message: reason, code: SKILL_USER_REMOVED })
+        continue
+      }
       // 来源闸门（P1-1/P1-2）：目标目录存在时，**先**判定它是不是本插件自己的
       // （渠道 = plugin）。用户自制内容与其它商店渠道的同名技能都拒收；这一判定
       // 与 x-version 无关 —— 版本相同也照样如实报 refused，否则"本机是别的东西"
@@ -823,9 +925,10 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
  * 或写一半，而调用方只记 refused——与本函数"不静默半写"的承诺相反（v2.7.4 的
  * 单文件原子写在失败时保留旧文件，属回归）。
  *
- * **换入是三步可恢复的（S13-3 复核，2026-09-17）**：
- *   1) `rename(old → .old-<name>-<pid>-<ts>)` 把旧目录原子旁置（不再先 rm）；
- *   2) `rename(.staging-<name>-<pid>-<ts> → dest)` 让新内容就位；
+ * **换入是三步可恢复的（S13-3 复核，2026-09-17）**（临时副本一律在
+ * `<skills>/.skill-tmp/` 这一层，见 {@link STAGING_INFIX}）：
+ *   1) `rename(old → .skill-tmp/.old-<name>-<pid>-<ts>)` 把旧目录原子旁置（不再先 rm）；
+ *   2) `rename(.skill-tmp/.staging-<name>-<pid>-<ts> → dest)` 让新内容就位；
  *   3) 删除旁置副本（尽力而为，删不掉留给下次同步清扫）。
  * 因此失败面只有两种，且都不丢内容：
  *   - 第 2 步失败 → 先把旁置副本改回原处再抛原始错误（旧技能原封不动，暂存副本
@@ -861,14 +964,27 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
   // 却没了）。本地 NF-1 的口径是 fail-loud：不动那个链接、如实报 refused。
   const planted = findSymlinkEntry(destDir)
   if (planted !== null) throw writeTargetRefusedError(join(destDir, planted))
-  // 暂存目录与目标同父目录（同一文件系统，rename 才能原子换入）；落点仍在
-  // 技能库根之下，逐文件断言（anchorDir）照旧生效。名字**以点开头**（A16）：
-  // 窗口期内既不被能力中心当成"已安装技能"，也不被上游发现器加载。
+  // 暂存目录建在技能库的**第二层**私有目录里（R4-B-2）：与目标同一文件系统
+  // （rename 才能原子换入），而运行时只说"技能库的直接子目录才是技能" ⇒ 第二层
+  // 结构上不可能被发现（对照：根上不论叫什么名字都会被 discoverRoot 按 frontmatter
+  // 的名字索引，见 {@link STAGING_INFIX} 的头注释）。落点仍在技能库根之下，
+  // 逐文件断言（anchorDir）照旧生效。
   const stamp = `${process.pid}-${Date.now()}`
-  const stagingDir = join(anchorDir, `${STAGING_INFIX}${name}-${stamp}`)
+  const stagingDir = join(anchorDir, SKILL_TEMP_DIR, `${STAGING_INFIX}${name}-${stamp}`)
   let asideDir = null
   /** 从旧目录搬进暂存目录的安装器标记（回滚时要搬回去）。 */
   let stashedMarkers = []
+  /**
+   * 换入前对"我们可能改写其内容"的标记文件做的**原样快照**（R4-B-1 的回滚保真）。
+   *
+   * 为什么必须有：R4-B-1 让本插件把自己写的那份 `release.json` / `.install-version`
+   * 按新 `x-version` 覆写（搬进暂存目录之后写），若换入失败再把它们搬回旧目录，
+   * 旧内容就会配上一个**属于新版本**的版本号（界面与遥测都会读错）。快照在
+   * {@link stashInstallerMarkers} **之前**取（那时文件还在旧目录里），回滚后逐字节
+   * 写回。只还原、**绝不删除**：快照里缺席的文件在回滚时不动作 —— 那个窗口里
+   * 别的写者新建的东西不属于我们，不能被"还原"顺手删掉。
+   */
+  let markerSnapshot = null
   try {
     mkdirSync(stagingDir, { recursive: true })
     const srcText = readFileSync(join(srcDir, 'SKILL.md'), 'utf8')
@@ -880,6 +996,7 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
     // provenance 时再补一份本插件自己的（channel: 'plugin'），使能力中心不会把
     // 随包装上的技能当成"用户自制"。两步都在换入之前完成，所以没有"换入成功但
     // 溯源丢了"的中间态。
+    markerSnapshot = snapshotInstallerMarkers(destDir)
     stashedMarkers = stashInstallerMarkers(destDir, stagingDir)
     writePluginProvenance(stagingDir, name, skillVersion(srcText), anchorDir)
     // F3 纵深防御（独立复审 r3）：即将换入的这棵树**必须**带着我们自己的溯源。
@@ -898,7 +1015,7 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
     }
     // 1) 旧目录旁置（原子；不再有"rm 之后 rename 失败 ⇒ 技能消失"的窗口）
     if (hadDest) {
-      asideDir = join(anchorDir, `${ASIDE_INFIX}${name}-${stamp}`)
+      asideDir = join(anchorDir, SKILL_TEMP_DIR, `${ASIDE_INFIX}${name}-${stamp}`)
       renameSync(destDir, asideDir)
     }
     // 2) 新内容就位；失败先把旧目录改回来（回滚再失败 → 抛可恢复错误）
@@ -921,7 +1038,11 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
     // 回滚成功（或目标一直都在）时，把搬进暂存目录的安装器标记原样搬回目标目录——
     // 清理暂存副本不能顺手带走用户的溯源。目标缺失（SkillSwapRecoveryError 那一路）
     // 时两份副本刻意保留，标记随暂存副本一起留在盘上，可人工恢复。
-    if (existsSync(destDir)) restoreInstallerMarkers(destDir, stagingDir, stashedMarkers)
+    if (existsSync(destDir)) {
+      restoreInstallerMarkers(destDir, stagingDir, stashedMarkers)
+      // R4-B-1：搬回来的可能已被我们按新 x-version 改写 ⇒ 用换入前的字节还原。
+      restoreInstallerMarkerBytes(destDir, markerSnapshot, anchorDir)
+    }
     // 只有"目标目录仍然在盘上（旧内容在位 / 回滚成功 / 新内容已就位）"或
     // "本来就没有旧目录"时才删暂存副本；目标缺失时暂存目录是这份内容的唯一
     // 完整副本，必须保留并在错误里点名（S13-3 复核：否则技能将凭空消失）。
@@ -973,7 +1094,48 @@ function restoreInstallerMarkers(destDir, stagingDir, moved) {
 }
 
 /**
- * 补齐本插件自己的来源溯源（A9 修复，2026-09-23）。
+ * 换入前对安装器标记里**可能被本插件改写**的那两个文件取原样快照（R4-B-1）。
+ *
+ * 只在文件确实是"小普通文件"时留下字节（复用 {@link readSmallRegularFile} 的
+ * FIFO/体积闸门：宁可没有快照，也不把 FIFO 读成阻塞源）；其余形态一律记为"无快照"。
+ *
+ * @param {string} destDir - 技能库内的旧技能目录。
+ * @returns {Map<string, Buffer>} 相对路径 → 换入前的字节（读不出的条目不进表）。
+ */
+function snapshotInstallerMarkers(destDir) {
+  const snapshot = new Map()
+  for (const rel of [join(PROVENANCE_DIR, PROVENANCE_FILE), '.install-version']) {
+    const read = readSmallRegularFile(join(destDir, rel), MARKER_MAX_BYTES)
+    if (read.status === 'ok') snapshot.set(rel, read.bytes)
+  }
+  return snapshot
+}
+
+/**
+ * 回滚后把快照里的标记逐字节写回（R4-B-1 的回滚保真）。
+ *
+ * 只写快照里**有字节**的条目；快照缺席的一律不动作（绝不"还原"成一个删除 ——
+ * 那个窗口里别的写者新建的文件不属于我们）。写失败只忽略：回滚路径的首要目标是
+ * 让旧内容在位，标记的最坏情况是被下一次安装/同步修正。
+ *
+ * 落点用 {@link writeFileAtomicSafeAt}（与换入路径同一个自锚定写原语）：
+ * 回滚后的目录里可能被预置了符号链接，裸 `writeFileSync` 会写穿到库外
+ * （仓库的结构哨兵 `coi-skill-landing-unasserted-write.test.js` 会直接报红）。
+ *
+ * @param {string} destDir - 已复原的技能目录。
+ * @param {Map<string, Buffer>|null} snapshot - {@link snapshotInstallerMarkers} 的返回值。
+ * @param {string} anchorDir - 技能库根（落点断言的基准）。
+ * @returns {void}
+ */
+function restoreInstallerMarkerBytes(destDir, snapshot, anchorDir) {
+  if (snapshot === null) return
+  for (const [rel, bytes] of snapshot) {
+    try { writeFileAtomicSafeAt(join(destDir, rel), bytes, { anchorDir }) } catch { /* 尽力 */ }
+  }
+}
+
+/**
+ * 补齐/刷新本插件自己的来源溯源（A9 + R4-B-1 修复，2026-09-23）。
  *
  * 目标没有 `.picoaide/release.json` 时写一份 `channel: 'plugin'` 的：
  * 字段与 enterprise 安装器 `writeProvenance` 一致（`appId` / `version` /
@@ -981,8 +1143,24 @@ function restoreInstallerMarkers(destDir, stagingDir, moved) {
  * `archiveChecksum` 刻意不写：它必须与企业侧 `computeSkillContentHash`
  * 逐字节同源，而跨包 import 禁止，第二份实现算错反而会让「是否被本地修改」
  * 的判据出错——宁缺勿错。
- * `.install-version` 只在缺失时补写（有版本才写，与安装器同口径），
- * 已有的一律原样保留（安装器/旧版本写下的记录优先）。
+ *
+ * **R4-B-1（P3，第四轮独立审计）：随包升版后，我们自己写的那份溯源必须跟着换。**
+ * `stashInstallerMarkers` 会把旧目录的 `.picoaide/` 与 `.install-version` 搬进新内容
+ * （A9），而旧实现的"只在缺失时写"因此对它们全部跳过 ⇒ 整树换入新内容（frontmatter
+ * `x-version: 1 → 2`）之后，盘上的 `release.json.version` 与 `.install-version` 仍是
+ * **旧值 1**。消费端把它当权威：能力中心显示 `prov.version`、技能调用遥测直接上报
+ * `.install-version`（`enterprise/src/auth-gate.ts` / `skill-telemetry.ts`）⇒ 界面与
+ * 遥测的版本号与内容不符。判据：升版后再同步一次，两个文件都必须等于新 `x-version`。
+ *
+ * 只重写**自己写的**那一份（`channel === 'plugin'` 且 `appId` 相符）：
+ *   - 别的渠道的标记（market / org / builtin）**一个字都不动** —— 它随后会被
+ *     `syncSkillDirSafe` 的换入前复检（stagedChannel !== plugin）拦下并原样搬回，
+ *     绝不把别人的归属改写成 plugin；
+ *   - 标记可读但不是我们写的那一份（JSON 坏 / appId 不符 / 渠道未知）同样不动；
+ *   - 已有标记的其它字段（`server` / `archiveChecksum` / `installedAt` 等）原样保留，
+ *     只把 `version` 推进到新值 —— 少写字段会让下游判据静默退化。
+ * `x-version` 缺失（`version === ''`）时**不写**：没有新版本可推进，留旧值比写空串诚实。
+ * `.install-version` 与 `release.json` 同进同退（我们自己那一份的两处记录必须一致）。
  *
  * @param {string} stagingDir - 暂存目录（换入前）。
  * @param {string} name - 技能名。
@@ -996,9 +1174,18 @@ function writePluginProvenance(stagingDir, name, xVersion, anchorDir) {
   const releaseFile = join(stagingDir, PROVENANCE_DIR, PROVENANCE_FILE)
   const versionFile = join(stagingDir, '.install-version')
   const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString() }
+  const own = readOwnPluginProvenance(stagingDir, name)
   const plan = []
-  if (!existsSync(releaseFile)) plan.push([releaseFile, `${JSON.stringify(info, null, 2)}\n`])
-  if (version !== '' && !existsSync(versionFile)) plan.push([versionFile, version])
+  if (own !== null) {
+    // 我们自己先前写下的那一份：按新 x-version 覆写（保留其它字段）。
+    if (version !== '') {
+      plan.push([releaseFile, `${JSON.stringify({ ...own, version }, null, 2)}\n`])
+      plan.push([versionFile, version])
+    }
+  } else {
+    if (!existsSync(releaseFile)) plan.push([releaseFile, `${JSON.stringify(info, null, 2)}\n`])
+    if (version !== '' && !existsSync(versionFile)) plan.push([versionFile, version])
+  }
   const written = []
   try {
     for (const [file, data] of plan) {
@@ -1010,6 +1197,32 @@ function writePluginProvenance(stagingDir, name, xVersion, anchorDir) {
     throw error
   }
   return written
+}
+
+/**
+ * 读**本插件自己写的**那一份溯源（R4-B-1 的判据入口）。
+ *
+ * 只有"可读 + `appId` 相符 + `channel === 'plugin'`"三件同时成立才算自己人；
+ * 其余（缺失 / 读不出 / JSON 坏 / appId 不符 / 别的渠道）一律返回 `null` —— 调用方
+ * 据此保持"别人的标记一个字都不动"。
+ *
+ * @param {string} dir - 暂存/技能目录。
+ * @param {string} name - 技能名（= 目录名）。
+ * @returns {object|null} 解析出的标记对象（原样，供保留其它字段）；不算自己人时 null。
+ */
+function readOwnPluginProvenance(dir, name) {
+  const marker = readSmallRegularFile(join(dir, PROVENANCE_DIR, PROVENANCE_FILE), MARKER_MAX_BYTES)
+  if (marker.status !== 'ok') return null
+  let parsed
+  try {
+    parsed = JSON.parse(marker.text)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object') return null
+  if (typeof parsed.appId !== 'string' || parsed.appId !== name) return null
+  if (parsed.channel !== PLUGIN_CHANNEL) return null
+  return parsed
 }
 
 /**
@@ -1058,21 +1271,26 @@ export class SkillSwapRecoveryError extends Error {
 }
 
 /**
- * 解析换入临时目录名。
+ * 解析换入临时目录名（只看 basename，落点由 {@link sweepStaleSwapDirs} 决定）。
  *
- * **新命名**（A16 修复，2026-09-23，写入时一律用这一种；前导点让目录对
- * `SKILL_NAME_PATTERN` 与上游发现器的目录名契约都不可见）：
+ * **当前命名**（写入时一律用这一种；落在 `<skills>/.skill-tmp/` 里，见
+ * {@link SKILL_TEMP_DIR}）：
  *   `.staging-<skill>-<pid>-<ts>` / `.old-<skill>-<pid>-<ts>`
- * **旧命名**（升级前写下的崩溃残留，仍要能清掉）：
- *   `<skill>.staging-<pid>-<ts>` / `<skill>.old-<pid>-<ts>`
+ * **历史命名**（升级前写下的崩溃残留，直接躺在技能库根上；仍要能清掉）：
+ *   `<skill>.staging-<pid>-<ts>` / `<skill>.old-<pid>-<ts>`（无前导点）
+ *   `.staging-<skill>-<pid>-<ts>` / `.old-<skill>-<pid>-<ts>`（A16 的前导点形态）
  *
- * @param {string} name - 技能库根下的目录名。
+ * ⚠️ 前导点**不是**"上游看不见"的判据（A16 的注释曾这么写，与 pinned 上游不符，
+ * 见 {@link STAGING_INFIX} 的头注释）：真正的不可见来自**层数** —— 只有技能库的
+ * 直接子目录会被 `discoverRoot` 发现。前导点在这里只剩"万一被拿到根上也不会命中
+ * 客户端/上游的技能名规则"这一层纵深防御。
+ *
+ * @param {string} name - 技能库根或 `.skill-tmp/` 下的目录名。
  * @returns {{skillName:string, pid:number, ts:number, aside:boolean}|null}
  */
 function parseSwapDirName(name) {
   for (const [infix, aside] of [[STAGING_INFIX, false], [ASIDE_INFIX, true]]) {
-    // 新命名：<infix><skill>-<pid>-<ts>（以点开头、隐藏）。贪婪匹配让技能名里的
-    // 连字符不被吃进 pid/ts。
+    // 带前导点形态：<infix><skill>-<pid>-<ts>。贪婪匹配让技能名里的连字符不被吃进 pid/ts。
     const hidden = new RegExp(`^\\${infix}(.+)-(\\d+)-(\\d+)$`).exec(name)
     if (hidden !== null) {
       return { skillName: hidden[1], pid: Number(hidden[2]), ts: Number(hidden[3]), aside }
@@ -1107,10 +1325,11 @@ function isPidAlive(pid) {
  * 清扫上次同步留下的暂存/旁置目录（S13-3 复核，2026-09-17）。
  *
  * 判据三条同时成立才删，且只在本插件自己的命名空间内动手：
- *   - **同父目录 + 名字形状匹配**：`.staging-<BUILTIN_SKILLS 成员>-<pid>-<ts>` /
- *     `.old-…`（新命名），以及升级前留下的 `<成员>.staging-<pid>-<ts>` /
- *     `<成员>.old-<pid>-<ts>`（旧命名，见 {@link parseSwapDirName}）；技能名限定
- *     在内置清单里，绝不碰用户自己的目录；
+ *   - **落点 + 名字形状匹配**：新落点是技能库的私有第二层
+ *     `<skills>/.skill-tmp/`（R4-B-2），旧落点是技能库**根**——两种都要扫，因为
+ *     升级前写下的残留（`<成员>.staging-<pid>-<ts>` 与 A16 的
+ *     `.staging-<成员>-<pid>-<ts>`）就在根上；技能名限定在内置清单里，绝不碰
+ *     用户自己的目录，也绝不碰安装器在同一个 `.skill-tmp` 里的 `install-*`；
  *   - **陈旧**：pid 已不存在，或目录年龄超过 {@link STALE_SWAP_MAX_AGE_MS}
  *     （pid 复用兜底）；仍在跑的并发同步（活 pid + 新时间戳）不动；
  *   - **旁置副本额外要求真技能目录还在**：真目录缺失时那个旁置目录是旧内容的
@@ -1122,20 +1341,30 @@ function isPidAlive(pid) {
  * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
  */
 function sweepStaleSwapDirs(userSkillsDir) {
-  let names
-  try {
-    names = readdirSync(userSkillsDir)
-  } catch {
-    return // 技能库还不存在：没有残留可扫
-  }
   const now = Date.now()
-  for (const name of names) {
-    const parsed = parseSwapDirName(name)
-    if (parsed === null || !BUILTIN_SKILLS.includes(parsed.skillName)) continue
-    if (parsed.aside && !existsSync(join(userSkillsDir, parsed.skillName))) continue
-    if (isPidAlive(parsed.pid) && now - parsed.ts <= STALE_SWAP_MAX_AGE_MS) continue
-    try { rmSync(join(userSkillsDir, name), { recursive: true, force: true }) } catch { /* 清不掉不影响同步 */ }
+  /** 扫一层目录：`anchor` 是这些名字所在的目录（相对技能库根的可读前缀见下）。 */
+  const sweep = (dir, atRoot) => {
+    let names
+    try {
+      names = readdirSync(dir)
+    } catch {
+      return // 目录还不存在：没有残留可扫
+    }
+    for (const name of names) {
+      const parsed = parseSwapDirName(name)
+      if (parsed === null || !BUILTIN_SKILLS.includes(parsed.skillName)) continue
+      // 自检：新落点里出现"根上那种无前导点的旧命名"说明有第三方往私有目录里塞东西，
+      // 不能按自己的残留删（清单里也没有那种形状）。这里只接受带前导点的形状。
+      if (!atRoot && !name.startsWith('.')) continue
+      if (parsed.aside && !existsSync(join(userSkillsDir, parsed.skillName))) continue
+      if (isPidAlive(parsed.pid) && now - parsed.ts <= STALE_SWAP_MAX_AGE_MS) continue
+      try { rmSync(join(dir, name), { recursive: true, force: true }) } catch { /* 清不掉不影响同步 */ }
+    }
   }
+  // 新落点：技能库的第二层私有目录（运行时看不见的那一层）。
+  sweep(join(userSkillsDir, SKILL_TEMP_DIR), false)
+  // 旧落点：技能库根（升级前写下的 `<name>.staging-…` 与 A16 的 `.staging-<name>-…`）。
+  sweep(userSkillsDir, true)
 }
 
 /** 递归列出目录下的普通文件（相对路径，'/'-分隔，供跨平台 join 使用）。 */

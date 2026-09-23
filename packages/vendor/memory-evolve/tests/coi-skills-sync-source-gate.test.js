@@ -189,15 +189,21 @@ test('P1-1 渠道就是 plugin：按 x-version 正常更新，且安装器标记
     const pluginSkills = join(dir, 'plugin-skills')
     const userSkills = join(dir, 'skills')
     seedPluginSkill(pluginSkills)
-    const provenanceBefore = seedStoreSkill(userSkills, 'plugin', { xVersion: 1 })
+    seedStoreSkill(userSkills, 'plugin', { xVersion: 1 })
     writeFileSync(join(userSkills, NAME, '.install-version'), '3.0.0')
 
     const entry = entryFor(syncBuiltinSkills(pluginSkills, userSkills))
     assert.equal(entry.action, 'synced', `plugin 渠道必须能正常升级：${JSON.stringify(entry)}`)
     assert.match(readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8'), /BUNDLED/, '内容来自插件源')
     assert.equal(existsSync(join(userSkills, NAME, 'scripts', 'helper.mjs')), true, '整目录语义：辅助文件随技能一起走')
-    assert.equal(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'), provenanceBefore, 'A9：安装器标记不丢')
-    assert.equal(readFileSync(join(userSkills, NAME, '.install-version'), 'utf8'), '3.0.0', 'A9：.install-version 不丢')
+    // A9：标记不丢（文件还在、归属不变）。R4-B-1（第四轮）：**version 必须跟到新的
+    // x-version**（源是 2；旧 provenance 记 1、旧 .install-version 是 3.0.0）——
+    // 停在旧值会被能力中心当"已装版本"显示、被技能调用遥测直接上报。
+    const provAfter = JSON.parse(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'))
+    assert.equal(provAfter.channel, 'plugin', 'A9：安装器标记不丢')
+    assert.equal(provAfter.appId, NAME, 'A9：归属不变')
+    assert.equal(provAfter.version, '2', 'R4-B-1：随包升版后 provenance.version 必须等于新的 x-version')
+    assert.equal(readFileSync(join(userSkills, NAME, '.install-version'), 'utf8'), '2', 'R4-B-1：.install-version 与 provenance 同进同退')
     assert.equal(
       readdirSync(userSkills).filter((n) => n.includes('.staging-') || n.includes('.old-')).length,
       0,
