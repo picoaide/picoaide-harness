@@ -24,9 +24,11 @@ import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from 
 import {
   ArchiveInstallRefusal,
   computeSkillContentHash,
+  isInstalledSkillDirty,
   isStoreProvenance,
   PROVENANCE_DIR,
   readProvenance,
+  requiresRemoveConfirmation,
   writeProvenance,
 } from './skill-install.ts'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
@@ -200,10 +202,10 @@ export interface InstallPresetArchiveOptions {
   /** 来源服务端地址(写入溯源标记)。 */
   server?: string | undefined
   /**
-   * 覆盖本机内容的显式确认（审计 2026-09-23 N2，与技能侧 `installSkillArchive`
-   * 同一口径）：目标目录已存在且**不是**能力中心装的（`isStoreProvenance` 为假）
-   * 时，没有它一律拒收（409 `LOCAL_CONTENT`）；商店来源的那一份（= 更新智能体）
-   * 不需要确认。
+   * 覆盖本机内容的显式确认（审计 2026-09-23 N2 + 第四轮 R4-B-3，与技能侧
+   * `installSkillArchive` 同一口径）：目标目录已存在且**不是**"内容未改的商店内容"
+   * （`isStoreProvenance` 为假，或内容哈希与安装时不一致）时，没有它一律拒收
+   * （409 `LOCAL_CONTENT`）；商店来源且内容未改的那一份（= 更新智能体）不需要确认。
    */
   overwrite?: boolean | undefined
 }
@@ -246,12 +248,23 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
       throw cause
     },
   )
-  if (exists && await classifyInstalledPreset(targetDir, name) === 'local' && options.overwrite !== true) {
-    throw new ArchiveInstallRefusal(
-      'LOCAL_CONTENT',
-      `a preset named "${name}" already exists locally but was not installed by the Capability Hub; `
-      + 'installing would replace it (including your own files) — confirm the overwrite to continue',
-    )
+  if (exists && options.overwrite !== true) {
+    const prov = await readProvenance(targetDir)
+    const origin = isStoreProvenance(prov, name) ? 'store' : 'local'
+    // R4-B-3：与技能侧共用同一份 dirty 判据（`isInstalledSkillDirty`）与同一份
+    // "要不要确认"判据（`requiresRemoveConfirmation`）—— 面板对已本地修改的智能体
+    // 也会出确认条，两端必须同源，否则这里会静默吃掉用户改过的内容。
+    const dirty = await isInstalledSkillDirty(targetDir, prov)
+    if (requiresRemoveConfirmation(origin, dirty)) {
+      throw new ArchiveInstallRefusal(
+        'LOCAL_CONTENT',
+        origin === 'local'
+          ? `a preset named "${name}" already exists locally but was not installed by the Capability Hub; `
+            + 'installing would replace it (including your own files) — confirm the overwrite to continue'
+          : `the preset "${name}" has local modifications; installing replaces the whole directory and discards `
+            + 'your changes — confirm the overwrite to continue',
+      )
+    }
   }
 
   const staging = await mkdtemp(join(presetsDir, `.install-${name}-`))
@@ -442,6 +455,19 @@ export async function uninstallPreset(
       `the preset directory "${name}" was not installed by the Capability Hub; `
       + 'deleting it removes your own files — confirm the deletion to continue',
     )
+  }
+  // R4-B-3：删除比覆盖更不可逆 —— 商店来源但被本地修改过的智能体也要先确认
+  // （与技能侧 `uninstallSkill` 同一份判据，不再各写一遍 origin === 'local'）。
+  if (options.overwrite !== true) {
+    const prov = await readProvenance(target)
+    const dirty = await isInstalledSkillDirty(target, prov)
+    if (dirty) {
+      throw new ArchiveInstallRefusal(
+        'LOCAL_CONTENT',
+        `the preset "${name}" has local modifications; deleting it discards your changes `
+        + '— confirm the deletion to continue',
+      )
+    }
   }
   await rm(target, { recursive: true, force: true })
   return target

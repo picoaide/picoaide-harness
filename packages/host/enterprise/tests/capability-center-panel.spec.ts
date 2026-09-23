@@ -16,15 +16,18 @@ import {
   mergeItems,
   nameTakenError,
   needsOverwriteConfirm,
+  overwriteConfirmReason,
   planCardAction,
   planSectionCards,
   uninstallEndpoint,
   versionInstallSupported,
   withOverwrite,
+  confirmStripAction,
+  confirmStripText,
   type CapabilityItem,
   type SectionCard,
 } from '../src/client/CapabilityCenterPanel.tsx'
-import { builtinCardsForTab, planBuiltinCards } from '../src/client/BuiltinSkillsStrip.tsx'
+import { builtinCardsForTab, builtinSkillsInstallOutcome, planBuiltinCards } from '../src/client/BuiltinSkillsStrip.tsx'
 import { setActiveLocale } from '../src/client/locales.ts'
 
 afterEach(() => { setActiveLocale('zh') })
@@ -459,6 +462,32 @@ describe('A15 覆盖确认判据（needsOverwriteConfirm）', () => {
   it('未安装 ⇒ 不涉及覆盖', () => {
     expect(needsOverwriteConfirm({ ...base, installed: false, installedOrigin: undefined })).toBe(false)
   })
+
+  /* R4-B-3（第四轮审计）：`dirty` 也必须参与同一份判据。 */
+  it('商店来源但**已被本地修改**（dirty）⇒ 与"本机自制"同档，必须先确认', () => {
+    expect(needsOverwriteConfirm({ ...base, installedOrigin: 'store', dirty: true })).toBe(true)
+    expect(installNeedsConfirm({ ...base, installedOrigin: 'store', dirty: true })).toBe(true)
+    // 用户点过确认条之后不再重复问（否则自锁成死循环）。
+    expect(installNeedsConfirm({ ...base, installedOrigin: 'store', dirty: true }, { overwrite: true })).toBe(false)
+    // 未改过的商店内容不受影响（同渠道更新仍是一次点击直达）。
+    expect(needsOverwriteConfirm({ ...base, installedOrigin: 'store', dirty: false })).toBe(false)
+  })
+
+  it('确认条的措辞按三档分派：自制 / 已本地修改 / 换渠道', () => {
+    expect(overwriteConfirmReason({ ...base, installedOrigin: 'local' })).toBe('local')
+    expect(overwriteConfirmReason({ ...base, installedOrigin: 'store', dirty: true })).toBe('dirty')
+    expect(overwriteConfirmReason({ ...base, installedOrigin: 'store', dirty: false })).toBe('store')
+    // 文案本身必须点明后果（走字典，切语言跟着变）。
+    setActiveLocale('zh')
+    expect(confirmStripText({ name: 'foo', localConflict: true, reason: 'dirty' })).toContain('已被本地修改')
+    expect(confirmStripAction({ name: 'foo', localConflict: true, reason: 'dirty' })).toBe('仍要更新')
+    setActiveLocale('en')
+    expect(confirmStripText({ name: 'foo', localConflict: true, reason: 'dirty' })).toContain('local modifications')
+    // 历史调用（只给 localConflict、没有 reason）按旧口径回落，不得变成"商店"档。
+    setActiveLocale('zh')
+    expect(confirmStripText({ name: 'foo', localConflict: true })).toContain('自制')
+    expect(confirmStripAction({ name: 'foo', localConflict: true })).toBe('仍要覆盖')
+  })
 })
 
 describe('覆盖标记只由"用户已确认"产生（withOverwrite，A2/A3 两端契约）', () => {
@@ -587,7 +616,9 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
     expect(strip, '确认条必须存在').not.toBeNull()
     // 唯一的放行点：点「覆盖安装 / 仍要覆盖」才 run(true)（= 才带 ?overwrite=1）。
     expect(strip![1]).toContain('void pending.run(true)')
-    expect(strip![1]).toContain('installConfirm.localConflict')
+    // 措辞按档位分派（R4-B-3 起有三档：自制 / 已本地修改 / 换渠道），走同一对纯函数。
+    expect(strip![1]).toContain('{confirmStripText(installConfirm)}')
+    expect(strip![1]).toContain('{confirmStripAction(installConfirm)}')
     // 真正发请求的 performInstall 经 installRequestUrl（唯一 URL 拼装入口）。
     const perform = /const performInstall = async \([\s\S]*?\n  \}/u.exec(source)
     expect(perform, 'performInstall 必须存在').not.toBeNull()
@@ -617,6 +648,22 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
     expect(source).not.toContain('builtin.install(skill)')
     // 确认条只有一处调用 run(true)。
     expect(source).toContain('void pending.run(true)')
+  })
+
+  /* R4-B-5（第四轮审计）：内置卡的 409 必须有第二段确认路径。 */
+  it('内置卡遇 409 时回到同一条确认条（而不是只贴一句拒绝文案 + 死「重试」）', () => {
+    // 判据（纯函数）：409 ⇒ conflict（不是 failed）。
+    expect(builtinSkillsInstallOutcome(409, false)).toBe('conflict')
+    expect(builtinSkillsInstallOutcome(200, true)).toBe('ok')
+    expect(builtinSkillsInstallOutcome(422, false)).toBe('failed')
+    // hook 必须真的用它（否则 409 又变成"贴文案 + 重试"）。
+    const strip = readFileSync(fileURLToPath(new URL('../src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    expect(strip).toContain('const outcome = builtinSkillsInstallOutcome(res.status, res.ok)')
+    expect(strip).toContain("if (outcome === 'conflict')")
+    // 面板：conflict 一律经同一条确认条（与普通卡的 409 回落同形），不得自己造第二套。
+    expect(source).toContain("if (result === 'conflict') ask('store')")
+    // 内置卡的本机同名判据与普通卡同源（needsOverwriteConfirm，含 dirty）。
+    expect(source).toContain('needsOverwriteConfirm({ ...local, installed: true })')
   })
 })
 

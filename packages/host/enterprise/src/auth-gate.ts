@@ -9,10 +9,10 @@ import { applyPinnedFingerprintsFromEnv, defaultTlsStorePath, installCertificate
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
 import {
-  computeSkillContentHash,
   describeArchiveFailure,
   INSTALL_VERSION_FILE,
   installSkillArchive,
+  isInstalledSkillDirty,
   isStoreProvenance,
   listInstalledSkills,
   listLocalSkills,
@@ -2438,6 +2438,18 @@ export function apply(ctx: Context, config: Config): void {
             : null
           if (uninstallMatch !== null) {
             const name = decodeURIComponent(uninstallMatch[1]!)
+            // 名字先于安装器校验（R4-B-6）：另外三条写面
+            // （`/api/pico/skills/:name/{install,uninstall}`、
+            // `/api/pico/skills/builtin/:name/{install,uninstall}`）都在进安装器**之前**
+            // 调 `validateSkillName` 并回 400 —— 只有这一条把校验留给 `uninstallSkill`
+            // 内部抛，于是同一个客户端面板对同一类输入看到 422 + code（走
+            // `describeArchiveFailure` 的 typed 分支）。非法名是**请求有问题**，
+            // 不是"内容有问题"：与三条兄弟分支对齐到 400（状态码语义唯一）。
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
             try {
               await uninstallSkill(skillsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
@@ -2518,11 +2530,10 @@ export function apply(ctx: Context, config: Config): void {
               // 与安装器/卸载器的判据同一份实现（isStoreProvenance）。
               skillOrigins.set(r.name, isStoreProvenance(prov, r.name) ? 'store' : 'local')
               if (prov !== undefined) {
-                let dirty = false
-                if (prov.archiveChecksum !== undefined) {
-                  const now = await computeSkillContentHash(dir).catch(() => undefined)
-                  dirty = now !== undefined && now !== prov.archiveChecksum
-                }
+                // R4-B-3：dirty 的**唯一实现**在安装器里（isInstalledSkillDirty）——
+                // 面板的徽章与宿主的覆盖/删除闸门必须消费同一份事实，否则会出现
+                // "面板显示「已本地修改」、宿主放行整树覆盖"的两端漂移。
+                const dirty = await isInstalledSkillDirty(dir, prov)
                 provenance.set(r.name, { appId: prov.appId, channel: prov.channel, version: prov.version, dirty })
                 localSkillVersions.set(r.name, prov.version !== '' ? prov.version : r.version)
                 continue
@@ -2570,11 +2581,8 @@ export function apply(ctx: Context, config: Config): void {
               const match = items.find(i => (i as { kind?: string }).kind === 'agent' && (i as { name?: string }).name === l.name)
               const dir = join(presetsDir, l.name)
               const prov = await readProvenance(dir)
-              let dirty = false
-              if (prov?.archiveChecksum !== undefined) {
-                const now = await computeSkillContentHash(dir).catch(() => undefined)
-                dirty = now !== undefined && now !== prov.archiveChecksum
-              }
+              // 与技能同一份 dirty 判据（唯一实现在安装器里，R4-B-3）。
+              const dirty = await isInstalledSkillDirty(dir, prov)
               localRows.push({
                 kind: 'agent', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
                 version: prov?.version !== undefined && prov.version !== '' ? prov.version : '1.0.0',
@@ -2623,6 +2631,14 @@ export function apply(ctx: Context, config: Config): void {
                       skillOrigins,
                       presetOrigins,
                     ),
+                    // 2026-09-02 归属权 + 第四轮 R4-B-14：`is_owner` **必须**在这里也透出。
+                    // 面板的上传预检是 `clash.isOwner !== true ⇒ 直接提示「名称已被占用」、
+                    // 不发请求`（CapabilityCenterPanel 的 upload()），而它扫的是当前
+                    // `items`。市场分区取数失败/未回来时（applySectionRows 会丢掉旧的
+                    // 非本地行），「我的」里只剩这一份**没有 isOwner** 的商店行 ⇒ 作者上传
+                    // **自己的**技能被本地预检挡住。字段来自服务端
+                    // `capabilities.CapabilityItem.IsOwner`（json: is_owner），两边同源。
+                    isOwner: (i as { is_owner?: boolean }).is_owner ?? false,
                     // 0059 官方字段透传(与 enriched 同构)。
                     official: (i as { official?: boolean }).official ?? false,
                     downloads: Number((i as { downloads?: number }).downloads ?? 0),

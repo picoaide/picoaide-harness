@@ -291,16 +291,80 @@ export function versionInstallSupported(item: CapabilityItem): boolean {
 }
 
 /**
- * 覆盖确认的判据（审计 A2/A3/A15）：本机已装、且那一份**不是**能力中心装的。
+ * 覆盖确认的判据（审计 A2/A3/A15 + 第四轮 R4-B-3）。
  *
  * 返回 true 时面板先出确认条、用户点过之后才把 `?overwrite=1` 发给宿主；
  * 宿主侧对同一种情形没有标记就 409 `LOCAL_CONTENT`（两端同一份规则，见
- * auth-gate 的 `/api/pico/skills` 分支注释）。
+ * auth-gate 的 `/api/pico/skills` 分支注释与安装器的
+ * `requiresOverwriteConfirmation`）。
+ *
+ * 两档成因（**同一份事实的两种读法，不是两套判据**）：
+ *  - `installedOrigin !== 'store'`：本机那一份不是能力中心装的（用户自制 /
+ *    来源不明）；
+ *  - `dirty === true`（R4-B-3）：**商店来源但被本地修改过** —— 磁盘上的内容哈希
+ *    与安装时记的 `archiveChecksum` 不一致。它同时是"商店来源"和"里面装着用户的
+ *    字节"：旧判据只看来源，于是「更新到 vX」一次单击就把用户加的文件与改过的正文
+ *    整树删掉 —— 而卡片上还挂着「已本地修改」徽章（有徽章、无后果提示）。
+ *    `dirty` 由宿主按磁盘事实算出（`isInstalledSkillDirty`，与宿主闸门同源）。
  * @param item - 能力中心的一行。
  * @returns 覆盖前需要用户确认。
  */
 export function needsOverwriteConfirm(item: CapabilityItem): boolean {
-  return item.installed === true && item.installedOrigin !== 'store'
+  return item.installed === true && (item.installedOrigin !== 'store' || item.dirty === true)
+}
+
+/** 覆盖确认条的措辞档位（三选一，见 {@link overwriteConfirmReason}）。 */
+export type OverwriteConfirmReason = 'local' | 'dirty' | 'store'
+
+/**
+ * 确认条该说哪一句（**唯一判定**）。
+ *
+ * 抽成纯函数的理由与 `needsOverwriteConfirm` 相同：措辞决定用户是否知道"按下去会
+ * 丢什么"。`dirty` 档（R4-B-3）必须与"用户自制"分开 —— 前者丢的是**你自己改过的
+ * 那部分**，后者丢的是**你写的一整份技能**，用户要据此决定按不按。
+ * @param item - 能力中心的一行。
+ * @returns `local` / `dirty` / `store`。
+ */
+export function overwriteConfirmReason(item: CapabilityItem): OverwriteConfirmReason {
+  if (item.installedOrigin !== 'store') return 'local'
+  return item.dirty === true ? 'dirty' : 'store'
+}
+
+/** 确认条要显示的那一行状态（{@link PendingInstall} 的最小子集，便于单测）。 */
+export interface ConfirmStripInput {
+  name: string
+  /** 兼容字段：没有 `reason` 的历史调用按它推档（true ⇒ `local`）。 */
+  localConflict: boolean
+  reason?: OverwriteConfirmReason | undefined
+}
+
+/** 确认条的措辞档位（`reason` 优先；缺省按 `localConflict` 推）。 */
+function confirmStripReason(input: ConfirmStripInput): OverwriteConfirmReason {
+  return input.reason ?? (input.localConflict ? 'local' : 'store')
+}
+
+/**
+ * 确认条正文（**唯一实现**；三档措辞见 {@link overwriteConfirmReason}）。
+ * @param input - 待确认的那一发。
+ * @returns 当前界面语言下的提示文案。
+ */
+export function confirmStripText(input: ConfirmStripInput): string {
+  const reason = confirmStripReason(input)
+  if (reason === 'local') return t('capability.conflictConfirmLocal', { name: input.name })
+  if (reason === 'dirty') return t('capability.conflictConfirmDirty', { name: input.name })
+  return t('capability.conflictConfirm', { name: input.name })
+}
+
+/**
+ * 确认条的按钮文案（与 {@link confirmStripText} 同档）。
+ * @param input - 待确认的那一发。
+ * @returns 当前界面语言下的按钮标签。
+ */
+export function confirmStripAction(input: ConfirmStripInput): string {
+  const reason = confirmStripReason(input)
+  if (reason === 'local') return t('capability.forceInstallLocal')
+  if (reason === 'dirty') return t('capability.forceInstallDirty')
+  return t('capability.forceInstall')
 }
 
 /** 给写面端点加上"用户已确认覆盖/删除本机内容"的显式标记。 */
@@ -852,8 +916,18 @@ interface PendingInstall {
   key: string
   /** 展示用的技能名。 */
   name: string
-  /** 本机那一份不是能力中心装的 ⇒ 用"自制内容"措辞 + 「仍要覆盖」。 */
+  /**
+   * 本机那一份不是"内容未改的商店内容" ⇒ 要走"会被覆盖"的措辞（**不是**第二套判据，
+   * 就是 {@link needsOverwriteConfirm} 的结果；保留字段是为了兼容既有断言）。
+   */
   localConflict: boolean
+  /**
+   * 确认条的措辞档位（唯一判据见 {@link overwriteConfirmReason}）：
+   *  - `local`：本机那一份不是能力中心装的 ⇒ "自制内容"措辞 + 「仍要覆盖」；
+   *  - `dirty`：商店来源但**被本地修改过**（R4-B-3）⇒ 明说"更新会丢掉你改过的内容"；
+   *  - `store`：商店来源、内容未改、只是换渠道 ⇒ 通用覆盖措辞。
+   */
+  reason?: OverwriteConfirmReason | undefined
   /** 用户在详情弹层里点选的版本（内置卡没有这一项）。 */
   version?: string | undefined
   /** 用户确认后真正执行的那一发（`overwrite` = 把 `?overwrite=1` 交给宿主）。 */
@@ -1039,7 +1113,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       const data = await res.json().catch(() => ({})) as { version?: unknown }
       const appliedVersion = typeof data.version === 'string' && data.version !== '' ? data.version : undefined
       setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name
-        ? { ...i, installed: true, installedVersion: appliedVersion, installedOrigin: 'store' }
+        // `dirty: false`（R4-B-3）：装完之后磁盘上的内容就是商店那一份（安装器会重算
+        // 内容哈希），「已本地修改」徽章必须同时熄灭 —— 否则覆盖成功后卡片还在说
+        // "已本地修改"，用户会以为自己的改动还在。
+        ? { ...i, installed: true, installedVersion: appliedVersion, installedOrigin: 'store', dirty: false }
         : i)))
       setAction({ key, kind: 'done-install', name: item.name })
       if (appliedVersion === undefined) loadAll()
@@ -1051,9 +1128,11 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   /**
    * 安装入口（带覆盖确认闸门）。
    *
-   * 审计 A2/A3/A15：**本机已装且那一份不是能力中心装的** ⇒ 先出确认条，用户点过
-   * 之后才把 `?overwrite=1` 交给宿主。旧实现把"已装"一律当成要覆盖、更新按钮又
-   * 硬编码 force ⇒ 确认条是死代码，用户手写的同名技能被静默整树替换。
+   * 审计 A2/A3/A15 + R4-B-3：**本机已装、且那一份不是"内容未改的商店内容"** ⇒
+   * 先出确认条，用户点过之后才把 `?overwrite=1` 交给宿主。旧实现把"已装"一律当成
+   * 要覆盖、更新按钮又硬编码 force ⇒ 确认条是死代码，用户手写的同名技能被静默整树
+   * 替换；R4-B-3 补上第二档：商店来源但**被本地修改过**（dirty）同样必须先确认 ——
+   * 否则一次单击「更新」就把用户加的文件与改过的正文整树删掉。
    * @param item - 能力中心的一行。
    * @param opts - overwrite（用户已确认）/ version（用户点选的版本）。
    */
@@ -1063,6 +1142,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         key: `${item.kind}:${item.name}`,
         name: item.name,
         localConflict: true,
+        reason: overwriteConfirmReason(item),
         ...opts?.version === undefined ? {} : { version: opts.version },
         run: async (overwrite) => { await performInstall(item, { overwrite, ...opts?.version === undefined ? {} : { version: opts.version } }) },
       })
@@ -1074,22 +1154,37 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   /**
    * 内置技能入口卡的动作（安装 / 更新到 vX）。
    *
-   * 与普通卡**共用同一条确认条**：本机同名那一份是用户自制时，先确认再带
-   * `?overwrite=1` 打宿主（否则宿主 409，用户只看到一条报错）。
+   * 与普通卡**共用同一条确认条与同一份判据**（{@link needsOverwriteConfirm}）：
+   * 本机同名那一份是用户自制、或是**被本地修改过的**商店内容时，先确认再带
+   * `?overwrite=1` 打宿主。
+   *
+   * R4-B-5（第四轮）：**面板的预检不是权威** —— 本机同名技能来自**另一条商店渠道**
+   * （如组织库）时，`installedOrigin` 仍是 `store`、`dirty` 也是 false，于是这一发
+   * 不带 `?overwrite=1`；宿主按"换渠道"正确地回 409，而内置卡此前只把服务端那句
+   * 英文拒绝文案贴在卡片上、右边只有一个「重试」按钮 —— 点多少次都是同一发请求，
+   * **没有任何路径能补上 `?overwrite=1`**（普通卡有确认条回落，内置卡漏了）。
+   * 现在 `builtin.install` 把 409 如实报回来（`'conflict'`），这里落到同一条确认条。
    * @param card - 内置技能卡。
    */
   const activateBuiltinCard = (card: BuiltinCard): void => {
     const local = items.find(i => i.kind === 'skill' && i.name === card.skill.name && i.source === 'local')
-    const localConflict = local !== undefined && local.installedOrigin !== 'store'
-    if (localConflict) {
-      const key = `builtin:${card.skill.name}`
+    const key = `builtin:${card.skill.name}`
+    /** 本机同名那一份需要覆盖确认（自制 / 已本地修改）⇒ 出确认条（唯一通道）。 */
+    const ask = (reason: OverwriteConfirmReason): void => {
       setInstallConfirm({
-        key, name: card.skill.name, localConflict: true,
+        key, name: card.skill.name, localConflict: true, reason,
         run: async (overwrite) => { await builtin.install(card.skill, overwrite) },
       })
+    }
+    if (local !== undefined && needsOverwriteConfirm({ ...local, installed: true })) {
+      ask(overwriteConfirmReason({ ...local, installed: true }))
       return
     }
-    void builtin.install(card.skill)
+    void builtin.install(card.skill).then((result) => {
+      // 宿主说"目标是另一条渠道的同名内容，需要确认"（R4-B-5）⇒ 与普通卡的 409
+      // 处理同形：回到确认条，而不是把一条拒绝文案永远贴在卡片上。
+      if (result === 'conflict') ask('store')
+    })
   }
 
   const uninstall = async (item: CapabilityItem): Promise<void> => {
@@ -1337,7 +1432,11 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         )}
         {uninstallConfirmKey === key && needsOverwriteConfirm(item) && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }} data-role="local-remove-warning">
-            {t('capability.confirmUninstallLocal', { name: item.name })}
+            {/* 两档成因走两句话（R4-B-3）：本机自制 vs 商店装来但被你改过 ——
+                后者说成"本机自制技能"是错的，会让用户以为这份不是从能力中心装的。 */}
+            {overwriteConfirmReason(item) === 'dirty'
+              ? t('capability.confirmUninstallDirty', { name: item.name })
+              : t('capability.confirmUninstallLocal', { name: item.name })}
           </p>
         )}
         <div style={CARD_FOOT}>
@@ -1490,9 +1589,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           <Card style={{ padding: '10px 14px', borderRadius: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <icons.IconAlert size={15} style={{ color: 'var(--dsw-alias-state-warn-label)' }} />
             <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
-              {installConfirm.localConflict
-                ? t('capability.conflictConfirmLocal', { name: installConfirm.name })
-                : t('capability.conflictConfirm', { name: installConfirm.name })}
+              {confirmStripText(installConfirm)}
             </span>
             <PanelButton variant="primary" size="sm" onClick={() => {
               const pending = installConfirm
@@ -1500,7 +1597,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               // 重放的是**同一发**安装（含用户在详情弹层里点选的版本，审计 A11），
               // 并且只有这里才把 `?overwrite=1` 交给宿主（用户确认过的唯一凭据）。
               void pending.run(true)
-            }}>{installConfirm.localConflict ? t('capability.forceInstallLocal') : t('capability.forceInstall')}</PanelButton>
+            }}>{confirmStripAction(installConfirm)}</PanelButton>
             <PanelButton variant="secondary" size="sm" onClick={() => { setInstallConfirm(null) }}>{t('capability.cancel')}</PanelButton>
           </Card>
         )}

@@ -180,8 +180,32 @@ export function describeArchiveFailure(cause: unknown): ArchiveFailureDescriptio
  *     被列成"已安装"。
  *  3. 与技能库**同一文件系统** ⇒ `rename()` 仍然是原子的（staging 因此在
  *     `skillsDir` 之内，而不是 os.tmpdir()）。
+ *
+ * ⚠️ 第 2 条是**结构判据**（层数），不是"目录名以点开头"（第四轮审计 R4-B-2：
+ * 上游 `discoverRoot` 按 frontmatter 认技能名、还会把点号目录排在真目录**之前**，
+ * 所以"藏在根上的点号目录"在上游侧反而会赢下注册表）。随包同步器的换入临时目录
+ * 用的是同一个目录名（跨包契约，见 {@link SKILL_REMOVED_DIR} 附近的说明与
+ * `tests/skill-channel-parity.spec.ts` 的对拍）。
  */
 export const SKILL_TEMP_DIR = '.skill-tmp'
+
+/**
+ * "用户显式卸载过这个随包技能"的墓碑目录（R4-B-4，第四轮审计）。
+ *
+ * 落点 `<skills>/.skill-removed/<name>.json`，与 {@link PROVENANCE_DIR} /
+ * {@link SKILL_TEMP_DIR} / `.skill-locks` 同源：技能库根下的点号私有目录 ——
+ * 运行时发现器只认直接子目录里的 `SKILL.md`，`listInstalledSkills` 也只列直接
+ * 子目录，所以墓碑既不会被当成技能，也不会出现在能力中心列表里。
+ *
+ * **跨包契约**：随包插件（`dsh-memory-evolve`）的开机同步读同一个落点、按同一个
+ * 判据（`appId` === 技能名 && `channel === 'plugin'`）跳过 —— vendored 包不能
+ * import 企业包，两端各自实现；由 `tests/skill-channel-parity.spec.ts` 读源码对拍。
+ *
+ * 为什么必须有它：能力中心对 `originChannel === 'plugin'` 的本机行给了「卸载」，
+ * 而卸载是纯本地删目录 ⇒ 下一次开机同步看到落点不存在，就走"首次安装"路径原样
+ * 装回（用户视角：卸载后重启，技能又回来了，全程零提示）。
+ */
+export const SKILL_REMOVED_DIR = '.skill-removed'
 
 /** 安装器写入的版本标记文件（安装器独占面：打包与安装两端都要净化它）。 */
 export const INSTALL_VERSION_FILE = '.install-version'
@@ -494,17 +518,23 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   // （每个最多 16MiB 原始 + 64MiB 解包）。只清"超过阈值"的，正在跑的那一份不受影响。
   await sweepStaleSkillTemps(skillsDir, options.staleTempMaxAgeMs)
 
-  // 同名覆盖守卫（审计 A2/A3 + W4 P1-2）：本机自制内容，以及**换渠道覆盖**
-  // （目标那份来自另一条商店渠道，如随包插件同步写下的 `plugin`）都必须由用户
-  // 显式确认（面板确认条 → `?overwrite=1`）；缺确认一律 409 `LOCAL_CONTENT`。
+  // 同名覆盖守卫（审计 A2/A3 + W4 P1-2 + R4-B-3）：本机自制内容、**被本地修改过的
+  // 商店内容**，以及**换渠道覆盖**（目标那份来自另一条商店渠道，如随包插件同步写下
+  // 的 `plugin`）都必须由用户显式确认（面板确认条 → `?overwrite=1`）；缺确认一律
+  // 409 `LOCAL_CONTENT`。三档共用同一份判据（{@link requiresOverwriteConfirmation}），
+  // 面板侧是它的镜像（`CapabilityCenterPanel.needsOverwriteConfirm`）。
   const targetDir = join(skillsDir, name)
   const existingOrigin = await classifyInstalledSkill(targetDir, name)
   if (existingOrigin !== undefined && overwrite !== true) {
-    const existingChannel = existingOrigin === 'store' ? (await readProvenance(targetDir))?.channel : undefined
-    if (requiresOverwriteConfirmation(existingOrigin, existingChannel, channel)) {
+    const existingProv = existingOrigin === 'store' ? await readProvenance(targetDir) : undefined
+    const existingChannel = existingProv?.channel
+    // R4-B-3：`dirty` 与面板同一份事实（同一次内容哈希），否则会出现"面板挂了
+    // 「已本地修改」徽章、宿主却照旧放行整树覆盖"的两端漂移。
+    const existingDirty = await isInstalledSkillDirty(targetDir, existingProv)
+    if (requiresOverwriteConfirmation(existingOrigin, existingChannel, channel, existingDirty)) {
       throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
-        describeOverwriteRefusal(name, existingOrigin, existingChannel, channel),
+        describeOverwriteRefusal(name, existingOrigin, existingChannel, channel, existingDirty),
       )
     }
   }
@@ -609,6 +639,11 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
       installedAt: new Date().toISOString(),
     }).catch(() => { /* 非致命 */ })
 
+    // 墓碑清除（R4-B-4）：用户重新装上了这个技能 ⇒ 之前"我卸载过它"的选择到此为止，
+    // 否则下一次开机同步仍会因为墓碑跳过它（内容与墓碑互相矛盾）。放在安装**成功
+    // 之后**，失败路径不动墓碑（宁可保持用户的选择）。
+    await clearSkillTombstone(skillsDir, name)
+
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))
@@ -695,42 +730,101 @@ export function isStoreProvenance(prov: SkillProvenance | undefined, name: strin
 }
 
 /**
- * 覆盖一个**已存在**的同名技能目录时，是否必须由用户显式确认（审计 W4 P1-2，2026-09-23）。
+ * 本机那一份技能的内容是否**已被本地修改**（审计 R4-B-3，第四轮）。
  *
- * 判据把"来源"拆成两件不同的事（此前混在一起 ⇒ 静默覆盖 + 归属错）：
+ * 判据只有一条：安装时写下的 `archiveChecksum`（{@link computeSkillContentHash} 的
+ * 内容树哈希）与**现在重算**的值不同。这是"用户动过这份内容"的唯一可验证证据 ——
+ * 面板据此渲染「已本地修改」徽章，覆盖/删除据此决定要不要先问一声。
+ *
+ * 三个边界（都取"宁可少判脏"）：
+ *  - 没有溯源标记、或标记里没有 `archiveChecksum`（如随包插件写的 plugin 溯源）
+ *    ⇒ `false`。没有基准就没有可比事实，凭空判脏会让每次更新都多出一张确认条；
+ *  - 目标目录不存在 / 读不出来 ⇒ `false`（调用方在此之前已用
+ *    {@link classifyInstalledSkill} 判过"有没有"）；
+ *  - 哈希计算抛错（权限/IO）⇒ `false`（保守：不因为算不出来就拦下正常更新）。
+ *
+ * **唯一实现**：安装器（{@link requiresOverwriteConfirmation} / {@link uninstallSkill}）
+ * 与能力中心聚合面（`auth-gate` 的 `?source=local` 与 enriched 两个分支）都调它 ——
+ * 三处各算一次是这条 finding 的温床（面板会显示徽章而宿主放行覆盖）。
+ *
+ * @param skillDir - 目标技能目录。
+ * @param prov - 该目录的 provenance（已读出的那一份，避免重复 IO）。
+ * @returns 内容与安装时不一致为 true。
+ */
+export async function isInstalledSkillDirty(
+  skillDir: string,
+  prov: SkillProvenance | undefined,
+): Promise<boolean> {
+  if (prov?.archiveChecksum === undefined) return false
+  const now = await computeSkillContentHash(skillDir).catch(() => undefined)
+  return now !== undefined && now !== prov.archiveChecksum
+}
+
+/**
+ * 覆盖/删除一个**已存在**的同名技能目录时，是否必须由用户显式确认
+ * （审计 W4 P1-2 + 第四轮 R4-B-3，2026-09-23）。
+ *
+ * 判据把"来源"拆成三件不同的事（此前混在一起 ⇒ 静默覆盖 + 归属错 + 吃掉本地改动）：
  *  - {@link isStoreProvenance} 回答"这份内容是不是用户手写的"（决定卸载/更新要不要
  *    当成用户数据对待）；
- *  - 本函数回答"这次覆盖会不会**换渠道**"。目标是商店来源、但渠道与本次安装的渠道
- *    不同（market ↔ org ↔ builtin ↔ plugin）时，整树替换会把这份技能从一条渠道搬到
- *    另一条：内容来源变了、而调用方按"商店来源 ⇒ 直接更新"放行，用户零感知。实测
- *    （W4 probe10）：市场安装无确认覆盖随包插件技能 → 下次开机插件同步又换回插件版
- *    （插件侧现在也会拒收，见 `skills-sync.js` 的来源闸门），两边互相覆盖。
+ *  - **本函数还要问"这份内容被改过没有"**（{@link isInstalledSkillDirty}，R4-B-3）：
+ *    商店装来的技能被用户改过之后，它**同时**是"商店来源"和"里面装着用户的字节"。
+ *    只看来源就会放行整树替换 ⇒ 一次单击「更新」把用户加的文件与改过的正文全删掉，
+ *    而面板上还挂着「已本地修改」徽章（有徽章、无后果提示）。用户内容不得静默替换 ——
+ *    与"本机自制"同档，必须先确认；
+ *  - 以及"这次覆盖会不会**换渠道**"：目标是商店来源、但渠道与本次安装的渠道不同
+ *    （market ↔ org ↔ builtin ↔ plugin）时，整树替换会把这份技能从一条渠道搬到另一条：
+ *    内容来源变了、而调用方按"商店来源 ⇒ 直接更新"放行，用户零感知。实测（W4 probe10）：
+ *    市场安装无确认覆盖随包插件技能 → 下次开机插件同步又换回插件版（插件侧现在也会
+ *    拒收，见 `skills-sync.js` 的来源闸门），两边互相覆盖。
  *
- * 因此：目标不存在 → 不需要确认；用户自制 → 需要确认；商店来源但渠道不同 → 需要确认；
- * 商店来源且渠道相同 → 正常更新（安装器自己的升级路径）。
+ * 因此：目标不存在 → 不需要确认；用户自制 / 已本地修改 / 换渠道 → 需要确认；
+ * 商店来源 + 渠道相同 + 内容未被改过 → 正常更新（安装器自己的升级路径）。
  *
  * @param existingOrigin - {@link classifyInstalledSkill} 的结果（`undefined` = 目标不存在）。
  * @param existingChannel - 目标那一份的 provenance 渠道（仅商店来源时有值）。
  * @param incomingChannel - 本次安装写入的渠道。
+ * @param existingDirty - {@link isInstalledSkillDirty} 的结果（缺省 false = 未改过）。
  * @returns 需要用户显式确认（面板确认条 / `?overwrite=1`）为 true。
  */
 export function requiresOverwriteConfirmation(
   existingOrigin: InstalledSkillOrigin | undefined,
   existingChannel: string | undefined,
   incomingChannel: SkillProvenanceChannel,
+  existingDirty = false,
 ): boolean {
   if (existingOrigin === undefined) return false
-  if (existingOrigin === 'local') return true
+  if (requiresRemoveConfirmation(existingOrigin, existingDirty)) return true
   return existingChannel !== incomingChannel
 }
 
 /**
- * 覆盖被拒时的用户可读原因（两种成因共用 `LOCAL_CONTENT` 这一个拒绝码：
+ * 删除（uninstall）一个**已存在**的同名技能目录时，是否必须由用户显式确认。
+ *
+ * 与 {@link requiresOverwriteConfirmation} 共用"用户内容"的那一半判据
+ * （本机自制 或 已本地修改）—— 删除比覆盖更不可逆，判据不该比覆盖更松。**不是
+ * 第二套口径**：这里调的就是同一个函数，调用点不该自己再写一遍 `origin === 'local'`。
+ *
+ * @param existingOrigin - {@link classifyInstalledSkill} 的结果（`undefined` = 目标不存在）。
+ * @param existingDirty - {@link isInstalledSkillDirty} 的结果（缺省 false = 未改过）。
+ * @returns 需要用户显式确认（`?overwrite=1`）为 true。
+ */
+export function requiresRemoveConfirmation(
+  existingOrigin: InstalledSkillOrigin | undefined,
+  existingDirty = false,
+): boolean {
+  if (existingOrigin === undefined) return false
+  return existingOrigin === 'local' || existingDirty
+}
+
+/**
+ * 覆盖被拒时的用户可读原因（三种成因共用 `LOCAL_CONTENT` 这一个拒绝码：
  * 面板对 409 的处理是同一条确认条，见 `CapabilityCenterPanel` 的 `performInstall`）。
  * @param name - the skill id.
  * @param existingOrigin - 目标那一份的来源分类。
  * @param existingChannel - 目标那一份的 provenance 渠道。
  * @param incomingChannel - 本次安装写入的渠道。
+ * @param existingDirty - 目标那一份是否被本地修改过（R4-B-3）。
  * @returns 英文（对外文案语言与其它拒绝一致）说明。
  */
 function describeOverwriteRefusal(
@@ -738,7 +832,15 @@ function describeOverwriteRefusal(
   existingOrigin: InstalledSkillOrigin,
   existingChannel: string | undefined,
   incomingChannel: SkillProvenanceChannel,
+  existingDirty: boolean,
 ): string {
+  if (existingDirty && existingOrigin === 'store' && existingChannel === incomingChannel) {
+    // R4-B-3：这一条必须点明"你改过的东西会丢" —— 用户看到的徽章是「已本地修改」，
+    // 拒绝文案却只说"已存在同名内容"的话，等于让他自己猜后果。
+    return `the "${String(existingChannel)}" skill "${name}" has local modifications; installing the `
+      + `${JSON.stringify(incomingChannel)} version replaces the whole directory and discards your changes `
+      + '— confirm the overwrite to continue'
+  }
   if (existingOrigin === 'local') {
     return `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
       + 'installing would replace it (including your own files) — confirm the overwrite to continue'
@@ -898,9 +1000,18 @@ export async function listInstalledSkills(skillsDir: string): Promise<string[]> 
  * 没有 `overwrite` 显式确认一律拒绝（409 `LOCAL_CONTENT`）。旧实现的判据只有
  * "名字合法 + 有 SKILL.md"，于是市场里存在同名条目时，**用户在技能库里手写的
  * 同名技能（连同笔记/脚本）被一键删除**。
+ *
+ * 第四轮 R4-B-3：判据扩到"**被本地修改过的商店内容**"——删除比覆盖更不可逆，
+ * 不能放过"装来的是商店版、但里面已经有用户改过的正文/自加的文件"这一形态。
+ * 与 {@link requiresOverwriteConfirmation} 共用同一次内容哈希（{@link isInstalledSkillDirty}），
+ * 不是第二套口径。
+ *
+ * 第四轮 R4-B-4：删掉的若是 `channel === 'plugin'` 的随包技能，成功之后写一个
+ * **墓碑**（{@link SKILL_REMOVED_DIR}），否则下一次开机同步看到落点不存在就走
+ * "首次安装"路径原样装回 —— 用户视角是"卸载后重启，技能又回来了"。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
  * @param name - the skill directory name (single safe segment).
- * @param options - `overwrite: true` = 用户已确认删除本机自制内容。
+ * @param options - `overwrite: true` = 用户已确认删除本机内容。
  * @returns the removed directory path.
  * @throws Error when the name is invalid, the skill is not installed, or local content needs confirmation.
  */
@@ -917,17 +1028,81 @@ export async function uninstallSkill(
     } catch {
       throw new ArchiveInstallRefusal('NOT_INSTALLED', `skill "${name}" is not installed`)
     }
-    const origin = await classifyInstalledSkill(target, name)
-    if (origin === 'local' && options.overwrite !== true) {
+    const prov = await readProvenance(target)
+    const origin = isStoreProvenance(prov, name) ? 'store' : 'local'
+    const dirty = await isInstalledSkillDirty(target, prov)
+    if (options.overwrite !== true && requiresRemoveConfirmation(origin, dirty)) {
       throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
-        `the skill directory "${name}" was not installed by the Capability Hub; `
-        + 'deleting it removes your own files — confirm the deletion to continue',
+        origin === 'local'
+          ? `the skill directory "${name}" was not installed by the Capability Hub; `
+            + 'deleting it removes your own files — confirm the deletion to continue'
+          : `the skill "${name}" has local modifications; deleting it discards your changes `
+            + '— confirm the deletion to continue',
       )
     }
     await rm(target, { recursive: true, force: true })
+    // 只有**随包**（plugin）技能需要墓碑：它是唯一会在下次开机被同步装回来的来源
+    // （market/org/builtin 没有自动重装路径 —— 给它们也写墓碑只会留下永久的陈旧
+    // 记录，还会在用户日后重新安装同名技能时干扰判断）。写失败不致命：最坏情况
+    // 退回升级前的行为（下次开机会装回来），而删除本身已经成功。
+    if (prov?.channel === 'plugin') await writeSkillTombstone(skillsDir, name, prov)
     return target
   })
+}
+
+/**
+ * 写"用户显式卸载过这个随包技能"的墓碑（R4-B-4）。
+ *
+ * 落点/判据见 {@link SKILL_REMOVED_DIR}；由 {@link uninstallSkill} 在删除成功之后
+ * 调用，随包同步器（`dsh-memory-evolve` 的 `skills-sync.js`）读它并跳过该技能。
+ * 写入是 best-effort（`catch` 吞掉）：墓碑丢了最坏退回升级前的行为，不该让
+ * "已经删掉的技能"报成失败。
+ *
+ * @param skillsDir - the user skill root.
+ * @param name - the skill id.
+ * @param prov - 被删那一份的 provenance（版本等事实记进墓碑，便于排障）。
+ * @returns 墓碑文件的绝对路径（写失败也返回——调用方据此打日志）。
+ */
+export async function writeSkillTombstone(
+  skillsDir: string,
+  name: string,
+  prov?: SkillProvenance | undefined,
+): Promise<string> {
+  const dir = join(skillsDir, SKILL_REMOVED_DIR)
+  const file = join(dir, `${name}.json`)
+  const info = {
+    appId: name,
+    channel: 'plugin',
+    ...prov?.version === undefined || prov.version === '' ? {} : { version: prov.version },
+    removedAt: new Date().toISOString(),
+  }
+  await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => { /* 非致命 */ })
+  await writeFile(file, `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 }).catch(() => { /* 非致命 */ })
+  return file
+}
+
+/**
+ * 清除墓碑（用户重新安装了这个技能 ⇒ 之前"我卸载过它"的选择到此为止）。
+ *
+ * 只在安装**成功之后**调用（见 `runInstallSkillArchive`）；失败路径不动墓碑 ——
+ * 用户的卸载选择不该被一次失败的安装抹掉。删不掉只忽略：陈旧墓碑会让下一次
+ * 随包同步继续跳过该技能，而技能已经在盘上（同步侧只在落点不存在时才需要它）
+ * —— 影响面是"随包升版不会自动更新它"，由下一次安装/卸载自然收敛。
+ *
+ * @param skillsDir - the user skill root.
+ * @param name - the skill id.
+ * @returns 目标墓碑路径（**幂等**：本来就没有墓碑也返回同一个路径 —— 调用方据此
+ *   知道"这个技能的墓碑现在不在盘上了"）；`rm` 抛错时为 undefined（best-effort）。
+ */
+export async function clearSkillTombstone(skillsDir: string, name: string): Promise<string | undefined> {
+  const file = join(skillsDir, SKILL_REMOVED_DIR, `${name}.json`)
+  try {
+    await rm(file, { force: true })
+    return file
+  } catch {
+    return undefined
+  }
 }
 
 /** 安装器写入的溯源目录名(服务端拒绝归档自带同名目录)。 */
