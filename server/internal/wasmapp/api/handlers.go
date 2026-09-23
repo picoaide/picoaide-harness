@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -668,22 +669,96 @@ func (h *Handlers) validateAppID(appID string) *apperr.Error {
 	return registry.ValidateAppID(appID, h.opt.AppIDExtraReserved)
 }
 
-// reviewRequired 读审核开关（R17，默认关）。
-func (h *Handlers) reviewRequired() bool {
+// reviewSwitchResult 是审核开关的**三态读结果**（R3-A A-3）。
+//
+// 三态必须分开表达，不能并成一个 bool：`required=false` 有两种来源
+// （"键不存在"与"读到了 false"），而 `err != nil` 是第三种（"读不到"）。
+// 旧实现把后两者并成一条路径都返回 false ⇒ 一次数据库读故障就能把全组织的
+// 审核开关静默绕过（新版本直接落 approved 对外生效），是本仓明令禁止的
+// fail-open 形态。
+type reviewSwitchResult struct {
+	// Required = 是否要求审核。读失败时**恒为 true**（fail-closed：
+	// 按"需要审核"处理，与"明确为 false"走的是两条路径）。
+	Required bool
+	// Err 非 nil = 这次读**失败**（不是"键不存在"）。调用方必须据此 fail-loud，
+	// 并在写入面（发布）拒绝继续。
+	Err error
+	// Found = settings 里到底有没有这个键。仅供诊断/日志，判定一律看上面两项。
+	Found bool
+}
+
+// reviewSwitch 是审核开关的**唯一读点**（三态；R17 / R3-A A-3）。
+//
+// 判定表（改动前先读这张表，尤其第一行 —— 它是本条缺陷的修复点）：
+//
+//	读失败（err != nil）  ⇒ Required=true, Err!=nil   // fail-closed，绝不回落成"关"
+//	键不存在（!ok）       ⇒ Required=false, Err=nil   // R17 的缺省就是"不审"，是承诺
+//	读到 true/1/on/yes    ⇒ Required=true,  Err=nil
+//	读到其它值            ⇒ Required=false, Err=nil   // 写入端只写 true/false
+//
+// 为什么"无法识别的值"仍按关：它与"读失败"不同 —— 值**读到了**，只是不是平台
+// 自己写的形态（写入端只有 true/false）。把它判成"需要审核"会让一次人工改库/未来
+// 的格式变更把全组织的新版本卡进待审队列，而本条的缺陷（读故障 fail-open）
+// 并不包含它。改动这里要单独取证。
+func (h *Handlers) reviewSwitch() reviewSwitchResult {
 	if h.opt.DB == nil {
-		return false
+		// 未装配 DB 只出现在最小装配/单元测试里：没有 settings 表可读，
+		// 按"缺省关"处理与 R17 一致（这不是读失败）。
+		return reviewSwitchResult{Required: false, Found: false}
 	}
 	v, ok, err := serverstore.GetSetting(h.opt.DB, SettingReviewRequired)
-	if err != nil || !ok {
-		return false
+	if err != nil {
+		// fail-closed：读不到 = 按"需要审核"处理。错误原样交给调用方去 fail-loud。
+		return reviewSwitchResult{Required: true, Err: err, Found: false}
+	}
+	if !ok {
+		// 键不存在 ≠ 读失败：这是 R17 的缺省（默认不审 + 事后抽检）。
+		return reviewSwitchResult{Required: false, Found: false}
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
-		return true
+		return reviewSwitchResult{Required: true, Found: true}
 	default:
-		// 无法识别的值按**关**处理：与"默认关"同向，且写入端只写 true/false。
-		return false
+		return reviewSwitchResult{Required: false, Found: true}
 	}
+}
+
+// reviewRequired 是**展示面**（管理列表 / 版本清单 / 作者版本历史）的读法：
+// 读失败按"需要审核"展示（fail-closed + fail-loud），但**不**让整页变成错误 ——
+// 展示面把"开关关着"和"读不到"混成同一次 500 只会让运维更难判断，
+// 而 fail-closed 的值已经保证了"页面绝不谎报审核已关"。
+func (h *Handlers) reviewRequired() bool {
+	res := h.reviewSwitch()
+	if res.Err != nil {
+		log.Printf("wasmapp: 审核开关 %s 读取失败，按 fail-closed 处理（展示为「需要审核」）：%v",
+			SettingReviewRequired, res.Err)
+	}
+	return res.Required
+}
+
+// publishReviewRequired 是**发布闸门**的读法（R3-A A-3）。
+//
+// 与展示面的差别只有一处、但很关键：读失败时它把错误**如实报出去**（503 + 不落行），
+// 而不是静静地按"需要审核"把版本放进待审队列 —— 读不到开关时审核队列自身也不可信
+// （管理员批准同样要读 settings），此时"排队等审"只会让作者拿到一个永远不会有人
+// 处理的 201，还会白白占掉一个**永久占位**的版本号。
+//
+// 返回的 bool 恒为 fail-closed 的 `true`（按"需要审核"处理）；调用方拿到非 nil 的
+// 错误后必须中断发布。
+func (h *Handlers) publishReviewRequired() (bool, *apperr.Error) {
+	res := h.reviewSwitch()
+	if res.Err == nil {
+		return res.Required, nil
+	}
+	log.Printf("wasmapp: 审核开关 %s 读取失败，发布 fail-closed 拒绝（不落行、不产生 approved 版本）：%v",
+		SettingReviewRequired, res.Err)
+	e := apperr.New(apperr.CodeInternal, "审核开关不可读，发布暂不可用").
+		WithCause(res.Err).
+		WithDetail("setting_key", SettingReviewRequired).
+		WithHint("平台读不到 settings 里的审核开关，按 fail-closed 处理：**不会**放行未审核版本，也**不**占用版本号；本次没有任何写入").
+		WithHint("请稍后重试；若持续出现，检查数据库连接与主库健康（连接池耗尽/抖动都会走到这条分支）")
+	e.HTTP = http.StatusServiceUnavailable
+	return true, e
 }
 
 // releaseVersion 归一化版本号（去空白）。

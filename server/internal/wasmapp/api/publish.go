@@ -858,7 +858,14 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	}
 
 	// ---- E：落库（从这里开始才有写入；此前一行都没有，也没有任何落盘）----
-	review := h.reviewRequired()
+	//
+	// 审核开关必须用**严格**读法（R3-A A-3）：读失败 ⇒ 503 + 不落行。
+	// 用展示面的宽松读法会把一次 settings 读故障变成"静默放行未审核版本"
+	// （fail-open），那正是本条缺陷的原始形态。
+	review, rerr := h.publishReviewRequired()
+	if rerr != nil {
+		return nil, rerr
+	}
 	status := serverstore.ReleaseStatusApproved
 	if review {
 		status = serverstore.ReleaseStatusPending
