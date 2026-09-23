@@ -123,6 +123,12 @@ const zh = {
   'refresh.unsupported': '连接器 {id} 不支持令牌刷新',
   'refresh.outboundBlocked': '令牌刷新被出站策略拒绝：{message}',
 
+  // ---- credential scope (src/store.ts + the restore pass) -----------------
+  // R6-B-2：升级前保存的凭据没有服务端标记，无法判定它属于哪个租户 ⇒ 不沿用
+  // （旧文件原样留在磁盘上），该连接器回到「需要授权」。凭据现在按
+  // 「账号 + 服务端」隔离：换一个服务端不会读到上一个服务端的凭据。
+  'store.rescopeRequired': '这条连接器升级前保存的凭据没有标记服务端，出于安全不再沿用（凭据文件仍保留在原处）——请重新授权一次',
+
   // ---- streamable-http redirect fence (src/mcp-transport-fence.ts) --------
   // Diagnostic seam-verification throws. They are developer diagnostics, but
   // `registerMcp` embeds them verbatim into the row's rejected[] text, so they
@@ -240,6 +246,8 @@ const en: Record<keyof typeof zh, string> = {
   'refresh.notConnected': 'Connector {id} is not connected',
   'refresh.unsupported': 'Connector {id} does not support token refresh',
   'refresh.outboundBlocked': 'Token refresh was refused by the outbound policy: {message}',
+
+  'store.rescopeRequired': 'This connector\'s pre-upgrade credential carries no server marker, so it is deliberately not reused (the old credential file is kept on disk) — please authorize once more. Credentials are now isolated per account AND per server, so switching servers can no longer read the previous one\'s.',
 
   'fence.notInstanceField': "MCP streamable-http transport: {field} is not an own field of the instance (the SDK's request-field shape changed, so there is nowhere to harden the instance)",
   'fence.requestInitNotFenced': "MCP streamable-http transport: {field} was not intercepted (the SDK's internal field or construction changed)",

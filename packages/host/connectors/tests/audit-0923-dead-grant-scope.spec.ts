@@ -14,9 +14,13 @@
  * Both cases below drive the REAL plugin (`apply()`), its REAL routes and its
  * REAL credential store. `storeBaseDir` is deliberately left undefined so the
  * plugin resolves the product's own account scope
- * (`<DSH_HOME>/users/<encoded-user>/connectors`): that per-account directory is
- * what makes "account A" and "account B" two different credential files, and
- * therefore what makes the cross-account case meaningful at all.
+ * (`<DSH_HOME>/users/<encoded-user>/servers/<server-scope>/connectors`,
+ * `./user-scope.ts`): that per-account directory is what makes "account A" and
+ * "account B" two different credential files, and therefore what makes the
+ * cross-account case meaningful at all. These cases emit sessions WITHOUT a
+ * server address, so the scope is the `servers/unscoped` one — the SERVER
+ * dimension of the same scope is covered by
+ * `tests/audit-0924-credential-server-scope.spec.ts`.
  *
  * Only `ctx.plugin` is faked (the shared harness reproduces upstream
  * mcp-client's "serverName already in use" contract), exactly like the package's
@@ -32,8 +36,7 @@ import { assert, describe, expect, it } from 'vitest'
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
 import { ConnectorStore } from '../src/store.ts'
-import { userScopePath } from '../src/user-scope.ts'
-import { callRoute, createHarness, seedCredential } from './helpers/connector-harness.ts'
+import { callRoute, createHarness, scopeDir, seedCredential } from './helpers/connector-harness.ts'
 import type { Harness } from './helpers/connector-harness.ts'
 
 /**
@@ -54,7 +57,7 @@ interface Row {
 }
 
 /** The store directory of one account (the resolution the plugin itself uses). */
-const storeDirOf = (username: string): string => join(userScopePath(username), 'connectors')
+const storeDirOf = (username: string): string => scopeDir(username)
 
 async function rowOf(h: Harness, id: string): Promise<Row> {
   const list = JSON.parse((await callRoute(h, '/api/pico/connectors', 'GET')).body) as { connectors: Row[] }

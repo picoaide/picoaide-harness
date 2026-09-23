@@ -13,7 +13,7 @@ import { runAuth } from './auth.ts'
 import { createOAuthProvider, isTerminalRefreshReason, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens, type RefreshFailure } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
-import { userScopePath } from './user-scope.ts'
+import { userScopePath, unscopedConnectorPath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
   CONNECTOR_AUTH_MODES,
@@ -349,12 +349,35 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
   }
 
-  // Per-user store. Rebuilt when the session changes; the old user's MCP
-  // registrations are disconnected first (server-side tokens stay on disk
-  // per user, never shared across accounts).
-  let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
-  // Per-user local-approval ledger for server-issued stdio commands (FIX-02).
-  let approvals = new ConnectorApprovalStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
+  // R6-B-2: the SECOND half of the credential scope. Same source and same
+  // read-per-call shape as `@picoaide/dsh-browser`'s `currentServerHash()` —
+  // one machine can be logged into two deployments, and the credential of the
+  // first must never be handed to the second (see `./user-scope.ts`).
+  const currentServerURL = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string } | null } | undefined
+      const serverURL = pico?.getSession?.()?.serverURL
+      return typeof serverURL === 'string' ? serverURL : null
+    } catch {
+      return null
+    }
+  }
+
+  // Per-(account, server) store. Rebuilt when the session changes; the old
+  // user's MCP registrations are disconnected first (server-side tokens stay on
+  // disk per account AND per server, never shared across either).
+  let store = new ConnectorStore(
+    options.storeBaseDir
+      ? { baseDir: options.storeBaseDir }
+      : { username: currentUser(), serverURL: currentServerURL() },
+  )
+  // Local-approval ledger for server-issued stdio commands (FIX-02), scoped the
+  // same way: the commands it vouches for come from ONE tenant's catalog.
+  let approvals = new ConnectorApprovalStore(
+    options.storeBaseDir
+      ? { baseDir: options.storeBaseDir }
+      : { username: currentUser(), serverURL: currentServerURL() },
+  )
   const states = new Map<string, ConnectorState>()
   /** Ids whose STORED credential currently carries a refresh token. */
   const refreshable = new Set<string>()
@@ -1047,14 +1070,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /** Rebuild per-user store/runtime after a login/logout/switch. */
-  const reconfigureUser = (): void => {
+  const reconfigureUser = (eventServerURL?: string | null): void => {
     const username = currentUser()
     // Migrate legacy `~/.picoaide/connectors` once (first login after
     // upgrade): A's pre-upgrade credentials must not be lost silently.
     migrateLegacyStore(username)
     if (!options.storeBaseDir) {
-      store = new ConnectorStore({ username })
-      approvals = new ConnectorApprovalStore({ username })
+      // Scope (account, server). The service read is authoritative; the event
+      // payload is the fallback, exactly like the browser plugin resolves its
+      // partition hash (`currentServerHash() ?? serverPartitionHash(event…)`).
+      // A session event can arrive before/while the service is updated, and
+      // "no evidence of the new server yet" must not silently keep the old
+      // server's directory.
+      const serverURL = currentServerURL() ?? eventServerURL ?? null
+      store = new ConnectorStore({ username, serverURL })
+      approvals = new ConnectorApprovalStore({ username, serverURL })
     }
   }
 
@@ -1067,7 +1097,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const epoch = lifecycleEpoch
       await teardownAll()
       await syncServerDefs()
-      reconfigureUser()
+      reconfigureUser((next as { serverURL?: string } | null)?.serverURL ?? null)
       if (next !== null) await restoreAll(epoch)
     }).catch((cause: unknown) => {
       ctx.logger?.error('pico-connectors: session change handling failed', cause)
@@ -1623,6 +1653,26 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return typeof credential.accessToken === 'string' && credential.accessToken !== ''
   }
 
+  /**
+   * Does this definition need a STORED credential to be registered at all?
+   *
+   * The credential-less arms mirror {@link credentialUsable} exactly (no mode
+   * declared, or a `device` definition that declares no device-code
+   * authorization): for those, "there is a leftover credential file somewhere"
+   * is not a reason to tell the user to authorize again — the connector has
+   * nothing to authorize. Everywhere else a missing credential IS an
+   * authorization gap, which is what the unscoped-credential branch in
+   * {@link restoreAll} reports (R6-B-2).
+   * @param def - the connector definition.
+   * @returns true when the row is expected to hold a credential.
+   */
+  const requiresCredential = (def: ConnectorDef): boolean => {
+    const mode: string | undefined = def.authMode
+    if (mode === undefined) return false
+    if (mode === 'device' && !declaresDeviceFlow(def)) return false
+    return true
+  }
+
   /** Publish a field form for the panel and leave the row waiting for it. */
   const requestDeclaredFields = (id: string, def: ConnectorDef): void => {
     pendingFieldRequestKind.set(id, 'tokenFields')
@@ -1915,6 +1965,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const restoreAll = async (epoch: number): Promise<void> => {
     /** True once a NEWER lifecycle transition superseded this task. */
     const stale = (): boolean => epoch !== lifecycleEpoch
+    // R6-B-2: report the credentials this build REFUSES to adopt (they were
+    // written before credentials carried a server dimension) ONCE per restore
+    // pass, as one line with the ids and the directory. The files stay where
+    // they are; the log is what makes the re-authorization wave diagnosable
+    // instead of looking like "my connectors forgot everything".
+    const unscoped = await store.unscopedCredentialIds()
+    if (stale()) return
+    // The `unscoped-credentials` tag is the stable, greppable half of the line
+    // (host logs are zh-first, so the sentence alone is not searchable for a
+    // non-Chinese reader); keep the tag ASCII and keep it in one place.
+    if (unscoped.length > 0) {
+      ctx.logger?.warn?.(
+        `pico-connectors: unscoped-credentials count=${String(unscoped.length)} — `
+        + `检测到 ${String(unscoped.length)} 个未标记服务端的连接器凭据（升级前保存），`
+        + '按服务端隔离策略不沿用，对应连接器需要重新授权；原文件保留在 '
+        + `${store.unscopedDir ?? ''}；ids=${unscoped.join(',')}`,
+      )
+    }
     for (const def of defs) {
       try {
         if (stale()) return
@@ -1927,12 +1995,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         if (stale()) return
         noteCredential(def.id, credential)
         if (!credential) {
-          // No credential for THIS user: clear the token facts the previous user
-          // left on the row (states survive a session change; the store does
-          // not). The STATUS is deliberately not forced to 'disconnected' —
-          // 'unauthorized' is how a failed authorization reports itself and must
-          // survive the restore pass.
+          // No credential for THIS (account, server): clear the token facts the
+          // previous scope left on the row (states survive a session change; the
+          // store does not). The STATUS is deliberately not forced to
+          // 'disconnected' — 'unauthorized' is how a failed authorization
+          // reports itself and must survive the restore pass.
           setState(def.id, { expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined })
+          // ...but an UNSCOPED credential of the same id is evidence this
+          // connector WAS authorized, just not for a server we can name. Say so
+          // and demand a fresh authorization: adopting it would hand the
+          // previous tenant's secret to whichever server is current, and
+          // leaving the row silently disconnected would look like a bug.
+          if (requiresCredential(def) && await target.hasUnscopedCredential(def.id)) {
+            setState(def.id, {
+              status: 'unauthorized',
+              everConnected: true,
+              error: copy('store.rescopeRequired'),
+              errorCode: 'auth-required',
+            })
+          }
           continue
         }
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
@@ -2473,6 +2554,14 @@ export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types
  * retries) and never blocks the app. Anonymous (logged-out) sessions never
  * absorb the legacy data — it is claimed by the first account that logs in.
  *
+ * The target is the **unscoped** directory ({@link unscopedConnectorPath},
+ * `<dshHome>/users/<user>/connectors`) — the pre-2026-09-24 layout. That store
+ * was shared by every server the account had ever pointed at, so since R6-B-2
+ * its files are never adopted: `restoreAll` probes them for existence, reports
+ * "needs a fresh authorization" and leaves the bytes alone. Migrating still
+ * earns its keep — it moves the files under the account that can see them (and
+ * into the log line that lists them) instead of stranding them in `~/.picoaide`.
+ *
  * TOCTOU hardening (2026-08-22): outside the `existsSync(target)` check the
  * claim is serialized through an atomic marker file created with `wx`
  * (O_EXCL). Whichever session/process creates the marker first wins the
@@ -2485,9 +2574,9 @@ function migrateLegacyStore(username: string | null): void {
   try {
     const legacy = join(homedir(), '.picoaide', 'connectors')
     if (!existsSync(legacy)) return
-    const target = join(userScopePath(username), 'connectors')
+    const target = unscopedConnectorPath(username)
     if (existsSync(target)) return
-    mkdirSync(join(userScopePath(username)), { recursive: true, mode: 0o700 })
+    mkdirSync(userScopePath(username), { recursive: true, mode: 0o700 })
     // Atomic claim: only the first O_EXCL winner proceeds to the rename.
     const claim = join(userScopePath(username), '.legacy-claim')
     try {

@@ -24,7 +24,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
-import { readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -118,10 +117,18 @@ export interface Config {
  * 的宿主里也必须能加载（此时返回 undefined，工具侧对 fill_credentials 一律
  * fail-closed 拒绝）。
  * @param options.currentUser - 当前登录用户名（scoping 凭据库）。
+ * @param options.currentServer - 当前会话的服务端地址（凭据库作用域的第二半；
+ *   与连接器插件同一份解析，见 `@picoaide/dsh-connectors/user-scope`）。
  * @param options.credentialSites - 部署显式声明的连接器站点地址。
  */
 export function createCredentialResolver(options: {
   currentUser: () => string | null
+  /**
+   * R6-B-2（2026-09-24）：连接器凭据按「账号 + 服务端」隔离后，本解析器必须用
+   * **同一个**服务端身份去读，否则它会在新布局下读一个空目录，"填充凭据"功能
+   * 静默失效（凭据还在，只是不在它找的地方）。
+   */
+  currentServer?: () => string | null
   credentialSites?: Record<string, string>
   /**
    * 应用源 scheme（渠道包 `desktop.app_origin_scheme`，组装期注入；§10/§16.1）。
@@ -135,8 +142,11 @@ export function createCredentialResolver(options: {
   try {
     const require = createRequire(import.meta.url)
     const { ConnectorStore } = require('@picoaide/dsh-connectors/store') as typeof import('@picoaide/dsh-connectors/store')
+    /** 与连接器插件逐字相同的作用域解析（username + 服务端地址）。 */
+    const scopeStore = (): InstanceType<typeof ConnectorStore> =>
+      new ConnectorStore({ username: options.currentUser(), serverURL: options.currentServer?.() ?? null })
     const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
-      const store = new ConnectorStore({ username: options.currentUser() })
+      const store = scopeStore()
       const credential = await store.readCredential(connectorId)
       if (credential === null) return null
       const fields = credential.fields ?? {}
@@ -149,19 +159,11 @@ export function createCredentialResolver(options: {
     }
     resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
       try {
-        const { userScopePath } = require('@picoaide/dsh-connectors/user-scope') as typeof import('@picoaide/dsh-connectors/user-scope')
-        const dir = join(userScopePath(options.currentUser()), 'connectors')
-        const names: string[] = []
-        try {
-          for (const file of readdirSync(dir)) {
-            if (file.endsWith('.json')) names.push(file.slice(0, -5))
-          }
-        } catch {
-          return []
-        }
-        const store = new ConnectorStore({ username: options.currentUser() })
+        // 目录枚举交给 store（`credentialIds()`）：布局加服务端维度后，第二处
+        // 自己拼路径的枚举点就是第二个会把作用域弄错的地方。
+        const store = scopeStore()
         const out: Array<{ id: string; username?: string }> = []
-        for (const id of names) {
+        for (const id of await store.credentialIds()) {
           const credential = await store.readCredential(id)
           const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
           out.push({ id, ...username !== undefined ? { username } : {} })
@@ -177,7 +179,7 @@ export function createCredentialResolver(options: {
      */
     resolveCredentials.originOf = async (connectorId: string): Promise<string | null> => {
       try {
-        const store = new ConnectorStore({ username: options.currentUser() })
+        const store = scopeStore()
         const credential = await store.readCredential(connectorId)
         return credentialSiteOrigin(credential?.fields, options.credentialSites?.[connectorId])
       } catch {
@@ -325,6 +327,26 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
+   * 当前会话的**服务端地址原文**。两个消费者读同一份、且必须永远指向同一个会话：
+   * ①下面的分区哈希（§7.2/R2S-8）；②`browser_fill_credentials` 的凭据解析器 ——
+   * 连接器凭据自 R6-B-2（2026-09-24）起按「账号 + 服务端」隔离，解析器要用**同一个**
+   * 地址去定位目录，否则它会在新布局里读一个空目录（凭据还在，只是不在它找的地方，
+   * 功能静默失效）。
+   *
+   * 未登录 / 读不到 ⇒ `null`（哈希侧落 `undefined`，凭据侧落 `servers/unscoped`）。
+   * @returns 会话的服务端地址，或 null。
+   */
+  const currentServerURL = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string } | null } | undefined
+      const serverURL = pico?.getSession?.()?.serverURL
+      return typeof serverURL === 'string' ? serverURL : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 当前会话的**服务端地址哈希**（§7.2/R2S-8 冻结：分区名 =
    * `persist:agent-browser-<user>@<sha256(normalized server url)[:32]>`）。
    *
@@ -338,15 +360,7 @@ export function apply(ctx: Context, config: Config = {}): void {
    * 未登录 / 读不到 ⇒ `undefined`（匿名分区**不带**后缀，逐字节不变）。
    * @returns 32 位 hex 摘要，或 undefined。
    */
-  const currentServerHash = (): string | undefined => {
-    try {
-      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string } | null } | undefined
-      const serverURL = pico?.getSession?.()?.serverURL
-      return serverPartitionHash(typeof serverURL === 'string' ? serverURL : null)
-    } catch {
-      return undefined
-    }
-  }
+  const currentServerHash = (): string | undefined => serverPartitionHash(currentServerURL())
 
   /**
    * Host UI locale for every piece of user-visible copy this plugin owns (the
@@ -371,6 +385,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const credentialResolver: CredentialResolver | undefined = createCredentialResolver({
     currentUser,
+    currentServer: currentServerURL,
     ...(config.credentialSites === undefined ? {} : { credentialSites: config.credentialSites }),
   })
 

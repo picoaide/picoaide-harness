@@ -26,6 +26,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { vi } from 'vitest'
 import { apply } from '../../src/index.ts'
 import { ConnectorStore } from '../../src/store.ts'
+import { connectorScopePath, unscopedConnectorPath } from '../../src/user-scope.ts'
 import type { ConnectorDef } from '../../src/types.ts'
 
 /** One MCP registration the plugin handed to `ctx.plugin`. */
@@ -47,7 +48,16 @@ export interface Harness {
   readonly routes: WebRoute[]
   /** Local-confirmation prompts the plugin raised, in order. */
   readonly prompts: Array<Record<string, unknown>>
-  readonly emitSession: (session: { username?: string } | null) => void
+  /**
+   * `ctx.logger.warn` / `ctx.logger.error` messages, in order.
+   *
+   * The restore pass reports things a user cannot see any other way (the
+   * unscoped-credential wave of R6-B-2, for instance), so a case has to be able
+   * to read the line it claims to produce.
+   */
+  readonly warns: string[]
+  readonly errors: string[]
+  readonly emitSession: (session: { username?: string; serverURL?: string } | null) => void
   /** Fire a host event (the plugin's own listeners run synchronously). */
   readonly emit: (event: string, ...args: unknown[]) => void
   readonly dispose: () => void
@@ -95,12 +105,22 @@ export function createHarness(
   const fibers: Array<{ dispose: ReturnType<typeof vi.fn> }> = []
   const routes: WebRoute[] = []
   const prompts: Array<Record<string, unknown>> = []
+  const warns: string[] = []
+  const errors: string[] = []
   const sessionHandlers: Array<(next: unknown) => void> = []
   const eventHandlers = new Map<string, Array<(...args: unknown[]) => void>>()
   /** serverNames a live (not yet disposed) plugin instance owns. */
   const liveServerNames = new Set<string>()
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
+  /**
+   * The server the fake session points at.
+   *
+   * `null` (the default) is the "no address" case ⇒ the plugin resolves the
+   * `servers/unscoped` scope. Cases that need two tenants on one machine emit a
+   * session per server.
+   */
+  let serverURL: string | null = null
   /** 可变的宿主语言：插件只能通过 ctx.get('desktopRuntime') 读到它。 */
   let locale: 'zh' | 'en' = (options.locale as 'zh' | 'en' | undefined) ?? 'zh'
 
@@ -122,7 +142,11 @@ export function createHarness(
 
   const ctx = {
     get: (name: string) => {
-      if (name === 'picoSession') return { getSession: () => (username === null ? null : { username }) }
+      if (name === 'picoSession') {
+        return {
+          getSession: () => (username === null ? null : { username, ...(serverURL === null ? {} : { serverURL }) }),
+        }
+      }
       if (name === 'connection') return fence
       // 与桌面壳同形：只暴露 locale 字段，插件用结构探针读取（host-locale.ts）。
       if (name === 'desktopRuntime') return { get locale() { return locale } }
@@ -161,7 +185,11 @@ export function createHarness(
       fibers.push(fiber)
       return fiber
     }),
-    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    logger: {
+      info: vi.fn(),
+      warn: vi.fn((message?: unknown) => { warns.push(String(message)) }),
+      error: vi.fn((message?: unknown) => { errors.push(String(message)) }),
+    },
     effect: (register: () => (() => void) | undefined) => {
       const dispose = register()
       if (typeof dispose === 'function') effectDisposers.push(dispose)
@@ -183,11 +211,14 @@ export function createHarness(
     fibers,
     routes,
     prompts,
+    warns,
+    errors,
     fence: fence ?? { seen: 0 },
     setLocale: (next) => { locale = next },
     locale: () => locale,
     emitSession: (session) => {
       username = session?.username ?? null
+      serverURL = session?.serverURL ?? null
       for (const handler of [...sessionHandlers]) handler(session)
     },
     emit: (event: string, ...args: unknown[]) => {
@@ -284,6 +315,29 @@ export async function seedCredential(
 ): Promise<void> {
   const store = new ConnectorStore({ baseDir: dir })
   await store.writeCredential(id, { updatedAt: Date.now(), ...credential } as never)
+}
+
+/**
+ * The credential directory the plugin itself resolves for one (account, server)
+ * pair — the SAME function the plugin uses, so a case never hand-rolls the
+ * layout (hand-rolled expectations are how a layout change silently turns a
+ * "seeded where the plugin reads" precondition into a no-op).
+ * @param username - the account (null = the anonymous scope).
+ * @param serverURL - the session's server address (null = `servers/unscoped`).
+ * @returns the absolute live credential directory.
+ */
+export function scopeDir(username: string | null, serverURL?: string | null): string {
+  return connectorScopePath(username, serverURL ?? null)
+}
+
+/**
+ * The pre-2026-09-24 (unscoped) directory, i.e. where an upgraded install left
+ * its credentials. The plugin never adopts what is in here.
+ * @param username - the account that owned the old store.
+ * @returns the absolute legacy credential directory.
+ */
+export function legacyScopeDir(username: string | null): string {
+  return unscopedConnectorPath(username)
 }
 
 // 默认预算 15s（原 5s）：这些用例等的是**后台轮询 / 子进程回传 / 真实 socket 往返**，

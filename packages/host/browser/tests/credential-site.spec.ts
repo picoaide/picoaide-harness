@@ -354,3 +354,43 @@ describe('createCredentialResolver: originOf 接线', () => {
     expect(JSON.stringify(await resolver.originOf!('corp'))).not.toContain('secret')
   })
 })
+
+/**
+ * R6-B-2（2026-09-24）：连接器凭据按「账号 + **服务端**」隔离之后，本解析器必须用
+ * 同一个服务端身份去读 —— 否则它会在新布局里读一个空目录，"填充凭据"功能静默失效
+ * （凭据还在，只是不在它找的地方）。下面两条是那条跨包接线的判据：种子写进服务端 A
+ * 的作用域，解析器只有拿到 A 才读得到。
+ */
+describe('createCredentialResolver: 凭据作用域含服务端（R6-B-2）', () => {
+  const SERVER_A = 'https://harness-a.example.com'
+  const SERVER_B = 'https://harness-b.example.com'
+
+  async function seedOn(serverURL: string): Promise<void> {
+    await new ConnectorStore({ username: 'user-a', serverURL }).writeCredential('corp', {
+      updatedAt: Date.now(),
+      fields: { username: 'alice', password: 'secret', baseUrl: 'https://corp.example/login' },
+    })
+  }
+
+  it('只有当前服务端那一份凭据可见（换服务端后读不到另一份）', async () => {
+    await seedOn(SERVER_A)
+
+    const onA = createCredentialResolver({ currentUser: () => 'user-a', currentServer: () => SERVER_A })!
+    expect(await onA.originOf!('corp')).toBe('https://corp.example')
+    expect(await onA('corp')).toEqual({ username: 'alice', password: 'secret' })
+    expect((await onA.list!()).map(entry => entry.id)).toEqual(['corp'])
+
+    // 同一个账号、另一台部署：这份凭据不在那个作用域里。
+    const onB = createCredentialResolver({ currentUser: () => 'user-a', currentServer: () => SERVER_B })!
+    expect(await onB.originOf!('corp')).toBeNull()
+    expect(await onB('corp')).toBeNull()
+    expect(await onB.list!()).toEqual([])
+  })
+
+  it('没有服务端身份时落到 unscoped 作用域，而不是别人写下的目录', async () => {
+    await seedOn(SERVER_A)
+    const nowhere = createCredentialResolver({ currentUser: () => 'user-a' })!
+    expect(await nowhere('corp')).toBeNull()
+    expect(await nowhere.list!()).toEqual([])
+  })
+})
