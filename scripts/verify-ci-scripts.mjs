@@ -31,6 +31,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
+import { extractRunBlocks } from './check-workflows.mjs'
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const channelsScript = join(root, 'scripts', 'ci-channels.sh')
 const releasePolicyScript = join(root, 'scripts', 'ci-release-policy.sh')
@@ -522,6 +525,69 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
       !channelsText.includes('*-beta.*') && !channelsText.includes('v[0-9]*.[0-9]*.[0-9]*'),
       'ci-channels.sh 不得保留第二份 tag 形态 glob(必须只读 ci-release-policy.sh)',
     )
+  }
+}
+
+// ---- 1c. 策展发布说明的两道检查:真跑 ci.yml 里的 shell(2026-09-23 审计 C-CI-2) ----
+//
+// 现场:唯一会拦"正式 tag 缺 docs/releases/<tag>.md"的地方在 `Create GitHub Release`
+// 步骤里,而它排在 `Upload every channel image to the update server (R2)` **之后** ——
+// 客户侧更新面(不可变长缓存)已经先被挂上新版本,才轮到 GitHub Release 红 = 半发布。
+// 现在有两道:gate 的早检(1 分钟内红,下游全部因 needs 跳过)与 release job 的
+// "任何对外上传之前"那道。两者都是 ci.yml 里的 shell,所以这里**抽出真块真跑**:
+// 少了任何一道、或者判据被改成恒成功,这一组就红。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const blocks = extractRunBlocks(workflowText)
+  const notesNeedle = 'test -f "docs/releases/${GITHUB_REF_NAME}.md"'
+  const earlyCheck = blocks.find(block => block.content.includes(notesNeedle) && !block.content.includes('release-policy.txt'))
+  const preUploadCheck = blocks.find(block => block.content.includes(notesNeedle) && block.content.includes('release-policy.txt'))
+  check(earlyCheck !== undefined, 'ci.yml 里找不到 gate 的策展说明早检(抽取失败或整步被删)')
+  check(preUploadCheck !== undefined, 'ci.yml 里找不到 release job 的"上传前"策展说明检查')
+
+  /** 造一个最小检出:scripts/ci-release-policy.sh + docs/releases/<可选文件>。 */
+  const sandbox = ({ releaseNotes }) => {
+    const dir = tempDir('ci-notes-')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    mkdirSync(join(dir, 'docs', 'releases'), { recursive: true })
+    writeFileSync(join(dir, 'scripts', 'ci-release-policy.sh'), readFileSync(releasePolicyScript))
+    if (releaseNotes !== null) writeFileSync(join(dir, 'docs', 'releases', `${releaseNotes}.md`), '# notes\n')
+    return dir
+  }
+  const runBlock = (dir, content, ref, refName) => spawnSync('bash', ['-c', content], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_REF: ref, GITHUB_REF_NAME: refName, GITHUB_OUTPUT: join(dir, 'out.txt') },
+  })
+
+  if (earlyCheck !== undefined && preUploadCheck !== undefined) {
+    // 正式 tag:缺文件必须 fail-loud(两道都要)。
+    const missing = sandbox({ releaseNotes: null })
+    const earlyMissing = runBlock(missing, earlyCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(earlyMissing.status !== 0, `gate 的早检在缺 docs/releases/<tag>.md 时必须失败,实际退出 ${String(earlyMissing.status)}`)
+    check(`${earlyMissing.stdout ?? ''}${earlyMissing.stderr ?? ''}`.includes('::error::'),
+      'gate 早检失败时要打 ::error::(CI 注解)')
+    const preMissing = runBlock(missing, preUploadCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(preMissing.status !== 0, `release job 的"上传前"检查在缺文件时必须失败,实际退出 ${String(preMissing.status)}`)
+    check(`${preMissing.stdout ?? ''}${preMissing.stderr ?? ''}`.includes('::error::'),
+      'release job 的上传前检查失败时要打 ::error::')
+
+    // 正式 tag + 文件在:必须放行(否则正当发版会被自己拦下)。
+    const present = sandbox({ releaseNotes: 'v9.9.9' })
+    const prePresent = runBlock(present, preUploadCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(prePresent.status === 0, `release job 的上传前检查在文件存在时应放行,实际退出 ${String(prePresent.status)}: ${(prePresent.stderr ?? '').slice(0, 200)}`)
+    const earlyPresent = runBlock(present, earlyCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(earlyPresent.status === 0, `gate 早检在文件存在时应放行,实际退出 ${String(earlyPresent.status)}`)
+
+    // 预发 tag:允许缺策展说明(仍是公开面,但按定案不拦)。
+    const prerelease = sandbox({ releaseNotes: null })
+    const prePrerelease = runBlock(prerelease, preUploadCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+    check(prePrerelease.status === 0, `预发 tag 缺策展说明不应拦(实际退出 ${String(prePrerelease.status)})`)
+
+    // 未知 tag 形态:唯一真源当场红,这一步也必须跟着红(不许"上传了才知道名字不认识")。
+    const unknown = sandbox({ releaseNotes: 'v9.9.9-hotfix' })
+    const preUnknown = runBlock(unknown, preUploadCheck.content, 'refs/tags/v9.9.9-hotfix', 'v9.9.9-hotfix')
+    check(preUnknown.status !== 0, '未知 tag 形态必须在"上传前"检查里失败(唯一真源已 fail-loud)')
   }
 }
 
