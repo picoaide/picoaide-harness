@@ -662,6 +662,12 @@ if (!envInfo.reachable) {
     : `无法通过 ssh 读取容器 env（${cfg.sshHost}）：${envInfo.error}`);
   if (envInfo.skipped !== true) {
     report.verdict.push('UNKNOWN: 未能读取容器 env，站点 URL（GLITCHTIP_URL/APP_URL/GLITCHTIP_DOMAIN）设置情况未知');
+    // G-8(2026-09-23 第三轮门禁审计)：这里此前只推 verdict、**不抬退出码**，于是
+    // "给了 --ssh 但连不上"时工具打印 UNKNOWN 却 exit 0 —— 只读退出码的调用方（包装
+    // 脚本/CI/人）会读到"核查完成且未发现缺陷"，与本文件自述的
+    // "0=无缺陷 1=发现缺陷 2=无法完成核查" 正好相反，是标准的 fail-open。
+    // 与下面 FAIL 分支同形：只在还没抬过码时抬（已有 1/2 都不回退）。
+    if (report.exitCode === 0) report.exitCode = 2;
   }
 } else {
   log(`   MAIN_URL=${envInfo.mainUrl ?? '(未设置)'}（GlitchTip 6.2.x 里无代码读取 = 零效果）`);

@@ -14,8 +14,20 @@
  *   4. cookie 越域（S15-9）：jar 只按过期时间过滤，别的域名/仅限 https 的 cookie
  *      会被发给 --base-url 指到的主机。
  *
+ * 2026-09-23 第三轮门禁审计的两条补充（G-8 / G-9）—— **判据存在但没人驱动**：
+ *   - G-8：`glitchtip-ops-check.mjs` 最核心的生产判据是"容器没设站点 URL ⇒ FAIL"
+ *     （查不出来却报 OK = fail-open）。但此前夹具里假 ssh **只**用于 S15-7 的命令串
+ *     断言，从不驱动这条判定 ⇒ 把 `if (!envInfo.domain)` 改成 `if (false)`（或整段删掉）
+ *     自测照样全绿，而真机把"只配了 MAIN_URL"的部署打成 `OK: 容器已设置站点 URL`。
+ *     现在用假 ssh 打印 `docker inspect` 形态的 env，把**两个方向**（三者皆空 ⇒ FAIL/exit 1；
+ *     设了 APP_URL ⇒ OK 且来源标注正确）与取值优先级、ssh 失败 ⇒ UNKNOWN/exit 2、
+ *     未给主机 ⇒ 跳过且**不调用 ssh** 全部钉住。
+ *   - G-9：loopback 判定的夹具此前只有字面量 `localhost`，而容器化部署里
+ *     "DSN 指向本机"更常见的形态是 `127.0.0.1` / `127.x.y.z` / `[::1]` / `0.0.0.0` /
+ *     `*.localhost` —— 把 `classifyHost` 弱化成只认 `localhost` 时自测照绿。
+ *
  * 测法：起一个本地假 keys API（http）+ 把假 `ssh` 放进 PATH —— 全程不碰真实环境。
- * 变异验证（把修复回退后本文件必红）见 S15-2/5/7/9 四条用例的断言。
+ * 变异验证（把修复回退后本文件必红）见 S15-2/5/7/9 与 G-8/G-9 各条用例的断言。
  *
  * 用法:node scripts/verify-glitchtip-ops-check.mjs
  * 退出码:0 全部通过;1 有断言失败。
@@ -159,6 +171,60 @@ const FUTURE = Math.floor(Date.now() / 1000) + 3600
     loopReport.verdict.some(line => line.startsWith('FAIL')),
     `S15-2: loopback DSN 必须给 FAIL verdict，实际 ${JSON.stringify(loopReport.verdict)}`,
   )
+}
+
+{
+  // G-9(2026-09-23 第三轮门禁审计):loopback 判据的夹具必须覆盖**非字面量 localhost**
+  // 的全部形态。此前只有 `http://key@localhost:8000/1` 一条 ⇒ `classifyHost` 弱化成
+  // "只认 localhost 字符串"时自测照绿,而真机上 DSN 指向本机的常见形态恰恰是
+  // 127.0.0.1 / 0.0.0.0 / ::1 / *.localhost（容器里 `APP_URL=http://127.0.0.1:8000`）。
+  for (const [shape, why] of [
+    ['http://key@127.0.0.1:8000/1', '127.0.0.1'],
+    ['http://key@127.1.2.3:8000/1', '127.0.0.0/8 的非 .0.1 地址'],
+    ['http://key@[::1]:8000/1', 'IPv6 环回'],
+    ['http://key@0.0.0.0:8000/1', 'unspecified'],
+    ['http://key@glitchtip.localhost:8000/1', '*.localhost'],
+  ]) {
+    const api = await startKeysApi([{ dsn: { public: shape } }])
+    const jar = writeJar(join(tempDir('glitchtip-jar-'), 'c.txt'), [
+      ['127.0.0.1', 'FALSE', '/', 'FALSE', String(FUTURE), 'glitchtip_session', 'SECRET-LOCAL'],
+    ])
+    const result = await runCheck(['--base-url', api.baseUrl, '--cookies', jar, '--json'])
+    const served = api.state.requests.length
+    await api.close()
+    let report = null
+    try {
+      report = JSON.parse(result.stdout)
+    } catch {
+      /* 断言里报错 */
+    }
+    check(served === 1, `G-9(${why}): 假 keys API 应收到 1 个请求，实际 ${served}`)
+    check(result.status === 1, `G-9(${why}): loopback DSN 必须 exit 1(实际 ${result.status})，stdout=${result.stdout.slice(0, 200)}`)
+    check(report?.loopback === true, `G-9(${why}): report.loopback 必须为 true，实际 ${JSON.stringify(report?.loopback)}`)
+    check(
+      Array.isArray(report?.verdict) && report.verdict.some(line => line.startsWith('FAIL')),
+      `G-9(${why}): 必须给 FAIL verdict，实际 ${JSON.stringify(report?.verdict)}`,
+    )
+  }
+  // 近失配反例:后缀像 127.x/含 localhost 字样的**真实域名**不得被误判成 loopback。
+  for (const shape of ['https://key@127.0.0.1.example.com/1', 'https://key@notlocalhost.example.com/1']) {
+    const api = await startKeysApi([{ dsn: { public: shape } }])
+    const jar = writeJar(join(tempDir('glitchtip-jar-'), 'c.txt'), [
+      ['127.0.0.1', 'FALSE', '/', 'FALSE', String(FUTURE), 'glitchtip_session', 'SECRET-LOCAL'],
+    ])
+    const result = await runCheck(['--base-url', api.baseUrl, '--cookies', jar, '--json'])
+    const served = api.state.requests.length
+    await api.close()
+    let report = null
+    try {
+      report = JSON.parse(result.stdout)
+    } catch {
+      /* 断言里报错 */
+    }
+    check(served === 1, `G-9(${shape}): 假 keys API 应收到 1 个请求，实际 ${served}`)
+    check(report?.loopback === false, `G-9(${shape}): 不得误判成 loopback，实际 ${JSON.stringify(report?.loopback)}`)
+    check(result.status === 0, `G-9(${shape}): 非 loopback DSN 应 exit 0(实际 ${result.status})`)
+  }
 }
 
 {
@@ -459,6 +525,179 @@ for (const shape of ['https://key@glitchtip.example.com', 'https://key@glitchtip
   )
 }
 
+// ---------------------------------------------------------------------------
+// G-8：容器 env 判定必须被**真的驱动**（假 ssh 打印 docker inspect 形态的 env）
+//
+// 这是本工具最核心的生产判据：容器没设站点 URL 时 DSN 展示与 issue permalink 会退化成
+// localhost。判据存在但夹具从不驱动它 = 删掉/置假那条 FAIL 分支无人发现（fail-open）。
+// 下面每个用例都用假 ssh 把 env 喂进去，并断言**两个方向** + 取值优先级 + 失败路径。
+// ---------------------------------------------------------------------------
+
+/** 把任意字符串包成 POSIX sh 单引号字面量（桩脚本里写路径用）。 */
+function shSingleQuote(value) {
+  return `'${String(value).replace(/'/gu, `'\\''`)}'`
+}
+
+/**
+ * 造一个假 ssh：记录 argv（证明**真的**被调用过，防"没接线"的假绿），打印指定 env 行。
+ * @param work - 用例工作目录。
+ * @param options - `{ envLines, status, stderrText }`。
+ * @returns `{ binDir, record }`。
+ */
+function fakeSsh(work, { envLines = [], status = 0, stderrText = '' } = {}) {
+  const binDir = join(work, 'bin')
+  mkdirSync(binDir, { recursive: true })
+  const record = join(work, 'ssh-argv.bin')
+  const outFile = join(work, 'ssh.stdout')
+  const errFile = join(work, 'ssh.stderr')
+  writeFileSync(outFile, envLines.length > 0 ? `${envLines.join('\n')}\n` : '')
+  writeFileSync(errFile, stderrText)
+  writeStub(binDir, 'ssh', [
+    'printf \'%s\\0\' "$@" > "$GLITCHTIP_TEST_SSH_RECORD"',
+    `cat ${shSingleQuote(outFile)}`,
+    `cat ${shSingleQuote(errFile)} >&2`,
+    `exit ${status}`,
+  ].join('\n'))
+  return { binDir, record }
+}
+
+/**
+ * 跑一条容器 env 用例：假 keys API 返回一个**健康的外部 DSN**（这样 API 侧的结论是
+ * OK/exit 0，不会掩盖容器侧的判定），容器侧由假 ssh 喂入。
+ * @param options - `{ workPrefix, envLines, sshStatus, sshStderr, useSsh }`。
+ */
+async function runContainerCase({ workPrefix, envLines = [], sshStatus = 0, sshStderr = '', useSsh = true }) {
+  const work = tempDir(workPrefix)
+  const { binDir, record } = fakeSsh(work, { envLines, status: sshStatus, stderrText: sshStderr })
+  const api = await startKeysApi([{ dsn: { public: 'https://key@glitchtip.example.com/42' } }])
+  const jar = writeJar(join(tempDir('glitchtip-jar-'), 'c.txt'), [
+    ['127.0.0.1', 'FALSE', '/', 'FALSE', String(FUTURE), 'glitchtip_session', 'SECRET-LOCAL'],
+  ])
+  const args = [
+    '--base-url', api.baseUrl,
+    '--cookies', jar,
+    ...(useSsh ? ['--ssh', 'ops@glitchtip-host'] : []),
+    '--json',
+  ]
+  const result = await runCheck(args, {
+    env: { PATH: `${binDir}:${process.env.PATH}`, GLITCHTIP_TEST_SSH_RECORD: record },
+  })
+  const served = api.state.requests.length
+  await api.close()
+  let report = null
+  try {
+    report = JSON.parse(result.stdout)
+  } catch {
+    /* 断言里报错 */
+  }
+  return { result, report, served, sshInvoked: existsSync(record) }
+}
+
+{
+  // (a) 三者皆空（现场只配了 MAIN_URL —— 6.2.x 里零代码读取）⇒ FAIL + exit 1。
+  const { result, report, served, sshInvoked } = await runContainerCase({
+    workPrefix: 'glitchtip-g8-empty-',
+    envLines: ['MAIN_URL=https://glitchtip.example.com'],
+  });
+  check(served === 1, `G-8(a): 假 keys API 应收到 1 个请求，实际 ${served}`)
+  // 前置断言：假 ssh 必须真的被调用过，否则下面的 FAIL 断言可能是"根本没查"的假绿。
+  check(sshInvoked, 'G-8(a): 假 ssh 未收到调用(接线失败)')
+  check(
+    report?.containerEnv?.reachable === true && report?.containerEnv?.siteUrlSource === null,
+    `G-8(a): 容器 env 应可达且无站点 URL 来源，实际 ${JSON.stringify(report?.containerEnv)}`,
+  )
+  check(
+    Array.isArray(report?.verdict) && report.verdict.includes(
+      'FAIL: 容器未设置站点 URL（GLITCHTIP_URL / APP_URL / GLITCHTIP_DOMAIN 三者皆空）'
+      + '—— DSN 展示与 issue permalink 会退化成 localhost（只配 MAIN_URL 不生效）',
+    ),
+    `G-8(a): 必须给"容器未设置站点 URL"的 FAIL verdict，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(result.status === 1, `G-8(a): 该 FAIL 必须 exit 1(实际 ${result.status})，stdout=${result.stdout.slice(0, 300)}`)
+}
+
+{
+  // (b) 只设 APP_URL（老部署的常见形态）⇒ OK 且来源标注必须是 APP_URL。
+  const { result, report, served, sshInvoked } = await runContainerCase({
+    workPrefix: 'glitchtip-g8-appurl-',
+    envLines: ['APP_URL=https://glitchtip.example.com'],
+  });
+  check(served === 1, `G-8(b): 假 keys API 应收到 1 个请求，实际 ${served}`)
+  check(sshInvoked, 'G-8(b): 假 ssh 未收到调用(接线失败)')
+  check(
+    Array.isArray(report?.verdict) && report.verdict.includes('OK: 容器已设置站点 URL（生效来源 APP_URL）'),
+    `G-8(b): 必须给"生效来源 APP_URL"的 OK verdict，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(result.status === 0, `G-8(b): 站点 URL 已设置时 exit 0(实际 ${result.status})`)
+}
+
+{
+  // (c) 优先级 GLITCHTIP_URL > APP_URL > GLITCHTIP_DOMAIN，且取值必须**真的被消费**
+  //     （不只钉 verdict 文案：期望 DSN 的主机必须来自 GLITCHTIP_URL）。
+  const { result, report, served, sshInvoked } = await runContainerCase({
+    workPrefix: 'glitchtip-g8-precedence-',
+    envLines: [
+      'GLITCHTIP_DOMAIN=https://legacy.example.com',
+      'APP_URL=https://app.example.com',
+      'GLITCHTIP_URL=https://preferred.example.com',
+    ],
+  });
+  check(served === 1, `G-8(c): 假 keys API 应收到 1 个请求，实际 ${served}`)
+  check(sshInvoked, 'G-8(c): 假 ssh 未收到调用(接线失败)')
+  check(
+    report?.containerEnv?.siteUrlSource === 'GLITCHTIP_URL'
+    && report?.containerEnv?.domain === 'https://preferred.example.com',
+    `G-8(c): 环境变量读取优先级应为 GLITCHTIP_URL，实际 ${JSON.stringify(report?.containerEnv)}`,
+  )
+  check(
+    Array.isArray(report?.verdict) && report.verdict.includes('OK: 容器已设置站点 URL（生效来源 GLITCHTIP_URL）'),
+    `G-8(c): 必须给"生效来源 GLITCHTIP_URL"的 OK verdict，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(
+    typeof report?.expectedDsn === 'string' && report.expectedDsn.includes('@preferred.example.com/42'),
+    `G-8(c): 期望 DSN 必须由容器 env 的域名推导(而不是回落 --base-url)，实际 ${JSON.stringify(report?.expectedDsn)}`,
+  )
+}
+
+{
+  // (d) ssh 读不到容器 env ⇒ UNKNOWN + exit 2（既不能报 OK，也不能冒充"发现缺陷"的 exit 1）。
+  const { result, report, served, sshInvoked } = await runContainerCase({
+    workPrefix: 'glitchtip-g8-sshfail-',
+    sshStatus: 1,
+    sshStderr: 'ssh: connect to host glitchtip-host port 22: Connection refused',
+  });
+  check(served === 1, `G-8(d): 假 keys API 应收到 1 个请求，实际 ${served}`)
+  check(sshInvoked, 'G-8(d): 假 ssh 未收到调用(接线失败)')
+  check(
+    Array.isArray(report?.verdict) && report.verdict.some(line => line.startsWith('UNKNOWN: 未能读取容器 env')),
+    `G-8(d): ssh 失败必须给 UNKNOWN verdict，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(
+    !(Array.isArray(report?.verdict) && report.verdict.some(line => /容器(未)?已?设置站点 URL/u.test(line))),
+    `G-8(d): ssh 失败时不得对站点 URL 下任何结论，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(result.status === 2, `G-8(d): ssh 失败必须 exit 2(实际 ${result.status})`)
+}
+
+{
+  // (e) 未给主机 ⇒ 跳过容器核查，且**绝不猜目标**（假 ssh 仍挂在 PATH 上，必须一次都没被调用）。
+  const { result, report, served, sshInvoked } = await runContainerCase({
+    workPrefix: 'glitchtip-g8-nohost-',
+    useSsh: false,
+  });
+  check(served === 1, `G-8(e): 假 keys API 应收到 1 个请求，实际 ${served}`)
+  check(!sshInvoked, 'G-8(e): 未给 --ssh 时不得调用 ssh(不猜目标)')
+  check(
+    Array.isArray(report?.notes) && report.notes.includes('跳过容器 env 核查（未提供主机）：只给了 --base-url，本次仅核查 API 侧'),
+    `G-8(e): 必须说明跳过了容器核查，实际 ${JSON.stringify(report?.notes)}`,
+  )
+  check(
+    !(Array.isArray(report?.verdict) && report.verdict.some(line => /站点 URL/u.test(line))),
+    `G-8(e): 跳过容器核查时不得对站点 URL 下结论，实际 ${JSON.stringify(report?.verdict)}`,
+  )
+  check(result.status === 0, `G-8(e): API 侧正常时 exit 0(实际 ${result.status})`)
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
@@ -467,5 +706,7 @@ if (failures.length > 0) {
 }
 process.stdout.write(
   'verify-glitchtip-ops-check: OK — 不可解析 DSN=fail-closed(UNKNOWN/exit 2)、坏转义不崩、'
-  + 'cookie 按 domain/path/secure 过滤、容器名与 compose 目录按字面量传递(注入惰性)\n',
+  + 'cookie 按 domain/path/secure 过滤、容器名与 compose 目录按字面量传递(注入惰性)、'
+  + '容器 env 判定被假 ssh 双向驱动(三者皆空 ⇒ FAIL/exit 1，APP_URL/GLITCHTIP_URL ⇒ OK 且来源正确)、'
+  + 'loopback 覆盖 127.0.0.0/8 · ::1 · 0.0.0.0 · *.localhost\n',
 )
