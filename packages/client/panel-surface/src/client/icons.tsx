@@ -99,11 +99,6 @@ export function IconChevron(props: PanelIconProps): JSX.Element {
   return <svg {...svgProps(props)}><path d="m4.2 6.2 3.8 3.8 3.8-3.8" {...STROKE} /></svg>
 }
 
-/** 成功。 */
-export function IconCheck(props: PanelIconProps): JSX.Element {
-  return <svg {...svgProps(props)}><path d="m3.4 8.4 3 3 6.2-7" {...STROKE} /></svg>
-}
-
 /** 提示/警示。 */
 export function IconAlert(props: PanelIconProps): JSX.Element {
   return <svg {...svgProps(props)}><circle cx="8" cy="8" r="5.8" {...STROKE} /><path d="M8 5.1v3.6M8 10.9h.01" {...STROKE} /></svg>
@@ -143,11 +138,6 @@ export function IconTrash(props: PanelIconProps): JSX.Element {
       <path d="M4.2 4.4l.6 8a1.4 1.4 0 0 0 1.4 1.3h3.6a1.4 1.4 0 0 0 1.4-1.3l.6-8" {...STROKE} />
     </svg>
   )
-}
-
-/** 人员 / 负责人。 */
-export function IconUser(props: PanelIconProps): JSX.Element {
-  return <svg {...svgProps(props)}><circle cx="8" cy="5.6" r="2.6" {...STROKE} /><path d="M3.4 13.2a4.9 4.9 0 0 1 9.2 0" {...STROKE} /></svg>
 }
 
 /** 权限 / 访问级别。 */

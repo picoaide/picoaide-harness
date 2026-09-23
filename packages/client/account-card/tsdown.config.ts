@@ -9,7 +9,6 @@ export default defineConfig([
     entry: {
       index: 'src/index.ts',
       invariant: 'src/invariant.ts',
-      'usage-service': 'src/usage-service.ts',
     },
     outDir: 'lib',
     format: 'esm',

@@ -126,18 +126,6 @@ function saveState(stateFile, state) {
   writeFileAtomicSafeAt(stateFile, JSON.stringify(state, null, 2))
 }
 
-/** Extensions treated as text even when the sniffing heuristics are inconclusive. */
-const TEXT_EXTENSIONS = new Set([
-  '.md', '.markdown', '.txt', '.text', '.json', '.json5', '.jsonc', '.yaml', '.yml',
-  '.toml', '.ini', '.cfg', '.conf', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.css', '.scss', '.less', '.html', '.htm', '.xml', '.svg', '.py', '.rb', '.go',
-  '.rs', '.java', '.kt', '.c', '.h', '.cc', '.cpp', '.hpp', '.cs', '.swift', '.php',
-  '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.sql', '.graphql', '.vue',
-  '.svelte', '.astro', '.env', '.gitignore', '.gitattributes', '.editorconfig',
-  '.eslintrc', '.prettierrc', '.npmrc', '.lock', '.properties', '.csv', '.tsv',
-  '.log', '.diff', '.patch', '.d.ts', '.d.cts', '.d.mts', '.dsh', '.skl', '.yml.i18n',
-])
-
 /** File extensions never offered for browsing/editing (generated or binary). */
 const SKIP_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.icns', '.bmp', '.avif', '.heic',

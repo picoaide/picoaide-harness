@@ -21,9 +21,6 @@ export function newTaskId() {
   return `coi-${Date.now().toString(36)}-${sequence.toString(36)}`
 }
 
-/** 任务状态机。 */
-export const TASK_STATUSES = ['queued', 'running', 'completed', 'failed', 'killed', 'interrupted']
-
 /**
  * @param {string} dir - 数据目录（memoryDir/coi）。
  * @param {object} [opts] - { maxLogBytes, retentionDays }。

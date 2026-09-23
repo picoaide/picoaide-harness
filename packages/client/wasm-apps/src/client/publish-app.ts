@@ -39,8 +39,6 @@ import {
 /** 本地发布入口（宿主路由；唯一的发布链路）。 */
 export const PUBLISH_PATH = '/api/pico/apps/wasm/publish'
 
-export { DEFAULT_ACCESS, WHITELIST_MAX, WRITABLE_ACCESS_MODES, type AccessMode }
-
 /** 应用配置草稿（字段名与 `picoaide.app.json` 一一对应）。 */
 export interface PublishConfigDraft {
   /**

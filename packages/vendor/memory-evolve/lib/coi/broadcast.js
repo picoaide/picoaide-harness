@@ -375,7 +375,6 @@ export class RoomStore {
  */
 const isPseudo = (r) => typeof r === 'string' && (r.startsWith('room:') || r.startsWith('project:'))
 const isRoomRef = (r) => typeof r === 'string' && r.startsWith('room:')
-const isProjectRef = (r) => typeof r === 'string' && r.startsWith('project:')
 
 /**
  * 解析一个接收者引用为 { type, value }：

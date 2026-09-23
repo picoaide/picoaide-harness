@@ -189,6 +189,40 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
   `name == 目录名`"）；`tests/coi.test.js` 的 skills-sync 用例同样钉住"包内 `skills/`
   与本插件清单一一对应"。
 
+### H. 死代码清理（2026-09-23；**升级合并后必须逐项复核，否则会被 `cp -a` 静默带回来**）
+
+本包 1310 个顶层声明里只有 15 个全仓零引用，下列 **1 个整文件 + 12 个符号**已删除
+（除 `DynamicsStore` 外全部是"零调用点的常量"）。判据与逐条证据：
+`temp/refactor-2026-09-23/R6-client-vendor.md` 与
+`temp/refactor-2026-09-23/probes/R6-client-vendor/memory-evolve-notes.md`（§3）。
+
+| 位置 | 删除对象 | 为什么是死的 |
+|---|---|---|
+| `lib/coi/dynamics.js` | **整文件 106 行**（`DynamicsStore`，房间动态队列） | 无 import、无按名查找；`tests/coi.test.js` 只有**反向**断言（不再写 `dynamics.json`）——快照通道早已改走 broadcast 段 |
+| `lib/skills-manager.js` | `TEXT_EXTENSIONS` | 全仓仅声明 1 处；文本判定走嗅探启发式，该白名单从未参与 |
+| `lib/coi/ws-coord.js` | `ACTIVE_WINDOW_MS` | 仅 1 处；"最近活跃"由 `sessionMeta.lastActiveAt` 派生 |
+| `lib/coi/broadcast.js` | `isProjectRef` | 仅 1 处；`isPseudo` / `isRoomRef` 在用 |
+| `lib/session-orch.js` | `PRESET_COMPOSITION_FILE` | 仅 1 处；preset 组成文件名不再由本包读取 |
+| `lib/sync/repo.js` | `TODO_FILE` | 仅 1 处；TODO 判定统一走 `lib/sync/filesets.js` 的 `isTodoPath` |
+| `lib/todo.js` | `TODO_STATUSES`、`TODO_ARCHIVE_TARGET` | 各 1 处；状态判定用字面量（该常量从未参与校验） |
+| `lib/coi/tasks-store.js` | `TASK_STATUSES` | 仅 1 处 |
+| `lib/advisor/instructions.js` | `INSTRUCTION_STATES` | 仅 1 处 |
+| `lib/advisor/runtime.js` | `RUNTIME_STATUS` | 仅 1 处 |
+| `lib/canvas.js` | `canvasDir(config)` | 仅 1 处；`canvasPath` 在用 |
+| `lib/sync/filesets.js` | `globalLocalBranchFor(fileset)` | 仅 1 处；`globalBranchFor` 在用 |
+
+**未删（有意保留，别当漏网）**：`lib/prompts.js` 的 `SEED_VERSION`（上游有意预留的迁移锚点）、
+`lib/update.js` 的 `_resetSharedChecker()`（单例测试接缝）、48 个"导出但只在本文件内用"的符号
+（vendor 是三方合并面，去掉 `export` 只会制造噪声 diff）、3 个 test-only 符号（测试即契约）。
+
+**另一条等价性结论（别当 bug 修）**：36 个 i18n 别名（带 / 不带 `getLocale()`）语义完全等价
+（`lib/i18n.js` 的 `translate(dict, key, params, locale = undefined)` 里 `const lang = locale ?? active`，
+而 `getLocale()` 返回的就是 `active`）。不要为了"统一"去动那 31 个文件。
+
+**升级后自查**：上表 12 个符号在合并结果里应仍不存在（逐条 `grep -rn "\b<SYM>\b" lib/ --include=*.js`
+的命中数应为 0），且 `lib/coi/dynamics.js` 不应重新出现（`ls lib/coi/dynamics.js` 报不存在）；
+任何一条复活都说明 `cp -a` 把上游版本带了回来，按本表再删一次即可。
+
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
 | 上游提交 | 内容 | 落地文件 |

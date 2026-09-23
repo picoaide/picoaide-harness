@@ -55,11 +55,6 @@ export function globalBranchFor(fileset) {
   return `dsh-shared/${name ?? fileset}`
 }
 
-/** 全局轨本地分支名（refs/heads/<fileset>，与远端分支解耦）。 */
-export function globalLocalBranchFor(fileset) {
-  return fileset
-}
-
 /** 取 fileset 的规格对象（未知 fileset 抛错）。 */
 export function filesetSpec(fileset) {
   if (fileset === 'project') return PROJECT_SPEC
