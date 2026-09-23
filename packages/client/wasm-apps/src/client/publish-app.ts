@@ -22,6 +22,7 @@
  */
 
 import { t } from './locales.ts'
+import { isAvailabilityReason, type AppAvailabilityReason } from './availability-contract.ts'
 import {
   APP_ID_ALL_DIGITS_PATTERN,
   APP_ID_MAX_LENGTH,
@@ -660,9 +661,15 @@ export interface AppIdAvailability {
   ownedByYou: boolean
   /** 能否对这个标识**发布**（本人的应用，或管理员的兜底接管）。 */
   canPublish: boolean
-  /** 判词：available / yours / taken / invalid。 */
-  reason: 'available' | 'yours' | 'taken' | 'invalid'
-  /** 非 available 时的稳定错误码（`NAME_TAKEN` / `INVALID_APP_ID`），与发布路径同码。 */
+  /**
+   * 判词。取值集合的唯一客户端镜像在 {@link APP_AVAILABILITY_REASONS}
+   * （`availability-contract.ts`），它与服务端源码的取值集合由对拍用例钉住。
+   */
+  reason: AppAvailabilityReason
+  /**
+   * 非 available 时的稳定错误码（`NAME_TAKEN` / `INVALID_APP_ID` / `APP_FROZEN` /
+   * `NOT_FOUND`），与发布路径**同码** —— 服务端两侧共用同一个 `*apperr.Error`。
+   */
   code: string
   /** 可读原因（服务端原文，客户端不改写）。 */
   message: string
@@ -678,14 +685,21 @@ export type AvailabilityOutcome =
 /**
  * 解析标识查重载荷。**fail-closed**：判词字段认不出来就返回 `null`（调用方据此
  * 判定为"查重不可用"），绝不默认成"可用"—— 那会让表单放行一次注定失败的发布。
+ *
+ * "认得出"= {@link isAvailabilityReason} 为真，取值集合来自
+ * `availability-contract.ts`（与**服务端源码**对拍，不在这里手写字面量）。
+ * 认不出的判词只有一条去路：{@link checkAppIdAvailability} 回 `UNEXPECTED_RESPONSE`
+ * ⇒ UI 显示"暂时无法确认"，绝不显示"可以用"。
  * @param payload - 服务端响应体。
- * @returns 判词，或 `null`（形状不认识）。
+ * @returns 判词，或 `null`（形状/判词不认识）。
  */
 export function parseAvailability(payload: unknown): AppIdAvailability | null {
   if (typeof payload !== 'object' || payload === null) return null
   const raw = payload as Record<string, unknown>
   const reason = raw.reason
-  if (reason !== 'available' && reason !== 'yours' && reason !== 'taken' && reason !== 'invalid') return null
+  // 判词集合的唯一镜像在 availability-contract.ts（对拍用例读服务端源码钉住它）：
+  // 这里**不再手写第二份字面量** —— 正是"两端各钉自己的字面量"那类漂移的温床。
+  if (!isAvailabilityReason(reason)) return null
   return {
     appId: typeof raw.app_id === 'string' ? raw.app_id : '',
     valid: raw.valid === true,

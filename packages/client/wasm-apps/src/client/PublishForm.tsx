@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { t, type AppCenterKey } from './locales.ts'
 import { WASM_MAX_BYTES, WRITABLE_ACCESS_MODES, type AccessMode } from './appcfg-contract.ts'
 import { appShareLink } from './deep-link.ts'
+import { AVAILABILITY_REASON_COPY } from './availability-contract.ts'
 import {
   type AppIdAvailability,
   type PublishDraft,
@@ -204,10 +205,12 @@ function formatBytes(bytes: number): string {
  * 把查重状态翻成一行给用户看的话。
  *
  * 几条刻意的取舍：
- *  - `taken` 时**优先显示服务端的 `message`**：它就是发布那一刻 409 的那句话，
- *    两条链路给出同一句话，用户不会以为"查重说占用、提交说别的"是两回事；
- *  - `invalid` 同理（服务端指名了到底是哪条规则；本地文案只是兜底）；
- *  - `taken` 追加一条 `takenHint`，把"永久占用、下架/删除也不释放"讲清楚 ——
+ *  - 判词的文案与"要不要拦提交"都取自 **{@link AVAILABILITY_REASON_COPY}**（一张表，
+ *    `Record<AppAvailabilityReason, …>`，漏一个判词 tsc 就报错）—— 不在这里写第二份
+ *    reason 字面量；
+ *  - 有服务端 `message` 时**优先显示它**：那就是发布那一刻被拒的同一句话，两条链路
+ *    给出同一句话，用户不会以为"查重说占用、提交说别的"是两回事；
+ *  - `hint`（表里声明的补充说明）追加在同一条里，把"永久占用/冻结可解冻"讲清楚 ——
  *    否则用户会去下架自己的旧应用然后奇怪为什么名字还是拿不回来；
  *  - `checking` / `unknown` **都说"不确定"**，绝不说"可用"。
  * @param availability - 当前查重态。
@@ -223,18 +226,10 @@ function availabilityText(availability: AvailabilityState): string {
       return t('appCenter.availabilityUnknown')
     case 'known': {
       const { verdict } = availability
-      switch (verdict.reason) {
-        case 'available':
-          return t('appCenter.availabilityFree')
-        case 'yours':
-          return t('appCenter.availabilityYours')
-        case 'taken': {
-          const head = verdict.message === '' ? t('appCenter.availabilityTaken') : verdict.message
-          return `${head} — ${t('appCenter.availabilityTakenHint')}`
-        }
-        case 'invalid':
-          return verdict.message === '' ? t('appCenter.availabilityInvalid') : verdict.message
-      }
+      const copy = AVAILABILITY_REASON_COPY[verdict.reason]
+      // 服务端原文优先（与发布路径同源），本地键兜底。
+      const head = verdict.message === '' ? t(copy.label) : verdict.message
+      return copy.hint === undefined ? head : `${head} — ${t(copy.hint)}`
     }
   }
 }
@@ -369,10 +364,16 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
    * 为什么不能只靠 `availability` 状态：它可能来自几百毫秒前的输入（防抖窗口里
    * 用户又改了名字），也可能因为防抖/网络根本没跑过 —— 拿它放行等于把"提交"押在
    * 一个可能过期的缓存上。这里**主动再问一次**，并且：
-   *  - 明确"被别人占用"⇒ 返回一条本地 issue，**不上传**（省掉一次 32 MiB 往返）；
+   *  - 判词在表里标了 `blocksSubmit`（被别人占用 / 名字不合法 / 应用被冻结 / 应用
+   *    已退役）⇒ 返回一条本地 issue，**不上传**（省掉一次 32 MiB 往返）；
    *  - 明确"是你的"或"空闲"⇒ 放行；
-   *  - 查重本身失败（宿主故障）⇒ **放行**，让服务端在发布那一刻给出权威判定 ——
-   *    查重是体验优化，不能变成新的单点故障（它挂了不该让所有人都发不出去）。
+   *  - 查重本身失败（宿主故障 / 判词认不出来）⇒ **放行**，让服务端在发布那一刻给出
+   *    权威判定 —— 查重是体验优化，不能变成新的单点故障（它挂了不该让所有人都发不出去）。
+   *
+   * 拦不拦由 {@link AVAILABILITY_REASON_COPY} 的 `blocksSubmit` 决定（**不是**这里第二份
+   * 判词名单）：R3-A 的 A-4 给 availability 加了 `frozen` / `retired` 两个终态判词，
+   * 服务端已保证它们 `can_publish=false`，而本地既不认识它们、更不会据此拦下 ——
+   * 用户于是白传一整个包才拿到 403 `APP_FROZEN` / 404 `NOT_FOUND`。
    * @returns 拦下提交的本地 issue；`null` = 可以继续提交。
    */
   const verifyAppIdBeforeSubmit = useCallback(async (candidate: string): Promise<ValidationIssue | null> => {
@@ -381,22 +382,15 @@ export function PublishForm({ onClose, onPublished, target }: { onClose: () => v
     const outcome = await checkAppIdAvailability(candidate)
     if (!outcome.ok) return null
     const verdict = outcome.availability
-    if (verdict.reason === 'taken') {
-      return {
-        field: 'app_id',
-        code: 'app_id_taken',
-        message: verdict.message === '' ? t('appCenter.availabilityTaken') : verdict.message,
-      }
+    const copy = AVAILABILITY_REASON_COPY[verdict.reason]
+    if (!copy.blocksSubmit) return null
+    return {
+      field: 'app_id',
+      // 稳定码与判词一一对应（`app_id_taken` / `app_id_invalid` / …），既有取值不变。
+      code: `app_id_${verdict.reason}`,
+      // 服务端原文优先（它指名了到底是哪一条规则 / 下一步怎么做），本地文案兜底。
+      message: verdict.message === '' ? t(copy.label) : verdict.message,
     }
-    if (verdict.reason === 'invalid') {
-      return {
-        field: 'app_id',
-        code: 'app_id_invalid',
-        // 服务端原文优先（它指名了到底是哪一条规则），本地文案兜底。
-        message: verdict.message === '' ? t('appCenter.availabilityInvalid') : verdict.message,
-      }
-    }
-    return null
   }, [initial.currentAccess])
 
   const pickFile = useCallback(async (selected: File | null): Promise<void> => {

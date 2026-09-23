@@ -136,6 +136,13 @@ export const zh = {
   'appCenter.availabilityTaken': '该标识已被占用，请换一个名字',
   'appCenter.availabilityTakenHint': '标识一经发布即永久占用：首个发布者一直持有，被下架或删除也不释放',
   'appCenter.availabilityInvalid': '这个标识不符合命名规则，请按提示修改',
+  // 终态判词（R3-A A-4）：服务端 `publishBlockOf` 的两个取值，都意味着**不能发新版**。
+  // 这两条是 `message` 缺席时的兜底（服务端原文优先，它与 publish 那一刻的拒绝同源）；
+  // hint 指向下一步动作 —— 只说"不能发"会让用户卡住。
+  'appCenter.availabilityFrozen': '这个标识属于一个已冻结的应用，解冻后才能发新版本',
+  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人可以解冻（同一端点带 {"frozen":false}），或换一个名字新建应用',
+  'appCenter.availabilityRetired': '这个标识属于一个已删除（退役）的应用，标识与版本号永久占位',
+  'appCenter.availabilityRetiredHint': '已删除的应用标识不会复用、也不释放给他人：请换一个名字新建应用',
   // 查重**没问成**（宿主/网络故障）：既不能说"可用"也不能说"被占用" ——
   // 说可用会放行一次注定失败的发布，说被占用会把一个合法的名字误杀。
   'appCenter.availabilityUnknown': '暂时无法确认该标识是否可用（不影响提交，提交时服务端会再判一次）',
@@ -463,6 +470,10 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.availabilityTaken': 'This App ID is already taken; please pick another name',
   'appCenter.availabilityTakenHint': 'An App ID is claimed permanently on first publish: it stays with its publisher even after unpublish or delete',
   'appCenter.availabilityInvalid': 'This App ID does not follow the naming rules — see the hint',
+  'appCenter.availabilityFrozen': 'This App ID belongs to a frozen app; unfreeze it before releasing a new version',
+  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher can unfreeze it (same endpoint with {"frozen":false}), or pick another name',
+  'appCenter.availabilityRetired': 'This App ID belongs to a deleted (retired) app; the ID and its version numbers are taken permanently',
+  'appCenter.availabilityRetiredHint': 'A deleted App ID is never reused or released to others: please pick another name',
   'appCenter.availabilityUnknown': 'Could not confirm whether this App ID is available (you can still submit; the server checks again)',
   'appCenter.availabilityShapeMismatch': 'The availability result does not match what the client expects',
   'appCenter.availabilityShapeHint': 'Report this to the platform maintainer: the server likely renamed an availability field',
