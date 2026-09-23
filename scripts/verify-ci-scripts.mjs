@@ -618,7 +618,10 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     const required = /--require\s+(\S+)/u.exec(text)?.[1]?.split(',').map(name => name.trim()).filter(Boolean) ?? []
     const goTest = /go\s+test\b[^\n]*?-json[^\n]*?>\s*([^\s;&|]+)/u.exec(text)
     const reportArg = /check-go-test-json\.mjs\s+([^\s\\]+)/u.exec(text)?.[1]
-    check(scope === 'internal/wasmapp,internal/router', `W-4 的 --scope 应为 internal/wasmapp,internal/router(不带尾斜杠:带了会漏掉 internal/router 根包的用例事件),实际 ${String(scope)}`)
+    // 登记值必须与 `scripts/check-workflows.mjs` 的 `WASM_CASE_GATE_SCOPE` 同一份取值:
+    // 前两段与组 3 同面,后两段(F8,2026-09-23)是 A-8 渠道守卫用例所在的包 ——
+    // 那两个包的用例依赖真 PG,PG 不可达时整包 `t.Skip`,不纳入判定面就等于没有守卫。
+    check(scope === 'internal/wasmapp,internal/router,internal/marketplace,internal/agentshare', `W-4 的 --scope 应为 internal/wasmapp,internal/router,internal/marketplace,internal/agentshare(不带尾斜杠:带了会漏掉 internal/router 根包的用例事件),实际 ${String(scope)}`)
     check(goTest !== null && reportArg !== undefined && goTest[1] === reportArg,
       `W-4 的报告路径必须与 go test -json 的落盘路径一致(实际落盘 ${String(goTest?.[1])} / 读取 ${String(reportArg)})`)
     check(required.length === 3, `W-4 的 --require 必须是三条关键用例,实际 ${required.length} 条:${required.join(', ')}`)

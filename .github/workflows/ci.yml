@@ -374,11 +374,17 @@ jobs:
       # 「**用例级 0 skip** + 三条关键用例确实 pass」判。该判据脚本此前只被组 3 调用,
       # 而组 3 没有任何 job 跑(`.github/` 对它 0 引用)⇒ 判据从不执行。
       #
-      # **范围**:`--scope internal/wasmapp,internal/router`(**不带尾斜杠** —— 带尾斜杠
-      # 会漏掉 `internal/router` 根包自己的 65 个用例事件,实测)与组 3 同面。全仓报告里
-      # 有若干**环境条件型** skip(如 `internal/serverstore` 的 DST 用例在 UTC runner
-      # 上必然 `t.Skip("本机时区无夏令时")`)—— 把"零用例级 skip"套到全仓等于每次必红的
-      # 假红,而假红的常见下场是整条判据被关掉。范围外事件不参与判定(脚本会打印计数)。
+      # **范围**:`--scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare`
+      # (**不带尾斜杠** —— 带尾斜杠会漏掉 `internal/router` 根包自己的 65 个用例事件,实测)。
+      # 前两段与组 3 同面;后两段是第三轮修复补齐的:渠道命名空间守卫(A-8/F1-F6)的用例
+      # 全在这两个包里,而它们**依赖真 PG** —— PG 不可达时 `serverstore.NewTestDB` 会
+      # `t.Skip("DB test skipped: postgres unavailable …")`,旧范围下"整包静默跳过"是绿的
+      # (复审 F8)。本机实测(真库,`PG_DSN_TEST` 指向新建库):两包 `-json` 报告里
+      # **用例级 skip = 0**(`internal/agentshare` 唯一的 `t.Skip` 是夹具尺寸超过预览上限
+      # 时的分支,当前 10 个形态全部 ≤128KiB,不触发)⇒ 纳入判定面不会造成每次必红的假红。
+      # 全仓报告里另有若干**环境条件型** skip(如 `internal/serverstore` 的 DST 用例在 UTC
+      # runner 上必然 `t.Skip("本机时区无夏令时")`)—— 把"零用例级 skip"套到全仓等于每次
+      # 必红的假红,而假红的常见下场是整条判据被关掉。范围外事件不参与判定(脚本打印计数)。
       - name: Go tests (repo-wide) + WASM case-level report
         run: |
           set -euo pipefail
@@ -388,7 +394,7 @@ jobs:
           go test ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
           CHECK_STATUS=0
           node ../scripts/wasm/check-go-test-json.mjs go-test.json \
-            --scope internal/wasmapp,internal/router \
+            --scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare \
             --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_ProjectsUserRowAndPublisherFlag \
             || CHECK_STATUS=$?
           if [ "${GO_TEST_STATUS}" -ne 0 ]; then

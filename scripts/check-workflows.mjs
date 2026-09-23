@@ -876,8 +876,17 @@ const WASM_CASE_GATE_REQUIRED = [
   'TestCheckClientOrigin',
   'TestClientFrameUser_ProjectsUserRowAndPublisherFlag',
 ]
-/** W-4 的判定范围(与组 3 同面;全仓套"零 skip"会因环境条件型 skip 变成每次必红的假红)。 */
-const WASM_CASE_GATE_SCOPE = ['internal/wasmapp', 'internal/router']
+/**
+ * W-4 的判定范围(前两段与组 3 同面;`internal/marketplace`/`internal/agentshare` 是
+ * 2026-09-23 第三轮修复按 F8 补的 —— 渠道命名空间守卫(A-8)的用例全在这两个包里,
+ * 且它们**依赖真 PG**:PG 不可达时 `serverstore.NewTestDB` 会整包 `t.Skip`
+ * ("DB test skipped: postgres unavailable"),旧范围下"整包静默跳过"是绿的。
+ * 真库实测两包用例级 skip = 0 ⇒ 纳入判定面不会造成假红。全仓套"零 skip"仍会因
+ * `internal/serverstore` 的 DST 这类**环境条件型** skip 变成每次必红。
+ * 改这里必须同步 `scripts/verify-ci-scripts.mjs` 的登记值(它真跑判定脚本并逐字
+ * 比对 ci.yml 的 `--scope`)。
+ */
+const WASM_CASE_GATE_SCOPE = ['internal/wasmapp', 'internal/router', 'internal/marketplace', 'internal/agentshare']
 /** W-5 的探针组与它必须带的"非覆盖平台显式 SKIP"开关。 */
 const WASM_PROBE_GROUPS = ['6']
 const WASM_PROBE_ENV = 'WASM_GATE_REQUIRE_COVERED_PLATFORM'

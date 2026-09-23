@@ -24,12 +24,16 @@
  * 缺省（不带 `--scope`）= 整份报告都判，组 3 的用法不变。
  *
  * 为什么 CI 需要它：server job 跑的是**全仓** `./...`，而"用例级 0 skip"这条判据的
- * 设计面是 `internal/wasmapp/... internal/router/...`（组 3 的范围）。全仓报告里有若干
+ * 设计面是 `internal/wasmapp/... internal/router/...`（组 3 的范围）加上 2026-09-23 按
+ * F8 补进来的 `internal/marketplace`/`internal/agentshare`（渠道命名空间守卫 A-8 的用例
+ * 所在包 —— 那两个包依赖真 PG，`serverstore.NewTestDB` 在 PG 不可达时整包 `t.Skip`，
+ * 旧范围下"静默全跳"是绿的；真库实测两包用例级 skip = 0）。全仓报告里有若干
  * **环境条件型** skip —— 例如 `internal/serverstore` 的 DST 用例在 UTC runner 上必然
  * `t.Skip("本机时区无夏令时")`、`internal/portal`/`serverstore` 的对拍用例在"看不到
  * 仓库外的客户端源码"时 skip。把零 skip 套到全仓 = 每次必红的假红，而假红的下场
  * 通常是把整条判据关掉（本仓反复记录过这个退化路径）。所以 CI 按范围判定：
- * `--scope internal/wasmapp,internal/router`，与组 3 同面。
+ * `--scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare`
+ * （前两段与组 3 同面）。
  *
  * **前缀不要带尾斜杠**：`internal/router/` 会漏掉 `internal/router` 根包自己的用例事件
  * （实测 65 个事件/12 个用例），而它正是路由表对拍所在。前缀按"包导入路径片段"匹配。
