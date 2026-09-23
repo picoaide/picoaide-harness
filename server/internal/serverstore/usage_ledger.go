@@ -489,13 +489,8 @@ func mergeUsageRows(a, b []UsageAggregateRow) []UsageAggregateRow {
 			order = append(order, r.Label)
 			return
 		}
-		cur.PromptTokens += r.PromptTokens
-		cur.CompletionTokens += r.CompletionTokens
-		cur.Requests += r.Requests
-		cur.EmbedRequests += r.EmbedRequests
-		cur.EmbedTokens += r.EmbedTokens
-		cur.CacheTokens += r.CacheTokens
-		cur.Cost += r.Cost
+		// 7 个可累加字段的唯一实现（原先是三处逐字节相同的副本之一）。
+		addUsageRow(&cur, r)
 		byLabel[r.Label] = cur
 	}
 	for _, r := range a {

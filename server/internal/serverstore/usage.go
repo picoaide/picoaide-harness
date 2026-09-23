@@ -460,6 +460,26 @@ type UsageAggregateRow struct {
 	Cost float64 `json:"cost"`
 }
 
+// addUsageRow 把 src 的**全部可累加字段**加到 dst 上（Label 是分组键，不参与累加）。
+//
+// 2026-09-23：本函数是这三处累加的唯一实现 —— `usage_dept.go`（group=dept）、
+// `usage_ledger.go` 的 mergeUsageRows（明细 + 日/月账本两段合并）、
+// `usage_provider.go`（group=provider）原先各有一份**逐字节相同**的 7 行累加块，
+// 分属三条互不相干的报表路径。把它们合成一处之后，
+// **加第 9 个可累加字段时只有这一个落点**，不会出现"某一条报表路径静默少计"。
+//
+// 数值口径与合并前逐字一致：纯字段相加，**不做任何取整/分位/微元换算**
+// （Cost 是元、已按记录时的口径落库；这里只负责求和，改精度不在此处）。
+func addUsageRow(dst *UsageAggregateRow, src UsageAggregateRow) {
+	dst.PromptTokens += src.PromptTokens
+	dst.CompletionTokens += src.CompletionTokens
+	dst.Requests += src.Requests
+	dst.EmbedRequests += src.EmbedRequests
+	dst.EmbedTokens += src.EmbedTokens
+	dst.CacheTokens += src.CacheTokens
+	dst.Cost += src.Cost
+}
+
 // UsageAggregateOption 为 UsageAggregate 的可选过滤条件。
 type UsageAggregateOption func(*UsageAggregateQuery)
 
