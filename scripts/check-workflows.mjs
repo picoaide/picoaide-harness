@@ -393,7 +393,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-7', 'SK-7a', 'SK-7b', 'SK-7c']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
 const SELFTEST_SCANNER_ASSERTIONS = 5
@@ -491,7 +491,7 @@ export function checkWorkflowText(name, text) {
       if (typeof step?.run === 'string' && typeof step.uses === 'string') {
         failures.push({ name, line: 0, detail: `job ${jobId} 的某个 step 同时有 run 与 uses` })
       }
-      if (typeof step?.run === 'string' && step.run.includes('ci-channel-transfer.sh')) {
+      if (typeof step?.run === 'string' && executableScript(step.run).includes('ci-channel-transfer.sh')) {
         const env = typeof step.env === 'object' && step.env !== null ? step.env : {}
         const missing = TRANSFER_REQUIRED_ENV.filter(name => {
           const value = env[name]
@@ -509,8 +509,8 @@ export function checkWorkflowText(name, text) {
       // 渠道 DMG 打包(ci-package-clients.sh + '*.dmg')必须带公证三元组。
       if (
         typeof step?.run === 'string'
-        && step.run.includes('ci-package-clients.sh')
-        && step.run.includes('*.dmg')
+        && executableScript(step.run).includes('ci-package-clients.sh')
+        && executableScript(step.run).includes('*.dmg')
       ) {
         const env = typeof step.env === 'object' && step.env !== null ? step.env : {}
         const missing = CHANNEL_DMG_NOTARIZE_REQUIRED_ENV.filter(name => {
@@ -527,7 +527,9 @@ export function checkWorkflowText(name, text) {
         }
         // 凭据齐了还要真的调公证:`--sign-only` 只签名不 staple,客户包会退回
         // "无票据"状态(本次缺陷的形态),必须能在 run 里看到公证命令。
-        if (!step.run.includes('dist:mac:notarize')) {
+        // "真的调了公证"必须落在**命令**上:先剥注释、再剥引号内容 —— 否则
+        // `echo "… dist:mac:notarize"` 这种回显就能满足判据(C-CI-3 的同类形态)。
+        if (!stripQuotedPayloads(executableScript(step.run)).includes('dist:mac:notarize')) {
           failures.push({
             name,
             line: 0,
@@ -551,33 +553,9 @@ export function checkWorkflowText(name, text) {
           })
         }
       }
-      // GitHub Release 的「名字」与「说明」(2026-09-11 定案):
-      //   - Release 名必须是 tag 本身。Releases 页左侧列表宽度固定,
-      //     "PicoAide Harness v2.6.9-beta.5" 会被截断成 "PicoAide Harness v2.6…",
-      //     一页十几个版本号全都看不见 —— 只剩重复的产品名前缀。
-      //   - 正式 tag 缺 docs/releases/<tag>.md 必须 fail-loud:回退自动生成的 PR
-      //     列表等于把公开版本页变成 CI 日志(v2.7.0 的实际情况)。
-      // 这两条都只在 tag 触发时才有感觉(PR/分支全绿、发版才发现),只能靠静态检查拦。
-      if (typeof step?.run === 'string' && step.run.includes('gh release create')) {
-        if (!step.run.includes('--title "${TAG}"')) {
-          failures.push({
-            name,
-            line: 0,
-            detail: `job ${jobId} 的 gh release 步骤没有把 Release 名设为 tag 本身`
-              + '(长名会被 Releases 页左侧列表截断,同页版本号全部不可见;请用 --title "${TAG}")',
-          })
-        }
-        const notesPolicy = ['docs/releases/${TAG}.md', '--notes-file', '--generate-notes', 'exit 1']
-        const missingPolicy = notesPolicy.filter(fragment => !step.run.includes(fragment))
-        if (missingPolicy.length > 0) {
-          failures.push({
-            name,
-            line: 0,
-            detail: `job ${jobId} 的 gh release 步骤缺少发布说明策略: ${missingPolicy.join(', ')}`
-              + '(正式 tag 必须用 docs/releases/${TAG}.md;缺失时 exit 1,不静默回退自动变更日志;模板 docs/releases/TEMPLATE.md)',
-          })
-        }
-      }
+      // GitHub Release 的「名字」与「说明」判据(2026-09-11 定案)已迁到 [SK-11],
+      // 且从"整段 YAML 子串匹配"改成**解析调用参数**(2026-09-23 审计 C-CI-3:
+      // 旧写法把 `--title "${TAG}"` 注释掉仍 EXIT=0,而等价的 `--title "$TAG"` 反被判红)。
     }
   }
 
@@ -637,6 +615,13 @@ export function checkWorkflowText(name, text) {
   // 策略 4(2026-09-19 第三轮审计 F2-3):块标量里的 `|| exit 0` / `! cmd` / 管道 + 缺
   // `set -eo pipefail` 三类静默失败。挂在白名单与 reported 去重之后,与 7a/7c 同口径。
   failures.push(...checkBlockScalarErrorHandling(name, document, blocks, allowlist, reported))
+  // 策略 5(2026-09-23 第三轮审计 R3-C C-7/C-3):CI 不得把根门禁换成弱化形态,
+  // 且 docs-only 判定不得跳过根守卫。
+  failures.push(...checkRootGateIntegrity(name, document, text, notes))
+  // 策略 6(C-CI-1):docs-only 分类器的规则逐条钉死(改宽/改窄都要红)。
+  failures.push(...checkDocsOnlyClassifier(name, document, text, notes))
+  // 策略 7(C-CI-2/C-CI-3):发布面语义判据(策展说明位置 + gh release argv)。
+  failures.push(...checkReleaseSurface(name, document, text, notes))
 
   return workflowResult(failures, {
     checked,
@@ -808,6 +793,109 @@ const INLINE_SWALLOW_TAIL = /(?:\|\||;)\s*[({]?\s*(?:true|:|echo|exit\s+0)(?![\w
 const SHELL_NEGATION = /(?:^|[;&|])\s*!\s*\S/u
 /** `if ! cmd` / `while ! cmd` / `elif ! cmd`(取反结果交给分支处理)。 */
 const NEGATION_IN_CONDITION = /\b(?:if|elif|while|until)\s+!\s+/u
+
+// ===== SK-8 / SK-9:根门禁调用的形态,以及"docs-only 不得跳过根守卫" =====
+//
+// 现场一(2026-09-23 第三轮审计 R3-C C-7):把 gate 那一步改成
+// `yarn check --no-guards`(丢掉**全部**根守卫)/ `--only <单包>`(只跑一个包)/
+// `--changed <ref>`(只跑改动映射到的包)/ `check:fast`(就是 `--changed` 的别名),
+// 四种变异在 `check-workflows.mjs` 下**全部 EXIT=0** —— bash -n 合法,SK-7 的三条
+// (吞码 / 超时序 / 单行退出码)也都不适用。这属于"守卫与被守卫对象的**语义**脱钩":
+// 静态策略钉住了 shell 层面的吞码手法,却没钉住"CI 调用的必须是全量、带守卫的那一种
+// `yarn check`"。
+//
+// 现场二(C-3):docs-only(`docs/*` `site/*` 任意 `*.md`)的 PR 让 gate 整条被 job 级
+// `if:` 跳过,而 GitHub 分支保护把 skipped 的必需检查记成**成功**(线上 PR #129 就是
+// Gate=skipped 后合并的)⇒ 16 个根守卫里判据落在文档上的那几条(铁律 0 的域名、迁移
+// 区间、文档数字、布局记录)**一次都没跑**。
+//
+// 判据:
+//   [SK-8] **调用形态**:根门禁调用(见 ROOT_GATE_INVOCATION)不得带
+//          `--no-guards` / `--only` / `--changed` / `--list` / `--help` / `-h`;
+//          `yarn check:fast` 一律禁止(它就是 `--changed`)。`--concurrency N` 与
+//          `--full-output` 只影响并发与日志、不减少覆盖面 ⇒ 放行。
+//   [SK-9] **docs-only 不得跳过根守卫**(只在"这份 workflow 有 docs-only 机制",
+//          即出现 `needs.changes.outputs` 时生效 —— 没有该机制就没有这个缺口):
+//          ① 恰好一次**参数向量为空**的全量 `yarn check`(承载它的 job 记作"门禁 job");
+//          ② 必须存在一个**结构上无法被跳过**的守卫 job(`node
+//             scripts/check-root-guards.mjs` 就是它的 run;它不得有 `if:`,也不得
+//             有 `needs:` —— 有 needs 时上游失败会把它变成 skipped,而 skipped 在
+//             分支保护里算成功);
+//          ③ 门禁 job 必须 `needs` 那个守卫 job,且必须有一条"守卫 job 未成功即
+//             `exit 1`"的步骤 —— 这是"守卫失败 ⇒ 必需的 Gate 检查也红"的唯一链路
+//             (守卫 job 加进分支保护之前靠它兜住);
+//          ④ 门禁 job 的 `if:` 不得引用 docs-only 输出;全量那一步若写了 `if:`,
+//             必须是 `!= 'false'` 形态(fail-safe:changes 失败/输出为空时走完整路径)。
+//   [SK-8b] **跑全量门禁的 job 必须拿到完整历史**:该 job 的 `actions/checkout`
+//          必须 `fetch-depth: 0`(且在门禁步之前)。C-4 的另一半:depth-1 检出解析不到
+//          提交信息区间的 base,`check-no-real-domains` 的提交信息判据就恒为空跑。
+//          守卫侧另有 fail-loud 兜底(区间解析不到 ⇒ EXIT=3),这条是让它不必触发的那半。
+//   [SK-10] **docs-only 分类器的规则逐条钉死**(C-CI-1:改宽改窄都要红):
+//          ① 分类步的 `case` 分支必须与登记表**逐条同序**相等(顺序本身是判据:
+//             `*.md` 若排在 `*/*` 之前,任意深度的 markdown 又会被当成文档);
+//          ② `code=false` 只允许写一次(唯一出口是"判定为 docs-only");
+//          ③ fail-safe 的 `code=true` 至少三处(tag / base 不可用 / 空 diff);
+//          ④ 承载分类器的 job 不得有 `if:`(它必须永远运行)。
+//   [SK-11] **发布面(策展说明 + GitHub Release)的语义判据**:
+//          ① 正式 tag 缺 `docs/releases/<tag>.md` 必须 fail-loud,且**两处**:
+//             gate 里的早检(1 分钟内红)与 release job 里、**任何对外上传之前**的
+//             第二道(C-CI-2:此前第二道排在 R2 上传之后 ⇒ 半发布窗口);
+//          ② `gh release create|edit` 的 argv 必须带 `--title` 且取值引用 tag 变量;
+//             必须有说明来源(`--notes-file` / `--notes` / `--generate-notes`,含在同
+//             一脚本里赋值的变量)。判据一律跑在**去掉注释后的可执行文本**上 ——
+//             子串匹配的旧写法把关键行注释掉就能静默通过(C-CI-3)。
+const ROOT_GATE_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*(?:corepack\s+yarn|yarn|node\s+scripts\/check-workspaces\.mjs)\s+(check:fast(?![:\w-])|check(?![:\w-]))((?:[ \t]+[^\s;&|>()]+)*)/gu
+/** 减少覆盖面的参数(R3-C C-7 的三种写法 + 两个"什么都不跑"的形态)。 */
+const ROOT_GATE_WEAKENING_FLAGS = ['--no-guards', '--only', '--changed', '--list', '--help', '-h']
+/** 永远运行那个守卫 job 的 run 内容(docs-only 的 PR 也跑)。 */
+const DOCS_ONLY_GUARD_RUNNER = 'scripts/check-root-guards.mjs'
+/** docs-only 分类器的登记形态(顺序即判据,见 [SK-10])。 */
+const DOCS_ONLY_CLASSIFIER_CASES = [
+  ['docs/*', 'docs'],
+  ['site/*', 'docs'],
+  ['*/*', 'code'],
+  ['*.md', 'docs'],
+  ['*', 'code'],
+]
+/**
+ * **对外（客户/公开）上传**的调用点(C-CI-2:策展说明检查必须排在它们之前)。
+ *
+ * 刻意**不含** `ci-channel-transfer.sh`:它上传的是 R2 上那个 run 级临时中转前缀
+ * (不可猜、由 release job 的 `if: always()` 步骤销毁),不是客户侧更新面;把它算进来
+ * 会让三个 desktop 打包 job 都要求一份发布说明检查 —— 那不是这条 finding 的面。
+ */
+const EXTERNAL_UPLOAD_COMMANDS = [
+  'ci-publish-update-server.sh',
+  'gh release create',
+  'gh release edit',
+  'gh release upload',
+]
+
+/** `gh release create|edit` 的调用点(捕获子命令与同一行的其余 argv)。 */
+const GH_RELEASE_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*gh\s+release\s+(create|edit)\s+([^\n;&|]*)/gu
+
+/**
+ * **可执行文本**:逐行去掉注释后的 run 内容。
+ *
+ * 为什么所有"命令里有没有 X"的判据都要走它(2026-09-23 审计 C-CI-3):旧实现直接对
+ * YAML 里的原始 `run` 做子串匹配,于是把关键行**注释掉**仍能通过 —— 审计方实测
+ * `--title "${TAG}"` 只在注释里时 `check-workflows.mjs` **EXIT=0**。
+ * @param run - step.run 原文。
+ * @returns 去掉整行/行尾注释的文本。
+ */
+function executableScript(run) {
+  return run.split('\n').map(line => stripLineComment(line)).join('\n')
+}
+
+/** 把行尾 `\` 续行接成一行(argv 解析需要;`gh release … \` 是多行写法)。 */
+function joinContinuations(script) {
+  return script.replace(/\\\n[ \t]*/gu, ' ')
+}
+
+/** step 的展示名(自检与失败信息共用)。 */
+function stepName(step, index) {
+  return typeof step?.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`
+}
 
 /** 归一化一条 shell 语句(连续空白 → 单个空格 + 去首尾空白):白名单签名的唯一形状。 */
 function normalizeStatement(text) {
@@ -1809,7 +1897,7 @@ function hasErrexitOnly(content) {
  * @param options - 见上。
  * @returns workflow 文本。
  */
-function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = false } = {}) {
+function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = false, jobIf = '', jobNeeds = '' } = {}) {
   return [
     'name: selftest',
     'on: push',
@@ -1817,11 +1905,500 @@ function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = fal
     '  verify:',
     '    runs-on: ubuntu-latest',
     ...(timeoutMinutes === null ? [] : [`    timeout-minutes: ${timeoutMinutes}`]),
+    ...(jobNeeds === '' ? [] : [`    needs: ${jobNeeds}`]),
+    ...(jobIf === '' ? [] : [`    if: ${jobIf}`]),
     ...(jobContinueOnError ? ['    continue-on-error: true'] : []),
     '    steps:',
     ...steps,
     '',
   ].join('\n')
+}
+
+/**
+ * [SK-8] / [SK-9] 的实现(判据见常量区的注释)。
+ *
+ * 为什么从 YAML 文档而不是 `blocks` 走:`if:` 是 job/step 级的字段,而 blocks 只带
+ * `{shell, content, line}` —— 这两条判据必须看见"哪一步在什么条件下跑"。
+ * run 内容仍先过 `stripLineComment`(注释里的历史命令不该触发判据)并去掉重定向
+ * (否则 `yarn check 2>&1 | tee …` 会被当成"带了参数")。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param text - 原始文本(用于判定"这份 workflow 有没有 docs-only 机制")。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkRootGateIntegrity(file, document, text, notes) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const invocations = []
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      const script = step.run
+        .split('\n')
+        .map(line => stripLineComment(line))
+        .join('\n')
+        .replace(/\d?>>?\s*[^\s;&|]+/gu, ' ')
+      for (const match of script.matchAll(ROOT_GATE_INVOCATION)) {
+        const args = match[2].trim() === '' ? [] : match[2].trim().split(/\s+/u)
+        invocations.push({
+          jobId,
+          stepIndex: index,
+          stepName: typeof step.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`,
+          step,
+          flag: match[1],
+          args,
+        })
+      }
+    })
+  }
+
+  for (const invocation of invocations) {
+    const label = `job ${invocation.jobId} 的 step「${invocation.stepName}」`
+    if (invocation.flag === 'check:fast') {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-8] ${label} 拿 \`yarn check:fast\` 当门禁 —— 它就是 \`--changed\` 的别名`
+          + '(package.json: "check:fast": "node scripts/check-workspaces.mjs --changed"),'
+          + '只跑改动映射到的包(映射表打错一个字就是 0 个包)。CI 里必须跑全量 `yarn check`。',
+      })
+      continue
+    }
+    const weakening = invocation.args.filter(arg => ROOT_GATE_WEAKENING_FLAGS.includes(arg))
+    if (weakening.length > 0) {
+      const consequence = weakening.includes('--no-guards')
+        ? '`--no-guards` 会让**全部**根守卫不跑(域名 / 迁移区间 / 文档数字 / 布局 / 变异体 / workflow 纪律…)'
+        : weakening.includes('--list') || weakening.includes('--help') || weakening.includes('-h')
+          ? '这个参数让命令**根本不执行检查**(只打印计划/用法后 exit 0)'
+          : '这个参数把检查面缩到"被改动映射到的包"或点名的一个包'
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-8] ${label} 把根门禁换成了弱化形态:\`yarn check ${invocation.args.join(' ')}\``
+          + `(弱化参数 ${weakening.join(', ')})\n  ⇒ ${consequence}。`
+          + 'CI 里必须是不带参数的全量 `yarn check`(2026-09-23 审计 R3-C C-7:'
+          + '`--no-guards` / `--only` / `--changed` 三种写法当时在静态策略下全部 EXIT=0)。',
+      })
+    }
+  }
+
+  // 没有 docs-only 机制 ⇒ 没有"整条门禁被跳过"的缺口,下面几条不适用。
+  const fullGateInvocations = invocations.filter(invocation => invocation.flag === 'check' && invocation.args.length === 0)
+
+  // [SK-8b]:跑全量门禁的 job 必须拿到完整历史(C-4 的另一半)。
+  for (const invocation of fullGateInvocations) {
+    const steps = Array.isArray(jobs[invocation.jobId]?.steps) ? jobs[invocation.jobId].steps : []
+    const checkouts = steps
+      .map((step, index) => ({ step, index }))
+      .filter(entry => typeof entry.step?.uses === 'string' && entry.step.uses.startsWith('actions/checkout@'))
+    const fullHistory = checkouts.find(entry => {
+      const depth = entry.step?.with?.['fetch-depth']
+      return depth === 0 || depth === '0'
+    })
+    if (fullHistory === undefined) {
+      const seen = checkouts.map(entry => String(entry.step?.with?.['fetch-depth'] ?? '默认(1)')).join(', ')
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-8b] job ${invocation.jobId} 跑全量门禁,但它的 actions/checkout 没有 \`fetch-depth: 0\``
+          + `(检出的 ref ${checkouts.length === 0 ? '根本没有 checkout 步骤' : `fetch-depth = ${seen}`})`
+          + '\n  ⇒ depth-1 检出解析不到提交信息区间的 base(PR 的检出 ref 是 refs/pull/N/merge,'
+          + 'origin/<base> 往往不存在),`check-no-real-domains` 的提交信息判据退化成"只看 HEAD"'
+          + ' —— 中间提交信息里的域名看不见(2026-09-23 审计 R3-C C-4 的现场:同一份历史,'
+          + '完整克隆 EXIT=1、depth-1 克隆 EXIT=0 且照打"零命中 ✅")。',
+      })
+    } else if (fullHistory.index > invocation.stepIndex) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-8b] job ${invocation.jobId} 的完整历史 checkout 排在门禁步之后(第 ${fullHistory.index + 1} 步 vs 第 ${invocation.stepIndex + 1} 步)`
+          + ' ⇒ 门禁跑的时候历史还没拿到,等同于没有 fetch-depth: 0。',
+      })
+    }
+  }
+
+  if (!/needs\.changes\.outputs/u.test(text)) return failures
+
+  const full = fullGateInvocations
+  if (full.length !== 1) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-9] 这份 workflow 用 docs-only 判定控制门禁(出现 \`needs.changes.outputs\`),`
+        + `但**参数向量为空**的全量 \`yarn check\` 出现了 ${full.length} 次(要求恰好 1 次)`
+        + '\n  ⇒ 全量门禁被删掉/改名/加了参数之后,CI 里就没有任何一步跑全量根守卫了'
+        + '(2026-09-23 审计 R3-C C-3/C-7)。',
+    })
+    return failures
+  }
+
+  const gateStep = full[0]
+  const gateJob = jobs[gateStep.jobId]
+  const jobIf = gateJob?.if
+  if (typeof jobIf === 'boolean' && jobIf === false) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-9] 承载全量门禁的 job ${gateStep.jobId} 的 \`if: false\` ⇒ 这个 job 永远不跑。`,
+    })
+  } else if (typeof jobIf === 'string' && /needs\.changes\.outputs/u.test(jobIf)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-9] 承载全量门禁的 job ${gateStep.jobId} 的 \`if:\` 引用了 docs-only 判定(${jobIf.trim()})`
+        + '\n  ⇒ "只改文档"的 PR 会把整条 gate 跳过,而分支保护把 skipped 的必需检查记成**成功**'
+        + ' ⇒ 判据落在文档上的根守卫(铁律 0 的域名 / 迁移区间 / 文档数字 / 布局记录)一次都不跑'
+        + '(2026-09-23 审计 R3-C C-3;线上 PR #129 的 Gate 就是 skipped 后合并的)。'
+        + `\n  处置:这个 job 永不跳过,docs-only 时改跑 \`${DOCS_ONLY_GUARD_RUNNER}\`。`,
+    })
+  }
+
+  // [SK-9②③] 永远运行的守卫 job + "守卫失败 ⇒ 门禁 job 红"的链路。
+  // 识别方式:哪个 job 的 run 里出现 DOCS_ONLY_GUARD_RUNNER。它必须结构上无法跳过:
+  // 有 `needs:` 时上游失败会被跳过,而 skipped 在分支保护里算成功 ⇒ 与 C-3 同形。
+  const guardJobs = Object.entries(jobs)
+    .filter(([, job]) => (Array.isArray(job?.steps) ? job.steps : [])
+      .some(step => typeof step?.run === 'string' && step.run.includes(DOCS_ONLY_GUARD_RUNNER)))
+  if (guardJobs.length !== 1) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-9] 跑 \`${DOCS_ONLY_GUARD_RUNNER}\` 的 job 有 ${guardJobs.length} 个(要求恰好 1 个)`
+        + '\n  ⇒ 0 个 = docs-only 的 PR 没有任何根守卫路径;多个 = 守卫会被并发跑两遍'
+        + '(资源竞争会把其中一次的失败伪装成超时)。',
+    })
+  } else {
+    const [guardJobId, guardJob] = guardJobs[0]
+    const guardNeeds = guardJob?.needs
+    const hasNeeds = Array.isArray(guardNeeds) ? guardNeeds.length > 0 : typeof guardNeeds === 'string' && guardNeeds.trim() !== ''
+    if (guardJob?.if !== undefined && guardJob.if !== null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-9] 根守卫 job ${guardJobId} 带了 \`if:\`(${String(guardJob.if).trim()})`
+          + '\n  ⇒ 条件在 PR 形态上可能为假,而被跳过的 job 在分支保护里算成功(MR/PR 上"零守卫通过")。'
+          + '这个 job 必须没有任何 `if:`。',
+      })
+    }
+    if (hasNeeds) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-9] 根守卫 job ${guardJobId} 带了 \`needs:\`(${Array.isArray(guardNeeds) ? guardNeeds.join(', ') : String(guardNeeds)})`
+          + '\n  ⇒ 上游 job 失败时本 job 会变成 **skipped**,而 skipped 在分支保护里算成功。'
+          + '这个 job 必须没有任何 `needs:`(它不需要 changes 的输出)。',
+      })
+    }
+    // ③ 必需的 Gate 检查必须反映守卫 job 的结果。
+    const gateNeeds = Array.isArray(gateJob?.needs)
+      ? gateJob.needs
+      : (typeof gateJob?.needs === 'string' ? [gateJob.needs] : [])
+    if (!gateNeeds.includes(guardJobId)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-9] 门禁 job ${gateStep.jobId} 的 \`needs:\` 里没有根守卫 job ${guardJobId}`
+          + '\n  ⇒ 守卫失败时必需的 Gate 检查仍可能报绿(守卫 job 还没被加进分支保护之前,'
+          + '这条 needs + 下一步的 exit 1 就是唯一链路)。',
+      })
+    } else {
+      const gateStepsForLink = Array.isArray(gateJob?.steps) ? gateJob.steps : []
+      const resultRef = new RegExp(`needs\\.${guardJobId}\\.result`, 'u')
+      const links = gateStepsForLink.filter(step => typeof step?.run === 'string'
+        && /exit\s+[1-9]/u.test(step.run)
+        // 引用可以写在 run 里(`echo "…needs.x.result…"`)或写在 `if:` 上(更常见)。
+        && (resultRef.test(step.run) || (typeof step?.if === 'string' && resultRef.test(step.if))))
+      if (links.length === 0) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-9] 门禁 job ${gateStep.jobId} 里没有"根守卫 job ${guardJobId} 未成功 ⇒ exit 1"的步骤`
+            + `\n  ⇒ 判据:该 job 的某个 run 必须引用 \`needs.${guardJobId}.result\` 且含 \`exit 1\`。`
+            + '少了它,守卫 job 红的时候必需的 Gate 检查照样绿(C-3 的同一形态)。',
+        })
+      }
+    }
+  }
+
+  const gateStepIf = typeof gateStep.step?.if === 'string' ? gateStep.step.if : ''
+  if (gateStepIf !== '' && /needs\.changes\.outputs\.code/u.test(gateStepIf) && !/!=/u.test(gateStepIf)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-9] 全量门禁那一步的 \`if:\` 是 \`${gateStepIf.trim()}\` —— 必须是 \`!= 'false'\` 形态`
+        + '\n  ⇒ 写成 `== \'true\'` 时,changes job 失败/输出为空会让"完整"与"轻量"两条路径'
+        + '**都不跑**(静默零门禁)。fail-safe 的写法是只有明确判定为 docs-only 才走轻量路径。',
+    })
+  }
+
+  notes.push(`[SK-8/SK-9] 全量门禁 = job ${gateStep.jobId} 的 step「${gateStep.stepName}」;`
+    + `根守卫 job = ${guardJobs.length === 1 ? guardJobs[0][0] : '未识别'}`)
+  return failures
+}
+
+/**
+ * [SK-10] docs-only 分类器的规则逐条钉死(C-CI-1)。
+ *
+ * 为什么必须钉死:分类器是"哪些改动可以只跑轻量路径"的唯一判据,而它此前
+ * **零策略** —— 把 `case` 放宽成 `*) ;;`(全仓都算文档)、把输出硬编码成
+ * `code=false`、把 fail-safe 的 `code=true` 分支删掉,`check-workflows.mjs`
+ * 全部 EXIT=0(子泳道 C-CI-1 实测)。它同时是唯一会**静默**扩大"跳过面"的地方。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param text - 原始文本。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkDocsOnlyClassifier(file, document, text, notes) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  let classifier = null
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    for (const step of steps) {
+      if (typeof step?.run === 'string' && step.run.includes('DOCS_ONLY=1')) classifier = { jobId, job, step }
+    }
+  }
+  if (classifier === null) {
+    // 没有分类器 = 没有 docs-only 机制,这条不适用(缺的其实是"跳过面",不是判据)。
+    return failures
+  }
+  const script = classifier.step.run
+    .split('\n')
+    .map(line => stripLineComment(line))
+    .join('\n')
+  const caseBody = /case\s+"\$f"\s+in\n([\s\S]*?)\n\s*esac/u.exec(script)?.[1]
+  if (caseBody === undefined) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: '[SK-10] 找不到 docs-only 分类器里 `case "$f" in … esac` 的分支表(判据无从对拍)',
+    })
+    return failures
+  }
+  const observed = []
+  for (const line of caseBody.split('\n')) {
+    const match = /^\s*([^)\s]+)\)\s*(.*)$/u.exec(line)
+    if (match === null) continue
+    const body = match[2]
+    const kind = body.includes('DOCS_ONLY=0') || body.includes('break') ? 'code' : 'docs'
+    // `a|b)` 是 bash 的合并写法 ⇒ 展开成两条登记项(顺序即判据)。
+    for (const pattern of match[1].split('|')) observed.push([pattern.trim(), kind])
+  }
+  const expected = DOCS_ONLY_CLASSIFIER_CASES
+  const same = observed.length === expected.length
+    && observed.every((entry, index) => entry[0] === expected[index][0] && entry[1] === expected[index][1])
+  if (!same) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: '[SK-10] docs-only 分类器的分支表与登记形态不一致(顺序也是判据):'
+        + `\n  实际:${observed.map(([pattern, kind]) => `${pattern} → ${kind}`).join(' | ') || '(空)'}`
+        + `\n  登记:${expected.map(([pattern, kind]) => `${pattern} → ${kind}`).join(' | ')}`
+        + '\n  ⇒ **改宽**(把更多路径算成文档 = 跳过更多门禁)与**改窄**(把文档改动当代码 = '
+        + '白跑三平台)都必须是一次显式决定:同步改 DOCS_ONLY_CLASSIFIER_CASES 并说明理由。'
+        + '特别地 `*.md` 会跨 `/` 匹配,必须排在 `*/*`(按代码处理)之后。',
+    })
+  }
+  const falseEcho = /echo\s+"code=false"/gu
+  const trueEcho = /echo\s+"code=true"/gu
+  const falseCount = (script.match(falseEcho) ?? []).length
+  const falseIndex = script.search(falseEcho)
+  // fail-safe 出口 = `code=false` **之前**的那些 `code=true`(tag / base 不可用 / 空 diff);
+  // 判定之后那个 else 分支的 `code=true` 不算在内(否则删掉一条 fail-safe 也能凑够数)。
+  const failSafeCount = falseIndex < 0
+    ? (script.match(trueEcho) ?? []).length
+    : (script.slice(0, falseIndex).match(trueEcho) ?? []).length
+  if (falseCount !== 1) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-10] docs-only 分类器里 \`echo "code=false"\` 出现 ${falseCount} 次(要求恰好 1 次)`
+        + '\n  ⇒ 多出来的出口都是"绕过全部重活"的静默通道;唯一允许的出口是"逐文件判定完确实是文档"。',
+    })
+  }
+  // "code=false 必须由 DOCS_ONLY 判定导出",不能是硬编码出口(子泳道实测:把 if/else
+  // 换成一句 `echo "code=false"` ⇒ 全仓都算文档,而门禁 EXIT=0)。
+  const docsOnlyGuard = /(?:\[\[|\[)\s*"?\$\{?DOCS_ONLY\}?"?\s*==?\s*"?1"?\s*(?:\]\]|\])/u
+  const guardIndex = script.search(docsOnlyGuard)
+  if (guardIndex < 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: '[SK-10] docs-only 分类器里找不到对 \`DOCS_ONLY\` 的判据'
+        + '(要求形如 `if [[ "${DOCS_ONLY}" == "1" ]]; then … echo "code=false" …`)\n'
+        + '  ⇒ `code=false` 必须由"逐文件判定"的结果导出;硬编码/无条件写出它 = 全仓都算文档,'
+        + '所有重活被跳过而门禁全绿(C-CI-1 的实测变异)。',
+    })
+  } else if (falseIndex >= 0 && falseIndex < guardIndex) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: '[SK-10] docs-only 分类器在 \`DOCS_ONLY\` 判据**之前**就写了 `code=false`'
+        + ' ⇒ 那条出口不受"逐文件判定"约束。',
+    })
+  }
+  if (failSafeCount < 3) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-10] docs-only 分类器的 fail-safe 出口只剩 ${failSafeCount} 个(要求 ≥ 3:tag / base 不可用 / 空 diff)`
+        + '\n  ⇒ 少一个,"算不出改动/算不出 base"就会落进 `code=false`,与 2026-09-17 编排器 '
+        + '`--changed` 的假绿同一形态(算不出来 ≠ 没有改动)。',
+    })
+  }
+  if (typeof classifier.job?.if === 'string' || typeof classifier.job?.if === 'boolean') {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-10] 承载 docs-only 分类器的 job ${classifier.jobId} 带了 \`if:\`(${String(classifier.job.if).trim()})`
+        + '\n  ⇒ 分类器必须永远运行(它同时是"必须跑重活"的 fail-safe 出口);被跳过时 '
+        + '`needs.changes.outputs.code` 为空,下游按完整路径跑倒还安全,但"docs-only 的 PR"'
+        + '会因此永远拿不到判定,而 PR 仍可能以 skipped 计入成功。',
+    })
+  }
+  notes.push(`[SK-10] docs-only 分类器 = job ${classifier.jobId};登记形态 ${expected.length} 条`)
+  return failures
+}
+
+/**
+ * [SK-11] 发布面语义判据(C-CI-2 半发布窗口 + C-CI-3 子串假绿)。
+ *
+ * 逐条:
+ *   ① 策展发布说明的 fail-loud 必须出现在**两个**位置:存在 `yarn check` 的门禁 job
+ *      (早检,1 分钟内红)与 release job(内部含对外上传的那个 job);且后者必须排在
+ *      该 job 内**任何**对外上传调用之前。
+ *   ② `gh release create|edit` 的 argv 语义:必须 `--title` 且取值引用 tag 变量;
+ *      必须给出说明来源。argv 在**去掉注释后的可执行文本**上解析(旧实现是整段 YAML
+ *      子串匹配 ⇒ 把关键行注释掉仍 EXIT=0)。等价的写法(`--title "$TAG"`)必须放行。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkReleaseSurface(file, document, text, notes) {
+  const failures = []
+  // 只在"这份 workflow 有发布面"时生效:合成样本 / 纯测试 workflow 只跑 `yarn check`
+  // 却没有 release 步骤是合法的(这条判据的动机是"半发布窗口",前提是先有发布面)。
+  if (!/gh\s+release\s+(?:create|edit|upload)|ci-release-policy\.sh/u.test(text)) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  /** 策展发布说明的 fail-loud:判据必须落在**可执行文本**上(注释不算)。 */
+  const isNotesGate = step => {
+    if (typeof step?.run !== 'string') return false
+    const script = executableScript(step.run)
+    return /docs\/releases\//u.test(script)
+      && /(?:test\s+-f|\[\s+-f)/u.test(script)
+      && /exit\s+1/u.test(script)
+  }
+  const isUpload = step => typeof step?.run === 'string'
+    && EXTERNAL_UPLOAD_COMMANDS.some(command => executableScript(step.run).includes(command))
+  const idsOf = steps => steps.map((step, index) => (step ? index : -1)).filter(index => index >= 0)
+  const position = (steps, predicate) => idsOf(steps).filter(index => predicate(steps[index]))
+
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    if (steps.length === 0) continue
+    const notesIndexes = position(steps, isNotesGate)
+    const uploadIndexes = position(steps, isUpload)
+    const fullGateIndexes = position(steps, step => typeof step?.run === 'string'
+      && /(?:^|[;&|(\n]|\$\()\s*(?:corepack\s+yarn|yarn)\s+check(?![\w:-])/u.test(executableScript(step.run)))
+
+    // ① 对外上传之前必须有一道 fail-loud(C-CI-2 的半发布窗口)。
+    if (uploadIndexes.length > 0) {
+      if (notesIndexes.length === 0) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] job ${jobId} 有对外上传步骤(${uploadIndexes.map(index => `第 ${index + 1} 步`).join(', ')}),`
+            + '但整个 job 里没有"策展发布说明缺失即 fail-loud"的步骤'
+            + '\n  ⇒ 正式 tag 缺 docs/releases/<tag>.md 时,客户侧更新面会先被挂上新版本(半发布窗口,'
+            + '2026-09-23 审计 C-CI-2)。判据:该步骤的**可执行文本**必须同时含 `docs/releases/`、'
+            + '`test -f`(或 `[ -f`)与 `exit 1`(注释里写不算)。',
+        })
+      } else if (Math.min(...notesIndexes) > Math.min(...uploadIndexes)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] job ${jobId} 的策展说明检查(第 ${Math.min(...notesIndexes) + 1} 步)排在第一个对外上传`
+            + `(第 ${Math.min(...uploadIndexes) + 1} 步)之后 ⇒ 说明缺失时上传已经发生(半发布:C-CI-2)。`,
+        })
+      }
+    }
+    // ② 早检:跑全量门禁的那个 job 里必须有一道(1 分钟内红,不等三平台构建 40 分钟)。
+    if (fullGateIndexes.length > 0 && notesIndexes.length === 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-11] job ${jobId} 跑全量门禁但没有"策展发布说明早检"步骤`
+          + '\n  ⇒ 正式 tag 缺 docs/releases/<tag>.md 时,要等三平台构建 + 各渠道镜像构建跑完'
+          + '才在最后一步红(本仓明文的成本规则是"1 分钟内报错")。'
+          + '要求:门禁步之前有一道纯 shell 的 fail-loud(不依赖构建产物)。',
+      })
+    } else if (fullGateIndexes.length > 0 && Math.min(...notesIndexes) > Math.min(...fullGateIndexes)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-11] job ${jobId} 的策展说明早检(第 ${Math.min(...notesIndexes) + 1} 步)排在门禁步`
+          + `(第 ${Math.min(...fullGateIndexes) + 1} 步)之后 ⇒ 不再是"早检"(C-CI-2)。`,
+      })
+    }
+  }
+
+  // ③ `gh release create|edit` 的参数语义(C-CI-3:旧实现是整段 YAML 子串匹配,
+  //    把关键行注释掉仍 EXIT=0;等价的 `--title "$TAG"` 反而被判红)。
+  const TAG_REF = /\$\{?(?:TAG|GITHUB_REF_NAME)\b\}?/u
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      const script = joinContinuations(executableScript(step.run))
+      for (const match of script.matchAll(GH_RELEASE_INVOCATION)) {
+        const tail = match[2]
+        const title = /(?:^|\s)(?:--title|-t)(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))/u.exec(tail)
+        const titleValue = title === null ? undefined : (title[1] ?? title[2] ?? title[3])
+        if (titleValue === undefined || !TAG_REF.test(titleValue)) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 的 Release 名不是 tag 本身`
+              + `(实际 --title 取值:${titleValue === undefined ? '缺失' : titleValue})`
+              + '\n  ⇒ Releases 页左侧列表宽度固定,长名会被截断成 "PicoAide Harness v2.6…",同页版本号全部不可见。'
+              + '必须 `--title` 且取值引用 tag 变量(`${TAG}` / `$TAG` / `${GITHUB_REF_NAME}` 都接受)。',
+          })
+        }
+        const assignedNotesVars = new Set(
+          [...script.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=[^\n]*?(--notes-file|--generate-notes|--notes)\b/gu)].map(hit => hit[1]),
+        )
+        const hasNotesInline = /(?:^|\s)--(?:notes-file|notes|generate-notes)\b/u.test(tail)
+        const hasNotesVar = [...assignedNotesVars].some(name => new RegExp(`\\$\\{?${name}\\b`, 'u').test(tail))
+        if (!/exit\s+[1-9]/u.test(script)) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里没有 fail-loud(\`exit 1\`)`
+              + '\n  ⇒ 本仓定案:正式 tag 缺 docs/releases/<tag>.md 时**绝不静默回退**自动生成的 PR 列表'
+              + '(v2.7.0 的教训:公开版本页变成 CI 日志)。这一条判据只认可执行文本,注释里写不算。',
+          })
+        }
+        if (!hasNotesInline && !hasNotesVar) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 没有说明来源`
+              + '\n  ⇒ 需要 `--notes-file` / `--notes` / `--generate-notes`,或同一脚本里赋给这些 flag 的变量'
+              + '(本仓的策展说明路径是 docs/releases/<tag>.md)。',
+          })
+        }
+      }
+    })
+  }
+  notes.push('[SK-11] 发布面已按可执行文本检查(策展说明位置 + gh release 参数语义)')
+  return failures
 }
 
 /**
@@ -1856,10 +2433,14 @@ export function selfTestPolicies() {
   const expect = (ok, message) => {
     if (!ok) failures.push(message)
   }
-  /** 跑一个样本并登记:red = 期望被报出来的策略标签,null = 期望完全绿。 */
+  /**
+   * 跑一个样本并登记:red = 期望被报出来的策略标签,null = 期望完全绿。
+   * `options.raw` 直接给整份 workflow 文本(SK-9/SK-10/SK-11 的样本需要多 job 形状)。
+   */
   const sample = (id, expectation, steps, options = {}) => {
     const file = options.file ?? 'selftest.yml'
-    const result = checkWorkflowText(file, selftestWorkflow(steps, options))
+    const text = options.raw ?? selftestWorkflow(steps, options)
+    const result = checkWorkflowText(file, text)
     const label = expectation === null ? `${id} [绿样本]` : `${id} [红样本 ${expectation}]`
     observed.push({ id, policy: expectation, label, failures: result.failures })
     return result
@@ -1877,6 +2458,18 @@ export function selfTestPolicies() {
         + result.failures.map(failure => `    ${failure.detail.split('\n')[0]}`).join('\n'))
     return result
   }
+
+  /**
+   * 夹具：真实 CI 的检出形态（`actions/checkout` + `fetch-depth: 0`）。
+   * [SK-8b] 要求"跑全量根门禁的 job 必须拿到完整历史"，所以任何含 `yarn check` 的
+   * 样本都要带这一步 —— 不带就是"夹具不像真 CI"的假红。
+   */
+  const GATE_CHECKOUT = (depth = '          fetch-depth: 0') => [
+    '      - uses: actions/checkout@v7',
+    '        with:',
+    '          submodules: recursive',
+    ...(depth === null ? [] : [depth]),
+  ]
 
   // ---- 策略 1:吞退出码 ----
   const swallowOr = expectRed('a1-or-true', '[SK-7a]', [
@@ -2044,6 +2637,7 @@ export function selfTestPolicies() {
     '        continue-on-error: ${{ matrix.experimental }}',
   ])
   expectGreen('g-coe-expr-false-is-ok', [
+    ...GATE_CHECKOUT(),
     '      - name: 表达式为字面 false',
     '        continue-on-error: false',
     '        run: yarn check',
@@ -2133,9 +2727,11 @@ export function selfTestPolicies() {
     '      - run: set -o pipefail; go test ./... -timeout 15m | tail -5',
   ])
   expectGreen('c5-exit-one-ok', [
+    ...GATE_CHECKOUT(),
     '      - run: yarn check || exit 1',
   ])
   expectGreen('c6-and-chain-ok', [
+    ...GATE_CHECKOUT(),
     '      - run: cp a b && yarn check',
   ])
   expectGreen('c7-real-inline-install', [
@@ -2250,6 +2846,262 @@ export function selfTestPolicies() {
     '          echo "go test || true"',
   ])
 
+  // ---- 策略 5([SK-8]/[SK-8b]/[SK-9]):根门禁调用形态 + 永不跳过的守卫 job ----
+  //
+  // 样本形状复刻 ci.yml 的真实形态(两个 job:永不跳过的守卫 job + 门禁 job),
+  // 这样"守卫 job 会不会被跳过""守卫结果有没有接进必需检查"这类缺陷才可能被覆盖到。
+  const GATE_SHAPE = ({
+    guardJob = true,
+    guardIf = '',
+    guardNeeds = '',
+    guardRun = `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    gateNeeds = '[changes, gate-guards]',
+    gateIf = '${{ !cancelled() }}',
+    gateStepIf = "needs.changes.outputs.code != 'false'",
+    gateRun = 'yarn check',
+    gateDepth = '          fetch-depth: 0',
+    guardDepth = '          fetch-depth: 0',
+    linkStep = true,
+  } = {}) => [
+    'name: selftest',
+    'on: push',
+    'jobs:',
+    '  changes:',
+    '    runs-on: ubuntu-latest',
+    '    timeout-minutes: 5',
+    '    outputs:',
+    '      code: ${{ steps.scope.outputs.code }}',
+    '    steps:',
+    '      - id: scope',
+    '        run: echo "code=true" >> "$GITHUB_OUTPUT"',
+    ...(guardJob ? [
+      '  gate-guards:',
+      '    runs-on: ubuntu-latest',
+      ...(guardNeeds === '' ? [] : [`    needs: ${guardNeeds}`]),
+      ...(guardIf === '' ? [] : [`    if: ${guardIf}`]),
+      '    timeout-minutes: 20',
+      '    steps:',
+      '      - uses: actions/checkout@v7',
+      '        with:',
+      '          submodules: recursive',
+      ...(guardDepth === null ? [] : [guardDepth]),
+      `      - run: ${guardRun}`,
+    ] : []),
+    '  gate:',
+    '    runs-on: ubuntu-latest',
+    `    needs: ${gateNeeds}`,
+    `    if: ${gateIf}`,
+    '    timeout-minutes: 60',
+    '    steps:',
+    ...(linkStep ? [
+      '      - name: Root guards must have passed',
+      "        if: needs.gate-guards.result != 'success'",
+      '        run: |',
+      '          set -euo pipefail',
+      '          exit 1',
+    ] : []),
+    '      - uses: actions/checkout@v7',
+    '        with:',
+    '          submodules: recursive',
+    ...(gateDepth === null ? [] : [gateDepth]),
+    '      - name: 全量门禁',
+    `        if: ${gateStepIf}`,
+    `        run: ${gateRun}`,
+    '',
+  ].join('\n')
+  const gateSample = (id, expectation, options) => {
+    const entry = { raw: GATE_SHAPE(options), file: 'selftest.yml' }
+    return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
+  }
+  // 正例:与 ci.yml 同形 ⇒ 一条失败都不许有(假阳性会把真实形态逼着改坏)。
+  gateSample('o1-gate-shape-green', null, {})
+  // 注释里的历史命令不该触发判据。
+  expectGreen('o2-weakening-in-comment', [
+    ...GATE_CHECKOUT(),
+    '      - run: |',
+    '          set -euo pipefail',
+    '          # 历史写法:yarn check --no-guards(仅本地提速)',
+    '          yarn check',
+  ])
+  // 弱化写法必须红(这条策略的现场,逐个样本)。
+  gateSample('o3-no-guards', '[SK-8]', { gateRun: 'yarn check --no-guards' })
+  gateSample('o4-only-package', '[SK-8]', { gateRun: 'yarn check --only dsh-plugin-desktop' })
+  gateSample('o5-changed-ref', '[SK-8]', { gateRun: 'yarn check --changed origin/master' })
+  gateSample('o6-check-fast-alias', '[SK-8]', { gateRun: 'yarn check:fast' })
+  gateSample('o7-list-only', '[SK-8]', { gateRun: 'yarn check --list' })
+  // 全量门禁整个消失(只剩单个守卫)也必须红。
+  gateSample('o8-no-full-gate', '[SK-9]', { gateRun: 'yarn check:layout' })
+  // 门禁 job 被 docs-only 判定跳过(= C-3 的原形态)。
+  gateSample('o9-job-skipped-on-docs-only', '[SK-9]', {
+    gateIf: "needs.changes.result != 'success' || needs.changes.outputs.code == 'true'",
+  })
+  // 永不跳过的守卫 job 不存在 / 它带 if: / 它带 needs: —— 都是"skipped 算成功"的形态。
+  gateSample('o10-missing-guard-job', '[SK-9]', { guardJob: false })
+  gateSample('o11-guard-job-with-if', '[SK-9]', { guardIf: '${{ !cancelled() }}' })
+  gateSample('o12-guard-job-with-needs', '[SK-9]', { guardNeeds: 'changes' })
+  // 守卫结果没有接进必需的 Gate 检查(少了 needs 或少了 exit 1 那一步)。
+  gateSample('o13-no-link-step', '[SK-9]', { linkStep: false })
+  gateSample('o14-gate-needs-without-guard-job', '[SK-9]', { gateNeeds: '[changes]' })
+  // 两步条件不互补(`== 'true'` 而不是 `!= 'false'`)。
+  gateSample('o15-step-not-failsafe', '[SK-9]', { gateStepIf: "needs.changes.outputs.code == 'true'" })
+  // [SK-8b]:跑全量门禁的 job 必须拿到完整历史(C-4 的另一半)。
+  gateSample('o16-no-fetch-depth', '[SK-8b]', { gateDepth: null })
+  gateSample('o17-fetch-depth-1', '[SK-8b]', { gateDepth: '          fetch-depth: 1' })
+  // 没有 docs-only 机制的 workflow 不受 [SK-9] 约束(没有跳过就没有缺口)。
+  expectGreen('o18-no-docs-only-mechanism', [
+    '      - run: yarn check:layout',
+  ])
+
+  // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
+  const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
+    'name: selftest',
+    'on: push',
+    'jobs:',
+    '  changes:',
+    '    runs-on: ubuntu-latest',
+    ...(jobIf === '' ? [] : [`    if: ${jobIf}`]),
+    '    timeout-minutes: 5',
+    '    outputs:',
+    '      code: ${{ steps.scope.outputs.code }}',
+    '    steps:',
+    '      - id: scope',
+    '        run: |',
+    '          set -euo pipefail',
+    ...(failsafes >= 1 ? [
+      '          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then',
+      '            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0',
+      '          fi',
+    ] : []),
+    ...(failsafes >= 2 ? [
+      '          if [[ -z "${BASE}" ]]; then',
+      '            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0',
+      '          fi',
+    ] : []),
+    ...(failsafes >= 3 ? [
+      '          if [[ -z "${CHANGED}" ]]; then',
+      '            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0',
+      '          fi',
+    ] : []),
+    '          DOCS_ONLY=1',
+    '          while IFS= read -r f; do',
+    '            [[ -z "$f" ]] && continue',
+    '            case "$f" in',
+    ...cases,
+    '            esac',
+    '          done <<< "${CHANGED}"',
+    '          if [[ "${DOCS_ONLY}" == "1" ]]; then',
+    '            echo "code=false" >> "$GITHUB_OUTPUT"',
+    '          else',
+    '            echo "code=true" >> "$GITHUB_OUTPUT"',
+    '          fi',
+    '',
+  ].join('\n')
+  const GREEN_CASES = [
+    '              docs/*|site/*) ;;',
+    '              */*) DOCS_ONLY=0; break ;;',
+    '              *.md) ;;',
+    '              *) DOCS_ONLY=0; break ;;',
+  ]
+  expectGreen('q1-classifier-green', [], { raw: CLASSIFIER_SHAPE({ cases: GREEN_CASES }), file: 'selftest.yml' })
+  expectRed('q2-classifier-widened', '[SK-10]', [], {
+    raw: CLASSIFIER_SHAPE({ cases: ['              docs/*|site/*|*.md) ;;', '              *) DOCS_ONLY=0; break ;;'] }),
+    file: 'selftest.yml',
+  })
+  expectRed('q3-classifier-reordered', '[SK-10]', [], {
+    raw: CLASSIFIER_SHAPE({ cases: ['              *.md) ;;', '              docs/*|site/*) ;;', '              */*) DOCS_ONLY=0; break ;;', '              *) DOCS_ONLY=0; break ;;'] }),
+    file: 'selftest.yml',
+  })
+  expectRed('q4-classifier-no-failsafe', '[SK-10]', [], {
+    raw: CLASSIFIER_SHAPE({ cases: GREEN_CASES, failsafes: 1 }),
+    file: 'selftest.yml',
+  })
+  expectRed('q5-classifier-job-with-if', '[SK-10]', [], {
+    raw: CLASSIFIER_SHAPE({ cases: GREEN_CASES, jobIf: "github.event_name == 'pull_request'" }),
+    file: 'selftest.yml',
+  })
+
+  // ---- 策略 7([SK-11]):发布面语义判据(策展说明位置 + gh release 参数) ----
+  const RELEASE_SHAPE = ({
+    releaseNotesStep = true,
+    gateNotesStep = true,
+    gateFirst = true,
+    titleFlag = '--title "${TAG}"',
+    notesFlag = '${NOTES_FLAG}',
+  } = {}) => [
+    'name: selftest',
+    'on: push',
+    'jobs:',
+    '  gate:',
+    '    runs-on: ubuntu-latest',
+    '    timeout-minutes: 60',
+    '    steps:',
+    '      - uses: actions/checkout@v7',
+    '        with:',
+    '          fetch-depth: 0',
+    ...(gateNotesStep && gateFirst ? [
+      '      - name: Require curated release notes for stable tags',
+      '        run: |',
+      '          set -euo pipefail',
+      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
+      '            echo "::error::missing curated notes"',
+      '            exit 1',
+      '          }',
+    ] : []),
+    '      - run: yarn check',
+    ...(gateNotesStep && !gateFirst ? [
+      '      - name: Require curated release notes for stable tags',
+      '        run: |',
+      '          set -euo pipefail',
+      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
+      '            echo "::error::missing curated notes"',
+      '            exit 1',
+      '          }',
+    ] : []),
+    '  release:',
+    '    runs-on: ubuntu-latest',
+    '    timeout-minutes: 45',
+    '    steps:',
+    '      - uses: actions/checkout@v7',
+    '        with:',
+    '          fetch-depth: 0',
+    ...(releaseNotesStep ? [
+      '      - name: Require curated release notes before any upload',
+      '        run: |',
+      '          set -euo pipefail',
+      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
+      '            echo "::error::missing curated notes"',
+      '            exit 1',
+      '          }',
+    ] : []),
+    '      - name: Upload every channel image to the update server (R2)',
+    '        run: bash scripts/ci-publish-update-server.sh --list channels.list',
+    '      - name: Create GitHub Release',
+    '        run: |',
+    '          set -euo pipefail',
+    '          TAG="${GITHUB_REF_NAME}"',
+    '          NOTES="docs/releases/${TAG}.md"',
+    '          if [ -f "${NOTES}" ]; then',
+    '            NOTES_FLAG="--notes-file ${NOTES}"',
+    '          else',
+    '            exit 1',
+    '          fi',
+    `          gh release create "\${TAG}" ${titleFlag} ${notesFlag}`,
+    '',
+  ].join('\n')
+  const releaseSample = (id, expectation, options) => {
+    const entry = { raw: RELEASE_SHAPE(options), file: 'selftest.yml' }
+    return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
+  }
+  releaseSample('p1-release-green', null, {})
+  // 等价写法必须放行(`--title="$TAG"` / `--title=${TAG}` 都是 tag 本身)。
+  releaseSample('p2-title-equivalent-quoting', null, { titleFlag: '--title="$TAG"' })
+  releaseSample('p3-title-unbraced', null, { titleFlag: '--title=${TAG}' })
+  // 弱化/缺失形态必须红。
+  releaseSample('p4-upload-before-notes', '[SK-11]', { releaseNotesStep: false })
+  releaseSample('p5-title-commented-out', '[SK-11]', { titleFlag: '# --title "${TAG}"' })
+  releaseSample('p6-no-notes-source', '[SK-11]', { notesFlag: '' })
+  releaseSample('p7-early-check-after-gate', '[SK-11]', { gateFirst: false })
+  releaseSample('p8-no-early-check', '[SK-11]', { gateNotesStep: false })
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——
   // 不能内联在 selfTestPolicies 体内:那样"把 selfTestPolicies 整条掏空"会连带
   // 把对账一起掏空(第三轮审计 m8 的形态)。这里只做数据收集,断言在
@@ -2271,7 +3123,7 @@ export function selfTestPoliciesCoverage(observed) {
   const failures = []
   const samples = Array.isArray(observed) ? observed : []
   const redSamples = samples.filter(entry => entry.policy !== null)
-  const policyTag = failure => /\[(SK-7[a-c]?)\]/u.exec(failure.detail ?? '')?.[1] ?? ''
+  const policyTag = failure => /\[(SK-\d+[a-z]?)\]/u.exec(failure.detail ?? '')?.[1] ?? ''
   const countTag = (entry, tag) => entry.failures.filter(failure => failure.detail.includes(tag)).length
   const expect = (ok, message) => {
     if (!ok) failures.push(message)
@@ -2683,7 +3535,9 @@ function main() {
     }
   }
   process.stdout.write(`check-workflows: OK — ${names.length} 个 workflow,${total} 个 shell run 块全部通过 `
-    + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)\n')
+    + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)'
+    + ' + SK-8/SK-8b/SK-9/SK-10/SK-11 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
+    + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {
