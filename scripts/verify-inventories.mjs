@@ -8,7 +8,11 @@
  *   1. `scripts/platform-modules.mjs` ↔ submodule
  *      `deepseek-harness/packages/client/web/src/platform.ts`
  *      漂移的后果是客户端 bundle 的 external 表与 shell 冻结模块表不一致 —— 运行时
- *      才炸,且只在特定插件被加载时炸。submodule 未 init 时**跳过并提示**(不静默通过)。
+ *      才炸,且只在特定插件被加载时炸。submodule 未 init 时**fail-loud**(2026-09-23
+ *      审计 W3:旧版只打一行 notice,成功行却仍宣称"platform-modules 与 submodule 一致"
+ *      —— 宣称了一件没查过的事;而同一情况下 check-theme-tokens 是直接抛错的)。
+ *      CI 的每个 checkout 都带 `submodules: recursive`,所以"读不到上游"= 环境坏了,
+ *      不是可接受的正常态。
  *
  *   2. `.github/workflows/ci.yml` 的 `workspace-build` 归档清单 ↔
  *      `packages/host/desktop/scripts/prebuild-workspace-deps.ts` 的包表 ↔
@@ -21,7 +25,7 @@
  * 由 `scripts/upgrade-upstream.mjs` 在每次升级时打印显式 TODO 提醒。
  *
  * 用法:node scripts/verify-inventories.mjs
- * 退出码:0 全部通过(或 submodule 未 init 而跳过);1 有漂移。
+ * 退出码:0 全部通过(含 platform-modules 与上游**真的**对拍过);1 有漂移或读不到上游。
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
@@ -30,10 +34,10 @@ import { parse as parseYaml } from 'yaml'
 
 const root = resolve(import.meta.dirname, '..')
 const failures = []
-const notices = []
 
 const fail = message => failures.push(message)
-const notice = message => notices.push(message)
+// 本门禁**刻意**没有 notice/提示通道(2026-09-23 审计 W3):任何"没查成"都必须是
+// failures 里的具名失败。给"读不到输入"留一条只打印的软通道,就是把静默通过请回来。
 
 /** 读取并解析一个 JSON 文件。 */
 function readJson(relative) {
@@ -48,16 +52,22 @@ function stringArrayFrom(source, name) {
 }
 
 // ---- 1. platform-modules.mjs ↔ submodule platform.ts ----
+/** 只有真的读到上游 platform.ts 并对拍过才置 true —— OK 行据此措辞（见文件末尾）。 */
+let platformModulesChecked = false
 {
   const localPath = 'scripts/platform-modules.mjs'
   const upstreamPath = 'deepseek-harness/packages/client/web/src/platform.ts'
   const local = readFileSync(join(root, localPath), 'utf8')
   if (!existsSync(join(root, upstreamPath))) {
-    notice(
-      `platform-modules 漂移未检查:${upstreamPath} 不存在(submodule 未 init)。`
-      + '先 `git submodule update --init --recursive` 再跑本门禁',
+    fail(
+      `platform-modules 漂移未检查:找不到 ${upstreamPath}(submodule 未 init / 检出不完整)。`
+      + '本门禁对 platform-modules 的**唯一**判据就是与上游 platform.ts 逐项对拍;读不到上游时'
+      + '"没问题"不可证 —— 所以这里判失败,而不是打一行提示后照旧输出「与 submodule 一致」'
+      + '(那是在宣称一件没查过的事)。CI 的每个 checkout 都带 `submodules: recursive`;'
+      + '本地先跑 `git submodule update --init --recursive`。',
     )
   } else {
+    platformModulesChecked = true
     const upstream = readFileSync(join(root, upstreamPath), 'utf8')
     for (const name of ['PLATFORM_MODULES', 'PRELOADED_CLIENT_EXTERNALS']) {
       const localValues = stringArrayFrom(local, name)
@@ -282,16 +292,21 @@ const archiveEntries = new Set()
 }
 
 // ---- 输出 ----
-for (const message of notices) process.stderr.write(`verify-inventories: 提示: ${message}\n`)
-
 if (failures.length > 0) {
   process.stderr.write(`\nverify-inventories: ${failures.length} 项断言失败\n`)
   for (const message of failures) process.stderr.write(`- ${message}\n`)
   process.exit(1)
 }
 
+// 不变量(结构上不可达:缺上游时上面已 fail):OK 行**不得**在没对拍过 platform-modules
+// 时出现 —— 这正是本守卫要根除的"宣称一致却没查"的形态。
+if (!platformModulesChecked) {
+  process.stderr.write('verify-inventories: 内部错误 —— platform-modules 未对拍却走到 OK 分支\n')
+  process.exit(1)
+}
+
 process.stdout.write(
-  'verify-inventories: OK — platform-modules 与 submodule 一致;'
+  'verify-inventories: OK — platform-modules 与 submodule 已逐项对拍一致;'
   + `CI workspace-build 归档 ${archiveEntries.size} 条路径 ↔ prebuild 包表 ${prebuildDirs.length} 个包 ↔ `
   + `check 链 ${checkChainDirs.length} 个包 ↔ 磁盘 ${workspacePackages.size} 个 workspace 包互相对拍\n`,
 )

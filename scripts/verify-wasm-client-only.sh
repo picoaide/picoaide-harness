@@ -59,10 +59,20 @@ mkdir -p "$LOG_DIR" "$PROBE_HOME"
 # ---------------------------------------------------------------------------
 MODE="full"
 GROUPS_SELECTED=""
+# 「有没有显式点名分组」必须独立记账（2026-09-23 审计 W3-05）：用 `-z "$GROUPS_SELECTED"`
+# 兼作"没传"的判据时，`--groups ""` 这个**显式空值**会被下面的缺省分支替换成
+# `1 2 3 4 5 6 7 8` —— "什么都没选"被静默执行成"全选"，而紧随其后的
+# "没有选中任何组 ⇒ exit 2" 在那条路径上永远不可达。
+GROUPS_EXPLICIT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --portable) MODE="portable"; shift ;;
-    --groups) GROUPS_SELECTED="${2:-}"; shift 2 ;;
+    --groups)
+      if [ $# -lt 2 ]; then
+        echo "verify-wasm-client-only: --groups 缺参数（用法：--groups 2,6；可选组见 --list）" >&2
+        exit 2
+      fi
+      GROUPS_SELECTED="$2"; GROUPS_EXPLICIT=1; shift 2 ;;
     --list) MODE="list"; shift ;;
     -h|--help) MODE="help"; shift ;;
     *) echo "verify-wasm-client-only: 未知参数 $1（用 --help）" >&2; exit 2 ;;
@@ -89,21 +99,32 @@ case "$MODE" in
     exit 0 ;;
   portable)
     # W5 文档判据（组 8）是纯 grep、无外部依赖 ⇒ 进便携组，`yarn check` 每次都跑（TST-15）。
-    if [ -z "$GROUPS_SELECTED" ]; then GROUPS_SELECTED="1 2 7 8"; fi ;;
+    if [ "$GROUPS_EXPLICIT" -eq 0 ]; then GROUPS_SELECTED="1 2 7 8"; fi ;;
   full)
-    # `--groups` 显式点名时不得被缺省值覆盖（否则 `--groups 2` 会静默跑成全部七组）。
-    if [ -z "$GROUPS_SELECTED" ]; then GROUPS_SELECTED="1 2 3 4 5 6 7 8"; fi ;;
+    # 缺省只在**没显式点名**时生效：`--groups 2` 不得被覆盖成全部八组，
+    # `--groups ""` 更不得被"补成"全选（那是把"什么都没选"执行成"全选"）。
+    if [ "$GROUPS_EXPLICIT" -eq 0 ]; then GROUPS_SELECTED="1 2 3 4 5 6 7 8"; fi ;;
 esac
 
 # `--groups 2,6` → `2 6`
 GROUPS_SELECTED="${GROUPS_SELECTED//,/ }"
 if [ -z "${GROUPS_SELECTED// /}" ]; then
-  echo "verify-wasm-client-only: 没有选中任何组（--groups 传了空值？）" >&2
+  if [ "$GROUPS_EXPLICIT" -eq 1 ]; then
+    echo "verify-wasm-client-only: --groups 传了空值 —— 「什么都没选」不等于「全选」。" \
+      "显式点名分组时至少要给一个组（1–8，逗号分隔，如 --groups 2,6）；要跑全部就省略 --groups。" >&2
+  else
+    echo "verify-wasm-client-only: 没有选中任何组（模式 $MODE）—— 拒绝以空集当成通过。" >&2
+  fi
   exit 2
 fi
+GROUP_COUNT=0
+VALIDATED_GROUPS=()
 for g in $GROUPS_SELECTED; do
   case "$g" in 1|2|3|4|5|6|7|8) ;; *) echo "verify-wasm-client-only: 未知组 '$g'（可选 1–8）" >&2; exit 2 ;; esac
+  case " ${VALIDATED_GROUPS[*]-} " in *" $g "*) ;; *) VALIDATED_GROUPS+=("$g") ;; esac
 done
+GROUPS_SELECTED="${VALIDATED_GROUPS[*]}"
+GROUP_COUNT="${#VALIDATED_GROUPS[@]}"
 want() { case " $GROUPS_SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ---------------------------------------------------------------------------
@@ -152,7 +173,7 @@ BINDING="$ROOT/temp/wasm-client-only/HEAD-binding.txt"
 
 echo "WASM 客户端专属验收门禁（scripts/verify-wasm-client-only.sh）"
 echo "HEAD $HEAD_START（$BRANCH_START；工作树 ${DIRTY_START} 个改动 —— 本仓并发编辑，结论按此 HEAD 归档）"
-echo "组：$GROUPS_SELECTED（模式 $MODE）｜日志目录 $LOG_DIR"
+echo "组：$GROUPS_SELECTED（模式 $MODE；共 ${GROUP_COUNT} 组，可选 1–8）｜日志目录 $LOG_DIR"
 
 if [ "$MODE" = "portable" ]; then
   echo "portable 模式：只跑与构建产物 / PG / 显示器无关的组。**显式**不在本模式内（不是静默跳过）："
