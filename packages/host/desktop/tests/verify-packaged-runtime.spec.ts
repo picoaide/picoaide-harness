@@ -814,11 +814,16 @@ describe('afterPack 的生产接线不可空转（第四轮审计 R4-A-9，2026-
     }
   })
 
-  it('生产接线表 AFTER_PACK_SEAMS 的四项必须逐一是真实现', () => {
+  it('生产接线表 AFTER_PACK_SEAMS 的五项必须逐一是真实现', () => {
+    // 五项都要钉：2026-09-23 合并 origin/master 后新增了第五项 `asarBigintSmoke`
+    // （issue #130：Electron 43.4.0 的 app.asar fs shim 忽略 `{ bigint: true }` 会让
+    // 整类 skill provider 静默失效）。独立复审实测：漏掉这一项时把它换成 `() => {}`
+    // 后本文件 126 条全绿 ⇒ 与 R4-A-9 修掉的"可空转接缝"是同一形态（判据缺口 P1）。
     expect(AFTER_PACK_SEAMS.verify).toBe(verifyPackagedRuntime)
     expect(AFTER_PACK_SEAMS.smoke).toBe(smokePackagedDiagnosticWorker)
     expect(AFTER_PACK_SEAMS.flockSmoke).toBe(smokePackagedFlockLock)
     expect(AFTER_PACK_SEAMS.errorReportingSmoke).toBe(smokePackagedErrorReporting)
+    expect(AFTER_PACK_SEAMS.asarBigintSmoke).toBe(smokePackagedAsarBigintSemantics)
     // 生产入口只声明一个参数（electron-builder 也只传一个）：arity 回到 >1 说明
     // 又出现了"缺省值即生产接线"的形态（真正的判据是上面那条 spy 用例，见 :742）。
     expect(afterPack.length).toBe(1)

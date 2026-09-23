@@ -347,7 +347,7 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         env:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
-        run: yarn check --full-output   # TEMP-DIAG: revert before merge
+        run: yarn check
       # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`
       # 对它 0 引用;组 6 只在本地手跑)。接在这里的原因:本 job 已装 xvfb(`yarn check`
       # 里的图形门禁需要它)、也已 `yarn install`(探针用仓内 Electron)⇒ 接线成本 = 一个
