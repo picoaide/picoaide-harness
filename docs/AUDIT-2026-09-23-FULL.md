@@ -284,6 +284,17 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 | **W-1~W-5**（WASM 门禁：树移出扫描面/三方对拍改名退化为 PENDING/桶上限来自 env/组 3 与组 6 从不执行） | **排队**（等 `verify-wasm-client-only.sh` 从 L-B 释放） | 组 3 的 `check-go-test-json.mjs` 与组 6 的 4 个协议探针**本机 4/4 PASS、21s 却从不被 CI 执行** ⇒ 属"有能力、没接线"的假保证；接线归 CI 泳道（已并入 L-F）。 |
 | `check:wasm-channels` 是否"声明了却从不运行" | **核实为误判（无孤儿守卫）** | 它由 `verify-wasm-client-only.sh:361` 间接调用，而 `check:wasm-client-only` 在编排器 `GUARDS` 内。逐条核对 package.json 的 `check:*` ↔ 编排器后：**无孤儿守卫**。 |
 
+### 7.35 用户现场新增（2.8.1，客户端技能库）：`skill_manage create` 在默认沙箱下永久失败且报错误导
+
+- **现象**：用户要求安装一个技能；`skill_manage(action:"create")` 连续三次（同一会话、同一进程）失败，报
+  `dsh-memory-evolve: write target <HOME>/memories/pending-skills/<name>/SKILL.md.tmp.<pid> is a symlink or escapes its directory — write refused`。
+- **证伪"符号链接"**：会话内的自证探针（`stat -f` / `readlink` / 逐层 `lstat` / `realpath`）显示该路径**是普通文件、父链全是真目录、realpath 在根内** ⇒ 文案与事实不符。
+- **真机制（两条叠加）**：
+  1. **原子写失败后泄漏 0 字节 `.tmp.<pid>` 且重试非幂等**：临时名是**按 PID 确定**的 `${target}.tmp.${process.pid}`，创建用 `O_EXCL`（`openExclusiveSafe`，`wx`）⇒ 一次失败留下残留后，**同一进程内对该落点的所有重试都命中 EEXIST**，并被统一映射成上面那句"符号链接"拒绝。会话内另见同日更早的同类残留 `<HOME>/memories/dsh-memory-evolve/update-state.json.tmp.<同一 pid>`（0 字节）⇒ 是插件原子写的**通用**缺陷，不是本次技能路径特有。
+  2. **技能库在会话工作区之外**：`<HOME>/memories/**`（以及 `~/.agents/skills`）不在 `workspace-write` 的工作区内 ⇒ **agent 连清理残留都要提权**：`rm` 得到 `Operation not permitted` + `[sandbox: file access denied under workspace-write mode]`，最终靠用户批准 `danger-full-access` 才删掉一个 0 字节文件；此后每次技能更新又各要一次批准（本会话共 9 次审批，其中 8 次理由是"技能库在会话工作区之外"）。
+- **代价**：agent 被误导去 `app.asar` 里 grep 守卫实现、反复探测文件系统，约 150 步后才用"把 SKILL.md 直接 `cp` 进另一个技能根"绕过；**产品自身的技能安装通道从未成功**。
+- **待修（本会话未修，登记为 P1）**：①失败分类与文案（分辨 `EPERM/EACCES`（权限/沙箱）与真正的符号链接/越界，二者不可共用一句）；②原子写失败必须清理自己创建的临时文件，且重试要幂等（临时名加随机后缀或失败即回收）；③数据根（技能库 / memories）与沙箱工作区的关系需要产品决策：要么把自身工具的写入面纳入沙箱允许范围，要么在会话为 `workspace-write` 时对该写入给出**可行动的**指引（而不是让用户反复批准提权）。
+
 ### 7.4 收敛判定
 
 **判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、**第三轮 0 P0 + 19 P1**（R3-A 2 / R3-B 1 / R3-B3 1 / R3-C 15）—— 第三轮不是干净轮，按口径干净的一对必须顺延到第四、五轮。
