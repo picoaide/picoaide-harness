@@ -895,8 +895,16 @@ function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
     installedOrigin: local?.installedOrigin ?? pickByAuthority(byAuthority, row => row.installedOrigin, () => true),
     // 归属判据（R6-B-1）：只有宿主下发在本机行上，**只认本机行那一份**，且不做
     // "任一行有就取"的归并 —— 它描述的是"磁盘上这一份算不算当前账号的"，目录行
-    // 上的任何字段都回答不了这个问题。缺省 undefined = 证明不了（不得读成 'mine'）。
-    localOwnership: local?.localOwnership,
+    // 上的任何字段都回答不了这个问题。
+    //
+    // **缺省必须归一化成 `'unknown'`（证明不了），绝不读成 `'mine'`**（第六轮独立复审
+    // V2 边界①：`?? 'mine'` 这个变异此前没有任何判据，存活）。读成 `'mine'` 会让
+    // "宿主根本没下发这个字段"（旧宿主 / 字段被裁剪 / 未来新增的调用点）与"宿主证明
+    // 属于当前账号"在 {@link isDelistedItem} 第 3 条判据里完全等价，于是页脚又给出
+    // **删除本机那一份** —— 正是 R6-B-1 要挡的那个跨账号破坏性动作。
+    // 归一化成显式取值（而不是留在 `undefined`）是为了让"证明不了"在数据里就是一个
+    // 取值：下游（含测试与探针）不必再区分"没这个字段"与"字段值是 undefined"。
+    localOwnership: local?.localOwnership ?? 'unknown',
     originChannel: local?.originChannel ?? pickByAuthority(byAuthority, row => row.originChannel, () => true),
     originAppId: local?.originAppId ?? pickByAuthority(byAuthority, row => row.originAppId, () => true),
     dirty: local?.dirty ?? pickByAuthority(byAuthority, row => row.dirty, () => true),

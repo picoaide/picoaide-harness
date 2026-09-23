@@ -343,6 +343,58 @@ describe('R6-B-1 归并：归属判据只认本机行那一份', () => {
     expect(isDelistedItem(merged)).toBe(false)
   })
 
+  /**
+   * **边界①（第六轮独立复审 V2）**：`mergeItems` 的缺省方向此前**没有任何判据** ——
+   * 把 `localOwnership: local?.localOwnership` 改成 `?? 'mine'`（= 把"证明不了"读成
+   * "属于当前账号"）时，本文件与能力中心其余用例**全部照绿**（变异存活）。
+   *
+   * 现场形状：宿主**没有**在本机行上写 `localOwnership`（旧宿主 / 字段被裁剪 / 将来
+   * 新增的取数路径）。这一行的语义与第一条用例里的 `'unknown'` 完全一样 ——
+   * 「证明不了就不出卸载」，所以缺省必须落在同一边。
+   */
+  it('本机行**不带** `localOwnership`（宿主未下发）⇒ 缺省取保守方向：不判已下架、不给删除动作', () => {
+    // 形状 = 没有该键（不是 `localOwnership: undefined`；两种写法都要落在同一侧）。
+    const local: CapabilityItem = {
+      kind: 'skill', source: 'local', name: 'x', displayName: 'x', version: '1.0.0',
+      description: '', author: '', versions: [], isLocal: true,
+      installedOrigin: 'store', originChannel: 'market',
+    }
+    expect('localOwnership' in local, '本用例的夹具必须真的**不带**这个键').toBe(false)
+
+    const item = mergeItems([local])[0]!
+    expect(item.localOwnership, '缺省必须归一化成保守取值（证明不了 ⇒ unknown），不得读成 mine').toBe('unknown')
+    expect(isDelistedItem(item), '缺省不得被读成"我的内容被下架"').toBe(false)
+    expect(planCardAction(item), '缺省下唯一可达的是无副作用的「上传」，绝不是删除').toEqual({ kind: 'upload' })
+  })
+
+  /**
+   * 同一形状的**权威判据对照**（边界①的"别把判据改弱"那一半）：`delisted` / `enabled`
+   * 是服务端下发的事实，与归属维度**无关** —— 缺省归一化之后它们必须**各自独立成立**。
+   * 这条把 `isDelistedItem` 前两条判据与第 3 条的归属维度解耦：谁把它们并进归属分支，
+   * 或者谁为了"保守"顺手把权威判据也一起收窄，本用例立刻红。
+   */
+  it('归属缺省不影响权威判据：不带 `localOwnership` 的行上，`delisted:true` / `enabled:false` 照旧成立', () => {
+    const base: CapabilityItem = {
+      kind: 'skill', source: 'local', name: 'x', displayName: 'x', version: '1.0.0',
+      description: '', author: '', versions: [], isLocal: true,
+      installedOrigin: 'store', originChannel: 'market',
+    }
+    // ① 作者面权威字段：服务端在作者自己的行上下发 `delisted:true`。
+    const delisted = mergeItems([{ ...base, delisted: true }])[0]!
+    expect(delisted.localOwnership).toBe('unknown')
+    expect(isDelistedItem(delisted), '权威判据不依赖归属维度').toBe(true)
+    expect(planCardAction(delisted)).toMatchObject({
+      kind: 'uninstall',
+      endpoint: `/api/pico/shared-skills/x/1.0.0/uninstall`,
+    })
+
+    // ② 目录面权威字段：下架行带 `enabled:false`（本机这一份仍在本机行上）。
+    const enabledOff = mergeItems([{ ...base, enabled: false }])[0]!
+    expect(enabledOff.localOwnership).toBe('unknown')
+    expect(isDelistedItem(enabledOff)).toBe(true)
+    expect(planCardAction(enabledOff).kind).toBe('uninstall')
+  })
+
   it('本机自制（无商店溯源）恒不受这条判据影响：仍出「上传」', () => {
     const draft: CapabilityItem = {
       kind: 'skill', source: 'local', name: 'my-draft', displayName: 'my-draft',
