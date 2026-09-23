@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
 import { packagedProductName } from './channel-build.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable filesystem and command boundaries for release verification. */
 export interface MacReleaseVerificationOptions {
@@ -131,8 +132,7 @@ export function verifyMacRelease(
   return { appPath, dmgPath }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const verified = verifyMacRelease()
     console.log(`macOS release verification passed: ${verified.dmgPath}`)

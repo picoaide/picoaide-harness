@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import { prepareChannelPackaging } from './channel-prepare.ts'
 import { withStagedPackAppRoot } from './pack-app-root.mjs'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -28,6 +29,10 @@ function run(command, args, cwd, env) {
  * 默认选项（生产路径）。渠道上下文在这里**同步**解析；真正会派生图标与随包
  * `channel.json` 的 `prepareChannelPackaging()` 留在直接执行分支里（必须在打包之前
  * 跑完，否则渠道包会带官方图标出厂）。
+ *
+ * `channelConfigArgs` 是**函数**而不是数组：生成的 electron-builder 配置必须在应用根
+ * **暂存之后**才写（缺省参数在函数进入时就求值，写成数组就等于"暂存之前生成"，
+ * 那正是 2026-09-23 复审 N-1 的机制）。渠道 id 非法仍在这里 fail-loud（早于暂存）。
  * @returns 打包 AppImage/deb 所需的全部注入缝。
  */
 function defaultOptions() {
@@ -36,7 +41,7 @@ function defaultOptions() {
   return {
     desktopRoot: packageRoot,
     builderCli: require.resolve('electron-builder/cli.js'),
-    channelConfigArgs: prepareChannelBuilderOverrides(channel),
+    channelConfigArgs: () => prepareChannelBuilderOverrides(channel),
     channelId: channel.channelId,
     run,
     log: message => console.log(message),
@@ -67,7 +72,8 @@ export function packageLinux(options = defaultOptions()) {
       '--publish',
       'never',
       '--config.npmRebuild=false',
-      ...options.channelConfigArgs,
+      // 惰性求值：到这里应用根已经暂存完（见 defaultOptions 的说明）。
+      ...options.channelConfigArgs(),
       ...staged.args,
     ], options.desktopRoot, {
       ...process.env,
@@ -79,9 +85,7 @@ export function packageLinux(options = defaultOptions()) {
   }
 }
 
-const invokedDirectly = process.argv[1] !== undefined
-  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
-if (invokedDirectly) {
+if (isDirectInvocation(import.meta)) {
   // 预构建依赖包(与 package-win/mac 一致),确保 AppImage/deb 携带完整 lib。
   if (!process.argv.includes('--no-prebuild')) {
     const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')

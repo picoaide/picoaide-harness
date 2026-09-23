@@ -40,7 +40,7 @@ function options(calls: CommandCall[], logs: string[] = []): MacSmokePackageOpti
     verifier: '/repo/packages/host/desktop/scripts/verify-mac-smoke.ts',
     nodeExecutable: '/usr/local/bin/node',
     // 官方渠道:不做 electron-builder 覆盖(渠道化由 channel-build.ts 负责)
-    channelConfigArgs: [],
+    channelConfigArgs: () => [],
     run: (command, args, cwd, env) => {
       calls.push({ command, args: [...args], cwd, env: { ...env } })
     },

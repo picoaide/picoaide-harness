@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url'
 import { assetExists, resolveChannelBuildContext, stageChannelProfile } from './channel-build.ts'
 import { generateMacAppIcon } from './generate-mac-app-icon.mjs'
 import { generateTrayIcons } from './generate-tray-icons.mjs'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const repoRoot = resolve(packageRoot, '..', '..', '..')
@@ -124,8 +125,7 @@ export async function prepareBrandAssets(options = {}) {
   return { channelId: context.channelId, files }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   // 这一步与 channel-prepare.ts 的 prepareChannelPackaging() 是同一件事的两半：
   // `yarn build` 必须让 build/ 与**本次渠道**自洽 —— 官方构建要删掉上一次渠道
   // 构建留下的 channel.json（残留会把客户品牌染进官方包），渠道构建要就位它。

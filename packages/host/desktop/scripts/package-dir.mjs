@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import { prepareChannelPackaging } from './channel-prepare.ts'
 import { withStagedPackAppRoot } from './pack-app-root.mjs'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -24,14 +25,19 @@ function run(command, args, cwd, env) {
  * 默认选项（生产路径）。渠道上下文在这里**同步**解析（与 `channel-build.ts` 的
  * `resolveChannelBuildContext()` 同源）；`prepareChannelPackaging()`（异步、会派生
  * 图标与随包 `channel.json`）留在直接执行分支里，必须在打包之前跑完。
+ *
+ * `channelConfigArgs` 是**函数**而不是数组：生成的 electron-builder 配置必须在应用根
+ * **暂存之后**才写（缺省参数在函数进入时就求值，写成数组就等于"暂存之前生成"，
+ * 那正是 2026-09-23 复审 N-1 的机制）。渠道 id 非法仍在这里 fail-loud（早于暂存）。
  * @returns 打包一条 unpacked 产物所需的全部注入缝。
  */
 function defaultOptions() {
   const require = createRequire(import.meta.url)
+  const channel = resolveChannelBuildContext()
   return {
     desktopRoot: packageRoot,
     builderCli: require.resolve('electron-builder/cli.js'),
-    channelConfigArgs: prepareChannelBuilderOverrides(resolveChannelBuildContext()),
+    channelConfigArgs: () => prepareChannelBuilderOverrides(channel),
     run,
   }
 }
@@ -52,7 +58,8 @@ export function packageDir(options = defaultOptions()) {
     options.run(process.execPath, [
       options.builderCli,
       '--dir',
-      ...options.channelConfigArgs,
+      // 惰性求值：到这里应用根已经暂存完（见 defaultOptions 的说明）。
+      ...options.channelConfigArgs(),
       ...staged.args,
     ], options.desktopRoot, {
       ...process.env,
@@ -64,9 +71,7 @@ export function packageDir(options = defaultOptions()) {
   }
 }
 
-const invokedDirectly = process.argv[1] !== undefined
-  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
-if (invokedDirectly) {
+if (isDirectInvocation(import.meta)) {
   const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
   prebuildWorkspaceDeps(packageRoot)
   // 渠道化准备（图标 + 随包 channel.json），见 channel-prepare.ts。

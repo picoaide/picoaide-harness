@@ -50,6 +50,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** 构建产物目录(相对包根):lib/ 是各包 tsdown/tsc 的 outDir;desktop 另有 build/(brand-prepare)。 */
 const OUTPUT_DIRS = ['lib', 'build']
@@ -537,8 +538,7 @@ export function prebuildWorkspaceDeps(desktopRoot: string): void {
   // 见其 scripts/build.mjs),其 lib/ 保留版本库跟踪,不走标准 prebuild。
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   const desktopRoot = dirname(dirname(fileURLToPath(import.meta.url)))
   try {
     prebuildWorkspaceDeps(desktopRoot)

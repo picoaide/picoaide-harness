@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
 import { packagedProductName } from './channel-build.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
 export interface MacSmokeVerificationOptions {
@@ -180,8 +181,7 @@ export function verifyMacSmoke(
   return { appPath, dmgPath }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const verified = verifyMacSmoke()
     console.log(`macOS DMG smoke verification passed: ${verified.dmgPath}`)

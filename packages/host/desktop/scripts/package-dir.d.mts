@@ -13,8 +13,13 @@ export interface PackageDirOptions {
   readonly desktopRoot: string
   /** electron-builder CLI 模块的绝对路径。 */
   readonly builderCli: string
-  /** 渠道化 `--config.*` 覆盖参数（官方渠道为空数组）。 */
-  readonly channelConfigArgs: readonly string[]
+  /**
+   * 渠道化 `--config.*` 覆盖参数（官方渠道为空数组）。
+   *
+   * **是函数而不是数组**：生成配置文件必须发生在**应用根暂存之后**（见
+   * channel-build.ts 的 channelConfigArgs 说明与 2026-09-23 复审 N-1）。
+   */
+  readonly channelConfigArgs: () => readonly string[]
   /**
    * 打包输入暂存（见 `pack-app-root.mjs`）。**只有测试注入替身**：生产调用一律走
    * 缺省的真实现（能力级接线判据的对象就是这条缺省路径）。

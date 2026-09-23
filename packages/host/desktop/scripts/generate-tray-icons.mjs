@@ -22,6 +22,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const repoRoot = resolve(packageRoot, '..', '..', '..')
@@ -145,8 +146,7 @@ export async function generateTrayIcons(options = {}) {
   return rendered
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   await generateTrayIcons()
   console.log('generate-tray-icons: rendered tray bitmaps from brands/official/logo.svg')
 }

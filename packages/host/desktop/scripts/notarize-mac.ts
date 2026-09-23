@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 // 新式 notarytool(Xcode 15+)输出 "Submission ID received" 后跟一行
 // "  id: <uuid>";旧式输出单行 "Submission ID: <uuid>"。两种都要认。
@@ -277,8 +277,7 @@ function defaultOptions(): NotarizeMacOptions {
   }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   notarizeMacApp(defaultOptions())
     .then(result => console.log(`notarization passed: ${result.appPath} (${result.submissionId}, ${result.status})`))
     .catch(error => {

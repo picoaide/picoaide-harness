@@ -1909,6 +1909,9 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
       ['real-env artifacts', '.real-env-shots/shot.png'],
       ['build temp directory', 'temp/squash-gzip.squashfs'],
       ['previous build output', 'dist-leakbase/linux-unpacked/x'],
+      // 2026-09-23 复审 N-1：打包**工具**的中间产物，落在随包白名单条目 `build/`
+      // 内部（整目录复制）⇒ 曾经进了 beta 与各品牌渠道的 asar。
+      ['channel builder config', 'build/channel-electron-builder.cjs'],
     ]
     for (const [label, entry] of cases) {
       // 每条单独喂：任何一条规则被删掉，对应 case 就会红。
@@ -1926,6 +1929,9 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
       'cordis.patch.yml',
       'build/tray-icon-blue.png',
       'build/web-brand/favicon.svg',
+      // 随包渠道配置**必须**在包里（渠道构建的运行期品牌/默认域名靠它）；
+      // 禁止形态表只钉打包工具生成的 `channel-electron-builder.cjs`，不是整个 build/。
+      'build/channel.json',
       'node_modules/@deepseek-ai/dsh/lib/bin.js',
       // 上游包自带的 .d.ts / README 是公开发行物，不在「自有源码」范围里。
       'node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.d.ts',

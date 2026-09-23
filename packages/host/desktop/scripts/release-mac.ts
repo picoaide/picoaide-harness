@@ -15,6 +15,7 @@ import {
 } from './release-preflight.ts'
 import { notarizeMacApp } from './notarize-mac.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable release boundary used by focused tests. */
 export interface MacReleaseOptions {
@@ -31,8 +32,12 @@ export interface MacReleaseOptions {
   /**
    * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
    * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   *
+   * **是函数而不是数组**：生成配置文件这件事必须发生在**应用根暂存之后**，而参数
+   * 对象的构造发生在暂存之前（缺省参数在函数进入时就求值）。2026-09-23 复审 N-1
+   * 的机制正是"暂存之前把渠道配置写进 `build/`，暂存整目录复制把它带进 asar"。
    */
-  readonly channelConfigArgs: readonly string[]
+  readonly channelConfigArgs: () => readonly string[]
   /** Remove only the dedicated generated release output before packaging. */
   readonly resetOutput: () => void
   /** Read code-signing identities with a credential-free environment. */
@@ -108,7 +113,8 @@ function defaultReleaseOptions(): MacReleaseOptions {
     desktopRoot,
     outputDir,
     productName,
-    channelConfigArgs: prepareChannelBuilderOverrides(channel),
+    // 惰性求值：配置在**应用根暂存之后**才生成（见 channelConfigArgs 的说明）。
+    channelConfigArgs: () => prepareChannelBuilderOverrides(channel),
     resetOutput: () => rmSync(outputDir, { recursive: true, force: true }),
     listCodeSigningIdentities,
     run,
@@ -206,7 +212,7 @@ export async function packMacApp(
       '--publish', 'never',
       '--config.forceCodeSigning=true', '--config.mac.notarize=false',
       '--config.npmRebuild=false',
-      ...options.channelConfigArgs,
+      ...options.channelConfigArgs(),
       `--config.directories.output=${options.outputDir}`,
       ...staged.args,
     ], options.desktopRoot, releaseEnvironment)
@@ -242,7 +248,7 @@ export async function buildMacDmgWithoutNotarization(
     '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
-    ...options.channelConfigArgs,
+    ...options.channelConfigArgs(),
     `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
   options.run(
@@ -277,7 +283,7 @@ export async function notarizeAndPackageMacDmg(
     '--publish', 'never',
     '--config.forceCodeSigning=true', '--config.mac.notarize=false',
     '--config.npmRebuild=false',
-    ...options.channelConfigArgs,
+    ...options.channelConfigArgs(),
     `--config.directories.output=${options.outputDir}`,
   ], options.desktopRoot, releaseEnvironment)
   options.run(
@@ -304,15 +310,14 @@ export async function releaseMac(
   await notarizeAndPackageMacDmg(options, appPath)
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const noPrebuild = process.argv.includes('--no-prebuild')
     const noGates = process.argv.includes('--no-gates')
     if (!noPrebuild) {
       // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))))
     }
     // 拆分模式:--pack 只打包+签名;--notarize 只公证+DMG+验证(可对同一产物
     // 重试,公证 submission id 经状态文件续等);--dmg 对已签名 app 直接出

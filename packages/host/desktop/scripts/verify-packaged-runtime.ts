@@ -334,6 +334,14 @@ export const FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS: ReadonlyArray<readonly [string
   ['real-env artifacts (.real-env-*/**)', /^\.real-env-/u],
   // 打包脚本的临时目录（曾经装着 156 MiB + 119 MiB 的 squashfs 试验件）。
   ['build temp directory (temp/**)', /^temp\//u],
+  // 打包**工具**的中间产物。与上面几条不同：它曾经落在随包白名单条目 `build/`
+  // 内部（`build/` 是**整目录复制**），所以"看着像开发期文件"却照样进包。
+  // 2026-09-23 独立复审 N-1：渠道构建生成的 electron-builder 配置（含渠道
+  // productName/appId/深链 scheme/产物名模板）就是这样进了 beta 与各品牌渠道的
+  // asar —— 官方渠道不生成它，所以本机跑官方打包看不见。现在它生成在包根 `temp/`
+  // （随包白名单之外）。这条是产物侧的第二道闸；输入侧第一道闸在
+  // `pack-app-root.mjs` 的 `PACK_APP_ROOT_FORBIDDEN_ENTRIES`（暂存前 fail-loud）。
+  ['channel builder config (build/channel-electron-builder.cjs)', /^build\/channel-electron-builder\.cjs$/u],
   ['previous build output (dist*/**)', /^dist[^/]*\//u],
 ]
 

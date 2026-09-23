@@ -11,6 +11,18 @@ export declare const PACK_APP_ROOT_ENTRIES: readonly string[]
 /** 应用根里绝不进包的开发期条目（排障展示用）。 */
 export declare const PACK_APP_ROOT_EXCLUDED: readonly string[]
 
+/**
+ * 打包工具中间产物：可以出现在包根，但**绝不进包**（落在白名单条目内部 ⇒ 会被
+ * 整目录复制，所以这里在暂存前 fail-loud）。
+ */
+export declare const PACK_APP_ROOT_FORBIDDEN_ENTRIES: readonly string[]
+
+/**
+ * 暂存前自检：随包应用根里不得有打包工具中间产物。
+ * @param packageRoot - 桌面包的绝对路径。
+ */
+export declare function assertNoPackToolResidue(packageRoot: string): void
+
 /** 暂存结果。 */
 export interface StagedPackAppRoot {
   /** 暂存应用根绝对路径。 */

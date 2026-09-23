@@ -22,9 +22,11 @@ import {
   assertStageRootIsRealDirectory,
   listStageEntries,
   PACK_APP_ROOT_ENTRIES,
+  PACK_APP_ROOT_FORBIDDEN_ENTRIES,
   stagePackAppRoot,
   withStagedPackAppRoot,
 } from '../scripts/pack-app-root.mjs'
+import { CHANNEL_ENV, prepareChannelBuilderOverrides, resolveChannelBuildContext, stageChannelProfile } from '../scripts/channel-build.ts'
 import { packageDir } from '../scripts/package-dir.mjs'
 import { packageLinux } from '../scripts/package-linux.mjs'
 import { packageMacSmoke } from '../scripts/package-mac.ts'
@@ -296,7 +298,7 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
         packageDir({
           desktopRoot,
           builderCli: join(desktopRoot, 'fake-electron-builder-cli.js'),
-          channelConfigArgs: [],
+          channelConfigArgs: () => [],
           run: recordingRun(desktopRoot, calls),
         })
       },
@@ -307,7 +309,7 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
         packageLinux({
           desktopRoot,
           builderCli: join(desktopRoot, 'fake-electron-builder-cli.js'),
-          channelConfigArgs: [],
+          channelConfigArgs: () => [],
           channelId: 'official',
           run: recordingRun(desktopRoot, calls),
           log: () => undefined,
@@ -330,7 +332,7 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
           builderCli: join(desktopRoot, 'fake-electron-builder-cli.js'),
           verifier: join(desktopRoot, 'fake-verifier.ts'),
           nodeExecutable: process.execPath,
-          channelConfigArgs: [],
+          channelConfigArgs: () => [],
           run: recordingRun(desktopRoot, calls),
           log: () => undefined,
         }, { skipGates: true })
@@ -350,7 +352,7 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
           builderCli: join(desktopRoot, 'fake-electron-builder-cli.js'),
           verifier: join(desktopRoot, 'fake-verifier.ts'),
           nodeExecutable: process.execPath,
-          channelConfigArgs: [],
+          channelConfigArgs: () => [],
           channelId: 'official',
           run: recordingRun(desktopRoot, calls),
           log: () => undefined,
@@ -366,7 +368,7 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
           desktopRoot,
           outputDir: join(desktopRoot, 'dist', 'mac-release'),
           productName: 'PicoAide Harness',
-          channelConfigArgs: [],
+          channelConfigArgs: () => [],
           resetOutput: () => undefined,
           listCodeSigningIdentities: () => '  1) 0123456789ABCDEF "Developer ID Application: Release Signer (TEAM123456)"\n',
           run: recordingRun(desktopRoot, calls),
@@ -386,6 +388,97 @@ describe('五个打包脚本的缺省路径就是真暂存（能力级接线判�
       assertStageWasReal(label, desktopRoot, calls)
     } finally {
       rmSync(desktopRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * 渠道覆盖文件不得进入打包输入（2026-09-23 独立复审 N-1）。
+ *
+ * 机制：`build` 是暂存白名单条目，`stagePackAppRoot()` 会把它**整目录**复制 ⇒ 任何
+ * 写在 `build/` 里的打包工具中间产物都会进 `app.asar`。渠道构建生成的
+ * electron-builder 配置（含渠道 productName/appId/深链 scheme/产物名模板）曾经就写在
+ * `build/` 里、且生成时机早于暂存 ⇒ **beta 与各品牌渠道的 asar 都多出这个文件**；
+ * 官方渠道不生成它，所以本机跑官方 `package-dir.mjs` 看不见。这里用**生产缺省路径**
+ * （真暂存 + 真渠道上下文 + 记录 argv 的 run）在进程内复刻复审的假 builder 端到端。
+ */
+describe('渠道覆盖文件不得进入暂存输入（N-1）', () => {
+  /** 造一个只含 channel.json 的最小渠道仓。 */
+  function channelRepo(): string {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-pack-channel-'))
+    const dir = join(root, 'channels', 'acme')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'channel.json'), `${JSON.stringify({
+      schema: 1,
+      channel_id: 'acme',
+      identity: { display_name: 'Acme AI' },
+      desktop: { slug: 'Acme-AI', app_id: 'com.acme.ai', deep_link_scheme: 'acmeai' },
+    }, null, 2)}\n`)
+    return root
+  }
+
+  it('渠道构建：打包那一刻暂存 build/ 里只有随包 channel.json，覆盖文件落在暂存之外', async () => {
+    const root = fakePackageRoot()
+    const channelRoot = channelRepo()
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: channelRoot })
+    const calls: Array<{ args: readonly string[], stageBuild: readonly string[] | null }> = []
+    try {
+      // 生产顺序：**先**就位随包渠道配置（直接执行分支里的 prepareChannelPackaging），
+      // 再进打包函数（暂存发生在这里面）。
+      stageChannelProfile(context, join(root, 'build'))
+      await packageLinux({
+        desktopRoot: root,
+        builderCli: join(root, 'fake-electron-builder-cli.js'),
+        // 生产缺省的惰性求值：配置在暂存之后生成（见各打包脚本的 channelConfigArgs）。
+        channelConfigArgs: () => prepareChannelBuilderOverrides(context, {
+          buildDir: join(root, 'build'),
+          configDir: join(root, 'temp'),
+        }),
+        channelId: 'acme',
+        run: (_command, args) => {
+          if (!args.includes('--linux')) return
+          const stagedBuild = join(root, 'dist', '.pack-root', 'build')
+          calls.push({
+            args: [...args],
+            stageBuild: existsSync(stagedBuild) ? readdirSync(stagedBuild).sort() : null,
+          })
+        },
+        log: () => undefined,
+      })
+
+      expect(calls, '没有观测到打包命令').toHaveLength(1)
+      const call = calls[0]!
+      // 正向：随包渠道配置必须在暂存里（运行期读的就是 asar 里的这一份）。
+      expect(call.stageBuild).toContain('channel.json')
+      // 反例：打包工具中间产物不得在暂存里（整目录复制会把它带进 asar）。
+      expect(call.stageBuild).not.toContain('channel-electron-builder.cjs')
+      // 它确实生成了，只是落在**暂存目录之外**，并且真的传给了 electron-builder。
+      const configIndex = call.args.indexOf('--config')
+      expect(configIndex).toBeGreaterThan(-1)
+      const configPath = call.args[configIndex + 1]!
+      expect(existsSync(configPath)).toBe(true)
+      expect(configPath.startsWith(join(root, 'dist', '.pack-root'))).toBe(false)
+      // 源包根的 build/ 里也不该留（旧形态留下的残留在暂存前会被清掉）。
+      expect(existsSync(join(root, 'build', 'channel-electron-builder.cjs'))).toBe(false)
+      // 暂存目录已被清掉（try/finally 生效）。
+      expect(existsSync(join(root, 'dist', '.pack-root'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(channelRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('源包根里残留打包配置时，暂存当场拒包（把修法拆回旧顺序 = 红）', () => {
+    const root = fakePackageRoot()
+    try {
+      // 前置：这个文件确实会被"整目录复制"带上（它是白名单条目 build/ 里的文件）。
+      expect(PACK_APP_ROOT_ENTRIES).toContain('build')
+      writeFileSync(join(root, 'build', 'channel-electron-builder.cjs'), 'module.exports = {}\n')
+      expect(() => stagePackAppRoot(root, 'dist')).toThrow(/打包工具中间产物/u)
+      // 禁止形态表里有它（这条判据不是写死的字面量，而是与产物侧同名的清单）。
+      expect(PACK_APP_ROOT_FORBIDDEN_ENTRIES).toContain('build/channel-electron-builder.cjs')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })
