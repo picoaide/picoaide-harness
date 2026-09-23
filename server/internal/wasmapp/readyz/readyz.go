@@ -328,14 +328,21 @@ type Snapshot struct {
 	//
 	// 为什么必须下发：现场排障要看的是"现在多少 / 上限多少"（本条 P0 的现场证据就是
 	// `编译缓存超上限：578263173 > 536870912`）。0 = 没有编译子系统（看 compile_available）。
-	CacheLimitBytes int64  `json:"compile_cache_limit_bytes"`
-	ExecRunning     int    `json:"exec_running"`
-	ExecWaiting     int    `json:"exec_waiting"`
-	EventsDropped   int64  `json:"events_dropped"`
-	EventsFailed    int64  `json:"events_failed"`
-	EventsWritten   int64  `json:"events_written"`
-	DBOK            bool   `json:"db_ok"`
-	CheckedAt       string `json:"checked_at"`
+	CacheLimitBytes int64 `json:"compile_cache_limit_bytes"`
+	ExecRunning     int   `json:"exec_running"`
+	ExecWaiting     int   `json:"exec_waiting"`
+	// ExecLimit 是**生效**的全局执行槽上限（与"执行槽已满"的判定用的是同一个值）。
+	//
+	// 为什么必须下发（2026-09-23 R6-A-7）：`max_instances` 是控制台可配的运营参数，
+	// 而"现在在跑几个 / 上限几个"只有放在一起才读得出水位；此前探针拿编译期常量
+	// 判定，于是同一个 `exec_running` 在不同档位下会得到相反的结论。0 = 装配层没有
+	// 注入调度器（这一维没有判定，不是"上限为 0"）。
+	ExecLimit     int    `json:"exec_limit"`
+	EventsDropped int64  `json:"events_dropped"`
+	EventsFailed  int64  `json:"events_failed"`
+	EventsWritten int64  `json:"events_written"`
+	DBOK          bool   `json:"db_ok"`
+	CheckedAt     string `json:"checked_at"`
 	// SnapshotCached 报告这份读数是不是**缓存命中**（R1-rt-4）。
 	//
 	// 为什么必须可见：`/readyz` 现在有秒级缓存（limits.ReadyzSnapshotTTL），
@@ -650,11 +657,27 @@ func (c *Checker) collect() Snapshot {
 		st := c.opt.Scheduler.Stats()
 		s.ExecRunning = st.GlobalRunning
 		s.ExecWaiting = st.Waiting
-		if st.GlobalRunning >= limits.GlobalInstances {
+		// 判据必须用**生效上限**，不是编译期常量（2026-09-23 R6-A-7，接 2026-09-21
+		// wasm-platform-gap-audit P1-④）：
+		//   · `max_instances` 是管理端可配的运营参数（applimits，1..256，holder 在装配层），
+		//     而 `limits.GlobalInstances` 只是它的编译期缺省值；
+		//   · 两者一分叉，探针就会说反话 —— 配成 small 档（3）时"执行槽已满"永远不出现
+		//     （运维盲区），配成 64 时在还剩 32 个空槽时就报满载（误报）。
+		//   · 生效值只有一个来源：调度器自己的 s.opt（queue.Acquire / pumpAllLocked
+		//     的准入判定读的就是它，控制台保存经 SetOptions 即时生效）。这里**不**
+		//     复制那份解析（"档位 vs 控制台 vs 缺省"的解析在装配层），也不重算 ——
+		//     与 CacheLimitBytes 同一条纪律：读数取自真正做判定的那个对象。
+		// 快照没给（最小装配/旧调用点）时才回落到编译期常量（与 compile 侧同款兜底）。
+		execLimit := c.opt.Scheduler.Options().GlobalRunning
+		if execLimit <= 0 {
+			execLimit = limits.GlobalInstances
+		}
+		s.ExecLimit = execLimit
+		if st.GlobalRunning >= execLimit {
 			// 满载不是"不健康"（§4.6：有界即设计目标）⇒ 只做**非阻塞**说明项，
 			// 不置 OK=false；AllowPublish 也会过滤掉这一条（发布不占执行槽，
 			// 满载时连发布都做不了反而无法排障）。
-			s.addReason(reasonExecutorFull, fmt.Sprintf("：%d ≥ %d", st.GlobalRunning, limits.GlobalInstances))
+			s.addReason(reasonExecutorFull, fmt.Sprintf("：%d ≥ %d", st.GlobalRunning, execLimit))
 		}
 	}
 	if c.opt.Events != nil {
