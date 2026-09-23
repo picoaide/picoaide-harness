@@ -550,6 +550,20 @@ func (h *Handlers) validate(c *gin.Context) {
 		writeErr(c, aerr)
 		return
 	}
+	// 归属校验，且必须在**任何实际工作之前**（2026-09-23 审计 A-2，P1）。
+	//
+	// 预检会读该应用**当前生效版本**的 config_json 作为继承基线
+	//（`inheritBaseForApp`），并把合并结果原样回显在 `validation.config`
+	//（`validationJSON`）—— 缺了这一句，任意已登录员工用一个只带 app_id 的最简载荷
+	// 就能换回他人应用的 `whitelist` 名单 / `purpose` / `data_sensitivity` / `owner` /
+	// `sensitive_columns`，外加一个 `first_release` 存在性 oracle。
+	//
+	// 位置有意：在 `isFirstRelease`/`decodeWasmBase64`/`inheritBaseForApp`/`prepare`
+	// 之前 —— 非归属人不触发任何配置读取、不进编译池、不落任何行。
+	if oerr := h.checkValidateOwner(c.Request.Context(), u, appID); oerr != nil {
+		writeErr(c, oerr)
+		return
+	}
 	// 首版判定是**只读**查询：决定 purpose/data_sensitivity/owner 是否必填。
 	// validate 不做任何写入（§4.2：不落版本号、不进审计）。
 	first, verr := h.isFirstRelease(c.Request.Context(), appID)
@@ -1203,6 +1217,35 @@ func (h *Handlers) checkOwner(u *serverstore.User, appID string, existing *serve
 		WithDetail("app_id", appID).
 		WithHint("发布即占名：首个成功发布者永久占有该标识，被拒/软删也不释放（R6/§4.1）").
 		WithHint("需要接管他人应用时，请管理员在管理面转移归属（§11 第 17 项）")
+}
+
+// checkValidateOwner 是**预检**（validate）的归属检查：非归属人一律 404。
+//
+// 为什么不能直接复用 checkOwner（publish 的 409）：那条 409 的语义是"名称已被占用，
+// 请换名字"，它必须回显（作者要知道下一步做什么），而且它**不携带任何配置内容**。
+// 预检不同 —— 它的响应体里有该应用的生效配置（继承基线回显），一旦放行，"响应的内容"
+// 本身就是泄露，所以拒绝必须走**只读管理面**的口径（`ownedApp`/`notFoundApp`）：
+// 不存在与不属于你是**同一个响应**（同一个构造函数、同一份文案、同一份 details/hints），
+// 外人无法用响应差异探测归属。参见 `release.go` 的 notFoundApp 与 `read.go` 目录面对
+// 同一份数据（whitelist/purpose 只给发布者）的口径。
+//
+// 空闲标识（没有 apps 行 = 首版）放行：validate 的**主要**用途就是"发布前先验证一个
+// 新标识能不能发"（§4.2 的预检），这里不是管理动作、也没有任何他人数据可读。
+// 存在性本身不是新增泄露：`/apps/wasm/availability/:app_id`（200 + reason=taken）与
+// publish 的 409 都已经公开"这个标识被占了"；本函数要关掉的是**存在性之外**的东西
+// （配置内容与 first_release 版本数 oracle）。
+func (h *Handlers) checkValidateOwner(ctx context.Context, u *serverstore.User, appID string) *apperr.Error {
+	app, err := serverstore.GetWasmApp(ctx, h.opt.DB, appID)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			return nil
+		}
+		return internalErr("查询失败", err)
+	}
+	if app.Owner == u.Username || isSuperAdmin(u) {
+		return nil
+	}
+	return notFoundApp(appID)
 }
 
 // isSuperAdmin 报告该用户是否是平台管理员（R23 兜底接管）。
