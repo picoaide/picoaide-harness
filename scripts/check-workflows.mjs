@@ -393,7 +393,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
 const SELFTEST_SCANNER_ASSERTIONS = 5
@@ -622,6 +622,8 @@ export function checkWorkflowText(name, text) {
   failures.push(...checkDocsOnlyClassifier(name, document, text, notes))
   // 策略 7(C-CI-2/C-CI-3):发布面语义判据(策展说明位置 + gh release argv)。
   failures.push(...checkReleaseSurface(name, document, text, notes))
+  // 策略 8(W-4/W-5):WASM 门禁的两处接线(用例级报告 + 协议探针)。
+  failures.push(...checkWasmGateWiring(name, document, notes))
 
   return workflowResult(failures, {
     checked,
@@ -858,7 +860,29 @@ const DOCS_ONLY_CLASSIFIER_CASES = [
   ['*', 'code'],
 ]
 /**
- * **对外（客户/公开）上传**的调用点(C-CI-2:策展说明检查必须排在它们之前)。
+ * [SK-12] WASM 门禁接线(2026-09-23 第三轮审计 W-4/W-5)。
+ *
+ * 为什么需要静态判据:这两条判据的**脚本侧**早就存在(`scripts/wasm/check-go-test-json.mjs`
+ * 与 `scripts/verify-wasm-client-only.sh --groups 6`),但 `.github/` 对它们 **0 引用** ⇒
+ * "从不执行"在 CI 侧不会被任何东西发现。接线只有几行,而最容易发生的退化是:
+ * ① 把 `--scope`/`--require` 改松(判据变成恒绿);
+ * ② 判定脚本的退出码被丢掉(少了 `exit 1` 这类把判定变成失败的收口);
+ * ③ 探针那一步的"平台未覆盖即显式 SKIP"开关被摘掉(非 Linux 上"跑完给结论")。
+ */
+const WASM_CASE_GATE_SCRIPT = 'scripts/wasm/check-go-test-json.mjs'
+/** W-4 的三条关键用例(与 `scripts/verify-wasm-client-only.sh` 组 3 同一份名单)。 */
+const WASM_CASE_GATE_REQUIRED = [
+  'TestClientRequest_LoginRequiredWithoutIdentityIs401',
+  'TestCheckClientOrigin',
+  'TestClientFrameUser_ProjectsUserRowAndPublisherFlag',
+]
+/** W-4 的判定范围(与组 3 同面;全仓套"零 skip"会因环境条件型 skip 变成每次必红的假红)。 */
+const WASM_CASE_GATE_SCOPE = ['internal/wasmapp', 'internal/router']
+/** W-5 的探针组与它必须带的"非覆盖平台显式 SKIP"开关。 */
+const WASM_PROBE_GROUPS = ['6']
+const WASM_PROBE_ENV = 'WASM_GATE_REQUIRE_COVERED_PLATFORM'
+
+/**
  *
  * 刻意**不含** `ci-channel-transfer.sh`:它上传的是 R2 上那个 run 级临时中转前缀
  * (不可猜、由 release job 的 `if: always()` 步骤销毁),不是客户侧更新面;把它算进来
@@ -2281,6 +2305,189 @@ function checkDocsOnlyClassifier(file, document, text, notes) {
  * @param notes - 提示收集器。
  * @returns 失败项列表。
  */
+/**
+ * [SK-12] 的实现:WASM 门禁的两处接线(W-4 用例级 0 skip / W-5 协议探针)。
+ *
+ * 判据(每条都对应一种"接上了但等于没接"的形态):
+ *   ① `check-go-test-json.mjs` 恰好被一步调用;那一步里 `go test … -json` 的**落盘路径**
+ *      必须等于判定脚本读的那个路径(路径不一致 ⇒ checker 只会以 exit 2 收尾,而人容易
+ *      把它当成"环境问题");`--require` 与 `--scope` 必须与登记值**集合相等**;
+ *      该 step 不得 `continue-on-error`,且必须含 `exit 1`(判定结果要真的变成失败);
+ *      所在 job(或该 step)必须提供 `PG_DSN_TEST` —— 没有真 PG 时 wasm 用例会 t.Skip,
+ *      判定必然红,接进无 PG 的 job 等于接了个恒红判据(会被关掉)。
+ *   ② `verify-wasm-client-only.sh --groups 6` 恰好被一步调用;该 step 的 env 必须
+ *      `WASM_GATE_REQUIRE_COVERED_PLATFORM=1`(否则非 Linux 平台会"跑完给结论");
+ *      不得 `continue-on-error`;`if:`(若有)不得把它收窄成"几乎不跑"的条件。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkWasmGateWiring(file, document, notes) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const stepsOf = job => (Array.isArray(job?.steps) ? job.steps : [])
+  const scriptOf = step => (typeof step?.run === 'string' ? executableScript(step.run) : '')
+  const setEqual = (observed, expected) => observed.length === expected.length
+    && [...observed].sort().join(',') === [...expected].sort().join(',')
+
+  // 判据只对**本仓的 CI 工作流**(`ci.yml`)生效。为什么锚文件名而不是"内容里有没有
+  // `yarn check`/`go test`":那类锚点会随被检查的东西一起消失 —— 把接线整段删掉时,
+  // 锚点也没了,判据静默变绿(正是这条策略要防的形态)。改名/搬走 ci.yml 不会静默:
+  // `scripts/verify-ci-scripts.mjs` 的 §1c/§1d 直接按这个路径抽取并断言(找不到即红)。
+  if (file !== 'ci.yml') return failures
+
+  const caseGateHits = []
+  const probeHits = []
+  for (const [jobId, job] of Object.entries(jobs)) {
+    for (const [index, step] of stepsOf(job).entries()) {
+      const script = scriptOf(step)
+      if (script.includes(WASM_CASE_GATE_SCRIPT)) caseGateHits.push({ jobId, job, step, index, script })
+      const groups = /--groups\s+([0-9,]+)/u.exec(script)
+      if (script.includes('verify-wasm-client-only.sh') && groups !== null) {
+        probeHits.push({ jobId, job, step, index, script, groups: groups[1].split(',').filter(Boolean) })
+      }
+    }
+  }
+
+  if (caseGateHits.length !== 1) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-12] 调用 \`${WASM_CASE_GATE_SCRIPT}\` 的 step 有 ${caseGateHits.length} 个(要求恰好 1 个)`
+        + '\n  ⇒ 0 个 = W-4「用例级 0 skip」在 CI 侧从不执行(脚本里那句"PG 不可达 ⇒ 全部 t.Skip ⇒ '
+        + '0 断言通过"会重新变绿);多个 = 同一份报告被反复判/接错工作目录。',
+    })
+  } else {
+    const hit = caseGateHits[0]
+    const label = `job ${hit.jobId} 的 step「${stepName(hit.step, hit.index)}」`
+    const goTest = /go\s+test\b[^\n]*?-json[^\n]*?>\s*([^\s;&|]+)/u.exec(hit.script)
+    if (goTest === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 里没有 \`go test … -json > <报告>\` 的落盘写法`
+          + '\n  ⇒ 判定脚本需要 `go test -json` 的报告;没有它只能以 exit 2 收尾(而"环境问题"很容易被忽略)。',
+      })
+    }
+    const reportArg = new RegExp(`${WASM_CASE_GATE_SCRIPT.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\s+([^\\\s\\\\]+)`, 'u').exec(hit.script)
+    const reportPath = reportArg?.[1]
+    if (goTest !== null && reportPath !== undefined && goTest[1] !== reportPath) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 的报告路径不一致:go test 落盘到 \`${goTest[1]}\`,`
+          + `判定脚本读 \`${reportPath}\` ⇒ checker 只会 exit 2("报告不可读")。`,
+      })
+    }
+    const requireMatch = /--require\s+(\S+)/u.exec(hit.script)
+    const requireList = requireMatch === null ? [] : requireMatch[1].split(',').map(name => name.trim()).filter(Boolean)
+    if (!setEqual(requireList, WASM_CASE_GATE_REQUIRED)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 的 --require 名单与登记值不一致`
+          + `\n  实际:${requireList.join(', ') || '(缺失)'}`
+          + `\n  登记:${WASM_CASE_GATE_REQUIRED.join(', ')}`
+          + '\n  ⇒ 名单被改松(例如只留一条必然通过的用例)= 判据恒绿;改名时必须同步这里的登记值。',
+      })
+    }
+    const scopeMatch = /--scope\s+(\S+)/u.exec(hit.script)
+    const scopeList = scopeMatch === null ? [] : scopeMatch[1].split(',').map(prefix => prefix.trim()).filter(Boolean)
+    if (!setEqual(scopeList, WASM_CASE_GATE_SCOPE)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 的 --scope 与登记值不一致`
+          + `\n  实际:${scopeList.join(', ') || '(缺失:整份报告都判)'}`
+          + `\n  登记:${WASM_CASE_GATE_SCOPE.join(', ')}`
+          + '\n  ⇒ 缺省(整份报告)会把 `internal/serverstore` 的 DST 用例这类**环境条件型 skip** 也算成失败'
+          + '(UTC runner 上必然红);范围被放大到全仓 = 每次必红的假红,而假红的下场通常是关掉判据。',
+      })
+    }
+    if (!/exit\s+[1-9]/u.test(hit.script)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 里没有把判定收口成失败的 \`exit 1\``
+          + '\n  ⇒ checker 的 1/2(报告不合格 / 前置缺失)会被当成"只是打印了几行")。',
+      })
+    }
+    if (hit.step?.continue_on_error !== undefined && hit.step.continue_on_error !== false) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 打开了 continue-on-error ⇒ 判定永远不会失败。`,
+      })
+    }
+    const jobPg = hit.job?.env?.PG_DSN_TEST
+    const stepPg = hit.step?.env?.PG_DSN_TEST
+    const pg = typeof stepPg === 'string' && stepPg.trim() !== '' ? stepPg : jobPg
+    if (typeof pg !== 'string' || pg.trim() === '') {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 所在的 job 没有 \`PG_DSN_TEST\``
+          + '\n  ⇒ 没有真 PG 时 wasm 的 appserver 用例会 t.Skip,判定必然红 ⇒ 接进无 PG 的 job 等于接了个恒红判据。',
+      })
+    }
+  }
+
+  if (probeHits.length !== 1) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-12] 调用 \`verify-wasm-client-only.sh --groups …\` 的 step 有 ${probeHits.length} 个(要求恰好 1 个)`
+        + '\n  ⇒ 0 个 = W-5 的 4 个协议探针在 CI 侧从不执行(`.github/` 对它 0 引用)。',
+    })
+  } else {
+    const hit = probeHits[0]
+    const label = `job ${hit.jobId} 的 step「${stepName(hit.step, hit.index)}」`
+    if (!setEqual(hit.groups, WASM_PROBE_GROUPS)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 跑的是 --groups ${hit.groups.join(',')}(登记 ${WASM_PROBE_GROUPS.join(',')})`
+          + '\n  ⇒ 接线要的是组 6(协议探针);漏掉/换组等于探针仍然从不执行。',
+      })
+    }
+    const env = typeof hit.step?.env === 'object' && hit.step.env !== null ? hit.step.env : {}
+    if (env[WASM_PROBE_ENV] !== '1' && env[WASM_PROBE_ENV] !== 1) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 没有 \`${WASM_PROBE_ENV}: '1'\`(实际 ${JSON.stringify(env[WASM_PROBE_ENV] ?? null)})`
+          + '\n  ⇒ 非 Linux 平台上探针会"跑完给结论"而不是显式 SKIP(77);组内新增的"全组 SKIP = 失败"'
+          + '只在 Linux 上保证不装作跑过。',
+      })
+    }
+    if (hit.step?.continue_on_error !== undefined && hit.step.continue_on_error !== false) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 打开了 continue-on-error ⇒ 探针失败不会拦门禁。`,
+      })
+    }
+    // `if:` 不得把它收窄成"几乎不跑"的条件(允许 `!= 'false'` 这种 fail-safe 形态)。
+    const stepIf = typeof hit.step?.if === 'string' ? hit.step.if : ''
+    const narrow = /github\.event_name|needs\.[\w-]+\.result|outputs\.code\s*==/u.test(stepIf)
+    if (narrow && !/!=\s*'false'/u.test(stepIf)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-12] ${label} 的 \`if:\` 是 \`${stepIf.trim()}\` —— 这会把探针收窄成"几乎不跑"`
+          + '\n  ⇒ 允许的形态只有:不写 `if:`,或写成 `!= \'false\'`(docs-only 的 fail-safe 形态)。',
+      })
+    }
+  }
+  if (caseGateHits.length > 0 || probeHits.length > 0) {
+    notes.push(`[SK-12] WASM 接线:用例级报告 ${caseGateHits.length} 步(范围 ${WASM_CASE_GATE_SCOPE.join(',')})、`
+      + `协议探针 ${probeHits.length} 步(组 ${WASM_PROBE_GROUPS.join(',')})`)
+  }
+  return failures
+}
+
 function checkReleaseSurface(file, document, text, notes) {
   const failures = []
   // 只在"这份 workflow 有发布面"时生效:合成样本 / 纯测试 workflow 只跑 `yarn check`
@@ -2460,6 +2667,100 @@ export function selfTestPolicies() {
   }
 
   /**
+   * WASM 接线的形态开关(W-4/W-5,见 [SK-12]):
+   * `full` 正常 / `none` 整段缺 / `no-scope` 去掉 --scope / `weakened-require` 名单改松 /
+   * `no-exit` 去掉收口 / `no-pg` 所在 job 不给 PG_DSN_TEST / `path-mismatch` 报告路径不一致。
+   */
+  const WASM_CASE_GATE_OPTIONS = {
+    full: {
+      scope: `--scope ${WASM_CASE_GATE_SCOPE.join(',')} \\`,
+      require: `--require ${WASM_CASE_GATE_REQUIRED.join(',')} \\`,
+      exit: ['          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then', '            exit 1', '          fi'],
+      report: 'go-test.json',
+      read: 'go-test.json',
+      pg: true,
+    },
+    'no-scope': {
+      scope: null,
+      require: `--require ${WASM_CASE_GATE_REQUIRED.join(',')} \\`,
+      exit: ['          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then', '            exit 1', '          fi'],
+      report: 'go-test.json',
+      read: 'go-test.json',
+      pg: true,
+    },
+    'weakened-require': {
+      scope: `--scope ${WASM_CASE_GATE_SCOPE.join(',')} \\`,
+      require: '--require TestClientFrameUser_ProjectsUserRowAndPublisherFlag \\',
+      exit: ['          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then', '            exit 1', '          fi'],
+      report: 'go-test.json',
+      read: 'go-test.json',
+      pg: true,
+    },
+    'no-exit': {
+      scope: `--scope ${WASM_CASE_GATE_SCOPE.join(',')} \\`,
+      require: `--require ${WASM_CASE_GATE_REQUIRED.join(',')} \\`,
+      exit: [],
+      report: 'go-test.json',
+      read: 'go-test.json',
+      pg: true,
+    },
+    'no-pg': {
+      scope: `--scope ${WASM_CASE_GATE_SCOPE.join(',')} \\`,
+      require: `--require ${WASM_CASE_GATE_REQUIRED.join(',')} \\`,
+      exit: ['          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then', '            exit 1', '          fi'],
+      report: 'go-test.json',
+      read: 'go-test.json',
+      pg: false,
+    },
+    'path-mismatch': {
+      scope: `--scope ${WASM_CASE_GATE_SCOPE.join(',')} \\`,
+      require: `--require ${WASM_CASE_GATE_REQUIRED.join(',')} \\`,
+      exit: ['          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then', '            exit 1', '          fi'],
+      report: 'go-test.json',
+      read: 'server/go-test.json',
+      pg: true,
+    },
+  }
+  /** W-5 探针步的形态生成器(两个夹具共用)。 */
+  const wasmProbeLines = (mode) => (mode === 'none' ? [] : [
+    '      - name: WASM protocol probes (group 6; Linux)',
+    ...(mode === 'narrow-if' ? ["        if: github.event_name == 'workflow_dispatch'"] : []),
+    '        env:',
+    `          ${WASM_PROBE_ENV}: ${mode === 'no-env' ? "''" : "'1'"}`,
+    `        run: bash scripts/verify-wasm-client-only.sh --groups ${mode === 'group1' ? '1' : '6'}`,
+  ])
+  /** W-4 用例级报告步的形态生成器(两个夹具共用)。 */
+  const wasmCaseGateLines = (mode) => {
+    if (mode === 'none') return []
+    const option = WASM_CASE_GATE_OPTIONS[mode]
+    return [
+      '  server:',
+      '    runs-on: ubuntu-latest',
+      '    timeout-minutes: 45',
+      ...(option.pg ? [
+        '    env:',
+        '      PG_DSN_TEST: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable',
+      ] : []),
+      '    defaults:',
+      '      run:',
+      '        working-directory: server',
+      '    steps:',
+      '      - uses: actions/checkout@v7',
+      '        with:',
+      '          fetch-depth: 0',
+      '      - run: |',
+      '          set -euo pipefail',
+      '          GO_TEST_STATUS=0',
+      `          go test ./... -count=1 -p 1 -timeout 15m -json > ${option.report} || GO_TEST_STATUS=$?`,
+      '          CHECK_STATUS=0',
+      `          node ../${WASM_CASE_GATE_SCRIPT} ${option.read} \\`,
+      ...(option.scope === null ? [] : [`            ${option.scope}`]),
+      `            ${option.require}`,
+      '            || CHECK_STATUS=$?',
+      ...option.exit,
+    ]
+  }
+  /**
    * 夹具：真实 CI 的检出形态（`actions/checkout` + `fetch-depth: 0`）。
    * [SK-8b] 要求"跑全量根门禁的 job 必须拿到完整历史"，所以任何含 `yarn check` 的
    * 样本都要带这一步 —— 不带就是"夹具不像真 CI"的假红。
@@ -2594,11 +2895,15 @@ export function selfTestPolicies() {
   ])
   // 白名单**逐条**生效:同一句话在 ci.yml 里被登记放行,在别的文件里必须照报
   // (否则白名单会退化成"整类语句豁免",那正是要防的豁免洞)。
+  // 白名单条目按 (file, signature) 命中,所以这条样本必须用 file: 'ci.yml';
+  // 而 [SK-12] 只对 ci.yml 生效 ⇒ 样本也要带上 WASM 接线(否则是本夹具形状不真实造成的假红)。
   expectGreen('g-allowlisted-cleanup', [
     '      - name: 清理类动作走白名单',
     '        run: |',
     '          set -euo pipefail',
     '          rm -rf "$PG18_MOUNT" 2>/dev/null || true',
+    ...wasmProbeLines('full'),
+    ...wasmCaseGateLines('full'),
   ], { file: 'ci.yml' })
   expectRed('a19-allowlist-not-file-wide', '[SK-7a]', [
     '      - name: 同样的清理语句在别的文件里',
@@ -2862,6 +3167,8 @@ export function selfTestPolicies() {
     gateDepth = '          fetch-depth: 0',
     guardDepth = '          fetch-depth: 0',
     linkStep = true,
+    wasmCaseGate = 'full',
+    wasmProbe = 'full',
   } = {}) => [
     'name: selftest',
     'on: push',
@@ -2907,10 +3214,12 @@ export function selfTestPolicies() {
     '      - name: 全量门禁',
     `        if: ${gateStepIf}`,
     `        run: ${gateRun}`,
+    ...wasmProbeLines(wasmProbe),
+    ...wasmCaseGateLines(wasmCaseGate),
     '',
   ].join('\n')
-  const gateSample = (id, expectation, options) => {
-    const entry = { raw: GATE_SHAPE(options), file: 'selftest.yml' }
+  const gateSample = (id, expectation, options = {}) => {
+    const entry = { raw: GATE_SHAPE(options), file: options.file ?? 'selftest.yml' }
     return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
   }
   // 正例:与 ci.yml 同形 ⇒ 一条失败都不许有(假阳性会把真实形态逼着改坏)。
@@ -2951,6 +3260,20 @@ export function selfTestPolicies() {
   expectGreen('o18-no-docs-only-mechanism', [
     '      - run: yarn check:layout',
   ])
+
+  // ---- 策略 8([SK-12]):WASM 门禁的两处接线(W-4 用例级报告 / W-5 协议探针) ----
+  // 样本必须用 `file: 'ci.yml'` —— [SK-12] 只对本仓 CI 工作流生效(锚点理由见策略注释)。
+  gateSample('r1-wasm-wiring-green', null, { file: 'ci.yml' })
+  gateSample('r2-case-gate-missing', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'none' })
+  gateSample('r3-case-gate-no-scope', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'no-scope' })
+  gateSample('r4-case-gate-weakened-require', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'weakened-require' })
+  gateSample('r5-case-gate-no-exit', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'no-exit' })
+  gateSample('r6-case-gate-no-pg', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'no-pg' })
+  gateSample('r7-case-gate-path-mismatch', '[SK-12]', { file: 'ci.yml', wasmCaseGate: 'path-mismatch' })
+  gateSample('r8-probe-missing', '[SK-12]', { file: 'ci.yml', wasmProbe: 'none' })
+  gateSample('r9-probe-no-require-covered', '[SK-12]', { file: 'ci.yml', wasmProbe: 'no-env' })
+  gateSample('r10-probe-wrong-group', '[SK-12]', { file: 'ci.yml', wasmProbe: 'group1' })
+  gateSample('r11-probe-narrow-if', '[SK-12]', { file: 'ci.yml', wasmProbe: 'narrow-if' })
 
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
@@ -3048,6 +3371,7 @@ export function selfTestPolicies() {
       '          }',
     ] : []),
     '      - run: yarn check',
+    ...wasmProbeLines('full'),
     ...(gateNotesStep && !gateFirst ? [
       '      - name: Require curated release notes for stable tags',
       '        run: |',
@@ -3086,6 +3410,7 @@ export function selfTestPolicies() {
     '            exit 1',
     '          fi',
     `          gh release create "\${TAG}" ${titleFlag} ${notesFlag}`,
+    ...wasmCaseGateLines('full'),
     '',
   ].join('\n')
   const releaseSample = (id, expectation, options) => {
@@ -3536,8 +3861,8 @@ function main() {
   }
   process.stdout.write(`check-workflows: OK — ${names.length} 个 workflow,${total} 个 shell run 块全部通过 `
     + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)'
-    + ' + SK-8/SK-8b/SK-9/SK-10/SK-11 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
-    + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据)\n')
+    + ' + SK-8/SK-8b/SK-9/SK-10/SK-11/SK-12 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
+    + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {

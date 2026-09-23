@@ -591,6 +591,95 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   }
 }
 
+// ---- 1d. WASM 门禁接线:真跑 W-4 判定脚本的**接线参数**(2026-09-23 审计 W-4/W-5) ----
+//
+// 现场:两条判据的脚本侧早就存在(`scripts/wasm/check-go-test-json.mjs` 与
+// `scripts/verify-wasm-client-only.sh --groups 6`),但 `.github/` 对它们 0 引用 ⇒
+// "从不执行"。接线最容易的退化是**把参数改松**:`--require` 只留一条必然通过的用例、
+// 或把 `--scope` 去掉(整份报告都判 ⇒ `internal/serverstore` 的 DST 用例在 UTC runner
+// 上必然 t.Skip ⇒ 每次必红的假红,而假红的下场通常是关掉判据)。
+//
+// 这一组**从 ci.yml 抽出真实 argv**再跑真脚本(合成报告,不跑 Go):
+//   ① 范围外的用例级 skip 不得影响结论(证明 --scope 真的在过滤);
+//   ② 范围内的用例级 skip 必须判红;
+//   ③ 报告缺失必须 exit 2(而不是"没有命中");
+//   ④ `--require` 三条关键用例必须都在报告里 pass 才绿。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const blocks = extractRunBlocks(workflowText)
+  const caseGateBlock = blocks.find(entry => entry.content.includes('check-go-test-json.mjs'))
+  check(caseGateBlock !== undefined, 'ci.yml 里找不到 W-4 的用例级判定步骤(接线被删?)')
+  const probeBlock = blocks.find(entry => entry.content.includes('verify-wasm-client-only.sh'))
+  check(probeBlock !== undefined, 'ci.yml 里找不到 W-5 的协议探针步骤(接线被删?)')
+
+  if (caseGateBlock !== undefined) {
+    const text = caseGateBlock.content
+    const scope = /--scope\s+(\S+)/u.exec(text)?.[1]
+    const required = /--require\s+(\S+)/u.exec(text)?.[1]?.split(',').map(name => name.trim()).filter(Boolean) ?? []
+    const goTest = /go\s+test\b[^\n]*?-json[^\n]*?>\s*([^\s;&|]+)/u.exec(text)
+    const reportArg = /check-go-test-json\.mjs\s+([^\s\\]+)/u.exec(text)?.[1]
+    check(scope === 'internal/wasmapp,internal/router', `W-4 的 --scope 应为 internal/wasmapp,internal/router(不带尾斜杠:带了会漏掉 internal/router 根包的用例事件),实际 ${String(scope)}`)
+    check(goTest !== null && reportArg !== undefined && goTest[1] === reportArg,
+      `W-4 的报告路径必须与 go test -json 的落盘路径一致(实际落盘 ${String(goTest?.[1])} / 读取 ${String(reportArg)})`)
+    check(required.length === 3, `W-4 的 --require 必须是三条关键用例,实际 ${required.length} 条:${required.join(', ')}`)
+    check(/exit\s+[1-9]/u.test(text), 'W-4 的步骤必须把判定收口成 exit 1(checker 的 1/2 都要变成失败)')
+
+    if (scope !== undefined && required.length > 0) {
+      const scopeArgs = ['--scope', scope]
+      const requireArgs = ['--require', required.join(',')]
+      const cases = required.map(name => ({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver', Test: name }))
+      const cleanReport = [
+        ...cases.map(entry => JSON.stringify(entry)),
+        JSON.stringify({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver' }),
+      ].join('\n')
+      // 范围外(serverstore)的用例级 skip:在 --scope 下必须**不影响**结论。
+      const outsideSkip = `${cleanReport}\n${JSON.stringify({ Action: 'skip', Package: 'picoaide/server/internal/serverstore', Test: 'TestSummarizeWasmAppOpensTrendUVAcrossDSTDay' })}`
+      // 范围内(appserver)的用例级 skip:必须判红。
+      const insideSkip = `${cleanReport}\n${JSON.stringify({ Action: 'skip', Package: 'picoaide/server/internal/wasmapp/appserver', Test: 'TestSomethingSkipped' })}`
+
+      const dir = tempDir('wasm-case-gate-')
+      const write = (name, content) => {
+        const path = join(dir, name)
+        writeFileSync(path, content)
+        return path
+      }
+      const runChecker = reportPath => spawnSync(
+        'node',
+        ['scripts/wasm/check-go-test-json.mjs', reportPath, ...scopeArgs, ...requireArgs],
+        { cwd: root, encoding: 'utf8' },
+      )
+
+      const clean = runChecker(write('clean.json', cleanReport))
+      check(clean.status === 0, `区间内干净报告应通过,实际退出 ${String(clean.status)}: ${(clean.stderr ?? '').slice(0, 200)}`)
+      const outOfScope = runChecker(write('outside-skip.json', outsideSkip))
+      check(outOfScope.status === 0,
+        `--scope 必须忽略范围外的用例级 skip,实际退出 ${String(outOfScope.status)}: ${(outOfScope.stderr ?? '').slice(0, 200)}`)
+      const inScope = runChecker(write('inside-skip.json', insideSkip))
+      check(inScope.status === 1, `范围外的用例级 skip 必须判红(exit 1),实际退出 ${String(inScope.status)}`)
+      const missing = runChecker(join(dir, 'does-not-exist.json'))
+      check(missing.status === 2, `报告缺失必须 exit 2(前置缺失),实际退出 ${String(missing.status)}`)
+      // 缺一条关键用例 ⇒ 判红(证明 --require 的名单真的在判)。
+      const dropped = required[required.length - 1]
+      const missingCase = runChecker(write('missing-case.json', [
+        ...cases.filter(entry => entry.Test !== dropped).map(entry => JSON.stringify(entry)),
+        JSON.stringify({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver' }),
+      ].join('\n')))
+      check(missingCase.status === 1, `少一条关键用例(${dropped})必须判红,实际退出 ${String(missingCase.status)}`)
+    }
+  }
+
+  // W-5:探针步骤的参数级断言(真跑 21s 的探针属于"本地/CI 实跑"面,这里只钉参数)。
+  if (probeBlock !== undefined) {
+    const text = probeBlock.content
+    check(/verify-wasm-client-only\.sh\s+--groups\s+6(?!\d)/u.test(text),
+      `W-5 必须跑 --groups 6(协议探针),实际:${text.split('\n').find(line => line.includes('verify-wasm-client-only')) ?? '(无)'}`)
+    check(workflowText.includes('WASM_GATE_REQUIRE_COVERED_PLATFORM'),
+      'W-5 必须带 WASM_GATE_REQUIRE_COVERED_PLATFORM(非覆盖平台显式 SKIP(77),不给"跑完给结论")')
+    check(/WASM_GATE_REQUIRE_COVERED_PLATFORM:\s*['"]1['"]/u.test(workflowText),
+      'WASM_GATE_REQUIRE_COVERED_PLATFORM 必须写死为 \'1\'(由 tag/平台派生的开关会让它退化成"跑完给结论")')
+  }
+}
+
 // ---- 2. 掩码 / 跳过不合规目录 / 不回显名字 ----
 {
   const source = fakeChannelRepo(['official', 'example-brand'], { extraDirectories: ['README', 'Bad_Name'] })
@@ -2060,4 +2149,8 @@ if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + 上传后大小/哈希完整性校验)/本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
+  + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数)/'
+  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
+  + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + 上传后大小/哈希完整性校验)/'
+  + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')
