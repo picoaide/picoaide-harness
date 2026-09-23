@@ -94,6 +94,57 @@ const OPT_IN_SKIPS = [
   },
 ]
 
+/**
+ * **环境条件型**用例级 skip（第二档，2026-09-24 第六轮补）：用例真的是回归断言，
+ * 但它需要宿主能力（这里是 `bwrap`），拿不到就自己 `t.Skip`。
+ *
+ * 为什么不能塞进 `OPT_IN_SKIPS`：那一档是"只在给环境变量时才有意义的取证出口"，
+ * 而这一档在**有能力的机器上是真跑的**（本机 `/usr/bin/bwrap` 0.11.0 时全部 pass）
+ * ⇒ 套用"不再跳过即陈旧"会把本地/开发机判红。反过来也不能放任：CI runner 上
+ * 它们**总是** skip，若直接放过，"整包静默跳过"就从这条通道溜过去了。
+ *
+ * 所以每条登记必须给三样东西，缺一不可：
+ *   · `requires`：缺的是什么能力（打进日志，"跳过"永远带着原因）；
+ *   · `companion`：**同一能力面的形状判据**用例名 —— 它必须在本报告里真的 `pass`，
+ *     否则该 skip 判失败（形状判据不需要 bwrap，能力缺席时它照样跑 ⇒ 一旦整包被
+ *     静默跳过，companion 也拿不到 pass，这条通道立刻关闭）；
+ *   · `reason`：为什么这个代价可接受。
+ *
+ * 陈旧口径：**报告里完全没出现**（改名/删除）判失败；真跑了并 pass 不判红。
+ */
+const ENV_CONDITIONAL_SKIPS = [
+  {
+    test: 'TestCompileUnderBwrapIsolation',
+    requires: 'bwrap',
+    companion: 'TestBwrapArgvShape',
+    reason: '隔离的端到端验收（真的在 bwrap 里编译一个模块）；CI runner 无可用 bwrap 时用例自身 t.Skip，argv 形状由 companion 覆盖',
+  },
+  {
+    test: 'TestBwrapBlocksWriteOutsideCacheDir',
+    requires: 'bwrap',
+    companion: 'TestBwrapArgvShape',
+    reason: '隔离的写入边界端到端验收；无 bwrap 即跳过（argv 形状由 companion 覆盖）',
+  },
+  {
+    test: 'TestCompileTimeoutUnderBwrapLeavesNoResidue',
+    requires: 'bwrap',
+    companion: 'TestBwrapArgvShape',
+    reason: '隔离下超时击杀不留残留；无 bwrap 即跳过（隔离外路径由 TestCompileTimeoutKillsChild 覆盖）',
+  },
+  {
+    test: 'TestBwrapCannotReadOutsideWhitelist',
+    requires: 'bwrap',
+    companion: 'TestBwrapArgvShape',
+    reason: '隔离的读取白名单端到端验收；无 bwrap 即跳过（argv 形状由 companion 覆盖）',
+  },
+  {
+    test: 'TestBwrapTmpIsWritable',
+    requires: 'bwrap',
+    companion: 'TestBwrapArgvShape',
+    reason: '隔离下 tmp 可写端到端验收；无 bwrap 即跳过（argv 形状由 companion 覆盖）',
+  },
+]
+
 const failures = []
 const casePasses = new Set()
 /** 报告里出现过的**全部**用例名（含失败/跳过）—— 用来区分"被改名"与"跑了但没过"。 */
@@ -151,20 +202,51 @@ if (casePasses.size === 0) failures.push('没有任何用例级 pass —— 零�
 
 if (caseSkips.length > 0) {
   const allowed = []
+  const envAllowed = []
   const unexpected = []
   for (const entry of caseSkips) {
     const name = entry.slice(entry.indexOf('::') + 2)
-    if (OPT_IN_SKIPS.some(rule => rule.test === name)) allowed.push(entry)
-    else unexpected.push(entry)
+    if (OPT_IN_SKIPS.some(rule => rule.test === name)) {
+      allowed.push(entry)
+      continue
+    }
+    const envRule = ENV_CONDITIONAL_SKIPS.find(rule => rule.test === name)
+    if (envRule !== undefined) {
+      // 环境条件型：**必须**同时在报告里看到同能力面的形状判据 pass —— 否则不能证明
+      // "只是缺能力"，而可能是整包被静默跳过（PG 不可达那类形态正是这么溜过去的）。
+      if (casePasses.has(envRule.companion)) {
+        envAllowed.push([entry, envRule])
+      } else {
+        unexpected.push(`${entry}（登记为环境条件型 skip，但同能力面的形状判据 ${envRule.companion} 本次没有 pass`
+          + ` ⇒ 无法证明只是缺 ${envRule.requires}）`)
+      }
+      continue
+    }
+    unexpected.push(entry)
   }
   for (const entry of allowed) {
     const rule = OPT_IN_SKIPS.find(candidate => candidate.test === entry.slice(entry.indexOf('::') + 2))
     console.log(`  SKIP(opt-in) ${entry} —— ${rule?.reason ?? ''}`)
   }
+  for (const [entry, rule] of envAllowed) {
+    console.log(`  SKIP(env:${rule.requires}) ${entry} —— ${rule.reason}`
+      + `（同能力面形状判据 ${rule.companion} 本次 pass ✅）`)
+  }
   // 陈旧白名单：登记了"会跳过"，实际却跑了（说明用例改名/去掉了 skip）⇒ 必须清理登记项。
   const stale = OPT_IN_SKIPS.filter(rule => !caseSkips.some(entry => entry.endsWith(`::${rule.test}`)))
   if (stale.length > 0) {
     failures.push(`OPT_IN_SKIPS 里有不再跳过的陈旧条目（请删除或改名）：${stale.map(rule => rule.test).join(', ')}`)
+  }
+  // 环境条件型：**报告里完全没出现**才算陈旧（改名/删除）；真跑了并 pass 是更严的形态，不判红。
+  const staleEnv = ENV_CONDITIONAL_SKIPS.filter(rule => !caseSeen.has(rule.test))
+  if (staleEnv.length > 0) {
+    failures.push(`ENV_CONDITIONAL_SKIPS 里登记的用例在报告里**不存在**（改名/删除 ⇒ 请同步登记）：${staleEnv.map(rule => rule.test).join(', ')}`)
+  }
+  const missingCompanion = [...new Set(ENV_CONDITIONAL_SKIPS.map(rule => rule.companion))]
+    .filter(name => !caseSeen.has(name))
+  if (missingCompanion.length > 0) {
+    failures.push(`环境条件型 skip 的形状判据（companion）在报告里不存在：${missingCompanion.join(', ')}`
+      + ' —— 没有它就无法把"缺能力"与"整包静默跳过"区分开')
   }
   if (unexpected.length > 0) {
     failures.push(`有未登记的用例级 skip ${unexpected.length} 个（PG 不可达/条件跳过 ⇒ 假绿，一律算失败）：${unexpected.slice(0, 20).join(' ')}`)
