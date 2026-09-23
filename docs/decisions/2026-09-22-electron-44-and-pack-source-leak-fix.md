@@ -139,6 +139,37 @@ sourcemap 在**进包之前**丢弃（`tsdown` 仍开 `sourcemap: true`，`lib/*
 `electronFuses`（`runAsNode` + `onlyLoadAppFromAsar`）在 44 依然有效：`afterPack`
 的 `@electron/fuses` 步骤在真实产物上跑通（构建日志 `executing @electron/fuses`）。
 
+### 附带修好的第二条：`app.asar` fs shim 恢复 `{ bigint: true }`（issue #130）
+
+44 不只带来安全回补：v2.8.0 随包的 **Electron 43.4.0 在 `app.asar` 的 fs 包装器里丢掉了
+`bigint` 选项**，对归档内路径合成 Number 版 `Stats`。两份 README 的
+「Electron 44.4.3 fixed it（见本决策）」指的就是这一条。
+
+- **现象**：cordis 会话里**所有文件系统技能消失** —— preset 自带的创作指南
+  （`cordis-plugin-development` / `editing-cordis-compositions`）与项目 `.dsh/skills`、
+  `$DSH_HOME/skills`、`~/.agents/skills` 一起不见了，而用户侧看不到任何报错。
+- **机制**：`@deepseek-ai/dsh-fs-local` 的 `listDirectory()` 用
+  `Number(info.mode & 0o777n)` 求权限掩码，Number 版 `Stats` 让这条表达式抛
+  `TypeError: Cannot mix BigInt and other types`；`@deepseek-ai/dsh-skill-filesystem`
+  没有逐根容错 ⇒ 整条文件系统技能 provider 被跳过。`@deepseek-ai/dsh-agent-presets`
+  不在 `asarUnpack` 里，所以每次 stat/list 都走这个包装器；`asarUnpack` 也救不了
+  （包装器无论如何都从归档合成元数据），而 `web-app` bundle 又关掉了宿主
+  `skill-filesystem` 行，没有第二个 provider 兜底。
+- **判据位置**：`scripts/verify-packaged-runtime.ts` 的
+  `smokePackagedAsarBigintSemantics`（afterPack，三平台）—— 在**真 asar** 上以
+  `ELECTRON_RUN_AS_NODE=1` 启动随包 launcher，断言 (a)
+  `stat(<asar 内路径>, { bigint: true })` 返回 `typeof mode === 'bigint'` 且掩码表达式
+  可求值，(b) 走真 `LocalFileSystem.listDir()` 列举 preset 技能目录，名字集合与
+  **产物自身**（asar 头或物理目录）另行读出的期望**逐元素相等**（被截断的列举必须
+  失败，比较函数 `assertExactSkillListing` 有独立单测）。配套：
+  `tests/verify-packaged-runtime.spec.ts`（含 43.4.0 症状、空期望拒跑、启动器缺失、
+  超时、空转 exited 0 等用例）；`tests/package.spec.ts` 另有 major ≥ 44 的精确 pin 守卫。
+- **升级或降级 Electron 都必须重跑该门禁**：`node scripts/package-dir.mjs`
+  （或 `yarn dist:linux`）会真正执行 `afterPack`；43 线上这条契约不成立。成功时打印
+  `dsh-plugin-desktop: packaged ASAR bigint smoke OK in <ms> (<n> preset skills, app root <path>)`，
+  CI 日志因此能正面证明门禁跑过。要在不动门禁的前提下复现 43 的失败形态：
+  `node scripts/asar-bigint-probe.mjs --app-out <dist/linux-unpacked> --engine <electron-43.4.0>`。
+
 ### 45+ 的坑（本次**不改**，仅登记）
 
 `safeStorage` 同步 API 在 45 弃用、46 移除，我们

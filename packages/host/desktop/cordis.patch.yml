@@ -57,7 +57,32 @@
     fetch: true
     searchTimeoutMs: 60000
 
-# ── 0.1.6-alpha.2 新增/改默认行为行：桌面这三行必须显式关闭 ──────────────────
+# ── 桌面必须显式关闭的行（0.1.6-alpha.2 新增/改默认行为，以及 profileContext 开关）──
+
+# Profile HMR（上游 base bundle 的 `hmr` 行，`@deepseek-ai/dsh-hmr`）：它和
+# `plugin-manager` **共用同一个开关** `disabled: !!js "!ctx.get('profileContext')"`
+# （deepseek-harness/packages/bundle/base/cordis.patch.yml:28-31）。桌面为了
+# `pluginManager` 服务必须 provide profileContext（见 src/main.ts 的 provide 注释 /
+# `desktopProfileContext`），这一行因此也会跟着激活 —— 而 `Service.init` 要求存在
+# `appReady` 服务（deepseek-harness/packages/boot/hmr/src/index.ts:200-208），
+# `appReady` 只有 `@deepseek-ai/dsh-cmdline` 会 provide（CLI 的"应用就绪"语义），
+# 桌面宿主不走 cmdline ⇒ 整棵 profile 树在
+# "Profile HMR requires application readiness" 处 fail-loud
+# （`fatal: plugin tree failed to load: … hmr (@deepseek-ai/dsh-hmr): Profile HMR
+# requires application readiness`）。**比原缺陷更严重**：原缺陷只让创造模式会话不
+# 可用，这个会让客户端直接起不来。所以在桌面组合里显式关闭该行。
+#
+# 我们没有依赖它（已核：`grep -rn "hmr\|reconcileProfilePatches"
+# packages/host/desktop/src` 无命中）：桌面的插件写面是 `DesktopPluginsService`
+# （bundle 启停 + 状态落 `<userData>/plugin-management/state.json`），重载语义由
+# 它自己持有。代价是上游 `plugin-manager` 在 hmr 缺席时把变更标成
+# `restart-required`（`configure()` 直跑、`reload()` 返回空）—— 这是上游的既定语义，
+# 不是能力缺失："启停/装包后重启客户端生效"。
+#
+# 若日后真要打开它，必须同时 provide `appReady`（把"树挂载完成"变成一个显式的
+# readiness 提交），不能只删这一行。
+- id: hmr
+  disabled: true
 
 # 会话原文出境（P0，2026-09-20 升级审计）：`session-log-deepseek` 的
 # `enabled` 默认值在 0.1.6 由 false 翻成 true，而 base bundle 无 config 挂载它。

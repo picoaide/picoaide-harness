@@ -11,6 +11,7 @@ import {
   AFTER_PACK_SEAMS,
   afterPack,
   runAfterPackSeams,
+  assertExactSkillListing,
   assertNoPackagedSourceLeaks,
   assertRequiredEntriesCoverWorkspaceSurface,
   assertRuntimeAssetFamiliesSurvive,
@@ -25,6 +26,10 @@ import {
   declaredElectronVersion,
   packagedRuntimeLayoutIsPhysical,
   PACKAGED_RUNTIME_LAYOUT_ENV,
+  PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS,
+  PACKAGED_CORDIS_SKILL_DIR,
+  REQUIRED_CORDIS_PRESET_SKILLS,
+  expectedCordisSkillListing,
   PACKAGED_WEB_BRAND_ASSETS,
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
@@ -46,9 +51,11 @@ import {
   smokePackagedDiagnosticWorker,
   smokePackagedErrorReporting,
   smokePackagedFlockLock,
+  smokePackagedAsarBigintSemantics,
   verifyPackagedRuntime,
   type ArchiveLister,
   type AfterPackSeams,
+  type AsarBigintSmokeLauncher,
   type FileProbe,
   type FlockSmokeLauncher,
   type PackageEntryReader,
@@ -699,9 +706,9 @@ describe('afterPack 的生产接线不可空转（第四轮审计 R4-A-9，2026-
   // 现在生产路径只有一张表（`AFTER_PACK_SEAMS`）+ 单参数入口 `afterPack(context)`。
   // 下面六条判据全部打在**生产接线**上（不是文本匹配）：
   //   ① 入口不带任何注入：合成产物必须被真 verify 拒，且拒的理由是静态门禁自己那条；
-  //   ②③④⑤ 逐个接缝：把该步从**生产表里取出**（AFTER_PACK_SEAMS[x]）当唯一真实现跑，
+  //   ②③④⑤⑥ 逐个接缝：把该步从**生产表里取出**（AFTER_PACK_SEAMS[x]）当唯一真实现跑，
   //        断言它真的拒了坏产物、点名自己那一步，且前面几步确实先跑过；
-  //   ⑥ 生产表四项必须逐一是真实现（表项被换成空函数即红）。
+  //   ⑦ 生产表五项必须逐一是真实现（表项被换成空函数即红）。
   const seamRecorders = (
     calls: string[],
     real: keyof AfterPackSeams,
@@ -710,6 +717,7 @@ describe('afterPack 的生产接线不可空转（第四轮审计 R4-A-9，2026-
     smoke: async () => { calls.push('smoke') },
     flockSmoke: () => { calls.push('flock') },
     errorReportingSmoke: () => { calls.push('error-reporting') },
+    asarBigintSmoke: () => { calls.push('asar-bigint') },
     // 被测那一步必须来自生产表：换成替身就失去"这一步真的接在生产上"的证明。
     [real]: AFTER_PACK_SEAMS[real],
   })
@@ -886,6 +894,7 @@ describe('packaged desktop runtime verification', () => {
       vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async (workerRoot) => { calls.push(workerRoot) }),
       vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => { calls.push('flock') }),
       vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke').mockImplementation(() => { calls.push('error-reporting') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'asarBigintSmoke').mockImplementation(() => { calls.push('asar-bigint') }),
     ]
 
     try {
@@ -898,6 +907,7 @@ describe('packaged desktop runtime verification', () => {
         expect.stringMatching(/resources[\\/]app$/u),
         'flock',
         'error-reporting',
+        'asar-bigint',
       ])
     } finally {
       for (const spy of spies) spy.mockRestore()
@@ -1986,6 +1996,243 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(launch).not.toHaveBeenCalled()
     })
   })
+})
+
+describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
+  /** 造一个"打包根":物理 app 根 + preset 技能目录 + 可选启动器。 */
+  function asarFixture(
+    electronPlatformName: string,
+    options: { readonly skills?: boolean, readonly launcher?: boolean } = {},
+  ): { runtimeContext: PackagedRuntimeContext, appRoot: string, launcher: string, skillsDir: string } {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-asar-bigint-fixture-'))
+    const runtimeContext: PackagedRuntimeContext = {
+      appOutDir,
+      electronPlatformName,
+      arch: 1,
+      packager: {
+        appInfo: { productFilename: 'PicoAide Harness' },
+        executableName: 'dsh-plugin-desktop',
+      },
+    }
+    const appRoot = join(appOutDir, 'resources', 'app')
+    const skillsDir = join(appRoot, PACKAGED_CORDIS_SKILL_DIR)
+    mkdirSync(skillsDir, { recursive: true })
+    writeFileSync(join(appRoot, 'package.json'), '{"name":"fixture"}\n')
+    if (options.skills !== false) {
+      for (const name of REQUIRED_CORDIS_PRESET_SKILLS) {
+        mkdirSync(join(skillsDir, name), { recursive: true })
+        writeFileSync(join(skillsDir, name, 'SKILL.md'), `# ${name}\n`)
+      }
+    }
+    let launcher = ''
+    if (options.launcher !== false) {
+      launcher = join(
+        appOutDir,
+        electronPlatformName === 'win32' ? 'dsh-plugin-desktop.exe' : 'dsh-plugin-desktop',
+      )
+      writeFileSync(launcher, '#!/bin/sh\n')
+      chmodSync(launcher, 0o755)
+    }
+    return { runtimeContext, appRoot, launcher, skillsDir }
+  }
+
+  const successResult = { status: 0, stdout: 'ASAR-BIGINT-SMOKE-OK\n', stderr: '' }
+  const packagedAppRoot = fileURLToPath(new URL('../dist/linux-unpacked', import.meta.url))
+
+  it('anchors the preset skills issue #130 lost, and proves the names come from the entry table', () => {
+    // 名字不是第二真源:它们由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 的 SKILL.md 条目派生。
+    // 这条钉的是**症状级锚点**(创造模式自带的创作指南)确实还在判据里;产物级断言用的是
+    // 派生集合,所以上游日后新增预设技能不需要改这里 —— 只有"清单里的锚点被删空"才会红。
+    for (const name of ['cordis-plugin-development', 'editing-cordis-compositions']) {
+      expect(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+        .toContain(`${PACKAGED_CORDIS_SKILL_DIR}/${name}/SKILL.md`)
+      expect(REQUIRED_CORDIS_PRESET_SKILLS).toContain(name)
+    }
+    expect(REQUIRED_CORDIS_PRESET_SKILLS.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('reads the expectation off the artifact itself (disk layout), not off a hard-coded count', () => {
+    const fixture = asarFixture('linux')
+    mkdirSync(join(fixture.skillsDir, 'extra-skill'), { recursive: true })
+    writeFileSync(join(fixture.skillsDir, 'extra-skill', 'SKILL.md'), '# extra\n')
+    writeFileSync(join(fixture.skillsDir, 'notes.txt'), 'not a skill\n')
+    expect(expectedCordisSkillListing(fixture.runtimeContext)).toEqual({
+      children: [...REQUIRED_CORDIS_PRESET_SKILLS, 'extra-skill', 'notes.txt'].sort(),
+      skills: [...REQUIRED_CORDIS_PRESET_SKILLS, 'extra-skill'].sort(),
+    })
+  })
+
+  it('reads the expectation off the archive header (asar layout), never through Electron fs', () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-asar-bigint-archive-'))
+    const asarPath = join(appOutDir, 'resources', 'app.asar')
+    mkdirSync(dirname(asarPath), { recursive: true })
+    writeFileSync(asarPath, 'placeholder — the lister is injected')
+    const list: ArchiveLister = () => [
+      `/${PACKAGED_CORDIS_SKILL_DIR}`,
+      `/${PACKAGED_CORDIS_SKILL_DIR}/alpha`,
+      `/${PACKAGED_CORDIS_SKILL_DIR}/alpha/SKILL.md`,
+      `/${PACKAGED_CORDIS_SKILL_DIR}/beta`,
+      `/${PACKAGED_CORDIS_SKILL_DIR}/README.md`,
+      '/node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
+    ]
+    expect(expectedCordisSkillListing(context(appOutDir, 'linux'), list, () => true)).toEqual({
+      children: ['README.md', 'alpha', 'beta'],
+      skills: ['alpha'],
+    })
+  })
+
+  it('runs the sealed launcher in Node mode with the artifact-derived expectation', () => {
+    const fixture = asarFixture('linux')
+    const launch = vi.fn<AsarBigintSmokeLauncher>((executable, args, env) => {
+      expect(executable).toBe(fixture.launcher)
+      expect(env.ELECTRON_RUN_AS_NODE).toBe('1')
+      expect(args[1]).toBe(fixture.appRoot)
+      expect(JSON.parse(args[2] as string)).toEqual({
+        children: REQUIRED_CORDIS_PRESET_SKILLS,
+        skills: REQUIRED_CORDIS_PRESET_SKILLS,
+      })
+      // 脚本必须真的断言引擎语义与真实 provider 路径(而不是"打印 OK 就退出"):
+      // `{ bigint: true }` + `0o777n` 是 fsio.ts 的原始表达式,`listDir` 是 provider 的实际调用。
+      const script = readFileSync(args[0] as string, 'utf8')
+      expect(script).toContain('{ bigint: true }')
+      expect(script).toContain('0o777n')
+      expect(script).toContain('@deepseek-ai/dsh-fs-local')
+      expect(script).toContain('listDir')
+      expect(script).toContain('ASAR-BIGINT-SMOKE-OK')
+      // 比较语义不是脚本里的第二份实现:子进程用的是父进程这个函数对象的源码
+      // (assertExactSkillListing.toString()),所以下面的单测测的就是它真正执行的东西。
+      expect(script).toContain(assertExactSkillListing.toString())
+      expect(script).toContain('assertExactSkillListing(names, expected.children')
+      expect(script).toContain('assertExactSkillListing(skills, expected.skills')
+      return successResult
+    })
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch)).not.toThrow()
+    expect(launch).toHaveBeenCalledOnce()
+    expect(PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS).toBe(20_000)
+  })
+
+  it('rejects a truncated listing: the comparison must be element-wise equality, not containment', () => {
+    // 审计 D §4：内嵌脚本的"恰好相等"原先没有单元判据 —— 把比较弱化成
+    // `listed.every(n => expected.includes(n))`（或 `>=`）后，被截断的列举能通过门禁
+    // 且 spec 全绿。这三条把语义钉死在真函数上（子进程插值的正是同一个函数对象）。
+    expect(() => { assertExactSkillListing(['a', 'b', 'c'], ['a', 'b', 'c'], 'skill directory listing') })
+      .not.toThrow()
+    expect(() => { assertExactSkillListing(['a', 'b'], ['a', 'b', 'c'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set[\s\S]*listed \["a","b"\][\s\S]*artifact holds \["a","b","c"\]/u)
+    // 多出一项同样不是"恰好相等"（`⊇` 方向也拦得住）。
+    expect(() => { assertExactSkillListing(['a', 'b', 'c', 'd'], ['a', 'b', 'c'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set/u)
+    // 顺序也属于契约（两侧都先 sort，所以顺序不同就是真的不同）。
+    expect(() => { assertExactSkillListing(['b', 'a'], ['a', 'b'], 'skill directory listing') })
+      .toThrow(/is not exactly the packaged set/u)
+    // 失败信息必须能指认现场：两个集合都要出现。
+    expect(() => { assertExactSkillListing(['a'], ['a', 'b'], 'discoverable skills') })
+      .toThrow(/discoverable skills[\s\S]*\["a"\][\s\S]*\["a","b"\]/u)
+  })
+
+  it('fails loud when the packaged launcher is missing instead of skipping', () => {
+    // win32:那里的候选列表只有具名启动器。Linux 分支还有"扫描 appOutDir"兜底,
+    // 它会把这个夹具里的 `resources/` 目录当候选收走 —— 那是启动器解析的既有行为
+    // (真产物里它只会硬失败在 spawn),不是本判据要测的东西。
+    const fixture = asarFixture('win32', { launcher: false })
+    const launch = vi.fn<AsarBigintSmokeLauncher>(() => successResult)
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch))
+      .toThrow(/cannot find the packaged launcher/u)
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('refuses to compare against an empty expectation', () => {
+    // 反空转:期望集合为空时,集合相等会退化成"列出 0 个也对"。
+    const fixture = asarFixture('linux', { skills: false })
+    const launch = vi.fn<AsarBigintSmokeLauncher>(() => successResult)
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch))
+      .toThrow(/found no cordis preset skill/u)
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('rejects the package when the engine reports Number stats (issue #130 symptom)', () => {
+    const fixture = asarFixture('linux')
+    const launch: AsarBigintSmokeLauncher = () => ({
+      status: 1,
+      stdout: '',
+      stderr: 'Error: the runtime permission-mask expression threw on an app.asar path: '
+        + 'TypeError: Cannot mix BigInt and other types, use explicit conversions',
+    })
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch))
+      .toThrow(/does not honour \{ bigint: true \}[\s\S]*filesystem skill provider would be skipped[\s\S]*Cannot mix BigInt/u)
+  })
+
+  it('fails loud on timeout, spawn failure and a vacuous exit 0', () => {
+    const fixture = asarFixture('linux')
+    const timedOut: AsarBigintSmokeLauncher = () => ({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: { code: 'ETIMEDOUT', message: 'spawnSync ETIMEDOUT' },
+    })
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, timedOut))
+      .toThrow(/timed out after 20000ms/u)
+
+    const missing: AsarBigintSmokeLauncher = () => ({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: { code: 'ENOENT', message: 'spawnSync ENOENT' },
+    })
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, missing))
+      .toThrow(/could not start[\s\S]*ENOENT/u)
+
+    const vacuous: AsarBigintSmokeLauncher = () => ({ status: 0, stdout: '', stderr: '' })
+    expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, vacuous))
+      .toThrow(/without reporting ASAR-BIGINT-SMOKE-OK/u)
+  })
+
+  it('is wired into the afterPack gate', async () => {
+    // 接线守卫:辅助函数测得到 ≠ 被调用。没有这条,删掉 afterPack 里的调用时其余用例全绿。
+    // 合并后（R4-A-9 的表 + issue #130 的第五接缝）生产路径只有一张表 + 单参数入口，
+    // 所以这里 spy 生产表项、再调**生产入口**，断言第五步确实被走到。
+    const fixture = asarFixture('linux')
+    const stub = vi.fn<(context: PackagedRuntimeContext) => void>()
+    const spies = [
+      vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async () => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'asarBigintSmoke').mockImplementation(stub),
+    ]
+    try {
+      await afterPack(fixture.runtimeContext)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+    expect(stub).toHaveBeenCalledOnce()
+    expect(stub.mock.calls[0]?.[0]).toBe(fixture.runtimeContext)
+  })
+
+  it('does not smoke anything once the static gate already rejected the package', async () => {
+    const fixture = asarFixture('linux')
+    const asarBigintSmoke = vi.fn<(context: PackagedRuntimeContext) => void>()
+    // 显式 seams 入口（`runAfterPackSeams`）驱动"静态门禁失败 ⇒ 后续几步都不跑"。
+    await expect(runAfterPackSeams(fixture.runtimeContext, {
+      ...AFTER_PACK_SEAMS,
+      verify: () => { throw new Error('static gate rejected the package') },
+      smoke: async () => {},
+      flockSmoke: () => {},
+      errorReportingSmoke: () => {},
+      asarBigintSmoke,
+    })).rejects.toThrow('static gate rejected the package')
+    expect(asarBigintSmoke).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(process.platform !== 'linux' || !existsSync(join(packagedAppRoot, 'resources', 'app.asar')))(
+    'reads the real packaged app.asar with the packaged Electron',
+    () => {
+      // 产物级判据(没有 dist 时跳过 —— 但它不是唯一的牙:上面的接线守卫与契约断言
+      // 不依赖产物,afterPack 在 CI 三平台会对真 asar 跑同一条)。
+      smokePackagedAsarBigintSemantics(context(packagedAppRoot, 'linux'))
+    },
+    60_000,
+  )
 })
 
   it('profile 锚点表与 src/profile.ts 的实际解析点逐条对拍（防新增插件漏登记）', () => {

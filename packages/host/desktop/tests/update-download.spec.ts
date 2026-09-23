@@ -8,6 +8,7 @@ import {
   MAX_UPDATE_DOWNLOAD_BYTES,
   UpdateDownloadError,
   downloadDesktopUpdate,
+  splitValidatorSpec,
   type DesktopDownloadPlatform,
   type UpdateArtifactRequest,
 } from '../src/update-download.ts'
@@ -158,6 +159,21 @@ async function expectNoPartialFiles(userDataPath: string, version: string): Prom
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+describe('resume validator specs', () => {
+  it('splits on the first colon only, so Last-Modified keeps its colons', () => {
+    // `split(':', 2)` 的第二参是"数组元素个数上限",不是"切几刀":用它解析
+    // `Last-Modified` 会把值截成 `Tue, 22 Sep 2026 18`,于是续传响应的验证器
+    // 永远比对不上、206 被丢弃、进度从断点掉回 0。
+    expect(splitValidatorSpec('etag:"release-3.0.0"')).toEqual({ kind: 'etag', value: '"release-3.0.0"' })
+    expect(splitValidatorSpec('last-modified:Tue, 22 Sep 2026 18:06:04 GMT')).toEqual({
+      kind: 'last-modified',
+      value: 'Tue, 22 Sep 2026 18:06:04 GMT',
+    })
+    // 没有冒号(不该出现,但切分必须仍然确定)。
+    expect(splitValidatorSpec('release-3.0.0')).toEqual({ kind: 'release-3.0.0', value: '' })
+  })
 })
 
 describe('desktop update installer download', () => {

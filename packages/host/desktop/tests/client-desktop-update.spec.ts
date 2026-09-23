@@ -137,6 +137,47 @@ describe('desktop update shared client store', () => {
     unsubscribe()
   })
 
+  it('refreshes immediately when the window comes back to the foreground', async () => {
+    // 主窗口没有关后台节流:窗口切到后台时 5 秒轮询会被 Chromium 压到 ≥1 次/分钟,
+    // 所以"回到前台"必须补取一次,否则进度/状态停在几十秒前的旧值。
+    // 本包用例跑在 node 环境,这里给一个最小事件目标替身(不引入 jsdom 依赖);
+    // 每次响应换一个版本号,用来判断"这一轮真的落地了"(同刻只允许一条在飞请求,
+    // 光看调用次数会被去重规则绊住)。
+    const documentStub = Object.assign(new EventTarget(), { visibilityState: 'visible' as string })
+    vi.stubGlobal('document', documentStub)
+    vi.stubGlobal('window', new EventTarget())
+    let served = 0
+    const request = vi.fn(async () => {
+      served += 1
+      return Response.json({ ...healthy, availableVersion: `2.3.${String(served)}` })
+    })
+    vi.stubGlobal('fetch', request)
+
+    const unsubscribe = subscribeDesktopUpdate(() => {})
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.1') })
+
+    documentStub.dispatchEvent(new Event('visibilitychange'))
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.2') })
+
+    ;(globalThis.window as unknown as EventTarget).dispatchEvent(new Event('focus'))
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.3') })
+    expect(request).toHaveBeenCalledTimes(3)
+
+    // 窗口仍然隐藏时不必补取(切走那一刻本来就不需要新数据)。
+    documentStub.visibilityState = 'hidden'
+    documentStub.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(3)
+
+    // 退订后监听器必须一起摘掉(否则最后一个订阅者离开后仍会打接口)。
+    documentStub.visibilityState = 'visible'
+    unsubscribe()
+    documentStub.dispatchEvent(new Event('visibilitychange'))
+    ;(globalThis.window as unknown as EventTarget).dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    expect(request).toHaveBeenCalledTimes(3)
+  })
+
   it('installs a downloaded installer and checks otherwise', async () => {
     const posts: string[] = []
     const request = vi.fn(async (input: RequestInfo | URL) => {

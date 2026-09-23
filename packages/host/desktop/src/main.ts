@@ -68,6 +68,7 @@ import { DesktopPluginsService } from './desktop-plugins.ts'
 import {
   DESKTOP_PROFILE_NAME,
   desktopInstallAnchor,
+  desktopProfileContext,
   prepareDesktopProfile,
   type SkippedOptionalEntry,
 } from './profile.ts'
@@ -495,6 +496,18 @@ async function start(): Promise<void> {
         )
         hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
         hostCtx.provide('desktopRuntime', runtime)
+        // profile 自述（issue #130，P0）：上游 base bundle 的 `plugin-manager` 行由
+        // `disabled: !!js "!ctx.get('profileContext')"` 开关控制，不 provide 就会被
+        // **静默** disable ⇒ `pluginManager` 服务不存在 ⇒ `cordis` preset 的行
+        // `tool-plugin-manager` 永远等不到服务 ⇒ 界面上的「创造模式」全部挂不起来。
+        // 构造只允许一处（`lib/profile.js` 的 desktopProfileContext，与
+        // `scripts/verify-profile-boot.mjs` 共用同一个函数）—— 在本文件里内联一个字面量
+        // 对象，就会让 CI 冒烟测的不是生产路径。
+        //
+        // ⚠️ 成对约束：provide 之后上游 `hmr` 行也会跟着激活，而它要求 `appReady`
+        // （只有 cmdline 会 provide，桌面不走 cmdline）⇒ 整棵树加载失败。所以
+        // `cordis.patch.yml` 里显式关闭了 `hmr` 行，两处必须一起改。
+        hostCtx.provide('profileContext', desktopProfileContext(prepared))
         // 协议 handler 的实际注册面（默认 session + 每个浏览器分区）经这个适配器
         // 交给插件：`provide` 发生在 boot 的 prepare 回调里，**早于** profile 树的
         // 任何插件 apply（dsh-app-boot 的 boot(): prepare → mountRootInclude）。

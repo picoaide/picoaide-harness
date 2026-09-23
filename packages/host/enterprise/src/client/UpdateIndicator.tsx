@@ -1,6 +1,6 @@
 /** Sidebar version-area update indicator: reads the window's shared update snapshot. */
 
-import { createElement, useCallback, useSyncExternalStore } from 'react'
+import { createElement, useCallback, useEffect, useReducer, useState, useSyncExternalStore } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { t } from './locales.ts'
 
@@ -73,13 +73,19 @@ function updateService(): DesktopUpdateService | undefined {
   return found
 }
 
-/** 共享快照 hook:同一窗口内所有展示面读到同一份状态(服务缺失时恒为 null)。 */
+/** 共享快照 hook:同一窗口内所有展示面读到同一份状态(服务缺失时恒为 null)。
+ *
+ * 退避倒计时在这里统一按"快照到达时刻"每秒重算一次:侧边栏指示器与设置
+ * 「关于」页都经这个 hook 读快照,所以两面的"N 秒后重试"会一起递减,不需要
+ * (也不可能)各自实现一套。
+ */
 export function useUpdateState(): UpdateState | null {
   const subscribe = useCallback((listener: () => void): (() => void) => {
     return updateService()?.subscribe(listener) ?? ((): void => { /* 无服务即无变化源 */ })
   }, [])
   const read = useCallback((): UpdateState | null => updateService()?.read() ?? null, [])
-  return useSyncExternalStore(subscribe, read, () => null) as UpdateState | null
+  const state = useSyncExternalStore(subscribe, read, () => null) as UpdateState | null
+  return useLiveRetryState(state)
 }
 
 /**
@@ -90,13 +96,56 @@ export async function triggerUpdateAction(): Promise<void> {
   await updateService()?.act()
 }
 
-/** 下载进度百分比文本(无进度信息时为 undefined)。 */
+/**
+ * 下载进度的显示文本(与 desktop 侧 `updateProgressPercent` **同语义**;
+ * 跨包对拍见 tests/update-progress-parity.spec.ts)。
+ *
+ * 完成语义(2026-09 缺陷修正):
+ * - `receivedBytes >= totalBytes` ⇒ **`100%`** —— "下载完成"必须有唯一的数值表达,
+ *   此前公式是单向封顶 `Math.min(99, …)`,整条链路里"100%"根本不存在;
+ * - 未达之前最多 99%;
+ * - `totalBytes` 未知(清单没给 size 且响应无 content-length)或非正数 ⇒
+ *   显示**已下载字节数**(如 `12.3 MB`),不显示一个假百分比;
+ * - 没有下载中的版本 / 没有进度快照 ⇒ undefined(调用方不渲染进度)。
+ * @param state - 共享快照。
+ * @returns 进度文本,或 undefined 表示当前没有可显示的进度。
+ */
 export function progressPercent(state: UpdateState | null): string | undefined {
   const progress = state?.downloadProgress
   if (state?.downloadingVersion === undefined || progress === undefined) return undefined
-  return progress.totalBytes !== undefined && progress.totalBytes > 0
-    ? `${Math.min(99, Math.floor((progress.receivedBytes / progress.totalBytes) * 100))}%`
-    : undefined
+  return downloadProgressText(progress)
+}
+
+/** 一段字节进度的文本(纯函数)。 */
+function downloadProgressText(
+  progress: { readonly receivedBytes: number, readonly totalBytes: number | undefined },
+): string {
+  const received = Number.isFinite(progress.receivedBytes) ? Math.max(0, progress.receivedBytes) : 0
+  const total = progress.totalBytes
+  if (total === undefined || !Number.isFinite(total) || total <= 0) return formatByteCount(received)
+  if (received >= total) return '100%'
+  return `${String(Math.min(99, Math.floor((received / total) * 100)))}%`
+}
+
+/**
+ * 已下载字节数的人类可读文本。
+ *
+ * 单位(`B`/`KB`/`MB`/`GB`/`TB`)与中文/英文无关,所以两个展示面可以逐字相同,
+ * 不必为此新增字典条目。
+ * @param bytes - non-negative byte count.
+ * @returns e.g. `812 B`, `12.3 MB`, `1.5 GB`.
+ */
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${String(Math.round(bytes))} B`
+  const units = ['KB', 'MB', 'GB', 'TB'] as const
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const rounded = value >= 100 ? String(Math.round(value)) : value.toFixed(1)
+  return `${rounded} ${units[unit] as string}`
 }
 
 /** 下载状态文本:重试等待中显示"第 n/N 次 + 倒计时",否则显示进度。 */
@@ -113,6 +162,49 @@ export function downloadingStatusText(state: UpdateState): string {
     return t('update.retrying', { version, attempt: String(attempt), max: String(max), percent: percent !== undefined ? ` ${percent}` : '' })
   }
   return t('update.downloading', { version, percent: percent !== undefined ? ` ${percent}` : '' })
+}
+
+/** 退避倒计时的本地重算节奏,ms(与宿主的重发节奏一致)。 */
+const RETRY_COUNTDOWN_TICK_MS = 1_000
+
+/**
+ * 退避倒计时的**本地**剩余毫秒。
+ *
+ * 快照里的 `retryDelayMs` 是"宿主发布那一刻的剩余量",而秒数要每秒都动:
+ * 以快照到达时刻为锚点做差,就能在两次轮询之间继续倒计时。
+ * 与 desktop 侧 `liveRetryDelayMs` 是**同一份语义的两份副本**(跨包客户端
+ * import 被禁止),由 `packages/host/enterprise/tests/update-progress-parity.spec.ts`
+ * 逐字对拍钉住。
+ * @param delayMs - 快照发布时的剩余毫秒。
+ * @param anchoredAtMs - 该快照到达本地的时刻(ms)。
+ * @param nowMs - 当前时刻(ms)。
+ * @returns 此刻的剩余毫秒(不为负;非有限输入视为未知,按原值处理)。
+ */
+export function liveRetryDelayMs(delayMs: number, anchoredAtMs: number, nowMs: number): number {
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return 0
+  if (!Number.isFinite(anchoredAtMs) || !Number.isFinite(nowMs)) return Math.max(0, Math.round(delayMs))
+  return Math.max(0, Math.round(delayMs - (nowMs - anchoredAtMs)))
+}
+
+/** 让退避剩余量每秒重算一次的 hook(只在本面真的渲染倒计时时才开定时器)。 */
+function useLiveRetryDelayMs(delayMs: number | undefined): number {
+  const delay = typeof delayMs === 'number' && delayMs > 0 ? delayMs : 0
+  const [anchor, setAnchor] = useState<{ delay: number, at: number }>(() => ({ delay, at: Date.now() }))
+  const [, tick] = useReducer((value: number) => value + 1, 0)
+  if (anchor.delay !== delay) setAnchor({ delay, at: Date.now() })
+  useEffect(() => {
+    if (delay <= 0) return undefined
+    const timer = setInterval(() => { tick() }, RETRY_COUNTDOWN_TICK_MS)
+    return () => { clearInterval(timer) }
+  }, [delay, anchor.at])
+  return liveRetryDelayMs(delay, anchor.at, Date.now())
+}
+
+/** 把快照换算成"此刻"的退避剩余量(无退避时原样返回同一个对象)。 */
+function useLiveRetryState(state: UpdateState | null): UpdateState | null {
+  const live = useLiveRetryDelayMs(state?.retryDelayMs)
+  if (state === null || live === state.retryDelayMs) return state
+  return { ...state, retryDelayMs: live }
 }
 
 /** 「关于」页的状态行文案(与侧边栏指示器同源,不再各写一套判断)。 */
@@ -152,6 +244,7 @@ export function updateStatusText(state: UpdateState | null): string {
  */
 export function UpdateIndicator({ state }: { state?: UpdateState | null }): JSX.Element | null {
   const subscribed = useUpdateState()
+  // `subscribed` 已经带本地倒计时;显式传入的 `state`(测试/调用方)按原样使用。
   const snapshot = state === undefined ? subscribed : state
   if (snapshot === null) return null
   const available = snapshot.availableVersion
