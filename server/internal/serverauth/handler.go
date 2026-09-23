@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -52,6 +53,15 @@ type API struct {
 	// loginIPLimiter + loginIPMaxAttempts)。每 API 实例专属,因此键里不需要
 	// dbLimiterScope(见 oidcFlowBudgetKeyForHost)。
 	oidcFlowLimiter *loginLimiter
+	// oidcFlowCapacity 是**因平台自身容量被拒**的流程启动计数(2026-09-23 R6-A-4)。
+	//
+	// 与 oidcFlowLimiter 的分工:那个桶记的是**真实失败**(凭证/协议/配置错误),
+	// 这个计数记的是"平台自己的闸门说不"(在途流程表满 / 单来源 IP 在途配额满)。
+	// 两者必须分开:容量拒绝不是攻击证据,把它算进失败预算会让一个 NAT 出口在
+	// 登录潮里自我强化成 5 分钟全组织 SSO 封锁 —— 详见 oidc.go 的
+	// recordFlowCapacityRejection。计数经 OIDCFlowCapacityRejections() 读,
+	// 供探针/运维区分"被限流"与"平台容量到顶"这两种完全不同的处置。
+	oidcFlowCapacity atomic.Int64
 
 	mu               sync.RWMutex
 	providers        map[string]PasswordProvider
@@ -109,6 +119,19 @@ func New(db *sql.DB) *API {
 		browsers:         map[string]BrowserProvider{},
 		enabledProviders: map[string]bool{},
 	}
+}
+
+// OIDCFlowCapacityRejections 返回**因平台自身容量**被拒的 OIDC 流程启动次数
+// (在途流程表满 + 单来源 IP 在途配额满,2026-09-23 R6-A-4)。
+//
+// 它**不是**失败预算的一部分(失败预算见 oidcFlowLimiter):两个数放在一起看,
+// 才能区分"这个出口在暴力尝试"(失败预算涨)与"这个出口的合法登录潮把平台容量
+// 打满"(本计数涨)。处置完全不同:前者要拦,后者要扩容或提示稍后重试。
+func (a *API) OIDCFlowCapacityRejections() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.oidcFlowCapacity.Load()
 }
 
 // SetEnabledProviders records the client-facing provider set (auth.enabled).

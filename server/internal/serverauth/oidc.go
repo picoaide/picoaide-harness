@@ -298,11 +298,16 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		// 成功"的原因。
 		//
 		// 2026-09-23 R5-A-18:本桶**只对失败计数**。
-		//   判定 = blocked(只读快照);记账 = 每个失败出口各 record 一次;
+		//   判定 = blocked(只读快照);记账 = 每个**真实失败**出口各 record 一次;
 		//   成功既不记账也**不** reset(见下)。
 		// 修前的语义是"与登录 IP 桶共用实例 + allow 每次被接受都记账",于是每一次
 		// **成功**的 SSO 登录都吃掉一格,而该键全仓零处 reset ⇒ 每个出口 IP 的
 		// SSO 登录被永久压到 60 次/5 分钟(纯合法流量即触发,无 env 旋钮)。
+		//
+		// 2026-09-23 R6-A-4(本轮):**平台自身容量**导致的拒绝(在途流程表满 /
+		// 单 IP 在途配额满)也不计入失败预算 —— 它们走 recordFlowCapacityRejection
+		// 的独立计数与独立审计动作。把"被自己的配额拒绝"算成"失败",会让一个 NAT
+		// 出口在登录潮里自我强化成 5 分钟全组织 SSO 封锁(见该闭包的注释)。
 		//
 		// 键在这里**只构造一次**,判定与所有记账点复用同一个字符串 ——
 		// 本仓有过"判定键 ≠ 记账键 ⇒ 桶永远判不满、限流静默失效"的教训
@@ -313,12 +318,38 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 			return
 		}
-		// recordFlowFailure 必须在**每一个**失败出口各调一次。下面共 5 个记账点,
-		// 覆盖 7 条失败出口:状态生成失败 / server 参数格式错 / scheme 不合法 /
-		// 来源不可信 / (provider 一处覆盖三条)流程表满、单 IP 在途配额满、其它错误。
+		// recordFlowFailure 必须在**每一个真实失败出口**各调一次。下面共 4 个记账点,
+		// 覆盖 5 条失败出口:状态生成失败 / server 参数格式错 / scheme 不合法 /
+		// 来源不可信 / provider 的其它错误(协议/配置失败)。
 		// 漏一处 = 该条失败路径不计预算
 		// (判据见 audit_20260923_oidc_flow_bucket_test.go)。
 		recordFlowFailure := func() { a.oidcFlowLimiter.record(flowKey) }
+		// recordFlowCapacityRejection 记录一次**因平台自身容量**被拒的流程启动
+		// (在途流程表满 / 单来源 IP 在途配额满),走的是与失败预算**不同的通道**。
+		//
+		// 2026-09-23 R6-A-4:这两条 429 此前与"凭证/协议错误"共用同一个失败预算,
+		// 于是产生了自我强化 —— 一个 NAT 出口的在途流程凑到 oidcMaxFlowsPerIP(100,
+		// 见 oidc.go 顶部的 TTL 说明:流程在 HandleCallback 之前占位最长 10 分钟)
+		// 之后,第 101 人起的**每一个**合法登录尝试都既回 429、又吃掉一格失败预算;
+		// 累计 60 次(oidcFlowStartMaxAttempts)就把整个出口 IP 的 SSO 再封 5 分钟。
+		// 平台自己的容量闸门把受害者推向"疑似攻击者"的判定 —— 纯合法流量即可触发,
+		// 且没有任何 env 旋钮。
+		//
+		// 现在的口径:
+		//   · 失败预算只被**真实失败**(凭证/协议/配置错误)消耗;
+		//   · 容量拒绝单独计数(API.OIDCFlowCapacityRejections,供运维/探针读),
+		//     并写一条**动作可区分**的审计(oidc_flow_capacity,不是 login_fail);
+		//   · HTTP 响应体刻意**不变**(仍是 429 RATE_LIMITED + 同一句文案):
+		//     对外区分"表满"与"你的 IP 超额"会泄露平台容量状态,且 429 的语义
+		//     ("稍后再试")对两种情形都成立。可区分性落在服务端日志与计数上,
+		//     不落在客户端可见面。
+		recordFlowCapacityRejection := func(reason string) {
+			a.oidcFlowCapacity.Add(1)
+			if a.DB != nil {
+				_ = serverstore.AuditLog(a.DB, "oidc-login", "oidc_flow_capacity",
+					"capacity_rejected reason="+reason+" ip="+c.ClientIP())
+			}
+		}
 		state, err := randomHex(16)
 		if err != nil {
 			recordFlowFailure()
@@ -355,9 +386,11 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		}
 		authURL, err := p.AuthURL(state, returnServer, c.ClientIP())
 		if err != nil {
-			recordFlowFailure()
+			// 顺序有意:先摘出**平台自身容量**的两条出口(它们不吃失败预算),
+			// 剩下的才是真实失败。见上面 recordFlowCapacityRejection 的注释。
 			if errors.Is(err, errOIDCFlowTableFull) {
 				// 在途流程已满:明确 429(不驱逐真人在途流程)。
+				recordFlowCapacityRejection("flow_table_full")
 				writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 				return
 			}
@@ -365,9 +398,15 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 				// 单 IP 在途流程配额满:同样是 429(对外不区分是哪一种)。
 				// 这一条是"只对失败计数"之后**替代**旧"成功也记账"的防滥用面:
 				// 建而不消费的灌表模式会在这里被挡住(见 oidcMaxFlowsPerIP)。
+				// ⚠️ 它**不是**失败:合法用户在登录潮里也会撞到(配额与速率无关,
+				// 只与"在途未回调"的条数有关),所以它不进失败预算 —— 否则
+				// "被自己的配额拒绝"会把整个出口 IP 推向二次封锁(R6-A-4)。
+				recordFlowCapacityRejection("per_ip_quota")
 				writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 				return
 			}
+			// 真实失败(协议/配置/随机源等):吃失败预算。
+			recordFlowFailure()
 			writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
 			return
 		}

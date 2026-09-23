@@ -14,7 +14,11 @@ package serverauth
 //	② 失败仍然吃预算：预算次失败之后第 N+1 次必须 429（含成功请求也被拒）；
 //	③ 判定键 == 记账键 == 观测键（都用 oidcFlowBudgetKeyForHost 这一个构造点）；
 //	④ 流程启动桶与登录 IP 桶**分开实例**、互不消费（两个方向都断言）；
-//	⑤ 每个失败出口都记一次账（来源不可信 400 / 表满 429 / 单 IP 配额 429 / 其它 502）。
+//	⑤ **真实失败**出口每一条都记一次账（来源不可信 400 / provider 其它错误 502）；
+//	⑥ **平台自身容量**的两条 429 出口（在途流程表满 / 单 IP 在途配额满）**不**吃
+//	   失败预算，改记独立计数 + 独立审计动作（2026-09-23 R6-A-4：修前它们与真实
+//	   失败共用失败预算，一个 NAT 出口能在登录潮里把自己的合法流量推成 5 分钟
+//	   全组织 SSO 封锁）。
 //
 // 另有 provider 层的 TestOIDCFlowPerIPQuotaBoundsTableHogging：那一条是"只对失败
 // 计数"之后**替代**旧"成功也记账"的防滥用面（一个 IP 不能灌满流程表）。
@@ -25,6 +29,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -118,21 +123,26 @@ func TestOIDCFlowBucketStillBlocksFailures(t *testing.T) {
 	}
 }
 
-// ⑤ 每个失败出口都记一次账（表驱动：provider 返回什么错误，就归到哪个 HTTP 码，
-// 但**都必须记账**）。
+// ⑤ 每个**真实失败**出口都记一次账（表驱动：provider 返回什么错误，就归到哪个
+// HTTP 码，但都必须记账）。
+//
+// ⚠️ 2026-09-23 R6-A-4：本表原本还列了「流程表满」与「单 IP 在途配额满」两行 ——
+// 那两条**不是失败**，是平台自己的容量闸门说不。它们在登录潮里被合法流量触发，
+// 记账等于"平台把自己的容量不足记成用户的错误"，并进一步把这个出口 IP 推向
+// 5 分钟全组织封锁。两行的新归处见
+// TestOIDCFlowCapacityRejectionsDoNotConsumeFailureBudget。
 func TestOIDCFlowBucketRecordsEveryFailureExit(t *testing.T) {
 	cases := []struct {
 		name        string
 		providerErr error
 		wantStatus  int
 	}{
-		{"流程表满", errOIDCFlowTableFull, http.StatusTooManyRequests},
-		{"单 IP 在途配额满", errOIDCFlowQuotaPerIP, http.StatusTooManyRequests},
 		{"provider 其它错误", errors.New("idp unreachable"), http.StatusBadGateway},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, _, api := oidcFlowTestAPI(t, &flowErrProvider{name: "oidc", err: tc.providerErr})
+			prov := &flowFlipProvider{name: "oidc", err: tc.providerErr}
+			r, _, api := oidcFlowTestAPI(t, prov)
 			const ip = "203.0.113.41"
 			key := oidcFlowBudgetKeyForHost(ip)
 
@@ -145,11 +155,84 @@ func TestOIDCFlowBucketRecordsEveryFailureExit(t *testing.T) {
 				t.Fatalf("失败记账数 = %d，want %d（该出口漏记 ⇒ 限流可被静默绕过）",
 					got, oidcFlowStartMaxAttempts)
 			}
-			// 预算耗尽后：换一个**会成功**的 provider 也必须 429（证明是限流器拦的，
-			// 而不是 provider 一直在报错）。
-			api.RegisterBrowser(&fakeBrowserProvider{name: "oidc"})
+			// 预算耗尽后：provider 恢复成**会成功**的也必须 429（证明是限流器拦的，
+			// 而不是 provider 一直在报错）。翻转的是同一个实例 —— 换 provider 对
+			// 已注册的路由无效（见 flowFlipProvider 的注释）。
+			prov.setErr(nil)
 			if w := flowLogin(t, r, ip, ""); w.Code != http.StatusTooManyRequests {
 				t.Fatalf("预算耗尽后（成功 provider）= %d，want 429", w.Code)
+			}
+		})
+	}
+}
+
+// ⑥ 平台自身的**容量拒绝**不吃失败预算（2026-09-23 R6-A-4）。
+//
+// 修前形态：AuthURL 的两条容量哨兵（errOIDCFlowTableFull / errOIDCFlowQuotaPerIP）
+// 与真实失败共用一个 recordFlowFailure() ⇒
+//
+//	· 一个 NAT 出口的在途流程凑到 oidcMaxFlowsPerIP（100；流程在 HandleCallback
+//	  之前占位最长 10 分钟）之后，第 101 人起的**每一个**合法登录尝试都既回 429、
+//	  又吃掉一格失败预算；
+//	· 累计 60 次（oidcFlowStartMaxAttempts）就把整个出口 IP 的 SSO 再封 5 分钟
+//	  —— 平台自己的容量闸门把受害者推向"疑似攻击者"的判定（自我强化，纯合法
+//	  流量即可触发，且没有任何 env 旋钮）。
+//
+// 判据（三条，缺一条就说明两条通道又被合并了）：
+//  1. 打满 3× 预算次容量拒绝之后，**失败桶占用必须仍是 0**；
+//  2. 容量拒绝单独计数（API.OIDCFlowCapacityRejections）；
+//  3. 日志可区分：审计动作是 `oidc_flow_capacity`，**不是** `login_fail`。
+//
+// 反证（同一次运行）：容量拒绝打满 3× 预算之后，一次**正常**的流程启动仍然 302
+// —— 修前它会是 429（被自己的容量拒绝封死）。
+func TestOIDCFlowCapacityRejectionsDoNotConsumeFailureBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		providerErr error
+		reason      string
+	}{
+		{"在途流程表满", errOIDCFlowTableFull, "flow_table_full"},
+		{"单 IP 在途配额满", errOIDCFlowQuotaPerIP, "per_ip_quota"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := &flowFlipProvider{name: "oidc", err: tc.providerErr}
+			r, db, api := oidcFlowTestAPI(t, prov)
+			const ip = "203.0.113.61"
+			key := oidcFlowBudgetKeyForHost(ip)
+
+			n := 3 * oidcFlowStartMaxAttempts
+			for i := 0; i < n; i++ {
+				if w := flowLogin(t, r, ip, ""); w.Code != http.StatusTooManyRequests {
+					t.Fatalf("第 %d 次容量拒绝 = %d %s，want 429", i+1, w.Code, w.Body.String())
+				}
+			}
+			if got := bucketLen(api.oidcFlowLimiter, key); got != 0 {
+				t.Fatalf("容量拒绝吃掉了失败预算：占用 %d 条，want 0（R6-A-4：这会让出口 IP 自我封锁）", got)
+			}
+			if got := api.OIDCFlowCapacityRejections(); got != int64(n) {
+				t.Fatalf("容量拒绝计数 = %d，want %d（容量拒绝必须走独立计数）", got, n)
+			}
+			// 日志可区分：容量拒绝记在 oidc_flow_capacity，不混进 login_fail。
+			var capacityRows, failRows int
+			if err := db.QueryRow(
+				"SELECT COUNT(*) FROM audit_logs WHERE action = 'oidc_flow_capacity' AND detail LIKE ?",
+				"%reason="+tc.reason+"%").Scan(&capacityRows); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(
+				"SELECT COUNT(*) FROM audit_logs WHERE action = 'login_fail'").Scan(&failRows); err != nil {
+				t.Fatal(err)
+			}
+			if capacityRows != n {
+				t.Fatalf("审计里 oidc_flow_capacity 行数 = %d，want %d", capacityRows, n)
+			}
+			if failRows != 0 {
+				t.Fatalf("容量拒绝写进了 login_fail：%d 行，want 0", failRows)
+			}
+			// 反证：容量拒绝没有把这个出口封死 —— 翻转同一个 provider 实例成"成功"。
+			prov.setErr(nil)
+			if w := flowLogin(t, r, ip, ""); w.Code != http.StatusFound {
+				t.Fatalf("容量拒绝打满后正常流程 = %d %s，want 302（容量拒绝不得变成封锁）", w.Code, w.Body.String())
 			}
 		})
 	}
@@ -192,20 +275,39 @@ func TestOIDCFlowBucketIsSeparateFromLoginIPBudget(t *testing.T) {
 	}
 }
 
-// flowErrProvider 是"AuthURL 恒失败"的桩 provider（用于逐个失败出口的记账断言）。
-type flowErrProvider struct {
+// flowFlipProvider 是**行为可翻转**的桩 provider：AuthURL 失败与否由 err 在运行期
+// 决定（用于"逐个失败出口的记账"断言，以及"限流器拦的、不是 provider 一直在报错"
+// 的反证）。
+//
+// 为什么必须可翻转：路由在**注册时**就把 provider 实例捕获进闭包
+// （RegisterRoutes 的 `for _, p := range a.browsers` + `handleOIDCLoginWith(p)`），
+// 之后 `RegisterBrowser` 换一个同名 provider 对已注册的 `/oidc/login` 完全无效。
+// 换 provider 的做法看着像反证，实际什么都不改（R5 的 ⑤ 用例末尾原本就是这个形态）。
+type flowFlipProvider struct {
 	name string
+	mu   sync.Mutex
 	err  error
 }
 
-func (p *flowErrProvider) Name() string { return p.name }
-func (p *flowErrProvider) AuthURL(string, string, string) (string, error) {
-	return "", p.err
+func (p *flowFlipProvider) Name() string { return p.name }
+func (p *flowFlipProvider) setErr(err error) {
+	p.mu.Lock()
+	p.err = err
+	p.mu.Unlock()
 }
-func (p *flowErrProvider) HandleCallback(string, string) (UserInfo, error) {
+func (p *flowFlipProvider) AuthURL(state, _, _ string) (string, error) {
+	p.mu.Lock()
+	err := p.err
+	p.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return "https://idp.example/auth?state=" + state, nil
+}
+func (p *flowFlipProvider) HandleCallback(string, string) (UserInfo, error) {
 	return UserInfo{}, nil
 }
-func (p *flowErrProvider) Configure(map[string]string) error { return nil }
+func (p *flowFlipProvider) Configure(map[string]string) error { return nil }
 
 // ⑤' provider 层：单 IP 在途流程配额（"只对失败计数"之后的防滥用面）。
 //
