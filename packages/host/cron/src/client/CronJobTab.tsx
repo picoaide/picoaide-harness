@@ -27,6 +27,7 @@ import type { CronController, CronViewSnapshot } from './controller.ts'
 import { styles } from './styles.ts'
 import { JobEditor } from './JobEditor.tsx'
 import { t } from './locales.ts'
+import { latestDstSkip } from './dst-notice.ts'
 
 /** 执行结果的展示标签（文字 + 语义色调）。 */
 function executionLabel(result: JobRecord['executions'][number]): { text: string; tone: 'success' | 'danger' | 'neutral' | 'warn' } {
@@ -107,6 +108,11 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
   const nextRunAt = snapshot.jobs
     .filter(job => job.enabled && job.nextRunAt !== undefined)
     .reduce<number | undefined>((soonest, job) => (soonest === undefined || job.nextRunAt! < soonest ? job.nextRunAt : soonest), undefined)
+  // 2026-09-23 R3-B3 F2 / B-5: an occurrence whose local clock does not exist
+  // (the spring-forward gap) is skipped by the scheduler — say so, instead of
+  // letting the job look like it was forgotten. Fresh skips only; see
+  // dst-notice.ts for why the record itself is history.
+  const dstSkip = latestDstSkip(snapshot.scheduler, Date.now())
 
   const newButton = (
     <PanelButton variant="primary" size="md" icon={<icons.IconPlus size={14} />} onClick={() => { setCreating(true) }}>
@@ -142,6 +148,12 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
               <span>{t('settings.ledgerCorrupt', { error: snapshot.scheduler.error })}</span>
             </div>
           )}
+      {dstSkip !== undefined && (
+        <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }} data-dsh-cron-dst-skip="">
+          <icons.IconClock size={14} />
+          <span>{t('settings.dstSkipped', { wallClock: dstSkip.wallClock, timeZone: dstSkip.timeZone, name: dstSkip.name })}</span>
+        </div>
+      )}
       {snapshot.transportError !== undefined && (
         <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <icons.IconAlert size={14} />

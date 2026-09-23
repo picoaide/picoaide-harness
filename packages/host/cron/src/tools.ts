@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HostCronService } from './host-service.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
-import { jobIsRunning } from './jobs.ts'
+import { isUsableJobName, jobIsRunning } from './jobs.ts'
 import { hostLocaleOf, hostT, type CronHostCopyKey } from './host-copy.ts'
 
 /** Host-side collaborators of the tools. */
@@ -55,6 +55,12 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // Hand-check cross-field constraints the DSL does not express.
       if (!isValidCron(args.cron)) throw new Error(copy('tool.invalidCron', { cron: args.cron }))
       if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(copy('tool.cronNoMatch', { cron: args.cron }))
+      // The parameter description has always promised a non-empty name; until
+      // 2026-09-23 the tool only trimmed it, so `"   "` was stored as `name: ""`
+      // — a nameless job card, a nameless session title, while the GUI/protocol
+      // face refused the same input (R3-B3 F3 / B-4). Both faces now ask the one
+      // predicate in jobs.ts instead of each deciding what "empty" means.
+      if (!isUsableJobName(args.name)) throw new Error(copy('tool.nameRequired'))
       if (args.prompt === undefined || args.prompt.trim() === '') throw new Error(copy('tool.promptRequired'))
       // FIX-17: `permission` names a preset of the composed permission service.
       // Free text used to be accepted here and dropped by the executor; now an

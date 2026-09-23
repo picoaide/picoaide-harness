@@ -15,7 +15,7 @@
  * (send a message to an existing session) kinds were removed when the task
  * board was merged into the scheduler.
  */
-import { nextRunAtMs } from './cron.ts'
+import { nextRunAtMsWithGaps, type WallClockGap } from './cron.ts'
 
 /** Result states of one triggered execution (a trigger record, not an agent turn). */
 export type ExecutionResult = 'succeeded' | 'failed' | 'cancelled'
@@ -111,6 +111,20 @@ export interface JobUpdatePatch {
   name?: string
   cron?: string
   enabled?: boolean
+}
+
+/**
+ * Whether a job name is usable (2026-09-23 R3-B3 F3 / B-4).
+ *
+ * ONE judgement for every surface that accepts a name: the browser action
+ * protocol (`validInput` / `validPatch` in protocol.ts) and the model-facing
+ * `cron_create` tool. The empty string and whitespace-only both count as
+ * missing — the tool used to `trim()` a blank name and store `''`, so the job
+ * card, `cron_list`, and the session title the job spawns were all nameless
+ * while the GUI refused the very same input.
+ */
+export function isUsableJobName(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
 }
 
 export function isCronJobAction(value: unknown, options: CronActionOptions = {}): value is CronJobAction {
@@ -228,12 +242,32 @@ export function updateJob(job: JobRecord, patch: JobUpdatePatch, now: number): J
   }
 }
 
+/** One roll-forward: the new instant plus the occurrences the roll skipped (DST gaps). */
+export interface NextRunRoll {
+  at: number | undefined
+  gaps: readonly WallClockGap[]
+}
+
 /**
  * Roll the job's next-run instant strictly past `fromMs`. When the job has
  * no nextRunAt yet (freshly created or just re-enabled), seed it from
  * `fromMs`.
  */
 export function rollNextRun(job: JobRecord, fromMs: number): number | undefined {
+  return rollNextRunWithGaps(job, fromMs).at
+}
+
+/**
+ * Same roll as {@link rollNextRun}, and additionally reports every wall-clock
+ * occurrence the roll walked past because that local time does not exist in
+ * the host timezone (2026-09-23 R3-B3 F2 / B-5). The ledger records them, so a
+ * DST gap shows up as "this occurrence was skipped" instead of as a job that
+ * silently did not run for a day.
+ *
+ * The scan base is the same one `rollNextRun` uses: an existing `nextRunAt`
+ * acts as a floor, so a roll can never fire or skip an occurrence twice.
+ */
+export function rollNextRunWithGaps(job: JobRecord, fromMs: number): NextRunRoll {
   const base = job.nextRunAt === undefined ? fromMs : Math.max(job.nextRunAt, fromMs)
-  return nextRunAtMs(job.cron, base)
+  return nextRunAtMsWithGaps(job.cron, base)
 }

@@ -19,9 +19,9 @@ import { dshHome } from './dsh-home.ts'
 import { isValidCron } from './cron.ts'
 import {
   createJob, jobIsRunning, jobVisibleTo, normalizeOwner, settleExecution, startExecution, updateJob,
-  rollNextRun, type ExecutionRecord, type JobRecord,
+  rollNextRunWithGaps, type ExecutionRecord, type JobRecord, type NextRunRoll,
 } from './jobs.ts'
-import { CRON_SCHEMA_VERSION, type CronAction, type CronSchedulerSnapshot } from './protocol.ts'
+import { CRON_SCHEMA_VERSION, type CronAction, type CronSchedulerSnapshot, type SkippedOccurrence } from './protocol.ts'
 
 interface PersistedScheduler extends CronSchedulerSnapshot {
   importedSources?: string[]
@@ -78,6 +78,9 @@ const MAX_REQUEST_CACHE = 256
  * 高频 job 的 ledger.json 无限膨胀且每次 mutate 全量重写。 */
 const MAX_EXECUTION_HISTORY = 100
 
+/** How many DST-gap skip records the scheduler state keeps (newest last). */
+const MAX_SKIPPED_OCCURRENCES = 8
+
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
 
@@ -108,10 +111,25 @@ function withoutNextRun(job: JobRecord): JobRecord {
   return rest
 }
 
-/** Conditionally-shaped nextRunAt seed for object literals. */
-function seededNextRun(job: JobRecord, now: number): { nextRunAt: number } | Record<string, never> {
-  const next = rollNextRun(job, now)
-  return next === undefined ? {} : { nextRunAt: next }
+/**
+ * Read back the persisted DST-gap skip records, dropping malformed entries and
+ * shaping the result for a conditional spread (2026-09-23 R3-B3 F2 / B-5).
+ *
+ * The document is our own file, but a hand-edited or truncated array must not
+ * be able to break the panel's notice.
+ * @param value - the persisted `scheduler.skippedOccurrences`, if any.
+ * @returns `{ skippedOccurrences }`, or an empty object when there is none.
+ */
+function skippedOccurrencesFor(value: unknown): { skippedOccurrences: SkippedOccurrence[] } | Record<string, never> {
+  if (!Array.isArray(value)) return {}
+  const restored = value.filter((entry): entry is SkippedOccurrence => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const candidate = entry as Record<string, unknown>
+    return typeof candidate.jobId === 'string' && typeof candidate.name === 'string'
+      && typeof candidate.wallClock === 'string' && typeof candidate.timeZone === 'string'
+      && typeof candidate.normalizedTo === 'number' && typeof candidate.detectedAt === 'number'
+  }).slice(-MAX_SKIPPED_OCCURRENCES)
+  return restored.length === 0 ? {} : { skippedOccurrences: restored }
 }
 
 function cloneJobs(jobs: readonly JobRecord[]): JobRecord[] {
@@ -157,12 +175,19 @@ function normalizeJobOwner(job: JobRecord): JobRecord {
  * Open a scheduled run: record a pending execution, roll nextRunAt forward,
  * and remember the trigger time. Returns the opened run, or undefined when
  * the job is disabled/archived/already running or the schedule cannot match.
+ * @param roll - roll-forward strategy; the ledger passes its own so the DST
+ *   gaps a roll skipped are recorded (2026-09-23 R3-B3 F2 / B-5).
  */
-export function openScheduledRun(job: JobRecord, executionId: string, now: number): { job: JobRecord; execution: ExecutionRecord } | undefined {
+export function openScheduledRun(
+  job: JobRecord,
+  executionId: string,
+  now: number,
+  roll: (job: JobRecord, now: number) => number | undefined = job => rollNextRunWithGaps(job, now).at,
+): { job: JobRecord; execution: ExecutionRecord } | undefined {
   if (!job.enabled) return undefined
   if (jobIsRunning(job)) return undefined
   const execution = startExecution(executionId, now)
-  const nextRunAt = rollNextRun(job, now)
+  const nextRunAt = roll(job, now)
   return {
     job: {
       ...job,
@@ -339,6 +364,10 @@ export class HostCronLedger {
           ...(parsed.scheduler?.ledgerId === undefined ? {} : { ledgerId: parsed.scheduler.ledgerId }),
           ...(parsed.scheduler?.lastTickAt === undefined ? {} : { lastTickAt: parsed.scheduler.lastTickAt }),
           ...(parsed.scheduler?.error === undefined ? {} : { error: parsed.scheduler.error }),
+          // DST-gap skip records survive a restart: "the 02:30 run was skipped
+          // because that local time did not exist" must not vanish with the app
+          // (2026-09-23 R3-B3 F2 / B-5).
+          ...skippedOccurrencesFor(parsed.scheduler?.skippedOccurrences),
         },
       }
       // Restore the idempotency cache from the persisted request log so a
@@ -449,10 +478,16 @@ export class HostCronLedger {
   }
 
   state(): LedgerState {
+    const { skippedOccurrences, ...scheduler } = this.current.scheduler
     return {
       revision: this.current.revision,
       jobs: cloneJobs(this.current.jobs),
-      scheduler: { ...this.current.scheduler },
+      // A caller must not be able to mutate the live skip list through the
+      // snapshot it was handed (the job list is deep-cloned for the same
+      // reason).
+      scheduler: skippedOccurrences === undefined
+        ? { ...scheduler }
+        : { ...scheduler, skippedOccurrences: skippedOccurrences.map(entry => ({ ...entry })) },
     }
   }
 
@@ -521,7 +556,7 @@ export class HostCronLedger {
       // the future was set when the run opened and must be preserved, or the
       // very next trigger would be silently skipped.
       if (job.nextRunAt !== undefined && job.nextRunAt <= now) {
-        const nextRunAt = rollNextRun(job, now)
+        const nextRunAt = this.rollJob(state, job, now)
         if (nextRunAt === undefined) delete job.nextRunAt
         else job.nextRunAt = nextRunAt
       }
@@ -601,7 +636,7 @@ export class HostCronLedger {
           if (existing !== undefined) return false
           const job = createJob(action.id, action.input, this.now(), this.owner() ?? undefined)
           if (job.enabled) {
-            const seeded = rollNextRun(job, this.now())
+            const seeded = this.rollJob(state, job, this.now())
             if (seeded !== undefined) job.nextRunAt = seeded
           }
           state.jobs.push(job)
@@ -618,10 +653,10 @@ export class HostCronLedger {
           // that switches a long-disabled job back on must not replay the
           // occurrence missed while it was off.
           if (action.patch.cron !== undefined && action.patch.cron !== job.cron) {
-            const seeded = rollNextRun(withoutNextRun(next), this.now())
+            const seeded = this.rollJob(state, withoutNextRun(next), this.now())
             if (seeded !== undefined) next.nextRunAt = seeded
           } else if (action.patch.enabled === true && nextRunIsStale(next, this.now())) {
-            const seeded = rollNextRun(withoutNextRun(next), this.now())
+            const seeded = this.rollJob(state, withoutNextRun(next), this.now())
             if (seeded !== undefined) next.nextRunAt = seeded
           }
           state.jobs[index] = next
@@ -652,7 +687,7 @@ export class HostCronLedger {
             // the very next tick fire the overdue occurrence in real time — a
             // replay nobody opted into. "Enable" means "resume from now" unless
             // the stored instant is still ahead.
-            ...(nextRunIsStale(job, this.now()) ? seededNextRun(job, this.now()) : {}),
+            ...(nextRunIsStale(job, this.now()) ? this.seededNextRun(state, job, this.now()) : {}),
             updatedAt: this.now(),
           }
           state.jobs[index] = next
@@ -774,13 +809,71 @@ export class HostCronLedger {
     })
   }
 
+  /**
+   * Roll one job forward and remember every occurrence the roll skipped because
+   * its local wall clock does not exist (DST spring-forward, 2026-09-23 R3-B3
+   * F2 / B-5).
+   *
+   * EVERY roll in this ledger goes through here — the scheduled open, the two
+   * skip-missed paths, the seeding on create/update/enable/upsert, and the
+   * crash reconcile. Routing a roll around it is exactly how the skip becomes
+   * silent again, so new call sites must use this helper instead of
+   * `rollNextRun`.
+   */
+  private rollJob(state: LedgerState, job: JobRecord, now: number): number | undefined {
+    const roll: NextRunRoll = rollNextRunWithGaps(job, now)
+    if (roll.gaps.length > 0) this.recordSkippedOccurrences(state, job, roll.gaps)
+    return roll.at
+  }
+
+  /** {@link rollJob} for the object-literal seeding shape (`{ nextRunAt }` or nothing). */
+  private seededNextRun(state: LedgerState, job: JobRecord, now: number): { nextRunAt: number } | Record<string, never> {
+    const next = this.rollJob(state, job, now)
+    return next === undefined ? {} : { nextRunAt: next }
+  }
+
+  /**
+   * Append the DST-gap occurrences of one roll to the scheduler state and log
+   * them.
+   *
+   * Observability is the whole point (2026-09-23 R3-B3 F2 / B-5): a skipped
+   * occurrence used to leave no trace at all — the job simply did not run that
+   * day. The record is persisted with the ledger (so it survives a restart) and
+   * reaches the panel through `GET /api/cron/state` / the SSE summary; the log
+   * line is what an operator greps in the Host log.
+   *
+   * Duplicates are collapsed by (jobId, wall clock): a re-seed (enable/update)
+   * can walk over the same gap again, and the notice must not multiply. The
+   * list is bounded and never reordered, so `[length - 1]` is the newest entry.
+   */
+  private recordSkippedOccurrences(state: LedgerState, job: JobRecord, gaps: NextRunRoll['gaps']): void {
+    const merged = [...(state.scheduler.skippedOccurrences ?? [])]
+    for (const gap of gaps) {
+      if (merged.some(entry => entry.jobId === job.id && entry.wallClock === gap.wallClock)) continue
+      const occurrence: SkippedOccurrence = {
+        jobId: job.id,
+        name: job.name,
+        wallClock: gap.wallClock,
+        timeZone: state.scheduler.timeZone,
+        normalizedTo: gap.normalizedTo,
+        detectedAt: this.now(),
+      }
+      merged.push(occurrence)
+      console.warn(
+        `[dsh-cron] DST gap: local time ${gap.wallClock} does not exist in ${occurrence.timeZone}, `
+        + `so the ${gap.wallClock} occurrence of job ${job.id} (${job.name}) was skipped and will not be caught up`,
+      )
+    }
+    state.scheduler.skippedOccurrences = merged.slice(-MAX_SKIPPED_OCCURRENCES)
+  }
+
   /** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
   skipMissed(now: number): void {
     this.mutate((state) => {
       let changed = false
       for (const job of state.jobs) {
         if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
-        const nextRunAt = rollNextRun(job, now)
+        const nextRunAt = this.rollJob(state, job, now)
         if (nextRunAt === undefined) {
           delete job.nextRunAt
         } else {
@@ -797,7 +890,7 @@ export class HostCronLedger {
     this.mutate((state) => {
       const job = state.jobs.find(candidate => candidate.id === jobId)
       if (job === undefined || !job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) return false
-      const nextRunAt = rollNextRun(job, now)
+      const nextRunAt = this.rollJob(state, job, now)
       if (nextRunAt === undefined) {
         delete job.nextRunAt
       } else {
@@ -813,7 +906,7 @@ export class HostCronLedger {
     this.mutate((state) => {
       const index = state.jobs.findIndex(candidate => candidate.id === jobId)
       if (index < 0) return false
-      const result = openScheduledRun(state.jobs[index]!, executionId, now)
+      const result = openScheduledRun(state.jobs[index]!, executionId, now, (job, at) => this.rollJob(state, job, at))
       if (result === undefined) return false
       // Persist the rolled-forward job (new execution + next nextRunAt).
       state.jobs[index] = result.job
@@ -841,7 +934,7 @@ export class HostCronLedger {
           ...(registration.enabled === undefined ? {} : { enabled: registration.enabled }),
         }, now, owner ?? undefined)
         if (job.enabled) {
-          const seeded = rollNextRun(job, now)
+          const seeded = this.rollJob(state, job, now)
           if (seeded !== undefined) job.nextRunAt = seeded
         }
         state.jobs.push(job)
@@ -858,13 +951,13 @@ export class HostCronLedger {
         updatedAt: now,
       }
       if (cronChanged) {
-        const seeded = rollNextRun(withoutNextRun(next), now)
+        const seeded = this.rollJob(state, withoutNextRun(next), now)
         if (seeded !== undefined) next.nextRunAt = seeded
       } else if (next.enabled && nextRunIsStale(next, now)) {
         // 2026-09-23 CR-6: the same stale re-seed as `enable` — a sibling
         // plugin re-attaching after a long shutdown must not replay the
         // occurrence the app was not running for.
-        const seeded = rollNextRun(withoutNextRun(next), now)
+        const seeded = this.rollJob(state, withoutNextRun(next), now)
         if (seeded !== undefined) next.nextRunAt = seeded
       }
       state.jobs[index] = next
