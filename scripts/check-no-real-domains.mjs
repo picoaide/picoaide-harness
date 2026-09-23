@@ -46,8 +46,8 @@
  * 用法：node scripts/check-no-real-domains.mjs [--root <dir>] [--unmasked] [--json]
  *                                            [--selftest] [--no-commit-range]
  * 退出码：0 = 零命中；1 = 有命中（含自证失败）；2 = 用法错误；
- *         3 = **提交信息判据没能完成**（例如浅检出里看不到历史）—— 这不是"零命中"，
- *             处置见 `commitRangeFindings`。
+ *         3 = **判据没能完成**（提交信息区间看不到历史，或**扫描面为 0 个文件**）——
+ *             这不是"零命中"，处置见 `commitRangeFindings` 与主流程的 emptySurface 分支。
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -320,12 +320,31 @@ function candidatesInText(text, file) {
   return found
 }
 
+/**
+ * 本守卫的扫描面：**已跟踪 + 未跟踪且未被忽略**的文件。
+ *
+ * 为什么必须是这个口径（2026-09-23 三轮审计 R3-C C-5）：`AGENTS.md` 把本守卫写成
+ * 「改任何含渠道/域名/URL 的文件或写提交信息**之前**，先跑」，而旧实现只读
+ * `git ls-files`（= 只扫索引）—— 作者按那句话在 `git add` **之前**跑，新建文件对守卫
+ * 根本不存在，得到"零命中 ✅"，下一步 `git add -A && git commit` 就把域名带进公开历史。
+ * 同仓的 `check-no-leftover-mutants.mjs` 早就用 `--cached --others --exclude-standard`
+ * 处理过同一个时机（变异体被 `git add -A` 扫进提交的真实事故），所以这不是取舍而是漏改。
+ *
+ * `--exclude-standard` 让 `.gitignore` / `.git/info/exclude` 里的本地产物照旧不被扫
+ * （它们不可能进提交，扫了只会制造误报）。
+ * @param root - 仓库根（或任意目录）。
+ * @returns 相对路径列表。
+ */
 function trackedFiles(root) {
   try {
-    const out = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 30 })
+    const out = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 1 << 30,
+    })
     return out.split('\0').filter(Boolean)
   } catch (error) {
-    console.error(`check-no-real-domains: 读不到 ${root} 的已跟踪文件（\`git ls-files\` 失败）：${error.message}`)
+    console.error(`check-no-real-domains: 读不到 ${root} 的扫描面（\`git ls-files --cached --others\` 失败）：${error.message}`)
     process.exit(2)
   }
 }
@@ -483,6 +502,113 @@ function selfTest() {
   expect(!masked.includes(syntheticFirstLabel), `脱敏输出仍含原始标签：${masked}`)
   expect(masked !== syntheticHost, `脱敏输出与原始 host 相同：${masked}`)
   expect(masked.endsWith('.com'), `脱敏输出应保留 TLD：${masked}`)
+  return failures
+}
+
+/**
+ * 自证：**文件扫描面**的端到端行为（2026-09-23 三轮审计 R3-C C-5 / 六处形态③ 的回归判据）。
+ *
+ * 为什么必须端到端（spawn 真进程 + 真 git 仓库）：C-5 的失效形态是"守卫照样打印
+ * `零命中 ✅`、照样 exit 0"，判据只能钉在**退出码**与**那句 ✅ 出不出现**上 ——
+ * 把 `trackedFiles` 的 `--others` 去掉这种改法在任何纯函数层面都看不出来。
+ *
+ * 五个样本（合成仓库建在系统临时目录、跑完删；域名一律 `syntheticLabel()` 运行时生成）：
+ *   ① 已跟踪文件里带合成域名        → EXIT=1（对照：这一形态本来就该红）
+ *   ② **未跟踪且未被忽略**的新文件   → EXIT=1（C-5 本体：旧实现 EXIT=0 + 零命中 ✅）
+ *   ③ 未跟踪但**被 .gitignore 忽略** → EXIT=0 且打印 `零命中`（证明排除表仍被尊重）
+ *   ④ 空 git 仓库（扫描面 0）        → EXIT=3 且**不打印** `零命中 ✅`（六处形态③ 本体）
+ *   ⑤ 干净仓库（只有占位符域名）      → EXIT=0 且打印 `零命中`（正例：正常流程不被判红）
+ *
+ * 子进程带 `SELFTEST_CHILD_ENV=1`（避免自证递归）。
+ *
+ * @returns 自证失败项列表（空 = 通过）。
+ */
+function selfTestScanSurface() {
+  const failures = []
+  const expect = (ok, message) => {
+    if (!ok) failures.push(message)
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'cnrd-surface-'))
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'guard-selftest',
+    GIT_AUTHOR_EMAIL: 'guard-selftest@example.invalid',
+    GIT_COMMITTER_NAME: 'guard-selftest',
+    GIT_COMMITTER_EMAIL: 'guard-selftest@example.invalid',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  }
+  const git = (cwd, args) => execFileSync('git', args, { cwd, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const runGuard = target => spawnSync(
+    process.execPath,
+    [fileURLToPath(import.meta.url), '--root', target, '--no-commit-range'],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, [SELFTEST_CHILD_ENV]: '1', GITHUB_EVENT_PATH: '', GITHUB_BASE_REF: '', GITHUB_ACTIONS: '', CI: '' },
+    },
+  )
+  /** 建一个只有 `keep.txt` 的已提交仓库，返回其路径。 */
+  const buildRepo = (dir, extra) => {
+    mkdirSync(dir)
+    git(dir, ['init', '-q', '-b', 'main', '.'])
+    writeFileSync(join(dir, 'keep.txt'), 'clean\n')
+    if (extra !== undefined) extra(dir)
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', 'init'])
+  }
+  const host = syntheticHostname()
+  try {
+    const tracked = join(scratch, 'tracked')
+    buildRepo(tracked, dir => writeFileSync(join(dir, 'README.md'), `server_url = https://${host}/api\n`))
+    const trackedCase = runGuard(tracked)
+    expect(trackedCase.status === 1, `样本①（已跟踪文件带域名）应为 EXIT=1，实得 ${trackedCase.status}`)
+    expect((trackedCase.stderr ?? '').includes('[DOMAIN]'), '样本① 没有报出已跟踪文件里的域名')
+
+    const untracked = join(scratch, 'untracked')
+    buildRepo(untracked)
+    writeFileSync(join(untracked, 'new-note.md'), `server_url = https://${host}/api\n`)
+    const untrackedCase = runGuard(untracked)
+    expect(untrackedCase.status === 1,
+      `样本②（**未跟踪未忽略**的新文件带域名）应为 EXIT=1（C-5 本体），实得 ${untrackedCase.status}`
+      + `\n    stdout: ${(untrackedCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect((untrackedCase.stderr ?? '').includes('[DOMAIN]'), '样本② 没有报出未跟踪文件里的域名（扫描面仍只覆盖索引）')
+    expect(!(untrackedCase.stdout ?? '').includes('零命中'), '样本② 有命中时不得打印 `零命中 ✅`')
+
+    const ignored = join(scratch, 'ignored')
+    buildRepo(ignored, dir => writeFileSync(join(dir, '.gitignore'), 'local-only/\n'))
+    mkdirSync(join(ignored, 'local-only'))
+    writeFileSync(join(ignored, 'local-only', 'scratch.md'), `server_url = https://${host}/api\n`)
+    const ignoredCase = runGuard(ignored)
+    expect(ignoredCase.status === 0,
+      `样本③（未跟踪但被 .gitignore 忽略）应为 EXIT=0（排除表必须被尊重），实得 ${ignoredCase.status}`
+      + `\n    stderr: ${(ignoredCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((ignoredCase.stdout ?? '').includes('零命中'), '样本③ 应打印 `零命中`')
+
+    const empty = join(scratch, 'empty')
+    mkdirSync(empty)
+    git(empty, ['init', '-q', '-b', 'main', '.'])
+    const emptyCase = runGuard(empty)
+    expect(emptyCase.status === 3,
+      `样本④（空 git 仓库 = 扫描面 0）应为 EXIT=3（fail-loud），实得 ${emptyCase.status}`
+      + `\n    stdout: ${(emptyCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect(!(emptyCase.stdout ?? '').includes('零命中'), '样本④ 扫描面为 0 时**不得**打印 `零命中 ✅`')
+    expect((emptyCase.stderr ?? '').includes('扫描面为'), '样本④ 的处置说明应点名"扫描面为 0 个文件"')
+
+    const clean = join(scratch, 'clean')
+    buildRepo(clean, dir => writeFileSync(join(dir, 'README.md'), 'server_url = https://harness.example.com/api\n'))
+    const cleanCase = runGuard(clean)
+    expect(cleanCase.status === 0, `样本⑤（干净仓库）应为 EXIT=0，实得 ${cleanCase.status}`
+      + `\n    stderr: ${(cleanCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((cleanCase.stdout ?? '').includes('零命中'), '样本⑤ 完成检查时应打印 `零命中`')
+  } catch (error) {
+    failures.push(`扫描面自证的夹具构建失败：${error?.message ?? String(error)}`)
+  } finally {
+    try {
+      rmSync(scratch, { recursive: true, force: true })
+    } catch {
+      // 清理失败不影响判据结论
+    }
+  }
   return failures
 }
 
@@ -874,6 +1000,7 @@ const SELFTEST_CHILD_ENV = 'CHECK_NO_REAL_DOMAINS_SELFTEST_CHILD'
 const selftestChild = process.env[SELFTEST_CHILD_ENV] === '1'
 
 const selfTestFailures = selfTest()
+if (!selftestChild) selfTestFailures.push(...selfTestScanSurface())
 if (!selftestChild) selfTestFailures.push(...selfTestCommitRange())
 if (selfTestFailures.length > 0) {
   for (const failure of selfTestFailures) console.error(`  [SELFTEST] ${failure}`)
@@ -926,9 +1053,16 @@ if (skipCommitRange) {
 }
 
 if (json) {
-  console.log(JSON.stringify({ root, scanned, findings, notes, commitRange: commitFatal === null ? 'checked' : 'incomplete' }, null, 2))
+  console.log(JSON.stringify({
+    root,
+    scanned,
+    findings,
+    notes,
+    commitRange: commitFatal === null ? 'checked' : 'incomplete',
+    scanSurface: scanned === 0 ? 'empty' : 'checked',
+  }, null, 2))
 } else {
-  console.log(`check-no-real-domains: 扫描 ${scanned} 个已跟踪文件（root=${root}）`)
+  console.log(`check-no-real-domains: 扫描 ${scanned} 个文件（已跟踪 + 未跟踪未忽略；root=${root}）`)
   for (const note of notes) console.log(`  · ${note}`)
 }
 
@@ -948,8 +1082,24 @@ if (commitFatal !== null) {
   console.error(`\ncheck-no-real-domains: 提交信息判据**没能完成**（这不等于"零命中"）：\n  ${commitFatal}`)
 }
 
+// 扫描面为 0 = **判据没跑**，不是"零命中"（2026-09-23 三轮审计 R3-C C-5 的第③条：
+// 空 git 仓库旧实现打印「扫描 0 个已跟踪文件」+「零命中 ✅」并 EXIT=0）。
+// 与 C-4 的提交信息判据同一原则：算不出范围 / 扫不到文件，都必须与"范围内没问题"区分。
+const emptySurface = scanned === 0
+if (emptySurface) {
+  console.error(
+    '\ncheck-no-real-domains: 扫描面为 **0 个文件**（root=' + root + '）—— 拒绝把"什么都没扫到"当成"零命中"。\n'
+    + '  扫描面 = `git ls-files --cached --others --exclude-standard`（已跟踪 + 未跟踪且未被忽略）。\n'
+    + '  落到这里的常见原因：① --root 指到了空仓库/空目录（或不是仓库根）；'
+    + '② 检出里一个文本文件都没有（二进制/子模块 gitlink 不算）；\n'
+    + '  ③ CI 的 gate checkout 缺 `fetch-depth: 0`（本仓 ci.yml 已带，这条是防它被改回去的判据）。\n'
+    + '  处置：确认 root 是仓库根、且工作树里真的有文件；确实只需要扫文件内容时加 `--no-commit-range`。',
+  )
+}
+
 if (findings.length > 0) process.exit(1)
 // 判据没跑完 ⇒ 不许打印"零命中 ✅"（C-4 的失效形态就是这一句 + exit 0）。
 if (commitFatal !== null) process.exit(3)
+if (emptySurface) process.exit(3)
 
 if (!json) console.log('check-no-real-domains: 零命中 ✅')
