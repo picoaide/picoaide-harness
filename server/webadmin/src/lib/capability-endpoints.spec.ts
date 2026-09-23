@@ -181,7 +181,14 @@ const MIRROR_ROUTES: Route[] = Object.values(MIRRORS).map((file) => {
   return routes
 }).flat()
 
-/** 样例行：两渠道各一份（org 带版本 —— 组织库多数端点是版本级资源）。 */
+/**
+ * 样例行：两渠道各一份（org 带版本 —— 组织库多数端点是版本级资源）。
+ *
+ * 访问组织行一律用**下标**写法（`SAMPLE[kind]['org']`），不要写成点号属性链：本仓库的
+ * `scripts/check-no-real-domains.mjs` 有一条「裸主机名」判据（`a.b.c.tld` 形状的 token
+ * 一律当主机名），点号链的末段恰好是顶级域，会被守卫误判成主机名（本文件踩过）。
+ * 键名保持渠道名不变，改动只落在访问写法上；**不要**去给顶级域加白名单。
+ */
 const SAMPLE: Record<CapabilityKind, Record<'market' | 'org', CapabilityRef>> = {
   skill: {
     market: { channel: 'market', name: 'data-extract', version: '1.0.0' },
@@ -302,8 +309,8 @@ describe('跨端对拍 · 每个动作按行 channel 选命名空间', () => {
   })
 
   it('组织渠道：服务端没有的端点必须为 null，绝不回落市场前缀', () => {
-    const orgSkill: CapabilityRef = SAMPLE.skill.org
-    const orgAgent: CapabilityRef = SAMPLE.agent.org
+    const orgSkill: CapabilityRef = SAMPLE.skill['org']
+    const orgAgent: CapabilityRef = SAMPLE.agent['org']
     // 规范化只存在于市场技能。
     expect(skillRequest('normalize', orgSkill)).toBeNull()
     expect(skillRequest('normalize', SAMPLE.skill.market)).not.toBeNull()
