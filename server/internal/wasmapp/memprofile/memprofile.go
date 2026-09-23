@@ -26,10 +26,8 @@ package memprofile
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -146,25 +144,3 @@ func FromEnv(getenv func(string) string) (Profile, error) {
 	}
 	return Parse(getenv(EnvMemoryProfile))
 }
-
-var (
-	currentOnce sync.Once
-	current     Profile
-	currentErr  error
-)
-
-// Current 返回本进程生效的档位（解析一次并缓存；解析失败 ⇒ 默认档 + 错误可由
-// CurrentError 取回）。装配期应当用 FromEnv 显式解析并在失败时**拒绝启动**
-// （fail-loud），Current 只是给不便传参的调用点一个一致的兜底。
-func Current() Profile {
-	currentOnce.Do(func() {
-		current, currentErr = FromEnv(os.Getenv)
-		if currentErr != nil {
-			current = Default()
-		}
-	})
-	return current
-}
-
-// CurrentError 返回 Current 解析时的错误（nil = 正常）。
-func CurrentError() error { return currentErr }

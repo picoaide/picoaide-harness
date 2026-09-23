@@ -12,13 +12,16 @@ import (
 )
 
 // 本文件是「平台限制项」模型的门禁：默认值等于编译期常量、档位折算、范围校验、
-// 四笔账与重启判定。变异验证（交付时实跑过，勿删）：
+// 四笔账。变异验证（交付时实跑过，勿删）：
 //   - 把 Validate 的 AppRunning 上界判断去掉 ⇒ TestValidateRejectsInconsistent 必红；
-//   - 把 NeedsRestart 恒返回 nil ⇒ TestNeedsRestart 必红；
 //   - 把 Budget 的实例池改成常量 ⇒ TestBudgetFollowsLimits 必红；
 //   - 去掉 FromProfile 的 clampCrossField ⇒ TestFromProfileStaysSelfConsistent 必红
 //     （small 档会给出 app_running=4 > max_instances=3 这种自身非法的组合）；
 //   - 把 AppDBReaders 的取值区间去掉 ⇒ TestAppDBReadersRange 必红。
+//
+// "哪些改动要重启"的判据**不在这里**：它按"运行时生效值 vs 目标值"判定，唯一落点是
+// appserver.ApplyLimits（见 limits_apply.go），回归在 appserver 的
+// TestApplyLimitsDoesNotAskForRestartWhenAssemblyAlreadyUsedTheValue。
 
 // TestDefaultsMatchCompileTimeConstants：默认值必须与 limits 逐值一致
 // （"不配置任何东西"的部署行为不变）。
@@ -194,12 +197,6 @@ func TestAppDBReadersRange(t *testing.T) {
 		if err := good.Validate(); err != nil {
 			t.Fatalf("app_db_readers=%d 应被接受：%v", n, err)
 		}
-	}
-	// app_db_readers 改动不要求重启（语义=下一个新建的句柄，与 appdb_cache_kib 同档）。
-	next := applimits.Defaults()
-	next.AppDBReaders = 8
-	if got := applimits.NeedsRestart(applimits.Defaults(), next); len(got) != 0 {
-		t.Fatalf("app_db_readers 改动不该要重启，得到 %v", got)
 	}
 }
 
@@ -379,22 +376,6 @@ func TestDefaultAppDBCacheKiBMatchesAppDB(t *testing.T) {
 	wantPerHandle := int64(1+limits.AppDBReaders) * int64(appdb.ConnCacheKiB()) << 10
 	if got := readyz.DefaultAppDBPageCachePerHandleBytes; got != wantPerHandle {
 		t.Fatalf("readyz 的每句柄页缓存兜底 = %d，期望 %d（口径必须与 appdb+limits 一致）", got, wantPerHandle)
-	}
-}
-
-// TestNeedsRestart：只有单实例内存上限需要重启。
-func TestNeedsRestart(t *testing.T) {
-	cur := applimits.Defaults()
-	next := cur
-	next.MaxInstances = cur.MaxInstances + 1
-	next.ModuleCacheMB = cur.ModuleCacheMB + 16
-	if got := applimits.NeedsRestart(cur, next); len(got) != 0 {
-		t.Fatalf("并发/缓存类改动应即时生效，得到 %v", got)
-	}
-	next.InstanceMemoryMB = cur.InstanceMemoryMB + 32
-	got := applimits.NeedsRestart(cur, next)
-	if len(got) != 1 || got[0] != "instance_memory_mb" {
-		t.Fatalf("单实例内存上限应标注需重启，得到 %v", got)
 	}
 }
 

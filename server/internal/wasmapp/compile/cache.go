@@ -363,11 +363,3 @@ func cacheShardHint(dir string) string {
 	sort.Strings(names)
 	return strings.Join(names, ",")
 }
-
-// moduleNameOf 返回缓存条目的文件名（测试与日志用：条目名即内容寻址的键）。
-func moduleNameOf(path string) string {
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		return path[i+1:]
-	}
-	return path
-}

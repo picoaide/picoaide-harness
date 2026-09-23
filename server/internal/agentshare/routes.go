@@ -35,12 +35,6 @@ var presetIDRe = regexp.MustCompile("^" + util.PresetIDPattern + "$")
 // versionRe accepts semver-ish version strings (no path separators).
 var versionRe = regexp.MustCompile(`^[0-9a-zA-Z.-]{1,64}$`)
 
-type PresetArchivePreview struct {
-	// Files is the sorted list of archive-relative paths (user files only).
-	Files   []string `json:"files"`
-	Content string   `json:"composition"`
-}
-
 // preview reads one stored archive and returns the top-level composition
 // (agent.cordis.yml) plus the full file list for admin review. When version
 // is non-empty it addresses one row; empty addresses the name's latest row

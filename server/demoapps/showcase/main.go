@@ -78,9 +78,6 @@ var runColumns = []demoapp.Column{
 	{Name: "marker", Type: "text"},
 }
 
-// runColumnNames 与 runColumns 同序，给历史表头与行投影用。
-var runColumnNames = []string{"created_at", "phase", "label", "detail", "who", "ok", "micros", "marker"}
-
 // insertRunSQL / selectRunSQL 是全应用唯一的两条业务 SQL。
 //
 //   - 值**一律**用 `?` 占位：平台不检查你是否参数化（字面量拼进 SQL 照样过闸门），

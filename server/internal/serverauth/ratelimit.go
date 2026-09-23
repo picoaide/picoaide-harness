@@ -287,8 +287,13 @@ func loginIPBudgetKey(db *sql.DB, c *gin.Context) string {
 	return loginIPBudgetKeyForHost(db, c.ClientIP())
 }
 
-// loginIPBudgetKeyForHost 与 loginIPBudgetKey 同形,供非 gin 入口
-// (wasmapp/session 的 net/http 登录页)复用 —— host 由调用方按其信任边界解析。
+// loginIPBudgetKeyForHost 是 ip 桶键的构造点(与 loginIPBudgetKey 同形):
+// host 由调用方按其信任边界解析后传入。
+//
+// 2026-09-23 E-01:键的**判定/记账/清账**必须出自这一个构造点。此前为 WASM 应用
+// 平台的员工浏览器登录页(internal/wasmapp/session,已随 W4 删除波次下线)另导出过
+// AllowLoginAttempt / ResetLoginSuccess 两个非 gin 入口,它们已失去调用方并删除 ——
+// 现在唯一入口是 gin 的 loginAllowed / loginSucceeded。
 func loginIPBudgetKeyForHost(db *sql.DB, host string) string {
 	return dbLimiterScope(db) + "ip:" + host
 }
@@ -306,36 +311,6 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 		return false
 	}
 	return true
-}
-
-// ===== 供非 gin 入口复用同一套登录失败预算（2026-09-17）=====
-//
-// 为什么必须导出：WASM 应用平台的员工浏览器登录页（internal/wasmapp/session）
-// 走的是 net/http 而不是 gin，如果它自己不做预算，就等于**在客户端面
-// /auth/login 之外新开了一个没有爆破防护的密码入口** —— 同一份账号密码、
-// 同一套 provider，防护却只覆盖其中一个入口。这三个键与 gin 入口
-// **完全相同**（host|username / u:username / ip:host），因此两处入口共享同一份
-// 失败预算（在一个入口上的失败会同时收紧另一个）。
-//
-// 2026-09-23 E-01:AllowLoginAttempt 判定通过即**原子记账**（与 gin 入口的
-// loginAllowed 同形），不再需要、也**不得**再调用失败记账 —— 那会重复计数
-// 并把预算减半。RecordLoginFailure 因此已删除。
-
-// AllowLoginAttempt 判定一次登录尝试是否在失败预算内；允许时立即记账。
-// host 传客户端 IP（反代下由 gin 的 ClientIP 语义决定，调用方负责取值）。
-func (a *API) AllowLoginAttempt(username, host string) bool {
-	scope := dbLimiterScope(a.DB)
-	return a.limiter.allow(scope+host+"|"+username) &&
-		a.limiter.allow(scope+"u:"+username) &&
-		a.loginIPLimiter.allow(loginIPBudgetKeyForHost(a.DB, host))
-}
-
-// ResetLoginSuccess 在认证成功后清空三个桶（合法登录不应消耗失败预算）。
-func (a *API) ResetLoginSuccess(username, host string) {
-	scope := dbLimiterScope(a.DB)
-	a.limiter.reset(scope + host + "|" + username)
-	a.limiter.reset(scope + "u:" + username)
-	a.loginIPLimiter.reset(loginIPBudgetKeyForHost(a.DB, host))
 }
 
 // loginSucceeded clears the buckets after a successful authentication

@@ -20,9 +20,7 @@ package demoapp
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -463,11 +461,6 @@ func Fail(status int, code, message string) Response {
 	return JSON(status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 
-// Text 返回纯文本响应（调试用）。
-func Text(status int, body string) Response {
-	return Response{Status: status, Headers: textHeaders(), Body: body}
-}
-
 // BodyJSON 把请求体解成 v（失败时返回 false，调用方给 400）。
 func (a *App) BodyJSON(v any) bool {
 	body := strings.TrimSpace(a.Req.Body)
@@ -489,18 +482,6 @@ func (a *App) QueryParam(key string) string {
 func (a *App) Path() string {
 	return a.Req.Path
 }
-
-// DecodeBase64 是给"上传图片"这类演示用的解码入口（失败回 nil）。
-func DecodeBase64(s string) []byte {
-	raw, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return nil
-	}
-	return raw
-}
-
-// ErrNotFound 是"这个路径应用没实现"的哨兵错误（调用方据此给 404 信封）。
-var ErrNotFound = errors.New("demoapp: 未实现的路径")
 
 // ReadAllStrings 是一个方便的小工具：把查询结果投影成"每行一个字符串切片"。
 func (r Rows) ReadAllStrings() [][]string {

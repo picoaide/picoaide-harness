@@ -2,7 +2,6 @@ package limits
 
 import (
 	"fmt"
-	"sort"
 	"time"
 )
 
@@ -168,26 +167,6 @@ type JSONDoc struct {
 // Doc 返回机器可读文档。
 func Doc() JSONDoc {
 	return JSONDoc{Version: 1, Source: "server/internal/wasmapp/limits/limits.go", Items: Table()}
-}
-
-// SortedKeys 返回全部键（升序），供一致性测试使用。
-func SortedKeys() []string {
-	ks := make([]string, 0, len(Table()))
-	for _, e := range Table() {
-		ks = append(ks, e.Key)
-	}
-	sort.Strings(ks)
-	return ks
-}
-
-// Lookup 按键取条目。
-func Lookup(key string) (Entry, bool) {
-	for _, e := range Table() {
-		if e.Key == key {
-			return e, true
-		}
-	}
-	return Entry{}, false
 }
 
 func itoa(v int) string { return fmt.Sprintf("%d", v) }
