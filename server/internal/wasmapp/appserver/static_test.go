@@ -361,3 +361,56 @@ func TestStatic_OnlyGetAndHead(t *testing.T) {
 		t.Fatalf("用例前提不成立: %s", got)
 	}
 }
+
+// 入口文档的判据是**文档**而不是**根文档**（R3-A A-5）。
+//
+// 规则 5（static.go 头部）与作者手册（`server/skills/app-builder/references/abi.md`
+// 与 `SKILL.md`）三处都写着「入口文档（`/`、`/index.html`、`<目录>/`）一律交给
+// wasm」，而实现只认根 `index.html`（`rel == "index.html"`）⇒ 页面放在子目录的
+// 应用，其**入口被宿主直出**，应用自己的准入页（名单外用户应看到应用渲染的 403
+// 与本人账号）永远不会被调用。
+//
+// 实现与文档对齐（本用例就是那条对齐后的判据）：
+//   - `/`、`/index.html`、`/admin/`、`/admin/index.html` 一律交给 wasm；
+//   - **子资源**（JS/CSS/图片）与**非入口的普通文档**（`docs/readme.html`）仍然
+//     由宿主直出（§4.6 资源响应缓存是 P0 必配，改这一条不得把它一起废掉）。
+func TestStatic_SubdirectoryEntryDocumentsGoToWasm(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("subentry")
+	e.publishApp(appSpec{appID: appID, config: loginRequiredConfig(testOwner), assets: map[string]string{
+		"index.html":       "<html>root shell</html>",
+		"admin/index.html": "<html>admin page shell</html>",
+		"admin/app.js":     "console.log('admin')",
+		"app/index.html":   "<html>app page shell</html>",
+		"docs/readme.html": "<html>plain doc</html>",
+		"static/app.css":   "body{color:red}",
+	}})
+
+	// ① 四种入口形态（含显式写出的子目录 index.html）都必须进 wasm：
+	//    判据是"响应体是平台信封且 path 原样回显"，而不是"状态码是 200"
+	//    （宿主直出的空壳同样是 200 —— 那正是本条缺陷没有被门禁发现的原因）。
+	for _, p := range []string{"/", "/index.html", "/admin/", "/admin/index.html", "/app/"} {
+		rec := e.get(appID, p)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 应交给 wasm 并 200，得到 %d body=%s", p, rec.Code, rec.Body.String())
+		}
+		if body := rec.Body.String(); strings.Contains(body, "shell") {
+			t.Fatalf("%s 是入口文档，不得由宿主直出（应用自己的准入页会被绕过）: %q", p, body)
+		}
+		if got := decodeJSON(t, rec.Body)["path"]; got != p {
+			t.Fatalf("%s 应由 wasm 处理（信封 path 应回显 %q），得到 %v", p, p, got)
+		}
+	}
+
+	// ② 反向（防过度修复）：子资源与非入口文档仍直出。
+	for path, want := range map[string]string{
+		"/admin/app.js":     "console.log('admin')",
+		"/docs/readme.html": "<html>plain doc</html>",
+		"/static/app.css":   "body{color:red}",
+	} {
+		rec := e.get(appID, path)
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Fatalf("%s 是子资源/非入口文档，仍应由宿主直出：得到 %d %q", path, rec.Code, rec.Body.String())
+		}
+	}
+}
