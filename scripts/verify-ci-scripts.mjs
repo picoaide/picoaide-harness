@@ -473,6 +473,41 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     check(!existsSync(hotfix.listPath), '失败时不得写出渠道列表(下游步骤拿到它就会继续构建)')
   }
 
+  // 漏 `v` 前缀的版本号 tag 必须 fail-loud(2026-09-23 第五轮审计 R5-C-1)。
+  //
+  // 现场:`2.8.2-beta.1` 既不匹配 stable 也不匹配 prerelease,而旧 `looks_like` 只认
+  // `v[0-9]*` ⇒ release_kind=none / publish=false / channel_set=official,release job 的
+  // `if: refs/tags/v` 也不成立 ⇒ **三平台照常构建 40 分钟、GitHub Release 与 R2 全为零,
+  // 而 CI 全绿**。K-04 消灭的"构建一半、发布零"只是换了个触发器。
+  for (const name of ['2.8.2-beta.1', '2.8.2', '2.8.2-rc.1', 'release-2.8.2', 'harness-2.8.2']) {
+    const result = policy(`refs/tags/${name}`, name)
+    check(result.status !== 0, `漏 v / 含版本号的 tag(${name})必须 fail-loud,不能静默按"非发布"处理`)
+    const text = `${result.stderr ?? ''}${result.stdout ?? ''}`
+    check(text.includes('v 前缀') || text.includes('含版本号'), `失败信息必须点名问题(v 前缀),实际: ${text.slice(0, 160)}`)
+    check(text.includes('::error::'), '失败必须打 ::error::(CI 注解可见)')
+    // 公开日志纪律:失败信息不回显 tag 名。
+    check(!text.includes(name), 'tag 形态失败信息不得回显 tag 名')
+  }
+  // 反向自证:合法的发布 tag 与**显式登记过的无关 tag**不被这条判据误伤
+  // (否则"宁可多拦"会变成"发版发不出去")。
+  for (const [ref, name, kind] of [
+    ['refs/tags/v2.8.2-beta.1', 'v2.8.2-beta.1', 'prerelease'],
+    ['refs/tags/v2.8.2', 'v2.8.2', 'stable'],
+    ['refs/tags/docs-snapshot', 'docs-snapshot', 'none'],
+  ]) {
+    const result = policy(ref, name)
+    check(result.status === 0, `${ref} 应放行,实际 ${String(result.status)}: ${(result.stderr ?? '').slice(0, 160)}`)
+    check(fields(result.stdout ?? '').release_kind === kind, `${ref}: release_kind 应为 ${kind}`)
+  }
+  // 同名但**不是 tag**(分支/PR)不得被这条判据拦 —— 否则一个叫 `2.8.2` 的分支
+  // 会让所有人的 PR 红(release 判据只能管 tag)。
+  {
+    const branch = policy('refs/heads/2.8.2-beta.1', '2.8.2-beta.1')
+    check(branch.status === 0, '名字像版本号的分支必须放行(只发 official、不发布),不能被发布判据拦下')
+    const pull = policy('refs/pull/42/merge', '42/merge')
+    check(pull.status === 0, 'PR ref 必须放行')
+  }
+
   // 静态对拍:三处都只读那一份实现,不留第二份名字形状判断。
   {
     const workflow = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
@@ -514,12 +549,21 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
       '反例自证失败:把 tag 形态判定写回 release job 的 if: 时,断言必须报红',
     )
     const policyIndex = workflow.indexOf('scripts/ci-release-policy.sh')
-    const notesIndex = workflow.indexOf("steps.release_policy.outputs.release_kind == 'stable'")
+    const notesIndex = workflow.indexOf("steps.release_policy.outputs.release_kind != 'none'")
     check(policyIndex >= 0, 'gate 必须执行 scripts/ci-release-policy.sh(未知形态要早失败)')
-    check(notesIndex >= 0, '发布说明检查必须读 release_policy 步骤的输出(不得再自己判名字形状)')
+    check(
+      notesIndex >= 0,
+      '发布说明检查必须读 release_policy 步骤的输出,且对**发布 tag 一律要求**(条件 `!= \'none\'`)'
+      + ' —— R5-C-3:只认 stable 会让预发 tag 缺说明时回退自动变更日志',
+    )
     check(
       policyIndex >= 0 && notesIndex >= 0 && policyIndex < notesIndex,
       '策略步骤必须在发布说明检查之前(它提供该检查依赖的输出)',
+    )
+    // 反例自证:`== 'stable'` 的精简写法必须被判红(证明上面那条断言有判别力)。
+    check(
+      !/steps\.release_policy\.outputs\.release_kind\s*==\s*'stable'/u.test(workflow),
+      'gate 的发布说明检查不得退回"只认正式版"的条件(预发 tag 同样必须有策展说明)',
     )
 
     const channelsText = readFileSync(channelsScript, 'utf8')
@@ -582,15 +626,271 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     const earlyPresent = runBlock(present, earlyCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
     check(earlyPresent.status === 0, `gate 早检在文件存在时应放行,实际退出 ${String(earlyPresent.status)}`)
 
-    // 预发 tag:允许缺策展说明(仍是公开面,但按定案不拦)。
-    const prerelease = sandbox({ releaseNotes: null })
-    const prePrerelease = runBlock(prerelease, preUploadCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
-    check(prePrerelease.status === 0, `预发 tag 缺策展说明不应拦(实际退出 ${String(prePrerelease.status)})`)
+    // 预发 tag:**同样必须**有策展说明(2026-09-23 第五轮审计 R5-C-3)。
+    //
+    // 现场:两处检查都以 `release_kind=stable` 为前提,预发 tag 缺说明被放行到
+    // `--generate-notes` —— 自动变更日志的正文由提交信息 + **PR 标题/正文**生成,而后者
+    // 不是文件、不在任何守卫判据内(铁律 0 的盲区);历史上正是这条路径把真实域名/IP
+    // 带进了公开 Release 正文。判据:预发 tag 缺说明时,gate 早检与上传前检查都必须红;
+    // 文件在时必须放行(否则正当发版会被自己拦下)。
+    const prereleaseMissing = sandbox({ releaseNotes: null })
+    for (const [label, block] of [['gate 早检', earlyCheck], ['上传前检查', preUploadCheck]]) {
+      const result = runBlock(prereleaseMissing, block.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+      check(result.status !== 0, `预发 tag 缺策展说明时${label}必须失败,实际退出 ${String(result.status)}`)
+      check(
+        `${result.stdout ?? ''}${result.stderr ?? ''}`.includes('::error::'),
+        `预发 tag 缺说明的${label}失败信息要打 ::error::`,
+      )
+    }
+    const prereleasePresent = sandbox({ releaseNotes: 'v9.9.9-beta.1' })
+    const prePrereleasePresent = runBlock(prereleasePresent, preUploadCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+    check(
+      prePrereleasePresent.status === 0,
+      `预发 tag 有策展说明时必须放行,实际退出 ${String(prePrereleasePresent.status)}: ${(prePrereleasePresent.stderr ?? '').slice(0, 200)}`,
+    )
+    const earlyPrereleasePresent = runBlock(prereleasePresent, earlyCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+    check(earlyPrereleasePresent.status === 0, `gate 早检在预发 tag + 文件存在时应放行,实际退出 ${String(earlyPrereleasePresent.status)}`)
 
     // 未知 tag 形态:唯一真源当场红,这一步也必须跟着红(不许"上传了才知道名字不认识")。
     const unknown = sandbox({ releaseNotes: 'v9.9.9-hotfix' })
     const preUnknown = runBlock(unknown, preUploadCheck.content, 'refs/tags/v9.9.9-hotfix', 'v9.9.9-hotfix')
     check(preUnknown.status !== 0, '未知 tag 形态必须在"上传前"检查里失败(唯一真源已 fail-loud)')
+  }
+}
+
+// ---- 1e. 发布 tag 的拓扑判据(2026-09-23 第五轮审计 R5-C-2 / M1) ----
+//
+// 现场:全仓没有 `git merge-base --is-ancestor` 类判据。2026-09-17 的真实事故里,上一个
+// tag 打在**旁支**上,发版人直接从功能分支打新 tag ⇒ 那条旁支上的修复被静默丢掉,而
+// CI 全绿。这一组用**合成 git 仓库**真跑 `scripts/ci-release-topology.sh`:
+//   ① 基线是祖先 ⇒ 绿;② 基线在旁支 ⇒ 红且打印两侧;③ `--exclude-tag` 能把"本次要发的
+//   tag"排除(支持先本地自检、再打 tag);④ 主线判据(不在主线 ⇒ 红);⑤ 判据跑不成
+//   (无发布 tag / 基线解析不出 / 主线 ref 解析不出)⇒ 退出 2,**不是** 0。
+{
+  const topologyScript = join(root, 'scripts', 'ci-release-topology.sh')
+  check(existsSync(topologyScript), 'scripts/ci-release-topology.sh 必须存在(拓扑判据的唯一实现)')
+
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'ci-topology-test',
+    GIT_AUTHOR_EMAIL: 'ci-topology-test@example.com',
+    GIT_COMMITTER_NAME: 'ci-topology-test',
+    GIT_COMMITTER_EMAIL: 'ci-topology-test@example.com',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  }
+  const git = (dir, args, env = {}) => spawnSync(
+    'git',
+    ['-C', dir, '-c', 'user.name=ci-topology-test', '-c', 'user.email=ci-topology-test@example.com', '-c', 'commit.gpgsign=false', ...args],
+    { encoding: 'utf8', env: { ...gitEnv, ...env } },
+  )
+  const mustGit = (dir, args, env = {}) => {
+    const result = git(dir, args, env)
+    if (result.status !== 0) throw new Error(`fixture git ${args.join(' ')} 失败: ${result.stderr}`)
+    return (result.stdout ?? '').trim()
+  }
+  /** 合成仓库:一个提交一个文件;日期显式给定(creatordate 排序不靠墙钟)。 */
+  const newRepo = () => {
+    const dir = tempDir('ci-topology-')
+    mustGit(dir, ['init', '-q', '-b', 'master'])
+    return dir
+  }
+  const commit = (dir, file, message, date) => {
+    writeFileSync(join(dir, file), `${message}\n`)
+    mustGit(dir, ['add', '-A'])
+    mustGit(dir, ['commit', '-q', '-m', message], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date })
+  }
+  const tag = (dir, name, date) => mustGit(
+    dir,
+    ['tag', '-a', name, '-m', name],
+    { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date },
+  )
+  const runTopology = (dir, args) => spawnSync('bash', [topologyScript, ...args], {
+    cwd: dir,
+    encoding: 'utf8',
+    // HOME 指向合成仓库:宿主 ~/.gitconfig(可能带签名/模板)不得影响判据。
+    env: { ...gitEnv, HOME: dir },
+  })
+
+  // ① 基线是祖先 ⇒ 绿。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    tag(dir, 'v2.8.1', '2026-09-01T10:01:00+08:00')
+    commit(dir, 'b.txt', 'next', '2026-09-02T10:00:00+08:00')
+    const ok = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(ok.status === 0, `拓扑正例(基线是祖先)应绿,实际 ${String(ok.status)}: ${ok.stderr}`)
+    check((ok.stdout ?? '').includes('v2.8.1'), '成功输出应点名基线 tag(发版日志要能核对)')
+  }
+
+  // ② 基线在旁支 ⇒ 红,且必须打印两侧(2026-09-17 事故的形态)。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    tag(dir, 'v2.8.1', '2026-09-01T10:01:00+08:00')
+    commit(dir, 'b.txt', 'main-next', '2026-09-02T10:00:00+08:00')
+    mustGit(dir, ['checkout', '-q', '-b', 'side', 'HEAD~1'])
+    commit(dir, 'side.txt', 'side-fix', '2026-09-03T10:00:00+08:00')
+    tag(dir, 'v2.8.2-beta.1', '2026-09-03T10:01:00+08:00')
+    mustGit(dir, ['checkout', '-q', 'master'])
+    const bad = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(bad.status === 1, `旁支基线必须红(退出 1),实际 ${String(bad.status)}: ${bad.stderr}`)
+    const text = `${bad.stderr ?? ''}`
+    check(text.includes('v2.8.2-beta.1'), '失败必须点名旁支上的基线 tag(打印两侧)')
+    check(text.includes('旁支'), '失败必须说清"两侧都非零 = 旁支"')
+    check(text.includes('::error::'), '失败必须打 ::error::(CI 注解可见)')
+    // ③ `--exclude-tag`:本次要发的 tag 不参与基线候选 ⇒ 回到 v2.8.1 ⇒ 绿。
+    const excluded = runTopology(dir, ['--ref', 'HEAD', '--exclude-tag', 'v2.8.2-beta.1', '--no-mainline'])
+    check(
+      excluded.status === 0,
+      `排除本次要发的 tag 后应绿(CI 用法:--exclude-tag),实际 ${String(excluded.status)}: ${excluded.stderr}`,
+    )
+    // ④ 主线判据:旁支 tag 不在 master 上 ⇒ 红。
+    const offMain = runTopology(dir, ['--ref', 'v2.8.2-beta.1', '--exclude-tag', 'v2.8.1', '--mainline', 'master'])
+    check(offMain.status === 1, `不在主线的 tag 必须红,实际 ${String(offMain.status)}: ${offMain.stderr}`)
+    check(`${offMain.stderr ?? ''}`.includes('主线'), '主线违规的失败信息必须点名"主线"')
+    // 正向对照:主线上、基线是祖先 ⇒ 绿(证明判据不是恒红)。
+    const onMain = runTopology(dir, ['--ref', 'master', '--base', 'v2.8.1', '--mainline', 'master'])
+    check(onMain.status === 0, `主线上的正例应绿,实际 ${String(onMain.status)}: ${onMain.stderr}`)
+  }
+
+  // ⑤ "判据没跑成"必须退出 2,不许伪装成通过。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    const noTags = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(noTags.status === 2, `没有任何发布 tag 时必须退出 2(判据未完成 ≠ 通过),实际 ${String(noTags.status)}`)
+    check(`${noTags.stderr ?? ''}`.includes('无法执行'), '未完成时的信息要说清"判据无法执行"')
+    const missingBase = runTopology(dir, ['--ref', 'HEAD', '--base', 'v9.9.9', '--no-mainline'])
+    check(missingBase.status === 2, `基线解析不出时必须退出 2,实际 ${String(missingBase.status)}`)
+    const missingMainline = runTopology(dir, ['--ref', 'HEAD', '--mainline', 'origin/does-not-exist'])
+    check(missingMainline.status === 2, `主线 ref 解析不出时必须退出 2,实际 ${String(missingMainline.status)}`)
+    const badUsage = runTopology(dir, ['--nope'])
+    check(badUsage.status === 2, `未知参数必须退出 2,实际 ${String(badUsage.status)}`)
+  }
+
+  // ⑥ 接线判据:gate 必须真的跑它(不是"有能力、没接线"),且只能在发布 tag 上跑,
+  //    并且早于全量门禁步(拓扑违规要在 1 分钟内红,不等 40 分钟构建)。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateSteps = workflow?.jobs?.gate?.steps ?? []
+    const topologyIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('ci-release-topology.sh'))
+    check(topologyIndex >= 0, 'ci.yml 的 gate 必须执行 scripts/ci-release-topology.sh(否则拓扑判据形同不存在)')
+    if (topologyIndex >= 0) {
+      const step = gateSteps[topologyIndex]
+      check(
+        typeof step.if === 'string' && step.if.includes('refs/tags/v'),
+        '拓扑判据只能在发布 tag 上跑(非 tag 的 PR/分支没有"上一个 tag"语义)',
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('--exclude-tag'),
+        '拓扑判据必须把本次要发的 tag 从基线候选里排除(--exclude-tag)',
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('git fetch'),
+        '拓扑判据步骤必须显式补齐判据输入(主线 ref + 全部 tag),不能依赖 checkout 恰好带了什么'
+        + ' —— 输入缺失时脚本退出 2,发布会被自己拦下',
+      )
+    }
+    const gateIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && /(?:^|\s)yarn\s+check(?![\w:-])/u.test(step.run))
+    check(gateIndex >= 0, 'ci.yml 的 gate 里找不到全量门禁步(扫描器可能已失效)')
+    check(
+      topologyIndex >= 0 && gateIndex >= 0 && topologyIndex < gateIndex,
+      '拓扑判据必须早于全量门禁步(1 分钟内报错,不等三平台构建)',
+    )
+  }
+}
+
+// ---- 1f. 版本一致性谓词(2026-09-23 第五轮审计 R5-C-5) ----
+//
+// 现场:两处 package.json 的版本一致性**只在 release job 第 4 步**校验(四平台构建 40 分钟
+// 之后),分支/PR 侧零判据;而 `version.mjs check`(期望值取 git describe 的最新 tag)在
+// "发布 PR 已 bump、tag 未打"的分支上**必红** ⇒ 不能直接塞进 gate。
+// 修法两半:① 新增 `manifests`(只比两处相等,与 tag 无关)—— 它能进 gate;② tag push 上
+// 再跑 `check "$GITHUB_REF_NAME"`。这一组在**合成检出**里真跑两条判据,并静态钉住接线。
+{
+  const versionScript = join(root, 'scripts', 'version.mjs')
+  check(existsSync(versionScript), 'scripts/version.mjs 必须存在(版本唯一权威源)')
+
+  /** 合成检出:scripts/version.mjs + 两处 package.json。 */
+  const sandbox = ({ rootVersion, desktopVersion }) => {
+    const dir = tempDir('ci-version-')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    mkdirSync(join(dir, 'packages', 'host', 'desktop'), { recursive: true })
+    writeFileSync(join(dir, 'scripts', 'version.mjs'), readFileSync(versionScript))
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'root', version: rootVersion }, null, 2)}\n`)
+    writeFileSync(
+      join(dir, 'packages', 'host', 'desktop', 'package.json'),
+      `${JSON.stringify({ name: 'desktop', version: desktopVersion }, null, 2)}\n`,
+    )
+    return dir
+  }
+  const runVersion = (dir, args) => spawnSync('node', ['scripts/version.mjs', ...args], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: dir },
+  })
+
+  // ① `manifests`:只比两处相等 —— 发布 PR"已 bump、tag 未打"的状态必须绿。
+  const bumped = sandbox({ rootVersion: '9.9.9', desktopVersion: '9.9.9' })
+  const manifestsGreen = runVersion(bumped, ['manifests'])
+  check(
+    manifestsGreen.status === 0,
+    `两处 manifest 相等时 manifests 必须绿(发布 PR 的常态),实际 ${String(manifestsGreen.status)}: ${manifestsGreen.stderr}`,
+  )
+  check((manifestsGreen.stdout ?? '').includes('9.9.9'), 'manifests 成功输出应带版本号(便于日志核对)')
+  // ② 只改一处:必须红,且点名两处取值(这是"漏改一处"的 1 分钟判据)。
+  const skewed = sandbox({ rootVersion: '9.9.9', desktopVersion: '9.9.8' })
+  const manifestsRed = runVersion(skewed, ['manifests'])
+  check(manifestsRed.status !== 0, `两处 manifest 不等时 manifests 必须红,实际 ${String(manifestsRed.status)}`)
+  const skewText = `${manifestsRed.stderr ?? ''}`
+  check(skewText.includes('9.9.9') && skewText.includes('9.9.8'), '不一致的失败信息必须点名两处取值')
+  // ③ tag 与两处 manifest 逐字一致 ⇒ 绿;不一致 ⇒ 红。
+  const taggedGreen = runVersion(bumped, ['check', 'v9.9.9'])
+  check(taggedGreen.status === 0, `tag 与 manifest 一致时应绿,实际 ${String(taggedGreen.status)}: ${taggedGreen.stderr}`)
+  const taggedRed = runVersion(bumped, ['check', 'v9.9.8'])
+  check(taggedRed.status !== 0, 'tag 与 manifest 不一致时必须红')
+  check(`${taggedRed.stderr ?? ''}`.includes('期望'), '不一致的失败信息必须给出期望值(点名)')
+  // ④ 显式 tag 漏 `v`:必须红(与 ci-release-policy.sh 同一口径,R5-C-1)。
+  const noPrefix = runVersion(bumped, ['check', '9.9.9'])
+  check(noPrefix.status !== 0, '显式 tag 漏 v 前缀时必须红(漏 v 的 tag 不是发布 tag)')
+  check(`${noPrefix.stderr ?? ''}`.includes('v 开头'), '漏 v 的失败信息必须点名"必须以 v 开头"')
+  // ⑤ `set` 收到无 v 前缀的输入:仍写入(不打断既有用法),但**必须出声**。
+  const setBare = runVersion(bumped, ['set', '9.9.10'])
+  check(setBare.status === 0, `set 9.9.10 应成功,实际 ${String(setBare.status)}: ${setBare.stderr}`)
+  check(
+    `${setBare.stderr ?? ''}`.includes('v 前缀') || `${setBare.stderr ?? ''}`.includes('git tag 必须带 v'),
+    'set 收到无 v 前缀输入时必须打警告(漏 v 的 tag 会静默零发布)',
+  )
+  check(
+    JSON.parse(readFileSync(join(bumped, 'package.json'), 'utf8')).version === '9.9.10',
+    'set 必须把去 v 的版本写进 manifest',
+  )
+  const setTagged = runVersion(bumped, ['set', 'v9.9.11'])
+  check(setTagged.status === 0, `set v9.9.11 应成功,实际 ${String(setTagged.status)}: ${setTagged.stderr}`)
+  check(!`${setTagged.stderr ?? ''}`.includes('v 前缀'), '带 v 前缀的 set 不应打警告(否则警告会被无视)')
+
+  // ⑥ 接线:gate 必须真的跑这两条(不是"有能力、没接线"),且 tag 判据只在 tag 上跑。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateSteps = workflow?.jobs?.gate?.steps ?? []
+    const manifestsIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('version.mjs manifests'))
+    check(manifestsIndex >= 0, 'ci.yml 的 gate 必须跑 `node scripts/version.mjs manifests`(漏改一处的 1 分钟判据)')
+    const checkIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('version.mjs check'))
+    check(checkIndex >= 0, 'ci.yml 的 gate 必须在 tag push 上跑 `node scripts/version.mjs check "$GITHUB_REF_NAME"`')
+    if (checkIndex >= 0) {
+      const step = gateSteps[checkIndex]
+      check(
+        typeof step.run === 'string' && step.run.includes('refs/tags/v') && step.run.includes('${GITHUB_REF_NAME}'),
+        'tag 版本判据必须按 ref 类型守卫并传 tag 名(不能无条件跑:发布 PR 未打 tag 时 check 必红)',
+      )
+    }
+    // release job 的那道保留(第二道),且两条判据必须共用同一个脚本(唯一真源)。
+    const releaseSteps = workflow?.jobs?.release?.steps ?? []
+    check(
+      releaseSteps.some(step => typeof step?.run === 'string' && step.run.includes('version.mjs check')),
+      'release job 必须保留 `version.mjs check`(发布前对 tag 的第二道判据)',
+    )
   }
 }
 

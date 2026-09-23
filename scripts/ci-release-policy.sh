@@ -22,7 +22,14 @@
 #   vX.Y.Z-(beta|rc|alpha)[.N…]   预发版 → 只构建 beta + 发布
 #   其它 `refs/tags/v…`           **fail-loud**(退出 1):名字像发布 tag 却不认识时,
 #                                 宁可让人当场改 tag 名,也不要"构建一半、发布零"
+#   漏 `v` 前缀的版本号 tag        **fail-loud**(退出 1,2026-09-23 第五轮审计 R5-C-1):
+#                                 `2.8.2-beta.1` 这类名字曾落在"非 tag"分支上 ⇒
+#                                 release_kind=none / publish=false / channel_set=official,
+#                                 而 release job 的 `if: refs/tags/v` 同样不成立 ⇒
+#                                 三平台照常构建 40 分钟、GitHub Release 与 R2 **全为零**,
+#                                 且 CI 全绿。K-04 消灭的"构建一半、发布零"换了个触发器复活。
 #   非 tag(分支 / PR)             只构建 official、不发布
+#   其它无关 tag(如 `docs-snapshot`)只构建 official、不发布(合法非发布 tag)
 #
 # 为什么不回显 tag 名:tag 名可能带渠道/客户信息(本仓是公开仓,`gate` 的日志公开),
 # 与 `ci-channels.sh` 的既有纪律一致 —— 只报"形态不认识",名字在 GITHUB_REF_NAME 里。
@@ -58,14 +65,27 @@ done
 # **不认识的后缀一律拒绝**,而不是"按最宽的那条 glob 当正式版"。
 STABLE_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
 PRERELEASE_RE='^v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc|alpha)(\.[0-9A-Za-z]+)*$'
+# `X.Y` / `X.Y.Z` 形状的版本段(用于认出"漏了 v 前缀的版本号 tag")。
+VERSION_PAIR_RE='[0-9]+\.[0-9]+'
+VERSION_TRIPLE_RE='[0-9]+\.[0-9]+\.[0-9]+'
 
-# "名字像发布 tag"(v + 数字开头):只用于两件事 ——
+# "名字像发布 tag"(`v` + 数字开头,或数字开头的版本号):只用于两件事 ——
 #   ① tag 上是未知形态时 fail-loud 的判据;
 #   ② 非 tag 上给"把 tag 名当分支推了"的中性告警(既有行为,判据不变宽)。
+# 注意 `42/merge` 这类 PR ref 名**不算**(它没有版本段),否则每个 PR 都会被告警刷屏。
 looks_like=false
-case "$REF_NAME" in
-  v[0-9]*) looks_like=true ;;
-esac
+if printf '%s' "$REF_NAME" | grep -Eq "^v[0-9]|^${VERSION_PAIR_RE}"; then
+  looks_like=true
+fi
+
+# "名字里含版本号"(数字开头,或任何位置出现 `X.Y.Z`):仅用于**发布 tag 的 fail-loud** ——
+# `2.8.2-beta.1`(漏 `v`)与 `release-2.8.2` 都属这一类。此处刻意比 `looks_like` 更宽:
+# 一个 tag 名里带着版本号却既不是白名单形态、又不是显式登记过的非发布形态时,
+# 静默按"非发布"处理就是 R5-C-1 的形态(构建照跑、交付为零、CI 全绿)。
+mentions_version=false
+if printf '%s' "$REF_NAME" | grep -Eq "^[0-9]|${VERSION_TRIPLE_RE}"; then
+  mentions_version=true
+fi
 
 kind="none"
 channel_set="official"
@@ -80,6 +100,22 @@ case "$REF" in
       kind="stable"; channel_set="all"; publish="true"
     elif printf '%s' "$REF_NAME" | grep -Eq "$PRERELEASE_RE"; then
       kind="prerelease"; channel_set="beta"; publish="true"
+    elif printf '%s' "$REF_NAME" | grep -Eq "^[0-9]"; then
+      # R5-C-1:版本号 tag 漏了 `v` 前缀。它**不是**"无关 tag" —— 名字里有完整版本号,
+      # 而 release job 的 `if: refs/tags/v` 不成立 ⇒ 会静默零发布。宁可当场红。
+      echo "::error::发布 tag 缺少 v 前缀:名字以数字开头(形如版本号),但本仓的发布 tag 一律是 vX.Y.Z / vX.Y.Z-<beta|rc|alpha>[.N]。" >&2
+      echo "::error::漏 v 的后果是**静默零发布**:形态被判成非发布 ⇒ 三平台照常构建、GitHub Release 与更新服务器(R2)全部为零,而 CI 全绿。" >&2
+      echo "::error::处置:删掉这个 tag(本地 git tag -d,远端 git push origin --delete <tag>)后,按 v 前缀重打;跑 scripts/version.mjs check <tag> 可先本地自检。" >&2
+      echo "::error::名字见 GITHUB_REF_NAME(刻意不回显)。" >&2
+      exit 1
+    elif [ "$mentions_version" = true ]; then
+      # 名字里带版本号、却既不白名单、也不以数字开头(如 `release-2.8.2`):
+      # 同样不能当"无关 tag"放过 —— 它多半就是想发这一版。
+      echo "::error::发布 tag 形态不认识:名字里含版本号,但不是 v 前缀的发布 tag(vX.Y.Z / vX.Y.Z-<beta|rc|alpha>[.N])。" >&2
+      echo "::error::按"无关 tag"放过它会静默零发布(构建照跑、GitHub Release 与 R2 全为零,CI 全绿)。" >&2
+      echo "::error::处置:改成 v 前缀的发布 tag 重打;确实与发布无关的 tag 请用不含版本号的名字(如 docs-snapshot)。" >&2
+      echo "::error::名字见 GITHUB_REF_NAME(刻意不回显)。" >&2
+      exit 1
     elif [ "$looks_like" = true ]; then
       echo "::error::发布 tag 形态不认识:名字像发布 tag(v 开头)但不匹配任何允许的形态。" >&2
       echo "::error::允许的形态只有两种:vX.Y.Z(正式版,全渠道)与 vX.Y.Z-(beta|rc|alpha)[.N](预发版,只发 beta)。" >&2

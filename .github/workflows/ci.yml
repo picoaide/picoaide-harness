@@ -205,18 +205,40 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
-      # 正式 tag 必须有策展发布说明(2026-09-11 定案):GitHub Release 页是**公开面**,
-      # 缺 docs/releases/<tag>.md 时 release job 会回退自动生成的 PR 列表 —— 版本页
-      # 变成 CI 日志(v2.7.0 的实际情况)。这条检查放在 gate 的第一步:tag 打错时
-      # 1 分钟内就报,不必等三平台构建 40 分钟才在最后一步失败。预发 tag 允许缺失。
-      # 「正式 / 预发」同样取自上面的唯一真源,不再写 `!contains(ref_name,'-')` 这类
-      # 名字形状判断 —— 那种写在 `if:` 里的第二份判据正是 K-04 的根因形态。
-      - name: Require curated release notes for stable tags
-        if: steps.release_policy.outputs.release_kind == 'stable'
+      # 发布 tag 的**拓扑判据**(2026-09-23 第五轮审计 R5-C-2 / M1)。
+      #
+      # 为什么也放在 gate 的第一步:拓扑违规的现场形态是"CI 全绿,但上一个 tag 的修复
+      # 被静默丢掉"—— 2026-09-17 真实事故里上一个 tag 打在**旁支**上,发版人直接从功能
+      # 分支打了新 tag,那条旁支上的修复(错误上报 + 迁移 0068)一个都没进本版,而 CI
+      # 没有任何一条判据会红。现在它在 1 分钟内红,下游 job 因 `needs: gate` 全部跳过。
+      #
+      # 判据(见脚本头部):① 上一个发布 tag 是本 tag 的祖先;② 本 tag 在主线 origin/master
+      # 上。两者都读本地 git 历史 —— 本 job 的 checkout 已是 `fetch-depth: 0`(全历史 +
+      # 全 tag)。这里**再显式补齐并校验**两份输入(主线 ref + 全部 tag):判据输入的
+      # 获取不依赖"checkout 恰好带了什么",fetch 失败即红(不用 `|| true` 吞掉)。
+      # `--exclude-tag` 把"本次要发的 tag"从基线候选里排除(等价于支持"先本地自检、再打 tag")。
+      #
+      # 判据跑不成时脚本退出 2(不是 0):"判据没完成"不等于通过。
+      - name: Release topology (previous release tag is an ancestor; tag is on the mainline)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-recurse-submodules origin \
+            '+refs/heads/master:refs/remotes/origin/master' '+refs/tags/*:refs/tags/*'
+          bash scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
+      # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
+      # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
+      # 时正文会回退成自动生成的 PR 列表 —— 而 PR 标题/正文不在任何守卫判据内(铁律 0 的
+      # 盲区),历史上正是这条路径把真实域名/IP 带进了公开 Release 正文。
+      # 这条检查放在 gate 的第一步:tag 写错/漏写时 1 分钟内就报,不必等三平台构建 40 分钟。
+      # 「是不是发布 tag」取自上面的唯一真源(不写 `!contains(ref_name,'-')` 这类名字形状
+      # 判断 —— 那种写在 `if:` 里的第二份判据正是 K-04 的根因形态)。
+      - name: Require curated release notes for release tags
+        if: steps.release_policy.outputs.release_kind != 'none'
         run: |
           set -euo pipefail
           test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
-            echo "::error::正式版缺少发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md)"
+            echo "::error::发布 tag 缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md)"
             exit 1
           }
           echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
@@ -230,6 +252,26 @@ jobs:
           node-version: 24
       - if: needs.changes.outputs.code != 'false'
         run: corepack enable
+      # 版本一致性判据(2026-09-23 第五轮审计 R5-C-5)。产品版本分布在两处 manifest
+      # (root package.json 与 packages/host/desktop/package.json),此前**只有** release
+      # job 第 4 步校验 —— 也就是四平台构建 40 分钟之后才红,而分支/PR 侧零判据
+      # (漏改一处时 gate 与三平台全绿,误导性极强)。
+      #
+      # 放这里的原因:node 已就绪(setup-node + corepack enable 在上面)、还没到
+      # `yarn install`,所以在最便宜的位置失败。两条判据分工:
+      #   ① `manifests`:只比两处 manifest 彼此相等 —— 发布 PR"已 bump、tag 未打"时它
+      #      必须绿(把 `check` 不带参数塞进 `yarn check` 会让每个发布 PR 恒红:后者的
+      #      期望值取自 git describe 的最新 tag)。
+      #   ② tag push 上再校验 tag 与两处 manifest 逐字一致(与 release job 同一命令、
+      #      同一真源),把"tag 打了但忘了 bump"从 40 分钟提前到 1 分钟。
+      - name: Product version predicates (manifests always; tag must match on release tags)
+        if: needs.changes.outputs.code != 'false'
+        run: |
+          set -euo pipefail
+          node scripts/version.mjs manifests
+          case "${GITHUB_REF}" in
+            refs/tags/v*) node scripts/version.mjs check "${GITHUB_REF_NAME}" ;;
+          esac
       - name: Cache yarn (and electron for the linux packaging job)
         if: needs.changes.outputs.code != 'false'
         uses: actions/cache@v6
@@ -996,27 +1038,28 @@ jobs:
       # 2026-09-23 审计 C-CI-2:策展发布说明的**第二道**检查必须在任何对外上传之前。
       #
       # 此前唯一会拦它的地方在 "Create GitHub Release" 步骤里,而那一排在
-      # "Upload every channel image to the update server (R2)" **之后** ⇒ 正式 tag 缺
+      # "Upload every channel image to the update server (R2)" **之后** ⇒ 缺
       # docs/releases/<tag>.md 时,客户侧更新面(latest.json + 镜像对象,且该路径是
       # 不可变长缓存)已经先被挂上新版本,才轮到 GitHub Release 步骤红 —— 结果是
       # "半发布":客户端能升到一个没有策展说明、也没有 GitHub Release 的版本。
       # gate 里的早检仍在(1 分钟内报错、下游全部因 needs 跳过);这里是 release job
       # 的第一步 —— 只要它没过去,后面一个上传步骤都不会跑。
+      #
+      # 2026-09-23 第五轮审计 R5-C-3:**预发 tag 同样要求策展说明**。此前这道检查以
+      # `release_kind=stable` 为前提,预发 tag 缺说明会被放行到 `--generate-notes` ——
+      # 自动变更日志的正文由提交信息 + **PR 标题/正文**生成,而后者不在任何守卫判据内
+      # (铁律 0 的盲区)。历史上正是这条路径把真实域名/IP 带进了公开 Release 正文。
       # 形态判定仍走唯一真源 `scripts/ci-release-policy.sh`(未知形态它也当场红)。
       - name: Require curated release notes before any upload
         run: |
           set -euo pipefail
           bash scripts/ci-release-policy.sh > release-policy.txt
           cat release-policy.txt
-          if grep -qx 'release_kind=stable' release-policy.txt; then
-            test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
-              echo "::error::正式版缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md);在任何对外上传之前中止"
-              exit 1
-            }
-            echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
-          else
-            echo "非正式版 ⇒ 允许缺策展说明(公开面仍优先用策展说明)"
-          fi
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "::error::发布 tag 缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md);在任何对外上传之前中止"
+            exit 1
+          }
+          echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
       # 三平台安装包仍需先构建:它们要打进镜像(客户端随镜像分发)。
       - uses: actions/download-artifact@v7
         with:
@@ -1095,21 +1138,20 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           REPO="picoaide/picoaide-harness"
-          # 说明(**公开发布面**,2026-09-11 定案):正式 tag 必须有策展发布说明
+          # 说明(**公开发布面**,2026-09-11 定案):tag 必须有策展发布说明
           # (docs/releases/<tag>.md,模板 TEMPLATE.md);缺失即失败,绝不静默回退
           # 自动生成的 PR 列表 —— 版本页是给客户与运维看的,不是 CI 日志。
-          # 预发 tag 允许缺失(beta/rc 面向内测),回退自动变更日志并告警。
+          # 2026-09-23 第五轮审计 R5-C-3 起**预发 tag 同样要求**:此前预发缺说明会回退
+          # `--generate-notes`,而自动变更日志的正文来自提交信息 + **PR 标题/正文**,
+          # 后者不在任何守卫判据内(铁律 0 的盲区)—— 历史上正是这条路径把真实域名/IP
+          # 带进了公开 Release 正文。这条是第三道保险(前两道在 gate 与 release job 首步)。
           NOTES="docs/releases/${TAG}.md"
-          if [ -f "${NOTES}" ]; then
-            echo "Using curated release notes from ${NOTES}"
-            NOTES_FLAG="--notes-file ${NOTES}"
-          elif [[ "${TAG}" == *-* ]]; then
-            echo "::warning::${NOTES} not found — prerelease falls back to GitHub auto-generated notes"
-            NOTES_FLAG="--generate-notes"
-          else
-            echo "::error::正式版 ${TAG} 缺少发布说明 ${NOTES}(模板见 docs/releases/TEMPLATE.md)"
+          test -f "${NOTES}" || {
+            echo "::error::${TAG} 缺少策展发布说明 ${NOTES}(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md)"
             exit 1
-          fi
+          }
+          echo "Using curated release notes from ${NOTES}"
+          NOTES_FLAG="--notes-file ${NOTES}"
           # prerelease tag(含 prerelease 段)按 GitHub 语义以 Pre-release 发布:
           # 可见但不会被当成 Latest。正式 tag 发布为普通 release。
           PRERELEASE=""

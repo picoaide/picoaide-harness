@@ -2999,6 +2999,30 @@ function checkReleaseSurface(file, document, text, notes) {
           + `(第 ${Math.min(...fullGateIndexes) + 1} 步)之后 ⇒ 不再是"早检"(C-CI-2)。`,
       })
     }
+    // ④ 判据本身不得被"只对正式版"的条件收窄(2026-09-23 第五轮审计 R5-C-3)。
+    //
+    // 现场:gate 与 release job 的策展说明检查都以 `release_kind == 'stable'` 为前提,
+    // 预发 tag 缺说明被放行到 `--generate-notes` —— 自动变更日志的正文由提交信息 +
+    // **PR 标题/正文**生成,而后者不是文件、不在任何守卫判据内(铁律 0 的盲区)。
+    // 历史上正是这条路径把真实域名/IP 带进了公开 Release 正文。
+    // 判据只读**可执行文本**里的 `if:` 条件(注释里写不算),覆盖两种收窄写法:
+    // 只认 stable,以及"名字不含 `-` 才算正式版"这类第二份名字形状判断。
+    for (const index of notesIndexes) {
+      const condition = steps[index]?.if
+      if (typeof condition !== 'string') continue
+      const narrow = /release_kind\s*==\s*['"]stable['"]/u.test(condition)
+        || /(?:!\s*)?contains\(\s*github\.ref_name\s*,\s*['"]-['"]/u.test(condition)
+      if (!narrow) continue
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-11] job ${jobId} 的策展说明检查(第 ${index + 1} 步)带条件 \`if: ${condition.trim()}\``
+          + '\n  ⇒ 预发 tag 被排除在这条判据之外,缺说明时会回退 GitHub 自动变更日志,'
+          + '而自动正文来自提交信息 + **PR 标题/正文**(PR 标题/正文不是文件 ⇒ 不在任何守卫判据内,'
+          + '铁律 0 的盲区;历史上真实域名/IP 就是这么进公开 Release 正文的)。'
+          + '策展说明对**发布 tag 一律要求**:条件只能是"是不是发布 tag",不得只认正式版。',
+      })
+    }
   }
 
   // ③ `gh release create|edit` 的参数语义(C-CI-3:旧实现是整段 YAML 子串匹配,
@@ -3044,6 +3068,20 @@ function checkReleaseSurface(file, document, text, notes) {
             detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 没有说明来源`
               + '\n  ⇒ 需要 `--notes-file` / `--notes` / `--generate-notes`,或同一脚本里赋给这些 flag 的变量'
               + '(本仓的策展说明路径是 docs/releases/<tag>.md)。',
+          })
+        }
+        // ⑤ 绝不回退自动变更日志(2026-09-23 第五轮审计 R5-C-3):`--generate-notes` 的正文
+        //    由提交信息 + **PR 标题/正文**生成,而 PR 标题/正文不是文件 ⇒ 不在任何守卫判据内
+        //    (铁律 0 的盲区)。历史上真实域名/IP 正是这么进公开 Release 正文的。
+        //    预发 tag 曾有这条回退,现已删除;这里把它钉死,防止再长回来。
+        if (/--generate-notes\b/u.test(script)) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里用了 \`--generate-notes\``
+              + '\n  ⇒ 那会把 Release 正文回退成自动变更日志(提交信息 + PR 标题/正文),'
+              + '而 PR 标题/正文不是文件、不在任何守卫判据内(铁律 0 的盲区;历史泄漏路径)。'
+              + '发布 tag(正式版与预发版)一律用 `--notes-file docs/releases/<tag>.md`。',
           })
         }
       }
@@ -3894,6 +3932,8 @@ export function selfTestPolicies() {
     gateFirst = true,
     titleFlag = '--title "${TAG}"',
     notesFlag = '${NOTES_FLAG}',
+    // 2026-09-23 第五轮审计 R5-C-3:策展说明判据不得被"只对正式版"的条件收窄。
+    gateNotesIf = '',
     triggers = ['pull_request', 'push'],
   } = {}) => [
     'name: selftest',
@@ -3908,7 +3948,8 @@ export function selfTestPolicies() {
     '        with:',
     '          fetch-depth: 0',
     ...(gateNotesStep && gateFirst ? [
-      '      - name: Require curated release notes for stable tags',
+      '      - name: Require curated release notes for release tags',
+      ...(gateNotesIf === '' ? [] : [`        if: ${gateNotesIf}`]),
       '        run: |',
       '          set -euo pipefail',
       '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
@@ -3919,7 +3960,7 @@ export function selfTestPolicies() {
     '      - run: yarn check',
     ...wasmProbeLines('full'),
     ...(gateNotesStep && !gateFirst ? [
-      '      - name: Require curated release notes for stable tags',
+      '      - name: Require curated release notes for release tags',
       '        run: |',
       '          set -euo pipefail',
       '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
@@ -3973,6 +4014,17 @@ export function selfTestPolicies() {
   releaseSample('p6-no-notes-source', '[SK-11]', { notesFlag: '' })
   releaseSample('p7-early-check-after-gate', '[SK-11]', { gateFirst: false })
   releaseSample('p8-no-early-check', '[SK-11]', { gateNotesStep: false })
+  // R5-C-3:策展说明判据被"只对正式版"的条件收窄(预发 tag 缺说明会回退自动变更日志,
+  // 而自动正文来自 PR 标题/正文 —— 不在任何守卫判据内)。两种收窄写法都必须红。
+  releaseSample('p9-notes-gate-stable-only', '[SK-11]', {
+    gateNotesIf: "steps.release_policy.outputs.release_kind == 'stable'",
+  })
+  releaseSample('p10-notes-gate-name-shape', '[SK-11]', {
+    // `${{ }}` 不能省:裸 `!contains(...)` 在 YAML 里是显式 tag 指示符,解析出来不是字符串。
+    gateNotesIf: "${{ !contains(github.ref_name, '-') }}",
+  })
+  // R5-C-3:`--generate-notes` 回退本身必须红(自动变更日志 = 提交信息 + PR 标题/正文)。
+  releaseSample('p11-generate-notes-fallback', '[SK-11]', { notesFlag: '--generate-notes' })
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——
   // 不能内联在 selfTestPolicies 体内:那样"把 selfTestPolicies 整条掏空"会连带
   // 把对账一起掏空(第三轮审计 m8 的形态)。这里只做数据收集,断言在
