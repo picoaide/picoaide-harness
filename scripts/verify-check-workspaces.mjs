@@ -972,10 +972,28 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   )
   const list = spawnSync(process.execPath, [subject, '--list'], { cwd: root, encoding: 'utf8' })
   check(list.status === 0, `接线: check-workspaces --list 应 exit 0(实际 ${list.status}: ${list.stderr.slice(0, 200)})`)
-  const guards = list.stdout.split('\n').find(line => line.startsWith('guards: ')) ?? ''
+  const listLines = (list.stdout ?? '').split('\n')
+  const guardLine = listLines.find(line => line.startsWith('guards: ')) ?? ''
+  const advisoryLine = listLines.find(line => line.startsWith('guards(advisory,只告警不拦门禁): ')) ?? ''
+  const registryLine = listLines.find(line => line.startsWith('guards(advisory 登记制): ')) ?? ''
+  const guardNames = guardLine.replace('guards: ', '').split(',').map(name => name.trim()).filter(Boolean)
+  const advisoryNames = advisoryLine.replace('guards(advisory,只告警不拦门禁): ', '')
+    .split(',').map(name => name.trim()).filter(Boolean)
+  /**
+   * 下限判据 = 守卫**在表里** 且 **不是 advisory**（2026-09-23 第六轮审计 R6-C-1）。
+   *
+   * 旧口径只断言"在表里"，于是给条目加一个 `advisory: true` 就能让这条下限变成
+   * "它在表里、但它不拦门禁" —— 下限形同虚设（这正是被审出来的红→绿开关）。
+   */
+  const blockingGuard = name => guardNames.includes(name) && !advisoryNames.includes(name)
   check(
-    guards.includes('check:check-workspaces'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:check-workspaces，实际 ${JSON.stringify(guards)}`,
+    advisoryNames.length === 0 || registryLine !== '',
+    '接线: 存在 advisory 守卫时 `--list` 必须同时打印登记表那一行（登记制是 advisory 的判据面）',
+  )
+  check(
+    blockingGuard('check:check-workspaces'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:check-workspaces **且它不得是 advisory**`
+      + `（advisory=${JSON.stringify(advisoryNames)},实际 ${JSON.stringify(guardLine)}）`,
   )
   // 2026-09-20：变异体残留守卫必须同样双重登记（package.json + GUARDS）——
   // 少任何一处都等于「事故防线没接上」，而它防的正是"红的变异体进提交"。
@@ -984,16 +1002,16 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     `接线: package.json 的 check:no-leftover-mutants 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:no-leftover-mutants'])}`,
   )
   check(
-    guards.includes('check:no-leftover-mutants'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:no-leftover-mutants，实际 ${JSON.stringify(guards)}`,
+    blockingGuard('check:no-leftover-mutants'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:no-leftover-mutants **且它不得是 advisory**，实际 ${JSON.stringify(guardLine)}`,
   )
   check(
     pkg.scripts?.['check:migration-range'] === 'node scripts/check-migration-range.mjs',
     `接线: package.json 的 check:migration-range 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:migration-range'])}`,
   )
   check(
-    guards.includes('check:migration-range'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:migration-range，实际 ${JSON.stringify(guards)}`,
+    blockingGuard('check:migration-range'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:migration-range **且它不得是 advisory**，实际 ${JSON.stringify(guardLine)}`,
   )
   // 2026-09-23：文档数字守卫（D-4 上游 pin / D-5 平台模块表）同样双重登记。
   check(
@@ -1001,8 +1019,8 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     `接线: package.json 的 check:doc-claims 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:doc-claims'])}`,
   )
   check(
-    guards.includes('check:doc-claims'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:doc-claims，实际 ${JSON.stringify(guards)}`,
+    blockingGuard('check:doc-claims'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:doc-claims **且它不得是 advisory**，实际 ${JSON.stringify(guardLine)}`,
   )
   // 2026-09-23 三轮审计 C-5 / 六处形态③⑤⑥：域名守卫、集成测试守卫同样必须双重登记
   // —— "写了用例但没人执行"等同于没有覆盖（本仓已记录过的缺陷类）。
@@ -1011,17 +1029,93 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     `接线: package.json 的 check:no-real-domains 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:no-real-domains'])}`,
   )
   check(
-    guards.includes('check:no-real-domains'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:no-real-domains（含 --others 扫描面与空扫描面判据），实际 ${JSON.stringify(guards)}`,
+    blockingGuard('check:no-real-domains'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:no-real-domains（含 --others 扫描面与空扫描面判据）`
+      + ` **且它不得是 advisory**（铁律 0 的第一道机器防线），实际 ${JSON.stringify(guardLine)}`,
   )
   check(
     pkg.scripts?.['check:integration-tests'] === 'node scripts/check-integration-tests.mjs',
     `接线: package.json 的 check:integration-tests 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:integration-tests'])}`,
   )
   check(
-    guards.includes('check:integration-tests'),
-    `接线: check-workspaces 的 GUARDS 表必须包含 check:integration-tests（electron-shots 的接线/SKIP 判据挂在它上面），实际 ${JSON.stringify(guards)}`,
+    blockingGuard('check:integration-tests'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:integration-tests（electron-shots 的接线/SKIP 判据挂在它上面）`
+      + ` **且它不得是 advisory**，实际 ${JSON.stringify(guardLine)}`,
   )
+
+  // -------------------------------------------------------------------------
+  // advisory **登记制**的第二条独立通道（2026-09-23 第六轮审计 R6-C-1）。
+  //
+  // 现场：`advisory: true` 曾是一个无判据的红→绿开关 —— `check-workspaces --list`、
+  // `check-root-guards --list` 都照旧绿，而两条门禁路径同时不再因该守卫失败。
+  //
+  // 这里做**三方差集对拍**（任一侧漂移都红）：
+  //   ① 编排器 `--list` 的 advisory 集合；
+  //   ② `check-root-guards.mjs --list`（**它自己独立解析 `ADVISORY_REGISTRY`**）的 advisory 集合；
+  //   ③ `--list` 打印的登记表行（`guards(advisory 登记制): …`）。
+  // 并用**副本**证明这三条判据真的会咬：给 check:no-real-domains 加 `advisory: true`
+  // ⇒ 编排器副本必须 exit 2、根守卫副本必须 exit 2（后者正是 docs-only 的 PR 唯一防线）。
+  // -------------------------------------------------------------------------
+  {
+    const rootGuardsPath = join(root, 'scripts', 'check-root-guards.mjs')
+    const rootGuardsList = spawnSync(process.execPath, [rootGuardsPath, '--list'], { cwd: root, encoding: 'utf8' })
+    check(rootGuardsList.status === 0,
+      `R6-C-1: check-root-guards --list 应 exit 0(实际 ${rootGuardsList.status}: ${rootGuardsList.stderr.slice(0, 300)})`)
+    const rootGuardsLines = (rootGuardsList.stdout ?? '').split('\n')
+    const rootGuardAdvisories = rootGuardsLines.filter(line => line.includes('（advisory）'))
+      .map(line => line.trim().split(/\s+/u)[0]).filter(Boolean).sort()
+    check(
+      rootGuardAdvisories.join(',') === [...advisoryNames].sort().join(','),
+      'R6-C-1: 编排器 `--list` 与 `check-root-guards --list` 的 advisory 集合必须一致'
+        + `（编排器 ${JSON.stringify(advisoryNames)} / 根守卫 ${JSON.stringify(rootGuardAdvisories)}）`,
+    )
+    const registryCountLine = rootGuardsLines.find(line => line.includes('advisory 登记 ')) ?? ''
+    const registryCount = Number(/advisory 登记 (\d+) 条/u.exec(registryCountLine)?.[1] ?? NaN)
+    check(Number.isSafeInteger(registryCount),
+      `R6-C-1: check-root-guards --list 必须报出 advisory 登记条数（诊断行缺失 ⇒ 登记表解析链路断了）：`
+        + `实际 ${JSON.stringify(registryCountLine)}`)
+    check(registryCount === advisoryNames.length,
+      `R6-C-1: 登记的 advisory 条数（${registryCount}）必须等于实际 advisory 守卫数（${advisoryNames.length}）`
+        + ' —— 未登记的 advisory 与陈旧登记都是配置错误',
+    )
+    check(
+      registryLine !== '' && (advisoryNames.length === 0) === registryLine.includes('无（每条守卫都必须拦门禁）'),
+      `R6-C-1: \`--list\` 的登记表行必须与实际 advisory 集合同源，实际 ${JSON.stringify(registryLine)}`,
+    )
+
+    // **副本红探针**：把某个真实守卫标成 advisory ⇒ 两条路径都必须红（而且必须是
+    // "配置错误"那种红 —— 退出码 2，不是把它当普通失败吞掉）。
+    const RED_PROBE_MUTATION = (source, guardName) => {
+      const needle = `{ name: '${guardName}', args: ['run', '${guardName}']`
+      if (!source.includes(needle)) return null
+      return source.replace(needle, needle.replace('{ name:', "{ advisory: true, name:"))
+    }
+    for (const guardName of ['check:no-real-domains', 'check:migration-range']) {
+      const mutatedSource = RED_PROBE_MUTATION(readFileSync(subject, 'utf8'), guardName)
+      check(mutatedSource !== null,
+        `R6-C-1(探针锚点): 在编排器源码里找不到 ${guardName} 的条目锚点 —— 本探针的形状变了，请同步（不要删掉这段）`)
+      if (mutatedSource === null) continue
+      const probeTree = tempDir('advisory-probe-')
+      mkdirSync(join(probeTree, 'scripts'))
+      writeFileSync(join(probeTree, 'scripts', 'check-workspaces.mjs'), mutatedSource)
+      copyFileSync(rootGuardsPath, join(probeTree, 'scripts', 'check-root-guards.mjs'))
+      writeFileSync(join(probeTree, 'package.json'),
+        `${JSON.stringify({ name: 'advisory-probe', private: true, scripts: { [guardName]: 'node scripts/noop.mjs' } }, null, 2)}\n`)
+      const orchestratorProbe = spawnSync(process.execPath, [join(probeTree, 'scripts', 'check-workspaces.mjs'), '--list'],
+        { cwd: probeTree, encoding: 'utf8' })
+      check(orchestratorProbe.status === 2,
+        `R6-C-1: 把 ${guardName} 标成 advisory（未登记）之后编排器**必须 exit 2**（配置错误），`
+          + `实际 ${orchestratorProbe.status}：${`${orchestratorProbe.stdout ?? ''}${orchestratorProbe.stderr ?? ''}`.slice(0, 300)}`)
+      check(`${orchestratorProbe.stderr ?? ''}`.includes('ADVISORY_REGISTRY'),
+        `R6-C-1: 未登记 advisory 的失败信息必须点名 ADVISORY_REGISTRY，实际 ${JSON.stringify((orchestratorProbe.stderr ?? '').slice(0, 200))}`)
+      const rootGuardsProbe = spawnSync(process.execPath, [join(probeTree, 'scripts', 'check-root-guards.mjs'), '--list'],
+        { cwd: probeTree, encoding: 'utf8' })
+      check(rootGuardsProbe.status === 2,
+        `R6-C-1: 同一次变异下 check-root-guards（docs-only PR 的唯一防线）**必须 exit 2**，`
+          + `实际 ${rootGuardsProbe.status}：${`${rootGuardsProbe.stdout ?? ''}${rootGuardsProbe.stderr ?? ''}`.slice(0, 300)}`)
+      console.log(`verify-check-workspaces: R6-C-1 未登记 advisory（${guardName}）⇒ 编排器与根守卫均 exit 2 ✓`)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

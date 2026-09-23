@@ -405,6 +405,8 @@ const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14',
 const SELFTEST_SCANNER_ASSERTIONS = 5
 /** `selfTestFatalPaths()` 至少执行的断言条数(4 样本 + 覆盖对账 2 条)。 */
 const SELFTEST_FATAL_PATH_ASSERTIONS = 6
+/** `selfTestWorkflowFileRegistry()` 至少执行的断言条数(4 个正反样本 + 1 条具名性)。 */
+const SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS = 5
 
 /**
  * `selfTestFatalPaths()` 必须覆盖的致命路径(2026-09-19 第三轮审计 F2-1)。
@@ -1002,6 +1004,13 @@ const PINNED_STEP_POLICIES = [
     label: '守卫结果链路步(`needs.<job>.result` + `exit 1`)',
     match: script => /exit\s+[1-9]/u.test(script) && /needs\.[A-Za-z_][\w-]*\.result/u.test(script),
     ifPolicy: 'needs-result',
+    // **逐字登记**（2026-09-23 第六轮审计 R6-C-2）。这一步是"根守卫失败 ⇒ 必需 Gate 变红"
+    // 的**唯一**链路（`gate-guards` 自己不在分支保护的必需检查里）。旧判据只要求 `if:`
+    // 里出现 `needs.<job>.result` 子串 ⇒ 任意合取项都能让它永不执行而门禁全绿，实测两种形态：
+    //   `if: needs.gate-guards.result != 'success' && github.event_name != 'pull_request'`
+    //   `if: needs.gate-guards.result != 'success' && github.repository_owner == 'nobody'`
+    // 都 EXIT=0。现在只认下面这个**逐字**取值；要新形态必须先登记进本表并写明理由。
+    ifValues: ["needs.gate-guards.result != 'success'"],
   },
   {
     id: 'wasm-case-gate',
@@ -1021,7 +1030,9 @@ const PINNED_STEP_POLICIES = [
  *   · `never` = 必须无条件运行(它本身就是"无论如何都要跑"的那一步);
  *   · `fail-safe-docs-only` = 只允许 docs-only 的 fail-safe 形态(`!= 'false'`,与
  *     [SK-9]④ 同一份口径 —— changes 失败/输出为空时走完整路径);
- *   · `needs-result` = 必须条件在某个上游 job 的结果上(守卫失败 ⇒ 本步运行)。
+ *   · `needs-result` = **逐字**等于该策略条目上登记的 `ifValues` 之一(与
+ *     `JOB_IF_POLICIES.exact` 同一范式)。**不接受子串匹配** —— "表达式里出现过
+ *     `needs.<job>.result`"这个判据可以被任何合取项绕过(R6-C-2 的现场)。
  */
 const PINNED_STEP_IF_POLICIES = {
   never: {
@@ -1033,8 +1044,10 @@ const PINNED_STEP_IF_POLICIES = {
     describe: "只允许 `if: needs.changes.outputs.code != 'false'`(docs-only 的 fail-safe 形态)",
   },
   'needs-result': {
-    check: value => /needs\.[A-Za-z_][\w-]*\.result/u.test(value),
-    describe: '只允许条件在 `needs.<job>.result` 上的 `if:`(守卫未成功 ⇒ 本步运行)',
+    check: (value, policy) => (policy?.ifValues ?? []).includes(String(value).trim()),
+    describe: policy => `只允许**逐字**等于 ${
+      (policy?.ifValues ?? []).map(item => `\`${item}\``).join(' 或 ') || '(该步骤没有登记任何取值)'
+    }（不接受合取项/取反/换写法的收窄 —— 那会让这一步永不执行而门禁仍绿）`,
   },
 }
 
@@ -1539,6 +1552,86 @@ function normalizeIf(value) {
  */
 function detectRemoteWrites(script) {
   return REMOTE_WRITE_CAPABILITIES.filter(capability => capability.re.test(script))
+}
+
+/**
+ * workflow **文件级**登记的双向判据（2026-09-23 第六轮审计 R6-D P2-1）。
+ *
+ * 现场：SK-15 的"不可静默跳过"是**按文件**放行的 —— `checkJobExecutability` 与
+ * `checkReleaseChainSteps` 都以 `registry.files.includes(file)` / `entries.length === 0`
+ * 早退，而 `.github/workflows/*.yml` ⊆ `REGISTERED_WORKFLOW_FILES` 这层**没有任何判据**。
+ * 于是新建一个 `zz-new-lane.yml`、里面放一个 `if: false` 的交付/公证 job ⇒ 门禁 EXIT=0
+ * 并照打"全部通过"（同一形态放进已登记文件里则 EXIT=1）。审计口径里这属于"换一个文件即
+ * 静默"，与"换一个 job / 一条步骤 / 一个对象"是同一类覆盖面缺口。
+ *
+ * 判据（两侧都红，只在扫描**默认目录**时生效）：
+ *   · 目录里存在却没登记 ⇒ 红（新文件必须先登记进 `REGISTERED_WORKFLOW_FILES`）；
+ *   · 登记了却不存在 ⇒ 红（文件被删/改名后登记项成了可复用的空壳）。
+ *
+ * 为什么要登记而不是"自动全部检查"：SK-15 的强制面需要**逐条写明依据**（每个 job 的
+ * 允许 `if:` 形态、每个发布链步骤的效果子串），自动扫描给不出依据 —— 所以新文件必须是
+ * 一次显式决定。`--workflows-dir` 指向临时目录时不做这条（那里是变异验证的合成树）。
+ *
+ * @param presentNames - 被扫目录里的 workflow 文件名（含 `.yml`/`.yaml`）。
+ * @param registeredFiles - 登记表里的文件名。
+ * @returns 失败项数组。
+ */
+export function checkRegisteredWorkflowFiles(presentNames, registeredFiles) {
+  const failures = []
+  for (const name of registeredFiles) {
+    if (!presentNames.includes(name)) {
+      failures.push({
+        name: '[SK-15]',
+        line: 0,
+        detail: `登记表里的 workflow 文件 \`${name}\` 在 .github/workflows 下**不存在**\n`
+          + '  ⇒ 文件被删掉/改名了：它的 job 与发布链步骤的登记项随即变成空壳，'
+          + '而"登记了却不存在"这一侧此前没有任何判据。改结构请同步 REGISTERED_WORKFLOW_FILES。',
+      })
+    }
+  }
+  for (const name of presentNames) {
+    if (!registeredFiles.includes(name)) {
+      failures.push({
+        name: '[SK-15]',
+        line: 0,
+        detail: `\`.github/workflows/${name}\` **没有登记**（登记值：${registeredFiles.join(', ')}）\n`
+          + '  ⇒ 未登记文件的 job / 步骤**不进 SK-15 的强制面**：`if: false` 的交付或公证 job、'
+          + '承载发布链命令的步骤都可以整块静默存在（R6-D P2-1 的现场形态：新文件 EXIT=0）。\n'
+          + '  处置：把该文件登记进 REGISTERED_WORKFLOW_FILES 的 registry（jobs 与 steps 两侧都要写'
+          + '清允许的 `if:` 形态与依据），或者删掉这个文件。',
+      })
+    }
+  }
+  return failures
+}
+
+/**
+ * 文件级登记自检（R6-D P2-1）：判据必须**两个方向都能被咬住**，且正向形态要绿。
+ * @returns `{ failures, assertions }`。
+ */
+export function selfTestWorkflowFileRegistry() {
+  const failures = []
+  let assertions = 0
+  const registered = ['a.yml', 'b.yml']
+  const expect = (id, present, shouldFail) => {
+    assertions += 1
+    const found = checkRegisteredWorkflowFiles(present, registered)
+    if (shouldFail ? found.length === 0 : found.length > 0) {
+      failures.push(`[file-registry-selftest] 样本 ${id}：期望${shouldFail ? '红' : '绿'}，`
+        + `实得 ${found.length} 条失败（${found.map(item => item.detail.split('\n')[0]).join(' / ')}）`)
+    }
+  }
+  expect('f1-全部登记且都存在', ['a.yml', 'b.yml'], false)
+  expect('f2-存在却没登记(新文件)', ['a.yml', 'b.yml', 'zz-new-lane.yml'], true)
+  expect('f3-登记了却不存在(删/改名)', ['a.yml'], true)
+  expect('f4-两个方向同时漂移', ['a.yml', 'zz-new-lane.yml'], true)
+  // 具名性：未登记的那份文件必须被**点名**（不能只说"有 1 项未通过"）。
+  assertions += 1
+  const named = checkRegisteredWorkflowFiles(['a.yml', 'b.yml', 'zz-new-lane.yml'], registered)
+  if (!named.some(item => item.detail.includes('zz-new-lane.yml'))) {
+    failures.push('[file-registry-selftest] 未登记文件必须被具名点名（诊断里找不到文件名）')
+  }
+  return { failures, assertions }
 }
 
 /**
@@ -3589,13 +3682,14 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
         // ② `if:` 形态必须在该类别的登记表里。
         const allowed = PINNED_STEP_IF_POLICIES[policy.ifPolicy]
         const text = typeof step.if === 'string' ? step.if : String(step.if)
-        if (!allowed.check(text)) {
+        if (!allowed.check(text, policy)) {
+          const describe = typeof allowed.describe === 'function' ? allowed.describe(policy) : allowed.describe
           failures.push({
             name: file,
             line: 0,
             detail: `[SK-14] ${label} 是「${policy.label}」,但它的 \`if:\`(${text.trim()})不在登记形态里`
-              + `\n  该类别只允许:${allowed.describe}`
-              + '\n  ⇒ 判据步骤一旦被条件收窄,就可能整条不跑;需要新形态请登记进'
+              + `\n  该类别只允许:${describe}`
+              + '\n  ⇒ 判据步骤一旦被条件收窄(哪怕只是加一个合取项),就可能整条不跑;需要新形态请登记进'
               + ' PINNED_STEP_IF_POLICIES 并写明理由(与吞码白名单同一套纪律)。',
           })
         }
@@ -4573,6 +4667,29 @@ export function selfTestPolicies() {
   // 正例:`if:` 写成登记过的形态(docs-only 的 fail-safe / 守卫结果)一律绿 —— r1 已覆盖
   // 「与真 ci.yml 同形」,这里再钉一条"探针步不带 if: 也绿"(避免把正确形态误判)。
   gateSample('u11-pinned-steps-without-if-green', null, { file: 'ci.yml', wasmProbe: 'full', caseGateIf: null })
+  // 2026-09-23 第六轮审计 R6-C-2：守卫结果链路步的 `if:` 是**逐字**判据（不再是子串）。
+  // 三种形态都必须红：常量假 / 加合取项 / 换写法（`== 'failure'`、`${{ … }}` 包裹）。
+  // 这一步是"守卫失败 ⇒ 必需 Gate 红"的唯一链路，任何收窄都等于把它摘掉。
+  gateSample('u12-guard-link-if-compound', '[SK-14]', {
+    file: 'ci.yml',
+    linkIf: "needs.gate-guards.result != 'success' && github.event_name != 'pull_request'",
+  })
+  gateSample('u13-guard-link-if-compound-owner', '[SK-14]', {
+    file: 'ci.yml',
+    linkIf: "needs.gate-guards.result != 'success' && github.repository_owner == 'nobody'",
+  })
+  gateSample('u14-guard-link-if-equals-failure', '[SK-14]', {
+    file: 'ci.yml',
+    linkIf: "needs.gate-guards.result == 'failure'",
+  })
+  gateSample('u15-guard-link-if-expression-wrapped', '[SK-14]', {
+    file: 'ci.yml',
+    linkIf: '${{ needs.gate-guards.result != \'success\' }}',
+  })
+  gateSample('u16-guard-link-if-other-job-result', '[SK-14]', {
+    file: 'ci.yml',
+    linkIf: "needs.changes.result != 'success'",
+  })
 
   // ---- 策略 12([SK-15]):job / 发布链步骤的**不可静默跳过**(R5-D-1 / R5-D-2) ----
   //
@@ -5153,6 +5270,28 @@ function main() {
       })
     }
   }
+  // workflow **文件级**登记的双向判据自检（R6-D P2-1）：判据本身要能被打坏。
+  const fileRegistrySelftest = selfTestWorkflowFileRegistry()
+  if (!Array.isArray(fileRegistrySelftest?.failures) || typeof fileRegistrySelftest?.assertions !== 'number') {
+    failures.push({
+      name: '[file-registry-selftest]',
+      line: 0,
+      detail: 'selfTestWorkflowFileRegistry() 的返回形状不对(需要 {failures, assertions}) —— 自检被改坏了'
+        + '(F2-1 的同一类形状问题)',
+    })
+  } else {
+    for (const detail of fileRegistrySelftest.failures) {
+      failures.push({ name: '[file-registry-selftest]', line: 0, detail })
+    }
+    if (fileRegistrySelftest.assertions < SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS) {
+      failures.push({
+        name: '[file-registry-selftest]',
+        line: 0,
+        detail: `workflow 文件级登记自检只执行了 ${fileRegistrySelftest.assertions} 条断言`
+          + `(期望 ≥ ${SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS}) ⇒ 自检被掏空。`,
+      })
+    }
+  }
   let total = 0
   const notes = []
   const allowlistHits = []
@@ -5172,6 +5311,13 @@ function main() {
   // 上,所以先证明这样的 workflow 真的存在 —— 把发布链整段删掉/搬进一个没有发布命令的
   // 文件时,这条点名(判据不依赖文件叫什么名字)。
   if (isDefaultDirectory) {
+    // 文件级登记的双向对拍（R6-D P2-1）：`.github/workflows/*.yml` ⊆ 登记集合。
+    // 放在这里而不是 `checkWorkflowText()` 里 —— 它判的是**目录清单**，不是单份文本。
+    failures.push(...checkRegisteredWorkflowFiles(names, REGISTRY_DEFAULT.files))
+    if (names.every(name => REGISTRY_DEFAULT.files.includes(name))) {
+      notes.push(`[SK-15] workflow 文件登记:${names.length} 个文件与登记集合双向一致`
+        + `(${REGISTRY_DEFAULT.files.join(', ')})—— 新文件/删文件都要先改登记表`)
+    }
     const releaseLines = names.filter(name => carriesReleaseLine(readFileSync(join(workflowDirectory, name), 'utf8')))
     if (releaseLines.length === 0) {
       failures.push({
@@ -5256,7 +5402,7 @@ function main() {
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
     + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
-    + 'continue-on-error / 效果子串 / 能力级远端写入面)\n')
+    + 'continue-on-error / 效果子串 / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {

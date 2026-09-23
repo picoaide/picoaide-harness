@@ -98,6 +98,80 @@ const GUARDS = [
 ]
 
 /**
+ * `advisory` 的**登记制**（2026-09-23 第六轮审计 R6-C-1）。
+ *
+ * 现场：`advisory: true` 曾是一个**无任何判据**的红→绿开关 —— 给上面 `GUARDS` 表的任一条目
+ * 加上这一个词，`yarn check`（= 必需的 `Gate` 检查）与 `scripts/check-root-guards.mjs`
+ * （docs-only 的 PR 唯一防线）就都不再因它失败，而 `MINIMUM_REQUIRED_GUARDS` 只断言
+ * "这个守卫在表里"。铁律 0 的域名守卫、迁移区间守卫、文档数字守卫、变异体残留守卫
+ * 全都挂在这张表上 ⇒ 一行改动即可让它们集体变成"只告警、不拦门禁"，而 CI 全绿。
+ *
+ * 现在：`advisory` 只能标在**这里逐条登记过**的守卫上，未登记的 advisory 在调度前
+ * fail-loud（见 `validateAdvisoryRegistry`）—— advisory 是"经过审批的临时豁免"，
+ * 不是"谁都能按一下的静音键"。反方向同样红：登记项对应的守卫不再 advisory（陈旧登记）
+ * 或根本不在表里，也必须一起改掉。
+ *
+ * 登记项形状：`{ name, reason, approvedBy, expiresOn }`
+ *   · `reason`     为什么这条守卫可以在施工期不拦门禁；
+ *   · `approvedBy` 谁批的（人/角色 —— 进 diff 才会被评审看见）；
+ *   · `expiresOn`  `YYYY-MM-DD`（含当天仍有效）—— 豁免必须到期复核，不能永久挂着。
+ *
+ * **当前为空**：没有任何守卫需要 advisory。历史上唯一的用途是 WASM「客户端专属」验收
+ * 门禁（W1–W5 施工期按设计恒红），它自 2026-09-20 起已转阻塞。
+ */
+const ADVISORY_REGISTRY = []
+
+/**
+ * 校验 advisory 登记（**双向**）：未登记的 advisory / 陈旧登记 / 缺字段 / 已过期
+ * 一律返回错误清单，调用方据此拒绝调度。
+ *
+ * 为什么不做成"未登记就降级成阻塞"：那会把配置错误伪装成正常门禁，红点从"配置非法"
+ * 漂移成"某条判据失败"，排查成本全落到下一个人身上。配置错误必须报成配置错误。
+ *
+ * @param guards - `GUARDS` 表（或它的副本）。
+ * @param registry - 登记表（测试可注入）。
+ * @param today - `YYYY-MM-DD` 口径的"今天"（测试可注入）。
+ * @returns 错误信息数组（空 = 合格）。
+ */
+export function validateAdvisoryRegistry(guards, registry = ADVISORY_REGISTRY, today = new Date()) {
+  const errors = []
+  const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
+  const registered = registry.map(entry => entry?.name)
+  for (const name of advisories) {
+    if (!registered.includes(name)) {
+      errors.push(`守卫 \`${name}\` 被标成 advisory，但它不在 ADVISORY_REGISTRY 里`
+        + ' ⇒ advisory 是无判据的红→绿开关（R6-C-1），必须先登记理由/批准人/到期日再标。'
+        + '若这条守卫本来就该拦门禁，请删掉条目上的 `advisory: true`。')
+    }
+  }
+  for (const entry of registry) {
+    const name = entry?.name
+    if (typeof name !== 'string' || name === '') {
+      errors.push(`ADVISORY_REGISTRY 有登记项缺 \`name\`：${JSON.stringify(entry)}`)
+      continue
+    }
+    for (const field of ['reason', 'approvedBy', 'expiresOn']) {
+      if (typeof entry[field] !== 'string' || entry[field].trim() === '') {
+        errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 缺 \`${field}\`（advisory 必须可追溯、可到期复核）`)
+      }
+    }
+    if (!Number.isNaN(Date.parse(entry.expiresOn ?? '')) && typeof entry.expiresOn === 'string') {
+      const todayKey = today.toISOString().slice(0, 10)
+      if (entry.expiresOn < todayKey) {
+        errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 已于 ${entry.expiresOn} 到期（今天 ${todayKey}）`
+          + ' ⇒ 到期即失效：要么再次登记并写明续期理由，要么把它转回阻塞。')
+      }
+    }
+    if (!advisories.includes(name)) {
+      errors.push(`ADVISORY_REGISTRY 里的 \`${name}\` 并不是 advisory 守卫`
+        + `（GUARDS 表里${guards.some(guard => guard.name === name) ? '该条目没有 `advisory: true`' : '根本没有这个守卫'}）`
+        + ' ⇒ 陈旧登记同样是配置错误（留下它 = 给下一个人一个可以随时按亮的静音键）。')
+    }
+  }
+  return errors
+}
+
+/**
  * workspace 包门禁。`needs` 表达"构建期真实依赖":依赖包的 tsdown 会先清空自己的
  * lib/(enterprise clean:true),并发读取其声明文件的包会在那个窗口里报
  * TS7016「Could not find a declaration file」——所以构建依赖必须串起来,不能
@@ -708,12 +782,15 @@ function seconds(ms) {
 /**
  * 记录一个失败任务的归属：`advisory` 任务只告警、不拦门禁。
  *
- * 为什么要这个开关（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
+ * 为什么这个开关存在（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
  * 落地前**按设计就是红的** —— 它的零残留断言必须如实报出存量命中（旧应用子域/换票/
  * entry_url/access=public/服务端 ai.chat）。若直接接成阻塞，`yarn check` 会在所有泳道
  * 施工期间恒红；若把它改成"没命中才算"，那条判据就退化成了摆设。
- * 折中：脚本本身仍然 exit 1（直跑可见），编排器这里只记 advisory 并**显式打印**，
- * W6 验收前必须删掉条目上的 `advisory:true`。
+ *
+ * **2026-09-23 第六轮审计 R6-C-1 起收口**：advisory 不再是条目上的一个自由字段 ——
+ * 它必须先在 `ADVISORY_REGISTRY` 里逐条登记（理由/批准人/到期日），否则本编排器
+ * 在调度前 exit 2（见 `validateAdvisoryRegistry`）。当时的施工期豁免已随该守卫
+ * 转阻塞而清空，登记表当前为空。
  */
 function classifyFailure(result, state) {
   if (result.task.advisory === true) state.advisory.push(result)
@@ -815,6 +892,18 @@ if (options.help) {
   process.exit(0)
 }
 
+// `advisory` 的登记制（2026-09-23 第六轮审计 R6-C-1）：配置非法时**拒绝调度**，
+// 绝不放行成"某个守卫变成只告警"。这条判据对 `--list` 也生效 —— 清单类判据
+// （`verify-check-workspaces.mjs` 等）正是靠 `--list` 读这张表的。
+{
+  const advisoryErrors = validateAdvisoryRegistry(GUARDS)
+  if (advisoryErrors.length > 0) {
+    for (const error of advisoryErrors) console.error(`check-workspaces: ${error}`)
+    console.error('check-workspaces: ADVISORY_REGISTRY 校验未通过 ⇒ 拒绝调度（退出码 2；退出码 0 不得代表一个被静音的门禁）')
+    process.exit(2)
+  }
+}
+
 // C-2（2026-09-23 三轮审计 P2）：调度/归属表的名字此前**没有任何校验** —— 打错一字符
 // 就是"静默删掉一条边"或"check:fast 判 0 个包"。放在 `--list` 之前：列计划时就必须拦。
 const scheduleProblems = scheduleTableProblems()
@@ -882,6 +971,11 @@ if (options.list) {
   console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
   const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
   if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
+  // 登记表本身也是清单判据的输入（verify-check-workspaces 会与 check-root-guards --list
+  // 对拍这条）—— 空表要**显式**说出来，不能靠"没打印那一行"来推断。
+  console.log(`guards(advisory 登记制): ${ADVISORY_REGISTRY.length === 0
+    ? '无（每条守卫都必须拦门禁）'
+    : ADVISORY_REGISTRY.map(entry => `${entry.name}@${entry.expiresOn}`).join(', ')}`)
   process.exit(0)
 }
 
@@ -939,8 +1033,9 @@ if (state.advisory.length > 0) {
     console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
     console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
   }
-  console.error('\n提示：WASM 客户端专属门禁在 W1–W5 波次落地前按设计就是红的（零残留如实报出存量命中）。')
-  console.error('     W6 验收前必须删掉 scripts/check-workspaces.mjs 里该条目的 advisory:true 转为阻塞。')
+  console.error('\n提示：advisory 条目必须先在 ADVISORY_REGISTRY 里登记（理由/批准人/到期日），')
+  console.error('     且 `scripts/check-root-guards.mjs` 只有在显式传 `--allow-advisory` 时才容忍它。')
+  console.error('     到期即失效：要么续期并写明理由，要么把该条目转回阻塞（删掉 `advisory: true`）。')
 }
 
 if (state.failed.length > 0 || state.dropped.length > 0) {
