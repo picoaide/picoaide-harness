@@ -98,14 +98,25 @@ const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
     dir: 'packages/host/desktop',
     deps: ['packages/host/host-home', 'packages/host/host-locale', 'packages/host/wasm-apps-host'],
   },
-  { workspace: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', deps: ['packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'] },
+  // 2026-09-23：`loopback.ts` 四份合一后，enterprise 也直接读叶子包的
+  // `./loopback` 子路径（原先实现住在自己包里）⇒ 这条边加上 host-locale。
+  {
+    workspace: '@picoaide/dsh-enterprise',
+    dir: 'packages/host/enterprise',
+    deps: ['packages/host/host-locale', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
+  },
   { workspace: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', deps: ['packages/host/desktop'] },
   { workspace: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', deps: ['packages/client/panel-surface', 'packages/client/foot-menu'] },
   { workspace: '@picoaide/dsh-branding', dir: 'packages/client/branding', deps: ['packages/host/desktop'] },
   // cron 的 tsc 仍读 desktop 的 lib/types（`dsh-plugin-desktop/host-locale` 与
   // `dsh-plugin-desktop/desktop-home` 两条 re-export 子路径）—— 它不在环上，
-  // 两条子路径都保留，故这条边继续登记。
-  { workspace: '@picoaide/dsh-cron', dir: 'packages/host/cron', deps: ['packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'] },
+  // 两条子路径都保留，故这条边继续登记。2026-09-23 起它还直接读叶子包的
+  // `./loopback` 子路径（`loopback.ts` 四份合一的落点），故加上 host-locale。
+  {
+    workspace: '@picoaide/dsh-cron',
+    dir: 'packages/host/cron',
+    deps: ['packages/host/host-locale', 'packages/host/desktop', 'packages/client/panel-surface', 'packages/client/foot-menu'],
+  },
 ]
 
 /** 执行一个 yarn 命令,失败即抛错。 */

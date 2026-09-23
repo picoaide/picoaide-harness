@@ -230,6 +230,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 路径形状与其余自有包一致（`main`/`exports["."]` 都指向 `lib/index.js`）——
   // 它们**不是** Cordis 插件，所以没有 `cordis.patch.yml` / `lib/invariant.js` 条目。
   'node_modules/@picoaide/dsh-host-locale/lib/index.js',
+  // 2026-09-23：`loopback.ts` 四份合一后，connectors / enterprise / browser / cron
+  // 的 lib 都**运行期** import 这个**子路径**（tsdown 把 `dependencies` 当 external，
+  // 所以各自的 `src/loopback.ts` re-export 不会被内联）。缺它就是**启动期**
+  // ERR_MODULE_NOT_FOUND —— 正是本清单存在的理由，故逐条登记。
+  'node_modules/@picoaide/dsh-host-locale/lib/loopback.js',
   'node_modules/@picoaide/dsh-host-locale/package.json',
   'node_modules/@picoaide/dsh-host-home/lib/index.js',
   'node_modules/@picoaide/dsh-host-home/package.json',

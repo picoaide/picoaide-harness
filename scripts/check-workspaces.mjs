@@ -109,13 +109,16 @@ const PACKAGES = [
   // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
   // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
   { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  // 2026-09-23：`loopback.ts` 四份合一（实现落在叶子包 `./loopback` 子路径）后，
+  // enterprise / cron 也**直接**读叶子包（不再是"经 desktop 的两条 re-export"）。
+  // 两条真实边写进表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
   // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
   { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
-  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
   { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
