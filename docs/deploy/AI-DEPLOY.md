@@ -234,6 +234,10 @@ unzip -p /tmp/pa.zip image.tar | docker load
 所以镜像 tar 里两个都带，`docker load` 后都能用 —— 2026-09-10 修：此前只带 v 形式，
 照本文档敲 `docker run ${IMAGE}:${VER}` 会去 docker.io 拉取而在隔离网/镜像代理下 403）。
 
+> **同一台机器上跑多个渠道栈时**：上面两个 tag 在**所有渠道的包**里都相同，后 `docker load`
+> 的会覆盖先前的。2026-09-23 起每个渠道的归档里还带一个渠道专属 tag
+> `picoaide-harness-server:<channel-id>-<VER>` —— 多栈宿主机必须按它隔离，步骤见 §6.5.1。
+
 > **下载慢（跨境）**：实测单流 75–260 KB/s（616MB ≈ 40–90 分钟），**8 路并行分块可到
 > ~2 MB/s（约 5 分钟）**，做法与坑（某些 Range 请求会被 CDN 忽略、返回整份）见
 > [`r2-update-server-runbook.md` §11](../planning/2026-09-10-r2-update-server-runbook.md)。
@@ -487,7 +491,8 @@ unzip -p /tmp/pa.zip image.tar | docker load
 ```bash
 cd /opt/picoaide
 # SERVER_IMAGE 用 latest.json 里的 server.image_tag(权威,形如 v2.7.0);
-# 镜像里 v2.7.0 与 2.7.0 两个 tag 都在,写哪个都能起来(§3.2)。
+# 镜像里 v2.7.0 与 2.7.0 两个 tag 都在,写哪个都能起来(§3.2);
+# **同一台机器上有第二个渠道栈时不要用这两个 tag** —— 它们在所有渠道包里都相同,见 §6.5.1。
 sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${VER}|" .env
 grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${VER}" >> .env
 docker compose up -d
@@ -501,6 +506,66 @@ docker compose up -d
 > **`.env`、`picoaide-data/`、`pg-data/`、`caddy-data/`、`certs/` 一律不动。**
 > **宿主机已有反代时**（附录 A）：只重建本产品容器 `docker compose up -d postgres server`，
 > 别把共享反代牵进来。
+
+#### 6.5.1 同一台宿主机跑多个渠道栈：必须用渠道专属 tag（**别跳过**）
+
+渠道差异在**镜像内容**（`/opt/picoaide/channel` 与烘焙进镜像的渠道标记），**不在 tag**
+—— 每个渠道的归档内部都带同一个 `picoaide-harness-server:v<VER>`。于是同一台机器上
+部署第二个渠道时，后 `docker load` 的那一份会**覆盖**先前那个 tag：
+
+- 此后任一栈执行 `docker compose up -d server` 都会用**另一个渠道**的镜像重建：门户与
+  客户端品牌、随包安装包、镜像内的渠道标记全变成隔壁栈的，而该栈 `.env` 里的
+  `SERVER_IMAGE` 看起来完全正确（最坏的一类静默故障）；
+- 服务端启动时会校验「镜像内渠道 vs 进程渠道」，**不一致会拒绝启动**；但若两栈的渠道
+  覆盖都没写，就可能"起得来、内容却是错的"。
+
+CI（2026-09-23 起）为每个渠道**额外**打一个渠道专属 tag
+`picoaide-harness-server:<channel-id>-<VER>` 并一并 `docker save`（official / beta /
+各定制渠道都有）。导入本渠道的包之后：
+
+```bash
+VER=<本次版本,不带 v>
+IMAGE=picoaide-harness-server
+STACK=/opt/picoaide            # ← 本栈部署目录
+CT=picoaide-server             # ← 本栈 server 容器名
+
+# 1) 导入本渠道的包（两栈各 load 自己渠道的包）
+unzip -p /tmp/pa.zip image.tar | docker load
+
+# 2) 按**本栈正在运行的容器**取 image id，重打成渠道专属 tag。
+#    「正在运行的容器」是权威判据：它拿到的就是这一栈此刻真正在用的那份镜像。
+#    ⚠️ 变量名不要用 GID / UID —— 远端 shell 是 zsh 时它们是只读特殊变量，
+#    赋值会报 "bad math expression"。
+IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+
+# 3) 把本栈 .env 指向**渠道 tag**（不要留裸 `v<VER>`：同机两栈时它随时可能指向隔壁）
+cd "$STACK"
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+docker compose up -d server
+
+# 4) 核对"这一栈跑的确实是本渠道"（三项一致才算过）
+docker exec "$CT" cat /opt/picoaide/CHANNEL          # 镜像内置的渠道标记
+docker exec "$CT" /app/picoaide-server --version     # 运行版本 == 目标版本
+curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 应与上面一致
+```
+
+**首次部署（还没有运行中的容器）**：`docker load` 之后**立刻**按刚导入的 tag 取 id 再重打，
+不要等另一栈先动手：
+
+```bash
+docker load -i image.tar                        # 或 unzip -p /tmp/pa.zip image.tar | docker load
+IMG_ID="$(docker inspect --format '{{.Id}}' ${IMAGE}:${VER})"
+docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+# 然后 .env 写 ${IMAGE}:<channel-id>-${VER}
+```
+
+**回滚同理**：回滚锚点要留**渠道 tag**（`<channel-id>-<旧版本>`），回滚 = 改 `.env` +
+`docker compose up -d server`。若曾经按裸 `v<旧版本>` 留过锚点，同机多栈时它可能已经
+指向另一个渠道的镜像 —— 回滚前先 `docker image inspect` 核对，必要时从更新服务器重新
+`docker load` 该渠道包再重打渠道 tag。
+
 
 ### 6.6 升级后验证（三项全过才算成功）
 
@@ -611,7 +676,7 @@ echo "$OLD" > VERSION
 | `docker compose up` 报端口占用 | 改 `.env` 的 `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT`，并同步改 Caddyfile |
 | 报网段冲突 | 改 `.env` 的 `NETWORK_SUBNET` 与三个固定 IP |
 | postgres 启动即退出且日志提 `OLD_DATABASES`/`unused mount` | PG16→18 旧布局问题，见 §6.2，需 dump/restore 迁移 |
-| 忘记超管密码 | 用另一个 super_admin 在 webadmin 重置；或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| 忘记超管**密码** | 有**其他超管**时让其在 webadmin「用户管理 → 重置密码」重置（重置即吊销该账号全部会话，并置 `password_must_change=1`：下次登录强制改密）。⚠️ `--reset-mfa <user>` **不重置密码** —— 它只清 MFA 并吊销会话，适用「密码记得、验证器丢了」；**唯一超管且密码也丢了**时它救不了（目标未配 MFA 时只打印 `nothing to reset` 就退出；`--bootstrap-admin` 在已有超管时也直接跳过、不会新建或重置）。此时只能在库上改写该账号的 `users.password_hash`（Argon2id 编码串，格式见 `server/internal/util/password.go`）并把 `password_must_change` 置 1，改完立即登录改密；动手前先按 §6.3 做备份 |
 | 应用（WASM）打不开或提示不可用 | 应用只在桌面客户端内打开，且**要求服务端与客户端同版本**（2026-09-19 起浏览器链路已删除）：把员工客户端升级到与服务端配套的版本（§5），旧客户端无法打开应用 |
 | webadmin「发现新版本」不出现 | 先看启动日志的 `channel resolved: … (update endpoint …)`：端点为空说明更新检查被关（显式设了 `off`）；端点正常则再看 `manifest channel … != …`。**服务端有 6 小时缓存**，刚发版时等待属正常延迟 |
 

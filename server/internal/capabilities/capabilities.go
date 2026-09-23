@@ -64,6 +64,13 @@ type CapabilityItem struct {
 	// 客户端上传前据此预检:同名且非本人 → 提前提示「名称已被占用」,
 	// 不必等一次网络往返(服务端 409 NAME_TAKEN 兜底,语义一致)。
 	IsOwner bool `json:"is_owner"`
+	// Delisted 下架标记(第五轮审计 R5-B-1,2026-09-23):该 App 已下架
+	// (apps.enabled=0)。下架 = **不可分发**,但归属人自己的「我的」分区仍
+	// 返回该行并带 delisted=true —— 作者需要看到「已下架」这个状态,否则管控
+	// 动作在作者面没有任何反馈(旧实现是连作者都查不到,作者只会反复重传)。
+	// 分发面(市场/组织分区)列出的行恒为 false(下架行不列)。
+	// 语义权威:serverstore/distribution.go。
+	Delisted bool `json:"delisted"`
 	// Versions 是该名全部 approved 版本(升序,数值感知)。归并后当前
 	// Version = 最高 approved 版本;versions[last] 恒等于 Version。
 	Versions []string `json:"versions"`
@@ -140,9 +147,35 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 	}
 }
 
+// marketOwnedBy 回答"这个调用者是否拥有该 kind 的**任意**一个应用行"（任意渠道）。
+//
+// 它的唯一用途是给「我的」分区的**市场渠道**取数做前置闸门（2026-09-23 R6-D P2-2）：
+// 市场清单（`ListSkills(enabledOnly=false)` / `ListApps(kind, market)`）是 O(市场应用数)
+// 次查询，而绝大多数调用者一个应用都不拥有 —— 那种请求不该为一条空结果付这份代价。
+// 判据用 distribution 的具名方法（`OwnedBy`），不在这里判 `Owner == username`：
+// 归属语义的唯一实现是 serverstore/distribution.go 的 AppOwnedByOwner
+// （空 owner 不属于任何人）。
+//
+// 它**不是**第二个可见性判据：真正的行级过滤仍逐行用 `dist.OwnedBy` —— 这个函数只
+// 决定"要不要去查"，查错了（比如渠道判错）也只会让结果为空，不会漏掉或放大任何一行。
+func marketOwnedBy(dists serverstore.DistributionMap, viewer string) bool {
+	if viewer == "" {
+		return false
+	}
+	for _, d := range dists {
+		if d.OwnedBy(viewer) {
+			return true
+		}
+	}
+	return false
+}
+
 // appendSkill merges one marketplace skill into the catalog (authorized/enabled only).
 // isOwner 由调用方按 apps.owner 计算(市场适配层 Skill.Author == apps.owner)。
-func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool, official bool) {
+//
+// delisted（2026-09-23 R6-D P2-2）：同 appendMarketAgent —— 只有「我的」分区（作者面）
+// 可能为 true；分发面列出的行恒 false（下架行不列，语义权威见 serverstore/distribution.go）。
+func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool, official bool, delisted bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	// 展示名(0051):优先包内 title 写入的 display_name,为空回退 name
 	// ——此前这里硬编码 s.Name,是「市场卡片显示目录名」的直接原因。
@@ -163,12 +196,18 @@ func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string
 		Downloads:   s.Downloads,
 		Calls:       s.Calls,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	})
 }
 
 // appendMarketAgent merges one marketplace agent into the catalog
 // (enabled+authorized only; G4 2026-09-04 市场智能体)。
-func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[string][]string, releases map[string]serverstore.Release, isOwner bool) {
+//
+// delisted（2026-09-23 R6-D P2-2）：下架标记，只在**归属人的「我的」分区**为 true
+// —— 分发面列出的行已按 Delivered() 过滤，故恒 false。市场渠道此前**没有作者面**
+// （「我的」只取 `ListOwnedAgentPresets` = org 渠道），于是下架的市场智能体在归属人
+// 那一侧完全不可表达；现在两条渠道同构（见 listCapabilities 的 3b 分支注释）。
+func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[string][]string, releases map[string]serverstore.Release, isOwner bool, delisted bool) {
 	r, ok := releases[a.AppID]
 	if !ok {
 		return
@@ -191,12 +230,27 @@ func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[st
 		Downloads:   r.Downloads,
 		Calls:       r.Calls,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	})
 }
 
 // appendSharedSkill merges one shared-skill row (already visibility-filtered
 // by the caller) with its quality tag and status.
-func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool, official bool) {
+//
+// 投影字段必须与孪生函数 appendSharedAgent **逐字段对齐**(审计 2026-09-23
+// G-P2-5):此前本函数漏了 Official 与 Downloads/Calls —— 于是组织渠道的官方
+// 技能在员工端**永远不显示蓝标**(客户端按 item.official === true 渲染,缺省
+// 为 false)、评分恒 0(calls*3+downloads)因而在合并后的目录里恒垫底;而
+// 「官方」机制(0059)的可见性承诺、以及管理端审批队列(对同一批行正确下发这
+// 两个字段)都说明数据源本来就有值 —— 是投影遗漏而不是设计。
+//
+// `TestAppendSharedPathsProjectTheSameFields` 用反射钉住"组织渠道两个 append
+// 函数实际非零投影的字段集相等",避免再漏字段。
+//
+// delisted（第五轮审计 R5-B-1）:下架标记，只在「我的」分区（作者面）可能为
+// true —— 分发面列出的行都已按 Delivered() 过滤，故恒 false。作者必须能看到
+// 「已下架」这个状态，否则管控动作在作者面没有任何反馈闭环。
+func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, versions map[string][]string, isOwner bool, official bool, delisted bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	item := CapabilityItem{
 		Kind:        KindSkill,
@@ -209,13 +263,17 @@ func appendSharedSkill(out *[]CapabilityItem, s serverstore.SharedSkill, version
 		Status:      string(s.Status),
 		Reason:      s.Reason,
 		Quality:     s.Quality,
+		Official:    official,
+		Downloads:   s.Downloads,
+		Calls:       s.Calls,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	}
 	*out = append(*out, item)
 }
 
 // appendSharedAgent merges one shared-agent row (visibility-filtered).
-func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string, isOwner bool, official bool) {
+func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, versions map[string][]string, isOwner bool, official bool, delisted bool) {
 	versions[p.Name] = append(versions[p.Name], p.Version)
 	*out = append(*out, CapabilityItem{
 		Kind:        KindAgent,
@@ -231,6 +289,7 @@ func appendSharedAgent(out *[]CapabilityItem, p serverstore.AgentPreset, version
 		Official:    official,
 		Downloads:   p.Downloads,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	})
 }
 
@@ -346,9 +405,23 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 		ft := parseTypeFilter(c)
 		items := []CapabilityItem{}
 		versions := map[string][]string{}
-		// 归属映射(2026-09-02):一个 App 的 owner 恒定,一次查询覆盖全部行。
-		skillOwners := appOwnerMap(db, serverstore.AppKindSkill, serverstore.AppChannelOrg)
-		agentOwners := appOwnerMap(db, serverstore.AppKindAgent, serverstore.AppChannelOrg)
+		// 分发状态与归属(App 级,2026-09-15 / 2026-09-23):**一次查询**同时给出
+		// owner 与 enabled —— 判据唯一实现在 serverstore/distribution.go 的语义
+		// 权威(下架只挡分发面;归属人自己的行仍可见;发布权与「我的」同源)。
+		// 此前这里是两份各自查询的 map(appOwnerMap + EnabledAppIDs),而且
+		// appOwnerMap 会**吞掉查询错误**返回空 map —— 空 map 会让「我的」分区
+		// 恒空、is_owner 恒 false(与事实相反的员工可见视图)。这里与官方属性
+		// 同款:查询失败必须 500。
+		skillDists, err := serverstore.DistributionStates(db, serverstore.AppKindSkill)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		agentDists, err := serverstore.DistributionStates(db, serverstore.AppKindAgent)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		// 官方属性(0059, App 级,与来源无关:market/org 行取同一 App)。
 		// 查询失败必须 500（与 listApprovals 两处同款）：吞掉后 map 为 nil，
 		// 整个能力中心会把所有官方内容标成非官方 —— 与事实相反的员工可见视图。
@@ -358,21 +431,6 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			return
 		}
 		agentOfficials, err := serverstore.AppOfficialMap(db, serverstore.AppKindAgent)
-		if err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		// 上下架(App 级,2026-09-15):客户端面下架与不存在同语义 —— 客户端安装
-		// 通路的归档端点恒以 admin=false 构造(与调用者是否管理员无关),管理员
-		// 看到的下架行点一次必 404(审计 2026-09-15 S11-2,对齐 agentshare
-		// listVisible 的 `&& enabled[...]`)。组织分区两个 kind 都要过滤;员工
-		// 分支走 ListVisible* 已在 DAO 层过滤。管理面清单仍全量(见 listApprovals)。
-		skillEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
-		if err != nil {
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-			return
-		}
-		agentEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindAgent)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
@@ -387,8 +445,14 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			for _, s := range skillList {
-				// 市场适配层 Skill.Author == apps.owner(2026-09-02 归属权)。
-				appendSkill(&items, s, versions, s.Author == u.Username, skillOfficials[s.Name])
+				// 归属判据与「我的」/发布权/下载豁免**同源**（2026-09-23 复审 B-N3）：
+				// 读 skillDists（apps 行）的具名判据 OwnedBy，不在这里写第二个表达式
+				// `s.Author == u.Username` —— 后者经 appToSkill 的 `Author = a.Owner`
+				// 映射当前恰好等价，但它是同类漂移的下一个落点（那段映射一变，
+				// 归属语义就静默跟着变，而这里看不出来）。判据唯一实现见
+				// serverstore/distribution.go 的 AppOwnedByOwner；等价性用例见
+				// bn3_market_owner_source_test.go。
+				appendSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name], false)
 			}
 		}
 
@@ -423,11 +487,16 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					continue
 				}
 				releases[a.AppID] = *r
-				appendMarketAgent(&items, a, versions, releases, a.Owner == u.Username)
+				// 与技能侧同源（B-N3）：具名判据读 apps 行的 owner，
+				// 不就地写 `a.Owner == u.Username` 这第二个表达式。
+				appendMarketAgent(&items, a, versions, releases, agentDists.Of(a.AppID).OwnedBy(u.Username), false)
 			}
 		}
 
-		// 2) 组织·共享技能(审核+授权)。
+		// 2) 组织·共享技能(审核+授权)。本分支是**分发面**:下架(App 级,
+		// 2026-09-15)与不存在同语义 —— 客户端安装通路的归档端点恒以
+		// admin=false 构造(与调用者是否管理员无关),管理员看到的下架行点一次
+		// 必 404(审计 2026-09-15 S11-2)。管理面清单仍全量(见 listApprovals)。
 		if includeOrg && ft.skills {
 			if u.IsAdmin {
 				all, err := serverstore.ListSharedSkills(db, "")
@@ -436,8 +505,8 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					return
 				}
 				for _, s := range all {
-					if s.Status == serverstore.SharedSkillApproved && skillEnabled[s.Name] {
-						appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username, skillOfficials[s.Name])
+					if s.Status == serverstore.SharedSkillApproved && skillDists.Of(s.Name).Delivered() {
+						appendSharedSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name], false)
 					}
 				}
 			} else {
@@ -454,34 +523,73 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				for _, s := range visible {
 					// 组织分区只展示 approved(决策 2026-08-25):作者 own 的
 					// pending/rejected 状态由「我的」分区展示,不在来源分区
-					// 重复/混入。
-					if s.Status != serverstore.SharedSkillApproved {
+					// 重复/混入。下架行(含作者自己的)同样不进分发面。
+					if s.Status != serverstore.SharedSkillApproved || !skillDists.Of(s.Name).Delivered() {
 						continue
 					}
-					appendSharedSkill(&items, s, versions, skillOwners[s.Name] == u.Username, skillOfficials[s.Name])
+					appendSharedSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name], false)
 				}
 			}
 		}
 
-		// 2b) 「我的」分区:作者 own 的任意状态(含 pending/rejected + 拒因)。
-		// 只取 own 行,不混入他人已授权的 approved 行。管理员 own 恒空
-		// (管理员不通过共享库上传),仍走同一查询语义保持简单。
-		if includeOwn && ft.skills && !u.IsAdmin {
-			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
+		// 2b) 「我的」分区:归属人自己的行(任意状态 + 拒因 + 下架标记)。
+		// 判据是 **apps.owner**(与发布权同源,第五轮审计 R5-B-2):归属转移后
+		// 旧上传者立刻不再出现在这里(他也已经不能续传),新归属人立刻出现。
+		// 只取 own 行,不混入他人已授权的 approved 行。
+		//
+		// 管理员不特殊(第五轮审计 R5-B-5):此前 `!u.IsAdmin` 让管理员自传的
+		// 共享技能在上传成功(201)后**任何员工面都看不到**,而客户端路由并不
+		// 禁止管理员上传 —— 同一件事的两面必须一致(201 ⇒ 我的里能看到),
+		// 且「一条归属规则对所有人成立」比一条角色例外更容易守。
+		if includeOwn && ft.skills {
+			owned, err := serverstore.ListOwnedSharedSkills(db, u.Username)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
-			visible, err := serverstore.ListVisibleSharedSkills(db, u.Username, granted)
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			for _, s := range visible {
-				if s.Author != u.Username {
+			for _, s := range owned {
+				dist := skillDists.Of(s.Name)
+				// AuthorVisible() 恒真 —— 下架只挡分发面,不挡作者自查(R5-B-1)。
+				if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
 					continue
 				}
-				appendSharedSkill(&items, s, versions, true, skillOfficials[s.Name])
+				appendSharedSkill(&items, s, versions, true, skillOfficials[s.Name], dist.Delisted())
+			}
+			// 市场渠道的归属行（2026-09-23 R6-D P2-2）：R5-B-1 的「下架 = 作者面仍
+			// 可见（带 delisted=true）」此前**只覆盖 org 渠道** —— 上面的
+			// ListOwnedSharedSkills 的 SQL 只认 channel='org'，而市场行在分发面
+			// 走 enabledOnly 过滤（read 侧 ListSkills(true)），下架后归属人的员工面
+			// market/org/own 三个视图同时为空：管控动作在作者面**没有任何反馈**，
+			// 而归属转移端点（PUT /apps/:kind/:app_id/owner）不限渠道、可把市场行
+			// 转给普通员工 ⇒ 归属人对市场行没有任何作者面。
+			//
+			// 判据与 org 分支**同构**：归属=apps.owner 的具名判据 OwnedBy（不在这里
+			// 写第二份表达式），作者面不看 Delivered()（下架只挡分发面），行里带
+			// delisted 标记。可见面不扩大：只有归属人自己的名字会进来，其他人的行
+			// 一行都不多（非归属人的分发面口径完全不变 —— 市场分支仍按 Delivered()）。
+			//
+			// 为什么用 ListSkills(enabledOnly=false)：它是市场技能的**唯一**清单入口
+			// （与分发面同一个 DAO/同一个投影，不在这里另写一份 appToSkill），
+			// enabledOnly=false 才拿得到下架行。代价是 O(市场应用数) 次查询，所以只在
+			// "调用者确实拥有该 kind 的某个应用行"时才跑（绝大多数请求因此零成本）。
+			if marketOwnedBy(skillDists, u.Username) {
+				marketSkills, merr := serverstore.ListSkills(db, false)
+				if merr != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				for _, s := range marketSkills {
+					dist := skillDists.Of(s.Name)
+					if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
+						continue
+					}
+					// 没有生效版本的行（占名但从未发布成功）不进目录 —— 与分发面
+					// 的"有生效版本"条件同口径（s.Version 由展示版本填，空 = 无）。
+					if s.Version == "" {
+						continue
+					}
+					appendSkill(&items, s, versions, true, skillOfficials[s.Name], dist.Delisted())
+				}
 			}
 		}
 
@@ -496,8 +604,8 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				for _, p := range all {
 					// 与技能面同口径(审计 2026-09-15 S11-2):下架行管理员在客户端
 					// 面也不该看到 —— 归档端点 admin=false,点了必 404。
-					if p.Status == serverstore.AgentPresetApproved && agentEnabled[p.Name] {
-						appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username, agentOfficials[p.Name])
+					if p.Status == serverstore.AgentPresetApproved && agentDists.Of(p.Name).Delivered() {
+						appendSharedAgent(&items, p, versions, agentDists.Of(p.Name).OwnedBy(u.Username), agentOfficials[p.Name], false)
 					}
 				}
 			} else {
@@ -513,32 +621,56 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				for _, p := range visible {
 					// 组织分区只展示 approved(决策 2026-08-25),作者 own 状态
-					// 由「我的」分区展示。
-					if p.Status != serverstore.AgentPresetApproved {
+					// 由「我的」分区展示;下架行不进分发面。
+					if p.Status != serverstore.AgentPresetApproved || !agentDists.Of(p.Name).Delivered() {
 						continue
 					}
-					appendSharedAgent(&items, p, versions, agentOwners[p.Name] == u.Username, agentOfficials[p.Name])
+					appendSharedAgent(&items, p, versions, agentDists.Of(p.Name).OwnedBy(u.Username), agentOfficials[p.Name], false)
 				}
 			}
 		}
 
-		// 3b) 「我的」分区:作者 own 的智能体预设(任意状态)。
-		if includeOwn && ft.agents && !u.IsAdmin {
-			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedPresetGrantTable, u.Username, groups)
+		// 3b) 「我的」分区:归属人自己的智能体预设(任意状态;与 2b 同判据 ——
+		// 含市场渠道的归属行,理由与技能侧逐条同源,见 2b 分支的长注释)。
+		if includeOwn && ft.agents {
+			owned, err := serverstore.ListOwnedAgentPresets(db, u.Username)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
 			}
-			visible, err := serverstore.ListVisibleAgentPresets(db, u.Username, granted)
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			for _, p := range visible {
-				if p.Author != u.Username {
+			for _, p := range owned {
+				dist := agentDists.Of(p.Name)
+				if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
 					continue
 				}
-				appendSharedAgent(&items, p, versions, true, agentOfficials[p.Name])
+				appendSharedAgent(&items, p, versions, true, agentOfficials[p.Name], dist.Delisted())
+			}
+			if marketOwnedBy(agentDists, u.Username) {
+				marketAgents, merr := serverstore.ListApps(db, serverstore.AppKindAgent, serverstore.AppChannelMarket)
+				if merr != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				releases := map[string]serverstore.Release{}
+				for _, a := range marketAgents {
+					dist := agentDists.Of(a.AppID)
+					if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
+						continue
+					}
+					// 与市场分发分支**同一处**取数（CurrentMarketReleaseFor 只认
+					// approved 且未软删的最高版本），只是这里的闸门是归属而不是
+					// Delivered —— 下架行正是要靠这一步才捞得回来。
+					r, rerr := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, a.AppID, false)
+					if rerr != nil {
+						serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+						return
+					}
+					if r == nil {
+						continue
+					}
+					releases[a.AppID] = *r
+					appendMarketAgent(&items, a, versions, releases, true, dist.Delisted())
+				}
 			}
 		}
 
@@ -698,7 +830,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			// 上下架状态 / 官方属性(App 级,2026-09-15):一次批量取;查询失败必须
 			// 返回 500 —— 吞掉后 map 为 nil,每条技能都会被标成 enabled=false,
 			// 运营看到与事实相反的「已下架」徽标。
-			skillEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindSkill)
+			skillDists, err := serverstore.DistributionStates(db, serverstore.AppKindSkill)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
@@ -728,7 +860,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					Downloads:   s.Downloads,
 					Calls:       s.Calls,
 					Official:    skillOfficials[s.Name],
-					Enabled:     skillEnabled[s.Name],
+					Enabled:     skillDists.Of(s.Name).Enabled,
 					BasePath:    "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version),
 					GrantsBase:  "/api/server/admin/shared-skills/" + pathEscape(s.Name),
 					PreviewPath: "/api/server/admin/shared-skills/" + pathEscape(s.Name) + "/" + pathEscape(s.Version) + "/preview",
@@ -754,7 +886,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			// 与技能分支同理,查询失败必须 500 —— 吞掉后 map 为 nil,每条智能体
 			// 都会被标成 enabled=false,审批页显示与事实相反的「已下架」+「上架」
 			// 按钮(管理员一点就把在架内容真下架)。
-			agentEnabled, err := serverstore.EnabledAppIDs(db, serverstore.AppKindAgent)
+			agentDists, err := serverstore.DistributionStates(db, serverstore.AppKindAgent)
 			if err != nil {
 				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 				return
@@ -774,7 +906,7 @@ func listApprovals(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					CreatedAt:   p.CreatedAt.Format("2006-01-02 15:04:05"),
 					Downloads:   p.Downloads,
 					Official:    agentOfficials[p.Name],
-					Enabled:     agentEnabled[p.Name],
+					Enabled:     agentDists.Of(p.Name).Enabled,
 					BasePath:    "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version),
 					GrantsBase:  "/api/server/admin/agent-presets/" + pathEscape(p.Name),
 					PreviewPath: "/api/server/admin/agent-presets/" + pathEscape(p.Name) + "/" + pathEscape(p.Version) + "/preview",

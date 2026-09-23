@@ -14,6 +14,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  APP_REQUEST_BODY_MAX_BYTES,
+  APP_RESPONSE_BODY_GUARANTEED_BYTES,
   FORWARDED_REQUEST_HEADERS,
   REQUEST_HEADER_COUNT_MAX,
   REQUEST_HEADER_VALUE_MAX_BYTES,
@@ -46,6 +48,15 @@ describe('请求头白名单：与服务端生成物逐字对拍（CLI-5 / J5）
     const limits = headerSpec().limits
     expect(REQUEST_HEADER_COUNT_MAX).toBe(limits.header_count_max)
     expect(REQUEST_HEADER_VALUE_MAX_BYTES).toBe(limits.header_value_bytes_max)
+  })
+
+  // A-7（2026-09-23 R3-A 审计，P2）：**体积两个数此前从不跨端对拍** —— 服务端
+  // `response_body_bytes_max` 已经改成"保证可交付"的 168 KiB，而客户端仍写着 8 MiB，
+  // 两端永远不会因为漂移变红。这条把两个方向都钉住（请求体 + 响应体）。
+  it('体积闸门（请求体 / 保证可交付响应体）与服务端生成物逐字一致', () => {
+    const limits = headerSpec().limits
+    expect(APP_REQUEST_BODY_MAX_BYTES).toBe(limits.request_body_bytes_max)
+    expect(APP_RESPONSE_BODY_GUARANTEED_BYTES).toBe(limits.response_body_bytes_max)
   })
 
   it('身份/凭据/浏览器内部头永远不进信封（正负对照）', () => {

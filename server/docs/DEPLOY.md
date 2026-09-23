@@ -140,5 +140,5 @@ compose 按 `./Caddyfile.${TLS_MODE:-manual}` 挂载模板，三种模式命名�
 | postgres 启动即退出，日志提 `OLD_DATABASES` / `unused mount` | PG16→18 旧数据布局；需 dump/restore 迁移，见 AI-DEPLOY §6.2 |
 | healthz 一直非 200 | 首次启动要跑 60+ 条迁移并建用量分区，等 1–2 分钟；仍失败看 `docker compose logs server` |
 | 镜像拉取失败 | GHCR 不可达时从更新服务器下载镜像包后 `docker load`（AI-DEPLOY §6.4） |
-| 忘了超管密码 | 另一个 super_admin 在 webadmin 重置，或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| 忘了超管**密码** | 有**其他超管**时让其在 webadmin「用户管理 → 重置密码」重置（重置即吊销该账号全部会话，下次登录强制改密）。⚠️ `--reset-mfa <user>` **不重置密码** —— 它只清 MFA 并吊销会话，适用「密码记得、验证器丢了」；唯一超管且密码也丢了时它救不了（未配 MFA 时只打印 `nothing to reset` 就退出，`--bootstrap-admin` 在已有超管时也直接跳过）。此时只能在库上改写该账号的 `users.password_hash`（Argon2id 编码串，格式见 `internal/util/password.go`）并把 `password_must_change` 置 1，改完立即登录改密；动手前先按 AI-DEPLOY §6.3 备份 |
 | 客户端里应用(WASM)打不开 | 应用只在桌面客户端内打开，且**要求服务端与客户端同版本**（2026-09-19 起浏览器访问链路已删除，见 §0.2）；把员工客户端升级到配套版本 |

@@ -11,6 +11,10 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./loopback": {
+      "types": "./lib/types/loopback.d.ts",
+      "default": "./lib/loopback.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

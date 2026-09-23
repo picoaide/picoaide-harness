@@ -1640,9 +1640,8 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
  * | POST | `/validate` | 预检代理（AI/UI 用来"不占版本号地试一发"） |
  * | POST | `/publish` | **发布编排**：`wasm_base64`/`wasm_path` → 直传或分片续传 |
  * | POST | `/:app_id/publish\|unpublish\|freeze` | 生命周期代理（原样转发 body） |
- * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|rows` | 只读代理（`rows` 额外要持有性证明） |
+ * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|rows\|availability` | 只读代理（`rows` 额外要持有性证明） |
  * | GET/POST | `/:app_id/ai-rows-consent` | 「允许 AI 读取此应用的数据」授权状态（本机文件；默认关） |
- * | GET | `/:app_id/diagnostics\|schema\|export\|releases\|availability` | 只读代理 |
  * | DELETE | `/:app_id` | 删除代理（R37 冻结→导出→真删） |
  *
  * 这个函数只做**四件 HTTP 层的事**：围栏（guard/持有性证明/auditor）、路径分发、

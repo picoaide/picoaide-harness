@@ -31,33 +31,30 @@ PicoAide Harness 是一个「桌面客户端 + 企业服务端」的一体化平
 ## 数据流
 
 1. **登录**：`POST /api/client/v2/auth/login` → Bearer token（90 天）；`GET /api/client/v2/config/bootstrap` 拉默认模型、建议清单与连接器目录。
-2. **LLM 调用**：`POST /v1/chat/completions`（stream 可选）→ 服务端限流 → 配额检查（token / 金额 / 部门预算，任一超限 429 `QUOTA_EXCEEDED`）→ 按模型匹配上游 provider 代理 → 计量写入 usage（含费用，记录时按定价 × 峰谷折算）。
-3. **管理配置**：管理员登录 `/admin/` → 用户/部门/网关/模型价格/峰谷窗口/配额/预算/商城/共享审批（全部经 `/api/server/admin/*`，session + CSRF + RBAC，审计落 audit_logs）。
+2. **LLM 调用**：`POST /v1/chat/completions`（stream 可选）→ 服务端限流 → **余额闸门**（开启且账户余额 ≤ 0 → 429 `BALANCE_EXHAUSTED`；2026-09-11 起 token 配额 / 金额配额 / 部门预算已下线）→ 按模型匹配上游 provider 代理 → 计量写入 usage（含费用，记录时按定价 × 峰谷折算），并与余额扣减**同事务**。
+3. **管理配置**：管理员登录 `/admin/` → 用户/部门/网关/模型价格/峰谷窗口/余额与按月发放/商城/共享审批（全部经 `/api/server/admin/*`，session + CSRF + RBAC，审计落 audit_logs）。
 
 ## 计量计费与配额
 
 - **费用**：`usage.cost` = 输入 × input_price/1e6 + 输出 × output_price/1e6（缓存命中另按 `cache_input_price_per_1m`）；高峰窗口（北京时间，可配）外 × 模型 `offpeak_discount`。改价/改窗口只影响之后产生的费用（记录时定价）。
-- **配额链**（任一超限即 429，admin 豁免）：
-  1. 员工 token 配额（`quota_tokens`：NULL = 跟随全局默认，0 = 不限）；
-  2. 员工金额配额（`quota_money`）；
-  3. 部门预算（`budget_money`，归属部门 + 祖先链全部生效，树内 SUM(cost)）。
-- **员工自查询**：`GET /api/client/v2/auth/usage` 返回余额（配额 − 本月已用，不限 = null）与今日/昨日/本月/累计 tokens + 费用、部门预算链。
-- **存量余额（可选闸门）**：`users.balance_money` 是与月度配额正交的存量金额（元）；开启闸门后余额 ≤ 0 的调用在网关 429，
-  消费与 usage 写入**同事务**按微元精度扣减；管理员可手动调整，也可按北京月自动发放（跨实例/重启幂等）。
+- **额度闸门（唯一一条，2026-09-11 收敛）**：`settings balance.enabled = true` 且该员工**已开通余额账户**且分位口径余额 ≤ 0 ⇒ 网关 429 `BALANCE_EXHAUSTED`（admin 豁免；余额查询失败 fail-closed）。未开通（从未入账）的账号既不扣余额也不被闸门拦。
+  同时**下线**了员工 token 配额（`quota_tokens`）、员工金额配额（`quota_money`）与部门预算（`budget_money`）：列与 settings 键保留在库中但不再读写，管理端不再下发与展示。
+- **员工自查询**：`GET /api/client/v2/auth/usage` 返回**账户余额**（`balance_money` / `balance_activated` / `balance_enabled` / `balance_monthly` / `balance_mode`）与今日/昨日/本月/累计 tokens + 费用；配额与剩余额度字段已下线。
+- **存量余额**：`users.balance_money` 是员工唯一可花的钱（元，存量）；消费与 usage 写入**同事务**按微元精度扣减，账本 `balance_ledger` 可逐笔对账；管理员可手动调整，也可按北京月自动发放（跨实例/重启幂等）。
 
 ## 安全设计
 
 - 上游密钥 AES-GCM（`enc:v1:`，master key 文件），永不落明文；API token 只存哈希；
 - **严格默认拒绝**：市场与共享内容未授权一律 404（不泄露存在性）；授权对象 = 用户或部门组（大小写不敏感），admin 恒全量不落表；授权变更审计；
 - 改密 / 降权 / 禁用自动吊销全部 API token（与用户更新同事务）；
-- 管理端 session 12h（硬上限 + 60min 空闲滑动过期）+ CSRF；登录限流（双桶：IP 与账号，10 次/5 分钟）；
+- 管理端 session 12h（硬上限 + 60min 空闲滑动过期）+ CSRF；登录限流只对**失败**计数（5 分钟滑动窗口，成功即清空该键）：账号维度 10 次/键（`u:<用户名>` 与 `ip|用户名` 共用同一份预算，客户端面与管理面共享），来源 IP 维度 60 次（按信任边界解析出的真实客户端 IP，反代下不会坍缩成一个代理 IP）；
 - 错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`；健康探针 `/healthz`；
 - 接入方 TLS：登录页/客户端拒绝非 HTTPS 远程地址（TOFU 由接入方实现）。
 
 ## 数据库
 
 - PostgreSQL（PG-only；部署形态为 compose 内置容器，二进制也接受外部实例的 `-pg-dsn`），
-  迁移位于 `migrations-pg/`（编号 0001–0061，历史上删减过部分编号，故有连续空档）；
+  迁移位于 `migrations-pg/`（编号 0001–0081，历史上删减过部分编号，故有连续空档）；
 - usage 明细按月原生分区（保留 N 月可配，默认 6），日/月账本永久保留（历史统计 10 年不丢）；
 - 共享技能 / Agent 归档直存 DB；审计哈希链（防篡改）、RBAC 角色、余额发放幂等锚。
 

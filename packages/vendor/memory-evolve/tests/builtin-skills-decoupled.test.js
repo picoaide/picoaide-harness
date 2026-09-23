@@ -120,9 +120,20 @@ test('本插件的技能在 coiEnabled 缺省(false) 时仍然同步，且落点
     assert.equal(existsSync(legacy), false, `不得再落到旧根 ${legacy}`)
 
     // 整目录逐字节一致（正文 + 辅助文件一起走）。
+    //
+    // A9（2026-09-23 独立审计）：落盘目录里现在**多出安装器标记**
+    // （`.picoaide/release.json` = 本插件来源的 provenance，channel: 'plugin'；
+    // `.install-version` = 版本），它们是同步补写的"非技能内容"，不属于被同步的
+    // 技能树。所以判据是「技能文件集合一致 + 逐个字节一致 + 多出来的只能是这两个
+    // 安装器标记」，而不是"目录里一个文件都不能多"。
+    const INSTALLER_MARKERS = ['.picoaide/release.json', '.install-version']
     const sourceFiles = listFiles(join(PACKAGE_ROOT, 'skills', 'memory-consolidate'))
     const landedFiles = listFiles(join(home, 'skills', 'memory-consolidate'))
-    assert.deepEqual(landedFiles, sourceFiles, '同步的必须是整目录，且文件名集合一致')
+    assert.deepEqual(
+      landedFiles.filter((rel) => !INSTALLER_MARKERS.includes(rel)),
+      sourceFiles,
+      '同步的必须是整目录，且技能文件集合一致（多出来的只能是安装器标记）',
+    )
     for (const rel of sourceFiles) {
       assert.deepEqual(
         readFileSync(join(home, 'skills', 'memory-consolidate', rel)),
@@ -130,6 +141,20 @@ test('本插件的技能在 coiEnabled 缺省(false) 时仍然同步，且落点
         `${rel} 必须逐字节一致`,
       )
     }
+    // 多出来的两个标记必须是我们自己的来源（否则能力中心会把随包技能当"用户自制"）。
+    const provenance = JSON.parse(readFileSync(join(home, 'skills', 'memory-consolidate', '.picoaide', 'release.json'), 'utf8'))
+    assert.equal(provenance.channel, 'plugin')
+    assert.equal(provenance.appId, 'memory-consolidate')
+    // 版本口径 = SKILL.md 的 `x-version`（随包技能声明了它；没声明时写空串）。
+    const sourceText = readFileSync(join(PACKAGE_ROOT, 'skills', 'memory-consolidate', 'SKILL.md'), 'utf8')
+    const xVersion = /^x-version:\s*(\d+)\s*$/mu.exec(sourceText)?.[1] ?? ''
+    assert.notEqual(xVersion, '', '前置：随包技能必须声明 x-version（否则本断言退化成空串比较）')
+    assert.equal(provenance.version, xVersion)
+    assert.equal(
+      readFileSync(join(home, 'skills', 'memory-consolidate', '.install-version'), 'utf8'),
+      xVersion,
+      '补齐的 .install-version 必须等于 x-version',
+    )
   })
 })
 

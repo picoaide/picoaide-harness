@@ -51,13 +51,14 @@ const zh = {
   // ---- tool errors the user reads in the transcript ----------------------
   'tool.invalidCron': 'cron 表达式无效: {cron}',
   'tool.cronNoMatch': 'cron 表达式在扫描范围内无匹配时刻（普通表达式八年、日/周组合四十一年）: {cron}',
+  'tool.nameRequired': '必须提供任务名称（不能为空或只有空白字符）',
   'tool.promptRequired': '必须提供 prompt（执行时发送给智能体会话的提示词）',
   'tool.permissionUnavailable': '权限预设服务不可用，无法指定 permission',
   'tool.unknownPermission': '未知的权限预设: {permission}（可用：{available}）',
   'tool.jobMissing': '定时任务不存在: {jobId}',
   'tool.jobRunning': '定时任务 {jobId} 已在运行',
   // ---- plugin announcement (system prompt) -------------------------------
-  'guidance.plugin': '本机已安装 dsh-cron 插件（PicoAide Harness 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run / cron_remove 工具创建、查看、启停、触发和删除定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。',
+  'guidance.plugin': '本机已安装 dsh-cron 插件（PicoAide Harness 的定时任务调度器）：可创建定时任务（cron 表达式，分钟级精度），到点由 Host 进程执行——关闭窗口或浏览器页面后仍会执行；应用完全退出期间、以及任务所属账号未登录期间错过的触发点默认跳过（可在设置中开启补跑最近一次）；夏令时前拨时当地不存在的时刻（例如时钟从 02:00 直接跳到 03:00、02:30 这一分钟不存在）同样不触发，跳过记录会显示在任务面板上；每个定时任务执行时会新建一个智能体会话（可指定工作区、智能体预设与权限），并把任务提示词发给该会话；执行详情（会话、开始/结束时间、结果、错误）记录在任务下可随时查看。模型可直接调用 cron_create / cron_list / cron_set_enabled / cron_run / cron_remove 工具创建、查看、启停、触发和删除定时任务。用户提到「定时任务 / cron / 定时执行」时即指本插件，请据此协作。',
 } as const
 
 /** English mirror — every key of {@link zh}, same parameter names. */
@@ -71,12 +72,13 @@ const en: Record<keyof typeof zh, string> = {
   'tool.removed': 'Deleted scheduled job {jobId}',
   'tool.invalidCron': 'invalid cron expression: {cron}',
   'tool.cronNoMatch': 'the cron expression has no matching instant within the scan range (eight years, or forty-one when day and weekday combine): {cron}',
+  'tool.nameRequired': 'A job name is required (it must not be empty or only whitespace)',
   'tool.promptRequired': 'prompt is required (the text sent to the agent session when the job runs)',
   'tool.permissionUnavailable': 'The permission preset service is unavailable, so permission cannot be pinned',
   'tool.unknownPermission': 'Unknown permission preset: {permission} (available: {available})',
   'tool.jobMissing': 'Scheduled job not found: {jobId}',
   'tool.jobRunning': 'Scheduled job {jobId} is already running',
-  'guidance.plugin': 'This machine has the dsh-cron plugin installed (the scheduled-job scheduler of PicoAide Harness): it can create scheduled jobs (cron expressions, minute-level precision) that the Host process runs when they are due — they still run after the window or the browser page is closed. Triggers missed while the application is completely shut down are skipped by default (catching up the most recent one can be enabled in settings). Each job execution starts a new agent session (a workspace, an agent preset and a permission preset can be pinned) and sends the job prompt to that session; execution details (session, start/end time, result, error) are recorded under the job and can be inspected at any time. The model can call the cron_create / cron_list / cron_set_enabled / cron_run / cron_remove tools directly to create, list, enable/disable, trigger and delete scheduled jobs. When the user mentions "定时任务 / cron / scheduled execution", they mean this plugin — collaborate accordingly.',
+  'guidance.plugin': 'This machine has the dsh-cron plugin installed (the scheduled-job scheduler of PicoAide Harness): it can create scheduled jobs (cron expressions, minute-level precision) that the Host process runs when they are due — they still run after the window or the browser page is closed. Triggers missed while the application is completely shut down, or while the account that owns the job is signed out, are skipped by default (catching up the most recent one can be enabled in settings); an occurrence whose local time does not exist at all (the daylight-saving spring-forward gap, such as 02:30 after the clock jumps to 03:00) is skipped the same way, and the skip is shown in the job panel. Each job execution starts a new agent session (a workspace, an agent preset and a permission preset can be pinned) and sends the job prompt to that session; execution details (session, start/end time, result, error) are recorded under the job and can be inspected at any time. The model can call the cron_create / cron_list / cron_set_enabled / cron_run / cron_remove tools directly to create, list, enable/disable, trigger and delete scheduled jobs. When the user mentions "定时任务 / cron / scheduled execution", they mean this plugin — collaborate accordingly.',
 }
 
 /** Every host copy key of this package. */

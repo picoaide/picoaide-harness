@@ -35,6 +35,7 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /**
  * 随包发布的应用根条目（白名单；**只列运行期需要的**）。
@@ -68,6 +69,45 @@ export const PACK_APP_ROOT_EXCLUDED = [
 ]
 
 /**
+ * **打包工具**的中间产物：可以出现在包根，但**绝不进包**。
+ *
+ * 与 `PACK_APP_ROOT_EXCLUDED` 的区别不是措辞：那份是"白名单之外的开发期目录"
+ * （不进包是因为没被列进白名单），这份列出的是**落在白名单条目内部**的文件
+ * ——`build/` 是整目录复制，所以写在 `build/` 里的任何东西都会进 asar。这里的
+ * 条目是**暂存前的 fail-loud 闸门**，不是排除规则：白名单的语义（"输入侧只放
+ * 这些"）保持不变，出现这些文件就说明有人把打包工具的产物写进了随包目录，
+ * 当场拒包而不是悄悄过滤掉（否则下次换个文件名又会静默泄漏一次）。
+ *
+ * `build/channel-electron-builder.cjs`（渠道构建生成的 electron-builder 配置，
+ * 含渠道 productName/appId/深链 scheme/产物名模板）是 2026-09-23 独立复审 N-1
+ * 的实例：它曾经由 `prepareChannelBuilderOverrides()` 写在 `build/` 里、而暂存在
+ * 其后执行 ⇒ beta 与各品牌渠道的 `app.asar` 都多出这个文件（官方渠道不生成它，
+ * 所以本机跑官方 `package-dir.mjs` 看不见）。现在它生成在包根 `temp/`
+ * （见 channel-build.ts 的 `defaultChannelBuilderConfigDir`），这条判据是第二道闸。
+ */
+export const PACK_APP_ROOT_FORBIDDEN_ENTRIES = [
+  'build/channel-electron-builder.cjs',
+]
+
+/**
+ * 暂存前自检：随包应用根里不得有打包工具中间产物（见上表说明）。
+ * @param packageRoot - 桌面包的绝对路径（`packages/host/desktop`）。
+ * @throws 命中任一禁止条目时（fail-loud，不产出包）。
+ */
+export function assertNoPackToolResidue(packageRoot) {
+  for (const entry of PACK_APP_ROOT_FORBIDDEN_ENTRIES) {
+    const path = join(packageRoot, entry)
+    if (!existsSync(path)) continue
+    throw new Error(
+      `pack-app-root: 打包输入里有打包工具中间产物 ${path}`
+      + '——它在随包白名单条目内部（build/ 是整目录复制），会进 app.asar。'
+      + '请确认打包前跑过 prepareChannelPackaging()（它每次构建都清理该残留），'
+      + '并检查是否有脚本把打包配置写回了 build/。',
+    )
+  }
+}
+
+/**
  * 复制时丢弃的文件：**sourcemap**。
  *
  * 为什么不靠 electron-builder 的 `files` 排除：那一层对应用根目录内容不生效
@@ -91,6 +131,8 @@ function shouldSkipInPack(source) {
  * @returns 暂存应用根的绝对路径，以及清理函数。
  */
 export function stagePackAppRoot(packageRoot, outDir = 'dist') {
+  // 先做输入侧自检：打包工具中间产物落在白名单条目内部时，整目录复制会把它带进包。
+  assertNoPackToolResidue(packageRoot)
   const distRoot = resolve(packageRoot, outDir)
   const stageRoot = join(distRoot, '.pack-root')
   // 先清旧的：上一次打包的残留会被当成本次输入收编（报告里 3514.6 MB 产物就是这么来的）。
@@ -158,13 +200,12 @@ export function assertStageRootIsRealDirectory(stageRoot) {
   return true
 }
 
-const invokedDirectly = process.argv[1] !== undefined
-  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
-if (invokedDirectly) {
+if (isDirectInvocation(import.meta)) {
   const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
   const { stageRoot, cleanup } = stagePackAppRoot(packageRoot)
   console.log(`pack-app-root: staged ${stageRoot}`)
   console.log(`  entries: ${listStageEntries(stageRoot).join(', ')}`)
   console.log(`  排除（开发期，不进包）: ${PACK_APP_ROOT_EXCLUDED.join(', ')}`)
+  console.log(`  禁止（打包工具中间产物，命中即拒包）: ${PACK_APP_ROOT_FORBIDDEN_ENTRIES.join(', ')}`)
   cleanup()
 }

@@ -107,7 +107,11 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 			if admin != nil {
 				actor = admin.Username
 			}
-			_ = serverstore.AuditLog(db, actor, "app_owner_transfer",
+			// 归属转移是**应用级**动作 ⇒ 必须带 app_id 列（AuditLogApp），
+			// 否则应用维度的审计视图（ListAuditLogsByApp / 导出 / 排障）看不到
+			// 这次转移 —— wasm 面自己的归属转移端点本来就写 app_id，两条路径
+			// 对同一种动作的可检索性必须一致（R3-A A-9）。
+			_ = serverstore.AuditLogApp(db, appID, actor, "app_owner_transfer",
 				TransferOwnerAuditDetail(kind, appID, app.Title, app.Owner, "官方"))
 			c.JSON(http.StatusOK, gin.H{"ok": true, "official": true})
 			return
@@ -134,7 +138,7 @@ func transferOwner(db *sql.DB) gin.HandlerFunc {
 		if app.Official == 1 {
 			from = "官方"
 		}
-		_ = serverstore.AuditLog(db, actor, "app_owner_transfer",
+		_ = serverstore.AuditLogApp(db, appID, actor, "app_owner_transfer",
 			TransferOwnerAuditDetail(kind, appID, app.Title, from, req.Owner))
 		c.JSON(http.StatusOK, gin.H{"ok": true, "owner": req.Owner})
 	}

@@ -49,8 +49,6 @@ import { writeFileAtomicSafeAt } from './sync/filesets.js'
 // dsh home 支持 $DSH_HOME 环境变量覆盖（dsh-paths resolveDshHome 同款逻辑）。
 /** preset id 合法性（与 DSH agent-presets 包 PRESET_ID 同正则）。 */
 const PRESET_ID_RE = /^[a-z0-9][a-z0-9-]*$/
-/** preset 组成文件名（DSH agent-presets 包 COMPOSITION_FILE）。 */
-const PRESET_COMPOSITION_FILE = 'agent.cordis.yml'
 
 /** 取 dsh home 目录（$DSH_HOME 优先，默认 ~/.dsh——与 dsh-paths resolveDshHome 同款）。 */
 function dshHome() {

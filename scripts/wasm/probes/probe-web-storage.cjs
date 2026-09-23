@@ -49,6 +49,7 @@ if (!electron || typeof electron !== 'object' || !electron.app) {
   process.exit(2)
 }
 const { app, BrowserWindow, protocol, session } = electron
+const { attest } = require('./probe-attest.cjs')
 
 // ---------------------------------------------------------------------------
 // 平台覆盖声明（**显式 skip，不静默**，L4 收编时统一加的约定）：本探针的结论目前只对
@@ -1135,6 +1136,16 @@ async function main() {
     }
   }
 
+  // 结构化证据行（R4-A N2）：门禁按"被发现的探针集合 == 有证据的探针集合"判定，
+  // 不再数 PASS；nonce 由门禁每次运行随机生成 ⇒ 写死的伪造行必然对不上。
+  attest({
+    probe: __filename,
+    assertions: required.length,
+    pass: required.length - failed.length,
+    fail: failed.length,
+    skip: 0,
+    platformCovered: PROBE_COVERED,
+  })
   clearTimeout(hardTimer)
   app.exit(exitCode)
 }
@@ -1142,6 +1153,8 @@ async function main() {
 app.whenReady().then(() => {
   if (!PROBE_COVERED && PROBE_REQUIRE_COVERED) {
     console.log(`[skip] PROBE_REQUIRE_COVERED_PLATFORM=1 且平台未覆盖（${PROBE_PLATFORM}），按显式 SKIP 退出（77）`)
+    // 显式 SKIP 也必须带证据（否则门禁无法区分"真探针如实跳过"与"根本没跑"）。
+    attest({ probe: __filename, assertions: 0, pass: 0, fail: 0, skip: 1, platformCovered: false })
     app.exit(77)
     return
   }

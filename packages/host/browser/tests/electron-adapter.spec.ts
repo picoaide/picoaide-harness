@@ -7,6 +7,8 @@ const captured: Array<{ kind: string; options: Record<string, unknown> }> = []
 const closeHandlers: Array<(event: { preventDefault: () => void }) => void> = []
 const focusHandlers: Array<() => void> = []
 const hidden: boolean[] = []
+let stopCalls = 0
+let reloadCalls = 0
 
 function makeElectron(): ElectronModuleLike {
   class FakeWebContentsView {
@@ -23,6 +25,8 @@ function makeElectron(): ElectronModuleLike {
       isDestroyed: () => false,
       close: () => {},
       capturePage: () => Promise.resolve(undefined),
+      reload: () => { reloadCalls += 1 },
+      stop: () => { stopCalls += 1 },
     }
     constructor(options: Record<string, unknown>) { captured.push({ kind: 'view', options }) }
   }
@@ -71,6 +75,23 @@ describe('electron adapter — 2026-09-08 browser lifecycle decisions', () => {
       const prefs = (entry.options.webPreferences ?? {}) as Record<string, unknown>
       expect(prefs.backgroundThrottling).toBe(false)
     }
+  })
+
+  /**
+   * SH-1（第二轮登记、第三轮 R3-B 复核仍未修）：`runtime.stopPendingLoads()` 走的是
+   * 适配器**可选**方法 `webContents.stop()`。真实适配器此前从未实现它 ⇒ `stop?.()`
+   * 静默 no-op（用户接管时挂起加载停不下来），而测试替身实现了它 ⇒ 套件恒绿。
+   * 判据必须钉"透传"而不是"方法存在"：只断言 `typeof stop === 'function'` 会让
+   * 一个空实现（`stop: () => {}`）也通过。
+   */
+  it('the real adapter forwards stop() to the native webContents (SH-1)', () => {
+    const adapter = createRealElectronAdapter(makeElectron())
+    const view = adapter.createView('persist:agent-browser')
+    const before = stopCalls
+    const stop = (view.webContents as { stop?: () => void }).stop
+    expect(typeof stop).toBe('function')
+    stop?.()
+    expect(stopCalls).toBe(before + 1)
   })
 
   it('the browser window is created hidden so boot prewarm never flashes it', () => {

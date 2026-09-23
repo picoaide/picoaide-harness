@@ -579,6 +579,15 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   /** 应用窗口的 webContents id（请求闸门的唯一白名单来源）。 */
   const webContentsIds = new Set<number>()
   const memory = new Map<string, AppWindowMemory>()
+  /**
+   * 每个应用窗口**建窗时**的分区（2026-09-23 审计 WS-1 的纵深防御）。
+   *
+   * 会话回调已经会在作用域变化时 `closeAll()`，但那是一层依赖"事件一定到"的保证；
+   * 分区是 Electron 创建后**不可改指**的属性，一旦映射里留下一个属于别的用户的窗口，
+   * 表现就是"新用户在那个应用的登录态里继续操作"（`windows.ts` 无法自行发现）。
+   * 所以命中已有窗口时再比一次分区：不一致就关掉重建，而不是 focus。
+   */
+  const windowPartitions = new Map<string, string>()
   /** 已注册进 surface 注册表的窗口（app_id → surface id；注销要按它）。 */
   const surfaceIds = new Map<string, number>()
   let surfaceSeq = 0
@@ -647,6 +656,7 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
   /** 丢掉一个已被原生侧销毁的句柄（用户手动关窗；见 `isAlive` 的契约注释）。 */
   const forget = (appId: string, handle: AppWindowHandle): void => {
     windows.delete(appId)
+    windowPartitions.delete(appId)
     // 窗口没了 ⇒ 它在 browser runtime 里的 surface 也必须消失：留着会让模型
     // 按 `app_id` 寻址到一个已经销毁的 webContents（工具面会报一个看不懂的错）。
     unregisterSurface(appId)
@@ -668,7 +678,17 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
     async open(appId, path = '/', geometry) {
       await load()
       const url = options.urlFor(appId, path)
-      const existing = liveHandle(appId)
+      // 分区在**每次打开**时求值（登录态可变）；下面"命中已有窗口"的判断也要用它。
+      const partition = options.partition()
+      let existing = liveHandle(appId)
+      if (existing !== undefined && windowPartitions.get(appId) !== partition) {
+        // WS-1 纵深防御：这个窗口是在**别的作用域**（上一个账号/上一个服务端）里建的。
+        // 分区创建后不可改指 ⇒ 唯一正确的处理是关掉它，再按当前分区新建。
+        warn(`pico-wasm-apps-host: closing the application window for ${appId} — it was created in another user scope; rebuilding it in the current one`)
+        options.adapter.closeAppWindow(existing)
+        forget(appId, existing)
+        existing = undefined
+      }
       if (existing !== undefined) {
         // 聚焦已有窗口 ⇒ 软闸门（§5.1b：保留内容 + 导航到目标路径，不换错误页）。
         options.adapter.focusAppWindow(existing, url)
@@ -697,9 +717,8 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
         declaredRatio,
       )
       const minimum = minimumWindowSize(declaredRatio)
-      // 分区在**每次打开**时求值（登录态可变）；同一次打开里的"装守卫"与"建窗"
-      // 必须用**同一个**值，否则守卫会落在与窗口不同的 session 上（等于没装）。
-      const partition = options.partition()
+      // 同一次打开里的"装守卫"与"建窗"必须用**同一个**分区值（上面求过），否则守卫
+      // 会落在与窗口不同的 session 上（等于没装）。
       // 先保证守卫再建窗：顺序反了会出现"窗口存在但权限面无守卫"的窗口期。
       options.adapter.ensureSessionGuard?.(partition)
       const handle = options.adapter.createAppWindow({
@@ -716,6 +735,7 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
         minimumHeight: minimum.height,
       })
       windows.set(appId, handle)
+      windowPartitions.set(appId, partition)
       const wcId = options.adapter.webContentsId?.(handle)
       if (typeof wcId === 'number') webContentsIds.add(wcId)
       else warn('pico-wasm-apps-host: the window adapter did not report a webContents id; application-scheme subresource requests will be refused (fail-closed)')
@@ -754,6 +774,7 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       const handle = windows.get(appId)
       if (handle === undefined) return
       windows.delete(appId)
+      windowPartitions.delete(appId)
       unregisterSurface(appId)
       const wcId = options.adapter.webContentsId?.(handle)
       if (typeof wcId === 'number') webContentsIds.delete(wcId)
@@ -763,6 +784,7 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       for (const handle of windows.values()) options.adapter.closeAppWindow(handle)
       for (const appId of [...surfaceIds.keys()]) unregisterSurface(appId)
       windows.clear()
+      windowPartitions.clear()
       webContentsIds.clear()
     },
     isAppSurfaceWebContents(webContentsId) {

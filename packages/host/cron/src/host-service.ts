@@ -22,6 +22,8 @@ export class HostCronService implements PicoCronService {
   readonly scheduler: HostCronScheduler
   private readonly listeners = new Set<() => void>()
   private active = true
+  /** Set by dispose(): the service is over, every write request is refused. */
+  private disposed = false
   private lastEventJson = ''
   private readonly now: () => number
   /** Current account (gateway username); set by the plugin on session change. */
@@ -52,8 +54,18 @@ export class HostCronService implements PicoCronService {
     return this.username
   }
 
+  /**
+   * Start ticking — only while the master switch is on (2026-09-23 CR-4).
+   *
+   * `apply()` calls `setConfiguration(enabled, catchUpMissed)` and then
+   * `start()`; without this check a composition/settings config of
+   * `{enabled: false, catchUpMissed: true}` would run the very first tick
+   * *before* the trailing `sync()` stops the scheduler again — and that tick's
+   * catch-up branch spawns agent sessions for a feature that is configured off.
+   * `setConfiguration(true, …)` remains the only other starter.
+   */
   start(): void {
-    this.scheduler.start()
+    if (this.active) this.scheduler.start()
   }
 
   setConfiguration(active: boolean, catchUpMissed: boolean): void {
@@ -89,6 +101,7 @@ export class HostCronService implements PicoCronService {
   }
 
   apply(requestId: string, action: CronAction): CronSnapshot {
+    this.assertOpen()
     if (!this.active) throw new Error('cron scheduler is disabled')
     const result = this.ledger.applyRequest(requestId, action)
     if (result.run !== undefined) void this.scheduler.fire(result.run.job, result.run.execution)
@@ -99,11 +112,13 @@ export class HostCronService implements PicoCronService {
   // picoCronService surface (sibling plugins)
 
   registerJob(registration: CronJobRegistration): void {
+    this.assertOpen()
     if (!this.active) throw new Error('cron scheduler is disabled')
     this.ledger.upsertJob(registration)
   }
 
   unregisterJob(id: string): void {
+    this.assertOpen()
     // A fresh requestId per call: unregister must not collide with the
     // idempotency cache (a deterministic id would make a second
     // detach→attach→detach cycle a silent no-op).
@@ -131,6 +146,18 @@ export class HostCronService implements PicoCronService {
 
   // Internals
 
+  /**
+   * Refuse every write request once the service is disposed (2026-09-23 R3-B3
+   * F1). The ledger seals itself too; this is the front door, so a request that
+   * was already parked in `await readBody(...)` when the plugin unloaded gets a
+   * clear error instead of touching a ledger that no longer owns its lock — the
+   * HTTP face used to answer 200 for a write that had already been refused.
+   */
+  private assertOpen(): void {
+    if (!this.disposed) return
+    throw new Error('dsh-cron: cron service is disposed: write refused')
+  }
+
   private emit(): void {
     // SSE gating: do not push an empty frame when nothing observable moved.
     const json = JSON.stringify(this.eventPayload())
@@ -140,6 +167,8 @@ export class HostCronService implements PicoCronService {
   }
 
   dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
     this.scheduler.dispose()
     this.ledger.dispose()
     this.listeners.clear()

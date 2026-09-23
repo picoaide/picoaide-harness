@@ -34,9 +34,10 @@ func TestSkills(t *testing.T) {
 		t.Fatalf("GetSkill = %+v", s)
 	}
 
-	// 0052:版本由「上传新版」随归档写入,元数据更新只改描述/作者。
+	// 0052:版本由「上传新版」随归档写入,元数据更新只改展示列
+	// (title/description/enabled;owner 不在此列,见 UpdateSkillMeta 的注释)。
 	s.Description = "demo skill v2"
-	if err := UpdateSkill(db, s); err != nil {
+	if err := UpdateSkillMeta(db, s); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = GetSkill(db, "demo")
@@ -133,7 +134,7 @@ func TestSkillUpdateKeepsArchive(t *testing.T) {
 	}
 	s, _ := GetSkill(db, "up2")
 	s.Description = "edited"
-	if err := UpdateSkill(db, s); err != nil {
+	if err := UpdateSkillMeta(db, s); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = GetSkill(db, "up2")
@@ -169,5 +170,49 @@ func TestCurrentReleasePrereleaseOrder(t *testing.T) {
 	// 预发布序号按数值比较:rc.10 > rc.2
 	if skillmanifest.CompareVersions("1.0.0-rc.10", "1.0.0-rc.2") <= 0 {
 		t.Fatal("rc.10 必须大于 rc.2")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// G-P2-1(审计 2026-09-23):`UpdateSkillMeta` 是市场技能的**展示元数据**入口,
+// 结构上不得触碰 `apps.owner` —— owner 是发布权的唯一真源,任何改写它的路径
+// 都必须走归属转移端点(存在性校验 + 互斥 + 幂等 + app_owner_transfer 审计)。
+// 变异验证:把 UpdateSkillMeta 的 UPDATE 列集加回 owner ⇒ 本用例红。
+// ---------------------------------------------------------------------------
+func TestUpdateSkillMetaNeverTouchesOwner(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddSkill(db, &Skill{Name: "meta-owner", Version: "1.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetAppOfficial(db, AppKindSkill, "meta-owner", false, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := GetSkill(db, "meta-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 即便调用方把 Author 改成了别人(旧实现会把它写进 owner),DAO 也必须忽略。
+	s.Author = "carol"
+	s.Description = "新描述"
+	if err := UpdateSkillMeta(db, s); err != nil {
+		t.Fatal(err)
+	}
+	app, err := GetApp(db, AppKindSkill, "meta-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Owner != "alice" {
+		t.Fatalf("UpdateSkillMeta 改写了归属: owner=%q, want alice", app.Owner)
+	}
+	if app.Description != "新描述" {
+		t.Fatalf("展示列没有更新: %+v", app)
+	}
+	// 不存在的行仍回 ErrNotFound。
+	if err := UpdateSkillMeta(db, &Skill{Name: "missing", Enabled: 1}); err != ErrNotFound {
+		t.Fatalf("missing = %v, want ErrNotFound", err)
 	}
 }

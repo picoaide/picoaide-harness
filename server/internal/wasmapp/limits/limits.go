@@ -241,10 +241,24 @@ const (
 	// SQLLimitWorkerThreads 是辅助线程数（SQLITE_LIMIT_WORKER_THREADS）：0。
 	SQLLimitWorkerThreads = 0
 
-	// SQLMaxRows 是单次查询返回行数上限（§4.5）：5 000 行，超出即截断并报错。
+	// SQLMaxRows 是单次查询返回行数上限（§4.5）：5 000 行。
+	// **超出只截断**（QueryResult.Truncated=true）而不返回错误码 —— 分页读取必须可行，
+	// 见 appdb/stmt.go 的取舍说明。
 	SQLMaxRows = 5000
-	// SQLMaxResultBytes 是单次查询返回字节上限（§4.5/§4.6）：8 MiB。
-	SQLMaxResultBytes = 8 << 20
+	// SQLMaxResultBytes 是单次查询返回字节上限（§4.5/§4.6）。
+	//
+	// ⚠️ 2026-09-23 审计 A-1（P1）把原值 8 MiB 收到**可交付量级**。原因：查询结果必须装进
+	// **一个** RPC 应答帧才能到应用（单帧上限 = ProtocolLineMaxBytes = 1 MiB），且结果里的
+	// 字符串按 Go `encoding/json` 的默认规则转义（控制字符/`<`/`>`/`&` → `\u00XX`，膨胀
+	// 6 倍）⇒ **8 MiB 的结果在数学上永远到不了应用**：宿主写出一条超帧，应用要么 10 s
+	// `RUNTIME_TIMEOUT`（骨架读帧器不排空）、要么拿到一条裸协议错误（`abi.ReadFrame` 排空
+	// 但不解释），两种形态都拿不到可用结果。
+	//
+	// 现在的取值 = 最坏转义下仍装得进一帧的**原始**字节量，与 `abi.MaxResponseBodyBytes`
+	// （响应体"保证可交付"的数）同一份推导 ⇒ 达到本上限的结果**一定**能交付。
+	// 超出仍是既有语义：**只截断 + `QueryResult.Truncated=true`**（分页读取，见
+	// appdb/stmt.go 的取舍说明）；只有"单行/列名本身就超帧"才回结构化 `DB_LIMIT`。
+	SQLMaxResultBytes = MaxDeliverablePayloadBytes
 	// SQLStatementBudget 是单语句硬超时（R13/§4.5）：5 s（独立于 guest 超时）。
 	SQLStatementBudget = 5 * time.Second
 
@@ -301,6 +315,23 @@ const (
 	AppResponseBodyMaxBytes = 8 << 20
 	// ProtocolLineMaxBytes 是协议帧单行上限（§4.6）：1 MiB，超限 RUNTIME_OUTPUT_OVERRUN。
 	ProtocolLineMaxBytes = 1 << 20
+	// MaxJSONEscapeExpansion 是 Go `encoding/json` 默认转义下单字节的**最坏膨胀倍数**：
+	// `<` `>` `&` 与控制字符（< 0x20）写成 `\u00XX`（6 B），`"` 与 `\` 写成 `\"`/`\\`（2 B），
+	// 非法 UTF-8 字节写成 `\ufffd`（6 B）。任何"保证装得进一个 1 MiB 帧"的对外数字都必须
+	// 按它折算 —— 2026-09-23 审计 A-6 的教训：按"原始字节 = 编码后字节"推出来的
+	// `MaxFrameBytes/2 = 512 KiB` 被 `<`×512 KiB（编码后 3,145,840 B）直接证伪。
+	MaxJSONEscapeExpansion = 6
+	// FrameEnvelopeReserveBytes 是单帧里"除载荷本身以外"的保留量：JSON-RPC 信封、键名、
+	// 列名、id、逗号与括号。列名上限 64 B × 16 列按最坏转义 ≈ 6 KiB，留 16 KiB 有两倍余量。
+	FrameEnvelopeReserveBytes = 16 << 10
+	// MaxDeliverablePayloadBytes 是"经 JSON 编码后仍**保证**装进单帧"的原始字节上限
+	// （§4.6）：`(ProtocolLineMaxBytes − FrameEnvelopeReserveBytes) / MaxJSONEscapeExpansion`
+	// = 172032 B（168 KiB，即对外口径的"约 170 KiB"）。
+	//
+	// 两个消费者共用这一份推导（都在"宿主必须经**一帧**交付给 guest"的同一条约束下）：
+	//   - `abi.MaxResponseBodyBytes`：应用响应体的"保证可交付"数（§4.6 对外契约）；
+	//   - `SQLMaxResultBytes`：`db.query` 结果的预算（超出只截断 + Truncated）。
+	MaxDeliverablePayloadBytes = (ProtocolLineMaxBytes - FrameEnvelopeReserveBytes) / MaxJSONEscapeExpansion
 	// GuestBudget 是 guest 执行预算（§4.6）：10 s（进入宿主调用时暂停计时）。
 	GuestBudget = 10 * time.Second
 	// ⚠️ W4 删除（总纲 §21.3）：服务端宿主 AI 调用的 30 s 预算随该能力一起消失；
@@ -397,6 +428,23 @@ const (
 	DiagnosticsDefaultLimit = 50
 	// DiagnosticsMaxLimit 是诊断 API 上限。
 	DiagnosticsMaxLimit = 200
+	// RowsPageMax 是**作者数据面**「行浏览」单页返回行数上限（§5.9）：一页最多 200 行
+	// （`GET …/wasm/:app_id/rows` 与工具 `wasm_app_rows`）。
+	//
+	// 为什么与 SQLMaxRows（5000）是两个数：那是**应用自己查库**的上限（appdb 的语句
+	// 预算），这是平台给人/AI 看的**浏览面分页**上限 —— 浏览不是数据导出（导出是另一个
+	// 产品决策，当前没有），所以刻意收得更紧。
+	//
+	// ⚠️ 这个数是**平台限制**，因此真源在 limits 表里（而不是只写在 `api/rows.go`）：
+	// 它随生成链进 `limits.md` / 技能 `references/limits.md`，并被三处判据绑住 ——
+	//   - 生成链逐字节门禁（`limits_gen_test.go` 的 (a)）：提交的生成物必须与 Table() 一致；
+	//   - `internal/wasmapp/api/rows_page_limit_binding_test.go`：rows.go 的 `rowsMaxLimit`
+	//     ↔ 本值 ↔ `docs/wasm-app-authoring.md` 的「一页最多 N 行」（**键锚定**，不是
+	//     "某个 200 存在即可"）；
+	//   - `internal/wasmapp/api/rows_test.go` 的 `TestRowsLimitsMatchAuthorFacingDocs`：
+	//     技能随包散文（`references/publishing.md` / `references/diagnostics.md`）的
+	//     "缺省 N / 最多 N" ↔ rows.go 常量。
+	RowsPageMax = 200
 	// StderrTailBytes 是诊断里回给作者的 stderr 尾巴上限（§4.9/§7.4）。
 	StderrTailBytes = 2 << 10
 	// ReadyzSnapshotTTL 是 `/readyz` **快照缓存**的有效期（R1-rt-4）。

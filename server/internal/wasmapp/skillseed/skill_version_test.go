@@ -158,6 +158,125 @@ var seededSkillDigests = map[string]string{
 	// 为什么必须提版本：这两份都是随镜像下发给员工的手册，已安装的客户端靠 version 判
 	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
 	"42dba768233467eaa28226e36ee8050981be784c35b04ae7dfb658c115213b01": "2.5.0",
+
+	// 2.6.0 = **文档与代码真值对齐**（2026-09-23，第二轮审计 SKD-1/2/3/4/9 + SKD-5 第二张表）：
+	// 四处技能叙述与实现相反/过时，且同技能内另有一份文件写的是对的（自相矛盾）：
+	//   - `references/abi.md` §3.6：`log` 的"保留 7 天"是**调用事件**的属性，应用日志只进
+	//     服务端运维日志、平台无查询接口也不承诺保留期（`appserver/hostenv.go` 的
+	//     `wasm-app[<app_id>]` 行；`limits.CallEventRetentionDays` 管的是调用事件）；
+	//   - `references/abi.md` §7：`FORBIDDEN` 与"发布者/冻结"无关（全包只有跨源写与审计
+	//     账号两个发射点）；非发布者是 **404 `NOT_FOUND`**（不泄露存在性），冻结是
+	//     **403 `APP_FROZEN`**；`APP_FROZEN` / `VALIDATE_FAILED` 两个真会发的码补进 §7.1；
+	//   - `references/abi.md` §3.3/§7 + `references/diagnostics.md`：`DB_LIMIT(507)` **只**
+	//     表示库写满（`appdb/appdb.go` 的 mapStmtError 注释口径）；行数/字节超限只置
+	//     `QueryResult.Truncated` 不报错，语句超时是 403 `DB_DENIED` +
+	//     `details.reason=statement_timeout`；
+	//   - `references/publishing.md`：冻结/导出的"只读快照（90 天）→ 真删"**未实现**
+	//     （`wasmapp/api/release.go` 与 `read.go` 自述"真删任务当前未实现"，`DELETE` 只软删）；
+	//   - `references/abi.md` 的 `NAME_TAKEN` hints：标识由首个发布者**永久占有**（同名即同一
+	//     应用），与同文件 `publishing.md` 的正确口径对齐；
+	//   - `references/limits.md`（生成物）：`sql_max_rows` 的 Note 由"超出即截断并报错"改成
+	//     "只截断并置 QueryResult.Truncated，不报错" —— 真源在 `limits/limitsspec.go`，
+	//     本条目由 `go generate ./internal/wasmapp/limits` 产出（不是手改生成物）；
+	//   - `SKILL.md` 的「并发与队列」段：补明 4096/256 两个上界来自
+	//     `internal/wasmapp/applimits/applimits.go`（**不在** limits 表里，数值门禁不覆盖
+	//     这张手写表），并去掉重复的"运维可在控制台改"。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"d90b4d151fe38f558b7fca6b328105f4a55776a902af0d6ae07576336f08271d": "2.6.0",
+
+	// 2.7.0 = **单帧可交付口径的统一**（2026-09-23 R3-A 审计 A-1/A-6/A-7，P1+P2）：
+	// 同一条"结果必须装进一个 1 MiB 协议帧"的约束在三处写成了互相矛盾的数字，
+	// 本轮统一到**一份推导**（真源 `limits/limits.go` 的
+	// `MaxDeliverablePayloadBytes = (ProtocolLineMaxBytes − FrameEnvelopeReserveBytes) /
+	// MaxJSONEscapeExpansion` = 172032 B ≈ 168 KiB）：
+	//   - `references/abi.md` §4：响应体由"8 MiB"改成"**保证可交付** 168 KiB；单帧上限
+	//     1 MiB 是原始字节数，低转义内容实测 ~625 KB 但不是承诺"——顺带解掉同段
+	//     "只写一帧"与"8 MiB"的自相矛盾；
+	//   - `references/abi.md` §3.3：`db.query` 返回上限由 5000 行 / 8 MiB 改成
+	//     5000 行 / 168 KiB（超出仍只截断 + `truncated:true`）；
+	//   - `references/abi.md` §3.1：请求体那一行补明"整帧（含 JSON 转义）不得超 1 MiB，
+	//     超了是 413 `BODY_TOO_LARGE`、应用收不到请求"；
+	//   - `references/abi.md` §7：`DB_LIMIT` 的"单行超过 8 MiB"改成 168 KiB，并新增
+	//     `RESULT_TOO_LARGE`（宿主结果装不进一帧的兜底码，本轮新增）；
+	//   - `references/limits.md`（生成物，真源 `limits/limitsspec.go`）：
+	//     `sql_max_result_bytes` 8388608 → 172032；
+	//   - `references/app-config.md`（生成物）：随 appcfg 生成器一并重写（内容未变，
+	//     但生成器一次写全部产物，摘要仍随之变化）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"bd4a7c2a7e195f670119ca3cd29388ee3326323e0ac0a9874f4e23c7fb58807e": "2.7.0",
+
+	// 2.8.0 = **入口文档形态三处对齐**（2026-09-23 R3-A 审计 A-5 的收尾）：
+	// 平台实现把"入口文档"的判据从"根 `index.html`"改成"文档名是 `index.html`"
+	// （`appserver.isEntryDocument`：`/`、`/index.html`、`<目录>/` 都是入口），
+	// 而技能里还有两处与实现不一致的表述/实现：
+	//   - `references/abi.md` §8：仍写"入口文档（`/`、`/index.html`）"两形态
+	//     （同文件 §3.7 那张表早已是"三形态"，属同技能内自相矛盾）⇒ 补齐 `<目录>/`；
+	//   - `examples/go/preview.mjs` 的 `isEntryPath`：只认 `/` 与 `/index.html`，
+	//     注释却自称"与平台 serveStatic 规则 5 同口径" ⇒ 改为 `endsWith('/index.html')`
+	//     （`/admin/index.html` 这类子目录入口不再被本地预览当资源直出），并在
+	//     `--selftest` 里新增第 9 条（入口形态 + 子资源仍直出）把行为钉住；
+	//   - `SKILL.md`：自测说明的条数随之由 8 改 9（`version` 提到 2.8.0 也在该文件）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册与本地工具，已安装的客户端靠
+	// version 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。防漂移判据在
+	// `internal/wasmapp/appserver/entry_contract_test.go`（四个契约面的枚举行必须列全三形态）。
+	"f1c39e1d49b403477973e9cea93bc15d595b861f2fd2273255f0758ccd15d633": "2.8.0",
+
+	// 2.8.1 = **自检条数不再以"平台限制"的形态出现**（2026-09-23，修 make check 的
+	// `TestSkillDiscipline` 回归；同轮把同族的"非平台限制数字"一并清掉）：
+	// `TestSkillDiscipline` 的判据是「文档里每个"数字+单位"都必须在 limits 表里有同量纲
+	// 同值的条目」，而"9 条自检"说的是**自检脚本自己的条数**，不是平台限制 —— 它上一版
+	// 之所以能过（"8 条"），只是因为表里恰好有 `sql_limit_compound_select` = 8（撞上的）。
+	// 本轮把这类"非平台限制的数字"按同一口径改成不产生「数字+单位」的写法：
+	//   - `SKILL.md`：自测说明的"（9 条自检）"改成"脚本自己报「全过」即说明本地库语义与
+	//     平台同向"（自检项数由脚本维护，正文不写死）；"见硬约束第 3 条"改成引用该条
+	//     标题文字（"第 3 条"里的"3 条"同样会被判据命中）；
+	//   - `examples/go/README.md`：`--selftest` 那一行的"（8 条）"去掉（它既是非平台限制
+	//     数字，也已随第 9 条自检过期）；
+	//   - `references/design-interview.md`：去掉两处**访谈建议**里的数字（"不超过 8 个
+	//     字段"、"最近 50 条"）—— 它们是话术建议，不是平台上限，留着只会在表变化时
+	//     无声地红/绿；
+	//   - `examples/go/main.go`：`clipRunes` 注释里的"UTF-8 字符"改成"多字节字符"
+	//     （"8 字符"是同一条正则从"UTF-8 字符"里误命中的）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册与本地工具，已安装的客户端靠
+	// version 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	// 未登记项（认账，留给主控拍板）：`docs/wasm-app-authoring.md` §7 的"单次查询返回
+	// 5000 行 / 8 MiB（超出截断并报错）"与真源不符（`sql_max_result_bytes` 现为 172032 B，
+	// 且行数/字节超限只置 `truncated` 不报错）—— 8 MiB 撞的是另一条表项
+	// （`app_response_body_max_bytes`），判据咬不到，本轮只报告不改。
+	"e5ad99023496f6c0bd940d6d809b40d4fe553a8473c98312c73e45ffd435331a": "2.8.1",
+
+	// 2.9.0 = **作者数据面分页上限进真源 + 作者指南返回体口径纠偏**（2026-09-23，R3 审计
+	// A/B 两项的收尾）：
+	//   - `references/limits.md`（生成物，真源 `limits/limitsspec.go` + `limits.go`）：
+	//     新增 `rows_page_max` = 200 —— 行浏览（`wasm_app_rows` / `GET …/rows`）单页行数
+	//     上限此前只写在 `api/rows.go` 的常量里、不在 limits 表里，作者文档那句
+	//     「一页最多 200 行」能过数值判据纯属撞上 `diagnostics_max_limit`；
+	//   - 生成器一次写全部产物 ⇒ `references/app-config.md` 也随之重写（内容未变）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	// 「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	// 同轮修掉的旧认账项：上一版 2.8.1 条目里登记的"`docs/wasm-app-authoring.md` §7 的
+	// 5000 行 / 8 MiB（超出截断并报错）与真源不符，只报告不改" —— 本轮已按真源改成
+	// 5000 行 / 168 KiB + "只截断并置 `truncated`，不报错"，并同步该文件的 `db.query`
+	// 一行、响应体一行、日志保留一行与退役快照一行（见交付报告）。
+	"079468e60c5650bba633f52986fb368026f0fa5b6dc0e0a100232bed7ec1c1c4": "2.9.0",
+
+	// 2.10.0 = **冻结行的作者面口径三处统一**（2026-09-23 第六轮审计 R6-B-3）：
+	// 服务端目录（`api/read.go` 的 catalog）改为对**归属人本人**保留冻结行（行里带
+	// `frozen:true`），于是"发布者本人在应用中心里就能解冻"这条路径在客户端面板每一次
+	// 重载之后都可达；而作者手册此前写的是"冻结是平台侧处置：**找管理员解冻**"，与客户端
+	// 字典互相矛盾（同一件事两个答案）。本轮把三面收敛到同一条口径：
+	//   - `references/abi.md` §7.1 的 `APP_FROZEN`：发布者本人在客户端应用中心里解冻
+	//     （冻结行仍列在他/她自己的目录里、带「已冻结」标记；解冻后还要重新上架），
+	//     其他成员看不到冻结的应用、需要解冻请找管理员；
+	//   - `SKILL.md` 的「讲清四种状态」表与排障口诀：冻结那一行区分**发布者本人**
+	//     （仍列在目录里、可解冻）与**其他员工**（不列进目录）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version
+	// 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。防漂移判据在客户端侧的
+	// `packages/client/wasm-apps/src/client/freeze-author-face-parity.spec.ts`
+	// （手册 ↔ 客户端文案 ↔ 服务端目录条件三面对拍）。
+	"bdb5e7c71299e2938e52f72b4972edd88869f6b9c9ca0b559e698d9151edf375": "2.10.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

@@ -76,7 +76,12 @@ func get(db *sql.DB) gin.HandlerFunc {
 
 // bindConnector parses the create/update body with validation. Returns nil
 // and writes the error response on invalid input.
-func bindConnector(c *gin.Context) *serverstore.Connector {
+//
+// keepEnabled 是**更新路径**的 PATCH 兜底（2026-09-23 审计 A-11，P2）：body 省略
+// `enabled` 时必须保持现值，不能回落成 true —— 那会把一个**已停用**的连接器静默复活，
+// 而连接器一旦 enabled 就会随 bootstrap 下发给全体客户端。创建路径传 nil（新对象的
+// 缺省就是启用，这是既有语义）。
+func bindConnector(c *gin.Context, keepEnabled *bool) *serverstore.Connector {
 	var req struct {
 		ID          string `json:"id"`
 		Name        string `json:"name"`
@@ -94,6 +99,9 @@ func bindConnector(c *gin.Context) *serverstore.Connector {
 		return nil
 	}
 	enabled := true
+	if keepEnabled != nil {
+		enabled = *keepEnabled
+	}
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
@@ -109,7 +117,7 @@ func bindConnector(c *gin.Context) *serverstore.Connector {
 
 func create(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		conn := bindConnector(c)
+		conn := bindConnector(c, nil)
 		if conn == nil {
 			return
 		}
@@ -133,7 +141,19 @@ func create(db *sql.DB) gin.HandlerFunc {
 func update(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		conn := bindConnector(c)
+		// PATCH 语义（2026-09-23 审计 A-11，P2）：先读现值，body 省略 `enabled` 时保持它。
+		// 用 `GetConnector` 而不是在 DAO 里加 COALESCE：`serverstore` 不在本泳道，
+		// 且连接器目录是小表、这条读只为取一个布尔值。
+		cur, err := serverstore.GetConnector(db, id)
+		if err != nil {
+			if errors.Is(err, serverstore.ErrNotFound) {
+				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "连接器不存在")
+				return
+			}
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		conn := bindConnector(c, &cur.Enabled)
 		if conn == nil {
 			return
 		}

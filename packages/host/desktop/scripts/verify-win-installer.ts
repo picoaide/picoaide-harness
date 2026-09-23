@@ -4,6 +4,7 @@ import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { channelArtifactName, resolveChannelBuildContext } from './channel-build.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Verify a complete in-memory Windows PE image. */
 export function assertPortableExecutableBuffer(data: Buffer, label: string, source: string): void {
@@ -109,8 +110,7 @@ export function verifyWindowsInstaller(
   return { installerPath, applicationPath }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const verified = verifyWindowsInstaller()
     console.log(`Windows installer verification passed: ${verified.installerPath}`)

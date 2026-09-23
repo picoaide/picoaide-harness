@@ -22,7 +22,7 @@
  *   → 200 {"url":"<app-origin-scheme>://<app_id>/", "opens":{"today":{"pv":N,"uv":M}}?}
  * ```
  *
- * 由宿主确保协议 handler 与分区就绪并让内置浏览器加载该应用；URL **由本机按
+ * 由宿主确保协议 handler 与分区就绪，并把该应用交给它自己的**独立窗口**加载；URL **由本机按
  * app_id 拼**，不接受调用方传入。本模块不复制任何服务端/协议逻辑（准入、静态、
  * 执行都在别处），只做五件事：本地预检、发一次请求、把失败翻译成**机器可读的
  * reason**、断言成功返回的是不是那个协议 URL、把 F16 的打开计数读出来。
@@ -73,6 +73,9 @@ import {
   readHostErrorCode,
   readHostPlatformReason,
   readHostPlatformRefusal,
+  // `readJsonQuietly` 2026-09-23 起只有一份实现（`host-proof.ts`）；本文件原先那份与它
+  // 逐字节相同，属三份重复之一（另见 `channel-seam.ts`）。
+  readJsonQuietly,
   PLATFORM_APP_FROZEN_REASON,
 } from './host-proof.ts'
 
@@ -364,20 +367,6 @@ export function reasonForPlatformRefusal(
 }
 
 /**
- * 读响应体为 JSON（失败 ⇒ `null`，用 clone 不消费原响应）。
- * @param response - 原始响应。
- * @returns 解析结果，或 `null`。
- */
-async function readJsonQuietly(response: Response): Promise<unknown> {
-  try {
-    const text = await response.clone().text()
-    return text === '' ? null : JSON.parse(text)
-  } catch {
-    return null
-  }
-}
-
-/**
  * 在客户端内打开一个应用（唯一的打开路径）。
  *
  * 失败**永不抛**：每一种失败都是一个带 `reason` 的结果（UI 据此给出可读原因）。
@@ -513,7 +502,7 @@ export async function openAppEntry(rawAppId: unknown, deps: OpenAppDeps = defaul
   // 没下发就不带 —— 界面据此决定要不要渲染"今日已被打开 N 次"。
   const counts = parseAppOpenCounts(payload)
   const window = parseOpenWindow(payload)
-  // 成功 = 本机确认协议 URL 已就绪，且内置浏览器正在加载它（契约 §5.2 的打开路径）。
+  // 成功 = 本机确认协议 URL 已就绪，且该应用的独立窗口正在加载它（契约 §5.2 的打开路径）。
   return {
     ok: true,
     url,

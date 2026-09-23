@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -38,11 +40,19 @@ const FileReaperInterval = 5 * time.Minute
 
 // ReapExpiredGatewayFiles 执行一轮回收：删上游 + 删台账行，返回 (成功, 失败) 计数。
 //
-// 并发正确性（审计 2026-09-22 R6 P1-A）：每一行都先经
-// `serverstore.ClaimExpiredGatewayFile` 在**事务内 `FOR UPDATE` + 复检过期**后删行
-// （无锁列表 + 无条件删行会在并发续期时把活行与上游对象一起删掉）。认领成功后、
-// 删上游对象**之前**再复检一次该 id 是否被重新登记（并发上传拿到同一个 id 会插入新行）
-// —— 被重新登记就跳过上游删除（宁可留一个孤儿对象下轮再扫，也不删活文件）。
+// 并发正确性（审计 2026-09-22 R6 P1-A + 2026-09-23 R4-C-1）：删除权是一个**带世代
+// 号的令牌**，不会被"转手给新一代"夺取：
+//
+//  1. 每一行先经 `serverstore.ClaimExpiredGatewayFile` 在事务内 `FOR UPDATE` + 复检
+//     过期 + **行世代 +1** 后打标记（无锁列表 + 无条件删行会在并发续期时把活行与上游
+//     对象一起删掉）；
+//  2. 认领在租约内时，登记路径（`RecordGatewayFileSize`）**拒绝转手** —— 同一个 id
+//     的"新上传者"拿不到这一行（返回 `ErrGatewayFileReapClaimed`，上传路径据此放弃
+//     这个 id）。这是 R4-C-1 的核心：过去"过期行可转手"会让新上传者的上游对象被在飞
+//     的 DELETE 误删，而台账仍显示它有效；
+//  3. 发上游 DELETE **之前**复检一次"世代未变 + 标记仍在租约内"（`GatewayFileReapClaimHeld`）；
+//     收尾删行时**再**校验一次世代（`FinishReapedGatewayFile` 的谓词）—— 即 DELETE
+//     前后各校验一次。任何一次发现世代变了就放弃（行留给新一代，日志点名 file_id + 世代）。
 //
 // 上游删除失败 ⇒ 释放回收标记（`ReleaseReapClaim`），行**从不删除** ⇒ 下一轮立刻可以
 // 重新认领并重试（行是"还有清理责任"的唯一凭据；认领本身也不再删行，见
@@ -70,6 +80,11 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 		log.Printf("gateway: file reaper: list expired rows failed: %v", err)
 		return 0, 0
 	}
+	// R5-A-12（审计 2026-09-23，P1）：把"上游在持续拒绝的对象"从"只是还没轮到"里
+	// 分出来。候选排序已经改成"尝试次数升序"（从未失败的行永远优先），所以失败行不再
+	// 阻塞批次；但它们本身**不会自愈**，必须有人看见 —— 这里每轮点名（计数 + 前若干
+	// 条 id），否则配额泄漏只剩"日志里每轮 500 failed"这一条线索。
+	logReapBacklog(a.DB)
 	if len(ids) == 0 {
 		return 0, 0
 	}
@@ -87,43 +102,55 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 			}
 			continue
 		}
-		_, claimed, err := serverstore.ClaimExpiredGatewayFile(a.DB, id)
+		snap, claimed, err := serverstore.ClaimExpiredGatewayFile(a.DB, id)
 		if err != nil {
-			log.Printf("gateway: file reaper: claim expired row failed: %v", err)
+			log.Printf("gateway: file reaper: claim expired row failed (id=%s): %v", id, err)
 			failed++
 			continue
 		}
 		if !claimed {
 			continue // 已续期 / 已被别的路径处理 / 标记仍在租约内
 		}
+		// gen 是本次认领拿到的**世代号**（fencing token，R4-C-1）：删除权与它绑定，
+		// 之后每一次"是否还能删"的判断都必须带上它。
+		gen := snap.ReapGeneration
 		if fn := reapRecheckHook.load(); fn != nil {
 			fn(id) // 测试注入点：模拟"认领与复检之间"发生的并发上传
 		}
-		// 认领 = 打标记（行保留）。真正删上游对象之前必须复检**标记是否仍归本次认领**：
-		// 并发上传若已把这个 id 重新登记，续期会清空标记 ⇒ 放弃删除（审计 R6 P1-A /
-		// R7 N11 的续期侧）。行被别的路径删掉同样返回 false。
-		if held, err := serverstore.GatewayFileReapClaimHeld(a.DB, id); err != nil {
-			log.Printf("gateway: file reaper: recheck reap claim failed: %v", err)
+		// 认领 = 打标记 + 世代 +1（行保留）。真正删上游对象之前必须复检**删除权是否
+		// 仍归本次认领**：世代未变、标记仍在**且仍在租约内**（R4-C-1）。租约内上个
+		// 传者的重新登记会被登记路径直接拒绝（ErrGatewayFileReapClaimed），所以这条
+		// 复检在正常情况下恒真；它挡的是"认领已过期/已被重新认领"的失效世代。
+		if held, err := serverstore.GatewayFileReapClaimHeld(a.DB, id, gen); err != nil {
+			log.Printf("gateway: file reaper: recheck reap claim failed (id=%s gen=%d): %v", id, gen, err)
 			failed++
 			continue
 		} else if !held {
-			log.Printf("gateway: file reaper: file %s was re-registered during reaping; upstream object kept", id)
+			log.Printf("gateway: file reaper: file %s gen=%d: reap claim no longer held (re-registered, re-claimed or lease expired); upstream object kept", id, gen)
 			continue
 		}
 		if err := deleteUpstreamFile(client, up, id); err != nil {
-			log.Printf("gateway: file reaper: delete upstream file failed: %v", err)
+			log.Printf("gateway: file reaper: delete upstream file failed (id=%s gen=%d): %v", id, gen, err)
 			// 释放标记让下一轮立刻重试（不必等租约过期）；行保留 = 清理责任不丢。
 			if rerr := serverstore.ReleaseReapClaim(a.DB, id); rerr != nil {
-				log.Printf("gateway: file reaper: release reap claim failed: %v", rerr)
+				log.Printf("gateway: file reaper: release reap claim failed (id=%s gen=%d): %v", id, gen, rerr)
 			}
 			failed++
 			continue
 		}
-		// 收尾：删掉仍带标记的行（若期间被重新登记，标记已清空 ⇒ 这里不会误删）。
-		if err := serverstore.FinishReapedGatewayFile(a.DB, id); err != nil {
-			log.Printf("gateway: file reaper: finish reaped row failed: %v", err)
+		// 收尾：删掉仍带**本世代**标记的行。该谓词同时是 DELETE **返回之后**的第二次
+		// 校验（R4-C-1 要求"DELETE 前与返回后都校验世代未变"）：世代变了就说明这一行
+		// 已归新一代（被重新登记或重新认领），本世代放弃收尾 —— 行留在新一代手里，
+		// 并把 file_id + 世代如实写进日志。
+		finished, err := serverstore.FinishReapedGatewayFile(a.DB, id, gen)
+		if err != nil {
+			log.Printf("gateway: file reaper: finish reaped row failed (id=%s gen=%d): %v", id, gen, err)
 			failed++
 			continue
+		}
+		if !finished {
+			log.Printf("gateway: file reaper: file %s gen=%d changed generation while the upstream delete was in flight; "+
+				"upstream object deleted, ledger row left to the newer generation (abandoned reap)", id, gen)
 		}
 		deleted++
 	}
@@ -169,6 +196,28 @@ var fileDeleteTimeout = 30 * time.Second
 
 // errUnusableReapFileID：台账行里的 id 形状非法（无法拼出合法上游 URL）。
 var errUnusableReapFileID = errors.New("reaper: unusable file id shape")
+
+// logReapBacklog 每轮记一次回收积压（R5-A-12）：只在"有行已被上游反复拒绝"时出声，
+// 正常情况（没有卡住的行）保持零噪音 —— 静默的配额泄漏才是这条缺陷真正贵的部分。
+func logReapBacklog(db *sql.DB) {
+	bl, err := serverstore.GatewayFileReapBacklogStats(db)
+	if err != nil {
+		log.Printf("gateway: file reaper: backlog stats failed: %v", err)
+		return
+	}
+	if bl.Stuck == 0 {
+		return
+	}
+	sample := make([]string, 0, len(bl.StuckSample))
+	for _, s := range bl.StuckSample {
+		sample = append(sample, fmt.Sprintf("%s(gen=%d)", s.FileID, s.Attempts))
+	}
+	log.Printf("gateway: file reaper: %d expired file(s) have failed reaping >=%d times "+
+		"(max attempts=%d, expired total=%d, ever-retried=%d) — 上游在持续拒绝这些对象,自动回收救不回来,"+
+		"需人工处置(管理端按 id / 条件清理);样例: %s",
+		bl.Stuck, serverstore.GatewayFileReapStuckThreshold, bl.MaxAttempts, bl.Expired, bl.Retrying,
+		strings.Join(sample, ", "))
+}
 
 // deleteUpstreamFile 删上游文件：404/410 视为成功（上游已自然过期/被删）。
 func deleteUpstreamFile(client *http.Client, up Upstream, fileID string) error {

@@ -31,6 +31,7 @@
  *
  * @module
  */
+import { lookup as lookupHostname } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
 import { hostname as osHostname } from 'node:os'
 import { DEFAULT_HOST_LOCALE, hostT, stepLabel, type HostLocale } from './host-copy.ts'
@@ -89,6 +90,12 @@ export interface OutboundFetchOptions {
    * site passes the locale resolved from `desktopRuntime` for THIS request.
    */
   locale?: HostLocale
+  /**
+   * Test seam for the resolution gate (CN-9): how a hostname is resolved. The
+   * plugin never sets it — a definition must not be able to replace the
+   * resolver the policy judges with.
+   */
+  resolve?: OutboundHostResolver
 }
 
 /**
@@ -142,6 +149,73 @@ function buildLoopbackList(): BlockList {
 
 const BLOCKED_ADDRESSES = buildBlockedList()
 const LOOPBACK_ADDRESSES = buildLoopbackList()
+
+/**
+ * Address ranges a **resolved DNS name** may not map onto (CN-9, audit
+ * 2026-09-23).
+ *
+ * Deliberately narrower than {@link BLOCKED_ADDRESSES}: the syntax list also
+ * refuses the documentation / benchmarking ranges because they can never carry
+ * a real service, while a NAME that resolves into them is a legitimate
+ * deployment shape. `198.18.0.0/15` is the standard fake-IP range of
+ * transparent proxies (Clash/TUN, and this project's own development box) —
+ * refusing it by name would break every connector for a customer running one,
+ * while the syntax rule for a literal in that range stays in force. Everything
+ * that can reach a real non-public service (loopback, unspecified, private,
+ * link-local/metadata, CGNAT, multicast, reserved) is refused.
+ */
+function buildResolvedNameBlockedList(): BlockList {
+  const list = new BlockList()
+  for (const [network, prefix] of [
+    ['0.0.0.0', 8],
+    ['10.0.0.0', 8],
+    ['100.64.0.0', 10],
+    ['127.0.0.0', 8],
+    ['169.254.0.0', 16],
+    ['172.16.0.0', 12],
+    ['192.0.0.0', 24],
+    ['192.168.0.0', 16],
+    ['224.0.0.0', 4],
+    ['240.0.0.0', 4],
+  ] as const) {
+    list.addSubnet(network, prefix, 'ipv4')
+  }
+  for (const [network, prefix] of [
+    ['::', 128],
+    ['::1', 128],
+    ['64:ff9b::', 96],
+    ['100::', 64],
+    ['fc00::', 7],
+    ['fe80::', 10],
+    ['ff00::', 8],
+  ] as const) {
+    list.addSubnet(network, prefix, 'ipv6')
+  }
+  return list
+}
+
+const RESOLVED_NAME_BLOCKED = buildResolvedNameBlockedList()
+
+/**
+ * Whether one resolved address may NOT be connected to for a DNS-named host.
+ *
+ * IPv4-mapped IPv6 (`::ffff:a.b.c.d`) reaches the IPv4 stack, so the embedded
+ * address is re-checked exactly like {@link classifyHost} does for literals.
+ * @param address - one address as the resolver returned it.
+ * @returns true when the address is non-public enough to refuse.
+ */
+export function isBlockedResolvedAddress(address: string): boolean {
+  const bare = bareHostname(address.trim()).toLowerCase()
+  const family = isIP(bare)
+  if (family === 0) return true
+  const type = family === 4 ? 'ipv4' : 'ipv6'
+  if (RESOLVED_NAME_BLOCKED.check(bare, type)) return true
+  if (type === 'ipv6' && bare.startsWith('::ffff:')) {
+    const mapped = bare.slice('::ffff:'.length)
+    if (isIP(mapped) === 4) return RESOLVED_NAME_BLOCKED.check(mapped, 'ipv4')
+  }
+  return false
+}
 
 /** Hostnames that name a cloud metadata service by name rather than by IP. */
 const METADATA_HOSTNAMES = new Set([
@@ -266,6 +340,95 @@ export function isOutboundUrlAllowed(rawUrl: string): boolean {
 }
 
 /**
+ * Deadline of the policy's OWN name resolution.
+ *
+ * A resolver that never answers must not park the request: the request keeps
+ * its own deadline ({@link OUTBOUND_REQUEST_TIMEOUT_MS}) and reports a timeout
+ * from there. A breach of THIS budget means "could not verify", not "refused".
+ */
+export const OUTBOUND_RESOLUTION_TIMEOUT_MS = 5_000
+
+/** Test seam: how the policy resolves a hostname (defaults to `dns.lookup`). */
+export type OutboundHostResolver = (hostname: string) => Promise<readonly string[]>
+
+const defaultHostResolver: OutboundHostResolver = async (hostname) => {
+  const answers = await lookupHostname(hostname, { all: true, verbatim: true })
+  return answers.map(answer => answer.address)
+}
+
+async function withResolutionDeadline<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      task,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('outbound resolution deadline exceeded')), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Resolve one connector-controlled URL and refuse it when the name maps onto a
+ * non-public address (CN-9, audit 2026-09-23).
+ *
+ * {@link assertOutboundUrlAllowed} is a pure-syntax verdict: a DNS name is
+ * `name` and an `https` name is allowed, so `https://attacker.example/` that
+ * resolves to `169.254.169.254`, to a `10/8` service or to loopback passed
+ * every rule above. This is the resolution half of the policy, called by
+ * {@link outboundFetch} and by the MCP transport fence before a request leaves
+ * the process.
+ *
+ * Residual (documented, NOT closed): the connection is not pinned to the
+ * verified address, so a name that is re-pointed between this lookup and the
+ * connection's own resolution still reaches the second address (DNS rebinding
+ * TOCTOU). Closing it needs a custom `undici` dispatcher (`Agent({connect:
+ * {lookup}})`) pinned per request; the deliberate trade-off here is the short
+ * window against a new outbound dependency, and the residual is reported with
+ * the finding.
+ *
+ * Fail-open cases (both deliberate): IP literals and `localhost` are already
+ * classified by the syntax rule; a resolver error or the resolution deadline
+ * means "could not verify" and leaves the verdict to the connection itself
+ * (which then has its own deadline and reports its own failure).
+ * @param url - the parsed, syntax-approved URL.
+ * @param what - the flow step naming the URL in the error.
+ * @param locale - locale for the error text.
+ * @param options - resolution seam and deadline (tests inject a resolver so the
+ *   verdict never depends on the runner's DNS).
+ * @throws {OutboundUrlBlockedError} when any returned address is non-public.
+ */
+export async function assertResolvedOutboundAddressAllowed(
+  url: URL,
+  what: string,
+  locale: HostLocale = DEFAULT_HOST_LOCALE,
+  options: { resolve?: OutboundHostResolver | undefined; timeoutMs?: number | undefined } = {},
+): Promise<void> {
+  const bare = bareHostname(url.hostname).toLowerCase().replace(/\.$/u, '')
+  if (isIP(bare) !== 0) return
+  if (isLoopbackLiteral(bare)) return
+  const resolve = options.resolve ?? defaultHostResolver
+  let addresses: readonly string[]
+  try {
+    addresses = await withResolutionDeadline(
+      Promise.resolve(resolve(bare)),
+      options.timeoutMs ?? OUTBOUND_RESOLUTION_TIMEOUT_MS,
+    )
+  } catch {
+    return
+  }
+  const blocked = addresses.find(address => isBlockedResolvedAddress(address))
+  if (blocked === undefined) return
+  throw new OutboundUrlBlockedError(hostT(locale, 'outbound.blockedResolved', {
+    what: stepLabel(locale, what),
+    target: url.host,
+    address: blocked,
+  }))
+}
+
+/**
  * Redirect policy every connector-controlled request must use (residual C).
  *
  * Checking the URL the plugin *asks* for is not enough: `fetch` follows
@@ -304,6 +467,65 @@ function describeRedirect(response: Response): string {
 }
 
 /**
+ * Marker behind which a value carries the outbound origins it may reach.
+ *
+ * The MCP transport fence cannot know which connector a live transport belongs
+ * to, and the SDK's 401 path follows URLs handed out by the RESOURCE server
+ * (`WWW-Authenticate: resource_metadata`, then `authorization_servers[0]`).
+ * The only component that knows the policy-checked authorization-server facts
+ * is the OAuth provider, so the provider attaches them to itself
+ * ({@link attachOutboundOrigins}) and the fence reads them back off
+ * `transport._oauthProvider` ({@link allowedOutboundOriginsOf}). A `Symbol`
+ * keeps this out of the provider's public shape and out of JSON.
+ */
+export const OUTBOUND_ALLOWED_ORIGINS = Symbol('picoaide.connectors.outbound.allowed-origins')
+
+/** The origin of one URL, or null when it does not parse. */
+export function originOfUrl(raw: string | undefined | null): string | null {
+  if (raw === undefined || raw === null || raw === '') return null
+  try {
+    return new URL(raw).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Attach the outbound origins `target` is allowed to reach besides its own.
+ *
+ * Origins that do not parse are dropped (the caller passes definition- or
+ * discovery-supplied spellings); duplicates collapse.
+ * @param target - the object to tag (the OAuth provider).
+ * @param origins - candidate URLs/origins.
+ * @returns the same object, for chaining.
+ */
+export function attachOutboundOrigins<T extends object>(
+  target: T,
+  origins: Iterable<string | undefined | null>,
+): T {
+  const allowed = new Set<string>()
+  for (const candidate of origins) {
+    const origin = originOfUrl(candidate)
+    if (origin !== null) allowed.add(origin)
+  }
+  Object.defineProperty(target, OUTBOUND_ALLOWED_ORIGINS, { value: allowed, enumerable: false })
+  return target
+}
+
+/**
+ * The origins attached by {@link attachOutboundOrigins}, or null when the value
+ * carries none (an unknown/foreign provider): callers then fall back to the
+ * general policy instead of pretending to know a scope.
+ * @param value - the provider (or anything).
+ * @returns the origin set, or null.
+ */
+export function allowedOutboundOriginsOf(value: unknown): ReadonlySet<string> | null {
+  if (typeof value !== 'object' || value === null) return null
+  const attached = (value as { [OUTBOUND_ALLOWED_ORIGINS]?: unknown })[OUTBOUND_ALLOWED_ORIGINS]
+  return attached instanceof Set ? attached : null
+}
+
+/**
  * Fetch a connector-controlled URL with the outbound policy AND the redirect
  * fence applied in one place, so no call site can perform one without the
  * other.
@@ -332,6 +554,14 @@ export async function outboundFetch(
   const locale = options.locale ?? DEFAULT_HOST_LOCALE
   const label = stepLabel(locale, what)
   const target = assertOutboundUrlAllowed(rawUrl, what, locale)
+  // CN-9: the syntax verdict above cannot see what a NAME resolves to, so the
+  // resolution gate runs before any byte of the request leaves the process.
+  await assertResolvedOutboundAddressAllowed(
+    target,
+    what,
+    locale,
+    options.resolve === undefined ? {} : { resolve: options.resolve },
+  )
   const deadlineMs = options.timeoutMs ?? OUTBOUND_REQUEST_TIMEOUT_MS
   // `AbortSignal.timeout` answers a bare RangeError for these; name the option
   // instead so a misconfigured deployment sees what to fix.

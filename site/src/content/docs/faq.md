@@ -5,7 +5,7 @@ description: PicoAide Harness 常见问题：与 DeepSeek Harness 的关系、�
 
 ## PicoAide Harness 与 DeepSeek Harness 是什么关系？
 
-PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（当前 pin `dsh-v0.1.5-rc.2`）构建。上游提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务管理与企业级后台。**上游源码原样运行，不魔改**——升级只跟随版本号，不破坏本地扩展。
+PicoAide Harness 基于固定版本的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（当前 pin `dsh-v0.1.6-alpha.2`，真源为仓库根 `upstream.json`）构建。上游提供核心智能体、插件系统与 Web UI；本项目提供桌面封装、本地服务管理与企业级后台。**上游源码原样运行，不魔改**——升级只跟随版本号，不破坏本地扩展。
 
 ## 这是 DeepSeek 官方产品吗？
 
@@ -57,7 +57,9 @@ CLI 直接 spawn 的「CLI 即 skill」方案（自动安装 dws/wecom-cli 等�
 
 ## 可以安装 DSH 插件吗？
 
-可以。从系统 shell 运行 `dsh plugin --profile desktop add <plugin>` / `remove` / `update`（应用固定运行 desktop profile，没有终端/Profile 切换的托盘入口），`--profile <name>` 显式指定；插件变更后需重启应用。
+第三方插件走 **profile 的用户补丁层**：编辑 `~/.picoaide-harness/cordis.patch.yml`，按 Loader patch 语法追加一行，重启应用即可（细节见[桌面客户端](/desktop/)的「插件管理」）。
+
+**不能**用 `dsh plugin --profile desktop …`：`desktop` profile 由桌面应用**独占**，CLI 会直接拒绝该 profile（`profile "desktop" is managed exclusively by the Electron application`），应用也没有终端 / Profile 切换入口。
 
 ## Desktop profile 和已有 web profile 会自动同步吗？
 

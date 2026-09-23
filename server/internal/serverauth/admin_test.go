@@ -1304,7 +1304,7 @@ func TestSessionBoundCSRF(t *testing.T) {
 type fakeBrowserProvider struct{ name string }
 
 func (f *fakeBrowserProvider) Name() string { return f.name }
-func (f *fakeBrowserProvider) AuthURL(state, returnServer string) (string, error) {
+func (f *fakeBrowserProvider) AuthURL(state, returnServer, clientIP string) (string, error) {
 	return "https://idp.example/auth?state=" + state, nil
 }
 func (f *fakeBrowserProvider) HandleCallback(code, state string) (UserInfo, error) {

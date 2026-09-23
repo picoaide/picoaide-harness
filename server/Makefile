@@ -3,6 +3,9 @@ BIN := bin/picoaide-server
 # 服务端镜像名(GHCR,与仓库同名);TAG 默认 latest
 IMAGE ?= ghcr.io/picoaide/picoaide-harness-server
 TAG ?= latest
+# 渠道(镜像内容的一部分):Dockerfile 的 channelassets 上下文取
+# channels-context/<CHANNEL>/(CI 从私有渠道仓检出;本地为空目录 = 不带渠道内容)。
+CHANNEL ?= official
 # 注入镜像内 --version 的版本号(默认取 git describe;可显式覆盖 VERSION=0.4.0)
 VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 
@@ -20,6 +23,24 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 并行测试包的并发数(本地默认 4;CI 的 `go test -p 1` 见 .github/workflows/ci.yml,
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
 TEST_PARALLEL ?= 4
+
+# ---------------------------------------------------------------------------
+# Go 扫描面**唯一真源**(2026-09-23 第六轮审计 R6-C P2-1)
+#
+# 现场:`gofmt`/`vet`/`test` 三面都只扫 `cmd internal demoapps`,而同一个 Go module 里
+# 还有 `webadmin/`(embed.go)与 `scripts/`(mock-upstream.go)两个包 —— CI 的
+# `go vet ./...` / `go test ./...` 覆盖它们,本地 `make check` 不覆盖 ⇒ 这两处写坏
+# 是"本地绿、CI 红";gofmt 违规更是两边都不查。`:72` 当时自称"与 CI 同义",那是不实陈述。
+#
+# 现在三面都由这一份目录真源派生;CI 的 gofmt 扫描面由
+# `scripts/verify-ci-scripts.mjs` 与本文件逐条对拍(只改一侧 ⇒ 红)。
+#
+# **为什么不用 `./...`**:`server/temp/**` 下是未跟踪的本地探针(有时是别人正在写的
+# 半个包),`make test` 用 `./...` 时会被卷进来。这里显式枚举的是**版本库里的** Go 包;
+# 新增 Go 包时把它加进 GO_DIRS(并同步 CI 的 gofmt 扫描面)。
+# ---------------------------------------------------------------------------
+GO_DIRS := cmd internal demoapps webadmin scripts
+GO_PACKAGES := $(addprefix ./,$(addsuffix /...,$(GO_DIRS)))
 
 # 单包测试超时——**必须按上下文（-p）分别取值，余量结论不可跨上下文搬运**。
 #
@@ -66,14 +87,15 @@ test:
 # 2026-09-08(P2-49):改为目录通配——此前手工枚举 9 个包,漏跑 10 个含
 # _test.go 的包(appstore/archiveutil/brand/capabilities/connectors/reports/
 # router/skillmanifest/telemetry/cmd/server),新增包也会再次漏跑。
-# 与 CI 的 `go test ./...` 同义(internal/ + cmd/ 即全部业务包;scripts/ 无测试)。
+# 2026-09-23(R6-C P2-1):扫描面改为从 GO_DIRS 派生(含 webadmin/ 与 scripts/)——
+# 此前与 CI 的 `go test ./...` 不同义(那两个包只在 CI 上跑)。
 test-server:
-	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT_PARALLEL)
+	go test $(GO_PACKAGES) -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT_PARALLEL)
 
 # 开发循环用的快速测试:不加 -count=1,未改动的包直接命中 go test 结果缓存
 # (实测全仓无改动 0.3s;改一个包只重跑那一个包)。发布门禁请用 test-server/check。
 test-server-fast:
-	go test ./internal/... ./cmd/... -p $(TEST_PARALLEL)
+	go test $(GO_PACKAGES) -p $(TEST_PARALLEL)
 
 
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
@@ -91,13 +113,26 @@ webadmin:
 
 # 服务端 Docker 镜像(计划 Task 4.6):本地构建单平台,带版本注入(--version 输出 VERSION)
 # 用法:make docker-image 或 make docker-image IMAGE=ghcr.io/picoaide/picoaide-harness-server TAG=v0.4.0
+#      CHANNEL=<渠道 id>(缺省 official;渠道内容取 channels-context/<id>/)
+#
+# **两个命名构建上下文是必需的**(2026-09-23 审计 K-05):Dockerfile 里
+# `COPY --from=clientassets …`(客户端安装包随镜像分发)与
+# `COPY --from=channelassets …`(渠道内容)。`COPY --from=<name>` 的 <name> 若不是
+# stage、也不是用户命名上下文,BuildKit 会把它当**镜像引用**去拉取 —— 于是
+# `docker build .` 会停在"拉取 clientassets"上(报错完全不指向真实原因,本项目历史上
+# 正是被 Docker Hub 可达性坑过)。两个目录**允许为空**(语义 = 本地镜像不带客户端/渠道
+# 内容,服务端回落内置文案),但目录必须存在:目录形式的 COPY 对空目录合法,对**不存在**
+# 的目录直接构建失败。
 docker-image:
-	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION))"
+	@echo "  构建镜像 $(IMAGE):$(TAG) (VERSION=$(VERSION) CHANNEL=$(CHANNEL))"
 	@# 内置技能资产（镜像内 /opt/picoaide/skills）就在本构建上下文里：
 	@# server/skills/<name>/ —— 随镜像分发，客户端在能力中心按需安装。
 	@# 曾经用 --build-context skillassets=../packages/vendor/memory-evolve 从
 	@# 客户端 vendored 插件包取，2026-09-19 起源头归位服务端，不再需要该上下文。
-	docker build --build-arg VERSION=$(VERSION) \
+	@mkdir -p client-assets/client "channels-context/$(CHANNEL)"
+	docker build --build-arg VERSION=$(VERSION) --build-arg CHANNEL=$(CHANNEL) \
+	  --build-context clientassets=./client-assets \
+	  --build-context channelassets=./channels-context \
 	  -t $(IMAGE):$(TAG) .
 
 # 离线镜像导出已移出仓库:发布流程由 CI 在 tag 时产出 tar 上传更新服务器,
@@ -105,10 +140,11 @@ docker-image:
 # (原 release-export 目标于 2026-09-10 随部署脚本一并移除)
 
 check:
-	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
-	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
-	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
-	go vet ./cmd/... ./internal/... ./demoapps/...
+	# gofmt/vet 的扫描面与 test-server 同源（GO_DIRS）：webadmin/ 与 scripts/ 是同一个
+	# Go module 里的包，CI 的 `go vet ./...` 覆盖它们而此前的本地门禁不覆盖（R6-C P2-1）。
+	# CI 的 gofmt 步骤必须与这里逐字同面（verify-ci-scripts.mjs 对拍），改这里要同步改 CI。
+	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
+	go vet $(GO_PACKAGES)
 	$(MAKE) test-server
 	cd webadmin && npm test && npm run build
 
@@ -116,9 +152,7 @@ check:
 # 与 check 的差异:不跑 webadmin 构建(tsc -b && vite build,~17s)、不带 -count=1。
 # 提交前/发布前仍须跑 `make check`(CI 跑的就是它那一套)。
 check-fast:
-	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
-	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
-	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
-	go vet ./cmd/... ./internal/... ./demoapps/...
+	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
+	go vet $(GO_PACKAGES)
 	$(MAKE) test-server-fast
 	cd webadmin && npm test

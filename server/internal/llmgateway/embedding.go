@@ -79,21 +79,36 @@ func NewEmbedder(db *sql.DB) *Embedder {
 // a well-formed response; 4xx errors stop the chain (client error), 5xx
 // and transport errors move on. The returned token count is the upstream
 // usage when reported, else 0.
+//
+// 计费需要**实际命中的 provider** 时用 EmbedWithProvider(G-03);本函数只为
+// 既有调用方保持签名不变。
 func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][]float32, int64, error) {
+	vecs, tokens, _, err := e.EmbedWithProvider(ctx, model, texts)
+	return vecs, tokens, err
+}
+
+// EmbedWithProvider 与 Embed 完全同路径,额外回传**实际服务本请求的
+// provider id**(G-03,审计 2026-09-23):failover 在 Embedder 内部完成,而
+// 取价必须按真正服务的那家 —— 落账时传 0 会回退到 `ModelPrices(name)`
+// (ORDER BY provider_id LIMIT 1),同名模型挂多 provider 时按 id 最小的那家
+// 计价(实测多收 100×,反向则少收),`usage.provider_id` 也会留 0 使
+// `group=provider` 报表归到"未配置渠道"。
+// 失败时 providerID 为 0(调用方走错误路径,不落账)。
+func (e *Embedder) EmbedWithProvider(ctx context.Context, model string, texts []string) ([][]float32, int64, int64, error) {
 	ups, err := MatchModelsByProtocol(e.db, model, "openai")
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	if len(ups) == 0 {
-		return nil, 0, errors.New("embedding model 未配置或不可用")
+		return nil, 0, 0, errors.New("embedding model 未配置或不可用")
 	}
 	inputJSON, err := json.Marshal(texts)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	body, err := json.Marshal(embedRequest{Model: model, Input: inputJSON})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	var lastErr error
 	for i := range ups {
@@ -118,7 +133,7 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 			continue
 		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return nil, 0, fmt.Errorf("embedding upstream %d", resp.StatusCode)
+			return nil, 0, 0, fmt.Errorf("embedding upstream %d", resp.StatusCode)
 		}
 		if resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("embedding upstream %d", resp.StatusCode)
@@ -162,9 +177,10 @@ func (e *Embedder) Embed(ctx context.Context, model string, texts []string) ([][
 		if tokens == 0 {
 			tokens = er.Usage.PromptTokens
 		}
-		return out, clampTokensNonNeg(tokens), nil
+		// G-03:回传实际命中的 provider id(计费按它取价,不再回退 name 口径)。
+		return out, clampTokensNonNeg(tokens), ups[i].ID, nil
 	}
-	return nil, 0, lastErr
+	return nil, 0, 0, lastErr
 }
 
 // handleEmbeddings proxies /v1/embeddings to the matching upstream with
@@ -219,7 +235,7 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 	// 并发计量(2026-08-31):embedding 也计入对应模型并发。
 	done := a.conc.begin(req.Model)
 	defer done()
-	vecs, tokens, err := NewEmbedder(a.DB).Embed(c.Request.Context(), req.Model, inputs)
+	vecs, tokens, providerID, err := NewEmbedder(a.DB).EmbedWithProvider(c.Request.Context(), req.Model, inputs)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游服务不可用")
 		return
@@ -238,7 +254,13 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 			estimated = true
 		}
 	}
-	usageID, err := serverstore.RecordUsageKindEstimated(a.DB, user.ID, req.Model, tokens, 0, billingKindEmbedding, estimated)
+	// G-03(审计 2026-09-23):落账必须带**实际命中的 provider** —— failover 由
+	// EmbedWithProvider 完成,providerID=0 会回退到 ModelPrices(name) 的
+	// "provider_id 最小那家",同名模型挂多 provider 时按别家价格计费(实测
+	// 100× 多收,反向少收),usage.provider_id 留 0 还会让 group=provider 报表
+	// 归到"未配置渠道"。providerID 为 0(无 provider 命中)时本入口语义与旧
+	// 入口一致(按 name 取价),不会更差。
+	usageID, err := serverstore.RecordUsageKindCachedEstimatedForProvider(a.DB, user.ID, providerID, req.Model, tokens, 0, 0, billingKindEmbedding, estimated)
 	if err != nil {
 		// FIX-05 + G5b:embedding 走同一条结算事务(RecordUsageKind →
 		// settleUsageCostTx)。**任何**结算失败都必须在这里拒绝 —— 事务已回滚,

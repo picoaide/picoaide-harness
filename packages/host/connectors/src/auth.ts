@@ -412,8 +412,22 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     rejectCode(authRequired(hostT(locale, 'auth.flowCancelled', { reason })))
   }
   const onAbort = (): void => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? hostT(locale, 'auth.userCancelled')))
-  options.signal.addEventListener('abort', onAbort, { once: true })
-  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
+  /**
+   * 幂等收尾：摘 abort 监听、停 5 分钟定时器、关回调服务器。
+   *
+   * 第三轮审计 R3B2-1：收尾原先只挂在 `await codePromise` 的 finally 上，而
+   * 「listen 成功之后的 registerClient / 缺 clientId / flowUrl 被出站策略拒」这几步
+   * 都发生在它之前且都可能抛 ⇒ 抛出后回调服务器继续应答 404 五分钟，且孤儿定时器到点
+   * reject 一个无人 await 的 promise ⇒ unhandled rejection（本包 index.ts 写明宿主
+   * 视其为致命、会退出整个应用）。因此建流阶段与等待回调**共用同一处收尾**。
+   */
+  const releaseFlow = (): void => {
+    options.signal.removeEventListener('abort', onAbort)
+    clearTimeout(flowTimer)
+    callbackServer?.close()
+    callbackServer?.closeIdleConnections?.()
+    callbackServer = null
+  }
   const port = await new Promise<number>((resolve, reject) => {
     const server = createServer((req, res) => {
       // The loopback port is fixed before any request can arrive (the listen
@@ -453,50 +467,55 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     server.on('error', reject)
     callbackServer = server
   })
-  const redirectUri = `http://${callbackHost}:${port}/callback`
-  const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
-  const clientId = registrationEndpoint
-    ? await registerClient(
-      auth,
-      redirectUri,
-      registrationEndpoint,
-      options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME,
-      flowOutbound,
-    )
-    : auth.clientId || ''
-  if (!clientId) throw new Error(hostT(locale, 'auth.noClientId'))
-  const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = flowUrl(
-    discovered?.authorizationEndpoint ?? auth.authorizeUrl,
-    'OAuth 授权端点',
-    locale,
-  )
-  authorizeUrl.searchParams.set('response_type', 'code')
-  authorizeUrl.searchParams.set('client_id', clientId)
-  authorizeUrl.searchParams.set('redirect_uri', redirectUri)
-  authorizeUrl.searchParams.set('state', state)
-  const scopes = discovered?.scopes ?? auth.scopes
-  if (scopes) authorizeUrl.searchParams.set('scope', scopes)
-  if (auth.pkce) {
-    authorizeUrl.searchParams.set('code_challenge', challenge)
-    authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
-  }
-  // RFC 8707: the token must be bound to the MCP server resource.
-  if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
-  options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
-  // 无论 codePromise 成功/失败/中止都先清理:失败路径(用户拒绝/OAuth 错误/
-  // abort)此前会绕过清理,残留 5 分钟 flowTimer 与 signal 上的 abort 监听
-  // (2026-09-01 审计修复)。
+  // 取消与超时只对「建流 + 等用户回调」这一段有意义：放在 listen 成功之后再武装，
+  // listen 失败时就不会留下孤儿定时器（R3B2-1）。
+  options.signal.addEventListener('abort', onAbort, { once: true })
+  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
+  // 兜底：即便将来又有新路径绕过 releaseFlow，也不让 rejectCode 变成 unhandled rejection。
+  codePromise.catch(() => {})
+  let redirectUri = ''
+  let clientId = ''
   let code: string
   try {
-    code = await codePromise
+    redirectUri = `http://${callbackHost}:${port}/callback`
+    const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
+    clientId = registrationEndpoint
+      ? await registerClient(
+        auth,
+        redirectUri,
+        registrationEndpoint,
+        options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME,
+        flowOutbound,
+      )
+      : auth.clientId || ''
+    if (!clientId) throw new Error(hostT(locale, 'auth.noClientId'))
+    const codeChallengeMethod = auth.pkce ? 'S256' : undefined
+    const authorizeUrl = flowUrl(
+      discovered?.authorizationEndpoint ?? auth.authorizeUrl,
+      'OAuth 授权端点',
+      locale,
+    )
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('client_id', clientId)
+    authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+    authorizeUrl.searchParams.set('state', state)
+    const scopes = discovered?.scopes ?? auth.scopes
+    if (scopes) authorizeUrl.searchParams.set('scope', scopes)
+    if (auth.pkce) {
+      authorizeUrl.searchParams.set('code_challenge', challenge)
+      authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
+    }
+    // RFC 8707: the token must be bound to the MCP server resource.
+    if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
+    options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
+      options.signal.removeEventListener('abort', onAbort)
+      clearTimeout(flowTimer)
+      callbackServer = null
+      code = await codePromise
   } finally {
-    // The flow settled (code received, error, or abort): stop watching for
-    // further aborts and stop the timeout so the token exchange below is not
-    // racing a cancelled flow.
-    options.signal.removeEventListener('abort', onAbort)
-    clearTimeout(flowTimer)
-    callbackServer = null
+    // 流已结束（拿到 code / OAuth 错误 / 用户取消 / 建流阶段抛出）：摘监听、停定时器、
+    // 关回调服务器，让后续的 token 交换不与已取消的流竞争。
+    releaseFlow()
   }
 
   throwIfAborted(options.signal)
@@ -597,7 +616,26 @@ export async function refreshOAuthToken(
 
 /** Device-code flow: surface verification URL + user code, poll until connected. */
 async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
-  const auth = def.auth as DeviceAuthConfig
+  const auth = def.auth as DeviceAuthConfig | undefined
+  // V3 follow-up to CN-3: "device" is also the catalog's fallback label for a
+  // definition that declares NEITHER an `auth` block NOR `tokenFields`
+  // (`parseServerConnectors` infers it). Such a connector has no authorization
+  // step at all — its MCP server needs no credential — so there is nothing to
+  // announce and nothing to poll. (Before CN-3 this shape connected and worked;
+  // running a device flow for it turned it into a permanent `unauthorized`.)
+  if (auth === undefined) {
+    return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  }
+  // B-1 (第三轮审计 R3-B)：`auth` 块存在但 `verificationUrl` 缺失/空白是**定义错误**，
+  // 不能与上面"根本没有授权步骤"合并成同一档 —— 合并的后果是：行报 connected、MCP 注册
+  // 成功，而落盘凭据里没有任何授权物（`hasDeviceAuthorization` 恒 false），用户既连不上
+  // 也没有任何可执行动作能修好（CN-3 修复要消灭的形态经此门回归；A/B 探针证实：同一
+  // 定义在 `ae1bccc222^` 上不注册，在此判据下变成 connected）。
+  // 与本函数下方 conn-4 的口径一致：验证页不可用的 device 行**不得**静默报 connected。
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
+  if (typeof auth.verificationUrl !== 'string' || auth.verificationUrl.trim() === '') {
+    throw authRequired(hostT(locale, 'auth.deviceVerificationUrlMissing'))
+  }
   // conn-4: `verificationUrl` is definition-supplied (the server-issued
   // catalog carries it) and the client renders it as a clickable `<a href>`.
   // It was the ONLY definition-controlled URL in this package that skipped the
@@ -605,7 +643,6 @@ async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Pa
   // verbatim. Check it exactly like its sibling `authorizeUrl`, and fail the
   // connect loudly (a device row whose verification page is unusable must not
   // silently report "connected").
-  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   const verificationUrl = flowUrl(auth.verificationUrl, '设备授权验证地址', locale).toString()
   options.onRequest({
     connectorId: def.id,
@@ -621,9 +658,26 @@ interface AuthProbe {
   isConnected: () => Promise<boolean>
 }
 
+/**
+ * Device-flow probe: the flow is stateless (2026-08-25 decision — the CLI
+ * connector was removed and no device-token endpoint is polled), so "the flow
+ * finished" is all this can observe.
+ *
+ * 2026-09-23 审计 CN-3 was about the ROW claiming `connected` without any
+ * authorization artifact — the probe was never the right place to fix that:
+ * the URL policy of `verificationUrl` is enforced HERE (before the poll) and
+ * `tests/device-verification-url-policy.spec.ts` pins that a well-formed
+ * verification address resolves, while the artifact question is answered where
+ * the credential is judged (`index.ts`: `credentialUsable` + the post-flow
+ * gate, which leaves the row `unauthorized` and registers nothing when a
+ * device connector holds neither a declared field value, an access token nor
+ * the public-endpoint marker). Keeping the two apart is what makes both
+ * invariants testable: a bad URL fails HERE, a missing artifact fails THERE.
+ * @param def - connector definition.
+ * @param options - the connect request.
+ * @returns the probe the poll loop asks.
+ */
 function createProbe(def: ConnectorDef, options: AuthRunOptions): AuthProbe {
-  // 决策 2026-08-25:CLI 连接器已删除(CLI 即 skill)——device 连接器默认
-  // 无状态探测,完成后立即成功。
   void def
   void options
   return { isConnected: async () => true }

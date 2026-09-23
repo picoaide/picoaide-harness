@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
@@ -8,11 +8,16 @@ import {
   OFFICIAL_BUILD_DEFAULTS,
   channelArtifactName,
   prepareChannelBuilderOverrides,
+  defaultChannelBuilderConfigDir,
+  defaultChannelBuildDir,
+  CHANNEL_BUILDER_CONFIG_FILENAME,
   readChannelDesktopBranding,
   resolveBuildChannelId,
   resolveChannelBuildContext,
   stageChannelProfile,
+  type ChannelBuilderOverridePaths,
 } from '../scripts/channel-build.ts'
+import { PACK_APP_ROOT_ENTRIES } from '../scripts/pack-app-root.mjs'
 import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -39,6 +44,17 @@ function readGeneratedConfig(path: string): Record<string, any> {
       .replace(/^\/\/[^\n]*\n/u, '')
       .replace(/^module\.exports = /u, ''),
   ) as Record<string, any>
+}
+
+/**
+ * 造一对**分离的**生成物落点：随包配置进 `build/`（会进 asar），electron-builder
+ * 配置进 `temp/`（**绝不进包**，见 channel-build.ts 的 defaultChannelBuilderConfigDir）。
+ *
+ * 生产默认值就是这两个目录；用例用临时目录替代，免得污染真包根。
+ */
+function tempOverridePaths(prefix: string): ChannelBuilderOverridePaths {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  return { buildDir: join(root, 'build'), configDir: join(root, 'temp') }
 }
 
 /** 造一个只含 channel.json 的临时渠道仓。 */
@@ -101,7 +117,7 @@ describe('official channel is a no-op', () => {
     // 官方数据目录逐字节不变（存量用户数据不搬家）
     expect(context.homeDir).toBe(PRODUCT_DSH_HOME_DIR)
     // 空数组 = 产物与渠道化改造前逐字节一致。
-    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-off-')))).toEqual([])
+    expect(prepareChannelBuilderOverrides(context, tempOverridePaths('dsh-off-'))).toEqual([])
   })
 
   it('expands the official artifact names as before', () => {
@@ -147,8 +163,8 @@ describe('channel build context', () => {
     // 覆盖走**生成的配置文件**,而不是 `--config.x=y` 命令行开关:
     // electron-builder 的 CLI 点号覆盖不支持数组下标(protocols),实测直接以
     // "unknown property 'protocols[0]'" 拒绝整次构建。
-    const workDir = mkdtempSync(join(tmpdir(), 'dsh-channel-cfg-'))
-    const args = prepareChannelBuilderOverrides(context, workDir)
+    const paths = tempOverridePaths('dsh-channel-cfg-')
+    const args = prepareChannelBuilderOverrides(context, paths)
     expect(args[0]).toBe('--config')
     const config = readGeneratedConfig(args[1]!)
     expect(config.productName).toBe('Acme AI 助手')
@@ -180,7 +196,7 @@ describe('channel build context', () => {
     expect(context.productName).toBe(OFFICIAL_BUILD_DEFAULTS.productName)
     expect(context.brandDir).toBe(join(repoRoot, 'brands', 'official'))
     // 仍然带上覆盖参数（appId/productName 用官方值），产物可复现。
-    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-fb-')))).not.toEqual([])
+    expect(prepareChannelBuilderOverrides(context, tempOverridePaths('dsh-fb-'))).not.toEqual([])
   })
 
   it('uses identity.display_name when the channel omits a desktop section', () => {
@@ -196,15 +212,15 @@ describe('deep link scheme', () => {
     const context = resolveChannelBuildContext({ env: {}, repoRoot })
     expect(context.deepLinkScheme).toBe('picoaide')
     // 官方渠道连配置文件都不生成 —— 产物与改造前一致。
-    expect(prepareChannelBuilderOverrides(context, mkdtempSync(join(tmpdir(), 'dsh-none-')))).toEqual([])
+    expect(prepareChannelBuilderOverrides(context, tempOverridePaths('dsh-none-'))).toEqual([])
   })
 
   it('uses the channel scheme and registers it with the OS', () => {
     const root = channelRepo('acme', acmeChannel())
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })
     expect(context.deepLinkScheme).toBe('acmeai')
-    const workDir = mkdtempSync(join(tmpdir(), 'dsh-scheme-'))
-    const args = prepareChannelBuilderOverrides(context, workDir)
+    const paths = tempOverridePaths('dsh-scheme-')
+    const args = prepareChannelBuilderOverrides(context, paths)
     expect(readGeneratedConfig(args[1]!).protocols).toEqual([{ name: 'Acme AI Link', schemes: ['acmeai'] }])
   })
 
@@ -359,6 +375,26 @@ describe('stageChannelProfile', () => {
     expect(existsSync(join(buildDir, 'channel.json'))).toBe(false)
   })
 
+  it('deletes the pack-tool residue on every build（2026-09-23 复审 N-1）', () => {
+    // 打包配置曾经写在 build/ 里、而 build/ 是暂存白名单条目（整目录复制）⇒ 它会进
+    // asar。现在它生成在包根 temp/，但**旧版本留下的那一份**仍可能躺在 build/ 里；
+    // 就位这一步每次构建都清它（渠道构建与官方构建都一样）。
+    const channelCase = channelDir({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
+    writeFileSync(join(channelCase.buildDir, CHANNEL_BUILDER_CONFIG_FILENAME), 'module.exports = {}\n')
+    stageChannelProfile(
+      resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: channelCase.repoRoot }),
+      channelCase.buildDir,
+    )
+    expect(existsSync(join(channelCase.buildDir, CHANNEL_BUILDER_CONFIG_FILENAME))).toBe(false)
+    // 同一分支里必须写的是随包配置（清理不能把该带的东西一起清掉）。
+    expect(existsSync(join(channelCase.buildDir, 'channel.json'))).toBe(true)
+
+    const officialCase = channelDir({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
+    writeFileSync(join(officialCase.buildDir, CHANNEL_BUILDER_CONFIG_FILENAME), 'module.exports = {}\n')
+    stageChannelProfile(resolveChannelBuildContext({ env: {}, repoRoot: officialCase.repoRoot }), officialCase.buildDir)
+    expect(existsSync(join(officialCase.buildDir, CHANNEL_BUILDER_CONFIG_FILENAME))).toBe(false)
+  })
+
   it('refuses a package whose channel_id disagrees with the build channel', () => {
     // 目录名与 channel_id 不一致 = 渠道包放错了位置:装出来的客户端会声称自己
     // 是另一个渠道(服务端镜像按 channel_id 对账,两边各说各话)。
@@ -399,7 +435,7 @@ describe('stageChannelProfile', () => {
     // 打包入口全部只经这一个函数拿渠道参数:就位动作挂在这里才不会漏。
     const { repoRoot, buildDir } = channelDir({ channel_id: 'acme', identity: { display_name: 'Acme AI' } })
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot })
-    prepareChannelBuilderOverrides(context, buildDir)
+    prepareChannelBuilderOverrides(context, { buildDir, configDir: mkdtempSync(join(tmpdir(), 'dsh-wired-')) })
     expect(existsSync(join(buildDir, 'channel.json'))).toBe(true)
   })
 
@@ -410,3 +446,47 @@ describe('stageChannelProfile', () => {
     expect(build.files).toContain('build/channel.json')
   })
 })
+
+/**
+ * 渠道覆盖文件不得进入打包输入（2026-09-23 独立复审 N-1）。
+ *
+ * 机制：`build/` 是暂存白名单条目，`stagePackAppRoot()` 会**整目录**复制它 ⇒ 任何
+ * 写在 `build/` 里的打包工具中间产物都会进 `app.asar`。渠道构建生成的
+ * electron-builder 配置（含渠道 productName/appId/深链 scheme/产物名模板）曾经就
+ * 写在 `build/` 里、且生成时机早于暂存 ⇒ **beta 与各品牌渠道的 asar 都多出这个
+ * 文件**；官方渠道不生成它，所以本机跑官方 `package-dir.mjs` 看不见，而 CI 的
+ * `ci-package-clients.sh` 会为每个非 official 渠道各打一次包。
+ *
+ * 这里的判据有两层：**落点**（生成物必须在随包应用根之外）与**清理**（旧版本留在
+ * `build/` 里的残留每次构建都要清）。产物侧还有一道：`verify-packaged-runtime.ts`
+ * 的禁止形态表；输入侧另有一道：`pack-app-root.mjs` 的 `PACK_APP_ROOT_FORBIDDEN_ENTRIES`。
+ */
+describe('channel builder overrides never enter the packaged app root', () => {
+  it('writes the generated config outside every pack-app-root entry', () => {
+    // 缺省落点必须是**随包白名单之外**的目录：只要首段路径落在白名单条目里，
+    // 整目录复制就会把它带进 asar（`build` 就是这样一个条目）。
+    const desktopDir = desktopRoot
+    const rel = relative(desktopDir, defaultChannelBuilderConfigDir())
+    const firstSegment = rel.split(sep)[0]
+    expect(PACK_APP_ROOT_ENTRIES).not.toContain(firstSegment)
+    // 随包配置的落点反过来必须在白名单里 —— 它才是要进包的那一份。
+    expect(PACK_APP_ROOT_ENTRIES).toContain(relative(desktopDir, defaultChannelBuildDir()).split(sep)[0])
+  })
+
+  it('keeps the runtime channel.json in build/ and the builder config out of it', () => {
+    const root = channelRepo('acme', acmeChannel())
+    const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })
+    const paths = tempOverridePaths('dsh-split-')
+    const args = prepareChannelBuilderOverrides(context, paths)
+
+    // 正向：随包配置在 build/（暂存会复制它 ⇒ 进 asar），这是**要**进包的那一份。
+    expect(existsSync(join(paths.buildDir!, 'channel.json'))).toBe(true)
+    // 反例：打包配置**不在** build/ 里（否则暂存整目录复制会把它带进 asar）。
+    expect(existsSync(join(paths.buildDir!, CHANNEL_BUILDER_CONFIG_FILENAME))).toBe(false)
+    // 它确实生成了，只是落在暂存输入之外。
+    expect(args[0]).toBe('--config')
+    expect(dirname(args[1]!)).toBe(paths.configDir)
+    expect(existsSync(join(paths.configDir!, CHANNEL_BUILDER_CONFIG_FILENAME))).toBe(true)
+  })
+})
+

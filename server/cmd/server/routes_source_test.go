@@ -22,9 +22,14 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -420,39 +425,303 @@ func collectGoFiles(root string) ([]string, error) {
 // Wasm）。生产侧漏填一整片路由的失败形态是静默的（没有编译错误、
 // 路由表少几条、日志里没有一行）。
 //
-// ⚠️ 能力边界（不夸大）：这是**源码文本**断言 —— 它能发现"字段没传"，
-// 不能发现"传错了值"（例如 Ready 传了一个必崩的 handler）。值层面的判据靠
-// 装配级行为用例（如 TestUploadCleanupSchedulerIsWired、TestReadyDepMissingFailsFast）。
+// 2026-09-23 审计 T-01/T-02 把它从「源码文本 strings.Contains」升级为
+// 「AST 解析 + reflect 派生字段清单」：
+//   - 旧判据下，把 main.go 的 `Wasm: wasmPlat.API,` **整行注释掉**，8 条路由守卫
+//     全部 PASS（生产静默丢 39 条路由）；`Wasm: nil,` 同样通过（文本里仍有
+//     "Wasm:"）；
+//   - 字段清单是**手写的 9 个名字**（而日志写着"10 个"）—— 给 productionDeps
+//     加第 10 个字段并漏传，也没有任何判据会红。
+//
+// 现在：字段清单由 `reflect` 从结构体派生（新增字段自动进入判据），字面量由
+// `go/parser` 解析成 key → 表达式（注释/字符串不再算数），并逐字段拒绝 nil/空字面量。
+//
+// ⚠️ 能力边界（不夸大）：值层面的判据只覆盖"一眼可判的零值形态"（`nil`、`""`），
+// 语义级判据（例如 `Wasm: maybeNil()`）与 Ready 传了必崩 handler 这类形态，靠
+// TestProductionDepsNilGatesDeclaredSlices 与 TestReadyDepMissingFailsFast。
 func TestProductionAssemblyPassesEveryDep(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("读 main.go: %v", err)
-	}
-	text := string(src)
-	const call = "registerProductionRoutes(r, productionDeps{"
-	start := strings.Index(text, call)
-	if start < 0 {
-		t.Fatalf("main.go 里找不到 %q 调用点", call)
-	}
-	rest := text[start+len(call):]
-	// 取到该字面量的结尾（生产调用点是一段连续的 productionDeps{...} 字面量）。
-	end := strings.Index(rest, "})")
-	if end < 0 {
-		t.Fatal("main.go 的 productionDeps 字面量没有闭合")
-	}
-	literal := rest[:end]
+	fields := productionDepsFieldNames(t)
+	assigned := mainProductionDepsLiteral(t)
 
-	// 字段清单来自 productionDeps 的结构体定义（新增字段会被强制登记）。
-	for _, field := range []string{
-		"DB:", "Auth:", "Admin:", "Wasm:", "Ready:",
-		"SkillSeed:", "DataDir:", "Version:", "ChannelID:",
-	} {
-		if !strings.Contains(literal, field) {
-			t.Errorf("main() 的 productionDeps 漏传 %s —— 依赖漏填会让对应路由整片消失"+
-				"（或探针注册了却必崩），且在路由表上完全看不出来", field)
+	// 方向 1：结构体的每个字段都必须在字面量里被赋值（注释掉 = 不在 AST 里 = 红）。
+	var missing []string
+	for _, name := range fields {
+		if _, ok := assigned[name]; !ok {
+			missing = append(missing, name)
 		}
 	}
-	t.Logf("生产装配调用点已传入全部 %d 个依赖字段", 10)
+	if len(missing) > 0 {
+		t.Errorf("main() 的 productionDeps 漏传 %s —— 依赖漏填会让对应路由整片消失"+
+			"（或探针注册了却必崩），且在路由表上完全看不出来。\n"+
+			"⚠️ 判据解析的是 AST：把该行**注释掉**与**删掉**在这里是同一件事。",
+			strings.Join(missing, ", "))
+	}
+
+	// 方向 2：字面量里的键必须是结构体字段（改名/拼错当场红）。
+	for _, name := range fields {
+		_ = assigned[name]
+	}
+	var unknown []string
+	for name := range assigned {
+		known := false
+		for _, field := range fields {
+			if field == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		t.Errorf("main() 的 productionDeps 字面量里有 productionDeps 结构体不存在的字段：%s"+
+			"（拼错字段名在当前判据下不再是静默的）", strings.Join(unknown, ", "))
+	}
+
+	// 方向 3：值不得是零值形态（T-01 的第二个变体 `Wasm: nil,`：文本里仍有 "Wasm:"，
+	// 旧判据照绿，而 registerWasm 首行 `if d.Wasm == nil { return }` 会整片跳过）。
+	for _, name := range fields {
+		expr, ok := assigned[name]
+		if !ok {
+			continue
+		}
+		if nilValueExpression(expr) {
+			t.Errorf("main() 的 productionDeps.%s 被赋成零值表达式（%s）—— 与漏传等价："+
+				"nil 依赖会让对应路由整片消失（registerWasm 静默 return），空字符串会让"+
+				"依赖该取值的装配面静默退化", name, expressionText(expr))
+		}
+	}
+	t.Logf("生产装配调用点已传入全部 %d 个依赖字段（字段清单由 reflect 从结构体派生）", len(fields))
+}
+
+// TestProductionDepsNilGatesDeclaredSlices：**逐字段置零实跑路由树**（运行期事实）。
+//
+// 为什么需要它：AST 判据能发现"字段没写/写了 nil"，但"这个字段到底管不管路由"只有
+// 跑一遍才知道 —— 而 main() 漏填的后果恰恰是"运行期整片路由消失"。
+// 这里对 productionDeps 的**每个**字段（清单由 reflect 派生）构造一份"只有该字段为
+// 零值"的依赖并实跑 registerProductionRoutes，断言：
+//   - 消失的路由集合与声明表（wasmGatedRoutes）**逐条相等** —— 新增一片条件注册
+//     而没人更新声明表 ⇒ 红；声明了却不再消失 ⇒ 反方向也红；
+//   - 置零会丢路由的字段，在 main() 的字面量里必须是**非零值表达式**
+//     （把上面那条 AST 判据绑到"运行期证明它有后果"上）；
+//   - 置零即**装配期 fail-loud**（panic）的字段，必须登记进
+//     productionDepsFailFastFields —— fail-loud 是可接受的失效形态（比静默丢路由
+//     好），但同样不许是"没人知道"的隐式行为；
+//   - 其余字段置零不得让任何路由消失（新增条件注册必须显式登记）。
+func TestProductionDepsNilGatesDeclaredSlices(t *testing.T) {
+	full := routeKeys(productionReferenceTree(t))
+	fields := productionDepsFieldNames(t)
+	gatingFields := map[string]map[string]bool{}
+	failFastSeen := map[string]bool{}
+
+	for _, name := range fields {
+		gated, panicMsg := treeWithZeroedField(t, name)
+		if panicMsg != "" {
+			reason, declaredFailFast := productionDepsFailFastFields[name]
+			if !declaredFailFast {
+				t.Errorf("productionDeps.%s 置零后装配期 panic（%s）—— 请把它登记进 "+
+					"productionDepsFailFastFields：fail-loud 可接受，但不许是没人知道的隐式行为",
+					name, panicMsg)
+				continue
+			}
+			failFastSeen[name] = true
+			if name == "Ready" && !strings.Contains(panicMsg, "Ready") {
+				t.Errorf("Ready 的 fail-fast 消息必须点名 Ready，实得 panic=%q", panicMsg)
+			}
+			t.Logf("productionDeps.%s 置零 ⇒ 装配期 fail-loud（%s）", name, reason)
+			continue
+		}
+		disappeared := diffKeys(full, gated)
+		if len(disappeared) == 0 {
+			continue
+		}
+		gatingFields[name] = keysToSet(disappeared)
+	}
+
+	// 登记表不得留死条目：写了"某字段 fail-loud"但它其实不 panic（会被下面
+	// gating/静默分支抓到，这里再对一次，避免登记表本身变成装饰）。
+	for name, reason := range productionDepsFailFastFields {
+		if !failFastSeen[name] {
+			t.Errorf("productionDepsFailFastFields 登记了 %s（%s），但该字段置零后并没有 fail-loud "+
+				"—— 失效形态变了，请更新登记", name, reason)
+		}
+	}
+
+	if len(gatingFields) == 0 {
+		t.Fatal("没有任何字段置零会让路由消失 —— 判据空转（productionReferenceTree 或 productionDeps 已变）")
+	}
+	wasmGated, hasWasm := gatingFields["Wasm"]
+	if !hasWasm {
+		t.Fatalf("productionDeps.Wasm 置零后没有路由消失（registerWasm 的 `d.Wasm == nil` 守卫变了？）")
+	}
+	declared := make(map[string]bool, len(wasmGatedRoutes))
+	for _, key := range wasmGatedRoutes {
+		declared[key] = true
+	}
+	if undeclared := diffKeys(wasmGated, declared); len(undeclared) > 0 {
+		t.Errorf("d.Wasm == nil 时有路由消失却没有登记（新增条件注册却没人更新声明表）：\n  %s",
+			strings.Join(undeclared, "\n  "))
+	}
+	if stale := diffKeys(declared, wasmGated); len(stale) > 0 {
+		t.Errorf("声明表里的路由在 d.Wasm == nil 时并未消失（路由被删/不再条件注册）：\n  %s",
+			strings.Join(stale, "\n  "))
+	}
+
+	// 把"运行期证明会丢路由的字段"绑回 main() 的字面量：漏填/写 nil 都是真事故。
+	assigned := mainProductionDepsLiteral(t)
+	for name := range gatingFields {
+		expr, ok := assigned[name]
+		if !ok {
+			t.Errorf("运行期证明 productionDeps.%s 置零会丢 %d 条路由，而 main() 的字面量里没有这个字段",
+				name, len(gatingFields[name]))
+			continue
+		}
+		if nilValueExpression(expr) {
+			t.Errorf("运行期证明 productionDeps.%s 置零会丢 %d 条路由，而 main() 把它赋成了零值表达式（%s）",
+				name, len(gatingFields[name]), expressionText(expr))
+		}
+	}
+	t.Logf("逐字段置零实测：%d 个字段会条件注册路由（Wasm=%d 条），与声明表一致",
+		len(gatingFields), len(wasmGated))
+}
+
+// productionDepsFailFastFields：置零即**装配期 panic** 的字段（fail-loud，可接受，
+// 但必须显式登记 —— 这份表由 TestProductionDepsNilGatesDeclaredSlices 双向对着
+// 运行期事实校验：登记了却不 panic、或 panic 了却没登记，都红）。
+//
+// 与 wasmGatedRoutes 的区别：那些字段置零会**静默**丢路由（最危险的形态），
+// 这些字段置零会当场炸掉装配（安全但需要人知道）。
+var productionDepsFailFastFields = map[string]string{
+	// gin.WrapH(nil) 注册期不 panic ⇒ 曾经表现为"每个 /readyz 请求 500"。
+	"Ready": "装配期 panic 且点名 Ready（见 TestReadyDepMissingFailsFast）",
+	// Auth / Admin 是两套 handler 集合，服务端路由注册期就会解引用它们。
+	"Auth":  "装配期 panic（nil handler 集合在路由注册期被解引用）",
+	"Admin": "装配期 panic（同上）",
+}
+
+// productionDepsFieldNames 返回 productionDeps 的字段名（**从结构体派生**）。
+//
+// T-02 实测：旧判据手写 9 个名字、日志却写"10 个"，给结构体加第 10 个字段并漏传时
+// 全部守卫照绿 —— 手写清单会与结构体脱钩。reflect 派生后，新增字段自动进入判据。
+func productionDepsFieldNames(t *testing.T) []string {
+	t.Helper()
+	typ := reflect.TypeOf(productionDeps{})
+	if typ.Kind() != reflect.Struct {
+		t.Fatalf("productionDeps 不是结构体（%s）", typ.Kind())
+	}
+	names := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		names = append(names, typ.Field(i).Name)
+	}
+	return names
+}
+
+// mainProductionDepsLiteral 解析 main.go 里 `registerProductionRoutes(r, productionDeps{…})`
+// 的复合字面量，返回 字段名 → 右侧表达式。
+//
+// 用 go/parser 而不是 strings.Contains：注释、字符串与其它函数体里的同名键都不再算数
+// （T-01 的绕过形态就是一行 `// Wasm: wasmPlat.API,`）。
+func mainProductionDepsLiteral(t *testing.T) map[string]ast.Expr {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("解析 main.go: %v", err)
+	}
+	var literal *ast.CompositeLit
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) != 2 {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || ident.Name != "registerProductionRoutes" {
+			return true
+		}
+		composite, ok := call.Args[1].(*ast.CompositeLit)
+		if !ok {
+			t.Fatalf("registerProductionRoutes 的第二个实参不是复合字面量（main.go:%d）",
+				fset.Position(call.Pos()).Line)
+		}
+		literal = composite
+		return false
+	})
+	if literal == nil {
+		t.Fatal("main.go 里找不到 `registerProductionRoutes(…, productionDeps{…})` 调用点")
+	}
+	assigned := make(map[string]ast.Expr, len(literal.Elts))
+	for index, elt := range literal.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			t.Fatalf("productionDeps 字面量第 %d 个元素不是 `字段: 值` 形态（位置 %s）——"+
+				"位置形态无法与结构体字段对齐，判据会失去意义",
+				index, fset.Position(elt.Pos()))
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			t.Fatalf("productionDeps 字面量的键不是标识符（位置 %s）", fset.Position(kv.Key.Pos()))
+		}
+		if _, duplicate := assigned[key.Name]; duplicate {
+			t.Fatalf("productionDeps 字面量里字段 %s 被赋值两次", key.Name)
+		}
+		assigned[key.Name] = kv.Value
+	}
+	return assigned
+}
+
+// nilValueExpression 判断表达式是否是"一眼可判的零值形态"：`nil`、`(nil)`、`""`。
+// 只覆盖源码文本层面的形态；语义级判据（`Wasm: maybeNil()`）由运行期用例负责。
+func nilValueExpression(expr ast.Expr) bool {
+	switch node := expr.(type) {
+	case *ast.Ident:
+		return node.Name == "nil"
+	case *ast.ParenExpr:
+		return nilValueExpression(node.X)
+	case *ast.BasicLit:
+		return node.Kind == token.STRING && strings.Trim(node.Value, "`\"") == ""
+	}
+	return false
+}
+
+// expressionText 把表达式还原成源码片段（失败信息用）。
+func expressionText(expr ast.Expr) string {
+	var b strings.Builder
+	if err := format.Node(&b, token.NewFileSet(), expr); err != nil {
+		return "<无法格式化>"
+	}
+	return b.String()
+}
+
+// treeWithZeroedField 用"只有 name 字段为零值"的依赖实跑 registerProductionRoutes，
+// 返回路由集合；装配期 panic 时返回 panic 文本（路由集合为 nil）。
+func treeWithZeroedField(t *testing.T, name string) (map[string]bool, string) {
+	t.Helper()
+	deps := testProductionDeps(t, nil)
+	value := reflect.ValueOf(&deps).Elem()
+	field := value.FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("productionDeps 没有字段 %s", name)
+	}
+	field.Set(reflect.Zero(field.Type()))
+
+	gin.SetMode(gin.TestMode)
+	r := newEngine()
+	installAPIMiddleware(r)
+	var panicMsg string
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicMsg = fmt.Sprint(rec)
+			}
+		}()
+		registerProductionRoutes(r, deps)
+	}()
+	if panicMsg != "" {
+		return nil, panicMsg
+	}
+	return routeKeys(r), ""
 }
 
 // TestReadyDepMissingFailsFast：Ready 漏填必须在**装配期**炸掉，而不是变成

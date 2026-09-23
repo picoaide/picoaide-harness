@@ -317,6 +317,73 @@ func TestUsageAggregateWeekMonth(t *testing.T) {
 	}
 }
 
+// TestUsageAggregateWeekTailAndBoundaryWeeks 钉死 group=week 的补零桶口径
+// (G-05,审计 2026-09-23 P1):起点必须对齐到 from 所在周的**周一**,否则窗口
+// 尾部那个"不完整周"的桶号与 SQL(date_trunc('week') = 周一)对不上,补零重建
+// 时该周已聚合的数据被整体丢弃(实测 3 次/600 token 报成 1 次/100)。
+// 另覆盖跨月/跨年边界周:桶名 = 周一(可能落在上一个月/上一年),且不产生
+// 重复或多余空桶。
+func TestUsageAggregateWeekTailAndBoundaryWeeks(t *testing.T) {
+	db, cleanup := newUsageDB(t)
+	defer cleanup()
+	uid := mustUserID(t, db)
+	insert := func(wall string, pt int64) {
+		t.Helper()
+		id, err := RecordUsageKind(db, uid, "m", pt, 1, "chat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		setCreatedAt(t, db, id, wall)
+	}
+	check := func(name string, fromS, toS string, wantLabels []string, wantReq, wantPT int64) {
+		t.Helper()
+		rows, err := UsageAggregate(db, bjDate(t, fromS), bjDate(t, toS), "week")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var labels []string
+		var req, pt int64
+		seen := map[string]bool{}
+		for _, r := range rows {
+			if seen[r.Label] {
+				t.Fatalf("%s: 桶重复: %v", name, labels)
+			}
+			seen[r.Label] = true
+			labels = append(labels, r.Label)
+			req += r.Requests
+			pt += r.PromptTokens
+		}
+		if len(labels) != len(wantLabels) {
+			t.Fatalf("%s: labels = %v, want %v(桶数不符:丢尾部周或多补空桶)", name, labels, wantLabels)
+		}
+		for i := range wantLabels {
+			if labels[i] != wantLabels[i] {
+				t.Fatalf("%s: labels = %v, want %v", name, labels, wantLabels)
+			}
+		}
+		if req != wantReq || pt != wantPT {
+			t.Fatalf("%s: requests=%d prompt_tokens=%d, want %d/%d", name, req, pt, wantReq, wantPT)
+		}
+	}
+
+	// (a) 尾部不完整周:2026-09-09(周三)..09-15(周二) 覆盖 09-07 与 09-14 两周桶。
+	// 旧实现从 from=周三 起逐周 +7 ⇒ 只产出 [09-07],09-14 桶的两行被丢弃。
+	insert("2026-09-10 10:00:00", 100) // 桶 09-07
+	insert("2026-09-14 10:00:00", 200) // 桶 09-14
+	insert("2026-09-15 10:00:00", 300) // 桶 09-14
+	check("tail", "2026-09-09", "2026-09-15", []string{"2026-09-07", "2026-09-14"}, 3, 600)
+
+	// (b) 跨月边界周:2026-09-28(周一)..10-04(周日) 与 10-05(周一)..10-11。
+	insert("2026-09-30 10:00:00", 10) // 桶 2026-09-28(周一在 9 月)
+	insert("2026-10-06 10:00:00", 20) // 桶 2026-10-05
+	check("cross-month", "2026-09-29", "2026-10-06", []string{"2026-09-28", "2026-10-05"}, 2, 30)
+
+	// (c) 跨年边界周:2025-12-29(周一)..2026-01-04(周日) 与 2026-01-05(周一)。
+	insert("2026-01-01 10:00:00", 40) // 桶 2025-12-29(周一在去年)
+	insert("2026-01-07 10:00:00", 70) // 桶 2026-01-05
+	check("cross-year", "2025-12-30", "2026-01-07", []string{"2025-12-29", "2026-01-05"}, 2, 110)
+}
+
 // TestUsageAggregateKindSplit: embedding 行单独计入 embed_requests/embed_tokens。
 func TestUsageAggregateKindSplit(t *testing.T) {
 	db, cleanup := newUsageDB(t)

@@ -18,9 +18,16 @@
  * 详见 docs/decisions/2026-09-05-prerelease-test-channel.md。
  *
  * 子命令:
- *   set <version>  写入两处 package.json(接受 2.3.0 或 v2.3.0),输出待办指引
+ *   set <version>  写入两处 package.json(接受 2.3.0 或 v2.3.0;无 v 前缀时打警告 ——
+ *                  写进 manifest 的永远是去 v 的形式,但 **git tag 必须带 v**)
  *   check [tag]    校验 tag(或 git describe)与两处 package.json 一致;
  *                  无 tag(PR/日常分支)时校验两处彼此一致。不一致 exit 1。
+ *                  **显式 tag 必须以 v 开头**:漏 v 的 tag 不是发布 tag,发布链
+ *                  (`scripts/ci-release-policy.sh`)会据此 fail-loud(2026-09-23
+ *                  第五轮审计 R5-C-1:漏 v 曾等于"构建照跑、交付为零、CI 全绿")。
+ *   manifests      只校验**两处 manifest 彼此相等**(不关心 tag):"发布 PR 已 bump、
+ *                  tag 还没打"的状态下它必须绿 ⇒ 这是能进 gate 的那半条判据
+ *                  (check 在同样状态下必红,因为它拿 git describe 的最新 tag 当期望值)。
  *   get            打印当前产品版本(优先 git 最近 tag,否则两处 package.json;
  *                  两者不一致时 fail-loud)。
  */
@@ -106,6 +113,17 @@ function check() {
   let expected = null
   let sourceNote = ''
   if (explicit !== undefined) {
+    // 显式 tag 必须以 v 开头(2026-09-23 第五轮审计 R5-C-1)。理由与 gate 侧的
+    // ci-release-policy.sh 同源:本仓的发布 tag 一律 `vX.Y.Z[-预发]`,`git tag` 漏 v
+    // 时 `refs/tags/v…` 的判据(release job 的 `if:`)与形态判据都不成立 ⇒
+    // 三平台照常构建而交付面为零。这里在**打 tag 之前**就能拦住(先 check 再 tag)。
+    if (!explicit.startsWith('v')) {
+      fail(
+        `显式 tag 必须以 v 开头(收到 ${explicit})—— 本仓发布 tag 一律 vX.Y.Z / vX.Y.Z-<beta|rc|alpha>[.N];` +
+        '漏 v 会静默零发布(三平台照常构建,GitHub Release 与更新服务器全为零,CI 仍全绿)。' +
+        `若只是想让 manifest 自检,用 node scripts/version.mjs manifests。`,
+      )
+    }
     expected = normalizeVersion(explicit)
     if (expected === null) fail(`显式 tag 非法: ${explicit}`)
     sourceNote = `显式 tag ${explicit}`
@@ -122,11 +140,37 @@ function check() {
   process.stdout.write(`version: OK — ${sourceNote}; root=${versions.root} desktop=${versions.desktop}\n`)
 }
 
+/**
+ * 只校验两处 manifest 彼此相等 —— 不看任何 tag。
+ *
+ * 为什么需要它:发布 PR 里两处 package.json 都 bump 到新版本、而 tag 还没打,
+ * 此时 `check`(期望值取 git describe 的最新 tag)必红,不能进 gate;而"只改了一处"
+ * 又必须在 gate 里 1 分钟内红(否则要等 release job 第 4 步,四平台构建 40 分钟之后)。
+ * 判据边界:相等 ⇒ 绿;不等 ⇒ exit 1 并点名两处取值。
+ */
+function manifestsOnly() {
+  const versions = readVersions()
+  checkConsistency(versions, null)
+  process.stdout.write(
+    `version: OK — 两处 manifest 一致(未校验 tag); root=${versions.root} desktop=${versions.desktop}\n`,
+  )
+}
+
 function setVersion() {
   const input = process.argv[3]
-  if (input === undefined) fail('用法: node scripts/version.mjs set <version> (如 2.3.0)')
+  if (input === undefined) fail('用法: node scripts/version.mjs set <version> (如 v2.3.0)')
   const version = normalizeVersion(input)
   if (version === null) fail(`版本号非法: ${input}(期望 semver 如 2.3.0 或 2.3.0-rc.1)`)
+  // 无 v 前缀时**出声**:写进 manifest 的总是去 v 的形式,真正的坑在下一步的 git tag
+  // (2026-09-23 第五轮审计 R5-C-1:漏 v 的 tag = 构建照跑、交付为零、CI 全绿)。
+  // 不直接拒绝是为了不打断既有用法(文档/脚本里两种写法都在用),但不再静默。
+  if (!input.startsWith('v')) {
+    process.stderr.write(
+      `::warning::version.mjs set 收到没有 v 前缀的输入 ${input} —— 已按 ${version} 写入 manifest。\n` +
+      `::warning::git tag 必须带 v:git tag -a v${version} -m "v${version}";` +
+      `漏 v 的 tag 会被发布判据拒绝(否则会静默零发布:构建照跑,Release 与更新服务器全为零)。\n`,
+    )
+  }
   for (const [, path] of productManifests()) {
     const absolute = resolve(root, path)
     const manifest = JSON.parse(readFileSync(absolute, 'utf8'))
@@ -135,9 +179,9 @@ function setVersion() {
   }
   process.stdout.write(
     `version: ${version} 已写入 root package.json 与 packages/host/desktop/package.json\n` +
-    `后续: git commit -m "chore: bump version to v${version}" && ` +
-    `git tag v${version} && git push --tags\n` +
-    `(push 后 CI 自动构建桌面三平台与 Docker 镜像 v${version}/latest)\n`,
+    `后续: 版本改动走 PR 合并到 master 后,在**合并提交**上 git tag -a v${version} -m "v${version}" && ` +
+    `git push origin v${version}\n` +
+    `(tag 必须带 v;push 后 CI 自动构建桌面三平台、服务端镜像与更新服务器发布面)\n`,
   )
 }
 
@@ -161,9 +205,12 @@ switch (command) {
   case 'check':
     check()
     break
+  case 'manifests':
+    manifestsOnly()
+    break
   case 'get':
     process.stdout.write(`${get()}\n`)
     break
   default:
-    fail('用法: node scripts/version.mjs <set <version>|check [tag]|get>')
+    fail('用法: node scripts/version.mjs <set <version>|check [tag]|manifests|get>')
 }

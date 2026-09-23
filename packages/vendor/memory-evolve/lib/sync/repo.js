@@ -169,10 +169,6 @@ export async function decideModeBBranch({ dir, remoteUrl, projectId }) {
   return { ok: true, kind: 'fresh', branch: sharedBranch, message: srt('syncr.freshBranch', { others, branch: sharedBranch }) }
 }
 
-/** 项目待办文件名（2026-08-11 统一模式：并入项目记忆轨同步）。
- *  TODO 格式判定统一走 lib/sync/filesets.js 的 isTodoPath（含全局待办）。 */
-export const TODO_FILE = 'TODOS.md'
-
 /** 仓库级兜底身份（不依赖用户全局 git 配置；施工图 §5 步骤 4）。 */
 const REPO_USER = { name: 'dsh-memory', email: 'dsh@localhost' }
 

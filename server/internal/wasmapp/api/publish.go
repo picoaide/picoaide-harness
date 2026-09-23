@@ -550,6 +550,45 @@ func (h *Handlers) validate(c *gin.Context) {
 		writeErr(c, aerr)
 		return
 	}
+	// 归属校验，且必须在**任何实际工作之前**（2026-09-23 审计 A-2，P1）。
+	//
+	// 预检会读该应用**当前生效版本**的 config_json 作为继承基线
+	//（`inheritBaseForApp`），并把合并结果原样回显在 `validation.config`
+	//（`validationJSON`）—— 缺了这一句，任意已登录员工用一个只带 app_id 的最简载荷
+	// 就能换回他人应用的 `whitelist` 名单 / `purpose` / `data_sensitivity` / `owner` /
+	// `sensitive_columns`，外加一个 `first_release` 存在性 oracle。
+	//
+	// 位置有意：在 `isFirstRelease`/`decodeWasmBase64`/`inheritBaseForApp`/`prepare`
+	// 之前 —— 非归属人不触发任何配置读取、不进编译池、不落任何行。
+	existing, oerr := h.checkValidateOwner(c.Request.Context(), u, appID)
+	if oerr != nil {
+		writeErr(c, oerr)
+		return
+	}
+	// 终态闸门（冻结 / 退役）：**与 publish 共用同一个 `publishBlockOf`**（R3-A A-4 的
+	// 第三个消费面）。
+	//
+	// 缺陷形态（复审 F1）：availability 与 publish 已经同源，唯独预检没接上，于是
+	// 冻结/退役的应用预检回 200 `ok:true, dry_run:"ok"`、真发布回 403 `APP_FROZEN` /
+	// 404 `NOT_FOUND` —— 正是 A-4 要消灭的"预检说可以、发布被拒"，而 AI 的第一动作
+	// 就是先预检（见下方 inheritBaseForApp 的注释）。第三个面没接上等于把同一个分叉
+	// 换了个入口留下。
+	//
+	// 位置有意：在归属校验之后、`isFirstRelease`/解码/编译/干跑**之前** —— 终态应用
+	// 不该消耗**编译资源**，错误也必须与 publish **逐字节同形**（同一个 `*apperr.Error`，
+	// 连 hints 一致）。
+	//
+	// ⚠️ 本闸门**不**省额度：`acquireUpload`（validate/publish 合计 30 次/小时的额度）
+	// 在本函数更上面、本闸门**之前** ⇒ 终态预检今天照样占一次额度。判据
+	// `TestValidateTerminalAppsNeverReachCompile` 也只钉到"不触发真编译"这一层；
+	// 要改成"不占额度"是行为变更，必须先把 `acquireUpload` 挪到闸门之后并同步改判据。
+	//
+	// 边界：`enabled=false`（下架）**不是**终态，`publishBlockOf` 对它返回 nil
+	// —— 预检与发布都不拦，这是 R37 的三态语义，不要"顺手"把下架也拦掉。
+	if blocked := publishBlockOf(existing); blocked != nil {
+		writeErr(c, blocked.Err)
+		return
+	}
 	// 首版判定是**只读**查询：决定 purpose/data_sensitivity/owner 是否必填。
 	// validate 不做任何写入（§4.2：不落版本号、不进审计）。
 	first, verr := h.isFirstRelease(c.Request.Context(), appID)
@@ -723,20 +762,11 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		h.auditDenied(u, appID, version, oerr)
 		return nil, oerr
 	}
-	// 顺序有意：**先判"已退役"再判"已冻结"**。删除会同时写下 frozen_at（R37 的
-	// 保留期锚点），若先判冻结，一个已删除的应用会对作者报"请先解冻" —— 而解冻
-	// 救不了它（标识已永久占位）。语义正确的答案是 404 已退役。
-	if existing != nil && existing.DeletedAt != nil {
-		e := apperr.New(apperr.CodeNotFound, "应用已退役（已删除）").
-			WithHint("已删除的应用标识与版本号永久占位，不能复用；请新建应用")
-		h.auditDenied(u, appID, version, e)
-		return nil, e
-	}
-	if existing != nil && existing.FrozenAt != nil {
-		e := apperr.New(apperr.CodeAppFrozen, "应用已冻结，不能发布新版本").
-			WithHint("冻结是 R37 退役流程的第一步：请先解冻（同一端点带 {\"frozen\":false}），或新建应用")
-		h.auditDenied(u, appID, version, e)
-		return nil, e
+	// 终态闸门（冻结 / 退役）：判据抽在 publishBlockOf 里，**与 availability 共用**
+	// （R3-A A-4）—— 两个面各写一份就会出现"预查说可以、发布被拒"。
+	if blocked := publishBlockOf(existing); blocked != nil {
+		h.auditDenied(u, appID, version, blocked.Err)
+		return nil, blocked.Err
 	}
 	if verr := registry.ValidateVersion(version); verr != nil {
 		h.auditDenied(u, appID, version, verr)
@@ -844,7 +874,14 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 	}
 
 	// ---- E：落库（从这里开始才有写入；此前一行都没有，也没有任何落盘）----
-	review := h.reviewRequired()
+	//
+	// 审核开关必须用**严格**读法（R3-A A-3）：读失败 ⇒ 503 + 不落行。
+	// 用展示面的宽松读法会把一次 settings 读故障变成"静默放行未审核版本"
+	// （fail-open），那正是本条缺陷的原始形态。
+	review, rerr := h.publishReviewRequired()
+	if rerr != nil {
+		return nil, rerr
+	}
 	status := serverstore.ReleaseStatusApproved
 	if review {
 		status = serverstore.ReleaseStatusPending
@@ -1021,9 +1058,23 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, in commitInput) (*r
 			projTitle = in.appID
 		}
 	}
+	// E1 归属投影：**官方应用的归属恒为空**（R3-A A-9）。
+	//
+	// 与 appstore.Publish:261-264 的 official 分支同形（同一条不变量在两个面上
+	// 必须只有一种写法）：官方内容的归属就是"官方"，管理员发版不得把它改写成
+	// 发布者个人 —— `official=1 ∧ owner≠''` 是 SetAppOfficial 显式拒绝的状态，
+	// 造出来会让员工端把官方条目当"某个人的应用"（is_owner 为真而发布仍被拒）。
+	//
+	// 为什么这里显式分支（DAO 的 UpsertWasmApp 也有同款守卫）：不变量必须在
+	// **调用方也成立**，与 DAO 的列集/条件分支改动无关（同 appstore.Publish 的
+	// "刻意显式传现值"纪律）。DAO 那一层防的是"未来的调用者写错"。
+	owner := in.publisher
+	if in.existing != nil && in.existing.Official == 1 {
+		owner = ""
+	}
 	if err := serverstore.UpsertWasmApp(ctx, h.opt.DB, serverstore.WasmApp{
 		AppID: in.appID, Title: projTitle, Description: projDescription,
-		Owner: in.publisher, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
+		Owner: owner, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
 		Purpose: projPurpose, DataSensitivity: projSensitivity,
 		ConfigJSON: projConfig,
 	}); err != nil {
@@ -1190,6 +1241,40 @@ func (h *Handlers) isAdmin(c *gin.Context) bool {
 	return isSuperAdmin(serverauthCurrentUser(c))
 }
 
+// publishBlock 描述"这个应用**为什么**不能再接收新版本"（nil = 可以发）。
+//
+// 两个消费方**必须**共用同一份判定，否则"预查说可以、发布被拒"的契约分叉会立刻
+// 回来（R3-A A-4）：
+//   - `publishFromBytes` 直接把它回给调用方（403 APP_FROZEN / 404 NOT_FOUND）；
+//   - `availability` 回 `can_publish=false` + 同一个错误的 code/message/hints
+//     （连文案都逐字相同 —— 客户端因此只需要一套渲染分支）。
+type publishBlock struct {
+	// Reason 是 availability 面的**稳定判词**（终态各自可辨，不并成 taken/yours）。
+	Reason string
+	// Err 是共用的结构化错误。
+	Err *apperr.Error
+}
+
+// publishBlockOf 是"这个应用现在还能不能发新版"的**唯一判据**。
+//
+// 顺序有意：**先判"已退役"再判"已冻结"**。删除会同时写下 frozen_at（R37 的保留期
+// 锚点），若先判冻结，一个已删除的应用会对作者报"请先解冻" —— 而解冻救不了它
+// （标识已永久占位）。语义正确的答案是 404 已退役。
+func publishBlockOf(app *serverstore.WasmApp) *publishBlock {
+	if app == nil {
+		return nil
+	}
+	if app.DeletedAt != nil {
+		return &publishBlock{Reason: "retired", Err: apperr.New(apperr.CodeNotFound, "应用已退役（已删除）").
+			WithHint("已删除的应用标识与版本号永久占位，不能复用；请新建应用")}
+	}
+	if app.FrozenAt != nil {
+		return &publishBlock{Reason: "frozen", Err: apperr.New(apperr.CodeAppFrozen, "应用已冻结，不能发布新版本").
+			WithHint("冻结是 R37 退役流程的第一步：请先解冻（同一端点带 {\"frozen\":false}），或新建应用")}
+	}
+	return nil
+}
+
 // checkOwner 是归属检查（§10.5 第 60 项 / R6）。
 //
 // 语义与 appstore.Publish **逐字一致**（同码 409 NAME_TAKEN、同文案"名称已被占用，
@@ -1203,6 +1288,39 @@ func (h *Handlers) checkOwner(u *serverstore.User, appID string, existing *serve
 		WithDetail("app_id", appID).
 		WithHint("发布即占名：首个成功发布者永久占有该标识，被拒/软删也不释放（R6/§4.1）").
 		WithHint("需要接管他人应用时，请管理员在管理面转移归属（§11 第 17 项）")
+}
+
+// checkValidateOwner 是**预检**（validate）的归属检查：非归属人一律 404。
+//
+// 为什么不能直接复用 checkOwner（publish 的 409）：那条 409 的语义是"名称已被占用，
+// 请换名字"，它必须回显（作者要知道下一步做什么），而且它**不携带任何配置内容**。
+// 预检不同 —— 它的响应体里有该应用的生效配置（继承基线回显），一旦放行，"响应的内容"
+// 本身就是泄露，所以拒绝必须走**只读管理面**的口径（`ownedApp`/`notFoundApp`）：
+// 不存在与不属于你是**同一个响应**（同一个构造函数、同一份文案、同一份 details/hints），
+// 外人无法用响应差异探测归属。参见 `release.go` 的 notFoundApp 与 `read.go` 目录面对
+// 同一份数据（whitelist/purpose 只给发布者）的口径。
+//
+// 空闲标识（没有 apps 行 = 首版）放行：validate 的**主要**用途就是"发布前先验证一个
+// 新标识能不能发"（§4.2 的预检），这里不是管理动作、也没有任何他人数据可读。
+// 存在性本身不是新增泄露：`/apps/wasm/availability/:app_id`（200 + reason=taken）与
+// publish 的 409 都已经公开"这个标识被占了"；本函数要关掉的是**存在性之外**的东西
+// （配置内容与 first_release 版本数 oracle）。
+//
+// 返回值是**读到的应用行**（不存在时 nil）：调用方（validate）要在同一个快照上跑
+// `publishBlockOf` 的终态闸门 —— 再查一次不仅多一次往返，还会让"归属校验通过"与
+// "终态判定"落在两个不同的读点（两读之间被冻结/删除就成了新的分叉窗口）。
+func (h *Handlers) checkValidateOwner(ctx context.Context, u *serverstore.User, appID string) (*serverstore.WasmApp, *apperr.Error) {
+	app, err := serverstore.GetWasmApp(ctx, h.opt.DB, appID)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, internalErr("查询失败", err)
+	}
+	if app.Owner == u.Username || isSuperAdmin(u) {
+		return app, nil
+	}
+	return nil, notFoundApp(appID)
 }
 
 // isSuperAdmin 报告该用户是否是平台管理员（R23 兜底接管）。

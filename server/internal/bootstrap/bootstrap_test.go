@@ -1,10 +1,14 @@
 package bootstrap
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,9 +50,15 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 		t.Fatal(err)
 	}
 
+	// R4-C-7（审计 2026-09-23）：本包不再有 RegisterRoutes 镜像（它曾在引擎上直挂
+	// 两条路由，却只被测试调用 ⇒ 双份真源 + 守卫盲区）。测试改为用**生产同一批
+	// handler** 自行组树：与 cmd/server（/healthz 直挂）和 internal/router
+	// （bootstrap 端点声明）逐字同形。
 	gin.SetMode(gin.TestMode)
+	h := NewHandlers(db)
 	r := gin.New()
-	RegisterRoutes(r, db)
+	r.GET("/healthz", h.Health)
+	r.GET("/api/client/v2/config/bootstrap", serverauth.BearerAuth(db), h.Bootstrap)
 	return r, db
 }
 
@@ -77,9 +87,10 @@ func TestBootstrap(t *testing.T) {
 	if out["default_model"] != "deepseek-chat" {
 		t.Fatalf("default_model = %v", out["default_model"])
 	}
-	// server_version:客户端据此发现"服务端已升级、本机客户端是旧版"。
-	// 服务端与客户端同包发版(客户端安装包随镜像发布),两者版本必须一致,
-	// 所以这个字段是版本错配的唯一可见信号,不能缺。
+	// server_version 的判据见 TestServerVersionIsInformationalOnly（本文件末尾）：
+	// 这里曾经写着"客户端据此发现『服务端已升级、本机客户端是旧版』……是版本错配的
+	// **唯一可见信号**，不能缺"—— 那是不成立的承诺（客户端零消费方），已撤回。
+	// 留在这里的只有**线格式契约**这一条（字段在、值是服务端构建版本）。
 	if got := out["server_version"]; got != serverauth.BuildVersion() {
 		t.Fatalf("server_version = %v, want %q", got, serverauth.BuildVersion())
 	}
@@ -357,4 +368,242 @@ func TestBootstrapDeliversHeartbeatFlag(t *testing.T) {
 	if web["error_reporting_heartbeat"] != false {
 		t.Fatalf("error_reporting_heartbeat = %v for value \"1\", want false", web["error_reporting_heartbeat"])
 	}
+}
+
+// ===========================================================================
+// server_version 的**用途**判据（R3-A A-13）
+// ===========================================================================
+
+// noClientConsumerMarker 是 Response.ServerVersion 文档里必须出现的那句话。
+//
+// 它的作用不是"钉字符串"，而是把**口径与实现的一致性**变成可执行判据：
+// 这一栏曾经宣称"客户端据此发现版本错配、是唯一可见信号"，而实际零消费方 ——
+// 门禁因此一直在告诉读者"这条链路是通的"（存在性断言冒充能力断言）。
+// A-13 的处置是**改承诺、不造消费方**：注释改成事实，用例改成下面这三条。
+const noClientConsumerMarker = "当前没有客户端消费方"
+
+// 扫描面下限（"判据自己也要有判据"）：真正读过内容的源码文件数、以及
+// `packages/vendor/memory-evolve/lib/` 下必须被读到的文件数。
+//
+// 数字来源（复算方式：把 skipScanDir 的规则套到 `git archive` 出来的干净树上）：
+// 全仓 910 个（工作树 919 个），其中 vendored lib 62 个；而任一顶层子树都远低于
+// 下限（packages/host 573、packages/vendor 241、packages/client 96）—— 所以
+// "把扫描面收窄到某个子树"必然触发下限红。改动扫描面（新增/删除包、改构建产物
+// 目录约定）时同步这两个数字，**不允许**只改数字来消红：数字变更要与扫描面变更
+// 出现在同一个提交里。
+const (
+	scanFloor      = 700
+	vendorLibFloor = 30
+	// vendoredLibPrefix 是**相对扫描根（packages/）**的路径 —— walk 回调里的 rel
+	// 就是相对它算的（写成 `packages/...` 会永远匹配不到，判据自己先红）。
+	vendoredLibPrefix = "vendor/memory-evolve/lib/"
+)
+
+// retractedClaim 是被撤回的那句承诺的**关键词**。
+//
+// 只禁"断言形态"、不禁"引用形态"：文档里引用被撤回的说法（并写明它不成立）
+// 是好事 —— 读者需要知道为什么撤。判据因此看的是"出现该词的那一行有没有撤回
+// 语气"（见 TestServerVersionIsInformationalOnly 的 ②b），而不是简单的包含检查。
+const retractedClaim = "唯一可见信号"
+
+// retractionWords 是"这一行是在撤回/否认该说法"的语气词（任一命中即可）。
+var retractionWords = []string{"曾", "撤回", "不成立", "不是事实", "已删"}
+
+// TestServerVersionIsInformationalOnly 钉住 server_version 的**真实用途**。
+//
+// 三条判据（对应 A-13 的三件事）：
+//  1. **线格式契约**：字段仍在、值仍是服务端构建版本 —— 删字段/改键名是跨端变更，
+//     必须与客户端同批发生，不能在这一条里悄悄做（这是"不造消费方"的边界，
+//     而不是"这个字段随便改"）；
+//  2. **文档说的是事实**：字段的文档必须声明"当前没有客户端消费方"，且不得再出现
+//     被撤回的承诺"唯一可见信号"。判据读的是**交付出去的那份注释**
+//     （bootstrap.go 本身），不是测试里的副本；
+//  3. **事实复核**：客户端源码里确实没有读取点 —— 注释说的是事实而不是自述。
+//     扫不到扫描面（packages/ 不存在）时**直接失败**，不静默通过
+//     （本仓刚修过四条"空扫描面静默通过"的守卫，这里是同一条纪律）。
+func TestServerVersionIsInformationalOnly(t *testing.T) {
+	// ① 线格式契约（字段仍在、值正确）。
+	r, db := setup(t)
+	u, _ := serverstore.GetUserByUsername(db, "alice")
+	token, _ := serverauth.IssueToken(db, u.ID)
+	w, out := getJSON(t, r, "/api/client/v2/config/bootstrap", token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if got := out["server_version"]; got != serverauth.BuildVersion() {
+		t.Fatalf("server_version = %v, want %q（线格式契约：值必须是服务端构建版本）", got, serverauth.BuildVersion())
+	}
+
+	// ② 口径与实现一致：读的是 bootstrap.go 里 ServerVersion 那一栏的文档注释。
+	//    文件读不到 ⇒ 直接红（不允许"扫不到就算过"）。
+	src, err := os.ReadFile("bootstrap.go")
+	if err != nil {
+		t.Fatalf("读不到 bootstrap.go（判据的扫描面缺失，拒绝宣称一致）: %v", err)
+	}
+	doc := fieldDocComment(t, string(src), "ServerVersion string `json:\"server_version\"`")
+	if !strings.Contains(doc, noClientConsumerMarker) {
+		t.Fatalf("ServerVersion 的文档必须如实声明 %q（谁真的加了客户端消费方，就同步改口径）:\n%s",
+			noClientConsumerMarker, doc)
+	}
+	// ②b 不得把被撤回的承诺写回**断言形态**：出现该词的那一行必须有撤回语气。
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.Contains(line, retractedClaim) {
+			continue
+		}
+		retracted := false
+		for _, w := range retractionWords {
+			if strings.Contains(line, w) {
+				retracted = true
+				break
+			}
+		}
+		if !retracted {
+			t.Fatalf("ServerVersion 的文档把被撤回的承诺写回了断言形态（客户端零消费方，这不是事实）:\n%s", line)
+		}
+	}
+
+	// ③ 事实复核：客户端源码里没有 server_version / serverVersion 读取点。
+	if hits := scanClientSources(t); len(hits) > 0 {
+		t.Fatalf("客户端源码里出现了 server_version 的消费方 %v —— "+
+			"口径必须同步（若已真的接上，请把文档里的 %q 改成事实描述，并让本条判据跟上）",
+			hits, noClientConsumerMarker)
+	}
+}
+
+// fieldDocComment 取出结构体字段声明行**紧邻上方**的连续 `//` 注释块。
+//
+// 用于把"注释即契约"变成可执行判据：判据读的是交付文件本身，不是测试里的副本。
+func fieldDocComment(t *testing.T, src, decl string) string {
+	t.Helper()
+	lines := strings.Split(src, "\n")
+	idx := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, decl) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("在源文件里找不到字段声明 %q（字段被改名/删除？）", decl)
+	}
+	var block []string
+	for i := idx - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, "//") {
+			break
+		}
+		block = append([]string{trimmed}, block...)
+	}
+	if len(block) == 0 {
+		t.Fatalf("字段 %q 上方没有任何文档注释（口径无从判据）", decl)
+	}
+	return strings.Join(block, "\n")
+}
+
+// scanClientSources 扫客户端源码里的 server_version / serverVersion 读取点。
+//
+// 扫描面 = 仓库根的 `packages/**` 源码（.ts/.tsx/.js/.mjs/.cjs）。
+//
+// **扫描面自己也有判据**（否则"悄悄收窄扫描面"就是一种假绿——本仓已登记过这类形态）：
+//   - 扫描根不存在 ⇒ 直接 `t.Fatalf`，不静默通过；
+//   - **扫描面下限**：真正读过内容的源码文件数不得低于 {@link scanFloor}
+//     （实测：干净 `git archive` 树 910 个、本仓工作树 919 个；而任一顶层子树
+//     都远低于它 —— packages/host 573、packages/vendor 241、packages/client 96）
+//     ⇒ 把扫描面收窄到某个子树/某个包会立刻红，而不是给出"没有消费方"的结论；
+//   - **vendored 源码必须在扫描面内**：`packages/vendor/memory-evolve/lib/` 是入库
+//     源码（63 个 tracked 文件，上游把 node 侧 JS 直接写在 `lib/` 下，见
+//     `packages/vendor/memory-evolve/VENDORED.md`），里面至少有
+//     {@link vendorLibFloor} 个源码文件必须被读到 —— 复审 F3 实测的盲区正是它：
+//     旧实现按目录名 skip（`lib`），把消费方放进该目录时用例**存活**。
+func scanClientSources(t *testing.T) []string {
+	t.Helper()
+	root := filepath.Join("..", "..", "..", "packages")
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("客户端源码根 %s 不存在（判据的扫描面缺失，拒绝宣称「没有消费方」）: %v", root, err)
+	}
+	exts := map[string]bool{".ts": true, ".tsx": true, ".js": true, ".mjs": true, ".cjs": true}
+	var hits []string
+	scanned := 0
+	vendoredLib := 0
+	err = filepath.WalkDir(root, func(abs string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, rerr := filepath.Rel(root, abs)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if rel == "." {
+				return nil
+			}
+			if skipScanDir(root, rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !exts[strings.ToLower(filepath.Ext(abs))] {
+			return nil
+		}
+		raw, rerr := os.ReadFile(abs)
+		if rerr != nil {
+			return rerr
+		}
+		scanned++
+		if strings.HasPrefix(rel, vendoredLibPrefix) {
+			vendoredLib++
+		}
+		if bytes.Contains(raw, []byte("server_version")) || bytes.Contains(raw, []byte("serverVersion")) {
+			hits = append(hits, abs)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("扫描客户端源码失败: %v", err)
+	}
+	// 下限断言（扫描面被收窄即红，而不是静默给出"零消费方"）。
+	if scanned < scanFloor {
+		t.Fatalf("客户端源码扫描面只剩 %d 个文件（下限 %d）——扫描面被收窄了，"+
+			"此时「没有消费方」不成立；请检查 skipScanDir 的判据与 root 指向", scanned, scanFloor)
+	}
+	if vendoredLib < vendorLibFloor {
+		t.Fatalf("扫描面里只有 %d 个 `%s` 下的源码文件（下限 %d）——"+
+			"vendored 插件的 lib/ 是**入库源码**，不得按目录名跳过（复审 F3）",
+			vendoredLib, vendoredLibPrefix, vendorLibFloor)
+	}
+	return hits
+}
+
+// skipScanDir 判定 `packages/` 下的某个目录（rel = 相对 packages/ 的 POSIX 路径）
+// 是否在扫描面之外。
+//
+// 判据是**结构位置**，不是目录名（旧实现按 basename 判，是复审 F3 的盲区）：
+//   - `node_modules` / `.git`：任何深度都跳（第三方 SDK、VCS 元数据，
+//     例如 @modelcontextprotocol/sdk 内部的 `_serverVersion` 与本字段无关）；
+//   - `lib` / `dist` / `build`：**只有**当它正好是某个包根（含 package.json 的目录）
+//     的直接子目录时才算构建产物（本仓 workspace 包都是 `packages/<a>[/<b>]/lib`）；
+//     更深的 `lib/`（如 `packages/x/src/lib/`）与没有 package.json 的同名目录都是源码；
+//   - `packages/vendor/**` 一律不跳：那是随包分发的**入库源码**（memory-evolve 的
+//     node 侧 JS 就写在 `lib/` 下）。
+func skipScanDir(root, rel string) bool {
+	base := path.Base(rel)
+	if base == "node_modules" || base == ".git" {
+		return true
+	}
+	if base != "lib" && base != "dist" && base != "build" {
+		return false
+	}
+	parent := path.Dir(rel) // 相对 packages/
+	if parent == "." {
+		return false
+	}
+	if parent == "vendor" || strings.HasPrefix(parent, "vendor/") {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(parent), "package.json")); err != nil {
+		return false
+	}
+	return true
 }

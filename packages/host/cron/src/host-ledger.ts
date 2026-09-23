@@ -14,14 +14,15 @@ import {
   chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync,
   renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
+import { hostname as osHostname } from 'node:os'
 import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
-import { isValidCron } from './cron.ts'
+import { currentTimeZone, isValidCron, nextRunAtMs } from './cron.ts'
 import {
-  createJob, jobVisibleTo, settleExecution, startExecution, updateJob, rollNextRun,
-  type ExecutionRecord, type JobRecord,
+  createJob, jobIsRunning, jobVisibleTo, normalizeOwner, settleExecution, startExecution, updateJob,
+  rollNextRunWithGaps, type ExecutionRecord, type JobRecord, type NextRunRoll,
 } from './jobs.ts'
-import { CRON_SCHEMA_VERSION, type CronAction, type CronSchedulerSnapshot } from './protocol.ts'
+import { CRON_SCHEMA_VERSION, type CronAction, type CronSchedulerSnapshot, type SkippedOccurrence } from './protocol.ts'
 
 interface PersistedScheduler extends CronSchedulerSnapshot {
   importedSources?: string[]
@@ -46,6 +47,23 @@ export interface LedgerState {
   scheduler: CronSchedulerSnapshot
 }
 
+/**
+ * How the ledger was obtained at construction (2026-09-23 CR-1).
+ *
+ * Only `first-run` legitimately starts empty. `read-only` means the bytes may
+ * still be on disk but could not be read (or could not be isolated), so every
+ * write is refused instead of renaming a fresh document over them.
+ */
+export type LedgerLoadMode =
+  /** No ledger file existed: the one legitimate empty state. */
+  | 'first-run'
+  /** An existing ledger was read, validated, and (when needed) migrated. */
+  | 'loaded'
+  /** A corrupt/newer ledger was isolated as `*.corrupt-<ts>`; a fresh empty one may be written. */
+  | 'reset-corrupt'
+  /** The ledger could not be read or isolated: reads answer from memory, every write is refused. */
+  | 'read-only'
+
 /** Result of one applied action. */
 export interface ApplyResult {
   state: LedgerState
@@ -61,15 +79,91 @@ const MAX_REQUEST_CACHE = 256
  * 高频 job 的 ledger.json 无限膨胀且每次 mutate 全量重写。 */
 const MAX_EXECUTION_HISTORY = 100
 
+/** How many DST-gap skip records the scheduler state keeps (newest last). */
+const MAX_SKIPPED_OCCURRENCES = 8
+
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
+
+/**
+ * Slack when comparing a live process' start time with the instant the lock was
+ * written (2026-09-23 R4-B-12).
+ *
+ * `/proc` start times are derived from the boot clock (`btime` + ticks) while
+ * `startedAt` comes from `Date.now()`: a clock adjustment or a coarse boot stamp
+ * can shift them by seconds. The comparison is only used to prove pid REUSE, so
+ * the slack errs towards "the owner is alive" — a wrong "stale" verdict would
+ * hand the ledger to a second writer.
+ */
+const PID_REUSE_SKEW_MS = 60_000
+
+/**
+ * Host name recorded in the lock, or `undefined` when the platform refuses to
+ * answer (the caller then never compares pids across machines).
+ * @returns the hostname, trimmed.
+ */
+function hostname(): string | undefined {
+  try {
+    const value = osHostname().trim()
+    return value === '' ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * When the process holding `pid` started (ms epoch), when the platform can tell
+ * us cheaply.
+ *
+ * Linux only: `/proc/<pid>/stat` field 22 is the start time in clock ticks since
+ * boot, and `/proc/stat`'s `btime` is the boot instant. Every other platform
+ * returns undefined, which makes stale recovery keep the lock (fail closed) —
+ * the same behavior as before, with the actionable message instead of a guess.
+ * @param pid - process id to inspect.
+ * @returns the start instant, or undefined when it cannot be determined.
+ */
+function processStartedAt(pid: number): number | undefined {
+  if (process.platform !== 'linux') return undefined
+  try {
+    // The comm field (2nd) may contain spaces and parentheses: parse after the
+    // LAST ')' so nothing else can shift the field indices.
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    const tail = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    const startTicks = Number(tail[19])
+    if (!Number.isFinite(startTicks) || startTicks <= 0) return undefined
+    const btimeLine = readFileSync('/proc/stat', 'utf8').split('\n').find(line => line.startsWith('btime '))
+    const btime = Number(btimeLine?.slice('btime '.length).trim())
+    if (!Number.isFinite(btime) || btime <= 0) return undefined
+    const ticksPerSecond = 100
+    return (btime + startTicks / ticksPerSecond) * 1000
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Refusal raised by every write path once `dispose()` sealed this generation
+ * (2026-09-23 R3-B3 F1). After `dispose()` hands `ledger.lock` to the successor
+ * generation, a write from this one would land with no mutual exclusion and no
+ * error — the exact state that let a late settlement erase the successor's
+ * jobs. So the write is refused loudly: the log names the file and the reason,
+ * and the caller gets an exception.
+ */
+function disposedRefusal(filePath: string): string {
+  return `ledger is disposed: write refused (${filePath}; this generation released ledger.lock to the successor)`
+}
 
 interface CachedRequest {
   fingerprint: string
 }
 
+/**
+ * The scheduler's zone — one implementation, shared with the pure cron math
+ * (R5-B-6): the panel recomputes the same way, and a second copy here would be
+ * exactly the drift this fix is about.
+ */
 function timeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  return currentTimeZone()
 }
 
 /** A job record with the nextRunAt optional field stripped (exactOptionalPropertyTypes). */
@@ -79,34 +173,107 @@ function withoutNextRun(job: JobRecord): JobRecord {
   return rest
 }
 
-/** Conditionally-shaped nextRunAt seed for object literals. */
-function seededNextRun(job: JobRecord, now: number): { nextRunAt: number } | Record<string, never> {
-  const next = rollNextRun(job, now)
-  return next === undefined ? {} : { nextRunAt: next }
+/**
+ * Read back the persisted skip records (DST gaps and missed triggers), dropping
+ * malformed entries and shaping the result for a conditional spread
+ * (2026-09-23 R3-B3 F2 / B-5, extended by R4-B-9).
+ *
+ * The document is our own file, but a hand-edited or truncated array must not
+ * be able to break the panel's notice.
+ * @param value - the persisted `scheduler.skippedOccurrences`, if any.
+ * @returns `{ skippedOccurrences }`, or an empty object when there is none.
+ */
+function skippedOccurrencesFor(value: unknown): { skippedOccurrences: SkippedOccurrence[] } | Record<string, never> {
+  if (!Array.isArray(value)) return {}
+  const restored = value.filter((entry): entry is SkippedOccurrence => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const candidate = entry as Record<string, unknown>
+    return typeof candidate.jobId === 'string' && typeof candidate.name === 'string'
+      && typeof candidate.wallClock === 'string' && typeof candidate.timeZone === 'string'
+      && typeof candidate.normalizedTo === 'number' && typeof candidate.detectedAt === 'number'
+      // `reason` is optional (records written before R4-B-9 are DST gaps), but a
+      // hand-edited value must not reach the panel as an unknown reason.
+      && (candidate.reason === undefined || candidate.reason === 'dst-gap' || candidate.reason === 'missed')
+  }).slice(-MAX_SKIPPED_OCCURRENCES)
+  return restored.length === 0 ? {} : { skippedOccurrences: restored }
+}
+
+/**
+ * The local wall clock of one instant, as `YYYY-MM-DD HH:MM` in `timeZone`.
+ *
+ * The same shape the DST-gap records build from the schedule's fields, so both
+ * reasons read identically in the panel and in the log.
+ * @param at - ms epoch of the occurrence.
+ * @param timeZone - IANA zone of the scheduler.
+ * @returns the formatted wall clock.
+ */
+function wallClockOf(at: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date(at))
+  const field = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find(part => part.type === type)?.value ?? '00'
+  return `${field('year')}-${field('month')}-${field('day')} ${field('hour')}:${field('minute')}`
 }
 
 function cloneJobs(jobs: readonly JobRecord[]): JobRecord[] {
   return JSON.parse(JSON.stringify(jobs)) as JobRecord[]
 }
 
-function hasOpenExecution(job: JobRecord): boolean {
-  return job.executions.some(execution => execution.endedAt === undefined)
-}
-
 function fingerprintOf(requestId: string, action: CronAction): string {
   return createHash('sha256').update(JSON.stringify({ requestId, action })).digest('hex')
+}
+
+/** Errno of a failed syscall, or the raw error text when it carries none. */
+function errnoOf(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === 'string' && code !== '' ? code : String(error)
+}
+
+/**
+ * Whether a stored `nextRunAt` is stale (absent or already past) and must be
+ * re-seeded from `now` on enable (2026-09-23 CR-6).
+ */
+function nextRunIsStale(job: JobRecord, now: number): boolean {
+  return job.nextRunAt === undefined || job.nextRunAt <= now
+}
+
+/**
+ * Converge a stored owner key on its canonical form (2026-09-23 CR-7). Pure
+ * convergence: reads already compare normalised keys, so an un-migrated record
+ * loses nothing — the next successful write persists the canonical spelling.
+ */
+function normalizeJobOwner(job: JobRecord): JobRecord {
+  if (job.owner === undefined) return job
+  const owner = normalizeOwner(job.owner)
+  if (owner === job.owner) return job
+  if (owner === undefined) {
+    const { owner: _drop, ...rest } = job
+    void _drop
+    return rest
+  }
+  return { ...job, owner }
 }
 
 /**
  * Open a scheduled run: record a pending execution, roll nextRunAt forward,
  * and remember the trigger time. Returns the opened run, or undefined when
  * the job is disabled/archived/already running or the schedule cannot match.
+ * @param roll - roll-forward strategy; the ledger passes its own so the DST
+ *   gaps a roll skipped are recorded (2026-09-23 R3-B3 F2 / B-5).
  */
-export function openScheduledRun(job: JobRecord, executionId: string, now: number): { job: JobRecord; execution: ExecutionRecord } | undefined {
+export function openScheduledRun(
+  job: JobRecord,
+  executionId: string,
+  now: number,
+  roll: (job: JobRecord, now: number) => number | undefined = job => rollNextRunWithGaps(job, now).at,
+): { job: JobRecord; execution: ExecutionRecord } | undefined {
   if (!job.enabled) return undefined
-  if (hasOpenExecution(job)) return undefined
+  if (jobIsRunning(job)) return undefined
   const execution = startExecution(executionId, now)
-  const nextRunAt = rollNextRun(job, now)
+  const nextRunAt = roll(job, now)
   return {
     job: {
       ...job,
@@ -131,6 +298,21 @@ export class HostCronLedger {
   private readonly filePath: string
   private lockFd: number | undefined
   private disposed = false
+  /** Outcome of the startup read (2026-09-23 CR-1). */
+  private mode: LedgerLoadMode = 'loaded'
+  /** Set in read-only degraded mode: every write throws with this reason. */
+  private degradedReason: string | undefined
+  /**
+   * State that exists in memory but not yet on disk (2026-09-23 R3-B3 F1).
+   *
+   * Ordinary mutations persist synchronously inside {@link mutate}, so there is
+   * no write queue: the only deferred writes are the convergence steps
+   * {@link load} deliberately leaves for "the next successful write" — a schema
+   * migration, canonicalised owner keys, the interrupted-execution reconcile,
+   * and the fresh document after a corrupt-ledger reset. {@link dispose} lands
+   * them before sealing.
+   */
+  private pendingFlush = false
   /** Current account (gateway username); null when logged out. */
   private readonly owner: () => string | null
 
@@ -153,11 +335,35 @@ export class HostCronLedger {
       try {
         const fd = openSync(this.lockPath, 'wx', 0o600)
         this.lockFd = fd
-        writeFileSync(fd, `${process.pid}\n`)
-        // fsync before the lock is considered held: a crash right after
-        // open('wx') would otherwise leave an empty lock that later stale
-        // recovery must guess about.
-        fsyncSync(fd)
+        try {
+          // The payload is the lock's ownership EVIDENCE (2026-09-23 R4-B-12):
+          // a bare pid cannot be told apart from a recycled one, which is how an
+          // unrelated live process used to make cron unusable until an operator
+          // deleted the file by hand. `startedAt` lets stale recovery prove the
+          // live pid started AFTER the lock was written; `host` keeps a pid from
+          // another machine (shared network home) from being compared at all.
+          writeFileSync(fd, `${JSON.stringify({
+            pid: process.pid,
+            startedAt: Date.now(),
+            host: hostname(),
+          })}\n`)
+          // fsync before the lock is considered held: a crash right after
+          // open('wx') would otherwise leave an empty lock that later stale
+          // recovery must guess about.
+          fsyncSync(fd)
+        } catch (error) {
+          // The lock file itself is ours (we just created it): remove it rather
+          // than leaving an empty lock that blocks the next boot for a full
+          // stale-age window.
+          try {
+            closeSync(fd)
+          } catch { /* already closed */ }
+          this.lockFd = undefined
+          try {
+            unlinkSync(this.lockPath)
+          } catch { /* best effort */ }
+          throw error
+        }
         return
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code
@@ -166,55 +372,144 @@ export class HostCronLedger {
           // without the lock would let two Hosts write the same ledger.
           throw new Error(`dsh-cron: cannot acquire ledger lock: ${String(error)}`)
         }
-        if (attempt === 1) {
-          throw new Error('dsh-cron: another Host process owns the cron ledger (ledger.lock exists and its owner is alive)')
-        }
         // Stale-lock recovery: a crashed Host leaves the lock behind. Read
-        // the owner pid; when the process is gone, reclaim the lock.
+        // the owner evidence; when the owner is gone (or provably recycled),
+        // reclaim the lock.
         if (this.reclaimStaleLock()) continue
-        throw new Error('dsh-cron: another Host process owns the cron ledger (ledger.lock exists and its owner is alive)')
+        throw new Error(this.lockRefusal())
       }
     }
     throw new Error('dsh-cron: cannot acquire ledger lock')
   }
 
-  /** Reclaim a lock file whose recorded owner pid is no longer alive. */
-  private reclaimStaleLock(): boolean {
+  /**
+   * Actionable refusal for a lock that could not be reclaimed: name the file,
+   * the recorded owner, and the manual remedy (2026-09-23 R4-B-12).
+   *
+   * The previous message ("ledger.lock exists and its owner is alive") named
+   * neither, and cron silently disappeared for the whole session.
+   * @returns the error message.
+   */
+  private lockRefusal(): string {
+    const owner = this.readLockOwner()
+    const described = owner === undefined
+      ? 'unreadable payload'
+      : `pid ${String(owner.pid)}${owner.host === undefined ? '' : ` on ${owner.host}`}`
+        + `${owner.startedAt === undefined ? '' : ` started ${new Date(owner.startedAt).toISOString()}`}`
+    return 'dsh-cron: another Host process owns the cron ledger '
+      + `(lock ${this.lockPath} is held by ${described}); `
+      + 'if no other Harness/CLI process is running for this data directory, delete that lock file and restart'
+  }
+
+  /** Owner evidence recorded in the lock file; undefined when it is unreadable. */
+  private readLockOwner(): { pid?: number; startedAt?: number; host?: string } | undefined {
     try {
       const raw = readFileSync(this.lockPath, 'utf8').trim()
+      if (raw === '') return {}
+      try {
+        const parsed = JSON.parse(raw) as { pid?: unknown; startedAt?: unknown; host?: unknown }
+        if (parsed !== null && typeof parsed === 'object') {
+          return {
+            ...(typeof parsed.pid === 'number' ? { pid: parsed.pid } : {}),
+            ...(typeof parsed.startedAt === 'number' ? { startedAt: parsed.startedAt } : {}),
+            ...(typeof parsed.host === 'string' ? { host: parsed.host } : {}),
+          }
+        }
+      } catch {
+        // Legacy lock (a bare pid line, written before the payload existed).
+      }
       const pid = Number(raw)
-      if (!Number.isInteger(pid) || pid <= 0) {
-        // An empty/garbage lock file means the previous Host crashed between
-        // open('wx') and writing the pid. Treat it as stale once it is older
-        // than a full tick cycle (a live owner would have written its pid
-        // immediately after creating the file).
+      return Number.isInteger(pid) && pid > 0 ? { pid } : {}
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Reclaim a lock whose owner is gone — or whose recorded pid belongs to a
+   * DIFFERENT, later process (pid reuse, 2026-09-23 R4-B-12).
+   *
+   * The decision order is deliberate:
+   *  1. no usable payload at all (a crash between `open('wx')` and the write)
+   *     is reclaimed once it is older than a full tick cycle;
+   *  2. a recorded pid with no live process is stale (the crash case);
+   *  3. a live pid on ANOTHER host is not comparable (a shared network home):
+   *     refuse, the operator decides;
+   *  4. a live pid on this host that provably started AFTER the lock was
+   *     written cannot be its author — reclaim it and say why.
+   */
+  private reclaimStaleLock(): boolean {
+    const observed = this.readLockOwner()
+    if (observed === undefined) return false
+    const { pid } = observed
+    if (pid === undefined) {
+      // An empty/garbage lock file means the previous Host crashed between
+      // open('wx') and writing the pid. Treat it as stale once it is older
+      // than a full tick cycle (a live owner would have written its pid
+      // immediately after creating the file).
+      try {
         const mtime = statSync(this.lockPath).mtimeMs
         if (Date.now() - mtime > STALE_LOCK_AGE_MS) {
           unlinkSync(this.lockPath)
           return true
         }
+      } catch {
         return false
       }
-      try {
-        process.kill(pid, 0)
-        return false // Owner is alive.
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EPERM') return false // Alive but not ours.
-        // ESRCH: no such process — stale.
-      }
-      unlinkSync(this.lockPath)
-      return true
-    } catch {
       return false
     }
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') return false // Alive but not ours.
+      // ESRCH: no such process — stale.
+      unlinkSync(this.lockPath)
+      return true
+    }
+    const owner = observed.host
+    if (owner !== undefined && owner !== hostname()) return false
+    // The lock was written at `startedAt` (or, for legacy bare-pid locks, at the
+    // file's own mtime). A process that started after that instant cannot have
+    // written it: the pid was recycled.
+    let writtenAt = observed.startedAt
+    if (writtenAt === undefined) {
+      try {
+        writtenAt = statSync(this.lockPath).mtimeMs
+      } catch {
+        return false
+      }
+    }
+    const liveStartedAt = processStartedAt(pid)
+    if (liveStartedAt === undefined) return false
+    if (liveStartedAt <= writtenAt + PID_REUSE_SKEW_MS) return false
+    unlinkSync(this.lockPath)
+    console.warn(
+      `[dsh-cron] reclaimed a stale ${this.lockPath}: pid ${String(pid)} is alive but started `
+      + `${new Date(liveStartedAt).toISOString()}, after the lock was written (${new Date(writtenAt).toISOString()}) — recycled pid`,
+    )
+    return true
   }
 
   private load(): LedgerState {
     let raw: string
     try {
       raw = readFileSync(this.filePath, 'utf8')
-    } catch {
-      return { revision: 0, jobs: [], scheduler: { timeZone: timeZone(), ledgerId: crypto.randomUUID() } }
+    } catch (error) {
+      const code = errnoOf(error)
+      if (code === 'ENOENT') {
+        // The ONLY legitimate empty state (2026-09-23 CR-1). Marked explicitly
+        // so callers — and the regression tests — can tell a genuine first run
+        // apart from a degraded read.
+        this.mode = 'first-run'
+        return { revision: 0, jobs: [], scheduler: { timeZone: timeZone(), ledgerId: crypto.randomUUID() } }
+      }
+      // EACCES/EPERM/EIO/EMFILE/ENFILE/ELOOP/…: the ledger may well be on disk,
+      // we just cannot read it. Presenting it as "empty" is what makes the next
+      // `persist()` rename a fresh document over every stored job and prompt —
+      // `rename(2)` only needs write permission on the *directory*, so a
+      // read-protected file in a writable directory is exactly the fatal case.
+      // Reads keep working from memory; writes are refused (never overwrite).
+      return this.degradeToReadOnly(`cannot read ${this.filePath} (${code}): ledger stays read-only and is never overwritten`, error)
     }
     try {
       const parsed = JSON.parse(raw) as LedgerDocument
@@ -222,6 +517,10 @@ export class HostCronLedger {
         throw new Error('unexpected schema')
       }
       let jobs = parsed.jobs
+      // Convergence below happens in memory only: nothing reaches disk until the
+      // next `persist()`. Tracked so `dispose()` can land it before sealing
+      // (2026-09-23 R3-B3 F1).
+      let pendingFlush = false
       // Schema 迁移(审计 2026-08-25 C-1):此前把「schema 版本不匹配」当损坏
       // 处理 → rename .corrupt + 清空全部数据,且无迁移路径;任何未来字段
       // 变更都会静默抹掉用户全部定时任务。现在区分:
@@ -230,9 +529,18 @@ export class HostCronLedger {
       // - 高于当前(未知未来) → 保守拒绝(不破坏数据,报错而非清空)。
       if (parsed.schemaVersion < CRON_SCHEMA_VERSION) {
         jobs = migrateCronLedger(jobs, parsed.schemaVersion)
+        pendingFlush = true
       } else if (parsed.schemaVersion > CRON_SCHEMA_VERSION) {
         throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v${CRON_SCHEMA_VERSION}`)
       }
+      // 2026-09-23 CR-7: converge stored owner keys on the canonical
+      // (trim + lower-case) form. Reads already match normalised keys, so this
+      // is pure convergence — the next successful write persists it, and
+      // skipping it would lose nothing.
+      const normalized = jobs.map(normalizeJobOwner)
+      // `normalizeJobOwner` returns the very same record when nothing changed.
+      if (normalized.some((job, index) => job !== jobs[index])) pendingFlush = true
+      jobs = normalized
       const state: LedgerState = {
         revision: parsed.revision,
         jobs,
@@ -241,6 +549,10 @@ export class HostCronLedger {
           ...(parsed.scheduler?.ledgerId === undefined ? {} : { ledgerId: parsed.scheduler.ledgerId }),
           ...(parsed.scheduler?.lastTickAt === undefined ? {} : { lastTickAt: parsed.scheduler.lastTickAt }),
           ...(parsed.scheduler?.error === undefined ? {} : { error: parsed.scheduler.error }),
+          // DST-gap skip records survive a restart: "the 02:30 run was skipped
+          // because that local time did not exist" must not vanish with the app
+          // (2026-09-23 R3-B3 F2 / B-5).
+          ...skippedOccurrencesFor(parsed.scheduler?.skippedOccurrences),
         },
       }
       // Restore the idempotency cache from the persisted request log so a
@@ -250,31 +562,73 @@ export class HostCronLedger {
           this.cache.set(entry.requestId, { fingerprint: entry.fingerprint })
         }
       }
-      this.reconcileInterruptedStarts(state, this.now())
+      if (this.reconcileInterruptedStarts(state, this.now())) pendingFlush = true
+      this.pendingFlush = pendingFlush
+      this.mode = 'loaded'
       return state
     } catch (error) {
       // Corrupt or newer-than-supported ledger: isolate the bytes and start
       // empty (loudly visible via the scheduler error field), never overwrite
       // the original file. 审计 2026-08-25 C-1:只有真正的损坏/未来版本才
       // 触发 .corrupt;可迁移旧版本已在上面的 migrate 路径处理。
+      //
+      // 2026-09-23 CR-1: writing over the file is only allowed once the bytes
+      // were really moved aside. When the isolation itself fails (EACCES/EIO/…)
+      // the ledger stays read-only — otherwise the next `persist()` would
+      // rename a fresh document over the only surviving copy.
+      const backup = `${this.filePath}.corrupt-${Date.now()}`
       try {
-        renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`)
-      } catch {
-        // Best effort.
+        renameSync(this.filePath, backup)
+      } catch (backupError) {
+        return this.degradeToReadOnly(
+          `cannot isolate the unreadable ledger ${this.filePath} as ${backup} (${errnoOf(backupError)}): `
+          + `ledger stays read-only and is never overwritten (${error instanceof Error ? error.message : String(error)})`,
+          backupError,
+        )
       }
+      this.mode = 'reset-corrupt'
+      // The isolated bytes are gone from `ledger.json`, so the in-memory reset
+      // is a pending write of its own (2026-09-23 R3-B3 F1): flushing it keeps
+      // the "ledger was reset (kept as …)" diagnostic visible on the next boot
+      // even when the user never touches the board.
+      this.pendingFlush = true
       return {
         revision: 0,
         jobs: [],
         scheduler: {
           timeZone: timeZone(),
           ledgerId: crypto.randomUUID(),
-          error: 'ledger was corrupt or too new and reset',
+          error: `ledger was corrupt or too new and reset (kept as ${backup})`,
         },
       }
     }
   }
 
+  /**
+   * Enter the read-only degraded mode (2026-09-23 CR-1): reads keep answering
+   * from the in-memory state, every write is refused, and the reason is logged
+   * (naming the file and errno) and surfaced in the snapshot so the UI can show
+   * it. The on-disk ledger is left byte-identical.
+   */
+  private degradeToReadOnly(reason: string, error?: unknown): LedgerState {
+    this.mode = 'read-only'
+    this.degradedReason = reason
+    if (error === undefined) console.error(`[dsh-cron] ${reason}`)
+    else console.error(`[dsh-cron] ${reason}`, error)
+    return {
+      revision: 0,
+      jobs: [],
+      scheduler: {
+        timeZone: timeZone(),
+        ledgerId: crypto.randomUUID(),
+        error: reason,
+        readOnly: true,
+      },
+    }
+  }
+
   private persist(): void {
+    this.assertWritable()
     const document: LedgerDocument = {
       schemaVersion: CRON_SCHEMA_VERSION,
       revision: this.current.revision,
@@ -286,16 +640,34 @@ export class HostCronLedger {
       })),
     }
     const tmp = `${this.filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-    const fd = openSync(tmp, 'w', 0o600)
     try {
-      writeFileSync(fd, JSON.stringify(document))
-      fsyncSync(fd)
-    } finally {
-      closeSync(fd)
+      const fd = openSync(tmp, 'w', 0o600)
+      try {
+        writeFileSync(fd, JSON.stringify(document))
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+      chmodSync(tmp, 0o600)
+      renameSync(tmp, this.filePath)
+    } catch (error) {
+      // A failed write must not leave its temporary copy behind (2026-09-23
+      // R4-B-11): the file holds the COMPLETE document — job prompts included —
+      // and nothing ever cleaned it up, so an ENOSPC/EPERM loop accumulated
+      // full copies of the user's prompts in `$DSH_HOME/cron/`. Best effort:
+      // the original error is what the caller must see.
+      try {
+        unlinkSync(tmp)
+      } catch {
+        // The temp file may never have been created (open failed) or the
+        // directory may be unwritable for the unlink too; the write error below
+        // is the actionable one.
+      }
+      throw error
     }
-    chmodSync(tmp, 0o600)
-    renameSync(tmp, this.filePath)
     this.pruneCache()
+    // Everything that was only in memory is on disk now (2026-09-23 R3-B3 F1).
+    this.pendingFlush = false
   }
 
   private pruneCache(): void {
@@ -307,12 +679,63 @@ export class HostCronLedger {
   }
 
   state(): LedgerState {
+    const { skippedOccurrences, ...scheduler } = this.current.scheduler
     return {
       revision: this.current.revision,
       jobs: cloneJobs(this.current.jobs),
-      scheduler: { ...this.current.scheduler },
+      // A caller must not be able to mutate the live skip list through the
+      // snapshot it was handed (the job list is deep-cloned for the same
+      // reason).
+      scheduler: skippedOccurrences === undefined
+        ? { ...scheduler }
+        : { ...scheduler, skippedOccurrences: skippedOccurrences.map(entry => ({ ...entry })) },
     }
   }
+
+  /**
+   * How the ledger was obtained at construction (2026-09-23 CR-1). Only
+   * `first-run` is a legitimate empty ledger; `read-only` means the stored jobs
+   * could not be read and must not be overwritten.
+   */
+  loadMode(): LedgerLoadMode {
+    return this.mode
+  }
+
+  /** Read-only degraded-mode reason; undefined while writes are allowed (2026-09-23 CR-1). */
+  readOnlyReason(): string | undefined {
+    return this.degradedReason
+  }
+
+  /**
+   * Refuse every write while the ledger is read-only (2026-09-23 CR-1): a
+   * `persist()` would `renameSync` a fresh document over bytes we could not
+   * read, destroying every job with no `.corrupt-*` copy left behind.
+   */
+  private assertWritable(): void {
+    this.assertOpen()
+    if (this.degradedReason === undefined) return
+    throw new Error(`dsh-cron: ledger is read-only: ${this.degradedReason}`)
+  }
+
+  /**
+   * Refuse every request once {@link dispose} sealed this generation
+   * (2026-09-23 R3-B3 F1).
+   *
+   * `dispose()` releases `ledger.lock`, which is the only mutual exclusion
+   * between two generations of Hosts (HMR reload, same-process rebuild, next
+   * boot). A write that still got through would `renameSync` over the
+   * successor's `ledger.json` with no lock and no error — silently erasing jobs
+   * the successor had just created and answering the user with a success.
+   * Refusing loudly is the only honest alternative: this generation no longer
+   * owns the file, and re-acquiring the lock is a *new* ledger's job.
+   */
+  private assertOpen(): void {
+    if (!this.disposed) return
+    const reason = disposedRefusal(this.filePath)
+    console.error(`[dsh-cron] ${reason}`)
+    throw new Error(`dsh-cron: ${reason}`)
+  }
+
 
   /**
    * Reconcile executions left pending by a crashed Host: a pending execution
@@ -320,8 +743,12 @@ export class HostCronLedger {
    * so it is settled as cancelled and its job's nextRunAt is rolled forward
    * past `now` so the job can trigger again. Never re-fires a start that was
    * interrupted before the session was recorded.
+   *
+   * Returns whether anything changed — the change is memory-only, so the caller
+   * records it as a pending flush for `dispose()` (2026-09-23 R3-B3 F1).
    */
-  private reconcileInterruptedStarts(state: LedgerState, now: number): void {
+  private reconcileInterruptedStarts(state: LedgerState, now: number): boolean {
+    let changed = false
     for (const job of state.jobs) {
       const pending = job.executions.find(execution => execution.endedAt === undefined)
       if (pending === undefined) continue
@@ -331,11 +758,13 @@ export class HostCronLedger {
       // the future was set when the run opened and must be preserved, or the
       // very next trigger would be silently skipped.
       if (job.nextRunAt !== undefined && job.nextRunAt <= now) {
-        const nextRunAt = rollNextRun(job, now)
+        const nextRunAt = this.rollJob(state, job, now)
         if (nextRunAt === undefined) delete job.nextRunAt
         else job.nextRunAt = nextRunAt
       }
+      changed = true
     }
+    return changed
   }
 
   /** Lightweight summary for SSE frames (no deep clone of the job list). */
@@ -352,10 +781,37 @@ export class HostCronLedger {
     for (const listener of [...this.listeners]) listener()
   }
 
+  /**
+   * Apply one in-memory mutation and land it on disk atomically.
+   *
+   * The mutation is rolled back when the write fails (2026-09-23 R4-B-11):
+   * without that, a failed `persist()` left the change visible in `state()` and
+   * in the panel while the disk still held the old document — the user saw an
+   * edit that silently vanished on the next restart ("改了又变回去"), and the
+   * revision counter claimed a write that never happened. The pre-mutation
+   * snapshot is taken unconditionally because mutators edit records in place.
+   *
+   * The idempotency cache is deliberately NOT snapshotted: `applyRequest` only
+   * records a requestId AFTER `mutate` returns, so a failed mutation never
+   * claims to have been applied.
+   */
   private mutate(mutator: (state: LedgerState) => boolean): void {
+    // Checked BEFORE the mutator: a refused write must not leave the change in
+    // memory while the disk still holds the old document (2026-09-23 CR-1).
+    this.assertWritable()
+    const before: LedgerState = {
+      revision: this.current.revision,
+      jobs: cloneJobs(this.current.jobs),
+      scheduler: { ...this.current.scheduler },
+    }
     if (!mutator(this.current)) return
     this.current.revision += 1
-    this.persist()
+    try {
+      this.persist()
+    } catch (error) {
+      this.current = before
+      throw error
+    }
     this.emit()
   }
 
@@ -364,6 +820,9 @@ export class HostCronLedger {
    * and, when a run was opened, the run to launch.
    */
   applyRequest(requestId: string, action: CronAction): ApplyResult {
+    // A sealed generation is over: not even an idempotent replay may be
+    // answered out of its memory (the successor owns the ledger now).
+    this.assertOpen()
     const fingerprint = fingerprintOf(requestId, action)
     const cached = this.cache.get(requestId)
     if (cached !== undefined) {
@@ -403,7 +862,7 @@ export class HostCronLedger {
           if (existing !== undefined) return false
           const job = createJob(action.id, action.input, this.now(), this.owner() ?? undefined)
           if (job.enabled) {
-            const seeded = rollNextRun(job, this.now())
+            const seeded = this.rollJob(state, job, this.now())
             if (seeded !== undefined) job.nextRunAt = seeded
           }
           state.jobs.push(job)
@@ -415,21 +874,32 @@ export class HostCronLedger {
           const job = state.jobs[index]!
           const next: JobRecord = updateJob(job, action.patch, this.now())
           // Re-seed nextRunAt when the cron changed or the job was just
-          // enabled: the scheduler re-derives it from the current time.
+          // enabled: the scheduler re-derives it from the current time. The
+          // same stale check as `enable` applies (2026-09-23 CR-6) — an edit
+          // that switches a long-disabled job back on must not replay the
+          // occurrence missed while it was off.
           if (action.patch.cron !== undefined && action.patch.cron !== job.cron) {
-            const seeded = rollNextRun(withoutNextRun(next), this.now())
+            const seeded = this.rollJob(state, withoutNextRun(next), this.now())
             if (seeded !== undefined) next.nextRunAt = seeded
-          } else if (action.patch.enabled === true && job.nextRunAt === undefined) {
-            const seeded = rollNextRun(withoutNextRun(next), this.now())
+          } else if (action.patch.enabled === true && nextRunIsStale(next, this.now())) {
+            const seeded = this.rollJob(state, withoutNextRun(next), this.now())
             if (seeded !== undefined) next.nextRunAt = seeded
           }
           state.jobs[index] = next
           return true
         }
         case 'delete': {
-          const before = state.jobs.length
+          const target = state.jobs.find(job => job.id === action.jobId)
+          if (target === undefined) return false
+          // 2026-09-23 CR-2: deleting does not cancel the spawned session, and
+          // `settle()` is a silent no-op once the job is gone — the run's record
+          // (session id, prompt, timings, result) would vanish without a trace.
+          // The guard lives at the mutation point (not only in `cron_remove`),
+          // so the GUI / HTTP path cannot bypass it; `jobIsRunning` is the one
+          // shared judgement (tools + panel button read the same predicate).
+          if (jobIsRunning(target)) throw new Error(`dsh-cron: job ${action.jobId} is running`)
           state.jobs = state.jobs.filter(job => job.id !== action.jobId)
-          return state.jobs.length !== before
+          return true
         }
         case 'enable': {
           const index = state.jobs.findIndex(job => job.id === action.jobId)
@@ -439,7 +909,11 @@ export class HostCronLedger {
           const next: JobRecord = {
             ...job,
             enabled: true,
-            ...(job.nextRunAt === undefined ? seededNextRun(job, this.now()) : {}),
+            // 2026-09-23 CR-6: a stale nextRunAt (disabled for days) would make
+            // the very next tick fire the overdue occurrence in real time — a
+            // replay nobody opted into. "Enable" means "resume from now" unless
+            // the stored instant is still ahead.
+            ...(nextRunIsStale(job, this.now()) ? this.seededNextRun(state, job, this.now()) : {}),
             updatedAt: this.now(),
           }
           state.jobs[index] = next
@@ -457,7 +931,7 @@ export class HostCronLedger {
           const index = state.jobs.findIndex(job => job.id === action.jobId)
           if (index < 0) return false
           const job = state.jobs[index]!
-          if (hasOpenExecution(job)) return false
+          if (jobIsRunning(job)) return false
           const execution = startExecution(`run-${crypto.randomUUID()}`, this.now())
           const next: JobRecord = {
             ...job,
@@ -472,7 +946,7 @@ export class HostCronLedger {
           const index = state.jobs.findIndex(job => job.id === action.jobId)
           if (index < 0) return false
           const job = state.jobs[index]!
-          if (hasOpenExecution(job)) return false
+          if (jobIsRunning(job)) return false
           const execution = startExecution(`rerun-${crypto.randomUUID()}`, this.now())
           const next: JobRecord = {
             ...job,
@@ -498,6 +972,52 @@ export class HostCronLedger {
     }
   }
 
+  /**
+   * Scheduler-owned: re-anchor every future `nextRunAt` onto the **current**
+   * timezone (R5-B-6).
+   *
+   * Why the Host must do this: a stored `nextRunAt` is an absolute instant,
+   * while the expression it came from is wall-clock semantics. Change the
+   * machine's zone and the stored instant stops being the instant the
+   * expression asks for — "0 9 * * *" fires once at 21:00 in the new zone, and
+   * the panel's "next run" contradicts the expression it sits next to. Both
+   * halves are fixed in this package: the panel recomputes the display, and
+   * this method makes the firing agree with it.
+   *
+   * Three boundaries, all chosen to leave existing semantics alone:
+   *  - **future instants only** — `nextRunAt <= now` belongs to the ordinary
+   *    fire / skip-missed path (R4-B-9); rescheduling here would erase that
+   *    record instead of letting the tick tell the story;
+   *  - **enabled jobs only** — a disabled job has no upcoming occurrence to
+   *    re-anchor;
+   *  - **no write when the zone is unchanged** — no revision bump, no wake-up
+   *    for subscribers on every tick.
+   * @param now - current Host clock.
+   * @returns the zone change when one happened (`from`/`to` + how many jobs
+   *   were rescheduled), otherwise `undefined`.
+   */
+  realignTimeZone(now: number): { from: string, to: string, rescheduled: number } | undefined {
+    const zone = timeZone()
+    const from = this.current.scheduler.timeZone
+    if (zone === from) return undefined
+    let rescheduled = 0
+    this.mutate((state) => {
+      for (const job of state.jobs) {
+        if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt <= now) continue
+        const next = nextRunAtMs(job.cron, now)
+        if (next === job.nextRunAt) continue
+        if (next === undefined) delete job.nextRunAt
+        else job.nextRunAt = next
+        rescheduled += 1
+      }
+      // The snapshot's zone is the one the *current* nextRunAt values were
+      // computed in — the panel compares it with the machine's zone.
+      state.scheduler.timeZone = zone
+      return true
+    })
+    return { from, to: zone, rescheduled }
+  }
+
   /** Scheduler-owned: record a tick time (persisted, revision-bumped). */
   setScheduler(patch: Omit<Partial<CronSchedulerSnapshot>, 'error'> & { error?: string | undefined }): void {
     this.mutate((state) => {
@@ -514,7 +1034,13 @@ export class HostCronLedger {
   settle(jobId: string, executionId: string, result: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
     this.mutate((state) => {
       const job = state.jobs.find(candidate => candidate.id === jobId)
-      if (job === undefined) return false
+      if (job === undefined) {
+        // Should be unreachable now that `delete` refuses a running job
+        // (2026-09-23 CR-2). Kept as a loud diagnostic instead of the previous
+        // silent no-op: a dropped settlement means a run's outcome was lost.
+        console.warn(`[dsh-cron] settling execution ${executionId} of an unknown job ${jobId}: result ${result} was dropped`)
+        return false
+      }
       const index = job.executions.findIndex(execution => execution.id === executionId)
       if (index < 0) return false
       const settled = settleExecution(job.executions[index]!, result, this.now(), error)
@@ -555,13 +1081,112 @@ export class HostCronLedger {
     })
   }
 
+  /**
+   * Roll one job forward and remember every occurrence the roll skipped because
+   * its local wall clock does not exist (DST spring-forward, 2026-09-23 R3-B3
+   * F2 / B-5).
+   *
+   * EVERY roll in this ledger goes through here — the scheduled open, the two
+   * skip-missed paths, the seeding on create/update/enable/upsert, and the
+   * crash reconcile. Routing a roll around it is exactly how the skip becomes
+   * silent again, so new call sites must use this helper instead of
+   * `rollNextRun`.
+   */
+  private rollJob(state: LedgerState, job: JobRecord, now: number): number | undefined {
+    const roll: NextRunRoll = rollNextRunWithGaps(job, now)
+    if (roll.gaps.length > 0) this.recordSkippedOccurrences(state, job, roll.gaps)
+    return roll.at
+  }
+
+  /** {@link rollJob} for the object-literal seeding shape (`{ nextRunAt }` or nothing). */
+  private seededNextRun(state: LedgerState, job: JobRecord, now: number): { nextRunAt: number } | Record<string, never> {
+    const next = this.rollJob(state, job, now)
+    return next === undefined ? {} : { nextRunAt: next }
+  }
+
+  /**
+   * Append the DST-gap occurrences of one roll to the scheduler state and log
+   * them.
+   *
+   * Observability is the whole point (2026-09-23 R3-B3 F2 / B-5): a skipped
+   * occurrence used to leave no trace at all — the job simply did not run that
+   * day. The record is persisted with the ledger (so it survives a restart) and
+   * reaches the panel through `GET /api/cron/state` / the SSE summary; the log
+   * line is what an operator greps in the Host log.
+   *
+   * Duplicates are collapsed by (jobId, wall clock): a re-seed (enable/update)
+   * can walk over the same gap again, and the notice must not multiply. The
+   * list is bounded and never reordered, so `[length - 1]` is the newest entry.
+   */
+  private recordSkippedOccurrences(state: LedgerState, job: JobRecord, gaps: NextRunRoll['gaps']): void {
+    const merged = [...(state.scheduler.skippedOccurrences ?? [])]
+    for (const gap of gaps) {
+      if (merged.some(entry => entry.jobId === job.id && entry.wallClock === gap.wallClock)) continue
+      const occurrence: SkippedOccurrence = {
+        jobId: job.id,
+        name: job.name,
+        reason: 'dst-gap',
+        wallClock: gap.wallClock,
+        timeZone: state.scheduler.timeZone,
+        normalizedTo: gap.normalizedTo,
+        detectedAt: this.now(),
+      }
+      merged.push(occurrence)
+      console.warn(
+        `[dsh-cron] DST gap: local time ${gap.wallClock} does not exist in ${occurrence.timeZone}, `
+        + `so the ${gap.wallClock} occurrence of job ${job.id} (${job.name}) was skipped and will not be caught up`,
+      )
+    }
+    state.scheduler.skippedOccurrences = merged.slice(-MAX_SKIPPED_OCCURRENCES)
+  }
+
+  /**
+   * Record one due instant that was rolled past while nothing was scheduling —
+   * the app was closed, the machine was suspended, or the job was not visible
+   * to the running session (2026-09-23 R4-B-9).
+   *
+   * Same observability contract as the DST-gap records (bounded, persisted,
+   * surfaced in the panel snapshot, one greppable Host log line), for the other
+   * way an occurrence can vanish. Deliberately NOT a catch-up: the recovery
+   * policy stays "roll forward, never replay", only the silence is removed.
+   * @param state - the state being mutated.
+   * @param job - the job whose due instant is being skipped.
+   * @param dueAt - the instant that came due (its `nextRunAt` before the roll).
+   */
+  private recordMissedOccurrence(state: LedgerState, job: JobRecord, dueAt: number): void {
+    const wallClock = wallClockOf(dueAt, state.scheduler.timeZone)
+    const merged = [...(state.scheduler.skippedOccurrences ?? [])]
+    // Same dedupe key as the gap records (jobId, wall clock): a boot that rolls
+    // the same due instant twice must not double the notice.
+    if (!merged.some(entry => entry.jobId === job.id && entry.wallClock === wallClock)) {
+      merged.push({
+        jobId: job.id,
+        name: job.name,
+        reason: 'missed',
+        wallClock,
+        timeZone: state.scheduler.timeZone,
+        normalizedTo: dueAt,
+        detectedAt: this.now(),
+      })
+      console.warn(
+        `[dsh-cron] missed trigger: the ${wallClock} occurrence of job ${job.id} (${job.name}) came due `
+        + `while the scheduler was not running and was rolled forward (missed triggers are not caught up)`,
+      )
+    }
+    state.scheduler.skippedOccurrences = merged.slice(-MAX_SKIPPED_OCCURRENCES)
+  }
+
   /** Scheduler-owned: roll every enabled job's nextRunAt past `now` (missed runs are skipped). */
   skipMissed(now: number): void {
     this.mutate((state) => {
       let changed = false
       for (const job of state.jobs) {
         if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) continue
-        const nextRunAt = rollNextRun(job, now)
+        // R4-B-9: the due instant is about to be rolled past — record it before
+        // the roll, so "why did yesterday's run not happen" has an answer.
+        const dueAt = job.nextRunAt
+        const nextRunAt = this.rollJob(state, job, now)
+        this.recordMissedOccurrence(state, job, dueAt)
         if (nextRunAt === undefined) {
           delete job.nextRunAt
         } else {
@@ -573,12 +1198,24 @@ export class HostCronLedger {
     })
   }
 
-  /** Scheduler-owned: roll one job's nextRunAt past `now` (post catch-up). */
-  skipMissedFor(jobId: string, now: number): void {
+  /**
+   * Scheduler-owned: roll one job's nextRunAt past `now`.
+   *
+   * `disposition` says what happened to the due instant: `'skipped'` (nothing
+   * fired it — record it, R4-B-9) or `'caught-up'` (the catch-up policy already
+   * fired it, so the run is observable through its execution row and must not
+   * be reported as a missed trigger).
+   * @param jobId - the job to roll.
+   * @param now - current Host clock.
+   * @param disposition - whether the due instant fired through the catch-up path.
+   */
+  skipMissedFor(jobId: string, now: number, disposition: 'skipped' | 'caught-up' = 'skipped'): void {
     this.mutate((state) => {
       const job = state.jobs.find(candidate => candidate.id === jobId)
       if (job === undefined || !job.enabled || job.nextRunAt === undefined || job.nextRunAt > now) return false
-      const nextRunAt = rollNextRun(job, now)
+      const dueAt = job.nextRunAt
+      const nextRunAt = this.rollJob(state, job, now)
+      if (disposition === 'skipped') this.recordMissedOccurrence(state, job, dueAt)
       if (nextRunAt === undefined) {
         delete job.nextRunAt
       } else {
@@ -594,7 +1231,7 @@ export class HostCronLedger {
     this.mutate((state) => {
       const index = state.jobs.findIndex(candidate => candidate.id === jobId)
       if (index < 0) return false
-      const result = openScheduledRun(state.jobs[index]!, executionId, now)
+      const result = openScheduledRun(state.jobs[index]!, executionId, now, (job, at) => this.rollJob(state, job, at))
       if (result === undefined) return false
       // Persist the rolled-forward job (new execution + next nextRunAt).
       state.jobs[index] = result.job
@@ -622,7 +1259,7 @@ export class HostCronLedger {
           ...(registration.enabled === undefined ? {} : { enabled: registration.enabled }),
         }, now, owner ?? undefined)
         if (job.enabled) {
-          const seeded = rollNextRun(job, now)
+          const seeded = this.rollJob(state, job, now)
           if (seeded !== undefined) job.nextRunAt = seeded
         }
         state.jobs.push(job)
@@ -639,10 +1276,13 @@ export class HostCronLedger {
         updatedAt: now,
       }
       if (cronChanged) {
-        const seeded = rollNextRun(withoutNextRun(next), now)
+        const seeded = this.rollJob(state, withoutNextRun(next), now)
         if (seeded !== undefined) next.nextRunAt = seeded
-      } else if (next.enabled && job.nextRunAt === undefined) {
-        const seeded = rollNextRun(withoutNextRun(next), now)
+      } else if (next.enabled && nextRunIsStale(next, now)) {
+        // 2026-09-23 CR-6: the same stale re-seed as `enable` — a sibling
+        // plugin re-attaching after a long shutdown must not replay the
+        // occurrence the app was not running for.
+        const seeded = this.rollJob(state, withoutNextRun(next), now)
         if (seeded !== undefined) next.nextRunAt = seeded
       }
       state.jobs[index] = next
@@ -650,28 +1290,70 @@ export class HostCronLedger {
     })
   }
 
-  dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
-    this.listeners.clear()
-    if (this.lockFd !== undefined) {
-      try {
-        closeSync(this.lockFd)
-        // Only remove the lock we still own: if the file was replaced while
-        // held (edge), deleting it would release someone else's lock.
-        const raw = readFileSync(this.lockPath, 'utf8').trim()
-        if (raw === `${process.pid}`) unlinkSync(this.lockPath)
-      } catch {
-        // Best effort.
-      }
-      this.lockFd = undefined
+  /**
+   * Persist state that so far only exists in memory (best effort, never throws).
+   *
+   * Ordinary mutations persist synchronously inside {@link mutate} — there is
+   * no asynchronous write queue to drain — so the only pending writes are the
+   * convergence steps {@link load} deliberately leaves for "the next successful
+   * write": a schema migration, canonicalised owner keys, the
+   * interrupted-execution reconcile, and the document after a corrupt-ledger
+   * reset. `dispose()` is that write.
+   *
+   * Must run BEFORE the seal (a sealed ledger refuses writes) and BEFORE the
+   * lock is released (the successor must not read pre-flush bytes). Teardown
+   * must never throw, so a failure is logged and the flag stays set.
+   */
+  private flushPendingState(): void {
+    if (!this.pendingFlush) return
+    // Read-only degraded mode: the stored bytes could not be read and must
+    // never be renamed over (`assertWritable` enforces the same rule).
+    if (this.degradedReason !== undefined) return
+    try {
+      this.persist()
+    } catch (error) {
+      console.error('[dsh-cron] dispose could not persist the pending ledger state', error)
     }
   }
-}
 
-/** Validate a cron expression against the shared parser (UI and Host agree). */
-export function validateCron(expr: string): boolean {
-  return isValidCron(expr)
+  /** Close and delete our own `ledger.lock` (never a successor's). */
+  private releaseLock(): void {
+    if (this.lockFd === undefined) return
+    try {
+      closeSync(this.lockFd)
+      // Only remove the lock we still own: if the file was replaced while
+      // held (edge), deleting it would release someone else's lock. The payload
+      // is read through the shared parser so the JSON shape introduced for
+      // R4-B-12 cannot silently stop releasing our own lock.
+      if (this.readLockOwner()?.pid === process.pid) unlinkSync(this.lockPath)
+    } catch {
+      // Best effort.
+    }
+    this.lockFd = undefined
+  }
+
+  /**
+   * Seal this generation and hand `ledger.lock` to its successor (idempotent,
+   * never throws).
+   *
+   * Phase order is deliberate and load-bearing (2026-09-23 R3-B3 F1):
+   *   1. flush   — land memory-only state while the lock is still ours;
+   *   2. seal    — from here on every write path refuses loudly (`assertOpen`);
+   *   3. release — delete `ledger.lock`, which lets the next generation acquire it.
+   *
+   * Sealing *before* releasing is the invariant: the moment the lock file is
+   * gone a successor may own `ledger.json`, so this generation must already be
+   * unable to write. Reversing 2 and 3 (or moving the flush after the seal)
+   * reopens the window where a late settlement rewrites the successor's file
+   * with no mutual exclusion and no error.
+   */
+  dispose(): void {
+    if (this.disposed) return
+    this.flushPendingState()
+    this.disposed = true
+    this.listeners.clear()
+    this.releaseLock()
+  }
 }
 
 /**

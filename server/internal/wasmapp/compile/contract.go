@@ -3,11 +3,10 @@ package compile
 import (
 	"fmt"
 
-	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
-// 本文件是编译侧用到的**平台契约的薄封装**：错误码别名、上限值转发、字节数渲染。
+// 本文件是编译侧用到的**平台契约的薄封装**：上限值转发、字节数渲染。
 //
 // 铁律（§4 / §5.5）：数值唯一真源 = limits，错误码唯一真源 = apperr。
 // 这里**只做转发**，不新增任何字面量；不在这里再声明一份常量枚举。
@@ -16,12 +15,6 @@ import (
 // 但 cmd 侧一直是直接 import apperr 用 `apperr.CodeX`；静态校验切到 wasmmod 之后那些
 // 转发函数全部失去调用点，已删除。父子之间的错误码一致性由**协议层**保证
 //（proto.go 的 protocolErrorCode 做白名单归并），不靠 Go 层的间接。
-
-// Code 是平台错误码的别名（编译侧只用到 §7.4 的子集）。
-//
-// 保留它是因为 cmd 与 api 侧用它写 `apperr.New(compile.Code…)` 之类的中性代码；
-// 本包内部一律直接用 `apperr.CodeX`（少一层间接）。
-type Code = apperr.Code
 
 // MaxModuleBytes 是上传模块体积上限（转发 §4.2 的 32 MiB）。
 func MaxModuleBytes() int64 { return int64(limits.WasmMaxBytes) }

@@ -31,12 +31,12 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { prepareBrandAssets } from './brand-prepare.mjs'
 import { defaultChannelAppDir } from './channel-prepare.ts'
 import { resolveChannelBuildContext } from './channel-build.ts'
 import { AppOriginSchemeError, parseDesktopChannelProfile } from '../src/desktop-channel.ts'
 import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** 必须逐字节与"按本渠道重新派生"一致的文件。 */
 const DERIVED_ASSETS = [
@@ -222,8 +222,7 @@ export async function verifyChannelPackage(options: {
   return { channelId: context.channelId, checked }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const args = parseArgs(process.argv.slice(2))
     const env = args.channel === undefined ? process.env : { ...process.env, DSH_BUILD_CHANNEL: args.channel }

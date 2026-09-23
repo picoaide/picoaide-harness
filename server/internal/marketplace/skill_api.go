@@ -179,7 +179,23 @@ func (a *API) downloadArchive(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
 		return
 	}
+	serveSkillArchive(c, a.DB, s)
+}
 
+// serveSkillArchive 下发一个市场技能归档的字节流 —— **两个命名空间共用这一份实现**：
+// 员工面 `GET /api/client/v2/marketplace/skills/:name/archive` 与管理面
+// `GET /api/server/admin/skills/:name/archive`（后者是 webadmin 预览弹层
+// 「文件过大 → 下载归档」的落点）。头集合只有一处真源：
+//
+//   - Content-Type / Content-Disposition 跟随归档**实际格式**（zip 推荐、tar.gz 兼容，
+//     按魔数嗅探而不是按版本号猜）；
+//   - X-Skill-Version / X-Skill-Checksum 是客户端安装器的完整性对照契约；
+//   - 下载计数在这里（员工下载与管理端核查下载都算，与组织侧两条档案端点同口径：
+//     sharedskills.download 与 agentshare.serveArchive 也不区分 admin）。
+//
+// 调用方各自负责"谁可以下"：员工面先过授权 + 上下架闸门，管理面不过闸门（管理员本就
+// 能看全部内容，与组织侧的 DownloadAdmin 同形）。
+func serveSkillArchive(c *gin.Context, db *sql.DB, s *serverstore.Skill) {
 	if len(s.Archive) == 0 {
 		// 0052: git 源模式已移除,归档是唯一内容来源;尚未上传归档的技能
 		// 明确 404,不再回退到克隆构建。
@@ -201,7 +217,7 @@ func (a *API) downloadArchive(c *gin.Context) {
 	c.Header("Content-Disposition", "attachment; filename=\""+dispName+"\"")
 	c.Header("X-Skill-Version", s.Version)
 	c.Header("X-Skill-Checksum", sum)
-	_, _ = serverstore.IncrementSkillDownload(a.DB, s.Name)
+	_, _ = serverstore.IncrementSkillDownload(db, s.Name)
 	c.Data(http.StatusOK, contentType, s.Archive)
 }
 

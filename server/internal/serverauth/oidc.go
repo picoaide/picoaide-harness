@@ -38,6 +38,9 @@ type oidcFlow struct {
 	// 浏览器跳转完成后,桌面客户端深链需要知道 token 属于哪个服务端;
 	// 为空 = 未指定(默认深链只带 token,由客户端用登录页 server 填充)。
 	returnServer string
+	// ip 是发起本次流程的来源 IP(按信任边界解析的真实客户端 IP)。
+	// 只用于在途流程配额 oidcMaxFlowsPerIP;空串 = 调用方未提供(配额不生效)。
+	ip string
 }
 
 // oidcFlowTTL bounds how long a flow may sit before the callback arrives.
@@ -46,12 +49,32 @@ type oidcFlow struct {
 const (
 	oidcFlowTTL  = 10 * time.Minute
 	oidcMaxFlows = 1000
+	// oidcMaxFlowsPerIP 是**单个来源 IP** 允许同时占用的在途流程数。
+	//
+	// 为什么需要它(审计 2026-09-23 R5-A-18 的"保留防滥用"部分):流程启动桶
+	// 改成"只对失败计数"之后,这条攻击就失去了拦阻点 —— 一个 IP 用 1000 次
+	// 廉价 GET 把流程表灌满,表满即 fail-closed(见 errOIDCFlowTableFull),
+	// 全组织在最长 oidcFlowTTL(10 分钟)内起不了新流程。旧语义下它被
+	// "60 次/5min/IP、成功也记账"间接挡住(10 分钟最多 120 条在途)。
+	//
+	// 配额与**速率**无关,所以不会误伤合法流量:真人流程在数秒内被回调消费
+	// (HandleCallback 立刻 delete,p.flows 里随即让位),只有"只建不消费"的
+	// 灌表模式才会累积到上限。取表容量的 1/10 ⇒ 单个 IP 最多占 10%,
+	// 填满全表至少需要 10 个来源 IP。
+	oidcMaxFlowsPerIP = oidcMaxFlows / 10
 )
 
 // errOIDCFlowTableFull 表示在途登录流程已满:此时**拒绝新流程**(fail-closed)
 // 而不是驱逐最旧的一条 —— 旧实现驱逐最旧会让攻击者用 1000 次匿名 GET 把
 // 正在登录的真人流程挤掉,回调时只得到"state 无效或已过期"(审计 2026-09-13 P2-4)。
 var errOIDCFlowTableFull = errors.New("oidc: too many in-flight login flows")
+
+// errOIDCFlowQuotaPerIP 表示**该来源 IP** 占用的在途流程已达 oidcMaxFlowsPerIP。
+//
+// 与 errOIDCFlowTableFull 分开成两个哨兵的原因是可诊断性:表满 = 全平台在途流程
+// 被灌满(需要运维介入/等待 TTL),单 IP 配额满 = 一个来源在建而不消费(通常是
+// 脚本或攻击),两者的处置完全不同。对外都回 429(不泄露是哪一种)。
+var errOIDCFlowQuotaPerIP = errors.New("oidc: too many in-flight login flows from this client")
 
 // oidcOutboundClient 是 OIDC discovery / token / JWKS 的**统一出站 client**
 // (审计 2026-09-13 P1-4)。
@@ -129,8 +152,10 @@ func (p *OIDCProvider) Configure(cfg map[string]string) error {
 // AuthURL starts a flow for the given state and returns the authorization
 // URL carrying state, PKCE S256 challenge and nonce. `returnServer` (from the
 // login page's `?server=` param) is bound to the flow so the callback deep
-// link can carry it back to the initiating desktop client.
-func (p *OIDCProvider) AuthURL(state, returnServer string) (string, error) {
+// link can carry it back to the initiating desktop client. `clientIP` 是发起
+// 流程的来源 IP,用于 oidcMaxFlowsPerIP 的**在途流程配额**(空串按"未知来源"
+// 计入同一配额,不跳过)。
+func (p *OIDCProvider) AuthURL(state, returnServer, clientIP string) (string, error) {
 	if state == "" {
 		return "", errors.New("oidc: empty state")
 	}
@@ -147,11 +172,34 @@ func (p *OIDCProvider) AuthURL(state, returnServer string) (string, error) {
 		p.mu.Unlock()
 		return "", errOIDCFlowTableFull
 	}
-	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now(), returnServer: returnServer}
+	// 单 IP 配额(审计 2026-09-23 R5-A-18):判定与占位在同一临界区内,
+	// 因此并发灌表也无法穿透(名额本身就是被消耗的资源)。
+	// 空 clientIP 归到同一个"未知来源"桶 —— 调用方忘了解析 IP 时**不会**静默
+	// 跳过配额(fail-closed),而是所有这类调用共享一份配额。
+	if p.flowsForIPLocked(clientIP) >= oidcMaxFlowsPerIP {
+		p.mu.Unlock()
+		return "", errOIDCFlowQuotaPerIP
+	}
+	p.flows[state] = &oidcFlow{verifier: verifier, nonce: nonce, createdAt: time.Now(), returnServer: returnServer, ip: clientIP}
 	p.mu.Unlock()
 	return p.cfg.AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oidc.Nonce(nonce)), nil
+}
+
+// flowsForIPLocked 统计某来源 IP 当前占用的在途流程数;caller holds p.mu。
+//
+// 复杂度 O(len(p.flows)) ≤ oidcMaxFlows(1000):只在流程启动时跑一次,
+// 每次最多一千次 map 迭代(微秒级),不值得为它再维护一份按 IP 的计数表
+// (那份表还要在消费/过期/驱逐三条路径上同步,多一份状态就多一处不一致)。
+func (p *OIDCProvider) flowsForIPLocked(ip string) int {
+	n := 0
+	for _, f := range p.flows {
+		if f.ip == ip {
+			n++
+		}
+	}
+	return n
 }
 
 // sweepFlowsLocked removes expired flows; caller holds p.mu.
@@ -241,17 +289,70 @@ const oidcStateCookieName = "picoaide_oidc_state"
 // the callback deep link so the desktop client knows which server to attach.
 func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// P2-4:未认证的 /auth/{oidc,openid}/login 是"流程表 + 出站 discovery"
-		// 的双重放大器,必须限流(IP 桶,与回调桶同量级)。
-		ipKey := "oidc-login-ip:" + c.ClientIP()
-		if !a.loginIPLimiter.allow(ipKey) {
+		// P2-4:未认证的 /auth/{oidc,openid}/login 是**流程表**的放大器(每次调用
+		// 写入一条 state,表满即 fail-closed ⇒ 全组织的 SSO 都起不了新流程),
+		// 必须限流。
+		// 口径更正:discovery **不在**本路径上(它在 Configure/保存认证配置时做一次
+		// 并缓存),所以每次调用的成本是"一次内存写入 + 一次 302",真正被消耗的资源
+		// 是流程表名额 —— 这也是防滥用落在 oidcMaxFlowsPerIP(配额)而不是"按速率卡
+		// 成功"的原因。
+		//
+		// 2026-09-23 R5-A-18:本桶**只对失败计数**。
+		//   判定 = blocked(只读快照);记账 = 每个**真实失败**出口各 record 一次;
+		//   成功既不记账也**不** reset(见下)。
+		// 修前的语义是"与登录 IP 桶共用实例 + allow 每次被接受都记账",于是每一次
+		// **成功**的 SSO 登录都吃掉一格,而该键全仓零处 reset ⇒ 每个出口 IP 的
+		// SSO 登录被永久压到 60 次/5 分钟(纯合法流量即触发,无 env 旋钮)。
+		//
+		// 2026-09-23 R6-A-4(本轮):**平台自身容量**导致的拒绝(在途流程表满 /
+		// 单 IP 在途配额满)也不计入失败预算 —— 它们走 recordFlowCapacityRejection
+		// 的独立计数与独立审计动作。把"被自己的配额拒绝"算成"失败",会让一个 NAT
+		// 出口在登录潮里自我强化成 5 分钟全组织 SSO 封锁(见该闭包的注释)。
+		//
+		// 键在这里**只构造一次**,判定与所有记账点复用同一个字符串 ——
+		// 本仓有过"判定键 ≠ 记账键 ⇒ 桶永远判不满、限流静默失效"的教训
+		// (loginIPBudgetKey 的注释),所以不留第二个构造点。
+		flowKey := oidcFlowBudgetKey(c)
+		if a.oidcFlowLimiter.blocked(flowKey) {
 			_ = serverstore.AuditLog(a.DB, "oidc-login", "login_fail", "rate_limited ip="+c.ClientIP())
 			writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 			return
 		}
-		a.loginIPLimiter.record(ipKey)
+		// recordFlowFailure 必须在**每一个真实失败出口**各调一次。下面共 4 个记账点,
+		// 覆盖 5 条失败出口:状态生成失败 / server 参数格式错 / scheme 不合法 /
+		// 来源不可信 / provider 的其它错误(协议/配置失败)。
+		// 漏一处 = 该条失败路径不计预算
+		// (判据见 audit_20260923_oidc_flow_bucket_test.go)。
+		recordFlowFailure := func() { a.oidcFlowLimiter.record(flowKey) }
+		// recordFlowCapacityRejection 记录一次**因平台自身容量**被拒的流程启动
+		// (在途流程表满 / 单来源 IP 在途配额满),走的是与失败预算**不同的通道**。
+		//
+		// 2026-09-23 R6-A-4:这两条 429 此前与"凭证/协议错误"共用同一个失败预算,
+		// 于是产生了自我强化 —— 一个 NAT 出口的在途流程凑到 oidcMaxFlowsPerIP(100,
+		// 见 oidc.go 顶部的 TTL 说明:流程在 HandleCallback 之前占位最长 10 分钟)
+		// 之后,第 101 人起的**每一个**合法登录尝试都既回 429、又吃掉一格失败预算;
+		// 累计 60 次(oidcFlowStartMaxAttempts)就把整个出口 IP 的 SSO 再封 5 分钟。
+		// 平台自己的容量闸门把受害者推向"疑似攻击者"的判定 —— 纯合法流量即可触发,
+		// 且没有任何 env 旋钮。
+		//
+		// 现在的口径:
+		//   · 失败预算只被**真实失败**(凭证/协议/配置错误)消耗;
+		//   · 容量拒绝单独计数(API.OIDCFlowCapacityRejections,供运维/探针读),
+		//     并写一条**动作可区分**的审计(oidc_flow_capacity,不是 login_fail);
+		//   · HTTP 响应体刻意**不变**(仍是 429 RATE_LIMITED + 同一句文案):
+		//     对外区分"表满"与"你的 IP 超额"会泄露平台容量状态,且 429 的语义
+		//     ("稍后再试")对两种情形都成立。可区分性落在服务端日志与计数上,
+		//     不落在客户端可见面。
+		recordFlowCapacityRejection := func(reason string) {
+			a.oidcFlowCapacity.Add(1)
+			if a.DB != nil {
+				_ = serverstore.AuditLog(a.DB, "oidc-login", "oidc_flow_capacity",
+					"capacity_rejected reason="+reason+" ip="+c.ClientIP())
+			}
+		}
 		state, err := randomHex(16)
 		if err != nil {
+			recordFlowFailure()
 			writeError(c, http.StatusInternalServerError, "INTERNAL", "状态生成失败")
 			return
 		}
@@ -267,29 +368,56 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 			// returnServerIsTrusted,R7-F3-N3)。
 			u, perr := url.Parse(returnServer)
 			if perr != nil || u.Host == "" {
+				recordFlowFailure()
 				writeError(c, http.StatusBadRequest, "VALIDATION", "server 参数格式错误")
 				return
 			}
 			loopback := u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "[::1]"
 			if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
+				recordFlowFailure()
 				writeError(c, http.StatusBadRequest, "VALIDATION", "server 必须为 https(或 http 回环)")
 				return
 			}
 			if !returnServerIsTrusted(p, u) {
+				recordFlowFailure()
 				writeError(c, http.StatusBadRequest, "VALIDATION", "server 与本次登录的服务端不一致")
 				return
 			}
 		}
-		authURL, err := p.AuthURL(state, returnServer)
+		authURL, err := p.AuthURL(state, returnServer, c.ClientIP())
 		if err != nil {
+			// 顺序有意:先摘出**平台自身容量**的两条出口(它们不吃失败预算),
+			// 剩下的才是真实失败。见上面 recordFlowCapacityRejection 的注释。
 			if errors.Is(err, errOIDCFlowTableFull) {
 				// 在途流程已满:明确 429(不驱逐真人在途流程)。
+				recordFlowCapacityRejection("flow_table_full")
 				writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
 				return
 			}
+			if errors.Is(err, errOIDCFlowQuotaPerIP) {
+				// 单 IP 在途流程配额满:同样是 429(对外不区分是哪一种)。
+				// 这一条是"只对失败计数"之后**替代**旧"成功也记账"的防滥用面:
+				// 建而不消费的灌表模式会在这里被挡住(见 oidcMaxFlowsPerIP)。
+				// ⚠️ 它**不是**失败:合法用户在登录潮里也会撞到(配额与速率无关,
+				// 只与"在途未回调"的条数有关),所以它不进失败预算 —— 否则
+				// "被自己的配额拒绝"会把整个出口 IP 推向二次封锁(R6-A-4)。
+				recordFlowCapacityRejection("per_ip_quota")
+				writeError(c, http.StatusTooManyRequests, "RATE_LIMITED", "登录请求过于频繁,请稍后再试")
+				return
+			}
+			// 真实失败(协议/配置/随机源等):吃失败预算。
+			recordFlowFailure()
 			writeError(c, http.StatusBadGateway, "UPSTREAM", "OIDC 服务不可用")
 			return
 		}
+		// 成功出口:**不记账**(这正是本条修复)—— 合法登录不再消耗任何预算,
+		// 因此"连续 N 次成功 SSO(N 远大于预算)"也不会 429。
+		//
+		// 为什么成功也**不** reset(与登录桶的 loginSucceeded 不同):流程启动的
+		// "成功"是**匿名可得**的 —— 任何人发一次不带参数、不带凭据的合法 GET 就
+		// 成功。若在这里 reset,攻击者用"59 次失败 + 1 次成功"交替即可把失败预算
+		// 永远洗掉,限流等于不存在。登录桶可以 reset,是因为那里的成功需要**通过
+		// 鉴权**,攻击者拿不到。失败预算的清账只由滑动窗口(5 分钟)自然过期承担。
 		name := p.Name()
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name:     oidcStateCookieName + "_" + name,
@@ -334,7 +462,9 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		})
 		// v3b §2.6: OIDC 回调限流(按来源 IP; 防 IdP 妥协后暴力回调)。
 		// 2026-09-08 P0-2:改用独立 IP 桶(不再占用全局 u:oidc-callback 登录桶,
-		// 否则全组织 SSO 每 5 分钟只能登录 10 次),且只对失败回调计数。
+		// 否则全组织 SSO 每 5 分钟只能登录 10 次)。
+		// 2026-09-23 E-01:allow 判定即记账(成功回调由 oidcCallbackSucceeded 清空)
+		// —— 旧"只对失败回调计数"由调用方 record,并发回调同样能穿透。
 		if !a.oidcCallbackAllowed(c) {
 			_ = serverstore.AuditLog(a.DB, "oidc-callback", "login_fail", "rate_limited ip="+c.ClientIP())
 			return
@@ -343,12 +473,10 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 		rs := returnServerOf(p, state)
 		ui, err := p.HandleCallback(code, state)
 		if errors.Is(err, errOIDCState) {
-			a.oidcCallbackFailed(c)
 			writeError(c, http.StatusBadRequest, "VALIDATION", "state 无效或已过期")
 			return
 		}
 		if err != nil {
-			a.oidcCallbackFailed(c)
 			// v3b 审计: OIDC 失败留痕。
 			_ = serverstore.AuditLog(a.DB, "oidc", "login_fail", "ip="+c.ClientIP())
 			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "OIDC 认证失败")

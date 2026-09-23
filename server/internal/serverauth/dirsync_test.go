@@ -267,19 +267,20 @@ func TestDirectorySyncDisabled(t *testing.T) {
 	}
 }
 
-// TestSyncDirectoryUpdatesProfile:目录改显示名/邮箱后同步更新;停用的外部
-// 用户回到目录后重新启用。
+// TestSyncDirectoryUpdatesProfile:目录改显示名/邮箱后同步更新;**但已停用的
+// 账号不被自动启用**(第五轮审计 R5-B-8,2026-09-23 定案:目录同步只自动停用,
+// 启用一律由管理员显式执行),本轮同时留下一条 directory_enable_skipped 审计。
 func TestSyncDirectoryUpdatesProfile(t *testing.T) {
 	db := mustDB(t)
 	p, f := fakeDir(t)
 	if _, err := SyncDirectoryRun(db, p); err != nil {
 		t.Fatal(err)
 	}
-	// 停用 alice(模拟离职→再入职)
+	// 停用 alice(与 webadmin 禁用走同一条 DAO:UpdateUserRevokingTokens)
 	alice, _ := serverstore.GetUserByUsername(db, "alice")
 	upd := *alice
 	upd.Status = 0
-	if err := serverstore.UpdateUser(db, &upd); err != nil {
+	if err := serverstore.UpdateUserRevokingTokens(db, &upd); err != nil {
 		t.Fatal(err)
 	}
 	// 目录改 alice 信息(显示名 + 邮箱)
@@ -293,11 +294,37 @@ func TestSyncDirectoryUpdatesProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Updated == 0 {
-		t.Fatal("expected profile update/re-enable in result")
+		t.Fatal("expected profile update in result")
+	}
+	if res.SkippedDisabled != 1 {
+		t.Fatalf("skipped = %d, want 1(alice 已停用,目录同步不得自动启用)", res.SkippedDisabled)
 	}
 	alice, _ = serverstore.GetUserByUsername(db, "alice")
-	if alice.Status != 1 || alice.DisplayName != "Alice Wang" || alice.Email != "aw@example.com" {
-		t.Fatalf("alice after sync = %+v", alice)
+	if alice.DisplayName != "Alice Wang" || alice.Email != "aw@example.com" {
+		t.Fatalf("alice after sync = %+v(显示名/邮箱仍须同步)", alice)
+	}
+	if alice.Status != 0 {
+		t.Fatalf("alice status = %d, want 0(账号已停用 ⇒ 目录同步不得自动启用)", alice.Status)
+	}
+	// 审计:被跳过的账号必须可追溯(否则"管理员禁用被同步无视"完全不可见)。
+	rows, _, err := serverstore.ListAuditLogsPagedFiltered(db, 0, 50, "directory_enable_skipped", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 || !strings.Contains(rows[0].Detail, "alice") {
+		t.Fatalf("缺少 directory_enable_skipped 审计(且需点名 alice): %+v", rows)
+	}
+	// 管理员显式恢复 ⇒ 目录同步不再干预(状态保持 1)。
+	alice.Status = 1
+	if err := serverstore.UpdateUserRevokingTokens(db, alice); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncDirectoryRun(db, p); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ = serverstore.GetUserByUsername(db, "alice")
+	if alice.Status != 1 {
+		t.Fatalf("alice status = %d, want 1(管理员显式恢复后应保持启用)", alice.Status)
 	}
 }
 

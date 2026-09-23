@@ -19,6 +19,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/opens"
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 	"github.com/picoaide/picoaide/internal/wasmapp/readyz"
+	"github.com/picoaide/picoaide/internal/wasmapp/runtime"
 	"github.com/picoaide/picoaide/internal/wasmapp/upload"
 )
 
@@ -50,6 +51,12 @@ type wasmPlatform struct {
 	UploadCleanup *upload.CleanupScheduler
 	// Compiler 是编译子系统（R31）。
 	Compiler *compile.Compiler
+	// CacheOps 是**执行侧自持**的磁盘编译缓存运维组件（R5-A-1）。
+	//
+	// 非 nil **当且仅当**编译子系统缺席：此时它接手"水位可见性 + 周期回收"，并在 Close
+	// 时随平台一起停。编译器在时它是 nil（唯一回收者仍是 compile 的周期循环）——
+	// "同一棵树永远只有一个删除者"由装配点的互斥保证，也由这里暴露给装配级判据。
+	CacheOps *runtime.CacheOps
 	// Scheduler 是请求排队/准入（§4.6）。
 	Scheduler *queue.Scheduler
 	// Limits 是平台限制项的运行期持有者（控制台设置 > 部署档位 > 默认）。
@@ -255,6 +262,36 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 		log.Printf("wasm: compile isolation = %s", compiler.IsolationPlan())
 	}
 
+	// ---- 磁盘编译缓存的周期回收（P0-a，2026-09-23 现场）----
+	//
+	// 为什么必须在装配期启动：磁盘编译缓存有**两个**写者 —— 发布/校验期的编译子进程，
+	// 以及**执行侧**（`internal/wasmapp/runtime` 的 wazero 磁盘缓存；判据见
+	// runtime/cache_mode_test.go 的 `wantDiskWrites: true`）。而回收此前只挂在
+	// "编译作业之后"（compile 的 runJob）⇒ **"只服务、不发布"的时段缓存只涨不降**，
+	// 直到 /readyz 报超限并同时把发布闸门关上 —— 而那道闸门正是产生编译作业的唯一入口，
+	// 于是自锁、永不恢复（现场实测：删掉缓存条目立刻恢复 200，不删就永远 503）。
+	//
+	// 随 ctx 退出/Close() 停止（见 compile.StartReclaimLoop 的契约）；compiler==nil 时是 no-op。
+	startWasmCompileReclaimLoop(ctx, compiler)
+
+	// ---- 编译子系统**缺席**时的同一职责（R5-A-1，2026-09-23 五轮审计）----
+	//
+	// 为什么必须补这一半：回收与水位可见性此前**整体挂在 compiler 上** —— 而执行侧照写
+	// 那棵树（`runtime.New` 只看 DataRoot 就装磁盘缓存，判据见 runtime/cache_mode_test.go
+	// 的 `wantDiskWrites: true`）。于是"缺一个可选辅助二进制"（auto 档只 log 后置 nil）
+	// 的部署里：周期回收不启动、`/readyz` 的 compile_cache_bytes **恒为 0**、全仓没有
+	// 第二个回收者 ⇒ 这棵树只涨不降，直到把数据根所在磁盘吃掉，而运维在探针上看到的
+	// 三个数字全是 0/上限（看不出是谁吃的盘）。
+	//
+	// 装配纪律：**两者互斥** —— 编译器在 ⇒ 唯一回收者是 compile 的周期循环（P0-a 的三条
+	// 自愈路径一字不改）；编译器缺席 ⇒ 才创建执行侧自持组件接手同一职责（同一棵树、
+	// 同一份阈值、同一个"先体积后条数、mtime 从旧到新"的回收口径）。
+	var cacheOps *runtime.CacheOps
+	if compiler == nil {
+		cacheOps = newWasmCompileCacheOps(dataDir, log.Printf)
+		startWasmCacheFallbackReclaim(ctx, compiler, cacheOps)
+	}
+
 	// ⚠️ W4 删除的三段装配（总纲 §8.4 / §21）：
 	//   - `aichat.New(...)`：服务端 AI 能力彻底删除，应用改走客户端 AI loop；
 	//   - `session.New(...)` + `sessionLoginThrottle`：员工浏览器会话与一次性换票
@@ -310,22 +347,9 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 
 	checker := readyz.New(readyz.Options{
 		DataRoot: dataDir,
-		Compiler: func() readyz.CompilerStatsSnapshot {
-			if compiler == nil {
-				// 编译子系统不可用时**不**在探针里伪造健康水位：让 /readyz 的
-				// 相关字段为 0（并靠下面的 CompileAvailability 把"不可用"这件事
-				// 显式说出来 —— 零水位与"空闲"同形，光看它区分不出来）。
-				return readyz.CompilerStatsSnapshot{}
-			}
-			st := compiler.Stats()
-			return readyz.CompilerStatsSnapshot{
-				QueueDepth: st.QueueDepth,
-				InFlight:   boolToInt(st.Compiling),
-				CacheBytes: st.CacheBytes,
-				CacheFiles: st.CacheEntries,
-				Running:    st.ChildRunning,
-			}
-		},
+		// 水位来源（R5-A-1）：编译器在 ⇒ 编译侧快照；编译器缺席 ⇒ **执行侧自持组件的
+		// 真实目录扫描**（不再报零水位 —— 那会把"这棵树在涨"从运维面上抹掉）。
+		Compiler: wasmCompileStatsProvider(compiler, cacheOps),
 		// 编译可用性是**是非题**（审计 P2-2：编译器缺失时 /readyz 与健康态逐字段同形，
 		// 编排发现不了"发布已禁用"）。它还会让 AllowPublish 拒绝发布（没有编译器就没有发布）。
 		CompileAvailability: func() readyz.CompileAvailability {
@@ -368,6 +392,15 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 			}
 			return string(compiler.CacheMode())
 		},
+		// 发布闸门的**同步自愈钩子**（P0-b，2026-09-23 现场）：命中"编译缓存超上限"时
+		// 先回收一次再判。编译子系统在 ⇒ 接到编译侧**唯一**的回收实现
+		// （compile.Compiler.ReclaimCache，与周期回收/编译后回收共用同一把锁），因此不会与
+		// 另外两条路径并发重复删除；编译子系统缺席 ⇒ 接到执行侧自持组件（R5-A-1），
+		// 否则"超限"这条理由在缺席形态下会永远无解（水位是真的，钩子是 nil）。
+		ReclaimCompileCache: compileReclaimHook(compiler, cacheOps),
+		// 只该进服务端日志的明细（R5-A-5：驱动错误原文；R5-A-4：回收的部分失败）：
+		// /readyz 是未认证端点，响应体只给分类后的原因。
+		Logger: log.Printf,
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{
@@ -440,6 +473,7 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 		EventCleanup:  eventCleanup,
 		OpensCleanup:  opensSched,
 		Compiler:      compiler,
+		CacheOps:      cacheOps,
 		Scheduler:     scheduler,
 		Limits:        limitsHolder,
 		lock:          lock,
@@ -475,6 +509,11 @@ func (p *wasmPlatform) Close() {
 	if p.UploadCleanup != nil {
 		p.UploadCleanup.Close()
 	}
+	// 执行侧缓存运维（只有编译子系统缺席时才存在）：先停周期循环，再关下面的组件 ——
+	// 它的回收与"唯一写者"（本进程的执行侧运行时）同生共死，停在最前面最安全。
+	if p.CacheOps != nil {
+		p.CacheOps.Close()
+	}
 	if p.Compiler != nil {
 		if err := p.Compiler.Close(); err != nil {
 			log.Printf("wasm: compiler close: %v", err)
@@ -500,6 +539,133 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// startWasmCompileReclaimLoop 启动磁盘编译缓存的**周期回收循环**（P0-a，现场自锁的一半）。
+//
+// 语义全部在 compile.StartReclaimLoop 里（幂等、启动即回收一次、ctx/Close 退出、失败
+// 只记日志）；这里只负责"装配期把它启动起来"这一件事 —— 事件驱动那条路径（编译作业
+// 之后回收）覆盖不了"只服务、不发布"的时段，而那正是现场 503 的成因。
+//
+// compiler == nil（编译子系统不可用）⇒ no-op：此时发布面已经由 compile_available=false
+// 关掉了。⚠️ 但**执行侧仍在那棵树上写条目** ⇒ 缺席形态的回收由
+// startWasmCacheFallbackReclaim 接手（R5-A-1），不是"没人管"。
+func startWasmCompileReclaimLoop(ctx context.Context, compiler *compile.Compiler) {
+	if compiler == nil {
+		return
+	}
+	compiler.StartReclaimLoop(ctx, compile.DefaultReclaimLoopInterval)
+	log.Printf("wasm: 编译缓存周期回收已启动（每 %v 一次，不依赖编译作业；日志前缀 %q）",
+		compile.DefaultReclaimLoopInterval, "compile: 缓存回收")
+}
+
+// newWasmCompileCacheOps 创建**执行侧自持**的缓存运维组件（R5-A-1）。
+//
+// 只解决一件事：让"这棵树有没有人管"与"编译子系统在不在"解耦。返回 nil 当且仅当
+// 数据根为空（没有磁盘缓存可管）；阈值与周期取 limits/默认值（与编译侧同一份口径，
+// 由 cmd/server 的跨包一致性用例钉住）。
+func newWasmCompileCacheOps(dataDir string, logf func(format string, args ...any)) *runtime.CacheOps {
+	return runtime.NewCacheOps(runtime.CacheOpsOptions{DataRoot: dataDir, Logger: logf})
+}
+
+// startWasmCacheFallbackReclaim 在**编译子系统缺席**时启动执行侧的周期回收（R5-A-1）。
+//
+// 互斥是硬约束：编译器在 ⇒ **不启动**（唯一回收者是 compile 的周期循环；同一棵树两个
+// 删除者只会白扫目录、让"删了几条"的计数失真）。返回是否真的启动了循环 ——
+// 装配级判据要断言的就是这个 bool，而不是"源码里有一行调用"。
+func startWasmCacheFallbackReclaim(ctx context.Context, compiler *compile.Compiler, ops *runtime.CacheOps) bool {
+	if compiler != nil {
+		return false
+	}
+	if ops == nil {
+		log.Printf("wasm: ⚠️ 编译子系统缺席且数据根为空 ⇒ 没有磁盘编译缓存可管（执行侧不启动回收）")
+		return false
+	}
+	ops.StartLoop(ctx)
+	log.Printf("wasm: 编译子系统缺席 ⇒ 执行侧接手编译缓存的水位与周期回收（扫描根 %s，每 %v 一次；日志前缀 %q）",
+		ops.ScanRoot(), ops.Interval(), "runtime: 编译缓存回收（执行侧/")
+	return true
+}
+
+// wasmCompileStatsProvider 返回 /readyz 的编译缓存水位快照来源（R5-A-1）。
+//
+// 编译子系统在 ⇒ 编译侧快照（含队列/在飞，与超限判定、与回收用的阈值同源）；
+// 编译子系统**缺席** ⇒ 执行侧自持组件的**真实目录扫描**（绝不报零水位：执行侧照写
+// 那棵树，报 0 等于把"磁盘在涨"从运维面上抹掉 —— 这正是本条审计的现场形态）。
+// 两者都拿不到（没有数据根）⇒ 零值快照（此时确实没有磁盘缓存）。
+func wasmCompileStatsProvider(compiler *compile.Compiler, ops *runtime.CacheOps) func() readyz.CompilerStatsSnapshot {
+	return func() readyz.CompilerStatsSnapshot {
+		if compiler != nil {
+			st := compiler.Stats()
+			return readyz.CompilerStatsSnapshot{
+				QueueDepth: st.QueueDepth,
+				InFlight:   boolToInt(st.Compiling),
+				CacheBytes: st.CacheBytes,
+				CacheFiles: st.CacheEntries,
+				Running:    st.ChildRunning,
+				// 生效的回收阈值（编译器自己的 Options 快照）：超限判定必须与回收
+				// 用的阈值同源，否则会出现"探针报超限、回收认为没超"⇒ 回收永远删不掉、
+				// 503 永久化（P0 的形态之一）。
+				CacheMaxBytes:   st.CacheMaxBytes,
+				CacheMaxEntries: st.CacheMaxEntries,
+			}
+		}
+		if ops == nil {
+			return readyz.CompilerStatsSnapshot{}
+		}
+		bytes, files := ops.UsageOrZero()
+		return readyz.CompilerStatsSnapshot{
+			CacheBytes:      bytes,
+			CacheFiles:      files,
+			CacheMaxBytes:   ops.MaxBytes(),
+			CacheMaxEntries: ops.MaxEntries(),
+		}
+	}
+}
+
+// compileReclaimHook 把发布闸门的同步回收接到**当时唯一在用的**回收实现上（P0-b / R5-A-1）。
+//
+// 为什么需要它而不是在 readyz 里直接 import compile：依赖方向（readyz 是被装配的探针，
+// compile 不该知道探针）—— readyz 只认一个函数签名，接线在装配层。
+//
+// 两条分支（与装配点的互斥一一对应）：
+//   - 编译器在 ⇒ compile.Compiler.ReclaimCache（与周期回收/编译后回收共用同一把锁）；
+//   - 编译器缺席 ⇒ 执行侧自持组件（R5-A-1）——否则"超限"这条理由的**水位是真的、
+//     钩子是 nil**，AllowPublish 每次都会以"未接线回收钩子"把发布关着。
+//
+// 返回 nil 仅当两者都不可用（没有数据根）：AllowPublish 对 nil 钩子的处置是
+// "保持超限即拒绝 + 点名装配缺失"。
+//
+// 回收结果进日志（可 grep）：删了 0 条不必打（发布闸门可能被高频触发，噪音无益），
+// 删了东西或失败都必须留痕。
+func compileReclaimHook(compiler *compile.Compiler, ops *runtime.CacheOps) func() (int, int64, error) {
+	if compiler == nil {
+		if ops == nil {
+			return nil
+		}
+		return func() (int, int64, error) {
+			removed, freed, err := ops.Reclaim()
+			if err != nil {
+				log.Printf("wasm: ⚠️ 发布闸门触发的缓存回收失败（执行侧）: %v", err)
+				return removed, freed, err
+			}
+			if removed > 0 {
+				log.Printf("wasm: 发布闸门触发的缓存回收（执行侧）：删除 %d 条 / 释放 %d 字节", removed, freed)
+			}
+			return removed, freed, nil
+		}
+	}
+	return func() (int, int64, error) {
+		removed, freed, err := compiler.ReclaimCache()
+		if err != nil {
+			log.Printf("wasm: ⚠️ 发布闸门触发的缓存回收失败: %v", err)
+			return removed, freed, err
+		}
+		if removed > 0 {
+			log.Printf("wasm: 发布闸门触发的缓存回收：删除 %d 条 / 释放 %d 字节", removed, freed)
+		}
+		return removed, freed, nil
+	}
 }
 
 // readMemoryAvailability 是**可用内存的唯一读取入口**（cgroup 感知 + 宿主回落）。

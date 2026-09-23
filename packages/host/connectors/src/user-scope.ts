@@ -1,19 +1,46 @@
 /**
- * Per-user scope resolution for the connectors plugin.
+ * Per-user **and per-server** scope resolution for the connectors plugin.
  *
  * The enterprise session is the product's single source of truth for "who is
- * logged in" (`picoSession` service + `pico/session-changed` event).
- * Connector credentials, CLI caches, and browser persistent partitions are
- * scoped per logged-in user so A's tokens never leak into B's session.
+ * logged in" (`picoSession` service + `pico/session-changed` event) and for
+ * "which deployment they are logged into" (`session.serverURL`). Connector
+ * credentials, CLI caches, and browser persistent partitions are scoped per
+ * logged-in user so A's tokens never leak into B's session.
  *
  * Namespace layout (everything under the DSH home):
  *
- *   <dshHome>/users/<encoded-username>/connectors/   credentials + cli cache
+ *   <dshHome>/users/<encoded-username>/servers/<server-scope>/connectors/
+ *
+ * where `<server-scope>` is `sha256(normalized server address)[:32]`
+ * ({@link serverScopeHash}) or the literal {@link UNSCOPED_SERVER_SEGMENT}
+ * when the session carries no server address.
+ *
+ * R6-B-2 (audit 2026-09-23): the **server dimension used to be missing**. Two
+ * deployments of one account (the repo's own topology runs a test and a
+ * production deployment, plus two channel stacks on one host, and `/login`
+ * supports re-pointing the address) shared ONE credential directory, so after
+ * switching servers the previous tenant's secrets were handed to the new
+ * tenant's same-id connector: a manual-token connector's `fields` (i.e. the
+ * plaintext secret) were injected into the new endpoint's headers/child env,
+ * and an OAuth connector's access/refresh token was presented to the new
+ * endpoint as well (the SDK's `issuer` stamp only catches the case where the
+ * two tenants' authorization servers differ — it does nothing for a shared
+ * IdP, and nothing at all for `fields`-only connectors).
+ *
+ * The pre-2026-09-24 layout
+ *
+ *   <dshHome>/users/<encoded-username>/connectors/
+ *
+ * is now the **unscoped (legacy) directory**: it is never resolved as a live
+ * scope, and the stored bytes are never adopted (see `ConnectorStore`), so a
+ * file written by an older build can no longer be replayed against whichever
+ * server the user happens to be pointed at now. The files are deliberately
+ * LEFT ON DISK — the migration is fail-closed, not destructive.
  *
  * The username segment is filesystem-safe encoded — a gateway account name
  * may contain `/`, `..`, or OS-reserved characters, so it is never used raw.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 // P2-36: the DSH-home constants/resolution used to be inlined copies of the
@@ -81,4 +108,98 @@ export function userScopePath(username: string | null | undefined, env: NodeJS.P
     'users',
     encodeSegment(key),
   )
+}
+
+/**
+ * The directory segment used when the session carries no server address.
+ *
+ * A separate segment (never the user root, never a plausible hash) is what
+ * makes "we cannot tell which server this belongs to" fail closed: a session
+ * without a server identity gets its own empty scope instead of silently
+ * adopting the unscoped legacy directory. 32-hex hashes can never equal this
+ * literal, so the two can never collide.
+ */
+export const UNSCOPED_SERVER_SEGMENT = 'unscoped'
+
+/**
+ * Server address → the scope segment it maps to (sha256, first 32 hex chars).
+ *
+ * CROSS-PACKAGE CONSTRAINT (2026-09-24): this is the SAME normalization and the
+ * SAME truncation as `@picoaide/dsh-browser/surface`'s `serverPartitionHash`
+ * and its mirror `@picoaide/dsh-wasm-apps-host/partition` — "one machine, two
+ * deployments, two tenants" is one threat model, so it gets ONE hash. The
+ * three implementations are kept in step by
+ * `tests/server-scope-parity.spec.ts`, which runs the other two in a real Node
+ * process and compares outputs example by example; do not invent a third
+ * digest (a different truncation here would silently re-scope every user's
+ * credentials on the next upgrade).
+ *
+ * Normalization is part of the contract: leading/trailing whitespace and
+ * trailing slashes are stripped, because `https://a.example` and
+ * `https://a.example/` are the same server — an address that was once saved
+ * with a slash must not open a second, empty scope ("all my connectors
+ * disappeared").
+ * @param serverURL - the session's server address.
+ * @returns 32 hex chars, or `undefined` when there is no usable address.
+ */
+export function serverScopeHash(serverURL: string | null | undefined): string | undefined {
+  if (typeof serverURL !== 'string') return undefined
+  let value = serverURL.trim()
+  while (value.endsWith('/')) value = value.slice(0, -1)
+  if (value === '') return undefined
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 32)
+}
+
+/**
+ * Scope root of one (account, server) pair:
+ * `<dshHome>/users/<encoded-user>/servers/<hash|unscoped>`.
+ * @param username - the logged-in account.
+ * @param serverURL - the session's server address (may be missing).
+ * @param env - environment used to resolve the DSH home.
+ * @returns the absolute scope directory.
+ */
+export function serverScopePath(
+  username: string | null | undefined,
+  serverURL: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return join(userScopePath(username, env), 'servers', serverScopeHash(serverURL) ?? UNSCOPED_SERVER_SEGMENT)
+}
+
+/**
+ * The live credential directory of one (account, server) pair:
+ * `<server scope>/connectors`. This — not the user root — is what
+ * `ConnectorStore` reads and writes.
+ * @param username - the logged-in account.
+ * @param serverURL - the session's server address (may be missing).
+ * @param env - environment used to resolve the DSH home.
+ * @returns the absolute credential directory.
+ */
+export function connectorScopePath(
+  username: string | null | undefined,
+  serverURL: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return join(serverScopePath(username, serverURL, env), 'connectors')
+}
+
+/**
+ * The **legacy** (unscoped) credential directory:
+ * `<dshHome>/users/<encoded-user>/connectors`.
+ *
+ * It is the pre-2026-09-24 layout and the target of {@link migrateLegacyStore}
+ * (the even older single-user `~/.picoaide/connectors`). Nothing resolves it as
+ * a live scope any more: the plugin only asks whether these files exist, so it
+ * can tell the user "this connector needs a fresh authorization" instead of
+ * quietly using a secret of unknown provenance. Those bytes must never be
+ * adopted, and must never be deleted either.
+ * @param username - the logged-in account.
+ * @param env - environment used to resolve the DSH home.
+ * @returns the absolute legacy directory.
+ */
+export function unscopedConnectorPath(
+  username: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return join(userScopePath(username, env), 'connectors')
 }

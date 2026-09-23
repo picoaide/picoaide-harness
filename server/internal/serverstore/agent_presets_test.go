@@ -44,36 +44,57 @@ func TestAgentPresetCRUD(t *testing.T) {
 		t.Fatalf("status = %q", p.Status)
 	}
 
-	// Rejection stores the admin's reason; approving clears it.
-	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetRejected), "缺少 skills/"); err != nil {
-		t.Fatalf("reject: %v", err)
+	// ID-01(审计 2026-09-23,P0):已通过审核的版本**不可**再被拒绝 ——
+	// 拒绝与释放归档是同一条 UPDATE,对在服务的版本执行它会不可恢复地销毁
+	// 归档字节并烧掉版本号。此处必须回 sentinel 且行一字不动。
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetRejected), "误点"); !errors.Is(err, ErrReleaseApprovedNotRejectable) {
+		t.Fatalf("reject approved = %v, want ErrReleaseApprovedNotRejectable", err)
 	}
 	p, _ = GetAgentPreset(db, "coding-agent")
-	if p.Status != AgentPresetRejected || p.Reason != "缺少 skills/" {
-		t.Fatalf("rejected row = %+v", p)
+	if p.Status != AgentPresetApproved || p.Reason != "" {
+		t.Fatalf("拒绝已通过版本改变了行: %+v", p)
+	}
+
+	// 拒绝一个**待审**版本才走「拒绝即释放归档」那条路径:理由入库、字节释放。
+	if _, err := CreateAgentPreset(db, &AgentPreset{
+		Name: "coding-agent", Author: "alice", Status: AgentPresetPending, Version: "1.1.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.1.0", string(AgentPresetRejected), "缺少 skills/"); err != nil {
+		t.Fatalf("reject pending: %v", err)
+	}
+	rejected, err := GetAgentPresetByVersion(db, "coding-agent", "1.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Status != AgentPresetRejected || rejected.Reason != "缺少 skills/" {
+		t.Fatalf("rejected row = %+v", rejected)
 	}
 	// 拒绝即释放归档(SetReleaseStatusForReview 的 N-3/N-4 守卫):此时直接
 	// approve 必须被拒——不能凭一条归档已被释放的行重新上架。
-	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetApproved), ""); !errors.Is(err, ErrReleaseArchiveCleared) {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.1.0", string(AgentPresetApproved), ""); !errors.Is(err, ErrReleaseArchiveCleared) {
 		t.Fatalf("approve rejected-without-archive = %v, want ErrReleaseArchiveCleared", err)
 	}
 	// 重提(生产路径 = 作者重新上传,归档一并回来;此处用播种 API 复原归档)。
-	if err := SetAgentPresetArchive(db, "coding-agent", "1.0.0", []byte("PK\x03\x04")); err != nil {
+	if err := SetAgentPresetArchive(db, "coding-agent", "1.1.0", []byte("PK\x03\x04")); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.0.0", string(AgentPresetApproved), ""); err != nil {
+	if err := SetReleaseStatusForReview(db, AppKindAgent, "coding-agent", "1.1.0", string(AgentPresetApproved), ""); err != nil {
 		t.Fatalf("approve again: %v", err)
 	}
-	p, _ = GetAgentPreset(db, "coding-agent")
-	if p.Reason != "" {
-		t.Fatalf("reason not cleared on approve: %q", p.Reason)
+	rejected, _ = GetAgentPresetByVersion(db, "coding-agent", "1.1.0")
+	if rejected.Reason != "" {
+		t.Fatalf("reason not cleared on approve: %q", rejected.Reason)
 	}
 
 	// 生产删除入口:agentshare removeVersioned → DeleteAgentPresetByVersion
-	// (整名删除 softDeleteAllPresetVersions 是 agentshare 包内函数;本用例只有
-	// 单版本,两者结果一致)。
+	// (整名删除 softDeleteAllPresetVersions 是 agentshare 包内函数)。
 	if err := DeleteAgentPresetByVersion(db, "coding-agent", "1.0.0"); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+	if err := DeleteAgentPresetByVersion(db, "coding-agent", "1.1.0"); err != nil {
+		t.Fatalf("delete 1.1.0: %v", err)
 	}
 	if _, err := GetAgentPreset(db, "coding-agent"); err != ErrNotFound {
 		t.Fatalf("after delete = %v, want ErrNotFound", err)

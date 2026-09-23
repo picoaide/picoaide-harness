@@ -17,6 +17,7 @@
  */
 const http = require('node:http')
 const { app, BrowserWindow, protocol, session } = require('electron')
+const { attest } = require('./probe-attest.cjs')
 
 const SCHEME = 'picoaide-app'
 protocol.registerSchemesAsPrivileged([{
@@ -161,5 +162,16 @@ app.whenReady().then(async () => {
   // 负向期望：客户端自有 UI（http 源）**不该**能驱动应用 origin。
   if (verdict.uiHttpOriginCanDriveApp !== false) failed.push('uiHttpOriginCanDriveApp(must be false)')
   log('ASSERT', { failed })
+  // 结构化证据行（R4-A N2）：assertions = 5 条正向 + cspViolationCount + uiHttpOriginCanDriveApp
+  // 两条负向期望（见上面的 failed 组装）。
+  const totalChecks = 7
+  attest({
+    probe: __filename,
+    assertions: totalChecks,
+    pass: totalChecks - failed.length,
+    fail: failed.length,
+    skip: 0,
+    platformCovered: COVERED_PLATFORM,
+  })
   app.exit(failed.length === 0 ? 0 : 1)
 }).catch((cause) => { console.error('[probeC2] fatal', cause); app.exit(1) })

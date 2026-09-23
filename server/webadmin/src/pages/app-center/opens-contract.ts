@@ -20,9 +20,14 @@
  *         today:{day,pv,uv}, totals:{pv,uv}, trend:[{day,pv,uv}…],
  *         apps:[{app_id,title,today_pv,today_uv,window_pv,window_uv}…],
  *         top_apps:[{app_id,title,pv,uv}…]}`
- *    - **读源（§5.1c A，双读源是有意的，不是 bug）**：`apps[]`/`today`/`totals` 读**明细表**
+ *    - **读源（§5.1c A；口径 = **同一天同源**）**：`apps[]`/`today`/`totals` 读**明细表**
  *      `wasm_app_opens`（与 §5.1b 的 `opens.today` 同源，保证"本次调用计数在内"）；
- *      `trend[]` 读**日汇总** `wasm_app_opens_daily`（长期保留，明细 90 天过期后曲线不断档）。
+ *      `trend[]` 也以**明细**为准 —— 某一天的 PV 与 UV 出自**同一次** `GROUP BY 日` 聚合
+ *      （`count(*)` / `count(DISTINCT user_id)`），只有**明细已不在的天**（早于 90 天保留期）
+ *      PV 才回落**日汇总** `wasm_app_opens_daily`（长期保留，曲线不断档）并把 UV 如实给 0。
+ *      ⚠️ **禁止**退回"`trend[].pv` 读日汇总、`trend[].uv` 读明细"的混用形态（AUD-1 修复
+ *      前的写法）：日汇总每 5 分钟才 tick 一次，混用会让同一份响应出现 `uv > pv`
+ *      （去重人数大于打开次数），活体实测过 `trend=[{pv:26 uv:27}]`。
  *    - `uv` = `count(DISTINCT user_id)`（§5.1c A 的硬约束）：**禁止**把逐日 `uv` 相加、
  *      **禁止**把各应用 `uv` 相加（同一个人开两个应用会重复计）⇒ `totals.uv` / `today.uv`
  *      只能取服务端那一次**不带 `GROUP BY app_id`** 的聚合值。
@@ -54,8 +59,14 @@
  *    - **必须消费 `attribution_available`**（§5.1c B + §21.4）：`false` ⇒ 渲染
  *      "统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
  *      **两者数字都是 0、含义相反，合并渲染即违反 §21.4。**
- *    - 归因来自客户端出站头 `X-Pico-App-Id`（只有客户端会话链路才记录；伪造头忽略 + warn）。
- *    - 老客户端不带该头 ⇒ **归因缺失但计费正常**（§21.4 认账）。
+ *    - 归因来自客户端出站头 `X-Pico-App-Id`（读方在网关 `internal/llmgateway/app_attribution.go`；
+ *      伪造头忽略 + warn）。
+ *    - **平台侧归因通道尚未接线（`AI_ATTRIBUTION_WIRING = 'not_wired'`）**：全仓**没有**
+ *      任何发送方（客户端 `packages/client/wasm-apps/src/client/app-ai.ts` 明写"不做该头"，
+ *      出站头唯一构造点在上游 `llm-deepseek` 适配器、没有 header 通道）⇒ `attribution_available`
+ *      恒为 `false`，且这个 `false` **不是**"老客户端没上报"，而是"这条路还没接上"。
+ *      文案不得把成因推给客户端版本或客户环境。已接线后本常量必须随之改为 `'wired'`
+ *      （判据 = `opens-contract-parity.spec.ts` 的归因通道扫描：出现发送方即红，逼着同步改文案）。
  * ④ 计数是 best-effort：接口失败/计数异常**不影响打开**（§5.1b）；管理端同理 ——
  *    拿不到数据就显示"不可用"。
  */
@@ -90,6 +101,66 @@ export function aiUsagePath(appId: string, query = ''): string {
  */
 export const AI_USAGE_WINDOW_DAYS = 30
 
+/**
+ * 应用维度 AI 归因的**接线状态**（R4-D-4）。
+ *
+ * 服务端的 `attribution_available` 只说"这个窗口里有没有带归因的 usage 行"，它把**两种
+ * 成因**合并成了一个 `false`：①平台侧还没有任何发送方（工程未完成）；②确实还没人调用过。
+ * 管理端**不能**替它猜，只能按一个**可判定的事实**渲染 —— 那个事实就是本常量。
+ *
+ * 取值与判据（`opens-contract-parity.spec.ts` 的归因通道扫描）：
+ *   - `'not_wired'`：全仓**没有** `X-Pico-App-Id` 的发送方（`ATTRIBUTION_HEADER_WRITERS`
+ *     为空）⇒ 任何客户端版本、任何客户环境都不产生归因 ⇒ 文案只能写"平台侧尚未接线"，
+ *     **禁止**归因于"老客户端/客户端未上报"；
+ *   - `'wired'`：出现发送方 ⇒ 本常量与文案必须一起改（扫描用例会红）。
+ */
+export type AiAttributionWiring = 'not_wired' | 'wired'
+
+/**
+ * 出站头 `X-Pico-App-Id` 的**发送方**登记表（仓库内相对路径）。
+ *
+ * **当前为空 = 平台侧归因通道尚未接线**：出站头的唯一构造点在上游 `llm-deepseek`
+ * 适配器，而平台侧没有 header 通道（结构性上限，见设计总纲 §21.7）；客户端
+ * `packages/client/wasm-apps/src/client/app-ai.ts` 也明写"不做该头"。
+ * 一旦有人接上发送方，必须把路径登记到这里（`opens-contract-parity.spec.ts` 会先把
+ * 未登记的发送方扫出来判红），并同时把 {@link AI_ATTRIBUTION_WIRING} 改成 `'wired'`、
+ * 改掉所有把成因推给客户端的文案。
+ */
+export const ATTRIBUTION_HEADER_WRITERS: readonly string[] = []
+
+/**
+ * 出站头 `X-Pico-App-Id` 的**读方**登记表（服务端网关/汇总侧）。
+ *
+ * 用途是"白名单式前向守卫"：仓库源码里出现该头名的文件必须全部登记（**双向**相等 ——
+ * 登记了却搜不到、搜到了却没登记都判红），于是"某天冒出一个发送方"这件事无法静默发生。
+ */
+export const ATTRIBUTION_HEADER_READERS: readonly string[] = [
+  'server/internal/llmgateway/app_attribution.go',
+  'server/internal/serverstore/wasm_app_opens.go',
+  'server/internal/serverstore/wasm_app_opens_summary.go',
+  'server/internal/wasmapp/api/admin_opens.go',
+  'server/internal/wasmapp/appserver/serve.go',
+  'server/internal/wasmapp/capapi/capapi.go',
+]
+
+/**
+ * 提到该头名、但**既不是读方也不是写方**的文件（只在注释/文本里出现）。
+ *
+ * 目前两处：
+ *  - 客户端 `app-ai.ts` 的"不做（明确留给别的层）"清单（**明确声明不做发送方**）；
+ *  - 不可变迁移 `0076_usage_app_id.sql` 里解释 `usage.app_id` 列语义的注释。
+ *
+ * 单列而不是塞进读方表，是为了让"平台侧没有发送方"这件事在登记表上一眼可见。
+ */
+export const ATTRIBUTION_HEADER_TEXT_ONLY: readonly string[] = [
+  'packages/client/wasm-apps/src/client/app-ai.ts',
+  'server/internal/serverstore/migrations-pg/0076_usage_app_id.sql',
+]
+
+/** 归因接线状态（派生自发送方登记表：**不手写**，两者不可能不一致）。 */
+export const AI_ATTRIBUTION_WIRING: AiAttributionWiring =
+  ATTRIBUTION_HEADER_WRITERS.length > 0 ? 'wired' : 'not_wired'
+
 /** 口径说明（页面统一引用，避免三处各写一份说法）。 */
 export const OPENS_COUNT_NOTE =
   'PV = 每次打开都 +1（不去重）；UV = 按用户去重（当日 / 窗口，由服务端聚合）。'
@@ -100,7 +171,9 @@ export const OPENS_SCOPE_NOTE =
 export const OPENS_PRIVACY_NOTE =
   '打开明细含 user_id / 部门 / 打开时间，仅 capability:read 可见；本期不提供导出。'
 export const AI_ATTRIBUTION_NOTE =
-  'AI 调用按**使用者账号**计费；应用维度按客户端出站头 X-Pico-App-Id 归因，未带该头的老客户端不产生归因（计费不受影响）。'
+  AI_ATTRIBUTION_WIRING === 'wired'
+    ? 'AI 调用按**使用者账号**计费；应用维度按客户端出站头 X-Pico-App-Id 归因（计费不受影响）。'
+    : 'AI 调用按**使用者账号**计费；应用维度按客户端出站头 X-Pico-App-Id 归因，但**平台侧归因通道尚未接线**（客户端与网关都还没有发送方）⇒ 任何客户端版本都不产生归因，与客户端新旧无关；计费不受影响。'
 
 // ---------------------------------------------------------------------------
 // 响应类型（只声明我们真正渲染的字段）

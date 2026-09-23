@@ -1,7 +1,12 @@
 package serverstore
 
 import (
+	"bytes"
+	"database/sql"
 	"errors"
+	"log"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -600,4 +605,402 @@ func TestUpdateModelRenameSyncsProviderJSON(t *testing.T) {
 	if raw != `["new-name"]` {
 		t.Fatalf("provider JSON = %s, want [\"new-name\"]", raw)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// G-01(P0)/G-02(P1) 回归(审计 2026-09-23):模型清单同步**不得摧毁运营方定价**
+// ---------------------------------------------------------------------------
+
+// modelRowByName 取一行模型(缺行即失败:以下用例关心的正是"行还在")。
+func modelRowByName(t *testing.T, db *sql.DB, pid int64, name string) *Model {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM models WHERE provider_id = ? AND name = ?`, pid, name).Scan(&id); err != nil {
+		t.Fatalf("模型行 %s(provider=%d)不存在: %v", name, pid, err)
+	}
+	m, err := GetModel(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// assertModelConfigKept 断言价格/缓存价/峰谷折扣/default_params/模态逐字未变。
+// want 传 nil = 该字段必须仍为 NULL。
+func assertModelConfigKept(t *testing.T, m *Model, in, out, cache, off *float64, params string, modalities []string) {
+	t.Helper()
+	check := func(label string, got, want *float64) {
+		t.Helper()
+		if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+			t.Fatalf("%s: got %v, want %v(模型 %s)", label, ptrFloatStr(got), ptrFloatStr(want), m.Name)
+		}
+	}
+	check("input_price_per_1m", m.InputPricePer1M, in)
+	check("output_price_per_1m", m.OutputPricePer1M, out)
+	check("cache_input_price_per_1m", m.CacheInputPricePer1M, cache)
+	check("offpeak_discount", m.OffpeakDiscount, off)
+	if m.DefaultParams != params {
+		t.Fatalf("default_params: got %q, want %q(模型 %s)", m.DefaultParams, params, m.Name)
+	}
+	if len(m.InputModalities) != len(modalities) {
+		t.Fatalf("input_modalities: got %v, want %v(模型 %s)", m.InputModalities, modalities, m.Name)
+	}
+	for i := range modalities {
+		if m.InputModalities[i] != modalities[i] {
+			t.Fatalf("input_modalities: got %v, want %v(模型 %s)", m.InputModalities, modalities, m.Name)
+		}
+	}
+}
+
+func ptrFloatStr(p *float64) string {
+	if p == nil {
+		return "NULL"
+	}
+	return strconv.FormatFloat(*p, 'g', -1, 64)
+}
+
+// TestSyncProviderModelsKeepsPricingAndParams 覆盖 G-01 的服务端根因:
+// 旧 SyncProviderModels 是"DELETE 该 provider 全部 models 行 + 只插三列
+// (name, provider_id, display_name)",于是 webadmin 的「编辑上游 → 保存」
+// (弹窗**无条件**回传预填的 models 列表)会把该上游全部模型的价格/缓存价/
+// 峰谷折扣/default_params/input_modalities 清零 —— 之后调用照常 200、
+// token 照记、cost=0。修法 = 按 name upsert + 只剪枝清单外的行。
+func TestSyncProviderModelsKeepsPricingAndParams(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-keep", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	id := modelRowByName(t, db, pid, "m1").ID
+	in, out, cache, off := 30.0, 60.0, 3.0, 0.5
+	const params = `{"max_output":123,"context_length":65536}`
+	if err := UpdateModel(db, &Model{
+		ID: id, Name: "m1", ProviderID: pid, DisplayName: "M1",
+		DefaultParams: params, InputModalities: []string{"text", "image"},
+		InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &cache, OffpeakDiscount: &off,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// ① 同一清单再同步一次:「编辑上游 → 原样保存」的服务端路径,必须是无操作。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+
+	// ② 清单**真的**新增模型时,既有行同样不得被重建(upsert 语义)。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m2", "m3"}); err != nil {
+		t.Fatal(err)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+
+	// ③ 剪枝:管理员从清单里删掉的模型必须真的不再路由(行删除)。
+	if err := SyncProviderModels(db, pid, []string{"m1", "m3"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE provider_id = ? AND name = 'm2'`, pid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("m2 行数 = %d, want 0(不在清单里的行必须被剪枝)", n)
+	}
+	assertModelConfigKept(t, modelRowByName(t, db, pid, "m1"), &in, &out, &cache, &off, params, []string{"text", "image"})
+}
+
+// TestRemoveMissingProviderModelsKeepsPricedRows 覆盖 G-02:
+// 上游 /models 目录**部分抖动**(一轮超时/降级/返回子集)不得物理删除带运营方
+// 定价/参数的行 —— 旧行为是 DELETE(价格一并消失),下一轮目录恢复时以新行插回
+// (价格 NULL)⇒ 该模型**永久免费**,而且无日志无审计。
+func TestRemoveMissingProviderModelsKeepsPricedRows(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-bounce", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const params = `{"context_length":128000,"max_output":8192}`
+	if err := SyncProviderModel(db, pid, "priced", params); err != nil {
+		t.Fatal(err)
+	}
+	in, out := 3.0, 7.0
+	if err := UpdateModel(db, &Model{
+		ID: modelRowByName(t, db, pid, "priced").ID, Name: "priced", ProviderID: pid,
+		DisplayName: "priced", DefaultParams: params, InputModalities: []string{"text", "image"},
+		InputPricePer1M: &in, OutputPricePer1M: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 对照:一个不带任何运营方配置的行(同步默认参数为空、无价)仍按旧行为物理删除
+	if err := SyncProviderModel(db, pid, "bare", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_providers SET models = ? WHERE id = ?`, `["priced","bare"]`, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	prevWriter := log.Writer()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prevWriter) })
+
+	// 目录抖动:一轮里两个模型都不在上游目录中
+	removed, err := RemoveMissingProviderModels(db, pid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2(1 行标记停用 + 1 行物理删除)", removed)
+	}
+	// ① 有价行仍在,价格/参数/模态一字未改
+	priced := modelRowByName(t, db, pid, "priced")
+	assertModelConfigKept(t, priced, &in, &out, nil, nil, params, []string{"text", "image"})
+	// ② 标记为"目录缺失"(路由与客户端目录据此过滤)
+	if !priced.CatalogMissing {
+		t.Fatalf("catalog_missing = false, want true(有价行必须被标记停用而不是删除)")
+	}
+	// ③ provider JSON 里的名字已移除(否则仍会被路由匹配到)
+	var raw string
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "priced") {
+		t.Fatalf("provider JSON = %s, want 不含 priced", raw)
+	}
+	// ④ 未带运营方配置的行仍物理删除
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE provider_id = ? AND name = 'bare'`, pid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("bare 行数 = %d, want 0", n)
+	}
+	// ⑤ 停用有价行必须留下**可检索的 warning 日志**(含 provider id 与模型名)
+	logged := buf.String()
+	for _, want := range []string{"catalog_missing", "priced", strconv.FormatInt(pid, 10)} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("目录缺失告警日志缺少 %q: %q", want, logged)
+		}
+	}
+	// ⑥ 幂等:再删一轮不得重复计数(已标记的行不参与第二轮)
+	again, err := RemoveMissingProviderModels(db, pid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Fatalf("removed(第二轮) = %d, want 0", again)
+	}
+	// ⑦ 目录恢复:同名 upsert 清标记、名字回到 provider JSON,价格不变
+	if err := SyncProviderModel(db, pid, "priced", params); err != nil {
+		t.Fatal(err)
+	}
+	recovered := modelRowByName(t, db, pid, "priced")
+	if recovered.CatalogMissing {
+		t.Fatalf("目录恢复后 catalog_missing 仍为 true(模型永久不可路由)")
+	}
+	assertModelConfigKept(t, recovered, &in, &out, nil, nil, params, []string{"text", "image"})
+	if err := db.QueryRow(`SELECT models FROM gateway_providers WHERE id = ?`, pid).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "priced") {
+		t.Fatalf("provider JSON = %s, want 含 priced(目录恢复后名字应回到清单)", raw)
+	}
+}
+
+// TestModelConfigLookupsSkipCatalogMissingRows：N-4(2026-09-23,P3)——
+// ModelDefaultParams / ModelCachePrice 与路由（syncedModelNames / ListModels）
+// 同口径排除 catalog_missing = TRUE 的行。
+//
+// 为什么值得钉：这是个"当前不可达但同族"的口径分裂 —— 取参/取缓存价的退化方向
+// 是安全的（未找到 ⇒ 回落 128K 补估上限 / 回落输入价），而 ModelPrices（取价
+// 兜底）**故意不排除**（退化成 0 = 免费，比用停用行的价更差）。三种退化方向不同，
+// 必须由用例把"谁过滤谁不过滤"钉死，否则下一次重构会把它们统一成一条 SQL。
+func TestModelConfigLookupsSkipCatalogMissingRows(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	const params = `{"context_length":64000,"max_output":4096}`
+	in, out, cache := 3.0, 7.0, 1.5
+
+	mk := func(name string) int64 {
+		pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-" + name, BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SyncProviderModel(db, pid, name, params); err != nil {
+			t.Fatal(err)
+		}
+		if err := UpdateModel(db, &Model{
+			ID: modelRowByName(t, db, pid, name).ID, Name: name, ProviderID: pid,
+			DisplayName: name, DefaultParams: params, InputModalities: []string{"text"},
+			InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &cache,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+
+	// solo：唯一一行被标记目录缺失 ⇒ 取参与取缓存价都必须"查不到"，取价兜底仍保留。
+	soloPID := mk("solo")
+	// dup：两行同名，低 id 的那行被标记缺失 ⇒ 取缓存价必须落到**高 id 的活行**上
+	// （不过滤时按 ORDER BY provider_id LIMIT 1 会取到缺失行的 1.5）。
+	dupMissingPID := mk("dup")
+	const dupLiveCache = 9.0
+	dupLivePID, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-dup-live", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, dupLivePID, "dup", params); err != nil {
+		t.Fatal(err)
+	}
+	liveCache := dupLiveCache
+	if err := UpdateModel(db, &Model{
+		ID: modelRowByName(t, db, dupLivePID, "dup").ID, Name: "dup", ProviderID: dupLivePID,
+		DisplayName: "dup", DefaultParams: params, InputModalities: []string{"text"},
+		InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &liveCache,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if dupMissingPID >= dupLivePID {
+		t.Fatalf("夹具失效:缺失行 provider_id=%d 必须小于活行 %d（否则测不出 ORDER BY 取首行）", dupMissingPID, dupLivePID)
+	}
+	// 目录抖动：两家的名字都不在目录里 ⇒ 有价行被标记缺失（不物理删除）。
+	if _, err := RemoveMissingProviderModels(db, soloPID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveMissingProviderModels(db, dupMissingPID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !modelRowByName(t, db, soloPID, "solo").CatalogMissing {
+		t.Fatal("夹具失效:solo 未被标记 catalog_missing")
+	}
+
+	// ① 唯一行缺失 ⇒ 取参返回 ErrNotFound（调用方回落默认窗口），不再把停用行的参数当生效配置。
+	if got, err := ModelDefaultParams(db, "solo"); !errors.Is(err, ErrNotFound) || got != "" {
+		t.Fatalf("ModelDefaultParams(catalog_missing) = (%q, %v), want (\"\", ErrNotFound)", got, err)
+	}
+	// ② 唯一行缺失 ⇒ 缓存价 0（costOfAt 随即回落按输入价计费）。
+	if got := ModelCachePrice(db, "solo"); got != 0 {
+		t.Fatalf("ModelCachePrice(catalog_missing) = %v, want 0", got)
+	}
+	// ③ 取价兜底**故意不过滤**：宁可沿用停用行的价，也不能退化成 0（免费）。
+	if gotIn, gotOut, _ := ModelPrices(db, "solo"); gotIn != in || gotOut != out {
+		t.Fatalf("ModelPrices(catalog_missing) = (%v,%v), want (%v,%v) —— 取价兜底不得因标记而变成 0",
+			gotIn, gotOut, in, out)
+	}
+	// ④ 同名两行：缺失行 id 更小，但取缓存价必须落到活行。
+	if got := ModelCachePrice(db, "dup"); got != dupLiveCache {
+		t.Fatalf("ModelCachePrice(dup) = %v, want %v（活行；取到 %v 说明未排除 catalog_missing）",
+			got, dupLiveCache, cache)
+	}
+	// ⑤ 目录恢复：标记清除后两处都恢复原值。
+	if err := SyncProviderModel(db, soloPID, "solo", params); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ModelDefaultParams(db, "solo"); err != nil || got != params {
+		t.Fatalf("目录恢复后 ModelDefaultParams(solo) = (%q, %v), want (%q, nil)", got, err, params)
+	}
+	if got := ModelCachePrice(db, "solo"); got != cache {
+		t.Fatalf("目录恢复后 ModelCachePrice(solo) = %v, want %v", got, cache)
+	}
+}
+
+// TestModelDefaultParamsIsDeterministicAcrossProviders 是 R4-C-3 的回归判据
+// （审计 2026-09-23，P2：`ModelDefaultParams` 缺 `ORDER BY`，同名多 provider 时
+// 取参随物理行序漂移）。
+//
+// 为什么必须钉：该值的唯一生产消费者是 llmgateway 的 promptEstimateCapForModel
+// —— 上游漏报 usage 时的**输入侧补估上限**。上限在 {context_length:4096} 与
+// {context_length:900000} 之间翻转 ⇒ 同一条请求的补估 token 数与费用可差两个数量级
+// （minPromptEstimateCap=1024 下限只保护极小的一侧），且与同族取价函数
+// （ModelPrices / ModelCachePrice，两者都有 `ORDER BY provider_id LIMIT 1`）的口径分叉。
+//
+// 判据三条（缺一条就退化成"只钉字符串"）：
+//  1. 取值必须等于 **provider_id 最小** 的那一行（与两个同族函数同序，不是"随便第一行"）；
+//  2. 行序扰动（PG 的 UPDATE = 新版本行，会改变堆内物理位置）之后取值不变；
+//  3. 两个同族函数在同一个夹具上取到的也是同一 provider 的口径（三处同序）。
+//
+// 变异验证：把 `ORDER BY provider_id LIMIT 1` 从 SQL 里去掉 ⇒ 本用例红
+// （夹具刻意**先插 provider B 的行、后插 provider A 的行**，堆序第一行是 B）。
+func TestModelDefaultParamsIsDeterministicAcrossProviders(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+
+	const paramsA = `{"context_length":4096}`
+	const paramsB = `{"context_length":900000}`
+	const cacheA, cacheB = 1.25, 9.75
+	inA, outA := 2.0, 3.0
+	inB, outB := 20.0, 30.0
+
+	mkProvider := func(name string) int64 {
+		pid, err := AddGatewayProvider(db, &GatewayProvider{
+			Name: name, BaseURL: "http://" + name + ".example.com", APIKeyEnc: "k", Enabled: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+	// 先建 provider B（id 更小? 不 —— 先建的 id 更小，所以这里反过来：
+	// 先插入**参数更极端**的那一行，让"堆序第一行"与"provider_id 最小行"分叉）。
+	pidEarly := mkProvider("dup-early")
+	pidLate := mkProvider("dup-late")
+	if pidEarly >= pidLate {
+		t.Fatalf("夹具失效：先建的 provider 应有更小的 id（%d vs %d）", pidEarly, pidLate)
+	}
+	add := func(pid int64, params string, cache float64, in, out float64) {
+		t.Helper()
+		if _, err := db.Exec(
+			`INSERT INTO models (name, provider_id, display_name, default_params, cache_input_price_per_1m,
+			                     input_price_per_1m, output_price_per_1m)
+			 VALUES ('dup-model', ?, 'dup-model', ?, ?, ?, ?)`,
+			pid, params, cache, in, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 插入顺序 = pidLate 在前、pidEarly 在后：默认堆序（无 ORDER BY 时的第一行）
+	// 指向 pidLate（900000），而正确口径必须取 pidEarly（4096）。
+	add(pidLate, paramsB, cacheB, inB, outB)
+	add(pidEarly, paramsA, cacheA, inA, outA)
+
+	readParams := func(label string) string {
+		t.Helper()
+		InvalidateModelConfig()
+		got, err := ModelDefaultParams(db, "dup-model")
+		if err != nil {
+			t.Fatalf("%s: ModelDefaultParams error: %v", label, err)
+		}
+		return got
+	}
+
+	first := readParams("first")
+	if first != paramsA {
+		t.Fatalf("ModelDefaultParams = %s，期望 provider_id 最小那一行的 %s —— "+
+			"取值面是结果集第一行（堆序）而不是确定序：同名多 provider 时补估上限会随物理行序漂移",
+			first, paramsA)
+	}
+
+	// 行序扰动：PG 的 UPDATE 会写新版本行，物理位置随之后移。
+	if _, err := db.Exec(`UPDATE models SET display_name = display_name WHERE provider_id = ?`, pidEarly); err != nil {
+		t.Fatal(err)
+	}
+	second := readParams("after-heap-move")
+	if second != first {
+		t.Fatalf("搬动物理行之后 ModelDefaultParams 从 %s 变成 %s —— 取值不确定", first, second)
+	}
+
+	// 三处同序：同族取价函数在同一个夹具上必须落到同一 provider（provider_id 最小）。
+	InvalidateModelConfig()
+	gotIn, gotOut, _ := ModelPrices(db, "dup-model")
+	if gotIn != inA || gotOut != outA {
+		t.Fatalf("ModelPrices = (%v,%v)，期望 (%v,%v)（provider_id 最小行）—— 取价与取参的口径分叉",
+			gotIn, gotOut, inA, outA)
+	}
+	if got := ModelCachePrice(db, "dup-model"); got != cacheA {
+		t.Fatalf("ModelCachePrice = %v，期望 %v（provider_id 最小行）", got, cacheA)
+	}
+	t.Logf("同名多 provider：取参=%s 取价=(%v,%v) 缓存价=%v —— 三处同序且行序扰动后不变",
+		second, gotIn, gotOut, cacheA)
 }

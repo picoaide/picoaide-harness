@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -122,6 +123,49 @@ func UpsertApp(db *sql.DB, a *App) error {
 	return upsertApp(db, a)
 }
 
+// RecomputeAppProjection 把 apps 行的**展示投影列**(title/description)重算为
+// "最新 approved 版本"的值,返回生效版本号(没有任何 approved 版本时返回 "")。
+//
+// 为什么必须有这一步(审计 2026-09-23 G-P2-3):apps 行是**目录对全员下发的
+// 投影**(技能/智能体/应用共用同一张表),而 app_releases 才是真相。发布内核
+// 只保证"待审版本不提前投影"(见 appstore.Publish 的 pending 分支),审核落定
+// 之后还必须把投影**切到**生效版本:
+//
+//   - approve:新版本成为生效版本 ⇒ 投影切到它(漏掉这一步 = "批准了却永远
+//     看不到新标题");
+//   - reject :被拒版本从未生效 ⇒ 投影**恢复**成仍在生效的那一版(漏掉这一步 =
+//     被拒/被撤回的标题永久留在目录上,而且没有任何自愈路径 —— 必须等下一次
+//     approved 发布才会被覆盖)。
+//
+// 取最高 approved 而不是"本次审核的版本":审批一个更旧的待审版本时(v2 待审、
+// v3 已通过),生效版本仍是更新的那个 —— 与线上交付(max(id) approved)同口径。
+//
+// 没有任何 approved 版本(首版待审被拒)时回落到 **app_id 占位**:空标题不是
+// 可接受的终态(目录/详情/导出都直接读这一列),而 app_id 至少是可识别、可定位
+// 的占位值 —— 与发布期首版待审的占位口径一致。
+//
+// **幂等且最小写入**:值没变就不写(updated_at 不跳),因此重复调用能自愈脏行、
+// 且第二次调用零副作用。
+func RecomputeAppProjection(db *sql.DB, kind, appID string) (string, error) {
+	var version, title, description string
+	err := db.QueryRow(`SELECT version, title, description FROM app_releases
+		WHERE kind = ? AND app_id = ? AND status = ? AND deleted_at IS NULL
+		ORDER BY id DESC LIMIT 1`, kind, appID, ReleaseStatusApproved).
+		Scan(&version, &title, &description)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		version, title, description = "", appID, ""
+	case err != nil:
+		return "", err
+	}
+	if _, err := db.Exec(`UPDATE apps SET title = ?, description = ?, updated_at = `+NowExpr()+`
+		WHERE kind = ? AND app_id = ? AND (title <> ? OR description <> ?)`,
+		title, description, kind, appID, title, description); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
 // upsertApp 是 UpsertApp 的 executor 版本(可传入 *sql.Tx,供原子发布复用)。
 func upsertApp(ex queryer, a *App) error {
 	if a.Kind != AppKindSkill && a.Kind != AppKindAgent {
@@ -228,7 +272,17 @@ func ListApps(db *sql.DB, kind, channel string) ([]App, error) {
 // SetAppOfficial 设置 App 官方属性与归属(转官方=official=1+owner=”;
 // 转用户=official=0+owner=<username>)。官方属性是 App 级唯一事实源,
 // 不经 UpsertApp 泄露(发布/元数据更新不触碰本列)。
+//
+// **不变量守卫**(审计 2026-09-23 G-P2-1):官方归属的唯一合法形态是
+// `official=1 ∧ owner 为空`(迁移 0059 / P2-21)。此前本函数接受任意组合,于是
+// 任何一条"顺手也写 owner"的调用点都能造出 `official=1 ∧ owner 非空` ——
+// 那会让 is_owner 对 owner 为 true(员工端显示「我的」)而发布仍被
+// OFFICIAL_LOCKED 403 拒绝,客户端预检与服务端判定分叉。守卫放在这里,
+// 未来的调用者无论怎么传都造不出禁止状态。
 func SetAppOfficial(db *sql.DB, kind, appID string, official bool, owner string) error {
+	if official && owner != "" {
+		return fmt.Errorf("%w: 官方归属必须 owner 为空(official=1 ∧ owner 非空 是禁止状态)", ErrValidation)
+	}
 	_, err := db.Exec(`UPDATE apps SET official = ?, owner = ?, updated_at = `+NowExpr()+`
 		WHERE kind = ? AND app_id = ?`, boolToInt(official), owner, kind, appID)
 	return err
@@ -264,6 +318,12 @@ func boolToInt(b bool) int {
 // EnabledAppIDs 返回某 kind 下全部**上架**(enabled=1)的 app_id 集合。
 // 读取侧一次取回后按名过滤,替代逐行查 apps 的 N+1(与 AppOfficialMap 同形):
 // 清单里漏掉一个下架行,与漏掉一个不存在的行同语义。
+//
+// **新代码不要再用它做可见性或写入判定**(第五轮审计 R5-B-1,2026-09-23 收敛):
+// 那类判定必须经 distribution.go 的 Distribution(Delivered / Writable /
+// AuthorVisible)—— 否则又会退化成"每个面各写一遍 enabled 判断",而这正是
+// 「作者面被下架过滤掉」「审批准了却没人看得见」的根因。本函数保留给"只要一个
+// 上架集合"的批量**投影**场景(以及跨泳道尚未迁移的调用点)。
 func EnabledAppIDs(db *sql.DB, kind string) (map[string]bool, error) {
 	rows, err := db.Query(`SELECT app_id FROM apps WHERE kind = ? AND enabled = 1`, kind)
 	if err != nil {
@@ -410,6 +470,49 @@ func collectReleases(rows *sql.Rows) ([]Release, error) {
 // 定义在 apps.go 而不是 errors.go,因为它是本文件审核不变量的一部分。
 var ErrReleaseArchiveCleared = errors.New("release archive cleared")
 
+// ErrReleaseApprovedNotRejectable 表示目标版本**已通过审核**,因此不允许走
+// 「审核拒绝」这条路径(审计 2026-09-23 ID-01)。
+//
+// 为什么必须是错误而不是"照旧执行":拒绝与释放归档在**同一条 UPDATE** 里完成
+// (见 SetReleaseStatusForReview 的 rejected 分支),而 approved 版本可能正在对
+// 全员服务(甚至是唯一可回滚的历史版本)。对它执行拒绝会
+//
+//	① 不可恢复地销毁归档字节(PG BYTEA 置 NULL,没有任何软删回收);
+//	② 让正在服务的版本立刻对全员下载 404;
+//	③ 烧掉版本号 —— (kind,app_id,version) 唯一约束 + "版本号永久占位"语义
+//	   使同一版本号无法重传,再 approve 也只会得到 ErrReleaseArchiveCleared。
+//
+// 管理员想要的"停服务"是**另一个可逆动作**:下架(apps.enabled=0)。因此
+// 「已 approved 的版本不可被拒绝」这条前置条件是产品语义,不是调用方的礼貌。
+//
+// **这是全仓唯一的判定实现**:三个审核面(sharedskills / agentshare /
+// wasmapp)都依赖本函数返回的 sentinel,而不是各自读一遍状态位 —— 此前
+// WASM 面自带一份 check-then-act 守卫、技能/智能体两面一份都没有,导致同一
+// 个概念三份实现、只有一份正确。
+//
+// 定义在 apps.go 而不是 errors.go,与 ErrReleaseArchiveCleared 同理。
+var ErrReleaseApprovedNotRejectable = errors.New("release already approved and cannot be rejected")
+
+// 审核拒绝被拒时的**对外**文案(409)。三个审核面共用同一份,避免"同一个事实
+// 三种说法"——文案是契约的一部分:它必须同时说清「发生了什么」与「该用什么
+// 替代动作」,否则管理员只会反复重试。
+const (
+	// CodeReleaseNotRejectable 是 409 信封的 error.code。
+	CodeReleaseNotRejectable = "APPROVED_NOT_REJECTABLE"
+	// MsgReleaseNotRejectable 说明拒绝的破坏性后果(不可恢复)。
+	MsgReleaseNotRejectable = "该版本已通过审核,不能审核拒绝:" +
+		"拒绝会在同一条语句里永久释放该版本的归档字节(不可恢复),该版本将立刻无法安装或下载"
+	// HintReleaseNotRejectable 指向可逆的替代动作。
+	HintReleaseNotRejectable = "审核拒绝只针对待审版本;要停止服务请用「下架」(可恢复),要换内容请让作者发布新版本(版本号永久占位,不能复用)"
+)
+
+// ReleaseRejectable 是「该版本能否被审核拒绝」的**唯一 Go 判定**。
+//
+// SQL 侧的同一判定是 SetReleaseStatusForReview 的 `AND status <> 'approved'`
+// —— 那一份才是并发下的真正防线(原子,不受 check-then-act 窗口影响);本函数
+// 只供需要在调用前给出友好提示的调用方使用,两边必须同时成立。
+func ReleaseRejectable(status string) bool { return status != ReleaseStatusApproved }
+
 // SetReleaseStatus 审核:approved/rejected(rejected 必须带理由,由调用方保证)。
 // 只改状态位,绝不触碰内容或归档——这是「快照」与「审核」得以共存的关键。
 //
@@ -446,12 +549,20 @@ func SetReleaseStatus(db *sql.DB, kind, appID, version, status, reason string) e
 //     存储上界:拒绝即释放,否则员工可无限循环「上传 → 被拒」堆字节)。
 //     调用方不需要、也不应该再补一次清归档 —— 「置 rejected」与「清 archive」
 //     分成两条语句时,中间那段窗口恰好就是被并发 approve 穿过的窗口。
+//     但这条语句**只对未生效的版本成立**:`status <> 'approved'` 是前置条件
+//     (审计 2026-09-23 ID-01)。approved 版本可能正在服务、也可能是唯一可
+//     回滚的历史版本,拒绝它会不可恢复地销毁归档字节并烧掉版本号 ⇒ 该条件
+//     不满足时返回 ErrReleaseApprovedNotRejectable(调用方映射 409),管理员
+//     要停服务请用下架(apps.enabled,可逆)。历史行为(approve 后仍可 reject)
+//     只对"尚未生效的待审版本"有意义,对 approved 版本是 P0 数据销毁。
 //
 // 为什么这就是 N-4 的修复:两个管理员并发 approve/reject 时,PostgreSQL 在
 // READ COMMITTED 下用行级锁串行化两条 UPDATE,后到的那条会**重新求值**
 // WHERE(EPQ),因此它看到的一定是先提交者的结果 —— 要么 approve 先提交而
-// reject 把它改成 rejected+已释放,要么 reject 先提交而 approve 的条件不再
-// 成立而拒绝。任何交错都产不出 `approved + archive IS NULL` 的坏行。
+// reject 的条件(status <> 'approved')不再成立而被拒,要么 reject 先提交而
+// approve 的条件不再成立而拒绝。任何交错都产不出 `approved + archive IS NULL`
+// 的坏行,也产不出"已生效版本的字节被销毁"。这条不变量只能写在 WHERE 里:
+// 调用方先读后写(check-then-act)在并发下必被绕过。
 func SetReleaseStatusForReview(db *sql.DB, kind, appID, version, status, reason string) error {
 	switch status {
 	case ReleaseStatusApproved:
@@ -478,13 +589,26 @@ func SetReleaseStatusForReview(db *sql.DB, kind, appID, version, status, reason 
 	case ReleaseStatusRejected:
 		res, err := db.Exec(`UPDATE app_releases SET status = ?, reason = ?, quality = '',
 			archive = NULL, size = 0, updated_at = `+NowExpr()+`
-			WHERE kind = ? AND app_id = ? AND version = ?`,
-			status, reason, kind, appID, version)
+			WHERE kind = ? AND app_id = ? AND version = ? AND status <> ?`,
+			status, reason, kind, appID, version, ReleaseStatusApproved)
 		if err != nil {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return ErrNotFound
+			// 0 行只有两种可能:行不存在,或行**已通过审核**(被上面的
+			// `status <> ?` 挡下)。两者对调用方的语义完全不同(404 vs 409),
+			// 必须区分 —— 这里的第二个查询只用于在**已经判定拒绝失败**之后
+			// 解释原因,不构成 check-then-act:真正的前置条件已经由 UPDATE
+			// 的分支保证,并发的 approve 只会让这次拒绝更早返回 sentinel。
+			var exists bool
+			if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM app_releases
+				WHERE kind = ? AND app_id = ? AND version = ?)`, kind, appID, version).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return ErrNotFound
+			}
+			return ErrReleaseApprovedNotRejectable
 		}
 		return nil
 	default:

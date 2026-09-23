@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,7 +111,12 @@ type Runtime struct {
 	// cacheMode 是本运行时**实际生效**的编译缓存模式（构造期由唯一的决策点
 	// resolveCompilationCache 连同缓存对象一起给出，见 config.go）。
 	cacheMode CacheMode
-	logger    *log.Logger
+	// cacheDir / cacheShards 是**本运行时自己建的**磁盘缓存的父目录与 wazero 版本分片
+	// 目录名（构造期观测，见 cacheheal.go）：目录被外部删除时按它们重建，就能让那个
+	// 已经绑定路径的 fileCache 立刻恢复可用。注入缓存/进程内缓存 ⇒ 零值（无从重建）。
+	cacheDir    string
+	cacheShards []string
+	logger      *log.Logger
 	// memoryPages 是本运行时的线性内存上限（§4.3 R22），用于与请求侧期望值对拍。
 	memoryPages uint32
 	// onModuleClose 是 Options.OnModuleClose 的装配期快照（nil ⇒ 无观察者）。
@@ -153,7 +159,17 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	// R5-A-2 自愈的输入：**只有我们自己按 DataRoot 建的磁盘缓存**才有可重建的路径
+	// （注入缓存是别人造的，我们不知道它的目录；进程内缓存没有目录）。分片目录名在
+	// 这里**观测**（`NewCompilationCacheWithDir` 刚刚把它建出来），不按规则另算一份。
+	var cacheDir string
+	var cacheShards []string
+	if own && cacheMode == CacheModeDisk && strings.TrimSpace(opts.DataRoot) != "" {
+		cacheDir = CompileCacheDir(opts.DataRoot)
+		cacheShards = cacheShardDirs(cacheDir)
+	}
 	return &Runtime{rt: rt, cache: cache, ownCch: own, cacheMode: cacheMode, logger: logger, memoryPages: pages,
+		cacheDir: cacheDir, cacheShards: cacheShards,
 		onModuleClose: opts.OnModuleClose}, nil
 }
 
@@ -200,9 +216,29 @@ func (r *Runtime) CacheMode() CacheMode {
 //
 // 它存在的意义是"同配置"这一条：执行进程若用别的配置编译，磁盘缓存就永远命中不了
 // （§4.3.1-a）。生产路径上模块由编译进程预编译（60 s 预算 + 队列），本方法服务于
-// 干跑与测试。
+// 请求路径上的冷编译补齐（appserver 的 moduleCache loader）与测试。
+//
+// ⚠️ 它是**执行侧唯一**会往磁盘缓存写条目的入口，因此"缓存目录被外部删除"的自愈
+// （R5-A-2）也挂在这里：wazero 的 fileCache 只持路径、不重建目录，删掉分片目录之后
+// 每一次冷编译都会以 ENOENT 失败到进程重启。自愈分两步 —— 编译前补齐目录；真的撞上
+// ENOENT 时补齐后**重试一次**；仍失败则把驱动级谜语换成可行动文案（见 cacheheal.go）。
 func (r *Runtime) CompileModule(ctx context.Context, bin []byte) (wazero.CompiledModule, error) {
-	return r.rt.CompileModule(ctx, bin)
+	if err := r.ensureDiskCacheDirs(); err != nil {
+		r.logger.Printf("runtime: ⚠️ 重建编译缓存目录失败（冷编译可能失败）：%v", err)
+	}
+	mod, err := r.rt.CompileModule(ctx, bin)
+	if err == nil || !cacheDirFailure(err, r.cacheDir) {
+		return mod, err
+	}
+	if rerr := r.ensureDiskCacheDirs(); rerr != nil {
+		return nil, cacheDirMissingError(fmt.Errorf("%v（重建目录失败：%v）", err, rerr), r.cacheDir)
+	}
+	mod, err = r.rt.CompileModule(ctx, bin)
+	if err != nil {
+		return nil, cacheDirMissingError(err, r.cacheDir)
+	}
+	r.logger.Printf("runtime: 编译缓存目录被外部删除，已重建并重试成功（%s）", r.cacheDir)
+	return mod, nil
 }
 
 // ===== 一次请求：执行循环（§7）=====
@@ -281,6 +317,38 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 	}()
 	defer close(watchdogDone)
 
+	// §7.1：请求帧先序列化并**先判预算**，再实例化 —— 超限时不付任何编译/实例化代价。
+	// 单写者保证：初始帧一定先于任何 RPC 应答（应用要先读到帧才可能发 RPC）。
+	//
+	// ⚠️ 2026-09-23 审计 A-1（P1）：请求信封是宿主 → guest 的**另一条**返回路径，
+	// 同样必须装进**一个**帧（§7.1：guest 只读一帧，没有分片语义）。
+	//
+	// 为什么信封也可能超帧：请求体上限是 `limits.AppRequestBodyMaxBytes`（1 MiB **原始
+	// 字节**），而 `abi.Request.Body` 是 JSON 字符串字段 —— 控制字符/`<`/`"` 密集的载荷
+	// 编码后按最坏 6 倍膨胀（≤6 MiB）⇒ 超帧。修复前宿主照样把超帧写进 stdin，guest 的
+	// ReadFrame 报 ErrFrameTooLarge（失同步）⇒ 应用什么都没读到就等预算，现场只看到
+	// `RUNTIME_TIMEOUT` 与"应用没响应"，与真因（请求太大）无关。
+	//
+	// 形态选择：请求信封**不能**像 RPC 结果那样"归一成结构化错误回给 guest" —— guest
+	// 还没拿到请求，任何回给它的字节都不是它要的语义。所以这里是**按预算拒绝**：根本
+	// 不实例化，直接把可行动错误回给**调用方**（BODY_TOO_LARGE，appserver 按 413 出口）。
+	payload, merr := json.Marshal(req.Envelope)
+	if merr != nil {
+		return nil, fmt.Errorf("runtime: 请求帧序列化失败: %w", merr)
+	}
+	if len(payload) > abi.MaxFrameBytes {
+		res.KillReason = killError(apperr.CodeBodyTooLarge,
+			fmt.Sprintf("请求帧编码后 %d 字节超过单帧上限 %s", len(payload), fmtBytes(abi.MaxFrameBytes))).
+			WithDetail("frame_bytes", len(payload)).
+			WithDetail("max", abi.MaxFrameBytes).
+			WithDetail("body_bytes", len(req.Envelope.Body)).
+			WithHint("请求体（含 JSON 转义）必须装进一个 1 MiB 的协议帧：请缩小请求体，" +
+				"或减少其中的控制字符/引号/尖括号等需要转义的内容").
+			WithHint("长文本请放进应用自己的库（db.query 分页读），不要经请求体传递")
+		fillFailureMetrics(&res.Metrics, res.KillReason)
+		return res, nil
+	}
+
 	// 实例名必须**每请求唯一**：wazero 的 store 按名字登记模块，同名会直接报
 	// "module[x] has already been instantiated"，并发请求会互相踩（§4.3 每请求新实例）。
 	mc := newModuleConfig(fmt.Sprintf("%s@%s#%d", appIDOr(req.Envelope.AppID), req.Envelope.Version, r.seq.Add(1)),
@@ -321,12 +389,7 @@ func (r *Runtime) Serve(ctx context.Context, module wazero.CompiledModule, req R
 		return res, nil
 	}
 
-	// §7.1：请求帧先写好（io.Pipe 的写会阻塞到对端读，故放 goroutine），再跑 _start。
-	// 单写者保证：初始帧一定先于任何 RPC 应答（应用要先读到帧才可能发 RPC）。
-	payload, merr := json.Marshal(req.Envelope)
-	if merr != nil {
-		return nil, fmt.Errorf("runtime: 请求帧序列化失败: %w", merr)
-	}
+	// 请求帧已在实例化之前序列化并判过预算（见上）⇒ 这里只负责写。
 	go func() {
 		if werr := guest.writeFrame(guestCtx, payload); werr != nil {
 			r.logf("请求帧写入失败 app=%s: %v", req.Envelope.AppID, werr)
@@ -628,10 +691,26 @@ func rpcErrorBody(e *apperr.Error) *abi.RPCErrorBody {
 }
 
 // writeRPC 把一个 JSON-RPC 应答写回 guest stdin（同一帧格式，§7.2）。
+//
+// ⚠️ 2026-09-23 审计 A-1（P1）：这里是宿主 → guest 的**主返回路径**（全部宿主能力的结果），
+// 单帧预算是它的硬边界。归一逻辑本身在 abi（`RPCResponse.MarshalJSON` —— 帧格式与帧预算
+// 的单一真源），本函数只做两件 abi 管不到的事：
+//   - 归一失败（连错误信封都装不下）⇒ 转成**平台错误**终止本次请求，绝不写超帧；
+//   - 纵深防御：写之前再量一次，`len(b) > MaxFrameBytes` 一律不写。
+//
+// 两层判据互为对照：abi 改写的回归由 abi 的用例钉住，这里钉的是"宿主永不写出超帧"这条
+// 端到端不变量（guest 侧 ReadFrame 的 ErrFrameTooLarge 从此只可能是**应用自己**写出来的）。
 func (r *Runtime) writeRPC(ctx context.Context, guest *guestWriter, resp abi.RPCResponse) *apperr.Error {
 	b, err := json.Marshal(resp)
 	if err != nil {
 		return apperr.New(apperr.CodeInternal, "宿主应答序列化失败").WithCause(err)
+	}
+	if len(b) > abi.MaxFrameBytes {
+		return apperr.New(apperr.CodeInternal,
+			fmt.Sprintf("宿主应答超过单帧上限（%d > %d）且无法归一", len(b), abi.MaxFrameBytes)).
+			WithDetail("frame_bytes", len(b)).
+			WithDetail("max", abi.MaxFrameBytes).
+			WithHint("这是平台侧不变量被破坏（abi 的帧预算归一没有生效），请上报；应用侧无法规避")
 	}
 	if werr := guest.writeFrame(ctx, b); werr != nil {
 		return apperr.New(apperr.CodeModuleKilled, "写入应用 stdin 失败").WithCause(werr)
@@ -802,7 +881,20 @@ type guestWriter struct {
 	w  *io.PipeWriter
 }
 
+// writeFrame 把一条帧负载写进 guest 的 stdin。
+//
+// ⚠️ 2026-09-23 审计 A-1（P1）：这里是宿主 → guest 的**唯一**写出口，因此也是"单帧预算"
+// 这条不变量的最后一道闸 —— 载荷超限时**一个字节都不写**（写出去 = guest 的 ReadFrame
+// 报 ErrFrameTooLarge + 失同步，而宿主那条写因为没人读会阻塞到 guest 预算耗尽 ⇒ 应用拿到
+// 与病因无关的 RUNTIME_TIMEOUT）。返回错误让调用方按"写不出去"归因。
+//
+// 上层的两条路径都已在写之前把载荷压到预算内（RPC 应答经 abi 归一、请求信封经 Serve 的
+// 预算闸门），所以走到这里还超限说明**平台自己的不变量被破坏** —— 这时宁可让本次请求失败，
+// 也不写出宿主侧的超帧。
 func (g *guestWriter) writeFrame(ctx context.Context, payload []byte) error {
+	if len(payload) > abi.MaxFrameBytes {
+		return fmt.Errorf("abi: 帧负载 %d 字节超过单帧上限 %d（不写出）", len(payload), abi.MaxFrameBytes)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	done := make(chan error, 1)

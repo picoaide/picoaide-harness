@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { HostCronService } from './host-service.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
+import { isUsableJobName, jobIsRunning } from './jobs.ts'
 import { hostLocaleOf, hostT, type CronHostCopyKey } from './host-copy.ts'
 
 /** Host-side collaborators of the tools. */
@@ -54,6 +55,12 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // Hand-check cross-field constraints the DSL does not express.
       if (!isValidCron(args.cron)) throw new Error(copy('tool.invalidCron', { cron: args.cron }))
       if (nextRunAtMs(args.cron, Date.now()) === undefined) throw new Error(copy('tool.cronNoMatch', { cron: args.cron }))
+      // The parameter description has always promised a non-empty name; until
+      // 2026-09-23 the tool only trimmed it, so `"   "` was stored as `name: ""`
+      // — a nameless job card, a nameless session title, while the GUI/protocol
+      // face refused the same input (R3-B3 F3 / B-4). Both faces now ask the one
+      // predicate in jobs.ts instead of each deciding what "empty" means.
+      if (!isUsableJobName(args.name)) throw new Error(copy('tool.nameRequired'))
       if (args.prompt === undefined || args.prompt.trim() === '') throw new Error(copy('tool.promptRequired'))
       // FIX-17: `permission` names a preset of the composed permission service.
       // Free text used to be accepted here and dropped by the executor; now an
@@ -128,8 +135,21 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       },
     },
     async execute(args) {
+      // Owner pre-check, same contract as cron_run/cron_remove (2026-09-23
+      // CR-3): a job this account cannot see is reported as missing. Without
+      // it, a nonexistent id reached the ledger, the mutation was a silent
+      // no-op and the tool still answered "enabled" (fake success), while a
+      // *foreign* id threw the ledger's internal "belongs to another account"
+      // string — a cross-account existence oracle and the only tool that
+      // answered differently for "not mine" vs "does not exist".
+      const before = service.listVisibleJobs().find(job => job.id === args.jobId)
+      if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
+      // Already in the requested state: report the verified state, do not
+      // claim a change that did not happen.
+      if (before.enabled === args.enabled) return { jobId: args.jobId, enabled: before.enabled }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: args.enabled ? 'enable' : 'disable', jobId: args.jobId })
-      return { jobId: args.jobId, enabled: args.enabled }
+      const after = service.listVisibleJobs().find(job => job.id === args.jobId)
+      return { jobId: args.jobId, enabled: after?.enabled ?? args.enabled }
     },
   })))
 
@@ -151,7 +171,10 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // (a cross-account jobId is treated as "does not exist", not a leak).
       const before = service.listVisibleJobs().find(job => job.id === args.jobId)
       if (before === undefined) throw new Error(copy('tool.jobMissing', { jobId: args.jobId }))
-      if (before.executions.some(execution => execution.endedAt === undefined)) {
+      // The shared "a live run must not lose its record" judgement (CR-2):
+      // `jobIsRunning` is the same predicate the ledger's delete guard and the
+      // panel button use.
+      if (jobIsRunning(before)) {
         throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'run', jobId: args.jobId })
@@ -181,7 +204,10 @@ export function registerCronTools(ctx: Context, service: HostCronService, option
       // A live execution is not cancelled by deleting its job (`settle()`
       // tolerates the missing record), so the run would keep going while its
       // history disappears. Refuse instead of losing the record silently.
-      if (before.executions.some(execution => execution.endedAt === undefined)) {
+      // The shared "a live run must not lose its record" judgement (CR-2):
+      // `jobIsRunning` is the same predicate the ledger's delete guard and the
+      // panel button use.
+      if (jobIsRunning(before)) {
         throw new Error(copy('tool.jobRunning', { jobId: args.jobId }))
       }
       service.apply(`tool-${crypto.randomUUID()}`, { kind: 'delete', jobId: args.jobId })

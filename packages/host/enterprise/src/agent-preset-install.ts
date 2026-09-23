@@ -16,12 +16,21 @@
 
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import * as tar from 'tar'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
-import { computeSkillContentHash, PROVENANCE_DIR, writeProvenance } from './skill-install.ts'
+import {
+  ArchiveInstallRefusal,
+  computeSkillContentHash,
+  isInstalledSkillDirty,
+  isStoreProvenance,
+  PROVENANCE_DIR,
+  readProvenance,
+  requiresRemoveConfirmation,
+  writeProvenance,
+} from './skill-install.ts'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
 /** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
@@ -192,6 +201,18 @@ export interface InstallPresetArchiveOptions {
   channel?: 'market' | 'org' | undefined
   /** 来源服务端地址(写入溯源标记)。 */
   server?: string | undefined
+  /**
+   * 覆盖本机内容的显式确认（审计 2026-09-23 N2 + 第四轮 R4-B-3，与技能侧
+   * `installSkillArchive` 同一口径）：目标目录已存在且**不是**"内容未改的商店内容"
+   * （`isStoreProvenance` 为假，或内容哈希与安装时不一致）时，没有它一律拒收
+   * （409 `LOCAL_CONTENT`）；商店来源且内容未改的那一份（= 更新智能体）不需要确认。
+   */
+  overwrite?: boolean | undefined
+}
+
+/** 本机那一份预设的来源：'store'（能力中心装的）或 'local'（用户自制/来源不明）。 */
+export async function classifyInstalledPreset(dir: string, name: string): Promise<'store' | 'local'> {
+  return isStoreProvenance(await readProvenance(dir), name) ? 'store' : 'local'
 }
 
 /**
@@ -217,16 +238,38 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
 
   await mkdir(presetsDir, { recursive: true, mode: 0o700 })
   const targetDir = join(presetsDir, name)
-  // A preset never overwrites: the upstream roster rejects a duplicate id,
-  // so replacing an existing directory would silently lose the local one.
-  try {
-    await stat(targetDir)
-    throw new Error(`preset "${name}" already exists locally`)
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
+  // 同名覆盖守卫（审计 2026-09-23 N2）：与技能侧同一份来源判据
+  // （isStoreProvenance）。商店来源 = 面板的「更新智能体」；本机自制内容必须由
+  // 用户显式确认（面板确认条才会把 `?overwrite=1` 交给宿主）。
+  const exists = await stat(targetDir).then(
+    () => true,
+    (cause: NodeJS.ErrnoException) => {
+      if (cause.code === 'ENOENT') return false
+      throw cause
+    },
+  )
+  if (exists && options.overwrite !== true) {
+    const prov = await readProvenance(targetDir)
+    const origin = isStoreProvenance(prov, name) ? 'store' : 'local'
+    // R4-B-3：与技能侧共用同一份 dirty 判据（`isInstalledSkillDirty`）与同一份
+    // "要不要确认"判据（`requiresRemoveConfirmation`）—— 面板对已本地修改的智能体
+    // 也会出确认条，两端必须同源，否则这里会静默吃掉用户改过的内容。
+    const dirty = await isInstalledSkillDirty(targetDir, prov)
+    if (requiresRemoveConfirmation(origin, dirty)) {
+      throw new ArchiveInstallRefusal(
+        'LOCAL_CONTENT',
+        origin === 'local'
+          ? `a preset named "${name}" already exists locally but was not installed by the Capability Hub; `
+            + 'installing would replace it (including your own files) — confirm the overwrite to continue'
+          : `the preset "${name}" has local modifications; installing replaces the whole directory and discards `
+            + 'your changes — confirm the overwrite to continue',
+      )
+    }
   }
 
   const staging = await mkdtemp(join(presetsDir, `.install-${name}-`))
+  /** 回滚也失败时置位：staging 里还躺着用户原有的目录，**不能**随 finally 一起删。 */
+  let keepStaging = false
   try {
     const format = archiveFormat(archive)
     if (format === null) throw new Error('unsupported archive format')
@@ -251,7 +294,32 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
       throw new Error(`archive has no ${COMPOSITION_FILE} at its root`)
     })
 
-    await rename(unpackRoot, targetDir)
+    // Replace an existing installation only with a fully verified tree
+    // (与技能侧 installSkillArchive 同形)：先 rename 旧 → backup，再 rename 新 →
+    // target，成功后删 backup；失败回滚旧目录 —— 两步之间 crash 也不会让已装
+    // 预设目录整个消失。
+    const backup = join(staging, 'backup')
+    await rename(targetDir, backup).catch((cause: NodeJS.ErrnoException) => {
+      if (cause.code !== 'ENOENT') throw cause // 不存在 = 首次安装
+    })
+    try {
+      await rename(unpackRoot, targetDir)
+    } catch (cause) {
+      // 回滚失败时旧内容**绝不能删**：留在 staging（点号目录 ⇒ 既不被预设花名册
+      // 发现、也不被 listInstalledPresets 列出）里供人工恢复，并把 finally 的
+      // 清理关掉。与技能侧 installSkillArchive 的 orphan- 处置同一意图。
+      await rename(backup, targetDir).catch(() => {
+        keepStaging = true
+        console.warn(
+          `[agent-preset-install] rollback failed for "${name}"; previous content kept in `
+          + `${basename(staging)}/${basename(backup)}`,
+        )
+      })
+      throw cause instanceof Error ? cause : new Error(String(cause))
+    }
+    await rm(backup, { recursive: true, force: true }).catch((cause: unknown) => {
+      console.warn(`[agent-preset-install] could not remove the backup of "${name}": ${cause instanceof Error ? cause.message : String(cause)}`)
+    })
     // 溯源(D6):与技能同构——记录应用 ID/版本/渠道/来源服务端与安装时内容哈希,
     // 客户端据此判定「来自哪里、是否被本地改过」。写失败不致命。
     await writeProvenance(targetDir, {
@@ -266,7 +334,7 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))
   } finally {
-    await rm(staging, { recursive: true, force: true }).catch(() => {})
+    if (!keepStaging) await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -352,25 +420,54 @@ export async function mapLocalPresets(
 /**
  * Uninstall one preset: remove `<presetsDir>/<name>` after verifying it is
  * an installed preset (valid id + composition present).
+ *
+ * 来源感知（审计 2026-09-23 N2，与技能侧 `uninstallSkill` 同一口径）：目标目录里的
+ * 那一份若不是能力中心装的（没有溯源标记 / 渠道不是商店来源 / appId 对不上），
+ * 视为用户自制内容 —— 没有 `overwrite` 显式确认一律拒收（409 `LOCAL_CONTENT`）。
  * @param presetsDir - the local preset root.
  * @param name - the preset id.
+ * @param options - `overwrite: true` = 用户已确认删除本机自制内容。
  * @returns the removed directory path.
- * @throws Error when the name is invalid or the preset is not installed.
+ * @throws ArchiveInstallRefusal when the name is invalid, the preset is not installed, or local content needs confirmation.
  */
-export async function uninstallPreset(presetsDir: string, name: string): Promise<string> {
+export async function uninstallPreset(
+  presetsDir: string,
+  name: string,
+  options: { overwrite?: boolean | undefined } = {},
+): Promise<string> {
   validatePresetId(name)
   const target = join(presetsDir, name)
   let st
   try {
     st = await stat(target)
   } catch {
-    throw new Error(`preset "${name}" is not installed`)
+    throw new ArchiveInstallRefusal('NOT_INSTALLED', `preset "${name}" is not installed`)
   }
-  if (!st.isDirectory()) throw new Error(`preset "${name}" is not installed`)
+  if (!st.isDirectory()) throw new ArchiveInstallRefusal('NOT_INSTALLED', `preset "${name}" is not installed`)
   try {
     await stat(join(target, COMPOSITION_FILE))
   } catch {
-    throw new Error(`preset "${name}" is not installed`)
+    throw new ArchiveInstallRefusal('NOT_INSTALLED', `preset "${name}" is not installed`)
+  }
+  if (await classifyInstalledPreset(target, name) === 'local' && options.overwrite !== true) {
+    throw new ArchiveInstallRefusal(
+      'LOCAL_CONTENT',
+      `the preset directory "${name}" was not installed by the Capability Hub; `
+      + 'deleting it removes your own files — confirm the deletion to continue',
+    )
+  }
+  // R4-B-3：删除比覆盖更不可逆 —— 商店来源但被本地修改过的智能体也要先确认
+  // （与技能侧 `uninstallSkill` 同一份判据，不再各写一遍 origin === 'local'）。
+  if (options.overwrite !== true) {
+    const prov = await readProvenance(target)
+    const dirty = await isInstalledSkillDirty(target, prov)
+    if (dirty) {
+      throw new ArchiveInstallRefusal(
+        'LOCAL_CONTENT',
+        `the preset "${name}" has local modifications; deleting it discards your changes `
+        + '— confirm the deletion to continue',
+      )
+    }
   }
   await rm(target, { recursive: true, force: true })
   return target

@@ -15,7 +15,11 @@
  *   1. `git ls-files` 的每个已跟踪文件里，所有 `https?://<host>` 的 host（**对 TLD 无限制**）；
  *   2. 裸主机名形态（没有协议前缀的 `label(.label)+.TLD`，TLD 受 `BARE_ALWAYS_TLDS` 约束）；
  *   3. URL authority 里的公网 IPv4（私有/保留/文档网段与已登记地址之外的一律报错）；
- *   4. **提交信息**：`git log <base>..HEAD --format=%B`（base 取不到时退化为最近 1 条并打印提示）。
+ *   4. **提交信息**：`git log <base>..HEAD --format=%B`。base 的解析顺序与"取不到 base"
+ *      时的处置写在 `resolveCommitBase` / `commitRangeFindings` 的头注释里 —— 2026-09-23
+ *      审计 R3-C C-4：CI gate 的 depth-1 检出曾让这条判据**恒为空跑**（解析不到 base ⇒
+ *      退化成"只看 HEAD"= PR 上那条 merge commit，中间提交信息里的域名看不见，而输出
+ *      照打 `零命中 ✅`）。
  *
  * 判据 1 是主判据（精确、零假设）；判据 2 补"没有协议前缀的值位"（`DOMAIN=<host>`、
  * `"server_url": "<host>"`、文档表格与正文里的裸主机名）；
@@ -25,8 +29,10 @@
  *
  * ## 两条硬约束
  *
- * - **守卫自身不得内嵌任何客户域名**（否则它变成新的泄漏点）：本文件的合成样串一律
- *   **运行时拼接**（见 `selfTest`），示例一律用 `example.com` 保留命名空间。
+ * - **守卫自身不得内嵌任何客户域名**（否则它变成新的泄漏点）：本文件的负例语料一律
+ *   **运行时随机生成**（`syntheticHostname` / `syntheticPublicIpv4`，见 `selfTest`），
+ *   示例一律用 `example.com` 保留命名空间与 RFC 5737 文档网段。**运行时拼接不算豁免**
+ *   （2026-09-23 审计 G-9：拼接真实串仍然把字符串逐段留在了公开仓源码里）。
  * - **输出默认脱敏**：CI 日志是公开的，守卫若把命中的 host 原样打在日志里，等于换了个
  *   地方泄漏（本仓已有"外部命令输出必须先捕获、脱敏、再打印"的先例）。本地排障用
  *   `--unmasked`。
@@ -39,12 +45,30 @@
  *
  * 用法：node scripts/check-no-real-domains.mjs [--root <dir>] [--unmasked] [--json]
  *                                            [--selftest] [--no-commit-range]
- * 退出码：0 = 零命中；1 = 有命中（含自证失败）；2 = 用法错误。
+ * 退出码：0 = 零命中；1 = 有命中（含自证失败）；2 = 用法错误；
+ *         3 = **判据没能完成**（提交信息区间看不到历史，或**扫描面为 0 个文件**）——
+ *             这不是"零命中"，处置见 `commitRangeFindings` 与主流程的 emptySurface 分支。
+ *
+ * ## 非普通文件（软链）的口径（2026-09-23 复审 F5）
+ *
+ * 扫描面用 `git ls-files --cached --others --exclude-standard` 列路径，而**读取一律先
+ * `lstat`**：软链**不跟随**目标，改扫 `readlinkSync` 的结果 —— 那才是 `git add` 会写进
+ * blob 的字节。理由有两条，缺任一条都会错：
+ *   - `readFileSync` 会**读穿**软链：未跟踪软链指向**被忽略**的文件时，那份内容永远提交
+ *     不进去（git 只存链接本身），却会被判成泄漏 ⇒ 复审实测的**假阳性**；
+ *   - 反过来，"链接目标路径里写了真实域名"是真泄漏（那个字符串就是要提交的内容），
+ *     所以不能简单地"跳过软链"。
+ * 这一层特判**必须可见**：只要出现过软链，输出里就有一条 `非普通文件：N 个软链按链接
+ * 目标字符串扫描…`；其余没有可扫文本内容的条目（子模块 gitlink / 目录 / 读失败）也会被
+ * 逐条列出来 —— 静默缩小扫描面正是本守卫这两轮在修的那类缺陷。
  */
 
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { relative, resolve } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 白名单（集中在这一处；分组名即"登记理由"）
@@ -108,6 +132,11 @@ const ALLOWED_DOMAINS = {
     'xiaoshouyi.com', 'feishu.cn', 'qq.com', 'dingtalk.com', 'glitchtip.com',
     'deepwiki.com', 'cloud.google.com', 'mcp.cloudflare.com', 'cloudflarestorage.com',
   ],
+  // 第三方公开标准命名空间（文件格式的元数据里必然出现，不是任何客户/部署身份）。
+  // `ns.adobe.com` = PNG/JPEG 的 XMP 元数据命名空间（Adobe 公开规范，截图文件里天然带）。
+  '公开标准命名空间（文件格式元数据）': [
+    'adobe.com',
+  ],
   // 主机解析 / SSRF 测试语料里的 token（对抗输入被拆碎后的残片，不是任何人的域名）。
   '畸形语料与占位主机（对抗输入残片）': [
     'mple.com', 'ample.com', 'tmple.com', 'nmple.com', 'ple.com', 'e.com', 'u200bmple.com',
@@ -127,6 +156,25 @@ const ALLOWED_DOMAINS = {
     'placeholder.com', 'x.com', 'baidu.com', 'gvt1.com',
   ],
 }
+
+/**
+ * **二进制扫描面**里已判定的命中（2026-09-23 第五轮审计 R5-D-16）。
+ *
+ * 含 NUL 的文件现在按字节安全方式扫描（旧实现静默跳过它们），于是压缩/元数据字节流里
+ * 会偶然出现"域名形态"的 ASCII 片段。**逐条登记 + 写明理由**，并做死条目对账
+ * （登记了却不再命中任何文件 ⇒ 红）：这样"新出现的二进制命中"一律红，而已知的
+ * 噪声片段是**可见、可判定、可评审**的（不再有"静默跳过"这一档）。
+ */
+const BINARY_SCAN_ACCEPTED = [
+  {
+    path: 'docs/evidence/2026-09-11-balance/10-csrf-healed.png',
+    // 运行时拼出（**不要在源码里留可直接匹配的 host 字面量**：本守卫也扫自己，
+    // 与 `MULTI_LABEL_SUFFIXES` 自证里 `['com', '.cn'].join('')` 同一手法）。
+    host: ['e', 'cn'].join('.'),
+    why: 'PNG 的 zlib 压缩字节流里偶然拼出的 ASCII 片段（1 字符标签 + 已知 TLD），'
+      + '不是主机名；同一形态在文本路径下也是假阳性，属"二进制扫描面"的固有噪声',
+  },
+]
 
 /**
  * 后缀白名单：命中即放行（用于保留命名空间与"任意子域都算占位符"的命名空间）。
@@ -309,19 +357,86 @@ function candidatesInText(text, file) {
   return found
 }
 
+/**
+ * 本守卫的扫描面：**已跟踪 + 未跟踪且未被忽略**的文件。
+ *
+ * 为什么必须是这个口径（2026-09-23 三轮审计 R3-C C-5）：`AGENTS.md` 把本守卫写成
+ * 「改任何含渠道/域名/URL 的文件或写提交信息**之前**，先跑」，而旧实现只读
+ * `git ls-files`（= 只扫索引）—— 作者按那句话在 `git add` **之前**跑，新建文件对守卫
+ * 根本不存在，得到"零命中 ✅"，下一步 `git add -A && git commit` 就把域名带进公开历史。
+ * 同仓的 `check-no-leftover-mutants.mjs` 早就用 `--cached --others --exclude-standard`
+ * 处理过同一个时机（变异体被 `git add -A` 扫进提交的真实事故），所以这不是取舍而是漏改。
+ *
+ * `--exclude-standard` 让 `.gitignore` / `.git/info/exclude` 里的本地产物照旧不被扫
+ * （它们不可能进提交，扫了只会制造误报）。
+ * @param root - 仓库根（或任意目录）。
+ * @returns 相对路径列表。
+ */
 function trackedFiles(root) {
   try {
-    const out = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 30 })
+    const out = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 1 << 30,
+    })
     return out.split('\0').filter(Boolean)
   } catch (error) {
-    console.error(`check-no-real-domains: 读不到 ${root} 的已跟踪文件（\`git ls-files\` 失败）：${error.message}`)
+    console.error(`check-no-real-domains: 读不到 ${root} 的扫描面（\`git ls-files --cached --others\` 失败）：${error.message}`)
     process.exit(2)
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 自证（防假绿）：合成样串一律运行时拼接，源码里不出现完整客户域名
+// 自证（防假绿）：负例语料一律**运行时随机生成**的合成目标
+//
+// 为什么是"随机生成"而不是"写死一个假串"、更不是"拼接一个真串"：
+//   - 写死的假串迟早会撞上某个真实注册（或被人当成"这就是那个客户域名"的证据）；
+//   - 拼接真串（旧实现，2026-09-23 审计 G-9）**只是骗过守卫自己的扫描**，
+//     字符串仍然逐段存在于公开仓源码里 —— 四段十进制 IP 更是明文数字字面量。
+//     `AGENTS.md` 铁律 0 对此没有豁免：任何位置、任何形态都不允许。
+//   - 负例真正需要的性质只有两条：**必然未登记**、**公网形态**。随机标签 + 显式
+//     断言"不在允许集合内"恰好给出这两条，且每次运行的目标都不同。
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** 合成负例用的随机标签（源码里没有完整域名/IP，只有一个 8 位十六进制片段）。 */
+function syntheticLabel() {
+  return `audit-${randomUUID().replace(/-/gu, '').slice(0, 8)}`
+}
+
+/**
+ * 合成主机名：随机标签 + 一个**非保留、非白名单**的 TLD（`.com`）。
+ *
+ * 每次运行都不同 ⇒ 必然未登记；`.com` 不在 `SPECIAL_SUFFIXES`（RFC 2606/6761）
+ * 也不在 `ALLOWED_DOMAINS` ⇒ 必须被判红。
+ *
+ * @returns {string} 形如 `<随机标签>.com`（源码里不留任何可直接匹配的主机名 token）
+ */
+function syntheticHostname() {
+  return `${syntheticLabel()}.com`
+}
+
+/**
+ * 合成公网形态 IPv4：循环随机抽样直到 `!ipv4Allowed(ip)`。
+ *
+ * 负例要的是"一个公网形态且不在允许集合内的地址"，不需要（也不允许）任何真实
+ * 地址。抽样上限只是防死循环 —— 命中保留/登记网段的概率极低（256 次全中的概率
+ * 可以忽略），真的耗尽时返回 `null`，调用处的断言会 fail-loud 而不是悄悄放行。
+ *
+ * @returns {string|null} 公网形态地址；抽样耗尽时为 null。
+ */
+function syntheticPublicIpv4() {
+  for (let attempt = 0; attempt < 256; attempt += 1) {
+    const octets = [
+      1 + Math.floor(Math.random() * 223), // 1..223：跳过 0/224+（"本网络"/组播/保留/广播）
+      Math.floor(Math.random() * 256),
+      Math.floor(Math.random() * 256),
+      1 + Math.floor(Math.random() * 254), // 1..254：避开 .0/.255 形态
+    ]
+    const candidate = octets.join('.')
+    if (!ipv4Allowed(candidate)) return candidate
+  }
+  return null
+}
 
 /**
  * 自证走的是**与扫描完全同一套** candidatesInLine/isAllowedCandidate，
@@ -331,11 +446,18 @@ function trackedFiles(root) {
  */
 function selfTest() {
   const failures = []
-  const [a, b, c, d, e] = ['har', 'ness.', 'mo', 'kahr', '.vip']
-  const syntheticHost = `${a}${b}${c}${d}${e}` // 运行时拼接，源码里没有完整域名
+  const syntheticHost = syntheticHostname()
   const syntheticUrl = `https://${syntheticHost}/updates/manifest`
-  const syntheticIp = ['101', '42', '228', '128'].join('.')
+  const syntheticIp = syntheticPublicIpv4()
   const expect = (condition, message) => { if (!condition) failures.push(message) }
+
+  // 语料前置断言：负例必须"必然未登记/不在允许集合内"，否则判据会变成假绿
+  // （白名单放行）或假红（守卫判对了、用例判错了）。
+  expect(!isAllowedHost(syntheticHost), `合成主机名落进了白名单（随机标签撞车）：${syntheticHost}`)
+  expect(
+    syntheticIp !== null && !ipv4Allowed(syntheticIp),
+    `未能在 256 次抽样内生成"不在允许集合内的公网形态地址"：${String(syntheticIp)}`,
+  )
 
   // 负例 1（URL）：合成客户域名必须被判红（URL 判据与裸主机名判据都会命中，故断言"至少一条且来自 URL"）。
   const urlHits = candidatesInLine(syntheticUrl).filter(hit => !isAllowedCandidate(hit))
@@ -348,10 +470,13 @@ function selfTest() {
   const bareHits = candidatesInLine(`DOMAIN=${syntheticHost}`).filter(hit => !isAllowedCandidate(hit))
   expect(bareHits.some(hit => hit.host === syntheticHost), `合成裸主机名负例未被判红：${syntheticHost}`)
 
-  // 负例 3（公网 IPv4）：被投递环境 IP 必须被判红（IP 只在 URL authority 里判，见 candidatesInLine 注释）。
-  const ipHits = candidatesInText(`server_url = https://${syntheticIp}/api`, 'deploy.sh')
-    .filter(hit => !isAllowedCandidate(hit))
-  expect(ipHits.some(hit => hit.host === syntheticIp), `合成公网 IP 负例未被判红：${syntheticIp}`)
+  // 负例 3（公网 IPv4）：随机生成的公网形态地址必须被判红（IP 只在 URL authority
+  // 里判，见 candidatesInLine 注释）。地址是随机的、且上面已断言不在允许集合内。
+  if (syntheticIp !== null) {
+    const ipHits = candidatesInText(`server_url = https://${syntheticIp}/api`, 'deploy.sh')
+      .filter(hit => !isAllowedCandidate(hit))
+    expect(ipHits.some(hit => hit.host === syntheticIp), `合成公网 IP 负例未被判红：${syntheticIp}`)
+  }
 
   // 负例 4（提交信息路径）：同一条合成串在 message 扫描里也必须红。
   const messageHits = candidatesInText(`deploy: point client at ${syntheticHost}`, 'COMMIT_EDITMSG')
@@ -360,10 +485,10 @@ function selfTest() {
 
   // 负例 5（守 2026-09-20 新加的「多段公共后缀自身不是主机名」跳过规则）：两段式后缀
   // 本身不再判红（否则守卫扫到自己的 `MULTI_LABEL_SUFFIXES` 语料就红，实测 EXIT=1），
-  // **但带真实标签的三段式主机名必须照旧判红** —— 判据不能靠"新规则看起来只跳过后缀"，
-  // 必须实测两个方向；串一律运行时拼接（与上面同样的理由：源码里不留完整域名）。
+  // **但三段式主机名必须照旧判红** —— 判据不能靠"新规则看起来只跳过后缀"，必须实测
+  // 两个方向；标签同样是随机生成的合成标签（与上面同样的理由：不留任何真实身份）。
   const cnSuffixBare = ['com', '.cn'].join('')
-  const cnHostBare = ['inn', 'er.', cnSuffixBare].join('')
+  const cnHostBare = `${syntheticLabel()}.${cnSuffixBare}`
   expect(
     candidatesInLine(`suffix ${cnSuffixBare}`).length === 0,
     `多段公共后缀自身被误判为主机名：${cnSuffixBare}`,
@@ -408,42 +533,539 @@ function selfTest() {
     }
   }
 
-  // 脱敏自证：命中输出不得原样回显 host。
+  // 脱敏自证：命中输出不得原样回显 host（本轮语料是随机的，就用本轮的随机标签当判据）。
   const masked = maskHost(syntheticHost)
-  expect(!masked.includes(d), `脱敏输出仍含原始标签：${masked}`)
-  expect(masked.endsWith(e), `脱敏输出应保留 TLD：${masked}`)
+  const syntheticFirstLabel = syntheticHost.split('.')[0]
+  expect(!masked.includes(syntheticFirstLabel), `脱敏输出仍含原始标签：${masked}`)
+  expect(masked !== syntheticHost, `脱敏输出与原始 host 相同：${masked}`)
+  expect(masked.endsWith('.com'), `脱敏输出应保留 TLD：${masked}`)
   return failures
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 提交信息判据
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * 自证：**文件扫描面**的端到端行为（2026-09-23 三轮审计 R3-C C-5 / 六处形态③ 的回归判据）。
+ *
+ * 为什么必须端到端（spawn 真进程 + 真 git 仓库）：C-5 的失效形态是"守卫照样打印
+ * `零命中 ✅`、照样 exit 0"，判据只能钉在**退出码**与**那句 ✅ 出不出现**上 ——
+ * 把 `trackedFiles` 的 `--others` 去掉这种改法在任何纯函数层面都看不出来。
+ *
+ * 七个样本（合成仓库建在系统临时目录、跑完删；域名一律 `syntheticLabel()` 运行时生成）：
+ *   ① 已跟踪文件里带合成域名        → EXIT=1（对照：这一形态本来就该红）
+ *   ② **未跟踪且未被忽略**的新文件   → EXIT=1（C-5 本体：旧实现 EXIT=0 + 零命中 ✅）
+ *   ③ 未跟踪但**被 .gitignore 忽略** → EXIT=0 且打印 `零命中`（证明排除表仍被尊重）
+ *   ④ 空 git 仓库（扫描面 0）        → EXIT=3 且**不打印** `零命中 ✅`（六处形态③ 本体）
+ *   ⑤ 干净仓库（只有占位符域名）      → EXIT=0 且打印 `零命中`（正例：正常流程不被判红）
+ *   ⑥ 未跟踪软链 → **被忽略**的目标含域名 → EXIT=0（复审 F5：不得读穿软链的目标）
+ *   ⑦ 软链**目标字符串自身**含域名    → EXIT=1 且点名该软链（真泄漏：git 存的就是它）
+ * ⑥⑦ 互为反证：只做 ⑥ 会在 ⑦ 变绿；读穿目标（旧行为）会让 ⑥ 变红。
+ * ⑧ 含 NUL 的已跟踪文件（R5-D-16）：旧实现对它们**静默跳过**（插一个 0 字节即可关掉判据），
+ *    现在按字节安全方式扫 ⇒ 里面的域名必须判红，且扫描面自述要点明"二进制也扫"。
+ *
+ * 子进程带 `SELFTEST_CHILD_ENV=1`（避免自证递归）。
+ *
+ * @returns 自证失败项列表（空 = 通过）。
+ */
+function selfTestScanSurface() {
+  const failures = []
+  const expect = (ok, message) => {
+    if (!ok) failures.push(message)
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'cnrd-surface-'))
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'guard-selftest',
+    GIT_AUTHOR_EMAIL: 'guard-selftest@example.invalid',
+    GIT_COMMITTER_NAME: 'guard-selftest',
+    GIT_COMMITTER_EMAIL: 'guard-selftest@example.invalid',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  }
+  const git = (cwd, args) => execFileSync('git', args, { cwd, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const runGuard = target => spawnSync(
+    process.execPath,
+    [fileURLToPath(import.meta.url), '--root', target, '--no-commit-range'],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        [SELFTEST_CHILD_ENV]: '1',
+        [ROOT_SELFTEST_CHILD_ENV]: '1',
+        GITHUB_EVENT_PATH: '',
+        GITHUB_BASE_REF: '',
+        GITHUB_ACTIONS: '',
+        CI: '',
+      },
+    },
+  )
+  /** 建一个只有 `keep.txt` 的已提交仓库，返回其路径。 */
+  const buildRepo = (dir, extra) => {
+    mkdirSync(dir)
+    git(dir, ['init', '-q', '-b', 'main', '.'])
+    writeFileSync(join(dir, 'keep.txt'), 'clean\n')
+    if (extra !== undefined) extra(dir)
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', 'init'])
+  }
+  const host = syntheticHostname()
+  try {
+    const tracked = join(scratch, 'tracked')
+    buildRepo(tracked, dir => writeFileSync(join(dir, 'README.md'), `server_url = https://${host}/api\n`))
+    const trackedCase = runGuard(tracked)
+    expect(trackedCase.status === 1, `样本①（已跟踪文件带域名）应为 EXIT=1，实得 ${trackedCase.status}`)
+    expect((trackedCase.stderr ?? '').includes('[DOMAIN]'), '样本① 没有报出已跟踪文件里的域名')
 
-function commitRangeFindings(root, unmasked, notes) {
-  const findings = []
-  // base 候选：CI 的 PR base 优先（GitHub 只给分支名，需要拼 `origin/`），再退化到常见主线。
+    const untracked = join(scratch, 'untracked')
+    buildRepo(untracked)
+    writeFileSync(join(untracked, 'new-note.md'), `server_url = https://${host}/api\n`)
+    const untrackedCase = runGuard(untracked)
+    expect(untrackedCase.status === 1,
+      `样本②（**未跟踪未忽略**的新文件带域名）应为 EXIT=1（C-5 本体），实得 ${untrackedCase.status}`
+      + `\n    stdout: ${(untrackedCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect((untrackedCase.stderr ?? '').includes('[DOMAIN]'), '样本② 没有报出未跟踪文件里的域名（扫描面仍只覆盖索引）')
+    expect(!(untrackedCase.stdout ?? '').includes('零命中'), '样本② 有命中时不得打印 `零命中 ✅`')
+
+    const ignored = join(scratch, 'ignored')
+    buildRepo(ignored, dir => writeFileSync(join(dir, '.gitignore'), 'local-only/\n'))
+    mkdirSync(join(ignored, 'local-only'))
+    writeFileSync(join(ignored, 'local-only', 'scratch.md'), `server_url = https://${host}/api\n`)
+    const ignoredCase = runGuard(ignored)
+    expect(ignoredCase.status === 0,
+      `样本③（未跟踪但被 .gitignore 忽略）应为 EXIT=0（排除表必须被尊重），实得 ${ignoredCase.status}`
+      + `\n    stderr: ${(ignoredCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((ignoredCase.stdout ?? '').includes('零命中'), '样本③ 应打印 `零命中`')
+
+    const empty = join(scratch, 'empty')
+    mkdirSync(empty)
+    git(empty, ['init', '-q', '-b', 'main', '.'])
+    const emptyCase = runGuard(empty)
+    expect(emptyCase.status === 3,
+      `样本④（空 git 仓库 = 扫描面 0）应为 EXIT=3（fail-loud），实得 ${emptyCase.status}`
+      + `\n    stdout: ${(emptyCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect(!(emptyCase.stdout ?? '').includes('零命中'), '样本④ 扫描面为 0 时**不得**打印 `零命中 ✅`')
+    expect((emptyCase.stderr ?? '').includes('扫描面为'), '样本④ 的处置说明应点名"扫描面为 0 个文件"')
+
+    const clean = join(scratch, 'clean')
+    buildRepo(clean, dir => writeFileSync(join(dir, 'README.md'), 'server_url = https://harness.example.com/api\n'))
+    const cleanCase = runGuard(clean)
+    expect(cleanCase.status === 0, `样本⑤（干净仓库）应为 EXIT=0，实得 ${cleanCase.status}`
+      + `\n    stderr: ${(cleanCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((cleanCase.stdout ?? '').includes('零命中'), '样本⑤ 完成检查时应打印 `零命中`')
+
+    // 样本⑥⑦（2026-09-23 复审 F5）：软链的两种方向，必须**同时**成立 ——
+    //   ⑥ 不读穿：未跟踪软链 → **被 .gitignore 忽略**的目标（内容含域名）⇒ EXIT=0。
+    //      旧实现 `readFileSync` 读穿目标 ⇒ 判红并点名 `leak.md`，而那份内容永远提交不进去
+    //      （git 只存链接本身）⇒ 语义上就是误报。
+    //   ⑦ 不放过：软链**目标字符串自身**带域名 ⇒ EXIT=1 且点名该软链路径。
+    //      那个字符串正是 `git add` 会写进 blob 的字节 ⇒ 真泄漏，不能因为"不跟随"而漏掉。
+    // 两条互为反证：只做 ⑥（一律跳过软链）会在 ⑦ 变绿；只做旧的 ⑥（读穿）会让 ⑥ 变红。
+    const linked = join(scratch, 'linked')
+    buildRepo(linked, dir => writeFileSync(join(dir, '.gitignore'), 'local-only/\n'))
+    mkdirSync(join(linked, 'local-only'))
+    writeFileSync(join(linked, 'local-only', 'secret.md'), `server_url = https://${host}/api\n`)
+    symlinkSync(join('local-only', 'secret.md'), join(linked, 'leak.md'))
+    const linkedCase = runGuard(linked)
+    expect(linkedCase.status === 0,
+      `样本⑥（未跟踪软链 → 被忽略的目标含域名）应为 EXIT=0（不得读穿软链），实得 ${linkedCase.status}`
+      + `\n    stderr: ${(linkedCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect(!(linkedCase.stderr ?? '').includes('leak.md'),
+      '样本⑥ 把软链判红了 —— 那是读穿了**永远提交不进去**的被忽略目标（复审 F5 的误报形态）')
+    // 特判必须可见：不得静默缩小扫描面。
+    expect((linkedCase.stdout ?? '').includes('软链'),
+      `样本⑥ 必须打印"软链按链接目标扫描"的可见说明，实际 ${JSON.stringify((linkedCase.stdout ?? '').trim().split('\n').slice(-3))}`)
+
+    const linkText = join(scratch, 'linktext')
+    buildRepo(linkText)
+    symlinkSync(`https://${host}/notes`, join(linkText, 'visit.md'))
+    const linkTextCase = runGuard(linkText)
+    expect(linkTextCase.status === 1,
+      `样本⑦（软链目标字符串自身带域名）应为 EXIT=1（真泄漏：git 存的就是这个字符串），实得 ${linkTextCase.status}`
+      + `\n    stdout: ${(linkTextCase.stdout ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((linkTextCase.stderr ?? '').includes('[DOMAIN]') && (linkTextCase.stderr ?? '').includes('visit.md'),
+      `样本⑦ 必须报出并点名该软链路径，实际 ${JSON.stringify((linkTextCase.stderr ?? '').trim().split('\n').slice(-3))}`)
+
+    // 样本⑧（2026-09-23 第五轮审计 R5-D-16）：**含 NUL 的已跟踪文件**里藏着的域名必须判红。
+    // 旧实现 `if (text.includes('\0')) continue` ⇒ 往文件里插一个 0 字节就能把铁律 0 的
+    // 判据关掉（独立复现：同内容不含 NUL ⇒ EXIT=1；含 NUL ⇒ EXIT=0 + `零命中 ✅`），
+    // 而"跳过了 39 个条目"这件事在输出里一个字都不提。现在按字节安全方式扫（latin1 +
+    // NUL→空格），并且二进制命中要么判红、要么进 `BINARY_SCAN_ACCEPTED` 的显式登记。
+    const nulBinary = join(scratch, 'nul-binary')
+    buildRepo(nulBinary, dir => writeFileSync(join(dir, 'blob.bin'),
+      Buffer.concat([
+        Buffer.from('PNG-like header\0\x01\x02', 'latin1'),
+        Buffer.from(` server_url = https://${host}/api `, 'utf8'),
+        Buffer.from('\0tail', 'latin1'),
+      ])))
+    const nulCase = runGuard(nulBinary)
+    expect(nulCase.status === 1,
+      `样本⑧（含 NUL 的已跟踪文件里带域名）应为 EXIT=1（R5-D-16：插一个 0 字节不得关掉判据），`
+      + `实得 ${nulCase.status}\n    stdout: ${(nulCase.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect((nulCase.stderr ?? '').includes('[DOMAIN]') && (nulCase.stderr ?? '').includes('blob.bin'),
+      `样本⑧ 必须报出并点名那个二进制文件，实际 ${JSON.stringify((nulCase.stderr ?? '').trim().split('\n').slice(-3))}`)
+    expect((nulCase.stdout ?? '').includes('二进制'),
+      '样本⑧ 的扫描面自述必须点明"含 NUL 的二进制按字节安全方式扫描"（静默跳过不再被允许）')
+  } catch (error) {
+    failures.push(`扫描面自证的夹具构建失败：${error?.message ?? String(error)}`)
+  } finally {
+    try {
+      rmSync(scratch, { recursive: true, force: true })
+    } catch {
+      // 清理失败不影响判据结论
+    }
+  }
+  return failures
+}
+
+/**
+ * 自证：**扫描根断言**（2026-09-23 第五轮审计 R4-A N4）。
+ *
+ * 现场：根断言（"默认根 = 仓库根" + "cwd 在子目录里 ⇒ 拒绝"）是 2026-09-23 R4-A-1 的
+ * 修复本体，但**它自己不在 `--selftest` 的覆盖里** —— 把默认根退回 `resolve(cwd)`、
+ * 或把根断言弱化成"路径存在即可"，`node scripts/check-no-real-domains.mjs --selftest`
+ * **仍然 EXIT=0**。也就是说"这个判据只在从仓库根调用时有效"这条约定本身没有自证。
+ *
+ * 三个样本（都 spawn 真进程、钉在**退出码**与那句具名拒绝上）：
+ *   ① 负例：在仓库的**子目录**里跑（默认根）        → EXIT=2 且点名"在仓库的子目录里运行"；
+ *   ② 负例：`--root` 指向工作树的**子目录**        → EXIT=2 且点名"指向了工作树的子目录"；
+ *   ③ 正例：在仓库根跑                              → EXIT=0 且打印"自证通过"（不误伤正常调用）。
+ *
+ * 子进程带 `SELFTEST_CHILD_ENV=1` + `ROOT_SELFTEST_CHILD_ENV=1`（后者防正例子进程递归）。
+ * @returns 自证失败项列表（空 = 通过）。
+ */
+function selfTestRootAssertion() {
+  const failures = []
+  const expect = (ok, message) => {
+    if (!ok) failures.push(message)
+  }
+  const script = fileURLToPath(import.meta.url)
+  const repoTop = gitToplevel(dirname(script))
+  if (repoTop === null) {
+    failures.push('扫描根自证无法开展：脚本目录不在 git 工作树里（--root 夹具场景请用显式 root）')
+    return failures
+  }
+  const childEnv = {
+    ...process.env,
+    [SELFTEST_CHILD_ENV]: '1',
+    [ROOT_SELFTEST_CHILD_ENV]: '1',
+    GITHUB_EVENT_PATH: '',
+    GITHUB_BASE_REF: '',
+    GITHUB_ACTIONS: '',
+    CI: '',
+  }
+  const run = (cwd, args) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env: childEnv })
+
+  // 负例①：在仓库的子目录里跑 —— 扫描面会被静默缩到那棵子树，必须拒绝。
+  const inSubdirectory = run(join(repoTop, 'scripts'), ['--selftest'])
+  expect(inSubdirectory.status === 2,
+    `根断言负例①（在仓库子目录里跑）应为 EXIT=2，实得 ${inSubdirectory.status}`
+    + `\n    stderr: ${(inSubdirectory.stderr ?? '').trim().split('\n').slice(0, 2).join(' | ')}`)
+  expect((inSubdirectory.stderr ?? '').includes('在仓库的子目录里运行'),
+    '根断言负例① 必须点名"在仓库的子目录里运行"（否则红的原因不是根断言咬住）')
+
+  // 负例②：显式 --root 指向工作树的子目录 —— 同样必须拒绝（--root 不豁免这条）。
+  const wrongRoot = run(repoTop, ['--root', 'scripts', '--selftest'])
+  expect(wrongRoot.status === 2,
+    `根断言负例②（--root 指向工作树子目录）应为 EXIT=2，实得 ${wrongRoot.status}`
+    + `\n    stderr: ${(wrongRoot.stderr ?? '').trim().split('\n').slice(0, 2).join(' | ')}`)
+  expect((wrongRoot.stderr ?? '').includes('指向了工作树的子目录'),
+    '根断言负例② 必须点名"解析出的根指向了工作树的子目录"')
+
+  // 正例：仓库根（正常调用姿势）必须绿 —— 判据不能把"从根跑"也拦下来。
+  const atRoot = run(repoTop, ['--selftest'])
+  expect(atRoot.status === 0,
+    `根断言正例（在仓库根跑）应为 EXIT=0，实得 ${atRoot.status}`
+    + `\n    stderr: ${(atRoot.stderr ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+  expect((atRoot.stdout ?? '').includes('自证通过'),
+    '根断言正例 必须打印"自证通过"（否则它没走到收尾）')
+  return failures
+}
+
+/**
+ * 自证：**提交信息区间判据的端到端行为**（2026-09-23 审计 R3-C C-4 的回归判据）。
+ *
+ * 为什么必须端到端（spawn 真进程）而不是只断言内部函数：C-4 的失效形态恰恰是
+ * "守卫照样打印 `零命中 ✅`、照样 exit 0" —— 判据只能钉在**退出码**与**那句 ✅ 出不出
+ * 现**上；把 fail-loud 改成"打一条 note"这种改法在内部函数层面看起来完全正常。
+ *
+ * 五个样本（合成仓库建在系统临时目录、跑完删；域名一律 `syntheticLabel()` 运行时
+ * 生成，不进本文件源码 ⇒ 守卫自己也不会被自己判红）：
+ *   ① 完整克隆 + 干净提交          → EXIT=0 且打印 `零命中`（正例：合法历史不能被判红）
+ *   ② 完整克隆 + **中间**提交带域名 → EXIT=1（区间判据真的看得见中间那些提交）
+ *   ③ depth-1 克隆 + CI 环境       → EXIT=3 且**不打印** `零命中 ✅`（C-4 本体：
+ *      解析不到 base 时不许静默退化成"只看 HEAD"）
+ *   ④ depth-1 克隆 + 无 CI 环境    → EXIT=3（同一处置，CI 检测不是逃生门）
+ *   ⑤ 完整克隆但候选 ref 全被删掉  → EXIT=1（无 base 时退化为"全部可达提交"，是超集）
+ *   ⑥ 事件载荷给的 base 必须真的被用上（这一对样本互相反证）：
+ *      ⑥a 无任何 ref + `GITHUB_EVENT_PATH` 指向 base ⇒ 区间 = base..HEAD ⇒
+ *         base **之前**那条带域名的提交**不该**被报（EXIT=0）；
+ *      ⑥b 同一个仓库、不给事件载荷 ⇒ 退化为"全部可达提交" ⇒ 它**必须**被报（EXIT=1）。
+ *      也就是说：把 `eventPayloadBaseSha` 从候选里删掉，⑥a 立刻变红。
+ *
+ * 子进程带 `SELFTEST_CHILD_ENV=1`（避免自证递归）。
+ *
+ * @returns 自证失败项列表（空 = 通过）。
+ */
+function selfTestCommitRange() {
+  const failures = []
+  const expect = (ok, message) => {
+    if (!ok) failures.push(message)
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'cnrd-selftest-'))
+  // 隔离宿主 git 配置：自证要能在任何机器（含 CI/沙箱）上跑，不依赖 ~/.gitconfig。
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'guard-selftest',
+    GIT_AUTHOR_EMAIL: 'guard-selftest@example.invalid',
+    GIT_COMMITTER_NAME: 'guard-selftest',
+    GIT_COMMITTER_EMAIL: 'guard-selftest@example.invalid',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  }
+  const git = (cwd, args) => execFileSync('git', args, { cwd, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const runGuard = (target, extraEnv) => spawnSync(
+    process.execPath,
+    [fileURLToPath(import.meta.url), '--root', target],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        [SELFTEST_CHILD_ENV]: '1',
+        // 逐样本显式给定，避免宿主环境（真 CI 的 GITHUB_* / 事件载荷）污染判据。
+        GITHUB_EVENT_PATH: '',
+        GITHUB_BASE_REF: '',
+        GITHUB_ACTIONS: '',
+        CI: '',
+        ...extraEnv,
+      },
+    },
+  )
+  /**
+   * 造一个"main → feature/x，两条提交"的合成 origin。
+   * `middleMessage` 非空时，**中间那条**提交的信息带该串（文件内容始终干净 ⇒
+   * 命中的必然是提交信息判据，不是 file 判据）。
+   */
+  const buildOrigin = (dir, middleMessage) => {
+    mkdirSync(dir)
+    git(dir, ['init', '-q', '-b', 'main', '.'])
+    writeFileSync(join(dir, 'README.md'), 'base\n')
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', 'base: init'])
+    git(dir, ['checkout', '-q', '-b', 'feature/x'])
+    writeFileSync(join(dir, 'note.txt'), 'x\n')
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', middleMessage])
+    writeFileSync(join(dir, 'note2.txt'), 'y\n')
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-q', '-m', 'clean: follow-up commit'])
+  }
+  try {
+    const cleanOrigin = join(scratch, 'origin-clean')
+    buildOrigin(cleanOrigin, 'feat: middle commit without any host')
+    const dirtyOrigin = join(scratch, 'origin-dirty')
+    buildOrigin(dirtyOrigin, `deploy: point client at ${syntheticLabel()}.com`)
+
+    const cleanFull = join(scratch, 'clean-full')
+    const dirtyFull = join(scratch, 'dirty-full')
+    const dirtyShallow = join(scratch, 'dirty-shallow')
+    const dirtyOrphan = join(scratch, 'dirty-orphan')
+    git(scratch, ['clone', '-q', '--branch', 'feature/x', `file://${cleanOrigin}`, cleanFull])
+    git(scratch, ['clone', '-q', '--branch', 'feature/x', `file://${dirtyOrigin}`, dirtyFull])
+    git(scratch, ['clone', '-q', '--depth', '1', '--branch', 'feature/x', `file://${dirtyOrigin}`, dirtyShallow])
+    git(scratch, ['clone', '-q', '--branch', 'feature/x', `file://${dirtyOrigin}`, dirtyOrphan])
+    // ⑤：完整克隆但把全部候选 ref（本地分支 + 远程跟踪）删掉 ⇒ resolveCommitBase 返回 null，
+    // 而"不是浅克隆"这条退路必须仍然看见那条带域名的中间提交。
+    git(dirtyOrphan, ['checkout', '-q', '--detach'])
+    for (const ref of git(dirtyOrphan, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes']).split('\n')) {
+      const name = ref.trim()
+      if (name !== '') git(dirtyOrphan, ['update-ref', '-d', name])
+    }
+
+    const cleanCase = runGuard(cleanFull, {})
+    expect(cleanCase.status === 0, `样本①（完整克隆 + 干净提交）应为 EXIT=0，实得 ${cleanCase.status}`
+      + `\n    stderr: ${(cleanCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((cleanCase.stdout ?? '').includes('零命中'), '样本① 完成检查时应打印 `零命中`')
+    expect(!(cleanCase.stderr ?? '').includes('[DOMAIN]'), '样本① 干净历史被判出域名命中')
+
+    const dirtyCase = runGuard(dirtyFull, {})
+    const dirtyCaseAgain = runGuard(dirtyFull, {})
+    expect(dirtyCase.status === 1, `样本②（完整克隆 + 中间提交带域名）应为 EXIT=1，实得 ${dirtyCase.status}`)
+    expect((dirtyCase.stderr ?? '').includes('[DOMAIN]'), '样本② 没有报出提交信息里的域名')
+    expect(!(dirtyCase.stdout ?? '').includes('零命中'), '样本② 有命中时不得打印 `零命中 ✅`')
+    // 同一条样本跑两次：随机语料每次都不同，结论必须一致（防"只对某一次的随机标签生效"）。
+    expect(dirtyCaseAgain.status === dirtyCase.status, '样本② 两次运行的结论不一致（判据依赖了随机语料）')
+
+    const ciShallow = runGuard(dirtyShallow, { GITHUB_ACTIONS: 'true', GITHUB_BASE_REF: 'main' })
+    expect(ciShallow.status === 3, `样本③（depth-1 + CI）应为 EXIT=3（fail-loud），实得 ${ciShallow.status}`
+      + `\n    stdout: ${(ciShallow.stdout ?? '').trim().split('\n').slice(-2).join(' | ')}`)
+    expect(!(ciShallow.stdout ?? '').includes('零命中'), '样本③ 区间不可解析时**不得**打印 `零命中 ✅`（C-4 的失效形态）')
+    expect((ciShallow.stderr ?? '').includes('fetch-depth'), '样本③ 的处置说明里应给出 CI 的修法（fetch-depth: 0）')
+    expect((ciShallow.stderr ?? '').includes('--no-commit-range'), '样本③ 的处置说明里应给出显式逃生门（--no-commit-range）')
+
+    const localShallow = runGuard(dirtyShallow, {})
+    expect(localShallow.status === 3, `样本④（depth-1 + 非 CI）应为 EXIT=3，实得 ${localShallow.status}`)
+    expect(!(localShallow.stdout ?? '').includes('零命中'), '样本④ 区间不可解析时不得打印 `零命中 ✅`')
+
+    const orphanCase = runGuard(dirtyOrphan, {})
+    expect(orphanCase.status === 1, `样本⑤（完整克隆 + 无任何候选 ref）应为 EXIT=1（退化为全部可达提交），实得 ${orphanCase.status}`)
+    expect((orphanCase.stderr ?? '').includes('[DOMAIN]'), '样本⑤ 退化为"全部可达提交"后仍应报出域名')
+
+    // ⑥：事件载荷（GitHub PR 的 pull_request.base.sha）必须真的被用上。
+    // 夹具：base 那条提交**自己**带域名（在区间之外），区间内的提交干净。
+    const eventOrigin = join(scratch, 'origin-event')
+    mkdirSync(eventOrigin)
+    git(eventOrigin, ['init', '-q', '-b', 'main', '.'])
+    writeFileSync(join(eventOrigin, 'README.md'), 'base\n')
+    git(eventOrigin, ['add', '-A'])
+    git(eventOrigin, ['commit', '-q', '-m', 'base: init'])
+    writeFileSync(join(eventOrigin, 'legacy.txt'), '1\n')
+    git(eventOrigin, ['add', '-A'])
+    git(eventOrigin, ['commit', '-q', '-m', `old: legacy client at ${syntheticLabel()}.com`])
+    const eventBaseSha = git(eventOrigin, ['rev-parse', 'HEAD']).trim()
+    git(eventOrigin, ['checkout', '-q', '-b', 'feature/x'])
+    writeFileSync(join(eventOrigin, 'current.txt'), '2\n')
+    git(eventOrigin, ['add', '-A'])
+    git(eventOrigin, ['commit', '-q', '-m', 'clean: current work'])
+    writeFileSync(join(eventOrigin, 'later.txt'), '3\n')
+    git(eventOrigin, ['add', '-A'])
+    git(eventOrigin, ['commit', '-q', '-m', 'clean: follow-up'])
+    const eventClone = join(scratch, 'event-orphan')
+    git(scratch, ['clone', '-q', '--branch', 'feature/x', `file://${eventOrigin}`, eventClone])
+    git(eventClone, ['checkout', '-q', '--detach'])
+    for (const ref of git(eventClone, ['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes']).split('\n')) {
+      const name = ref.trim()
+      if (name !== '') git(eventClone, ['update-ref', '-d', name])
+    }
+    const eventPath = join(scratch, 'event.json')
+    writeFileSync(eventPath, JSON.stringify({ pull_request: { base: { sha: eventBaseSha } } }))
+
+    const eventCase = runGuard(eventClone, { GITHUB_EVENT_PATH: eventPath, GITHUB_ACTIONS: 'true', GITHUB_BASE_REF: 'main' })
+    expect(eventCase.status === 0, `样本⑥a（事件载荷给了 base）应为 EXIT=0（base 之前的提交在区间之外），实得 ${eventCase.status}`
+      + `\n    stderr: ${(eventCase.stderr ?? '').trim().split('\n').slice(0, 3).join(' | ')}`)
+    expect(!(eventCase.stderr ?? '').includes('[DOMAIN]'), '样本⑥a 把 base 之前那条提交也报了 ⇒ 事件载荷给的 base 没被用上')
+    const noEventCase = runGuard(eventClone, {})
+    expect(noEventCase.status === 1, `样本⑥b（同一仓库但不给事件载荷）应退化为"全部可达提交"并 EXIT=1，实得 ${noEventCase.status}`)
+    expect((noEventCase.stderr ?? '').includes('[DOMAIN]'), '样本⑥b 退化扫描没有报出 base 之前那条带域名的提交（夹具失去判别力）')
+  } catch (error) {
+    failures.push(`区间判据自证的夹具构建失败：${error?.message ?? String(error)}`)
+  } finally {
+    try {
+      rmSync(scratch, { recursive: true, force: true })
+    } catch {
+      // 清理失败不影响判据结论
+    }
+  }
+  return failures
+}
+
+/**
+ * 解析"提交信息区间"的 base（2026-09-23 审计 R3-C C-4 重写）。解析不到返回 null。
+ *
+ * 为什么重写：这条判据原先只有"`GITHUB_BASE_REF` 派生 + 主线名"两条路径，而 CI 的
+ * gate checkout 是 depth-1（`ci.yml` 的 checkout 没有 `fetch-depth`）⇒ 四个候选
+ * **全部解析失败**，于是它静默退化成"只看 HEAD"（PR 上就是那条 merge commit），
+ * 中间那些提交信息里的域名一个都看不见。实测同一份历史：完整克隆 EXIT=1、
+ * depth-1 克隆 EXIT=0 且打印 `零命中 ✅`。
+ *
+ * 解析顺序（前一条能解析就用）：
+ *   1. **GitHub 事件载荷里的 sha**（PR = `pull_request.base.sha`，push = `before`）。
+ *      它不依赖 ref 是否存在，只要对象在本地（`fetch-depth: 0` 保证在）——这是唯一
+ *      能在 PR 上稳定拿到 base 的路径：PR 检出的 ref 是 `refs/pull/N/merge`，
+ *      `origin/<base>` 往往根本不存在。
+ *   2. `GITHUB_BASE_REF` 派生的四个 ref 形态。
+ *   3. 常见主线 ref（origin/master / origin/main / master / main）。
+ *
+ * @param root - 仓库根。
+ * @param notes - 输出用的提示收集器。
+ * @returns 可用的 base（commit-ish）或 null。
+ */
+function resolveCommitBase(root, notes) {
   const candidates = []
+  const eventSha = eventPayloadBaseSha(notes)
+  if (eventSha !== null) candidates.push(eventSha)
   const envBase = process.env.GITHUB_BASE_REF?.trim()
-  if (envBase) candidates.push(`origin/${envBase}`, envBase)
+  if (envBase) {
+    candidates.push(`origin/${envBase}`, `refs/remotes/origin/${envBase}`, envBase, `refs/heads/${envBase}`)
+  }
   candidates.push('origin/master', 'origin/main', 'master', 'main')
-  let base = null
   for (const candidate of candidates) {
     try {
       execFileSync('git', ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`], { cwd: root, stdio: 'ignore' })
-      base = candidate
-      break
+      return candidate
     } catch {
       // 继续找下一个候选
     }
   }
+  return null
+}
 
+/**
+ * 从 GitHub 事件载荷里取 base sha（PR: `pull_request.base.sha`；push: `before`）。
+ * 读不到 / 形状不合法 / 全零（新建分支的 push）都返回 null，由调用方继续走别的候选。
+ * @param notes - 输出用的提示收集器。
+ * @returns sha 字符串或 null。
+ */
+function eventPayloadBaseSha(notes) {
+  const path = process.env.GITHUB_EVENT_PATH?.trim()
+  if (!path) return null
+  let payload
+  try {
+    payload = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    notes.push(`读不到 GitHub 事件载荷（${path}）⇒ 该路径这次不能提供 base`)
+    return null
+  }
+  for (const sha of [payload?.pull_request?.base?.sha, payload?.before]) {
+    if (typeof sha !== 'string') continue
+    const value = sha.trim()
+    if (!/^[0-9a-f]{7,40}$/u.test(value) || /^0+$/u.test(value)) continue
+    return value
+  }
+  return null
+}
+
+/**
+ * 是不是浅检出。`true`/`false`，判不出来返回 `null`（调用方按"不能证明完整"处理）。
+ * @param root - 仓库根。
+ * @returns 见上。
+ */
+function isShallowRepository(root) {
+  try {
+    return execFileSync('git', ['rev-parse', '--is-shallow-repository'], { cwd: root, encoding: 'utf8' }).trim() === 'true'
+  } catch {
+    return null
+  }
+}
+
+/** `git log` 的三字段格式（sha / 摘要 / 正文），\0 分隔。 */
+const COMMIT_LOG_FORMAT = '--format=%H%x00%s%x00%B%x00'
+
+/**
+ * 提交信息判据：返回 `{ findings, fatal }`。
+ *
+ * `fatal` 非 null = **这条判据没能完成**。"算不出范围"必须与"范围内没问题"分开
+ * （2026-09-17 编排器 `--changed` 假绿是同一条原则）；调用方把 fatal 变成 fail-loud
+ * 的退出码（3），而不是让 `零命中 ✅` 照打。
+ *
+ * 没有 base 时的三条处置（判据是"能不能证明覆盖了所有可能带域名的提交"）：
+ *   - **非浅检出** ⇒ 扫**从 HEAD 可达的全部提交**。这是任何 `base..HEAD` 的超集，
+ *     只会更严、不会漏检（代价是多扫一遍历史）；
+ *   - **浅检出（或深浅未知）** ⇒ fatal：历史根本不在本地，任何"零命中"都是假的。
+ *     CI 的处置 = gate 的 checkout 补 `fetch-depth: 0`（2026-09-23 起已加）；
+ *     本地 = `git fetch --unshallow`；
+ *   - 只想扫文件内容 = 显式传 `--no-commit-range`，**不是**静默降级。
+ *
+ * @param root - 仓库根。
+ * @param unmasked - 是否原样打印 host（默认脱敏）。
+ * @param notes - 输出用的提示收集器。
+ * @returns `{ findings, fatal }`（fatal 为 null = 判据完成）。
+ */
+function commitRangeFindings(root, unmasked, notes) {
+  const findings = []
   const collect = (args, label) => {
     let raw = ''
     try {
       raw = execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28 })
-    } catch {
-      notes.push(`提交信息检查跳过：\`git ${args.join(' ')}\` 不可用（可能不是 git 工作区或 base 不存在）`)
-      return 0
+    } catch (error) {
+      return { error: `\`git ${args.join(' ')}\` 执行失败：${error?.message ?? String(error)}` }
     }
     const parts = raw.split('\0')
     let commits = 0
@@ -466,24 +1088,43 @@ function commitRangeFindings(root, unmasked, notes) {
       }
     }
     if (findings.length === 0) notes.push(`提交信息区间 ${label} 已检查（${commits} 条提交，0 命中）`)
-    return commits
+    return { commits }
   }
 
+  const base = resolveCommitBase(root, notes)
   if (base !== null) {
     const range = `${base}..HEAD`
-    const count = collect(['log', '--format=%H%x00%s%x00%B%x00', range], range)
+    const ranged = collect(['log', COMMIT_LOG_FORMAT, range], range)
+    if (ranged.error !== undefined) return { findings, fatal: ranged.error }
     // `base == HEAD`（CI 上 push 到 master 时 actions/checkout 就是这个形态）⇒ 区间为空，
-    // 但"刚推上去的那条提交"正需要检查 ⇒ CI 下退化为只查 HEAD 一条。
-    if (count === 0 && (process.env.GITHUB_ACTIONS || process.env.CI)) {
+    // 但"刚推上去的那条提交"正需要检查 ⇒ CI 下追加检查 HEAD 一条。
+    if (ranged.commits === 0 && (process.env.GITHUB_ACTIONS || process.env.CI)) {
       notes.push(`base(${base}) 与 HEAD 相同（push 到主线的典型形态）⇒ 追加检查 HEAD 这一条提交信息`)
-      collect(['log', '-1', '--format=%H%x00%s%x00%B%x00', 'HEAD'], 'HEAD~0')
+      const single = collect(['log', '-1', COMMIT_LOG_FORMAT, 'HEAD'], 'HEAD~0')
+      if (single.error !== undefined) return { findings, fatal: single.error }
     }
-    return findings
+    return { findings, fatal: null }
   }
 
-  notes.push('取不到 base（origin/master 等均不可用）⇒ 退化为只检查最近 1 条提交信息')
-  collect(['log', '-1', '--format=%H%x00%s%x00%B%x00', 'HEAD'], 'HEAD~0')
-  return findings
+  const shallow = isShallowRepository(root)
+  if (shallow === false) {
+    notes.push('取不到 base，但该检出不是浅克隆 ⇒ 退化为扫描**从 HEAD 可达的全部提交**'
+      + '（任何区间的超集，只会更严不会漏检）')
+    const all = collect(['log', COMMIT_LOG_FORMAT, 'HEAD'], 'HEAD 可达的全部提交')
+    if (all.error !== undefined) return { findings, fatal: all.error }
+    return { findings, fatal: null }
+  }
+
+  return {
+    findings,
+    fatal: '取不到提交信息区间的 base，且该检出是浅克隆'
+      + `（shallow=${shallow === null ? '未知（判不出来）' : 'true'}）⇒ 历史根本不在本地，`
+      + '"零命中"会是假的。\n'
+      + '  处置（三选一）：① CI 里给 gate 的 actions/checkout 补 `fetch-depth: 0`'
+      + '（本仓 2026-09-23 起已有，这条就是防它被改回去的判据）；'
+      + '② 本地浅克隆执行 `git fetch --unshallow`；'
+      + '③ 确实只需要扫文件内容时显式传 `--no-commit-range`（跳过提交信息判据）。',
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,6 +1132,7 @@ function commitRangeFindings(root, unmasked, notes) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2)
+let explicitRoot = false
 let root = resolve(process.cwd())
 let unmasked = false
 let json = false
@@ -505,6 +1147,7 @@ for (let index = 0; index < argv.length; index += 1) {
       process.exit(2)
     }
     root = resolve(value)
+    explicitRoot = true
     index += 1
   } else if (arg === '--unmasked') unmasked = true
   else if (arg === '--json') json = true
@@ -516,48 +1159,257 @@ for (let index = 0; index < argv.length; index += 1) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 扫描根：**必须是仓库根**（2026-09-23 第四轮审计 R4-A-1）
+//
+// 旧实现：`let root = resolve(process.cwd())`，且全文没有"根必须是仓库根"的断言
+// （`grep -n "show-toplevel"` 零命中）。后果：在 `packages/` 这类子目录里跑**同一个脚本**，
+// 扫描面被静默缩到那棵子树，然后打印 `零命中 ✅` 并 EXIT=0 —— 同一批守卫里，
+// `check-no-leftover-mutants.mjs`（子目录 ⇒ EXIT=2）、`check-migration-range.mjs`
+// （找不到迁移目录 ⇒ EXIT=1）、`check-doc-claims.mjs`（扫描面为 0 ⇒ EXIT=1）都 fail-loud，
+// 唯独承载**铁律 0**（失效代价不可逆）的这一个不响。
+//
+// 现在的口径（两条判据合起来才既不假绿、又不误伤夹具）：
+//   ① **默认根不是 cwd，而是仓库根**：从脚本自身位置上溯（`git -C <脚本目录> rev-parse
+//      --show-toplevel`），拿不到 git 顶层时回落 `<脚本目录>/..`。所以"从任意 cwd 跑"
+//      都不会把扫描面缩到 cwd。
+//   ② **解析出的根必须就是仓库根**：能判出 git 顶层且与 root 不等 ⇒ 退出码 2 并点名
+//      "实际根 / 仓库根"。另加一条同源判据：**调用者的 cwd 若在某个工作树里却不是该工作树
+//      的根**（即"在子目录里跑"）⇒ 同样退出码 2 —— 拒绝把"我其实只想扫这一部分"与
+//      "全仓都扫过了"混成同一个 `零命中 ✅`。
+//      `--root` 的显式语义保持不变（它服务自证/合成树夹具）：`--root` 时不看 cwd，
+//      但**仍受第 ② 条约束** —— 夹具本身是 git 仓库却指到它的子目录，同样当场红。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @returns 该目录所属工作树的顶层（绝对路径）；不是 git 工作树时返回 null。 */
+function gitToplevel(dir) {
+  try {
+    const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return top === '' ? null : resolve(top)
+  } catch {
+    return null
+  }
+}
+
+if (!explicitRoot) {
+  const scriptDir = dirname(fileURLToPath(import.meta.url))
+  root = gitToplevel(scriptDir) ?? resolve(scriptDir, '..')
+}
+
+/** 统一的"根不对"处置：点名实际根与期望根，退出码 2（前置失败，不是"有命中"）。 */
+function refuseWrongRoot(actual, expected, how) {
+  console.error(
+    `check-no-real-domains: 扫描根不是仓库根（${how}）—— 实际 root=${actual}，仓库根=${expected}。\n`
+    + '  扫描面 = 该根下的 `git ls-files --cached --others --exclude-standard`；根指错会把'
+    + '"全仓扫过了"与"只扫了一棵子树"混成同一个 `零命中 ✅`（本守卫承载铁律 0，失效不可逆，'
+    + '所以这里 fail-loud）。\n'
+    + `  处置：cd ${expected} && node scripts/check-no-real-domains.mjs`
+    + '（确实要扫别的目录时才用 --root 显式指定）。',
+  )
+  process.exit(2)
+}
+
+{
+  const rootTop = gitToplevel(root)
+  if (rootTop !== null && rootTop !== root) refuseWrongRoot(root, rootTop, '解析出的根指向了工作树的子目录')
+  if (!explicitRoot) {
+    const cwdTop = gitToplevel(process.cwd())
+    if (cwdTop !== null && resolve(process.cwd()) !== cwdTop) {
+      refuseWrongRoot(resolve(process.cwd()), cwdTop, '在仓库的子目录里运行')
+    }
+  }
+}
+
+/**
+ * 自证子进程标记：`selfTestCommitRange()` 会 spawn 本脚本自己（端到端判据必须钉在
+ * 退出码与那句 `零命中 ✅` 上），没有这个标记就会无限递归。**它只跳过"区间判据"
+ * 的那段自证，不影响任何域名判据**，而且守卫会在输出里明说这一次自证被跳过
+ * （见下面 notes 里的那条）—— 不允许静默。
+ */
+const SELFTEST_CHILD_ENV = 'CHECK_NO_REAL_DOMAINS_SELFTEST_CHILD'
+const selftestChild = process.env[SELFTEST_CHILD_ENV] === '1'
+/**
+ * 扫描根自证的子进程标记（R4-A N4）：正例子进程会走到自证这一段，没有它就会无穷递归。
+ * **只跳过"根断言的那段自证"**，根断言本身在每个子进程里照常执行。
+ */
+const ROOT_SELFTEST_CHILD_ENV = 'CHECK_NO_REAL_DOMAINS_ROOT_SELFTEST_CHILD'
+const rootSelftestChild = process.env[ROOT_SELFTEST_CHILD_ENV] === '1'
+
 const selfTestFailures = selfTest()
+if (!selftestChild) selfTestFailures.push(...selfTestScanSurface())
+if (!selftestChild) selfTestFailures.push(...selfTestCommitRange())
+// 根断言的自证：合成夹具的子进程用 --root 指向夹具（根断言在那些进程里照常执行），
+// 所以这里只在"非子进程"时跑，避免进程数放大；用独立标记防正例子进程递归。
+if (!selftestChild && !rootSelftestChild) selfTestFailures.push(...selfTestRootAssertion())
 if (selfTestFailures.length > 0) {
   for (const failure of selfTestFailures) console.error(`  [SELFTEST] ${failure}`)
   console.error('\n守卫自证失败 ⇒ 守卫本身不可信（可能已被改坏或白名单被滥用）。修好它再谈扫描结果。')
   process.exit(1)
 }
 if (selftestOnly) {
-  console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿）✅')
+  console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿、'
+    + '扫描面八样本（含软链两个方向与含 NUL 的二进制）、'
+    + `${selftestChild ? '区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '提交信息区间判据五样本'}、`
+    + `${selftestChild || rootSelftestChild
+      ? '扫描根断言自证因 ' + SELFTEST_CHILD_ENV + '/' + ROOT_SELFTEST_CHILD_ENV + '=1 跳过'
+      : '扫描根断言三样本（子目录两负例 + 仓库根正例）'}）✅`)
   process.exit(0)
 }
 
 const notes = []
+if (selftestChild) {
+  notes.push(`自证子进程（${SELFTEST_CHILD_ENV}=1）⇒ 本次跳过"提交信息区间判据"的那段自证；域名判据不受影响`)
+}
 const findings = []
 let scanned = 0
+/** 按**链接目标字符串**扫过的软链条数（git 存的就是那个字符串）。 */
+let symlinksScanned = 0
+/** 没有可扫文本内容的条目（子模块 gitlink / 目录 / 读失败）—— 逐条列出，不静默跳过。 */
+const nonRegularSkipped = []
+/** 含 NUL 因而按**字节安全**方式(latin1 + NUL→空格)扫描的文件数（R5-D-16 前是静默跳过）。 */
+let binaryScanned = 0
+/** `BINARY_SCAN_ACCEPTED` 里本次真的命中的条目（死条目对账用）。 */
+const binaryAcceptedHits = new Set()
+// 体积：**刻意不做**"超过 N MiB 就跳过"的闸门（2026-09-23 复审 F5 第 4 条）。理由：静默跳过
+// 大文件 = 新的假绿（本守卫这两轮修的就是"静默缩小扫描面"）；而整份读入的代价实测可接受
+// （复审用它自己造的 400 MB 未跟踪文本实测 EXIT=0 / 2.6 s）。真的需要处理超大文件时，
+// 正确做法是流式/分块读，不是跳过。
 for (const file of trackedFiles(root)) {
   const absolute = resolve(root, file)
   let text
+  let viaLink = false
+  /** 本次内容是**含 NUL 的二进制**（latin1 + NUL→空格 读法）；命中要过 BINARY_SCAN_ACCEPTED。 */
+  let viaBinary = false
+  // 先 lstat：软链**不跟随**（见文件头「非普通文件（软链）的口径」）。`readFileSync` 会读穿
+  // 到目标 ⇒ 未跟踪软链指向被忽略文件时把"永远提交不进去的内容"误判成泄漏。
+  let entry
   try {
-    text = readFileSync(absolute, 'utf8')
+    entry = lstatSync(absolute)
   } catch {
-    continue // 子模块 gitlink / 已被删除但仍在索引里
+    nonRegularSkipped.push(`${file}（lstat 失败：已删除但仍留在索引里？）`)
+    continue
   }
-  if (text.includes('\0')) continue // 二进制
+  try {
+    if (entry.isSymbolicLink()) {
+      text = readlinkSync(absolute) // 链接目标字符串 = git 真正会存储的 blob 内容
+      viaLink = true
+      symlinksScanned += 1
+    } else if (entry.isFile()) {
+      const bytes = readFileSync(absolute)
+      if (bytes.includes(0)) {
+        // **二进制也要扫**（2026-09-23 第五轮审计 R5-D-16）。
+        //
+        // 旧实现:`if (text.includes('\0')) continue` —— 对**含 NUL 的已跟踪文本/二进制
+        // 文件静默跳过**(本仓 HEAD 实测 39 个条目、3.2 MB,含 `assets/**` 截图与
+        // `docs/evidence/**` 的 PNG)。独立复现:同一份内容不含 NUL ⇒ EXIT=1;把 NUL 塞进去
+        // ⇒ EXIT=0 + `零命中 ✅` —— 也就是说"往文件里插一个 0 字节"就能把铁律 0 的判据
+        // 关掉,而"跳过"这件事在输出里一个字都不提。
+        //
+        // 现在:按**字节安全**的方式扫 —— latin1 解码(1 字节 = 1 字符,偏移与行号不变)、
+        // 把 NUL 换成空格(避免把二进制当成"行"来切),再走同一套 candidate 判定。
+        // 域名/主机名都是 ASCII,这种读法不会漏(实测本仓 39 个二进制条目只多出 1 条
+        // 候选,且是可判定的一类)。跳过面因此**归零**,不再需要"跳过清单"。
+        text = bytes.toString('latin1').replace(/\0/gu, ' ')
+        binaryScanned += 1
+        viaBinary = true
+      } else {
+        text = bytes.toString('utf8')
+      }
+    } else {
+      nonRegularSkipped.push(`${file}（${entry.isDirectory() ? '目录/gitlink' : '非普通文件'}）`)
+      continue
+    }
+  } catch (error) {
+    nonRegularSkipped.push(`${file}（读取失败：${error?.code ?? error?.message ?? '未知原因'}）`)
+    continue
+  }
   scanned += 1
   for (const hit of candidatesInText(text, file)) {
     if (isAllowedCandidate(hit)) continue
+    if (viaBinary) {
+      const accepted = BINARY_SCAN_ACCEPTED.find(entry => entry.host === hit.host.toLowerCase()
+        && entry.path === file)
+      if (accepted !== undefined) {
+        binaryAcceptedHits.add(accepted)
+        continue
+      }
+    }
     findings.push({
-      scope: 'file',
+      scope: viaBinary ? 'binary' : 'file',
       where: `${relative(root, absolute)}:${hit.line}`,
       host: unmasked ? hit.host : maskHost(hit.host),
-      why: hit.why,
+      why: viaLink ? `${hit.why}（软链目标字符串）` : (viaBinary ? `${hit.why}（二进制字节流）` : hit.why),
       line: hit.line,
     })
   }
 }
 
-if (!skipCommitRange) findings.push(...commitRangeFindings(root, unmasked, notes))
+// 特判必须可见（不得静默缩小扫描面）：软链走了"按链接目标扫"的分支就说明出来。
+if (symlinksScanned > 0) {
+  notes.push(`非普通文件：${symlinksScanned} 个**软链**按链接目标字符串扫描（不跟随目标；git 存的就是链接本身）`)
+}
+if (binaryAcceptedHits.size > 0) {
+  notes.push(`二进制扫描面：${binaryAcceptedHits.size} 条**已登记**的已知噪声命中被放行`
+    + '（BINARY_SCAN_ACCEPTED，逐条写明理由；未登记的一律判红）')
+}
+{
+  // 只在**扫的就是本仓根**时对账：`--root <合成夹具>` 的扫描面里当然没有这些文件，
+  // 那不是"死条目"（自证夹具的七/五个样本都走 --root）。特判必须可见。
+  const repoRoot = gitToplevel(dirname(fileURLToPath(import.meta.url)))
+  const isRepoScan = repoRoot !== null && resolve(root) === repoRoot
+  const dead = isRepoScan ? BINARY_SCAN_ACCEPTED.filter(entry => !binaryAcceptedHits.has(entry)) : []
+  if (!isRepoScan) {
+    notes.push('扫描根不是本仓根 ⇒ BINARY_SCAN_ACCEPTED 的**死条目对账**本次未生效'
+      + '（它按仓库相对路径登记，只在扫本仓时有意义）')
+  }
+  if (dead.length > 0) {
+    console.error('\ncheck-no-real-domains: BINARY_SCAN_ACCEPTED 有 '
+      + `${dead.length} 条**死条目**（本次扫描里不再命中任何文件）：\n`
+      + dead.map(entry => `  - ${entry.path} ← ${entry.host}（${entry.why}）`).join('\n')
+      + '\n  处置：该文件/该字节流已变（或已被文本判据覆盖）⇒ 登记必须同步收窄，'
+      + '留下它就是一条可复用的豁免洞。')
+    process.exitCode = 1
+  }
+}
+if (binaryScanned > 0) {
+  notes.push(`扫描面：${binaryScanned} 个**含 NUL 的二进制**条目按字节安全方式扫描`
+    + '（latin1 解码 + NUL→空格，偏移与行号不变；旧实现对它们静默跳过 ⇒ R5-D-16）')
+}
+if (nonRegularSkipped.length > 0) {
+  const shown = nonRegularSkipped.slice(0, 10)
+  notes.push(`非普通文件：${nonRegularSkipped.length} 个条目没有可扫的文本内容，**未扫**（逐条列出，不是静默跳过）：`
+    + shown.join('、')
+    + (nonRegularSkipped.length > shown.length ? ` … 另有 ${nonRegularSkipped.length - shown.length} 个` : ''))
+}
+
+// 提交信息判据："没能完成"（fatal）与"有命中"是两种不同的红 —— 前者绝不能被
+// 当成"零命中"（2026-09-23 审计 R3-C C-4 的失效形态就是这条路径静默降级）。
+let commitFatal = null
+if (skipCommitRange) {
+  notes.push('提交信息判据被 --no-commit-range 显式跳过（只扫文件内容）')
+} else {
+  const commitScan = commitRangeFindings(root, unmasked, notes)
+  findings.push(...commitScan.findings)
+  commitFatal = commitScan.fatal
+}
 
 if (json) {
-  console.log(JSON.stringify({ root, scanned, findings, notes }, null, 2))
+  console.log(JSON.stringify({
+    root,
+    scanned,
+    findings,
+    notes,
+    commitRange: commitFatal === null ? 'checked' : 'incomplete',
+    scanSurface: scanned === 0 ? 'empty' : 'checked',
+    binaryScanned,
+  }, null, 2))
 } else {
-  console.log(`check-no-real-domains: 扫描 ${scanned} 个已跟踪文件（root=${root}）`)
+  console.log(`check-no-real-domains: 扫描 ${scanned} 个文件`
+    + `${binaryScanned > 0 ? `（其中 ${binaryScanned} 个含 NUL 的二进制按字节安全方式扫描）` : ''}`
+    + `（已跟踪 + 未跟踪未忽略；root=${root}）`)
   for (const note of notes) console.log(`  · ${note}`)
 }
 
@@ -571,7 +1423,30 @@ if (findings.length > 0) {
     + '环境变量、或私有仓 `picoaide/channels`）；确属第三方依赖/文档的公开域名，才在 '
     + '`scripts/check-no-real-domains.mjs` 的 `ALLOWED_DOMAINS` 里**按分组登记理由**。'
     + '客户自有域名与被投递/测试环境主机名一律不得登记。')
-  process.exit(1)
 }
+
+if (commitFatal !== null) {
+  console.error(`\ncheck-no-real-domains: 提交信息判据**没能完成**（这不等于"零命中"）：\n  ${commitFatal}`)
+}
+
+// 扫描面为 0 = **判据没跑**，不是"零命中"（2026-09-23 三轮审计 R3-C C-5 的第③条：
+// 空 git 仓库旧实现打印「扫描 0 个已跟踪文件」+「零命中 ✅」并 EXIT=0）。
+// 与 C-4 的提交信息判据同一原则：算不出范围 / 扫不到文件，都必须与"范围内没问题"区分。
+const emptySurface = scanned === 0
+if (emptySurface) {
+  console.error(
+    '\ncheck-no-real-domains: 扫描面为 **0 个文件**（root=' + root + '）—— 拒绝把"什么都没扫到"当成"零命中"。\n'
+    + '  扫描面 = `git ls-files --cached --others --exclude-standard`（已跟踪 + 未跟踪且未被忽略）。\n'
+    + '  落到这里的常见原因：① --root 指到了空仓库/空目录（或不是仓库根）；'
+    + '② 检出里一个文本文件都没有（二进制/子模块 gitlink 不算）；\n'
+    + '  ③ CI 的 gate checkout 缺 `fetch-depth: 0`（本仓 ci.yml 已带，这条是防它被改回去的判据）。\n'
+    + '  处置：确认 root 是仓库根、且工作树里真的有文件；确实只需要扫文件内容时加 `--no-commit-range`。',
+  )
+}
+
+if (findings.length > 0) process.exit(1)
+// 判据没跑完 ⇒ 不许打印"零命中 ✅"（C-4 的失效形态就是这一句 + exit 0）。
+if (commitFatal !== null) process.exit(3)
+if (emptySurface) process.exit(3)
 
 if (!json) console.log('check-no-real-domains: 零命中 ✅')

@@ -368,16 +368,3 @@ func SetUsageAppID(db *sql.DB, id int64, appID string) error {
 	_, err := db.Exec(`UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
 	return err
 }
-
-// SetUsageAppIDCtx 是 SetUsageAppID 的 context 版本（网关在请求上下文里调用它）。
-func SetUsageAppIDCtx(ctx context.Context, db *sql.DB, id int64, appID string) error {
-	if id <= 0 {
-		return nil
-	}
-	label := SanitizeUsageAppID(appID)
-	if label == "" {
-		return nil
-	}
-	_, err := db.ExecContext(ctx, `UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
-	return err
-}

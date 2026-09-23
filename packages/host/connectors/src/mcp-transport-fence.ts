@@ -18,6 +18,28 @@
  * since 0.1.6 — an optional `authProvider`), so the fence is installed on the
  * transport CLASS before any instance exists.
  *
+ * ## The second half: the outbound URL policy (audit 2026-09-23, CN-1)
+ *
+ * A redirect fence alone left the seam half hard-wired: the wrapper received
+ * the URL and threw it away, so any request the SDK decided to make — including
+ * the one a 401 names in `WWW-Authenticate: Bearer resource_metadata="…"` — was
+ * really performed, carrying the transport's `requestInit` headers (the
+ * connector's `Authorization: Bearer <access_token>` or its static API key), no
+ * matter what `outbound.ts` thought of that URL. Measured, not inferred: a
+ * resource metadata URL the policy REFUSED (`0.0.0.0/8`) received a real GET
+ * with the connector's headers on it.
+ *
+ * Every request through {@link createMcpOutboundFetch} now passes four gates:
+ * the outbound URL policy (`assertOutboundUrlAllowed`, the same function
+ * `auth.ts` uses for our own discovery chain), the DNS resolution gate
+ * (`CN-9`), an origin scope registered by the connector's OAuth provider (so
+ * the resource server cannot steer the flow to a host the definition never
+ * named), and header hygiene (the connector's baked credential headers stay on
+ * the transport's own origin). A refusal throws
+ * {@link OutboundUrlBlockedError} — fail-loud, never a silent downgrade — and
+ * the behavioural verification below proves each gate is live before the fence
+ * reports itself installed.
+ *
  * ## How the fence is installed, and why it changed in SDK v2
  *
  * Until upstream 0.1.5 the SDK's transport kept `_requestInit` / `_fetch` /
@@ -84,7 +106,14 @@
  */
 import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
+import { DEFAULT_HOST_LOCALE, hostT, stepLabel, type HostLocale } from './host-copy.ts'
+import {
+  allowedOutboundOriginsOf,
+  assertOutboundUrlAllowed,
+  assertResolvedOutboundAddressAllowed,
+  originOfUrl,
+  OutboundUrlBlockedError,
+} from './outbound.ts'
 import type { FetchLike } from '@modelcontextprotocol/client'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 
@@ -139,6 +168,19 @@ const REQUEST_INIT_FIELD = '_requestInit'
 const FETCH_WITH_INIT_FIELD = '_fetchWithInit'
 const FETCH_FIELD = '_fetch'
 /**
+ * The transport's own URL (an own class field in v2). The fence needs it to
+ * tell "a request to MY MCP server" from "a request to a host the resource
+ * server named"; a build that renames it fails the installation probe instead
+ * of silently losing the same-origin rule.
+ */
+const URL_FIELD = '_url'
+/**
+ * The OAuth provider the transport was constructed with. It carries the
+ * allowed-origin scope (`outbound.ts`), which is the only trusted answer to
+ * "which hosts may this connector's credential reach".
+ */
+const OAUTH_PROVIDER_FIELD = '_oauthProvider'
+/**
  * Outbound entry points of the v2 streamable-http transport.
  *
  * Every request the SDK can make starts in one of these (`Client.connect()`
@@ -154,6 +196,18 @@ const FENCED_METHODS = ['start', 'send', 'terminateSession', 'resumeStream', 'fi
 const PROBE_HEADER = 'x-picoaide-transport-fence'
 /** Never contacted: the probe always supplies its own recording `fetch`. */
 const PROBE_URL = 'http://127.0.0.1:1/mcp'
+/**
+ * A URL the SYNTAX policy refuses (`0.0.0.0/8`), used by the installation probe
+ * to prove the policy half of the fence is live. Never contacted either: the
+ * probe passes only when the recorder was NOT reached.
+ */
+const POLICY_REFUSED_PROBE_URL = 'http://0.0.0.0:1/mcp'
+/**
+ * A DIFFERENT origin from {@link PROBE_URL} (different port) that the policy
+ * allows, used to prove the connector's baked credential headers do not travel
+ * cross-origin. The recorder answers; no socket exists.
+ */
+const CROSS_ORIGIN_PROBE_URL = 'http://127.0.0.1:2/rm'
 
 type Proto = Record<string, unknown>
 
@@ -500,6 +554,15 @@ let targetWarning: string | null = null
 let targetMismatch = false
 /** One warning per install: connectors re-register on every session change. */
 let targetWarningLogged = false
+/**
+ * Locale of the last install request, read when a fenced request is refused.
+ *
+ * Deliberately mutable and read at REQUEST time: the connector plugin resolves
+ * the desktop locale per registration, and a user who switches language must
+ * see the next refusal in the new language (module-level frozen copy is the bug
+ * class documented in `client/status-label.ts`).
+ */
+let fenceLocale: HostLocale = DEFAULT_HOST_LOCALE
 
 function protoOf(): Proto {
   return StreamableHTTPClientTransport.prototype as unknown as Proto
@@ -507,7 +570,9 @@ function protoOf(): Proto {
 
 /**
  * Rewrite one live transport's own request fields so no request it makes can
- * follow a redirect.
+ * follow a redirect — and so no request it makes can leave the outbound policy
+ * or hand this connector's credential headers to a host the connector never
+ * registered (audit 2026-09-23, CN-1).
  *
  * This is the v2 seam. The SDK declares `_requestInit` / `_fetch` /
  * `_fetchWithInit` as class fields, so each instance carries them as OWN data
@@ -516,28 +581,57 @@ function protoOf(): Proto {
  * interception point left, and it is durable: the fire-and-forget SSE open, the
  * reconnection timer and the 401/auth retries read the SAME fields later.
  *
+ * Three fields, three jobs (see {@link createMcpOutboundFetch} for the wrapper):
+ *
+ *  - `_requestInit` ← `redirect: 'manual'` (every POST/DELETE spread);
+ *  - `_fetch`       ← policy + scope + redirect (POST/DELETE and the SSE GET;
+ *                      every request it carries targets the transport's own URL);
+ *  - `_fetchWithInit` ← the same, PLUS the connector's baked headers merged back
+ *                      in for same-origin requests only. The SDK's own
+ *                      `createFetchWithInit` would bake `requestInit.headers`
+ *                      (the connector's `Authorization: Bearer …` / static API
+ *                      key) into EVERY request that closure makes — including
+ *                      the RFC 9728 / RFC 8414 discovery requests the 401 path
+ *                      aims at a URL the RESOURCE server supplied. Rebuilding
+ *                      the closure here is what keeps those headers on the MCP
+ *                      origin.
+ *
  * Idempotent: {@link HARDENED} marks an instance that was already rewritten, so
  * concurrent `send()` calls cannot build a wrapper tower.
  *
  * @param transport - the live transport instance (its `this`).
+ * @param locale - resolves the locale of the messages the wrapper may throw, at
+ *   throw time (never frozen at install time).
  * @throws {TypeError} when a field exists but rejects the write (a getter-only
  *   accessor in a future SDK build) — the caller surfaces that as a failed
  *   verification, never as an unfenced connection.
  */
-function hardenTransport(transport: object): void {
+function hardenTransport(transport: object, locale: () => HostLocale = () => DEFAULT_HOST_LOCALE): void {
   const fields = transport as Record<string | symbol, unknown>
   if (fields[HARDENED] === true) return
-  fields[REQUEST_INIT_FIELD] = forceManual(fields[REQUEST_INIT_FIELD] as RequestInit | undefined)
-  const withInit = fields[FETCH_WITH_INIT_FIELD]
-  fields[FETCH_WITH_INIT_FIELD] = typeof withInit === 'function'
-    ? forcedRedirectFetch(withInit as FetchLike)
-    : defaultFetchFence()
+  const requestInit = forceManual(fields[REQUEST_INIT_FIELD] as RequestInit | undefined)
+  fields[REQUEST_INIT_FIELD] = requestInit
+  const ownUrl = (): unknown => fields[URL_FIELD]
+  // Where the SDK's requests really go: the caller-supplied fetch when there is
+  // one (tests inject a recorder; a foreign build may inject a proxy), else the
+  // global fetch read lazily at request time. The SDK's own `_fetchWithInit`
+  // closure is deliberately NOT reused: it bakes the credential headers in, and
+  // a wrapper cannot take them back out again.
+  const provided = fields[FETCH_FIELD]
+  const base: FetchLike = typeof provided === 'function' ? provided as FetchLike : globalFetch
+  const scope = fields[OAUTH_PROVIDER_FIELD]
+  fields[FETCH_WITH_INIT_FIELD] = createMcpOutboundFetch({
+    base,
+    ownUrl,
+    scope,
+    bakedHeaders: requestInit.headers,
+    locale,
+  })
   // `_startOrAuthSse()` builds its GET with `...this._requestInit` (v2) but the
   // POST/DELETE path and the 401 retries all read `_fetch`; the production
   // construction passes NO `fetch`, so `(this._fetch ?? fetch)` must resolve to
   // OUR wrapper rather than to the global follow-by-default fetch.
-  const base = fields[FETCH_FIELD]
-  fields[FETCH_FIELD] = typeof base === 'function' ? forcedRedirectFetch(base as FetchLike) : defaultFetchFence()
+  fields[FETCH_FIELD] = createMcpOutboundFetch({ base, ownUrl, scope, locale })
   Object.defineProperty(fields, HARDENED, { value: true, enumerable: false })
 }
 
@@ -555,19 +649,136 @@ function forceManual(init: RequestInit | undefined): RequestInit {
 /** The global fetch, behind one indirection so the wrapper never relies on `this`. */
 const globalFetch: FetchLike = (input, init) => globalThis.fetch(input, init)
 
+/** Step label the wrapper names in its policy errors (translated by `stepLabel`). */
+function transportStep(locale: HostLocale): string {
+  return hostT(locale, 'step.mcpTransportRequest')
+}
+
+/** The URL of one `fetch` input, whatever shape the SDK passed. */
+function requestUrlOf(input: unknown): string {
+  if (typeof input === 'string') return input
+  if (input instanceof URL) return input.href
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.url
+  if (typeof input === 'object' && input !== null) {
+    const candidate = (input as { url?: unknown }).url
+    if (typeof candidate === 'string') return candidate
+  }
+  return String(input)
+}
+
+/** The transport's own origin, read live (a late `_url` write still counts). */
+function ownOriginOf(read: (() => unknown) | undefined): string | null {
+  const value = read?.()
+  if (value instanceof URL) return value.origin
+  if (typeof value === 'string') return originOfUrl(value)
+  return null
+}
+
+/** One header list as a plain lower-cased record (Headers/array/record). */
+function headerRecord(headers: HeadersInit | undefined): Record<string, string> {
+  const record: Record<string, string> = {}
+  if (headers === undefined) return record
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+    headers.forEach((value, name) => { record[name.toLowerCase()] = value })
+    return record
+  }
+  if (Array.isArray(headers)) {
+    for (const [name, value] of headers) record[String(name).toLowerCase()] = String(value)
+    return record
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (value !== undefined) record[name.toLowerCase()] = String(value)
+  }
+  return record
+}
+
 /**
- * Wrap a fetch so `redirect: 'manual'` is forced onto EVERY request it makes,
- * whatever init the SDK passes (`_startOrAuthSse` passes none).
- *
- * An already-fenced fetch is returned untouched, so installing the fence twice
- * cannot build a wrapper tower.
- * @param base - the fetch to force, or undefined for the global one.
- * @returns a marked, redirect-refusing fetch.
+ * Merge the transport's baked headers under one request's own headers, the way
+ * the SDK's `createFetchWithInit` does (per-request wins).
+ * @param baked - headers the transport carries by construction.
+ * @param given - headers of this request.
+ * @returns the merged record, or undefined when neither side has any.
  */
-function forcedRedirectFetch(base: FetchLike | undefined): FetchLike {
-  const target = base ?? globalFetch
-  if ((target as { [FENCED_FETCH]?: unknown })[FENCED_FETCH] === true) return target
-  const wrapped: FetchLike = (input, init) => target(input, forceManual(init))
+function mergeHeaders(baked: HeadersInit | undefined, given: HeadersInit | undefined): Record<string, string> | undefined {
+  const merged = { ...headerRecord(baked), ...headerRecord(given) }
+  return Object.keys(merged).length === 0 ? undefined : merged
+}
+
+/** Options of {@link createMcpOutboundFetch}. */
+export interface McpOutboundFetchOptions {
+  /** The fetch to delegate to once the request passed the fence. */
+  base: FetchLike
+  /** Live read of the transport's own URL (`_url`), for the same-origin rule. */
+  ownUrl?: (() => unknown) | undefined
+  /** Object carrying the attached allowed origins (the OAuth provider). */
+  scope?: unknown
+  /** Headers the SDK bakes into this transport (`requestInit.headers`). */
+  bakedHeaders?: HeadersInit | undefined
+  /** Locale of the messages this wrapper may throw, resolved per request. */
+  locale?: (() => HostLocale) | undefined
+}
+
+/**
+ * Build the ONE fenced fetch every MCP transport request goes through.
+ *
+ * Four rules, each of which the 2026-09-23 audit found missing from the
+ * redirect-only wrapper this replaces (`CN-1`):
+ *
+ * 1. **Outbound URL policy** — the same `assertOutboundUrlAllowed` the OAuth
+ *    discovery chain uses (`auth.ts`), applied to the URL the SDK is about to
+ *    fetch. Without it, a 401 carrying
+ *    `WWW-Authenticate: Bearer resource_metadata="<any URL>"` made the SDK
+ *    really GET that URL — while `outbound.ts` refused the very same URL when
+ *    we resolved it ourselves. A refusal throws
+ *    {@link OutboundUrlBlockedError}; nothing is fetched, so nothing leaks.
+ * 2. **Resolution gate** — {@link assertResolvedOutboundAddressAllowed}, so a
+ *    NAME that resolves into a private / link-local / loopback range is refused
+ *    like its literal spelling (`CN-9`).
+ * 3. **Registered-origin scope** — a request to an origin other than the
+ *    transport's own is allowed only when the connector registered that origin
+ *    (`createOAuthProvider` attaches the policy-checked authorization-server
+ *    facts to itself, and the fence reads them off `_oauthProvider`). The
+ *    resource server decides nothing about where credentials go; the connector
+ *    definition does. An unknown provider (no attached scope) keeps the general
+ *    policy — the header rule below still protects it.
+ * 4. **Header hygiene** — the connector's baked headers (`Authorization: Bearer
+ *    …`, the definition's static API keys) are merged back in for SAME-ORIGIN
+ *    requests only. A cross-origin hop (token endpoint, discovery document, the
+ *    URL a hostile resource server named) receives only what that request
+ *    itself asked for, so the SDK's own OAuth protocol headers still work while
+ *    the connector credential cannot travel.
+ *
+ * `redirect: 'manual'` is still forced on every request (residual C), and an
+ * already-fenced fetch is returned untouched so a re-install cannot build a
+ * wrapper tower.
+ * @param options - base fetch, own-URL reader, scope, baked headers, locale.
+ * @returns a marked fetch that only performs policy-approved, scoped requests.
+ */
+export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchLike {
+  const wrapped: FetchLike = async (input, init) => {
+    const locale = options.locale?.() ?? DEFAULT_HOST_LOCALE
+    const step = transportStep(locale)
+    const raw = requestUrlOf(input)
+    const target = assertOutboundUrlAllowed(raw, step, locale)
+    const ownOrigin = ownOriginOf(options.ownUrl)
+    const allowed = allowedOutboundOriginsOf(options.scope)
+    const crossOrigin = ownOrigin === null || target.origin !== ownOrigin
+    if (crossOrigin && allowed !== null && !allowed.has(target.origin)) {
+      throw new OutboundUrlBlockedError(hostT(locale, 'outbound.mcpFenceOrigin', {
+        what: stepLabel(locale, step),
+        target: target.href,
+        allowed: [...allowed].join(', ') || hostT(locale, 'outbound.mcpFenceOriginNone'),
+      }))
+    }
+    await assertResolvedOutboundAddressAllowed(target, step, locale)
+    const headers = crossOrigin
+      ? (init?.headers === undefined ? undefined : headerRecord(init.headers))
+      : mergeHeaders(options.bakedHeaders, init?.headers)
+    const next: RequestInit = { ...(init ?? {}), redirect: 'manual' }
+    if (headers === undefined || Object.keys(headers).length === 0) delete next.headers
+    else next.headers = headers
+    return await options.base(input, next)
+  }
   Object.defineProperty(wrapped, FENCED_FETCH, { value: true, enumerable: false })
   return wrapped
 }
@@ -575,18 +786,6 @@ function forcedRedirectFetch(base: FetchLike | undefined): FetchLike {
 /** Whether one value is a fetch this module already fenced. */
 function isFencedFetch(value: unknown): boolean {
   return typeof value === 'function' && (value as { [FENCED_FETCH]?: unknown })[FENCED_FETCH] === true
-}
-
-/**
- * The one wrapper used when a transport was built without a `fetch` option —
- * the production shape. Cached so every instance shares one identity instead of
- * minting a wrapper per harden.
- */
-let defaultFencedFetch: FetchLike | null = null
-
-function defaultFetchFence(): FetchLike {
-  defaultFencedFetch ??= forcedRedirectFetch(undefined)
-  return defaultFencedFetch
 }
 
 /**
@@ -614,7 +813,7 @@ function patchTransportClass(): () => void {
     Object.defineProperty(proto, name, {
       ...descriptor,
       value: function hardenedEntry(this: object, ...args: unknown[]): unknown {
-        hardenTransport(this)
+        hardenTransport(this, () => fenceLocale)
         return original.apply(this, args)
       },
     })
@@ -662,10 +861,10 @@ function restoreField(field: string, descriptor: PropertyDescriptor | undefined)
  * `registerMcp` turns into a refusal to register the server.
  */
 async function verifyFenceSeam(locale: HostLocale): Promise<void> {
-  const seen: Array<{ method: string; redirect: unknown }> = []
+  const seen: Array<{ method: string; redirect: unknown; headers: unknown }> = []
   const probeFetch: FetchLike = async (_input, init) => {
     const method = init?.method ?? 'GET'
-    seen.push({ method, redirect: init?.redirect })
+    seen.push({ method, redirect: init?.redirect, headers: init?.headers })
     // 405 is the spec's "this server offers no SSE stream" answer, so the SSE
     // path terminates without scheduling a reconnection; every redirect
     // decision has already been taken by the fence when the recorder runs.
@@ -679,8 +878,10 @@ async function verifyFenceSeam(locale: HostLocale): Promise<void> {
   // The v2 shape this fence rewrites: own data properties (class fields). If a
   // future build keeps them on the prototype as accessors, hardening still
   // writes through them — but a build that hides them entirely must be caught
-  // here rather than reported as hardened.
-  for (const field of [REQUEST_INIT_FIELD, FETCH_WITH_INIT_FIELD, FETCH_FIELD]) {
+  // here rather than reported as hardened. `_url` is in the list because the
+  // same-origin rule (which host may receive the connector's baked headers)
+  // reads it: a rename must fail the install, not silently widen the fence.
+  for (const field of [REQUEST_INIT_FIELD, FETCH_WITH_INIT_FIELD, FETCH_FIELD, URL_FIELD]) {
     if (Object.getOwnPropertyDescriptor(probe, field) === undefined) {
       throw new McpTransportFenceUnavailableError(
         hostT(locale, 'fence.notInstanceField', { field }),
@@ -750,6 +951,45 @@ async function verifyFenceSeam(locale: HostLocale): Promise<void> {
   if (resumed === undefined || resumed.redirect !== 'manual') {
     throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.resumeNotManual'))
   }
+  // CN-1 (audit 2026-09-23): the wrapper must ALSO apply the outbound URL
+  // policy. A URL the policy refuses has to be refused here, before the base
+  // fetch is reached — otherwise a 401 whose `WWW-Authenticate` names a
+  // private/metadata URL makes the SDK really GET it. `0.0.0.0/8` is refused by
+  // the SYNTAX rule, so this probe needs no resolver and no socket.
+  seen.length = 0
+  let policyRefusals = 0
+  await (fetchWithInit as FetchLike)(POLICY_REFUSED_PROBE_URL, { method: 'GET' }).then(
+    () => undefined,
+    () => { policyRefusals += 1 },
+  )
+  if (policyRefusals !== 1 || seen.length !== 0) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.policyNotApplied'))
+  }
+  // …and the credential headers the connector baked into `requestInit` must not
+  // travel to a DIFFERENT origin (the token endpoint / a hostile
+  // `resource_metadata` URL), while the SAME-origin request keeps them.
+  seen.length = 0
+  await (fetchWithInit as FetchLike)(PROBE_URL, { method: 'POST' }).catch(() => undefined)
+  if (!headersOf(seen[0]?.headers).has(PROBE_HEADER)) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.sameOriginHeadersDropped'))
+  }
+  seen.length = 0
+  await (fetchWithInit as FetchLike)(CROSS_ORIGIN_PROBE_URL, { method: 'GET' }).catch(() => undefined)
+  const crossOrigin = seen.find(call => call.method === 'GET')
+  if (crossOrigin === undefined) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.fetchWithInitNotManual', { field: FETCH_WITH_INIT_FIELD }))
+  }
+  if (headersOf(crossOrigin.headers).has(PROBE_HEADER)) {
+    throw new McpTransportFenceUnavailableError(hostT(locale, 'fence.credentialHeaderCrossOrigin'))
+  }
+}
+
+/** One recorded header set as a `Headers` (the probe compares with `has`). */
+function headersOf(headers: unknown): Headers {
+  if (headers instanceof Headers) return headers
+  if (Array.isArray(headers)) return new Headers(headers as [string, string][])
+  if (typeof headers === 'object' && headers !== null) return new Headers(headers as Record<string, string>)
+  return new Headers()
 }
 
 /**
@@ -808,6 +1048,9 @@ export function installMcpTransportRedirectFence(targets?: { ours: string; their
     targetWarning = describeTargets(verdict.ours, verdict.theirs, locale)
       + (verdict.note === undefined ? '' : ` / ${verdict.note}`)
   }
+  // Every install request re-states the locale, so a later language switch is
+  // reflected by the next refusal this fence produces (see `fenceLocale`).
+  fenceLocale = locale
   restorePatched = patchTransportClass()
   patched = true
   return uninstallMcpTransportRedirectFence
@@ -872,6 +1115,10 @@ export function uninstallMcpTransportRedirectFence(): void {
  * @throws {McpTransportFenceUnavailableError} when the seam cannot be fenced.
  */
 export async function ensureMcpTransportRedirectFence(locale: HostLocale = DEFAULT_HOST_LOCALE): Promise<void> {
+  // The locale of THIS registration is what a later refusal must render in,
+  // even while the seam itself is already installed and verified (the fence is
+  // process-wide, the panel language is not).
+  fenceLocale = locale
   // NOTE: `failure` is memoized on purpose (one seam verification per process),
   // so the FIRST caller's locale fixes the text of the cached error. That is a
   // property of the memoized failure, not a module-level locale capture: the

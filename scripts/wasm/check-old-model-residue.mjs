@@ -14,13 +14,22 @@
  *   3. **未跟踪文件也要查**（`git grep` 只覆盖已跟踪文件；本仓有并发编辑史）；
  *   4. `git grep` 的 rc≥2（路径不存在 / 正则错）**不得当通过** —— 那是门禁自己坏了。
  *
+ * 2026-09-23 第三轮审计（W-3）的两处修法：
+ *   · **上限的真源 = `scripts/wasm/wasm-gate-inventory.json` 的 budgets 段**，环境变量只允许
+ *     "更严"（更小的非负整数）；取值非法 / 试图放宽一律 fail-loud。此前
+ *     `WASM_RESIDUE_CONTRACT_BUDGET=999` 能把 `B=36 > 34` 的 FAIL(EXIT=1) 翻成 PASS(EXIT=0)。
+ *   · **桶资格不再有整目录前缀豁免**：`server/demoapps/**`、`server/skills/**` 曾无条件进 D 桶
+ *     （不进 A、无上限）⇒ 把逐字残留写进 `server/demoapps/legacy-gate.go` 就 A=0 通过；
+ *     现在 D 只认"生成物"且逐文件登记，C 只认"测试文件形态 / 文档 / 不可变迁移 / testdata 夹具"，
+ *     两桶都有上限。C/D 的资格是**规则**，不是"路径前缀一票豁免"。
+ *
  * 用法：node scripts/wasm/check-old-model-residue.mjs [--all] [--json <path>]
  * 退出码：0 = 业务代码零命中；1 = 有业务命中或扫描本身失败。
  */
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -41,7 +50,7 @@ const CATEGORIES = [
     // 标识符一律加词边界：`SessionMax`/`TicketTTL` 这类短标识符不加边界会命中
     // 无关的复合名（实测 `TicketTTL` 命中 `mfaTicketTTL` —— 那是**管理员 MFA 挑战
     // 票据**，与应用换票毫无关系；R1-L4-2）。
-    source: '\\bPICOAI_APPS_BASE_DOMAIN\\b|\\bAPPS_BASE_DOMAIN\\b|\\bapps_base_domain\\b|\\bwasm_apps_base_domain_change\\b|\\bAppsBaseDomain\\b|\\bAppBaseDomain\\b|\\bbaseDomainHolder\\b|\\bBaseDomain\\b|\\bParseBaseDomain\\b|\\bInspectAppBaseDomain\\b|\\bHostGate\\b|\\bhostgate\\b|\\bMatchHost\\b|\\bIsProbePath\\b|\\bSelfOrigin\\b',
+    source: '\\bPICOAI_APPS_BASE_DOMAIN\\b|\\bAPPS_BASE_DOMAIN\\b|\\bapps_base_domain\\b|\\bwasm_apps_base_domain_change\\b|\\bAppsBaseDomain\\b|\\bAppBaseDomain\\b|\\bbaseDomainHolder\\b|\\bBaseDomain\\b|\\bParseBaseDomain\\b|\\bInspectAppBaseDomain\\b|\\bHostGate\\b|\\bhostgate\\b|\\bMatchHost\\b|\\bIsProbePath\\b|\\bSelfOrigin\\b|\\bCheckOrigin\\b',
   },
   {
     key: 'ticket',
@@ -95,18 +104,23 @@ const SCOPES = [
 /**
  * 白名单（**必须带理由**；只允许"测试夹具"与"历史/权威文档"两类，
  * 业务代码一律不可白名单 —— 否则这条判据会退化成"存在性断言"）。
+ *
+ * W-3 收紧（2026-09-23）：`(^|/)(tests?|__tests__)/` 曾让**任意**文件（含 `.go`/`.ts` 源）
+ * 只要落在测试目录里就整文件免疫 —— 那是"按位置豁免"，与 D 桶前缀豁免同族。现在测试面只认
+ * **测试文件形态**（`_test.go` / `*.spec.*` / `*.test.*`）或 **testdata/fixtures 夹具数据**
+ * （Go 工具链忽略 testdata、不会被编译，夹具里出现旧字面量是正常取证需要）。
  */
 const WHITELIST = [
-  { test: /_test\.go$/u, reason: 'Go 测试夹具/历史用例（业务实现不得命中）' },
+  { test: /_test\.go$/u, reason: 'Go 测试用例/夹具（业务实现不得命中）' },
+  { test: /\.spec\.(ts|tsx|mjs|cjs|js)$/u, reason: '前端/Node 测试用例' },
+  { test: /\.test\.(ts|tsx|mjs|cjs|js)$/u, reason: '前端/Node 测试用例' },
+  { test: /(^|\/)(testdata|fixtures|__fixtures__)\//u, reason: '夹具数据（testdata 不被 Go 编译，spec 夹具不被构建收录）' },
   { test: /^docs\//u, reason: '文档（部署/作者/发布说明；命中=文案口径问题，不是业务实现）' },
   // 不可变历史迁移（主控 2026-09-19 裁定）：已上线的库都应用过它们 —— 改历史迁移会破坏
   // 部署与幂等，删它更荒谬（drop 由**后续**迁移负责，例如 0073 才 drop 0070 建的表）。
   // ⇒ 归 C（历史制品），但仍然打印，且**新增**迁移会另起一行提示人工复核（见下方 newMigrations）。
   { test: /^server\/internal\/serverstore\/migrations-pg\//u, reason: '不可变历史迁移（已应用；改动破坏幂等）' },
   { test: /\.md$/u, reason: 'Markdown 文档（同上）' },
-  { test: /(^|\/)(tests?|__tests__)\//u, reason: '测试目录' },
-  { test: /\.spec\.(ts|tsx|mjs|cjs|js)$/u, reason: '前端/Node 测试用例' },
-  { test: /\.test\.(ts|tsx|mjs|cjs|js)$/u, reason: '前端/Node 测试用例' },
   { test: /^docs\/planning\/2026-09-17-wasm-app-platform/u, reason: '早期契约（正文已删，仅指针式提及）' },
   { test: /^docs\/planning\/2026-09-19-/u, reason: '本轮权威文档（提及旧概念是为了声明其删除）' },
   { test: /^docs\/decisions\//u, reason: '决策记录（作废横幅已加）' },
@@ -116,6 +130,78 @@ const WHITELIST = [
 
 /** 报告里的相对路径（失败信息要能直接点开）。 */
 const REL = path => path.replace(`${ROOT}/`, '')
+
+// ---------------------------------------------------------------------------
+// 预算真源（2026-09-23 第三轮审计 W-3）
+//
+// 上限**唯一真源** = `scripts/wasm/wasm-gate-inventory.json` 的 budgets 段（进 diff、可评审）。
+// 环境变量只允许**收紧**（更小的非负整数）；非法取值或试图放宽 ⇒ 直接 fail-loud 退出。
+// 反例（修复前实测）：`WASM_RESIDUE_CONTRACT_BUDGET=999` 把 `B=36 > 34` 的 FAIL(EXIT=1)
+// 翻成 PASS(EXIT=0)，而"请显式调上限并说明"里的"说明"没有任何判据。
+// ---------------------------------------------------------------------------
+const INVENTORY_PATH = join(ROOT, 'scripts/wasm/wasm-gate-inventory.json')
+
+function loadBudgets() {
+  if (!existsSync(INVENTORY_PATH)) {
+    console.error(`  FAIL 预算真源缺失：${REL(INVENTORY_PATH)}（缺省值 = 静默放宽，一律不得当通过）`)
+    process.exit(1)
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(INVENTORY_PATH, 'utf8'))
+  } catch (cause) {
+    console.error(`  FAIL 预算真源无法解析：${REL(INVENTORY_PATH)}：${cause.message}`)
+    process.exit(1)
+  }
+  const budgets = parsed?.budgets
+  if (budgets === null || typeof budgets !== 'object') {
+    console.error(`  FAIL 预算真源缺 budgets 段：${REL(INVENTORY_PATH)}`)
+    process.exit(1)
+  }
+  const problems = []
+  const take = (key, envName) => {
+    const entry = budgets[key]
+    if (entry === null || typeof entry !== 'object' || !Number.isInteger(entry.value) || entry.value < 0) {
+      problems.push(`budgets.${key} 缺失或 value 不是非负整数：${JSON.stringify(entry)}`)
+      return null
+    }
+    const label = typeof entry.reason === 'string' && entry.reason !== '' ? entry.reason : '（真源未写理由）'
+    const raw = process.env[envName]
+    if (raw === undefined || raw === '') return { value: entry.value, source: `真源 ${entry.value}：${label}` }
+    if (!/^\d+$/u.test(raw)) {
+      problems.push(`${envName}=${JSON.stringify(raw)} 取值非法（只允许非负整数；环境变量只能收紧上限）`)
+      return null
+    }
+    const env = Number(raw)
+    if (env > entry.value) {
+      problems.push(`${envName}=${env} 大于真源上限 ${entry.value}：放宽上限必须改 ${REL(INVENTORY_PATH)} `
+        + `的 budgets 段并写理由（进 diff，可评审）—— 不得用环境变量把红翻绿`)
+      return null
+    }
+    return { value: env, source: `${envName}=${env}（收紧；真源 ${entry.value}）` }
+  }
+  const contract = take('contract', 'WASM_RESIDUE_CONTRACT_BUDGET')
+  const ann = take('ann', 'WASM_RESIDUE_ANN_BUDGET')
+  const whitelisted = take('whitelisted', 'WASM_RESIDUE_WHITELISTED_BUDGET')
+  const derived = take('derived', 'WASM_RESIDUE_DERIVED_BUDGET')
+  const modules = budgets.contractModules
+  if (modules === null || typeof modules !== 'object' || Array.isArray(modules)) {
+    problems.push(`budgets.contractModules 缺失或形状非法：${JSON.stringify(modules)}`)
+  } else {
+    for (const [label, value] of Object.entries(modules)) {
+      if (!Number.isInteger(value) || value < 0) problems.push(`budgets.contractModules.${label} 不是非负整数：${JSON.stringify(value)}`)
+    }
+  }
+  const allow = parsed?.derivedAllowance?.entries
+  if (!Array.isArray(allow)) problems.push('derivedAllowance.entries 缺失或不是数组（生成物豁免必须逐文件登记）')
+  if (problems.length > 0) {
+    for (const problem of problems) console.error(`  FAIL 预算真源不合格：${problem}`)
+    process.exit(1)
+  }
+  return { contract, ann, whitelisted, derived, modules, derivedAllowance: allow }
+}
+
+const BUDGETS = loadBudgets()
 
 const failures = []
 const hits = []
@@ -153,6 +239,20 @@ for (const scope of SCOPES) {
 if (present.length === 0) {
   console.error('零残留扫描没有可扫描的范围 —— 拒绝把"扫不到"当成"零命中"')
   process.exit(1)
+}
+// 范围**空目录**（目录还在但文件被删光/被搬走）此前不触发任何判据：`git grep` 返回 0 命中、
+// 预算随扫描面一起缩水 ⇒ 缩小覆盖面反而更好过（W-1a 的机制之一）。required 范围必须**非空**。
+for (const scope of SCOPES) {
+  if (!scope.required || !existsSync(resolve(ROOT, scope.path))) continue
+  const files = git(['ls-files', '--cached', '--others', '--exclude-standard', '--', scope.path])
+  if (files.status !== 0) {
+    bad(`required 范围 ${scope.path} 的文件清点失败（rc=${files.status}）：${(files.stderr ?? '').trim()}`)
+    continue
+  }
+  if ((files.stdout ?? '').split('\n').filter(Boolean).length === 0) {
+    bad(`required 扫描范围为空：${scope.path} 目录在、但里面一个文件都没有`
+      + `（内容被搬走/删光 ⇒ "零命中"是真空成立，不是真的干净）`)
+  }
 }
 console.log(`  扫描范围（${present.length}）：${present.join(' ')}`)
 
@@ -217,32 +317,28 @@ records.push(...untrackedHits)
 //     （常量名 `REMOVED_|LEGACY_` 或同行/紧邻注释写"已废弃/历史"），且有**计数上限**
 //     （防止有人把新残留塞进这个桶 —— 桶一旦无上限就等于白名单）。
 //   C 夹具 / 历史文档白名单（逐条带理由；命中仍打印）。
-//   D 生成物与非本泳道内容（go generate 产物、演示应用与技能内容）：单列交对应泳道，
-//     不计入 A，但计数必须打印（审计一眼就能看见它们没被藏起来）。
+//   D 生成物（go generate 产物）：单列交对应泳道，**逐文件登记**后才免计入 A，且计数必须打印。
 //
-// A 桶必须为 0；B 桶 ≤ 上限且每条带标识；C/D 只计数与抽样。
+// A 桶必须为 0；B/ANN/C/D 各有上限（真源 = scripts/wasm/wasm-gate-inventory.json 的 budgets）。
 // ---------------------------------------------------------------------------
-/** B 桶上限（可用 WASM_RESIDUE_CONTRACT_BUDGET 覆盖；调整必须是有意识的动作）。 */
-// 预算 = 实测构成（client 13 + webadmin 7 + appcfg 13 = 33）；调整预算必须是有意识的动作，
-// 并在 L4-status / 台账里写明理由（桶无上限就等于白名单）。
-// 预算 = 实测构成（client 13 + webadmin 7 + appcfg 14 = 34）；调整预算必须是有意识的动作，
-// 并在 L4-status / 台账里写明理由（桶无上限就等于白名单）。
-//
-// 2026-09-20 +1（主控裁决，13 → 14 / 总 33 → 34）：L7 把"判断 access 是否历史公开档位"
-// 从 `appseed.go` 的**代码行**收进它的**归属模块** ——
-//   `func IsLegacyPublicAccess(s string) bool { return Access(s) == AccessPublic }`
-// 理由：①这是 W4 一次性磁盘资产改写（§9 的 A 方案）**必须**的历史取值判定，与 0074 迁移里的
-// `'public'` 字面量同性质；②它是有意识的**归属修正**（历史取值长什么样只该由读侧口径的唯一
-// 作者 `appcfg` 知道，`appseed` 不该知道），不是把新残留塞进桶。
-// **下次再 +1 必须先给出同等强度的理由**（"加条注释就能进桶"= 逃生门，明确不做）。
-const CONTRACT_BUDGET = Number(process.env.WASM_RESIDUE_CONTRACT_BUDGET ?? 34)
+// B 桶上限的取值与理由见真源 JSON 的 budgets.contract（2026-09-23 起不再由环境变量给缺省值；
+// 环境变量只能收紧）。历史沿革：预算是实测构成（client 13 + webadmin 7 + appcfg 14 = 34），
+// 2026-09-20 +1 的理由（`IsLegacyPublicAccess` 归属模块化）记在真源 JSON 里。
+const CONTRACT_BUDGET = BUDGETS.contract.value
 
 /** B 桶的显式标识（常量名或同行/紧邻注释的废弃标注）。 */
 const CONTRACT_MARKER = /REMOVED_|LEGACY_|已废弃|历史|deprecated|2026-09-19|已不在契约|不再下发|不再有|已不存在|已删除|删除清单|冻结契约|迁移白名单|旧书签|旧 schema|兼容 shim|legacy/iu
 const CONTRACT_DECLARATION = /(?:export\s+)?(?:const|let|var)\s+(?:REMOVED_|LEGACY_)[A-Z0-9_]*/u
 
-/** D 桶：生成物与"非本泳道内容"（演示应用 / 技能内容，属 W4/W5 改写清单）。 */
-const DERIVED_PREFIXES = ['server/demoapps/', 'server/skills/']
+/**
+ * D 桶：**只有生成物**（go generate 产物）。
+ *
+ * W-3 修法（2026-09-23）：原先还有 `DERIVED_PREFIXES = ['server/demoapps/', 'server/skills/']`
+ * 的**整目录前缀豁免** —— `server/demoapps/` 是真 Go 模块（会被构建进镜像），把逐字残留写进
+ * `server/demoapps/legacy-gate.go` 就整份进 D 桶（不进 A、无上限）⇒ EXIT=0 假绿。
+ * 现在前缀豁免取消：那里的代码按普通业务代码判（→ A），文档按 `.md` 判（→ C）。
+ * 生成物命中必须逐文件登记在真源 JSON 的 derivedAllowance 里（当前为空）。
+ */
 const GENERATED_NAME = /(?:^|\/)(?:generated|gen)\/|[_\-.]gen\.[a-z]+$/u
 const GENERATED_ARTIFACTS = new Set(['limits.json', 'appcfg.json', 'limits.md', 'app-config.md'])
 function isGenerated(file) {
@@ -251,6 +347,15 @@ function isGenerated(file) {
   if (!GENERATED_ARTIFACTS.has(base)) return false
   // 生成物（limits/appcfg）与同名手写文件靠目录区分：只有 limits/ 与 references/ 下才是产物。
   return /\/limits\//u.test(file) || /\/references\//u.test(file)
+}
+const DERIVED_ALLOWANCE = BUDGETS.derivedAllowance
+const DERIVED_ALLOWED = new Set()
+for (const entry of DERIVED_ALLOWANCE) {
+  if (entry === null || typeof entry !== 'object' || typeof entry.file !== 'string' || typeof entry.reason !== 'string' || entry.reason.trim() === '') {
+    bad(`derivedAllowance 条目形状非法（需要 file/reason）：${JSON.stringify(entry)}`)
+    continue
+  }
+  DERIVED_ALLOWED.add(entry.file)
 }
 /**
  * B 桶的资格范围（按"契约型保留"的所在地枚举；其余一律 A）：
@@ -289,9 +394,9 @@ const CONTRACT_MODULES = [
     // 拆成两个文件只是为了可读性。
     test: /^server\/internal\/wasmapp\/appcfg\//u,
     label: 'appcfg',
-    // 2026-09-20：13 → 14（`IsLegacyPublicAccess` —— W4 一次性改写的历史取值判定，
-    // 归属模块化的结果；理由见下方 CONTRACT_BUDGET 注释）。
-    budget: 14,
+    // 预算 14 的真源 = scripts/wasm/wasm-gate-inventory.json 的 budgets.contractModules.appcfg
+    // （2026-09-20 由 13 → 14：`IsLegacyPublicAccess` —— W4 一次性改写的历史取值判定）。
+    budget: BUDGETS.modules.appcfg,
     reason: 'I6 明文要求的兼容面：AccessPublic（"历史值，只读"）/ `login_required=false ⇒ access=public` 的旧 schema 映射 / AccessValues（历史只读集合）/ publicAccessRejected（写侧拒绝的**结构化错误**）/ 基线历史 public 的读侧映射',
   },
 ]
@@ -312,16 +417,19 @@ const CONTRACT_MODULES = [
  * 变异判据：把某行的标注词去掉 ⇒ 该行**必须**回到 A（实测见 L4-status 的 M6）。
  */
 const ANN_MARKER = /REMOVED_|LEGACY_|已废弃|历史|deprecated|2026-09-19|已不在契约|不再下发|不再有|已不存在|已删除|删除|删除清单|冻结契约|迁移白名单|旧书签|旧 schema|兼容 shim|legacy|已随|不再产生|不再提供|退役|退场|W4|\bW-?C\b/iu
-// ANN 上限 = 2026-09-20 实测 65（W4 施工中；冻结期应重新基线化）。它拦的是"新残留披一条
-// '已删除' 注释混进来"——要加就显式改这个数并说明。
-const ANN_BUDGET = Number(process.env.WASM_RESIDUE_ANN_BUDGET ?? 65)
+// ANN 上限的真源 = 真源 JSON 的 budgets.ann（2026-09-20 实测 64 / 上限 65）。它拦的是
+// "新残留披一条 '已删除' 注释混进来"——要加就显式改真源并说明。
+const ANN_BUDGET = BUDGETS.ann.value
+/** C 桶（夹具/历史文档/不可变迁移）上限；规则资格仍是主判据，上限拦"成批塞入"。 */
+const WHITELISTED_BUDGET = BUDGETS.whitelisted.value
 
 function isCommentLine(text) {
   return /^\s*(\/\/|\*|\/\*|#|--|<!--)/u.test(text)
 }
 
 function bucketOf(record) {
-  if (DERIVED_PREFIXES.some(prefix => record.file.startsWith(prefix)) || isGenerated(record.file)) return 'D'
+  // D 桶：只有生成物，且必须逐文件登记（2026-09-23 W-3：取消 server/demoapps|skills 前缀豁免）。
+  if (isGenerated(record.file)) return 'D'
   if (whitelistReason(record.file) !== null) return 'C'
   // 文件级契约模块：整个包都是契约面（逐模块预算在下面单独查），不再要求逐行标识。
   if (CONTRACT_MODULES.some(entry => entry.test.test(record.file))) return 'B'
@@ -387,13 +495,16 @@ const labelOf = key => ({
   A: 'A 业务代码零命中（必须为 0）',
   B: `B 契约型保留（必须带标识；上限 ${CONTRACT_BUDGET}）`,
   ANN: `ANN 带删除/废弃标注的注释（注释块级：标注词可来自同行 [self] 或同块表头 [blk]；上限 ${ANN_BUDGET}）`,
-  C: 'C 夹具 / 历史文档与不可变迁移',
-  D: 'D 生成物 / 演示与技能内容（非本泳道）',
+  C: `C 夹具 / 历史文档与不可变迁移（上限 ${WHITELISTED_BUDGET}）`,
+  D: `D 生成物（逐文件登记；上限 ${BUDGETS.derived.value}）`,
 }[key])
 
 console.log(`  五桶：A=${buckets.A.length}（必须为 0） B=${buckets.B.length}（上限 ${CONTRACT_BUDGET}）`
-  + ` ANN=${buckets.ANN.length}（上限 ${ANN_BUDGET}） C=${buckets.C.length} D=${buckets.D.length}`
+  + ` ANN=${buckets.ANN.length}（上限 ${ANN_BUDGET}） C=${buckets.C.length}（上限 ${WHITELISTED_BUDGET}）`
+  + ` D=${buckets.D.length}（上限 ${BUDGETS.derived.value}）`
   + `${buckets.A.length === 0 ? '' : ' ← A 必须为 0（W4 未完成）'}`)
+console.log(`  预算真源：${REL(INVENTORY_PATH)} —— B ${BUDGETS.contract.source} ｜ ANN ${BUDGETS.ann.source}`
+  + ` ｜ C ${BUDGETS.whitelisted.source} ｜ D ${BUDGETS.derived.source}`)
 
 for (const key of ['B', 'ANN', 'A']) {
   const items = buckets[key]
@@ -447,8 +558,20 @@ if (JSON_OUT !== null) {
     head: git(['rev-parse', 'HEAD']).stdout.trim(),
     buckets: { A: buckets.A, B: buckets.B, ANN: buckets.ANN, C: buckets.C, D: buckets.D },
     counts: { A: buckets.A.length, B: buckets.B.length, ANN: buckets.ANN.length, C: buckets.C.length, D: buckets.D.length },
-    contractBudget: CONTRACT_BUDGET,
-    annBudget: ANN_BUDGET,
+    budgets: {
+      source: REL(INVENTORY_PATH),
+      contract: BUDGETS.contract.value,
+      ann: BUDGETS.ann.value,
+      whitelisted: BUDGETS.whitelisted.value,
+      derived: BUDGETS.derived.value,
+      contractModules: BUDGETS.modules,
+      envOverride: {
+        contract: BUDGETS.contract.source,
+        ann: BUDGETS.ann.source,
+        whitelisted: BUDGETS.whitelisted.source,
+        derived: BUDGETS.derived.source,
+      },
+    },
     untracked,
   }, null, 2)}\n`)
   console.log(`  报告落盘：${JSON_OUT}`)
@@ -470,11 +593,33 @@ for (const module of CONTRACT_MODULES) {
 if (buckets.ANN.length > ANN_BUDGET) {
   bad(`ANN 桶（带删除/废弃标注的注释）${buckets.ANN.length} 处 > 上限 ${ANN_BUDGET}：`
     + `标注注释不是无上限白名单（新残留披一条"已删除"注释就会被这条抓住）；`
-    + `如确为 W4 成果请显式调 WASM_RESIDUE_ANN_BUDGET 并说明。`)
+    + `如确为 W4 成果请显式改 ${REL(INVENTORY_PATH)} 的 budgets.ann 并写理由。`)
 }
 if (buckets.B.length > CONTRACT_BUDGET) {
   bad(`B 桶（契约型保留）${buckets.B.length} 处 > 上限 ${CONTRACT_BUDGET}：很可能是把**新残留**塞进了这个桶`
-    + `（桶无上限就等于白名单）。请逐条确认标识与理由，必要时显式调 WASM_RESIDUE_CONTRACT_BUDGET 并说明。`)
+    + `（桶无上限就等于白名单）。请逐条确认标识与理由，必要时显式改 ${REL(INVENTORY_PATH)} 的 budgets.contract 并写理由`
+    + `（环境变量只能收紧，不能用它放宽）。`)
+}
+if (buckets.C.length > WHITELISTED_BUDGET) {
+  bad(`C 桶（夹具/历史文档/不可变迁移）${buckets.C.length} 处 > 上限 ${WHITELISTED_BUDGET}：`
+    + `记录面不是无上限白名单（成批新残留可以藏进文档/测试目录）。`
+    + `确认后显式改 ${REL(INVENTORY_PATH)} 的 budgets.whitelisted 并写理由。`)
+}
+if (buckets.D.length > BUDGETS.derived.value) {
+  bad(`D 桶（生成物）${buckets.D.length} 处 > 上限 ${BUDGETS.derived.value}：生成物里出现旧模型字面量`
+    + `要么是生成器没跟上，要么是残留藏进了产物。逐文件登记在 ${REL(INVENTORY_PATH)} 的 derivedAllowance（带理由）后才允许。`)
+}
+// D 桶条目必须**逐文件登记**（W-3：曾经整个 server/demoapps/**、server/skills/** 无条件豁免）。
+for (const record of buckets.D) {
+  if (!DERIVED_ALLOWED.has(record.file)) {
+    bad(`D 桶条目未登记：${record.file}:${record.line}（生成物豁免必须逐文件登记 + 理由；前缀整目录豁免已取消）`)
+  }
+}
+// 陈旧登记：登记了却不再命中 ⇒ 登记表会腐烂成永久豁免。
+for (const file of DERIVED_ALLOWED) {
+  if (!buckets.D.some(record => record.file === file)) {
+    bad(`derivedAllowance 登记已失效（该文件不再有 D 桶命中）：${file} —— 陈旧登记必须删除`)
+  }
 }
 // B 桶条目**必须**带显式标识：bucketOf 只在标识成立时才给 B，这里再独立复核一遍
 // （防御"标识判定被改宽但复核没跟上"），复核口径=命中行或所在注释块或上方常量声明。
@@ -504,5 +649,6 @@ if (buckets.A.length > 0) {
 }
 if (failures.length > 0) process.exit(1)
 ok(`业务代码零旧模型残留（A=0；B=${buckets.B.length} ≤ ${CONTRACT_BUDGET} 契约型保留；`
-  + `ANN=${buckets.ANN.length} ≤ ${ANN_BUDGET} 带标注的删除注释；C=${buckets.C.length} 夹具/文档/历史迁移；D=${buckets.D.length} 生成物/演示与技能内容）`)
+  + `ANN=${buckets.ANN.length} ≤ ${ANN_BUDGET} 带标注的删除注释；C=${buckets.C.length} ≤ ${WHITELISTED_BUDGET} 夹具/文档/历史迁移；`
+  + `D=${buckets.D.length} ≤ ${BUDGETS.derived.value} 生成物；上限真源 ${REL(INVENTORY_PATH)}）`)
 console.log('零残留扫描通过 ✅')

@@ -38,6 +38,9 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	// 审批预览(2026-09-01):管理员上架前后都要能看到包内到底是什么。
 	serverauth.AdminRoute(g, "GET", "/skills/:name/preview", serverauth.PermMarketRead, func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) })
 	serverauth.AdminRoute(g, "GET", "/skills/:name/file", serverauth.PermMarketRead, func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) })
+	// 归档下载(2026-09-23):预览弹层「文件过大 → 下载归档」= 预览基路径 + /archive。
+	// 此前只有 POST …/archive(上传新版),市场行的那个链接必 404。
+	serverauth.AdminRoute(g, "GET", "/skills/:name/archive", serverauth.PermMarketRead, func(c *gin.Context) { downloadSkillArchiveAdmin(c, db) })
 	// 存量规范化(决策 2026-09-01 §八):产出符合发布契约的新版本(patch+1)。
 	serverauth.AdminRoute(g, "POST", "/skills/:name/normalize", serverauth.PermMarketWrite, func(c *gin.Context) { normalizeSkillAdmin(c, db, cacheDir) })
 	// 授权管理(严格默认:未授权不可见/不可下载)
@@ -54,6 +57,8 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 	serverauth.AdminRoute(g, "POST", "/agents/:name/enable", serverauth.PermMarketWrite, func(c *gin.Context) { enableAgentAdmin(c, db) })
 	serverauth.AdminRoute(g, "GET", "/agents/:name/preview", serverauth.PermMarketRead, func(c *gin.Context) { previewAgentAdmin(c, db) })
 	serverauth.AdminRoute(g, "GET", "/agents/:name/file", serverauth.PermMarketRead, func(c *gin.Context) { fileContentAgentAdmin(c, db) })
+	// 归档下载(2026-09-23,与技能侧同形且同权限):预览弹层「文件过大 → 下载归档」。
+	serverauth.AdminRoute(g, "GET", "/agents/:name/archive", serverauth.PermMarketRead, func(c *gin.Context) { downloadAgentArchiveAdmin(c, db) })
 	serverauth.AdminRoute(g, "GET", "/agents/:name/grants", serverauth.PermMarketRead, func(c *gin.Context) { listAgentGrants(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/agents/:name/grants", serverauth.PermMarketWrite, func(c *gin.Context) { replaceAgentGrants(c, db) })
 	serverauth.AdminRoute(g, "PUT", "/agents/:name/grant", serverauth.PermMarketWrite, func(c *gin.Context) { applyAgentGrant(c, db, true) })
@@ -369,13 +374,33 @@ func updateSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请用「上传新版」随归档一起更改版本")
 		return
 	}
+	// 归属(owner)= 发布权的唯一真源,前端把它当「署名」展示(webadmin 的
+	// 文案就是「此处仅改署名展示」),但它的实际语义是"谁有权续传新版本"。
+	// 因此这里**不接受**归属变更(审计 2026-09-23 G-P2-1):
+	//
+	//   - 此前 `s.Author = req.Author` 会被 UpdateSkill 写进 apps.owner ⇒ 一次
+	//     普通元数据 PUT 变成**无审计的归属转移**(不校验用户是否存在、official
+	//     行也照改,能造出 official=1 ∧ owner≠'' 的禁止状态);
+	//   - 智能体孪生端点(agent_api.go 的 updateAgentAdmin)明确保留
+	//     `Owner: a.Owner`,两条姊妹端点行为必须一致;
+	//   - 合规入口只有一个:PUT /api/server/admin/apps/:kind/:app_id/owner
+	//     (appstore/admin.go:目标用户存在性校验 + owner/official 互斥 + 同归属
+	//     幂等 + app_owner_transfer 审计),webadmin 的「转移归属」按钮走它。
+	//
+	// 表单会回填当前归属,所以「值没变」必须放行(否则任何一次编辑描述都会被
+	// 拒绝);只有**真的想改归属**才回 400 并指路 —— 静默忽略比报错更糟:
+	// 管理员会以为改成功了。
+	if req.Author != "" && req.Author != s.Author {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+			"归属(负责人)不能在这里修改:它决定谁能续传新版本,请用「转移归属」")
+		return
+	}
 	if req.Description != "" {
 		s.Description = req.Description
 	}
-	if req.Author != "" {
-		s.Author = req.Author
-	}
-	if err := serverstore.UpdateSkill(db, s); err != nil {
+	// UpdateSkillMeta 只写展示列(title/description/enabled),不碰 owner ——
+	// 让"元数据 PUT 无意中改写归属"在 DAO 层结构上不可能(唯一真源在 DAO)。
+	if err := serverstore.UpdateSkillMeta(db, s); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
 	}
@@ -526,6 +551,39 @@ func previewSkillAdmin(c *gin.Context, db *sql.DB, cacheDir string) {
 		"files": files, "skill_md": content,
 		"name": s.Name, "version": s.Version, "checksum": s.Checksum,
 	})
+}
+
+// downloadSkillArchiveAdmin 管理面下载市场技能的归档（2026-09-23）。
+//
+// 落点是 webadmin 归档预览弹层的「文件过大 → 下载归档」链接：链接 = 预览基路径
+// + `/archive`，而市场行的基路径是 `/api/server/admin/skills/:name` —— 该命名空间
+// 此前只声明了 `POST …/archive`（上传新版），GET 未声明 ⇒ 市场行点下去 404，组织行
+// （`/shared-skills/:name/:version/archive`）正常。
+//
+// 与组织侧既有档案端点（sharedskills.DownloadAdmin）同形，不自创语义：
+//   - 管理面只读归档，**不做上下架/授权闸门**（管理员本就能看到全部内容）；
+//   - 缺失/尚未上传归档一律 JSON 信封 404（不是空 body、不是 405）；
+//   - 命中即按归档实际格式下发二进制流 + 版本/校验和头 —— 字节与头由
+//     serveSkillArchive 一处产出（员工面同一条出口，两端不可能漂移）。
+//
+// 渠道守卫来自 serverstore.GetSkill 本身（要求 apps.channel='market'），
+// 与员工面同一条：市场命名空间不会服务组织行。
+func downloadSkillArchiveAdmin(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	if !util.SafePathSegment(name) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "技能名不合法")
+		return
+	}
+	s, err := serverstore.GetSkill(db, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	serveSkillArchive(c, db, s)
 }
 
 // fileContentSkillAdmin returns one file's content from a market skill's

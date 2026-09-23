@@ -7,13 +7,17 @@
  *   - 激活时 `<html>` 上的唯一激活态属性被写入，关闭时被移除；
  *   - 两个面板互斥（打开 B 关掉 A，走 `dsh-panel-activate` 事件）；
  *   - 点侧边栏的行 ⇒ 自动让位；
- *   - Esc ⇒ 让位，但面板内开着真模态（`role=dialog aria-modal`）时不抢 Esc；
+ *   - Esc ⇒ 让位，但面板内开着真模态（`role=dialog` **或** `role=alertdialog`，
+ *     且 `aria-modal`）时不抢 Esc；
  *   - dispose 把容器/样式/监听全部收干净。
  *
  * ---- 变异验证 ----
  *   - 把容器隐藏写成行内 `element.style.display = 'none'` ⇒ 「默认隐藏靠样式表」红；
  *   - `activate()` 不派发 `dsh-panel-activate` ⇒ 「两个面板互斥」红；
  *   - `onKeyDown` 去掉 `role=dialog` 的闸 ⇒ 「模态开着时 Esc 归模态」红；
+ *   - `hasInnerModal` 去掉 `[role="alertdialog"]` 分支（审计 C-01 的旧判据）⇒
+ *     「alertdialog 同样成立」红（应用中心的确认框就是这个角色）；
+ *   - `hasInnerModal` 不判 `aria-modal` ⇒ 「非模态 dialog 不吃 Esc」红；
  *   - `dispose()` 不摘 keydown 监听 ⇒ 「dispose 之后 Esc 不报错/不再改属性」红。
  */
 import { act } from 'react'
@@ -145,6 +149,55 @@ describe('中列整页装载器', () => {
     dialog.remove()
     await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
     expect(activePanelId(document)).toBeNull()
+  })
+
+  /**
+   * 审计 C-01：`hasInnerModal` 必须**同时**认 `alertdialog`。
+   *
+   * 应用中心的两个二次确认块（下架 / 删除）写的正是 `role="alertdialog"`
+   * `aria-modal="true"` —— ARIA 里"需要用户立即确认"的正确角色。旧判据是
+   * `[role="dialog"][aria-modal="true"]`（**精确值**匹配，alertdialog 不命中），
+   * 于是确认框在屏上按 Esc 会把整个面板关掉：用户以为在取消确认，实际被踢回会话区、
+   * 丢掉目录的筛选与滚动位置。
+   *
+   * 变异验证：把 `hasInnerModal` 里的 `[role="alertdialog"][aria-modal="true"]`
+   * 删掉（回到旧判据）⇒ 本用例红。
+   */
+  it('Esc 让位对 alertdialog 同样成立（确认框在屏上时不许关掉整页）', async () => {
+    const handle = mount('apps', '应用中心')
+    await act(async () => { handle.activate() })
+    const confirm = document.createElement('div')
+    confirm.setAttribute('role', 'alertdialog')
+    confirm.setAttribute('aria-modal', 'true')
+    confirm.setAttribute('aria-label', '确认下架')
+    const confirmButton = document.createElement('button')
+    confirmButton.textContent = '确认下架'
+    confirm.appendChild(confirmButton)
+    document.body.appendChild(confirm)
+    // 真键盘路径：确认框把焦点移进自己的按钮，Esc 从**获得焦点的元素**上冒泡。
+    await act(async () => { confirmButton.focus() })
+    await act(async () => {
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(activePanelId(document), 'alertdialog 在屏上时装载器必须让位').toBe('apps')
+
+    confirm.remove()
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(activePanelId(document), '模态收起后 Esc 回到装载器').toBeNull()
+  })
+
+  it('非模态 dialog（没有 aria-modal）不吃 Esc —— 它可能同时存在多个，不算"那一层"', async () => {
+    const handle = mount('apps', '应用中心')
+    await act(async () => { handle.activate() })
+    for (const role of ['dialog', 'alertdialog']) {
+      const loose = document.createElement('div')
+      loose.setAttribute('role', role)
+      document.body.appendChild(loose)
+      await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+      expect(activePanelId(document), `${role} 缺 aria-modal ⇒ 装载器照常关面板`).toBeNull()
+      loose.remove()
+      await act(async () => { handle.activate() })
+    }
   })
 
   it('可见性回调只在真正变化时触发', async () => {

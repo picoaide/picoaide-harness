@@ -5,7 +5,7 @@ description: 'Frequently asked questions about PicoAide Harness: its relationshi
 
 ## What is the relationship between PicoAide Harness and DeepSeek Harness?
 
-PicoAide Harness is built on a fixed version of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (currently pinned at `dsh-v0.1.5-rc.2`). Upstream provides the core agent, plugin system, and Web UI; this project provides the desktop packaging, local service management, and enterprise-grade console. **The upstream source runs unchanged, without modifications** — upgrades only follow the version number and don't break local extensions.
+PicoAide Harness is built on a fixed version of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (currently pinned at `dsh-v0.1.6-alpha.2`; the source of truth is `upstream.json` at the repository root). Upstream provides the core agent, plugin system, and Web UI; this project provides the desktop packaging, local service management, and enterprise-grade console. **The upstream source runs unchanged, without modifications** — upgrades only follow the version number and don't break local extensions.
 
 ## Is this an official DeepSeek product?
 
@@ -53,7 +53,9 @@ The task board and scheduled jobs overlapped semantically, and it was **merged i
 
 ## Can I install DSH plugins?
 
-Yes. From a system shell, run `dsh plugin --profile desktop add <plugin>` / `remove` / `update` (the app runs the fixed desktop profile, with no terminal/Profile-switch tray entry); specify one explicitly with `--profile <name>`. The app must be restarted after plugin changes.
+Third-party plugins go through the profile's **user patch layer**: edit `~/.picoaide-harness/cordis.patch.yml`, append one line in Loader patch syntax, and restart the app (details in [Desktop client](/en/desktop/), "Plugin management").
+
+You **cannot** use `dsh plugin --profile desktop …`: the `desktop` profile is managed exclusively by the desktop application, so the CLI rejects that profile outright (`profile "desktop" is managed exclusively by the Electron application`), and the app exposes no terminal or Profile switcher.
 
 ## Do the Desktop profile and an existing web profile sync automatically?
 

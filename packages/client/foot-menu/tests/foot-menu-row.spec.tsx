@@ -278,6 +278,29 @@ describe('浮层：关闭路径与"关闭 ≠ 卸载"', () => {
     dialog.remove()
   })
 
+  /**
+   * 审计 C-01 的同一个判据在本调用点也必须成立：`role="alertdialog"` 是
+   * "需要用户立即确认"的正确角色（应用中心的下架/删除确认块用的就是它），而
+   * `[role="dialog"]` 是精确值匹配、不命中它。这里与装载器共用
+   * `hasInnerModal`（`@picoaide/dsh-panel-surface/client`），**不许**各写一份。
+   *
+   * 变异验证：`hasInnerModal` 去掉 alertdialog 分支（或本文件改回内联选择器）⇒ 红。
+   */
+  it('alertdialog 开着时也不抢 Esc（与装载器同一份判据）', async () => {
+    add('cron', -10)
+    await render(true)
+    await open()
+    const confirm = document.createElement('div')
+    confirm.setAttribute('role', 'alertdialog')
+    confirm.setAttribute('aria-modal', 'true')
+    document.body.appendChild(confirm)
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(menu().style.display, 'alertdialog 在屏上时浮层不许自己关掉').toBe('block')
+    confirm.remove()
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(menu().style.display, '模态收起后 Esc 回到浮层').toBe('none')
+  })
+
   it('外部 pointerdown 关闭；行内部的 pointerdown 不关闭', async () => {
     add('cron', -10)
     await render(true)

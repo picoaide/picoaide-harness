@@ -9,8 +9,11 @@ import { applyPinnedFingerprintsFromEnv, defaultTlsStorePath, installCertificate
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
 import {
-  computeSkillContentHash,
+  describeArchiveFailure,
+  INSTALL_VERSION_FILE,
   installSkillArchive,
+  isInstalledSkillDirty,
+  isStoreProvenance,
   listInstalledSkills,
   listLocalSkills,
   packSkill,
@@ -1015,7 +1018,7 @@ export function loginServerSwitchConflict(current: Session | null, requestedServ
 export async function readInstalledPresetVersion(presetDir: string): Promise<string | undefined> {
   const prov = await readProvenance(presetDir)
   if (prov !== undefined && prov.version !== '') return prov.version
-  const marker = await readFile(join(presetDir, '.install-version'), 'utf8').then(s => s.trim()).catch(() => undefined)
+  const marker = await readFile(join(presetDir, INSTALL_VERSION_FILE), 'utf8').then(s => s.trim()).catch(() => undefined)
   return marker !== undefined && marker !== '' ? marker : undefined
 }
 
@@ -1034,6 +1037,50 @@ export function installedVersionFor(
   presetVersions: ReadonlyMap<string, string | undefined>,
 ): string | undefined {
   return kind === 'skill' ? skillVersions.get(name) : presetVersions.get(name)
+}
+
+/**
+ * 按 kind 选"本机那一份的来源"表（审计 2026-09-23 A2/A3）。
+ *
+ * 客户端用它决定"更新到 vX / 卸载"要不要先弹确认条：`store` = 能力中心装的，
+ * 直接替换/删除；`local` = 本机自制（或缺溯源），必须先由用户确认，宿主也会
+ * 在缺 `?overwrite=1` 时以 409 `LOCAL_CONTENT` 拒绝。
+ * @param kind - 目录行的 kind('skill' | 'agent')。
+ * @param name - 目录行名。
+ * @param skillOrigins - 技能来源表。
+ * @param presetOrigins - 共享 Agent 来源表。
+ * @returns `'store'` / `'local'`，未知（未安装/读不到）为 undefined。
+ */
+export function installedOriginFor(
+  kind: string,
+  name: string,
+  skillOrigins: ReadonlyMap<string, 'store' | 'local'>,
+  presetOrigins: ReadonlyMap<string, 'store' | 'local'>,
+): 'store' | 'local' | undefined {
+  return kind === 'skill' ? skillOrigins.get(name) : presetOrigins.get(name)
+}
+
+/**
+ * 解析本机路由里的一格 `decodeURIComponent`：**畸形百分号转义不再抛穿 handler**。
+ *
+ * 为什么必须兜住（第六轮审计 R6-B 的 P3，与 wasm-apps 的 FIX-40 同一条纪律）：
+ * `decodeURIComponent('%zz')` 抛 `URIError`，而本模块的 handler 是 async 的 ——
+ * 异常会一路抛到上游 webserver，被兜底成 `writeHead(400); res.end()`（**无 body**）。
+ * 而本机 API 的错误口径是"一律 JSON 信封"（第一消费者是 AI 的 http 工具/脚本）：
+ * 一个空 body 等于让它完全无法判断该改什么。
+ *
+ * 合法客户端不会构造这种路径（面板一律 `encodeURIComponent`），所以这条不是安全
+ * 边界，而是**契约完整性**：四个上游 JSON 分支之外，宿主自己也要守同一条。
+ * @param raw - 正则捕获到的原始段（未解码）。
+ * @returns 解码结果；非法转义 ⇒ `null`（调用方回 400 具名信封）。
+ */
+export function decodePathSegment(raw: string | undefined): string | null {
+  if (raw === undefined) return null
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -1583,7 +1630,21 @@ export function apply(ctx: Context, config: Config): void {
             const status = err instanceof AuthError
               ? (err.kind === 'network' ? 502 : 401)
               : (err instanceof ApiError ? 400 : 500)
-            json(res, status, { error: err instanceof Error ? err.message : 'change password failed' })
+            // 稳定错误码（第六轮审计 R6-B 的 P3）：账户卡片此前靠**嗅探服务端中文原文**
+            // （`message.includes('原密码')`）判断"是不是旧密码错了"，而服务端另有
+            // 一条 400 `"新密码不能与原密码相同"` 也含这串 —— 文案一改就静默退化。
+            // 这里回一个与文案无关的码，判据落在 `code` 上（扁平 `{error, code}` 是本
+            // 文件其余写面的既有形状，见 describeArchiveFailure 的消费点）。
+            //
+            // 取值：`NETWORK`（连接层，502）/ `AUTH_FAILED`（服务端拒绝了本次凭据，
+            // 对本端点即"原密码错误"，401）/ `ApiError.code`（如 `HTTP_400`，校验类）/ `INTERNAL`。
+            // 已认账的边界：服务端 401 分两种码（`AUTH_FAILED` 原密码错 / `AUTH` 令牌失效），
+            // 而连接器层把两者都收敛成 `AuthError('invalid_credentials')` ⇒ 这里无法再分，
+            // 统一记 `AUTH_FAILED`（要彻底分开需连接器透传服务端 code，属独立改动）。
+            const code = err instanceof AuthError
+              ? (err.kind === 'network' ? 'NETWORK' : 'AUTH_FAILED')
+              : (err instanceof ApiError ? err.code : 'INTERNAL')
+            json(res, status, { error: err instanceof Error ? err.message : 'change password failed', code })
           }
         },
       }),
@@ -1764,7 +1825,20 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'GET' && !writeGuard()) {
             return json(res, 403, { error: 'auditor cannot modify' })
           }
-          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const pathname = url.pathname
+          /**
+           * **显式覆盖确认标记**（审计 2026-09-23 A2/A3/A15）。
+           *
+           * 面板在用户点过确认条之后才把 `?overwrite=1` 拼进 URL；宿主据此决定
+           * 要不要拒绝"无确认的整树替换 / 删除本机内容"。契约（两端共用）：
+           *  - 目标目录**不是**能力中心装的（无 provenance / 渠道非商店来源 /
+           *    appId 对不上）⇒ 没有这个标记一律 409 `LOCAL_CONTENT`；
+           *  - 目标目录是商店来源 ⇒ 不需要标记（正常更新/重装/卸载）。
+           * ⚠️ 它与历史上的 `?force=1` **不是**一回事：那一个宿主从来没读过，
+           * 是纯死面（R2-SK-5 记录在案）；这一个两端都必须读/写。
+           */
+          const overwrite = url.searchParams.get('overwrite') === '1'
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
               const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token, locale: hostLocale(req) })
@@ -1812,7 +1886,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (builtinInstallMatch !== null) {
-            const name = decodeURIComponent(builtinInstallMatch[1]!)
+            const name = decodePathSegment(builtinInstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1848,6 +1923,8 @@ export function apply(ctx: Context, config: Config): void {
                 // 溯源(D6)：标记为 builtin，与市场/组织区分开。
                 channel: 'builtin',
                 server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
               })
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
@@ -1855,10 +1932,41 @@ export function apply(ctx: Context, config: Config): void {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              // 与市场安装同口径：校验/解包类拒绝是客户端错误，网关/IO 是上游错误。
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码的唯一实现（审计 A12/A13）：拒绝 422、
+              // 需要确认 409、系统级错误 502 且文案里没有本机路径。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
+            }
+            return
+          }
+          // POST /api/pico/skills/builtin/:name/uninstall -> local removal.
+          // 审计 2026-09-23 A6：内置技能此前**只能装不能卸**（没有这条路由），
+          // 装完在「我的」里变成一张本地卡、只有「上传」按钮，产品内没有任何
+          // 入口能移除它。与市场卸载同口径：本地删除 + 来源校验 + 显式确认。
+          const builtinUninstallMatch = req.method === 'POST'
+            ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/uninstall$/u.exec(pathname)
+            : null
+          if (builtinUninstallMatch !== null) {
+            const name = decodePathSegment(builtinUninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
+            try {
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              // Purely local operation — no gateway round-trip needed.
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
+              json(res, 200, { ok: true, name })
+            } catch (cause) {
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -1866,7 +1974,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1896,18 +2005,25 @@ export function apply(ctx: Context, config: Config): void {
                 // 溯源(D6):记录渠道与来源服务端,客户端据此显示归属。
                 channel: 'market',
                 server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
               })
+              // 审计 2026-09-23 A11：**回传真实安装版本**。市场归档端点只按
+              // "当前 approved 最高版"取（服务端不支持按版本安装），请求里带的
+              // 版本号与真实落盘版本可能不同；面板据这里的 `version` 记账，而不是
+              // 据"用户点的那一个版本"。
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              // Install refusals (checksum, unsafe archive, no SKILL.md) are
-              // client errors; gateway/IO failures are upstream errors.
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码的唯一实现（拒绝 422 / 需确认 409 / 系统级 502）。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -1915,7 +2031,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1923,11 +2040,15 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               // Purely local operation — no gateway round-trip needed.
-              await uninstallSkill(resolveSkillsDir(), name)
+              // `overwrite` = 用户已确认删除本机自制内容（审计 A3）。
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -1935,7 +2056,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
-          const name = decodeURIComponent(archiveMatch[1]!)
+          const name = decodePathSegment(archiveMatch[1])
+          if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
           // B8(2026-09-01):归档下载分支此前未校验 name——解码后的名字会
           // 原样拼进 Content-Disposition(如 %22 → `"` 产生畸形头)。与
           // install/uninstall 分支对齐,先验名再放行。
@@ -2002,6 +2124,16 @@ export function apply(ctx: Context, config: Config): void {
           }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           const presetsDir = resolvePresetsDir()
+          /**
+           * 覆盖/删除本机自制内容的显式确认标记（审计 2026-09-23 N2）。
+           *
+           * 与技能侧**同一份契约**（`/api/pico/skills*`、`/api/pico/shared-skills*`）：
+           * 面板只在用户点过确认条 / 卸载第二段确认之后才把 `?overwrite=1` 拼进 URL。
+           * 此前这条路由**不读任何 query**，而 `installPresetArchive` 对已存在目录
+           * 一律拒收 ⇒ 面板的「更新智能体」必然失败（`preset "x" already exists locally`），
+           * 同名的覆盖确认整条是死面。
+           */
+          const overwrite = new URL(req.url ?? '/', 'http://localhost').searchParams.get('overwrite') === '1'
 
           // GET /api/pico/agent-presets -> gateway catalog + installed + local.
           if (pathname === '/api/pico/agent-presets' && req.method === 'GET') {
@@ -2057,15 +2189,24 @@ export function apply(ctx: Context, config: Config): void {
                 // the code-appropriate status (NAME_TAKEN→409, PENDING_LIMIT→429).
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
                 // 版本冲突各有语义(409/403)。
+                // 2026-09-23(第五轮 R5-B-1 跨泳道):**同时透传稳定错误码** ——
+                // 状态码不是一个可判定的判据(409 同时是 NAME_TAKEN / VERSION_* /
+                // CONFLICT / ARCHIVE_CLEARED / APP_DELISTED),面板按 code 才能把
+                // 「已下架冻结」与「重名」分开说(见 uploadFailureText)。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403
                       : cause.code === 'NOT_FOUND' ? 404
                         : 422)
-                return json(res, status, { error: cause.message })
+                return json(res, status, { error: cause.message, code: cause.code })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+              // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
+              // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2075,7 +2216,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validatePresetId(name)
             } catch (cause) {
@@ -2101,6 +2243,8 @@ export function apply(ctx: Context, config: Config): void {
                 name, archive: content, checksum, presetsDir,
                 // 溯源(D6):与技能同构,记录版本/渠道/来源服务端。
                 version: presetVersion, channel: 'org', server: s.serverURL,
+                // 覆盖确认（审计 2026-09-23 N2）：与技能同一条 `?overwrite=1` 契约。
+                overwrite,
               })
               json(res, 200, { ok: true, name })
             } catch (cause) {
@@ -2108,9 +2252,13 @@ export function apply(ctx: Context, config: Config): void {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|agent\.cordis\.yml|invalid preset id|link entry|too large|traversal|empty path|already exists/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码走**唯一实现**（审计 2026-09-23 A12：这里此前
+              // 是裸分类 + 原文，系统级 errno 会把本机绝对路径透给 UI）。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2120,13 +2268,18 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
-              await uninstallPreset(presetsDir, name)
+              // 与技能同口径（审计 A3/N2）：本机自制内容没有 `?overwrite=1` 一律拒收。
+              await uninstallPreset(presetsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2136,7 +2289,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/archive$/u.exec(pathname)
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
-          const name = decodeURIComponent(archiveMatch[1]!)
+          const name = decodePathSegment(archiveMatch[1])
+          if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
           // B8(2026-09-01):与 install/uninstall 对齐,归档下载分支先验名再拼
           // Content-Disposition(此前解码后的 quote 会产出畸形头)。
           try {
@@ -2196,7 +2350,10 @@ export function apply(ctx: Context, config: Config): void {
           if (req.method !== 'GET' && !writeGuard()) {
             return json(res, 403, { error: 'auditor cannot modify' })
           }
-          const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+          const sharedUrl = new URL(req.url ?? '/', 'http://localhost')
+          const pathname = sharedUrl.pathname
+          // 显式覆盖确认标记：审计 A2/A3/A15 的两端契约，见 /api/pico/skills 分支的注释。
+          const overwrite = sharedUrl.searchParams.get('overwrite') === '1'
           const skillsDir = resolveSkillsDir()
 
           if (pathname === '/api/pico/shared-skills' && req.method === 'GET') {
@@ -2251,15 +2408,24 @@ export function apply(ctx: Context, config: Config): void {
               if (cause instanceof ApiError) {
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
                 // 版本冲突各有语义(409/403),客户端按状态码分别提示。
+                // 2026-09-23(第五轮 R5-B-1 跨泳道):**同时透传稳定错误码** ——
+                // 409 是多个码共用的状态,面板必须按 code 才能把「已下架冻结」
+                // (APP_DELISTED)与「重名」(NAME_TAKEN)分开说,与 agent-presets
+                // 那条上传代理逐字同形。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403
                       : cause.code === 'NOT_FOUND' ? 404
                         : 422)
-                return json(res, status, { error: cause.message })
+                return json(res, status, { error: cause.message, code: cause.code })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /too large|过大/u.test(message) ? 413 : 422, { error: message })
+              // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
+              // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2269,8 +2435,10 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
-            const version = decodeURIComponent(installMatch[2]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
+            const version = decodePathSegment(installMatch[2])
+            if (version === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -2292,16 +2460,29 @@ export function apply(ctx: Context, config: Config): void {
               }
               const checksum = upstream.headers.get('x-skill-checksum') ?? undefined
               const ver = upstream.headers.get('x-skill-version') ?? version
-              await installSkillArchive({ name, archive: content, checksum, skillsDir, version: ver, channel: 'org', server: s.serverURL })
-              json(res, 200, { ok: true, name, version: ver })
+              const result = await installSkillArchive({
+                name,
+                archive: content,
+                checksum,
+                skillsDir,
+                version: ver,
+                channel: 'org',
+                server: s.serverURL,
+                // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
+                overwrite,
+              })
+              // 真实落盘版本以响应为准（审计 A11：请求里的版本可能被服务端忽略）。
+              json(res, 200, { ok: true, name, version: result.version ?? ver })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|SKILL\.md|invalid skill name|link entry|too large|traversal|empty path/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2311,13 +2492,29 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
+            // 名字先于安装器校验（R4-B-6）：另外三条写面
+            // （`/api/pico/skills/:name/{install,uninstall}`、
+            // `/api/pico/skills/builtin/:name/{install,uninstall}`）都在进安装器**之前**
+            // 调 `validateSkillName` 并回 400 —— 只有这一条把校验留给 `uninstallSkill`
+            // 内部抛，于是同一个客户端面板对同一类输入看到 422 + code（走
+            // `describeArchiveFailure` 的 typed 分支）。非法名是**请求有问题**，
+            // 不是"内容有问题"：与三条兄弟分支对齐到 400（状态码语义唯一）。
             try {
-              await uninstallSkill(skillsDir, name)
+              validateSkillName(name)
+            } catch (cause) {
+              return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
+            }
+            try {
+              await uninstallSkill(skillsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2368,6 +2565,9 @@ export function apply(ctx: Context, config: Config): void {
             // installedVersion:优先读安装器写的 .install-version 标记
             // (可靠);否则退回 SKILL.md frontmatter 的 version(best-effort)。
             const localSkillVersions = new Map<string, string | undefined>()
+            /** 本机那一份的来源：'store'（能力中心装的）/'local'（用户自制）——审计 A2/A3。 */
+            const skillOrigins = new Map<string, 'store' | 'local'>()
+            const presetOrigins = new Map<string, 'store' | 'local'>()
             // 审计 2026-09-12 P1-6:共享 Agent 的已装版本此前**恒为 undefined**
             // (`kind === 'skill' ? localSkillVersions.get(name) : undefined`),而
             // 客户端 `hasUpdateFor()` 一见 undefined 就返回 false ⇒ 能力中心
@@ -2382,17 +2582,19 @@ export function apply(ctx: Context, config: Config): void {
             for (const r of localSkills) {
               const dir = join(skillsDir, r.name)
               const prov = await readProvenance(dir)
+              // 来源判定（审计 A2/A3）：面板据 installedOrigin 决定"更新/卸载要不要确认"。
+              // 与安装器/卸载器的判据同一份实现（isStoreProvenance）。
+              skillOrigins.set(r.name, isStoreProvenance(prov, r.name) ? 'store' : 'local')
               if (prov !== undefined) {
-                let dirty = false
-                if (prov.archiveChecksum !== undefined) {
-                  const now = await computeSkillContentHash(dir).catch(() => undefined)
-                  dirty = now !== undefined && now !== prov.archiveChecksum
-                }
+                // R4-B-3：dirty 的**唯一实现**在安装器里（isInstalledSkillDirty）——
+                // 面板的徽章与宿主的覆盖/删除闸门必须消费同一份事实，否则会出现
+                // "面板显示「已本地修改」、宿主放行整树覆盖"的两端漂移。
+                const dirty = await isInstalledSkillDirty(dir, prov)
                 provenance.set(r.name, { appId: prov.appId, channel: prov.channel, version: prov.version, dirty })
                 localSkillVersions.set(r.name, prov.version !== '' ? prov.version : r.version)
                 continue
               }
-              const marker = join(dir, '.install-version')
+              const marker = join(dir, INSTALL_VERSION_FILE)
               const mv = await readFile(marker, 'utf8').then(s => s.trim()).catch(() => undefined)
               localSkillVersions.set(r.name, mv ?? r.version)
             }
@@ -2401,8 +2603,11 @@ export function apply(ctx: Context, config: Config): void {
             // 「frontmatter 兜底」这一层——读不到就留 undefined,由客户端
             // hasUpdateFor 保守判 false(宁可不提示,不可误报)。
             for (const l of localPresets) {
-              const v = await readInstalledPresetVersion(join(presetsDir, l.name))
+              const dir = join(presetsDir, l.name)
+              const v = await readInstalledPresetVersion(dir)
               if (v !== undefined) localPresetVersions.set(l.name, v)
+              // 与技能同一份来源判据（共享 Agent 的 provenance 同格式）。
+              presetOrigins.set(l.name, isStoreProvenance(await readProvenance(dir), l.name) ? 'store' : 'local')
             }
 
             // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
@@ -2421,28 +2626,51 @@ export function apply(ctx: Context, config: Config): void {
                 description: l.description ?? '', author: '',
                 // 归属与本地改动(D6):面板据此显示「来自市场 · vX · 已本地修改」。
                 ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty: prov.dirty },
+                // 本机那一份的来源（审计 A2/A3）。builtin/plugin 的本地行靠它渲染「卸载」。
+                installedOrigin: skillOrigins.get(l.name) ?? 'local',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+                // 下架标记（第五轮审计 R5-B-1，2026-09-23 追加授权）：服务端在**作者自己的行**
+                // 上下发权威字段 `delisted`（`capabilities.CapabilityItem.Delisted`，见
+                // server/internal/capabilities/capabilities.go）。它必须与 status/reason 一起
+                // 透传到本机行 —— 否则"下架"这个状态在面板上**永远看不到**：本机自制行没有
+                // 商店溯源、服务端也不下发 `enabled`，客户端自己推不出来（这正是本条 finding
+                // 作者面的成因）。无匹配行时不写这个键（未知 ≠ 未下架；JSON 序列化会丢掉
+                // undefined，面板读到的是"服务端没说"）。
+                delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
+                // 归属判据（第六轮审计 R6-B-1）：**本机这一份算不算当前账号的**。
+                // 技能库是机器作用域的（`<DSH_HOME>/skills`，不按账号分目录），同机换号
+                // 被支持 ⇒ 磁盘上这一份可能是**别的账号**装的。宿主能证明的只有一件事：
+                // 服务端 `?source=own`（author-own 任意状态）里有没有同名同 kind 的行 ——
+                // 有 ⇒ 这个名字属于当前账号（`'mine'`）；没有 ⇒ 证明不了（`'unknown'`，
+                // 既可能是别人装的、也可能是我装的别人的内容）。
+                // ⚠️ 面板据此**禁止**对 `'unknown'` 的行给出"删除本机那一份"的动作
+                // （见 CapabilityCenterPanel 的 `isDelistedItem` 第 3 条）—— 那是一个
+                // 跨账号的破坏性动作。**不发 `'other'`**：没有任何事实能证明"是第三方装的"。
+                localOwnership: match !== undefined ? 'mine' : 'unknown',
               })
             }
             for (const l of localPresets) {
               const match = items.find(i => (i as { kind?: string }).kind === 'agent' && (i as { name?: string }).name === l.name)
               const dir = join(presetsDir, l.name)
               const prov = await readProvenance(dir)
-              let dirty = false
-              if (prov?.archiveChecksum !== undefined) {
-                const now = await computeSkillContentHash(dir).catch(() => undefined)
-                dirty = now !== undefined && now !== prov.archiveChecksum
-              }
+              // 与技能同一份 dirty 判据（唯一实现在安装器里，R4-B-3）。
+              const dirty = await isInstalledSkillDirty(dir, prov)
               localRows.push({
                 kind: 'agent', source: 'local', name: l.name, displayName: l.displayName ?? l.name,
                 version: prov?.version !== undefined && prov.version !== '' ? prov.version : '1.0.0',
                 description: l.description ?? '', author: '',
                 ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty },
+                installedOrigin: presetOrigins.get(l.name) ?? 'local',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
                 reason: match !== undefined ? (match as { reason?: string }).reason : undefined,
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
+                // 与技能面同一条透传（R5-B-1）：智能体预设的作者行同样带服务端下发的 delisted。
+                delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
+                // 与技能面同一条归属判据（R6-B-1，逐字同源）：预设目录同样是机器作用域的
+                // （`<DSH_HOME>/.agent-presets`），证明不了归属就不允许面板给删除动作。
+                localOwnership: match !== undefined ? 'mine' : 'unknown',
               })
             }
 
@@ -2475,6 +2703,21 @@ export function apply(ctx: Context, config: Config): void {
                       localSkillVersions,
                       localPresetVersions,
                     ),
+                    // 来源（审计 A2/A3）：与 enriched 分支同源（同一个 helper）。
+                    installedOrigin: installedOriginFor(
+                      (i as { kind?: string }).kind ?? '',
+                      (i as { name?: string }).name ?? '',
+                      skillOrigins,
+                      presetOrigins,
+                    ),
+                    // 2026-09-02 归属权 + 第四轮 R4-B-14：`is_owner` **必须**在这里也透出。
+                    // 面板的上传预检是 `clash.isOwner !== true ⇒ 直接提示「名称已被占用」、
+                    // 不发请求`（CapabilityCenterPanel 的 upload()），而它扫的是当前
+                    // `items`。市场分区取数失败/未回来时（applySectionRows 会丢掉旧的
+                    // 非本地行），「我的」里只剩这一份**没有 isOwner** 的商店行 ⇒ 作者上传
+                    // **自己的**技能被本地预检挡住。字段来自服务端
+                    // `capabilities.CapabilityItem.IsOwner`（json: is_owner），两边同源。
+                    isOwner: (i as { is_owner?: boolean }).is_owner ?? false,
                     // 0059 官方字段透传(与 enriched 同构)。
                     official: (i as { official?: boolean }).official ?? false,
                     downloads: Number((i as { downloads?: number }).downloads ?? 0),
@@ -2513,6 +2756,8 @@ export function apply(ctx: Context, config: Config): void {
                 score: Number((i as { score?: number }).score ?? 0),
                 installed,
                 installedVersion,
+                // 来源（审计 A2/A3）：只对"本机真的装了"的行给，未装时 undefined。
+                installedOrigin: installed ? installedOriginFor(kind, name, skillOrigins, presetOrigins) : undefined,
                 hasUpdate: false, // 客户端按 versions 与 installedVersion 计算
               }
             })

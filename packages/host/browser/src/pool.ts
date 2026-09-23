@@ -136,6 +136,15 @@ class PoolMutex {
     signal?: AbortSignal,
     /** 用户闸等待预算（ms，<=0 表示不设限）。 */
     gateBudgetMs = 0,
+    /**
+     * "等前一个操作"的预算（ms，<=0 = 不设限）—— R4-B-15（2026-09-23 审计）。
+     *
+     * 排队曾经只可取消、没有时间上限：前一个操作合法占用全局锁 40s 时，排在后面
+     * 的工具会在排队中越过自己的 deadline，工具自己的诊断被上游换成笼统超时。
+     * 预算由调用方按**本次调用剩余的工具额度**算出（runtime），到点抛可读的
+     * `timed out waiting for the running browser operation`。
+     */
+    queueBudgetMs = 0,
   ): Promise<void> {
     const prev = this.tail
     // The tool deadline is armed when the model issues the call, so queue time
@@ -150,7 +159,8 @@ class PoolMutex {
     try {
       // Waiting for the previous operation must be cancellable too: a wedged
       // predecessor used to block every later call forever (2026-09-08 P0-4).
-      await raceAbort(prev, gate, signal, this.locale)
+      // R4-B-15: and it must be BOUNDED — see `queueBudgetMs`.
+      await raceAbort(withQueueBudget(prev, queueBudgetMs, this.locale), gate, signal, this.locale)
       while (gate()) {
         if (signal !== undefined && signal.aborted) {
           throw browserError('window-controlled', gateRefusalWith(
@@ -216,6 +226,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const t = setTimeout(resolve, Math.max(0, ms))
     t.unref?.()
+  })
+}
+
+/**
+ * Bound "waiting for the previous operation" by a time budget (R4-B-15).
+ *
+ * The predecessor itself is untouched — this only decides how long THIS caller
+ * keeps waiting for the mutex it has not acquired yet. On expiry the caller gets
+ * a readable, actionable error instead of being silently dragged past its own
+ * tool deadline; the queue stays consistent because `run`'s `finally` still
+ * releases this caller's own slot.
+ * @param promise - the predecessor's completion promise (`mutex.tail`).
+ * @param budgetMs - wait budget in ms; `<= 0` means "no bound" (returned as-is).
+ * @param locale - locale provider for the refusal text.
+ * @returns a promise that settles like `promise`, or rejects on budget expiry.
+ */
+function withQueueBudget(promise: Promise<void>, budgetMs: number, locale: () => HostLocale): Promise<void> {
+  if (budgetMs <= 0) return promise
+  return new Promise<void>((resolve, reject) => {
+    const seconds = Math.max(1, Math.round(budgetMs / 1000))
+    const timer = setTimeout(() => {
+      reject(browserError('timeout', hostCopy(
+        locale(),
+        `browser: 等待前一个浏览器操作超时（已等 ${String(seconds)}s）—— 上一个 browser_* 调用仍在运行，请等它结束或重试`,
+        `browser: timed out waiting for the running browser operation (waited ${String(seconds)}s) — the previous browser_* call is still running; wait for it to finish or retry`,
+      )))
+    }, budgetMs)
+    timer.unref?.()
+    promise.then(
+      () => { clearTimeout(timer); resolve() },
+      (error: unknown) => { clearTimeout(timer); reject(error) },
+    )
   })
 }
 
@@ -292,7 +334,17 @@ export class TabPool {
    * Run one AI operation under the global serial mutex with the user-gate
    * check; marks the pool busy while running/queued.
    */
-  async withOperation<T>(tool: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async withOperation<T>(
+    tool: string,
+    work: () => Promise<T>,
+    signal?: AbortSignal,
+    /**
+     * How long this call may wait for the mutex before giving up (ms) — the
+     * caller derives it from what is left of the tool deadline (R4-B-15);
+     * omitted/`0` keeps the historical "wait as long as it takes" behavior.
+     */
+    queueBudgetMs = 0,
+  ): Promise<T> {
     if (this.busyDepth === 0) this.busyTool = tool
     this.busyDepth++
     this.emit('busy')
@@ -303,6 +355,7 @@ export class TabPool {
         () => this.windowControlled,
         signal,
         this.options.userGateTimeoutMs,
+        queueBudgetMs,
       )
       return result
     } finally {

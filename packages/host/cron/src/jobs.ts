@@ -15,7 +15,7 @@
  * (send a message to an existing session) kinds were removed when the task
  * board was merged into the scheduler.
  */
-import { nextRunAtMs } from './cron.ts'
+import { nextRunAtMsWithGaps, type WallClockGap } from './cron.ts'
 
 /** Result states of one triggered execution (a trigger record, not an agent turn). */
 export type ExecutionResult = 'succeeded' | 'failed' | 'cancelled'
@@ -113,8 +113,18 @@ export interface JobUpdatePatch {
   enabled?: boolean
 }
 
-export function isExecutionResult(value: unknown): value is ExecutionResult {
-  return value === 'succeeded' || value === 'failed' || value === 'cancelled'
+/**
+ * Whether a job name is usable (2026-09-23 R3-B3 F3 / B-4).
+ *
+ * ONE judgement for every surface that accepts a name: the browser action
+ * protocol (`validInput` / `validPatch` in protocol.ts) and the model-facing
+ * `cron_create` tool. The empty string and whitespace-only both count as
+ * missing — the tool used to `trim()` a blank name and store `''`, so the job
+ * card, `cron_list`, and the session title the job spawns were all nameless
+ * while the GUI refused the very same input.
+ */
+export function isUsableJobName(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
 }
 
 export function isCronJobAction(value: unknown, options: CronActionOptions = {}): value is CronJobAction {
@@ -156,15 +166,40 @@ export function settleExecution(
   }
 }
 
-/** Build a new job record from validated input. */
+/**
+ * Canonical account key for job ownership (2026-09-23 CR-7).
+ *
+ * The identity the enterprise session hands the Host is the **typed login
+ * string** (`server-connector/auth.ts` builds `Session.username` from the login
+ * form field), while the server resolves accounts with `lower(username) =
+ * lower(?)` and returns the canonical spelling only in the login response —
+ * which the client ignores. Using the raw text as the owner key splits one
+ * account into two keys (`Alice` vs `alice`): after signing in with a different
+ * spelling the account no longer sees its own jobs **and the scheduler stops
+ * running them**, while the records stay on disk.
+ *
+ * Normalising to the server's own uniqueness rule (trim + lower) keeps a single
+ * key per account. It is deliberately a *comparison-and-stamp* rule instead of a
+ * destructive rewrite: records stamped before this change keep matching without
+ * a migration, so no data can be lost by skipping it (`load()` converges the
+ * stored spelling on the next successful write).
+ */
+export function normalizeOwner(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return key === '' ? undefined : key
+}
+
+/** Build a new job record from validated input. The owner is stamped in its canonical form. */
 export function createJob(id: string, input: NewJobInput, now: number, owner?: string): JobRecord {
+  const key = normalizeOwner(owner)
   return {
     id,
     name: input.name,
     cron: input.cron,
     action: input.action,
     enabled: input.enabled ?? false,
-    ...(owner === undefined || owner.length === 0 ? {} : { owner }),
+    ...(key === undefined ? {} : { owner: key }),
     executions: [],
     createdAt: now,
     updatedAt: now,
@@ -174,9 +209,26 @@ export function createJob(id: string, input: NewJobInput, now: number, owner?: s
 /** Whether a job is visible to (and executable by) the given account. */
 export function jobVisibleTo(job: JobRecord, username: string | null | undefined): boolean {
   // Legacy records (no owner) stay visible to every session; owner-scoped
-  // records are visible only to their creating account.
-  if (job.owner === undefined) return true
-  return username !== undefined && username !== null && username.length > 0 && job.owner === username
+  // records are visible only to their creating account. The comparison runs on
+  // the canonical key (CR-7), so a record stamped with `Alice` still matches
+  // the same account typed as `alice`.
+  const owner = normalizeOwner(job.owner)
+  if (owner === undefined) return true
+  return normalizeOwner(username) === owner
+}
+
+/**
+ * Whether the job has a run that has not settled yet.
+ *
+ * The single judgement behind "a live run must not lose its record"
+ * (2026-09-23 CR-2): the ledger refuses to delete such a job, the agent tools
+ * report it, and the panel disables its delete button. Deleting does not cancel
+ * the spawned session, and settling a deleted job's execution can only drop the
+ * record (session id, prompt, timings, result) — so the delete is refused while
+ * the run is live.
+ */
+export function jobIsRunning(job: Pick<JobRecord, 'executions'>): boolean {
+  return job.executions.some(execution => execution.endedAt === undefined)
 }
 
 /** Apply a validated patch to an existing job record (immutable update). */
@@ -190,12 +242,32 @@ export function updateJob(job: JobRecord, patch: JobUpdatePatch, now: number): J
   }
 }
 
+/** One roll-forward: the new instant plus the occurrences the roll skipped (DST gaps). */
+export interface NextRunRoll {
+  at: number | undefined
+  gaps: readonly WallClockGap[]
+}
+
 /**
  * Roll the job's next-run instant strictly past `fromMs`. When the job has
  * no nextRunAt yet (freshly created or just re-enabled), seed it from
  * `fromMs`.
  */
 export function rollNextRun(job: JobRecord, fromMs: number): number | undefined {
+  return rollNextRunWithGaps(job, fromMs).at
+}
+
+/**
+ * Same roll as {@link rollNextRun}, and additionally reports every wall-clock
+ * occurrence the roll walked past because that local time does not exist in
+ * the host timezone (2026-09-23 R3-B3 F2 / B-5). The ledger records them, so a
+ * DST gap shows up as "this occurrence was skipped" instead of as a job that
+ * silently did not run for a day.
+ *
+ * The scan base is the same one `rollNextRun` uses: an existing `nextRunAt`
+ * acts as a floor, so a roll can never fire or skip an occurrence twice.
+ */
+export function rollNextRunWithGaps(job: JobRecord, fromMs: number): NextRunRoll {
   const base = job.nextRunAt === undefined ? fromMs : Math.max(job.nextRunAt, fromMs)
-  return nextRunAtMs(job.cron, base)
+  return nextRunAtMsWithGaps(job.cron, base)
 }

@@ -8,17 +8,26 @@
  * command is simply never spawned — the connector row stays "需要授权" until
  * the user decides.
  *
- * Storage: `<user scope>/connectors/.mcp-approvals.json`, mode 0600, written
- * atomically (tmp + rename). The leading dot keeps the name outside the
- * connector-id charset, so it can never collide with `<id>.json` credentials.
- * A missing or corrupt file reads as "nothing approved" (fail closed).
+ * Storage: `<user scope>/servers/<server-hash>/connectors/.mcp-approvals.json`,
+ * mode 0600, written atomically (tmp + rename). The leading dot keeps the name
+ * outside the connector-id charset, so it can never collide with `<id>.json`
+ * credentials. A missing or corrupt file reads as "nothing approved" (fail
+ * closed).
+ *
+ * Why this ledger carries the server dimension too (R6-B-2, 2026-09-24): the
+ * stdio commands it vouches for are issued by the SERVER's catalog, so "this
+ * machine already agreed to run this command" is a statement about ONE tenant's
+ * administrator. A second deployment is a second administrator; reusing the
+ * approval there would run a command the user never saw for that tenant. The
+ * cost is one extra local confirmation after switching servers — the same
+ * fail-closed direction as the credential scope, resolved in the same place.
  *
  * @module
  */
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
-import { userScopePath } from './user-scope.ts'
+import { connectorScopePath } from './user-scope.ts'
 
 const FILE_NAME = '.mcp-approvals.json'
 const FILE_MODE = 0o600
@@ -42,6 +51,12 @@ export interface ConnectorApprovalStoreOptions {
   baseDir?: string
   /** The logged-in username; per-user scoping when omitted/missing. */
   username?: string | null
+  /**
+   * The current session's server address. The second half of the scope — see
+   * the module header: an approval belongs to the tenant whose catalog issued
+   * the command.
+   */
+  serverURL?: string | null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -64,7 +79,7 @@ export class ConnectorApprovalStore {
   private cache: McpApprovalRecord[] | null = null
 
   constructor(options: ConnectorApprovalStoreOptions = {}) {
-    this.dir = options.baseDir ?? join(userScopePath(options.username), 'connectors')
+    this.dir = options.baseDir ?? connectorScopePath(options.username, options.serverURL)
   }
 
   private path(): string {

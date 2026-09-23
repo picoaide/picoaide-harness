@@ -173,7 +173,7 @@ func TestSanitizeOutboundBodyFailsClosedOnParseFailure(t *testing.T) {
 // 清单本身也受判据约束：条目必须真的被扫到（禁止留死条目）。
 var outboundRequestAllowlist = map[string]string{
 	"balance.go:fetchDeepSeekBalance":                          "余额探针：服务端自建 GET，无客户端体",
-	"embedding.go:Embed":                                       "集成路径：出站体由服务端按解析后的 input 自建",
+	"embedding.go:EmbedWithProvider":                           "集成路径：出站体由服务端按解析后的 input 自建",
 	"errorreporting_test_event.go:sendErrorReportingTestEvent": "错误上报测试探针：体是服务端自建事件",
 	"files.go:handleFilesUpload":                               "Files API 直通：客户端体**就是文件字节**，无 JSON 字段面",
 	"files.go:doFilesMeta":                                     "Files 元数据 GET/DELETE：无请求体",

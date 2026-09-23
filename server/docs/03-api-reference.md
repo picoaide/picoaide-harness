@@ -17,6 +17,8 @@
 | `RATE_LIMITED` | 429 | 触发限流 |
 | `PASSWORD_CHANGE_REQUIRED` | 403 | 密码被管理员重置后强制改密:改密完成前仅放行改密/me/logout(0057) |
 | `BALANCE_EXHAUSTED` | 429 | 员工账户余额已用尽(2026-09-11 起唯一的额度闸门;admin 豁免,未开通余额账户的员工不受约束) |
+| `APPROVED_NOT_REJECTABLE` | 409 | **已通过审核的版本不能被"审核拒绝"**。三个审核面(共享技能 `/api/server/admin/shared-skills/:name/:version/reject`、组织智能体 `/api/server/admin/agent-presets/:name/:version/reject`、WASM 应用 `/api/server/admin/wasm-apps/:app_id/releases/:version/reject`)**共用同一个 code 与同一份语义**:拒绝会在同一条语句里**永久释放**该版本的归档字节(不可恢复),对生效版本等于"当场没有可交付版本",对历史版本等于"不可恢复地丢一个可回滚点"。**版本号永久占位、不能复用**,所以要停服务请用**下架**(可恢复;WASM 面还有冻结),要换内容请让作者**发布新版本**。`error.details` 带 `app_id`/`version`/`status`(WASM 面) |
+| `APP_DELISTED` | 409 | **该能力已下架(apps.enabled=0),内容冻结**。下架期间不接受新版本、也不允许把待审版本置为 approved —— 判据唯一实现在 `serverstore.Distribution.Writable()`(见 `serverstore/distribution.go` 的语义权威),发布内核(`appstore.Publish`,三条上传路径共用)与审批面(`sharedskills.decide`)共用它。放行只会产出「已批准但任何人(含作者)在员工面都看不见」的版本。唯一出口是管理员**显式重新上架**(`PUT …/:name/enabled` 或市场对应端点),该动作本身有审计 |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 2. 鉴权方式
@@ -60,7 +62,10 @@
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
 | PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
-| GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(parent/leader;`budget_money` 已随部门预算下线,请求体里该字段被忽略) |
+| GET | `/api/server/admin/departments` | 部门树(`parent`/`leader`;`budget_money` 已随部门预算下线) |
+| POST | `/api/server/admin/departments` | 新建部门 |
+| PUT | `/api/server/admin/departments/:id` | 更新部门(parent/leader;`budget_money` 请求体里该字段被忽略) |
+| DELETE | `/api/server/admin/departments/:id` | 删除部门(须无成员/子部门/授权引用) |
 | GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
 | POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
@@ -78,11 +83,18 @@
 | GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level/heartbeat, glitchtip_base_url, glitchtip_organization}`(**2026-09-11 起不含 `monthly_quota`/`monthly_quota_money`** —— 员工配额已下线) |
 | PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`)。⚠️ 请求体里的 `monthly_quota`/`monthly_quota_money`(旧文档曾写作 `usage.monthly_quota*`)**已不在请求结构里 ⇒ 被 JSON 绑定直接忽略:返回 200 但零写入** —— 保留这些键的说法只是为了不砸旧客户端;控额度请用余额端点(`PUT /balance`、`POST /users/:id/balance`) |
 | GET | `/api/server/admin/channels` | 渠道列表 |
-| GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;示例企业/sales-easy 等定义服务端下发) |
-| GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(90 天保留 → 默认 180 天,settings `audit.retention_days`;0048 起哈希链) |
+| GET | `/api/server/admin/connectors` | 连接器目录列表(0042;示例企业/sales-easy 等定义服务端下发) |
+| GET | `/api/server/admin/connectors/:id` | 单个连接器详情 |
+| POST | `/api/server/admin/connectors` | 新建连接器 |
+| PUT | `/api/server/admin/connectors/:id` | 更新连接器 |
+| PUT | `/api/server/admin/connectors/:id/enabled` | 连接器上架/下架 |
+| DELETE | `/api/server/admin/connectors/:id` | 删除连接器 |
+| GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(默认保留 180 天,settings `audit.retention_days` 可配;0048 起哈希链) |
 | GET/PUT | `/api/server/admin/auth`、`POST /auth/test` | 认证配置(脱敏读/写/连接测试;LDAP 测试连接返回目录统计 `{ok, message, users, groups, sample[5]}`;密码传 `***`/空 = 用已保存值测试) |
 
-> **LDAP 目录自动同步(2026-09)**:LDAP 配置保存后立即触发一轮全量同步,此后服务端每 1 小时自动一轮。同步语义:目录存在的用户自动创建/更新(显示名/邮箱/组,组全量替换)/重新启用;目录已消失的外部用户自动停用 + 吊销全部 token;同名本地账号绝不被外部身份接管;空目录(0 用户)拒绝执行(防误停用全部外部用户)。
+> **LDAP 目录自动同步(2026-09;启用方向 2026-09-23 收紧)**:LDAP 配置保存后立即触发一轮全量同步,此后服务端每 1 小时自动一轮。同步语义:目录存在的用户自动创建/更新(显示名/邮箱/组,组全量替换);目录已消失的外部用户自动停用 + 吊销全部 token;同名本地账号绝不被外部身份接管;空目录(0 用户)拒绝执行(防误停用全部外部用户)。
+>
+> **启用方向是单向的(第五轮审计 R5-B-8)**:目录同步只自动**停用**,**永不自动启用** —— 目录里存在但账号已停用的一律跳过(管理员为安全事件按下的「禁用」不再被下一轮同步静默撤销),启用一律由管理员显式执行(webadmin 用户管理里把状态改回启用)。两个方向都写审计:被跳过的账号记 `directory_enable_skipped`(`username=system`,每轮最多一条并点名),因目录消失被停用的记 `directory_user_disabled`(逐人一条)。**代价(认账)**:因目录抖动或离职后重新入职而「消失又出现」的账号不再自动恢复,需要管理员启用一次。
 
 ## 5. AI 网关(客户端用,Bearer;独立命名空间 `/v1/*`,另有无 `/v1` 官方原生变体)
 
@@ -160,6 +172,13 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | GET/POST | `/api/server/admin/skills` | 列表/上架技能(`{name, description, author}`;内容经 `POST /skills/:name/archive` 上传,元数据以包内 SKILL.md 为准) |
 | PUT/DELETE | `/api/server/admin/skills/:name` | 更新/下架(置 enabled=0,不删行) |
 | POST | `/api/server/admin/skills/:name/archive` | 上传新版压缩包(0040):body `{version, archive(base64 zip)}` → 切换上传模式,归档存 DB;校验顶层 `SKILL.md`,≤16MB |
+| GET | `/api/server/admin/skills/:name/archive` | 管理员下载归档核查(原样二进制流:zip ⇒ `application/zip`,否则 `application/gzip`;附 `X-Skill-Checksum` / `X-Skill-Version`) |
+| GET | `/api/server/admin/agents/:name/archive` | 市场智能体的同名端点(当前 approved 版本;附 `X-Preset-Checksum` / `X-Preset-Version`) |
+
+> 最后两条 `GET …/:name/archive` 是 webadmin 归档预览弹层「文件过大 → 下载归档」的落点
+> (链接 = 预览基路径 + `/archive`,基路径按行的 channel 推导;组织行走
+> `/shared-skills/:name/:version/archive` 与 `/agent-presets/:name/:version/archive`)。
+> 2026-09-23 补齐前,市场命名空间只有 `POST …/archive`(上传新版),市场行点该链接必 404。
 
 ## 8. 共享 Agent(客户端用,Bearer,多版本)
 
@@ -169,20 +188,22 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | POST | `/api/client/v2/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 zip)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
 | GET | `/api/client/v2/agent-presets/:name/:version/archive` | 下载归档(仅 approved 且已授权;旧路径 `/:name/archive` 取最高版本);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
 
+> 员工面归档下载**两种渠道都服务**(市场智能体的安装通路 = 桌面能力中心的能力安装端点,市场侧没有对员工开放的归档端点);市场「下架」在上架闸门 `apps.enabled` 处统一生效(下架后与「不存在」同 404)。
+
 ### 管理端(Admin)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/server/admin/agent-presets?status=` | 全部清单(可选 status 过滤) |
-| GET | `/api/server/admin/agent-presets/:name/archive` | 管理员下载归档核查(任意版本,兼容旧路径) |
+| GET | `/api/server/admin/agent-presets/:name/archive` | 管理员下载归档核查(任意版本,兼容旧路径);**只服务组织行**(市场行走 `/agents/:name/archive`,跨渠道 ⇒ 与「不存在」同 404;2026-09-23 F4 加固) |
 | GET | `/api/server/admin/agent-presets/:name/preview` | 审核预览:`{files:[...], composition}`(顶层 agent.cordis.yml 内容 + 全文件清单;兼容旧路径) |
 | POST | `/api/server/admin/agent-presets/:name/approve` | 通过(兼容旧路径,版本取最高) |
 | POST | `/api/server/admin/agent-presets/:name/reject` | 拒绝:body `{reason}`(必填,≤500 字);仅上传者可见可重提 |
 | DELETE | `/api/server/admin/agent-presets/:name` | 删除记录与归档(全版本;兼容旧路径) |
-| GET | `/api/server/admin/agent-presets/:name/:version/archive` | 指定版本归档下载核查 |
+| GET | `/api/server/admin/agent-presets/:name/:version/archive` | 指定版本归档下载核查(**同上:只服务组织行**) |
 | GET | `/api/server/admin/agent-presets/:name/:version/preview` | 指定版本审核预览:`{files:[...], composition}` |
 | POST | `/api/server/admin/agent-presets/:name/:version/approve` | 通过该版本(清空 reason) |
-| POST | `/api/server/admin/agent-presets/:name/:version/reject` | 拒绝该版本:body `{reason}`(必填,≤500 字) |
+| POST | `/api/server/admin/agent-presets/:name/:version/reject` | 拒绝该版本:body `{reason}`(必填,≤500 字)。**已通过审核的版本不可拒绝** ⇒ `409 APPROVED_NOT_REJECTABLE`(三面同码,语义见 §1) |
 | DELETE | `/api/server/admin/agent-presets/:name/:version` | 删除该版本记录与归档 |
 | PUT | `/api/server/admin/agent-presets/:name/:version/quality` | 质量标记(0037):body `{quality}` ∈ `""`\|`official`\|`featured`;仅 approved 行,互斥,审计 `agent_preset_qualify` |
 | GET | `/api/server/admin/agent-presets/:name/:version/file?path=` | 归档单文件内容:`{path, size, binary, too_large, content}`(文本内联,二进制/超大标记) |
@@ -195,9 +216,9 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/client/v2/shared-skills` | 可见清单:approved 且**已授权** 且**已上架**(apps.enabled=1) + 自己上传的全部状态(同样受上下架约束);返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
-| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
-| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(三重闸门:approved + 已上架 + 已授权/作者本人,任一不过同 404);附 `X-Skill-Checksum` / `X-Skill-Version` |
+| GET | `/api/client/v2/shared-skills` | 可见清单(**分发面**):approved 且**已授权** 且**已上架**(apps.enabled=1) + **归属人本人**(apps.owner)已上架的行;下架行在此面一律不列(与「不存在」同语义,归属人也不例外 —— 作者的「已下架」态由能力中心「我的」分区表达,见 §8c);返回 `{skills:[{name, display_name, version, description, author, status, reason, downloads, calls, created_at}]}` |
+| POST | `/api/client/v2/shared-skills` | 上传:body `{name, display_name?, version, description?, archive(base64 zip)}` → 201 `{skill:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `SKILL.md`、拒绝越界/链接;归档直存 DB(0040);UNIQUE(name, version) 多版本并存;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429;**该技能已下架时 409 `APP_DELISTED`**(内容冻结,先重新上架) |
+| GET | `/api/client/v2/shared-skills/:name/:version/archive` | 下载归档(三重闸门:approved + 已上架 + 已授权/**归属人本人**,任一不过同 404);豁免判据是 `apps.owner`(不是上传者 `app_releases.publisher`)—— 归属转移后新归属人无需授权即可取到自己的内容;附 `X-Skill-Checksum` / `X-Skill-Version` |
 
 ### 管理端(Admin)
 
@@ -206,15 +227,15 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | GET | `/api/server/admin/shared-skills?status=` | 全部清单(含版本) |
 | GET | `/api/server/admin/shared-skills/:name/:version/archive` | 管理员下载归档核查 |
 | GET | `/api/server/admin/shared-skills/:name/:version/preview` | 审核预览:`{files:[...], skill_md}`(顶层 SKILL.md 内容 + 全文件清单) |
-| POST | `/api/server/admin/shared-skills/:name/:version/approve` | 通过该版本(全员可见可安装);市场同名将 409(CONFLICT) |
-| POST | `/api/server/admin/shared-skills/:name/:version/reject` | 拒绝:body `{reason}`(必填);仅上传者可见可重提 |
+| POST | `/api/server/admin/shared-skills/:name/:version/approve` | 通过该版本(全员可见可安装);市场同名将 409(CONFLICT);**该技能已下架时 409 `APP_DELISTED`**(下架期间不得让新版本生效;reject 不受限,用于清理队列) |
+| POST | `/api/server/admin/shared-skills/:name/:version/reject` | 拒绝:body `{reason}`(必填);仅上传者可见可重提。**已通过审核的版本不可拒绝** ⇒ `409 APPROVED_NOT_REJECTABLE`(三面同码,语义见 §1) |
 | DELETE | `/api/server/admin/shared-skills/:name/:version` | 删除该版本记录与归档 |
 | PUT | `/api/server/admin/shared-skills/:name/:version/quality` | 质量标记(0037):body `{quality}` ∈ `""`\|`official`\|`featured`;仅 approved 行,互斥,审计 `shared_skill_qualify` |
 | GET | `/api/server/admin/shared-skills/:name/:version/file?path=` | 归档单文件内容:`{path, size, binary, too_large, content}`(文本内联,二进制/超大标记) |
 | GET | `/api/server/admin/shared-skills/:name/grants` | 授权清单(按 name,同名多版本共享) |
 | PUT | `/api/server/admin/shared-skills/:name/grants` | 整组替换部门授权(body `{groups:[...]}`) |
 | PUT/DELETE | `/api/server/admin/shared-skills/:name/grant` | 增/删单条授权(body `{username}` 或 `{group}`) |
-| PUT | `/api/server/admin/shared-skills/:name/enabled` | 组织共享技能上下架(2026-09-15):body `{enabled: true\|false}` → `{ok, enabled}`;语义同市场技能(apps.enabled),但**只作用于 org 渠道行**(市场行由 marketplace 端点管,跨渠道写 404);下架后员工目录不可见、归档下载 404,管理端仍可审核/预览/下载核查;审计 `shared_skill_enable` / `shared_skill_disable` |
+| PUT | `/api/server/admin/shared-skills/:name/enabled` | 组织共享技能上下架(2026-09-15):body `{enabled: true\|false}` → `{ok, enabled}`;语义同市场技能(apps.enabled),但**只作用于 org 渠道行**(市场行由 marketplace 端点管,跨渠道写 404);**下架语义(2026-09-23 收敛,唯一权威 `serverstore/distribution.go`)**:分发面(员工目录 / 归档下载)与「不存在」同语义,但归属人自己的「我的」仍可见并带 `delisted=true`;下架期间内容冻结(新版本上传与 approve 一律 409 `APP_DELISTED`);管理端仍可审核/预览/下载核查;审计 `shared_skill_enable` / `shared_skill_disable` |
 
 ## 8c. 能力中心(统一目录与审批队列)
 
@@ -226,7 +247,9 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 |------|------|------|
 | GET | `/api/client/v2/capabilities?source=&type=&q=` | 统一目录 `{items:[CapabilityItem]}`;`source=market`(默认)返回市场+组织合并(同名 market 优先折叠,org 版本入 versions),`source=org` 仅组织,`source=local` 仅本地(host 代理合并);`type=skill\|agent\|all`;`installed`/`hasUpdate` 由 host 代理按本地磁盘补齐 |
 
-`CapabilityItem`:`{kind: skill\|agent, source: market\|org, name, display_name, version, description, author, status, reason?, quality?, versions[]}`。可见性语义各自保留:market=enabled+授权;org=作者 own(任意状态,仅「我的」展示)OR approved+授权;admin 恒全量。
+`CapabilityItem`:`{kind: skill\|agent, source: market\|org, name, display_name, version, description, author, status, reason?, quality?, official, downloads, calls, score, is_owner, delisted, versions[]}`。可见性语义各自保留:market=enabled+授权;org 分发面=approved+授权+已上架(外加归属人自己已上架的行);「我的」(`source=own`/`local`)=**归属人本人**(`apps.owner == viewer`)的全部状态,下架行照旧返回并带 `delisted=true`(作者必须能看到「已下架」);admin 在分发面恒全量。
+
+> **归属判据同源(第五轮审计 R5-B-2/R5-B-5,2026-09-23)**:「我的」的成员判据与发布权都是 `apps.owner`(`serverstore.AppOwnedByOwner` 是唯一实现)—— 归属转移后旧上传者立刻不再出现在「我的」(他也已经不能续传),新归属人立刻出现。**空 owner**(官方内容 / 2026-09-02 之前的历史行)不属于任何人:与发布内核的既有规则同义(空 owner 一律视同占名,非管理员不得接管发布)。管理员不再是例外:他自传的内容同样出现在自己的「我的」里(此前 201 上传后任何员工面都看不到)。
 
 ### 管理端统一审批队列(Admin)
 
@@ -332,13 +355,13 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | POST | `/api/client/v2/apps/wasm/proof` | Bearer + **安装签名** | 签发持有性证明。proof 绑 `(user_id, bearer hash, install_id, serverURL, app_id, exp, jti)`,默认 15 min;非幂等请求做 jti 去重。安装公钥注册是 **TOFU**(任何持有效 bearer 者可为**尚未注册**的 install_id 注册自己的公钥,注册需一次性 nonce 签名)⇒ 该机制使 proof **不可跨应用/跨用户搬运、不可重放**,但**不**把"bearer 泄露"变成"不可用"(认账见设计总纲 §17)。**签名消息是 `appproof-install-v1` 五段换行串**(`install_id`/`nonce`/`ts`(秒)/`serverURL`),公钥必须是**原始 32 字节** Ed25519(不是 SPKI/DER),请求体**只允许** `install_id`/`public_key`/`nonce`/`ts`/`signature`/`app_id` 六个键。签发失败的 `401` 带 `details.reason`,取值:`decode_failed`(JSON 解码失败或含未知字段)/ `invalid_public_key`(公钥不是 base64 或不是**原始 32 字节** Ed25519)/ `signature_malformed`(签名为空/纯空白/不是 base64/长度不符)/ `invalid_timestamp`(`ts` 缺失或 `<= 0`)/ `nonce_replayed` / `timestamp_skew`(超时间窗)/ `install_key_mismatch`(该 install_id 已注册过**别的**公钥)/ `signature_invalid`。**认账**:`install_id`/`nonce` 的**形状**失败目前仍落在 `signature_invalid`,所以该码应读作"最后兜底档",**不能**读成"验签一定不过"——排障时先看前面几档 |
 | **错误码分层** | — | — | 对接方按**外层优先**分流。**传输层（外层 HTTP）**：`401 AUTH_REQUIRED` / `401 AUTH_FAILED` / **`401 PROOF_REQUIRED`**（缺证明）/ **`401 PROOF_EXPIRED`**（证明过期）/ **`401 PROOF_MISMATCH`**（绑定或结构/签名不符）/ **`401 PROOF_REPLAYED`**（非幂等请求的 jti 重放）/ `403`（审计账号或权限）/ `400 VALIDATION`（信封或 host 形态）/ `413 BODY_TOO_LARGE` / `429 RATE_LIMITED` / `503`（关停中）。**应用管线（内层信封 `status`）**：`404 NOT_FOUND`（不存在/未登记/软删/**冻结**，冻结时带 `reason=app_frozen`）/ `410`（已下架，`code` 复用 `NOT_FOUND`）/ `403 FORBIDDEN`（跨源写）/ `502`/`504`（运行时无响应或超时）/ `500 RUNTIME_OUTPUT_OVERRUN`。**`X-Pico-App-Proof` 的 401 一律用 `proof_*` 前缀**（客户端据此只在该前缀上自动重签一次） |
 | GET | `/api/server/admin/wasm-apps/:app_id/opens?from=&to=&granularity=day\|dept` | 管理会话 + `capability:read` | 打开计数运营视图(PV/UV 日趋势、按部门聚合;明细保留 90 天、日汇总长期)。缺少该端点时管理端显示"接口尚不可用"而**不是 0** |
-| GET | `/api/server/admin/wasm-apps/opens/summary?days=` | 管理会话 + `capability:read` | 运营看板总览:`today`/`totals`/`trend[]`/`apps[]`/`top_apps[]`/`capped`/`detail_retention_days`。**读源是有意分开的**:`apps[]`/`today`/`totals` 与 `trend[].uv` 读**明细**,`trend[].pv` 读**日汇总**(曲线长期不断档)。**UV 一律 `count(DISTINCT user_id)`**:禁止把各应用或各日的 `uv` 相加。窗口长于 90 天明细保留期时 `capped=true`,且早于保留期的日期 **UV 如实为 0**(PV 仍真实) |
-| GET | `/api/server/admin/wasm-apps/:app_id/ai-usage?days=` | 管理会话 + `capability:read` | 应用维度 AI 用量:`days[]`/`total`/`attribution_available`。`attribution_available=false` 表示**该窗口内没有可归因调用**(与"端点不支持"区分) |
+| GET | `/api/server/admin/wasm-apps/opens/summary?days=` | 管理会话 + `capability:read` | 运营看板总览:`today`/`totals`/`trend[]`/`apps[]`/`top_apps[]`/`capped`/`detail_retention_days`。**读源口径 = 同一天同源**(AUD-1,2026-09-20):`apps[]`/`today`/`totals` 读**明细** `wasm_app_opens`;`trend[]` 亦以明细为准 —— 某一天的 PV 与 UV 出自**同一次** `GROUP BY 日` 聚合(`count(*)` / `count(DISTINCT user_id)`),只有**明细已不在的天**(早于 90 天保留期)PV 才回落**日汇总** `wasm_app_opens_daily`(长期保留,曲线不断档)且 UV 如实为 0。**禁止**退回"`trend[].pv` 读日汇总、`trend[].uv` 读明细"的混用形态:日汇总每 5 分钟才 tick 一次,混用会让同一份响应出现 `uv > pv`(去重人数大于打开次数,活体实测过)。**UV 一律 `count(DISTINCT user_id)`**:禁止把各应用或各日的 `uv` 相加。窗口长于 90 天明细保留期时 `capped=true` |
+| GET | `/api/server/admin/wasm-apps/:app_id/ai-usage?days=` | 管理会话 + `capability:read` | 应用维度 AI 用量:`days[]`/`total`/`attribution_available`。`attribution_available=false` 表示**该窗口内没有可归因调用**(与"端点不支持"区分)。⚠️ **平台侧的应用归因通道尚未接线**(2026-09-23 事实):归因靠客户端出站头 `X-Pico-App-Id`,而该头在**全仓没有任何发送方**(客户端明写不做,出站头唯一构造点在上游 `llm-deepseek` 适配器且无 header 通道) ⇒ 该字段当前**恒为 `false`**,成因是"这条路还没接上",**不是**"老客户端没上报";管理端文案不得把成因推给客户端版本或客户环境 |
 | GET | `/api/server/admin/wasm-apps/:app_id/schema` | 管理会话 + `capability:read` | 管理面的表结构自省（与员工面同 payload、同实现；差别只有鉴权与操作者账号进审计） |
 | GET | `/api/server/admin/wasm-apps/:app_id/rows` | 管理会话 + `capability:read` | 管理面的行浏览（与员工面同形；管理员排障与合规用，同样默认脱敏并写审计） |
 | GET | `/api/server/admin/wasm-apps/limits` | 管理会话 + `capability:read` | 应用平台限制项(11 个字段)+ 生效来源(`source`:部署档位/控制台保存)+ 四笔账预览(`budget`)+ 需重启字段(`restart_pending`) |
 | PUT | `/api/server/admin/wasm-apps/limits` | 管理会话 + `capability:write` | 保存限制项。**信封强制**:必须 `{"limits":{…完整字段…}}` —— 未知顶层键或缺 `limits` 键一律 `400 VALIDATION`(闸门在落库之前 ⇒ 不落库/不写审计/不改运行时);**回落部署档位是显式动作** `{"limits":null}`;越界/缺字段/未知字段各自 `400`;`instance_memory_mb` 属运行时不可变项 ⇒ 保存后进 `restart_pending` |
-| POST | `/api/server/admin/wasm-apps/:app_id/releases/:version/reject` | 管理会话 + `capability:write` | 拒绝该版本。`reason` **必填**(归一后为空/纯空白即 `400 VALIDATION`,`field=reason`);理由会写进审计与**作者客户端**(作者据此改后再发)。闸门**先于**版本状态检查 |
+| POST | `/api/server/admin/wasm-apps/:app_id/releases/:version/reject` | 管理会话 + `capability:write` | 拒绝该版本。`reason` **必填**(归一后为空/纯空白即 `400 VALIDATION`,`field=reason`);理由会写进审计与**作者客户端**(作者据此改后再发)。闸门**先于**版本状态检查。**已通过审核的版本不可拒绝** ⇒ `409 APPROVED_NOT_REJECTABLE`(三面同码,语义见 §1) |
 | GET/POST | `/api/server/admin/wasm-apps?status=&access=&q=`、`…/:app_id/{publish,unpublish,freeze,owner}` | 管理会话 | 应用中心管理面(`status` 支持 `all/pending/published/unpublished/frozen/deleted`;`access` 支持 `all/login/whitelist`,**`login` 会连同历史 `public` 行一起返回**)。上下架/冻结/归属转移均写审计(含哈希链字段) |
 
 **应用能力边界**:应用内**无 cookie**(自定义协议下 `document.cookie` 恒空)、`localStorage`/`IndexedDB` 可用但**`Cache Storage` 不可用**(`cache.put` 抛 `TypeError: Request scheme … is unsupported`);**服务端 `ai.chat` 宿主能力已删除** —— 需要 AI 的应用改为**前端调客户端 AI loop**(保留路径 `POST /__picoaide/ai/chat`,由客户端协议 handler 本地处理)再把结果回传 wasm 落库。
@@ -349,6 +372,11 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD;`PUT /connectors/:id/enabled` 下架/上架 |
+| GET | `/api/server/admin/connectors` | 连接器目录列表 |
+| GET | `/api/server/admin/connectors/:id` | 单个连接器详情 |
+| POST | `/api/server/admin/connectors` | 新建连接器 |
+| PUT | `/api/server/admin/connectors/:id` | 更新连接器 |
+| PUT | `/api/server/admin/connectors/:id/enabled` | 下架/上架 |
+| DELETE | `/api/server/admin/connectors/:id` | 删除连接器 |
 
 员工面不直接调连接器端点:目录经 bootstrap `connectors[]` 下发;OAuth/设备/令牌授权由客户端本地代理(`/api/pico/connectors/...`,loopback guard)与服务端 `serverauth` 会话协同。

@@ -72,6 +72,11 @@ const GUARDS = [
   // 2026-09-20 实测漂移：`server/docs/06-database.md` / `08-development.md` 写着「迁移 0001–0060」
   // 而实际已到 0076。文档里的迁移区间此前**没有任何守卫**，只能靠人记得改 —— 这条把它变成判据。
   { name: 'check:migration-range', args: ['run', 'check:migration-range'], path: '文档里的迁移区间 ↔ 实际迁移编号' },
+  // 2026-09-23 二轮审计 D-4/D-5：官网 FAQ/理念页写着上游 pin `dsh-v0.1.5-rc.2`（真源已是
+  // 0.1.6-alpha.2），插件开发页声称平台模块表「与上游逐字一致」却只列了 8/9 项 —— 两处
+  // 「文档引用真源数字」此前同样零守卫。这条把它们绑到 `upstream.json` 与
+  // `scripts/platform-modules.mjs` 上（扫描器失效/空扫描一律 fail-loud）。
+  { name: 'check:doc-claims', args: ['run', 'check:doc-claims'], path: '文档里的上游 pin / 平台模块表 ↔ 真源' },
   // 2026-09-20 补上的那一环：本仓**公开**，「真实客户/部署域名永不出现」这条规则原先只有
   // 人工 `git grep`，而且规则条文自己把真实域名写进了示例 ⇒ 自检永远命中规则本身，等于没有
   // 守卫（历史提交信息里也真的进过客户域名与预发/生产主机名）。白名单式**前向**守卫：
@@ -83,7 +88,122 @@ const GUARDS = [
     args: ['run', 'check:wasm-client-only', '--portable'],
     path: 'WASM 客户端专属（残留/对拍/渠道/W5 文档/HEAD 绑定）；PG 与探针见 §16 W6',
   },
+  // 2026-09-23 二轮审计 W3-02/W3-03/W3-04：`integration-tests/` 的两个用例脚本打的是
+  // 真实 IdP + 真实服务端（需 Docker/Xvfb），**不进 CI** ⇒ 整块脱离门禁，长期腐烂到
+  // "永远不可能通过"也没人发现（深链断言结构上不可达、断言 2026-09-10 已删除的旧 brand
+  // 契约、用伪造 cookie 的恒真"非 200"断言）。本守卫把可静态执行的那部分接进来：
+  // python 语法、`--self-test` 判据夹具（每条判据都配负例）、以及**进程内假网关**驱动的
+  // 正/反例（按真契约应答必须绿 / 破坏契约必须红 / provider 未配置必须 SKIP 且不得报 PASS）。
+  { name: 'check:integration-tests', args: ['run', 'check:integration-tests'], path: 'integration-tests/**（语法/判据自检/假网关正反例）' },
 ]
+
+/**
+ * `advisory` 的**登记制**（2026-09-23 第六轮审计 R6-C-1）。
+ *
+ * 现场：`advisory: true` 曾是一个**无任何判据**的红→绿开关 —— 给上面 `GUARDS` 表的任一条目
+ * 加上这一个词，`yarn check`（= 必需的 `Gate` 检查）与 `scripts/check-root-guards.mjs`
+ * （docs-only 的 PR 唯一防线）就都不再因它失败，而 `MINIMUM_REQUIRED_GUARDS` 只断言
+ * "这个守卫在表里"。铁律 0 的域名守卫、迁移区间守卫、文档数字守卫、变异体残留守卫
+ * 全都挂在这张表上 ⇒ 一行改动即可让它们集体变成"只告警、不拦门禁"，而 CI 全绿。
+ *
+ * 现在：`advisory` 只能标在**这里逐条登记过**的守卫上，未登记的 advisory 在调度前
+ * fail-loud（见 `validateAdvisoryRegistry`）—— advisory 是"经过审批的临时豁免"，
+ * 不是"谁都能按一下的静音键"。反方向同样红：登记项对应的守卫不再 advisory（陈旧登记）
+ * 或根本不在表里，也必须一起改掉。
+ *
+ * 登记项形状：`{ name, reason, approvedBy, expiresOn }`
+ *   · `reason`     为什么这条守卫可以在施工期不拦门禁；
+ *   · `approvedBy` 谁批的（人/角色 —— 进 diff 才会被评审看见）；
+ *   · `expiresOn`  `YYYY-MM-DD`（含当天仍有效）—— 豁免必须到期复核，不能永久挂着。
+ *
+ * **当前为空**：没有任何守卫需要 advisory。历史上唯一的用途是 WASM「客户端专属」验收
+ * 门禁（W1–W5 施工期按设计恒红），它自 2026-09-20 起已转阻塞。
+ */
+const ADVISORY_REGISTRY = []
+
+/**
+ * advisory 到期日必须是**真实日历日**（第六轮独立复审 V2 边界②）。
+ *
+ * 现场：`expiresOn` 此前只被要求"是字符串"，到期比较写成
+ * `if (!Number.isNaN(Date.parse(entry.expiresOn ?? '')) && …)` —— 于是**不可解析**的
+ * 取值被静默跳过：登记项写 `expiresOn: 'whenever'` 就能让"到期即失效"这条语义永不生效。
+ * 实测两条通道都 EXIT=0（`check-workspaces --list` / `check-root-guards --list`）。
+ * 这是 R6-C-1 的同一个病：判据看起来在，实际缺一颗牙。
+ *
+ * 三档一起判（缺任一条都能被绕过）：
+ *   ① 形状 `^\d{4}-\d{2}-\d{2}$` —— 挡 `'whenever'`、`'2026-1-1'`、`'2026/10/31'`；
+ *   ② `Date.parse` 不是 NaN —— 挡 `'2026-13-45'` 这类越界取值；
+ *   ③ UTC 往返逐字回读相等 —— 挡 `'2026-02-31'` 这类"形状合法、但不是那一天"的取值
+ *      （Node 的 ISO 解析**会把它滚到 3 月 3 日**：实测
+ *      `Date.parse('2026-02-31T00:00:00Z')` ⇒ `2026-03-03T00:00:00.000Z`）。
+ *      ③ 判的是日期本身的性质，不是运行时的宽容度。
+ *
+ * 取向与其它登记字段同档：**非法值不是"没有判据"，而是配置错误 ⇒ fail-loud**。
+ * @param value - 登记项上的 `expiresOn`（已归一化成字符串，可能是空串）。
+ * @returns 是不是一个可比较的真实日历日。
+ */
+function isAdvisoryExpiresOn(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00Z`)
+  if (Number.isNaN(parsed)) return false
+  return new Date(parsed).toISOString().slice(0, 10) === value
+}
+
+/**
+ * 校验 advisory 登记（**双向**）：未登记的 advisory / 陈旧登记 / 缺字段 / 到期日非法 /
+ * 已过期一律返回错误清单，调用方据此拒绝调度。
+ *
+ * 为什么不做成"未登记就降级成阻塞"：那会把配置错误伪装成正常门禁，红点从"配置非法"
+ * 漂移成"某条判据失败"，排查成本全落到下一个人身上。配置错误必须报成配置错误。
+ *
+ * @param guards - `GUARDS` 表（或它的副本）。
+ * @param registry - 登记表（测试可注入）。
+ * @param today - `YYYY-MM-DD` 口径的"今天"（测试可注入）。
+ * @returns 错误信息数组（空 = 合格）。
+ */
+export function validateAdvisoryRegistry(guards, registry = ADVISORY_REGISTRY, today = new Date()) {
+  const errors = []
+  const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
+  const registered = registry.map(entry => entry?.name)
+  const todayKey = today.toISOString().slice(0, 10)
+  for (const name of advisories) {
+    if (!registered.includes(name)) {
+      errors.push(`守卫 \`${name}\` 被标成 advisory，但它不在 ADVISORY_REGISTRY 里`
+        + ' ⇒ advisory 是无判据的红→绿开关（R6-C-1），必须先登记理由/批准人/到期日再标。'
+        + '若这条守卫本来就该拦门禁，请删掉条目上的 `advisory: true`。')
+    }
+  }
+  for (const entry of registry) {
+    const name = entry?.name
+    if (typeof name !== 'string' || name === '') {
+      errors.push(`ADVISORY_REGISTRY 有登记项缺 \`name\`：${JSON.stringify(entry)}`)
+      continue
+    }
+    for (const field of ['reason', 'approvedBy', 'expiresOn']) {
+      if (typeof entry[field] !== 'string' || entry[field].trim() === '') {
+        errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 缺 \`${field}\`（advisory 必须可追溯、可到期复核）`)
+      }
+    }
+    const expiresOn = typeof entry.expiresOn === 'string' ? entry.expiresOn.trim() : ''
+    if (expiresOn !== '' && !isAdvisoryExpiresOn(expiresOn)) {
+      // 只判"有没有"会让一个乱字符串把"到期即失效"整条语义绕过去（第六轮复审 V2 边界②）。
+      errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 的 \`expiresOn\`（${JSON.stringify(entry.expiresOn)}）`
+        + '不是 `YYYY-MM-DD` 形式的真实日期'
+        + ' ⇒ 到期判据（`expiresOn < 今天`）对不可解析的取值**静默不成立**，豁免会变成"永不过期"。'
+        + ' 请写成真实日历日（例：`2026-10-31`）；不确定就给一个**更早**的日期 ——'
+        + ' 到期即失效、续期要重新进 diff，这正是这条登记制的全部意义。')
+    } else if (expiresOn !== '' && expiresOn < todayKey) {
+      errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 已于 ${expiresOn} 到期（今天 ${todayKey}）`
+        + ' ⇒ 到期即失效：要么再次登记并写明续期理由，要么把它转回阻塞。')
+    }
+    if (!advisories.includes(name)) {
+      errors.push(`ADVISORY_REGISTRY 里的 \`${name}\` 并不是 advisory 守卫`
+        + `（GUARDS 表里${guards.some(guard => guard.name === name) ? '该条目没有 `advisory: true`' : '根本没有这个守卫'}）`
+        + ' ⇒ 陈旧登记同样是配置错误（留下它 = 给下一个人一个可以随时按亮的静音键）。')
+    }
+  }
+  return errors
+}
 
 /**
  * workspace 包门禁。`needs` 表达"构建期真实依赖":依赖包的 tsdown 会先清空自己的
@@ -109,16 +229,23 @@ const PACKAGES = [
   // 登记（传递上已由 wasm-apps-host → browser → connectors → 叶子包保证，但真实边
   // 就该写在表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
   { name: 'dsh-plugin-desktop', dir: 'packages/host/desktop', needs: ['@picoaide/dsh-wasm-apps-host', '@picoaide/dsh-host-locale', '@picoaide/dsh-host-home'] },
-  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  // 2026-09-23：`loopback.ts` 四份合一（实现落在叶子包 `./loopback` 子路径）后，
+  // enterprise / cron 也**直接**读叶子包（不再是"经 desktop 的两条 re-export"）。
+  // 两条真实边写进表里 —— `temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
+  { name: '@picoaide/dsh-enterprise', dir: 'packages/host/enterprise', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 2026-09-20（路线 A / A 扩展）：`host-copy.ts` 的语言解析直接 import 叶子包
   // `@picoaide/dsh-host-locale`；`user-scope.ts` 的 DSH-home 权威改成
   // `@picoaide/dsh-host-home` ⇒ **connectors 不再 import 桌面包**，
   // 那条 `connectors → dsh-plugin-desktop` 边随之删除（它正是四边环的最后一段）。
   { name: '@picoaide/dsh-connectors', dir: 'packages/host/connectors', needs: ['@picoaide/dsh-host-home', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
-  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
+  { name: '@picoaide/dsh-cron', dir: 'packages/host/cron', needs: ['dsh-plugin-desktop', '@picoaide/dsh-host-locale', '@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   { name: '@picoaide/dsh-branding', dir: 'packages/client/branding', needs: [] },
   { name: 'dsh-community-fabric', dir: 'community/fabric', needs: [] },
-  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise'] },
+  // 2026-09-23：账户浮层的 Esc 分层回归（`panel-esc.spec.tsx`）**挂真的装载器**
+  // （不是在测试里另写一份"遇到模态就让位"的替身：这条缺陷的全部机制就在装载器认不认
+  // 这层模态上）⇒ 该用例 import `@picoaide/dsh-panel-surface/client`，于是多了一条
+  // 真实构建边（测试读它的 lib）。`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍。
+  { name: '@picoaide/dsh-account-card', dir: 'packages/client/account-card', needs: ['@picoaide/dsh-enterprise', '@picoaide/dsh-panel-surface'] },
   // WASM 应用平台的客户端半边（应用中心 + 发布编排入口）：读 enterprise 的 lib/types。
   { name: '@picoaide/dsh-wasm-apps', dir: 'packages/client/wasm-apps', needs: ['@picoaide/dsh-panel-surface', '@picoaide/dsh-foot-menu'] },
   // 四个客户端面板共用的**中列整页装载器 + 视觉语言**叶子包（2026-09-20）：
@@ -178,7 +305,24 @@ const PACKAGES = [
   },
 ]
 
-/** 路径前缀 → 包名(用于 --changed 的改动归属判定,最长前缀优先)。 */
+/**
+ * 路径前缀 → 包名(用于 --changed 的改动归属判定)。
+ *
+ * **匹配语义 = 先声明者胜**(不是"最长前缀优先"):`selectByChanges` 用
+ * `PATH_OWNERS.find(([prefix]) => file.startsWith(prefix))` —— `Array.prototype.find`
+ * 返回**数组序第一个**命中的条目,与前缀长度无关。
+ *
+ * 由此推出两条对这张表的要求(2026-09-23 复审 F2,实测过隔离仓库里的顺序翻转):
+ *   - **同一路径写两条前缀、后者永不生效**(重复前缀已由自检单独报);
+ *   - 一条前缀若是另一条的**严格子路径**且归属不同包,归属结果就**取决于声明顺序**:
+ *     窄前缀声明在后 ⇒ 它永远不会命中(名存实亡);声明在前 ⇒ 该子树归窄前缀的包、
+ *     其余仍归宽前缀的包(同一个包按目录被劈成两个归属)。
+ *     这种歧义由 {@link scheduleTableProblems} 直接判红,**不允许靠顺序约定**。
+ *   - 归属相同包的细粒度前缀(如 `packages/host/desktop/` + `packages/host/desktop/src/`)
+ *     没有歧义:两条命中结果相同 ⇒ 允许。
+ *
+ * 改这张表前先看 {@link scheduleTableProblems}:它会把上面两类形态在跑任何任务之前判红。
+ */
 const PATH_OWNERS = [
   ['packages/host/desktop/', 'dsh-plugin-desktop'],
   ['packages/host/enterprise/', '@picoaide/dsh-enterprise'],
@@ -226,6 +370,8 @@ const DEPENDENTS = {
     '@picoaide/dsh-connectors',
     '@picoaide/dsh-cron',
     '@picoaide/dsh-wasm-apps',
+    // 2026-09-23：account-card 的 Esc 分层回归挂真的装载器 ⇒ 它也算消费方。
+    '@picoaide/dsh-account-card',
     '@picoaide/dsh-foot-menu',
   ],
   // 底部并道行：五个面板插件的 tsc 读它的 `./client` 声明（type-only），
@@ -238,6 +384,132 @@ const DEPENDENTS = {
     '@picoaide/dsh-wasm-apps',
     'dsh-plugin-desktop',
   ],
+}
+
+/**
+ * 在 `needs` 图里找一个环(返回环上的包名序列,首尾同名;无环返回 null)。
+ *
+ * 只沿"表内存在的名字"走边:不存在的名字由 {@link scheduleTableProblems} 单独报,
+ * 否则成环报告会被一串"未知依赖"淹没。
+ * @param byName - 包名 → 条目。
+ * @returns 环路径或 null。
+ */
+function findScheduleCycle(byName) {
+  const visiting = new Set()
+  const settled = new Set()
+  const path = []
+  let found = null
+  const visit = name => {
+    if (found !== null || settled.has(name)) return
+    if (visiting.has(name)) {
+      found = [...path.slice(path.indexOf(name)), name]
+      return
+    }
+    visiting.add(name)
+    path.push(name)
+    for (const need of byName.get(name)?.needs ?? []) {
+      if (byName.has(need)) visit(need)
+      if (found !== null) break
+    }
+    path.pop()
+    visiting.delete(name)
+    settled.add(name)
+  }
+  for (const name of byName.keys()) visit(name)
+  return found
+}
+
+/**
+ * 调度表 / 归属表自检（2026-09-23 三轮审计 R3-C C-1/C-2）。
+ *
+ * 为什么必须在**编排器自己**里做：这三张表是手写的，而名字打错时的失败形态**全是静默的** ——
+ *
+ *   1. `needs` 里一个不存在的名字：`needs.filter(name => selectedSet.has(name))` 对
+ *      "名字不存在"与"没被选中"给出同一结果 ⇒ **边被静默删掉**，调度顺序退化
+ *      （本地有 `lib/` 时照绿，干净检出才报 TS2307）；
+ *   2. `needs` 成环：环上的包永远停在 `pending`，主循环以 `running.size === 0 &&
+ *      !progressed` 退出 ⇒ 这些包**既不跑、也不进 skipped**（runScheduler 末端的
+ *      dropped 断言是第二道网）；
+ *   3. `PATH_OWNERS` 前缀/包名打错：`check:fast` 把改动判成"0 个包"并 EXIT=0；
+ *   4. `DEPENDENTS` 键/值打错：`--changed` 的反向展开静默少跑。
+ *
+ * 判据**不依赖任何具体包名**（名字全部从表里现读、再互相对拍）⇒ 新增包自动被覆盖。
+ * @returns 问题描述列表（空 = 通过）。
+ */
+function scheduleTableProblems() {
+  const problems = []
+  const byName = new Map()
+  for (const pkg of PACKAGES) {
+    if (byName.has(pkg.name)) problems.push(`PACKAGES 里有重复的包名:${JSON.stringify(pkg.name)}`)
+    byName.set(pkg.name, pkg)
+  }
+  for (const pkg of PACKAGES) {
+    for (const need of pkg.needs ?? []) {
+      if (!byName.has(need)) {
+        problems.push(`${pkg.name}: needs 里的 ${JSON.stringify(need)} 不在 PACKAGES 表内（这条构建边会被静默丢弃）`)
+      }
+    }
+  }
+  const cycle = findScheduleCycle(byName)
+  if (cycle !== null) {
+    problems.push(`needs 成环:${cycle.join(' → ')}（环上的包永远不会被调度，见 runScheduler 的 dropped 断言）`)
+  }
+  const prefixes = new Set()
+  for (const [prefix, name] of PATH_OWNERS) {
+    if (!byName.has(name)) {
+      problems.push(`PATH_OWNERS 的 ${JSON.stringify(prefix)} 指向不存在的包 ${JSON.stringify(name)}`)
+    }
+    if (prefixes.has(prefix)) problems.push(`PATH_OWNERS 里有重复前缀:${JSON.stringify(prefix)}（先声明者胜 ⇒ 后者永不生效）`)
+    prefixes.add(prefix)
+    // 前缀必须落在某个真实包目录之下：否则它永远匹配不到文件（打错前缀的形态）。
+    const inside = PACKAGES.some(pkg => prefix === `${pkg.dir}/` || prefix.startsWith(`${pkg.dir}/`))
+    if (!inside) {
+      problems.push(`PATH_OWNERS 的前缀 ${JSON.stringify(prefix)} 不在任何 PACKAGES 的 dir 之下（改动会归属不到包）`)
+    }
+  }
+  // 前缀歧义：一条前缀是另一条的**严格子路径**、且两条归属**不同包**（2026-09-23 复审 F2）。
+  //
+  // 为什么判红而不是"按最长的赢"：匹配语义是**先声明者胜**（`find` 取数组序首个，见
+  // PATH_OWNERS 头注释）。隔离仓库实测（复审 §2-F2 证据 B）：把
+  // `['packages/client/branding/src/', '<另一个包>']` 加在表**末尾** ⇒ 该条目永不生效
+  // （`check:fast` 仍判 `@picoaide/dsh-branding`）；加在表**最前** ⇒ 同一批改动判给
+  // 另一个包。也就是说"谁是归属方"取决于书写顺序，且两种写法都静默 —— 正是本仓
+  // 反复踩到的那类失败形态（名字打错/静默不生效）。所以**这类声明不允许存在**。
+  //
+  // 边界：归属**相同包**的细粒度前缀不算歧义（两条命中结果相同），例如
+  // `packages/host/desktop/` + `packages/host/desktop/src/` 是允许的。
+  for (const [narrow, narrowOwner] of PATH_OWNERS) {
+    for (const [wide, wideOwner] of PATH_OWNERS) {
+      if (narrow === wide || narrowOwner === wideOwner) continue
+      if (!narrow.startsWith(wide)) continue // 只查严格子路径
+      problems.push(`PATH_OWNERS 前缀歧义：${JSON.stringify(narrow)}（归属 ${JSON.stringify(narrowOwner)}）`
+        + ` 是 ${JSON.stringify(wide)}（归属 ${JSON.stringify(wideOwner)}）的严格子路径，而两条归属不同包`
+        + ' —— 匹配语义是**先声明者胜**：窄前缀声明在后 ⇒ 它永不生效；声明在前 ⇒ 按声明顺序翻转归属'
+        + '（同一棵树里的文件被劈给两个包）。处置：删掉窄前缀、或让它与宽前缀归属同一个包；'
+        + '确实要拆给不同的包，就把宽前缀也一并拆细（让两条互不包含）')
+    }
+  }
+  for (const pkg of PACKAGES) {
+    const expected = `${pkg.dir}/`
+    // 每个包的**根目录前缀**必须恰好有一条归属条目（可以再有更细的子目录条目）。
+    // 这条判据同时挡住两个方向的打错：把 `.../connectors/` 打成 `.../connector/`
+    // （不在任何 dir 之下 ⇒ 上面那条报），以及打成 `.../connectors/x`（前缀"看起来"更细、
+    // 于是永远匹配不到该包根下的文件 ⇒ 这里报"没有覆盖根目录的条目"）。
+    if (!PATH_OWNERS.some(([prefix, name]) => name === pkg.name && prefix === expected)) {
+      const declared = PATH_OWNERS.filter(([, name]) => name === pkg.name).map(([prefix]) => JSON.stringify(prefix))
+      problems.push(`${pkg.name}: PATH_OWNERS 里没有 ${JSON.stringify(expected)} 这条根前缀`
+        + `（它现在的条目:${declared.length > 0 ? declared.join(', ') : '无'}）—— --changed 会把它根下的改动判成 0 个包`)
+    }
+  }
+  for (const [name, dependents] of Object.entries(DEPENDENTS)) {
+    if (!byName.has(name)) problems.push(`DEPENDENTS 的键 ${JSON.stringify(name)} 不在 PACKAGES 表内`)
+    for (const dependent of dependents) {
+      if (!byName.has(dependent)) {
+        problems.push(`DEPENDENTS[${JSON.stringify(name)}] 里的 ${JSON.stringify(dependent)} 不在 PACKAGES 表内`)
+      }
+    }
+  }
+  return problems
 }
 
 /** 影响全仓的顶层文件(改动即视为全量门禁)。 */
@@ -311,6 +583,108 @@ const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error
 const MAX_FAILURE_LINES = 150
 /** Cap on the trailing context lines printed per failed task. */
 const MAX_TAIL_LINES = 200
+
+/**
+ * 「软降级」判定行（2026-09-23 三轮审计 R3-C C-8）。
+ *
+ * 本仓近三轮的缺陷类别是"守卫静默通过"：守卫自己在 stdout 里说了「跳过 X」
+ * 「未检查 Y」「退化为只看 HEAD」，而编排器对**通过**的任务只打一行 `✓ name 时间`，
+ * 输出留在 `state.results` 里 ⇒ CI 摘要里永远看不到这些句子（只有失败才 dump 输出），
+ * 于是"我跳过了某条判据"这类软降级永远到不了人眼。
+ *
+ * 判据刻意包含两类：**软跳过**（跳过/未检查/未验证/未覆盖/未证明/降级/退化为/
+ * 不可达/advisory/SKIP/skipped/not checked）与**软声明**（`提示:`/`注意:` 开头的
+ * 说明行 —— 本仓守卫用这两个前缀承载"本次没证明什么"）。
+ * 只回显这些行（**绝不放整份日志**），见 {@link collectDegraded} —— 它的汇总范围是
+ * **根守卫**（GUARDS 表），包级 check 的测试运行器噪音不计入。
+ *
+ * 关键词命中之后还要过一道**成功摘要/规范性表述排除**（{@link isSuccessOrNormativeLine}，
+ * 2026-09-23 复审 F1）—— 否则守卫的通过摘要会被误判成降级行（实测 9 条里 5 条）。
+ */
+const DEGRADED_LINE = /(?:跳过|未检查|未做|未验证|未覆盖|未证明|退化为|降级|不可达|软跳过|提示[:：]|注意[:：]|advisory|\bSKIP\b|\bskipped\b|not checked)/u
+/**
+ * 「成功摘要」排除谓词（2026-09-23 复审 F1）。
+ *
+ * 为什么需要：{@link DEGRADED_LINE} 是**关键词**判据，而守卫的**通过摘要**里天然会出现
+ * "跳过 / SKIP" 这些词 —— 它们表达的是「这条判据被判过了，且它断言的是'不许静默跳过'」，
+ * 与"本次没判"正好相反。复审实测：一次全量 `yarn check` 的 9 条命中里 **5 条**属于这类
+ * 假阳性（逐条夹具见 `scripts/verify-check-workspaces.mjs` 的 F1 回归块：日志
+ * `temp/verify-guards-final/logs/C-full-check.log` 的 9 行，5 假阳 / 4 真阳）。
+ * 假阳性的代价不是刷屏（有界 9 行）而是**摘要自带的话术变成假的** ——
+ * "这些行说明某条判据本次没有真的判"长期与事实不符，读者会学会忽略整段，正是 C-8 想避免的事。
+ *
+ * 三类形态（每类都只匹配"这句话不是在报告某条判据没真的判"）：
+ *   1. **成功摘要**：`PASS n ｜ FAIL m ｜ SKIP k ｜ …`（`^PASS \d+`）、计数为 0 的穷尽式
+ *      汇总（`SKIP 0` / `skipped 0`）、守卫的收尾行 `OK — …`（`^OK\s*[—–-]`，以及被
+ *      守卫名带着前缀的 `<guard>: OK — …`）。刻意**不**写 `^OK\b` —— `OK，但有 3 个
+ *      文件未覆盖` 这种句子必须继续收进来。
+ *   2. **规范性表述**：`不得跳过` / `必须 SKIP` 这类"规则该怎样"的措辞
+ *      （`docs-only 不得跳过根守卫`、`环境缺失必须 SKIP 且不得报 PASS`）。
+ *      刻意**不**收 `不静默` / `显式 SKIP`：真降级行的措辞正是
+ *      `（可选；未给目录时显式 SKIP，不静默通过）`，收进来会把真信号一起吞掉。
+ *   3. **自检注记**：守卫把"我验证过的契约"写成一行 `<期望行为> ⇒ <期望结果> ✓`
+ *      （`聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓`）。判据 = 含 `⇒` 且以 `✓`
+ *      收尾；真降级行是**陈述事实**（`SKIP 未提供 --channels-repo …`），不写成期望式注记。
+ *
+ * 边界（认账）：这是**形态**判据，不是语义理解。某个守卫若**真的**要在 `OK —` 摘要里报告一条
+ * 降级，那行必须换一种写法（例如 C-8 夹具用的 `· 跳过：…`），否则会被这里排除掉 ——
+ * 边界写在此处，避免下一个人把它当缺陷重报。**不得**为了让某条真降级行进来而删谓词：
+ * 正确处置是改那行的写法。
+ */
+const DEGRADED_SUCCESS_SUMMARY = /(?:^PASS \d+|^OK\s*[—–-]|:\s*OK\s*[—–-]|\bSKIP 0\b|\bskipped 0\b)/u
+/** 「规范性表述」排除谓词 —— 见 {@link DEGRADED_SUCCESS_SUMMARY} 的第 2 类。 */
+const DEGRADED_NORMATIVE = /(?:不得跳过|不得静默跳过|必须\s*SKIP|禁止跳过|不允许跳过)/u
+/** 「自检注记」排除谓词 —— 见 {@link DEGRADED_SUCCESS_SUMMARY} 的第 3 类。 */
+const DEGRADED_SELFCHECK_NOTE = /⇒[^⇒]*✓\s*$/u
+
+/**
+ * 这一行是不是"成功摘要 / 规范性表述 / 自检注记"（⇒ 不是降级报告）。
+ * @param text - 已 trim 的输出行。
+ * @returns 命中任一排除谓词即 true。
+ */
+function isSuccessOrNormativeLine(text) {
+  return DEGRADED_SUCCESS_SUMMARY.test(text)
+    || DEGRADED_NORMATIVE.test(text)
+    || DEGRADED_SELFCHECK_NOTE.test(text)
+}
+
+/** 每个任务最多回显几条降级行（防某个套件刷屏）。 */
+const MAX_DEGRADED_PER_TASK = 8
+/** 全局最多回显几条降级行（CI 摘要必须短 —— 长日志会被 GitHub 截断中段）。 */
+const MAX_DEGRADED_TOTAL = 60
+/**
+ * 测试运行器自身的"跳过"噪音行。
+ *
+ * ⚠️ 汇总范围**只取根守卫**（GUARDS 表条目的 `task.path` 非空；包级 check 没有这个字段）。
+ * 实测依据：一次全量 `yarn check` 的 32 条命中里 28 条来自包级输出 —— vitest 的用例名
+ * （`✓ … 如实跳过 …`）、`Tests 657 passed | 1 skipped`、`[prebuild] up to date, skipped: …`、
+ * `advisor: … skipped` 这些都不是"某条判据没真的判"。把它们刷进 CI 摘要只会重演本仓踩过的
+ * "日志刷爆、真信号被挤出 GitHub 截断窗口"。包级 check 的内部跳过仍可在失败路径与
+ * `--full-output` 里看到。
+ */
+const DEGRADED_NOISE = /^(?:[✓×↓✔✗]|Test Files\b|Tests\b|Duration\b|Snapshots\b)/u
+
+/**
+ * 把一个**通过**任务（仅根守卫）的输出里的软降级行收进 `state.degraded`（有界）。
+ *
+ * 命中 {@link DEGRADED_LINE} **且**没有命中 {@link isSuccessOrNormativeLine} 才算降级行
+ * —— 后者是 2026-09-23 复审 F1 加的成功摘要/规范性表述排除（实测把 9 条命中里的 5 条
+ * 假阳性去掉，4 条真阳性一条不少）。
+ * @param result - 已通过的任务结果。
+ * @param state - 汇总状态。
+ */
+function collectDegraded(result, state) {
+  if (result.task.path === undefined) return
+  let taken = 0
+  for (const raw of result.output.split('\n')) {
+    const text = raw.trim()
+    if (text === '' || DEGRADED_NOISE.test(text) || isSuccessOrNormativeLine(text) || !DEGRADED_LINE.test(text)) continue
+    if (state.degraded.length >= MAX_DEGRADED_TOTAL) return
+    state.degraded.push({ task: result.task.name, line: text.slice(0, 200) })
+    taken += 1
+    if (taken >= MAX_DEGRADED_PER_TASK) return
+  }
+}
 
 /**
  * Bound a failed task's output to something a CI log can actually carry.
@@ -442,12 +816,15 @@ function seconds(ms) {
 /**
  * 记录一个失败任务的归属：`advisory` 任务只告警、不拦门禁。
  *
- * 为什么要这个开关（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
+ * 为什么这个开关存在（2026-09-19）：WASM「客户端专属」的验收门禁（§13）在 W1–W5 波次
  * 落地前**按设计就是红的** —— 它的零残留断言必须如实报出存量命中（旧应用子域/换票/
  * entry_url/access=public/服务端 ai.chat）。若直接接成阻塞，`yarn check` 会在所有泳道
  * 施工期间恒红；若把它改成"没命中才算"，那条判据就退化成了摆设。
- * 折中：脚本本身仍然 exit 1（直跑可见），编排器这里只记 advisory 并**显式打印**，
- * W6 验收前必须删掉条目上的 `advisory:true`。
+ *
+ * **2026-09-23 第六轮审计 R6-C-1 起收口**：advisory 不再是条目上的一个自由字段 ——
+ * 它必须先在 `ADVISORY_REGISTRY` 里逐条登记（理由/批准人/到期日），否则本编排器
+ * 在调度前 exit 2（见 `validateAdvisoryRegistry`）。当时的施工期豁免已随该守卫
+ * 转阻塞而清空，登记表当前为空。
  */
 function classifyFailure(result, state) {
   if (result.task.advisory === true) state.advisory.push(result)
@@ -463,6 +840,7 @@ async function runPool(tasks, limit, state) {
       const result = await runTask(task)
       state.results.push(result)
       if (!result.ok) classifyFailure(result, state)
+      else collectDegraded(result, state)
       const mark = result.ok ? '✓' : result.task.advisory === true ? '!' : '✗'
       console.log(`${mark} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     }
@@ -484,8 +862,10 @@ async function runScheduler(tasks, limit, state) {
     const promise = runTask(task).then(result => {
       running.delete(task.name)
       state.results.push(result)
-      if (result.ok) succeeded.add(task.name)
-      else classifyFailure(result, state)
+      if (result.ok) {
+        succeeded.add(task.name)
+        collectDegraded(result, state)
+      } else classifyFailure(result, state)
       const mark = result.ok ? '✓' : task.advisory === true ? '!' : '✗'
       console.log(`${mark} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     })
@@ -518,6 +898,21 @@ async function runScheduler(tasks, limit, state) {
     }
     await Promise.race(running.values())
   }
+
+  // C-1（2026-09-23 三轮审计 P1）：循环退出前断言 `pending` 清空。
+  //
+  // 旧实现在这里直接 `break`，而 `pending` 里剩下的任务**既不跑、也不进 skipped**
+  // （skipped 只在"阻塞依赖已结束且永远不会成功"时记账；互相等待的包永远停在
+  // pending）⇒ 摘要里没有任何一处能看出"少了几个包"：它按 `state.results` 倒算
+  // `passed`，于是打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次
+  // 都没跑。审计实测（注入 `A needs B` + `B needs A`）：两个包在输出里出现 0 次，
+  // 门禁照绿。现在把它们逐条列出来并**判失败**。
+  if (pending.size > 0) {
+    for (const task of pending.values()) {
+      state.dropped.push({ task, needs: task.needs.filter(name => !succeeded.has(name)) })
+      console.error(`✗ ${task.name.padEnd(28)} 未运行（依赖永不满足：${task.needs.join(', ') || '—'}）`)
+    }
+  }
 }
 
 const options = parseArgs(process.argv.slice(2))
@@ -529,6 +924,27 @@ if (options === null) process.exit(process.exitCode ?? 1)
 if (options.help) {
   console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')
   process.exit(0)
+}
+
+// `advisory` 的登记制（2026-09-23 第六轮审计 R6-C-1）：配置非法时**拒绝调度**，
+// 绝不放行成"某个守卫变成只告警"。这条判据对 `--list` 也生效 —— 清单类判据
+// （`verify-check-workspaces.mjs` 等）正是靠 `--list` 读这张表的。
+{
+  const advisoryErrors = validateAdvisoryRegistry(GUARDS)
+  if (advisoryErrors.length > 0) {
+    for (const error of advisoryErrors) console.error(`check-workspaces: ${error}`)
+    console.error('check-workspaces: ADVISORY_REGISTRY 校验未通过 ⇒ 拒绝调度（退出码 2；退出码 0 不得代表一个被静音的门禁）')
+    process.exit(2)
+  }
+}
+
+// C-2（2026-09-23 三轮审计 P2）：调度/归属表的名字此前**没有任何校验** —— 打错一字符
+// 就是"静默删掉一条边"或"check:fast 判 0 个包"。放在 `--list` 之前：列计划时就必须拦。
+const scheduleProblems = scheduleTableProblems()
+if (scheduleProblems.length > 0) {
+  console.error(`check-workspaces: 调度/归属表自检失败（${scheduleProblems.length} 处）—— 这些名字打错时失败形态全是静默的：`)
+  for (const problem of scheduleProblems) console.error(`  - ${problem}`)
+  process.exit(2)
 }
 
 const envConcurrency = Number(process.env.CHECK_CONCURRENCY ?? '')
@@ -589,10 +1005,15 @@ if (options.list) {
   console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
   const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
   if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
+  // 登记表本身也是清单判据的输入（verify-check-workspaces 会与 check-root-guards --list
+  // 对拍这条）—— 空表要**显式**说出来，不能靠"没打印那一行"来推断。
+  console.log(`guards(advisory 登记制): ${ADVISORY_REGISTRY.length === 0
+    ? '无（每条守卫都必须拦门禁）'
+    : ADVISORY_REGISTRY.map(entry => `${entry.name}@${entry.expiresOn}`).join(', ')}`)
   process.exit(0)
 }
 
-const state = { results: [], failed: [], skipped: [], advisory: [] }
+const state = { results: [], failed: [], skipped: [], advisory: [], dropped: [], degraded: [] }
 const startedAt = Date.now()
 console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
 
@@ -614,8 +1035,30 @@ if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt
 const passed = state.results.length - state.failed.length
-console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+// 摘要刻意把「计划 / 实跑」两个数都打出来：C-1 的失效形态正是"少跑了任务但计数看不出来"
+// （`passed` 是按实际结果倒算的）。计划数 = 本轮真正排进计划的任务（守卫 + 选中的包）。
+const planned = firstWave.length + rest.length
+console.log(`──── 计划 ${planned} / 实跑 ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+  + `${state.dropped.length > 0 ? `、${state.dropped.length} 未运行` : ''}`
   + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory)` : ''},总耗时 ${seconds(totalMs)}`)
+
+// C-8（2026-09-23 三轮审计 P2）：**通过**的守卫里那些"跳过/降级"行必须进摘要。
+// 只回显判定行（有界），绝不放整份日志 —— 本仓踩过"日志刷爆把失败详情挤出 GitHub
+// 截断窗口"的坑。固定前缀 `[DEGRADED]` 供 CI 侧 grep。
+if (state.degraded.length > 0) {
+  console.log(`\n[DEGRADED] ${state.degraded.length} 条"跳过/降级"提示（来自**通过**的任务；只回显判定行，不是日志 dump）`)
+  for (const entry of state.degraded) console.log(`[DEGRADED] ${entry.task}: ${entry.line}`)
+  console.log('[DEGRADED] 处置：这些行说明某条判据本次没有真的判 —— 要么修掉降级路径，要么在守卫里把它改成 fail-loud。')
+}
+
+if (state.dropped.length > 0) {
+  console.error(`\n✗ ${state.dropped.length} 个任务**未运行**（依赖成环 / 依赖永不满足）—— 既不算通过、也不算跳过：`)
+  for (const entry of state.dropped) {
+    console.error(`  - ${entry.task.name}（未满足的依赖：${entry.needs.join(', ') || '—'}）`)
+  }
+  console.error('  判据来源：C-1（2026-09-23 三轮审计 P1）。旧实现在此处静默 break，摘要按实际结果倒算')
+  console.error('  ⇒ 打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次都没跑。')
+}
 
 if (state.advisory.length > 0) {
   // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
@@ -624,11 +1067,12 @@ if (state.advisory.length > 0) {
     console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
     console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
   }
-  console.error('\n提示：WASM 客户端专属门禁在 W1–W5 波次落地前按设计就是红的（零残留如实报出存量命中）。')
-  console.error('     W6 验收前必须删掉 scripts/check-workspaces.mjs 里该条目的 advisory:true 转为阻塞。')
+  console.error('\n提示：advisory 条目必须先在 ADVISORY_REGISTRY 里登记（理由/批准人/到期日），')
+  console.error('     且 `scripts/check-root-guards.mjs` 只有在显式传 `--allow-advisory` 时才容忍它。')
+  console.error('     到期即失效：要么续期并写明理由，要么把该条目转回阻塞（删掉 `advisory: true`）。')
 }
 
-if (state.failed.length > 0) {
+if (state.failed.length > 0 || state.dropped.length > 0) {
   for (const failure of state.failed) {
     console.error(`\n===== ${failure.task.name} 失败(退出码非 0) =====`)
     console.error(options.fullOutput ? failure.output.trimEnd() : summarizeFailure(failure.output))

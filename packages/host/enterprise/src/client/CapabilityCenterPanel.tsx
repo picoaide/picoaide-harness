@@ -72,6 +72,30 @@ interface CapabilityItem {
   installed: boolean
   /** 已装版本（hasUpdate 比较基准；本地创作时为其版本）。 */
   installedVersion?: string | undefined
+  /**
+   * 本机那一份的来源（宿主按磁盘上的 provenance 判定，审计 2026-09-23 A2/A3）：
+   * `store` = 能力中心装的（更新/卸载直接做）；`local` = 本机自制或来源不明
+   * （覆盖/删除前**必须**由用户确认，宿主也会在缺 `?overwrite=1` 时 409 拒绝）。
+   */
+  installedOrigin?: 'store' | 'local' | undefined
+  /**
+   * 本机那一份**能不能算作当前账号的**（宿主按服务端「我的」视图下发的归属判据，
+   * 第六轮审计 R6-B-1）。
+   *
+   * 技能库/预设目录是**机器作用域**的（`<DSH_HOME>/skills`，不按账号分目录），
+   * 而同机换账号是被支持的操作 ⇒ 磁盘上这一份可能是**别的账号**装的。宿主手里唯一
+   * 能证明的事实是：服务端 `?source=own`（author-own 任意状态）里有没有同名同 kind
+   * 的行 —— 有 ⇒ 这个名字属于当前账号（`'mine'`）；没有 ⇒ **证明不了**
+   * （`'unknown'`：既可能是别人装的，也可能是我装的别人的内容）。
+   *
+   * 为什么**不发** `'other'`：宿主没有任何事实能证明"这一份是第三方装的"，编一个
+   * 出来就是本条 finding 的同一个错（拿未知当已知）。
+   *
+   * 消费纪律（见 {@link isDelistedItem} 第 3 条）：只有 `'mine'` 才允许走"目录里没有
+   * 它 ⇒ 判已下架"的推断，并因此给出**删除本机那一份**的动作；`'unknown'` 一律不判、
+   * 不删（判据只回答"能不能从目录更新/上传"，不回答"这份内容还能不能用"）。
+   */
+  localOwnership?: 'mine' | 'unknown' | undefined
   /** 是否本地创作（「我的」分区用）。 */
   isLocal?: boolean | undefined
   /** 本地创作时是否有上传状态记录（无 = 未上传过）。 */
@@ -84,8 +108,44 @@ interface CapabilityItem {
   dirty?: boolean | undefined
   /** 运行时技能名（SKILL.md 的 name）；与 name 不同时需显式提示。 */
   runtimeName?: string | undefined
-  /** 是否当前用户归属（2026-09-02 归属权：上传预检据此区分「我的」与「他人」同名）。 */
+  /**
+   * 是否当前用户归属（2026-09-02 归属权：上传预检据此区分「我的」与「他人」同名）。
+   *
+   * **三态**（R5-B-2）：`true` = 服务端说归你；`false` = 服务端**明确**说不是你的
+   * （归属被转走就是这一档）；`undefined` = 这一行没有下发该字段（本地磁盘行就是
+   * 这种情况）—— 未知**不得**被当成"我的"（上传预检仍是 `!== true` 就拦住），
+   * 也不得被当成"已转交"（没有事实就不下这个判词）。
+   */
   isOwner?: boolean | undefined
+  /**
+   * 服务端行上的归属人账号（`is_owner === false` 时用来说明"转给谁了"）。
+   *
+   * ⚠️ **当前员工面契约里没有这个字段**（2026-09-23 核对 `server/internal/capabilities`：
+   * `owner` 只在管理端的 `ApprovalRow` 上，员工面的 `CapabilityItem` 只有 `is_owner`）。
+   * 保留它是因为"已转交"的**文案**（转给了谁）需要它：服务端一旦在员工面行上补
+   * `owner`（json `owner`），客户端不需要再改（{@link isTransferredItem} 的判据仍以
+   * `is_owner === false` 为主，本字段只用于显示）。缺省 = 未下发，不编造名字。
+   */
+  owner?: string | undefined
+  /**
+   * 服务端在**作者自己的行**上下发的下架标记（`server/internal/capabilities` 的
+   * `CapabilityItem.Delisted`，json `delisted`；第五轮审计 R5-B-1 的权威字段）。
+   *
+   * 语义（服务端泳道的定义）：下架 = **不可分发**，但归属人自己的「我的」分区仍会
+   * 返回该行并带 `delisted:true` —— 作者需要看到这个状态，否则管控动作在作者面
+   * 没有任何反馈。分发面列出的行恒为 `false`。缺省 = 未下发（不得读成"上架"）。
+   */
+  delisted?: boolean | undefined
+  /**
+   * 上架标志（`apps.enabled`）的**兼容**读取口。
+   *
+   * ⚠️ 当前能力中心的员工面契约用的是 `delisted`（服务端 2026-09-23 定的字段），
+   * **没有** `enabled`；这里保留是因为"目录行带 `apps.enabled`"是同一产品另一处
+   * （应用中心 `AppCenterItem.enabled`）的既有形态 —— 一旦哪条目录行带它，判据立即
+   * 生效，不用再改客户端。缺省是 `undefined` 而不是 `true`：能力中心没有"这一行默认
+   * 上架"的知识，把未下发读成"上架"就是拿未知当可用（R5-B-1 的纪律）。
+   */
+  enabled?: boolean | undefined
 }
 
 /** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
@@ -217,16 +277,46 @@ export function itemsForTab<T extends { source?: string, installed?: boolean }>(
     : items.filter(i => i.source === 'local' || i.installed === true)
 }
 
+/** 取数分区：市场（市场+组织合并结果）与我的。 */
+export type SectionKey = 'mine' | 'market'
+
+/**
+ * 一次分区取数回来后如何并进现有列表（**唯一实现**）。
+ *
+ * 决策 2026-08-25：「市场」tab 承载 market+org 合并结果 —— 加载 market 时清除
+ * 两源旧条目；「我的」只清 local（其余保留：`?source=local` 的载荷里同时带
+ * 商店已装行与本机行）。
+ *
+ * 抽成纯函数是为了让「两种到达顺序」可被单测直接驱动（独立复审 2026-09-23 N1）：
+ * 本包没有 jsdom/渲染测试面，而这条归约是两次并发取数唯一的合流点 —— 它在
+ * `setItems` 的 updater 里时，谁也没法在没有 React 的情况下复现 market-first /
+ * mine-first 两种到达顺序。
+ * @param prev - 当前列表。
+ * @param key - 回来的那个分区。
+ * @param rows - 该分区的行。
+ * @returns 合并后的列表。
+ */
+export function applySectionRows(
+  prev: readonly CapabilityItem[],
+  key: SectionKey,
+  rows: readonly CapabilityItem[],
+): CapabilityItem[] {
+  const drop = key === 'market'
+    ? (i: CapabilityItem) => i.source !== 'local'
+    : (i: CapabilityItem) => i.source === 'local'
+  return [...prev.filter(i => !drop(i)), ...rows]
+}
+
 /** 单测用：按（kind, source）解析安装端点。
  * 市场技能只存在于服务端 skills/marketplace 表,必须走 /api/pico/skills 代理
  * (网关 marketplace /archive);共享技能走 shared-skills 代理(带版本);
  * 智能体走 agent-presets 代理。合并面板时(57aeffecbb)曾把市场技能误路由
  * 到 shared-skills 端点 → 网关 404 → 面板「操作失败:gateway error」。
  *
- * ⚠️ 端点**不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（auth-gate），
- * 从不读 `?force=1`；"覆盖已装同名内容"是**客户端确认条**决定要不要发这一发请求
- * （见 `install()` 的 installConfirmKey），不是一个服务端开关。此前拼上的
- * `?force=1` 是死面：谁都没读它，却让人以为宿主支持"强制刷新"。
+ * ⚠️ 端点**本身不带 query 参数**（R2-SK-5）：路径由本函数拼，`?overwrite=1` 由
+ * {@link withOverwrite} 在"用户已在确认条上确认过"之后加上 —— 宿主**真的读**它
+ * （审计 2026-09-23 A2/A3/A15 的两端契约），缺它时拒绝覆盖本机自制内容（409
+ * `LOCAL_CONTENT`）。这与历史上的 `?force=1` 不同：那一个谁都没读，是死面。
  */
 export function installEndpoint(item: CapabilityItem, version: string): string {
   let base: string
@@ -238,6 +328,361 @@ export function installEndpoint(item: CapabilityItem, version: string): string {
     base = `/api/pico/agent-presets/${encodeURIComponent(item.name)}/install`
   }
   return base
+}
+
+/**
+ * 「按版本安装」是否真的能装到指定版本（审计 2026-09-23 A11）。
+ *
+ * 只有**组织共享技能**的端点把版本写进路径
+ * （`/api/pico/shared-skills/:name/:version/install`）。市场技能与智能体的端点
+ * 都不带版本（市场归档端点只按"当前 approved 最高版"取），所以对它们渲染
+ * 「v1 / v2」按钮是**假入口**：点 v1 装到的还是最新版，界面却按 v1 记账。
+ * @param item - 能力中心的一行。
+ * @returns 支持按版本安装为 true。
+ */
+export function versionInstallSupported(item: CapabilityItem): boolean {
+  return item.kind === 'skill' && item.source === 'org'
+}
+
+/**
+ * 覆盖确认的判据（审计 A2/A3/A15 + 第四轮 R4-B-3）。
+ *
+ * 返回 true 时面板先出确认条、用户点过之后才把 `?overwrite=1` 发给宿主；
+ * 宿主侧对同一种情形没有标记就 409 `LOCAL_CONTENT`（两端同一份规则，见
+ * auth-gate 的 `/api/pico/skills` 分支注释与安装器的
+ * `requiresOverwriteConfirmation`）。
+ *
+ * 两档成因（**同一份事实的两种读法，不是两套判据**）：
+ *  - `installedOrigin !== 'store'`：本机那一份不是能力中心装的（用户自制 /
+ *    来源不明）；
+ *  - `dirty === true`（R4-B-3）：**商店来源但被本地修改过** —— 磁盘上的内容哈希
+ *    与安装时记的 `archiveChecksum` 不一致。它同时是"商店来源"和"里面装着用户的
+ *    字节"：旧判据只看来源，于是「更新到 vX」一次单击就把用户加的文件与改过的正文
+ *    整树删掉 —— 而卡片上还挂着「已本地修改」徽章（有徽章、无后果提示）。
+ *    `dirty` 由宿主按磁盘事实算出（`isInstalledSkillDirty`，与宿主闸门同源）。
+ * @param item - 能力中心的一行。
+ * @returns 覆盖前需要用户确认。
+ */
+export function needsOverwriteConfirm(item: CapabilityItem): boolean {
+  return item.installed === true && (item.installedOrigin !== 'store' || item.dirty === true)
+}
+
+/** 覆盖确认条的措辞档位（三选一，见 {@link overwriteConfirmReason}）。 */
+export type OverwriteConfirmReason = 'local' | 'dirty' | 'store'
+
+/**
+ * 确认条该说哪一句（**唯一判定**）。
+ *
+ * 抽成纯函数的理由与 `needsOverwriteConfirm` 相同：措辞决定用户是否知道"按下去会
+ * 丢什么"。`dirty` 档（R4-B-3）必须与"用户自制"分开 —— 前者丢的是**你自己改过的
+ * 那部分**，后者丢的是**你写的一整份技能**，用户要据此决定按不按。
+ * @param item - 能力中心的一行。
+ * @returns `local` / `dirty` / `store`。
+ */
+export function overwriteConfirmReason(item: CapabilityItem): OverwriteConfirmReason {
+  if (item.installedOrigin !== 'store') return 'local'
+  return item.dirty === true ? 'dirty' : 'store'
+}
+
+/** 确认条要显示的那一行状态（{@link PendingInstall} 的最小子集，便于单测）。 */
+export interface ConfirmStripInput {
+  name: string
+  /** 兼容字段：没有 `reason` 的历史调用按它推档（true ⇒ `local`）。 */
+  localConflict: boolean
+  reason?: OverwriteConfirmReason | undefined
+}
+
+/** 确认条的措辞档位（`reason` 优先；缺省按 `localConflict` 推）。 */
+function confirmStripReason(input: ConfirmStripInput): OverwriteConfirmReason {
+  return input.reason ?? (input.localConflict ? 'local' : 'store')
+}
+
+/**
+ * 确认条正文（**唯一实现**；三档措辞见 {@link overwriteConfirmReason}）。
+ * @param input - 待确认的那一发。
+ * @returns 当前界面语言下的提示文案。
+ */
+export function confirmStripText(input: ConfirmStripInput): string {
+  const reason = confirmStripReason(input)
+  if (reason === 'local') return t('capability.conflictConfirmLocal', { name: input.name })
+  if (reason === 'dirty') return t('capability.conflictConfirmDirty', { name: input.name })
+  return t('capability.conflictConfirm', { name: input.name })
+}
+
+/**
+ * 确认条的按钮文案（与 {@link confirmStripText} 同档）。
+ * @param input - 待确认的那一发。
+ * @returns 当前界面语言下的按钮标签。
+ */
+export function confirmStripAction(input: ConfirmStripInput): string {
+  const reason = confirmStripReason(input)
+  if (reason === 'local') return t('capability.forceInstallLocal')
+  if (reason === 'dirty') return t('capability.forceInstallDirty')
+  return t('capability.forceInstall')
+}
+
+/** 给写面端点加上"用户已确认覆盖/删除本机内容"的显式标记。 */
+export function withOverwrite(url: string, overwrite: boolean): string {
+  if (!overwrite) return url
+  return `${url}${url.includes('?') ? '&' : '?'}overwrite=1`
+}
+
+/**
+ * 这一发安装是否必须先弹确认条（**唯一判定入口**）。
+ *
+ * 抽成纯函数是为了让"确认条可达"这条契约可被单测打坏（审计 A15：旧实现里
+ * 更新按钮硬编码 force，确认条永远是死代码，而纯渲染层没有任何用例能抓到）。
+ * @param item - 能力中心的一行。
+ * @param opts - 调用方的选项（`overwrite: true` = 用户已在确认条上点过）。
+ * @returns 需要先确认。
+ */
+export function installNeedsConfirm(item: CapabilityItem, opts?: { overwrite?: boolean | undefined }): boolean {
+  return opts?.overwrite !== true && needsOverwriteConfirm(item)
+}
+
+/**
+ * 一次安装请求的 URL（**唯一拼装入口**）。
+ *
+ * `?overwrite=1` 只在"用户已确认"时出现 —— 宿主缺它就会拒绝覆盖本机自制内容
+ * （409 `LOCAL_CONTENT`）。版本取用户点选的那一个，否则取当前展示版本。
+ * @param item - 能力中心的一行。
+ * @param opts - 调用方的选项（overwrite / 用户点选的版本）。
+ * @returns 请求 URL。
+ */
+export function installRequestUrl(
+  item: CapabilityItem,
+  opts?: { overwrite?: boolean | undefined, version?: string | undefined },
+): string {
+  const version = opts?.version ?? item.version
+  return withOverwrite(installEndpoint(item, version), opts?.overwrite === true)
+}
+
+/**
+ * 本机技能库里那一份"来源是随包/平台"的技能，卸载走哪条端点（审计 A6 + 跨泳道契约 S2）。
+ *
+ *  - `builtin`（平台内置，服务端下发）⇒ `POST /api/pico/skills/builtin/:name/uninstall`
+ *    —— 这条路由是本次新增的（此前内置技能只能装不能卸）；
+ *  - `plugin`（随客户端内置，如随包插件同步进来的技能）⇒ `POST /api/pico/skills/:name/uninstall`
+ *    —— 该端点本就是纯本地删除。
+ * @param item - 能力中心的一行。
+ * @returns 端点路径；不适用（不是这两种来源）时为 undefined。
+ */
+export function localRemoveEndpoint(item: CapabilityItem): string | undefined {
+  if (item.kind !== 'skill') return undefined
+  const name = encodeURIComponent(item.name)
+  if (item.originChannel === 'builtin') return `/api/pico/skills/builtin/${name}/uninstall`
+  if (item.originChannel === 'plugin') return `/api/pico/skills/${name}/uninstall`
+  return undefined
+}
+
+/** 卡片页脚那一格该出什么（{@link planCardAction} 的返回值）。 */
+export type CardActionPlan =
+  | { kind: 'uninstall', endpoint: string, localContent: boolean }
+  | { kind: 'update', version: string }
+  | { kind: 'install' }
+  | { kind: 'upload' }
+  | { kind: 'reupload' }
+  | { kind: 'review', status: ItemStatus }
+  /** 归属已转交（R5-B-2）：这一格没有可达动作，只报状态。 */
+  | { kind: 'transferred' }
+  /** 已下架且本机没有可卸的那一份（R5-B-1）：同样只报状态。 */
+  | { kind: 'delisted' }
+
+/**
+ * 本机这一份是不是"从目录装进来的那一份"（{@link isDelistedItem} 推断判据的一半）。
+ *
+ * 只认**目录渠道**（`market` / `org`）：`builtin` / `plugin` 是随包内容，
+ * 本来就不在能力中心目录里，把它们算进来会让平台内置技能恒显示「已下架」。
+ * 两个字段都是磁盘 provenance 的消费端（auth-gate 的本机行），与安装器/卸载器的
+ * `isStoreProvenance` 同源。
+ */
+function catalogSourcedLocal(item: Pick<CapabilityItem, 'installedOrigin' | 'originChannel'>): boolean {
+  return item.installedOrigin === 'store' && (item.originChannel === 'market' || item.originChannel === 'org')
+}
+
+/**
+ * 这一行当前**不在可用目录中**（下架 / 授权撤回 / 已转走）—— 三条判据，前两条是
+ * 服务端下发的事实，第三条是**只在能证明属于当前账号时**才允许的客户端推断：
+ *
+ *  1. **权威判据（作者面）**：服务端在作者自己的行上下发了 `delisted: true`
+ *     （`CapabilityItem.Delisted`，R5-B-1 的服务端泳道新增字段）；
+ *  2. **权威判据（目录面）**：服务端在行上下发了 `enabled: false`（下架行不再被
+ *     服务端滤掉时就是这一档，客户端无需再改）；
+ *  3. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，带着目录渠道的
+ *     商店溯源（{@link catalogSourcedLocal}），**且宿主能证明它属于当前账号**
+ *     （`localOwnership === 'mine'`）。
+ *
+ * 第 2 条为什么成立：{@link mergeItems} 的权威序是 市场 > 组织 > 本机 —— 只要目录里
+ * 还有同名同 kind 的一行，归并结果的 `source` 就**不可能**是 `local`。于是
+ * "source === 'local' + 商店溯源"等价于"这份内容是从目录装进来的、而目录里已经没有
+ * 它了"（R5-B-1：下架后员工面 market/org/own 三个来源同时为空，只剩磁盘本机行）。
+ *
+ * ⚠️ **第 3 条为什么必须加归属这一维（第六轮审计 R6-B-1）**：技能库是**机器作用域**
+ * 的（`<DSH_HOME>/skills`，不按账号分目录），同机换账号又是被支持的操作。于是"本机有
+ * 一份商店内容、当前账号在 own/market 两个视图里都看不到它"这个形状**同时**对应两种
+ * 完全不同的处境：
+ *   - 它确实是当前账号的内容（作者面 `delisted` 未下发的旧服务端；或授权被撤回），
+ *     或
+ *   - 它是**另一个账号**在这台机器上装的（当前账号既不是作者、也没有授权）。
+ * 只看"目录里没有它"无法区分两者，修复前的版本会把后者也说成"可能已被管理员下架"，
+ * 并把页脚换成**删除本机那一份**——一个跨账号的破坏性动作。归属判据由宿主下发
+ * （{@link CapabilityItem.localOwnership}，来自服务端 `?source=own` 的匹配结果），
+ * 证明不了（`'unknown'`）就**不下判词**：不标已下架、也不给删除类动作。
+ *
+ * 判据只回答"还能不能从目录更新/上传"，**不**回答"这份内容还能不能用"：磁盘上这一份
+ * 照常可用、照常渲染，只是不再出现"上传/更新"这种已达不成的动作。
+ * @param item - 能力中心的一行（必须是**归并后**的行，见上）。
+ * @returns 明确不在目录中且属于当前账号 ⇒ `true`；其余（含未知）⇒ `false`。
+ */
+export function isDelistedItem(
+  item: Pick<
+    CapabilityItem,
+    'source' | 'delisted' | 'enabled' | 'installedOrigin' | 'originChannel' | 'localOwnership'
+  >,
+): boolean {
+  if (item.delisted === true) return true
+  if (item.enabled === false) return true
+  return item.source === 'local' && catalogSourcedLocal(item) && item.localOwnership === 'mine'
+}
+
+/**
+ * 归属已被转交给别人（R5-B-2）：服务端**明确**说这一行不归当前用户
+ * （`is_owner === false`），而本机还留着"我上传过"的记录
+ * （{@link CapabilityItem.uploadStatus} 有值）。
+ *
+ * 为什么必须同时看 `uploadStatus`：任何"别人上传、我装进来"的商店行
+ * `is_owner` 同样是 `false`，只看它会把每一份装来的内容都写成「已转交」。
+ *
+ * **不拿 `author` 兜底**（R5-B-2 的纪律）：`author` 是发布者，归属转移之后它仍然是
+ * 旧作者的名字 —— 用本地这份缓存去推归属正是这条 finding 的成因。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @returns 已转交 ⇒ `true`。
+ */
+export function isTransferredItem(item: Pick<CapabilityItem, 'isOwner' | 'uploadStatus'>): boolean {
+  return item.isOwner === false && item.uploadStatus !== undefined
+}
+
+/**
+ * 卡片页脚动作的**唯一判定实现**（渲染层只按它 map，不再自己算一遍）。
+ *
+ * 抽成纯函数的理由（独立复审 2026-09-23 A6/N1）：本包没有 jsdom/渲染测试面，
+ * 而这正是 A6 的验收点 ——「同名商店行存在时仍渲染「随客户端内置」徽章 + 卸载按钮」。
+ * 埋成 JSX 嵌套三元时，`mergeItems` 吞掉本机行字段造成的"页脚退化成「安装」"
+ * 没有任何用例能打坏（审计探针只能逐字复刻这两处分支）。
+ *
+ * 两条口径（与 {@link localRemoveEndpoint} / `needsOverwriteConfirm` 同源）：
+ *  - `source === 'local'`（本机创作，含 builtin/plugin 同步进来的那一份）：
+ *    平台/随包内置的技能出「卸载」（审计 A6）；**已转交**（R5-B-2）与**不在目录中**
+ *    （R5-B-1/B-3，**且能证明属于当前账号**，R6-B-1）两态各自出状态/卸载，
+ *    **绝不出「上传」**；其余按上传状态出上传/等审/重传；
+ *  - 商店行：未装出「安装」，有新版出「更新到 vX」（**不传 force**，A15），
+ *    否则出「卸载」。
+ *
+ * 删除类动作的**准入条件**（R6-B-1）：本机那一份必须能证明属于当前账号
+ * （{@link CapabilityItem.localOwnership} = `'mine'`，或服务端下发了权威的
+ * `delisted`/`enabled`）。证明不了的行**一律不出**「卸载」—— 技能库是机器作用域的，
+ * 删掉的很可能是同机**另一个账号**装的那一份。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @returns 页脚动作。
+ */
+export function planCardAction(item: CapabilityItem): CardActionPlan {
+  if (item.source === 'local') {
+    const removable = localRemoveEndpoint(item)
+    if (removable !== undefined) {
+      return { kind: 'uninstall', endpoint: removable, localContent: needsOverwriteConfirm(item) }
+    }
+    // R5-B-2 先于上传档：归属已经不在自己名下（服务端 `is_owner:false`）时，
+    // 「上传 / 重新上传」是**已达不成**的动作（服务端 409 NAME_TAKEN）。这一格
+    // 只报状态，不再造假按钮。
+    if (isTransferredItem(item)) return { kind: 'transferred' }
+    // R5-B-1/B-3：目录里已经没有这一行（下架 / 授权撤回）时，本机这一份**仍然
+    // 可用**，但"上传"要么注定失败、要么（下架期间服务端放行上传时）只是让作者
+    // 在完全不知情的状态下反复提交。改成**真的可达**的那一个动作：本地卸载
+    // （{@link uninstallEndpoint} 对技能走 shared-skills、对智能体走
+    // agent-presets —— 两条都是既有端点，零新增接口）。是否为"用户自己的内容"
+    // 仍由 needsOverwriteConfirm 决定要不要先确认一次。
+    //
+    // ⚠️ 这一格**只在能证明本机那一份属于当前账号时**才可能命中（R6-B-1）：
+    // `isDelistedItem` 的第 3 条判据要求 `localOwnership === 'mine'`。证明不了
+    // （`'unknown'`，例如"同事在这台机器上装的商店技能"）时落到下面的上传档：
+    // 那是一个**无副作用**的动作（服务端会以名称占用拒掉），而删除**别人**装在
+    // 这台机器上的那一份是有后果的跨账号动作。
+    if (isDelistedItem(item)) {
+      return {
+        kind: 'uninstall',
+        endpoint: uninstallEndpoint(item, item.version),
+        localContent: needsOverwriteConfirm(item),
+      }
+    }
+    if (item.uploadStatus === 'rejected') return { kind: 'reupload' }
+    if (item.uploadStatus === 'pending') return { kind: 'review', status: 'pending' }
+    if (item.uploadStatus === 'approved') return { kind: 'review', status: 'approved' }
+    return { kind: 'upload' }
+  }
+  if (isDelistedItem(item)) {
+    // 目录行上的下架（服务端 `enabled:false`）：**不给**「安装」—— 装了也不会与
+    // 目录一致，而下架对使用者等价于"不存在"；本机已经有一份时给「卸载」（可达），
+    // 否则这一格只报状态（与应用中心「已下架 + 禁用打开」同形态）。
+    return item.installed
+      ? { kind: 'uninstall', endpoint: uninstallEndpoint(item, item.version), localContent: needsOverwriteConfirm(item) }
+      : { kind: 'delisted' }
+  }
+  if (!item.installed) return { kind: 'install' }
+  if (hasUpdateFor(item)) {
+    return { kind: 'update', version: item.versions[item.versions.length - 1] ?? item.version }
+  }
+  return {
+    kind: 'uninstall',
+    endpoint: uninstallEndpoint(item, item.version),
+    localContent: needsOverwriteConfirm(item),
+  }
+}
+
+/** 「来源」徽章可能用到的字典键（**六选一**，见 {@link capabilitySourceBadgeKey}）。 */
+export type CapabilitySourceBadgeKey =
+  | 'capability.sourceLocal'
+  | 'capability.sourceOrg'
+  | 'capability.sourceBuiltin'
+  | 'capability.sourcePlugin'
+  | 'capability.sourceMarket'
+  | 'capability.sourceOther'
+
+/**
+ * 「来源」徽章该显示哪一个（**唯一实现**）。
+ *
+ * 2026-09-20 修的真实 UI bug：原先「我的」分区同时渲染 `source` 徽章与
+ * `mineSourceBadge`，匿名路径下两张都写「自制」—— 卡片上出现两个一模一样的胶囊。
+ * 现在按分区二选一：市场分区用来源（市场/组织），我的分区用「这份内容是怎么来的」
+ * （自制 / 来自组织 / 平台内置 / 来自市场 / 其它）。
+ *
+ * 抽成纯函数的理由（独立复审 2026-09-23 A6）：这两条分支此前埋在 `renderBadges`
+ * 的 JSX 里，而本包没有 jsdom/渲染测试面 ⇒「同名商店行存在时还渲染得出
+ * 「随客户端内置」徽章吗」这件事**没有任何用例能打坏**。现在判据可被单测直接钉住，
+ * 与 {@link localRemoveEndpoint}（同一个 `originChannel` 的另一个消费点）成对。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @param tab - 所在分区。
+ * @returns 徽章文案的字典键。
+ */
+export function capabilitySourceBadgeKey(
+  item: Pick<CapabilityItem, 'source' | 'originChannel'>,
+  tab: 'mine' | 'market',
+): CapabilitySourceBadgeKey {
+  if (tab === 'market') {
+    return item.source === 'market'
+      ? 'capability.sourceMarket'
+      : item.source === 'org' ? 'capability.sourceOrg' : 'capability.sourceLocal'
+  }
+  if (item.source === 'local') return 'capability.sourceLocal'
+  // 「我的」里的非本地行 = 从商店装进来的那一份；`originChannel` 来自磁盘 provenance。
+  switch (item.originChannel) {
+    case 'org': return 'capability.sourceOrg'
+    case 'builtin': return 'capability.sourceBuiltin'
+    // 随客户端内置（随包插件同步进技能库的技能，跨泳道契约 S2）：
+    // 它不是用户作品，也不是市场/组织内容 —— 面板给它「卸载」，不给「上传」。
+    case 'plugin': return 'capability.sourcePlugin'
+    case 'market': return 'capability.sourceMarket'
+    default: return 'capability.sourceOther'
+  }
 }
 
 /** 分区里的一条可见卡：内置入口卡（builtin）或普通条目卡（item）。 */
@@ -274,6 +719,9 @@ export function planSectionCards(options: {
 
 /** 单测用：按（kind, source）解析卸载端点(与安装同一来源规则)。 */
 export function uninstallEndpoint(item: CapabilityItem, version: string): string {
+  // 平台内置 / 随客户端内置（不随市场/组织目录走）的技能优先（审计 A6 + 跨泳道契约 S2）。
+  const local = localRemoveEndpoint(item)
+  if (local !== undefined) return local
   if (item.kind === 'skill') {
     return item.source === 'market'
       ? `/api/pico/skills/${encodeURIComponent(item.name)}/uninstall`
@@ -296,36 +744,200 @@ export function nameTakenError(displayName: string): string {
   return t('capability.nameTaken', { name: displayName })
 }
 
-/** 单测用：把同名（kind+name）条目归并成一张卡（保留最高 approved 版本为当前）。 */
+/**
+ * 上传被服务端拒绝时的用户可见文案（**按稳定错误码映射，不看 HTTP 状态码**）。
+ *
+ * 为什么判据必须是 `code` 而不是 `status`（R5-B-1 的客户端尾巴，2026-09-23 跨泳道
+ * 补齐）：本机写面（`auth-gate` 的 `/api/pico/shared-skills/upload` 与
+ * `/api/pico/agent-presets/upload`）会**透传服务端原始状态码**，而 409 同时是
+ * `NAME_TAKEN` / `VERSION_*` / `CONFLICT` / `ARCHIVE_CLEARED` / `APP_DELISTED`
+ * 的码 —— 按 409 一律说「名称已被占用」会把「已下架冻结」说成重名（本仓踩过同形的坑）。
+ * 因此只有 `APP_DELISTED` 走专用文案；**其它任何码都逐字沿用本函数引入前的行为**
+ * （服务端 message 优先，缺省回落 `HTTP <status>`），不被这条分支吞掉。
+ *
+ * 抽成纯函数的理由与 {@link nameTakenError} 相同：文案取自模块级 `t()`，只有
+ * "切语言后跟着变"的断言才有判别力，且"其它码不被吞"需要能被直接打坏。
+ * @param failure - 本机写面返回的错误信封（`code` 缺省 = 旧宿主 / 非信封错误）。
+ * @returns 当前界面语言下的提示文案。
+ */
+export function uploadFailureText(
+  failure: { code?: string | undefined; message?: string | undefined; status: number },
+): string {
+  if (failure.code === 'APP_DELISTED') return t('capability.delistedFrozen')
+  if (failure.message !== undefined && failure.message !== '') return failure.message
+  return `HTTP ${String(failure.status)}`
+}
+
+/**
+ * 跨源同名行的**权威序**：市场 > 组织 > 本机（2026-08-25 决策"跨源同名的展示行
+ * 保留市场"）。返回值只取决于行的 `source`，与数组到达顺序无关。
+ * @param item - 能力中心的一行。
+ * @returns 排序权重（越小越权威）。
+ */
+function sourceRank(item: CapabilityItem): number {
+  return item.source === 'market' ? 0 : item.source === 'org' ? 1 : 2
+}
+
+/** 同源多行时的稳定次级键：同等级的行按内容定序，与到达顺序无关。 */
+function stableRowKey(item: CapabilityItem): string {
+  return JSON.stringify(item)
+}
+
+/** 按权威序取第一个可用值（`usable` 不成立就继续往后找），没有则 undefined。 */
+function pickByAuthority<T>(
+  ordered: readonly CapabilityItem[],
+  read: (item: CapabilityItem) => T | undefined,
+  usable: (value: T) => boolean,
+): T | undefined {
+  for (const item of ordered) {
+    const value = read(item)
+    if (value !== undefined && usable(value)) return value
+  }
+  return undefined
+}
+
+/** 数值字段取各行的最大值（全部缺失时保持 undefined）。 */
+function maxOf(ordered: readonly CapabilityItem[], read: (item: CapabilityItem) => number | undefined): number | undefined {
+  const values = ordered.map(read).filter((v): v is number => v !== undefined)
+  return values.length === 0 ? undefined : Math.max(...values)
+}
+
+/**
+ * 归并**同一张卡**的多行（同名 kind+name 的跨源/跨分区载荷）。
+ *
+ * 三条硬约定（独立复审 2026-09-23 A6 + N1 的修复面）：
+ *
+ *  1. **结果只取决于行集合，不取决于到达顺序**。面板 mount 时并发发
+ *     `?source=market` 与 `?source=local` 两次取数（后者内部还要打 3 次上游），
+ *     谁先回来不定。旧实现是"先到的行说了算"（`{...existing}` 打底、逐行覆写），
+ *     于是同一份数据会渲染成两种卡：market-first 丢本机行的 `originChannel` ⇒
+ *     **「随客户端内置」徽章与本机卸载入口都渲染不出来**（A6 的卸载入口在这个
+ *     形态下不可达）；mine-first 则把已装技能渲染成「安装」。现在每个字段都有
+ *     显式、与顺序无关的取值规则。
+ *  2. **本机那一行是"这台机器上是什么"的权威**（A6）：`originChannel` /
+ *     `originAppId` / `dirty` / `installedOrigin` 一律取 `source === 'local'` 行的
+ *     值 —— 它们来自磁盘上的 provenance，只有本机行有，旧实现会被商店行吞掉。
+ *  3. **磁盘上真有这一份 ⇒ 已安装**：存在本机行（`?source=local` 的本地行由
+ *     `listLocalSkills`/`listLocalPresets` 扫盘得到）即 `installed: true`，
+ *     否则「我的」里的本机卡会被渲染成「安装」。
+ *
+ * 其余口径保持 2026-08-25 决策：展示行来源市场优先；`displayName`/`description`
+ * 取「较新」（版本高者优先）的非空值，避免市场行用与 name 同值的标题盖掉组织行的
+ * 中文标题；`version` 展示最高 approved 版本（与来源无关的版本事实）。
+ * @param items - 各来源的行（同一条可来自多个载荷）。
+ * @returns 每个（kind, name）一行，按 `kind:name` 升序（面板随后自行排序）。
+ */
 export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
-  const byKey = new Map<string, CapabilityItem>()
-  // 决策 2026-08-25(市场/组织合并) + bug 修复:同名 (kind+name) 归并时
-  // (a) 展示行保留 market 来源(市场优先,跨源同名的权威行);
-  // (b) displayName/description 取「较新」的(非空优先,避免 market 行
-  //      覆盖 org 的中文标题);
-  // (c) version 展示最高 approved(与来源无关的版本事实),installed 等
-  //      状态保留现有逻辑。
+  const groups = new Map<string, CapabilityItem[]>()
   for (const item of items) {
     const key = `${item.kind}:${item.name}`
-    const existing = byKey.get(key)
-    if (existing === undefined) {
-      byKey.set(key, { ...item, versions: item.versions.length > 0 ? [...item.versions] : [item.version] })
-      continue
-    }
-    // 合并 versions（去重、升序）。
-    const all = new Set([...existing.versions, ...item.versions, item.version])
-    const sorted = [...all].sort(compareVersions)
-    // 取 approved 最高版作为当前展示；无 approved 保留原样。
-    const approved = [...all].filter(v => items.some(x => x.kind === item.kind && x.name === item.name && x.version === v && x.status === 'approved'))
-    const display = approved.length > 0 ? approved.reduce((best, v) => (compareVersions(v, best) > 0 ? v : best), approved[0]!) : existing.version
-    // 展示行来源:market 优先(跨源同名权威);否则保留已有。
-    const source = existing.source === 'market' || item.source === 'market' ? 'market' : existing.source
-    // displayName/description:非空优先(market 常与 name 同值,org 常带中文标题)。
-    const displayName = (item.displayName && item.displayName !== item.name) ? item.displayName : existing.displayName
-    const description = (item.description && item.description !== '') ? item.description : existing.description
-    byKey.set(key, { ...existing, source, displayName, description, version: display, versions: sorted })
+    const bucket = groups.get(key)
+    if (bucket === undefined) groups.set(key, [item])
+    else bucket.push(item)
   }
-  return [...byKey.values()]
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, rows]) => mergeItemGroup(rows))
+}
+
+/** {@link mergeItems} 的单组归并（行的到达顺序不得影响返回值）。 */
+function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
+  // 权威序：来源优先 + **内容**定序（`rows` 本身的到达顺序不得参与）。
+  const byAuthority = [...rows].sort((a, b) => {
+    const rank = sourceRank(a) - sourceRank(b)
+    return rank !== 0 ? rank : stableRowKey(a).localeCompare(stableRowKey(b))
+  })
+  // 「较新」序：版本高的先；同版本时按内容定序 —— displayName/description 用它取值。
+  const byFreshness = [...rows].sort((a, b) => {
+    const byVersion = compareVersions(b.version, a.version)
+    return byVersion !== 0 ? byVersion : stableRowKey(a).localeCompare(stableRowKey(b))
+  })
+  /** 本机那一行（磁盘事实的唯一来源）；没有本机行时为 undefined。 */
+  const local = rows.find(row => row.source === 'local')
+
+  const all = new Set<string>()
+  for (const row of rows) {
+    for (const version of row.versions) all.add(version)
+    if (row.version !== '') all.add(row.version)
+  }
+  const versions = [...all].sort(compareVersions)
+  const approved = versions.filter(v => rows.some(row => row.version === v && row.status === 'approved'))
+  const version = approved[approved.length - 1] ?? versions[versions.length - 1] ?? byAuthority[0]!.version
+  const name = byAuthority[0]!.name
+  const displayName = pickByAuthority(byFreshness, row => row.displayName, v => v !== '' && v !== name)
+    ?? pickByAuthority(byFreshness, row => row.displayName, v => v !== '')
+    ?? ''
+  const description = pickByAuthority(byFreshness, row => row.description, v => v !== '') ?? ''
+  // 状态徽章是"用户自己的上传进度"：pending/rejected 优先透出（市场行常是
+  // approved，按权威序取会把用户自己的待审状态吞掉）。
+  const progress = byAuthority.find(row => row.status === 'pending' || row.status === 'rejected')
+  const status = progress?.status ?? pickByAuthority(byAuthority, row => row.status, () => true)
+  const reason = (progress?.reason !== undefined && progress.reason !== '')
+    ? progress.reason
+    : pickByAuthority(byAuthority, row => row.reason, v => v !== '')
+
+  return {
+    // 打底只为了带上宿主未来新增的透传字段（声明的字段全部在下面显式赋值，
+    // 结果不依赖哪一行打底）。权威序首行 = 内容定序 ⇒ 与到达顺序无关。
+    ...byAuthority[0]!,
+    kind: byAuthority[0]!.kind,
+    name,
+    source: pickByAuthority(byAuthority, row => row.source, () => true) ?? 'local',
+    displayName,
+    description,
+    author: pickByAuthority(byAuthority, row => row.author, v => v !== '') ?? '',
+    version,
+    versions,
+    // 磁盘上真有这一份（本机行由扫盘得到）⇒ 已安装。
+    installed: rows.some(row => row.installed === true || row.source === 'local'),
+    installedVersion: pickByAuthority(byAuthority, row => row.installedVersion, () => true),
+    // 本机行优先：来源判定只有磁盘上的 provenance 说得准（A2/A3/A6）。
+    installedOrigin: local?.installedOrigin ?? pickByAuthority(byAuthority, row => row.installedOrigin, () => true),
+    // 归属判据（R6-B-1）：只有宿主下发在本机行上，**只认本机行那一份**，且不做
+    // "任一行有就取"的归并 —— 它描述的是"磁盘上这一份算不算当前账号的"，目录行
+    // 上的任何字段都回答不了这个问题。
+    //
+    // **缺省必须归一化成 `'unknown'`（证明不了），绝不读成 `'mine'`**（第六轮独立复审
+    // V2 边界①：`?? 'mine'` 这个变异此前没有任何判据，存活）。读成 `'mine'` 会让
+    // "宿主根本没下发这个字段"（旧宿主 / 字段被裁剪 / 未来新增的调用点）与"宿主证明
+    // 属于当前账号"在 {@link isDelistedItem} 第 3 条判据里完全等价，于是页脚又给出
+    // **删除本机那一份** —— 正是 R6-B-1 要挡的那个跨账号破坏性动作。
+    // 归一化成显式取值（而不是留在 `undefined`）是为了让"证明不了"在数据里就是一个
+    // 取值：下游（含测试与探针）不必再区分"没这个字段"与"字段值是 undefined"。
+    localOwnership: local?.localOwnership ?? 'unknown',
+    originChannel: local?.originChannel ?? pickByAuthority(byAuthority, row => row.originChannel, () => true),
+    originAppId: local?.originAppId ?? pickByAuthority(byAuthority, row => row.originAppId, () => true),
+    dirty: local?.dirty ?? pickByAuthority(byAuthority, row => row.dirty, () => true),
+    runtimeName: pickByAuthority(byAuthority, row => row.runtimeName, v => v !== ''),
+    isLocal: rows.some(row => row.isLocal === true) ? true : undefined,
+    uploadStatus: local?.uploadStatus ?? pickByAuthority(byAuthority, row => row.uploadStatus, () => true),
+    quality: pickByAuthority(byAuthority, row => row.quality, v => v === 'featured')
+      ?? pickByAuthority(byAuthority, row => row.quality, () => true),
+    status,
+    reason,
+    official: rows.some(row => row.official === true) ? true : undefined,
+    // 归属三态必须**如实**下发（R5-B-2）：`mergeItemGroup` 里原来的
+    // `some(isOwner === true) ? true : undefined` 会把服务端明确说的 `false`
+    // 抹成"未知"，于是"这一行已经转给别人了"在客户端**永远表达不出来**。
+    // 归并语义：任一行说"是你的"⇒ 是你的；否则任一行明确说"不是你的"⇒ 不是你的；
+    // 都没有该字段 ⇒ 未知（本机磁盘行）。
+    isOwner: rows.some(row => row.isOwner === true)
+      ? true
+      : rows.some(row => row.isOwner === false) ? false : undefined,
+    // 归属人账号（服务端下发时透出，供「已转交」说明用；缺省不编造）。
+    owner: pickByAuthority(byAuthority, row => row.owner, v => v !== ''),
+    // 下架标记（R5-B-1）：**任一行说下架就是下架**（它是 App 级事实，不是行级偏好）；
+    // 没有任何一行带该字段 ⇒ undefined（未知，不得读成"上架"）。
+    delisted: rows.some(row => row.delisted === true) ? true : undefined,
+    // 上下架（R5-B-1）：**false 优先**（任一行说下架 ⇒ 下架）；没有该字段 ⇒
+    // undefined（未知，不得读成"上架"）。
+    enabled: rows.some(row => row.enabled === false)
+      ? false
+      : rows.some(row => row.enabled === true) ? true : undefined,
+    downloads: maxOf(rows, row => row.downloads),
+    calls: maxOf(rows, row => row.calls),
+    score: maxOf(rows, row => row.score),
+  }
 }
 
 /**
@@ -377,11 +989,18 @@ const DIALOG_BOX: React.CSSProperties = {
  * 交互：Esc 关闭、点遮罩关闭、初始焦点落进弹层。**Esc 必须由弹层自己处理** ——
  * 面板是整页不是模态，装载器的 Esc 在检测到 `[role=dialog][aria-modal=true]`
  * 时会让位（"面板里开着真模态时 Esc 归模态"）。
- * @param props - 目标、忙碌态、按版本安装回调与关闭回调。
+ * @param props - 目标、忙碌态、站级闸、按版本安装回调与关闭回调。
  */
-export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose }: {
+export function CapabilityDetailDialog({ target, busy, blocked, onInstallVersion, onClose }: {
   target: DetailTarget
   busy: boolean
+  /**
+   * 站级闸（另有动作在飞）。审计 C-03：`install()` 第一行对"有动作在飞"是**静默
+   * return**，而弹层里的按版本按钮此前只收到 own-key 的 `busy` ⇒ 别的卡片在安装时
+   * 这两个按钮仍是启用态，点下去不发请求、不改状态、不报错 = **死按钮**。
+   * 闸门必须与"点下去会被吞掉"的条件同源，并且以**禁用 + 说明**呈现。
+   */
+  blocked: boolean
   onInstallVersion: (version: string) => void
   onClose: () => void
 }): JSX.Element {
@@ -444,7 +1063,11 @@ export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose
   const meta = skill !== undefined
     ? `v${skill.version}${skill.author !== undefined && skill.author !== '' ? ` · ${skill.author}` : ''}`
     : `v${item!.version}${item!.author !== '' ? ` · ${item!.author}` : ''}`
-  const versions = item !== undefined && item.source !== 'local' ? item.versions : []
+  // 「按版本安装」只在端点**真的接受版本**时出现（审计 A11）：市场技能/智能体的
+  // 端点不带版本，点了「v1」装到的还是最新版，界面却按 v1 记账 ⇒ 常驻「更新到 vX」。
+  const versions = item !== undefined && versionInstallSupported(item) ? item.versions : []
+  /** 市场技能只能装最新版：把这件事写在弹层里，而不是给一排假按钮。 */
+  const marketLatestOnly = item !== undefined && item.kind === 'skill' && item.source === 'market'
 
   return (
     <div
@@ -477,6 +1100,9 @@ export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose
           <p style={{ ...DESC, whiteSpace: 'pre-wrap', marginTop: 4 }} data-role="detail-description">
             {description === '' ? t('capability.detailNoDescription') : description}
           </p>
+          {marketLatestOnly && (
+            <p style={{ ...META, marginTop: 12 }} data-role="market-latest-only">{t('capability.marketLatestOnly')}</p>
+          )}
           {versions.length > 1 && (
             <div style={{ marginTop: 14 }}>
               <div style={{ ...LABEL_SM }}>{t('capability.viewVersions', { count: String(versions.length) })}</div>
@@ -486,7 +1112,10 @@ export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose
                     key={version}
                     variant={version === item!.version ? 'primary' : 'secondary'}
                     size="sm"
-                    disabled={busy}
+                    // `busy` = 本弹层目标自己的动作在飞；`blocked` = 站级闸（另有动作在飞）。
+                    // 两者都要禁用：`install()` 对后者是静默 return（审计 C-03）。
+                    disabled={busy || blocked}
+                    title={blocked && !busy ? t('capability.busyHint') : undefined}
                     onClick={() => { onInstallVersion(version) }}
                   >
                     v{version}
@@ -503,6 +1132,30 @@ export function CapabilityDetailDialog({ target, busy, onInstallVersion, onClose
 
 /** 弹层里的小节标题。 */
 const LABEL_SM: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-caption)' }
+
+/** 待用户确认的一发安装（普通条目卡与内置技能卡共用）。 */
+interface PendingInstall {
+  /** `{kind}:{name}` 或 `builtin:{name}`（与 action.key 同口径）。 */
+  key: string
+  /** 展示用的技能名。 */
+  name: string
+  /**
+   * 本机那一份不是"内容未改的商店内容" ⇒ 要走"会被覆盖"的措辞（**不是**第二套判据，
+   * 就是 {@link needsOverwriteConfirm} 的结果；保留字段是为了兼容既有断言）。
+   */
+  localConflict: boolean
+  /**
+   * 确认条的措辞档位（唯一判据见 {@link overwriteConfirmReason}）：
+   *  - `local`：本机那一份不是能力中心装的 ⇒ "自制内容"措辞 + 「仍要覆盖」；
+   *  - `dirty`：商店来源但**被本地修改过**（R4-B-3）⇒ 明说"更新会丢掉你改过的内容"；
+   *  - `store`：商店来源、内容未改、只是换渠道 ⇒ 通用覆盖措辞。
+   */
+  reason?: OverwriteConfirmReason | undefined
+  /** 用户在详情弹层里点选的版本（内置卡没有这一项）。 */
+  version?: string | undefined
+  /** 用户确认后真正执行的那一发（`overwrite` = 把 `?overwrite=1` 交给宿主）。 */
+  run: (overwrite: boolean) => Promise<void>
+}
 
 /** 每个（来源,类型）的加载状态（分区独立错误态）。 */
 type SectionStatus = 'idle' | 'loading' | 'ok' | 'error'
@@ -532,8 +1185,18 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const [items, setItems] = useState<CapabilityItem[]>([])
   const [sections, setSections] = useState<Record<string, SectionState>>({})
   const [action, setAction] = useState<ActionState | null>(null)
-  /** 安装覆盖确认 key（{kind}:{name}）；与卸载确认分离，避免互串。 */
-  const [installConfirmKey, setInstallConfirmKey] = useState<string | null>(null)
+  /**
+   * 覆盖确认：待用户确认的那一发安装。
+   *
+   * 存"意图"（而不是只存一个 key）有三个理由（审计 A15/A11/A2）：
+   *  ①确认条要重放**同一发**安装，包括详情弹层里点的那一个版本（旧实现只存 key，
+   *    确认后会退回 item.version）；
+   *  ②措辞要按本机那一份的来源分档（用户自制 vs 商店）；
+   *  ③**两个安装入口共用同一条确认条**：普通条目卡与内置技能入口卡（`run` 闭包
+   *    分别指向 `performInstall` / `builtin.install`），否则内置技能的「更新到 vX」
+   *    会绕过确认直接打到宿主（被 409 挡下 = 用户只看到一条报错）。
+   */
+  const [installConfirm, setInstallConfirm] = useState<PendingInstall | null>(null)
   /** 卸载确认 key（{kind}:{name}）。 */
   const [uninstallConfirmKey, setUninstallConfirmKey] = useState<string | null>(null)
   /**
@@ -560,24 +1223,21 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
   const noticeKey = action === null ? '' : `${action.kind}|${action.key}|${action.error ?? ''}`
   useEffect(() => {
     if (noticeRef.current === null) return
-    if (noticeKey === '' && installConfirmKey === null) return
+    if (noticeKey === '' && installConfirm === null) return
     noticeRef.current.scrollIntoView({ block: 'nearest' })
-  }, [noticeKey, installConfirmKey])
+  }, [noticeKey, installConfirm])
 
   const setSection = (key: string, state: Partial<SectionState>): void => {
     setSections(prev => ({ ...prev, [key]: { status: prev[key]?.status ?? 'idle', error: prev[key]?.error ?? '', ...state } }))
   }
 
-  const loadSection = async (key: string, fetcher: () => Promise<CapabilityItem[]>): Promise<void> => {
+  const loadSection = async (key: SectionKey, fetcher: () => Promise<CapabilityItem[]>): Promise<void> => {
     const seq = loadSeqRef.current
     setSection(key, { status: 'loading', error: '' })
     try {
       const rows = await fetcher()
       if (seq !== loadSeqRef.current) return
-      // 决策 2026-08-25:「市场」tab 承载 market+org 合并结果——加载 market
-      // 时清除两源旧条目;「我的」只清 local。
-      const drop = key === 'market' ? (i: CapabilityItem) => i.source !== 'local' : (i: CapabilityItem) => i.source === 'local'
-      setItems(prev => [...prev.filter(i => !drop(i)), ...rows])
+      setItems(prev => applySectionRows(prev, key, rows))
       setSection(key, { status: 'ok' })
     } catch {
       if (seq !== loadSeqRef.current) return
@@ -632,7 +1292,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         if (!res.ok) return
         const data = await res.json() as { items?: CapabilityItem[] }
         if (seq !== loadSeqRef.current) return
-        setItems(prev => [...prev.filter(i => i.source === 'local'), ...(data.items ?? [])])
+        // 与 loadSection 同一条归约（唯一实现），不在这里另写一份 filter。
+        setItems(prev => applySectionRows(prev, 'market', data.items ?? []))
         // 后台刷新成功即退出先前 error 态——否则首次加载失败后,错误提示与
         // 重试按钮会遮住已刷新的数据(2026-09-01 深挖)。
         setSection('market', { status: 'ok', error: '' })
@@ -641,31 +1302,112 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     return () => { clearInterval(timer) }
   }, [])
 
-  const install = async (item: CapabilityItem, opts?: { force?: boolean; version?: string }): Promise<void> => {
+  /**
+   * 真正发请求的那一发安装（**不含**确认闸门 —— 闸门在 {@link install}）。
+   * @param item - 能力中心的一行。
+   * @param opts - overwrite / 用户点选的版本。
+   */
+  const performInstall = async (item: CapabilityItem, opts?: { overwrite?: boolean; version?: string }): Promise<void> => {
     if (action !== null && (action.kind === 'installing' || action.kind === 'uninstalling' || action.kind === 'uploading')) return
     const key = `${item.kind}:${item.name}`
-    // 同名冲突确认（磁盘/installed 已有同名目录且用户还没确认）。`force` 只表示
-    // "用户已在确认条上点过覆盖" —— 它**不进 URL**（宿主不读 `?force=1`，R2-SK-5），
-    // 安装器本身就是整树替换语义。
-    if (!opts?.force && (item.installed || (item.source !== 'local' && item.isLocal))) {
-      setInstallConfirmKey(key)
-      return
-    }
-    setInstallConfirmKey(null)
+    setInstallConfirm(null)
     setAction({ key, kind: 'installing' })
     try {
-      const targetVersion = opts?.version ?? item.version
-      const url = installEndpoint(item, targetVersion)
+      const url = installRequestUrl(item, opts)
       const res = await fetch(url, { method: 'POST' })
+      // 宿主说"目标是本机内容，需要确认"（面板缓存的来源过期 / 多窗口竞争）⇒
+      // 回到确认条，而不是把一条 409 当成失败丢给用户。
+      if (res.status === 409) {
+        setAction(null)
+        setInstallConfirm({
+          key, name: item.name, localConflict: true,
+          ...opts?.version === undefined ? {} : { version: opts.version },
+          run: async (overwrite) => { await performInstall(item, { ...opts, overwrite }) },
+        })
+        return
+      }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
       }
-      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name ? { ...i, installed: true, installedVersion: targetVersion } : i)))
+      // 记账用**响应里的真实版本**（审计 A11）：市场归档端点只按当前 approved
+      // 最高版取，请求里那个版本号可能根本没被采纳。拿不到版本就留 undefined
+      // （宁可不提示更新，也不误报），并按磁盘事实重载一次。
+      const data = await res.json().catch(() => ({})) as { version?: unknown }
+      const appliedVersion = typeof data.version === 'string' && data.version !== '' ? data.version : undefined
+      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name
+        // `dirty: false`（R4-B-3）：装完之后磁盘上的内容就是商店那一份（安装器会重算
+        // 内容哈希），「已本地修改」徽章必须同时熄灭 —— 否则覆盖成功后卡片还在说
+        // "已本地修改"，用户会以为自己的改动还在。
+        ? { ...i, installed: true, installedVersion: appliedVersion, installedOrigin: 'store', dirty: false }
+        : i)))
       setAction({ key, kind: 'done-install', name: item.name })
+      if (appliedVersion === undefined) loadAll()
     } catch (cause) {
       setAction({ key, kind: 'failed', error: cause instanceof Error ? cause.message : undefined, name: item.name })
     }
+  }
+
+  /**
+   * 安装入口（带覆盖确认闸门）。
+   *
+   * 审计 A2/A3/A15 + R4-B-3：**本机已装、且那一份不是"内容未改的商店内容"** ⇒
+   * 先出确认条，用户点过之后才把 `?overwrite=1` 交给宿主。旧实现把"已装"一律当成
+   * 要覆盖、更新按钮又硬编码 force ⇒ 确认条是死代码，用户手写的同名技能被静默整树
+   * 替换；R4-B-3 补上第二档：商店来源但**被本地修改过**（dirty）同样必须先确认 ——
+   * 否则一次单击「更新」就把用户加的文件与改过的正文整树删掉。
+   * @param item - 能力中心的一行。
+   * @param opts - overwrite（用户已确认）/ version（用户点选的版本）。
+   */
+  const install = async (item: CapabilityItem, opts?: { overwrite?: boolean; version?: string }): Promise<void> => {
+    if (installNeedsConfirm(item, opts)) {
+      setInstallConfirm({
+        key: `${item.kind}:${item.name}`,
+        name: item.name,
+        localConflict: true,
+        reason: overwriteConfirmReason(item),
+        ...opts?.version === undefined ? {} : { version: opts.version },
+        run: async (overwrite) => { await performInstall(item, { overwrite, ...opts?.version === undefined ? {} : { version: opts.version } }) },
+      })
+      return
+    }
+    await performInstall(item, opts)
+  }
+
+  /**
+   * 内置技能入口卡的动作（安装 / 更新到 vX）。
+   *
+   * 与普通卡**共用同一条确认条与同一份判据**（{@link needsOverwriteConfirm}）：
+   * 本机同名那一份是用户自制、或是**被本地修改过的**商店内容时，先确认再带
+   * `?overwrite=1` 打宿主。
+   *
+   * R4-B-5（第四轮）：**面板的预检不是权威** —— 本机同名技能来自**另一条商店渠道**
+   * （如组织库）时，`installedOrigin` 仍是 `store`、`dirty` 也是 false，于是这一发
+   * 不带 `?overwrite=1`；宿主按"换渠道"正确地回 409，而内置卡此前只把服务端那句
+   * 英文拒绝文案贴在卡片上、右边只有一个「重试」按钮 —— 点多少次都是同一发请求，
+   * **没有任何路径能补上 `?overwrite=1`**（普通卡有确认条回落，内置卡漏了）。
+   * 现在 `builtin.install` 把 409 如实报回来（`'conflict'`），这里落到同一条确认条。
+   * @param card - 内置技能卡。
+   */
+  const activateBuiltinCard = (card: BuiltinCard): void => {
+    const local = items.find(i => i.kind === 'skill' && i.name === card.skill.name && i.source === 'local')
+    const key = `builtin:${card.skill.name}`
+    /** 本机同名那一份需要覆盖确认（自制 / 已本地修改）⇒ 出确认条（唯一通道）。 */
+    const ask = (reason: OverwriteConfirmReason): void => {
+      setInstallConfirm({
+        key, name: card.skill.name, localConflict: true, reason,
+        run: async (overwrite) => { await builtin.install(card.skill, overwrite) },
+      })
+    }
+    if (local !== undefined && needsOverwriteConfirm({ ...local, installed: true })) {
+      ask(overwriteConfirmReason({ ...local, installed: true }))
+      return
+    }
+    void builtin.install(card.skill).then((result) => {
+      // 宿主说"目标是另一条渠道的同名内容，需要确认"（R4-B-5）⇒ 与普通卡的 409
+      // 处理同形：回到确认条，而不是把一条拒绝文案永远贴在卡片上。
+      if (result === 'conflict') ask('store')
+    })
   }
 
   const uninstall = async (item: CapabilityItem): Promise<void> => {
@@ -675,13 +1417,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     setUninstallConfirmKey(null)
     setAction({ key, kind: 'uninstalling' })
     try {
+      // 第二步（用户已确认）才带 `?overwrite=1`：本机自制内容没有它宿主会 409 拒绝
+      // （审计 A3）。商店来源不需要它，多带一个显式确认也无害。
       const base = uninstallEndpoint(item, item.version)
-      const res = await fetch(base, { method: 'POST' })
+      const res = await fetch(withOverwrite(base, true), { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
       }
-      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name ? { ...i, installed: false, installedVersion: undefined } : i)))
+      setItems(prev => prev.map(i => (i.kind === item.kind && i.name === item.name ? { ...i, installed: false, installedVersion: undefined, installedOrigin: undefined } : i)))
       setAction({ key, kind: 'done-uninstall', name: item.name })
     } catch (cause) {
       setAction({ key, kind: 'failed', error: cause instanceof Error ? cause.message : undefined, name: item.name })
@@ -715,8 +1459,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({ name: item.name }),
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+        const data = await res.json().catch(() => ({})) as { error?: unknown; code?: unknown }
+        // R5-B-1 的客户端尾巴：下架冻结（409 APP_DELISTED）说清"为什么没成 + 怎么解"，
+        // 而不是把服务端 message 原样（或 `HTTP 409`）丢给用户。判据**只看错误码**
+        // （409 同时是 NAME_TAKEN/VERSION_*/CONFLICT 的码），其它码逐字沿用原行为。
+        throw new Error(uploadFailureText({
+          ...typeof data.code === 'string' ? { code: data.code } : {},
+          ...typeof data.error === 'string' ? { message: data.error } : {},
+          status: res.status,
+        }))
       }
       setAction({ key, kind: 'done-upload', name: item.name })
       loadAll()
@@ -773,28 +1524,16 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const officialBadge = item.official === true ? <Chip tone="brand">{t('capability.official')}</Chip> : null
     const qualityBadge = item.quality === 'featured' ? <Chip tone="warn">{t('capability.featured')}</Chip> : null
     /**
-     * 「来源」徽章**只出一个**。
-     *
-     * 2026-09-20 修的真实 UI bug：原先「我的」分区同时渲染 `source` 徽章与
-     * `mineSourceBadge`，匿名路径下两张都写「自制」—— 卡片上出现两个一模一样的胶囊。
-     * 现在按分区二选一：市场分区用来源（市场/组织），我的分区用「这份内容是怎么来的」
-     * （自制 / 来自组织 / 平台内置 / 来自市场 / 其它）。
+     * 「已下架」徽章（R5-B-1）：形态照**应用中心**那一套（`AppCenterPanel` 的
+     * `appCenter.disabled` 中性胶囊 + 卡片置灰 + 说明文字），不另创一套。
      */
-    const sourceBadge = isMineSection
-      ? (item.source === 'local'
-          ? <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>
-          : item.originChannel === 'org'
-            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
-            : item.originChannel === 'builtin'
-              ? <Chip tone="neutral" plain>{t('capability.sourceBuiltin')}</Chip>
-              : item.originChannel === 'market'
-                ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
-                : <Chip tone="neutral" plain>{t('capability.sourceOther')}</Chip>)
-      : (item.source === 'market'
-          ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
-          : item.source === 'org'
-            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
-            : <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>)
+    const delistedBadge = isDelistedItem(item) ? <Chip tone="neutral" plain>{t('capability.delisted')}</Chip> : null
+    /** 「已转交」徽章（R5-B-2）：归属已不在自己名下（服务端 `is_owner:false`）。 */
+    const transferredBadge = isTransferredItem(item) ? <Chip tone="warn">{t('capability.transferred')}</Chip> : null
+    /**
+     * 「来源」徽章**只出一个**（选键的唯一实现在 {@link capabilitySourceBadgeKey}）。
+     */
+    const sourceBadge = <Chip tone="neutral" plain>{t(capabilitySourceBadgeKey(item, isMineSection ? 'mine' : 'market'))}</Chip>
     return (
       <>
         <Chip tone={item.kind === 'skill' ? 'brand' : 'neutral'}>
@@ -804,6 +1543,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         {officialBadge}
         {qualityBadge}
         {statusBadge}
+        {delistedBadge}
+        {transferredBadge}
         {item.source === 'local' && item.originChannel !== undefined && item.originChannel !== 'builtin' && (
           <Chip tone="neutral" plain>{`v${item.version}`}</Chip>
         )}
@@ -860,15 +1601,35 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               <span style={{ ...META, flex: 1, color: 'var(--dsw-alias-state-error-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={card.failure}>
                 {card.failure}
               </span>
-              <PanelButton variant="primary" size="md" disabled={inFlight} onClick={() => { void builtin.install(skill) }}>
+              <PanelButton variant="primary" size="md" disabled={inFlight} onClick={() => { activateBuiltinCard(card) }}>
                 {t('capability.builtinRetry')}
               </PanelButton>
             </>
           ) : (
-            <PanelButton variant="primary" size="md" block disabled={inFlight} onClick={() => { void builtin.install(skill) }}>{label}</PanelButton>
+            <PanelButton variant="primary" size="md" block disabled={inFlight} onClick={() => { activateBuiltinCard(card) }}>{label}</PanelButton>
           )}
         </div>
       </Card>
+    )
+  }
+
+  /**
+   * 「卸载」按钮区（两段式确认）。商店已装行与"本机内置（builtin/plugin）"行共用。
+   * 本机自制内容那一档用 danger 文案与「仍要删除」按钮（审计 A3）。
+   */
+  const renderUninstall = (item: CapabilityItem, key: string, busy: boolean, blocked: boolean): React.ReactNode => {
+    if (uninstallConfirmKey !== key) {
+      return <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</PanelButton>
+    }
+    return (
+      <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+        <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={blocked} onClick={() => { void uninstall(item) }}>
+          {busy && action?.kind === 'uninstalling'
+            ? t('capability.uninstalling')
+            : needsOverwriteConfirm(item) ? t('capability.deleteLocal') : t('capability.confirmUninstall')}
+        </PanelButton>
+        <PanelButton variant="secondary" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
+      </div>
     )
   }
 
@@ -881,9 +1642,16 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const blocked = busy || inFlight
     const title = item.displayName || item.name
     const isLocal = item.source === 'local'
-    const needUpdate = hasUpdateFor(item)
+    // 页脚动作的唯一判定（A6/N1）：本机内置（builtin/plugin）行与商店行都不在这里各判一次。
+    const plan = planCardAction(item)
+    /**
+     * 两态说明（R5-B-1 / R5-B-2）都在这里取一次 —— 徽章、置灰、说明文字必须同源，
+     * 否则会出现"卡片说已下架、按钮却是上传"的自相矛盾（正是这两条 finding 的形态）。
+     */
+    const delisted = isDelistedItem(item)
+    const transferred = isTransferredItem(item)
     return (
-      <Card key={key} interactive muted={item.status === 'rejected'} style={CARD} className="pico-skill-card">
+      <Card key={key} interactive muted={item.status === 'rejected' || delisted} style={CARD} className="pico-skill-card">
         <div style={TITLE_ROW}>
           <IconTile size={38} radius={12} tone={item.kind === 'skill' ? 'brand' : 'neutral'} label={item.name.charAt(0)} />
           <div style={NAME_COL}>
@@ -907,33 +1675,49 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         {item.status === 'rejected' && item.reason !== undefined && item.reason !== '' && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>{t('capability.rejectReason', { reason: item.reason })}</p>
         )}
+        {/* 状态说明（R5-B-1 / R5-B-2）：徽章只给结论，这一行走的是"为什么 + 还能做什么"。
+            应用中心同款位置（`appCenter.publishNewDisabled` 也是卡片里的说明段）。 */}
+        {(delisted || transferred) && (
+          <p
+            style={{ ...META, whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' }}
+            data-role={transferred ? 'card-transferred-reason' : 'card-delisted-reason'}
+          >
+            {transferred ? t('capability.transferredHint') : t('capability.delistedHint')}
+          </p>
+        )}
+        {uninstallConfirmKey === key && needsOverwriteConfirm(item) && (
+          <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }} data-role="local-remove-warning">
+            {/* 两档成因走两句话（R4-B-3）：本机自制 vs 商店装来但被你改过 ——
+                后者说成"本机自制技能"是错的，会让用户以为这份不是从能力中心装的。 */}
+            {overwriteConfirmReason(item) === 'dirty'
+              ? t('capability.confirmUninstallDirty', { name: item.name })
+              : t('capability.confirmUninstallLocal', { name: item.name })}
+          </p>
+        )}
         <div style={CARD_FOOT}>
-          {isLocal ? (
-            item.uploadStatus === 'rejected'
-              ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
-              : item.uploadStatus === 'pending'
-                ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.awaitingReview')}</Chip></span>
-                : item.uploadStatus === 'approved'
-                  ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="success">{t('capability.approved')}</Chip></span>
-                  : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
-          ) : item.installed ? (
-            needUpdate ? (
-              <PanelButton variant="primary" size="md" block disabled={blocked || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item, { force: true }) }}>
-                {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
+          {/* 页脚动作由 planCardAction 唯一决定（A6/N1）；这里只做按钮映射。 */}
+          {plan.kind === 'uninstall' ? renderUninstall(item, key, busy, blocked)
+            : plan.kind === 'update' ? (
+              // 更新按钮**不传 force**（审计 A15）：走 install() 自己的来源判定 ——
+              // 商店那一份直接更新，本机自制同名内容则先出确认条。
+              <PanelButton variant="primary" size="md" block disabled={blocked || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item) }}>
+                {t('capability.updateTo', { version: plan.version })}
               </PanelButton>
-            ) : uninstallConfirmKey === key ? (
-              <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-                <PanelButton variant="danger" size="md" style={{ flex: 1 }} disabled={blocked} onClick={() => { void uninstall(item) }}>
-                  {busy && action?.kind === 'uninstalling' ? t('capability.uninstalling') : t('capability.confirmUninstall')}
-                </PanelButton>
-                <PanelButton variant="secondary" size="md" style={{ flex: 1 }} disabled={busy} onClick={() => { setUninstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
-              </div>
-            ) : (
-              <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void uninstall(item) }}>{t('capability.uninstall')}</PanelButton>
             )
-          ) : (
-            <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>
-          )}
+              : plan.kind === 'reupload'
+                ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
+                : plan.kind === 'review'
+                  ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone={plan.status === 'pending' ? 'warn' : 'success'}>{plan.status === 'pending' ? t('capability.awaitingReview') : t('capability.approved')}</Chip></span>
+                  // 已转交（R5-B-2）：这一格**没有**可达动作 —— 上传会被服务端 409 挡下，
+                  // 所以给状态胶囊而不是假按钮（形态与「等待审核」那一档一致）。
+                  : plan.kind === 'transferred'
+                    ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.transferred')}</Chip></span>
+                    // 已下架且本机没有可卸的一份（R5-B-1）：同样只报状态。
+                    : plan.kind === 'delisted'
+                      ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="neutral" plain>{t('capability.delisted')}</Chip></span>
+                      : plan.kind === 'upload'
+                      ? <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
+                      : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>}
         </div>
         {/* 历史版本、描述全文都收在详情弹层里（就地展开会把整行栅格撑高）。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
@@ -1031,7 +1815,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
               onChange={next => {
                 setTab(next)
                 setFilter('all')
-                setInstallConfirmKey(null)
+                setInstallConfirm(null)
                 setUninstallConfirmKey(null)
               }}
             />
@@ -1063,18 +1847,20 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       >
         {/* 结果条/确认条挂在滚动区顶部，出现时滚进视口（见 noticeRef 的注释）。 */}
         <div ref={noticeRef}>
-        {installConfirmKey !== null && (
+        {installConfirm !== null && (
           <Card style={{ padding: '10px 14px', borderRadius: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <icons.IconAlert size={15} style={{ color: 'var(--dsw-alias-state-warn-label)' }} />
             <span style={{ flex: 1, minWidth: 200, fontSize: 13 }}>
-              {t('capability.conflictConfirm', { name: installConfirmKey.split(':')[1] ?? '' })}
+              {confirmStripText(installConfirm)}
             </span>
             <PanelButton variant="primary" size="sm" onClick={() => {
-              const item = items.find(i => `${i.kind}:${i.name}` === installConfirmKey)
-              setInstallConfirmKey(null)
-              if (item !== undefined) void install(item, { force: true })
-            }}>{t('capability.forceInstall')}</PanelButton>
-            <PanelButton variant="secondary" size="sm" onClick={() => { setInstallConfirmKey(null) }}>{t('capability.cancel')}</PanelButton>
+              const pending = installConfirm
+              setInstallConfirm(null)
+              // 重放的是**同一发**安装（含用户在详情弹层里点选的版本，审计 A11），
+              // 并且只有这里才把 `?overwrite=1` 交给宿主（用户确认过的唯一凭据）。
+              void pending.run(true)
+            }}>{confirmStripAction(installConfirm)}</PanelButton>
+            <PanelButton variant="secondary" size="sm" onClick={() => { setInstallConfirm(null) }}>{t('capability.cancel')}</PanelButton>
           </Card>
         )}
         {action !== null && action.kind !== 'installing' && action.kind !== 'uninstalling' && action.kind !== 'uploading' && (
@@ -1095,9 +1881,14 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         <CapabilityDetailDialog
           target={detail}
           busy={action?.key === (detail.kind === 'item' ? `${detail.item.kind}:${detail.item.name}` : `builtin:${detail.card.skill.name}`)}
+          // 站级闸：`install()` 对"有动作在飞"静默 return，弹层按钮必须与它同源禁用
+          //（审计 C-03）。详情本身仍可打开 —— 看详情不该被别的动作禁止。
+          blocked={inFlight}
           onInstallVersion={version => {
             if (detail.kind !== 'item') return
-            void install(detail.item, { force: true, version })
+            // 不传 overwrite：本机自制同名时先出确认条（审计 A15）；版本随意图一起
+            // 存进确认条，确认后重放的还是这一个版本（A11）。
+            void install(detail.item, { version })
           }}
           onClose={() => { setDetail(null) }}
         />

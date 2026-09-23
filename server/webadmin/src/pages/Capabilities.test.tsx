@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { request } from '../api'
-import Capabilities from './Capabilities'
+import Capabilities, { DELISTED_PENDING_HINT } from './Capabilities'
 
 // 2026-09 恢复统一审批:能力中心承载共享技能+共享 Agent 审核(技能/智能体
 // 类型可筛选;approve/reject/delete 走服务端下发的 base_path = /api/server/admin/*)。
@@ -266,6 +266,38 @@ describe('Capabilities 能力中心(统一审批)', () => {
     })
   })
 
+
+  // ID-01(审计 2026-09-23,P0):已通过审核的版本**不得**提供「拒绝」入口 ——
+  // 拒绝与释放归档是同一条 UPDATE,对在服务的版本执行它会不可恢复地销毁归档
+  // 字节、让该版本对全员 404、并烧掉版本号;可逆动作是「下架」。
+  // 同时确认文案必须与事实一致(不能写「可重新上传」)。
+  it('已通过行不渲染拒绝按钮,拒绝文案与事实一致(不可恢复 + 指路下架)', async () => {
+    const u = userEvent.setup()
+    const live = { ...SKILL_ROWS[0]!, status: 'approved' as const, enabled: true }
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=approved') return { approvals: [live] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      return {}
+    })
+    render(<Capabilities />)
+    await u.click(screen.getByRole('tab', { name: '已通过（0）' }))
+    await screen.findByText('CodeQL 审计')
+    expect(screen.queryByText('拒绝')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下架' })).toBeInTheDocument()
+  })
+
+  it('待审行渲染拒绝按钮,确认文案说明归档释放不可恢复且指路下架', async () => {
+    render(<Capabilities />)
+    await screen.findByText('CodeQL 审计')
+    const rejectBtns = screen.getAllByText('拒绝')
+    fireEvent.click(rejectBtns[0]!)
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('不可恢复')
+    expect(dialog).toHaveTextContent('下架')
+    // 误导文案(曾写「可重新上传」)不得复现。
+    expect(dialog).not.toHaveTextContent('可重新上传')
+  })
+
   it('转移归属:未选择时确认按钮禁用,当前归属人不可选', async () => {
     render(<Capabilities />)
     await screen.findByText('CodeQL 审计')
@@ -282,5 +314,70 @@ describe('Capabilities 能力中心(统一审批)', () => {
       .filter((el) => el !== null)
     expect(currentItems.length).toBeGreaterThan(0)
     expect(currentItems[0]?.getAttribute('data-disabled')).toBe('true')
+  })
+})
+
+/**
+ * R6-B P2（第六轮审计，2026-09-23）：待审版本叠在**已下架应用**上时，页面此前给出
+ * 一个可点的「通过」—— 点下去服务端必回 409 `APP_DELISTED`
+ * （`server/internal/sharedskills/routes.go` 的 `Distribution.Writable()`；
+ * `internal/capabilities/r5b_delist_owner_semantics_test.go` 明确造出这个状态并断言 409），
+ * 而下架徽标只在 `status === 'approved'` 的行上渲染 ⇒ 管理员看到的是一个"正常待审"的行，
+ * 事前零标记、事后只拿到失败文案。
+ *
+ * 判据：`enabled === false` 的行（**不看 status**）必须同时有 ①下架徽标、②置灰的「通过」、
+ * ③说明文案（挂在按钮外层 span 上：禁用按钮不派发鼠标事件，浏览器不显示它自己的 title），
+ * 且 ④「拒绝」保持可用（拒绝不是注定失败的动作），⑤点「通过」不发任何请求、不开确认弹窗。
+ *
+ * 变异验证（见 `temp/r6b-fix/MUTATION.md`）：把 `row.enabled === false` 从按钮的 disabled
+ * 条件里去掉（= 修复前的形态）⇒ 本组第一条必红。
+ */
+describe('R6-B P2：待审 + 应用已下架', () => {
+  /** 待审版本 + 应用级下架（`apps.enabled=false`，服务端审批队列会下发 `enabled`）。 */
+  const delistedPending = {
+    ...SKILL_ROWS[0]!, name: 'finance-report', display_name: '财务月报', version: '1.1.0',
+    enabled: false,
+    base_path: '/api/server/admin/shared-skills/finance-report/1.1.0',
+    grants_base: '/api/server/admin/shared-skills/finance-report',
+  }
+
+  function mockWith(row: typeof delistedPending): void {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path === '/api/server/admin/capabilities/approvals?status=pending') return { approvals: [row] }
+      if (path === '/api/server/admin/capabilities/approvals?status=all') return { approvals: [row] }
+      if (path === '/api/server/admin/departments') return { departments: [] }
+      if (path === '/api/server/admin/capability-locks') return { locks: [] }
+      return {}
+    })
+  }
+
+  it('显示「已下架」徽标 + 「通过」置灰 + 说明文案，且点了不发请求', async () => {
+    mockWith(delistedPending)
+    render(<Capabilities />)
+    await screen.findByText('财务月报')
+
+    // ① 事前标记（修前：只在 approved 行渲染 ⇒ pending 行零标记）。
+    expect(screen.getByText('已下架')).toBeInTheDocument()
+    // ② 注定失败的按钮必须点不动。
+    const approve = screen.getByRole('button', { name: '通过' })
+    expect(approve).toBeDisabled()
+    // ③ 文案说明（与 409 APP_DELISTED 语义一致 + 给出本页可达的处置路径）。
+    const hint = screen.getByTitle(DELISTED_PENDING_HINT)
+    expect(hint).toBeInTheDocument()
+    expect(DELISTED_PENDING_HINT).toContain('APP_DELISTED')
+    // ④ 拒绝不是注定失败的动作，保持可用。
+    expect(screen.getByRole('button', { name: '拒绝' })).toBeEnabled()
+    // ⑤ 点「通过」不得发出任何请求、也不得弹确认框。
+    fireEvent.click(approve)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(mockRequest.mock.calls.some(([p]) => String(p).endsWith('/approve'))).toBe(false)
+  })
+
+  it('对照：未下架（enabled 未下发或 true）的待审行照旧可点「通过」，且无下架徽标', async () => {
+    mockWith({ ...delistedPending, enabled: true })
+    render(<Capabilities />)
+    await screen.findByText('财务月报')
+    expect(screen.queryByText('已下架')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '通过' })).toBeEnabled()
   })
 })

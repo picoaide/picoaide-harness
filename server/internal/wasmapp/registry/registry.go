@@ -12,9 +12,9 @@ package registry
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -118,29 +118,16 @@ func ValidateVersion(v string) *apperr.Error {
 //   - 数值相同时：**无 prerelease > 有 prerelease**（1.0.0 > 1.0.0-beta.1，语义化版本）；
 //   - 都有 prerelease 时按点分段比较：纯数字段按数值比，否则按字典序；数字段 < 非数字段。
 //
-// 调用方必须先 ValidateVersion，本函数不检查格式（非法输入返回 0 并视为相等，
-// 由调用方的校验兜住）。
+// ⚠️ 2026-09-23 R3-A 审计 A-10（P2）：本函数**委托** `util.CompareSemVer`，不再自带一份
+// 实现 —— 同一条不变量在两个包各写一遍，就会像审计现场那样给出**相反**结论
+// （`util.CompareSemVer("1.0.0-1","1.0.0")=+1` 而本函数 =-1）：能力中心把 `1.0.0-1`
+// 当"当前版本"展示，而发布闸门与生效版本是 `1.0.0`。委托后两个调用点由构造保证一致，
+// 并由 `version_parity_test.go` 的期望表钉住语义（防止将来有人在任一侧重新实现）。
+//
+// 调用方仍必须先 ValidateVersion：本函数容忍非法输入（util 侧回落到字节序），
+// 但"格式非法 ⇒ 拒绝"是调用方的职责。
 func CompareVersions(a, b string) int {
-	am, bm := splitVersion(a), splitVersion(b)
-	for i := 0; i < 3; i++ {
-		if am.core[i] != bm.core[i] {
-			if am.core[i] < bm.core[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	// 数值相同：无 prerelease 的更大。
-	if am.pre == "" && bm.pre == "" {
-		return 0
-	}
-	if am.pre == "" {
-		return 1
-	}
-	if bm.pre == "" {
-		return -1
-	}
-	return comparePre(am.pre, bm.pre)
+	return util.CompareSemVer(a, b)
 }
 
 // MustBeNewer 判定 candidate 是否严格新于 current（§10.5 第 54 项）。
@@ -154,62 +141,6 @@ func MustBeNewer(candidate, current string) *apperr.Error {
 			WithHint("已落行的版本号永久占号（包括被拒与软删的版本）")
 	}
 	return nil
-}
-
-type parsedVersion struct {
-	core [3]int
-	pre  string
-}
-
-func splitVersion(v string) parsedVersion {
-	core, pre := v, ""
-	if i := strings.IndexByte(v, '-'); i >= 0 {
-		core, pre = v[:i], v[i+1:]
-	}
-	var p parsedVersion
-	parts := strings.Split(core, ".")
-	for i := 0; i < 3 && i < len(parts); i++ {
-		n, _ := strconv.Atoi(parts[i])
-		p.core[i] = n
-	}
-	p.pre = pre
-	return p
-}
-
-func comparePre(a, b string) int {
-	as, bs := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < len(as) && i < len(bs); i++ {
-		x, y := as[i], bs[i]
-		xn, xErr := strconv.Atoi(x)
-		yn, yErr := strconv.Atoi(y)
-		switch {
-		case xErr == nil && yErr == nil:
-			if xn != yn {
-				if xn < yn {
-					return -1
-				}
-				return 1
-			}
-		case xErr == nil: // 数字段 < 非数字段（语义化版本 §11.4）
-			return -1
-		case yErr == nil:
-			return 1
-		default:
-			if x != y {
-				if x < y {
-					return -1
-				}
-				return 1
-			}
-		}
-	}
-	switch {
-	case len(as) < len(bs):
-		return -1
-	case len(as) > len(bs):
-		return 1
-	}
-	return 0
 }
 
 // ValidateChangelog 校验 changelog（§4.1：非首版必填，空即拒 422 MISSING_FIELD）。

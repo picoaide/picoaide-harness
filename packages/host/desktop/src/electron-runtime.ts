@@ -38,6 +38,7 @@ import type {
   DesktopTrayItemRegistration,
   DesktopUpdateAdapter,
   DesktopUpdateSource,
+  DesktopUpdateTransferBudget,
   UpdateDownloadProgressSnapshot,
 } from './runtime.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
@@ -136,7 +137,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     get statePath() { return join(app.getPath('userData'), 'updates', 'state.json') },
     request: (url, init) => net.fetch(url, init),
     showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-    downloadUpdate: (version, source, signal, onProgress) => this.downloadUpdate(version, source, signal, onProgress),
+    downloadUpdate: (version, source, signal, onProgress, budget) =>
+      this.downloadUpdate(version, source, signal, onProgress, budget),
     announceUpdateReady: (version, path) => this.announceUpdateReady(version, path),
     installUpdate: (version, path) => this.installUpdate(version, path),
     notify: notification => { this.showNotification(notification) },
@@ -604,6 +606,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     source: DesktopUpdateSource,
     signal: AbortSignal,
     onProgress?: (progress: UpdateDownloadProgressSnapshot) => void,
+    budget?: DesktopUpdateTransferBudget,
   ): Promise<string> {
     if (this.platform !== 'darwin' && this.platform !== 'win32' && this.platform !== 'linux') {
       throw new Error(`dsh-plugin-desktop: updates are unavailable on ${this.platform}`)
@@ -617,6 +620,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       signal,
       ...(source.expectedChannel === undefined ? {} : { expectedChannel: source.expectedChannel }),
       ...(onProgress === undefined ? {} : { onProgress }),
+      // B-08:停滞/总预算由更新插件按设置下发;缺省时下载器用自己的常量。
+      ...(budget === undefined ? {} : { stallTimeoutMs: budget.stallTimeoutMs, totalTimeoutMs: budget.totalTimeoutMs }),
     })
     signal.throwIfAborted()
     if (this.platform === 'linux') {
@@ -915,10 +920,32 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         )
       }
     })
-    window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
-      // P1-3: a failed navigation (not abort) offers a recovery UI.
+    // B-01（2026-09-23 审计 P1，真机 Electron 44.4.3 复现）：**子框架**加载失败
+    // 也会派发 `did-fail-load`，而第 5 参 `isMainFrame` 才是"顶层文档"的判据
+    // （`electron.d.ts` 的签名是 `(event, errorCode, errorDescription,
+    // validatedURL, isMainFrame, frameProcessId, frameRoutingId)`）。
+    //
+    // 不区分框架的后果（探针 `probe-did-fail-load-subframe.cjs` 实测
+    // `did-fail-load code=-312 … isMainFrame=false`）：一次 iframe 失败就让**整个
+    // 界面**重新加载（丢掉草稿/视图状态），第二次把界面换成崩溃回退页 ——
+    // 触发面真实存在（右栏 HTML 预览就是 `<iframe src=blob:…>`）。
+    // 因此子框架失败只记一行日志（带 validatedURL 供排障），绝不进恢复路径。
+    //
+    // 第 5 参做防御性判空：只认严格 `true` 才走恢复 —— 旧/新 Electron 少给参数时
+    // 宁可少一次自动恢复（用户仍可从托盘重开），也不能让 iframe 掀掉整窗。
+    window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      const target = typeof validatedURL === 'string' ? validatedURL : ''
+      if (isMainFrame !== true) {
+        this.logError(
+          `dsh-plugin-desktop: subframe failed to load (${errorCode}: ${errorDescription}) ${target}`,
+        )
+        return
+      }
+      // P1-3: a failed main-frame navigation (not abort) offers a recovery UI.
       if (errorCode === -3 /* ABORTED - expected during navigation */) return
-      this.logError(`dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription})`)
+      this.logError(
+        `dsh-plugin-desktop: renderer failed to load (${errorCode}: ${errorDescription}) ${target}`,
+      )
       void reloadOrShowCrashFallback(
         { log: (message) => this.logError(message), productName: this.productName, locale: this.currentLocale },
         window,
@@ -1004,8 +1031,40 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
  * (the per-window flag only suppressed the *reload*, not the bounce back).
  * The button now navigates explicitly, which re-enters the normal crash path
  * (one reload, then the error page again) without a loop.
+ *
+ * B-03（2026-09-23 审计 P1）：`render-process-gone` 与 `did-fail-load` **共用一个
+ * 一次性的"重试一次"闩锁，而且不串行**。渲染进程崩溃时 Electron 会**同时**派发
+ * 两个事件（进程级 + 导航级），于是两次 `loadURL` 并发：错误页与 reload 谁后完成
+ * 谁说了算，用户可能看到"reload 成功了却出现错误页"，而且闩锁被提前耗尽，
+ * 下一次真实崩溃直接进错误页（探针实测两次导航并发）。
+ *
+ * 现在的形态是**单飞 + 状态机**（每个窗口一份）：
+ *   `idle` --事件--> `retrying` --成功--> `reloaded`（重试额度用掉，之后只显示错误页）
+ *                                 \--失败--> `failed`  （之后只显示错误页）
+ * 任何在 `retrying` 期间到达的事件**加入同一个 Promise**，不再发起第二次导航。
+ * "至多重试一次、之后只显示错误页"因此是构造上成立的，而不是靠时序侥幸。
  */
-const crashRetried = new WeakMap<BrowserWindow, boolean>()
+export type CrashRecoveryPhase = 'idle' | 'retrying' | 'reloaded' | 'failed'
+
+/** One window's crash-recovery bookkeeping. */
+interface CrashRecoveryState {
+  /** Where the window's one-shot recovery stands. */
+  phase: CrashRecoveryPhase
+  /** Recovery currently running: concurrent events join it instead of navigating. */
+  pending: Promise<void> | undefined
+}
+
+const crashRecoveryStates = new WeakMap<BrowserWindow, CrashRecoveryState>()
+
+/** Read (or create) one window's recovery state. */
+function crashRecoveryState(window: BrowserWindow): CrashRecoveryState {
+  let state = crashRecoveryStates.get(window)
+  if (state === undefined) {
+    state = { phase: 'idle', pending: undefined }
+    crashRecoveryStates.set(window, state)
+  }
+  return state
+}
 
 /** Embed a URL in an inline `<script>`: JSON-escaped and `<` neutralized so a
  * page URL containing `</script>` cannot break out of the block. */
@@ -1018,24 +1077,85 @@ function escapeHtmlText(value: string): string {
   return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;')
 }
 
-async function reloadOrShowCrashFallback(
+/**
+ * Serialize renderer recovery for one window (B-03).
+ *
+ * 两个事件源（`render-process-gone` / `did-fail-load`）只能经这一个入口：
+ * 第一个事件发起恢复，其余事件**加入同一个 Promise**。恢复结束后 `phase` 不是
+ * `idle`，后续事件一律只走错误页。
+ * @param runtime - logging + localized copy surface.
+ * @param window - window whose renderer failed.
+ * @returns a promise settling when this recovery round finished.
+ */
+function reloadOrShowCrashFallback(
+  runtime: { log(message: string): void; productName: string; locale: DesktopLocale },
+  window: BrowserWindow,
+): Promise<void> {
+  if (window.isDestroyed()) return Promise.resolve()
+  const state = crashRecoveryState(window)
+  if (state.pending !== undefined) {
+    runtime.log('dsh-plugin-desktop: renderer recovery already in flight; joining it instead of navigating again')
+    return state.pending
+  }
+  const settled = recoverRenderer(runtime, window, state)
+  state.pending = settled
+  return settled
+}
+
+/** 本轮导航已经定下（reload 成功 / 错误页已发出）⇒ 解除单飞。 */
+function releaseCrashRecovery(state: CrashRecoveryState): void {
+  state.pending = undefined
+}
+
+/** One recovery round: the single automatic reload, then the error page. */
+async function recoverRenderer(
+  runtime: { log(message: string): void; productName: string; locale: DesktopLocale },
+  window: BrowserWindow,
+  state: CrashRecoveryState,
+): Promise<void> {
+  if (window.isDestroyed()) return
+  if (state.phase === 'idle') {
+    state.phase = 'retrying'
+    // The retry target is captured **before** the reload: a concurrent event that
+    // joins this round must not retarget the navigation.
+    const retryTarget = currentAppURL(window)
+    if (retryTarget !== '') {
+      try {
+        await window.loadURL(retryTarget)
+        state.phase = 'reloaded'
+        // 同步解除单飞（不放在 `Promise.finally` 里）：`finally` 会晚一个微任务，
+        // 而"reload 已完成、下一个事件才到达"必须算**新的一轮**（重试额度已用尽
+        // ⇒ 直接错误页），不能被上一轮的单飞吞掉。
+        releaseCrashRecovery(state)
+        return
+      } catch {
+        runtime.log('dsh-plugin-desktop: the automatic reload after a renderer failure did not complete')
+      }
+    }
+    state.phase = 'failed'
+  }
+  try {
+    await showCrashFallbackPage(runtime, window)
+  } finally {
+    releaseCrashRecovery(state)
+  }
+}
+
+/** Current `http(s)` document URL, or `''` when the window has none. */
+function currentAppURL(window: BrowserWindow): string {
+  if (window.isDestroyed()) return ''
+  const current = window.webContents.getURL()
+  return current.startsWith('http') ? current : ''
+}
+
+/** Load the in-window failure page with an explicit retry button. */
+async function showCrashFallbackPage(
   runtime: { log(message: string): void; productName: string; locale: DesktopLocale },
   window: BrowserWindow,
 ): Promise<void> {
   if (window.isDestroyed()) return
-  const retried = crashRetried.get(window) ?? false
-  if (!retried) {
-    crashRetried.set(window, true)
-    try {
-      await window.loadURL(window.webContents.getURL())
-      return
-    } catch {
-      // fall through to the error page
-    }
-  }
   try {
-    const current = window.webContents.getURL()
-    const retryTarget = current.startsWith('http') ? current : ''
+    const retryTarget = currentAppURL(window)
     const retryScript = retryTarget === ''
       ? ''
       : `<script>document.getElementById('retry').addEventListener('click',function(){location.href=${inlineScriptUrl(retryTarget)}})</script>`

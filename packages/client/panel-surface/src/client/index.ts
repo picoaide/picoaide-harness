@@ -20,6 +20,7 @@ export {
 } from '../index.ts'
 
 export {
+  hasInnerModal,
   mountPanelSurface,
   type PanelSurfaceApi,
   type PanelSurfaceHandle,
@@ -37,7 +38,6 @@ export {
   PanelButton,
   PanelPage,
   PanelStats,
-  SectionHeader,
   SegmentedControl,
   TONE_COLOR,
   type CardProps,
@@ -49,7 +49,6 @@ export {
   type PanelPageProps,
   type PanelStatsProps,
   type PanelTone,
-  type SectionHeaderProps,
   type SegmentedControlOption,
   type SegmentedControlProps,
 } from './ui.tsx'

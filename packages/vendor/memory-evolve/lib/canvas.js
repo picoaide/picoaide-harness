@@ -62,11 +62,6 @@ export function canvasPath(config) {
   return join(config.memoryDir, 'canvas', 'boards.json')
 }
 
-/** 画板数据目录（<memoryDir>/canvas/）。 */
-export function canvasDir(config) {
-  return join(config.memoryDir, 'canvas')
-}
-
 /** 单板节点上限（防无限膨胀；一期够用）。 */
 export const CANVAS_NODES_MAX = 500
 

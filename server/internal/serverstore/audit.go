@@ -142,6 +142,42 @@ func AuditLog(db *sql.DB, username, action, detail string) error {
 	return auditLog(db, "", username, action, detail)
 }
 
+// AuditLogTx 在**调用方事务**内追加一条审计条目(2026-09-23,P0-2)。
+//
+// 为什么需要它:异步 worker(AuditLog/auditLog)自带事务,业务写与审计写必然
+// 分成两次提交 —— 业务写成功而审计写失败,就出现"库改了、审计零痕迹";反过来
+// 业务写回滚而审计已提交,就出现"审计说改了、其实没改"。管理端
+// PUT /api/server/admin/providers/:id 这类「改配置即改钱」的路径不允许这两种
+// 不一致,所以它的审计必须与业务写同事务。
+//
+// 链口径与 AuditLog 完全一致(v1,hash_version=1,app_id 为 NULL):同一个
+// sha256(prev|username|action|detail|created_at),同一个固定 advisory lock
+// (事务级,事务结束自动释放)串行化「读链尾 → 计算 → 插入」。detail 与
+// AuditLog 一样先过 util.EscapeControl(入口唯一,保证"落库内容 == 计算哈希
+// 的输入",否则 VerifyAuditChain 会报断链)。
+//
+// 与异步 worker 的无死锁论证:本函数在事务**末尾**取审计锁,此前只持有
+// gateway_providers/models 的行锁;worker 持有审计锁时只插 audit_logs(新行),
+// 不碰我们的行 ⇒ 不存在环。
+func AuditLogTx(tx *sql.Tx, username, action, detail string) error {
+	if _, err := tx.Exec("SELECT pg_advisory_xact_lock(?)", auditChainLockKey); err != nil {
+		return err
+	}
+	var prevHash string
+	if err := tx.QueryRow("SELECT hash FROM audit_logs ORDER BY id DESC LIMIT 1").Scan(&prevHash); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		prevHash = ""
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	detail = util.EscapeControl(detail)
+	sum := sha256.Sum256([]byte(auditHashPayload(prevHash, username, action, detail, now)))
+	_, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at, app_id, hash_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		username, action, detail, prevHash, hex.EncodeToString(sum[:]), now, nil, auditHashVersionLegacy)
+	return err
+}
+
 // AuditLogApp 与 AuditLog 相同,但把条目关联到一个 **wasm 应用**(迁移 0069
 // 新增的 audit_logs.app_id,§4.9「审计的 app 维度」):发布/上下架/冻结/删除/
 // 换票签发这类操作必须答得出"谁在什么时候用了哪个应用"。
@@ -321,6 +357,17 @@ func (w *auditWorker) writeBatchWithRetry(batch []auditRequest) []error {
 // FIX-12:返回**逐条**错误(长度恒为 len(batch)),并且**允许部分成功** ——
 // 每条用 SAVEPOINT 隔离,单条失败只回滚它自己,其余照常提交。此前任何一条
 // 失败都走 `defer tx.Rollback()` 丢掉整批:一批最多 20 条,坏 1 条 = 丢 20 条。
+//
+// R4-C-5(审计 2026-09-23,P2):"部分成功"只在**事务仍然可用**时成立。事务一旦
+// 被判废(SAVEPOINT 本身发不出去 / `ROLLBACK TO SAVEPOINT` 也失败),函数虽然
+// 返回逐条错误,`defer tx.Rollback()` 会把**此前已经插入的行一起丢弃** —— 那些
+// 行的 errs[i] 仍是 nil,调用方(worker → r.done)因此被告知"这几条审计写成功了",
+// 实际一条都没落库。方向恰好与 FIX-12 的目标("审计丢失必须可观测")相反,而且
+// 既不计数(auditDroppedEntries 只在 worker 收到逐条错误时 +1)也不打日志。
+//
+// 修法:事务不可用 ⇒ **整批**报失败(failAll(...,0))。"要么全部成功、要么如实
+// 报告失败"这个语义与返回值一致;部分成功路径(errs[i]!=nil 只标记第 i 条、
+// 其余照常提交)保持不变。
 func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 	errs := make([]error, len(batch))
 	failAll := func(e error, from int) []error {
@@ -346,11 +393,21 @@ func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 	}
 	inserted := 0
 	for i, r := range batch {
+		if fn := auditBatchFaultHook.Load(); fn != nil {
+			// 仅测试注入：在**建立保存点之前**对事务做一步（例如发一条必然报错的
+			// 语句把事务打成 aborted），用来确定性地构造"SAVEPOINT 发不出去"这
+			// 条路径。生产恒为 nil（见 audit_batch_fault_test.go 的口径说明）。
+			(*fn)(auditBatchExecer{tx: tx}, i)
+		}
 		// 保存点名固定:PG 里重名 SAVEPOINT 会替换旧的,ROLLBACK TO 之后
 		// 保存点仍然存在,可继续复用。
 		if _, err := tx.Exec("SAVEPOINT audit_row"); err != nil {
-			// 事务已不可用(通常是被 PG 判废):剩余条目一并失败。
-			return failAll(err, i)
+			// 事务已不可用(通常是被 PG 判废)。此处**必须整批报失败**:函数随即
+			// return、`defer tx.Rollback()` 会把 errs[0..i-1] 那几条已插入的行一起
+			// 丢弃 —— 若只标 errs[i..] 为失败,调用方会把 0..i-1 当成"写成功"
+			// (R4-C-5:报成功但实际丢失,且零日志、零 dropped 计数)。
+			log.Printf("audit: batch aborted at entry %d/%d, whole batch rolled back: %v", i, len(batch), err)
+			return failAll(err, 0)
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
 		// 链口径按行选择(0069):带应用维度的行写 v2,其余保持 v1 —— 同一批
@@ -365,12 +422,13 @@ func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 		hash := hex.EncodeToString(sum[:])
 		if _, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at, app_id, hash_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			r.username, r.action, r.detail, prevHash, hash, now, nullIfEmpty(r.appID), version); err != nil {
-			errs[i] = err
-			// 回滚这一条,保住此前已插入的条目;失败则整批作废。
+			// 回滚这一条,保住此前已插入的条目;失败则整批作废(同上的理由:
+			// 事务不可用时已插入的行会被 defer 的 Rollback 丢掉,不能报成功)。
 			if _, rbErr := tx.Exec("ROLLBACK TO SAVEPOINT audit_row"); rbErr != nil {
-				errs[i] = err
-				return failAll(rbErr, i+1)
+				log.Printf("audit: rollback to savepoint failed at entry %d/%d, whole batch rolled back: %v", i, len(batch), rbErr)
+				return failAll(errors.Join(err, rbErr), 0)
 			}
+			errs[i] = err
 			continue
 		}
 		prevHash = hash
@@ -393,6 +451,26 @@ const (
 	auditHashVersionLegacy int16 = 1
 	auditHashVersionApp    int16 = 2
 )
+
+// auditBatchExecer 是故障注入钩子能看到的事务能力面(**只有 Exec**):
+// 让测试能在建立保存点之前把事务打成 aborted(例如 `SELECT 1/0`),不夸大面。
+type auditBatchExecer struct{ tx *sql.Tx }
+
+func (e auditBatchExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return e.tx.Exec(query, args...)
+}
+
+// auditBatchFaultHook 是**仅测试**的故障注入点(生产恒为 nil)。
+//
+// 为什么要它:writeAuditBatch 的"SAVEPOINT 失败"路径无法在真实驱动上确定性构造
+// —— SAVEPOINT 是事务里的第一条语句,只有事务**已经**被 PG 判废时才会失败,而要
+// 把事务打成 aborted 就必须先发一条会报错的语句(它自己会在事务里留下错误状态)。
+// 钩子在"建立保存点之前"执行,测试注入 `SELECT 1/0` 即可确定性地走到那条路径;
+// 判据见 audit_batch_fault_test.go(修法前的 failAll(err,i) 会让该用例红)。
+//
+// 与 files_reaper.go 的 reapAfterListHook/reapRecheckHook 同一范式:atomic.Pointer
+// 存函数值,避免 worker goroutine 与测试之间的 DATA RACE。
+var auditBatchFaultHook atomic.Pointer[func(auditBatchExecer, int)]
 
 // auditHashPayload mirrors the payload used at write time (same layout).
 func auditHashPayload(prevHash, username, action, detail, createdAt string) string {
@@ -543,12 +621,19 @@ func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string
 // P2-1:保留被删批次中**最新的一条**作为「锚」——链中下一行的 prev_hash 指向
 // 它,整批删掉会让 VerifyAuditChain 在保留边界处必然报断链。锚行自身的哈希
 // 仍会被校验,锚之前的条目(超出保留期)才真正消失。
-func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) error {
+// R4-D-4(审计 2026-09-23,P2):返回值从 error 变成 (删除行数, error) —— 保留策略
+// 现在有一个**周期执行者**(`internal/auditretention`),它需要"这次清了什么"才能
+// 打出一条可观测的日志(否则只能证明"跑过了",不能证明"清掉了")。
+func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) (int64, error) {
 	// cutoff 是绝对瞬时:用会话时区无关的瞬时字面量(裸墙钟字符串会被按 PG
 	// 会话时区解释,进程 TZ 与会话时区不同时保留边界会偏 8 小时)。
-	_, err := db.Exec(`DELETE FROM audit_logs a
+	res, err := db.Exec(`DELETE FROM audit_logs a
 		WHERE a.created_at < ?::timestamptz AND EXISTS (
 			SELECT 1 FROM audit_logs b WHERE b.created_at < ?::timestamptz AND b.id > a.id)`,
 		pgInstantArg(cutoff), pgInstantArg(cutoff))
-	return err
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

@@ -10,10 +10,10 @@ import { ConnectorStore, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
-import { createOAuthProvider, resolveAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens } from './mcp-oauth-provider.ts'
+import { createOAuthProvider, isTerminalRefreshReason, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens, type RefreshFailure } from './mcp-oauth-provider.ts'
 import type { OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
-import { userScopePath } from './user-scope.ts'
+import { userScopePath, unscopedConnectorPath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
 import {
   CONNECTOR_AUTH_MODES,
@@ -349,12 +349,35 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
   }
 
-  // Per-user store. Rebuilt when the session changes; the old user's MCP
-  // registrations are disconnected first (server-side tokens stay on disk
-  // per user, never shared across accounts).
-  let store = new ConnectorStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
-  // Per-user local-approval ledger for server-issued stdio commands (FIX-02).
-  let approvals = new ConnectorApprovalStore(options.storeBaseDir ? { baseDir: options.storeBaseDir } : { username: currentUser() })
+  // R6-B-2: the SECOND half of the credential scope. Same source and same
+  // read-per-call shape as `@picoaide/dsh-browser`'s `currentServerHash()` —
+  // one machine can be logged into two deployments, and the credential of the
+  // first must never be handed to the second (see `./user-scope.ts`).
+  const currentServerURL = (): string | null => {
+    try {
+      const pico = ctx.get('picoSession') as { getSession?: () => { serverURL?: string } | null } | undefined
+      const serverURL = pico?.getSession?.()?.serverURL
+      return typeof serverURL === 'string' ? serverURL : null
+    } catch {
+      return null
+    }
+  }
+
+  // Per-(account, server) store. Rebuilt when the session changes; the old
+  // user's MCP registrations are disconnected first (server-side tokens stay on
+  // disk per account AND per server, never shared across either).
+  let store = new ConnectorStore(
+    options.storeBaseDir
+      ? { baseDir: options.storeBaseDir }
+      : { username: currentUser(), serverURL: currentServerURL() },
+  )
+  // Local-approval ledger for server-issued stdio commands (FIX-02), scoped the
+  // same way: the commands it vouches for come from ONE tenant's catalog.
+  let approvals = new ConnectorApprovalStore(
+    options.storeBaseDir
+      ? { baseDir: options.storeBaseDir }
+      : { username: currentUser(), serverURL: currentServerURL() },
+  )
   const states = new Map<string, ConnectorState>()
   /** Ids whose STORED credential currently carries a refresh token. */
   const refreshable = new Set<string>()
@@ -430,10 +453,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       && credential.expiresAt - Date.now() > REFRESH_LEAD_MS
       && target.tokenUrl !== undefined
     ) {
+      // CN-2 (audit 2026-09-23): this branch used to build the provider with NO
+      // discovery state, and the SDK then re-discovered the authorization server
+      // from the MCP URL — `WWW-Authenticate: resource_metadata` of the RESOURCE
+      // server's choosing, then its `authorization_servers[0]` — and POSTed the
+      // stored refresh token to whatever token endpoint came back. The
+      // definition's own `tokenUrl` is the authority instead, and resolving it
+      // is pure policy checking: no round trip, so the fast path this branch
+      // exists for is preserved.
+      const staticResolved = resolveStaticAuthorizationServer(target, locale())
+      if (staticResolved.discovery === undefined) {
+        ctx.logger?.warn(`pico-connectors: ${def.id} 静态端点不可用（${staticResolved.failure?.message ?? 'unknown'}）`)
+        return {}
+      }
       const baseline: { current: ConnectorCredential } = { current: credential }
       const created = createOAuthProvider({
         credential,
         target,
+        discovery: staticResolved.discovery,
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
         // **必须 await 落盘**（2026-09-17 flake 定案）：`saveTokens` 是 SDK 自己
         // 续期后唯一的持久化点，而 provider 的 `tokens()` 又会把内存里的新令牌
@@ -541,7 +578,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /** Install (or replace) the live handle of one registered server. */
   function installLiveProvider(id: string, serverName: string, handle: LiveProviderHandle): void {
     const byServer = liveProviders.get(id) ?? new Map<string, LiveProviderHandle>()
-    byServer.set(serverName, handle)
+    byServer.set(mcpServerKey(id, serverName), handle)
     liveProviders.set(id, byServer)
   }
 
@@ -549,7 +586,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   function dropLiveProvider(id: string, serverName: string): void {
     const byServer = liveProviders.get(id)
     if (byServer === undefined) return
-    byServer.delete(serverName)
+    byServer.delete(mcpServerKey(id, serverName))
     if (byServer.size === 0) liveProviders.delete(id)
   }
 
@@ -679,7 +716,137 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
-  const mcpDisposers = new Map<string, () => void>()
+  /** Composite key of one MCP server inside ONE connector (live providers). */
+  const mcpServerKey = (id: string, serverName: string): string => JSON.stringify([id, serverName])
+  /**
+   * Dead-grant terminal state: **(account scope, connector id) → the credential
+   * generation (`updatedAt`) that was rejected with
+   * `invalid_grant`/`invalid_client`**.
+   *
+   * The fact belongs to ONE ACCOUNT's credential file, so the account is part of
+   * the key — not a separate cleanup path (R3-B2 audit 2026-09-23, R3B2-2).
+   * Keyed by connector id alone, account A's revocation was inherited by account
+   * B whenever B's stored credential carried the same generation, which is what
+   * a provisioned/copied credential file looks like: B was told to authorize
+   * again, with zero network round trips, although its token was usable. The
+   * scope is the resolved store directory — the same identity `TokenRefresher`
+   * snapshots as `scopeAtStart` — so two accounts can never share an entry, and
+   * another account's entry is unreachable rather than merely cleared (a user
+   * switch keeps THIS account's terminal state, exactly like the durable row
+   * state, and re-arms nothing).
+   *
+   * In memory on purpose: the marker is an optimization of the AUTOMATIC sweep
+   * (one probe per account and process is acceptable, a probe per minute forever
+   * is not), while the durable facts (row `unauthorized` + the stored credential)
+   * already survive a restart. A successful re-authorization writes a new
+   * generation, so the entry stops matching and automatic recovery is re-armed
+   * without any explicit clearing.
+   */
+  const deadGrants = new Map<string, number>()
+  /**
+   * Key of one dead-grant marker: account scope + connector id, built in ONE
+   * place so every read, write and delete agrees on it (a marker judged under a
+   * different key than it was recorded under would silently re-arm, or never
+   * arm, the automatic recovery).
+   *
+   * NUL separates the halves: no filesystem path can contain it, and connector
+   * ids are already validated to `[A-Za-z0-9._-]`, so no two scope/id pairs can
+   * collide by concatenation.
+   */
+  const deadGrantKey = (scope: string, id: string): string => `${scope}\u0000${id}`
+  /** Is the credential just read from THIS account's store the generation already proven dead? */
+  const isDeadGrant = (scope: string, id: string, credential: ConnectorCredential): boolean =>
+    deadGrants.get(deadGrantKey(scope, id)) === credential.updatedAt
+  /** Record the generation whose grant the authorization server revoked, under ITS OWN account. */
+  const markDeadGrant = (scope: string, id: string, credential: ConnectorCredential): void => {
+    deadGrants.set(deadGrantKey(scope, id), credential.updatedAt)
+  }
+  /** Re-arm automatic recovery for one account's connector (fresh generation / disconnect). */
+  const clearDeadGrant = (scope: string, id: string): void => {
+    deadGrants.delete(deadGrantKey(scope, id))
+  }
+  /**
+   * 一次刷新失败 ⇒ 行状态 + 终态标记。**唯一实现**：恢复、后台扫掠、面板按钮三条
+   * 路径共用，它们不能对"哪些失败是终态"给出不同答案。
+   *
+   * R4-B-10（审计 2026-09-23）就是这条唯一性缺失的后果：面板「刷新」按钮遇到
+   * `invalid_grant` 时只 `setState`、不 `markDeadGrant`，于是下一次后台扫掠又把
+   * **已被消费掉**的 refresh token 出示给 IdP（探针实测 reuse 0→1→2；由扫掠检出的
+   * 对照组停在 1）。R4-B-8 的另一半同理：`invalid_scope` 一类**请求级**永久拒绝
+   * （{@link isTerminalRefreshReason} 的 `terminal`）也必须走这里，否则 60s 扫掠
+   * 永远重发同一条注定失败的请求。
+   *
+   * 5xx/网络（`transient`）语义**不变**：不是终态、不装标记，行状态留给调用点
+   * （扫掠保持原状以便下一轮继续试探，面板按钮显示错误文案）。
+   * @param scope - account scope the credential was read from (`store.dir`).
+   * @param id - connector id.
+   * @param credential - the credential generation the failing attempt used, or
+   * `null` when the attempt had none (then no marker can be keyed to a generation).
+   * @param outcome - the classified failure.
+   * @returns true when the failure was terminal (marker armed + row flipped).
+   */
+  const applyRefreshFailure = (
+    scope: string,
+    id: string,
+    credential: ConnectorCredential | null,
+    outcome: RefreshFailure,
+  ): boolean => {
+    if (!isTerminalRefreshReason(outcome.reason)) return false
+    if (credential !== null) markDeadGrant(scope, id, credential)
+    setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+    return true
+  }
+  /**
+   * Live MCP registrations, keyed by **serverName** — the namespace upstream
+   * `mcp-client` reserves for exactly ONE live instance.
+   *
+   * The key stays the bare name on purpose: `tests/lifecycle.spec.ts > disposes
+   * the previous registration when the same server key is registered again`
+   * (P2-23) pins that a later registration of the same key retires the previous
+   * one before it loads — upstream's plugin throws "serverName is already in
+   * use" otherwise, and a credential refresh re-registers through exactly this
+   * path.
+   *
+   * CN-4 (audit 2026-09-23) is the other half of that event: the row whose
+   * transport was taken over kept claiming `connected` while its tools were
+   * gone. The VALUE therefore carries the owning connector id, so
+   * {@link retireServerName} can tell the vacated row the truth instead of
+   * leaving it lying.
+   */
+  interface McpRegistration {
+    /** Connector that owns the live registration. */
+    id: string
+    dispose: () => void
+  }
+  const mcpRegistrations = new Map<string, McpRegistration>()
+
+  /**
+   * Retire whatever live registration owns `serverName`, and — when it belonged
+   * to ANOTHER connector — stop that connector's row from claiming `connected`.
+   *
+   * Called before every load (`registerMcp`), so the name is always free for the
+   * new instance.
+   * @param serverName - the upstream-reserved name being (re)registered.
+   * @param ownerId - the connector performing the registration.
+   * @param ownerName - its display name (named in the vacated row's message).
+   */
+  const retireServerName = (serverName: string, ownerId: string, ownerName: string): void => {
+    const previous = mcpRegistrations.get(serverName)
+    if (previous === undefined) return
+    dropLiveProvider(previous.id, serverName)
+    try { previous.dispose() } catch { /* teardown never throws */ }
+    mcpRegistrations.delete(serverName)
+    if (previous.id === ownerId) return
+    // Upstream allows one live instance per name, so taking the name over
+    // disposes the other connector's transport — and with it every tool of that
+    // row. Reporting `connected` from here on would be a lie.
+    setState(previous.id, {
+      status: 'error',
+      everConnected: true,
+      error: copy('flow.serverNameTaken', { serverName, by: ownerName }),
+      errorCode: undefined,
+    })
+  }
   /** In-flight auth flows keyed by connector id: disconnect/cancel aborts them. */
   const pendingFlows = new Map<string, AbortController>()
   /**
@@ -861,10 +1028,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
     liveProviders.clear()
     latestRefresh.clear()
-    for (const dispose of mcpDisposers.values()) {
-      try { dispose() } catch { /* teardown never throws */ }
+    for (const registration of mcpRegistrations.values()) {
+      try { registration.dispose() } catch { /* teardown never throws */ }
     }
-    mcpDisposers.clear()
+    mcpRegistrations.clear()
     for (const flow of pendingFlows.values()) flow.abort(new Error(copy('flow.userSwitchedConnect')))
     pendingFlows.clear()
     // BUG-02: connect/submit intents started under the previous session must
@@ -903,14 +1070,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /** Rebuild per-user store/runtime after a login/logout/switch. */
-  const reconfigureUser = (): void => {
+  const reconfigureUser = (eventServerURL?: string | null): void => {
     const username = currentUser()
     // Migrate legacy `~/.picoaide/connectors` once (first login after
     // upgrade): A's pre-upgrade credentials must not be lost silently.
     migrateLegacyStore(username)
     if (!options.storeBaseDir) {
-      store = new ConnectorStore({ username })
-      approvals = new ConnectorApprovalStore({ username })
+      // Scope (account, server). The service read is authoritative; the event
+      // payload is the fallback, exactly like the browser plugin resolves its
+      // partition hash (`currentServerHash() ?? serverPartitionHash(event…)`).
+      // A session event can arrive before/while the service is updated, and
+      // "no evidence of the new server yet" must not silently keep the old
+      // server's directory.
+      const serverURL = currentServerURL() ?? eventServerURL ?? null
+      store = new ConnectorStore({ username, serverURL })
+      approvals = new ConnectorApprovalStore({ username, serverURL })
     }
   }
 
@@ -923,7 +1097,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const epoch = lifecycleEpoch
       await teardownAll()
       await syncServerDefs()
-      reconfigureUser()
+      reconfigureUser((next as { serverURL?: string } | null)?.serverURL ?? null)
       if (next !== null) await restoreAll(epoch)
     }).catch((cause: unknown) => {
       ctx.logger?.error('pico-connectors: session change handling failed', cause)
@@ -1316,10 +1490,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // The old transport is gone (or about to be): its handle must not keep
         // receiving adopted tokens.
         dropLiveProvider(def.id, server.serverName)
-        const disposer = mcpDisposers.get(server.serverName)
-        if (disposer === undefined) return
-        try { disposer() } catch { /* teardown never throws */ }
-        mcpDisposers.delete(server.serverName)
+        retireServerName(server.serverName, def.id, def.name)
       }
       retire()
       // `ctx.plugin` returns `Fiber & PromiseLike<Fiber>` (not a real Promise),
@@ -1365,9 +1536,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         installLiveProvider(def.id, server.serverName, auth.handle)
         adoptLatestRefresh(def.id, auth.handle, credential)
       }
-      // P2-23 kept: the map holds at most one disposer per server key, so the
-      // fiber recorded here is the only live instance for that name.
-      mcpDisposers.set(server.serverName, () => { void fiber?.dispose?.() })
+      // P2-23 kept: the map holds at most one registration per server key, so
+      // the fiber recorded here is the only live instance for that name — and
+      // the owner id is what lets the NEXT takeover stop the previous row from
+      // claiming `connected` (CN-4).
+      mcpRegistrations.set(server.serverName, { id: def.id, dispose: () => { void fiber?.dispose?.() } })
     }
     return { rejected }
   }
@@ -1375,11 +1548,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const unregisterMcp = async (def: ConnectorDef): Promise<void> => {
     for (const server of def.mcp) {
       dropLiveProvider(def.id, server.serverName)
-      const dispose = mcpDisposers.get(server.serverName)
-      if (dispose) {
-        dispose()
-        mcpDisposers.delete(server.serverName)
-      }
+      const registration = mcpRegistrations.get(server.serverName)
+      // Only this connector's own registration: if another row has since taken
+      // the name over, disconnecting here must not tear down ITS transport
+      // (CN-4). That takeover already marked this row not-connected.
+      if (registration === undefined || registration.id !== def.id) continue
+      try { registration.dispose() } catch { /* teardown never throws */ }
+      mcpRegistrations.delete(server.serverName)
     }
   }
 
@@ -1399,6 +1574,43 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
 
   /**
+   * Whether a `device` connector actually DECLARES a device-code authorization.
+   *
+   * `parseServerConnectors` labels a definition that has neither an `auth` block
+   * nor `tokenFields` as `device` (the historical fallback). That label says
+   * nothing about authorization: there is no verification URL to visit and no
+   * token to obtain, so the CN-3 artifact gate must not apply — otherwise a
+   * perfectly usable credential-less MCP connector becomes permanently
+   * `unauthorized` with no user action able to fix it (V3 review, 2026-09-23).
+   * The same predicate drives `runDevice`, which skips the flow entirely when no
+   * verification URL is declared.
+   * @param def - connector definition.
+   * @returns true when the definition declares a device authorization step.
+   */
+  const declaresDeviceFlow = (def: ConnectorDef): boolean => {
+    const auth = def.auth as { verificationUrl?: unknown } | undefined
+    return auth !== undefined
+      && typeof auth.verificationUrl === 'string'
+      && auth.verificationUrl.trim() !== ''
+  }
+
+  /**
+   * Whether a `device` credential carries an authorization artifact at all.
+   *
+   * The connect path may look at more than this (a declared-field form is
+   * published separately), but "does the row have anything to authenticate
+   * with" must have ONE answer: an access token, the public-endpoint marker, or
+   * at least one declared field value. An empty credential (the stateless
+   * device flow's `{updatedAt}`) is not an authorization — see CN-3.
+   * @param credential - the stored credential.
+   * @returns true when at least one artifact is present.
+   */
+  const hasDeviceAuthorization = (credential: ConnectorCredential): boolean =>
+    (typeof credential.accessToken === 'string' && credential.accessToken !== '')
+    || credential.publicMcp === true
+    || Object.keys(credential.fields ?? {}).length > 0
+
+  /**
    * Whether a stored credential can be registered on startup.
    *
    * OAuth/server-side credentials authenticate with `accessToken`; token and
@@ -1415,12 +1627,50 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): boolean => {
     if (credential === null || credential === undefined) return false
     if (missingDeclaredFields(def, credential).length > 0) return false
-    if (def.authMode === 'token' || def.authMode === 'device') return true
+    // Widened on purpose: a definition handed straight to `apply()` (a profile
+    // row, a test fixture) may carry no mode at all — see the `undefined` arm.
+    const mode: string | undefined = def.authMode
+    if (mode === 'token') return true
+    // CN-3 (audit 2026-09-23): `device` used to pass through unconditionally, so
+    // a device flow that produced nothing but `{updatedAt}` registered its MCP
+    // servers on every restart and the row read `connected` while every tool
+    // call was guaranteed to fail. A device credential is usable only when it
+    // carries something the tools can actually use — BUT the gate only applies
+    // to connectors that DECLARE a device-code authorization (V3 review): the
+    // catalog's fallback label is also `device` for a definition with neither
+    // an `auth` block nor `tokenFields`, and such a credential-less connector
+    // (a local MCP server that needs no credential) must stay usable exactly as
+    // it was before CN-3. See `declaresDeviceFlow`.
+    if (mode === 'device') return declaresDeviceFlow(def) ? hasDeviceAuthorization(credential) : true
+    // A definition that declares no authorization mode at all is the
+    // credential-less shape as well (V3 review): nothing was declared, so there
+    // is nothing to authorize and nothing to gate.
+    if (mode === undefined) return true
     // A public MCP endpoint answers without an authorization challenge, so the
     // discovery result is the whole credential: requiring an accessToken here
     // dropped its tools on every restart (2026-09-15 audit, BUG-06).
     if (credential.publicMcp === true) return true
     return typeof credential.accessToken === 'string' && credential.accessToken !== ''
+  }
+
+  /**
+   * Does this definition need a STORED credential to be registered at all?
+   *
+   * The credential-less arms mirror {@link credentialUsable} exactly (no mode
+   * declared, or a `device` definition that declares no device-code
+   * authorization): for those, "there is a leftover credential file somewhere"
+   * is not a reason to tell the user to authorize again — the connector has
+   * nothing to authorize. Everywhere else a missing credential IS an
+   * authorization gap, which is what the unscoped-credential branch in
+   * {@link restoreAll} reports (R6-B-2).
+   * @param def - the connector definition.
+   * @returns true when the row is expected to hold a credential.
+   */
+  const requiresCredential = (def: ConnectorDef): boolean => {
+    const mode: string | undefined = def.authMode
+    if (mode === undefined) return false
+    if (mode === 'device' && !declaresDeviceFlow(def)) return false
+    return true
   }
 
   /** Publish a field form for the panel and leave the row waiting for it. */
@@ -1533,6 +1783,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // 'connecting' rather than registering MCP servers that cannot work.
       if (missingDeclaredFields(def, merged).length > 0) {
         requestDeclaredFields(id, def)
+        return
+      }
+      // CN-3: nothing declared to fill in AND nothing stored to authenticate
+      // with (a `device` flow that only wrote `{updatedAt}`) — registering here
+      // is what told the user "connected" while every tool call would fail.
+      // Say what is wrong and stay unauthorized instead.
+      if (!credentialUsable(def, merged)) {
+        setState(id, {
+          status: 'unauthorized',
+          everConnected: true,
+          error: copy('auth.deviceUnverifiable'),
+          errorCode: 'auth-required',
+        })
         return
       }
       // conn-1: the flow may have been overtaken (logout / user switch) while
@@ -1677,6 +1940,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // handles): the cached refresh result must not be adopted by a later
     // re-registration under a NEW authorization.
     latestRefresh.delete(id)
+    // The marker belongs to the account whose credential was just removed.
+    clearDeadGrant(store.dir, id)
     liveProviders.delete(id)
     // 断开必须连分类一起清（2026-09-17 S04-3 审计）：只清 error 会留下
     // `errorCode:'auth-required'`，下一次未分类失败就会被渲染成"需要重新授权"。
@@ -1700,38 +1965,81 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const restoreAll = async (epoch: number): Promise<void> => {
     /** True once a NEWER lifecycle transition superseded this task. */
     const stale = (): boolean => epoch !== lifecycleEpoch
+    // R6-B-2: report the credentials this build REFUSES to adopt (they were
+    // written before credentials carried a server dimension) ONCE per restore
+    // pass, as one line with the ids and the directory. The files stay where
+    // they are; the log is what makes the re-authorization wave diagnosable
+    // instead of looking like "my connectors forgot everything".
+    const unscoped = await store.unscopedCredentialIds()
+    if (stale()) return
+    // The `unscoped-credentials` tag is the stable, greppable half of the line
+    // (host logs are zh-first, so the sentence alone is not searchable for a
+    // non-Chinese reader); keep the tag ASCII and keep it in one place.
+    if (unscoped.length > 0) {
+      ctx.logger?.warn?.(
+        `pico-connectors: unscoped-credentials count=${String(unscoped.length)} — `
+        + `检测到 ${String(unscoped.length)} 个未标记服务端的连接器凭据（升级前保存），`
+        + '按服务端隔离策略不沿用，对应连接器需要重新授权；原文件保留在 '
+        + `${store.unscopedDir ?? ''}；ids=${unscoped.join(',')}`,
+      )
+    }
     for (const def of defs) {
       try {
         if (stale()) return
-        const credential = await store.readCredential(def.id)
+        // The account scope is captured TOGETHER with the credential (one store
+        // instance for both): the dead-grant markers below are only meaningful
+        // against the very store the credential came from.
+        const target = store
+        const scope = target.dir
+        const credential = await target.readCredential(def.id)
         if (stale()) return
         noteCredential(def.id, credential)
         if (!credential) {
-          // No credential for THIS user: clear the token facts the previous user
-          // left on the row (states survive a session change; the store does
-          // not). The STATUS is deliberately not forced to 'disconnected' —
-          // 'unauthorized' is how a failed authorization reports itself and must
-          // survive the restore pass.
+          // No credential for THIS (account, server): clear the token facts the
+          // previous scope left on the row (states survive a session change; the
+          // store does not). The STATUS is deliberately not forced to
+          // 'disconnected' — 'unauthorized' is how a failed authorization
+          // reports itself and must survive the restore pass.
           setState(def.id, { expiresAt: undefined, refreshedAt: undefined, refreshToken: undefined })
+          // ...but an UNSCOPED credential of the same id is evidence this
+          // connector WAS authorized, just not for a server we can name. Say so
+          // and demand a fresh authorization: adopting it would hand the
+          // previous tenant's secret to whichever server is current, and
+          // leaving the row silently disconnected would look like a bug.
+          if (requiresCredential(def) && await target.hasUnscopedCredential(def.id)) {
+            setState(def.id, {
+              status: 'unauthorized',
+              everConnected: true,
+              error: copy('store.rescopeRequired'),
+              errorCode: 'auth-required',
+            })
+          }
           continue
         }
         // Refresh OAuth tokens before restoring (official SDK refresh flow),
         // then register the MCP servers.
         const effective = credential.refreshToken === undefined
+          || isDeadGrant(scope, def.id, credential)
           ? credential
           : await (async () => {
               const outcome = await tokenRefresher.refresh(def.id)
               if (stale()) return credential
-              if (!outcome.ok && outcome.reason === 'reauthorize') {
-                // The grant is gone: say so on the row instead of registering
-                // MCP servers that are guaranteed to 401.
-                setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+              if (!outcome.ok && applyRefreshFailure(scope, def.id, credential, outcome)) {
+                // CN-5 + R4-B-8/10: the terminal state is recorded in ONE place
+                // (marker + row). The grant/request is refused, so registering
+                // MCP servers that are guaranteed to fail is skipped.
                 return null
               }
-              return await store.readCredential(def.id) ?? credential
+              return await target.readCredential(def.id) ?? credential
             })()
         if (stale() || effective === null) continue
         if (stale()) return
+        // A credential whose grant is known dead must not be registered (every
+        // tool call would 401); the row keeps demanding a fresh authorization.
+        if (isDeadGrant(scope, def.id, effective)) {
+          setState(def.id, { status: 'unauthorized', everConnected: true, errorCode: 'auth-required' })
+          continue
+        }
         if (credentialUsable(def, effective)) {
           const outcome = await registerMcp(def, { signal: teardownController.signal })
           // A newer registration for THIS connector (user pressed connect on it)
@@ -1776,8 +2084,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
       liveProviders.clear()
       latestRefresh.clear()
-      for (const dispose of mcpDisposers.values()) dispose()
-      mcpDisposers.clear()
+      for (const registration of mcpRegistrations.values()) {
+        try { registration.dispose() } catch { /* teardown never throws */ }
+      }
+      mcpRegistrations.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
       // lingering OAuth/device flow would keep the callback server up and
       // (on a later disconnect) could write back credentials after teardown.
@@ -1811,19 +2121,42 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   /**
    * 一次扫掠：把"该刷新的连接器刷一遍"串在生命周期队列里（与连接/断开互斥），
    * 刷新失败的 `reauthorize` 落 `unauthorized`。定时器与测试注入共用这一份。
+   *
+   * CN-5（2026-09-23 审计）：死 grant 必须进**终态**。此前 `unauthorized` 也在
+   * 扫掠白名单里，于是被吊销的 refresh token 每 60s 再被出示一次（审计探针实测
+   * 5 次扫掠 = 40 次打到 IdP），对那些做异常登录检测的 IdP 看起来就是持续攻击。
+   * 现在：`invalid_grant`/`invalid_client` 记在 {@link deadGrants} 上（键是**账号
+   * 作用域 + 连接器**，值是**凭据代次** `updatedAt`），只要该账号盘上还是同一份
+   * 凭据就不再自动重试；用户重新授权会写入新凭据（新代次）⇒ 自动恢复尝试；面板的
+   * 「刷新」按钮走 `force`，一直可用。
+   *
+   * R4-B-8/10（审计 2026-09-23）：终态判定与写状态收进 {@link applyRefreshFailure}
+   * 一处（三条路径共用）；`error` 行只要还持 refresh token 也留在白名单里 —— 面板
+   * 按钮遇到 5xx 会把行设成 `error`（可重试的失败），此前那一行从此**退出主动刷新
+   * 集**，一次网络抖动就让连接器再也不会自愈。
    * @returns 扫掠完成的 Promise。
    */
   async function runRefreshSweep(): Promise<void> {
     return runLifecycle(async () => {
       for (const def of defs) {
         const state = states.get(def.id)
-        if (state?.status !== 'connected' && state?.status !== 'unauthorized') continue
-        const credential = await store.readCredential(def.id)
+        if (state?.status !== 'connected' && state?.status !== 'unauthorized' && state?.status !== 'error') continue
+        // 作用域与凭据取自同一个 store 实例（见 {@link deadGrantKey}）。
+        const target = store
+        const scope = target.dir
+        const credential = await target.readCredential(def.id)
         if (!credential || !tokenNeedsRefresh(credential)) continue
+        // 终态：同一账号同一代凭据已经证明授权被吊销/请求被永久拒绝 ⇒ 停止心跳
+        // （不静默、行状态仍是「需要重新授权」，只是不再拿死 token 去打 IdP）。
+        if (isDeadGrant(scope, def.id, credential)) continue
         const outcome = await tokenRefresher.refresh(def.id, { locale: locale() })
-        if (!outcome.ok && outcome.reason === 'reauthorize') {
-          setState(def.id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+        if (outcome.ok) {
+          clearDeadGrant(scope, def.id)
+          continue
         }
+        // transient 在这里刻意**不改行状态**：它的语义是"稍后用同一份凭据再试"，
+        // 下一轮扫掠应当继续试探（终态的两类由唯一的 applyRefreshFailure 处理）。
+        applyRefreshFailure(scope, def.id, credential, outcome)
       }
     })
   }
@@ -1889,6 +2222,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      * reports the new expiry; a dead grant flips the row to `unauthorized` so
      * the user is told to authorize again instead of silently staying
      * "connected" with a token that no longer works.
+     *
+     * R4-B-10 (audit 2026-09-23): this path used to flip the row WITHOUT arming
+     * the terminal marker, so when the button was the first surface to meet a
+     * revoked grant the next background sweep presented the already-consumed
+     * refresh token to the IdP one more time (probe: reuse 0→1→2, versus 1 for
+     * the sweep-detected control). It now goes through the same
+     * {@link applyRefreshFailure} the other two paths use.
      */
     const refreshTokens: JsonHandler = async (req, res) => {
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
@@ -1897,21 +2237,32 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const def = getDef(id)
       if (!def) return json(res, 404, { error: `unknown connector: ${id}` })
       if (oauthTargetOf(def) === null) return json(res, 400, { error: copy('flow.refreshUnsupported') })
-      const outcome = await tokenRefresher.refresh(id, { force: true, locale: locale() })
+      // The credential the failing attempt used: the terminal marker below is
+      // keyed to its generation, so it must be READ — but the forced refresh is
+      // registered FIRST. A route that awaits a read before calling `refresh()`
+      // yields its single-flight slot to a concurrent automatic refresh, and
+      // when that one takes the "token still fresh, nothing to do" fast path the
+      // user's "refresh now" is silently swallowed (pinned by
+      // `token-refresh.spec.ts > refreshes through the real route and exposes the
+      // new expiry`, which requires exactly one grant from this route). A FAILED
+      // attempt never writes a credential, so racing the read is safe.
+      const scope = store.dir
+      const pending = tokenRefresher.refresh(id, { force: true, locale: locale() })
+      const credential = await store.readCredential(id)
+      const outcome = await pending
       if (!outcome.ok) {
-        // The refresh engine reports WHY the refresh failed; a dead grant is the
-        // one outcome that means "authorize again", and that is the stable code
-        // the client maps (the message itself is translatable).
-        const errorCode = outcome.reason === 'reauthorize' ? 'auth-required' : undefined
-        if (outcome.reason === 'reauthorize') {
-          setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode })
-        } else if (outcome.reason === 'transient') {
+        // The refresh engine reports WHY the refresh failed; the terminal
+        // reasons are the ones that mean "this credential will not be retried
+        // automatically", and `auth-required` is the stable code the client maps
+        // (the message itself is translatable).
+        const terminal = applyRefreshFailure(scope, id, credential, outcome)
+        if (!terminal && outcome.reason === 'transient') {
           setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
         }
         return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
           error: outcome.message,
           reason: outcome.reason,
-          ...(errorCode === undefined ? {} : { errorCode }),
+          ...(terminal ? { errorCode: 'auth-required' as const } : {}),
         })
       }
       noteCredential(id, await store.readCredential(id))
@@ -2203,6 +2554,14 @@ export type { ConnectorDef, ConnectorState, ConnectorAuthRequest } from './types
  * retries) and never blocks the app. Anonymous (logged-out) sessions never
  * absorb the legacy data — it is claimed by the first account that logs in.
  *
+ * The target is the **unscoped** directory ({@link unscopedConnectorPath},
+ * `<dshHome>/users/<user>/connectors`) — the pre-2026-09-24 layout. That store
+ * was shared by every server the account had ever pointed at, so since R6-B-2
+ * its files are never adopted: `restoreAll` probes them for existence, reports
+ * "needs a fresh authorization" and leaves the bytes alone. Migrating still
+ * earns its keep — it moves the files under the account that can see them (and
+ * into the log line that lists them) instead of stranding them in `~/.picoaide`.
+ *
  * TOCTOU hardening (2026-08-22): outside the `existsSync(target)` check the
  * claim is serialized through an atomic marker file created with `wx`
  * (O_EXCL). Whichever session/process creates the marker first wins the
@@ -2215,9 +2574,9 @@ function migrateLegacyStore(username: string | null): void {
   try {
     const legacy = join(homedir(), '.picoaide', 'connectors')
     if (!existsSync(legacy)) return
-    const target = join(userScopePath(username), 'connectors')
+    const target = unscopedConnectorPath(username)
     if (existsSync(target)) return
-    mkdirSync(join(userScopePath(username)), { recursive: true, mode: 0o700 })
+    mkdirSync(userScopePath(username), { recursive: true, mode: 0o700 })
     // Atomic claim: only the first O_EXCL winner proceeds to the rename.
     const claim = join(userScopePath(username), '.legacy-claim')
     try {

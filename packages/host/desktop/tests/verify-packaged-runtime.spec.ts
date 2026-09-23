@@ -1,19 +1,33 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
+import { listPackage } from '@electron/asar'
 import {
+  AFTER_PACK_SEAMS,
   afterPack,
+  runAfterPackSeams,
   assertExactSkillListing,
   assertNoPackagedSourceLeaks,
+  assertRequiredEntriesCoverWorkspaceSurface,
   assertRuntimeAssetFamiliesSurvive,
   assertBrandAssetSvg,
-  PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS,
-  PACKAGED_CORDIS_SKILL_DIR,
+  collectWorkspaceSurface,
+  effectivePackagedRuntimeEntries,
+  assertWorkspacePackageCoverage,
+  REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
   PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
+  PACKAGED_ELECTRON_VERSION_MARKER,
+  declaredElectronVersion,
+  packagedRuntimeLayoutIsPhysical,
+  PACKAGED_RUNTIME_LAYOUT_ENV,
+  PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS,
+  PACKAGED_CORDIS_SKILL_DIR,
   REQUIRED_CORDIS_PRESET_SKILLS,
   expectedCordisSkillListing,
   PACKAGED_WEB_BRAND_ASSETS,
@@ -21,10 +35,13 @@ import {
   PACKAGED_WEB_BRAND_OFFICIAL,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_PROFILE_PATCH_ANCHORS,
+  REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
   assertProfilePatchAnchors,
   REQUIRED_ASAR_EXPORTS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
   REQUIRED_MACOS_UNIVERSAL_ENTRIES,
+  NATIVE_PLATFORM_FAMILIES,
+  NATIVE_FAMILY_EXEMPT_ENTRIES,
   nativeAddonPlatformPackages,
   nativeAddonRequirement,
   REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
@@ -37,6 +54,7 @@ import {
   smokePackagedAsarBigintSemantics,
   verifyPackagedRuntime,
   type ArchiveLister,
+  type AfterPackSeams,
   type AsarBigintSmokeLauncher,
   type FileProbe,
   type FlockSmokeLauncher,
@@ -59,6 +77,28 @@ function context(
     packager: { appInfo: { productFilename: 'PicoAide Harness' } },
   }
 }
+
+/**
+ * 本仓安装的 Electron 可执行文件绝对路径（P-5：冒烟要跑在**真 Electron** 上）。
+ *
+ * `require('electron')` 在普通 Node 进程里返回二进制路径（同
+ * `scripts/verify-renderer-error-capture.mjs`）；缺二进制就 fail-loud ——
+ * `yarn check` 本来就要跑图形门禁，二进制是既有前置条件。
+ */
+function resolveElectronBinary(): string {
+  const require = createRequire(import.meta.url)
+  const binary = require('electron') as unknown
+  if (typeof binary !== 'string' || !existsSync(binary)) {
+    throw new Error(`electron binary not resolved (got ${JSON.stringify(binary)}); run yarn install first`)
+  }
+  return binary
+}
+
+/**
+ * 打包版 Electron 版本行（P-5）：冒烟子进程的输出里必须带它，且取值等于
+ * `devDependencies.electron`。注入的成功输出同样要带（否则宿主断言应当拒）。
+ */
+const ELECTRON_VERSION_LINE = `${PACKAGED_ELECTRON_VERSION_MARKER}${declaredElectronVersion()}\n`
 
 const REQUIRED_ASAR_EXPORT_PATHS = [
   'lib/index.js',
@@ -83,7 +123,16 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js',
   'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
   'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
+  // 2026-09-23（第三轮审计反向 oracle）：这 7 条此前不在任何一张表里，而产物里
+  // 真实存在且被真实 specifier 引用 ⇒ 删掉它们没有任何判据会红。
+  'node_modules/@picoaide/dsh-enterprise/lib/index.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/loopback.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js',
   'node_modules/@picoaide/dsh-enterprise/package.json',
+  'node_modules/@picoaide/dsh-connectors/lib/index.js',
+  'node_modules/@picoaide/dsh-connectors/lib/invariant.js',
+  'node_modules/@picoaide/dsh-connectors/lib/store.js',
+  'node_modules/@picoaide/dsh-connectors/lib/user-scope.js',
   // ⚠️ 下面这张表是 `completeArchiveEntries()` 搭夹具用的**本地拷贝**，真源是脚本里的
   // `REQUIRED_ASAR_EXPORTS`（已导出）。2026-09-19 之前两份没有一致性守卫，而且这里多出过一条
   // 早就删掉的 `dsh-connectors/lib/sales-easy.js`（磁盘上不存在、connectors 也没这个导出）——
@@ -122,6 +171,17 @@ function listFilesRel(dir: string, prefix = ''): string[] {
 
 /** 我方品牌 SVG(内容断言由专门的用例覆盖,其余用例只关心条目/导出逻辑)。 */
 const BRAND_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254"><rect fill="#000000"/></svg>'
+
+/**
+ * linux/x64 真实产物里 `app.asar.unpacked` 的原生条目（清单里除
+ * `@deepseek-ai/node-addon-system*` 之外的全部）。
+ *
+ * 那一族由"架构感知的原生家族"用例按需摆布（x64 / arm64 / 缺失），这里只提供
+ * 其余家族的"齐备"基线 —— G-1 的家族适用性断言上线后，fixture 再写"精简树"
+ * 会被 `@img/sharp-linux-x64` 这类家族当场打红（判据在正常工作）。
+ */
+const LINUX_X64_NATIVE_FILES = REQUIRED_UNPACKED_RUNTIME_ENTRIES
+  .filter(entry => !entry.startsWith('node_modules/@deepseek-ai/node-addon-system-'))
 
 /**
  * `verifyPackagedRuntime` 的品牌内容读缝打桩:默认返回我方 SVG。
@@ -341,6 +401,539 @@ describe('上游补丁目标的静态 import 必须在打包必需清单里（G-
   })
 })
 
+describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）', () => {
+  // 审计实测（J-test-efficacy §G-2）：从清单里删掉一条 = **同时删掉那条断言**
+  // （`it.each(REQUIRED_PACKAGED_RUNTIME_ENTRIES)` 是自同义反复：删条目就少一个用例）。
+  // 实测静默的删条目：`…/dsh-web-frontend/dist/index.html`、`build/app-icon-mac.png`、
+  // `lib/preload/renderer-error.cjs` —— 三条都落在"文件确实随包、缺了会静默坏"的面上
+  // （`lib/preload/renderer-error.cjs` 正是清单注释里写着"必须在打包断言里逐条钉住"
+  // 的那一条，而它当时没有任何独立判据）。
+  //
+  // 这里的 oracle **不看清单**：从仓库里真实应当随包的东西（构建产物目录 + 打包
+  // 排除规则）推导应有集合，再断言清单覆盖它；反向断言清单里没有死条目。
+  // 与既有的三条 oracle（@picoaide 子路径 / 补丁目标 import / memory-evolve skills）
+  // 同一形态，只把覆盖面推广到可枚举的产物目录。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const manifest = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+
+  /**
+   * 「整个目录随包」族：目录里每个真实文件都必须在清单里。
+   *
+   * `exclude` 的每一条都要写明理由（排除 = 一次显式决定）；`files.length > 0` 是
+   * 前置断言 —— 目录缺失/为空时判据会空转，而本仓规则是**文件缺席即红，不是 skip**
+   * （构建未跑时这里会红，提示先跑 build）。
+   */
+  const SHIPPED_DIRECTORY_FAMILIES = [
+    {
+      label: 'build/（brand-prepare 的构建期产物）',
+      dir: 'build',
+      exclude: [/^channel\.json$/u],
+      why: 'channel.json 只有渠道构建产出，官方构建里不存在；它的随包断言在 verify-channel-package.ts',
+    },
+    {
+      label: 'lib/preload/（沙箱预加载脚本）',
+      dir: 'lib/preload',
+      exclude: [/\.map$/u],
+      why: 'sourcemap 由 FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS 明令禁止随包',
+    },
+    {
+      label: '@deepseek-ai/dsh-web-frontend/dist（稳定名入口文档）',
+      dir: 'node_modules/@deepseek-ai/dsh-web-frontend/dist',
+      exclude: [/^assets\//u, /\.map$/u, /^preview/u],
+      why: 'assets/ 是内容哈希 chunk（名字随上游每次升级变化，由产物驱动的 import 判据覆盖）；preview* 被上游自己的 files 排除',
+    },
+  ] as const
+
+  it.each(SHIPPED_DIRECTORY_FAMILIES)(
+    '$label：目录里每个真实文件都必须在清单里，清单里每条也必须真实存在',
+    (family) => {
+      const files = listFilesRel(join(desktopRoot, family.dir))
+        .filter(rel => !family.exclude.some(pattern => pattern.test(rel)))
+      expect(
+        files.length,
+        `${family.dir} 里没有可枚举文件（构建未跑？）—— 判据不能空转`,
+      ).toBeGreaterThan(0)
+      const prefix = `${family.dir}/`
+      const missing = files.filter(rel => !manifest.has(`${prefix}${rel}`))
+      expect(
+        missing,
+        `这些文件真的随包（${family.dir}），但打包必需清单里没有：\n  ${missing.join('\n  ')}\n`
+        + `（排除规则：${family.exclude.map(String).join(', ')}；理由：${family.why}）`,
+      ).toEqual([])
+      const dead = [...manifest]
+        .filter(entry => entry.startsWith(prefix))
+        .filter(entry => !existsSync(join(desktopRoot, entry)))
+      expect(
+        dead,
+        `清单里有 ${family.dir} 下的死条目（文件已不存在）：\n  ${dead.join('\n  ')}`,
+      ).toEqual([])
+    },
+  )
+
+  it('清单条数棘轮：批量删条目必须是有意识的决定（下限只随新增条目上调）', () => {
+    // 细粒度覆盖由上面的目录 oracle 与另外三条来源 oracle 负责；这条只兜"整段
+    // 注释掉/删除"这种批量形态（例如把 build/ 那一段整体删掉而各处仍绿）。
+    expect(
+      REQUIRED_PACKAGED_RUNTIME_ENTRIES.length,
+      `清单当前 ${REQUIRED_PACKAGED_RUNTIME_ENTRIES.length} 条（下限 84）`,
+    ).toBeGreaterThanOrEqual(84)
+  })
+})
+
+describe('打包必需清单的 build/* 条目必须在 build.files 正向清单里（2026-09-23 补）', () => {
+  // 事故（CI 必红：`Desktop (macOS)` 与 `Desktop (Windows installer)`）：
+  //   `packaged runtime at …/Resources/app.asar is missing required ASAR entries: build/assistedMessages.yml`
+  //
+  // 机制（读 `packages/host/desktop/node_modules/app-builder-lib/out/fileMatcher.js` 的
+  // `getFileMatchers` / `getMainFileMatchers`，以及 `out/util/config/config.js` 的 `normalizeFiles`
+  // 后确认；本机 `scripts/package-dir.mjs --no-prebuild --no-gates` 实打的 Linux 产物与
+  // `dist/builder-debug.yml` 复现了同一形态）：
+  //   * 应用根的匹配器来自 `getFileMatchers(config, "files", …, customBuildOptions: platformSpecificBuildOptions)`：
+  //     全局 `files` 被 `normalizeFiles` 收成**一个 file-set 条目** ⇒ 进 `fileMatchers` 数组；
+  //     平台专属 `files`（`build.linux.files`，40 条**全是** `!` 忽略项）以普通字符串加进
+  //     `defaultMatcher` ⇒ 末尾的 `fileMatchers.unshift(defaultMatcher)` 把它顶成 `matchers[0]`；
+  //   * `getMainFileMatchers` 只对 `matchers[0]` 补默认模式，且**只在**
+  //     `isEmpty() || containsOnlyIgnore()` 时才补 `**/*`。
+  //   ⇒ Linux 的有效应用根匹配器 = 那份全 `!` 的平台清单 ⇒ 补 `**/*` ⇒ 整个 `build/` 进包；
+  //     macOS / Windows（`build.mac` / `build.win` 都没有 `files` 键）⇒ 有效匹配器 = 全局
+  //     正向清单 ⇒ **清单里没列的 `build/assistedMessages.yml` 被静默丢掉**，直到 afterPack
+  //     的必需项断言才在打包末尾报错（`files` 是构建输入，报错点离病根很远）。
+  //
+  // 所以「Linux 打包绿」**掩盖**了 mac/win 的清单缺项。这条判据不看产物、不跑打包，
+  // 只对拍两张表：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 里每个 `build/` 条目，都必须被
+  // `package.json` 的 `build.files` 里至少一个**正向**（非 `!`）模式匹配。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  /**
+   * 最小 glob→RegExp（不引依赖 —— 本仓不为一条判据新增包）。
+   *
+   * 支持 electron-builder/minimatch 在本清单里会用到的子集：`**` 跨 `/`（`a/**\/b` 也匹配
+   * `a/b`）、`*` 不跨 `/`、`?` 单字符、`{a,b}` 展开一层。**故意不实现**扩展语法
+   * （`!()`/`+()`/`@()` 等）：真出现未支持的写法时匹配会失败 ⇒ 判据变红并要求人来看，
+   * 而不是静默放行（与 `check-no-real-domains.mjs` 的"未登记即失败"同一取向）。
+   * @param pattern - `build.files` 里的一条正向模式。
+   * @returns 整串匹配（`^…$`）用的正则。
+   */
+  function globToRegExp(pattern: string): RegExp {
+    const expandBraces = (value: string): string[] => {
+      const found = /\{([^{}]*)\}/u.exec(value)
+      if (found === null) return [value]
+      const [whole, body = ''] = found
+      return body.split(',').flatMap(part => expandBraces(value.replace(whole, part)))
+    }
+    const alternatives = expandBraces(pattern).map(one => {
+      let source = ''
+      for (let index = 0; index < one.length; index += 1) {
+        const char = one.charAt(index)
+        const next = one.charAt(index + 1)
+        if (char === '*') {
+          if (next === '*' && one.charAt(index + 2) === '/') {
+            // `**/` 允许零段：`build/**/x.yml` 要能匹配 `build/x.yml`。
+            source += '(?:.*/)?'
+            index += 2
+          } else if (next === '*') {
+            source += '.*'
+            index += 1
+          } else {
+            source += '[^/]*'
+          }
+          continue
+        }
+        if (char === '?') {
+          source += '[^/]'
+          continue
+        }
+        source += char.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+      }
+      return source
+    })
+    return new RegExp(`^(?:${alternatives.join('|')})$`, 'u')
+  }
+
+  it('每个 build/ 必需项都被正向模式覆盖（缺一条 = macOS/Windows 静默丢件）', () => {
+    const manifest = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8')) as {
+      build?: { files?: string[] }
+    }
+    const patterns = manifest.build?.files ?? []
+    // 前置断言：下面任一条为假，判据都会空转（本仓规则：缺席即红，不是 skip）。
+    expect(patterns.length, 'build.files 读不出来 —— 判据会空转').toBeGreaterThan(0)
+    const positive = patterns.filter(pattern => !pattern.startsWith('!'))
+    expect(
+      positive.length,
+      'build.files 里一条正向模式都没有（应用根会落回 `**/*`，Linux 那层掩盖效应会回来）',
+    ).toBeGreaterThan(0)
+    const required = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => entry.startsWith('build/'))
+    expect(required.length, '必需清单里没有 build/ 条目 —— 判据会空转').toBeGreaterThan(0)
+
+    // 判据自证：转换器必须能**区分**。若它退化成恒真，下面"缺一条即红"就变成"怎么删都绿"
+    // —— 那正是这次事故的形态（Linux 绿、mac/win 红）。
+    expect(globToRegExp('build/tray-icon*.png').test('build/tray-icon-blue.png')).toBe(true)
+    expect(globToRegExp('build/tray-icon*.png').test('build/assistedMessages.yml')).toBe(false)
+    expect(globToRegExp('build/**').test('build/nested/deep.yml')).toBe(true)
+    expect(globToRegExp('build/*').test('build/nested/deep.yml')).toBe(false)
+
+    const unmatched = required.filter(
+      entry => !positive.some(pattern => globToRegExp(pattern).test(entry)),
+    )
+    expect(
+      unmatched,
+      '这些必需项没有被 build.files 的正向清单覆盖，macOS/Windows 打包会静默丢掉它们：\n'
+      + `  ${unmatched.join('\n  ')}\n`
+      + '（Linux 因为 build.linux.files 全是 `!` 而落回 `**/*`，从打包结果里看不出这个问题）',
+    ).toEqual([])
+  })
+})
+
+describe('反向 oracle：清单必须覆盖产物（第三轮审计 P-1，2026-09-23 补）', () => {
+  // 审计实测（P-1）：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是"必需项"判据的**唯一来源**，
+  // 从清单里删掉一条 = 同时删掉那条断言 —— 16 次单条 `@picoaide/*` 删除里 9 次让
+  // 这个 spec 78/78 全绿，其中 8 条没有任何别的表覆盖。
+  //
+  // 既有的三条 oracle 为什么没拦住：
+  //   * `spec:206`（desktop `lib/*.js` 的子路径 import）只看**桌面自身**的产物，
+  //     看不见插件包之间的 import（`wasm-apps-host → dsh-browser/surface`）；
+  //   * G-9 那张只看上游补丁目标的子路径 import；
+  //   * G-2 的目录 oracle 只能枚举"名字稳定的目录"，而 `node_modules/@picoaide/<pkg>/lib`
+  //     里有内容哈希命名的 chunk ⇒ 结构上不能要求"目录里每个文件都在清单里"；
+  //   * 2026-09-16 的 vendored 技能 oracle 只枚举 `dsh-memory-evolve/skills/**` 一个源目录。
+  // 所以这里换判据：不问目录里有什么，问**产物真实需要什么**（包自己声明的入口面 +
+  // 产物里真实的 `@picoaide/*` specifier），再与清单对拍，最后叠加每包计数棘轮。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  it('真产物：派生面非空、且当前清单完整覆盖它（基线绿）', () => {
+    const census = assertRequiredEntriesCoverWorkspaceSurface()
+    // 前置断言：判据不能空转（产物没构建时这里会是 0，而"跳过"不是本仓的选项）。
+    expect(census.packages.length, '没有扫到任何自有 workspace 包，判据会空转').toBeGreaterThanOrEqual(6)
+    expect(census.resolvedSpecifiers, '没有从产物里解析出任何 @picoaide/* specifier').toBeGreaterThan(0)
+    expect(census.required.length).toBeGreaterThanOrEqual(census.packages.length)
+    // 每包都必须有棘轮登记（新增自有插件包不登记 ⇒ 上面那条 throw）。
+    expect([...census.perPackage.keys()].sort()).toEqual(
+      REQUIRED_WORKSPACE_PACKAGE_COVERAGE.map(floor => floor.package).sort(),
+    )
+  })
+
+  it.each([
+    ['包自己声明的 `exports["."]`/`main` 入口', 'node_modules/@picoaide/dsh-foot-menu/lib/index.js'],
+    ['`dsh.client` ⇒ `exports["./client"]`（客户端 bundle）', 'node_modules/@picoaide/dsh-foot-menu/lib/client.js'],
+    ['`dsh.bundle.patch`（profile 组装期读取）', 'node_modules/@picoaide/dsh-foot-menu/cordis.patch.yml'],
+    ['包 manifest（`createRequire().resolve` 落点）', 'node_modules/@picoaide/dsh-foot-menu/package.json'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-browser/lib/surface.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-browser/lib/guard.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-host-locale/lib/loopback.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-connectors/lib/store.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-connectors/lib/user-scope.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js'],
+    ['`exports["./invariant"]`（包自有不变量伴生入口）', 'node_modules/@picoaide/dsh-account-card/lib/invariant.js'],
+    ['`exports["./invariant"]`（包自有不变量伴生入口）', 'node_modules/@picoaide/dsh-cron/lib/invariant.js'],
+  ])('%s：删掉 %s 后每包棘轮必须红', (_reason, entry) => {
+    const without = effectivePackagedRuntimeEntries().filter(candidate => candidate !== entry)
+    expect(without, `${entry} 本来就不在生效清单里，这条用例失去意义`).not.toContain(entry)
+    expect(
+      () => assertWorkspacePackageCoverage(without),
+      `删掉 ${entry} 之后棘轮仍然放行 —— 那正是 P-1 的形态`,
+    ).toThrow(/覆盖计数低于棘轮下限/u)
+  })
+
+  it('产物反推出的每一条：从生效清单里删掉都必须红（随树状态自适应，不写死清单）', () => {
+    // 与上一条互补：上一条走"清单驱动"的棘轮（构建无关），这一条走"产物驱动"的
+    // 覆盖判据 —— 派生出来的每一条都真的参与判定，而不是只在错误消息里出现过。
+    const census = collectWorkspaceSurface(desktopRoot)
+    expect(census.required.length).toBeGreaterThan(0)
+    for (const item of census.required) {
+      const without = effectivePackagedRuntimeEntries().filter(entry => entry !== item.entry)
+      expect(
+        () => assertRequiredEntriesCoverWorkspaceSurface(without, desktopRoot, REQUIRED_WORKSPACE_PACKAGE_COVERAGE, 1),
+        `删掉 ${item.entry} 之后覆盖判据仍然放行`,
+      ).toThrow(/产物真实需要的条目不在打包必需清单里/u)
+    }
+  })
+
+  it('第三轮审计实测的 8 条"无别表兜底"缺口逐条都不再静默', () => {
+    // 审计表里列出的 8 条（`browser/lib/surface.js`、`host-locale/lib/loopback.js`、
+    // `browser|account-card|foot-menu` 的 `lib/client.js`、`account-card|cron` 的
+    // `lib/invariant.js`）—— 这一轮它们被真实需要面反推出来了。
+    const audited = [
+      'node_modules/@picoaide/dsh-browser/lib/surface.js',
+      'node_modules/@picoaide/dsh-host-locale/lib/loopback.js',
+      'node_modules/@picoaide/dsh-browser/lib/client.js',
+      'node_modules/@picoaide/dsh-account-card/lib/client.js',
+      'node_modules/@picoaide/dsh-foot-menu/lib/client.js',
+      'node_modules/@picoaide/dsh-account-card/lib/invariant.js',
+      'node_modules/@picoaide/dsh-cron/lib/invariant.js',
+      'node_modules/@picoaide/dsh-cron/lib/client.js',
+    ]
+    const effective = new Set(effectivePackagedRuntimeEntries())
+    for (const entry of audited) expect(effective, `${entry} 不在生效清单里`).toContain(entry)
+  })
+
+  it('每包计数棘轮：基线绿，且每一个包的三个计数都恰好贴住下限（不留余量）', () => {
+    // 棘轮的全部价值在"贴住"：下限留了余量就回到 P-1（当时的全局下限 82 而清单 83 条，
+    // 删一条仍是 82 ≥ 82 ⇒ 全绿）。
+    const effective = effectivePackagedRuntimeEntries()
+    expect(() => assertWorkspacePackageCoverage(effective)).not.toThrow()
+    const flat = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+    for (const floor of REQUIRED_WORKSPACE_PACKAGE_COVERAGE) {
+      const prefix = `node_modules/@picoaide/${floor.package}/`
+      const owned = effective.filter(entry => entry.startsWith(prefix))
+      expect(owned.filter(entry => flat.has(entry)).length, `${floor.package} 扁平计数没有贴住下限`)
+        .toBe(floor.flattened)
+      expect(owned.length, `${floor.package} 生效计数没有贴住下限`).toBe(floor.effective)
+      expect(owned.filter(entry => entry.startsWith(`${prefix}lib/`)).length, `${floor.package} lib 计数没有贴住下限`)
+        .toBe(floor.library)
+    }
+    expect(effective.length).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR)
+  })
+
+  it('棘轮本身有判别力：下限高于真实条目数即红（不是恒真断言）', () => {
+    const target = REQUIRED_WORKSPACE_PACKAGE_COVERAGE.find(floor => floor.package === 'dsh-browser')!
+    const effective = effectivePackagedRuntimeEntries()
+    for (const bumped of [
+      { ...target, flattened: target.flattened + 1 },
+      { ...target, effective: target.effective + 1 },
+      { ...target, library: target.library + 1 },
+    ]) {
+      expect(() => assertWorkspacePackageCoverage(
+        effective,
+        REQUIRED_WORKSPACE_PACKAGE_COVERAGE.map(floor => (floor.package === 'dsh-browser' ? bumped : floor)),
+      )).toThrow(/覆盖计数低于棘轮下限/u)
+    }
+    // 反向对照：未上调时同一次调用是绿的（证明上面那些红的成因就是棘轮）。
+    expect(() => assertWorkspacePackageCoverage(effective)).not.toThrow()
+  })
+
+  it('合成产物夹具：声明面 + specifier 闭包 + 未登记包 + 计数棘轮四个方向都独立可判', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-surface-'))
+    const scope = join(root, 'node_modules', '@picoaide')
+    const write = (relative: string, body: string): void => {
+      mkdirSync(dirname(join(root, relative)), { recursive: true })
+      writeFileSync(join(root, relative), body)
+    }
+    write('node_modules/@picoaide/dsh-probe/package.json', JSON.stringify({
+      name: '@picoaide/dsh-probe',
+      main: 'lib/index.js',
+      exports: {
+        '.': { default: './lib/index.js' },
+        './client': { default: './lib/client.js' },
+        './invariant': { default: './lib/invariant.js' },
+        './extra': { default: './lib/extra.js' },
+      },
+      dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } },
+    }))
+    for (const rel of ['lib/index.js', 'lib/client.js', 'lib/invariant.js', 'lib/extra.js']) {
+      write(`node_modules/@picoaide/dsh-probe/${rel}`, 'export {}\n')
+    }
+    write('node_modules/@picoaide/dsh-probe/cordis.patch.yml', '- insert: []\n')
+    write('lib/main.js', 'import "@picoaide/dsh-probe/extra"\n')
+    expect(existsSync(scope)).toBe(true)
+
+    const floors = [{ package: 'dsh-probe', flattened: 0, effective: 6, library: 4 }]
+    const complete = [
+      'node_modules/@picoaide/dsh-probe/package.json',
+      'node_modules/@picoaide/dsh-probe/lib/index.js',
+      'node_modules/@picoaide/dsh-probe/lib/client.js',
+      'node_modules/@picoaide/dsh-probe/lib/invariant.js',
+      'node_modules/@picoaide/dsh-probe/cordis.patch.yml',
+      'node_modules/@picoaide/dsh-probe/lib/extra.js',
+    ]
+    const census = assertRequiredEntriesCoverWorkspaceSurface(complete, root, floors, 1)
+    expect(census.required.map(item => item.entry).sort()).toEqual([...complete].sort())
+    expect(census.resolvedSpecifiers).toBe(1)
+
+    // ① 声明面缺一条（客户端 bundle）⇒ 红。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete.filter(entry => !entry.endsWith('/lib/client.js')), root, floors, 1,
+    )).toThrow(/exports\["\.\/client"\]/u)
+    // ② specifier 闭包缺一条（`lib/main.js` 引的 extra）⇒ 红。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete.filter(entry => !entry.endsWith('/lib/extra.js')), root, floors, 1,
+    )).toThrow(/dsh-probe\/extra/u)
+    // ③ 随包但没登记棘轮的包 ⇒ 红（新增自有插件不许静默）。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(complete, root, [], 1))
+      .toThrow(/没在 REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里登记下限/u)
+    // ④ 棘轮下限高于真实条目数 ⇒ 红（棘轮是清单驱动、与产物无关的那一半）。
+    expect(() => assertWorkspacePackageCoverage(
+      complete, [{ package: 'dsh-probe', flattened: 1, effective: 6, library: 4 }],
+    )).toThrow(/扁平清单 0 < 下限 1/u)
+    // ⑤ 表里有产物中不存在的包 ⇒ 红（包删了要同步这张表）。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete, root, [...floors, { package: 'dsh-gone', flattened: 0, effective: 0, library: 0 }], 1,
+    )).toThrow(/产物中不存在的包/u)
+  })
+
+  it('产物目录缺失即红，不静默跳过（真源是产物，不是清单）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-surface-empty-'))
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface([], root))
+      .toThrow(/workspace 依赖未安装或未构建/u)
+    mkdirSync(join(root, 'node_modules', '@picoaide'), { recursive: true })
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface([], root))
+      .toThrow(/没有任何自带 package.json 的包/u)
+  })
+
+  it('生效清单 = 三张表的并集（覆盖判据不能只看扁平表）', () => {
+    const effective = effectivePackagedRuntimeEntries()
+    expect(new Set(effective).size).toBe(effective.length)
+    for (const entry of [...REQUIRED_PACKAGED_RUNTIME_ENTRIES, ...REQUIRED_PROFILE_PATCH_ANCHORS]) {
+      expect(effective).toContain(entry)
+    }
+    for (const entry of REQUIRED_ASAR_EXPORTS) expect(effective).toContain(entry.archivePath)
+  })
+
+  it('接线守卫：afterPack 的归档分支必须真的调用反向 oracle', () => {
+    // 与 `spec:1545` 同形：辅助函数测得到 ≠ 被调用（这条本项目实测踩过）。
+    const source = readFileSync(
+      join(desktopRoot, 'scripts', 'verify-packaged-runtime.ts'), 'utf8',
+    )
+    const gate = source.slice(
+      source.indexOf('function tryListArchive('),
+      source.indexOf('function verifyUnpackedPackageResolution('),
+    )
+    expect(gate, 'tryListArchive 里没有调用反向 oracle').toContain('assertRequiredEntriesCoverWorkspaceSurface()')
+    expect(gate, '反向 oracle 必须排在 profile 锚点断言之前（诊断顺序）').toContain(
+      'assertRequiredEntriesCoverWorkspaceSurface()',
+    )
+  })
+})
+
+describe('afterPack 的生产接线不可空转（第四轮审计 R4-A-9，2026-09-23 补）', () => {
+  // 缺口（R4-A-9，复现记录见 temp/round4-2026-09-23/R4-A/subreport-B-pack.md §R4-A-B1）：
+  // electron-builder 按**具名导出**解析 afterPack 并只用一个参数调用它
+  // （`app-builder-lib/out/util/resolve.js` 的 resolveFunction(..., 'afterPack', ...) +
+  // `packager.js` 的 emit('afterPack', context)）。旧实现把四个接缝写成**缺省参数值**
+  // （`verify = verifyPackagedRuntime` / `smoke = smokePackagedDiagnosticWorker` /
+  // `flockSmoke = smokePackagedFlockLock` / `errorReportingSmoke = smokePackagedErrorReporting`）
+  // ⇒ 缺省值在生产上就是唯一会跑的代码，而**唯一**行使 afterPack 的两条用例各自注入了替身
+  // （本文件 :742 旧写法、:1761 旧写法），四个缺省值逐个改成 `() => {}` —— 含把整个静态
+  // 门禁 `verify` 换成空转 —— 后本文件仍然 109/109 全绿。也就是说"闸门被换成空转"当时
+  // 没有任何判据。
+  //
+  // 现在生产路径只有一张表（`AFTER_PACK_SEAMS`）+ 单参数入口 `afterPack(context)`。
+  // 下面六条判据全部打在**生产接线**上（不是文本匹配）：
+  //   ① 入口不带任何注入：合成产物必须被真 verify 拒，且拒的理由是静态门禁自己那条；
+  //   ②③④⑤⑥ 逐个接缝：把该步从**生产表里取出**（AFTER_PACK_SEAMS[x]）当唯一真实现跑，
+  //        断言它真的拒了坏产物、点名自己那一步，且前面几步确实先跑过；
+  //   ⑦ 生产表五项必须逐一是真实现（表项被换成空函数即红）。
+  const seamRecorders = (
+    calls: string[],
+    real: keyof AfterPackSeams,
+  ): AfterPackSeams => ({
+    verify: () => { calls.push('verify') },
+    smoke: async () => { calls.push('smoke') },
+    flockSmoke: () => { calls.push('flock') },
+    errorReportingSmoke: () => { calls.push('error-reporting') },
+    asarBigintSmoke: () => { calls.push('asar-bigint') },
+    // 被测那一步必须来自生产表：换成替身就失去"这一步真的接在生产上"的证明。
+    [real]: AFTER_PACK_SEAMS[real],
+  })
+
+  /**
+   * `smokePackagedDiagnosticWorker` 在"归档与物理树都缺 worker"这条早期失败路径上
+   * 没有 `finally`，会留下一个临时目录；用例把它清掉，避免复跑积累。
+   */
+  const cleanupDiagnosticSmokeDirs = (before: ReadonlySet<string>): void => {
+    for (const name of readdirSync(tmpdir())) {
+      if (name.startsWith('dsh-packaged-diagnostics-') && !before.has(name)) {
+        rmSync(join(tmpdir(), name), { recursive: true, force: true })
+      }
+    }
+  }
+
+  it('生产入口 afterPack(context) 不带注入：静态门禁必须真的拒掉坏产物', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-entry-'))
+    // 布局开关必须回到"要求 app.asar"，否则真 verify 会走物理分支（另一条判据覆盖它）。
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(afterPack(context(appOutDir, 'linux')))
+        .rejects.toThrow(/packaged runtime has no app\.asar at[\s\S]*PACKAGED_RUNTIME_LAYOUT=physical/u)
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('静态门禁（verify）从生产表取出后仍然拒包，且它是第一步', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-verify-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'verify'),
+      )).rejects.toThrow(/has no app\.asar at/u)
+      // verify 若变成空转，序列会继续走后面的记录器 ⇒ 上面的 rejects 直接失败。
+      expect(calls).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('诊断 Worker 冒烟（smoke）从生产表取出后仍然拒包，且排在静态门禁之后', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-smoke-'))
+    const calls: string[] = []
+    const before = new Set(readdirSync(tmpdir()))
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'smoke'),
+      )).rejects.toThrow(/smoke: worker missing from asar and physical tree/u)
+      expect(calls).toEqual(['verify'])
+    } finally {
+      vi.unstubAllEnvs()
+      cleanupDiagnosticSmokeDirs(before)
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('flock 冒烟（flockSmoke）从生产表取出后仍然拒包，且排在 Worker 冒烟之后', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-flock-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'flockSmoke'),
+      )).rejects.toThrow(/packaged flock smoke cannot find the packaged launcher/u)
+      expect(calls).toEqual(['verify', 'smoke'])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('错误上报冒烟（errorReportingSmoke）从生产表取出后仍然拒包，且它是最后一步', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-sentry-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'errorReportingSmoke'),
+      )).rejects.toThrow(/packaged error-reporting smoke cannot find the packaged launcher/u)
+      expect(calls).toEqual(['verify', 'smoke', 'flock'])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('生产接线表 AFTER_PACK_SEAMS 的五项必须逐一是真实现', () => {
+    // 五项都要钉：2026-09-23 合并 origin/master 后新增了第五项 `asarBigintSmoke`
+    // （issue #130：Electron 43.4.0 的 app.asar fs shim 忽略 `{ bigint: true }` 会让
+    // 整类 skill provider 静默失效）。独立复审实测：漏掉这一项时把它换成 `() => {}`
+    // 后本文件 126 条全绿 ⇒ 与 R4-A-9 修掉的"可空转接缝"是同一形态（判据缺口 P1）。
+    expect(AFTER_PACK_SEAMS.verify).toBe(verifyPackagedRuntime)
+    expect(AFTER_PACK_SEAMS.smoke).toBe(smokePackagedDiagnosticWorker)
+    expect(AFTER_PACK_SEAMS.flockSmoke).toBe(smokePackagedFlockLock)
+    expect(AFTER_PACK_SEAMS.errorReportingSmoke).toBe(smokePackagedErrorReporting)
+    expect(AFTER_PACK_SEAMS.asarBigintSmoke).toBe(smokePackagedAsarBigintSemantics)
+    // 生产入口只声明一个参数（electron-builder 也只传一个）：arity 回到 >1 说明
+    // 又出现了"缺省值即生产接线"的形态（真正的判据是上面那条 spy 用例，见 :742）。
+    expect(afterPack.length).toBe(1)
+  })
+})
+
 describe('packaged desktop runtime verification', () => {
   it('fails the diagnostic Worker smoke when its archive omits the crash dump', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
@@ -400,24 +993,34 @@ describe('packaged desktop runtime verification', () => {
     const runtimeContext = context('/build', 'win32')
     const calls: string[] = []
 
-    // The production afterPack resolves the worker source root from the real
-    // filesystem: no app.asar in this fixture, so the physical app root is used.
-    await afterPack(
-      runtimeContext,
-      () => { calls.push('static') },
-      async (workerRoot) => { calls.push(workerRoot) },
-      () => { calls.push('flock') },
-      () => { calls.push('error-reporting') },
-      () => { calls.push('asar-bigint') },
-    )
+    // R4-A-9：这条用例现在**只传 context**（生产入口的契约就是单参数），四项全部从
+    // 生产表 `AFTER_PACK_SEAMS` 上临时 spy 出来 —— 也就是说它同时证明「afterPack 确实
+    // 走这张表、且顺序是 static → smoke → flock → error-reporting」。旧写法是给
+    // afterPack 传四个位置参数，而那份"可注入的缺省实现"正是审计记录的空转形态：
+    // 把缺省值换成空函数后这条用例照样绿（它压根没碰缺省值）。
+    const spies = [
+      vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => { calls.push('static') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async (workerRoot) => { calls.push(workerRoot) }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => { calls.push('flock') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke').mockImplementation(() => { calls.push('error-reporting') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'asarBigintSmoke').mockImplementation(() => { calls.push('asar-bigint') }),
+    ]
 
-    expect(calls).toEqual([
-      'static',
-      expect.stringMatching(/resources[\\/]app$/u),
-      'flock',
-      'error-reporting',
-      'asar-bigint',
-    ])
+    try {
+      // The production afterPack resolves the worker source root from the real
+      // filesystem: no app.asar in this fixture, so the physical app root is used.
+      await afterPack(runtimeContext)
+
+      expect(calls).toEqual([
+        'static',
+        expect.stringMatching(/resources[\\/]app$/u),
+        'flock',
+        'error-reporting',
+        'asar-bigint',
+      ])
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
   })
 
   it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
@@ -514,7 +1117,10 @@ describe('packaged desktop runtime verification', () => {
       const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
       mkdirSync(unpackedRoot, { recursive: true })
       // 至少一条必需原生条目存在,否则会先被"no native unpacked entries"拦下。
-      writeUnpacked(unpackedRoot, ['node_modules/node-pty/prebuilds/linux-x64/pty.node', ...files])
+      // G-1（2026-09-23）：还要**除被测家族外全都齐** —— 家族适用性断言上线后，
+      // 只写一条 pty.node 的"精简树"会被 @img/sharp-linux-x64 等家族当场打红，
+      // 那是判据在正常工作，不是 fixture 该省的事。
+      writeUnpacked(unpackedRoot, [...LINUX_X64_NATIVE_FILES, ...files])
       return runtimeContext
     }
 
@@ -564,6 +1170,160 @@ describe('packaged desktop runtime verification', () => {
       ])
       expect(() => verifyWithBrandStub(missing, () => completeArchiveEntries()))
         .toThrow(/missing required native files.*node-addon-system-darwin-arm64\/bin\/system\.node/su)
+    })
+  })
+
+  describe('按平台存在的原生家族：整包缺失必须红（G-1，2026-09-23 补）', () => {
+    // 审计实测（J-test-efficacy §G-1）：旧判据是「**整包目录不存在** ⇒ 这一条不算
+    // 缺失」，于是整包删掉 `@img/sharp-linux-x64` / `@koromix/koffi-linux-x64` /
+    // `node-pty` / `@vscode/ripgrep-linux-x64` /
+    // `node-addon-require-builtin-linux-x64-gnu` 之后 afterPack **全部 PASS**，
+    // 唯一会发现它的时机是运行期的 dlopen / execFile 失败。
+    // 这里用一棵"逐路径回答存在性"的假文件系统**精确复现"整包目录被删"**：
+    // 删除 = 该包目录下所有条目一起消失（目录本身也消失），完全等价于现场形态。
+    /** fake 路径下的 unpacked 根（linux/win32 布局是 `<appOutDir>/resources/...`）。 */
+    const FAKE_ROOT = resolvePackagedUnpackedRoot(context('/build', 'linux', 1))
+    const ALL_UNPACKED_ENTRIES = [
+      ...REQUIRED_UNPACKED_RUNTIME_ENTRIES,
+      ...REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
+    ]
+
+    /** 以条目集合为真源的 FileProbe（root = 该平台的 app.asar.unpacked）：文件存在、其所有祖先目录也存在。 */
+    function treeProbe(root: string, tree: ReadonlySet<string>): FileProbe {
+      const files = [...tree]
+      return (filename: string): boolean => {
+        const normalized = filename.replaceAll('\\', '/')
+        if (normalized === root) return true
+        const prefix = `${root}/`
+        if (!normalized.startsWith(prefix)) return false
+        const rel = normalized.slice(prefix.length)
+        return tree.has(rel) || files.some(entry => entry.startsWith(`${rel}/`))
+      }
+    }
+
+    /** 删掉整个包目录（= 现场 `rm -rf node_modules/<pkg>`）后剩下的树。 */
+    function withoutPackage(entries: readonly string[], packageDir: string): Set<string> {
+      return new Set(entries.filter(entry => entry !== packageDir && !entry.startsWith(`${packageDir}/`)))
+    }
+
+    function expectPass(platform: string, arch: number, entries: readonly string[]): void {
+      expect(() => verifyWithBrandStub(
+        context('/build', platform, arch),
+        () => completeArchiveEntries(),
+        treeProbe(resolvePackagedUnpackedRoot(context('/build', platform, arch)), new Set(entries)),
+      )).not.toThrow()
+    }
+
+    it('家族表与清单逐条对齐（无未分类条目、无死条目）', () => {
+      // 这条是家族表自己的 oracle：删掉一行家族（= 悄悄解除一族断言）会被下面
+      // 两个方向同时打红 —— 那些条目变成"未分类"，而它也不再被任何用例覆盖。
+      const classified = new Set<string>()
+      for (const family of NATIVE_PLATFORM_FAMILIES) {
+        expect(family.entries.length, `${family.id} 没有任何条目`).toBeGreaterThan(0)
+        expect(family.purpose.length, `${family.id} 没写清承载什么`).toBeGreaterThan(0)
+        for (const entry of family.entries) {
+          expect(classified.has(entry), `${entry} 被两个家族重复登记`).toBe(false)
+          classified.add(entry)
+        }
+      }
+      for (const [entry, owner] of NATIVE_FAMILY_EXEMPT_ENTRIES) {
+        expect(owner.length, `${entry} 的豁免没写负责方`).toBeGreaterThan(0)
+        expect(classified.has(entry), `${entry} 既在家族表里又被豁免`).toBe(false)
+        classified.add(entry)
+      }
+      const manifest = new Set<string>(ALL_UNPACKED_ENTRIES)
+      expect(
+        ALL_UNPACKED_ENTRIES.filter(entry => !classified.has(entry)),
+        '这些原生必需条目没有被任何家族/豁免项分类（新增条目必须显式决定它归谁管）',
+      ).toEqual([])
+      expect(
+        [...classified].filter(entry => !manifest.has(entry)),
+        '这些家族/豁免条目不在打包必需清单里（死条目）',
+      ).toEqual([])
+    })
+
+    it('适用性矩阵：家族只在声明的平台/架构上生效', () => {
+      const applies = (id: string, platform: string, arch?: number): boolean => {
+        const family = NATIVE_PLATFORM_FAMILIES.find(candidate => candidate.id === id)
+        expect(family, `家族表里没有 ${id}`).toBeDefined()
+        return family!.applies(platform, arch)
+      }
+      const linuxFamilies = NATIVE_PLATFORM_FAMILIES
+        .filter(family => family.id !== 'node-pty（win32-x64 prebuild）')
+        .map(family => family.id)
+      for (const id of linuxFamilies) {
+        expect(applies(id, 'linux', 1), `${id} 在 linux/x64 上应当适用`).toBe(true)
+        expect(applies(id, 'linux'), `${id} 在未声明 arch 的 linux 上应当适用（历史形态 = x64）`).toBe(true)
+        expect(applies(id, 'linux', 3), `${id} 在 linux/arm64 上不适用（本仓不构建该目标）`).toBe(false)
+        expect(applies(id, 'win32', 1), `${id} 在 win32 上不适用`).toBe(false)
+        expect(applies(id, 'darwin', 3), `${id} 在 darwin 上不适用`).toBe(false)
+      }
+      expect(applies('node-pty（win32-x64 prebuild）', 'win32', 1)).toBe(true)
+      expect(applies('node-pty（win32-x64 prebuild）', 'win32')).toBe(true)
+      expect(applies('node-pty（win32-x64 prebuild）', 'linux', 1)).toBe(false)
+    })
+
+    it('linux/x64 基线通过，而删掉任一原生家族的整包目录必红', () => {
+      expectPass('linux', 1, REQUIRED_UNPACKED_RUNTIME_ENTRIES)
+      // 只对**这一平台上适用**的家族提要求：win32 的 ConPTY 一族在 linux 上不适用。
+      const applicable = NATIVE_PLATFORM_FAMILIES
+        .filter(family => family.applies('linux', 1)
+          && !family.packageDir.includes('node-addon-system'))
+        .map(family => family.packageDir)
+      expect(applicable.length, 'linux/x64 上没有任何适用家族，判据会空转').toBeGreaterThan(0)
+      for (const packageDir of applicable) {
+        expect(
+          () => verifyWithBrandStub(
+            context('/build', 'linux', 1),
+            () => completeArchiveEntries(),
+            treeProbe(FAKE_ROOT, withoutPackage(REQUIRED_UNPACKED_RUNTIME_ENTRIES, packageDir)),
+          ),
+          `整包删掉 ${packageDir} 后门禁必须红（G-1 的假绿形态）`,
+        ).toThrow(/missing the .* native family/u)
+      }
+    })
+
+    it('win32/x64：删掉 linux 专属家族不红，删掉 ConPTY 一族必红', () => {
+      // 反向：平台不适用的家族缺席必须合法（否则 Windows 打包会被 linux 条目打红）。
+      for (const packageDir of [
+        'node_modules/@img/sharp-linux-x64',
+        'node_modules/@koromix/koffi-linux-x64',
+        'node_modules/node-addon-require-builtin-linux-x64-gnu',
+        'node_modules/@vscode/ripgrep-linux-x64',
+      ]) {
+        expect(
+          () => verifyWithBrandStub(
+            context('/build', 'win32', 1),
+            () => completeArchiveEntries(),
+            treeProbe(FAKE_ROOT, withoutPackage(ALL_UNPACKED_ENTRIES, packageDir)),
+          ),
+          `${packageDir} 在 win32 上不适用，缺席不该红`,
+        ).not.toThrow()
+      }
+      expect(
+        () => verifyWithBrandStub(
+          context('/build', 'win32', 1),
+          () => completeArchiveEntries(),
+          treeProbe(FAKE_ROOT, withoutPackage(ALL_UNPACKED_ENTRIES, 'node_modules/node-pty/prebuilds/win32-x64')),
+        ),
+        'win32 目标的 ConPTY 一族整包缺失必须红',
+      ).toThrow(/missing the node-pty（win32-x64 prebuild） native family/u)
+    })
+
+    it('darwin 目标不受 linux/win32 家族影响（darwin 走绝对路径断言）', () => {
+      const darwinTree = new Set<string>([
+        // 任一条必需条目在即可过"has no native unpacked entries"（G-1 的家族表里
+        // 没有 darwin 条目：darwin 的原生文件以 `resolveNativeEntry` 的**绝对路径**
+        // 进 `requiredPhysicalEntries`，本来就不受"整包不存在跳过"影响，另有
+        // verify-mac-smoke / verify-mac-release 覆盖）。
+        'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      expect(() => verifyWithBrandStub(
+        context('/build', 'darwin', 3),
+        () => completeArchiveEntries(),
+        treeProbe(resolvePackagedUnpackedRoot(context('/build', 'darwin', 3)), darwinTree),
+      )).not.toThrow()
     })
   })
 
@@ -675,10 +1435,137 @@ describe('packaged desktop runtime verification', () => {
   })
 })
 
+describe('打包布局判定：损坏的 app.asar 不得被当成物理布局（第三轮审计 P-6）', () => {
+  // 为什么要有它：`tryListArchive` 曾把**任何**异常都读作"没有 app.asar ⇒ 物理布局"，
+  // 于是"app.asar 存在但损坏/截断"会走物理分支，报出 `resources/app` 缺文件 —— 而
+  // asar 布局下那个目录**根本不存在**，错误信息指向不存在的路径、真实原因被吞掉
+  // （历史同类：asar entry offset 错乱 ⇒ Electron 报随机某个 json 的 Invalid package
+  // config）。现在：只有 ENOENT 能读作"归档不存在"，而且物理分支要显式开关。
+  afterEach(() => { vi.unstubAllEnvs() })
+
+  /**
+   * 造一个**真** asar：400 个小文件让头部 pickle 远大于 1 KiB，再截断成前 1 KiB
+   * （与审计的复现形态同构：真归档 + 截断，而不是"随手写个垃圾文件"）。
+   */
+  async function truncatedArchiveFixture(): Promise<{ appOutDir: string, archive: string, sourceDir: string }> {
+    const sourceDir = mkdtempSync(join(tmpdir(), 'dsh-asar-src-'))
+    mkdirSync(join(sourceDir, 'lib'), { recursive: true })
+    writeFileSync(join(sourceDir, 'package.json'), '{"name":"fixture"}\n')
+    for (let index = 0; index < 400; index += 1) {
+      writeFileSync(join(sourceDir, 'lib', `chunk-${String(index)}.js`), `export const x${String(index)} = ${String(index)}\n`)
+    }
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-asar-out-'))
+    const archive = join(appOutDir, 'resources', 'app.asar')
+    mkdirSync(dirname(archive), { recursive: true })
+    const { createPackage } = await import('@electron/asar')
+    await createPackage(sourceDir, archive)
+    const full = readFileSync(archive)
+    // 前置断言：头部确实比截断点长，否则这条用例会退化成"截断后仍能列举"的空转。
+    expect(full.length).toBeGreaterThan(64 * 1024)
+    writeFileSync(archive, full.subarray(0, 1024))
+    return { appOutDir, archive, sourceDir }
+  }
+
+  it('app.asar 存在但损坏：点名"存在但无法列举（可能已损坏）"，不报"缺条目"', async () => {
+    const { appOutDir, archive, sourceDir } = await truncatedArchiveFixture()
+    try {
+      // 前置判据：真 @electron/asar 对这个截断文件确实抛错（非 ENOENT）。
+      let thrown: unknown
+      try {
+        listPackage(archive, { isPack: false })
+      } catch (cause) {
+        thrown = cause
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect((thrown as NodeJS.ErrnoException).code).not.toBe('ENOENT')
+
+      const failure = (() => {
+        try {
+          verifyPackagedRuntime(context(appOutDir, 'linux'))
+          return null
+        } catch (cause) {
+          return cause as Error
+        }
+      })()
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure?.message).toMatch(/is present but cannot be listed/u)
+      expect(failure?.message).toMatch(/likely corrupt or truncated/u)
+      // 必须带上真实原因；且**绝不能**再是那条指向不存在目录的"缺条目"文案。
+      expect(failure?.message).toMatch(new RegExp((thrown as Error).message.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+      expect(failure?.message).not.toMatch(/missing required entries/u)
+      expect(failure?.message).not.toMatch(/missing required ASAR entries/u)
+    } finally {
+      rmSync(appOutDir, { recursive: true, force: true })
+      rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
+
+  it('布局开关的取值判定（真源是 packagedRuntimeLayoutIsPhysical）', () => {
+    expect(packagedRuntimeLayoutIsPhysical({})).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: '' })).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: '  ' })).toBe(false)
+    expect(packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: ' Physical ' })).toBe(true)
+    expect(() => packagedRuntimeLayoutIsPhysical({ PACKAGED_RUNTIME_LAYOUT: 'physcial' }))
+      .toThrow(/not a known layout/u)
+  })
+
+  it('注入的列举器抛非 ENOENT 错误同样不静默兜底', () => {
+    const broken: ArchiveLister = () => { throw new RangeError('Attempt to access memory outside buffer bounds') }
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), broken, () => true))
+      .toThrow(/present but cannot be listed[\s\S]*Attempt to access memory outside buffer bounds/u)
+  })
+
+  it('ENOENT（真·没有归档）默认不再退回物理布局，且错误点名显式开关', () => {
+    const missing: ArchiveLister = () => {
+      const cause: NodeJS.ErrnoException = new Error('ENOENT: no such file or directory')
+      cause.code = 'ENOENT'
+      throw cause
+    }
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, () => true))
+      .toThrow(/has no app\.asar at[\s\S]*PACKAGED_RUNTIME_LAYOUT=physical/u)
+  })
+
+  it('只有显式 PACKAGED_RUNTIME_LAYOUT=physical 才走物理分支', () => {
+    const missing: ArchiveLister = () => {
+      const cause: NodeJS.ErrnoException = new Error('ENOENT: no such file or directory')
+      cause.code = 'ENOENT'
+      throw cause
+    }
+    const appRoot = join('/build', 'resources', 'app')
+    const existsComplete: FileProbe = filename => {
+      const rel = filename.replaceAll('\\', '/')
+      return rel === appRoot
+        || REQUIRED_PACKAGED_RUNTIME_ENTRIES.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_ASAR_EXPORT_PATHS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+        || REQUIRED_PROFILE_PATCH_ANCHORS.some(entry => rel === join(appRoot, entry).replaceAll('\\', '/'))
+    }
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), missing, existsComplete)).not.toThrow()
+    // 物理分支下归档列举器根本不该被调用（开关决定布局，不由异常决定）。
+    const lister = vi.fn<ArchiveLister>(missing)
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), lister, existsComplete)).not.toThrow()
+    expect(lister).not.toHaveBeenCalled()
+  })
+
+  it('开关取值非法即 fail-loud（拼错的开关不能静默退回默认）', () => {
+    const archive: ArchiveLister = () => completeArchiveEntries()
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'Physical')
+    // 大小写不敏感：'Physical' 是合法写法。
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), archive, () => true)).not.toThrow()
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physcial')
+    expect(() => verifyWithBrandStub(context('/build', 'linux'), archive, () => true))
+      .toThrow(/PACKAGED_RUNTIME_LAYOUT="physcial" is not a known layout/u)
+  })
+})
+
 describe('packaged desktop runtime verification (physical layout, asar: false)', () => {
+  afterEach(() => { vi.unstubAllEnvs() })
+
   it('accepts a complete physical tree and rejects missing entries', () => {
     const runtimeContext = context('/build', 'linux')
     const appRoot = join('/build', 'resources', 'app')
+    // 2026-09-23 P-6：物理布局现在是**显式开关**，不再由"列举抛异常"触发。
+    vi.stubEnv('PACKAGED_RUNTIME_LAYOUT', 'physical')
     const noArchive = vi.fn<ArchiveLister>(() => {
       throw new Error('no app.asar')
     })
@@ -932,7 +1819,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       return { runtimeContext, appRoot, launcher }
     }
 
-    const successResult = { status: 0, stdout: 'FLOCK-SMOKE-OK\n', stderr: '' }
+    const successResult = { status: 0, stdout: `${ELECTRON_VERSION_LINE}FLOCK-SMOKE-OK\n`, stderr: '' }
 
     it('resolves the packaged launcher per platform', () => {
       expect(resolvePackagedLauncherCandidates({
@@ -996,10 +1883,45 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(script).toContain('@deepseek-ai/node-addon-system/flock')
         expect(script).toContain('tryLockExclusive')
         expect(script).toContain('FLOCK-SMOKE-OK')
+        // P-5:脚本必须报出它实际跑的 Electron（宿主据此断言版本）。
+        expect(script).toContain(`${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron)`)
         return successResult
       })
       expect(() => smokePackagedFlockLock(fixture.runtimeContext, launch)).not.toThrow()
       expect(launch).toHaveBeenCalledOnce()
+    })
+
+    it('fails when the packaged runtime is not the pinned Electron (P-5)', () => {
+      // 清单里的 6 处 electron pin 是**声明**；这条判据看的是产物实际跑的版本。
+      // 变异验证：把声明值或冒烟输出改掉任一侧，本用例必红。
+      const fixture = flockFixture('linux')
+      const other: FlockSmokeLauncher = () => ({
+        status: 0,
+        stdout: `${PACKAGED_ELECTRON_VERSION_MARKER}43.4.0\nFLOCK-SMOKE-OK\n`,
+        stderr: '',
+      })
+      expect(() => smokePackagedFlockLock(fixture.runtimeContext, other))
+        .toThrow(new RegExp(`ran on Electron 43\\.4\\.0 while package\\.json pins devDependencies\\.electron ${declaredElectronVersion()}`, 'u'))
+
+      const missing: FlockSmokeLauncher = () => ({ status: 0, stdout: 'FLOCK-SMOKE-OK\n', stderr: '' })
+      expect(() => smokePackagedFlockLock(fixture.runtimeContext, missing))
+        .toThrow(/did not report ELECTRON-VERSION:<version>/u)
+    })
+
+    it('pins an exact Electron version to compare against (P-5)', () => {
+      const declared = declaredElectronVersion()
+      expect(declared).toMatch(/^\d+\.\d+\.\d+/u)
+      const manifestPath = fileURLToPath(new URL('../package.json', import.meta.url))
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        devDependencies?: Record<string, string>
+      }
+      expect(declared).toBe(manifest.devDependencies?.electron)
+      // 真跑过的证据：安装树里那个 Electron 二进制**自己**报出的版本就是这一份
+      // （冒烟用的是同一个二进制、同一种 as-node 模式，见上面的 e2e 用例）。
+      expect(execFileSync(resolveElectronBinary(), ['-p', 'process.versions.electron'], {
+        encoding: 'utf8',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      }).trim()).toBe(declared)
     })
 
     it('fails loud with the captured output when the launcher exits non-zero', () => {
@@ -1041,15 +1963,21 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
     it.skipIf(process.platform === 'win32')(
       'takes a real lock with the embedded script against the installed tree',
       () => {
-        // 端到端:默认 launcher + 真脚本 + 真 flock 绑定。用一个 `exec node "$@"`
-        // 的壳脚本冒充打包版 Electron(Electron 的 as-node 模式就是 node),app 根
-        // 指向装好的 desktop 依赖树,于是走的是与打包态一样的 exports 解析路径。
+        // 端到端:默认 launcher + 真脚本 + 真 flock 绑定 + **真 Electron 运行时**。
+        // 壳脚本 exec 的是本仓安装的 electron 二进制（`require('electron')` 在普通
+        // Node 里返回它的路径；冒烟本来就用 ELECTRON_RUN_AS_NODE=1 跑它），app 根
+        // 指向装好的 desktop 依赖树，于是走的是与打包态一样的 exports 解析路径。
+        //
+        // P-5 起这条用例必须跑真 Electron：冒烟脚本会打一行
+        // `ELECTRON-VERSION:<process.versions.electron>`，宿主断言它等于
+        // devDependencies.electron —— 用纯 node 冒充会让版本断言（正确地）红。
+        const electronBinary = resolveElectronBinary()
         const fixture = flockFixture('linux')
         // 把打包根的 node_modules 指向真实安装树,于是脚本里的 exports 解析路径
         // (@deepseek-ai/node-addon-system/flock → 平台包 bin/*/system.node)与
         // 打包态完全一致,只是少了 asar 这一层。
         symlinkSync(join(__dirname, '..', 'node_modules'), join(fixture.appRoot, 'node_modules'), 'dir')
-        writeFileSync(fixture.launcher, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
+        writeFileSync(fixture.launcher, `#!/bin/sh\nexec ${JSON.stringify(electronBinary)} "$@"\n`)
         chmodSync(fixture.launcher, 0o755)
 
         expect(() => smokePackagedFlockLock(fixture.runtimeContext)).not.toThrow()
@@ -1086,7 +2014,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       return { runtimeContext, appRoot, launcher }
     }
 
-    const successResult = { status: 0, stdout: 'SENTRY-SMOKE-OK\n', stderr: '' }
+    const successResult = { status: 0, stdout: `${ELECTRON_VERSION_LINE}SENTRY-SMOKE-OK\n`, stderr: '' }
 
     it('fails the afterPack gate when the sentry smoke reports a missing module', async () => {
       const fixture = sentryFixture('linux')
@@ -1096,14 +2024,24 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         stderr: "Error: Cannot find module '@sentry/node'",
       }))
 
-      await expect(afterPack(
-        fixture.runtimeContext,
-        () => {},
-        async () => {},
-        () => {},
-        runtimeContext => { smokePackagedErrorReporting(runtimeContext, launch) },
-      )).rejects.toThrow(/Cannot find module '@sentry\/node'/u)
-      expect(launch).toHaveBeenCalledOnce()
+      // R4-A-9：仍然走**生产入口**（单参数 `afterPack(context)`）。前三步在生产表上
+      // 临时置为记录器（合成 fixture 过不了静态门禁），第四步把 sentry 的 launch 替身
+      // 接进真实现 —— 判据与旧写法同强，但不再依赖 afterPack 的"可注入缺省值"。
+      const spies = [
+        vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async () => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke')
+          .mockImplementation(runtimeContext => { smokePackagedErrorReporting(runtimeContext, launch) }),
+      ]
+
+      try {
+        await expect(afterPack(fixture.runtimeContext))
+          .rejects.toThrow(/Cannot find module '@sentry\/node'/u)
+        expect(launch).toHaveBeenCalledOnce()
+      } finally {
+        for (const spy of spies) spy.mockRestore()
+      }
     })
 
     it('fails when the sentry smoke exits 0 without the success marker', () => {
@@ -1125,11 +2063,28 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         expect(script).toContain('@sentry/node')
         expect(script).toContain('@picoaide/dsh-enterprise/error-reporting')
         expect(script).toContain('SENTRY-SMOKE-OK')
+        // P-5:这个冒烟三平台都跑 ⇒ 它是 Electron 版本断言的全平台落点。
+        expect(script).toContain(`${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron)`)
         return successResult
       })
       expect(() => smokePackagedErrorReporting(fixture.runtimeContext, launch)).not.toThrow()
       expect(launch).toHaveBeenCalledOnce()
       expect(PACKAGED_SENTRY_SMOKE_TIMEOUT_MS).toBe(10_000)
+    })
+
+    it('fails when the packaged runtime is not the pinned Electron (P-5)', () => {
+      const fixture = sentryFixture('linux')
+      const other: SentrySmokeLauncher = () => ({
+        status: 0,
+        stdout: `${PACKAGED_ELECTRON_VERSION_MARKER}43.4.0\nSENTRY-SMOKE-OK\n`,
+        stderr: '',
+      })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, other))
+        .toThrow(/packaged error-reporting smoke ran on Electron 43\.4\.0 while package\.json pins/u)
+
+      const missing: SentrySmokeLauncher = () => ({ status: 0, stdout: 'SENTRY-SMOKE-OK\n', stderr: '' })
+      expect(() => smokePackagedErrorReporting(fixture.runtimeContext, missing))
+        .toThrow(/packaged error-reporting smoke did not report ELECTRON-VERSION:<version>/u)
     })
 
     it('does not skip the sentry smoke on win32', () => {
@@ -1343,24 +2298,38 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
 
   it('is wired into the afterPack gate', async () => {
     // 接线守卫:辅助函数测得到 ≠ 被调用。没有这条,删掉 afterPack 里的调用时其余用例全绿。
+    // 合并后（R4-A-9 的表 + issue #130 的第五接缝）生产路径只有一张表 + 单参数入口，
+    // 所以这里 spy 生产表项、再调**生产入口**，断言第五步确实被走到。
     const fixture = asarFixture('linux')
-    const asarBigintSmoke = vi.fn<(runtimeContext: PackagedRuntimeContext) => void>()
-    await afterPack(fixture.runtimeContext, () => {}, async () => {}, () => {}, () => {}, asarBigintSmoke)
-    expect(asarBigintSmoke).toHaveBeenCalledOnce()
-    expect(asarBigintSmoke.mock.calls[0]?.[0]).toBe(fixture.runtimeContext)
+    const stub = vi.fn<(context: PackagedRuntimeContext) => void>()
+    const spies = [
+      vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async () => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke').mockImplementation(() => {}),
+      vi.spyOn(AFTER_PACK_SEAMS, 'asarBigintSmoke').mockImplementation(stub),
+    ]
+    try {
+      await afterPack(fixture.runtimeContext)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
+    expect(stub).toHaveBeenCalledOnce()
+    expect(stub.mock.calls[0]?.[0]).toBe(fixture.runtimeContext)
   })
 
   it('does not smoke anything once the static gate already rejected the package', async () => {
     const fixture = asarFixture('linux')
-    const asarBigintSmoke = vi.fn<(runtimeContext: PackagedRuntimeContext) => void>()
-    await expect(afterPack(
-      fixture.runtimeContext,
-      () => { throw new Error('static gate rejected the package') },
-      async () => {},
-      () => {},
-      () => {},
+    const asarBigintSmoke = vi.fn<(context: PackagedRuntimeContext) => void>()
+    // 显式 seams 入口（`runAfterPackSeams`）驱动"静态门禁失败 ⇒ 后续几步都不跑"。
+    await expect(runAfterPackSeams(fixture.runtimeContext, {
+      ...AFTER_PACK_SEAMS,
+      verify: () => { throw new Error('static gate rejected the package') },
+      smoke: async () => {},
+      flockSmoke: () => {},
+      errorReportingSmoke: () => {},
       asarBigintSmoke,
-    )).rejects.toThrow('static gate rejected the package')
+    })).rejects.toThrow('static gate rejected the package')
     expect(asarBigintSmoke).not.toHaveBeenCalled()
   })
 
@@ -1453,6 +2422,9 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
       ['real-env artifacts', '.real-env-shots/shot.png'],
       ['build temp directory', 'temp/squash-gzip.squashfs'],
       ['previous build output', 'dist-leakbase/linux-unpacked/x'],
+      // 2026-09-23 复审 N-1：打包**工具**的中间产物，落在随包白名单条目 `build/`
+      // 内部（整目录复制）⇒ 曾经进了 beta 与各品牌渠道的 asar。
+      ['channel builder config', 'build/channel-electron-builder.cjs'],
     ]
     for (const [label, entry] of cases) {
       // 每条单独喂：任何一条规则被删掉，对应 case 就会红。
@@ -1470,6 +2442,9 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
       'cordis.patch.yml',
       'build/tray-icon-blue.png',
       'build/web-brand/favicon.svg',
+      // 随包渠道配置**必须**在包里（渠道构建的运行期品牌/默认域名靠它）；
+      // 禁止形态表只钉打包工具生成的 `channel-electron-builder.cjs`，不是整个 build/。
+      'build/channel.json',
       'node_modules/@deepseek-ai/dsh/lib/bin.js',
       // 上游包自带的 .d.ts / README 是公开发行物，不在「自有源码」范围里。
       'node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.d.ts',

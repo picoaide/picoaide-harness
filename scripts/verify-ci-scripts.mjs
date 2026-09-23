@@ -24,20 +24,180 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
+import { extractRunBlocks } from './check-workflows.mjs'
+// step 级字段(`env:`)必须走 YAML 解析 —— 1d 的 W-8 判据问的是"这一步的 env 里有没有
+// 那个变量",子串匹配会把别处(别的 job/别的 step)的同一行算进来。
+import { parse as parseYaml } from 'yaml'
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const channelsScript = join(root, 'scripts', 'ci-channels.sh')
+const releasePolicyScript = join(root, 'scripts', 'ci-release-policy.sh')
 const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
 const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
 const transferScript = join(root, 'scripts', 'ci-channel-transfer.sh')
 const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
 const failures = []
 const scratch = []
+
+/**
+ * 假 aws(给 ci-publish-update-server.sh 的本地回归用):把 s3 / s3api 子命令落到
+ * 本地目录,并把每次调用记进日志,便于断言。
+ *
+ * 支持 `s3 cp` / `s3 ls` / `s3 rm`(保留策略路径)与发布脚本真正用到的
+ * `s3api put-object` / `s3api head-object`(2026-09-23 审计 K-01 起,上传走单请求
+ * PUT + 存储侧校验和 —— 假 aws 必须同形,否则"上传成功但对象损坏"这类场景在本地
+ * 根本构造不出来)。
+ *
+ * 故障注入(通过**子进程环境变量**给,不用改脚本文本):
+ *   FAKE_AWS_TRUNCATE_BYTES=N  put-object 只写前 N 字节(退出码仍为 0 —— 模拟
+ *                              "上传成功但字节被截断"的现场形态)
+ *   FAKE_AWS_SIZE=…            覆盖 head-object 报的 ContentLength
+ *   FAKE_AWS_SHA=…             覆盖 head-object 报的 ChecksumSHA256('None' = 没有)
+ *
+ * **按对象作用域**(2026-09-23 第六轮审计 R6-C-3):上面三条缺省作用于**所有**对象
+ * (K-01 的既有注入面,逐字不变);带上对应的 `<…>_KEY=<对象键子串>` 之后只作用于键含
+ * 该子串的对象 —— 这是"换一个对象即静默"那类缺口的判据面:此前 A–E 五条用例全部打在
+ * **先被校验的那个 zip** 上,于是 `SHA256SUMS` 与 `latest.json` 对象删掉校验之后门禁
+ * 仍 EXIT=0(而成功行照旧宣称"上传后大小/哈希完整性校验")。
+ *   FAKE_AWS_TRUNCATE_KEY=<子串>         只截断匹配的对象
+ *   FAKE_AWS_SIZE_KEY / FAKE_AWS_SHA_KEY 只覆盖匹配对象的元数据
+ *   FAKE_AWS_TRUNCATE_ON_HEAD=<子串>:<N> 第 N 次对匹配对象做 head-object **之后**把远端
+ *                              对象截断到 10 字节(本次返回值仍是真的 —— 读在前)⇒ 只有
+ *                              **之后**那次复检能看见它。用途:证明"写指针前的复检"
+ *                              确实是拦住"指针指向损坏对象"的那条判据。
+ */
+function fakeAwsScript({ store, log }) {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+log="${log}"
+store="${store}"
+record() { printf '%s\\n' "$*" >> "$log"; }
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+# 注入作用域:$1=对象键,$2=子串(空 = 对所有对象生效 ⇒ 旧注入面逐字不变)。
+inject_scope() {
+  [ -z "\${2:-}" ] && return 0
+  case "$1" in *"\${2}"*) return 0 ;; *) return 1 ;; esac
+}
+cmd="\${args[0]:-} \${args[1]:-}"
+case "$cmd" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    extra=("\${args[@]:4}")
+    record "cp $src $dst \${extra[*]:-}"
+    key="\${dst#s3://*/}"
+    if [[ "$dst" == */ ]]; then
+      # 目录目标:对象键 = 前缀 + 源文件名(与 aws s3 cp 语义一致)
+      dest="$store/\${key}$(basename "$src")"
+    else
+      dest="$store/\${key}"
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cp "$src" "$dest"
+    ;;
+  "s3api put-object")
+    key=""; body=""; sum=""
+    i=2
+    while [ "$i" -lt "\${#args[@]}" ]; do
+      case "\${args[$i]}" in
+        --key) key="\${args[$((i+1))]}"; i=$((i+2)) ;;
+        --body) body="\${args[$((i+1))]}"; i=$((i+2)) ;;
+        --checksum-sha256) sum="\${args[$((i+1))]}"; i=$((i+2)) ;;
+        *) i=$((i+1)) ;;
+      esac
+    done
+    body="\${body#fileb://}"
+    # 全参数入日志:缓存头断言(max-age / no-cache)就是靠这一行。
+    record "\${args[*]}"
+    dest="$store/$key"
+    mkdir -p "$(dirname "$dest")"
+    if [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
+      head -c "\${FAKE_AWS_TRUNCATE_BYTES}" "$body" > "$dest"
+    else
+      cp "$body" "$dest"
+    fi
+    printf '%s' "$sum" > "$dest.checksum"
+    ;;
+  "s3api head-object")
+    key=""; query=""
+    i=2
+    while [ "$i" -lt "\${#args[@]}" ]; do
+      case "\${args[$i]}" in
+        --key) key="\${args[$((i+1))]}"; i=$((i+2)) ;;
+        --query) query="\${args[$((i+1))]}"; i=$((i+2)) ;;
+        *) i=$((i+1)) ;;
+      esac
+    done
+    record "head-object $key $query"
+    target="$store/$key"
+    if [ ! -f "$target" ]; then
+      echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+      exit 254
+    fi
+    if [ "$query" = "ContentLength" ]; then
+      if [ -n "\${FAKE_AWS_SIZE:-}" ] && inject_scope "$key" "\${FAKE_AWS_SIZE_KEY:-}"; then
+        echo "\${FAKE_AWS_SIZE}"
+      else
+        stat -c%s "$target"
+      fi
+    else
+      if [ -n "\${FAKE_AWS_SHA:-}" ] && inject_scope "$key" "\${FAKE_AWS_SHA_KEY:-}"; then
+        echo "\${FAKE_AWS_SHA}"
+      elif [ -f "$target.checksum" ]; then
+        cat "$target.checksum"
+      else
+        echo "None"
+      fi
+    fi
+    # "第 N 次 head 之后把对象弄坏":本次返回值仍是真的(读在前),下一次才看得见 ⇒
+    # 只有**上传之后的那次复检**能拦住它。
+    if [ -n "\${FAKE_AWS_TRUNCATE_ON_HEAD:-}" ]; then
+      head_key="\${FAKE_AWS_TRUNCATE_ON_HEAD%%:*}"
+      head_at="\${FAKE_AWS_TRUNCATE_ON_HEAD##*:}"
+      if inject_scope "$key" "$head_key"; then
+        head_n="$(cat "$store/.headcount" 2>/dev/null || printf '0')"
+        head_n=$((head_n + 1))
+        printf '%s' "$head_n" > "$store/.headcount"
+        if [ "$head_n" -ge "$head_at" ]; then
+          head -c 10 "$target" > "$target.truncated"
+          mv "$target.truncated" "$target"
+        fi
+      fi
+    fi
+    ;;
+  "s3 ls")
+    prefix="\${args[2]}"
+    key="\${prefix#s3://*/}"
+    record "ls $prefix"
+    # 与真实 aws 同语义:前缀命中**单个对象**时打印那一行,命中"目录"时逐个列目录,
+    # 都没有时**退出码 0 且无输出**(所以断言必须查"有没有输出",不能查退出码)。
+    if [ -f "$store/$key" ]; then
+      echo "2026-01-01 00:00:00          1 $key"
+    elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
+    ;;
+  "s3 rm")
+    target="\${args[2]}"
+    key="\${target#s3://*/}"
+    record "rm $target"
+    rm -rf "$store/$key"
+    ;;
+  *) record "other $*" ;;
+esac
+`
+}
 
 function fail(message) {
   failures.push(message)
@@ -50,10 +210,54 @@ function check(condition, message) {
 }
 
 /** 造一个临时目录(进程退出时清理)。 */
-function tempDir(prefix) {
-  const dir = mkdtempSync(join(tmpdir(), prefix))
+function tempDir(prefix) {  const dir = mkdtempSync(join(tmpdir(), prefix))
   scratch.push(dir)
   return dir
+}
+
+/**
+ * 合成 git 仓库的公共环境与包装(拓扑判据 1e 与渠道 pin 1g 共用)。
+ *
+ * 为什么显式给 user/date/`GIT_CONFIG_NOSYSTEM`:判据跑在宿主 git 上,宿主的
+ * `~/.gitconfig`(签名、模板、hooksPath)或系统配置不得影响结论,墙钟也不得决定
+ * tag 的 creatordate 顺序。
+ */
+const gitFixtureEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'ci-fixture',
+  GIT_AUTHOR_EMAIL: 'ci-fixture@example.com',
+  GIT_COMMITTER_NAME: 'ci-fixture',
+  GIT_COMMITTER_EMAIL: 'ci-fixture@example.com',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_TERMINAL_PROMPT: '0',
+}
+function fixtureGit(dir, args, env = {}) {
+  return spawnSync(
+    'git',
+    ['-C', dir, '-c', 'user.name=ci-fixture', '-c', 'user.email=ci-fixture@example.com', '-c', 'commit.gpgsign=false', ...args],
+    { encoding: 'utf8', env: { ...gitFixtureEnv, ...env } },
+  )
+}
+function fixtureMustGit(dir, args, env = {}) {
+  const result = fixtureGit(dir, args, env)
+  if (result.status !== 0) throw new Error(`fixture git ${args.join(' ')} 失败: ${result.stderr}`)
+  return (result.stdout ?? '').trim()
+}
+/** 合成仓库:一个提交一个文件;日期显式给定。 */
+function fixtureRepo() {
+  const dir = tempDir('ci-git-fixture-')
+  fixtureMustGit(dir, ['init', '-q', '-b', 'master'])
+  return dir
+}
+function fixtureCommit(dir, file, message, date) {
+  const target = join(dir, file)
+  mkdirSync(dirname(target), { recursive: true })
+  writeFileSync(target, `${message}\n`)
+  fixtureMustGit(dir, ['add', '-A'])
+  fixtureMustGit(dir, ['commit', '-q', '-m', message], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date })
+}
+function fixtureTag(dir, name, date) {
+  return fixtureMustGit(dir, ['tag', '-a', name, '-m', name], { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date })
 }
 
 /** PNG 块(长度 + 类型 + 数据 + CRC)。 */
@@ -79,6 +283,26 @@ function tinyPng(width, height, bitDepth, colorType) {
     pngChunk('IDAT', deflateSync(Buffer.alloc(width * height * 4))),
     pngChunk('IEND', Buffer.alloc(0)),
   ])
+}
+
+/**
+ * 找出 release job 里"用 tag 名形状判形态"的用法(必须为零)。
+ *
+ * 只认 `if:` 条件里的 `github.ref_name` 形状判断(`contains(...)` / `startsWith(...)`,
+ * 含取反形态);`VERSION: ${{ github.ref_name }}`、`TAG="${GITHUB_REF_NAME}"` 这类
+ * **取值**位是合法的 —— tag 名本来就要作为版本号传下去,一并禁掉会把正常写法打红
+ * (2026-09-23 现场踩过:断言写成 `!job.includes('github.ref_name')`,把
+ * `VERSION: ${{ github.ref_name }}` 也判成违规)。
+ */
+function tagShapePredicates(jobText) {
+  const hits = []
+  for (const [index, line] of jobText.split('\n').entries()) {
+    if (!/^\s*(?:-\s*)?if:/u.test(line)) continue
+    if (/(?:!\s*)?(?:contains|startsWith)\(\s*github\.ref_name/u.test(line)) {
+      hits.push({ line: index + 1, text: line.trim() })
+    }
+  }
+  return hits
 }
 
 /** 造一个假的私有渠道仓:`<root>/channels/<id>/channel.json`。 */
@@ -136,10 +360,11 @@ function fakeChannelRepo(ids, options = {}) {
  *   缺省把 refName 当成 tag(`refs/tags/<refName>`)—— 多数用例测的是 tag 策略;
  *   分支用例显式传 `ref: 'refs/heads/…'`(`GITHUB_REF` 由 GitHub 注入,分支 push
  *   上就是 `refs/heads/<分支名>`)。
+ *   `args` 是在 `--dest` / `--list` 之前追加的额外 argv(`--pin <sha>` / `--resolve-only`)。
  */
-function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
+function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [] }) {
   const cwd = tempDir('ci-channels-run-')
-  const result = spawnSync('bash', [channelsScript, '--dest', dest, '--list', join(cwd, list)], {
+  const result = spawnSync('bash', [channelsScript, ...args, '--dest', dest, '--list', join(cwd, list)], {
     cwd,
     encoding: 'utf8',
     env: {
@@ -251,6 +476,996 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     check(
       JSON.stringify(tagged.selected) === JSON.stringify(['official', 'beta', 'example-brand', 'zeta']),
       `真 tag 仍须发全部渠道,实际 ${JSON.stringify(tagged.selected)}`,
+    )
+  }
+}
+
+// ---- 1b. `ref 形态 → 渠道集 / 是否发布` 的唯一真源(2026-09-23 审计 K-04) ----
+//
+// 这条规则曾经有两份实现:`ci-channels.sh` 的 bash glob 与 `ci.yml` 里 release job 的
+// `if:` 表达式。两者对"名字带 `-` 但后缀不认识"的 tag 结论**相反** —— 一个
+// `v2.8.2-hotfix`(合法 semver,`scripts/version.mjs check` 也放行)会被渠道脚本按
+// `v[0-9]*.[0-9]*.[0-9]*` 前缀当成正式版 ⇒ 构建**全部**渠道(含品牌渠道);而 release
+// job 的兜底是 `!contains(ref_name,'-')` ⇒ 整个 release job 被跳过。结果:40 分钟全渠道
+// 构建 + **零交付**(GitHub Release 与 R2 都没有新版本、客户侧零信号),品牌产物还留在
+// R2 中转前缀里没人清理(销毁步骤在 release job 内部)。
+//
+// 现在判定只有 `scripts/ci-release-policy.sh` 一份:gate 第一步执行它(未知形态当场红,
+// 下游 job 因 needs 全部跳过)、ci-channels.sh 与 release job 都读它。这一组同时做
+// **行为表**与**静态对拍**(后者防的是"改一处、留一处"的老毛病复发)。
+{
+  const policy = (ref, refName) => spawnSync(
+    'bash', [releasePolicyScript, '--ref', ref, '--ref-name', refName],
+    { encoding: 'utf8' },
+  )
+  const fields = stdout => Object.fromEntries(
+    stdout.split('\n').filter(Boolean).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  )
+
+  const table = [
+    { ref: 'refs/tags/v2.8.1', name: 'v2.8.1', kind: 'stable', channels: 'all', publish: 'true' },
+    { ref: 'refs/tags/v2.8.0-beta.2', name: 'v2.8.0-beta.2', kind: 'prerelease', channels: 'beta', publish: 'true' },
+    { ref: 'refs/tags/v2.8.0-rc', name: 'v2.8.0-rc', kind: 'prerelease', channels: 'beta', publish: 'true' },
+    { ref: 'refs/tags/v2.8.0-alpha.1', name: 'v2.8.0-alpha.1', kind: 'prerelease', channels: 'beta', publish: 'true' },
+    // 非 tag(分支/PR/缺 ref)→ 只 official、不发布(`GITHUB_REF` 的类型前缀是唯一判据)
+    { ref: 'refs/heads/v2.8.1', name: 'v2.8.1', kind: 'none', channels: 'official', publish: 'false' },
+    { ref: 'refs/pull/42/merge', name: '42/merge', kind: 'none', channels: 'official', publish: 'false' },
+    { ref: 'refs/tags/docs-snapshot', name: 'docs-snapshot', kind: 'none', channels: 'official', publish: 'false' },
+    { ref: '', name: '', kind: 'none', channels: 'official', publish: 'false' },
+  ]
+  for (const row of table) {
+    const result = policy(row.ref, row.name)
+    if (!check(result.status === 0, `策略脚本对 ${row.ref || '<空 ref>'} 应成功,实际 ${String(result.status)}: ${result.stderr ?? ''}`)) continue
+    const parsed = fields(result.stdout ?? '')
+    check(parsed.release_kind === row.kind, `${row.ref}: release_kind 应为 ${row.kind},实际 ${parsed.release_kind}`)
+    check(parsed.channel_set === row.channels, `${row.ref}: channel_set 应为 ${row.channels},实际 ${parsed.channel_set}`)
+    check(parsed.publish_release === row.publish, `${row.ref}: publish_release 应为 ${row.publish},实际 ${parsed.publish_release}`)
+  }
+
+  // "名字像发布 tag 但形态不认识"必须**当场中止**:不允许"一边全渠道构建、一边不发布"。
+  for (const name of ['v2.8.2-hotfix', 'v2.8.2-preview', 'v2.8', 'v2.8.2.1', 'v26081402']) {
+    const result = policy(`refs/tags/${name}`, name)
+    check(result.status !== 0, `未知后缀的 tag(${name})必须 fail-loud,不能猜一个渠道集`)
+    check(
+      `${result.stderr ?? ''}${result.stdout ?? ''}`.includes('形态'),
+      `未知后缀的失败信息应点名"形态"(便于当场改 tag),实际: ${(result.stderr ?? '').slice(0, 160)}`,
+    )
+    // 公开日志纪律:失败信息不回显 tag 名(tag 名可能带渠道/客户信息)。
+    check(!`${result.stderr ?? ''}${result.stdout ?? ''}`.includes(name), 'tag 形态失败信息不得回显 tag 名')
+  }
+
+  // 同一条 tag 形态,渠道脚本与策略脚本必须给**同一个**渠道集(这是"两份实现"的正面判据)。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand'])
+    for (const name of ['v2.8.1', 'v2.8.0-beta.2']) {
+      const expected = fields(policy(`refs/tags/${name}`, name).stdout ?? '').channel_set
+      const result = runChannels({ source, refName: name, dest: 'channels', list: 'p.list' })
+      check(result.status === 0, `${name}: 渠道发现应成功`)
+      const expectedSelected = expected === 'all'
+        ? ['official', 'beta', 'example-brand']
+        : expected === 'beta' ? ['beta'] : ['official']
+      check(
+        JSON.stringify(result.selected) === JSON.stringify(expectedSelected),
+        `${name}: 渠道脚本与策略脚本必须给出同一渠道集(策略=${expected},实际 ${JSON.stringify(result.selected)})`,
+      )
+    }
+    // 未知后缀:渠道脚本也必须 fail-loud(而不是按最宽的 glob 全渠道构建)。
+    const hotfix = runChannels({ source, refName: 'v2.8.2-hotfix', dest: 'channels', list: 'p2.list' })
+    check(hotfix.status !== 0, '未知后缀 tag 在渠道发现步骤就必须失败(否则会全渠道构建却零发布)')
+    check(!existsSync(hotfix.listPath), '失败时不得写出渠道列表(下游步骤拿到它就会继续构建)')
+  }
+
+  // 漏 `v` 前缀的版本号 tag 必须 fail-loud(2026-09-23 第五轮审计 R5-C-1)。
+  //
+  // 现场:`2.8.2-beta.1` 既不匹配 stable 也不匹配 prerelease,而旧 `looks_like` 只认
+  // `v[0-9]*` ⇒ release_kind=none / publish=false / channel_set=official,release job 的
+  // `if: refs/tags/v` 也不成立 ⇒ **三平台照常构建 40 分钟、GitHub Release 与 R2 全为零,
+  // 而 CI 全绿**。K-04 消灭的"构建一半、发布零"只是换了个触发器。
+  for (const name of ['2.8.2-beta.1', '2.8.2', '2.8.2-rc.1', 'release-2.8.2', 'harness-2.8.2']) {
+    const result = policy(`refs/tags/${name}`, name)
+    check(result.status !== 0, `漏 v / 含版本号的 tag(${name})必须 fail-loud,不能静默按"非发布"处理`)
+    const text = `${result.stderr ?? ''}${result.stdout ?? ''}`
+    check(text.includes('v 前缀') || text.includes('含版本号'), `失败信息必须点名问题(v 前缀),实际: ${text.slice(0, 160)}`)
+    check(text.includes('::error::'), '失败必须打 ::error::(CI 注解可见)')
+    // 公开日志纪律:失败信息不回显 tag 名。
+    check(!text.includes(name), 'tag 形态失败信息不得回显 tag 名')
+  }
+  // 反向自证:合法的发布 tag 与**显式登记过的无关 tag**不被这条判据误伤
+  // (否则"宁可多拦"会变成"发版发不出去")。
+  for (const [ref, name, kind] of [
+    ['refs/tags/v2.8.2-beta.1', 'v2.8.2-beta.1', 'prerelease'],
+    ['refs/tags/v2.8.2', 'v2.8.2', 'stable'],
+    ['refs/tags/docs-snapshot', 'docs-snapshot', 'none'],
+  ]) {
+    const result = policy(ref, name)
+    check(result.status === 0, `${ref} 应放行,实际 ${String(result.status)}: ${(result.stderr ?? '').slice(0, 160)}`)
+    check(fields(result.stdout ?? '').release_kind === kind, `${ref}: release_kind 应为 ${kind}`)
+  }
+  // 同名但**不是 tag**(分支/PR)不得被这条判据拦 —— 否则一个叫 `2.8.2` 的分支
+  // 会让所有人的 PR 红(release 判据只能管 tag)。
+  {
+    const branch = policy('refs/heads/2.8.2-beta.1', '2.8.2-beta.1')
+    check(branch.status === 0, '名字像版本号的分支必须放行(只发 official、不发布),不能被发布判据拦下')
+    const pull = policy('refs/pull/42/merge', '42/merge')
+    check(pull.status === 0, 'PR ref 必须放行')
+  }
+
+  // 静态对拍:三处都只读那一份实现,不留第二份名字形状判断。
+  {
+    const workflow = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+    const lines = workflow.split(/\r?\n/u)
+    const start = lines.findIndex(line => line === '  release:')
+    check(start >= 0, '未找到 ci.yml 的 release job(扫描器可能已失效)')
+    let end = lines.length
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^ {2}[A-Za-z0-9_-]+:\s*$/u.test(lines[index])) { end = index; break }
+    }
+    const releaseJob = start < 0 ? '' : lines.slice(start, end).join('\n')
+    check(
+      /^ {4}if: startsWith\(github\.ref, 'refs\/tags\/v'\)$/mu.test(releaseJob),
+      'release job 的 if: 只应判"是不是 v 开头的 tag"(形态判定属于 ci-release-policy.sh)',
+    )
+    // **只禁"用 tag 名形状判形态"**,不是禁用 github.ref_name 本身:
+    // `VERSION: ${{ github.ref_name }}` / `TAG="${GITHUB_REF_NAME}"` 这类**取值**位是
+    // 合法的(它就是把 tag 名当版本号用);被禁的是 `if:` 条件里的
+    // `contains(github.ref_name, '-beta')` / `!contains(github.ref_name, '-')` 这类名字
+    // 形状判断 —— 那正是 K-04 的第二份实现(未知后缀会"全渠道构建 + 零发布")。
+    const shapeHits = tagShapePredicates(releaseJob)
+    check(
+      shapeHits.length === 0,
+      `release job 的 if: 不得用 github.ref_name 判 tag 形态(应只读 ci-release-policy.sh),实际命中 ${JSON.stringify(shapeHits)}`,
+    )
+    // 正例自证:取值位仍在使用,且不因上一条被判违规(否则这条断言会把合法写法一起打红)。
+    check(
+      releaseJob.includes('${{ github.ref_name }}'),
+      'release job 应仍把 tag 名作为版本号传入(VERSION: ${{ github.ref_name }});若确实改了,请同步本条正例',
+    )
+    // 反例自证:把形态判定写回 job 级 `if:` 时必须被判违规 —— 证明上一条断言有判别力
+    // (而不是"怎么改都绿")。
+    const mutatedJob = releaseJob.replace(
+      /^ {4}if: .*$/mu,
+      "    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')",
+    )
+    check(
+      mutatedJob !== releaseJob && tagShapePredicates(mutatedJob).length > 0,
+      '反例自证失败:把 tag 形态判定写回 release job 的 if: 时,断言必须报红',
+    )
+    const policyIndex = workflow.indexOf('scripts/ci-release-policy.sh')
+    const notesIndex = workflow.indexOf("steps.release_policy.outputs.release_kind != 'none'")
+    check(policyIndex >= 0, 'gate 必须执行 scripts/ci-release-policy.sh(未知形态要早失败)')
+    check(
+      notesIndex >= 0,
+      '发布说明检查必须读 release_policy 步骤的输出,且对**发布 tag 一律要求**(条件 `!= \'none\'`)'
+      + ' —— R5-C-3:只认 stable 会让预发 tag 缺说明时回退自动变更日志',
+    )
+    check(
+      policyIndex >= 0 && notesIndex >= 0 && policyIndex < notesIndex,
+      '策略步骤必须在发布说明检查之前(它提供该检查依赖的输出)',
+    )
+    // 反例自证:`== 'stable'` 的精简写法必须被判红(证明上面那条断言有判别力)。
+    check(
+      !/steps\.release_policy\.outputs\.release_kind\s*==\s*'stable'/u.test(workflow),
+      'gate 的发布说明检查不得退回"只认正式版"的条件(预发 tag 同样必须有策展说明)',
+    )
+
+    const channelsText = readFileSync(channelsScript, 'utf8')
+    check(channelsText.includes('ci-release-policy.sh'), 'ci-channels.sh 必须调用唯一真源 ci-release-policy.sh')
+    check(
+      !channelsText.includes('*-beta.*') && !channelsText.includes('v[0-9]*.[0-9]*.[0-9]*'),
+      'ci-channels.sh 不得保留第二份 tag 形态 glob(必须只读 ci-release-policy.sh)',
+    )
+  }
+}
+
+// ---- 1c. 策展发布说明的两道检查:真跑 ci.yml 里的 shell(2026-09-23 审计 C-CI-2) ----
+//
+// 现场:唯一会拦"正式 tag 缺 docs/releases/<tag>.md"的地方在 `Create GitHub Release`
+// 步骤里,而它排在 `Upload every channel image to the update server (R2)` **之后** ——
+// 客户侧更新面(不可变长缓存)已经先被挂上新版本,才轮到 GitHub Release 红 = 半发布。
+// 现在有两道:gate 的早检(1 分钟内红,下游全部因 needs 跳过)与 release job 的
+// "任何对外上传之前"那道。两者都是 ci.yml 里的 shell,所以这里**抽出真块真跑**:
+// 少了任何一道、或者判据被改成恒成功,这一组就红。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const blocks = extractRunBlocks(workflowText)
+  const notesNeedle = 'test -f "docs/releases/${GITHUB_REF_NAME}.md"'
+  const earlyCheck = blocks.find(block => block.content.includes(notesNeedle) && !block.content.includes('release-policy.txt'))
+  const preUploadCheck = blocks.find(block => block.content.includes(notesNeedle) && block.content.includes('release-policy.txt'))
+  check(earlyCheck !== undefined, 'ci.yml 里找不到 gate 的策展说明早检(抽取失败或整步被删)')
+  check(preUploadCheck !== undefined, 'ci.yml 里找不到 release job 的"上传前"策展说明检查')
+
+  /** 造一个最小检出:scripts/ci-release-policy.sh + docs/releases/<可选文件>。 */
+  const sandbox = ({ releaseNotes }) => {
+    const dir = tempDir('ci-notes-')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    mkdirSync(join(dir, 'docs', 'releases'), { recursive: true })
+    writeFileSync(join(dir, 'scripts', 'ci-release-policy.sh'), readFileSync(releasePolicyScript))
+    if (releaseNotes !== null) writeFileSync(join(dir, 'docs', 'releases', `${releaseNotes}.md`), '# notes\n')
+    return dir
+  }
+  const runBlock = (dir, content, ref, refName) => spawnSync('bash', ['-c', content], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_REF: ref, GITHUB_REF_NAME: refName, GITHUB_OUTPUT: join(dir, 'out.txt') },
+  })
+
+  if (earlyCheck !== undefined && preUploadCheck !== undefined) {
+    // 正式 tag:缺文件必须 fail-loud(两道都要)。
+    const missing = sandbox({ releaseNotes: null })
+    const earlyMissing = runBlock(missing, earlyCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(earlyMissing.status !== 0, `gate 的早检在缺 docs/releases/<tag>.md 时必须失败,实际退出 ${String(earlyMissing.status)}`)
+    check(`${earlyMissing.stdout ?? ''}${earlyMissing.stderr ?? ''}`.includes('::error::'),
+      'gate 早检失败时要打 ::error::(CI 注解)')
+    const preMissing = runBlock(missing, preUploadCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(preMissing.status !== 0, `release job 的"上传前"检查在缺文件时必须失败,实际退出 ${String(preMissing.status)}`)
+    check(`${preMissing.stdout ?? ''}${preMissing.stderr ?? ''}`.includes('::error::'),
+      'release job 的上传前检查失败时要打 ::error::')
+
+    // 正式 tag + 文件在:必须放行(否则正当发版会被自己拦下)。
+    const present = sandbox({ releaseNotes: 'v9.9.9' })
+    const prePresent = runBlock(present, preUploadCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(prePresent.status === 0, `release job 的上传前检查在文件存在时应放行,实际退出 ${String(prePresent.status)}: ${(prePresent.stderr ?? '').slice(0, 200)}`)
+    const earlyPresent = runBlock(present, earlyCheck.content, 'refs/tags/v9.9.9', 'v9.9.9')
+    check(earlyPresent.status === 0, `gate 早检在文件存在时应放行,实际退出 ${String(earlyPresent.status)}`)
+
+    // 预发 tag:**同样必须**有策展说明(2026-09-23 第五轮审计 R5-C-3)。
+    //
+    // 现场:两处检查都以 `release_kind=stable` 为前提,预发 tag 缺说明被放行到
+    // `--generate-notes` —— 自动变更日志的正文由提交信息 + **PR 标题/正文**生成,而后者
+    // 不是文件、不在任何守卫判据内(铁律 0 的盲区);历史上正是这条路径把真实域名/IP
+    // 带进了公开 Release 正文。判据:预发 tag 缺说明时,gate 早检与上传前检查都必须红;
+    // 文件在时必须放行(否则正当发版会被自己拦下)。
+    const prereleaseMissing = sandbox({ releaseNotes: null })
+    for (const [label, block] of [['gate 早检', earlyCheck], ['上传前检查', preUploadCheck]]) {
+      const result = runBlock(prereleaseMissing, block.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+      check(result.status !== 0, `预发 tag 缺策展说明时${label}必须失败,实际退出 ${String(result.status)}`)
+      check(
+        `${result.stdout ?? ''}${result.stderr ?? ''}`.includes('::error::'),
+        `预发 tag 缺说明的${label}失败信息要打 ::error::`,
+      )
+    }
+    const prereleasePresent = sandbox({ releaseNotes: 'v9.9.9-beta.1' })
+    const prePrereleasePresent = runBlock(prereleasePresent, preUploadCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+    check(
+      prePrereleasePresent.status === 0,
+      `预发 tag 有策展说明时必须放行,实际退出 ${String(prePrereleasePresent.status)}: ${(prePrereleasePresent.stderr ?? '').slice(0, 200)}`,
+    )
+    const earlyPrereleasePresent = runBlock(prereleasePresent, earlyCheck.content, 'refs/tags/v9.9.9-beta.1', 'v9.9.9-beta.1')
+    check(earlyPrereleasePresent.status === 0, `gate 早检在预发 tag + 文件存在时应放行,实际退出 ${String(earlyPrereleasePresent.status)}`)
+
+    // 未知 tag 形态:唯一真源当场红,这一步也必须跟着红(不许"上传了才知道名字不认识")。
+    const unknown = sandbox({ releaseNotes: 'v9.9.9-hotfix' })
+    const preUnknown = runBlock(unknown, preUploadCheck.content, 'refs/tags/v9.9.9-hotfix', 'v9.9.9-hotfix')
+    check(preUnknown.status !== 0, '未知 tag 形态必须在"上传前"检查里失败(唯一真源已 fail-loud)')
+  }
+}
+
+// ---- 1e. 发布 tag 的拓扑判据(2026-09-23 第五轮审计 R5-C-2 / M1) ----
+//
+// 现场:全仓没有 `git merge-base --is-ancestor` 类判据。2026-09-17 的真实事故里,上一个
+// tag 打在**旁支**上,发版人直接从功能分支打新 tag ⇒ 那条旁支上的修复被静默丢掉,而
+// CI 全绿。这一组用**合成 git 仓库**真跑 `scripts/ci-release-topology.sh`:
+//   ① 基线是祖先 ⇒ 绿;② 基线在旁支 ⇒ 红且打印两侧;③ `--exclude-tag` 能把"本次要发的
+//   tag"排除(支持先本地自检、再打 tag);④ 主线判据(不在主线 ⇒ 红);⑤ 判据跑不成
+//   (无发布 tag / 基线解析不出 / 主线 ref 解析不出)⇒ 退出 2,**不是** 0。
+{
+  const topologyScript = join(root, 'scripts', 'ci-release-topology.sh')
+  check(existsSync(topologyScript), 'scripts/ci-release-topology.sh 必须存在(拓扑判据的唯一实现)')
+
+  // 合成仓库工具见模块级 `fixtureRepo` / `fixtureCommit` / `fixtureTag`(与 1g 共用)。
+  const newRepo = fixtureRepo
+  const commit = fixtureCommit
+  const tag = fixtureTag
+  const runTopology = (dir, args) => spawnSync('bash', [topologyScript, ...args], {
+    cwd: dir,
+    encoding: 'utf8',
+    // HOME 指向合成仓库:宿主 ~/.gitconfig(可能带签名/模板)不得影响判据。
+    env: { ...gitFixtureEnv, HOME: dir },
+  })
+
+  // ① 基线是祖先 ⇒ 绿。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    tag(dir, 'v2.8.1', '2026-09-01T10:01:00+08:00')
+    commit(dir, 'b.txt', 'next', '2026-09-02T10:00:00+08:00')
+    const ok = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(ok.status === 0, `拓扑正例(基线是祖先)应绿,实际 ${String(ok.status)}: ${ok.stderr}`)
+    check((ok.stdout ?? '').includes('v2.8.1'), '成功输出应点名基线 tag(发版日志要能核对)')
+  }
+
+  // ② 基线在旁支 ⇒ 红,且必须打印两侧(2026-09-17 事故的形态)。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    tag(dir, 'v2.8.1', '2026-09-01T10:01:00+08:00')
+    commit(dir, 'b.txt', 'main-next', '2026-09-02T10:00:00+08:00')
+    fixtureMustGit(dir, ['checkout', '-q', '-b', 'side', 'HEAD~1'])
+    commit(dir, 'side.txt', 'side-fix', '2026-09-03T10:00:00+08:00')
+    tag(dir, 'v2.8.2-beta.1', '2026-09-03T10:01:00+08:00')
+    fixtureMustGit(dir, ['checkout', '-q', 'master'])
+    const bad = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(bad.status === 1, `旁支基线必须红(退出 1),实际 ${String(bad.status)}: ${bad.stderr}`)
+    const text = `${bad.stderr ?? ''}`
+    check(text.includes('v2.8.2-beta.1'), '失败必须点名旁支上的基线 tag(打印两侧)')
+    check(text.includes('旁支'), '失败必须说清"两侧都非零 = 旁支"')
+    check(text.includes('::error::'), '失败必须打 ::error::(CI 注解可见)')
+    // ③ `--exclude-tag`:本次要发的 tag 不参与基线候选 ⇒ 回到 v2.8.1 ⇒ 绿。
+    const excluded = runTopology(dir, ['--ref', 'HEAD', '--exclude-tag', 'v2.8.2-beta.1', '--no-mainline'])
+    check(
+      excluded.status === 0,
+      `排除本次要发的 tag 后应绿(CI 用法:--exclude-tag),实际 ${String(excluded.status)}: ${excluded.stderr}`,
+    )
+    // ④ 主线判据:旁支 tag 不在 master 上 ⇒ 红。
+    const offMain = runTopology(dir, ['--ref', 'v2.8.2-beta.1', '--exclude-tag', 'v2.8.1', '--mainline', 'master'])
+    check(offMain.status === 1, `不在主线的 tag 必须红,实际 ${String(offMain.status)}: ${offMain.stderr}`)
+    check(`${offMain.stderr ?? ''}`.includes('主线'), '主线违规的失败信息必须点名"主线"')
+    // 正向对照:主线上、基线是祖先 ⇒ 绿(证明判据不是恒红)。
+    const onMain = runTopology(dir, ['--ref', 'master', '--base', 'v2.8.1', '--mainline', 'master'])
+    check(onMain.status === 0, `主线上的正例应绿,实际 ${String(onMain.status)}: ${onMain.stderr}`)
+  }
+
+  // ⑤ "判据没跑成"必须退出 2,不许伪装成通过。
+  {
+    const dir = newRepo()
+    commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
+    const noTags = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
+    check(noTags.status === 2, `没有任何发布 tag 时必须退出 2(判据未完成 ≠ 通过),实际 ${String(noTags.status)}`)
+    check(`${noTags.stderr ?? ''}`.includes('无法执行'), '未完成时的信息要说清"判据无法执行"')
+    const missingBase = runTopology(dir, ['--ref', 'HEAD', '--base', 'v9.9.9', '--no-mainline'])
+    check(missingBase.status === 2, `基线解析不出时必须退出 2,实际 ${String(missingBase.status)}`)
+    const missingMainline = runTopology(dir, ['--ref', 'HEAD', '--mainline', 'origin/does-not-exist'])
+    check(missingMainline.status === 2, `主线 ref 解析不出时必须退出 2,实际 ${String(missingMainline.status)}`)
+    const badUsage = runTopology(dir, ['--nope'])
+    check(badUsage.status === 2, `未知参数必须退出 2,实际 ${String(badUsage.status)}`)
+  }
+
+  // ⑥ 接线判据:gate 必须真的跑它(不是"有能力、没接线"),且只能在发布 tag 上跑,
+  //    并且早于全量门禁步(拓扑违规要在 1 分钟内红,不等 40 分钟构建)。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateSteps = workflow?.jobs?.gate?.steps ?? []
+    const topologyIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('ci-release-topology.sh'))
+    check(topologyIndex >= 0, 'ci.yml 的 gate 必须执行 scripts/ci-release-topology.sh(否则拓扑判据形同不存在)')
+    if (topologyIndex >= 0) {
+      const step = gateSteps[topologyIndex]
+      check(
+        typeof step.if === 'string' && step.if.includes('refs/tags/v'),
+        '拓扑判据只能在发布 tag 上跑(非 tag 的 PR/分支没有"上一个 tag"语义)',
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('--exclude-tag'),
+        '拓扑判据必须把本次要发的 tag 从基线候选里排除(--exclude-tag)',
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('git fetch'),
+        '拓扑判据步骤必须显式补齐判据输入(主线 ref + 全部 tag),不能依赖 checkout 恰好带了什么'
+        + ' —— 输入缺失时脚本退出 2,发布会被自己拦下',
+      )
+    }
+    const gateIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && /(?:^|\s)yarn\s+check(?![\w:-])/u.test(step.run))
+    check(gateIndex >= 0, 'ci.yml 的 gate 里找不到全量门禁步(扫描器可能已失效)')
+    check(
+      topologyIndex >= 0 && gateIndex >= 0 && topologyIndex < gateIndex,
+      '拓扑判据必须早于全量门禁步(1 分钟内报错,不等三平台构建)',
+    )
+  }
+}
+
+// ---- 1f. 版本一致性谓词(2026-09-23 第五轮审计 R5-C-5) ----
+//
+// 现场:两处 package.json 的版本一致性**只在 release job 第 4 步**校验(四平台构建 40 分钟
+// 之后),分支/PR 侧零判据;而 `version.mjs check`(期望值取 git describe 的最新 tag)在
+// "发布 PR 已 bump、tag 未打"的分支上**必红** ⇒ 不能直接塞进 gate。
+// 修法两半:① 新增 `manifests`(只比两处相等,与 tag 无关)—— 它能进 gate;② tag push 上
+// 再跑 `check "$GITHUB_REF_NAME"`。这一组在**合成检出**里真跑两条判据,并静态钉住接线。
+{
+  const versionScript = join(root, 'scripts', 'version.mjs')
+  check(existsSync(versionScript), 'scripts/version.mjs 必须存在(版本唯一权威源)')
+
+  /** 合成检出:scripts/version.mjs + 两处 package.json。 */
+  const sandbox = ({ rootVersion, desktopVersion }) => {
+    const dir = tempDir('ci-version-')
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    mkdirSync(join(dir, 'packages', 'host', 'desktop'), { recursive: true })
+    writeFileSync(join(dir, 'scripts', 'version.mjs'), readFileSync(versionScript))
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'root', version: rootVersion }, null, 2)}\n`)
+    writeFileSync(
+      join(dir, 'packages', 'host', 'desktop', 'package.json'),
+      `${JSON.stringify({ name: 'desktop', version: desktopVersion }, null, 2)}\n`,
+    )
+    return dir
+  }
+  const runVersion = (dir, args) => spawnSync('node', ['scripts/version.mjs', ...args], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, HOME: dir },
+  })
+
+  // ① `manifests`:只比两处相等 —— 发布 PR"已 bump、tag 未打"的状态必须绿。
+  const bumped = sandbox({ rootVersion: '9.9.9', desktopVersion: '9.9.9' })
+  const manifestsGreen = runVersion(bumped, ['manifests'])
+  check(
+    manifestsGreen.status === 0,
+    `两处 manifest 相等时 manifests 必须绿(发布 PR 的常态),实际 ${String(manifestsGreen.status)}: ${manifestsGreen.stderr}`,
+  )
+  check((manifestsGreen.stdout ?? '').includes('9.9.9'), 'manifests 成功输出应带版本号(便于日志核对)')
+  // ② 只改一处:必须红,且点名两处取值(这是"漏改一处"的 1 分钟判据)。
+  const skewed = sandbox({ rootVersion: '9.9.9', desktopVersion: '9.9.8' })
+  const manifestsRed = runVersion(skewed, ['manifests'])
+  check(manifestsRed.status !== 0, `两处 manifest 不等时 manifests 必须红,实际 ${String(manifestsRed.status)}`)
+  const skewText = `${manifestsRed.stderr ?? ''}`
+  check(skewText.includes('9.9.9') && skewText.includes('9.9.8'), '不一致的失败信息必须点名两处取值')
+  // ③ tag 与两处 manifest 逐字一致 ⇒ 绿;不一致 ⇒ 红。
+  const taggedGreen = runVersion(bumped, ['check', 'v9.9.9'])
+  check(taggedGreen.status === 0, `tag 与 manifest 一致时应绿,实际 ${String(taggedGreen.status)}: ${taggedGreen.stderr}`)
+  const taggedRed = runVersion(bumped, ['check', 'v9.9.8'])
+  check(taggedRed.status !== 0, 'tag 与 manifest 不一致时必须红')
+  check(`${taggedRed.stderr ?? ''}`.includes('期望'), '不一致的失败信息必须给出期望值(点名)')
+  // ④ 显式 tag 漏 `v`:必须红(与 ci-release-policy.sh 同一口径,R5-C-1)。
+  const noPrefix = runVersion(bumped, ['check', '9.9.9'])
+  check(noPrefix.status !== 0, '显式 tag 漏 v 前缀时必须红(漏 v 的 tag 不是发布 tag)')
+  check(`${noPrefix.stderr ?? ''}`.includes('v 开头'), '漏 v 的失败信息必须点名"必须以 v 开头"')
+  // ⑤ `set` 收到无 v 前缀的输入:仍写入(不打断既有用法),但**必须出声**。
+  const setBare = runVersion(bumped, ['set', '9.9.10'])
+  check(setBare.status === 0, `set 9.9.10 应成功,实际 ${String(setBare.status)}: ${setBare.stderr}`)
+  check(
+    `${setBare.stderr ?? ''}`.includes('v 前缀') || `${setBare.stderr ?? ''}`.includes('git tag 必须带 v'),
+    'set 收到无 v 前缀输入时必须打警告(漏 v 的 tag 会静默零发布)',
+  )
+  check(
+    JSON.parse(readFileSync(join(bumped, 'package.json'), 'utf8')).version === '9.9.10',
+    'set 必须把去 v 的版本写进 manifest',
+  )
+  const setTagged = runVersion(bumped, ['set', 'v9.9.11'])
+  check(setTagged.status === 0, `set v9.9.11 应成功,实际 ${String(setTagged.status)}: ${setTagged.stderr}`)
+  check(!`${setTagged.stderr ?? ''}`.includes('v 前缀'), '带 v 前缀的 set 不应打警告(否则警告会被无视)')
+
+  // ⑥ 接线:gate 必须真的跑这两条(不是"有能力、没接线"),且 tag 判据只在 tag 上跑。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateSteps = workflow?.jobs?.gate?.steps ?? []
+    const manifestsIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('version.mjs manifests'))
+    check(manifestsIndex >= 0, 'ci.yml 的 gate 必须跑 `node scripts/version.mjs manifests`(漏改一处的 1 分钟判据)')
+    const checkIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('version.mjs check'))
+    check(checkIndex >= 0, 'ci.yml 的 gate 必须在 tag push 上跑 `node scripts/version.mjs check "$GITHUB_REF_NAME"`')
+    if (checkIndex >= 0) {
+      const step = gateSteps[checkIndex]
+      check(
+        typeof step.run === 'string' && step.run.includes('refs/tags/v') && step.run.includes('${GITHUB_REF_NAME}'),
+        'tag 版本判据必须按 ref 类型守卫并传 tag 名(不能无条件跑:发布 PR 未打 tag 时 check 必红)',
+      )
+    }
+    // release job 的那道保留(第二道),且两条判据必须共用同一个脚本(唯一真源)。
+    const releaseSteps = workflow?.jobs?.release?.steps ?? []
+    check(
+      releaseSteps.some(step => typeof step?.run === 'string' && step.run.includes('version.mjs check')),
+      'release job 必须保留 `version.mjs check`(发布前对 tag 的第二道判据)',
+    )
+  }
+}
+
+// ---- 1g. 渠道仓 revision:一处解析、多 job 复用(2026-09-23 第五轮审计 R5-C-2) ----
+//
+// 现场:私有渠道仓在同一次 tag 里被四个 job 各自 `git clone --depth 1 origin/main`
+// (三平台 + release),四次克隆相差数十分钟、不 pin、不记录、无跨 job 比对 ⇒ 镜像里的
+// 渠道内容(晚克隆)与随包客户端(早克隆)可能不同源,同一个源码 tag 也无法复现同一份
+// 交付物(项目已有同形事故:预发线数据根被改,升级后"所有对话消失")。
+//
+// 这一组在**合成 git 仓库**里真跑 `ci-channels.sh --pin`,判据是行为而不是文本:
+//   ① `--resolve-only` 打印唯一一行 `channels_rev=<HEAD sha>`;
+//   ② `--pin <旧提交>` 取到的是**那个旧提交**的内容(新提交里加的渠道不出现)——
+//      这正是"包内客户端与镜像内容同源"的机器判据;
+//   ③ 不 pin 时取的是默认分支 HEAD(证明 pin 确实改变了行为,而不是恒等);
+//   ④ 发布 tag 上缺 pin 必须 fail-loud(不静默退回"各自 clone HEAD");
+//   ⑤ pin 形状非法 / pin 不存在都必须失败,且**不回显取值**;
+//   ⑥ 静态接线:gate 声明并解析 `channels_rev`,四处调用点都带同一个 pin 来源,
+//      release job 必须**直接** needs gate(`needs` 上下文只含直接依赖)。
+{
+  const policyFields = stdout => Object.fromEntries(
+    (stdout ?? '').split('\n').filter(Boolean)
+      .filter(line => line.includes('='))
+      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  )
+
+  // 合成渠道仓:提交 1 = official;提交 2 增加 beta(内容差异可观测)。
+  const repo = fixtureRepo()
+  mkdirSync(join(repo, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(repo, 'channels', 'official', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'official',
+    identity: { display_name: 'official AI', short_name: 'official' },
+    desktop: { app_origin_scheme: 'picoaide-app' },
+  }))
+  fixtureCommit(repo, 'channels/official/README.md', 'first', '2026-09-01T10:00:00+08:00')
+  const firstRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+  mkdirSync(join(repo, 'channels', 'beta'), { recursive: true })
+  writeFileSync(join(repo, 'channels', 'beta', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'beta',
+    identity: { display_name: 'beta AI', short_name: 'beta' },
+    desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' },
+  }))
+  fixtureCommit(repo, 'channels/beta/README.md', 'second', '2026-09-02T10:00:00+08:00')
+  const headRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+  check(firstRev !== headRev, '合成仓库必须有两个不同提交(否则 pin 判据没有判别力)')
+  const url = `file://${repo}`
+
+  const runPinned = (extraEnv, args = []) => runChannels({
+    source: undefined,
+    refName: 'v9.9.9',
+    ref: 'refs/tags/v9.9.9',
+    dest: 'channels',
+    list: 'pin.list',
+    env: { CI_CHANNELS_URL: url, ...extraEnv },
+    args,
+  })
+
+  // ① `--resolve-only`:stdout 恰好一行 `channels_rev=<sha>`,且等于默认分支 HEAD。
+  {
+    const resolved = runChannels({
+      source: undefined,
+      refName: 'v9.9.9',
+      ref: 'refs/tags/v9.9.9',
+      dest: 'channels',
+      list: 'rev.list',
+      env: { CI_CHANNELS_URL: url },
+      args: ['--resolve-only'],
+    })
+    check(resolved.status === 0, `--resolve-only 应成功,实际 ${String(resolved.status)}: ${resolved.stderr}`)
+    const lines = (resolved.stdout ?? '').split('\n').filter(Boolean)
+    check(lines.length === 1 && lines[0] === `channels_rev=${headRev}`,
+      `--resolve-only 的 stdout 必须恰好一行 channels_rev=<HEAD sha>(供 >> \"$GITHUB_OUTPUT\"),实际 ${JSON.stringify(lines)}`)
+  }
+
+  // ② pin 到旧提交 ⇒ 取到旧内容(beta 不存在);③ 不 pin ⇒ 取 HEAD(两个渠道都在)。
+  {
+    const pinned = runPinned({ CI_CHANNELS_PIN: firstRev })
+    check(pinned.status === 0, `pin 取旧提交应成功,实际 ${String(pinned.status)}: ${pinned.stderr}`)
+    check(
+      JSON.stringify(pinned.selected) === JSON.stringify(['official']),
+      `pin 到旧提交时渠道集必须只含旧提交里的渠道(证明取到的是 pinned 内容,不是 HEAD),实际 ${JSON.stringify(pinned.selected)}`,
+    )
+    check((pinned.stdout ?? '').includes(`pinned at ${firstRev}`), 'pinned 路径必须打印解析出的 revision(可审计)')
+    const unpinned = runChannels({
+      source: undefined,
+      refName: 'release-branch',
+      ref: 'refs/heads/release-branch',
+      dest: 'channels',
+      list: 'nopin.list',
+      env: { CI_CHANNELS_URL: url },
+    })
+    check(unpinned.status === 0, `非 tag 上不 pin 应成功,实际 ${String(unpinned.status)}: ${unpinned.stderr}`)
+    check(
+      JSON.stringify(unpinned.selected) === JSON.stringify(['official']),
+      '非 tag 上只发 official(渠道集判据不变)',
+    )
+    check((unpinned.stdout ?? '').includes(`revision ${headRev}`),
+      '不 pin 的路径必须打印实际取到的 revision(证明 pin 确实改变了行为)')
+  }
+
+  // ④ 发布 tag 上缺 pin:必须失败(不静默退回"各自 clone origin/main HEAD")。
+  {
+    const missing = runChannels({
+      source: undefined,
+      refName: 'v9.9.9',
+      ref: 'refs/tags/v9.9.9',
+      dest: 'channels',
+      list: 'nopin-tag.list',
+      env: { CI_CHANNELS_URL: url },
+    })
+    check(missing.status !== 0, '发布 tag 上缺渠道仓 pin 必须 fail-loud(否则四处克隆可能不同源)')
+    check(`${missing.stderr ?? ''}`.includes('pin'), '缺 pin 的失败信息必须点名 pin')
+  }
+
+  // ⑤ pin 形状非法 / pin 在仓库里不存在:失败且不回显取值。
+  {
+    const bogus = 'zzzz-not-a-sha'
+    const badShape = runPinned({ CI_CHANNELS_PIN: bogus })
+    check(badShape.status !== 0, 'pin 形状非法时必须失败')
+    check(!`${badShape.stderr ?? ''}${badShape.stdout ?? ''}`.includes(bogus), 'pin 形状失败的输出不得回显取值')
+    const absent = 'f'.repeat(40)
+    const notFound = runPinned({ CI_CHANNELS_PIN: absent })
+    check(notFound.status !== 0, 'pin 指向仓库里不存在的提交时必须失败(不得退回 HEAD)')
+    check(!`${notFound.stderr ?? ''}`.includes(absent), 'pin 取回失败的输出不得回显取值')
+  }
+
+  // ⑥ 静态接线:一处解析 + 四 job 共用 + release 直接依赖 gate。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateJob = workflow?.jobs?.gate
+    const gateSteps = Array.isArray(gateJob?.steps) ? gateJob.steps : []
+    const resolveIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('--resolve-only'))
+    check(resolveIndex >= 0, 'gate 必须有一处 `ci-channels.sh --resolve-only`(渠道仓 revision 的唯一解析点)')
+    if (resolveIndex >= 0) {
+      const step = gateSteps[resolveIndex]
+      check(typeof step.id === 'string' && step.id !== '', '--resolve-only 步骤必须有 id(供 job output 引用)')
+      check(
+        typeof step.if === 'string' && step.if.includes('refs/tags/v'),
+        '--resolve-only 只能在发布 tag 上跑(非 tag 没有 pin 语义,退回原行为)',
+      )
+      const declared = gateJob?.outputs?.channels_rev
+      check(
+        typeof declared === 'string' && declared.includes(`steps.${step.id}.outputs.channels_rev`),
+        `gate 的 outputs.channels_rev 必须引用该步骤的输出(实际 ${JSON.stringify(declared)})`,
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('>> "$GITHUB_OUTPUT"'),
+        '--resolve-only 的输出必须写进 $GITHUB_OUTPUT(否则多 job 复用读不到)',
+      )
+    }
+    // 其余调用点(三平台 + release)一律带同一个 pin 来源。
+    const consumers = []
+    for (const [jobId, job] of Object.entries(workflow?.jobs ?? {})) {
+      for (const step of (Array.isArray(job?.steps) ? job.steps : [])) {
+        if (typeof step?.run !== 'string' || !step.run.includes('ci-channels.sh')) continue
+        if (step.run.includes('--resolve-only')) continue
+        consumers.push({ jobId, step })
+      }
+    }
+    check(
+      consumers.length === 4,
+      `渠道抓取调用点应为 4 处(三平台 + release),实际 ${consumers.length}:${consumers.map(c => c.jobId).join(', ')}`,
+    )
+    for (const { jobId, step } of consumers) {
+      const pin = step?.env?.CI_CHANNELS_PIN
+      check(
+        typeof pin === 'string' && pin.includes('needs.gate.outputs.channels_rev'),
+        `job ${jobId} 的渠道抓取步骤必须带 CI_CHANNELS_PIN: \${{ needs.gate.outputs.channels_rev }}(实际 ${JSON.stringify(pin)})`,
+      )
+    }
+    const releaseNeeds = workflow?.jobs?.release?.needs
+    check(
+      Array.isArray(releaseNeeds) && releaseNeeds.includes('gate'),
+      '`needs` 上下文只含直接依赖:release job 必须**直接** needs gate 才能读到 channels_rev',
+    )
+  }
+}
+
+// ---- 1d. WASM 门禁接线:真跑 W-4 判定脚本的**接线参数**(2026-09-23 审计 W-4/W-5) ----
+//
+// 现场:两条判据的脚本侧早就存在(`scripts/wasm/check-go-test-json.mjs` 与
+// `scripts/verify-wasm-client-only.sh --groups 6`),但 `.github/` 对它们 0 引用 ⇒
+// "从不执行"。接线最容易的退化是**把参数改松**:`--require` 只留一条必然通过的用例、
+// 或把 `--scope` 去掉(整份报告都判 ⇒ `internal/serverstore` 的 DST 用例在 UTC runner
+// 上必然 t.Skip ⇒ 每次必红的假红,而假红的下场通常是关掉判据)。
+//
+// 这一组**从 ci.yml 抽出真实 argv**再跑真脚本(合成报告,不跑 Go):
+//   ① 范围外的用例级 skip 不得影响结论(证明 --scope 真的在过滤);
+//   ② 范围内的用例级 skip 必须判红;
+//   ③ 报告缺失必须 exit 2(而不是"没有命中");
+//   ④ `--require` 三条关键用例必须都在报告里 pass 才绿。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const blocks = extractRunBlocks(workflowText)
+  const caseGateBlock = blocks.find(entry => entry.content.includes('check-go-test-json.mjs'))
+  check(caseGateBlock !== undefined, 'ci.yml 里找不到 W-4 的用例级判定步骤(接线被删?)')
+  const probeBlock = blocks.find(entry => entry.content.includes('verify-wasm-client-only.sh'))
+  check(probeBlock !== undefined, 'ci.yml 里找不到 W-5 的协议探针步骤(接线被删?)')
+
+  if (caseGateBlock !== undefined) {
+    const text = caseGateBlock.content
+    const scope = /--scope\s+(\S+)/u.exec(text)?.[1]
+    const required = /--require\s+(\S+)/u.exec(text)?.[1]?.split(',').map(name => name.trim()).filter(Boolean) ?? []
+    const goTest = /go\s+test\b[^\n]*?-json[^\n]*?>\s*([^\s;&|]+)/u.exec(text)
+    const reportArg = /check-go-test-json\.mjs\s+([^\s\\]+)/u.exec(text)?.[1]
+    // 登记值必须与 `scripts/check-workflows.mjs` 的 `WASM_CASE_GATE_SCOPE` 同一份取值:
+    // 前两段与组 3 同面,后两段(F8,2026-09-23)是 A-8 渠道守卫用例所在的包 ——
+    // 那两个包的用例依赖真 PG,PG 不可达时整包 `t.Skip`,不纳入判定面就等于没有守卫。
+    check(scope === 'internal/wasmapp,internal/router,internal/marketplace,internal/agentshare', `W-4 的 --scope 应为 internal/wasmapp,internal/router,internal/marketplace,internal/agentshare(不带尾斜杠:带了会漏掉 internal/router 根包的用例事件),实际 ${String(scope)}`)
+    check(goTest !== null && reportArg !== undefined && goTest[1] === reportArg,
+      `W-4 的报告路径必须与 go test -json 的落盘路径一致(实际落盘 ${String(goTest?.[1])} / 读取 ${String(reportArg)})`)
+    check(required.length === 3, `W-4 的 --require 必须是三条关键用例,实际 ${required.length} 条:${required.join(', ')}`)
+    check(/exit\s+[1-9]/u.test(text), 'W-4 的步骤必须把判定收口成 exit 1(checker 的 1/2 都要变成失败)')
+
+    if (scope !== undefined && required.length > 0) {
+      const scopeArgs = ['--scope', scope]
+      const requireArgs = ['--require', required.join(',')]
+      const cases = required.map(name => ({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver', Test: name }))
+      const cleanReport = [
+        ...cases.map(entry => JSON.stringify(entry)),
+        JSON.stringify({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver' }),
+      ].join('\n')
+      // 范围外(serverstore)的用例级 skip:在 --scope 下必须**不影响**结论。
+      const outsideSkip = `${cleanReport}\n${JSON.stringify({ Action: 'skip', Package: 'picoaide/server/internal/serverstore', Test: 'TestSummarizeWasmAppOpensTrendUVAcrossDSTDay' })}`
+      // 范围内(appserver)的用例级 skip:必须判红。
+      const insideSkip = `${cleanReport}\n${JSON.stringify({ Action: 'skip', Package: 'picoaide/server/internal/wasmapp/appserver', Test: 'TestSomethingSkipped' })}`
+
+      const dir = tempDir('wasm-case-gate-')
+      const write = (name, content) => {
+        const path = join(dir, name)
+        writeFileSync(path, content)
+        return path
+      }
+      const runChecker = reportPath => spawnSync(
+        'node',
+        ['scripts/wasm/check-go-test-json.mjs', reportPath, ...scopeArgs, ...requireArgs],
+        { cwd: root, encoding: 'utf8' },
+      )
+
+      const clean = runChecker(write('clean.json', cleanReport))
+      check(clean.status === 0, `区间内干净报告应通过,实际退出 ${String(clean.status)}: ${(clean.stderr ?? '').slice(0, 200)}`)
+      const outOfScope = runChecker(write('outside-skip.json', outsideSkip))
+      check(outOfScope.status === 0,
+        `--scope 必须忽略范围外的用例级 skip,实际退出 ${String(outOfScope.status)}: ${(outOfScope.stderr ?? '').slice(0, 200)}`)
+      const inScope = runChecker(write('inside-skip.json', insideSkip))
+      check(inScope.status === 1, `范围外的用例级 skip 必须判红(exit 1),实际退出 ${String(inScope.status)}`)
+      const missing = runChecker(join(dir, 'does-not-exist.json'))
+      check(missing.status === 2, `报告缺失必须 exit 2(前置缺失),实际退出 ${String(missing.status)}`)
+      // 缺一条关键用例 ⇒ 判红(证明 --require 的名单真的在判)。
+      const dropped = required[required.length - 1]
+      const missingCase = runChecker(write('missing-case.json', [
+        ...cases.filter(entry => entry.Test !== dropped).map(entry => JSON.stringify(entry)),
+        JSON.stringify({ Action: 'pass', Package: 'picoaide/server/internal/wasmapp/appserver' }),
+      ].join('\n')))
+      check(missingCase.status === 1, `少一条关键用例(${dropped})必须判红,实际退出 ${String(missingCase.status)}`)
+    }
+  }
+
+  // W-5:探针步骤的参数级断言(真跑 21s 的探针属于"本地/CI 实跑"面,这里只钉参数)。
+  if (probeBlock !== undefined) {
+    const text = probeBlock.content
+    check(/verify-wasm-client-only\.sh\s+--groups\s+6(?!\d)/u.test(text),
+      `W-5 必须跑 --groups 6(协议探针),实际:${text.split('\n').find(line => line.includes('verify-wasm-client-only')) ?? '(无)'}`)
+    check(workflowText.includes('WASM_GATE_REQUIRE_COVERED_PLATFORM'),
+      'W-5 必须带 WASM_GATE_REQUIRE_COVERED_PLATFORM(非覆盖平台显式 SKIP(77),不给"跑完给结论")')
+    check(/WASM_GATE_REQUIRE_COVERED_PLATFORM:\s*['"]1['"]/u.test(workflowText),
+      'WASM_GATE_REQUIRE_COVERED_PLATFORM 必须写死为 \'1\'(由 tag/平台派生的开关会让它退化成"跑完给结论")')
+  }
+
+  // ---- W-8 接线:门禁结论必须绑定权威 HEAD(2026-09-23 第三轮审计的收口) ----
+  //
+  // 现场:`scripts/verify-wasm-client-only.sh` 早就支持 `WASM_GATE_EXPECT_HEAD`(跑前锁定
+  // 期望 HEAD,不匹配即**跑前**退出码 2 + 「结论不可比」),而 `.github/` 从不设置它 ⇒
+  // 又一次"有能力、没接线":换 commit / 脏树 / 跑动中被推进 HEAD,都能拿到同一句
+  // "全部通过 ✅(绑定 HEAD …)"。
+  //
+  // 这一组做两件事(静态 + 动态,缺一不可):
+  //   ① 静态:从 ci.yml 的 **step `env:`**(YAML 解析,不是全文子串匹配)里取出跑这个门禁的
+  //      每一步的期望 HEAD 取值,断言恰好是 `${{ github.sha }}`;
+  //   ② 动态:把从 ci.yml 抽出来的**变量名**与一个形状合法、但不等于当前 HEAD 的 sha 交给
+  //      **真脚本**,断言它以退出码 2 拒绝并打印「结论不可比」—— 这一步证明"名字真的被脚本认"
+  //      (改名 / 打错字这类静默失效在这里当场红),而不是只证明 YAML 里有一行像样的文本。
+  {
+    const EXPECT_HEAD_ENV = 'WASM_GATE_EXPECT_HEAD'
+    const EXPECT_HEAD_VALUE = '${{ github.sha }}'
+    const document = parseYaml(workflowText)
+    const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+    /** 去掉行尾注释(`#` 之后的文本),与门禁自己的可执行文本口径一致。 */
+    const strippedRun = step => (typeof step?.run === 'string'
+      ? step.run.split('\n').map(line => line.replace(/(?:^|\s)#.*$/u, '')).join('\n')
+      : '')
+    /** 直接跑 WASM 门禁的 step(探针步 / 将来新增的入口)。 */
+    const directSteps = []
+    /** 跑整仓门禁的 step(`yarn check`,经 check:wasm-client-only 间接跑同一门禁)。 */
+    const fullGateSteps = []
+    for (const [jobId, job] of Object.entries(jobs)) {
+      const steps = Array.isArray(job?.steps) ? job.steps : []
+      steps.forEach((step, index) => {
+        const script = strippedRun(step)
+        const label = `job ${jobId} 的 step「${typeof step?.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`}」`
+        if (script.includes('verify-wasm-client-only.sh')) directSteps.push({ label, step })
+        if (/yarn\s+check(?![\w:.-])/u.test(script)) fullGateSteps.push({ label, step })
+      })
+    }
+    check(directSteps.length > 0, 'ci.yml 里找不到直接跑 verify-wasm-client-only.sh 的步骤(W-8 的接线对象没了)')
+    check(fullGateSteps.length > 0, 'ci.yml 里找不到跑全量根门禁(`yarn check`)的步骤(W-8 的接线对象没了)')
+    const expectedValue = value => (typeof value === 'string' ? value.trim() : String(value ?? '').trim())
+    let observedEnvName = null
+    for (const { label, step } of [...directSteps, ...fullGateSteps]) {
+      const env = typeof step?.env === 'object' && step.env !== null ? step.env : {}
+      const raw = env[EXPECT_HEAD_ENV]
+      check(raw !== undefined && expectedValue(raw) === EXPECT_HEAD_VALUE,
+        `${label} 的 step env 必须带 ${EXPECT_HEAD_ENV}: ${EXPECT_HEAD_VALUE}`
+        + `(实际 ${raw === undefined ? '缺失' : JSON.stringify(raw)})`
+        + ' —— 缺它不是"少一层保险",而是本次结论不绑任何权威 HEAD(换 commit 也照样说"全部通过")')
+      // 变量名从 ci.yml 里**抽出来**给动态断言用(而不是在测试里再写一遍字面量:
+      // 那样"CI 与脚本对不上"这种形态会被测试自己的字面量掩盖)。
+      if (raw !== undefined) observedEnvName = EXPECT_HEAD_ENV
+    }
+    // 动态:真脚本必须认这个名字,且必须在**跑任何一组之前**就以退出码 2 拒绝。
+    // sha 形状合法(40 位小写十六进制)但按构造不可能等于 HEAD ⇒ 走到"结论不可比"分支;
+    // 顺手断言它**没有**执行任何组(输出里不出现组标题),证明这是前置拒绝而非跑完才发现。
+    if (observedEnvName !== null) {
+      const wrongHead = '0'.repeat(40)
+      const refused = spawnSync('bash', ['scripts/verify-wasm-client-only.sh', '--groups', '8'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, [observedEnvName]: wrongHead },
+      })
+      const refusalText = `${refused.stdout ?? ''}${refused.stderr ?? ''}`
+      check(refused.status === 2,
+        `${observedEnvName} 与当前 HEAD 不符时,真脚本必须以退出码 2 前置拒绝(实际 ${String(refused.status)})`)
+      check(refusalText.includes('结论不可比'),
+        `${observedEnvName} 的前置拒绝必须打印「结论不可比」`
+        + `(实际输出:${refusalText.split('\n').slice(0, 3).join(' / ').slice(0, 200)})`)
+      check(!refusalText.includes('W5 文档与作者面判据'),
+        `${observedEnvName} 的前置拒绝必须发生在**跑任何一组之前**(输出里出现了组 8 的标题 ⇒ 判据已经跑过才拒绝)`)
+    }
+  }
+}
+
+// ---- 1d-2. WASM 探针证据协议的自证必须**可被打坏**(2026-09-23 第五轮审计 R4-A N2) ----
+//
+// 现场(R5-D §N2 / VERIFY.md N2):组级不变量是**计数**不变量 ⇒
+//   · 早退分支把 `skip` 写成 `pass`("跳过但打印 PASS")⇒ `group 6 pass=1` + EXIT=0;
+//   · 把探针换成 `exit 0` 桩并打印伪造的 VERDICT 行 ⇒ 4 PASS / EXIT=0。
+// 修复本体(`scripts/verify-wasm-client-only.sh`):真探针必须产出**带本次 nonce 的**
+// 结构化证据行,组级判据改成**集合**判定(发现集合 == 证据集合),并配 16 条自证样本。
+//
+// 这一组是本守卫作为**独立来源**给出的"自证网":它真跑 `--self-check`,再在
+// **副本**上把自证本身打坏,要求它变红 —— 只把自证剪掉(或把 validator 改成恒接受)
+// 在这里必然被咬住(而不是"自证自己说自己通过了")。
+{
+  const gateScript = join(root, 'scripts', 'verify-wasm-client-only.sh')
+  const source = readFileSync(gateScript, 'utf8')
+  const runSelfCheck = script => spawnSync('bash', [script, '--self-check'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 120_000,
+  })
+  const baseline = runSelfCheck(gateScript)
+  const baselineOut = `${baseline.stdout ?? ''}${baseline.stderr ?? ''}`
+  check(baseline.status === 0,
+    `WASM 门禁的 --self-check 必须 exit 0（实际 ${baseline.status}）：${baselineOut.trim().slice(-300)}`)
+  const summary = /probe-evidence self-check: samples=(\d+)\/(\d+) accepted=(\d+) rejected=(\d+)/u.exec(baselineOut)
+  if (summary === null) {
+    fail(`WASM 门禁的 --self-check 没有打印自证汇总结论（样本数与接受/拒绝计数不可见）：`
+      + `${baselineOut.trim().slice(-200)}`)
+  } else {
+    const [, observed, registered, accepted, rejected] = summary.map(Number)
+    check(observed === registered,
+      `WASM 探针证据自证只跑了 ${observed}/${registered} 条样本 ⇒ 有样本没被跑（自证被掏空）`)
+    check(registered >= 16,
+      `WASM 探针证据自证样本只剩 ${registered} 条（下限 16）—— 样本被删到没有判别力`)
+    check(accepted >= 2 && rejected >= 1,
+      `WASM 探针证据自证：接受 ${accepted} / 拒绝 ${rejected} —— 两侧都要有样本（否则判据可能恒接受或恒拒绝）`)
+    console.log(`verify-ci-scripts: WASM 探针证据自证 samples=${observed}/${registered} `
+      + `accepted=${accepted} rejected=${rejected}`)
+  }
+  // 静态接线(与动态变异互补):两种攻击形态的样本 id 与两条组级证据必须在源码里。
+  for (const needle of ['exit0-silent', 'exit0-forged-static', 'skip-with-pass-attest',
+    'early-exit-pass-no-evidence', 'group6-invariant:', 'probe-attested:']) {
+    check(source.includes(needle),
+      `WASM 门禁源码里找不到 \`${needle}\` —— 探针证据协议/自证样本被删了（R4-A N2 的两种攻击形态必须各有样本盯着）`)
+  }
+  // 变异副本:把自证打坏 ⇒ `--self-check` 必须非零。
+  const BREAK_CASES = [
+    {
+      id: 'validator-always-accept',
+      label: '证据 validator 恒接受（自证被掏空）',
+      needle: 'probe_evidence_verdict() {',
+      // 在函数体最前面插入无条件接受 ⇒ 所有 reject 样本都会被"接受"
+      replacement: "probe_evidence_verdict() {\n  printf 'accept'; return 0",
+    },
+    {
+      id: 'selftest-sample-removed',
+      label: '自证样本被删（"exit 0 桩"没有样本盯着）',
+      needle: '  "exit0-silent|reject|0|"\n',
+      replacement: '',
+    },
+    {
+      id: 'selftest-call-removed',
+      label: '自证入口被删（--self-check 不再证明任何东西）',
+      needle: 'probe_evidence_selftest() {',
+      replacement: 'probe_evidence_selftest_disabled() {',
+    },
+  ]
+  for (const breakCase of BREAK_CASES) {
+    const dir = tempDir(`wasm-selfcheck-${breakCase.id}-`)
+    const copy = join(dir, 'verify-wasm-client-only.sh')
+    if (!source.includes(breakCase.needle)) {
+      fail(`WASM 自证变异 \`${breakCase.id}\` 的注入锚点失效（锚点 ${JSON.stringify(breakCase.needle)} 不在源码里）`
+        + ' —— 请同步本守卫的锚点，不要直接删掉这段')
+      continue
+    }
+    writeFileSync(copy, source.replace(breakCase.needle, breakCase.replacement))
+    const mutated = runSelfCheck(copy)
+    check(mutated.status !== 0,
+      `WASM 自证变异「${breakCase.label}」之后 --self-check 仍然 exit 0 ⇒ 自证网是假绿（N2 的"拆掉自证 ⇒ 红"没成立）`)
+    console.log(`verify-ci-scripts: WASM 探针证据自证 变异「${breakCase.label}」⇒ --self-check 非零 ✓`)
+  }
+}
+
+// ---- 1e. Go 扫描面:CI 与 server/Makefile 同源(第三轮审计 P-4 / 第六轮 R6-C P2-1) ----
+//
+// 现场:CI 的 gofmt 步骤扫 `cmd internal`,而 `server/Makefile` 的 check / check-fast
+// 扫 `cmd internal demoapps` ⇒ `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)
+// 里的格式违规在 CI 全绿,而 `go vet ./...` 与 `go test ./...` 都不查格式。所以
+// "CI 全绿"在那条面上是假的。
+//
+// R6-C P2-1(2026-09-23 第六轮审计)又指出另一半:`gofmt`/`vet`/`test` 三面都漏掉同一个
+// Go module 里的 `webadmin/`(embed.go)与 `scripts/`(mock-upstream.go) —— CI 的
+// `go vet ./...` / `go test ./...` **覆盖**它们,本地 `make check` 不覆盖 ⇒ 这两处
+// 写坏是"本地绿、CI 红";当时 `Makefile:72` 那句"与 CI 同义"是不实陈述。
+//
+// 判据不是"两边文本相等"(那是声明),而是**目录集合相等 + 目录真实存在**:
+//   · 单侧加目录(Makefile 加、CI 不加)= 两条门禁分叉 ⇒ 红;
+//   · 单侧删目录(CI 删 demoapps/webadmin/scripts)= 扫描面缩水 ⇒ 红;
+//   · 目录名打错(扫一个不存在的目录)= 红;
+//   · Makefile 的 check 与 check-fast 出现两个不同的扫描面 ⇒ 红;
+//   · Makefile 的 `go vet` / `go test` 用的包集合 ≠ `GO_DIRS` 派生出的集合 ⇒ 红
+//     (那是"注释说同义、命令不同义"的形态;`test` 目标的 `./...` 例外 —— 它显式包含
+//      未跟踪的 `temp/**` 探针,是**更宽**的面,方向安全)。
+// 目录集合从两侧**真源**解析(CI 的 run 块 + Makefile 的 `GO_DIRS`),不写死字面量 ——
+// 写死的话改了真源判据不会跟着动(那正是 P-1/P-2/R6-C P2-1 的假绿形态)。
+{
+  const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const block = extractRunBlocks(workflowText).find(entry => /gofmt\s+-l\b/u.test(entry.content))
+  check(block !== undefined, 'ci.yml 里找不到 gofmt 步骤(抽取失败或整步被删)')
+
+  const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+  /** 解析 Makefile 变量(`X := …` / `X ?= …` / `X = …`),返回 token 数组。 */
+  const makeVar = name => {
+    const match = new RegExp(`^${name}\\s*[:?]?=\\s*(.+)$`, 'mu').exec(makefile)
+    return match === null ? null : match[1].trim().split(/\s+/u).filter(Boolean)
+  }
+  const goDirs = makeVar('GO_DIRS')
+  check(goDirs !== null && goDirs.length > 0,
+    'server/Makefile 里找不到 `GO_DIRS`(Go 扫描面的唯一真源)—— 请恢复它，不要把目录列表抄回各条命令')
+  const expectedPackages = (goDirs ?? []).map(dir => `./${dir}/...`)
+
+  /** 取出文本里所有 `gofmt -l <目录…>` 的目录列表,并把 `$(GO_DIRS)` 展开成真源目录。 */
+  const scanLists = text => [...text.matchAll(/gofmt\s+-l\s+([^\n"';|&]+)/gu)]
+    // 剥掉 shell 里的收尾括号:`$$(gofmt -l $(GO_DIRS))` / `FILES="$(gofmt -l cmd)"`。
+    // 只剥**不配对**的那些 —— `$(GO_DIRS)` 自己的右括号必须留着。
+    .map(match => {
+      let raw = match[1].trim()
+      for (;;) {
+        const opens = (raw.match(/\$\(/gu) ?? []).length
+        const closes = (raw.match(/\)/gu) ?? []).length
+        if (closes <= opens || !raw.endsWith(')')) break
+        raw = raw.slice(0, -1).trimEnd()
+      }
+      return raw.split(/\s+/u).filter(Boolean)
+    })
+    .filter(dirs => dirs.length > 0)
+    .map(dirs => dirs.flatMap(dir => (dir === '$(GO_DIRS)' ? (goDirs ?? [dir]) : [dir])))
+  const makefileLists = scanLists(makefile)
+  check(makefileLists.length > 0, 'server/Makefile 里找不到 `gofmt -l`(唯一真源被删?)')
+  check(
+    new Set(makefileLists.map(dirs => dirs.join(' '))).size === 1,
+    `server/Makefile 的每处 gofmt -l 必须扫同一组目录(本地快慢门禁不许分叉),实际 ${JSON.stringify(makefileLists)}`,
+  )
+  const makefileDirs = makefileLists[0] ?? []
+  check(
+    makefileDirs.join(' ') === (goDirs ?? []).join(' '),
+    `server/Makefile 的 gofmt 扫描面必须等于 GO_DIRS:期望 [${(goDirs ?? []).join(' ')}],`
+      + `实际 [${makefileDirs.join(' ')}] —— 三面(gofmt/vet/test)必须由同一份目录真源派生`,
+  )
+  const ciDirs = block === undefined ? [] : (scanLists(block.content)[0] ?? [])
+  check(ciDirs.length > 0, 'ci.yml 的 gofmt 步骤里找不到 `gofmt -l <目录…>`')
+  check(
+    ciDirs.join(' ') === makefileDirs.join(' '),
+    'CI 的 gofmt 扫描面必须与 server/Makefile 同源(唯一真源是 Makefile 的 `GO_DIRS`)'
+      + `:期望 [${makefileDirs.join(' ')}],实际 [${ciDirs.join(' ')}]`
+      + ' —— 只改一侧会让 CI 与本地 make check 的门禁分叉',
+  )
+  for (const dir of ciDirs) {
+    check(
+      existsSync(join(root, 'server', dir)),
+      `gofmt 扫描目录 server/${dir} 不存在(打错的目录名等于白扫)`,
+    )
+  }
+
+  // Makefile 的 `go vet` / `go test` 必须与 gofmt 同面(经 `$(GO_PACKAGES)` 或逐字列出)。
+  const goCommandLines = makefile.split('\n')
+    .map(line => /^\s*go\s+(vet|test)\s+(.+)$/u.exec(line))
+    .filter(match => match !== null)
+  check(goCommandLines.length >= 3,
+    `server/Makefile 里的 go vet/go test 命令行只剩 ${goCommandLines.length} 条(期望 ≥ 3)—— 抽取失效或命令被删`)
+  for (const match of goCommandLines) {
+    const [, verb, rest] = match
+    const packages = rest.replace('$(GO_PACKAGES)', expectedPackages.join(' '))
+      .split(/\s+/u).filter(token => token.startsWith('./'))
+    // `go test ./...`(test 目标):显式含未跟踪的 `temp/**` 探针,是**更宽**的面。
+    const isEverything = packages.length === 1 && packages[0] === './...'
+    if (isEverything) continue
+    check(
+      packages.join(' ') === expectedPackages.join(' '),
+      `server/Makefile 的 \`go ${verb}\` 包集合必须等于 GO_DIRS 派生出的集合`
+        + `(期望 [${expectedPackages.join(' ')}],实际 [${packages.join(' ')}])`
+        + ' —— "与 CI 同义"必须是命令级事实，不能只是注释里的一句话(R6-C P2-1)',
     )
   }
 }
@@ -944,64 +2159,24 @@ echo x > "${distDir}/App.AppImage"
   const store = join(work, 'store')
   writeFileSync(list, 'official\nbeta\nexample-brand\n')
 
-  // 假 aws:把 s3 cp/ls/rm 变成对本地目录的操作,并把参数记进日志,便于断言。
+  // 假 aws:把 s3/s3api 子命令变成对本地目录的操作,并把参数记进日志,便于断言。
   const log = join(work, 'aws.log')
   writeFileSync(log, '')
   const fakeAws = join(work, 'aws')
-  writeFileSync(fakeAws, `#!/usr/bin/env bash
-set -euo pipefail
-log="${log}"
-store="${store}"
-record() { printf '%s\\n' "$*" >> "$log"; }
-args=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --endpoint-url) shift 2 ;;
-    *) args+=("$1"); shift ;;
-  esac
-done
-cmd="\${args[0]:-} \${args[1]:-}"
-case "$cmd" in
-  "s3 cp")
-    src="\${args[2]}"; dst="\${args[3]}"
-    extra=("\${args[@]:4}")
-    record "cp $src $dst \${extra[*]:-}"
-    key="\${dst#s3://*/}"
-    if [[ "$dst" == */ ]]; then
-      # 目录目标:对象键 = 前缀 + 源文件名(与 aws s3 cp 语义一致)
-      dest="$store/\${key}$(basename "$src")"
-    else
-      dest="$store/\${key}"
-    fi
-    mkdir -p "$(dirname "$dest")"
-    cp "$src" "$dest"
-    ;;
-  "s3 ls")
-    prefix="\${args[2]}"
-    key="\${prefix#s3://*/}"
-    record "ls $prefix"
-    # 与真实 aws 同语义:前缀命中**单个对象**时打印那一行,命中"目录"时逐个列目录,
-    # 都没有时**退出码 0 且无输出**(所以断言必须查"有没有输出",不能查退出码)。
-    if [ -f "$store/$key" ]; then
-      echo "2026-01-01 00:00:00          1 $key"
-    elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
-    ;;
-  "s3 rm")
-    target="\${args[2]}"
-    key="\${target#s3://*/}"
-    record "rm $target"
-    rm -rf "$store/$key"
-    ;;
-  *) record "other $*" ;;
-esac
-`)
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
   execFileSync('chmod', ['+x', fakeAws])
 
-  // 每个渠道造一份"已构建"的镜像包。
+  // 每个渠道造一份"已构建"的镜像包。SHA256SUMS 必须**真的**写着该包的 sha256 ——
+  // 发布脚本会先做本地产物自洽检查(空/写错包名的清单在客户侧表现为"校验永远不过")。
+  const bundleSums = (channel, content) => {
+    const digest = createHash('sha256').update(content).digest('hex')
+    writeFileSync(join(bundle, channel, 'SHA256SUMS'), `${digest}  picoaide-server-2.7.0-amd64.zip\n`)
+  }
   for (const channel of ['official', 'beta', 'example-brand']) {
     mkdirSync(join(bundle, channel), { recursive: true })
-    writeFileSync(join(bundle, channel, 'picoaide-server-2.7.0-amd64.zip'), `zip-${channel}`)
-    writeFileSync(join(bundle, channel, 'SHA256SUMS'), `sum-${channel}`)
+    const content = `zip-${channel}`
+    writeFileSync(join(bundle, channel, 'picoaide-server-2.7.0-amd64.zip'), content)
+    bundleSums(channel, content)
   }
   // 早于保留窗口的旧版本(应被清掉)与较新版本(应保留)。
   mkdirSync(join(store, 'official', 'releases', '2.5.0'), { recursive: true })
@@ -1105,6 +2280,164 @@ esac
     env: { PATH: `${work}:${process.env.PATH ?? ''}`, HOME: process.env.HOME ?? '', R2_ACCOUNT_ID: 'a', R2_BUCKET: 'b' },
   })
   check(noVersion.status !== 0, '缺 VERSION 时必须失败')
+}
+
+// ---- 6b. R2 上传后必须做「大小 + 哈希」完整性校验(2026-09-23 审计 K-01) ----
+//
+// 为什么必须有这一组:`aws s3 cp` 的退出码只表示"请求成功",不表示"远端字节完整"。
+// 2026-09-22 现场实测过对象在 382,992,384B 处截断(宣告 522MB)而全链路绿灯;审计
+// 探针里"只写入前 10 字节"的假 aws 也让脚本 EXIT=0 并写出指向损坏对象的 latest.json。
+// 旧实现唯一的检查是"对象存在"(`aws s3 ls` 有输出即可)。
+//
+// 判据(每条都要能被打坏 —— 正向对照保证这些用例不是恒红):
+//   A. 假 aws 截断上传(退出码 0,只写前 10 字节)→ 必须非 0,且**不写** latest.json;
+//   B. 远端大小被改错 → 必须非 0,且**不写** latest.json;
+//   C. 远端校验和与本地不一致 → 必须非 0,且**不写** latest.json;
+//   D. 远端没有校验和(None)→ 必须非 0(不退化成"只校大小");
+//   E. 正向对照:完整上传 + 正确大小/校验和 → EXIT=0 且写出 latest.json。
+{
+  const work = tempDir('ci-publish-integrity-')
+  const bundle = join(work, 'release-bundle')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  writeFileSync(list, 'official\n')
+
+  const zipName = 'picoaide-server-9.9.9-amd64.zip'
+  const content = 'zip-official-integrity-probe'
+  mkdirSync(join(bundle, 'official'), { recursive: true })
+  writeFileSync(join(bundle, 'official', zipName), content)
+  writeFileSync(
+    join(bundle, 'official', 'SHA256SUMS'),
+    `${createHash('sha256').update(content).digest('hex')}  ${zipName}\n`,
+  )
+
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+
+  const runPublish = faults => spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: 'v9.9.9',
+      ...faults,
+    },
+  })
+  const manifestPath = join(store, 'official', 'latest.json')
+  const resetStore = () => rmSync(store, { recursive: true, force: true })
+
+  // A. 截断上传(退出码 0)。这正是 2026-09-22 现场的形态。
+  resetStore()
+  const truncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10' })
+  check(truncated.status !== 0, '上传被截断(远端 10 字节)时必须失败,不能静默写 latest.json')
+  check(!existsSync(manifestPath), '完整性校验失败时**不得**写 latest.json(否则指针指向损坏对象)')
+  check(
+    `${truncated.stderr ?? ''}`.includes('校验失败'),
+    `失败信息应点名完整性校验,实际: ${(truncated.stderr ?? '').slice(0, 200)}`,
+  )
+
+  // B. 远端大小与本地不一致(head-object 报错值)。
+  resetStore()
+  const wrongSize = runPublish({ FAKE_AWS_SIZE: '123' })
+  check(wrongSize.status !== 0, '远端大小 != 本地大小时必须失败')
+  check(!existsSync(manifestPath), '大小不符时不得写 latest.json')
+
+  // C. 远端哈希与本地不一致(大小正确)。
+  resetStore()
+  const wrongSha = runPublish({ FAKE_AWS_SHA: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' })
+  check(wrongSha.status !== 0, '远端 SHA256 != 本地 SHA256 时必须失败')
+  check(!existsSync(manifestPath), '哈希不符时不得写 latest.json')
+
+  // D. 远端没有校验和 → 同样 fail-loud(不能退化成"只校大小")。
+  resetStore()
+  const noSha = runPublish({ FAKE_AWS_SHA: 'None' })
+  check(noSha.status !== 0, '远端没有 SHA256 校验和时必须失败(不允许退化成只校大小)')
+  check(!existsSync(manifestPath), '拿不到校验和时不得写 latest.json')
+
+  // E. 正向对照:不注入故障 ⇒ 必须成功,否则上面四条可能只是"恒红"。
+  resetStore()
+  const ok = runPublish({})
+  check(
+    ok.status === 0,
+    `完整上传 + 正确大小/校验和必须成功(否则上面几条恒红),实际退出 ${String(ok.status)}: ${(ok.stderr ?? '').slice(0, 300)}`,
+  )
+  check(existsSync(manifestPath), '正向对照应写出 latest.json')
+  check(
+    readFileSync(join(store, 'official', 'releases', '9.9.9', zipName), 'utf8') === content,
+    '正向对照:远端对象应与本地字节一致',
+  )
+  // 上传必须是**单请求 PUT + 声明整对象 SHA256**:多段上传的校验和是"分片校验和的
+  // 校验和",与本地 sha256 不可对拍(用它当判据会在每次正常发布上误报)。
+  const putLine = readFileSync(log, 'utf8').split('\n')
+    .find(line => line.includes('put-object') && line.includes(zipName))
+  const expectedB64 = createHash('sha256').update(content).digest('base64')
+  check(
+    typeof putLine === 'string' && putLine.includes(`--checksum-sha256 ${expectedB64}`),
+    `上传必须带 --checksum-sha256 <base64(本地 sha256)>,实际记录: ${putLine ?? '<无>'}`,
+  )
+
+  // 本地产物不自洽(SHA256SUMS 里没有该包的 sha256)→ 必须当场失败,不浪费一次上传。
+  resetStore()
+  writeFileSync(join(bundle, 'official', 'SHA256SUMS'), 'deadbeef  picoaide-server-9.9.9-amd64.zip\n')
+  const badSums = runPublish({})
+  check(badSums.status !== 0, '本地产物不自洽(SHA256SUMS 不含该包哈希)时必须失败')
+  check(!existsSync(manifestPath), '本地产物不自洽时不得写 latest.json')
+
+  // -------------------------------------------------------------------------
+  // F–I. **按对象**的完整性回归网(2026-09-23 第六轮审计 R6-C-3)。
+  //
+  // 现场:A–E 五条注入全部打在**先被校验的那个 zip** 上,于是
+  //   · 删掉 `ci-publish-update-server.sh:226`(SHA256SUMS 对象的 verify_remote_object),
+  //   · 删掉 `:263`(清理旧版本之后、写 latest.json 之前的 zip 复检),
+  // 两次 `node scripts/verify-ci-scripts.mjs` 都仍然 **EXIT=0**,而成功行照旧宣称
+  // "上传后大小/哈希完整性校验"。指针对象(latest.json)当时更是完全没有校验。
+  // 这四条用例就是那三处的判据面:注入**只作用于被点名的对象**。
+  // -------------------------------------------------------------------------
+  resetStore()
+  writeFileSync(join(bundle, 'official', 'SHA256SUMS'),
+    `${createHash('sha256').update(content).digest('hex')}  ${zipName}\n`)
+  // F. `SHA256SUMS` 对象被截断(zip 完全正常)⇒ 必须失败,且不得写 latest.json。
+  //    这是"客户拿它给包对拍、而它自己坏了"的现场形态。
+  const sumsTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: 'SHA256SUMS' })
+  check(sumsTruncated.status !== 0, 'SHA256SUMS 对象被截断(而 zip 正常)时必须失败')
+  check(!existsSync(manifestPath), 'SHA256SUMS 完整性不过时不得写 latest.json')
+  check(existsSync(join(store, 'official', 'releases', '9.9.9', zipName)),
+    'F 用例的前提:zip 本身必须已完整上传(注入只作用于 SHA256SUMS)')
+  // G. `SHA256SUMS` 对象哈希不符(大小正确)⇒ 同样必须失败。
+  resetStore()
+  const sumsWrongSha = runPublish({ FAKE_AWS_SHA: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=', FAKE_AWS_SHA_KEY: 'SHA256SUMS' })
+  check(sumsWrongSha.status !== 0, 'SHA256SUMS 对象的 SHA256 与本地不一致时必须失败')
+  check(!existsSync(manifestPath), 'SHA256SUMS 哈希不符时不得写 latest.json')
+  // H. **写指针前的复检**必须是拦住"上传后对象又坏了"的那条判据:
+  //    第 1 次 zip head(上传后校验)读到的是好对象,之后对象被弄坏 ⇒ 只有复检能看见。
+  resetStore()
+  const staleAfterFirstCheck = runPublish({ FAKE_AWS_TRUNCATE_ON_HEAD: `${zipName}:1` })
+  check(staleAfterFirstCheck.status !== 0,
+    '上传后对象再被弄坏(第 1 次 head 之后截断)时,写指针前的复检必须失败 —— 删掉它会静默写出指向损坏对象的 latest.json')
+  check(!existsSync(manifestPath), '写指针前的复检不过时不得写 latest.json')
+  // I. **指针对象**本身也要校:latest.json 被截断 ⇒ 必须失败(客户更新链路的第一步就是读它)。
+  resetStore()
+  const pointerTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: 'latest.json' })
+  check(pointerTruncated.status !== 0, 'latest.json 对象被截断时必须失败(指针损坏 = 客户更新链路不可用)')
+  // 正向对照(与 E 同一形态,但注入面按对象收窄之后复跑一次):三条校验都该放行。
+  resetStore()
+  const scopedGreen = runPublish({ FAKE_AWS_TRUNCATE_KEY: 'nothing-matches', FAKE_AWS_SIZE_KEY: 'nothing-matches' })
+  check(scopedGreen.status === 0,
+    `带按对象作用域的注入但不命中任何对象时必须成功(否则 F–I 可能只是恒红),实际退出 ${String(scopedGreen.status)}: ${(scopedGreen.stderr ?? '').slice(0, 300)}`)
+  check(existsSync(manifestPath), 'F–I 的正向对照应写出 latest.json')
+  // 三个对象都确实被校验过:head-object 至少要各问到一次(证据,不是"存在性断言")。
+  const scopedLog = readFileSync(log, 'utf8')
+  for (const needle of [zipName, 'SHA256SUMS', 'latest.json']) {
+    check(scopedLog.includes(`head-object official/releases/9.9.9/${needle}`)
+      || scopedLog.includes(`head-object official/${needle}`),
+    `正向对照:${needle} 必须被 head-object 校验过(缺了它 ⇒ 该对象的完整性判据不存在)`)
+  }
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
@@ -1402,6 +2735,21 @@ exit 0
     /save .*picoaide-harness-server:v9\.9\.9 .*picoaide-harness-server:9\.9\.9/u.test(dockerLog),
     'docker save 必须带上两个 tag(否则 docker load 后少一个)',
   )
+  // 渠道专属 tag(2026-09-23 审计 K-02):同一台宿主机上多个渠道栈时,归档内部的
+  // `v<ver>` tag 完全相同,后 `docker load` 的会覆盖先前的 ⇒ 任一栈
+  // `docker compose up -d server` 都可能用**另一渠道**的镜像重建(品牌/随包客户端
+  // 全错,而 .env 里的 SERVER_IMAGE 看起来完全正确)。所以每个渠道的归档里必须
+  // 额外带一个 `<channel>-<ver>` tag,部署侧才能把两栈彻底隔开。
+  for (const channel of ['official', 'beta']) {
+    check(
+      dockerLog.includes(`tag picoaide-harness-server:v9.9.9 picoaide-harness-server:${channel}-9.9.9`),
+      `镜像必须额外打渠道专属 tag ${channel}-<ver>(同机多栈时防止互相覆盖)`,
+    )
+    check(
+      new RegExp(`save .*picoaide-harness-server:${channel}-9\\.9\\.9`, 'u').test(dockerLog),
+      `docker save 必须带上渠道专属 tag ${channel}-<ver>(否则 docker load 后没有它)`,
+    )
+  }
   check(existsSync(join(out, 'official', 'picoaide-server-9.9.9-amd64.zip')), '产物名应中性(不含渠道 id)')
 }
 
@@ -1422,51 +2770,22 @@ exit 0
   writeFileSync(log, '')
   writeFileSync(list, 'beta\n')
 
-  // 假 aws:与 §6 同构(cp/ls/rm 落到本地目录,`s3 ls <对象键>` 命中时打印一行)。
+  // 假 aws:与 §6 同一份(s3/s3api 同形,`s3 ls <对象键>` 命中时打印一行)。
   const fakeAws = join(work, 'aws')
-  writeFileSync(fakeAws, `#!/usr/bin/env bash
-set -euo pipefail
-log="${log}"
-store="${store}"
-record() { printf '%s\\n' "$*" >> "$log"; }
-args=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --endpoint-url) shift 2 ;;
-    *) args+=("$1"); shift ;;
-  esac
-done
-cmd="\${args[0]:-} \${args[1]:-}"
-case "$cmd" in
-  "s3 cp")
-    src="\${args[2]}"; dst="\${args[3]}"
-    record "cp $src $dst"
-    key="\${dst#s3://*/}"
-    if [[ "$dst" == */ ]]; then dest="$store/\${key}$(basename "$src")"; else dest="$store/\${key}"; fi
-    mkdir -p "$(dirname "$dest")"; cp "$src" "$dest"
-    ;;
-  "s3 ls")
-    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
-    record "ls $prefix"
-    if [ -f "$store/$key" ]; then
-      echo "2026-01-01 00:00:00          1 $key"
-    elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
-    ;;
-  "s3 rm")
-    target="\${args[2]}"; key="\${target#s3://*/}"
-    record "rm $target"
-    rm -rf "$store/$key"
-    ;;
-  *) record "other $*" ;;
-esac
-`)
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
   execFileSync('chmod', ['+x', fakeAws])
 
   /** 造出某渠道某版本的"已构建"资产,再跑一次发布。 */
   const publish = (channel, ver) => {
     mkdirSync(join(bundle, channel), { recursive: true })
-    writeFileSync(join(bundle, channel, `picoaide-server-${ver}-amd64.zip`), `zip-${channel}-${ver}`)
-    writeFileSync(join(bundle, channel, 'SHA256SUMS'), `sum-${channel}-${ver}`)
+    const content = `zip-${channel}-${ver}`
+    const archive = `picoaide-server-${ver}-amd64.zip`
+    writeFileSync(join(bundle, channel, archive), content)
+    // SHA256SUMS 必须真的含该包哈希:发布脚本会先做本地产物自洽检查。
+    writeFileSync(
+      join(bundle, channel, 'SHA256SUMS'),
+      `${createHash('sha256').update(content).digest('hex')}  ${archive}\n`,
+    )
     const result = spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
       cwd: work,
       encoding: 'utf8',
@@ -1619,10 +2938,60 @@ esac
   }
 }
 
+// ---- 12. 本地镜像构建入口必须提供 Dockerfile 要求的全部命名构建上下文(2026-09-23 审计 K-05) ----
+//
+// `COPY --from=<name>` 的 <name> 若不是 stage、也不是用户命名上下文,BuildKit 会把它当
+// **镜像引用**去拉取 —— 于是 `make docker-image`(四处文档承诺的本地构建入口)会停在
+// "拉取 clientassets"上,报错完全不指向真实原因(本项目历史上正是被 Docker Hub 可达性
+// 坑过)。判据 = **Dockerfile 里用到的自定义上下文集合 ⊆ Makefile 提供的集合**,
+// 两边任一新增/改名都会在这里红。
+{
+  const dockerfile = readFileSync(join(root, 'server', 'Dockerfile'), 'utf8')
+  const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+
+  const stages = new Set(
+    [...dockerfile.matchAll(/^FROM\s+\S+\s+AS\s+([A-Za-z0-9_.-]+)/gimu)].map(match => match[1].toLowerCase()),
+  )
+  const contexts = [...new Set(
+    [...dockerfile.matchAll(/^COPY\s+--from=([A-Za-z0-9_.-]+)/gimu)]
+      .map(match => match[1])
+      .filter(name => !stages.has(name.toLowerCase())),
+  )]
+  check(
+    contexts.length > 0,
+    'server/Dockerfile 应至少依赖一个命名构建上下文(客户端随镜像分发 + 渠道内容);'
+      + '若确实都不需要了,请同时删掉 Makefile 的 --build-context 与这条断言',
+  )
+
+  const target = /^docker-image:\n((?:\t.*\n|\s*\n)*)/mu.exec(makefile)
+  check(target !== null, 'server/Makefile 应有 docker-image 目标(本地镜像构建入口)')
+  const body = target?.[1] ?? ''
+  for (const name of contexts) {
+    check(
+      body.includes(`--build-context ${name}=`),
+      `make docker-image 必须提供 --build-context ${name}=…(Dockerfile 的 COPY --from=${name} 是必需上下文;`
+        + '缺了 BuildKit 会把该名字当镜像引用去拉取,报错不指向真实原因)',
+    )
+  }
+  // 用法示例同样要带上下文:照抄 Dockerfile 头部注释的人会直接踩坑。
+  const header = dockerfile.split('\n').filter(line => line.startsWith('#')).join('\n')
+  for (const name of contexts) {
+    check(
+      header.includes(`--build-context ${name}=`),
+      `server/Dockerfile 头部的构建示例必须带 --build-context ${name}=…(照抄示例的人会直接踩坑)`,
+    )
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
 }
-process.stdout.write('verify-ci-scripts: OK — 渠道发现(ref 类型判定)/掩码(取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/镜像装配(无 deb+双 tag)/R2 中转/R2 发布(本次版本必留)/公开 artifact 守卫全部符合预期\n')
+process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
+  + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
+  + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
+  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
+  + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
+  + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')

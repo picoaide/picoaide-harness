@@ -109,15 +109,31 @@ export function builtinRowProgress(
 /**
  * 安装端点（与市场技能同一前缀的宿主代理；不直连服务端）。
  *
- * ⚠️ **不带 query 参数**（R2-SK-5）：宿主按 pathname 分发（`auth-gate` 的
- * `/^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/`），从不读 `?force=1`；
- * "更新"之所以能生效，靠的是 `installSkillArchive` 本身的**整树替换**语义
- * （备份旧目录 → rename 新的进来），而不是某个强制刷新开关。留一个没人读的
- * 参数只会让人以为它能强制刷新（曾如此）。
+ * 端点本身不带参数（R2-SK-5：宿主按 pathname 分发，历史上的 `?force=1` 谁都没读）；
+ * `overwrite=true` 时由本函数拼上 `?overwrite=1` —— 那个参数宿主**真的读**
+ * （审计 2026-09-23 A2/A3 的两端契约：覆盖本机自制内容必须有用户确认）。
  * @param name - 技能名（服务端清单里的 `name`）。
+ * @param overwrite - 用户已确认覆盖本机同名内容。
  */
-export function builtinInstallEndpoint(name: string): string {
-  return `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
+export function builtinInstallEndpoint(name: string, overwrite = false): string {
+  const base = `/api/pico/skills/builtin/${encodeURIComponent(name)}/install`
+  return overwrite ? `${base}?overwrite=1` : base
+}
+
+/**
+ * 一次内置技能安装请求的响应 → 面板要做的下一步（**纯函数**，R4-B-5）。
+ *
+ * 抽出来的理由：`useBuiltinSkills` 是 React hook，本包没有 jsdom 渲染测试面；而
+ * "409 必须落到确认条"恰恰是这条 finding 的验收点。做成纯函数后，
+ * `builtinSkillsInstallOutcome(409, false) === 'conflict'` 可以被单测直接打坏，
+ * 而"hook 真的用了它"由 `capability-center-panel.spec.ts` 的接线断言钉住。
+ * @param status - HTTP 状态码。
+ * @param ok - `res.ok`。
+ * @returns `'ok'` 装上 / `'conflict'` 需要用户确认（409 LOCAL_CONTENT）/ `'failed'`。
+ */
+export function builtinSkillsInstallOutcome(status: number, ok: boolean): 'ok' | 'conflict' | 'failed' {
+  if (ok) return 'ok'
+  return status === 409 ? 'conflict' : 'failed'
 }
 
 /**
@@ -175,14 +191,30 @@ export function useBuiltinSkills(onInstalled?: () => void) {
    * 安装与更新是**同一条链路**（同端点、同宿主处理）：本机已有这一行时再 POST 一次，
    * `installSkillArchive` 会把整棵树替换成服务端那一份（R1-pm-8 的"更新真的装得上"
    * 就靠它）。端点不带参数（R2-SK-5）—— 宿主不读 `?force=1`，别再加回来。
+   *
+   * 返回值是**给调用方的分派信号**（R4-B-5，第四轮审计）：
+   *  - `'ok'`：装上了（含"更新"）；
+   *  - `'conflict'`：宿主回 409 `LOCAL_CONTENT` = 目标是需要确认的同名内容
+   *    （另一条商店渠道 / 本机自制 / 已本地修改）⇒ 调用方（面板）要开确认条并把
+   *    `overwrite = true` 再打一次。**不能**当成失败：只贴一句拒绝文案 + 一个「重试」
+   *    按钮时，点多少次都是同一发不带 `?overwrite=1` 的请求 —— 用户没有任何路径
+   *    能补上确认（这正是这条 finding 的现场）；
+   *  - `'failed'`：其它失败（网络/422/…），文案走本模块的按行失败态。
    * @param skill - 清单行。
+   * @param overwrite - 用户已在本机确认覆盖同名内容（宿主缺它会 409 拒绝）。
+   * @returns `'ok' | 'conflict' | 'failed'`。
    */
-  const install = async (skill: BuiltinSkill): Promise<void> => {
+  const install = async (skill: BuiltinSkill, overwrite = false): Promise<'ok' | 'conflict' | 'failed'> => {
     setBusy(skill.name)
     setFailed(null)
     try {
-      const res = await fetch(builtinInstallEndpoint(skill.name), { method: 'POST' })
-      if (!res.ok) {
+      const res = await fetch(builtinInstallEndpoint(skill.name, overwrite), { method: 'POST' })
+      const outcome = builtinSkillsInstallOutcome(res.status, res.ok)
+      if (outcome === 'conflict') {
+        // 需要用户确认：不置失败态（确认条才是这一步的出口）。
+        return 'conflict'
+      }
+      if (outcome === 'failed') {
         const data = await res.json().catch(() => ({})) as { error?: string }
         throw new Error(data.error ?? `HTTP ${String(res.status)}`)
       }
@@ -192,8 +224,10 @@ export function useBuiltinSkills(onInstalled?: () => void) {
       // （带「平台内置」来源徽章），同时本入口卡片消失（已装且同版本 ⇒ planBuiltinCards
       // 不再出卡；面板的 planSectionCards 保证任一时刻同名技能只有一张卡）。
       onInstalled?.()
+      return 'ok'
     } catch (cause) {
       setFailed({ name: skill.name, message: cause instanceof Error ? cause.message : String(cause) })
+      return 'failed'
     } finally {
       setBusy(null)
     }

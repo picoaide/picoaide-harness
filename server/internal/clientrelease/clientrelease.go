@@ -158,8 +158,28 @@ func manifest(c *gin.Context, serverVersion, channel string) {
 //
 // 只服务资产目录下的**普通安装包文件**:目录里除了安装包还有
 // CLIENT-RELEASE.json 等文件,而 http.ServeFile 对目录会直接返回目录列表
-// (name=".." 曾实测可列出资产目录的父目录文件名 —— 未认证的目录探测)。
+// (name=".." 曾实测可列出资产目录的父文件名 —— 未认证的目录探测)。
+//
+// # 下载面的响应头必须**显式**给定（R3-A A-12）
+//
+// 此前本函数只设 Cache-Control 与写截止,类型完全交给 `http.ServeFile` ——
+// 那意味着:没有 `nosniff`(类型判定权交给浏览器)、没有 `Content-Disposition`
+// (浏览器可以**内联渲染**下载内容),而 Content-Type 由 ServeFile 按扩展名推导,
+// 推不出来时直接**按内容嗅探**(运行镜像里不一定有 mime 数据库,未知扩展名必然
+// 走这条路)。安装包一律是二进制下载面,这三件事都不该由字节内容决定。
+//
+// 三条约束（`download_headers_test.go` 逐条钉住）:
+//   - `X-Content-Type-Options: nosniff` —— 浏览器不得改写类型判定;
+//   - `Content-Type` 按**扩展名**显式声明（见 assetContentType）;
+//   - `Content-Disposition: attachment` —— 一律作为附件下载。
+//
+// 为什么是 attachment 而不是 inline:本路由的白名单只有安装包
+// (.dmg/.exe/.appimage/.deb/.zip/.tar.gz/.msi/.pkg),没有任何一种需要浏览器内联
+// 渲染;inline 的收益是零,代价是一个**同源渲染面**。文件名经 mime.FormatMediaType
+// 编码(RFC 6266/5987),所以含非 ASCII 的文件名也不会拼出畸形头。
 func file(c *gin.Context) {
+	// 错误面同样不该由嗅探决定类型(nosniff 对 JSON 404 无害,所以放在最前面)。
+	c.Header("X-Content-Type-Options", "nosniff")
 	name := strings.TrimPrefix(c.Param("file"), "/")
 	if name == "" || strings.ContainsAny(name, `/\`) ||
 		strings.Contains(name, "..") || !allowedAssetName(name) {
@@ -174,12 +194,84 @@ func file(c *gin.Context) {
 	}
 	// 文件名含版本号 → 内容固定,可长缓存;ServeFile 自带 Range/断点续传。
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	// 显式类型 + 附件下载：必须在 ServeFile **之前**设好（serveContent 只在
+	// Content-Type 为空时才去推导/嗅探）。Range/206 走的是同一份响应头。
+	c.Header("Content-Type", assetContentType(name))
+	c.Header("Content-Disposition", contentDispositionAttachment(name))
 	// 只放宽**这一条路由**的写截止时间(见 downloadWriteDeadline 的推导):
 	// 安装包体积大、慢链路下载远超全局 WriteTimeout。底层实现不支持时
 	// (SetWriteDeadline 返回 ErrNotSupported)保持原语义,不新增失败面。
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(
 		time.Now().Add(downloadWriteDeadline(st.Size())))
 	http.ServeFile(c.Writer, c.Request, full)
+}
+
+// assetContentTypes 把白名单里的扩展名映射到**平台声明**的媒体类型。
+//
+// 为什么要一张表而不是 `application/octet-stream` 一刀切:下载面虽然是 attachment,
+// 类型仍是操作系统与下载管理器用来"打开/安装"的依据(选错会让用户双击后得到
+// "未知文件")。表里全部是 IANA 注册类型或 shared-mime-info 的既定取值,未知扩展名
+// 回落 `application/octet-stream` —— 回落值同样**不是**嗅探结果。
+//
+// 与 allowedAssetExts 必须成对维护:新增白名单扩展名时没配类型 = 回落成
+// octet-stream(功能仍正确,只是信息量少),而**不会**退回嗅探。
+var assetContentTypes = map[string]string{
+	".dmg":      "application/x-apple-diskimage",
+	".exe":      "application/vnd.microsoft.portable-executable",
+	".appimage": "application/vnd.appimage",
+	".deb":      "application/vnd.debian.binary-package",
+	".zip":      "application/zip",
+	".tar.gz":   "application/gzip",
+	".msi":      "application/x-msi",
+	".pkg":      "application/vnd.apple.installer+xml",
+}
+
+// assetContentType 按扩展名给媒体类型(小写比较,未知回落 octet-stream)。
+func assetContentType(name string) string {
+	lower := strings.ToLower(name)
+	for ext, ctype := range assetContentTypes {
+		if strings.HasSuffix(lower, ext) {
+			return ctype
+		}
+	}
+	return "application/octet-stream"
+}
+
+// contentDispositionAttachment 构造 `attachment; filename="…"`（下载面固定形态）。
+//
+// 为什么不用 `mime.FormatMediaType`：它把 token 形态的文件名写成**不带引号**的
+// `filename=x.dmg`（RFC 6266 允许，但并非所有下载管理器/旧客户端都认）。
+// 这里的文件名形态固定（`<slug>-<ver>-<os>.<ext>`），固定输出带引号的
+// quoted-string 更稳，也让判据可以逐字断言。
+//
+// 含非 ASCII 时**同时**给 RFC 5987 的 `filename*`（ASCII 替身在前、UTF-8 真名在后，
+// 即 RFC 6266 §4.3 的兼容写法）—— 只给一种会让某类客户端拿到乱码文件名。
+//
+// 控制字符显式剔除：合法资产名里不可能有换行（文件名由 CI 生成），但响应头绝不
+// 接受调用方可控的换行是纵深防御，成本一行（Go 的 http 层也会把 CR/LF 换成空格，
+// 那会让"文件名被判据读成另一个值"，不如自己先删掉）。
+func contentDispositionAttachment(name string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	quoted := `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(clean) + `"`
+	if isASCII(clean) {
+		return "attachment; filename=" + quoted
+	}
+	return "attachment; filename=" + quoted + "; filename*=UTF-8''" + url.PathEscape(clean)
+}
+
+// isASCII 报告字符串是否全部是 ASCII（决定要不要补 filename*）。
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // allowedAssetExts 可对外下发的安装包扩展名白名单(小写比较)。

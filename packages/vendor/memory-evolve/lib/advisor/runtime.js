@@ -205,9 +205,6 @@ function raceIteratorNext(iterator, signal) {
 // AdvisorRuntime
 // ---------------------------------------------------------------------------
 
-/** 评审运行时状态（契约 v2 冻结枚举）。 */
-export const RUNTIME_STATUS = ['disabled', 'idle', 'reviewing', 'quota_exhausted', 'halted']
-
 /**
  * @param {object} options
  * @param {string} options.provider - 生效供应商路由（resolveAdvisorRoute 解析后）

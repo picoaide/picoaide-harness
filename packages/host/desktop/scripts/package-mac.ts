@@ -10,6 +10,7 @@ import { withStagedPackAppRoot } from './pack-app-root.mjs'
 import { prepareChannelPackaging } from './channel-prepare.ts'
 import { withoutMacReleaseSecrets } from './release-preflight.ts'
 import { prepareInstalledMacArm64Runtime } from './mac-runtime.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable native macOS packaging boundary used by focused tests. */
 export interface MacSmokePackageOptions {
@@ -40,8 +41,12 @@ export interface MacSmokePackageOptions {
   /**
    * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
    * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   *
+   * **是函数而不是数组**：生成配置文件这件事必须发生在**应用根暂存之后**，而参数
+   * 对象的构造发生在暂存之前（缺省参数在函数进入时就求值）。2026-09-23 复审 N-1
+   * 的机制正是"暂存之前把渠道配置写进 `build/`，暂存整目录复制把它带进 asar"。
    */
-  readonly channelConfigArgs: readonly string[]
+  readonly channelConfigArgs: () => readonly string[]
   /**
    * 打包输入暂存（见 pack-app-root.mjs）：把应用根复制成**只含运行期条目**的副本，
    * 让 electron-builder 以它为 `directories.app`。
@@ -101,7 +106,8 @@ function defaultOptions(): MacSmokePackageOptions {
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL('./verify-mac-smoke.ts', import.meta.url)),
     nodeExecutable: process.execPath,
-    channelConfigArgs: prepareChannelBuilderOverrides(channel),
+    // 惰性求值：配置在**应用根暂存之后**才生成（见 channelConfigArgs 的说明）。
+    channelConfigArgs: () => prepareChannelBuilderOverrides(channel),
     run,
     log: message => console.log(message),
   }
@@ -164,7 +170,8 @@ export function packageMacSmoke(
       '--config.mac.notarize=false',
       '--config.npmRebuild=false',
       `--config.directories.output=${options.outputDir}`,
-      ...options.channelConfigArgs,
+      // 惰性求值：到这里应用根已经暂存完（见 channelConfigArgs 的说明）。
+      ...options.channelConfigArgs(),
       ...staged.args,
     ],
     options.desktopRoot,
@@ -185,13 +192,12 @@ export function packageMacSmoke(
   )
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     if (!process.argv.includes('--no-prebuild')) {
       // 打包前预构建依赖包(见 prebuild-workspace-deps.ts)
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))))
     }
     // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json),必须在打包之前。
     await prepareChannelPackaging()

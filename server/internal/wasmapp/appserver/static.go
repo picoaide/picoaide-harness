@@ -42,13 +42,16 @@ const staticCacheMaxAge = 5 * time.Minute
 //     只用宿主能力，路由形状完全由作者决定），形状判断必然打架。
 //  4. 目录形态（以 `/` 结尾）等价于该目录下的 `index.html`；`/` 等价于 `/index.html`。
 //  5. **入口文档的特例**：`RequiresLogin()` 为真的应用（allowEntry=false）下
-//     `/`、`/index.html`、`<dir>/` 这些**入口**不直出，交给 wasm。
+//     `/`、`/index.html`、`<dir>/`（= `<dir>/index.html`）这些**入口文档**不直出，
+//     交给 wasm。判据是"是不是入口**文档**"，不是"是不是**根**文档"（R3-A A-5：
+//     实现曾只认根 `index.html`，于是页面放在子目录的应用，其入口被宿主直出）。
 //     理由：R24 把名单判定交给应用，且 §6.1 的链路明写"未授权请求照样进 wasm，
 //     由应用返回 403（页面必须显示本人账号）"。如果宿主把入口 HTML 直出，
 //     不在名单里的已登录用户就永远看不到那个 403 页面（只看到一个空壳页面，
 //     而它的 API 调用会 403）—— 名单应用的入口必须由应用自己把门。
-//     子资源（JS/CSS/图片）仍然直出：它们是壳资源，且在 (app,version) 下不可变，
-//     正是 §4.6「资源响应缓存是 P0 必配」要保护的部分。
+//     子资源（JS/CSS/图片）与**非入口的普通文档**（如 `docs/readme.html`）仍然
+//     直出：它们是壳资源，且在 (app,version) 下不可变，正是 §4.6「资源响应缓存是
+//     P0 必配」要保护的部分。只有"入口文档"这一件事被交给应用。
 //  6. **平台保留资源（`picoaide.app.json`）永不直出**，见 isReservedAsset 的注释。
 //
 // # 缓存键
@@ -261,7 +264,22 @@ func staticLogicalPath(u *url.URL) (logical string, isEntry bool, ok bool) {
 	if rel == "api" || strings.HasPrefix(rel, "api/") {
 		return "", false, false
 	}
-	return rel, rel == "index.html", true
+	return rel, isEntryDocument(rel), true
+}
+
+// isEntryDocument 判定一个包内逻辑路径是不是**入口文档**（规则 5）。
+//
+// 判据是"文档"而不是"根文档"（R3-A A-5）：`/`、`/index.html`、`<dir>/`
+// （目录形态在 staticLogicalPath 里已经归一成 `<dir>/index.html`）都是入口。
+// 应用完全可能把页面放在子目录（`/admin/`、`/app/`），而 R24 要求**入口请求由
+// 应用自己回答** —— 只有应用能答，名单外用户才能拿到应用渲染的 403 页面。
+//
+// 反向边界（同样是契约的一部分，改动前先看用例
+// `TestStatic_SubdirectoryEntryDocumentsGoToWasm`）：只有 `index.html` 是入口文档，
+// `docs/readme.html` 这类普通文档与 JS/CSS/图片仍是壳资源、仍由宿主直出
+// （§4.6 的资源响应缓存不能被这一条一起废掉）。
+func isEntryDocument(rel string) bool {
+	return rel == "index.html" || strings.HasSuffix(rel, "/index.html")
 }
 
 // assetETag 计算静态资源的 ETag：hash(app_id ‖ version ‖ path ‖ content)。

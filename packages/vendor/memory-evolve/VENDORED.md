@@ -105,7 +105,8 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 `tmp-landing-sweep-symlink-fence`、`write-target-symlink-toctou`（均 `.test.js`）；
 2026-09-16 新增 5 个：`state-corruption-failsoft`、`advisor-lazy-dirs`、`tool-param-contract`、
 `client-locale-follow`、`advisor-prompt-locale`、`i18n-dictionary-integrity`
-（**注**：§A.9 的 `skills-fault` 与本清单重复登记，历史上造成了"17 vs 18"的口径差）。
+（**注**：§A.9 的 `skills-fault` 与本清单重复登记，历史上造成了"17 vs 18"的口径差）；
+2026-09-23 新增 1 个：`coi-skills-sync-source-gate`（见 §I）。
 
 ### D. 2026-09-16 本地修复批（P1 启动级 + 参数契约 + i18n，全部带回归）
 
@@ -189,6 +190,40 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
   `name == 目录名`"）；`tests/coi.test.js` 的 skills-sync 用例同样钉住"包内 `skills/`
   与本插件清单一一对应"。
 
+### H. 死代码清理（2026-09-23；**升级合并后必须逐项复核，否则会被 `cp -a` 静默带回来**）
+
+本包 1310 个顶层声明里只有 15 个全仓零引用，下列 **1 个整文件 + 12 个符号**已删除
+（除 `DynamicsStore` 外全部是"零调用点的常量"）。判据与逐条证据：
+`temp/refactor-2026-09-23/R6-client-vendor.md` 与
+`temp/refactor-2026-09-23/probes/R6-client-vendor/memory-evolve-notes.md`（§3）。
+
+| 位置 | 删除对象 | 为什么是死的 |
+|---|---|---|
+| `lib/coi/dynamics.js` | **整文件 106 行**（`DynamicsStore`，房间动态队列） | 无 import、无按名查找；`tests/coi.test.js` 只有**反向**断言（不再写 `dynamics.json`）——快照通道早已改走 broadcast 段 |
+| `lib/skills-manager.js` | `TEXT_EXTENSIONS` | 全仓仅声明 1 处；文本判定走嗅探启发式，该白名单从未参与 |
+| `lib/coi/ws-coord.js` | `ACTIVE_WINDOW_MS` | 仅 1 处；"最近活跃"由 `sessionMeta.lastActiveAt` 派生 |
+| `lib/coi/broadcast.js` | `isProjectRef` | 仅 1 处；`isPseudo` / `isRoomRef` 在用 |
+| `lib/session-orch.js` | `PRESET_COMPOSITION_FILE` | 仅 1 处；preset 组成文件名不再由本包读取 |
+| `lib/sync/repo.js` | `TODO_FILE` | 仅 1 处；TODO 判定统一走 `lib/sync/filesets.js` 的 `isTodoPath` |
+| `lib/todo.js` | `TODO_STATUSES`、`TODO_ARCHIVE_TARGET` | 各 1 处；状态判定用字面量（该常量从未参与校验） |
+| `lib/coi/tasks-store.js` | `TASK_STATUSES` | 仅 1 处 |
+| `lib/advisor/instructions.js` | `INSTRUCTION_STATES` | 仅 1 处 |
+| `lib/advisor/runtime.js` | `RUNTIME_STATUS` | 仅 1 处 |
+| `lib/canvas.js` | `canvasDir(config)` | 仅 1 处；`canvasPath` 在用 |
+| `lib/sync/filesets.js` | `globalLocalBranchFor(fileset)` | 仅 1 处；`globalBranchFor` 在用 |
+
+**未删（有意保留，别当漏网）**：`lib/prompts.js` 的 `SEED_VERSION`（上游有意预留的迁移锚点）、
+`lib/update.js` 的 `_resetSharedChecker()`（单例测试接缝）、48 个"导出但只在本文件内用"的符号
+（vendor 是三方合并面，去掉 `export` 只会制造噪声 diff）、3 个 test-only 符号（测试即契约）。
+
+**另一条等价性结论（别当 bug 修）**：36 个 i18n 别名（带 / 不带 `getLocale()`）语义完全等价
+（`lib/i18n.js` 的 `translate(dict, key, params, locale = undefined)` 里 `const lang = locale ?? active`，
+而 `getLocale()` 返回的就是 `active`）。不要为了"统一"去动那 31 个文件。
+
+**升级后自查**：上表 12 个符号在合并结果里应仍不存在（逐条 `grep -rn "\b<SYM>\b" lib/ --include=*.js`
+的命中数应为 0），且 `lib/coi/dynamics.js` 不应重新出现（`ls lib/coi/dynamics.js` 报不存在）；
+任何一条复活都说明 `cp -a` 把上游版本带了回来，按本表再删一次即可。
+
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
 | 上游提交 | 内容 | 落地文件 |
@@ -211,13 +246,73 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 2. `lib/advisor/index.js`：上游的 issue #49 三档兜底 `ownEvents?.() ?? events ?? []` 覆盖了本地
    先行修复（本地缺 `?? []`）→ 取上游实现，同时保留本地 `FIX-27` 原子写加固。
 
+### I. 2026-09-23 W4 审计修复批（P1-1 / P1-2：随包同步的**来源闸门**）
+
+**缺陷**（W4 报告 `temp/round2-2026-09-23/W4-skill-roots.md` §6，真磁盘探针 `probe5`/`probe10`）：
+开机同步是整条技能链路上**唯一没有闸门的写者** —— `lib/coi/skills-sync.js` 的 `needsCopy`
+只看 `x-version`，于是
+
+- **P1-1**：用户手写的同名技能（无 provenance）被**静默整树覆盖**（用户自己的 `MY-NOTES.md`
+  一起消失），并被补上 `channel: 'plugin'` 的溯源 ⇒ 能力中心此后把它当"商店来源"；
+- **P1-2**：市场装进来的同名技能被换回插件正文，而 A9 的标记保留让**旧的 market
+  provenance 活下来** ⇒ 内容是插件版、徽章是"市场 v3.0.0"、`dirty` 翻真；两条渠道每次开机
+  互相覆盖。
+
+**修法**（本包侧，判据与 enterprise 安装器**同一份**：`skill-install.ts` 的
+`isStoreProvenance` / `classifyInstalledSkill`；跨包 import 禁止 ⇒ 本地复刻并注释指回真源）：
+
+| 目标目录状态 | 结果 |
+|---|---|
+| 不存在 | `synced`（首次安装，写 `channel: 'plugin'` 溯源，A9 行为不变） |
+| provenance `channel === 'plugin'` 且 `appId === 目录名` | 按 `x-version` 正常更新（`synced` / `unchanged`），安装器标记由 A9 保留 |
+| provenance 是**其它**商店渠道（market/org/builtin） | **`refused`** + `code: 'SKILL_CHANNEL_CONFLICT'`（渠道互斥：换渠道必须由用户显式处置；**不因内容相同而采纳**） |
+| 没有任何 `release.json`，且内容与随包技能**逐字相同** | **`adopted`**（采纳：补写 `channel: 'plugin'` 溯源，随后走正常更新路径 —— 见下面的"兼容路径"） |
+| 没有任何 `release.json`，内容不同（多/少文件、任何字节差异、符号链接、读失败） | **`refused`** + `code: 'SKILL_LOCAL_CONTENT'`（按用户自制内容处理） |
+| 有 `release.json` 但读不出可用渠道（JSON 坏 / `appId` 不符 / 未知渠道） | **`refused`** + `code: 'SKILL_LOCAL_CONTENT'`，且**不采纳**（不覆盖看不懂的标记） |
+| 内容同一性成立、但补写溯源失败 | **`refused`** + `code: 'SKILL_ADOPT_FAILED'`（fail-loud：绝不"内容已换、溯源没写"） |
+
+拒绝都保持既有 fail-loud 的 `action: 'refused'` 语义，并在日志里点名技能、原因与落点
+（`syncBuiltinSkills` 内 `console.warn`/`console.log`，`lib/index.js` 与 `lib/coi/index.js`
+的启动日志另有一行汇总，`adopted` 单独一行）。三种落点可区分：
+`adopted`（内容同一 ⇒ 只补溯源）/ `synced` / `unchanged`（正常更新）/ `refused`（带原因与 `code`）。
+
+**落地文件**：`lib/coi/skills-sync.js`（新增 `STORE_CHANNELS` 常量、`readStoreChannel` /
+`classifySyncTarget` / `isPresent`，闸门接在 `syncBuiltinSkills` 的 `needsCopy` 之前；
+`STORE_CHANNELS` 与 enterprise 的 `STORE_PROVENANCE_CHANNELS` **必须同值**）；
+兼容路径另加 `isIdenticalTree` / `listEntriesRel` / `readFileOrNull`。
+
+**兼容路径（内容同一性采纳，同轮追加）**：写溯源的 A9 **不在任何已发布 tag 里** ⇒ 现场存在
+"旧版插件同步落下、没有 `.picoaide`"的目录。它们只有在**可验证的内容同一性**成立时才被采纳
+（不是启发式）：①条目集合逐项相同（文件与目录都算，多一个/少一个/改名/文件↔目录都算不同）；
+②每个普通文件**字节逐字相同**（`Buffer.equals`）；③全程无符号链接/FIFO/读取失败。
+成立 ⇒ 补写 `channel: 'plugin'` 溯源（写失败即 `refused`，绝不半写）⇒ 此后按 `x-version` 正常更新。
+**用户手工复制的随包技能副本也会被采纳**（内容逐字相同即无任何用户创作可丢）；改过一个字节或
+加过一个文件就不成立 ⇒ 照旧拒收。**刻意不用 mtime** 做更严的判据：随包文件来自安装包/asar
+解包、旧同步写下的文件 mtime 是同步当时时间，两者不可比，拿它判等只会误拒。
+
+**回归**：`tests/coi-skills-sync-source-gate.test.js`（**20 例** = 闸门 10 + 兼容路径 10，含
+`child-skills-sync-adopt-fault.mjs` 夹具驱动的"补写溯源失败"子进程用例）；
+变异验证（均实跑、trap 还原后 sha256 逐字一致）：①`classifySyncTarget` 恒 `{ok:true}` ⇒ 17/20 红；
+②降级掉逐文件字节比较 ⇒ "一个字节不同"红；③放宽"多一个条目也算不同" ⇒ "多一个用户文件（名字
+排在随包条目之后那一例）"红。既有用例按新事实收口：`coi-skills-sync-provenance-and-staging.test.js`
+与两个 `child-skills-sync-*` 夹具的"已装副本"改成 `channel: 'plugin'`（否则测的就不是换入路径）、
+`coi-skill-landing-unasserted-write.test.js` 的两条落点断言用例先给目标目录补 plugin 溯源
+（否则会被闸门先拒掉 = 覆盖假丢失）。
+
+**认账的余波**：采纳只覆盖"**逐字未改动**的历史副本"；用户改过的历史副本仍被拒收（正确：
+无法证明来源，且里面确实有用户字节）。探针 `probe11-legacy-adoption.mjs` 给出修复前后的
+逐字对照（修复前：合法副本 `unchanged`/用户内容 `synced` 且用户文件被删；修复后：合法副本
+`adopted → synced`、用户内容 `refused` 且文件与正文原样）。
+
 ## 验证
 
-- 插件自带测试：**987 pass / 0 fail**（`corepack yarn workspace dsh-memory-evolve test`，
-  或直接 `node scripts/run-tests.mjs`）。**本套测试自 2026-09-16 起进了根门禁**
+- 插件自带测试：**1102 例（1101 pass / 0 fail / 1 skipped）**（2026-09-23 §I 修复批实测，
+  `HOME=<可写目录> corepack yarn test`；§I 之前为 1082 例、闸门批之后为 1092 例）。
+  **本套测试自 2026-09-16 起进了根门禁**
   （`scripts/check-workspaces.mjs` 的 `dsh-memory-evolve` 任务，`firstWave` 与 desktop
   check 并发）；此前它在 `verify-inventories.mjs` 挂着 `CHECK_CHAIN_EXEMPTIONS` 豁免，
   950 个用例（含全部本地安全加固回归）**不在任何门禁链里**。
+  （另可直接 `node scripts/run-tests.mjs`，见下。）
   - 测试运行器 `scripts/run-tests.mjs` 负责建一次性 `HOME`：① `HOME` 必须可写，否则插件往
     `$HOME/.dsh` 写状态 → `EROFS` 假红；② 覆盖 `HOME` 后 git 读不到全局配置，
     `init.defaultBranch=main` 丢失 → `tests/update.test.js` 的 `git push origin main`

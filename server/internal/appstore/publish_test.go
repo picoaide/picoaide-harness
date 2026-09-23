@@ -346,7 +346,7 @@ func TestPublishKeepsOfficialOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	if app.Official != 1 || app.Owner != "" {
-		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner=''", app.Official, app.Owner)
+		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner 为空", app.Official, app.Owner)
 	}
 }
 
@@ -392,5 +392,86 @@ func TestPublishPendingCapPerKindAndAuthor(t *testing.T) {
 	steal.PendingCap = 2
 	if _, err := Publish(db, steal); code(t, err) != CodeNameTaken {
 		t.Fatalf("他人抢同名 = %v, want NAME_TAKEN", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// G-P2-3(审计 2026-09-23):待审/被拒版本的 title/description 不得进入 `apps`
+// 投影行,且 approve/reject 之后必须按「最新 approved」重算投影。
+//
+// 背景:apps 行是**目录对全员下发的投影**,版本行才是真相。修复前 `appstore.Publish`
+// 对待审版本照写投影(作者提交一个"改名成 IT 密码重置"的待审版本,全公司立刻在
+// 目录里看到它),而 approve/reject 都不回填 ⇒ 被拒的标题永久留在投影行上、没有
+// 自愈路径。WASM 面早已用守卫 + recomputeProjection 闭合,这条共用内核从未修。
+//
+// 变异验证:
+//   - 让 Publish 重新投影待审元数据 ⇒ 第②步红;
+//   - 摘掉 RecomputeAppProjection 调用(或把它改成"取最新版本")⇒ 第③④步红。
+//
+// ---------------------------------------------------------------------------
+func TestPendingReleaseDoesNotPolluteProjection(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	const name = "proj-skill"
+
+	// ① 首版待审:投影 = app_id 占位(不是包内标题,也不是空串)。
+	r1 := raceReq(name, "1.0.0", "alice", "真实标题")
+	if _, err := Publish(db, r1); err != nil {
+		t.Fatalf("publish v1: %v", err)
+	}
+	app, err := serverstore.GetApp(db, serverstore.AppKindSkill, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Title != name || app.Description != "" {
+		t.Fatalf("首版待审投影 = %q/%q, want %q/空(待审版本没有生效)", app.Title, app.Description, name)
+	}
+
+	// ② 通过 v1 → 投影切到 v1 的元数据(approve 必须回填,否则"批准了也看不到")。
+	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill, name, "1.0.0",
+		serverstore.ReleaseStatusApproved, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecomputeAppProjection(db, serverstore.AppKindSkill, name); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = serverstore.GetApp(db, serverstore.AppKindSkill, name)
+	if app.Title != "真实标题" {
+		t.Fatalf("approve 后投影 = %q, want 真实标题", app.Title)
+	}
+
+	// ③ v2 待审(改名 + 换描述):投影必须**一字不动**。
+	r2 := raceReq(name, "2.0.0", "alice", "UNAPPROVED Renamed")
+	r2.Manifest.Description = "未审核的描述"
+	if _, err := Publish(db, r2); err != nil {
+		t.Fatalf("publish v2: %v", err)
+	}
+	app, _ = serverstore.GetApp(db, serverstore.AppKindSkill, name)
+	if app.Title != "真实标题" {
+		t.Fatalf("待审版本污染了投影: title=%q(目录会对全员显示未审核的标题)", app.Title)
+	}
+
+	// ④ 拒绝 v2 → 投影回到 v1(被拒元数据不得留下)。
+	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill, name, "2.0.0",
+		serverstore.ReleaseStatusRejected, "不合规"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverstore.RecomputeAppProjection(db, serverstore.AppKindSkill, name); err != nil {
+		t.Fatal(err)
+	}
+	app, _ = serverstore.GetApp(db, serverstore.AppKindSkill, name)
+	if app.Title != "真实标题" || app.Description == "未审核的描述" {
+		t.Fatalf("拒绝后投影 = %q/%q, want 真实标题 + v1 描述", app.Title, app.Description)
+	}
+
+	// ⑤ 员工可见的目录行(真相面)始终是 v1 的标题。
+	rels, err := serverstore.ListReleases(db, serverstore.AppKindSkill, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range rels {
+		if rel.Status == serverstore.ReleaseStatusApproved && rel.Title != "真实标题" {
+			t.Fatalf("已通过版本行标题 = %q", rel.Title)
+		}
 	}
 }

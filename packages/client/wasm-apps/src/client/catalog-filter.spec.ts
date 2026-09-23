@@ -25,7 +25,7 @@ import {
 
 /** 一条目录条目（只给筛选关心的字段；其余给最小合法值）。 */
 function item(over: Partial<AppCenterItem> & { appId: string }): AppCenterItem {
-  return { title: over.appId, description: '', responsible: '', access: 'login', enabled: true, currentVersion: '', isOwner: false, ...over }
+  return { title: over.appId, description: '', responsible: '', access: 'login', enabled: true, frozen: false, currentVersion: '', isOwner: false, ...over }
 }
 
 const ITEMS: AppCenterItem[] = [

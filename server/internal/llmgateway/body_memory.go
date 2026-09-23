@@ -261,19 +261,6 @@ func (g *bodyParseGate) inFlightBytes() int64 {
 	return g.small + g.large
 }
 
-// inFlightSmallBytes / inFlightLargeBytes 供测试断言分档行为使用。
-func (g *bodyParseGate) inFlightSmallBytes() int64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.small
-}
-
-func (g *bodyParseGate) inFlightLargeBytes() int64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.large
-}
-
 // zeroForTest 把两个池清零（只给测试隔离用：真实路径只能靠配对 release 归还）。
 func (g *bodyParseGate) zeroForTest() {
 	g.mu.Lock()

@@ -3,6 +3,7 @@ package serverauth
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -18,13 +19,33 @@ import (
 //
 // 同步语义(与登录时一致):
 //   - users.source='external' 的行全量对齐:目录存在的 → 核对显示名/邮箱、
-//     组全量替换(SyncUserGroups)、曾停用则重新启用;目录不存在的 →
-//     停用(status=0)并吊销全部 token(离职立即失效,保留审计行)。
+//     组全量替换(SyncUserGroups);目录不存在的 → 停用(status=0)并吊销全部
+//     token(离职立即失效,保留审计行)。
+//   - **启用方向是单向的**:目录同步只自动**停用**,永不自动**启用**
+//     (第五轮审计 R5-B-8,2026-09-23 定案)。目录里存在但账号已停用的一律
+//     **跳过**并记审计 `directory_enable_skipped` —— 停用是一个显式决定,
+//     只有管理员显式恢复(webadmin 用户管理里把状态改回启用)才能撤销它。
+//
+//     依据:此前「仍在目录里 ⇒ Status=1」这条判据把「曾因离职被同步停用、
+//     现在又回到目录」与「管理员手工停用」合成了同一个条件,于是管理员为
+//     安全事件(账号疑似被盗/违规)按下的禁用会被下一轮同步**静默撤销**
+//     (≤1h、零审计,管理端此前显示的"已禁用"与事实相反)。两种意图在库里
+//     没有任何区分标记,而任何新增标记对**存量行**都只能记"未知":按"目录
+//     管理"解释 ⇒ 存量禁用行继续暴露在旧缺陷里;按"人工"解释 ⇒ 其行为恰好
+//     等于本规则。所以直接采用规则本身,不引入新状态(也就不需要迁移与
+//     相应的文档同步)。
+//
+//     代价(认账):因目录抖动或离职后重新入职而"消失又出现"的账号不再自动
+//     恢复,需要管理员启用一次;它每轮都会被点名(审计 + 日志),不是静默的。
 //   - 外部身份绝不接管本地账号(与 provisionUser 同一安全边界)。
 //   - 组:目录组名经 GetOrCreateGroup 落 groups 表(大小写不敏感);
 //     用户组关系全量替换,空组自动回收。
 //   - 空目录(0 用户)拒绝执行:极可能是过滤器写错,停用全部外部用户
 //     风险过大(与网关 SyncProvider 空模型列表不清空目录同理)。
+//
+// 审计:两个方向都留痕(此前 dirsync 全文零 AuditLog)——
+//   · `directory_enable_skipped`:本轮被跳过的已停用账号(每轮最多一条,点名);
+//   · `directory_user_disabled`:因目录中消失而被停用的账号(逐人一条)。
 //
 // 周期:启动后每 LDAPSyncInterval(1h)一轮;配置保存后立即触发一轮
 // (setAuthConfig → SyncDirectoryOnce)。失败仅记日志,绝不影响登录。
@@ -32,12 +53,23 @@ import (
 // LDAPSyncInterval 是全量目录同步周期(用户要求:每隔 1 小时)。
 const LDAPSyncInterval = time.Hour
 
+// dirSyncAuditActor 是目录同步写审计时的操作者名(无真人发起者;与
+// internal/balance 调度器的 "system" 同一约定)。
+const dirSyncAuditActor = "system"
+
+// dirSyncSkipAuditLimit 限制单条「跳过自动启用」审计里点名的用户数
+// (审计详情要可读;超出部分只报总数)。
+const dirSyncSkipAuditLimit = 20
+
 // DirSyncResult 描述一轮目录同步的结果(日志 / 测试断言)。
 type DirSyncResult struct {
 	Added   int `json:"added"`
 	Updated int `json:"updated"`
 	Deact   int `json:"deactivated"`
 	Groups  int `json:"groups"`
+	// SkippedDisabled 是本轮因「账号已停用」而被跳过的目录用户数
+	// (目录同步不自动启用,见文件头策略注释)。
+	SkippedDisabled int `json:"skipped_disabled"`
 }
 
 // DirectorySyncRunner 执行一轮目录同步(接口便于测试注入)。
@@ -110,6 +142,10 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	res := &DirSyncResult{}
 	seen := make(map[string]bool, len(entries))
 	groupSeen := make(map[string]bool)
+	// skipped:目录里存在、但账号已停用的用户名(本轮跳过自动启用的人员)。
+	skipped := []string{}
+	// deactivated:因目录中消失而被停用的用户名(逐人写审计)。
+	deactivated := []string{}
 	for _, e := range entries {
 		username := prov.usernameOf(e)
 		if username == "" {
@@ -170,12 +206,17 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 				groupSeen[g] = true
 			}
 		}
-		// 更新显示名/邮箱(外部行仅此两字段可同步;密码/配额/角色不动)
-		if u.DisplayName != displayName || u.Email != email || u.Status != 1 {
+		// 更新显示名/邮箱(外部行仅此两字段可同步;密码/配额/角色/状态不动)。
+		//
+		// **状态不在同步面内**(第五轮审计 R5-B-8):已停用的账号一律跳过自动
+		// 启用(记入 skipped,本轮结束写审计)。upd.Status 保持 u.Status 原值。
+		if u.Status != 1 {
+			skipped = append(skipped, username)
+		}
+		if u.DisplayName != displayName || u.Email != email {
 			upd := *u
 			upd.DisplayName = displayName
 			upd.Email = email
-			upd.Status = 1 // 曾停用的外部用户回到目录 → 重新启用
 			if err := serverstore.UpdateUser(db, &upd); err != nil {
 				return res, err
 			}
@@ -183,6 +224,18 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 		}
 	}
 	res.Groups = len(groupSeen)
+	res.SkippedDisabled = len(skipped)
+	// 审计①:本轮被跳过的已停用账号(每轮最多一条,点名到上限;不写会让
+	// "管理员禁用被同步无视"这件事在审计里彻底不可见,而它恰恰是安全事件
+	// 的处置动作)。
+	if len(skipped) > 0 {
+		log.Printf("ldap directory sync: %d disabled account(s) present in directory; not re-enabling (admin action required): %s",
+			len(skipped), strings.Join(capNames(skipped, dirSyncSkipAuditLimit), ","))
+		if err := serverstore.AuditLog(db, dirSyncAuditActor, "directory_enable_skipped",
+			dirSyncSkipAuditDetail(skipped)); err != nil {
+			log.Printf("ldap directory sync: audit directory_enable_skipped failed: %v", err)
+		}
+	}
 	// 2026-09-08 P1-4:记录本轮目录"见过"的用户名,停用对账只针对这些用户名
 	// (OIDC 用户同为 Source=external,不得被 LDAP 同步误停用)。
 	syncedNames := make([]string, 0, len(seen))
@@ -192,23 +245,51 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	if err := serverstore.MarkLDAPSynced(db, syncedNames); err != nil {
 		return res, err
 	}
-	// 目录中已不存在的外部用户:停用 + 吊销令牌(离职即失效)
-	deact, err := deactivateMissingExternalUsers(db, seen)
+	// 目录中已不存在的外部用户:停用 + 吊销令牌(离职即失效)。
+	// 逐人写审计 `directory_user_disabled`(此前这一步没有任何审计行:
+	// "账号在企业里已经不存在了"这种自动化收紧动作必须可追溯)。
+	deactivated, err = deactivateMissingExternalUsers(db, seen)
 	if err != nil {
 		return res, err
 	}
-	res.Deact = deact
+	res.Deact = len(deactivated)
+	for _, name := range deactivated {
+		if err := serverstore.AuditLog(db, dirSyncAuditActor, "directory_user_disabled",
+			name+" (目录中已不存在，自动停用并吊销全部令牌)"); err != nil {
+			log.Printf("ldap directory sync: audit directory_user_disabled failed: %v", err)
+		}
+	}
 	return res, nil
 }
 
+// dirSyncSkipAuditDetail 组装「跳过自动启用」的审计详情:人 + 规则。
+// 上限 dirSyncSkipAuditLimit 个名字(审计详情要可读),超出只报总数。
+func dirSyncSkipAuditDetail(names []string) string {
+	detail := fmt.Sprintf("跳过自动启用 %d 个已停用账号(停用只由管理员显式恢复,目录同步不自动启用): %s",
+		len(names), strings.Join(capNames(names, dirSyncSkipAuditLimit), ","))
+	if len(names) > dirSyncSkipAuditLimit {
+		detail += fmt.Sprintf(" 等 %d 个", len(names))
+	}
+	return detail
+}
+
+// capNames 返回最多 limit 个名字(超限时只取前 limit 个)。
+func capNames(names []string, limit int) []string {
+	if limit <= 0 || len(names) <= limit {
+		return names
+	}
+	return names[:limit]
+}
+
 // deactivateMissingExternalUsers 停用 keep 中不存在的外部用户并吊销其
-// 全部 token,返回停用数量。本地账号/管理员不受影响。
+// 全部 token,返回被停用的用户名(调用方据此逐人写审计)。本地账号/管理员
+// 不受影响。
 // 2026-09-08 P1-4:只停用**曾由 LDAP 同步见过**的用户名(ldap_synced_users),
 // 否则同为 Source=external 的 OIDC 用户会被 LDAP 对账每小时误停用一次。
-func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, error) {
+func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) ([]string, error) {
 	synced, err := serverstore.LDAPSyncedUsers(db)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	// F18(审计 2026-09-11):分页拉取全部用户(旧实现硬上限 10 万,超出部分
 	// 永远不会被停用 —— 大规模目录的离职用户 token 不会吊销)。
@@ -217,7 +298,7 @@ func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, erro
 	for offset := 0; ; offset += pageSize {
 		batch, total, err := serverstore.ListUsers(db, offset, pageSize, "")
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		users = append(users, batch...)
 		if len(batch) == 0 || int64(len(users)) >= total {
@@ -225,9 +306,9 @@ func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, erro
 		}
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	count := 0
+	deactivated := []string{}
 	for _, u := range users {
 		if u.Source != "external" || keep[u.Username] || u.Status != 1 || !synced[u.Username] {
 			continue
@@ -235,14 +316,14 @@ func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) (int, erro
 		upd := u
 		upd.Status = 0
 		if err := serverstore.UpdateUserRevokingTokens(db, &upd); err != nil {
-			return count, err
+			return deactivated, err
 		}
 		if err := serverstore.UnmarkLDAPSynced(db, u.Username); err != nil {
-			return count, err
+			return deactivated, err
 		}
-		count++
+		deactivated = append(deactivated, u.Username)
 	}
-	return count, nil
+	return deactivated, nil
 }
 
 // SyncDirectoryLoop 定时执行目录同步(启动后立即一轮,然后固定间隔)。

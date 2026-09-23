@@ -71,6 +71,13 @@ export const ACTION_LABEL: Record<string, string> = {
   user_dept: '用户部门变更',
   user_tokens_revoked: '吊销令牌',
   auth_config: '修改认证配置',
+  // LDAP 目录同步（第五轮审计 R5-B-8，2026-09-23）：同步**只自动停用、永不自动
+  // 启用**。两个动作各一条标签：`directory_enable_skipped` 是每轮一条的汇总
+  // （点名被跳过、需要管理员显式启用的账号），`directory_user_disabled` 是因目录
+  // 中消失而被停用的逐个账号。缺标签后果与服务端其它写点相同：行内回落成裸 id、
+  // 且进不了筛选下拉（`Audit.test.tsx` 的双向对拍会直接报缺失）。
+  directory_enable_skipped: '目录同步跳过启用（需管理员显式启用）',
+  directory_user_disabled: '目录同步停用账号',
   dept_create: '新建部门',
   dept_update: '更新部门',
   dept_delete: '删除部门',
@@ -132,6 +139,10 @@ export const ACTION_LABEL: Record<string, string> = {
   // 登记后可按结果筛选。
   login_success: '登录成功',
   login_fail: '登录失败',
+  // 第六轮 R6-A-4：OIDC 在途流程达上限时的**容量拒绝**单独记一条（它不算失败，
+  // 不能混进 login_fail —— 否则一个 NAT 出口会把自己的配额拒绝当成攻击证据，
+  // 二次封锁整个出口）。语义与 internal/serverauth/oidc.go 的写照点一致。
+  oidc_flow_capacity: 'OIDC 流程容量拒绝',
   password_change: '修改密码',
   admin_password_change: '修改管理员密码',
   admin_mfa_login: '管理员 MFA 登录',

@@ -45,12 +45,6 @@ import { ENTRY_DELIMITER, isSymlinkFreeRepoTarget, projectHash, safeStoreTarget,
 /** The four todo tracks. */
 export const TODO_TARGETS = ['life', 'work', 'project', 'daily']
 
-/** Valid todo statuses (default: pending). */
-export const TODO_STATUSES = ['pending', 'doing', 'done', 'blocked', 'cancelled']
-
-/** Archive track name for todo suggestions (single shared archive file). */
-export const TODO_ARCHIVE_TARGET = 'todo-archive'
-
 /** Default max entries of the smart list view. */
 export const DEFAULT_VIEW_LIMIT = 8
 

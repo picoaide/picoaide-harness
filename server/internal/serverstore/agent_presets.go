@@ -217,20 +217,34 @@ func ListAgentPresets(db *sql.DB, status string) ([]AgentPreset, error) {
 	return out, nil
 }
 
-// ListVisibleAgentPresets 员工可见清单:approved 且已授权 + 自己上传的全部状态(仅组织渠道)。
+// ListVisibleAgentPresets 员工清单（组织渠道）的**分发面** —— 与技能侧
+// （ListVisibleSharedSkills）逐条同形的孪生：只有可分发的东西才在这里
+// （approved ∧ 已授权 ∧ 已上架），外加「归属人自己的、已上架的」行。
+// 作者面（「我的」）走 ListOwnedAgentPresets。
 //
-// P2-1(审计 2026-09-13):App 级下架(apps.enabled=0)在员工面等同于不存在——
-// 此前只按状态 + 授权/作者过滤,管理员下架后员工仍能列出并下载。上架集合
-// 一次批量取回(EnabledAppIDs),不逐行查 apps。
+// 判据唯一实现在 distribution.go（Distribution/Delivered/OwnedBy），本函数
+// 只做投影。历史沿革：P2-1(审计 2026-09-13) 补了 App 级下架过滤；2026-09-23
+// 第五轮审计 R5-B-1/R5-B-2 把「作者例外」由 publisher 改为 owner（与发布权
+// 同源），并把「下架只挡分发面、不挡作者自查」拆成两个面。
 //
 // R7 agentshare-2:渠道过滤在 DAO 层(orgAgentReleases)完成——共享库只服务
 // channel=org,市场行不进员工清单(技能侧同层过滤)。
-func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]AgentPreset, error) {
+func ListVisibleAgentPresets(db *sql.DB, viewer string, granted []string) ([]AgentPreset, error) {
+	return listAgentPresetsByFace(db, viewer, granted, false)
+}
+
+// ListOwnedAgentPresets 是「我的」分区（作者面）的唯一取数口：apps.owner ==
+// viewer 的全部版本 —— 任意审核状态 + 忽略下架（与技能侧同判据）。
+func ListOwnedAgentPresets(db *sql.DB, viewer string) ([]AgentPreset, error) {
+	return listAgentPresetsByFace(db, viewer, nil, true)
+}
+
+func listAgentPresetsByFace(db *sql.DB, viewer string, granted []string, ownOnly bool) ([]AgentPreset, error) {
 	list, err := orgAgentReleases(db, "")
 	if err != nil {
 		return nil, err
 	}
-	enabled, err := EnabledAppIDs(db, AppKindAgent)
+	dists, err := DistributionStates(db, AppKindAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -240,10 +254,17 @@ func ListVisibleAgentPresets(db *sql.DB, author string, granted []string) ([]Age
 	}
 	out := []AgentPreset{}
 	for _, r := range list {
-		if !enabled[r.AppID] {
+		d := dists.Of(r.AppID)
+		if ownOnly {
+			if d.OwnedBy(viewer) {
+				out = append(out, releaseToPreset(r))
+			}
 			continue
 		}
-		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
+		if !d.Delivered() {
+			continue
+		}
+		if d.OwnedBy(viewer) || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
 			out = append(out, releaseToPreset(r))
 		}
 	}

@@ -122,6 +122,78 @@ func TestSnapshotExecutorFull(t *testing.T) {
 	t.Fatalf("执行槽满应在 reasons 里可见（且不改变 OK，满载是有界设计的正常态）：%+v", s)
 }
 
+// TestSnapshotExecutorFullUsesEffectiveLimit：执行槽判据必须跟**生效上限**
+// （调度器自己的 s.opt，管理端可配的 max_instances）走，不是编译期常量
+// （2026-09-23 R6-A-7 / 2026-09-21 gap-audit P1-④）。
+//
+// 两个方向各一条，缺一条都不足以区分：
+//  1. 生效上限**小于**编译期常量（small 档 = 3）：3 个在跑就必须报满
+//     —— 用编译期常量时这一条永远不出现（运维盲区）；
+//  2. 生效上限**大于**编译期常量（large 档 = 64）：跑 40 个（> 32 常量、< 64 生效）
+//     必须**不**报满 —— 用编译期常量时会误报。
+//
+// 变异（把判据改回 limits.GlobalInstances）⇒ 两条都红。
+func TestSnapshotExecutorFullUsesEffectiveLimit(t *testing.T) {
+	acquire := func(t *testing.T, sch *queue.Scheduler, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			tk, err := sch.Acquire(t.Context(), "app-"+strconv.Itoa(i), int64(i+1))
+			if err != nil {
+				t.Fatalf("acquire(%d): %v", i, err)
+			}
+			t.Cleanup(tk.Release)
+		}
+	}
+	executorFull := func(s Snapshot) bool {
+		for _, r := range s.Reasons {
+			if strings.HasPrefix(r, reasonExecutorFull) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("生效上限小于编译期常量", func(t *testing.T) {
+		const effective = 3
+		if effective >= limits.GlobalInstances {
+			t.Fatalf("本用例的前提是生效上限 < 编译期常量(%d)", limits.GlobalInstances)
+		}
+		sch := queue.New(queue.Options{GlobalRunning: effective})
+		acquire(t, sch, effective)
+		o := fixedOpts(MinDiskFreeBytes, nil)
+		o.Scheduler = sch
+		s := New(o).Snapshot()
+		if s.ExecLimit != effective || s.ExecRunning != effective {
+			t.Fatalf("exec_limit/exec_running = %d/%d，want %d/%d（生效值必须下发）",
+				s.ExecLimit, s.ExecRunning, effective, effective)
+		}
+		if !executorFull(s) {
+			t.Fatalf("生效上限 %d 已满但 reasons 里没有「执行槽已满」：%v（判据用了编译期常量 %d？）",
+				effective, s.Reasons, limits.GlobalInstances)
+		}
+		if !s.OK {
+			t.Fatalf("执行槽满不是不健康（有界即设计目标）：%v", s.Reasons)
+		}
+	})
+
+	t.Run("生效上限大于编译期常量", func(t *testing.T) {
+		const effective = limits.GlobalInstances * 2
+		running := limits.GlobalInstances + 8
+		sch := queue.New(queue.Options{GlobalRunning: effective})
+		acquire(t, sch, running)
+		o := fixedOpts(MinDiskFreeBytes, nil)
+		o.Scheduler = sch
+		s := New(o).Snapshot()
+		if s.ExecLimit != effective || s.ExecRunning != running {
+			t.Fatalf("exec_limit/exec_running = %d/%d，want %d/%d", s.ExecLimit, s.ExecRunning, effective, running)
+		}
+		if executorFull(s) {
+			t.Fatalf("生效上限 %d、在跑 %d（还有 %d 个空槽）却报了「执行槽已满」：%v",
+				effective, running, effective-running, s.Reasons)
+		}
+	})
+}
+
 func TestHandlerStatus(t *testing.T) {
 	// 不达标 ⇒ 503 + JSON。
 	c := New(fixedOpts(1, nil))

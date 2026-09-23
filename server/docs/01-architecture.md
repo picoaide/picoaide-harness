@@ -37,10 +37,15 @@
 ## 4. 计量计费与配额(0021-0024)
 
 - **费用**:`usage.cost` = 输入×input_price/1e6 + 输出×output_price/1e6;高峰窗口(settings `usage.peak_windows`,北京时间)外 × 模型 `offpeak_discount`。改价/改窗口只影响之后产生的费用(记录时定价)。
-- **配额链**(任一超限即 429,admin 豁免):
-  1. 员工 token 配额(`users.quota_tokens`,NULL=跟随全局默认,0=不限)
-  2. 员工金额配额(`users.quota_money`)
-  3. ~~部门预算~~(2026-09-11 下线:员工侧的额度只有账户余额一种)
+- **额度闸门(唯一一条,2026-09-11 收敛)**:`settings balance.enabled=true` 且该员工**已开通余额账户**
+  且分位口径余额 ≤ 0 ⇒ 网关 429 `BALANCE_EXHAUSTED`(admin 豁免;余额查询失败 fail-closed)。
+  未开通(从未入账)的账号既不扣余额也不被闸门拦。
+- **已下线的三套旧额度**(别再把它们当现役闸门):
+  员工 token 配额(`users.quota_tokens`)、员工金额配额(`users.quota_money`)、部门预算
+  (`groups.budget_money`)—— 列与 settings 键(`usage.monthly_quota`/`usage.monthly_quota_money`)
+  **保留在库中但不再读写**,管理端不再下发与展示,`PUT /users/:id` 请求体里的 `quota_*` 字段被
+  直接忽略(见 `serverauth/admin.go` 的字段说明、`llmgateway/handler.go` 的 `quotaBlocked`)。
+  下线原因:三套并行额度互相打架(充了钱仍被软配额拦住),且只有余额可逐笔对账。
 - **员工自查询**:`GET /api/client/v2/auth/usage` 返回**账户余额**、是否开通、余额闸门开关与今日/昨日/本月/累计 tokens+费用(配额/剩余字段已下线)。
 
 ## 5. 安全设计摘要
@@ -48,7 +53,7 @@
 - 上游密钥 AES-GCM(`enc:v1:`,master key 文件),永不落明文;API token 只存哈希。
 - 严格默认拒绝:商城资源未授权一律 404;授权对象 = 用户或部门组(NOCASE),admin 恒全量不落表;授权变更审计。
 - 改密/降权/禁用自动吊销全部 API token(与用户更新同事务)。
-- 管理端 session 12h(硬上限 + 60min 空闲滑动过期)+ CSRF;登录限流(10 次/5min/键,双桶)。
+- 管理端 session 12h(硬上限 + 60min 空闲滑动过期)+ CSRF;登录限流只对**失败**计数(5 分钟滑动窗口,成功即清空):账号键 10 次(`u:<用户名>` 与 `ip|用户名` 共用一份预算,客户端面与管理面共享),来源 IP 60 次(按信任边界解析出的真实客户端 IP,反代下不坍缩)。
 - 错误统一信封 `{"error":{"code":"ERR_CODE","message":"..."}}`;健康探针 `/healthz`。
 - 接入方 TLS:登录页/客户端拒绝非 HTTPS 远程地址(TOFU 由接入方实现)。
 

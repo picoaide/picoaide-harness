@@ -135,6 +135,14 @@ function isHttpUrl(v: string): boolean {
   }
 }
 
+// sameModelList 判断编辑弹窗里的模型清单与服务端现存清单是否**逐位相同**
+// (顺序敏感:清单就是 provider.models 的写入值,顺序变化也算一次真实修改)。
+// 2026-09-23(审计 G-01,P0):只有真变了才提交 models —— 无条件回传会让服务端
+// 重建模型行,把价格/参数/模态配置清零。
+function sameModelList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((name, i) => name === b[i])
+}
+
 // 密码/密钥输入(审计修复 P3-4):显隐切换按钮,复用 Input 样式;密码管理工具与粘贴不受影响
 // 已在 components/secret-input.tsx 提取为共享组件(Gateway 与 Auth 页共用)。
 // 删除本地实现,使用共享导入。
@@ -386,8 +394,15 @@ export default function Gateway() {
       }
       // 密钥留空 = 不更换;模型清单渠道型不提交(服务端切渠道时自动清空手动清单)
       if (editProvForm.api_key.trim() !== '') body.api_key = editProvForm.api_key
+      // 2026-09-23(审计 G-01,P0):**只在清单真的变化时**才提交 models。
+      // 弹窗会把预填清单原样回传,而服务端只要收到 models 就按清单重建模型行;
+      // 旧实现(删全部 + 只插三列)会让"改个名字/切个启用/原样保存"把该上游全部
+      // 价格/缓存价/峰谷折扣/default_params/input_modalities 清零 —— 之后调用照常
+      // 200、token 照记、cost=0。服务端已加同款守卫(清单相等则跳过同步),这里
+      // 是不发无用请求的第一道闸。
       if (!editProvForm.channel && editProvForm.models.trim() !== '') {
-        body.models = editProvForm.models.split(',').map((s) => s.trim()).filter(Boolean)
+        const next = editProvForm.models.split(',').map((s) => s.trim()).filter(Boolean)
+        if (!sameModelList(next, editProv.models ?? [])) body.models = next
       }
       await request(`${ADMIN_API}/providers/${editProv.id}`, { method: 'PUT', body: JSON.stringify(body) })
       setEditProv(null)
@@ -1180,6 +1195,14 @@ export default function Gateway() {
                 placeholder={editProvForm.channel ? '保存后自动同步' : 'deepseek-chat, deepseek-reasoner'}
                 onChange={(e) => setEditProvForm({ ...editProvForm, models: e.target.value })}
               />
+              {!editProvForm.channel && !sameModelList(
+                editProvForm.models.split(',').map((s) => s.trim()).filter(Boolean),
+                editProv?.models ?? [],
+              ) && (
+                <p className="text-xs text-destructive">
+                  模型清单已修改:移出清单的模型会被删除(含其价格与参数配置);仍在清单中的模型,价格/参数/输入模态保持不变。
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <Switch checked={editProvForm.enabled} onCheckedChange={(v) => setEditProvForm({ ...editProvForm, enabled: v })} />

@@ -7,11 +7,51 @@
  * executable fields anywhere in the union. The browser never writes
  * scheduler-owned timestamps or execution results.
  */
-import { isCronJobAction, type CronActionOptions, type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts'
+import { isCronJobAction, isUsableJobName, type CronActionOptions, type JobRecord, type NewJobInput, type JobUpdatePatch } from './jobs.ts'
 import { isValidCron, nextRunAtMs } from './cron.ts'
 
 export const CRON_SCHEMA_VERSION = 2 as const
 export const CRON_API_PREFIX = '/api/cron'
+
+/**
+ * Why an occurrence never fired.
+ *
+ * - `dst-gap`: its local wall clock does not exist (spring-forward), so the
+ *   scheduler rolled past it and it can never fire (2026-09-23 R3-B3 F2).
+ * - `missed`: it came due while nothing was scheduling (the app was closed or
+ *   suspended, or the job was not visible to the running session) and the
+ *   recovery policy rolls such occurrences forward instead of replaying them
+ *   (2026-09-23 R4-B-9). Records written before this field existed are all DST
+ *   gaps, so an absent reason reads as `dst-gap`.
+ */
+export type SkipReason = 'dst-gap' | 'missed'
+
+/**
+ * One occurrence the scheduler rolled past without firing.
+ *
+ * The skip itself is correct — a local time that does not exist cannot fire,
+ * and a trigger missed while the app was closed is never replayed — but it used
+ * to be invisible: the job simply did not run. This record is what the panel
+ * and `GET /api/cron/state` show, so a user can tell "the 02:30 run was skipped
+ * because 02:30 did not exist" or "the 09:00 run was missed because the app was
+ * closed" from "the scheduler is broken".
+ */
+export interface SkippedOccurrence {
+  /** Job the occurrence belonged to. */
+  jobId: string
+  /** Job name when the skip was recorded (so the notice needs no join). */
+  name: string
+  /** Why it never fired; absent = a pre-`reason` DST-gap record. */
+  reason?: SkipReason
+  /** Wall clock the occurrence asked for (or the missing local time), as `YYYY-MM-DD HH:MM`. */
+  wallClock: string
+  /** IANA timezone the skip was computed in (the scheduler's timezone). */
+  timeZone: string
+  /** The instant the occurrence was due at (a DST gap: the instant it normalized forward to). */
+  normalizedTo: number
+  /** When the roll observed the skip (Host clock, ms epoch). */
+  detectedAt: number
+}
 
 export interface CronSchedulerSnapshot {
   timeZone: string
@@ -19,6 +59,23 @@ export interface CronSchedulerSnapshot {
   ledgerId?: string
   lastTickAt?: number
   error?: string
+  /**
+   * Set when the Host could not read its ledger at startup (a non-ENOENT errno,
+   * or a corrupt file whose bytes could not be isolated): reads answer from an
+   * empty in-memory state and **every write is refused**, so the stored jobs are
+   * never overwritten. The panel renders this as its own notice instead of the
+   * "corrupt and reset" one (2026-09-23 CR-1).
+   */
+  readOnly?: boolean
+  /**
+   * Most recent occurrences the scheduler rolled past without firing — DST
+   * spring-forward gaps (the local time does not exist) and triggers missed
+   * while nothing was scheduling — oldest first, bounded. Each entry carries
+   * its {@link SkippedOccurrence.reason}. The panel shows the latest one while
+   * it is fresh; `GET /api/cron/state` and the SSE frames carry the list itself
+   * (2026-09-23 R3-B3 F2 / B-5, extended by R4-B-9).
+   */
+  skippedOccurrences?: SkippedOccurrence[]
 }
 
 export interface CronSnapshot {
@@ -79,7 +136,10 @@ function validCron(value: unknown): boolean {
 function validInput(value: unknown, options: CronActionOptions): value is NewJobInput {
   const input = record(value)
   if (input === undefined || !exactKeys(input, ['name', 'cron', 'action', 'enabled'])) return false
-  if (typeof input.name !== 'string' || input.name === '') return false
+  // Name and cron share their judgement with the model-facing tool
+  // (`isUsableJobName` / `validCron`) instead of each surface re-deciding what
+  // "non-empty" means (2026-09-23 R3-B3 F3 / B-4).
+  if (!isUsableJobName(input.name)) return false
   if (!validCron(input.cron)) return false
   if (!optionalBoolean(input.enabled)) return false
   return isCronJobAction(input.action, options)
@@ -88,7 +148,7 @@ function validInput(value: unknown, options: CronActionOptions): value is NewJob
 function validPatch(value: unknown): value is JobUpdatePatch {
   const patch = record(value)
   if (patch === undefined || !exactKeys(patch, ['name', 'cron', 'enabled'])) return false
-  if (patch.name !== undefined && (typeof patch.name !== 'string' || patch.name === '')) return false
+  if (patch.name !== undefined && !isUsableJobName(patch.name)) return false
   if (patch.cron !== undefined && !validCron(patch.cron)) return false
   return optionalBoolean(patch.enabled)
 }

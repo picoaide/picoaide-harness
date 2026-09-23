@@ -49,9 +49,6 @@ const (
 	DefaultTTL = 15 * time.Minute
 	// DefaultReplayCapacity 是 jti 去重表的有界容量（契约 §23.1：10 万条）。
 	DefaultReplayCapacity = 100_000
-	// DefaultNonceCapacity 是一次性 nonce 表的有界容量（与 jti 同量级即可：
-	// 签发频率远低于请求频率，10 万条足以覆盖 TTL 窗口内的峰值）。
-	DefaultNonceCapacity = 100_000
 	// maxInstallKeysPerUser 是单个用户的安装密钥上限（换机/重装的合理余量）。
 	//
 	// 有界的原因：注册表是一份按部署存的凭据材料，没有上限就等于"任何持 bearer 的

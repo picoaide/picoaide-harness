@@ -138,4 +138,52 @@ describe('Auth 认证配置页(v3b Tab 重设计)', () => {
     expect(screen.getByText('alice')).toBeInTheDocument()
     expect(screen.getByText('admins')).toBeInTheDocument()
   })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-23 审计 WEB-2(P0):`GET /auth` 失败时的写面闸门。
+  //
+  // 原缺陷:`load()` 的 `finally { setLoading(false) }` 是整页**唯一**闸门 ⇒
+  // 读取失败后表单照样渲染并解锁,而初值是最空的一份(`enabled=['local']`、
+  // `EMPTY_FORM`、`secrets={}`);前端校验只遍历"启用中的非 local"(空循环直接过)
+  // ⇒ 一次「保存认证配置」就把 `auth.enabled` 收敛成 `local`、清空 LDAP/OIDC/
+  // OpenID 全部字段,并用**空串的密文覆盖已存密钥**(不可恢复,全员 SSO/LDAP
+  // 登录当场失败)。本用例锁住"读不到就不许写"。
+  // -------------------------------------------------------------------------
+  it('WEB-2:GET /auth 失败后写面锁定(保存禁用且不发 PUT),重新加载成功后才解锁', async () => {
+    let fail = true
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/auth' && (init?.method ?? 'GET') === 'GET') {
+        if (fail) throw new Error('认证配置读取失败（模拟 500/网络错误）')
+        return AUTH_SAMPLE
+      }
+      if (path === '/api/server/admin/auth' && init?.method === 'PUT') return { ok: true }
+      return {}
+    })
+    render(<Auth />)
+
+    // 错误原因 + "表单已锁定"的说明都在(空表单否则读起来像"当前没有任何认证方式")。
+    expect(await screen.findByText(/认证配置读取失败/)).toBeInTheDocument()
+    expect(screen.getByText(/表单已锁定/)).toBeInTheDocument()
+    const save = screen.getByRole('button', { name: '保存认证配置' })
+    expect(save).toBeDisabled()
+    // 程序化点击(绕开 disabled)也不能发出那个把 SSO 与密钥抹掉的请求。
+    fireEvent.click(save)
+    expect(mockRequest.mock.calls.some((c) => c[1]?.method === 'PUT')).toBe(false)
+
+    // 正向对照(防"永远禁用"式假绿):服务端恢复后「重新加载配置」解锁,
+    // 保存提交的是**服务端读到的**启用方式,而不是那份空初值。
+    fail = false
+    fireEvent.click(screen.getByRole('button', { name: '重新加载配置' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存认证配置' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: '保存认证配置' }))
+    await waitFor(() => {
+      const put = mockRequest.mock.calls.find((c) => c[1]?.method === 'PUT')
+      expect(put).toBeTruthy()
+      const body = JSON.parse(String(put![1]!.body))
+      expect(body.enabled).toBe('local,ldap,oidc')
+      // 未重新输入密码 ⇒ 回传 *** 保持现值(不是空串覆盖)。
+      expect(body.ldap.bind_password).toBe('***')
+      expect(body.oidc.client_secret).toBe('***')
+    })
+  })
 })

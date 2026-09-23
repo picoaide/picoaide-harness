@@ -49,6 +49,13 @@ const (
 	rowsDefaultLimit = 50
 	// rowsMaxLimit 是单次返回行数上限。取 200 而不是 appdb 的 5000：
 	// 这是给人/AI 看的浏览面，不是数据导出面（导出是另一个产品决策，当前没有）。
+	//
+	// **数值真源 = `limits.RowsPageMax`**（会随生成链进 `references/limits.md`）。
+	// 这里保留字面量而不是写成 `= limits.RowsPageMax`：跨语言对拍
+	// （`packages/client/wasm-apps/src/client/rows-paging-contract.spec.ts`）按
+	// `rowsMaxLimit = <数字>` 的形态读本文件，换成符号引用会让那条判据失效。
+	// 与真源的同值绑定（以及作者文档那句"一页最多 N 行"）由
+	// `rows_page_limit_binding_test.go` 判红。
 	rowsMaxLimit = 200
 	// rowsMaxOffset 防止用超大 offset 逼 SQLite 扫全表。
 	rowsMaxOffset = 1_000_000

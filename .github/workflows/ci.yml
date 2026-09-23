@@ -70,11 +70,29 @@ jobs:
             # 空 diff(空提交/强制推送后的未知状态)按有改动处理
             echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # docs-only 的判定是**正面清单**(2026-09-23 第三轮审计 R3-C C-3 / C-CI-1)。
+          #
+          # 曾经写的是 `docs/*|site/*|*.md` —— bash `case` 的 `*` **跨 `/`**,所以
+          # "任意深度的 markdown"都算文档:包括 `server/skills/**/*.md`(随包交付给
+          # 客户的技能文档,由 `TestBuiltinSkillVersionTracksContent` 的内容摘要门禁
+          # 守着,实测追加一行注释就红)与 `packages/**/*.md`。那些文件的真正判据在
+          # Go 测试 / 包 check 里 ⇒ 走 docs-only = 那些 job 全跳过 = 零门禁通过。
+          #
+          # 现在的规则(唯一实现,`check-workflows.mjs` 的 [SK-10] 逐条对拍,**改宽改窄
+          # 都红**):
+          #   docs/**、site/**            → 文档面
+          #   任何**含 `/` 的其它路径**   → 代码(含 server/skills/**/*.md 这类随包文档)
+          #   仓库根的 markdown           → 文档面(README/CONTRIBUTING/AGENTS… 没有
+          #                                 包级/Go 判据;铁律 0 等根守卫另由
+          #                                 `Gate (root guards, every change)` 兜住)
+          #   其余                        → 代码
           DOCS_ONLY=1
           while IFS= read -r f; do
             [[ -z "$f" ]] && continue
             case "$f" in
-              docs/*|site/*|*.md) ;;
+              docs/*|site/*) ;;
+              */*) DOCS_ONLY=0; break ;;
+              *.md) ;;
               *) DOCS_ONLY=0; break ;;
             esac
           done <<< "${CHANGED}"
@@ -86,36 +104,33 @@ jobs:
       - name: Report scope
         run: echo "docs-only=${{ steps.scope.outputs.code == 'false' }}（code=${{ steps.scope.outputs.code }}）"
 
-  gate:
-    name: Gate (tests + workspace build)
-    needs: changes
-    # changes 失败(而非成功判定为 docs-only)时照跑:宁可多跑,不可漏测
-    if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'
+  # 2026-09-23 第三轮审计 R3-C C-3:**永远运行的小 job** —— 只跑根守卫。
+  #
+  # 为什么单独一个 job:docs-only 的 PR 会让"重活"(gate/server/desktop-*)整条跳过,
+  # 而 GitHub 分支保护把 skipped 的必需检查记成**成功**(`gh api
+  # repos/.../branches/master/protection` 的必需检查含 Gate;线上 PR #129 的 Gate 就是
+  # skipped 之后合并的)⇒ 判据落在文档上的根守卫(铁律 0 的域名、迁移区间、文档数字、
+  # 布局记录)一次都不跑。本 job **没有 `if:`、也没有 `needs:`** —— 结构上无法被跳过,
+  # 因而在**任何** PR / 推送形态下都会真的跑那批不依赖构建产物的根守卫
+  # (`scripts/check-root-guards.mjs`,清单来自 `scripts/check-workspaces.mjs` 的 GUARDS
+  # 表,≈1 分钟)。
+  #
+  # 建议把本 job 加进分支保护(它一失败就是红的,独立可读);在加之前,gate 的第一步
+  # 会检查它的结果 —— 它没成功 ⇒ 必需的 `Gate (tests + workspace build)` 一起红,
+  # 所以"守卫失败但 PR 还能合"这条路现在不存在。
+  gate-guards:
+    name: Gate (root guards, every change)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      actions: write
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      # 正式 tag 必须有策展发布说明(2026-09-11 定案):GitHub Release 页是**公开面**,
-      # 缺 docs/releases/<tag>.md 时 release job 会回退自动生成的 PR 列表 —— 版本页
-      # 变成 CI 日志(v2.7.0 的实际情况)。这条检查放在 gate 的第一步:tag 打错时
-      # 1 分钟内就报,不必等三平台构建 40 分钟才在最后一步失败。预发 tag 允许缺失。
-      - name: Require curated release notes for stable tags
-        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
-        run: |
-          set -euo pipefail
-          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
-            echo "::error::正式版缺少发布说明 docs/releases/${GITHUB_REF_NAME}.md(模板见 docs/releases/TEMPLATE.md)"
-            exit 1
-          }
-          echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
-      # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
-      # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
-      # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。
+          # 根守卫里的 check-no-real-domains 要扫提交信息区间 ⇒ 必须能看见历史
+          # (2026-09-23 审计 R3-C C-4;守卫侧另有 fail-loud 兜底)。
+          fetch-depth: 0
+      # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false 且会重排
+      # PATH —— corepack enable 必须在 setup-node 之后执行,否则 yarn shim 被覆盖。
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -129,11 +144,175 @@ jobs:
             ~/.cache/electron-builder
           key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
       - run: yarn install --immutable
+      # 清单与运行器:`scripts/check-root-guards.mjs` 解析编排器的 GUARDS 表(解析不到
+      # 即 fail-loud),不跑任何 workspace 包的 check(那部分属于下面的 gate)。
+      - name: Root guards (every PR shape)
+        run: node scripts/check-root-guards.mjs
+
+  gate:
+    name: Gate (tests + workspace build)
+    # gate-guards 是"永不跳过"的守卫 job;changes 只提供 docs-only 判定。
+    needs: [changes, gate-guards]
+    # 2026-09-23 第三轮审计 R3-C C-3:**本 job 永不因 docs-only 而跳过**。
+    #
+    # 此前这里是 `if: needs.changes.result != 'success' || needs.changes.outputs.code == 'true'`,
+    # 于是"只改文档"的 PR 会把整条 gate 跳过。现在:重活仍按 docs-only 跳过(那正是
+    # 这个开关的用途),但**根守卫已经不在本 job 里**了 —— 它们在 gate-guards(永不
+    # 跳过),而本 job 的第一件事就是检查那个 job 的结果。
+    #
+    # 判据 `!cancelled()`,不是 `success()`:changes 失败(而非判定 docs-only)时照跑 ——
+    # 那时输出为空,下面按"完整路径"处理(宁可多跑,不可漏测);只有整个 run 被取消
+    # (并发互斥,见文件头 concurrency)才不空烧 runner。
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+    # 渠道仓 revision:**一处解析、多 job 复用**(2026-09-23 第五轮审计 R5-C-2)。
+    # 发布 tag 上本 job 用 `ci-channels.sh --resolve-only` 解析一次 commit SHA,三平台
+    # job 与 release job 的渠道抓取步骤都以 `CI_CHANNELS_PIN` 收下同一个值 —— 于是
+    # "包内客户端"(早克隆)与"镜像内渠道内容"(晚克隆)必然同源,同一源码 tag 也可复现。
+    # 非 tag(PR/分支)上这一步被跳过、输出为空,渠道抓取退回原来的"取默认分支 HEAD"。
+    outputs:
+      channels_rev: ${{ steps.channels_rev.outputs.channels_rev }}
+    steps:
+      # 必需的 `Gate (tests + workspace build)` 必须反映守卫 job 的结果:守卫失败 ⇒
+      # 本步红 ⇒ 必需检查红(静态策略 [SK-9] 钉住这条链路)。
+      - name: Root guards must have passed
+        if: needs.gate-guards.result != 'success'
+        run: |
+          set -euo pipefail
+          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"
+          echo "::error::见 job「Gate (root guards, every change)」的输出;docs-only 的 PR 也必须让它绿。"
+          exit 1
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          # 2026-09-23 第三轮审计 R3-C C-4:此前没有 `fetch-depth`(默认 1),而
+          # check-no-real-domains 的**提交信息判据**要先解析出区间 base —— PR 的检出
+          # ref 是 `refs/pull/N/merge`,`origin/<base>` 往往根本不存在,depth-1 下四个
+          # 候选全部解析失败,判据于是静默退化成"只看 HEAD"(= 那条 merge commit),
+          # 中间提交信息里的域名一个都看不见。实测同一份历史:完整克隆 EXIT=1、
+          # depth-1 克隆 EXIT=0 且照打"零命中 ✅"。
+          # changes job 早就付过这个成本,同一个仓不是新增量级;守卫侧另有 fail-loud
+          # 兜底(区间解析不到即 EXIT=3),这条是让它**不需要**触发的那一半。
+          fetch-depth: 0
+      # ref 形态 → 渠道集 / 是否发布的**唯一真源**(2026-09-23 审计 K-04)。
+      #
+      # 为什么放在 gate 的第一步:这条规则曾经有两份实现(ci-channels.sh 的 bash
+      # glob + release job 的 `if:`),两者对"名字带 `-` 但后缀不认识"的 tag 结论
+      # 相反 —— 一个 `v2.8.2-hotfix` 会跑满三平台构建(含品牌渠道),而 release job
+      # 整体被跳过:零交付 + 客户侧零信号,品牌产物还留在 R2 中转前缀里没人清理。
+      # 现在形态判定只有 `scripts/ci-release-policy.sh` 一处:不认识就**当场红**
+      # (1 分钟内),desktop-* / release 因 `needs: gate` 全部跳过 ⇒ 不会再有
+      # "构建了却不发布"的空转。判据与渠道集见该脚本头部注释。
+      - name: Classify the release tag (single source of truth)
+        id: release_policy
+        run: |
+          set -euo pipefail
+          bash scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
+      # 发布 tag 的**拓扑判据**(2026-09-23 第五轮审计 R5-C-2 / M1)。
+      #
+      # 为什么也放在 gate 的第一步:拓扑违规的现场形态是"CI 全绿,但上一个 tag 的修复
+      # 被静默丢掉"—— 2026-09-17 真实事故里上一个 tag 打在**旁支**上,发版人直接从功能
+      # 分支打了新 tag,那条旁支上的修复(错误上报 + 迁移 0068)一个都没进本版,而 CI
+      # 没有任何一条判据会红。现在它在 1 分钟内红,下游 job 因 `needs: gate` 全部跳过。
+      #
+      # 判据(见脚本头部):① 上一个发布 tag 是本 tag 的祖先;② 本 tag 在主线 origin/master
+      # 上。两者都读本地 git 历史 —— 本 job 的 checkout 已是 `fetch-depth: 0`(全历史 +
+      # 全 tag)。这里**再显式补齐并校验**两份输入(主线 ref + 全部 tag):判据输入的
+      # 获取不依赖"checkout 恰好带了什么",fetch 失败即红(不用 `|| true` 吞掉)。
+      # `--exclude-tag` 把"本次要发的 tag"从基线候选里排除(等价于支持"先本地自检、再打 tag")。
+      #
+      # 判据跑不成时脚本退出 2(不是 0):"判据没完成"不等于通过。
+      - name: Release topology (previous release tag is an ancestor; tag is on the mainline)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-recurse-submodules origin \
+            '+refs/heads/master:refs/remotes/origin/master' '+refs/tags/*:refs/tags/*'
+          bash scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
+      # 渠道仓 revision 的**唯一**解析点(2026-09-23 第五轮审计 R5-C-2)。
+      #
+      # 为什么必须有:私有渠道仓原先被同一次 tag 的四个 job 各自 `git clone --depth 1
+      # origin/main`(三平台 + release),四次克隆相差数十分钟,中途任何一次 push 都会让
+      # 镜像里的渠道内容与随包客户端不同源,且同一个源码 tag 无法复现同一份交付物
+      # (项目已有同形事故:预发线数据根被改,升级后用户"所有对话消失")。
+      #
+      # 现在只在这里解析一次:`--resolve-only` 走一次 `git ls-remote`(不克隆),结果经
+      # job output 传给四个调用点,它们以 `CI_CHANNELS_PIN` 收下并**硬校验**检出到的
+      # commit 与 pin 逐字相等。非 tag 上没有 pin,退回原行为(只发 official)。
+      - name: Resolve the channel packages revision (once per run)
+        id: channels_rev
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
+      # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
+      # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
+      # 时正文会回退成自动生成的 PR 列表 —— 而 PR 标题/正文不在任何守卫判据内(铁律 0 的
+      # 盲区),历史上正是这条路径把真实域名/IP 带进了公开 Release 正文。
+      # 这条检查放在 gate 的第一步:tag 写错/漏写时 1 分钟内就报,不必等三平台构建 40 分钟。
+      # 「是不是发布 tag」取自上面的唯一真源(不写 `!contains(ref_name,'-')` 这类名字形状
+      # 判断 —— 那种写在 `if:` 里的第二份判据正是 K-04 的根因形态)。
+      - name: Require curated release notes for release tags
+        if: steps.release_policy.outputs.release_kind != 'none'
+        run: |
+          set -euo pipefail
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "::error::发布 tag 缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md)"
+            exit 1
+          }
+          echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
+      # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
+      # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
+      # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。
+      # docs-only ⇒ 本 job 只做上面的"守卫结果检查 + tag 形态/发布说明检查",不构建。
+      - uses: actions/setup-node@v7
+        if: needs.changes.outputs.code != 'false'
+        with:
+          node-version: 24
+      - if: needs.changes.outputs.code != 'false'
+        run: corepack enable
+      # 版本一致性判据(2026-09-23 第五轮审计 R5-C-5)。产品版本分布在两处 manifest
+      # (root package.json 与 packages/host/desktop/package.json),此前**只有** release
+      # job 第 4 步校验 —— 也就是四平台构建 40 分钟之后才红,而分支/PR 侧零判据
+      # (漏改一处时 gate 与三平台全绿,误导性极强)。
+      #
+      # 放这里的原因:node 已就绪(setup-node + corepack enable 在上面)、还没到
+      # `yarn install`,所以在最便宜的位置失败。两条判据分工:
+      #   ① `manifests`:只比两处 manifest 彼此相等 —— 发布 PR"已 bump、tag 未打"时它
+      #      必须绿(把 `check` 不带参数塞进 `yarn check` 会让每个发布 PR 恒红:后者的
+      #      期望值取自 git describe 的最新 tag)。
+      #   ② tag push 上再校验 tag 与两处 manifest 逐字一致(与 release job 同一命令、
+      #      同一真源),把"tag 打了但忘了 bump"从 40 分钟提前到 1 分钟。
+      - name: Product version predicates (manifests always; tag must match on release tags)
+        if: needs.changes.outputs.code != 'false'
+        run: |
+          set -euo pipefail
+          node scripts/version.mjs manifests
+          case "${GITHUB_REF}" in
+            refs/tags/v*) node scripts/version.mjs check "${GITHUB_REF_NAME}" ;;
+          esac
+      - name: Cache yarn (and electron for the linux packaging job)
+        if: needs.changes.outputs.code != 'false'
+        uses: actions/cache@v6
+        with:
+          path: |
+            .yarn/cache
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+      - if: needs.changes.outputs.code != 'false'
+        run: yarn install --immutable
       # 渲染进程错误采集门禁(verify:renderer-capture,2026-09-16)是**图形**门禁:
       # 要真起 Electron 并在页面主世界抛错。runner 镜像通常自带 xvfb,这里仍与
       # desktop-linux job 一样做防御式安装 —— 该门禁在无 DISPLAY 且无 xvfb-run 时
       # **故意 fail-loud**(不静默跳过),所以装不上会红,而不是悄悄变绿。
+      # 只有完整路径会跑到那个图形门禁,docs-only 时不必装。
       - name: Ensure xvfb for the graphical gate
+        if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
           if ! command -v xvfb-run >/dev/null 2>&1; then
@@ -141,10 +320,54 @@ jobs:
           fi
       # 根 check(2026-09-06 重排):desktop check 最前(一次构建产出桌面 lib/types,
       # 其余包 tsc 依赖),随后其余包 check,全程每包只构建一次。
-      - run: yarn check
+      # 判据用 `!= 'false'` 而不是 `== 'true'`:changes 失败/输出为空时走完整路径
+      # (fail-safe)。参数向量必须保持为空(禁止 --no-guards / --only / --changed /
+      # check:fast)—— 这条由 check-workflows.mjs 的 [SK-8] 静态策略守着。
+      # **根守卫也在 `yarn check` 里**,但那条路径只对"有代码改动"的 PR 生效;
+      # docs-only 的 PR 由永不跳过的 gate-guards job 承担(见上面的注释)。
+      #
+      # W-8 接线(2026-09-23 第三轮审计的收口):`yarn check` 里的 `check:wasm-client-only`
+      # 会跑 `scripts/verify-wasm-client-only.sh`。该脚本早就支持"跑前锁定期望 HEAD"
+      # (不匹配即**跑前**退出码 2 并打印「结论不可比」),但**没有任何地方设置它** ⇒
+      # 换 commit / 脏树 / 跑动中被推进 HEAD 都能拿到同一句「全部通过 ✅(绑定 HEAD …)」。
+      # 这里把结论钉在本次运行的那个提交上(`github.sha` 就是 `actions/checkout` 检出的
+      # 那个 commit;push/tag/PR 三种触发下都成立)。
+      # 取值必须是 `${{ github.sha }}`:写死字面量会在下一次提交后恒红,`github.ref` 之类
+      # 形状非法(脚本按 7–40 位小写十六进制校验)⇒ 两者都会被 check-workflows.mjs 的
+      # [SK-12]③ 静态判据拒掉。
+      #
+      # 为什么**不**顺带接 `--require-clean` / `WASM_GATE_REQUIRE_CLEAN=1`(2026-09-23 拍板):
+      # ① 本仓的共享工作树长期有并发未提交改动,门禁自身还会产出被忽略的构建产物 ⇒
+      #    "必须干净"极易变成假红,而假红的常见下场是整条判据被关掉;
+      # ② CI 之外真正需要这条硬判据的场景(归档一次可复现的结论)由本地显式加参数满足;
+      # ③ 缺省口径不是静默的 —— 脏树会以 `WARN 工作树不干净(跑前 N → 跑后 M 个改动)`
+      #    写进结论行与绑定文件(`dirty-policy` 行),不会被误读成"跑在干净 HEAD 上"。
+      # 若将来要接:需要在**干净检出**上先实测它稳定为绿(副本仓已验证可行),再接。
+      - name: Full gate (packages + all root guards)
+        if: needs.changes.outputs.code != 'false'
+        env:
+          WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
+        run: yarn check
+      # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`
+      # 对它 0 引用;组 6 只在本地手跑)。接在这里的原因:本 job 已装 xvfb(`yarn check`
+      # 里的图形门禁需要它)、也已 `yarn install`(探针用仓内 Electron)⇒ 接线成本 = 一个
+      # step,实测 21s(4/4 PASS)。
+      # 只接 Linux:Windows/macOS 的自定义协议行为尚未实测,探针在非 Linux 上显式
+      # SKIP(77);组内本轮新增的"**全组 SKIP = 失败**"保证 Linux 上哪天全 SKIP 也不会
+      # 装作跑过(不留"跑完给结论"的假象)。
+      # `WASM_GATE_EXPECT_HEAD` 同样要带:这一步与 `yarn check` 跑的是**同一个脚本**,
+      # 不设置它就会留下一份"没绑任何权威 HEAD"的探针结论(与被审计的 W-8 形态相同);
+      # 两处入口由 check-workflows.mjs 的 [SK-12]③ 一起钉住。
+      - name: WASM protocol probes (group 6; Linux)
+        if: needs.changes.outputs.code != 'false'
+        env:
+          WASM_GATE_REQUIRE_COVERED_PLATFORM: '1'
+          WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
+        run: bash scripts/verify-wasm-client-only.sh --groups 6
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products
+        if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
           tar -czf workspace-build.tgz \
@@ -157,6 +380,7 @@ jobs:
             packages/client/wasm-apps/lib packages/client/panel-surface/lib \
             packages/client/foot-menu/lib \
       - name: Upload workspace build products (one build, three platforms)
+        if: needs.changes.outputs.code != 'false'
         uses: actions/upload-artifact@v7
         with:
           name: workspace-build
@@ -214,10 +438,22 @@ jobs:
         working-directory: server/webadmin
       # 2026-09-06 补上门禁缺口(审计 G1/G2):gofmt 与 webadmin 测试此前只在
       # server/Makefile check 中,CI 从未执行。
+      #
+      # W-6(2026-09-23 第三轮审计 P-4):扫描面必须与 `server/Makefile` 的
+      # `gofmt -l` **同源**(那里的唯一真源是 `GO_DIRS`)。此前这里少一个
+      # `demoapps`,而 `go vet ./...` 与 `go test ./...` 都不查格式 ⇒
+      # `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)里的格式违规
+      # 在 CI 全绿。两边的目录集合由 `scripts/verify-ci-scripts.mjs` 的
+      # 「gofmt 扫描面必须与 Makefile 同源」判据逐条对拍(任一侧增删目录都红)
+      # —— 不要只在这一侧或只在 Makefile 里加/删扫描目录。
+      #
+      # R6-C P2-1(2026-09-23 第六轮审计):补上 `webadmin` 与 `scripts` —— 它们是同一个
+      # Go module 里的包,`go vet ./...` / `go test ./...` 覆盖它们,而本地 `make check`
+      # 此前不覆盖(写坏 = 本地绿、CI 红);gofmt 面则是两边都没查。
       - name: gofmt check
         run: |
           set -euo pipefail
-          FILES="$(gofmt -l cmd internal)"
+          FILES="$(gofmt -l cmd internal demoapps webadmin scripts)"
           if [ -n "$FILES" ]; then
             echo "::error::gofmt 未通过: $FILES"
             exit 1
@@ -233,7 +469,51 @@ jobs:
       # 整体取消,产物从 `panic: test timed out after Nm` + goroutine dump +
       # 用例名,退化成"gate 红、查不出原因"(第二轮审计 R2-SK-7,P2)。
       # 15m 对最慢包(299s)有 3× 余量,且保留 dump 机会。
-      - run: go test ./... -count=1 -p 1 -timeout 15m
+      #
+      # W-4(2026-09-23 第三轮审计):只取 `go test` 的退出码会让"PG 不可达 ⇒ 全部
+      # `t.Skip` ⇒ 0 断言通过"变成门禁绿 ⇒ 这里落 `-json` 报告,再交给判定脚本按
+      # 「**用例级 0 skip** + 三条关键用例确实 pass」判。该判据脚本此前只被组 3 调用,
+      # 而组 3 没有任何 job 跑(`.github/` 对它 0 引用)⇒ 判据从不执行。
+      #
+      # **范围**:`--scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare`
+      # (**不带尾斜杠** —— 带尾斜杠会漏掉 `internal/router` 根包自己的 65 个用例事件,实测)。
+      # 前两段与组 3 同面;后两段是第三轮修复补齐的:渠道命名空间守卫(A-8/F1-F6)的用例
+      # 全在这两个包里,而它们**依赖真 PG** —— PG 不可达时 `serverstore.NewTestDB` 会
+      # `t.Skip("DB test skipped: postgres unavailable …")`,旧范围下"整包静默跳过"是绿的
+      # (复审 F8)。本机实测(真库,`PG_DSN_TEST` 指向新建库):两包 `-json` 报告里
+      # **用例级 skip = 0**(`internal/agentshare` 唯一的 `t.Skip` 是夹具尺寸超过预览上限
+      # 时的分支,当前 10 个形态全部 ≤128KiB,不触发)⇒ 纳入判定面不会造成每次必红的假红。
+      # 全仓报告里另有若干**环境条件型** skip(如 `internal/serverstore` 的 DST 用例在 UTC
+      # runner 上必然 `t.Skip("本机时区无夏令时")`)—— 把"零用例级 skip"套到全仓等于每次
+      # 必红的假红,而假红的常见下场是整条判据被关掉。范围外事件不参与判定(脚本打印计数)。
+      - name: Go tests (repo-wide) + WASM case-level report
+        run: |
+          set -euo pipefail
+          # 报告**不进 CI 日志**:上千个用例的 JSON 会把 job log 刷爆,而 GitHub 会截断
+          # 中段(本仓踩过"失败用例名被自己人挤出日志")⇒ 重定向落盘,失败时另存 artifact。
+          GO_TEST_STATUS=0
+          go test ./... -count=1 -p 1 -timeout 15m -json > go-test.json || GO_TEST_STATUS=$?
+          CHECK_STATUS=0
+          node ../scripts/wasm/check-go-test-json.mjs go-test.json \
+            --scope internal/wasmapp,internal/router,internal/marketplace,internal/agentshare \
+            --require TestClientRequest_LoginRequiredWithoutIdentityIs401,TestCheckClientOrigin,TestClientFrameUser_ProjectsUserRowAndPublisherFlag \
+            || CHECK_STATUS=$?
+          if [ "${GO_TEST_STATUS}" -ne 0 ]; then
+            echo "::error::go test 退出 ${GO_TEST_STATUS}(报告 go-test.json;上面的判定输出已列出失败/跳过的用例名)"
+          fi
+          # 两个退出码都要显式判定:`go test` 失败而判定脚本恰好判绿(例如报告被截断)
+          # 时也不许放过 —— 反过来判定脚本的 1/2 同样是红。
+          if [ "${GO_TEST_STATUS}" -ne 0 ] || [ "${CHECK_STATUS}" -ne 0 ]; then
+            exit 1
+          fi
+      - name: Upload go test JSON report (on failure)
+        # 失败时把报告带走:判定脚本只打印用例名,排障常要看完整事件流。
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-test-json
+          path: server/go-test.json
+          if-no-files-found: ignore
       - run: npm test
         working-directory: server/webadmin
       - run: make build-server
@@ -343,6 +623,9 @@ jobs:
         if: ${{ !github.event.pull_request.head.repo.fork }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       # --official-last:官方最后构建,于是 dist/ 留下的是**官方**产物 ——
       # 紧随其后的 E2E 与人工排查都对着官方那一份(渠道产物已归集到 client-assets/)。
@@ -490,6 +773,9 @@ jobs:
         shell: bash
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       - name: Package client installers for every selected channel
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -675,6 +961,9 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       - name: Stage the official DMG for the release image
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -765,9 +1054,18 @@ jobs:
     name: Release (server image archive)
     # 只对 beta 与 official 发布到 GitHub Release(2026-09-10 定案):
     # 品牌渠道是客户定制交付,不进公开 Releases(客户从更新服务器自己的渠道目录取)。
-    # 渠道由 tag 形态决定,与 resolve 步骤同源。
-    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || !contains(github.ref_name, '-'))
-    needs: [server, desktop-linux, desktop-windows, desktop-macos]
+    #
+    # **这里只判"是不是 v 开头的 tag",不再判 tag 形态**(2026-09-23 审计 K-04):
+    # 形态 → 渠道集/是否发布的映射是 `scripts/ci-release-policy.sh` 一份实现,由
+    # gate 的第一步执行(未知形态当场红 ⇒ 本 job 因 `needs` 被跳过)。
+    # 曾经这里写着第二份判据 `… || !contains(github.ref_name, '-')`,它与渠道脚本
+    # 对 `v2.8.2-hotfix` 结论相反:全渠道构建 + 零发布(客户侧零信号、R2 中转前缀
+    # 无人清理)。**不要**再把名字形状判断写回这个 `if:`。
+    if: startsWith(github.ref, 'refs/tags/v')
+    # gate 是**直接**依赖(不只是传递依赖):本 job 要用 `needs.gate.outputs.channels_rev`
+    # 拿渠道仓 pin(2026-09-23 第五轮审计 R5-C-2)—— `needs` 上下文只含直接依赖,
+    # 少了这一条会静默拿到空值。
+    needs: [gate, server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -776,6 +1074,31 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      # 2026-09-23 审计 C-CI-2:策展发布说明的**第二道**检查必须在任何对外上传之前。
+      #
+      # 此前唯一会拦它的地方在 "Create GitHub Release" 步骤里,而那一排在
+      # "Upload every channel image to the update server (R2)" **之后** ⇒ 缺
+      # docs/releases/<tag>.md 时,客户侧更新面(latest.json + 镜像对象,且该路径是
+      # 不可变长缓存)已经先被挂上新版本,才轮到 GitHub Release 步骤红 —— 结果是
+      # "半发布":客户端能升到一个没有策展说明、也没有 GitHub Release 的版本。
+      # gate 里的早检仍在(1 分钟内报错、下游全部因 needs 跳过);这里是 release job
+      # 的第一步 —— 只要它没过去,后面一个上传步骤都不会跑。
+      #
+      # 2026-09-23 第五轮审计 R5-C-3:**预发 tag 同样要求策展说明**。此前这道检查以
+      # `release_kind=stable` 为前提,预发 tag 缺说明会被放行到 `--generate-notes` ——
+      # 自动变更日志的正文由提交信息 + **PR 标题/正文**生成,而后者不在任何守卫判据内
+      # (铁律 0 的盲区)。历史上正是这条路径把真实域名/IP 带进了公开 Release 正文。
+      # 形态判定仍走唯一真源 `scripts/ci-release-policy.sh`(未知形态它也当场红)。
+      - name: Require curated release notes before any upload
+        run: |
+          set -euo pipefail
+          bash scripts/ci-release-policy.sh > release-policy.txt
+          cat release-policy.txt
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "::error::发布 tag 缺少策展发布说明 docs/releases/${GITHUB_REF_NAME}.md(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md);在任何对外上传之前中止"
+            exit 1
+          }
+          echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
       # 三平台安装包仍需先构建:它们要打进镜像(客户端随镜像分发)。
       - uses: actions/download-artifact@v7
         with:
@@ -804,6 +1127,9 @@ jobs:
       - name: Fetch channel packages (private repo)
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
 
       # 品牌渠道的客户端产物走 R2 中转(见 desktop-linux job 的说明),这里取回。
@@ -854,21 +1180,20 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           REPO="picoaide/picoaide-harness"
-          # 说明(**公开发布面**,2026-09-11 定案):正式 tag 必须有策展发布说明
+          # 说明(**公开发布面**,2026-09-11 定案):tag 必须有策展发布说明
           # (docs/releases/<tag>.md,模板 TEMPLATE.md);缺失即失败,绝不静默回退
           # 自动生成的 PR 列表 —— 版本页是给客户与运维看的,不是 CI 日志。
-          # 预发 tag 允许缺失(beta/rc 面向内测),回退自动变更日志并告警。
+          # 2026-09-23 第五轮审计 R5-C-3 起**预发 tag 同样要求**:此前预发缺说明会回退
+          # `--generate-notes`,而自动变更日志的正文来自提交信息 + **PR 标题/正文**,
+          # 后者不在任何守卫判据内(铁律 0 的盲区)—— 历史上正是这条路径把真实域名/IP
+          # 带进了公开 Release 正文。这条是第三道保险(前两道在 gate 与 release job 首步)。
           NOTES="docs/releases/${TAG}.md"
-          if [ -f "${NOTES}" ]; then
-            echo "Using curated release notes from ${NOTES}"
-            NOTES_FLAG="--notes-file ${NOTES}"
-          elif [[ "${TAG}" == *-* ]]; then
-            echo "::warning::${NOTES} not found — prerelease falls back to GitHub auto-generated notes"
-            NOTES_FLAG="--generate-notes"
-          else
-            echo "::error::正式版 ${TAG} 缺少发布说明 ${NOTES}(模板见 docs/releases/TEMPLATE.md)"
+          test -f "${NOTES}" || {
+            echo "::error::${TAG} 缺少策展发布说明 ${NOTES}(正式版与预发版一律要求;模板见 docs/releases/TEMPLATE.md)"
             exit 1
-          fi
+          }
+          echo "Using curated release notes from ${NOTES}"
+          NOTES_FLAG="--notes-file ${NOTES}"
           # prerelease tag(含 prerelease 段)按 GitHub 语义以 Pre-release 发布:
           # 可见但不会被当成 Latest。正式 tag 发布为普通 release。
           PRERELEASE=""

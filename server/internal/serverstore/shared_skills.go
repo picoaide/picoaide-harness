@@ -121,21 +121,42 @@ func ListSharedSkills(db *sql.DB, status string) ([]SharedSkill, error) {
 	return out, nil
 }
 
-// ListVisibleSharedSkills 员工可见清单:approved 且已授权 + 自己上传的全部状态。
+// ListVisibleSharedSkills 员工清单（组织渠道）的**分发面**：只有可分发的东西
+// 才在这里 —— approved ∧ 已授权 ∧ 已上架（下架 = 与不存在同语义），外加
+// 「归属人自己的、已上架的」行（作者在组织分区也要看得到自己已生效的内容，
+// 否则他在客户端根本点不到安装）。
 //
-// P2-1(审计 2026-09-13,技能侧补齐 2026-09-15):App 级下架(apps.enabled=0)在
-// 员工面等同于不存在——智能体侧 ListVisibleAgentPresets 早已按 EnabledAppIDs
-// 过滤,技能侧当时漏了,于是两面的"下架"语义不一致(员工仍能列出并下载已下架
-// 的技能)。上架集合一次批量取回,不逐行查 apps。
+// 判据只有一份（distribution.go 的语义权威）。作者面（「我的」分区，含下架
+// 与 pending/rejected）走 ListOwnedSharedSkills —— 两个函数的差别恰好就是
+// 「下架」：**下架只挡分发面，不挡作者自查**（第五轮审计 R5-B-1）。
 //
-// 门禁:internal/capabilities 的 TestSkillLifecycleUploadApproveInstall 第 5 步
-// 与 TestSkillLifecycleDisabledParityWithAgents 会在这条被摘掉时变红。
-func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]SharedSkill, error) {
+// **发布者（app_releases.publisher）不是判据**（第五轮审计 R5-B-2）：归属
+// 转移后它与发布权（apps.owner）方向相反 —— 旧作者会永久看到一行自己已无权
+// 续传的内容，而新归属人（唯一有权续传的人）什么都看不到。归属判据见
+// AppOwnedByOwner。
+//
+// 门禁：internal/capabilities 的 TestSkillLifecycleUploadApproveInstall 第 5 步
+// 与 TestSkillDisabledHiddenFromAdminClientLists（下架后三种角色在客户端面皆
+// 不可见）会在这条被摘掉时变红。
+func ListVisibleSharedSkills(db *sql.DB, viewer string, granted []string) ([]SharedSkill, error) {
+	return listSharedSkillsByFace(db, viewer, granted, false)
+}
+
+// ListOwnedSharedSkills 是「我的」分区（作者面）的唯一取数口：apps.owner ==
+// viewer 的全部版本 —— **任意审核状态 + 忽略下架**。停用/下架/待审/被拒都
+// 必须让作者看得到，否则管控动作在作者面没有任何反馈闭环（R5-B-1/R5-B-2）。
+func ListOwnedSharedSkills(db *sql.DB, viewer string) ([]SharedSkill, error) {
+	return listSharedSkillsByFace(db, viewer, nil, true)
+}
+
+// listSharedSkillsByFace 是上面两个面的共同实现：ownOnly=false 取分发面
+// （下架行一律不列），ownOnly=true 取作者面（归属人的行，忽略下架）。
+func listSharedSkillsByFace(db *sql.DB, viewer string, granted []string, ownOnly bool) ([]SharedSkill, error) {
 	list, err := orgSkillReleases(db, "")
 	if err != nil {
 		return nil, err
 	}
-	enabled, err := EnabledAppIDs(db, AppKindSkill)
+	dists, err := DistributionStates(db, AppKindSkill)
 	if err != nil {
 		return nil, err
 	}
@@ -145,10 +166,17 @@ func ListVisibleSharedSkills(db *sql.DB, author string, granted []string) ([]Sha
 	}
 	out := []SharedSkill{}
 	for _, r := range list {
-		if !enabled[r.AppID] {
+		d := dists.Of(r.AppID)
+		if ownOnly {
+			if d.OwnedBy(viewer) {
+				out = append(out, releaseToShared(r))
+			}
 			continue
 		}
-		if r.Publisher == author || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
+		if !d.Delivered() {
+			continue
+		}
+		if d.OwnedBy(viewer) || (r.Status == ReleaseStatusApproved && ok[r.AppID]) {
 			out = append(out, releaseToShared(r))
 		}
 	}

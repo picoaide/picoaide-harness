@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -286,7 +287,9 @@ var hintTable = map[apperr.Code][]string{
 	},
 	apperr.CodeRuntimeMemory: {
 		fmt.Sprintf(memoryLimitHintFormat, limits.InstanceMemoryPages*limits.WasmPageSize>>20),
-		fmt.Sprintf("db.query 单次最多返回 %d 行 / %d MiB,更大的结果要分页(LIMIT/OFFSET)", limits.SQLMaxRows, limits.SQLMaxResultBytes>>20),
+		// 2026-09-23 审计 A-1：结果预算收到"可交付量级"（168 KiB，与单帧自洽）——
+		// 这里必须按 KiB 打印，`>>20` 会印成 0 MiB（预算已经小于 1 MiB）。
+		fmt.Sprintf("db.query 单次最多返回 %d 行 / %d KiB,更大的结果要分页(LIMIT/OFFSET)", limits.SQLMaxRows, limits.SQLMaxResultBytes>>10),
 		"Go 运行时自身常驻数 MiB 堆,留给业务数据的内存比预期少;先在 db.query 里 WHERE 收窄再聚合",
 	},
 	apperr.CodeRuntimeGuestExit: {
@@ -295,7 +298,7 @@ var hintTable = map[apperr.Code][]string{
 		"响应必须由应用写到 stdout 的协议帧里 —— 只 exit 不写帧等于把失败报成空响应",
 	},
 	apperr.CodeDBLimit: {
-		fmt.Sprintf("触到 SQL 硬限(单语句 %s / %d 行 / %d MiB):先加 WHERE 与 LIMIT,再考虑分页", limits.SQLStatementBudget, limits.SQLMaxRows, limits.SQLMaxResultBytes>>20),
+		fmt.Sprintf("触到 SQL 硬限(单语句 %s / %d 行 / %d KiB):先加 WHERE 与 LIMIT,再考虑分页", limits.SQLStatementBudget, limits.SQLMaxRows, limits.SQLMaxResultBytes>>10),
 		fmt.Sprintf("应用库体积上限 %d MB:平台不提供扩容旋钮,需要自己删旧数据或做汇总表", limits.AppDBMaxBytes>>20),
 		"一次只发一条语句(多语句一定被拒),复杂查询拆成多次 db.query",
 	},
@@ -324,7 +327,14 @@ var hintTable = map[apperr.Code][]string{
 	},
 	apperr.CodeRuntimeOutputOverrun: {
 		fmt.Sprintf("协议帧单行上限 %d MiB:不要把大对象一次性写进响应,分页或改走 db 查询", limits.ProtocolLineMaxBytes>>20),
-		fmt.Sprintf("应用响应体上限 %d MiB,超出的部分客户端也拿不到", limits.AppResponseBodyMaxBytes>>20),
+		// ⚠️ 口径是"**可交付**"而不是"总输出闸门"（2026-09-23 审计 ABI-1；A-6 订正取值）：
+		// 响应体必须装进**一个**帧（pump 读到第一个响应帧即结束），所以能交付的体量
+		// 远小于 limits.AppResponseBodyMaxBytes(8 MiB)——那个数是平台侧的总输出闸门，
+		// 不是"能拿到多少"。而"保证可交付"的数按**最坏 JSON 转义（6 倍）**反推 =
+		// limits.MaxDeliverablePayloadBytes（168 KiB）：原来的 512 KiB 被 `<`×512 KiB
+		// （编码后 3,145,840 B > 1 MiB 帧）直接证伪。
+		fmt.Sprintf("应用响应体必须装进**一个**帧:单帧负载上限 %d MiB,实际可用约 %d KiB(含响应头与 JSON 转义开销)",
+			abi.MaxFrameBytes>>20, abi.MaxResponseBodyBytes>>10),
 	},
 	apperr.CodeHostCallOverBudget: {
 		fmt.Sprintf("宿主调用超过预算(%s):缩小输入或拆成多次调用", limits.HostCallBudgetDefault),

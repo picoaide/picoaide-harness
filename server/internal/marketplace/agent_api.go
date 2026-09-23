@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
@@ -205,6 +207,22 @@ func fmtAgentUploadAudit(name, version, title, checksum string) string {
 }
 
 // updateAgentAdmin 更新元数据(不触碰版本与归档)。
+//
+// **顺序口径(2026-09-23 复审 F6 订正)**:本端点是市场命名空间 10 条逐名路由里
+// **唯一**「先 body 解析、后过渠道守卫」的一条(其余 9 条守卫都在任何实际工作之前)。
+// 此前注释把它算进"守卫一律先于 body 解析"是**不实口径** —— 事实是:
+//
+//	name 形状(400) → ShouldBindJSON(坏 body ⇒ 400) → marketAgentApp(守卫) → 写库
+//
+// 保留该顺序是**有意**的,且实测**不泄露存在性**:坏 body 下 org 行与"该名字不存在"
+// 逐字节同为 `400 {"code":"VALIDATION","message":"请求体错误"}`(守卫在 body 之后,
+// 两侧都先撞同一处 body 解析);合法 body 下两侧同为 404。守卫仍在**任何 DB 读/写
+// 之前**,所以不存在"先写后 404"这类副作用面。
+// 判据:`TestAgentUpdateMetaHidesOrgChannelRow` 用
+// `assertBadBodyIsIndistinguishable` 钉住"两侧同形"这条不变量 —— 任何"按行是否
+// 存在分流"的漂移(先查行、org 行回 404、不存在的名字仍走 body 解析回 400)立刻红。
+// 若日后把守卫提到 body 解析之前,两侧一起变 404(收紧),该用例仍绿,只把本注释
+// 的顺序描述改成事实即可。
 func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
 	if !util.SafePathSegment(name) {
@@ -216,17 +234,13 @@ func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
 		return
 	}
-	a, err := serverstore.GetApp(db, serverstore.AppKindAgent, name)
+	a, err := marketAgentApp(db, name)
 	if err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
 			return
 		}
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	if a.Channel != serverstore.AppChannelMarket {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
 		return
 	}
 	title := req.Name
@@ -252,7 +266,7 @@ func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 // deleteAgentAdmin 下架(保留数据,可重新上架)。
 func deleteAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if a, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err == nil && a.Channel == serverstore.AppChannelMarket {
+	if _, err := marketAgentApp(db, name); err == nil {
 		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, false)
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -264,7 +278,7 @@ func deleteAgentAdmin(c *gin.Context, db *sql.DB) {
 // enableAgentAdmin 重新上架。
 func enableAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if a, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err == nil && a.Channel == serverstore.AppChannelMarket {
+	if _, err := marketAgentApp(db, name); err == nil {
 		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, true)
 		_ = serverstore.AuditLog(db, adminUsername(c), "agent_enable", name)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -276,6 +290,11 @@ func enableAgentAdmin(c *gin.Context, db *sql.DB) {
 // previewAgentAdmin 返回展示版本归档的文件清单与主文件内容。
 func previewAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
+	// A-8:渠道守卫在任何实际工作之前(与 agentshare.requireOrgAgent 的授权面同形)
+	// —— org 行在这个命名空间下按不存在处理,不得被预览。
+	if !requireMarketAgent(c, db, name) {
+		return
+	}
 	r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, name, true)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
@@ -308,9 +327,63 @@ func archEntryText(data []byte, target string) (string, error) {
 	return content, nil
 }
 
+// downloadAgentArchiveAdmin 管理面下载市场智能体的归档（2026-09-23，与技能侧
+// downloadSkillArchiveAdmin 同形、同权限、同响应契约）。
+//
+// 落点同上：webadmin 归档预览弹层「文件过大 → 下载归档」= 预览基路径 + `/archive`，
+// 市场智能体的基路径是 `/api/server/admin/agents/:name`，此前只声明了 POST（上传新版）
+// ⇒ 市场行 404。组织侧对应端点是 `/agent-presets/:name/:version/archive`。
+//
+// 取"当前展示版本"（最高 approved 且未软删）——与同命名空间的 preview/file 两面
+// 同一条解析（CurrentMarketReleaseFor），因此三面看到的永远是同一份内容。
+func downloadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
+	name := c.Param("name")
+	// 市场命名空间的渠道守卫：市场行 = apps.channel='market'（与 listAgentsAdmin 的
+	// 过滤同一判据）。技能侧的守卫来自 serverstore.GetSkill 自身；智能体侧 A-8
+	// （2026-09-23）起九个逐名端点统一走 requireMarketAgent / marketAgentApp，
+	// 不再各自内联判据 —— 否则组织的智能体会从市场命名空间的 URL 下走归档，
+	// 正是「按行 channel 选命名空间」要杜绝的越渠道形态。
+	if _, err := marketAgentApp(db, name); err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, name, true)
+	if err != nil {
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return
+	}
+	if r == nil || len(r.Archive) == 0 {
+		// 尚未发布版本 / 归档缺失：与预览面同措辞的 JSON 404（不是空 body、不是 405）。
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体尚未发布版本")
+		return
+	}
+	// 按归档实际格式回响应（zip 推荐 / tar.gz 兼容），头名与组织侧
+	// agentshare.serveArchive 一致（X-Preset-*），客户端安装器靠它做对照。
+	dispName := name + "-" + r.Version + ".tar.gz"
+	contentType := "application/gzip"
+	if archiveutil.Format(r.Archive) == "zip" {
+		dispName = name + "-" + r.Version + ".zip"
+		contentType = "application/zip"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
+	c.Header("X-Preset-Version", r.Version)
+	c.Header("X-Preset-Checksum", r.Checksum)
+	_, _ = serverstore.IncrementAgentPresetDownload(db, name, r.Version)
+	c.Data(http.StatusOK, contentType, r.Archive)
+}
+
 // fileContentAgentAdmin 按路径返回归档内文件内容(与技能预览同语义)。
 func fileContentAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
+	// A-8:渠道守卫在任何实际工作之前 —— org 行不得被逐文件读出。
+	if !requireMarketAgent(c, db, name) {
+		return
+	}
 	filePath := c.Query("path")
 	r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, name, true)
 	if err != nil {
@@ -335,7 +408,12 @@ func fileContentAgentAdmin(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if tooLarge {
-		c.JSON(http.StatusOK, gin.H{"size": size, "tooLarge": true})
+		// 键名是**跨端契约**：webadmin 的 FileContentData.too_large 读它，组织侧的
+		// `/agent-presets/:name/:version/file`（agentshare）与技能侧
+		// （fileContentSkillAdmin）产出的也是 `too_large`。这里曾写成驼峰 `tooLarge`
+		// ⇒ 市场智能体的超大文件**永不显示**「文件过大 → 下载归档」入口（三段里只有
+		// 这一段静默失效，两端各自"自证"都测不出来）。别改回驼峰。
+		c.JSON(http.StatusOK, gin.H{"size": size, "too_large": true})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"content": content, "size": size})
@@ -345,8 +423,10 @@ func fileContentAgentAdmin(c *gin.Context, db *sql.DB) {
 
 func listAgentGrants(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err != nil {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	// A-8:授权**读**也只服务市场行(市场与组织库同名同 kind 共用一张 app_grants,
+	// 不过滤渠道就会读出组织行的 ACL)。与 agentshare.listPresetGrants 的
+	// requireOrgAgent 同形、方向相反。
+	if !requireMarketAgent(c, db, name) {
 		return
 	}
 	grants, err := serverstore.ListAppGrants(db, serverstore.AppKindAgent, name)
@@ -362,6 +442,11 @@ func listAgentGrants(c *gin.Context, db *sql.DB) {
 
 func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
 	name := c.Param("name")
+	// A-8:**写**面守卫在任何实际工作之前 —— 组织行的授权不得被市场命名空间增删。
+	// 位置与 agentshare.setPresetGrant 的 requireOrgAgent 同形(首段,先于 body 解析)。
+	if !requireMarketAgent(c, db, name) {
+		return
+	}
 	var req grantReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -370,11 +455,6 @@ func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
 	subject, t, ok := parseGrantSubject(req)
 	if !ok {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "username 与 group 必须指定其一")
-		return
-	}
-	// 资源存在性先判(404),与技能侧 setSkillGrant → applyGrant 的顺序一致。
-	if _, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err != nil {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
 		return
 	}
 	// marketplace-5:与技能侧 applyGrant 同口径 —— 单条授权也要剥掉 webadmin
@@ -418,8 +498,9 @@ func applyAgentGrant(c *gin.Context, db *sql.DB, grant bool) {
 // 与技能侧 replaceSkillGrants/ReplaceSkillGroupGrants 同语义。
 func replaceAgentGrants(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := serverstore.GetApp(db, serverstore.AppKindAgent, name); err != nil {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	// A-8:**写**面守卫在任何实际工作之前(先于 body 解析与事务)。
+	// 与 agentshare.replacePresetGrants 的 requireOrgAgent 同形、方向相反。
+	if !requireMarketAgent(c, db, name) {
 		return
 	}
 	var req struct {

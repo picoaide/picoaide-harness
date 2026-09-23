@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Pixel width and height of the generated macOS icon canvas. */
 const MAC_APP_ICON_CANVAS_SIZE = 1024
@@ -88,7 +89,6 @@ export async function generateMacAppIcon(source = sourcePath, output = outputPat
   await writeFile(output, rendered)
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   await generateMacAppIcon()
 }

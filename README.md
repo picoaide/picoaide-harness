@@ -53,19 +53,36 @@ PicoAide Harness 把 DeepSeek Harness 的本地智能体、Host 服务、插件�
 
 ## 下载与安装
 
-当前正式安装包支持 Windows x64、macOS（Apple Silicon）和 Linux x64（AppImage 与 deb）。普通用户不需要单独安装 Node.js、pnpm 或 DSH。
+客户端安装包**随服务端镜像一起发布**（不单独挂在下载站），支持 Windows x64、macOS（Apple Silicon）和 Linux x64（AppImage）。普通用户不需要单独安装 Node.js、pnpm 或 DSH。
 
-> 下载入口统一指向 [Releases 最新版本](https://github.com/picoaide/picoaide-harness/releases/latest)：资产名带版本号（`PicoAide-Harness-<版本>-…`），硬编码版本的直链会在下一个版本发布后失效（P2-55）。
-
-| 平台 | 下载 | 安装方式 |
+| 平台 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | [下载安装程序](https://github.com/picoaide/picoaide-harness/releases/latest)（资产 `PicoAide-Harness-<版本>-x64-Setup.exe`） | 运行 NSIS 安装程序并按提示完成安装 |
-| macOS | [下载 DMG](https://github.com/picoaide/picoaide-harness/releases/latest)（资产 `PicoAide-Harness-<版本>-mac.dmg`） | 打开 DMG，将 PicoAide Harness 拖入 Applications |
-| Linux x64 | [下载 AppImage](https://github.com/picoaide/picoaide-harness/releases/latest)（资产 `PicoAide-Harness-<版本>-x86_64.AppImage`，另有 `PicoAide-Harness-<版本>-amd64.deb`） | 授予执行权限后运行（deb 用 `sudo dpkg -i` 安装） |
+| Windows x64 | `PicoAide-Harness-<版本>-x64-Setup.exe` | 运行 NSIS 安装程序并按提示完成安装 |
+| macOS（Apple Silicon） | `PicoAide-Harness-<版本>-mac.dmg` | 打开 DMG，将 PicoAide Harness 拖入 Applications |
+| Linux x64 | `PicoAide-Harness-<版本>-x86_64.AppImage` | 授予执行权限后运行 |
 
-客户端升级与首次安装也可以直接问**它登录的那台服务端**要包（`GET /api/client/v2/updates/manifest`）——企业部署下员工机器因此不需要访问任何外网。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。详细步骤、插件命令和故障排查见官网 [桌面客户端](https://www.picoaide.com/docs/desktop/)与[常见问题](https://www.picoaide.com/docs/faq/)。
+拿到这些安装包只有两条路：
 
-> 说明：Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"，请先在 Releases 下载 `SHA256SUMS.txt` 核对后再运行；Linux 安装包同理。
+1. **企业服务器**（推荐）：管理员部署完成后，员工打开 `https://<企业域名>/`，门户页直接列出三平台下载入口；
+2. **官方镜像包**（试用 / 单机）：从更新服务器或 [GitHub Release](https://github.com/picoaide/picoaide-harness/releases) 取**服务端镜像包**，再从镜像里解出安装包：
+
+```bash
+VER=<版本，取自 latest.json 的 server.version>      # 预发布渠道把 official 换成 beta
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
+curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"
+sha256sum -c SHA256SUMS                            # ← 用 SHA256SUMS 校验下载到的镜像包
+unzip -p "picoaide-server-${VER}-amd64.zip" image.tar | docker load
+mkdir -p ./picoaide-stack
+docker run --rm -v "$PWD/picoaide-stack:/out" -e PICOAI_UNPACK_STACK=/out \
+  "picoaide-harness-server:${VER}"
+ls -1 ./picoaide-stack/client                       # 三平台安装包 + CLIENT-RELEASE.json
+```
+
+> GitHub Release 的附件是**服务端镜像包**（`picoaide-server-<版本>-amd64.zip`）与校验文件 `SHA256SUMS` —— 客户端安装包在镜像里，不在 Release 附件里；校验文件名是 `SHA256SUMS`（没有 `.txt`）。
+
+客户端升级与首次安装也可以直接问**它登录的那台服务端**要包（`GET /api/client/v2/updates/manifest`）——企业部署下员工机器因此不需要访问任何外网。首次启动会创建默认 `desktop` profile，并在本机启动官方 DSH Web 界面。完整步骤（含从镜像取包、离线部署与渠道交付）见官网[快速开始](https://www.picoaide.com/getting-started/)、[客户端分发与升级](https://www.picoaide.com/deployment/client-delivery/)，插件命令与故障排查见[桌面客户端](https://www.picoaide.com/docs/desktop/)与[常见问题](https://www.picoaide.com/docs/faq/)。
+
+> 说明：Windows 安装程序与 Linux 安装包暂未签名（macOS 正式发布版经签名/公证）。首次运行 Windows 安装包时 SmartScreen 可能提示"未知发布者"—— 请先用镜像包同目录的 `SHA256SUMS` 校验镜像（安装包从中解出），Linux 安装包同理。
 
 ## 核心优势
 

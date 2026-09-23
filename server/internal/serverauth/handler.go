@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -44,11 +45,34 @@ type API struct {
 	loginIPLimiter *loginLimiter
 	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
 	callbackLimiter *loginLimiter
+	// oidcFlowLimiter:OIDC **流程启动**专用 IP 桶(审计 2026-09-23 R5-A-18)。
+	//
+	// 与上面两个桶的关键区别:它**只对失败计数**(判定 blocked / 记账 record /
+	// 成功不计数),因此不能与登录 IP 桶共用实例 —— 共用时"成功也记账"的语义
+	// 会互相偷预算,而两套预算的阈值含义也完全不同(实读:修前它直接复用
+	// loginIPLimiter + loginIPMaxAttempts)。每 API 实例专属,因此键里不需要
+	// dbLimiterScope(见 oidcFlowBudgetKeyForHost)。
+	oidcFlowLimiter *loginLimiter
+	// oidcFlowCapacity 是**因平台自身容量被拒**的流程启动计数(2026-09-23 R6-A-4)。
+	//
+	// 与 oidcFlowLimiter 的分工:那个桶记的是**真实失败**(凭证/协议/配置错误),
+	// 这个计数记的是"平台自己的闸门说不"(在途流程表满 / 单来源 IP 在途配额满)。
+	// 两者必须分开:容量拒绝不是攻击证据,把它算进失败预算会让一个 NAT 出口在
+	// 登录潮里自我强化成 5 分钟全组织 SSO 封锁 —— 详见 oidc.go 的
+	// recordFlowCapacityRejection。计数经 OIDCFlowCapacityRejections() 读,
+	// 供探针/运维区分"被限流"与"平台容量到顶"这两种完全不同的处置。
+	oidcFlowCapacity atomic.Int64
 
 	mu               sync.RWMutex
 	providers        map[string]PasswordProvider
 	browsers         map[string]BrowserProvider
 	enabledProviders map[string]bool
+	// providersConfigured 区分"**从未配置过**"与"配置成空集"(WEB-2 审计 2026-09-23)。
+	// `New()` 起 enabledProviders 就是非 nil 空 map ⇒ 判不了 nil;而空集在 fail-open
+	// 方向恰恰是最危险的取值(`auth.enabled=","` 落库 ⇒ 空集 ⇒ 旧兜底返回
+	// ["ldap","local"] ⇒ 员工面重新接受本地密码)。SetEnabledProviders /
+	// ReloadProviders 一旦被调用即置位,之后空集按 fail-closed 处理(空顺序)。
+	providersConfigured bool
 
 	// OnSessionRevoked / OnUserSessionsRevoked 是**会话键失效**的回调
 	// （契约 §8.2 / R1-SRV-5，2026-09-19）。
@@ -90,10 +114,24 @@ func New(db *sql.DB) *API {
 		limiter:          sharedLoginLimiter(),
 		loginIPLimiter:   sharedLoginIPLimiter(),
 		callbackLimiter:  newCallbackLimiter(),
+		oidcFlowLimiter:  newRateLimiter(oidcFlowStartMaxAttempts),
 		providers:        map[string]PasswordProvider{},
 		browsers:         map[string]BrowserProvider{},
 		enabledProviders: map[string]bool{},
 	}
+}
+
+// OIDCFlowCapacityRejections 返回**因平台自身容量**被拒的 OIDC 流程启动次数
+// (在途流程表满 + 单来源 IP 在途配额满,2026-09-23 R6-A-4)。
+//
+// 它**不是**失败预算的一部分(失败预算见 oidcFlowLimiter):两个数放在一起看,
+// 才能区分"这个出口在暴力尝试"(失败预算涨)与"这个出口的合法登录潮把平台容量
+// 打满"(本计数涨)。处置完全不同:前者要拦,后者要扩容或提示稍后重试。
+func (a *API) OIDCFlowCapacityRejections() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.oidcFlowCapacity.Load()
 }
 
 // SetEnabledProviders records the client-facing provider set (auth.enabled).
@@ -104,6 +142,7 @@ func (a *API) SetEnabledProviders(names []string) {
 	}
 	a.mu.Lock()
 	a.enabledProviders = set
+	a.providersConfigured = true // 空集从此是"配置成空"而不是"没配置过"
 	a.mu.Unlock()
 }
 
@@ -131,6 +170,7 @@ func (a *API) ReloadProviders(db *sql.DB) error {
 	a.providers = providers
 	a.browsers = bs
 	a.enabledProviders = enabled
+	a.providersConfigured = true
 	a.mu.Unlock()
 	return nil
 }
@@ -138,13 +178,18 @@ func (a *API) ReloadProviders(db *sql.DB) error {
 // clientPasswordOrder returns the provider names the CLIENT surface may use.
 // auth.enabled is authoritative (2026-09-08 P1-5): the local provider stays
 // registered for the admin surface, but a deployment that enables ldap/oidc
-// only must not accept local passwords on the employee surface. An empty set
-// (API built without ConfigureProviders, e.g. unit tests) keeps the legacy
-// order so existing behaviour is preserved.
+// only must not accept local passwords on the employee surface.
+//
+// WEB-2(审计 2026-09-23):"从未配置过"的最小装配(`New()` 之后没人调过
+// SetEnabledProviders/ReloadProviders,例如单测)保留遗留顺序 ["ldap","local"];
+// **已经配置过**而集合为空 ⇒ 返回空顺序(fail-closed),不再回落成"ldap+local"。
+// 旧实现按 `len(enabledProviders)==0` 判断,把"没配置过"和"配置成什么都没有"
+// 混为一谈 ⇒ `auth.enabled=","`(HTTP 面现已 400)会让员工面重新接受本地口令。
+// 管理后台不受影响:它走 AuthenticateConfiguredAdmin(独立于本函数)。
 func (a *API) clientPasswordOrder() []string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if len(a.enabledProviders) == 0 {
+	if !a.providersConfigured {
 		return []string{"ldap", "local"}
 	}
 	order := make([]string, 0, 2)
@@ -313,7 +358,8 @@ func (a *API) handleLogin(c *gin.Context) {
 	if err != nil {
 		// 2026-09-08 P1-3:只有失败尝试才计入限流预算(此前成功也计数,
 		// 正常用户第 11 次登录会被 429)。
-		a.loginFailed(c, req.Username)
+		// 2026-09-23 E-01:记账已由 loginAllowed 里的 allow **判定即记账**原子
+		// 完成,此处不得再记一次(重复记账会让预算减半);成功分支仍清空。
 		// v3b 审计: 登录失败留痕(合规要求; 含来源 IP)。
 		_ = serverstore.AuditLog(a.DB, req.Username, "login_fail", "ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")

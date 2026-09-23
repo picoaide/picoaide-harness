@@ -52,8 +52,6 @@ const DEFAULT_TTL_SEC = 30
 const MAX_TTL_SEC = 300
 /** observed（自动登记）锁默认 TTL（秒）：写过的文件短时间内别人最好别动；写操作续期。 */
 const OBSERVED_TTL_SEC = 30
-/** 活动概览"最近活跃"窗口（ms）：10 分钟内活动过的会话算活跃。 */
-const ACTIVE_WINDOW_MS = 10 * 60 * 1000
 /** 快照段注入阈值：活跃会话 >= 2 才注入（克制原则，单会话零开销）。 */
 const SNAPSHOT_MIN_ACTIVE = 2
 

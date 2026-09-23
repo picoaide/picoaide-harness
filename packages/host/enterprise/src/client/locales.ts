@@ -26,6 +26,8 @@ export const zh = {
   'capability.sourceMarket': '市场',
   'capability.sourceOrg': '组织',
   'capability.sourceBuiltin': '平台内置',
+  // 随客户端内置：随包插件同步进技能库的技能（跨泳道契约 S2），不是用户作品。
+  'capability.sourcePlugin': '随客户端内置',
   'capability.sourceLocal': '自制',
   'capability.sourceOther': '其他安装',
   'capability.officialLocked': '官方内容仅管理员可更新',
@@ -41,6 +43,15 @@ export const zh = {
   'capability.official': '官方',
   'capability.featured': '精选',
   'capability.installed': '已安装',
+  // 下架 / 归属两态（R5-B-1 / R5-B-2）。形态照应用中心那一套（中性「已下架」胶囊 +
+  // 一句"为什么 + 还能做什么"的说明），不另创一套文案。
+  'capability.delisted': '已下架',
+  'capability.delistedHint': '该条目已不在能力中心目录中：可能已被管理员下架、已转交给他人，或你的授权已被撤回。本机这一份仍可使用，但不能再更新或上传新版本；若是被下架，内容在下架期间冻结（上传与审核一律被拒），要等重新上架后才能发新版。',
+  // 下架期间上传被服务端拒绝（409 APP_DELISTED）时的用户可见文案。与
+  // `capability.delistedHint` 同一语义，但这一条说的是"你刚点的那个动作为什么没成"。
+  'capability.delistedFrozen': '该内容已下架，新版本已被拒绝：下架期间内容冻结（上传与审核一律被拒），请先联系管理员重新上架，再发新版。',
+  'capability.transferred': '已转交',
+  'capability.transferredHint': '这条内容已转交给其他负责人，你不再有发布权；如需继续维护请联系管理员。',
   'capability.updateTo': '更新到 v{version}',
   'capability.viewVersions': '{count} 个版本',
   // 动作与分区空态
@@ -66,6 +77,22 @@ export const zh = {
   'capability.uploadedName': '已上传 {name}，等待审核',
   'capability.conflictConfirm': '已存在同名内容「{name}」，安装将覆盖本地目录。确定继续？',
   'capability.forceInstall': '覆盖安装',
+  // 本机自制同名（审计 A2/A3/A15）：措辞必须让用户看出"这份是你自己写的"。
+  'capability.conflictConfirmLocal': '本机存在同名自制技能「{name}」（不是能力中心安装的），安装会覆盖它、你写的内容会丢失。确定继续？',
+  'capability.forceInstallLocal': '仍要覆盖',
+  // 商店来源但**被本地修改过**（第四轮审计 R4-B-3）：卡片上的「已本地修改」徽章必须
+  // 配一句后果提示 —— 否则用户点下去才知道自己改过的正文与自加的文件被整树替换了。
+  'capability.conflictConfirmDirty': '技能「{name}」已被本地修改（改过正文或加过自己的文件），更新会整目录替换、这些改动会丢失。确定继续？',
+  'capability.forceInstallDirty': '仍要更新',
+  'capability.confirmUninstallLocal': '「{name}」是本机自制技能（不是能力中心安装的），删除会连同你自己的文件一起移除。',
+  'capability.deleteLocal': '仍要删除',
+  // 商店装来但被本地修改过（R4-B-3）：删除同样会带走用户的改动，措辞不能说成"自制"。
+  'capability.confirmUninstallDirty': '技能「{name}」已被本地修改（改过正文或加过自己的文件），删除会连同这些改动一起移除。',
+  // 市场技能的归档端点只按当前 approved 最高版取（审计 A11）：不给"按版本安装"的假入口。
+  'capability.marketLatestOnly': '市场技能只能安装当前最新版。',
+  // 站级闸（审计 C-03）：`install()` 对"有动作在飞"静默 return ⇒ 按钮必须禁用并说明原因，
+  // 而不是点了没反应。
+  'capability.busyHint': '有另一个安装/卸载正在进行，完成后再试。',
   'account.current': '当前账号',
   'account.server': '服务端地址',
   'account.unknown': '未知',
@@ -138,6 +165,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.sourceMarket': 'Market',
   'capability.sourceOrg': 'Org',
   'capability.sourceBuiltin': 'Built-in',
+  'capability.sourcePlugin': 'Bundled',
   'capability.sourceLocal': 'Local',
   'capability.sourceOther': 'Other install',
   'capability.officialLocked': 'Official content: updates by admin only',
@@ -152,6 +180,11 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.official': 'Official',
   'capability.featured': 'Featured',
   'capability.installed': 'Installed',
+  'capability.delisted': 'Delisted',
+  'capability.delistedHint': 'This item is no longer in the Capability Hub catalog: it may have been delisted by an administrator, transferred to someone else, or your access may have been revoked. The copy on this machine still works, but it can no longer be updated or re-uploaded; if it was delisted, its content stays frozen (uploads and approvals are refused) until an administrator relists it.',
+  'capability.delistedFrozen': 'This item is delisted, so the new version was refused: while delisted its content is frozen (uploads and approvals are rejected). Ask an administrator to relist it first, then publish the new version.',
+  'capability.transferred': 'Transferred',
+  'capability.transferredHint': 'This item has been transferred to another owner, so you no longer have publishing rights; contact your administrator to keep maintaining it.',
   'capability.updateTo': 'Update to v{version}',
   'capability.viewVersions': '{count} versions',
   'capability.install': 'Install',
@@ -176,6 +209,25 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.uploadedName': 'Uploaded {name}; awaiting review',
   'capability.conflictConfirm': 'A "{name}" already exists locally; installing will overwrite it. Continue?',
   'capability.forceInstall': 'Overwrite install',
+  // Locally authored same-name content (audit A2/A3/A15): the wording must make clear
+  // that this copy is the user's own work, not something the Capability Hub installed.
+  'capability.conflictConfirmLocal': 'A locally authored skill "{name}" exists on this machine (it was not installed from the Capability Hub). Installing will overwrite it and your own content will be lost. Continue?',
+  'capability.forceInstallLocal': 'Overwrite anyway',
+  // Store content that was edited locally (round-4 audit R4-B-3): the "Locally modified"
+  // badge needs a matching consequence sentence, otherwise the first signal the user gets
+  // is their own edits disappearing.
+  'capability.conflictConfirmDirty': 'The skill "{name}" has local modifications (edited text or files you added). Updating replaces the whole directory and discards those changes. Continue?',
+  'capability.forceInstallDirty': 'Update anyway',
+  'capability.confirmUninstallLocal': '"{name}" is a locally authored skill on this machine (not installed from the Capability Hub). Deleting it removes your own files too.',
+  'capability.deleteLocal': 'Delete anyway',
+  // Store content edited locally (R4-B-3): deleting takes those edits with it, and the
+  // wording must not claim this copy is locally authored (it came from the Hub).
+  'capability.confirmUninstallDirty': 'The skill "{name}" has local modifications (edited text or files you added). Deleting it removes those changes too.',
+  // The marketplace archive endpoint only serves the current highest approved version (audit A11).
+  'capability.marketLatestOnly': 'Marketplace skills install the current latest version only.',
+  // Station-wide gate (audit C-03): `install()` silently returns while another action is in
+  // flight, so the button must be disabled with a reason instead of doing nothing on click.
+  'capability.busyHint': 'Another install or uninstall is in progress; try again when it finishes.',
   'account.current': 'Current account',
   'account.server': 'Server URL',
   'account.unknown': 'Unknown',

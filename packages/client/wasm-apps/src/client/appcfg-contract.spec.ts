@@ -317,13 +317,20 @@ describe('单一真源对拍：目录行字段（read.go 的 catalog ↔ 客户�
   const actualKnownKeys = (source: string): string[] =>
     actualKeys(source).filter(key => !(TRANSITIONAL_SERVER_ONLY_KEYS as readonly string[]).includes(key))
 
-  /** 只在 **catalog 函数体内**做替换（整文件第一处 `"app_id":` 在 diagnostics 里）。 */
-  const mutateCatalog = (source: string, from: string, to: string): string => {
+  /**
+   * 只在 **catalog 函数体内**做替换（整文件第一处 `"app_id":` 在 diagnostics 里）。
+   *
+   * `from` 允许是正则，且**鼓励**用正则表达"键名 + 冒号"而不是抄一整行字面量：
+   * gofmt 会随同一块里最长的键重新对齐值那一列，抄下来的对齐空格会在**无关改动**里
+   * 烂掉（2026-09-23 R6-B-3 给目录行加 `"frozen":` 就撞上了这条：`"enabled":` 后面的
+   * 四个空格变成了一个）。锚点带空白 = 判据绑在格式上，不绑在语义上。
+   */
+  const mutateCatalog = (source: string, from: string | RegExp, to: string): string => {
     const start = source.indexOf('func (h *Handlers) catalog(')
     expect(start, 'read.go 里必须还有 catalog 函数').toBeGreaterThanOrEqual(0)
     const nextFunc = source.indexOf('\nfunc ', start)
     const body = source.slice(start, nextFunc < 0 ? undefined : nextFunc)
-    expect(body, `catalog 函数体里必须有 ${from}`).toContain(from)
+    expect(body, `catalog 函数体里必须有 ${String(from)}`).toMatch(from)
     return source.slice(0, start) + body.replace(from, to) + source.slice(nextFunc < 0 ? source.length : nextFunc)
   }
 
@@ -363,7 +370,8 @@ describe('单一真源对拍：目录行字段（read.go 的 catalog ↔ 客户�
       expect(keys!.assigned, `${field} 必须按调用者赋值下发`).toContain(field)
     }
     // 自证：把 `whitelist` 挪成 gin.H 的字面量键（= 对所有人下发），这条判据变红。
-    const leaked = mutateCatalog(source, '"enabled":    a.Enabled,', '"enabled": a.Enabled,\n\t\t\t"whitelist": cfg.Whitelist,')
+    // 锚点用正则（键名 + 冒号 + 任意空白）：抄一整行的对齐空格会随 gofmt 重排而烂掉。
+    const leaked = mutateCatalog(source, /"enabled":\s+a\.Enabled,/, '"enabled": a.Enabled,\n\t\t\t"whitelist": cfg.Whitelist,')
     expect(catalogRowKeysFromReadGo(leaked)!.literal).toContain('whitelist')
   })
 })

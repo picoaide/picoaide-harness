@@ -28,9 +28,6 @@ export const INSTRUCTION_MAX_CHARS = 2_000
 /** 每会话 pending 上限。 */
 export const PENDING_MAX = 20
 
-/** 指令状态机。 */
-export const INSTRUCTION_STATES = ['pending', 'reserved', 'consumed']
-
 /**
  * @param {object} options
  * @param {(path: string, data: string) => void} options.writeFile - 持久化写入（temp+rename 由调用方保证或测试注入）

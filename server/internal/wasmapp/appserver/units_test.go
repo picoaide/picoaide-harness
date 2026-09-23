@@ -158,7 +158,17 @@ func TestStaticLogicalPath(t *testing.T) {
 		{"/index.html", "index.html", true, true},
 		{"/app.js", "app.js", false, true},
 		{"/static/app.css", "static/app.css", false, true},
-		{"/docs/", "docs/index.html", false, true},
+		// 子目录入口 = 入口文档（目录形态在 staticLogicalPath 里归一成 index.html）。
+		// ⚠️ 本行曾经是 `{"/docs/", "docs/index.html", false, true}` —— 那正是 R3-A A-5
+		// 的缺陷形态：规则 5 与作者手册三处都写着「入口文档（`/`、`/index.html`、
+		// `<目录>/`）一律交给 wasm」，实现却只认根 `index.html`，而这行把错的那一侧
+		// 钉成了期望。期望值已按**文档**修正，并补上多级目录与非入口文档两类边界。
+		{"/docs/", "docs/index.html", true, true},
+		{"/docs/index.html", "docs/index.html", true, true},
+		{"/a/b/", "a/b/index.html", true, true},
+		// 非入口的普通文档不是入口：它仍是壳资源，仍由宿主直出（§4.6 缓存收益）。
+		{"/docs/readme.html", "docs/readme.html", false, true},
+		{"/index.htm", "index.htm", false, true},
 		{"/api", "", false, false},
 		{"/api/items", "", false, false},
 		{"/apiary/x", "apiary/x", false, true}, // 只有 /api 前缀是保留的，不误伤 apiary

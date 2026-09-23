@@ -81,6 +81,32 @@ export function isValidCron(expr: string): boolean {
 }
 
 /**
+ * One wall-clock occurrence a scan walked past because that wall clock does
+ * not exist in the host timezone — the spring-forward DST gap (2026-09-23
+ * R3-B3 F2 / B-5).
+ */
+export interface WallClockGap {
+  /** Local wall-clock fields the schedule asked for, as written in the expression. */
+  year: number
+  month: number
+  day: number
+  hour: number
+  minute: number
+  /** The missing local time as `YYYY-MM-DD HH:MM`. */
+  wallClock: string
+  /** The instant `new Date()` normalized that wall clock to (its "forward" instant). */
+  normalizedTo: number
+}
+
+/** One forward scan: the next matching instant plus the gap occurrences it walked past. */
+export interface NextRunScan {
+  /** Next matching instant, or undefined when the calendar can never match. */
+  at: number | undefined
+  /** Wall-clock occurrences that do not exist locally and can therefore never fire. */
+  gaps: readonly WallClockGap[]
+}
+
+/**
  * Compute the next matching instant after `fromMs` (ms epoch), in local time,
  * at minute granularity, strictly greater than `fromMs`. Returns the ms epoch
  * of the matching minute's start, or undefined when the calendar constraint
@@ -89,21 +115,64 @@ export function isValidCron(expr: string): boolean {
  * day/weekday AND branch is in play).
  *
  * Walks candidate year/month/day/hour/minute values straight from the parsed
- * field sets instead of scanning every minute. Wall-clock field construction
- * + the final `matches` re-check preserve standard DST semantics: nonexistent
- * spring minutes normalize forward and the repeated fall-back hour is never
- * visited twice.
+ * field sets instead of scanning every minute. Candidates are built as local
+ * wall-clock `Date`s and re-checked with `matches`, which fixes the DST
+ * semantics (2026-09-23 R3-B3 F2 / B-5 — an earlier comment here claimed the
+ * opposite of what the code does):
+ *
+ *   - a wall clock that does not exist locally (the spring-forward gap, e.g.
+ *     `30 2 * * *` on a US spring-forward day) is normalized forward by
+ *     `Date`, fails the re-check, and is therefore **skipped, never fired**.
+ *     {@link nextRunAtMsWithGaps} reports every such occurrence so the skip can
+ *     be surfaced instead of vanishing;
+ *   - the repeated hour of a fall-back is visited once, on its FIRST pass
+ *     (`new Date` never yields the second instance) — Vixie cron's behavior.
  */
 export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
+  return nextRunAtMsWithGaps(expr, fromMs).at
+}
+
+/**
+ * The IANA timezone the schedule is evaluated in — the process's local zone
+ * (R5-B-6).
+ *
+ * Cron expressions are **wall-clock** semantics ("0 9 * * *" means 09:00 where
+ * the machine is), while a stored `nextRunAt` is an absolute instant. The two
+ * only agree while the zone stays put, so both the Host (re-anchoring after a
+ * change) and the panel (recomputing the display) need the same reading of
+ * "which zone are we in now" — this is that single reading. `'local'` is the
+ * documented fallback when the runtime cannot name the zone (the value already
+ * used for skip records and the snapshot).
+ * @returns the resolved IANA zone name, or `'local'`.
+ */
+export function currentTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+/**
+ * Same scan as {@link nextRunAtMs}, and additionally reports every wall-clock
+ * occurrence it walked past because that local time does not exist. Callers
+ * that must make the skip observable (the ledger's roll path) use this; the
+ * plain `nextRunAtMs` stays the narrow answer for validation and the UI.
+ * @param expr - 5-field cron expression.
+ * @param fromMs - exclusive lower bound (ms epoch).
+ * @returns the next instant (if any) and the gap occurrences before it.
+ */
+export function nextRunAtMsWithGaps(expr: string, fromMs: number): NextRunScan {
   const schedule = parseCron(expr)
-  if (schedule === null) return undefined
-  if (!hasPossibleCalendarDay(schedule)) return undefined
+  if (schedule === null) return { at: undefined, gaps: [] }
+  if (!hasPossibleCalendarDay(schedule)) return { at: undefined, gaps: [] }
   const from = new Date(fromMs)
   const limitMs = fromMs + horizonDays(schedule) * 24 * 60 * 60 * 1000
 
   const sortedMinutes = [...schedule.minutes].sort((a, b) => a - b)
   const sortedHours = [...schedule.hours].sort((a, b) => a - b)
   const sortedMonths = [...schedule.months].sort((a, b) => a - b)
+  const gaps: WallClockGap[] = []
 
   let year = from.getFullYear()
   let month = from.getMonth() + 1
@@ -129,8 +198,25 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
             const candidate = new Date(year, candidateMonth - 1, candidateDay, candidateHour, candidateMinute, 0, 0)
             const time = candidate.getTime()
             if (time <= fromMs) continue
-            if (time > limitMs) return undefined
-            if (matches(schedule, candidate)) return time
+            // A wall clock that does not exist locally is normalized forward by
+            // `new Date`, so the re-check below drops it: the occurrence never
+            // fires. Record it — otherwise the only trace of a skipped trigger
+            // is its absence (2026-09-23 R3-B3 F2 / B-5). The repeated hour of a
+            // fall-back is NOT recorded: there the wall clock does exist, its
+            // first instance is merely already behind `fromMs`.
+            if (candidate.getHours() !== candidateHour || candidate.getMinutes() !== candidateMinute) {
+              gaps.push({
+                year,
+                month: candidateMonth,
+                day: candidateDay,
+                hour: candidateHour,
+                minute: candidateMinute,
+                wallClock: `${year}-${pad2(candidateMonth)}-${pad2(candidateDay)} ${pad2(candidateHour)}:${pad2(candidateMinute)}`,
+                normalizedTo: time,
+              })
+            }
+            if (time > limitMs) return { at: undefined, gaps }
+            if (matches(schedule, candidate)) return { at: time, gaps }
           }
         }
       }
@@ -141,7 +227,12 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
     hour = 0
     minute = 0
   }
-  return undefined
+  return { at: undefined, gaps }
+}
+
+/** Zero-padded two-digit field for the human-readable wall clock of a gap. */
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
 }
 
 /**

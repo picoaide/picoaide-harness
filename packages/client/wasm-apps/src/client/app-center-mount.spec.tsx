@@ -34,12 +34,16 @@
  *   - 发布表单的 `access` 初值改回硬编码 `DEFAULT_ACCESS`、`data_sensitivity` 改回
  *     `'internal'`（P1-3 前的实现）⇒ 预填/留空两组用例红；
  *   - 去掉"访问范围改动需确认"的闸 ⇒ 「改动访问范围」那条红；
- *   - 选文件时不判 `size`（P1-10 前的实现）⇒ 「33 MiB 不读字节」红。
+ *   - 选文件时不判 `size`（P1-10 前的实现）⇒ 「33 MiB 不读字节」红；
+ *   - `hasInnerModal`（panel-surface）去掉 `[role="alertdialog"]` 分支 ⇒
+ *     「装载器层（审计 C-01）」红：确认框在屏上按 Esc 会把整个应用中心关掉。
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PANEL_ACTIVE_ATTR, PANEL_SURFACE_ATTR, activePanelId } from '@picoaide/dsh-panel-surface/client'
 import { AppCenterPanel } from './AppCenterPanel.tsx'
+import { APP_CENTER_PANEL_ID, mountAppCenterPanel, openAppCenterPanel } from './app-center-surface.tsx'
 import { PublishForm } from './PublishForm.tsx'
 import { OPEN_APP_PATH } from './open-app.ts'
 import { APP_CHANNEL_PATH, type AppChannel } from './channel-seam.ts'
@@ -1373,18 +1377,30 @@ const AVAILABILITY_URL = (appId: string): string => `/api/pico/apps/wasm/${appId
 /** 一条查重判词（服务端 `availability` 的真实形状）。 */
 const availabilityPayload = (
   appId: string,
-  verdict: 'available' | 'yours' | 'taken' | 'invalid',
+  verdict: 'available' | 'yours' | 'taken' | 'invalid' | 'frozen' | 'retired',
 ): Record<string, unknown> => ({
   app_id: appId,
   valid: verdict !== 'invalid',
-  exists: verdict === 'yours' || verdict === 'taken',
+  exists: verdict !== 'available' && verdict !== 'invalid',
   available: verdict === 'available',
-  owned_by_you: verdict === 'yours',
+  owned_by_you: verdict === 'yours' || verdict === 'frozen' || verdict === 'retired',
+  // R3-A A-4 之后 `can_publish` 与 publish **共用同一处终态判据**：冻结/退役不再回 true。
   can_publish: verdict === 'available' || verdict === 'yours',
   reason: verdict,
-  code: verdict === 'taken' ? 'NAME_TAKEN' : verdict === 'invalid' ? 'INVALID_APP_ID' : '',
-  message: verdict === 'taken' ? '名称已被占用，无法上传：请更换名称或联系管理员' : '',
-  hints: verdict === 'taken' ? ['发布即占名：首个成功发布者永久占有该标识'] : [],
+  code: verdict === 'taken' ? 'NAME_TAKEN'
+    : verdict === 'invalid' ? 'INVALID_APP_ID'
+      : verdict === 'frozen' ? 'APP_FROZEN'
+        : verdict === 'retired' ? 'NOT_FOUND'
+          : '',
+  // 服务端文案逐字（冻结/退役那两句就是 publish 那一刻回的同一句）。
+  message: verdict === 'taken' ? '名称已被占用，无法上传：请更换名称或联系管理员'
+    : verdict === 'frozen' ? '应用已冻结，不能发布新版本'
+      : verdict === 'retired' ? '应用已退役（已删除）'
+        : '',
+  hints: verdict === 'taken' ? ['发布即占名：首个成功发布者永久占有该标识']
+    : verdict === 'frozen' ? ['冻结是 R37 退役流程的第一步：请先解冻']
+      : verdict === 'retired' ? ['已删除的应用标识与版本号永久占位，不能复用；请新建应用']
+        : [],
 })
 
 /** 打开发布表单并等到它挂载完。 */
@@ -1539,5 +1555,237 @@ describe('应用标识查重：填 app_id 时异步问、提交前复检', () =>
     // 既有应用的 app_id 不做查重（它必然"存在"），提交直接走发布。
     expect(calls.filter(call => call.url.includes('/availability'))).toHaveLength(0)
     expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(1)
+  })
+
+  /**
+   * R3-A A-4 的**客户端半边**：`frozen` / `retired` 两个终态判词。
+   *
+   * 服务端修好终态判据后（`availability` 与 `publish` 共用 `publishBlockOf`），冻结/
+   * 退役的应用回 `can_publish=false` + 新判词 —— 而客户端联合类型里没有这两个取值，
+   * fail-closed 解析器把它们一律归成 `null` ⇒ 界面显示"暂时无法确认"，用户既拿不到
+   * A-4 的文案，也不会在填表阶段被拦下（白传一个 32 MiB 的包才拿到 403/404）。
+   *
+   * 判据四条：①结论行真的显示新判词（`data-availability` 是稳定钩子）；
+   * ②显示的是**服务端原文**（与 publish 那一刻同一句）；③提交被就地拦下；
+   * ④**一个字节的产物都没上传**（连文件都没再读一次）。
+   *
+   * 变异验证：把 `AVAILABILITY_REASON_COPY` 里任一判词的 `blocksSubmit` 改成 false ⇒
+   * 「拦下」两条红；把判词从 `APP_AVAILABILITY_REASONS` 删掉 ⇒ 结论行回落 `unknown`
+   * （第 ①②条红，且跨端对拍 spec 一起红）。
+   */
+  it.each([
+    { verdict: 'frozen' as const, appId: 'frozen-tool', message: '应用已冻结' },
+    { verdict: 'retired' as const, appId: 'retired-tool', message: '应用已退役' },
+  ])('终态 $verdict：显示服务端原文，且提交被就地拦下、不上传任何产物', async ({ verdict, appId, message }) => {
+    let fileRead = 0
+    stubFetch((url) => {
+      if (url === AVAILABILITY_URL(appId)) return jsonResponse(200, availabilityPayload(appId, verdict))
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]), { onRead: () => { fileRead += 1 } })
+    await typeIntoPublishForm({ ...FILLED, appId })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+
+    // ① + ②：判词可辨（不是笼统的"查重不可用"），且文案来自服务端原文。
+    expect(availabilityLine().state).toBe(verdict)
+    expect(availabilityLine().text).toContain(message)
+
+    const before = fileRead
+    await click('.pico-app-center-submit')
+    // ③ 提交被拦下：没有发布请求。
+    expect(calls.filter(call => call.url === PUBLISH_PATH)).toHaveLength(0)
+    // ④ 连文件都没再读一次（产物根本没被编码）。
+    expect(fileRead).toBe(before)
+    const issues = container.querySelector('[data-role="local-error"]')
+    expect(issues).not.toBeNull()
+    expect(issues!.textContent).toContain(message)
+  })
+
+  /**
+   * 反向（fail-closed 不许被"放开联合类型"顺手废掉）：**没登记过**的判词仍走
+   * `unknown` —— 界面说"暂时无法确认"，**绝不**说"可以用"。
+   *
+   * 注意这里的第三条断言与前两条是**互补**的：未登记判词既不显示"可用"，也**不**拦下
+   * 提交（查重是体验优化，权威判据是服务端发布那一刻的判定）—— 那正是"查重问不成"
+   * 那条既有用例的口径，本用例只把"未知判词"也纳入同一条路径。
+   */
+  it('未登记的判词（未来服务端新增）⇒ 仍走 fail-closed：显示"无法确认"，不说可用', async () => {
+    stubFetch((url) => {
+      // `suspended` 是客户端**没有登记**的判词（模拟服务端先落地、客户端还没跟上的那一刻）。
+      if (url === AVAILABILITY_URL('future-tool')) {
+        return jsonResponse(200, {
+          app_id: 'future-tool', valid: true, exists: true, available: false,
+          owned_by_you: true, can_publish: false, reason: 'suspended', code: 'APP_SUSPENDED',
+          message: '应用已暂停', hints: [],
+        })
+      }
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED, appId: 'future-tool' })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)) })
+
+    expect(availabilityLine().state).toBe('unknown')
+    // 三个"可用"的同义词一个都不许出现（这是 fail-closed 的可观察判据）。
+    expect(availabilityLine().text).not.toContain('可以用')
+    expect(availabilityLine().text).not.toContain('可以发新版本')
+    // 也不许把未知判词当成"被占用"（那会误杀合法名字）。
+    expect(availabilityLine().text).not.toContain('名称已被占用')
+  })
+
+  /**
+   * 审计 C-02（P1）：窗口几何**最后**填也必须进请求体。
+   *
+   * `submit` 是 `useCallback`，依赖数组漏了 `windowRatioText/windowWidthText/
+   * windowHeightText` ⇒ 闭包读到的永远是**上一次重建时**的快照。而窗口那一行是配置区
+   * 的最后一行（其后只有提交按钮），自然填写顺序就是"窗口最后填" ⇒ 作者声明的几何被
+   * 静默丢弃，应用按"作者没声明"发布（宿主回落 1280×720、不锁比例）。
+   *
+   * 判据取**请求体**而不是界面：界面本来就显示作者敲的值（这正是"静默丢弃"的伪装）。
+   * 变异验证：把三个 window state 从依赖数组里删掉 ⇒ 本用例红（`config.window` 变
+   * `undefined`）。
+   */
+  it('窗口比例/尺寸最后填也进请求体（A：首版发布）', async () => {
+    stubFetch((url) => {
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await openPublishForm()
+    await pickFile('.pico-app-center-file', 'shift-notes.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ ...FILLED })
+    // 窗口行**最后**填（与真实填写顺序一致）。
+    await type('.pico-app-center-window-ratio', '16:9')
+    await type('.pico-app-center-window-width', '1280')
+    await type('.pico-app-center-window-height', '720')
+    await click('.pico-app-center-submit')
+    const publish = calls.filter(call => call.url === PUBLISH_PATH)
+    expect(publish).toHaveLength(1)
+    const body = JSON.parse(String(publish[0]!.init.body)) as { config?: { window?: unknown } }
+    expect(body.config?.window, '最后填的窗口几何必须进请求体').toEqual({ ratio: 16 / 9, width: 1280, height: 720 })
+  })
+
+  /**
+   * 审计 C-02 的另一半（改版路径更糟）：新发版时窗口三个输入框**预填上一版的值**，
+   * 漏依赖时作者改完提交上去的是**旧值**，而界面显示新值 —— 用户看到的与发出去的不是
+   * 一回事。变异验证同上（删依赖 ⇒ 本用例红：期望 2、实得 1.5）。
+   */
+  it('发新版：作者改过的窗口比例不被上一版预填值覆盖（B：改版）', async () => {
+    const catalogWithWindow = {
+      apps: [
+        { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [], window: { ratio: 1.5 } },
+      ],
+    }
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, catalogWithWindow)
+      if (url === PUBLISH_PATH) return jsonResponse(201, RELEASE_OK)
+      return jsonResponse(200, { apps: [] })
+    })
+    await mount()
+    await clickIn('值班表', '.pico-app-center-publish-new')
+    await pickFile('.pico-app-center-file', 'roster.wasm', new Uint8Array([0, 97, 115, 109]))
+    await typeIntoPublishForm({ version: '2.0.0', changelog: '改了窗口', sensitivity: 'internal' })
+    // 上一版是 1.5（预填）；作者最后改成 2。
+    expect(container.querySelector<HTMLInputElement>('.pico-app-center-window-ratio')!.value).toBe('1.5')
+    await type('.pico-app-center-window-ratio', '2')
+    await click('.pico-app-center-submit')
+    const publish = calls.filter(call => call.url === PUBLISH_PATH)
+    expect(publish).toHaveLength(1)
+    const body = JSON.parse(String(publish[0]!.init.body)) as { config?: { window?: { ratio?: number } } }
+    expect(body.config?.window?.ratio, '提交的必须是作者刚敲的值，不是上一版的预填值').toBe(2)
+  })
+})
+
+/**
+ * 装载器层回归（审计 C-01）：Esc 的让位判据必须认 `role="alertdialog"`。
+ *
+ * **为什么必须挂装载器**：上面那条「确认块的 Esc」用例用 `createRoot` 直接渲染
+ * `AppCenterPanel` —— 装载器根本不在树上，于是 `closeCount` 恒不变，无论装载器认不认
+ * alertdialog 都会通过（典型的"只挂面板、不挂装载器"假绿；审计实测产线里同一次按键的
+ * 行为相反：确认框在屏上按 Esc 会把整个应用中心关掉）。
+ *
+ * 本用例走**真实集成点** `mountAppCenterPanel`（= `mountPanelSurface` + 真
+ * `AppCenterPanel`，与 `index.ts` 的 `ctx.effect` 同一个调用），判据取自装载器的激活态
+ * 属性（不是面板自己的 `onClose` 计数）。
+ *
+ * ---- 变异验证 ----
+ *   - `hasInnerModal` 里删掉 `[role="alertdialog"][aria-modal="true"]`（回到只认
+ *     `dialog` 的旧判据）⇒ 本用例红（`activePanelId` 变成 null）；
+ *   - 确认块改回非模态（去掉 `aria-modal`）⇒ 本用例红（同一次按键没人接住）；
+ *   - 装载器改成查 `[role="dialog"]`（丢掉 `aria-modal` 条件）⇒ 本用例仍绿，但
+ *     `panel-surface/tests` 的"非模态 dialog 不该吃掉 Esc"会红。
+ */
+describe('装载器层（审计 C-01）：确认框上的 Esc 只收起确认框，不关整页应用中心', () => {
+  /** 一条归当前用户所有的应用（`is_owner` ⇒ 卡片出管理按钮）。 */
+  const LOADER_CATALOG = {
+    apps: [
+      { app_id: 'roster', title: '值班表', description: '', responsible: 'carol', entry_url: 'https://roster.apps.example.com/', access: 'login', enabled: true, current_version: '2.0.0', is_owner: true, purpose: '值班', whitelist: [] },
+    ],
+  }
+
+  it('role=alertdialog aria-modal=true 的内层模态让装载器让位', async () => {
+    stubFetch((url) => {
+      if (url === '/api/pico/apps/wasm') return jsonResponse(200, LOADER_CATALOG)
+      throw new Error(`unexpected url: ${url}`)
+    })
+    // 装载器把面板插进**中列**，所以中列必须先存在（真实壳里它由框架挂载）。
+    const column = document.createElement('div')
+    column.setAttribute('data-pane', 'conversation')
+    document.body.appendChild(column)
+    let dispose: () => void = () => undefined
+    // 装载本身也会渲染一次（面板还没激活 ⇒ 渲染 null）：同样要包在 act 里。
+    await act(async () => { dispose = mountAppCenterPanel() })
+    try {
+      await act(async () => { openAppCenterPanel() })
+      // 目录请求（useEffect 里的 load()）落地：多给几轮微任务/宏任务。
+      for (let round = 0; round < 4; round += 1) {
+        await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+      }
+      expect(activePanelId(document), '面板应已激活').toBe(APP_CENTER_PANEL_ID)
+
+      const surfaceEl = column.querySelector<HTMLElement>(`[${PANEL_SURFACE_ATTR}="${APP_CENTER_PANEL_ID}"]`)
+      expect(surfaceEl, '装载器应把面板容器插进中列').not.toBeNull()
+      const trigger = surfaceEl!.querySelector<HTMLButtonElement>('.pico-app-center-take-offline')
+      expect(trigger, '目录里应渲染出下架按钮').not.toBeNull()
+      await act(async () => { trigger!.click() })
+
+      const confirm = surfaceEl!.querySelector<HTMLElement>('[data-role="confirm-take-offline"]')
+      expect(confirm, '确认块应已出现').not.toBeNull()
+      // 被这条缺陷推翻的信念：确认块声明成 `role="alertdialog" aria-modal="true"`。
+      expect(confirm!.getAttribute('role')).toBe('alertdialog')
+      expect(confirm!.getAttribute('aria-modal')).toBe('true')
+
+      // 真键盘路径：确认块把焦点移进"确认下架"，Esc 从**获得焦点的元素**上冒泡。
+      const focused = document.activeElement
+      expect(confirm!.contains(focused), '焦点应在确认块内').toBe(true)
+      await act(async () => {
+        focused!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      })
+
+      expect(surfaceEl!.querySelector('[data-role="confirm-take-offline"]'), '确认块应被自己的 window 监听收起').toBeNull()
+      expect(activePanelId(document), 'Esc 应归内层 alertdialog：整页面板不许被关掉').toBe(APP_CENTER_PANEL_ID)
+      expect(calls.filter(call => call.url.endsWith('/unpublish')), 'Esc 取消不得发出任何写请求').toHaveLength(0)
+
+      // 对照：确认块收起之后，同一次按键就该按设计关掉面板（让位判据不是"永远让位"）。
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      })
+      expect(activePanelId(document), '没有内层模态时，Esc 按设计关掉面板').toBeNull()
+    } finally {
+      // 收尾：让面板里还在飞的只读请求（渠道/身份/证明）落地后再卸载，避免
+      // "act 之外的 state 更新"噪音。
+      for (let round = 0; round < 3; round += 1) {
+        await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+      }
+      await act(async () => { dispose() })
+      column.remove()
+      document.documentElement.removeAttribute(PANEL_ACTIVE_ATTR)
+    }
   })
 })

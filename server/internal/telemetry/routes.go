@@ -121,9 +121,26 @@ func reportSkillCall(db *sql.DB) gin.HandlerFunc {
 }
 
 // skillCallTargetAllowed 判定本次上报的计数目标是否对该调用者可见,口径与
-// 读侧一致:市场技能列表/详情 = 已上架 ∧ 已授权(app_grants,kind='skill';
-// 市场与组织共享库共用同一授权命名空间),admin 恒全量、不落授权表;组织共享
-// 技能的作者本人可见(与 ListVisibleSharedSkills 的作者例外一致)。
+// 读侧一致:市场技能列表/详情 = **已上架** ∧ 已授权(app_grants,kind='skill';
+// 市场与组织共享库共用同一授权命名空间),admin 免授权但仍需已上架;内容**归属人**
+// 本人可见(与 ListVisibleSharedSkills 的作者例外一致)。
+//
+// 作者例外判据是 apps.owner 而不是 app_releases.publisher(归属转移后旧上传者
+// 已无任何权利,新归属人才是该内容的负责人 —— 与发布权/「我的」分区/下载豁免
+// 同源;第五轮审计 R5-B-2 的遥测孪生,2026-09-23 跨泳道补齐)。判据唯一实现在
+// serverstore.AppOwnedByOwner,见 serverstore/distribution.go 的语义权威。
+// 影响面仅限**计数**:本函数只决定 calls 是否 +1,不决定任何内容的可见性与分发
+// (读侧与下载侧各自的判据未变)。
+//
+// 「已上架」这道闸门是 2026-09-23 第五轮复审 B-N1 补上的:此前本函数只判归属与
+// 授权,**从不看 apps.enabled** —— 与注释自称的"已上架 ∧ 已授权"不符,也与读侧
+// 相反(下架后归属人与已授权同事上报仍计 calls,而同刻读侧已按 Delivered 隐藏)。
+// 读侧对**所有人**(含 admin)都是"授权先于下架、下架即 404":marketplace.skill_api
+// 的 getSkill/downloadArchive 都在 IsAdmin 分支**之后**统一判 s.Enabled != 1,
+// 市场列表 ListSkills(enabledOnly=true) 同样先滤 apps.enabled 再判授权
+// (admin 免的是**授权**那一维,不免上下架)。计数面因此走同一道闸,判据唯一
+// 实现 = serverstore.Distribution.Delivered() —— 禁止在这里就地写 enabled,
+// 那正是 distribution.go 头注释要消灭的第二份判据。
 //
 // 目标在平台上不存在 = 本地创作技能:沿用既有"静默忽略"语义返回 true
 // (后续 UPDATE 不命中任何行,计数不变),不让遥测影响客户端主链路。
@@ -132,10 +149,20 @@ func skillCallTargetAllowed(db *sql.DB, u *serverstore.User, name, version strin
 	if err != nil {
 		return false, err
 	}
-	if rel == nil || u.IsAdmin {
+	if rel == nil {
 		return true, nil
 	}
-	if rel.Publisher != "" && rel.Publisher == u.Username {
+	dist, err := serverstore.AppDistribution(db, serverstore.AppKindSkill, name)
+	if err != nil {
+		return false, err
+	}
+	if !dist.Delivered() {
+		return false, nil
+	}
+	if u.IsAdmin {
+		return true, nil
+	}
+	if dist.OwnedBy(u.Username) {
 		return true, nil
 	}
 	groups, err := serverstore.UserEffectiveGroups(db, u.ID)

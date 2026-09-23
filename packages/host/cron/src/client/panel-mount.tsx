@@ -3,8 +3,8 @@
  *
  * 面板本身的切换语义（中列整页接管、四个面板互斥、侧边栏点行让位、Esc 返回）
  * 全部由 `@picoaide/dsh-panel-surface` 提供 —— 本文件只剩两件事：把装载器接上，
- * 以及给兄弟模块一对 `openCronPanel()` / `closeCronPanel()`（触发按钮与兄弟面板
- * 用它们，而不是自己去读写 html 属性）。
+ * 以及给触发按钮一个 `openCronPanel()`（它自己不读写 html 属性）。
+ * 关闭由装载器负责（Esc / 面板返回按钮），故没有对称的 `closeCronPanel()`。
  *
  * 历史：这里原来有一整套自己实现的 DOM 接管（注入样式表 + `MutationObserver`
  * 等中列出现 + `data-dsh-cron-active`）。2026-09-20 收敛到共享装载器，因为
@@ -28,11 +28,6 @@ let surface: PanelSurfaceHandle | undefined
 /** 打开定时任务中心（触发按钮调用）。 */
 export function openCronPanel(): void {
   surface?.activate()
-}
-
-/** 关闭定时任务中心（兄弟面板与内部入口调用）。 */
-export function closeCronPanel(): void {
-  surface?.close()
 }
 
 /**

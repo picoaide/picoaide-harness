@@ -180,19 +180,40 @@ R2 存**热版本**（升级与回滚用，快），GitHub Release 存**全部�
 
 **清理方法**（发布时执行，删"第 4 新及更早"的目录）：
 
+> **不要手敲这段逻辑 —— 直接跑发布脚本**（它自带保留策略，且与发布同一个事务顺序：
+> 先上传、**校验完整性**、再清理、最后写 `latest.json`）：
+>
+> ```bash
+> VERSION=vX.Y.Z bash scripts/ci-publish-update-server.sh --list channels.list --bundle release-bundle
+> ```
+>
+> 只有在**补做清理**（例如某渠道历史上攒了太多版本目录）时才手工执行下面这段。
+> **本片段与 `scripts/ci-publish-update-server.sh` 的 prune 段同源：改一处必须改两处。**
+
 ```bash
-CH=official
-# 列出该渠道所有版本目录（按版本号倒序），保留前 3 个
+CH=official                 # ← 目标渠道 id（渠道目录名）
+VER=<本次刚发布的版本号，不带 v>   # **必填**：本次版本永不参与淘汰
 KEEP=3
-$aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
-  | sort -rV | tail -n +$((KEEP+1)) | while read -r old; do
-      echo "清理旧版本: $CH/releases/$old"
-      $aws s3 rm "s3://$R2_BUCKET/$CH/releases/$old/" --recursive
-    done
+# 关键三点（2026-09-12 审计 P1-2 的现场结论，缺任何一条都会删掉刚发布的版本）：
+#   ① 用 `grep -vxF "$VER"` 把本次版本从待淘汰集合里**精确**排除
+#      （`-x` 整行匹配：`2.7.2` 不能误伤 `2.7.20` / `2.7.2-beta.1`）；
+#   ② 截断从**第 KEEP 位**开始（`tail -n +$KEEP`）—— 因为留存 = 本次版本 + 次新的 (KEEP-1) 个；
+#   ③ 版本序用 `sort -rV`，不能用字典序。
+# 反面教材（曾经就是这么写的）：不做 ① 而用 `tail -n +$((KEEP+1))` —— `sort -rV` 把预发布
+# 排在正式版**之前**（`2.7.2-beta.6` > `2.7.2`），于是正式版一出就被自己的预发布挤到第
+# KEEP+1 位，**刚上传的版本目录被自己删掉**，紧接着写出的 latest.json 指向空目录。
+versions="$($aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
+  | grep -E '^[0-9]' | grep -vxF "$VER" || true)"
+printf '%s\n' "$versions" | sort -rV | tail -n +"$KEEP" | while read -r old; do
+    [ -n "$old" ] || continue
+    echo "清理旧版本: $CH/releases/$old"
+    $aws s3 rm "s3://$R2_BUCKET/$CH/releases/$old/" --recursive
+  done
 ```
 
 **注意**：`sort -V` 必须用版本序（`-V`），不能用字典序（`2.10.0` 会排在 `2.9.0` 前面 —— 同一个
-坑在 §2 讲 `latest.json` 必要性时也出现过）。清完跑一次 `temp/r2-verify.sh` 确认最新版仍完整。
+坑在 §2 讲 `latest.json` 必要性时也出现过）。清完跑一次 `temp/r2-verify.sh` 确认最新版仍完整，
+并确认 `latest.json` 里的 `server.image_asset` **真的取得到**（`curl -fI` 该地址）。
 
 **不要用 R2 生命周期规则自动删**：生命周期规则按**对象年龄**过期，会同时删掉"最新的旧对象"
 （客户端包与镜像 tar 是一起传的，但规则不知道版本边界），可能把当前版本的资产删掉。版本级
@@ -316,29 +337,52 @@ aws="aws --endpoint-url $R2_ENDPOINT"
 
 逐类上传（`--cache-control` 与 `--content-type` 必须显式给）：
 
+> **正常情况下不要手敲这一节**：发布统一走 `scripts/ci-publish-update-server.sh`（上传 →
+> **大小 + SHA256 完整性校验** → 清理 → 最后写指针，顺序与判据都在脚本里、且有本地回归门禁）。
+> 下面这份片段只用于**补传/排障**，改动时必须与脚本同源。
+
 ```bash
 CH=official ; VER=2.7.0 ; DIR=release-bundle/
 
-# 1) 镜像（不可变、长缓存）
-$aws s3 cp "$DIR/picoaide-server-$VER-amd64.zip" \
-  "s3://$R2_BUCKET/$CH/releases/$VER/picoaide-server-$VER-amd64.zip" \
-  --content-type application/zip \
-  --cache-control 'public, max-age=31536000, immutable'
+# 0) 本地校验:SHA256SUMS 必须真的对得上这个包(客户侧就是照它校验的)
+( cd "$DIR" && sha256sum -c SHA256SUMS )
 
-$aws s3 cp "$DIR/SHA256SUMS" "s3://$R2_BUCKET/$CH/releases/$VER/SHA256SUMS" \
-  --content-type text/plain --cache-control 'public, max-age=31536000, immutable'
+# 1) 镜像（不可变、长缓存 + 存储侧校验和）
+#    用**单请求 PUT**:多段上传(`s3 cp`)的对象校验和是"分片校验和的校验和"(带 `-N`
+#    后缀),与本地 sha256 不可对拍;单请求 PUT 让存储端在写入时校验整对象字节,
+#    head-object 读回的就是本地那一份 sha256。R2 单次 PUT 上限 5 GiB,包 ~500MB。
+SUM_B64="$(openssl dgst -sha256 -binary "$DIR/picoaide-server-$VER-amd64.zip" | base64 | tr -d '\n')"
+$aws s3api put-object --bucket "$R2_BUCKET" \
+  --key "$CH/releases/$VER/picoaide-server-$VER-amd64.zip" \
+  --body "fileb://$DIR/picoaide-server-$VER-amd64.zip" \
+  --content-type application/zip \
+  --cache-control 'public, max-age=31536000, immutable' \
+  --checksum-sha256 "$SUM_B64"
+
+# 1b) 上传后必须**证明远端字节完整**（大小 + 哈希),否则不写指针
+$aws s3api head-object --bucket "$R2_BUCKET" \
+  --key "$CH/releases/$VER/picoaide-server-$VER-amd64.zip" \
+  --checksum-mode ENABLED --query '{size:ContentLength,sha:ChecksumSHA256}' --output json
+#   size 必须 == stat -c%s 本地包；sha 必须 == $SUM_B64
+
+$aws s3api put-object --bucket "$R2_BUCKET" \
+  --key "$CH/releases/$VER/SHA256SUMS" --body "fileb://$DIR/SHA256SUMS" \
+  --content-type text/plain --cache-control 'public, max-age=31536000, immutable' \
+  --checksum-sha256 "$(openssl dgst -sha256 -binary "$DIR/SHA256SUMS" | base64 | tr -d '\n')"
 
 # 2) 版本检查指针（放最后！且必须短缓存）
 $aws s3 cp "$DIR/latest.json" "s3://$R2_BUCKET/$CH/latest.json" \
   --content-type application/json --cache-control 'no-cache'
 
-# 3) 清理到只剩最近 3 个版本（见 §3；用版本序 sort -V，不能用字典序）
+# 3) 清理到只剩最近 3 个版本（见 §3：必须排除本次版本，用版本序 sort -V 不能用字典序）
 KEEP=3
-$aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
-  | sort -rV | tail -n +$((KEEP+1)) | while read -r old; do
-      echo "清理旧版本: $CH/releases/$old"
-      $aws s3 rm "s3://$R2_BUCKET/$CH/releases/$old/" --recursive
-    done
+versions="$($aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
+  | grep -E '^[0-9]' | grep -vxF "$VER" || true)"
+printf '%s\n' "$versions" | sort -rV | tail -n +"$KEEP" | while read -r old; do
+    [ -n "$old" ] || continue
+    echo "清理旧版本: $CH/releases/$old"
+    $aws s3 rm "s3://$R2_BUCKET/$CH/releases/$old/" --recursive
+  done
 ```
 
 **顺序不可颠倒**：先把 `releases/<v>/` 传完，**再**清旧版本，**最后**才覆盖 `latest.json`。
@@ -346,8 +390,14 @@ $aws s3 ls "s3://$R2_BUCKET/$CH/releases/" | awk '{print $2}' | sed 's#/##' \
 
 > **清理必须在 `latest.json` 覆盖之前**：如果先覆盖指针再清理，中间窗口里 `latest.json` 指向新版本、
 > 而新版本的资产可能还没传完。先传齐 → 清旧 → 最后指新，任何时刻指针都指向完整可用的版本。
+>
+> **淘汰集合必须排除本次版本**（`grep -vxF "$VER"` + `tail -n +"$KEEP"`）：`sort -rV` 把预发布
+> 排在正式版之前（`2.7.2-beta.6` > `2.7.2`），照"保留前 KEEP 个"直接截断会把**刚上传的正式版**
+> 删掉，随后写出的 `latest.json` 指向空目录（2026-09-12 审计 P1-2 的现场）。
 
-> 500MB 的 tar 会触发 aws cli 的 multipart upload（默认阈值 8MB），这是正常路径，无需手工 `create-multipart-upload`。
+> 500MB 的包在**手工** `aws s3 cp` 下会走 multipart upload（默认阈值 8MB），这是正常路径，无需
+> 手工 `create-multipart-upload`；但要记住它的对象校验和是**分片校验和的校验和**，不能拿来与本地
+> `sha256` 对拍（发布脚本因此改用单请求 PUT，见上）。
 
 ---
 

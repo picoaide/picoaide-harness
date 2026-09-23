@@ -23,7 +23,7 @@ description: 'PicoAide Harness server HTTP API reference: auth, LLM gateway, boo
 | `VALIDATION` | 400 | Parameter validation failed |
 | `UPSTREAM` | 502 | Upstream LLM error |
 | `RATE_LIMITED` | 429 | Rate limit triggered |
-| `QUOTA_EXCEEDED` | 429 | Monthly token/money quota, department budget or balance insufficient (admins exempt) |
+| `BALANCE_EXHAUSTED` | 429 | Balance gate enabled and the account balance is ≤ 0 (admins exempt; the token quota, money quota and department budget were retired on 2026-09-11 — the balance is the only gate) |
 | `INTERNAL` | 500 | Internal error |
 
 ## Auth (employee surface)
@@ -33,7 +33,7 @@ description: 'PicoAide Harness server HTTP API reference: auth, LLM gateway, boo
 | POST | `/api/client/v2/auth/login` | Password login (local / LDAP): `{username, password}` → `{token}` |
 | POST | `/api/client/v2/auth/logout` | Revoke the current token |
 | GET | `/api/client/v2/auth/me` | Current user (incl. `role` / `permissions`) |
-| GET | `/api/client/v2/auth/usage` | Usage overview: balance, today/yesterday/month/total tokens + cost, department budget chain |
+| GET | `/api/client/v2/auth/usage` | Usage overview: **account balance** (`balance_money` / `balance_activated` / `balance_enabled` / `balance_monthly` / `balance_mode`), today/yesterday/month/total tokens + cost |
 | POST | `/api/client/v2/auth/password` | Employee self-service password change (local users; all tokens are revoked afterwards and the user must log in again) |
 | GET | `/api/client/v2/auth/methods` | Login-method discovery (public) |
 | GET | `/api/client/v2/auth/oidc/login` `/callback` (same for OpenID) | Browser authorization login; the provider is resolved from the auth configuration at request time, so saving takes effect immediately |
@@ -97,7 +97,7 @@ The client login page needs the brand and the installer before anyone has logged
 | GET | `/me` `/logout` | Current admin / sign out |
 | POST | `/me/password` | Change your own password (revokes all sessions) |
 | GET/POST | `/me/mfa` `/me/mfa/enable` `/me/mfa/verify` `/me/mfa/disable` | Admin TOTP codes (view / enable / verify / disable) |
-| GET/POST/PUT/DELETE | `/users` `/users/:id` | User CRUD (quota, role, status, reset password, reset MFA) |
+| GET/POST/PUT/DELETE | `/users` `/users/:id` | User CRUD (role, status, balance, reset password, reset MFA; `quota_*` request fields have been ignored since 2026-09-11) |
 | PUT | `/users/:id/department` | Set department membership (`group_ids` array, multi-department supported) |
 | GET/POST/PUT/DELETE | `/departments` `/departments/:id` | Department tree and budgets |
 | POST | `/users/:id/balance` | Employee balance adjustment (add / deduct / set, audited) |

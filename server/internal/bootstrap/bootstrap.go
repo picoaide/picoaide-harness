@@ -1,14 +1,20 @@
 // Package bootstrap aggregates the startup configuration for clients
-// (GET /api/config/bootstrap): models + default model + skill suggestions.
+// (GET /api/client/v2/config/bootstrap): models + default model + skill suggestions.
+//
+// 路由声明纪律（R4-C-7，审计 2026-09-23）：本包**不再**提供 `RegisterRoutes`。
+// 它曾直接在 `*gin.Engine` 上挂 `/healthz` 与 `/api/client/v2/config/bootstrap`，
+// 但生产装配不用它（`cmd/server/main.go` 直接挂 `Handlers.Health`、`internal/router`
+// 声明 bootstrap 端点），只被包内测试调用 —— 于是它既是一份"双份真源"，又位于
+// 所有守卫的扫描面之外（`cmd/server` 的直挂守卫只扫本包源码）。处置是**移除**：
+// 测试改为用 `NewHandlers` 暴露的 handler 自行组树（与生产同一批 handler）。
+// "业务包不得直挂引擎"这条形态现在由 cmd/server/route_mirror_registry_test.go 守卫。
 package bootstrap
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -58,9 +64,29 @@ type Response struct {
 	// 每项 = 客户端 ConnectorDef 对齐的 JSON(definition 字段内嵌),
 	// 服务端管理员经 webadmin 管理;客户端凭证仍只存本地,不随下发。
 	Connectors []ConnectorItem `json:"connectors"`
-	// ServerVersion 服务端版本(编译期注入)。
-	// 客户端据此发现"服务端已升级、本机客户端是旧版"并提示升级 —— 服务端与
-	// 客户端同包发版(客户端安装包随镜像发布),所以两者版本必须一致。
+	// ServerVersion 是**服务端构建版本标识**（编译期注入，值 = serverauth.BuildVersion()）。
+	//
+	// 诚实口径（R3-A A-13）：这一栏曾经写着"客户端据此发现『服务端已升级、本机客户端
+	// 是旧版』并提示升级……是版本错配的**唯一可见信号**" —— 那是**不成立的承诺**，
+	// 已撤回。事实是：
+	//   - **当前没有客户端消费方**：`packages/**` 的源码里既没有 `server_version`
+	//     也没有 `serverVersion` 的读取点（判据是包内用例
+	//     TestServerVersionIsInformationalOnly —— 它扫的就是客户端源码，抄不走）；
+	//   - 客户端的版本检查走的是 **`GET /api/client/v2/updates/manifest`** 的
+	//     `server.version`（见 internal/clientrelease），与本字段无关；
+	//   - 所以本字段今天是**诊断/溯源**信息：回答"这份 bootstrap 来自哪个构建"，
+	//     不承担任何"版本错配提示"的产品承诺。
+	//
+	// 为什么"改承诺"而不是删字段或补消费方（这是本条缺陷的处置取舍）：
+	//   - 字段集合被视为**跨语言契约**（客户端 BootstrapConfig 逐字对齐），删字段
+	//     必须与客户端同批发版，代价与风险都不属于服务端单方面；
+	//   - "让客户端消费它并提示升级"是**产品决策 + 客户端改动**（另一个泳道），
+	//     服务端这边单方面改不动 —— 在它落地之前，注释与用例必须如实描述现状，
+	//     否则门禁会继续告诉读者"这条链路是通的"（存在性断言冒充能力断言）。
+	//
+	// 改动纪律：这个注释与 TestServerVersionIsInformationalOnly 是**一对**。
+	// 谁把"客户端据此提示升级"这类承诺写回来，或者真加了客户端消费方却没同步口径，
+	// 用例都会红。
 	ServerVersion string `json:"server_version"`
 }
 
@@ -74,26 +100,6 @@ type ConnectorItem struct {
 	AuthMode    string `json:"auth_mode"`
 	// 完整定义 JSON:客户端 parse 后覆盖内置(无内置,仅此下发)。
 	Definition string `json:"definition"`
-}
-
-// RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
-// plus an unauthenticated /healthz for docker healthchecks (only on the
-// no-prefix call — healthz is a fixed endpoint and must never be mirrored).
-func RegisterRoutes(r *gin.Engine, db *sql.DB) {
-	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)。
-	// 查询 DB(3s 超时),DB 不可用返回 503。
-	r.GET("/healthz", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		defer cancel()
-		if err := db.PingContext(ctx); err != nil {
-			// 健康探针保持 {ok:false} 语义(docker HEALTHCHECK 只认状态码),
-			// 但 error 字段与错误信封同构(审计2026-F1.2)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": gin.H{"code": "INTERNAL", "message": "db unavailable"}})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-	r.GET("/api/client/v2/config/bootstrap", serverauth.BearerAuth(db), buildBootstrapHandler(db))
 }
 
 // buildBootstrapHandler 返回 bootstrap 端点 handler;闭包在每次调用时新建,

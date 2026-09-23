@@ -348,10 +348,16 @@ export function readHostPlatformReason(payload: unknown): string | null {
 
 /**
  * 读响应体为 JSON（失败 ⇒ `null`），**不改动**调用方后续的读取（用 clone）。
+ *
+ * 2026-09-23：本函数是本包（`src/client/`）的**唯一实现** —— `channel-seam.ts` 与
+ * `open-app.ts` 原先各持一份逐字节相同的副本，三份互为独立实现意味着「一次收口
+ * （例如给 clone 失败加兜底、或把 `JSON.parse` 换成带 reviver 的版本）只改到一处」。
+ * 那两处现在都从这里 import。导出面因此变大（原来是模块私有），属纯增量。
+ *
  * @param response - 原始响应。
  * @returns 解析结果，或 `null`。
  */
-async function readJsonQuietly(response: Response): Promise<unknown> {
+export async function readJsonQuietly(response: Response): Promise<unknown> {
   try {
     const text = await response.clone().text()
     return text === '' ? null : JSON.parse(text)

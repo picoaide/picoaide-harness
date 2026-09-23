@@ -88,6 +88,18 @@ The server enforces these checks at startup and when checking for updates:
 > If `PICOAI_CHANNEL=official` was left in `.env` by hand, a custom-channel deployment will be judged
 > inconsistent — just delete that line.
 
+### The image tag is a fourth value on multi-stack hosts
+
+Channel differences live in the **image contents**, not in the tag: every channel's archive carries
+the same `picoaide-harness-server:v<version>`. On a host running two channel stacks, the later
+`docker load` overwrites that tag, so `docker compose up -d server` on either stack can rebuild it
+from the **other** channel's image (branding and bundled installers wrong, while `.env` looks
+perfectly correct). Each archive therefore also carries a channel-scoped tag
+`picoaide-harness-server:<channel-id>-<version>`; point each stack's `SERVER_IMAGE` at its own
+channel tag. Steps and the post-change verification are in
+[Upgrade, backup and rollback](/en/deployment/upgrade/).
+
+
 ## Troubleshooting
 
 | Symptom | Cause |

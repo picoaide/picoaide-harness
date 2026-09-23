@@ -1,10 +1,26 @@
-/** Per-user connector credential store under the product home. */
+/**
+ * Per-(account, server) connector credential store under the product home.
+ *
+ * Scope = `<dshHome>/users/<encoded-user>/servers/<server-hash>/connectors`
+ * (`./user-scope.ts` is the single place the layout and the hash are defined).
+ *
+ * Upgrade cost (R6-B-2, 2026-09-24) — read this before touching the layout:
+ * a credential written by an older build has no server marker, so it cannot be
+ * attributed to any tenant. This store therefore does NOT adopt it: the legacy
+ * directory `<dshHome>/users/<encoded-user>/connectors` is only ever probed for
+ * existence, the affected connector reports "授权需要重来" /
+ * "needs a fresh authorization", and the user re-authorizes each connector
+ * ONCE. That is the intended, fail-closed price: the alternative (adopting the
+ * file for whichever server happens to be current) is exactly the cross-tenant
+ * secret replay this scope exists to stop. Deleting the old files is NOT part
+ * of the migration — they are the user's record of what was authorized.
+ */
 
 import { promises as fs } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
-import { userScopePath } from './user-scope.ts'
+import { connectorScopePath, unscopedConnectorPath } from './user-scope.ts'
 
 const DIRECTORY_MODE = 0o700
 const FILE_MODE = 0o600
@@ -30,6 +46,7 @@ export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): 
     && a.clientSecret === b.clientSecret
     && a.expiresAt === b.expiresAt
     && a.refreshedAt === b.refreshedAt
+    && a.issuer === b.issuer
     && a.publicMcp === b.publicMcp
     && fields(a) === fields(b)
 }
@@ -63,6 +80,19 @@ export interface ConnectorCredential {
   /** When the last successful token refresh happened (epoch ms). */
   refreshedAt?: number
   /**
+   * The SDK's SEP-2352 `issuer` stamp: the authorization server this credential
+   * was issued by.
+   *
+   * The SDK stamps every value it hands to `saveTokens` and checks the stamp on
+   * every read (`discardIfIssuerMismatch`) — a credential stamped for another
+   * authorization server reads back as "no tokens", which is what stops a
+   * credential from being replayed against a different AS. The provider used to
+   * drop it on the way to disk, so the isolation never engaged and the SDK
+   * warned on every read (audit 2026-09-23, CN-2). Absent on credentials written
+   * before this field existed; the SDK back-stamps them on first use.
+   */
+  issuer?: string
+  /**
    * The MCP endpoint answered without an authorization challenge during
    * discovery (spec 2025-06-18 "public" server), so no token exists or is ever
    * issued. Persisted so a restart can tell "no credential needed" apart from
@@ -74,10 +104,26 @@ export interface ConnectorCredential {
 }
 
 export interface ConnectorStoreOptions {
-  /** Override the base directory (tests). */
+  /**
+   * Override the base directory (tests).
+   *
+   * Bypasses the product scope resolution entirely (including the legacy
+   * probe): a test base dir is a live directory by definition.
+   */
   baseDir?: string
   /** The logged-in username; per-user scoping when omitted/missing. */
   username?: string | null
+  /**
+   * The current session's server address — the SECOND half of the scope.
+   *
+   * One account on two deployments (a test and a production one, two channel
+   * stacks on one host) is TWO tenants: the same connector id points at two
+   * different MCP endpoints, so credentials are scoped by (account, server).
+   * When it is missing (logged out, no session address) the store falls back
+   * to `servers/unscoped` — never to the old unscoped directory, which is
+   * exactly the path that handed tenant A's secret to tenant B's endpoint.
+   */
+  serverURL?: string | null
 }
 
 function assertConnectorId(id: string): string {
@@ -97,23 +143,69 @@ async function ensurePrivateDirectory(dir: string): Promise<void> {
   await fs.chmod(dir, DIRECTORY_MODE)
 }
 
+/**
+ * Connector ids whose `<id>.json` sits in `dir` — names only, never contents.
+ *
+ * One implementation for both the live scope ({@link ConnectorStore.credentialIds})
+ * and the legacy one ({@link ConnectorStore.unscopedCredentialIds}): the filter
+ * is what keeps `.mcp-approvals.json` (and any other dot file) out of a list of
+ * connector ids, and it is the same `CONNECTOR_ID_PATTERN` the read path uses.
+ * An unreadable/missing directory reads as "none", like every other read here.
+ * @param dir - absolute directory to enumerate.
+ * @returns sorted connector ids.
+ */
+async function listCredentialIds(dir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dir)
+    return entries
+      .filter(name => name.endsWith('.json') && CONNECTOR_ID_PATTERN.test(name.slice(0, -'.json'.length)))
+      .map(name => name.slice(0, -'.json'.length))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
 export class ConnectorStore {
   /**
-   * The resolved per-account directory this store writes to.
+   * The resolved per-(account, server) directory this store writes to.
    *
    * Callers that outlive a session reconfiguration (an in-flight SDK 401 write,
    * a refresh) compare THIS to decide whether they still write to the account
    * they started on. Comparing store instance identity would wrongly reject a
    * same-account reconfiguration — the new instance points at the same
    * directory and the write is both safe and necessary (2026-09-16 audit R2).
+   *
+   * R6-B-2 (audit 2026-09-23): the server dimension is part of this identity,
+   * so `TokenRefresher`'s `scopeAtStart` and the dead-grant markers keyed on it
+   * (both read `store.dir`) became per-(account, server) in the same step as
+   * the directory layout — one key construction point, no "judged under one key,
+   * recorded under another".
    */
   readonly dir: string
 
+  /**
+   * The legacy, unscoped directory (`<dshHome>/users/<user>/connectors`), or
+   * `null` when this store is a test `baseDir` override.
+   *
+   * Read-only by contract: {@link hasUnscopedCredential} /
+   * {@link unscopedCredentialIds} only ever stat/name entries. A pre-upgrade
+   * credential lives here and is NEVER adopted — the plugin turns its connector
+   * into "needs a fresh authorization" instead, and leaves the bytes alone so a
+   * user (or an operator) can still find them.
+   */
+  readonly unscopedDir: string | null
+
   constructor(options: ConnectorStoreOptions = {}) {
-    // Default root: `<dshHome>/users/<encoded-user>/connectors`; a real user
-    // (enterprise session) scopes credentials per account. `anonymous` is the
-    // fallback so unauthenticated state never collides with a user's dir.
-    this.dir = options.baseDir ?? join(userScopePath(options.username), 'connectors')
+    // Default root: `<dshHome>/users/<encoded-user>/servers/<server-hash>/connectors`;
+    // a real user (enterprise session) scopes credentials per account AND per
+    // server. `anonymous` is the fallback so unauthenticated state never
+    // collides with a user's dir; `unscoped` is the fallback for "no server
+    // identity" (and never the legacy directory — see `unscopedDir`).
+    this.dir = options.baseDir ?? connectorScopePath(options.username, options.serverURL)
+    this.unscopedDir = options.baseDir === undefined || options.baseDir === null
+      ? unscopedConnectorPath(options.username)
+      : null
   }
 
   private path(id: string): string {
@@ -291,5 +383,56 @@ export class ConnectorStore {
 
   async hasCredential(id: string): Promise<boolean> {
     return (await this.readCredential(id)) !== null
+  }
+
+  /**
+   * Did an **unscoped** (pre-2026-09-24) credential for `id` survive the
+   * upgrade in the legacy directory?
+   *
+   * Existence only: the file's BYTES are never read, never parsed and never
+   * returned. That is the point — a credential of unknown provenance must not
+   * even enter the process, let alone get injected into the current server's
+   * endpoint. The caller uses this to report "needs a fresh authorization"
+   * instead of silently staying disconnected, and the file itself is left
+   * exactly where it is.
+   * @param id - connector id (validated before it touches the filesystem).
+   * @returns true when the legacy directory holds a regular `<id>.json`.
+   */
+  async hasUnscopedCredential(id: string): Promise<boolean> {
+    if (this.unscopedDir === null) return false
+    const file = resolve(this.unscopedDir, `${assertConnectorId(id)}.json`)
+    if (dirname(file) !== resolve(this.unscopedDir)) return false
+    try {
+      const stat = await fs.lstat(file)
+      return stat.isFile() && !stat.isSymbolicLink()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Ids of the credentials stored in THIS (account, server) scope.
+   *
+   * Names only — callers that need the material call {@link readCredential}.
+   * Added for the in-process consumers that used to enumerate the directory
+   * themselves with the user-scope helper (the browser's credential resolver):
+   * once the layout gained the server dimension, a second enumeration site
+   * would be a second place to get the scope wrong.
+   * @returns sorted connector ids.
+   */
+  async credentialIds(): Promise<string[]> {
+    return await listCredentialIds(this.dir)
+  }
+
+  /**
+   * Ids of every unscoped credential file left in the legacy directory, for the
+   * ONE searchable log line the plugin writes per restore pass.
+   *
+   * Names only (no `readCredential`, no sizes, no contents); unreadable or
+   * missing directories read as "none", like every other read here.
+   * @returns sorted connector ids (empty when there is nothing to report).
+   */
+  async unscopedCredentialIds(): Promise<string[]> {
+    return this.unscopedDir === null ? [] : await listCredentialIds(this.unscopedDir)
   }
 }

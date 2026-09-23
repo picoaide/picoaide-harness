@@ -153,6 +153,13 @@ func keyOf(userID int64) string {
 //
 // 契约（§23.1）：容量 10 万条、条目在 TTL 内一律视为"已用过"，超容量丢最旧的。
 //
+// 有界性的两个量**都必须有界**（审计 2026-09-23 R5-A-28：修前只有 seen 有界，
+// order 在低于 capacity/TTL 的速率下无界）：
+//
+//	len(seen)  <= capacity + 1     —— 表满时按 order 的 FIFO 丢最旧；
+//	len(order) <= 2 * capacity     —— 超过上界即按 seen 的存活情况重建（见 evictLocked）；
+//	len(order)-head <= 2*capacity  —— 同一条不变量的另一种写法（head 只前移，不缩短切片）。
+//
 // 为什么是"丢最旧"而不是"满了拒绝"：这是**防重放**而不是配额。丢最旧意味着
 // 一个被驱逐的旧键理论上可再次使用（LRU 的固有代价），而它的窗口只有 TTL 之内；
 // "满了拒绝"则会让正常流量在峰值时整批 401 —— 用一个可用性事故换一个极窄的
@@ -201,17 +208,54 @@ func (g *ReplayGuard) Consume(key string) bool {
 	return true
 }
 
-// evictLocked 维护容量与内存上界：先按 FIFO 挤到容量内，再在过期条目占比过高时压缩。
+// evictLocked 维护容量与内存上界：先按 FIFO 挤到容量内，再重建 order（丢掉死条目）。
+//
+// ⚠️ 不变量（审计 2026-09-23 R5-A-28，改这里之前先读）：
+//
+//	len(g.order) <= 2*capacity  在**每次 Consume 返回前**恒成立（追加至多 +1，随后立即检查）
+//
+// 修前的压缩判据是 `g.head > g.capacity`，而**推进 head 的唯一路径**是上面那个
+// 截断循环，它的前置条件是 `len(g.seen) > g.capacity`；可 seen 的过期清扫阈值是
+// capacity/2 —— 两者合起来就是：只要不同键的到达速率低于 capacity/TTL
+// （默认 100k/15min ≈ 111 键/秒），seen 就被清扫压在容量之下 ⇒ 截断永不触发 ⇒
+// head 恒为 0 ⇒ **order 按请求速率永久增长**（1 键/秒 ≈ 15MB/天，纯内存 OOM 面；
+// 而且 nonce 在验签之前被消费，任何持员工 bearer 的请求都能驱动）。
+//
+// 现在的判据只看 order 的**总长度**，不依赖 seen：len(order) 只增不减
+// （append 增长；head 前移并不缩短切片），所以"超过 2*capacity 就重建"是
+// **必然触发**的条件，与流量档位无关。摊销仍是 O(1)：重建后 len(order)
+// ≤ len(seen) ≤ capacity+1，要再次超限至少还需要 ≈capacity 次追加。
+//
+// 为什么重建必须**按 seen 过滤**而不是简单丢掉已消费前缀：低速率档位下 head
+// 恒为 0（没有任何键被 FIFO 挤出），前缀里全是"已过 TTL、已被扫出 seen"的死键。
+// 只丢前缀等于什么都没做（len 不变 ⇒ 每次都重建 ⇒ O(n) 且仍然无界），
+// 必须真的把死键筛掉。同时按 seen 过滤还有一个好处：重复条目（同一键过期后
+// 被重新消费会再追加一条）会在重建时折叠，`len(order) ≤ 2*capacity` 因此
+// 严格成立，而不是"大致成立"。
 func (g *ReplayGuard) evictLocked(now int64) {
 	for len(g.seen) > g.capacity && g.head < len(g.order) {
 		delete(g.seen, g.order[g.head])
 		g.order[g.head] = ""
 		g.head++
 	}
-	// 压缩：order 的已消费前缀超过容量时整体前移（否则长跑进程的 order 会无限增长）。
-	if g.head > g.capacity {
-		rest := append([]string(nil), g.order[g.head:]...)
-		g.order = rest
+	// 重建：order 总长度超过 2*capacity 时按 seen 的存活情况筛一遍。
+	if len(g.order) > 2*g.capacity {
+		tail := g.order[g.head:]
+		// 同一键可能有多条（过期后被重新消费）；保留**最后**一条，FIFO 序才与
+		// 真实插入时间一致。
+		lastIdx := make(map[string]int, g.capacity)
+		for i, k := range tail {
+			if exp, ok := g.seen[k]; ok && exp > now {
+				lastIdx[k] = i
+			}
+		}
+		live := make([]string, 0, len(lastIdx))
+		for i, k := range tail {
+			if j, ok := lastIdx[k]; ok && j == i {
+				live = append(live, k)
+			}
+		}
+		g.order = live
 		g.head = 0
 	}
 	// 过期条目也顺手清一遍（避免"低频部署"下 seen 长期只增不减）。
@@ -232,4 +276,19 @@ func (g *ReplayGuard) Len() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.seen)
+}
+
+// OrderLen 返回 FIFO 切片 order 的**总长度**（用例与诊断用，与 Len 同形）。
+//
+// 为什么要单独看它（审计 2026-09-23 R5-A-28 的判据要求）：内存占用由 order 决定，
+// 而不变量 `len(order) <= 2*capacity` 在**低速率**档位才可能被打破 —— 只看 Len()
+// 会得到"一切正常"的假绿（seen 被清扫压在容量之下，order 却在天长地久地涨）。
+// 诊断面必须两个量一起看：order_len 单调增长且 seen_len <= capacity = 本条缺陷。
+func (g *ReplayGuard) OrderLen() int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.order)
 }

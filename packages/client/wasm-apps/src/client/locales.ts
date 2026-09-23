@@ -29,7 +29,6 @@ export const zh = {
   'appCenter.responsible': '负责人',
   'appCenter.open': '打开',
   'appCenter.openAria': '打开应用',
-  'appCenter.close': '关闭',
   'appCenter.backToChat': '返回聊天',
   'appCenter.publishSubtitle': '把写好的小工具发布到应用中心，同事点开就能用',
   'appCenter.notLoggedIn': '登录后可以查看应用中心',
@@ -60,7 +59,6 @@ export const zh = {
   'appCenter.shareUnavailableConfig': '分享入口暂不可用：这个客户端还没配置应用地址（渠道配置问题，请联系管理员）',
 
   // ---- 详情页（F16 的消费端：打开次数来自 open 端点；不编造）----
-  'appCenter.details': '详情',
   'appCenter.detailAria': '查看应用详情',
   'appCenter.backToCatalog': '返回列表',
   // 文案逐字取自设计总纲 §19 Q11（"今日已被打开 N 次"）。
@@ -88,10 +86,14 @@ export const zh = {
   'appCenter.ai.toolsNote': '应用 AI 只有对话：没有工具、不能读写文件、不能使用连接器与记忆。',
   'appCenter.ai.allow': '允许',
   'appCenter.ai.deny': '不允许',
-  'appCenter.ai.denied': '已拒绝：这个应用不能使用 AI。改主意就点「撤销授权」。',
+  'appCenter.ai.denied': '已拒绝：这个应用不能使用 AI。改主意就点「允许」。',
   'appCenter.ai.revoke': '撤销授权',
   'appCenter.ai.revoked': '已撤销：下次调用会重新询问。',
   'appCenter.ai.consentFailed': '授权没能保存到本机，这次不能放行：请重启客户端后重试。',
+  // 审计 C-24/C-25：撤销与「不允许」失败时的话只说**真实后果**（宿主闸门还开着），
+  // 且与「允许」失败分开 —— 拿「这次不能放行」描述撤销失败是反的。
+  'appCenter.ai.revokeFailed': '撤销没有生效：闸门仍然允许这个应用使用 AI，请重试。',
+  'appCenter.ai.denyFailed': '拒绝没有生效：没能关掉本机的 AI 闸门，请重试。',
   'appCenter.ai.identityPending': '正在确认登录身份，确认后即可授权（授权按 用户×应用 记录）。',
   'appCenter.ai.placeholder': '给应用 AI 发一条消息',
   'appCenter.ai.send': '发送',
@@ -121,7 +123,6 @@ export const zh = {
   'appCenter.publishHint': '选择本机编译好的 .wasm 文件，填好版本与配置后提交。大文件由平台自动分片续传，不必自己切。',
   'appCenter.back': '返回',
   'appCenter.file': '.wasm 文件',
-  'appCenter.filePick': '选择文件',
   'appCenter.fileNone': '还没有选择文件',
   'appCenter.fileChosen': '已选择',
   'appCenter.appId': '应用标识（app_id）',
@@ -135,6 +136,26 @@ export const zh = {
   'appCenter.availabilityTaken': '该标识已被占用，请换一个名字',
   'appCenter.availabilityTakenHint': '标识一经发布即永久占用：首个发布者一直持有，被下架或删除也不释放',
   'appCenter.availabilityInvalid': '这个标识不符合命名规则，请按提示修改',
+  // 终态判词（R3-A A-4）：服务端 `publishBlockOf` 的两个取值，都意味着**不能发新版**。
+  // 这两条是 `message` 缺席时的兜底（服务端原文优先，它与 publish 那一刻的拒绝同源）；
+  // hint 指向下一步动作 —— 只说"不能发"会让用户卡住。
+  //
+  // R5-B-7：这条 hint 原来写的是"发布者本人可以解冻（同一端点带 {"frozen":false}）"
+  // ——那是一句**接口契约**，员工在产品里没有任何入口去执行它；而同一份字典的
+  // `openAppFrozenHint` 又说"联系平台管理员"。同一件事两个答案 = 承诺落空。
+  // 现在的口径（面板已给出冻结/解冻入口，见 `app-lifecycle.ts` 的 `setAppFrozen`）：
+  // 发布者 → 应用中心；其他人 → 管理员。
+  //
+  // R6-B-3（2026-09-23）：这条 hint 原来说"如果列表里已经看不到这个应用，请联系
+  // 平台管理员" —— 与"发布者本人在应用中心里就能解冻"自相矛盾：目录（面板唯一
+  // 数据源）曾经对**所有人**跳过冻结行，而面板每次挂载/每次发布后都重拉目录，于是
+  // 发布者看到的正是"列表里已经看不到"。现在服务端对**归属人本人**保留冻结行
+  // （带「已冻结」标记），发布者的路径因此在任何一次重载之后都可达；"看不到"
+  // 只剩另一种人：**不是**归属人的员工（他们本来就无权解冻）。
+  'appCenter.availabilityFrozen': '这个标识属于一个已冻结的应用，解冻后才能发新版本',
+  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人的应用中心里一直能看到它（带「已冻结」标记），点「解冻」即可（解冻后还要重新上架才会恢复访问）；其他成员看不到已冻结的应用，需要解冻请联系平台管理员',
+  'appCenter.availabilityRetired': '这个标识属于一个已删除（退役）的应用，标识与版本号永久占位',
+  'appCenter.availabilityRetiredHint': '已删除的应用标识不会复用、也不释放给他人：请换一个名字新建应用',
   // 查重**没问成**（宿主/网络故障）：既不能说"可用"也不能说"被占用" ——
   // 说可用会放行一次注定失败的发布，说被占用会把一个合法的名字误杀。
   'appCenter.availabilityUnknown': '暂时无法确认该标识是否可用（不影响提交，提交时服务端会再判一次）',
@@ -207,6 +228,21 @@ export const zh = {
   'appCenter.deleteConfirm': '确认删除？不可恢复。应用标识与版本号永久保留；数据保留期以服务端返回的说明为准。',
   'appCenter.deleteConfirmAction': '确认删除',
   'appCenter.confirmCancel': '取消',
+  // ---- 冻结 / 解冻（R5-B-7：发布者本人的出口）----
+  // 服务端的语义（release.go:119-187）：冻结 = 停止服务（appserver 一律 404）并**顺带下架**；
+  // 解冻**不会**自动上架（要再点一次「上架」）。文案必须说清这两步，否则用户会以为
+  // "解冻了就能用了"（客户端不复述服务端的保留期数字，只复述这个动作语义）。
+  'appCenter.frozen': '已冻结',
+  'appCenter.frozenHint': '已冻结：应用暂停服务（打开会失败），数据仍然保留。解冻后还需要重新上架才会恢复访问。',
+  'appCenter.freeze': '冻结',
+  'appCenter.freezeAria': '冻结该应用（停止服务，数据保留）',
+  'appCenter.unfreeze': '解冻',
+  'appCenter.unfreezeAria': '解冻该应用（解冻后还需重新上架）',
+  'appCenter.freezeConfirm': '确认冻结？应用立刻停止服务，并同时下架（访问者收到 404）。数据仍然保留，之后可以由你解冻并重新上架。',
+  'appCenter.freezeConfirmAction': '确认冻结',
+  'appCenter.appFrozen': '应用已冻结',
+  'appCenter.appUnfrozen': '应用已解冻',
+  'appCenter.frozenNote': '服务端说明',
   'appCenter.actionFailed': '操作失败',
   'appCenter.appDeleted': '应用已删除',
   'appCenter.appDeletedNote': '服务端说明',
@@ -228,6 +264,7 @@ export const zh = {
   // 生命周期端点的"响应形状对不上"（服务端改了契约）：三条各自的判据 + 一条共用指路。
   // 这些消息也会进 en 界面，所以必须走字典（发布块的同类中文是既有缺陷 R1-uxc-7，别扩散）。
   'appCenter.setPublishedShapeMismatch': '服务端返回的上下架结果里没有 enabled 字段（响应形状与客户端预期不一致）',
+  'appCenter.setFrozenShapeMismatch': '服务端返回的冻结/解冻结果里没有 frozen 字段（响应形状与客户端预期不一致）',
   'appCenter.deleteShapeMismatch': '服务端没有确认删除（响应里没有 deleted=true）',
   'appCenter.diagnosticsShapeMismatch': '服务端返回的诊断结果形状与客户端预期不一致',
   'appCenter.schemaShapeMismatch': '服务端返回的表结构形状与客户端预期不一致',
@@ -251,7 +288,6 @@ export const zh = {
   'appCenter.dataReload': '刷新',
   'appCenter.dataShow': '查看数据',
   'appCenter.dataHide': '收起数据',
-  'appCenter.dataTables': '表',
   'appCenter.dataRowsCount': '行',
   'appCenter.dataNoRows': '这张表还是空的。',
   'appCenter.dataMaskedNote': '敏感列已脱敏（值被替换成星号）。',
@@ -284,7 +320,9 @@ export const zh = {
   // 区分凭据是 `platform_reason`。冻结是**只读快照**（数据仍然保留），文案必须与
   // "不存在"逐字可辨：说成"可能已被删除"会让用户去找发布者要一个还在的新应用。
   'appCenter.openAppFrozen': '打开失败：应用已被管理员停用（冻结）',
-  'appCenter.openAppFrozenHint': '冻结是只读快照：数据仍然保留，但不能继续使用；如需恢复请联系平台管理员',
+  // 与 `appCenter.availabilityFrozenHint` **同一个答案**（R5-B-7）：发布者在应用中心
+  // 解冻，其他成员找平台管理员；不再一边承诺"发布者可以解冻"、一边只说"联系管理员"。
+  'appCenter.openAppFrozenHint': '冻结是只读快照：数据仍然保留，但不能继续使用；如果你是发布者，可以在应用中心里解冻（解冻后还需重新上架），否则请联系平台管理员',
   'appCenter.openAppMissing': '打开失败：这个应用不存在（可能已被删除或改名）',
   'appCenter.openAppMissingHint': '刷新应用列表确认它还在；若确实已被删除，请向发布者索取新的应用',
   'appCenter.openProtocolNotReady': '打开失败：客户端内打开应用的能力还没就绪',
@@ -319,7 +357,6 @@ export const zh = {
   'appCenter.errorCode': '错误码',
   'appCenter.errorDetails': '详情',
   'appCenter.errorHints': '建议',
-  'appCenter.publishAgain': '继续发布',
   'appCenter.backToList': '返回应用列表',
   'appCenter.needFile': '请先选择 .wasm 文件',
   'appCenter.readFailed': '读取文件失败',
@@ -375,7 +412,6 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.responsible': 'Owner',
   'appCenter.open': 'Open',
   'appCenter.openAria': 'Open app',
-  'appCenter.close': 'Close',
   'appCenter.backToChat': 'Back to chat',
   'appCenter.publishSubtitle': 'Publish your tool to the App Center so colleagues can open it',
   'appCenter.notLoggedIn': 'Sign in to browse the App Center',
@@ -401,7 +437,6 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.shareUnavailableConfig': 'Sharing is unavailable: this client has no app origin address configured (a channel configuration problem — contact an administrator)',
 
   // ---- Detail view (F16 consumer: open counts come from the open endpoint) ----
-  'appCenter.details': 'Details',
   'appCenter.detailAria': 'View app details',
   'appCenter.backToCatalog': 'Back to list',
   'appCenter.opensToday': 'Opened {n} times today',
@@ -420,10 +455,14 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.ai.toolsNote': 'App AI is chat only: no tools, no file access, no connectors and no memory.',
   'appCenter.ai.allow': 'Allow',
   'appCenter.ai.deny': 'Do not allow',
-  'appCenter.ai.denied': 'Denied: this app cannot use AI. Use "Revoke consent" to change your mind.',
+  'appCenter.ai.denied': 'Denied: this app cannot use AI. Use "Allow" to change your mind.',
   'appCenter.ai.revoke': 'Revoke consent',
   'appCenter.ai.revoked': 'Revoked: the next call asks again.',
   'appCenter.ai.consentFailed': 'The consent could not be saved on this device, so it was not granted. Restart the client and try again.',
+  // Audit C-24/C-25: a failed revoke / deny states the real consequence (the gate is still open)
+  // and must not reuse the allow direction's copy.
+  'appCenter.ai.revokeFailed': 'The revocation did not take effect: the gate still lets this app use AI. Try again.',
+  'appCenter.ai.denyFailed': 'The denial did not take effect: the local AI gate could not be closed. Try again.',
   'appCenter.ai.identityPending': 'Confirming your sign-in identity; you can grant consent once it is ready (consent is recorded per user and app).',
   'appCenter.ai.placeholder': 'Send a message to the app AI',
   'appCenter.ai.send': 'Send',
@@ -452,7 +491,6 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.publishHint': 'Pick the .wasm file you compiled locally, fill in the version and config, then submit. Large payloads are chunked and resumed by the platform.',
   'appCenter.back': 'Back',
   'appCenter.file': '.wasm file',
-  'appCenter.filePick': 'Choose file',
   'appCenter.fileNone': 'No file selected',
   'appCenter.fileChosen': 'Selected',
   'appCenter.appId': 'App ID',
@@ -463,6 +501,10 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.availabilityTaken': 'This App ID is already taken; please pick another name',
   'appCenter.availabilityTakenHint': 'An App ID is claimed permanently on first publish: it stays with its publisher even after unpublish or delete',
   'appCenter.availabilityInvalid': 'This App ID does not follow the naming rules — see the hint',
+  'appCenter.availabilityFrozen': 'This App ID belongs to a frozen app; unfreeze it before releasing a new version',
+  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher always sees the app in the App Center (marked "Frozen") and can unfreeze it there (bring it online again afterwards to restore access); other members do not see frozen apps — ask your platform administrator to unfreeze it',
+  'appCenter.availabilityRetired': 'This App ID belongs to a deleted (retired) app; the ID and its version numbers are taken permanently',
+  'appCenter.availabilityRetiredHint': 'A deleted App ID is never reused or released to others: please pick another name',
   'appCenter.availabilityUnknown': 'Could not confirm whether this App ID is available (you can still submit; the server checks again)',
   'appCenter.availabilityShapeMismatch': 'The availability result does not match what the client expects',
   'appCenter.availabilityShapeHint': 'Report this to the platform maintainer: the server likely renamed an availability field',
@@ -527,6 +569,17 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.deleteConfirm': 'Delete this app? This cannot be undone. The app ID and version numbers stay reserved forever; the data retention window follows the note the server returns.',
   'appCenter.deleteConfirmAction': 'Confirm delete',
   'appCenter.confirmCancel': 'Cancel',
+  'appCenter.frozen': 'Frozen',
+  'appCenter.frozenHint': 'Frozen: the app is out of service (opening it fails) and its data is kept. After unfreezing you must bring it online again before it becomes reachable.',
+  'appCenter.freeze': 'Freeze',
+  'appCenter.freezeAria': 'Freeze this app (stops service, keeps data)',
+  'appCenter.unfreeze': 'Unfreeze',
+  'appCenter.unfreezeAria': 'Unfreeze this app (bring it online again afterwards)',
+  'appCenter.freezeConfirm': 'Freeze this app? It stops serving immediately and is taken offline as well (visitors get 404). The data is kept, and you can unfreeze and bring it online again later.',
+  'appCenter.freezeConfirmAction': 'Confirm freeze',
+  'appCenter.appFrozen': 'App frozen',
+  'appCenter.appUnfrozen': 'App unfrozen',
+  'appCenter.frozenNote': 'Server note',
   'appCenter.actionFailed': 'Action failed',
   'appCenter.appDeleted': 'App deleted',
   'appCenter.appDeletedNote': 'Server note',
@@ -544,6 +597,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.diagnosticsHints': 'Hints',
   'appCenter.publishNewDisabled': 'This app is offline: publishing a new version now does NOT restore access (it still returns 410 Gone). Bring it online first, then publish.',
   'appCenter.setPublishedShapeMismatch': 'The take offline / bring online response has no enabled field, so this client cannot tell the app state',
+  'appCenter.setFrozenShapeMismatch': 'The freeze / unfreeze response has no frozen field, so this client cannot tell the app state',
   'appCenter.deleteShapeMismatch': 'The server did not confirm the deletion (no deleted=true in the response)',
   'appCenter.diagnosticsShapeMismatch': 'The diagnostics response does not match the shape this client expects',
   'appCenter.schemaShapeMismatch': 'The schema response does not match the shape this client expects',
@@ -564,7 +618,6 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.dataReload': 'Refresh',
   'appCenter.dataShow': 'View data',
   'appCenter.dataHide': 'Hide data',
-  'appCenter.dataTables': 'Tables',
   'appCenter.dataRowsCount': 'rows',
   'appCenter.dataNoRows': 'This table is empty.',
   'appCenter.dataMaskedNote': 'Sensitive columns are masked.',
@@ -589,7 +642,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.openWindowOpened': 'Opened',
   'appCenter.openWindowFocused': 'Focused (this app already had a window)',
   'appCenter.openAppFrozen': 'Could not open: an administrator has disabled (frozen) this app',
-  'appCenter.openAppFrozenHint': 'A freeze is a read-only snapshot: the data is still kept, but the app cannot be used; contact your platform administrator to restore it',
+  'appCenter.openAppFrozenHint': 'A freeze is a read-only snapshot: the data is still kept, but the app cannot be used; if you are the publisher you can unfreeze it in the App Center (bring it online again afterwards), otherwise contact your platform administrator',
   'appCenter.openAppMissing': 'Could not open: this app does not exist (it may have been deleted or renamed)',
   'appCenter.openAppMissingHint': 'Refresh the app list to confirm it is still there; if it was deleted, ask the publisher for the new app',
   'appCenter.openProtocolNotReady': 'Could not open: in-client app support is not ready yet',
@@ -617,7 +670,6 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.errorCode': 'Code',
   'appCenter.errorDetails': 'Details',
   'appCenter.errorHints': 'Hints',
-  'appCenter.publishAgain': 'Publish another',
   'appCenter.backToList': 'Back to apps',
   'appCenter.needFile': 'Choose a .wasm file first',
   'appCenter.readFailed': 'Reading the file failed',

@@ -24,7 +24,7 @@ This is the first principle of the entire product line.
 
 DeepSeek Harness's core is a composable agent harness: agents, models, tools, sessions, and the Web UI are all composed through the Cordis plugin mechanism. Instead of rewriting from scratch, PicoAide Harness **treats the entire product as a plugin** too — the desktop shell (window, tray, updates, the fixed `desktop` profile) is itself a legitimate DSH plugin that runs through the same composition path as third-party plugins:
 
-- The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `dsh-v0.1.5-rc.2`); no product capability modifies the upstream source;
+- The upstream DeepSeek Harness runs **unchanged at a fixed version** (currently pinned at `dsh-v0.1.6-alpha.2`; `upstream.json` at the repository root is the source of truth); no product capability modifies the upstream source;
 - Plugins from the official ecosystem can be installed and used directly;
 - Our own business capabilities (Capability Hub, connectors, scheduled jobs, browser, enterprise login) are combined **on equal footing** with third-party plugins — they inject interfaces through the same slot mechanism and provide capabilities through the same service contract;
 - Upgrades only follow the upstream version number and do not break local extensions.
@@ -46,11 +46,11 @@ By default the product keeps all sensitive data on your machine and makes "stayi
 
 The desktop client owns the "experience" while the Go server owns "governance", dividing work through a clear protocol:
 
-- **Server**: accounts (local / LDAP / OIDC), model gateway proxy, rate limiting, quotas, metering & billing, department budgets, skill and agent market, approvals, audit — every capability that "can be abused" lives on the server;
+- **Server**: accounts (local / LDAP / OIDC), model gateway proxy, rate limiting, metering & billing with the balance gate, skill and agent market, approvals, audit — every capability that "can be abused" lives on the server;
 - **Client**: chat, workspaces, Capability Hub, connectors, scheduled jobs, browser — every "personal-facing" experience lives on the client;
 - **Multi-user isolation is the default, not a feature**: connector credentials are stored per user scope, browser sessions are isolated per account, and scheduled jobs are isolated per account; the server issues Bearer tokens per user (hashed at rest, 90-day expiry, automatically revoked on password change / permission downgrade / disable).
 
-**Operating principle: any decision that can be folded back to the server must never be self-certified on the client.** The client only displays the quotas, balance, and permission results the server provides (such as `429 QUOTA_EXCEEDED`); it grants no local exemptions.
+**Operating principle: any decision that can be folded back to the server must never be self-certified on the client.** The client only displays the balance and permission results the server provides (such as `429 BALANCE_EXHAUSTED`); it grants no local exemptions.
 
 ## 4. Capability distribution: content type × source, dimensions always orthogonal
 

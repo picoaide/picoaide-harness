@@ -20,9 +20,15 @@
  * 它的旧版命名债单独记账，不拦本守卫 —— 恢复上游同步比逐行改名更重要。
  *
  * 自证：`--self-test` 用内存夹具跑正/反用例（每次 check 都会跑一遍，毫秒级）：
- * 判定规则、嵌套 var 扫描、样式块解析、**块注释后的行号**（S15-6）与
- * **自有源码根缺失/空目录必须硬错误**（S15-8）。其中 S15-8 还额外把本脚本复制进
+ * 判定规则、嵌套 var 扫描、样式块解析、**块注释后的行号**（S15-6）、
+ * **自有源码根缺失/空目录必须硬错误**（S15-8）与
+ * **扫描面为 0 必须硬错误**（S15-9）。其中 S15-8/S15-9 还额外把本脚本复制进
  * 合成树、用**真实入口**跑一遍 —— 只测辅助函数证明不了 main() 真的调用了它。
+ *
+ * S15-9（2026-09-23 审计 W3-04）：`assertRootsPresent` 只要求"目录存在且非空"，
+ * 而"非空"可以是只放了一个 README —— 此时每个根贡献 0 个源码文件，整守卫打印
+ * `OK（0 个文件、0 条提示、0 条阻断）` 并 exit 0：**扫了个寂寞却报绿**。
+ * 现在每个根都登记 `minSources` 下限，且全局 `scanned === 0` 直接红。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -36,8 +42,20 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 /** 上游主题样式的权威目录（pinned submodule）。 */
 const THEME_ROOT = join(ROOT, 'deepseek-harness', 'packages', 'client', 'ui-theme', 'src')
 
-/** 我们自己的源码根（相对仓库根）；vendored 第三方不在此列。 */
-const OUR_ROOTS = ['packages/host', 'packages/client', 'brands', 'site/src']
+/**
+ * 我们自己的源码根（相对仓库根）；vendored 第三方不在此列。
+ *
+ * `minSources` = 该根**必须**至少扫到的源码文件数（S15-9）。0 是**显式**声明
+ * "这个根本来就不放源码"，不是"随便"：`brands/` 只有 svg/json/yml（品牌**素材**
+ * 目录，扫到 0 个 .ts/.css 是正常态）。任何根一旦被搬空/改名成只剩文档，
+ * 计数掉到下限以下就红，而不是安静地少扫一棵树。
+ */
+const OUR_ROOTS = [
+  { path: 'packages/host', minSources: 1 },
+  { path: 'packages/client', minSources: 1 },
+  { path: 'brands', minSources: 0 },
+  { path: 'site/src', minSources: 1 },
+]
 
 /** 扫描时跳过的目录名（构建产物 / 依赖）。 */
 const SKIP_DIRS = new Set(['node_modules', 'lib', 'dist', '.git', 'build', 'coverage', '.astro'])
@@ -197,11 +215,13 @@ function* sourceFiles(dir) {
  * 不能静默退化成"扫了个寂寞"。
  *
  * 导出仅为让 self-test 用临时目录造"缺失/空"两种坏树。
- * @param {readonly string[]} roots - 相对 `base` 的目录列表。
+ * @param {readonly (string | { path: string })[]} roots - 相对 `base` 的目录列表
+ *   （可以是 {@link OUR_ROOTS} 的对象形状，也可以是裸路径）。
  * @param {string} [base] - 仓库根（默认 {@link ROOT}）。
  */
 export function assertRootsPresent(roots, base = ROOT) {
-  for (const root of roots) {
+  for (const entry of roots) {
+    const root = typeof entry === 'string' ? entry : entry.path
     const absolute = join(base, root)
     if (!existsSync(absolute)) {
       throw new Error(
@@ -311,7 +331,8 @@ function suggestions(token, defined) {
  *
  * 测法：把本脚本**原样复制**进一棵合成树，用它自己的入口跑（脚本用自身路径推导 ROOT，
  * 所以只有复制才能测另一棵树）。合成树里放最小上游主题样式根（`upstreamTokens()` 缺目录
- * 会抛错，不能让它成为红的真实原因）+ 4 个自有源码根，再分别造"缺失"与"被搬空"两种坏树。
+ * 会抛错，不能让它成为红的真实原因）+ 4 个自有源码根，再分别造"缺失"、"被搬空"与
+ * "非空但一个源码文件都没有（S15-9）"三种坏树。
  * 副本靠环境变量掐断递归：副本不会再派生子进程。
  */
 function entryPointSelfTest() {
@@ -329,7 +350,7 @@ function entryPointSelfTest() {
       + 'body[data-ds-dark-theme] {\n  --dsw-alias-label-primary: #ffffff;\n}\n',
     )
     for (const root of OUR_ROOTS) {
-      const dir = join(scratch, root)
+      const dir = join(scratch, root.path)
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'probe.ts'), 'export const probe = 1\n')
     }
@@ -343,6 +364,12 @@ function entryPointSelfTest() {
       throw new Error(
         `check-theme-tokens: self-test 失败 —— 合成树自有根齐备时真实入口应通过，`
         + `实际 exit ${healthy.status}：${healthy.stderr.slice(0, 400)}`,
+      )
+    }
+    if (!/扫描 \d+ 个源码文件/u.test(healthy.stdout)) {
+      throw new Error(
+        'check-theme-tokens: self-test 失败 —— 通过时的输出必须带扫描计数（否则看不出守卫是否在工作）：'
+        + healthy.stdout.slice(0, 300),
       )
     }
     const brands = join(scratch, 'brands')
@@ -360,6 +387,23 @@ function entryPointSelfTest() {
       throw new Error(
         `check-theme-tokens: self-test 失败 —— 自有源码根被搬空时真实入口必须报错`
         + `(exit=${emptied.status})，stderr=${emptied.stderr.slice(0, 300)}`,
+      )
+    }
+    // S15-9：根都"存在且非空"，但整棵树一个源码文件都没有 ⇒ 扫描面为 0，必须红。
+    // 先恢复成齐备的树（上一例把 brands 清空了），再把每个根的 probe.ts 换成 README.md。
+    for (const root of OUR_ROOTS) {
+      mkdirSync(join(scratch, root.path), { recursive: true })
+      writeFileSync(join(scratch, root.path, 'probe.ts'), 'export const probe = 1\n')
+    }
+    for (const root of OUR_ROOTS) {
+      rmSync(join(scratch, root.path, 'probe.ts'))
+      writeFileSync(join(scratch, root.path, 'README.md'), 'no sources here\n')
+    }
+    const noSources = run()
+    if (noSources.status === 0 || !noSources.stderr.includes('源码文件数为 0')) {
+      throw new Error(
+        'check-theme-tokens: self-test 失败 —— 自有根非空但零源码文件时真实入口必须报错'
+        + `(exit=${noSources.status})，stderr=${noSources.stderr.slice(0, 300)}`,
       )
     }
   } finally {
@@ -445,21 +489,65 @@ function selfTest() {
   entryPointSelfTest()
 }
 
+/**
+ * 主流程。**所有**硬错误都收敛成 `console.error(message) + exit 1`（不是未捕获异常）：
+ * 本仓其它守卫的输出风格如此，而 Node 的异常栈（`node:fs:1350 … at mkdirSync`）会把
+ * 唯一有用的那句话埋掉 —— 报错文案是排障时唯一的行动坐标（2026-09-23 主控复核建议）。
+ * @returns {number} 退出码。
+ */
 function main() {
+  try {
+    return run()
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    return 1
+  }
+}
+
+/** 主流程主体（异常由 {@link main} 收敛）。 */
+function run() {
   selfTest()
   assertRootsPresent(OUR_ROOTS)
   const defined = upstreamTokens()
   const problems = []
+  const perRoot = new Map()
   let scanned = 0
-  let references = 0
   for (const root of OUR_ROOTS) {
-    const absolute = join(ROOT, root)
+    const absolute = join(ROOT, root.path)
+    let rootCount = 0
     for (const file of sourceFiles(absolute)) {
       scanned += 1
+      rootCount += 1
       const hits = scanFile(file, defined)
-      references += hits.length
       for (const hit of hits) problems.push({ ...hit, file: relative(ROOT, file) })
     }
+    perRoot.set(root.path, rootCount)
+  }
+  const counts = [...perRoot].map(([root, count]) => `${root} ${count}`).join('、')
+  // S15-9（2026-09-23 审计 W3-04）：扫描面为 0 时**绝不能**打印 OK ——
+  // "根都在、只是里面没有源码"是"扫了个寂寞"，与"扫干净了"必须能区分。
+  if (scanned === 0) {
+    console.error(
+      'check-theme-tokens: 扫描到的源码文件数为 0（' + counts + '）—— 拒绝把"扫不到"当通过。'
+      + '自有源码根都在，但没有一个 .ts/.tsx/.js/.mjs/.css 文件：'
+      + 'OUR_ROOTS 路径写错、源码被搬走或检出不完整时都会长这样，必须先修扫描面再看结论。',
+    )
+    return 1
+  }
+  const short = []
+  for (const root of OUR_ROOTS) {
+    const count = perRoot.get(root.path) ?? 0
+    if (count < root.minSources) {
+      short.push(`${root.path}（${count} 个，下限 ${root.minSources}）`)
+    }
+  }
+  if (short.length > 0) {
+    console.error(
+      'check-theme-tokens: 自有源码根扫到的源码文件数低于下限：' + short.join('、')
+      + `。整棵树共扫到 ${scanned} 个源码文件（${counts}）—— `
+      + '某个根被改名/搬空/漏检出时必须红，不能安静地少扫一棵树（下限在 OUR_ROOTS 的 minSources）。',
+    )
+    return 1
   }
   const broken = problems.filter(problem => problem.status === 'broken')
   const dead = problems.filter(problem => problem.status === 'dead')
@@ -481,12 +569,15 @@ function main() {
       '\n改法：换成上游真实存在的 token（`deepseek-harness/packages/client/ui-theme/src/styles/design-platform.css`'
       + ' 里 `body {}` = 亮色、`body[data-ds-dark-theme] {}` = 暗色），或按需自建 token。',
     )
-    process.exit(1)
+    return 1
   }
   console.log(
-    `check-theme-tokens: OK（${scanned} 个文件、${problems.length} 条提示、0 条阻断；`
-    + `上游 token ${defined.size} 个）`,
+    `check-theme-tokens: OK（扫描 ${scanned} 个源码文件（${counts}）、`
+    + `${problems.length} 条提示、0 条阻断；上游 token ${defined.size} 个）`,
   )
+  return 0
 }
 
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) main()
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  process.exit(main())
+}

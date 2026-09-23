@@ -193,6 +193,58 @@ describe('Gateway 网关配置页', () => {
     )
   })
 
+  it('上游编辑:模型清单未变时不提交 models(原样保存不得重建模型行、清空价格)', async () => {
+    // G-01(P0)前端侧:编辑弹窗会把预填的 models 原样回传,服务端只要收到就按
+    // 清单重建模型行(旧实现:DELETE 全部 + 只插三列)⇒ 该上游全部价格/缓存价/
+    // 峰谷折扣/default_params/input_modalities 被清零,之后调用照常 200、token
+    // 照记、cost=0。前端只应在清单**真的变化**时才提交 models。
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/providers') {
+        return { providers: [{ id: 1, name: 'manual', base_url: 'http://x', api_key: '***', models: ['m-a', 'm-b'], enabled: true, channel: '', protocol: 'openai' }] }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(dialog.getByDisplayValue('m-a, m-b')).toBeInTheDocument()
+    // 未改动 ⇒ 不显示"清单已修改"提示
+    expect(dialog.queryByText(/模型清单已修改/)).toBeNull()
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/providers/1',
+      expect.objectContaining({ method: 'PUT' }),
+    ))
+    const call = mockRequest.mock.calls.find(([p, i]: any[]) => p === '/api/server/admin/providers/1' && i?.method === 'PUT')
+    const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+    expect(body.models).toBeUndefined()
+    expect(body).toMatchObject({ name: 'manual', base_url: 'http://x', enabled: true, protocol: 'openai' })
+  })
+
+  it('上游编辑:清单真变了才提交 models,并提示移出的模型会被删除', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/providers') {
+        return { providers: [{ id: 1, name: 'manual', base_url: 'http://x', api_key: '***', models: ['m-a', 'm-b'], enabled: true, channel: '', protocol: 'openai' }] }
+      }
+      return baseImpl(path, init)
+    })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.change(dialog.getByDisplayValue('m-a, m-b'), { target: { value: 'm-a, m-b, m-c' } })
+    expect(await dialog.findByText(/模型清单已修改/)).toBeInTheDocument()
+    fireEvent.click(dialog.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/providers/1',
+      expect.objectContaining({ method: 'PUT' }),
+    ))
+    const call = mockRequest.mock.calls.find(([p, i]: any[]) => p === '/api/server/admin/providers/1' && i?.method === 'PUT')
+    const body = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>
+    expect(body.models).toEqual(['m-a', 'm-b', 'm-c'])
+  })
+
   it('渠道同步模型删除确认文案说明不会自动恢复', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<Gateway />)

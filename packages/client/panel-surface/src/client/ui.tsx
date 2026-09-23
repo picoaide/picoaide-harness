@@ -293,31 +293,6 @@ export function PanelPage({ title, subtitle, icon, onClose, backLabel, actions, 
   )
 }
 
-export interface SectionHeaderProps {
-  title: string
-  /** 标题后的弱化计数。 */
-  count?: number | undefined
-  /** 右侧操作区。 */
-  actions?: React.ReactNode | undefined
-}
-
-/**
- * 正文里的分区标题（比面板标题低一级）。
- * @param props - 标题、计数与右侧操作。
- */
-export function SectionHeader({ title, count, actions }: SectionHeaderProps): JSX.Element {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '2px 0 10px' }}>
-      <h3 style={{ margin: 0, fontSize: 13, lineHeight: '20px', fontWeight: 600 }}>{title}</h3>
-      {count === undefined ? null : (
-        <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>{count}</span>
-      )}
-      <span style={{ flex: 1 }} />
-      {actions}
-    </div>
-  )
-}
-
 export interface PanelStatsProps {
   items: ReadonlyArray<{ label: string; value: string; tone?: PanelTone | undefined }>
 }

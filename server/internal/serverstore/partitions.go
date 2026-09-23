@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 本文件是 usage 家族**所有**分区创建的唯一实现。
@@ -388,16 +386,9 @@ func overlappingPartitionErr(spec partitionSpec, overlapping string, cause error
 }
 
 // isOverlapPartitionErr 报告 err 是否为 PG 42P17(分区边界与既有分区重叠)。
-// 与 isDuplicateRelationErr 同一实现形态:先认 *pgconn.PgError,再退回错误串。
+// 判定唯一实现在 pg.go 的 pgErrorCode（`errors.As` 优先，回落错误串）。
 func isOverlapPartitionErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "42P17"
-	}
-	return strings.Contains(err.Error(), "42P17")
+	return pgErrorCodeIs(err, pgSQLStateOverlapPartition)
 }
 
 // partitionReadyErr 判定"已存在的关系能否直接当作目标分区使用"。
@@ -543,16 +534,9 @@ func partitionBoundCoversEverything(bound string) bool {
 // 表加新分区会让既有行违反分区约束"(rc3-4)。它与 42P17(overlap)是同一族的
 // 两种 PG 拒绝形态:布局本身完全可写,只是**不能再加窄分区**。
 //
-// 与 isOverlapPartitionErr 同一实现形态:先认 *pgconn.PgError,再退回错误串。
+// 判定唯一实现在 pg.go 的 pgErrorCode（`errors.As` 优先，回落错误串）。
 func isDefaultPartitionViolationErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23514"
-	}
-	return strings.Contains(err.Error(), "23514")
+	return pgErrorCodeIs(err, pgSQLStateDefaultPartitionViolated)
 }
 
 // coveredByDefaultPartitionErr 把 23514 翻译成与 overlappingPartitionErr 同级

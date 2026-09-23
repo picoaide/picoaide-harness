@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.8.1",
+  "version": "2.8.2-beta.1",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -95,6 +95,7 @@
     "cordis.patch.yml",
     "docs/**",
     "lib/**/*.js",
+    "lib/**/*.cjs",
     "lib/**/*.map",
     "lib/types/**/*.d.ts",
     "README.md",
@@ -379,6 +380,7 @@
       "build/channel.json",
       "build/app-icon-mac.png",
       "build/tray-icon*.png",
+      "build/assistedMessages.yml",
       "build/web-brand/favicon.svg",
       "build/web-brand/official.svg",
       "cordis.patch.yml",

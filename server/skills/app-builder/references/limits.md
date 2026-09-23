@@ -69,8 +69,8 @@
 | `sql_limit_like_pattern_length` | 512 | count | §4.5 | SQLITE_LIMIT_LIKE_PATTERN_LENGTH |  |
 | `sql_limit_trigger_depth` | 8 | count | §4.5 | SQLITE_LIMIT_TRIGGER_DEPTH |  |
 | `sql_limit_worker_threads` | 0 | count | §4.5 | SQLITE_LIMIT_WORKER_THREADS | 禁辅助线程 |
-| `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 超出即截断并报错 |
-| `sql_max_result_bytes` | 8388608 | bytes | §4.5 | 返回字节上限 |  |
+| `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 只截断并置 QueryResult.Truncated，不报错（分页信号；见 appdb/stmt.go） |
+| `sql_max_result_bytes` | 172032 | bytes | §4.5 | 返回字节上限 |  |
 | `sql_statement_budget` | 5 | seconds | §4.5 | 单语句硬超时 | 独立于 guest 超时；驱动取消时 sqlite3_interrupt |
 | `app_db_readers` | 4 | count | §4.5 | 每应用只读连接数 | WAL 下并发读；写仍只由一个写者串行 |
 | `app_db_readers_max` | 16 | count | §4.5 | 只读连接数上限 | 配置注入的钳位（超出即钳到该值） |
@@ -84,7 +84,8 @@
 | `sql_column_types` | `text, int, real, bool, datetime` |  | §4.5 | 列类型枚举 | 封闭集合 |
 | `allowed_statement_kinds` | `SELECT, INSERT, UPDATE, DELETE` |  | §4.5 | 语句种类白名单 | 其余一律拒（含全部 DDL） |
 | `app_request_body_max_bytes` | 1048576 | bytes | §4.6 | 应用 API 请求体上限 | 客户端请求信封自带上限；管线仍自套 MaxBytesReader 兜住 chunked/长度撒谎 |
-| `app_response_body_max_bytes` | 8388608 | bytes | §4.6 | 应用响应体上限 |  |
+| `app_response_body_max_bytes` | 8388608 | bytes | §4.6 | 应用响应体总输出上限 | guest 写出多少字节就算超（RUNTIME_OUTPUT_OVERRUN）；**不是**能交付多少，见下一条 |
+| `app_response_body_deliverable_bytes` | 172032 | bytes | §4.6 | 响应体保证可交付上限 | = (protocol_line_max_bytes − frame_envelope_reserve_bytes) / max_json_escape_expansion；最坏 JSON 转义下仍装得进一个帧（abi.MaxResponseBodyBytes 同源） |
 | `protocol_line_max_bytes` | 1048576 | bytes | §4.6 | 协议帧单行上限 | 超限 RUNTIME_OUTPUT_OVERRUN |
 | `guest_budget` | 10 | seconds | §4.6 | guest 执行预算 | 进入宿主调用时暂停计时 |
 | `request_wall_clock` | 60 | seconds | §4.6 | 请求端到端墙钟 | 含排队等待，到点即拒 |
@@ -100,6 +101,7 @@
 | `call_event_batch_max` | 512 | count | §4.9 | 调用事件单批上限 |  |
 | `diagnostics_default_limit` | 50 | count | §4.9 | 诊断默认条数 |  |
 | `diagnostics_max_limit` | 200 | count | §4.9 | 诊断条数上限 |  |
+| `rows_page_max` | 200 | count | §5.9 | 作者数据面单页行数上限 | 行浏览（`wasm_app_rows` / `GET …/wasm/:app_id/rows`）一页最多多少行；与 sql_max_rows 的 5000 是两件事（那是应用自己查库的上限，这是给人/AI 看的浏览面） |
 | `stderr_tail_bytes` | 2048 | bytes | §4.9 | stderr 尾巴上限 | 诊断回给作者 |
 | `readyz_snapshot_ttl` | 5 | seconds | §4.9 | /readyz 快照缓存时长 | 未认证端点；缓存整次采集（目录 walk + statfs + db.Ping） |
 | `retirement_snapshot_retention_days` | 90 | days | §5.3 | 退役快照保留 | 冻结/退役后保留快照的时长；到期由平台回收 |

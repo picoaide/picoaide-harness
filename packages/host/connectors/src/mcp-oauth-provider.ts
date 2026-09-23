@@ -49,8 +49,20 @@ import type {
   OAuthDiscoveryState,
   OAuthTokens,
 } from '@modelcontextprotocol/client'
+
+/**
+ * v2's public `OAuthTokens` does not declare the SEP-2352 `issuer` stamp the SDK
+ * itself writes (`provider.saveTokens({...tokens, issuer})`), so the stamp is
+ * modelled here: dropping it silently is exactly the defect this alias prevents.
+ */
+export type StoredOAuthTokens = OAuthTokens & { issuer?: string }
 import { discoverMcpOAuth } from './auth.ts'
-import { assertOutboundUrlAllowed, OutboundUrlBlockedError } from './outbound.ts'
+import {
+  assertOutboundUrlAllowed,
+  attachOutboundOrigins,
+  OutboundUrlBlockedError,
+} from './outbound.ts'
+import { createMcpOutboundFetch } from './mcp-transport-fence.ts'
 import { DEFAULT_TOKEN_LIFETIME_MS, REFRESH_LEAD_MS } from './token-lifetime.ts'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
 import type { ConnectorCredential } from './store.ts'
@@ -72,10 +84,33 @@ export interface OAuthTarget {
   tokenUrl?: string | undefined
   /** Static authorize endpoint; used only to derive the authorization server URL. */
   authorizeUrl?: string | undefined
+  /** RFC 7591 registration endpoint the definition publishes, when it has one. */
+  registrationEndpoint?: string | undefined
   clientId?: string | undefined
   clientSecret?: string | undefined
   scope?: string | undefined
   redirectUri?: string | undefined
+}
+
+/**
+ * The authorization-server facts a provider is built with.
+ *
+ * Produced by {@link resolveAuthorizationServer} (network discovery for
+ * `discoveryUrl` definitions) or by {@link resolveStaticAuthorizationServer}
+ * (no network at all: the definition names its endpoints). Both shapes feed the
+ * SAME SDK seam — the provider hands them back as saved discovery state — so
+ * the SDK never has to ask the RESOURCE server who the authorization server is
+ * (`CN-2`, audit 2026-09-23: without this the SDK re-discovered from the MCP
+ * URL and POSTed the stored refresh token to the token endpoint the MCP
+ * endpoint named).
+ */
+export interface DiscoveredAuthorizationServer {
+  authorizationServerUrl: string
+  tokenEndpoint: string
+  /** Authorization endpoint when the source names one (interactive flows). */
+  authorizationEndpoint?: string | undefined
+  /** RFC 7591 registration endpoint when the source names one. */
+  registrationEndpoint?: string | undefined
 }
 
 /** Successful refresh: the authoritative token facts to persist. */
@@ -89,6 +124,18 @@ export interface RefreshedTokens {
 type RefreshFailureReason =
   /** The authorization server rejected the grant: only a new authorization helps. */
   | 'reauthorize'
+  /**
+   * The authorization server rejected the REQUEST itself (RFC 6749 §5.2 /
+   * RFC 8707 shape errors: `invalid_scope`, `invalid_request`,
+   * `unsupported_grant_type`, `invalid_target`).
+   *
+   * Re-sending the identical request cannot succeed, so this is a THIRD
+   * outcome next to `reauthorize` — it reaches the same terminal state (the
+   * connector demands attention and the automatic sweep stops re-presenting
+   * the credential) but must not promise that re-authorizing fixes it: the
+   * request shape is what the server refused.
+   */
+  | 'terminal'
   /** Network / 5xx / malformed response: retry later with the same credential. */
   | 'transient'
   /** Nothing to refresh (no refresh token, no endpoint, or a public endpoint). */
@@ -102,11 +149,41 @@ export interface RefreshFailure {
 
 export type RefreshOutcome = { ok: true; tokens: RefreshedTokens } | RefreshFailure
 
+/**
+ * Whether a failure reason is a **terminal** one: the same stored credential
+ * must not be presented again by the automatic sweep (only an interactive
+ * re-authorization, a configuration change, or the manual button may retry).
+ *
+ * One predicate so the three call sites (restore / sweep / panel button) can
+ * not disagree about which reasons arm the terminal marker — the R4-B audit
+ * found the panel path arming nothing at all.
+ * @param reason - the classified refresh failure reason.
+ * @returns true for `reauthorize` and `terminal`.
+ */
+export function isTerminalRefreshReason(reason: RefreshFailureReason): boolean {
+  return reason === 'reauthorize' || reason === 'terminal'
+}
+
 /** Thrown internally when the SDK would redirect a background refresh to a browser. */
 const REAUTHORIZE_REQUIRED = 'PICO_CONNECTOR_REAUTHORIZE_REQUIRED'
 
 /** OAuth error codes that mean "this grant is dead" (SDK `OAuthError.code` values). */
 const DEAD_GRANT_CODES = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client'])
+
+/**
+ * OAuth error codes that mean "this REQUEST is permanently refused".
+ *
+ * RFC 6749 §5.2 (`invalid_request`, `invalid_scope`, `unsupported_grant_type`)
+ * and RFC 8707's `invalid_target` describe the request the client sent, not a
+ * lapsed authorization: the identical retry gets the identical answer. Treating
+ * them as `transient` made the 60 s sweep re-present a doomed request to the
+ * customer's IdP forever (R4-B-8, audit 2026-09-23), the same hammering class
+ * the CN-5 fix closed for dead grants.
+ *
+ * Deliberately an allow-list: unknown codes (including transport errno strings
+ * such as `ECONNREFUSED`) must stay retryable.
+ */
+const REQUEST_REJECTED_CODES = new Set(['invalid_scope', 'invalid_request', 'unsupported_grant_type', 'invalid_target'])
 
 /**
  * Structural read of the SDK's `OAuthError`.
@@ -162,7 +239,7 @@ export function createOAuthProvider(
   options: {
     credential: ConnectorCredential
     target: OAuthTarget
-    discovery?: { authorizationServerUrl: string; tokenEndpoint: string } | undefined
+    discovery?: DiscoveredAuthorizationServer | undefined
     /** RFC 8707 resource indicator the grant stays bound to. */
     resource?: string | undefined
     /** Redirect URL for an interactive flow; `undefined` keeps it non-interactive. */
@@ -179,7 +256,7 @@ export function createOAuthProvider(
 ): {
   provider: OAuthClientProvider
   /** The provider's live view of the tokens (updated by `saveTokens` and `adopt`). */
-  readonly tokens: OAuthTokens | undefined
+  readonly tokens: StoredOAuthTokens | undefined
   /**
    * Adopt tokens obtained by a refresh **we** ran, so the SDK's next 401
    * self-heal presents the rotated credential instead of the consumed one.
@@ -188,8 +265,42 @@ export function createOAuthProvider(
 } {
   const { credential, target } = options
   const ensureFresh = options.ensureFresh
+  /**
+   * The authorization-server facts this provider works with.
+   *
+   * The caller may pass them (network discovery / the static fast path in
+   * `index.ts`), and a definition that names its own `tokenUrl`/`authorizeUrl`
+   * always yields them without a round trip — so a provider can never be
+   * "scopeless" just because a caller forgot the argument. That matters beyond
+   * tidiness: with no facts at all the SDK would resolve the authorization
+   * server from the RESOURCE server's 401 challenge and refresh against it
+   * (audit 2026-09-23, CN-2), and the transport fence would have no registered
+   * origin to allow.
+   */
+  const discoveryFacts = ((): DiscoveredAuthorizationServer | undefined => {
+    if (options.discovery !== undefined) return options.discovery
+    try {
+      return resolveStaticAuthorizationServer(target).discovery
+    } catch {
+      // A policy-blocked static endpoint is not a reason to build a provider
+      // that can be steered by the resource server: leave it factless, and the
+      // scope gate below keeps it from ever presenting a refresh token.
+      return undefined
+    }
+  })()
   /** 绝对过期时刻（ms）；`adopt` / SDK 的 `saveTokens` 都会更新它。 */
   let expiresAt: number | undefined = credential.expiresAt
+  /**
+   * The SDK's SEP-2352 `issuer` stamp, carried with the tokens.
+   *
+   * `auth()` stamps every value it hands to `saveTokens` and reads the stamp
+   * back through `discardIfIssuerMismatch` — a credential issued by another
+   * authorization server then reads as "no tokens" instead of being replayed.
+   * Dropping the field on the way to disk (what this provider did before the
+   * 2026-09-23 audit) disables that isolation and makes the SDK warn on every
+   * read; it is therefore part of the stored credential now.
+   */
+  let issuer: string | undefined = credential.issuer
   const adoptTokens = (next: RefreshedTokens): void => {
     // A rotation MAY omit a new refresh token; keep the one we hold rather
     // than dropping the only material a later refresh needs.
@@ -199,15 +310,17 @@ export function createOAuthProvider(
       access_token: next.accessToken,
       token_type: 'Bearer',
       ...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+      ...(issuer === undefined ? {} : { issuer }),
       expires_in: Math.max(0, Math.round((next.expiresAt - Date.now()) / 1000)),
     }
   }
-  let tokens: OAuthTokens | undefined = credential.accessToken === undefined
+  let tokens: StoredOAuthTokens | undefined = credential.accessToken === undefined
     ? undefined
     : {
         access_token: credential.accessToken,
         token_type: 'Bearer',
         ...(credential.refreshToken === undefined ? {} : { refresh_token: credential.refreshToken }),
+        ...(credential.issuer === undefined ? {} : { issuer: credential.issuer }),
         ...(credential.expiresAt === undefined ? {} : { expires_in: Math.max(0, Math.round((credential.expiresAt - Date.now()) / 1000)) }),
       }
   let clientInformation: OAuthClientInformationMixed | undefined = credential.clientId === undefined
@@ -216,6 +329,24 @@ export function createOAuthProvider(
         client_id: credential.clientId,
         ...(credential.clientSecret === undefined ? {} : { client_secret: credential.clientSecret }),
       }
+  /**
+   * The token view the SDK is allowed to see.
+   *
+   * **No discovery facts ⇒ no refresh token.** The SDK's 401 path refreshes
+   * against whatever authorization server it resolves itself — and with no
+   * saved discovery state that resolution starts from the RESOURCE server
+   * (`WWW-Authenticate: resource_metadata`, then `authorization_servers[0]`).
+   * Handing it a refresh token in that state is precisely how the stored token
+   * ended up POSTed to the MCP-named endpoint (audit 2026-09-23, CN-2). Without
+   * a resolved authorization server the SDK therefore sees an access token at
+   * most and escalates to "authorize again" instead; our own refresher (which
+   * resolves the endpoints through the policy-checked discovery) is unaffected.
+   */
+  const withoutRefreshTokenWhenScopeless = (value: StoredOAuthTokens | undefined): StoredOAuthTokens | undefined => {
+    if (value === undefined || discoveryFacts !== undefined || value.refresh_token === undefined) return value
+    const { refresh_token: _dropped, ...rest } = value
+    return rest
+  }
   const redirectUri = options.redirectUrl ?? target.redirectUri
   const clientMetadata: OAuthClientMetadata = {
     client_name: 'MCP Connector',
@@ -225,7 +356,10 @@ export function createOAuthProvider(
     token_endpoint_auth_method: credential.clientSecret === undefined ? 'none' : 'client_secret_post',
     ...(target.scope === undefined ? {} : { scope: target.scope }),
   }
-  const serverUrl = target.discoveryUrl
+  // The MCP resource this credential authorizes. It is what the SDK validates
+  // a discovered resource against and what RFC 8707 binds the grant to; for a
+  // static-endpoint definition the definition's own MCP URL is authoritative.
+  const resourceUrl = target.discoveryUrl ?? target.resourceUrl
 
   const provider = {
     // No redirect URL: the refresh path must never fall through to opening a
@@ -258,7 +392,7 @@ export function createOAuthProvider(
      * @returns 该 provider 当前持有的令牌（刷新失败时仍是旧的，交给 SDK 走原来的
      *   escalate 路径）。
      */
-    tokens: async (_ctx?: OAuthClientInformationContext): Promise<OAuthTokens | undefined> => {
+    tokens: async (_ctx?: OAuthClientInformationContext): Promise<StoredOAuthTokens | undefined> => {
       // 与 `tokenNeedsRefresh` 同判据，但用**活的** `expiresAt`（`adopt` /
       // `saveTokens` 都会前移它）：没有 refresh token 的连接器永不在这里刷新；
       // 未记录过期时间视为可能过期（问一次很便宜）。
@@ -274,14 +408,20 @@ export function createOAuthProvider(
           // 「需要重新授权」）。
         }
       }
-      return tokens
+      return withoutRefreshTokenWhenScopeless(tokens)
     },
-    saveTokens: async (next: OAuthTokens, _ctx?: OAuthClientInformationContext) => {
+    saveTokens: async (next: StoredOAuthTokens, _ctx?: OAuthClientInformationContext) => {
       tokens = next
+      // The SDK stamps `issuer` on every value it writes (SEP-2352). Keep it in
+      // memory AND on disk: a credential that loses the stamp reads back as
+      // "unstamped" on the next process, which both re-enables cross-AS reuse
+      // and makes the SDK warn on every single read.
+      if (next.issuer !== undefined) issuer = next.issuer
       expiresAt = Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000
       await options.onPersist?.({
         accessToken: next.access_token,
         ...(next.refresh_token === undefined ? {} : { refreshToken: next.refresh_token }),
+        ...(next.issuer === undefined ? {} : { issuer: next.issuer }),
         // `expires_in` is seconds-from-now; store the absolute instant once.
         expiresAt: Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000,
         refreshedAt: Date.now(),
@@ -290,7 +430,13 @@ export function createOAuthProvider(
     // RFC 6749 §6 refresh grant in the SDK's own parameter object — the
     // endpoint comes from the discovered metadata, not from a URL we build.
     prepareTokenRequest: () => {
-      if (tokens?.refresh_token === undefined) throw new Error(REAUTHORIZE_REQUIRED)
+      // The SDK builds the refresh grant from THIS hook, so it must see the same
+      // scope-checked token view as `tokens()`: with no resolved authorization
+      // server the provider has no refresh token to present (see
+      // `withoutRefreshTokenWhenScopeless`), and a scopeless refresh must fail
+      // loudly here rather than POST the stored token to a discovered endpoint.
+      const visible = withoutRefreshTokenWhenScopeless(tokens)
+      if (visible?.refresh_token === undefined) throw new Error(REAUTHORIZE_REQUIRED)
       // RFC 6749 §6: a refresh request MAY carry `scope`, but omitting it means
       // "keep the originally granted scope" — and only that form is
       // interoperable. Measured against a real authorization server
@@ -300,7 +446,7 @@ export function createOAuthProvider(
       // endless 401 → refresh-fails → backoff loop on the MCP transport.
       return new URLSearchParams({
         grant_type: 'refresh_token',
-        refresh_token: tokens.refresh_token,
+        refresh_token: visible.refresh_token,
         ...(options.resource === undefined ? {} : { resource: options.resource }),
       })
     },
@@ -318,6 +464,24 @@ export function createOAuthProvider(
       }
       return undefined
     },
+    /**
+     * Forget tokens/client info the authorization server has just rejected.
+     *
+     * `auth()` calls this on `invalid_grant` / `invalid_client` and then retries
+     * ONCE with whatever the provider still holds. Doing nothing (the previous
+     * behaviour) meant the retry presented the same dead grant a second time —
+     * the audit counted four token POSTs for one refresh attempt and saw a
+     * revoked grant re-presented forever (CN-5). With the rejected tokens
+     * forgotten, the retry fails fast as "authorize again" instead.
+     * @param scope - which credential the SDK invalidated.
+     */
+    invalidateCredentials: (scope?: 'all' | 'client' | 'tokens') => {
+      if (scope !== 'client') {
+        tokens = undefined
+        issuer = undefined
+      }
+      if (scope !== 'tokens') clientInformation = undefined
+    },
     redirectToAuthorization: () => {
       // Reached only when the grant is dead; the panel must drive a new
       // authorization, never this background call.
@@ -325,22 +489,69 @@ export function createOAuthProvider(
     },
     saveCodeVerifier: () => {},
     codeVerifier: () => '',
-    ...(options.discovery === undefined || serverUrl === undefined
+    ...(discoveryFacts === undefined
       ? {}
       : {
+          /**
+           * Saved discovery state — the ONLY thing that decides which
+           * authorization server this credential belongs to.
+           *
+           * Two audit findings ride on this object (2026-09-23, CN-2):
+           *
+           *  - it must exist for the STATIC-endpoint shape too (a definition
+           *    that names `tokenUrl`/`authorizeUrl` and publishes no
+           *    `discoveryUrl`). The old condition also demanded
+           *    `target.discoveryUrl`, so that branch handed the SDK a provider
+           *    with no discovery state at all; `authInternal` then re-discovered
+           *    from the MCP URL — `resource_metadata` of the RESOURCE server's
+           *    choosing, then `authorization_servers[0]` — and POSTed the
+           *    STORED refresh token to whatever token endpoint came back.
+           *  - `resourceMetadata` must be present. Without it the SDK still
+           *    fetches the protected-resource metadata document (again from the
+           *    resource server's URL) even when it already knows the
+           *    authorization server.
+           *
+           * `registration_endpoint` is carried when the source names one, so a
+           * definition without a client id can still register (the SDK only
+           * registers when `clientInformation` is absent).
+           */
           discoveryState: (): OAuthDiscoveryState => ({
-            authorizationServerUrl: options.discovery!.authorizationServerUrl,
+            authorizationServerUrl: discoveryFacts!.authorizationServerUrl,
             authorizationServerMetadata: {
-              issuer: options.discovery!.authorizationServerUrl,
-              authorization_endpoint: target.authorizeUrl ?? options.discovery!.authorizationServerUrl,
-              token_endpoint: options.discovery!.tokenEndpoint,
+              issuer: discoveryFacts!.authorizationServerUrl,
+              authorization_endpoint: discoveryFacts!.authorizationEndpoint
+                ?? target.authorizeUrl
+                ?? discoveryFacts!.authorizationServerUrl,
+              token_endpoint: discoveryFacts!.tokenEndpoint,
+              ...(discoveryFacts!.registrationEndpoint === undefined
+                ? {}
+                : { registration_endpoint: discoveryFacts!.registrationEndpoint }),
               response_types_supported: ['code'],
               grant_types_supported: ['authorization_code', 'refresh_token'],
               token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
             },
+            ...(resourceUrl === undefined ? {} : { resourceMetadata: { resource: resourceUrl } }),
           }),
         }),
   }
+
+  // The MCP transport fence reads these off `transport._oauthProvider`: they are
+  // the only policy-checked answer to "which hosts may this connector reach".
+  // Everything the SDK may legitimately contact is in here — the MCP resource
+  // (the transport's own URL, always allowed), the authorization server, its
+  // token/registration endpoints and the static definition's endpoints.
+  attachOutboundOrigins(provider, [
+    resourceUrl,
+    discoveryFacts?.authorizationServerUrl,
+    discoveryFacts?.tokenEndpoint,
+    discoveryFacts?.authorizationEndpoint,
+    discoveryFacts?.registrationEndpoint,
+    target.discoveryUrl,
+    target.resourceUrl,
+    target.tokenUrl,
+    target.authorizeUrl,
+    target.registrationEndpoint,
+  ])
 
   return {
     provider: provider as unknown as OAuthClientProvider,
@@ -366,6 +577,45 @@ export function createOAuthProvider(
 }
 
 /**
+ * Resolve the authorization-server facts a **static-endpoint** definition
+ * already names — with NO network round trip.
+ *
+ * This is the branch the packaged seed row takes (`0042_connectors.sql:54`:
+ * `authorizeUrl` + `tokenUrl` + `registrationEndpoint`, no `discoveryUrl`), and
+ * the reason the shape exists at all: a registration must not pay for a
+ * discovery round trip when the definition already publishes its endpoints.
+ * Every URL is still policy-checked here, and the result is what the provider
+ * hands the SDK as saved discovery state — which is what stops the SDK from
+ * re-discovering from the MCP URL (`CN-2`).
+ * @param target - the connector's OAuth facts.
+ * @param locale - locale of the failure text.
+ * @returns the discovery facts, or a `failure` describing why there is none.
+ */
+export function resolveStaticAuthorizationServer(
+  target: OAuthTarget,
+  locale: HostLocale = DEFAULT_HOST_LOCALE,
+): { discovery?: DiscoveredAuthorizationServer; failure?: RefreshFailure } {
+  if (!target.tokenUrl) {
+    return { failure: { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.noTokenEndpoint') } }
+  }
+  const tokenEndpoint = assertOutboundUrlAllowed(target.tokenUrl, 'OAuth token 端点', locale).toString()
+  const asUrl = authorizationServerUrl(target)
+  if (asUrl === undefined) {
+    return { failure: { ok: false, reason: 'transient', message: hostT(locale, 'refresh.invalidTokenUrl') } }
+  }
+  return {
+    discovery: {
+      authorizationServerUrl: asUrl,
+      tokenEndpoint,
+      ...(target.authorizeUrl === undefined ? {} : { authorizationEndpoint: target.authorizeUrl }),
+      ...(target.registrationEndpoint === undefined
+        ? {}
+        : { registrationEndpoint: assertOutboundUrlAllowed(target.registrationEndpoint, 'OAuth 客户端注册端点', locale).toString() }),
+    },
+  }
+}
+
+/**
  * Resolve the authorization-server facts a refresh will use, through our
  * policy-checked discovery. Returns `null` for a public MCP endpoint (nothing
  * to authorize) and reports "no endpoint" when neither shape is available.
@@ -373,7 +623,7 @@ export function createOAuthProvider(
 export async function resolveAuthorizationServer(
   target: OAuthTarget,
   options: { timeoutMs?: number | undefined; locale?: HostLocale | undefined } = {},
-): Promise<{ discovery?: { authorizationServerUrl: string; tokenEndpoint: string }; resource?: string; failure?: RefreshFailure }> {
+): Promise<{ discovery?: DiscoveredAuthorizationServer; resource?: string; failure?: RefreshFailure }> {
   // Every failure message below is built for THIS call's locale; nothing is
   // cached at module scope (the caller resolves it per refresh request).
   const locale = options.locale ?? DEFAULT_HOST_LOCALE
@@ -391,25 +641,19 @@ export async function resolveAuthorizationServer(
     const asUrl = discovered.authorizationServerUrl
     if (discovered.tokenEndpoint && asUrl) {
       return {
-        discovery: { authorizationServerUrl: asUrl, tokenEndpoint: discovered.tokenEndpoint },
+        discovery: {
+          authorizationServerUrl: asUrl,
+          tokenEndpoint: discovered.tokenEndpoint,
+          ...(discovered.authorizationEndpoint === undefined ? {} : { authorizationEndpoint: discovered.authorizationEndpoint }),
+          ...(discovered.registrationEndpoint === undefined ? {} : { registrationEndpoint: discovered.registrationEndpoint }),
+        },
         ...(discovered.resource === undefined ? {} : { resource: discovered.resource }),
       }
     }
   }
-  if (target.tokenUrl) {
-    const tokenEndpoint = assertOutboundUrlAllowed(target.tokenUrl, 'OAuth token 端点', locale).toString()
-    const asUrl = authorizationServerUrl(target)
-    return asUrl === undefined
-      ? { failure: { ok: false, reason: 'transient', message: hostT(locale, 'refresh.invalidTokenUrl') } }
-      : { discovery: { authorizationServerUrl: asUrl, tokenEndpoint } }
-  }
-  return {
-    failure: {
-      ok: false,
-      reason: 'not-applicable',
-      message: hostT(locale, target.discoveryUrl === undefined ? 'refresh.noTokenEndpoint' : 'refresh.discoveryNoTokenEndpoint'),
-    },
-  }
+  // One implementation of the static branch, shared with `registerMcp`'s
+  // no-round-trip path.
+  return resolveStaticAuthorizationServer(target, locale)
 }
 
 /**
@@ -467,7 +711,20 @@ export async function refreshCredentialTokens(
     return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.missingMcpEndpoint') }
   }
   try {
-    const result = await auth(provider, { serverUrl })
+    // The SDK's `auth()` defaults to the GLOBAL fetch when no `fetchFn` is
+    // passed, which would put this request outside every fence in the package: a
+    // redirect from the token endpoint (or a URL the resource server names, if
+    // discovery state were ever missing) would be followed with the refresh
+    // token in its body. Hand it the same fenced fetch the MCP transport uses.
+    const result = await auth(provider, {
+      serverUrl,
+      fetchFn: createMcpOutboundFetch({
+        base: (input, init) => globalThis.fetch(input, init),
+        ownUrl: () => serverUrl,
+        scope: provider,
+        locale: () => locale,
+      }),
+    })
     if (result !== 'AUTHORIZED') {
       return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.notCompleted') }
     }
@@ -479,6 +736,12 @@ export async function refreshCredentialTokens(
     }
     if (code !== undefined && DEAD_GRANT_CODES.has(code)) {
       return { ok: false, reason: 'reauthorize', message: hostT(locale, 'refresh.grantRejected', { code }) }
+    }
+    // R4-B-8: a request-level refusal is terminal too, but says so honestly —
+    // "authorize again" would be a promise this outcome cannot keep (the
+    // request shape, not the authorization, is what the server rejected).
+    if (code !== undefined && REQUEST_REJECTED_CODES.has(code)) {
+      return { ok: false, reason: 'terminal', message: hostT(locale, 'refresh.requestRejected', { code }) }
     }
     return { ok: false, reason: 'transient', message: hostT(locale, 'refresh.failed', { message }) }
   }

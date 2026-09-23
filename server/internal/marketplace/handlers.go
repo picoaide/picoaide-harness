@@ -36,47 +36,53 @@ type Handlers struct {
 	UploadSkillArchiveAdmin gin.HandlerFunc
 	PreviewSkillAdmin       gin.HandlerFunc
 	FileContentSkillAdmin   gin.HandlerFunc
-	NormalizeSkillAdmin     gin.HandlerFunc
-	UpdateSkillAdmin        gin.HandlerFunc
-	DeleteSkillAdmin        gin.HandlerFunc
-	EnableSkillAdmin        gin.HandlerFunc
-	ListSkillGrants         gin.HandlerFunc
-	ReplaceSkillGrants      gin.HandlerFunc
-	SetSkillGrant           gin.HandlerFunc
-	RemoveSkillGrant        gin.HandlerFunc
+	// DownloadSkillArchiveAdmin / DownloadAgentArchiveAdmin：管理面归档下载
+	// （webadmin 预览弹层「文件过大 → 下载归档」，2026-09-23）。
+	DownloadSkillArchiveAdmin gin.HandlerFunc // GET /skills/:name/archive
+	DownloadAgentArchiveAdmin gin.HandlerFunc // GET /agents/:name/archive
+	NormalizeSkillAdmin       gin.HandlerFunc
+	UpdateSkillAdmin          gin.HandlerFunc
+	DeleteSkillAdmin          gin.HandlerFunc
+	EnableSkillAdmin          gin.HandlerFunc
+	ListSkillGrants           gin.HandlerFunc
+	ReplaceSkillGrants        gin.HandlerFunc
+	SetSkillGrant             gin.HandlerFunc
+	RemoveSkillGrant          gin.HandlerFunc
 }
 
 // NewHandlers 返回技能商城 handler 集合(db + cacheDir 注入)。
 func NewHandlers(db *sql.DB, cacheDir string) *Handlers {
 	api := NewAPI(db, cacheDir)
 	return &Handlers{
-		ListSkills:              api.listSkills,
-		GetSkill:                api.getSkill,
-		DownloadArchive:         api.downloadArchive,
-		ListAgentsAdmin:         func(c *gin.Context) { listAgentsAdmin(c, db) },
-		CreateAgentAdmin:        func(c *gin.Context) { createAgentAdmin(c, db) },
-		UploadAgentArchiveAdmin: func(c *gin.Context) { uploadAgentArchiveAdmin(c, db) },
-		PreviewAgentAdmin:       func(c *gin.Context) { previewAgentAdmin(c, db) },
-		FileContentAgentAdmin:   func(c *gin.Context) { fileContentAgentAdmin(c, db) },
-		UpdateAgentAdmin:        func(c *gin.Context) { updateAgentAdmin(c, db) },
-		DeleteAgentAdmin:        func(c *gin.Context) { deleteAgentAdmin(c, db) },
-		EnableAgentAdmin:        func(c *gin.Context) { enableAgentAdmin(c, db) },
-		ListAgentGrants:         func(c *gin.Context) { listAgentGrants(c, db) },
-		ReplaceAgentGrants:      func(c *gin.Context) { replaceAgentGrants(c, db) },
-		SetAgentGrant:           func(c *gin.Context) { applyAgentGrant(c, db, true) },
-		RemoveAgentGrant:        func(c *gin.Context) { applyAgentGrant(c, db, false) },
-		ListSkillsAdmin:         func(c *gin.Context) { listSkillsAdmin(c, db) },
-		CreateSkillAdmin:        func(c *gin.Context) { createSkillAdmin(c, db) },
-		UploadSkillArchiveAdmin: func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) },
-		PreviewSkillAdmin:       func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) },
-		FileContentSkillAdmin:   func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) },
-		NormalizeSkillAdmin:     func(c *gin.Context) { normalizeSkillAdmin(c, db, cacheDir) },
-		UpdateSkillAdmin:        func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) },
-		DeleteSkillAdmin:        func(c *gin.Context) { deleteSkillAdmin(c, db) },
-		EnableSkillAdmin:        func(c *gin.Context) { enableSkillAdmin(c, db) },
-		ListSkillGrants:         func(c *gin.Context) { listSkillGrants(c, db) },
-		ReplaceSkillGrants:      func(c *gin.Context) { replaceSkillGrants(c, db) },
-		SetSkillGrant:           func(c *gin.Context) { setSkillGrant(c, db, true) },
-		RemoveSkillGrant:        func(c *gin.Context) { setSkillGrant(c, db, false) },
+		ListSkills:                api.listSkills,
+		GetSkill:                  api.getSkill,
+		DownloadArchive:           api.downloadArchive,
+		ListAgentsAdmin:           func(c *gin.Context) { listAgentsAdmin(c, db) },
+		CreateAgentAdmin:          func(c *gin.Context) { createAgentAdmin(c, db) },
+		UploadAgentArchiveAdmin:   func(c *gin.Context) { uploadAgentArchiveAdmin(c, db) },
+		PreviewAgentAdmin:         func(c *gin.Context) { previewAgentAdmin(c, db) },
+		FileContentAgentAdmin:     func(c *gin.Context) { fileContentAgentAdmin(c, db) },
+		UpdateAgentAdmin:          func(c *gin.Context) { updateAgentAdmin(c, db) },
+		DeleteAgentAdmin:          func(c *gin.Context) { deleteAgentAdmin(c, db) },
+		EnableAgentAdmin:          func(c *gin.Context) { enableAgentAdmin(c, db) },
+		ListAgentGrants:           func(c *gin.Context) { listAgentGrants(c, db) },
+		ReplaceAgentGrants:        func(c *gin.Context) { replaceAgentGrants(c, db) },
+		SetAgentGrant:             func(c *gin.Context) { applyAgentGrant(c, db, true) },
+		RemoveAgentGrant:          func(c *gin.Context) { applyAgentGrant(c, db, false) },
+		ListSkillsAdmin:           func(c *gin.Context) { listSkillsAdmin(c, db) },
+		CreateSkillAdmin:          func(c *gin.Context) { createSkillAdmin(c, db) },
+		UploadSkillArchiveAdmin:   func(c *gin.Context) { uploadSkillArchiveAdmin(c, db, cacheDir) },
+		PreviewSkillAdmin:         func(c *gin.Context) { previewSkillAdmin(c, db, cacheDir) },
+		FileContentSkillAdmin:     func(c *gin.Context) { fileContentSkillAdmin(c, db, cacheDir) },
+		DownloadSkillArchiveAdmin: func(c *gin.Context) { downloadSkillArchiveAdmin(c, db) },
+		DownloadAgentArchiveAdmin: func(c *gin.Context) { downloadAgentArchiveAdmin(c, db) },
+		NormalizeSkillAdmin:       func(c *gin.Context) { normalizeSkillAdmin(c, db, cacheDir) },
+		UpdateSkillAdmin:          func(c *gin.Context) { updateSkillAdmin(c, db, cacheDir) },
+		DeleteSkillAdmin:          func(c *gin.Context) { deleteSkillAdmin(c, db) },
+		EnableSkillAdmin:          func(c *gin.Context) { enableSkillAdmin(c, db) },
+		ListSkillGrants:           func(c *gin.Context) { listSkillGrants(c, db) },
+		ReplaceSkillGrants:        func(c *gin.Context) { replaceSkillGrants(c, db) },
+		SetSkillGrant:             func(c *gin.Context) { setSkillGrant(c, db, true) },
+		RemoveSkillGrant:          func(c *gin.Context) { setSkillGrant(c, db, false) },
 	}
 }

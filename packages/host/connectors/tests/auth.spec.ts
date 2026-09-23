@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -78,6 +78,38 @@ describe('connector auth', () => {
       expect(tokenBody).toContain('code=auth-code-1')
     } finally {
       globalThis.fetch = originalFetch
+    }
+  })
+
+  /**
+   * 第三轮审计 R3B2-1：建流阶段的抛出（注册客户端出网失败 / 缺 clientId /
+   * authorizeUrl 被出站策略拒）原先会绕过唯一的清理点 ⇒ 回调服务器与 5 分钟定时器
+   * 成为孤儿，定时器到点 reject 一个无人 await 的 promise（本包 index.ts 写明宿主
+   * 视 unhandled rejection 为致命、会退出整个应用）。
+   */
+  it('建流阶段抛出后清除超时定时器与取消监听，不产生 unhandled rejection（R3B2-1）', async () => {
+    // 0.0.0.0/8 被出站策略拒 ⇒ flowUrl 在 listen 成功之后抛，正是修复前的泄漏路径；
+    // 静态 clientId 让流程不做出网注册，用例完全离线。
+    const def = oauthDef()
+    def.auth = { ...def.auth!, registrationEndpoint: '', clientId: 'static-client', authorizeUrl: 'http://0.0.0.0/authorize' }
+    const controller = new AbortController()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const timersBefore = vi.getTimerCount()
+    try {
+      await expect(runAuth(def, { onRequest: () => {}, signal: controller.signal })).rejects.toThrow()
+      // ① 5 分钟定时器必须已清（修复前这里会多出 1 个孤儿定时器）。
+      expect(vi.getTimerCount()).toBe(timersBefore)
+      // ② signal 上的 abort 监听必须已摘（修复前 abort 会 reject 一个无人 await 的 promise）。
+      controller.abort()
+      await new Promise(resolve => setImmediate(resolve))
+      await new Promise(resolve => setImmediate(resolve))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      vi.useRealTimers()
     }
   })
 

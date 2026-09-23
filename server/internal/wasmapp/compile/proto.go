@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 父子协议的操作白名单（fail-closed：子进程只认这两个 op，其余一律拒）。
@@ -133,8 +132,3 @@ func encodeLine(v any) ([]byte, error) {
 
 // errProtocolLine 表示编码结果含换行（协议自检失败，不应发生）。
 var errProtocolLine = apperr.New(apperr.CodeInternal, "协议行编码失败：结果含换行符")
-
-// maxModuleBytes 是子进程读取模块文件的上限（= §4.2 的 32 MiB）。
-//
-// 放在读取之前判定：不给"超限文件先整体读进内存再判"的机会。
-const maxModuleBytes = int64(limits.WasmMaxBytes)

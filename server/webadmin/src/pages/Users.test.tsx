@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react'
 import Users from './Users'
 import { MemoryRouter } from 'react-router-dom'
 import { request } from '../api'
@@ -256,6 +256,92 @@ describe('Users 0057 密码/MFA 操作', () => {
     render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
     await screen.findByText('ldap1')
     expect(screen.getByRole('button', { name: '重置密码' })).toBeDisabled()
+  })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-23 审计 WEB-1(P0):「设置部门」对话框的写面闸门。
+  //
+  // 原缺陷:部门树 GET 失败时 catch 只 `setDeptErr` 就 return —— 弹窗留着、
+  // 复选框列表为空、`deptSelect` 还是空数组,一次点击就发
+  // `PUT /users/<id>/department {"group_ids":[]}`,服务端 `SyncUserGroups` 用
+  // **空集替换该用户全部部门归属**(部门级共享授权与预算范围同时塌缩成"仅全员")。
+  // 下面两条用例锁住修好后的形态:①读失败锁写面且不发请求;②换用户后上一个
+  // 用户的迟到响应不得落进当前对话框(否则为 B 保存会把 A 的部门赋给 B)。
+  // -------------------------------------------------------------------------
+  it('WEB-1:部门树读取失败时保存被锁定,不发清空归属的 PUT', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] }],
+          total: 1, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') throw new Error('部门树读取失败（模拟 500/网络错误）')
+      if (path.endsWith('/department') && init?.method === 'PUT') return { ok: true }
+      return {}
+    })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+    await screen.findByText('alice')
+    fireEvent.click(screen.getByRole('button', { name: '部门' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    // 失败原因可见,且明说"保存已锁定"(空列表否则读起来像"该用户没有部门")。
+    expect(await dialog.findByText(/部门树读取失败/)).toBeInTheDocument()
+    expect(dialog.getByText(/保存已锁定/)).toBeInTheDocument()
+    const save = dialog.getByRole('button', { name: '保存' })
+    expect(save).toBeDisabled()
+    // 程序化点击(绕开 disabled)也不能把那个清空归属的请求发出去。
+    fireEvent.click(save)
+    expect(mockRequest.mock.calls.filter((c) => String(c[0]).endsWith('/department'))).toHaveLength(0)
+  })
+
+  it('WEB-1:换用户后上一个用户的迟到部门树响应不落进当前对话框', async () => {
+    let releaseAliceTree!: (v: unknown) => void
+    const aliceTree = new Promise((resolve) => { releaseAliceTree = resolve })
+    let deptCalls = 0
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return {
+          users: [
+            { id: 1, username: 'alice', is_admin: false, status: 1, groups: ['研发部'] },
+            { id: 2, username: 'boss', is_admin: true, status: 1, groups: [] },
+          ],
+          total: 2, page: 1, size: 20,
+        }
+      }
+      if (path === '/api/server/admin/departments') {
+        deptCalls += 1
+        // ① 为 alice 发的那次挂住(模拟慢网络);② 为 boss 发的立即返回。
+        if (deptCalls === 1) return aliceTree
+        return { departments: depts }
+      }
+      if (path.endsWith('/department') && init?.method === 'PUT') return { ok: true }
+      return {}
+    })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+    await screen.findByText('alice')
+    // 打开 alice 的对话框(部门树请求挂在路上),随即关闭。
+    fireEvent.click(screen.getAllByRole('button', { name: '部门' })[0])
+    const aliceDialog = within(await screen.findByRole('dialog'))
+    expect(aliceDialog.getByText(/部门树加载中/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    // 打开 boss 的对话框:这一次部门树立刻返回(boss 无归属 = 空选择)。
+    fireEvent.click(screen.getAllByRole('button', { name: '部门' })[1])
+    const bossDialog = within(await screen.findByRole('dialog'))
+    expect(await bossDialog.findByRole('checkbox', { name: /研发部/ })).not.toBeChecked()
+    // 放行 alice 的迟到响应 —— 它属于**已经关闭**的那个抽屉,不得写进 boss。
+    await act(async () => {
+      releaseAliceTree({ departments: depts })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(bossDialog.getByRole('checkbox', { name: /研发部/ })).not.toBeChecked()
+    expect(bossDialog.queryByText(/当前归属/)).toBeNull()
+    // 保存在途时写的仍是 boss 自己的归属(空),而不是 alice 的部门 id。
+    fireEvent.click(bossDialog.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/users/2/department',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ group_ids: [] }) }),
+    ))
   })
 })
 

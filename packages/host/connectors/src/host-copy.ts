@@ -50,12 +50,16 @@ const zh = {
   'outbound.blocked': '{what} 指向内网/链路本地/元数据地址，已拒绝: {target}',
   'outbound.notLoopback': '{what} 使用 http 但主机不是回环地址: {target}',
   'outbound.localHostname': '{what} 指向本机主机名，已拒绝: {target}',
+  'outbound.blockedResolved': '{what} 的域名解析到内网/链路本地/回环地址，已拒绝: {target} -> {address}',
+  'outbound.mcpFenceOrigin': 'MCP 传输缝拒绝向未登记的来源发请求: {what} {target}（本连接器允许的来源: {allowed}）',
+  'outbound.mcpFenceOriginNone': '（无）',
   'outbound.badDeadline': '出站请求截止时间非法（timeoutMs={timeoutMs}），必须为正数',
   'outbound.timeout': '{what} 出站请求超时（{timeoutMs}ms 内未完成），已中止: {host}',
   'outbound.redirect': '{what} 返回重定向（{detail}），按出站策略拒绝跟随: {host}',
 
   // ---- flow-step labels embedded into the messages above ------------------
   'step.mcpEndpoint': 'MCP 端点',
+  'step.mcpTransportRequest': 'MCP 传输请求',
   'step.registrationEndpoint': 'OAuth 客户端注册端点',
   'step.authorizationEndpoint': 'OAuth 授权端点',
   'step.tokenEndpoint': 'OAuth token 端点',
@@ -77,6 +81,8 @@ const zh = {
   'auth.tokenExchangeFailed': 'OAuth token 换取失败: HTTP {status}',
   'auth.tokenMissingAccessToken': 'OAuth token 响应缺少 access_token',
   'auth.pollTimeout': '授权轮询超时，请重试',
+  'auth.deviceUnverifiable': '该连接器声明为设备码授权但未定义任何凭据字段，无法验证授权是否完成；请改用具名 token 字段或 OAuth 模式',
+  'auth.deviceVerificationUrlMissing': '该连接器声明为设备码授权，但没有可用的验证地址（verificationUrl 缺失或为空）——这是连接器定义的错误，请联系管理员修正后重试',
   'auth.serverMissingFetchToken': '服务端连接器定义缺少 fetchToken 回调',
   'auth.serverNoToken': '服务端未返回 token',
 
@@ -110,11 +116,18 @@ const zh = {
   'refresh.notCompleted': '授权服务器未完成令牌刷新，需要重新授权',
   'refresh.tokenExpired': 'refresh token 已失效，需要重新授权',
   'refresh.grantRejected': '授权服务器拒绝了刷新（{code}），需要重新授权',
+  'refresh.requestRejected': '授权服务器永久拒绝了这次刷新请求（{code}），已停止自动重试；请检查该连接器的授权配置后手动重试',
   'refresh.failed': '令牌刷新失败：{message}',
   'refresh.missingAccessToken': '令牌刷新未返回 access_token',
   'refresh.notConnected': '连接器 {id} 尚未连接',
   'refresh.unsupported': '连接器 {id} 不支持令牌刷新',
   'refresh.outboundBlocked': '令牌刷新被出站策略拒绝：{message}',
+
+  // ---- credential scope (src/store.ts + the restore pass) -----------------
+  // R6-B-2：升级前保存的凭据没有服务端标记，无法判定它属于哪个租户 ⇒ 不沿用
+  // （旧文件原样留在磁盘上），该连接器回到「需要授权」。凭据现在按
+  // 「账号 + 服务端」隔离：换一个服务端不会读到上一个服务端的凭据。
+  'store.rescopeRequired': '这条连接器升级前保存的凭据没有标记服务端，出于安全不再沿用（凭据文件仍保留在原处）——请重新授权一次',
 
   // ---- streamable-http redirect fence (src/mcp-transport-fence.ts) --------
   // Diagnostic seam-verification throws. They are developer diagnostics, but
@@ -136,6 +149,9 @@ const zh = {
   'fence.notHardened': 'MCP streamable-http 传输不可加固: {error}',
   'fence.verificationFailed': 'MCP streamable-http 重定向栅栏校验失败: {error}',
   'fence.oursLabel': '本包',
+  'fence.policyNotApplied': 'MCP streamable-http 传输未施加出站 URL 策略（SDK 给的 URL 会被真实请求，凭据头随之外送）',
+  'fence.sameOriginHeadersDropped': 'MCP streamable-http 传输把连接器自带的请求头丢掉了（同源请求收不到凭据头）',
+  'fence.credentialHeaderCrossOrigin': 'MCP streamable-http 传输把连接器自带凭据头发给了其它来源',
 
   // ---- plugin lifecycle / auth-flow outcomes (src/index.ts) ---------------
   'flow.superseded': '连接意图已被更新的请求取代',
@@ -151,6 +167,7 @@ const zh = {
   'flow.authRequired': '需要先完成授权：当前凭据被服务端拒绝（点击「连接」重新授权）',
   'flow.fenceUnavailable': '{serverName}: streamable-http 出站重定向栅栏不可用，拒绝连接（{error}）',
   'flow.refreshUnsupported': '该连接器不支持令牌刷新',
+  'flow.serverNameTaken': '本地 MCP 名「{serverName}」已被连接器「{by}」接管（服务端要求 serverName 唯一），本连接器的 MCP 注册已停止',
 } as const
 
 /** English mirror — every key of {@link zh}, same parameter names. */
@@ -161,11 +178,15 @@ const en: Record<keyof typeof zh, string> = {
   'outbound.blocked': '{what} points at a private, link-local or metadata address and was refused: {target}',
   'outbound.notLoopback': '{what} uses http but the host is not a loopback address: {target}',
   'outbound.localHostname': "{what} points at this machine's own hostname and was refused: {target}",
+  'outbound.blockedResolved': '{what} resolves to a private, link-local or loopback address and was refused: {target} -> {address}',
+  'outbound.mcpFenceOrigin': 'The MCP transport fence refused a request to an origin this connector never registered: {what} {target} (allowed origins: {allowed})',
+  'outbound.mcpFenceOriginNone': '(none)',
   'outbound.badDeadline': 'Invalid outbound request deadline (timeoutMs={timeoutMs}); it must be a positive number',
   'outbound.timeout': '{what} outbound request timed out (not finished within {timeoutMs}ms) and was aborted: {host}',
   'outbound.redirect': '{what} answered with a redirect ({detail}); the outbound policy refuses to follow it: {host}',
 
   'step.mcpEndpoint': 'MCP endpoint',
+  'step.mcpTransportRequest': 'MCP transport request',
   'step.registrationEndpoint': 'OAuth client registration endpoint',
   'step.authorizationEndpoint': 'OAuth authorization endpoint',
   'step.tokenEndpoint': 'OAuth token endpoint',
@@ -186,6 +207,8 @@ const en: Record<keyof typeof zh, string> = {
   'auth.tokenExchangeFailed': 'OAuth token exchange failed: HTTP {status}',
   'auth.tokenMissingAccessToken': 'OAuth token response has no access_token',
   'auth.pollTimeout': 'Authorization polling timed out; please retry',
+  'auth.deviceUnverifiable': 'This connector uses device-code authorization but declares no credential field, so completion cannot be verified; declare a token field or use the OAuth mode instead',
+  'auth.deviceVerificationUrlMissing': 'This connector uses device-code authorization but has no usable verification URL (verificationUrl is missing or blank) — the connector definition is invalid; ask an administrator to fix it and retry',
   'auth.serverMissingFetchToken': 'The server-side connector definition has no fetchToken callback',
   'auth.serverNoToken': 'The server returned no token',
 
@@ -217,11 +240,14 @@ const en: Record<keyof typeof zh, string> = {
   'refresh.notCompleted': 'The authorization server did not complete the token refresh; authorization is required again',
   'refresh.tokenExpired': 'The refresh token is no longer valid; authorization is required again',
   'refresh.grantRejected': 'The authorization server refused the refresh ({code}); authorization is required again',
+  'refresh.requestRejected': 'The authorization server permanently refused this refresh request ({code}); automatic retries have stopped — check the connector authorization settings, then retry manually',
   'refresh.failed': 'Token refresh failed: {message}',
   'refresh.missingAccessToken': 'The token refresh returned no access_token',
   'refresh.notConnected': 'Connector {id} is not connected',
   'refresh.unsupported': 'Connector {id} does not support token refresh',
   'refresh.outboundBlocked': 'Token refresh was refused by the outbound policy: {message}',
+
+  'store.rescopeRequired': 'This connector\'s pre-upgrade credential carries no server marker, so it is deliberately not reused (the old credential file is kept on disk) — please authorize once more. Credentials are now isolated per account AND per server, so switching servers can no longer read the previous one\'s.',
 
   'fence.notInstanceField': "MCP streamable-http transport: {field} is not an own field of the instance (the SDK's request-field shape changed, so there is nowhere to harden the instance)",
   'fence.requestInitNotFenced': "MCP streamable-http transport: {field} was not intercepted (the SDK's internal field or construction changed)",
@@ -239,6 +265,9 @@ const en: Record<keyof typeof zh, string> = {
   'fence.notHardened': 'The MCP streamable-http transport cannot be hardened: {error}',
   'fence.verificationFailed': 'MCP streamable-http redirect fence verification failed: {error}',
   'fence.oursLabel': 'this package',
+  'fence.policyNotApplied': 'The MCP streamable-http transport does not apply the outbound URL policy (a URL the resource server names would really be requested, taking the credential headers with it)',
+  'fence.sameOriginHeadersDropped': 'The MCP streamable-http transport dropped the connector\'s own request headers (the same-origin request no longer carries its credential header)',
+  'fence.credentialHeaderCrossOrigin': 'The MCP streamable-http transport sent the connector\'s credential headers to another origin',
 
   'flow.superseded': 'The connect request was superseded by a newer one',
   'flow.userSwitchedRegistration': 'The user changed; connector registration was aborted',
@@ -253,6 +282,7 @@ const en: Record<keyof typeof zh, string> = {
   'flow.authRequired': 'Authorization is required first: the server rejected the current credential (click "Connect" to authorize again)',
   'flow.fenceUnavailable': '{serverName}: the streamable-http outbound redirect fence is unavailable; connection refused ({error})',
   'flow.refreshUnsupported': 'This connector does not support token refresh',
+  'flow.serverNameTaken': 'The local MCP name "{serverName}" was taken over by connector "{by}" (serverName must be unique); this connector\'s MCP registration has stopped',
 }
 
 /** Every host copy key of this package. */
@@ -309,6 +339,7 @@ export function hostT(locale: HostLocale, key: HostCopyKey, params?: Record<stri
  */
 const EN_STEP_LABELS: Record<string, string> = {
   [zh['step.mcpEndpoint']]: en['step.mcpEndpoint'],
+  [zh['step.mcpTransportRequest']]: en['step.mcpTransportRequest'],
   [zh['step.registrationEndpoint']]: en['step.registrationEndpoint'],
   [zh['step.authorizationEndpoint']]: en['step.authorizationEndpoint'],
   [zh['step.tokenEndpoint']]: en['step.tokenEndpoint'],
@@ -332,11 +363,6 @@ export function stepLabel(locale: HostLocale, what: string): string {
   const named = `${zh['step.mcpEndpoint']} `
   if (what.startsWith(named)) return `${en['step.mcpEndpoint']} ${what.slice(named.length)}`
   return what
-}
-
-/** Convenience: resolve the locale from a context and translate in one step. */
-export function hostTFrom(source: HostCopySource | undefined, key: HostCopyKey, params?: Record<string, string>): string {
-  return hostT(hostLocaleOf(source), key, params)
 }
 
 /** Product-default host locale, re-exported for the deep modules' defaults. */

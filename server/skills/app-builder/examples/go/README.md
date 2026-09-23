@@ -38,7 +38,7 @@ node preview.mjs dist/shared-notes-packed.wasm --path /static/app.js       # 宿
 node preview.mjs dist/shared-notes-packed.wasm --path /api/notes --method POST --body '{"body":"hello"}'
 node preview.mjs dist/shared-notes-packed.wasm --user someone-else         # 看无权限页
 node preview.mjs dist/shared-notes-packed.wasm --dump-tables               # 看本地库的表/列/行数
-node preview.mjs --selftest                                                # 自检：本地库语义与平台同向（8 条）
+node preview.mjs --selftest                                                # 自检：本地库语义与平台同向
 
 # ④ 上传平台：先 wasm_app_validate（不占版本号），过了再 wasm_app_publish
 ```

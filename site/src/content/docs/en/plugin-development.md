@@ -21,7 +21,7 @@ Plugins are extension packages that add capabilities to DSH — models, tools, i
 
 ## Client Plugins
 
-Client plugins are built with the **`clientBundle` preset** (tsdown), aligning external dependencies with the platform module table (`PLATFORM_MODULES` — authoritative source `scripts/platform-modules.mjs`, identical to upstream `packages/client/web/src/platform.ts`: `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`) and the **client packages actually imported**.
+Client plugins are built with the **`clientBundle` preset** (tsdown), aligning external dependencies with the platform module table (`PLATFORM_MODULES`; the single source of truth in this repository is `scripts/platform-modules.mjs`, 9 entries: `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`, `@deepseek-ai/dsh-client-ui-primitives`, `@deepseek-ai/dsh-client-ui-dockkit`) and the **client packages actually imported**. That table mirrors the pinned upstream `deepseek-harness/packages/client/web/src/platform.ts`; `node scripts/verify-inventories.mjs` diffs the two entry by entry (any drift fails the gate).
 
 - **Client-side cross-package imports are forbidden**: the source package injects via `ctx.slots.inject` inside `ctx.effect`, and the target package registers via `ctx.slots.register` in its own client;
 - The type-check `tsconfig.client.json` needs `skipLibCheck: true` (to avoid internal type errors in the upstream `dsh-client-ui-sidebar` d.ts);

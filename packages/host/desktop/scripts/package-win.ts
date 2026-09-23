@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { prepareChannelBuilderOverrides, resolveChannelBuildContext } from './channel-build.ts'
 import { withStagedPackAppRoot } from './pack-app-root.mjs'
 import { prepareChannelPackaging } from './channel-prepare.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const WINDOWS_SIGNING_KEYS = [
   'CSC_IDENTITY_AUTO_DISCOVERY',
@@ -42,8 +43,12 @@ export interface WindowsPackageOptions {
   /**
    * 渠道化的 electron-builder `--config.*` 覆盖参数（见 channel-build.ts）。
    * 官方渠道为空数组 —— 不做覆盖，产物与改造前一致。
+   *
+   * **是函数而不是数组**：生成配置文件这件事必须发生在**应用根暂存之后**，而参数
+   * 对象的构造发生在暂存之前（缺省参数在函数进入时就求值）。2026-09-23 复审 N-1
+   * 的机制正是"暂存之前把渠道配置写进 `build/`，暂存整目录复制把它带进 asar"。
    */
-  readonly channelConfigArgs: readonly string[]
+  readonly channelConfigArgs: () => readonly string[]
   /** 本次构建的渠道 id（日志与验证脚本用）。 */
   readonly channelId: string
   /**
@@ -116,7 +121,8 @@ export function createWindowsPackageOptions(verifier = './verify-win-installer.t
     builderCli: require.resolve('electron-builder/cli.js'),
     verifier: fileURLToPath(new URL(verifier, import.meta.url)),
     nodeExecutable: process.execPath,
-    channelConfigArgs: prepareChannelBuilderOverrides(channel),
+    // 惰性求值：配置在**应用根暂存之后**才生成（见 channelConfigArgs 的说明）。
+    channelConfigArgs: () => prepareChannelBuilderOverrides(channel),
     channelId: channel.channelId,
     run,
     log: message => console.log(message),
@@ -187,7 +193,8 @@ export function packageWindowsArtifact(
         'never',
         '--config.win.signExecutable=false',
         '--config.npmRebuild=false',
-        ...options.channelConfigArgs,
+        // 惰性求值：到这里应用根已经暂存完（见 channelConfigArgs 的说明）。
+        ...options.channelConfigArgs(),
         ...staged.args,
       ],
       options.desktopRoot,
@@ -216,8 +223,7 @@ export function packageWindowsInstaller(
   packageWindowsArtifact(options, 'nsis', 'installer', switches)
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     const noPrebuild = process.argv.includes('--no-prebuild')
     if (!noPrebuild) {
@@ -225,7 +231,7 @@ if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.m
       // 不构建则安装包携带缺失/旧 bundle,品牌版本号不显示。顺序见
       // prebuild-workspace-deps.ts)。
       const { prebuildWorkspaceDeps } = await import('./prebuild-workspace-deps.ts')
-      prebuildWorkspaceDeps(dirname(dirname(resolve(invokedPath))))
+      prebuildWorkspaceDeps(dirname(dirname(fileURLToPath(import.meta.url))))
     }
     // 渠道化准备(按渠道派生图标素材 + 就位随包 channel.json)。CI 打包走
     // --no-prebuild,brand-prepare 不会经 prebuild 触发 —— 少了这一步,渠道包

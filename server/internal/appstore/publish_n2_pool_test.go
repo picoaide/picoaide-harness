@@ -211,12 +211,29 @@ func TestReleaseReviewGuardIsAtomic(t *testing.T) {
 	if err != nil || row.Status != serverstore.ReleaseStatusApproved || len(row.Archive) == 0 {
 		t.Fatalf("approve 后 = %+v err=%v", row, err)
 	}
-	// 2) 拒绝:状态与归档释放必须同时发生。
+	// 2) ID-01(审计 2026-09-23,P0):已通过审核的版本**不可**被拒绝 ——
+	// 拒绝与释放归档是同一条 UPDATE,对在服务的版本执行它会不可恢复地销毁
+	// 归档字节、让该版本对全员 404、并烧掉版本号(同版本号永久占位)。
 	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill,
-		"n4-guard", "1.0.0", serverstore.ReleaseStatusRejected, "不合规"); err != nil {
-		t.Fatalf("reject: %v", err)
+		"n4-guard", "1.0.0", serverstore.ReleaseStatusRejected, "误点拒绝"); !errors.Is(err, serverstore.ErrReleaseApprovedNotRejectable) {
+		t.Fatalf("reject approved = %v, want ErrReleaseApprovedNotRejectable", err)
 	}
 	row, err = serverstore.GetRelease(db, serverstore.AppKindSkill, "n4-guard", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != serverstore.ReleaseStatusApproved || len(row.Archive) == 0 || row.Size == 0 {
+		t.Fatalf("拒绝已通过版本改变了行: status=%s archive=%d size=%d", row.Status, len(row.Archive), row.Size)
+	}
+	// 3) 拒绝一个**待审**版本:状态与归档释放必须同时发生(存储上界)。
+	if _, err := Publish(db, raceReq("n4-guard", "2.0.0", "alice", "T2")); err != nil {
+		t.Fatalf("publish v2: %v", err)
+	}
+	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill,
+		"n4-guard", "2.0.0", serverstore.ReleaseStatusRejected, "不合规"); err != nil {
+		t.Fatalf("reject pending: %v", err)
+	}
+	row, err = serverstore.GetRelease(db, serverstore.AppKindSkill, "n4-guard", "2.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,19 +244,23 @@ func TestReleaseReviewGuardIsAtomic(t *testing.T) {
 		t.Fatalf("reject 后归档没有释放: archive=%d size=%d(存储上界被绕过:员工可无限循环上传→被拒)",
 			len(row.Archive), row.Size)
 	}
-	// 3) 关键断言:归档已释放的 rejected 行**不能**再被置为 approved。
+	// 4) 关键断言:归档已释放的 rejected 行**不能**再被置为 approved。
 	err = serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill,
-		"n4-guard", "1.0.0", serverstore.ReleaseStatusApproved, "")
+		"n4-guard", "2.0.0", serverstore.ReleaseStatusApproved, "")
 	if !errors.Is(err, serverstore.ErrReleaseArchiveCleared) {
 		t.Fatalf("rejected+空归档的版本通过审核 = %v, want ErrReleaseArchiveCleared", err)
 	}
-	row, _ = serverstore.GetRelease(db, serverstore.AppKindSkill, "n4-guard", "1.0.0")
+	row, _ = serverstore.GetRelease(db, serverstore.AppKindSkill, "n4-guard", "2.0.0")
 	if row.Status != serverstore.ReleaseStatusRejected || len(row.Archive) != 0 {
 		t.Fatalf("被拒的写操作改变了行: status=%s archive=%d", row.Status, len(row.Archive))
 	}
-	// 4) 不存在的版本仍回 ErrNotFound(不能与「归档已释放」混淆)。
+	// 5) 不存在的版本仍回 ErrNotFound(不能与「归档已释放」/「已通过不可拒」混淆)。
 	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill,
 		"n4-guard", "9.9.9", serverstore.ReleaseStatusApproved, ""); !errors.Is(err, serverstore.ErrNotFound) {
 		t.Fatalf("不存在的版本 = %v, want ErrNotFound", err)
+	}
+	if err := serverstore.SetReleaseStatusForReview(db, serverstore.AppKindSkill,
+		"n4-guard", "9.9.9", serverstore.ReleaseStatusRejected, "x"); !errors.Is(err, serverstore.ErrNotFound) {
+		t.Fatalf("拒绝不存在的版本 = %v, want ErrNotFound", err)
 	}
 }

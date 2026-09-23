@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +20,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
-	"github.com/picoaide/picoaide/internal/balance"
+	"github.com/picoaide/picoaide/internal/auditretention"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/capabilities"
 	"github.com/picoaide/picoaide/internal/channel"
@@ -37,6 +36,7 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
+	"github.com/picoaide/picoaide/internal/usageretention"
 	"github.com/picoaide/picoaide/internal/util"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -102,17 +102,20 @@ func main() {
 		return
 	}
 
-	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等),随后清理
-	// 超出保留期的明细分区(先校验对应月日账已生成,防删明细丢账)。
+	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等)。
+	//
+	// 保留期**清理**不在这里做:它的执行者是周期调度器
+	// (startUsageRetentionScheduler,启动先跑一轮 ⇒ 仍有"启动即清理"的语义)。
+	// R5-A-11(审计 2026-09-23,P1):此前这里调一次 CleanupUsageRetention,加上
+	// 保存保留期时的一次,稳态运行的实例**没有任何周期执行者** —— 超期月分区与
+	// 明细永不删除(磁盘随经过的月份单调增长)。同一形态在审计侧已由
+	// internal/auditretention 修好(R4-D-4),usage 侧当时漏了。
 	if n, rerr := serverstore.EffectiveRetentionMonths(db); rerr == nil {
 		// 北京日口径(不依赖容器 TZ);RebuildUsageLedger 内部亦会归一。
 		from := serverstore.BeijingDay(time.Now()).AddDate(0, -max(n, 6), 0)
 		if lerr := serverstore.RebuildUsageLedger(db, from, time.Now()); lerr != nil {
 			log.Printf("startup rebuild usage ledger: %v", lerr)
 		}
-	}
-	if cerr := serverstore.CleanupUsageRetention(db); cerr != nil {
-		log.Printf("startup cleanup usage retention: %v", cerr)
 	}
 
 	if *bootstrapAdmin != "" {
@@ -235,15 +238,11 @@ func main() {
 	})
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
-	retentionDays := 180
-	if v, ok, _ := serverstore.GetSetting(db, "audit.retention_days"); ok && v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			retentionDays = n
-		}
-	}
-	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-time.Duration(retentionDays)*24*time.Hour)); err != nil {
-		log.Printf("audit log purge: %v", err)
-	}
+	//
+	// R4-D-4(审计 2026-09-23,P2):清理**不再是启动时的一次性动作** —— 那会让稳态运行
+	// 的实例只在启动那一刻按保留期清理(`audit.retention_days` 形同虚设)。执行者改由
+	// 周期调度器 auditretention 承担(见下方 Start;启动先跑一轮,覆盖停机期间到期的条目,
+	// 之后每 6 小时一次)。管理员保存配置时仍会额外主动触发一次(立即生效)。
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
 	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
 	go llmgateway.SyncLoop(db, time.Hour, nil)
@@ -293,10 +292,35 @@ func main() {
 	// 变成可执行判据。
 	startGatewayFileReaper(ctx, db, llmgateway.FileReaperInterval)
 	// 月度报表推送调度(2026-09 P1):每小时检查补跑上月报表。
-	reports.NewScheduler(db, time.Hour, nil).Start(ctx)
+	//
+	// 经 startReportsScheduler(schedulers.go 的装配接缝)调用 —— R6-A-2(审计
+	// 2026-09-23,P1):这两行此前是裸调用,把 `.Start(ctx)` 摘掉时 `go test
+	// ./cmd/server/` 整包仍绿(全组织月报静默停发),且调度器本身零可观测出口。
+	startReportsScheduler(ctx, db, reportsSchedulerTick)
 	// 月度余额发放调度(0061):每小时检查当月是否已发放,未发则按配置
-	// 发放(add 累加 / cover 覆盖);幂等锚在 balance_grants.month。
-	balance.NewScheduler(db, time.Hour, nil).Start(ctx)
+	// 发放(add 累加 / cover 覆盖);幂等锚在 balance_grant_items(user_id, month)。
+	//
+	// 经 startBalanceScheduler(同一接缝文件)调用:它是**唯一的自动发放路径**
+	// (另两个是管理端手动 PUT /balance 与 POST /balance/grant) —— 死掉时
+	// `balance.enabled=true` 的部署里余额只减不增、员工最终全部 429
+	// BALANCE_EXHAUSTED,而此前没有任何判据或观测出口能指出"发放循环是死的"。
+	startBalanceScheduler(ctx, db, balanceSchedulerTick)
+	// 审计日志保留策略的周期执行者(R4-D-4):启动先跑一轮(替代原先的一次性启动清理),
+	// 之后每 6 小时按 settings audit.retention_days 清理过期条目;随 ctx 退出。
+	//
+	// 经 startAuditRetentionScheduler(audit_retention.go 的装配接缝)调用 —— 后者被删掉
+	// 或那一行被挪走时,cmd/server 的装配级用例会红(与网关回收器的 M8 判据同款)。
+	startAuditRetentionScheduler(ctx, db, auditretention.DefaultTick)
+	// usage 明细保留策略的周期执行者(R5-A-11):启动先跑一轮(替代原先的一次性启动
+	// 清理),之后每 6 小时按 settings usage.retention_months DROP 过期月分区;随
+	// ctx 退出。经 startUsageRetentionScheduler(usage_retention.go 的装配接缝)调用
+	// —— 与网关回收器/审计保留同款:删掉那一行时 cmd/server 的装配级用例会红。
+	startUsageRetentionScheduler(ctx, db, usageretention.DefaultTick)
+	// R6-A-2(审计 2026-09-23,P1):调度器可观测出口 —— 全部后台调度器装配完后
+	// 打一行/台 `scheduler status (startup): name=… started=… runs=… last_error=…`
+	// (scheduler_status.go)。两个此前裸调的调度器(reports/balance)死掉时不再
+	// 零可观测:启动日志直接给出"是否已启动",关停日志再给出 runs/errors/上次错误。
+	logSchedulerStatuses("startup")
 	// F9 启动自检:历史大小写重复用户名会让 NOCASE 唯一约束无法建立,
 	// 这里显式告警(不阻断启动),提示管理员人工合并。
 	if conflicts, cerr := serverstore.CheckUsernameCaseConflicts(db); cerr != nil {
@@ -327,6 +351,9 @@ func main() {
 	}()
 	<-ctx.Done()
 	log.Println("shutting down…")
+	// R6-A-2:关停时把调度器的最终运行状态打进日志（runs/errors/上次错误）——
+	// "这个进程存活期间发放循环到底跑没跑过"的最终对账口径。
+	logSchedulerStatuses("shutdown")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {

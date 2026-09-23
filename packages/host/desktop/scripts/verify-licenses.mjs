@@ -7,6 +7,19 @@
  * package has no license field and no LICENSE file, or when its license is
  * not on the redistribution allowlist.
  *
+ * An **empty** production dependency graph is a failure too (2026-09-23 R3-C
+ * 六处形态①): "0 packages checked" is indistinguishable from "all packages
+ * compliant", and the desktop package is never dependency-free in practice —
+ * an empty tree means the manifest lost its `dependencies` or the resolver
+ * walked nothing. Pass `--allow-empty` to opt out explicitly (the opt-out is
+ * printed, never silent).
+ *
+ * Usage: node scripts/verify-licenses.mjs [--allow-empty]
+ *        node scripts/verify-licenses.mjs --notices <file>
+ *        node scripts/verify-licenses.mjs --check-notices <file>
+ * Exit codes: 0 = ok; 1 = violations (including an empty production tree
+ * without `--allow-empty`) or bad CLI usage.
+ *
  * @module scripts/verify-licenses
  */
 
@@ -17,6 +30,8 @@ import { fileURLToPath } from 'node:url'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const rootManifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
+// 显式豁免"空生产依赖树"（见文件头）。缺省不带 ⇒ 空树 fail-loud。
+const allowEmpty = process.argv.includes('--allow-empty')
 
 /** Licenses accepted for redistribution inside the desktop installers. */
 const ALLOWED_LICENSES = new Set([
@@ -153,12 +168,27 @@ for (let index = 0; index < queue.length; index += 1) {
   }
 }
 
+// 六处形态①（2026-09-23 三轮审计 R3-C）：空生产依赖树**不是**"全部合规"，而是
+// "没有检查对象"。旧实现在这种情况下打印
+// `verify-licenses: 0 production packages carry redistribution-safe licenses` 并 exit 0，
+// 与"依赖树真的逐包查过且全合规"完全无法区分 —— 而桌面包在现实中永远不是零依赖
+// （`dependencies` 被误删、或解析链断在 node_modules 上都会落到这里）。
+// 显式豁免只有一个入口：`--allow-empty`（且它会被打印出来，不是静默放行）。
+const totalProduction = seen.size - 1
+if (totalProduction === 0 && !allowEmpty) {
+  failures.push(
+    'no production package was resolved from this manifest (dependencies + optionalDependencies) —— '
+    + '"0 packages checked" is not "all packages compliant". If the desktop package is intentionally '
+    + 'dependency-free, rerun with --allow-empty; otherwise check that `dependencies` survived and that '
+    + 'node_modules is installed (`corepack yarn install --immutable`).',
+  )
+}
+
 if (failures.length > 0) {
   process.stderr.write(`verify-licenses: ${failures.length} production package(s) need attention\n`)
   for (const failure of failures) process.stderr.write(`- ${failure}\n`)
   process.exit(1)
 }
-
 const noticeOnly = manifests.filter(entry => NOTICE_LICENSES.has(entry.license))
 
 /**

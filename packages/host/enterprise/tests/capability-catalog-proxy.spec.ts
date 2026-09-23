@@ -20,6 +20,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
 import type { Session } from '../src/server-connector/config.ts'
+import {
+  isDelistedItem,
+  mergeItems,
+  planCardAction,
+  type CapabilityItem,
+} from '../src/client/CapabilityCenterPanel.tsx'
 
 const SKILL_MD = `---
 name: codeql
@@ -197,5 +203,114 @@ describe('能力中心聚合代理：本地上传行的状态匹配（技能链�
     const anon = harness(null)
     stubCatalog(anon)
     expect((await anon.call('/api/pico/capabilities?source=market')).code).toBe(401)
+  })
+})
+
+/**
+ * R5-B-1（2026-09-23 追加授权）：服务端在**作者自己的行**上下发的 `delisted` 必须透传到本机行。
+ *
+ * 为什么非透传不可：本机自制的那一份既没有商店溯源（推断判据用不上），服务端也不下发
+ * `enabled`；只有 `?source=own` 的匹配行知道"它被下架了"。宿主若不把 `delisted` 传下去，
+ * 面板就只能把这一行当成"从未上传过" ⇒ 作者看到「上传」，下架这个管控动作在作者面
+ * 永远没有反馈（这正是 R5-B-1 的现场）。
+ *
+ * 这一组把两段接起来跑：**真** auth-gate 路由（`/api/pico/capabilities?source=local`，真 disk 扫描、
+ * 真服务端载荷解析）→ **真**面板纯函数（`mergeItems` / `planCardAction`）。任何一段单独绿都不算数。
+ */
+describe('R5-B-1：作者行的下架标记透传（宿主 → 面板）', () => {
+  /** 服务端 `?source=own` 的载荷：`delisted` 由调用方决定，其余字段用真实形状。 */
+  function stubOwnWithDelisted(h: { gateway: string[] }, delisted: boolean | undefined): void {
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const href = String(url)
+      h.gateway.push(href)
+      const own = {
+        kind: 'skill', name: 'codeql', version: '1.0.0', status: 'approved',
+        source: 'org', is_owner: true, display_name: 'CodeQL 示例技能',
+        ...delisted === undefined ? {} : { delisted },
+      }
+      const payload = href.includes('source=own')
+        ? { items: [own] }
+        // 分发面（org/market）：下架行不列 —— 与 `serverstore.ListVisibleSharedSkills` 同口径，
+        // 于是本机行是**唯一**还记得这件事的地方。
+        : { items: [] }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+  }
+
+  /** 本机行 → 面板看到的卡片动作（真归并 + 真页脚判定）。 */
+  function panelPlan(rows: Array<Record<string, unknown>>): ReturnType<typeof planCardAction> {
+    const local = rows.find(i => i.source === 'local' && i.name === 'codeql')
+    expect(local, '本机创作行必须在「我的」面返回').toBeDefined()
+    return planCardAction(mergeItems([local as unknown as CapabilityItem])[0]!)
+  }
+
+  it('own 行带 delisted ⇒ 透传到本机行，面板判「已下架」而不是「上传」', async () => {
+    const h = harness(SESSION)
+    stubOwnWithDelisted(h, true)
+    const res = await h.call('/api/pico/capabilities?source=local')
+    expect(res.code).toBe(200)
+    const local = (res.body.items as Array<Record<string, unknown>>).find(i => i.source === 'local' && i.name === 'codeql')
+    // ① 宿主这一层的判据（透传本身）。
+    expect(local?.delisted).toBe(true)
+    expect(local?.uploadStatus).toBe('approved')
+    // ② 面板这一层的判据（同一份数据 → 可见状态 + 动作）。
+    const item = mergeItems([local as unknown as CapabilityItem])[0]!
+    expect(isDelistedItem(item)).toBe(true)
+    expect(planCardAction(item).kind).not.toBe('upload')
+    // 本机自制内容卸载前**必须**确认（needsOverwriteConfirm 仍是唯一闸门）。
+    expect(planCardAction(item)).toMatchObject({ kind: 'uninstall', localContent: true })
+    expect(planCardAction(item)).toHaveProperty('endpoint', expect.stringContaining('/uninstall'))
+  })
+
+  it('智能体预设走同一条透传（不是只修了技能那一处）', async () => {
+    // 本机装了一份预设：本机预设根 = `$DSH_HOME/.agent-presets`（resolvePresetsDir），
+    // 且 `listInstalledPresets` 要求目录里有 agent.cordis.yml。
+    const presetDir = join(home, '.agent-presets', 'ppt-gen')
+    await mkdir(presetDir, { recursive: true })
+    await writeFile(join(presetDir, 'agent.cordis.yml'), 'name: ppt-gen\n', 'utf8')
+    await writeFile(join(presetDir, 'preset.yml'), 'name: PPT 生成\n', 'utf8')
+
+    const h = harness(SESSION)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const href = String(url)
+      h.gateway.push(href)
+      const payload = href.includes('source=own')
+        ? { items: [{ kind: 'agent', name: 'ppt-gen', version: '1.0.0', status: 'approved', source: 'org', is_owner: true, delisted: true }] }
+        : { items: [] }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const res = await h.call('/api/pico/capabilities?source=local')
+    const local = (res.body.items as Array<Record<string, unknown>>).find(i => i.source === 'local' && i.name === 'ppt-gen')
+    expect(local?.delisted).toBe(true)
+    const item = mergeItems([local as unknown as CapabilityItem])[0]!
+    expect(isDelistedItem(item)).toBe(true)
+    // 智能体本机行 ⇒ 卸载动作指向 agent 端点（R5-B-3 的同一条分支）。
+    expect(planCardAction(item)).toMatchObject({ kind: 'uninstall', endpoint: '/api/pico/agent-presets/ppt-gen/uninstall' })
+  })
+
+  it('服务端没下发该字段 ⇒ 本机行不带 delisted，本机自制行照旧出「上传」（不退化、不误报）', async () => {
+    const h = harness(SESSION)
+    stubOwnWithDelisted(h, undefined)
+    const res = await h.call('/api/pico/capabilities?source=local')
+    const local = (res.body.items as Array<Record<string, unknown>>).find(i => i.source === 'local' && i.name === 'codeql')
+    expect(local).toBeDefined()
+    // 键不能出现（未知 ≠ 未下架；`undefined` 会被 JSON 丢掉，面板读到的是"服务端没说"）。
+    expect(local).not.toHaveProperty('delisted')
+    expect(panelPlan(res.body.items as Array<Record<string, unknown>>)).toMatchObject({ kind: 'review', status: 'approved' })
+    // 完全没有匹配行的本机创作（从未上传过）仍然出「上传」。
+    const noMatch = harness(SESSION)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      noMatch.gateway.push(String(url))
+      return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const res2 = await noMatch.call('/api/pico/capabilities?source=local')
+    expect(panelPlan(res2.body.items as Array<Record<string, unknown>>)).toEqual({ kind: 'upload' })
+  })
+
+  it('`delisted:false`（明确未下架）不产生任何下架态（不得把 false 读成 true）', async () => {
+    const h = harness(SESSION)
+    stubOwnWithDelisted(h, false)
+    const res = await h.call('/api/pico/capabilities?source=local')
+    expect(panelPlan(res.body.items as Array<Record<string, unknown>>)).toMatchObject({ kind: 'review', status: 'approved' })
   })
 })

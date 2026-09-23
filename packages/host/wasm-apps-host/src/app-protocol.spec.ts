@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import {
   APP_ENVELOPE_MAX_BYTES,
   APP_REQUEST_BODY_MAX_BYTES,
+  APP_RESPONSE_BODY_GUARANTEED_BYTES,
   APP_RESPONSE_BODY_MAX_BYTES,
   appOrigin,
   buildRequestEnvelope,
@@ -151,7 +152,12 @@ describe('request envelope', () => {
     // 体积上限常量必须与契约 §4.2 逐字一致（`limits.go` 同源）。
     expect(APP_REQUEST_BODY_MAX_BYTES).toBe(1 << 20)
     expect(APP_ENVELOPE_MAX_BYTES).toBe(Math.ceil((1 << 20) * 4 / 3) + (64 << 10))
-    expect(APP_RESPONSE_BODY_MAX_BYTES).toBe(8 << 20)
+    // A-6/A-7（2026-09-23 审计）：客户端捕获层的兜底上限 = 协议帧上限（1 MiB），
+    // 而**保证可交付**的作者面数字是 168 KiB —— 两者都不是原来的 8 MiB（那是数学上
+    // 不可达的数：`pump` 读到第一个响应帧即结束，单帧上限 1 MiB）。
+    expect(APP_RESPONSE_BODY_MAX_BYTES).toBe(1 << 20)
+    expect(APP_RESPONSE_BODY_GUARANTEED_BYTES).toBe(172032)
+    expect(APP_RESPONSE_BODY_GUARANTEED_BYTES).toBeLessThan(APP_RESPONSE_BODY_MAX_BYTES)
 
     // 信封闸门是"头表闸门之外"的兜底：白名单口径下头表最多 8×8 KiB，正常到不了
     // 这里，所以直接喂一个超限的 body 走 body 闸门，再断言信封上限常量本身。

@@ -80,6 +80,10 @@ type AdminAPI struct {
 	// 与 API 的同名钩子分成两个字段(而不是共用一个全局):两个 handler 集合的装配
 	// 生命周期不同(AdminAPI 由 main 独立构造),共用一个全局会让测试之间的注入互相串。
 	OnUserSessionsRevoked func(userID int64)
+	// balanceReaders 是余额对账面两个读点的**测试注入点**(R4-C-6):
+	// nil = 生产读点(serverstore 的真实实现);非 nil 用于构造"读失败"路径
+	// (真实 PG 上无法确定性构造"用户存在但余额读失败",见 reconcileUserBalance)。
+	balanceReaders *balanceReaders
 }
 
 // notifyUserSessionsRevoked 触发管理端的会话吊销回调(nil 安全,与 API 同名方法同形)。
@@ -371,9 +375,8 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 	u, err := AuthenticateConfiguredAdmin(a.DB, req.Username, req.Password)
 	release()
 	if err != nil || !u.HasManagementAccess() {
-		lim.record(ipKey)
-		lim.record(userKey)
-		a.ipLimiter().record(srcIPKey)
+		// 2026-09-23 E-01:三个桶的记账已由上面的 allow **判定即记账**原子完成
+		// (此前在此处 record,并发请求会在首个 record 落表前全部通过判定)。
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
@@ -437,8 +440,9 @@ func (a *AdminAPI) handleLoginMFA(c *gin.Context) {
 	}
 	secret, err := decryptMFASecret(u.TotpSecret)
 	if err != nil || !verifyAndConsumeTOTP(a.DB, u.ID, secret, req.Code) {
-		lim.record(mfaIPKey)
-		lim.record(mfaUserKey)
+		// 2026-09-23 E-01:mfa-ip / mfa-user 两个桶的记账已在两处 allow 里原子
+		// 完成(此前"第二次判定在若干次 DB 往返之后"只是意外串行化屏障,
+		// 并发 40 张票据时并非真正的上限)。
 		_ = serverstore.AuditLog(a.DB, u.Username, "admin_mfa_login", "fail ip="+c.ClientIP())
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "动态码错误或已失效")
 		return
@@ -1261,9 +1265,9 @@ func (a *AdminAPI) putAuditSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
-	// 立即生效:启动清理兜底周期执行,此处主动触发一次。
-	if err := serverstore.PurgeOldAuditLogs(a.DB, time.Now().Add(-time.Duration(*req.RetentionDays)*24*time.Hour)); err != nil {
-		// 清理失败不影响保存(启动清理兜底); 审计中不落错误。
+	// 立即生效:另有周期调度器(auditretention,6h)兜底,此处主动触发一次。
+	if _, err := serverstore.PurgeOldAuditLogs(a.DB, time.Now().Add(-time.Duration(*req.RetentionDays)*24*time.Hour)); err != nil {
+		// 清理失败不影响保存(周期调度器兜底); 审计中不落错误。
 	}
 	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "audit_retention_change", fmt.Sprintf("%d→%d", old, *req.RetentionDays))
 	c.JSON(http.StatusOK, gin.H{"retention_days": *req.RetentionDays})
@@ -1395,6 +1399,16 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			return
 		}
 		seen[p] = true
+	}
+	// WEB-2(审计 2026-09-23,与 E-02 同一根因):**至少一个有效提供方**。
+	// 旧实现里 `{"enabled":","}`(或 " , ")每一项 trim 后都是空串,上面的循环
+	// 全部 `continue` 跳过且不报错 ⇒ 空列表落库,`enabledProviderNames` 解出空集,
+	// `clientPasswordOrder()` 又因"空集"回落遗留兜底 ["ldap","local"] ⇒ 员工面
+	// **重新接受本地密码**。空集合同时被当成"还没配置过"与"配置成什么都没有",
+	// 这两件事必须分开:HTTP 面显式拒绝空集合,运行期只对"从未配置过"保留兜底。
+	if len(seen) == 0 {
+		writeError(c, http.StatusBadRequest, "VALIDATION", "auth.enabled 至少需要一个提供方(local|ldap|openid|oidc)")
+		return
 	}
 	// min_password_length 校验必须在写库前(F14:不允许写一半再 400)。
 	if req.MinPasswordLength != nil {
@@ -2118,22 +2132,79 @@ func (a *AdminAPI) userBalanceLedger(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	sum, _ := serverstore.BalanceLedgerSum(a.DB, id)
+	// R4-C-6:同一次读里取账本合计与账户余额，任一失败即 500 —— 不得回落 0。
+	// 旧实现 `sum, _ := …` 与 `u2BalanceMoney`（查询失败 return 0）会让两个字段
+	// 同时为 0，而管理员看到的是"账本与余额一致（都是 0）"：对余额本就为 0 的
+	// 用户，"读失败"与"已对平"在响应里**逐字节相同**。
+	ledgerSum, balanceMoney, rerr := reconcileUserBalance(a.reconcileReads(), id)
+	if rerr != nil {
+		log.Printf("admin: balance reconciliation read failed for user %d: %v", id, rerr)
+		if errors.Is(rerr, errReconcileLedgerRead) {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "账本合计读取失败，余额对账结果本次不可用，请重试")
+		} else {
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "用户余额读取失败，余额对账结果本次不可用，请重试")
+		}
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"items": items, "total": total, "page": page, "size": size,
 		// 账本对账:sum 应恒等于该用户当前余额(不变量 I1)。
-		"ledger_sum":    serverstore.QuantizeMoney(sum),
-		"balance_money": serverstore.QuantizeMoney(u2BalanceMoney(a, id)),
+		"ledger_sum":    serverstore.QuantizeMoney(ledgerSum),
+		"balance_money": serverstore.QuantizeMoney(balanceMoney),
 	})
 }
 
-// u2BalanceMoney 读取用户当前余额(账本对账面用;查询失败返回 0)。
-func u2BalanceMoney(a *AdminAPI, id int64) float64 {
-	u, err := serverstore.GetUserByID(a.DB, id)
-	if err != nil {
-		return 0
+// errReconcileLedgerRead / errReconcileUserRead 把"读不到"分成两个可判定的类别
+// （仅用于选择**粗粒度**的对外文案；底层错误只进日志，不回显给调用方）。
+var (
+	errReconcileLedgerRead = errors.New("ledger sum read failed")
+	errReconcileUserRead   = errors.New("user balance read failed")
+)
+
+// balanceReaders 是余额对账面需要的两个读点（生产 = serverstore 的真实实现）。
+//
+// 为什么要抽出来：R4-C-6 的缺陷形态是"读失败静默回落 0"，而真实 PG 上无法确定性
+// 构造"用户存在、但余额/账本读失败"的形态（用户存在性检查与两次读走同一个库，
+// 把库打停会让前面的存在性检查先失败）。抽成参数后，"读失败"这条路径可以直接用
+// 失败读点构造，判据见 balance_reconcile_test.go。
+type balanceReaders struct {
+	user func(id int64) (*serverstore.User, error)
+	sum  func(id int64) (float64, error)
+}
+
+// defaultBalanceReaders 是生产读点（唯一真源：这两个 serverstore 函数在这一处绑定）。
+func defaultBalanceReaders(db *sql.DB) balanceReaders {
+	return balanceReaders{
+		user: func(id int64) (*serverstore.User, error) { return serverstore.GetUserByID(db, id) },
+		sum:  func(id int64) (float64, error) { return serverstore.BalanceLedgerSum(db, id) },
 	}
-	return u.BalanceMoney
+}
+
+// reconcileReads 返回本次对账要用的读点（测试可覆盖 a.balanceReaders）。
+func (a *AdminAPI) reconcileReads() balanceReaders {
+	if a != nil && a.balanceReaders != nil {
+		return *a.balanceReaders
+	}
+	if a == nil {
+		return balanceReaders{}
+	}
+	return defaultBalanceReaders(a.DB)
+}
+
+// reconcileUserBalance 取"账本合计 + 账户余额"两个对账面数字。
+//
+// 语义：**要么两个都拿到，要么返回错误**。调用方不得把错误当成 0 —— 本函数的不
+// 变量是"返回值只在 err == nil 时有意义"（R4-C-6：区分"真 0"与"读不到"）。
+func reconcileUserBalance(r balanceReaders, id int64) (ledgerSum, balanceMoney float64, err error) {
+	u, uerr := r.user(id)
+	if uerr != nil {
+		return 0, 0, fmt.Errorf("%w: %w", errReconcileUserRead, uerr)
+	}
+	sum, serr := r.sum(id)
+	if serr != nil {
+		return 0, 0, fmt.Errorf("%w: %w", errReconcileLedgerRead, serr)
+	}
+	return sum, u.BalanceMoney, nil
 }
 
 // getBalance 管理端余额总览:配置 + 最近/当月发放 + 人数与余额合计。

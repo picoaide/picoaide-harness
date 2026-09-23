@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readdir, readFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -774,5 +774,165 @@ describe('desktop update installer download', () => {
       request,
     }), 'invalid-options')
     expect(requested).toBe(false)
+  })
+})
+
+/**
+ * B-07 / B-08（2026-09-23 独立审计 P1）。
+ *
+ *  · B-08：安装包传输此前**没有停滞/超时检测** —— 服务端接受连接后不再发字节
+ *    （黑洞连接）会让传输永久 pending（探针 `probe-download-stall-real.mjs`
+ *    实测 6 秒后仍 pending，磁盘上留下 `.partial` / `.partial.json`）。
+ *  · B-07：本地永久失败（ENOSPC/EACCES/EROFS/ENOTDIR…）被压成可重试的 `network`
+ *    ⇒ 上层按网络故障退避重试 6 次，最后告诉用户"网络问题"（探针
+ *    `probe-fs-error-as-network.mjs`）。
+ *
+ * 判据必须证明三件事：停滞**会在预算内失败**、**一直有进展的慢流不会被误杀**、
+ * 本地永久失败是**不可重试且分类为 storage**。
+ */
+describe('传输预算与本地失败的分类（B-07/B-08）', () => {
+  /** 只发响应头、之后一个字节都不发的响应体（黑洞连接）。 */
+  function stalledBody(): Response {
+    return new Response(new ReadableStream<Uint8Array>({ start() { /* 永不 enqueue、永不 close */ } }), {
+      status: 200,
+      headers: { 'content-length': String(300 * 1024 * 1024) },
+    })
+  }
+
+  /** 一块一块地发、每块之间间隔 `gapMs` 的响应体（模拟慢链路）。 */
+  function tricklingBody(chunk: Uint8Array, chunkBytes: number, gapMs: number): Response {
+    let sent = 0
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= chunk.byteLength) {
+          controller.close()
+          return
+        }
+        await new Promise(resolve => setTimeout(resolve, gapMs))
+        controller.enqueue(chunk.subarray(sent, sent + chunkBytes))
+        sent += chunkBytes
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'content-length': String(chunk.byteLength) } })
+  }
+
+  /** 跑一次下载并把失败（或 undefined）取回来，便于逐条断言分类。 */
+  async function attempt(options: Parameters<typeof downloadDesktopUpdate>[0]): Promise<UpdateDownloadError | undefined> {
+    return await downloadDesktopUpdate(options).then(
+      () => undefined,
+      (cause: unknown) => cause as UpdateDownloadError,
+    )
+  }
+
+  it('永不产出字节的响应体在停滞预算内失败，且按可重试的 network 归类', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifactURL = `${SERVER}/updates/client/2.9.0/PicoAide-Harness-2.9.0-x86_64.AppImage`
+    const started = Date.now()
+    const failure = await attempt({
+      manifestURL: MANIFEST_URL,
+      platform: 'linux',
+      version: '2.9.0',
+      userDataPath,
+      stallTimeoutMs: 120,
+      totalTimeoutMs: 5_000,
+      request: async url => url === MANIFEST_URL
+        ? platformManifest('2.9.0', 'linux', artifactURL, 'a'.repeat(64), 300 * 1024 * 1024)
+        : stalledBody(),
+    })
+
+    expect(failure).toBeInstanceOf(UpdateDownloadError)
+    expect(failure?.code, '停滞必须落在可重试的 network 上（否则一次停滞就永久失败）').toBe('network')
+    expect(failure?.retriable).toBe(true)
+    expect(failure?.message).toContain('stalled')
+    expect(Date.now() - started, '停滞预算必须真的兜住它').toBeLessThan(3_000)
+  })
+
+  it('一直有进展的慢流不会被停滞预算误杀（判据是字节进展，不是总时长）', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = appImageArtifact()
+    const artifactURL = `${SERVER}/updates/client/2.9.0/PicoAide-Harness-2.9.0-x86_64.AppImage`
+    // 每块间隔 20ms、块大小 64B:远慢于"总时长"直觉,但每块都在进展 ⇒ 必须成功。
+    const path = await downloadDesktopUpdate({
+      manifestURL: MANIFEST_URL,
+      platform: 'linux',
+      version: '2.9.0',
+      userDataPath,
+      stallTimeoutMs: 250,
+      totalTimeoutMs: 10_000,
+      request: async url => url === MANIFEST_URL
+        ? platformManifest('2.9.0', 'linux', artifactURL, sha256(artifact), artifact.byteLength)
+        : tricklingBody(artifact, 64, 20),
+    })
+
+    expect(path).toBe(completedPath(userDataPath, '2.9.0', artifactURL))
+    expect(await readFile(path)).toEqual(Buffer.from(artifact))
+  })
+
+  it('总预算兜住"一直在慢慢发、永远发不完"的对端', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifactURL = `${SERVER}/updates/client/2.9.0/PicoAide-Harness-2.9.0-x86_64.AppImage`
+    const failure = await attempt({
+      manifestURL: MANIFEST_URL,
+      platform: 'linux',
+      version: '2.9.0',
+      userDataPath,
+      // 停滞预算远大于总预算:只有总预算能终止它(每 20ms 都有 8 字节进展)。
+      stallTimeoutMs: 30_000,
+      totalTimeoutMs: 150,
+      request: async url => url === MANIFEST_URL
+        ? platformManifest('2.9.0', 'linux', artifactURL, 'a'.repeat(64), 300 * 1024 * 1024)
+        : tricklingBody(new Uint8Array(4 * 1024), 8, 20),
+    })
+
+    expect(failure?.code).toBe('network')
+    expect(failure?.retriable).toBe(true)
+    expect(failure?.message).toContain('total time budget')
+  })
+
+  it('本地文件系统失败归类为不可重试的 storage，而不是可重试的 network', async () => {
+    const userDataPath = await temporaryUserData()
+    // `<userData>/updates` 已存在且是**文件**:版本目录的 mkdir 会抛 ENOTDIR ——
+    // 本地永久失败(重试改变不了),此前被压成 network。
+    await writeFile(join(userDataPath, 'updates'), 'not a directory')
+    let artifactRequests = 0
+    const artifactURL = `${SERVER}/updates/client/2.9.0/PicoAide-Harness-2.9.0-x86_64.AppImage`
+    const failure = await attempt({
+      manifestURL: MANIFEST_URL,
+      platform: 'linux',
+      version: '2.9.0',
+      userDataPath,
+      request: async url => {
+        if (url === MANIFEST_URL) return platformManifest('2.9.0', 'linux', artifactURL, 'a'.repeat(64), 0)
+        artifactRequests += 1
+        return fullResponse([appImageArtifact()])
+      },
+    })
+
+    expect(failure).toBeInstanceOf(UpdateDownloadError)
+    expect(failure?.code, `本地永久失败必须是 storage,实际 ${String(failure?.code)}`).toBe('storage')
+    expect(failure?.retriable, 'storage 不可重试:磁盘满不会因为再问一次而变空').toBe(false)
+    expect(failure?.message).toContain('disk')
+    // 本地目标先校验、再联网:畸形目标不该先建立网络连接。
+    expect(artifactRequests).toBe(0)
+  })
+
+  it('清单里带 NUL / 超长字节的资产名退回中性文件名，不再抛本地 errno', async () => {
+    const userDataPath = await temporaryUserData()
+    const artifact = appImageArtifact()
+    // NUL 与 300 字节的多字节名字都是**合法 URL 编码**：解码后直接进 open() 会抛
+    // ERR_INVALID_ARG_VALUE / ENAMETOOLONG(本地永久失败)。
+    const artifactURL = `${SERVER}/updates/client/2.9.0/${encodeURIComponent('bad\0name')}-${'中'.repeat(150)}.AppImage`
+    const path = await downloadDesktopUpdate({
+      manifestURL: MANIFEST_URL,
+      platform: 'linux',
+      version: '2.9.0',
+      userDataPath,
+      request: async url => url === MANIFEST_URL
+        ? platformManifest('2.9.0', 'linux', artifactURL, sha256(artifact), artifact.byteLength)
+        : fullResponse([artifact]),
+    })
+
+    expect(path).toBe(join(userDataPath, 'updates', '2.9.0', 'update-2.9.0-linux.AppImage'))
+    expect(await readFile(path)).toEqual(Buffer.from(artifact))
   })
 })

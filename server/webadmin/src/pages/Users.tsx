@@ -103,9 +103,29 @@ export default function Users() {
   const [tokens, setTokens] = useState<ApiToken[]>([])
   const [deptUser, setDeptUser] = useState<User | null>(null)
   const [deptSelect, setDeptSelect] = useState<string[]>([])   // 多部门(2026-09)
+  // 2026-09-23 审计 WEB-1(P0):「设置部门」对话框的写面闸门。部门树 GET 失败时
+  // 对话框还在、复选框列表是空的、`deptSelect` 还是空数组 ⇒ 点「保存」就发
+  // `{"group_ids":[]}`,服务端 `SyncUserGroups` 用**空集替换该用户全部部门归属**
+  // (部门级共享授权与预算范围同时塌缩)。解锁条件必须是"本次用户的部门树真的读到了"
+  // ——与 components/grant-dialog.tsx 的 grantsLoaded 同形。
+  const [deptLoaded, setDeptLoaded] = useState(false)
   // P1-8: 请求序号防乱序——快速翻页/搜索/删除重拉时只有最新请求的响应能更新 state
   const loadSeq = useRef(0)
   const tokensSeq = useRef(0)
+  // WEB-1 同族:对话框换用户后,上一个用户的部门树**迟到响应**不得写进这一个。
+  const deptSeq = useRef(0)
+  // WEB-1(规则 2:资源切换必须**渲染期**同步归零):换了对话框里的用户,上一份
+  // 归属/提示必须立刻清掉,不能等 effect(effect 在绘制之后跑,会留下一帧旧归属
+  // 可勾选、可保存)。React 认可的"props 变化时调整 state"写法:条件成立才 setState。
+  const [deptStateUser, setDeptStateUser] = useState<number | null>(null)
+  const deptUserId = deptUser?.id ?? null
+  if (deptStateUser !== deptUserId) {
+    setDeptStateUser(deptUserId)
+    setDeptSelect([])
+    setDeptNote('')
+    setDeptErr('')
+    setDeptLoaded(false)
+  }
 
   const load = useCallback(async (p: number, search: string) => {
     const current = ++loadSeq.current
@@ -231,18 +251,27 @@ export default function Users() {
 
   // ---- 员工部门归属(2026-09 起支持多部门:部门树多选) ----
   async function openDept(u: User) {
+    const current = ++deptSeq.current
     setDeptUser(u)
     setDeptErr('')
+    // WEB-1:本地先归零 + 锁写面,只有拿到"本次用户"的归属才解锁。
+    setDeptSelect([])
+    setDeptNote('')
+    setDeptLoaded(false)
     // 部门树按需拉取(见 load 的注释):只读角色没有 dept:read,打开不了这个
     // 对话框(入口也被隐藏),所以这里失败时只需在对话框内报错。
     let tree = depts
     if (tree.length === 0) {
       try {
         const d = await request(`${ADMIN_API}/departments`)
+        if (current !== deptSeq.current) return // WEB-1:迟到的树响应属于上一个用户
         tree = d.departments ?? []
         setDepts(tree)
       } catch (err: any) {
+        if (current !== deptSeq.current) return
         setDeptErr(err.message)
+        // WEB-1:读取失败**不得**把空归属当成"该用户没有部门"解锁保存。
+        setDeptLoaded(false)
         return
       }
     }
@@ -251,6 +280,7 @@ export default function Users() {
     const deptNames = groups.filter((g) => tree.some((d) => d.name === g))
     const ids = tree.filter((d) => deptNames.includes(d.name)).map((d) => String(d.id))
     setDeptSelect(ids)
+    setDeptLoaded(true) // WEB-1:只有真的拿到归属才解锁写面
     if (deptNames.length > 1) {
       setDeptNote(`当前归属 ${deptNames.length} 个部门(${deptNames.join('、')});保存保留为多部门,预算按全部所属部门同时生效(任一超限即拦)。`)
     } else if (deptNames.length === 0 && groups.length > 0) {
@@ -262,6 +292,12 @@ export default function Users() {
 
   async function saveDept() {
     if (busy || !deptUser) return // 双击守卫(L10)
+    // WEB-1:部门树没读到就没有"当前归属"可言——空数组在服务端是"清空全部归属"
+    // 的指令,所以这里原地拒绝,不发那个注定破坏数据的请求。
+    if (!deptLoaded) {
+      setDeptErr('部门树未加载成功,保存已锁定(否则会用空归属覆盖该用户的全部部门)。请关闭对话框后重试。')
+      return
+    }
     setBusy(true)
     try {
       await request(`${ADMIN_API}/users/${deptUser.id}/department`, {
@@ -664,6 +700,7 @@ export default function Users() {
                       type="checkbox"
                       className="h-4 w-4 accent-[#4176E6]"
                       checked={deptSelect.includes(String(o.id))}
+                      disabled={!deptLoaded}
                       onChange={(e) => {
                         const v = String(o.id)
                         setDeptSelect((prev) => e.target.checked ? [...prev, v] : prev.filter((x) => x !== v))
@@ -681,7 +718,15 @@ export default function Users() {
               授权 = 全部所属部门+祖先链同时生效
             </p>
             {deptErr && <div className="text-sm text-destructive">{deptErr}</div>}
-            <Button onClick={saveDept} className="w-full">保存</Button>
+            {/* WEB-1:未读到归属时写明"保存已锁定",否则空列表读起来像"该用户没有部门"。 */}
+            {!deptLoaded && (
+              <p className={deptErr ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>
+                {deptErr
+                  ? '部门树未加载成功:保存已锁定(否则会用空归属覆盖该用户的全部部门),请关闭对话框后重试。'
+                  : '部门树加载中…'}
+              </p>
+            )}
+            <Button onClick={saveDept} className="w-full" disabled={busy || !deptLoaded}>保存</Button>
           </div>
         </DialogContent>
       </Dialog>

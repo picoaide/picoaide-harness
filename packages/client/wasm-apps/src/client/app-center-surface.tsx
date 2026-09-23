@@ -27,11 +27,6 @@ export function openAppCenterPanel(): void {
   surface?.activate()
 }
 
-/** 关闭应用中心。 */
-export function closeAppCenterPanel(): void {
-  surface?.close()
-}
-
 /** 面板依赖（全部可选；缺省值在 `AppCenterPanel` 内部回落）。 */
 export type AppCenterPanelDeps = Omit<React.ComponentProps<typeof AppCenterPanel>, 'onClose'>
 

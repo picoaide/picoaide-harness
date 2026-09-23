@@ -28,9 +28,6 @@ type InstanceLimits struct {
 	HostBudgets map[string]time.Duration
 }
 
-// DefaultInstanceLimits 返回全缺省的请求上限。
-func DefaultInstanceLimits() InstanceLimits { return InstanceLimits{} }
-
 // MemoryLimitPages 返回生效的内存页上限。
 func (l InstanceLimits) MemoryLimitPages() uint32 {
 	if l.MemoryPages == 0 {

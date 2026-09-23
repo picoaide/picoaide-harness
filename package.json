@@ -1,6 +1,6 @@
 {
   "name": "picoaide-harness",
-  "version": "2.8.1",
+  "version": "2.8.2-beta.1",
   "private": true,
   "description": "PicoAide Harness product workspace",
   "license": "MIT",
@@ -76,6 +76,8 @@
     "check:wasm-channels": "node scripts/verify-wasm-channels.mjs",
     "check:no-leftover-mutants": "node scripts/check-no-leftover-mutants.mjs",
     "check:migration-range": "node scripts/check-migration-range.mjs",
+    "check:doc-claims": "node scripts/check-doc-claims.mjs",
+    "check:integration-tests": "node scripts/check-integration-tests.mjs",
     "check:no-real-domains": "node scripts/check-no-real-domains.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",

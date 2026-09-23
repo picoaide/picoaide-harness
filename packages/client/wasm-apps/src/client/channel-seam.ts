@@ -28,7 +28,15 @@
  */
 
 import { setAppShareScheme } from './deep-link.ts'
-import { fetchWithHostProof, hostProofFailure, isHostProofErrorCode, readHostErrorCode } from './host-proof.ts'
+// `readJsonQuietly` 2026-09-23 起只有一份实现（`host-proof.ts`）；本文件原先那份与它
+// 逐字节相同，属三份重复之一（另见 `open-app.ts`）。
+import {
+  fetchWithHostProof,
+  hostProofFailure,
+  isHostProofErrorCode,
+  readHostErrorCode,
+  readJsonQuietly,
+} from './host-proof.ts'
 
 /**
  * 宿主本机只读路由（§16.1 冻结路径；宿主侧前缀注册在
@@ -278,18 +286,4 @@ export function loadAppChannel(deps: AppChannelDeps = {}): Promise<AppChannelRes
  */
 export async function refreshAppChannel(deps: AppChannelDeps = {}): Promise<AppChannel | null> {
   return (await loadAppChannel(deps)).channel
-}
-
-/**
- * 读响应体为 JSON（失败 ⇒ `null`，用 clone 不消费原响应）。
- * @param response - 原始响应。
- * @returns 解析结果，或 `null`。
- */
-async function readJsonQuietly(response: Response): Promise<unknown> {
-  try {
-    const text = await response.clone().text()
-    return text === '' ? null : JSON.parse(text)
-  } catch {
-    return null
-  }
 }

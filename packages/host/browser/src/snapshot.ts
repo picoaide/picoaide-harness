@@ -79,7 +79,26 @@ const SNAPSHOT_PROBE = `
   const MAX = __MAX__;
   const COUNT_CAP = __COUNT_CAP__;
   const SHADOW_SCAN_CAP = __SHADOW_SCAN_CAP__;
-  const SEL = 'a,button,input,select,textarea,[role="button"],[tabindex]:not([tabindex="-1"])';
+  // 2026-09-23 审计 SN-1：SEL 与 kindOf 曾经不同口径 —— SEL 收了
+  // [role="button"] 与 [tabindex]:not([tabindex="-1"])，kindOf 却只认固定标签 +
+  // role="button"，于是现代组件库最常见的可交互元素（div[tabindex="0"]、无 href 的
+  // a）返回 null，被下面的 if (!kind) continue 在 total++ **之前**丢掉 —— 既不在
+  // 列表里，也不进 total/truncated，模型连"另有 N 个未列出"都看不到。
+  // 现在两边同口径：SEL 收 ARIA 控件角色，kindOf 把它们映射成既有 kind。
+  // role="tab"/"option" 不收进这张表：宿主的 kind 契约是
+  // link/button/input/select/textarea/other（extractSnapshot 会把表外取值回落成
+  // 'other'），所以它们经兜底 'other' 进入结果 —— 可枚举、可点击才是 SN-1 的判据。
+  const ROLE_KINDS = {
+    button: 'button', menuitem: 'button', menuitemcheckbox: 'button', menuitemradio: 'button',
+    link: 'link',
+    checkbox: 'input', radio: 'input', switch: 'input', slider: 'input', spinbutton: 'input',
+    combobox: 'select', textbox: 'input', searchbox: 'input',
+  };
+  const SEL = 'a,button,input,select,textarea'
+    + ',[role="button"],[role="link"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"]'
+    + ',[role="tab"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"]'
+    + ',[role="combobox"],[role="textbox"],[role="searchbox"],[role="slider"],[role="spinbutton"]'
+    + ',[tabindex]:not([tabindex="-1"])';
   const kindOf = (el) => {
     const tag = el.tagName.toLowerCase();
     if (tag === 'a' && el.href) return 'link';
@@ -93,8 +112,15 @@ const SNAPSHOT_PROBE = `
     }
     if (tag === 'select') return 'select';
     if (tag === 'textarea') return 'textarea';
-    if (el.getAttribute && el.getAttribute('role') === 'button') return 'button';
-    return null;
+    if (el.getAttribute) {
+      const role = (el.getAttribute('role') || '').trim().toLowerCase();
+      const mapped = ROLE_KINDS[role];
+      if (mapped) return mapped;
+    }
+    // 兜底 'other'：SEL 命中的、上面没归类的可交互元素（无 href 的 a、
+    // [tabindex] 容器、未映射的 role）保留在结果与 total 里。唯一仍然返回 null 的
+    // 是 input[type=hidden] —— 它本来就不可交互，列出来只会制造噪音。
+    return 'other';
   };
   const textOf = (el) => {
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {

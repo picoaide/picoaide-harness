@@ -54,6 +54,66 @@ const ABIVersion = "picoaide-app/1"
 // MaxFrameBytes 是单帧 JSON 负载上限（§4.6：协议帧单行上限 1 MiB）。
 const MaxFrameBytes = limits.ProtocolLineMaxBytes
 
+// MaxResponseBodyBytes 是"应用响应体"在**单帧**内**保证可交付**的上限（真实口径）。
+//
+// 为什么不是 `limits.AppResponseBodyMaxBytes`（8 MiB，2026-09-23 审计 ABI-1）：
+// 响应体必须先装进**一个**帧 —— `pump` 读到第一个响应帧即结束（runtime.go 的
+// `case abi.FrameResponse: … return`），而单帧负载上限就是 MaxFrameBytes(1 MiB)
+// ⇒ "响应体 8 MiB"在数学上不可达（`appserver.writeAppResponse` 那条 8 MiB 判据
+// 永远命中不了）。把不可达的数当对外契约，作者会按 8 MiB 去设计，然后在 1 MiB 处
+// 撞上一个与病因无关的错误。
+//
+// ⚠️ **2026-09-23 审计 A-6（P2）订正过一次取值**：原先写的是 `MaxFrameBytes/2`
+// （512 KiB）并自称"承诺可交付"，但那条推导把"原始字节 = 编码后字节"当成了前提 ——
+// Go `encoding/json` 默认把 `<`/`>`/`&`/控制字符转义成 `\u00XX`（**6 倍**），
+// 512 KiB 的 `<` 编码后是 3,145,840 B > 1 MiB 帧（探针实测）。所以现在按**最坏转义**
+// 反推：`(1 MiB − 信封余量) / 6` = 168 KiB（`limits.MaxDeliverablePayloadBytes`，
+// 对外口径"约 170 KiB"）。
+//
+// 两个数字的分工（不要混用，写进作者手册的也是这一份）：
+//   - **168 KiB** = "不管内容长什么样都装得下"的**保证**值；
+//   - **1 MiB**   = 单帧上限本身（原始字节）；低转义内容（纯 ASCII、无 `<>"&`）实测能到
+//     ~625 KB，但那是"实测天花板"，不是承诺 —— 超了就是 RUNTIME_OUTPUT_OVERRUN。
+//
+// 单一真源：`api/headerspec.go` 的 `response_body_bytes_max` 与 `diag` 的提示都取
+// 这里（不在别处硬编码）。`limits.AppResponseBodyMaxBytes` 仍是平台侧的**总输出**
+// 闸门（口径不同：那是"guest 写出多少字节就算超"，不是"能交付多少"）。
+const MaxResponseBodyBytes = limits.MaxDeliverablePayloadBytes
+
+// CodeAssetOversize 是"单个随包资源超过上限"错误码的**字面量**（= apperr.CodeAssetOversize）。
+//
+// ⚠️ 这里刻意**不** import apperr（2026-09-23 实测踩到）：abi 是 **guest 侧也编译**的包
+// ——参考实现（internal/wasmapp/refapp）就用它写帧，而 apperr 依赖 net/http，一旦 abi
+// 依赖 apperr，任何 guest 产物的 WASI 导入面就会膨胀（实测 refapp 原始导入 18 → 20 条，
+// 多出 path_* / fd_* 一族），直接打红 `TestGeneratorCheckModeAgreesWithDisk` 与
+// `TestRefappOnlyWhitelistWouldRejectFileUsingApps` 两条白名单门禁。
+// 两处取值的**同值性**由 abi 的测试断言（TestAssetOversizeCodeMatchesApperr）。
+const CodeAssetOversize = "ASSET_OVERSIZE"
+
+// CodeDBLimit 是"db.query 结果超限"错误码的**字面量**（= apperr.CodeDBLimit）。
+//
+// 2026-09-23 审计 A-1（P1）新增的消费者侧兜底用它：一条 `db.query` 的结果连"丢掉全部
+// 行"都装不进单帧时（单行或列名本身就超帧），回给应用的是 §7.4 里"行数/结果超限"那一档
+// ——与 appdb 对"单行吃掉整份预算"的既有口径（`queryResultTooLarge`）**同一个码**。
+// 理由同 CodeAssetOversize：abi 不能 import apperr（guest 侧编译 + WASI 导入面）。
+const CodeDBLimit = "DB_LIMIT"
+
+// CodeResultTooLarge 是"宿主结果装不进一个协议帧"的兜底错误码字面量
+// （= apperr.CodeResultTooLarge）。
+//
+// 为什么需要一个**新**码：§7.4 的失败语义表没有覆盖这一类失败，而现有码里没有一个是
+// "这个结果编码后超过 1 MiB 帧"的语义 —— 复用 DB_DENIED/INTERNAL 会让作者往错误的
+// 方向排查（前者是权限/超时、后者是平台故障，而这条是**应用自己请求得太宽**）。
+// 与 apperr 的同值性由 abi 测试断言（TestOversizeCodeLiteralsMatchApperr）。
+const CodeResultTooLarge = "RESULT_TOO_LARGE"
+
+// MaxFrameDrainBytes 是"超限帧排空"的字节上界（见 ReadFrame）。
+//
+// 取 2×`limits.AppResponseBodyMaxBytes`：平台自己的写入方（宿主 → guest 的 RPC 应答）
+// 最多能写出"响应体上限 8 MiB + base64/转义膨胀 + 信封"，16 MiB 覆盖它并留一倍余量。
+// 超过这个数说明对端**不是**本平台实现 ⇒ 放弃重同步（不能为一条畸形帧无限读下去）。
+const MaxFrameDrainBytes = 2 * limits.AppResponseBodyMaxBytes
+
 // 帧解析错误（宿主一侧把它们映射为 RUNTIME_OUTPUT_OVERRUN / SECTION_MALFORMED 类错误）。
 var (
 	// ErrFrameTooLarge 表示帧确实超限（长度前缀合法但超过 MaxFrameBytes）。
@@ -115,7 +175,8 @@ func PeekIsFrame(r *bufio.Reader) (bool, error) {
 //   - 起始字节必须是 FrameMagic，否则 ErrNotFrame（调用方转日志）；
 //   - 长度前缀是十进制 ASCII，以 '\n' 结束；
 //   - 必须一次读满（io.ReadFull），不得预读；
-//   - 负载长度 > MaxFrameBytes ⇒ ErrFrameTooLarge；
+//   - 负载长度 > MaxFrameBytes ⇒ ErrFrameTooLarge（并**排空**该帧载荷以保持流可解析，
+//     上界见 MaxFrameDrainBytes）；
 //   - EOF 且未读到任何字节 ⇒ io.EOF（正常结束）。
 func ReadFrame(r *bufio.Reader) ([]byte, error) {
 	first, err := r.ReadByte()
@@ -155,6 +216,23 @@ func ReadFrame(r *bufio.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("%w: bad length prefix", ErrFrameMalformed)
 	}
 	if n > MaxFrameBytes {
+		// **超限必须排空载荷**（2026-09-23 审计 ABI-1，P2）。
+		//
+		// 修复前这里直接返回、把 n 字节留在流里 ⇒ 读者"失同步"：下一次 ReadFrame 读到
+		// 的是上一帧的载荷中段（实测：再读 8 字节得到 `7b 22 6a 73 6f 6e 72 70`
+		// = `{"jsonrp`，不是 RS 帧头），而写者因为没人读而阻塞到 guest 预算用尽 ⇒
+		// 现场看到的是 RUNTIME_TIMEOUT/MODULE_KILLED 这种与病因无关的错误码
+		// （`assets.read` 一个大资源就会走到这条路）。
+		//
+		// 重同步是有界的：只排空 ≤ MaxFrameDrainBytes 的载荷；超过它说明对端不是本平台
+		// 实现（本平台任何写入方都 ≤16 MiB），此时**不**排空并照常报错，由调用方终止连接
+		// （ReadFrame 拿不到"关闭"能力，契约写在错误语义里：ErrFrameTooLarge 之后
+		//   - 排空成功 ⇒ 流仍可继续解析（调用方可以只跳过这一帧）；
+		//   - 未排空   ⇒ 流不可信，调用方必须终止，不要继续读）。
+		// 排空失败（EOF/管道关闭）不改错误：主错误始终是 ErrFrameTooLarge。
+		if n <= MaxFrameDrainBytes {
+			_, _ = io.CopyN(io.Discard, r, int64(n))
+		}
 		return nil, fmt.Errorf("%w: %d > %d", ErrFrameTooLarge, n, MaxFrameBytes)
 	}
 	payload := make([]byte, n)
@@ -249,6 +327,219 @@ type RPCResponse struct {
 	ID      json.RawMessage `json:"id"`
 	Result  any             `json:"result,omitempty"`
 	Error   *RPCErrorBody   `json:"error,omitempty"`
+}
+
+// rpcResponseWire 是 RPCResponse 的别名：MarshalJSON 内部必须用它编码，
+// 否则 json.Marshal 会再次进入本方法（无限递归）。
+type rpcResponseWire RPCResponse
+
+// MarshalJSON 让"单帧预算"成为 **abi 这一层**的硬边界：任何经 abi 写出的 RPC 应答
+// 都不得大于 MaxFrameBytes。
+//
+// 为什么兜底放在这里，而不是各个能力实现里：帧格式与帧预算是 abi 的单一真源
+// （`MaxFrameBytes` 只在这里定义），而"结果装不进一帧"这件事只有编码时才知道。
+// 修复前的现场形态（2026-09-23 审计 ABI-1，P2）：`assets.read` 读一个 4 MiB 随包资源
+// （base64 后 5.3 MiB）⇒ 宿主写出一条超帧、guest 的 ReadFrame 报 ErrFrameTooLarge 且
+// **失同步**、宿主那条写因为没人读而阻塞到 guest 预算用尽 ⇒ 应用拿到 RUNTIME_TIMEOUT
+// （与病因无关），而它本该拿到 ASSET_OVERSIZE（本平台对"单个资源超限"的既有错误码）。
+//
+// ⚠️ **2026-09-23 审计 A-1（P1）把改写面从"只认 assets.read"推广到"任何装不进单帧的
+// 结果"**：`db.query` 的结果预算是 8 MiB（> 单帧 1 MiB），于是它必然复现同一条链路 ——
+// 宿主写出超帧、应用要么 10 s `RUNTIME_TIMEOUT`（官方骨架的读帧器不排空）、要么拿到
+// 一条裸协议错误（`abi.ReadFrame` 排空但不解释），**两种形态都拿不到可用结果**。
+// 判据（本函数现在的三层，顺序即优先级）：
+//
+//  1. 编码结果 ≤ MaxFrameBytes ⇒ 原样返回（绝大多数应答走这条，零额外开销）；
+//  2. `db.query` 结果超限 ⇒ **按帧预算丢尾行**并置 `Truncated=true`（§4.5 的分页信号，
+//     与 appdb 的"只截断不报错"同一口径）——保住"能拿到的那部分数据"；
+//  3. 其余任何超限结果（含"丢掉全部行仍装不下"的 `db.query`）⇒ 归一成**结构化错误**
+//     （本平台对这类失败的既有码：assets.read → ASSET_OVERSIZE、db.query → DB_LIMIT、
+//     其余 → RESULT_TOO_LARGE），details 带 `encoded_bytes`/`max` 与产生它的方法。
+//
+// **不变量**（第 3 层兜底，见 oversizedRPCError）：本函数**永不**返回大于 MaxFrameBytes
+// 的字节；连错误信封都装不下时（guest 可以把 id 写成 1 MiB）退化为 `id:null` 的错误，
+// 再不行就返回 error，让调用方按"写不出去"处理 —— 绝不写出一条超帧。
+func (r RPCResponse) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(rpcResponseWire(r))
+	if err != nil || len(b) <= MaxFrameBytes {
+		return b, err
+	}
+	// 第 2 层：db.query 结果按帧预算丢尾行（分页语义），保住数据。
+	if q, ok := queryResultOf(r.Result); ok {
+		if fitted, ferr := fitQueryResultToFrame(r, q); ferr == nil && fitted != nil {
+			return fitted, nil
+		}
+	}
+	// 第 3 层：结构化错误（必然装得下，或返回 error）。
+	return oversizedRPCError(r, len(b))
+}
+
+// queryResultOf 报告 result 是否为 `db.query` 的结果（值或指针形态）。
+func queryResultOf(result any) (QueryResult, bool) {
+	switch v := result.(type) {
+	case QueryResult:
+		return v, true
+	case *QueryResult:
+		if v == nil {
+			return QueryResult{}, false
+		}
+		return *v, true
+	default:
+		return QueryResult{}, false
+	}
+}
+
+// fitQueryResultToFrame 把一条装不进单帧的 `db.query` 结果裁到单帧内：**只丢尾部行**，
+// 绝不改列、绝不改行内取值（分页语义 = 应用用 OFFSET/LIMIT 再取下一页）。
+//
+// 返回 (nil, nil) 表示"连 0 行都装不下"（单行/列名本身就超帧）⇒ 交给上层出结构化错误；
+// 返回 (bytes, nil) 表示裁好的帧负载（`Truncated=true`）。
+//
+// 为什么用二分：行数是 5000 上限，二分 13 次封顶，且每次探测的编码量随区间缩小
+// （首次探测约一半结果大小）⇒ 最坏瞬态分配 ≈ 结果大小的两倍，只在超限路径上发生。
+// 裁剪结果仍走 `json.Marshal`（不手拼 JSON），因此不可能产出畸形帧。
+func fitQueryResultToFrame(r RPCResponse, q QueryResult) ([]byte, error) {
+	encode := func(rows int) ([]byte, bool) {
+		cut := QueryResult{Columns: q.Columns, Rows: q.Rows[:rows], Truncated: q.Truncated}
+		if rows < len(q.Rows) {
+			// 丢了行就必须显式置位（§4.5：分页信号绝不静默）。
+			cut.Truncated = true
+		}
+		b, err := json.Marshal(rpcResponseWire(RPCResponse{
+			JSONRPC: r.JSONRPC, ID: r.ID, Result: cut,
+		}))
+		if err != nil {
+			return nil, false
+		}
+		return b, len(b) <= MaxFrameBytes
+	}
+	// 0 行形态是可行性的**下界**：连它都装不下（列名本身就超帧）⇒ 交结构化错误。
+	zeroFits := false
+	if _, ok := encode(0); ok {
+		zeroFits = true
+	}
+	if !zeroFits {
+		return nil, nil
+	}
+	// 再单独试满额：裁剪路径唯一的非单调点是"丢了行就必须置 Truncated=true"那几十字节，
+	// 满额时反而可能刚好塞得下。
+	if b, ok := encode(len(q.Rows)); ok {
+		return b, nil
+	}
+	if len(q.Rows) == 0 {
+		// 本来就是空结果（或只有 0 行）且它装得下 —— 上面已判定；留作防御。
+		b, _ := encode(0)
+		return b, nil
+	}
+	// 二分找最大的可行行数（对 rows 单调：多保留一行只可能更多字节）。
+	lo, hi := 0, len(q.Rows)
+	for lo+1 < hi {
+		mid := lo + (hi-lo)/2
+		if _, ok := encode(mid); ok {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	// **一行都留不下时不返回空结果**：与 appdb 的既有口径一致（`queryResultTooLarge`：
+	// "0 行 + Truncated 从来不是有用的结果"）——回结构化 DB_LIMIT 让应用知道要改查询，
+	// 而不是拿到一个看起来成功的空集（那是静默丢结果）。
+	if lo == 0 {
+		return nil, nil
+	}
+	b, ok := encode(lo)
+	if !ok {
+		return nil, nil
+	}
+	return b, nil
+}
+
+// oversizedRPCError 把"装不进单帧"的结果归一成结构化错误信封（同 id，必然装得下）。
+//
+// 错误码按结果类型取**平台既有语义**（不新造词）：
+//   - `assets.read` → ASSET_OVERSIZE（单个资源超限，§4.2 同源）；
+//   - `db.query`    → DB_LIMIT（§7.4 的"行数/结果超限"档；appdb 对"单行吃掉整份预算"
+//     也回这一档）；
+//   - 其余          → RESULT_TOO_LARGE（§7.4 失败语义表未列，显式扩充；文案里点名
+//     方法与两个数字，第一消费者 AI 能据此改应用）。
+//
+// 文案即"可行动错误"：RPCErrorBody 没有 hints 字段（帧内契约不含它），所以"怎么办"
+// 必须写在 message 里（DB_LIMIT 那条直接给分页指引）。
+//
+// **兜底不变量**：返回的字节一定 ≤ MaxFrameBytes —— guest 可以把 `id` 写成接近 1 MiB
+// 的 JSON 值（它自己的请求帧也受 1 MiB 上限约束），照抄 id 的错误信封会再次超限，
+// 那时退化为 `id:null`（JSON-RPC 允许错误用 null id）。两条路都装不下则返回 error。
+func oversizedRPCError(r RPCResponse, encoded int) ([]byte, error) {
+	code, message, details := oversizeErrorShape(r.Result, encoded)
+	build := func(id json.RawMessage) ([]byte, error) {
+		return json.Marshal(rpcResponseWire(RPCResponse{
+			JSONRPC: r.JSONRPC,
+			ID:      id,
+			Error: &RPCErrorBody{
+				Code:    code,
+				Message: message,
+				Details: details,
+			},
+		}))
+	}
+	b, err := build(r.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) <= MaxFrameBytes {
+		return b, nil
+	}
+	b, err = build(json.RawMessage("null"))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) <= MaxFrameBytes {
+		return b, nil
+	}
+	return nil, fmt.Errorf("abi: 超限应答的错误信封仍装不进单帧（%d > %d）", len(b), MaxFrameBytes)
+}
+
+// oversizeErrorShape 给出"装不进单帧"时的错误码、文案与 details。
+func oversizeErrorShape(result any, encoded int) (code, message string, details map[string]any) {
+	base := map[string]any{
+		"reason":        "frame_too_large",
+		"encoded_bytes": encoded,
+		"max":           MaxFrameBytes,
+	}
+	if size, ok := assetsReadResultSize(result); ok {
+		base["asset_bytes"] = size
+		return CodeAssetOversize,
+			"assets.read 的结果装不进一个协议帧（单帧上限 1 MiB）：请把大资源拆小，或改成多次读取",
+			base
+	}
+	if q, ok := queryResultOf(result); ok {
+		base["rows"] = len(q.Rows)
+		base["columns"] = len(q.Columns)
+		return CodeDBLimit,
+			"db.query 的结果装不进一个协议帧（单帧上限 1 MiB）：请分页读取（LIMIT/OFFSET）或减少列数/单行内容",
+			base
+	}
+	return CodeResultTooLarge,
+		"宿主结果装不进一个协议帧（单帧上限 1 MiB）：请缩小本次调用的返回内容",
+		base
+}
+
+// assetsReadResultSize 报告 result 是否为 assets.read 的结果，以及其原始字节数。
+//
+// 保留为**导出的判据之外的单一取值点**：`oversizeErrorShape` 目前用类型分支直接取
+// Size，但"哪些形态算 assets.read 结果"这件事只允许有一份判据（值/指针两种）。
+func assetsReadResultSize(result any) (int, bool) {
+	switch v := result.(type) {
+	case AssetsReadResult:
+		return v.Size, true
+	case *AssetsReadResult:
+		if v == nil {
+			return 0, false
+		}
+		return v.Size, true
+	default:
+		return 0, false
+	}
 }
 
 // RPCErrorBody 是宿主错误的 JSON-RPC 形态（§7.4：code 用平台错误码字符串）。

@@ -12,7 +12,7 @@ import type {
   DesktopUpdateSource,
 } from '../src/runtime.ts'
 import type { UpdateCheckResult, UpdateRequest } from '../src/update-checker.ts'
-import { UpdateDownloadError } from '../src/update-download.ts'
+import { downloadDesktopUpdate, UpdateDownloadError } from '../src/update-download.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
 
 // 客户端只从**它登录的那台服务端**取更新(2026-09-10 定案):每个检查用例都
@@ -28,6 +28,10 @@ const testConfig: UpdateConfig = {
   // 退避延迟压到 1ms:测的是"有没有重试/重试几次",不是等多久。
   checkRetryDelaysMs: [1, 1, 1],
   transferRetryDelaysMs: [1, 1, 1, 1, 1],
+  // B-08:传输预算压到毫秒级(测的是"有界",不是等多久);需要真实下载器的
+  // 用例会再覆盖这两个值。
+  downloadStallTimeoutMs: 1_000,
+  downloadTotalTimeoutMs: 60_000,
   retryJitterRatio: 0,
 }
 
@@ -182,7 +186,13 @@ async function createHarness(options: {
   readonly config?: UpdateConfig
   readonly request?: DesktopRuntime['updates']['request']
   readonly showManualCheckResult?: (result: UpdateCheckResult | null) => Promise<void>
-  readonly downloadUpdate?: (version: string, source: DesktopUpdateSource, signal: AbortSignal) => Promise<string>
+  readonly downloadUpdate?: (
+    version: string,
+    source: DesktopUpdateSource,
+    signal: AbortSignal,
+    onProgress?: (progress: { readonly receivedBytes: number, readonly totalBytes: number | undefined }) => void,
+    budget?: { readonly stallTimeoutMs: number, readonly totalTimeoutMs: number },
+  ) => Promise<string>
   readonly announceUpdateReady?: (version: string, path: string) => Promise<void>
   readonly installUpdate?: (version: string, path: string) => Promise<void>
   readonly notify?: (notification: DesktopNotification) => void
@@ -299,6 +309,9 @@ describe('desktop update Host plugin', () => {
       // 3 次检查尝试 / 5 次传输尝试(首次 + 每个延迟项一次重试)。
       checkRetryDelaysMs: [2_000, 8_000, 20_000],
       transferRetryDelaysMs: [2_000, 8_000, 20_000, 30_000, 30_000],
+      // B-08:安装包传输的停滞/总预算（缺省见 update-download.ts 的常量）。
+      downloadStallTimeoutMs: 60_000,
+      downloadTotalTimeoutMs: 16_384_000,
       retryJitterRatio: 0.25,
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
@@ -956,7 +969,13 @@ describe('desktop update Host plugin', () => {
     expect(typeof harness.checkNow).toBe('function')
     // The trigger drives the same manual flow: 检查 → 静默下载 → 可安装。
     harness.checkNow?.()
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledWith('2.3.0', expect.anything(), expect.any(AbortSignal), expect.any(Function)) })
+    await vi.waitFor(() => {
+      expect(harness.downloadUpdate).toHaveBeenCalledWith(
+        '2.3.0', expect.anything(), expect.any(AbortSignal), expect.any(Function),
+        // B-08:插件必须把停滞/总预算下发给适配器（只在适配器忽略时才靠看门狗兜底）。
+        { stallTimeoutMs: testConfig.downloadStallTimeoutMs, totalTimeoutMs: testConfig.downloadTotalTimeoutMs },
+      )
+    })
   })
 })
 
@@ -1053,6 +1072,89 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
     })
     expect(harness.downloadUpdate).not.toHaveBeenCalled()
 
+    await harness.dispose()
+  })
+})
+
+/**
+ * B-08（2026-09-23 独立审计 P1）：一条黑洞连接不能把整条更新流程卡死。
+ *
+ * 走**真实下载器**（`downloadDesktopUpdate`）而不是替身：只有这样才能证明
+ * "服务端发了响应头、之后一个字节都不发"最终会失败，而不是永远停在"下载中"。
+ * 判据有三条：①在预算内失败并发布 `lastError`；②重试预算按既有策略用尽；
+ * ③`downloadTask` 占位被清掉 —— 再点一次"检查更新"会真的再发起传输。
+ */
+describe('安装包传输的有界性（B-08）', () => {
+  it('停滞的传输以可见失败收尾，并且放掉 downloadTask 占位', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-updates-stall-'))
+    const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
+    // 清单之外的任何地址（渠道探测 / 安装包）都返回"只发头、不发字节"的响应。
+    const request = async (url: string): Promise<Response> => {
+      if (url === OFFICIAL_MANIFEST_URL) return manifestResponse('2.1.0')
+      if (url.includes('/channel')) return channelResponse()
+      return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+        status: 200,
+        headers: { 'content-length': String(300 * 1024 * 1024) },
+      })
+    }
+    const harness = await createHarness({
+      packaged: false,
+      request,
+      userDataRoot: root,
+      config: { ...testConfig, downloadStallTimeoutMs: 30, downloadTotalTimeoutMs: 5_000 },
+      // 适配器把插件下发的预算交给真实下载器（生产接线见 electron-runtime.ts）。
+      downloadUpdate: async (version, source, signal, onProgress, budget) => await downloadDesktopUpdate({
+        platform,
+        version,
+        manifestURL: source.manifestURL,
+        userDataPath: root,
+        request,
+        signal,
+        ...(onProgress === undefined ? {} : { onProgress }),
+        ...(budget === undefined
+          ? {}
+          : { stallTimeoutMs: budget.stallTimeoutMs, totalTimeoutMs: budget.totalTimeoutMs }),
+      }),
+    })
+
+    await harness.tray.invoke()
+    await vi.waitFor(() => {
+      expect(harness.publishedStates).toHaveBeenLastCalledWith(
+        expect.objectContaining({ lastError: 'network', downloadingVersion: undefined }),
+      )
+    }, { timeout: 10_000 })
+
+    // 停滞按可重试的网络故障处理:重试预算用尽(首次 + 每个退避项一次)。
+    expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
+    // 占位必须放掉:否则 runBackgroundCheck 与手动检查会永久早退（缺陷本体）。
+    const attempts = harness.downloadUpdate.mock.calls.length
+    await harness.tray.invoke()
+    await vi.waitFor(() => {
+      expect(harness.downloadUpdate.mock.calls.length).toBeGreaterThan(attempts)
+    }, { timeout: 10_000 })
+
+    await harness.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('本地永久失败(storage)保留精确分类且不重试（B-07）', async () => {
+    const harness = await createHarness({
+      packaged: false,
+      request: async () => manifestResponse('2.1.0'),
+      downloadUpdate: async () => {
+        throw new UpdateDownloadError('storage', 'The update installer could not be written to disk (ENOSPC).')
+      },
+    })
+
+    await harness.tray.invoke()
+    await vi.waitFor(() => {
+      expect(harness.publishedStates).toHaveBeenLastCalledWith(
+        expect.objectContaining({ lastError: 'storage' }),
+      )
+    })
+
+    // 磁盘满重试没有意义:一次就够,且不能报成网络问题。
+    expect(harness.downloadUpdate).toHaveBeenCalledTimes(1)
     await harness.dispose()
   })
 })

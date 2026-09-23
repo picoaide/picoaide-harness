@@ -17,6 +17,7 @@ import { HOST_PROOF_PATH, setHostProofToken } from './host-proof.ts'
 import {
   APP_AI_CHAT_PATH,
   APP_AI_CONSENT_PATH,
+  APP_AI_IDENTITY_PATH,
   APP_AI_ERROR_CODES,
   APP_AI_MESSAGE_MAX_BYTES,
   APP_AI_MESSAGES_MAX,
@@ -25,6 +26,7 @@ import {
   failureFromEnvelope,
   grantAppAiConsent,
   hasAppAiConsent,
+  loadAppAiIdentity,
   parseAppAiFrame,
   revokeAppAiConsent,
   streamAppAiChat,
@@ -335,5 +337,41 @@ describe('授权同步：允许/撤销真的写到宿主（§21.1 第 9 条 / §
     const result = await syncAppAiConsent('demo', true, { fetch: refused })
     expect(result.ok).toBe(false)
     expect(calls).toEqual([HOST_PROOF_PATH])
+  })
+})
+
+/**
+ * 审计 C-25：授权作用域必须与**宿主闸门**同源。
+ *
+ * 宿主（`wasm-apps-host/src/ai-authorization.ts`）按 `aiConsentKey(user, app)` 记授权，
+ * 其中 `user` 就是 `session.username`（`index.ts` 的 `const user = session.username ?? ''`）。
+ * 客户端这边此前返回 `<username>@<serverURL>`：改过服务端地址（登录页支持的界面动作）
+ * 或清过站点数据之后 key 就对不上 —— 面板重新弹卡、用户点「不允许」看到"不能使用 AI"，
+ * 而宿主闸门仍然开着。修法＝align 到 `username`。
+ *
+ * 变异验证：把 `return username` 改回 `username@serverURL` ⇒ 本条红。
+ */
+describe('loadAppAiIdentity：授权作用域与宿主同源（审计 C-25）', () => {
+  const respond = (body: unknown): typeof fetch =>
+    (async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+
+  it('返回裸 username（不带 serverURL），与宿主的 username\0app 作用域一致', async () => {
+    const identity = await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: 'https://harness.example.com' }) })
+    expect(identity).toBe('alice')
+  })
+
+  it('未登录 / 身份缺失 ⇒ 空串（fail-closed，绝不退化成"所有人都已授权"）', async () => {
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: false }) })).toBe('')
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: '   ' }) })).toBe('')
+  })
+
+  it('读身份的路由是本机只读的 /api/pico/auth/state', async () => {
+    let seen = ''
+    const spy = (async (input: unknown) => {
+      seen = String(input)
+      return new Response(JSON.stringify({ loggedIn: true, username: 'alice' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    await loadAppAiIdentity({ fetch: spy })
+    expect(seen).toBe(APP_AI_IDENTITY_PATH)
   })
 })

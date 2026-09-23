@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
+import { writeProvenance } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 /**
@@ -191,6 +192,12 @@ beforeEach(async () => {
   skillsDir = join(home, 'skills')
   await mkdir(join(skillsDir, 'codeql'), { recursive: true })
   await writeFile(join(skillsDir, 'codeql', 'SKILL.md'), SKILL_MD, 'utf8')
+  // 溯源标记 = "这一份是能力中心装的"：卸载/覆盖不需要额外确认（审计 2026-09-23
+  // A2/A3 的来源判定）。没有它的话卸载会被 409 LOCAL_CONTENT 拦下 —— 那条契约
+  // 由 builtin-skills.spec.ts 的专项用例钉住，这里只测持有性证明这一层。
+  await writeProvenance(join(skillsDir, 'codeql'), {
+    appId: 'codeql', version: '1.0.0', channel: 'market', installedAt: new Date().toISOString(),
+  })
   vi.stubEnv('DSH_HOME', home)
 })
 

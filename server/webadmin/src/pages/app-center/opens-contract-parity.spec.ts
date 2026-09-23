@@ -29,9 +29,16 @@
  *   - 解析器自己坏掉（找不到结构体/接口）⇒ 直接抛错（**不静默零命中**），
  *     第 7 条另有"锚点必须命中"的非空自证。
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import {
+  AI_ATTRIBUTION_WIRING,
+  ATTRIBUTION_HEADER_TEXT_ONLY,
+  ATTRIBUTION_HEADER_READERS,
+  ATTRIBUTION_HEADER_WRITERS,
+  OPENS_DETAIL_RETENTION_DAYS,
+} from './opens-contract'
 
 // ---------------------------------------------------------------------------
 // 定位两侧真源（路径不写死：从 cwd 向上找服务端标记，与 Audit.test.tsx 同款）
@@ -56,13 +63,37 @@ function findServerDir(): string {
 }
 
 const SERVER_DIR = findServerDir()
+const REPO_ROOT = resolve(SERVER_DIR, '..')
 const STORE_GO = join(SERVER_DIR, 'internal', 'serverstore', 'wasm_app_opens_summary.go')
 const DETAIL_GO = join(SERVER_DIR, 'internal', 'serverstore', 'wasm_app_opens.go')
 const API_GO = join(SERVER_DIR, 'internal', 'wasmapp', 'api', 'admin_opens.go')
 const CONTRACT_TS = join(SERVER_DIR, 'webadmin', 'src', 'pages', 'app-center', 'opens-contract.ts')
+const API_REFERENCE_MD = join(SERVER_DIR, 'docs', '03-api-reference.md')
 
-for (const f of [STORE_GO, DETAIL_GO, API_GO, CONTRACT_TS]) {
+for (const f of [STORE_GO, DETAIL_GO, API_GO, CONTRACT_TS, API_REFERENCE_MD]) {
   if (!existsSync(f)) throw new Error(`对拍真源缺失：${f}（缺失是失败，不是跳过 —— 静默跳过等于把判据关掉）`)
+}
+
+/**
+ * 抽出包含 `marker` 的那条 **SQL 语句**（Go 反引号原文）。
+ *
+ * 为什么不能"在整份源码里找一句话"：注释里也会出现表名/函数名，取最近的反引号片段
+ * 会命中注释里的行内代码。这里只在**反引号字符串**里找，并要求它是一条 `SELECT`
+ * （多条或不唯一即 throw —— 锚点不唯一就不算判据）。
+ * @param src - Go 源码全文。
+ * @param marker - 语句里必须出现的标记串。
+ * @returns 该 SQL 语句的原文。
+ */
+function sqlStatement(src: string, marker: string): string {
+  const segments = [...src.matchAll(/`([^`]*)`/gu)].map((m) => m[1]!)
+  const hits = segments.filter((s) => s.includes(marker))
+  const selects = hits.filter((s) => /SELECT/iu.test(s))
+  if (selects.length === 1) return selects[0]!
+  if (selects.length > 1) {
+    throw new Error(`含 ${marker} 的 SQL 有 ${selects.length} 条（锚点不唯一，判据必须指向唯一实现）`)
+  }
+  if (hits.length === 1) return hits[0]!
+  throw new Error(`Go 源码里找不到含 ${marker} 的 SQL 语句（读源口径改了？锚点必须更新）`)
 }
 
 /** 去掉注释后再解析：注释里出现的 `{`/`}` 会把"成员名在顶层"的判定带偏。 */
@@ -149,7 +180,9 @@ function tsInterfaceKeys(src: string, name: string): string[] {
 const GO_STORE = readFileSync(STORE_GO, 'utf8')
 const GO_DETAIL = readFileSync(DETAIL_GO, 'utf8')
 const GO_API = readFileSync(API_GO, 'utf8')
-const TS = stripComments(readFileSync(CONTRACT_TS, 'utf8'))
+/** 前端契约**原文**（含注释）：文本锚点必须看注释，键解析才需要去注释。 */
+const CONTRACT_RAW = readFileSync(CONTRACT_TS, 'utf8')
+const TS = stripComments(CONTRACT_RAW)
 
 /**
  * 逐键对拍：**集合相等**（不是"包含"）—— 多一个键也是漂移（前端会读不到/读错，
@@ -208,13 +241,47 @@ describe('跨端对拍 · A 打开看板概览（§5.1c A）', () => {
     )
   })
 
-  it('UV 口径的源码锚点：去重聚合 + 趋势读日汇总（两个读源是有意的）', () => {
-    // ① 窗口聚合必须是 count(DISTINCT user_id) —— 逐日相加会把同一个人算成 N 个。
+  it('趋势读源 = 同一天同源（语义锚点；改回"PV 读日汇总 + UV 读明细"必红）', () => {
+    // ---- ① 文本锚点：两侧的**说法**必须与实现同口径（R4-D-2）----
+    //
+    // 事故形态：AUD-1（2026-09-20）只改了实现与设计总纲，API 参考与前端契约注释仍是
+    // 修复前口径（"trend[].pv 读日汇总"）⇒ 按文档实现的新消费方会复现 `uv > pv`。
+    const doc = readFileSync(API_REFERENCE_MD, 'utf8')
+    for (const [label, src] of [['03-api-reference.md', doc], ['opens-contract.ts', CONTRACT_RAW]] as const) {
+      expect(src, `${label} 必须写明趋势"同一天同源"`).toContain('同一天同源')
+      for (const stale of ['trend[].pv` 读**日汇总**', '`trend[]` 读**日汇总**', '读源是有意分开的', '双读源是有意的']) {
+        expect(src, `${label} 不得残留修复前口径「${stale}」`).not.toContain(stale)
+      }
+    }
+
+    // ---- ② 查询锚点：PV 与 UV 必须出自**同一次**明细聚合（GROUP BY 1）----
+    //
+    // 判据不是"文件里出现过某张表名"（存在性断言改回旧行为仍绿），而是**趋势那两条
+    // 查询各自的形状**：明细聚合一次给出 count(*) 与 count(DISTINCT user_id)；
+    // 日汇总回落只取 SUM(pv)（不含 user_id —— 那天的人数已不可知，如实给 0）。
+    const detailAgg = sqlStatement(GO_STORE, 'width_bucket')
+    expect(detailAgg, '趋势明细聚合必须同时算 count(*)').toMatch(/count\(\*\)/)
+    expect(detailAgg, '趋势明细聚合必须同时算 count(DISTINCT user_id)').toMatch(/count\(DISTINCT user_id\)/)
+    expect(detailAgg, 'PV/UV 必须来自同一次聚合（同一个 GROUP BY）').toMatch(/GROUP BY 1/)
+    expect(detailAgg, '趋势明细聚合必须读明细表').toContain('FROM wasm_app_opens')
+
+    const fallback = sqlStatement(GO_STORE, 'wasm_app_opens_daily')
+    expect(fallback, '日汇总回落只取 PV（SUM(pv)）').toMatch(/SUM\(pv\)/)
+    expect(fallback, '日汇总表里没有 user_id 维度，回落分支不得去算 UV').not.toContain('user_id')
+
+    // ---- ③ 装配锚点：明细覆盖到的天用同源聚合，直接 continue（不回落到日汇总）----
+    //
+    // 这一条是"改回旧行为必红"的关键：旧行为下每一天的 PV 都来自 summaryPV，
+    // `PV: agg.PV, UV: agg.UV` 这一句会消失。
+    expect(
+      GO_STORE,
+      '趋势装配必须在"该日有明细"分支里用同一次聚合的 PV+UV（`PV: agg.PV, UV: agg.UV`）',
+    ).toContain('PV: agg.PV, UV: agg.UV')
+    const fallbackAppend = 'PV: pv, UV: 0'
+    expect(GO_STORE, '日汇总回落分支必须把 UV 如实给 0').toContain(fallbackAppend)
+
+    // ④ 去重口径（§5.1c A 的硬约束）：逐日/逐应用相加会把同一个人算成 N 个。
     expect(GO_STORE).toContain('count(DISTINCT user_id)')
-    // ② 趋势读**日汇总**表（长期保留；明细 90 天过期后曲线不断档）。
-    expect(GO_STORE).toContain('wasm_app_opens_daily')
-    // ③ 明细窗口聚合读**明细**表（与 open 端点的 opens.today 同源）。
-    expect(GO_STORE).toContain('FROM wasm_app_opens')
   })
 })
 
@@ -258,6 +325,139 @@ describe('跨端对拍 · C 应用详情（§5.1c C）', () => {
     const tsKeys = tsInterfaceKeys(TS, 'OpensDetail')
     for (const key of goKeys) {
       expect(tsKeys, `前端 OpensDetail 必须声明服务端下发的 ${key}（缺了就读不到，也就无从渲染生效窗口）`).toContain(key)
+    }
+  })
+
+  it('明细保留期：前端回落常量 ↔ Go 真源（R4-D-9）', () => {
+    // 前端在三处把它当**回落值/请求窗口**用（OpensBoard / AppOpensSection），却只对自己
+    // 断言 `toBe(90)`（自证）。Go 改一行保留期（`WasmAppOpensRetentionDays`）后前端仍按
+    // 90 天算 ⇒ 「全部（长期日汇总）」会少取，或显示错误的保留天数。这里读 Go 真源比。
+    const go = /WasmAppOpensRetentionDays\s*=\s*(\d+)/u.exec(GO_DETAIL)
+    if (go === null) {
+      throw new Error('wasm_app_opens.go 里找不到 WasmAppOpensRetentionDays（改名了？对拍真源必须更新）')
+    }
+    expect(
+      OPENS_DETAIL_RETENTION_DAYS,
+      '前端 OPENS_DETAIL_RETENTION_DAYS 必须等于 Go 的 WasmAppOpensRetentionDays',
+    ).toBe(Number(go[1]))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// D. 应用 AI 归因通道的接线状态（R4-D-4：只有读没有写）
+// ---------------------------------------------------------------------------
+
+/** 扫描面：平台侧源码（Go 服务端 + 客户端包）。 */
+const ATTRIBUTION_SCAN_ROOTS = ['server/internal', 'server/cmd', 'packages']
+/** 不进扫描面的目录：依赖、构建产物、测试夹具。 */
+const SCAN_SKIP_DIRS = new Set(['node_modules', 'lib', 'dist', 'build', 'coverage', 'temp', 'tests', 'test', 'testdata', '__tests__'])
+/** 测试文件不算产品源码（它们只断言契约，不构造出站头）。 */
+const SCAN_SKIP_FILE = /(\.spec\.|\.test\.|_test\.go$)/u
+/** 出站头名（大小写不敏感）。 */
+const ATTRIBUTION_HEADER_RE = /x-pico-app-id/iu
+
+/**
+ * 递归收集"提到出站头名"的产品源文件（仓库相对 POSIX 路径，已排序）。
+ *
+ * fail-loud：一个文件都没扫到 ⇒ throw（扫描面写错/被搬走时不能"零命中全绿"）。
+ * @param root - 仓库根。
+ * @returns 命中文件清单与扫描文件总数。
+ */
+function scanAttributionHeaderFiles(root: string): { hits: string[]; scanned: number } {
+  const hits: string[] = []
+  let scanned = 0
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || SCAN_SKIP_DIRS.has(entry.name)) continue
+        walk(full)
+        continue
+      }
+      if (!entry.isFile() || SCAN_SKIP_FILE.test(entry.name)) continue
+      scanned += 1
+      let text = ''
+      try {
+        text = readFileSync(full, 'utf8')
+      } catch {
+        continue // 非常规文件（管道/权限）不参与判据
+      }
+      if (ATTRIBUTION_HEADER_RE.test(text)) hits.push(relative(root, full).split('\\').join('/'))
+    }
+  }
+  for (const rel of ATTRIBUTION_SCAN_ROOTS) {
+    const dir = join(root, rel)
+    if (!existsSync(dir)) throw new Error(`归因扫描面缺失：${rel}（扫描面缩水是失败，不是跳过）`)
+    walk(dir)
+  }
+  if (scanned === 0) throw new Error(`归因扫描面一个文件都没扫到（root=${root}）—— 扫描器坏了必须红`)
+  return { hits: hits.sort(), scanned }
+}
+
+/**
+ * "真的在写这个出站头"的形态（Go/TS 各两种常见写法）。
+ *
+ * 与"文件清单双向对拍"互补：清单能抓住**新文件**里冒出这个头，但抓不住"已经登记的
+ * 读方文件里多出一行写"。这条纯句法扫描不依赖登记表，代价是只覆盖常见写法
+ * （常量间接写法的兜底仍是登记表 + 人工决定）。
+ */
+const ATTRIBUTION_WRITE_PATTERNS: Array<[string, RegExp]> = [
+  ['Go: Header.Set(...)', /(?:Header|h)\.(?:Set|Add)\(\s*(?:appIDHeader|"X-Pico-App-Id")/iu],
+  ['Go: req.Header["X-Pico-App-Id"] = ...', /\[\s*"X-Pico-App-Id"\s*\]\s*=/u],
+  ['TS: new Headers({...})/headers: {...}', /['"]x-pico-app-id['"]\s*:/iu],
+  ['TS: headers.set(...)', /\.(?:set|append)\(\s*['"]x-pico-app-id['"]/iu],
+]
+
+describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4）', () => {
+  const found = scanAttributionHeaderFiles(REPO_ROOT)
+  const declared = [
+    ...ATTRIBUTION_HEADER_READERS,
+    ...ATTRIBUTION_HEADER_WRITERS,
+    ...ATTRIBUTION_HEADER_TEXT_ONLY,
+  ].sort()
+
+  it('出站头 X-Pico-App-Id 的登记表与实际源码**双向**相等（冒出写方即红）', () => {
+    expect(found.scanned, '扫描面必须真的覆盖到源码（缩面即失败）').toBeGreaterThan(200)
+    for (const rel of declared) {
+      expect(existsSync(join(REPO_ROOT, rel)), `登记表里的文件不存在：${rel}`).toBe(true)
+    }
+    expect(
+      found.hits,
+      'X-Pico-App-Id 出现的文件必须全部登记（新出现写方/读方 ⇒ 本用例红，逼着同步接线状态与文案）',
+    ).toEqual(declared)
+  })
+
+  it('接线状态与"是否真的有人写出站头"一致（未接线时不得出现写方句法）', () => {
+    expect(AI_ATTRIBUTION_WIRING).toBe(ATTRIBUTION_HEADER_WRITERS.length > 0 ? 'wired' : 'not_wired')
+    const offenders: string[] = []
+    for (const rel of found.hits) {
+      const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
+      for (const [label, pattern] of ATTRIBUTION_WRITE_PATTERNS) {
+        if (pattern.test(text)) offenders.push(`${rel} (${label})`)
+      }
+    }
+    if (AI_ATTRIBUTION_WIRING === 'not_wired') {
+      expect(
+        offenders,
+        `平台侧归因通道标为"未接线"，但这些文件在写出站头（接线状态与文案必须一起改）：${offenders.join(', ')}`,
+      ).toEqual([])
+    } else {
+      expect(ATTRIBUTION_HEADER_WRITERS.length, "标为 'wired' 就必须登记发送方文件").toBeGreaterThan(0)
+    }
+  })
+
+  it('文案不得把"没有归因"归因于客户端版本/客户环境（文本锚点）', () => {
+    const ui = readFileSync(join(SERVER_DIR, 'webadmin', 'src', 'pages', 'app-center', 'AppAiUsageSection.tsx'), 'utf8')
+    const doc = readFileSync(API_REFERENCE_MD, 'utf8')
+    if (AI_ATTRIBUTION_WIRING === 'not_wired') {
+      // 面板：成因必须是"平台侧尚未接线"，不得出现"客户端尚未上报 / 老客户端"。
+      expect(ui, 'AI 用量面板必须写明"平台侧归因通道尚未接线"').toContain('尚未接线')
+      expect(ui, '不得再把成因写成"客户端尚未上报"').not.toContain('客户端尚未上报')
+      expect(ui, '不得再把成因写成"老客户端"').not.toContain('老客户端')
+      expect(doc, 'API 参考必须写明客户端出站头尚未接线').toContain('归因通道尚未接线')
+    } else {
+      expect(ui).not.toContain('尚未接线')
+      expect(doc).not.toContain('归因通道尚未接线')
     }
   })
 })

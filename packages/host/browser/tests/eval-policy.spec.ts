@@ -163,7 +163,9 @@ describe('wrapEvalExpression', () => {
 })
 
 describe('serializeEvalResult: secret masking', () => {
-  it('masks strings containing secret-shaped keywords (length >= 6)', () => {
+  // 2026-09-23 审计 EV-1：只有"整串就是这个凭据"（或敏感键下的值）才整串 ****；
+  // 关键词出现在散文里不再抹掉整串（那与 browser_get_text 自相矛盾）。
+  it('masks credential-keyed values and whole-string credentials', () => {
     expect(serializeEvalResult({ token: 'abc-token-123' })).toBe('{"token":"****"}')
     expect(serializeEvalResult({ secret: 'verysecret' })).toBe('{"secret":"****"}')
     expect(serializeEvalResult({ password: 'hunter2secret' })).toBe('{"password":"****"}')
@@ -189,8 +191,15 @@ describe('serializeEvalResult: secret masking', () => {
     // cookie jar (or any long credential-bearing body) came back in the clear.
     const cookie = 'SID=OPAQUESECRETVALUE; theme=dark; pad=' + 'y'.repeat(4200)
     expect(serializeEvalResult(cookie)).toBe('"****"')
+    // 2026-09-23 审计 EV-1：这里从"整串 ****"改成**片段级**打码 —— 不变的判据是
+    // "凭据绝不以明文（或截断后的残片）逃出"，变的是普通正文不再被一起抹掉。
     const longToken = 'prefix ' + 'y'.repeat(4200) + ' token=super-secret-value'
-    expect(serializeEvalResult(longToken)).toBe('"****"')
+    const longOut = serializeEvalResult(longToken)
+    expect(longOut).not.toContain('super-secret-value')
+    expect(longOut.endsWith('…"')).toBe(true)
+    const shortToken = serializeEvalResult('prefix token=super-secret-value')
+    expect(shortToken).not.toContain('super-secret-value')
+    expect(shortToken).toContain('token=****')
     // A long, harmless string is still truncated (with the ellipsis marker).
     const harmless = 'plain text '.repeat(500)
     const out = serializeEvalResult(harmless)

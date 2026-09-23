@@ -57,10 +57,9 @@ func ledgerFixture(t *testing.T) (db *sql.DB, uid int64, oldMonth time.Time) {
 	if err := RebuildUsageLedger(d, oldMonth, oldMonth.AddDate(0, 1, -1)); err != nil {
 		t.Fatal(err)
 	}
-	// 等价于 CleanupUsageRetention DROP 掉旧分区
-	if _, err := d.Exec("DELETE FROM usage WHERE model IN ('model-a','model-b') AND created_at < ?", recent); err != nil {
-		t.Fatal(err)
-	}
+	// 与 CleanupUsageRetention 同序地摘掉旧月分区（真 DETACH+DROP；R4-C-4 起
+	// 分段判据是"分区是否存在"，DELETE 行不再等价于 DROP 分区）。
+	dropUsageMonthPartition(t, d, oldMonth)
 	return d, uid, oldMonth
 }
 

@@ -279,25 +279,6 @@ func (l Limits) BudgetFor(availableBytes int64, profile string) readyz.MemoryBud
 	})
 }
 
-// NeedsRestart 报告从 cur 改到 next 时**必须重启**的字段（空 = 全部可即时生效）。
-//
-// 只有单实例内存上限属于这一类：它是 wazero RuntimeConfig 的字段，而执行侧 runtime
-// 是进程内单例、建好之后不可变（见 runtime.NewRuntimeConfig 的注释）。
-// 其余字段都能即时下发：队列上限（Scheduler.SetOptions）、模块缓存上限与空闲 TTL
-// （moduleCache.SetBounds）、库句柄上限与空闲回收（appDBPool.SetLimits）。
-// 另有两个"下次生效"的软字段（既不阻塞保存，也不要求重启）：
-//   - appdb_cache_kib —— 连接级 PRAGMA，只影响**新建**的连接；
-//   - app_db_readers —— 只读连接必须在 appdb 建库的一次性令牌窗口内一次建满
-//     （见 appdb.Options.Readers），因此只影响**下一个新建的应用库句柄**；
-//     已有句柄在空闲回收/污染回收重建时生效（下发路径：appDBPool.SetReaders）。
-func NeedsRestart(cur, next Limits) []string {
-	var out []string
-	if cur.InstanceMemoryMB != next.InstanceMemoryMB {
-		out = append(out, "instance_memory_mb")
-	}
-	return out
-}
-
 // Encode 序列化（落库形态；字段顺序稳定，便于 diff 与人读）。
 func (l Limits) Encode() string {
 	b, _ := json.Marshal(l)

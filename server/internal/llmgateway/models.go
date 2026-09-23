@@ -21,11 +21,14 @@ type Model struct {
 }
 
 // ListModels returns models from enabled providers, ordered by id.
+// 2026-09-23(审计 G-02):排除 catalog_missing = TRUE 的行 —— 上游目录里已经
+// 没有它们了(渠道同步"停用而非删除"以保住定价),客户端目录不该再展示一个
+// 选中即失败的模型。
 func ListModels(db *sql.DB) ([]Model, error) {
 	rows, err := db.Query(`SELECT m.name, COALESCE(m.display_name, m.name), COALESCE(m.default_params, ''),
 		COALESCE(m.input_modalities, '["text"]')
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
-		WHERE p.enabled = 1 ORDER BY m.id`)
+		WHERE p.enabled = 1 AND m.catalog_missing = FALSE ORDER BY m.id`)
 	if err != nil {
 		return nil, err
 	}

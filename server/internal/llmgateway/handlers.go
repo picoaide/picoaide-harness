@@ -77,12 +77,12 @@ func NewHandlers(db *sql.DB) *Handlers {
 	serverstore.RegisterModelsChangedHook(InvalidateUpstreams)
 	api := &API{
 		DB: db,
-		// 非流式:仅约束响应头到达(ResponseHeaderTimeout),body 单独限时读取——
-		// 全量 Timeout 会截断长报告生成(审计2026-M11)
-		client: &http.Client{Transport: newUpstreamTransport()},
+		// 出站 client 的**唯一构造点**（见 upstreamHTTPClient）——生产装配与包内
+		// 测试镜像（routes.go 的 RegisterRoutes）必须走同一条，安全面才同源。
+		client: upstreamHTTPClient(),
 		// streaming client: headers (first byte) must arrive within the same
 		// window as the non-stream client, but the body streams unbounded.
-		sse:  &http.Client{Transport: newUpstreamTransport()},
+		sse:  upstreamHTTPClient(),
 		rl:   newRateLimiter(),
 		conc: newConcurrencyMeter(),
 	}
@@ -124,6 +124,17 @@ func NewHandlers(db *sql.DB) *Handlers {
 		TestErrorReporting:    func(c *gin.Context) { testErrorReporting(c, db) },
 		ErrorReportingClients: func(c *gin.Context) { errorReportingClients(c, db) },
 	}
+}
+
+// upstreamHTTPClient 返回网关出站 HTTP client 的**唯一构造点**。
+//
+// R4-C-7(审计 2026-09-23,P3):生产装配(NewHandlers)与包内测试镜像
+// (routes.go 的 RegisterRoutes)必须用同一个构造点 —— 镜像此前自建
+// `&http.Transport{ResponseHeaderTimeout: …}`,**不带 netguard**,于是所有经由该镜像
+// 跑的用例对"出站被拦住"(连接期 IP 复检 / 代理路径复检)的行为与生产**不等价**
+// (安全面差异)。两条路径现在共用本函数,判据见 routes_transport_test.go。
+func upstreamHTTPClient() *http.Client {
+	return &http.Client{Transport: newUpstreamTransport()}
 }
 
 // newUpstreamTransport 返回网关上游 HTTP transport(F10,审计 2026-09-11)。

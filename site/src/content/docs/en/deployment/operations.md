@@ -111,7 +111,7 @@ a container deployment:
 | Upstream keys | Stored encrypted with AES-GCM (`enc:v1:`, master key file 0600), never in plaintext |
 | Employee tokens | Only a SHA-256 hash is stored, with a 90-day expiry; password change / privilege downgrade / disabling revokes all tokens **in the same transaction** |
 | Admin sessions | 12-hour hard limit + 60-minute idle sliding expiry; CSRF bound to the session (HMAC time window) |
-| Login rate limiting | Dual bucket (by account and by source), 10 attempts / 5 minutes; `PICOAI_TRUSTED_PROXIES` determines how the source IP is derived |
+| Login rate limiting | Failures only, 5-minute sliding window, cleared on success: 10 per account key (`u:username` and `ip+username` share one budget); 60 per source IP (`PICOAI_TRUSTED_PROXIES` determines how the source IP is derived) |
 | Content visibility | Marketplace and shared content use a two-gate model (review + grant); anything unauthorized returns 404 and never leaks existence |
 | Audit | Key operations — users / departments / quotas / pricing / approvals / grants / balances — are recorded end to end, with a hash chain for tamper resistance |
 | Client access | The login page and the client reject non-HTTPS remote addresses (TOFU); installer SHA-256 verification |
@@ -130,7 +130,7 @@ a container deployment:
 | Certificate warnings / clients cannot connect | `internal` mode requires trusting the Caddy local CA; for `auto` mode, confirm the domain connects directly to this machine and port 80 is open to the public internet |
 | Employee clients "always say they are up to date" | `client_unavailable` appears in the manifest: configure `PICOAI_PUBLIC_BASE_URL` |
 | webadmin "new version found" does not appear | The three channel values are not consistent (see [Channels & white-label](/en/deployment/channels/#troubleshooting)); the server caches for 6 hours |
-| Forgot the super admin password | Reset it with another super_admin in the Admin Console; or run `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| Forgot the super admin **password** | If **another super_admin** exists, have them reset it in the Admin Console under "Users → Reset password" (that revokes all of the account's sessions and forces a password change at the next sign-in). ⚠️ `--reset-mfa <user>` does **not** reset a password: it only clears MFA and revokes sessions, for the "password known, authenticator lost" case; with a single super_admin who also lost the password it cannot help (it just prints `nothing to reset` when the target has no MFA, and `--bootstrap-admin` skips entirely once a super admin exists). The only route left is to overwrite that account's `users.password_hash` (an Argon2id encoded string, format in `server/internal/util/password.go`) in the database and set `password_must_change = 1`, then sign in and change it immediately; take the backup described in [Pre-upgrade checks](/en/deployment/upgrade/#2-pre-upgrade-checks) first |
 
 ## Common commands
 

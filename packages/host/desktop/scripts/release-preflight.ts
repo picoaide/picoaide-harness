@@ -1,8 +1,7 @@
 /** Fail-loud checks required before a signed and notarized macOS desktop release. */
 
 import { spawnSync } from 'node:child_process'
-import { resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 const DEVELOPER_ID_PREFIX = 'Developer ID Application:'
 const P12_DATA_PREFIX = 'data:application/x-pkcs12;base64,'
@@ -270,5 +269,4 @@ function main(): void {
   }
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) main()
+if (isDirectInvocation(import.meta)) main()

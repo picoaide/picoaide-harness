@@ -65,8 +65,18 @@ func requireOrgAgent(c *gin.Context, db *sql.DB, name string) bool {
 	return true
 }
 
-// 归档下载的渠道口径说明:共享面的清单/审核等端点只服务 org(见 orgAgentNames),
-// 但**归档下载**两种渠道都服务 —— 桌面能力中心的市场智能体安装走的正是
-// /api/client/v2/agent-presets/:name/archive(CapabilityCenterPanel 的
-// installEndpoint),市场侧没有对员工开放的归档端点。市场「下架」在上架闸门
-// (apps.enabled)处统一生效,见 serveArchive。
+// 归档下载的渠道口径说明(2026-09-23 复审 F4 订正):
+//
+//   - **员工面** `/api/client/v2/agent-presets/:name[/:version]/archive`(admin=false)
+//     **两种渠道都服务** —— 桌面能力中心的市场智能体安装走的正是这条
+//     (CapabilityCenterPanel 的 installEndpoint),市场侧没有对员工开放的归档端点。
+//     市场「下架」在上架闸门(apps.enabled)处统一生效,见 serveArchive。
+//   - **管理面** `/api/server/admin/agent-presets/:name[/:version]/archive`(admin=true)
+//     **只服务组织行**(download/downloadVersioned 里的 requireOrgAgent):市场行有自己的
+//     管理面归档端点 `GET /api/server/admin/agents/:name/archive`(2026-09-23 补齐,
+//     marketplace.downloadAgentArchiveAdmin)。组织命名空间服务市场行是同一条渠道边界的
+//     **反方向**破口(与 marketplace 的 requireMarketAgent 同形、方向相反)。
+//
+// 复审实测(F4,复原后由 admin_archive_scope_test.go 钉住):加守卫前
+// `GET /api/server/admin/agent-presets/<market>/archive` 返回 200 application/zip,
+// 而同命名空间的孪生端点 `<market>/preview` 已经是 404 —— 即"守卫只加了一半"。

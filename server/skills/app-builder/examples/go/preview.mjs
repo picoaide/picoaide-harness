@@ -152,10 +152,14 @@ function pathnameOf(url) {
   return withSlash.length > 1 && withSlash.endsWith('/') ? withSlash.slice(0, -1) : withSlash
 }
 
-/** 入口文档判定（与平台 serveStatic 规则 5 同口径）。 */
+/** 入口文档判定（与平台 `appserver.isEntryDocument` / serveStatic 规则 5 同口径）。 */
 function isEntryPath(path) {
-  if (path === '/' || path === '/index.html') return true
-  return false
+  // `pathnameOf` 已去掉结尾斜杠：目录形态 `/admin/` 到这里是 `/admin`，它在包内对应
+  // `admin/index.html`（没有名为 `admin` 的资源 ⇒ 下面的 directAssetPath 自然回落给 wasm）。
+  // 所以这里只判"包内文档名是 index.html"这一条，与平台 `isEntryDocument` 的判据同形：
+  // `/`、`/index.html`、`<目录>/`（= `<目录>/index.html`）都是入口，其余不是。
+  if (path === '/') return true
+  return path.endsWith('/index.html')
 }
 
 /** 这个请求该不该由宿主直出（返回包内逻辑路径或 null）。 */
@@ -822,6 +826,17 @@ function runSelfTest() {
   })
   check('非法列类型 ⇒ DB_DENIED（与平台枚举一致）', () => {
     expectDenied(() => db.define({ table: 'bad', columns: [{ name: 'x', type: 'blob' }] }), '非法列类型')
+  })
+  check('入口文档（`/`、`/index.html`、`<目录>/`）一律交给 wasm，宿主不直出', () => {
+    // 与平台 appserver.isEntryDocument 同口径：判据是"包内文档名是 index.html"，
+    // 不是"路径恰好是 /"（子目录入口同样要由应用自己把门）。
+    for (const entry of ['/', '/index.html', '/admin/index.html', '/a/b/index.html']) {
+      if (!isEntryPath(entry)) throw new Error(`${entry} 应判为入口文档`)
+      if (directAssetPath('GET', entry) !== null) throw new Error(`${entry} 不该由宿主直出`)
+    }
+    if (directAssetPath('GET', '/admin/app.js') !== 'admin/app.js') {
+      throw new Error('子资源仍应由宿主直出（§4.6 缓存收益）')
+    }
   })
   db.close()
   rmSync(dir, { recursive: true, force: true })

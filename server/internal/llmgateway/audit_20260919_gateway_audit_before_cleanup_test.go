@@ -58,18 +58,36 @@ func nacMonthRelation(n int) string {
 	return "usage_" + serverstore.BeijingMonth(time.Now()).AddDate(0, -n-1, 0).Format("200601")
 }
 
-// nacInjectCleanupFailure 造一个"必然让 DROP TABLE 失败"的关系:把该月的
-// usage 分区换成同名 VIEW(relispartition=false ⇒ 走"孤儿表"分支 ⇒
-// `DROP TABLE IF EXISTS usage_<key>` 报 "is not a table")。
-func nacInjectCleanupFailure(t *testing.T, db *sql.DB, rel string) func() {
+// nacInjectCleanupFailure 造一个"必然让清理失败"的形态：一个**视图依赖**该月的
+// usage 分区 ⇒ `ALTER TABLE usage DETACH PARTITION` 成功后 `DROP TABLE` 报
+// 2BP01（cannot drop table … because other objects depend on it）。
+//
+// 为什么不沿用"同名 VIEW 占名"（旧夹具）：R6-A-1（审计 2026-09-23）之后清理按
+// relkind 分流，占用月名的视图会被 `DROP VIEW` **清掉**（那正是修好的行为），
+// 不再是失败 —— 判据会退化成"注入没生效"而不是"清理失败"。依赖视图是同一族
+// 里**仍然**让清理失败、且运维真会做出来的形态（建报表视图）。
+//
+// 返回（解除注入的函数, 依赖视图名）。
+func nacInjectCleanupFailure(t *testing.T, db *sql.DB, rel string) (func(), string) {
 	t.Helper()
-	if _, err := db.Exec(`DROP TABLE IF EXISTS ` + rel + ` CASCADE`); err != nil {
-		t.Fatalf("drop %s: %v", rel, err)
+	// 依赖视图必须挂在**真分区**上：只有 DETACH+DROP 真分区这条路径才会撞依赖。
+	var isPartition bool
+	var kind string
+	if err := db.QueryRow(`SELECT c.relispartition, c.relkind FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&isPartition, &kind); err != nil {
+		t.Fatalf("探测注入目标 %s: %v", rel, err)
 	}
-	if _, err := db.Exec(`CREATE VIEW ` + rel + ` AS SELECT 1 AS zz`); err != nil {
-		t.Fatalf("create view %s: %v", rel, err)
+	if !isPartition || kind != "r" {
+		t.Fatalf("夹具失效：%s 不是挂在 usage 下的叶子分区(is_partition=%t kind=%q)，"+
+			"依赖视图无法制造 DROP 失败（测试库预建分区窗口变了吗？）", rel, isPartition, kind)
 	}
-	return func() { _, _ = db.Exec(`DROP VIEW IF EXISTS ` + rel) }
+	view := rel + "_report_view"
+	_, _ = db.Exec(`DROP VIEW IF EXISTS ` + view)
+	if _, err := db.Exec(`CREATE VIEW ` + view + ` AS SELECT count(*) AS n FROM ` + rel); err != nil {
+		t.Fatalf("建依赖视图 %s: %v", view, err)
+	}
+	return func() { _, _ = db.Exec(`DROP VIEW IF EXISTS ` + view) }, view
 }
 
 // TestGatewayConfigAuditLandsBeforeRetentionCleanupFails(N2):清理失败 500 时
@@ -87,9 +105,9 @@ func TestGatewayConfigAuditLandsBeforeRetentionCleanupFails(t *testing.T) {
 		t.Fatalf("基线审计 = %d/%q, want 1/\"明细保留:(空)→6\"", n, detail)
 	}
 
-	// 注入:retention=2 时清理的第一个访问月份 = 当前月-3,把它换成 VIEW。
+	// 注入:retention=2 时清理的第一个访问月份 = 当前月-3,让一个视图依赖它。
 	rel := nacMonthRelation(2)
-	dropView := nacInjectCleanupFailure(t, db, rel)
+	dropView, view := nacInjectCleanupFailure(t, db, rel)
 	defer dropView()
 
 	w, _ := adminReq(t, r, "PUT", "/api/server/admin/gateway", `{"retention_months":"2"}`, hdr)
@@ -100,10 +118,10 @@ func TestGatewayConfigAuditLandsBeforeRetentionCleanupFails(t *testing.T) {
 	if got, want := w.Body.String(), `{"error":{"code":"INTERNAL","message":"保留清理失败"}}`; got != want {
 		t.Fatalf("500 响应体 = %s, want %s", got, want)
 	}
-	// ② 清理确实失败了(注入的 VIEW 还在 ⇒ DROP TABLE 失败)。
+	// ② 清理确实失败了(注入的依赖视图还在 ⇒ DROP TABLE 报 2BP01)。
 	var kind string
-	if err := db.QueryRow(`SELECT relkind FROM pg_class WHERE relname = ? AND relnamespace = 'public'::regnamespace`, rel).Scan(&kind); err != nil || kind != "v" {
-		t.Fatalf("注入的 %s 已被清理(说明失败不是来自注入): kind=%q err=%v", rel, kind, err)
+	if err := db.QueryRow(`SELECT relkind FROM pg_class WHERE relname = ? AND relnamespace = 'public'::regnamespace`, view).Scan(&kind); err != nil || kind != "v" {
+		t.Fatalf("注入的依赖视图 %s 不在了(说明失败不是来自注入): kind=%q err=%v", view, kind, err)
 	}
 	// ③ 配置已提交生效(库值 + 运行期读取路径)。
 	if v := nacSetting(t, db, serverstore.RetentionMonthsSetting); v != "2" {

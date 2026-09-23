@@ -254,6 +254,91 @@ const spec: DesktopShellSpec = {
   requestQuit: () => {},
 }
 
+/**
+ * 窗口 CSP 的**已批准能力集**（T-03，2026-09-23 审计）。
+ *
+ * 这是"渲染进程允许拥有哪些能力"的显式声明，故意与 `src/electron-runtime.ts`
+ * 里的常量**分开写**：改 CSP 的人必须在这里再过一次（而不是把测试跟着改）。
+ */
+const APPROVED_CSP_CAPABILITIES: Record<string, readonly string[]> = {
+  'default-src': ["'self'", 'data:', 'blob:', 'ws:'],
+  // 只允许本地脚本 + 上游构建产物内联/求值；**不得**加任何网络源
+  // （`https:`/任意主机 = 从任意 HTTPS 源加载并求值脚本）。
+  'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+  // 2026-09-12 P0：CSP3 的 worker 回退链是 worker-src→child-src→script-src→
+  // default-src，必须**显式**声明，否则 Blob-URL Worker（附件上传/右栏 PDF 预览）必失败。
+  'worker-src': ["'self'", 'blob:'],
+  'style-src': ["'self'", "'unsafe-inline'"],
+  // 白标渠道的 logo/favicon 由客户自己的服务器下发 ⇒ 必须放行 http/https 图源。
+  'img-src': ["'self'", 'data:', 'blob:', 'http:', 'https:'],
+  'font-src': ["'self'", 'data:'],
+  // 出站必须**显式**声明：少了它出站就受 default-src 支配，改一处会静默放开另一处。
+  'connect-src': ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+}
+
+/** 匹配"网络源/通配源"；脚本类指令里出现即视为能力放宽。 */
+const CSP_NETWORK_SOURCE = /^(?:https?|wss?|ftp):|\*/u
+
+/**
+ * 把 CSP 解析成「指令 → 源列表」再按**能力**判定（不再用 `toContain` 子串）。
+ *
+ * 为什么必须升级：2026-09-23 审计实测三种真实放宽**全部通过**旧的子串断言 ——
+ *   1. `script-src …` 追加 ` https: blob:`（任意 HTTPS 源加载/求值脚本）；
+ *   2. 追加 `frame-src *` / `object-src *`（任意 iframe / 插件对象）；
+ *   3. 删除整条 `connect-src`（当时没有任何断言钉它）。
+ * 根因是 `toContain` 只是**前缀**匹配，且完全没覆盖"新增指令"这个方向。这里的判据：
+ *   · 指令集合**显式枚举**（多一条/少一条即红，逼一次审查）；
+ *   · 每条指令的源集合**全等**（不是前缀、也不是"至少包含"）；
+ *   · 任何指令都不得出现通配 `*`，脚本/worker 指令不得出现任何网络源。
+ * @param csp - 响应头里那条 Content-Security-Policy。
+ */
+function assertContentSecurityPolicyCapabilities(csp: string): void {
+  const directives = new Map<string, string[]>()
+  for (const part of csp.split(';')) {
+    const trimmed = part.trim()
+    if (trimmed === '') continue
+    const [name, ...sources] = trimmed.split(/\s+/u)
+    if (name === undefined) continue
+    expect(directives.has(name), `CSP 指令重复声明：${name}`).toBe(false)
+    directives.set(name, sources)
+  }
+  const sorted = (values: readonly string[]): string[] => [...values].sort()
+  expect([...directives.keys()].sort(), 'CSP 指令集合变化必须显式审查（新增指令即红）')
+    .toEqual(Object.keys(APPROVED_CSP_CAPABILITIES).sort())
+  for (const [name, approved] of Object.entries(APPROVED_CSP_CAPABILITIES)) {
+    const sources = directives.get(name)
+    expect(sources, `CSP 缺少指令 ${name}`).toBeDefined()
+    expect(sorted(sources ?? []), `${name} 的源集合与已批准能力不一致`).toEqual(sorted(approved))
+    expect(sources, `${name} 不得包含通配源 *`).not.toContain('*')
+  }
+  for (const name of ['script-src', 'worker-src']) {
+    for (const source of directives.get(name) ?? []) {
+      expect(
+        CSP_NETWORK_SOURCE.test(source),
+        `${name} 不得包含网络源 ${source}（任意 HTTPS 源加载/求值脚本 = 远程代码执行面）`,
+      ).toBe(false)
+    }
+  }
+}
+
+/** 装上窗口，返回真正注入到响应头里的那条 CSP（CSP 放宽用例共用）。 */
+async function appliedContentSecurityPolicy(): Promise<string> {
+  const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+  const runtime = new ElectronDesktopRuntime(async () => {})
+  const release = runtime.schedule(spec)
+  await runtime.mountScheduled()
+  const listener = electron.webContents.session.webRequest.onHeadersReceived.mock.calls[0]?.[0] as
+    | ((details: { url: string }, cb: (response: { responseHeaders?: Record<string, string[]> }) => void) => void)
+    | undefined
+  expect(listener, 'mount 必须安装 CSP 响应头处理器').toBeDefined()
+  let headers: Record<string, string[]> | undefined
+  listener!({ url: 'http://127.0.0.1:43120/' }, (response) => { headers = response.responseHeaders })
+  await release()
+  const csp = headers?.['Content-Security-Policy']?.[0]
+  expect(csp, '受控 URL 必须拿到 CSP 响应头').toBeDefined()
+  return csp!
+}
+
 describe('Electron compatibility runtime', () => {
   beforeEach(() => {
     electron.ipcMain.on.mockClear()
@@ -1157,7 +1242,8 @@ describe('Electron compatibility runtime', () => {
     // 跨源绝对 URL。`img-src 'self' data: blob:` 会把它直接拦掉（微实验复现
     // `violates the following Content Security Policy directive: "img-src 'self'
     // data: blob:"`，naturalWidth=0）—— 界面上就是"品牌图裂了"，而服务端一切正常。
-    // 这条测试钉住指令表，避免有人"顺手收紧 CSP"时白标再次静默失效。
+    // 这条测试钉住**能力集**（T-03，2026-09-23：旧版只 `toContain` 子串，三种真实
+    // 放宽全部通过），避免有人"顺手收紧 CSP"时白标再次静默失效。
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
     const runtime = new ElectronDesktopRuntime(async () => {})
     const release = runtime.schedule(spec)
@@ -1172,14 +1258,12 @@ describe('Electron compatibility runtime', () => {
     listener!({ url: 'http://127.0.0.1:43120/' }, (response) => { headers = response.responseHeaders })
     const csp = headers?.['Content-Security-Policy']?.[0]
     expect(csp).toBeDefined()
+    // 能力级主判据：指令集合显式枚举 + 每条源集合全等 + 脚本类指令零网络源。
+    assertContentSecurityPolicyCapabilities(csp!)
+    // 保留"能力为什么必须在这儿"的正向锚（判据失败时能直接看出动机）：
+    // 白标渠道图源必须放行 http/https；Blob-URL Worker 必须放行；脚本仍限本地。
     expect(csp).toContain("img-src 'self' data: blob: http: https:")
-    // 2026-09-12（P0，打包版真机复现）：rc2 的附件上传与右栏 PDF 预览只用
-    // Blob-URL Worker；CSP3 的 worker 回退链是 worker-src→child-src→script-src→
-    // default-src，`script-src` 已声明时 `default-src` 的 blob: 不再参与回退 ——
-    // 少了这条指令，非图片附件必定上传失败（图片走 base64 不受影响）。
-    // 注意：这条测试只钉指令表；指令**能力**由 e2e 真机断言覆盖。
     expect(csp).toContain("worker-src 'self' blob:")
-    // 收紧的部分不能被顺手放开：脚本仍限本地。
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval'")
     expect(csp).toContain("default-src 'self' data: blob: ws:")
 
@@ -1189,6 +1273,35 @@ describe('Electron compatibility runtime', () => {
     expect(other?.responseHeaders?.['Content-Security-Policy']).toBeUndefined()
 
     await release()
+  })
+
+  it.each([
+    [
+      "script-src 追加 https: blob:（允许从任意 HTTPS 源加载/求值脚本）",
+      (csp: string) => csp.replace(
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:",
+      ),
+    ],
+    [
+      '追加 frame-src * / object-src *（任意 iframe / 插件对象）',
+      (csp: string) => `${csp}; frame-src *; object-src *`,
+    ],
+    [
+      '删除 connect-src（出站改由 default-src 支配，且没有任何断言钉它）',
+      (csp: string) => csp.split('; ').filter(part => !part.startsWith('connect-src')).join('; '),
+    ],
+  ])('能力级判据拒绝放宽：%s', async (_label, loosen) => {
+    // 判据本身必须能被打坏（旧 `toContain` 做不到的那一半）：先用真实 CSP 证明
+    // 判据绿，再对同一份 CSP 施加三种真实放宽，逐一必须红。
+    const csp = await appliedContentSecurityPolicy()
+    expect(() => assertContentSecurityPolicyCapabilities(csp)).not.toThrow()
+    const loosened = loosen(csp)
+    expect(loosened, '放宽函数没有改变 CSP —— 用例会空转').not.toBe(csp)
+    expect(
+      () => assertContentSecurityPolicyCapabilities(loosened),
+      `放宽后的 CSP 必须被判据拒绝：${loosened}`,
+    ).toThrow()
   })
 
   it('grants the clipboard permission to the app UI document only (2026-09-14 复制按钮 P0)', async () => {
@@ -1268,5 +1381,99 @@ describe('Electron compatibility runtime', () => {
     officialRuntime.receiveDeepLink('acmebrand://auth?token=t&server=' + encodeURIComponent('https://acme.example') + '&user=alice')
     expect(delivered).toHaveLength(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('ignoring malformed deep link'))
+  })
+})
+
+/**
+ * B-01 / B-03（2026-09-23 独立审计 P1，真机 Electron 44.4.3 复现）。
+ *
+ * 两个缺陷共用一个入口：`render-process-gone` 与 `did-fail-load` 都进崩溃回退。
+ *  · B-01：`did-fail-load` 不检查第 5 参 `isMainFrame` ⇒ 一次 **iframe** 失败
+ *    （右栏 HTML 预览就是 `<iframe src=blob:…>`）就整窗 reload、第二次换成错误页。
+ *  · B-03：两条路径共用一个一次性闩锁且不串行 ⇒ 崩溃时两个事件并发两次 `loadURL`，
+ *    "至多重试一次"从未成立。
+ *
+ * 判据必须能区分主/子框架，且必须能证伪"并发只发一次导航"。
+ */
+describe('崩溃回退：框架判据 + 串行化（B-01/B-03）', () => {
+  /** 挂好窗口、清掉 mount 自己那次 loadURL，并取出两个事件的处理器。 */
+  async function mounted(): Promise<{
+    release: () => Promise<void>
+    logger: { error: ReturnType<typeof vi.fn>, errorCause: ReturnType<typeof vi.fn> }
+    didFailLoad: (...args: unknown[]) => void
+    gone: (...args: unknown[]) => void
+    window: InstanceType<typeof electron.BrowserWindow>
+  }> {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const logger = { error: vi.fn(), errorCause: vi.fn() }
+    const runtime = new ElectronDesktopRuntime(async () => {}, undefined, logger)
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+    const window = electron.browserWindows.at(-1)!
+    const handler = (event: string): ((...args: unknown[]) => void) => {
+      // `webContents` 是**跨窗口共享**的替身：早先 mount 注册的处理器仍留在
+      // mock.calls 里（find 会拿到第一个窗口的闭包 = 拿错窗口的状态机），所以取最后一个。
+      const found = window.webContents.on.mock.calls.filter(([name]) => name === event).at(-1)?.[1] as
+        | ((...args: unknown[]) => void)
+        | undefined
+      expect(found, `mount 必须安装 ${event} 处理器`).toBeDefined()
+      return found!
+    }
+    electron.webContents.getURL.mockReturnValue('http://127.0.0.1:43120/')
+    // mountScheduled 已经 load 过应用 URL：只数崩溃驱动的导航。
+    electron.loadURL.mockClear()
+    return { release, logger, didFailLoad: handler('did-fail-load'), gone: handler('render-process-gone'), window }
+  }
+
+  it('子框架加载失败只记日志，绝不 reload 整窗（B-01）', async () => {
+    const { release, logger, didFailLoad } = await mounted()
+
+    // Electron 的签名是 (event, errorCode, errorDescription, validatedURL, isMainFrame, …)：
+    // 真机探针 probe-did-fail-load-subframe.cjs 实测子框架失败为 isMainFrame=false。
+    didFailLoad({}, -312, 'ERR_UNSUPPORTED', 'blob:http://127.0.0.1:43120/dead-frame', false)
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(electron.loadURL, '子框架失败不得触发任何导航').not.toHaveBeenCalled()
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('subframe failed to load'))
+    // 日志必须带 validatedURL：否则线上只有一句"某处失败了"。
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('blob:http://127.0.0.1:43120/dead-frame'))
+    await release()
+  })
+
+  it('主框架失败仍然走一次自动恢复；缺第 5 参时按"不确定"处理（B-01 反向对照）', async () => {
+    const { release, didFailLoad } = await mounted()
+
+    didFailLoad({}, -105, 'ERR_NAME_NOT_RESOLVED', 'http://127.0.0.1:43120/', true)
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) })
+    expect(electron.loadURL).toHaveBeenLastCalledWith('http://127.0.0.1:43120/')
+    await release()
+
+    // 防御性判空：旧/新 Electron 少给第 5 参时**不**自动恢复（宁可少一次自动重试，
+    // 也不能让未知来源的失败掀掉整窗）。
+    const second = await mounted()
+    second.didFailLoad({}, -105, 'ERR_NAME_NOT_RESOLVED', 'http://127.0.0.1:43120/')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(electron.loadURL).not.toHaveBeenCalled()
+    await second.release()
+  })
+
+  it('崩溃与加载失败并发时只发一次导航，之后只显示错误页（B-03）', async () => {
+    const { release, logger, gone, didFailLoad } = await mounted()
+
+    // 渲染进程崩溃时 Electron 会**同时**派发进程级与导航级两个事件。
+    gone({}, { reason: 'crashed', exitCode: 1 })
+    didFailLoad({}, -105, 'ERR_NAME_NOT_RESOLVED', 'http://127.0.0.1:43120/', true)
+    await new Promise(resolve => setTimeout(resolve, 40))
+
+    expect(electron.loadURL, '并发事件必须合并成一次 reload').toHaveBeenCalledTimes(1)
+    expect(electron.loadURL).toHaveBeenLastCalledWith('http://127.0.0.1:43120/')
+    // 串行化是显式的（日志可证），不是靠"恰好没并发"。
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('recovery already in flight'))
+
+    // 第三次事件：重试额度已用尽 ⇒ 只显示错误页，绝不再次 reload 应用 URL。
+    gone({}, { reason: 'crashed', exitCode: 1 })
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) })
+    expect(String(electron.loadURL.mock.calls[1]?.[0])).toContain('data:text/html')
+    await release()
   })
 })

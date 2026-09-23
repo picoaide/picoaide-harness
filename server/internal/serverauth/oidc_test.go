@@ -211,7 +211,7 @@ func TestOIDCConfigure(t *testing.T) {
 func TestOIDCAuthURL(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
-	u, err := p.AuthURL("state-1", "")
+	u, err := p.AuthURL("state-1", "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestOIDCHandleCallbackSuccess(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s1"
-	authURL, err := p.AuthURL(state, "")
+	authURL, err := p.AuthURL(state, "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestOIDCHandleCallbackWrongCode(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s2"
-	authURL, err := p.AuthURL(state, "")
+	authURL, err := p.AuthURL(state, "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestOIDCHandleCallbackNonceMismatch(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
 	state := "s3"
-	authURL, err := p.AuthURL(state, "")
+	authURL, err := p.AuthURL(state, "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestOIDCRoutes(t *testing.T) {
 func TestOIDCStateSingleUse(t *testing.T) {
 	idp := newFakeIDP(t)
 	p := newOIDCProvider(t, idp)
-	authURL, err := p.AuthURL("s4", "")
+	authURL, err := p.AuthURL("s4", "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestOIDCExchangeTimeout(t *testing.T) {
 	defer func() { oidcExchangeTimeout = prev }()
 
 	state := "s-timeout"
-	authURL, err := p.AuthURL(state, "")
+	authURL, err := p.AuthURL(state, "", "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}

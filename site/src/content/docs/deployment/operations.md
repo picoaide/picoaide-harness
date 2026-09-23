@@ -104,7 +104,7 @@ picoaide-harness.example.com {
 | 上游密钥 | AES-GCM 加密存储（`enc:v1:`，master key 文件 0600），永不落明文 |
 | 员工令牌 | 只存 SHA-256 哈希、90 天过期；改密 / 降权 / 禁用**同事务**吊销全部令牌 |
 | 管理端会话 | 12 小时硬上限 + 60 分钟空闲滑动过期；CSRF 与会话绑定（HMAC 时间窗） |
-| 登录限流 | 双桶（按账号与来源），10 次 / 5 分钟；`PICOAI_TRUSTED_PROXIES` 决定来源 IP 的取法 |
+| 登录限流 | 只对失败计数、5 分钟滑动窗口，成功即清空：账号键 10 次（`u:用户名` 与 `ip+用户名` 共用一份预算）；来源 IP 60 次（`PICOAI_TRUSTED_PROXIES` 决定来源 IP 的取法） |
 | 内容可见性 | 市场与共享内容"审核 + 授权"双门制；未授权一律 404，不泄露存在性 |
 | 审计 | 用户 / 部门 / 配额 / 定价 / 审批 / 授权 / 余额等关键操作全程留痕，哈希链防篡改 |
 | 客户端接入 | 登录页与客户端拒绝非 HTTPS 远程地址（TOFU）；安装包 SHA-256 校验 |
@@ -123,7 +123,7 @@ picoaide-harness.example.com {
 | 证书告警 / 客户端连不上 | `internal` 模式需信任 Caddy 本地 CA；`auto` 模式确认域名直连本机且 80 端口对公网开放 |
 | 员工端"检查更新永远说已是最新" | 清单里出现 `client_unavailable`：配 `PICOAI_PUBLIC_BASE_URL` |
 | webadmin「发现新版本」不出现 | 渠道三值不自洽（见[渠道与白标](/deployment/channels/#排障)）；服务端有 6 小时缓存 |
-| 忘记超管密码 | 用另一个 super_admin 在管理后台重置；或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| 忘记超管**密码** | 有**其他超管**时让其在管理后台「用户管理 → 重置密码」重置（重置即吊销该账号全部会话，并强制下次登录改密）。⚠️ `--reset-mfa <user>` **不重置密码**：它只清 MFA 并吊销会话，用于「密码记得、验证器丢了」；唯一超管且密码也丢了时它救不了（目标未配 MFA 时只打印 `nothing to reset` 就退出，`--bootstrap-admin` 在已有超管时也直接跳过）。此时只能在库上改写该账号的 `users.password_hash`（Argon2id 编码串，格式见 `server/internal/util/password.go`）并把 `password_must_change` 置 1，改完立即登录改密；动手前按[升级前检查](/deployment/upgrade/#2-升级前检查)先做备份 |
 
 ## 常用命令
 

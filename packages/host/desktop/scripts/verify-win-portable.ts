@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import AdmZip from 'adm-zip'
 import { assertPortableExecutableBuffer } from './verify-win-installer.ts'
 import { channelArtifactName, resolveChannelBuildContext } from './channel-build.ts'
+import { isDirectInvocation } from './direct-invocation.mjs'
 
 export interface WindowsPortableVerificationOptions {
   /** Desktop package root containing package.json and dist. */
@@ -67,8 +68,7 @@ export function verifyWindowsPortable(
   return portablePath
 }
 
-const invokedPath = process.argv[1]
-if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+if (isDirectInvocation(import.meta)) {
   try {
     console.log(`Windows portable verification passed: ${verifyWindowsPortable()}`)
   } catch (error) {

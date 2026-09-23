@@ -79,9 +79,17 @@ func TestConcurrentFirstPublishHasExactlyOneWinner(t *testing.T) {
 		if rels[0].Publisher != app.Owner {
 			t.Fatalf("round %d: owner=%q but the only release was published by %q", i, app.Owner, rels[0].Publisher)
 		}
-		wantTitle := "TITLE-BY-" + strings.ToUpper(app.Owner)
+		// 投影行(apps.title)在**待审**期间必须是 app_id 占位,绝不能带包内
+		// 标题 —— 否则作者提交一个"改名成 IT 密码重置"的待审版本就立刻出现在
+		// 目录上(审计 2026-09-23 G-P2-3)。真实标题活在版本行上,approve 之后
+		// 由 serverstore.RecomputeAppProjection 落到投影行。
+		wantTitle := name
 		if app.Title != wantTitle {
-			t.Fatalf("round %d: title = %q, want %q (败者不得覆写赢家的展示名)", i, app.Title, wantTitle)
+			t.Fatalf("round %d: title = %q, want %q (待审版本不得投影标题;败者更不得覆写赢家的展示名)",
+				i, app.Title, wantTitle)
+		}
+		if want := "TITLE-BY-" + strings.ToUpper(app.Owner); rels[0].Title != want {
+			t.Fatalf("round %d: release title = %q, want %q (真相必须留在版本行上)", i, rels[0].Title, want)
 		}
 	}
 	if bothAccepted > 0 {

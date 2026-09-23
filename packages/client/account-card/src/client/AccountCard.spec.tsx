@@ -37,6 +37,8 @@
  *     去掉 `click` ⇒「只有 click 的激活也关掉」红（审计 P1 的回归守卫）；
  *   - Esc 关闭时不 `rowRef.current?.focus()` ⇒「焦点回到行」红；
  *   - 打开后不 `popoverElement.focus()` ⇒「焦点进入浮层」红；
+ *   - 浮层去掉 `aria-modal="true"` ⇒「焦点进入浮层」用例红（2026-09-23：这一对
+ *     ARIA 属性是面板装载器让位的判据，两层的回归见 panel-esc.spec.tsx）；
  *   - 重入闸退回 state 判据（`if (refreshing) return`）⇒ 两条"连点两次"红；
  *   - 位置 effect 退回只依赖稳定 ref（不跟锚点元素）⇒「宽 → 窄轨重算」红；
  *   - 401 分支改成只写 state 不清 data ⇒「401 后不再显示金额」红。
@@ -476,8 +478,11 @@ describe('无障碍焦点（审计 P2-a11y）', () => {
     expect(panel.getAttribute('tabindex')).toBe('-1')
     expect(document.activeElement).toBe(panel)
     expect(panel.contains(document.activeElement)).toBe(true)
-    // 浮层不是模态：不许用 aria-modal（兄弟「更多」行的 Esc 守卫会礼让模态）。
-    expect(panel.getAttribute('aria-modal')).toBeNull()
+    // 浮层是**模态**：`aria-modal="true"` 是面板装载器"把 Esc 让给内层模态"的判据
+    // （2026-09-23 修复「一次 Esc 关两层」前这里写的是"不许加 aria-modal"——
+    // 少了它装载器不认这层模态，同一次 Esc 会把整页面板一起关掉；
+    // 两层的回归用例见 panel-esc.spec.tsx）。
+    expect(panel.getAttribute('aria-modal')).toBe('true')
     await pressKey('Escape')
     expect(document.activeElement).toBe(row)
   })

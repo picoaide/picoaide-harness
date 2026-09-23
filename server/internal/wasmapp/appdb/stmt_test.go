@@ -241,12 +241,14 @@ func TestQueryTruncatesAtRowLimit(t *testing.T) {
 	}
 }
 
-// TestQueryTruncatesAtByteLimit 覆盖 §4.5 返回字节上限 8 MiB。
+// TestQueryTruncatesAtByteLimit 覆盖 §4.5 返回字节上限（= limits.SQLMaxResultBytes，
+// 2026-09-23 审计 A-1 起为 168 KiB —— 与单帧预算自洽的值）。
 func TestQueryTruncatesAtByteLimit(t *testing.T) {
 	d := newTestDB(t, "bytes-app")
 	defineTable(t, d, "big", col("v", "text"))
 	ctx := context.Background()
-	chunk := strings.Repeat("x", 900*1024) // 单值 < SQLITE_LIMIT_LENGTH(1 MiB)
+	// 每行 32 KiB（单行远小于预算），10 行累计 320 KiB > 预算 ⇒ 截断。
+	chunk := strings.Repeat("x", 32*1024)
 	for i := 0; i < 10; i++ {
 		mustExec(t, d, "INSERT INTO big(v) VALUES (?)", chunk)
 	}
@@ -255,10 +257,10 @@ func TestQueryTruncatesAtByteLimit(t *testing.T) {
 		t.Fatalf("Query 失败：%v", err)
 	}
 	if !res.Truncated {
-		t.Fatalf("超过 8 MiB 必须截断（返回 %d 行）", len(res.Rows))
+		t.Fatalf("超过返回字节上限必须截断（返回 %d 行）", len(res.Rows))
 	}
 	if len(res.Rows) >= 10 {
-		t.Fatalf("应在 8 MiB 上限处停下，实际返回 %d 行", len(res.Rows))
+		t.Fatalf("应在字节上限处停下，实际返回 %d 行", len(res.Rows))
 	}
 	var total int64
 	for _, row := range res.Rows {

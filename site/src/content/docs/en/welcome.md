@@ -11,7 +11,7 @@ PicoAide Harness is an **enterprise-grade DeepSeek Harness all-in-one platform**
 |---|---|
 | **Desktop client** | Native window, chat, Capability Hub, connectors, scheduled jobs, browser, memory — the everyday entry point for employees |
 | **Local agent engine** | Automatically starts/stops/recovers the official DeepSeek Harness service (a fixed version, run unchanged); data stays on your machine |
-| **Enterprise server + admin console** | Accounts (local / LDAP / OIDC), model gateway, rate limiting, metering & billing, department budgets, market & shared approvals, audit |
+| **Enterprise server + admin console** | Accounts (local / LDAP / OIDC), model gateway, rate limiting, metering & billing with the balance gate, market & shared approvals, audit |
 
 ## Reading path
 

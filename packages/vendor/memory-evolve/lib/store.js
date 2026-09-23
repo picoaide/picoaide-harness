@@ -258,6 +258,27 @@ export function stripEntrySummary(entry) {
   return prefix + rest.replace(/^\[summary:[^\]]*\]\s*/, '')
 }
 
+/**
+ * 条目**匹配键**（§7 / 上游 issue #59 的本地加固，2026-09-23）：剥掉展示层会剥的
+ * 两个程序标记（`[id:…]` 身份证 + 头部 `[summary:…]`）之后的文本。
+ *
+ * **展示剥离与匹配剥离共用同一份实现**：记忆 Tab / 告警快照展示走
+ * `stripEntrySummary(stripEntryId(entry))`（lib/index.js 的
+ * `:772`/`:809`/`:1072`/`:1435`/`:1513`/`:1683`/`:1764`），匹配层必须用同一个键，
+ * 否则用户在界面上看到的文本回传给后端就"不存在"。
+ *
+ * 缺陷形态（上游 #59）：匹配层此前只剥身份证（`findExactIndex`），或是严格整体
+ * 相等（`peekExact` / `ArchiveStore.removeExact`）⇒ 带 `[summary:…]` 的条目在记忆
+ * Tab 无法删除/编辑/归档，归档页里带 `[id:…]` 的条目连删除也失败。
+ *
+ * @param {string} entry - 完整条目文本（磁盘原文或界面回传文本）。
+ * @returns {string} 匹配键。
+ */
+export function entryMatchKey(entry) {
+  // stripEntrySummary 是同文件的函数声明（提升），无循环依赖。
+  return stripEntrySummary(stripEntryId(String(entry ?? '')))
+}
+
 export function serializeEntries(entries) {
   return entries.join(ENTRY_DELIMITER) + '\n'
 }
@@ -365,16 +386,18 @@ export function isProjectSyncEnabled(dir) {
 }
 
 /**
- * 精确匹配索引（对身份证免疫）：strip 相等比较——展示层剥离 [id:…] 后回传
- * 的文本仍能命中磁盘原文（审查 P0：Tab/API 精确操作在启用 sync 后失效）。
+ * 精确匹配索引（对展示层剥掉的程序标记免疫）：`entryMatchKey` 相等比较——
+ * 展示层剥掉 `[id:…]` 与 `[summary:…]` 后回传的文本仍能命中磁盘原文
+ * （审查 P0：Tab/API 精确操作在启用 sync 后失效；§7：带 `[summary:…]` 的条目
+ * 无法删除/编辑/归档）。
  * 返回唯一命中下标；0 条/多条返回 -1（调用方按"不存在"处理——多条属数据
  * 异常，保守拒绝）。
  */
 function findExactIndex(entries, exact) {
-  const target = stripEntryId(exact)
+  const target = entryMatchKey(exact)
   let found = -1
   for (let i = 0; i < entries.length; i++) {
-    if (stripEntryId(entries[i]) === target) {
+    if (entryMatchKey(entries[i]) === target) {
       if (found !== -1) return -1 // 多条命中 → 歧义，拒绝
       found = i
     }
@@ -1288,7 +1311,9 @@ export class MemoryStore {
 
   /**
    * Preview whether an EXACT whole-entry match exists (same matching
-   * semantics as removeExact, read-only, writes nothing). 供「先归档、
+   * semantics as removeExact — the `entryMatchKey` comparison, so the
+   * display-stripped text the UI sends back still matches — read-only,
+   * writes nothing). 供「先归档、
    * 后删除」场景在写入归档文件前校验目标条目确实存在于主轨——避免
    * 无效请求（非整条子串、已删除条目）先把垃圾内容写进归档文件。
    * @param {string} target - the memory track ('memory' | 'user' | 'daily' |
@@ -1316,7 +1341,7 @@ export class MemoryStore {
       if (reload.kind === 'read-failed') {
         return { ok: false, message: st('store.fileUnreadableOp'), target }
       }
-      if (!reload.entries.includes(exact)) {
+      if (findExactIndex(reload.entries, exact) === -1) {
         return { ok: false, message: stt('storetail.mainMissing'), target }
       }
       return { ok: true, entry: exact, target }
@@ -1842,10 +1867,22 @@ export class ArchiveStore {
     // 与 append/remove 同一锁域（P1-8；此前误用 this.dir → key 轨丢更新）
     return this.underWriteLock(this.archiveLockDir(target, cwd), () => {
       const entries = this.entriesOf(target, cwd)
-      const index = entries.indexOf(content)
-      if (index === -1) {
+      // §7（上游 issue #59，2026-09-23）：归档页展示时剥掉了 `[id:…]`，此前这里是
+      // 严格 `entries.indexOf(content)` ⇒ 带身份证（或头部 `[summary:…]`）的条目在
+      // 归档页"删除"永远报不存在。匹配键与展示层同一份实现（`entryMatchKey`）；
+      // 多条命中按歧义拒绝，与 `remove`/`findExactIndex` 同口径。
+      const key = entryMatchKey(content)
+      const hits = []
+      for (let i = 0; i < entries.length; i++) {
+        if (entryMatchKey(entries[i]) === key) hits.push(i)
+      }
+      if (hits.length === 0) {
         return { ok: false, message: stt('storetail.archiveEntryMissing') }
       }
+      if (hits.length > 1) {
+        return { ok: false, message: stt('storetail.archiveMultiMatch', { match: content, count: hits.length }) }
+      }
+      const index = hits[0]
       const next = [...entries]
       next.splice(index, 1)
       // 建目录本身也会穿透符号链接祖先：建目录前先复检（TOCTOU 第二层）

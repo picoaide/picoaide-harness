@@ -17,7 +17,9 @@ package serverstore
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -446,26 +448,33 @@ func TestClaimExpiredGatewayFileConcurrentClaimsExactlyOneWins(t *testing.T) {
 		var wg sync.WaitGroup
 		oks := make([]bool, 2)
 		errs := make([]error, 2)
+		snaps := make([]GatewayFileForReap, 2)
 		for k := 0; k < 2; k++ {
 			wg.Add(1)
 			go func(k int) {
 				defer wg.Done()
 				<-start
-				_, ok, err := ClaimExpiredGatewayFile(db, id)
-				oks[k], errs[k] = ok, err
+				snap, ok, err := ClaimExpiredGatewayFile(db, id)
+				snaps[k], oks[k], errs[k] = snap, ok, err
 			}(k)
 		}
 		close(start)
 		wg.Wait()
 
 		wins := 0
+		var gen int64
 		for k := 0; k < 2; k++ {
 			if errs[k] != nil {
 				t.Fatalf("第 %d 轮 goroutine %d 报错: %v", i, k, errs[k])
 			}
 			if oks[k] {
 				wins++
+				gen = snaps[k].ReapGeneration
 			}
+		}
+		// R4-C-1：胜者必须拿到一个非零世代（fencing token），收尾要带上它。
+		if gen == 0 {
+			t.Fatalf("第 %d 轮认领未返回世代号（fencing token 缺失）", i)
 		}
 		if wins != 1 {
 			t.Fatalf("第 %d 轮成功数 = %d, want 1（oks=%v）", i, wins, oks)
@@ -481,8 +490,10 @@ func TestClaimExpiredGatewayFileConcurrentClaimsExactlyOneWins(t *testing.T) {
 		if left != 1 || !marked {
 			t.Fatalf("第 %d 轮认领后应保留带标记的行（left=%d marked=%v）", i, left, marked)
 		}
-		if err := FinishReapedGatewayFile(db, id); err != nil {
+		if finished, err := FinishReapedGatewayFile(db, id, gen); err != nil {
 			t.Fatal(err)
+		} else if !finished {
+			t.Fatalf("第 %d 轮收尾应删掉本世代的行（finished=false）", i)
 		}
 		if err := db.QueryRow(`SELECT count(*) FROM gateway_files WHERE file_id = ?`, id).Scan(&left); err != nil {
 			t.Fatal(err)
@@ -624,14 +635,17 @@ func TestPurgeAndClaimCrossPaths(t *testing.T) {
 	if err := RecordGatewayFile(db, "cross-1", alice, &past); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := ClaimExpiredGatewayFile(db, "cross-1"); err != nil || !ok {
+	cross1, ok, err := ClaimExpiredGatewayFile(db, "cross-1")
+	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if n, err := PurgeExpiredGatewayFiles(db, 10); err != nil || n != 0 {
 		t.Fatalf("claim 之后 purge = %d/%v, want 0/nil（标记行必须被跳过）", n, err)
 	}
-	if err := FinishReapedGatewayFile(db, "cross-1"); err != nil {
+	if finished, err := FinishReapedGatewayFile(db, "cross-1", cross1.ReapGeneration); err != nil {
 		t.Fatal(err)
+	} else if !finished {
+		t.Fatal("收尾应删掉本世代的行")
 	}
 	if n, err := PurgeExpiredGatewayFiles(db, 10); err != nil || n != 0 {
 		t.Fatalf("收尾之后 purge 仍应为 0（行已删）: %d/%v", n, err)
@@ -1224,14 +1238,20 @@ func TestReapClaimKeepsLedgerRowUntilFinish(t *testing.T) {
 	if exists, err := GatewayFileRowExists(db, "n12-1"); err != nil || !exists {
 		t.Fatalf("认领后行必须仍在（写回路径因此不再需要）: exists=%v err=%v", exists, err)
 	}
-	if held, err := GatewayFileReapClaimHeld(db, "n12-1"); err != nil || !held {
+	if held, err := GatewayFileReapClaimHeld(db, "n12-1", snap.ReapGeneration); err != nil || !held {
 		t.Fatalf("认领后标记必须持有: held=%v err=%v", held, err)
+	}
+	// R4-C-1：世代号是删除权的令牌 —— 别的世代（哪怕只差 1）不得被认为仍持有。
+	if held, err := GatewayFileReapClaimHeld(db, "n12-1", snap.ReapGeneration+1); err != nil || held {
+		t.Fatalf("世代不匹配时不得认为仍持有删除权: held=%v err=%v", held, err)
 	}
 	if snap.CreatedAt.IsZero() {
 		t.Fatal("认领快照必须带 created_at（管理端上传时间的唯一来源）")
 	}
-	if err := FinishReapedGatewayFile(db, "n12-1"); err != nil {
+	if finished, err := FinishReapedGatewayFile(db, "n12-1", snap.ReapGeneration); err != nil {
 		t.Fatal(err)
+	} else if !finished {
+		t.Fatal("收尾应删掉本世代的行")
 	}
 	if exists, _ := GatewayFileRowExists(db, "n12-1"); exists {
 		t.Fatal("收尾后行才应消失")
@@ -1308,34 +1328,201 @@ func TestFinishReapedGatewayFileRefusesRowWhoseClaimWasCleared(t *testing.T) {
 	if err := RecordGatewayFile(db, "h9-1", alice, &past); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := ClaimExpiredGatewayFile(db, "h9-1"); err != nil || !ok {
+	snap1, ok, err := ClaimExpiredGatewayFile(db, "h9-1")
+	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	// 续期（换人）= 清空标记 ⇒ 收尾必须放弃删行。
+	// R4-C-1：认领仍在租约内时，转手（换人登记）必须被**拒绝** —— 否则在飞的
+	// 上游 DELETE 会删掉新上传者的对象，而台账仍说他有效。返回的必须是可判定的
+	// 哨兵错误（上传路径据此放弃这个 id）。
+	if err := RecordGatewayFile(db, "h9-1", bob, &future); !errors.Is(err, ErrGatewayFileReapClaimed) {
+		t.Fatalf("租约内的转手应被拒绝并返回 ErrGatewayFileReapClaimed，实得 %v", err)
+	}
+	var ownerAfterRefusal int64
+	if err := db.QueryRow(`SELECT user_id FROM gateway_files WHERE file_id = 'h9-1'`).Scan(&ownerAfterRefusal); err != nil {
+		t.Fatal(err)
+	}
+	if ownerAfterRefusal != alice {
+		t.Fatalf("被拒绝的转手却改了归属: owner=%d want %d（原主）", ownerAfterRefusal, alice)
+	}
+	// 租约过期（认领方卡住/崩溃）⇒ 转手恢复允许，同时**世代推进** ⇒ 老世代的
+	// 删除权立即失效：收尾必须放弃删行。
+	if _, err := db.Exec(`UPDATE gateway_files SET reaping_at = now() - interval '11 minutes' WHERE file_id = 'h9-1'`); err != nil {
+		t.Fatal(err)
+	}
 	if err := RecordGatewayFile(db, "h9-1", bob, &future); err != nil {
 		t.Fatal(err)
 	}
-	if held, err := GatewayFileReapClaimHeld(db, "h9-1"); err != nil || held {
-		t.Fatalf("续期后标记必须已清空: held=%v err=%v", held, err)
+	if held, err := GatewayFileReapClaimHeld(db, "h9-1", snap1.ReapGeneration); err != nil || held {
+		t.Fatalf("租约过期后转手⇒老世代不得再持有删除权: held=%v err=%v", held, err)
 	}
-	if err := FinishReapedGatewayFile(db, "h9-1"); err != nil {
+	if finished, err := FinishReapedGatewayFile(db, "h9-1", snap1.ReapGeneration); err != nil {
 		t.Fatal(err)
+	} else if finished {
+		t.Fatal("老世代的收尾不得删掉新一代的行")
 	}
 	owner, ok, err := GatewayFileOwner(db, "h9-1")
 	if err != nil || !ok || owner != bob {
 		t.Fatalf("续期后的活行被收尾误删了: owner=%d ok=%v err=%v", owner, ok, err)
 	}
-	// 反向对照：标记仍在时收尾必须真的把行删掉（否则回收会永远清不完）。
+	// 反向对照：标记仍在（且世代匹配）时收尾必须真的把行删掉（否则回收会永远清不完）。
 	if err := RecordGatewayFile(db, "h9-2", alice, &past); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := ClaimExpiredGatewayFile(db, "h9-2"); !ok {
+	snap2, ok, _ := ClaimExpiredGatewayFile(db, "h9-2")
+	if !ok {
 		t.Fatal("claim h9-2 failed")
 	}
-	if err := FinishReapedGatewayFile(db, "h9-2"); err != nil {
+	if finished, err := FinishReapedGatewayFile(db, "h9-2", snap2.ReapGeneration); err != nil {
 		t.Fatal(err)
+	} else if !finished {
+		t.Fatal("标记仍在时收尾必须删行")
 	}
 	if exists, _ := GatewayFileRowExists(db, "h9-2"); exists {
 		t.Fatal("标记仍在时收尾必须删行")
 	}
+}
+
+// TestRecordGatewayFileRefusesTransferDuringActiveClaim 是 R4-C-1 的核心判据：
+// 「删除权」收敛成带世代号的令牌后，**认领在租约内时登记路径拒绝转手** —— 两个写者
+// 对同一个 file_id 不可能同时成立（回收器要删的对象不会被"新一代"接管）。
+//
+// 三种时机的语义边界（都必须成立，缺一条就退化成"窗口变窄"）：
+//  1. 租约内转手 ⇒ 拒绝 + ErrGatewayFileReapClaimed（上传路径放弃该 id）；
+//  2. 租约过期后转手 ⇒ 允许，但世代推进 ⇒ 老世代的删除权失效（收尾不动新行）；
+//  3. 释放认领（上游删除失败的重试路径）后转手 ⇒ 允许（行回到"可转手"状态）。
+func TestRecordGatewayFileRefusesTransferDuringActiveClaim(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	t.Cleanup(cleanup)
+	alice := mustUser(t, db, "gw-claim-alice")
+	bob := mustUser(t, db, "gw-claim-bob")
+	past := time.Now().Add(-time.Minute)
+	future := time.Now().Add(time.Hour)
+
+	// ① 租约内：换人登记与同人续期都必须被拒绝（对象正在被删，谁都不能接管）。
+	for _, tc := range []struct {
+		name  string
+		owner int64
+	}{
+		{"换人登记", bob}, {"同人续期", alice},
+	} {
+		id := "claim-refuse-" + strconv.FormatInt(tc.owner, 10)
+		if err := RecordGatewayFile(db, id, alice, &past); err != nil {
+			t.Fatal(err)
+		}
+		snap, ok, err := ClaimExpiredGatewayFile(db, id)
+		if err != nil || !ok {
+			t.Fatalf("%s: claim ok=%v err=%v", tc.name, ok, err)
+		}
+		if err := RecordGatewayFile(db, id, tc.owner, &future); !errors.Is(err, ErrGatewayFileReapClaimed) {
+			t.Fatalf("%s: 租约内必须拒绝并返回 ErrGatewayFileReapClaimed，实得 %v", tc.name, err)
+		}
+		var genAfter int64
+		if err := db.QueryRow(`SELECT reap_gen FROM gateway_files WHERE file_id = ?`, id).Scan(&genAfter); err != nil {
+			t.Fatal(err)
+		}
+		if genAfter != snap.ReapGeneration {
+			t.Fatalf("%s: 被拒绝的登记不得推进世代（%d → %d）", tc.name, snap.ReapGeneration, genAfter)
+		}
+		// 回收器随后照常收尾（对象确实该删）。
+		if finished, err := FinishReapedGatewayFile(db, id, snap.ReapGeneration); err != nil || !finished {
+			t.Fatalf("%s: 收尾失败 finished=%v err=%v", tc.name, finished, err)
+		}
+	}
+
+	// ② 租约过期后：转手允许且世代推进 ⇒ 老世代失效。
+	const idExpired = "claim-lease-expired"
+	if err := RecordGatewayFile(db, idExpired, alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	snapExp, ok, err := ClaimExpiredGatewayFile(db, idExpired)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_files SET reaping_at = now() - interval '11 minutes' WHERE file_id = ?`, idExpired); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, idExpired, bob, &future); err != nil {
+		t.Fatalf("租约过期后的转手应被允许: %v", err)
+	}
+	if held, err := GatewayFileReapClaimHeld(db, idExpired, snapExp.ReapGeneration); err != nil || held {
+		t.Fatalf("转手后老世代必须失效: held=%v err=%v", held, err)
+	}
+	// 老世代的回收器即使硬发 DELETE，也无法收尾（行归新一代）。
+	if finished, err := FinishReapedGatewayFile(db, idExpired, snapExp.ReapGeneration); err != nil || finished {
+		t.Fatalf("老世代收尾不得删行: finished=%v err=%v", finished, err)
+	}
+	if owner, ok, _ := GatewayFileOwner(db, idExpired); !ok || owner != bob {
+		t.Fatalf("新一代的归属被破坏: owner=%d ok=%v", owner, ok)
+	}
+
+	// ④ 世代被**新一次认领**推进：老世代的收尾不得删掉新世代的行。
+	//
+	// 这是"DELETE 返回后校验世代"（R4-C-1 的第二道闸）唯一可观测的形态：转手会清空
+	// reaping_at（`DELETE … WHERE reaping_at IS NOT NULL` 本来就不命中），只有"另一个
+	// 回收器在租约过期后重新认领"才会留下"标记在、世代不同"。此时老世代若把行删掉，
+	// 新认领方就失去了清理责任的唯一凭据 —— 若它在发上游 DELETE 之前崩溃，那份对象
+	// 再无凭据（正是 R7 N11 的设计要避免的配额静默泄漏）。
+	const idReclaimed = "claim-reclaimed"
+	if err := RecordGatewayFile(db, idReclaimed, alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	snapA, ok, err := ClaimExpiredGatewayFile(db, idReclaimed)
+	if err != nil || !ok {
+		t.Fatalf("first claim: ok=%v err=%v", ok, err)
+	}
+	if _, err := db.Exec(`UPDATE gateway_files SET reaping_at = now() - interval '11 minutes' WHERE file_id = ?`, idReclaimed); err != nil {
+		t.Fatal(err)
+	}
+	snapB, ok, err := ClaimExpiredGatewayFile(db, idReclaimed)
+	if err != nil || !ok {
+		t.Fatalf("second claim: ok=%v err=%v", ok, err)
+	}
+	if snapB.ReapGeneration <= snapA.ReapGeneration {
+		t.Fatalf("重新认领必须推进世代（%d → %d）", snapA.ReapGeneration, snapB.ReapGeneration)
+	}
+	if held, err := GatewayFileReapClaimHeld(db, idReclaimed, snapA.ReapGeneration); err != nil || held {
+		t.Fatalf("老世代不得再持有删除权: held=%v err=%v", held, err)
+	}
+	if finished, err := FinishReapedGatewayFile(db, idReclaimed, snapA.ReapGeneration); err != nil {
+		t.Fatal(err)
+	} else if finished {
+		t.Fatal("老世代的收尾删掉了新认领方的行（新认领方失去清理凭据）")
+	}
+	if !lane1RowStillMarked(db, idReclaimed) {
+		t.Fatal("老世代的收尾之后，新世代的带标记行必须仍在")
+	}
+	if finished, err := FinishReapedGatewayFile(db, idReclaimed, snapB.ReapGeneration); err != nil {
+		t.Fatal(err)
+	} else if !finished {
+		t.Fatal("新世代自己的收尾必须删掉行")
+	}
+
+	// ③ 释放认领（上游删除失败 ⇒ 立刻重试路径）后：转手允许。
+	const idReleased = "claim-released"
+	if err := RecordGatewayFile(db, idReleased, alice, &past); err != nil {
+		t.Fatal(err)
+	}
+	snapRel, ok, err := ClaimExpiredGatewayFile(db, idReleased)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := ReleaseReapClaim(db, idReleased); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordGatewayFile(db, idReleased, bob, &future); err != nil {
+		t.Fatalf("释放认领后的转手应被允许: %v", err)
+	}
+	if held, err := GatewayFileReapClaimHeld(db, idReleased, snapRel.ReapGeneration); err != nil || held {
+		t.Fatalf("释放后老世代必须失效: held=%v err=%v", held, err)
+	}
+}
+
+// lane1RowStillMarked 报告该行是否仍存在且带回收标记（测试用）。
+func lane1RowStillMarked(db *sql.DB, fileID string) bool {
+	var marked bool
+	if err := db.QueryRow(`SELECT reaping_at IS NOT NULL FROM gateway_files WHERE file_id = ?`, fileID).Scan(&marked); err != nil {
+		return false
+	}
+	return marked
 }

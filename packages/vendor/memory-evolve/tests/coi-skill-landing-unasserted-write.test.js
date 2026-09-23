@@ -51,6 +51,23 @@ function seedVictim(path, body = OUTSIDE_TEXT) {
   return path
 }
 
+/**
+ * 给一个目标技能目录写本插件的溯源（`.picoaide/release.json`，channel: 'plugin'）。
+ *
+ * 2026-09-23 P1-1 来源闸门引入后，整树换入**只**对本插件自己写下的目录生效；
+ * 下面的落点断言用例必须先过这道闸门，否则"refused"来自闸门而不是符号链接/
+ * 越界断言 —— 断言照样绿，覆盖却没了（假绿）。
+ * @param {string} dir - 目标技能目录（会被创建）。
+ * @returns {void}
+ */
+function seedPluginProvenance(dir) {
+  mkdirSync(join(dir, '.picoaide'), { recursive: true })
+  writeFileSync(
+    join(dir, '.picoaide', 'release.json'),
+    `${JSON.stringify({ appId: BUILTIN, version: '1', channel: 'plugin', installedAt: '2026-09-01T00:00:00.000Z' }, null, 2)}\n`,
+  )
+}
+
 /** 递归收集 lib/**\/*.js（跳过打包产物）。 */
 function walkJs(dir) {
   const out = []
@@ -161,6 +178,10 @@ test('syncBuiltinSkills refuses a pre-placed symlink at the final SKILL.md landi
     const userSkills = join(dir, 'skills')
     const victim = seedVictim(join(dir, 'victim.txt'), `---\nname: ${BUILTIN}\ndescription: x\nx-version: 0\n---\nSTALE-SEED\n`)
     mkdirSync(join(userSkills, BUILTIN), { recursive: true })
+    // P1-1 来源闸门（2026-09-23 W4）：整树换入只对**本插件自己**的目录生效，所以
+    // 这里必须先给目标目录一份 plugin 溯源，否则用例会先被闸门拒掉、**测不到**
+    // 落点断言（假绿：看起来 refused，其实不是符号链接那条路径拒的）。
+    seedPluginProvenance(join(userSkills, BUILTIN))
     symlinkSync(victim, join(userSkills, BUILTIN, 'SKILL.md'))
 
     const { syncBuiltinSkills, BUILTIN_SKILLS } = await import('../lib/coi/skills-sync.js')
@@ -170,6 +191,7 @@ test('syncBuiltinSkills refuses a pre-placed symlink at the final SKILL.md landi
     const entry = results.find((r) => r.name === BUILTIN)
     assert.notEqual(entry.action, 'synced', '落点被拒却仍报 synced 成功：调用方无法感知写穿')
     assert.equal(entry.action, 'refused')
+    assert.equal(entry.code, undefined, '必须是落点断言（writeTargetRefusedError）拒的，不是来源闸门')
     // 其余内置技能不受影响（单个落点被拒不阻塞整轮同步）。数量按清单算，
     // 不再硬编码——上游 v26091501 新增 memory-consolidate，硬编码 3 会假红。
     assert.equal(results.filter((r) => r.action === 'synced').length, BUILTIN_SKILLS.length - 1)
@@ -186,6 +208,8 @@ test('syncBuiltinSkills refuses a symlinked skill directory escaping the skill l
     const outside = join(dir, 'elsewhere', BUILTIN)
     mkdirSync(userSkills, { recursive: true })
     mkdirSync(outside, { recursive: true })
+    // 同前：给库外目标一份 plugin 溯源，让判定走到"目录本身是符号链接"那条断言。
+    seedPluginProvenance(outside)
     symlinkSync(outside, join(userSkills, BUILTIN))
 
     const { syncBuiltinSkills } = await import('../lib/coi/skills-sync.js')

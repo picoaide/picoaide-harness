@@ -1082,3 +1082,116 @@ func TestGatewayHeartbeatSetting(t *testing.T) {
 		t.Fatalf("level = %q, want warning", v)
 	}
 }
+
+// TestAdminProviderEditKeepsModelPricing 覆盖 G-01(P0,审计 2026-09-23)的
+// **端到端管理面路径**:webadmin「编辑上游 → 保存」把弹窗预填的 models 列表
+// 回传给 PUT /api/server/admin/providers/:id。旧实现只要收到 models 就走
+// SyncProviderModels(DELETE 全部 + 只插三列),于是改个名字/切个启用都会把该
+// 上游全部价格/缓存价/峰谷折扣/default_params/input_modalities 清零 —— 之后
+// 调用照常 200、token 照记、cost=0,而且**一条审计都不写**。
+//
+// 修后的三条不变量:
+//  1. 清单未变 ⇒ 服务端根本不调用同步(原样保存 = 无操作);
+//  2. 清单真变 ⇒ 只 upsert + 剪枝,既有行的定价/参数/模态分毫不动;
+//  3. 价格类字段的变化必须进审计(detail 里含 models_prices 与 price:<model>)。
+func TestAdminProviderEditKeepsModelPricing(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	if w, _ := adminReq(t, r, "POST", "/api/server/admin/providers",
+		`{"name":"manual","base_url":"http://x","api_key":"k","models":["m1","m2"]}`, hdr); w.Code != http.StatusOK {
+		t.Fatalf("create provider: %d %s", w.Code, w.Body.String())
+	}
+	modelID := func(name string) int64 {
+		t.Helper()
+		var id int64
+		if err := db.QueryRow(`SELECT id FROM models WHERE name = ?`, name).Scan(&id); err != nil {
+			t.Fatalf("模型 %s 不存在: %v", name, err)
+		}
+		return id
+	}
+	// 管理员定价 + 参数 + 图片模态(经管理端模型接口,与真实操作同路径)
+	for _, name := range []string{"m1", "m2"} {
+		body := fmt.Sprintf(`{"display_name":"%s 展示名","default_params":"{\"max_output\":123,\"context_length\":65536}","input_modalities":["text","image"],"input_price_per_1m":30,"output_price_per_1m":60,"cache_input_price_per_1m":3,"offpeak_discount":0.5}`, name)
+		if w, _ := adminReq(t, r, "PUT", fmt.Sprintf("/api/server/admin/models/%d", modelID(name)), body, hdr); w.Code != http.StatusOK {
+			t.Fatalf("定价 %s: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+	const wantParams = `{"max_output":123,"context_length":65536}`
+	assertPricing := func(stage, name string) {
+		t.Helper()
+		var id int64
+		if err := db.QueryRow(`SELECT id FROM models WHERE name = ?`, name).Scan(&id); err != nil {
+			t.Fatalf("%s: 模型 %s 的行不见了: %v", stage, name, err)
+		}
+		m, err := serverstore.GetModel(db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.InputPricePer1M == nil || *m.InputPricePer1M != 30 ||
+			m.OutputPricePer1M == nil || *m.OutputPricePer1M != 60 {
+			t.Fatalf("%s: 模型 %s 价格被改/清空 = %s/%s, want 30/60",
+				stage, name, priceStr(m.InputPricePer1M), priceStr(m.OutputPricePer1M))
+		}
+		if m.CacheInputPricePer1M == nil || *m.CacheInputPricePer1M != 3 ||
+			m.OffpeakDiscount == nil || *m.OffpeakDiscount != 0.5 {
+			t.Fatalf("%s: 模型 %s 缓存价/峰谷折扣被清空 = %s/%s",
+				stage, name, priceStr(m.CacheInputPricePer1M), priceStr(m.OffpeakDiscount))
+		}
+		if m.DefaultParams != wantParams {
+			t.Fatalf("%s: 模型 %s default_params = %q, want %q", stage, name, m.DefaultParams, wantParams)
+		}
+		if len(m.InputModalities) != 2 || m.InputModalities[0] != "text" || m.InputModalities[1] != "image" {
+			t.Fatalf("%s: 模型 %s input_modalities = %v, want [text image]", stage, name, m.InputModalities)
+		}
+	}
+	putProvider := func(body string) {
+		t.Helper()
+		if w, _ := adminReq(t, r, "PUT", "/api/server/admin/providers/1", body, hdr); w.Code != http.StatusOK {
+			t.Fatalf("update provider: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	// ① 原样保存(清单与既有清单逐字相同)—— P0 的复现路径。
+	putProvider(`{"name":"manual","base_url":"http://x","enabled":true,"protocol":"openai","models":["m1","m2"]}`)
+	assertPricing("原样保存后", "m1")
+	assertPricing("原样保存后", "m2")
+	// display_name 同样是管理员配置:清单没变时服务端必须**根本不调用**清单同步,
+	// 否则 upsert 会把展示名打回模型名(与"原样保存 = 无操作"的要求相悖)。
+	var display string
+	if err := db.QueryRow(`SELECT display_name FROM models WHERE name = 'm1'`).Scan(&display); err != nil {
+		t.Fatal(err)
+	}
+	if display != "m1 展示名" {
+		t.Fatalf("原样保存后 display_name = %q, want %q(清单未变却重建了模型行)", display, "m1 展示名")
+	}
+
+	// ② 清单真的变了(新增 m3):既有行同样不得被重建,新增行按未定价建。
+	putProvider(`{"name":"manual","base_url":"http://x","enabled":true,"protocol":"openai","models":["m1","m2","m3"]}`)
+	assertPricing("清单新增后", "m1")
+	assertPricing("清单新增后", "m2")
+	if pin, pout, _ := serverstore.ModelPricesForProvider(db, 1, "m1"); pin != 30 || pout != 60 {
+		t.Fatalf("清单新增后取价 = %v/%v, want 30/60(计费必须仍然有价)", pin, pout)
+	}
+
+	// ③ 显式从清单里删掉带定价的 m2:行删除(管理员显式意图),但价格变化必须留痕。
+	putProvider(`{"name":"manual","base_url":"http://x","enabled":true,"protocol":"openai","models":["m1","m3"]}`)
+	assertPricing("清单删除后", "m1")
+	var left int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM models WHERE name = 'm2'`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("m2 行数 = %d, want 0(从清单里删掉的模型必须真的不可路由)", left)
+	}
+	var detail string
+	if err := db.QueryRow(`SELECT detail FROM audit_logs WHERE action = 'provider_update' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatalf("provider_update 审计缺失(价格被改/被清必须留痕): %v", err)
+	}
+	if !strings.Contains(detail, "models_prices:1项变更") {
+		t.Fatalf("审计 detail = %q, want 含 models_prices:1项变更", detail)
+	}
+	if !strings.Contains(detail, "price:m2:") || !strings.Contains(detail, "已移除") {
+		t.Fatalf("审计 detail = %q, want 含 price:m2:…→已移除", detail)
+	}
+}

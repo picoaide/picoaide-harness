@@ -21,6 +21,14 @@ export interface BrowserTabState {
   readonly canGoBack: boolean
   /** Whether the tab's navigation history has a next entry. */
   readonly canGoForward: boolean
+  /**
+   * Whether automatic crash recovery gave up on this tab (2026-09-23 audit
+   * BR-2). The renderer crashed more than the bounded number of times in a row,
+   * so the runtime stopped reloading the page; the model sees this marker in
+   * `browser_list_tabs`, and `browser_reload` (or a new navigation) is the
+   * explicit retry that clears it.
+   */
+  readonly crashed: boolean
 }
 
 /** Window visibility of the dedicated browser window. */

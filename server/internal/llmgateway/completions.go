@@ -2,6 +2,7 @@ package llmgateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -167,7 +168,18 @@ func (a *API) forwardEndpoint(c *gin.Context, up *Upstream, body outboundBody, s
 	if stream {
 		client = a.sse
 	}
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(clean))
+	// G-04(审计 2026-09-23):流式请求的 context 必须与客户端断开解耦 ——
+	// 与 forward()(chat,handler.go)及 forwardAnthropic()(messages.go)**同一份
+	// 口径**。沿用 c.Request.Context() 时客户端断连会立刻取消上游请求,上游
+	// 永远不回 usage chunk ⇒ 只剩 4 字节/token 的估算(实测输入侧 1234→12),
+	// 断在正文之前更是整笔零落账;同一条流走 /v1/chat/completions 却如实计费。
+	// drain 的上限仍由 serveStream 的 streamDrainTimeout(2min)与 idle 看门狗
+	// (streamIdleTimeout)兜住,不会无界进行。
+	reqCtx := c.Request.Context()
+	if stream {
+		reqCtx = context.WithoutCancel(reqCtx)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(clean))
 	if err != nil {
 		return nil, err
 	}

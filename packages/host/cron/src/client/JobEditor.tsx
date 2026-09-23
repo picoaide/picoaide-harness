@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { isValidCron, nextRunAtMs } from '../cron.ts'
+import { currentTimeZone, isValidCron, nextRunAtMs } from '../cron.ts'
 import { isCronJobAction, type JobRecord, type NewJobInput } from '../jobs.ts'
 import type { CronController } from './controller.ts'
 import { styles } from './styles.ts'
@@ -233,7 +233,7 @@ export function JobEditor({ controller, job, workspaces, api, onClose }: {
           </div>
           {cronValid && nextRun !== undefined && (
             <span style={styles.jobNext}>
-              {t('job.nextRun')}: {new Date(nextRun).toLocaleString()}
+              {t('job.nextRun')}: {new Date(nextRun).toLocaleString()} ({currentTimeZone()})
             </span>
           )}
         </div>

@@ -8,10 +8,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
@@ -74,8 +76,22 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'lib/document-lock-recovery.js',
   'build/app-icon.png',
   'build/app-icon-mac.png',
+  // G-2（2026-09-23 审计）：`build/` 是**可枚举的构建期产物目录**，而清单此前只
+  // 挑了其中 6 条 —— 删掉 `build/app-icon-mac.png` 这类条目**没有任何判据会红**
+  // （其他用例 `it.each(清单)` 只证明"清单里的条目存在"，删条目=同时删用例）。
+  // 现在由 `tests/verify-packaged-runtime.spec.ts` 的「清单必须覆盖可枚举产物
+  // 目录」用例从磁盘枚举反推：目录里每个真实文件都必须在清单里
+  // （`build/channel.json` 除外 —— 它只有渠道构建才产出，由
+  // verify-channel-package.ts 负责）。这里把 brand-prepare 真实产出的多倍率托盘
+  // 位图与 NSIS 安装文案补齐（2026-09-23 在真实 dist/linux-unpacked 的 app.asar
+  // 上逐条核对过它们确实随包）。
   'build/tray-iconTemplate.png',
+  'build/tray-iconTemplate@2x.png',
   'build/tray-icon-blue.png',
+  'build/tray-icon-blue@1.25x.png',
+  'build/tray-icon-blue@1.5x.png',
+  'build/tray-icon-blue@2x.png',
+  'build/assistedMessages.yml',
   // 品牌几何真源在包内的落点(`brand-prepare.mjs` 产出:官方构建 = brands/official/logo.svg
   // 的逐字节副本,渠道构建 = 该渠道自己的 mark)。被服务的 favicon 曾经是上游鱼(P0-2),
   // 这里同时断言"存在"与"内容不带上游特征"(见 assertBrandAssetSvg)。
@@ -91,7 +107,15 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
   'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
+  // G-2（2026-09-23 审计）：前端 dist 的**稳定名入口文档**必须随包。`index.html`
+  // 之外的这两份是固定路径（不是内容哈希 chunk）—— 它们被 `/favicon.svg`、
+  // `/manifest.webmanifest` 这类固定 URL 语义引用（桌面壳另用 brand-web-route 覆盖
+  // 同名路由，文件本身仍是前端构建的一部分）。内容哈希 chunk 的名字随上游每次升级
+  // 变化，**不**进本清单（进清单 = 每次升级都要改清单），它们由「归档里每个
+  // lib/*.js 的 import 都必须在包里」那条产物驱动判据覆盖。
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg',
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/manifest.webmanifest',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   // 宿主行 `plugin-manager` 自 2026-09-23（issue #130）起在桌面里真的会被激活：它发布
   // `pluginManager` 服务，而 cordis preset 的 `tool-plugin-manager` 行注入该服务 ——
@@ -173,6 +197,13 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 就是经它注册成 `kind:'app'` 的（2026-09-21 审计 P0-1）。缺这个产物 ⇒ 打包版
   // 启动即 ERR_MODULE_NOT_FOUND（与 2026-09-20 的 app-proof 事故同一形态）。
   'node_modules/@picoaide/dsh-browser/lib/surface.js',
+  // 同一条 seam 的另一半（2026-09-23 第三轮审计的反向 oracle 抓到）：应用窗口宿主
+  // `lib/electron-adapter.js` 值导入 `@picoaide/dsh-browser/guard`（权限守卫 +
+  // 应用 scheme 请求闸门），而 `electron-adapter.js` 被 desktop 的 `lib/main.js`
+  // 静态 import ⇒ 这条掉出产物是**启动期** ERR_MODULE_NOT_FOUND（整个应用起不来），
+  // 与上面 `surface.js` 完全同族。它此前不在三张表的任何一张里 —— 只有"清单必须覆盖
+  // 产物的真实 specifier"这条反向判据能看见它。
+  'node_modules/@picoaide/dsh-browser/lib/guard.js',
   'node_modules/@picoaide/dsh-browser/package.json',
   'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
   'node_modules/@picoaide/dsh-cron/lib/index.js',
@@ -217,6 +248,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 路径形状与其余自有包一致（`main`/`exports["."]` 都指向 `lib/index.js`）——
   // 它们**不是** Cordis 插件，所以没有 `cordis.patch.yml` / `lib/invariant.js` 条目。
   'node_modules/@picoaide/dsh-host-locale/lib/index.js',
+  // 2026-09-23：`loopback.ts` 四份合一后，connectors / enterprise / browser / cron
+  // 的 lib 都**运行期** import 这个**子路径**（tsdown 把 `dependencies` 当 external，
+  // 所以各自的 `src/loopback.ts` re-export 不会被内联）。缺它就是**启动期**
+  // ERR_MODULE_NOT_FOUND —— 正是本清单存在的理由，故逐条登记。
+  'node_modules/@picoaide/dsh-host-locale/lib/loopback.js',
   'node_modules/@picoaide/dsh-host-locale/package.json',
   'node_modules/@picoaide/dsh-host-home/lib/index.js',
   'node_modules/@picoaide/dsh-host-home/package.json',
@@ -307,6 +343,14 @@ export const FORBIDDEN_PACKAGED_ARCHIVE_PATTERNS: ReadonlyArray<readonly [string
   ['real-env artifacts (.real-env-*/**)', /^\.real-env-/u],
   // 打包脚本的临时目录（曾经装着 156 MiB + 119 MiB 的 squashfs 试验件）。
   ['build temp directory (temp/**)', /^temp\//u],
+  // 打包**工具**的中间产物。与上面几条不同：它曾经落在随包白名单条目 `build/`
+  // 内部（`build/` 是**整目录复制**），所以"看着像开发期文件"却照样进包。
+  // 2026-09-23 独立复审 N-1：渠道构建生成的 electron-builder 配置（含渠道
+  // productName/appId/深链 scheme/产物名模板）就是这样进了 beta 与各品牌渠道的
+  // asar —— 官方渠道不生成它，所以本机跑官方打包看不见。现在它生成在包根 `temp/`
+  // （随包白名单之外）。这条是产物侧的第二道闸；输入侧第一道闸在
+  // `pack-app-root.mjs` 的 `PACK_APP_ROOT_FORBIDDEN_ENTRIES`（暂存前 fail-loud）。
+  ['channel builder config (build/channel-electron-builder.cjs)', /^build\/channel-electron-builder\.cjs$/u],
   ['previous build output (dist*/**)', /^dist[^/]*\//u],
 ]
 
@@ -509,6 +553,152 @@ export const REQUIRED_MACOS_UNIVERSAL_ENTRIES = [
   ...MACOS_ARM64_NATIVE_ENTRIES.map(entry => entry.path),
 ] as const
 
+/** x64 目标（含"调用方没给 arch"的历史形态，与本文件其余 arch 判据同口径）。 */
+function targetIsX64(arch: number | undefined): boolean {
+  return arch === undefined || arch === 1
+}
+
+/**
+ * 一个「按平台/架构存在的原生包家族」（G-1，2026-09-23 审计）。
+ *
+ * 为什么需要它：`REQUIRED_UNPACKED_RUNTIME_ENTRIES` 混装了多个**只在特定平台/架构
+ * 才存在**的原生包（`node-pty` 的 linux-x64 prebuild、`@img/sharp-linux-x64`、
+ * `@koromix/koffi-linux-x64`、`@vscode/ripgrep-linux-x64`、
+ * `node-addon-require-builtin-linux-x64-gnu`），而完整性与否的判据是
+ * 「**整包目录存在**才逐条判」⇒ 整包被删（上游拆包/改名、`asarUnpack` glob 失效、
+ * `supportedArchitectures` 变化 —— 0.1.5 的 `node-addon-landlock-run` →
+ * `node-addon-system` 改名就是这个形态）时 afterPack **全部 PASS**：审计实测整包
+ * 删掉上面五个家族后门禁依然全绿，唯一会发现的是运行期的 dlopen / execFile 失败。
+ *
+ * 现在每个家族都带**显式的适用性判据**：
+ *   - `applies` 为真 ⇒ 家族内每一条都必须在产物里（整包目录不在 = 更直白的诊断）；
+ *   - `applies` 为假 ⇒ 平台/架构确实不适用，缺席合法。
+ * 「不适用」不再是"目录碰巧不在"这种隐式推断，而是一行可审阅的声明。
+ */
+export interface NativePlatformFamily {
+  /** 家族名（报错信息用）。 */
+  readonly id: string
+  /** 家族所属包目录（相对 unpacked 根）：整包在此 ⇒ 全族资产都掉出产物。 */
+  readonly packageDir: string
+  /** 该家族在清单里登记的必需条目（相对 unpacked 根）。 */
+  readonly entries: readonly string[]
+  /** 这一族承载什么（报错时说明后果）。 */
+  readonly purpose: string
+  /** 该家族在当前平台/架构下是否**必须存在**。 */
+  readonly applies: (electronPlatformName: string, arch: number | undefined) => boolean
+}
+
+/**
+ * 原生包家族表（G-1）。
+ *
+ * 覆盖：`REQUIRED_UNPACKED_RUNTIME_ENTRIES` ∪ `REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES`
+ * 里除 `@deepseek-ai/node-addon-system*` 之外的每一条 —— 后者有更严的架构感知断言
+ * （见 {@link NATIVE_FAMILY_EXEMPT_ENTRIES} 与 `verifyPackagedRuntime` 里
+ * `family-and-launcher` 那段）。两向完备性由
+ * `tests/verify-packaged-runtime.spec.ts` 的「家族表覆盖清单每一条」用例钉住。
+ */
+export const NATIVE_PLATFORM_FAMILIES: readonly NativePlatformFamily[] = [
+  {
+    id: 'node-pty（linux-x64 prebuild）',
+    packageDir: 'node_modules/node-pty',
+    entries: ['node_modules/node-pty/prebuilds/linux-x64/pty.node'],
+    purpose: '本机命令执行与终端托管走 node-pty 的 linux-x64 prebuild（subprocess-local）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@img/sharp-linux-x64',
+    packageDir: 'node_modules/@img/sharp-linux-x64',
+    entries: ['node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64-0.35.3.node'],
+    purpose: '托盘/应用图标的位图派生走 sharp（缺它品牌图与图标派生整类失败）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@koromix/koffi-linux-x64',
+    packageDir: 'node_modules/@koromix/koffi-linux-x64',
+    entries: ['node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node'],
+    purpose: 'koffi 承载本机调用（缺它相关原生调用在运行期才炸）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: 'node-addon-require-builtin-linux-x64-gnu',
+    packageDir: 'node_modules/node-addon-require-builtin-linux-x64-gnu',
+    entries: ['node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt/linux-x64-gnu-napi-v9.node'],
+    purpose: 'requireBuiltin 的 linux-x64 glibc 变体（缺它对应能力在运行期才炸）',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: '@vscode/ripgrep-linux-x64',
+    packageDir: 'node_modules/@vscode/ripgrep-linux-x64',
+    entries: ['node_modules/@vscode/ripgrep-linux-x64/bin/rg'],
+    purpose: '文件搜索（glob/grep 工具）execFile 的物理二进制；它不可能从 asar 里执行',
+    applies: (platform, arch) => platform === 'linux' && targetIsX64(arch),
+  },
+  {
+    id: 'node-pty（win32-x64 prebuild）',
+    packageDir: 'node_modules/node-pty',
+    entries: REQUIRED_WINDOWS_X64_NODE_PTY_ENTRIES,
+    purpose: 'Windows 的 ConPTY 原生面（pty.node / conpty* / OpenConsole.exe / conpty.dll）',
+    applies: (platform, arch) => platform === 'win32' && targetIsX64(arch),
+  },
+]
+
+/**
+ * 不归家族表管的清单条目（每条写明由谁负责）—— 让"家族表覆盖清单"是**全等**
+ * 而不是"至少覆盖一部分"：清单新增一条原生条目却没人分类 ⇒ 红。
+ */
+export const NATIVE_FAMILY_EXEMPT_ENTRIES: ReadonlyArray<readonly [string, string]> = [
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run',
+    '架构感知的 node-addon-system 断言（nativeAddonPlatformPackages + family-and-launcher）',
+  ],
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/glibc/system.node',
+    '架构感知的 node-addon-system 断言（NATIVE_ADDON_PLATFORM_FILES）',
+  ],
+  [
+    'node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/musl/system.node',
+    '架构感知的 node-addon-system 断言（NATIVE_ADDON_PLATFORM_FILES）',
+  ],
+]
+
+/**
+ * 逐家族断言「按平台存在的原生包」真的在产物里（G-1）。
+ *
+ * 与 `verifyPackagedRuntime` 里那条「包目录存在才逐条判」的过滤互补：那条对
+ * **整包缺失**是静默的，而整包缺失恰是最可能的真实故障形态。这里按家族再判一次，
+ * `applies` 为真时整包缺席即红。
+ *
+ * 不在本表的两类：`@deepseek-ai/node-addon-system*`（上面有更严的架构感知断言）、
+ * darwin 的原生文件（它们以**绝对路径**进 `requiredPhysicalEntries`，本来就不受
+ * "整包不存在跳过"影响，另由 verify-mac-smoke / verify-mac-release 覆盖）。
+ * @param electronPlatformName - Electron's `process.platform` value.
+ * @param arch - Electron Builder target arch（undefined = 老调用方/未声明）。
+ * @param unpackedRoot - `app.asar.unpacked` 根。
+ * @param exists - physical-file probe（生产 = `fs.existsSync`）。
+ * @returns Nothing; failure rejects the package before signing.
+ */
+export function assertNativePlatformFamilies(
+  electronPlatformName: string,
+  arch: number | undefined,
+  unpackedRoot: string,
+  exists: FileProbe = existsSync,
+): void {
+  // 整棵 unpacked 树都不在时不动手：那种形态由「has no native unpacked entries」
+  // 拦下（单测也用"注入探针 + 不存在的伪路径"跑正例，这里不能误报）。
+  if (!exists(unpackedRoot)) return
+  for (const family of NATIVE_PLATFORM_FAMILIES) {
+    if (!family.applies(electronPlatformName, arch)) continue
+    const missing = family.entries.filter(entry => !exists(join(unpackedRoot, entry)))
+    if (missing.length === 0) continue
+    const wholePackage = !exists(join(unpackedRoot, family.packageDir))
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} is missing the ${family.id} native family: `
+      + `${missing.join(', ')}`
+      + (wholePackage ? `（整包目录 ${family.packageDir} 不存在 —— 全族资产都掉出产物了）` : '')
+      + ` — ${family.purpose}`,
+    )
+  }
+}
 
 
 /** Injectable archive listing seam used by focused tests. */
@@ -830,7 +1020,482 @@ function assertRelativeImportsPresent(
   }
 }
 
-/** Try to list one archive; an absent archive is the physical-layout signal. */
+/** `@picoaide/*` 在归档/产物里的条目前缀（三张清单表都用这个写法）。 */
+const WORKSPACE_SCOPE_PREFIX = 'node_modules/@picoaide/'
+
+/** 反向 oracle 的定位标签（错误消息前缀）。 */
+const WORKSPACE_COVERAGE_LABEL = 'dsh-plugin-desktop: first-party workspace runtime surface'
+
+/**
+ * 自有 workspace 包 `package.json` 里本判据消费的字段。
+ *
+ * 只读**声明**，不读文件系统上的偶然内容：`exports` 决定子路径怎么落点，
+ * `dsh.bundle.patch` 决定 profile 组装期要读哪份补丁，`dsh.client` 决定客户端
+ * bundle 必须存在（上游 `dsh-client-modules` 见到 `dsh.client` 而没有
+ * `exports["./client"]` 会直接抛错）。
+ */
+interface WorkspacePackageManifest {
+  readonly main?: unknown
+  /** `exports` 既可能是字符串（旧形态）也可能是键 → 目标的映射。 */
+  readonly exports?: unknown
+  readonly dsh?: { readonly bundle?: { readonly patch?: unknown }, readonly client?: unknown }
+}
+
+/**
+ * `package.json` 的 `exports` 取键视图（字符串形态与非对象形态一律回空表）。
+ * @param manifest - 目标包的 `package.json`。
+ * @returns 键 → 原值的只读视图（非对象时为空表）。
+ */
+function workspaceExportMap(manifest: WorkspacePackageManifest): Record<string, unknown> {
+  const value = manifest.exports
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
+}
+
+/** 一条"必须有"的条目 + 它是**哪条规则**推出来的（诊断用）。 */
+interface WorkspaceRequiredEntry {
+  readonly package: string
+  readonly entry: string
+  readonly reason: string
+}
+
+/** 反向 oracle 的一次普查结果。 */
+export interface WorkspaceSurfaceCensus {
+  /** 产物里真实随包的自有 workspace 包名（升序）。 */
+  readonly packages: readonly string[]
+  /** 全部必须有条目（升序）。 */
+  readonly required: readonly WorkspaceRequiredEntry[]
+  /** `<包名>` → 该包必须有条目数（供棘轮比对）。 */
+  readonly perPackage: ReadonlyMap<string, readonly string[]>
+  /** 从产物里解析出的 `@picoaide/*` specifier 条数（防空转的前置量）。 */
+  readonly resolvedSpecifiers: number
+}
+
+/**
+ * 每个自有 workspace 包在生效清单里的覆盖下限（**只允许上调**）。
+ *
+ * 为什么需要它（2026-09-23 第三轮审计 P-1）：`REQUIRED_PACKAGED_RUNTIME_ENTRIES`
+ * 这类清单是"必需项判据"的**唯一来源** —— 从清单里删掉一条，等于同时删掉那条断言
+ * （`it.each(清单)` 是自同义反复）。16 次单条删除里 9 次让 spec 78/78 全绿。反向
+ * oracle（`assertRequiredEntriesCoverWorkspaceSurface`）负责"清单必须覆盖产物"，
+ * 这里再钉一层**计数棘轮**：即使某条派生规则将来退化（例如 `exports` 改写、
+ * import 换成运行期拼接），少一条也会在计数上立刻暴露，而不是安静地少一道门。
+ *
+ * `flattened` 数 `REQUIRED_PACKAGED_RUNTIME_ENTRIES`（扁平表），`effective` 数三张表
+ * 的并集，`library` 数并集里的 `lib/**` 产物条目。三个数分别拦三种形态：删扁平表条目、
+ * 删"只有另一张表覆盖"的条目（如 `cordis.patch.yml` 同时被 profile 锚点表覆盖）、
+ * 以及删产物入口。新增自有插件包而不登记这里 = 红。
+ */
+export interface WorkspacePackageCoverageFloor {
+  /** 包名（`@picoaide/` 之后的部分）。 */
+  readonly package: string
+  /** 扁平必需清单里该包的条目数下限。 */
+  readonly flattened: number
+  /** 生效清单（三张表并集）里该包的条目数下限。 */
+  readonly effective: number
+  /** 生效清单里该包 `lib/**` 产物条目的下限。 */
+  readonly library: number
+}
+
+/**
+ * 生效清单 = afterPack 实际断言的三张表的并集。
+ *
+ * 分开维护三张表是历史（扁平登记 / specifier+落点 / profile 锚点），但"必需项"这件事
+ * 在运行期只有一个含义：这三张表里任何一条缺失都会拒包。反向 oracle 因此必须按并集
+ * 判覆盖 —— 只按扁平表判会把 connectors / enterprise 这七个包误判成全无覆盖。
+ * @returns 去重后的条目列表（顺序 = 三张表的声明顺序）。
+ */
+export function effectivePackagedRuntimeEntries(): string[] {
+  return [...new Set([
+    ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+    ...REQUIRED_ASAR_EXPORTS.map(required => required.archivePath),
+    ...REQUIRED_PROFILE_PATCH_ANCHORS,
+  ])]
+}
+
+/** 桌面包根（`scripts/` 的上一级）：反向 oracle 在这里读**产物**而不是归档列表。 */
+function desktopProductRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)))
+}
+
+/**
+ * 每包计数棘轮的**当前值**（2026-09-23 实测，只允许上调）。
+ *
+ * 三个数分别拦三种"悄悄删一条"：删扁平表条目（`flattened`）、删已被另一张表覆盖的
+ * 条目（`effective`，例如 `cordis.patch.yml` 同时被 profile 锚点表覆盖）、删产物入口
+ * （`library`）。数值就是该包在对应集合里的**当前真实条目数**；上调随新增条目一起做，
+ * 下调必须在同一次改动里给出理由并改这张表（低于下限时 `assertRequiredEntriesCoverWorkspaceSurface`
+ * 会拒包）。
+ */
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCoverageFloor[] = [
+  { package: 'dsh-account-card', flattened: 5, effective: 5, library: 3 },
+  { package: 'dsh-browser', flattened: 7, effective: 7, library: 5 },
+  // connectors / enterprise 的条目**全部**在 `REQUIRED_ASAR_EXPORTS`（specifier + 落点）里，
+  // 扁平清单里一条都没有 ⇒ `flattened: 0` 是有意的，不是漏登记。
+  { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
+  // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
+  { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 13 条 + 锚点表的 `cordis.patch.yml`。
+  { package: 'dsh-enterprise', flattened: 0, effective: 14, library: 12 },
+  { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
+  { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
+  { package: 'dsh-host-locale', flattened: 3, effective: 3, library: 2 },
+  { package: 'dsh-wasm-apps', flattened: 5, effective: 5, library: 3 },
+  { package: 'dsh-wasm-apps-host', flattened: 6, effective: 6, library: 4 },
+]
+
+/**
+ * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
+ * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
+ */
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 114
+// 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
+// `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
+// 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
+
+/**
+ * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
+ *
+ * 实测：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
+ * `needs` 闭包先生成 `lib/`）21 条 —— 取 20 是为了让这条"防空转"的前置判据在两种
+ * 树状态下都成立。**它不是删条目的保证**（那个由 `assertWorkspacePackageCoverage`
+ * 的每包棘轮负责，与构建无关）。
+ */
+const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 20
+
+/**
+ * 递归列出产物目录下的普通文件（相对路径，`/` 分隔）。
+ *
+ * 与测试夹具的 `listFilesRel` 有两处必须的差别：
+ *  1. workspace 依赖在 `node_modules` 下是**符号链接**（`nodeLinker: node-modules`），
+ *     `Dirent.isDirectory()` 对链接返回 false ⇒ 必须 stat 解引用，否则整个作用域
+ *     目录被当成空目录、oracle 静默空转（这正是它要防的形态）；
+ *  2. 不再下降进嵌套的 `node_modules`（那是依赖的依赖，不是本包产物面）。
+ * @param root - 要枚举的目录。
+ * @returns 相对 `root` 的文件路径（升序无关，调用方自己排序）。
+ */
+function listProductFiles(root: string): string[] {
+  const files: string[] = []
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name)
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      let isDirectory = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        let stats
+        try {
+          stats = statSync(absolute)
+        } catch (cause) {
+          throw new Error(
+            `${WORKSPACE_COVERAGE_LABEL}: ${absolute} 是悬空符号链接（workspace 依赖未构建/被删？）`
+            + '—— 反向 oracle 不能跳过它，否则判据会静默空转',
+            { cause },
+          )
+        }
+        isDirectory = stats.isDirectory()
+        isFile = stats.isFile()
+      }
+      if (isDirectory) {
+        if (entry.name === 'node_modules' && prefix !== '') continue
+        walk(absolute, relative)
+        continue
+      }
+      if (isFile) files.push(relative)
+    }
+  }
+  walk(root, '')
+  return files
+}
+
+/**
+ * 把一个 `<包>/<子路径>` specifier 解析成包内相对落点。
+ *
+ * 顺序与 Node 一致：`exports[key]` 的 `default`/`import`/`require` → 包根再回落 `main`。
+ * 通配子路径（`./src/*` 这类）返回 `undefined` —— 它们不是打包入口，要求登记会把这条
+ * 判据变成假红源。
+ * @param manifest - 目标包的 `package.json`。
+ * @param subpath - 子路径（包根传空串）。
+ * @returns 包内相对落点（已去掉 `./` 前缀），解析不到时为 `undefined`。
+ */
+function workspaceEntryTarget(manifest: WorkspacePackageManifest, subpath: string): string | undefined {
+  const key = subpath === '' ? '.' : `./${subpath}`
+  const record = workspaceExportMap(manifest)[key]
+  const value = typeof record === 'string'
+    ? record
+    : (record !== null && typeof record === 'object'
+        ? (record as Record<string, unknown>).default
+          ?? (record as Record<string, unknown>).import
+          ?? (record as Record<string, unknown>).require
+        : undefined)
+  const target = typeof value === 'string' ? value : (subpath === '' ? manifest.main : undefined)
+  if (typeof target !== 'string') return undefined
+  const relative = target.replace(/^\.\//u, '')
+  return relative.includes('*') ? undefined : relative
+}
+
+/**
+ * **反向 oracle**：清单必须覆盖产物，而不是清单自己说了算（2026-09-23 第三轮审计 P-1）。
+ *
+ * 与既有三条 oracle 的分工与差别：
+ *  - `spec:206`（desktop `lib/*.js` 的 `@picoaide/*` 子路径）只看**桌面自身**的产物；
+ *    插件包之间的 import（`wasm-apps-host → dsh-browser/surface` 这类）它看不见。
+ *  - G-9 那张只看**上游补丁目标**的子路径 import。
+ *  - G-2 的目录 oracle（`build/`、`lib/preload/`、前端 dist）要求"目录里每个文件都在清单里"，
+ *    但它**结构上无法**覆盖 `node_modules/@picoaide/<pkg>/lib`：那里有内容哈希命名的 chunk
+ *    （`host-routes-DZDVSIog.js`、`auth-7L36hEyX.js`），名字每次构建都变。
+ *  - 2026-09-16 的 vendored 技能 oracle 只枚举 `dsh-memory-evolve/skills/**` 一个**源目录**。
+ *
+ * 因此这里换一种判据：不问"目录里有什么"，而问"**产物真实需要什么**"，来源有两条，
+ * 都与清单无关：
+ *  1. **包自己声明的入口面** —— `package.json`（`exports["."]`/`main`、`dsh.bundle.patch`、
+ *     `dsh.client` ⇒ `exports["./client"]`、`exports["./invariant"]`）；
+ *  2. **产物里真实的 `@picoaide/*` specifier** —— 桌面 `lib/**` 与每个自有包
+ *     `lib/**` 的 JS 里出现的包 specifier，按目标包 `exports` 解析成落点。
+ * 两条来源推出的每一条都必须在生效清单里。
+ *
+ * **与每包计数棘轮（`assertWorkspacePackageCoverage`）的分工**：
+ *  - 这条是**产物驱动**的 —— 抓"产物多出一个清单没覆盖的入口"（新 import / 新包）与
+ *    "清单条目的路径拼写被改坏"（派生出来的那条在清单里找不到）。
+ *  - 棘轮是**清单驱动、构建无关**的 —— 抓"删掉任何一条条目"，且不依赖任何包是否已构建
+ *    （CI 的 `gate` job 从干净检出跑根 `yarn check`，`dsh-plugin-desktop` 的 check 排在
+ *    `enterprise`/`account-card`/`cron`/`wasm-apps` **之前**，那四个包的 `lib/` 在
+ *    这一步根本不存在 ⇒ 产物驱动的那条此刻只能覆盖已构建的部分）。
+ *
+ * **为什么读磁盘产物而不是归档列表**：afterPack 本就跑在构建工作区里，磁盘 `lib/` +
+ * `node_modules/@picoaide/` 就是被打进包的那份输入；读它同时让这条判据在 `vitest`
+ * 里可判（不必真打包），也避免依赖各调用点注入的读缝（那些读缝在单测里是桩）。
+ * "归档里真的在"由既有三条断言负责（扁平表 / `REQUIRED_ASAR_EXPORTS` / 锚点表），
+ * 两者合起来才是闭环：**清单必须覆盖产物，产物必须覆盖清单**。
+ * @param manifest - 生效清单（缺省 = 三张表的并集）。
+ * @param productRoot - 产物根（缺省 = 桌面包根）。测试用它指到合成夹具。
+ * @param floors - 每包下限表（缺省 = `REQUIRED_WORKSPACE_PACKAGE_COVERAGE`），只用于
+ *   "随包但没登记"与"登记了却不存在"这两个结构判据。
+ * @param minResolvedSpecifiers - specifier 空转下限（合成夹具按自己的规模传值）。
+ * @returns 普查结果（供测试断言规模，避免"空转即通过"）。
+ */
+export function assertRequiredEntriesCoverWorkspaceSurface(
+  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
+  productRoot: string = desktopProductRoot(),
+  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+  minResolvedSpecifiers: number = MIN_RESOLVED_WORKSPACE_SPECIFIERS,
+): WorkspaceSurfaceCensus {
+  const census = collectWorkspaceSurface(productRoot)
+  const known = new Set(manifest)
+
+  const missing = census.required.filter(required => !known.has(required.entry))
+  if (missing.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL} at ${productRoot}: 产物真实需要的条目不在打包必需清单里 `
+      + `（删掉清单里的一条 = 同时删掉那条断言，所以这里从产物反推）：\n`
+      + missing.map(item => `  - ${item.entry}  [${item.reason}]`).join('\n'),
+    )
+  }
+
+  const byPackage = new Map(floors.map(floor => [floor.package, floor]))
+  const unregistered = census.packages.filter(name => !byPackage.has(name))
+  if (unregistered.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 这些自有插件包随包但没在 REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里登记下限：`
+      + `${unregistered.join(', ')}（新增自有插件必须显式登记，否则"删一条"没有棘轮兜底）`,
+    )
+  }
+  const dead = floors.filter(floor => !census.packages.includes(floor.package))
+  if (dead.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里有产物中不存在的包：`
+      + `${dead.map(floor => floor.package).join(', ')}（包已删除/改名 ⇒ 同步这张表）`,
+    )
+  }
+  if (census.resolvedSpecifiers < minResolvedSpecifiers) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 只从产物里解析出 ${census.resolvedSpecifiers} 条 @picoaide/* specifier `
+      + `（下限 ${minResolvedSpecifiers}）—— 产物没构建或判据已空转，不能当成通过`,
+    )
+  }
+  return census
+}
+
+/**
+ * **每包计数棘轮**：清单里每个自有 workspace 包的条目数不得低于登记的下限。
+ *
+ * 这条判据**不读产物、不做任何构建**，因此它在任何树状态下都成立 —— 包括 CI 的
+ * `gate` job 从干净检出跑根 `yarn check`（desktop 的 check 排在 enterprise /
+ * account-card / cron / wasm-apps 之前，那四个包的 `lib/` 那时还不存在）。它的职责就
+ * 一条：**删掉清单里任何一条 = 立刻红**，而"删条目同时删掉断言"正是 P-1 的形态。
+ *
+ * 为什么按包分段而不是只钉总数：删 A 段一条、加 B 段一条会让总数不变（审计里
+ * `browser/cordis.patch.yml` 那条被 profile 锚点表重复覆盖、删掉后总数只少一，
+ * 而当时的全局下限留了余量 ⇒ 静默）。三个数各管一类：`flattened` 管扁平表条目、
+ * `effective` 管"已被另一张表覆盖"的条目、`library` 管 `lib/` 产物入口。
+ * @param manifest - 生效清单（缺省 = 三张表的并集）。
+ * @param floors - 每包下限（缺省 = `REQUIRED_WORKSPACE_PACKAGE_COVERAGE`）。
+ */
+export function assertWorkspacePackageCoverage(
+  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
+  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+): void {
+  const flat = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+  const violations: string[] = []
+  for (const floor of floors) {
+    const prefix = `${WORKSPACE_SCOPE_PREFIX}${floor.package}/`
+    const effective = manifest.filter(entry => entry.startsWith(prefix))
+    const flattened = effective.filter(entry => flat.has(entry)).length
+    const library = effective.filter(entry => entry.startsWith(`${prefix}lib/`)).length
+    if (flattened < floor.flattened) {
+      violations.push(`${floor.package}: 扁平清单 ${flattened} < 下限 ${floor.flattened}`)
+    }
+    if (effective.length < floor.effective) {
+      violations.push(`${floor.package}: 生效清单 ${effective.length} < 下限 ${floor.effective}`)
+    }
+    if (library < floor.library) {
+      violations.push(`${floor.package}: lib/ 产物 ${library} < 下限 ${floor.library}`)
+    }
+  }
+  // 全局下限同样只允许上调：它兜"整段删除"这类批量形态与 @picoaide 之外的条目。
+  if (manifest.length < REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR) {
+    violations.push(
+      `生效清单共 ${manifest.length} 条 < 下限 ${REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR}`,
+    )
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 覆盖计数低于棘轮下限（下限只允许上调；确要下调必须在同一次改动里`
+      + `说明理由并改 REQUIRED_WORKSPACE_PACKAGE_COVERAGE）：\n  ${violations.join('\n  ')}`,
+    )
+  }
+}
+
+/**
+ * 从产物推导"必须有"的自有 workspace 条目（反向 oracle 的普查步骤）。
+ *
+ * 导出它是为了让 `tests/verify-packaged-runtime.spec.ts` 能直接对合成产物夹具断言
+ * 派生结果（而不是复制一份派生逻辑 —— 复制出来的那份会替假条目背书）。
+ * @param productRoot - 产物根（桌面包根）。
+ * @returns 普查结果。
+ */
+export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCensus {
+  const scopeRoot = join(productRoot, 'node_modules', '@picoaide')
+  if (!existsSync(scopeRoot)) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 找不到 ${scopeRoot} —— workspace 依赖未安装或未构建，判据不能空转`,
+    )
+  }
+  const packages = readdirSync(scopeRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() || entry.isSymbolicLink())
+    .map(entry => entry.name)
+    .filter(name => existsSync(join(scopeRoot, name, 'package.json')))
+    .sort()
+  if (packages.length === 0) {
+    throw new Error(`${WORKSPACE_COVERAGE_LABEL}: ${scopeRoot} 下没有任何自带 package.json 的包`)
+  }
+
+  const manifests = new Map<string, WorkspacePackageManifest>()
+  for (const name of packages) {
+    manifests.set(name, JSON.parse(readFileSync(join(scopeRoot, name, 'package.json'), 'utf8')) as WorkspacePackageManifest)
+  }
+
+  const required = new Map<string, WorkspaceRequiredEntry>()
+  const add = (name: string, relative: string | undefined, reason: string): void => {
+    if (relative === undefined) return
+    const entry = `${WORKSPACE_SCOPE_PREFIX}${name}/${relative}`
+    if (!required.has(entry)) required.set(entry, { package: name, entry, reason })
+  }
+  for (const name of packages) {
+    const manifest = manifests.get(name)!
+    add(name, 'package.json', '包 manifest（profile 组装期 createRequire().resolve 的落点）')
+    add(name, workspaceEntryTarget(manifest, ''), 'package.json 的 exports["."]/main（插件行入口）')
+    const patch = manifest.dsh?.bundle?.patch
+    if (typeof patch === 'string') add(name, patch.replace(/^\.\//u, ''), 'dsh.bundle.patch（profile 组装期读取）')
+    if (manifest.dsh?.client !== undefined) {
+      // 上游 client-modules 见到 dsh.client 而没有 exports["./client"] 会**直接抛错**
+      // （`client-modules: <pkg> declares dsh.client but exports no "./client" bundle`）。
+      add(name, workspaceEntryTarget(manifest, 'client'), 'dsh.client ⇒ exports["./client"]（客户端 bundle）')
+    }
+    if (workspaceExportMap(manifest)['./invariant'] !== undefined) {
+      add(name, workspaceEntryTarget(manifest, 'invariant'), 'exports["./invariant"]（包自有不变量伴生入口）')
+    }
+  }
+
+  const artifacts = [
+    ...listProductFiles(join(productRoot, 'lib')).map(relative => `lib/${relative}`),
+    ...listProductFiles(scopeRoot).map(relative => `${WORKSPACE_SCOPE_PREFIX}${relative}`),
+  ].filter(entry => /\.(?:js|cjs|mjs)$/u.test(entry))
+
+  const resolved = new Set<string>()
+  for (const artifact of artifacts) {
+    const absolute = join(productRoot, artifact)
+    const source = readFileSync(absolute, 'utf8')
+    // 刻意用"任何以 @picoaide/ 开头的字符串字面量"而不是精确的 import/require 语法：
+    // `createRequire(...).resolve('@picoaide/x/package.json')` 这类**也是运行期依赖**
+    // （profile 锚点就是这么解析的），而漏掉它等于放掉一整类。代价是文档字符串里提到
+    // 的包名也会被要求登记 —— 这是**偏严**的方向，且解析不到落点/通配子路径会被跳过。
+    for (const match of source.matchAll(/["'](@picoaide\/[^"']+)["']/gu)) {
+      const specifier = match[1]!
+      const [, name, subpath = ''] = /^@picoaide\/([^/]+)(?:\/(.*))?$/u.exec(specifier) ?? []
+      if (name === undefined) continue
+      const manifest = manifests.get(name)
+      if (manifest === undefined) continue
+      const target = workspaceEntryTarget(manifest, subpath)
+      if (target === undefined) continue
+      resolved.add(specifier)
+      add(name, target, `产物里的真实 specifier ${specifier}（来自 ${artifact}）`)
+    }
+  }
+
+  const entries = [...required.values()].sort((left, right) => left.entry.localeCompare(right.entry))
+  const perPackage = new Map<string, readonly string[]>()
+  for (const name of packages) {
+    perPackage.set(name, entries.filter(item => item.package === name).map(item => item.entry))
+  }
+  return { packages, required: entries, perPackage, resolvedSpecifiers: resolved.size }
+}
+
+/**
+ * 打包布局的**显式开关**（2026-09-23 第三轮审计 P-6）。
+ *
+ * 历史形态：`tryListArchive` 把**任何**异常都当成"没有 `app.asar` ⇒ 物理布局"，
+ * 于是"`app.asar` 存在但损坏/截断"会掉进 `resources/app/` 那条分支，报出
+ * "`resources/app` 缺文件"——而 asar 布局下这个目录**根本不该存在**，错误信息指向
+ * 一个不存在的路径（历史同类坑：asar entry offset 错乱 ⇒ Electron 报随机某个 json
+ * 的 `Invalid package config`）。真实原因被 `catch {}` 吞掉，排障要重走一遍弯路。
+ *
+ * 现在：归档缺失（ENOENT）只说明"这次构建**可能**用了 `asar: false`"，**不再**自动
+ * 改走物理分支 —— 必须由本开关显式声明。默认（未设）= 归档必须存在且可列举。
+ * 取值：`physical`（大小写/首尾空白不敏感）；**其它取值一律 fail-loud**（拼错的开关
+ * 不能静默退回默认，那会让"我明明开了物理布局"变成一句空话）。
+ */
+export const PACKAGED_RUNTIME_LAYOUT_ENV = 'PACKAGED_RUNTIME_LAYOUT'
+
+/**
+ * 是否显式声明了物理布局（`PACKAGED_RUNTIME_LAYOUT=physical`）。
+ * @param env - 环境变量来源（测试注入；生产是 `process.env`）。
+ * @returns true = 这次验证对象是 `asar: false` 的物理树。
+ * @throws 开关取值非法（不是 `physical` 也不是空）时 fail-loud。
+ */
+export function packagedRuntimeLayoutIsPhysical(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env[PACKAGED_RUNTIME_LAYOUT_ENV]
+  if (raw === undefined || raw.trim() === '') return false
+  const normalized = raw.trim().toLowerCase()
+  if (normalized === 'physical') return true
+  throw new Error(
+    `dsh-plugin-desktop: ${PACKAGED_RUNTIME_LAYOUT_ENV}=${JSON.stringify(raw)} is not a known layout — `
+    + `only 'physical' (an asar:false resources/app tree) is accepted; leave it unset to require app.asar`,
+  )
+}
+
+/** 归档**不存在**（ENOENT）与"归档存在但读不了"必须分开判：前者是布局信号，后者是坏产物。 */
+function isMissingArchiveError(cause: unknown): boolean {
+  return (cause as NodeJS.ErrnoException | null | undefined)?.code === 'ENOENT'
+}
+
+/**
+ * Try to list one archive.
+ * @param archivePath - absolute `app.asar` path.
+ * @param list - ASAR listing implementation.
+ * @param readEntry - archive-entry reader used by the content assertions.
+ * @returns 归档条目集；`undefined` = 归档**不存在**（唯一可读作"不是 asar 布局"的信号）。
+ * @throws 归档存在但无法列举（截断/损坏/读不了）—— 必须点名真实原因，绝不静默改走物理分支。
+ */
 function tryListArchive(
   archivePath: string,
   list: ArchiveLister,
@@ -839,8 +1504,14 @@ function tryListArchive(
   let entries: readonly string[]
   try {
     entries = list(archivePath, { isPack: false })
-  } catch {
-    return undefined
+  } catch (cause) {
+    if (isMissingArchiveError(cause)) return undefined
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${archivePath} is present but cannot be listed `
+      + `(the archive is unreadable — likely corrupt or truncated): ${detail}`,
+      { cause },
+    )
   }
   const present = new Set(entries.map(normalizeArchiveEntry))
   const missing = REQUIRED_PACKAGED_RUNTIME_ENTRIES.filter(entry => !present.has(entry))
@@ -849,6 +1520,14 @@ function tryListArchive(
       `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required ASAR entries: ${missing.join(', ')}`,
     )
   }
+  // 反向 oracle（2026-09-23 第三轮审计 P-1）：**清单必须覆盖产物**。
+  // 上面那条只证明"清单里的条目都在包里" —— 而清单是这条判据的唯一来源，删掉一条
+  // 等于同时删掉那条断言（审计实测 16 次单条删除里 9 次全绿）。这两条一起兜：
+  //   * 每包覆盖棘轮：构建无关，删掉任何一条即红（含"删条目 + 加假条目"抵消总数）；
+  //   * 产物反向覆盖：产物里真实需要的入口（声明面 + `@picoaide/*` specifier）
+  //     必须都在清单里 —— 抓"产物多出一个没被覆盖的入口"与"清单路径拼写被改坏"。
+  assertWorkspacePackageCoverage()
+  assertRequiredEntriesCoverWorkspaceSurface()
   // 反向断言（2026-09-22）：包里不得出现自有源码 / sourcemap / 开发期产物。
   // 放在这里而不是 `files` 里 —— `files` 是声明，这里是**证据**：任何一条排除规则
   // 写错（例如「仅根级」那种单星号写法）都会在这一步把坏包拦下来，而不是发到客户机上。
@@ -912,7 +1591,24 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/skill-telemetry', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js' },
   { specifier: '@picoaide/dsh-enterprise/channel-sync', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js' },
   { specifier: '@picoaide/dsh-enterprise/invariant', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/invariant.js' },
+  // 2026-09-23（第三轮审计的反向 oracle）：下面 7 条都是**产物里真实存在、且被真实
+  // specifier 引用**的入口，但此前不在任何一张表里 —— 也就是"删掉它们没有任何判据会红"。
+  //   `@picoaide/dsh-enterprise`                 ← profile 行 `picoaide-enterprise` 的入口
+  //   `@picoaide/dsh-enterprise/loopback`        ← account-card `lib/index.js` 值导入
+  //   `@picoaide/dsh-enterprise/server-connector/auth` ← account-card `lib/index.js` 值导入
+  //   `@picoaide/dsh-connectors`                 ← profile 行 `pico-connectors` 的入口
+  //   `@picoaide/dsh-connectors/invariant`       ← 该包声明的 `./invariant` 伴生入口
+  //   `@picoaide/dsh-connectors/store`           ← browser `lib/index.js` 值导入
+  //   `@picoaide/dsh-connectors/user-scope`      ← browser `lib/index.js` 值导入
+  // 判据是 `assertRequiredEntriesCoverWorkspaceSurface`（清单必须覆盖产物）。
+  { specifier: '@picoaide/dsh-enterprise', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/index.js' },
+  { specifier: '@picoaide/dsh-enterprise/loopback', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js' },
+  { specifier: '@picoaide/dsh-enterprise/server-connector/auth', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
+  { specifier: '@picoaide/dsh-connectors', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/index.js' },
+  { specifier: '@picoaide/dsh-connectors/invariant', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/invariant.js' },
+  { specifier: '@picoaide/dsh-connectors/store', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/store.js' },
+  { specifier: '@picoaide/dsh-connectors/user-scope', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/user-scope.js' },
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
   { specifier: '@picoaide/dsh-connectors/package.json', archivePath: 'node_modules/@picoaide/dsh-connectors/package.json' },
 ]
@@ -1005,10 +1701,11 @@ function verifyUnpackedPackageResolution(
  * `resources/app.asar` with `app.asar.unpacked` holding native binaries) and
  * the physical tree (`asar: false` — `resources/app/`). **Every current
  * packaging path produces `app.asar`**, so the archive checks are the ones
- * that run in practice; the physical branch stays as a fallback for an
- * `asar: false` build. The archive checks run only when the archive exists;
- * the physical layout checks every required entry and export against the real
- * files.
+ * that run in practice; the physical branch is an explicit opt-in
+ * (`PACKAGED_RUNTIME_LAYOUT=physical`, 2026-09-23 P-6) rather than an
+ * exception-driven fallback: an archive that exists but cannot be listed is a
+ * broken artifact and must be reported as such, not mistaken for a physical
+ * tree.
  * @param context - Electron Builder's afterPack context.
  * @param list - ASAR listing implementation.
  * @param exists - physical-file probe for the unpacked CLI dependency tree.
@@ -1022,12 +1719,20 @@ export function verifyPackagedRuntime(
   readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
   const asarPath = resolvePackagedAsarPath(context)
-  const asarEntries = tryListArchive(asarPath, list, readEntry)
-  if (asarEntries === undefined) {
-    // Physical layout (`asar: false`, a fallback the desktop does not ship —
-    // see the JSDoc above): the runtime is a real file tree.
+  if (packagedRuntimeLayoutIsPhysical()) {
+    // Explicit opt-in (`asar: false` build): the runtime is a real file tree.
     verifyPhysicalRuntime(resolvePackagedAppRoot(context), exists, readEntry)
     return
+  }
+  const asarEntries = tryListArchive(asarPath, list, readEntry)
+  if (asarEntries === undefined) {
+    // 归档不存在是**唯一**能读作"不是 asar 布局"的信号，而且它也不再自动改走物理
+    // 分支（2026-09-23 P-6）：要么补出 app.asar，要么显式声明物理布局。这条错误必须
+    // 给出开关名，否则"缺归档"会被误诊成"物理树缺文件"。
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime has no app.asar at ${asarPath} — every packaging path produces one; `
+      + `set ${PACKAGED_RUNTIME_LAYOUT_ENV}=physical only for an asar:false (resources/app) build`,
+    )
   }
   const unpackedRoot = resolvePackagedUnpackedRoot(context)
   const requiredPhysicalEntries = context.electronPlatformName === 'win32'
@@ -1045,7 +1750,20 @@ export function verifyPackagedRuntime(
   }
   // P2-52: 逐条断言——旧实现只判断「至少一项存在」,清单里写错或漏打的路径会被
   // 静默过滤掉(afterPack 门禁形同空转)。某原生包目录存在时,该包清单内每条必需
-  // 文件都必须存在;整包不存在 = 平台不适用(例如 Windows 产物里的 linux-x64 包),跳过。
+  // 文件都必须存在。
+  //
+  // G-1（2026-09-23 审计）:上面这条的「**整包目录不存在 ⇒ 跳过**」是假绿口子 ——
+  // 整包删掉 `@img/sharp-linux-x64` / `@koromix/koffi-linux-x64` / `node-pty` /
+  // `@vscode/ripgrep-linux-x64` / `node-addon-require-builtin-linux-x64-gnu` 后
+  // afterPack 全部 PASS。缺席的合法性现在由**显式的家族适用性判据**决定
+  // （NATIVE_PLATFORM_FAMILIES），不再由"目录碰巧不在"隐式推断。放在这条之前跑，
+  // 好让"整包缺失"给出点名家族的诊断。
+  assertNativePlatformFamilies(
+    context.electronPlatformName,
+    context.arch,
+    unpackedRoot,
+    exists,
+  )
   const missingNativeEntries = requiredPhysicalEntries.filter((entry) => {
     if (!exists(join(unpackedRoot, unpackedPackageDir(entry)))) return false
     return !exists(join(unpackedRoot, entry))
@@ -1245,6 +1963,70 @@ function listUnpackedUnsafeJs(unpackedRoot: string): string[] {
 /** Timeout for the packaged flock smoke (a hung Electron must not hang afterPack). */
 export const PACKAGED_FLOCK_SMOKE_TIMEOUT_MS = 10_000
 
+/**
+ * 打包版运行时**实际**报出的 Electron 版本行（2026-09-23 第三轮审计 P-5）。
+ *
+ * 为什么需要它：清单里 6 处（4 个包 × dev/peer）pin 的是 `electron` 的**声明**，
+ * 而构建出来的产物用哪个 Electron 只由安装树决定 —— 升级/降级 Electron 时
+ * `afterPack` 对版本本身无感，两个已记录的不变量（Electron 43.4.0 的 `app.asar`
+ * `{ bigint: true }` 语义会让 `skill-filesystem` 整类 provider 静默失效；45 起
+ * `safeStorage` 同步 API 会炸）因此都没有前置判据。
+ *
+ * 做法：两个**已在打包版二进制里跑**的冒烟（flock / error-reporting）各打一行
+ * `ELECTRON-VERSION:<process.versions.electron>`，宿主断言它等于本包
+ * `devDependencies.electron`（不等则报错并打印两侧取值）。
+ */
+export const PACKAGED_ELECTRON_VERSION_MARKER = 'ELECTRON-VERSION:'
+
+/**
+ * 本包 pin 的 Electron 版本（`packages/host/desktop/package.json` 的
+ * `devDependencies.electron`）—— 打包产物用的就是这一份。
+ * @returns 精确版本字符串（如 `44.4.3`）。
+ * @throws 声明值不是精确版本（range/别名会让"逐字比较"这条判据失效，必须 fail-loud）。
+ */
+export function declaredElectronVersion(): string {
+  const manifestPath = join(desktopProductRoot(), 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    readonly devDependencies?: Readonly<Record<string, unknown>>
+  }
+  const declared = manifest.devDependencies?.electron
+  if (typeof declared !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(declared)) {
+    throw new Error(
+      `dsh-plugin-desktop: ${manifestPath} 的 devDependencies.electron 必须是**精确版本**`
+      + `（收到 ${JSON.stringify(declared)}）—— 打包版 Electron 版本断言需要一个可逐字比较的声明值，`
+      + 'range/别名/tag 会让它静默失效',
+    )
+  }
+  return declared
+}
+
+/**
+ * 断言某次打包后冒烟**真的跑在**本包声明的 Electron 上。
+ * @param stdout - 冒烟子进程的 stdout。
+ * @param smoke - 冒烟名（错误信息里点名是谁）。
+ * @returns 冒烟报出的 Electron 版本。
+ * @throws 缺版本行，或版本与 `devDependencies.electron` 不等（错误信息打印两侧取值）。
+ */
+export function assertPackagedElectronVersion(stdout: string, smoke: string): string {
+  const expected = declaredElectronVersion()
+  const reported = new RegExp(`${PACKAGED_ELECTRON_VERSION_MARKER}(\\S+)`, 'u').exec(stdout)?.[1]
+  if (reported === undefined) {
+    throw new Error(
+      `dsh-plugin-desktop: ${smoke} did not report ${PACKAGED_ELECTRON_VERSION_MARKER}<version> `
+      + `(expected ${expected}) — the embedded smoke script must print the Electron it actually ran on`,
+    )
+  }
+  if (reported !== expected) {
+    throw new Error(
+      `dsh-plugin-desktop: ${smoke} ran on Electron ${reported} while package.json pins `
+      + `devDependencies.electron ${expected} — the shipped runtime is not the version this build declares `
+      + '(check the installed electron dist / a stale node_modules; the asar bigint semantics and the '
+      + 'safeStorage API shape are version-dependent)',
+    )
+  }
+  return reported
+}
+
 /** Success marker the embedded flock script prints; a silent exit 0 is a failure. */
 const FLOCK_SMOKE_OK = 'FLOCK-SMOKE-OK'
 
@@ -1259,6 +2041,12 @@ const FLOCK_SMOKE_OK = 'FLOCK-SMOKE-OK'
  * proves the lock is real by failing to take it again from a second descriptor
  * (POSIX flock is per open-file-description, so contention must raise
  * EAGAIN/EWOULDBLOCK). It never touches `bin/landlock-run`.
+ *
+ * It also prints the Electron it is actually running on (`ELECTRON-VERSION:<v>`,
+ * 2026-09-23 P-5): the host asserts that equals `devDependencies.electron`, so a
+ * runtime built against an unexpected Electron fails the gate instead of being
+ * discovered later by a version-specific behaviour (asar bigint semantics,
+ * safeStorage API shape).
  */
 const FLOCK_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs'
@@ -1267,6 +2055,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const appRoot = process.argv[2]
+process.stdout.write('${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron) + '\\n')
 const appRequire = createRequire(join(appRoot, 'package.json'))
 const flockUrl = pathToFileURL(appRequire.resolve('@deepseek-ai/node-addon-system/flock')).href
 const { tryLockExclusive } = await import(flockUrl)
@@ -1446,6 +2235,9 @@ export function smokePackagedFlockLock(
         + `${FLOCK_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
+    // P-5(2026-09-23):版本断言必须落在**真跑过的**冒烟上 —— 清单里的 6 处 pin 是声明，
+    // 这一行才是"产物实际用的 Electron"的证据。
+    assertPackagedElectronVersion(result.stdout, 'packaged flock smoke')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1469,12 +2261,16 @@ const SENTRY_SMOKE_OK = 'SENTRY-SMOKE-OK'
  * falls out of the package, the plugin module fails to load **with zero logs**
  * (the composition loads plugins lazily), which nothing else in the gate would
  * catch — the static entry list only proves a path exists, not that it loads.
+ *
+ * 同 flock 冒烟：它也会打一行 `ELECTRON-VERSION:<v>`（2026-09-23 P-5）。这个冒烟
+ * **三个平台都跑**，所以它是版本断言在全平台上的落点。
  */
 const SENTRY_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const appRoot = process.argv[2]
+process.stdout.write('${PACKAGED_ELECTRON_VERSION_MARKER}' + String(process.versions.electron) + '\\n')
 const appRequire = createRequire(join(appRoot, 'package.json'))
 // Static import target of the enterprise error-reporting module (external in its
 // tsdown build, so this resolves at runtime, not at build time).
@@ -1596,6 +2392,8 @@ export function smokePackagedErrorReporting(
         + `${SENTRY_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
+    // P-5(2026-09-23):这个冒烟**三个平台都跑**，Electron 版本因此是全平台判据。
+    assertPackagedElectronVersion(result.stdout, 'packaged error-reporting smoke')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1909,32 +2707,96 @@ export function smokePackagedAsarBigintSemantics(
 }
 
 /**
- * Run the static packaged-runtime check as Electron Builder's afterPack hook.
- * @param context - Electron Builder's afterPack context.
- * @param verify - static verification implementation (tests).
- * @param smoke - packaged diagnostic worker smoke (tests).
- * @param flockSmoke - packaged flock smoke (tests).
- * @param errorReportingSmoke - packaged error-reporting smoke (tests).
- * @param asarBigintSmoke - packaged ASAR bigint/skill-listing smoke (tests).
- * @returns A promise that rejects before signing when the runtime is incomplete.
+/**
+ * `afterPack` 的五个验证接缝（**唯一生产接线**）。
+ *
+ * 为什么是一张显式的表，而不是"可注入的缺省实现"：electron-builder 按**具名导出**
+ * 解析本钩子（`app-builder-lib/out/util/resolve.js` 的
+ * `resolveFunction(type, config.afterPack, "afterPack", root)`），并且只用一个参数调用它
+ * （`app-builder-lib/out/packager.js` 的 `await emit("afterPack", context)`）。也就是说
+ * 「缺省参数值」在生产上就是**唯一会跑的代码** —— 把它改成空函数＝把对应那一步验证删掉，
+ * 而调用方（electron-builder）永远不会发现，也没有任何调用点守卫会红。
+ *
+ * 2026-09-23 第四轮审计 R4-A-9 记录的正是这个形态：旧实现把四个接缝写成
+ * `verify: typeof verifyPackagedRuntime = verifyPackagedRuntime`（smoke/flockSmoke/
+ * errorReportingSmoke 同形），四个缺省值逐个换成 `() => {}`（含把整个静态门禁换成空转）
+ * 后 `tests/verify-packaged-runtime.spec.ts` 仍然 109/109 全绿。
+ *
+ * 现在的形状：生产路径**只有这张表**，`afterPack` 不再接受任何注入参数。
+ *   * 要按步驱动真实现 ⇒ 用 {@link runAfterPackSeams}（显式给替身，用于单步判据）；
+ *   * 要证明生产入口确实按序调用各项 ⇒ 临时 `vi.spyOn` 本表项再调 `afterPack(context)`。
+ * 两条路径在 spec 的「生产接线不可空转（R4-A-9）」一组里都有对应判据，所以"把表项换成
+ * 空函数"与"在 afterPack 里绕开这张表"都会红。
+ *
+ * 第五项 `asarBigintSmoke` 来自另一条线（issue #130：Electron 43.4.0 的 `app.asar`
+ * fs shim 忽略 `{ bigint: true }`，会让整类 skill provider 静默失效）—— 合并后它同样
+ * 只是表里的一项，仍然只有"从这张表取出真实现"这一条生产路径。
  */
-export async function afterPack(
+export interface AfterPackSeams {
+  /** 静态产物门禁：必需条目 / 泄漏表 / 反向 oracle / 品牌资产 / profile 锚点。 */
+  readonly verify: typeof verifyPackagedRuntime
+  /** 打包版诊断 Worker 冒烟（归档里真的能起来并产出诊断包）。 */
+  readonly smoke: PackagedDiagnosticWorkerSmoke
+  /** 打包版 flock 冒烟（会话可写；win32 按设计跳过）。 */
+  readonly flockSmoke: (context: PackagedRuntimeContext) => void
+  /** 打包版错误上报冒烟（`@sentry/node` 在包里真的能加载）。 */
+  readonly errorReportingSmoke: (context: PackagedRuntimeContext) => void
+  /** 打包版 `app.asar` 的 `{ bigint: true }` 语义与技能列举冒烟（issue #130）。 */
+  readonly asarBigintSmoke: (context: PackagedRuntimeContext) => void
+}
+
+/**
+ * 生产接线的四个接缝（真实现，无缺省空壳）。
+ *
+ * 这是 `afterPack` **唯一**会使用的实现来源。测试可以临时替换本表的成员
+ * （`vi.spyOn`）来观察生产入口的调用序列，但必须还原 —— 它同时是"生产接线"本身。
+ */
+export const AFTER_PACK_SEAMS: AfterPackSeams = {
+  verify: verifyPackagedRuntime,
+  smoke: smokePackagedDiagnosticWorker,
+  flockSmoke: smokePackagedFlockLock,
+  errorReportingSmoke: smokePackagedErrorReporting,
+  asarBigintSmoke: smokePackagedAsarBigintSemantics,
+}
+
+/**
+ * 四步验证序列（顺序即生产顺序）。
+ *
+ * 导出是为了让单步判据能把**被测那一步取成真实现**（`AFTER_PACK_SEAMS[step]`）、其余
+ * 步骤给替身：合成产物永远无法让静态门禁通过，所以第 2~4 步只能这样到达。
+ * @param context - Electron Builder's afterPack context.
+ * @param seams - 四个接缝的实现；生产传 {@link AFTER_PACK_SEAMS}。
+ * @returns A promise that rejects when any step rejects.
+ */
+export async function runAfterPackSeams(
   context: PackagedRuntimeContext,
-  verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
-  smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
-  flockSmoke: (context: PackagedRuntimeContext) => void = smokePackagedFlockLock,
-  errorReportingSmoke: (context: PackagedRuntimeContext) => void = smokePackagedErrorReporting,
-  asarBigintSmoke: (context: PackagedRuntimeContext) => void = smokePackagedAsarBigintSemantics,
+  seams: AfterPackSeams,
 ): Promise<void> {
-  verify(context)
+  // 四步一律 `await`：接缝声明是同步的，但"把某一步包成 async 函数"会让**未 await 的
+  // 拒绝变成 unhandled rejection、那一步静默放过**（R4-A-9 的真产物探针实测踩到过）。
+  await seams.verify(context)
   const asarPath = resolvePackagedAsarPath(context)
   // Physical tree (asar: false): the worker smoke's extraction fallback reads
   // from the application root; the archive layout reads from app.asar.unpacked.
   const sourceRoot = existsSync(asarPath)
     ? resolvePackagedUnpackedRoot(context)
     : resolvePackagedAppRoot(context)
-  await smoke(sourceRoot, undefined, asarPath)
-  flockSmoke(context)
-  errorReportingSmoke(context)
-  asarBigintSmoke(context)
+  await seams.smoke(sourceRoot, undefined, asarPath)
+  await seams.flockSmoke(context)
+  await seams.errorReportingSmoke(context)
+  await seams.asarBigintSmoke(context)
+}
+
+/**
+ * Run the static packaged-runtime check as Electron Builder's afterPack hook.
+ *
+ * **单参数是契约**：electron-builder 只传 context（具名导出 + 单参数 emit）。这里刻意
+ * **不**加任何可注入的缺省实现 —— 那正是 R4-A-9 记录的空转形态（"缺省值即生产接线"）。
+ * 要替换接缝请用 {@link runAfterPackSeams}，要观察生产序列请临时 spy
+ * {@link AFTER_PACK_SEAMS}。
+ * @param context - Electron Builder's afterPack context.
+ * @returns A promise that rejects before signing when the runtime is incomplete.
+ */
+export async function afterPack(context: PackagedRuntimeContext): Promise<void> {
+  await runAfterPackSeams(context, AFTER_PACK_SEAMS)
 }

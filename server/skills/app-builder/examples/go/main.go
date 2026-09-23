@@ -1038,7 +1038,7 @@ func cellAt(row []any, i int) string {
 	return cell(row[i])
 }
 
-// clipRunes 按字符截断（避免把半个 UTF-8 字符塞进提示词或数据库）。
+// clipRunes 按字符截断（避免把一个多字节字符截成半个塞进提示词或数据库）。
 func clipRunes(s string, max int) string {
 	rs := []rune(s)
 	if len(rs) <= max {

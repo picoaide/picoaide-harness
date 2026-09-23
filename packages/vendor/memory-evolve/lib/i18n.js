@@ -810,8 +810,12 @@ export const SKILL_MSG_DICT = {
   'skillmsg.invalidNameShort': ['无效技能名 "{name}"', 'Invalid skill name "{name}"'],
   'skillmsg.pendingMissing': ['待确认技能 "{name}" 不存在', 'Pending skill "{name}" does not exist'],
   'skillmsg.landingRefused': [
-    '技能库中的落点 "{name}" 是符号链接或越出技能库，已拒绝采纳',
-    'Skill landing "{name}" is a symlink or escapes the skill library; adoption refused',
+    '技能库中的落点 "{name}" 不可用（符号链接 / 同名处不是目录 / 越出技能库），已拒绝采纳',
+    'Skill landing "{name}" is unusable (symlink / a non-directory is in the way / escapes the skill library); adoption refused',
+  ],
+  'skillmsg.writeRefused': [
+    '技能库中的落点 "{name}" 被拒绝（符号链接 / 越出技能库 / 同名处不是目录），未写入任何文件',
+    'Skill landing "{name}" refused (symlink / escapes the skill library / a non-directory is in the way); nothing was written',
   ],
   'skillmsg.alreadyInLib': [
     '技能 "{name}" 已存在于技能库，请先处理再采纳',

@@ -34,8 +34,15 @@ export interface CdpTransport {
 const CDP_CALL_TIMEOUT_MS = 30_000
 
 export interface CdpSessionOptions {
-  /** Per-command timeout in ms (default CDP_CALL_TIMEOUT_MS). */
-  timeoutMs?: number
+  /**
+   * Per-command timeout in ms (default CDP_CALL_TIMEOUT_MS).
+   *
+   * A provider function is evaluated for EVERY command: the runtime needs the
+   * budget to shrink with what is left of the current tool deadline, so a hung
+   * renderer is abandoned before the upstream timeout-policy replaces the tool's
+   * own diagnosis with a generic `tool call timed out` (R4-B-15).
+   */
+  timeoutMs?: number | (() => number)
 }
 
 /** One established CDP session over a transport. */
@@ -81,7 +88,8 @@ export class CdpSession {
     callOptions: { timeoutMs?: number; signal?: AbortSignal; sessionId?: string } = {},
   ): Promise<T> {
     if (this.closed) throw new Error(`browser: CDP session closed (${method})`)
-    const timeoutMs = callOptions.timeoutMs ?? this.options.timeoutMs ?? CDP_CALL_TIMEOUT_MS
+    const configured = callOptions.timeoutMs ?? this.options.timeoutMs
+    const timeoutMs = typeof configured === 'function' ? configured() : configured ?? CDP_CALL_TIMEOUT_MS
     const wire = callOptions.sessionId === undefined
       ? this.transport.sendCommand(method, params)
       : this.transport.sendCommand(method, params, callOptions.sessionId)

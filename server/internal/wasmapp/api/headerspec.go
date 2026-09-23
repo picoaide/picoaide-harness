@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -122,17 +123,22 @@ func HeadersSpec() HeadersDoc {
 		Schema: HeadersSpecSchema,
 		Note: "跨端请求头白名单（单一真源 = server/internal/wasmapp/api/headerspec.go）。" +
 			"客户端必须转发且只转发 request_headers 里的头；多一个或少一个都会让导航/请求 400。" +
-			"本文件由 go generate ./internal/wasmapp/api 生成，不要手改。",
+			"本文件由 go generate ./internal/wasmapp/api 生成，不要手改。" +
+			"response_body_bytes_max 是**可交付**口径（= 单帧预算的一半，见 abi.MaxResponseBodyBytes）：" +
+			"应用响应体必须装进一个协议帧（单帧负载上限 abi.MaxFrameBytes = 1 MiB），" +
+			"所以 8 MiB 那类数字是不可达的（2026-09-23 审计 ABI-1）。",
 		RequestHeaders: append([]string(nil), EnvelopeRequestHeaders...),
 		Limits: HeadersLimits{
-			HeaderCountMax:       maxClientHeaderCount,
-			HeaderValueBytesMax:  maxClientHeaderBytes,
-			HeaderNameBytesMax:   maxClientHeaderNameSize,
-			PathBytesMax:         maxClientPathBytes,
-			QueryBytesMax:        maxClientQueryBytes,
-			EnvelopeBytesMax:     maxClientEnvelopeBytes,
-			RequestBodyBytesMax:  limits.AppRequestBodyMaxBytes,
-			ResponseBodyBytesMax: limits.AppResponseBodyMaxBytes,
+			HeaderCountMax:      maxClientHeaderCount,
+			HeaderValueBytesMax: maxClientHeaderBytes,
+			HeaderNameBytesMax:  maxClientHeaderNameSize,
+			PathBytesMax:        maxClientPathBytes,
+			QueryBytesMax:       maxClientQueryBytes,
+			EnvelopeBytesMax:    maxClientEnvelopeBytes,
+			RequestBodyBytesMax: limits.AppRequestBodyMaxBytes,
+			// 真实口径（可交付）而不是 8 MiB：响应体必须装进一个帧。
+			// 单一真源 = abi.MaxResponseBodyBytes（见那里的推导与实测）。
+			ResponseBodyBytesMax: abi.MaxResponseBodyBytes,
 		},
 		PlatformHeaders: HeadersPlatform{
 			ProofRequest:       proofHeader,

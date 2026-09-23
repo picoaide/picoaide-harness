@@ -311,27 +311,72 @@ function channelBuilderConfigArgs(
   return ['--config', configFilePath]
 }
 
+/** 生成的 electron-builder 配置文件名（打包工具中间产物，**绝不随包**）。 */
+export const CHANNEL_BUILDER_CONFIG_FILENAME = 'channel-electron-builder.cjs'
+
 /**
- * 打包脚本的统一入口:按渠道生成配置文件并返回要追加的 electron-builder 参数。
+ * 随包渠道配置（`build/channel.json`）与品牌素材的落点：`build/`。
  *
- * 官方渠道返回 `[]`(不做任何覆盖,产物与改造前一致),也不会写任何文件。
+ * 它是 electron-builder 的 buildResources，也是暂存白名单条目 `build`
+ * —— **整个目录会进 app.asar**（见 `pack-app-root.mjs`）。
+ * @returns 绝对路径。
+ */
+export function defaultChannelBuildDir(): string {
+  return join(defaultRepoRoot(), 'packages/host/desktop', 'build')
+}
+
+/**
+ * 生成的 electron-builder 配置的落点：包根 `temp/`（**在随包应用根之外**）。
+ *
+ * 为什么不能放 `build/`（2026-09-23 独立复审 N-1 实测）：`build` 是暂存白名单条目，
+ * `stagePackAppRoot()` 会把它**整目录**复制进打包输入 ⇒ 写在 `build/` 里的任何
+ * 打包工具中间产物都会进 `app.asar`。这个覆盖文件含渠道 productName / appId /
+ * 深链 scheme / 产物名模板：官方渠道不生成它（所以本机 `package-dir.mjs` 看不见），
+ * 而 CI 会为 beta 与各品牌渠道各打一次包 ⇒ 那些交付件的 asar 里会多一个渠道配置文件。
+ *
+ * `temp/` 在 `PACK_APP_ROOT_EXCLUDED` 里（开发期目录、被 gitignore 覆盖），
+ * 与暂存根 `dist/.pack-root` 没有包含关系。产物侧还有第二道闸：
+ * `verify-packaged-runtime.ts` 的禁止形态表把该路径钉成违规。
+ * @returns 绝对路径。
+ */
+export function defaultChannelBuilderConfigDir(): string {
+  return join(defaultRepoRoot(), 'packages/host/desktop', 'temp')
+}
+
+/** `prepareChannelBuilderOverrides` 的两个落点（测试注入用）。 */
+export interface ChannelBuilderOverridePaths {
+  /** 随包渠道配置的落点（缺省 {@link defaultChannelBuildDir}）。 */
+  readonly buildDir?: string
+  /** 生成的 electron-builder 配置的落点（缺省 {@link defaultChannelBuilderConfigDir}）。 */
+  readonly configDir?: string
+}
+
+/**
+ * 打包脚本的统一入口:按渠道就位随包渠道配置、生成 electron-builder 配置，
+ * 并返回要追加到命令行的参数。
+ *
+ * 两个落点是**分开**的，且必须分开：随包配置进 `build/`（会进 asar），打包配置
+ * 进 `temp/`（绝不进包）—— 见 {@link defaultChannelBuilderConfigDir}。
+ * 调用时机也有约束：随包配置要在应用根**暂存之前**就位，打包配置要在**暂存之后**
+ * 生成（各打包脚本把它做成惰性求值的 `channelConfigArgs()` 正是为此）。
+ *
+ * 官方渠道返回 `[]`(不做任何覆盖,产物与改造前一致),只做残留清理。
  * @param context - 渠道上下文。
- * @param workDir - 生成文件写到哪里(缺省 package 根的 build/)。
+ * @param paths - 两个落点（缺省见上文；测试注入临时目录）。
  * @returns 追加到 electron-builder 命令行的参数。
  */
 export function prepareChannelBuilderOverrides(
   context: ChannelBuildContext,
-  workDir?: string,
+  paths: ChannelBuilderOverridePaths = {},
 ): string[] {
-  // 应用资源目录 = 生成的配置文件与**随包分发的渠道包**共同的落点。两者必须
-  // 同进同出:工作目录是测试/临时构建的覆盖点(见各打包脚本的 channelConfigArgs)。
-  const appDir = workDir ?? join(defaultRepoRoot(), 'packages/host/desktop', 'build')
-  // 先就位**运行期**渠道包，再谈编译期覆盖:两者缺一，渠道构建就是半成品
-  // (见 stageChannelProfile 的说明)。官方渠道也要走一遍 —— 它的作用是**清掉**
-  // 上一次渠道构建留下的文件。
-  stageChannelProfile(context, appDir)
+  // 先就位**运行期**渠道包:两者缺一，渠道构建就是半成品(见 stageChannelProfile)。
+  // 官方渠道也要走一遍 —— 它的作用是**清掉**上一次渠道构建留下的文件。
+  stageChannelProfile(context, paths.buildDir ?? defaultChannelBuildDir())
   if (context.official) return []
-  const target = join(appDir, 'channel-electron-builder.cjs')
+  const target = join(
+    paths.configDir ?? defaultChannelBuilderConfigDir(),
+    CHANNEL_BUILDER_CONFIG_FILENAME,
+  )
   return channelBuilderConfigArgs(context, writeChannelBuilderConfig(context, target))
 }
 
@@ -366,11 +411,27 @@ export function packagedProductName(buildDir?: string): string {
  * 两样东西都必须清:随包渠道配置（`channel.json`，会决定客户端的品牌/默认域名）
  * 与生成的 electron-builder 配置（`channel-electron-builder.cjs`，含渠道名/appId/
  * 协议 scheme）。官方构建继承任何一样都属于"官方包带上客户品牌"，比"没生效"更糟。
+ *
+ * 打包配置自 2026-09-23 起**不再写进 `build/`**（见
+ * {@link defaultChannelBuilderConfigDir}），这里的两条清理因此分工不同：
+ * `channel.json` 只在"官方/本地无渠道包"分支清，而打包配置**每次构建都清** ——
+ * 旧版本留下的残留同样会被暂存层整目录复制进 asar。
  * @param buildDir - `packages/host/desktop/build` 目录。
  */
 function clearChannelResidue(buildDir: string): void {
   rmSync(join(buildDir, 'channel.json'), { force: true })
-  rmSync(join(buildDir, 'channel-electron-builder.cjs'), { force: true })
+}
+
+/**
+ * 打包工具中间产物不得留在随包目录里（每次构建都清，与渠道无关）。
+ *
+ * 这段清理是 2026-09-23 复审 N-1 的纵深防御：**修复后**的正常路径不会往 `build/`
+ * 写它，但升级上来的工作树里可能还躺着旧版本写下的那一份 —— 不清掉，它就会被
+ * `stagePackAppRoot()` 整目录复制进 asar。产物侧还有禁止形态表兜底。
+ * @param buildDir - `packages/host/desktop/build` 目录。
+ */
+function clearChannelBuilderResidue(buildDir: string): void {
+  rmSync(join(buildDir, CHANNEL_BUILDER_CONFIG_FILENAME), { force: true })
 }
 
 /**
@@ -402,6 +463,8 @@ export function stageChannelProfile(
 ): string | undefined {
   const target = join(buildDir, 'channel.json')
   const source = join(context.channelDir, 'channel.json')
+  // 打包工具中间产物先清（任何分支都清，见 clearChannelBuilderResidue）。
+  clearChannelBuilderResidue(buildDir)
   if (context.official || !existsSync(source)) {
     // 本地开发（没有渠道目录）走这里:必须清掉残留，否则会用错品牌。
     clearChannelResidue(buildDir)
@@ -507,6 +570,8 @@ function writeChannelBuilderConfig(context: ChannelBuildContext, outputPath: str
     },
   }
   const target = isAbsolute(outputPath) ? outputPath : join(defaultRepoRoot(), outputPath)
+  // 落点可能还不存在（缺省是包根 `temp/`，一个纯 scratch 目录）。
+  mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, `// 由 scripts/channel-build.ts 生成 —— 渠道 ${context.channelId} 的打包配置。
 module.exports = ${JSON.stringify(config, null, 2)}\n`)
   return target
