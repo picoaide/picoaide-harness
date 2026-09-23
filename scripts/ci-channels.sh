@@ -120,9 +120,31 @@ if [ "$RESOLVE_ONLY" -eq 1 ]; then
     echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret" >&2
     exit 1
   fi
-  REV="$(git ls-remote --quiet "$(channels_url)" HEAD 2>/dev/null | awk 'NR==1 {print $1}')"
+  # **失败不能沉默**（2026-09-23 现场）：secret 里的 token 失效时 `git ls-remote` 返回 128，
+  # 而 `set -e` 会在赋值处直接终止脚本；旧写法还把 stderr 丢进 `/dev/null` ⇒ CI 日志里
+  # 只剩一行 "exit code 128"，完全指不到病根（本次就是靠本机复现无效 token 的**同一返回码**
+  # 才反推出是凭据问题）。现在把 git 的 stderr 捕下来、**脱敏后**打进日志，并按症状分类：
+  # 凭据被拒 / 网络不可达 / 未分类，各自给可行动的处置。
+  if ! REMOTE_OUT="$(git ls-remote --quiet "$(channels_url)" HEAD 2>&1)"; then
+    REMOTE_ERR="$(printf '%s' "$REMOTE_OUT" | sed -E 's#(x-access-token:)[^@]*@#\1<redacted>@#g')"
+    echo "::error::读取私有渠道仓失败（git ls-remote 非零退出）：${REPO}" >&2
+    printf '%s\n' "$REMOTE_ERR" | sed 's/^/  /' >&2
+    case "$REMOTE_ERR" in
+      *"Invalid username or token"*|*"鉴权失败"*|*"Authentication failed"*|*"could not read Username"*)
+        echo "::error::症状=凭据被拒 ⇒ secret CHANNELS_REPO_TOKEN 已失效/被撤销，或权限不含 ${REPO} 的 Contents:Read（secret 值不回显；更新后重跑本 job）" >&2
+        ;;
+      *"Could not resolve host"*|*"Connection timed out"*|*"unable to access"*|*"The requested URL returned error: 5"*)
+        echo "::error::症状=网络不可达/服务端 5xx ⇒ 先重跑本 job；持续失败再查 runner 出网与 GitHub 状态" >&2
+        ;;
+      *)
+        echo "::error::症状未分类 ⇒ 看上面的原始 stderr（已脱敏；token 不会回显）" >&2
+        ;;
+    esac
+    exit 1
+  fi
+  REV="$(printf '%s\n' "$REMOTE_OUT" | awk 'NR==1 {print $1}')"
   if [ -z "$REV" ]; then
-    echo "::error::无法解析渠道仓 revision(检查 CHANNELS_REPO_TOKEN 与网络)" >&2
+    echo "::error::渠道仓返回空 revision（HEAD 不存在？）：${REPO}" >&2
     exit 1
   fi
   require_pin_shape "$REV"
