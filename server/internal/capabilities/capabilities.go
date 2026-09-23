@@ -147,9 +147,35 @@ func parseTypeFilter(c *gin.Context) typeFilter {
 	}
 }
 
+// marketOwnedBy 回答"这个调用者是否拥有该 kind 的**任意**一个应用行"（任意渠道）。
+//
+// 它的唯一用途是给「我的」分区的**市场渠道**取数做前置闸门（2026-09-23 R6-D P2-2）：
+// 市场清单（`ListSkills(enabledOnly=false)` / `ListApps(kind, market)`）是 O(市场应用数)
+// 次查询，而绝大多数调用者一个应用都不拥有 —— 那种请求不该为一条空结果付这份代价。
+// 判据用 distribution 的具名方法（`OwnedBy`），不在这里判 `Owner == username`：
+// 归属语义的唯一实现是 serverstore/distribution.go 的 AppOwnedByOwner
+// （空 owner 不属于任何人）。
+//
+// 它**不是**第二个可见性判据：真正的行级过滤仍逐行用 `dist.OwnedBy` —— 这个函数只
+// 决定"要不要去查"，查错了（比如渠道判错）也只会让结果为空，不会漏掉或放大任何一行。
+func marketOwnedBy(dists serverstore.DistributionMap, viewer string) bool {
+	if viewer == "" {
+		return false
+	}
+	for _, d := range dists {
+		if d.OwnedBy(viewer) {
+			return true
+		}
+	}
+	return false
+}
+
 // appendSkill merges one marketplace skill into the catalog (authorized/enabled only).
 // isOwner 由调用方按 apps.owner 计算(市场适配层 Skill.Author == apps.owner)。
-func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool, official bool) {
+//
+// delisted（2026-09-23 R6-D P2-2）：同 appendMarketAgent —— 只有「我的」分区（作者面）
+// 可能为 true；分发面列出的行恒 false（下架行不列，语义权威见 serverstore/distribution.go）。
+func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string][]string, isOwner bool, official bool, delisted bool) {
 	versions[s.Name] = append(versions[s.Name], s.Version)
 	// 展示名(0051):优先包内 title 写入的 display_name,为空回退 name
 	// ——此前这里硬编码 s.Name,是「市场卡片显示目录名」的直接原因。
@@ -170,12 +196,18 @@ func appendSkill(out *[]CapabilityItem, s serverstore.Skill, versions map[string
 		Downloads:   s.Downloads,
 		Calls:       s.Calls,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	})
 }
 
 // appendMarketAgent merges one marketplace agent into the catalog
 // (enabled+authorized only; G4 2026-09-04 市场智能体)。
-func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[string][]string, releases map[string]serverstore.Release, isOwner bool) {
+//
+// delisted（2026-09-23 R6-D P2-2）：下架标记，只在**归属人的「我的」分区**为 true
+// —— 分发面列出的行已按 Delivered() 过滤，故恒 false。市场渠道此前**没有作者面**
+// （「我的」只取 `ListOwnedAgentPresets` = org 渠道），于是下架的市场智能体在归属人
+// 那一侧完全不可表达；现在两条渠道同构（见 listCapabilities 的 3b 分支注释）。
+func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[string][]string, releases map[string]serverstore.Release, isOwner bool, delisted bool) {
 	r, ok := releases[a.AppID]
 	if !ok {
 		return
@@ -198,6 +230,7 @@ func appendMarketAgent(out *[]CapabilityItem, a serverstore.App, versions map[st
 		Downloads:   r.Downloads,
 		Calls:       r.Calls,
 		IsOwner:     isOwner,
+		Delisted:    delisted,
 	})
 }
 
@@ -419,7 +452,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				// 归属语义就静默跟着变，而这里看不出来）。判据唯一实现见
 				// serverstore/distribution.go 的 AppOwnedByOwner；等价性用例见
 				// bn3_market_owner_source_test.go。
-				appendSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name])
+				appendSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name], false)
 			}
 		}
 
@@ -456,7 +489,7 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				releases[a.AppID] = *r
 				// 与技能侧同源（B-N3）：具名判据读 apps 行的 owner，
 				// 不就地写 `a.Owner == u.Username` 这第二个表达式。
-				appendMarketAgent(&items, a, versions, releases, agentDists.Of(a.AppID).OwnedBy(u.Username))
+				appendMarketAgent(&items, a, versions, releases, agentDists.Of(a.AppID).OwnedBy(u.Username), false)
 			}
 		}
 
@@ -522,6 +555,42 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				}
 				appendSharedSkill(&items, s, versions, true, skillOfficials[s.Name], dist.Delisted())
 			}
+			// 市场渠道的归属行（2026-09-23 R6-D P2-2）：R5-B-1 的「下架 = 作者面仍
+			// 可见（带 delisted=true）」此前**只覆盖 org 渠道** —— 上面的
+			// ListOwnedSharedSkills 的 SQL 只认 channel='org'，而市场行在分发面
+			// 走 enabledOnly 过滤（read 侧 ListSkills(true)），下架后归属人的员工面
+			// market/org/own 三个视图同时为空：管控动作在作者面**没有任何反馈**，
+			// 而归属转移端点（PUT /apps/:kind/:app_id/owner）不限渠道、可把市场行
+			// 转给普通员工 ⇒ 归属人对市场行没有任何作者面。
+			//
+			// 判据与 org 分支**同构**：归属=apps.owner 的具名判据 OwnedBy（不在这里
+			// 写第二份表达式），作者面不看 Delivered()（下架只挡分发面），行里带
+			// delisted 标记。可见面不扩大：只有归属人自己的名字会进来，其他人的行
+			// 一行都不多（非归属人的分发面口径完全不变 —— 市场分支仍按 Delivered()）。
+			//
+			// 为什么用 ListSkills(enabledOnly=false)：它是市场技能的**唯一**清单入口
+			// （与分发面同一个 DAO/同一个投影，不在这里另写一份 appToSkill），
+			// enabledOnly=false 才拿得到下架行。代价是 O(市场应用数) 次查询，所以只在
+			// "调用者确实拥有该 kind 的某个应用行"时才跑（绝大多数请求因此零成本）。
+			if marketOwnedBy(skillDists, u.Username) {
+				marketSkills, merr := serverstore.ListSkills(db, false)
+				if merr != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				for _, s := range marketSkills {
+					dist := skillDists.Of(s.Name)
+					if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
+						continue
+					}
+					// 没有生效版本的行（占名但从未发布成功）不进目录 —— 与分发面
+					// 的"有生效版本"条件同口径（s.Version 由展示版本填，空 = 无）。
+					if s.Version == "" {
+						continue
+					}
+					appendSkill(&items, s, versions, true, skillOfficials[s.Name], dist.Delisted())
+				}
+			}
 		}
 
 		// 3) 组织·共享 Agent(审核+授权)。
@@ -561,7 +630,8 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 			}
 		}
 
-		// 3b) 「我的」分区:归属人自己的智能体预设(任意状态;与 2b 同判据)。
+		// 3b) 「我的」分区:归属人自己的智能体预设(任意状态;与 2b 同判据 ——
+		// 含市场渠道的归属行,理由与技能侧逐条同源,见 2b 分支的长注释)。
 		if includeOwn && ft.agents {
 			owned, err := serverstore.ListOwnedAgentPresets(db, u.Username)
 			if err != nil {
@@ -574,6 +644,33 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					continue
 				}
 				appendSharedAgent(&items, p, versions, true, agentOfficials[p.Name], dist.Delisted())
+			}
+			if marketOwnedBy(agentDists, u.Username) {
+				marketAgents, merr := serverstore.ListApps(db, serverstore.AppKindAgent, serverstore.AppChannelMarket)
+				if merr != nil {
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				releases := map[string]serverstore.Release{}
+				for _, a := range marketAgents {
+					dist := agentDists.Of(a.AppID)
+					if !dist.OwnedBy(u.Username) || !dist.AuthorVisible() {
+						continue
+					}
+					// 与市场分发分支**同一处**取数（CurrentMarketReleaseFor 只认
+					// approved 且未软删的最高版本），只是这里的闸门是归属而不是
+					// Delivered —— 下架行正是要靠这一步才捞得回来。
+					r, rerr := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, a.AppID, false)
+					if rerr != nil {
+						serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+						return
+					}
+					if r == nil {
+						continue
+					}
+					releases[a.AppID] = *r
+					appendMarketAgent(&items, a, versions, releases, true, dist.Delisted())
+				}
 			}
 		}
 
