@@ -122,8 +122,36 @@ const GUARDS = [
 const ADVISORY_REGISTRY = []
 
 /**
- * 校验 advisory 登记（**双向**）：未登记的 advisory / 陈旧登记 / 缺字段 / 已过期
- * 一律返回错误清单，调用方据此拒绝调度。
+ * advisory 到期日必须是**真实日历日**（第六轮独立复审 V2 边界②）。
+ *
+ * 现场：`expiresOn` 此前只被要求"是字符串"，到期比较写成
+ * `if (!Number.isNaN(Date.parse(entry.expiresOn ?? '')) && …)` —— 于是**不可解析**的
+ * 取值被静默跳过：登记项写 `expiresOn: 'whenever'` 就能让"到期即失效"这条语义永不生效。
+ * 实测两条通道都 EXIT=0（`check-workspaces --list` / `check-root-guards --list`）。
+ * 这是 R6-C-1 的同一个病：判据看起来在，实际缺一颗牙。
+ *
+ * 三档一起判（缺任一条都能被绕过）：
+ *   ① 形状 `^\d{4}-\d{2}-\d{2}$` —— 挡 `'whenever'`、`'2026-1-1'`、`'2026/10/31'`；
+ *   ② `Date.parse` 不是 NaN —— 挡 `'2026-13-45'` 这类越界取值；
+ *   ③ UTC 往返逐字回读相等 —— 挡 `'2026-02-31'` 这类"形状合法、但不是那一天"的取值
+ *      （Node 的 ISO 解析**会把它滚到 3 月 3 日**：实测
+ *      `Date.parse('2026-02-31T00:00:00Z')` ⇒ `2026-03-03T00:00:00.000Z`）。
+ *      ③ 判的是日期本身的性质，不是运行时的宽容度。
+ *
+ * 取向与其它登记字段同档：**非法值不是"没有判据"，而是配置错误 ⇒ fail-loud**。
+ * @param value - 登记项上的 `expiresOn`（已归一化成字符串，可能是空串）。
+ * @returns 是不是一个可比较的真实日历日。
+ */
+function isAdvisoryExpiresOn(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00Z`)
+  if (Number.isNaN(parsed)) return false
+  return new Date(parsed).toISOString().slice(0, 10) === value
+}
+
+/**
+ * 校验 advisory 登记（**双向**）：未登记的 advisory / 陈旧登记 / 缺字段 / 到期日非法 /
+ * 已过期一律返回错误清单，调用方据此拒绝调度。
  *
  * 为什么不做成"未登记就降级成阻塞"：那会把配置错误伪装成正常门禁，红点从"配置非法"
  * 漂移成"某条判据失败"，排查成本全落到下一个人身上。配置错误必须报成配置错误。
@@ -137,6 +165,7 @@ export function validateAdvisoryRegistry(guards, registry = ADVISORY_REGISTRY, t
   const errors = []
   const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
   const registered = registry.map(entry => entry?.name)
+  const todayKey = today.toISOString().slice(0, 10)
   for (const name of advisories) {
     if (!registered.includes(name)) {
       errors.push(`守卫 \`${name}\` 被标成 advisory，但它不在 ADVISORY_REGISTRY 里`
@@ -155,12 +184,17 @@ export function validateAdvisoryRegistry(guards, registry = ADVISORY_REGISTRY, t
         errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 缺 \`${field}\`（advisory 必须可追溯、可到期复核）`)
       }
     }
-    if (!Number.isNaN(Date.parse(entry.expiresOn ?? '')) && typeof entry.expiresOn === 'string') {
-      const todayKey = today.toISOString().slice(0, 10)
-      if (entry.expiresOn < todayKey) {
-        errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 已于 ${entry.expiresOn} 到期（今天 ${todayKey}）`
-          + ' ⇒ 到期即失效：要么再次登记并写明续期理由，要么把它转回阻塞。')
-      }
+    const expiresOn = typeof entry.expiresOn === 'string' ? entry.expiresOn.trim() : ''
+    if (expiresOn !== '' && !isAdvisoryExpiresOn(expiresOn)) {
+      // 只判"有没有"会让一个乱字符串把"到期即失效"整条语义绕过去（第六轮复审 V2 边界②）。
+      errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 的 \`expiresOn\`（${JSON.stringify(entry.expiresOn)}）`
+        + '不是 `YYYY-MM-DD` 形式的真实日期'
+        + ' ⇒ 到期判据（`expiresOn < 今天`）对不可解析的取值**静默不成立**，豁免会变成"永不过期"。'
+        + ' 请写成真实日历日（例：`2026-10-31`）；不确定就给一个**更早**的日期 ——'
+        + ' 到期即失效、续期要重新进 diff，这正是这条登记制的全部意义。')
+    } else if (expiresOn !== '' && expiresOn < todayKey) {
+      errors.push(`ADVISORY_REGISTRY 的 \`${name}\` 已于 ${expiresOn} 到期（今天 ${todayKey}）`
+        + ' ⇒ 到期即失效：要么再次登记并写明续期理由，要么把它转回阻塞。')
     }
     if (!advisories.includes(name)) {
       errors.push(`ADVISORY_REGISTRY 里的 \`${name}\` 并不是 advisory 守卫`

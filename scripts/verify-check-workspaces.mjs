@@ -1115,6 +1115,106 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
           + `实际 ${rootGuardsProbe.status}：${`${rootGuardsProbe.stdout ?? ''}${rootGuardsProbe.stderr ?? ''}`.slice(0, 300)}`)
       console.log(`verify-check-workspaces: R6-C-1 未登记 advisory（${guardName}）⇒ 编排器与根守卫均 exit 2 ✓`)
     }
+
+    // -----------------------------------------------------------------------
+    // advisory 到期日**格式**判据（第六轮独立复审 V2 边界② / C-N1）。
+    //
+    // 现场：`expiresOn` 只被要求"是字符串"，到期比较写成
+    // `if (!Number.isNaN(Date.parse(entry.expiresOn ?? '')) && …)` ⇒ 不可解析的取值被
+    // **静默跳过**。登记项写 `expiresOn: 'whenever'` + 把一个非下限守卫标成 advisory，
+    // 两条通道都 EXIT=0 —— "到期即失效"这条语义被一个乱字符串绕过（判据缺一颗牙）。
+    //
+    // 自检样本（三个非法取值必须在**编排器**这条通道上 exit 2，且失败信息点名 `expiresOn`）：
+    //   · `'whenever'`   —— 形状非法（旧实现静默跳过的那一档）；
+    //   · `'2026-13-45'` —— 形状合法但越界（`Date.parse` 为 NaN）；
+    //   · `''`           —— 空串（"缺字段"那一档，语义同样是"没有可用的到期日"）。
+    // 再加一个**正控**（`'2099-12-31'`，编排器必须 exit 0）：没有它，"探针恒红"
+    // （比如注入本身把树弄坏了）也会让上面三条断言全部通过 —— 那是假绿。
+    //
+    // 变异：把编排器里的格式校验去掉 ⇒ 三个非法样本不再 exit 2 ⇒ 本段必红。
+    //
+    // **已认账的残余（范围限制，2026-09-23）**：`check-root-guards.mjs` 按源码文本解析
+    // 登记表，但**不校验字段值**（`reason`/`approvedBy`/`expiresOn` 都只判在不在），
+    // 本次范围不允许改该脚本 ⇒ 乱取值在那条通道上仍是 EXIT=0。影响面有限：该通道的
+    // advisory **默认照样拦门禁**（只有显式 `--allow-advisory` 才降级，docs-only 的 CI
+    // 路径不传），所以"到期即失效"被绕过的实际后果集中在编排器侧，而那一侧已经堵上。
+    // 补法是一行：在 `parseAdvisoryRegistry` 之后拒绝非法 `expiresOn`（与
+    // `check-workspaces.mjs` 的 `isAdvisoryExpiresOn` 同源）。
+    // -----------------------------------------------------------------------
+    {
+      /**
+       * 把编排器源码改成「`check:glitchtip` 标 advisory + 登记项带指定 `expiresOn`」。
+       * 到期日用**单引号**字面量（根守卫是按源码文本解析登记表的：`expiresOn:\s*'…'`），
+       * 这样 `''` 样本在两条通道上看到的都是"空串"而不是"字段缺失"。
+       * @param source - 编排器源码。
+       * @param expiresOn - 样本取值（本段的三个非法值 + 一个正控，均不含单引号）。
+       * @returns 变异后的源码；锚点不在时返回 null（fail-loud，不静默跳过）。
+       */
+      const EXPIRY_PROBE_MUTATION = (source, expiresOn) => {
+        if (expiresOn.includes("'")) return null
+        const needle = "{ name: 'check:glitchtip', args: ['run', 'check:glitchtip']"
+        const registry = 'const ADVISORY_REGISTRY = []'
+        if (!source.includes(needle) || !source.includes(registry)) return null
+        return source
+          .replace(needle, "{ advisory: true, name: 'check:glitchtip', args: ['run', 'check:glitchtip']")
+          .replace(registry, 'const ADVISORY_REGISTRY = [\n'
+            + '  { name: \'check:glitchtip\', reason: \'R6-C-1 到期日格式副本探针\', '
+            + `approvedBy: 'verify-check-workspaces', expiresOn: '${expiresOn}' },\n`
+            + ']')
+      }
+      const EXPIRY_SAMPLES = [
+        { value: 'whenever', legal: false },
+        { value: '2026-13-45', legal: false },
+        { value: '', legal: false },
+        { value: '2099-12-31', legal: true },
+      ]
+      for (const sample of EXPIRY_SAMPLES) {
+        const mutatedSource = EXPIRY_PROBE_MUTATION(readFileSync(subject, 'utf8'), sample.value)
+        check(mutatedSource !== null,
+          'R6-C-1(到期日探针锚点): 在编排器源码里找不到 check:glitchtip 的条目锚点或 `const ADVISORY_REGISTRY = []`'
+            + ' —— 本探针的形状变了，请同步（不要删掉这段）')
+        if (mutatedSource === null) continue
+        const probeTree = tempDir('advisory-expiry-probe-')
+        mkdirSync(join(probeTree, 'scripts'))
+        writeFileSync(join(probeTree, 'scripts', 'check-workspaces.mjs'), mutatedSource)
+        copyFileSync(rootGuardsPath, join(probeTree, 'scripts', 'check-root-guards.mjs'))
+        writeFileSync(join(probeTree, 'package.json'),
+          // 根守卫还会断言"表里的守卫都必须是**这棵树**的 package.json scripts" ⇒ 合成树要把
+          // 真表的守卫名全登记上，否则正控（必须 exit 0）会被那条无关判据染红。
+          `${JSON.stringify({
+            name: 'advisory-expiry-probe',
+            private: true,
+            scripts: Object.fromEntries(guardNames.map(name => [name, 'node scripts/noop.mjs'])),
+          }, null, 2)}\n`)
+        const expected = sample.legal ? 0 : 2
+        const label = `expiresOn=${JSON.stringify(sample.value)}`
+        const orchestratorProbe = spawnSync(process.execPath, [join(probeTree, 'scripts', 'check-workspaces.mjs'), '--list'],
+          { cwd: probeTree, encoding: 'utf8' })
+        check(orchestratorProbe.status === expected,
+          `R6-C-1(到期日): ${label} 时编排器必须 exit ${expected}，实际 ${orchestratorProbe.status}：`
+            + `${`${orchestratorProbe.stdout ?? ''}${orchestratorProbe.stderr ?? ''}`.slice(0, 300)}`)
+        if (!sample.legal) {
+          check(`${orchestratorProbe.stderr ?? ''}`.includes('expiresOn'),
+            `R6-C-1(到期日): ${label} 的失败信息必须点名 \`expiresOn\`（否则排查者看不出是到期日写坏了），`
+              + `实际 ${JSON.stringify((orchestratorProbe.stderr ?? '').slice(0, 200))}`)
+        }
+        const rootGuardsProbe = spawnSync(process.execPath, [join(probeTree, 'scripts', 'check-root-guards.mjs'), '--list'],
+          { cwd: probeTree, encoding: 'utf8' })
+        if (sample.legal) {
+          // 正控：合法取值在两棵树上都必须被接受（否则说明探针自身把树弄坏了，
+          // 上面那些"必须 exit 2"就全是假绿）。
+          check(rootGuardsProbe.status === 0,
+            `R6-C-1(到期日): 正控 ${label} 时 check-root-guards 必须 exit 0，`
+              + `实际 ${rootGuardsProbe.status}：${`${rootGuardsProbe.stdout ?? ''}${rootGuardsProbe.stderr ?? ''}`.slice(0, 300)}`)
+          console.log(`verify-check-workspaces: R6-C-1 到期日 ${label} ⇒ 编排器与根守卫均 exit 0 ✓（正控）`)
+          continue
+        }
+        // 非法取值在根守卫通道上**只记录、不断言**：那条通道的字段值判据不在本次范围内
+        // （见本段头部的"已认账的残余"）。把它如实打出来，不让它悄悄消失。
+        console.log(`verify-check-workspaces: R6-C-1 到期日 ${label} ⇒ 编排器 exit 2 ✓；`
+          + `根守卫通道 exit ${rootGuardsProbe.status}（残余：该脚本不校验字段值，未在本次范围）`)
+      }
+    }
   }
 }
 
