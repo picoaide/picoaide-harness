@@ -300,6 +300,59 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
 }
 
 // ---------------------------------------------------------------------------
+// 文档数字守卫（2026-09-23 二轮审计 D-4/D-5 后的新守卫）：合成正/负例 + 接线
+//
+// 夹具同样"两处都动"：真源写 0.1.6-alpha.2 / 2 项模块，官网先写落后 pin + 漏项列表
+// （必须红，且必须同时点名两处），改对后同一棵树必须绿。
+// ---------------------------------------------------------------------------
+
+{
+  const guard = join(root, 'scripts', 'check-doc-claims.mjs')
+  const tree = tempDir('doc-claims-tree-')
+  mkdirSync(join(tree, 'scripts'), { recursive: true })
+  mkdirSync(join(tree, 'site', 'src', 'content', 'docs', 'en'), { recursive: true })
+  writeFileSync(join(tree, 'upstream.json'), JSON.stringify({ commit: 'a'.repeat(40), sourceVersion: '0.1.6-alpha.2' }))
+  writeFileSync(
+    join(tree, 'scripts', 'platform-modules.mjs'),
+    "export const PLATFORM_MODULES = [\n  'react',\n  'react-dom',\n]\n",
+  )
+  const stalePinLine = '当前 pin `dsh-v0.1.5-rc.2` 构建。\n'
+  const staleModulesLine = '平台模块表（`PLATFORM_MODULES`，共 9 项：`react`、`react-dom`、`@deepseek-ai/dsh-client-ui-dockkit`）。\n'
+  writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'faq.md'), `# FAQ\n\n${stalePinLine}`)
+  writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'plugin-development.md'), `# Plugins\n\n${staleModulesLine}`)
+  writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'en', 'plugin-development.md'), `# Plugins\n\n${staleModulesLine}`)
+  check(
+    stalePinLine.includes('dsh-v0.1.5-rc.2') && staleModulesLine.includes('dsh-client-ui-dockkit'),
+    '文档数字守卫自检：坏夹具必须真的含落后 pin 与多出的模块项（否则负例是假绿）',
+  )
+
+  const bad = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(bad.status === 1, `文档数字守卫：落后 pin / 模块表不一致必须红（实际 exit=${bad.status}）`)
+  check(
+    bad.stderr.includes('faq.md') && bad.stderr.includes('dsh-v0.1.6-alpha.2'),
+    `文档数字守卫：pin 漂移必须点名文件与真源值（实际 ${JSON.stringify(bad.stderr.slice(0, 300))}）`,
+  )
+  check(
+    bad.stderr.includes('plugin-development.md') && bad.stderr.includes('dsh-client-ui-dockkit'),
+    `文档数字守卫：模块表漂移必须点名文件与多出的项（实际 ${JSON.stringify(bad.stderr.slice(0, 300))}）`,
+  )
+
+  // 改对之后同一棵树必须绿（证明判红来自这两行，不是别的噪声）。
+  writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'faq.md'), '# FAQ\n\n当前 pin `dsh-v0.1.6-alpha.2` 构建。\n')
+  const goodModulesLine = '平台模块表（`PLATFORM_MODULES`，共 2 项：`react`、`react-dom`）。\n'
+  for (const file of ['plugin-development.md', join('en', 'plugin-development.md')]) {
+    writeFileSync(join(tree, 'site', 'src', 'content', 'docs', file), `# Plugins\n\n${goodModulesLine}`)
+  }
+  const good = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(good.status === 0, `文档数字守卫：改对后必须绿（实际 exit=${good.status}：${good.stderr.slice(0, 300)}）`)
+
+  // 扫描面失效（一条 pin 断言都扫不到）必须红 —— 空扫描不是通过。
+  writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'faq.md'), '# FAQ\n\n没有 pin 断言。\n')
+  const empty = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
+  check(empty.status === 1, `文档数字守卫：零 pin 断言必须红而不是静默通过（实际 exit=${empty.status}）`)
+}
+
+// ---------------------------------------------------------------------------
 // 接线：本门禁必须在 package.json 与 GUARDS 表里都登记（否则等于没接）
 // ---------------------------------------------------------------------------
 
@@ -334,6 +387,15 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
     guards.includes('check:migration-range'),
     `接线: check-workspaces 的 GUARDS 表必须包含 check:migration-range，实际 ${JSON.stringify(guards)}`,
   )
+  // 2026-09-23：文档数字守卫（D-4 上游 pin / D-5 平台模块表）同样双重登记。
+  check(
+    pkg.scripts?.['check:doc-claims'] === 'node scripts/check-doc-claims.mjs',
+    `接线: package.json 的 check:doc-claims 必须指向守卫脚本，实际 ${JSON.stringify(pkg.scripts?.['check:doc-claims'])}`,
+  )
+  check(
+    guards.includes('check:doc-claims'),
+    `接线: check-workspaces 的 GUARDS 表必须包含 check:doc-claims，实际 ${JSON.stringify(guards)}`,
+  )
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
@@ -345,5 +407,5 @@ if (failures.length > 0) {
 process.stdout.write(
   'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
-  + '迁移区间守卫的合成正/负例、本门禁与两个新守卫都已接入 package.json 与 GUARDS\n',
+  + '迁移区间守卫与文档数字守卫的合成正/负例、本门禁与相关守卫都已接入 package.json 与 GUARDS\n',
 )

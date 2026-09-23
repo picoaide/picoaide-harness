@@ -72,6 +72,11 @@ const GUARDS = [
   // 2026-09-20 实测漂移：`server/docs/06-database.md` / `08-development.md` 写着「迁移 0001–0060」
   // 而实际已到 0076。文档里的迁移区间此前**没有任何守卫**，只能靠人记得改 —— 这条把它变成判据。
   { name: 'check:migration-range', args: ['run', 'check:migration-range'], path: '文档里的迁移区间 ↔ 实际迁移编号' },
+  // 2026-09-23 二轮审计 D-4/D-5：官网 FAQ/理念页写着上游 pin `dsh-v0.1.5-rc.2`（真源已是
+  // 0.1.6-alpha.2），插件开发页声称平台模块表「与上游逐字一致」却只列了 8/9 项 —— 两处
+  // 「文档引用真源数字」此前同样零守卫。这条把它们绑到 `upstream.json` 与
+  // `scripts/platform-modules.mjs` 上（扫描器失效/空扫描一律 fail-loud）。
+  { name: 'check:doc-claims', args: ['run', 'check:doc-claims'], path: '文档里的上游 pin / 平台模块表 ↔ 真源' },
   // 2026-09-20 补上的那一环：本仓**公开**，「真实客户/部署域名永不出现」这条规则原先只有
   // 人工 `git grep`，而且规则条文自己把真实域名写进了示例 ⇒ 自检永远命中规则本身，等于没有
   // 守卫（历史提交信息里也真的进过客户域名与预发/生产主机名）。白名单式**前向**守卫：

@@ -8,8 +8,12 @@
  *
  * 判据：
  *   1. 读 `server/internal/serverstore/migrations-pg/` 的实际文件名 ⇒ `MIN` / `MAX`（四位数）；
- *   2. 扫 `server/docs` 下的 md、`server/AGENTS.md`、根 `AGENTS.md`、`docs` 下递归的 md 里的区间表述
+ *   2. 扫 `server/docs` 下的 md、`server/AGENTS.md`、根 `AGENTS.md`、`docs` 下递归的 md、
+ *      **`site/src/content/docs` 下递归的 md** 里的区间表述
  *      （`0001–00NN`、`0001 与 00NN`、`0001~00NN`…）：**上限必须 == MAX**（或该行已显式列出 MAX）；
+ *      官网（`site/**`）此前不在扫描面内 —— `architecture.md` 因此长期写着 `0001–0061`
+ *      （实际已到 0080）而无人发现：同一份"文档区间"在 `docs/` 里红、在 `site/` 里绿，
+ *      守卫的覆盖面本身成了假绿来源（2026-09-23 修复）。
  *   3. 另断言 `server/AGENTS.md` 里出现的四位数迁移号都在实际文件集合里（防写了不存在的迁移）；
  *   4. 豁免**只能**是：行内 `migration-range:allow` 标记，或**记录面**文档
  *      （`docs/planning|decisions|releases/**`、`docs/AUDIT-*.md` —— 它们记录的是"当时"的
@@ -43,7 +47,9 @@ for (let index = 0; index < args.length; index += 1) {
 }
 
 const MIGRATION_DIR = 'server/internal/serverstore/migrations-pg'
-const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs']
+// `site/src/content/docs`（官网 wiki，中英各一份）必须在内：它是**面向用户**的同一批
+// 数字，漏扫 = 同一处漂移在 docs/ 里被拦住、在官网上照旧发布（2026-09-23 D-6）。
+const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs']
 /**
  * 记录面：记录"当时"的事实，不跟随 MAX（理由见头注释第 4 条）。
  *   · `docs/planning|decisions|releases`、`docs/AUDIT-*`：计划/决策/发布/审计留痕；

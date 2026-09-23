@@ -76,6 +76,7 @@
     "check:wasm-channels": "node scripts/verify-wasm-channels.mjs",
     "check:no-leftover-mutants": "node scripts/check-no-leftover-mutants.mjs",
     "check:migration-range": "node scripts/check-migration-range.mjs",
+    "check:doc-claims": "node scripts/check-doc-claims.mjs",
     "check:no-real-domains": "node scripts/check-no-real-domains.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",
