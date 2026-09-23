@@ -158,6 +158,32 @@ var seededSkillDigests = map[string]string{
 	// 为什么必须提版本：这两份都是随镜像下发给员工的手册，已安装的客户端靠 version 判
 	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
 	"42dba768233467eaa28226e36ee8050981be784c35b04ae7dfb658c115213b01": "2.5.0",
+
+	// 2.6.0 = **文档与代码真值对齐**（2026-09-23，第二轮审计 SKD-1/2/3/4/9 + SKD-5 第二张表）：
+	// 四处技能叙述与实现相反/过时，且同技能内另有一份文件写的是对的（自相矛盾）：
+	//   - `references/abi.md` §3.6：`log` 的"保留 7 天"是**调用事件**的属性，应用日志只进
+	//     服务端运维日志、平台无查询接口也不承诺保留期（`appserver/hostenv.go` 的
+	//     `wasm-app[<app_id>]` 行；`limits.CallEventRetentionDays` 管的是调用事件）；
+	//   - `references/abi.md` §7：`FORBIDDEN` 与"发布者/冻结"无关（全包只有跨源写与审计
+	//     账号两个发射点）；非发布者是 **404 `NOT_FOUND`**（不泄露存在性），冻结是
+	//     **403 `APP_FROZEN`**；`APP_FROZEN` / `VALIDATE_FAILED` 两个真会发的码补进 §7.1；
+	//   - `references/abi.md` §3.3/§7 + `references/diagnostics.md`：`DB_LIMIT(507)` **只**
+	//     表示库写满（`appdb/appdb.go` 的 mapStmtError 注释口径）；行数/字节超限只置
+	//     `QueryResult.Truncated` 不报错，语句超时是 403 `DB_DENIED` +
+	//     `details.reason=statement_timeout`；
+	//   - `references/publishing.md`：冻结/导出的"只读快照（90 天）→ 真删"**未实现**
+	//     （`wasmapp/api/release.go` 与 `read.go` 自述"真删任务当前未实现"，`DELETE` 只软删）；
+	//   - `references/abi.md` 的 `NAME_TAKEN` hints：标识由首个发布者**永久占有**（同名即同一
+	//     应用），与同文件 `publishing.md` 的正确口径对齐；
+	//   - `references/limits.md`（生成物）：`sql_max_rows` 的 Note 由"超出即截断并报错"改成
+	//     "只截断并置 QueryResult.Truncated，不报错" —— 真源在 `limits/limitsspec.go`，
+	//     本条目由 `go generate ./internal/wasmapp/limits` 产出（不是手改生成物）；
+	//   - `SKILL.md` 的「并发与队列」段：补明 4096/256 两个上界来自
+	//     `internal/wasmapp/applimits/applimits.go`（**不在** limits 表里，数值门禁不覆盖
+	//     这张手写表），并去掉重复的"运维可在控制台改"。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"d90b4d151fe38f558b7fca6b328105f4a55776a902af0d6ae07576336f08271d": "2.6.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

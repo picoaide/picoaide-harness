@@ -73,12 +73,18 @@ docker buildx build --platform linux/amd64 \
 
 > 版本号与产品标签共用同一 git tag(`v*`):tag 流水线在 push tag 时经 `scripts/version.mjs check` 校验 tag 与 root package.json 一致,镜像版本与桌面客户端同线推进(如 `v2.4.6`),不再使用独立的 `v0.4.x`/`v0.5.x` 线。
 
-### 3.3 发布(CI 自动,Workflow: .github/workflows/docker.yml)
+### 3.3 发布(CI 自动,`ci.yml` 的 `release` job;**已无 docker.yml**)
 
-- 触发:`push tag v*` 或手动 `workflow_dispatch`(填版本号);
-- 单平台 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟);注入 VERSION;推送标签 `vX.Y.Z` / `vX.Y` / `latest`;
-- 附加 `type=gha` 构建缓存、`sbom=true`、`provenance=mode=max`;`imagetools inspect` 校验 amd64 manifest;
-- 镜像来源 = **更新服务器**(`https://release.picoaide.com/<channel>/releases/<版本>/…zip` 内的 `image.tar`,`docker load` 后按渠道重打 tag 并写回 `.env` 的 `SERVER_IMAGE`);**GHCR 已于 2026-09-10 下线,不要再用镜像仓库地址**。
+- 触发:`push tag v*`;渠道集与「是否对外发布」由 `scripts/ci-release-policy.sh` **单点判定**(gate 第一步执行,未知 tag 形态当场红);
+- 前置:`release` job 的 `needs: [server, desktop-linux, desktop-windows, desktop-macos]` —— 四路全绿才构建镜像;
+- 从**源码**按渠道构建镜像(`scripts/ci-build-channel-images.sh`:打进该渠道的客户端安装包与渠道内容)
+  → `docker save | zip` 成 `picoaide-server-<版本>-amd64.zip`;单平台 `linux/amd64`(2026-08-26 起移除 arm64,不再 QEMU 模拟);
+- 分发两条腿:**GitHub Release 只挂 beta/official**(品牌渠道是客户定制交付,不进公开 Releases);
+  每个渠道的镜像包另由 `scripts/ci-publish-update-server.sh` 上传到
+  `https://release.picoaide.com/<channel>/releases/<版本>/`(同目录 `SHA256SUMS`,保留最近 3 版),
+  `<channel>/latest.json` 是更新清单;
+- **不经任何镜像仓库**:GHCR 已于 2026-09-10 下线,镜像只从更新服务器取(`image.tar` → `docker load`
+  → 按渠道重打 tag → 写回 `.env` 的 `SERVER_IMAGE`)。
 
 ### 3.4 镜像验证清单
 
@@ -87,7 +93,7 @@ docker buildx build --platform linux/amd64 \
 | 版本注入 | `docker run --rm <image> --version` | 构建时注入版本(非 `dev`) |
 | 非 root | `docker run --rm --entrypoint id <image>` | `uid=10001(picoaide)` |
 | 健康端点 | 起容器后 `curl /healthz` | 200 `{"ok":true}` |
-| 架构 | `docker buildx imagetools inspect <image>:vX.Y.Z` | `linux/amd64`(arm64 已移除) |
+| 架构 | `docker image inspect <image> --format '{{.Os}}/{{.Architecture}}'` | `linux/amd64`(arm64 已移除;**镜像只在本地,没有可 inspect 的 registry manifest**) |
 | 持久化 | 写数据→重启→数据在 | 卷挂载有效 |
 
 ## 3. 接入方(客户端)接入说明

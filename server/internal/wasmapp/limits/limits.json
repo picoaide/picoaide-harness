@@ -512,7 +512,7 @@
       "Unit": "count",
       "Section": "§4.5",
       "Title": "返回行数上限",
-      "Note": "超出即截断并报错"
+      "Note": "只截断并置 QueryResult.Truncated，不报错（分页信号；见 appdb/stmt.go）"
     },
     {
       "Key": "sql_max_result_bytes",

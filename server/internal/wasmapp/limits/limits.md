@@ -69,7 +69,7 @@
 | `sql_limit_like_pattern_length` | 512 | count | §4.5 | SQLITE_LIMIT_LIKE_PATTERN_LENGTH |  |
 | `sql_limit_trigger_depth` | 8 | count | §4.5 | SQLITE_LIMIT_TRIGGER_DEPTH |  |
 | `sql_limit_worker_threads` | 0 | count | §4.5 | SQLITE_LIMIT_WORKER_THREADS | 禁辅助线程 |
-| `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 超出即截断并报错 |
+| `sql_max_rows` | 5000 | count | §4.5 | 返回行数上限 | 只截断并置 QueryResult.Truncated，不报错（分页信号；见 appdb/stmt.go） |
 | `sql_max_result_bytes` | 8388608 | bytes | §4.5 | 返回字节上限 |  |
 | `sql_statement_budget` | 5 | seconds | §4.5 | 单语句硬超时 | 独立于 guest 超时；驱动取消时 sqlite3_interrupt |
 | `app_db_readers` | 4 | count | §4.5 | 每应用只读连接数 | WAL 下并发读；写仍只由一个写者串行 |

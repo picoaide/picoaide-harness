@@ -53,7 +53,9 @@ The task board and scheduled jobs overlapped semantically, and it was **merged i
 
 ## Can I install DSH plugins?
 
-Yes. From a system shell, run `dsh plugin --profile desktop add <plugin>` / `remove` / `update` (the app runs the fixed desktop profile, with no terminal/Profile-switch tray entry); specify one explicitly with `--profile <name>`. The app must be restarted after plugin changes.
+Third-party plugins go through the profile's **user patch layer**: edit `~/.picoaide-harness/cordis.patch.yml`, append one line in Loader patch syntax, and restart the app (details in [Desktop client](/en/desktop/), "Plugin management").
+
+You **cannot** use `dsh plugin --profile desktop …`: the `desktop` profile is managed exclusively by the desktop application, so the CLI rejects that profile outright (`profile "desktop" is managed exclusively by the Electron application`), and the app exposes no terminal or Profile switcher.
 
 ## Do the Desktop profile and an existing web profile sync automatically?
 

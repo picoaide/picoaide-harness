@@ -24,7 +24,7 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 | `VALIDATION` | 400 | 参数校验失败 |
 | `UPSTREAM` | 502 | 上游 LLM 错误 |
 | `RATE_LIMITED` | 429 | 触发限流 |
-| `QUOTA_EXCEEDED` | 429 | 本月 token / 金额配额、部门预算或余额不足（admin 豁免） |
+| `BALANCE_EXHAUSTED` | 429 | 余额闸门开启且账户余额 ≤ 0（admin 豁免；2026-09-11 起 token 配额 / 金额配额 / 部门预算已下线，余额是唯一闸门） |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 认证（员工面）
@@ -34,7 +34,7 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 | POST | `/api/client/v2/auth/login` | 密码登录（local / LDAP）：`{username, password}` → `{token}` |
 | POST | `/api/client/v2/auth/logout` | 吊销当前 token |
 | GET | `/api/client/v2/auth/me` | 当前用户（含 `role` / `permissions`） |
-| GET | `/api/client/v2/auth/usage` | 员工用量概览：余额、今日/昨日/本月/累计 tokens + 费用、部门预算链 |
+| GET | `/api/client/v2/auth/usage` | 员工用量概览：**账户余额**（`balance_money` / `balance_activated` / `balance_enabled` / `balance_monthly` / `balance_mode`）、今日/昨日/本月/累计 tokens + 费用 |
 | POST | `/api/client/v2/auth/password` | 员工自助改密（本地用户；改密后全部令牌吊销，需重新登录） |
 | GET | `/api/client/v2/auth/methods` | 登录方式发现（公开） |
 | GET | `/api/client/v2/auth/oidc/login` `/callback`（OpenID 同） | 浏览器授权登录；provider 在请求时从认证配置解析，保存即生效 |
@@ -98,7 +98,7 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 | GET | `/me` `/logout` | 当前管理员 / 登出 |
 | POST | `/me/password` | 修改自己的密码（改后吊销全部会话） |
 | GET/POST | `/me/mfa` `/me/mfa/enable` `/me/mfa/verify` `/me/mfa/disable` | 管理员 TOTP 动态码（查看 / 开启 / 验证 / 关闭） |
-| GET/POST/PUT/DELETE | `/users` `/users/:id` | 用户 CRUD（配额、角色、状态、重置密码、重置 MFA） |
+| GET/POST/PUT/DELETE | `/users` `/users/:id` | 用户 CRUD（角色、状态、余额、重置密码、重置 MFA；请求体里的 `quota_*` 字段自 2026-09-11 起被忽略） |
 | PUT | `/users/:id/department` | 设置部门归属（`group_ids` 数组，支持多部门） |
 | GET/POST/PUT/DELETE | `/departments` `/departments/:id` | 部门树与预算 |
 | POST | `/users/:id/balance` | 员工余额调整（增加 / 扣减 / 设为，写审计） |

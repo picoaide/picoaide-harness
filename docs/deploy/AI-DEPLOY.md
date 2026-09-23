@@ -676,7 +676,7 @@ echo "$OLD" > VERSION
 | `docker compose up` 报端口占用 | 改 `.env` 的 `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT`，并同步改 Caddyfile |
 | 报网段冲突 | 改 `.env` 的 `NETWORK_SUBNET` 与三个固定 IP |
 | postgres 启动即退出且日志提 `OLD_DATABASES`/`unused mount` | PG16→18 旧布局问题，见 §6.2，需 dump/restore 迁移 |
-| 忘记超管密码 | 用另一个 super_admin 在 webadmin 重置；或 `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| 忘记超管**密码** | 有**其他超管**时让其在 webadmin「用户管理 → 重置密码」重置（重置即吊销该账号全部会话，并置 `password_must_change=1`：下次登录强制改密）。⚠️ `--reset-mfa <user>` **不重置密码** —— 它只清 MFA 并吊销会话，适用「密码记得、验证器丢了」；**唯一超管且密码也丢了**时它救不了（目标未配 MFA 时只打印 `nothing to reset` 就退出；`--bootstrap-admin` 在已有超管时也直接跳过、不会新建或重置）。此时只能在库上改写该账号的 `users.password_hash`（Argon2id 编码串，格式见 `server/internal/util/password.go`）并把 `password_must_change` 置 1，改完立即登录改密；动手前先按 §6.3 做备份 |
 | 应用（WASM）打不开或提示不可用 | 应用只在桌面客户端内打开，且**要求服务端与客户端同版本**（2026-09-19 起浏览器链路已删除）：把员工客户端升级到与服务端配套的版本（§5），旧客户端无法打开应用 |
 | webadmin「发现新版本」不出现 | 先看启动日志的 `channel resolved: … (update endpoint …)`：端点为空说明更新检查被关（显式设了 `off`）；端点正常则再看 `manifest channel … != …`。**服务端有 6 小时缓存**，刚发版时等待属正常延迟 |
 

@@ -171,7 +171,7 @@ node scripts/pack-assets.mjs --in shared-notes.wasm --out dist/shared-notes-pack
 | 预检 | `POST /api/client/v2/apps/wasm/validate` | 静态检查 + 真编译 + 合成帧干跑；**不占版本号、不进审计** |
 | 提交新版本 | `POST /api/client/v2/apps/wasm/:app_id/releases` | **同步**：成功才落版本行；请求体含 wasm + `version`/`title`/`changelog` + 应用配置文件 |
 | 上架 / 下架 | `POST /api/client/v2/apps/wasm/:app_id/publish` · `…/unpublish` | 发布者自主操作，与审核开关无关 |
-| 冻结 / 导出 / 删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` | 冻结 = 只读快照（保留 90 天）→ 可导出 → 真删并审计 |
+| 冻结 / 导出 / 删除 | `POST …/wasm/:app_id/freeze` · `GET …/export` · `DELETE …/wasm/:app_id` | 冻结 = 停止服务 + 下架 + 进入只读保留期（`retirement_snapshot_retention_days` = 90 天）；导出 = 控制面元数据 JSON（**不含**应用库里的业务数据）；删除 = **软删**（标识与版本号永久占位）——⚠️ **保留期到期后的定期快照与「真删」后台任务尚未实现**：制品与应用库会一直留在服务端 |
 | 诊断 | `GET …/wasm/:app_id/diagnostics` | 最近失败与被杀记录（见 `references/diagnostics.md`） |
 | 自省 | `GET …/wasm/:app_id/schema` | 表结构与占用（仅发布者可见，并写审计） |
 | 数据 | `GET …/wasm/:app_id/rows?table=&limit=&offset=&unmask=` | 某张表的一页行（仅发布者；**默认脱敏**敏感列，原值需显式 `unmask=1` 且单独记审计） |

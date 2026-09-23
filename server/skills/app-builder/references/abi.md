@@ -138,7 +138,8 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
   **SQL 注入没有任何平台侧防线，只有你自己用参数占位挡住**。
 - 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、绑定参数最多 128 个、返回最多 5000 行 / 8 MiB
   （**行数或字节超限是截断并置 `truncated:true`，不报错** —— 看到它就该分页）。
-- 每条语句最长 5 秒，超时被中断并报 `DB_LIMIT`；库总量上限 100 MB。
+- 每条语句最长 5 秒，超时会被中断并报 **403 `DB_DENIED`**（`details.reason = "statement_timeout"`）；
+  库总量上限 100 MB（**写满**才报 507 `DB_LIMIT`）。
 
 ### 3.4 `db.tx`（事务）
 
@@ -172,7 +173,13 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
 ### 3.6 `log`
 
 单条不超过 4 KiB（**超限截断，不拒绝**），每个请求最多 100 条，超出丢弃并在结果里回
-`dropped`；`level` 空串回落 `info`。日志保留 7 天，是排障的第一手材料 —— 关键分支都打一条。
+`dropped`；`level` 空串回落 `info`。
+
+⚠️ **`log` 没有查询接口、也没有保留期**：日志只进**服务端运维日志**（`wasm-app[<app_id>] …`，
+随宿主日志滚动），平台**不承诺保留多久**，你自己（和平台）都查不回历史。它是给运维定位的
+第一手材料，不是应用的审计流水 —— 要可回查的记录，**自己写库**（`db.exec`）。
+**保留 7 天的是「调用事件」**（每次请求的 outcome / reason_code / CPU / 内存 …，出口是诊断接口），
+两张表别混：见 `references/diagnostics.md`。
 
 ### 3.7 `assets.read`
 
@@ -297,8 +304,8 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `HOST_CALL_OVER_BUDGET` | 504 | 宿主调用超预算 | 拆小单次调用；不要依赖长阻塞 |
 | `AUTH_REQUIRED` | 401 | 身份未验证却调用需要身份的能力 | 平台一律要求登录（历史 `public` 配置读取侧按 `login` 处理）：确认请求来自登录态，或引导用户先登录 |
 | `MODULE_KILLED` | 504 | 请求被取消 / 实例已关闭 | 同超时处理：拆小、重试前先确认状态 |
-| `DB_LIMIT` | 507 | 库满 100 MB / 返回超行数 / 语句超时 | 清理旧数据或做汇总表；加 `WHERE` + `LIMIT` |
-| `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `WITH`·`EXPLAIN` / 保留列 `_row_id` 及其别名 / 类型不符），或事务内调了被禁能力 | 建表用 `db.define`，语句只留四个动词，值走 `args`；保留列规则见 §3.2；事务规则见 §3.4 |
+| `DB_LIMIT` | 507 | **只有**「库写满」（100 MB 上限）—— 以及单行超过 8 MiB（一行都返回不了） | 清理旧数据或做汇总表；别把大对象塞进一行。**行数/字节超限不是这个码**（见 §3.3 的 `truncated`） |
+| `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `WITH`·`EXPLAIN` / 保留列 `_row_id` 及其别名 / 类型不符）、**语句超过 5 秒被中断**（`details.reason = "statement_timeout"`），或事务内调了被禁能力 | 建表用 `db.define`，语句只留四个动词，值走 `args`；保留列规则见 §3.2；事务规则见 §3.4；先读 `details.reason` 再决定是改 SQL 还是加 `LIMIT` |
 | `APP_QUEUE_FULL` | 429 | 该应用排队已满 | 按 `Retry-After` 退避；合并小请求 |
 | `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等额外的 WASI 模块或符号） | 用官方骨架；不要引入平台外的运行时。**放行清单见 `references/imports.md`**（逐符号 + 签名 + 为什么放行） |
 | `IMPORT_SIGNATURE_MISMATCH` | 422 | 导入符号在名单内但类型不符 | 按骨架的读帧/写帧写法重写；目标必须是 `wasm32-wasip1`（签名对照 `references/imports.md`） |
@@ -308,14 +315,14 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `COMPILE_TIMEOUT` | 504 | 编译超过 60 秒 | 精简依赖；不要引入大型第三方库 |
 | `COMPILE_OOM` | 500 | 编译所需内存超过平台上限 | 同上：减小模块与依赖 |
 | `INVALID_APP_ID` | 400 | 应用名不合法 | 见 SKILL 硬约束第十一条 |
-| `NAME_TAKEN` | 409 | 应用名已被占用 | 换名字（同名不同人是不同的应用） |
+| `NAME_TAKEN` | 409 | 应用名已被占用（**同名即同一个应用**，不是"不同人各有一个"） | 换名字：标识由**首个成功发布者永久占有**（被拒/软删也不释放）；需要接管时请管理员在管理面转移归属 |
 | `VERSION_INVALID` / `VERSION_NOT_NEWER` | 400 | 版本号不是 `x.y.z` 或不递增 | 改成比线上更大的 `x.y.z` |
 | `MISSING_FIELD` | 422 | 非首版缺少 changelog 等必填项 | 补上再发 |
 | `APP_CONFIG_INVALID` | 422 | `picoaide.app.json` 缺失/非法/字段越界 | 按提示字段修（注意 `access="whitelist"` 必须有非空名单；字段规格见 `references/app-config.md`） |
 | `WASM_TOO_LARGE` / `BODY_TOO_LARGE` | 413 | wasm 超 32 MiB / 上传体超 48 MiB | 精简资源，或把大资源移出应用 |
 | `RATE_LIMITED` / `COMPILE_BUSY` | 429 | 上传过于频繁 / 编译队列忙 | 等一会儿再试 |
-| `FORBIDDEN` | 403 | 不是这个应用的发布者（或应用已冻结） | 只能改自己发布的应用；需要接管找管理员 |
-| `NOT_FOUND` | 404 | 应用/版本不存在；**或应用调了不存在的宿主方法（见 §7.1）** | 核对 `app_id`；若来自宿主调用，读 `message` |
+| `FORBIDDEN` | 403 | 审计账号调用应用平台；或**跨源写请求**被拒（非幂等方法的 `Origin` 必须等于应用自身源 `<渠道 app 源 scheme>://<app_id>`）——**与"发布者/冻结"无关** | 用发布者本人的登录态操作；写请求带同源来源。**不是发布者**时看到的是 404（见下一行），应用被冻结时看到的是 403 `APP_FROZEN`（见 §7.1） |
+| `NOT_FOUND` | 404 | 应用/版本不存在；**或你不是该应用的发布者**（与"不存在"逐字节同形，不泄露存在性）；**或应用调了不存在的宿主方法（见 §7.1）** | 先核对 `app_id` 拼写与当前账号；若来自宿主调用，读 `message`。**不要靠改名绕过**：标识一旦被占就不释放（见 `NAME_TAKEN`） |
 | `VALIDATION` | 400 | 请求内容不合法 | 按 `details` 修 |
 | `INTERNAL` | 500 | 平台内部错误 | 重试一次；持续失败提工单并附诊断 |
 
@@ -337,6 +344,8 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长）；**发布期的随包资源名占用 `__picoaide/` 前缀也回这个码**（`details.reason = "reserved_path_prefix"`） | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`not_canonical`、`reserved_path_prefix`） |
 | `ASSET_OVERSIZE` | 422 | 单个随包资源超过单文件上限（与自定义段总量同源，见 `references/limits.md`） | 精简资源；HTML/JS 先压缩再内嵌 |
 | `ASSET_EXISTS` | 409 | 同一个资源名在自定义段里出现了两次（重名段只认第一个） | 改资源名或删掉重复的那一份；改内容 = 发一个新版本 |
+| `APP_FROZEN` | 403 | 应用已被管理员**冻结**，而你在做发布 / 上下架 / 改配置 | 冻结是平台侧处置：**找管理员解冻**，自己重试任何写动作都不会成功（冻结同时会下架，员工侧打开是 404） |
+| `VALIDATE_FAILED` | 422 | 产物不满足应用契约：导出面缺 `_start` / `memory`（或导出类型不对），或模块**无法被运行时装载** | 用官方骨架重新构建；确认目标是 `wasm32-wasip1`，且 `_start` 与 `memory` 都是**导出**（额外导出忽略；对照 `references/imports.md`） |
 
 > 失败码是**可操作**的入口：每个码都带 `message`，多数还带 `details` 与 `hints`。
 > 遇到没见过的码，先看 `hints`，再看 `references/diagnostics.md`。

@@ -241,7 +241,9 @@ const (
 	// SQLLimitWorkerThreads 是辅助线程数（SQLITE_LIMIT_WORKER_THREADS）：0。
 	SQLLimitWorkerThreads = 0
 
-	// SQLMaxRows 是单次查询返回行数上限（§4.5）：5 000 行，超出即截断并报错。
+	// SQLMaxRows 是单次查询返回行数上限（§4.5）：5 000 行。
+	// **超出只截断**（QueryResult.Truncated=true）而不返回错误码 —— 分页读取必须可行，
+	// 见 appdb/stmt.go 的取舍说明。
 	SQLMaxRows = 5000
 	// SQLMaxResultBytes 是单次查询返回字节上限（§4.5/§4.6）：8 MiB。
 	SQLMaxResultBytes = 8 << 20

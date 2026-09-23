@@ -46,11 +46,11 @@ By default the product keeps all sensitive data on your machine and makes "stayi
 
 The desktop client owns the "experience" while the Go server owns "governance", dividing work through a clear protocol:
 
-- **Server**: accounts (local / LDAP / OIDC), model gateway proxy, rate limiting, quotas, metering & billing, department budgets, skill and agent market, approvals, audit — every capability that "can be abused" lives on the server;
+- **Server**: accounts (local / LDAP / OIDC), model gateway proxy, rate limiting, metering & billing with the balance gate, skill and agent market, approvals, audit — every capability that "can be abused" lives on the server;
 - **Client**: chat, workspaces, Capability Hub, connectors, scheduled jobs, browser — every "personal-facing" experience lives on the client;
 - **Multi-user isolation is the default, not a feature**: connector credentials are stored per user scope, browser sessions are isolated per account, and scheduled jobs are isolated per account; the server issues Bearer tokens per user (hashed at rest, 90-day expiry, automatically revoked on password change / permission downgrade / disable).
 
-**Operating principle: any decision that can be folded back to the server must never be self-certified on the client.** The client only displays the quotas, balance, and permission results the server provides (such as `429 QUOTA_EXCEEDED`); it grants no local exemptions.
+**Operating principle: any decision that can be folded back to the server must never be self-certified on the client.** The client only displays the balance and permission results the server provides (such as `429 BALANCE_EXHAUSTED`); it grants no local exemptions.
 
 ## 4. Capability distribution: content type × source, dimensions always orthogonal
 

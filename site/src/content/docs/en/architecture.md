@@ -31,18 +31,16 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 ## Data flow
 
 1. **Sign in**: `POST /api/client/v2/auth/login` → Bearer token (90 days); `GET /api/client/v2/config/bootstrap` fetches the default model, suggestions, and connector catalog.
-2. **LLM call**: `POST /v1/chat/completions` (stream optional) → server rate limit → quota check (token / money / department budget; over any limit returns 429 `QUOTA_EXCEEDED`) → route to the upstream provider by model → metering writes usage (including cost, priced at record time with peak/off-peak discounting).
-3. **Admin config**: sign in at `/admin/` → users/departments/gateway/model prices/peak windows/quotas/budgets/marketplace/shared approvals (all via `/api/server/admin/*`, session + CSRF + RBAC, audited into audit_logs).
+2. **LLM call**: `POST /v1/chat/completions` (stream optional) → server rate limit → **balance gate** (when enabled and the account balance is ≤ 0 → 429 `BALANCE_EXHAUSTED`; the token quota, money quota and department budget were retired on 2026-09-11) → route to the upstream provider by model → metering writes usage (including cost, priced at record time with peak/off-peak discounting) and deducts the balance in the **same transaction**.
+3. **Admin config**: sign in at `/admin/` → users/departments/gateway/model prices/peak windows/balance and monthly grants/marketplace/shared approvals (all via `/api/server/admin/*`, session + CSRF + RBAC, audited into audit_logs).
 
 ## Metering, billing, and quotas
 
 - **Cost**: `usage.cost` = input × input_price/1e6 + output × output_price/1e6 (cache hits use `cache_input_price_per_1m`); outside peak windows (configurable, Beijing time) × model `offpeak_discount`. Changing prices or windows only affects future costs (priced at record time).
-- **Quota chain** (429 on any exceeded limit; admins exempt):
-  1. Employee token quota (`quota_tokens`: NULL = global default, 0 = unlimited);
-  2. Employee money quota (`quota_money`);
-  3. Department budget (`budget_money`; owned department + ancestor chain all apply; tree SUM(cost)).
-- **Self-query**: `GET /api/client/v2/auth/usage` returns the balance (quota − month-to-date used; unlimited = null) plus today/yesterday/month/total tokens and costs, and the department budget chain.
-- **Stored balance (optional gate)**: `users.balance_money` is a stored amount (in CNY) orthogonal to the monthly quota; once the gate is enabled, calls with a balance ≤ 0 get a 429 at the gateway, and spending is deducted at micro-unit precision **in the same transaction** as the usage write; administrators can adjust it manually, and it can also be granted automatically per Beijing month (idempotent across instances/restarts).
+- **The single spending gate (consolidated 2026-09-11)**: `settings balance.enabled = true` **and** the employee's balance account is activated **and** the quantized balance is ≤ 0 ⇒ the gateway returns 429 `BALANCE_EXHAUSTED` (admins exempt; a failed balance lookup is fail-closed). Accounts that were never activated are neither charged nor blocked.
+  The employee token quota (`quota_tokens`), employee money quota (`quota_money`) and department budget (`budget_money`) were **retired**: the columns and settings keys remain in the database but are no longer read or written, and the Admin Console neither ships nor displays them.
+- **Self-query**: `GET /api/client/v2/auth/usage` returns the **account balance** (`balance_money` / `balance_activated` / `balance_enabled` / `balance_monthly` / `balance_mode`) plus today/yesterday/month/total tokens and costs; the quota and remaining-amount fields are gone.
+- **Stored balance**: `users.balance_money` is the only money an employee can spend; spending is deducted at micro-unit precision **in the same transaction** as the usage write, and the `balance_ledger` is reconcilable line by line. Administrators can adjust it manually, and it can also be granted automatically per Beijing month (idempotent across instances/restarts).
 
 ## Security design
 

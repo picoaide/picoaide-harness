@@ -7,8 +7,10 @@
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
-> 0049 按模型并发峰值 model_concurrency_stats;0050-0056 能力中心/用量中心与
-> 报表订阅;0057 密码改密字段 + 管理员 MFA(admin_mfa_challenges);
+> 0049 按模型并发峰值 model_concurrency_stats;0050-0052 能力中心/用量中心与
+> 报表订阅;**0053-0055 统一应用模型(`apps`/`app_releases`/`app_grants` 建表 → 回填 → DROP 掉
+> `skills`/`shared_skills`/`agent_presets` 与三张旧授权表,见下「apps」一节)**;
+> 0056 报表订阅;0057 密码改密字段 + 管理员 MFA(admin_mfa_challenges);
 > 0058 模型输入模态 `models.input_modalities`;0059 能力中心「官方」`apps.official`;
 > 0060 LDAP 目录同步标记 ldap_synced_users(OIDC 用户不再被 LDAP 对账误停);
 > 0061/0062 员工账户余额与账本(`users.balance_money`/`balance_ledger`,唯一计费
@@ -78,15 +80,35 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 - 0022 新增 `cost REAL DEFAULT 0`:记录时按模型定价折算的金额(元),后续改价/删模型不重写历史;统计与余额扣减统一读 `cost`。月度费用聚合:`UserMonthlyCost`/`UserMonthlyCostBatch`;**2026-09-11**:金额配额判定(`EffectiveMoneyQuota`)已下线,消费改为在写 usage 的同一事务里结算到账户余额(`settleUsageCostTx` → `balance_ledger`)。
 - 0023 新增 `models.offpeak_discount REAL`(低谷折扣率):结合 settings `usage.peak_windows`(高峰时段 JSON,北京时间,如 `[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]`)——高峰窗口外(空闲时段)费用 × 折扣率;DeepSeek 官方当前政策(2026-08-16 生效)高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%(含缓存命中价)。历史 16:30-00:30 错峰政策已废弃,可在网关页自行配置。
 
-### skills(0005, 0040 起归档直存 DB + 统计)
-`id, name 唯一, display_name(0051 展示名,来自包内 title), version, description, author, checksum, enabled(0/1,下架置 0 不删行), archive(0040 直存), downloads/calls, created_at, updated_at`;0052 移除 git_url/git_ref/source 三列(归档上传是唯一入口)。bootstrap 建议清单只返回 enabled=1。
-- 0040 新增 `source('git'|'upload')`、`archive BYTEA`(上传包直存 DB)、`downloads`/`calls` 计数:归档下载成功 downloads+1,客户端 telemetry 上报累加 calls。老 git 行下载走磁盘缓存只读回退,新上传一律写 DB。
+### apps(0053) + app_releases(0053) + app_grants(0053)——统一应用模型
 
-### agent_presets(0032, 0033, 0035, 0037, 0041 + agent_preset_grants 0036)
-`id, name, display_name, version(0035 起多版本), description, author, checksum, status('pending'|'approved'|'rejected'), reason, quality(0037:''|'official'|'featured'), archive BYTEA(0041 直存 DB), downloads(0041), created_at, updated_at`;0035 改 `UNIQUE(name, version)`(重建表,旧行 version='1.0.0');0036 新增 `agent_preset_grants(name, grantee_type user|group, grantee)`;0037 新增 quality 列(组织库质量标记,仅 approved 行可设置,reject/pending 清空)。状态机:上传 → pending;admin approve → approved(**授权后才可见可装**,作者可见自己的);reject(必填 reason)→ 仅作者可见可重提。pre-0041 老行归档磁盘回退(`data/agent-presets-cache/`)只读。
+技能与智能体自 2026-09-01 起是**一套模型**：App（长期身份）+ Release（不可变版本）+ Grant（授权）。
+0054 把三张旧表（市场 `skills`、组织 `shared_skills`、组织 `agent_presets` 及其三张授权表）完整回填
+进来，**0055 把那六张旧表 DROP 掉** —— 它们**已经不存在**：照旧文档写
+`SELECT … FROM skills` / `FROM shared_skill_grants` / `FROM agent_preset_grants` 只会拿到
+`relation "…" does not exist`，授权语义现在**只**落在 `app_grants`。
 
-### shared_skills(0034, 0037, 0040 + shared_skill_grants 0036)
-`id, name, display_name, version, description, author, checksum, status('pending'|'approved'|'rejected'), reason, quality(0037:''|'official'|'featured'), archive BYTEA(0040 直存 DB), downloads/calls(0040), created_at, updated_at`,`UNIQUE(name, version)` 多版本并存;0036 新增 `shared_skill_grants(skill_name, grantee_type, grantee)`;0037 新增 quality 列(组织库质量标记,仅 approved 行可设置,reject/pending 清空)。状态机同 agent_presets(上传 → 审核 → **授权后可见可装**);同名不同版本独立审核。pre-0040 老行归档磁盘回退(`data/shared-skills-cache/`)只读。
+- `apps(kind, app_id, title, description, owner, channel, enabled, official, created_at, updated_at,
+  purpose, data_sensitivity, config_json, current_release_id, frozen_at, deleted_at)`，
+  `PRIMARY KEY (kind, app_id)`；`kind ∈ {skill, agent, wasm_app}`、`channel ∈ {market, org, wasm}`
+  （0069 放开 CHECK 并给 WASM 应用平台复用本表：`config_json` 存 `picoaide.app.json`、
+  `frozen_at`/`deleted_at` 承载冻结与软删；0071 删掉 `visible` 列 —— 访问模式只存
+  `config_json.access`）。`owner` = **首个成功发布者**（0053 的 `COALESCE(NULLIF(owner,''),…)`
+  语义：一经写入不被后续发布改写）；0059 起官方内容 `official=1` 且 `owner=''`。
+- `app_releases(id, kind, app_id, version, title, description, changelog, category, tags, author,
+  publisher, checksum, size, archive BYTEA, status, reason, quality, downloads, calls, config_json,
+  assets_dir, deleted_at, created_at, updated_at)`，`UNIQUE (kind, app_id, version)`，
+  外键 → `apps(kind, app_id)` ON DELETE CASCADE。`status ∈ {pending, approved, rejected}`
+  （市场渠道由管理员发布 ⇒ 直接 approved；组织渠道进 pending）；`quality ∈ {'', 'featured'}`
+  （0059 起 `'official'` 退役，官方语义移到 `apps.official`）；`deleted_at` = **软删**
+  （版本号永久占用、不可复用）；`archive` 直存归档字节（上传是唯一入口）；`downloads`/`calls` 计数。
+- `app_grants(kind, app_id, grantee_type, grantee)`，
+  `PRIMARY KEY (kind, app_id, grantee_type, grantee)`，`grantee_type ∈ {user, group}` ——
+  组织内容**唯一**的授权表（授权后可见可装，admin 恒全量不落表）。0055 之前的
+  `skill_grants` / `shared_skill_grants` / `agent_preset_grants` 三张表已随 0055 删除。
+- 状态机（组织渠道）：上传 → pending；admin approve → approved；reject（必填 reason）→ 仅作者可见可重提；
+  同名不同版本独立审核。pre-0040/0041 的老行归档走磁盘只读回退（`data/skills-cache/`、
+  `data/shared-skills-cache/`、`data/agent-presets-cache/`，`cmd/server/main.go` 仍会创建这三个目录）。
 
 ### admin_sessions(0009)
 `id(PK, 随机), user_id, csrf_key, expires_at, last_used_at(0046:12h 硬上限 + 60min 空闲滑动到期)`。管理端 12h 会话 + CSRF 校验(见 04-auth.md §4)。

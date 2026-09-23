@@ -31,16 +31,16 @@ The sidebar is organized into three sections — Management / Operations / Audit
 - **Create user**: username + password + role (`super_admin` / `auditor` / `user`); the RBAC role is the single source of truth (`is_admin` is a compatibility field);
 - **Status**: enabled / disabled — disabling **immediately revokes all API tokens for that user**, requiring the client to log in again (in the same transaction as the user update);
 - **Delete**: double confirmation (makes clear it wipes all API tokens, usage records and group membership, and is not recoverable);
-- **Quotas**: `quota_tokens` (monthly token cap: null = follow the global default, 0 = unlimited, >0 = monthly cap) and `quota_money` (monthly money cap, same semantics); the table shows the **resolved effective quota** (follow default = global value, admin = 0);
-- **Balance**: `balance_money` is a **stock amount** (CNY), orthogonal to the monthly quota. The in-row "Adjust balance / Top up" action supports add / deduct / set and writes an audit entry; the "Monthly balance grant" section at the top of the page configures the gate switch, the per-person monthly amount and the grant mode (add / cover), and can grant the current month immediately — with the gate on, an employee whose balance is ≤ 0 gets a 429 when calling AI (administrators are exempt); it is off by default, so that nobody is blocked the moment you upgrade;
+- **Quotas (retired)**: `quota_tokens` / `quota_money` and department budgets stopped taking effect on **2026-09-11** — the columns remain in the database, but the gateway no longer reads them and the Admin Console neither ships nor displays them; `quota_*` fields in `PUT /users/:id` are ignored outright. **The balance is the only gate**;
+- **Balance**: `balance_money` is a **stock amount** (CNY) and the only money an employee can spend. The in-row "Adjust balance / Top up" action supports add / deduct / set and writes an audit entry; the "Monthly balance grant" section at the top of the page configures the gate switch, the per-person monthly amount and the grant mode (add / cover), and can grant the current month immediately — with the gate on, an employee whose balance is ≤ 0 gets a 429 when calling AI (administrators are exempt); it is off by default, so that nobody is blocked the moment you upgrade;
 - **Reset password / reset MFA**: an administrator can reset the password of a local user (the user is forced to change it at the next login) and reset the TOTP code; a `super_admin` cannot reset their own MFA — another super admin or the ops CLI has to do it;
-- **Departments and roles**: users belong to departments (**multi-department supported**, see Departments), and department budgets take effect across **all** memberships + ancestor chains.
+- **Departments and roles**: users belong to departments (**multi-department supported**, see Departments); department membership drives **grant visibility** (a grant to a department covers its sub-departments) but **does not affect cost** — department budgets are retired (see below).
 
 ## Departments
 
 - Tree-shaped department structure; members belong to departments;
 - **Multi-department membership (2026-09)**: both local and LDAP/OIDC users may belong to **multiple departments** — the "Set department" dialog is a multi-select (checkbox tree) submitting a `group_ids` array; LDAP/OIDC groups come from the enterprise directory (LDAP full sync every hour; OIDC/OpenID from the IdP `groups` claim at login time), so a manually assigned local membership may be overridden by the directory;
-- **Department budget** (`groups.budget_money`): **all** departments of membership + each ancestor chain take effect simultaneously (not "the highest"), `SUM(cost)` is computed in real time for the current month (Asia/Shanghai timezone, auto-reset on the 1st of each month); **any** overspent department blocks the user (gateway 429 `QUOTA_EXCEEDED`, fail-closed: lookup failure also denies); the page shows a live progress bar (% used, amber at 80%, red over budget) and "inherited from parent (¥x)" when a department has no budget of its own;
+- **Department budgets are retired (2026-09-11)**: the `groups.budget_money` column remains in the database but **no longer participates in any decision** — the gateway does not read it, the Admin Console does not display it, and it never blocks a request (it used to apply across "all memberships + ancestor chains" and return a 429; that behaviour was consolidated away with the other parallel quota mechanisms). The only allowance an employee has is the **account balance**.
 - Grant targets: marketplace/organization content can be granted to **users or departments** (NOCASE match); groups outside the department tree (e.g. LDAP authorization-only groups) do not participate in budgets.
 
 ## Authentication configuration
@@ -73,7 +73,7 @@ Login methods (local / LDAP / OIDC / OpenID) are configured on the "Auth `/auth`
 - **Dimensions**: by user / by model / by date; two measurement modes — cost (money) and tokens — switchable;
 - **Charts**: bar chart (cost/tokens trend), pie chart (model distribution), drill-down (filter user → see their model composition);
 - **Detail**: row-level cost, prompt/completion tokens, request counts; cache-hit billing is reflected in the detail (at the cache price);
-- **Balance**: `GET /api/client/v2/auth/usage` employee self-service query — remaining quota (quota − used this month; unlimited = null), today/yesterday/month/cumulative tokens and cost, department budget chain.
+- **Employee self-query**: `GET /api/client/v2/auth/usage` returns the **account balance** (`balance_money` / activated / gate switch / monthly amount and grant mode) plus today/yesterday/month/cumulative tokens and cost; the quota, remaining-amount and department-budget-chain fields are gone.
 
 ## Marketplace · Skills (marketplace)
 

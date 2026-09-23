@@ -57,7 +57,9 @@ CLI 直接 spawn 的「CLI 即 skill」方案（自动安装 dws/wecom-cli 等�
 
 ## 可以安装 DSH 插件吗？
 
-可以。从系统 shell 运行 `dsh plugin --profile desktop add <plugin>` / `remove` / `update`（应用固定运行 desktop profile，没有终端/Profile 切换的托盘入口），`--profile <name>` 显式指定；插件变更后需重启应用。
+第三方插件走 **profile 的用户补丁层**：编辑 `~/.picoaide-harness/cordis.patch.yml`，按 Loader patch 语法追加一行，重启应用即可（细节见[桌面客户端](/desktop/)的「插件管理」）。
+
+**不能**用 `dsh plugin --profile desktop …`：`desktop` profile 由桌面应用**独占**，CLI 会直接拒绝该 profile（`profile "desktop" is managed exclusively by the Electron application`），应用也没有终端 / Profile 切换入口。
 
 ## Desktop profile 和已有 web profile 会自动同步吗？
 

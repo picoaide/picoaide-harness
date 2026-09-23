@@ -130,7 +130,7 @@ a container deployment:
 | Certificate warnings / clients cannot connect | `internal` mode requires trusting the Caddy local CA; for `auto` mode, confirm the domain connects directly to this machine and port 80 is open to the public internet |
 | Employee clients "always say they are up to date" | `client_unavailable` appears in the manifest: configure `PICOAI_PUBLIC_BASE_URL` |
 | webadmin "new version found" does not appear | The three channel values are not consistent (see [Channels & white-label](/en/deployment/channels/#troubleshooting)); the server caches for 6 hours |
-| Forgot the super admin password | Reset it with another super_admin in the Admin Console; or run `docker exec picoaide-server /app/picoaide-server --reset-mfa <user>` |
+| Forgot the super admin **password** | If **another super_admin** exists, have them reset it in the Admin Console under "Users → Reset password" (that revokes all of the account's sessions and forces a password change at the next sign-in). ⚠️ `--reset-mfa <user>` does **not** reset a password: it only clears MFA and revokes sessions, for the "password known, authenticator lost" case; with a single super_admin who also lost the password it cannot help (it just prints `nothing to reset` when the target has no MFA, and `--bootstrap-admin` skips entirely once a super admin exists). The only route left is to overwrite that account's `users.password_hash` (an Argon2id encoded string, format in `server/internal/util/password.go`) in the database and set `password_must_change = 1`, then sign in and change it immediately; take the backup described in [Pre-upgrade checks](/en/deployment/upgrade/#2-pre-upgrade-checks) first |
 
 ## Common commands
 
