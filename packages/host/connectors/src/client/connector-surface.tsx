@@ -21,11 +21,6 @@ export function openConnectorCenter(): void {
   surface?.activate()
 }
 
-/** 关闭连接器中心。 */
-export function closeConnectorCenter(): void {
-  surface?.close()
-}
-
 /**
  * 装载连接器中心面板（插件启动时一次）。
  * @returns 卸载函数（移除容器、样式与监听）。

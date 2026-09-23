@@ -353,11 +353,6 @@ export function stepLabel(locale: HostLocale, what: string): string {
   return what
 }
 
-/** Convenience: resolve the locale from a context and translate in one step. */
-export function hostTFrom(source: HostCopySource | undefined, key: HostCopyKey, params?: Record<string, string>): string {
-  return hostT(hostLocaleOf(source), key, params)
-}
-
 /** Product-default host locale, re-exported for the deep modules' defaults. */
 export { DEFAULT_HOST_LOCALE }
 export type { HostLocale }

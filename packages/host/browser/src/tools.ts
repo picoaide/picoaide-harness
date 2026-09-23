@@ -1507,14 +1507,4 @@ export function parseToolGroups(value: string[] | undefined): ReadonlySet<string
   return set.size === 0 ? DEFAULT_GROUPS : set
 }
 
-/** Present result meta passthrough (kept for future card projections). */
-export function browserMetaFromResult(meta: unknown): JsonValue | undefined {
-  return meta as JsonValue | undefined
-}
-
-/** Present call view helper exported for tests. */
-export function presentBrowserCall(kind: string, title: string, args: Record<string, unknown>): GenericCallView {
-  return { card: 'generic', kind: kind === 'screenshot' ? 'fetch' : 'other', title, rawInput: args }
-}
-
 export type { ToolResult }

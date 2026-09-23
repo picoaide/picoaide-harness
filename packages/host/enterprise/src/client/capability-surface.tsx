@@ -27,11 +27,6 @@ export function openCapabilityCenter(): void {
   surface?.activate()
 }
 
-/** 关闭能力中心。 */
-export function closeCapabilityCenter(): void {
-  surface?.close()
-}
-
 /**
  * 装载能力中心面板（插件启动时一次）。
  * @returns 卸载函数（移除容器、样式与监听）。

@@ -823,11 +823,6 @@ export class HostCronLedger {
   }
 }
 
-/** Validate a cron expression against the shared parser (UI and Host agree). */
-export function validateCron(expr: string): boolean {
-  return isValidCron(expr)
-}
-
 /**
  * Migrate a ledger's jobs from an older schema version to the current one.
  * 审计 2026-08-25 C-1:此前 schema 版本不匹配 = 清空数据。现在旧版本走

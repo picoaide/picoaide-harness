@@ -113,10 +113,6 @@ export interface JobUpdatePatch {
   enabled?: boolean
 }
 
-export function isExecutionResult(value: unknown): value is ExecutionResult {
-  return value === 'succeeded' || value === 'failed' || value === 'cancelled'
-}
-
 export function isCronJobAction(value: unknown, options: CronActionOptions = {}): value is CronJobAction {
   if (typeof value !== 'object' || value === null) return false
   const action = value as Record<string, unknown>
