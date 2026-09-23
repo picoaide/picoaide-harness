@@ -89,8 +89,30 @@ export const APP_REQUEST_BODY_MAX_BYTES = 1 << 20
 /** 信封上限（§4.2）：`1 MiB * 4 / 3 + 64 KiB`。 */
 export const APP_ENVELOPE_MAX_BYTES = Math.ceil(APP_REQUEST_BODY_MAX_BYTES * 4 / 3) + (64 << 10)
 
-/** 响应体权威上限（§4.2）：8 MiB；handler 只在捕获层做兜底截断。 */
-export const APP_RESPONSE_BODY_MAX_BYTES = 8 << 20
+/**
+ * 客户端捕获层的**畸形输入兜底**上限（§4.6）：协议帧单行上限 1 MiB。
+ *
+ * 口径（2026-09-23 R3-A 审计 A-6/A-7 订正，此前写的是"响应体权威上限 8 MiB"）：
+ * 应用响应体必须先装进**一个**协议帧才能交付，而单帧上限就是 1 MiB（服务端
+ * `abi.MaxFrameBytes = limits.ProtocolLineMaxBytes`）⇒ 超过它的响应在协议上
+ * **不可能出现**，这里截断只是"别把畸形输入交给渲染器"。
+ *
+ * ⚠️ 不要把它当成"作者可依赖的可交付预算"：服务端**保证**可交付的是
+ * {@link APP_RESPONSE_BODY_GUARANTEED_BYTES}（168 KiB，最坏 JSON 转义下仍装得进一帧），
+ * 低转义内容实测能到 ~625 KB 但不承诺。两个数字的分工与服务端
+ * `abi.MaxResponseBodyBytes` / `limits.MaxDeliverablePayloadBytes` 一一对应。
+ */
+export const APP_RESPONSE_BODY_MAX_BYTES = 1 << 20
+
+/**
+ * 服务端**声明并保证可交付**的响应体上限（bytes）= 生成物
+ * `wasm-app-headers.json` 的 `limits.response_body_bytes_max`。
+ *
+ * 真源在服务端（`limits.MaxDeliverablePayloadBytes`），本常量只是它的镜像，
+ * 由 `header-spec-parity.spec.ts` 与服务端生成物**逐字对拍**（此前两端各写各的、
+ * 且没有任何判据，所以永远不会因为漂移变红 —— A-7 的现场）。
+ */
+export const APP_RESPONSE_BODY_GUARANTEED_BYTES = 172032
 
 /** 方法白名单（§4.2）。 */
 export const APP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const
