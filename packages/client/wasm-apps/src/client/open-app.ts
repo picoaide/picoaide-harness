@@ -73,6 +73,9 @@ import {
   readHostErrorCode,
   readHostPlatformReason,
   readHostPlatformRefusal,
+  // `readJsonQuietly` 2026-09-23 起只有一份实现（`host-proof.ts`）；本文件原先那份与它
+  // 逐字节相同，属三份重复之一（另见 `channel-seam.ts`）。
+  readJsonQuietly,
   PLATFORM_APP_FROZEN_REASON,
 } from './host-proof.ts'
 
@@ -361,20 +364,6 @@ export function reasonForPlatformRefusal(
   if (platformCode.startsWith('proof_')) return 'platform-refused'
   if (status === 401 || status === 403) return 'not-signed-in'
   return 'unexpected-response'
-}
-
-/**
- * 读响应体为 JSON（失败 ⇒ `null`，用 clone 不消费原响应）。
- * @param response - 原始响应。
- * @returns 解析结果，或 `null`。
- */
-async function readJsonQuietly(response: Response): Promise<unknown> {
-  try {
-    const text = await response.clone().text()
-    return text === '' ? null : JSON.parse(text)
-  } catch {
-    return null
-  }
 }
 
 /**
