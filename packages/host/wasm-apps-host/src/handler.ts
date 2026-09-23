@@ -44,6 +44,9 @@ import { AI_CHAT_PATH, AI_CHAT_SSE_HEADERS, type AiChatOutcome } from './ai-chat
 import { APP_PROOF_HEADER } from './app-proof.ts'
 import { APP_VERSION_HEADER } from './open-gate.ts'
 import { isReservedHostPath } from './host-request.ts'
+// `normalizeServerURL` 2026-09-23 起只有一份实现（`server-url.ts`）：本文件原先那份与
+// `open-gate.ts` / `window-catalog.ts` 里的逐字节相同。
+import { normalizeServerURL } from './server-url.ts'
 import {
   appErrorPage,
   invalidRequestPage,
@@ -110,13 +113,6 @@ export interface AppSchemeCache {
   put(scope: CacheScope, entry: CacheEntryInput): Promise<void>
   conditional(scope: CacheScope, appId: string, version: string, path: string, ifNoneMatch: string | undefined): Promise<CacheConditionalResult>
   isStaticSubresource(path: string, headers: Record<string, string>): boolean
-}
-
-/** 去掉尾斜杠（与 enterprise `normalizeServerURL` 同口径）。 */
-function normalizeServerURL(input: string): string {
-  let value = input.trim()
-  while (value.length > 0 && value.endsWith('/')) value = value.slice(0, -1)
-  return value
 }
 
 /** HTML 响应（本地页面）。 */

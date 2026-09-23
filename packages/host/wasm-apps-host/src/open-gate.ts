@@ -22,6 +22,9 @@
  */
 
 import { APP_PROOF_HEADER } from './app-proof.ts'
+// `normalizeServerURL` 2026-09-23 起只有一份实现（`server-url.ts`）：本文件原先那份与
+// `handler.ts` / `window-catalog.ts` 里的逐字节相同。
+import { normalizeServerURL } from './server-url.ts'
 
 /** 平台应用端点前缀（与 `app-protocol.ts` 的 `APP_REQUEST_PATH` 同源）。 */
 export const APP_OPEN_PATH = '/api/client/v2/apps/wasm'
@@ -86,13 +89,6 @@ export interface AppOpenGate {
    * @param currentVersion - 客户端当前缓存的版本（不知道时给空串 ⇒ 平台回 changed=true）。
    */
   check(appId: string, currentVersion: string): Promise<AppOpenOutcome>
-}
-
-/** 去掉尾斜杠（与 `handler.ts` 同口径）。 */
-function normalizeServerURL(input: string): string {
-  let value = input.trim()
-  while (value.length > 0 && value.endsWith('/')) value = value.slice(0, -1)
-  return value
 }
 
 /** 读一个正整数计数（畸形 ⇒ undefined：计数是 best-effort，绝不猜 0）。 */

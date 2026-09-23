@@ -21,6 +21,9 @@
  */
 
 import { parseDeclaredWindowGeometry, type DeclaredWindowGeometry } from './windows.ts'
+// `normalizeServerURL` 2026-09-23 起只有一份实现（`server-url.ts`）：本文件原先那份与
+// `handler.ts` / `open-gate.ts` 里的逐字节相同。
+import { normalizeServerURL } from './server-url.ts'
 
 /**
  * 宿主侧的平台目录端点（与 `open-gate.ts` 的 {@link APP_OPEN_PATH} 同前缀）。
@@ -72,13 +75,6 @@ export interface WindowCatalog {
   lookup(appId: string): Promise<DeclaredWindowGeometry | undefined>
   /** 会话/服务端变化 ⇒ 作废已缓存的目录（切租户不得复用上一台的目录）。 */
   invalidate(): void
-}
-
-/** 去掉尾斜杠（与 `handler.ts`/`open-gate.ts` 同口径）。 */
-function normalizeServerURL(input: string): string {
-  let value = input.trim()
-  while (value.length > 0 && value.endsWith('/')) value = value.slice(0, -1)
-  return value
 }
 
 /**
