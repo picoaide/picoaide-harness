@@ -562,10 +562,17 @@ const report = {
   composeDir: cfg.composeDir,
   observedDsn: null,
   observed: null,
+  /** keys API 的 URL：**展示值的来源**，R4-A-26 的 fail-loud 文案要点名它。 */
+  keysApiUrl: null,
   loopback: null,
   loopbackReason: null,
   containerEnv: null,
   expectedDsn: null,
+  /** 期望 DSN 的来源（数据来源 + 推导函数），与展示值来源一起进 FAIL 文案。 */
+  expectedDsnSource: null,
+  observedDsnSource: null,
+  /** `match` / `mismatch` / `unknown`（无法判定）—— 三种结果必须可区分（R4-A-26）。 */
+  dsnConsistency: null,
   verdict: [],
   notes: [],
   exitCode: 0,
@@ -623,6 +630,7 @@ if (!report.cookieJarPresent) {
     const raw = first?.dsn?.public ?? first?.dsn?.secret ?? null;
     const parsed = parseDsn(raw);
     report.observedDsn = raw;
+    report.keysApiUrl = keysUrl;
     report.observed = parsed;
     report.loopback = parsed ? parsed.isLoopback : null;
     report.loopbackReason = parsed ? classifyHost(parsed.host).reason : null;
@@ -687,13 +695,60 @@ if (!envInfo.reachable) {
 }
 log('');
 
-const domainForExpected = envInfo.reachable && envInfo.domain ? envInfo.domain : cfg.baseUrl;
+// R4-A-26(2026-09-23 四轮门禁审计)：期望 DSN 与后台展示值**都算出来了**，判据就必须落地。
+// 旧实现只 `log('↑ 与当前后台展示值不同 …')`，`report.verdict` / `report.exitCode` 在这一行之
+// 后不再变化 ⇒ 本工具存在的**唯一理由**（抓"容器站点 URL 与后台展示 DSN 不一致"）在算出来
+// 之后被丢掉，收尾照样两条 OK + exit 0，而文件头自述 `0 = 核查完成且未发现缺陷`。
+//
+// 判据口径（为什么只在"容器 env 权威域名"上判）：`expected` 有两个来源 ——
+//   ① 容器 env 的站点 URL（`GLITCHTIP_URL` / `APP_URL` / `GLITCHTIP_DOMAIN`）：**权威**，
+//      它就是 DSN 主机真正的算法输入；
+//   ② 没有容器访问时的回落 `--base-url`：**不是权威** —— 站点完全可以经反代以别的公开名
+//      访问，那时"DSN 主机 ≠ 你访问的那个名字"是正常的。
+// 只有 ① 能与后台展示值做**判定**；② 只能记 note，否则会把"经反代访问的正常部署"判成缺陷
+// （假红）。三种结果因此**可区分**：`match` / `mismatch`（FAIL + 非零退出）/ `unknown`（无法判定）。
+const authoritativeDomain = envInfo.reachable && envInfo.domain ? envInfo.domain : null;
+const domainForExpected = authoritativeDomain ?? cfg.baseUrl;
 const expected = buildExpectedDsn(domainForExpected, report.observed);
 report.expectedDsn = expected;
+report.expectedDsnSource = authoritativeDomain === null
+  ? `回落 --base-url（${cfg.baseUrl}；无容器 env 权威域名 ⇒ 只能记"无法判定"，不做一致性判定）`
+  : `容器 env ${envInfo.siteUrlSource}（${authoritativeDomain}）→ buildExpectedDsn()`;
+report.observedDsnSource = report.observedDsn === null
+  ? null
+  : `keys API ${report.keysApiUrl ?? '(未请求)'} 的 [0].dsn.public → parseDsn()`;
 log('④ 期望的正确 DSN（由权威域名 + 已观测到的 key/project 推导）');
 log(`   ${expected ?? '(无法推导：缺 DSN 观测值或域名非法)'}`);
-if (expected && report.observedDsn && expected !== report.observedDsn) {
-  log('   ↑ 与当前后台展示值不同 → 修好 GLITCHTIP_DOMAIN 后应从后台重新抄一次并更新 webadmin');
+log(`   来源：${report.expectedDsnSource}`);
+if (expected === null) {
+  if (report.observedDsn !== null) {
+    report.notes.push('无法判定：期望 DSN 推导不出来（域名非法，或缺 DSN 里的 key/project）——'
+      + '本次**不对"期望 vs 展示"下结论**（不等于一致，也不等于不一致）');
+  }
+} else if (report.observedDsn === null) {
+  log('   （无展示值可比对：keys API 没有返回可解析的 DSN）');
+} else if (expected === report.observedDsn) {
+  report.dsnConsistency = 'match';
+  log('   ✓ 与当前后台展示值逐字一致');
+} else if (authoritativeDomain === null) {
+  // 无法判定（R4-A-26 要保留的第二种结果）：把"没判定"这件事说出来，而不是默默放过。
+  report.dsnConsistency = 'unknown';
+  const note = `无法判定：期望 DSN ${expected}（来源：${report.expectedDsnSource}）`
+    + ` ≠ 后台展示 ${report.observedDsn}（来源：${report.observedDsnSource}）——`
+    + ' 没有容器 env 的权威站点 URL，站点可能经反代以别的公开名访问；要判定请提供 --ssh，'
+    + '让工具读到容器 env 里的站点 URL。';
+  report.notes.push(note);
+  log(`   ! ${note}`);
+} else {
+  // 判定为不一致：**fail-loud**（R4-A-26 的修法本体）。文案点名期望值、展示值**与两侧来源**。
+  report.dsnConsistency = 'mismatch';
+  const failLine = 'FAIL: 期望 DSN 与后台展示的 DSN **不一致** ——'
+    + ` 期望 ${expected}（来源：${report.expectedDsnSource}）；`
+    + ` 展示 ${report.observedDsn}（来源：${report.observedDsnSource}）。`
+    + ' 后台展示值不会自己更新：修好容器站点 URL 后必须从后台重抄一次并更新 webadmin。';
+  report.verdict.push(failLine);
+  if (report.exitCode === 0) report.exitCode = 1;
+  log(`   ✗ ${failLine}`);
 }
 log('');
 

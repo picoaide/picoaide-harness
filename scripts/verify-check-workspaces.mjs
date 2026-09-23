@@ -21,8 +21,22 @@
  * 变异验证（回退后本文件必红）：去掉 changedFiles 的 rev-parse 探测、去掉 main 里的
  * --only 校验、删掉 `.gitignore` 的那条规则 —— 三种回退都有对应断言。
  *
+ * ## 本文件自己的自检（2026-09-23 第四轮审计 R4-A-6）
+ *
+ * 旧实现收尾只判 `failures.length > 0` ⇒ 把 `fail()` 掏空（`void message`）后，本文件
+ * 会**打印与健康时逐字相同的 OK 长句并 EXIT=0**，回归网被掏空而无人发现。对照
+ * `scripts/check-workflows.mjs` 早有的范式（`SELFTEST_MIN_SAMPLES` /
+ * `SELFTEST_EXPECTED_POLICIES` / `SELFTEST_FATAL_PATH_ASSERTIONS`），这里补三条**互相
+ * 独立**的自检，任一不成立即 EXIT=1 —— 而且它们的失败**不经过 `fail()`**（否则掏空
+ * `fail()` 会把自检一起吞掉）：
+ *   ① `check()` 执行条数 ≥ `SELFTEST_MIN_CHECKS`（防"断言表被清空"）；
+ *   ② 合成树场景数 ≥ `SELFTEST_MIN_SCENARIOS`（防"样本数骤降"）；
+ *   ③ **失败路径可达性**：in-process 探针（`fail()` 必须真的记录 + 真的写 stderr），
+ *      外加端到端红色副本（把一条断言注入成恒假、跑一份自己的副本 ⇒ 必须 EXIT=1 且
+ *      点名那条注入的失败）。
+ *
  * 用法:node scripts/verify-check-workspaces.mjs
- * 退出码:0 全部通过;1 有断言失败。
+ * 退出码:0 全部通过;1 有断言失败或自检失败。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -30,11 +44,32 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const subject = join(root, 'scripts', 'check-workspaces.mjs')
 const failures = []
 const scratch = []
+
+/** 自检下限（实测值见下方 banner；只允许被"变多"越过，变少 = 回归网被掏空）。 */
+const SELFTEST_MIN_CHECKS = 200
+const SELFTEST_MIN_SCENARIOS = 13
+/** 红色副本的子进程标记：副本只做"必假断言"这一件事，不再递归生成副本。 */
+const RED_PROBE_CHILD_ARG = '--selfcheck-red-probe-child'
+/** 注入给红色副本的恒假断言文本（探针按它断言"具名失败"确实到达 stderr）。 */
+const RED_PROBE_MESSAGE = 'SELFCHECK-RED-PROBE: 注入的必假断言（证明"断言失败 ⇒ exit 1"这条路径真的通）'
+const redProbeChild = process.argv.includes(RED_PROBE_CHILD_ARG)
+
+/** 自检失败通道：**故意不经过 `fail()`** —— `fail()` 被掏空时它仍必须让本文件变红。 */
+const selfCheckFailures = []
+function selfCheckFail(message) {
+  selfCheckFailures.push(message)
+  process.stderr.write(`verify-check-workspaces: [self-check] ${message}\n`)
+}
+
+/** 执行过的断言条数（自检①）与合成树场景数（自检②）。 */
+let checksRun = 0
+let scenariosRun = 0
 
 function fail(message) {
   failures.push(message)
@@ -42,6 +77,7 @@ function fail(message) {
 }
 
 function check(condition, message) {
+  checksRun += 1
   if (!condition) fail(message)
   return condition
 }
@@ -88,6 +124,7 @@ function gitIn(cwd, ...args) {
  */
 function buildTree(options = {}) {
   const { mutate = null, stubExtra = '' } = options
+  scenariosRun += 1
   const tree = tempDir('check-workspaces-')
   mkdirSync(join(tree, 'scripts'))
   const source = readFileSync(subject, 'utf8')
@@ -863,14 +900,104 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   )
 }
 
+// ---------------------------------------------------------------------------
+// 本文件自己的自检（R4-A-6）：三条互相独立，全部**不经过 fail()**
+// ---------------------------------------------------------------------------
+
+{
+  // 自检③-a：`fail()` 必须真的记录 + 真的写 stderr。探针的 stderr 输出被临时捕获，
+  // 跑完把那条探针失败从 failures[] 里弹掉（否则它会污染结论）—— 捕获也顺带证明
+  // "失败是 fail-loud"，而不只是"记在一个没人读的数组里"。
+  const probe = 'SELFCHECK: fail() 失败通道探针（这条不进最终结论）'
+  const originalWrite = process.stderr.write
+  let captured = ''
+  process.stderr.write = chunk => { captured += String(chunk); return true }
+  const before = failures.length
+  fail(probe)
+  process.stderr.write = originalWrite
+  const recorded = failures.length === before + 1 && failures.at(-1) === probe
+  if (recorded) failures.pop()
+  if (!recorded) {
+    selfCheckFail('fail() 没有把失败记录进 failures[] —— 失败通道被掏空：'
+      + '任何断言失败都不会再影响退出码（本文件会打印完整 OK banner 并 EXIT=0）')
+  }
+  if (!captured.includes(probe)) {
+    selfCheckFail('fail() 没有把失败写到 stderr —— 失败不是 fail-loud（CI 日志里看不到原因）')
+  }
+}
+
+if (!redProbeChild) {
+  // 自检③-b：失败路径**端到端**可达。把一条断言注入成恒假，跑一份自己的副本，
+  // 断言它 EXIT=1 且 stderr 里出现那条具名失败。副本放在 `<仓库根>/temp/` —— 直接
+  // 放在根下的子目录里，副本用"脚本位置的上溯"推出的 root 才正好是同一个仓库根
+  // （放别处它读不到 package.json / .gitignore / scripts/check-workspaces.mjs）；
+  // `temp/` 在 .gitignore 里（第 88 行），且副本跑完立即删除。
+  // **掏空 fail() 的变异会在这里变红**：副本退出 0 而探针要求 1。
+  const source = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const needle = [
+    'function check(condition, message) {',
+    '  checksRun += 1',
+    '  if (!condition) fail(message)',
+    '  return condition',
+    '}',
+  ].join('\n')
+  if (!source.includes(needle)) {
+    selfCheckFail('红色副本的注入锚点失效（check() 的形状变了）—— 失败路径自检无法开展，'
+      + '请同步本文件里 RED_PROBE 的锚点，不要直接删掉这段自检')
+  } else {
+    const probeDir = join(root, 'temp')
+    const probeFile = join(probeDir, `verify-check-workspaces-red-${process.pid}-${randomUUID().slice(0, 8)}.mjs`)
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(
+        probeFile,
+        source.replace(needle, `${needle}\n\nif (process.argv.includes(${JSON.stringify(RED_PROBE_CHILD_ARG)})) {\n`
+          + `  check(false, ${JSON.stringify(RED_PROBE_MESSAGE)})\n}`),
+      )
+      const child = spawnSync(process.execPath, [probeFile, RED_PROBE_CHILD_ARG], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env },
+        timeout: 120_000,
+      })
+      const output = `${child.stdout ?? ''}${child.stderr ?? ''}`
+      check(child.status === 1,
+        `自检③-b: 注入了必假断言的副本必须 EXIT=1（实得 ${child.status}${child.error ? `，error=${child.error.message}` : ''}）`
+        + ' —— EXIT=0 = 失败路径不可达（fail() 被掏空 / 收尾判据被改）')
+      check(output.includes('SELFCHECK-RED-PROBE'),
+        `自检③-b: 副本必须把那条注入的失败具名打到 stderr（实得 ${JSON.stringify(output.slice(-300))}）`)
+    } catch (error) {
+      selfCheckFail(`自检③-b 无法开展（写/跑红色副本失败：${error?.message ?? String(error)}）`)
+    } finally {
+      try {
+        rmSync(probeFile, { force: true })
+      } catch {
+        // 清理失败不影响结论
+      }
+    }
+  }
+}
+
+// 自检① / ②：条数与样本下限。**下限只允许被"变多"越过** —— 断言表被清空、
+// 场景被删掉时这两条立刻红（而它们不经过 fail()，掏空 fail() 也躲不过）。
+if (checksRun < SELFTEST_MIN_CHECKS) {
+  selfCheckFail(`只执行了 ${checksRun} 条断言（下限 ${SELFTEST_MIN_CHECKS}）—— 回归网的断言表被清空/缩水`)
+}
+if (scenariosRun < SELFTEST_MIN_SCENARIOS) {
+  selfCheckFail(`只跑了 ${scenariosRun} 个合成树场景（下限 ${SELFTEST_MIN_SCENARIOS}）—— 样本数骤降`)
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 
-if (failures.length > 0) {
-  process.stderr.write(`\nverify-check-workspaces: ${failures.length} 项断言失败\n`)
+if (failures.length > 0 || selfCheckFailures.length > 0) {
+  process.stderr.write(`\nverify-check-workspaces: ${failures.length} 项断言失败`
+    + `${selfCheckFailures.length > 0 ? ` / ${selfCheckFailures.length} 项自检失败` : ''}\n`)
   process.exit(1)
 }
 process.stdout.write(
-  'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
+  `verify-check-workspaces: OK（断言 ${checksRun} 条 / 合成树场景 ${scenariosRun} 个 / 自检 3 条：条数下限、`
+  + '样本下限、失败路径可达性——含"注入必假断言的副本必须 EXIT=1"的端到端探针） — '
+  + '--changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
   + '迁移区间守卫与文档数字守卫的合成正/负例、'
   + '调度/归属表自检 7 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / '

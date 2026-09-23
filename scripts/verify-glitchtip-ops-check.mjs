@@ -26,6 +26,14 @@
  *     "DSN 指向本机"更常见的形态是 `127.0.0.1` / `127.x.y.z` / `[::1]` / `0.0.0.0` /
  *     `*.localhost` —— 把 `classifyHost` 弱化成只认 `localhost` 时自测照绿。
  *
+ * 2026-09-23 第四轮门禁审计的补充（R4-A-26）—— **算出来了却不设判据**：
+ *   - G-10：工具把"期望 DSN（由容器 env 的站点 URL 推导）"与"后台展示的 DSN（keys API）"
+ *     都算了出来，却只 `log('↑ 与当前后台展示值不同 …')` —— verdict 两条全 OK、exit 0。
+ *     这正是本工具存在的唯一理由，属于**纯 in-band 假绿**（不需要对 GlitchTip 内部做任何
+ *     假设）。现在三个用例把它钉住：不一致 ⇒ `mismatch` + FAIL（点名两侧值与两侧来源）
+ *     + exit 1；一致 ⇒ `match` + exit 0；没有容器 env 权威域名 ⇒ `unknown` + note
+ *     "无法判定"（经反代以别的公开名访问是正常部署，不得判成缺陷）。
+ *
  * 测法：起一个本地假 keys API（http）+ 把假 `ssh` 放进 PATH —— 全程不碰真实环境。
  * 变异验证（把修复回退后本文件必红）见 S15-2/5/7/9 与 G-8/G-9 各条用例的断言。
  *
@@ -744,6 +752,79 @@ async function runContainerCase({ workPrefix, envLines = [], sshStatus = 0, sshS
 }
 
 {
+  // G-10（2026-09-23 四轮门禁审计 R4-A-26）：**期望 DSN ≠ 后台展示 DSN 必须 fail-loud**。
+  //
+  // 旧实现把两者都算出来了，却只 `log('↑ 与当前后台展示值不同 …')` —— verdict 两条全 OK、
+  // exit 0（文件头自述 `0 = 核查完成且未发现缺陷`）。而"容器站点 URL 与后台展示 DSN 不一致"
+  // 正是这个工具存在的唯一理由；算出来却不设判据 = 纯 in-band 假绿（不需要对 GlitchTip 内部
+  // 做任何假设）。
+  //
+  // 三个用例互为反证，**拆掉任一侧都会红**：
+  //   (a) 负例：容器 env `GLITCHTIP_URL` 与后台展示值不同（都是非 loopback 的合成域名）
+  //       ⇒ `dsnConsistency=mismatch` + FAIL verdict（点名两侧值与两侧来源）+ **exit 1**；
+  //   (b) 正例：容器 env 域名与展示值一致 ⇒ `match` + exit 0（判据不是"恒 FAIL"）；
+  //   (c) 第三种可区分结果：没有容器 env 权威域名（只给 --base-url）⇒ `unknown` +
+  //       note 明说"无法判定"，**不下 FAIL 也不冒充一致**（经反代以别的公开名访问是正常部署）。
+  const negative = await runContainerCase({
+    workPrefix: 'glitchtip-g10-mismatch-',
+    envLines: ['GLITCHTIP_URL=https://wrong.example.com'],
+  })
+  check(negative.served === 1, `G-10(a): 假 keys API 应收到 1 个请求，实际 ${negative.served}`)
+  check(negative.sshInvoked, 'G-10(a): 假 ssh 未收到调用(接线失败)')
+  check(
+    negative.report?.expectedDsn === 'https://key@wrong.example.com/42',
+    `G-10(a): 期望 DSN 必须由容器 env 域名推导，实际 ${JSON.stringify(negative.report?.expectedDsn)}`,
+  )
+  check(
+    negative.report?.dsnConsistency === 'mismatch',
+    `G-10(a): 不一致时必须落 dsnConsistency=mismatch，实际 ${JSON.stringify(negative.report?.dsnConsistency)}`,
+  )
+  check(
+    negative.result.status === 1,
+    `G-10(a): 期望 DSN 与后台展示值不一致必须 exit 1（实得 ${negative.result.status}）`
+    + ' —— exit 0 = 工具算出了不一致却仍宣称"未发现缺陷"（R4-A-26 本体）',
+  )
+  const negativeFail = (negative.report?.verdict ?? []).find(line => line.startsWith('FAIL:'))
+  check(negativeFail !== undefined,
+    `G-10(a): 必须给一条 FAIL verdict，实际 ${JSON.stringify(negative.report?.verdict)}`)
+  check(
+    typeof negativeFail === 'string'
+    && negativeFail.includes('https://key@wrong.example.com/42')
+    && negativeFail.includes('https://key@glitchtip.example.com/42'),
+    `G-10(a): FAIL 文案必须同时点名期望值与展示值，实际 ${JSON.stringify(negativeFail)}`,
+  )
+  check(
+    typeof negativeFail === 'string' && negativeFail.includes('GLITCHTIP_URL') && negativeFail.includes('keys API'),
+    `G-10(a): FAIL 文案必须点名两侧来源（容器 env 变量名 + keys API URL），实际 ${JSON.stringify(negativeFail)}`,
+  )
+
+  const positive = await runContainerCase({
+    workPrefix: 'glitchtip-g10-match-',
+    envLines: ['APP_URL=https://glitchtip.example.com'],
+  })
+  check(
+    positive.report?.dsnConsistency === 'match',
+    `G-10(b): 期望与展示一致时必须落 dsnConsistency=match，实际 ${JSON.stringify(positive.report?.dsnConsistency)}`,
+  )
+  check(positive.result.status === 0, `G-10(b): 一致时必须 exit 0（判据不得恒 FAIL），实际 ${positive.result.status}`)
+
+  const unknownCase = await runContainerCase({ workPrefix: 'glitchtip-g10-unknown-', useSsh: false })
+  check(
+    unknownCase.report?.dsnConsistency === 'unknown',
+    `G-10(c): 没有容器 env 权威域名时必须落 dsnConsistency=unknown，实际 ${JSON.stringify(unknownCase.report?.dsnConsistency)}`,
+  )
+  check(
+    Array.isArray(unknownCase.report?.notes) && unknownCase.report.notes.some(line => line.includes('无法判定')),
+    `G-10(c): "无法判定"必须显式说出来（note），实际 ${JSON.stringify(unknownCase.report?.notes)}`,
+  )
+  check(
+    !(unknownCase.report?.verdict ?? []).some(line => line.startsWith('FAIL: 期望 DSN')),
+    `G-10(c): 无法判定时不得下"不一致"的 FAIL，实际 ${JSON.stringify(unknownCase.report?.verdict)}`,
+  )
+  check(unknownCase.result.status === 0, `G-10(c): 无法判定时退出码保持 0（不冒充缺陷），实际 ${unknownCase.result.status}`)
+}
+
+{
   // 六处形态④（2026-09-23 三轮审计 R3-C）：**目标缺失必须具名收尾**，不得以未捕获异常栈
   // 结束。旧形态：目标脚本不在 ⇒ 子进程空 stdout ⇒ 裸 JSON.parse('') 抛 SyntaxError
   // （退出码是对的、文案不对）。这里用测试缝 CHECK_GLITCHTIP_SCRIPT 指向一个不存在的
@@ -773,5 +854,7 @@ process.stdout.write(
   + 'cookie 按 domain/path/secure 过滤、容器名与 compose 目录按字面量传递(注入惰性)、'
   + '容器 env 判定被假 ssh 双向驱动(三者皆空 ⇒ FAIL/exit 1，APP_URL/GLITCHTIP_URL ⇒ OK 且来源正确)、'
   + 'loopback 覆盖 127.0.0.0/8 · ::1 · 0.0.0.0 · *.localhost、'
+  + '期望 DSN ≠ 后台展示 DSN ⇒ FAIL(点名两侧值与两侧来源)+exit 1（一致 ⇒ match/exit 0；'
+  + '无权威域名 ⇒ unknown/只记"无法判定"）、'
   + '目标脚本缺失 ⇒ 具名原因 + exit 1(不以异常栈收尾)\n',
 )

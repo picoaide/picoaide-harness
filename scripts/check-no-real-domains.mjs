@@ -67,7 +67,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1013,6 +1013,7 @@ function commitRangeFindings(root, unmasked, notes) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2)
+let explicitRoot = false
 let root = resolve(process.cwd())
 let unmasked = false
 let json = false
@@ -1027,6 +1028,7 @@ for (let index = 0; index < argv.length; index += 1) {
       process.exit(2)
     }
     root = resolve(value)
+    explicitRoot = true
     index += 1
   } else if (arg === '--unmasked') unmasked = true
   else if (arg === '--json') json = true
@@ -1035,6 +1037,70 @@ for (let index = 0; index < argv.length; index += 1) {
   else {
     console.error(`check-no-real-domains: 未知参数 ${arg}`)
     process.exit(2)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 扫描根：**必须是仓库根**（2026-09-23 第四轮审计 R4-A-1）
+//
+// 旧实现：`let root = resolve(process.cwd())`，且全文没有"根必须是仓库根"的断言
+// （`grep -n "show-toplevel"` 零命中）。后果：在 `packages/` 这类子目录里跑**同一个脚本**，
+// 扫描面被静默缩到那棵子树，然后打印 `零命中 ✅` 并 EXIT=0 —— 同一批守卫里，
+// `check-no-leftover-mutants.mjs`（子目录 ⇒ EXIT=2）、`check-migration-range.mjs`
+// （找不到迁移目录 ⇒ EXIT=1）、`check-doc-claims.mjs`（扫描面为 0 ⇒ EXIT=1）都 fail-loud，
+// 唯独承载**铁律 0**（失效代价不可逆）的这一个不响。
+//
+// 现在的口径（两条判据合起来才既不假绿、又不误伤夹具）：
+//   ① **默认根不是 cwd，而是仓库根**：从脚本自身位置上溯（`git -C <脚本目录> rev-parse
+//      --show-toplevel`），拿不到 git 顶层时回落 `<脚本目录>/..`。所以"从任意 cwd 跑"
+//      都不会把扫描面缩到 cwd。
+//   ② **解析出的根必须就是仓库根**：能判出 git 顶层且与 root 不等 ⇒ 退出码 2 并点名
+//      "实际根 / 仓库根"。另加一条同源判据：**调用者的 cwd 若在某个工作树里却不是该工作树
+//      的根**（即"在子目录里跑"）⇒ 同样退出码 2 —— 拒绝把"我其实只想扫这一部分"与
+//      "全仓都扫过了"混成同一个 `零命中 ✅`。
+//      `--root` 的显式语义保持不变（它服务自证/合成树夹具）：`--root` 时不看 cwd，
+//      但**仍受第 ② 条约束** —— 夹具本身是 git 仓库却指到它的子目录，同样当场红。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @returns 该目录所属工作树的顶层（绝对路径）；不是 git 工作树时返回 null。 */
+function gitToplevel(dir) {
+  try {
+    const top = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return top === '' ? null : resolve(top)
+  } catch {
+    return null
+  }
+}
+
+if (!explicitRoot) {
+  const scriptDir = dirname(fileURLToPath(import.meta.url))
+  root = gitToplevel(scriptDir) ?? resolve(scriptDir, '..')
+}
+
+/** 统一的"根不对"处置：点名实际根与期望根，退出码 2（前置失败，不是"有命中"）。 */
+function refuseWrongRoot(actual, expected, how) {
+  console.error(
+    `check-no-real-domains: 扫描根不是仓库根（${how}）—— 实际 root=${actual}，仓库根=${expected}。\n`
+    + '  扫描面 = 该根下的 `git ls-files --cached --others --exclude-standard`；根指错会把'
+    + '"全仓扫过了"与"只扫了一棵子树"混成同一个 `零命中 ✅`（本守卫承载铁律 0，失效不可逆，'
+    + '所以这里 fail-loud）。\n'
+    + `  处置：cd ${expected} && node scripts/check-no-real-domains.mjs`
+    + '（确实要扫别的目录时才用 --root 显式指定）。',
+  )
+  process.exit(2)
+}
+
+{
+  const rootTop = gitToplevel(root)
+  if (rootTop !== null && rootTop !== root) refuseWrongRoot(root, rootTop, '解析出的根指向了工作树的子目录')
+  if (!explicitRoot) {
+    const cwdTop = gitToplevel(process.cwd())
+    if (cwdTop !== null && resolve(process.cwd()) !== cwdTop) {
+      refuseWrongRoot(resolve(process.cwd()), cwdTop, '在仓库的子目录里运行')
+    }
   }
 }
 
