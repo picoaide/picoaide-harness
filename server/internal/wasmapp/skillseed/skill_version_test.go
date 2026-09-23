@@ -222,6 +222,30 @@ var seededSkillDigests = map[string]string{
 	// version 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。防漂移判据在
 	// `internal/wasmapp/appserver/entry_contract_test.go`（四个契约面的枚举行必须列全三形态）。
 	"f1c39e1d49b403477973e9cea93bc15d595b861f2fd2273255f0758ccd15d633": "2.8.0",
+
+	// 2.8.1 = **自检条数不再以"平台限制"的形态出现**（2026-09-23，修 make check 的
+	// `TestSkillDiscipline` 回归；同轮把同族的"非平台限制数字"一并清掉）：
+	// `TestSkillDiscipline` 的判据是「文档里每个"数字+单位"都必须在 limits 表里有同量纲
+	// 同值的条目」，而"9 条自检"说的是**自检脚本自己的条数**，不是平台限制 —— 它上一版
+	// 之所以能过（"8 条"），只是因为表里恰好有 `sql_limit_compound_select` = 8（撞上的）。
+	// 本轮把这类"非平台限制的数字"按同一口径改成不产生「数字+单位」的写法：
+	//   - `SKILL.md`：自测说明的"（9 条自检）"改成"脚本自己报「全过」即说明本地库语义与
+	//     平台同向"（自检项数由脚本维护，正文不写死）；"见硬约束第 3 条"改成引用该条
+	//     标题文字（"第 3 条"里的"3 条"同样会被判据命中）；
+	//   - `examples/go/README.md`：`--selftest` 那一行的"（8 条）"去掉（它既是非平台限制
+	//     数字，也已随第 9 条自检过期）；
+	//   - `references/design-interview.md`：去掉两处**访谈建议**里的数字（"不超过 8 个
+	//     字段"、"最近 50 条"）—— 它们是话术建议，不是平台上限，留着只会在表变化时
+	//     无声地红/绿；
+	//   - `examples/go/main.go`：`clipRunes` 注释里的"UTF-8 字符"改成"多字节字符"
+	//     （"8 字符"是同一条正则从"UTF-8 字符"里误命中的）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册与本地工具，已安装的客户端靠
+	// version 判「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	// 未登记项（认账，留给主控拍板）：`docs/wasm-app-authoring.md` §7 的"单次查询返回
+	// 5000 行 / 8 MiB（超出截断并报错）"与真源不符（`sql_max_result_bytes` 现为 172032 B，
+	// 且行数/字节超限只置 `truncated` 不报错）—— 8 MiB 撞的是另一条表项
+	// （`app_response_body_max_bytes`），判据咬不到，本轮只报告不改。
+	"e5ad99023496f6c0bd940d6d809b40d4fe553a8473c98312c73e45ffd435331a": "2.8.1",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的
