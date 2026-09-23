@@ -50,9 +50,15 @@ func setup(t *testing.T) (*gin.Engine, *sql.DB) {
 		t.Fatal(err)
 	}
 
+	// R4-C-7（审计 2026-09-23）：本包不再有 RegisterRoutes 镜像（它曾在引擎上直挂
+	// 两条路由，却只被测试调用 ⇒ 双份真源 + 守卫盲区）。测试改为用**生产同一批
+	// handler** 自行组树：与 cmd/server（/healthz 直挂）和 internal/router
+	// （bootstrap 端点声明）逐字同形。
 	gin.SetMode(gin.TestMode)
+	h := NewHandlers(db)
 	r := gin.New()
-	RegisterRoutes(r, db)
+	r.GET("/healthz", h.Health)
+	r.GET("/api/client/v2/config/bootstrap", serverauth.BearerAuth(db), h.Bootstrap)
 	return r, db
 }
 

@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -183,30 +184,109 @@ func pingFn(db *sql.DB) func() error {
 	return db.Ping
 }
 
-// TestAdminRouterNoFallOpen: 每个 /api/server/admin/* 路由(除公开 login/
-// auth/methods)都必须出现在 serverauth.AdminRoute registry 中。
+// TestAdminRouterNoFallOpen: **管理面命名空间**下每条路由都必须申报（或在显式
+// 公开豁免表里）。
+//
+// R4-C-2（审计 2026-09-23，P2）：判据从"字面量前缀 `/api/server/admin/`"改成
+// **命名空间级**（`/api/server` 下的每一条），因为旧写法能被三种新写法绕过：
+// `/api/server/admin-extra/*`、`/api/server/ops/*`、恰好 `/api/server/admin`
+// —— 它们同时躲过本用例与 internal/router 的镜像对拍，在 `router.go`（§7.0 规定的
+// 唯一落点）里新增这样的路由**没有任何红灯**。
+//
+// 判据实现是纯函数 `serverauth.AdminNamespaceViolations`（豁免表按 (method,path)
+// 精确匹配，不用前缀包含放行；陈旧条目也判红），下面第 3 段用注入的路由集合自证
+// 判别力（四种写法逐一必须被判红 + 申报过的路由必须放行 + 陈旧豁免必须判红）。
 func TestAdminRouterNoFallOpen(t *testing.T) {
 	r := buildRouter(t)
-	registered := map[string]bool{}
-	for _, rr := range serverauth.AdminRoutePerms() {
-		registered[rr.Method+" "+rr.Path] = true
-	}
-	public := map[string]bool{
-		"POST /api/server/admin/login":       true,
-		"POST /api/server/admin/login/mfa":   true,
-		"GET /api/server/admin/auth/methods": true,
-	}
+	routes := make([]string, 0, len(r.Routes()))
 	for _, rt := range r.Routes() {
-		if len(rt.Path) < len("/api/server/admin/") || rt.Path[:len("/api/server/admin/")] != "/api/server/admin/" {
-			continue
+		routes = append(routes, rt.Method+" "+rt.Path)
+	}
+	declared := map[string]bool{}
+	for _, rr := range serverauth.AdminRoutePerms() {
+		declared[rr.Method+" "+rr.Path] = true
+	}
+	publicKeys := make([]string, 0, 4)
+	exemptions := serverauth.PublicAdminRoutes()
+	for _, e := range exemptions {
+		if strings.TrimSpace(e.Reason) == "" {
+			t.Fatalf("公开豁免 %s %s 没写理由（豁免是安全决策，必须逐条说明）", e.Method, e.Path)
 		}
-		key := rt.Method + " " + rt.Path
-		if public[key] {
-			continue
+		publicKeys = append(publicKeys, e.Method+" "+e.Path)
+	}
+	public := serverauth.MethodPathSet(publicKeys)
+
+	undeclared, stale := serverauth.AdminNamespaceViolations(routes, declared, public)
+	if len(undeclared) > 0 {
+		sort.Strings(undeclared)
+		t.Fatalf("fall-open: 管理面命名空间 %s 下有 %d 条路由既未申报也未豁免：\n  %s\n"+
+			"⇒ 管理面路由必须经 serverauth.AdminRoute 申报权限点（或在 PublicAdminRoutes 里逐条登记理由，仅限未认证的登录面）",
+			serverauth.AdminNamespaceServer, len(undeclared), strings.Join(undeclared, "\n  "))
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		t.Fatalf("申报表/豁免表里有 %d 条在路由表里不存在（改名/删除后没清理）：\n  %s",
+			len(stale), strings.Join(stale, "\n  "))
+	}
+
+	// 3) 判据自带变异证明：三种"旧判据判不出来"的新写法 + 对照，逐一实跑。
+	//
+	// 探针路径必须带一个**保证不在申报表/豁免表里**的后缀：否则一旦真实树里存在同名
+	// 已申报路由，注入形态会变成"已申报 ⇒ 不判红"，本段就会误报"判别力失效"（实测：
+	// 在 router.go 里加一条经 AdminRoute 申报的 /admin/probe-x 时命中）。前缀形态的
+	// 三种写法仍逐一构造，下面另有前置断言兜住"探针路径被真实条目污染"。
+	const probeTail = "/zz-probe-never-declared"
+	probes := []string{
+		"GET " + serverauth.AdminNamespaceServer + "/admin" + probeTail,
+		"GET " + serverauth.AdminNamespaceServer + "/admin-extra" + probeTail,
+		"GET " + serverauth.AdminNamespaceServer + "/ops" + probeTail,
+		"GET " + serverauth.AdminNamespaceServer + "/admin", // 恰好等于前缀去尾斜杠（形态本身没有可加后缀的位置）
+	}
+	for _, key := range probes {
+		if declared[key] || public[key] {
+			t.Fatalf("前置不成立：探针路径 %s 已在申报/豁免表里，判别力证明会被污染", key)
 		}
-		if !registered[key] {
-			t.Fatalf("fall-open: %s has no permission declared", key)
+	}
+	base := append([]string{}, routes...)
+	for _, tc := range []struct {
+		key  string
+		want bool // 是否必须被判红
+	}{
+		{probes[0], true}, // 对照：旧判据也抓得住
+		{probes[1], true}, // 前缀近似 admin-extra
+		{probes[2], true}, // 同命名空间另一分组 ops
+		{probes[3], true}, // 恰好等于前缀去尾斜杠
+		{"GET " + serverauth.AdminNamespaceServer + "/admin/users", false},  // 已申报 ⇒ 放行
+		{"POST " + serverauth.AdminNamespaceServer + "/admin/login", false}, // 已豁免 ⇒ 放行
+		{"GET " + serverauth.AdminNamespaceServer + "/admin/login", true},   // 豁免按 (method,path) 精确匹配：换个方法不再豁免
+		{"GET /api/serverless/probe-x", false},                              // 裸前缀近似但**不属于**该命名空间
+	} {
+		got, _ := serverauth.AdminNamespaceViolations(append(append([]string{}, base...), tc.key), declared, public)
+		caught := false
+		for _, v := range got {
+			if v == tc.key {
+				caught = true
+			}
 		}
+		if caught != tc.want {
+			t.Fatalf("判据判别力失效：%s 期望被判红=%v，实得 %v（undeclared=%v）", tc.key, tc.want, caught, got)
+		}
+	}
+	// 陈旧豁免条目同样必须判红（防"清单越长越像有守卫"）。
+	if _, staleInjected := serverauth.AdminNamespaceViolations(
+		base, declared, serverauth.MethodPathSet(append(publicKeys, "GET /api/server/admin/does-not-exist")),
+	); len(staleInjected) == 0 {
+		t.Fatal("判据没咬住陈旧的豁免条目（登记了却不存在必须判红）")
+	}
+}
+
+// TestAdminNamespaceConstantMatchesRouterTruth 锁住"命名空间常量只有一份真源"：
+// serverauth.AdminNamespaceServer 是 router.NamespaceServer 的副本（反向 import 会
+// 成环），两者漂移必须判红 —— 否则判据会在错误的命名空间上"守卫"。
+func TestAdminNamespaceConstantMatchesRouterTruth(t *testing.T) {
+	if serverauth.AdminNamespaceServer != router.NamespaceServer {
+		t.Fatalf("serverauth.AdminNamespaceServer=%q 与 router.NamespaceServer=%q 漂移",
+			serverauth.AdminNamespaceServer, router.NamespaceServer)
 	}
 }
 

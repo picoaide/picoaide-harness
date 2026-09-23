@@ -37,7 +37,7 @@
 
 ## 5. 审计
 
-`agent_preset_upload`(作者)/ `agent_preset_approve` / `agent_preset_reject` / `agent_preset_delete` / `agent_preset_qualify`(管理员),落 audit_logs(默认 180 天,settings `audit.retention_days` 可配)。
+`agent_preset_upload`(作者)/ `agent_preset_approve` / `agent_preset_reject` / `agent_preset_delete` / `agent_preset_qualify`(管理员),落 audit_logs(默认 180 天,settings `audit.retention_days` 可配;由周期调度器 `internal/auditretention` 清理)。
 
 ## 6. 边界
 

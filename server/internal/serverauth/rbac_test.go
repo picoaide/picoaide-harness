@@ -17,6 +17,13 @@ import (
 // 管理会话可越权」。
 // ---------------------------------------------------------------------------
 
+// TestAdminRouteRegistryNoUnprotected: **管理面命名空间**下（镜像树里）每条路由都必须
+// 经 AdminRoute 申报，或在显式的公开豁免表里。
+//
+// R4-C-2（审计 2026-09-23，P2）：判据从"字面量前缀 `/api/server/admin/`"改成命名空间级
+// —— 判据实现与 cmd/server 的生产面用例共用同一个纯函数
+// `AdminNamespaceViolations`（豁免表按 (method,path) 精确匹配，不用前缀包含放行；
+// 陈旧条目也判红）。镜像树与生产树两侧同口径，避免"两侧各写一份前缀"的历史坑。
 func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 	r := gin.New()
 	db := mustDB(t)
@@ -25,23 +32,23 @@ func TestAdminRouteRegistryNoUnprotected(t *testing.T) {
 	for _, rr := range AdminRoutePerms() {
 		registered[rr.Method+" "+rr.Path] = true
 	}
-	// 公开(未认证)路由显式豁免: 登录、两步登录第二步、登录方式发现。
-	public := map[string]bool{
-		"POST /api/server/admin/login":       true,
-		"POST /api/server/admin/login/mfa":   true,
-		"GET /api/server/admin/auth/methods": true,
+	// 公开(未认证)路由：唯一真源是 PublicAdminRoutes（serverauth 包内）。
+	publicKeys := make([]string, 0, 4)
+	for _, e := range PublicAdminRoutes() {
+		publicKeys = append(publicKeys, e.Method+" "+e.Path)
 	}
+	public := MethodPathSet(publicKeys)
+
+	routes := make([]string, 0, len(r.Routes()))
 	for _, rt := range r.Routes() {
-		if !stringsHasPrefix(rt.Path, "/api/server/admin/") {
-			continue
-		}
-		key := rt.Method + " " + rt.Path
-		if public[key] {
-			continue
-		}
-		if !registered[key] {
-			t.Fatalf("admin route %s registered without AdminRoute (fall-open risk)", key)
-		}
+		routes = append(routes, rt.Method+" "+rt.Path)
+	}
+	undeclared, stale := AdminNamespaceViolations(routes, registered, public)
+	if len(undeclared) > 0 {
+		t.Fatalf("admin route(s) registered without AdminRoute (fall-open risk): %v", undeclared)
+	}
+	if len(stale) > 0 {
+		t.Fatalf("申报表/豁免表里有镜像树中不存在的条目（陈旧）: %v", stale)
 	}
 	if len(registered) < 15 {
 		t.Fatalf("registry too small: %d (serverauth own routes)", len(registered))

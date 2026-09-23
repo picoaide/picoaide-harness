@@ -1,14 +1,20 @@
 // Package bootstrap aggregates the startup configuration for clients
-// (GET /api/config/bootstrap): models + default model + skill suggestions.
+// (GET /api/client/v2/config/bootstrap): models + default model + skill suggestions.
+//
+// 路由声明纪律（R4-C-7，审计 2026-09-23）：本包**不再**提供 `RegisterRoutes`。
+// 它曾直接在 `*gin.Engine` 上挂 `/healthz` 与 `/api/client/v2/config/bootstrap`，
+// 但生产装配不用它（`cmd/server/main.go` 直接挂 `Handlers.Health`、`internal/router`
+// 声明 bootstrap 端点），只被包内测试调用 —— 于是它既是一份"双份真源"，又位于
+// 所有守卫的扫描面之外（`cmd/server` 的直挂守卫只扫本包源码）。处置是**移除**：
+// 测试改为用 `NewHandlers` 暴露的 handler 自行组树（与生产同一批 handler）。
+// "业务包不得直挂引擎"这条形态现在由 cmd/server/route_mirror_registry_test.go 守卫。
 package bootstrap
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -94,26 +100,6 @@ type ConnectorItem struct {
 	AuthMode    string `json:"auth_mode"`
 	// 完整定义 JSON:客户端 parse 后覆盖内置(无内置,仅此下发)。
 	Definition string `json:"definition"`
-}
-
-// RegisterRoutes mounts GET /api/config/bootstrap behind BearerAuth,
-// plus an unauthenticated /healthz for docker healthchecks (only on the
-// no-prefix call — healthz is a fixed endpoint and must never be mirrored).
-func RegisterRoutes(r *gin.Engine, db *sql.DB) {
-	// 无需认证的存活探针:docker HEALTHCHECK 用(docker 官方语义:退出码 0=healthy)。
-	// 查询 DB(3s 超时),DB 不可用返回 503。
-	r.GET("/healthz", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		defer cancel()
-		if err := db.PingContext(ctx); err != nil {
-			// 健康探针保持 {ok:false} 语义(docker HEALTHCHECK 只认状态码),
-			// 但 error 字段与错误信封同构(审计2026-F1.2)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": gin.H{"code": "INTERNAL", "message": "db unavailable"}})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-	r.GET("/api/client/v2/config/bootstrap", serverauth.BearerAuth(db), buildBootstrapHandler(db))
 }
 
 // buildBootstrapHandler 返回 bootstrap 端点 handler;闭包在每次调用时新建,

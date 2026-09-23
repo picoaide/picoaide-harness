@@ -1,6 +1,7 @@
 package router
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -22,15 +23,52 @@ import (
 	"github.com/picoaide/picoaide/internal/telemetry"
 )
 
-// adminRouteSet 枚举 engine 中 /api/server/admin 命名空间下的 (method, path)。
+// adminRouteSet 枚举 engine 中**管理面命名空间**（/api/server）下的 (method, path)。
+//
+// R4-C-2（审计 2026-09-23，P2）：前缀从 `NamespaceServer+"/admin"` 放宽到整个命名空间
+// ——旧前缀会把 `/api/server/ops/x` 挡在扫描面之外（生产独有 ⇒ 只 t.Logf ⇒ 两条守卫
+// 全绿）。命名空间成员判定用 serverauth.InServerNamespace（与 fall-open 守卫同一实现，
+// 不允许两侧各写一份前缀）。
 func adminRouteSet(e *gin.Engine) map[string]bool {
 	out := map[string]bool{}
 	for _, r := range e.Routes() {
-		if strings.HasPrefix(r.Path, NamespaceServer+"/admin") {
+		if serverauth.InServerNamespace(r.Path) {
 			out[r.Method+" "+r.Path] = true
 		}
 	}
 	return out
+}
+
+// productionOnlyAdminRoutes 登记**生产路由表里有、测试镜像没有**的管理面路由。
+//
+// R4-C-2 修法 2：`prodOnly` 从"信息性 t.Logf"升为 **fail-loud + 逐条登记**。理由：
+// 镜像（各业务包的 RegisterAdminRoutes）只覆盖一部分管理面，其余（appstore/reports/
+// portal/skillseed 等）没有镜像注册函数 —— 这个差距本身是事实，但不该是**静默**的事实：
+// 新增一条没有镜像的管理面路由时没人会去看日志，于是"镜像对拍"给人一种全覆盖的错觉。
+// 登记表把差距变成**逐条申报**：新出现的生产独有路由不登记即红；登记了却不再独有
+// （改名/被镜像覆盖/删除）也红（陈旧条目同样会假装有守卫）。
+//
+// 键 = "METHOD /api/server/…"；值 = 为什么这条路由没有镜像（该业务包只提供 Handlers
+// 供给面 / 镜像只覆盖了该组的一部分）。
+var productionOnlyAdminRoutes = map[string]string{
+	"GET " + NamespaceServer + "/admin/providers/:id/balance":          "上游余额查询：llmgateway 镜像只覆盖 CRUD 组的一部分",
+	"GET " + NamespaceServer + "/admin/concurrency":                    "按模型并发状态：同一镜像组之外的只读端点",
+	"GET " + NamespaceServer + "/admin/users/:id/balance/ledger":       "余额流水对账：serverauth 镜像不建 AdminAuth 组",
+	"PUT " + NamespaceServer + "/admin/apps/:kind/:app_id/owner":       "归属转移：appstore 只有 Handlers（无镜像函数）",
+	"GET " + NamespaceServer + "/admin/skills/builtin":                 "平台内置技能只读面：skillseed 只有 Handlers",
+	"GET " + NamespaceServer + "/admin/portal":                         "门户配置读：portal 只有 Handlers",
+	"PUT " + NamespaceServer + "/admin/portal":                         "门户配置写（同上）",
+	"GET " + NamespaceServer + "/admin/report-subscriptions":           "报表订阅：reports 只有 Handlers",
+	"POST " + NamespaceServer + "/admin/report-subscriptions":          "报表订阅（同上）",
+	"PUT " + NamespaceServer + "/admin/report-subscriptions/:id":       "报表订阅（同上）",
+	"DELETE " + NamespaceServer + "/admin/report-subscriptions/:id":    "报表订阅（同上）",
+	"POST " + NamespaceServer + "/admin/report-subscriptions/:id/test": "报表订阅（同上）",
+}
+
+// productionOnlyReasonFor 返回该生产独有路由的登记理由；未登记返回 ok=false（判红）。
+func productionOnlyReasonFor(route string) (string, bool) {
+	reason, ok := productionOnlyAdminRoutes[route]
+	return reason, ok
 }
 
 // productionTestDeps 是 router 包内测试用的生产装配依赖（nil DB + 临时缓存目录）。
@@ -188,17 +226,38 @@ func TestAdminRouteMirrorIsSubsetOfProduction(t *testing.T) {
 		t.Fatalf("test mirrors register routes missing from production router (%d):\n  %s",
 			len(mirrorOnly), strings.Join(mirrorOnly, "\n  "))
 	}
-	var prodOnly []string
+	// 生产独有（没有镜像注册函数）的路由：**必须逐条登记理由**（R4-C-2 修法 2）。
+	// 旧实现只 t.Logf ⇒ 新增一条没有镜像的管理面路由时没有任何红灯。
+	prodOnly := map[string]bool{}
 	for route := range prodSet {
 		if !mirrorSet[route] {
-			prodOnly = append(prodOnly, route)
+			prodOnly[route] = true
 		}
 	}
-	t.Logf("production admin routes=%d, mirror routes=%d, production-only (no test mirror) = %d",
-		len(prodSet), len(mirrorSet), len(prodOnly))
-	if len(prodOnly) > 0 {
-		// 信息性输出:这些路由没有镜像注册函数(reports/appstore 等),
-		// 只能依靠 router 冒烟测试/客户端契约测试覆盖。
-		t.Logf("production-only routes:\n  %s", strings.Join(prodOnly, "\n  "))
+	var unregistered, stale []string
+	for route := range prodOnly {
+		if reason, ok := productionOnlyReasonFor(route); !ok || strings.TrimSpace(reason) == "" {
+			unregistered = append(unregistered, route)
+		}
 	}
+	for route := range productionOnlyAdminRoutes {
+		if !prodOnly[route] {
+			stale = append(stale, route)
+		}
+	}
+	if len(unregistered) > 0 {
+		sort.Strings(unregistered)
+		t.Fatalf("生产路由表里有 %d 条管理面路由没有测试镜像、也未登记理由：\n  %s\n"+
+			"⇒ 在 parity_test.go 的 productionOnlyAdminRoutes 里登记（写明为什么没有镜像），"+
+			"或为该业务包补一个 RegisterAdminRoutes 镜像",
+			len(unregistered), strings.Join(unregistered, "\n  "))
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		t.Fatalf("productionOnlyAdminRoutes 里有 %d 条已经不是「生产独有」（改名/删除/已被镜像覆盖）：\n  %s\n"+
+			"⇒ 清理登记表（陈旧条目会让这条守卫看起来在保护什么东西）",
+			len(stale), strings.Join(stale, "\n  "))
+	}
+	t.Logf("production admin routes=%d, mirror routes=%d, production-only (登记)=%d",
+		len(prodSet), len(mirrorSet), len(prodOnly))
 }

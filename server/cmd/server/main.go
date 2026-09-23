@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
+	"github.com/picoaide/picoaide/internal/auditretention"
 	"github.com/picoaide/picoaide/internal/balance"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -235,15 +235,11 @@ func main() {
 	})
 	// 审计日志保留策略(v3b: settings audit.retention_days, 默认 180 天;
 	// 安全/权限类事件 365 天由应用策略保证, 这里按全局保留清理)。
-	retentionDays := 180
-	if v, ok, _ := serverstore.GetSetting(db, "audit.retention_days"); ok && v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			retentionDays = n
-		}
-	}
-	if err := serverstore.PurgeOldAuditLogs(db, time.Now().Add(-time.Duration(retentionDays)*24*time.Hour)); err != nil {
-		log.Printf("audit log purge: %v", err)
-	}
+	//
+	// R4-D-4(审计 2026-09-23,P2):清理**不再是启动时的一次性动作** —— 那会让稳态运行
+	// 的实例只在启动那一刻按保留期清理(`audit.retention_days` 形同虚设)。执行者改由
+	// 周期调度器 auditretention 承担(见下方 Start;启动先跑一轮,覆盖停机期间到期的条目,
+	// 之后每 6 小时一次)。管理员保存配置时仍会额外主动触发一次(立即生效)。
 	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
 	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
 	go llmgateway.SyncLoop(db, time.Hour, nil)
@@ -297,6 +293,12 @@ func main() {
 	// 月度余额发放调度(0061):每小时检查当月是否已发放,未发则按配置
 	// 发放(add 累加 / cover 覆盖);幂等锚在 balance_grants.month。
 	balance.NewScheduler(db, time.Hour, nil).Start(ctx)
+	// 审计日志保留策略的周期执行者(R4-D-4):启动先跑一轮(替代原先的一次性启动清理),
+	// 之后每 6 小时按 settings audit.retention_days 清理过期条目;随 ctx 退出。
+	//
+	// 经 startAuditRetentionScheduler(audit_retention.go 的装配接缝)调用 —— 后者被删掉
+	// 或那一行被挪走时,cmd/server 的装配级用例会红(与网关回收器的 M8 判据同款)。
+	startAuditRetentionScheduler(ctx, db, auditretention.DefaultTick)
 	// F9 启动自检:历史大小写重复用户名会让 NOCASE 唯一约束无法建立,
 	// 这里显式告警(不阻断启动),提示管理员人工合并。
 	if conflicts, cerr := serverstore.CheckUsernameCaseConflicts(db); cerr != nil {
