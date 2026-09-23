@@ -498,7 +498,7 @@ node <技能目录>/examples/go/preview.mjs app.wasm --user someone-else   # 看
 | `ASSET_OVERSIZE` | 单个随包资源超过 4 MiB（与自定义段总量同源） | 精简资源；HTML/JS 先 gzip 再内嵌 |
 | `ASSET_EXISTS` | 同一个包内路径在自定义段里出现了两次（解析层只取第一个，重复的那份会被静默丢弃 ⇒ 平台直接拒） | 打包时不要给两个源文件写同一个目标路径；改内容 = 发新版本 |
 | `HOST_METHOD_UNKNOWN` | 调了不存在的宿主函数（拼错方法名、或平台没有的能力） | 只调封闭清单里的宿主方法（见 `references/abi.md` §3）；**AI 不在其中**，走 §2.1c 的客户端 AI loop。注意：**调不存在的宿主方法时第一层先回 JSON-RPC `NOT_FOUND` + `未知的宿主方法: <名字>`**（老应用调 `ai.chat` 撞的就是这一层） |
-| `DB_LIMIT` | 库满 100 MB 或返回超行数/字节、语句超时 | 清理历史数据或做汇总表；分页 |
+| `DB_LIMIT` | **只有**「库写满」（100 MB 上限），或**单行**超过 168 KiB（一行都返回不了） | 清理历史数据或做汇总表；别把大对象塞进一行。**行数/字节超限不是这个码**（按 §4.5 截断并置 `truncated`）；**语句超时**是 `DB_DENIED`(403) + `details.reason="statement_timeout"` |
 | `APP_QUEUE_FULL` | 用的人多 | 按 `Retry-After` 退避，别立刻重试 |
 | `ai_balance_insufficient`（**客户端 AI loop** 错误，不是 wasm 错误码） | 使用者余额不足 | 提示本人去桌面客户端看余额；**不显示金额、不自动重试** |
 | `ai_rate_limited` / `app_ai_denied` / `app_ai_unavailable` / `app_ai_invalid` / `ai_cancelled`（**客户端 AI loop** 错误） | 限流 / 用户未授权（或已撤销）/ 客户端 AI 不可用或未登录 / 请求体不合法（条数、单条长度、方法不是 POST）/ 页面关闭导致取消 | 分别提示"稍后重试"、"到应用详情页的 AI 面板授权（撤销入口也在那里）"、"AI 暂不可用"、"检查 messages 条数与长度"、无需提示（是用户主动关闭）；见 §2.1c |

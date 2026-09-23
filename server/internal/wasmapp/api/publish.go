@@ -575,8 +575,13 @@ func (h *Handlers) validate(c *gin.Context) {
 	// 换了个入口留下。
 	//
 	// 位置有意：在归属校验之后、`isFirstRelease`/解码/编译/干跑**之前** —— 终态应用
-	// 不该消耗编译资源与 validate/publish 合计 30 次/小时的额度（`acquireUpload`），
-	// 错误也必须与 publish **逐字节同形**（同一个 `*apperr.Error`，连 hints 一致）。
+	// 不该消耗**编译资源**，错误也必须与 publish **逐字节同形**（同一个 `*apperr.Error`，
+	// 连 hints 一致）。
+	//
+	// ⚠️ 本闸门**不**省额度：`acquireUpload`（validate/publish 合计 30 次/小时的额度）
+	// 在本函数更上面、本闸门**之前** ⇒ 终态预检今天照样占一次额度。判据
+	// `TestValidateTerminalAppsNeverReachCompile` 也只钉到"不触发真编译"这一层；
+	// 要改成"不占额度"是行为变更，必须先把 `acquireUpload` 挪到闸门之后并同步改判据。
 	//
 	// 边界：`enabled=false`（下架）**不是**终态，`publishBlockOf` 对它返回 nil
 	// —— 预检与发布都不拦，这是 R37 的三态语义，不要"顺手"把下架也拦掉。
