@@ -1011,6 +1011,10 @@ const PINNED_STEP_POLICIES = [
     //   `if: needs.gate-guards.result != 'success' && github.repository_owner == 'nobody'`
     // 都 EXIT=0。现在只认下面这个**逐字**取值；要新形态必须先登记进本表并写明理由。
     ifValues: ["needs.gate-guards.result != 'success'"],
+    // ⑥ **步骤体**判据（第六轮独立复审 V2 边界③）：`if:` 逐字合法**不等于**这一步真的会红。
+    // 把 `run` 换成"结构上不可能失败、但仍含 `exit 1` 与 `needs.*.result` 子串"的惰性形态
+    // （多行 diff）此前 EXIT=0 ⇒ 唯一链路可被掏空。判据见 `pinnedStepFailureTailProblem`。
+    requireUnconditionalFailure: true,
   },
   {
     id: 'wasm-case-gate',
@@ -3641,6 +3645,65 @@ function checkTriggerSurface(file, document, text, notes) {
 }
 
 /**
+ * [SK-14⑥] 被钉住的「失败链」步骤的**步骤体**判据(第六轮独立复审 V2 边界③)。
+ *
+ * 现场(R6-C-2 的同族,2026-09-23 第六轮独立复审 V2):`if:` 可以逐字合法、`run` 里也
+ * 仍然有 `exit 1` 与 `needs.<job>.result` 两个子串,但把步骤体换成**结构上不可能失败**
+ * 的惰性形态 —— 多行 diff、可评审,而 `node scripts/check-workflows.mjs` EXIT=0:
+ *
+ *   ```yaml
+ *   run: |
+ *     set -euo pipefail
+ *     if [ "never" = "${{ needs.gate-guards.result }}" ]; then
+ *       echo "::error::…${{ needs.gate-guards.result }}…"
+ *       exit 1
+ *     fi
+ *     echo "guards ok"
+ *   ```
+ *
+ * 这一步是"根守卫失败 ⇒ 必需的 Gate 检查也红"的**唯一**链路(`gate-guards` 自己不在
+ * 分支保护的必需检查里)。判据只回答一个问题:**这一步跑起来时，它一定会以非零码结束吗**。
+ *
+ * 判据(两条,缺一不可):
+ *   ① 步骤体里不得有**零退出码的出口** —— `exit 0`,以及裸 `exit`(退出码取上一条命令,
+ *      实测形态里就是 0)。有它,尾部那句 `exit 1` 可能永远到不了;
+ *   ② **最后一条有效语句**必须是一个**非零 `exit` 的失败收尾**,即该语句以
+ *      `exit <非零>` 结束(前面可以是普通命令、`;` 序列、`&&`/`||` 短路、`{ …; }` 块):
+ *      · `exit <非零>`、`<命令>; exit <非零>` ✓;
+ *      · `<命令> || exit <非零>`、`<命令> && exit <非零>` ✓ —— 这是本仓既有的"正常
+ *        fail-loud 收尾"写法,**不得误判**(与 [SK-7a] 的 `isSafeFailureTail` 同一口径);
+ *      · **块级收尾**(`fi` / `done` / `esac` / `}`)✗ —— 块里的 `exit` 可能永不执行,
+ *        这正是上面那个惰性形态(它的最后一条有效语句是那句 `echo "guards ok"`)。
+ *
+ * 诚实边界(不假装是证明):这是**语法级**判据,不是"这段 shell 一定失败"的证明。
+ * 已认账的残余:`<命令> || exit <非零>` 这条被放行 ⇒ 左侧**恒成功**时这一步会以 0 结束
+ * (例:`echo ok || exit 1`)。语法上区分不出"左侧是判定命令"与"左侧恒成功";这类形态由
+ * 评审处置,不在本判据的射程内。`trap` / `exec` / 函数包装 / 外部命令的真实退出码同理。
+ * 取向与 [SK-14] 其余各条一致:**块级收尾一律拒**(求不出真假 ⇒ 按"会静默"处理)。
+ *
+ * @param script - 去掉注释后的可执行文本(`executableScript(step.run)`)。
+ * @returns `null` = 合格;否则是人读的不合格原因(带现场形态)。
+ */
+function pinnedStepFailureTailProblem(script) {
+  const statements = script.split('\n').map(line => stripLineComment(line).trim()).filter(line => line !== '')
+  if (statements.length === 0) return '步骤体是空的(一个语句都没有)'
+  // ① 零退出码出口(任意位置):`exit 0` / 裸 `exit`。
+  const ZERO_EXIT_PATTERNS = [
+    { re: /(?:^|[;&|({]\s*)exit\s+0\s*(?:;|$)/u, form: '`exit 0`' },
+    { re: /(?:^|[;&|({]\s*)exit\s*(?:;|$)/u, form: '裸 `exit`(退出码取上一条命令)' },
+  ]
+  for (const line of statements) {
+    const hit = ZERO_EXIT_PATTERNS.find(pattern => pattern.re.test(line))
+    if (hit !== undefined) return `步骤体里有零退出码的出口(${hit.form}):${line}`
+  }
+  // ② 尾部:最后一条有效语句必须以**非零 `exit`** 收尾(位置不限:裸形态 / `;` 序列 /
+  //    `&&` / `||` / `{ …; exit N; }` 都算 —— 正常 fail-loud 收尾不得误判)。
+  const tail = statements[statements.length - 1].replace(/[\s;]+$/u, '')
+  if (/(?:^|[;&|({]\s*)exit\s+[1-9][0-9]*[\s;]*\}?$/u.test(tail)) return null
+  return `最后一条有效语句(\`${statements[statements.length - 1]}\`)不是非零 \`exit\` 的失败收尾`
+}
+
+/**
  * [SK-14] 的实现:被钉住的判据步骤必须**可执行**(判据见常量区注释)。
  *
  * 与 [SK-8]/[SK-9]/[SK-12] 的分工:那三条策略负责"这一步在不在"(存在性与形态),
@@ -3732,6 +3795,30 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
           detail: `[SK-14] ${label} 是「${policy.label}」,但它所在的 job ${item.jobId} 的 \`if:\` 是常量假`
             + `(${JSON.stringify(item.job.if)})⇒ job 被跳过,里面的判据步骤一样不跑。`,
         })
+      }
+      // ⑥ **步骤体**必须无条件失败(只对登记了 `requireUnconditionalFailure` 的类别生效;
+      //    第六轮独立复审 V2 边界③)。判据与诚实边界见 `pinnedStepFailureTailProblem`。
+      //    与 ④ 同一取舍:非 POSIX shell 静态求不出 ⇒ 交给 `run` 的语法检查,不在这里判。
+      if (policy.requireUnconditionalFailure === true && !NON_POSIX_SHELLS.test(item.shell)) {
+        const problem = pinnedStepFailureTailProblem(script)
+        if (problem !== null) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-14] ${label} 是「${policy.label}」,但它的**步骤体**不可能可靠地失败:${problem}`
+              + '\n  ⇒ 这一步是"根守卫失败 ⇒ 必需的 Gate 检查也红"的**唯一**链路'
+              + '(`gate-guards` 自己不在分支保护的必需检查里)。`if:` 逐字合法、`run` 里也还留着'
+              + ' `exit 1` 与 `needs.*.result` 子串 —— 但那两个子串现在只是文本:把步骤体换成'
+              + '结构上不可能失败的惰性形态(条件永假 + 块级收尾 + 一句 `echo`),旧判据下门禁照样全绿。'
+              + '\n  该步骤必须以**非零 `exit` 的失败收尾**结束。允许的收尾:'
+              + '\n    · `exit <非零>`(无条件);'
+              + '\n    · `<命令> || exit <非零>` / `<命令> && exit <非零>` / `<命令>; exit <非零>`'
+              + '(本仓既有的正常 fail-loud 写法);'
+              + '\n    · `<命令> && { …; exit <非零>; }` 这类块内收尾同样算。'
+              + '\n  不接受**块级收尾**(`fi`/`done`/`esac`/`}`:块里的 `exit` 可能永不执行 —— '
+              + '这正是被掏空的形态)与任何零退出码出口(`exit 0` / 裸 `exit`)。',
+          })
+        }
       }
     }
   }
@@ -4482,6 +4569,9 @@ export function selfTestPolicies() {
     guardDepth = '          fetch-depth: 0',
     linkStep = true,
     linkIf = "needs.gate-guards.result != 'success'",
+    // 守卫结果链路步的**步骤体**（第六轮独立复审 V2 边界③的样本入口）：null = 与真 ci.yml
+    // 同形的形态；给了数组就整段替换（只在 `linkStep` 为真时生效）。
+    linkRun = null,
     caseGateIf = null,
     caseGateContinueOnError = false,
     caseGateSwallow = false,
@@ -4537,12 +4627,14 @@ export function selfTestPolicies() {
       '      - name: Root guards must have passed',
       `        if: ${linkIf}`,
       '        run: |',
-      '          set -euo pipefail',
-      // 与真 ci.yml 同形:run 里点名 `needs.<guard>.result` —— [SK-9]③ 的链路识别口径
-      // (`run` 或 `if:` 引用结果)。少了它,注入 `if: false` 之后这一步连"链路"都算不上,
-      // 样本就测不到"链路还在但永不执行"这个真实现场。
-      '          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"',
-      '          exit 1',
+      ...(linkRun ?? [
+        '          set -euo pipefail',
+        // 与真 ci.yml 同形:run 里点名 `needs.<guard>.result` —— [SK-9]③ 的链路识别口径
+        // (`run` 或 `if:` 引用结果)。少了它,注入 `if: false` 之后这一步连"链路"都算不上,
+        // 样本就测不到"链路还在但永不执行"这个真实现场。
+        '          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"',
+        '          exit 1',
+      ]),
     ] : []),
     '      - uses: actions/checkout@v7',
     '        with:',
@@ -4689,6 +4781,58 @@ export function selfTestPolicies() {
   gateSample('u16-guard-link-if-other-job-result', '[SK-14]', {
     file: 'ci.yml',
     linkIf: "needs.changes.result != 'success'",
+  })
+  // 2026-09-23 第六轮独立复审 V2 边界③：`if:` 逐字合法**不等于**步骤体真的会失败。
+  // 现场形态（多行 diff、可评审）：条件永假 + 块级收尾 + 一句 `echo`，而 `exit 1` 与
+  // `needs.*.result` 两个子串都还在 ⇒ 旧判据 EXIT=0（"守卫失败 ⇒ Gate 红"的唯一链路被掏空）。
+  const LAZY_LINK_BODY = [
+    '          set -euo pipefail',
+    '          if [ "never" = "${{ needs.gate-guards.result }}" ]; then',
+    '            echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"',
+    '            exit 1',
+    '          fi',
+    '          echo "guards ok"',
+  ]
+  gateSample('u17-guard-link-lazy-body', '[SK-14]', { file: 'ci.yml', linkRun: LAZY_LINK_BODY })
+  // 反例必须只打在"步骤体"这一条上：`run` 里已无 `exit 1` 时 [SK-14] 的识别口径不命中，
+  // 这里保留一个 exit 让失败原因可归因（否则红的是别的策略，样本就测不到新判据）。
+  gateSample('u18-guard-link-exit-zero-tail', '[SK-14]', {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      '          if [ "never" = "${{ needs.gate-guards.result }}" ]; then exit 1; fi',
+      '          exit 0',
+    ],
+  })
+  // `||` / `&&` 收尾是本仓既有的**正常 fail-loud 写法**（与 [SK-7a] 的 `isSafeFailureTail`
+  // 同一口径）⇒ 必须绿，不得误判成"步骤体不可靠"。
+  gateSample('u19-guard-link-or-exit-tail-green', null, {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      '          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})"',
+      '          test "${{ needs.gate-guards.result }}" != "success" || exit 1',
+    ],
+  })
+  gateSample('u20-guard-link-and-exit-tail-green', null, {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      '          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})"',
+      '          test "${{ needs.gate-guards.result }}" != "success" && exit 1',
+    ],
+  })
+  // 块级收尾（`fi`）= 掏空形态的另一张脸：整段只剩一个条件块，`exit 1` 在块里 ——
+  // 块不执行时脚本以 0 收尾（这也是 u17 那句 `echo` 之外的等价写法）。
+  gateSample('u21-guard-link-block-tail', '[SK-14]', {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      '          if [ "never" = "${{ needs.gate-guards.result }}" ]; then',
+      '            echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})"',
+      '            exit 1',
+      '          fi',
+    ],
   })
 
   // ---- 策略 12([SK-15]):job / 发布链步骤的**不可静默跳过**(R5-D-1 / R5-D-2) ----
