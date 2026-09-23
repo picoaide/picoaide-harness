@@ -29,6 +29,16 @@
 #       与 `__snapshots__` 排除，"扫描面不得静默缩小"有两条互相独立的判据（登记值全覆盖 +
 #       package.json#workspaces 顶层段全覆盖，任一缺项即退出码 2）。
 #
+# **组级不变量（R4-A-15，2026-09-23 四轮审计）**：所选定的**每一个组都必须至少跑成 1 条
+# 断言**（PASS ≥ 1），否则该组在收尾时判红并点名"组 N 零断言"。它由 `group_begin` /
+# `group_settle` 一对原语实现，**不依附于任何分支** —— 早退 skip（非 Linux 平台）、
+# 探针全 77、前置缺失、子脚本空转、将来新增的任何早退路径，一律覆盖。旧实现把
+# "全组 SKIP = 失败"只写在组 6 的 xvfb-run 分支里，于是非 Linux 上 `--groups 6` 打印
+# `PASS 0 ｜ FAIL 0 ｜ SKIP 1` + `全部通过 ✅` 且 EXIT=0（零断言当通过）。
+# SKIP 的**语义与理由可解析**（照 W-6 在组 7 建立的协议）：绑定文件里逐组写
+# `group <n> pass=… fail=… skip=…`，每处跳过写一行 `group-skip <n> <理由>`；
+# 收尾按这份独立来源复算条数，与内存计数不符即判"SKIP 记账协议坏了"。
+#
 # 用法：
 #   bash scripts/verify-wasm-client-only.sh                 # 全量（1–8）
 #   bash scripts/verify-wasm-client-only.sh --portable      # 与产物/PG/显示器无关的子集（1,2,7,8）
@@ -69,7 +79,8 @@
 #                       假红，而假红的下场通常是整条判据被关掉；缺省口径不是静默的——脏树会以
 #                       `WARN 工作树不干净（跑前 N → 跑后 M 个改动）` 写进结论行与绑定文件的
 #                       `dirty-policy` 行。CI 的干净检出下它是绿的（副本仓实测）。
-# 退出码：0 = 所选组全部通过；1 = 有失败项；2 = 用法/环境错误（含跑前期望 HEAD 与当前 HEAD 不一致）。
+# 退出码：0 = 所选组全部通过（且每个被选中的组都至少有 1 条 PASS）；1 = 有失败项
+#         （含"某组零断言"这条组级不变量）；2 = 用法/环境错误（含跑前期望 HEAD 与当前 HEAD 不一致）。
 
 set -euo pipefail
 
@@ -196,11 +207,51 @@ want() { case " $GROUPS_SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac;
 FAIL=0
 PASS_COUNT=0
 SKIP_COUNT=0
-pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS_COUNT=$((PASS_COUNT + 1)); }
-fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
-skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
+pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS_COUNT=$((PASS_COUNT + 1)); GROUP_PASS=$((GROUP_PASS + 1)); }
+fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); GROUP_FAIL=$((GROUP_FAIL + 1)); }
+skip() {
+  printf '  \033[33mSKIP\033[0m %s\n' "$1"
+  SKIP_COUNT=$((SKIP_COUNT + 1)); GROUP_SKIP=$((GROUP_SKIP + 1))
+  # SKIP 必须**可解析**（W-6 的协议，R4-A-15 把它推广到每个组）：每处跳过都写一行
+  # `group-skip <组> <理由>`；收尾按这份**独立来源**复算计数，与内存计数不符即协议坏了。
+  printf 'group-skip %s %s\n' "${GROUP_ID:-<未开始>}" "$1" >>"$GROUP_SKIP_FILE"
+}
 note() { printf '  %s\n' "$1"; }
 step() { printf '\n== %s\n' "$1"; }
+
+# ── 组级记账（R4-A-15，2026-09-23 四轮审计）───────────────────────────────────
+# 旧实现把"全组 SKIP = 失败"**只**写在组 6 的 xvfb-run 分支内部（`probe_pass -eq 0 &&
+# probe_skip -gt 0`），而组 6 在非 Linux 平台上走的是**探针循环之前**的早退分支
+# （`skip "非 Linux…"`）⇒ 汇总打印 `PASS 0 ｜ FAIL 0 ｜ SKIP 1` + `全部通过 ✅` 且 EXIT=0，
+# 零断言当通过。现在把"该组一条都没跑成 ⇒ 该组失败"做成**组级不变量**：每组开始时清零、
+# 收尾时判定，所以它在**任何平台、任何分支**（早退 skip / 前置缺失 / 探针全 77 /
+# 子脚本空转 / 将来新增的早退路径）上都成立 —— 规则不再依附于某条分支。
+GROUP_ID=""
+GROUP_PASS=0
+GROUP_FAIL=0
+GROUP_SKIP=0
+GROUP_SKIP_FILE="$LOG_DIR/group-skips.txt"
+: >"$GROUP_SKIP_FILE"
+group_begin() { GROUP_ID="$1"; GROUP_PASS=0; GROUP_FAIL=0; GROUP_SKIP=0; }
+group_settle() {
+  local group="$GROUP_ID"
+  local reason_lines=0
+  reason_lines="$(grep -c "^group-skip ${group} " "$GROUP_SKIP_FILE" || true)"
+  reason_lines="${reason_lines:-0}"
+  {
+    printf 'group %s pass=%s fail=%s skip=%s\n' "$group" "$GROUP_PASS" "$GROUP_FAIL" "$GROUP_SKIP"
+    if [ "$reason_lines" != "$GROUP_SKIP" ]; then
+      printf 'group-protocol-broken %s skip-count=%s skip-reason-lines=%s\n' "$group" "$GROUP_SKIP" "$reason_lines"
+    fi
+  } >>"$BINDING"
+  if [ "$reason_lines" != "$GROUP_SKIP" ]; then
+    fail "组 ${group} 的 SKIP 计数（$GROUP_SKIP）与可解析理由行数（$reason_lines）不符 —— SKIP 记账协议坏了（$GROUP_SKIP_FILE）"
+  fi
+  if [ "$GROUP_PASS" -eq 0 ]; then
+    fail "组 ${group} 零断言（PASS 0 ｜ FAIL ${GROUP_FAIL} ｜ SKIP ${GROUP_SKIP}）：该组一条断言都没跑成 —— 全组 SKIP / 零 PASS 不得当通过（组级不变量，任何平台、任何分支都成立）"
+  fi
+}
+
 
 run_limited() { # run_limited <秒> <命令...>（没有 timeout(1) 的平台直接跑）
   local seconds="$1"; shift
@@ -301,6 +352,7 @@ fi
 
 # ---------------------------------------------------------------------------
 if want 1; then
+  group_begin 1
   step "1. 静态守卫（新包登记 / 布局 / 工作流）"
   for guard in verify-layout verify-inventories check-workflows; do
     log="$LOG_DIR/$guard.log"
@@ -311,10 +363,12 @@ if want 1; then
       tail -n 8 "$log" | sed 's/^/      /'
     fi
   done
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 2; then
+  group_begin 2
   step "2. 三方对拍 + 旧模型零残留（五桶 + 删除面/包清单/旧能力指纹；未跟踪文件也查）"
   log="$LOG_DIR/route-parity.log"
   if node scripts/wasm/check-route-parity.mjs >"$log" 2>&1; then
@@ -351,10 +405,12 @@ if want 2; then
     fail "删除面判据未通过（日志 $log）"
     grep -E '^  FAIL' "$log" | head -n 12 | sed 's/^/      /' || true
   fi
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 3; then
+  group_begin 3
   step "3. 服务端构建 + 定向测试（真 PG；禁止静默跳过）"
   log="$LOG_DIR/go-build.log"
   if (cd server && run_limited 900 go build ./...) >"$log" 2>&1; then
@@ -398,10 +454,12 @@ if want 3; then
     # （宿主已有 Go 模块缓存时加 `WASM_GATE_GO_ENV=host`）。
     fail "PG 不可达（$PG_DSN_TEST）：定向测试无法执行 —— 本组不得当通过；本地入口见脚本头『接线现状』"
   fi
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 4; then
+  group_begin 4
   step "4. 客户端包检查（新包 / 浏览器 / 客户端应用中心）"
   for pkg in @picoaide/dsh-wasm-apps-host @picoaide/dsh-browser @picoaide/dsh-wasm-apps; do
     log="$LOG_DIR/pkg-${pkg//\//_}.log"
@@ -412,10 +470,12 @@ if want 4; then
       tail -n 8 "$log" | sed 's/^/      /'
     fi
   done
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 5; then
+  group_begin 5
   step "5. webadmin 测试"
   log="$LOG_DIR/webadmin.log"
   if [ ! -d server/webadmin/node_modules ]; then
@@ -426,10 +486,12 @@ if want 5; then
     fail "webadmin npm test（日志 $log）"
     tail -n 8 "$log" | sed 's/^/      /'
   fi
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 6; then
+  group_begin 6
   step "6. 协议探针（探针自判定 + 退出码；不 grep 文本；xvfb-run -a 与探针同命令）"
   PROBES=()
   while IFS= read -r probe; do
@@ -445,6 +507,10 @@ if want 6; then
     if [ "$(uname -s)" = "Linux" ]; then
       fail "Linux 上缺少 xvfb-run（apt install xvfb）—— 无头环境下探针跑不起来，不得静默跳过"
     else
+      # 这里是**早退分支**（探针循环之前就返回）：它正是 R4-A-15 的躲过路径 ——
+      # 旧实现把"全组 SKIP = 失败"写在 else 分支里，本分支只 skip 一次，
+      # 汇总遂打出 `PASS 0 ｜ FAIL 0 ｜ SKIP 1` + `全部通过 ✅` 且 EXIT=0。
+      # 现在由收尾的 group_settle（组级不变量）负责判红，本分支保持"如实 skip"。
       skip "非 Linux（$(uname -s)）：本机不使用 xvfb-run；三平台探针属 §16 W6（§17 认账 1），请在 W6 用各平台原生方式跑"
     fi
   else
@@ -489,10 +555,14 @@ if want 6; then
       fail "组 6 的 ${#PROBES[@]} 个探针全部 SKIP（PASS 0 / SKIP $probe_skip / FAIL $probe_fail）—— 全组 SKIP = 零断言，不得当通过"
     fi
   fi
+  # 组级不变量（R4-A-15）：覆盖上面**每一条**分支 —— 早退 skip、探针全 77、探针全失败、
+  # 探针一条都没找到…… 只要本组没有任何 PASS，收尾就在这里判红并点名"组 6 零断言"。
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
 if want 7; then
+  group_begin 7
   step "7. 渠道约束（§10：app_origin_scheme 必填 / 形状 / 跨渠道唯一；正式 tag dry-run；仓库 pin）"
   CHANNEL_ARGS=()
   CHANNELS_DRYRUN="skipped"
@@ -560,6 +630,7 @@ if want 7; then
       fail "渠道约束未通过（日志 $log）"
     fi
   fi
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
@@ -577,6 +648,7 @@ if want 8; then
   #   · 台账里那批"已闭合"的合成负例在同一次运行里当回归网实跑（正则被削弱即红）。
   # 子脚本用 `G8-PASS/G8-FAIL/G8-NOTE` 前缀回报，父脚本镜像进自己的组级计数
   # —— 避免"子脚本说通过、父脚本说另一套"。
+  group_begin 8
   step "8. W5 文档与作者面判据（模式判据 + 按分句豁免 + 合成负例回归；便携）"
   log="$LOG_DIR/authoring-claims.log"
   if ! node --check scripts/wasm/check-authoring-claims.mjs 2>"$log"; then
@@ -606,6 +678,7 @@ if want 8; then
       fail "作者面判据一条 PASS/FAIL 都没回报（空集通过）—— 日志 $log"
     fi
   fi
+  group_settle
 fi
 
 # ---------------------------------------------------------------------------
@@ -670,6 +743,12 @@ fi
 
 note "PASS ${PASS_COUNT} ｜ FAIL ${FAIL} ｜ SKIP ${SKIP_COUNT} ｜ 绑定文件 ${BINDING#"$ROOT/"}"
 
+# 组级台账（R4-A-15 的可解析面）：逐组一行 `group <n> pass=… fail=… skip=…`，跳过逐条
+# `group-skip <n> <理由>`（都在绑定文件里，与上面的 SKIP 计数同源复算）。
+if grep -q '^group ' "$BINDING" 2>/dev/null; then
+  note "组级台账（每组至少要有 1 条 PASS；零 PASS 的组在上面已被判红）："
+  grep -E '^group ' "$BINDING" | sed 's/^/    /'
+fi
 if [ "$FAIL" -eq 0 ]; then
   echo "全部通过 ✅"
   exit 0
