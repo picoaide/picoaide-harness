@@ -255,6 +255,18 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 		log.Printf("wasm: compile isolation = %s", compiler.IsolationPlan())
 	}
 
+	// ---- 磁盘编译缓存的周期回收（P0-a，2026-09-23 现场）----
+	//
+	// 为什么必须在装配期启动：磁盘编译缓存有**两个**写者 —— 发布/校验期的编译子进程，
+	// 以及**执行侧**（`internal/wasmapp/runtime` 的 wazero 磁盘缓存；判据见
+	// runtime/cache_mode_test.go 的 `wantDiskWrites: true`）。而回收此前只挂在
+	// "编译作业之后"（compile 的 runJob）⇒ **"只服务、不发布"的时段缓存只涨不降**，
+	// 直到 /readyz 报超限并同时把发布闸门关上 —— 而那道闸门正是产生编译作业的唯一入口，
+	// 于是自锁、永不恢复（现场实测：删掉缓存条目立刻恢复 200，不删就永远 503）。
+	//
+	// 随 ctx 退出/Close() 停止（见 compile.StartReclaimLoop 的契约）；compiler==nil 时是 no-op。
+	startWasmCompileReclaimLoop(ctx, compiler)
+
 	// ⚠️ W4 删除的三段装配（总纲 §8.4 / §21）：
 	//   - `aichat.New(...)`：服务端 AI 能力彻底删除，应用改走客户端 AI loop；
 	//   - `session.New(...)` + `sessionLoginThrottle`：员工浏览器会话与一次性换票
@@ -324,6 +336,11 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 				CacheBytes: st.CacheBytes,
 				CacheFiles: st.CacheEntries,
 				Running:    st.ChildRunning,
+				// 生效的回收阈值（编译器自己的 Options 快照）：超限判定必须与回收
+				// 用的阈值同源，否则会出现"探针报超限、回收认为没超"⇒ 回收永远删不掉、
+				// 503 永久化（P0 的形态之一）。
+				CacheMaxBytes:   st.CacheMaxBytes,
+				CacheMaxEntries: st.CacheMaxEntries,
 			}
 		},
 		// 编译可用性是**是非题**（审计 P2-2：编译器缺失时 /readyz 与健康态逐字段同形，
@@ -368,6 +385,10 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 			}
 			return string(compiler.CacheMode())
 		},
+		// 发布闸门的**同步自愈钩子**（P0-b，2026-09-23 现场）：命中"编译缓存超上限"时
+		// 先回收一次再判。接到编译侧**唯一**的回收实现（compile.Compiler.ReclaimCache，
+		// 与周期回收/编译后回收共用同一把锁），因此不会与另外两条路径并发重复删除。
+		ReclaimCompileCache: compileReclaimHook(compiler),
 	})
 
 	api := wasmapi.NewHandlers(wasmapi.Options{
@@ -500,6 +521,50 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// startWasmCompileReclaimLoop 启动磁盘编译缓存的**周期回收循环**（P0-a，现场自锁的一半）。
+//
+// 语义全部在 compile.StartReclaimLoop 里（幂等、启动即回收一次、ctx/Close 退出、失败
+// 只记日志）；这里只负责"装配期把它启动起来"这一件事 —— 事件驱动那条路径（编译作业
+// 之后回收）覆盖不了"只服务、不发布"的时段，而那正是现场 503 的成因。
+//
+// compiler == nil（编译子系统不可用）⇒ no-op：此时发布面已经由 compile_available=false
+// 关掉了，没有必要为一个不存在的缓存起循环。
+func startWasmCompileReclaimLoop(ctx context.Context, compiler *compile.Compiler) {
+	if compiler == nil {
+		return
+	}
+	compiler.StartReclaimLoop(ctx, compile.DefaultReclaimLoopInterval)
+	log.Printf("wasm: 编译缓存周期回收已启动（每 %v 一次，不依赖编译作业；日志前缀 %q）",
+		compile.DefaultReclaimLoopInterval, "compile: 缓存回收")
+}
+
+// compileReclaimHook 把发布闸门的同步回收接到编译侧**唯一**的回收实现上（P0-b）。
+//
+// 为什么需要它而不是在 readyz 里直接 import compile：依赖方向（readyz 是被装配的探针，
+// compile 不该知道探针）—— readyz 只认一个函数签名，接线在装配层。
+//
+// 返回 nil 当且仅当没有编译子系统：此时"缓存超上限"这条理由也不可能出现（水位来自
+// 编译器快照），而 AllowPublish 对 nil 钩子的处置是"保持超限即拒绝 + 点名装配缺失"。
+//
+// 回收结果进日志（可 grep）：删了 0 条不必打（发布闸门可能被高频触发，噪音无益），
+// 删了东西或失败都必须留痕。
+func compileReclaimHook(compiler *compile.Compiler) func() (int, int64, error) {
+	if compiler == nil {
+		return nil
+	}
+	return func() (int, int64, error) {
+		removed, freed, err := compiler.ReclaimCache()
+		if err != nil {
+			log.Printf("wasm: ⚠️ 发布闸门触发的缓存回收失败: %v", err)
+			return removed, freed, err
+		}
+		if removed > 0 {
+			log.Printf("wasm: 发布闸门触发的缓存回收：删除 %d 条 / 释放 %d 字节", removed, freed)
+		}
+		return removed, freed, nil
+	}
 }
 
 // readMemoryAvailability 是**可用内存的唯一读取入口**（cgroup 感知 + 宿主回落）。

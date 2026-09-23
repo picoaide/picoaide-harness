@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -273,6 +274,16 @@ type Compiler struct {
 	done chan struct{}
 	once sync.Once
 
+	// reclaimMu 串行化**全部**回收路径（编译作业之后 / 周期循环 / 发布闸门的同步自愈），
+	// 并保护 lastReclaim。见 cache.go 的 ReclaimCache 注释（P0-a）。
+	reclaimMu   sync.Mutex
+	lastReclaim time.Time
+	// loopOnce / loopWG / loopStarted 让 StartReclaimLoop 幂等，并让 Close 有界地等
+	// 周期循环收尾（见 Close 的顺序注释）。
+	loopOnce    sync.Once
+	loopWG      sync.WaitGroup
+	loopStarted atomic.Bool
+
 	mu           sync.Mutex
 	childProc    *childProcess
 	compiling    bool
@@ -280,7 +291,6 @@ type Compiler struct {
 	failures     int64
 	timeouts     int64
 	lastCompileM int64
-	lastReclaim  time.Time
 
 	uploadMu sync.Mutex
 	uploads  map[int64]*uploadState
@@ -626,6 +636,12 @@ func (c *Compiler) Close() error {
 		// ⚠️ 顺序（2026-09-21 六轮审计 P3）：**先杀子进程再删目录**。反过来的话，
 		// 在飞编译的子进程仍在往临时目录里写，`RemoveAll` 会与它竞争（可能删掉正在
 		// 写的条目、或让子进程以难解释的错误收场）。
+		//
+		// 周期回收循环（P0-a）同理：它拿的正是这个目录，必须先等它看到 c.stop 退出。
+		// 只在该循环**真的启动过**时等（否则每次 Close 都要白等一个宽限）。
+		if c.loopStarted.Load() {
+			c.waitReclaimLoop(closeGrace)
+		}
 		if c.childCacheTemp != "" {
 			defer func() { _ = os.RemoveAll(c.childCacheTemp) }()
 		}
@@ -697,17 +713,15 @@ func (c *Compiler) runJob(j *job) {
 		c.compiles++
 		c.lastCompileM = res.CompileMS
 	}
-	needReclaim := time.Since(c.lastReclaim) >= c.opt.ReclaimInterval
-	if needReclaim {
-		c.lastReclaim = time.Now()
-	}
 	c.mu.Unlock()
 
-	if needReclaim {
-		// 回收在父侧（子进程只写不删，§10.3 第 35 项）。
-		if _, _, rerr := c.ReclaimCache(); rerr != nil {
-			c.logger.Printf("compile: 缓存回收失败（下次继续尝试）: %v", rerr)
-		}
+	// 回收在父侧（子进程只写不删，§10.3 第 35 项）。
+	//
+	// 走 reclaimIfDue（与周期循环/发布闸门共用同一把锁与同一个节流窗口，P0-a）：
+	// 这条路径只覆盖"发布期确实有编译作业"的时段；"只服务、不发布"的时段由
+	// StartReclaimLoop 的周期回收覆盖（那是现场 P0 的根因）。
+	if _, _, rerr := c.reclaimIfDue(); rerr != nil {
+		c.logger.Printf("compile: 缓存回收失败（下次继续尝试）: %v", rerr)
 	}
 	j.resp <- jobResult{res: res, err: err}
 }

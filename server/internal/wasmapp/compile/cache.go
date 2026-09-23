@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -257,7 +258,35 @@ func (c *Compiler) CacheUsage() (bytes int64, entries int) {
 // ⚠️ 与并发编译的关系：wazero 的条目在写入未完成时被删会让那次编译的缓存写入
 // 失败（表现为下次 miss，不是错误）。因此回收只在两次编译**之间**由父侧调用
 // （编译 worker 是单线程，回收在 runJob 里同步执行 ⇒ 不与编译重入）。
+//
+// ⚠️ 并发（2026-09-23 P0-a）：本方法**强制**回收（不看节流窗口），并持 reclaimMu ——
+// 回收现在有三个触发点（编译作业之后、周期循环、发布闸门的同步自愈），任何两个同时
+// 到来都会"各扫一遍、各删一遍"：重复删除的条目第二次报 ENOENT（被容忍），但日志与
+// "删了几条"的计数会失真，而且白扫一遍目录。锁是**回收专用**的，不参与编译本身。
 func (c *Compiler) ReclaimCache() (removed int, freed int64, err error) {
+	c.reclaimMu.Lock()
+	defer c.reclaimMu.Unlock()
+	// 强制回收也要推进节流时间戳：否则"闸门刚回收完、编译作业又立刻全扫一遍"。
+	c.lastReclaim = time.Now()
+	return c.reclaimLocked()
+}
+
+// reclaimIfDue 是**按 ReclaimInterval 节流**的回收（编译作业之后的那条路径）。
+//
+// 节流与锁共用 reclaimMu：判定"到期"与推进时间戳必须与回收本身在同一临界区，
+// 否则两个 goroutine 可以同时通过判定、各回收一遍（正是本锁要防的形态）。
+func (c *Compiler) reclaimIfDue() (removed int, freed int64, err error) {
+	c.reclaimMu.Lock()
+	defer c.reclaimMu.Unlock()
+	if time.Since(c.lastReclaim) < c.opt.ReclaimInterval {
+		return 0, 0, nil
+	}
+	c.lastReclaim = time.Now()
+	return c.reclaimLocked()
+}
+
+// reclaimLocked 是回收的实现体（调用方必须持有 reclaimMu）。
+func (c *Compiler) reclaimLocked() (removed int, freed int64, err error) {
 	es, err := c.scanCacheEntries()
 	if err != nil {
 		return 0, 0, err
