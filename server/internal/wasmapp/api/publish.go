@@ -560,8 +560,28 @@ func (h *Handlers) validate(c *gin.Context) {
 	//
 	// 位置有意：在 `isFirstRelease`/`decodeWasmBase64`/`inheritBaseForApp`/`prepare`
 	// 之前 —— 非归属人不触发任何配置读取、不进编译池、不落任何行。
-	if oerr := h.checkValidateOwner(c.Request.Context(), u, appID); oerr != nil {
+	existing, oerr := h.checkValidateOwner(c.Request.Context(), u, appID)
+	if oerr != nil {
 		writeErr(c, oerr)
+		return
+	}
+	// 终态闸门（冻结 / 退役）：**与 publish 共用同一个 `publishBlockOf`**（R3-A A-4 的
+	// 第三个消费面）。
+	//
+	// 缺陷形态（复审 F1）：availability 与 publish 已经同源，唯独预检没接上，于是
+	// 冻结/退役的应用预检回 200 `ok:true, dry_run:"ok"`、真发布回 403 `APP_FROZEN` /
+	// 404 `NOT_FOUND` —— 正是 A-4 要消灭的"预检说可以、发布被拒"，而 AI 的第一动作
+	// 就是先预检（见下方 inheritBaseForApp 的注释）。第三个面没接上等于把同一个分叉
+	// 换了个入口留下。
+	//
+	// 位置有意：在归属校验之后、`isFirstRelease`/解码/编译/干跑**之前** —— 终态应用
+	// 不该消耗编译资源与 validate/publish 合计 30 次/小时的额度（`acquireUpload`），
+	// 错误也必须与 publish **逐字节同形**（同一个 `*apperr.Error`，连 hints 一致）。
+	//
+	// 边界：`enabled=false`（下架）**不是**终态，`publishBlockOf` 对它返回 nil
+	// —— 预检与发布都不拦，这是 R37 的三态语义，不要"顺手"把下架也拦掉。
+	if blocked := publishBlockOf(existing); blocked != nil {
+		writeErr(c, blocked.Err)
 		return
 	}
 	// 首版判定是**只读**查询：决定 purpose/data_sensitivity/owner 是否必填。
@@ -1280,18 +1300,22 @@ func (h *Handlers) checkOwner(u *serverstore.User, appID string, existing *serve
 // 存在性本身不是新增泄露：`/apps/wasm/availability/:app_id`（200 + reason=taken）与
 // publish 的 409 都已经公开"这个标识被占了"；本函数要关掉的是**存在性之外**的东西
 // （配置内容与 first_release 版本数 oracle）。
-func (h *Handlers) checkValidateOwner(ctx context.Context, u *serverstore.User, appID string) *apperr.Error {
+//
+// 返回值是**读到的应用行**（不存在时 nil）：调用方（validate）要在同一个快照上跑
+// `publishBlockOf` 的终态闸门 —— 再查一次不仅多一次往返，还会让"归属校验通过"与
+// "终态判定"落在两个不同的读点（两读之间被冻结/删除就成了新的分叉窗口）。
+func (h *Handlers) checkValidateOwner(ctx context.Context, u *serverstore.User, appID string) (*serverstore.WasmApp, *apperr.Error) {
 	app, err := serverstore.GetWasmApp(ctx, h.opt.DB, appID)
 	if err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
-			return nil
+			return nil, nil
 		}
-		return internalErr("查询失败", err)
+		return nil, internalErr("查询失败", err)
 	}
 	if app.Owner == u.Username || isSuperAdmin(u) {
-		return nil
+		return app, nil
 	}
-	return notFoundApp(appID)
+	return nil, notFoundApp(appID)
 }
 
 // isSuperAdmin 报告该用户是否是平台管理员（R23 兜底接管）。
