@@ -8,10 +8,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
@@ -186,6 +188,13 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 就是经它注册成 `kind:'app'` 的（2026-09-21 审计 P0-1）。缺这个产物 ⇒ 打包版
   // 启动即 ERR_MODULE_NOT_FOUND（与 2026-09-20 的 app-proof 事故同一形态）。
   'node_modules/@picoaide/dsh-browser/lib/surface.js',
+  // 同一条 seam 的另一半（2026-09-23 第三轮审计的反向 oracle 抓到）：应用窗口宿主
+  // `lib/electron-adapter.js` 值导入 `@picoaide/dsh-browser/guard`（权限守卫 +
+  // 应用 scheme 请求闸门），而 `electron-adapter.js` 被 desktop 的 `lib/main.js`
+  // 静态 import ⇒ 这条掉出产物是**启动期** ERR_MODULE_NOT_FOUND（整个应用起不来），
+  // 与上面 `surface.js` 完全同族。它此前不在三张表的任何一张里 —— 只有"清单必须覆盖
+  // 产物的真实 specifier"这条反向判据能看见它。
+  'node_modules/@picoaide/dsh-browser/lib/guard.js',
   'node_modules/@picoaide/dsh-browser/package.json',
   'node_modules/@picoaide/dsh-browser/cordis.patch.yml',
   'node_modules/@picoaide/dsh-cron/lib/index.js',
@@ -994,6 +1003,433 @@ function assertRelativeImportsPresent(
   }
 }
 
+/** `@picoaide/*` 在归档/产物里的条目前缀（三张清单表都用这个写法）。 */
+const WORKSPACE_SCOPE_PREFIX = 'node_modules/@picoaide/'
+
+/** 反向 oracle 的定位标签（错误消息前缀）。 */
+const WORKSPACE_COVERAGE_LABEL = 'dsh-plugin-desktop: first-party workspace runtime surface'
+
+/**
+ * 自有 workspace 包 `package.json` 里本判据消费的字段。
+ *
+ * 只读**声明**，不读文件系统上的偶然内容：`exports` 决定子路径怎么落点，
+ * `dsh.bundle.patch` 决定 profile 组装期要读哪份补丁，`dsh.client` 决定客户端
+ * bundle 必须存在（上游 `dsh-client-modules` 见到 `dsh.client` 而没有
+ * `exports["./client"]` 会直接抛错）。
+ */
+interface WorkspacePackageManifest {
+  readonly main?: unknown
+  /** `exports` 既可能是字符串（旧形态）也可能是键 → 目标的映射。 */
+  readonly exports?: unknown
+  readonly dsh?: { readonly bundle?: { readonly patch?: unknown }, readonly client?: unknown }
+}
+
+/**
+ * `package.json` 的 `exports` 取键视图（字符串形态与非对象形态一律回空表）。
+ * @param manifest - 目标包的 `package.json`。
+ * @returns 键 → 原值的只读视图（非对象时为空表）。
+ */
+function workspaceExportMap(manifest: WorkspacePackageManifest): Record<string, unknown> {
+  const value = manifest.exports
+  return value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
+}
+
+/** 一条"必须有"的条目 + 它是**哪条规则**推出来的（诊断用）。 */
+interface WorkspaceRequiredEntry {
+  readonly package: string
+  readonly entry: string
+  readonly reason: string
+}
+
+/** 反向 oracle 的一次普查结果。 */
+export interface WorkspaceSurfaceCensus {
+  /** 产物里真实随包的自有 workspace 包名（升序）。 */
+  readonly packages: readonly string[]
+  /** 全部必须有条目（升序）。 */
+  readonly required: readonly WorkspaceRequiredEntry[]
+  /** `<包名>` → 该包必须有条目数（供棘轮比对）。 */
+  readonly perPackage: ReadonlyMap<string, readonly string[]>
+  /** 从产物里解析出的 `@picoaide/*` specifier 条数（防空转的前置量）。 */
+  readonly resolvedSpecifiers: number
+}
+
+/**
+ * 每个自有 workspace 包在生效清单里的覆盖下限（**只允许上调**）。
+ *
+ * 为什么需要它（2026-09-23 第三轮审计 P-1）：`REQUIRED_PACKAGED_RUNTIME_ENTRIES`
+ * 这类清单是"必需项判据"的**唯一来源** —— 从清单里删掉一条，等于同时删掉那条断言
+ * （`it.each(清单)` 是自同义反复）。16 次单条删除里 9 次让 spec 78/78 全绿。反向
+ * oracle（`assertRequiredEntriesCoverWorkspaceSurface`）负责"清单必须覆盖产物"，
+ * 这里再钉一层**计数棘轮**：即使某条派生规则将来退化（例如 `exports` 改写、
+ * import 换成运行期拼接），少一条也会在计数上立刻暴露，而不是安静地少一道门。
+ *
+ * `flattened` 数 `REQUIRED_PACKAGED_RUNTIME_ENTRIES`（扁平表），`effective` 数三张表
+ * 的并集，`library` 数并集里的 `lib/**` 产物条目。三个数分别拦三种形态：删扁平表条目、
+ * 删"只有另一张表覆盖"的条目（如 `cordis.patch.yml` 同时被 profile 锚点表覆盖）、
+ * 以及删产物入口。新增自有插件包而不登记这里 = 红。
+ */
+export interface WorkspacePackageCoverageFloor {
+  /** 包名（`@picoaide/` 之后的部分）。 */
+  readonly package: string
+  /** 扁平必需清单里该包的条目数下限。 */
+  readonly flattened: number
+  /** 生效清单（三张表并集）里该包的条目数下限。 */
+  readonly effective: number
+  /** 生效清单里该包 `lib/**` 产物条目的下限。 */
+  readonly library: number
+}
+
+/**
+ * 生效清单 = afterPack 实际断言的三张表的并集。
+ *
+ * 分开维护三张表是历史（扁平登记 / specifier+落点 / profile 锚点），但"必需项"这件事
+ * 在运行期只有一个含义：这三张表里任何一条缺失都会拒包。反向 oracle 因此必须按并集
+ * 判覆盖 —— 只按扁平表判会把 connectors / enterprise 这七个包误判成全无覆盖。
+ * @returns 去重后的条目列表（顺序 = 三张表的声明顺序）。
+ */
+export function effectivePackagedRuntimeEntries(): string[] {
+  return [...new Set([
+    ...REQUIRED_PACKAGED_RUNTIME_ENTRIES,
+    ...REQUIRED_ASAR_EXPORTS.map(required => required.archivePath),
+    ...REQUIRED_PROFILE_PATCH_ANCHORS,
+  ])]
+}
+
+/** 桌面包根（`scripts/` 的上一级）：反向 oracle 在这里读**产物**而不是归档列表。 */
+function desktopProductRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)))
+}
+
+/**
+ * 每包计数棘轮的**当前值**（2026-09-23 实测，只允许上调）。
+ *
+ * 三个数分别拦三种"悄悄删一条"：删扁平表条目（`flattened`）、删已被另一张表覆盖的
+ * 条目（`effective`，例如 `cordis.patch.yml` 同时被 profile 锚点表覆盖）、删产物入口
+ * （`library`）。数值就是该包在对应集合里的**当前真实条目数**；上调随新增条目一起做，
+ * 下调必须在同一次改动里给出理由并改这张表（低于下限时 `assertRequiredEntriesCoverWorkspaceSurface`
+ * 会拒包）。
+ */
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCoverageFloor[] = [
+  { package: 'dsh-account-card', flattened: 5, effective: 5, library: 3 },
+  { package: 'dsh-browser', flattened: 7, effective: 7, library: 5 },
+  // connectors / enterprise 的条目**全部**在 `REQUIRED_ASAR_EXPORTS`（specifier + 落点）里，
+  // 扁平清单里一条都没有 ⇒ `flattened: 0` 是有意的，不是漏登记。
+  { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
+  // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
+  { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 13 条 + 锚点表的 `cordis.patch.yml`。
+  { package: 'dsh-enterprise', flattened: 0, effective: 14, library: 12 },
+  { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
+  { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
+  { package: 'dsh-host-locale', flattened: 3, effective: 3, library: 2 },
+  { package: 'dsh-wasm-apps', flattened: 5, effective: 5, library: 3 },
+  { package: 'dsh-wasm-apps-host', flattened: 6, effective: 6, library: 4 },
+]
+
+/**
+ * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
+ * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
+ */
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 111
+
+/**
+ * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
+ *
+ * 实测：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
+ * `needs` 闭包先生成 `lib/`）21 条 —— 取 20 是为了让这条"防空转"的前置判据在两种
+ * 树状态下都成立。**它不是删条目的保证**（那个由 `assertWorkspacePackageCoverage`
+ * 的每包棘轮负责，与构建无关）。
+ */
+const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 20
+
+/**
+ * 递归列出产物目录下的普通文件（相对路径，`/` 分隔）。
+ *
+ * 与测试夹具的 `listFilesRel` 有两处必须的差别：
+ *  1. workspace 依赖在 `node_modules` 下是**符号链接**（`nodeLinker: node-modules`），
+ *     `Dirent.isDirectory()` 对链接返回 false ⇒ 必须 stat 解引用，否则整个作用域
+ *     目录被当成空目录、oracle 静默空转（这正是它要防的形态）；
+ *  2. 不再下降进嵌套的 `node_modules`（那是依赖的依赖，不是本包产物面）。
+ * @param root - 要枚举的目录。
+ * @returns 相对 `root` 的文件路径（升序无关，调用方自己排序）。
+ */
+function listProductFiles(root: string): string[] {
+  const files: string[] = []
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const absolute = join(dir, entry.name)
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      let isDirectory = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        let stats
+        try {
+          stats = statSync(absolute)
+        } catch (cause) {
+          throw new Error(
+            `${WORKSPACE_COVERAGE_LABEL}: ${absolute} 是悬空符号链接（workspace 依赖未构建/被删？）`
+            + '—— 反向 oracle 不能跳过它，否则判据会静默空转',
+            { cause },
+          )
+        }
+        isDirectory = stats.isDirectory()
+        isFile = stats.isFile()
+      }
+      if (isDirectory) {
+        if (entry.name === 'node_modules' && prefix !== '') continue
+        walk(absolute, relative)
+        continue
+      }
+      if (isFile) files.push(relative)
+    }
+  }
+  walk(root, '')
+  return files
+}
+
+/**
+ * 把一个 `<包>/<子路径>` specifier 解析成包内相对落点。
+ *
+ * 顺序与 Node 一致：`exports[key]` 的 `default`/`import`/`require` → 包根再回落 `main`。
+ * 通配子路径（`./src/*` 这类）返回 `undefined` —— 它们不是打包入口，要求登记会把这条
+ * 判据变成假红源。
+ * @param manifest - 目标包的 `package.json`。
+ * @param subpath - 子路径（包根传空串）。
+ * @returns 包内相对落点（已去掉 `./` 前缀），解析不到时为 `undefined`。
+ */
+function workspaceEntryTarget(manifest: WorkspacePackageManifest, subpath: string): string | undefined {
+  const key = subpath === '' ? '.' : `./${subpath}`
+  const record = workspaceExportMap(manifest)[key]
+  const value = typeof record === 'string'
+    ? record
+    : (record !== null && typeof record === 'object'
+        ? (record as Record<string, unknown>).default
+          ?? (record as Record<string, unknown>).import
+          ?? (record as Record<string, unknown>).require
+        : undefined)
+  const target = typeof value === 'string' ? value : (subpath === '' ? manifest.main : undefined)
+  if (typeof target !== 'string') return undefined
+  const relative = target.replace(/^\.\//u, '')
+  return relative.includes('*') ? undefined : relative
+}
+
+/**
+ * **反向 oracle**：清单必须覆盖产物，而不是清单自己说了算（2026-09-23 第三轮审计 P-1）。
+ *
+ * 与既有三条 oracle 的分工与差别：
+ *  - `spec:206`（desktop `lib/*.js` 的 `@picoaide/*` 子路径）只看**桌面自身**的产物；
+ *    插件包之间的 import（`wasm-apps-host → dsh-browser/surface` 这类）它看不见。
+ *  - G-9 那张只看**上游补丁目标**的子路径 import。
+ *  - G-2 的目录 oracle（`build/`、`lib/preload/`、前端 dist）要求"目录里每个文件都在清单里"，
+ *    但它**结构上无法**覆盖 `node_modules/@picoaide/<pkg>/lib`：那里有内容哈希命名的 chunk
+ *    （`host-routes-DZDVSIog.js`、`auth-7L36hEyX.js`），名字每次构建都变。
+ *  - 2026-09-16 的 vendored 技能 oracle 只枚举 `dsh-memory-evolve/skills/**` 一个**源目录**。
+ *
+ * 因此这里换一种判据：不问"目录里有什么"，而问"**产物真实需要什么**"，来源有两条，
+ * 都与清单无关：
+ *  1. **包自己声明的入口面** —— `package.json`（`exports["."]`/`main`、`dsh.bundle.patch`、
+ *     `dsh.client` ⇒ `exports["./client"]`、`exports["./invariant"]`）；
+ *  2. **产物里真实的 `@picoaide/*` specifier** —— 桌面 `lib/**` 与每个自有包
+ *     `lib/**` 的 JS 里出现的包 specifier，按目标包 `exports` 解析成落点。
+ * 两条来源推出的每一条都必须在生效清单里。
+ *
+ * **与每包计数棘轮（`assertWorkspacePackageCoverage`）的分工**：
+ *  - 这条是**产物驱动**的 —— 抓"产物多出一个清单没覆盖的入口"（新 import / 新包）与
+ *    "清单条目的路径拼写被改坏"（派生出来的那条在清单里找不到）。
+ *  - 棘轮是**清单驱动、构建无关**的 —— 抓"删掉任何一条条目"，且不依赖任何包是否已构建
+ *    （CI 的 `gate` job 从干净检出跑根 `yarn check`，`dsh-plugin-desktop` 的 check 排在
+ *    `enterprise`/`account-card`/`cron`/`wasm-apps` **之前**，那四个包的 `lib/` 在
+ *    这一步根本不存在 ⇒ 产物驱动的那条此刻只能覆盖已构建的部分）。
+ *
+ * **为什么读磁盘产物而不是归档列表**：afterPack 本就跑在构建工作区里，磁盘 `lib/` +
+ * `node_modules/@picoaide/` 就是被打进包的那份输入；读它同时让这条判据在 `vitest`
+ * 里可判（不必真打包），也避免依赖各调用点注入的读缝（那些读缝在单测里是桩）。
+ * "归档里真的在"由既有三条断言负责（扁平表 / `REQUIRED_ASAR_EXPORTS` / 锚点表），
+ * 两者合起来才是闭环：**清单必须覆盖产物，产物必须覆盖清单**。
+ * @param manifest - 生效清单（缺省 = 三张表的并集）。
+ * @param productRoot - 产物根（缺省 = 桌面包根）。测试用它指到合成夹具。
+ * @param floors - 每包下限表（缺省 = `REQUIRED_WORKSPACE_PACKAGE_COVERAGE`），只用于
+ *   "随包但没登记"与"登记了却不存在"这两个结构判据。
+ * @param minResolvedSpecifiers - specifier 空转下限（合成夹具按自己的规模传值）。
+ * @returns 普查结果（供测试断言规模，避免"空转即通过"）。
+ */
+export function assertRequiredEntriesCoverWorkspaceSurface(
+  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
+  productRoot: string = desktopProductRoot(),
+  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+  minResolvedSpecifiers: number = MIN_RESOLVED_WORKSPACE_SPECIFIERS,
+): WorkspaceSurfaceCensus {
+  const census = collectWorkspaceSurface(productRoot)
+  const known = new Set(manifest)
+
+  const missing = census.required.filter(required => !known.has(required.entry))
+  if (missing.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL} at ${productRoot}: 产物真实需要的条目不在打包必需清单里 `
+      + `（删掉清单里的一条 = 同时删掉那条断言，所以这里从产物反推）：\n`
+      + missing.map(item => `  - ${item.entry}  [${item.reason}]`).join('\n'),
+    )
+  }
+
+  const byPackage = new Map(floors.map(floor => [floor.package, floor]))
+  const unregistered = census.packages.filter(name => !byPackage.has(name))
+  if (unregistered.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 这些自有插件包随包但没在 REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里登记下限：`
+      + `${unregistered.join(', ')}（新增自有插件必须显式登记，否则"删一条"没有棘轮兜底）`,
+    )
+  }
+  const dead = floors.filter(floor => !census.packages.includes(floor.package))
+  if (dead.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里有产物中不存在的包：`
+      + `${dead.map(floor => floor.package).join(', ')}（包已删除/改名 ⇒ 同步这张表）`,
+    )
+  }
+  if (census.resolvedSpecifiers < minResolvedSpecifiers) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 只从产物里解析出 ${census.resolvedSpecifiers} 条 @picoaide/* specifier `
+      + `（下限 ${minResolvedSpecifiers}）—— 产物没构建或判据已空转，不能当成通过`,
+    )
+  }
+  return census
+}
+
+/**
+ * **每包计数棘轮**：清单里每个自有 workspace 包的条目数不得低于登记的下限。
+ *
+ * 这条判据**不读产物、不做任何构建**，因此它在任何树状态下都成立 —— 包括 CI 的
+ * `gate` job 从干净检出跑根 `yarn check`（desktop 的 check 排在 enterprise /
+ * account-card / cron / wasm-apps 之前，那四个包的 `lib/` 那时还不存在）。它的职责就
+ * 一条：**删掉清单里任何一条 = 立刻红**，而"删条目同时删掉断言"正是 P-1 的形态。
+ *
+ * 为什么按包分段而不是只钉总数：删 A 段一条、加 B 段一条会让总数不变（审计里
+ * `browser/cordis.patch.yml` 那条被 profile 锚点表重复覆盖、删掉后总数只少一，
+ * 而当时的全局下限留了余量 ⇒ 静默）。三个数各管一类：`flattened` 管扁平表条目、
+ * `effective` 管"已被另一张表覆盖"的条目、`library` 管 `lib/` 产物入口。
+ * @param manifest - 生效清单（缺省 = 三张表的并集）。
+ * @param floors - 每包下限（缺省 = `REQUIRED_WORKSPACE_PACKAGE_COVERAGE`）。
+ */
+export function assertWorkspacePackageCoverage(
+  manifest: readonly string[] = effectivePackagedRuntimeEntries(),
+  floors: readonly WorkspacePackageCoverageFloor[] = REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
+): void {
+  const flat = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+  const violations: string[] = []
+  for (const floor of floors) {
+    const prefix = `${WORKSPACE_SCOPE_PREFIX}${floor.package}/`
+    const effective = manifest.filter(entry => entry.startsWith(prefix))
+    const flattened = effective.filter(entry => flat.has(entry)).length
+    const library = effective.filter(entry => entry.startsWith(`${prefix}lib/`)).length
+    if (flattened < floor.flattened) {
+      violations.push(`${floor.package}: 扁平清单 ${flattened} < 下限 ${floor.flattened}`)
+    }
+    if (effective.length < floor.effective) {
+      violations.push(`${floor.package}: 生效清单 ${effective.length} < 下限 ${floor.effective}`)
+    }
+    if (library < floor.library) {
+      violations.push(`${floor.package}: lib/ 产物 ${library} < 下限 ${floor.library}`)
+    }
+  }
+  // 全局下限同样只允许上调：它兜"整段删除"这类批量形态与 @picoaide 之外的条目。
+  if (manifest.length < REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR) {
+    violations.push(
+      `生效清单共 ${manifest.length} 条 < 下限 ${REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR}`,
+    )
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 覆盖计数低于棘轮下限（下限只允许上调；确要下调必须在同一次改动里`
+      + `说明理由并改 REQUIRED_WORKSPACE_PACKAGE_COVERAGE）：\n  ${violations.join('\n  ')}`,
+    )
+  }
+}
+
+/**
+ * 从产物推导"必须有"的自有 workspace 条目（反向 oracle 的普查步骤）。
+ *
+ * 导出它是为了让 `tests/verify-packaged-runtime.spec.ts` 能直接对合成产物夹具断言
+ * 派生结果（而不是复制一份派生逻辑 —— 复制出来的那份会替假条目背书）。
+ * @param productRoot - 产物根（桌面包根）。
+ * @returns 普查结果。
+ */
+export function collectWorkspaceSurface(productRoot: string): WorkspaceSurfaceCensus {
+  const scopeRoot = join(productRoot, 'node_modules', '@picoaide')
+  if (!existsSync(scopeRoot)) {
+    throw new Error(
+      `${WORKSPACE_COVERAGE_LABEL}: 找不到 ${scopeRoot} —— workspace 依赖未安装或未构建，判据不能空转`,
+    )
+  }
+  const packages = readdirSync(scopeRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() || entry.isSymbolicLink())
+    .map(entry => entry.name)
+    .filter(name => existsSync(join(scopeRoot, name, 'package.json')))
+    .sort()
+  if (packages.length === 0) {
+    throw new Error(`${WORKSPACE_COVERAGE_LABEL}: ${scopeRoot} 下没有任何自带 package.json 的包`)
+  }
+
+  const manifests = new Map<string, WorkspacePackageManifest>()
+  for (const name of packages) {
+    manifests.set(name, JSON.parse(readFileSync(join(scopeRoot, name, 'package.json'), 'utf8')) as WorkspacePackageManifest)
+  }
+
+  const required = new Map<string, WorkspaceRequiredEntry>()
+  const add = (name: string, relative: string | undefined, reason: string): void => {
+    if (relative === undefined) return
+    const entry = `${WORKSPACE_SCOPE_PREFIX}${name}/${relative}`
+    if (!required.has(entry)) required.set(entry, { package: name, entry, reason })
+  }
+  for (const name of packages) {
+    const manifest = manifests.get(name)!
+    add(name, 'package.json', '包 manifest（profile 组装期 createRequire().resolve 的落点）')
+    add(name, workspaceEntryTarget(manifest, ''), 'package.json 的 exports["."]/main（插件行入口）')
+    const patch = manifest.dsh?.bundle?.patch
+    if (typeof patch === 'string') add(name, patch.replace(/^\.\//u, ''), 'dsh.bundle.patch（profile 组装期读取）')
+    if (manifest.dsh?.client !== undefined) {
+      // 上游 client-modules 见到 dsh.client 而没有 exports["./client"] 会**直接抛错**
+      // （`client-modules: <pkg> declares dsh.client but exports no "./client" bundle`）。
+      add(name, workspaceEntryTarget(manifest, 'client'), 'dsh.client ⇒ exports["./client"]（客户端 bundle）')
+    }
+    if (workspaceExportMap(manifest)['./invariant'] !== undefined) {
+      add(name, workspaceEntryTarget(manifest, 'invariant'), 'exports["./invariant"]（包自有不变量伴生入口）')
+    }
+  }
+
+  const artifacts = [
+    ...listProductFiles(join(productRoot, 'lib')).map(relative => `lib/${relative}`),
+    ...listProductFiles(scopeRoot).map(relative => `${WORKSPACE_SCOPE_PREFIX}${relative}`),
+  ].filter(entry => /\.(?:js|cjs|mjs)$/u.test(entry))
+
+  const resolved = new Set<string>()
+  for (const artifact of artifacts) {
+    const absolute = join(productRoot, artifact)
+    const source = readFileSync(absolute, 'utf8')
+    // 刻意用"任何以 @picoaide/ 开头的字符串字面量"而不是精确的 import/require 语法：
+    // `createRequire(...).resolve('@picoaide/x/package.json')` 这类**也是运行期依赖**
+    // （profile 锚点就是这么解析的），而漏掉它等于放掉一整类。代价是文档字符串里提到
+    // 的包名也会被要求登记 —— 这是**偏严**的方向，且解析不到落点/通配子路径会被跳过。
+    for (const match of source.matchAll(/["'](@picoaide\/[^"']+)["']/gu)) {
+      const specifier = match[1]!
+      const [, name, subpath = ''] = /^@picoaide\/([^/]+)(?:\/(.*))?$/u.exec(specifier) ?? []
+      if (name === undefined) continue
+      const manifest = manifests.get(name)
+      if (manifest === undefined) continue
+      const target = workspaceEntryTarget(manifest, subpath)
+      if (target === undefined) continue
+      resolved.add(specifier)
+      add(name, target, `产物里的真实 specifier ${specifier}（来自 ${artifact}）`)
+    }
+  }
+
+  const entries = [...required.values()].sort((left, right) => left.entry.localeCompare(right.entry))
+  const perPackage = new Map<string, readonly string[]>()
+  for (const name of packages) {
+    perPackage.set(name, entries.filter(item => item.package === name).map(item => item.entry))
+  }
+  return { packages, required: entries, perPackage, resolvedSpecifiers: resolved.size }
+}
+
 /** Try to list one archive; an absent archive is the physical-layout signal. */
 function tryListArchive(
   archivePath: string,
@@ -1013,6 +1449,14 @@ function tryListArchive(
       `dsh-plugin-desktop: packaged runtime at ${archivePath} is missing required ASAR entries: ${missing.join(', ')}`,
     )
   }
+  // 反向 oracle（2026-09-23 第三轮审计 P-1）：**清单必须覆盖产物**。
+  // 上面那条只证明"清单里的条目都在包里" —— 而清单是这条判据的唯一来源，删掉一条
+  // 等于同时删掉那条断言（审计实测 16 次单条删除里 9 次全绿）。这两条一起兜：
+  //   * 每包覆盖棘轮：构建无关，删掉任何一条即红（含"删条目 + 加假条目"抵消总数）；
+  //   * 产物反向覆盖：产物里真实需要的入口（声明面 + `@picoaide/*` specifier）
+  //     必须都在清单里 —— 抓"产物多出一个没被覆盖的入口"与"清单路径拼写被改坏"。
+  assertWorkspacePackageCoverage()
+  assertRequiredEntriesCoverWorkspaceSurface()
   // 反向断言（2026-09-22）：包里不得出现自有源码 / sourcemap / 开发期产物。
   // 放在这里而不是 `files` 里 —— `files` 是声明，这里是**证据**：任何一条排除规则
   // 写错（例如「仅根级」那种单星号写法）都会在这一步把坏包拦下来，而不是发到客户机上。
@@ -1076,7 +1520,24 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/skill-telemetry', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js' },
   { specifier: '@picoaide/dsh-enterprise/channel-sync', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js' },
   { specifier: '@picoaide/dsh-enterprise/invariant', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/invariant.js' },
+  // 2026-09-23（第三轮审计的反向 oracle）：下面 7 条都是**产物里真实存在、且被真实
+  // specifier 引用**的入口，但此前不在任何一张表里 —— 也就是"删掉它们没有任何判据会红"。
+  //   `@picoaide/dsh-enterprise`                 ← profile 行 `picoaide-enterprise` 的入口
+  //   `@picoaide/dsh-enterprise/loopback`        ← account-card `lib/index.js` 值导入
+  //   `@picoaide/dsh-enterprise/server-connector/auth` ← account-card `lib/index.js` 值导入
+  //   `@picoaide/dsh-connectors`                 ← profile 行 `pico-connectors` 的入口
+  //   `@picoaide/dsh-connectors/invariant`       ← 该包声明的 `./invariant` 伴生入口
+  //   `@picoaide/dsh-connectors/store`           ← browser `lib/index.js` 值导入
+  //   `@picoaide/dsh-connectors/user-scope`      ← browser `lib/index.js` 值导入
+  // 判据是 `assertRequiredEntriesCoverWorkspaceSurface`（清单必须覆盖产物）。
+  { specifier: '@picoaide/dsh-enterprise', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/index.js' },
+  { specifier: '@picoaide/dsh-enterprise/loopback', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js' },
+  { specifier: '@picoaide/dsh-enterprise/server-connector/auth', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
+  { specifier: '@picoaide/dsh-connectors', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/index.js' },
+  { specifier: '@picoaide/dsh-connectors/invariant', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/invariant.js' },
+  { specifier: '@picoaide/dsh-connectors/store', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/store.js' },
+  { specifier: '@picoaide/dsh-connectors/user-scope', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/user-scope.js' },
   { specifier: '@picoaide/dsh-connectors/client', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/client.js' },
   { specifier: '@picoaide/dsh-connectors/package.json', archivePath: 'node_modules/@picoaide/dsh-connectors/package.json' },
 ]

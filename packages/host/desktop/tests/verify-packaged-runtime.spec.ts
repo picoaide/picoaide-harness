@@ -7,8 +7,13 @@ import AdmZip from 'adm-zip'
 import {
   afterPack,
   assertNoPackagedSourceLeaks,
+  assertRequiredEntriesCoverWorkspaceSurface,
   assertRuntimeAssetFamiliesSurvive,
   assertBrandAssetSvg,
+  collectWorkspaceSurface,
+  effectivePackagedRuntimeEntries,
+  assertWorkspacePackageCoverage,
+  REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR,
   PACKAGED_FLOCK_SMOKE_TIMEOUT_MS,
   PACKAGED_SENTRY_SMOKE_TIMEOUT_MS,
   PACKAGED_WEB_BRAND_ASSETS,
@@ -16,6 +21,7 @@ import {
   PACKAGED_WEB_BRAND_OFFICIAL,
   REQUIRED_PACKAGED_RUNTIME_ENTRIES,
   REQUIRED_PROFILE_PATCH_ANCHORS,
+  REQUIRED_WORKSPACE_PACKAGE_COVERAGE,
   assertProfilePatchAnchors,
   REQUIRED_ASAR_EXPORTS,
   REQUIRED_UNPACKED_RUNTIME_ENTRIES,
@@ -78,7 +84,16 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/skill-telemetry.js',
   'node_modules/@picoaide/dsh-enterprise/lib/channel-sync.js',
   'node_modules/@picoaide/dsh-enterprise/lib/invariant.js',
+  // 2026-09-23（第三轮审计反向 oracle）：这 7 条此前不在任何一张表里，而产物里
+  // 真实存在且被真实 specifier 引用 ⇒ 删掉它们没有任何判据会红。
+  'node_modules/@picoaide/dsh-enterprise/lib/index.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/loopback.js',
+  'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js',
   'node_modules/@picoaide/dsh-enterprise/package.json',
+  'node_modules/@picoaide/dsh-connectors/lib/index.js',
+  'node_modules/@picoaide/dsh-connectors/lib/invariant.js',
+  'node_modules/@picoaide/dsh-connectors/lib/store.js',
+  'node_modules/@picoaide/dsh-connectors/lib/user-scope.js',
   // ⚠️ 下面这张表是 `completeArchiveEntries()` 搭夹具用的**本地拷贝**，真源是脚本里的
   // `REQUIRED_ASAR_EXPORTS`（已导出）。2026-09-19 之前两份没有一致性守卫，而且这里多出过一条
   // 早就删掉的 `dsh-connectors/lib/sales-easy.js`（磁盘上不存在、connectors 也没这个导出）——
@@ -421,8 +436,219 @@ describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）'
     // 注释掉/删除"这种批量形态（例如把 build/ 那一段整体删掉而各处仍绿）。
     expect(
       REQUIRED_PACKAGED_RUNTIME_ENTRIES.length,
-      `清单当前 ${REQUIRED_PACKAGED_RUNTIME_ENTRIES.length} 条（下限 82）`,
-    ).toBeGreaterThanOrEqual(82)
+      `清单当前 ${REQUIRED_PACKAGED_RUNTIME_ENTRIES.length} 条（下限 84）`,
+    ).toBeGreaterThanOrEqual(84)
+  })
+})
+
+describe('反向 oracle：清单必须覆盖产物（第三轮审计 P-1，2026-09-23 补）', () => {
+  // 审计实测（P-1）：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是"必需项"判据的**唯一来源**，
+  // 从清单里删掉一条 = 同时删掉那条断言 —— 16 次单条 `@picoaide/*` 删除里 9 次让
+  // 这个 spec 78/78 全绿，其中 8 条没有任何别的表覆盖。
+  //
+  // 既有的三条 oracle 为什么没拦住：
+  //   * `spec:206`（desktop `lib/*.js` 的子路径 import）只看**桌面自身**的产物，
+  //     看不见插件包之间的 import（`wasm-apps-host → dsh-browser/surface`）；
+  //   * G-9 那张只看上游补丁目标的子路径 import；
+  //   * G-2 的目录 oracle 只能枚举"名字稳定的目录"，而 `node_modules/@picoaide/<pkg>/lib`
+  //     里有内容哈希命名的 chunk ⇒ 结构上不能要求"目录里每个文件都在清单里"；
+  //   * 2026-09-16 的 vendored 技能 oracle 只枚举 `dsh-memory-evolve/skills/**` 一个源目录。
+  // 所以这里换判据：不问目录里有什么，问**产物真实需要什么**（包自己声明的入口面 +
+  // 产物里真实的 `@picoaide/*` specifier），再与清单对拍，最后叠加每包计数棘轮。
+  const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  it('真产物：派生面非空、且当前清单完整覆盖它（基线绿）', () => {
+    const census = assertRequiredEntriesCoverWorkspaceSurface()
+    // 前置断言：判据不能空转（产物没构建时这里会是 0，而"跳过"不是本仓的选项）。
+    expect(census.packages.length, '没有扫到任何自有 workspace 包，判据会空转').toBeGreaterThanOrEqual(6)
+    expect(census.resolvedSpecifiers, '没有从产物里解析出任何 @picoaide/* specifier').toBeGreaterThan(0)
+    expect(census.required.length).toBeGreaterThanOrEqual(census.packages.length)
+    // 每包都必须有棘轮登记（新增自有插件包不登记 ⇒ 上面那条 throw）。
+    expect([...census.perPackage.keys()].sort()).toEqual(
+      REQUIRED_WORKSPACE_PACKAGE_COVERAGE.map(floor => floor.package).sort(),
+    )
+  })
+
+  it.each([
+    ['包自己声明的 `exports["."]`/`main` 入口', 'node_modules/@picoaide/dsh-foot-menu/lib/index.js'],
+    ['`dsh.client` ⇒ `exports["./client"]`（客户端 bundle）', 'node_modules/@picoaide/dsh-foot-menu/lib/client.js'],
+    ['`dsh.bundle.patch`（profile 组装期读取）', 'node_modules/@picoaide/dsh-foot-menu/cordis.patch.yml'],
+    ['包 manifest（`createRequire().resolve` 落点）', 'node_modules/@picoaide/dsh-foot-menu/package.json'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-browser/lib/surface.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-browser/lib/guard.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-host-locale/lib/loopback.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-connectors/lib/store.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-connectors/lib/user-scope.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js'],
+    ['产物里真实的跨包 specifier', 'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js'],
+    ['`exports["./invariant"]`（包自有不变量伴生入口）', 'node_modules/@picoaide/dsh-account-card/lib/invariant.js'],
+    ['`exports["./invariant"]`（包自有不变量伴生入口）', 'node_modules/@picoaide/dsh-cron/lib/invariant.js'],
+  ])('%s：删掉 %s 后每包棘轮必须红', (_reason, entry) => {
+    const without = effectivePackagedRuntimeEntries().filter(candidate => candidate !== entry)
+    expect(without, `${entry} 本来就不在生效清单里，这条用例失去意义`).not.toContain(entry)
+    expect(
+      () => assertWorkspacePackageCoverage(without),
+      `删掉 ${entry} 之后棘轮仍然放行 —— 那正是 P-1 的形态`,
+    ).toThrow(/覆盖计数低于棘轮下限/u)
+  })
+
+  it('产物反推出的每一条：从生效清单里删掉都必须红（随树状态自适应，不写死清单）', () => {
+    // 与上一条互补：上一条走"清单驱动"的棘轮（构建无关），这一条走"产物驱动"的
+    // 覆盖判据 —— 派生出来的每一条都真的参与判定，而不是只在错误消息里出现过。
+    const census = collectWorkspaceSurface(desktopRoot)
+    expect(census.required.length).toBeGreaterThan(0)
+    for (const item of census.required) {
+      const without = effectivePackagedRuntimeEntries().filter(entry => entry !== item.entry)
+      expect(
+        () => assertRequiredEntriesCoverWorkspaceSurface(without, desktopRoot, REQUIRED_WORKSPACE_PACKAGE_COVERAGE, 1),
+        `删掉 ${item.entry} 之后覆盖判据仍然放行`,
+      ).toThrow(/产物真实需要的条目不在打包必需清单里/u)
+    }
+  })
+
+  it('第三轮审计实测的 8 条"无别表兜底"缺口逐条都不再静默', () => {
+    // 审计表里列出的 8 条（`browser/lib/surface.js`、`host-locale/lib/loopback.js`、
+    // `browser|account-card|foot-menu` 的 `lib/client.js`、`account-card|cron` 的
+    // `lib/invariant.js`）—— 这一轮它们被真实需要面反推出来了。
+    const audited = [
+      'node_modules/@picoaide/dsh-browser/lib/surface.js',
+      'node_modules/@picoaide/dsh-host-locale/lib/loopback.js',
+      'node_modules/@picoaide/dsh-browser/lib/client.js',
+      'node_modules/@picoaide/dsh-account-card/lib/client.js',
+      'node_modules/@picoaide/dsh-foot-menu/lib/client.js',
+      'node_modules/@picoaide/dsh-account-card/lib/invariant.js',
+      'node_modules/@picoaide/dsh-cron/lib/invariant.js',
+      'node_modules/@picoaide/dsh-cron/lib/client.js',
+    ]
+    const effective = new Set(effectivePackagedRuntimeEntries())
+    for (const entry of audited) expect(effective, `${entry} 不在生效清单里`).toContain(entry)
+  })
+
+  it('每包计数棘轮：基线绿，且每一个包的三个计数都恰好贴住下限（不留余量）', () => {
+    // 棘轮的全部价值在"贴住"：下限留了余量就回到 P-1（当时的全局下限 82 而清单 83 条，
+    // 删一条仍是 82 ≥ 82 ⇒ 全绿）。
+    const effective = effectivePackagedRuntimeEntries()
+    expect(() => assertWorkspacePackageCoverage(effective)).not.toThrow()
+    const flat = new Set<string>(REQUIRED_PACKAGED_RUNTIME_ENTRIES)
+    for (const floor of REQUIRED_WORKSPACE_PACKAGE_COVERAGE) {
+      const prefix = `node_modules/@picoaide/${floor.package}/`
+      const owned = effective.filter(entry => entry.startsWith(prefix))
+      expect(owned.filter(entry => flat.has(entry)).length, `${floor.package} 扁平计数没有贴住下限`)
+        .toBe(floor.flattened)
+      expect(owned.length, `${floor.package} 生效计数没有贴住下限`).toBe(floor.effective)
+      expect(owned.filter(entry => entry.startsWith(`${prefix}lib/`)).length, `${floor.package} lib 计数没有贴住下限`)
+        .toBe(floor.library)
+    }
+    expect(effective.length).toBe(REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR)
+  })
+
+  it('棘轮本身有判别力：下限高于真实条目数即红（不是恒真断言）', () => {
+    const target = REQUIRED_WORKSPACE_PACKAGE_COVERAGE.find(floor => floor.package === 'dsh-browser')!
+    const effective = effectivePackagedRuntimeEntries()
+    for (const bumped of [
+      { ...target, flattened: target.flattened + 1 },
+      { ...target, effective: target.effective + 1 },
+      { ...target, library: target.library + 1 },
+    ]) {
+      expect(() => assertWorkspacePackageCoverage(
+        effective,
+        REQUIRED_WORKSPACE_PACKAGE_COVERAGE.map(floor => (floor.package === 'dsh-browser' ? bumped : floor)),
+      )).toThrow(/覆盖计数低于棘轮下限/u)
+    }
+    // 反向对照：未上调时同一次调用是绿的（证明上面那些红的成因就是棘轮）。
+    expect(() => assertWorkspacePackageCoverage(effective)).not.toThrow()
+  })
+
+  it('合成产物夹具：声明面 + specifier 闭包 + 未登记包 + 计数棘轮四个方向都独立可判', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-surface-'))
+    const scope = join(root, 'node_modules', '@picoaide')
+    const write = (relative: string, body: string): void => {
+      mkdirSync(dirname(join(root, relative)), { recursive: true })
+      writeFileSync(join(root, relative), body)
+    }
+    write('node_modules/@picoaide/dsh-probe/package.json', JSON.stringify({
+      name: '@picoaide/dsh-probe',
+      main: 'lib/index.js',
+      exports: {
+        '.': { default: './lib/index.js' },
+        './client': { default: './lib/client.js' },
+        './invariant': { default: './lib/invariant.js' },
+        './extra': { default: './lib/extra.js' },
+      },
+      dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } },
+    }))
+    for (const rel of ['lib/index.js', 'lib/client.js', 'lib/invariant.js', 'lib/extra.js']) {
+      write(`node_modules/@picoaide/dsh-probe/${rel}`, 'export {}\n')
+    }
+    write('node_modules/@picoaide/dsh-probe/cordis.patch.yml', '- insert: []\n')
+    write('lib/main.js', 'import "@picoaide/dsh-probe/extra"\n')
+    expect(existsSync(scope)).toBe(true)
+
+    const floors = [{ package: 'dsh-probe', flattened: 0, effective: 6, library: 4 }]
+    const complete = [
+      'node_modules/@picoaide/dsh-probe/package.json',
+      'node_modules/@picoaide/dsh-probe/lib/index.js',
+      'node_modules/@picoaide/dsh-probe/lib/client.js',
+      'node_modules/@picoaide/dsh-probe/lib/invariant.js',
+      'node_modules/@picoaide/dsh-probe/cordis.patch.yml',
+      'node_modules/@picoaide/dsh-probe/lib/extra.js',
+    ]
+    const census = assertRequiredEntriesCoverWorkspaceSurface(complete, root, floors, 1)
+    expect(census.required.map(item => item.entry).sort()).toEqual([...complete].sort())
+    expect(census.resolvedSpecifiers).toBe(1)
+
+    // ① 声明面缺一条（客户端 bundle）⇒ 红。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete.filter(entry => !entry.endsWith('/lib/client.js')), root, floors, 1,
+    )).toThrow(/exports\["\.\/client"\]/u)
+    // ② specifier 闭包缺一条（`lib/main.js` 引的 extra）⇒ 红。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete.filter(entry => !entry.endsWith('/lib/extra.js')), root, floors, 1,
+    )).toThrow(/dsh-probe\/extra/u)
+    // ③ 随包但没登记棘轮的包 ⇒ 红（新增自有插件不许静默）。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(complete, root, [], 1))
+      .toThrow(/没在 REQUIRED_WORKSPACE_PACKAGE_COVERAGE 里登记下限/u)
+    // ④ 棘轮下限高于真实条目数 ⇒ 红（棘轮是清单驱动、与产物无关的那一半）。
+    expect(() => assertWorkspacePackageCoverage(
+      complete, [{ package: 'dsh-probe', flattened: 1, effective: 6, library: 4 }],
+    )).toThrow(/扁平清单 0 < 下限 1/u)
+    // ⑤ 表里有产物中不存在的包 ⇒ 红（包删了要同步这张表）。
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface(
+      complete, root, [...floors, { package: 'dsh-gone', flattened: 0, effective: 0, library: 0 }], 1,
+    )).toThrow(/产物中不存在的包/u)
+  })
+
+  it('产物目录缺失即红，不静默跳过（真源是产物，不是清单）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-surface-empty-'))
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface([], root))
+      .toThrow(/workspace 依赖未安装或未构建/u)
+    mkdirSync(join(root, 'node_modules', '@picoaide'), { recursive: true })
+    expect(() => assertRequiredEntriesCoverWorkspaceSurface([], root))
+      .toThrow(/没有任何自带 package.json 的包/u)
+  })
+
+  it('生效清单 = 三张表的并集（覆盖判据不能只看扁平表）', () => {
+    const effective = effectivePackagedRuntimeEntries()
+    expect(new Set(effective).size).toBe(effective.length)
+    for (const entry of [...REQUIRED_PACKAGED_RUNTIME_ENTRIES, ...REQUIRED_PROFILE_PATCH_ANCHORS]) {
+      expect(effective).toContain(entry)
+    }
+    for (const entry of REQUIRED_ASAR_EXPORTS) expect(effective).toContain(entry.archivePath)
+  })
+
+  it('接线守卫：afterPack 的归档分支必须真的调用反向 oracle', () => {
+    // 与 `spec:1545` 同形：辅助函数测得到 ≠ 被调用（这条本项目实测踩过）。
+    const source = readFileSync(
+      join(desktopRoot, 'scripts', 'verify-packaged-runtime.ts'), 'utf8',
+    )
+    const gate = source.slice(
+      source.indexOf('function tryListArchive('),
+      source.indexOf('function verifyUnpackedPackageResolution('),
+    )
+    expect(gate, 'tryListArchive 里没有调用反向 oracle').toContain('assertRequiredEntriesCoverWorkspaceSurface()')
+    expect(gate, '反向 oracle 必须排在 profile 锚点断言之前（诊断顺序）').toContain(
+      'assertRequiredEntriesCoverWorkspaceSurface()',
+    )
   })
 })
 
