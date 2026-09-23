@@ -682,9 +682,11 @@ type reviewSwitchResult struct {
 	Required bool
 	// Err 非 nil = 这次读**失败**（不是"键不存在"）。调用方必须据此 fail-loud，
 	// 并在写入面（发布）拒绝继续。
+	//
+	// 刻意**不**再放一个"键到底存不存在"的字段：两个消费方都不需要它
+	// （读失败时无从得知、读成功时 Required 已经表达完），留着只会是一个
+	// 没有任何读取方的死字段 —— 本批修复的纪律是"每行都要有判据载体"。
 	Err error
-	// Found = settings 里到底有没有这个键。仅供诊断/日志，判定一律看上面两项。
-	Found bool
 }
 
 // reviewSwitch 是审核开关的**唯一读点**（三态；R17 / R3-A A-3）。
@@ -704,22 +706,22 @@ func (h *Handlers) reviewSwitch() reviewSwitchResult {
 	if h.opt.DB == nil {
 		// 未装配 DB 只出现在最小装配/单元测试里：没有 settings 表可读，
 		// 按"缺省关"处理与 R17 一致（这不是读失败）。
-		return reviewSwitchResult{Required: false, Found: false}
+		return reviewSwitchResult{Required: false}
 	}
 	v, ok, err := serverstore.GetSetting(h.opt.DB, SettingReviewRequired)
 	if err != nil {
 		// fail-closed：读不到 = 按"需要审核"处理。错误原样交给调用方去 fail-loud。
-		return reviewSwitchResult{Required: true, Err: err, Found: false}
+		return reviewSwitchResult{Required: true, Err: err}
 	}
 	if !ok {
 		// 键不存在 ≠ 读失败：这是 R17 的缺省（默认不审 + 事后抽检）。
-		return reviewSwitchResult{Required: false, Found: false}
+		return reviewSwitchResult{Required: false}
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "on", "yes":
-		return reviewSwitchResult{Required: true, Found: true}
+		return reviewSwitchResult{Required: true}
 	default:
-		return reviewSwitchResult{Required: false, Found: true}
+		return reviewSwitchResult{Required: false}
 	}
 }
 
