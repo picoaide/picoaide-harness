@@ -291,6 +291,35 @@ type usageMonthTables struct {
 	// 残留、或被手工换成 VIEW 的异常形态）。它们没有分区身份，但同样占着名字：
 	// 留着会让该月的新写入撞同名关系而失败，所以清理必须一并处理。
 	Orphans []string
+	// Kinds 是关系名 → pg_class.relkind（'r' 普通表 / 'p' 二级分区 / 'v' 视图 /
+	// 'm' 物化视图 / 'i' 索引 / 'S' 序列 / 'f' 外部表 …）。
+	//
+	// R6-A-1（审计 2026-09-23，P1）：清理必须按 relkind 选 DROP 动词 ——
+	// `DROP TABLE IF EXISTS <rel>` 只吞"关系不存在"，**不吞"存在但不是表"**
+	// （PG 42809 `"x" is not a table`）。旧实现一律硬发 DROP TABLE，于是一个
+	// 占用月名的视图就让整轮清理 `return derr`（见 CleanupUsageRetention）。
+	Kinds map[string]string
+}
+
+// dropStatementFor 返回清理名为 rel、relkind 为 kind 的关系时要发的 SQL 与
+// 该形态是否可清理。
+//
+// 表（'r' 叶子 / 'p' 二级分区，后者自身仍是表）→ DROP TABLE；
+// 视图 / 物化视图 → 各自的 DROP 动词（月名被换成 VIEW 是代码注释早已点名的
+// 异常形态，占着名字就要清掉，否则该月的新写入永远撞同名关系）；
+// 其余形态（索引、序列、外部表、复合类型…）→ **跳过**：同名的非表对象是人工
+// 事故，服务端不替管理员决定删它（与 misboundedPartitionErr「不自动 DROP/改写
+// 外来对象」同一条纪律），调用方记警告并计入 skipped。
+func dropStatementFor(rel, kind string) (stmt string, ok bool) {
+	switch kind {
+	case "r", "p":
+		return "DROP TABLE IF EXISTS " + rel, true
+	case "v":
+		return "DROP VIEW IF EXISTS " + rel, true
+	case "m":
+		return "DROP MATERIALIZED VIEW IF EXISTS " + rel, true
+	}
+	return "", false
 }
 
 // usageMonthRelationOf 解析关系名 usage_<YYYYMM>，返回该月（UTC 月首）与是否合法。
@@ -342,7 +371,7 @@ ORDER BY c.relname`)
 		return usageMonthTables{}, err
 	}
 	defer rows.Close()
-	out := usageMonthTables{}
+	out := usageMonthTables{Kinds: map[string]string{}}
 	for rows.Next() {
 		var rel, parent, kind string
 		var isPartition sql.NullBool
@@ -352,6 +381,7 @@ ORDER BY c.relname`)
 		if _, ok := usageMonthRelationOf(rel); !ok {
 			continue // usage_daily_2026 之类的兄弟关系
 		}
+		out.Kinds[rel] = kind
 		if isPartition.Valid && isPartition.Bool && parent == "usage" && kind == "r" {
 			out.Partitions = append(out.Partitions, rel)
 			continue
@@ -430,6 +460,13 @@ func rebuildLedgerForRetention(db *sql.DB, from, to time.Time) error {
 // 惰性创建的 —— 零用量月本来就没有分区,那个洞会让更早的分区**永久**不被清理
 // (该月已过去 ⇒ 分区不会被重建 ⇒ 洞永久)。现在既不 break、也不会漏月,并且把
 // 区间里缺席的月份**显式记录**下来(运维可据此核对"保留期是否真的覆盖到边界")。
+//
+// R6-A-1(审计 2026-09-23,P1):清理**逐关系错误隔离**。单条关系失败(DROP 视图
+// 形态发错动词、被别的对象依赖 2BP01、锁超时、补账失败)只记日志+原因码并继续,
+// 末尾把本轮失败聚合成一个错误返回 ⇒ 保留策略不再被一条坏关系永久拖停摆,同时
+// 仍 fail-loud(调用方/调度器能看到非 nil 并重试)。形态判定的降级语义(R5-A-9)
+// 不变;每轮**无条件**打一行 `usage retention: round summary …`(清了几条/失败
+// 几条),失败另有逐条的 `usage retention: FAILED <rel> op=… sqlstate=…`。
 func CleanupUsageRetention(db *sql.DB) error {
 	n, err := EffectiveRetentionMonths(db)
 	if err != nil {
@@ -448,16 +485,52 @@ func CleanupUsageRetention(db *sql.DB) error {
 	}
 	// F11(审计 2026-09-11):孤儿关系(DETACH 成功但 DROP 失败留下的表、或被换成
 	// VIEW 的异常形态)先清掉 —— 它们没有分区身份，留着会让该月的新写入撞同名关系
-	// 而失败。清理失败照旧上抛(不静默跳过)。
+	// 而失败。
+	//
+	// R6-A-1(审计 2026-09-23,P1):这里与下面的分区循环都改成**逐关系错误隔离**。
+	// 旧实现一条失败即 `return derr`,而 Orphans 在分区循环之前 ⇒ 任意一条关系
+	// DROP 失败(视图占名 42809、被别的对象依赖 2BP01、锁超时…)就让**该轮全部到期
+	// 月份**留在盘上,且下一轮在同一处再中止 ⇒ 保留策略永久停摆(管理端仍显示
+	// "生效中",磁盘按经过的月份单调增长)。现在:单条失败只记日志(带原因码)并
+	// 继续处理其余关系,函数末尾把本轮失败**聚合成一个错误**返回 —— 仍然 fail-loud
+	// (调用方/调度器能看到非 nil 并重试),但不再阻断与故障无关的月份。
+	// 第五轮 R5-A-9 的语义(形态异常只降级为日志、不阻断清理)保持不变。
+	var failures []string
+	failed := 0
+	failedRels := make([]string, 0, 1)
+	noteFailure := func(rel, op string, err error) {
+		failed++
+		failedRels = append(failedRels, rel)
+		code, ok := pgErrorCode(err)
+		if !ok {
+			code = "unknown"
+		}
+		log.Printf("usage retention: FAILED %s op=%s sqlstate=%s err=%v;"+
+			" 继续清理其余到期关系(R6-A-1:单条失败不得让整轮停摆,下一轮会重试它)",
+			rel, op, code, err)
+		failures = append(failures, fmt.Sprintf("%s (%s, sqlstate=%s): %v", rel, op, code, err))
+	}
+	clearedDetached := 0
+	skipped := 0
 	for _, rel := range tables.Orphans {
 		m, ok := usageMonthRelationOf(rel)
 		if !ok || !m.Before(cutoffMonth) {
 			continue
 		}
-		if _, derr := db.Exec("DROP TABLE IF EXISTS " + rel); derr != nil {
-			return derr
+		stmt, droppable := dropStatementFor(rel, tables.Kinds[rel])
+		if !droppable {
+			skipped++
+			log.Printf("usage retention: SKIP detached relation %s (relkind=%q):只清理表/视图/物化视图,"+
+				"其余形态需人工处置(服务端不替管理员决定删非表对象)", rel, tables.Kinds[rel])
+			continue
 		}
-		log.Printf("usage retention: dropped detached relation %s (not a partition of usage)", rel)
+		if _, derr := db.Exec(stmt); derr != nil {
+			noteFailure(rel, "drop-detached", derr)
+			continue
+		}
+		clearedDetached++
+		log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage)",
+			rel, tables.Kinds[rel])
 	}
 	existing := make(map[string]bool, len(tables.Partitions))
 	var oldest time.Time
@@ -495,23 +568,27 @@ func CleanupUsageRetention(db *sql.DB) error {
 				rel, shapeErr, winFrom.Format(dateFmt), winTo.Format(dateFmt))
 		}
 		// 补账(账本 UPSERT,幂等):失败**保持 fail-loud** —— 账没算出来就不 DROP,
-		// 否则明细被删而账本没补上,金额永久丢失。
+		// 否则明细被删而账本没补上,金额永久丢失。但失败**只隔离到这一条关系**
+		// (R6-A-1):其余到期月份照常清理,该月下一轮重试。
 		if err := rebuildLedgerForRetention(db, winFrom, winTo); err != nil {
-			return fmt.Errorf("rebuild ledger before dropping %s: %w", rel, err)
+			noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
+			continue
 		}
 		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION " + rel); derr != nil {
 			// 复检:并发清理/重复执行时可能已经不是分区 → 继续 DROP;
-			// 仍是分区说明 DETACH 真失败 → 上抛,不静默跳过。
+			// 仍是分区说明 DETACH 真失败 → 记失败并跳过这一条(不再上抛阻断整轮)。
 			var again sql.NullBool
 			rerr := db.QueryRow(`SELECT c.relispartition FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&again)
 			if rerr != nil || !again.Valid || again.Bool {
-				return fmt.Errorf("detach %s: %w", rel, derr)
+				noteFailure(rel, "detach-partition", derr)
+				continue
 			}
 		}
 		if _, derr := db.Exec("DROP TABLE IF EXISTS " + rel); derr != nil {
-			return derr
+			noteFailure(rel, "drop-partition", derr)
+			continue
 		}
 		dropped++
 	}
@@ -529,9 +606,14 @@ WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&again)
 				len(gaps), strings.Join(gaps, ","))
 		}
 	}
-	if dropped > 0 || len(tables.Orphans) > 0 {
-		log.Printf("usage retention: dropped %d expired month partition(s) and %d detached relation(s) (retention=%d months, cutoff=%s)",
-			dropped, len(tables.Orphans), n, monthKey(cutoffMonth))
+	// R6-A-1 的可观测口径:每轮**无条件**打一行"清了几条 / 失败几条 / 原因码"，
+	// 失败明细另有上面逐条的 `usage retention: FAILED <rel> op=… sqlstate=…` 行。
+	// 旧实现只在"本轮有清理动作"时打日志，停摆的轮次完全静默。
+	log.Printf("usage retention: round summary cleared_partitions=%d cleared_detached=%d skipped=%d failures=%d cutoff=%s retention_months=%d",
+		dropped, clearedDetached, skipped, failed, monthKey(cutoffMonth), n)
+	if len(failures) > 0 {
+		return fmt.Errorf("usage retention: %d relation(s) could not be cleaned this round (其余到期关系已清理,下一轮会重试;失败关系:%s): %s",
+			failed, strings.Join(failedRels, ","), strings.Join(failures, " | "))
 	}
 	return nil
 }
