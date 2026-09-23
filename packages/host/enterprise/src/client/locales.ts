@@ -43,6 +43,12 @@ export const zh = {
   'capability.official': '官方',
   'capability.featured': '精选',
   'capability.installed': '已安装',
+  // 下架 / 归属两态（R5-B-1 / R5-B-2）。形态照应用中心那一套（中性「已下架」胶囊 +
+  // 一句"为什么 + 还能做什么"的说明），不另创一套文案。
+  'capability.delisted': '已下架',
+  'capability.delistedHint': '该条目已不在能力中心目录中：可能已被管理员下架、已转交给他人，或你的授权已被撤回。本机这一份仍可使用，但不能再更新或上传新版本。',
+  'capability.transferred': '已转交',
+  'capability.transferredHint': '这条内容已转交给其他负责人，你不再有发布权；如需继续维护请联系管理员。',
   'capability.updateTo': '更新到 v{version}',
   'capability.viewVersions': '{count} 个版本',
   // 动作与分区空态
@@ -171,6 +177,10 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.official': 'Official',
   'capability.featured': 'Featured',
   'capability.installed': 'Installed',
+  'capability.delisted': 'Delisted',
+  'capability.delistedHint': 'This item is no longer in the Capability Hub catalog: it may have been delisted by an administrator, transferred to someone else, or your access may have been revoked. The copy on this machine still works, but it can no longer be updated or re-uploaded.',
+  'capability.transferred': 'Transferred',
+  'capability.transferredHint': 'This item has been transferred to another owner, so you no longer have publishing rights; contact your administrator to keep maintaining it.',
   'capability.updateTo': 'Update to v{version}',
   'capability.viewVersions': '{count} versions',
   'capability.install': 'Install',

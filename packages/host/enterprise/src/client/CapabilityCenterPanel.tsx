@@ -90,8 +90,28 @@ interface CapabilityItem {
   dirty?: boolean | undefined
   /** 运行时技能名（SKILL.md 的 name）；与 name 不同时需显式提示。 */
   runtimeName?: string | undefined
-  /** 是否当前用户归属（2026-09-02 归属权：上传预检据此区分「我的」与「他人」同名）。 */
+  /**
+   * 是否当前用户归属（2026-09-02 归属权：上传预检据此区分「我的」与「他人」同名）。
+   *
+   * **三态**（R5-B-2）：`true` = 服务端说归你；`false` = 服务端**明确**说不是你的
+   * （归属被转走就是这一档）；`undefined` = 这一行没有下发该字段（本地磁盘行就是
+   * 这种情况）—— 未知**不得**被当成"我的"（上传预检仍是 `!== true` 就拦住），
+   * 也不得被当成"已转交"（没有事实就不下这个判词）。
+   */
   isOwner?: boolean | undefined
+  /**
+   * 服务端行上的归属人账号（`is_owner === false` 时用来说明"转给谁了"）。
+   * 缺省 = 未下发（旧服务端）：只显示"已转交"，不编造名字。
+   */
+  owner?: string | undefined
+  /**
+   * 服务端行上的上下架标志（`apps.enabled`）——**目前只有目录行会带**。
+   *
+   * 缺省是 `undefined` 而不是 `true`：能力中心没有"这一行默认上架"的知识，
+   * 把未下发读成"上架"就是拿未知当可用（R5-B-1 的纪律）。目录行缺席的情况
+   * （下架行被服务端整行滤掉）由 {@link isDelistedItem} 的第二种判据兜住。
+   */
+  enabled?: boolean | undefined
 }
 
 /** 来源分区 tab(决策 2026-08-25:市场/组织合并为「市场」——仅 我的/市场)。 */
@@ -429,6 +449,64 @@ export type CardActionPlan =
   | { kind: 'upload' }
   | { kind: 'reupload' }
   | { kind: 'review', status: ItemStatus }
+  /** 归属已转交（R5-B-2）：这一格没有可达动作，只报状态。 */
+  | { kind: 'transferred' }
+  /** 已下架且本机没有可卸的那一份（R5-B-1）：同样只报状态。 */
+  | { kind: 'delisted' }
+
+/**
+ * 本机这一份是不是"从目录装进来的那一份"（{@link isDelistedItem} 推断判据的一半）。
+ *
+ * 只认**目录渠道**（`market` / `org`）：`builtin` / `plugin` 是随包内容，
+ * 本来就不在能力中心目录里，把它们算进来会让平台内置技能恒显示「已下架」。
+ * 两个字段都是磁盘 provenance 的消费端（auth-gate 的本机行），与安装器/卸载器的
+ * `isStoreProvenance` 同源。
+ */
+function catalogSourcedLocal(item: Pick<CapabilityItem, 'installedOrigin' | 'originChannel'>): boolean {
+  return item.installedOrigin === 'store' && (item.originChannel === 'market' || item.originChannel === 'org')
+}
+
+/**
+ * 这一行当前**不在可用目录中**（下架 / 授权撤回 / 已转走）—— 两个判据取或：
+ *
+ *  1. **权威判据**：服务端在行上下发了 `enabled: false`（下架行不再被服务端滤掉时
+ *     就是这一档，客户端无需再改）；
+ *  2. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，且带着目录
+ *     渠道的商店溯源（{@link catalogSourcedLocal}）。
+ *
+ * 第 2 条为什么成立：{@link mergeItems} 的权威序是 市场 > 组织 > 本机 —— 只要目录里
+ * 还有同名同 kind 的一行，归并结果的 `source` 就**不可能**是 `local`。于是
+ * "source === 'local' + 商店溯源"等价于"这份内容是从目录装进来的、而目录里已经没有
+ * 它了"（R5-B-1：下架后员工面 market/org/own 三个来源同时为空，只剩磁盘本机行）。
+ *
+ * 判据只回答"还能不能从目录更新/上传"，**不**回答"这份内容还能不能用"：磁盘上这一份
+ * 照常可用、照常渲染，只是不再出现"上传/更新"这种已达不成的动作。
+ * @param item - 能力中心的一行（必须是**归并后**的行，见上）。
+ * @returns 明确不在目录中 ⇒ `true`；其余（含未知）⇒ `false`。
+ */
+export function isDelistedItem(
+  item: Pick<CapabilityItem, 'source' | 'enabled' | 'installedOrigin' | 'originChannel'>,
+): boolean {
+  if (item.enabled === false) return true
+  return item.source === 'local' && catalogSourcedLocal(item)
+}
+
+/**
+ * 归属已被转交给别人（R5-B-2）：服务端**明确**说这一行不归当前用户
+ * （`is_owner === false`），而本机还留着"我上传过"的记录
+ * （{@link CapabilityItem.uploadStatus} 有值）。
+ *
+ * 为什么必须同时看 `uploadStatus`：任何"别人上传、我装进来"的商店行
+ * `is_owner` 同样是 `false`，只看它会把每一份装来的内容都写成「已转交」。
+ *
+ * **不拿 `author` 兜底**（R5-B-2 的纪律）：`author` 是发布者，归属转移之后它仍然是
+ * 旧作者的名字 —— 用本地这份缓存去推归属正是这条 finding 的成因。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @returns 已转交 ⇒ `true`。
+ */
+export function isTransferredItem(item: Pick<CapabilityItem, 'isOwner' | 'uploadStatus'>): boolean {
+  return item.isOwner === false && item.uploadStatus !== undefined
+}
 
 /**
  * 卡片页脚动作的**唯一判定实现**（渲染层只按它 map，不再自己算一遍）。
@@ -440,7 +518,9 @@ export type CardActionPlan =
  *
  * 两条口径（与 {@link localRemoveEndpoint} / `needsOverwriteConfirm` 同源）：
  *  - `source === 'local'`（本机创作，含 builtin/plugin 同步进来的那一份）：
- *    平台/随包内置的技能出「卸载」（审计 A6），其余按上传状态出上传/等审/重传；
+ *    平台/随包内置的技能出「卸载」（审计 A6）；**已转交**（R5-B-2）与**不在目录中**
+ *    （R5-B-1/B-3）两态各自出状态/卸载，**绝不出「上传」**；其余按上传状态出
+ *    上传/等审/重传；
  *  - 商店行：未装出「安装」，有新版出「更新到 vX」（**不传 force**，A15），
  *    否则出「卸载」。
  * @param item - 能力中心的一行（归并后的行）。
@@ -452,10 +532,35 @@ export function planCardAction(item: CapabilityItem): CardActionPlan {
     if (removable !== undefined) {
       return { kind: 'uninstall', endpoint: removable, localContent: needsOverwriteConfirm(item) }
     }
+    // R5-B-2 先于上传档：归属已经不在自己名下（服务端 `is_owner:false`）时，
+    // 「上传 / 重新上传」是**已达不成**的动作（服务端 409 NAME_TAKEN）。这一格
+    // 只报状态，不再造假按钮。
+    if (isTransferredItem(item)) return { kind: 'transferred' }
+    // R5-B-1/B-3：目录里已经没有这一行（下架 / 授权撤回）时，本机这一份**仍然
+    // 可用**，但"上传"要么注定失败、要么（下架期间服务端放行上传时）只是让作者
+    // 在完全不知情的状态下反复提交。改成**真的可达**的那一个动作：本地卸载
+    // （{@link uninstallEndpoint} 对技能走 shared-skills、对智能体走
+    // agent-presets —— 两条都是既有端点，零新增接口）。是否为"用户自己的内容"
+    // 仍由 needsOverwriteConfirm 决定要不要先确认一次。
+    if (isDelistedItem(item)) {
+      return {
+        kind: 'uninstall',
+        endpoint: uninstallEndpoint(item, item.version),
+        localContent: needsOverwriteConfirm(item),
+      }
+    }
     if (item.uploadStatus === 'rejected') return { kind: 'reupload' }
     if (item.uploadStatus === 'pending') return { kind: 'review', status: 'pending' }
     if (item.uploadStatus === 'approved') return { kind: 'review', status: 'approved' }
     return { kind: 'upload' }
+  }
+  if (isDelistedItem(item)) {
+    // 目录行上的下架（服务端 `enabled:false`）：**不给**「安装」—— 装了也不会与
+    // 目录一致，而下架对使用者等价于"不存在"；本机已经有一份时给「卸载」（可达），
+    // 否则这一格只报状态（与应用中心「已下架 + 禁用打开」同形态）。
+    return item.installed
+      ? { kind: 'uninstall', endpoint: uninstallEndpoint(item, item.version), localContent: needsOverwriteConfirm(item) }
+      : { kind: 'delisted' }
   }
   if (!item.installed) return { kind: 'install' }
   if (hasUpdateFor(item)) {
@@ -710,7 +815,21 @@ function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
     status,
     reason,
     official: rows.some(row => row.official === true) ? true : undefined,
-    isOwner: rows.some(row => row.isOwner === true) ? true : undefined,
+    // 归属三态必须**如实**下发（R5-B-2）：`mergeItemGroup` 里原来的
+    // `some(isOwner === true) ? true : undefined` 会把服务端明确说的 `false`
+    // 抹成"未知"，于是"这一行已经转给别人了"在客户端**永远表达不出来**。
+    // 归并语义：任一行说"是你的"⇒ 是你的；否则任一行明确说"不是你的"⇒ 不是你的；
+    // 都没有该字段 ⇒ 未知（本机磁盘行）。
+    isOwner: rows.some(row => row.isOwner === true)
+      ? true
+      : rows.some(row => row.isOwner === false) ? false : undefined,
+    // 归属人账号（服务端下发时透出，供「已转交」说明用；缺省不编造）。
+    owner: pickByAuthority(byAuthority, row => row.owner, v => v !== ''),
+    // 上下架（R5-B-1）：**false 优先**（任一行说下架 ⇒ 下架）；没有该字段 ⇒
+    // undefined（未知，不得读成"上架"）。
+    enabled: rows.some(row => row.enabled === false)
+      ? false
+      : rows.some(row => row.enabled === true) ? true : undefined,
     downloads: maxOf(rows, row => row.downloads),
     calls: maxOf(rows, row => row.calls),
     score: maxOf(rows, row => row.score),
@@ -1294,6 +1413,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const officialBadge = item.official === true ? <Chip tone="brand">{t('capability.official')}</Chip> : null
     const qualityBadge = item.quality === 'featured' ? <Chip tone="warn">{t('capability.featured')}</Chip> : null
     /**
+     * 「已下架」徽章（R5-B-1）：形态照**应用中心**那一套（`AppCenterPanel` 的
+     * `appCenter.disabled` 中性胶囊 + 卡片置灰 + 说明文字），不另创一套。
+     */
+    const delistedBadge = isDelistedItem(item) ? <Chip tone="neutral" plain>{t('capability.delisted')}</Chip> : null
+    /** 「已转交」徽章（R5-B-2）：归属已不在自己名下（服务端 `is_owner:false`）。 */
+    const transferredBadge = isTransferredItem(item) ? <Chip tone="warn">{t('capability.transferred')}</Chip> : null
+    /**
      * 「来源」徽章**只出一个**（选键的唯一实现在 {@link capabilitySourceBadgeKey}）。
      */
     const sourceBadge = <Chip tone="neutral" plain>{t(capabilitySourceBadgeKey(item, isMineSection ? 'mine' : 'market'))}</Chip>
@@ -1306,6 +1432,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         {officialBadge}
         {qualityBadge}
         {statusBadge}
+        {delistedBadge}
+        {transferredBadge}
         {item.source === 'local' && item.originChannel !== undefined && item.originChannel !== 'builtin' && (
           <Chip tone="neutral" plain>{`v${item.version}`}</Chip>
         )}
@@ -1405,8 +1533,14 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const isLocal = item.source === 'local'
     // 页脚动作的唯一判定（A6/N1）：本机内置（builtin/plugin）行与商店行都不在这里各判一次。
     const plan = planCardAction(item)
+    /**
+     * 两态说明（R5-B-1 / R5-B-2）都在这里取一次 —— 徽章、置灰、说明文字必须同源，
+     * 否则会出现"卡片说已下架、按钮却是上传"的自相矛盾（正是这两条 finding 的形态）。
+     */
+    const delisted = isDelistedItem(item)
+    const transferred = isTransferredItem(item)
     return (
-      <Card key={key} interactive muted={item.status === 'rejected'} style={CARD} className="pico-skill-card">
+      <Card key={key} interactive muted={item.status === 'rejected' || delisted} style={CARD} className="pico-skill-card">
         <div style={TITLE_ROW}>
           <IconTile size={38} radius={12} tone={item.kind === 'skill' ? 'brand' : 'neutral'} label={item.name.charAt(0)} />
           <div style={NAME_COL}>
@@ -1429,6 +1563,16 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         )}
         {item.status === 'rejected' && item.reason !== undefined && item.reason !== '' && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }}>{t('capability.rejectReason', { reason: item.reason })}</p>
+        )}
+        {/* 状态说明（R5-B-1 / R5-B-2）：徽章只给结论，这一行走的是"为什么 + 还能做什么"。
+            应用中心同款位置（`appCenter.publishNewDisabled` 也是卡片里的说明段）。 */}
+        {(delisted || transferred) && (
+          <p
+            style={{ ...META, whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' }}
+            data-role={transferred ? 'card-transferred-reason' : 'card-delisted-reason'}
+          >
+            {transferred ? t('capability.transferredHint') : t('capability.delistedHint')}
+          </p>
         )}
         {uninstallConfirmKey === key && needsOverwriteConfirm(item) && (
           <p style={{ ...META, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'pre-wrap' }} data-role="local-remove-warning">
@@ -1453,9 +1597,16 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
                 ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
                 : plan.kind === 'review'
                   ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone={plan.status === 'pending' ? 'warn' : 'success'}>{plan.status === 'pending' ? t('capability.awaitingReview') : t('capability.approved')}</Chip></span>
-                  : plan.kind === 'upload'
-                    ? <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
-                    : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>}
+                  // 已转交（R5-B-2）：这一格**没有**可达动作 —— 上传会被服务端 409 挡下，
+                  // 所以给状态胶囊而不是假按钮（形态与「等待审核」那一档一致）。
+                  : plan.kind === 'transferred'
+                    ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.transferred')}</Chip></span>
+                    // 已下架且本机没有可卸的一份（R5-B-1）：同样只报状态。
+                    : plan.kind === 'delisted'
+                      ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="neutral" plain>{t('capability.delisted')}</Chip></span>
+                      : plan.kind === 'upload'
+                      ? <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
+                      : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>}
         </div>
         {/* 历史版本、描述全文都收在详情弹层里（就地展开会把整行栅格撑高）。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
