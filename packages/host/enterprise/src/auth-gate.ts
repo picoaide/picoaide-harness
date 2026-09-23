@@ -2147,12 +2147,16 @@ export function apply(ctx: Context, config: Config): void {
                 // the code-appropriate status (NAME_TAKEN→409, PENDING_LIMIT→429).
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
                 // 版本冲突各有语义(409/403)。
+                // 2026-09-23(第五轮 R5-B-1 跨泳道):**同时透传稳定错误码** ——
+                // 状态码不是一个可判定的判据(409 同时是 NAME_TAKEN / VERSION_* /
+                // CONFLICT / ARCHIVE_CLEARED / APP_DELISTED),面板按 code 才能把
+                // 「已下架冻结」与「重名」分开说(见 uploadFailureText)。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403
                       : cause.code === 'NOT_FOUND' ? 404
                         : 422)
-                return json(res, status, { error: cause.message })
+                return json(res, status, { error: cause.message, code: cause.code })
               }
               // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
               // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
@@ -2359,12 +2363,16 @@ export function apply(ctx: Context, config: Config): void {
               if (cause instanceof ApiError) {
                 // 2026-09-02:透传服务端原始状态码(不再一律 422)——归属/锁定/
                 // 版本冲突各有语义(409/403),客户端按状态码分别提示。
+                // 2026-09-23(第五轮 R5-B-1 跨泳道):**同时透传稳定错误码** ——
+                // 409 是多个码共用的状态,面板必须按 code 才能把「已下架冻结」
+                // (APP_DELISTED)与「重名」(NAME_TAKEN)分开说,与 agent-presets
+                // 那条上传代理逐字同形。
                 const status = cause.status ?? (cause.code === 'PENDING_LIMIT' ? 429
                   : cause.code === 'NAME_TAKEN' || cause.code.startsWith('VERSION_') ? 409
                     : cause.code === 'APP_LOCKED' ? 403
                       : cause.code === 'NOT_FOUND' ? 404
                         : 422)
-                return json(res, status, { error: cause.message })
+                return json(res, status, { error: cause.message, code: cause.code })
               }
               // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
               // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。

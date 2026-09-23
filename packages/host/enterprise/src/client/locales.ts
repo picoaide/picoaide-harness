@@ -46,7 +46,10 @@ export const zh = {
   // 下架 / 归属两态（R5-B-1 / R5-B-2）。形态照应用中心那一套（中性「已下架」胶囊 +
   // 一句"为什么 + 还能做什么"的说明），不另创一套文案。
   'capability.delisted': '已下架',
-  'capability.delistedHint': '该条目已不在能力中心目录中：可能已被管理员下架、已转交给他人，或你的授权已被撤回。本机这一份仍可使用，但不能再更新或上传新版本。',
+  'capability.delistedHint': '该条目已不在能力中心目录中：可能已被管理员下架、已转交给他人，或你的授权已被撤回。本机这一份仍可使用，但不能再更新或上传新版本；若是被下架，内容在下架期间冻结（上传与审核一律被拒），要等重新上架后才能发新版。',
+  // 下架期间上传被服务端拒绝（409 APP_DELISTED）时的用户可见文案。与
+  // `capability.delistedHint` 同一语义，但这一条说的是"你刚点的那个动作为什么没成"。
+  'capability.delistedFrozen': '该内容已下架，新版本已被拒绝：下架期间内容冻结（上传与审核一律被拒），请先联系管理员重新上架，再发新版。',
   'capability.transferred': '已转交',
   'capability.transferredHint': '这条内容已转交给其他负责人，你不再有发布权；如需继续维护请联系管理员。',
   'capability.updateTo': '更新到 v{version}',
@@ -178,7 +181,8 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.featured': 'Featured',
   'capability.installed': 'Installed',
   'capability.delisted': 'Delisted',
-  'capability.delistedHint': 'This item is no longer in the Capability Hub catalog: it may have been delisted by an administrator, transferred to someone else, or your access may have been revoked. The copy on this machine still works, but it can no longer be updated or re-uploaded.',
+  'capability.delistedHint': 'This item is no longer in the Capability Hub catalog: it may have been delisted by an administrator, transferred to someone else, or your access may have been revoked. The copy on this machine still works, but it can no longer be updated or re-uploaded; if it was delisted, its content stays frozen (uploads and approvals are refused) until an administrator relists it.',
+  'capability.delistedFrozen': 'This item is delisted, so the new version was refused: while delisted its content is frozen (uploads and approvals are rejected). Ask an administrator to relist it first, then publish the new version.',
   'capability.transferred': 'Transferred',
   'capability.transferredHint': 'This item has been transferred to another owner, so you no longer have publishing rights; contact your administrator to keep maintaining it.',
   'capability.updateTo': 'Update to v{version}',

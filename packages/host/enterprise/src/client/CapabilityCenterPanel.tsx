@@ -700,6 +700,30 @@ export function nameTakenError(displayName: string): string {
 }
 
 /**
+ * 上传被服务端拒绝时的用户可见文案（**按稳定错误码映射，不看 HTTP 状态码**）。
+ *
+ * 为什么判据必须是 `code` 而不是 `status`（R5-B-1 的客户端尾巴，2026-09-23 跨泳道
+ * 补齐）：本机写面（`auth-gate` 的 `/api/pico/shared-skills/upload` 与
+ * `/api/pico/agent-presets/upload`）会**透传服务端原始状态码**，而 409 同时是
+ * `NAME_TAKEN` / `VERSION_*` / `CONFLICT` / `ARCHIVE_CLEARED` / `APP_DELISTED`
+ * 的码 —— 按 409 一律说「名称已被占用」会把「已下架冻结」说成重名（本仓踩过同形的坑）。
+ * 因此只有 `APP_DELISTED` 走专用文案；**其它任何码都逐字沿用本函数引入前的行为**
+ * （服务端 message 优先，缺省回落 `HTTP <status>`），不被这条分支吞掉。
+ *
+ * 抽成纯函数的理由与 {@link nameTakenError} 相同：文案取自模块级 `t()`，只有
+ * "切语言后跟着变"的断言才有判别力，且"其它码不被吞"需要能被直接打坏。
+ * @param failure - 本机写面返回的错误信封（`code` 缺省 = 旧宿主 / 非信封错误）。
+ * @returns 当前界面语言下的提示文案。
+ */
+export function uploadFailureText(
+  failure: { code?: string | undefined; message?: string | undefined; status: number },
+): string {
+  if (failure.code === 'APP_DELISTED') return t('capability.delistedFrozen')
+  if (failure.message !== undefined && failure.message !== '') return failure.message
+  return `HTTP ${String(failure.status)}`
+}
+
+/**
  * 跨源同名行的**权威序**：市场 > 组织 > 本机（2026-08-25 决策"跨源同名的展示行
  * 保留市场"）。返回值只取决于行的 `source`，与数组到达顺序无关。
  * @param item - 能力中心的一行。
@@ -1378,8 +1402,15 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({ name: item.name }),
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)
+        const data = await res.json().catch(() => ({})) as { error?: unknown; code?: unknown }
+        // R5-B-1 的客户端尾巴：下架冻结（409 APP_DELISTED）说清"为什么没成 + 怎么解"，
+        // 而不是把服务端 message 原样（或 `HTTP 409`）丢给用户。判据**只看错误码**
+        // （409 同时是 NAME_TAKEN/VERSION_*/CONFLICT 的码），其它码逐字沿用原行为。
+        throw new Error(uploadFailureText({
+          ...typeof data.code === 'string' ? { code: data.code } : {},
+          ...typeof data.error === 'string' ? { message: data.error } : {},
+          status: res.status,
+        }))
       }
       setAction({ key, kind: 'done-upload', name: item.name })
       loadAll()
