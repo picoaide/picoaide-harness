@@ -78,6 +78,24 @@ interface CapabilityItem {
    * （覆盖/删除前**必须**由用户确认，宿主也会在缺 `?overwrite=1` 时 409 拒绝）。
    */
   installedOrigin?: 'store' | 'local' | undefined
+  /**
+   * 本机那一份**能不能算作当前账号的**（宿主按服务端「我的」视图下发的归属判据，
+   * 第六轮审计 R6-B-1）。
+   *
+   * 技能库/预设目录是**机器作用域**的（`<DSH_HOME>/skills`，不按账号分目录），
+   * 而同机换账号是被支持的操作 ⇒ 磁盘上这一份可能是**别的账号**装的。宿主手里唯一
+   * 能证明的事实是：服务端 `?source=own`（author-own 任意状态）里有没有同名同 kind
+   * 的行 —— 有 ⇒ 这个名字属于当前账号（`'mine'`）；没有 ⇒ **证明不了**
+   * （`'unknown'`：既可能是别人装的，也可能是我装的别人的内容）。
+   *
+   * 为什么**不发** `'other'`：宿主没有任何事实能证明"这一份是第三方装的"，编一个
+   * 出来就是本条 finding 的同一个错（拿未知当已知）。
+   *
+   * 消费纪律（见 {@link isDelistedItem} 第 3 条）：只有 `'mine'` 才允许走"目录里没有
+   * 它 ⇒ 判已下架"的推断，并因此给出**删除本机那一份**的动作；`'unknown'` 一律不判、
+   * 不删（判据只回答"能不能从目录更新/上传"，不回答"这份内容还能不能用"）。
+   */
+  localOwnership?: 'mine' | 'unknown' | undefined
   /** 是否本地创作（「我的」分区用）。 */
   isLocal?: boolean | undefined
   /** 本地创作时是否有上传状态记录（无 = 未上传过）。 */
@@ -484,31 +502,47 @@ function catalogSourcedLocal(item: Pick<CapabilityItem, 'installedOrigin' | 'ori
 
 /**
  * 这一行当前**不在可用目录中**（下架 / 授权撤回 / 已转走）—— 三条判据，前两条是
- * 服务端下发的事实，第三条才是客户端推断：
+ * 服务端下发的事实，第三条是**只在能证明属于当前账号时**才允许的客户端推断：
  *
  *  1. **权威判据（作者面）**：服务端在作者自己的行上下发了 `delisted: true`
  *     （`CapabilityItem.Delisted`，R5-B-1 的服务端泳道新增字段）；
  *  2. **权威判据（目录面）**：服务端在行上下发了 `enabled: false`（下架行不再被
  *     服务端滤掉时就是这一档，客户端无需再改）；
- *  3. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，且带着目录
- *     渠道的商店溯源（{@link catalogSourcedLocal}）。
+ *  3. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，带着目录渠道的
+ *     商店溯源（{@link catalogSourcedLocal}），**且宿主能证明它属于当前账号**
+ *     （`localOwnership === 'mine'`）。
  *
  * 第 2 条为什么成立：{@link mergeItems} 的权威序是 市场 > 组织 > 本机 —— 只要目录里
  * 还有同名同 kind 的一行，归并结果的 `source` 就**不可能**是 `local`。于是
  * "source === 'local' + 商店溯源"等价于"这份内容是从目录装进来的、而目录里已经没有
  * 它了"（R5-B-1：下架后员工面 market/org/own 三个来源同时为空，只剩磁盘本机行）。
  *
+ * ⚠️ **第 3 条为什么必须加归属这一维（第六轮审计 R6-B-1）**：技能库是**机器作用域**
+ * 的（`<DSH_HOME>/skills`，不按账号分目录），同机换账号又是被支持的操作。于是"本机有
+ * 一份商店内容、当前账号在 own/market 两个视图里都看不到它"这个形状**同时**对应两种
+ * 完全不同的处境：
+ *   - 它确实是当前账号的内容（作者面 `delisted` 未下发的旧服务端；或授权被撤回），
+ *     或
+ *   - 它是**另一个账号**在这台机器上装的（当前账号既不是作者、也没有授权）。
+ * 只看"目录里没有它"无法区分两者，修复前的版本会把后者也说成"可能已被管理员下架"，
+ * 并把页脚换成**删除本机那一份**——一个跨账号的破坏性动作。归属判据由宿主下发
+ * （{@link CapabilityItem.localOwnership}，来自服务端 `?source=own` 的匹配结果），
+ * 证明不了（`'unknown'`）就**不下判词**：不标已下架、也不给删除类动作。
+ *
  * 判据只回答"还能不能从目录更新/上传"，**不**回答"这份内容还能不能用"：磁盘上这一份
  * 照常可用、照常渲染，只是不再出现"上传/更新"这种已达不成的动作。
  * @param item - 能力中心的一行（必须是**归并后**的行，见上）。
- * @returns 明确不在目录中 ⇒ `true`；其余（含未知）⇒ `false`。
+ * @returns 明确不在目录中且属于当前账号 ⇒ `true`；其余（含未知）⇒ `false`。
  */
 export function isDelistedItem(
-  item: Pick<CapabilityItem, 'source' | 'delisted' | 'enabled' | 'installedOrigin' | 'originChannel'>,
+  item: Pick<
+    CapabilityItem,
+    'source' | 'delisted' | 'enabled' | 'installedOrigin' | 'originChannel' | 'localOwnership'
+  >,
 ): boolean {
   if (item.delisted === true) return true
   if (item.enabled === false) return true
-  return item.source === 'local' && catalogSourcedLocal(item)
+  return item.source === 'local' && catalogSourcedLocal(item) && item.localOwnership === 'mine'
 }
 
 /**
@@ -539,10 +573,15 @@ export function isTransferredItem(item: Pick<CapabilityItem, 'isOwner' | 'upload
  * 两条口径（与 {@link localRemoveEndpoint} / `needsOverwriteConfirm` 同源）：
  *  - `source === 'local'`（本机创作，含 builtin/plugin 同步进来的那一份）：
  *    平台/随包内置的技能出「卸载」（审计 A6）；**已转交**（R5-B-2）与**不在目录中**
- *    （R5-B-1/B-3）两态各自出状态/卸载，**绝不出「上传」**；其余按上传状态出
- *    上传/等审/重传；
+ *    （R5-B-1/B-3，**且能证明属于当前账号**，R6-B-1）两态各自出状态/卸载，
+ *    **绝不出「上传」**；其余按上传状态出上传/等审/重传；
  *  - 商店行：未装出「安装」，有新版出「更新到 vX」（**不传 force**，A15），
  *    否则出「卸载」。
+ *
+ * 删除类动作的**准入条件**（R6-B-1）：本机那一份必须能证明属于当前账号
+ * （{@link CapabilityItem.localOwnership} = `'mine'`，或服务端下发了权威的
+ * `delisted`/`enabled`）。证明不了的行**一律不出**「卸载」—— 技能库是机器作用域的，
+ * 删掉的很可能是同机**另一个账号**装的那一份。
  * @param item - 能力中心的一行（归并后的行）。
  * @returns 页脚动作。
  */
@@ -562,6 +601,12 @@ export function planCardAction(item: CapabilityItem): CardActionPlan {
     // （{@link uninstallEndpoint} 对技能走 shared-skills、对智能体走
     // agent-presets —— 两条都是既有端点，零新增接口）。是否为"用户自己的内容"
     // 仍由 needsOverwriteConfirm 决定要不要先确认一次。
+    //
+    // ⚠️ 这一格**只在能证明本机那一份属于当前账号时**才可能命中（R6-B-1）：
+    // `isDelistedItem` 的第 3 条判据要求 `localOwnership === 'mine'`。证明不了
+    // （`'unknown'`，例如"同事在这台机器上装的商店技能"）时落到下面的上传档：
+    // 那是一个**无副作用**的动作（服务端会以名称占用拒掉），而删除**别人**装在
+    // 这台机器上的那一份是有后果的跨账号动作。
     if (isDelistedItem(item)) {
       return {
         kind: 'uninstall',
@@ -848,6 +893,10 @@ function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
     installedVersion: pickByAuthority(byAuthority, row => row.installedVersion, () => true),
     // 本机行优先：来源判定只有磁盘上的 provenance 说得准（A2/A3/A6）。
     installedOrigin: local?.installedOrigin ?? pickByAuthority(byAuthority, row => row.installedOrigin, () => true),
+    // 归属判据（R6-B-1）：只有宿主下发在本机行上，**只认本机行那一份**，且不做
+    // "任一行有就取"的归并 —— 它描述的是"磁盘上这一份算不算当前账号的"，目录行
+    // 上的任何字段都回答不了这个问题。缺省 undefined = 证明不了（不得读成 'mine'）。
+    localOwnership: local?.localOwnership,
     originChannel: local?.originChannel ?? pickByAuthority(byAuthority, row => row.originChannel, () => true),
     originAppId: local?.originAppId ?? pickByAuthority(byAuthority, row => row.originAppId, () => true),
     dirty: local?.dirty ?? pickByAuthority(byAuthority, row => row.dirty, () => true),

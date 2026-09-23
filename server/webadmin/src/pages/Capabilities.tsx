@@ -71,6 +71,21 @@ function fmtTime(iso: string): string {
 }
 
 /**
+ * 「待审 + 应用已下架」这一格为什么不能点（R6-B P2，2026-09-23）。
+ *
+ * 服务端自第五轮起在下架期间对 approve 一律 409 `APP_DELISTED`
+ * （`server/internal/sharedskills/routes.go` 的 `Distribution.Writable()`，agentshare 同闸；
+ * 带真 PG 的回归用例 `internal/capabilities/r5b_delist_owner_semantics_test.go` 明确造出
+ * "先有 1.1.0 待审、再下架"并断言 409）。而本页此前只在 `status === 'approved'` 的行上
+ * 渲染下架徽标，待审行给出的是一个**注定失败**的「通过」按钮，事前没有任何标记。
+ *
+ * 文案与 `APP_DELISTED` 语义一致，并给出 Admin 在本页可达的处置路径
+ * （上下架是 App 级、按 name 生效 ⇒ 在「已通过」页对同名应用的已通过版本「上架」即可解冻）。
+ */
+export const DELISTED_PENDING_HINT =
+  '该应用已下架：下架期间「通过」会被服务端拒绝（409 APP_DELISTED）。请先到「已通过」页对该应用「上架」。'
+
+/**
  * 锁定管理(决策 2026-09-01 D4):被锁定的技能/智能体只能由管理员发布,
  * 员工在客户端上传时会收到 403 与此处填写的理由。支持对**尚不存在**的
  * 名字预先锁定(占名),防止员工抢占官方命名。
@@ -314,7 +329,10 @@ export default function Capabilities() {
                     </TableCell>
                     <TableCell>
                       <Badge variant={meta.variant}>{meta.label}</Badge>
-                      {row.status === 'approved' && row.enabled === false && (
+                      {/* 下架徽标按**服务端字段**（`apps.enabled=false`）渲染，不再只在
+                          `status === 'approved'` 的行上：待审版本叠在已下架应用上时，
+                          通过必被服务端 409 `APP_DELISTED` 拒（R6-B P2），事前必须有标记。 */}
+                      {row.enabled === false && (
                         <Badge variant="destructive" className="ml-1" title="已下架：员工目录不可见且不可下载（数据保留）">已下架</Badge>
                       )}
                     </TableCell>
@@ -377,7 +395,13 @@ export default function Capabilities() {
                           )
                         )}
                         {row.status !== 'approved' && (
-                          <Button size="sm" disabled={isBusy} onClick={() => { setConfirm(row); setConfirmKind('approve') }}>通过</Button>
+                          // 已下架的待审行：「通过」置灰（点下去必然 409 APP_DELISTED），
+                          // 说明挂在**外层 span** 上 —— 禁用按钮不派发鼠标事件，浏览器
+                          // 不会显示它自己的 title（R6-B P2）。
+                          <span title={row.enabled === false ? DELISTED_PENDING_HINT : undefined}>
+                            <Button size="sm" disabled={isBusy || row.enabled === false}
+                              onClick={() => { setConfirm(row); setConfirmKind('approve') }}>通过</Button>
+                          </span>
                         )}
                         {/* 拒绝只对待审版本开放(ID-01,审计 2026-09-23):拒绝与
                             「释放归档字节」是同一条 UPDATE,对**已通过且在服务中**

@@ -74,6 +74,19 @@ function localRow(name: string, extra: Partial<CapabilityItem> = {}): Capability
 const DELISTED = localRow('delisted-skill', { delisted: true })
 const LIVE = localRow('live-skill')
 
+/**
+ * **跨账号**那一条（R6-B-1，第六轮审计）：本机技能库是机器作用域的，这一份是
+ * **另一个账号**在这台机器上从能力中心装的（商店溯源，但当前账号 own/market 都看不到
+ * ⇒ 宿主只能给 `localOwnership: 'unknown'`）。修复前它被判「已下架」并被给出
+ * "删除本机那一份"的动作（跨账号破坏性动作）。
+ */
+const OTHER_ACCOUNT = localRow('other-account-skill', {
+  installedOrigin: 'store',
+  originChannel: 'market',
+  originAppId: 'other-account-skill',
+  localOwnership: 'unknown',
+})
+
 beforeEach(() => {
   setActiveLocale('zh')
   container = document.createElement('div')
@@ -83,7 +96,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
     calls.push({ url, init: init ?? {} })
-    if (url.includes('source=local')) return jsonResponse(200, { items: [DELISTED, LIVE] })
+    if (url.includes('source=local')) return jsonResponse(200, { items: [DELISTED, LIVE, OTHER_ACCOUNT] })
     if (url.includes('source=market')) return jsonResponse(200, { items: [] })
     return jsonResponse(200, {})
   }))
@@ -152,5 +165,24 @@ describe('R5-B-1 已下架徽章的真挂载判据（B-N2）', () => {
     expect(text).toContain('delisted-skill')
     expect(text).toContain('live-skill')
     expect(calls.some(call => call.url.includes('source=local'))).toBe(true)
+  })
+
+  /**
+   * R6-B-1：**证明不了归属**的行不得判已下架、不得给删除动作。
+   *
+   * 这一条与上面「带 `delisted:true` 的权威行」成对：前者钉"真下架的呈现没有被改弱"，
+   * 这一条钉"拿未知当已知不再导致跨账号的破坏性动作"。变异：把 `isDelistedItem`
+   * 第 3 条判据里的 `localOwnership === 'mine'` 去掉（= 修复前的形态）⇒ 徽章、
+   * 说明段与卸载按钮三处同时出现，本用例必红。
+   */
+  it('同机另一账号装的商店内容（localOwnership=unknown）：不出下架徽章、不出卸载按钮', async () => {
+    await mountPanel()
+    const card = cardOf('other-account-skill')
+    expect(leafTexts(card, t('capability.delisted'))
+      .filter(element => element.getAttribute('data-role') === null)).toHaveLength(0)
+    expect(card.querySelector('[data-role="card-delisted-reason"]')).toBeNull()
+    expect(buttonTexts(card)).not.toContain(t('capability.uninstall'))
+    // 落回「上传」：那是一个**无副作用**的动作（服务端会以名称占用拒掉）。
+    expect(buttonTexts(card)).toContain(t('capability.upload'))
   })
 })

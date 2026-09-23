@@ -75,6 +75,41 @@ const ERROR: React.CSSProperties = { fontSize: 12, margin: 0, color: 'var(--dsw-
 const LOADING_LABEL: React.CSSProperties = { fontSize: 13, margin: 0, color: 'var(--dsw-alias-label-caption)' }
 
 /**
+ * 改密失败时，"这是旧密码错了"该由**哪个字段**判定（第六轮审计 R6-B 的 P3）。
+ *
+ * 修前这里嗅探的是**服务端中文原文**（`raw.includes('原密码')`），而服务端另有
+ * 一条 400 `"新密码不能与原密码相同"`（`server/internal/serverauth/handler.go`）
+ * 也含这串 ⇒ 会被显示成"原密码不正确"。文案耦合的判据一改服务端措辞就静默退化。
+ *
+ * 现在判据是宿主下发的**稳定错误码**（`POST /api/pico/auth/password` 的
+ * `{error, code}`，见 auth-gate 该分支的注释）：
+ *   - `AUTH_FAILED`（401）= 服务端拒绝了本次提交的凭据，对本端点即"原密码错误"；
+ *   - 其它码（`NETWORK` / `HTTP_400` / `INTERNAL` …）逐字沿用原行为：显示服务端
+ *     原文，取不到就回落到带状态码的通用文案。
+ *
+ * 抽成纯函数的理由：本包没有 jsdom/渲染测试面（同 `planCardAction` 的取舍），
+ * 判据必须能被直接钉住 —— 用例在 `tests/account-password-error-code.spec.ts`。
+ * @param payload - 宿主响应的 JSON 体（形状不保证，按 unknown 处理）。
+ * @returns 是否"旧密码错误"。
+ */
+export function isWrongOldPassword(payload: unknown): boolean {
+  if (payload === null || typeof payload !== 'object') return false
+  return (payload as { code?: unknown }).code === 'AUTH_FAILED'
+}
+
+/** 失败响应里可展示的服务端原文（老形状 `{error: string}` 与错误对象都能读）。 */
+function serverErrorMessage(payload: unknown): string {
+  if (payload === null || typeof payload !== 'object') return ''
+  const raw = (payload as { error?: unknown }).error
+  if (typeof raw === 'string') return raw
+  // `{error: {message}}`：与本仓服务端信封同形（本路由不用，防上游形状变化）。
+  if (raw !== null && typeof raw === 'object' && typeof (raw as { message?: unknown }).message === 'string') {
+    return (raw as { message: string }).message
+  }
+  return ''
+}
+
+/**
  * Account page: the logged-in username and server, with a logout action that
  * revokes the gateway token server-side (via the local API) and returns the
  * main window to the login page.
@@ -153,17 +188,14 @@ export function AccountSection(_props: PropsRuntime<'settings.section'>) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
       })
-      const data = (await res.json().catch(() => null)) as { error?: string } | null
+      const data = (await res.json().catch(() => null)) as unknown
       if (!res.ok) {
-        const raw = String(data?.error ?? '')
-        // 刻意嗅探**服务端**的中文原文:Go 服务端的错误文案不在本次 i18n 范围内
-        // (服务端只回 `{"error":{"code","message"}}`,message 恒为中文),而"原密码
-        // 错误"这条要换成界面语言、又不能把服务端整句话塞给用户,只能按原文匹配。
-        // 这把客户端与服务端的措辞耦合在一起:服务端改文案时这里会**静默退化**成
-        // 直接显示服务端中文(不会报错)。更稳的做法是服务端在该分支回稳定错误码
-        // (如 AUTH_FAILED + 独立 code),届时把这里换成按 code 判定。
-        const msg = raw.includes('原密码') ? t('account.password.errOld') : raw || t('account.password.errFailed', { error: String(res.status) })
-        setPwErr(msg)
+        // 判据 = 宿主下发的**稳定错误码**，不再嗅探服务端中文原文（R6-B 的 P3，
+        // 见 isWrongOldPassword 的头注释：`"新密码不能与原密码相同"` 也含"原密码"）。
+        const message = serverErrorMessage(data)
+        setPwErr(isWrongOldPassword(data)
+          ? t('account.password.errOld')
+          : message || t('account.password.errFailed', { error: String(res.status) }))
         return
       }
       // 服务端已吊销全部令牌(本地会话被清除): 刷新回登录页, 提示用新密码登录。

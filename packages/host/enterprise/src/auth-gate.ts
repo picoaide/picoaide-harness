@@ -1061,6 +1061,29 @@ export function installedOriginFor(
 }
 
 /**
+ * 解析本机路由里的一格 `decodeURIComponent`：**畸形百分号转义不再抛穿 handler**。
+ *
+ * 为什么必须兜住（第六轮审计 R6-B 的 P3，与 wasm-apps 的 FIX-40 同一条纪律）：
+ * `decodeURIComponent('%zz')` 抛 `URIError`，而本模块的 handler 是 async 的 ——
+ * 异常会一路抛到上游 webserver，被兜底成 `writeHead(400); res.end()`（**无 body**）。
+ * 而本机 API 的错误口径是"一律 JSON 信封"（第一消费者是 AI 的 http 工具/脚本）：
+ * 一个空 body 等于让它完全无法判断该改什么。
+ *
+ * 合法客户端不会构造这种路径（面板一律 `encodeURIComponent`），所以这条不是安全
+ * 边界，而是**契约完整性**：四个上游 JSON 分支之外，宿主自己也要守同一条。
+ * @param raw - 正则捕获到的原始段（未解码）。
+ * @returns 解码结果；非法转义 ⇒ `null`（调用方回 400 具名信封）。
+ */
+export function decodePathSegment(raw: string | undefined): string | null {
+  if (raw === undefined) return null
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 组装期注入的品牌 → `/api/client/v2/channel` 形态的响应体。
  *
  * 字段名与服务端 `channel.Response` 对齐（客户端 `channel-sync` 直吃这份），
@@ -1607,7 +1630,21 @@ export function apply(ctx: Context, config: Config): void {
             const status = err instanceof AuthError
               ? (err.kind === 'network' ? 502 : 401)
               : (err instanceof ApiError ? 400 : 500)
-            json(res, status, { error: err instanceof Error ? err.message : 'change password failed' })
+            // 稳定错误码（第六轮审计 R6-B 的 P3）：账户卡片此前靠**嗅探服务端中文原文**
+            // （`message.includes('原密码')`）判断"是不是旧密码错了"，而服务端另有
+            // 一条 400 `"新密码不能与原密码相同"` 也含这串 —— 文案一改就静默退化。
+            // 这里回一个与文案无关的码，判据落在 `code` 上（扁平 `{error, code}` 是本
+            // 文件其余写面的既有形状，见 describeArchiveFailure 的消费点）。
+            //
+            // 取值：`NETWORK`（连接层，502）/ `AUTH_FAILED`（服务端拒绝了本次凭据，
+            // 对本端点即"原密码错误"，401）/ `ApiError.code`（如 `HTTP_400`，校验类）/ `INTERNAL`。
+            // 已认账的边界：服务端 401 分两种码（`AUTH_FAILED` 原密码错 / `AUTH` 令牌失效），
+            // 而连接器层把两者都收敛成 `AuthError('invalid_credentials')` ⇒ 这里无法再分，
+            // 统一记 `AUTH_FAILED`（要彻底分开需连接器透传服务端 code，属独立改动）。
+            const code = err instanceof AuthError
+              ? (err.kind === 'network' ? 'NETWORK' : 'AUTH_FAILED')
+              : (err instanceof ApiError ? err.code : 'INTERNAL')
+            json(res, status, { error: err instanceof Error ? err.message : 'change password failed', code })
           }
         },
       }),
@@ -1849,7 +1886,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (builtinInstallMatch !== null) {
-            const name = decodeURIComponent(builtinInstallMatch[1]!)
+            const name = decodePathSegment(builtinInstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1912,7 +1950,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/builtin\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (builtinUninstallMatch !== null) {
-            const name = decodeURIComponent(builtinUninstallMatch[1]!)
+            const name = decodePathSegment(builtinUninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1935,7 +1974,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -1991,7 +2031,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -2015,7 +2056,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/skills\/([^/]+)\/archive$/u.exec(pathname)
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
-          const name = decodeURIComponent(archiveMatch[1]!)
+          const name = decodePathSegment(archiveMatch[1])
+          if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
           // B8(2026-09-01):归档下载分支此前未校验 name——解码后的名字会
           // 原样拼进 Content-Disposition(如 %22 → `"` 产生畸形头)。与
           // install/uninstall 分支对齐,先验名再放行。
@@ -2174,7 +2216,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validatePresetId(name)
             } catch (cause) {
@@ -2225,7 +2268,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               // 与技能同口径（审计 A3/N2）：本机自制内容没有 `?overwrite=1` 一律拒收。
               await uninstallPreset(presetsDir, name, { overwrite })
@@ -2245,7 +2289,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/agent-presets\/([^/]+)\/archive$/u.exec(pathname)
             : null
           if (archiveMatch === null) return json(res, 404, { error: 'not found' })
-          const name = decodeURIComponent(archiveMatch[1]!)
+          const name = decodePathSegment(archiveMatch[1])
+          if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
           // B8(2026-09-01):与 install/uninstall 对齐,归档下载分支先验名再拼
           // Content-Disposition(此前解码后的 quote 会产出畸形头)。
           try {
@@ -2390,8 +2435,10 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/install$/u.exec(pathname)
             : null
           if (installMatch !== null) {
-            const name = decodeURIComponent(installMatch[1]!)
-            const version = decodeURIComponent(installMatch[2]!)
+            const name = decodePathSegment(installMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
+            const version = decodePathSegment(installMatch[2])
+            if (version === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               validateSkillName(name)
             } catch (cause) {
@@ -2445,7 +2492,8 @@ export function apply(ctx: Context, config: Config): void {
             ? /^\/api\/pico\/shared-skills\/([^/]+)\/([^/]+)\/uninstall$/u.exec(pathname)
             : null
           if (uninstallMatch !== null) {
-            const name = decodeURIComponent(uninstallMatch[1]!)
+            const name = decodePathSegment(uninstallMatch[1])
+            if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             // 名字先于安装器校验（R4-B-6）：另外三条写面
             // （`/api/pico/skills/:name/{install,uninstall}`、
             // `/api/pico/skills/builtin/:name/{install,uninstall}`）都在进安装器**之前**
@@ -2591,6 +2639,16 @@ export function apply(ctx: Context, config: Config): void {
                 // 作者面的成因）。无匹配行时不写这个键（未知 ≠ 未下架；JSON 序列化会丢掉
                 // undefined，面板读到的是"服务端没说"）。
                 delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
+                // 归属判据（第六轮审计 R6-B-1）：**本机这一份算不算当前账号的**。
+                // 技能库是机器作用域的（`<DSH_HOME>/skills`，不按账号分目录），同机换号
+                // 被支持 ⇒ 磁盘上这一份可能是**别的账号**装的。宿主能证明的只有一件事：
+                // 服务端 `?source=own`（author-own 任意状态）里有没有同名同 kind 的行 ——
+                // 有 ⇒ 这个名字属于当前账号（`'mine'`）；没有 ⇒ 证明不了（`'unknown'`，
+                // 既可能是别人装的、也可能是我装的别人的内容）。
+                // ⚠️ 面板据此**禁止**对 `'unknown'` 的行给出"删除本机那一份"的动作
+                // （见 CapabilityCenterPanel 的 `isDelistedItem` 第 3 条）—— 那是一个
+                // 跨账号的破坏性动作。**不发 `'other'`**：没有任何事实能证明"是第三方装的"。
+                localOwnership: match !== undefined ? 'mine' : 'unknown',
               })
             }
             for (const l of localPresets) {
@@ -2610,6 +2668,9 @@ export function apply(ctx: Context, config: Config): void {
                 versions: [], isLocal: true, uploadStatus: match !== undefined ? (match as { status?: string }).status : undefined,
                 // 与技能面同一条透传（R5-B-1）：智能体预设的作者行同样带服务端下发的 delisted。
                 delisted: match !== undefined && (match as { delisted?: unknown }).delisted === true ? true : undefined,
+                // 与技能面同一条归属判据（R6-B-1，逐字同源）：预设目录同样是机器作用域的
+                // （`<DSH_HOME>/.agent-presets`），证明不了归属就不允许面板给删除动作。
+                localOwnership: match !== undefined ? 'mine' : 'unknown',
               })
             }
 

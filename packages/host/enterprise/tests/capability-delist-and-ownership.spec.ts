@@ -21,6 +21,10 @@
  *  - 把 `isTransferredItem` 改回 `return false` ⇒ 「已转交」两条必红；
  *  - 把归并里的 `isOwner` 改回 `some(=== true) ? true : undefined` ⇒ 归属两条必红；
  *  - 把 `planCardAction` 的 delisted 分支删掉 ⇒ 智能体那条必红（退回 upload）。
+ *
+ * ⚠️ 第六轮审计 R6-B-1 之后，本文件的**推断判据**用例都显式带上 `localOwnership: 'mine'`
+ * （= 宿主能证明这个名字属于当前账号）。跨账号那两条（证明不了归属 ⇒ 不判已下架、不给
+ * 删除动作）在 `capability-local-ownership.spec.ts` 里。
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -92,8 +96,11 @@ function catalogRow(kind: 'skill' | 'agent', name: string, extra: Partial<Capabi
 }
 
 describe('R5-B-1 已下架：员工面能表达出来，且动作与状态一致', () => {
-  it('目录里已经没有这一行（下架/撤权）⇒ 已下架，且页脚不再是「上传」', () => {
-    const item = localRow('skill', 'r5b-skill', 'org')
+  it('可证明属于我的本机行 + 目录里已经没有这一行（下架/撤权）⇒ 已下架，且页脚不再是「上传」', () => {
+    // `localOwnership: 'mine'` = 宿主证明了这个名字属于当前账号（服务端 `?source=own`
+    // 有同名同 kind 的行）。第六轮审计 R6-B-1 之后，推断判据**只对这一档**生效 ——
+    // 证明不了的行（同机另一个账号装的那一份）不得被判已下架、更不得给删除动作。
+    const item = localRow('skill', 'r5b-skill', 'org', { localOwnership: 'mine' })
     // 修前：`planCardAction` 退化成 {kind:'upload'}（这就是 finding 的现场）。
     expect(planCardAction(item)).not.toEqual({ kind: 'upload' })
     expect(isDelistedItem(item)).toBe(true)
@@ -193,8 +200,8 @@ describe('R5-B-1 已下架：员工面能表达出来，且动作与状态一致
 })
 
 describe('R5-B-3 下架后的智能体：本机行也要走到 agent 卸载端点', () => {
-  it('智能体本机行 ⇒ 卸载动作指向 agent 端点（既有端点，未新增任何服务端接口）', () => {
-    const item = localRow('agent', 'r5b-agent', 'org')
+  it('可证明属于我的智能体本机行 ⇒ 卸载动作指向 agent 端点（既有端点，未新增任何服务端接口）', () => {
+    const item = localRow('agent', 'r5b-agent', 'org', { localOwnership: 'mine' })
     expect(planCardAction(item)).toEqual({
       kind: 'uninstall',
       endpoint: '/api/pico/agent-presets/r5b-agent/uninstall',
