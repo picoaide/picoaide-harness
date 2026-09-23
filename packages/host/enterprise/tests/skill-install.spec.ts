@@ -589,17 +589,63 @@ describe('A2/A3 覆盖与删除按 provenance 判定（本机自制内容必须�
     await expect(installSkillArchive({ name: 'squatter', archive, skillsDir: root })).rejects.toThrow(/not installed by the Capability Hub/u)
   })
 
-  it('商店来源（market/org/builtin/plugin 四种）不需要确认即可更新/卸载', async () => {
+  it('商店来源、同渠道更新不需要确认即可更新；卸载同样不需要确认', async () => {
     for (const channel of ['market', 'org', 'builtin', 'plugin'] as const) {
       await makeStoreSkill(root, `store-${channel}`, channel)
       const archive = await makeArchive({ 'SKILL.md': skillMdWith(`store-${channel}`, 'version: 2.0.0\n') })
       await expect(
-        installSkillArchive({ name: `store-${channel}`, archive, skillsDir: root, version: '2.0.0' }),
+        installSkillArchive({ name: `store-${channel}`, archive, skillsDir: root, version: '2.0.0', channel }),
         channel,
       ).resolves.toMatchObject({ name: `store-${channel}` })
       await expect(uninstallSkill(root, `store-${channel}`), channel).resolves.toBe(join(root, `store-${channel}`))
     }
     expect(await listInstalledSkills(root)).toEqual([])
+  })
+
+  /**
+   * W4 P1-2（2026-09-23）：同一目录的 provenance 渠道发生变化时（market ↔ plugin
+   * 等）必须有显式确认 —— 旧实现把 `plugin` 也算进"商店来源 ⇒ 无需确认"，于是市场里
+   * 点一次「安装」就静默吃掉随包插件同步进来的同名技能，而插件下次开机会把内容换回去
+   * （内容与徽章归属错位，`dirty` 还会翻真）。
+   */
+  it('跨渠道覆盖（市场 × 随包插件技能）无 overwrite 一律拒绝，内容与溯源一字不动', async () => {
+    const dir = await makeStoreSkill(root, 'memory-consolidate', 'plugin')
+    const skillBefore = await readFile(join(dir, 'SKILL.md'), 'utf8')
+    const provenanceBefore = await readFile(join(dir, '.picoaide', 'release.json'), 'utf8')
+    await writeFile(join(dir, 'extra-notes.md'), 'vendor-owned extra\n')
+
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('memory-consolidate', 'version: 3.0.0\n') })
+    await expect(
+      installSkillArchive({ name: 'memory-consolidate', archive, skillsDir: root, version: '3.0.0' }),
+    ).rejects.toThrow(/another channel/u)
+    expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toBe(skillBefore)
+    expect(await readFile(join(dir, '.picoaide', 'release.json'), 'utf8')).toBe(provenanceBefore)
+    expect(await readFile(join(dir, 'extra-notes.md'), 'utf8')).toBe('vendor-owned extra\n')
+
+    // 用户确认后才真的换渠道：内容换成市场版，溯源也必须跟着变成 market（内容与归属一致）。
+    await expect(
+      installSkillArchive({ name: 'memory-consolidate', archive, skillsDir: root, version: '3.0.0', overwrite: true }),
+    ).resolves.toMatchObject({ name: 'memory-consolidate' })
+    const prov = await readProvenance(dir)
+    expect(prov?.channel).toBe('market')
+    expect(prov?.version).toBe('3.0.0')
+    expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toMatch(/version: 3\.0\.0/u)
+  })
+
+  it('跨渠道与"用户自制"是两条判据：无 provenance 的目标仍按自制内容拒绝（互不掩盖）', async () => {
+    await mkdir(join(root, 'hand-written'), { recursive: true })
+    await writeFile(join(root, 'hand-written', 'SKILL.md'), skillMdWith('hand-written'))
+    const archive = await makeArchive({ 'SKILL.md': skillMdWith('hand-written', 'version: 1.0.0\n') })
+    await expect(
+      installSkillArchive({ name: 'hand-written', archive, skillsDir: root, channel: 'builtin' }),
+    ).rejects.toThrow(/not installed by the Capability Hub/u)
+    // 反向：同渠道覆盖（builtin 装到 builtin 上）不需要确认。
+    const dir = await makeStoreSkill(root, 'from-builtin', 'builtin')
+    const same = await makeArchive({ 'SKILL.md': skillMdWith('from-builtin', 'version: 2.0.0\n') })
+    await expect(
+      installSkillArchive({ name: 'from-builtin', archive: same, skillsDir: root, version: '2.0.0', channel: 'builtin' }),
+    ).resolves.toMatchObject({ name: 'from-builtin' })
+    expect((await readProvenance(dir))?.channel).toBe('builtin')
   })
 
   it('readProvenance 把 plugin 原样返回（不回落成 market，跨泳道契约 S2）', async () => {

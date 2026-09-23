@@ -288,15 +288,19 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   // （每个最多 16MiB 原始 + 64MiB 解包）。只清"超过阈值"的，正在跑的那一份不受影响。
   await sweepStaleSkillTemps(skillsDir, options.staleTempMaxAgeMs)
 
-  // 同名覆盖守卫（审计 A2/A3）：本机自制内容必须显式确认。
+  // 同名覆盖守卫（审计 A2/A3 + W4 P1-2）：本机自制内容，以及**换渠道覆盖**
+  // （目标那份来自另一条商店渠道，如随包插件同步写下的 `plugin`）都必须由用户
+  // 显式确认（面板确认条 → `?overwrite=1`）；缺确认一律 409 `LOCAL_CONTENT`。
   const targetDir = join(skillsDir, name)
   const existingOrigin = await classifyInstalledSkill(targetDir, name)
-  if (existingOrigin === 'local' && overwrite !== true) {
-    throw new ArchiveInstallRefusal(
-      'LOCAL_CONTENT',
-      `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
-      + 'installing would replace it (including your own files) — confirm the overwrite to continue',
-    )
+  if (existingOrigin !== undefined && overwrite !== true) {
+    const existingChannel = existingOrigin === 'store' ? (await readProvenance(targetDir))?.channel : undefined
+    if (requiresOverwriteConfirmation(existingOrigin, existingChannel, channel)) {
+      throw new ArchiveInstallRefusal(
+        'LOCAL_CONTENT',
+        describeOverwriteRefusal(name, existingOrigin, existingChannel, channel),
+      )
+    }
   }
 
   // Stage under the skill root so the final rename stays on one filesystem.
@@ -482,6 +486,60 @@ export async function classifyInstalledSkill(skillDir: string, name: string): Pr
  */
 export function isStoreProvenance(prov: SkillProvenance | undefined, name: string): boolean {
   return prov !== undefined && isStoreChannel(prov.channel) && prov.appId === name
+}
+
+/**
+ * 覆盖一个**已存在**的同名技能目录时，是否必须由用户显式确认（审计 W4 P1-2，2026-09-23）。
+ *
+ * 判据把"来源"拆成两件不同的事（此前混在一起 ⇒ 静默覆盖 + 归属错）：
+ *  - {@link isStoreProvenance} 回答"这份内容是不是用户手写的"（决定卸载/更新要不要
+ *    当成用户数据对待）；
+ *  - 本函数回答"这次覆盖会不会**换渠道**"。目标是商店来源、但渠道与本次安装的渠道
+ *    不同（market ↔ org ↔ builtin ↔ plugin）时，整树替换会把这份技能从一条渠道搬到
+ *    另一条：内容来源变了、而调用方按"商店来源 ⇒ 直接更新"放行，用户零感知。实测
+ *    （W4 probe10）：市场安装无确认覆盖随包插件技能 → 下次开机插件同步又换回插件版
+ *    （插件侧现在也会拒收，见 `skills-sync.js` 的来源闸门），两边互相覆盖。
+ *
+ * 因此：目标不存在 → 不需要确认；用户自制 → 需要确认；商店来源但渠道不同 → 需要确认；
+ * 商店来源且渠道相同 → 正常更新（安装器自己的升级路径）。
+ *
+ * @param existingOrigin - {@link classifyInstalledSkill} 的结果（`undefined` = 目标不存在）。
+ * @param existingChannel - 目标那一份的 provenance 渠道（仅商店来源时有值）。
+ * @param incomingChannel - 本次安装写入的渠道。
+ * @returns 需要用户显式确认（面板确认条 / `?overwrite=1`）为 true。
+ */
+export function requiresOverwriteConfirmation(
+  existingOrigin: InstalledSkillOrigin | undefined,
+  existingChannel: string | undefined,
+  incomingChannel: SkillProvenanceChannel,
+): boolean {
+  if (existingOrigin === undefined) return false
+  if (existingOrigin === 'local') return true
+  return existingChannel !== incomingChannel
+}
+
+/**
+ * 覆盖被拒时的用户可读原因（两种成因共用 `LOCAL_CONTENT` 这一个拒绝码：
+ * 面板对 409 的处理是同一条确认条，见 `CapabilityCenterPanel` 的 `performInstall`）。
+ * @param name - the skill id.
+ * @param existingOrigin - 目标那一份的来源分类。
+ * @param existingChannel - 目标那一份的 provenance 渠道。
+ * @param incomingChannel - 本次安装写入的渠道。
+ * @returns 英文（对外文案语言与其它拒绝一致）说明。
+ */
+function describeOverwriteRefusal(
+  name: string,
+  existingOrigin: InstalledSkillOrigin,
+  existingChannel: string | undefined,
+  incomingChannel: SkillProvenanceChannel,
+): string {
+  if (existingOrigin === 'local') {
+    return `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
+      + 'installing would replace it (including your own files) — confirm the overwrite to continue'
+  }
+  return `a skill named "${name}" is installed from the "${String(existingChannel)}" channel; installing the `
+    + `"${incomingChannel}" version would move it to another channel and replace its content — `
+    + 'confirm the overwrite to continue'
 }
 
 /** 本机那一份技能/智能体的来源：商店（能力中心装的）或本机自制。 */
@@ -681,7 +739,15 @@ export const PROVENANCE_DIR = '.picoaide'
  */
 export type SkillProvenanceChannel = 'market' | 'org' | 'builtin' | 'plugin'
 
-/** 商店来源渠道（"这份内容不是用户手写的"）。 */
+/**
+ * 商店来源渠道（判据："这份内容不是用户手写的"）。
+ *
+ * ⚠️ 这个集合**只**回答"是不是用户内容"（卸载/更新按它决定要不要当用户数据对待）。
+ * 它**不**表示"可以直接被另一条渠道覆盖" —— 覆盖时的渠道互斥由
+ * {@link requiresOverwriteConfirmation} 单独判定（审计 W4 P1-2：此前把 `plugin`
+ * 放进这个集合就顺带获得了"无需确认即可被市场覆盖"的待遇，于是市场安装静默吃掉
+ * 随包插件技能、内容与徽章归属错位）。
+ */
 export const STORE_PROVENANCE_CHANNELS: readonly SkillProvenanceChannel[] = ['market', 'org', 'builtin', 'plugin']
 
 /** 渠道是否属于商店来源（类型收窄）。 */

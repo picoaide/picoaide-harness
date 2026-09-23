@@ -2,10 +2,14 @@
  * Child process for the A9 marker-preservation regression
  * (tests/coi-skills-sync-provenance-and-staging.test.js).
  *
- * Builds a plugin skill (x-version 2) and an already-installed copy that looks like a
- * **market install** (`.picoaide/release.json` with channel 'market' + `.install-version`
- * '9.9.9' + a user-added notes.md), then runs one `syncBuiltinSkills` pass and prints
- * the resulting directory state.
+ * Builds a plugin skill (x-version 2) and an already-installed copy that the plugin
+ * itself wrote earlier (`.picoaide/release.json` with channel 'plugin' + `.install-version`
+ * '9.9.9' + a user-added notes.md), then runs one `syncBuiltinSkills` pass and prints the
+ * resulting directory state.
+ *
+ * Channel 'plugin' is load-bearing since the P1-1 source gate: only directories whose
+ * provenance says the content came from this plugin are updated in place; a 'market'
+ * copy is refused instead (see tests/coi-skills-sync-source-gate.test.js).
  *
  * Run with `--import tests/fixtures/register-swap-fault.mjs` (+ SWAP_FAULT_CODE=EPERM)
  * to exercise the failed-swap rollback: the installer markers were moved into the
@@ -31,12 +35,12 @@ const userSkills = join(dir, 'skills')
 mkdirSync(join(pluginSkills, NAME), { recursive: true })
 writeFileSync(join(pluginSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: d\nx-version: 2\n---\n# NEW-SOURCE\n`)
 
-// 已装副本 = 市场安装形态
+// 已装副本 = 本插件先前同步落下的形态（channel: 'plugin' ⇒ 允许整树换入）
 mkdirSync(join(userSkills, NAME, '.picoaide'), { recursive: true })
 writeFileSync(join(userSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: d\nx-version: 1\n---\n# OLD-INSTALLED\n`)
 writeFileSync(
   join(userSkills, NAME, '.picoaide', 'release.json'),
-  `${JSON.stringify({ appId: NAME, version: '9.9.9', channel: 'market', installedAt: '2026-09-01T00:00:00.000Z' }, null, 2)}\n`,
+  `${JSON.stringify({ appId: NAME, version: '9.9.9', channel: 'plugin', installedAt: '2026-09-01T00:00:00.000Z' }, null, 2)}\n`,
 )
 writeFileSync(join(userSkills, NAME, '.install-version'), '9.9.9')
 writeFileSync(join(userSkills, NAME, 'notes.md'), 'USER DATA\n')

@@ -5,8 +5,12 @@
  * 「技能管理」Tab 禁用）。插件包内自带内置技能（skills/ 目录），
  * 插件启动时同步到技能库（落点 = `config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）：
  *   - 目标不存在 → 复制（装上）
- *   - 目标 x-version 更低 → 整目录覆盖（源头在插件，升级随插件更新）
+ *   - 目标存在且**溯源渠道就是 plugin**，x-version 更低 → 整目录覆盖
+ *     （源头在插件，升级随插件更新）
  *   - 一致 → 跳过
+ *   - 目标存在但是用户自制内容 / 另一条商店渠道的同名技能 → **拒绝**（fail-loud，
+ *     `action: 'refused'` + `code`），绝不整树覆盖 —— 见 {@link classifySyncTarget}
+ *     与本文档的"来源闸门"段（P1-1/P1-2，2026-09-23 独立审计 W4）
  * 同步以**整目录**为单位（SKILL.md + scripts/ 等辅助文件随技能一起走）；
  * 被禁用的技能文件仍存在，只是不注入模型。
  */
@@ -59,6 +63,30 @@ const PROVENANCE_FILE = 'release.json'
  * 这份技能是**插件随包**装上的，而不是用户自制。
  */
 const PLUGIN_CHANNEL = 'plugin'
+
+/**
+ * 商店来源渠道（P1-1/P1-2 修复，2026-09-23 独立审计 W4）。
+ *
+ * ⚠️ 这是**企业包安装器同一判据的本地副本**，真源在
+ * `packages/host/enterprise/src/skill-install.ts` 的
+ * `STORE_PROVENANCE_CHANNELS`（值 `['market','org','builtin','plugin']`）。
+ * 跨包 import 禁止（本插件是随包 vendored 副本，不依赖企业包），所以这里复刻
+ * 取值集合，不 import。**改真源必须同步改这里**：两边漂移的后果是"安装器认为
+ * 是商店来源、同步器认为是用户内容"（或反过来），也就是本次要修的这类静默覆盖。
+ */
+const STORE_CHANNELS = ['market', 'org', 'builtin', PLUGIN_CHANNEL]
+
+/**
+ * 拒绝码（P1-1 修复）：与安装器一样，**如实报 refused 并点名原因**，绝不静默
+ * 覆盖。两者都出现在 `syncBuiltinSkills` 结果的 `code` 字段上：
+ *   - {@link SKILL_LOCAL_CONTENT}：目标目录没有可用的安装器溯源 ⇒ 按"用户自制"
+ *     处理（判据与安装器的 `classifyInstalledSkill === 'local'` 同源）；
+ *   - {@link SKILL_CHANNEL_CONFLICT}：目标目录是**另一条商店渠道**（market /
+ *     org / builtin）装进来的 ⇒ 整树换入会把渠道从那条改成 plugin，两边会在
+ *     每次开机互相覆盖（P1-2 的乒乓球）。
+ */
+const SKILL_LOCAL_CONTENT = 'SKILL_LOCAL_CONTENT'
+const SKILL_CHANNEL_CONFLICT = 'SKILL_CHANNEL_CONFLICT'
 
 /**
  * 暂存/旁置目录的"陈旧"年龄上限：超过它一律按崩溃残留清扫（即便 pid 还在
@@ -135,6 +163,97 @@ function skillVersion(text) {
 }
 
 /**
+ * 读目标技能目录的安装器溯源渠道（P1-1 修复，2026-09-23 独立审计 W4）。
+ *
+ * 判据与企业包安装器的 `isStoreProvenance`（`skill-install.ts:483-485`）
+ * **逐条同源**，三件事必须同时成立才算"这份内容不是用户手写的"：
+ *   1. `<dir>/.picoaide/release.json` 可读且是 JSON 对象；
+ *   2. `appId` 是 string 且**等于目录名**（目录被改名/被占用时不算）；
+ *   3. `channel` 是已知的商店渠道取值（见 {@link STORE_CHANNELS}；未知取值按
+ *      "非商店来源"处理 —— 与安装器"未知渠道不回落成 market"的历史修复同口径）。
+ * 任何一条不成立都返回 `undefined` = 按用户自制内容处理（宁可多拒一次，不可
+ * 静默覆盖/删除用户内容）。
+ *
+ * @param {string} destDir - 技能库内的目标技能目录。
+ * @param {string} name - 期望的技能名（= 目录名）。
+ * @returns {string|undefined} 渠道取值；不是商店来源时为 undefined。
+ */
+function readStoreChannel(destDir, name) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(join(destDir, PROVENANCE_DIR, PROVENANCE_FILE), 'utf8'))
+  } catch {
+    return undefined // 没有标记 / 读不出来 / JSON 坏 —— 都是"不是商店来源"
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined
+  if (typeof parsed.appId !== 'string' || parsed.appId !== name) return undefined
+  if (typeof parsed.channel !== 'string' || !STORE_CHANNELS.includes(parsed.channel)) return undefined
+  return parsed.channel
+}
+
+/**
+ * 整树换入**之前**的来源闸门（P1-1 / P1-2 修复，2026-09-23 独立审计 W4）。
+ *
+ * 为什么必须有它：本插件的开机同步原先只看 `x-version`（{@link syncBuiltinSkills}
+ * 的 `needsCopy`），于是**任何**同名目录都会被整树换入 —— 用户手写的同名技能连同
+ * 自己的笔记/脚本一起被删、还被补上 `channel: 'plugin'` 的溯源（能力中心此后按
+ * "商店来源"对待）。实测（W4 probe5 情形 1）：用户文件消失、`installedOrigin`
+ * 从 `local` 翻 `store`，全程零确认。它同时是 P1-2 的一半：市场装进来的同名技能
+ * 会被换回插件版而 `.picoaide` 原样保留 ⇒ 内容与徽章归属不一致。
+ *
+ * 判据（**同一个函数同时决定覆盖与不覆盖**，不在调用点各写一遍）：
+ *   - 目录不存在 → 允许（首次安装，正常路径）；
+ *   - 渠道 === `plugin` → 允许（`x-version` 正常更新；安装器标记由 A9 保留）；
+ *   - 渠道是**其它**商店渠道（market/org/builtin）→ 拒绝（换渠道 = 两边每次开机
+ *     互相覆盖，必须由用户显式处置，见 {@link SKILL_CHANNEL_CONFLICT}）；
+ *   - 没有可用的商店溯源 → 拒绝（按用户自制内容处理，见 {@link SKILL_LOCAL_CONTENT}）。
+ *
+ * 注意"目录存在但没有 SKILL.md"同样按**存在**处理：那可能是用户自己的目录
+ * （只有若干笔记文件），整树换入会把它们删掉。首次安装请让落点不存在。
+ *
+ * @param {string} destDir - 技能库内的目标技能目录。
+ * @param {string} name - 技能名（= 目录名）。
+ * @returns {{ok:true}|{ok:false, code:string, message:string}} 判定结果。
+ */
+function classifySyncTarget(destDir, name) {
+  const channel = readStoreChannel(destDir, name)
+  if (channel === PLUGIN_CHANNEL) return { ok: true }
+  if (channel !== undefined) {
+    return {
+      ok: false,
+      code: SKILL_CHANNEL_CONFLICT,
+      message: `${destDir} 是「${channel}」渠道装进来的同名技能 —— 整树换入会把它的来源改成 plugin`
+        + '（内容与溯源归属不一致，且两条渠道会在每次开机互相覆盖）；已拒绝。'
+        + '若要使用随包内置技能，请先在能力中心卸载该同名技能或改掉它的目录名。',
+    }
+  }
+  return {
+    ok: false,
+    code: SKILL_LOCAL_CONTENT,
+    message: `${destDir} 已存在，但没有可用的安装器溯源（按"用户自制"处理）—— 整树换入会连同你自己的文件一起删掉；已拒绝。`
+      + '若要使用随包内置技能，请先卸载/改名这份同名目录。',
+  }
+}
+
+/**
+ * 落点是否**已经存在任何东西**（不跟随符号链接，`lstat` 语义）。
+ *
+ * 与 `existsSync` 的差别正是闸门要的那种：指向不存在目标的悬空符号链接
+ * `existsSync` 为假，但它**占着这个落点**，必须交给 {@link syncSkillDirSafe} 的
+ * 断言去拒收（预置链接是拒收而不是被换入静默删掉，本地 NF-1 口径）。
+ * @param {string} path - 待检查的路径。
+ * @returns {boolean} 存在（含符号链接、普通文件）为 true。
+ */
+function isPresent(path) {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * 校验并规范化一段 SKILL.md 内容（技能格式要求）：
  *   - 空内容 / 超上限 → 抛错
  *   - 已有 frontmatter：必须完整（--- 包裹、含 name 与 description），
@@ -167,9 +286,10 @@ export function normalizeSkillText(raw, skillName, displayName) {
 
 /**
  * 同步内置技能到用户技能库。
- * 覆盖策略（保护用户编辑）：目标缺失 → 复制；目标 x-version 更低 →
- * 整目录覆盖（插件升级，SKILL.md 与 scripts/ 等辅助文件一起更新）；
- * 否则不动（用户可能编辑过，x-version 未变不覆盖）。
+ * 覆盖策略（保护用户内容）：目标缺失 → 复制；目标存在且溯源渠道就是 `plugin`、
+ * 且 x-version 更低 → 整目录覆盖（插件升级，SKILL.md 与 scripts/ 等辅助文件一起
+ * 更新）；版本一致 → 不动；**目标是用户自制内容或另一条商店渠道的同名技能 →
+ * 拒收**（`refused`，见 {@link classifySyncTarget}）。
  *
  * 落点（NF-1，2026-09-13 审计加固；2026-09-16 与上游整目录语义合流）：
  * `<userSkillsDir>/<name>` 是本插件**自有内容**的固定落点，必须先过断言——
@@ -180,11 +300,19 @@ export function normalizeSkillText(raw, skillName, displayName) {
  * 依然逐个文件走自锚定原子写，断言不放松。
  * 单个技能落点被拒只记 `refused`，不阻塞其余技能同步。
  *
+ * **来源闸门（P1-1 / P1-2 修复，2026-09-23 独立审计 W4）**：覆盖之前先判定目标
+ * 目录的安装器溯源（{@link classifySyncTarget}）——用户自制内容与"另一条商店渠道"
+ * 的同名技能一律不动、如实记 `refused`（并打日志点名技能与原因）；只有目录不存在
+ * 或渠道就是 `plugin` 时才走 `x-version` 更新。这一条与安装器的
+ * `classifyInstalledSkill` / `isStoreProvenance` 是同一份判据（本地副本，见
+ * {@link STORE_CHANNELS}），不是第二套口径。
+ *
  * @param {string} pluginSkillsDir - 插件包内 skills/ 目录的绝对路径。
  * @param {string} userSkillsDir - 用户技能库目录（`config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）。
  * @returns {Array<{name:string, action:'synced'|'unchanged'|'missing'|'refused', message?:string, code?:string}>}
- *   `code` 只在可区分的失败上出现（目前只有换入+回滚双失败的
- *   `SKILL_SWAP_RECOVERY_FAILED`，见 {@link SkillSwapRecoveryError}）。
+ *   `code` 只在可区分的失败上出现：换入+回滚双失败的
+ *   `SKILL_SWAP_RECOVERY_FAILED`（见 {@link SkillSwapRecoveryError}），以及来源闸门
+ *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT`。
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
@@ -211,6 +339,20 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
     let action = 'unchanged'
     let message
     let code
+    // 来源闸门（P1-1/P1-2）：目标目录存在时，**先**判定它是不是本插件自己的
+    // （渠道 = plugin）。用户自制内容与其它商店渠道的同名技能都拒收；这一判定
+    // 与 x-version 无关 —— 版本相同也照样如实报 refused，否则"本机是别的东西"
+    // 会被 `unchanged` 掩盖成"已经是最新"。
+    if (isPresent(destDir)) {
+      const verdict = classifySyncTarget(destDir, name)
+      if (!verdict.ok) {
+        // fail-loud：点名技能、原因与落点。整树换入会删掉目标目录里的**全部**
+        // 内容（含用户自己的文件），所以这里绝不"尽力而为"。
+        console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${verdict.code}）：${verdict.message}`)
+        results.push({ name, action: 'refused', message: verdict.message, code: verdict.code })
+        continue
+      }
+    }
     const needsCopy = !existsSync(destFile)
       || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
     if (needsCopy) {

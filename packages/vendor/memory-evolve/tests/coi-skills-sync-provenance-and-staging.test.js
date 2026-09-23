@@ -16,6 +16,11 @@
  *   **后**写 provenance）→ 前两条用例红（目标 provenance 消失 / 新装目录没有
  *  `channel: 'plugin'`）；把回滚里的 `restoreInstallerMarkers` 去掉 → 第三条红。
  *
+ *  ⚠️ 前置条件（P1-1 来源闸门，2026-09-23 W4）：整树换入只对**渠道就是 plugin**
+ *   的目标生效（缺溯源 / 别的商店渠道一律拒收，见
+ *   `tests/coi-skills-sync-source-gate.test.js`）——所以本文件的"已装副本"夹具
+ *   必须是 plugin 溯源，否则测的就不是换入路径了。
+ *
  * A16（P3）换入临时目录名会被当成"一个独立技能"：旧命名
  *   `<name>.staging-<pid>-<ts>` 命中客户端 `SKILL_NAME_PATTERN`
  *   （`^[a-z0-9][a-z0-9._-]{0,63}$`）且内部有完整 SKILL.md ⇒ SIGKILL 窗口期内
@@ -65,8 +70,11 @@ function seedPluginSkill(pluginSkills, { xVersion } = {}) {
   writeFileSync(join(pluginSkills, NAME, 'scripts', 'helper.mjs'), '// HELPER\n')
 }
 
-/** 造一份"市场安装形态"的已装副本（版本 1 < 源，触发整目录换入）。 */
-function seedMarketInstall(userSkills, { channel = 'market', version = '9.9.9' } = {}) {
+/** 造一份"本插件先前同步落下的"已装副本（版本 1 < 源，触发整目录换入）。
+ *
+ * 渠道必须是 `plugin`：P1-1 的来源闸门只允许整树换入"本插件自己的内容"
+ * （见 tests/coi-skills-sync-source-gate.test.js），`market` 那一份会被拒收。 */
+function seedPluginInstall(userSkills, { channel = 'plugin', version = '9.9.9' } = {}) {
   mkdirSync(join(userSkills, NAME, '.picoaide'), { recursive: true })
   writeFileSync(join(userSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: installed\nx-version: 1\n---\n# OLD-INSTALLED\n`)
   writeFileSync(
@@ -85,7 +93,7 @@ test('A9 成功换入：目标目录的 `.picoaide/` 与 `.install-version` 逐�
     const pluginSkills = join(dir, 'plugin-skills')
     const userSkills = join(dir, 'skills')
     seedPluginSkill(pluginSkills, { xVersion: 2 })
-    const provenanceBefore = seedMarketInstall(userSkills)
+    const provenanceBefore = seedPluginInstall(userSkills)
     const installVersionBefore = readFileSync(join(userSkills, NAME, '.install-version'), 'utf8')
 
     const results = syncBuiltinSkills(pluginSkills, userSkills)
@@ -93,7 +101,7 @@ test('A9 成功换入：目标目录的 `.picoaide/` 与 `.install-version` 逐�
     assert.equal(results.find((r) => r.name === NAME).action, 'synced')
     assert.match(readFileSync(join(userSkills, NAME, 'SKILL.md'), 'utf8'), /BUNDLED/, '内容必须来自插件源（换入仍然生效）')
     assert.equal(existsSync(join(userSkills, NAME, '.picoaide', 'release.json')), true, '同步吃掉了安装溯源（A9）')
-    assert.equal(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'), provenanceBefore, '市场 provenance 必须逐字不变')
+    assert.equal(readFileSync(join(userSkills, NAME, '.picoaide', 'release.json'), 'utf8'), provenanceBefore, 'plugin provenance 必须逐字不变')
     assert.equal(existsSync(join(userSkills, NAME, '.install-version')), true, '同步吃掉了 .install-version（A9）')
     assert.equal(readFileSync(join(userSkills, NAME, '.install-version'), 'utf8'), installVersionBefore)
     assert.equal(existsSync(join(userSkills, NAME, 'scripts', 'helper.mjs')), true, '整目录语义：辅助文件随技能一起更新')
@@ -195,7 +203,7 @@ test('A9 换入失败回滚：搬进暂存目录的安装器标记必须搬回�
   const ok = run(false)
   assert.equal(ok.entry.action, 'synced')
   assert.match(String(ok.destSkill), /NEW-SOURCE/)
-  assert.match(String(ok.provenance), /"channel": "market"/)
+  assert.match(String(ok.provenance), /"channel": "plugin"/)
   assert.equal(ok.installVersion, '9.9.9')
 
   // 故障：staging→dest 换入失败 → 回滚把旧目录改回来；此前搬进暂存目录的
@@ -203,7 +211,7 @@ test('A9 换入失败回滚：搬进暂存目录的安装器标记必须搬回�
   const bad = run(true)
   assert.equal(bad.entry.action, 'refused', `换入失败必须如实记 refused：${JSON.stringify(bad.entry)}`)
   assert.match(String(bad.destSkill), /OLD-INSTALLED/, '回滚后旧内容必须原封不动')
-  assert.match(String(bad.provenance ?? ''), /"channel": "market"/, '回滚清理把安装溯源带走了（stash 之后没有搬回）')
+  assert.match(String(bad.provenance ?? ''), /"channel": "plugin"/, '回滚清理把安装溯源带走了（stash 之后没有搬回）')
   assert.equal(bad.installVersion, '9.9.9', '回滚清理把 .install-version 带走了')
   assert.deepEqual(bad.leftovers, [], '回滚成功后不得留下暂存/旁置副本')
 })

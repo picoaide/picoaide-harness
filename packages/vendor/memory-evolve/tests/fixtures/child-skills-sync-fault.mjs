@@ -27,10 +27,15 @@ mkdirSync(join(pluginSkills, NAME, 'scripts'), { recursive: true })
 writeFileSync(join(pluginSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: d\nx-version: 2\n---\n# NEW-SOURCE\n`)
 writeFileSync(join(pluginSkills, NAME, 'scripts', 'helper.mjs'), '// NEW-HELPER\n')
 
-// 目标：用户已装好的旧版（x-version 1）+ 用户自加文件（整目录语义下会被替换，
-// 但**失败时**必须原样保留——这正是 S13-3 的断言面）
-mkdirSync(join(userSkills, NAME), { recursive: true })
+// 目标：**随包插件先前装好的旧版**（x-version 1，带 plugin 溯源 —— P1-1 的来源闸门
+// 只允许整树换入"本插件自己的内容"，缺溯源的同名目录会被拒收）+ 用户自加文件
+// （整目录语义下成功时会被替换，但**失败时**必须原样保留——这正是 S13-3 的断言面）
+mkdirSync(join(userSkills, NAME, '.picoaide'), { recursive: true })
 writeFileSync(join(userSkills, NAME, 'SKILL.md'), `---\nname: ${NAME}\ndescription: d\nx-version: 1\n---\n# OLD-INSTALLED\n`)
+writeFileSync(
+  join(userSkills, NAME, '.picoaide', 'release.json'),
+  `${JSON.stringify({ appId: NAME, version: '1', channel: 'plugin', installedAt: '2026-09-01T00:00:00.000Z' }, null, 2)}\n`,
+)
 writeFileSync(join(userSkills, NAME, 'notes.md'), 'USER DATA\n')
 
 const results = syncBuiltinSkills(pluginSkills, userSkills)
