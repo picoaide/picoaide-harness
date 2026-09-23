@@ -953,11 +953,21 @@ func setPresetGrant(db *sql.DB, grant bool) gin.HandlerFunc {
 // single-param form). Employees may download only approved presets (anything
 // else is the same 404 as "does not exist", so the review queue of other
 // people is never leaked); admins may download any row.
+//
+// 渠道口径(F4,2026-09-23 复审):`admin=true`(管理面 `/api/server/admin/agent-presets/*`)
+// **只服务组织行** —— 市场行有自己的管理面归档端点
+// `GET /api/server/admin/agents/:name/archive`(marketplace,2026-09-23 补齐),
+// 组织命名空间不该服务它。守卫在**任何行读取之前**,拒绝语义与"名字不存在"逐字节一致
+// (requireOrgAgent ⇒ 404「预设不存在」);`admin=false`(员工面)仍两渠道都服务 ——
+// 那是市场智能体的安装通路,口径见 channel.go 末段。
 func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name := c.Param("name")
 		if !presetIDRe.MatchString(name) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "预设名不合法")
+			return
+		}
+		if admin && !requireOrgAgent(c, db, name) {
 			return
 		}
 		p, err := serverstore.GetAgentPreset(db, name)
@@ -974,11 +984,15 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 }
 
 // downloadVersioned serves the stored archive of one name@version row.
+// 渠道口径与 download 相同(F4):管理面只服务组织行,员工面两渠道都服务。
 func downloadVersioned(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
 		if !presetIDRe.MatchString(name) || !versionRe.MatchString(version) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "参数不合法")
+			return
+		}
+		if admin && !requireOrgAgent(c, db, name) {
 			return
 		}
 		p, err := serverstore.GetAgentPresetByVersion(db, name, version)

@@ -184,17 +184,19 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 | POST | `/api/client/v2/agent-presets` | 上传:body `{name, display_name?, description?, version?(默认 1.0.0), archive(base64 zip)}` → 201 `{preset:{name, version, status:"pending"}}`;归档 ≤16MB、须含顶层 `agent.cordis.yml`、拒绝越界/链接;归档**直存 DB**(0041 不落盘);display_name/描述 ≤500 字;同名同版本 pending/approved → 409;rejected 可重提;每用户待审上限 10 → 429 |
 | GET | `/api/client/v2/agent-presets/:name/:version/archive` | 下载归档(仅 approved 且已授权;旧路径 `/:name/archive` 取最高版本);从 DB 出(0041);附 `X-Preset-Checksum` / `X-Preset-Version` |
 
+> 员工面归档下载**两种渠道都服务**(市场智能体的安装通路 = 桌面能力中心的能力安装端点,市场侧没有对员工开放的归档端点);市场「下架」在上架闸门 `apps.enabled` 处统一生效(下架后与「不存在」同 404)。
+
 ### 管理端(Admin)
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/server/admin/agent-presets?status=` | 全部清单(可选 status 过滤) |
-| GET | `/api/server/admin/agent-presets/:name/archive` | 管理员下载归档核查(任意版本,兼容旧路径) |
+| GET | `/api/server/admin/agent-presets/:name/archive` | 管理员下载归档核查(任意版本,兼容旧路径);**只服务组织行**(市场行走 `/agents/:name/archive`,跨渠道 ⇒ 与「不存在」同 404;2026-09-23 F4 加固) |
 | GET | `/api/server/admin/agent-presets/:name/preview` | 审核预览:`{files:[...], composition}`(顶层 agent.cordis.yml 内容 + 全文件清单;兼容旧路径) |
 | POST | `/api/server/admin/agent-presets/:name/approve` | 通过(兼容旧路径,版本取最高) |
 | POST | `/api/server/admin/agent-presets/:name/reject` | 拒绝:body `{reason}`(必填,≤500 字);仅上传者可见可重提 |
 | DELETE | `/api/server/admin/agent-presets/:name` | 删除记录与归档(全版本;兼容旧路径) |
-| GET | `/api/server/admin/agent-presets/:name/:version/archive` | 指定版本归档下载核查 |
+| GET | `/api/server/admin/agent-presets/:name/:version/archive` | 指定版本归档下载核查(**同上:只服务组织行**) |
 | GET | `/api/server/admin/agent-presets/:name/:version/preview` | 指定版本审核预览:`{files:[...], composition}` |
 | POST | `/api/server/admin/agent-presets/:name/:version/approve` | 通过该版本(清空 reason) |
 | POST | `/api/server/admin/agent-presets/:name/:version/reject` | 拒绝该版本:body `{reason}`(必填,≤500 字) |
