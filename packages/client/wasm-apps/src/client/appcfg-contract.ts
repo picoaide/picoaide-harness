@@ -219,6 +219,12 @@ export const PUBLISH_PAYLOAD_FIELDS = ['app_id', 'version', 'wasm_base64', 'conf
  * `picoaide-app://<app_id>/` 打开，服务端不再下发入口链接；可分享形态 = 深链
  * `<渠道 scheme>://app/<app_id>`）。客户端不再认识这个字段 —— 它出现也只是被忽略
  * （{@link ./AppCenterPanel.parseCatalog} 不映射）。
+ *
+ * 2026-09-23（R6-B-3）：新增 `frozen`（`apps.frozen_at` 非空）。它必须是**无条件**
+ * 字段而不是"冻结行才有"：冻结会**顺带下架**（`enabled=false`），只看 `enabled`
+ * 会把"冻结"显示成"已下架"，而两者的处置完全不同（下架可自己重新上架；冻结要先
+ * 解冻，且解冻入口只对归属人开）。同一轮修复让目录对**归属人本人**保留冻结行
+ * ——它是 `POST …/:app_id/freeze {"frozen":false}` 在客户端里唯一的依附面。
  */
 export const CATALOG_ROW_FIELDS = [
   'app_id',
@@ -228,6 +234,7 @@ export const CATALOG_ROW_FIELDS = [
   'owner',
   'access',
   'enabled',
+  'frozen',
   'current_version',
   'is_owner',
   'updated_at',

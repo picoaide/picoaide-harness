@@ -113,7 +113,8 @@ describe('目录解析：只归一化，不新增筛选规则（展示全部应�
     expect(items[0]).toEqual({
       appId: 'a', title: 'A 工具', description: '一句话', responsible: 'alice', access: 'login', enabled: true,
       // P1-4 / P1-3：服务端没下发就**留空 / false**，不编造版本号、也不假装是发布者。
-      // R5-B-7：`frozen` 同一条纪律 —— 服务端目前不列冻结行，缺席即"未冻结"。
+      // R5-B-7 / R6-B-3：`frozen` 同一条纪律 —— 缺席即"未冻结"（服务端对**归属人
+      // 本人**下发 `frozen:true`，客户端不推断冻结态）。
       currentVersion: '', isOwner: false, frozen: false,
     })
     // 2026-09-19：`entry_url` 已不在契约里（冻结契约 §4.5）—— 服务端仍带着它时

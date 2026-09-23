@@ -35,7 +35,7 @@ const repoSkillDir = "../../../../server/skills/app-builder"
 // "有更新"，装过的员工永远拿不到新版手册）。这条纪律由 skill_version_test.go 的
 // TestBuiltinSkillVersionTracksContent 用"内容摘要 → 版本"登记表守住；这里只是把
 // 断言里的字面量收敛到一处。
-const seededSkillVersion = "2.9.0"
+const seededSkillVersion = "2.10.0"
 
 // dropSkillVersion 从 SKILL.md 文本里删掉 version 那一行（坏资产夹具）。
 // 用正则而不是字面量替换：版本号提级时夹具不会跟着烂掉。

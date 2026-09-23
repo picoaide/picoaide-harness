@@ -144,9 +144,16 @@ export const zh = {
   // ——那是一句**接口契约**，员工在产品里没有任何入口去执行它；而同一份字典的
   // `openAppFrozenHint` 又说"联系平台管理员"。同一件事两个答案 = 承诺落空。
   // 现在的口径（面板已给出冻结/解冻入口，见 `app-lifecycle.ts` 的 `setAppFrozen`）：
-  // 发布者 → 应用中心；其他人 → 管理员；列表里看不到 → 管理员。
+  // 发布者 → 应用中心；其他人 → 管理员。
+  //
+  // R6-B-3（2026-09-23）：这条 hint 原来说"如果列表里已经看不到这个应用，请联系
+  // 平台管理员" —— 与"发布者本人在应用中心里就能解冻"自相矛盾：目录（面板唯一
+  // 数据源）曾经对**所有人**跳过冻结行，而面板每次挂载/每次发布后都重拉目录，于是
+  // 发布者看到的正是"列表里已经看不到"。现在服务端对**归属人本人**保留冻结行
+  // （带「已冻结」标记），发布者的路径因此在任何一次重载之后都可达；"看不到"
+  // 只剩另一种人：**不是**归属人的员工（他们本来就无权解冻）。
   'appCenter.availabilityFrozen': '这个标识属于一个已冻结的应用，解冻后才能发新版本',
-  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人在应用中心里就能解冻（解冻后还要重新上架才会恢复访问）；如果列表里已经看不到这个应用，请联系平台管理员',
+  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人的应用中心里一直能看到它（带「已冻结」标记），点「解冻」即可（解冻后还要重新上架才会恢复访问）；其他成员看不到已冻结的应用，需要解冻请联系平台管理员',
   'appCenter.availabilityRetired': '这个标识属于一个已删除（退役）的应用，标识与版本号永久占位',
   'appCenter.availabilityRetiredHint': '已删除的应用标识不会复用、也不释放给他人：请换一个名字新建应用',
   // 查重**没问成**（宿主/网络故障）：既不能说"可用"也不能说"被占用" ——
@@ -495,7 +502,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.availabilityTakenHint': 'An App ID is claimed permanently on first publish: it stays with its publisher even after unpublish or delete',
   'appCenter.availabilityInvalid': 'This App ID does not follow the naming rules — see the hint',
   'appCenter.availabilityFrozen': 'This App ID belongs to a frozen app; unfreeze it before releasing a new version',
-  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher can unfreeze it in the App Center (bring it online again afterwards to restore access); if the app is no longer listed, contact your platform administrator',
+  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher always sees the app in the App Center (marked "Frozen") and can unfreeze it there (bring it online again afterwards to restore access); other members do not see frozen apps — ask your platform administrator to unfreeze it',
   'appCenter.availabilityRetired': 'This App ID belongs to a deleted (retired) app; the ID and its version numbers are taken permanently',
   'appCenter.availabilityRetiredHint': 'A deleted App ID is never reused or released to others: please pick another name',
   'appCenter.availabilityUnknown': 'Could not confirm whether this App ID is available (you can still submit; the server checks again)',

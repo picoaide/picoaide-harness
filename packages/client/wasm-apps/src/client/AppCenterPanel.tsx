@@ -354,7 +354,9 @@ export function parseCatalogReport(payload: unknown): CatalogReport {
       // 服务端**会**下发 enabled（下架条目也照样列在目录里，见 api/read.go），
       // 所以这里只在字段缺失时才按"上架"兜底。
       enabled: entry.enabled !== false,
-      // 冻结（R5-B-7）：服务端目前不列冻结行，字段缺席即"未冻结"；见字段注释。
+      // 冻结（R5-B-7 / R6-B-3）：服务端**对归属人本人**下发 `frozen:true`（目录保留
+      // 他/她自己冻结的应用 —— 那是解冻入口唯一的依附面；其他人根本收不到这一行）。
+      // 字段缺席即"未冻结"：冻结是服务端事实，客户端不推断。
       frozen: entry.frozen === true,
       // 版本缺失 ⇒ 空串（服务端版本行被保留策略回收时会这样）；面板显示为"未知"，
       // **不编造**一个版本号。

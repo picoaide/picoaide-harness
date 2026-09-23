@@ -629,7 +629,7 @@ func (h *Handlers) catalog(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(apps))
 	for _, a := range apps {
-		// 目录条件（R34 + §8，2026-09-18 收敛后**只剩三条**）：
+		// 目录条件（R34 + §8 + R6-B-3，收敛后**只剩三条**）：
 		//   未删除（DAO 已保证）· 有生效版本（占名但从未发布成功的行不列）· 未冻结。
 		//   - **下架（enabled=false）仍列出**：下架是**可逆的发布者动作**，应用与它的
 		//     数据都还在（应用子域返回 410 Gone + "应用已下架，数据仍然保留，恢复后
@@ -639,9 +639,22 @@ func (h *Handlers) catalog(c *gin.Context) {
 		//     ⚠️ 勘误（2026-09-18 独立审计）：此前这里写"子域照旧可访问"是**错的**
 		//     —— serve.go 对 enabled=false 返回 410。列出它的理由是可逆与"仍在"，
 		//     不是"还能用"。
-		//   - **冻结仍不列**：冻结 = 停止服务（appserver 对 frozen 一律 404，R37），
-		//     列出来只会给出一个死链接。
-		if a.FrozenAt != nil || a.CurrentReleaseID <= 0 {
+		//   - **冻结仍不对其他人列**：冻结 = 停止服务（appserver 对 frozen 一律 404，
+		//     R37），列给使用者只会给出一个死链接。
+		//   - **冻结行对归属人本人列出**（2026-09-23 R6-B-3）：冻结是**可逆**动作，
+		//     而解冻入口（`POST …/:app_id/freeze {"frozen":false}`）只有归属人/管理员
+		//     能调 —— 对归属人也隐去，就等于"解冻这条路在员工产品里没有依附面"：
+		//     面板每次重挂载/重启都会重新拉目录（唯一数据源），行一消失，界面上就没有
+		//     任何东西可点，而文案仍在承诺"发布者本人在应用中心里就能解冻"。
+		//     行里带 `frozen:true`（客户端据此标「已冻结」、禁用打开、给出解冻动作），
+		//     其他人**看不到这一行**（与"不存在"同形，不泄露存在性）。
+		//     归属判据用**严格归属**（a.Owner == 调用者），不含超管兜底：管理员面在
+		//     webadmin（`?filter=frozen` + 管理端点），员工面不为他们扩面。
+		ownedByViewer := a.Owner != "" && a.Owner == viewer.Username
+		if a.CurrentReleaseID <= 0 {
+			continue
+		}
+		if a.FrozenAt != nil && !ownedByViewer {
 			continue
 		}
 		// 负责人 = picoaide.app.json 的 owner（§4.2 的"负责人"声明）；平台归属
@@ -667,7 +680,13 @@ func (h *Handlers) catalog(c *gin.Context) {
 			"access": string(appcfg.AccessOfConfigJSON(a.ConfigJSON)),
 			// enabled=false = 已下架：**不能**从 URL 直达（appserver 返回 410 Gone，
 			// 见 writeGone），但它仍列在目录里（理由见上面的目录条件）。
-			"enabled":    a.Enabled,
+			"enabled": a.Enabled,
+			// frozen=true = 已冻结（R6-B-3）：冻结**顺带下架**（release.go 的 freeze
+			// 先置 frozen_at 再 enabled=0），所以只看 enabled 会把冻结显示成"已下架"
+			// —— 两者的处置完全不同（下架可自己重新上架；冻结要先解冻，而解冻入口
+			// 只对归属人开）。字段只在归属人自己的行上可能为 true（其他人的冻结行
+			// 不进目录），客户端据此标「已冻结」、禁用打开、给出解冻动作。
+			"frozen":     a.FrozenAt != nil,
 			"updated_at": a.UpdatedAt,
 			// 当前线上版本（可能为空串：版本行被保留策略回收）。
 			"current_version": versions[a.CurrentReleaseID],

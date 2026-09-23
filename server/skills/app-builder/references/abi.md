@@ -350,7 +350,7 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `ASSET_DENIED` | 403 | `assets.read` 的包内路径被拒（绝对路径 / `..` / `\` / 控制字符 / 超长）；**发布期的随包资源名占用 `__picoaide/` 前缀也回这个码**（`details.reason = "reserved_path_prefix"`） | 用相对、以 `/` 分隔的包内逻辑路径；看 `details.reason`（如 `parent_segment`、`not_canonical`、`reserved_path_prefix`） |
 | `ASSET_OVERSIZE` | 422 | 单个随包资源超过单文件上限（与自定义段总量同源，见 `references/limits.md`） | 精简资源；HTML/JS 先压缩再内嵌 |
 | `ASSET_EXISTS` | 409 | 同一个资源名在自定义段里出现了两次（重名段只认第一个） | 改资源名或删掉重复的那一份；改内容 = 发一个新版本 |
-| `APP_FROZEN` | 403 | 应用已被管理员**冻结**，而你在做发布 / 上下架 / 改配置 | 冻结是平台侧处置：**找管理员解冻**，自己重试任何写动作都不会成功（冻结同时会下架，员工侧打开是 404） |
+| `APP_FROZEN` | 403 | 应用已被**冻结**（发布者本人或管理员停用），而你在做发布 / 上下架 / 改配置 | 冻结期间任何写动作都不会成功，也不会自动恢复：**发布者本人在客户端应用中心里解冻**（冻结的应用对他/她自己仍列在目录里，带「已冻结」标记，点「解冻」即可；解冻后还要重新上架），其他成员看不到冻结的应用、需要解冻请找管理员。冻结同时会下架，员工侧打开一律 404 |
 | `VALIDATE_FAILED` | 422 | 产物不满足应用契约：导出面缺 `_start` / `memory`（或导出类型不对），或模块**无法被运行时装载** | 用官方骨架重新构建；确认目标是 `wasm32-wasip1`，且 `_start` 与 `memory` 都是**导出**（额外导出忽略；对照 `references/imports.md`） |
 
 > 失败码是**可操作**的入口：每个码都带 `message`，多数还带 `details` 与 `hints`。
