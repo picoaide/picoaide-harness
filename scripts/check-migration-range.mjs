@@ -171,4 +171,15 @@ if (hits.length > 0 || unknownIds.length > 0) {
   process.exit(1)
 }
 
+// 扫描面不完整一律 fail-loud：零文档、或缺 server/AGENTS.md 时，下面那句"一致 ✅"是在
+// 宣称一件**根本没检查**的事（第三轮审计 C-6 的形态：给一棵有迁移目录、零文档可扫的树，
+// 它照样打印"文档区间与实际一致"并 exit 0，连那棵树里并不存在的 `server/AGENTS.md`
+// 也一并宣称"迁移号都存在"）。`--root` 合成树/夹具同样适用：夹具必须自带被扫文档。
+if (scanned === 0 || !agentsScanned) {
+  console.error(`check-migration-range: 扫描面不完整（扫描 ${scanned} 个 md、`
+    + `server/AGENTS.md ${agentsScanned ? '已扫' : '未找到'}，root=${root}）—— 拒绝把"没检查"当通过。`
+    + '修法：确认扫描面存在（' + SCAN_PATHS.join('、') + '），或在合成树夹具里补齐被扫文档。')
+  process.exit(1)
+}
+
 if (!json) console.log(`check-migration-range: 文档区间与实际一致（${pad(MIN)}–${pad(MAX)}），且 server/AGENTS.md 的迁移号都存在 ✅`)
