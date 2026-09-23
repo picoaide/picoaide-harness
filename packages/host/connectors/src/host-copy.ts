@@ -82,6 +82,7 @@ const zh = {
   'auth.tokenMissingAccessToken': 'OAuth token 响应缺少 access_token',
   'auth.pollTimeout': '授权轮询超时，请重试',
   'auth.deviceUnverifiable': '该连接器声明为设备码授权但未定义任何凭据字段，无法验证授权是否完成；请改用具名 token 字段或 OAuth 模式',
+  'auth.deviceVerificationUrlMissing': '该连接器声明为设备码授权，但没有可用的验证地址（verificationUrl 缺失或为空）——这是连接器定义的错误，请联系管理员修正后重试',
   'auth.serverMissingFetchToken': '服务端连接器定义缺少 fetchToken 回调',
   'auth.serverNoToken': '服务端未返回 token',
 
@@ -200,6 +201,7 @@ const en: Record<keyof typeof zh, string> = {
   'auth.tokenMissingAccessToken': 'OAuth token response has no access_token',
   'auth.pollTimeout': 'Authorization polling timed out; please retry',
   'auth.deviceUnverifiable': 'This connector uses device-code authorization but declares no credential field, so completion cannot be verified; declare a token field or use the OAuth mode instead',
+  'auth.deviceVerificationUrlMissing': 'This connector uses device-code authorization but has no usable verification URL (verificationUrl is missing or blank) — the connector definition is invalid; ask an administrator to fix it and retry',
   'auth.serverMissingFetchToken': 'The server-side connector definition has no fetchToken callback',
   'auth.serverNoToken': 'The server returned no token',
 

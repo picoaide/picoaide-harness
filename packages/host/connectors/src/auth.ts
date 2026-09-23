@@ -623,8 +623,18 @@ async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Pa
   // step at all — its MCP server needs no credential — so there is nothing to
   // announce and nothing to poll. (Before CN-3 this shape connected and worked;
   // running a device flow for it turned it into a permanent `unauthorized`.)
-  if (auth === undefined || typeof auth.verificationUrl !== 'string' || auth.verificationUrl.trim() === '') {
+  if (auth === undefined) {
     return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  }
+  // B-1 (第三轮审计 R3-B)：`auth` 块存在但 `verificationUrl` 缺失/空白是**定义错误**，
+  // 不能与上面"根本没有授权步骤"合并成同一档 —— 合并的后果是：行报 connected、MCP 注册
+  // 成功，而落盘凭据里没有任何授权物（`hasDeviceAuthorization` 恒 false），用户既连不上
+  // 也没有任何可执行动作能修好（CN-3 修复要消灭的形态经此门回归；A/B 探针证实：同一
+  // 定义在 `ae1bccc222^` 上不注册，在此判据下变成 connected）。
+  // 与本函数下方 conn-4 的口径一致：验证页不可用的 device 行**不得**静默报 connected。
+  const locale = options.locale ?? DEFAULT_HOST_LOCALE
+  if (typeof auth.verificationUrl !== 'string' || auth.verificationUrl.trim() === '') {
+    throw authRequired(hostT(locale, 'auth.deviceVerificationUrlMissing'))
   }
   // conn-4: `verificationUrl` is definition-supplied (the server-issued
   // catalog carries it) and the client renders it as a clickable `<a href>`.
@@ -633,7 +643,6 @@ async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Pa
   // verbatim. Check it exactly like its sibling `authorizeUrl`, and fail the
   // connect loudly (a device row whose verification page is unusable must not
   // silently report "connected").
-  const locale = options.locale ?? DEFAULT_HOST_LOCALE
   const verificationUrl = flowUrl(auth.verificationUrl, '设备授权验证地址', locale).toString()
   options.onRequest({
     connectorId: def.id,

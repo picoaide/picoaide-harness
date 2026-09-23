@@ -81,6 +81,37 @@ describe('conn-4: the device verification address passes the outbound URL policy
   })
 })
 
+/**
+ * B-1 (第三轮审计 R3-B, P2)：`auth` 块存在但 `verificationUrl` 缺失/空白是**定义错误**，
+ * 必须 fail-loud —— 修复前它与"根本没有授权步骤"共用一条早退，于是行报 `connected`、
+ * MCP 注册成功、而落盘凭据只有 `{updatedAt}`（`hasDeviceAuthorization` 恒 false）：
+ * 用户既连不上也没有任何可执行动作能修好（CN-3 要消灭的形态经此门回归）。
+ * 判据刻意同时钉两侧：坏形状**必须拒绝且不发出任何 request**，而"没有 auth 块"的
+ * 形状保持既有语义（不报错、不弹授权请求）—— 只钉前者会让"把两种形状一起拒绝"的
+ * 过度修复也通过。
+ */
+describe('B-1: a device row with an unusable definition fails loudly instead of reporting connected', () => {
+  it('rejects a missing / blank verificationUrl and emits no auth request', async () => {
+    for (const url of ['', '   ']) {
+      const { outcome, requests } = await runDeviceFlow(url)
+      console.log(`[B-1] verificationUrl=${JSON.stringify(url)} => ${outcome}`)
+      expect(outcome).toMatch(/verificationUrl/)
+      expect(requests).toEqual([])
+    }
+  })
+
+  it('keeps the "no auth block at all" shape working (no request, no error)', async () => {
+    const def: ConnectorDef = { ...deviceDef('https://idp.example/device') }
+    delete (def as { auth?: unknown }).auth
+    const requests: ConnectorAuthRequest[] = []
+    const outcome = await runAuth(def, { onRequest: request => requests.push(request), signal: new AbortController().signal })
+      .then(() => 'resolved', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    console.log(`[B-1] no-auth-block => ${outcome}`)
+    expect(outcome).toBe('resolved')
+    expect(requests).toEqual([])
+  })
+})
+
 describe('conn-4: a refused verification address fails the connect instead of connecting', () => {
   it('leaves the row unauthorized, registers no MCP server and discloses no URL', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'pico-conn4-'))
