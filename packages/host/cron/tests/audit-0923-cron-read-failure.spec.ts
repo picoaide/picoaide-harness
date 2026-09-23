@@ -185,6 +185,11 @@ describe('CR-1 ledger load errno discrimination', () => {
     // console.error names the file and the errno, and the stored bytes survive.
     expect(child.stderr).toContain('EACCES')
     expect(child.stderr).toContain(ledgerPath())
+    // 读回原字节之前先恢复读位：非 root 运行者（CI 的 runner 用户）读不了 0o000 的文件，
+    // 而这条断言要证明的是"内容逐字节未变"——权限位不是契约的一部分（root 下无害；
+    // 子进程已经在受限 uid 下跑完并完成断言）。2026-09-23 CI 实测：缺这一步会让本用例
+    // 在非 root runner 上以 `Error: EACCES ... open ledger.json` 失败（本地 root 假绿）。
+    chmodSync(ledgerPath(), 0o600)
     expect(readFileSync(ledgerPath())).toEqual(before)
     expect(readdirSync(join(dir, 'cron')).filter(name => name.includes('.tmp-') || name.includes('.corrupt-'))).toEqual([])
   })
