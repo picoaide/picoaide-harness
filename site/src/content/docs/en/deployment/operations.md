@@ -111,7 +111,7 @@ a container deployment:
 | Upstream keys | Stored encrypted with AES-GCM (`enc:v1:`, master key file 0600), never in plaintext |
 | Employee tokens | Only a SHA-256 hash is stored, with a 90-day expiry; password change / privilege downgrade / disabling revokes all tokens **in the same transaction** |
 | Admin sessions | 12-hour hard limit + 60-minute idle sliding expiry; CSRF bound to the session (HMAC time window) |
-| Login rate limiting | Dual bucket (by account and by source), 10 attempts / 5 minutes; `PICOAI_TRUSTED_PROXIES` determines how the source IP is derived |
+| Login rate limiting | Failures only, 5-minute sliding window, cleared on success: 10 per account key (`u:username` and `ip+username` share one budget); 60 per source IP (`PICOAI_TRUSTED_PROXIES` determines how the source IP is derived) |
 | Content visibility | Marketplace and shared content use a two-gate model (review + grant); anything unauthorized returns 404 and never leaks existence |
 | Audit | Key operations — users / departments / quotas / pricing / approvals / grants / balances — are recorded end to end, with a hash chain for tamper resistance |
 | Client access | The login page and the client reject non-HTTPS remote addresses (TOFU); installer SHA-256 verification |

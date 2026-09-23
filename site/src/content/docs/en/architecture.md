@@ -47,14 +47,14 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 - Upstream keys AES-GCM (`enc:v1:`, master key file), never plaintext; API tokens stored as hashes only;
 - **Strict deny by default**: unauthorized marketplace and shared content return 404 (no existence leak); grants are per user or department group (case-insensitive); admins always full-access without a table row; grant changes are audited;
 - Password change / privilege downgrade / disable revokes all API tokens in the same transaction;
-- Admin session 12h (hard TTL + 60-min idle sliding expiry) + CSRF; login rate limit (dual bucket: IP and account, 10 per 5 minutes);
+- Admin session 12h (hard TTL + 60-min idle sliding expiry) + CSRF; login rate limiting counts **failures only** (5-minute sliding window, cleared for that key on success): 10 per account key (`u:<username>` and `ip|username` share one budget, shared by the client and admin faces) and 60 per source IP (the real client IP as resolved through the trusted-proxy boundary, so it does not collapse into a single proxy IP behind a reverse proxy);
 - Unified error envelope `{"error":{"code":"ERR_CODE","message":"..."}}`; health probe `/healthz`;
 - Integrator TLS: the login page/client rejects non-HTTPS remote addresses (TOFU implemented by the client).
 
 ## Database
 
 - PostgreSQL only (PG-only; the deployment form is the container built into compose, and the binary also accepts an external instance via `-pg-dsn`),
-  with migrations under `migrations-pg/` (numbered 0001–0061; some numbers were dropped historically, hence the gaps);
+  with migrations under `migrations-pg/` (numbered 0001–0080; some numbers were dropped historically, hence the gaps);
 - usage details are natively partitioned by month (retention configurable in months, default 6), while the daily/monthly ledgers are kept forever (10 years of historical statistics never lost);
 - Shared skill / agent archives are stored directly in the DB; audit hash chain (tamper-evident), RBAC roles, balance-grant idempotency anchor.
 

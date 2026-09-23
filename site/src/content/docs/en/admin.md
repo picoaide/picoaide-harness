@@ -5,7 +5,7 @@ description: 'PicoAide Harness Admin Console (webadmin) feature guide: users and
 
 The Admin Console (webadmin) is a single-page application embedded in the Go server, accessed via the browser at `/admin/`. It is responsible for **governance**: accounts, departments, the model gateway, metering and billing, marketplace and shared-content approvals, and audit. Employees never touch it — all governance decisions are made here.
 
-> Sessions and security: admin login uses session + CSRF protection; login rate limiting (10 attempts / 5 minutes / key); a unified error envelope `{"error":{"code":"ERR_CODE","message":"..."}}`; health probe at `/healthz`.
+> Sessions and security: admin login uses session + CSRF protection; login rate limiting counts **failures only** (5-minute sliding window, cleared on success): 10 per account key and 60 per source IP (the per-account failure budget is shared with client logins); a unified error envelope `{"error":{"code":"ERR_CODE","message":"..."}}`; health probe at `/healthz`.
 
 ## Navigation overview
 
@@ -13,13 +13,15 @@ The sidebar is organized into three sections — Management / Operations / Audit
 
 | Section | Menu | Path | Responsibility |
 |---|---|---|---|
-| Management | Users | `/users` | Accounts, roles, status, quotas, **balance**, reset password / reset MFA, login tokens |
-| Management | Departments | `/departments` | Department tree, members (multi-department supported), budgets |
+| Management | Users | `/users` | Accounts, roles, status, **balance**, reset password / reset MFA, login tokens |
+| Management | Departments | `/departments` | Department tree, members (multi-department supported) |
 | Management | Auth | `/auth` | Local / LDAP / OIDC login-mode configuration |
 | Operations | Gateway | `/gateway` | Upstream providers, default model, rate limiting, peak windows, model pricing and usage policy |
+| Operations | Gateway files | `/gateway-files` | Files API ownership ledger: per-employee usage, search/sort and expiry cleanup |
 | Operations | Error monitoring | `/error-monitoring` | Client error reporting and the GlitchTip connector preset |
 | Operations | Usage center | `/usage` | Overview, departments, members, models, detail, quotas & budgets, report subscriptions |
 | Operations | Capability Hub | `/capabilities` | Three tabs — Skills / Agents / Approvals (Official/Featured marking, grants) |
+| Operations | App center | `/app-center` | Employee-built apps (publish/unpublish, freeze, ownership, update approval), operations board, limits |
 | Operations | Connectors | `/connectors` | Connector catalog and delivery switches |
 | Operations | Server info | `/server-info` | Version and update notice, database and migrations, model concurrency |
 | Audit | Audit log | `/audit` | Full trace of key operations (including the retention policy) |

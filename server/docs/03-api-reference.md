@@ -60,7 +60,10 @@
 | DELETE | `/api/server/admin/users/:id` | 删除用户 |
 | PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
-| GET/PUT | `/api/server/admin/departments`、`/departments/:id` | 部门树 CRUD(parent/leader;`budget_money` 已随部门预算下线,请求体里该字段被忽略) |
+| GET | `/api/server/admin/departments` | 部门树(`parent`/`leader`;`budget_money` 已随部门预算下线) |
+| POST | `/api/server/admin/departments` | 新建部门 |
+| PUT | `/api/server/admin/departments/:id` | 更新部门(parent/leader;`budget_money` 请求体里该字段被忽略) |
+| DELETE | `/api/server/admin/departments/:id` | 删除部门(须无成员/子部门/授权引用) |
 | GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
 | POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
@@ -78,7 +81,12 @@
 | GET | `/api/server/admin/gateway` | 网关配置:`{rate_limit, peak_windows, retention_months, default_model, default_thinking_level, server_base_url, error_reporting_dsn/enabled/level/heartbeat, glitchtip_base_url, glitchtip_organization}`(**2026-09-11 起不含 `monthly_quota`/`monthly_quota_money`** —— 员工配额已下线) |
 | PUT | `/api/server/admin/gateway` | 写网关配置(settings:`gateway.rate_limit`、`gateway.default_model`、`usage.peak_windows`、`usage.retention_months`、`web.default_thinking_level`、`server.base_url`、`web.error_reporting_*`、`web.glitchtip_*`)。⚠️ 请求体里的 `monthly_quota`/`monthly_quota_money`(旧文档曾写作 `usage.monthly_quota*`)**已不在请求结构里 ⇒ 被 JSON 绑定直接忽略:返回 200 但零写入** —— 保留这些键的说法只是为了不砸旧客户端;控额度请用余额端点(`PUT /balance`、`POST /users/:id/balance`) |
 | GET | `/api/server/admin/channels` | 渠道列表 |
-| GET/PUT | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD(0042;示例企业/sales-easy 等定义服务端下发) |
+| GET | `/api/server/admin/connectors` | 连接器目录列表(0042;示例企业/sales-easy 等定义服务端下发) |
+| GET | `/api/server/admin/connectors/:id` | 单个连接器详情 |
+| POST | `/api/server/admin/connectors` | 新建连接器 |
+| PUT | `/api/server/admin/connectors/:id` | 更新连接器 |
+| PUT | `/api/server/admin/connectors/:id/enabled` | 连接器上架/下架 |
+| DELETE | `/api/server/admin/connectors/:id` | 删除连接器 |
 | GET | `/api/server/admin/audit` | 审计日志分页 `?page=&size=&action=&username=`(90 天保留 → 默认 180 天,settings `audit.retention_days`;0048 起哈希链) |
 | GET/PUT | `/api/server/admin/auth`、`POST /auth/test` | 认证配置(脱敏读/写/连接测试;LDAP 测试连接返回目录统计 `{ok, message, users, groups, sample[5]}`;密码传 `***`/空 = 用已保存值测试) |
 
@@ -349,6 +357,11 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/api/server/admin/connectors`、`/connectors/:id` | 连接器目录 CRUD;`PUT /connectors/:id/enabled` 下架/上架 |
+| GET | `/api/server/admin/connectors` | 连接器目录列表 |
+| GET | `/api/server/admin/connectors/:id` | 单个连接器详情 |
+| POST | `/api/server/admin/connectors` | 新建连接器 |
+| PUT | `/api/server/admin/connectors/:id` | 更新连接器 |
+| PUT | `/api/server/admin/connectors/:id/enabled` | 下架/上架 |
+| DELETE | `/api/server/admin/connectors/:id` | 删除连接器 |
 
 员工面不直接调连接器端点:目录经 bootstrap `connectors[]` 下发;OAuth/设备/令牌授权由客户端本地代理(`/api/pico/connectors/...`,loopback guard)与服务端 `serverauth` 会话协同。
