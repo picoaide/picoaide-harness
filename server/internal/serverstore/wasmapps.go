@@ -58,9 +58,16 @@ type WasmApp struct {
 	DataSensitivity  string
 	ConfigJSON       string
 	CurrentReleaseID int64
-	FrozenAt         *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// Official 是"归属官方"标记(迁移 0059 的 apps.official)。
+	//
+	// 为什么 wasm 面也必须读得见它(R3-A A-9):官方归属的**唯一合法形态**是
+	// `official=1 ∧ owner=''`(SetAppOfficial 显式拒绝其它组合)。发布路径要能像
+	// appstore.Publish 那样"官方应用发版不改写归属",前提就是看得见这一列 ——
+	// 此前 DTO 列集里没有它,于是出现了"共享端点写得出、wasm 面读不到"的错位。
+	Official  int
+	FrozenAt  *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 	// DeletedAt 非空 = 已软删(退役)。GetWasmApp 仍返回该行(R37 冻结期还要
 	// 导出),GetWasmAppByHost 则必须查不到。
 	DeletedAt *time.Time
@@ -102,7 +109,7 @@ type WasmRelease struct {
 // wasmAppColumns 是 apps 上 wasm 应用用到的列(显式列名:既有 skill/agent
 // 代码用 appColumns,互不影响)。
 const wasmAppColumns = `app_id, title, description, owner, channel, enabled, purpose,
-	data_sensitivity, config_json, current_release_id, frozen_at, deleted_at,
+	data_sensitivity, config_json, current_release_id, official, frozen_at, deleted_at,
 	created_at, updated_at`
 
 // wasmReleaseListColumns 不含 archive blob:清单查询绝不加载全部制品。
@@ -195,7 +202,7 @@ func scanWasmApp(row interface{ Scan(...any) error }) (*WasmApp, error) {
 	var enabled int
 	var frozen, deleted, created, updated any
 	if err := row.Scan(&a.AppID, &a.Title, &a.Description, &a.Owner, &a.Channel, &enabled,
-		&a.Purpose, &a.DataSensitivity, &a.ConfigJSON, &a.CurrentReleaseID,
+		&a.Purpose, &a.DataSensitivity, &a.ConfigJSON, &a.CurrentReleaseID, &a.Official,
 		&frozen, &deleted, &created, &updated); err != nil {
 		return nil, err
 	}
@@ -245,6 +252,16 @@ func wasmAppRowsAffected(res sql.Result, err error) error {
 //   - config_json / purpose / data_sensitivity 只由 SetWasmAppConfig 改
 //     (它们的真源是随包的应用配置文件,一次只带标题的 upsert 不该抹掉配置);
 //   - current_release_id 只由 SetWasmAppCurrentRelease 改(§8 待审期间线上仍旧版本)。
+//
+// **官方归属守卫**(R3-A A-9):`official=1 ⇒ owner=”` 是迁移 0059/P2-21 的不变量,
+// `SetAppOfficial` 对"official=1 ∧ owner≠”"直接返回 ErrValidation。而本函数的
+// COALESCE 分支恰好能造出那个禁止状态:官方行的 owner 本来就是空串,于是
+// `COALESCE(NULLIF(”,”), excluded.owner)` 把归属填成发布者 —— 一次普通的管理员
+// 发版(以及每次启动的 appseed 播种)就能把"官方"改写成个人。
+//
+// 守卫放在 DAO 而不是只放在调用点,与 SetAppOfficial 的守卫同一条理由:
+// **未来的调用者无论怎么传都造不出禁止状态**(不变量必须在唯一写入口成立)。
+// 调用点(wasmapp/api 的 commitRelease)另有同形分支,那是"显式表达意图"的那一层。
 func UpsertWasmApp(ctx context.Context, db *sql.DB, app WasmApp) error {
 	appID := normalizeWasmAppID(app.AppID)
 	if appID == "" {
@@ -256,7 +273,8 @@ func UpsertWasmApp(ctx context.Context, db *sql.DB, app WasmApp) error {
 		ON CONFLICT (kind, app_id) DO UPDATE SET
 			title = excluded.title,
 			description = excluded.description,
-			owner = COALESCE(NULLIF(apps.owner, ''), excluded.owner),
+			owner = CASE WHEN apps.official = 1 THEN ''
+				ELSE COALESCE(NULLIF(apps.owner, ''), excluded.owner) END,
 			updated_at = now()`,
 		AppKindWasmApp, appID, app.Title, app.Description, app.Owner, AppChannelWasm,
 		boolToInt(app.Enabled), app.Purpose, app.DataSensitivity, app.ConfigJSON)

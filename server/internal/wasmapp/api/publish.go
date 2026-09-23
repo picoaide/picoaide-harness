@@ -1042,9 +1042,23 @@ func (h *Handlers) commitRelease(c *gin.Context, st *staged, in commitInput) (*r
 			projTitle = in.appID
 		}
 	}
+	// E1 归属投影：**官方应用的归属恒为空**（R3-A A-9）。
+	//
+	// 与 appstore.Publish:261-264 的 official 分支同形（同一条不变量在两个面上
+	// 必须只有一种写法）：官方内容的归属就是"官方"，管理员发版不得把它改写成
+	// 发布者个人 —— `official=1 ∧ owner≠''` 是 SetAppOfficial 显式拒绝的状态，
+	// 造出来会让员工端把官方条目当"某个人的应用"（is_owner 为真而发布仍被拒）。
+	//
+	// 为什么这里显式分支（DAO 的 UpsertWasmApp 也有同款守卫）：不变量必须在
+	// **调用方也成立**，与 DAO 的列集/条件分支改动无关（同 appstore.Publish 的
+	// "刻意显式传现值"纪律）。DAO 那一层防的是"未来的调用者写错"。
+	owner := in.publisher
+	if in.existing != nil && in.existing.Official == 1 {
+		owner = ""
+	}
 	if err := serverstore.UpsertWasmApp(ctx, h.opt.DB, serverstore.WasmApp{
 		AppID: in.appID, Title: projTitle, Description: projDescription,
-		Owner: in.publisher, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
+		Owner: owner, Channel: serverstore.AppChannelWasm, Enabled: in.enabled,
 		Purpose: projPurpose, DataSensitivity: projSensitivity,
 		ConfigJSON: projConfig,
 	}); err != nil {

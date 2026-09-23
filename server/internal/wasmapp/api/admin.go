@@ -1078,6 +1078,19 @@ func (h *Handlers) adminTransferOwner(c *gin.Context) {
 		writeErr(c, aerr)
 		return
 	}
+	// 官方归属是**一次性转移**（official=1 ∧ owner=''，0059/P2-21）：本端点只改
+	// owner、不表达 official 语义，放行就等于把"官方"改写成个人 —— 那是
+	// `SetAppOfficial` 显式拒绝的禁止状态（R3-A A-9 的**第二个写入口**：
+	// 发布路径之外，管理员点一次「转移归属」即可造出来）。
+	// 显式拒绝并指路，绝不静默降级成一次普通改归属。
+	if app.Official == 1 {
+		writeErr(c, apperr.New(apperr.CodeForbidden, "官方应用的归属恒为「官方」，不能转移给个人").
+			WithDetail("app_id", appID).
+			WithDetail("official", true).
+			WithHint("官方归属的解除与再指定是一次性动作（official / owner 二选一），请走能力面的归属转移端点").
+			WithHint("本端点只改负责人、不表达「取消官方」，放行会造出 official=1 ∧ owner≠'' 的禁止状态"))
+		return
+	}
 	var req struct {
 		Owner string `json:"owner"`
 	}
