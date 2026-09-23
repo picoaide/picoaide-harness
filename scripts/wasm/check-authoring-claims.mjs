@@ -188,17 +188,30 @@ function clausesOf(text) {
 
 /**
  * 「禁止型」判据：找 `pattern` 的命中，命中所在**分句**含任一豁免词则放行。
+ *
+ * `options.exemptionGuard`（2026-09-23 第五轮追加：判据④ 的管辖范围收窄）：
+ * 豁免只在**同一分句里不含"目录面标识"**时生效 —— 它是"豁免护栏"，防的是
+ * 「给一句真正违规的应用目录口径挂一个'分发面'词就整句放行」这种豁免洗白。
+ * 粒度仍然是**分句**（同一行别的分句里的命中照旧报）。
  * @param text - 文件全文。
  * @param pattern - 判据模式（**不要带 `g` 标志**：带状态的 lastIndex 会让逐行判定串味）。
  * @param exemptions - 分句级豁免词。
+ * @param options - `{ exemptionGuard, exemptionScope }`：豁免护栏模式（命中则该分句**不**享受豁免）；
+ *   `exemptionScope` = `'clause'`（缺省，**按分句**）或 `'line'`（按整行）。
+ *   **粒度是显式契约**：按整行豁免会漏掉"同一行别的分句里仍然违规"的句子
+ *   （`分发面不列；应用中心下架不列。`），所以它写成可登记、可被回归网钉住的一档。
  * @returns 命中列表 `{ line, clause }`（按行号升序）。
  */
-function scanForbidden(text, pattern, exemptions = []) {
+function scanForbidden(text, pattern, exemptions = [], options = {}) {
+  const guard = options.exemptionGuard
+  const scope = options.exemptionScope ?? 'clause'
+  const isExempt = clause => exemptions.some(marker => clause.includes(marker))
+    && !(guard !== undefined && guard.test(clause))
   const hits = []
   text.split('\n').forEach((line, index) => {
     if (!pattern.test(line)) return
-    const offending = clausesOf(line).filter(clause =>
-      pattern.test(clause) && !exemptions.some(marker => clause.includes(marker)))
+    if (scope === 'line' && isExempt(line)) return
+    const offending = clausesOf(line).filter(clause => pattern.test(clause) && !isExempt(clause))
     if (offending.length > 0) hits.push({ line: index + 1, clause: offending[0] })
   })
   return hits
@@ -271,14 +284,43 @@ const RULE_OFFLINE = {
   exemptions: ['不要对外写', '不要对外说成', '不要写', '不要宣称', '不等于', '不得写成'],
 }
 /**
- * ④ 目录口径（R1-L5-14 订正）：一律列出（下架仍列、冻结不列）——
+ * ④ 目录口径（R1-L5-14 订正）：**应用目录**一律列出（下架仍列、冻结不列）——
  * "下架 ⇒ 不列/不再出现"的表述必须红。**模式判据**（不是固定枚举），
  * 并刻意排除"冻结不列"这一句（那句是**正确**处方：冻结不进目录）。
+ *
+ * ## 管辖范围 = 应用目录（2026-09-23 第五轮追加：收窄 + 分句级登记豁免）
+ *
+ * 现场：判据把这条规则推广到了它**并不管辖**的面。两处真实文本被判红（同一根因）：
+ *   · `packages/host/enterprise/tests/capability-catalog-proxy.spec.ts` 的注释
+ *     `分发面（org/market）：下架行不列 —— 与 serverstore.ListVisibleSharedSkills 同口径`；
+ *   · `server/docs/03-api-reference.md` 里 `GET /api/client/v2/shared-skills` 的可见清单说明
+ *     （下架行在此面一律不列（与「不存在」同语义），作者的「已下架」态由能力中心「我的」分区表达）。
+ * 两处**语义正确**：`shared-skills` 是**授权制安装面/可见清单**（严格默认拒绝、未授权即 404
+ * 不泄露存在性，"不列"= 不可安装），与"应用目录一律列出（仅不可打开）"是两个面、两条规则。
+ * 为了过判据去改写这两处措辞 = 绕过判据，本仓刚修过一整类，所以处置是**收窄判据**：
+ *
+ *   · `exemptions`（**分句级**登记豁免）：命中所在分句含"分发面/安装面/可见清单/授权面/授权制"
+ *     之一的，放行 —— 这些词是**面的标识**，出现它们说明谈的不是应用目录；
+ *   · `exemptionGuard`（豁免护栏）：同一分句里若同时出现**目录面标识**
+ *     （应用中心/应用目录/应用列表/应用市场/目录），豁免**不生效** ——
+ *     防止"给一句真正违规的应用目录口径挂一个分发面词"就整句放行；
+ *   · 粒度是**分句**：`分发面不列；应用中心下架不列。` 仍然报（整行豁免会漏掉它，
+ *     回归网里有一条样本专门盯这个粒度）。
+ *
+ * 新增豁免词必须登记在这里并写明依据（与白名单同一套纪律）；反例见回归网：
+ * `已下架的应用不会再出现在应用中心列表里` / `冻结与已下架都不列` / `下架不列` /
+ * `应用下架后不再出现` / `下架的应用不出现在应用中心` 五条必须继续红。
  */
 const RULE_DELISTED = {
   pattern: /(?:已下架|下架)(?:(?!冻结)[^，。；]){0,12}(?:不列|不再列|不再出现|不会再出现|不出现在|不会出现在|不展示|不显示|移除|下掉)/u,
-  exemptions: [],
+  exemptions: ['分发面', '安装面', '可见清单', '授权面', '授权制'],
+  exemptionGuard: /应用中心|应用目录|应用列表|应用市场|目录/u,
+  // 粒度**显式登记**为按分句：整行豁免会漏掉"同一行别的分句仍违规"的句子（回归网有样本钉它）。
+  exemptionScope: 'clause',
 }
+// **已知边界（如实认账，不是本轮引入）**：模式只覆盖「下架 ⇒ 不列」这一**语序**；
+// 反语序形态（如「不列出已下架的应用」）不在判据内。要覆盖它需要另写一条模式并重扫
+// 真实面（本轮范围是"收窄管辖范围"，不做扩张）。
 /**
  * ⑤ 载体口径（§2.1/§4）：应用只在客户端内的**独立窗口**打开，不得再被描述成
  * "内置浏览器加载 / 浏览器标签承载"。模式照台账 R2-L5-2 的写法（刻意不允许插入"的"，
@@ -387,8 +429,32 @@ const REGRESSION_CASES = [
   { rule: 'delisted', expect: 'hit', text: '冻结与已下架都不列。' },
   { rule: 'delisted', expect: 'hit', text: '下架不列。' },
   { rule: 'delisted', expect: 'hit', text: '应用下架后不再出现。' },
+  // 五条反例（第五轮追加两条"应用目录"语境的真实形态）：判据收窄后仍必须全红
+  { rule: 'delisted', expect: 'hit', text: '下架的应用不出现在应用中心。' },
+  { rule: 'delisted', expect: 'hit', text: '下架的应用不再出现在应用中心列表里。' },
   // 反向对照：现行正确处方（冻结不列、下架仍列）不得被误报
   { rule: 'delisted', expect: 'miss', text: '已下架的应用仍然列在目录里，只是带「已下架」标记（冻结不列）。' },
+  // **管辖范围收窄**（第五轮）：授权制安装面/可见清单/分发面的"下架 ⇒ 不列"是**正确**口径
+  // —— 这三条是真实文本（逐字取自仓库里那两处）+ 一条合成正向，必须绿。
+  {
+    rule: 'delisted',
+    expect: 'miss',
+    text: '// 分发面（org/market）：下架行不列 —— 与 `serverstore.ListVisibleSharedSkills` 同口径，',
+  },
+  {
+    rule: 'delisted',
+    expect: 'miss',
+    text: '可见清单(**分发面**):approved 且**已授权** 且**已上架**(apps.enabled=1);下架行在此面一律不列(与「不存在」同语义,归属人也不例外)',
+  },
+  { rule: 'delisted', expect: 'miss', text: '技能分发面（授权制安装面）看不到下架行；作者的「已下架」态由「我的」分区表达。' },
+  // 豁免护栏：给**应用目录**口径挂一个"分发面"词不得放行（豁免洗白）
+  { rule: 'delisted', expect: 'hit', text: '应用中心的分发面：下架不列。' },
+  // 粒度：豁免在**别的分句**里时，本分句照旧报（整行豁免会漏掉它）——
+  // 这一条**不含目录面词**，所以它只由"按分句"这一档兜住（豁免护栏管不到它）：
+  // 把 `exemptionScope` 改成 `'line'` 这条样本立刻变 miss。
+  { rule: 'delisted', expect: 'hit', text: '分发面不列；下架不列。' },
+  // 豁免护栏：目录面词与豁免词同句 ⇒ 豁免不生效（防"给违规句挂分发面词"）
+  { rule: 'delisted', expect: 'hit', text: '分发面不列；应用中心下架不列。' },
   // 联网口径（W-7a 的原始躲过形态：豁免词在**别的分句**里，整行豁免时代被一并放行）
   { rule: 'offline', expect: 'hit', text: '应用不能联网，这不等于说它不能显示外部网页（顶层导航不受限）。' },
   { rule: 'offline', expect: 'miss', text: '⚠️ **不要对外说成"不能联网"**：CSP 不管顶层导航与弹窗。' },
@@ -412,7 +478,11 @@ function regressionOutcome(testCase) {
   const { text } = testCase
   switch (testCase.rule) {
     case 'carrier': return scanForbidden(text, RULE_CARRIER.pattern, RULE_CARRIER.exemptions).length > 0 ? 'hit' : 'miss'
-    case 'delisted': return scanForbidden(text, RULE_DELISTED.pattern, RULE_DELISTED.exemptions).length > 0 ? 'hit' : 'miss'
+    case 'delisted': return scanForbidden(text, RULE_DELISTED.pattern, RULE_DELISTED.exemptions,
+      {
+        exemptionGuard: RULE_DELISTED.exemptionGuard,
+        exemptionScope: RULE_DELISTED.exemptionScope,
+      }).length > 0 ? 'hit' : 'miss'
     case 'offline': return scanForbidden(text, RULE_OFFLINE.pattern, RULE_OFFLINE.exemptions).length > 0 ? 'hit' : 'miss'
     case 'cache': return cacheStorageVerdict(text)
     case 'ratio': return ratioConclusionGaps(text).length === 0 ? 'complete' : 'incomplete'
@@ -541,7 +611,8 @@ function regressionOutcome(testCase) {
 {
   const hits = []
   for (const absolute of uniqueScanFiles) {
-    for (const hit of scanForbidden(readText(absolute), RULE_DELISTED.pattern, RULE_DELISTED.exemptions)) {
+    for (const hit of scanForbidden(readText(absolute), RULE_DELISTED.pattern, RULE_DELISTED.exemptions,
+      { exemptionGuard: RULE_DELISTED.exemptionGuard, exemptionScope: RULE_DELISTED.exemptionScope })) {
       hits.push(`${relative(ROOT, absolute)}:${hit.line}: ${hit.clause.slice(0, 120)}`)
     }
   }
