@@ -37,6 +37,7 @@ import (
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
 	"github.com/picoaide/picoaide/internal/updatecheck"
+	"github.com/picoaide/picoaide/internal/usageretention"
 	"github.com/picoaide/picoaide/internal/util"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -102,17 +103,20 @@ func main() {
 		return
 	}
 
-	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等),随后清理
-	// 超出保留期的明细分区(先校验对应月日账已生成,防删明细丢账)。
+	// 启动账本自愈:补算最近 N 个月(保留窗口)的日账/月账(幂等)。
+	//
+	// 保留期**清理**不在这里做:它的执行者是周期调度器
+	// (startUsageRetentionScheduler,启动先跑一轮 ⇒ 仍有"启动即清理"的语义)。
+	// R5-A-11(审计 2026-09-23,P1):此前这里调一次 CleanupUsageRetention,加上
+	// 保存保留期时的一次,稳态运行的实例**没有任何周期执行者** —— 超期月分区与
+	// 明细永不删除(磁盘随经过的月份单调增长)。同一形态在审计侧已由
+	// internal/auditretention 修好(R4-D-4),usage 侧当时漏了。
 	if n, rerr := serverstore.EffectiveRetentionMonths(db); rerr == nil {
 		// 北京日口径(不依赖容器 TZ);RebuildUsageLedger 内部亦会归一。
 		from := serverstore.BeijingDay(time.Now()).AddDate(0, -max(n, 6), 0)
 		if lerr := serverstore.RebuildUsageLedger(db, from, time.Now()); lerr != nil {
 			log.Printf("startup rebuild usage ledger: %v", lerr)
 		}
-	}
-	if cerr := serverstore.CleanupUsageRetention(db); cerr != nil {
-		log.Printf("startup cleanup usage retention: %v", cerr)
 	}
 
 	if *bootstrapAdmin != "" {
@@ -299,6 +303,11 @@ func main() {
 	// 经 startAuditRetentionScheduler(audit_retention.go 的装配接缝)调用 —— 后者被删掉
 	// 或那一行被挪走时,cmd/server 的装配级用例会红(与网关回收器的 M8 判据同款)。
 	startAuditRetentionScheduler(ctx, db, auditretention.DefaultTick)
+	// usage 明细保留策略的周期执行者(R5-A-11):启动先跑一轮(替代原先的一次性启动
+	// 清理),之后每 6 小时按 settings usage.retention_months DROP 过期月分区;随
+	// ctx 退出。经 startUsageRetentionScheduler(usage_retention.go 的装配接缝)调用
+	// —— 与网关回收器/审计保留同款:删掉那一行时 cmd/server 的装配级用例会红。
+	startUsageRetentionScheduler(ctx, db, usageretention.DefaultTick)
 	// F9 启动自检:历史大小写重复用户名会让 NOCASE 唯一约束无法建立,
 	// 这里显式告警(不阻断启动),提示管理员人工合并。
 	if conflicts, cerr := serverstore.CheckUsernameCaseConflicts(db); cerr != nil {

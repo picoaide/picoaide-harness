@@ -46,11 +46,6 @@ func yearKey(t time.Time) string {
 // 名字被抢占即达到目的,42P07 视为成功;但必须复检占用者是真分区,不能把
 // F11 的同名孤儿表一起吞掉。
 func ensureUsagePartition(db *sql.DB, month time.Time) error {
-	// 归一到北京月:写入路径传的是"真实瞬时"(2026-09-10 时区缺陷修复前按
-	// 进程 TZ 取月,UTC 容器在北京每月 1 日 00:00-08:00 会去建/查上个月分区,
-	// 当月分区缺失 → INSERT 报 "no partition of relation usage found for row")。
-	month = BeijingMonth(month)
-	key := monthKey(month)
 	// F11(审计 2026-09-11):探测必须区分「真分区」与「同名孤儿表」。
 	// 旧实现只看 to_regclass:若某月分区被 DETACH 成功但 DROP 失败,孤儿表
 	// 仍在 catalog 中,探测会误判"已存在"而不再建分区,该月所有计量写入
@@ -59,17 +54,31 @@ func ensureUsagePartition(db *sql.DB, month time.Time) error {
 	// P1-3(审计 2026-09-12)/年分区同族(2026-09-13):探测→建表的竞态与
 	// 42P07 兜底复检统一在 partitions.go 的 ensureRangePartition 里实现,
 	// 年分区 ensureUsageDailyPartition 走同一个 helper。
+	return ensureRangePartition(db, usageMonthPartitionSpec(month))
+}
+
+// usageMonthPartitionSpec 是某**北京月**的 usage 明细分区规格的**唯一构造点**
+// (R5-A-9/R5-A-10,审计 2026-09-23):创建路径(ensureUsagePartition)与清理路径
+// 的"该月分区形态是否就绪"判定必须看同一份期望窗口 —— 两处各拼一次窗口会让
+// "清理认为异常、创建认为正常"这类分叉静默成立。
+//
+// 分区边界用**显式 UTC 偏移**的瞬时字面量:分区范围(timestamptz)不随 PG 会话
+// 时区漂移(裸日期 '2026-09-01' 会被按会话时区解析,UTC 会话下建出的分区范围
+// 与北京月错开 8 小时)。
+//
+// 归一到北京月:写入路径传的是"真实瞬时"(2026-09-10 时区缺陷修复前按进程 TZ
+// 取月,UTC 容器在北京每月 1 日 00:00-08:00 会去建/查上个月分区,当月分区缺失
+// → INSERT 报 "no partition of relation usage found for row")。
+func usageMonthPartitionSpec(month time.Time) partitionSpec {
+	month = BeijingMonth(month)
 	start := dayKey(month)
 	end := start.AddDate(0, 1, 0)
-	// 分区边界用**显式 UTC 偏移**的瞬时字面量:分区范围(timestamptz)不随 PG
-	// 会话时区漂移(裸日期 '2026-09-01' 会被按会话时区解析,UTC 会话下建出的
-	// 分区范围与北京月错开 8 小时)。
-	return ensureRangePartition(db, partitionSpec{
+	return partitionSpec{
 		parent: "usage",
-		key:    key,
+		key:    monthKey(month),
 		from:   pgInstantArg(BeijingDayInstant(start)),
 		to:     pgInstantArg(BeijingDayInstant(end)),
-	})
+	}
 }
 
 func dayKey(t time.Time) time.Time {
@@ -97,6 +106,17 @@ func ensureUsageDailyPartition(db *sql.DB, year time.Time) error {
 // 明细是事实源,账本是降维缓存:崩溃/漏跑后可全窗口重算,永无洞。
 // from/to 为闭区间日期;只处理窗口内 created_at 所属的"天",并按天聚合后
 // 顺带更新所属月份。
+//
+// R5-A-10(审计 2026-09-23,P1):**只为"该月确实有明细"的月份建明细分区**。
+// 旧实现对窗口内每个月无条件 `ensureUsagePartition` —— 保留期曾调小(过期月
+// 分区被 DROP、账本完整)后调大并重启,启动补算会为这些月建出**空**分区;而
+// 聚合的分段判据是"该月关系是否存在 ⇒ 读明细"(R4-C-4),于是这些月在用量中心
+// 与月报里恒为 0 —— 永久账本里的金额被静默隐藏(真 PG 实测 聚合 0.0000 /
+// 账本直读 3.0000)。空分区是**只在重建路径上产生**的伪明细源,所以修在产生点。
+//
+// 注意 usage_daily 的年分区仍对窗口内每个月无条件 ensure:它是**账本自己的**
+// 关系(写聚合结果的目标),与"明细是否存在"无关,也不是聚合分段的判据来源
+// (scanUsageMonthTables 只认 usage_<6 位数字>,usage_daily_<YYYY> 不参与)。
 func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 	if from.IsZero() || to.IsZero() || from.After(to) {
 		return nil
@@ -107,14 +127,72 @@ func RebuildUsageLedger(db *sql.DB, from, to time.Time) error {
 	if from.After(to) {
 		return nil
 	}
-	// 建好涉及月份/年份的分区
+	if err := ensureLedgerRelations(db, from, to); err != nil {
+		return err
+	}
+	return rebuildUsageLedgerRows(db, from, to)
+}
+
+// ensureLedgerRelations 为窗口内的月份准备关系:usage_daily 年分区**无条件**
+// 建(账本写入目标),usage 明细月分区**按需**建(该月一行明细都没有就不建,
+// 见 RebuildUsageLedger 的 R5-A-10 说明)。
+func ensureLedgerRelations(db *sql.DB, from, to time.Time) error {
 	for m := dayKey(from); !m.After(dayKey(to)); m = m.AddDate(0, 1, 0) {
-		if err := ensureUsagePartition(db, m); err != nil {
-			return err
-		}
 		if err := ensureUsageDailyPartition(db, m); err != nil {
 			return err
 		}
+		hasDetail, err := usageMonthHasDetail(db, m)
+		if err != nil {
+			return err
+		}
+		if !hasDetail {
+			// 该月没有明细 ⇒ 不建空分区(建了会让聚合把该月判成"有明细"从而
+			// 隐藏账本金额)。当月的新写入由写路径 RecordUsage 自己 ensure。
+			continue
+		}
+		if err := ensureUsagePartition(db, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// usageMonthHasDetail 探测某北京月内 usage 是否**至少有一行**明细。
+//
+// 只做 LIMIT 1 存在性检查:分区裁剪把扫描限制在该月分区上,而该分区里的每一行
+// 都落在窗口内 ⇒ 命中即返回,与分区行数无关。
+//
+// 这个探测**不需要分区存在**:月分区是写时惰性创建的,而读路径查的是父表 ——
+// 缺分区时同样返回"没有行"(缺分区 ≠ 有行),正是我们要的语义。
+func usageMonthHasDetail(db *sql.DB, month time.Time) (bool, error) {
+	start := dayKey(BeijingMonth(month))
+	end := start.AddDate(0, 1, 0)
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM usage
+	                     WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
+	                     LIMIT 1`,
+		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end))).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// rebuildUsageLedgerRows 是账本重算的**纯聚合**部分:明细 → usage_daily →
+// usage_monthly(UPSERT,幂等)。**不建任何关系**。
+//
+// 与 RebuildUsageLedger 的分离是 R5-A-9 的修法:聚合读的是 usage **父表**,
+// 与"该月分区的形态"无关(分区边界错位/读不懂/二级分区里的行照样能被聚合)。
+// 清理路径因此可以在**不要求分区就绪**的前提下先补账、再 DETACH+DROP ——
+// 旧实现经 RebuildUsageLedger 无条件 ensureUsagePartition,一个错界老分区让
+// 整轮清理中止(清理被"自己要清的东西"挡住,保留策略永久停摆)。
+func rebuildUsageLedgerRows(db *sql.DB, from, to time.Time) error {
+	from, to = normalizeDayRange(from, to)
+	if from.IsZero() || to.IsZero() || from.After(to) {
+		return nil
 	}
 	// 日账:按 (user_id, model, day) 聚合明细;UPSERT 覆盖(幂等)。
 	// PG 用 ON CONFLICT (user_id, model, day) DO UPDATE。
@@ -283,6 +361,67 @@ ORDER BY c.relname`)
 	return out, rows.Err()
 }
 
+// retentionLedgerWindow 返回"清理某个到期月关系之前必须补算的账本窗口",并在
+// 同一次 catalog 探测里给出该关系的**形态判定**(R5-A-9,审计 2026-09-23)。
+//
+//   - 形态就绪(叶子分区、挂 usage 下、边界覆盖期望北京月)→ 窗口 = 该月;
+//   - 形态异常(错界 / 读不懂 / 二级分区 / 同名孤儿)→ 窗口 = 该月 ∪ 分区**实际
+//     边界**覆盖的北京日。理由:错界分区持有的行可能跨到相邻的北京月(典型是
+//     UTC 自然月边界与北京月差 8 小时),只补名义月会让滑到相邻月的那部分行在
+//     DROP 时丢掉账;边界读不懂时退回名义月(判据不建立在对边界的猜测上)。
+//   - shapeErr 非 nil **不是**中止理由(只用于点名记日志):清理的判据是"该月
+//     明细能否被聚合",而聚合读父表,与分区边界无关。
+func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) (from, to time.Time, shapeErr error) {
+	from, to = m, m.AddDate(0, 1, -1)
+	probe, perr := probeUsagePartition(db, rel)
+	if perr != nil {
+		// 探测失败 ≠ 形态异常:读不到 catalog 时不做任何猜测,按名义月补账并要求
+		// 调用方在日志里看见(perr 会作为形态信息被打印)。
+		return from, to, perr
+	}
+	if !probe.Exists {
+		return from, to, nil // 并发下已被别人清掉:仍是"可以继续 DROP"的状态
+	}
+	if serr := partitionReadyErr(usageMonthPartitionSpec(m), probe); serr == nil {
+		return from, to, nil
+	} else {
+		shapeErr = serr
+	}
+	if boundFrom, boundTo, ok := splitRangeBound(probe.Bound); ok {
+		if _, at, okF := parsePartitionBoundLiteral(boundFrom); okF {
+			if d := BeijingDay(at); d.Before(from) {
+				from = d
+			}
+		}
+		if _, at, okT := parsePartitionBoundLiteral(boundTo); okT {
+			// 上界是开区间:退 1ns 落到最后一个被覆盖的瞬时所在的北京日。
+			if d := BeijingDay(at.Add(-time.Nanosecond)); d.After(to) {
+				to = d
+			}
+		}
+	}
+	return from, to, shapeErr
+}
+
+// rebuildLedgerForRetention 是清理路径的补账入口:先备好 usage_daily 年分区
+// (账本**自己的**关系,缺了聚合结果写不进去 = 真失败),再做**纯聚合** ——
+// 全程不碰 usage 明细月分区,因此"该月分区形态异常"不会阻止清理(R5-A-9)。
+//
+// 与 RebuildUsageLedger 的唯一差别就是最后这一条:后者是写路径/启动补算的入口,
+// 需要确保月分区形态就绪(fail-loud),清理路径不需要(它正要 DROP 那个分区)。
+func rebuildLedgerForRetention(db *sql.DB, from, to time.Time) error {
+	from, to = normalizeDayRange(from, to)
+	if from.IsZero() || to.IsZero() || from.After(to) {
+		return nil
+	}
+	for m := dayKey(from); !m.After(dayKey(to)); m = m.AddDate(0, 1, 0) {
+		if err := ensureUsageDailyPartition(db, m); err != nil {
+			return err
+		}
+	}
+	return rebuildUsageLedgerRows(db, from, to)
+}
+
 // CleanupUsageRetention DROP 过期月份分区(先校验该月日账已生成,防丢账)。
 // 保留 N 个月 = 删除 created_at 早于"当前北京月 - N 个月"的整分区。
 //
@@ -338,9 +477,27 @@ func CleanupUsageRetention(db *sql.DB) error {
 		if !ok || !m.Before(cutoffMonth) {
 			continue // 保留期内(或名字不合法,前一步已排除)
 		}
-		// 先重建该月日账/月账(幂等,防明细删除后账本丢)。
-		if err := RebuildUsageLedger(db, m, m.AddDate(0, 1, -1)); err != nil {
-			return err
+		// R5-A-9(审计 2026-09-23,P1):补账**不得要求"该月分区形态就绪"**。
+		// 旧实现在 DROP 前调 RebuildUsageLedger(内部无条件 ensureUsagePartition),
+		// 于是一个错界/读不懂/二级分区的老分区(按设计只允许人工处置、不会自愈)
+		// 让整轮清理 `return err` —— 与它无关的、本该被清掉的月份一起留在盘上,
+		// 每次重试都重新判定 ⇒ 保留策略永久停摆,只能人工 DROP。
+		//
+		// 判据同构:清理要素是"该月明细能否被聚合",而聚合读的是 usage **父表**,
+		// 与分区边界无关 ⇒ 形态异常只影响"该月能否接收新写入",不阻止清理。
+		// 形态异常仍**点名**(关系名 + 期望窗口 + 实际边界原文,都在 shapeErr 里),
+		// 让人知道该月的新写入需要人工处置 —— 清理本身照常进行。
+		winFrom, winTo, shapeErr := retentionLedgerWindow(db, rel, m)
+		if shapeErr != nil {
+			log.Printf("usage retention: %s 的形态判定未通过(或无法判定):%v;"+
+				"重建其明细账本(窗口 %s..%s,按它实际持有的行)后照常 DETACH+DROP"+
+				"(R5-A-9:分区形态只影响该月新写入,不得让整轮保留清理停摆)",
+				rel, shapeErr, winFrom.Format(dateFmt), winTo.Format(dateFmt))
+		}
+		// 补账(账本 UPSERT,幂等):失败**保持 fail-loud** —— 账没算出来就不 DROP,
+		// 否则明细被删而账本没补上,金额永久丢失。
+		if err := rebuildLedgerForRetention(db, winFrom, winTo); err != nil {
+			return fmt.Errorf("rebuild ledger before dropping %s: %w", rel, err)
 		}
 		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION " + rel); derr != nil {
 			// 复检:并发清理/重复执行时可能已经不是分区 → 继续 DROP;
@@ -458,6 +615,29 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 			segEnd = to
 		}
 		detail := present[monthKey(monthStart)]
+		// R5-A-10 的纵深防御(审计 2026-09-23,P1):"分区存在" ≠ "该月有明细"。
+		// 历史缺陷(或人工 DDL/旧版本遗留)建出的**空**分区与"仍有明细的分区"在
+		// `present` 判据下同形 ⇒ 明细段读出 0,而永久账本里明明有金额(报告静默
+		// 少计)。这里把判据补全为:分区存在 **且**(该月有明细行 **或** 该月账本
+		// 无行)。两边都空时读哪边都一样,保持原判据(不多查一次)。
+		//
+		// 只在"分区为空"时才查账本 ⇒ 正常布局(分区非空)零额外查询、且仍以明细
+		// 为事实源(不会因账本有旧数据而重复计数)。
+		if detail {
+			hasDetail, derr := usageMonthHasDetail(db, monthStart)
+			if derr != nil {
+				return nil, derr
+			}
+			if !hasDetail {
+				hasLedger, lerr := ledgerMonthHasRows(db, monthStart)
+				if lerr != nil {
+					return nil, lerr
+				}
+				if hasLedger {
+					detail = false
+				}
+			}
+		}
 		if n := len(segments); n > 0 && segments[n-1].detail == detail {
 			segments[n-1].to = segEnd
 		} else {
@@ -466,6 +646,23 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 		cur = nextMonth
 	}
 	return segments, nil
+}
+
+// ledgerMonthHasRows 报告该北京月在永久日账 usage_daily 里**是否至少有一行**
+// (R5-A-10 纵深防御的配套探测;只做 LIMIT 1 存在性检查,走 idx_usage_daily_day)。
+func ledgerMonthHasRows(db *sql.DB, month time.Time) (bool, error) {
+	start := dayKey(BeijingMonth(month))
+	end := start.AddDate(0, 1, 0)
+	var one int
+	err := db.QueryRow(`SELECT 1 FROM usage_daily WHERE day >= ?::date AND day < ?::date LIMIT 1`,
+		start.Format(dateFmt), end.Format(dateFmt)).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ledgerWindowEmpty 探测日账表在 [from, to] 闭区间内**是否一行都没有**。

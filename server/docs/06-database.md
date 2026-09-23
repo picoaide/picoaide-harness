@@ -100,9 +100,20 @@ cache_prompt_tokens(BIGINT), kind, cost(DOUBLE), created_at`;索引
 `idx_usage_user_time / idx_usage_time / idx_usage_model_time / idx_usage_kind /
 idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 
-**保留策略**: settings `usage.retention_months`(默认 6,0=永久,1~120);
-`CleanupUsageRetention` 校验对应月日账已生成后 `DETACH PARTITION + DROP TABLE`
-秒删过期明细。网关每次调用计量写入;`CleanupPendingUsage` 清理挂起记录(全零待定行)。月度聚合:`UserMonthlyUsage`(当月 SUM,走索引)/ `UserMonthlyUsageBatch`(管理页批量附用量)。**2026-09-11**:员工 token 配额判定(`EffectiveQuota`)已下线,网关唯一闸门是账户余额(`BalanceBlocked` → 429 `BALANCE_EXHAUSTED`)。
+**保留策略**: settings `usage.retention_months`(默认 6,0=永久,1~120)。
+**执行者 = `internal/usageretention` 周期调度器**(启动先跑一轮 → 每 6 小时一次 → 随 ctx 退出;
+`PUT /api/server/admin/gateway` 保存保留期时额外立即触发一次)—— 不要再写成「启动时清理一次」,
+那正是 2026-09-23 审计 R5-A-11 的缺陷形态(稳态运行的实例里保留期不生效、明细随月份单调增长);
+同一形态在审计侧已由 `internal/auditretention` 修好(R4-D-4)。
+`CleanupUsageRetention` 逐个处理早于 cutoff 的月分区:**先补账再 `DETACH PARTITION + DROP TABLE`**
+秒删过期明细。两条写实口径(2026-09-23 审计 R5-A-9 / R5-A-10):
+① 补账**不要求该月分区形态就绪** —— 形态异常(错界 / 边界读不懂 / 二级分区)只影响"该月能否接收新写入",
+   不得让整轮清理中止(旧实现因此永久停摆,只能人工 DROP);异常分区仍**点名**到日志,并按其**实际边界**
+   扩大补账窗口后再 DROP(错界分区可能持有相邻北京月的行)。
+② **只为"该月确实有明细"的月份建明细分区** —— 否则"保留期调小(旧月分区被 DROP)后调大 + 重启补算"
+   会为这些月建出空分区,而聚合按"分区在 ⇒ 读明细"判据读到空表,永久账本里的金额被静默隐藏
+   (真 PG 实测 聚合 0.0000 / 账本直读 3.0000);聚合侧另有纵深防御:分区为空且账本该月有行时回落账本。
+网关每次调用计量写入;`CleanupPendingUsage` 清理挂起记录(全零待定行)。月度聚合:`UserMonthlyUsage`(当月 SUM,走索引)/ `UserMonthlyUsageBatch`(管理页批量附用量)。**2026-09-11**:员工 token 配额判定(`EffectiveQuota`)已下线,网关唯一闸门是账户余额(`BalanceBlocked` → 429 `BALANCE_EXHAUSTED`)。
 - 0022 新增 `cost REAL DEFAULT 0`:记录时按模型定价折算的金额(元),后续改价/删模型不重写历史;统计与余额扣减统一读 `cost`。月度费用聚合:`UserMonthlyCost`/`UserMonthlyCostBatch`;**2026-09-11**:金额配额判定(`EffectiveMoneyQuota`)已下线,消费改为在写 usage 的同一事务里结算到账户余额(`settleUsageCostTx` → `balance_ledger`)。
 - 0023 新增 `models.offpeak_discount REAL`(低谷折扣率):结合 settings `usage.peak_windows`(高峰时段 JSON,北京时间,如 `[{"start":"09:00","end":"12:00"},{"start":"14:00","end":"18:00"}]`)——高峰窗口外(空闲时段)费用 × 折扣率;DeepSeek 官方当前政策(2026-08-16 生效)高峰 = 北京 09:00-12:00、14:00-18:00,空闲价 = 高峰价 × 50%(含缓存命中价)。历史 16:30-00:30 错峰政策已废弃,可在网关页自行配置。
 
