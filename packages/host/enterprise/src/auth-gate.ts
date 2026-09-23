@@ -10,7 +10,7 @@ import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
 import {
   computeSkillContentHash,
-  describeSkillFailure,
+  describeArchiveFailure,
   INSTALL_VERSION_FILE,
   installSkillArchive,
   isStoreProvenance,
@@ -1896,7 +1896,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               // 分类 + 脱敏 + 状态码的唯一实现（审计 A12/A13）：拒绝 422、
               // 需要确认 409、系统级错误 502 且文案里没有本机路径。
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -1923,7 +1923,7 @@ export function apply(ctx: Context, config: Config): void {
               await uninstallSkill(resolveSkillsDir(), name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -1979,7 +1979,7 @@ export function apply(ctx: Context, config: Config): void {
                 return json(res, 401, { error: 'auth expired' })
               }
               // 分类 + 脱敏 + 状态码的唯一实现（拒绝 422 / 需确认 409 / 系统级 502）。
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -2003,7 +2003,7 @@ export function apply(ctx: Context, config: Config): void {
               await uninstallSkill(resolveSkillsDir(), name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -2082,6 +2082,16 @@ export function apply(ctx: Context, config: Config): void {
           }
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
           const presetsDir = resolvePresetsDir()
+          /**
+           * 覆盖/删除本机自制内容的显式确认标记（审计 2026-09-23 N2）。
+           *
+           * 与技能侧**同一份契约**（`/api/pico/skills*`、`/api/pico/shared-skills*`）：
+           * 面板只在用户点过确认条 / 卸载第二段确认之后才把 `?overwrite=1` 拼进 URL。
+           * 此前这条路由**不读任何 query**，而 `installPresetArchive` 对已存在目录
+           * 一律拒收 ⇒ 面板的「更新智能体」必然失败（`preset "x" already exists locally`），
+           * 同名的覆盖确认整条是死面。
+           */
+          const overwrite = new URL(req.url ?? '/', 'http://localhost').searchParams.get('overwrite') === '1'
 
           // GET /api/pico/agent-presets -> gateway catalog + installed + local.
           if (pathname === '/api/pico/agent-presets' && req.method === 'GET') {
@@ -2146,7 +2156,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
               // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -2186,6 +2196,8 @@ export function apply(ctx: Context, config: Config): void {
                 name, archive: content, checksum, presetsDir,
                 // 溯源(D6):与技能同构,记录版本/渠道/来源服务端。
                 version: presetVersion, channel: 'org', server: s.serverURL,
+                // 覆盖确认（审计 2026-09-23 N2）：与技能同一条 `?overwrite=1` 契约。
+                overwrite,
               })
               json(res, 200, { ok: true, name })
             } catch (cause) {
@@ -2193,9 +2205,13 @@ export function apply(ctx: Context, config: Config): void {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              const message = cause instanceof Error ? cause.message : String(cause)
-              const isRefusal = /checksum|archive|agent\.cordis\.yml|invalid preset id|link entry|too large|traversal|empty path|already exists/u.test(message)
-              json(res, isRefusal ? 422 : 502, { error: message })
+              // 分类 + 脱敏 + 状态码走**唯一实现**（审计 2026-09-23 A12：这里此前
+              // 是裸分类 + 原文，系统级 errno 会把本机绝对路径透给 UI）。
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2207,11 +2223,15 @@ export function apply(ctx: Context, config: Config): void {
           if (uninstallMatch !== null) {
             const name = decodeURIComponent(uninstallMatch[1]!)
             try {
-              await uninstallPreset(presetsDir, name)
+              // 与技能同口径（审计 A3/N2）：本机自制内容没有 `?overwrite=1` 一律拒收。
+              await uninstallPreset(presetsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause)
-              json(res, /not installed/u.test(message) ? 404 : 500, { error: message })
+              const failure = describeArchiveFailure(cause)
+              json(res, failure.status, {
+                error: failure.message,
+                ...failure.code === undefined ? {} : { code: failure.code },
+              })
             }
             return
           }
@@ -2348,7 +2368,7 @@ export function apply(ctx: Context, config: Config): void {
               }
               // 打包/预检失败：分类 + 脱敏由 skill-install 统一给（拒绝 = 422，
               // 归档过大 = 413，系统级 = 502 且文案里不含本机路径）。
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -2403,7 +2423,7 @@ export function apply(ctx: Context, config: Config): void {
                 ctx.picoSession.clear()
                 return json(res, 401, { error: 'auth expired' })
               }
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },
@@ -2422,7 +2442,7 @@ export function apply(ctx: Context, config: Config): void {
               await uninstallSkill(skillsDir, name, { overwrite })
               json(res, 200, { ok: true, name })
             } catch (cause) {
-              const failure = describeSkillFailure(cause)
+              const failure = describeArchiveFailure(cause)
               json(res, failure.status, {
                 error: failure.message,
                 ...failure.code === undefined ? {} : { code: failure.code },

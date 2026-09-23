@@ -14,6 +14,7 @@ import {
   uninstallPreset,
   validatePresetId,
 } from '../src/agent-preset-install.ts'
+import { ArchiveInstallRefusal, readProvenance } from '../src/skill-install.ts'
 
 const COMPOSITION = `- id: persona
   name: '@deepseek-ai/dsh-persona'
@@ -267,12 +268,74 @@ describe('installPresetArchive', () => {
     }
   })
 
-  it('refuses to overwrite an existing preset', async () => {
+  /**
+   * 审计 2026-09-23 **N2**：面板的「更新智能体」此前**必然失败** —— 安装器对已存在
+   * 目录一律拒收（`preset "x" already exists locally`），而宿主又不读 `?overwrite=1`。
+   * 现在与技能侧同口径（来源判定复用 `isStoreProvenance`）：
+   *  - 能力中心装的那一份（磁盘上有 `.picoaide/release.json` 且渠道 ∈ 商店来源、
+   *    appId == 目录名）⇒ 直接更新；
+   *  - 本机自制 / 来源不明 ⇒ 没有 `overwrite: true` 一律拒收 `LOCAL_CONTENT`，
+   *    且**磁盘一字未动**；显式确认后才整树替换。
+   */
+  it('N2：商店来源的已装预设可直接更新（面板「更新智能体」不再必然失败）', async () => {
     const dir = await newPresetsDir()
     try {
-      const archive = await makeArchive({ 'agent.cordis.yml': COMPOSITION })
-      await installPresetArchive({ name: 'dup', archive, presetsDir: dir })
-      await expect(installPresetArchive({ name: 'dup', archive, presetsDir: dir })).rejects.toThrow(/already exists/u)
+      const v1 = await makeArchive({ 'agent.cordis.yml': COMPOSITION, 'preset.yml': 'name: v1\n' })
+      await installPresetArchive({ name: 'dup', archive: v1, presetsDir: dir, version: '1.0.0' })
+      // 第一次安装写下的 provenance（channel 缺省 org + appId == name）⇒ 商店来源。
+      expect((await readProvenance(join(dir, 'dup')))?.channel).toBe('org')
+
+      const v2 = await makeArchive({ 'agent.cordis.yml': COMPOSITION, 'preset.yml': 'name: v2\n' })
+      const updated = await installPresetArchive({ name: 'dup', archive: v2, presetsDir: dir, version: '2.0.0' })
+      expect(updated.targetDir).toBe(join(dir, 'dup'))
+      expect(await readFile(join(dir, 'dup', 'preset.yml'), 'utf8')).toBe('name: v2\n')
+      expect((await readProvenance(join(dir, 'dup')))?.version).toBe('2.0.0')
+      // 更新不留 staging / backup 残渣。
+      expect((await readdir(dir)).filter(n => n.startsWith('.'))).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('N2：本机自制同名预设无确认 ⇒ 拒收且磁盘一字未动，带 overwrite 才替换', async () => {
+    const dir = await newPresetsDir()
+    try {
+      // 用户自己写的预设：有 composition、**没有** provenance。
+      const mine = join(dir, 'dup')
+      await mkdir(mine, { recursive: true })
+      await writeFile(join(mine, 'agent.cordis.yml'), COMPOSITION)
+      await writeFile(join(mine, 'notes.md'), 'my own notes\n')
+
+      const archive = await makeArchive({ 'agent.cordis.yml': COMPOSITION, 'preset.yml': 'name: store\n' })
+      const refused = await installPresetArchive({ name: 'dup', archive, presetsDir: dir }).catch((cause: unknown) => cause)
+      expect(refused).toBeInstanceOf(ArchiveInstallRefusal)
+      expect((refused as ArchiveInstallRefusal).code).toBe('LOCAL_CONTENT')
+      expect(await readFile(join(mine, 'notes.md'), 'utf8')).toBe('my own notes\n')
+      // 拒绝时不留任何残留（staging 也被清掉）。
+      expect((await readdir(dir)).filter(n => n.startsWith('.'))).toEqual([])
+
+      await installPresetArchive({ name: 'dup', archive, presetsDir: dir, overwrite: true })
+      await expect(readFile(join(mine, 'notes.md'), 'utf8')).rejects.toThrow()
+      expect(await readFile(join(mine, 'preset.yml'), 'utf8')).toBe('name: store\n')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('N2：卸载同样来源感知（本机自制无确认 ⇒ 拒收；带 overwrite 才删）', async () => {
+    const dir = await newPresetsDir()
+    try {
+      const mine = join(dir, 'mine')
+      await mkdir(mine, { recursive: true })
+      await writeFile(join(mine, 'agent.cordis.yml'), COMPOSITION)
+
+      const refused = await uninstallPreset(dir, 'mine').catch((cause: unknown) => cause)
+      expect(refused).toBeInstanceOf(ArchiveInstallRefusal)
+      expect((refused as ArchiveInstallRefusal).code).toBe('LOCAL_CONTENT')
+      expect(await listInstalledPresets(dir)).toEqual(['mine'])
+
+      expect(await uninstallPreset(dir, 'mine', { overwrite: true })).toBe(mine)
+      expect(await listInstalledPresets(dir)).toEqual([])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

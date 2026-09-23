@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
+  applySectionRows,
   avatarColor,
+  capabilitySourceBadgeKey,
   compareVersions,
   hasUpdateFor,
   installEndpoint,
@@ -14,6 +16,7 @@ import {
   mergeItems,
   nameTakenError,
   needsOverwriteConfirm,
+  planCardAction,
   planSectionCards,
   uninstallEndpoint,
   versionInstallSupported,
@@ -331,6 +334,109 @@ describe('内置技能的分区归属（2026-09-20 用户口径）', () => {
 })
 
 
+/**
+ * 独立复审 2026-09-23 **A6（PARTIAL）** + **N1（P2）**：「我的」卡片的来源字段
+ * 与卡片形态必须只取决于**已合并后的单一数据源**，不取决于两次并发取数的到达顺序。
+ *
+ * 现场（审计 §5.18 实测）：
+ *  - 面板 mount 时并发发 `/api/pico/capabilities?source=market` 与 `?source=local`
+ *    （后者内部还要打 3 次上游 + 扫盘），谁先回来不定；
+ *  - **market-first**：同名商店行先入 Map ⇒ `mergeItems` 用它打底 ⇒ 本机行独有的
+ *    `originChannel` 被吞 ⇒ **「随客户端内置」徽章与本机卸载入口都渲染不出来**（A6）；
+ *  - **mine-first**：本机行打底但 `installed` 被商店行的 `source` 覆写、`installed`
+ *    本身没被带上 ⇒ 已装技能渲染成「安装」。
+ *
+ * 用例直接驱动**真实的归约函数**（applySectionRows → itemsForTab → mergeItems →
+ * capabilitySourceBadgeKey / planCardAction），两种到达顺序各跑一遍：
+ *  - 变异验证：把 mergeItems 退回"先到的行说了算"⇒ 第 1 条（逐字相等）必红；
+ *    只丢"本机行的 originChannel/installedOrigin 优先"⇒ 第 2 条必红；
+ *    只丢"存在本机行即 installed"⇒ 第 3 条必红。
+ */
+describe('A6/N1 本机行与同名商店行的归并（只依赖合并结果，不依赖到达顺序）', () => {
+  /** `?source=market` 的目录行：host 已按磁盘状态补 installed/installedOrigin/installedVersion。 */
+  const catalogRow = (name: string, version: string, installedVersion: string): CapabilityItem => ({
+    kind: 'skill', source: 'market', name, displayName: name, version, description: '目录说明',
+    author: 'someone', status: 'approved', versions: [version], installed: true,
+    installedVersion, installedOrigin: 'store', official: false, downloads: 3, calls: 1, score: 10,
+    isOwner: false,
+  })
+  /** `?source=local` 的本机行（扫盘得到）：**不带 installed**，来源字段来自磁盘 provenance。 */
+  const localRow = (name: string, version: string, originChannel?: string): CapabilityItem => ({
+    kind: 'skill', source: 'local', name, displayName: name, runtimeName: name, version,
+    description: '本机说明', author: '', versions: [], isLocal: true, installedOrigin: 'store',
+    ...originChannel === undefined ? {} : { originChannel, originAppId: name, dirty: false },
+  })
+
+  /** 两次取数的载荷（同一份服务端目录行会同时出现在两个分支里）。 */
+  const MARKET: CapabilityItem[] = [catalogRow('app-builder', '1.0.0', '1.0.0'), catalogRow('codeql', '1.2.0', '1.0.0')]
+  const LOCAL: CapabilityItem[] = [
+    catalogRow('app-builder', '1.0.0', '1.0.0'),
+    catalogRow('codeql', '1.2.0', '1.0.0'),
+    localRow('app-builder', '1.0.0', 'plugin'),
+    localRow('my-draft', '1.0.0'),
+  ]
+  const EMPTY: CapabilityItem[] = []
+
+  /** market 先到（常见）：mine 的归约会把商店行留着，本机行追加在后。 */
+  const marketFirst = (): CapabilityItem[] =>
+    mergeItems(itemsForTab(applySectionRows(applySectionRows(EMPTY, 'market', MARKET), 'mine', LOCAL), 'mine'))
+  /** mine 先到：market 的归约会先清掉非本机行，商店行由 market 那一发补上。 */
+  const mineFirst = (): CapabilityItem[] =>
+    mergeItems(itemsForTab(applySectionRows(applySectionRows(EMPTY, 'mine', LOCAL), 'market', MARKET), 'mine'))
+
+  const pick = (rows: CapabilityItem[], name: string): CapabilityItem => {
+    const found = rows.find(row => row.name === name)
+    expect(found, `${name} 必须出现在「我的」`).toBeDefined()
+    return found!
+  }
+
+  it('两种到达顺序给出逐字相同的卡片数据（N1 的根因面）', () => {
+    expect(mineFirst()).toEqual(marketFirst())
+    // 三种卡（内置技能 / 商店已装 / 本机创作）都在，且各只有一张。
+    expect(marketFirst().map(row => row.name).sort()).toEqual(['app-builder', 'codeql', 'my-draft'])
+  })
+
+  it('同名商店行存在时仍带 provenance ⇒ 「随客户端内置」徽章 + 卸载按钮都渲染得出（A6 验收点）', () => {
+    for (const merged of [marketFirst(), mineFirst()]) {
+      const item = pick(merged, 'app-builder')
+      expect(item.installed).toBe(true)
+      expect(item.originChannel).toBe('plugin')
+      expect(capabilitySourceBadgeKey(item, 'mine')).toBe('capability.sourcePlugin')
+      expect(planCardAction(item)).toEqual({
+        kind: 'uninstall',
+        endpoint: '/api/pico/skills/app-builder/uninstall',
+        localContent: false,
+      })
+      // 卸载端点也不是市场那一条（market 分支会拼 /api/pico/skills/:name/uninstall，
+      // 恰好同路径；这里钉的是 localRemoveEndpoint 认得它 —— 徽章与入口同源）。
+      expect(localRemoveEndpoint(item)).toBe('/api/pico/skills/app-builder/uninstall')
+    }
+  })
+
+  it('已装的商店行不再随到达顺序退化成「安装」（N1 的第二形态）', () => {
+    for (const merged of [marketFirst(), mineFirst()]) {
+      const item = pick(merged, 'codeql')
+      expect(item.installed).toBe(true)
+      expect(item.installedVersion).toBe('1.0.0')
+      expect(planCardAction(item)).toEqual({ kind: 'update', version: '1.2.0' })
+    }
+  })
+
+  it('本机创作（无同名商店行）照常出「上传」，不被归并改写成商店卡', () => {
+    for (const merged of [marketFirst(), mineFirst()]) {
+      const item = pick(merged, 'my-draft')
+      expect(item.source).toBe('local')
+      expect(capabilitySourceBadgeKey(item, 'mine')).toBe('capability.sourceLocal')
+      expect(planCardAction(item)).toEqual({ kind: 'upload' })
+    }
+  })
+
+  it('归并结果与输入顺序无关：同一组行正序/倒序归并逐字相同', () => {
+    const rows = [...MARKET, ...LOCAL]
+    expect(mergeItems([...rows].reverse())).toEqual(mergeItems(rows))
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 独立审计 2026-09-23 A2/A3/A6/A11/A15 —— 覆盖确认与"按版本安装"的纯判据
 // ---------------------------------------------------------------------------
@@ -388,6 +494,23 @@ describe('覆盖标记只由"用户已确认"产生（withOverwrite，A2/A3 两�
     expect(withOverwrite('/api/pico/skills/foo/uninstall', true)).toBe('/api/pico/skills/foo/uninstall?overwrite=1')
     expect(withOverwrite('/api/pico/shared-skills/foo/1.0.0/install', true)).toContain('overwrite=1')
   })
+
+  it('N2：智能体（agent-presets）走同一个标记 —— 宿主侧路由真的读它', () => {
+    const agent: CapabilityItem = {
+      kind: 'agent', source: 'org', name: 'creative-writer', displayName: '', version: '2.0.0',
+      description: '', author: '', versions: ['1.0.0', '2.0.0'], installed: true,
+      installedVersion: '1.0.0', installedOrigin: 'store',
+    }
+    // 商店来源：面板「更新智能体」直接发请求（不带标记）；宿主允许商店来源覆盖。
+    expect(planCardAction(agent)).toEqual({ kind: 'update', version: '2.0.0' })
+    expect(installNeedsConfirm(agent)).toBe(false)
+    expect(installRequestUrl(agent)).toBe('/api/pico/agent-presets/creative-writer/install')
+    // 本机自制同名：先出确认条，确认后才把标记交给宿主（否则宿主 409 LOCAL_CONTENT）。
+    const local: CapabilityItem = { ...agent, installedOrigin: 'local' }
+    expect(installNeedsConfirm(local)).toBe(true)
+    expect(installRequestUrl(local)).toBe('/api/pico/agent-presets/creative-writer/install')
+    expect(installRequestUrl(local, { overwrite: true })).toBe('/api/pico/agent-presets/creative-writer/install?overwrite=1')
+  })
 })
 
 describe('A11 「按版本安装」只在端点真的接受版本时出现', () => {
@@ -441,11 +564,22 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/client/CapabilityCenterPanel.tsx', import.meta.url)), 'utf8')
 
   it('更新按钮不再硬编码覆盖确认（确认条才是唯一的覆盖来源）', () => {
-    const update = /needUpdate \? \(([\s\S]*?)\) : renderUninstall/u.exec(source)
+    // 旧实现把「更新」的 onClick 写成 `install(item, { overwrite: true })`（硬编码 force）
+    // ⇒ 确认条永远是死代码。「该不该出更新」现在由 planCardAction 判（纯判据），
+    // 「要不要先确认」由 install() 自己问 installNeedsConfirm（A15 那组用例钉住）。
+    const installed: CapabilityItem = {
+      kind: 'skill', source: 'market', name: 'foo', displayName: '', version: '1.2.0',
+      description: '', author: '', versions: ['1.1.0', '1.2.0'], installed: true,
+      installedVersion: '1.1.0', installedOrigin: 'local',
+    }
+    expect(planCardAction(installed)).toEqual({ kind: 'update', version: '1.2.0' })
+    const update = /plan\.kind === 'update' \? \(([\s\S]*?): plan\.kind === 'reupload'/u.exec(source)
     expect(update, '更新按钮的渲染分支必须存在').not.toBeNull()
     // 更新路径必须走 install() 自己的来源判定：**不传任何选项**（旧实现传了 force）。
     expect(update![1]).toContain('onClick={() => { void install(item) }}')
     expect(update![1]).not.toMatch(/install\(item, \{/u)
+    // 页脚只认 planCardAction 给的 kind，不再自己写 `needUpdate ? … : …` 的分支。
+    expect(source).not.toContain('const needUpdate = hasUpdateFor(item)')
   })
 
   it('确认条是唯一的"用户已确认"出口，重放的是同一发安装', () => {

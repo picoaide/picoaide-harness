@@ -10,7 +10,7 @@ import AdmZip from 'adm-zip'
 import {
   classifyInstalledSkill,
   computeSkillContentHash,
-  describeSkillFailure,
+  describeArchiveFailure,
   installSkillArchive,
   isLoadableSkillName,
   listInstalledSkills,
@@ -18,9 +18,9 @@ import {
   packSkill,
   readProvenance,
   resolveSkillsDir,
-  sanitizeSkillErrorText,
+  sanitizeArchiveErrorText,
   SKILL_NAME_PATTERN,
-  SkillInstallRefusal,
+  ArchiveInstallRefusal,
   sweepStaleSkillTemps,
   synthesizeSkillFrontmatter,
   uninstallSkill,
@@ -725,28 +725,28 @@ describe('A8 tar 通道与 zip 通道权限口径一致（剥掉 setuid/setgid/s
 })
 
 describe('A12 失败文案脱敏 + 陈旧 staging 清扫', () => {
-  it('sanitizeSkillErrorText 去掉本机路径、保留 errno 与原因', () => {
+  it('sanitizeArchiveErrorText 去掉本机路径、保留 errno 与原因', () => {
     const raw = "ENOTEMPTY: directory not empty, rename '/home/user/.picoaide-harness/skills/.install-x/unpacked' -> '/home/user/.picoaide-harness/skills/zeta'"
-    const clean = sanitizeSkillErrorText(raw)
+    const clean = sanitizeArchiveErrorText(raw)
     expect(clean).toBe('ENOTEMPTY: target directory not empty (a concurrent install/uninstall may be running)')
     expect(clean).not.toContain('/home')
     // 未知 errno / 无 errno 的文案：整体脱敏，路径只剩 basename。
-    const other = sanitizeSkillErrorText("EACCES: permission denied, open '/root/secret/skills/a/SKILL.md'")
+    const other = sanitizeArchiveErrorText("EACCES: permission denied, open '/root/secret/skills/a/SKILL.md'")
     expect(other).toBe('EACCES: permission denied')
-    const weird = sanitizeSkillErrorText("boom at '/tmp/one/two/three.txt' and C:\\Users\\me\\x.txt")
+    const weird = sanitizeArchiveErrorText("boom at '/tmp/one/two/three.txt' and C:\\Users\\me\\x.txt")
     expect(weird).not.toContain('/tmp/one')
     expect(weird).not.toContain('C:\\Users')
     expect(weird).toContain('three.txt')
   })
 
-  it('describeSkillFailure 把失败映射成稳定状态码（409/422/404/413/502）', () => {
-    expect(describeSkillFailure(new SkillInstallRefusal('LOCAL_CONTENT', 'x'))).toMatchObject({ status: 409, code: 'LOCAL_CONTENT', refusal: true })
-    expect(describeSkillFailure(new SkillInstallRefusal('NOT_INSTALLED', 'x'))).toMatchObject({ status: 404, code: 'NOT_INSTALLED' })
-    expect(describeSkillFailure(new SkillInstallRefusal('ARCHIVE_TOO_LARGE', 'x'))).toMatchObject({ status: 413 })
-    expect(describeSkillFailure(new SkillInstallRefusal('CHECKSUM_MISMATCH', 'archive checksum mismatch; refused'))).toMatchObject({ status: 422 })
+  it('describeArchiveFailure 把失败映射成稳定状态码（409/422/404/413/502）', () => {
+    expect(describeArchiveFailure(new ArchiveInstallRefusal('LOCAL_CONTENT', 'x'))).toMatchObject({ status: 409, code: 'LOCAL_CONTENT', refusal: true })
+    expect(describeArchiveFailure(new ArchiveInstallRefusal('NOT_INSTALLED', 'x'))).toMatchObject({ status: 404, code: 'NOT_INSTALLED' })
+    expect(describeArchiveFailure(new ArchiveInstallRefusal('ARCHIVE_TOO_LARGE', 'x'))).toMatchObject({ status: 413 })
+    expect(describeArchiveFailure(new ArchiveInstallRefusal('CHECKSUM_MISMATCH', 'archive checksum mismatch; refused'))).toMatchObject({ status: 422 })
     // archive-util 的普通 Error 也是拒绝（关键词兜底），不是上游 502。
-    expect(describeSkillFailure(new Error('parent traversal in archive: ../evil'))).toMatchObject({ status: 422, refusal: true })
-    const system = describeSkillFailure(new Error("EACCES: permission denied, mkdir '/home/u/.picoaide-harness/skills'"))
+    expect(describeArchiveFailure(new Error('parent traversal in archive: ../evil'))).toMatchObject({ status: 422, refusal: true })
+    const system = describeArchiveFailure(new Error("EACCES: permission denied, mkdir '/home/u/.picoaide-harness/skills'"))
     expect(system).toMatchObject({ status: 502, refusal: false })
     expect(system.message).not.toContain('/home/u')
   })
@@ -759,7 +759,7 @@ describe('A12 失败文案脱敏 + 陈旧 staging 清扫', () => {
       await writeFile(asFile, 'x')
       const archive = await makeArchive({ 'SKILL.md': skillMdWith('x', 'version: 1.0.0\n') })
       const cause = await installSkillArchive({ name: 'x', archive, skillsDir: asFile }).catch((e: unknown) => e)
-      const described = describeSkillFailure(cause)
+      const described = describeArchiveFailure(cause)
       expect(described.status).toBe(502)
       expect(described.message).not.toContain(root)
       expect(described.message).not.toContain(asFile)

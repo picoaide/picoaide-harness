@@ -223,6 +223,36 @@ export function itemsForTab<T extends { source?: string, installed?: boolean }>(
     : items.filter(i => i.source === 'local' || i.installed === true)
 }
 
+/** 取数分区：市场（市场+组织合并结果）与我的。 */
+export type SectionKey = 'mine' | 'market'
+
+/**
+ * 一次分区取数回来后如何并进现有列表（**唯一实现**）。
+ *
+ * 决策 2026-08-25：「市场」tab 承载 market+org 合并结果 —— 加载 market 时清除
+ * 两源旧条目；「我的」只清 local（其余保留：`?source=local` 的载荷里同时带
+ * 商店已装行与本机行）。
+ *
+ * 抽成纯函数是为了让「两种到达顺序」可被单测直接驱动（独立复审 2026-09-23 N1）：
+ * 本包没有 jsdom/渲染测试面，而这条归约是两次并发取数唯一的合流点 —— 它在
+ * `setItems` 的 updater 里时，谁也没法在没有 React 的情况下复现 market-first /
+ * mine-first 两种到达顺序。
+ * @param prev - 当前列表。
+ * @param key - 回来的那个分区。
+ * @param rows - 该分区的行。
+ * @returns 合并后的列表。
+ */
+export function applySectionRows(
+  prev: readonly CapabilityItem[],
+  key: SectionKey,
+  rows: readonly CapabilityItem[],
+): CapabilityItem[] {
+  const drop = key === 'market'
+    ? (i: CapabilityItem) => i.source !== 'local'
+    : (i: CapabilityItem) => i.source === 'local'
+  return [...prev.filter(i => !drop(i)), ...rows]
+}
+
 /** 单测用：按（kind, source）解析安装端点。
  * 市场技能只存在于服务端 skills/marketplace 表,必须走 /api/pico/skills 代理
  * (网关 marketplace /archive);共享技能走 shared-skills 代理(带版本);
@@ -327,6 +357,100 @@ export function localRemoveEndpoint(item: CapabilityItem): string | undefined {
   return undefined
 }
 
+/** 卡片页脚那一格该出什么（{@link planCardAction} 的返回值）。 */
+export type CardActionPlan =
+  | { kind: 'uninstall', endpoint: string, localContent: boolean }
+  | { kind: 'update', version: string }
+  | { kind: 'install' }
+  | { kind: 'upload' }
+  | { kind: 'reupload' }
+  | { kind: 'review', status: ItemStatus }
+
+/**
+ * 卡片页脚动作的**唯一判定实现**（渲染层只按它 map，不再自己算一遍）。
+ *
+ * 抽成纯函数的理由（独立复审 2026-09-23 A6/N1）：本包没有 jsdom/渲染测试面，
+ * 而这正是 A6 的验收点 ——「同名商店行存在时仍渲染「随客户端内置」徽章 + 卸载按钮」。
+ * 埋成 JSX 嵌套三元时，`mergeItems` 吞掉本机行字段造成的"页脚退化成「安装」"
+ * 没有任何用例能打坏（审计探针只能逐字复刻这两处分支）。
+ *
+ * 两条口径（与 {@link localRemoveEndpoint} / `needsOverwriteConfirm` 同源）：
+ *  - `source === 'local'`（本机创作，含 builtin/plugin 同步进来的那一份）：
+ *    平台/随包内置的技能出「卸载」（审计 A6），其余按上传状态出上传/等审/重传；
+ *  - 商店行：未装出「安装」，有新版出「更新到 vX」（**不传 force**，A15），
+ *    否则出「卸载」。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @returns 页脚动作。
+ */
+export function planCardAction(item: CapabilityItem): CardActionPlan {
+  if (item.source === 'local') {
+    const removable = localRemoveEndpoint(item)
+    if (removable !== undefined) {
+      return { kind: 'uninstall', endpoint: removable, localContent: needsOverwriteConfirm(item) }
+    }
+    if (item.uploadStatus === 'rejected') return { kind: 'reupload' }
+    if (item.uploadStatus === 'pending') return { kind: 'review', status: 'pending' }
+    if (item.uploadStatus === 'approved') return { kind: 'review', status: 'approved' }
+    return { kind: 'upload' }
+  }
+  if (!item.installed) return { kind: 'install' }
+  if (hasUpdateFor(item)) {
+    return { kind: 'update', version: item.versions[item.versions.length - 1] ?? item.version }
+  }
+  return {
+    kind: 'uninstall',
+    endpoint: uninstallEndpoint(item, item.version),
+    localContent: needsOverwriteConfirm(item),
+  }
+}
+
+/** 「来源」徽章可能用到的字典键（**六选一**，见 {@link capabilitySourceBadgeKey}）。 */
+export type CapabilitySourceBadgeKey =
+  | 'capability.sourceLocal'
+  | 'capability.sourceOrg'
+  | 'capability.sourceBuiltin'
+  | 'capability.sourcePlugin'
+  | 'capability.sourceMarket'
+  | 'capability.sourceOther'
+
+/**
+ * 「来源」徽章该显示哪一个（**唯一实现**）。
+ *
+ * 2026-09-20 修的真实 UI bug：原先「我的」分区同时渲染 `source` 徽章与
+ * `mineSourceBadge`，匿名路径下两张都写「自制」—— 卡片上出现两个一模一样的胶囊。
+ * 现在按分区二选一：市场分区用来源（市场/组织），我的分区用「这份内容是怎么来的」
+ * （自制 / 来自组织 / 平台内置 / 来自市场 / 其它）。
+ *
+ * 抽成纯函数的理由（独立复审 2026-09-23 A6）：这两条分支此前埋在 `renderBadges`
+ * 的 JSX 里，而本包没有 jsdom/渲染测试面 ⇒「同名商店行存在时还渲染得出
+ * 「随客户端内置」徽章吗」这件事**没有任何用例能打坏**。现在判据可被单测直接钉住，
+ * 与 {@link localRemoveEndpoint}（同一个 `originChannel` 的另一个消费点）成对。
+ * @param item - 能力中心的一行（归并后的行）。
+ * @param tab - 所在分区。
+ * @returns 徽章文案的字典键。
+ */
+export function capabilitySourceBadgeKey(
+  item: Pick<CapabilityItem, 'source' | 'originChannel'>,
+  tab: 'mine' | 'market',
+): CapabilitySourceBadgeKey {
+  if (tab === 'market') {
+    return item.source === 'market'
+      ? 'capability.sourceMarket'
+      : item.source === 'org' ? 'capability.sourceOrg' : 'capability.sourceLocal'
+  }
+  if (item.source === 'local') return 'capability.sourceLocal'
+  // 「我的」里的非本地行 = 从商店装进来的那一份；`originChannel` 来自磁盘 provenance。
+  switch (item.originChannel) {
+    case 'org': return 'capability.sourceOrg'
+    case 'builtin': return 'capability.sourceBuiltin'
+    // 随客户端内置（随包插件同步进技能库的技能，跨泳道契约 S2）：
+    // 它不是用户作品，也不是市场/组织内容 —— 面板给它「卸载」，不给「上传」。
+    case 'plugin': return 'capability.sourcePlugin'
+    case 'market': return 'capability.sourceMarket'
+    default: return 'capability.sourceOther'
+  }
+}
+
 /** 分区里的一条可见卡：内置入口卡（builtin）或普通条目卡（item）。 */
 export type SectionCard =
   | { type: 'builtin'; card: BuiltinCard }
@@ -386,36 +510,147 @@ export function nameTakenError(displayName: string): string {
   return t('capability.nameTaken', { name: displayName })
 }
 
-/** 单测用：把同名（kind+name）条目归并成一张卡（保留最高 approved 版本为当前）。 */
+/**
+ * 跨源同名行的**权威序**：市场 > 组织 > 本机（2026-08-25 决策"跨源同名的展示行
+ * 保留市场"）。返回值只取决于行的 `source`，与数组到达顺序无关。
+ * @param item - 能力中心的一行。
+ * @returns 排序权重（越小越权威）。
+ */
+function sourceRank(item: CapabilityItem): number {
+  return item.source === 'market' ? 0 : item.source === 'org' ? 1 : 2
+}
+
+/** 同源多行时的稳定次级键：同等级的行按内容定序，与到达顺序无关。 */
+function stableRowKey(item: CapabilityItem): string {
+  return JSON.stringify(item)
+}
+
+/** 按权威序取第一个可用值（`usable` 不成立就继续往后找），没有则 undefined。 */
+function pickByAuthority<T>(
+  ordered: readonly CapabilityItem[],
+  read: (item: CapabilityItem) => T | undefined,
+  usable: (value: T) => boolean,
+): T | undefined {
+  for (const item of ordered) {
+    const value = read(item)
+    if (value !== undefined && usable(value)) return value
+  }
+  return undefined
+}
+
+/** 数值字段取各行的最大值（全部缺失时保持 undefined）。 */
+function maxOf(ordered: readonly CapabilityItem[], read: (item: CapabilityItem) => number | undefined): number | undefined {
+  const values = ordered.map(read).filter((v): v is number => v !== undefined)
+  return values.length === 0 ? undefined : Math.max(...values)
+}
+
+/**
+ * 归并**同一张卡**的多行（同名 kind+name 的跨源/跨分区载荷）。
+ *
+ * 三条硬约定（独立复审 2026-09-23 A6 + N1 的修复面）：
+ *
+ *  1. **结果只取决于行集合，不取决于到达顺序**。面板 mount 时并发发
+ *     `?source=market` 与 `?source=local` 两次取数（后者内部还要打 3 次上游），
+ *     谁先回来不定。旧实现是"先到的行说了算"（`{...existing}` 打底、逐行覆写），
+ *     于是同一份数据会渲染成两种卡：market-first 丢本机行的 `originChannel` ⇒
+ *     **「随客户端内置」徽章与本机卸载入口都渲染不出来**（A6 的卸载入口在这个
+ *     形态下不可达）；mine-first 则把已装技能渲染成「安装」。现在每个字段都有
+ *     显式、与顺序无关的取值规则。
+ *  2. **本机那一行是"这台机器上是什么"的权威**（A6）：`originChannel` /
+ *     `originAppId` / `dirty` / `installedOrigin` 一律取 `source === 'local'` 行的
+ *     值 —— 它们来自磁盘上的 provenance，只有本机行有，旧实现会被商店行吞掉。
+ *  3. **磁盘上真有这一份 ⇒ 已安装**：存在本机行（`?source=local` 的本地行由
+ *     `listLocalSkills`/`listLocalPresets` 扫盘得到）即 `installed: true`，
+ *     否则「我的」里的本机卡会被渲染成「安装」。
+ *
+ * 其余口径保持 2026-08-25 决策：展示行来源市场优先；`displayName`/`description`
+ * 取「较新」（版本高者优先）的非空值，避免市场行用与 name 同值的标题盖掉组织行的
+ * 中文标题；`version` 展示最高 approved 版本（与来源无关的版本事实）。
+ * @param items - 各来源的行（同一条可来自多个载荷）。
+ * @returns 每个（kind, name）一行，按 `kind:name` 升序（面板随后自行排序）。
+ */
 export function mergeItems(items: readonly CapabilityItem[]): CapabilityItem[] {
-  const byKey = new Map<string, CapabilityItem>()
-  // 决策 2026-08-25(市场/组织合并) + bug 修复:同名 (kind+name) 归并时
-  // (a) 展示行保留 market 来源(市场优先,跨源同名的权威行);
-  // (b) displayName/description 取「较新」的(非空优先,避免 market 行
-  //      覆盖 org 的中文标题);
-  // (c) version 展示最高 approved(与来源无关的版本事实),installed 等
-  //      状态保留现有逻辑。
+  const groups = new Map<string, CapabilityItem[]>()
   for (const item of items) {
     const key = `${item.kind}:${item.name}`
-    const existing = byKey.get(key)
-    if (existing === undefined) {
-      byKey.set(key, { ...item, versions: item.versions.length > 0 ? [...item.versions] : [item.version] })
-      continue
-    }
-    // 合并 versions（去重、升序）。
-    const all = new Set([...existing.versions, ...item.versions, item.version])
-    const sorted = [...all].sort(compareVersions)
-    // 取 approved 最高版作为当前展示；无 approved 保留原样。
-    const approved = [...all].filter(v => items.some(x => x.kind === item.kind && x.name === item.name && x.version === v && x.status === 'approved'))
-    const display = approved.length > 0 ? approved.reduce((best, v) => (compareVersions(v, best) > 0 ? v : best), approved[0]!) : existing.version
-    // 展示行来源:market 优先(跨源同名权威);否则保留已有。
-    const source = existing.source === 'market' || item.source === 'market' ? 'market' : existing.source
-    // displayName/description:非空优先(market 常与 name 同值,org 常带中文标题)。
-    const displayName = (item.displayName && item.displayName !== item.name) ? item.displayName : existing.displayName
-    const description = (item.description && item.description !== '') ? item.description : existing.description
-    byKey.set(key, { ...existing, source, displayName, description, version: display, versions: sorted })
+    const bucket = groups.get(key)
+    if (bucket === undefined) groups.set(key, [item])
+    else bucket.push(item)
   }
-  return [...byKey.values()]
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, rows]) => mergeItemGroup(rows))
+}
+
+/** {@link mergeItems} 的单组归并（行的到达顺序不得影响返回值）。 */
+function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
+  // 权威序：来源优先 + **内容**定序（`rows` 本身的到达顺序不得参与）。
+  const byAuthority = [...rows].sort((a, b) => {
+    const rank = sourceRank(a) - sourceRank(b)
+    return rank !== 0 ? rank : stableRowKey(a).localeCompare(stableRowKey(b))
+  })
+  // 「较新」序：版本高的先；同版本时按内容定序 —— displayName/description 用它取值。
+  const byFreshness = [...rows].sort((a, b) => {
+    const byVersion = compareVersions(b.version, a.version)
+    return byVersion !== 0 ? byVersion : stableRowKey(a).localeCompare(stableRowKey(b))
+  })
+  /** 本机那一行（磁盘事实的唯一来源）；没有本机行时为 undefined。 */
+  const local = rows.find(row => row.source === 'local')
+
+  const all = new Set<string>()
+  for (const row of rows) {
+    for (const version of row.versions) all.add(version)
+    if (row.version !== '') all.add(row.version)
+  }
+  const versions = [...all].sort(compareVersions)
+  const approved = versions.filter(v => rows.some(row => row.version === v && row.status === 'approved'))
+  const version = approved[approved.length - 1] ?? versions[versions.length - 1] ?? byAuthority[0]!.version
+  const name = byAuthority[0]!.name
+  const displayName = pickByAuthority(byFreshness, row => row.displayName, v => v !== '' && v !== name)
+    ?? pickByAuthority(byFreshness, row => row.displayName, v => v !== '')
+    ?? ''
+  const description = pickByAuthority(byFreshness, row => row.description, v => v !== '') ?? ''
+  // 状态徽章是"用户自己的上传进度"：pending/rejected 优先透出（市场行常是
+  // approved，按权威序取会把用户自己的待审状态吞掉）。
+  const progress = byAuthority.find(row => row.status === 'pending' || row.status === 'rejected')
+  const status = progress?.status ?? pickByAuthority(byAuthority, row => row.status, () => true)
+  const reason = (progress?.reason !== undefined && progress.reason !== '')
+    ? progress.reason
+    : pickByAuthority(byAuthority, row => row.reason, v => v !== '')
+
+  return {
+    // 打底只为了带上宿主未来新增的透传字段（声明的字段全部在下面显式赋值，
+    // 结果不依赖哪一行打底）。权威序首行 = 内容定序 ⇒ 与到达顺序无关。
+    ...byAuthority[0]!,
+    kind: byAuthority[0]!.kind,
+    name,
+    source: pickByAuthority(byAuthority, row => row.source, () => true) ?? 'local',
+    displayName,
+    description,
+    author: pickByAuthority(byAuthority, row => row.author, v => v !== '') ?? '',
+    version,
+    versions,
+    // 磁盘上真有这一份（本机行由扫盘得到）⇒ 已安装。
+    installed: rows.some(row => row.installed === true || row.source === 'local'),
+    installedVersion: pickByAuthority(byAuthority, row => row.installedVersion, () => true),
+    // 本机行优先：来源判定只有磁盘上的 provenance 说得准（A2/A3/A6）。
+    installedOrigin: local?.installedOrigin ?? pickByAuthority(byAuthority, row => row.installedOrigin, () => true),
+    originChannel: local?.originChannel ?? pickByAuthority(byAuthority, row => row.originChannel, () => true),
+    originAppId: local?.originAppId ?? pickByAuthority(byAuthority, row => row.originAppId, () => true),
+    dirty: local?.dirty ?? pickByAuthority(byAuthority, row => row.dirty, () => true),
+    runtimeName: pickByAuthority(byAuthority, row => row.runtimeName, v => v !== ''),
+    isLocal: rows.some(row => row.isLocal === true) ? true : undefined,
+    uploadStatus: local?.uploadStatus ?? pickByAuthority(byAuthority, row => row.uploadStatus, () => true),
+    quality: pickByAuthority(byAuthority, row => row.quality, v => v === 'featured')
+      ?? pickByAuthority(byAuthority, row => row.quality, () => true),
+    status,
+    reason,
+    official: rows.some(row => row.official === true) ? true : undefined,
+    isOwner: rows.some(row => row.isOwner === true) ? true : undefined,
+    downloads: maxOf(rows, row => row.downloads),
+    calls: maxOf(rows, row => row.calls),
+    score: maxOf(rows, row => row.score),
+  }
 }
 
 /**
@@ -699,16 +934,13 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     setSections(prev => ({ ...prev, [key]: { status: prev[key]?.status ?? 'idle', error: prev[key]?.error ?? '', ...state } }))
   }
 
-  const loadSection = async (key: string, fetcher: () => Promise<CapabilityItem[]>): Promise<void> => {
+  const loadSection = async (key: SectionKey, fetcher: () => Promise<CapabilityItem[]>): Promise<void> => {
     const seq = loadSeqRef.current
     setSection(key, { status: 'loading', error: '' })
     try {
       const rows = await fetcher()
       if (seq !== loadSeqRef.current) return
-      // 决策 2026-08-25:「市场」tab 承载 market+org 合并结果——加载 market
-      // 时清除两源旧条目;「我的」只清 local。
-      const drop = key === 'market' ? (i: CapabilityItem) => i.source !== 'local' : (i: CapabilityItem) => i.source === 'local'
-      setItems(prev => [...prev.filter(i => !drop(i)), ...rows])
+      setItems(prev => applySectionRows(prev, key, rows))
       setSection(key, { status: 'ok' })
     } catch {
       if (seq !== loadSeqRef.current) return
@@ -763,7 +995,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
         if (!res.ok) return
         const data = await res.json() as { items?: CapabilityItem[] }
         if (seq !== loadSeqRef.current) return
-        setItems(prev => [...prev.filter(i => i.source === 'local'), ...(data.items ?? [])])
+        // 与 loadSection 同一条归约（唯一实现），不在这里另写一份 filter。
+        setItems(prev => applySectionRows(prev, 'market', data.items ?? []))
         // 后台刷新成功即退出先前 error 态——否则首次加载失败后,错误提示与
         // 重试按钮会遮住已刷新的数据(2026-09-01 深挖)。
         setSection('market', { status: 'ok', error: '' })
@@ -966,32 +1199,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const officialBadge = item.official === true ? <Chip tone="brand">{t('capability.official')}</Chip> : null
     const qualityBadge = item.quality === 'featured' ? <Chip tone="warn">{t('capability.featured')}</Chip> : null
     /**
-     * 「来源」徽章**只出一个**。
-     *
-     * 2026-09-20 修的真实 UI bug：原先「我的」分区同时渲染 `source` 徽章与
-     * `mineSourceBadge`，匿名路径下两张都写「自制」—— 卡片上出现两个一模一样的胶囊。
-     * 现在按分区二选一：市场分区用来源（市场/组织），我的分区用「这份内容是怎么来的」
-     * （自制 / 来自组织 / 平台内置 / 来自市场 / 其它）。
+     * 「来源」徽章**只出一个**（选键的唯一实现在 {@link capabilitySourceBadgeKey}）。
      */
-    const sourceBadge = isMineSection
-      ? (item.source === 'local'
-          ? <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>
-          : item.originChannel === 'org'
-            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
-            : item.originChannel === 'builtin'
-              ? <Chip tone="neutral" plain>{t('capability.sourceBuiltin')}</Chip>
-              // 随客户端内置（随包插件同步进技能库的技能，跨泳道契约 S2）：
-              // 它不是用户作品，也不是市场/组织内容 —— 面板给它「卸载」，不给「上传」。
-              : item.originChannel === 'plugin'
-                ? <Chip tone="neutral" plain>{t('capability.sourcePlugin')}</Chip>
-                : item.originChannel === 'market'
-                ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
-                : <Chip tone="neutral" plain>{t('capability.sourceOther')}</Chip>)
-      : (item.source === 'market'
-          ? <Chip tone="neutral" plain>{t('capability.sourceMarket')}</Chip>
-          : item.source === 'org'
-            ? <Chip tone="neutral" plain>{t('capability.sourceOrg')}</Chip>
-            : <Chip tone="neutral" plain>{t('capability.sourceLocal')}</Chip>)
+    const sourceBadge = <Chip tone="neutral" plain>{t(capabilitySourceBadgeKey(item, isMineSection ? 'mine' : 'market'))}</Chip>
     return (
       <>
         <Chip tone={item.kind === 'skill' ? 'brand' : 'neutral'}>
@@ -1098,11 +1308,8 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     const blocked = busy || inFlight
     const title = item.displayName || item.name
     const isLocal = item.source === 'local'
-    const needUpdate = hasUpdateFor(item)
-    // 平台内置 / 随客户端内置（审计 A6 + 跨泳道契约 S2）：本机这一份是"平台给的"，
-    // 不是用户作品 ⇒ 该给「卸载」而不是「上传」（旧实现把内置技能装完后当成自制卡，
-    // 只能上传、无法移除）。
-    const removable = isLocal ? localRemoveEndpoint(item) : undefined
+    // 页脚动作的唯一判定（A6/N1）：本机内置（builtin/plugin）行与商店行都不在这里各判一次。
+    const plan = planCardAction(item)
     return (
       <Card key={key} interactive muted={item.status === 'rejected'} style={CARD} className="pico-skill-card">
         <div style={TITLE_ROW}>
@@ -1134,26 +1341,22 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           </p>
         )}
         <div style={CARD_FOOT}>
-          {isLocal ? (
-            removable !== undefined ? renderUninstall(item, key, busy, blocked)
-              : item.uploadStatus === 'rejected'
-              ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
-              : item.uploadStatus === 'pending'
-                ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="warn">{t('capability.awaitingReview')}</Chip></span>
-                : item.uploadStatus === 'approved'
-                  ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="success">{t('capability.approved')}</Chip></span>
-                  : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
-          ) : item.installed ? (
-            needUpdate ? (
+          {/* 页脚动作由 planCardAction 唯一决定（A6/N1）；这里只做按钮映射。 */}
+          {plan.kind === 'uninstall' ? renderUninstall(item, key, busy, blocked)
+            : plan.kind === 'update' ? (
               // 更新按钮**不传 force**（审计 A15）：走 install() 自己的来源判定 ——
               // 商店那一份直接更新，本机自制同名内容则先出确认条。
               <PanelButton variant="primary" size="md" block disabled={blocked || item.official} title={item.official ? t('capability.officialLocked') : undefined} onClick={() => { void install(item) }}>
-                {t('capability.updateTo', { version: item.versions[item.versions.length - 1] ?? item.version })}
+                {t('capability.updateTo', { version: plan.version })}
               </PanelButton>
-            ) : renderUninstall(item, key, busy, blocked)
-          ) : (
-            <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>
-          )}
+            )
+              : plan.kind === 'reupload'
+                ? <PanelButton variant="secondary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.reupload')}</PanelButton>
+                : plan.kind === 'review'
+                  ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone={plan.status === 'pending' ? 'warn' : 'success'}>{plan.status === 'pending' ? t('capability.awaitingReview') : t('capability.approved')}</Chip></span>
+                  : plan.kind === 'upload'
+                    ? <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
+                    : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>}
         </div>
         {/* 历史版本、描述全文都收在详情弹层里（就地展开会把整行栅格撑高）。 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>

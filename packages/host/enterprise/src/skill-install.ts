@@ -56,29 +56,29 @@ export function isLoadableSkillName(name: string): boolean {
 /** Validate a skill name for use as a single directory segment. */
 export function validateSkillName(name: string): string {
   if (!isLoadableSkillName(name)) {
-    throw new SkillInstallRefusal('NAME_INVALID', `invalid skill name ${JSON.stringify(name)}`)
+    throw new ArchiveInstallRefusal('NAME_INVALID', `invalid skill name ${JSON.stringify(name)}`)
   }
   return name
 }
 
 /**
  * 安装器自己的**拒绝类**错误：文案已经面向用户、且**不含本机路径**，
- * 因此 {@link describeSkillFailure} 原样透出，不做脱敏（脱敏会吃掉
+ * 因此 {@link describeArchiveFailure} 原样透出，不做脱敏（脱敏会吃掉
  * `SKILL.md`/`checksum` 这类可判定的关键词）。
  *
  * `code` 是稳定错误码（路由据此决定 HTTP 状态，客户端据此决定要不要弹确认条）。
  */
-export class SkillInstallRefusal extends Error {
+export class ArchiveInstallRefusal extends Error {
   readonly code: string
   constructor(code: string, message: string) {
     super(message)
-    this.name = 'SkillInstallRefusal'
+    this.name = 'ArchiveInstallRefusal'
     this.code = code
   }
 }
 
 /** 结果与 HTTP 信封一一对应：路由不再自己写 `/checksum|archive|…/` 正则。 */
-export interface SkillFailureDescription {
+export interface ArchiveFailureDescription {
   /** HTTP 状态码（409=需要用户确认覆盖/删除本机内容,422=拒绝,404=未安装,413=过大,502=系统级失败）。 */
   status: number
   /** 给用户看的文案（系统级错误已脱敏）。 */
@@ -90,7 +90,7 @@ export interface SkillFailureDescription {
 }
 
 /**
- * 兜底分类用的关键词（老路径上仍有**非** {@link SkillInstallRefusal} 的拒绝：
+ * 兜底分类用的关键词（老路径上仍有**非** {@link ArchiveInstallRefusal} 的拒绝：
  * `archive-util` 的条目校验、以及历史调用点）。它们全是客户端错误，不能因为
  * "不是typed"就被当成上游 502。
  */
@@ -120,7 +120,7 @@ const ERRNO_HINT: Record<string, string> = {
  * @param raw - 原始错误文案。
  * @returns 可安全展示的文案（≤300 字符）。
  */
-export function sanitizeSkillErrorText(raw: string): string {
+export function sanitizeArchiveErrorText(raw: string): string {
   const errno = /^([A-Z][A-Z0-9]+):/u.exec(raw)?.[1]
   const hint = errno === undefined ? undefined : ERRNO_HINT[errno]
   if (errno !== undefined && hint !== undefined) return `${errno}: ${hint}`
@@ -133,16 +133,21 @@ export function sanitizeSkillErrorText(raw: string): string {
 }
 
 /**
- * 把安装/卸载的失败翻译成 HTTP 信封（分类 + 脱敏 + 状态码）。
+ * 把归档安装/卸载的失败翻译成 HTTP 信封（分类 + 脱敏 + 状态码）。
  *
- * 抽成唯一实现的理由：这三件事此前散在 auth-gate 的四处 `isRefusal ? 422 : 502`
- * 正则里，任一处漏改就会出现"同一个拒绝在这里 422、在那里 502"。
+ * **唯一实现**：技能（`/api/pico/skills*`、`/api/pico/shared-skills*`）与共享智能体
+ * （`/api/pico/agent-presets*`）四条写面共用它。抽出来的理由：这三件事此前散在
+ * auth-gate 的四处 `isRefusal ? 422 : 502` 正则里，任一处漏改就会出现"同一个拒绝
+ * 在这里 422、在那里 502"；而独立复审 2026-09-23 **A12** 实测智能体路径仍是旧写法
+ * （裸分类 + 原文）⇒ 系统级错误（如
+ * `ENOTDIR: not a directory, mkdir '/home/<user>/.picoaide-harness/agent-presets'`）
+ * 会把**本机绝对路径**透给 UI。
  * @param cause - the thrown value.
  * @returns status / message / code / refusal。
  */
-export function describeSkillFailure(cause: unknown): SkillFailureDescription {
+export function describeArchiveFailure(cause: unknown): ArchiveFailureDescription {
   const raw = cause instanceof Error ? cause.message : String(cause)
-  const typed = cause instanceof SkillInstallRefusal ? cause : undefined
+  const typed = cause instanceof ArchiveInstallRefusal ? cause : undefined
   if (typed?.code === 'NOT_INSTALLED') return { status: 404, message: raw, code: typed.code, refusal: true }
   if (typed?.code === 'LOCAL_CONTENT') return { status: 409, message: raw, code: typed.code, refusal: true }
   if (typed?.code === 'ARCHIVE_TOO_LARGE') return { status: 413, message: raw, code: typed.code, refusal: true }
@@ -154,7 +159,7 @@ export function describeSkillFailure(cause: unknown): SkillFailureDescription {
       refusal: true,
     }
   }
-  return { status: 502, message: sanitizeSkillErrorText(raw), refusal: false }
+  return { status: 502, message: sanitizeArchiveErrorText(raw), refusal: false }
 }
 
 /**
@@ -267,14 +272,14 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   const { name, archive, checksum, skillsDir, version, server, overwrite } = options
   const channel = options.channel ?? 'market'
 
-  if (archive.byteLength === 0) throw new SkillInstallRefusal('ARCHIVE_EMPTY', 'empty archive')
+  if (archive.byteLength === 0) throw new ArchiveInstallRefusal('ARCHIVE_EMPTY', 'empty archive')
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
-    throw new SkillInstallRefusal('ARCHIVE_TOO_LARGE', `archive too large (${archive.byteLength} bytes)`)
+    throw new ArchiveInstallRefusal('ARCHIVE_TOO_LARGE', `archive too large (${archive.byteLength} bytes)`)
   }
   if (checksum !== undefined) {
     const actual = createHash('sha256').update(archive).digest('hex')
     if (actual !== checksum.toLowerCase()) {
-      throw new SkillInstallRefusal('CHECKSUM_MISMATCH', 'archive checksum mismatch; refused')
+      throw new ArchiveInstallRefusal('CHECKSUM_MISMATCH', 'archive checksum mismatch; refused')
     }
   }
 
@@ -287,7 +292,7 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   const targetDir = join(skillsDir, name)
   const existingOrigin = await classifyInstalledSkill(targetDir, name)
   if (existingOrigin === 'local' && overwrite !== true) {
-    throw new SkillInstallRefusal(
+    throw new ArchiveInstallRefusal(
       'LOCAL_CONTENT',
       `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
       + 'installing would replace it (including your own files) — confirm the overwrite to continue',
@@ -302,7 +307,7 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
 
   try {
     const format = archiveFormat(archive)
-    if (format === null) throw new SkillInstallRefusal('ARCHIVE_UNSUPPORTED', 'unsupported archive format')
+    if (format === null) throw new ArchiveInstallRefusal('ARCHIVE_UNSUPPORTED', 'unsupported archive format')
 
     // Pass 1: reject unsafe entries and bound the unpacked size without
     // extracting (zip via AdmZip in-memory scan; tar.gz via node-tar listing).
@@ -325,7 +330,7 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
 
     // The archive must carry a top-level SKILL.md (directory bundle or flat).
     await stat(join(unpackRoot, 'SKILL.md')).catch(() => {
-      throw new SkillInstallRefusal('SKILL_MD_MISSING', 'archive has no SKILL.md at its root')
+      throw new ArchiveInstallRefusal('SKILL_MD_MISSING', 'archive has no SKILL.md at its root')
     })
 
     // The upstream skill-filesystem parser requires YAML frontmatter
@@ -491,28 +496,28 @@ export type InstalledSkillOrigin = 'store' | 'local'
  * 记账，而模型侧看到的是另一个名字（`@` 谁都不对）。
  * @param dir - the unpacked skill directory.
  * @param name - the skill id being installed.
- * @throws SkillInstallRefusal with a user-readable reason.
+ * @throws ArchiveInstallRefusal with a user-readable reason.
  */
 export async function assertLoadableSkillMetadata(dir: string, name: string): Promise<void> {
   const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
   const fmName = metaString(meta.name)
   const fmDescription = metaString(meta.description)
   if (fmName === undefined || fmDescription === undefined) {
-    throw new SkillInstallRefusal(
+    throw new ArchiveInstallRefusal(
       'FRONTMATTER_INVALID',
       'SKILL.md must carry YAML frontmatter with a non-empty name and description; '
       + 'without them the runtime ignores the skill (it would install but never load)',
     )
   }
   if (!isLoadableSkillName(fmName)) {
-    throw new SkillInstallRefusal(
+    throw new ArchiveInstallRefusal(
       'NAME_INVALID',
       `SKILL.md name ${JSON.stringify(fmName)} is not a loadable skill name `
       + '(lowercase kebab-case such as my-skill is required); the runtime would ignore this skill',
     )
   }
   if (fmName !== name) {
-    throw new SkillInstallRefusal(
+    throw new ArchiveInstallRefusal(
       'FRONTMATTER_INVALID',
       `SKILL.md name ${JSON.stringify(fmName)} must equal the skill id ${JSON.stringify(name)}`,
     )
@@ -646,11 +651,11 @@ export async function uninstallSkill(
     try {
       await stat(join(target, 'SKILL.md'))
     } catch {
-      throw new SkillInstallRefusal('NOT_INSTALLED', `skill "${name}" is not installed`)
+      throw new ArchiveInstallRefusal('NOT_INSTALLED', `skill "${name}" is not installed`)
     }
     const origin = await classifyInstalledSkill(target, name)
     if (origin === 'local' && options.overwrite !== true) {
-      throw new SkillInstallRefusal(
+      throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
         `the skill directory "${name}" was not installed by the Capability Hub; `
         + 'deleting it removes your own files — confirm the deletion to continue',
