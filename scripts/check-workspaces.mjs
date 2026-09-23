@@ -261,6 +261,110 @@ const DEPENDENTS = {
   ],
 }
 
+/**
+ * 在 `needs` 图里找一个环(返回环上的包名序列,首尾同名;无环返回 null)。
+ *
+ * 只沿"表内存在的名字"走边:不存在的名字由 {@link scheduleTableProblems} 单独报,
+ * 否则成环报告会被一串"未知依赖"淹没。
+ * @param byName - 包名 → 条目。
+ * @returns 环路径或 null。
+ */
+function findScheduleCycle(byName) {
+  const visiting = new Set()
+  const settled = new Set()
+  const path = []
+  let found = null
+  const visit = name => {
+    if (found !== null || settled.has(name)) return
+    if (visiting.has(name)) {
+      found = [...path.slice(path.indexOf(name)), name]
+      return
+    }
+    visiting.add(name)
+    path.push(name)
+    for (const need of byName.get(name)?.needs ?? []) {
+      if (byName.has(need)) visit(need)
+      if (found !== null) break
+    }
+    path.pop()
+    visiting.delete(name)
+    settled.add(name)
+  }
+  for (const name of byName.keys()) visit(name)
+  return found
+}
+
+/**
+ * 调度表 / 归属表自检（2026-09-23 三轮审计 R3-C C-1/C-2）。
+ *
+ * 为什么必须在**编排器自己**里做：这三张表是手写的，而名字打错时的失败形态**全是静默的** ——
+ *
+ *   1. `needs` 里一个不存在的名字：`needs.filter(name => selectedSet.has(name))` 对
+ *      "名字不存在"与"没被选中"给出同一结果 ⇒ **边被静默删掉**，调度顺序退化
+ *      （本地有 `lib/` 时照绿，干净检出才报 TS2307）；
+ *   2. `needs` 成环：环上的包永远停在 `pending`，主循环以 `running.size === 0 &&
+ *      !progressed` 退出 ⇒ 这些包**既不跑、也不进 skipped**（runScheduler 末端的
+ *      dropped 断言是第二道网）；
+ *   3. `PATH_OWNERS` 前缀/包名打错：`check:fast` 把改动判成"0 个包"并 EXIT=0；
+ *   4. `DEPENDENTS` 键/值打错：`--changed` 的反向展开静默少跑。
+ *
+ * 判据**不依赖任何具体包名**（名字全部从表里现读、再互相对拍）⇒ 新增包自动被覆盖。
+ * @returns 问题描述列表（空 = 通过）。
+ */
+function scheduleTableProblems() {
+  const problems = []
+  const byName = new Map()
+  for (const pkg of PACKAGES) {
+    if (byName.has(pkg.name)) problems.push(`PACKAGES 里有重复的包名:${JSON.stringify(pkg.name)}`)
+    byName.set(pkg.name, pkg)
+  }
+  for (const pkg of PACKAGES) {
+    for (const need of pkg.needs ?? []) {
+      if (!byName.has(need)) {
+        problems.push(`${pkg.name}: needs 里的 ${JSON.stringify(need)} 不在 PACKAGES 表内（这条构建边会被静默丢弃）`)
+      }
+    }
+  }
+  const cycle = findScheduleCycle(byName)
+  if (cycle !== null) {
+    problems.push(`needs 成环:${cycle.join(' → ')}（环上的包永远不会被调度，见 runScheduler 的 dropped 断言）`)
+  }
+  const prefixes = new Set()
+  for (const [prefix, name] of PATH_OWNERS) {
+    if (!byName.has(name)) {
+      problems.push(`PATH_OWNERS 的 ${JSON.stringify(prefix)} 指向不存在的包 ${JSON.stringify(name)}`)
+    }
+    if (prefixes.has(prefix)) problems.push(`PATH_OWNERS 里有重复前缀:${JSON.stringify(prefix)}（最长前缀优先 ⇒ 后者永不生效）`)
+    prefixes.add(prefix)
+    // 前缀必须落在某个真实包目录之下：否则它永远匹配不到文件（打错前缀的形态）。
+    const inside = PACKAGES.some(pkg => prefix === `${pkg.dir}/` || prefix.startsWith(`${pkg.dir}/`))
+    if (!inside) {
+      problems.push(`PATH_OWNERS 的前缀 ${JSON.stringify(prefix)} 不在任何 PACKAGES 的 dir 之下（改动会归属不到包）`)
+    }
+  }
+  for (const pkg of PACKAGES) {
+    const expected = `${pkg.dir}/`
+    // 每个包的**根目录前缀**必须恰好有一条归属条目（可以再有更细的子目录条目）。
+    // 这条判据同时挡住两个方向的打错：把 `.../connectors/` 打成 `.../connector/`
+    // （不在任何 dir 之下 ⇒ 上面那条报），以及打成 `.../connectors/x`（前缀"看起来"更细、
+    // 于是永远匹配不到该包根下的文件 ⇒ 这里报"没有覆盖根目录的条目"）。
+    if (!PATH_OWNERS.some(([prefix, name]) => name === pkg.name && prefix === expected)) {
+      const declared = PATH_OWNERS.filter(([, name]) => name === pkg.name).map(([prefix]) => JSON.stringify(prefix))
+      problems.push(`${pkg.name}: PATH_OWNERS 里没有 ${JSON.stringify(expected)} 这条根前缀`
+        + `（它现在的条目:${declared.length > 0 ? declared.join(', ') : '无'}）—— --changed 会把它根下的改动判成 0 个包`)
+    }
+  }
+  for (const [name, dependents] of Object.entries(DEPENDENTS)) {
+    if (!byName.has(name)) problems.push(`DEPENDENTS 的键 ${JSON.stringify(name)} 不在 PACKAGES 表内`)
+    for (const dependent of dependents) {
+      if (!byName.has(dependent)) {
+        problems.push(`DEPENDENTS[${JSON.stringify(name)}] 里的 ${JSON.stringify(dependent)} 不在 PACKAGES 表内`)
+      }
+    }
+  }
+  return problems
+}
+
 /** 影响全仓的顶层文件(改动即视为全量门禁)。 */
 const GLOBAL_PREFIXES = [
   'package.json', 'yarn.lock', '.yarnrc.yml', 'patches/', 'scripts/', '.github/',
@@ -332,6 +436,55 @@ const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error
 const MAX_FAILURE_LINES = 150
 /** Cap on the trailing context lines printed per failed task. */
 const MAX_TAIL_LINES = 200
+
+/**
+ * 「软降级」判定行（2026-09-23 三轮审计 R3-C C-8）。
+ *
+ * 本仓近三轮的缺陷类别是"守卫静默通过"：守卫自己在 stdout 里说了「跳过 X」
+ * 「未检查 Y」「退化为只看 HEAD」，而编排器对**通过**的任务只打一行 `✓ name 时间`，
+ * 输出留在 `state.results` 里 ⇒ CI 摘要里永远看不到这些句子（只有失败才 dump 输出），
+ * 于是"我跳过了某条判据"这类软降级永远到不了人眼。
+ *
+ * 判据刻意包含两类：**软跳过**（跳过/未检查/未验证/未覆盖/未证明/降级/退化为/
+ * 不可达/advisory/SKIP/skipped/not checked）与**软声明**（`提示:`/`注意:` 开头的
+ * 说明行 —— 本仓守卫用这两个前缀承载"本次没证明什么"）。
+ * 只回显这些行（**绝不放整份日志**），见 {@link collectDegraded} —— 它的汇总范围是
+ * **根守卫**（GUARDS 表），包级 check 的测试运行器噪音不计入。
+ */
+const DEGRADED_LINE = /(?:跳过|未检查|未做|未验证|未覆盖|未证明|退化为|降级|不可达|软跳过|提示[:：]|注意[:：]|advisory|\bSKIP\b|\bskipped\b|not checked)/u
+/** 每个任务最多回显几条降级行（防某个套件刷屏）。 */
+const MAX_DEGRADED_PER_TASK = 8
+/** 全局最多回显几条降级行（CI 摘要必须短 —— 长日志会被 GitHub 截断中段）。 */
+const MAX_DEGRADED_TOTAL = 60
+/**
+ * 测试运行器自身的"跳过"噪音行。
+ *
+ * ⚠️ 汇总范围**只取根守卫**（GUARDS 表条目的 `task.path` 非空；包级 check 没有这个字段）。
+ * 实测依据：一次全量 `yarn check` 的 32 条命中里 28 条来自包级输出 —— vitest 的用例名
+ * （`✓ … 如实跳过 …`）、`Tests 657 passed | 1 skipped`、`[prebuild] up to date, skipped: …`、
+ * `advisor: … skipped` 这些都不是"某条判据没真的判"。把它们刷进 CI 摘要只会重演本仓踩过的
+ * "日志刷爆、真信号被挤出 GitHub 截断窗口"。包级 check 的内部跳过仍可在失败路径与
+ * `--full-output` 里看到。
+ */
+const DEGRADED_NOISE = /^(?:[✓×↓✔✗]|Test Files\b|Tests\b|Duration\b|Snapshots\b)/u
+
+/**
+ * 把一个**通过**任务（仅根守卫）的输出里的软降级行收进 `state.degraded`（有界）。
+ * @param result - 已通过的任务结果。
+ * @param state - 汇总状态。
+ */
+function collectDegraded(result, state) {
+  if (result.task.path === undefined) return
+  let taken = 0
+  for (const raw of result.output.split('\n')) {
+    const text = raw.trim()
+    if (text === '' || DEGRADED_NOISE.test(text) || !DEGRADED_LINE.test(text)) continue
+    if (state.degraded.length >= MAX_DEGRADED_TOTAL) return
+    state.degraded.push({ task: result.task.name, line: text.slice(0, 200) })
+    taken += 1
+    if (taken >= MAX_DEGRADED_PER_TASK) return
+  }
+}
 
 /**
  * Bound a failed task's output to something a CI log can actually carry.
@@ -484,6 +637,7 @@ async function runPool(tasks, limit, state) {
       const result = await runTask(task)
       state.results.push(result)
       if (!result.ok) classifyFailure(result, state)
+      else collectDegraded(result, state)
       const mark = result.ok ? '✓' : result.task.advisory === true ? '!' : '✗'
       console.log(`${mark} ${result.task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     }
@@ -505,8 +659,10 @@ async function runScheduler(tasks, limit, state) {
     const promise = runTask(task).then(result => {
       running.delete(task.name)
       state.results.push(result)
-      if (result.ok) succeeded.add(task.name)
-      else classifyFailure(result, state)
+      if (result.ok) {
+        succeeded.add(task.name)
+        collectDegraded(result, state)
+      } else classifyFailure(result, state)
       const mark = result.ok ? '✓' : task.advisory === true ? '!' : '✗'
       console.log(`${mark} ${task.name.padEnd(28)} ${seconds(result.ms).padStart(8)}`)
     })
@@ -539,6 +695,21 @@ async function runScheduler(tasks, limit, state) {
     }
     await Promise.race(running.values())
   }
+
+  // C-1（2026-09-23 三轮审计 P1）：循环退出前断言 `pending` 清空。
+  //
+  // 旧实现在这里直接 `break`，而 `pending` 里剩下的任务**既不跑、也不进 skipped**
+  // （skipped 只在"阻塞依赖已结束且永远不会成功"时记账；互相等待的包永远停在
+  // pending）⇒ 摘要里没有任何一处能看出"少了几个包"：它按 `state.results` 倒算
+  // `passed`，于是打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次
+  // 都没跑。审计实测（注入 `A needs B` + `B needs A`）：两个包在输出里出现 0 次，
+  // 门禁照绿。现在把它们逐条列出来并**判失败**。
+  if (pending.size > 0) {
+    for (const task of pending.values()) {
+      state.dropped.push({ task, needs: task.needs.filter(name => !succeeded.has(name)) })
+      console.error(`✗ ${task.name.padEnd(28)} 未运行（依赖永不满足：${task.needs.join(', ') || '—'}）`)
+    }
+  }
 }
 
 const options = parseArgs(process.argv.slice(2))
@@ -550,6 +721,15 @@ if (options === null) process.exit(process.exitCode ?? 1)
 if (options.help) {
   console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')
   process.exit(0)
+}
+
+// C-2（2026-09-23 三轮审计 P2）：调度/归属表的名字此前**没有任何校验** —— 打错一字符
+// 就是"静默删掉一条边"或"check:fast 判 0 个包"。放在 `--list` 之前：列计划时就必须拦。
+const scheduleProblems = scheduleTableProblems()
+if (scheduleProblems.length > 0) {
+  console.error(`check-workspaces: 调度/归属表自检失败（${scheduleProblems.length} 处）—— 这些名字打错时失败形态全是静默的：`)
+  for (const problem of scheduleProblems) console.error(`  - ${problem}`)
+  process.exit(2)
 }
 
 const envConcurrency = Number(process.env.CHECK_CONCURRENCY ?? '')
@@ -613,7 +793,7 @@ if (options.list) {
   process.exit(0)
 }
 
-const state = { results: [], failed: [], skipped: [], advisory: [] }
+const state = { results: [], failed: [], skipped: [], advisory: [], dropped: [], degraded: [] }
 const startedAt = Date.now()
 console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
 
@@ -635,8 +815,30 @@ if (rest.length > 0) await runScheduler(rest, concurrency, state)
 
 const totalMs = Date.now() - startedAt
 const passed = state.results.length - state.failed.length
-console.log(`──── ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+// 摘要刻意把「计划 / 实跑」两个数都打出来：C-1 的失效形态正是"少跑了任务但计数看不出来"
+// （`passed` 是按实际结果倒算的）。计划数 = 本轮真正排进计划的任务（守卫 + 选中的包）。
+const planned = firstWave.length + rest.length
+console.log(`──── 计划 ${planned} / 实跑 ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+  + `${state.dropped.length > 0 ? `、${state.dropped.length} 未运行` : ''}`
   + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory)` : ''},总耗时 ${seconds(totalMs)}`)
+
+// C-8（2026-09-23 三轮审计 P2）：**通过**的守卫里那些"跳过/降级"行必须进摘要。
+// 只回显判定行（有界），绝不放整份日志 —— 本仓踩过"日志刷爆把失败详情挤出 GitHub
+// 截断窗口"的坑。固定前缀 `[DEGRADED]` 供 CI 侧 grep。
+if (state.degraded.length > 0) {
+  console.log(`\n[DEGRADED] ${state.degraded.length} 条"跳过/降级"提示（来自**通过**的任务；只回显判定行，不是日志 dump）`)
+  for (const entry of state.degraded) console.log(`[DEGRADED] ${entry.task}: ${entry.line}`)
+  console.log('[DEGRADED] 处置：这些行说明某条判据本次没有真的判 —— 要么修掉降级路径，要么在守卫里把它改成 fail-loud。')
+}
+
+if (state.dropped.length > 0) {
+  console.error(`\n✗ ${state.dropped.length} 个任务**未运行**（依赖成环 / 依赖永不满足）—— 既不算通过、也不算跳过：`)
+  for (const entry of state.dropped) {
+    console.error(`  - ${entry.task.name}（未满足的依赖：${entry.needs.join(', ') || '—'}）`)
+  }
+  console.error('  判据来源：C-1（2026-09-23 三轮审计 P1）。旧实现在此处静默 break，摘要按实际结果倒算')
+  console.error('  ⇒ 打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次都没跑。')
+}
 
 if (state.advisory.length > 0) {
   // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
@@ -649,7 +851,7 @@ if (state.advisory.length > 0) {
   console.error('     W6 验收前必须删掉 scripts/check-workspaces.mjs 里该条目的 advisory:true 转为阻塞。')
 }
 
-if (state.failed.length > 0) {
+if (state.failed.length > 0 || state.dropped.length > 0) {
   for (const failure of state.failed) {
     console.error(`\n===== ${failure.task.name} 失败(退出码非 0) =====`)
     console.error(options.fullOutput ? failure.output.trimEnd() : summarizeFailure(failure.output))
