@@ -24,6 +24,24 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
 # 那里串行是为了 service 容器的 max_connections,不是性能考虑)。
 TEST_PARALLEL ?= 4
 
+# ---------------------------------------------------------------------------
+# Go 扫描面**唯一真源**(2026-09-23 第六轮审计 R6-C P2-1)
+#
+# 现场:`gofmt`/`vet`/`test` 三面都只扫 `cmd internal demoapps`,而同一个 Go module 里
+# 还有 `webadmin/`(embed.go)与 `scripts/`(mock-upstream.go)两个包 —— CI 的
+# `go vet ./...` / `go test ./...` 覆盖它们,本地 `make check` 不覆盖 ⇒ 这两处写坏
+# 是"本地绿、CI 红";gofmt 违规更是两边都不查。`:72` 当时自称"与 CI 同义",那是不实陈述。
+#
+# 现在三面都由这一份目录真源派生;CI 的 gofmt 扫描面由
+# `scripts/verify-ci-scripts.mjs` 与本文件逐条对拍(只改一侧 ⇒ 红)。
+#
+# **为什么不用 `./...`**:`server/temp/**` 下是未跟踪的本地探针(有时是别人正在写的
+# 半个包),`make test` 用 `./...` 时会被卷进来。这里显式枚举的是**版本库里的** Go 包;
+# 新增 Go 包时把它加进 GO_DIRS(并同步 CI 的 gofmt 扫描面)。
+# ---------------------------------------------------------------------------
+GO_DIRS := cmd internal demoapps webadmin scripts
+GO_PACKAGES := $(addprefix ./,$(addsuffix /...,$(GO_DIRS)))
+
 # 单包测试超时——**必须按上下文（-p）分别取值，余量结论不可跨上下文搬运**。
 #
 # 2026-09-19 第三轮审计 F3-5 实测（同一台 4 vCPU 机器，与 CI runner 同规格；
@@ -69,14 +87,15 @@ test:
 # 2026-09-08(P2-49):改为目录通配——此前手工枚举 9 个包,漏跑 10 个含
 # _test.go 的包(appstore/archiveutil/brand/capabilities/connectors/reports/
 # router/skillmanifest/telemetry/cmd/server),新增包也会再次漏跑。
-# 与 CI 的 `go test ./...` 同义(internal/ + cmd/ 即全部业务包;scripts/ 无测试)。
+# 2026-09-23(R6-C P2-1):扫描面改为从 GO_DIRS 派生(含 webadmin/ 与 scripts/)——
+# 此前与 CI 的 `go test ./...` 不同义(那两个包只在 CI 上跑)。
 test-server:
-	go test ./internal/... ./cmd/... -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT_PARALLEL)
+	go test $(GO_PACKAGES) -count=1 -p $(TEST_PARALLEL) -timeout $(TEST_TIMEOUT_PARALLEL)
 
 # 开发循环用的快速测试:不加 -count=1,未改动的包直接命中 go test 结果缓存
 # (实测全仓无改动 0.3s;改一个包只重跑那一个包)。发布门禁请用 test-server/check。
 test-server-fast:
-	go test ./internal/... ./cmd/... -p $(TEST_PARALLEL)
+	go test $(GO_PACKAGES) -p $(TEST_PARALLEL)
 
 
 # webadmin 是编译进 Go 二进制的临时产物:build-server 自动先构建,不单独编译
@@ -121,10 +140,11 @@ docker-image:
 # (原 release-export 目标于 2026-09-10 随部署脚本一并移除)
 
 check:
-	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
-	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
-	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
-	go vet ./cmd/... ./internal/... ./demoapps/...
+	# gofmt/vet 的扫描面与 test-server 同源（GO_DIRS）：webadmin/ 与 scripts/ 是同一个
+	# Go module 里的包，CI 的 `go vet ./...` 覆盖它们而此前的本地门禁不覆盖（R6-C P2-1）。
+	# CI 的 gofmt 步骤必须与这里逐字同面（verify-ci-scripts.mjs 对拍），改这里要同步改 CI。
+	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
+	go vet $(GO_PACKAGES)
 	$(MAKE) test-server
 	cd webadmin && npm test && npm run build
 
@@ -132,9 +152,7 @@ check:
 # 与 check 的差异:不跑 webadmin 构建(tsc -b && vite build,~17s)、不带 -count=1。
 # 提交前/发布前仍须跑 `make check`(CI 跑的就是它那一套)。
 check-fast:
-	# demoapps 也进闸：内置演示应用的 Go 源码随镜像分发，此前不在任何本地门禁里 ——
-	# 写坏一个只能等 CI 构建镜像（或服务端启动播种）才发现。
-	@if [ -n "$$(gofmt -l cmd internal demoapps)" ]; then echo "gofmt未通过:"; gofmt -l cmd internal demoapps; exit 1; fi
-	go vet ./cmd/... ./internal/... ./demoapps/...
+	@if [ -n "$$(gofmt -l $(GO_DIRS))" ]; then echo "gofmt未通过:"; gofmt -l $(GO_DIRS); exit 1; fi
+	go vet $(GO_PACKAGES)
 	$(MAKE) test-server-fast
 	cd webadmin && npm test

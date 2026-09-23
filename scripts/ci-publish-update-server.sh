@@ -17,6 +17,10 @@
 # `stat`/`sha256` 逐字对拍,任一条不符即 fail-loud(不写 latest.json)。
 # 判据与"为什么不能用 s3 cp 的多段校验和"写在 verify_remote_object 的注释里。
 #
+# **校验覆盖面 = 三个对象都校**(2026-09-23 第六轮审计 R6-C-3):`<ver>/…zip`、
+# `<ver>/SHA256SUMS`、`latest.json`(指针)—— 后两个此前分别只在"上传后"与
+# "写指针前"被覆盖了一半,删掉任一处校验都没有任何回归会红。
+#
 # 用法:
 #   R2_ACCOUNT_ID=... R2_BUCKET=... VERSION=v2.7.0 \
 #     scripts/ci-publish-update-server.sh --list channels.list [--bundle release-bundle]
@@ -263,6 +267,11 @@ while IFS= read -r channel; do
   verify_remote_object "$zip_key" "$zip" "版本资产(写指针前复检)"
 
   # 4) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
+  #
+  #    指针本身也要证明字节完整(2026-09-23 第六轮审计 R6-C-3):客户端更新链路的第一步
+  #    就是读这份清单 —— 它被截断/写坏时连版本号都读不到,而 `aws s3 cp` 的退出码同样
+  #    只表示"请求成功"。所以这里与资产走**同一条**单请求 PUT + 存储侧校验和的路径,
+  #    写完再由 verify_remote_object 对拍大小与 SHA256。
   manifest="$(mktemp)"
   cat > "$manifest" <<JSON
 {
@@ -277,12 +286,15 @@ while IFS= read -r channel; do
   "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON
-  if ! brand_run_checked aws s3 cp "$manifest" "$base/latest.json" \
-    --content-type application/json --cache-control "$NO_CACHE"; then
+  if ! brand_run_checked aws s3api put-object \
+    --bucket "$R2_BUCKET" --key "${channel}/latest.json" --body "fileb://${manifest}" \
+    --content-type application/json --cache-control "$NO_CACHE" \
+    --checksum-sha256 "$(sha256_b64 "$manifest")"; then
     echo "::error::更新服务器发布失败(渠道 ${INDEX}:写版本指针;上方输出已脱敏)" >&2
     rm -f "$manifest"
     exit 1
   fi
+  verify_remote_object "${channel}/latest.json" "$manifest" "版本指针"
   rm -f "$manifest"
   TOTAL=$((TOTAL + 1))
 done < "$LIST"

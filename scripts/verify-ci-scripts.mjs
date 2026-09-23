@@ -61,6 +61,18 @@ const scratch = []
  *                              "上传成功但字节被截断"的现场形态)
  *   FAKE_AWS_SIZE=…            覆盖 head-object 报的 ContentLength
  *   FAKE_AWS_SHA=…             覆盖 head-object 报的 ChecksumSHA256('None' = 没有)
+ *
+ * **按对象作用域**(2026-09-23 第六轮审计 R6-C-3):上面三条缺省作用于**所有**对象
+ * (K-01 的既有注入面,逐字不变);带上对应的 `<…>_KEY=<对象键子串>` 之后只作用于键含
+ * 该子串的对象 —— 这是"换一个对象即静默"那类缺口的判据面:此前 A–E 五条用例全部打在
+ * **先被校验的那个 zip** 上,于是 `SHA256SUMS` 与 `latest.json` 对象删掉校验之后门禁
+ * 仍 EXIT=0(而成功行照旧宣称"上传后大小/哈希完整性校验")。
+ *   FAKE_AWS_TRUNCATE_KEY=<子串>         只截断匹配的对象
+ *   FAKE_AWS_SIZE_KEY / FAKE_AWS_SHA_KEY 只覆盖匹配对象的元数据
+ *   FAKE_AWS_TRUNCATE_ON_HEAD=<子串>:<N> 第 N 次对匹配对象做 head-object **之后**把远端
+ *                              对象截断到 10 字节(本次返回值仍是真的 —— 读在前)⇒ 只有
+ *                              **之后**那次复检能看见它。用途:证明"写指针前的复检"
+ *                              确实是拦住"指针指向损坏对象"的那条判据。
  */
 function fakeAwsScript({ store, log }) {
   return `#!/usr/bin/env bash
@@ -75,6 +87,11 @@ while [ $# -gt 0 ]; do
     *) args+=("$1"); shift ;;
   esac
 done
+# 注入作用域:$1=对象键,$2=子串(空 = 对所有对象生效 ⇒ 旧注入面逐字不变)。
+inject_scope() {
+  [ -z "\${2:-}" ] && return 0
+  case "$1" in *"\${2}"*) return 0 ;; *) return 1 ;; esac
+}
 cmd="\${args[0]:-} \${args[1]:-}"
 case "$cmd" in
   "s3 cp")
@@ -107,7 +124,7 @@ case "$cmd" in
     record "\${args[*]}"
     dest="$store/$key"
     mkdir -p "$(dirname "$dest")"
-    if [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ]; then
+    if [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
       head -c "\${FAKE_AWS_TRUNCATE_BYTES}" "$body" > "$dest"
     else
       cp "$body" "$dest"
@@ -131,14 +148,33 @@ case "$cmd" in
       exit 254
     fi
     if [ "$query" = "ContentLength" ]; then
-      if [ -n "\${FAKE_AWS_SIZE:-}" ]; then echo "\${FAKE_AWS_SIZE}"; else stat -c%s "$target"; fi
+      if [ -n "\${FAKE_AWS_SIZE:-}" ] && inject_scope "$key" "\${FAKE_AWS_SIZE_KEY:-}"; then
+        echo "\${FAKE_AWS_SIZE}"
+      else
+        stat -c%s "$target"
+      fi
     else
-      if [ -n "\${FAKE_AWS_SHA:-}" ]; then
+      if [ -n "\${FAKE_AWS_SHA:-}" ] && inject_scope "$key" "\${FAKE_AWS_SHA_KEY:-}"; then
         echo "\${FAKE_AWS_SHA}"
       elif [ -f "$target.checksum" ]; then
         cat "$target.checksum"
       else
         echo "None"
+      fi
+    fi
+    # "第 N 次 head 之后把对象弄坏":本次返回值仍是真的(读在前),下一次才看得见 ⇒
+    # 只有**上传之后的那次复检**能拦住它。
+    if [ -n "\${FAKE_AWS_TRUNCATE_ON_HEAD:-}" ]; then
+      head_key="\${FAKE_AWS_TRUNCATE_ON_HEAD%%:*}"
+      head_at="\${FAKE_AWS_TRUNCATE_ON_HEAD##*:}"
+      if inject_scope "$key" "$head_key"; then
+        head_n="$(cat "$store/.headcount" 2>/dev/null || printf '0')"
+        head_n=$((head_n + 1))
+        printf '%s' "$head_n" > "$store/.headcount"
+        if [ "$head_n" -ge "$head_at" ]; then
+          head -c 10 "$target" > "$target.truncated"
+          mv "$target.truncated" "$target"
+        fi
       fi
     fi
     ;;
@@ -1331,30 +1367,60 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   }
 }
 
-// ---- 1e. CI 的 gofmt 扫描面必须与 server/Makefile 同源(2026-09-23 第三轮审计 P-4) ----
+// ---- 1e. Go 扫描面:CI 与 server/Makefile 同源(第三轮审计 P-4 / 第六轮 R6-C P2-1) ----
 //
 // 现场:CI 的 gofmt 步骤扫 `cmd internal`,而 `server/Makefile` 的 check / check-fast
 // 扫 `cmd internal demoapps` ⇒ `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)
 // 里的格式违规在 CI 全绿,而 `go vet ./...` 与 `go test ./...` 都不查格式。所以
 // "CI 全绿"在那条面上是假的。
 //
+// R6-C P2-1(2026-09-23 第六轮审计)又指出另一半:`gofmt`/`vet`/`test` 三面都漏掉同一个
+// Go module 里的 `webadmin/`(embed.go)与 `scripts/`(mock-upstream.go) —— CI 的
+// `go vet ./...` / `go test ./...` **覆盖**它们,本地 `make check` 不覆盖 ⇒ 这两处
+// 写坏是"本地绿、CI 红";当时 `Makefile:72` 那句"与 CI 同义"是不实陈述。
+//
 // 判据不是"两边文本相等"(那是声明),而是**目录集合相等 + 目录真实存在**:
-//   * 单侧加目录(Makefile 加、CI 不加)= 两条门禁分叉 ⇒ 红;
-//   * 单侧删目录(CI 删 demoapps)= 扫描面缩水 ⇒ 红;
-//   * 目录名打错(扫一个不存在的目录)= 红;
-//   * Makefile 的 check 与 check-fast 出现两个不同的扫描面 ⇒ 红。
-// 目录集合从两侧**真源**解析(CI 的 run 块 + Makefile),不写死字面量 ——
-// 写死的话改了真源判据不会跟着动(那正是本轮 P-1/P-2 的假绿形态)。
+//   · 单侧加目录(Makefile 加、CI 不加)= 两条门禁分叉 ⇒ 红;
+//   · 单侧删目录(CI 删 demoapps/webadmin/scripts)= 扫描面缩水 ⇒ 红;
+//   · 目录名打错(扫一个不存在的目录)= 红;
+//   · Makefile 的 check 与 check-fast 出现两个不同的扫描面 ⇒ 红;
+//   · Makefile 的 `go vet` / `go test` 用的包集合 ≠ `GO_DIRS` 派生出的集合 ⇒ 红
+//     (那是"注释说同义、命令不同义"的形态;`test` 目标的 `./...` 例外 —— 它显式包含
+//      未跟踪的 `temp/**` 探针,是**更宽**的面,方向安全)。
+// 目录集合从两侧**真源**解析(CI 的 run 块 + Makefile 的 `GO_DIRS`),不写死字面量 ——
+// 写死的话改了真源判据不会跟着动(那正是 P-1/P-2/R6-C P2-1 的假绿形态)。
 {
   const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
   const block = extractRunBlocks(workflowText).find(entry => /gofmt\s+-l\b/u.test(entry.content))
   check(block !== undefined, 'ci.yml 里找不到 gofmt 步骤(抽取失败或整步被删)')
 
-  /** 取出文本里所有 `gofmt -l <目录…>` 的目录列表(按出现顺序;不做去重,便于比对同面)。 */
-  const scanLists = text => [...text.matchAll(/gofmt\s+-l\s+([^\n"';|&)]+)/gu)]
-    .map(match => match[1].trim().split(/\s+/u).filter(Boolean))
-    .filter(dirs => dirs.length > 0)
   const makefile = readFileSync(join(root, 'server', 'Makefile'), 'utf8')
+  /** 解析 Makefile 变量(`X := …` / `X ?= …` / `X = …`),返回 token 数组。 */
+  const makeVar = name => {
+    const match = new RegExp(`^${name}\\s*[:?]?=\\s*(.+)$`, 'mu').exec(makefile)
+    return match === null ? null : match[1].trim().split(/\s+/u).filter(Boolean)
+  }
+  const goDirs = makeVar('GO_DIRS')
+  check(goDirs !== null && goDirs.length > 0,
+    'server/Makefile 里找不到 `GO_DIRS`(Go 扫描面的唯一真源)—— 请恢复它，不要把目录列表抄回各条命令')
+  const expectedPackages = (goDirs ?? []).map(dir => `./${dir}/...`)
+
+  /** 取出文本里所有 `gofmt -l <目录…>` 的目录列表,并把 `$(GO_DIRS)` 展开成真源目录。 */
+  const scanLists = text => [...text.matchAll(/gofmt\s+-l\s+([^\n"';|&]+)/gu)]
+    // 剥掉 shell 里的收尾括号:`$$(gofmt -l $(GO_DIRS))` / `FILES="$(gofmt -l cmd)"`。
+    // 只剥**不配对**的那些 —— `$(GO_DIRS)` 自己的右括号必须留着。
+    .map(match => {
+      let raw = match[1].trim()
+      for (;;) {
+        const opens = (raw.match(/\$\(/gu) ?? []).length
+        const closes = (raw.match(/\)/gu) ?? []).length
+        if (closes <= opens || !raw.endsWith(')')) break
+        raw = raw.slice(0, -1).trimEnd()
+      }
+      return raw.split(/\s+/u).filter(Boolean)
+    })
+    .filter(dirs => dirs.length > 0)
+    .map(dirs => dirs.flatMap(dir => (dir === '$(GO_DIRS)' ? (goDirs ?? [dir]) : [dir])))
   const makefileLists = scanLists(makefile)
   check(makefileLists.length > 0, 'server/Makefile 里找不到 `gofmt -l`(唯一真源被删?)')
   check(
@@ -1362,11 +1428,16 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     `server/Makefile 的每处 gofmt -l 必须扫同一组目录(本地快慢门禁不许分叉),实际 ${JSON.stringify(makefileLists)}`,
   )
   const makefileDirs = makefileLists[0] ?? []
+  check(
+    makefileDirs.join(' ') === (goDirs ?? []).join(' '),
+    `server/Makefile 的 gofmt 扫描面必须等于 GO_DIRS:期望 [${(goDirs ?? []).join(' ')}],`
+      + `实际 [${makefileDirs.join(' ')}] —— 三面(gofmt/vet/test)必须由同一份目录真源派生`,
+  )
   const ciDirs = block === undefined ? [] : (scanLists(block.content)[0] ?? [])
   check(ciDirs.length > 0, 'ci.yml 的 gofmt 步骤里找不到 `gofmt -l <目录…>`')
   check(
     ciDirs.join(' ') === makefileDirs.join(' '),
-    'CI 的 gofmt 扫描面必须与 server/Makefile 同源(唯一真源是 Makefile 的 `gofmt -l`)'
+    'CI 的 gofmt 扫描面必须与 server/Makefile 同源(唯一真源是 Makefile 的 `GO_DIRS`)'
       + `:期望 [${makefileDirs.join(' ')}],实际 [${ciDirs.join(' ')}]`
       + ' —— 只改一侧会让 CI 与本地 make check 的门禁分叉',
   )
@@ -1374,6 +1445,27 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     check(
       existsSync(join(root, 'server', dir)),
       `gofmt 扫描目录 server/${dir} 不存在(打错的目录名等于白扫)`,
+    )
+  }
+
+  // Makefile 的 `go vet` / `go test` 必须与 gofmt 同面(经 `$(GO_PACKAGES)` 或逐字列出)。
+  const goCommandLines = makefile.split('\n')
+    .map(line => /^\s*go\s+(vet|test)\s+(.+)$/u.exec(line))
+    .filter(match => match !== null)
+  check(goCommandLines.length >= 3,
+    `server/Makefile 里的 go vet/go test 命令行只剩 ${goCommandLines.length} 条(期望 ≥ 3)—— 抽取失效或命令被删`)
+  for (const match of goCommandLines) {
+    const [, verb, rest] = match
+    const packages = rest.replace('$(GO_PACKAGES)', expectedPackages.join(' '))
+      .split(/\s+/u).filter(token => token.startsWith('./'))
+    // `go test ./...`(test 目标):显式含未跟踪的 `temp/**` 探针,是**更宽**的面。
+    const isEverything = packages.length === 1 && packages[0] === './...'
+    if (isEverything) continue
+    check(
+      packages.join(' ') === expectedPackages.join(' '),
+      `server/Makefile 的 \`go ${verb}\` 包集合必须等于 GO_DIRS 派生出的集合`
+        + `(期望 [${expectedPackages.join(' ')}],实际 [${packages.join(' ')}])`
+        + ' —— "与 CI 同义"必须是命令级事实，不能只是注释里的一句话(R6-C P2-1)',
     )
   }
 }
@@ -2296,6 +2388,56 @@ echo x > "${distDir}/App.AppImage"
   const badSums = runPublish({})
   check(badSums.status !== 0, '本地产物不自洽(SHA256SUMS 不含该包哈希)时必须失败')
   check(!existsSync(manifestPath), '本地产物不自洽时不得写 latest.json')
+
+  // -------------------------------------------------------------------------
+  // F–I. **按对象**的完整性回归网(2026-09-23 第六轮审计 R6-C-3)。
+  //
+  // 现场:A–E 五条注入全部打在**先被校验的那个 zip** 上,于是
+  //   · 删掉 `ci-publish-update-server.sh:226`(SHA256SUMS 对象的 verify_remote_object),
+  //   · 删掉 `:263`(清理旧版本之后、写 latest.json 之前的 zip 复检),
+  // 两次 `node scripts/verify-ci-scripts.mjs` 都仍然 **EXIT=0**,而成功行照旧宣称
+  // "上传后大小/哈希完整性校验"。指针对象(latest.json)当时更是完全没有校验。
+  // 这四条用例就是那三处的判据面:注入**只作用于被点名的对象**。
+  // -------------------------------------------------------------------------
+  resetStore()
+  writeFileSync(join(bundle, 'official', 'SHA256SUMS'),
+    `${createHash('sha256').update(content).digest('hex')}  ${zipName}\n`)
+  // F. `SHA256SUMS` 对象被截断(zip 完全正常)⇒ 必须失败,且不得写 latest.json。
+  //    这是"客户拿它给包对拍、而它自己坏了"的现场形态。
+  const sumsTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: 'SHA256SUMS' })
+  check(sumsTruncated.status !== 0, 'SHA256SUMS 对象被截断(而 zip 正常)时必须失败')
+  check(!existsSync(manifestPath), 'SHA256SUMS 完整性不过时不得写 latest.json')
+  check(existsSync(join(store, 'official', 'releases', '9.9.9', zipName)),
+    'F 用例的前提:zip 本身必须已完整上传(注入只作用于 SHA256SUMS)')
+  // G. `SHA256SUMS` 对象哈希不符(大小正确)⇒ 同样必须失败。
+  resetStore()
+  const sumsWrongSha = runPublish({ FAKE_AWS_SHA: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=', FAKE_AWS_SHA_KEY: 'SHA256SUMS' })
+  check(sumsWrongSha.status !== 0, 'SHA256SUMS 对象的 SHA256 与本地不一致时必须失败')
+  check(!existsSync(manifestPath), 'SHA256SUMS 哈希不符时不得写 latest.json')
+  // H. **写指针前的复检**必须是拦住"上传后对象又坏了"的那条判据:
+  //    第 1 次 zip head(上传后校验)读到的是好对象,之后对象被弄坏 ⇒ 只有复检能看见。
+  resetStore()
+  const staleAfterFirstCheck = runPublish({ FAKE_AWS_TRUNCATE_ON_HEAD: `${zipName}:1` })
+  check(staleAfterFirstCheck.status !== 0,
+    '上传后对象再被弄坏(第 1 次 head 之后截断)时,写指针前的复检必须失败 —— 删掉它会静默写出指向损坏对象的 latest.json')
+  check(!existsSync(manifestPath), '写指针前的复检不过时不得写 latest.json')
+  // I. **指针对象**本身也要校:latest.json 被截断 ⇒ 必须失败(客户更新链路的第一步就是读它)。
+  resetStore()
+  const pointerTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: 'latest.json' })
+  check(pointerTruncated.status !== 0, 'latest.json 对象被截断时必须失败(指针损坏 = 客户更新链路不可用)')
+  // 正向对照(与 E 同一形态,但注入面按对象收窄之后复跑一次):三条校验都该放行。
+  resetStore()
+  const scopedGreen = runPublish({ FAKE_AWS_TRUNCATE_KEY: 'nothing-matches', FAKE_AWS_SIZE_KEY: 'nothing-matches' })
+  check(scopedGreen.status === 0,
+    `带按对象作用域的注入但不命中任何对象时必须成功(否则 F–I 可能只是恒红),实际退出 ${String(scopedGreen.status)}: ${(scopedGreen.stderr ?? '').slice(0, 300)}`)
+  check(existsSync(manifestPath), 'F–I 的正向对照应写出 latest.json')
+  // 三个对象都确实被校验过:head-object 至少要各问到一次(证据,不是"存在性断言")。
+  const scopedLog = readFileSync(log, 'utf8')
+  for (const needle of [zipName, 'SHA256SUMS', 'latest.json']) {
+    check(scopedLog.includes(`head-object official/releases/9.9.9/${needle}`)
+      || scopedLog.includes(`head-object official/${needle}`),
+    `正向对照:${needle} 必须被 head-object 校验过(缺了它 ⇒ 该对象的完整性判据不存在)`)
+  }
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
@@ -2851,5 +2993,5 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
   + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
   + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
-  + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + 上传后大小/哈希完整性校验)/'
+  + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')

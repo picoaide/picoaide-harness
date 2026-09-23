@@ -440,16 +440,20 @@ jobs:
       # server/Makefile check 中,CI 从未执行。
       #
       # W-6(2026-09-23 第三轮审计 P-4):扫描面必须与 `server/Makefile` 的
-      # `gofmt -l` **同源**(那里是 `cmd internal demoapps`)。此前这里少一个
+      # `gofmt -l` **同源**(那里的唯一真源是 `GO_DIRS`)。此前这里少一个
       # `demoapps`,而 `go vet ./...` 与 `go test ./...` 都不查格式 ⇒
       # `server/demoapps/**`(随镜像分发的内置演示应用 Go 源码)里的格式违规
       # 在 CI 全绿。两边的目录集合由 `scripts/verify-ci-scripts.mjs` 的
       # 「gofmt 扫描面必须与 Makefile 同源」判据逐条对拍(任一侧增删目录都红)
       # —— 不要只在这一侧或只在 Makefile 里加/删扫描目录。
+      #
+      # R6-C P2-1(2026-09-23 第六轮审计):补上 `webadmin` 与 `scripts` —— 它们是同一个
+      # Go module 里的包,`go vet ./...` / `go test ./...` 覆盖它们,而本地 `make check`
+      # 此前不覆盖(写坏 = 本地绿、CI 红);gofmt 面则是两边都没查。
       - name: gofmt check
         run: |
           set -euo pipefail
-          FILES="$(gofmt -l cmd internal demoapps)"
+          FILES="$(gofmt -l cmd internal demoapps webadmin scripts)"
           if [ -n "$FILES" ]; then
             echo "::error::gofmt 未通过: $FILES"
             exit 1
