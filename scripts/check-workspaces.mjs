@@ -88,6 +88,13 @@ const GUARDS = [
     args: ['run', 'check:wasm-client-only', '--portable'],
     path: 'WASM 客户端专属（残留/对拍/渠道/W5 文档/HEAD 绑定）；PG 与探针见 §16 W6',
   },
+  // 2026-09-23 二轮审计 W3-02/W3-03/W3-04：`integration-tests/` 的两个用例脚本打的是
+  // 真实 IdP + 真实服务端（需 Docker/Xvfb），**不进 CI** ⇒ 整块脱离门禁，长期腐烂到
+  // "永远不可能通过"也没人发现（深链断言结构上不可达、断言 2026-09-10 已删除的旧 brand
+  // 契约、用伪造 cookie 的恒真"非 200"断言）。本守卫把可静态执行的那部分接进来：
+  // python 语法、`--self-test` 判据夹具（每条判据都配负例）、以及**进程内假网关**驱动的
+  // 正/反例（按真契约应答必须绿 / 破坏契约必须红 / provider 未配置必须 SKIP 且不得报 PASS）。
+  { name: 'check:integration-tests', args: ['run', 'check:integration-tests'], path: 'integration-tests/**（语法/判据自检/假网关正反例）' },
 ]
 
 /**
