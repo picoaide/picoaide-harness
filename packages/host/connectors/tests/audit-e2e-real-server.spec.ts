@@ -133,6 +133,10 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     // and the SDK must refresh with the stored refresh token, then retry
     server.expireAccessTokens()
     const call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
+    // TEMP-DIAG（合并前回退）：把恢复链的观测值带进失败行，便于从 CI 的受限日志读出真因。
+    if (!(server.stats.mcpUnauthorized >= 1) || !server.stats.grants.includes('refresh_token')) {
+      throw new Error(`FAIL R5DIAG stats=${JSON.stringify(server.stats)} text=${String(call.content?.[0]?.text)}`)
+    }
     expect(call.content?.[0]?.text).toBe('echo:after-expiry')
     expect(server.stats.mcpUnauthorized).toBeGreaterThanOrEqual(1)
     expect(server.stats.grants).toContain('refresh_token')
