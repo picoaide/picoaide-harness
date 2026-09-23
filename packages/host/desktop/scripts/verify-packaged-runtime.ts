@@ -2388,29 +2388,87 @@ export function smokePackagedErrorReporting(
 }
 
 /**
- * Run the static packaged-runtime check as Electron Builder's afterPack hook.
- * @param context - Electron Builder's afterPack context.
- * @param verify - static verification implementation (tests).
- * @param smoke - packaged diagnostic worker smoke (tests).
- * @param flockSmoke - packaged flock smoke (tests).
- * @param errorReportingSmoke - packaged error-reporting smoke (tests).
- * @returns A promise that rejects before signing when the runtime is incomplete.
+ * `afterPack` 的四个验证接缝（**唯一生产接线**）。
+ *
+ * 为什么是一张显式的表，而不是四个"可注入的缺省实现"：electron-builder 按**具名导出**
+ * 解析本钩子（`app-builder-lib/out/util/resolve.js` 的
+ * `resolveFunction(type, config.afterPack, "afterPack", root)`），并且只用一个参数调用它
+ * （`app-builder-lib/out/packager.js` 的 `await emit("afterPack", context)`）。也就是说
+ * 「缺省参数值」在生产上就是**唯一会跑的代码** —— 把它改成空函数＝把对应那一步验证删掉，
+ * 而调用方（electron-builder）永远不会发现，也没有任何调用点守卫会红。
+ *
+ * 2026-09-23 第四轮审计 R4-A-9 记录的正是这个形态：旧实现把四个接缝写成
+ * `verify: typeof verifyPackagedRuntime = verifyPackagedRuntime`（smoke/flockSmoke/
+ * errorReportingSmoke 同形），四个缺省值逐个换成 `() => {}`（含把整个静态门禁换成空转）
+ * 后 `tests/verify-packaged-runtime.spec.ts` 仍然 109/109 全绿。
+ *
+ * 现在的形状：生产路径**只有这张表**，`afterPack` 不再接受任何注入参数。
+ *   * 要按步驱动真实现 ⇒ 用 {@link runAfterPackSeams}（显式给替身，用于单步判据）；
+ *   * 要证明生产入口确实按序调用四项 ⇒ 临时 `vi.spyOn` 本表项再调 `afterPack(context)`。
+ * 两条路径在 spec 的「生产接线不可空转（R4-A-9）」一组里都有对应判据，所以"把表项换成
+ * 空函数"与"在 afterPack 里绕开这张表"都会红。
  */
-export async function afterPack(
+export interface AfterPackSeams {
+  /** 静态产物门禁：必需条目 / 泄漏表 / 反向 oracle / 品牌资产 / profile 锚点。 */
+  readonly verify: typeof verifyPackagedRuntime
+  /** 打包版诊断 Worker 冒烟（归档里真的能起来并产出诊断包）。 */
+  readonly smoke: PackagedDiagnosticWorkerSmoke
+  /** 打包版 flock 冒烟（会话可写；win32 按设计跳过）。 */
+  readonly flockSmoke: (context: PackagedRuntimeContext) => void
+  /** 打包版错误上报冒烟（`@sentry/node` 在包里真的能加载）。 */
+  readonly errorReportingSmoke: (context: PackagedRuntimeContext) => void
+}
+
+/**
+ * 生产接线的四个接缝（真实现，无缺省空壳）。
+ *
+ * 这是 `afterPack` **唯一**会使用的实现来源。测试可以临时替换本表的成员
+ * （`vi.spyOn`）来观察生产入口的调用序列，但必须还原 —— 它同时是"生产接线"本身。
+ */
+export const AFTER_PACK_SEAMS: AfterPackSeams = {
+  verify: verifyPackagedRuntime,
+  smoke: smokePackagedDiagnosticWorker,
+  flockSmoke: smokePackagedFlockLock,
+  errorReportingSmoke: smokePackagedErrorReporting,
+}
+
+/**
+ * 四步验证序列（顺序即生产顺序）。
+ *
+ * 导出是为了让单步判据能把**被测那一步取成真实现**（`AFTER_PACK_SEAMS[step]`）、其余
+ * 步骤给替身：合成产物永远无法让静态门禁通过，所以第 2~4 步只能这样到达。
+ * @param context - Electron Builder's afterPack context.
+ * @param seams - 四个接缝的实现；生产传 {@link AFTER_PACK_SEAMS}。
+ * @returns A promise that rejects when any step rejects.
+ */
+export async function runAfterPackSeams(
   context: PackagedRuntimeContext,
-  verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
-  smoke: PackagedDiagnosticWorkerSmoke = smokePackagedDiagnosticWorker,
-  flockSmoke: (context: PackagedRuntimeContext) => void = smokePackagedFlockLock,
-  errorReportingSmoke: (context: PackagedRuntimeContext) => void = smokePackagedErrorReporting,
+  seams: AfterPackSeams,
 ): Promise<void> {
-  verify(context)
+  // 四步一律 `await`：接缝声明是同步的，但"把某一步包成 async 函数"会让**未 await 的
+  // 拒绝变成 unhandled rejection、那一步静默放过**（R4-A-9 的真产物探针实测踩到过）。
+  await seams.verify(context)
   const asarPath = resolvePackagedAsarPath(context)
   // Physical tree (asar: false): the worker smoke's extraction fallback reads
   // from the application root; the archive layout reads from app.asar.unpacked.
   const sourceRoot = existsSync(asarPath)
     ? resolvePackagedUnpackedRoot(context)
     : resolvePackagedAppRoot(context)
-  await smoke(sourceRoot, undefined, asarPath)
-  flockSmoke(context)
-  errorReportingSmoke(context)
+  await seams.smoke(sourceRoot, undefined, asarPath)
+  await seams.flockSmoke(context)
+  await seams.errorReportingSmoke(context)
+}
+
+/**
+ * Run the static packaged-runtime check as Electron Builder's afterPack hook.
+ *
+ * **单参数是契约**：electron-builder 只传 context（具名导出 + 单参数 emit）。这里刻意
+ * **不**加任何可注入的缺省实现 —— 那正是 R4-A-9 记录的空转形态（"缺省值即生产接线"）。
+ * 要替换接缝请用 {@link runAfterPackSeams}，要观察生产序列请临时 spy
+ * {@link AFTER_PACK_SEAMS}。
+ * @param context - Electron Builder's afterPack context.
+ * @returns A promise that rejects before signing when the runtime is incomplete.
+ */
+export async function afterPack(context: PackagedRuntimeContext): Promise<void> {
+  await runAfterPackSeams(context, AFTER_PACK_SEAMS)
 }

@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import AdmZip from 'adm-zip'
 import { listPackage } from '@electron/asar'
 import {
+  AFTER_PACK_SEAMS,
   afterPack,
+  runAfterPackSeams,
   assertNoPackagedSourceLeaks,
   assertRequiredEntriesCoverWorkspaceSurface,
   assertRuntimeAssetFamiliesSurvive,
@@ -22,6 +24,7 @@ import {
   PACKAGED_ELECTRON_VERSION_MARKER,
   declaredElectronVersion,
   packagedRuntimeLayoutIsPhysical,
+  PACKAGED_RUNTIME_LAYOUT_ENV,
   PACKAGED_WEB_BRAND_ASSETS,
   PACKAGED_WEB_BRAND_FAVICON,
   PACKAGED_WEB_BRAND_OFFICIAL,
@@ -45,6 +48,7 @@ import {
   smokePackagedFlockLock,
   verifyPackagedRuntime,
   type ArchiveLister,
+  type AfterPackSeams,
   type FileProbe,
   type FlockSmokeLauncher,
   type PackageEntryReader,
@@ -680,6 +684,139 @@ describe('反向 oracle：清单必须覆盖产物（第三轮审计 P-1，2026-
   })
 })
 
+describe('afterPack 的生产接线不可空转（第四轮审计 R4-A-9，2026-09-23 补）', () => {
+  // 缺口（R4-A-9，复现记录见 temp/round4-2026-09-23/R4-A/subreport-B-pack.md §R4-A-B1）：
+  // electron-builder 按**具名导出**解析 afterPack 并只用一个参数调用它
+  // （`app-builder-lib/out/util/resolve.js` 的 resolveFunction(..., 'afterPack', ...) +
+  // `packager.js` 的 emit('afterPack', context)）。旧实现把四个接缝写成**缺省参数值**
+  // （`verify = verifyPackagedRuntime` / `smoke = smokePackagedDiagnosticWorker` /
+  // `flockSmoke = smokePackagedFlockLock` / `errorReportingSmoke = smokePackagedErrorReporting`）
+  // ⇒ 缺省值在生产上就是唯一会跑的代码，而**唯一**行使 afterPack 的两条用例各自注入了替身
+  // （本文件 :742 旧写法、:1761 旧写法），四个缺省值逐个改成 `() => {}` —— 含把整个静态
+  // 门禁 `verify` 换成空转 —— 后本文件仍然 109/109 全绿。也就是说"闸门被换成空转"当时
+  // 没有任何判据。
+  //
+  // 现在生产路径只有一张表（`AFTER_PACK_SEAMS`）+ 单参数入口 `afterPack(context)`。
+  // 下面六条判据全部打在**生产接线**上（不是文本匹配）：
+  //   ① 入口不带任何注入：合成产物必须被真 verify 拒，且拒的理由是静态门禁自己那条；
+  //   ②③④⑤ 逐个接缝：把该步从**生产表里取出**（AFTER_PACK_SEAMS[x]）当唯一真实现跑，
+  //        断言它真的拒了坏产物、点名自己那一步，且前面几步确实先跑过；
+  //   ⑥ 生产表四项必须逐一是真实现（表项被换成空函数即红）。
+  const seamRecorders = (
+    calls: string[],
+    real: keyof AfterPackSeams,
+  ): AfterPackSeams => ({
+    verify: () => { calls.push('verify') },
+    smoke: async () => { calls.push('smoke') },
+    flockSmoke: () => { calls.push('flock') },
+    errorReportingSmoke: () => { calls.push('error-reporting') },
+    // 被测那一步必须来自生产表：换成替身就失去"这一步真的接在生产上"的证明。
+    [real]: AFTER_PACK_SEAMS[real],
+  })
+
+  /**
+   * `smokePackagedDiagnosticWorker` 在"归档与物理树都缺 worker"这条早期失败路径上
+   * 没有 `finally`，会留下一个临时目录；用例把它清掉，避免复跑积累。
+   */
+  const cleanupDiagnosticSmokeDirs = (before: ReadonlySet<string>): void => {
+    for (const name of readdirSync(tmpdir())) {
+      if (name.startsWith('dsh-packaged-diagnostics-') && !before.has(name)) {
+        rmSync(join(tmpdir(), name), { recursive: true, force: true })
+      }
+    }
+  }
+
+  it('生产入口 afterPack(context) 不带注入：静态门禁必须真的拒掉坏产物', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-entry-'))
+    // 布局开关必须回到"要求 app.asar"，否则真 verify 会走物理分支（另一条判据覆盖它）。
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(afterPack(context(appOutDir, 'linux')))
+        .rejects.toThrow(/packaged runtime has no app\.asar at[\s\S]*PACKAGED_RUNTIME_LAYOUT=physical/u)
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('静态门禁（verify）从生产表取出后仍然拒包，且它是第一步', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-verify-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'verify'),
+      )).rejects.toThrow(/has no app\.asar at/u)
+      // verify 若变成空转，序列会继续走后面的记录器 ⇒ 上面的 rejects 直接失败。
+      expect(calls).toEqual([])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('诊断 Worker 冒烟（smoke）从生产表取出后仍然拒包，且排在静态门禁之后', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-smoke-'))
+    const calls: string[] = []
+    const before = new Set(readdirSync(tmpdir()))
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'smoke'),
+      )).rejects.toThrow(/smoke: worker missing from asar and physical tree/u)
+      expect(calls).toEqual(['verify'])
+    } finally {
+      vi.unstubAllEnvs()
+      cleanupDiagnosticSmokeDirs(before)
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('flock 冒烟（flockSmoke）从生产表取出后仍然拒包，且排在 Worker 冒烟之后', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-flock-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'flockSmoke'),
+      )).rejects.toThrow(/packaged flock smoke cannot find the packaged launcher/u)
+      expect(calls).toEqual(['verify', 'smoke'])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('错误上报冒烟（errorReportingSmoke）从生产表取出后仍然拒包，且它是最后一步', async () => {
+    const appOutDir = mkdtempSync(join(tmpdir(), 'dsh-afterpack-sentry-'))
+    const calls: string[] = []
+    vi.stubEnv(PACKAGED_RUNTIME_LAYOUT_ENV, '')
+    try {
+      await expect(runAfterPackSeams(
+        context(appOutDir, 'linux'),
+        seamRecorders(calls, 'errorReportingSmoke'),
+      )).rejects.toThrow(/packaged error-reporting smoke cannot find the packaged launcher/u)
+      expect(calls).toEqual(['verify', 'smoke', 'flock'])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(appOutDir, { recursive: true, force: true })
+    }
+  })
+
+  it('生产接线表 AFTER_PACK_SEAMS 的四项必须逐一是真实现', () => {
+    expect(AFTER_PACK_SEAMS.verify).toBe(verifyPackagedRuntime)
+    expect(AFTER_PACK_SEAMS.smoke).toBe(smokePackagedDiagnosticWorker)
+    expect(AFTER_PACK_SEAMS.flockSmoke).toBe(smokePackagedFlockLock)
+    expect(AFTER_PACK_SEAMS.errorReportingSmoke).toBe(smokePackagedErrorReporting)
+    // 生产入口只声明一个参数（electron-builder 也只传一个）：arity 回到 >1 说明
+    // 又出现了"缺省值即生产接线"的形态（真正的判据是上面那条 spy 用例，见 :742）。
+    expect(afterPack.length).toBe(1)
+  })
+})
+
 describe('packaged desktop runtime verification', () => {
   it('fails the diagnostic Worker smoke when its archive omits the crash dump', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-smoke-'))
@@ -739,22 +876,32 @@ describe('packaged desktop runtime verification', () => {
     const runtimeContext = context('/build', 'win32')
     const calls: string[] = []
 
-    // The production afterPack resolves the worker source root from the real
-    // filesystem: no app.asar in this fixture, so the physical app root is used.
-    await afterPack(
-      runtimeContext,
-      () => { calls.push('static') },
-      async (workerRoot) => { calls.push(workerRoot) },
-      () => { calls.push('flock') },
-      () => { calls.push('error-reporting') },
-    )
+    // R4-A-9：这条用例现在**只传 context**（生产入口的契约就是单参数），四项全部从
+    // 生产表 `AFTER_PACK_SEAMS` 上临时 spy 出来 —— 也就是说它同时证明「afterPack 确实
+    // 走这张表、且顺序是 static → smoke → flock → error-reporting」。旧写法是给
+    // afterPack 传四个位置参数，而那份"可注入的缺省实现"正是审计记录的空转形态：
+    // 把缺省值换成空函数后这条用例照样绿（它压根没碰缺省值）。
+    const spies = [
+      vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => { calls.push('static') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async (workerRoot) => { calls.push(workerRoot) }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => { calls.push('flock') }),
+      vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke').mockImplementation(() => { calls.push('error-reporting') }),
+    ]
 
-    expect(calls).toEqual([
-      'static',
-      expect.stringMatching(/resources[\\/]app$/u),
-      'flock',
-      'error-reporting',
-    ])
+    try {
+      // The production afterPack resolves the worker source root from the real
+      // filesystem: no app.asar in this fixture, so the physical app root is used.
+      await afterPack(runtimeContext)
+
+      expect(calls).toEqual([
+        'static',
+        expect.stringMatching(/resources[\\/]app$/u),
+        'flock',
+        'error-reporting',
+      ])
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+    }
   })
 
   it('tracks the ConPTY-only native surface shipped by node-pty 1.2', () => {
@@ -1758,14 +1905,24 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         stderr: "Error: Cannot find module '@sentry/node'",
       }))
 
-      await expect(afterPack(
-        fixture.runtimeContext,
-        () => {},
-        async () => {},
-        () => {},
-        runtimeContext => { smokePackagedErrorReporting(runtimeContext, launch) },
-      )).rejects.toThrow(/Cannot find module '@sentry\/node'/u)
-      expect(launch).toHaveBeenCalledOnce()
+      // R4-A-9：仍然走**生产入口**（单参数 `afterPack(context)`）。前三步在生产表上
+      // 临时置为记录器（合成 fixture 过不了静态门禁），第四步把 sentry 的 launch 替身
+      // 接进真实现 —— 判据与旧写法同强，但不再依赖 afterPack 的"可注入缺省值"。
+      const spies = [
+        vi.spyOn(AFTER_PACK_SEAMS, 'verify').mockImplementation(() => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'smoke').mockImplementation(async () => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'flockSmoke').mockImplementation(() => {}),
+        vi.spyOn(AFTER_PACK_SEAMS, 'errorReportingSmoke')
+          .mockImplementation(runtimeContext => { smokePackagedErrorReporting(runtimeContext, launch) }),
+      ]
+
+      try {
+        await expect(afterPack(fixture.runtimeContext))
+          .rejects.toThrow(/Cannot find module '@sentry\/node'/u)
+        expect(launch).toHaveBeenCalledOnce()
+      } finally {
+        for (const spy of spies) spy.mockRestore()
+      }
     })
 
     it('fails when the sentry smoke exits 0 without the success marker', () => {
