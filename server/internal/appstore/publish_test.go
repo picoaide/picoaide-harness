@@ -346,7 +346,7 @@ func TestPublishKeepsOfficialOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	if app.Official != 1 || app.Owner != "" {
-		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner=''", app.Official, app.Owner)
+		t.Fatalf("after admin publish: official=%d owner=%q, want official=1 owner 为空", app.Official, app.Owner)
 	}
 }
 
@@ -407,6 +407,7 @@ func TestPublishPendingCapPerKindAndAuthor(t *testing.T) {
 // 变异验证:
 //   - 让 Publish 重新投影待审元数据 ⇒ 第②步红;
 //   - 摘掉 RecomputeAppProjection 调用(或把它改成"取最新版本")⇒ 第③④步红。
+//
 // ---------------------------------------------------------------------------
 func TestPendingReleaseDoesNotPolluteProjection(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)

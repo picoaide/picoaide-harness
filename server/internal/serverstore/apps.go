@@ -274,14 +274,14 @@ func ListApps(db *sql.DB, kind, channel string) ([]App, error) {
 // 不经 UpsertApp 泄露(发布/元数据更新不触碰本列)。
 //
 // **不变量守卫**(审计 2026-09-23 G-P2-1):官方归属的唯一合法形态是
-// `official=1 ∧ owner=''`(迁移 0059 / P2-21)。此前本函数接受任意组合,于是
-// 任何一条"顺手也写 owner"的调用点都能造出 `official=1 ∧ owner≠''` ——
+// `official=1 ∧ owner 为空`(迁移 0059 / P2-21)。此前本函数接受任意组合,于是
+// 任何一条"顺手也写 owner"的调用点都能造出 `official=1 ∧ owner 非空` ——
 // 那会让 is_owner 对 owner 为 true(员工端显示「我的」)而发布仍被
 // OFFICIAL_LOCKED 403 拒绝,客户端预检与服务端判定分叉。守卫放在这里,
 // 未来的调用者无论怎么传都造不出禁止状态。
 func SetAppOfficial(db *sql.DB, kind, appID string, official bool, owner string) error {
 	if official && owner != "" {
-		return fmt.Errorf("%w: 官方归属必须 owner=''(official=1 ∧ owner≠'' 是禁止状态)", ErrValidation)
+		return fmt.Errorf("%w: 官方归属必须 owner 为空(official=1 ∧ owner 非空 是禁止状态)", ErrValidation)
 	}
 	_, err := db.Exec(`UPDATE apps SET official = ?, owner = ?, updated_at = `+NowExpr()+`
 		WHERE kind = ? AND app_id = ?`, boolToInt(official), owner, kind, appID)

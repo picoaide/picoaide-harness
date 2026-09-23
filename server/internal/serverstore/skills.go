@@ -167,13 +167,13 @@ func GetSkill(db *sql.DB, name string) (*Skill, error) {
 //   - `appstore.Publish` 用 `existingApp.Owner != req.Publisher → 409 NAME_TAKEN`
 //     判定"谁能续传新版本"(internal/appstore/publish.go);
 //   - 能力中心用它算 `is_owner`;
-//   - `official=1 ∧ owner≠''` 是被迁移 0059 与 SetAppOfficial 契约禁止的状态。
+//   - `official=1 ∧ owner 非空` 是被迁移 0059 与 SetAppOfficial 契约禁止的状态。
 //
 // 因此任何改写 owner 的路径都必须**视同归属转移**:走唯一合规入口
 // `PUT /api/server/admin/apps/:kind/:app_id/owner`(appstore/admin.go),那里
 // 有目标用户存在性校验、owner/official 互斥、同归属幂等与 `app_owner_transfer`
 // 审计。此前本函数把 `s.Author` 写进 owner,任何一次元数据 PUT 都变成一次
-// **无审计的归属转移**,还能造出 `official=1 ∧ owner≠''`(禁止状态)——
+// **无审计的归属转移**,还能造出 `official=1 ∧ owner 非空`(禁止状态)——
 // 智能体孪生端点(marketplace/agent_api.go 明确保留 `Owner: a.Owner`)没有这个洞,
 // 所以这是遗漏而非设计。
 //

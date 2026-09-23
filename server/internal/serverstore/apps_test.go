@@ -276,7 +276,7 @@ func TestSetAppTitleKeepsOwnershipAndFlags(t *testing.T) {
 		Channel: AppChannelMarket, Enabled: 0}); err != nil {
 		t.Fatal(err)
 	}
-	// 官方属性挂 App 级且不由 UpsertApp 写入:转官方 = official=1 + owner=''。
+	// 官方属性挂 App 级且不由 UpsertApp 写入:转官方 = official=1 + owner 为空。
 	if err := SetAppOfficial(db, AppKindAgent, "official-agent", true, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func rawUpdatedAt(t *testing.T, db *sql.DB, appID string) string {
 }
 
 // TestSetAppOfficialRejectsForbiddenState 钉住官方归属的唯一合法形态
-// (审计 2026-09-23 G-P2-1):`official=1 ∧ owner≠''` 是禁止状态 —— 它会让
+// (审计 2026-09-23 G-P2-1):`official=1 ∧ owner 非空` 是禁止状态 —— 它会让
 // is_owner 对 owner 为 true 而发布仍被 OFFICIAL_LOCKED 拒,客户端预检与
 // 服务端判定分叉。守卫放在唯一的写入点,任何未来调用者都造不出来。
 func TestSetAppOfficialRejectsForbiddenState(t *testing.T) {
@@ -515,7 +515,7 @@ func TestSetAppOfficialRejectsForbiddenState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := SetAppOfficial(db, AppKindSkill, "official-guard", true, "alice"); !errors.Is(err, ErrValidation) {
-		t.Fatalf("official=1 ∧ owner≠'' = %v, want ErrValidation", err)
+		t.Fatalf("official=1 ∧ owner 非空 = %v, want ErrValidation", err)
 	}
 	if app, _ := GetApp(db, AppKindSkill, "official-guard"); app.Official != 0 || app.Owner != "alice" {
 		t.Fatalf("被拒的写入改变了行: %+v", app)

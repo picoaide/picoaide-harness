@@ -619,7 +619,7 @@ func TestAdminSkillFirstArchiveSameVersion(t *testing.T) {
 // G-P2-1(审计 2026-09-23):一次元数据 `PUT /api/server/admin/skills/:name
 // {author}` 就是一次**无审计的归属转移** —— 它把请求体里的自由文本直接写进
 // `apps.owner`(发布权的唯一真源),不校验目标用户是否存在、official 行也照改,
-// 能造出 `official=1 ∧ owner≠''` 这个被 0059/P2-21 明令禁止的状态;而 webadmin
+// 能造出 `official=1 ∧ owner 非空` 这个被 0059/P2-21 明令禁止的状态;而 webadmin
 // 的文案写的是「此处仅改署名展示」。智能体孪生端点正确保留 owner ⇒ 是遗漏。
 //
 // 修法:归属只允许走唯一合规入口 PUT /apps/:kind/:app_id/owner;本端点拒绝
@@ -684,7 +684,7 @@ func TestAdminSkillMetadataPutCannotTransferOwner(t *testing.T) {
 		t.Fatalf("合法元数据编辑未生效/越界: %+v", after)
 	}
 
-	// ④ official=1 的行同样不能被这条路径造出 official=1 ∧ owner≠'' 的禁止状态。
+	// ④ official=1 的行同样不能被这条路径造出 official=1 ∧ owner 非空 的禁止状态。
 	if err := serverstore.SetAppOfficial(db, serverstore.AppKindSkill, "own-demo", true, ""); err != nil {
 		t.Fatal(err)
 	}
