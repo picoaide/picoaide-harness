@@ -412,8 +412,22 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     rejectCode(authRequired(hostT(locale, 'auth.flowCancelled', { reason })))
   }
   const onAbort = (): void => abortFlow(options.signal.reason instanceof Error ? options.signal.reason.message : String(options.signal.reason ?? hostT(locale, 'auth.userCancelled')))
-  options.signal.addEventListener('abort', onAbort, { once: true })
-  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
+  /**
+   * 幂等收尾：摘 abort 监听、停 5 分钟定时器、关回调服务器。
+   *
+   * 第三轮审计 R3B2-1：收尾原先只挂在 `await codePromise` 的 finally 上，而
+   * 「listen 成功之后的 registerClient / 缺 clientId / flowUrl 被出站策略拒」这几步
+   * 都发生在它之前且都可能抛 ⇒ 抛出后回调服务器继续应答 404 五分钟，且孤儿定时器到点
+   * reject 一个无人 await 的 promise ⇒ unhandled rejection（本包 index.ts 写明宿主
+   * 视其为致命、会退出整个应用）。因此建流阶段与等待回调**共用同一处收尾**。
+   */
+  const releaseFlow = (): void => {
+    options.signal.removeEventListener('abort', onAbort)
+    clearTimeout(flowTimer)
+    callbackServer?.close()
+    callbackServer?.closeIdleConnections?.()
+    callbackServer = null
+  }
   const port = await new Promise<number>((resolve, reject) => {
     const server = createServer((req, res) => {
       // The loopback port is fixed before any request can arrive (the listen
@@ -453,50 +467,55 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     server.on('error', reject)
     callbackServer = server
   })
-  const redirectUri = `http://${callbackHost}:${port}/callback`
-  const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
-  const clientId = registrationEndpoint
-    ? await registerClient(
-      auth,
-      redirectUri,
-      registrationEndpoint,
-      options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME,
-      flowOutbound,
-    )
-    : auth.clientId || ''
-  if (!clientId) throw new Error(hostT(locale, 'auth.noClientId'))
-  const codeChallengeMethod = auth.pkce ? 'S256' : undefined
-  const authorizeUrl = flowUrl(
-    discovered?.authorizationEndpoint ?? auth.authorizeUrl,
-    'OAuth 授权端点',
-    locale,
-  )
-  authorizeUrl.searchParams.set('response_type', 'code')
-  authorizeUrl.searchParams.set('client_id', clientId)
-  authorizeUrl.searchParams.set('redirect_uri', redirectUri)
-  authorizeUrl.searchParams.set('state', state)
-  const scopes = discovered?.scopes ?? auth.scopes
-  if (scopes) authorizeUrl.searchParams.set('scope', scopes)
-  if (auth.pkce) {
-    authorizeUrl.searchParams.set('code_challenge', challenge)
-    authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
-  }
-  // RFC 8707: the token must be bound to the MCP server resource.
-  if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
-  options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
-  // 无论 codePromise 成功/失败/中止都先清理:失败路径(用户拒绝/OAuth 错误/
-  // abort)此前会绕过清理,残留 5 分钟 flowTimer 与 signal 上的 abort 监听
-  // (2026-09-01 审计修复)。
+  // 取消与超时只对「建流 + 等用户回调」这一段有意义：放在 listen 成功之后再武装，
+  // listen 失败时就不会留下孤儿定时器（R3B2-1）。
+  options.signal.addEventListener('abort', onAbort, { once: true })
+  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
+  // 兜底：即便将来又有新路径绕过 releaseFlow，也不让 rejectCode 变成 unhandled rejection。
+  codePromise.catch(() => {})
+  let redirectUri = ''
+  let clientId = ''
   let code: string
   try {
-    code = await codePromise
+    redirectUri = `http://${callbackHost}:${port}/callback`
+    const registrationEndpoint = discovered?.registrationEndpoint ?? auth.registrationEndpoint
+    clientId = registrationEndpoint
+      ? await registerClient(
+        auth,
+        redirectUri,
+        registrationEndpoint,
+        options.clientName ?? DEFAULT_OAUTH_CLIENT_NAME,
+        flowOutbound,
+      )
+      : auth.clientId || ''
+    if (!clientId) throw new Error(hostT(locale, 'auth.noClientId'))
+    const codeChallengeMethod = auth.pkce ? 'S256' : undefined
+    const authorizeUrl = flowUrl(
+      discovered?.authorizationEndpoint ?? auth.authorizeUrl,
+      'OAuth 授权端点',
+      locale,
+    )
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('client_id', clientId)
+    authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+    authorizeUrl.searchParams.set('state', state)
+    const scopes = discovered?.scopes ?? auth.scopes
+    if (scopes) authorizeUrl.searchParams.set('scope', scopes)
+    if (auth.pkce) {
+      authorizeUrl.searchParams.set('code_challenge', challenge)
+      authorizeUrl.searchParams.set('code_challenge_method', codeChallengeMethod ?? 'S256')
+    }
+    // RFC 8707: the token must be bound to the MCP server resource.
+    if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
+    options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
+      options.signal.removeEventListener('abort', onAbort)
+      clearTimeout(flowTimer)
+      callbackServer = null
+      code = await codePromise
   } finally {
-    // The flow settled (code received, error, or abort): stop watching for
-    // further aborts and stop the timeout so the token exchange below is not
-    // racing a cancelled flow.
-    options.signal.removeEventListener('abort', onAbort)
-    clearTimeout(flowTimer)
-    callbackServer = null
+    // 流已结束（拿到 code / OAuth 错误 / 用户取消 / 建流阶段抛出）：摘监听、停定时器、
+    // 关回调服务器，让后续的 token 交换不与已取消的流竞争。
+    releaseFlow()
   }
 
   throwIfAborted(options.signal)
