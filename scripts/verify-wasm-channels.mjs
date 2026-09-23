@@ -12,9 +12,12 @@
  *   1. 冻结正则三方对拍：设计总纲 §8.3 的 `^[a-z][a-z0-9+.-]{1,31}$` ↔ ci-channels.sh
  *      里 deep_link_scheme 与 app_origin_scheme 两处**逐字相同**（R1-SRV-9 曾出现
  *      "正则/长度两端不一致"；只改一处就是漂移）。
- *   2. 仓库 pin 校验：upstream.json 的 commit `fb2c4b9e…` 与 `dsh-v0.1.5-rc.2`、
- *      .gitmodules 的上游 URL、`git submodule status` 的实际检出 commit —— 三者一致
+ *   2. 仓库 pin 校验：`upstream.json`（commit 形状 + `sourceVersion == runtimePackageVersion`）、
+ *      `.gitmodules` 的上游 URL、`git submodule status` 的实际检出 commit == `upstream.json.commit`
  *      （渠道 scheme 的取值与注入链都写在这个 pin 的行为上，pin 漂移则结论不可比）。
+ *      具体版本号/commit**只在 `upstream.json` 里**（升级脚本同时改写它与 submodule）；
+ *      历史版本的本注释曾写死具体 commit 与 tag，pin 一升级那两处立即失真
+ *      （2026-09-23 二轮审计 D-4 同族：文档/注释里的 pin 必须指向真源，不写死值）。
  *   3. 渠道 CI dry-run（**正式 tag 名**，R2T-6/OPS-3：不能用预发 tag 只证明 beta）：
  *      对合成夹具跑 `scripts/ci-channels.sh`，断言正式 tag ⇒ 全部渠道（含 official）、
  *      预发 tag ⇒ 仅 beta、非 tag ⇒ 仅 official。
