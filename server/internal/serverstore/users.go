@@ -417,16 +417,21 @@ func ListUsers(db *sql.DB, offset, limit int, q string) ([]User, int64, error) {
 	return users, total, rows.Err()
 }
 
+// isUniqueViolation 报告 err 是否为唯一约束冲突（PG 23505）。
+//
+// SQLSTATE 判定走 pg.go 的 pgErrorCode（`errors.As` 优先，回落错误串）；
+// 后面那三条**文本**判定是 SQLite 时代的回落，PG-only 迁移后已无生产者。
+// 它们比 `errors.As` **更宽**，删掉属于**行为收紧**、不是重构，故保留并在此标明来源：
+//   - PG: ERROR: duplicate key value violates unique constraint "x" (SQLSTATE 23505)
+//   - SQLite: UNIQUE constraint failed: users.username
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	// PG: ERROR: duplicate key value violates unique constraint "x" (SQLSTATE 23505)
-	// SQLite: UNIQUE constraint failed: users.username
-	if strings.Contains(msg, "SQLSTATE 23505") || strings.Contains(msg, "23505") {
+	if pgErrorCodeIs(err, pgSQLStateUniqueViolation) {
 		return true
 	}
+	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE") || strings.Contains(msg, "unique constraint") || strings.Contains(msg, "duplicate key")
 }
 

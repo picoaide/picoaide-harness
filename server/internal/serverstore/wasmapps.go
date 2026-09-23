@@ -176,13 +176,18 @@ func WasmAppCurrentVersions(ctx context.Context, db *sql.DB, ids []int64) (map[i
 
 // isForeignKeyViolation 报告 PG 的外键冲突(23503):CreateWasmRelease 用它
 // 把"应用不存在"翻译成 ErrNotFound,而不是让调用方拿到裸驱动错误。
+//
+// SQLSTATE 判定走 pg.go 的 pgErrorCode（`errors.As` 优先，回落错误串）；末尾那条
+// **文本**判定是 SQLite 时代的回落（PG-only 迁移后已无生产者），它比 `errors.As`
+// 更宽，删掉属于行为收紧、不是重构，故保留并在此标明来源。
 func isForeignKeyViolation(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "SQLSTATE 23503") || strings.Contains(msg, "23503") ||
-		strings.Contains(msg, "foreign key constraint")
+	if pgErrorCodeIs(err, pgSQLStateForeignKeyViolation) {
+		return true
+	}
+	return strings.Contains(err.Error(), "foreign key constraint")
 }
 
 func scanWasmApp(row interface{ Scan(...any) error }) (*WasmApp, error) {
