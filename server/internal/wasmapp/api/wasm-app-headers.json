@@ -19,7 +19,7 @@
     "query_bytes_max": 4096,
     "envelope_bytes_max": 1463637,
     "request_body_bytes_max": 1048576,
-    "response_body_bytes_max": 524288
+    "response_body_bytes_max": 172032
   },
   "platform_headers": {
     "proof_request": "X-Pico-App-Proof",

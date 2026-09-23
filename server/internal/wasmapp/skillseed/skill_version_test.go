@@ -184,6 +184,28 @@ var seededSkillDigests = map[string]string{
 	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
 	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
 	"d90b4d151fe38f558b7fca6b328105f4a55776a902af0d6ae07576336f08271d": "2.6.0",
+
+	// 2.7.0 = **单帧可交付口径的统一**（2026-09-23 R3-A 审计 A-1/A-6/A-7，P1+P2）：
+	// 同一条"结果必须装进一个 1 MiB 协议帧"的约束在三处写成了互相矛盾的数字，
+	// 本轮统一到**一份推导**（真源 `limits/limits.go` 的
+	// `MaxDeliverablePayloadBytes = (ProtocolLineMaxBytes − FrameEnvelopeReserveBytes) /
+	// MaxJSONEscapeExpansion` = 172032 B ≈ 168 KiB）：
+	//   - `references/abi.md` §4：响应体由"8 MiB"改成"**保证可交付** 168 KiB；单帧上限
+	//     1 MiB 是原始字节数，低转义内容实测 ~625 KB 但不是承诺"——顺带解掉同段
+	//     "只写一帧"与"8 MiB"的自相矛盾；
+	//   - `references/abi.md` §3.3：`db.query` 返回上限由 5000 行 / 8 MiB 改成
+	//     5000 行 / 168 KiB（超出仍只截断 + `truncated:true`）；
+	//   - `references/abi.md` §3.1：请求体那一行补明"整帧（含 JSON 转义）不得超 1 MiB，
+	//     超了是 413 `BODY_TOO_LARGE`、应用收不到请求"；
+	//   - `references/abi.md` §7：`DB_LIMIT` 的"单行超过 8 MiB"改成 168 KiB，并新增
+	//     `RESULT_TOO_LARGE`（宿主结果装不进一帧的兜底码，本轮新增）；
+	//   - `references/limits.md`（生成物，真源 `limits/limitsspec.go`）：
+	//     `sql_max_result_bytes` 8388608 → 172032；
+	//   - `references/app-config.md`（生成物）：随 appcfg 生成器一并重写（内容未变，
+	//     但生成器一次写全部产物，摘要仍随之变化）。
+	// 为什么必须提版本：整份技能是随镜像下发给员工的作者手册，已安装的客户端靠 version 判
+	//「有更新」（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"bd4a7c2a7e195f670119ca3cd29388ee3326323e0ac0a9874f4e23c7fb58807e": "2.7.0",
 }
 
 // TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的

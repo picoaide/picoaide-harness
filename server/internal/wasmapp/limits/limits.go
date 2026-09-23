@@ -245,8 +245,20 @@ const (
 	// **超出只截断**（QueryResult.Truncated=true）而不返回错误码 —— 分页读取必须可行，
 	// 见 appdb/stmt.go 的取舍说明。
 	SQLMaxRows = 5000
-	// SQLMaxResultBytes 是单次查询返回字节上限（§4.5/§4.6）：8 MiB。
-	SQLMaxResultBytes = 8 << 20
+	// SQLMaxResultBytes 是单次查询返回字节上限（§4.5/§4.6）。
+	//
+	// ⚠️ 2026-09-23 审计 A-1（P1）把原值 8 MiB 收到**可交付量级**。原因：查询结果必须装进
+	// **一个** RPC 应答帧才能到应用（单帧上限 = ProtocolLineMaxBytes = 1 MiB），且结果里的
+	// 字符串按 Go `encoding/json` 的默认规则转义（控制字符/`<`/`>`/`&` → `\u00XX`，膨胀
+	// 6 倍）⇒ **8 MiB 的结果在数学上永远到不了应用**：宿主写出一条超帧，应用要么 10 s
+	// `RUNTIME_TIMEOUT`（骨架读帧器不排空）、要么拿到一条裸协议错误（`abi.ReadFrame` 排空
+	// 但不解释），两种形态都拿不到可用结果。
+	//
+	// 现在的取值 = 最坏转义下仍装得进一帧的**原始**字节量，与 `abi.MaxResponseBodyBytes`
+	// （响应体"保证可交付"的数）同一份推导 ⇒ 达到本上限的结果**一定**能交付。
+	// 超出仍是既有语义：**只截断 + `QueryResult.Truncated=true`**（分页读取，见
+	// appdb/stmt.go 的取舍说明）；只有"单行/列名本身就超帧"才回结构化 `DB_LIMIT`。
+	SQLMaxResultBytes = MaxDeliverablePayloadBytes
 	// SQLStatementBudget 是单语句硬超时（R13/§4.5）：5 s（独立于 guest 超时）。
 	SQLStatementBudget = 5 * time.Second
 
@@ -303,6 +315,23 @@ const (
 	AppResponseBodyMaxBytes = 8 << 20
 	// ProtocolLineMaxBytes 是协议帧单行上限（§4.6）：1 MiB，超限 RUNTIME_OUTPUT_OVERRUN。
 	ProtocolLineMaxBytes = 1 << 20
+	// MaxJSONEscapeExpansion 是 Go `encoding/json` 默认转义下单字节的**最坏膨胀倍数**：
+	// `<` `>` `&` 与控制字符（< 0x20）写成 `\u00XX`（6 B），`"` 与 `\` 写成 `\"`/`\\`（2 B），
+	// 非法 UTF-8 字节写成 `\ufffd`（6 B）。任何"保证装得进一个 1 MiB 帧"的对外数字都必须
+	// 按它折算 —— 2026-09-23 审计 A-6 的教训：按"原始字节 = 编码后字节"推出来的
+	// `MaxFrameBytes/2 = 512 KiB` 被 `<`×512 KiB（编码后 3,145,840 B）直接证伪。
+	MaxJSONEscapeExpansion = 6
+	// FrameEnvelopeReserveBytes 是单帧里"除载荷本身以外"的保留量：JSON-RPC 信封、键名、
+	// 列名、id、逗号与括号。列名上限 64 B × 16 列按最坏转义 ≈ 6 KiB，留 16 KiB 有两倍余量。
+	FrameEnvelopeReserveBytes = 16 << 10
+	// MaxDeliverablePayloadBytes 是"经 JSON 编码后仍**保证**装进单帧"的原始字节上限
+	// （§4.6）：`(ProtocolLineMaxBytes − FrameEnvelopeReserveBytes) / MaxJSONEscapeExpansion`
+	// = 172032 B（168 KiB，即对外口径的"约 170 KiB"）。
+	//
+	// 两个消费者共用这一份推导（都在"宿主必须经**一帧**交付给 guest"的同一条约束下）：
+	//   - `abi.MaxResponseBodyBytes`：应用响应体的"保证可交付"数（§4.6 对外契约）；
+	//   - `SQLMaxResultBytes`：`db.query` 结果的预算（超出只截断 + Truncated）。
+	MaxDeliverablePayloadBytes = (ProtocolLineMaxBytes - FrameEnvelopeReserveBytes) / MaxJSONEscapeExpansion
 	// GuestBudget 是 guest 执行预算（§4.6）：10 s（进入宿主调用时暂停计时）。
 	GuestBudget = 10 * time.Second
 	// ⚠️ W4 删除（总纲 §21.3）：服务端宿主 AI 调用的 30 s 预算随该能力一起消失；

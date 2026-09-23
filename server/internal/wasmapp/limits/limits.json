@@ -516,7 +516,7 @@
     },
     {
       "Key": "sql_max_result_bytes",
-      "Value": "8388608",
+      "Value": "172032",
       "Unit": "bytes",
       "Section": "§4.5",
       "Title": "返回字节上限",
@@ -631,8 +631,16 @@
       "Value": "8388608",
       "Unit": "bytes",
       "Section": "§4.6",
-      "Title": "应用响应体上限",
-      "Note": ""
+      "Title": "应用响应体总输出上限",
+      "Note": "guest 写出多少字节就算超（RUNTIME_OUTPUT_OVERRUN）；**不是**能交付多少，见下一条"
+    },
+    {
+      "Key": "app_response_body_deliverable_bytes",
+      "Value": "172032",
+      "Unit": "bytes",
+      "Section": "§4.6",
+      "Title": "响应体保证可交付上限",
+      "Note": "= (protocol_line_max_bytes − frame_envelope_reserve_bytes) / max_json_escape_expansion；最坏 JSON 转义下仍装得进一个帧（abi.MaxResponseBodyBytes 同源）"
     },
     {
       "Key": "protocol_line_max_bytes",

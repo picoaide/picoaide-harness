@@ -124,7 +124,8 @@ func Table() []Entry {
 
 		// ===== §4.6 请求与队列 =====
 		{"app_request_body_max_bytes", itoa(AppRequestBodyMaxBytes), "bytes", "§4.6", "应用 API 请求体上限", "客户端请求信封自带上限；管线仍自套 MaxBytesReader 兜住 chunked/长度撒谎"},
-		{"app_response_body_max_bytes", itoa(AppResponseBodyMaxBytes), "bytes", "§4.6", "应用响应体上限", ""},
+		{"app_response_body_max_bytes", itoa(AppResponseBodyMaxBytes), "bytes", "§4.6", "应用响应体总输出上限", "guest 写出多少字节就算超（RUNTIME_OUTPUT_OVERRUN）；**不是**能交付多少，见下一条"},
+		{"app_response_body_deliverable_bytes", itoa(MaxDeliverablePayloadBytes), "bytes", "§4.6", "响应体保证可交付上限", "= (protocol_line_max_bytes − frame_envelope_reserve_bytes) / max_json_escape_expansion；最坏 JSON 转义下仍装得进一个帧（abi.MaxResponseBodyBytes 同源）"},
 		{"protocol_line_max_bytes", itoa(ProtocolLineMaxBytes), "bytes", "§4.6", "协议帧单行上限", "超限 RUNTIME_OUTPUT_OVERRUN"},
 		{"guest_budget", secs(GuestBudget), "seconds", "§4.6", "guest 执行预算", "进入宿主调用时暂停计时"},
 		{"request_wall_clock", secs(RequestWallClock), "seconds", "§4.6", "请求端到端墙钟", "含排队等待，到点即拒"},

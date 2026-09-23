@@ -77,7 +77,14 @@ func TestQuerySingleRowOverBudgetIsBounded(t *testing.T) {
 func TestQueryOverBudgetStillTruncatesForMultiRow(t *testing.T) {
 	d := newTestDB(t, "budget-multi")
 	defineTable(t, d, "big", col("v", "text"))
-	chunk := strings.Repeat("x", 900*1024) // 单值 < SQLITE_LIMIT_LENGTH(1 MiB)
+	// 每行 32 KiB（**单行远小于预算**），12 行累计 384 KiB > SQLMaxResultBytes(168 KiB)
+	// ⇒ 走"截断 + Truncated"而不是"单行超预算"那条错误路径。
+	//
+	// ⚠️ 2026-09-23 审计 A-1 把预算从 8 MiB 收到 168 KiB 后，本用例的夹具必须跟着改：
+	// 原来用 900 KiB/行，收预算后**单行**就超过整份预算 ⇒ 走 DB_LIMIT，而本用例要钉的是
+	// "多行累计超限仍截断"这条**分页语义**（两种形态各有专门用例，见
+	// TestQueryOverBudgetSingleRowRejected）。
+	chunk := strings.Repeat("x", 32*1024)
 	for i := 0; i < 12; i++ {
 		mustExec(t, d, "INSERT INTO big(v) VALUES (?)", chunk)
 	}
@@ -108,8 +115,10 @@ func TestQueryKeepsLargeValuesIntact(t *testing.T) {
 	d := newTestDB(t, "budget-keep")
 	ctx := context.Background()
 
-	const blobBytes = 200 * 1024
-	res, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT zeroblob(204800)"})
+	// 2026-09-23 审计 A-1：返回值预算收到 168 KiB（与单帧预算自洽）⇒ 夹具取 64 KiB，
+	// 既在预算内、又足够大到真的走 []byte→string 那条复制路径。
+	const blobBytes = 64 * 1024
+	res, err := d.Query(ctx, abi.SQLParams{SQL: "SELECT zeroblob(65536)"})
 	if err != nil {
 		t.Fatalf("Query 失败：%v", err)
 	}

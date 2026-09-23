@@ -79,6 +79,14 @@ const (
 	CodeAssetOversize Code = "ASSET_OVERSIZE"
 	// CodeAssetExists 资源已存在（发布期抽取只写一次，拒绝覆盖）。
 	CodeAssetExists Code = "ASSET_EXISTS"
+	// CodeResultTooLarge 宿主结果装不进一个协议帧（单帧上限 1 MiB）。
+	//
+	// 2026-09-23 审计 A-1（P1）新增：`db.query` 之外的能力结果（以及"连丢掉全部行都
+	// 装不下"的 `db.query` 之外的兜底形态）编码后超过单帧时，宿主回这个码 —— 见
+	// `abi.RPCResponse.MarshalJSON` 的 `oversizeErrorShape`。它与 `ASSET_OVERSIZE`
+	// （单个资源超限）和 `DB_LIMIT`（行数/结果超限）并列：三个码各自指向**不同的修法**
+	// （拆资源 / 分页 / 缩小本次调用的返回内容），合并成一个会让作者改错地方。
+	CodeResultTooLarge Code = "RESULT_TOO_LARGE"
 
 	// ===== 客户端持有性证明（app-proof，契约 §20.1/§23.1）=====
 	//
@@ -253,6 +261,9 @@ var codeStatus = map[Code]int{
 	CodeAssetDenied:       http.StatusForbidden,           // 403
 	CodeAssetOversize:     http.StatusUnprocessableEntity, // 422
 	CodeAssetExists:       http.StatusConflict,            // 409
+	// 结果装不进单帧同样是"请求得太宽"（422），与 ASSET_OVERSIZE 同档：
+	// 修法是应用侧改查询/分页，不是平台故障（那不是 5xx）。
+	CodeResultTooLarge: http.StatusUnprocessableEntity, // 422
 
 	// 四个 proof 码一律 401（契约 §20.1：缺失/过期/绑定不符 ⇒ 401；
 	// 重放同属"这份证明对本次请求无效"，也用 401 —— 403 会被客户端当成"权限不足"

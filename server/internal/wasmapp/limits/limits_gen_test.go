@@ -222,9 +222,11 @@ var exemptDecls = map[string]exemption{
 	"AppResponseContentTypes":    {reason: "允许的 content-type 集合（枚举表）", wantKind: "var"},
 
 	// —— 换算常量 / 权限位（不是"上限"）——
-	"WasmPageSize":         {reason: "wasm 规范固定的页大小（换算单位）：真上限是 instance_memory_pages / instance_memory_bytes", wantKind: "const"},
-	"DataDirMode":          {reason: "应用数据目录权限位（os.FileMode 0700，安全基线而非上限）", wantKind: "const"},
-	"CompileCacheRevision": {reason: "编译缓存分代的**回落常量**（字符串，不是数值也不是上限）：分代的唯一实现是 runtime.cacheNamespace()/compile.cacheNamespaceFor()（优先 wazero 真实版本，拿不到版本时才回落到本常量）；实测更正（2026-09-18）：GetWazeroVersion() 只在 **test 二进制**里返回 dev，生产 main 二进制里返回真实版本（v1.12.0）", wantKind: "const"},
+	"WasmPageSize":              {reason: "wasm 规范固定的页大小（换算单位）：真上限是 instance_memory_pages / instance_memory_bytes", wantKind: "const"},
+	"DataDirMode":               {reason: "应用数据目录权限位（os.FileMode 0700，安全基线而非上限）", wantKind: "const"},
+	"MaxJSONEscapeExpansion":    {reason: "Go encoding/json 默认转义的最坏膨胀倍数（规范/实现固定的**换算常量**，不是可调上限）：真上限是由它推导出的 app_response_body_deliverable_bytes / sql_max_result_bytes", wantKind: "const"},
+	"FrameEnvelopeReserveBytes": {reason: "单帧里除载荷以外的余量（推导参数，不是可调上限）：它只参与 app_response_body_deliverable_bytes 的推导，真上限见该表项", wantKind: "const"},
+	"CompileCacheRevision":      {reason: "编译缓存分代的**回落常量**（字符串，不是数值也不是上限）：分代的唯一实现是 runtime.cacheNamespace()/compile.cacheNamespaceFor()（优先 wazero 真实版本，拿不到版本时才回落到本常量）；实测更正（2026-09-18）：GetWazeroVersion() 只在 **test 二进制**里返回 dev，生产 main 二进制里返回真实版本（v1.12.0）", wantKind: "const"},
 }
 
 // ===== (c) 关键数值语义 =====

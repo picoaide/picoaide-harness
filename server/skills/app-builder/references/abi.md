@@ -49,7 +49,7 @@ RS(0x1e) + 十进制长度 + '\n' + UTF-8 JSON
 | `path` | string | 应用内路径（如 `/`、`/api/notes`） |
 | `query` | object | 查询参数（同名参数取第一个值） |
 | `headers` | object | 请求头子集（小写键；Cookie 不在其中 —— 自定义协议下浏览器本来也不带 Cookie，`document.cookie` 恒为空） |
-| `body` | string | 原始请求体（上限 1 MiB） |
+| `body` | string | 原始请求体（上限 1 MiB 原始字节；但整帧（含 JSON 转义）不得超过 1 MiB —— 控制字符/引号/尖括号密集的 1 MiB 请求会因转义膨胀而**整帧被拒**（413 `BODY_TOO_LARGE`），此时应用收不到请求，请改用更小的请求体） |
 
 **身份契约**：应用拿不到 Cookie / 令牌 / 平台角色 / 员工名录。帧里的 `user` 是**唯一**
 的身份来源、正常路径恒为对象（客户端专属模型下平台没有匿名面），且由宿主构造，
@@ -136,7 +136,7 @@ _row_id INTEGER PRIMARY KEY AUTOINCREMENT
   参数化** —— 字面量拼进 SQL 照样通过闸门（`WHERE author='emp1'`、`DELETE … WHERE body='x'`
   都不会被拒），它只查上面那几条。
   **SQL 注入没有任何平台侧防线，只有你自己用参数占位挡住**。
-- 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、绑定参数最多 128 个、返回最多 5000 行 / 8 MiB
+- 单条 SQL 不超过 64 KiB、单值不超过 1 MiB、绑定参数最多 128 个、返回最多 5000 行 / 168 KiB
   （**行数或字节超限是截断并置 `truncated:true`，不报错** —— 看到它就该分页）。
 - 每条语句最长 5 秒，超时会被中断并报 **403 `DB_DENIED`**（`details.reason = "statement_timeout"`）；
   库总量上限 100 MB（**写满**才报 507 `DB_LIMIT`）。
@@ -256,7 +256,12 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 - **自定义协议下没有 cookie 语义**：`document.cookie` 恒为空、平台发的 `Set-Cookie`
   也不会落盘，应用设不了、也不该依赖它；安全响应头（CSP、`nosniff`、`Referrer-Policy`）
   由平台强制写入，应用写的同名头会被剥掉。要保存状态就写应用库（`db.*`）。
-- 响应体上限 8 MiB；协议帧单行上限 1 MiB（超了报 `RUNTIME_OUTPUT_OVERRUN`）。
+- 响应体的**保证可交付**上限是 **168 KiB**；协议帧单行上限 1 MiB
+  （超了报 `RUNTIME_OUTPUT_OVERRUN`）。两个数的关系：响应帧要和响应头、JSON 信封一起编码，
+  而 `<`/`>`/`&`/控制字符在 JSON 里会膨胀到 **6 倍**（`<` → `\u003c`）——168 KiB 是
+  "不管内容长什么样都装得下"的数；低转义内容（纯 ASCII、无 `<>"&`）的实测天花板更高，
+  但那是实测值、不是承诺，**不要照着它设计**。**超了怎么办**：把响应拆小
+  （分页 / 只返回当前页要用的字段），不要把整张表一次渲染进页面。
 - 应用必须自己写响应：正常退出但没写帧 = `RUNTIME_NO_RESPONSE`（平台绝不会把它当成功）。
 
 ## 5. 判别规则（两类帧共用一种格式）
@@ -304,7 +309,8 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 | `HOST_CALL_OVER_BUDGET` | 504 | 宿主调用超预算 | 拆小单次调用；不要依赖长阻塞 |
 | `AUTH_REQUIRED` | 401 | 身份未验证却调用需要身份的能力 | 平台一律要求登录（历史 `public` 配置读取侧按 `login` 处理）：确认请求来自登录态，或引导用户先登录 |
 | `MODULE_KILLED` | 504 | 请求被取消 / 实例已关闭 | 同超时处理：拆小、重试前先确认状态 |
-| `DB_LIMIT` | 507 | **只有**「库写满」（100 MB 上限）—— 以及单行超过 8 MiB（一行都返回不了） | 清理旧数据或做汇总表；别把大对象塞进一行。**行数/字节超限不是这个码**（见 §3.3 的 `truncated`） |
+| `DB_LIMIT` | 507 | **只有**「库写满」（100 MB 上限）—— 以及单行超过 168 KiB（一行都返回不了；"丢掉全部行仍装不进 1 MiB 帧"也回这一档） | 清理旧数据或做汇总表；别把大对象塞进一行。**行数/字节超限不是这个码**（见 §3.3 的 `truncated`） |
+| `RESULT_TOO_LARGE` | 422 | 宿主调用的结果装不进一个协议帧（1 MiB） | 缩小本次调用的返回内容（`db.query` 走分页；`assets.read` 换小资源） |
 | `DB_DENIED` | 403 | 语句被拒（DDL / 多语句 / `WITH`·`EXPLAIN` / 保留列 `_row_id` 及其别名 / 类型不符）、**语句超过 5 秒被中断**（`details.reason = "statement_timeout"`），或事务内调了被禁能力 | 建表用 `db.define`，语句只留四个动词，值走 `args`；保留列规则见 §3.2；事务规则见 §3.4；先读 `details.reason` 再决定是改 SQL 还是加 `LIMIT` |
 | `APP_QUEUE_FULL` | 429 | 该应用排队已满 | 按 `Retry-After` 退避；合并小请求 |
 | `IMPORT_NOT_ALLOWED` | 422 | 导入面不在白名单（`env.*` / `js.*` 等额外的 WASI 模块或符号） | 用官方骨架；不要引入平台外的运行时。**放行清单见 `references/imports.md`**（逐符号 + 签名 + 为什么放行） |
