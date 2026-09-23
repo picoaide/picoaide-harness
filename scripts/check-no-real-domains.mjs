@@ -48,11 +48,24 @@
  * 退出码：0 = 零命中；1 = 有命中（含自证失败）；2 = 用法错误；
  *         3 = **判据没能完成**（提交信息区间看不到历史，或**扫描面为 0 个文件**）——
  *             这不是"零命中"，处置见 `commitRangeFindings` 与主流程的 emptySurface 分支。
+ *
+ * ## 非普通文件（软链）的口径（2026-09-23 复审 F5）
+ *
+ * 扫描面用 `git ls-files --cached --others --exclude-standard` 列路径，而**读取一律先
+ * `lstat`**：软链**不跟随**目标，改扫 `readlinkSync` 的结果 —— 那才是 `git add` 会写进
+ * blob 的字节。理由有两条，缺任一条都会错：
+ *   - `readFileSync` 会**读穿**软链：未跟踪软链指向**被忽略**的文件时，那份内容永远提交
+ *     不进去（git 只存链接本身），却会被判成泄漏 ⇒ 复审实测的**假阳性**；
+ *   - 反过来，"链接目标路径里写了真实域名"是真泄漏（那个字符串就是要提交的内容），
+ *     所以不能简单地"跳过软链"。
+ * 这一层特判**必须可见**：只要出现过软链，输出里就有一条 `非普通文件：N 个软链按链接
+ * 目标字符串扫描…`；其余没有可扫文本内容的条目（子模块 gitlink / 目录 / 读失败）也会被
+ * 逐条列出来 —— 静默缩小扫描面正是本守卫这两轮在修的那类缺陷。
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -512,12 +525,15 @@ function selfTest() {
  * `零命中 ✅`、照样 exit 0"，判据只能钉在**退出码**与**那句 ✅ 出不出现**上 ——
  * 把 `trackedFiles` 的 `--others` 去掉这种改法在任何纯函数层面都看不出来。
  *
- * 五个样本（合成仓库建在系统临时目录、跑完删；域名一律 `syntheticLabel()` 运行时生成）：
+ * 七个样本（合成仓库建在系统临时目录、跑完删；域名一律 `syntheticLabel()` 运行时生成）：
  *   ① 已跟踪文件里带合成域名        → EXIT=1（对照：这一形态本来就该红）
  *   ② **未跟踪且未被忽略**的新文件   → EXIT=1（C-5 本体：旧实现 EXIT=0 + 零命中 ✅）
  *   ③ 未跟踪但**被 .gitignore 忽略** → EXIT=0 且打印 `零命中`（证明排除表仍被尊重）
  *   ④ 空 git 仓库（扫描面 0）        → EXIT=3 且**不打印** `零命中 ✅`（六处形态③ 本体）
  *   ⑤ 干净仓库（只有占位符域名）      → EXIT=0 且打印 `零命中`（正例：正常流程不被判红）
+ *   ⑥ 未跟踪软链 → **被忽略**的目标含域名 → EXIT=0（复审 F5：不得读穿软链的目标）
+ *   ⑦ 软链**目标字符串自身**含域名    → EXIT=1 且点名该软链（真泄漏：git 存的就是它）
+ * ⑥⑦ 互为反证：只做 ⑥ 会在 ⑦ 变绿；读穿目标（旧行为）会让 ⑥ 变红。
  *
  * 子进程带 `SELFTEST_CHILD_ENV=1`（避免自证递归）。
  *
@@ -600,6 +616,38 @@ function selfTestScanSurface() {
     expect(cleanCase.status === 0, `样本⑤（干净仓库）应为 EXIT=0，实得 ${cleanCase.status}`
       + `\n    stderr: ${(cleanCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
     expect((cleanCase.stdout ?? '').includes('零命中'), '样本⑤ 完成检查时应打印 `零命中`')
+
+    // 样本⑥⑦（2026-09-23 复审 F5）：软链的两种方向，必须**同时**成立 ——
+    //   ⑥ 不读穿：未跟踪软链 → **被 .gitignore 忽略**的目标（内容含域名）⇒ EXIT=0。
+    //      旧实现 `readFileSync` 读穿目标 ⇒ 判红并点名 `leak.md`，而那份内容永远提交不进去
+    //      （git 只存链接本身）⇒ 语义上就是误报。
+    //   ⑦ 不放过：软链**目标字符串自身**带域名 ⇒ EXIT=1 且点名该软链路径。
+    //      那个字符串正是 `git add` 会写进 blob 的字节 ⇒ 真泄漏，不能因为"不跟随"而漏掉。
+    // 两条互为反证：只做 ⑥（一律跳过软链）会在 ⑦ 变绿；只做旧的 ⑥（读穿）会让 ⑥ 变红。
+    const linked = join(scratch, 'linked')
+    buildRepo(linked, dir => writeFileSync(join(dir, '.gitignore'), 'local-only/\n'))
+    mkdirSync(join(linked, 'local-only'))
+    writeFileSync(join(linked, 'local-only', 'secret.md'), `server_url = https://${host}/api\n`)
+    symlinkSync(join('local-only', 'secret.md'), join(linked, 'leak.md'))
+    const linkedCase = runGuard(linked)
+    expect(linkedCase.status === 0,
+      `样本⑥（未跟踪软链 → 被忽略的目标含域名）应为 EXIT=0（不得读穿软链），实得 ${linkedCase.status}`
+      + `\n    stderr: ${(linkedCase.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect(!(linkedCase.stderr ?? '').includes('leak.md'),
+      '样本⑥ 把软链判红了 —— 那是读穿了**永远提交不进去**的被忽略目标（复审 F5 的误报形态）')
+    // 特判必须可见：不得静默缩小扫描面。
+    expect((linkedCase.stdout ?? '').includes('软链'),
+      `样本⑥ 必须打印"软链按链接目标扫描"的可见说明，实际 ${JSON.stringify((linkedCase.stdout ?? '').trim().split('\n').slice(-3))}`)
+
+    const linkText = join(scratch, 'linktext')
+    buildRepo(linkText)
+    symlinkSync(`https://${host}/notes`, join(linkText, 'visit.md'))
+    const linkTextCase = runGuard(linkText)
+    expect(linkTextCase.status === 1,
+      `样本⑦（软链目标字符串自身带域名）应为 EXIT=1（真泄漏：git 存的就是这个字符串），实得 ${linkTextCase.status}`
+      + `\n    stdout: ${(linkTextCase.stdout ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+    expect((linkTextCase.stderr ?? '').includes('[DOMAIN]') && (linkTextCase.stderr ?? '').includes('visit.md'),
+      `样本⑦ 必须报出并点名该软链路径，实际 ${JSON.stringify((linkTextCase.stderr ?? '').trim().split('\n').slice(-3))}`)
   } catch (error) {
     failures.push(`扫描面自证的夹具构建失败：${error?.message ?? String(error)}`)
   } finally {
@@ -1008,8 +1056,9 @@ if (selfTestFailures.length > 0) {
   process.exit(1)
 }
 if (selftestOnly) {
-  console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿'
-    + `${selftestChild ? '；区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '、提交信息区间判据五样本'}）✅`)
+  console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿、'
+    + '扫描面七样本（含软链两个方向）、'
+    + `${selftestChild ? '区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '提交信息区间判据五样本'}）✅`)
   process.exit(0)
 }
 
@@ -1019,15 +1068,43 @@ if (selftestChild) {
 }
 const findings = []
 let scanned = 0
+/** 按**链接目标字符串**扫过的软链条数（git 存的就是那个字符串）。 */
+let symlinksScanned = 0
+/** 没有可扫文本内容的条目（子模块 gitlink / 目录 / 读失败）—— 逐条列出，不静默跳过。 */
+const nonRegularSkipped = []
+// 体积：**刻意不做**"超过 N MiB 就跳过"的闸门（2026-09-23 复审 F5 第 4 条）。理由：静默跳过
+// 大文件 = 新的假绿（本守卫这两轮修的就是"静默缩小扫描面"）；而整份读入的代价实测可接受
+// （复审用它自己造的 400 MB 未跟踪文本实测 EXIT=0 / 2.6 s）。真的需要处理超大文件时，
+// 正确做法是流式/分块读，不是跳过。
 for (const file of trackedFiles(root)) {
   const absolute = resolve(root, file)
   let text
+  let viaLink = false
+  // 先 lstat：软链**不跟随**（见文件头「非普通文件（软链）的口径」）。`readFileSync` 会读穿
+  // 到目标 ⇒ 未跟踪软链指向被忽略文件时把"永远提交不进去的内容"误判成泄漏。
+  let entry
   try {
-    text = readFileSync(absolute, 'utf8')
+    entry = lstatSync(absolute)
   } catch {
-    continue // 子模块 gitlink / 已被删除但仍在索引里
+    nonRegularSkipped.push(`${file}（lstat 失败：已删除但仍留在索引里？）`)
+    continue
   }
-  if (text.includes('\0')) continue // 二进制
+  try {
+    if (entry.isSymbolicLink()) {
+      text = readlinkSync(absolute) // 链接目标字符串 = git 真正会存储的 blob 内容
+      viaLink = true
+      symlinksScanned += 1
+    } else if (entry.isFile()) {
+      text = readFileSync(absolute, 'utf8')
+    } else {
+      nonRegularSkipped.push(`${file}（${entry.isDirectory() ? '目录/gitlink' : '非普通文件'}）`)
+      continue
+    }
+  } catch (error) {
+    nonRegularSkipped.push(`${file}（读取失败：${error?.code ?? error?.message ?? '未知原因'}）`)
+    continue
+  }
+  if (text.includes('\0')) continue // 二进制（既有口径：不按文本判内容）
   scanned += 1
   for (const hit of candidatesInText(text, file)) {
     if (isAllowedCandidate(hit)) continue
@@ -1035,10 +1112,21 @@ for (const file of trackedFiles(root)) {
       scope: 'file',
       where: `${relative(root, absolute)}:${hit.line}`,
       host: unmasked ? hit.host : maskHost(hit.host),
-      why: hit.why,
+      why: viaLink ? `${hit.why}（软链目标字符串）` : hit.why,
       line: hit.line,
     })
   }
+}
+
+// 特判必须可见（不得静默缩小扫描面）：软链走了"按链接目标扫"的分支就说明出来。
+if (symlinksScanned > 0) {
+  notes.push(`非普通文件：${symlinksScanned} 个**软链**按链接目标字符串扫描（不跟随目标；git 存的就是链接本身）`)
+}
+if (nonRegularSkipped.length > 0) {
+  const shown = nonRegularSkipped.slice(0, 10)
+  notes.push(`非普通文件：${nonRegularSkipped.length} 个条目没有可扫的文本内容，**未扫**（逐条列出，不是静默跳过）：`
+    + shown.join('、')
+    + (nonRegularSkipped.length > shown.length ? ` … 另有 ${nonRegularSkipped.length - shown.length} 个` : ''))
 }
 
 // 提交信息判据："没能完成"（fatal）与"有命中"是两种不同的红 —— 前者绝不能被
