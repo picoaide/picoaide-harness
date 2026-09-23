@@ -30,6 +30,15 @@
  *      找，**这份判据在本仓从未真正跑过**，而且因为根 `node_modules` 目录存在，
  *      连"未安装"的提示都没打印过（实测：运行 3 次全绿、判据 0 次执行）。
  *   4. 补丁文件名形如 `<包名>@<版本>.patch`（升级脚本按这个形状改名）。
+ *   5. **内容级判据**（2026-09-23 第四轮门禁审计 R4-A-32，=D7）：每个登了记的补丁
+ *      目标，其已安装副本里必须真的**含补丁新增的锚点**（锚点直接从补丁文件本身
+ *      抽出来，不另抄一份会漂移的字面量；某段若是纯删除，则反向断言那些行**不再
+ *      存在**）。判据 3 只比 `version` 字段，而 pristine 与打过补丁的副本**版本号
+ *      完全相同** ⇒ 对"描述符没命中、装进去的是 pristine"天然失明（审计实测：
+ *      `dsh-web-fetch-http` 还原成 pristine 后本门禁仍 exit 0）。锚点判据补上
+ *      这一层：它读的是交付副本的内容，不需要 `.yarn/cache`，也不需要 pristine
+ *      tarball。抽不出可判定的锚点（补丁不可读/段里没有任何内容行）时 **fail-loud**，
+ *      绝不静默放过。
  *
  * 下限与"没装依赖"（2026-09-23 二轮审计 W3-10 + R3-C）：
  *   · `patches/` **目录整个缺失** ⇒ 红（与"目录在但为空"分开报，见下）；
@@ -44,7 +53,9 @@
  *
  * 自证：每次运行都跑 `selfTest()` —— 把本脚本复制进合成树、用**真实入口**跑四例
  * （空 `node_modules` 必红 / `--skip-installed` 显式跳过 / 已安装 == pin 必绿 /
- * 已安装 ≠ pin 必红并点名"未打补丁"）。只测辅助函数证明不了 main() 真的判了。
+ * 已安装 ≠ pin 必红并点名"未打补丁"），外加 R4-A-32 的内容级两例
+ * （版本 == pin 但文件仍是 pristine ⇒ 必红并点名锚点 / 补丁抽不出锚点 ⇒ 必红）。
+ * 只测辅助函数证明不了 main() 真的判了。
  *
  * 用法：`node scripts/check-patch-pin.mjs [--skip-installed]`；
  * 退出码 0 通过、1 有断言失败。
@@ -55,6 +66,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parsePatchSections } from './patch-targets.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const failures = []
@@ -78,8 +90,136 @@ function parsePatchValue(value) {
   return { name: match[1], version: match[2], patchPath: match[3].replace(/^\.\//u, '') }
 }
 
+/** 锚点行的最短长度（更短的行没有判别力，见 `isAnchorText`）。 */
+const ANCHOR_MIN_LENGTH = 12
+/** 锚点必须含至少一个非标点、非符号、非空白字符（滤掉 `*`、注释收尾符、`{` 这类结构行）。 */
+const ANCHOR_HAS_CONTENT = /[^\p{P}\p{S}\s]/u
+
 /**
- * 合成树自检（真实入口）：`node_modules` 空/缺、`--skip-installed`、已安装 ==/≠ pin。
+ * 一行内容够不够格当锚点。
+ * @param text - 已去掉 diff 前缀的原始行（保留缩进）。
+ * @returns 是否可作为锚点。
+ */
+function isAnchorText(text) {
+  const trimmed = text.trim()
+  return trimmed.length >= ANCHOR_MIN_LENGTH && ANCHOR_HAS_CONTENT.test(trimmed)
+}
+
+/**
+ * 从补丁文本里抽出**内容级锚点**（R4-A-32）。
+ *
+ * 锚点**只能**来自补丁文件本身：新增加的行 = "必须存在"，某段若没有任何新增行
+ * （纯删除段）则改用被删除的行 = "必须不存在"。这样升级/重录补丁时锚点自己跟着走，
+ * 不存在"另抄一份字面量、改了一边另一边漂移"的问题。段的边界与 hunk 行数由共享的
+ * `parsePatchSections` 给出（不在这里另写一套 unified diff 解析）。
+ *
+ * @param patchText - 补丁文件内容。
+ * @returns `{ sections, problems }`；sections 每项含
+ *   `{ path, deletesFile, absent, anchors }`；problems 非空 = 无法判定（调用方 fail-loud）。
+ */
+function patchAnchors(patchText) {
+  const lines = String(patchText ?? '').split(/\r?\n/u)
+  const shape = parsePatchSections(patchText)
+  const problems = [...shape.problems]
+  const sections = []
+  for (const section of shape.sections) {
+    const added = []
+    const removed = []
+    for (const hunk of section.hunks) {
+      let index = hunk.atLine
+      let oldSeen = 0
+      let newSeen = 0
+      // 与 `parsePatchSections` 的 hunk 正文走法一致：吃到 `@@` 声明的行数为止，
+      // 遇到结构行（下一段头 / hunk 头 / 空行）立即停。
+      while (index < lines.length && (oldSeen < hunk.oldLines || newSeen < hunk.newLines)) {
+        const body = lines[index]
+        if (body === '' || body.startsWith('diff --git ') || body.startsWith('@@ ')) break
+        if (body.startsWith('--- ') && (lines[index + 1] ?? '').startsWith('+++ ')) break
+        if (body.startsWith('\\')) { index += 1; continue }
+        if (body.startsWith(' ')) { oldSeen += 1; newSeen += 1; index += 1; continue }
+        if (body.startsWith('-')) { oldSeen += 1; removed.push(body.slice(1)); index += 1; continue }
+        if (body.startsWith('+')) { newSeen += 1; added.push(body.slice(1)); index += 1; continue }
+        break
+      }
+    }
+    const presentAnchors = added.filter(isAnchorText)
+    const absentAnchors = removed.filter(isAnchorText)
+    const absent = presentAnchors.length === 0 && absentAnchors.length > 0
+    const anchors = absent ? absentAnchors : presentAnchors
+    if (anchors.length === 0) {
+      problems.push(
+        `补丁段 ${section.path} 抽不出任何可判定的锚点（新增行 ${String(added.length)} 条、删除行 ${String(removed.length)} 条，`
+        + `都短于 ${String(ANCHOR_MIN_LENGTH)} 字符或只有标点）—— 该段是否生效无法判定。`
+        + '处置：确认补丁没有被截断；确属极短改动时，在补丁里保留一行更长的注释/代码作为锚点后重录。',
+      )
+    }
+    sections.push({
+      path: section.path,
+      deletesFile: section.newPath === '/dev/null',
+      absent,
+      anchors,
+    })
+  }
+  if (shape.sections.length === 0 && shape.problems.length === 0) {
+    problems.push('补丁里解析不出任何文件段，锚点判据无从下手')
+  }
+  return { sections, problems }
+}
+
+/**
+ * 在**一份已安装副本**里核对锚点（R4-A-32 判据 5）。
+ *
+ * @param args - `{ copy, copyLabel, patchPath, sections }`。
+ * @returns `{ problems, checkedLines }`。
+ */
+function anchorProblemsForCopy({ copy, copyLabel, patchPath, sections }) {
+  const problems = []
+  let checkedLines = 0
+  for (const section of sections) {
+    const file = join(copy, section.path)
+    if (section.deletesFile) {
+      if (existsSync(file)) {
+        problems.push(`${patchPath}: ${copyLabel} 里 ${section.path} 仍然存在，但补丁删除了它（该段未生效）`)
+      }
+      continue
+    }
+    if (!existsSync(file)) {
+      problems.push(`${patchPath}: ${copyLabel} 里缺少补丁触及的文件 ${section.path}（该段未生效）`)
+      continue
+    }
+    let lines
+    try {
+      lines = readFileSync(file, 'utf8').split(/\r?\n/u)
+    } catch (error) {
+      problems.push(`${patchPath}: ${copyLabel} 的 ${section.path} 读不出来（${String(error?.message ?? error)}）—— 锚点判据无法判定`)
+      continue
+    }
+    checkedLines += section.anchors.length
+    const hit = anchor => lines.includes(anchor)
+    if (section.absent) {
+      const stillThere = section.anchors.filter(hit)
+      if (stillThere.length > 0) {
+        problems.push(
+          `${patchPath}: ${copyLabel} 的 ${section.path} 里仍能找到补丁**删除**的行（${String(stillThere.length)}/${String(section.anchors.length)}）—— `
+          + `该段未生效；例：${JSON.stringify(stillThere[0].trim().slice(0, 80))}`,
+        )
+      }
+      continue
+    }
+    const missing = section.anchors.filter(anchor => !hit(anchor))
+    if (missing.length > 0) {
+      problems.push(
+        `${patchPath}: ${copyLabel} 的 ${section.path} 里缺少补丁**新增**的锚点（${String(missing.length)}/${String(section.anchors.length)}）—— `
+        + `这份副本的字节不是补丁结果；例：${JSON.stringify(missing[0].trim().slice(0, 80))}`,
+      )
+    }
+  }
+  return { problems, checkedLines }
+}
+
+/**
+ * 合成树自检（真实入口）：`node_modules` 空/缺、`--skip-installed`、已安装 ==/≠ pin、
+ * 已安装 == pin 但字节仍是 pristine（R4-A-32 的内容级判据）、抽不出锚点必须 fail-loud。
  *
  * 副本靠环境变量掐断递归（副本不会再派生子进程）；每个副本都跑在各自的临时树里，
  * 树里放最小 `patches/` + `package.json`(resolutions) + `upstream.json`。
@@ -90,12 +230,28 @@ function selfTest() {
   const pin = JSON.parse(readFileSync(join(root, 'upstream.json'), 'utf8')).runtimePackageVersion
   const name = '@deepseek-ai/dsh-probe'
   const patchFile = 'dsh-probe@' + pin + '.patch'
+  const probeFile = 'lib/x.js'
+  const pristineProbe = 'const probeValue = 1;\n'
+  const patchedProbe = 'const probeValue = 2;\n'
+  // 夹具补丁：一个文件段、一行新增、一行删除 —— 锚点就是那行新增内容。
+  const fixturePatch = [
+    `--- a/${probeFile}`,
+    `+++ b/${probeFile}`,
+    '@@ -1,1 +1,1 @@',
+    '-const probeValue = 1;',
+    '+const probeValue = 2;',
+    '',
+  ].join('\n')
   try {
     mkdirSync(join(scratch, 'scripts'))
-    writeFileSync(
-      join(scratch, 'scripts', 'check-patch-pin.mjs'),
-      readFileSync(fileURLToPath(import.meta.url)),
-    )
+    // 本脚本现在 import 共享解析器 `patch-targets.mjs`（锚点判据复用它的段/hunk
+    // 边界解析）—— 合成树里必须一并放进去，否则副本连模块都加载不了。
+    for (const file of ['check-patch-pin.mjs', 'patch-targets.mjs']) {
+      writeFileSync(
+        join(scratch, 'scripts', file),
+        readFileSync(join(import.meta.dirname, file)),
+      )
+    }
     writeFileSync(join(scratch, 'upstream.json'), JSON.stringify({ runtimePackageVersion: pin }))
     writeFileSync(join(scratch, 'package.json'), JSON.stringify({
       name: 'probe',
@@ -104,7 +260,7 @@ function selfTest() {
       },
     }))
     mkdirSync(join(scratch, 'patches'))
-    writeFileSync(join(scratch, 'patches', patchFile), 'diff --git a/x b/x\n')
+    writeFileSync(join(scratch, 'patches', patchFile), fixturePatch)
     const run = args => spawnSync(process.execPath, [join('scripts', 'check-patch-pin.mjs'), ...args], {
       cwd: scratch,
       encoding: 'utf8',
@@ -134,12 +290,22 @@ function selfTest() {
     expect('--skip-installed', run(['--skip-installed']), 0, '跳过 1 个包')
     // ④ 补丁目标装上了但版本 ≠ pin ⇒ 红（判据 3 的正题：描述符没命中）
     const installed = join(scratch, 'node_modules', name)
-    mkdirSync(installed, { recursive: true })
+    mkdirSync(join(installed, 'lib'), { recursive: true })
     writeFileSync(join(installed, 'package.json'), JSON.stringify({ name, version: '0.0.0-pristine' }))
+    writeFileSync(join(installed, probeFile), patchedProbe)
     expect('已安装版本 ≠ pin', run([]), 1, '未打补丁')
-    // ⑤ 已安装版本 == pin ⇒ 绿，且 OK 行要打印真的校验条数
+    // ⑤ 已安装版本 == pin、文件也真的是补丁结果 ⇒ 绿，且 OK 行要打印真的校验条数
     writeFileSync(join(installed, 'package.json'), JSON.stringify({ name, version: pin }))
     expect('已安装版本 == pin', run([]), 0, '已安装版本校验 1 份拷贝')
+    expect('已安装版本 == pin：必须打印锚点核对条数', run([]), 0, '内容级锚点校验 1 份拷贝')
+    // ⑥ R4-A-32 的正题：版本号恰好还是 pin，但字节仍是 pristine ⇒ 必须红并点名锚点。
+    //    （旧版只比 version 字段，这一形态下 exit 0 —— 审计 D7 实测。）
+    writeFileSync(join(installed, probeFile), pristineProbe)
+    expect('版本 == pin 但字节是 pristine', run([]), 1, '缺少补丁**新增**的锚点')
+    // ⑦ 抽不出锚点（补丁没有可解析的文件段）⇒ fail-loud，绝不静默放过。
+    writeFileSync(join(installed, probeFile), patchedProbe)
+    writeFileSync(join(scratch, 'patches', patchFile), 'diff --git a/x b/x\n')
+    expect('补丁抽不出锚点', run([]), 1, '无法判定')
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
@@ -181,15 +347,18 @@ function workspaceDirs() {
  * 每一份都必须等于 pin；只看仓库根等于一份都没看（见文件头注释）。
  * @param {string[]} roots - 相对仓库根的安装根（`''` = 仓库根）。
  * @param {string} name - 包名。
- * @returns {{ path: string, version: string }[]} 找到的拷贝（相对路径 + 版本）。
+ * @returns {{ path: string, dir: string, version: string }[]} 找到的拷贝
+ *   （`path` = 相对仓库根的 package.json、`dir` = 包目录绝对路径、`version`）。
  */
 function installedCopies(roots, name) {
   const copies = []
   for (const base of ['', ...roots]) {
-    const manifestPath = join(root, base, 'node_modules', name, 'package.json')
+    const dir = join(root, base, 'node_modules', name)
+    const manifestPath = join(dir, 'package.json')
     if (!existsSync(manifestPath)) continue
     copies.push({
       path: relative(root, manifestPath),
+      dir,
       version: JSON.parse(readFileSync(manifestPath, 'utf8')).version,
     })
   }
@@ -234,6 +403,14 @@ function main() {
   // 同一个包会被 exact + `^` 两条 resolution 各点到一次：安装情况只算一次。
   const foundCopies = new Map()
   const installRoots = workspaceDirs()
+  // 安装副本按包名缓存（判据 3 与内容级判据 5 共用，避免重复扫目录）。
+  const copyCache = new Map()
+  const copiesFor = (packageName) => {
+    if (!copyCache.has(packageName)) copyCache.set(packageName, installedCopies(installRoots, packageName))
+    return copyCache.get(packageName)
+  }
+  /** 补丁目标（按 `<name>@<version>` 去重）——内容级判据 5 的核对清单。 */
+  const anchorTargets = new Map()
 
   for (const [key, value] of Object.entries(resolutions)) {
     if (typeof value !== 'string' || !value.startsWith('patch:')) continue
@@ -243,6 +420,7 @@ function main() {
       continue
     }
     referenced.add(parsed.patchPath)
+    anchorTargets.set(`${parsed.name}@${parsed.version}`, parsed)
     if (!PIN_BOUND.test(parsed.name)) {
       skippedThirdParty += 1
       continue
@@ -277,7 +455,7 @@ function main() {
 
     // 3. 已安装的补丁目标（**每一份拷贝**）必须是 pin 版本（静默失配的直接判据）。
     if (foundCopies.has(parsed.name)) continue
-    const copies = installedCopies(installRoots, parsed.name)
+    const copies = copiesFor(parsed.name)
     foundCopies.set(parsed.name, copies.length)
     for (const copy of copies) {
       installedChecked += 1
@@ -333,6 +511,53 @@ function main() {
     }
   }
 
+  // 7. **内容级判据**（2026-09-23 第四轮门禁审计 R4-A-32）：判据 3 只比 `version`
+  //    字段，而 pristine 与打过补丁的副本**版本号完全相同** ⇒ "描述符没命中、
+  //    装进去的是 pristine"这种形态它天然看不见。这里改为直接读交付副本的**内容**：
+  //    补丁新增的锚点必须真的在里面（纯删除段则断言被删的行不再出现）。锚点全部
+  //    取自补丁文件本身 —— 不另抄一份会漂移的字面量。抽不出锚点 = fail-loud。
+  let anchorCopiesChecked = 0
+  let anchorLinesChecked = 0
+  for (const target of anchorTargets.values()) {
+    if (!existsSync(join(root, target.patchPath))) continue // 判据 2 已经报过"补丁文件不存在"
+    let patchText
+    try {
+      patchText = readFileSync(join(root, target.patchPath), 'utf8')
+    } catch (error) {
+      failures.push(
+        `${target.patchPath}: 补丁文件读不出来（${String(error?.message ?? error)}）—— 内容级锚点判据无法判定`,
+      )
+      continue
+    }
+    const parsedAnchors = patchAnchors(patchText)
+    if (parsedAnchors.problems.length > 0) {
+      failures.push(
+        `${target.patchPath}: 内容级锚点判据**无法判定**（${parsedAnchors.problems.join('；')}）——`
+        + ' 这条判据宁可 fail-loud 也不静默放过：请修好补丁文件的形状（每段都要有 hunk 与内容行）。',
+      )
+      continue
+    }
+    const copies = copiesFor(target.name).filter(copy => copy.version === target.version)
+    if (copies.length === 0) {
+      notes.push(
+        `补丁 ${target.patchPath}: 安装树里没有 ${target.name}@${target.version} 的副本，内容级锚点判据未在场`
+        + `（该判据需要已安装的交付副本；${skipInstalled ? '已按 --skip-installed 声明本树未安装依赖' : '先 `yarn install`'}）`,
+      )
+      continue
+    }
+    for (const copy of copies) {
+      const verdict = anchorProblemsForCopy({
+        copy: copy.dir,
+        copyLabel: copy.path.replace(/\/package\.json$/u, ''),
+        patchPath: target.patchPath,
+        sections: parsedAnchors.sections,
+      })
+      for (const message of verdict.problems) failures.push(message)
+      anchorCopiesChecked += 1
+      anchorLinesChecked += verdict.checkedLines
+    }
+  }
+
   for (const message of notes) process.stdout.write(`check-patch-pin: 提示: ${message}\n`)
   if (failures.length > 0) {
     process.stderr.write(`\ncheck-patch-pin: ${failures.length} 项断言失败\n`)
@@ -341,8 +566,8 @@ function main() {
   }
   process.stdout.write(
     `check-patch-pin: OK — ${checked} 条 DSH patch resolution、${foundCopies.size} 个包绑定在 pin ${pin}`
-    + `（已安装版本校验 ${installedChecked} 份拷贝；第三方补丁豁免 ${skippedThirdParty} 条；`
-    + `patches/ 共 ${patchFiles.length} 个文件）\n`,
+    + `（已安装版本校验 ${installedChecked} 份拷贝；内容级锚点校验 ${anchorCopiesChecked} 份拷贝 × ${anchorLinesChecked} 条锚点；`
+    + `第三方补丁豁免 ${skippedThirdParty} 条；patches/ 共 ${patchFiles.length} 个文件）\n`,
   )
   return 0
 }

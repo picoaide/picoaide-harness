@@ -9,7 +9,7 @@
  *   给出过相反结论。唯一可靠的姿势是把 yarn cache 里的 pristine tarball 解到
  *   仓库外的临时目录,在那里应用补丁。
  *
- * 每个补丁做四件事:
+ * 每个补丁做五件事:
  *   1. **补丁体自身必须有内容**:零字节/纯空白、或"非空但一个文件段都没有"的
  *      补丁一律判红并点名补丁文件(2026-09-23 第三轮门禁审计 G-1:此前这种补丁
  *      抽出 0 个路径 ⇒ 逐字节对拍循环整体空转,守卫仍打印 `0 file(s)` 与
@@ -26,12 +26,33 @@
  *      每个文件必须与封存副本逐字节一致。这条同时兜住 offset 与"补丁文件被手改
  *      但与锁文件里的 patch 不一致"。
  *
- * 结果对拍的另一半(补丁覆盖所有副本:嵌套 node_modules 里不得留未打补丁拷贝)
- * 以**警告**形式输出:修掉它需要 `yarn install` 重解析,离线门禁不能自己改锁文件。
+ * 5. **交付物侧硬判据(2026-09-23 第四轮门禁审计 R4-A-32,=D7)**:安装树里
+ *    每一个该 pin 版本的副本(即真正会被打进安装包/随包分发的那份字节)的
+ *    **补丁触及文件**都必须与"pristine + 补丁"逐字节一致。判红,不是警告。
  *
- * 守卫自检(2026-09-23 G-1/G-2 的变异网):本文件在跑真实补丁之前,先用一组
- * **最小多文件补丁夹具**把上面第 1/4 步的判据本身驱动一遍(零字节 ⇒ 红、丢段 ⇒ 红、
- * 改坏 hunk ⇒ 红、完好 ⇒ 绿)。夹具与真实补丁走的是**同一个**
+ *    为什么单列一条:第 2/4 步的见证可以来自 `.yarn/cache/<pkg>-patch-*.zip`,
+ *    而那是**纯派生数据** —— 与交付的字节没有必然联系。实测(审计 D7):把
+ *    `dsh-web-fetch-http` 的唯一安装副本还原成 pristine 后,只要 cache 里的封存副本
+ *    还在,旧版本就只打一行"安装树里有 1 份未打补丁的副本"的**警告**并 exit 0;
+ *    而把这枚与交付物无关的 zip 删掉,同一棵树立刻 exit 1 ⇒ "抓不抓得住"取决于
+ *    一个缓存条目。现在判据的见证是**交付副本的字节本身**(反向验证见下),
+ *    删不删 cache 结论都一样。
+ *
+ *    "未安装"与"不适用"两种形态**不**判红(它们不是"补丁没生效"):安装树里
+ *    一份该版本副本都没有 ⇒ 警告(这条判据没在场;覆盖它的是 `check-patch-pin.mjs`
+ *    的"补丁目标一个都没装上即红");副本版本 ≠ pin ⇒ 提示(那是别的版本,
+ *    本补丁不适用)。只有"版本恰好等于 pin、字节却不是补丁结果"才是缺陷 ——
+ *    那正是"分辨率没命中、装进去的是未打补丁副本"的直接形态。
+ *
+ * pristine 的来源:优先 `.yarn/cache` 的 pristine tarball(它同时证明补丁对**上游
+ * 发布版**仍然干净应用);cache 里没有时**回退到交付物侧** —— 拿安装副本反向应用
+ * 补丁重建 pristine(`patch -R`,必须干净无 fuzz)。反向应用失败本身就是判红理由:
+ * 交付字节不是"pristine + 本补丁"的形态。于是"有 cache"与"没 cache"给出同一结论。
+ *
+ * 守卫自检(2026-09-23 G-1/G-2/R4-A-32 的变异网):本文件在跑真实补丁之前,先用一组
+ * **最小多文件补丁夹具**把上面第 1/4/5 步的判据本身驱动一遍(零字节 ⇒ 红、丢段 ⇒ 红、
+ * 改坏 hunk ⇒ 红、完好 ⇒ 绿;交付副本 = pristine ⇒ 红、交付副本只打了前一半 ⇒ 红、
+ * 交付副本 = 补丁结果 ⇒ 绿)。夹具与真实补丁走的是**同一个**
  * `inspectPatchAgainstTrees`,所以把判据拆掉时自检必然变红 —— 不必等谁手工注入。
  * 自检跑在同一个仓库外临时树里,不碰工作区。
  *
@@ -91,16 +112,25 @@ function runPatch(pkgDir, patchFile, dryRun) {
   return { status: result.status, output, error: result.error }
 }
 
-/** 找到安装树里的顶层副本(仅用于结果对拍的回退见证)。 */
-function findInstalledCopy(name) {
-  let dir = join(root, 'packages', 'host', 'desktop')
-  for (;;) {
-    const candidate = join(dir, 'node_modules', name)
-    if (existsSync(join(candidate, 'package.json'))) return candidate
-    const parent = dirname(dir)
-    if (parent === dir) return undefined
-    dir = parent
-  }
+/**
+ * 反向应用补丁(R4-A-32 的交付物侧回退):把安装副本还原成 pristine。
+ *
+ * 刻意**不用** `--batch`:GNU patch 的 `--batch` 会在"补丁看起来是反向的"时
+ * **自作主张反转方向**,于是"在一棵 pristine 树上反向应用"会静默变成"正向应用"
+ * 并 exit 0 —— 这条判据就会假绿(实测踩到)。这里用 `-f`(假定补丁没有被反向),
+ * 方向只由 `-R` 决定:补丁的 `+` 行不在文件里就必然 hunk FAILED。
+ *
+ * @param pkgDir - 待还原的目录(会被就地修改)。
+ * @param patchFile - 补丁文件绝对路径。
+ * @param dryRun - true 只试跑。
+ * @returns `{ status, output, error }`。
+ */
+function runPatchReverse(pkgDir, patchFile, dryRun) {
+  const args = ['-p1', '-R', '-f', '--no-backup-if-mismatch', '--reject-file=-', '-i', patchFile]
+  if (dryRun) args.splice(1, 0, '--dry-run')
+  const result = spawnSync('patch', args, { cwd: pkgDir, encoding: 'utf8' })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  return { status: result.status, output, error: result.error }
 }
 
 /**
@@ -154,19 +184,29 @@ function listInstalledCopies(name) {
 }
 
 /**
- * 对一个补丁 + 一棵 pristine 树 + 一份参照副本做全部判据。
+ * 对一个补丁 + 一棵 pristine 树 + 一份参照副本 + 若干交付副本做全部判据。
  *
- * 抽成函数是为了让**守卫自检**用合成夹具驱动同一套判据(2026-09-23 G-1/G-2):
+ * 抽成函数是为了让**守卫自检**用合成夹具驱动同一套判据(2026-09-23 G-1/G-2/R4-A-32):
  * 夹具与真实补丁只有输入不同,判据完全一致 —— 于是"把判据拆掉"必然让自检变红。
  *
- * @param args - `{ patchText, patchFile, pkgDir, referenceDir, referenceLabel, sealedReference }`。
- * @returns `{ problems, notes, touched, offset, compared }`;problems 是**不含**补丁名的
- *   失败消息(调用方负责加 `<补丁路径>:` 前缀)。
+ * @param args - `{ patchText, patchFile, pkgDir, referenceDir, referenceLabel, sealedReference,
+ *   deliveredCopies }`。`deliveredCopies` 是安装树里**版本 == pin** 的副本
+ *   (`{ path, label }[]`),判据 5 逐个核对它们的补丁触及文件。
+ * @returns `{ problems, notes, touched, offset, compared, deliveredVerified, deliveredBad }`;
+ *   problems 是**不含**补丁名的失败消息(调用方负责加 `<补丁路径>:` 前缀)。
  */
-function inspectPatchAgainstTrees({ patchText, patchFile, pkgDir, referenceDir, referenceLabel, sealedReference }) {
+function inspectPatchAgainstTrees({
+  patchText,
+  patchFile,
+  pkgDir,
+  referenceDir,
+  referenceLabel,
+  sealedReference,
+  deliveredCopies = [],
+}) {
   const problems = []
   const localNotes = []
-  const info = { touched: [], offset: false, compared: false }
+  const info = { touched: [], offset: false, compared: false, deliveredVerified: 0, deliveredBad: [] }
 
   // 判据 0:补丁体自身必须"有话可说"(G-1/G-2 的入口)。
   const shape = parsePatchSections(patchText)
@@ -232,7 +272,7 @@ function inspectPatchAgainstTrees({ patchText, patchFile, pkgDir, referenceDir, 
     if (changed.length === 0 && added.length === 0) {
       problems.push(
         `${referenceLabel} 与 pristine 逐字节相同,但补丁文件非空 —— `
-        + '封存副本里看不到任何改动(补丁未生效/未被 yarn 记录)',
+        + '参照副本里看不到任何改动(补丁未生效/未被 yarn 记录)',
       )
       return { ...info, problems, notes: localNotes }
     }
@@ -268,7 +308,13 @@ function inspectPatchAgainstTrees({ patchText, patchFile, pkgDir, referenceDir, 
     localNotes.push('无封存副本可对拍(结果等价性未验证)')
   }
 
-  // 判据 3:真应用。
+  // 判据 3:真应用。应用**之前**先把 pristine 侧的摘要留档 —— 判据 5 要靠它区分
+  // "交付副本一处都没生效"与"只打了一半"。
+  const pristineDigests = new Map()
+  for (const relative of touched) {
+    const file = join(pkgDir, relative)
+    pristineDigests.set(relative, existsSync(file) ? sha256(file) : undefined)
+  }
   const applied = runPatch(pkgDir, patchFile, false)
   if (applied.status !== 0) {
     problems.push(
@@ -299,6 +345,56 @@ function inspectPatchAgainstTrees({ patchText, patchFile, pkgDir, referenceDir, 
     }
   }
 
+  // 判据 5(2026-09-23 R4-A-32):**交付物侧硬判据**。
+  // 见证是安装副本的字节本身 —— 与 `.yarn/cache` 无关:cache 里有没有那枚封存 zip
+  // 都不改变结论。只有"版本 == pin 却没有补丁字节"才是缺陷;"没装"与"版本不适用"
+  // 由调用方按警告/提示处理(见文件头)。
+  const patchedDigests = new Map()
+  for (const relative of touched) {
+    const file = join(pkgDir, relative)
+    patchedDigests.set(relative, existsSync(file) ? sha256(file) : undefined)
+  }
+  for (const delivered of deliveredCopies) {
+    const sameAsPristine = []
+    const neither = []
+    const missing = []
+    for (const relative of touched) {
+      const file = join(delivered.path, relative)
+      const patchedDigest = patchedDigests.get(relative)
+      if (patchedDigest === undefined) {
+        // 补丁把该文件删掉了:交付副本里也必须没有它。
+        if (existsSync(file)) neither.push(`${relative}(补丁已删除该文件,但副本里仍在)`)
+        continue
+      }
+      if (!existsSync(file)) {
+        missing.push(relative)
+        continue
+      }
+      const digest = sha256(file)
+      if (digest === patchedDigest) continue
+      if (digest === pristineDigests.get(relative)) sameAsPristine.push(relative)
+      else neither.push(relative)
+    }
+    if (sameAsPristine.length === 0 && neither.length === 0 && missing.length === 0) {
+      info.deliveredVerified += 1
+      continue
+    }
+    info.deliveredBad.push(delivered.label)
+    const details = []
+    if (sameAsPristine.length > 0) details.push(`与 pristine 逐字节相同:${sameAsPristine.join(', ')}`)
+    if (neither.length > 0) details.push(`既不是 pristine 也不是补丁后内容:${neither.join(', ')}`)
+    if (missing.length > 0) details.push(`副本里不存在:${missing.join(', ')}`)
+    const nothingApplied = sameAsPristine.length + missing.length === touched.length
+    problems.push(
+      `安装树副本 ${delivered.label} 与"pristine + 补丁"不一致(${details.join(';')})—— `
+      + (nothingApplied
+        ? '这份**交付副本**里补丁一处都没生效(安装/交付形态的补丁丢失)'
+        : '这份交付副本只打上了一部分、或内容被改坏')
+      + '。跑 `corepack yarn install --immutable` 重解析 resolutions 后复跑;'
+      + '本判据的见证是交付字节本身,与 .yarn/cache 无关',
+    )
+  }
+
   return { ...info, problems, notes: localNotes }
 }
 
@@ -310,7 +406,7 @@ function inspectPatchAgainstTrees({ patchText, patchFile, pkgDir, referenceDir, 
  * 不依赖任何人记得再加一条 wiring。
  *
  * @param tempRoot - 仓库外临时根目录。
- * @returns 自检失败消息列表(空 = 通过)。
+ * @returns `{ problems, count }`:自检失败消息列表(空 = 通过)与夹具数量。
  */
 function runGuardSelfCheck(tempRoot) {
   const problems = []
@@ -337,6 +433,24 @@ function runGuardSelfCheck(tempRoot) {
   const referenceDir = join(fixtureRoot, 'reference')
   writeTree(pristineDir, pristineFiles)
   writeTree(referenceDir, patchedFiles)
+  // 交付物侧夹具(R4-A-32):三种"安装副本"形态。
+  //   deliveredPatched = 补丁结果(绿)、deliveredPristine = 一处都没生效(红)、
+  //   deliveredHalf = 只打了第一段(红)。
+  const deliveredPatchedDir = join(fixtureRoot, 'delivered-patched')
+  const deliveredPristineDir = join(fixtureRoot, 'delivered-pristine')
+  const deliveredHalfDir = join(fixtureRoot, 'delivered-half')
+  writeTree(deliveredPatchedDir, patchedFiles)
+  writeTree(deliveredPristineDir, pristineFiles)
+  writeTree(deliveredHalfDir, {
+    'lib/a.js': patchedFiles['lib/a.js'],
+    'lib/b.js': pristineFiles['lib/b.js'],
+    'lib/c.js': pristineFiles['lib/c.js'],
+  })
+  const deliveredOf = {
+    patched: { path: deliveredPatchedDir, label: '夹具安装副本(已打补丁)' },
+    pristine: { path: deliveredPristineDir, label: '夹具安装副本(pristine)' },
+    half: { path: deliveredHalfDir, label: '夹具安装副本(只打了前一半)' },
+  }
 
   const sectionA = [
     'diff --git a/lib/a.js b/lib/a.js',
@@ -402,6 +516,22 @@ function runGuardSelfCheck(tempRoot) {
       expectRed: true,
       pattern: /解析不出任何文件段/u,
     },
+    // R4-A-32:交付物侧判据的夹具。前两条的补丁体完好、cache 见证也在场,
+    // 只有"安装副本的字节"不对 —— 旧版本在同样输入下是 **绿** 的(只打一行警告)。
+    {
+      name: '完好补丁但交付副本仍是 pristine',
+      text: intact,
+      expectRed: true,
+      delivered: 'pristine',
+      pattern: /补丁一处都没生效/u,
+    },
+    {
+      name: '完好补丁但交付副本只打了前一半',
+      text: intact,
+      expectRed: true,
+      delivered: 'half',
+      pattern: /只打上了一部分/u,
+    },
   ]
 
   for (const [index, testCase] of cases.entries()) {
@@ -410,6 +540,7 @@ function runGuardSelfCheck(tempRoot) {
     cpSync(pristineDir, pkgDir, { recursive: true })
     const patchFile = join(caseDir, 'fixture.patch')
     writeFileSync(patchFile, testCase.text)
+    const delivered = deliveredOf[testCase.delivered ?? 'patched']
     const result = inspectPatchAgainstTrees({
       patchText: testCase.text,
       patchFile,
@@ -417,6 +548,7 @@ function runGuardSelfCheck(tempRoot) {
       referenceDir,
       referenceLabel: '夹具封存副本',
       sealedReference: true,
+      deliveredCopies: [delivered],
     })
     const isRed = result.problems.length > 0
     if (isRed !== testCase.expectRed) {
@@ -441,9 +573,13 @@ function runGuardSelfCheck(tempRoot) {
         )
       }
       if (result.compared !== true) problems.push(`自检用例「${testCase.name}」没有真的做封存副本对拍`)
+      // R4-A-32:绿例必须真的逐字节核对过交付副本(判据 5 被拆掉时这里先红)。
+      if (result.deliveredVerified !== 1) {
+        problems.push(`自检用例「${testCase.name}」没有真的核对交付副本的字节(判据 5 没跑)`)
+      }
     }
   }
-  return problems
+  return { problems, count: cases.length }
 }
 
 // 六处形态④（2026-09-23 三轮审计 R3-C）：**依赖目标 / 输入缺失必须具名收尾**。
@@ -512,10 +648,19 @@ const cleanup = []
 let uncompared = 0
 /** 参照副本不是 cache 封存副本(而是安装树副本)的补丁数 —— 只影响总结文案的措辞。 */
 let installedReference = 0
+/** 判据 5 真核过的安装副本总数 / 在安装树里根本没有该版本副本的补丁数。 */
+let deliveredVerified = 0
+let noDeliveredCopy = 0
+/** pristine 不是从 cache tarball 解出来(而是从交付副本反向重建)的补丁数。 */
+let rebuiltPristine = 0
+/** 守卫自检的夹具数量(只用于总结文案)。 */
+let selfCheckCount = 0
 
 try {
   // 判据自检必须在真实补丁之前跑:夹具红了就说明守卫本身坏了,后面的"全绿"没有意义。
-  for (const message of runGuardSelfCheck(tempRoot)) fail(`守卫自检失败:${message}`)
+  const selfCheck = runGuardSelfCheck(tempRoot)
+  selfCheckCount = selfCheck.count
+  for (const message of selfCheck.problems) fail(`守卫自检失败:${message}`)
 
   for (const target of [...targets].sort((a, b) => a.patchPath.localeCompare(b.patchPath))) {
     const label = target.patchPath
@@ -526,24 +671,63 @@ try {
     }
     const patchText = readFileSync(patchFile, 'utf8')
 
-    const { pristine, patched } = findCacheZips(cacheDir, target.name, target.version)
-    if (pristine === undefined) {
-      fail(
-        `${label}: 在 ${join('.yarn', 'cache')} 里找不到 ${target.name}@${target.version} 的 pristine tarball`
-        + `(<name>-npm-<version>-*.zip)。离线校验需要它 —— 先跑 \`corepack yarn install --immutable\``,
-      )
-      continue
+    // 交付物侧:安装树里该 pin 版本的全部副本(判据 5 的核对对象)。
+    // 版本 ≠ pin 的副本只是"本补丁不适用"(提示),不参与核对。
+    const delivered = []
+    const deliveredOtherVersions = []
+    for (const copy of listInstalledCopies(target.name)) {
+      let version
+      try {
+        version = JSON.parse(readFileSync(join(copy, 'package.json'), 'utf8')).version
+      } catch {
+        continue
+      }
+      const relativeCopy = copy.slice(root.length + 1)
+      if (version === target.version) delivered.push({ path: copy, label: relativeCopy })
+      else deliveredOtherVersions.push(`${relativeCopy}@${version}`)
+    }
+    if (deliveredOtherVersions.length > 0) {
+      note(`${label}: 安装树里有 ${deliveredOtherVersions.length} 份版本 ≠ ${target.version} 的副本(本补丁不适用):${deliveredOtherVersions.join(', ')}`)
     }
 
+    const { pristine, patched } = findCacheZips(cacheDir, target.name, target.version)
     const workDir = join(tempRoot, label.replace(/[^A-Za-z0-9.@-]/gu, '_'))
     const pristineDir = join(workDir, 'pristine')
     const patchedDir = join(workDir, 'patched-reference')
-    mkdirSync(pristineDir, { recursive: true })
-    cleanup.push(workDir)
-    new admZip(join(cacheDir, pristine)).extractAllTo(pristineDir, true)
     const pkgDir = join(pristineDir, 'node_modules', target.name)
-    if (!existsSync(join(pkgDir, 'package.json'))) {
-      fail(`${label}: pristine tarball ${pristine} 里没有 node_modules/${target.name}`)
+    cleanup.push(workDir)
+
+    // pristine 的来源:优先 cache tarball(它同时证明补丁对**上游发布版**仍然干净应用);
+    // 没有 cache 时回退到交付物侧 —— 安装副本反向应用补丁重建(R4-A-32)。
+    if (pristine !== undefined) {
+      mkdirSync(pristineDir, { recursive: true })
+      new admZip(join(cacheDir, pristine)).extractAllTo(pristineDir, true)
+      if (!existsSync(join(pkgDir, 'package.json'))) {
+        fail(`${label}: pristine tarball ${pristine} 里没有 node_modules/${target.name}`)
+        continue
+      }
+    } else if (delivered.length > 0) {
+      const source = delivered[0]
+      mkdirSync(dirname(pkgDir), { recursive: true })
+      cpSync(source.path, pkgDir, { recursive: true })
+      const reverse = runPatchReverse(pkgDir, patchFile, false)
+      if (reverse.status !== 0 || FUZZ_PATTERN.test(reverse.output)) {
+        fail(
+          `${label}: ${join('.yarn', 'cache')} 里没有 pristine tarball,退回到交付副本重建 pristine 时`
+          + `在 ${source.label} 上**反向应用补丁失败**(退出码 ${String(reverse.status)})——`
+          + '交付字节不是"pristine + 本补丁"的形态(补丁未生效 / 被改坏):\n'
+          + reverse.output.trimEnd().split('\n').map(line => `      ${line}`).join('\n'),
+        )
+        continue
+      }
+      rebuiltPristine += 1
+      note(`${label}: cache 里没有 pristine tarball,pristine 由交付副本 ${source.label} 反向应用补丁重建(判据见证仍是交付字节)`)
+    } else {
+      fail(
+        `${label}: ${join('.yarn', 'cache')} 里找不到 ${target.name}@${target.version} 的 pristine tarball`
+        + `(<name>-npm-<version>-*.zip),安装树里也没有该版本的副本可用于反向重建 ——`
+        + '补丁是否生效无法判定。先跑 `corepack yarn install --immutable`',
+      )
       continue
     }
 
@@ -556,12 +740,9 @@ try {
       referenceDir = join(patchedDir, 'node_modules', target.name)
       referenceLabel = `cache 封存副本 ${patched}`
       sealedReference = true
-    } else {
-      const installed = findInstalledCopy(target.name)
-      if (installed !== undefined) {
-        referenceDir = installed
-        referenceLabel = `安装树顶层副本 ${installed.slice(root.length + 1)}`
-      }
+    } else if (delivered.length > 0) {
+      referenceDir = delivered[0].path
+      referenceLabel = `安装树副本 ${delivered[0].label}`
     }
 
     const result = inspectPatchAgainstTrees({
@@ -571,12 +752,23 @@ try {
       referenceDir,
       referenceLabel,
       sealedReference,
+      deliveredCopies: delivered,
     })
     for (const message of result.problems) fail(`${label}: ${message}`)
     for (const message of result.notes) note(`${label}: ${message}`)
     if (result.problems.length > 0) continue
     if (!result.compared) uncompared += 1
     else if (sealedReference !== true) installedReference += 1
+    deliveredVerified += result.deliveredVerified
+    if (delivered.length === 0) {
+      noDeliveredCopy += 1
+      warn(
+        `${target.name}@${target.version}: 安装树里没有该版本的任何副本(未安装 / 不适用)—— `
+        + '本次**没有**从交付物侧证明补丁在那份字节里生效(判据 5 不在场)。'
+        + '兜底:`check-patch-pin.mjs` 对"补丁目标一个都没装上"是 fail-loud;'
+        + '跑 `corepack yarn install --immutable` 后本判据会在场',
+      )
+    }
 
     const offsetNote = result.offset
       ? `  [偏移:${result.compared ? `已由${referenceLabel}逐字节对拍证明无害` : '未验证'}]`
@@ -584,35 +776,12 @@ try {
     const witness = result.compared
       ? `见证:${referenceLabel}`
       : '见证:无(结果等价性未验证)'
+    const deliveredNote = delivered.length > 0
+      ? `交付物侧:${String(result.deliveredVerified)}/${String(delivered.length)} 份安装副本逐字节一致`
+      : '交付物侧:无安装副本(未安装/不适用)'
     report.push(
-      `  ✓ ${label.padEnd(52)} ${result.touched.length} file(s)${offsetNote}  ${witness}`,
+      `  ✓ ${label.padEnd(52)} ${result.touched.length} file(s)${offsetNote}  ${witness}  ${deliveredNote}`,
     )
-
-    // 诊断:安装树里的未打补丁副本(修它需要 yarn install)。
-    const unpatched = []
-    for (const copy of listInstalledCopies(target.name)) {
-      let version
-      try {
-        version = JSON.parse(readFileSync(join(copy, 'package.json'), 'utf8')).version
-      } catch {
-        continue
-      }
-      if (version !== target.version) continue
-      // 与"pristine + 补丁"的结果对比:一致 = 这份副本已打补丁。
-      const matchesPatched = result.touched.every((relative) => {
-        const file = join(copy, relative)
-        return existsSync(file) && sha256(file) === sha256(join(pkgDir, relative))
-      })
-      if (!matchesPatched) {
-        unpatched.push(copy.slice(root.length + 1))
-      }
-    }
-    if (unpatched.length > 0) {
-      warn(
-        `${target.name}@${target.version}: 安装树里有 ${unpatched.length} 份未打补丁的副本 —— `
-        + `需要主 agent 跑 \`corepack yarn install\` 重解析 resolutions 后复跑(${unpatched.join(', ')})`,
-      )
-    }
   }
 
   if (patchFiles.length !== targets.length) {
@@ -633,14 +802,19 @@ if (failures.length > 0) {
 }
 
 process.stdout.write(
-  `verify-patches: OK — ${targets.length} 个补丁在仓库外临时树(${tmpdir()})的 pristine tarball 上`
+  `verify-patches: OK — ${targets.length} 个补丁在仓库外临时树(${tmpdir()})的 pristine 树上`
   + '全部干净应用(无 fuzz / 无反向;每段都有 hunk,且与参照副本的改动集逐段对齐)'
   + (uncompared > 0
-    ? `;其中 ${uncompared} 个补丁没有任何参照副本可对拍(结果等价性**未**验证)\n`
+    ? `;其中 ${uncompared} 个补丁没有任何参照副本可对拍(结果等价性**未**验证)`
     : installedReference > 0
       // G-4(2026-09-23):见证是安装树副本时不能宣称"与 yarn 封存副本逐字节一致"。
-      ? `,应用结果与参照副本逐字节一致(其中 ${installedReference} 个的参照是安装树副本而非 cache 封存副本)\n`
-      : ',应用结果与 yarn 封存副本逐字节一致\n')
+      ? `,应用结果与参照副本逐字节一致(其中 ${installedReference} 个的参照是安装树副本而非 cache 封存副本)`
+      : ',应用结果与 yarn 封存副本逐字节一致')
+  + `;交付物侧:${deliveredVerified} 份安装副本的补丁触及文件与补丁后内容逐字节一致`
+  + (noDeliveredCopy > 0
+    ? `(${noDeliveredCopy} 个补丁在安装树里没有该版本副本 —— 未安装/不适用,该判据未在场)\n`
+    : '\n')
+  + (rebuiltPristine > 0 ? `(其中 ${rebuiltPristine} 个补丁的 pristine 由交付副本反向重建,未读 .yarn/cache)\n` : '')
   + `${report.join('\n')}\n`
-  + `  守卫自检:8 个合成夹具(零字节 / 丢段 / 多余段 / 截断 hunk / 无段头 / 完好)已驱动同一套判据\n`,
+  + `  守卫自检:${String(selfCheckCount)} 个合成夹具(零字节 / 丢段 / 多余段 / 截断 hunk / 无段头 / 完好 / 交付副本未打 / 交付副本半打)已驱动同一套判据\n`,
 )
