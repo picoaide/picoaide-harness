@@ -40,8 +40,14 @@
  * Release 名必须是 tag 本身(长名会被 Releases 页左侧列表截断,同页版本号全看不见),
  * 且正式 tag 缺 `docs/releases/<tag>.md` 时必须 exit 1(不静默回退自动生成的 PR 列表)。
  *
+ * 2026-09-23 第四轮审计 R4-A 之后再补两条(现场与登记值见各自策略的注释):
+ *   [SK-13] **触发面(`on:)的业务契约** —— 此前全文对 `on:` 零判据:删掉 `push:` 会让
+ *           tag push 不再触发整条发布链,而 PR 检查仍然全绿(引入改动的 PR 自己能合)。
+ *   [SK-14] **被钉住的判据步骤必须可执行** —— 给步骤加一行 `if: false`(`run` 一字不改)
+ *           即可让整套 Go 测试 / 守卫结果链路静默不跑,而 SK-8/SK-9/SK-12 只问"文本在不在"。
+ *
  * 用法:node scripts/check-workflows.mjs
- * 退出码:0 = 全部通过;1 = 有块解析失败或扫描器退化。
+ * 退出码:0 = 全部通过;1 = 有块解析失败、策略违规或扫描器退化。
  */
 
 import { execFileSync } from 'node:child_process'
@@ -393,7 +399,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
 const SELFTEST_SCANNER_ASSERTIONS = 5
@@ -624,6 +630,11 @@ export function checkWorkflowText(name, text) {
   failures.push(...checkReleaseSurface(name, document, text, notes))
   // 策略 8(W-4/W-5):WASM 门禁的两处接线(用例级报告 + 协议探针)。
   failures.push(...checkWasmGateWiring(name, document, notes))
+  // 策略 9(R4-A-3):触发面(`on:`)的业务契约 —— 删掉 `push:` 就等于关掉整条发布链。
+  failures.push(...checkTriggerSurface(name, document, text, notes))
+  // 策略 10(R4-A-5):被钉住的判据步骤必须**可执行**(`if: false` 落在"存在性"与
+  // "形态"两条判据之间:文本在、内容对,就是永不执行)。
+  failures.push(...checkPinnedStepExecutability(name, document, blocks, allowlist, notes))
 
   return workflowResult(failures, {
     checked,
@@ -897,6 +908,161 @@ const WASM_PROBE_ENV = 'WASM_GATE_REQUIRE_COVERED_PLATFORM'
  */
 const WASM_GATE_EXPECT_HEAD_ENV = 'WASM_GATE_EXPECT_HEAD'
 const WASM_GATE_EXPECT_HEAD_VALUE = '${{ github.sha }}'
+
+// ===== SK-13:触发面(`on:`)的业务契约 =====
+//
+// 现场(2026-09-23 第四轮审计 R4-A-3):本脚本全文对 `on:` **零判据**(SK-8/SK-8b/SK-9/
+// SK-10/SK-11/SK-12 六条策略全部只看 job/step 的内容)。把 `ci.yml` 的
+//     on:
+//       pull_request:
+//       push:
+// 改成只留 `pull_request:`(一次一行删除)之后,本门禁与 `verify-ci-scripts.mjs` 全绿 ——
+// 而后果是**整条发布链静默消失**:tag push 不再触发 workflow ⇒ `release` job、
+// `gh release create`、R2 `publish-update-server`、mac 签名+公证 job 全部不会启动;
+// 连流水线**自己内部**的那批检查(`ci-release-policy.sh` 的 tag 形态判定、
+// `docs/releases/<tag>.md` 策展说明检查、tag 上的根守卫)也一起消失。因为
+// `pull_request:` 还在,**引入这个改动的 PR 自己会拿到全绿检查并通过分支保护**。
+// 同一次探测的另两种形态(`on:` 只留 `workflow_dispatch` / 给 push 与 pull_request
+// 加 `branches: [never-exists]`)同样全绿。
+//
+// 登记值(依据 `AGENTS.md` 的 CI 段与 `docs/decisions/2026-09-06-ci-pipeline-redesign.md`:
+// 「触发 = `pull_request` + `push`(全分支含 tag)。**每个提交都产出可下载产物**……
+// tag 走 mac 签名 + release job 发布」 ⇒ 触发面本身就是交付契约的一部分):
+//   ① 承载发布链 / 全量门禁的 workflow 必须同时有 `pull_request` 与 `push`;
+//   ② `push` 必须是**未加过滤**的 —— `branches` / `branches-ignore` / `tags` /
+//      `tags-ignore` / `paths` / `paths-ignore` 任意一个都会把 tag 或一部分分支从触发面
+//      里摘掉(`branches` 与 `tags` 同时给出时是 AND 关系,写 `branches: [master]` 就等于
+//      "`v*` tag 不再触发发布"),所以登记形态只有"不写任何过滤键"这一种;
+//   ③ `pull_request` 同样不得收窄(受保护的 PR 形态必须都被检查);
+//   ④ `workflow_dispatch` 可有可无,但**出现即登记**:触发键集合必须 ⊆ 登记集合,
+//      新增 `schedule` / `workflow_run` 之类必须在这里登记并写明理由;
+//   ⑤ 只有 `workflow_dispatch`(或任何"没有 push/pull_request"的形态)= 红。
+//
+// 契约挂在哪个 workflow 上(两个锚点,缺一不可):
+//   · 文件名锚点:`ci.yml` —— 本仓承载发布链的那个 workflow;
+//   · 内容锚点:可执行文本里出现发布链命令(`RELEASE_LINE_ANCHORS`)—— 改名/搬走时契约
+//     跟着走,不会因为"文件不叫 ci.yml 了"而静默失效(第四轮审计 R4-A-3 的附注:
+//     改名后的"红"此前只是 SWALLOW_ALLOWLIST 失配的副作用,不是有意识的判据)。
+const RELEASE_LINE_WORKFLOW = 'ci.yml'
+/** 发布链的内容锚点(**可执行文本**里的命令;注释里写不算)。 */
+const RELEASE_LINE_ANCHORS = ['ci-publish-update-server.sh', 'gh release create', 'gh release edit']
+/** 必须存在的触发键。 */
+const REQUIRED_TRIGGERS = ['push', 'pull_request']
+/** 被登记过的触发键(`workflow_dispatch` 可有可无,但只有登记过的键才允许出现)。 */
+const REGISTERED_TRIGGERS = ['push', 'pull_request', 'workflow_dispatch']
+/** 会收窄触发面的过滤键(登记形态 = 这些键一个都不出现)。 */
+const TRIGGER_NARROWING_KEYS = ['branches', 'branches-ignore', 'tags', 'tags-ignore', 'paths', 'paths-ignore']
+
+// ===== SK-14:被钉住的判据步骤必须**可执行**(不是"文本还在") =====
+//
+// 现场(2026-09-23 第四轮审计 R4-A-5):SK-8/SK-9/SK-12 把若干步骤钉成"必须存在",但判据
+// 只问**文本存在性**。给步骤加一行 `if: false`(`run` 一字不改)之后实测:
+//   · 「Go tests (repo-wide) + WASM case-level report」 → **全绿**:整套 Go 测试(含
+//     `-json` 报告 + `check-go-test-json.mjs` 的"用例级 0 skip / 三条关键用例确实 pass /
+//     退出码 0-1-2 三段可区分")静默不跑,而必需的 **Go server** 检查仍然是绿的;
+//   · 「Root guards must have passed」 → **全绿**:docs-only 的 PR 上"守卫失败 ⇒ 必需的
+//     Gate 检查也红"这条**唯一链路**被摘除(第三轮 C-3 / 线上 PR #129 的复发路径)。
+// 根因两处:SK-9③ 只正则匹配 `run` 文本;SK-12 的 `if:` 判据只认**字符串**形态
+// (`typeof step.if === 'string'` ⇒ YAML 里的布尔 `false` 直接漏掉)。
+//
+// 判据(对每个"被钉住的判据步骤"):
+//   ① 不得是**常量假** `if:`(`false` / `'false'` / `${{ false }}` / `0` / 空串);
+//   ② `if:` 只允许该步骤**登记过的形态**(见 PINNED_STEP_IF_POLICIES),否则一律拒 ——
+//      需要新形态就把形态登记进去并写明理由,与白名单同一套纪律;
+//   ③ 不得 `continue-on-error`(表达式形态静态求不出真假,同样按"会静默"处理);
+//   ④ `run` 不得被吞掉退出码 —— **复用 [SK-7a] 的同一份谓词与白名单**(`SWALLOW_PATTERNS`
+//      + `isSilentSuccessTail`):这里要的是"钉住的步骤必须真的能失败",不是再发明一套
+//      吞码语法;
+//   ⑤ 所在 job 不得是常量假 `if:`(job 被跳过 = 里面的步骤一样不跑)。
+/** 被钉住的判据步骤:**识别口径**与 `if:` 允许形态(登记表)。 */
+const PINNED_STEP_POLICIES = [
+  {
+    id: 'full-root-gate',
+    label: '全量根门禁(`yarn check`)',
+    // 与 [SK-8]/[SK-9] 同一份识别口径:参数向量为空的 `yarn check`。
+    match: script => [...script.matchAll(ROOT_GATE_INVOCATION)]
+      .some(match => match[1] === 'check' && match[2].trim() === ''),
+    ifPolicy: 'fail-safe-docs-only',
+  },
+  {
+    id: 'root-guard-runner',
+    label: `根守卫运行步(\`${DOCS_ONLY_GUARD_RUNNER}\`)`,
+    match: script => script.includes(DOCS_ONLY_GUARD_RUNNER),
+    ifPolicy: 'never',
+  },
+  {
+    id: 'root-guard-link',
+    label: '守卫结果链路步(`needs.<job>.result` + `exit 1`)',
+    match: script => /exit\s+[1-9]/u.test(script) && /needs\.[A-Za-z_][\w-]*\.result/u.test(script),
+    ifPolicy: 'needs-result',
+  },
+  {
+    id: 'wasm-case-gate',
+    label: `用例级判定(\`${WASM_CASE_GATE_SCRIPT}\`)`,
+    match: script => script.includes(WASM_CASE_GATE_SCRIPT),
+    ifPolicy: 'never',
+  },
+  {
+    id: 'wasm-probe',
+    label: 'WASM 协议探针(`verify-wasm-client-only.sh`)',
+    match: script => script.includes('verify-wasm-client-only.sh'),
+    ifPolicy: 'fail-safe-docs-only',
+  },
+]
+/**
+ * `if:` 允许形态的**登记值**。
+ *   · `never` = 必须无条件运行(它本身就是"无论如何都要跑"的那一步);
+ *   · `fail-safe-docs-only` = 只允许 docs-only 的 fail-safe 形态(`!= 'false'`,与
+ *     [SK-9]④ 同一份口径 —— changes 失败/输出为空时走完整路径);
+ *   · `needs-result` = 必须条件在某个上游 job 的结果上(守卫失败 ⇒ 本步运行)。
+ */
+const PINNED_STEP_IF_POLICIES = {
+  never: {
+    check: () => false,
+    describe: '不得带 `if:`(这一步必须无条件运行)',
+  },
+  'fail-safe-docs-only': {
+    check: value => /needs\.changes\.outputs\.code\s*!=\s*'false'/u.test(value),
+    describe: "只允许 `if: needs.changes.outputs.code != 'false'`(docs-only 的 fail-safe 形态)",
+  },
+  'needs-result': {
+    check: value => /needs\.[A-Za-z_][\w-]*\.result/u.test(value),
+    describe: '只允许条件在 `needs.<job>.result` 上的 `if:`(守卫未成功 ⇒ 本步运行)',
+  },
+}
+
+/**
+ * 这份 workflow 的**可执行文本**里是否出现发布链命令(注释里写不算)。
+ * @param text - workflow 原文。
+ * @returns 是否承载发布链。
+ */
+function carriesReleaseLine(text) {
+  return extractRunBlocks(text)
+    .map(block => executableScript(block.content))
+    .some(script => RELEASE_LINE_ANCHORS.some(anchor => script.includes(anchor)))
+}
+
+/**
+ * `if:` 是否**静态可判定为假**(布尔 false / `'false'` / `${{ false }}` / `0` / 空串)。
+ *
+ * 只判"逐字常量"这一档:其余表达式(如 `needs.x.outputs.y == 'z'`)静态度量不出真假,
+ * 交由 `PINNED_STEP_IF_POLICIES` 的**形态登记**兜住(与 [SK-7a] 对表达式形态
+ * `continue-on-error` 的口径一致:求不出真假 ⇒ 按"会静默"处理)。
+ * @param value - YAML 解析出来的 `if:` 取值。
+ * @returns 是否恒假。
+ */
+function isConstantFalseIf(value) {
+  if (value === false) return true
+  if (value === undefined || value === null) return false
+  if (typeof value === 'number') return value === 0
+  if (typeof value !== 'string') return false
+  const text = value.trim()
+  if (text === '') return true
+  // `${{ … }}` 只看花括号里的表达式本身(`${{ false }}` 与 `false` 同判)。
+  const inner = /^\$\{\{([\s\S]*)\}\}$/u.exec(text)?.[1]
+  const probe = (inner ?? text).trim().toLowerCase()
+  return probe === 'false' || probe === '0' || probe === "''" || probe === '""'
+}
 
 /**
  *
@@ -1937,10 +2103,11 @@ function hasErrexitOnly(content) {
  * @param options - 见上。
  * @returns workflow 文本。
  */
-function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = false, jobIf = '', jobNeeds = '' } = {}) {
+function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = false, jobIf = '', jobNeeds = '', triggers = ['push'] } = {}) {
   return [
     'name: selftest',
-    'on: push',
+    'on:',
+    ...triggers.map(trigger => `  ${trigger}:`),
     'jobs:',
     '  verify:',
     '    runs-on: ubuntu-latest',
@@ -2563,6 +2730,209 @@ function checkWasmGateWiring(file, document, notes) {
   return failures
 }
 
+/**
+ * [SK-13] 的实现:触发面(`on:`)的业务契约(判据与登记值见常量区注释)。
+ *
+ * 判据跑在 **parseYaml 的结果**上(不是子串匹配 —— 注释里的 `push:` 不算,`on:` 写成
+ * 字符串/数组/映射三种形态都能读),并逐条给出"这条改动会让什么静默消失"。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param text - 原始文本(用于内容锚点)。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkTriggerSurface(file, document, text, notes) {
+  const failures = []
+  // 契约只挂在"承载发布链的那个 workflow"上:文件名锚点 + 内容锚点(见常量区注释)。
+  if (file !== RELEASE_LINE_WORKFLOW && !carriesReleaseLine(text)) return failures
+  const where = file === RELEASE_LINE_WORKFLOW
+    ? `workflow \`${file}\`(承载发布链的那一个)`
+    : `workflow \`${file}\`(可执行文本里出现发布链命令,因而承载发布链)`
+  const consequence = '\n  ⇒ 后果不是"少跑一条检查",而是**整条发布链静默消失**:tag push 不再'
+    + '触发 workflow ⇒ `release` job、`gh release create`、R2 `publish-update-server`、'
+    + 'mac 签名+公证 job 全部不会启动,连流水线内部那批检查(`ci-release-policy.sh` 的 tag 形态'
+    + '判定、`docs/releases/<tag>.md` 策展说明检查、tag 上的根守卫)也一起消失;'
+    + '而 `pull_request:` 还在 ⇒ **引入这个改动的 PR 自己仍然全绿可合**(2026-09-23 第四轮审计 R4-A-3)。'
+
+  /** 触发键 → 取值(map/字符串/数组三种写法归一)。 */
+  const triggers = new Map()
+  const on = document?.on
+  if (typeof on === 'string' && on.trim() !== '') triggers.set(on.trim(), null)
+  else if (Array.isArray(on)) {
+    for (const entry of on) if (typeof entry === 'string' && entry.trim() !== '') triggers.set(entry.trim(), null)
+  } else if (typeof on === 'object' && on !== null) {
+    for (const [name, value] of Object.entries(on)) triggers.set(name, value)
+  }
+  if (triggers.size === 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-13] ${where} 没有可解析的 \`on:\` 触发面(缺失/空/形态不认识)`
+        + '\n  ⇒ 没有触发面的 workflow 只能手工 `workflow_dispatch` 启动:PR 不检查、'
+        + 'push 不构建、tag 不发布。' + consequence,
+    })
+    return failures
+  }
+
+  const names = [...triggers.keys()]
+  // ① 必须存在的触发键。
+  const missing = REQUIRED_TRIGGERS.filter(name => !triggers.has(name))
+  if (missing.length > 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-13] ${where} 的触发面缺少 ${missing.map(name => `\`${name}\``).join(' / ')}`
+        + `(实际只有 ${names.map(name => `\`${name}\``).join(', ')})。`
+        + `\n  登记形态:${REQUIRED_TRIGGERS.map(name => `\`${name}\``).join(' + ')}`
+        + `(可有可无但出现即登记:${REGISTERED_TRIGGERS.filter(name => !REQUIRED_TRIGGERS.includes(name)).map(name => `\`${name}\``).join(', ')})。`
+        + consequence,
+    })
+  }
+  // ② 未登记的触发键(新增 schedule / workflow_run 之类必须改登记值 + 写明理由)。
+  const unregistered = names.filter(name => !REGISTERED_TRIGGERS.includes(name))
+  if (unregistered.length > 0) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-13] ${where} 出现了未登记的触发键 ${unregistered.map(name => `\`${name}\``).join(', ')}`
+        + `\n  登记集合:${REGISTERED_TRIGGERS.map(name => `\`${name}\``).join(', ')}`
+        + '\n  ⇒ 触发面是本文件里 REGISTERED_TRIGGERS 的登记值;新增触发形态请同步登记并写明'
+        + '它与发布链/门禁的关系(否则"多了一条谁也不认识的触发"和"少了一条"一样无从审计)。',
+    })
+  }
+  // ③ push / pull_request 不得被过滤键收窄(登记形态 = 一个过滤键都不出现)。
+  for (const name of REQUIRED_TRIGGERS) {
+    if (!triggers.has(name)) continue
+    const value = triggers.get(name)
+    if (value === null || value === undefined) continue
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-13] ${where} 的 \`${name}:\` 取值形态不认识(${JSON.stringify(value)})`
+          + '\n  ⇒ 登记形态是这个键**不带任何取值**(不写过滤);写法请与其余触发键一致。',
+      })
+      continue
+    }
+    const keys = Object.keys(value)
+    if (keys.length === 0) continue
+    const narrowing = keys.filter(key => TRIGGER_NARROWING_KEYS.includes(key))
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-13] ${where} 的 \`${name}:\` 带了过滤键(${keys.join(', ')}),触发面被收窄`
+        + `\n  登记形态:\`${name}:\` 不带任何过滤键 —— \`push\` 必须是"全分支含 tag"`
+        + '(`branches` 与 `tags` 同时给出时是 AND 关系:写 `branches: [master]` 就等于 `v*` tag'
+        + '不再触发发布),`pull_request` 不得用 `branches` 白名单收窄。'
+        + (narrowing.length > 0 ? `\n  本次命中的收窄键:${narrowing.join(', ')}` : '')
+        + consequence,
+    })
+  }
+
+  notes.push(`[SK-13] 触发面 = ${names.map(name => `\`${name}\``).join(' + ')}(登记形态:`
+    + `${REQUIRED_TRIGGERS.join(' + ')};不得带过滤键)`)
+  return failures
+}
+
+/**
+ * [SK-14] 的实现:被钉住的判据步骤必须**可执行**(判据见常量区注释)。
+ *
+ * 与 [SK-8]/[SK-9]/[SK-12] 的分工:那三条策略负责"这一步在不在"(存在性与形态),
+ * 本条负责"这一步**会不会真的跑、跑了能不能失败**" —— 它们各自只看得见自己那一面,
+ * 而 `if: false` 正好落在两者之间(文本在、内容对,就是永不执行)。
+ *
+ * 步骤枚举走 `shellSteps()`(与 [SK-7a] 同一份"有效 shell"解析),吞码谓词与白名单也整份
+ * 复用 [SK-7a] —— 这里是**收口**,不是第二套语法。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param blocks - extractRunBlocks 的结果(供 shellSteps 解析有效 shell 与行号)。
+ * @param allowlist - 语句级吞码白名单(与 [SK-7a] 共用)。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) {
+  const failures = []
+  /** 命中过哪些"被钉住"的类别(供收尾 note 打印证据,避免"存在性断言 = 假绿")。 */
+  const observed = []
+  for (const item of shellSteps(document, blocks)) {
+    const step = item.step
+    const label = stepLabel(item)
+    const script = executableScript(step.run)
+    for (const policy of PINNED_STEP_POLICIES) {
+      if (!policy.match(script)) continue
+      observed.push(`${policy.id}@${item.jobId}#${item.label}`)
+      // ① 常量假 `if:`(布尔 false 与字符串形态一起判 —— SK-12 此前只认字符串)。
+      if (isConstantFalseIf(step.if)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-14] ${label} 是「${policy.label}」,但它的 \`if:\` 是常量假`
+            + `(${JSON.stringify(step.if)})⇒ **这一步永远不会执行**(run 一字未改,`
+            + '所以"文本还在"的存在性判据全绿)。'
+            + '\n  ⇒ 被钉住的判据步骤必须真的能跑;要条件就用登记过的形态,不要把条件写成常量。',
+        })
+      } else if (step.if !== undefined && step.if !== null) {
+        // ② `if:` 形态必须在该类别的登记表里。
+        const allowed = PINNED_STEP_IF_POLICIES[policy.ifPolicy]
+        const text = typeof step.if === 'string' ? step.if : String(step.if)
+        if (!allowed.check(text)) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-14] ${label} 是「${policy.label}」,但它的 \`if:\`(${text.trim()})不在登记形态里`
+              + `\n  该类别只允许:${allowed.describe}`
+              + '\n  ⇒ 判据步骤一旦被条件收窄,就可能整条不跑;需要新形态请登记进'
+              + ' PINNED_STEP_IF_POLICIES 并写明理由(与吞码白名单同一套纪律)。',
+          })
+        }
+      }
+      // ③ `continue-on-error`:失败不再让 job 红(表达式形态同样按"会静默"处理)。
+      if (step['continue-on-error'] !== undefined && !isContinueOnErrorDisabled(step['continue-on-error'])) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-14] ${label} 是「${policy.label}」,但打开了 continue-on-error`
+            + `(${JSON.stringify(step['continue-on-error'])})⇒ 这一步失败不再让 job 红。`
+            + '\n  ⇒ 判据步骤的失败必须传出去(它是"必需检查红"的唯一来源)。',
+        })
+      }
+      // ④ `run` 被吞码 —— 谓词与白名单整份复用 [SK-7a](不另发明一套语法)。
+      if (NON_POSIX_SHELLS.test(item.shell)) continue
+      const lines = step.run.split('\n').map(stripLineComment)
+      for (const line of lines) {
+        const skeleton = shellSkeleton(line)
+        if (skeleton.trim() === '') continue
+        const hit = SWALLOW_PATTERNS.find(pattern => pattern.re.test(skeleton))
+        if (hit === undefined || !isSilentSuccessTail(skeleton)) continue
+        const signature = normalizeStatement(line)
+        // 与 [SK-7a] 共用白名单(登记过的那句话不重复报);这里只对"钉住的步骤"再报一次
+        // **未被登记**的吞码 —— 顺序上 SK-7a 先跑,所以真实形态不会两处都红。
+        if (allowlist.lookup(file, signature) !== undefined) continue
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-14] ${label} 是「${policy.label}」,但它的 run 吞掉了退出码(${hit.form}):${signature}`
+            + '\n  ⇒ 被钉住的判据步骤永远退出 0 = 判据静默失效(与 [SK-7a] 同一份谓词与白名单:'
+            + '这里只是把"这一步必须真的能失败"写成对判据步骤的显式下限)。',
+        })
+      }
+      // ⑤ 所在 job 被常量假 `if:` 跳过 ⇒ 步骤一样不跑。
+      if (isConstantFalseIf(item.job?.if)) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-14] ${label} 是「${policy.label}」,但它所在的 job ${item.jobId} 的 \`if:\` 是常量假`
+            + `(${JSON.stringify(item.job.if)})⇒ job 被跳过,里面的判据步骤一样不跑。`,
+        })
+      }
+    }
+  }
+  if (observed.length > 0) notes.push(`[SK-14] 可执行性检查覆盖 ${observed.length} 个被钉住的判据步骤(${observed.join(', ')})`)
+  return failures
+}
+
 function checkReleaseSurface(file, document, text, notes) {
   const failures = []
   // 只在"这份 workflow 有发布面"时生效:合成样本 / 纯测试 workflow 只跑 `yarn check`
@@ -2811,13 +3181,16 @@ export function selfTestPolicies() {
   const wasmProbeLines = (mode, expectHead = 'full') => (mode === 'none' ? [] : [
     '      - name: WASM protocol probes (group 6; Linux)',
     ...(mode === 'narrow-if' ? ["        if: github.event_name == 'workflow_dispatch'"] : []),
+    // 第四轮审计 R4-A-5 的现场形态:布尔 `false`(SK-12 此前只认字符串形态 ⇒ 漏掉)。
+    ...(mode === 'if-false' ? ['        if: false'] : []),
+    ...(mode === 'if-string-false' ? ["        if: 'false'"] : []),
     '        env:',
     `          ${WASM_PROBE_ENV}: ${mode === 'no-env' ? "''" : "'1'"}`,
     ...(expectHeadEnvLine(expectHead) === null ? [] : [expectHeadEnvLine(expectHead)]),
     `        run: bash scripts/verify-wasm-client-only.sh --groups ${mode === 'group1' ? '1' : '6'}`,
   ])
-  /** W-4 用例级报告步的形态生成器(两个夹具共用)。 */
-  const wasmCaseGateLines = (mode) => {
+  /** W-4 用例级报告步的形态生成器(两个夹具共用)。`ifLine` 用来注入常量假 `if:`(R4-A-5)。 */
+  const wasmCaseGateLines = (mode, ifLine = null, { continueOnError = false, swallow = false } = {}) => {
     if (mode === 'none') return []
     const option = WASM_CASE_GATE_OPTIONS[mode]
     return [
@@ -2835,10 +3208,14 @@ export function selfTestPolicies() {
       '      - uses: actions/checkout@v7',
       '        with:',
       '          fetch-depth: 0',
-      '      - run: |',
+      '      - name: Go tests (repo-wide) + WASM case-level report',
+      ...(ifLine === null ? [] : [`        if: ${ifLine}`]),
+      ...(continueOnError ? ['        continue-on-error: true'] : []),
+      '        run: |',
       '          set -euo pipefail',
       '          GO_TEST_STATUS=0',
       `          go test ./... -count=1 -p 1 -timeout 15m -json > ${option.report} || GO_TEST_STATUS=$?`,
+      ...(swallow ? ['          yarn check || true'] : []),
       '          CHECK_STATUS=0',
       `          node ../${WASM_CASE_GATE_SCRIPT} ${option.read} \\`,
       ...(option.scope === null ? [] : [`            ${option.scope}`]),
@@ -2991,7 +3368,7 @@ export function selfTestPolicies() {
     '          rm -rf "$PG18_MOUNT" 2>/dev/null || true',
     ...wasmProbeLines('full'),
     ...wasmCaseGateLines('full'),
-  ], { file: 'ci.yml' })
+  ], { file: 'ci.yml', triggers: REQUIRED_TRIGGERS })
   expectRed('a19-allowlist-not-file-wide', '[SK-7a]', [
     '      - name: 同样的清理语句在别的文件里',
     '        run: |',
@@ -3247,6 +3624,7 @@ export function selfTestPolicies() {
     guardIf = '',
     guardNeeds = '',
     guardRun = `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    guardRunIf = null,
     gateNeeds = '[changes, gate-guards]',
     gateIf = '${{ !cancelled() }}',
     gateStepIf = "needs.changes.outputs.code != 'false'",
@@ -3254,13 +3632,27 @@ export function selfTestPolicies() {
     gateDepth = '          fetch-depth: 0',
     guardDepth = '          fetch-depth: 0',
     linkStep = true,
+    linkIf = "needs.gate-guards.result != 'success'",
+    caseGateIf = null,
+    caseGateContinueOnError = false,
+    caseGateSwallow = false,
+    triggers = ['pull_request', 'push'],
+    pushFilter = null,
+    prFilter = null,
+    extraTriggers = [],
+    releaseAnchor = false,
     wasmCaseGate = 'full',
     wasmProbe = 'full',
     gateExpectHead = 'full',
     probeExpectHead = 'full',
   } = {}) => [
     'name: selftest',
-    'on: push',
+    'on:',
+    ...triggers.flatMap(trigger => {
+      const filter = trigger === 'push' ? pushFilter : (trigger === 'pull_request' ? prFilter : null)
+      return filter === null ? [`  ${trigger}:`] : [`  ${trigger}:`, `    ${filter}`]
+    }),
+    ...extraTriggers.map(trigger => `  ${trigger}:`),
     'jobs:',
     '  changes:',
     '    runs-on: ubuntu-latest',
@@ -3281,7 +3673,10 @@ export function selfTestPolicies() {
       '        with:',
       '          submodules: recursive',
       ...(guardDepth === null ? [] : [guardDepth]),
-      `      - run: ${guardRun}`,
+      // R4-A-5 的现场形态:守卫运行步本身被常量假 `if:` 摘掉(带 `if:` 时必须展开成多行形态)。
+      ...(guardRunIf === null
+        ? [`      - run: ${guardRun}`]
+        : ['      - name: Root guards (every PR shape)', `        if: ${guardRunIf}`, `        run: ${guardRun}`]),
     ] : []),
     '  gate:',
     '    runs-on: ubuntu-latest',
@@ -3291,9 +3686,13 @@ export function selfTestPolicies() {
     '    steps:',
     ...(linkStep ? [
       '      - name: Root guards must have passed',
-      "        if: needs.gate-guards.result != 'success'",
+      `        if: ${linkIf}`,
       '        run: |',
       '          set -euo pipefail',
+      // 与真 ci.yml 同形:run 里点名 `needs.<guard>.result` —— [SK-9]③ 的链路识别口径
+      // (`run` 或 `if:` 引用结果)。少了它,注入 `if: false` 之后这一步连"链路"都算不上,
+      // 样本就测不到"链路还在但永不执行"这个真实现场。
+      '          echo "::error::根守卫 job 未成功(result=${{ needs.gate-guards.result }})⇒ 门禁整体失败"',
       '          exit 1',
     ] : []),
     '      - uses: actions/checkout@v7',
@@ -3304,8 +3703,12 @@ export function selfTestPolicies() {
     `        if: ${gateStepIf}`,
     ...(expectHeadEnvLine(gateExpectHead) === null ? [] : ['        env:', expectHeadEnvLine(gateExpectHead)]),
     `        run: ${gateRun}`,
+    ...(releaseAnchor ? [
+      '      - name: Publish channel images to the update server (R2)',
+      '        run: bash scripts/ci-publish-update-server.sh --list channels.list',
+    ] : []),
     ...wasmProbeLines(wasmProbe, probeExpectHead),
-    ...wasmCaseGateLines(wasmCaseGate),
+    ...wasmCaseGateLines(wasmCaseGate, caseGateIf, { continueOnError: caseGateContinueOnError, swallow: caseGateSwallow }),
     '',
   ].join('\n')
   const gateSample = (id, expectation, options = {}) => {
@@ -3371,6 +3774,50 @@ export function selfTestPolicies() {
   gateSample('r14-gate-wrong-var-expect-head', '[SK-12]', { file: 'ci.yml', gateExpectHead: 'wrong-var' })
   gateSample('r15-probe-missing-expect-head', '[SK-12]', { file: 'ci.yml', probeExpectHead: 'none' })
   gateSample('r16-probe-literal-expect-head', '[SK-12]', { file: 'ci.yml', probeExpectHead: 'literal' })
+
+  // ---- 策略 9([SK-13]):触发面(`on:`)的业务契约(2026-09-23 第四轮审计 R4-A-3) ----
+  //
+  // 三种现场变异(删 `push:` / 只留 `workflow_dispatch` / 加 `branches: [never-exists]`)
+  // 此前**全部 EXIT=0**。样本用 `file: 'ci.yml'`(= 承载发布链的那个 workflow 的登记名)。
+  gateSample('s1-push-removed', '[SK-13]', { file: 'ci.yml', triggers: ['pull_request'] })
+  gateSample('s2-dispatch-only', '[SK-13]', { file: 'ci.yml', triggers: ['workflow_dispatch'] })
+  gateSample('s3-pull-request-removed', '[SK-13]', { file: 'ci.yml', triggers: ['push'] })
+  gateSample('s4-push-branches-narrowed', '[SK-13]', { file: 'ci.yml', pushFilter: 'branches: [never-exists-xyz]' })
+  gateSample('s5-push-branches-ignore', '[SK-13]', { file: 'ci.yml', pushFilter: 'branches-ignore: [master]' })
+  gateSample('s6-push-tags-only', '[SK-13]', { file: 'ci.yml', pushFilter: "tags: ['v*']" })
+  gateSample('s7-pr-branches-whitelist', '[SK-13]', { file: 'ci.yml', prFilter: 'branches: [master]' })
+  gateSample('s8-unregistered-trigger', '[SK-13]', { file: 'ci.yml', extraTriggers: ['schedule'] })
+  // 正例:登记形态(必含的两种 + 可有可无但已登记的 `workflow_dispatch`)必须绿。
+  gateSample('s9-triggers-with-dispatch-green', null, { file: 'ci.yml', triggers: ['pull_request', 'push', 'workflow_dispatch'] })
+  // 内容锚点:文件**不叫** ci.yml 时,只要它承载发布链,契约照样生效(改名不是逃生门)。
+  gateSample('s10-renamed-release-line', '[SK-13]', {
+    file: 'ci-main.yml', triggers: ['pull_request'], releaseAnchor: true,
+  })
+  gateSample('s11-renamed-release-line-green', null, {
+    file: 'ci-main.yml', triggers: ['pull_request', 'push'], releaseAnchor: true,
+  })
+  // 与发布链无关的普通 workflow 不受约束(没有触发面契约可谈的地方不要收紧)。
+  expectGreen('s12-plain-workflow-not-release-line', [
+    '      - run: echo hello',
+  ])
+
+  // ---- 策略 10([SK-14]):被钉住的判据步骤必须**可执行**(R4-A-5) ----
+  //
+  // 现场形态:步骤保留、`run` 一字不改,只加一行常量假 `if:`。两条最重的实例(整套 Go
+  // 测试、守卫结果链路)此前**全绿**。
+  gateSample('u1-go-tests-if-false', '[SK-14]', { file: 'ci.yml', caseGateIf: 'false' })
+  gateSample('u2-go-tests-if-string-false', '[SK-14]', { file: 'ci.yml', caseGateIf: "'false'" })
+  gateSample('u3-guard-link-if-false', '[SK-14]', { file: 'ci.yml', linkIf: 'false' })
+  gateSample('u4-guard-runner-if-false', '[SK-14]', { file: 'ci.yml', guardRunIf: 'false' })
+  gateSample('u5-full-gate-if-false', '[SK-14]', { file: 'ci.yml', gateStepIf: 'false' })
+  gateSample('u6-probe-if-false', '[SK-14]', { file: 'ci.yml', wasmProbe: 'if-false' })
+  gateSample('u7-probe-if-string-false', '[SK-14]', { file: 'ci.yml', wasmProbe: 'if-string-false' })
+  gateSample('u8-guard-runner-if-expression', '[SK-14]', { file: 'ci.yml', guardRunIf: '${{ github.event_name == \'push\' }}' })
+  gateSample('u9-go-tests-continue-on-error', '[SK-14]', { file: 'ci.yml', caseGateContinueOnError: true })
+  gateSample('u10-go-tests-swallowed-exit', '[SK-14]', { file: 'ci.yml', caseGateSwallow: true })
+  // 正例:`if:` 写成登记过的形态(docs-only 的 fail-safe / 守卫结果)一律绿 —— r1 已覆盖
+  // 「与真 ci.yml 同形」,这里再钉一条"探针步不带 if: 也绿"(避免把正确形态误判)。
+  gateSample('u11-pinned-steps-without-if-green', null, { file: 'ci.yml', wasmProbe: 'full', caseGateIf: null })
 
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
@@ -3447,9 +3894,11 @@ export function selfTestPolicies() {
     gateFirst = true,
     titleFlag = '--title "${TAG}"',
     notesFlag = '${NOTES_FLAG}',
+    triggers = ['pull_request', 'push'],
   } = {}) => [
     'name: selftest',
-    'on: push',
+    'on:',
+    ...triggers.map(trigger => `  ${trigger}:`),
     'jobs:',
     '  gate:',
     '    runs-on: ubuntu-latest',
@@ -3892,6 +4341,24 @@ function main() {
     goTestTimeoutHits += result.goTestTimeoutHits ?? 0
   }
 
+  // [SK-13] 的**全仓存在性**对账(只在默认目录):契约挂在"承载发布链的那个 workflow"
+  // 上,所以先证明这样的 workflow 真的存在 —— 把发布链整段删掉/搬进一个没有发布命令的
+  // 文件时,这条点名(判据不依赖文件叫什么名字)。
+  if (isDefaultDirectory) {
+    const releaseLines = names.filter(name => carriesReleaseLine(readFileSync(join(workflowDirectory, name), 'utf8')))
+    if (releaseLines.length === 0) {
+      failures.push({
+        name: '[SK-13]',
+        line: 0,
+        detail: `.github/workflows 下没有任何 workflow 承载发布链(可执行文本里没有 `
+          + `${RELEASE_LINE_ANCHORS.map(anchor => `\`${anchor}\``).join(' / ')})\n`
+          + '  ⇒ 发布链被整段删掉/搬走了 ⇒ tag push 不会有任何交付面动作(GitHub Release、'
+          + 'R2 更新面、渠道镜像全都不产出),而 PR 上的检查仍可能全绿。\n'
+          + `  登记值:发布链承载者是 \`${RELEASE_LINE_WORKFLOW}\`(可改名,但必须仍然承载它)。`,
+      })
+    }
+  }
+
   // 白名单死条目对账:登记了却不再命中任何语句的条目必须清掉 —— 否则白名单会悄悄
   // 长成一个"谁都能往里塞一句"的豁免洞(与本脚本"不许整个文件豁免"的口径配套)。
   const deadAllowlist = [...SWALLOW_ALLOWLIST, ...BLOCK_ERREXIT_ALLOWLIST].filter(
@@ -3959,7 +4426,8 @@ function main() {
   process.stdout.write(`check-workflows: OK — ${names.length} 个 workflow,${total} 个 shell run 块全部通过 `
     + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)'
     + ' + SK-8/SK-8b/SK-9/SK-10/SK-11/SK-12 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
-    + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n')
+    + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
+    + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {
