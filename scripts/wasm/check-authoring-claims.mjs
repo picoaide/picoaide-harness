@@ -21,10 +21,21 @@
  * ## 本实现的口径
  *
  * - **扫描面是目录驱动 + 通配**（不是逐文件字面量）：`docs` / `site/src` / `server/docs` /
- *   `server/skills/app-builder` 四个目录 + 仓库根 `README*.md` 通配。**每个声明的根都必须存在**，
+ *   `server/skills/app-builder` / **`packages`（workspace 源码）** / **`community`** 六个目录
+ *   + 仓库根 `README*.md` 通配。**每个声明的根都必须存在**，
  *   每个根在 include/exclude 之后都必须**至少留下一个文件**，任何文件读取失败一律 fail-loud ——
  *   这三条是本脚本对 `grep rc≥2` 纪律的等价物：**扫描本身坏了不得当通过**
  *   （同款纪律见 `check-old-model-residue.mjs` 头注释）。
+ * - **不得静默缩小扫描面**（第三轮 W-7 收口，2026-09-23）：`packages/**` 此前不在面内，而那里
+ *   有 9 处源码注释仍把应用说成"内置浏览器加载"（`open-app.ts` / `deep-link.ts` /
+ *   `AppCenterPanel.tsx` / `wasm-apps-host/README.md` …）—— 判据写着"全仓"，实际只覆盖文档面。
+ *   现在有**两条独立**的缩面判据（任一不成立即 `bail()` / 退出码 2）：
+ *     ① `REQUIRED_SCAN_DIR_ROOTS` 登记值必须被 `SCAN_DIR_ROOTS` **全覆盖**（删登记项即静默缩面）；
+ *     ② 仓库根 `package.json` 的 `workspaces` 每个 glob 的**顶层段**必须被扫描根覆盖
+ *        （新增 workspace 根却忘了纳入扫描面 ⇒ 当场红；这是与登记值互相独立的第二个真源）。
+ * - **产物/第三方排除要精确**：`lib`（tsdown/tsc 产物）与 `__snapshots__`（测试快照）按目录名排除，
+ *   但 vendored 包的 `lib`（如 `packages/vendor/memory-evolve/lib`）是**入库源码**（无构建步骤）
+ *   ⇒ 由 `KEEP_DIR_PATHS` 显式反向覆盖，避免"一刀切排 lib"把真源码一起排除。
  * - **豁免按分句**：`，。；！？` 是分句边界；命中所在分句里出现豁免词，该分句放行，**同一行别的分句**里
  *   的命中照旧报（这正是"整行豁免"要修的形态）。
  * - **正向判据钉结论**：Cache Storage 断言的是**可用性取值**（出现"可用/鼓励依赖"型断言即失败，
@@ -45,7 +56,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const args = process.argv.slice(2)
@@ -81,15 +92,35 @@ function bail(message) { console.error(`G8-FAIL ${message}`); process.exit(2) }
 const AUTHOR_DOC = 'docs/wasm-app-authoring.md'
 /** 作者面技能包（①/②/③ 的另一半；随包进服务端镜像）。 */
 const AUTHOR_SKILL_DIR = 'server/skills/app-builder'
-/** ④/⑤ 的全仓扫描根（**目录驱动**：新增/改名的文档目录写这里，改死条目由存在性校验兜住）。 */
-const SCAN_DIR_ROOTS = ['docs', 'site/src', 'server/docs', AUTHOR_SKILL_DIR]
+/**
+ * ④/⑤ 的全仓扫描根（**目录驱动**：新增/改名的文档目录写这里，改死条目由存在性校验兜住）。
+ *
+ * `packages` 与 `community` 是**源码/文档面**（第三轮 W-7 收口）：`packages/**` 里有应用打开
+ * 链路与宿主包的源码注释、`community/**` 是随仓发布的协作文档 —— 两处都会对读者描述
+ * "应用在哪里打开"，属本判据的对象。生成的 `lib/**` 由 `EXCLUDE_DIR_NAMES` 排除（产物不是文案）。
+ */
+const SCAN_DIR_ROOTS = ['docs', 'site/src', 'server/docs', AUTHOR_SKILL_DIR, 'packages', 'community']
+/**
+ * **不许静默缩小扫描面**（登记值，2026-09-23 W-7 收口）：这些根必须出现在 `SCAN_DIR_ROOTS` 里。
+ * 与下面基于 `package.json#workspaces` 的派生校验是**两条独立的**判据 —— 只删本清单的某一项
+ * 会被它抓住；只删派生面（改了 workspaces 却忘了纳入）会被派生校验抓住。任一不成立即 `bail()`。
+ */
+const REQUIRED_SCAN_DIR_ROOTS = ['docs', 'site/src', 'server/docs', AUTHOR_SKILL_DIR, 'packages', 'community']
 /** ④/⑤ 的仓库根通配（`README*.md` 覆盖 README.md / README.en.md / README.zh.md，
  *  不再写死单个文件名 —— 旧清单里的 `README.zh-CN.md` 在仓库里根本不存在）。 */
 const SCAN_ROOT_GLOBS = ['README*.md']
 /** 只看源文件（与原 `--include` 一致）；`dist`/`node_modules`/`.astro`/`build` 是构建产物。 */
 const INCLUDE_FILE = /\.(?:md|mdx|astro|ts|tsx)$/u
-/** 目录排除（`--exclude-dir` 语义：任意层级同名目录都跳过）。 */
-const EXCLUDE_DIR_NAMES = new Set(['dist', 'node_modules', '.astro', 'build'])
+/** 目录排除（`--exclude-dir` 语义：任意层级同名目录都跳过）。
+ *  `lib` 是 workspace 包的构建产物（tsdown/tsc 输出，含 .d.ts —— 它只是 `src/**` 的副本，
+ *  扫它等于用产物给源码背书）；`__snapshots__` 是测试快照。源码面始终由 `src/**` 覆盖。 */
+const EXCLUDE_DIR_NAMES = new Set(['dist', 'node_modules', '.astro', 'build', 'lib', '__snapshots__'])
+/**
+ * `EXCLUDE_DIR_NAMES` 的**反向覆盖**（仓库相对 POSIX 路径）：vendored 包把 JS 直接写在 `lib/`
+ * 里且**没有构建步骤**（`packages/vendor/memory-evolve/VENDORED.md`：入库即为源码，跑了
+ * `scripts/build.mjs` 反而会覆盖本地加固）⇒ 它不是产物，不得被"一刀切排 lib"排除。
+ */
+const KEEP_DIR_PATHS = new Set(['packages/vendor/memory-evolve/lib'])
 /**
  * 记录面排除：`docs/planning|decisions|releases` 与 `docs/AUDIT-*.md` **必须**逐字保留旧措辞才有意义
  * （总纲/台账/早期契约要引用被推翻的原话，审计留痕是证据不是现行处方）。
@@ -107,6 +138,8 @@ const RECORD_EXCLUDE_FILE = /^AUDIT-.*\.md$/u
 function collectDir(absoluteDir, { excludeRecords }) {
   const files = []
   const errors = []
+  /** 仓库相对 POSIX 路径（`KEEP_DIR_PATHS` 用同一口径比较；Windows 上 `\\` → `/`）。 */
+  const relPosix = absolute => relative(ROOT, absolute).split(sep).join('/')
   const walk = dir => {
     let entries
     try {
@@ -118,7 +151,7 @@ function collectDir(absoluteDir, { excludeRecords }) {
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const absolute = join(dir, entry.name)
       if (entry.isDirectory()) {
-        if (EXCLUDE_DIR_NAMES.has(entry.name)) continue
+        if (EXCLUDE_DIR_NAMES.has(entry.name) && !KEEP_DIR_PATHS.has(relPosix(absolute))) continue
         if (excludeRecords && RECORD_EXCLUDE_DIR_NAMES.has(entry.name)) continue
         walk(absolute)
         continue
@@ -270,6 +303,38 @@ if (!existsSync(authorSkillPath) || !statSync(authorSkillPath).isDirectory()) {
 }
 
 /** ④/⑤ 的扫描面：目录根 + 仓库根通配，逐个校验存在性与非空（W-9①③）。 */
+// 缩面判据 ①（登记值）：登记根必须被实际根清单全覆盖 —— 删掉 `SCAN_DIR_ROOTS` 里的任一项
+// （例如把 `packages` 去掉）都让"全仓"这三个字变成假话，而存在性校验抓不到这种删法
+// （目录还在，只是没人扫）。
+for (const required of REQUIRED_SCAN_DIR_ROOTS) {
+  if (!SCAN_DIR_ROOTS.includes(required)) {
+    bail(`扫描根清单缺少登记项 ${required}（REQUIRED_SCAN_DIR_ROOTS）—— 判据静默缩水，拒绝出结论`)
+  }
+}
+// 缩面判据 ②（派生真源，与登记值互相独立）：workspace 声明的每个 glob 的顶层段都必须在
+// 扫描面内。新增一个 workspace 根却忘了纳入扫描面时，这条会立刻红 —— 而 ① 因为登记值没动
+// 是抓不到的（反过来，只删 ① 的登记项也躲不过它）。
+{
+  const rootPkgPath = join(ROOT, 'package.json')
+  if (!existsSync(rootPkgPath)) bail('仓库根 package.json 缺失 —— 无法校验 workspace 扫描面覆盖')
+  let workspaces = []
+  try {
+    const parsed = JSON.parse(readFileSync(rootPkgPath, 'utf8'))
+    workspaces = Array.isArray(parsed?.workspaces) ? parsed.workspaces : []
+  } catch (error) {
+    bail(`仓库根 package.json 解析失败（${error.message}）—— 无法校验 workspace 扫描面覆盖`)
+  }
+  if (workspaces.length === 0) bail('仓库根 package.json 没有 workspaces 声明 —— 无法校验扫描面覆盖')
+  for (const glob of workspaces) {
+    const top = String(glob).split('/')[0]
+    if (top === '' || top === '.' || top === '..') continue
+    if (!SCAN_DIR_ROOTS.some(root => root === top || root.startsWith(`${top}/`))) {
+      bail(`workspace 根 ${glob} 的顶层目录 ${top} 不在扫描根清单里（${SCAN_DIR_ROOTS.join(' / ')}）`
+        + ' —— workspace 源码面必须纳入载体口径判据，缺一个根 = 判据静默缩水')
+    }
+  }
+}
+
 const scanFiles = []
 const rootSummary = []
 for (const rel of SCAN_DIR_ROOTS) {
@@ -300,7 +365,8 @@ for (const rel of SCAN_DIR_ROOTS) {
   rootSummary.push(`${SCAN_ROOT_GLOBS.join(' ')} ${matched}`)
 }
 const uniqueScanFiles = [...new Set(scanFiles)].sort()
-note(`扫描面（目录驱动 + 通配）：${rootSummary.join(' / ')} ⇒ 去重后 ${uniqueScanFiles.length} 个文件（排除 ${[...EXCLUDE_DIR_NAMES].join('/')} 与记录面 ${[...RECORD_EXCLUDE_DIR_NAMES].join('/')}+AUDIT-*.md）`)
+note(`扫描面（目录驱动 + 通配）：${rootSummary.join(' / ')} ⇒ 去重后 ${uniqueScanFiles.length} 个文件（排除 ${[...EXCLUDE_DIR_NAMES].join('/')} 与记录面 ${[...RECORD_EXCLUDE_DIR_NAMES].join('/')}+AUDIT-*.md；反向保留 ${[...KEEP_DIR_PATHS].join('/')}）`)
+note(`缩面判据：登记根 ${REQUIRED_SCAN_DIR_ROOTS.length} 项全覆盖 ✅ / package.json#workspaces 顶层段全覆盖 ✅（两条判据互相独立，任一缺项即退出码 2）`)
 
 // ---------------------------------------------------------------------------
 // 回归网：台账里"已闭合"的合成负例 + 本次审计的原始躲过形态（用**同一批**判据函数）

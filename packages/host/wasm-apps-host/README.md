@@ -1,6 +1,6 @@
 # `@picoaide/dsh-wasm-apps-host`
 
-客户端专属 WASM 应用 origin：把内置浏览器加载的 `picoaide-app://<app_id>/…` 每个请求
+客户端专属 WASM 应用 origin：把该应用的**独立窗口**加载的 `picoaide-app://<app_id>/…` 每个请求
 转成平台 JSON 信封，带员工令牌 POST 到服务端，再把响应还原成 Chromium `Response`。
 
 契约：`docs/decisions/2026-09-19-wasm-client-internal-origin.md`（冻结）。任务书：
@@ -9,7 +9,7 @@
 ## 它做什么 / 不做什么
 
 ```
-应用窗口 / 内置浏览器视图（partition: persist:agent-browser-<user>@<server-hash>）
+应用窗口（内嵌与内置浏览器同款的 view；partition: persist:agent-browser-<user>@<server-hash>）
   load picoaide-app://<app_id>/<path>?<query>
         │  Chromium 交给已注册的协议 handler
         ▼

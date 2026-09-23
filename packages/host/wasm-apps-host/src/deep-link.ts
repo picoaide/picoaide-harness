@@ -34,7 +34,7 @@ export interface AppDeepLink {
    */
   readonly path: string
   /**
-   * 规范化后的内部 URL（内置浏览器/应用窗口加载的地址）。
+   * 规范化后的内部 URL（该应用的独立窗口加载的地址）。
    *
    * **scheme 是参数**（§7.8/CHN-3）：这里曾经写死 `picoaide-app://`，渠道客户端
    * 会打开一个自己都不认识的 origin。

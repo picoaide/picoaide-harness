@@ -1678,7 +1678,7 @@ export function AppCenterRow({
     setActionFailure(null)
     void openAppEntry(item.appId)
       .then((result) => {
-        // 成功 = 本机确认协议 URL 已就绪，内置浏览器正在加载它 —— 不需要客户端再做什么
+        // 成功 = 本机确认协议 URL 已就绪，该应用的独立窗口正在加载它 —— 不需要客户端再做什么
         //（也没有系统浏览器兜底）。F16 的计数若随响应回来，交由面板记录并展示。
         if (!result.ok) {
           setActionFailure(openFailureEnvelope(result))
