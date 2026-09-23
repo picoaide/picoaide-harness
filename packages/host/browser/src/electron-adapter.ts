@@ -374,6 +374,10 @@ export function createRealElectronAdapter(
         goBack: () => wc.goBack(),
         goForward: () => wc.goForward(),
         reload: () => wc.reload(),
+        // SH-1（第二轮登记、第三轮 R3-B 复核仍未修）：用户接管时要停掉本视图的挂起加载，
+        // `runtime.stopPendingLoads()` 走的是这条可选方法 —— 真实适配器此前**从未实现**它，
+        // 于是 `stop?.()` 静默 no-op，而测试替身实现了 ⇒ 套件恒绿、真机无效果。
+        stop: () => wc.stop(),
         canGoBack: () => wc.navigationHistory.canGoBack(),
         canGoForward: () => wc.navigationHistory.canGoForward(),
         capturePage: (rect) => wc.capturePage(rect),
@@ -466,6 +470,10 @@ export function createRealElectronAdapter(
           goBack: () => wc.goBack(),
           goForward: () => wc.goForward(),
           reload: () => wc.reload(),
+        // SH-1（第二轮登记、第三轮 R3-B 复核仍未修）：用户接管时要停掉本视图的挂起加载，
+        // `runtime.stopPendingLoads()` 走的是这条可选方法 —— 真实适配器此前**从未实现**它，
+        // 于是 `stop?.()` 静默 no-op，而测试替身实现了 ⇒ 套件恒绿、真机无效果。
+        stop: () => wc.stop(),
           canGoBack: () => false,
           canGoForward: () => false,
           capturePage: (rect) => wc.capturePage(rect),
