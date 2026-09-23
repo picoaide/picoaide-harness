@@ -33,8 +33,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,6 +43,21 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
 const notes = []
 const fail = message => failures.push(message)
+/** 条件断言（失败即记一条原因，与 check-* 系列守卫同形）。 */
+const check = (condition, message) => {
+  if (!condition) fail(message)
+  return condition
+}
+
+/** 本守卫自己造的临时目录（进程退出时统一清理）。 */
+const scratchDirs = []
+
+/** 造一个临时目录。 */
+function tempDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  scratchDirs.push(dir)
+  return dir
+}
 
 /** 契约用例脚本（带 --self-test 与真实断言的那两个）。 */
 const CONTRACT_TESTS = [
@@ -321,6 +337,111 @@ for (const file of pyFiles) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. 语法闸门：integration-tests 下所有 .mjs（六处形态⑤）
+//
+// 第三个集成脚本 `electron-shots.mjs` 在 2026-09-23 之前**没有任何自动化覆盖**：
+// 它要打包产物 + Xvfb + CDP，谁也不会顺手跑；语法/接线一坏就烂在那里（本轮实测它
+// 的 `--server` 缺值会静默变成 `undefined`）。这里先补最便宜的一层：`node --check`。
+// ---------------------------------------------------------------------------
+
+/** 递归列出目录下的 `*.mjs`（相对 ROOT，POSIX 分隔）。 */
+function moduleFiles(dir) {
+  const out = []
+  for (const entry of readdirSync(dir)) {
+    if (entry === 'node_modules' || entry === '__pycache__' || entry === '.git') continue
+    const path = join(dir, entry)
+    if (statSync(path).isDirectory()) out.push(...moduleFiles(path))
+    else if (entry.endsWith('.mjs')) out.push(relative(ROOT, path))
+  }
+  return out.sort()
+}
+
+const mjsFiles = existsSync(join(ROOT, 'integration-tests')) ? moduleFiles(join(ROOT, 'integration-tests')) : []
+if (mjsFiles.length === 0) {
+  fail('integration-tests/ 下一个 .mjs 都没有 —— 扫描面为 0，拒绝以"无可检查"当通过')
+}
+for (const file of mjsFiles) {
+  const parsed = spawnSync(process.execPath, ['--check', join(ROOT, file)], { encoding: 'utf8' })
+  if (parsed.status !== 0) {
+    fail(`${file}: Node 语法解析失败（${(parsed.stderr ?? '').trim().split('\n').slice(0, 3).join(' / ')}）`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 1c. electron-shots 的**接线**与 **SKIP 语义**（六处形态⑤⑥）
+//
+// 判据分三层：① `run-all.sh` 必须真的调用它（否则"接线"只是文件存在）；
+// ② 脚本里必须有可判定的断言与退出码契约（截图非空、失败非零、缺前置 77）；
+// ③ 缺前置时**真的**以 77 退出且不打印 PASS（端到端跑一次，用不存在的 --app 驱动）。
+// ---------------------------------------------------------------------------
+
+{
+  const runnerPath = join(ROOT, 'integration-tests', 'run-all.sh')
+  const shotsPath = join(ROOT, 'integration-tests', 'electron-shots', 'electron-shots.mjs')
+  check(existsSync(shotsPath), '形态⑤: integration-tests/electron-shots/electron-shots.mjs 必须存在')
+  const runner = existsSync(runnerPath) ? readFileSync(runnerPath, 'utf8') : ''
+  check(runner.includes('electron-shots/electron-shots.mjs'),
+    '形态⑤: run-all.sh 必须真的调用 electron-shots/electron-shots.mjs（"接线"不是"文件存在"）')
+  check(/electron-shots[^\n]*\|[^\n]*77|77\)[^\n]*electron/u.test(runner) || runner.includes('77'),
+    '形态⑥: run-all.sh 必须把 77 当 SKIP 记账（聚合层退出码契约）')
+
+  const source = existsSync(shotsPath) ? readFileSync(shotsPath, 'utf8') : ''
+  for (const [needle, why] of [
+    ['Page.captureScreenshot', '截图必须真的抓帧（而不是只 console.log）'],
+    ['size > 1000', '截图必须断言非空（P3 的产物级判据）'],
+    ['RESULT: FAIL', '断言失败必须以 RESULT: FAIL 收尾'],
+    ['EXIT_SKIP', '缺前置必须走显式 SKIP(77) 而不是 FAIL(1)'],
+  ]) {
+    check(source.includes(needle), `形态⑤: electron-shots 必须保留「${why}」（找不到 ${JSON.stringify(needle)}）`)
+  }
+
+  // 端到端：`--app` 指向不存在的路径 ⇒ SKIP(77) 且不得打印 PASS。
+  const skipRun = spawnSync(process.execPath, [shotsPath, '--app', join(tempDir('shots-skip-'), 'no-such-app'), '--shots', tempDir('shots-out-')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, DISPLAY: '' },
+  })
+  const skipOutput = `${skipRun.stdout ?? ''}${skipRun.stderr ?? ''}`
+  check(skipRun.status === 77, `形态⑥: 缺打包产物必须 exit 77(SKIP)（实际 ${skipRun.status}）：${skipOutput.slice(0, 200)}`)
+  check(skipOutput.includes('SKIP'), `形态⑥: 必须打印 SKIP 原因，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
+  check(!skipOutput.includes('RESULT: PASS'), `形态⑥: SKIP 时不得打印 RESULT: PASS，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
+
+  // 端到端：未知参数 ⇒ 用法错误 2（不要让它变成"静默用默认值跑下去"）。
+  const usageRun = spawnSync(process.execPath, [shotsPath, '--definitely-unknown'], { cwd: ROOT, encoding: 'utf8' })
+  check(usageRun.status === 2, `形态⑤: 未知参数必须 exit 2（实际 ${usageRun.status}）`)
+}
+
+// ---------------------------------------------------------------------------
+// 1d. 聚合层 run-all.sh：一项都没跑起来 ⇒ 77，且绝不报 PASS（六处形态⑥）
+//
+// 真机端到端（Docker + 真实服务端 + Xvfb）不在 CI；这里断言的是**聚合契约**：
+// 三个脚本全 SKIP 时，run-all.sh 必须以 77 收尾并打印 RESULT: SKIP ——
+// "什么都没验证"绝不能被下游当成 PASS。
+// ---------------------------------------------------------------------------
+
+{
+  const serverDown = 'http://127.0.0.1:1'
+  const aggregate = spawnSync('bash', ['integration-tests/run-all.sh'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: {
+      ...process.env,
+      SERVER_BASE: serverDown,
+      // 打包产物可能真的存在（别的泳道会构建），显式指到不存在的路径 ⇒ 第三项也判 SKIP，
+      // 让这条用例与"本机是否打过包"解耦。
+      ELECTRON_SHOTS_APP: join(tempDir('shots-aggregate-'), 'no-such-app'),
+    },
+  })
+  const output = `${aggregate.stdout ?? ''}${aggregate.stderr ?? ''}`
+  const detail = output.trim().split('\n').slice(-4).join(' / ')
+  check(aggregate.status === 77, `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
+  check(output.includes('RESULT: SKIP'), `形态⑥: 聚合层必须打印 RESULT: SKIP，实际 ${detail}`)
+  check(!output.includes('RESULT: PASS'), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS，实际 ${detail}`)
+  notes.push('聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓')
+}
+
+// ---------------------------------------------------------------------------
 // 2. 判据自检（--self-test）：每条判据的负例必须被拒
 // ---------------------------------------------------------------------------
 for (const test of CONTRACT_TESTS) {
@@ -405,6 +526,13 @@ for (const item of SCENARIOS) {
 }
 
 // ---------------------------------------------------------------------------
+for (const dir of scratchDirs) {
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // 清理失败不影响判据结论
+  }
+}
 for (const message of notes) process.stdout.write(`check-integration-tests: ${message}\n`)
 if (failures.length > 0) {
   process.stderr.write(`\ncheck-integration-tests: ${failures.length} 项断言失败\n`)
@@ -412,9 +540,10 @@ if (failures.length > 0) {
   return 1
 }
 process.stdout.write(
-  `check-integration-tests: OK — ${pyFiles.length} 个 Python 用例语法通过、`
+  `check-integration-tests: OK — ${pyFiles.length} 个 Python 用例语法通过、${mjsFiles.length} 个 Node 用例语法通过、`
   + `${CONTRACT_TESTS.length} 个契约脚本判据自检通过、${SCENARIOS.length} 个假网关场景`
-  + '（正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）全部符合预期\n',
+  + '（正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）、'
+  + 'electron-shots 的接线与 SKIP(77) 契约、聚合层 run-all.sh 全 SKIP ⇒ 77 且不报 PASS 全部符合预期\n',
 )
 return 0
 }
