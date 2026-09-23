@@ -155,6 +155,24 @@ describe('R5-B-1 已下架：员工面能表达出来，且动作与状态一致
     ])).toBe(false)
   })
 
+  it('服务端在作者行上下发的 `delisted:true`（R5-B-1 的权威字段）⇒ 本机自制内容也判已下架', () => {
+    // 这一条是本泳道**唯一**能覆盖"作者本机自制、从未从目录装过"的判据来源：
+    // 那种行没有商店溯源、服务端也不下发 `enabled`，客户端自己推不出来。
+    const mine: CapabilityItem = {
+      kind: 'skill', source: 'local', name: 'my-draft', displayName: 'my-draft',
+      version: '1.0.0', description: '', author: '', versions: [], isLocal: true,
+      installedOrigin: 'local', delisted: true,
+    }
+    expect(isDelistedItem(mine)).toBe(true)
+    expect(planCardAction(mine).kind).not.toBe('upload')
+    // 未下发 / 明确 false ⇒ 不宣称任何状态（未知不等于下架）。
+    expect(isDelistedItem({ ...mine, delisted: undefined })).toBe(false)
+    expect(isDelistedItem({ ...mine, delisted: false })).toBe(false)
+    // 归并：任一行说下架就是下架（App 级事实）。
+    const merged = mergeItems([{ ...mine, source: 'local' }, { ...mine, source: 'local', delisted: true }])
+    expect(merged[0]!.delisted).toBe(true)
+  })
+
   it('字典与面板都真的有「已下架」这一态（修前：两个文件零命中，员工面结构上说不出来）', () => {
     const panel = readFileSync(PANEL, 'utf8')
     const locales = readFileSync(LOCALES, 'utf8')

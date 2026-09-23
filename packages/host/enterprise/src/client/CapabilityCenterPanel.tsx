@@ -105,6 +105,15 @@ interface CapabilityItem {
    */
   owner?: string | undefined
   /**
+   * 服务端在**作者自己的行**上下发的下架标记（`server/internal/capabilities` 的
+   * `CapabilityItem.Delisted`，json `delisted`；第五轮审计 R5-B-1 的权威字段）。
+   *
+   * 语义（服务端泳道的定义）：下架 = **不可分发**，但归属人自己的「我的」分区仍会
+   * 返回该行并带 `delisted:true` —— 作者需要看到这个状态，否则管控动作在作者面
+   * 没有任何反馈。分发面列出的行恒为 `false`。缺省 = 未下发（不得读成"上架"）。
+   */
+  delisted?: boolean | undefined
+  /**
    * 服务端行上的上下架标志（`apps.enabled`）——**目前只有目录行会带**。
    *
    * 缺省是 `undefined` 而不是 `true`：能力中心没有"这一行默认上架"的知识，
@@ -467,11 +476,14 @@ function catalogSourcedLocal(item: Pick<CapabilityItem, 'installedOrigin' | 'ori
 }
 
 /**
- * 这一行当前**不在可用目录中**（下架 / 授权撤回 / 已转走）—— 两个判据取或：
+ * 这一行当前**不在可用目录中**（下架 / 授权撤回 / 已转走）—— 三条判据，前两条是
+ * 服务端下发的事实，第三条才是客户端推断：
  *
- *  1. **权威判据**：服务端在行上下发了 `enabled: false`（下架行不再被服务端滤掉时
- *     就是这一档，客户端无需再改）；
- *  2. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，且带着目录
+ *  1. **权威判据（作者面）**：服务端在作者自己的行上下发了 `delisted: true`
+ *     （`CapabilityItem.Delisted`，R5-B-1 的服务端泳道新增字段）；
+ *  2. **权威判据（目录面）**：服务端在行上下发了 `enabled: false`（下架行不再被
+ *     服务端滤掉时就是这一档，客户端无需再改）；
+ *  3. **推断判据**：这是一张**归并后 `source === 'local'`** 的本机行，且带着目录
  *     渠道的商店溯源（{@link catalogSourcedLocal}）。
  *
  * 第 2 条为什么成立：{@link mergeItems} 的权威序是 市场 > 组织 > 本机 —— 只要目录里
@@ -485,8 +497,9 @@ function catalogSourcedLocal(item: Pick<CapabilityItem, 'installedOrigin' | 'ori
  * @returns 明确不在目录中 ⇒ `true`；其余（含未知）⇒ `false`。
  */
 export function isDelistedItem(
-  item: Pick<CapabilityItem, 'source' | 'enabled' | 'installedOrigin' | 'originChannel'>,
+  item: Pick<CapabilityItem, 'source' | 'delisted' | 'enabled' | 'installedOrigin' | 'originChannel'>,
 ): boolean {
+  if (item.delisted === true) return true
   if (item.enabled === false) return true
   return item.source === 'local' && catalogSourcedLocal(item)
 }
@@ -825,6 +838,9 @@ function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
       : rows.some(row => row.isOwner === false) ? false : undefined,
     // 归属人账号（服务端下发时透出，供「已转交」说明用；缺省不编造）。
     owner: pickByAuthority(byAuthority, row => row.owner, v => v !== ''),
+    // 下架标记（R5-B-1）：**任一行说下架就是下架**（它是 App 级事实，不是行级偏好）；
+    // 没有任何一行带该字段 ⇒ undefined（未知，不得读成"上架"）。
+    delisted: rows.some(row => row.delisted === true) ? true : undefined,
     // 上下架（R5-B-1）：**false 优先**（任一行说下架 ⇒ 下架）；没有该字段 ⇒
     // undefined（未知，不得读成"上架"）。
     enabled: rows.some(row => row.enabled === false)
