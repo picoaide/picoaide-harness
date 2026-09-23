@@ -727,6 +727,12 @@ func (c *Compiler) runJob(j *job) {
 }
 
 // compileOne 是单个编译的完整路径：准备子进程 → 发请求 → 判定缓存命中 → 收尾。
+//
+// ⚠️ 编译侧**不需要**像执行侧那样做"缓存目录被外部删除"的自愈（R5-A-2 的对照面，实测）：
+// 子进程对每次请求都新建一份 wazero Runtime 与 `NewCompilationCacheWithDir(req.CacheDir)`
+// （cmd/picoaide-app-compile/main.go：`server` 是"无跨请求状态"的），因此目录被删之后
+// **下一次编译会自己把分片目录建回来**。这条前提由 cache_selfheal_test.go 的特征化用例
+// 钉住（变异：把子进程的 cache 提升为进程级 ⇒ 用例红）。
 func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 	proc, cerr := c.ensureChild(modulePath)
 	if cerr != nil {

@@ -10,8 +10,11 @@
 package readyz
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -243,6 +246,16 @@ type Options struct {
 	// nil ⇒ 不做同步回收（保持"超限即拒绝"的旧语义；最小装配/单测可用），
 	// 但拒绝文案会点名"装配层没有注入回收钩子"（装配缺失必须可见，不许静默降级）。
 	ReclaimCompileCache func() (removed int, freed int64, err error)
+	// Logger 记**只该进服务端日志**的东西（R5-A-5：驱动错误原文 / R5-A-4：回收的部分失败）。
+	//
+	// 为什么探针需要一个日志出口：`/readyz` 是**未认证端点**，响应体里只能有分类后的
+	// 定性原因（同文件 CompileAvailability.Detail 的注释写的就是这条纪律：不要塞底层
+	// 错误原文）—— 而"为什么不可达 / 哪一条删不掉"又必须留在机器上供排障。两者只能靠
+	// "对外短语 + 服务端明细"分离，明细的落点就是这个 Logger。
+	//
+	// nil ⇒ 明细丢弃，但**对外仍然只给分类**：绝不因为"没接日志"就把原文吐出去
+	// （fail-closed 的方向是"少说"，不是"多说"）。
+	Logger func(format string, args ...any)
 }
 
 // Snapshot 是 `/readyz` 的响应体。
@@ -267,8 +280,20 @@ type Options struct {
 // 自己的访问器（不许在装配层重算），因此不可能与"真的用了哪个缓存"分叉 ——
 // 详见 Options.ExecCacheMode / Options.CompileCacheMode。
 type Snapshot struct {
-	OK               bool     `json:"ok"`
-	Reasons          []string `json:"reasons,omitempty"`
+	OK      bool     `json:"ok"`
+	Reasons []string `json:"reasons,omitempty"`
+	// Actions 是**每一条 reason 的可行动文案**（R5-A-3）：取自发布闸门登记表
+	// `publishBlockers` 的 `Action` 字段，与 Reasons 同序、只对"有 Action 的理由"产出。
+	//
+	// 为什么必须有这个字段：P0-c 的交付物是一张"每条阻塞理由都要回答谁来解除它"的
+	// 登记表，但那段文案此前**只存在于 Go 源码里**（全仓唯一读者是断言它 ≥12 字的测试）——
+	// 运维在 /readyz 与管理端只看得到 reason 字面量，于是"闸门关上之后谁来把它重新打开"
+	// 在产品里仍然是空的。现在它是响应体的一部分（`actions`），并且 `AllowPublish`
+	// 的 503 hints 也是由同一份登记表拼出来的（同一真源，不允许出现第二份处置文案）。
+	//
+	// 内容是**静态的运维指引**（不含任何水位/路径之外的信息），因此可以出现在未认证的
+	// /readyz 上：它回答的是"该做什么"，而不是"这台机器现在是什么状态"。
+	Actions          []string `json:"actions,omitempty"`
 	DiskFreeByte     int64    `json:"disk_free_bytes"`
 	MemSource        string   `json:"mem_source"`
 	MemAvailableByte int64    `json:"mem_available_bytes"`
@@ -400,7 +425,10 @@ var publishBlockers = []publishBlocker{
 	{
 		Prefix: reasonDiskLow, BlocksPublish: true, Heal: HealOperator,
 		Action: "释放数据根所在磁盘空间（编译缓存 <data_root>/" + limits.CompileCacheDirName +
-			" 与调用事件表都会占用），或扩容后重启；余量低于 1 GiB 拒绝发布是刻意设计（§4.9）",
+			" 与调用事件表都会占用），或扩容后重启；余量低于 1 GiB 拒绝发布是刻意设计（§4.9）。" +
+			"要清编译缓存请走进程内回收入口（ReclaimCache / CleanCache，见 /readyz 的 actions）；" +
+			"**不要手工删除或改名 <data_root>/" + limits.CompileCacheDirName + " 目录本身**——" +
+			"执行侧把它绑定为信任边界且不会重建，删掉之后所有冷编译会失败到重启",
 		Why: "磁盘写满会让发布半途失败并留下不一致状态：这条没有自动解除者",
 	},
 	{
@@ -424,7 +452,10 @@ var publishBlockers = []publishBlocker{
 		Prefix: reasonCompileCacheOver, BlocksPublish: true, Heal: HealSyncReclaim,
 		Action: "发布闸门会**先同步回收一次再判**（P0-b），周期任务每 5 分钟也会回收（P0-a）；" +
 			"若仍超限，请检查 <data_root>/" + limits.CompileCacheDirName +
-			" 的写权限与磁盘余量（条目是内容寻址的派生数据，整目录删除不影响正确性）",
+			" 的写权限与磁盘余量。要手工清理只允许删**分片目录下的条目文件**" +
+			"（如 `find <data_root>/" + limits.CompileCacheDirName + " -type f -delete`）；" +
+			"**不要删除或改名缓存目录本身**：执行侧 wazero 的 fileCache 在构造期绑定它、" +
+			"不会重建，删掉之后所有冷编译会失败到重启（唯一正确的恢复方式是进程内回收入口）",
 		Why: "现场 P0 的自锁点：它曾把**唯一**的回收触发点（编译作业）关上 —— " +
 			"所以它必须同时有周期回收与同步自愈两条出路",
 	},
@@ -664,12 +695,99 @@ func (c *Checker) collect() Snapshot {
 		if err := c.opt.Ping(); err != nil {
 			s.OK = false
 			s.DBOK = false
-			s.addReason(reasonDBUnreachable, ": "+err.Error())
+			// R5-A-5：**只给分类后的原因**，绝不回显驱动原文。
+			//
+			// 驱动错误里带的是运维基础设施的标识：pgx 的连接错误逐字形如
+			// `failed to connect to \`user=<PGUSER> database=<PGDB>\`: <host>:<port> (<hostname>): …`，
+			// 而 /readyz 是**未认证端点**（cmd/server/main.go 直接 r.GET("/readyz", …)），
+			// 同一批 reasons 还会进 AllowPublish 的 503 details ⇒ 任何能访问这两个面的人
+			// 都能读到生产库的用户名/库名/地址。本文件自己的纪律写在
+			// CompileAvailability.Detail 与 meminfo.go 的注释里（"不要塞底层错误原文"），
+			// DB 这条此前是唯一的例外。
+			//
+			// 原文进服务端日志（可 grep，排障能力不降级）：Logger 未接线时**丢弃**，
+			// 而不是退回"把原文放进响应体"。
+			s.addReason(reasonDBUnreachable, "："+classifyDBError(err))
+			c.logf("readyz: 数据库探针失败（分类=%s；原文仅进服务端日志，不进 /readyz）：%v",
+				classifyDBError(err), err)
 		} else {
 			s.DBOK = true
 		}
 	}
+	s.attachActions()
 	return s
+}
+
+// classifyDBError 把数据库探针的错误**分类**成一句不含敏感信息的短语（R5-A-5）。
+//
+// 判据用错误链（errors.Is / net.Error / *net.DNSError）而不是驱动文案：文案会随驱动
+// 版本变（pgx 5.10 与 6.x 的措辞就不同），而错误类型不会。分类之外**一个字都不回显** ——
+// 不拼路径、不拼用户名、不拼地址（那正是本条要堵的洞）。
+//
+// 分类是**尽力而为**的：认不出来就统一给"连接失败"（宁可少说，不可多说）。
+func classifyDBError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return "连接超时（探针预算内未完成）"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "连接被拒绝（数据库未在监听？）"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		return "网络不可达"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "认证或权限失败"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		return "连接被重置"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "域名解析失败"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "连接超时（网络层超时）"
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "连接目标不存在（套接字/主机名解析结果）"
+	}
+	return "连接失败"
+}
+
+// logf 是 nil 安全的日志出口（Options.Logger 未接线 ⇒ 丢弃）。
+func (c *Checker) logf(format string, args ...any) {
+	if c == nil || c.opt.Logger == nil {
+		return
+	}
+	c.opt.Logger(format, args...)
+}
+
+// attachActions 把每条 reason 的**可行动文案**填进 s.Actions（R5-A-3）。
+//
+// 取值一律来自发布闸门登记表 `publishBlockers`（唯一真源）：没有登记的 reason 不会有
+// 文案（而"未登记"这件事由 publish_blocker_registry_test.go 当场打红，不会静默溜过），
+// 登记了但 Action 为空的（自愈类）也不产出 —— 那种情况下"谁来解除它"的答案是
+// 机器（周期回收/同步回收/自然回落），不是运维。
+func (s *Snapshot) attachActions() {
+	for _, r := range s.Reasons {
+		b, ok := publishBlockerFor(r)
+		if !ok {
+			continue
+		}
+		if line := blockerActionLine(b); line != "" {
+			s.Actions = append(s.Actions, line)
+		}
+	}
+}
+
+// blockerActionLine 把一条登记项渲染成**运维可读的一行**（/readyz 的 actions 与
+// AllowPublish 的 hints 共用同一份渲染：两处文案同源，第二份就是分叉的开始）。
+func blockerActionLine(b publishBlocker) string {
+	if strings.TrimSpace(b.Action) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s（解除者：%s）：%s", b.Prefix, b.Heal, b.Action)
 }
 
 // Handler 是 `/readyz` 的 HTTP 处理（JSON；不达标返回 503）。
@@ -745,11 +863,32 @@ func (c *Checker) AllowPublish() *apperr.Error {
 		WithDetail("compile_cache_limit_bytes", s.CacheLimitBytes).
 		WithHint("这是 fail-closed 保护：磁盘/缓存/编译队列水位不足时接受发布会把平台推向不可恢复状态").
 		WithHint("请在服务端查看 /readyz 的明细")
+	// **可行动文案来自登记表**（R5-A-3）：P0-c 要求"每条阻塞理由都要回答谁来解除它"，
+	// 那段文案此前只在源码里；现在它与 /readyz 的 actions 由同一份登记项渲染，
+	// 因此"闸门关上之后谁能把它重新打开"在**对外面上是有答案的**。
+	for _, line := range blockerActionLines(blocking) {
+		e = e.WithHint(line)
+	}
 	if healHint != "" {
 		e = e.WithHint(healHint)
 	}
 	e.HTTP = http.StatusServiceUnavailable
 	return e
+}
+
+// blockerActionLines 把一组阻塞理由渲染成可行动提示（与 /readyz 的 actions 同源）。
+func blockerActionLines(reasons []string) []string {
+	out := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		b, ok := publishBlockerFor(r)
+		if !ok {
+			continue
+		}
+		if line := blockerActionLine(b); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // dropReasonPrefix 返回去掉（前缀匹配的）某条 reason 之后的列表。
@@ -799,6 +938,12 @@ func (c *Checker) compileCacheLevel() (bytes int64, max int64) {
 //
 // 失败方向一律 fail-closed：钩子未接线 / 回收报错 / 回收后仍超限 / 水位读不出来 ⇒
 // 仍然阻塞，且文案点名"为什么没解除"并给出现在值与阈值（现场排障要的就是这三个数）。
+//
+// ⚠️ 口径纪律（R5-A-4）：**任何写进文案的数字都必须是回收后重新读到的**。
+// 旧实现把判定用的第一次读数（回收**前**）当作"现在"，于是"一条删不掉、其余删够"时会
+// 写出自相矛盾的 `现在 104857600 > 536870912`（假命题），把运维指向错误方向。
+// 现在：回收后一律重读；只有重读值真的超限才写"仍超限"，否则按**已解除**处理并把
+// "个别条目删不掉"降级为服务端日志（一条删不掉的条目不该把发布闸门永久关上）。
 func (c *Checker) healCompileCacheOverflow() (ok bool, replacement string, hint string) {
 	bytes, max := c.compileCacheLevel()
 	if c.opt.ReclaimCompileCache == nil {
@@ -809,14 +954,27 @@ func (c *Checker) healCompileCacheOverflow() (ok bool, replacement string, hint 
 			"装配层未注入缓存回收钩子（readyz.Options.ReclaimCompileCache）：发布闸门无法自愈，请核对 cmd/server 的装配"
 	}
 	removed, freed, err := c.opt.ReclaimCompileCache()
-	if err != nil {
-		return false,
-			fmt.Sprintf("%s（同步回收失败：%v；本次删除 %d 条 / 释放 %d 字节；现在 %d > %d）",
-				reasonCompileCacheOver, err, removed, freed, bytes, max),
-			"缓存回收失败（服务端日志里有 " + reasonCompileCacheOver + " 的回收记录）：请检查 <data_root>/" +
-				limits.CompileCacheDirName + " 的写权限与磁盘余量；缓存条目是内容寻址的派生数据，整目录删除不影响正确性"
-	}
+	// 回收**后**重新读数（无论成功还是失败）：文案里的"现在"必须是此刻的事实。
 	after, afterMax := c.compileCacheLevel()
+	if err != nil {
+		if afterMax > 0 && after <= afterMax {
+			// 回收报了错，但水位已经达标 ⇒ **判定已解除**：把"个别条目删不掉"降级为
+			// 服务端日志。继续关着闸门只会让一个已达标的水位永久 503（正是 P0 的形态）。
+			c.logf("readyz: 同步回收报错但水位已达标（删除 %d 条 / 释放 %d 字节；回收后 %d ≤ %d）：%v",
+				removed, freed, after, afterMax, err)
+			return true, "", ""
+		}
+		detail := "回收后水位不可读"
+		if afterMax > 0 {
+			detail = fmt.Sprintf("回收后 %d > %d", after, afterMax)
+		}
+		return false,
+			fmt.Sprintf("%s（同步回收失败：%v；本次删除 %d 条 / 释放 %d 字节；%s）",
+				reasonCompileCacheOver, err, removed, freed, detail),
+			"缓存回收失败（服务端日志里有 " + reasonCompileCacheOver + " 的回收记录）：请检查 <data_root>/" +
+				limits.CompileCacheDirName + " 的写权限与磁盘余量；**不要手工删除或改名缓存目录**——" +
+				"请走进程内回收入口（ReclaimCache / CleanCache）或重启服务端"
+	}
 	if afterMax <= 0 {
 		// 水位读不出来 ⇒ 无法证明已解除（读不到 ≠ 已达标）。
 		return false,

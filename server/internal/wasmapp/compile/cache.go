@@ -379,9 +379,19 @@ func cacheDirIsTrustBoundary(dir string) (string, error) {
 
 // cacheShardHint 返回 wazero 的缓存分片名（诊断：说明"换版本/换 CPU 会复制条目"，§4.3.1-b）。
 func cacheShardHint(dir string) string {
+	return strings.Join(cacheShardDirNames(dir), ",")
+}
+
+// cacheShardDirNames 返回缓存目录下的 wazero 版本分片目录名（`wazero-<版本>-<arch>-<os>`）。
+//
+// 用**观测**而不是"按规则算一份"：分片名由 wazero 自己拼，我们算的第二份一旦与它分叉，
+// 诊断/判据就会指向一个不存在的目录。观测到的名字只可能是它在用的那个。
+// （R5-A-2 的结论见 compileOne 的注释：编译侧无需重建目录 —— 子进程每次请求都新建
+// cache；这条观测只服务诊断与特征化判据。）
+func cacheShardDirNames(dir string) []string {
 	tops, err := os.ReadDir(dir)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var names []string
 	for _, t := range tops {
@@ -390,5 +400,5 @@ func cacheShardHint(dir string) string {
 		}
 	}
 	sort.Strings(names)
-	return strings.Join(names, ",")
+	return names
 }

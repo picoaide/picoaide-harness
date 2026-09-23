@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,7 +111,12 @@ type Runtime struct {
 	// cacheMode 是本运行时**实际生效**的编译缓存模式（构造期由唯一的决策点
 	// resolveCompilationCache 连同缓存对象一起给出，见 config.go）。
 	cacheMode CacheMode
-	logger    *log.Logger
+	// cacheDir / cacheShards 是**本运行时自己建的**磁盘缓存的父目录与 wazero 版本分片
+	// 目录名（构造期观测，见 cacheheal.go）：目录被外部删除时按它们重建，就能让那个
+	// 已经绑定路径的 fileCache 立刻恢复可用。注入缓存/进程内缓存 ⇒ 零值（无从重建）。
+	cacheDir    string
+	cacheShards []string
+	logger      *log.Logger
 	// memoryPages 是本运行时的线性内存上限（§4.3 R22），用于与请求侧期望值对拍。
 	memoryPages uint32
 	// onModuleClose 是 Options.OnModuleClose 的装配期快照（nil ⇒ 无观察者）。
@@ -153,7 +159,17 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	// R5-A-2 自愈的输入：**只有我们自己按 DataRoot 建的磁盘缓存**才有可重建的路径
+	// （注入缓存是别人造的，我们不知道它的目录；进程内缓存没有目录）。分片目录名在
+	// 这里**观测**（`NewCompilationCacheWithDir` 刚刚把它建出来），不按规则另算一份。
+	var cacheDir string
+	var cacheShards []string
+	if own && cacheMode == CacheModeDisk && strings.TrimSpace(opts.DataRoot) != "" {
+		cacheDir = CompileCacheDir(opts.DataRoot)
+		cacheShards = cacheShardDirs(cacheDir)
+	}
 	return &Runtime{rt: rt, cache: cache, ownCch: own, cacheMode: cacheMode, logger: logger, memoryPages: pages,
+		cacheDir: cacheDir, cacheShards: cacheShards,
 		onModuleClose: opts.OnModuleClose}, nil
 }
 
@@ -200,9 +216,29 @@ func (r *Runtime) CacheMode() CacheMode {
 //
 // 它存在的意义是"同配置"这一条：执行进程若用别的配置编译，磁盘缓存就永远命中不了
 // （§4.3.1-a）。生产路径上模块由编译进程预编译（60 s 预算 + 队列），本方法服务于
-// 干跑与测试。
+// 请求路径上的冷编译补齐（appserver 的 moduleCache loader）与测试。
+//
+// ⚠️ 它是**执行侧唯一**会往磁盘缓存写条目的入口，因此"缓存目录被外部删除"的自愈
+// （R5-A-2）也挂在这里：wazero 的 fileCache 只持路径、不重建目录，删掉分片目录之后
+// 每一次冷编译都会以 ENOENT 失败到进程重启。自愈分两步 —— 编译前补齐目录；真的撞上
+// ENOENT 时补齐后**重试一次**；仍失败则把驱动级谜语换成可行动文案（见 cacheheal.go）。
 func (r *Runtime) CompileModule(ctx context.Context, bin []byte) (wazero.CompiledModule, error) {
-	return r.rt.CompileModule(ctx, bin)
+	if err := r.ensureDiskCacheDirs(); err != nil {
+		r.logger.Printf("runtime: ⚠️ 重建编译缓存目录失败（冷编译可能失败）：%v", err)
+	}
+	mod, err := r.rt.CompileModule(ctx, bin)
+	if err == nil || !cacheDirFailure(err, r.cacheDir) {
+		return mod, err
+	}
+	if rerr := r.ensureDiskCacheDirs(); rerr != nil {
+		return nil, cacheDirMissingError(fmt.Errorf("%v（重建目录失败：%v）", err, rerr), r.cacheDir)
+	}
+	mod, err = r.rt.CompileModule(ctx, bin)
+	if err != nil {
+		return nil, cacheDirMissingError(err, r.cacheDir)
+	}
+	r.logger.Printf("runtime: 编译缓存目录被外部删除，已重建并重试成功（%s）", r.cacheDir)
+	return mod, nil
 }
 
 // ===== 一次请求：执行循环（§7）=====

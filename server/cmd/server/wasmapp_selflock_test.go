@@ -175,7 +175,7 @@ func TestSelfLockSyncReclaimHealsOrKeepsActionable503(t *testing.T) {
 	checker := readyz.New(readyz.Options{
 		DataRoot:            dataRoot,
 		Compiler:            compileStatsFunc(c),
-		ReclaimCompileCache: compileReclaimHook(c), // 生产装配的同一个 helper
+		ReclaimCompileCache: compileReclaimHook(c, nil), // 生产装配的同一个 helper（编译器在 ⇒ 走编译侧）
 	})
 
 	// 回收成功 ⇒ 放行（且真的删了东西）。
@@ -208,7 +208,7 @@ func TestSelfLockSyncReclaimHealsOrKeepsActionable503(t *testing.T) {
 	checker2 := readyz.New(readyz.Options{
 		DataRoot:            badRoot,
 		Compiler:            compileStatsFunc(c2),
-		ReclaimCompileCache: compileReclaimHook(c2),
+		ReclaimCompileCache: compileReclaimHook(c2, nil),
 	})
 	err := checker2.AllowPublish()
 	if err == nil {
@@ -332,33 +332,53 @@ func waitForCacheAtMost(t *testing.T, c *compile.Compiler, limit int64, budget t
 // TestWasmCompileSelfLockWiringIsPresent ④：装配守卫（源码级）。
 //
 // 为什么必须源码级：另三条判据测的是"组件给了就work"，而 setupWasmPlatform 是唯一
-// 装配点 —— 删掉那两行接线时失败形态是**静默的**（不会有用例红），正是现场 P0 的一半。
+// 装配点 —— 删掉那几行接线时失败形态是**静默的**（不会有用例红），正是现场 P0 的一半。
+//
+// 2026-09-23（R5-A-1）：水位快照的构造从 setupWasmPlatform 的内联闭包抽成了
+// `wasmCompileStatsProvider`，因此"生效上限必须来自编译器自己的快照"这条判据改在
+// **那个函数的函数体**里断言（判据本身没有被放宽：它仍然钉住 `st.CacheMaxBytes` 这个
+// 具体表达式，而不是"某处有 CacheMaxBytes"）。
 func TestWasmCompileSelfLockWiringIsPresent(t *testing.T) {
 	src, err := os.ReadFile("wasmapp.go")
 	if err != nil {
 		t.Fatalf("读 wasmapp.go: %v", err)
 	}
 	text := string(src)
-	start := strings.Index(text, "func setupWasmPlatform(")
+
+	for _, want := range []struct {
+		fn     string
+		needle string
+		why    string
+	}{
+		{"func setupWasmPlatform(", "startWasmCompileReclaimLoop(ctx, compiler)", "周期回收（P0-a）必须在装配期启动"},
+		{"func setupWasmPlatform(", "ReclaimCompileCache: compileReclaimHook(compiler, cacheOps)", "发布闸门的同步回收钩子（P0-b）必须接线，且编译子系统缺席时要落到执行侧（R5-A-1）"},
+		{"func setupWasmPlatform(", "Compiler: wasmCompileStatsProvider(compiler, cacheOps)", "水位来源必须按「编译器在/不在」二选一（R5-A-1：缺席时不许自报 0）"},
+		{"func setupWasmPlatform(", "newWasmCompileCacheOps(dataDir, log.Printf)", "编译子系统缺席时必须创建执行侧缓存运维组件（R5-A-1）"},
+		{"func setupWasmPlatform(", "startWasmCacheFallbackReclaim(ctx, compiler, cacheOps)", "执行侧周期回收必须在装配期被启动（R5-A-1 ②）"},
+		{"func wasmCompileStatsProvider(", "CacheMaxBytes:", "生效上限必须注入探针（否则超限判定与回收用的阈值分叉）"},
+		{"func wasmCompileStatsProvider(", "st.CacheMaxBytes", "注入的必须是编译器自己的生效上限（不是重新推导一个）"},
+	} {
+		if !strings.Contains(funcBody(t, text, want.fn), want.needle) {
+			t.Fatalf("%s 里缺 %q（%s）", want.fn, want.needle, want.why)
+		}
+	}
+}
+
+// funcBody 返回 `func <签名前缀>` 那段函数体（到下一个顶层 func 为止）。
+//
+// 抽出来是因为接线分布在两个函数里（装配点 + 水位来源），而**断言位置**必须跟着实现走 ——
+// 否则"判据找不到字符串"会被误读成"接线没了"（判据本身就成了噪音）。
+func funcBody(t *testing.T, text, prefix string) string {
+	t.Helper()
+	start := strings.Index(text, prefix)
 	if start < 0 {
-		t.Fatal("wasmapp.go 里找不到 setupWasmPlatform")
+		t.Fatalf("wasmapp.go 里找不到 %q", prefix)
 	}
 	end := strings.Index(text[start:], "\nfunc ")
 	if end < 0 {
-		t.Fatal("定位 setupWasmPlatform 函数体失败")
+		t.Fatalf("定位 %q 的函数体失败", prefix)
 	}
-	body := text[start : start+end]
-
-	for _, want := range []struct{ needle, why string }{
-		{"startWasmCompileReclaimLoop(ctx, compiler)", "周期回收（P0-a）必须在装配期启动"},
-		{"ReclaimCompileCache: compileReclaimHook(compiler)", "发布闸门的同步回收钩子（P0-b）必须接线"},
-		{"CacheMaxBytes:", "生效上限必须注入探针（否则超限判定与回收用的阈值分叉）"},
-		{"st.CacheMaxBytes", "注入的必须是编译器自己的生效上限（不是重新推导一个）"},
-	} {
-		if !strings.Contains(body, want.needle) {
-			t.Fatalf("setupWasmPlatform 缺 %q（%s）", want.needle, want.why)
-		}
-	}
+	return text[start : start+end]
 }
 
 // ===== 夹具 =====

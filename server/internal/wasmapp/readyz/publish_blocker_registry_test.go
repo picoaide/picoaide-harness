@@ -19,13 +19,24 @@ package readyz
 //     `s.Reasons = append("新的阻塞理由…")`）⇒ 本文件红；
 //   - 把某条阻塞理由的 Heal 清空 / Action 清空（HealOperator）⇒ 本文件红；
 //   - 删掉某条登记项（而 collect() 仍会产出它）⇒ 行为方向红。
+//
+// ⚠️ 解析面（R5-D-27，2026-09-23 五轮对抗审计）：判据扫的是**整个包目录下的全部非测试
+// .go 文件**，而不是只解析 `readyz.go`。旧形态（只解析一个文件）有一个**静默逃逸**：
+// 把新的阻塞 reason 的写入点放进同包另一个文件（方法名不叫 `addReason`、或干脆在别处
+// `s.Reasons = append(...)`）⇒ 八条登记表判据全绿，而那条 reason **未登记** ⇒ 装配后成为
+// "未登记的 fail-closed 阻塞" ⇒ 永久 503 且没有解除者（正是 909440eab4 刚修的现场自锁
+// 形态复发）。现在两个方向都被包级扫描罩住，且"扫不到任何写入点/一个文件都没解析到"
+// 一律 fail-loud（不许静默通过）。
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,127 +45,237 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/queue"
 )
 
-// reasonsSourceFile 是源码判据读的文件（与测试同目录）。
-const reasonsSourceFile = "readyz.go"
+// reasonsSourceDir 是源码判据解析的**包目录**（与测试同目录；R5-D-27 起是整包而不是单文件）。
+const reasonsSourceDir = "."
 
-// collectReasonPrefixes 从源码里取出 collect() 产出的全部 reason 前缀。
-//
-// 判据形态：
-//   - 每条 reason 必须写成 `s.addReason(<reason 常量>, …)`（第一个参数是**标识符**）；
-//   - 一律禁止 `*.Reasons = append(...)` 的裸拼装（绕过登记表）；
-//   - 标识符必须解析到本文件里的字符串常量（改名/新字面量都会被抓住）。
-func collectReasonPrefixes(t *testing.T) map[string]int {
-	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, reasonsSourceFile, nil, 0)
+// reasonScan 是一次包级扫描的结果。
+type reasonScan struct {
+	// Files 是**已解析**的非测试 .go 文件（相对路径）。
+	Files []string
+	// Produced 是 addReason 产出的 reason 值 → 出现次数。
+	Produced map[string]int
+	// Problems 是结构性缺陷（解析失败 / 没有文件 / 裸写 Reasons / addReason 缺失或重复 /
+	// 首个参数不是常量标识符 / 参数个数不对）。**任何一条都必须 fail-loud**。
+	Problems []string
+}
+
+// nonTestGoFiles 列出 dir 下的非测试 .go 文件（排序后返回，保证判据可复现）。
+func nonTestGoFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("解析 %s 失败: %v", reasonsSourceFile, err)
+		return nil, err
 	}
-	// 先收集常量表（name → 字符串值）。
-	consts := map[string]string{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		gd, ok := n.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
-			return true
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// scanPackageReasons 扫**包目录下的全部非测试 .go**（R5-D-27 的解析面）。
+func scanPackageReasons(dir string) reasonScan {
+	paths, err := nonTestGoFiles(dir)
+	if err != nil {
+		return reasonScan{Produced: map[string]int{}, Problems: []string{fmt.Sprintf("列举 %s 下的源文件失败: %v", dir, err)}}
+	}
+	if len(paths) == 0 {
+		return reasonScan{Produced: map[string]int{}, Problems: []string{fmt.Sprintf("%s 下没有任何非测试 .go 文件（判据失效）", dir)}}
+	}
+	abs := make([]string, 0, len(paths))
+	for _, p := range paths {
+		abs = append(abs, dir+string(os.PathSeparator)+p)
+	}
+	return scanReasonSources(abs)
+}
+
+// scanReasonSources 扫**给定的源文件集合**（跨文件语义：常量表与 addReason 实现体的位置
+// 都是包级聚合的，因此"常量在 A 文件、addReason 调用在 B 文件"同样被罩住）。
+func scanReasonSources(paths []string) reasonScan {
+	res := reasonScan{Files: append([]string{}, paths...), Produced: map[string]int{}}
+	type parsedFile struct {
+		path string
+		fset *token.FileSet
+		file *ast.File
+	}
+	var files []parsedFile
+	consts := map[string]string{} // 包级常量表（name → 字符串值）
+	type span struct {
+		path     string
+		pos, end token.Pos
+	}
+	var addReasonSpans []span
+
+	for _, p := range paths {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			res.Problems = append(res.Problems, fmt.Sprintf("解析 %s 失败: %v", p, err))
+			continue
+		}
+		files = append(files, parsedFile{p, fset, file})
+		ast.Inspect(file, func(n ast.Node) bool {
+			gd, ok := n.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				return true
 			}
-			for i, name := range vs.Names {
-				if i >= len(vs.Values) {
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
 					continue
 				}
-				if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					if v, uerr := strconv.Unquote(lit.Value); uerr == nil {
-						consts[name.Name] = v
+				for i, name := range vs.Names {
+					if i >= len(vs.Values) {
+						continue
+					}
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						if v, uerr := strconv.Unquote(lit.Value); uerr == nil {
+							consts[name.Name] = v
+						}
 					}
 				}
 			}
-		}
-		return true
-	})
-
-	out := map[string]int{}
-	// addReason 自己的实现体是**唯一**允许写 `s.Reasons = append(...)` 的地方
-	//（它就是那个集中点）—— 先算出它的位置区间，赋值判据在该区间内豁免。
-	addReasonStart, addReasonEnd := token.NoPos, token.NoPos
-	ast.Inspect(file, func(n ast.Node) bool {
-		fd, ok := n.(*ast.FuncDecl)
-		if ok && fd.Name != nil && fd.Name.Name == "addReason" {
-			addReasonStart, addReasonEnd = fd.Pos(), fd.End()
-		}
-		return true
-	})
-	if !addReasonStart.IsValid() {
-		t.Fatalf("%s 里找不到 addReason 的实现（判据本身失效了）", reasonsSourceFile)
-	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.AssignStmt:
-			// 禁止直接给 *Reasons 赋值/追加（会绕过登记表）；addReason 自己的实现体除外。
-			if node.Pos() >= addReasonStart && node.End() <= addReasonEnd {
-				return true
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			fd, ok := n.(*ast.FuncDecl)
+			if ok && fd.Name != nil && fd.Name.Name == "addReason" {
+				addReasonSpans = append(addReasonSpans, span{p, fd.Pos(), fd.End()})
 			}
-			for _, lhs := range node.Lhs {
-				sel, ok := lhs.(*ast.SelectorExpr)
-				if ok && sel.Sel.Name == "Reasons" {
-					t.Fatalf("%s:%d 直接对 Reasons 赋值/追加 —— reason 必须经 Snapshot.addReason 用登记常量产出"+
-						"（否则发布闸门的判据表无法枚举，见 publishBlockers 的注释）",
-						reasonsSourceFile, fset.Position(node.Pos()).Line)
+			return true
+		})
+	}
+	if len(files) == 0 {
+		res.Problems = append(res.Problems, "一个源文件都没解析成功（判据失效）")
+		return res
+	}
+	// addReason 自己的实现体是**唯一**允许写 `s.Reasons = append(...)` 的地方（它就是那个
+	// 集中点）—— 赋值判据在该区间内豁免。缺失 ⇒ fail-loud（否则"没有集中点"会静默放行一切）。
+	switch len(addReasonSpans) {
+	case 0:
+		res.Problems = append(res.Problems, "找不到 addReason 的实现（判据本身失效）")
+	case 1:
+	default:
+		res.Problems = append(res.Problems, fmt.Sprintf("addReason 有 %d 处实现（集中点必须唯一）", len(addReasonSpans)))
+	}
+
+	for _, pf := range files {
+		inAddReason := func(n ast.Node) bool {
+			for _, s := range addReasonSpans {
+				if s.path == pf.path && n.Pos() >= s.pos && n.End() <= s.end {
+					return true
 				}
 			}
-		case *ast.CallExpr:
-			sel, ok := node.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "addReason" {
-				return true
-			}
-			if len(node.Args) != 2 {
-				t.Fatalf("%s:%d addReason 需要 2 个参数 (prefix, extra)",
-					reasonsSourceFile, fset.Position(node.Pos()).Line)
-			}
-			ident, ok := node.Args[0].(*ast.Ident)
-			if !ok {
-				t.Fatalf("%s:%d addReason 的第一个参数必须是 reason* 常量标识符（不许写字面量/拼接）",
-					reasonsSourceFile, fset.Position(node.Pos()).Line)
-			}
-			value, ok := consts[ident.Name]
-			if !ok {
-				t.Fatalf("%s:%d addReason 的 %s 不是本文件的字符串常量 —— 新增 reason 必须先在常量区声明并登记进 publishBlockers",
-					reasonsSourceFile, fset.Position(node.Pos()).Line, ident.Name)
-			}
-			out[value]++
+			return false
 		}
-		return true
-	})
-	if len(out) == 0 {
-		t.Fatal("源码里没有找到任何 addReason 调用（判据本身失效了）")
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				// 禁止直接给 *Reasons 赋值/追加（会绕过登记表）；addReason 自己的实现体除外。
+				if inAddReason(node) {
+					return true
+				}
+				for _, lhs := range node.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if ok && sel.Sel.Name == "Reasons" {
+						res.Problems = append(res.Problems, fmt.Sprintf(
+							"%s:%d 直接对 Reasons 赋值/追加 —— reason 必须经 Snapshot.addReason 用登记常量产出"+
+								"（否则发布闸门的判据表无法枚举，见 publishBlockers 的注释）",
+							pf.path, pf.fset.Position(node.Pos()).Line))
+					}
+				}
+			case *ast.CallExpr:
+				sel, ok := node.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "addReason" {
+					return true
+				}
+				if len(node.Args) != 2 {
+					res.Problems = append(res.Problems, fmt.Sprintf("%s:%d addReason 需要 2 个参数 (prefix, extra)",
+						pf.path, pf.fset.Position(node.Pos()).Line))
+					return true
+				}
+				ident, ok := node.Args[0].(*ast.Ident)
+				if !ok {
+					res.Problems = append(res.Problems, fmt.Sprintf(
+						"%s:%d addReason 的第一个参数必须是 reason* 常量标识符（不许写字面量/拼接）",
+						pf.path, pf.fset.Position(node.Pos()).Line))
+					return true
+				}
+				value, ok := consts[ident.Name]
+				if !ok {
+					res.Problems = append(res.Problems, fmt.Sprintf(
+						"%s:%d addReason 的 %s 不是本包的字符串常量 —— 新增 reason 必须先在常量区声明并登记进 publishBlockers",
+						pf.path, pf.fset.Position(node.Pos()).Line, ident.Name))
+					return true
+				}
+				res.Produced[value]++
+			}
+			return true
+		})
 	}
-	return out
+	if len(res.Produced) == 0 {
+		res.Problems = append(res.Problems, "扫描没有找到任何 addReason 产出点（判据失效：不许静默通过）")
+	}
+	sort.Strings(res.Problems)
+	return res
 }
 
-// TestPublishBlockersCoverEveryReasonInSource：源码方向 —— 产出的每一条 reason 都已登记，
-// 登记的每一条也都真的会被产出。
-func TestPublishBlockersCoverEveryReasonInSource(t *testing.T) {
-	produced := collectReasonPrefixes(t)
+// registryCoverageProblems 返回"源码写入点 ↔ 登记表"两个方向的全部不一致（空 ⇒ 一致）。
+//
+// 抽成纯函数（R5-D-27 的要求）：跨文件正/反例可以在**临时目录的合成源文件**上跑同一套
+// 判据，而不必改真实包内容 —— "把写入点放进第二个文件且不登记 ⇒ 必须红"这件事因此是
+// 可复跑的判据，而不是一次性的手工变异。
+func registryCoverageProblems(produced map[string]int, blockers []publishBlocker) []string {
+	var out []string
 	registered := map[string]bool{}
-	for _, b := range publishBlockers {
+	for _, b := range blockers {
 		if registered[b.Prefix] {
-			t.Fatalf("登记表里有重复前缀：%q", b.Prefix)
+			out = append(out, fmt.Sprintf("登记表里有重复前缀：%q", b.Prefix))
 		}
 		registered[b.Prefix] = true
 	}
 	for prefix, n := range produced {
-		if _, ok := publishBlockerFor(prefix); !ok {
-			t.Fatalf("collect() 产出的 reason %q（%d 处）没有登记 —— 新增阻塞理由必须显式回答"+
-				"「谁来解除它」（periodic-task / sync-reclaim / self-draining / operator+可行动文案）", prefix, n)
+		if !registered[prefix] {
+			out = append(out, fmt.Sprintf("产出的 reason %q（%d 处）没有登记 —— 新增阻塞理由必须显式回答"+
+				"「谁来解除它」（periodic-task / sync-reclaim / self-draining / operator+可行动文案）", prefix, n))
 		}
 	}
-	for _, b := range publishBlockers {
+	for _, b := range blockers {
 		if produced[b.Prefix] == 0 {
-			t.Fatalf("登记项 %q 在 collect() 里没有任何产出点（陈旧登记：它不会出现在 /readyz 上）", b.Prefix)
+			out = append(out, fmt.Sprintf("登记项 %q 在源码里没有任何产出点（陈旧登记：它不会出现在 /readyz 上）", b.Prefix))
 		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectReasonPrefixes 扫真实包并把结构性缺陷一律 fail-loud。
+//
+// 判据形态：
+//   - 每条 reason 必须写成 `s.addReason(<reason 常量>, …)`（第一个参数是**标识符**）；
+//   - 一律禁止 `*.Reasons = append(...)` 的裸拼装（绕过登记表）；
+//   - 标识符必须解析到本包（**任意文件**）的字符串常量（改名/新字面量都会被抓住）；
+//   - 解析面 = 包目录下全部非测试 .go（R5-D-27）。
+func collectReasonPrefixes(t *testing.T) map[string]int {
+	t.Helper()
+	res := scanPackageReasons(reasonsSourceDir)
+	if len(res.Problems) > 0 {
+		t.Fatalf("源码判据发现结构性缺陷（%d 条，解析面=%s 下全部非测试 .go）：%s",
+			len(res.Problems), reasonsSourceDir, strings.Join(res.Problems, "；"))
+	}
+	return res.Produced
+}
+
+// TestPublishBlockersCoverEveryReasonInSource：源码方向 —— 产出的每一条 reason 都已登记，
+// 登记的每一条也都真的会被产出（两个方向都由 registryCoverageProblems 判定，解析面=整包）。
+func TestPublishBlockersCoverEveryReasonInSource(t *testing.T) {
+	produced := collectReasonPrefixes(t)
+	if problems := registryCoverageProblems(produced, publishBlockers); len(problems) > 0 {
+		t.Fatalf("源码写入点与登记表不一致（%d 条）：%s", len(problems), strings.Join(problems, "；"))
 	}
 }
 
@@ -358,14 +479,137 @@ func TestReasonPrefixConstantsMatchRegistry(t *testing.T) {
 }
 
 // TestCollectReasonPrefixesScannerIsNotVacuous：判据自证 ——
-// 扫描器必须真的从源码里读到全部 8 条 reason（否则"没找到 ⇒ 不报错"就是假绿）。
+// 扫描器必须真的从源码里读到全部 8 条 reason（否则"没找到 ⇒ 不报错"就是假绿），
+// 并且**真的覆盖了包目录下的每一个非测试 .go 文件**（R5-D-27：漏文件 = 静默逃逸）。
 func TestCollectReasonPrefixesScannerIsNotVacuous(t *testing.T) {
 	produced := collectReasonPrefixes(t)
 	if len(produced) != len(publishBlockers) {
 		t.Fatalf("扫描到 %d 条 reason，登记表有 %d 条（扫描器或实现漂移）：%v",
 			len(produced), len(publishBlockers), produced)
 	}
-	if _, err := os.Stat(reasonsSourceFile); err != nil {
-		t.Fatalf("源码判据读的文件不存在：%v", err)
+	// 解析面完整性：本次扫描的文件集合必须等于包目录下的全部非测试 .go 文件。
+	want, err := nonTestGoFiles(reasonsSourceDir)
+	if err != nil {
+		t.Fatalf("列举包目录源文件失败：%v", err)
+	}
+	if len(want) == 0 {
+		t.Fatal("包目录下没有任何非测试 .go 文件（判据失效）")
+	}
+	res := scanPackageReasons(reasonsSourceDir)
+	if len(res.Problems) > 0 {
+		t.Fatalf("包级扫描有结构性缺陷：%s", strings.Join(res.Problems, "；"))
+	}
+	got := map[string]bool{}
+	for _, f := range res.Files {
+		got[filepath.Base(f)] = true
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Fatalf("包级扫描漏掉了 %s（解析面必须罩住同包**全部**非测试 .go —— "+
+				"漏一个文件就等于给「把写入点搬过去」开了后门，R5-D-27）：扫过=%v", name, res.Files)
+		}
+	}
+}
+
+// ===== R5-D-27：解析面的**跨文件**正/反例（合成源文件，不改真实包）=====
+
+// syntheticPackage 在临时目录里造一个"两个文件的包"，返回目录与两个文件路径。
+//
+// 第一个文件承载常量表与 addReason 的**实现体**（唯一允许裸写 Reasons 的地方）；
+// 第二个文件承载**新的写入点** —— 这正是旧形态（只解析 readyz.go）漏掉的形态。
+func syntheticPackage(t *testing.T, extraSource string) (dir, first, second string) {
+	t.Helper()
+	dir = t.TempDir()
+	first = filepath.Join(dir, "registry.go")
+	second = filepath.Join(dir, "extra_writer.go")
+	write := func(path, src string) {
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatalf("写合成源文件 %s: %v", path, err)
+		}
+	}
+	write(first, `package readyz
+
+// 已知理由（已登记）
+const reasonKnown = "已知理由"
+
+type Snapshot struct{ Reasons []string }
+
+// addReason 记一条 reason：集中点（唯一允许裸写 Reasons 的地方）。
+func (s *Snapshot) addReason(prefix, extra string) {
+	s.Reasons = append(s.Reasons, prefix+extra)
+}
+
+func collectKnown(s *Snapshot, ok bool) {
+	if ok {
+		s.addReason(reasonKnown, "")
+	}
+}
+`)
+	write(second, extraSource)
+	return dir, first, second
+}
+
+// TestRegistryScannerCoversWholePackageCrossFile 是 R5-D-27 的承重判据：
+//
+//	反例：新写入点在**同包第二个文件**且未登记 ⇒ 包级扫描必须产出它、覆盖判据必须红；
+//	      而"只解析第一个文件"的旧形态**抓不到**（这正是本条修复存在的理由）；
+//	正例：同一条 reason 登记之后 ⇒ 覆盖判据必须绿。
+func TestRegistryScannerCoversWholePackageCrossFile(t *testing.T) {
+	const newReason = "一条没登记的新阻塞理由"
+	const extra = `package readyz
+
+const reasonUndeclared = "一条没登记的新阻塞理由"
+
+func collectExtra(s *Snapshot) {
+	s.addReason(reasonUndeclared, "")
+}
+`
+	_, first, second := syntheticPackage(t, extra)
+
+	// ① 反例（跨文件、未登记）：包级扫描必须看见它，覆盖判据必须红。
+	pkg := scanReasonSources([]string{first, second})
+	if len(pkg.Problems) > 0 {
+		t.Fatalf("合成包不该有结构性缺陷：%s", strings.Join(pkg.Problems, "；"))
+	}
+	if pkg.Produced[newReason] == 0 {
+		t.Fatalf("包级扫描必须覆盖第二个文件里的写入点（R5-D-27）：%v", pkg.Produced)
+	}
+	problems := registryCoverageProblems(pkg.Produced, []publishBlocker{{Prefix: "已知理由", BlocksPublish: true, Heal: HealSelfDraining, Why: "夹具"}})
+	if len(problems) == 0 {
+		t.Fatal("未登记的跨文件 reason 必须被覆盖判据抓住（否则它会成为没有解除者的永久 503）")
+	}
+	if !strings.Contains(strings.Join(problems, "；"), newReason) {
+		t.Fatalf("覆盖判据必须点名那条未登记的 reason：%v", problems)
+	}
+	// ② 旧形态（只解析第一个文件）**抓不到** —— 这条断言说明修复承重，而不是"看起来更全"。
+	old := scanReasonSources([]string{first})
+	if old.Produced[newReason] != 0 {
+		t.Fatal("夹具不成立：旧形态（单文件解析）本该看不见第二个文件")
+	}
+	if got := registryCoverageProblems(old.Produced, []publishBlocker{{Prefix: "已知理由", BlocksPublish: true, Heal: HealSelfDraining, Why: "夹具"}}); len(got) != 0 {
+		t.Fatalf("旧形态在反例上应当**全绿**（这就是 R5-D-27 的逃逸面）：%v", got)
+	}
+	// ③ 正例（跨文件、已登记）：同一份源码 + 登记项 ⇒ 覆盖判据必须绿。
+	registered := []publishBlocker{
+		{Prefix: "已知理由", BlocksPublish: true, Heal: HealSelfDraining, Why: "夹具"},
+		{Prefix: newReason, BlocksPublish: true, Heal: HealOperator, Action: "请运维介入（夹具）", Why: "夹具"},
+	}
+	if got := registryCoverageProblems(pkg.Produced, registered); len(got) != 0 {
+		t.Fatalf("登记之后必须绿：%v", got)
+	}
+
+	// ④ 同族逃逸面同样被罩住：第二个文件里**裸写** s.Reasons ⇒ 结构性缺陷。
+	bareDir, bareFirst, bareSecond := syntheticPackage(t, `package readyz
+
+func collectBare(s *Snapshot) {
+	s.Reasons = append(s.Reasons, "裸拼的阻塞理由")
+}
+`)
+	bare := scanReasonSources([]string{bareFirst, bareSecond})
+	if len(bare.Problems) == 0 || !strings.Contains(strings.Join(bare.Problems, "；"), "Reasons") {
+		t.Fatalf("第二个文件里的裸写必须被抓住（否则绕过登记表的第二条路仍然通着）：%v", bare.Problems)
+	}
+	if _, err := nonTestGoFiles(bareDir); err != nil {
+		t.Fatalf("nonTestGoFiles 在合成目录上失败：%v", err)
 	}
 }
