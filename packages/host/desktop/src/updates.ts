@@ -18,6 +18,7 @@ import {
   type DesktopReleaseManifest,
 } from './desktop-release.ts'
 import {
+  compareSemVerVersions,
   fetchReleaseManifestDetailed,
   isRetriableManifestOutcome,
   parseSemVer,
@@ -617,7 +618,7 @@ export function apply(ctx: Context, config: Config): void {
       return {
         kind: 'ok',
         result: {
-          status: compareVersionStrings(latest.version, current.version) > 0 ? 'update-available' : 'up-to-date',
+          status: compareVersions(latest.version, current.version) > 0 ? 'update-available' : 'up-to-date',
           currentVersion: current.version,
           latestVersion: latest.version,
         },
@@ -931,46 +932,24 @@ function downloadPlatform(): 'darwin' | 'win32' | 'linux' {
   return process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
 }
 
-/** 严格 SemVer 比较(任一非法 ⇒ 0,调用方据此不做"可复用"判断)。 */
-function compareVersions(left: string, right: string): number {
-  const parsedLeft = parseSemVer(left)
-  const parsedRight = parseSemVer(right)
-  if (parsedLeft === null || parsedRight === null) return 0
-  return compareVersionStrings(parsedLeft.version, parsedRight.version)
-}
-
 /**
- * 比较两个**规范**版本号(先各自解析;非法值按相等处理)。
- * @param left - canonical version.
- * @param right - canonical version.
+ * 严格 SemVer 比较（任一非法 ⇒ 0，调用方据此不做"可复用"判断）。
+ *
+ * ⚠️ 2026-09-23 R4-D-1（P1）：本函数**收敛为 `update-checker.ts` 的
+ * `compareSemVerVersions` 一个实现**（此前本文件另有一份 `compareVersionStrings`，
+ * 与 update-checker 的同义函数并存 = 客户端内部自己两种写法）。
+ *
+ * 语义与服务端唯一实现 `server/internal/util/semver.go` 的 `CompareSemVer` 一致，
+ * 并由**仓内共享语料**逐条对拍：`server/internal/util/testdata/semver-corpus.json`
+ * （判据 `tests/version-compare-corpus.spec.ts`；企业包与 Go 侧四个包读同一份）。
+ * 导出本函数**只是为了让跨端语料判据够得着它**（生产调用点仍在本文件内）。
+ *
+ * @param left - 左版本（非规范版本由 parseSemVer 判定，非法 ⇒ 0）。
+ * @param right - 右版本。
  * @returns 负数/零/正数表示先后。
  */
-function compareVersionStrings(left: string, right: string): number {
-  const parsedLeft = parseSemVer(left)
-  const parsedRight = parseSemVer(right)
-  if (parsedLeft === null || parsedRight === null) return 0
-  const numeric = (value: string): number => Number(value)
-  for (const key of ['major', 'minor', 'patch'] as const) {
-    const difference = numeric(parsedLeft[key]) - numeric(parsedRight[key])
-    if (difference !== 0) return difference < 0 ? -1 : 1
-  }
-  if (parsedLeft.prerelease.length === 0) return parsedRight.prerelease.length === 0 ? 0 : 1
-  if (parsedRight.prerelease.length === 0) return -1
-  const length = Math.max(parsedLeft.prerelease.length, parsedRight.prerelease.length)
-  for (let index = 0; index < length; index += 1) {
-    const a = parsedLeft.prerelease[index]
-    const b = parsedRight.prerelease[index]
-    if (a === undefined) return -1
-    if (b === undefined) return 1
-    if (a === b) continue
-    const aNumeric = /^[0-9]+$/u.test(a)
-    const bNumeric = /^[0-9]+$/u.test(b)
-    if (aNumeric && bNumeric) return Number(a) < Number(b) ? -1 : 1
-    if (aNumeric) return -1
-    if (bNumeric) return 1
-    return a < b ? -1 : 1
-  }
-  return 0
+export function compareVersions(left: string, right: string): number {
+  return compareSemVerVersions(left, right) ?? 0
 }
 
 function parseState(text: string): UpdateStateV2 {
