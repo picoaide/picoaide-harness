@@ -36,6 +36,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute, sep, dirname } from 'node:path'
 import { localTrustFence } from './http-guard.js'
+import { hasDisableFlag, toggleDisableFlag } from './skill-manifest.js'
 import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Cap on a single readable text file (bytes). */
@@ -46,6 +47,13 @@ const MAX_WRITE_BYTES = 1024 * 1024
 
 /** Cap on the disable/enable toggle request body (bytes). */
 const MAX_TOGGLE_BYTES = 4096
+
+/**
+ * 禁用标记"投影"的防抖窗口（N1b）：「目录发生变化」到"把 `state.disabled` 投影回
+ * 文件"之间的等待。取值只需盖住一次更新的多次写盘事件（换入 + 清理 + 新内容扫描），
+ * 不能长到让面板/模型在窗口内看到分叉状态。与 `skills/change` 的触发频率同量级。
+ */
+const DISABLE_PROJECTION_DEBOUNCE_MS = 500
 
 /**
  * Default legacy state files of the standalone skill-manager plugins
@@ -293,33 +301,12 @@ function splitFrontmatter(text) {
 // 修复：直接把 SKILL.md frontmatter 的 disable-model-invocation 置为 true——
 // 这是 skill-local 官方解析的字段（true → modelInvocable:false → 模型目录
 // 过滤、skill 工具拒绝加载），不依赖任何 layer 覆盖关系，per-source 生效。
-
-/** frontmatter 禁用标记字段名（skill-local 官方 canonical key）。 */
-const DISABLE_MODEL_KEY = 'disable-model-invocation'
-
-/**
- * 在 SKILL.md 文本的 frontmatter 中插入/移除禁用标记，其余内容原样保留。
- * @param {string} text - 完整 SKILL.md 内容。
- * @param {boolean} disabled - true=插入 `disable-model-invocation: true`；
- *   false=移除该字段（无论其当前值）。
- * @returns {string|null} 修改后的文本；状态已一致时返回原文本；
- *   非规范 SKILL.md（无 frontmatter）返回 null（调用方按失败处理）。
- */
-function toggleDisableFlag(text, disabled) {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n?)([\s\S]*)$/.exec(text)
-  if (match === null) return null
-  const [, data, closingNewline, body] = match
-  const keyLine = /^\s*disable-model-invocation\s*:.*$/m
-  const has = keyLine.test(data)
-  if (disabled === has) return text
-  let next
-  if (disabled) {
-    next = `${data}${data.endsWith('\n') ? '' : '\n'}${DISABLE_MODEL_KEY}: true`
-  } else {
-    next = data.split('\n').filter((line) => !keyLine.test(line)).join('\n')
-  }
-  return `---\n${next}\n---${closingNewline}${body}`
-}
+//
+// **N1b（独立复审 R5-B-4，2026-09-23）**：该字段的**写入端与哈希端必须共用同一份
+// 实现**，否则平台自己写的元数据会被内容哈希判成"用户改了内容"（能力中心误显示
+// 「已本地修改」+ 每次更新多一张确认条）。`toggleDisableFlag` / `hasDisableFlag`
+// 已移入 `lib/skill-manifest.js`（内容哈希端的 `normalizeSkillManifestBytes` 也在
+// 那里，`coi/skills-sync.js` 的换入保留逻辑同样 import 它），本文件只保留调用。
 
 /**
  * 原子写入修改后的 SKILL.md（tmp + rename，与 saveState 同款）。
@@ -494,6 +481,8 @@ export function installSkillsManager(ctx, options = {}) {
     /** Plugin teardown latch: stop registering new shadows after dispose. */
     let disposed = false
     let reconciling = false
+    /** 「禁用标记投影」的防抖定时器（N1b；dispose 时清理）。 */
+    let projectionTimer = null
     let reconcileAgain = false
     /** Invalidation handle for the user-managed directory provider. */
     let providerControl = null
@@ -584,6 +573,10 @@ export function installSkillsManager(ctx, options = {}) {
     skillCtx.effect(() => {
       return () => {
         disposed = true
+        if (projectionTimer !== null) {
+          clearTimeout(projectionTimer)
+          projectionTimer = null
+        }
         for (const dispose of shadows.values()) dispose()
         shadows.clear()
       }
@@ -591,38 +584,67 @@ export function installSkillsManager(ctx, options = {}) {
     void reconcile()
 
     /**
-     * issue #6 懒迁移（启动时一次）：260810 快照分层后，旧 state 列表里那些
-     * 「global 层 shadow 已被 scope 层同名技能覆盖、禁用实际失效」的技能
-     * （典型：~/.agents/skills 的 user-agents 技能），落地 frontmatter 标记
-     * 使其真正禁用。只处理「当前目录里 modelInvocable 仍为 true」的技能——
-     * shadow 已生效的（global 层 custom 技能等）不动文件，最小侵入。
-     * 写盘后 skill-local watcher 触发 skills/change → reconcile（幂等收敛，
-     * 标记后 modelInvocable:false，reconcile 不会再注册 shadow）。
+     * 把 `state.disabled` **投影**到技能文件上（N1b，独立复审 R5-B-4）。
+     *
+     * 权威是插件的 `state.disabled`（它同时驱动运行时 shadow，且对 bundled/project
+     * 这类不可写文件同样有效）；文件里的 `disable-model-invocation` 是这份权威的
+     * **投影**，判据只有一个：**文件里没有该标记就补上**。
+     *
+     * 为什么不能沿用旧口径（"shadow 已生效就不动文件，最小侵入"）：那条口径会让
+     * 两者长期分叉 —— 一次整树更新（能力中心更新 / 随包换入）会把标记从文件里抹掉，
+     * 而 shadow 让运行时看起来仍然禁用，于是**没有任何人再去补文件**：界面/模型是
+     * 禁用的、文件是启用的，两边各记一份且无人对账（复审 R5-B-4 的 ③）。
+     * 反过来说，只要按"文件缺标记就补"，无论谁换掉了内容（安装器、随包同步、用户
+     * 手工拷贝），下一个 tick 就会对齐；随包同步侧另有一条更早的保留逻辑
+     * （`coi/skills-sync.js` 换入前把旧标记写进新内容），两条一起做到"零窗口"。
+     *
+     * bundled / protected 源**不落文件**（安装目录/项目技能文件不是本插件的写面）：
+     * 它们的禁用只由运行时 shadow 表达 —— 这是唯一被接受的"只有一份记录"的形态。
+     * 写盘后 watcher 触发 `skills/change` → 再投影一次（幂等：标记已在 ⇒ 不写）。
      */
-    const migrateStaleDisables = async () => {
-      if (state.disabled.length === 0) return
+    const projectDisableFlags = async () => {
+      if (disposed || state.disabled.length === 0) return
       let list = []
       try {
         const scope = await resolveScope()
         list = await skillCtx.skills.list({ ...(scope !== undefined ? { scope } : {}) })
       } catch (error) {
-        skillCtx.logger?.warn?.(`skills-manager: disable migration lookup failed: ${error?.message ?? error}`)
+        skillCtx.logger?.warn?.(`skills-manager: disable projection lookup failed: ${error?.message ?? error}`)
         return
       }
       for (const name of state.disabled) {
         const summary = list.find((skill) => skill.name === name)
         if (summary === undefined) continue
-        // 已生效（shadow 或作者标记）→ 无需落地；bundled/project 不落地
-        if (!summary.invocation?.modelInvocable) continue
         if (summary.source === 'bundled' || isProtectedSource(summary.source)) continue
+        const file = skillFileOf(summary)
+        if (file === null) continue
+        let text
+        try {
+          text = readFileSync(file, 'utf8')
+        } catch {
+          continue // 读不到（用户删了/权限）：投影无对象，交给 reconcile 兜住运行时
+        }
+        if (hasDisableFlag(text)) continue // 文件已是禁用态 ⇒ 两边一致
         const applied = applyDisableFlagToFile(summary, true)
         if (!applied.ok) {
-          skillCtx.logger?.warn?.(`skills-manager: disable migration skipped "${name}": ${applied.error}`)
+          skillCtx.logger?.warn?.(`skills-manager: disable projection skipped "${name}": ${applied.error}`)
         }
       }
     }
-    // 迁移不与 reconcile 抢锁；写盘事件会自然触发后续 reconcile。
-    void migrateStaleDisables()
+    // 启动时投影一次；此后每次目录变化（更新/换入/新装）再投影一次（防抖，
+    // 避免写盘事件风暴里反复扫目录）。投影不与 reconcile 抢锁。
+    const scheduleDisableProjection = () => {
+      if (disposed || projectionTimer !== null) return
+      projectionTimer = setTimeout(() => {
+        projectionTimer = null
+        void projectDisableFlags()
+      }, DISABLE_PROJECTION_DEBOUNCE_MS)
+      projectionTimer.unref?.()
+    }
+    skillCtx.on('skills/change', () => {
+      scheduleDisableProjection()
+    })
+    void projectDisableFlags()
 
     /**
      * The user-managed custom-directory provider: lists skills from the

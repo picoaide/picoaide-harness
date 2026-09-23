@@ -657,11 +657,21 @@ test('skills sync: version-gated copy protects user edits', async () => {
   const edited = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(edited.find((r) => r.name === 'kimi-cli-calling').action, 'unchanged')
   assert.equal(readFileSync(join(userSkills, 'kimi-cli-calling', 'SKILL.md'), 'utf8').includes('用户自定义内容'), true)
-  // 内置版本升级 → 覆盖（源头在插件）
+  // 内置版本升级 → **用户改过的那一份不再被整树覆盖**（独立复审 N1，2026-09-23）：
+  // 随包同步是唯一不需要用户动作就会覆盖内容的写者，所以它必须与市场侧同口径 ——
+  // 跳过并如实报告（refused + SKILL_LOCAL_CONTENT），用户字节一个都不丢。
   writeFileSync(join(pluginSkills, 'kimi-cli-calling', 'SKILL.md'), '---\nx-version: 2\n---\n# kimi v2\n')
   const upgraded = syncBuiltinSkills(pluginSkills, userSkills)
-  assert.equal(upgraded.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
-  assert.equal(readFileSync(join(userSkills, 'kimi-cli-calling', 'SKILL.md'), 'utf8').includes('# kimi v2'), true)
+  assert.equal(upgraded.find((r) => r.name === 'kimi-cli-calling').action, 'refused')
+  assert.equal(upgraded.find((r) => r.name === 'kimi-cli-calling').code, 'SKILL_LOCAL_CONTENT')
+  assert.equal(readFileSync(join(userSkills, 'kimi-cli-calling', 'SKILL.md'), 'utf8').includes('用户自定义内容'), true)
+  // 反向对照（不许把正常升版一起挡掉）：**没改过**的那一份照旧随版本换新。
+  const cleanSkills = join(dir, 'clean-skills')
+  syncBuiltinSkills(pluginSkills, cleanSkills) // 先把当前随包版本（v2）装进第二个技能库
+  writeFileSync(join(pluginSkills, 'kimi-cli-calling', 'SKILL.md'), '---\nx-version: 3\n---\n# kimi v3\n')
+  const clean = syncBuiltinSkills(pluginSkills, cleanSkills)
+  assert.equal(clean.find((r) => r.name === 'kimi-cli-calling').action, 'synced')
+  assert.equal(readFileSync(join(cleanSkills, 'kimi-cli-calling', 'SKILL.md'), 'utf8').includes('# kimi v3'), true)
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -682,14 +692,27 @@ test('skills sync: directory skills (scripts/) copy as a whole folder', async ()
   const again = syncBuiltinSkills(pluginSkills, userSkills)
   assert.equal(again.find((r) => r.name === 'memory-consolidate').action, 'unchanged')
   assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('用户改过'), true)
-  // 版本升级 → 整目录覆盖，且目标里的陈旧辅助文件被清掉
-  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nname: memory-consolidate\nx-version: 2\ndescription: 记忆合并梳理\n---\n# v2\n')
+  // 用户改过之后再升版：整树覆盖被拦下（独立复审 N1）—— 用户字节一个都不丢，
+  // 陈旧辅助文件当然也不动（"清掉旧文件"只对**没被改过**的落点成立）。
   writeFileSync(join(userSkills, 'memory-consolidate', 'scripts', 'stale-old.mjs'), 'export const stale = true\n')
-  const bump = syncBuiltinSkills(pluginSkills, userSkills)
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nname: memory-consolidate\nx-version: 2\ndescription: 记忆合并梳理\n---\n# v2\n')
+  const blocked = syncBuiltinSkills(pluginSkills, userSkills)
+  assert.equal(blocked.find((r) => r.name === 'memory-consolidate').action, 'refused')
+  assert.equal(blocked.find((r) => r.name === 'memory-consolidate').code, 'SKILL_LOCAL_CONTENT')
+  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('用户改过'), true)
+  assert.equal(existsSync(join(userSkills, 'memory-consolidate', 'scripts', 'stale-old.mjs')), true)
+  // 版本升级 + **没改过**的落点 → 整目录覆盖，且随包旧版本里的陈旧辅助文件被清掉。
+  const cleanSkills = join(dir, 'clean-skills')
+  mkdirSync(join(pluginSkills, 'memory-consolidate', 'scripts'), { recursive: true })
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'scripts', 'stale-from-v1.mjs'), 'export const stale = true\n')
+  syncBuiltinSkills(pluginSkills, cleanSkills) // 装带 stale-from-v1 的 v2
+  writeFileSync(join(pluginSkills, 'memory-consolidate', 'SKILL.md'), '---\nname: memory-consolidate\nx-version: 3\ndescription: 记忆合并梳理\n---\n# v3\n')
+  rmSync(join(pluginSkills, 'memory-consolidate', 'scripts', 'stale-from-v1.mjs'))
+  const bump = syncBuiltinSkills(pluginSkills, cleanSkills)
   assert.equal(bump.find((r) => r.name === 'memory-consolidate').action, 'synced')
-  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('# v2'), true)
-  assert.equal(existsSync(join(userSkills, 'memory-consolidate', 'scripts', 'stale-old.mjs')), false)
-  assert.equal(readFileSync(join(userSkills, 'memory-consolidate', 'scripts', 'scan_memory.mjs'), 'utf8'), 'export const v = 1\n')
+  assert.equal(readFileSync(join(cleanSkills, 'memory-consolidate', 'SKILL.md'), 'utf8').includes('# v3'), true)
+  assert.equal(existsSync(join(cleanSkills, 'memory-consolidate', 'scripts', 'stale-from-v1.mjs')), false)
+  assert.equal(readFileSync(join(cleanSkills, 'memory-consolidate', 'scripts', 'scan_memory.mjs'), 'utf8'), 'export const v = 1\n')
   rmSync(dir, { recursive: true, force: true })
 })
 

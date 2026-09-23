@@ -564,23 +564,76 @@ test('skills-manager: bundled skills refuse disable, project skills stay protect
   }
 })
 
-// issue #6 方案 A 懒迁移：预置 state.disabled 中「当前目录 modelInvocable 仍为
-// true」的技能（shadow 被 scope 层覆盖的场景），装配时自动落地 frontmatter 标记。
-test('skills-manager: stale disables migrate to frontmatter on boot (issue #6)', async () => {
+// 禁用状态的**投影**（issue #6 懒迁移 + N1b 复审 R5-B-4 收窄）：
+// 权威是插件的 `state.disabled`（它同时驱动运行时 shadow，且对 bundled/project
+// 这类不可写文件有效），文件里的 `disable-model-invocation` 是这份权威的投影。
+// 判据 = **文件里没有该标记就补上**（不再看 shadow 是否已经生效——旧口径"shadow
+// 已生效就不动文件"正是"文件说启用、state 说禁用"长期分叉的来源：一次整树更新
+// 抹掉标记后，没有任何人再补文件）。
+/** 轮询等待某个条件成立（禁用投影是异步的：启动一次 + 目录变化后防抖一次）。 */
+async function waitFor(check, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (check()) return true
+    if (Date.now() > deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
+// 禁用状态的**投影**（issue #6 懒迁移 + N1b 复审 R5-B-4 收窄）：
+// 权威是插件的 `state.disabled`（它同时驱动运行时 shadow，且对 bundled/project
+// 这类不可写文件有效），文件里的 `disable-model-invocation` 是这份权威的投影。
+// 判据 = **文件里没有该标记就补上**（不再看 shadow 是否已经生效——旧口径"shadow
+// 已生效就不动文件"正是"文件说启用、state 说禁用"长期分叉的来源：一次整树更新
+// 抹掉标记后，没有任何人再补文件）。
+test('skills-manager: 禁用状态在启动时投影到文件（issue #6 + N1b：不许两边各记一份）', async () => {
   const dir = tempDir()
   try {
     const stateFile = join(dir, 'skills-state.json')
-    // 预置：alpha 在禁用列表，但目录里 modelInvocable 仍为 true（模拟禁用失效）
+    // 预置：alpha / bravo 都在禁用列表，文件里都没有标记（= 刚被更新抹掉/旧版本状态）
+    writeFileSync(stateFile, JSON.stringify({ disabled: ['alpha', 'bravo'], customDirs: [] }))
+    const sm = await bootSkillsManager({ stateFile })
+    try {
+      const alphaFile = sm.catalog.get('alpha').path
+      const bravoFile = sm.catalog.get('bravo').path
+      assert.equal(await waitFor(() => /^disable-model-invocation: true$/m.test(readFileSync(alphaFile, 'utf8'))), true,
+        'state 说禁用、文件没标记 ⇒ 启动投影必须补上')
+      // N1b 收窄：shadow 已生效的技能（bravo modelInvocable:false）**同样**要落地
+      // 标记 —— 否则一次更新把它抹掉之后，文件与 state 永久分叉。
+      assert.equal(await waitFor(() => /^disable-model-invocation: true$/m.test(readFileSync(bravoFile, 'utf8'))), true,
+        'shadow 已生效不是"不写文件"的理由：两边必须一致')
+      // UI disabled 显示仍来自 state 列表
+      const list = await sm.request('GET', '/skills-manager/api/skills')
+      assert.equal(list.data.skills.find((s) => s.name === 'alpha').disabled, true)
+    } finally {
+      await sm.close()
+      sm.cleanup()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('skills-manager: 更新/换入抹掉标记之后，目录变化事件把投影补回来（N1b 的 ③）', async () => {
+  const dir = tempDir()
+  try {
+    const stateFile = join(dir, 'skills-state.json')
     writeFileSync(stateFile, JSON.stringify({ disabled: ['alpha'], customDirs: [] }))
     const sm = await bootSkillsManager({ stateFile })
     try {
-      const alpha = sm.catalog.get('alpha')
-      const text = readFileSync(alpha.path, 'utf8')
-      assert.match(text, /^disable-model-invocation: true$/m)
-      // 已生效（shadow）的技能（bravo modelInvocable:false）不动文件
-      const bravo = sm.catalog.get('bravo')
-      assert.doesNotMatch(readFileSync(bravo.path, 'utf8'), /disable-model-invocation/)
-      // UI disabled 显示仍来自 state 列表
+      const file = sm.catalog.get('alpha').path
+      assert.equal(await waitFor(() => /^disable-model-invocation: true$/m.test(readFileSync(file, 'utf8'))), true, '夹具前置：启用态已落地')
+
+      // 模拟"一次整树更新"：文件被换成不带标记的新内容（安装器 / 随包同步都会这样）。
+      writeFileSync(file, '---\nname: alpha\ndescription: "alpha description"\n---\nBody text v2\n')
+      assert.doesNotMatch(readFileSync(file, 'utf8'), /disable-model-invocation/)
+
+      // 更新会让上游 fs watcher 派发 `skills/change`（这里直接派发同一个事件）。
+      for (const listener of sm.changeListeners) listener()
+
+      assert.equal(await waitFor(() => /^disable-model-invocation: true$/m.test(readFileSync(file, 'utf8'))), true,
+        '目录变化之后投影必须把标记补回来（state 是权威）')
+      assert.match(readFileSync(file, 'utf8'), /Body text v2/, '更新后的正文必须保留（投影只补标记）')
       const list = await sm.request('GET', '/skills-manager/api/skills')
       assert.equal(list.data.skills.find((s) => s.name === 'alpha').disabled, true)
     } finally {

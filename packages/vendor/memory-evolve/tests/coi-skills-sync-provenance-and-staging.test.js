@@ -11,7 +11,10 @@
  *        随同一次原子 rename 回到位（失败回滚时必须搬回，见第三条用例）；
  *     2. 目标没有 provenance 时补一份本插件自己的：`channel: 'plugin'`，
  *        字段与客户端安装器 `writeProvenance` 一致（`appId` / `version` /
- *        `channel` / `installedAt`），`version` 取 SKILL.md 的 `x-version`（无则 `''`）。
+ *        `channel` / `installedAt` / `archiveChecksum`），`version` 取 SKILL.md 的
+ *        `x-version`（无则 `''`）。`archiveChecksum` 是独立复审 N1 追加的内容基准
+ *        （见 `tests/coi-skills-sync-dirty-baseline.test.js` 与 enterprise
+ *        `tests/skill-channel-parity.spec.ts` 的同源对拍）。
  *  变异性：把 `stashInstallerMarkers` / `writePluginProvenance` 调用去掉（或只在换入
  *   **后**写 provenance）→ 前两条用例红（目标 provenance 消失 / 新装目录没有
  *  `channel: 'plugin'`）；把回滚里的 `restoreInstallerMarkers` 去掉 → 第三条红。
@@ -183,9 +186,11 @@ test('A9 补齐 provenance：全新落盘写 `channel: "plugin"`，version 取 x
     const info = JSON.parse(readFileSync(releasePath, 'utf8'))
     assert.deepEqual(
       Object.keys(info).sort(),
-      ['appId', 'channel', 'installedAt', 'version'],
-      '字段集合必须与安装器 writeProvenance 的四个必备字段一致（archiveChecksum 刻意不写：跨包无法共享同一份哈希实现）',
+      ['appId', 'archiveChecksum', 'channel', 'installedAt', 'version'],
+      '字段集合必须与安装器 writeProvenance 的字段一致（archiveChecksum 是独立复审 N1 追加的内容基准：'
+      + '没有它，"用户是否改过这份随包技能"就无从判定，开机同步会静默整树覆盖用户改动）',
     )
+    assert.match(String(info.archiveChecksum), /^[0-9a-f]{64}$/u, '基准必须是 sha256 十六进制')
     assert.equal(info.appId, NAME)
     assert.equal(info.channel, 'plugin', '渠道取值必须是扩展后的 plugin')
     assert.equal(info.version, '3', 'version 必须取 SKILL.md 的 x-version')

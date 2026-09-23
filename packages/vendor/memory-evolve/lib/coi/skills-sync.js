@@ -6,7 +6,7 @@
  * 插件启动时同步到技能库（落点 = `config.skillDir`，桌面端缺省 `<DSH_HOME>/skills`）：
  *   - 目标不存在 → 复制（装上）
  *   - 目标存在且**溯源渠道就是 plugin**，x-version 更低 → 整目录覆盖
- *     （源头在插件，升级随插件更新）
+ *     （源头在插件，升级随插件更新）——**除非落点已被本地修改**（见下）
  *   - 一致 → 跳过
  *   - 目标存在、**没有**任何溯源，而内容与随包技能**逐字相同** → **采纳**
  *     （补写 `channel:'plugin'`，见 {@link isIdenticalTree}）—— 给 A9 之前
@@ -16,6 +16,26 @@
  *     与本文档的"来源闸门"段（P1-1/P1-2，2026-09-23 独立审计 W4）
  * 同步以**整目录**为单位（SKILL.md + scripts/ 等辅助文件随技能一起走）；
  * 被禁用的技能文件仍存在，只是不注入模型。
+ *
+ * **本地改动闸门（独立复审 N1，2026-09-23）**：随包同步是**唯一不需要用户动作
+ * 就会覆盖内容的写者**（每次开机自动跑），而它此前结构性不在「用户改过没有」的
+ * 判据内——写溯源时刻意不写 `archiveChecksum`，企业侧 `isInstalledSkillDirty`
+ * 没有基准就一律返回 `false`。结果是用户改了随包技能（或往里加了自己的文件）之后，
+ * 下一次随包升版把它连同用户字节一起整树换掉，全程零提示，能力中心也不显示
+ * 「已本地修改」。现在：
+ *   - **每次自己写内容**（首次安装 / 升版换入 / 内容同一性采纳）之后都写一份
+ *     `archiveChecksum` = {@link skillContentChecksum}（与企业侧
+ *     `computeSkillContentHash` 逐字节同源的整树哈希，排除顶层 `.picoaide/`、
+ *     含 `.install-version`；两实现的等价性由企业包
+ *     `tests/skill-channel-parity.spec.ts` 用真实 fixture 对拍）；
+ *   - 整树换入之前比对基准：不一致 ⇒ **如实拒收**（`refused` +
+ *     `SKILL_LOCAL_CONTENT`），一个字节都不动 —— 自动路径没有 UI，所以不做"用户
+ *     点了才覆盖"的交互式方案，与市场侧"跳过并如实报告"同一口径；
+ *   - 未改过 ⇒ 照旧 `synced`（随包技能的主要用途不得退化）。
+ *   **兼容边界（认账）**：本闸门之前落下的目录没有基准。它们在"内容与随包技能
+ *   逐字相同"时会被补上基准（下一次开机即闭合）；内容已经不同又没有基准时无法
+ *   证明是谁写的，只能照旧整树换入并打一行 warn —— 这个窗口只存在于"升级前装的
+ *   那一份"，一次同步之后不复存在。
  *
  * **独立复审 r3（2026-09-23）补上的三条硬约束**（都写在各自函数头）：
  *   1. **判定与写溯源不可分割**（{@link isIdenticalTree} 的写后复检）：采纳路径
@@ -30,8 +50,10 @@
  *      溯源是市场版"，且插件此后永久 `SKILL_CHANNEL_CONFLICT` 拒收、**不会自愈**。
  */
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { isSymlinkFreeRepoTarget, openExclusiveSafe, removeCreatedFile, writeFileAtomicSafeAt, writeTargetRefusedError } from '../sync/filesets.js'
+import { hasDisableFlag, normalizeSkillManifestBytes, toggleDisableFlag } from '../skill-manifest.js'
 
 /**
  * 换入过程中的两个临时目录名：
@@ -178,7 +200,8 @@ const STORE_CHANNELS = ['market', 'org', 'builtin', PLUGIN_CHANNEL]
  * 覆盖。三者都出现在 `syncBuiltinSkills` 结果的 `code` 字段上：
  *   - {@link SKILL_LOCAL_CONTENT}：目标目录没有可用的安装器溯源、且**不能**用内容
  *     同一性证明它是本插件的副本 ⇒ 按"用户自制"处理（判据与安装器的
- *     `classifyInstalledSkill === 'local'` 同源）；
+ *     `classifyInstalledSkill === 'local'` 同源）；**或者**目标是本插件的落点、
+ *     但内容与上次同步写下的基准不一致（用户改过，独立复审 N1）⇒ 同样保留本机内容；
  *   - {@link SKILL_CHANNEL_CONFLICT}：目标目录是**另一条商店渠道**（market /
  *     org / builtin）装进来的 ⇒ 整树换入会把渠道从那条改成 plugin，两边会在
  *     每次开机互相覆盖（P1-2 的乒乓球）；
@@ -713,9 +736,11 @@ function readSkillTombstone(userSkillsDir, name) {
  * 拒收**（`refused`，见 {@link classifySyncTarget}）；目标没有任何溯源但内容与
  * 随包技能**逐字相同** → 采纳（补写溯源后报 `adopted`）。
  *
- * 逐技能三道闸门、**顺序不可换**：①墓碑（用户显式卸载过 ⇒ `skipped`，
+ * 逐技能四道闸门、**顺序不可换**：①墓碑（用户显式卸载过 ⇒ `skipped`，
  * {@link readSkillTombstone}）；②来源（目标存在时按 {@link classifySyncTarget} 判定，
- * 另有内容同一性采纳的兼容路径）；③版本（`x-version` 更高才整树换入）。每条出口都在
+ * 另有内容同一性采纳的兼容路径）；③版本（`x-version` 更高才整树换入）；
+ * ④**本地改动**（换入前比对 `archiveChecksum` 基准，不一致 ⇒ `refused` +
+ * `SKILL_LOCAL_CONTENT`，一个字节都不动 —— 独立复审 N1）。每条出口都在
  * per-name 锁之内，互斥对象是能力中心的安装器（同一把锁、同一落点）。
  *
  * 落点（NF-1，2026-09-13 审计加固；2026-09-16 与上游整目录语义合流）：
@@ -754,6 +779,9 @@ function readSkillTombstone(userSkillsDir, name) {
  *   `SKILL_SWAP_RECOVERY_FAILED`（见 {@link SkillSwapRecoveryError}），以及来源闸门
  *   的 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT` / `SKILL_ADOPT_FAILED`
  *   与墓碑的 `SKILL_USER_REMOVED`。
+ *   `SKILL_LOCAL_CONTENT` 现在有**两种**触发形态（都是"保留本机内容、如实拒收"）：
+ *   目录没有可用溯源（按用户自制处理），以及**落点已被本地修改**（基准对不上，
+ *   独立复审 N1）—— 后者是自动同步路径上唯一会覆盖内容的写者，必须拦。
  */
 export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   const results = []
@@ -866,6 +894,30 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
       const needsCopy = !existsSync(destFile)
         || skillVersion(srcText) > skillVersion(readFileSync(destFile, 'utf8'))
       if (needsCopy) {
+        // 本地改动闸门（独立复审 N1）：随包同步是**唯一不需要用户动作**就会覆盖
+        // 内容的写者，所以"用户改过的随包技能"必须在这里被拦下。判据 = 落点内容
+        // 与上次同步写下的基准（`release.json` 的 `archiveChecksum`）不一致；
+        // 自动路径没有 UI ⇒ 只能**如实拒收**（与市场侧"跳过并如实报告"同一口径），
+        // 绝不静默整树换入。没有基准（本闸门之前落下的目录）时无从判定 ⇒ 不拦，
+        // 但如实打日志（见 §兼容边界的认账口径）。
+        const ownProv = readOwnPluginProvenance(destDir, name)
+        const dirty = pluginContentDirty(destDir, ownProv)
+        if (dirty === true) {
+          const reason = `${destDir} 已被本地修改（内容哈希与上次同步写下的基准不一致，`
+            + `${PROVENANCE_DIR}/${PROVENANCE_FILE} 的 archiveChecksum 是可比对的证据）—— `
+            + '随包同步不覆盖用户内容，本次**不落盘**：技能/你的文件与改动全部原样保留'
+            + '（能力中心会把它标成「已本地修改」）。要换回随包版本：删除该技能目录后重启客户端'
+            + '（会重新装一份干净的随包技能）；要保留你的改动：什么都不用做。'
+          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 未同步（保留本机内容，${SKILL_LOCAL_CONTENT}）：${reason}`)
+          results.push({ name, action: 'refused', message: reason, code: SKILL_LOCAL_CONTENT })
+          continue
+        }
+        if (dirty === null && ownProv !== null) {
+          // 有我们自己的溯源、但没有基准：本闸门之前落下的目录。无从判定"是不是
+          // 用户改的" ⇒ 不误拦（随包升版不得退化），但这一档必须留痕。
+          console.warn(`[dsh-memory-evolve] 内置技能 ${name} 缺少内容基准（archiveChecksum），`
+            + '无法判断落点是否被本地修改 ⇒ 本次照旧整树换入（换入后会立即建立基准，此后不再有此窗口）。')
+        }
         try {
           syncSkillDirSafe(srcDir, destDir, userSkillsDir)
           action = 'synced'
@@ -888,6 +940,34 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
         // 不需要换入。本次的唯一动作就是补写溯源，如实报 `adopted`（不是 unchanged：
         // 调用方/日志要能看出"这份目录是被采纳的，不是本来就带溯源的"）。
         action = 'adopted'
+      } else {
+        // 版本一致（无事可做）的路径上补一次基准（独立复审 N1 的兼容边界）：
+        // 本闸门之前落下的目录有 plugin 溯源却没有 `archiveChecksum` ⇒ 我们永远
+        // 判不出"有没有被改过"。这里只做**能证明**的那一半：内容与随包技能逐字
+        // 相同（`isIdenticalTree`，忽略安装器标记）⇒ 这份目录里没有用户字节，
+        // 基准 = 当前内容树哈希，直接写下即可。内容已经不同则**不猜**（不写基准、
+        // 不判脏、也不拦），留待下一次随包升版按"无基准"那一档处理并打日志。
+        // 失败只记日志：基准是"下一次判定"的依据，写不进去不影响本次（无事可做）。
+        if (existsSync(destDir)) {
+          const ownProv = readOwnPluginProvenance(destDir, name)
+          const missingBaseline = ownProv !== null
+            && !(typeof ownProv.archiveChecksum === 'string' && ownProv.archiveChecksum !== '')
+          if (missingBaseline && isIdenticalTree(srcDir, destDir, { ignoreTopLevel: INSTALLER_MARKERS })) {
+            // 这里写的是**活的**技能目录（不是暂存目录），所以失败时必须把两个标记
+            // 逐字节还原：`writePluginProvenance` 失败路径会收回"自己刚写下的文件"，
+            // 而它覆盖的可能是原本就在位的 `release.json`（own 非 null 才会有本分支）
+            // —— 不还原就等于把用户的溯源标记删掉。
+            const snapshot = snapshotInstallerMarkers(destDir)
+            try {
+              writePluginProvenance(destDir, name, skillVersion(srcText), userSkillsDir)
+              console.log(`[dsh-memory-evolve] 内置技能 ${name} 已补写内容基准（archiveChecksum）：`
+                + '内容与随包技能逐字一致 ⇒ 此后本地改动可判（随包升版不再无条件整树换入）。')
+            } catch (error) {
+              restoreInstallerMarkerBytes(destDir, snapshot, userSkillsDir)
+              console.warn(`[dsh-memory-evolve] 内置技能 ${name} 补写内容基准失败（忽略，下次同步再试）：${String(error?.message ?? error)}`)
+            }
+          }
+        }
       }
       results.push({
         name,
@@ -907,6 +987,43 @@ export function syncBuiltinSkills(pluginSkillsDir, userSkillsDir) {
   // （skill … ignored because a higher-priority skill already exists，整整一个会话）。
   sweepStaleSwapDirs(userSkillsDir)
   return results
+}
+
+/**
+ * 把旧技能文件里的**禁用标记**带进即将换入的新内容（N1b，独立复审 R5-B-4）。
+ *
+ * 判据只有一条：旧 `SKILL.md` 带 `disable-model-invocation`（见
+ * `../skill-manifest.js` 的 {@link hasDisableFlag}）⇒ 把它按同一份实现
+ * （{@link toggleDisableFlag}）写进暂存目录的 `SKILL.md`。因此"换入"对禁用状态
+ * 完全透明：文件与插件 state 不会因为一次更新而分叉。
+ *
+ * 不成立的情形一律**不动作**（首次安装没有旧文件、旧文件不是规范 SKILL.md、新内容
+ * 已经带标记、读失败）——本函数只做"保留"，绝不新增/删除禁用状态。
+ *
+ * @param {string} destDir - 技能库内的旧技能目录。
+ * @param {string} stagingDir - 已写好新内容的暂存目录。
+ * @param {string} anchorDir - 技能库根（落点断言的基准）。
+ * @returns {boolean} 是否真的把标记写进了暂存内容。
+ */
+function preserveDisableFlag(destDir, stagingDir, anchorDir) {
+  let oldText
+  try {
+    oldText = readFileSync(join(destDir, 'SKILL.md'), 'utf8')
+  } catch {
+    return false
+  }
+  if (!hasDisableFlag(oldText)) return false
+  const stagedFile = join(stagingDir, 'SKILL.md')
+  let stagedText
+  try {
+    stagedText = readFileSync(stagedFile, 'utf8')
+  } catch {
+    return false
+  }
+  const next = toggleDisableFlag(stagedText, true)
+  if (next === null || next === stagedText) return false
+  writeFileAtomicSafeAt(stagedFile, next, { anchorDir })
+  return true
 }
 
 /**
@@ -998,6 +1115,13 @@ function syncSkillDirSafe(srcDir, destDir, anchorDir) {
     // 溯源丢了"的中间态。
     markerSnapshot = snapshotInstallerMarkers(destDir)
     stashedMarkers = stashInstallerMarkers(destDir, stagingDir)
+    // N1b（独立复审 R5-B-4）：**禁用标记随换入保留**。用户在「技能管理」里禁用过这个
+    // 技能时，标记写在 SKILL.md frontmatter 里（`disable-model-invocation`，写入端是
+    // `skills-manager.js` 的 `applyDisableFlagToFile`）；整树换入会把文件换成随包那一
+    // 份（没有标记）⇒ 文件说"启用"、插件 `state.disabled` 说"禁用"，两边各记一份且
+    // 无人对账。这里在**换入之前**把旧文件的标记写进新内容，做到零窗口（插件侧还有
+    // 一条启动/目录变化时的投影兜底，见 `skills-manager.js` 的 `projectDisableFlags`）。
+    preserveDisableFlag(destDir, stagingDir, anchorDir)
     writePluginProvenance(stagingDir, name, skillVersion(srcText), anchorDir)
     // F3 纵深防御（独立复审 r3）：即将换入的这棵树**必须**带着我们自己的溯源。
     // per-name 锁已经把安装器挡在外面；这一条挡的是"标记在锁外被换掉"的其余形态
@@ -1135,14 +1259,103 @@ function restoreInstallerMarkerBytes(destDir, snapshot, anchorDir) {
 }
 
 /**
- * 补齐/刷新本插件自己的来源溯源（A9 + R4-B-1 修复，2026-09-23）。
+ * 一份技能目录的内容哈希（**与安装器逐字节同源**的整树哈希，独立复审 N1）。
+ *
+ * 这是「本机这一份是否被用户改过」的**唯一可比基准**：安装器在装的时候写一份
+ * （`computeSkillContentHash`），本插件在每次自己写内容之后写一份（见
+ * {@link writePluginProvenance}），两侧此后都用同一算法重算盘上的内容来比对。
+ *
+ * 算法（与 `packages/host/enterprise/src/skill-install.ts` 的
+ * `computeSkillContentHash` 逐字节一致 —— 跨包 import 禁止，所以这里是**本地复刻**
+ * 而不是共享模块，等价性由企业包 `tests/skill-channel-parity.spec.ts` 用真实
+ * fixture（嵌套目录 / 空目录 / 二进制 / 非 ASCII 名 / 符号链接 / 顶层 `.picoaide`）
+ * 对拍，任何一侧漂移都会立刻打红）：
+ *   - `sha256`；
+ *   - 逐层 `readdir({ withFileTypes: true })` 后按 `name.localeCompare` 排序（两侧
+ *     同一个表达式 ⇒ 同一份 Node/ICU 下同序）；
+ *   - 目录 → `D:<相对路径>\n`；普通文件 → `F:<相对路径>:` + 原始字节 + `\n`
+ *     （不解码、不做编码归一化）；
+ *   - **只排除顶层的 `.picoaide/`**（安装器/本插件的溯源目录，写它不得让内容变脏）；
+ *     `.install-version` 是内容的一部分，因此它必须在算基准**之前**写到最终字节；
+ *   - 符号链接等其它条目两侧都按"不看"处理（既不是目录也不是普通文件）。
+ *
+ * 相对路径一律用 `/` 连接（与安装器同形），保证 Windows/Linux 同值。
+ *
+ * @param {string} skillDir - 技能目录。
+ * @returns {string} 64 位十六进制的 sha256。
+ */
+export function skillContentChecksum(skillDir) {
+  const hash = createHash('sha256')
+  const walk = (dir, prefix) => {
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      if (prefix === '' && entry.name === PROVENANCE_DIR) continue
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) {
+        hash.update(`D:${rel}\n`)
+        walk(join(dir, entry.name), rel)
+      } else if (entry.isFile()) {
+        hash.update(`F:${rel}:`)
+        // 顶层 SKILL.md 走**规范化**字节（N1b）：本插件管理的 frontmatter 字段
+        // （`disable-model-invocation`）不进内容哈希 —— 「禁用」是平台动作，
+        // 不是"用户改了内容"。归一化无字段即逐字节原样（老基准不受影响）。
+        const bytes = readFileSync(join(dir, entry.name))
+        hash.update(rel === 'SKILL.md' ? normalizeSkillManifestBytes(bytes) : bytes)
+        hash.update('\n')
+      }
+    }
+  }
+  walk(skillDir, '')
+  return hash.digest('hex')
+}
+
+/**
+ * 落点里的内容相对"上次同步写下的基准"是否已变（本地改动闸门，独立复审 N1）。
+ *
+ * 三态（与企业侧 `isInstalledSkillDirty` 同口径，只是多一档"无从判定"）：
+ *   - `true`：有基准且**对不上** ⇒ 用户改过（改过正文、加过/删过文件都算）；
+ *   - `false`：有基准且对得上 ⇒ 没改过，可以照常整树换入；
+ *   - `null`：**没有基准**（本闸门之前落下的目录）或读不出来 ⇒ 无从判定。调用方
+ *     据此**不拦**（宁可少判脏，与安装器既有口径一致）并把这一档如实打日志 ——
+ *     凭空判脏会让每一次正常升版都被挡下，那是随包技能的主要用途。
+ *
+ * 哈希算不出来（权限/IO）同样返回 `null`：不因为算不出来就拦下正常更新。
+ *
+ * @param {string} destDir - 技能库内的目标技能目录。
+ * @param {object|null} own - {@link readOwnPluginProvenance} 的返回值。
+ * @returns {boolean|null} 改过 / 没改过 / 无从判定。
+ */
+function pluginContentDirty(destDir, own) {
+  const baseline = typeof own?.archiveChecksum === 'string' && own.archiveChecksum !== '' ? own.archiveChecksum : null
+  if (baseline === null) return null
+  let now
+  try {
+    now = skillContentChecksum(destDir)
+  } catch {
+    return null
+  }
+  return now !== baseline
+}
+
+/**
+ * 补齐/刷新本插件自己的来源溯源（A9 + R4-B-1 修复，2026-09-23；
+ * `archiveChecksum` 基准为独立复审 N1 追加）。
  *
  * 目标没有 `.picoaide/release.json` 时写一份 `channel: 'plugin'` 的：
  * 字段与 enterprise 安装器 `writeProvenance` 一致（`appId` / `version` /
- * `channel` / `installedAt`），版本号取 SKILL.md 的 `x-version`（没有则 `''`）。
- * `archiveChecksum` 刻意不写：它必须与企业侧 `computeSkillContentHash`
- * 逐字节同源，而跨包 import 禁止，第二份实现算错反而会让「是否被本地修改」
- * 的判据出错——宁缺勿错。
+ * `channel` / `installedAt` / `archiveChecksum`），版本号取 SKILL.md 的
+ * `x-version`（没有则 `''`）。
+ *
+ * **N1：`archiveChecksum` 必须写。** 此前这里刻意不写（"跨包 import 禁止 ⇒ 宁缺
+ * 勿错"），而企业侧 `isInstalledSkillDirty` 没有基准就返回 `false` —— 两者互为因果
+ * ⇒ 随包技能结构性不在「用户是否改过」的判据内，而**开机自动同步**正是唯一不需要
+ * 用户动作就会覆盖内容的写者：用户改了随包技能，下一次升版整树换入、用户字节消失、
+ * 零提示。基准的取值 = {@link skillContentChecksum}（与安装器逐字节同源，等价性由
+ * 企业包的对拍用例钉住）。
+ *
+ * **写的顺序不可换**：`.install-version` 先写到最终字节（它是内容树的一部分，被算进
+ * 哈希），然后算基准，最后写 `release.json`（顶层 `.picoaide/` 被排除在哈希之外，
+ * 写它不影响基准）。顺序反了，基准就会与盘上内容差一个文件 ⇒ 下一次比对恒判"脏"。
  *
  * **R4-B-1（P3，第四轮独立审计）：随包升版后，我们自己写的那份溯源必须跟着换。**
  * `stashInstallerMarkers` 会把旧目录的 `.picoaide/` 与 `.install-version` 搬进新内容
@@ -1157,9 +1370,11 @@ function restoreInstallerMarkerBytes(destDir, snapshot, anchorDir) {
  *     `syncSkillDirSafe` 的换入前复检（stagedChannel !== plugin）拦下并原样搬回，
  *     绝不把别人的归属改写成 plugin；
  *   - 标记可读但不是我们写的那一份（JSON 坏 / appId 不符 / 渠道未知）同样不动；
- *   - 已有标记的其它字段（`server` / `archiveChecksum` / `installedAt` 等）原样保留，
- *     只把 `version` 推进到新值 —— 少写字段会让下游判据静默退化。
- * `x-version` 缺失（`version === ''`）时**不写**：没有新版本可推进，留旧值比写空串诚实。
+ *   - 已有标记的其它字段（`server` / `installedAt` 等）原样保留，
+ *     只把 `version` 推进到新值、把 `archiveChecksum` 换成当前内容的基准 ——
+ *     少写字段会让下游判据静默退化。
+ * `x-version` 缺失（`version === ''`）时**不推进版本**（留旧值比写空串诚实），
+ * 但基准照写：它与版本号无关，是"这份内容长什么样"的事实。
  * `.install-version` 与 `release.json` 同进同退（我们自己那一份的两处记录必须一致）。
  *
  * @param {string} stagingDir - 暂存目录（换入前）。
@@ -1173,24 +1388,30 @@ function writePluginProvenance(stagingDir, name, xVersion, anchorDir) {
   const version = xVersion > 0 ? String(xVersion) : ''
   const releaseFile = join(stagingDir, PROVENANCE_DIR, PROVENANCE_FILE)
   const versionFile = join(stagingDir, '.install-version')
-  const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString() }
   const own = readOwnPluginProvenance(stagingDir, name)
-  const plan = []
-  if (own !== null) {
-    // 我们自己先前写下的那一份：按新 x-version 覆写（保留其它字段）。
-    if (version !== '') {
-      plan.push([releaseFile, `${JSON.stringify({ ...own, version }, null, 2)}\n`])
-      plan.push([versionFile, version])
-    }
-  } else {
-    if (!existsSync(releaseFile)) plan.push([releaseFile, `${JSON.stringify(info, null, 2)}\n`])
-    if (version !== '' && !existsSync(versionFile)) plan.push([versionFile, version])
-  }
   const written = []
   try {
-    for (const [file, data] of plan) {
-      writeFileAtomicSafeAt(file, data, { anchorDir })
-      written.push(file)
+    // 1) 版本文件先写到最终字节（内容树的一部分 ⇒ 必须进基准）。
+    let writeVersion = false
+    if (version !== '') {
+      const current = readSmallRegularFile(versionFile, MARKER_MAX_BYTES)
+      writeVersion = own === null ? current.status !== 'ok' : current.status !== 'ok' || current.text !== version
+    }
+    if (writeVersion) {
+      writeFileAtomicSafeAt(versionFile, version, { anchorDir })
+      written.push(versionFile)
+    }
+    // 2) 基准 = 此刻整棵内容树的内容哈希。
+    const archiveChecksum = skillContentChecksum(stagingDir)
+    // 3) `release.json` 最后写（顶层 `.picoaide/` 被排除在哈希之外，写它不影响基准）。
+    if (own !== null) {
+      const next = { ...own, archiveChecksum, ...(version === '' ? {} : { version }) }
+      writeFileAtomicSafeAt(releaseFile, `${JSON.stringify(next, null, 2)}\n`, { anchorDir })
+      written.push(releaseFile)
+    } else if (!existsSync(releaseFile)) {
+      const info = { appId: name, version, channel: PLUGIN_CHANNEL, installedAt: new Date().toISOString(), archiveChecksum }
+      writeFileAtomicSafeAt(releaseFile, `${JSON.stringify(info, null, 2)}\n`, { anchorDir })
+      written.push(releaseFile)
     }
   } catch (error) {
     discardPluginProvenance(stagingDir, written)

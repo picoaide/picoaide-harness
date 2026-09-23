@@ -732,24 +732,46 @@ export function isStoreProvenance(prov: SkillProvenance | undefined, name: strin
 /**
  * 本机那一份技能的内容是否**已被本地修改**（审计 R4-B-3，第四轮）。
  *
- * 判据只有一条：安装时写下的 `archiveChecksum`（{@link computeSkillContentHash} 的
- * 内容树哈希）与**现在重算**的值不同。这是"用户动过这份内容"的唯一可验证证据 ——
+ * 判据只有一条：上次写内容时记下的 `archiveChecksum`（{@link computeSkillContentHash}
+ * 的内容树哈希）与**现在重算**的值不同。这是"用户动过这份内容"的唯一可验证证据 ——
  * 面板据此渲染「已本地修改」徽章，覆盖/删除据此决定要不要先问一声。
  *
+ * **dirty 的语义 = "用户改过内容"**（N1b，独立复审 R5-B-4 收窄）：平台自己管理的
+ * frontmatter 字段（当前只有「技能管理」禁用开关写的 `disable-model-invocation`，
+ * 见 {@link DISABLE_MODEL_KEY} / {@link normalizeSkillManifestBytes}）**不参与**这个
+ * 哈希 —— 否则用户点一次「禁用」就会被判成"改了内容"（徽章误导 + 此后每次更新/卸载
+ * 都多一张确认条）。用户真的改了正文/加了文件，照样判脏（判据不因此变松）。
+ *
+ * **基准的两个写者**（缺任一个就有来源整块落在判据外）：
+ *  - 本安装器：{@link writeProvenance} 在装完/覆盖完写 `archiveChecksum`；
+ *  - 随包插件同步器（`packages/vendor/memory-evolve/lib/coi/skills-sync.js`，独立复审
+ *    N1）：首次安装 / 随包升版换入 / 内容同一性采纳之后都写一份 `channel: 'plugin'`
+ *    的标记，**含 `archiveChecksum`**（取值 = 它自己那份 `skillContentChecksum`，
+ *    与本文件的 {@link computeSkillContentHash} 逐字节同源；跨包 import 禁止，所以是
+ *    "各自实现 + 机器对拍"，对拍用例见 `tests/skill-channel-parity.spec.ts`）。
+ *    在此之前的随包溯源刻意不写基准，于是随包技能**结构性不判脏**（面板没有徽章），
+ *    而它是唯一不需要用户动作就会覆盖内容的写者 ⇒ 用户改过的随包技能在下次升版时被
+ *    静默整树换掉。同步侧的同一条闸门：基准对不上就 `refused` + `SKILL_LOCAL_CONTENT`，
+ *    绝不整树换入。
+ *
  * 三个边界（都取"宁可少判脏"）：
- *  - 没有溯源标记、或标记里没有 `archiveChecksum`（如随包插件写的 plugin 溯源）
- *    ⇒ `false`。没有基准就没有可比事实，凭空判脏会让每次更新都多出一张确认条；
+ *  - 没有溯源标记、或标记里没有 `archiveChecksum` ⇒ `false`。没有基准就没有可比
+ *    事实，凭空判脏会让每次更新都多出一张确认条。**这一档只应出现在本闸门之前
+ *    落下的随包目录上**（同步器下一次开机在"内容与随包逐字相同"时补写基准；内容
+ *    已经不同时它无从证明、只能照旧换入并打日志 —— 那一窗口的认账口径写在
+ *    `skills-sync.js` 的模块头注释里）；
  *  - 目标目录不存在 / 读不出来 ⇒ `false`（调用方在此之前已用
  *    {@link classifyInstalledSkill} 判过"有没有"）；
  *  - 哈希计算抛错（权限/IO）⇒ `false`（保守：不因为算不出来就拦下正常更新）。
  *
  * **唯一实现**：安装器（{@link requiresOverwriteConfirmation} / {@link uninstallSkill}）
  * 与能力中心聚合面（`auth-gate` 的 `?source=local` 与 enriched 两个分支）都调它 ——
- * 三处各算一次是这条 finding 的温床（面板会显示徽章而宿主放行覆盖）。
+ * 三处各算一次是这条 finding 的温床（面板会显示徽章而宿主放行覆盖）；
+ * 随包同步侧的同一条判据是它在本包的镜像（本地副本，见上）。
  *
  * @param skillDir - 目标技能目录。
  * @param prov - 该目录的 provenance（已读出的那一份，避免重复 IO）。
- * @returns 内容与安装时不一致为 true。
+ * @returns 内容与上次写下的基准不一致为 true。
  */
 export async function isInstalledSkillDirty(
   skillDir: string,
@@ -1109,6 +1131,18 @@ export async function clearSkillTombstone(skillsDir: string, name: string): Prom
 export const PROVENANCE_DIR = '.picoaide'
 
 /**
+ * 「技能管理」禁用开关写进 SKILL.md frontmatter 的字段名（N1b，跨端同值契约）：
+ * 写入端是 vendored 插件的 `lib/skills-manager.js`（经 `lib/skill-manifest.js`
+ * 的 `DISABLE_MODEL_KEY`），本包只在**内容哈希**里把它剔除
+ * （{@link normalizeSkillManifestBytes}）—— 平台自己的元数据不得被判成"用户改了内容"。
+ * 两侧同值由 `tests/skill-channel-parity.spec.ts` 对拍。
+ */
+export const DISABLE_MODEL_KEY = 'disable-model-invocation'
+
+/** 该字段的整行匹配（与 vendored `lib/skill-manifest.js` 逐字相同）。 */
+const DISABLE_MODEL_KEY_LINE = /^\s*disable-model-invocation\s*:.*$/m
+
+/**
  * 分发渠道（跨泳道契约 S2 ↔ S1 写死）：
  *  - `market` 市场（服务端 marketplace 表）
  *  - `org` 组织共享库（shared-skills）
@@ -1202,6 +1236,13 @@ export async function readProvenance(skillDir: string): Promise<SkillProvenance 
  * the installer-owned provenance directory. 与安装时记录的归档校验和不同源,
  * 因此只用于「与上次计算相比是否变化」——首次安装时由 writeProvenance
  * 记录当时的内容哈希,之后据此判定本地是否被改动过。
+ *
+ * **跨包同源契约（独立复审 N1）**：随包插件同步器（vendored
+ * `lib/coi/skills-sync.js` 的 `skillContentChecksum`）在每次自己写内容之后也写一份
+ * 同样的哈希（`channel: 'plugin'` 落点的 `archiveChecksum`）。跨包 import 禁止 ⇒
+ * 两份实现各自持有，等价性由 `tests/skill-channel-parity.spec.ts` 用真实 fixture
+ * 对拍（嵌套目录 / 空目录 / 二进制 / 非 ASCII 名 / 符号链接 / 顶层 `.picoaide`）。
+ * **改这里的算法必须同步改那边**（差异会让随包技能恒判脏或恒不判脏）。
  */
 export async function computeSkillContentHash(skillDir: string): Promise<string> {
   const hash = createHash('sha256')
@@ -1215,13 +1256,53 @@ export async function computeSkillContentHash(skillDir: string): Promise<string>
         await walk(join(dir, entry.name), rel)
       } else if (entry.isFile()) {
         hash.update(`F:${rel}:`)
-        hash.update(await readFile(join(dir, entry.name)))
+        const bytes = await readFile(join(dir, entry.name))
+        // 顶层 SKILL.md 走**规范化**字节（N1b / 复审 R5-B-4）：平台管理的
+        // frontmatter 字段（`disable-model-invocation`，由「技能管理」的禁用开关写）
+        // 不进内容哈希 —— 「禁用」是平台动作，不是"用户改了内容"。
+        hash.update(rel === 'SKILL.md' ? normalizeSkillManifestBytes(bytes) : bytes)
         hash.update('\n')
       }
     }
   }
   await walk(skillDir, '')
   return hash.digest('hex')
+}
+
+/**
+ * 内容哈希用的**规范化字节**：把平台管理的 frontmatter 字段从 SKILL.md 里剔除
+ * （N1b / 独立复审 R5-B-4）。
+ *
+ * 为什么必须有：`disable-model-invocation` 是「技能管理」Tab 的禁用开关写进
+ * SKILL.md 的字段（写入端在 vendored 插件 `lib/skills-manager.js`，本轮起与
+ * `lib/skill-manifest.js` 共用同一份实现）。它是**平台自己的元数据**，而内容哈希
+ * 此前把它当成"用户改了内容"：①能力中心误显示「已本地修改」；②此后每次更新/卸载
+ * 都要多一张确认条。判据因此收窄为"**用户改过内容**"。
+ *
+ * 与其余跨包契约一样：**逐字节复刻** vendored 侧 `lib/skill-manifest.js` 的
+ * `normalizeSkillManifestBytes`（跨包 import 禁止），等价性由
+ * `tests/skill-channel-parity.spec.ts` 用真实 fixture 对拍。
+ *
+ * 三条性质（缺一条都会出事）：
+ *  - **无 frontmatter / 无该字段 ⇒ 原样返回入参 Buffer**（不做往返编解码）：本修复
+ *    之前写下的老基准里，从没带过该字段的技能必须逐字节仍然可比，否则全量技能会
+ *    瞬间变成"已本地修改"；
+ *  - 有该字段 ⇒ 按 `toggleDisableFlag` 的同一套 splice 规则移除并重建 frontmatter
+ *    块（`---\n<data>\n---<原闭合换行><body>`），于是"禁用/启用"开关对哈希不可见；
+ *  - 只影响顶层 `SKILL.md`（{@link computeSkillContentHash} 只在 `rel === 'SKILL.md'`
+ *    时调用它）；正文/其它文件一律按原始字节哈希 ⇒ 用户真的改了正文**照样**判脏。
+ *
+ * @param bytes - SKILL.md 的原始字节。
+ * @returns 参与哈希的字节（多数情况下就是入参本身）。
+ */
+export function normalizeSkillManifestBytes(bytes: Buffer): Buffer {
+  const text = bytes.toString('utf8')
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n?)([\s\S]*)$/u.exec(text)
+  if (match === null) return bytes
+  const data = match[1] as string
+  if (!DISABLE_MODEL_KEY_LINE.test(data)) return bytes
+  const next = data.split('\n').filter((line) => !DISABLE_MODEL_KEY_LINE.test(line)).join('\n')
+  return Buffer.from(`---\n${next}\n---${match[2] as string}${match[3] as string}`, 'utf8')
 }
 
 /** One locally authored skill row (name + display metadata from frontmatter). */

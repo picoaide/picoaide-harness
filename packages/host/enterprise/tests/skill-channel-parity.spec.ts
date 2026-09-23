@@ -21,13 +21,21 @@
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { computeSkillContentHash } from '../src/skill-install.ts'
+// @ts-expect-error vendored plain JS (no types)
+import { skillContentChecksum } from '../../../vendor/memory-evolve/lib/coi/skills-sync.js'
+// @ts-expect-error vendored plain JS (no types)
+import { toggleDisableFlag } from '../../../vendor/memory-evolve/lib/skill-manifest.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ENTERPRISE_FILE = join(HERE, '..', 'src', 'skill-install.ts')
 const VENDOR_FILE = join(HERE, '..', '..', '..', 'vendor', 'memory-evolve', 'lib', 'coi', 'skills-sync.js')
-
+/** 禁用字段（N1b）的唯一实现：vendored 的 `lib/skill-manifest.js`。 */
+const VENDOR_MANIFEST_FILE = join(HERE, '..', '..', '..', 'vendor', 'memory-evolve', 'lib', 'skill-manifest.js')
 const enterpriseSrc = readFileSync(ENTERPRISE_FILE, 'utf8')
 const vendorSrc = readFileSync(VENDOR_FILE, 'utf8')
 
@@ -233,5 +241,135 @@ describe('R4-D-8 技能名语法四处同源', () => {
       literal(enterpriseSrc, /MAX_SKILL_NAME_LENGTH = (\d+)/u, 'MAX_SKILL_NAME_LENGTH', ENTERPRISE_FILE),
       '安装器目录段上限必须与 skillmanifest 的 64 保持一致',
     ).toBe('64')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// N1：内容基准哈希**行为对拍**（独立复审 2026-09-23）
+//
+// 「这份技能是否被本地改过」的判据是"盘上内容哈希 vs 上次写下的基准"，而基准有
+// **两个写者**：安装器（`computeSkillContentHash`，写 `archiveChecksum`）与随包
+// 同步器（`skillContentChecksum`，写 `channel:'plugin'` 落点的 `archiveChecksum`）。
+// 跨包 import 禁止 ⇒ 两份实现各自持有，于是"逐字节同源"必须由机器判据钉住：
+// 任何一侧改了遍历顺序 / 前缀（`D:` `F:`）/ 分隔符 / 排除规则，都会让随包技能
+// **恒判脏**（每次开机都拒收）或**恒不判脏**（回到 N1 的静默覆盖）。
+//
+// 判据是行为，不是源码文本：同一批真实 fixture 两侧都必须给出**同一个**哈希。
+// 上面那组"读源码文本"的对拍对这两份实现无效（它们读的是字面量，不是算法）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 造一棵"什么都有"的技能树（模块级夹具，N1 与 N1b 两组共用）：嵌套目录 / 空目录 / 二进制 / 非 ASCII 名 /
+ * 大小写与连字符（`localeCompare` 与字节序不同的名字）/ 符号链接 / 顶层 `.picoaide`。
+ * 创建顺序刻意与排序顺序相反（先 z 后 a），任何"按 readdir 原始顺序"的实现都会分叉。
+ * @param dir - 目标目录（必须已存在）。
+ */
+const buildParityTree = async (dir: string): Promise<void> => {
+  await mkdir(join(dir, 'scripts', 'nested'), { recursive: true })
+  await mkdir(join(dir, 'references'), { recursive: true }) // 空目录（必须进哈希）
+  await mkdir(join(dir, '.picoaide'), { recursive: true }) // 顶层私有目录（必须被排除）
+  await writeFile(join(dir, 'scripts', 'zz.mjs'), 'zz\n')
+  await writeFile(join(dir, 'scripts', 'aa.mjs'), 'aa\n')
+  await writeFile(join(dir, 'scripts', 'nested', 'deep.txt'), 'deep\n')
+  await writeFile(join(dir, 'SKILL.md'), '---\nname: probe\n---\n\nbody\n')
+  await writeFile(join(dir, '.install-version'), '7') // 内容的一部分（不是私有目录）
+  await writeFile(join(dir, 'a-b.md'), 'dash\n')
+  await writeFile(join(dir, 'aB.md'), 'camel\n')
+  await writeFile(join(dir, '二进制.bin'), Buffer.from([0, 1, 2, 255, 0, 65]))
+  await writeFile(join(dir, '.picoaide', 'release.json'), '{"appId":"probe"}\n')
+  await symlink(join(dir, 'SKILL.md'), join(dir, 'link-to-skill.md')) // 两侧都按"不看"处理
+}
+
+describe('N1 内容基准哈希：安装器 computeSkillContentHash === 同步器 skillContentChecksum', () => {
+  it('同一棵树：两侧哈希逐字相同；内容变了两侧一起变且仍相同', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-hash-parity-'))
+    try {
+      await buildParityTree(root)
+      const fromInstaller = await computeSkillContentHash(root)
+      const fromSync = skillContentChecksum(root)
+      expect(fromSync, '同步器写下的基准与安装器重算的值必须逐字节相同（否则随包技能恒判脏/恒不判脏）').toBe(fromInstaller)
+
+      await writeFile(join(root, 'scripts', 'nested', 'deep.txt'), 'deep EDITED\n')
+      const editedInstaller = await computeSkillContentHash(root)
+      const editedSync = skillContentChecksum(root)
+      expect(editedSync, '内容变了之后两侧仍必须相同').toBe(editedInstaller)
+      expect(editedInstaller, 'fixture 不是恒等函数：改一个字节必须换一个哈希').not.toBe(fromInstaller)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('顶层 .picoaide/ 两侧都排除（写溯源本身不得让这份内容变脏）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-hash-parity-'))
+    try {
+      await buildParityTree(root)
+      const before = skillContentChecksum(root)
+      await writeFile(join(root, '.picoaide', 'release.json'), '{"appId":"probe","archiveChecksum":"x"}\n')
+      await writeFile(join(root, '.picoaide', 'extra.json'), '{}\n')
+      expect(skillContentChecksum(root)).toBe(before)
+      expect(await computeSkillContentHash(root)).toBe(before)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('.install-version 两侧都**计入**（所以同步器必须先写它、再算基准）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-hash-parity-'))
+    try {
+      await buildParityTree(root)
+      const before = skillContentChecksum(root)
+      await writeFile(join(root, '.install-version'), '8')
+      expect(skillContentChecksum(root), '.install-version 是内容树的一部分（安装器只排除顶层 .picoaide）').not.toBe(before)
+      expect(skillContentChecksum(root)).toBe(await computeSkillContentHash(root))
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// N1b：平台管理的 frontmatter 字段（「技能管理」禁用开关写的
+// `disable-model-invocation`）**不进内容哈希** —— 复审 R5-B-4 的根因是
+// "写入端（skills-manager）与哈希端对同一个字段的定义不同"。两端必须一致：
+// 字段名同值（源文本对拍）+ 归一化行为同值（真实文件对拍）。
+// ---------------------------------------------------------------------------
+
+describe('N1b 禁用字段：两端同值且都不进内容哈希', () => {
+  it('字段名两端同值（改一侧即红）', () => {
+    const pattern = /DISABLE_MODEL_KEY = '([^']+)'/u
+    const fromEnterprise = literal(enterpriseSrc, pattern, 'DISABLE_MODEL_KEY', ENTERPRISE_FILE)
+    const fromVendor = literal(readFileSync(VENDOR_MANIFEST_FILE, 'utf8'), pattern, 'DISABLE_MODEL_KEY', VENDOR_MANIFEST_FILE)
+    expect(fromVendor, '禁用字段名必须是同一个（写入端在 vendored，哈希端两侧都有）').toBe(fromEnterprise)
+    expect(fromEnterprise).toBe('disable-model-invocation')
+  })
+
+  it('写入/清除该字段：两侧哈希都不变；改正文：两侧都变且仍相同', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pico-hash-n1b-'))
+    try {
+      await buildParityTree(root)
+      const base = await computeSkillContentHash(root)
+      expect(skillContentChecksum(root)).toBe(base)
+
+      const mdPath = join(root, 'SKILL.md')
+      const plain = readFileSync(mdPath, 'utf8')
+      const withFlag = toggleDisableFlag(plain, true) as string
+      expect(withFlag, '夹具必须能加上禁用标记').not.toBe(plain)
+      await writeFile(mdPath, withFlag)
+      expect(await computeSkillContentHash(root), '禁用是平台动作，不是"用户改了内容"').toBe(base)
+      expect(skillContentChecksum(root)).toBe(base)
+
+      // 反向对照：归一化只剔除该字段，正文改动照样判脏（两侧一致）。
+      await writeFile(mdPath, withFlag.replace('body', 'body EDITED'))
+      const editedInstaller = await computeSkillContentHash(root)
+      expect(editedInstaller).not.toBe(base)
+      expect(skillContentChecksum(root)).toBe(editedInstaller)
+
+      // 清除标记（启用）：回到基准 —— 开关是双向不可见的。
+      await writeFile(mdPath, toggleDisableFlag(withFlag, false) as string)
+      expect(await computeSkillContentHash(root)).toBe(base)
+      expect(skillContentChecksum(root)).toBe(base)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
