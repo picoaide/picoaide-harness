@@ -125,8 +125,11 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 
 **默认形态是前后端分离**：`web/index.html` + `web/app.css` + `web/app.js` 打进包里当静态资源，
 **宿主按路径直出**（§2.1 的直出规则与 `references/abi.md` §3.7）；wasm 只回 JSON。
-入口文档（`/`、`/index.html`）**由 wasm 自己答**（先判名单，再 `assets.read("index.html")`
-作为响应体）—— 名单判定在应用手里，宿主对入口一律不直出。
+入口文档（`/`、`/index.html`、`<目录>/` —— 目录形态等价于 `<目录>/index.html`）**由 wasm 自己答**
+（先判名单，再 `assets.read("index.html")` 作为响应体）—— 名单判定在应用手里，宿主对入口一律不直出。
+判据是"是不是**入口文档**"，不是"是不是**根**文档"：页面放在子目录（`/admin/`、`/app/`）时，
+`/admin/` 同样是入口、同样由应用把门 —— 否则名单外的人只会看到一个空壳页面。
+子资源（JS/CSS/图片）与**非入口的普通文档**（如 `docs/readme.html`）仍由宿主直出。
 
 `html/template` / `text/template` **仍然被放行**（导入白名单由参考实现**真编译取并集**生成，
 已覆盖模板渲染所需的导入面：`Execute`、`(*os.File).ReadAt/WriteAt` 等），有服务端渲染需求时
