@@ -415,6 +415,10 @@ const LEGACY_ACTIONS: Record<string, string> = {
 const AUDIT_SINKS: ReadonlyArray<{ name: string; actionArg: number }> = [
   { name: 'AuditLogApp', actionArg: 3 },
   { name: 'AuditLog', actionArg: 2 },
+  // provider PUT 事务化（0dd74681b7）把审计写入从 AuditLog 换成 AuditLogTx；
+  // 签名是 (tx, username, action, detail) ⇒ action 仍在 2 号位。漏登记会让
+  // provider_update 被判成「凭空发明的动作名」——本仓「跨面拼接」缺陷类的又一例。
+  { name: 'AuditLogTx', actionArg: 2 },
   { name: 'auditApp', actionArg: 2 },
   { name: 'auditOrg', actionArg: 1 },
   { name: 'Audit', actionArg: 1 },
