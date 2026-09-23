@@ -890,6 +890,13 @@ const WASM_CASE_GATE_SCOPE = ['internal/wasmapp', 'internal/router', 'internal/m
 /** W-5 的探针组与它必须带的"非覆盖平台显式 SKIP"开关。 */
 const WASM_PROBE_GROUPS = ['6']
 const WASM_PROBE_ENV = 'WASM_GATE_REQUIRE_COVERED_PLATFORM'
+/**
+ * W-8 接线的后半(2026-09-23):跑 WASM 门禁的每一步都必须把**结论**钉在权威 HEAD 上。
+ * 变量名与取值都登记在这里(脚本侧 `scripts/verify-wasm-client-only.sh` 的跑前校验读它;
+ * `scripts/verify-ci-scripts.mjs` 会从 ci.yml 抽出真值并**实跑**脚本证明这个名字被认)。
+ */
+const WASM_GATE_EXPECT_HEAD_ENV = 'WASM_GATE_EXPECT_HEAD'
+const WASM_GATE_EXPECT_HEAD_VALUE = '${{ github.sha }}'
 
 /**
  *
@@ -2327,6 +2334,18 @@ function checkDocsOnlyClassifier(file, document, text, notes) {
  *   ② `verify-wasm-client-only.sh --groups 6` 恰好被一步调用;该 step 的 env 必须
  *      `WASM_GATE_REQUIRE_COVERED_PLATFORM=1`(否则非 Linux 平台会"跑完给结论");
  *      不得 `continue-on-error`;`if:`(若有)不得把它收窄成"几乎不跑"的条件。
+ *   ③ **结论必须绑权威 HEAD**(W-8 接线的后半,2026-09-23):跑这个门禁的**两处**入口
+ *      (整仓门禁那一步 + 协议探针那一步)都必须在 step 的 `env` 里带
+ *      `WASM_GATE_EXPECT_HEAD: ${{ github.sha }}`。脚本侧的这份能力早就存在
+ *      (不匹配即**跑前**退出码 2 并打印"结论不可比"),但 `.github/` 里没有任何地方设置它
+ *      ⇒ 又是一次"有能力、没接线":换 commit、脏树、跑动中被推进 HEAD,都能拿到同一句
+ *      "全部通过 ✅(绑定 HEAD …)"。取值必须是 `github.sha` —— 写死一个字面量 sha 会在
+ *      下一次提交后**恒红**(而恒红的判据迟早被摘掉),写成 `github.ref` 之类则形状非法。
+ *      反例(必须红):env 缺失 / 写成字面量 sha / 写成别的 github 变量。
+ *   ④ **刻意不接 `--require-clean` / `WASM_GATE_REQUIRE_CLEAN`**(2026-09-23 拍板,理由见
+ *      ci.yml 该 step 的注释与脚本头部):共享工作树恒脏、门禁自身会产出被忽略的构建产物,
+ *      "必须干净"容易变成假红 ⇒ 这一条**不做**静态判据(它也不构成静默缺口:真接上了且
+ *      红了,CI 会当场报错,不会悄悄失去判据)。
  *
  * @param file - workflow 文件名。
  * @param document - parseYaml 的结果。
@@ -2340,6 +2359,40 @@ function checkWasmGateWiring(file, document, notes) {
   const scriptOf = step => (typeof step?.run === 'string' ? executableScript(step.run) : '')
   const setEqual = (observed, expected) => observed.length === expected.length
     && [...observed].sort().join(',') === [...expected].sort().join(',')
+  /**
+   * 这一步是不是「参数向量为空的全量根门禁」(与 [SK-8]/[SK-9] 同一份识别口径:
+   * `ROOT_GATE_INVOCATION` + 参数向量为空)。`scriptOf` 已去掉注释 ⇒ 把 `yarn check`
+   * 注释掉的写法不会被当成跑过门禁。
+   */
+  const isFullRootGate = script => [...script.matchAll(ROOT_GATE_INVOCATION)]
+    .some(match => match[1] === 'check' && match[2].trim() === '')
+  /**
+   * ③ 结论绑定权威 HEAD(W-8 接线):step 的 `env` 必须带
+   * `WASM_GATE_EXPECT_HEAD: ${{ github.sha }}`。只接受这一个取值 —— 字面量 sha 会在下一次
+   * 提交后恒红,其它 github 变量(如 `github.ref`)形状非法 ⇒ 两者都会把判据变成噪音。
+   * @param workflow - 文件名(进失败项)。
+   * @param label - 人读的定位串。
+   * @param step - YAML 解析出来的 step 对象。
+   * @returns 失败项数组(可能为空)。
+   */
+  const expectHeadBinding = (workflow, label, step) => {
+    const env = typeof step?.env === 'object' && step.env !== null ? step.env : {}
+    const raw = env[WASM_GATE_EXPECT_HEAD_ENV]
+    const value = typeof raw === 'string' ? raw.trim() : (raw === undefined || raw === null ? '' : String(raw).trim())
+    if (value === WASM_GATE_EXPECT_HEAD_VALUE) return []
+    const shape = value === ''
+      ? '缺失'
+      : (/^\$\{\{/u.test(value) ? '写成了别的表达式' : '写成了字面量')
+    return [{
+      name: workflow,
+      line: 0,
+      detail: `[SK-12] ${label} 没有把结论钉在权威 HEAD 上:`
+        + `\`${WASM_GATE_EXPECT_HEAD_ENV}: ${WASM_GATE_EXPECT_HEAD_VALUE}\`(实际 ${shape}:${JSON.stringify(value)})`
+        + '\n  ⇒ 脚本侧早已支持跑前锁定期望 HEAD(不匹配即**跑前**退出码 2 + "结论不可比"),'
+        + '但 CI 不设置它 ⇒ 换 commit / 脏树 / 跑动中被推进 HEAD 都能拿到同一句"全部通过 ✅(绑定 HEAD …)"。'
+        + '\n  取值必须是 `${{ github.sha }}`:字面量 sha 在下一次提交后恒红,`github.ref` 之类形状非法。',
+    }]
+  }
 
   // 判据只对**本仓的 CI 工作流**(`ci.yml`)生效。为什么锚文件名而不是"内容里有没有
   // `yarn check`/`go test`":那类锚点会随被检查的东西一起消失 —— 把接线整段删掉时,
@@ -2349,6 +2402,7 @@ function checkWasmGateWiring(file, document, notes) {
 
   const caseGateHits = []
   const probeHits = []
+  const fullGateHits = []
   for (const [jobId, job] of Object.entries(jobs)) {
     for (const [index, step] of stepsOf(job).entries()) {
       const script = scriptOf(step)
@@ -2357,6 +2411,9 @@ function checkWasmGateWiring(file, document, notes) {
       if (script.includes('verify-wasm-client-only.sh') && groups !== null) {
         probeHits.push({ jobId, job, step, index, script, groups: groups[1].split(',').filter(Boolean) })
       }
+      // 「整仓门禁那一步」= 参数向量为空的全量 `yarn check`(与 [SK-8] 同一份识别口径)。
+      // 它跑 `check:wasm-client-only`(check-workspaces.mjs 的 GUARDS 表),所以也吃 step env。
+      if (isFullRootGate(script)) fullGateHits.push({ jobId, job, step, index, script })
     }
   }
 
@@ -2489,10 +2546,19 @@ function checkWasmGateWiring(file, document, notes) {
           + '\n  ⇒ 允许的形态只有:不写 `if:`,或写成 `!= \'false\'`(docs-only 的 fail-safe 形态)。',
       })
     }
+    failures.push(...expectHeadBinding(file, label, hit.step))
   }
-  if (caseGateHits.length > 0 || probeHits.length > 0) {
+
+  // ③ 整仓门禁那一步:它经 `check:wasm-client-only` 跑同一份门禁,所以结论同样必须绑 HEAD。
+  // 0 个全量门禁 ⇒ [SK-8]/[SK-9] 已经会红,这里不重复报(避免同一缺陷两处噪音)。
+  for (const hit of fullGateHits) {
+    failures.push(...expectHeadBinding(file, `job ${hit.jobId} 的 step「${stepName(hit.step, hit.index)}」`, hit.step))
+  }
+
+  if (caseGateHits.length > 0 || probeHits.length > 0 || fullGateHits.length > 0) {
     notes.push(`[SK-12] WASM 接线:用例级报告 ${caseGateHits.length} 步(范围 ${WASM_CASE_GATE_SCOPE.join(',')})、`
-      + `协议探针 ${probeHits.length} 步(组 ${WASM_PROBE_GROUPS.join(',')})`)
+      + `协议探针 ${probeHits.length} 步(组 ${WASM_PROBE_GROUPS.join(',')})、`
+      + `结论绑 HEAD ${fullGateHits.length + probeHits.length} 步(${WASM_GATE_EXPECT_HEAD_ENV})`)
   }
   return failures
 }
@@ -2730,12 +2796,24 @@ export function selfTestPolicies() {
       pg: true,
     },
   }
+  /**
+   * W-8③ 的 env 行生成器(两个夹具共用):`full` = 登记形态,其余是三种必须红的变异。
+   * `literal` = 写死一个字面量 sha(下次提交后恒红);`wrong-var` = 换成别的 github 变量
+   * (脚本侧形状校验会拒);`none` = 整行缺失(= 本判据要修的原始形态)。
+   */
+  const expectHeadEnvLine = mode => {
+    if (mode === 'none') return null
+    if (mode === 'literal') return `          ${WASM_GATE_EXPECT_HEAD_ENV}: '1f9c621b98e81c92ecb5170fd97910a78725b8e9'`
+    if (mode === 'wrong-var') return `          ${WASM_GATE_EXPECT_HEAD_ENV}: \${{ github.ref }}`
+    return `          ${WASM_GATE_EXPECT_HEAD_ENV}: \${{ github.sha }}`
+  }
   /** W-5 探针步的形态生成器(两个夹具共用)。 */
-  const wasmProbeLines = (mode) => (mode === 'none' ? [] : [
+  const wasmProbeLines = (mode, expectHead = 'full') => (mode === 'none' ? [] : [
     '      - name: WASM protocol probes (group 6; Linux)',
     ...(mode === 'narrow-if' ? ["        if: github.event_name == 'workflow_dispatch'"] : []),
     '        env:',
     `          ${WASM_PROBE_ENV}: ${mode === 'no-env' ? "''" : "'1'"}`,
+    ...(expectHeadEnvLine(expectHead) === null ? [] : [expectHeadEnvLine(expectHead)]),
     `        run: bash scripts/verify-wasm-client-only.sh --groups ${mode === 'group1' ? '1' : '6'}`,
   ])
   /** W-4 用例级报告步的形态生成器(两个夹具共用)。 */
@@ -3178,6 +3256,8 @@ export function selfTestPolicies() {
     linkStep = true,
     wasmCaseGate = 'full',
     wasmProbe = 'full',
+    gateExpectHead = 'full',
+    probeExpectHead = 'full',
   } = {}) => [
     'name: selftest',
     'on: push',
@@ -3222,8 +3302,9 @@ export function selfTestPolicies() {
     ...(gateDepth === null ? [] : [gateDepth]),
     '      - name: 全量门禁',
     `        if: ${gateStepIf}`,
+    ...(expectHeadEnvLine(gateExpectHead) === null ? [] : ['        env:', expectHeadEnvLine(gateExpectHead)]),
     `        run: ${gateRun}`,
-    ...wasmProbeLines(wasmProbe),
+    ...wasmProbeLines(wasmProbe, probeExpectHead),
     ...wasmCaseGateLines(wasmCaseGate),
     '',
   ].join('\n')
@@ -3283,6 +3364,13 @@ export function selfTestPolicies() {
   gateSample('r9-probe-no-require-covered', '[SK-12]', { file: 'ci.yml', wasmProbe: 'no-env' })
   gateSample('r10-probe-wrong-group', '[SK-12]', { file: 'ci.yml', wasmProbe: 'group1' })
   gateSample('r11-probe-narrow-if', '[SK-12]', { file: 'ci.yml', wasmProbe: 'narrow-if' })
+  // ③ W-8 接线的后半:结论必须钉在权威 HEAD 上(整仓门禁步 + 探针步两处都要)。
+  // 三种变异都要红:整行缺失(= 原始形态)/ 写死字面量 sha(下次提交后恒红)/ 换成别的 github 变量。
+  gateSample('r12-gate-missing-expect-head', '[SK-12]', { file: 'ci.yml', gateExpectHead: 'none' })
+  gateSample('r13-gate-literal-expect-head', '[SK-12]', { file: 'ci.yml', gateExpectHead: 'literal' })
+  gateSample('r14-gate-wrong-var-expect-head', '[SK-12]', { file: 'ci.yml', gateExpectHead: 'wrong-var' })
+  gateSample('r15-probe-missing-expect-head', '[SK-12]', { file: 'ci.yml', probeExpectHead: 'none' })
+  gateSample('r16-probe-literal-expect-head', '[SK-12]', { file: 'ci.yml', probeExpectHead: 'literal' })
 
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [

@@ -24,6 +24,10 @@
 #       实现收在 `scripts/wasm/check-authoring-claims.mjs`（2026-09-23 三轮审计 W-7/W-9：
 #       三条反向判据曾是固定枚举、一条豁免是整行关键词、两条正向判据只查关键词存在、
 #       扫描根含死条目且 `2>/dev/null || true` 吞掉 grep 自身的 rc≥2）。
+#       扫描面（2026-09-23 W-7 收口）：docs / site/src / server/docs / server/skills/app-builder
+#       **+ packages（workspace 源码）+ community** + 仓库根 `README*.md`；`lib`（构建产物）
+#       与 `__snapshots__` 排除，"扫描面不得静默缩小"有两条互相独立的判据（登记值全覆盖 +
+#       package.json#workspaces 顶层段全覆盖，任一缺项即退出码 2）。
 #
 # 用法：
 #   bash scripts/verify-wasm-client-only.sh                 # 全量（1–8）
@@ -52,7 +56,19 @@
 #   WASM_GATE_REQUIRE_COVERED_PLATFORM=1  非 Linux 平台上探针按显式 SKIP（退出码 77）处理
 #   WASM_GATE_EXPECT_HEAD  跑前锁定的期望 HEAD（7–40 位小写十六进制，按**前缀**比较）。
 #                       不匹配即**跑前**失败（退出码 2）并说明「结论不可比」；CI 应传 `github.sha`。
+#                       接线现状（2026-09-23，W-8 收口）：`.github/workflows/ci.yml` 的 gate job 里
+#                       **两处**入口都设了它——`Full gate (packages + all root guards)`（经
+#                       `check:wasm-client-only` 跑本脚本）与 `WASM protocol probes (group 6)`；
+#                       两处由 `scripts/check-workflows.mjs` 的 [SK-12]③ 钉住，取值必须是
+#                       `${{ github.sha }}`（写死字面量会在下一次提交后恒红）。
+#                       `scripts/verify-ci-scripts.mjs` 另有动态判据：拿 ci.yml 里的**变量名**
+#                       配一个不等于 HEAD 的 sha 实跑本脚本，必须以退出码 2 前置拒绝。
 #   WASM_GATE_REQUIRE_CLEAN=1  等价于 --require-clean：工作树有改动即判失败（缺省只 WARN 并写进结论行）
+#                       **刻意不接进 CI**（2026-09-23 拍板，理由见 ci.yml 该 step 的注释）：
+#                       本仓共享工作树恒脏、门禁自身会产出被忽略的构建产物，"必须干净"容易变成
+#                       假红，而假红的下场通常是整条判据被关掉；缺省口径不是静默的——脏树会以
+#                       `WARN 工作树不干净（跑前 N → 跑后 M 个改动）` 写进结论行与绑定文件的
+#                       `dirty-policy` 行。CI 的干净检出下它是绿的（副本仓实测）。
 # 退出码：0 = 所选组全部通过；1 = 有失败项；2 = 用法/环境错误（含跑前期望 HEAD 与当前 HEAD 不一致）。
 
 set -euo pipefail
@@ -98,7 +114,9 @@ GROUPS_EXPLICIT=0
 # W-8②：脏树的判定口径（缺省 WARN + 写进结论行；`--require-clean` / WASM_GATE_REQUIRE_CLEAN=1 时判失败）。
 # 为什么默认不是失败：本仓有并发编辑史，把"脏树"一律判死会让门禁在共享工作目录里恒红，人就会学着忽略它；
 # 但"只记录不断言"同样不行（结论会被当成干净 HEAD 的结论）⇒ 折中是**显式的、进结论行的 WARN**，
-# 并给 CI 一个开关把它升级成硬判据（CI 检出的是干净树，脏 = 有东西被改过，必须红）。
+# 并把硬判据留给**显式调用**（--require-clean / WASM_GATE_REQUIRE_CLEAN=1）。
+# **CI 刻意不接这个开关**（2026-09-23 拍板）：见脚本头「环境变量」一节与 ci.yml 里该 step 的注释 ——
+# 共享工作树恒脏 + 门禁自身产出被忽略的构建产物 ⇒ "必须干净"容易变成假红，而假红的下场通常是关掉判据。
 REQUIRE_CLEAN="${WASM_GATE_REQUIRE_CLEAN:-0}"
 # 非法取值 fail-loud（不静默降级成 warn）：写 `=true`/`=yes` 是很自然的误用，而它一旦被当成
 # "没开"，脏树就只剩 WARN —— 那正是 W-8② 要消灭的形态（CI 里静默失去这条判据）。
@@ -208,7 +226,11 @@ pg_reachable() {
 # 换 commit、带脏树都能拿到同一句"全部通过 ✅（绑定 HEAD …）"。现在补三件事：
 #   ① **跑前**接受期望 HEAD（WASM_GATE_EXPECT_HEAD，CI 传 github.sha）：不匹配即退出码 2，
 #      并明说"结论不可比"——这是前置失败，不是"判据没通过"；
-#   ② 脏树有**显式判据**（缺省 WARN 写进结论行；--require-clean / WASM_GATE_REQUIRE_CLEAN=1 时红）；
+#      **接线现状（W-8 收口）**：CI gate job 的两处入口（`yarn check` 那一步与组 6 探针那一步）
+#      都已设它，由 `check-workflows.mjs` 的 [SK-12]③ 静态钉住（取值必须是 `${{ github.sha }}`），
+#      `verify-ci-scripts.mjs` 另有"拿 ci.yml 的变量名 + 错 sha 实跑 ⇒ 必须前置拒绝"的动态判据；
+#   ② 脏树有**显式判据**（缺省 WARN 写进结论行；--require-clean / WASM_GATE_REQUIRE_CLEAN=1 时红；
+#      CI 刻意不接——理由见脚本头与环境变量一节）；
 #   ③ residue.json 的 head 与本绑定文件在结论处**对拍**（同一门禁内部两个真源必须互校）。
 # ---------------------------------------------------------------------------
 HEAD_START="$(git rev-parse HEAD)"

@@ -260,8 +260,28 @@ jobs:
       # check:fast)—— 这条由 check-workflows.mjs 的 [SK-8] 静态策略守着。
       # **根守卫也在 `yarn check` 里**,但那条路径只对"有代码改动"的 PR 生效;
       # docs-only 的 PR 由永不跳过的 gate-guards job 承担(见上面的注释)。
+      #
+      # W-8 接线(2026-09-23 第三轮审计的收口):`yarn check` 里的 `check:wasm-client-only`
+      # 会跑 `scripts/verify-wasm-client-only.sh`。该脚本早就支持"跑前锁定期望 HEAD"
+      # (不匹配即**跑前**退出码 2 并打印「结论不可比」),但**没有任何地方设置它** ⇒
+      # 换 commit / 脏树 / 跑动中被推进 HEAD 都能拿到同一句「全部通过 ✅(绑定 HEAD …)」。
+      # 这里把结论钉在本次运行的那个提交上(`github.sha` 就是 `actions/checkout` 检出的
+      # 那个 commit;push/tag/PR 三种触发下都成立)。
+      # 取值必须是 `${{ github.sha }}`:写死字面量会在下一次提交后恒红,`github.ref` 之类
+      # 形状非法(脚本按 7–40 位小写十六进制校验)⇒ 两者都会被 check-workflows.mjs 的
+      # [SK-12]③ 静态判据拒掉。
+      #
+      # 为什么**不**顺带接 `--require-clean` / `WASM_GATE_REQUIRE_CLEAN=1`(2026-09-23 拍板):
+      # ① 本仓的共享工作树长期有并发未提交改动,门禁自身还会产出被忽略的构建产物 ⇒
+      #    "必须干净"极易变成假红,而假红的常见下场是整条判据被关掉;
+      # ② CI 之外真正需要这条硬判据的场景(归档一次可复现的结论)由本地显式加参数满足;
+      # ③ 缺省口径不是静默的 —— 脏树会以 `WARN 工作树不干净(跑前 N → 跑后 M 个改动)`
+      #    写进结论行与绑定文件(`dirty-policy` 行),不会被误读成"跑在干净 HEAD 上"。
+      # 若将来要接:需要在**干净检出**上先实测它稳定为绿(副本仓已验证可行),再接。
       - name: Full gate (packages + all root guards)
         if: needs.changes.outputs.code != 'false'
+        env:
+          WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: yarn check
       # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`
       # 对它 0 引用;组 6 只在本地手跑)。接在这里的原因:本 job 已装 xvfb(`yarn check`
@@ -270,10 +290,14 @@ jobs:
       # 只接 Linux:Windows/macOS 的自定义协议行为尚未实测,探针在非 Linux 上显式
       # SKIP(77);组内本轮新增的"**全组 SKIP = 失败**"保证 Linux 上哪天全 SKIP 也不会
       # 装作跑过(不留"跑完给结论"的假象)。
+      # `WASM_GATE_EXPECT_HEAD` 同样要带:这一步与 `yarn check` 跑的是**同一个脚本**,
+      # 不设置它就会留下一份"没绑任何权威 HEAD"的探针结论(与被审计的 W-8 形态相同);
+      # 两处入口由 check-workflows.mjs 的 [SK-12]③ 一起钉住。
       - name: WASM protocol probes (group 6; Linux)
         if: needs.changes.outputs.code != 'false'
         env:
           WASM_GATE_REQUIRE_COVERED_PLATFORM: '1'
+          WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: bash scripts/verify-wasm-client-only.sh --groups 6
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。

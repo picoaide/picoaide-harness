@@ -33,6 +33,9 @@ import { fileURLToPath } from 'node:url'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
 import { extractRunBlocks } from './check-workflows.mjs'
+// step 级字段(`env:`)必须走 YAML 解析 —— 1d 的 W-8 判据问的是"这一步的 env 里有没有
+// 那个变量",子串匹配会把别处(别的 job/别的 step)的同一行算进来。
+import { parse as parseYaml } from 'yaml'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const channelsScript = join(root, 'scripts', 'ci-channels.sh')
@@ -680,6 +683,77 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
       'W-5 必须带 WASM_GATE_REQUIRE_COVERED_PLATFORM(非覆盖平台显式 SKIP(77),不给"跑完给结论")')
     check(/WASM_GATE_REQUIRE_COVERED_PLATFORM:\s*['"]1['"]/u.test(workflowText),
       'WASM_GATE_REQUIRE_COVERED_PLATFORM 必须写死为 \'1\'(由 tag/平台派生的开关会让它退化成"跑完给结论")')
+  }
+
+  // ---- W-8 接线:门禁结论必须绑定权威 HEAD(2026-09-23 第三轮审计的收口) ----
+  //
+  // 现场:`scripts/verify-wasm-client-only.sh` 早就支持 `WASM_GATE_EXPECT_HEAD`(跑前锁定
+  // 期望 HEAD,不匹配即**跑前**退出码 2 + 「结论不可比」),而 `.github/` 从不设置它 ⇒
+  // 又一次"有能力、没接线":换 commit / 脏树 / 跑动中被推进 HEAD,都能拿到同一句
+  // "全部通过 ✅(绑定 HEAD …)"。
+  //
+  // 这一组做两件事(静态 + 动态,缺一不可):
+  //   ① 静态:从 ci.yml 的 **step `env:`**(YAML 解析,不是全文子串匹配)里取出跑这个门禁的
+  //      每一步的期望 HEAD 取值,断言恰好是 `${{ github.sha }}`;
+  //   ② 动态:把从 ci.yml 抽出来的**变量名**与一个形状合法、但不等于当前 HEAD 的 sha 交给
+  //      **真脚本**,断言它以退出码 2 拒绝并打印「结论不可比」—— 这一步证明"名字真的被脚本认"
+  //      (改名 / 打错字这类静默失效在这里当场红),而不是只证明 YAML 里有一行像样的文本。
+  {
+    const EXPECT_HEAD_ENV = 'WASM_GATE_EXPECT_HEAD'
+    const EXPECT_HEAD_VALUE = '${{ github.sha }}'
+    const document = parseYaml(workflowText)
+    const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+    /** 去掉行尾注释(`#` 之后的文本),与门禁自己的可执行文本口径一致。 */
+    const strippedRun = step => (typeof step?.run === 'string'
+      ? step.run.split('\n').map(line => line.replace(/(?:^|\s)#.*$/u, '')).join('\n')
+      : '')
+    /** 直接跑 WASM 门禁的 step(探针步 / 将来新增的入口)。 */
+    const directSteps = []
+    /** 跑整仓门禁的 step(`yarn check`,经 check:wasm-client-only 间接跑同一门禁)。 */
+    const fullGateSteps = []
+    for (const [jobId, job] of Object.entries(jobs)) {
+      const steps = Array.isArray(job?.steps) ? job.steps : []
+      steps.forEach((step, index) => {
+        const script = strippedRun(step)
+        const label = `job ${jobId} 的 step「${typeof step?.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`}」`
+        if (script.includes('verify-wasm-client-only.sh')) directSteps.push({ label, step })
+        if (/yarn\s+check(?![\w:.-])/u.test(script)) fullGateSteps.push({ label, step })
+      })
+    }
+    check(directSteps.length > 0, 'ci.yml 里找不到直接跑 verify-wasm-client-only.sh 的步骤(W-8 的接线对象没了)')
+    check(fullGateSteps.length > 0, 'ci.yml 里找不到跑全量根门禁(`yarn check`)的步骤(W-8 的接线对象没了)')
+    const expectedValue = value => (typeof value === 'string' ? value.trim() : String(value ?? '').trim())
+    let observedEnvName = null
+    for (const { label, step } of [...directSteps, ...fullGateSteps]) {
+      const env = typeof step?.env === 'object' && step.env !== null ? step.env : {}
+      const raw = env[EXPECT_HEAD_ENV]
+      check(raw !== undefined && expectedValue(raw) === EXPECT_HEAD_VALUE,
+        `${label} 的 step env 必须带 ${EXPECT_HEAD_ENV}: ${EXPECT_HEAD_VALUE}`
+        + `(实际 ${raw === undefined ? '缺失' : JSON.stringify(raw)})`
+        + ' —— 缺它不是"少一层保险",而是本次结论不绑任何权威 HEAD(换 commit 也照样说"全部通过")')
+      // 变量名从 ci.yml 里**抽出来**给动态断言用(而不是在测试里再写一遍字面量:
+      // 那样"CI 与脚本对不上"这种形态会被测试自己的字面量掩盖)。
+      if (raw !== undefined) observedEnvName = EXPECT_HEAD_ENV
+    }
+    // 动态:真脚本必须认这个名字,且必须在**跑任何一组之前**就以退出码 2 拒绝。
+    // sha 形状合法(40 位小写十六进制)但按构造不可能等于 HEAD ⇒ 走到"结论不可比"分支;
+    // 顺手断言它**没有**执行任何组(输出里不出现组标题),证明这是前置拒绝而非跑完才发现。
+    if (observedEnvName !== null) {
+      const wrongHead = '0'.repeat(40)
+      const refused = spawnSync('bash', ['scripts/verify-wasm-client-only.sh', '--groups', '8'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, [observedEnvName]: wrongHead },
+      })
+      const refusalText = `${refused.stdout ?? ''}${refused.stderr ?? ''}`
+      check(refused.status === 2,
+        `${observedEnvName} 与当前 HEAD 不符时,真脚本必须以退出码 2 前置拒绝(实际 ${String(refused.status)})`)
+      check(refusalText.includes('结论不可比'),
+        `${observedEnvName} 的前置拒绝必须打印「结论不可比」`
+        + `(实际输出:${refusalText.split('\n').slice(0, 3).join(' / ').slice(0, 200)})`)
+      check(!refusalText.includes('W5 文档与作者面判据'),
+        `${observedEnvName} 的前置拒绝必须发生在**跑任何一组之前**(输出里出现了组 8 的标题 ⇒ 判据已经跑过才拒绝)`)
+    }
   }
 }
 
@@ -2200,7 +2274,7 @@ if (failures.length > 0) {
   process.exit(1)
 }
 process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
-  + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数)/'
+  + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
   + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
   + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + 上传后大小/哈希完整性校验)/'
