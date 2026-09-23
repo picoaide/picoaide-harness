@@ -17,7 +17,7 @@ import {
 import { hostname as osHostname } from 'node:os'
 import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
-import { isValidCron } from './cron.ts'
+import { currentTimeZone, isValidCron, nextRunAtMs } from './cron.ts'
 import {
   createJob, jobIsRunning, jobVisibleTo, normalizeOwner, settleExecution, startExecution, updateJob,
   rollNextRunWithGaps, type ExecutionRecord, type JobRecord, type NextRunRoll,
@@ -157,8 +157,13 @@ interface CachedRequest {
   fingerprint: string
 }
 
+/**
+ * The scheduler's zone — one implementation, shared with the pure cron math
+ * (R5-B-6): the panel recomputes the same way, and a second copy here would be
+ * exactly the drift this fix is about.
+ */
 function timeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  return currentTimeZone()
 }
 
 /** A job record with the nextRunAt optional field stripped (exactOptionalPropertyTypes). */
@@ -965,6 +970,52 @@ export class HostCronLedger {
       ...(opened === undefined ? {} : { run: opened }),
       ...(rerun === undefined ? {} : { rerun }),
     }
+  }
+
+  /**
+   * Scheduler-owned: re-anchor every future `nextRunAt` onto the **current**
+   * timezone (R5-B-6).
+   *
+   * Why the Host must do this: a stored `nextRunAt` is an absolute instant,
+   * while the expression it came from is wall-clock semantics. Change the
+   * machine's zone and the stored instant stops being the instant the
+   * expression asks for — "0 9 * * *" fires once at 21:00 in the new zone, and
+   * the panel's "next run" contradicts the expression it sits next to. Both
+   * halves are fixed in this package: the panel recomputes the display, and
+   * this method makes the firing agree with it.
+   *
+   * Three boundaries, all chosen to leave existing semantics alone:
+   *  - **future instants only** — `nextRunAt <= now` belongs to the ordinary
+   *    fire / skip-missed path (R4-B-9); rescheduling here would erase that
+   *    record instead of letting the tick tell the story;
+   *  - **enabled jobs only** — a disabled job has no upcoming occurrence to
+   *    re-anchor;
+   *  - **no write when the zone is unchanged** — no revision bump, no wake-up
+   *    for subscribers on every tick.
+   * @param now - current Host clock.
+   * @returns the zone change when one happened (`from`/`to` + how many jobs
+   *   were rescheduled), otherwise `undefined`.
+   */
+  realignTimeZone(now: number): { from: string, to: string, rescheduled: number } | undefined {
+    const zone = timeZone()
+    const from = this.current.scheduler.timeZone
+    if (zone === from) return undefined
+    let rescheduled = 0
+    this.mutate((state) => {
+      for (const job of state.jobs) {
+        if (!job.enabled || job.nextRunAt === undefined || job.nextRunAt <= now) continue
+        const next = nextRunAtMs(job.cron, now)
+        if (next === job.nextRunAt) continue
+        if (next === undefined) delete job.nextRunAt
+        else job.nextRunAt = next
+        rescheduled += 1
+      }
+      // The snapshot's zone is the one the *current* nextRunAt values were
+      // computed in — the panel compares it with the machine's zone.
+      state.scheduler.timeZone = zone
+      return true
+    })
+    return { from, to: zone, rescheduled }
   }
 
   /** Scheduler-owned: record a tick time (persisted, revision-bumped). */

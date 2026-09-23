@@ -28,6 +28,16 @@ import { styles } from './styles.ts'
 import { JobEditor } from './JobEditor.tsx'
 import { t } from './locales.ts'
 import { latestDstSkip, latestMissedTrigger } from './dst-notice.ts'
+import { currentTimeZone, displayNextRun, hostTimeZoneDrift, soonestNextRun } from './next-run.ts'
+
+/**
+ * 重新读一次"现在"与"本机时区"的间隔（R5-B-6）。
+ *
+ * 两件事都要会变：墙钟走过触发点后"下次运行"要跟着走（下次触发点不再是刚才那个），
+ * 系统时区被改（旅行、策略变更、VPN 切区）后显示与说明要立刻跟上。宿主 tick 也是
+ * 30s 一次，两边同频；用户切回窗口时还有一次即时对表（见下面的 focus/visibility）。
+ */
+const CLOCK_TICK_MS = 30_000
 
 /** 执行结果的展示标签（文字 + 语义色调）。 */
 function executionLabel(result: JobRecord['executions'][number]): { text: string; tone: 'success' | 'danger' | 'neutral' | 'warn' } {
@@ -40,12 +50,19 @@ function executionLabel(result: JobRecord['executions'][number]): { text: string
   }
 }
 
-/** 下次运行的可读文案（未启用 ⇒ 已停用；已启用但没排上 ⇒ 未调度）。 */
-function nextRunText(job: JobRecord): string {
+/**
+ * 下次运行的可读文案（未启用 ⇒ 已停用；已启用但没排上 ⇒ 未调度）。
+ *
+ * R5-B-6：时刻由 {@link displayNextRun} 给 —— 它按**本机时区**从表达式重算，
+ * 而不是照抄宿主存下来的绝对时刻（时区变过之后那个时刻已经不是表达式要的那个点了）。
+ * 文案后面挂上时区名：cron 是墙钟语义，"09:00 在哪个时区"是这句话的一半。
+ */
+function nextRunText(job: JobRecord, now: number, zone: string): string {
   if (!job.enabled) return t('job.disabled')
-  return job.nextRunAt === undefined
+  const { at } = displayNextRun(job, now)
+  return at === undefined
     ? `${t('job.nextRun')} ${t('job.notScheduled')}`
-    : `${t('job.nextRun')} ${new Date(job.nextRunAt).toLocaleString()}`
+    : `${t('job.nextRun')} ${new Date(at).toLocaleString()} (${zone})`
 }
 
 /** cron 表达式的等宽小胶囊（放在卡片里当"技术标识"用）。 */
@@ -104,10 +121,36 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
   // The roster is fetched inside JobEditor; only forward the api handle.
   void api
 
+  /**
+   * "现在"与"本机时区"各自会变（R5-B-6），两个值都只在渲染期读，不往宿主账本写任何东西。
+   * 系统时区多半是在用户离开又回来的间隙被改的（旅行、切网络、VPN），所以除了定时器
+   * 还在窗口重新获得焦点/页面重新可见时立刻对一次表。
+   */
+  const [clock, setClock] = useState(() => ({ now: Date.now(), zone: currentTimeZone() }))
+  useEffect(() => {
+    const sync = (): void => {
+      setClock((previous) => {
+        const now = Date.now()
+        const zone = currentTimeZone()
+        return now === previous.now && zone === previous.zone ? previous : { now, zone }
+      })
+    }
+    const timer = setInterval(sync, CLOCK_TICK_MS)
+    window.addEventListener('focus', sync)
+    document.addEventListener('visibilitychange', sync)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', sync)
+      document.removeEventListener('visibilitychange', sync)
+    }
+  }, [])
+
   const enabledCount = snapshot.jobs.filter(job => job.enabled).length
-  const nextRunAt = snapshot.jobs
-    .filter(job => job.enabled && job.nextRunAt !== undefined)
-    .reduce<number | undefined>((soonest, job) => (soonest === undefined || job.nextRunAt! < soonest ? job.nextRunAt : soonest), undefined)
+  // 统计格的"下次运行"与卡片同源（同一个 displayNextRun），不再各读一次原始字段 ——
+  // 时区变过时两处必须给出同一个时刻（R5-B-6）。
+  const nextRunAt = soonestNextRun(snapshot.jobs, clock.now)
+  // 宿主记录的时区与本机不同 ⇒ 宿主还没按当前时区重排（它每个 tick 都会对齐一次）。
+  const zoneDrift = hostTimeZoneDrift(snapshot.scheduler)
   // 2026-09-23 R3-B3 F2 / B-5: an occurrence whose local clock does not exist
   // (the spring-forward gap) is skipped by the scheduler — say so, instead of
   // letting the job look like it was forgotten. Fresh skips only; see
@@ -131,7 +174,7 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
         <PanelStats items={[
           { label: t('job.listTitle'), value: String(snapshot.jobs.length) },
           { label: t('job.enabled'), value: String(enabledCount), tone: enabledCount > 0 ? 'success' : undefined },
-          { label: t('job.nextRun'), value: nextRunAt === undefined ? t('job.notScheduled') : new Date(nextRunAt).toLocaleString() },
+          { label: t('job.nextRun'), value: nextRunAt === undefined ? t('job.notScheduled') : `${new Date(nextRunAt).toLocaleString()} (${clock.zone})` },
         ]} />
       )}
       {/* P1-13: a corrupt ledger reset must be loudly visible — the scheduler
@@ -163,6 +206,16 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
         <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }} data-dsh-cron-missed-trigger="">
           <icons.IconClock size={14} />
           <span>{t('settings.missedTrigger', { wallClock: missedTrigger.wallClock, name: missedTrigger.name })}</span>
+        </div>
+      )}
+      {/* 时区漂移（R5-B-6）：宿主存的 nextRunAt 是按**旧**时区算的绝对时刻，而表达式是
+          墙钟语义。宿主每个 tick 都会按当前时区重排（realignTimeZone），所以这条说明通常
+          最多存在一个 tick；宿主进程没在跑时会一直在 —— 那正是要如实告诉用户的时候。
+          这一行只解释"为什么显示的时刻与宿主记录的不一样"，不做任何动作。 */}
+      {zoneDrift && (
+        <div style={{ ...styles.error, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }} data-dsh-cron-tz-drift="">
+          <icons.IconClock size={14} />
+          <span>{t('settings.timeZoneDrift', { host: snapshot.scheduler.timeZone, local: clock.zone })}</span>
         </div>
       )}
       {snapshot.transportError !== undefined && (
@@ -197,6 +250,8 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
                   pending={snapshot.pendingJobIds.includes(job.id)}
                   controller={controller}
                   onEdit={setEditing}
+                  now={clock.now}
+                  zone={clock.zone}
                   {...(openSession === undefined ? {} : { openSession })}
                 />
               ))}
@@ -240,12 +295,16 @@ export function CronJobTab({ controller, workspaces, api, openSession, page }: {
   )
 }
 
-function JobCard({ job, pending, controller, onEdit, openSession }: {
+function JobCard({ job, pending, controller, onEdit, openSession, now, zone }: {
   job: JobRecord
   pending: boolean
   controller: CronController
   onEdit: (job: JobRecord) => void
   openSession?: (sessionId: string) => void
+  /** 渲染这一刻的时钟（R5-B-6：触发点走过之后"下次运行"要跟着走）。 */
+  now: number
+  /** 本机时区名（显示在时刻旁边；cron 是墙钟语义）。 */
+  zone: string
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   /** 当前展开查看全文的 prompt（行内展示；null=收起）。 */
@@ -274,7 +333,7 @@ function JobCard({ job, pending, controller, onEdit, openSession }: {
           </div>
           <div style={{ ...META_LINE, marginTop: 4 }}>
             <code style={CRON_CODE}>{job.cron}</code>
-            <span className="pico-clamp-1" title={nextRunText(job)}>{nextRunText(job)}</span>
+            <span className="pico-clamp-1" title={nextRunText(job, now, zone)}>{nextRunText(job, now, zone)}</span>
           </div>
         </div>
         <label className="pico-switch" title={t('job.enabled')} style={{ marginTop: 2 }}>

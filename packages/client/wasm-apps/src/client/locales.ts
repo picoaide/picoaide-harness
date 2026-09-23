@@ -139,8 +139,14 @@ export const zh = {
   // 终态判词（R3-A A-4）：服务端 `publishBlockOf` 的两个取值，都意味着**不能发新版**。
   // 这两条是 `message` 缺席时的兜底（服务端原文优先，它与 publish 那一刻的拒绝同源）；
   // hint 指向下一步动作 —— 只说"不能发"会让用户卡住。
+  //
+  // R5-B-7：这条 hint 原来写的是"发布者本人可以解冻（同一端点带 {"frozen":false}）"
+  // ——那是一句**接口契约**，员工在产品里没有任何入口去执行它；而同一份字典的
+  // `openAppFrozenHint` 又说"联系平台管理员"。同一件事两个答案 = 承诺落空。
+  // 现在的口径（面板已给出冻结/解冻入口，见 `app-lifecycle.ts` 的 `setAppFrozen`）：
+  // 发布者 → 应用中心；其他人 → 管理员；列表里看不到 → 管理员。
   'appCenter.availabilityFrozen': '这个标识属于一个已冻结的应用，解冻后才能发新版本',
-  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人可以解冻（同一端点带 {"frozen":false}），或换一个名字新建应用',
+  'appCenter.availabilityFrozenHint': '冻结是退役流程的第一步：发布者本人在应用中心里就能解冻（解冻后还要重新上架才会恢复访问）；如果列表里已经看不到这个应用，请联系平台管理员',
   'appCenter.availabilityRetired': '这个标识属于一个已删除（退役）的应用，标识与版本号永久占位',
   'appCenter.availabilityRetiredHint': '已删除的应用标识不会复用、也不释放给他人：请换一个名字新建应用',
   // 查重**没问成**（宿主/网络故障）：既不能说"可用"也不能说"被占用" ——
@@ -215,6 +221,21 @@ export const zh = {
   'appCenter.deleteConfirm': '确认删除？不可恢复。应用标识与版本号永久保留；数据保留期以服务端返回的说明为准。',
   'appCenter.deleteConfirmAction': '确认删除',
   'appCenter.confirmCancel': '取消',
+  // ---- 冻结 / 解冻（R5-B-7：发布者本人的出口）----
+  // 服务端的语义（release.go:119-187）：冻结 = 停止服务（appserver 一律 404）并**顺带下架**；
+  // 解冻**不会**自动上架（要再点一次「上架」）。文案必须说清这两步，否则用户会以为
+  // "解冻了就能用了"（客户端不复述服务端的保留期数字，只复述这个动作语义）。
+  'appCenter.frozen': '已冻结',
+  'appCenter.frozenHint': '已冻结：应用暂停服务（打开会失败），数据仍然保留。解冻后还需要重新上架才会恢复访问。',
+  'appCenter.freeze': '冻结',
+  'appCenter.freezeAria': '冻结该应用（停止服务，数据保留）',
+  'appCenter.unfreeze': '解冻',
+  'appCenter.unfreezeAria': '解冻该应用（解冻后还需重新上架）',
+  'appCenter.freezeConfirm': '确认冻结？应用立刻停止服务，并同时下架（访问者收到 404）。数据仍然保留，之后可以由你解冻并重新上架。',
+  'appCenter.freezeConfirmAction': '确认冻结',
+  'appCenter.appFrozen': '应用已冻结',
+  'appCenter.appUnfrozen': '应用已解冻',
+  'appCenter.frozenNote': '服务端说明',
   'appCenter.actionFailed': '操作失败',
   'appCenter.appDeleted': '应用已删除',
   'appCenter.appDeletedNote': '服务端说明',
@@ -236,6 +257,7 @@ export const zh = {
   // 生命周期端点的"响应形状对不上"（服务端改了契约）：三条各自的判据 + 一条共用指路。
   // 这些消息也会进 en 界面，所以必须走字典（发布块的同类中文是既有缺陷 R1-uxc-7，别扩散）。
   'appCenter.setPublishedShapeMismatch': '服务端返回的上下架结果里没有 enabled 字段（响应形状与客户端预期不一致）',
+  'appCenter.setFrozenShapeMismatch': '服务端返回的冻结/解冻结果里没有 frozen 字段（响应形状与客户端预期不一致）',
   'appCenter.deleteShapeMismatch': '服务端没有确认删除（响应里没有 deleted=true）',
   'appCenter.diagnosticsShapeMismatch': '服务端返回的诊断结果形状与客户端预期不一致',
   'appCenter.schemaShapeMismatch': '服务端返回的表结构形状与客户端预期不一致',
@@ -291,7 +313,9 @@ export const zh = {
   // 区分凭据是 `platform_reason`。冻结是**只读快照**（数据仍然保留），文案必须与
   // "不存在"逐字可辨：说成"可能已被删除"会让用户去找发布者要一个还在的新应用。
   'appCenter.openAppFrozen': '打开失败：应用已被管理员停用（冻结）',
-  'appCenter.openAppFrozenHint': '冻结是只读快照：数据仍然保留，但不能继续使用；如需恢复请联系平台管理员',
+  // 与 `appCenter.availabilityFrozenHint` **同一个答案**（R5-B-7）：发布者在应用中心
+  // 解冻，其他成员找平台管理员；不再一边承诺"发布者可以解冻"、一边只说"联系管理员"。
+  'appCenter.openAppFrozenHint': '冻结是只读快照：数据仍然保留，但不能继续使用；如果你是发布者，可以在应用中心里解冻（解冻后还需重新上架），否则请联系平台管理员',
   'appCenter.openAppMissing': '打开失败：这个应用不存在（可能已被删除或改名）',
   'appCenter.openAppMissingHint': '刷新应用列表确认它还在；若确实已被删除，请向发布者索取新的应用',
   'appCenter.openProtocolNotReady': '打开失败：客户端内打开应用的能力还没就绪',
@@ -471,7 +495,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.availabilityTakenHint': 'An App ID is claimed permanently on first publish: it stays with its publisher even after unpublish or delete',
   'appCenter.availabilityInvalid': 'This App ID does not follow the naming rules — see the hint',
   'appCenter.availabilityFrozen': 'This App ID belongs to a frozen app; unfreeze it before releasing a new version',
-  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher can unfreeze it (same endpoint with {"frozen":false}), or pick another name',
+  'appCenter.availabilityFrozenHint': 'Freezing is the first step of retirement: the publisher can unfreeze it in the App Center (bring it online again afterwards to restore access); if the app is no longer listed, contact your platform administrator',
   'appCenter.availabilityRetired': 'This App ID belongs to a deleted (retired) app; the ID and its version numbers are taken permanently',
   'appCenter.availabilityRetiredHint': 'A deleted App ID is never reused or released to others: please pick another name',
   'appCenter.availabilityUnknown': 'Could not confirm whether this App ID is available (you can still submit; the server checks again)',
@@ -538,6 +562,17 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.deleteConfirm': 'Delete this app? This cannot be undone. The app ID and version numbers stay reserved forever; the data retention window follows the note the server returns.',
   'appCenter.deleteConfirmAction': 'Confirm delete',
   'appCenter.confirmCancel': 'Cancel',
+  'appCenter.frozen': 'Frozen',
+  'appCenter.frozenHint': 'Frozen: the app is out of service (opening it fails) and its data is kept. After unfreezing you must bring it online again before it becomes reachable.',
+  'appCenter.freeze': 'Freeze',
+  'appCenter.freezeAria': 'Freeze this app (stops service, keeps data)',
+  'appCenter.unfreeze': 'Unfreeze',
+  'appCenter.unfreezeAria': 'Unfreeze this app (bring it online again afterwards)',
+  'appCenter.freezeConfirm': 'Freeze this app? It stops serving immediately and is taken offline as well (visitors get 404). The data is kept, and you can unfreeze and bring it online again later.',
+  'appCenter.freezeConfirmAction': 'Confirm freeze',
+  'appCenter.appFrozen': 'App frozen',
+  'appCenter.appUnfrozen': 'App unfrozen',
+  'appCenter.frozenNote': 'Server note',
   'appCenter.actionFailed': 'Action failed',
   'appCenter.appDeleted': 'App deleted',
   'appCenter.appDeletedNote': 'Server note',
@@ -555,6 +590,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.diagnosticsHints': 'Hints',
   'appCenter.publishNewDisabled': 'This app is offline: publishing a new version now does NOT restore access (it still returns 410 Gone). Bring it online first, then publish.',
   'appCenter.setPublishedShapeMismatch': 'The take offline / bring online response has no enabled field, so this client cannot tell the app state',
+  'appCenter.setFrozenShapeMismatch': 'The freeze / unfreeze response has no frozen field, so this client cannot tell the app state',
   'appCenter.deleteShapeMismatch': 'The server did not confirm the deletion (no deleted=true in the response)',
   'appCenter.diagnosticsShapeMismatch': 'The diagnostics response does not match the shape this client expects',
   'appCenter.schemaShapeMismatch': 'The schema response does not match the shape this client expects',
@@ -599,7 +635,7 @@ export const en: Record<keyof typeof zh, string> = {
   'appCenter.openWindowOpened': 'Opened',
   'appCenter.openWindowFocused': 'Focused (this app already had a window)',
   'appCenter.openAppFrozen': 'Could not open: an administrator has disabled (frozen) this app',
-  'appCenter.openAppFrozenHint': 'A freeze is a read-only snapshot: the data is still kept, but the app cannot be used; contact your platform administrator to restore it',
+  'appCenter.openAppFrozenHint': 'A freeze is a read-only snapshot: the data is still kept, but the app cannot be used; if you are the publisher you can unfreeze it in the App Center (bring it online again afterwards), otherwise contact your platform administrator',
   'appCenter.openAppMissing': 'Could not open: this app does not exist (it may have been deleted or renamed)',
   'appCenter.openAppMissingHint': 'Refresh the app list to confirm it is still there; if it was deleted, ask the publisher for the new app',
   'appCenter.openProtocolNotReady': 'Could not open: in-client app support is not ready yet',

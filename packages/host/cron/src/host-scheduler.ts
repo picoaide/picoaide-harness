@@ -74,6 +74,26 @@ export class HostCronScheduler {
     this.tickInFlight = true
     try {
       const now = this.now()
+      // R5-B-6: the system zone can change between two ticks (travel, a policy
+      // change) while every stored `nextRunAt` stays an absolute instant. Fold
+      // the jobs that are still in the future onto the new zone **before** the
+      // due check, otherwise "0 9 * * *" fires once at the wrong wall clock and
+      // the panel shows a time the expression does not ask for. Overdue
+      // instants are deliberately left to the ordinary paths below, so the
+      // missed-trigger record (R4-B-9) still gets written.
+      //
+      // The call is capability-tolerant on purpose: `realignTimeZone` is a Host
+      // ledger method, and structural stand-ins (tests, embedded ledgers) may
+      // not implement it. A missing method must only mean "no automatic
+      // re-anchoring" — never a dead scheduler (this whole tick is the only
+      // thing that fires jobs).
+      const realign = (this.ledger as {
+        realignTimeZone?: (at: number) => { from: string, to: string, rescheduled: number } | undefined
+      }).realignTimeZone
+      const realigned = realign === undefined ? undefined : realign.call(this.ledger, now)
+      if (realigned !== undefined) {
+        console.warn(`[dsh-cron] timezone changed ${realigned.from} → ${realigned.to}: rescheduled ${String(realigned.rescheduled)} job(s) onto the new zone`)
+      }
       const previousTick = this.lastTickAt
       const recovered = first || (previousTick !== undefined && now - previousTick > RESUME_GAP_MS)
       this.lastTickAt = now

@@ -24,9 +24,11 @@ import { formatWindowRatio, parseErrorEnvelope, type PublishFailure, type Publis
 import {
   deleteApp,
   fetchDiagnostics,
+  setAppFrozen,
   setAppPublished,
   type DeleteSuccess,
   type DiagnosticsReport,
+  type SetFrozenSuccess,
   type SetPublishedSuccess,
 } from './app-lifecycle.ts'
 import {
@@ -109,6 +111,20 @@ export interface AppCenterItem {
   access: AccessMode
   /** 是否上架（服务端 `enabled`）；`false` = 已下架，仍然展示但禁用打开。 */
   enabled: boolean
+  /**
+   * 是否已冻结（R5-B-7；服务端 `frozen` / 诊断的 `app_frozen` 同源事实）。
+   *
+   * 冻结 = 停止服务：打开一律失败（appserver 对冻结应用回 404 + `app_frozen`），
+   * 而**发布者本人有解冻权**（服务端 `freeze` 走 `ownedApp`）。面板据此渲染
+   * 「已冻结」徽章、禁用打开、并给出解冻入口 —— 在此之前客户端根本没有这个字段，
+   * 文案里的"发布者可以解冻"没有任何 UI 落点。
+   *
+   * 缺省 `false`（未下发 = 未冻结）：服务端目前**不把冻结行列进目录**
+   * （`api/read.go` 的目录条件），所以"看不到"是常态；字段出现只在
+   * "服务端开始下发"或"本会话刚冻结过"这两种情况，且它只会让 UI 更保守
+   * （徽章 + 解冻入口 + 禁用打开），不会放行任何动作。
+   */
+  frozen: boolean
   /**
    * 当前线上版本（服务端 `current_version`；空串 = 服务端没有版本行）。
    *
@@ -242,6 +258,8 @@ export interface AppCenterError {
 
 /** 目录条目的生命周期动作的结果类型（宿主/服务端返回，见 `app-lifecycle.ts`）。 */
 export type SetPublishedOutcome = SetPublishedSuccess | PublishFailure
+/** {@link SetPublishedOutcome} 的冻结/解冻版本（R5-B-7）。 */
+export type SetFrozenOutcome = SetFrozenSuccess | PublishFailure
 /** {@link SetPublishedOutcome} 的删除版本。 */
 export type DeleteOutcome = DeleteSuccess | PublishFailure
 /** {@link SetPublishedOutcome} 的诊断版本。 */
@@ -257,12 +275,17 @@ export type ReleasesOutcome = MyReleasesReport | PublishFailure
  * 删除"就等于替服务端做出了它没有做出的承诺（管理端已踩过这个坑）。
  */
 export interface CatalogNotice {
-  kind: 'deleted'
+  kind: 'deleted' | 'frozen'
   appId: string
   /** 服务端返回的说明（可能为空串）。 */
   note: string
   /** 服务端返回的保留天数；没有就是 undefined（不编造）。 */
   retentionDays: number | undefined
+  /**
+   * 冻结/解冻后的状态（`kind === 'frozen'` 时用；值来自服务端 `app.frozen`）。
+   * 解冻时服务端会附带一条 note（"解冻不会自动上架"），面板原样转述。
+   */
+  frozen?: boolean
 }
 
 /** {@link parseCatalogReport} 的结果：条目 + 行数统计（P2-10 的诊断用）。 */
@@ -331,6 +354,8 @@ export function parseCatalogReport(payload: unknown): CatalogReport {
       // 服务端**会**下发 enabled（下架条目也照样列在目录里，见 api/read.go），
       // 所以这里只在字段缺失时才按"上架"兜底。
       enabled: entry.enabled !== false,
+      // 冻结（R5-B-7）：服务端目前不列冻结行，字段缺席即"未冻结"；见字段注释。
+      frozen: entry.frozen === true,
       // 版本缺失 ⇒ 空串（服务端版本行被保留策略回收时会这样）；面板显示为"未知"，
       // **不编造**一个版本号。
       currentVersion: typeof entry.current_version === 'string' ? entry.current_version : '',
@@ -927,6 +952,29 @@ export function AppCenterPanel({
   }, [])
 
   /**
+   * 冻结 / 解冻（R5-B-7）：**用服务端返回的 `frozen` / `enabled` 更新行**。
+   *
+   * 行**不消失**（即使服务端下一轮目录不再列它）：冻结是可逆动作，而唯一能解开它的
+   * 就是发布者本人 —— 把行立刻抹掉等于把刚给出的入口又收回去。解冻时服务端的
+   * `note`（"解冻不会自动上架"）原样进通知。
+   */
+  const handleSetFrozen = useCallback(async (item: AppCenterItem, frozen: boolean): Promise<SetFrozenOutcome> => {
+    const result = await setAppFrozen(item.appId, frozen)
+    if (result.ok) {
+      setState(previous => previous.kind !== 'ready'
+        ? previous
+        : {
+            kind: 'ready',
+            items: previous.items.map(row => (row.appId === result.appId
+              ? { ...row, frozen: result.frozen, enabled: result.enabled }
+              : row)),
+          })
+      setNotice({ kind: 'frozen', appId: result.appId, note: result.note, retentionDays: undefined, frozen: result.frozen })
+    }
+    return result
+  }, [])
+
+  /**
    * 删除：服务端确认 `deleted` 之后行才消失，并把服务端的 `note` / `retention_days`
    * 原样显示在通知里（保留期语义由服务端说，客户端不复述 —— 见 {@link CatalogNotice}）。
    */
@@ -1060,6 +1108,7 @@ export function AppCenterPanel({
                 if (outcome !== undefined) setOpenFeedback(previous => ({ ...previous, [item.appId]: outcome }))
               }}
               onSetPublished={handleSetPublished}
+              onSetFrozen={handleSetFrozen}
               onDelete={handleDelete}
               onDiagnostics={handleDiagnostics}
               onReleases={handleReleases}
@@ -1132,7 +1181,7 @@ export function AppCenterBody({
   state, notice, filter, onFilterChange, visible, onShowMore,
   onboardingDismissed, onDismissOnboarding, pendingOpenAppId,
   shareScheme, channelFailure, openCounts, openFeedback, copied, onCopyLink, onOpenDetail, onOpenResult, onOpenFailure,
-  onRetry, onPublish, onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases,
+  onRetry, onPublish, onPublishNewVersion, onSetPublished, onSetFrozen, onDelete, onDiagnostics, onReleases,
 }: {
   state: AppCenterState
   notice?: CatalogNotice | null
@@ -1167,6 +1216,8 @@ export function AppCenterBody({
   onPublish?: () => void
   onPublishNewVersion?: (item: AppCenterItem) => void
   onSetPublished?: (item: AppCenterItem, enabled: boolean) => Promise<SetPublishedOutcome>
+  /** 冻结 / 解冻（R5-B-7）。 */
+  onSetFrozen?: (item: AppCenterItem, frozen: boolean) => Promise<SetFrozenOutcome>
   onDelete?: (item: AppCenterItem) => Promise<DeleteOutcome>
   onDiagnostics?: (item: AppCenterItem) => Promise<DiagnosticsOutcome>
   onReleases?: (item: AppCenterItem) => Promise<ReleasesOutcome>
@@ -1297,6 +1348,7 @@ export function AppCenterBody({
               {...(onOpenFailure === undefined ? {} : { onOpenFailure })}
               {...(onPublishNewVersion === undefined ? {} : { onPublishNewVersion })}
               {...(onSetPublished === undefined ? {} : { onSetPublished })}
+              {...(onSetFrozen === undefined ? {} : { onSetFrozen })}
               {...(onDelete === undefined ? {} : { onDelete })}
               {...(onDiagnostics === undefined ? {} : { onDiagnostics })}
               {...(onReleases === undefined ? {} : { onReleases })}
@@ -1539,10 +1591,16 @@ export function AppDetailView({
  * @param props - 通知内容（来自 {@link DeleteOutcome}）。
  */
 export function NoticeBlock({ notice }: { notice: CatalogNotice }) {
+  // 冻结/解冻（R5-B-7）与删除共用这一块：三者的形状一样（"对哪个应用做了什么 +
+  // 服务端原话"），分别写三个通知组件只会让措辞再次漂移。
+  const headline = notice.kind === 'frozen'
+    ? `${notice.frozen === true ? t('appCenter.appFrozen') : t('appCenter.appUnfrozen')}: ${notice.appId}`
+    : `${t('appCenter.appDeleted')}: ${notice.appId}`
+  const noteLabel = notice.kind === 'frozen' ? t('appCenter.frozenNote') : t('appCenter.appDeletedNote')
   return (
     <div style={NOTICE} data-role="catalog-notice" role="status">
-      <div>{`${t('appCenter.appDeleted')}: ${notice.appId}`}</div>
-      {notice.note !== '' && <div data-role="notice-note">{`${t('appCenter.appDeletedNote')}: ${notice.note}`}</div>}
+      <div data-role="notice-headline">{headline}</div>
+      {notice.note !== '' && <div data-role="notice-note">{`${noteLabel}: ${notice.note}`}</div>}
       {notice.retentionDays !== undefined && (
         <div data-role="notice-retention">{`${t('appCenter.retentionDays')}: ${String(notice.retentionDays)}`}</div>
       )}
@@ -1550,8 +1608,8 @@ export function NoticeBlock({ notice }: { notice: CatalogNotice }) {
   )
 }
 
-/** 目录行的动作条状态：没有确认、正在确认下架、正在确认删除。 */
-type RowConfirm = 'none' | 'offline' | 'delete'
+/** 目录行的动作条状态：没有确认、正在确认下架/删除/冻结。 */
+type RowConfirm = 'none' | 'offline' | 'delete' | 'freeze'
 
 /** 诊断面板状态（关闭 / 读取中 / 报告 / 失败信封）。 */
 type RowDiagnostics =
@@ -1602,7 +1660,7 @@ type RowReleases =
  */
 export function AppCenterRow({
   item, shareScheme, copied, counts, windowOutcome, onCopyLink, onOpenDetail, onOpenResult, onOpenFailure,
-  onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases,
+  onPublishNewVersion, onSetPublished, onDelete, onDiagnostics, onReleases, onSetFrozen,
 }: {
   item: AppCenterItem
   /** 生效的渠道深链 scheme；`null`/缺席 ⇒ 不渲染「复制链接」（§19 Q6）。 */
@@ -1619,13 +1677,15 @@ export function AppCenterRow({
   onOpenFailure?: (item: AppCenterItem, failure: OpenFailure) => void
   onPublishNewVersion?: (item: AppCenterItem) => void
   onSetPublished?: (item: AppCenterItem, enabled: boolean) => Promise<SetPublishedOutcome>
+  /** 冻结 / 解冻（R5-B-7；发布者本人）。缺省 ⇒ 不渲染这两个按钮。 */
+  onSetFrozen?: (item: AppCenterItem, frozen: boolean) => Promise<SetFrozenOutcome>
   onDelete?: (item: AppCenterItem) => Promise<DeleteOutcome>
   onDiagnostics?: (item: AppCenterItem) => Promise<DiagnosticsOutcome>
   onReleases?: (item: AppCenterItem) => Promise<ReleasesOutcome>
 }) {
   const [opening, setOpening] = useState(false)
   const [confirm, setConfirm] = useState<RowConfirm>('none')
-  const [busy, setBusy] = useState<null | 'set-published' | 'delete'>(null)
+  const [busy, setBusy] = useState<null | 'set-published' | 'delete' | 'set-frozen'>(null)
   const [actionFailure, setActionFailure] = useState<PublishFailure | null>(null)
   const [diagnostics, setDiagnostics] = useState<RowDiagnostics>({ kind: 'closed' })
   const [releases, setReleases] = useState<RowReleases>({ kind: 'closed' })
@@ -1671,7 +1731,9 @@ export function AppCenterRow({
   // `<本安装的 app scheme>://<app_id>/` 打开，入口链接这个字段已经从两侧契约里删除 —— 打开
   // 能力不再取决于"服务端有没有下发一个链接"，而是取决于本机路由能不能把它打开
   // （失败时把 reason 渲染成可读原因，见下面 openFailureEnvelope）。
-  const openable = item.enabled
+  // 冻结 = 停止服务（服务端 appserver 对冻结应用一律 404）：打开按钮跟着禁用，
+  // 免得用户点出一个必然失败的请求（失败文案虽可辨，但按钮本身就该说真话）。
+  const openable = item.enabled && !item.frozen
   const open = (): void => {
     if (!openable || opening) return
     setOpening(true)
@@ -1693,7 +1755,9 @@ export function AppCenterRow({
   // "发新版"只给发布者本人（P1-3 的入口）：服务端 `ownedApp` 对非发布者一律 404，
   // 给别人一个必然失败的按钮不如不给。
   const canPublish = item.isOwner && onPublishNewVersion !== undefined
-  const canManage = item.isOwner && (onSetPublished !== undefined || onDelete !== undefined || onDiagnostics !== undefined || onReleases !== undefined)
+  const canManage = item.isOwner
+    && (onSetPublished !== undefined || onDelete !== undefined || onDiagnostics !== undefined
+      || onReleases !== undefined || onSetFrozen !== undefined)
   const diagnosticsPanelId = `pico-app-center-diagnostics-${item.appId}`
   const releasesPanelId = `pico-app-center-releases-${item.appId}`
 
@@ -1703,6 +1767,20 @@ export function AppCenterRow({
     setBusy('set-published')
     setActionFailure(null)
     const result = await onSetPublished(item, enabled)
+    setBusy(null)
+    setConfirm('none')
+    if (!result.ok) setActionFailure(result)
+  }
+
+  /**
+   * 执行冻结 / 解冻（R5-B-7）：**只认服务端返回的 `frozen` / `enabled`**（与上下架
+   * 同一条纪律）。冻结会顺带下架、解冻不会自动上架 —— 两个状态都由服务端的回包写回。
+   */
+  const runSetFrozen = async (frozen: boolean): Promise<void> => {
+    if (onSetFrozen === undefined) return
+    setBusy('set-frozen')
+    setActionFailure(null)
+    const result = await onSetFrozen(item, frozen)
     setBusy(null)
     setConfirm('none')
     if (!result.ok) setActionFailure(result)
@@ -1755,7 +1833,7 @@ export function AppCenterRow({
   }
 
   return (
-    <Card interactive muted={!item.enabled} style={CARD} className="pico-app-center-card">
+    <Card interactive muted={!item.enabled || item.frozen} style={CARD} className="pico-app-center-card">
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11, minWidth: 0 }}>
         <IconTile
           size={40}
@@ -1787,6 +1865,13 @@ export function AppCenterRow({
             {!item.enabled && (
               <span className="pico-app-center-disabled" data-role="app-disabled" style={{ display: 'inline-flex' }}>
                 <Chip tone="neutral" plain>{t('appCenter.disabled')}</Chip>
+              </span>
+            )}
+            {/* 冻结（R5-B-7）：形状与「已下架」同款（中性胶囊 + 卡片置灰），但**多一
+                个解冻入口**（见下面的动作条）—— 冻结不是终态，发布者本人能解开。 */}
+            {item.frozen && (
+              <span className="pico-app-center-frozen" data-role="app-frozen" style={{ display: 'inline-flex' }}>
+                <Chip tone="neutral" plain>{t('appCenter.frozen')}</Chip>
               </span>
             )}
           </div>
@@ -1826,6 +1911,17 @@ export function AppCenterRow({
           data-role="publish-new-disabled-reason"
         >
           {t('appCenter.publishNewDisabled')}
+        </p>
+      )}
+
+      {/* 冻结说明（R5-B-7）：徽章只给结论，这一行说清"为什么打不开"与"下一步"。
+          所有人可见（不是只有发布者）—— 使用者同样需要知道应用没被删掉。 */}
+      {item.frozen && (
+        <p
+          style={{ ...ROW_META, whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' }}
+          data-role="app-frozen-reason"
+        >
+          {t('appCenter.frozenHint')}
         </p>
       )}
 
@@ -1882,6 +1978,38 @@ export function AppCenterRow({
                     onClick={() => { void runSetPublished(true) }}
                   >
                     {t('appCenter.bringOnline')}
+                  </PanelButton>
+                )
+          )}
+          {/* 冻结 / 解冻（R5-B-7）：服务端对发布者开着这条端点，文案也一直承诺
+              "发布者本人可以解冻" —— 这里就是那个入口。冻结是停服动作，先出确认块；
+              解冻不需要确认（它只清 frozen_at，不会自动上架）。 */}
+          {onSetFrozen !== undefined && (
+            item.frozen
+              ? (
+                  <PanelButton
+                    variant="ghost"
+                    size="sm"
+                    className="pico-app-center-unfreeze"
+                    data-action="unfreeze"
+                    disabled={busy !== null}
+                    aria-label={`${t('appCenter.unfreezeAria')} ${item.title}`}
+                    onClick={() => { void runSetFrozen(false) }}
+                  >
+                    {t('appCenter.unfreeze')}
+                  </PanelButton>
+                )
+              : (
+                  <PanelButton
+                    variant="danger"
+                    size="sm"
+                    className="pico-app-center-freeze"
+                    data-action="freeze"
+                    disabled={busy !== null}
+                    aria-label={`${t('appCenter.freezeAria')} ${item.title}`}
+                    onClick={(event) => { confirmTriggerRef.current = event.currentTarget; setActionFailure(null); setConfirm('freeze') }}
+                  >
+                    {t('appCenter.freeze')}
                   </PanelButton>
                 )
           )}
@@ -1983,6 +2111,35 @@ export function AppCenterRow({
               onClick={() => { void runSetPublished(false) }}
             >
               {t('appCenter.takeOfflineConfirmAction')}
+            </PanelButton>
+            <PanelButton
+              variant="secondary"
+              size="sm"
+              className="pico-app-center-confirm-cancel"
+              data-action="cancel-confirm"
+              disabled={busy !== null}
+              onClick={() => { setConfirm('none') }}
+            >
+              {t('appCenter.confirmCancel')}
+            </PanelButton>
+          </div>
+        </div>
+      )}
+
+      {confirm === 'freeze' && (
+        <div style={CONFIRM} data-role="confirm-freeze" role="alertdialog" aria-modal="true" aria-label={t('appCenter.freezeConfirm')}>
+          <div data-role="confirm-message">{t('appCenter.freezeConfirm')}</div>
+          <div style={CONFIRM_ROW}>
+            <PanelButton
+              variant="danger"
+              size="sm"
+              ref={confirmRef}
+              className="pico-app-center-confirm-freeze"
+              data-action="confirm-freeze"
+              disabled={busy !== null}
+              onClick={() => { void runSetFrozen(true) }}
+            >
+              {t('appCenter.freezeConfirmAction')}
             </PanelButton>
             <PanelButton
               variant="secondary"

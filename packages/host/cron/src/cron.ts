@@ -133,6 +133,27 @@ export function nextRunAtMs(expr: string, fromMs: number): number | undefined {
 }
 
 /**
+ * The IANA timezone the schedule is evaluated in — the process's local zone
+ * (R5-B-6).
+ *
+ * Cron expressions are **wall-clock** semantics ("0 9 * * *" means 09:00 where
+ * the machine is), while a stored `nextRunAt` is an absolute instant. The two
+ * only agree while the zone stays put, so both the Host (re-anchoring after a
+ * change) and the panel (recomputing the display) need the same reading of
+ * "which zone are we in now" — this is that single reading. `'local'` is the
+ * documented fallback when the runtime cannot name the zone (the value already
+ * used for skip records and the snapshot).
+ * @returns the resolved IANA zone name, or `'local'`.
+ */
+export function currentTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+/**
  * Same scan as {@link nextRunAtMs}, and additionally reports every wall-clock
  * occurrence it walked past because that local time does not exist. Callers
  * that must make the skip observable (the ledger's roll path) use this; the

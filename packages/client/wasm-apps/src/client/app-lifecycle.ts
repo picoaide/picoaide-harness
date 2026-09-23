@@ -19,8 +19,15 @@
  *     （服务端会幂等返回 `changed:false` 与它自己的当前值；乐观更新等于把
  *     "我点了下架"说成"它已经下架了"）。
  *
- * 只做**作者自服务**那一组：冻结/解冻、导出、自省、审批留给管理端与后续波次
- * （宿主路由有，但员工侧不该在没有产品决策的情况下暴露）。
+ * 只做**作者自服务**那一组：冻结/解冻（2026-09-23 R5-B-7 起）、导出、自省、审批
+ * 留给管理端与后续波次（宿主路由有，但员工侧不该在没有产品决策的情况下暴露）。
+ *
+ * 冻结/解冻为什么进这一组（R5-B-7 的裁决）：服务端**对发布者开着**
+ * `POST /api/client/v2/apps/wasm/:app_id/freeze`（`release.go:119-187` 的 `freeze`，
+ * 走 `ownedApp` 鉴权），宿主也早已把 body 原样转发（`wasm-apps.ts:1834-1844`）——
+ * 缺的只有客户端这一半。而客户端文案一直在承诺"发布者本人可以解冻"：有端点、
+ * 有授权、没有可达路径，正是这条 finding。现在两端同源：面板给出冻结/解冻入口，
+ * 文案指向面板。
  *
  * @module @picoaide/dsh-wasm-apps/client/app-lifecycle
  */
@@ -34,6 +41,15 @@ import {
 
 /** 本机写面里"上下架"的两个后缀（与宿主路由逐字一致）。 */
 export const SET_PUBLISHED_SUFFIX = { online: 'publish', offline: 'unpublish' } as const
+
+/**
+ * 本机写面里"冻结/解冻"的后缀（与宿主路由逐字一致）。
+ *
+ * 两个方向**共用同一个端点**：服务端只看 body 里的 `frozen`
+ * （`release.go:139-149`：body 缺 `frozen` 时默认冻结），所以这里不发明
+ * `unfreeze` 这种路径 —— 多一条自造路由就多一份与服务端不一致的地方。
+ */
+export const SET_FROZEN_SUFFIX = 'freeze'
 
 /** 本机路由前缀（与 `wasm-apps.ts` 的 `WASM_APPS_PREFIX` 同值；客户端不 import 宿主包）。 */
 export const WASM_APPS_LOCAL_PREFIX = '/api/pico/apps/wasm'
@@ -260,6 +276,91 @@ export async function deleteApp(appId: string, deps: RequestDeps = {}): Promise<
   const outcome = await requestJSON(deletePath(appId), { method: 'DELETE' }, deps)
   if (!outcome.ok) return outcome
   return parseDeleteOutcome(appId, outcome.payload)
+}
+
+// ---------------------------------------------------------------------------
+// 冻结 / 解冻（R5-B-7）
+// ---------------------------------------------------------------------------
+
+/**
+ * 冻结路由（发布者本人；服务端 `ownedApp` 对非发布者一律 404）。
+ * @param appId - 应用标识。
+ * @returns 本机路径。
+ */
+export function setFrozenPath(appId: string): string {
+  return lifecyclePath(appId, SET_FROZEN_SUFFIX)
+}
+
+/** 冻结/解冻的**服务端**结果（`release.go:151-186`）。 */
+export interface SetFrozenSuccess {
+  ok: true
+  appId: string
+  /** **服务端返回的**当前冻结状态（不是请求里的值）。 */
+  frozen: boolean
+  /** 服务端是否真的改了（状态本来就一致时 `false` —— 幂等，不写审计）。 */
+  changed: boolean
+  /**
+   * 服务端返回的上架状态。冻结会**顺带下架**（冻结=停止服务），解冻**不会**
+   * 自动上架（`release.go:176-186` 的 note 逐字说明这件事）。
+   */
+  enabled: boolean
+  /** 服务端给用户的说明（解冻时是"不会自动上架，请显式 publish"）；没有就是空串。 */
+  note: string
+}
+
+/**
+ * 解析冻结响应：`{app:{app_id,frozen,changed,enabled,note?}}`。
+ *
+ * `app.frozen` **必须**是布尔值：它是行状态的唯一来源（与
+ * {@link parseSetPublishedOutcome} 同一条纪律 —— 回落成"我请求的那个值"就是把
+ * 乐观更新伪装成服务端结果）。`app.enabled` 缺席时按 `false` 读：冻结路径上
+ * 服务端恒下发它，缺席只能说明契约漂移，此时"已下架"比"还在服务"更保守。
+ * @param appId - 本次请求的 app_id（与回显比对，防串行）。
+ * @param payload - 响应体。
+ * @returns 结构化结果或失败。
+ */
+export function parseSetFrozenOutcome(appId: string, payload: unknown): SetFrozenSuccess | PublishFailure {
+  const app = asRecord(asRecord(payload).app)
+  if (typeof app.frozen !== 'boolean') {
+    return shapeMismatch(appId, payload, t('appCenter.setFrozenShapeMismatch'))
+  }
+  const echoed = asString(app.app_id)
+  if (echoed !== '' && echoed !== appId) {
+    return shapeMismatch(appId, payload, t('appCenter.setFrozenShapeMismatch'))
+  }
+  return {
+    ok: true,
+    appId,
+    frozen: app.frozen,
+    changed: app.changed === true,
+    enabled: app.enabled === true,
+    note: asString(app.note),
+  }
+}
+
+/**
+ * 冻结 / 解冻一个应用（发布者本人；服务端 `ownedApp` 鉴权）。
+ *
+ * 两个方向共用同一个端点，body 恒为 `{"frozen":<bool>}`（服务端以 body 为判据，
+ * 空 body 等于冻结 —— 显式传 `true` 让"我到底请求了什么"在两端可读）。
+ * 面板对**冻结**方向先出确认块（它会让应用立刻停服并顺带下架），解冻不需要确认。
+ * @param appId - 应用标识。
+ * @param frozen - true = 冻结，false = 解冻。
+ * @param deps - 可注入的 fetch / 取消信号。
+ * @returns 服务端结果或结构化失败（永不抛）。
+ */
+export async function setAppFrozen(
+  appId: string,
+  frozen: boolean,
+  deps: RequestDeps = {},
+): Promise<SetFrozenSuccess | PublishFailure> {
+  const outcome = await requestJSON(setFrozenPath(appId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frozen }),
+  }, deps)
+  if (!outcome.ok) return outcome
+  return parseSetFrozenOutcome(appId, outcome.payload)
 }
 
 // ---------------------------------------------------------------------------
