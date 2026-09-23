@@ -7,6 +7,7 @@ import { fmtY } from '../usage/common'
 import { RefreshCw, Sparkles } from 'lucide-react'
 import {
   AI_ATTRIBUTION_NOTE,
+  AI_ATTRIBUTION_WIRING,
   AI_USAGE_WINDOW_DAYS,
   aiUsagePath,
   aiUsageTokens,
@@ -36,7 +37,9 @@ import {
  *
  * 四条必须守住的语义：
  *   ① **账单归使用者账号，应用维度靠归因**：客户端 LLM 出站带 `X-Pico-App-Id`，
- *      服务端只在该请求确属客户端会话链路时记录（伪造头忽略并 warn）；
+ *      服务端只在该请求确属客户端会话链路时记录（伪造头忽略并 warn）。**但平台侧
+ *      归因通道尚未接线**（全仓无发送方，见 `opens-contract.ts` 的
+ *      `ATTRIBUTION_HEADER_WRITERS`）⇒ 文案不得把成因推给客户端版本或客户环境；
  *   ② **"统计未上线" ≠ "零调用"**（§5.1c B / §21.4）：`attribution_available=false`
  *      ⇒ 渲染"统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
  *      两者数字都是 0、含义相反，合并渲染即违反 §21.4；
@@ -130,11 +133,17 @@ export function AppAiUsageSection({ appId, canRead }: { appId: string; canRead: 
         </p>
       ) : view === 'no_attribution' ? (
         /* 归因**尚未上线**（§5.1c B / §21.4）：服务端明确回报 attribution_available=false。
-           这里绝不能写成"0 次调用"—— 那是另一种含义（统计已上线、本应用确实没调过）。 */
+           这里绝不能写成"0 次调用"—— 那是另一种含义（统计已上线、本应用确实没调过）。
+           成因**按 `AI_ATTRIBUTION_WIRING` 如实说**（R4-D-4）：通道未接线时不得把成因
+           推给客户端版本（全仓没有发送方，任何客户端版本都不产生归因）。 */
         <EmptyState
           icon={<Sparkles className="h-6 w-6" />}
           title="统计尚未上线：暂无应用归因"
-          desc="服务端回报 attribution_available=false：该窗口内平台还没有任何带应用归因的 AI 调用记录（客户端尚未上报 X-Pico-App-Id，或应用 AI 链路还没上线）。这不是 0 次调用，而是「还没开始统计」。"
+          desc={
+            AI_ATTRIBUTION_WIRING === 'not_wired'
+              ? '服务端回报 attribution_available=false：平台侧的应用归因通道尚未接线（客户端与网关都还没有发送方，出站头 X-Pico-App-Id 目前无人写入），因此任何客户端版本都不会产生归因。这不是 0 次调用，也不是客户端版本问题。'
+              : '服务端回报 attribution_available=false：该窗口内平台还没有任何带应用归因的 AI 调用记录。这不是 0 次调用，而是「还没开始统计」。'
+          }
         />
       ) : view === 'zero_calls' ? (
         /* 归因统计**可用**（attribution_available=true）而本应用全零 ⇒ 这才是"确实零调用"。 */
