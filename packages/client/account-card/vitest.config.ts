@@ -1,4 +1,8 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
+
+/** 本包的 React 安装副本（跨包源码用例必须共用同一个 React 实例）。 */
+const REACT = fileURLToPath(new URL('./node_modules/', import.meta.url))
 
 /**
  * 默认 `node`（宿主半边与纯函数用例足够）；**挂载类**用例（账户行/浮层的真
@@ -11,6 +15,15 @@ import { defineConfig } from 'vitest/config'
  * `.tsx` 用例也不该因为漏列而悄悄不跑）。
  */
 export default defineConfig({
+  resolve: {
+    alias: [
+      { find: /^react$/, replacement: `${REACT}react/index.js` },
+      { find: /^react\/jsx-runtime$/, replacement: `${REACT}react/jsx-runtime.js` },
+      { find: /^react\/jsx-dev-runtime$/, replacement: `${REACT}react/jsx-dev-runtime.js` },
+      { find: /^react-dom$/, replacement: `${REACT}react-dom/index.js` },
+      { find: /^react-dom\/client$/, replacement: `${REACT}react-dom/client.js` },
+    ],
+  },
   test: {
     environment: 'node',
     include: ['src/**/*.{test,spec}.{ts,tsx}', 'tests/**/*.{test,spec}.{ts,tsx}'],

@@ -412,8 +412,14 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 				return
 			}
 			for _, s := range skillList {
-				// 市场适配层 Skill.Author == apps.owner(2026-09-02 归属权)。
-				appendSkill(&items, s, versions, s.Author == u.Username, skillOfficials[s.Name])
+				// 归属判据与「我的」/发布权/下载豁免**同源**（2026-09-23 复审 B-N3）：
+				// 读 skillDists（apps 行）的具名判据 OwnedBy，不在这里写第二个表达式
+				// `s.Author == u.Username` —— 后者经 appToSkill 的 `Author = a.Owner`
+				// 映射当前恰好等价，但它是同类漂移的下一个落点（那段映射一变，
+				// 归属语义就静默跟着变，而这里看不出来）。判据唯一实现见
+				// serverstore/distribution.go 的 AppOwnedByOwner；等价性用例见
+				// bn3_market_owner_source_test.go。
+				appendSkill(&items, s, versions, skillDists.Of(s.Name).OwnedBy(u.Username), skillOfficials[s.Name])
 			}
 		}
 
@@ -448,7 +454,9 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					continue
 				}
 				releases[a.AppID] = *r
-				appendMarketAgent(&items, a, versions, releases, a.Owner == u.Username)
+				// 与技能侧同源（B-N3）：具名判据读 apps 行的 owner，
+				// 不就地写 `a.Owner == u.Username` 这第二个表达式。
+				appendMarketAgent(&items, a, versions, releases, agentDists.Of(a.AppID).OwnedBy(u.Username))
 			}
 		}
 
