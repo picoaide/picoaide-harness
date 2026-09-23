@@ -259,7 +259,14 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 		return
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		a.recordUploadedFile(userID, body, lim.fileExpiry)
+		if err := a.recordUploadedFile(userID, body, lim.fileExpiry); err != nil {
+			// R4-C-1：这个 id 正被回收器删除（登记路径拒绝转手）。**不能**把上游
+			// 响应原样转给客户端 —— 客户端会拿它当有效 file_id 后续引用，而对象马上
+			// 就没。回 503（可重试）+ 错误信封：客户端据此回落 base64 内联/重新上传。
+			serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER",
+				"该文件正在被回收（重复内容命中了即将过期的对象），请重试或改用内联方式")
+			return
+		}
 		// 过期行清理也在上传路径做一次：官方客户端的正常路径**从不 list**（只在配额
 		// 不足时才 list 回收），只靠 list 兜底会让过期行一直堆积（审计 2026-09-22 F8）。
 		if n, err := serverstore.PurgeExpiredGatewayFiles(a.DB, 200); err != nil {
@@ -838,7 +845,12 @@ func writeFilesTransportError(c *gin.Context, readErr error) {
 // expiryCap 是本次上传读体那一刻的保留上限快照（与出站体收敛用的那一份同源）：
 // 记账与上游两侧必须用同一个上限，否则管理员在请求进行中改配置会让两侧分叉
 // （上游按旧上限保留、台账按新上限记账 ⇒ 台账比上游活得久，用户会拿到上游 404）。
-func (a *API) recordUploadedFile(userID int64, body []byte, expiryCap time.Duration) {
+//
+// 返回值（R4-C-1，审计 2026-09-23）：**只有一种错误会让调用方放弃这个 id** ——
+// `ErrGatewayFileReapClaimed`（该 id 正被回收器删除，登记路径拒绝转手）。此时绝不能
+// 把 id 交给客户端（上行对象马上就要被删，引用必然 404），必须回错误让客户端回落
+// base64 内联/重新上传。其余失败仍按既有口径"只记日志、不阻断交付"。
+func (a *API) recordUploadedFile(userID int64, body []byte, expiryCap time.Duration) error {
 	var obj struct {
 		ID        string          `json:"id"`
 		ExpiresAt json.RawMessage `json:"expires_at"`
@@ -847,11 +859,11 @@ func (a *API) recordUploadedFile(userID int64, body []byte, expiryCap time.Durat
 	}
 	if err := json.Unmarshal(body, &obj); err != nil || strings.TrimSpace(obj.ID) == "" {
 		log.Printf("gateway: files: upload response has no usable id; ownership not recorded")
-		return
+		return nil
 	}
 	if !validGatewayFileID(obj.ID) {
 		log.Printf("gateway: files: upstream returned an unusable file id shape; ownership not recorded")
-		return
+		return nil
 	}
 	var expires *time.Time
 	if t, ok := parseFileExpiry(obj.ExpiresAt); ok {
@@ -868,8 +880,14 @@ func (a *API) recordUploadedFile(userID int64, body []byte, expiryCap time.Durat
 		size = obj.SizeBytes
 	}
 	if err := serverstore.RecordGatewayFileSize(a.DB, obj.ID, userID, expires, size); err != nil {
+		if errors.Is(err, serverstore.ErrGatewayFileReapClaimed) {
+			// 可 grep 的冲突日志：点名 file_id（世代号在台账/回收器侧记录）。
+			log.Printf("gateway: files: uploaded file id %s is under an active reap claim (upstream object being deleted); refusing to hand it out", obj.ID)
+			return err
+		}
 		log.Printf("gateway: files: record ownership for uploaded file failed: %v", err)
 	}
+	return nil
 }
 
 // enforceFileExpiry 把"上游给的过期时间"收进平台上限内：

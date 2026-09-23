@@ -19,6 +19,7 @@ package serverstore
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -47,27 +48,87 @@ func RecordGatewayFile(db *sql.DB, fileID string, userID int64, expiresAt *time.
 // （审计 2026-09-22 L1 实测：30 天前的老行被 B 重新占用后 created_at 仍是 30 天前）。
 //
 // `size_bytes` 语义：0 = 上游没回大小 ⇒ 保留已知值（不清零）；>0 ⇒ 覆盖。
+//
+// `reap_gen` 语义（R4-C-1，审计 2026-09-23）：行世代号，登记路径 +1。世代是回收器的
+// **fencing token** —— 认领时也会 +1，回收器持有自己那一代；任何让"这份对象该不该被删"
+// 的归属发生变化的写（转手/续期/重新认领）都会推进世代，让在飞的删除权立即失效。
+//
+// **认领在租约内时拒绝转手**（R4-C-1 的核心）：`reaping_at` 落在租约内的行正被回收器
+// 删除上游对象，此时把行转给新的上传者，会让"新上传者的上游对象被删掉、台账却说他有效"
+// —— 所以 WHERE 追加租约判据，命中即 0 行并返回 `ErrGatewayFileReapClaimed`，由上传
+// 路径放弃这个 id（回落 base64 内联 / 重新上传）。租约过期后的转手照旧允许（认领方
+// 崩溃的自愈窗口），此时世代已被推进，回收器会在 DELETE 前后两次校验里放弃删除。
 func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *time.Time, sizeBytes int64) error {
 	if sizeBytes < 0 {
 		sizeBytes = 0
 	}
-	_, err := db.Exec(
-		`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
-		 ON CONFLICT (file_id) DO UPDATE
-		   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id,
-		       -- 重新登记 = 这份文件又有主了 ⇒ 必须清掉回收标记，否则回收器仍以为自己在删
-		       -- 一个"没人要"的对象（审计 R7 N11 的续期侧；SQL 里少这一句就退化成
-		       -- "续期后仍被回收"，判据 TestReaperAbandonsIfRenewedDuringReap 会红）。
-		       reaping_at = NULL,
-		       created_at = CASE WHEN gateway_files.expires_at <= now() THEN now()
-		                         ELSE gateway_files.created_at END,
-		       size_bytes = CASE WHEN EXCLUDED.size_bytes > 0 THEN EXCLUDED.size_bytes
-		                         ELSE gateway_files.size_bytes END
-		 WHERE gateway_files.user_id = EXCLUDED.user_id
-		    OR gateway_files.expires_at <= now()`,
-		fileID, userID, expiresAt, sizeBytes,
-	)
-	return err
+	// 认领租约在 WHERE 里出现两次判据（"标记仍在租约内"），用同一个真源常量。
+	lease := ReapClaimLease.Seconds()
+	for attempt := 0; attempt < 2; attempt++ {
+		res, err := db.Exec(
+			`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
+			 ON CONFLICT (file_id) DO UPDATE
+			   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id,
+			       -- 重新登记 = 这份文件又有主了 ⇒ 必须清掉回收标记，否则回收器仍以为自己在删
+			       -- 一个"没人要"的对象（审计 R7 N11 的续期侧；SQL 里少这一句就退化成
+			       -- "续期后仍被回收"，判据 TestReaperAbandonsIfRenewedDuringReap 会红）。
+			       reaping_at = NULL,
+			       -- 世代推进：在飞的回收权（持旧世代的回收器）从这一刻起失效。
+			       reap_gen = gateway_files.reap_gen + 1,
+			       created_at = CASE WHEN gateway_files.expires_at <= now() THEN now()
+			                         ELSE gateway_files.created_at END,
+			       size_bytes = CASE WHEN EXCLUDED.size_bytes > 0 THEN EXCLUDED.size_bytes
+			                         ELSE gateway_files.size_bytes END
+			 WHERE (gateway_files.user_id = EXCLUDED.user_id
+			        OR gateway_files.expires_at <= now())
+			   -- R4-C-1：认领在租约内的行不得转手（上游对象正在被删）。
+			   AND (gateway_files.reaping_at IS NULL
+			        OR gateway_files.reaping_at < now() - make_interval(secs => ?))`,
+			fileID, userID, expiresAt, sizeBytes, lease,
+		)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+		// 0 行的两种成因语义完全不同，必须区分：
+		//   (a) 该 id 仍属于**别人**且未过期 —— "存活行不转手"的既定规则，不是错误；
+		//   (b) 该行正被回收器认领（租约内）—— 上游对象正在被删，绝不能把这个 id
+		//       交给上传者（R4-C-1），必须让调用方放弃它。
+		claimed, err := gatewayFileReapClaimActive(db, fileID)
+		if err != nil {
+			return err
+		}
+		if claimed {
+			return fmt.Errorf("%w: %s", ErrGatewayFileReapClaimed, fileID)
+		}
+		// 未认领：也可能是"认领刚被释放/租约刚过期"的竞态 ⇒ 再试一次即可收敛
+		// （第二次仍 0 行就只可能是 (a)）。
+	}
+	return nil
+}
+
+// ErrGatewayFileReapClaimed 表示目标 `file_id` 正被回收器认领（标记在租约内）：
+// 上游对象正在被删除，登记路径**拒绝转手**，调用方必须放弃这个 id
+// （llmgateway 的上传路径据此回错误，让客户端回落 base64 内联 / 重新上传）。
+//
+// 判据见 serverstore 的 TestRecordGatewayFileRefusesTransferDuringActiveClaim 与
+// llmgateway 的 TestReaperFencesRegistrationDuringUpstreamDelete（确定性交错）。
+var ErrGatewayFileReapClaimed = errors.New("gateway file has an active reap claim")
+
+// gatewayFileReapClaimActive 报告该行是否正被回收器认领（标记在租约内）。
+func gatewayFileReapClaimActive(db *sql.DB, fileID string) (bool, error) {
+	var active bool
+	switch err := db.QueryRow(
+		`SELECT reaping_at IS NOT NULL AND reaping_at >= now() - make_interval(secs => ?)
+		   FROM gateway_files WHERE file_id = ?`, ReapClaimLease.Seconds(), fileID).Scan(&active); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return active, nil
 }
 
 // GatewayFileOwner 返回 file_id 的归属用户；ok=false 表示台账里没有这个**有效**文件
@@ -564,29 +625,35 @@ func GatewayFileRowExists(db *sql.DB, fileID string) (bool, error) {
 
 // GatewayFileForReap 是回收器认领一行时的快照。
 //
-// 回收路径本身只用 `ok` 判定（认领成功后行仍在、无需写回），快照字段供**测试与诊断**
+// 回收路径只用 `ok` 判定（认领成功后行仍在、无需写回），快照字段供**测试与诊断**
 // 消费（例如断言 created_at 不丢、管理端上传时间口径）；保留它们是为了让"认领拿到了
 // 什么"可被断言，而不是给生产路径回写用。
 //
 // `CreatedAt` 必须一起带走：写回是"补回一行"，若不带原始上传时间就只能记成 now()，
 // 台账会丢掉真实上传时间（审计 2026-09-22 N10）。
+//
+// `ReapGeneration` 是本次认领拿到的**世代号**（R4-C-1 的 fencing token）：认领时
+// 行世代 +1，回收器据此在"发上游 DELETE 之前"与"收尾删行之前"各校验一次自己的
+// 删除权是否仍然有效（`GatewayFileReapClaimHeld` / `FinishReapedGatewayFile`）。
 type GatewayFileForReap struct {
-	FileID    string
-	UserID    int64
-	CreatedAt time.Time
-	ExpiresAt *time.Time
-	SizeBytes int64
+	FileID         string
+	UserID         int64
+	CreatedAt      time.Time
+	ExpiresAt      *time.Time
+	SizeBytes      int64
+	ReapGeneration int64
 }
 
 // ClaimExpiredGatewayFile 在一个事务里"认领"一行已过期记录：锁行、复检**此刻仍然过期**、
-// 打上回收标记（`reaping_at = now()`）并提交。**不删行**。
+// 打上回收标记（`reaping_at = now()`）并把行世代 +1，提交。**不删行**。
 //
 // 为什么是"标记"而不是"删行"（审计 2026-09-22 R7 N11）：认领后要发一次上游删除，
 // 若中间进程死掉，删掉的行会让那个上游对象**再无凭据**（配额静默泄漏）；保留行 + 标记
 // 则可以让下一轮重新认领、重删（404 = 成功）再收尾，天然可重入。
 //
-// 租约（`reapClaimLease`）：标记早于租约时长的行可被重新认领 —— 认领方崩溃的自愈窗口，
-// 比回收间隔略长，避免正常在跑的批次被下一轮抢走。
+// 租约（`ReapClaimLease`）：标记早于租约时长的行可被重新认领 —— 认领方崩溃的自愈窗口，
+// 比回收间隔略长，避免正常在跑的批次被下一轮抢走。重新认领会**再次推进世代**，因此
+// 老认领方的在飞删除权自动失效（R4-C-1 的 fencing 语义）。
 //
 // 返回 ok=false 表示"已经不过期 / 已被别的路径处理 / 标记仍在租约内"（调用方跳过）。
 func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
@@ -606,15 +673,17 @@ func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, boo
 	case err != nil:
 		return GatewayFileForReap{}, false, err
 	}
-	res, err := tx.Exec(`UPDATE gateway_files SET reaping_at = now()
-	                      WHERE file_id = ?
-	                        AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))`,
-		fileID, ReapClaimLease.Seconds())
+	// 世代号在**同一条语句**里 +1 并回读（RETURNING），避免"先读后写"的竞态。
+	err = tx.QueryRow(`UPDATE gateway_files SET reaping_at = now(), reap_gen = reap_gen + 1
+	                    WHERE file_id = ?
+	                      AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
+	                    RETURNING reap_gen`,
+		fileID, ReapClaimLease.Seconds()).Scan(&snap.ReapGeneration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GatewayFileForReap{}, false, nil // 别的批次正持有标记（租约内）
+	}
 	if err != nil {
 		return GatewayFileForReap{}, false, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return GatewayFileForReap{}, false, nil // 别的批次正持有标记（租约内）
 	}
 	if err := tx.Commit(); err != nil {
 		return GatewayFileForReap{}, false, err
@@ -627,14 +696,23 @@ func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, boo
 // `ClaimExpiredGatewayFile` 与 `ListExpiredGatewayFiles` 共用它，llmgateway 侧不再自持常量。
 const ReapClaimLease = 10 * time.Minute
 
-// GatewayFileReapClaimHeld 报告该行的回收标记是否仍由**本次认领**持有。
+// GatewayFileReapClaimHeld 报告该行的回收权是否仍由**本次认领**（世代 generation）持有。
 //
-// 判据是"标记还在"：重新登记（并发上传转手过期行）会清空 `reaping_at`，
-// 行被别的路径删掉则查不到 ⇒ 两种情况都返回 false，调用方必须**放弃删上游对象**。
-func GatewayFileReapClaimHeld(db *sql.DB, fileID string) (bool, error) {
+// 判据是"标记还在**且**世代未变**且**仍在租约内"（R4-C-1 的 fencing token 语义）：
+//   - 重新登记（转手/续期）会清空 `reaping_at` 并推进世代 ⇒ false；
+//   - 行被别的路径删掉 ⇒ 查不到 ⇒ false；
+//   - 认领已过租约（认领方卡住超过租约）⇒ false —— 此时别的批次随时可以重新认领并
+//     推进世代，甚至上传者可以合法转手，所以本世代**没有**删除权；
+//   - 行被重新认领（多实例/崩溃自愈）⇒ 世代不同 ⇒ false。
+//
+// 任何一种为 false 都意味着调用方必须**放弃删上游对象**（对象可能已属于新一代）。
+func GatewayFileReapClaimHeld(db *sql.DB, fileID string, generation int64) (bool, error) {
 	var held bool
 	switch err := db.QueryRow(
-		`SELECT reaping_at IS NOT NULL FROM gateway_files WHERE file_id = ?`, fileID).Scan(&held); {
+		`SELECT reaping_at IS NOT NULL AND reap_gen = ?
+		          AND reaping_at >= now() - make_interval(secs => ?)
+		   FROM gateway_files WHERE file_id = ?`,
+		generation, ReapClaimLease.Seconds(), fileID).Scan(&held); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
 	case err != nil:
@@ -643,11 +721,20 @@ func GatewayFileReapClaimHeld(db *sql.DB, fileID string) (bool, error) {
 	return held, nil
 }
 
-// FinishReapedGatewayFile 收尾：删掉仍带回收标记的行（上游对象已经删掉了）。
-// 带标记谓词 ⇒ 若期间被重新登记（标记被清空），这里不会误删活行。
-func FinishReapedGatewayFile(db *sql.DB, fileID string) error {
-	_, err := db.Exec(`DELETE FROM gateway_files WHERE file_id = ? AND reaping_at IS NOT NULL`, fileID)
-	return err
+// FinishReapedGatewayFile 收尾：删掉仍带**本世代**回收标记的行（上游对象已经删掉了）。
+//
+// 带世代谓词 ⇒ 若期间被重新登记（转手会清空标记并推进世代）或已被重新认领，
+// 这里不会误删新一代的行。返回 finished=false 表示"这一行已经不归本世代处置"
+// —— 调用方必须把这次删除如实记为"对象已删、台账行留给新一代"（并打日志）。
+func FinishReapedGatewayFile(db *sql.DB, fileID string, generation int64) (bool, error) {
+	res, err := db.Exec(
+		`DELETE FROM gateway_files WHERE file_id = ? AND reaping_at IS NOT NULL AND reap_gen = ?`,
+		fileID, generation)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // ReleaseReapClaim 放弃回收标记（上游删除失败时调用）：下一轮立刻可以重试，

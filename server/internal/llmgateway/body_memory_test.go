@@ -3,6 +3,7 @@ package llmgateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -974,8 +975,10 @@ func TestNonMultipartUploadPassesThrough(t *testing.T) {
 // TestReaperDoesNotDeleteRenewedFile（R6 P1-A）：并发续期（同一 file_id 被重新登记
 // 为未来过期）时，回收器**不得**删掉上游对象。
 //
-// 两段判据：①认领前已续期 ⇒ claim 直接失败（行与对象都不动）；
-// ②认领与上游删除之间被重新登记（用测试注入点确定性复现）⇒ 跳过上游删除。
+// 判据（R4-C-1 起 ② 的形态变了）：①认领前已续期 ⇒ claim 直接失败（行与对象都不动）；
+// ③列表与认领之间被续期 ⇒ 同上；②认领与上游删除之间被重新登记 ⇒ **登记路径拒绝转手**
+// （`ErrGatewayFileReapClaimed`，对象正在被删），回收照常完成并清行 —— 这比"跳过删除"
+// 更强：不可能留下「台账说有效、对象已被删」的行。
 func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
 	resetBodyParseGate(t)
 	up := newFakeFilesUpstream(t)
@@ -1028,30 +1031,29 @@ func TestReaperDoesNotDeleteRenewedFile(t *testing.T) {
 		t.Fatalf("续期后的行必须保留: exists=%v err=%v", exists, err)
 	}
 
-	// ② 认领与上游删除之间被重新登记。
+	// ② 认领与上游删除之间被重新登记（R4-C-1 起**登记路径直接拒绝**这个窗口：
+	//    对象正在被删，谁都不能接管这个 id）⇒ 回收照常完成、行被清掉，
+	//    绝不会出现"台账说有效、对象已被删"的行。
 	if err := serverstore.RecordGatewayFile(gw.db, "file-race", gw.uidA, &past); err != nil {
 		t.Fatal(err)
 	}
+	var raceErr error
 	reapRecheckHook.store(func(id string) {
 		if id != "file-race" {
 			return
 		}
 		reapRecheckHook.store(nil)
-		// 模拟并发上传：同一个 id 被重新登记为未来过期。
-		if err := serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future); err != nil {
-			t.Errorf("re-register: %v", err)
-		}
+		raceErr = serverstore.RecordGatewayFile(gw.db, id, gw.uidB, &future)
 	})
 	t.Cleanup(func() { reapRecheckHook.store(nil) })
-	before := up.deletes.Load()
-	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 0 {
-		t.Fatalf("被重新登记的文件不该计入回收（deleted=%d）", deleted)
+	if deleted, _ := api.ReapExpiredGatewayFiles(0); deleted != 1 {
+		t.Fatalf("认领租约内的转手被拒绝后，回收应照常完成（deleted=%d, want 1）", deleted)
 	}
-	if up.deletes.Load() != before {
-		t.Fatalf("被重新登记的文件的上游对象被删了（deletes %d → %d）", before, up.deletes.Load())
+	if !errors.Is(raceErr, serverstore.ErrGatewayFileReapClaimed) {
+		t.Fatalf("认领租约内的重新登记必须被拒绝（ErrGatewayFileReapClaimed），实得 %v", raceErr)
 	}
-	if exists, err := serverstore.GatewayFileRowExists(gw.db, "file-race"); err != nil || !exists {
-		t.Fatalf("重新登记的行必须保留: exists=%v err=%v", exists, err)
+	if exists, err := serverstore.GatewayFileRowExists(gw.db, "file-race"); err != nil || exists {
+		t.Fatalf("收尾后台账行必须清掉（不能留下「台账说有效、对象已删」的行）: exists=%v err=%v", exists, err)
 	}
 }
 
