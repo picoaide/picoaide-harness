@@ -1478,6 +1478,27 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     })
 
   /**
+   * Whether a `device` connector actually DECLARES a device-code authorization.
+   *
+   * `parseServerConnectors` labels a definition that has neither an `auth` block
+   * nor `tokenFields` as `device` (the historical fallback). That label says
+   * nothing about authorization: there is no verification URL to visit and no
+   * token to obtain, so the CN-3 artifact gate must not apply — otherwise a
+   * perfectly usable credential-less MCP connector becomes permanently
+   * `unauthorized` with no user action able to fix it (V3 review, 2026-09-23).
+   * The same predicate drives `runDevice`, which skips the flow entirely when no
+   * verification URL is declared.
+   * @param def - connector definition.
+   * @returns true when the definition declares a device authorization step.
+   */
+  const declaresDeviceFlow = (def: ConnectorDef): boolean => {
+    const auth = def.auth as { verificationUrl?: unknown } | undefined
+    return auth !== undefined
+      && typeof auth.verificationUrl === 'string'
+      && auth.verificationUrl.trim() !== ''
+  }
+
+  /**
    * Whether a `device` credential carries an authorization artifact at all.
    *
    * The connect path may look at more than this (a declared-field form is
@@ -1510,13 +1531,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): boolean => {
     if (credential === null || credential === undefined) return false
     if (missingDeclaredFields(def, credential).length > 0) return false
-    if (def.authMode === 'token') return true
+    // Widened on purpose: a definition handed straight to `apply()` (a profile
+    // row, a test fixture) may carry no mode at all — see the `undefined` arm.
+    const mode: string | undefined = def.authMode
+    if (mode === 'token') return true
     // CN-3 (audit 2026-09-23): `device` used to pass through unconditionally, so
     // a device flow that produced nothing but `{updatedAt}` registered its MCP
     // servers on every restart and the row read `connected` while every tool
     // call was guaranteed to fail. A device credential is usable only when it
-    // carries something the tools can actually use.
-    if (def.authMode === 'device') return hasDeviceAuthorization(credential)
+    // carries something the tools can actually use — BUT the gate only applies
+    // to connectors that DECLARE a device-code authorization (V3 review): the
+    // catalog's fallback label is also `device` for a definition with neither
+    // an `auth` block nor `tokenFields`, and such a credential-less connector
+    // (a local MCP server that needs no credential) must stay usable exactly as
+    // it was before CN-3. See `declaresDeviceFlow`.
+    if (mode === 'device') return declaresDeviceFlow(def) ? hasDeviceAuthorization(credential) : true
+    // A definition that declares no authorization mode at all is the
+    // credential-less shape as well (V3 review): nothing was declared, so there
+    // is nothing to authorize and nothing to gate.
+    if (mode === undefined) return true
     // A public MCP endpoint answers without an authorization challenge, so the
     // discovery result is the whole credential: requiring an accessToken here
     // dropped its tools on every restart (2026-09-15 audit, BUG-06).

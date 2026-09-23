@@ -597,7 +597,16 @@ export async function refreshOAuthToken(
 
 /** Device-code flow: surface verification URL + user code, poll until connected. */
 async function runDevice(def: ConnectorDef, options: AuthRunOptions): Promise<Partial<ConnectorCredential>> {
-  const auth = def.auth as DeviceAuthConfig
+  const auth = def.auth as DeviceAuthConfig | undefined
+  // V3 follow-up to CN-3: "device" is also the catalog's fallback label for a
+  // definition that declares NEITHER an `auth` block NOR `tokenFields`
+  // (`parseServerConnectors` infers it). Such a connector has no authorization
+  // step at all — its MCP server needs no credential — so there is nothing to
+  // announce and nothing to poll. (Before CN-3 this shape connected and worked;
+  // running a device flow for it turned it into a permanent `unauthorized`.)
+  if (auth === undefined || typeof auth.verificationUrl !== 'string' || auth.verificationUrl.trim() === '') {
+    return { updatedAt: Date.now() } as Partial<ConnectorCredential>
+  }
   // conn-4: `verificationUrl` is definition-supplied (the server-issued
   // catalog carries it) and the client renders it as a clickable `<a href>`.
   // It was the ONLY definition-controlled URL in this package that skipped the

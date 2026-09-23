@@ -27,6 +27,7 @@ import { assert, describe, expect, it } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
+import { parseServerConnectors } from '../src/index.ts'
 import { ConnectorStore } from '../src/store.ts'
 import { createHarness, callRoute, seedCredential, waitFor } from './helpers/connector-harness.ts'
 
@@ -63,6 +64,53 @@ describe('CN-3: device mode must not report connected without an authorization a
     const restarted = JSON.parse((await callRoute(h2, '/api/pico/connectors/dev/state', 'GET')).body) as { status: string }
     expect(restarted.status).not.toBe('connected')
     expect(h2.configs.length).toBe(0)
+  })
+})
+
+describe('CN-3 follow-up (V3): a credential-less connector is NOT gated by the device rule', () => {
+  it('connects and registers its MCP server when the definition declares neither `auth` nor `tokenFields`', async () => {
+    const base = await dir()
+    // Exactly the shape `parseServerConnectors` falls back to labelling `device`
+    // (no authMode, no `auth` block, no tokenFields): a local MCP server that
+    // needs no credential at all. Running a device flow for it — or applying the
+    // CN-3 artifact gate to it — turned a working connector into a permanent
+    // `unauthorized` with no user action able to fix it (V3 review).
+    const definition = {
+      mcp: [{ serverName: 'noauth-mcp', transport: 'stdio', command: 'node', args: ['server.mjs'] }],
+    }
+    // Through the REAL catalog parser, so the auto-inference under test really
+    // produces `authMode: 'device'` (that inference is the whole reason this
+    // shape reached the device gate).
+    const parsed = parseServerConnectors([
+      { id: 'noauth', name: 'NoAuth', description: '', auth_mode: '', definition: JSON.stringify(definition) },
+    ])
+    expect(parsed.map(def => def.authMode), 'the parser must infer `device` for this shape').toEqual(['device'])
+    const h = createHarness(parsed, base, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    await callRoute(h, '/api/pico/connectors/noauth/connect', 'POST')
+    await waitFor(() => h.configs.length === 1, 5000)
+    const state = JSON.parse((await callRoute(h, '/api/pico/connectors/noauth/state', 'GET')).body) as { status: string, errorCode?: string }
+    expect(state.status, 'a connector whose MCP server needs no credential must stay usable').toBe('connected')
+    expect(state.errorCode).toBeUndefined()
+    expect(h.configs.length, 'its MCP server must actually be registered').toBe(1)
+    // The restart path uses `credentialUsable` too: same verdict there.
+    const h2 = createHarness(parsed, base, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    await waitFor(() => h2.configs.length === 1, 5000)
+    const restarted = JSON.parse((await callRoute(h2, '/api/pico/connectors/noauth/state', 'GET')).body) as { status: string }
+    expect(restarted.status).toBe('connected')
+  })
+
+  it('also connects when a definition is handed over with no mode at all (profile/fixture shape)', async () => {
+    const base = await dir()
+    const def = {
+      id: 'raw', name: 'Raw', description: '',
+      mcp: [{ serverName: 'raw-mcp', transport: 'stdio', command: 'node', args: ['server.mjs'] }],
+    }
+    const h = createHarness([def] as never, base, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    await callRoute(h, '/api/pico/connectors/raw/connect', 'POST')
+    await waitFor(() => h.configs.length === 1, 5000)
+    const state = JSON.parse((await callRoute(h, '/api/pico/connectors/raw/state', 'GET')).body) as { status: string }
+    expect(state.status).toBe('connected')
+    expect(h.configs.length).toBe(1)
   })
 })
 
