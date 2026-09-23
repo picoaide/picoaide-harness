@@ -81,6 +81,18 @@ const MAX_EXECUTION_HISTORY = 100
 /** A lock file without a parseable owner pid is reclaimed once older than this. */
 const STALE_LOCK_AGE_MS = 45_000
 
+/**
+ * Refusal raised by every write path once `dispose()` sealed this generation
+ * (2026-09-23 R3-B3 F1). After `dispose()` hands `ledger.lock` to the successor
+ * generation, a write from this one would land with no mutual exclusion and no
+ * error — the exact state that let a late settlement erase the successor's
+ * jobs. So the write is refused loudly: the log names the file and the reason,
+ * and the caller gets an exception.
+ */
+function disposedRefusal(filePath: string): string {
+  return `ledger is disposed: write refused (${filePath}; this generation released ledger.lock to the successor)`
+}
+
 interface CachedRequest {
   fingerprint: string
 }
@@ -179,6 +191,17 @@ export class HostCronLedger {
   private mode: LedgerLoadMode = 'loaded'
   /** Set in read-only degraded mode: every write throws with this reason. */
   private degradedReason: string | undefined
+  /**
+   * State that exists in memory but not yet on disk (2026-09-23 R3-B3 F1).
+   *
+   * Ordinary mutations persist synchronously inside {@link mutate}, so there is
+   * no write queue: the only deferred writes are the convergence steps
+   * {@link load} deliberately leaves for "the next successful write" — a schema
+   * migration, canonicalised owner keys, the interrupted-execution reconcile,
+   * and the fresh document after a corrupt-ledger reset. {@link dispose} lands
+   * them before sealing.
+   */
+  private pendingFlush = false
   /** Current account (gateway username); null when logged out. */
   private readonly owner: () => string | null
 
@@ -284,6 +307,10 @@ export class HostCronLedger {
         throw new Error('unexpected schema')
       }
       let jobs = parsed.jobs
+      // Convergence below happens in memory only: nothing reaches disk until the
+      // next `persist()`. Tracked so `dispose()` can land it before sealing
+      // (2026-09-23 R3-B3 F1).
+      let pendingFlush = false
       // Schema 迁移(审计 2026-08-25 C-1):此前把「schema 版本不匹配」当损坏
       // 处理 → rename .corrupt + 清空全部数据,且无迁移路径;任何未来字段
       // 变更都会静默抹掉用户全部定时任务。现在区分:
@@ -292,6 +319,7 @@ export class HostCronLedger {
       // - 高于当前(未知未来) → 保守拒绝(不破坏数据,报错而非清空)。
       if (parsed.schemaVersion < CRON_SCHEMA_VERSION) {
         jobs = migrateCronLedger(jobs, parsed.schemaVersion)
+        pendingFlush = true
       } else if (parsed.schemaVersion > CRON_SCHEMA_VERSION) {
         throw new Error(`ledger schema v${String(parsed.schemaVersion)} is newer than supported v${CRON_SCHEMA_VERSION}`)
       }
@@ -299,7 +327,10 @@ export class HostCronLedger {
       // (trim + lower-case) form. Reads already match normalised keys, so this
       // is pure convergence — the next successful write persists it, and
       // skipping it would lose nothing.
-      jobs = jobs.map(normalizeJobOwner)
+      const normalized = jobs.map(normalizeJobOwner)
+      // `normalizeJobOwner` returns the very same record when nothing changed.
+      if (normalized.some((job, index) => job !== jobs[index])) pendingFlush = true
+      jobs = normalized
       const state: LedgerState = {
         revision: parsed.revision,
         jobs,
@@ -317,7 +348,8 @@ export class HostCronLedger {
           this.cache.set(entry.requestId, { fingerprint: entry.fingerprint })
         }
       }
-      this.reconcileInterruptedStarts(state, this.now())
+      if (this.reconcileInterruptedStarts(state, this.now())) pendingFlush = true
+      this.pendingFlush = pendingFlush
       this.mode = 'loaded'
       return state
     } catch (error) {
@@ -341,6 +373,11 @@ export class HostCronLedger {
         )
       }
       this.mode = 'reset-corrupt'
+      // The isolated bytes are gone from `ledger.json`, so the in-memory reset
+      // is a pending write of its own (2026-09-23 R3-B3 F1): flushing it keeps
+      // the "ledger was reset (kept as …)" diagnostic visible on the next boot
+      // even when the user never touches the board.
+      this.pendingFlush = true
       return {
         revision: 0,
         jobs: [],
@@ -399,6 +436,8 @@ export class HostCronLedger {
     chmodSync(tmp, 0o600)
     renameSync(tmp, this.filePath)
     this.pruneCache()
+    // Everything that was only in memory is on disk now (2026-09-23 R3-B3 F1).
+    this.pendingFlush = false
   }
 
   private pruneCache(): void {
@@ -437,8 +476,28 @@ export class HostCronLedger {
    * read, destroying every job with no `.corrupt-*` copy left behind.
    */
   private assertWritable(): void {
+    this.assertOpen()
     if (this.degradedReason === undefined) return
     throw new Error(`dsh-cron: ledger is read-only: ${this.degradedReason}`)
+  }
+
+  /**
+   * Refuse every request once {@link dispose} sealed this generation
+   * (2026-09-23 R3-B3 F1).
+   *
+   * `dispose()` releases `ledger.lock`, which is the only mutual exclusion
+   * between two generations of Hosts (HMR reload, same-process rebuild, next
+   * boot). A write that still got through would `renameSync` over the
+   * successor's `ledger.json` with no lock and no error — silently erasing jobs
+   * the successor had just created and answering the user with a success.
+   * Refusing loudly is the only honest alternative: this generation no longer
+   * owns the file, and re-acquiring the lock is a *new* ledger's job.
+   */
+  private assertOpen(): void {
+    if (!this.disposed) return
+    const reason = disposedRefusal(this.filePath)
+    console.error(`[dsh-cron] ${reason}`)
+    throw new Error(`dsh-cron: ${reason}`)
   }
 
   /**
@@ -447,8 +506,12 @@ export class HostCronLedger {
    * so it is settled as cancelled and its job's nextRunAt is rolled forward
    * past `now` so the job can trigger again. Never re-fires a start that was
    * interrupted before the session was recorded.
+   *
+   * Returns whether anything changed — the change is memory-only, so the caller
+   * records it as a pending flush for `dispose()` (2026-09-23 R3-B3 F1).
    */
-  private reconcileInterruptedStarts(state: LedgerState, now: number): void {
+  private reconcileInterruptedStarts(state: LedgerState, now: number): boolean {
+    let changed = false
     for (const job of state.jobs) {
       const pending = job.executions.find(execution => execution.endedAt === undefined)
       if (pending === undefined) continue
@@ -462,7 +525,9 @@ export class HostCronLedger {
         if (nextRunAt === undefined) delete job.nextRunAt
         else job.nextRunAt = nextRunAt
       }
+      changed = true
     }
+    return changed
   }
 
   /** Lightweight summary for SSE frames (no deep clone of the job list). */
@@ -494,6 +559,9 @@ export class HostCronLedger {
    * and, when a run was opened, the run to launch.
    */
   applyRequest(requestId: string, action: CronAction): ApplyResult {
+    // A sealed generation is over: not even an idempotent replay may be
+    // answered out of its memory (the successor owns the ledger now).
+    this.assertOpen()
     const fingerprint = fingerprintOf(requestId, action)
     const cached = this.cache.get(requestId)
     if (cached !== undefined) {
@@ -804,22 +872,68 @@ export class HostCronLedger {
     })
   }
 
+  /**
+   * Persist state that so far only exists in memory (best effort, never throws).
+   *
+   * Ordinary mutations persist synchronously inside {@link mutate} — there is
+   * no asynchronous write queue to drain — so the only pending writes are the
+   * convergence steps {@link load} deliberately leaves for "the next successful
+   * write": a schema migration, canonicalised owner keys, the
+   * interrupted-execution reconcile, and the document after a corrupt-ledger
+   * reset. `dispose()` is that write.
+   *
+   * Must run BEFORE the seal (a sealed ledger refuses writes) and BEFORE the
+   * lock is released (the successor must not read pre-flush bytes). Teardown
+   * must never throw, so a failure is logged and the flag stays set.
+   */
+  private flushPendingState(): void {
+    if (!this.pendingFlush) return
+    // Read-only degraded mode: the stored bytes could not be read and must
+    // never be renamed over (`assertWritable` enforces the same rule).
+    if (this.degradedReason !== undefined) return
+    try {
+      this.persist()
+    } catch (error) {
+      console.error('[dsh-cron] dispose could not persist the pending ledger state', error)
+    }
+  }
+
+  /** Close and delete our own `ledger.lock` (never a successor's). */
+  private releaseLock(): void {
+    if (this.lockFd === undefined) return
+    try {
+      closeSync(this.lockFd)
+      // Only remove the lock we still own: if the file was replaced while
+      // held (edge), deleting it would release someone else's lock.
+      const raw = readFileSync(this.lockPath, 'utf8').trim()
+      if (raw === `${process.pid}`) unlinkSync(this.lockPath)
+    } catch {
+      // Best effort.
+    }
+    this.lockFd = undefined
+  }
+
+  /**
+   * Seal this generation and hand `ledger.lock` to its successor (idempotent,
+   * never throws).
+   *
+   * Phase order is deliberate and load-bearing (2026-09-23 R3-B3 F1):
+   *   1. flush   — land memory-only state while the lock is still ours;
+   *   2. seal    — from here on every write path refuses loudly (`assertOpen`);
+   *   3. release — delete `ledger.lock`, which lets the next generation acquire it.
+   *
+   * Sealing *before* releasing is the invariant: the moment the lock file is
+   * gone a successor may own `ledger.json`, so this generation must already be
+   * unable to write. Reversing 2 and 3 (or moving the flush after the seal)
+   * reopens the window where a late settlement rewrites the successor's file
+   * with no mutual exclusion and no error.
+   */
   dispose(): void {
     if (this.disposed) return
+    this.flushPendingState()
     this.disposed = true
     this.listeners.clear()
-    if (this.lockFd !== undefined) {
-      try {
-        closeSync(this.lockFd)
-        // Only remove the lock we still own: if the file was replaced while
-        // held (edge), deleting it would release someone else's lock.
-        const raw = readFileSync(this.lockPath, 'utf8').trim()
-        if (raw === `${process.pid}`) unlinkSync(this.lockPath)
-      } catch {
-        // Best effort.
-      }
-      this.lockFd = undefined
-    }
+    this.releaseLock()
   }
 }
 
