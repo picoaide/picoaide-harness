@@ -58,9 +58,29 @@ type Response struct {
 	// 每项 = 客户端 ConnectorDef 对齐的 JSON(definition 字段内嵌),
 	// 服务端管理员经 webadmin 管理;客户端凭证仍只存本地,不随下发。
 	Connectors []ConnectorItem `json:"connectors"`
-	// ServerVersion 服务端版本(编译期注入)。
-	// 客户端据此发现"服务端已升级、本机客户端是旧版"并提示升级 —— 服务端与
-	// 客户端同包发版(客户端安装包随镜像发布),所以两者版本必须一致。
+	// ServerVersion 是**服务端构建版本标识**（编译期注入，值 = serverauth.BuildVersion()）。
+	//
+	// 诚实口径（R3-A A-13）：这一栏曾经写着"客户端据此发现『服务端已升级、本机客户端
+	// 是旧版』并提示升级……是版本错配的**唯一可见信号**" —— 那是**不成立的承诺**，
+	// 已撤回。事实是：
+	//   - **当前没有客户端消费方**：`packages/**` 的源码里既没有 `server_version`
+	//     也没有 `serverVersion` 的读取点（判据是包内用例
+	//     TestServerVersionIsInformationalOnly —— 它扫的就是客户端源码，抄不走）；
+	//   - 客户端的版本检查走的是 **`GET /api/client/v2/updates/manifest`** 的
+	//     `server.version`（见 internal/clientrelease），与本字段无关；
+	//   - 所以本字段今天是**诊断/溯源**信息：回答"这份 bootstrap 来自哪个构建"，
+	//     不承担任何"版本错配提示"的产品承诺。
+	//
+	// 为什么"改承诺"而不是删字段或补消费方（这是本条缺陷的处置取舍）：
+	//   - 字段集合被视为**跨语言契约**（客户端 BootstrapConfig 逐字对齐），删字段
+	//     必须与客户端同批发版，代价与风险都不属于服务端单方面；
+	//   - "让客户端消费它并提示升级"是**产品决策 + 客户端改动**（另一个泳道），
+	//     服务端这边单方面改不动 —— 在它落地之前，注释与用例必须如实描述现状，
+	//     否则门禁会继续告诉读者"这条链路是通的"（存在性断言冒充能力断言）。
+	//
+	// 改动纪律：这个注释与 TestServerVersionIsInformationalOnly 是**一对**。
+	// 谁把"客户端据此提示升级"这类承诺写回来，或者真加了客户端消费方却没同步口径，
+	// 用例都会红。
 	ServerVersion string `json:"server_version"`
 }
 
