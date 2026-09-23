@@ -23,11 +23,13 @@ import (
 
 // availabilityOut 是端点响应体（字段名是跨端契约：客户端 PublishForm 按它渲染）。
 type availabilityOut struct {
-	AppID      string   `json:"app_id"`
-	Valid      bool     `json:"valid"`
-	Available  bool     `json:"available"`
-	OwnedByYou bool     `json:"owned_by_you"`
-	Exists     bool     `json:"exists"`
+	AppID      string `json:"app_id"`
+	Valid      bool   `json:"valid"`
+	Available  bool   `json:"available"`
+	OwnedByYou bool   `json:"owned_by_you"`
+	Exists     bool   `json:"exists"`
+	// CanPublish 是"现在能不能对这个标识发一版"的判词（R3-A A-4：终态必须为 false）。
+	CanPublish bool     `json:"can_publish"`
 	Reason     string   `json:"reason"`
 	Code       string   `json:"code"`
 	Message    string   `json:"message"`

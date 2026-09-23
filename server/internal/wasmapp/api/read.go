@@ -568,6 +568,18 @@ func (h *Handlers) availability(c *gin.Context) {
 		c.JSON(http.StatusOK, out)
 		return
 	}
+	// 终态闸门（冻结 / 退役）必须在"归属放行"之后、报"可以发"之前判（R3-A A-4）：
+	// 判据与 publish **同一处**（publishBlockOf），code/message/hints 因此逐字相同，
+	// 客户端只需要一套渲染分支。放在 checkOwner 之后是有意的 —— 归属是更外层的
+	// 事实（"这不是你的应用"），只有归属放行的人才需要知道"你的应用处于哪个终态"。
+	if blocked := publishBlockOf(app); blocked != nil {
+		out["reason"] = blocked.Reason
+		out["code"] = string(blocked.Err.Code)
+		out["message"] = blocked.Err.Message
+		out["hints"] = blocked.Err.Hints
+		c.JSON(http.StatusOK, out)
+		return
+	}
 	// checkOwner 放行 = "你可以对这个标识发布"：发布者本人，或管理员的兜底接管。
 	// 注意它与 owned_by_you 不同物 —— 后者是**严格归属**（admin 接管时仍为 false），
 	// 而表单要判的是"能不能发"，所以 reason 取宽松的那一个。

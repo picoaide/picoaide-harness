@@ -737,20 +737,11 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		h.auditDenied(u, appID, version, oerr)
 		return nil, oerr
 	}
-	// 顺序有意：**先判"已退役"再判"已冻结"**。删除会同时写下 frozen_at（R37 的
-	// 保留期锚点），若先判冻结，一个已删除的应用会对作者报"请先解冻" —— 而解冻
-	// 救不了它（标识已永久占位）。语义正确的答案是 404 已退役。
-	if existing != nil && existing.DeletedAt != nil {
-		e := apperr.New(apperr.CodeNotFound, "应用已退役（已删除）").
-			WithHint("已删除的应用标识与版本号永久占位，不能复用；请新建应用")
-		h.auditDenied(u, appID, version, e)
-		return nil, e
-	}
-	if existing != nil && existing.FrozenAt != nil {
-		e := apperr.New(apperr.CodeAppFrozen, "应用已冻结，不能发布新版本").
-			WithHint("冻结是 R37 退役流程的第一步：请先解冻（同一端点带 {\"frozen\":false}），或新建应用")
-		h.auditDenied(u, appID, version, e)
-		return nil, e
+	// 终态闸门（冻结 / 退役）：判据抽在 publishBlockOf 里，**与 availability 共用**
+	// （R3-A A-4）—— 两个面各写一份就会出现"预查说可以、发布被拒"。
+	if blocked := publishBlockOf(existing); blocked != nil {
+		h.auditDenied(u, appID, version, blocked.Err)
+		return nil, blocked.Err
 	}
 	if verr := registry.ValidateVersion(version); verr != nil {
 		h.auditDenied(u, appID, version, verr)
@@ -1223,6 +1214,40 @@ func (h *Handlers) acquireUpload(u *serverstore.User) (time.Duration, *apperr.Er
 // isAdmin 是平台兜底判定（§8/R23：super_admin 可接管处置任何应用）。
 func (h *Handlers) isAdmin(c *gin.Context) bool {
 	return isSuperAdmin(serverauthCurrentUser(c))
+}
+
+// publishBlock 描述"这个应用**为什么**不能再接收新版本"（nil = 可以发）。
+//
+// 两个消费方**必须**共用同一份判定，否则"预查说可以、发布被拒"的契约分叉会立刻
+// 回来（R3-A A-4）：
+//   - `publishFromBytes` 直接把它回给调用方（403 APP_FROZEN / 404 NOT_FOUND）；
+//   - `availability` 回 `can_publish=false` + 同一个错误的 code/message/hints
+//     （连文案都逐字相同 —— 客户端因此只需要一套渲染分支）。
+type publishBlock struct {
+	// Reason 是 availability 面的**稳定判词**（终态各自可辨，不并成 taken/yours）。
+	Reason string
+	// Err 是共用的结构化错误。
+	Err *apperr.Error
+}
+
+// publishBlockOf 是"这个应用现在还能不能发新版"的**唯一判据**。
+//
+// 顺序有意：**先判"已退役"再判"已冻结"**。删除会同时写下 frozen_at（R37 的保留期
+// 锚点），若先判冻结，一个已删除的应用会对作者报"请先解冻" —— 而解冻救不了它
+// （标识已永久占位）。语义正确的答案是 404 已退役。
+func publishBlockOf(app *serverstore.WasmApp) *publishBlock {
+	if app == nil {
+		return nil
+	}
+	if app.DeletedAt != nil {
+		return &publishBlock{Reason: "retired", Err: apperr.New(apperr.CodeNotFound, "应用已退役（已删除）").
+			WithHint("已删除的应用标识与版本号永久占位，不能复用；请新建应用")}
+	}
+	if app.FrozenAt != nil {
+		return &publishBlock{Reason: "frozen", Err: apperr.New(apperr.CodeAppFrozen, "应用已冻结，不能发布新版本").
+			WithHint("冻结是 R37 退役流程的第一步：请先解冻（同一端点带 {\"frozen\":false}），或新建应用")}
+	}
+	return nil
 }
 
 // checkOwner 是归属检查（§10.5 第 60 项 / R6）。
