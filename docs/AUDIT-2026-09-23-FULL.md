@@ -300,6 +300,14 @@ PostgreSQL 探针统一使用容器 `pg-test`（`postgres:postgres@127.0.0.1:543
 - **代价**：agent 被误导去 `app.asar` 里 grep 守卫实现、反复探测文件系统，约 150 步后才用"把 SKILL.md 直接 `cp` 进另一个技能根"绕过；**产品自身的技能安装通道从未成功**。
 - **待修（本会话未修，登记为 P1）**：①失败分类与文案（分辨 `EPERM/EACCES`（权限/沙箱）与真正的符号链接/越界，二者不可共用一句）；②原子写失败必须清理自己创建的临时文件，且重试要幂等（临时名加随机后缀或失败即回收）；③数据根（技能库 / memories）与沙箱工作区的关系需要产品决策：要么把自身工具的写入面纳入沙箱允许范围，要么在会话为 `workspace-write` 时对该写入给出**可行动的**指引（而不是让用户反复批准提权）。
 
+### 7.36 Normify 架构结构库：二轮增量刷新完成（结构库本身不入库）
+
+- **形状**：1544 模块（312 容器 + 1232 叶子；+3 为补"新源文件无模块认领"的覆盖缺口）、3551 条唯一 API 键、2536 条 source 证据、1165 条依赖边、312 层渲染数据（容器 100% 覆盖）；产物 `tree.json`/`outline.md`/`api-index.json`/`receipt.json`/`picoaide-architecture.html`（5.49 MB）。
+- **自证**：独立校验器 `tools/verify-tree.mjs` **problems 336 → 0**；`repair-plan.mjs` 0 悬空边/0 重复键/0 缺 apis/0 缺 layout；`normify_validate` **408 error → 0 error**（18 条 warning 与任务书"已知可接受"完全吻合，且数字未变）；行号越界 7 → 0；build ✅ render ✅。变更记录 `2026-09-23-incremental-refresh-round2`（**verified**，revision.after `7a82c2db81`，create 3 / modify 480 / delete 0）。
+- **做法上的一处关键修正**：没有把 `normify_sync` 的 `affected` 当重建清单 —— 那是"文件→模块"映射的**上界**（含大量只改测试文件、或生成期已读到新内容而无需动的模块）。改为独立只读脚本对全部模块复算指纹并与本区间真改动文件比对，得到 **334 个真漂移模块**再重建；16 个偏粗叶子与 859 条未锚定箭头维持原样（非本轮引入）。
+- **认账的不确定性**：①仓库有并发写者，`docs/AUDIT-*` 收尾时仍在被追加 ⇒ 该模块会再次显示 fingerprint-drift（预期，可 `normify_module_refresh` 消掉）；②`verify-packaged-runtime.ts` 当时有未提交改动，4 个 runtime-verify 叶子的行段按当时 HEAD 给出，落地后需再刷一轮；③`update-download.ts` 的两条修复当时只在 `origin/master` 而不在工作树。
+- **发现的引擎侧系统性缺陷 6 条（供后续修 normify 本身）**：①`revision` 是单值 SHA 且校验器原本硬编码它 ⇒ 增量刷新必然产生混合值、会把 483 个模块误报成缺陷（校验器已改为接受"生成 revision 或 HEAD 的任一祖先"）；②`module_patch`/`batch` **不重算也不校验** fingerprint ⇒ 改 source 后必须固定跑 second-step `module_refresh`；③"叶子 API 键全项目唯一"与"实现收敛成 re-export"天然冲突，垫片必须用来源前缀键；④`change_close` 对活工作树校验，并发写者下可能永远等不到 0 error 的瞬间（本次被打断 3 次）；⑤子代理工具传输**传不了数组参数**（3 个代理命中 `args/missing: items`，绕法=逐条 patch）；⑥`sync` 的 `affected` 既漏（行号越界类）又过（测试文件类），两端都要独立只读扫描补。
+
 ### 7.4 收敛判定
 
 **判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、**第三轮 0 P0 + 19 P1**（R3-A 2 / R3-B 1 / R3-B3 1 / R3-C 15）—— 第三轮不是干净轮，按口径干净的一对必须顺延到第四、五轮。
