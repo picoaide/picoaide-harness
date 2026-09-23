@@ -179,6 +179,51 @@ function tempDir(prefix) {  const dir = mkdtempSync(join(tmpdir(), prefix))
   return dir
 }
 
+/**
+ * 合成 git 仓库的公共环境与包装(拓扑判据 1e 与渠道 pin 1g 共用)。
+ *
+ * 为什么显式给 user/date/`GIT_CONFIG_NOSYSTEM`:判据跑在宿主 git 上,宿主的
+ * `~/.gitconfig`(签名、模板、hooksPath)或系统配置不得影响结论,墙钟也不得决定
+ * tag 的 creatordate 顺序。
+ */
+const gitFixtureEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'ci-fixture',
+  GIT_AUTHOR_EMAIL: 'ci-fixture@example.com',
+  GIT_COMMITTER_NAME: 'ci-fixture',
+  GIT_COMMITTER_EMAIL: 'ci-fixture@example.com',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_TERMINAL_PROMPT: '0',
+}
+function fixtureGit(dir, args, env = {}) {
+  return spawnSync(
+    'git',
+    ['-C', dir, '-c', 'user.name=ci-fixture', '-c', 'user.email=ci-fixture@example.com', '-c', 'commit.gpgsign=false', ...args],
+    { encoding: 'utf8', env: { ...gitFixtureEnv, ...env } },
+  )
+}
+function fixtureMustGit(dir, args, env = {}) {
+  const result = fixtureGit(dir, args, env)
+  if (result.status !== 0) throw new Error(`fixture git ${args.join(' ')} 失败: ${result.stderr}`)
+  return (result.stdout ?? '').trim()
+}
+/** 合成仓库:一个提交一个文件;日期显式给定。 */
+function fixtureRepo() {
+  const dir = tempDir('ci-git-fixture-')
+  fixtureMustGit(dir, ['init', '-q', '-b', 'master'])
+  return dir
+}
+function fixtureCommit(dir, file, message, date) {
+  const target = join(dir, file)
+  mkdirSync(dirname(target), { recursive: true })
+  writeFileSync(target, `${message}\n`)
+  fixtureMustGit(dir, ['add', '-A'])
+  fixtureMustGit(dir, ['commit', '-q', '-m', message], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date })
+}
+function fixtureTag(dir, name, date) {
+  return fixtureMustGit(dir, ['tag', '-a', name, '-m', name], { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date })
+}
+
 /** PNG 块(长度 + 类型 + 数据 + CRC)。 */
 function pngChunk(type, data) {
   const length = Buffer.alloc(4)
@@ -279,10 +324,11 @@ function fakeChannelRepo(ids, options = {}) {
  *   缺省把 refName 当成 tag(`refs/tags/<refName>`)—— 多数用例测的是 tag 策略;
  *   分支用例显式传 `ref: 'refs/heads/…'`(`GITHUB_REF` 由 GitHub 注入,分支 push
  *   上就是 `refs/heads/<分支名>`)。
+ *   `args` 是在 `--dest` / `--list` 之前追加的额外 argv(`--pin <sha>` / `--resolve-only`)。
  */
-function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
+function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [] }) {
   const cwd = tempDir('ci-channels-run-')
-  const result = spawnSync('bash', [channelsScript, '--dest', dest, '--list', join(cwd, list)], {
+  const result = spawnSync('bash', [channelsScript, ...args, '--dest', dest, '--list', join(cwd, list)], {
     cwd,
     encoding: 'utf8',
     env: {
@@ -670,46 +716,15 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
   const topologyScript = join(root, 'scripts', 'ci-release-topology.sh')
   check(existsSync(topologyScript), 'scripts/ci-release-topology.sh 必须存在(拓扑判据的唯一实现)')
 
-  const gitEnv = {
-    ...process.env,
-    GIT_AUTHOR_NAME: 'ci-topology-test',
-    GIT_AUTHOR_EMAIL: 'ci-topology-test@example.com',
-    GIT_COMMITTER_NAME: 'ci-topology-test',
-    GIT_COMMITTER_EMAIL: 'ci-topology-test@example.com',
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_TERMINAL_PROMPT: '0',
-  }
-  const git = (dir, args, env = {}) => spawnSync(
-    'git',
-    ['-C', dir, '-c', 'user.name=ci-topology-test', '-c', 'user.email=ci-topology-test@example.com', '-c', 'commit.gpgsign=false', ...args],
-    { encoding: 'utf8', env: { ...gitEnv, ...env } },
-  )
-  const mustGit = (dir, args, env = {}) => {
-    const result = git(dir, args, env)
-    if (result.status !== 0) throw new Error(`fixture git ${args.join(' ')} 失败: ${result.stderr}`)
-    return (result.stdout ?? '').trim()
-  }
-  /** 合成仓库:一个提交一个文件;日期显式给定(creatordate 排序不靠墙钟)。 */
-  const newRepo = () => {
-    const dir = tempDir('ci-topology-')
-    mustGit(dir, ['init', '-q', '-b', 'master'])
-    return dir
-  }
-  const commit = (dir, file, message, date) => {
-    writeFileSync(join(dir, file), `${message}\n`)
-    mustGit(dir, ['add', '-A'])
-    mustGit(dir, ['commit', '-q', '-m', message], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date })
-  }
-  const tag = (dir, name, date) => mustGit(
-    dir,
-    ['tag', '-a', name, '-m', name],
-    { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date },
-  )
+  // 合成仓库工具见模块级 `fixtureRepo` / `fixtureCommit` / `fixtureTag`(与 1g 共用)。
+  const newRepo = fixtureRepo
+  const commit = fixtureCommit
+  const tag = fixtureTag
   const runTopology = (dir, args) => spawnSync('bash', [topologyScript, ...args], {
     cwd: dir,
     encoding: 'utf8',
     // HOME 指向合成仓库:宿主 ~/.gitconfig(可能带签名/模板)不得影响判据。
-    env: { ...gitEnv, HOME: dir },
+    env: { ...gitFixtureEnv, HOME: dir },
   })
 
   // ① 基线是祖先 ⇒ 绿。
@@ -729,10 +744,10 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     commit(dir, 'a.txt', 'base', '2026-09-01T10:00:00+08:00')
     tag(dir, 'v2.8.1', '2026-09-01T10:01:00+08:00')
     commit(dir, 'b.txt', 'main-next', '2026-09-02T10:00:00+08:00')
-    mustGit(dir, ['checkout', '-q', '-b', 'side', 'HEAD~1'])
+    fixtureMustGit(dir, ['checkout', '-q', '-b', 'side', 'HEAD~1'])
     commit(dir, 'side.txt', 'side-fix', '2026-09-03T10:00:00+08:00')
     tag(dir, 'v2.8.2-beta.1', '2026-09-03T10:01:00+08:00')
-    mustGit(dir, ['checkout', '-q', 'master'])
+    fixtureMustGit(dir, ['checkout', '-q', 'master'])
     const bad = runTopology(dir, ['--ref', 'HEAD', '--no-mainline'])
     check(bad.status === 1, `旁支基线必须红(退出 1),实际 ${String(bad.status)}: ${bad.stderr}`)
     const text = `${bad.stderr ?? ''}`
@@ -890,6 +905,183 @@ function runChannels({ source, refName = '', ref, dest, list, env = {} }) {
     check(
       releaseSteps.some(step => typeof step?.run === 'string' && step.run.includes('version.mjs check')),
       'release job 必须保留 `version.mjs check`(发布前对 tag 的第二道判据)',
+    )
+  }
+}
+
+// ---- 1g. 渠道仓 revision:一处解析、多 job 复用(2026-09-23 第五轮审计 R5-C-2) ----
+//
+// 现场:私有渠道仓在同一次 tag 里被四个 job 各自 `git clone --depth 1 origin/main`
+// (三平台 + release),四次克隆相差数十分钟、不 pin、不记录、无跨 job 比对 ⇒ 镜像里的
+// 渠道内容(晚克隆)与随包客户端(早克隆)可能不同源,同一个源码 tag 也无法复现同一份
+// 交付物(项目已有同形事故:预发线数据根被改,升级后"所有对话消失")。
+//
+// 这一组在**合成 git 仓库**里真跑 `ci-channels.sh --pin`,判据是行为而不是文本:
+//   ① `--resolve-only` 打印唯一一行 `channels_rev=<HEAD sha>`;
+//   ② `--pin <旧提交>` 取到的是**那个旧提交**的内容(新提交里加的渠道不出现)——
+//      这正是"包内客户端与镜像内容同源"的机器判据;
+//   ③ 不 pin 时取的是默认分支 HEAD(证明 pin 确实改变了行为,而不是恒等);
+//   ④ 发布 tag 上缺 pin 必须 fail-loud(不静默退回"各自 clone HEAD");
+//   ⑤ pin 形状非法 / pin 不存在都必须失败,且**不回显取值**;
+//   ⑥ 静态接线:gate 声明并解析 `channels_rev`,四处调用点都带同一个 pin 来源,
+//      release job 必须**直接** needs gate(`needs` 上下文只含直接依赖)。
+{
+  const policyFields = stdout => Object.fromEntries(
+    (stdout ?? '').split('\n').filter(Boolean)
+      .filter(line => line.includes('='))
+      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  )
+
+  // 合成渠道仓:提交 1 = official;提交 2 增加 beta(内容差异可观测)。
+  const repo = fixtureRepo()
+  mkdirSync(join(repo, 'channels', 'official'), { recursive: true })
+  writeFileSync(join(repo, 'channels', 'official', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'official',
+    identity: { display_name: 'official AI', short_name: 'official' },
+    desktop: { app_origin_scheme: 'picoaide-app' },
+  }))
+  fixtureCommit(repo, 'channels/official/README.md', 'first', '2026-09-01T10:00:00+08:00')
+  const firstRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+  mkdirSync(join(repo, 'channels', 'beta'), { recursive: true })
+  writeFileSync(join(repo, 'channels', 'beta', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'beta',
+    identity: { display_name: 'beta AI', short_name: 'beta' },
+    desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' },
+  }))
+  fixtureCommit(repo, 'channels/beta/README.md', 'second', '2026-09-02T10:00:00+08:00')
+  const headRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+  check(firstRev !== headRev, '合成仓库必须有两个不同提交(否则 pin 判据没有判别力)')
+  const url = `file://${repo}`
+
+  const runPinned = (extraEnv, args = []) => runChannels({
+    source: undefined,
+    refName: 'v9.9.9',
+    ref: 'refs/tags/v9.9.9',
+    dest: 'channels',
+    list: 'pin.list',
+    env: { CI_CHANNELS_URL: url, ...extraEnv },
+    args,
+  })
+
+  // ① `--resolve-only`:stdout 恰好一行 `channels_rev=<sha>`,且等于默认分支 HEAD。
+  {
+    const resolved = runChannels({
+      source: undefined,
+      refName: 'v9.9.9',
+      ref: 'refs/tags/v9.9.9',
+      dest: 'channels',
+      list: 'rev.list',
+      env: { CI_CHANNELS_URL: url },
+      args: ['--resolve-only'],
+    })
+    check(resolved.status === 0, `--resolve-only 应成功,实际 ${String(resolved.status)}: ${resolved.stderr}`)
+    const lines = (resolved.stdout ?? '').split('\n').filter(Boolean)
+    check(lines.length === 1 && lines[0] === `channels_rev=${headRev}`,
+      `--resolve-only 的 stdout 必须恰好一行 channels_rev=<HEAD sha>(供 >> \"$GITHUB_OUTPUT\"),实际 ${JSON.stringify(lines)}`)
+  }
+
+  // ② pin 到旧提交 ⇒ 取到旧内容(beta 不存在);③ 不 pin ⇒ 取 HEAD(两个渠道都在)。
+  {
+    const pinned = runPinned({ CI_CHANNELS_PIN: firstRev })
+    check(pinned.status === 0, `pin 取旧提交应成功,实际 ${String(pinned.status)}: ${pinned.stderr}`)
+    check(
+      JSON.stringify(pinned.selected) === JSON.stringify(['official']),
+      `pin 到旧提交时渠道集必须只含旧提交里的渠道(证明取到的是 pinned 内容,不是 HEAD),实际 ${JSON.stringify(pinned.selected)}`,
+    )
+    check((pinned.stdout ?? '').includes(`pinned at ${firstRev}`), 'pinned 路径必须打印解析出的 revision(可审计)')
+    const unpinned = runChannels({
+      source: undefined,
+      refName: 'release-branch',
+      ref: 'refs/heads/release-branch',
+      dest: 'channels',
+      list: 'nopin.list',
+      env: { CI_CHANNELS_URL: url },
+    })
+    check(unpinned.status === 0, `非 tag 上不 pin 应成功,实际 ${String(unpinned.status)}: ${unpinned.stderr}`)
+    check(
+      JSON.stringify(unpinned.selected) === JSON.stringify(['official']),
+      '非 tag 上只发 official(渠道集判据不变)',
+    )
+    check((unpinned.stdout ?? '').includes(`revision ${headRev}`),
+      '不 pin 的路径必须打印实际取到的 revision(证明 pin 确实改变了行为)')
+  }
+
+  // ④ 发布 tag 上缺 pin:必须失败(不静默退回"各自 clone origin/main HEAD")。
+  {
+    const missing = runChannels({
+      source: undefined,
+      refName: 'v9.9.9',
+      ref: 'refs/tags/v9.9.9',
+      dest: 'channels',
+      list: 'nopin-tag.list',
+      env: { CI_CHANNELS_URL: url },
+    })
+    check(missing.status !== 0, '发布 tag 上缺渠道仓 pin 必须 fail-loud(否则四处克隆可能不同源)')
+    check(`${missing.stderr ?? ''}`.includes('pin'), '缺 pin 的失败信息必须点名 pin')
+  }
+
+  // ⑤ pin 形状非法 / pin 在仓库里不存在:失败且不回显取值。
+  {
+    const bogus = 'zzzz-not-a-sha'
+    const badShape = runPinned({ CI_CHANNELS_PIN: bogus })
+    check(badShape.status !== 0, 'pin 形状非法时必须失败')
+    check(!`${badShape.stderr ?? ''}${badShape.stdout ?? ''}`.includes(bogus), 'pin 形状失败的输出不得回显取值')
+    const absent = 'f'.repeat(40)
+    const notFound = runPinned({ CI_CHANNELS_PIN: absent })
+    check(notFound.status !== 0, 'pin 指向仓库里不存在的提交时必须失败(不得退回 HEAD)')
+    check(!`${notFound.stderr ?? ''}`.includes(absent), 'pin 取回失败的输出不得回显取值')
+  }
+
+  // ⑥ 静态接线:一处解析 + 四 job 共用 + release 直接依赖 gate。
+  {
+    const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+    const gateJob = workflow?.jobs?.gate
+    const gateSteps = Array.isArray(gateJob?.steps) ? gateJob.steps : []
+    const resolveIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && step.run.includes('--resolve-only'))
+    check(resolveIndex >= 0, 'gate 必须有一处 `ci-channels.sh --resolve-only`(渠道仓 revision 的唯一解析点)')
+    if (resolveIndex >= 0) {
+      const step = gateSteps[resolveIndex]
+      check(typeof step.id === 'string' && step.id !== '', '--resolve-only 步骤必须有 id(供 job output 引用)')
+      check(
+        typeof step.if === 'string' && step.if.includes('refs/tags/v'),
+        '--resolve-only 只能在发布 tag 上跑(非 tag 没有 pin 语义,退回原行为)',
+      )
+      const declared = gateJob?.outputs?.channels_rev
+      check(
+        typeof declared === 'string' && declared.includes(`steps.${step.id}.outputs.channels_rev`),
+        `gate 的 outputs.channels_rev 必须引用该步骤的输出(实际 ${JSON.stringify(declared)})`,
+      )
+      check(
+        typeof step.run === 'string' && step.run.includes('>> "$GITHUB_OUTPUT"'),
+        '--resolve-only 的输出必须写进 $GITHUB_OUTPUT(否则多 job 复用读不到)',
+      )
+    }
+    // 其余调用点(三平台 + release)一律带同一个 pin 来源。
+    const consumers = []
+    for (const [jobId, job] of Object.entries(workflow?.jobs ?? {})) {
+      for (const step of (Array.isArray(job?.steps) ? job.steps : [])) {
+        if (typeof step?.run !== 'string' || !step.run.includes('ci-channels.sh')) continue
+        if (step.run.includes('--resolve-only')) continue
+        consumers.push({ jobId, step })
+      }
+    }
+    check(
+      consumers.length === 4,
+      `渠道抓取调用点应为 4 处(三平台 + release),实际 ${consumers.length}:${consumers.map(c => c.jobId).join(', ')}`,
+    )
+    for (const { jobId, step } of consumers) {
+      const pin = step?.env?.CI_CHANNELS_PIN
+      check(
+        typeof pin === 'string' && pin.includes('needs.gate.outputs.channels_rev'),
+        `job ${jobId} 的渠道抓取步骤必须带 CI_CHANNELS_PIN: \${{ needs.gate.outputs.channels_rev }}(实际 ${JSON.stringify(pin)})`,
+      )
+    }
+    const releaseNeeds = workflow?.jobs?.release?.needs
+    check(
+      Array.isArray(releaseNeeds) && releaseNeeds.includes('gate'),
+      '`needs` 上下文只含直接依赖:release job 必须**直接** needs gate 才能读到 channels_rev',
     )
   }
 }

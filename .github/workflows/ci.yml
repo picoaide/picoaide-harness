@@ -169,6 +169,13 @@ jobs:
     permissions:
       contents: read
       actions: write
+    # 渠道仓 revision:**一处解析、多 job 复用**(2026-09-23 第五轮审计 R5-C-2)。
+    # 发布 tag 上本 job 用 `ci-channels.sh --resolve-only` 解析一次 commit SHA,三平台
+    # job 与 release job 的渠道抓取步骤都以 `CI_CHANNELS_PIN` 收下同一个值 —— 于是
+    # "包内客户端"(早克隆)与"镜像内渠道内容"(晚克隆)必然同源,同一源码 tag 也可复现。
+    # 非 tag(PR/分支)上这一步被跳过、输出为空,渠道抓取退回原来的"取默认分支 HEAD"。
+    outputs:
+      channels_rev: ${{ steps.channels_rev.outputs.channels_rev }}
     steps:
       # 必需的 `Gate (tests + workspace build)` 必须反映守卫 job 的结果:守卫失败 ⇒
       # 本步红 ⇒ 必需检查红(静态策略 [SK-9] 钉住这条链路)。
@@ -226,6 +233,22 @@ jobs:
           git fetch --quiet --no-recurse-submodules origin \
             '+refs/heads/master:refs/remotes/origin/master' '+refs/tags/*:refs/tags/*'
           bash scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
+      # 渠道仓 revision 的**唯一**解析点(2026-09-23 第五轮审计 R5-C-2)。
+      #
+      # 为什么必须有:私有渠道仓原先被同一次 tag 的四个 job 各自 `git clone --depth 1
+      # origin/main`(三平台 + release),四次克隆相差数十分钟,中途任何一次 push 都会让
+      # 镜像里的渠道内容与随包客户端不同源,且同一个源码 tag 无法复现同一份交付物
+      # (项目已有同形事故:预发线数据根被改,升级后用户"所有对话消失")。
+      #
+      # 现在只在这里解析一次:`--resolve-only` 走一次 `git ls-remote`(不克隆),结果经
+      # job output 传给四个调用点,它们以 `CI_CHANNELS_PIN` 收下并**硬校验**检出到的
+      # commit 与 pin 逐字相等。非 tag 上没有 pin,退回原行为(只发 official)。
+      - name: Resolve the channel packages revision (once per run)
+        id: channels_rev
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+        run: bash scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
       # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
       # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
       # 时正文会回退成自动生成的 PR 列表 —— 而 PR 标题/正文不在任何守卫判据内(铁律 0 的
@@ -596,6 +619,9 @@ jobs:
         if: ${{ !github.event.pull_request.head.repo.fork }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       # --official-last:官方最后构建,于是 dist/ 留下的是**官方**产物 ——
       # 紧随其后的 E2E 与人工排查都对着官方那一份(渠道产物已归集到 client-assets/)。
@@ -743,6 +769,9 @@ jobs:
         shell: bash
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       - name: Package client installers for every selected channel
         if: ${{ !github.event.pull_request.head.repo.fork }}
@@ -928,6 +957,9 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
       - name: Stage the official DMG for the release image
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -1026,7 +1058,10 @@ jobs:
     # 对 `v2.8.2-hotfix` 结论相反:全渠道构建 + 零发布(客户侧零信号、R2 中转前缀
     # 无人清理)。**不要**再把名字形状判断写回这个 `if:`。
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [server, desktop-linux, desktop-windows, desktop-macos]
+    # gate 是**直接**依赖(不只是传递依赖):本 job 要用 `needs.gate.outputs.channels_rev`
+    # 拿渠道仓 pin(2026-09-23 第五轮审计 R5-C-2)—— `needs` 上下文只含直接依赖,
+    # 少了这一条会静默拿到空值。
+    needs: [gate, server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -1088,6 +1123,9 @@ jobs:
       - name: Fetch channel packages (private repo)
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
+          # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
+          CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
         run: bash scripts/ci-channels.sh
 
       # 品牌渠道的客户端产物走 R2 中转(见 desktop-linux job 的说明),这里取回。
