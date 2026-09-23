@@ -15,29 +15,64 @@ import { CapabilityLockPanel } from '../components/capability-lock-panel'
 import { GrantDialog } from '../components/grant-dialog'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Download, UserCog, Bot, Upload, Lock } from 'lucide-react'
+import { agentRequest, grantsBase, previewFileBase } from '../lib/capability-endpoints'
 
 interface AgentRow {
   name: string
   title?: string
   version?: string
   description?: string
+  /** 本行归档的上传者(署名);与 owner(归属人)可不同。 */
   author?: string
+  /**
+   * 归属人(apps.owner)。**展示与转移预填只用本字段**:
+   * 市场行 = 服务端 agentJSON 的 author 键(即 apps.owner,由 capability-endpoints.spec.ts
+   * 对拍钉住);组织行 = 审批归并行的 owner 键。
+   */
+  owner: string
   enabled: boolean
   quality?: string
   downloads?: number
   changelog?: string
   /** 0059: 官方属性(蓝标, 仅管理员可上传)。 */
   official?: boolean
-  /** 来源渠道: market(市场直上架) || org(员工上传审批后)。 */
-  channel?: 'market' | 'org'
+  /** 来源渠道: market(市场直上架) || org(员工上传审批后)。必填 —— 决定命名空间。 */
+  channel: 'market' | 'org'
+}
+
+/** 市场命名空间列表行 → 行模型(channel=market;归属见 AgentRow.owner 注释)。 */
+function toMarketAgent(raw: Omit<AgentRow, 'owner' | 'channel'>): AgentRow {
+  return { ...raw, owner: raw.author ?? '', channel: 'market' }
+}
+
+/** 请求初始化(不传 body 时不带该键,保持既有调用形态)。 */
+function initOf(req: { method: string; body?: string }): RequestInit {
+  return req.body === undefined ? { method: req.method } : { method: req.method, body: req.body }
+}
+
+/**
+ * 组织共享行(员工上传、审批通过)在本页的**能力边界**:管理端只有
+ * 预览/授权/上下架/归属;新版本只能由员工重新上传。服务端在组织命名空间下
+ * 确实没有 元数据编辑 / 上传新版 端点(上传入口在员工面
+ * `POST /api/client/v2/agent-presets`),这两个入口对 org 行禁用并说明原因
+ * —— 不留必然 404 的入口,也不回落到市场命名空间。
+ */
+const ORG_LIMITS = {
+  hint: '组织共享智能体:内容由员工上传,管理端只能预览/授权/上下架/归属;新版本由员工重新上传后走审批。',
+  edit: '组织共享智能体的描述随员工上传的归档,管理端不提供元数据编辑',
+  upload: '组织共享智能体的新版本由员工重新上传(审批通过后生效)',
+} as const
+
+/** 该行是否来自组织共享库(渠道决定命名空间)。 */
+function isOrg(row: { channel?: 'market' | 'org' }): boolean {
+  return row.channel === 'org'
 }
 
 /**
  * 市场智能体管理(G4,2026-09-04):与市场技能同构的管理面——
  * 上架(登记→上传归档,preset.yml 包内即真相)/上传新版/预览/授权/归属/上下架。
- * 端点: GET|POST /agents、POST /agents/:name/archive、PUT|DELETE /agents/:name、
- * POST /agents/:name/enable、GET /agents/:name/{preview,file,grants}、
- * PUT|DELETE /agents/:name/grant、PUT /agents/:name/grants。
+ * 端点由 `lib/capability-endpoints` 按行 channel 决定(市场 `/agents` ↔
+ * 组织 `/agent-presets`);组织行还会并入本页(打「员工上传」徽标)。
  */
 export default function Agents() {
   const [agents, setAgents] = useState<AgentRow[]>([])
@@ -66,7 +101,8 @@ export default function Agents() {
   // 预览 / 授权 / 归属
   const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
   const [previewKey, setPreviewKey] = useState('')
-  const [previewName, setPreviewName] = useState('')
+  /** 预览中的行(决定预览/单文件/归档走哪个命名空间;org 还要版本段)。 */
+  const [previewRow, setPreviewRow] = useState<AgentRow | null>(null)
   const [grantAgent, setGrantAgent] = useState<AgentRow | null>(null)
   const [departments, setDepartments] = useState<GrantDept[]>([])
   interface GrantDept { id: number; name: string; parent_id: number }
@@ -76,15 +112,24 @@ export default function Agents() {
     setLoading(true)
     setError('')
     try {
+      // 市场列表按行 channel 选命名空间(市场命名空间;组织行见 action 分支)。
+      const listReq = agentRequest('list', { channel: 'market', name: '' })!
       const [d, approvals] = await Promise.all([
-        request(`${ADMIN_API}/agents`),
+        request(listReq.url),
         request(`${ADMIN_API}/capabilities/approvals?status=approved&type=agent`).catch(() => ({ approvals: [] })),
       ])
-      const merged: AgentRow[] = [...(d.agents ?? [])]
-      for (const row of (approvals.approvals ?? []) as { name: string; version: string; display_name: string; description: string; author: string; downloads?: number; official?: boolean; quality?: string }[]) {
+      const merged: AgentRow[] = (d.agents ?? []).map(toMarketAgent)
+      for (const row of (approvals.approvals ?? []) as {
+        name: string; version: string; display_name: string; description: string
+        author: string; owner?: string; enabled?: boolean; downloads?: number
+        official?: boolean; quality?: string
+      }[]) {
+        // 归属取服务端下发的 owner(apps.owner),**不是** author(本行上传者);
+        // 上下架状态透传服务端值,缺省按"未知即未上架"(绝不回落 true)。
         merged.push({
           name: row.name, title: row.display_name || row.name, version: row.version,
-          description: row.description, author: row.author, enabled: true,
+          description: row.description, author: row.author, owner: row.owner ?? '',
+          enabled: row.enabled === true,
           downloads: row.downloads ?? 0, official: row.official, quality: row.quality, channel: 'org',
         })
       }
@@ -115,8 +160,11 @@ export default function Agents() {
     if (!createName.trim()) { setCreateErr('请填写智能体名'); return }
     setBusy('create-agent')
     try {
-      await request(`${ADMIN_API}/agents`, {
-        method: 'POST',
+      // 新建 = 市场命名空间(组织共享智能体由员工上传,没有管理端新建入口)。
+      const req = agentRequest('create', { channel: 'market', name: '' })
+      if (req === null) { setCreateErr('当前命名空间不支持新建智能体'); return }
+      await request(req.url, {
+        method: req.method,
         body: JSON.stringify({ name: createName.trim(), description: createDesc.trim() }),
       })
       setCreateOpen(false)
@@ -141,15 +189,15 @@ export default function Agents() {
     if (!uploadAgent || uploadBusy) return
     setUploadErr('')
     if (!uploadFile) { setUploadErr('请选择归档包(.zip 或 .tar.gz,含 agent.cordis.yml + preset.yml)'); return }
+    // 组织共享行没有管理端续传端点(新版本由员工重新上传)⇒ 入口已禁用,这里兜底。
+    const req = agentRequest('uploadVersion', uploadAgent)
+    if (req === null) { setUploadErr(ORG_LIMITS.upload); return }
     setUploadBusy(true)
     try {
       const archive = await toBase64(uploadFile)
       const body: Record<string, string> = { archive }
       if (uploadVersion.trim() !== '') body.version = uploadVersion.trim()
-      await request(`${ADMIN_API}/agents/${encodeURIComponent(uploadAgent.name)}/archive`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
+      await request(req.url, { method: req.method, body: JSON.stringify(body) })
       setUploadAgent(null)
       setUploadVersion('')
       setUploadFile(null)
@@ -162,27 +210,33 @@ export default function Agents() {
   }
 
   const openPreview = async (a: AgentRow) => {
+    const req = agentRequest('preview', a)
+    if (req === null) { setOpError(`预览失败:${ORG_LIMITS.hint}`); return }
     try {
-      const d = await request(`${ADMIN_API}/agents/${encodeURIComponent(a.name)}/preview`)
+      const d = await request(req.url)
       setPreview({ files: d.files ?? [], composition: d.composition ?? '', skill_md: d.composition ?? '' })
       setPreviewKey(`${a.name}-${Date.now()}`)
-      setPreviewName(a.name)
+      setPreviewRow(a)
     } catch (err: any) {
       setOpError(`预览失败:${err.message}`)
     }
   }
 
+  /**
+   * 上下架按行 channel 选命名空间:
+   *   - 市场:`DELETE /agents/:name` (下架) / `POST /agents/:name/enable` (上架);
+   *   - 组织:`PUT /agent-presets/:name/enabled` + 体 `{enabled}`。
+   */
   const setEnabled = async (a: AgentRow, enabled: boolean) => {
     if (busy) return
-    const key = `${enabled ? 'enable' : 'disable'}-${a.name}`
+    const action = enabled ? 'enable' : 'disable'
+    const req = agentRequest(action, a)
+    if (req === null) { setOpError(`${enabled ? '上架' : '下架'}失败:该来源不支持此操作`); return }
+    const key = `${action}-${a.name}`
     setBusy(key)
     setOpError('')
     try {
-      // 下架 = DELETE /agents/:name; 重新上架 = POST /agents/:name/enable
-      await request(`${ADMIN_API}/agents/${encodeURIComponent(a.name)}${enabled ? '/enable' : ''}`, {
-        method: enabled ? 'POST' : 'DELETE',
-        body: undefined,
-      })
+      await request(req.url, initOf(req))
       await load()
     } catch (err: any) {
       setOpError(`${enabled ? '上架' : '下架'}失败:${err.message}${a.version ? '' : '(可能尚未发布版本)'}`)
@@ -193,11 +247,13 @@ export default function Agents() {
 
   const saveEdit = async () => {
     if (!editAgent || busy) return
+    const req = agentRequest('updateMeta', editAgent)
+    if (req === null) { setEditErr(ORG_LIMITS.edit); return }
     setEditErr('')
     setBusy('edit-agent')
     try {
-      await request(`${ADMIN_API}/agents/${encodeURIComponent(editAgent.name)}`, {
-        method: 'PUT',
+      await request(req.url, {
+        method: req.method,
         body: JSON.stringify({ description: editDesc }),
       })
       setEditAgent(null)
@@ -263,22 +319,51 @@ export default function Agents() {
                     </span>
                   </div>
                   <p className="mt-3 line-clamp-3 flex-1 text-xs leading-relaxed text-slate-500" title={a.description || undefined}>{a.description || '暂无描述'}</p>
-                  <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者,只有归属人(及管理员)能更新">
-                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {a.official ? '官方' : (a.author || '未指定')}</span>
+                  <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者(apps.owner),只有归属人(及管理员)能更新">
+                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {a.official ? '官方' : (a.owner || '未指定')}</span>
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     {a.quality && a.quality !== '' && <Badge variant="secondary" className="px-1 py-0 text-[10px]">{a.quality}</Badge>}
                     <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {a.downloads ?? 0}</span>
                   </div>
+                  {/* 组织共享行没有 元数据编辑 / 上传新版 端点(服务端确实不存在)⇒
+                      这两个入口对该行禁用并说明原因,绝不回落市场命名空间(必然 404)。 */}
+                  {isOrg(a) && (
+                    <p className="mt-3 text-[11px] leading-relaxed text-slate-500">{ORG_LIMITS.hint}</p>
+                  )}
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
-                    <Button variant="outline" onClick={() => void openPreview(a)}>预览</Button>
-                    <Button variant="outline" disabled={busy !== null} onClick={() => { setUploadAgent(a); setUploadVersion(''); setUploadFile(null); setUploadErr('') }}>上传新版</Button>
-                    <Button variant="outline" onClick={() => { setEditAgent(a); setEditDesc(a.description ?? ''); setEditErr('') }}>编辑</Button>
-                    <Button variant="outline" onClick={() => setTransferAgent(a)} title="转移归属(负责人)">归属</Button>
-                    <Button variant="outline" onClick={() => setGrantAgent(a)}>授权</Button>
-                    {a.enabled
-                      ? <Button variant="destructive" disabled={busy !== null} onClick={() => void setEnabled(a, false)}>{busy === `disable-${a.name}` ? '下架中…' : '下架'}</Button>
-                      : <Button variant="outline" disabled={busy !== null} onClick={() => void setEnabled(a, true)}>{busy === `enable-${a.name}` ? '上架中…' : '重新上架'}</Button>}
+                    {(() => {
+                      const previewReq = agentRequest('preview', a)
+                      const editReq = agentRequest('updateMeta', a)
+                      const uploadReq = agentRequest('uploadVersion', a)
+                      return (
+                        <>
+                          <Button
+                            variant="outline"
+                            disabled={previewReq === null}
+                            title={previewReq === null ? ORG_LIMITS.hint : undefined}
+                            onClick={() => void openPreview(a)}
+                          >预览</Button>
+                          <Button
+                            variant="outline"
+                            disabled={busy !== null || uploadReq === null}
+                            title={uploadReq === null ? ORG_LIMITS.upload : undefined}
+                            onClick={() => { setUploadAgent(a); setUploadVersion(''); setUploadFile(null); setUploadErr('') }}
+                          >上传新版</Button>
+                          <Button
+                            variant="outline"
+                            disabled={editReq === null}
+                            title={editReq === null ? ORG_LIMITS.edit : undefined}
+                            onClick={() => { setEditAgent(a); setEditDesc(a.description ?? ''); setEditErr('') }}
+                          >编辑</Button>
+                          <Button variant="outline" onClick={() => setTransferAgent(a)} title="转移归属(负责人)">归属</Button>
+                          <Button variant="outline" onClick={() => setGrantAgent(a)}>授权</Button>
+                          {a.enabled
+                            ? <Button variant="destructive" disabled={busy !== null} onClick={() => void setEnabled(a, false)}>{busy === `disable-${a.name}` ? '下架中…' : '下架'}</Button>
+                            : <Button variant="outline" disabled={busy !== null} onClick={() => void setEnabled(a, true)}>{busy === `enable-${a.name}` ? '上架中…' : '重新上架'}</Button>}
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
               ))}
@@ -360,17 +445,20 @@ export default function Agents() {
         <ArchivePreviewDialog
           openKey={previewKey}
           data={preview}
-          mainTitle={`market · ${previewName}`}
+          mainTitle={`${previewRow && isOrg(previewRow) ? '组织共享' : '市场'} · ${previewRow?.name ?? ''}`}
           mainContent={preview.composition ?? ''}
-          fileBase={`${ADMIN_API}/agents/${encodeURIComponent(previewName)}`}
-          onClose={() => setPreview(null)}
+          // 单文件/归档端点按 channel 走:市场是 name 级、组织是 name@version 级。
+          fileBase={previewRow ? previewFileBase('agent', previewRow) ?? '' : ''}
+          onClose={() => { setPreview(null); setPreviewRow(null) }}
         />
       )}
       {grantAgent && (
         <GrantDialog
           open={!!grantAgent}
           name={grantAgent.name}
-          basePath={`${ADMIN_API}/agents/${encodeURIComponent(grantAgent.name)}`}
+          // 授权基路径按行 channel 走:市场 /agents/:name、组织 /agent-presets/:name
+          // (组织库的授权是 name-only,同名多版本共享 —— 不带版本段)。
+          basePath={grantsBase('agent', grantAgent) ?? ''}
           departments={departments}
           onClose={() => setGrantAgent(null)}
           onSaved={() => { setGrantAgent(null); void load() }}
@@ -382,7 +470,7 @@ export default function Agents() {
           kind="agent"
           name={transferAgent.name}
           displayName={transferAgent.title || transferAgent.name}
-          currentOwner={transferAgent.author ?? ''}
+          currentOwner={transferAgent.owner}
           onClose={() => setTransferAgent(null)}
           onSaved={() => { setTransferAgent(null); void load() }}
         />

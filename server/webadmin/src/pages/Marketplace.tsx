@@ -14,13 +14,26 @@ import { TransferOwnerDialog } from '../components/transfer-owner-dialog'
 import { CapabilityLockPanel } from '../components/capability-lock-panel'
 import { GrantDialog } from '../components/grant-dialog'
 import { Store, Download, Package, Activity, UserCog } from 'lucide-react'
+import { grantsBase, previewFileBase, skillRequest } from '../lib/capability-endpoints'
 
 interface Skill {
   id: number
   name: string
   version: string
   description: string
+  /**
+   * 本行归档的**上传者**(署名)。市场行由服务端把 apps.owner 投影到该键
+   * (serverstore.appToSkill / skillJSON,由 capability-endpoints.spec.ts 对拍钉住);
+   * 组织行 = 员工上传者,与归属人可不同。
+   */
   author: string
+  /**
+   * 归属人(apps.owner,2026-09-02 归属权)。**展示与转移预填只用本字段**:
+   *   - 市场行:服务端 skillJSON 的 author 键(= apps.owner);
+   *   - 组织行:审批归并行的 owner 键(与上传者 author 可不同)。
+   * 绝不用 release/共享行的 author 当归属 —— 那是上传者,不是负责人。
+   */
+  owner: string
   enabled: boolean
   /** 0040: 'git' | 'upload' — upload 模式归档存 DB。 */
   source?: string
@@ -30,14 +43,25 @@ interface Skill {
   official?: boolean
   /** 0059 质量(精选 featured 保留; 官方语义移交 official)。 */
   quality?: string
-  /** 来源渠道: market=市场(管理端直上架) || org=员工上传(审批后)。 */
-  channel?: 'market' | 'org'
+  /** 来源渠道: market=市场(管理端直上架) || org=员工上传(审批后)。必填 ——
+   *  每个动作的命名空间都由它决定,缺失即"不知道该打哪个前缀"。 */
+  channel: 'market' | 'org'
 }
 
 interface Dept {
   id: number
   parent_id: number
   name: string
+}
+
+/** 该行是否来自组织共享库(渠道决定命名空间)。 */
+function isOrg(row: { channel?: 'market' | 'org' }): boolean {
+  return row.channel === 'org'
+}
+
+/** 市场命名空间列表行 → 行模型(channel=market;归属见 Skill.owner 注释)。 */
+function toMarketSkill(raw: Omit<Skill, 'owner' | 'channel'>): Skill {
+  return { ...raw, owner: raw.author, channel: 'market' }
 }
 
 // ---- 表单状态 ----
@@ -54,6 +78,26 @@ const EMPTY_SKILL_FORM = {
 function isUploadMode(form: typeof EMPTY_SKILL_FORM): boolean {
   return form.archiveFile !== null
 }
+
+/** 请求初始化(不传 body 时不带该键,保持既有调用形态)。 */
+function initOf(req: { method: string; body?: string }): RequestInit {
+  return req.body === undefined
+    ? { method: req.method }
+    : { method: req.method, body: req.body }
+}
+
+/**
+ * 组织共享行(员工上传、审批通过)在本页的**能力边界**:管理端只有
+ * 预览/授权/上下架/归属;新版本只能由员工重新上传,规范化只针对市场技能。
+ * 服务端在组织命名空间下确实没有 编辑/上传新版/规范化 端点,因此这三个入口
+ * 对 org 行禁用并说明原因(不留必然 404 的入口)。
+ */
+const ORG_LIMITS = {
+  hint: '组织共享技能:内容由员工上传,管理端只能预览/授权/上下架/归属;新版本由员工重新上传后走审批。',
+  normalize: '规范化只适用于市场技能(组织共享技能的内容由员工上传)',
+  edit: '组织共享技能的名称/描述/署名随员工上传的归档,管理端不提供元数据编辑',
+  upload: '组织共享技能的新版本由员工重新上传(审批通过后生效)',
+} as const
 
 export default function Marketplace() {
   const [skills, setSkills] = useState<Skill[]>([])
@@ -72,14 +116,15 @@ export default function Marketplace() {
   // 审批预览:管理员上架前后都要能看到包内到底是什么(2026-09-01)
   const [preview, setPreview] = useState<ArchivePreviewData | null>(null)
   const [previewKey, setPreviewKey] = useState('')
-  const [previewName, setPreviewName] = useState('')
+  /** 预览中的行(决定预览/单文件/归档走哪个命名空间;org 还要版本段)。 */
+  const [previewRow, setPreviewRow] = useState<Skill | null>(null)
   const [replaceDialog, setReplaceDialog] = useState<Skill | null>(null)
   const [replaceFile, setReplaceFile] = useState<File | null>(null)
   const [replaceVersion, setReplaceVersion] = useState('')
   const [replaceBusy, setReplaceBusy] = useState(false)
 
-  // 授权
-  const [grantDialog, setGrantDialog] = useState<{ kind: 'skill'; name: string; id: number } | null>(null)
+  // 授权(基路径按行 channel 走 grantsBase,不再硬编码市场前缀)
+  const [grantDialog, setGrantDialog] = useState<Skill | null>(null)
   // 归属转移(2026-09-02):技能归属人 = 首个成功占名者(apps.owner)。
   // 锁定管理(2026-09-04 从审批页迁入市场页)
   const [lockOpen, setLockOpen] = useState(false)
@@ -94,16 +139,26 @@ export default function Marketplace() {
     setSkillsLoading(true)
     setSkillsError('')
     try {
+      // 市场列表按行 channel 选命名空间(市场命名空间;组织行的动作见 action 分支)。
+      const listReq = skillRequest('list', { channel: 'market', name: '' })!
       const [s, approvals] = await Promise.all([
-        request(`${ADMIN_API}/skills`),
+        request(listReq.url),
         request(`${ADMIN_API}/capabilities/approvals?status=approved&type=skill`).catch(() => ({ approvals: [] })),
       ])
-      const merged: Skill[] = [...(s.skills ?? [])]
-      for (const row of (approvals.approvals ?? []) as { name: string; version: string; display_name: string; description: string; author: string; downloads?: number; calls?: number; official?: boolean; quality?: string }[]) {
-        // UI 归一: 员工上传(审批通过)的技能并入技能市场页, 来源徽章 org
+      const merged: Skill[] = (s.skills ?? []).map(toMarketSkill)
+      for (const row of (approvals.approvals ?? []) as {
+        name: string; version: string; display_name: string; description: string
+        author: string; owner?: string; enabled?: boolean; downloads?: number; calls?: number
+        official?: boolean; quality?: string
+      }[]) {
+        // UI 归一: 员工上传(审批通过)的技能并入技能市场页, 来源徽章 org。
+        // 归属取服务端下发的 owner(apps.owner),**不是** author(本行上传者);
+        // 上下架状态同样透传服务端值,缺省按"未知即未上架"——绝不回落 true
+        // (回落 true 会让已下架的 org 技能显示成「上架」,这正是现场缺陷之一)。
         merged.push({
           id: 0, name: row.name, version: row.version, description: row.description,
-          author: row.author, enabled: true, downloads: row.downloads ?? 0, calls: row.calls ?? 0,
+          author: row.author, owner: row.owner ?? '', enabled: row.enabled === true,
+          downloads: row.downloads ?? 0, calls: row.calls ?? 0,
           official: row.official, quality: row.quality, channel: 'org',
         })
       }
@@ -149,8 +204,11 @@ export default function Marketplace() {
     setBusy('save-skill')
     try {
       if (skillEdit) {
-        await request(`${ADMIN_API}/skills/${encodeURIComponent(skillEdit.name)}`, {
-          method: 'PUT',
+        // 编辑只存在于市场命名空间(组织行的该入口已禁用,不会走到这里)。
+        const req = skillRequest('updateMeta', skillEdit)
+        if (req === null) { setDialogError(ORG_LIMITS.edit); return }
+        await request(req.url, {
+          method: req.method,
           body: JSON.stringify({
             name: skillEdit.name,
             version: skillForm.version,
@@ -160,8 +218,11 @@ export default function Marketplace() {
         })
       } else {
         // 先建行(仅登记名称与元数据),再上传归档(0052:归档唯一入口)。
-        const created = await request(`${ADMIN_API}/skills`, {
-          method: 'POST',
+        // 新建 = 市场命名空间(组织共享技能由员工上传,没有管理端新建入口)。
+        const createReq = skillRequest('create', { channel: 'market', name: '' })
+        if (createReq === null) { setDialogError('当前命名空间不支持新建技能'); return }
+        const created = await request(createReq.url, {
+          method: createReq.method,
           body: JSON.stringify({
             name,
             version: '',
@@ -172,8 +233,10 @@ export default function Marketplace() {
         if (uploadMode) {
           const file = skillForm.archiveFile!
           const body = await readAsBase64(file)
-          await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}/archive`, {
-            method: 'POST',
+          const uploadReq = skillRequest('uploadVersion', { channel: 'market', name })
+          if (uploadReq === null) { setDialogError(ORG_LIMITS.upload); return }
+          await request(uploadReq.url, {
+            method: uploadReq.method,
             body: JSON.stringify({ version: skillForm.version.trim(), archive: body }),
           })
           if (created?.skill) created.skill.source = 'upload'
@@ -204,30 +267,25 @@ export default function Marketplace() {
     setSkillDialog(true)
   }
 
-  async function disableSkill(name: string) {
+  /**
+   * 上下架:**按行 channel 选命名空间**(现场 P1 的核心之一)。
+   *   - 市场:`DELETE /skills/:name` (下架) / `POST /skills/:name/enable` (上架);
+   *   - 组织:`PUT /shared-skills/:name/enabled` + 体 `{enabled}`(版本无关,App 级)。
+   * 两条路径的动词与请求体都不同,所以走动作表而不是拼同一个形状。
+   */
+  async function setSkillEnabled(s: Skill, enabled: boolean) {
     if (busy) return // P1-6: 双击守卫
-    if (!window.confirm(`下架技能 ${name}?员工建议清单将不再展示(可重新上架)。`)) return
+    const action = enabled ? 'enable' : 'disable'
+    const req = skillRequest(action, s)
+    if (req === null) { setOpError(`${enabled ? '上架' : '下架'}失败:该来源不支持此操作`); return }
+    if (!enabled && !window.confirm(`下架技能 ${s.name}?员工建议清单将不再展示(可重新上架)。`)) return
     setOpError('')
-    setBusy(`disable-skill-${name}`)
+    setBusy(`${action}-skill-${s.name}`)
     try {
-      await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      await request(req.url, initOf(req))
       loadSkills()
     } catch (err: any) {
-      setOpError(`下架失败:${err.message}`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function enableSkill(name: string) {
-    if (busy) return // P1-6: 双击守卫
-    setOpError('')
-    setBusy(`enable-skill-${name}`)
-    try {
-      await request(`${ADMIN_API}/skills/${encodeURIComponent(name)}/enable`, { method: 'POST' })
-      loadSkills()
-    } catch (err: any) {
-      setOpError(`上架失败:${err.message}`)
+      setOpError(`${enabled ? '上架' : '下架'}失败:${err.message}`)
     } finally {
       setBusy(null)
     }
@@ -235,11 +293,13 @@ export default function Marketplace() {
 
   // ---- 审批预览 ----
   const openPreview = async (s2: Skill) => {
-    setPreviewName(s2.name)
+    const req = skillRequest('preview', s2)
+    if (req === null) { setOpError(`预览失败:${ORG_LIMITS.hint}`); return }
+    setPreviewRow(s2)
     setPreviewKey(`${s2.name}@${s2.version}`)
     setPreview(null)
     try {
-      const data = await request<ArchivePreviewData>(`${ADMIN_API}/skills/${encodeURIComponent(s2.name)}/preview`)
+      const data = await request<ArchivePreviewData>(req.url)
       setPreview(data)
     } catch (e) {
       const err = e as Error
@@ -250,14 +310,15 @@ export default function Marketplace() {
 
   // ---- 存量规范化(决策 2026-09-01 §八:产出合规的 patch+1 新版本) ----
   const normalize = async (s2: Skill) => {
+    const req = skillRequest('normalize', s2)
+    if (req === null) { setOpError(`规范化失败:${ORG_LIMITS.normalize}`); return }
     if (!window.confirm(
       `规范化「${s2.name}」?\n\n将把包内 SKILL.md 改写为符合发布标准的内容` +
       `(中文名迁到 title、剥离 BOM、补齐必填字段),并作为新版本发布。原版本不会被修改。`)) return
     setBusy(`normalize-${s2.name}`)
     setOpError('')
     try {
-      const r = await request<{ version: string; changes?: string[] }>(
-        `${ADMIN_API}/skills/${encodeURIComponent(s2.name)}/normalize`, { method: 'POST' })
+      const r = await request<{ version: string; changes?: string[] }>(req.url, initOf(req))
       window.alert(`已规范化为 v${r.version}\n\n${(r.changes ?? []).join('\n') || '无需改动'}`)
       await loadSkills()
     } catch (e) {
@@ -277,12 +338,14 @@ export default function Marketplace() {
     if (!replaceDialog || replaceBusy) return
     if (!replaceFile) { setDialogError('请选择压缩包(.zip)'); return }
     if (!replaceVersion.trim()) { setDialogError('版本必填'); return }
+    const req = skillRequest('uploadVersion', replaceDialog)
+    if (req === null) { setDialogError(ORG_LIMITS.upload); return }
     setReplaceBusy(true)
     setDialogError('')
     try {
       const body = await readAsBase64(replaceFile)
-      await request(`${ADMIN_API}/skills/${encodeURIComponent(replaceDialog.name)}/archive`, {
-        method: 'POST',
+      await request(req.url, {
+        method: req.method,
         body: JSON.stringify({ version: replaceVersion.trim(), archive: body }),
       })
       setReplaceDialog(null)
@@ -348,25 +411,60 @@ export default function Marketplace() {
                   <div className="mt-3 flex items-center gap-1.5 truncate text-xs text-slate-500">
                     <Package className="h-3 w-3 shrink-0" /><span className="truncate">压缩包直存数据库</span>
                   </div>
-                  <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者,只有归属人(及管理员)能更新该技能">
-                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {s.official ? '官方' : (s.author || '未指定')}</span>
+                  <div className="mt-1 flex items-center gap-1.5 truncate text-xs text-slate-500" title="归属人:首个成功发布者(apps.owner),只有归属人(及管理员)能更新该技能">
+                    <UserCog className="h-3 w-3 shrink-0" /><span className="truncate">归属 {s.official ? '官方' : (s.owner || '未指定')}</span>
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-500">
                     <span className="inline-flex items-center gap-1"><Download className="h-3 w-3" />下载 {s.downloads ?? 0}</span>
                     <span className="inline-flex items-center gap-1"><Activity className="h-3 w-3" />调用 {s.calls ?? 0}</span>
                   </div>
+                  {/* 组织共享行没有 编辑/上传新版/规范化 端点(服务端确实不存在)⇒
+                      这三个入口对该行禁用并说明原因,绝不回落市场命名空间(必然 404)。 */}
+                  {isOrg(s) && (
+                    <p className="mt-3 text-[11px] leading-relaxed text-slate-500">{ORG_LIMITS.hint}</p>
+                  )}
                   <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
-                    <Button variant="outline" onClick={() => void openPreview(s)}>预览</Button>
-                    <Button variant="outline" disabled={busy !== null} onClick={() => void normalize(s)}>
-                      {busy === `normalize-${s.name}` ? '规范化中…' : '规范化'}
-                    </Button>
-                    <Button variant="outline" onClick={() => openEditSkill(s)}>编辑</Button>
-                    <Button variant="outline" onClick={() => openReplace(s)}>上传新版</Button>
-                    <Button variant="outline" onClick={() => setTransferSkill(s)} title="转移归属(负责人)">归属</Button>
-                    <Button variant="outline" onClick={() => setGrantDialog({ kind: 'skill', name: s.name, id: 0 })}>授权</Button>
-                    {s.enabled
-                      ? <Button variant="destructive" disabled={busy !== null} onClick={() => disableSkill(s.name)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
-                      : <Button variant="outline" disabled={busy !== null} onClick={() => enableSkill(s.name)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
+                    {(() => {
+                      const previewReq = skillRequest('preview', s)
+                      const editReq = skillRequest('updateMeta', s)
+                      const uploadReq = skillRequest('uploadVersion', s)
+                      const normalizeReq = skillRequest('normalize', s)
+                      return (
+                        <>
+                          <Button
+                            variant="outline"
+                            disabled={previewReq === null}
+                            title={previewReq === null ? ORG_LIMITS.hint : undefined}
+                            onClick={() => void openPreview(s)}
+                          >预览</Button>
+                          <Button
+                            variant="outline"
+                            disabled={busy !== null || normalizeReq === null}
+                            title={normalizeReq === null ? ORG_LIMITS.normalize : undefined}
+                            onClick={() => void normalize(s)}
+                          >
+                            {busy === `normalize-${s.name}` ? '规范化中…' : '规范化'}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={editReq === null}
+                            title={editReq === null ? ORG_LIMITS.edit : undefined}
+                            onClick={() => openEditSkill(s)}
+                          >编辑</Button>
+                          <Button
+                            variant="outline"
+                            disabled={uploadReq === null}
+                            title={uploadReq === null ? ORG_LIMITS.upload : undefined}
+                            onClick={() => openReplace(s)}
+                          >上传新版</Button>
+                          <Button variant="outline" onClick={() => setTransferSkill(s)} title="转移归属(负责人)">归属</Button>
+                          <Button variant="outline" onClick={() => setGrantDialog(s)}>授权</Button>
+                          {s.enabled
+                            ? <Button variant="destructive" disabled={busy !== null} onClick={() => void setSkillEnabled(s, false)}>{busy === `disable-skill-${s.name}` ? '下架中…' : '下架'}</Button>
+                            : <Button variant="outline" disabled={busy !== null} onClick={() => void setSkillEnabled(s, true)}>{busy === `enable-skill-${s.name}` ? '上架中…' : '重新上架'}</Button>}
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
               ))}
@@ -446,20 +544,22 @@ export default function Marketplace() {
         data={preview}
         mainTitle="SKILL.md"
         mainContent={preview?.skill_md ?? ''}
-        fileBase={previewName ? `${ADMIN_API}/skills/${encodeURIComponent(previewName)}` : ''}
-        onClose={() => { setPreviewKey(''); setPreview(null) }}
+        // 单文件/归档端点同样按 channel 走:市场是 name 级、组织是 name@version 级。
+        fileBase={previewRow ? previewFileBase('skill', previewRow) ?? '' : ''}
+        onClose={() => { setPreviewKey(''); setPreview(null); setPreviewRow(null) }}
       />
 
       {/* 锁定管理(2026-09-04 从审批页迁入市场页) */}
       <CapabilityLockPanel open={lockOpen} onClose={() => setLockOpen(false)} />
 
-      {/* 归属转移(2026-09-02):公共弹窗,与服务端的 /apps/:kind/:app_id/owner 同源。 */}
+      {/* 归属转移(2026-09-02):公共弹窗,与服务端的 /apps/:kind/:app_id/owner 同源。
+          预填必须用 apps.owner(owner 字段),不是本行上传者 author。 */}
       <TransferOwnerDialog
         open={transferSkill !== null}
         kind="skill"
         name={transferSkill?.name ?? ''}
         displayName={transferSkill?.name}
-        currentOwner={transferSkill?.author ?? ''}
+        currentOwner={transferSkill?.owner ?? ''}
         onClose={() => { setTransferSkill(null) }}
         onSaved={() => { setTransferSkill(null); void loadSkills() }}
       />
@@ -497,7 +597,9 @@ export default function Marketplace() {
       <GrantDialog
         open={grantDialog !== null}
         name={grantDialog?.name ?? ''}
-        basePath={`${ADMIN_API}/skills/${encodeURIComponent(grantDialog?.name ?? '')}`}
+        // 授权基路径按行 channel 走:市场 /skills/:name、组织 /shared-skills/:name
+        // (组织库的授权是 name-only,同名多版本共享 —— 不带版本段)。
+        basePath={grantDialog ? grantsBase('skill', grantDialog) ?? '' : ''}
         departments={departments}
         onClose={() => setGrantDialog(null)}
         onSaved={() => loadSkills()}

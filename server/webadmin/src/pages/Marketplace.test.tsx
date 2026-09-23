@@ -263,3 +263,150 @@ describe('Marketplace 商城页', () => {
     expect(await screen.findByText('data-extract')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// org 渠道(员工上传、审批通过,并入本页并打「员工上传」徽标)
+//
+// 现场 P1:这些行此前每个按钮都打**市场命名空间**(`/api/server/admin/skills/<name>…`),
+// 而服务端对 org 行在该命名空间下正确 404(serverstore.GetSkill 要求 channel=market)。
+// 下面的用例断言每个动作**真的**打到共享命名空间,且服务端没有的入口被禁用。
+// 路径与动词的穷举对拍在 src/lib/capability-endpoints.spec.ts(读 Go 路由声明)。
+// ---------------------------------------------------------------------------
+
+const MARKET_SKILLS = [
+  { id: 1, name: 'data-extract', version: '1.0.0', description: '数据提取', author: 'seed', enabled: true },
+]
+
+/** 组织共享行:author(上传者) 与 owner(apps.owner) **不同**,便于判"归属用哪个字段"。 */
+const ORG_ROWS = [
+  {
+    name: 'codeql', version: '1.2.0', display_name: 'CodeQL 审计', description: 'find vulns',
+    author: 'bob', owner: 'alice', enabled: true, downloads: 4, calls: 9, official: false, quality: '',
+  },
+  {
+    name: 'retired-org', version: '0.9.0', display_name: '退役组织技能', description: '老包',
+    author: 'carol', owner: 'dave', enabled: false, downloads: 0, calls: 0, official: false, quality: '',
+  },
+]
+
+const ORG_ROOT = '/api/server/admin/shared-skills'
+
+function mockOrgRows() {
+  mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+    if (path === '/api/server/admin/departments') return { departments: DEPTS }
+    if (path === '/api/server/admin/skills') return { skills: MARKET_SKILLS }
+    if (path === '/api/server/admin/capabilities/approvals?status=approved&type=skill') return { approvals: ORG_ROWS }
+    if (path.startsWith('/api/server/admin/users')) {
+      return { users: [{ username: 'alice', display_name: 'Alice' }, { username: 'bob', display_name: 'Bob' }], total: 2 }
+    }
+    if (path.startsWith(ORG_ROOT)) {
+      if (path.endsWith('/preview')) return { files: ['SKILL.md', 'scripts/run.sh'], skill_md: '# codeql\n' }
+      if (path.endsWith('/grants')) return { grants: [{ grantee_type: 'group', grantee: '研发部' }] }
+      if (path.includes('/file?path=')) return { content: '# codeql', size: 9, binary: false, too_large: false }
+      return { ok: true, enabled: String(init?.body ?? '').includes('true') }
+    }
+    return {}
+  })
+}
+
+function orgCard(name: string): HTMLElement {
+  return screen.getByText(name).closest<HTMLElement>('[class*="group"]')!
+}
+
+describe('Marketplace 商城页 · org 行按 channel 走共享命名空间', () => {
+  beforeEach(mockOrgRows)
+
+  it('预览打到 shared-skills 的 name@version 端点(不是市场 /skills/:name/preview)', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    fireEvent.click(within(orgCard('codeql')).getByRole('button', { name: '预览' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(`${ORG_ROOT}/codeql/1.2.0/preview`)
+    })
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/skills/codeql/preview')
+  })
+
+  it('预览弹窗的单文件端点同样带版本段(市场形状会 404)', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    fireEvent.click(within(orgCard('codeql')).getByRole('button', { name: '预览' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'SKILL.md' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(`${ORG_ROOT}/codeql/1.2.0/file?path=SKILL.md`)
+    })
+  })
+
+  it('授权对话框基路径走 shared-skills(名级,不带版本)且撤销落同一前缀', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    fireEvent.click(within(orgCard('codeql')).getByRole('button', { name: '授权' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(await dialog.findByText('@研发部')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(`${ORG_ROOT}/codeql/grants`)
+    })
+    fireEvent.click(dialog.getAllByRole('button', { name: '撤销' })[0])
+    expect(mockRequest).toHaveBeenCalledWith(
+      `${ORG_ROOT}/codeql/grant`,
+      expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ group: '研发部' }) }),
+    )
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/skills/codeql/grants')
+  })
+
+  it('下架/重新上架走 PUT /shared-skills/:name/enabled 并透传真实上下架状态', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    // 服务端下发 enabled=false 的行必须显示「已下架」并给「重新上架」(此前硬编码 true)。
+    expect(orgCard('retired-org').textContent).toContain('已下架')
+    expect(orgCard('codeql').textContent).toContain('上架')
+    fireEvent.click(within(orgCard('codeql')).getByRole('button', { name: '下架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(`${ORG_ROOT}/codeql/enabled`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: false }),
+      })
+    })
+    fireEvent.click(within(orgCard('retired-org')).getByRole('button', { name: '重新上架' }))
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith(`${ORG_ROOT}/retired-org/enabled`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: true }),
+      })
+    })
+    // 市场命名空间的两个上下架动词一律不许出现在 org 行上。
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/skills/codeql', expect.objectContaining({ method: 'DELETE' }))
+    expect(mockRequest).not.toHaveBeenCalledWith('/api/server/admin/skills/retired-org/enable', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('服务端没有的端点(编辑/上传新版/规范化)对 org 行禁用并给文案,市场行仍可点', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    const org = within(orgCard('codeql'))
+    for (const name of ['编辑', '上传新版', '规范化']) {
+      const btn = org.getByRole('button', { name })
+      expect(btn, `org 行的「${name}」必须禁用(服务端无该端点)`).toBeDisabled()
+      expect(btn.getAttribute('title')).toBeTruthy()
+    }
+    expect(orgCard('codeql').textContent).toContain('组织共享技能')
+    // 市场行不受影响。
+    const market = within(orgCard('data-extract'))
+    expect(market.getByRole('button', { name: '编辑' })).toBeEnabled()
+    expect(market.getByRole('button', { name: '上传新版' })).toBeEnabled()
+    expect(market.getByRole('button', { name: '规范化' })).toBeEnabled()
+  })
+
+  it('归属显示与转移预填用 apps.owner(不是本行上传者 author)', async () => {
+    render(<Marketplace />)
+    await screen.findByText('codeql')
+    // 展示:owner=alice,author=bob ⇒ 必须是 alice。
+    expect(orgCard('codeql').textContent).toContain('归属 alice')
+    expect(orgCard('codeql').textContent).not.toContain('归属 bob')
+    // 预填:转移弹窗把 alice 标为「当前归属」(若误用 author,标中的会是 bob)。
+    fireEvent.click(within(orgCard('codeql')).getByRole('button', { name: '归属' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.click(dialog.getByRole('combobox'))
+    // 候选列表走 Popover portal(在 dialog 子树之外),按整页查。
+    const marker = await screen.findByText('当前归属')
+    expect(marker.closest('[role="option"]')?.textContent).toContain('alice')
+  })
+})
