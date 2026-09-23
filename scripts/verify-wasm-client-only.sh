@@ -16,14 +16,21 @@
 #   3 服务端 go build/vet/定向测试（真 PG；**用例级 0 skip**）
 #   4 客户端三包 check                   5 webadmin npm test
 #   6 协议探针（scripts/wasm/probes/*，自判定 + 退出码；xvfb-run -a 与探针同命令）
-#   7 渠道约束（§10：app_origin_scheme 必填/形状/唯一 + 正式 tag dry-run + 仓库 pin）
-#   8 W5 文档与作者面判据（纯 grep；便携组；TST-15 的机器判据）
+#   7 渠道约束（§10：app_origin_scheme 必填/形状/唯一 + 仓库 pin）
+#       真实渠道仓 dry-run 是**显式可选步骤**（公开仓不持有渠道仓，也不联网）：未提供
+#       WASM_CHANNELS_REPO 时按 SKIP 计入组级 SKIP 计数，PASS 文案按**实际执行面**生成
+#       （2026-09-23 三轮审计 W-6：旧文案把没跑的 dry-run 说成跑过了，且 SKIP 不计入计数）。
+#   8 W5 文档与作者面判据（模式判据 + 按分句豁免 + 结论钉牢 + 合成负例回归；便携组；TST-15 的机器判据）
+#       实现收在 `scripts/wasm/check-authoring-claims.mjs`（2026-09-23 三轮审计 W-7/W-9：
+#       三条反向判据曾是固定枚举、一条豁免是整行关键词、两条正向判据只查关键词存在、
+#       扫描根含死条目且 `2>/dev/null || true` 吞掉 grep 自身的 rc≥2）。
 #
 # 用法：
 #   bash scripts/verify-wasm-client-only.sh                 # 全量（1–8）
 #   bash scripts/verify-wasm-client-only.sh --portable      # 与产物/PG/显示器无关的子集（1,2,7,8）
 #                                                           # —— 供 `yarn check` 的 GUARDS 与本地快跑
 #   bash scripts/verify-wasm-client-only.sh --groups 2,6    # 只跑指定组（1–8）
+#   bash scripts/verify-wasm-client-only.sh --require-clean # 工作树脏 ⇒ 本组结论判失败（CI 用）
 #   bash scripts/verify-wasm-client-only.sh --list
 #
 # 各组前置与**接线现状**（2026-09-23 第三轮审计 W-4/W-5；改 CI 前先读这段）：
@@ -39,11 +46,14 @@
 #   PG_DSN_TEST      定向测试的数据库（缺省 postgres://postgres:postgres@127.0.0.1:5432/picoaide_test）
 #   PROBE_TIMEOUT    单探针超时秒数（缺省 180）
 #   ELECTRON_BIN     Electron 可执行文件（缺省 packages/host/desktop/node_modules/.bin/electron）
-#   WASM_CHANNELS_REPO  真实私有渠道仓检出（可选；给了就跑正式 tag dry-run）
+#   WASM_CHANNELS_REPO  真实私有渠道仓检出（可选；给了就跑正式 tag dry-run；不给则该步骤计入 SKIP）
 #   WASM_GATE_LOG_DIR   日志目录（缺省 temp/wasm-client-only/gate-logs）
 #   WASM_GATE_GO_ENV    repo（缺省，Go 缓存钉在仓内且离线）/ host（继承宿主 GOCACHE/GOMODCACHE/GOPROXY）
 #   WASM_GATE_REQUIRE_COVERED_PLATFORM=1  非 Linux 平台上探针按显式 SKIP（退出码 77）处理
-# 退出码：0 = 所选组全部通过；1 = 有失败项；2 = 用法/环境错误。
+#   WASM_GATE_EXPECT_HEAD  跑前锁定的期望 HEAD（7–40 位小写十六进制，按**前缀**比较）。
+#                       不匹配即**跑前**失败（退出码 2）并说明「结论不可比」；CI 应传 `github.sha`。
+#   WASM_GATE_REQUIRE_CLEAN=1  等价于 --require-clean：工作树有改动即判失败（缺省只 WARN 并写进结论行）
+# 退出码：0 = 所选组全部通过；1 = 有失败项；2 = 用法/环境错误（含跑前期望 HEAD 与当前 HEAD 不一致）。
 
 set -euo pipefail
 
@@ -85,9 +95,23 @@ GROUPS_SELECTED=""
 # `1 2 3 4 5 6 7 8` —— "什么都没选"被静默执行成"全选"，而紧随其后的
 # "没有选中任何组 ⇒ exit 2" 在那条路径上永远不可达。
 GROUPS_EXPLICIT=0
+# W-8②：脏树的判定口径（缺省 WARN + 写进结论行；`--require-clean` / WASM_GATE_REQUIRE_CLEAN=1 时判失败）。
+# 为什么默认不是失败：本仓有并发编辑史，把"脏树"一律判死会让门禁在共享工作目录里恒红，人就会学着忽略它；
+# 但"只记录不断言"同样不行（结论会被当成干净 HEAD 的结论）⇒ 折中是**显式的、进结论行的 WARN**，
+# 并给 CI 一个开关把它升级成硬判据（CI 检出的是干净树，脏 = 有东西被改过，必须红）。
+REQUIRE_CLEAN="${WASM_GATE_REQUIRE_CLEAN:-0}"
+# 非法取值 fail-loud（不静默降级成 warn）：写 `=true`/`=yes` 是很自然的误用，而它一旦被当成
+# "没开"，脏树就只剩 WARN —— 那正是 W-8② 要消灭的形态（CI 里静默失去这条判据）。
+case "$REQUIRE_CLEAN" in
+  0|1) ;;
+  *) echo "verify-wasm-client-only: WASM_GATE_REQUIRE_CLEAN 取值非法（$REQUIRE_CLEAN）——" \
+       "只接受 0 或 1（要开就用 1 或 --require-clean）" >&2
+     exit 2 ;;
+esac
 while [ $# -gt 0 ]; do
   case "$1" in
     --portable) MODE="portable"; shift ;;
+    --require-clean) REQUIRE_CLEAN=1; shift ;;
     --groups)
       if [ $# -lt 2 ]; then
         echo "verify-wasm-client-only: --groups 缺参数（用法：--groups 2,6；可选组见 --list）" >&2
@@ -179,21 +203,68 @@ pg_reachable() {
 
 # ---------------------------------------------------------------------------
 # HEAD 绑定（§13 判据 6；R2T-10）：本仓有并发编辑史，结论不绑 HEAD 就不可比。
+#
+# 2026-09-23 三轮审计 W-8：「绑定 HEAD」此前只做**自洽**（跑前 == 跑后），不绑任何权威 ——
+# 换 commit、带脏树都能拿到同一句"全部通过 ✅（绑定 HEAD …）"。现在补三件事：
+#   ① **跑前**接受期望 HEAD（WASM_GATE_EXPECT_HEAD，CI 传 github.sha）：不匹配即退出码 2，
+#      并明说"结论不可比"——这是前置失败，不是"判据没通过"；
+#   ② 脏树有**显式判据**（缺省 WARN 写进结论行；--require-clean / WASM_GATE_REQUIRE_CLEAN=1 时红）；
+#   ③ residue.json 的 head 与本绑定文件在结论处**对拍**（同一门禁内部两个真源必须互校）。
 # ---------------------------------------------------------------------------
 HEAD_START="$(git rev-parse HEAD)"
 BRANCH_START="$(git rev-parse --abbrev-ref HEAD)"
 DIRTY_START="$(git status --porcelain | wc -l | tr -d ' ')"
 BINDING="$ROOT/temp/wasm-client-only/HEAD-binding.txt"
+
+EXPECT_HEAD_RAW="${WASM_GATE_EXPECT_HEAD:-}"
+EXPECT_HEAD=""
+if [ -n "$EXPECT_HEAD_RAW" ]; then
+  case "$EXPECT_HEAD_RAW" in
+    *[!0-9a-f]*)
+      echo "verify-wasm-client-only: WASM_GATE_EXPECT_HEAD 形状非法（$EXPECT_HEAD_RAW）——" \
+        "必须是 7–40 位小写十六进制 git sha（CI 传 github.sha）" >&2
+      exit 2 ;;
+  esac
+  if [ "${#EXPECT_HEAD_RAW}" -lt 7 ] || [ "${#EXPECT_HEAD_RAW}" -gt 40 ]; then
+    echo "verify-wasm-client-only: WASM_GATE_EXPECT_HEAD 长度非法（${#EXPECT_HEAD_RAW} 位）——" \
+      "必须是 7–40 位小写十六进制 git sha（CI 传 github.sha）" >&2
+    exit 2
+  fi
+  EXPECT_HEAD="$EXPECT_HEAD_RAW"
+  case "$HEAD_START" in
+    "$EXPECT_HEAD"*) : ;;
+    *)
+      echo "verify-wasm-client-only: 期望 HEAD $EXPECT_HEAD 与当前 HEAD $HEAD_START 不一致 ——" \
+        "**结论不可比**（本门禁的结论只在它绑定的那个 HEAD 上成立），拒绝以别的 HEAD 出结论。" \
+        "CI 请传 github.sha；本地确认无误后去掉 WASM_GATE_EXPECT_HEAD 重跑。" >&2
+      exit 2 ;;
+  esac
+fi
+
 {
   printf 'HEAD %s\n' "$HEAD_START"
+  printf 'expect-head %s\n' "${EXPECT_HEAD:-<未锁定：本次结论只保证跑前==跑后自洽，不绑任何外部权威>}"
   printf 'branch %s\n' "$BRANCH_START"
   printf 'dirty-files %s\n' "$DIRTY_START"
+  printf 'dirty-policy %s\n' "$([ "$REQUIRE_CLEAN" = "1" ] && echo 'require-clean（脏即失败）' || echo 'warn（脏只 WARN，写进结论行）')"
   printf 'groups %s\n' "$GROUPS_SELECTED"
   printf 'started %s\n' "$(date -Is)"
 } >"$BINDING"
 
 echo "WASM 客户端专属验收门禁（scripts/verify-wasm-client-only.sh）"
 echo "HEAD $HEAD_START（$BRANCH_START；工作树 ${DIRTY_START} 个改动 —— 本仓并发编辑，结论按此 HEAD 归档）"
+if [ -n "$EXPECT_HEAD" ]; then
+  echo "期望 HEAD ${EXPECT_HEAD}（WASM_GATE_EXPECT_HEAD）：与当前 HEAD 一致 ✅"
+else
+  echo "期望 HEAD 未锁定：本次只保证跑前==跑后自洽（要绑权威请传 WASM_GATE_EXPECT_HEAD=<sha>，CI 传 github.sha）"
+fi
+if [ "${DIRTY_START:-0}" != "0" ]; then
+  if [ "$REQUIRE_CLEAN" = "1" ]; then
+    echo "WARN 工作树有 ${DIRTY_START} 个改动，而 --require-clean 已开启 ⇒ 结论会被判失败（见末尾）"
+  else
+    echo "WARN 工作树有 ${DIRTY_START} 个改动：结论对应的是「此 HEAD + 这些未提交改动」，不是干净 HEAD（CI 用 --require-clean 把它变成硬判据）"
+  fi
+fi
 echo "组：$GROUPS_SELECTED（模式 $MODE；共 ${GROUP_COUNT} 组，可选 1–8）｜日志目录 $LOG_DIR"
 echo "Go 环境：$GO_ENV_NOTE"
 
@@ -402,7 +473,11 @@ fi
 if want 7; then
   step "7. 渠道约束（§10：app_origin_scheme 必填 / 形状 / 跨渠道唯一；正式 tag dry-run；仓库 pin）"
   CHANNEL_ARGS=()
-  if [ -n "${WASM_CHANNELS_REPO:-}" ]; then CHANNEL_ARGS+=(--channels-repo "$WASM_CHANNELS_REPO"); fi
+  CHANNELS_DRYRUN="skipped"
+  if [ -n "${WASM_CHANNELS_REPO:-}" ]; then
+    CHANNEL_ARGS+=(--channels-repo "$WASM_CHANNELS_REPO")
+    CHANNELS_DRYRUN="ran"
+  fi
   log="$LOG_DIR/channels.log"
   # 先语法检查再跑：这一段门禁的内容全在 `scripts/verify-wasm-channels.mjs` 里，
   # 而脚本解析失败时**整段代码根本不执行**，报出来的却只是"渠道约束未通过"——
@@ -411,12 +486,57 @@ if want 7; then
   if ! node --check scripts/verify-wasm-channels.mjs 2>"$log"; then
     sed 's/^/  /' "$log"
     fail "守卫脚本本身语法错误（scripts/verify-wasm-channels.mjs 解析失败）"
-  elif node scripts/verify-wasm-channels.mjs ${CHANNEL_ARGS[@]+"${CHANNEL_ARGS[@]}"} >"$log" 2>&1; then
-    sed 's/^/  /' "$log"
-    pass "渠道约束（含五条负例与正式 tag dry-run）"
   else
+    channels_rc=0
+    node scripts/verify-wasm-channels.mjs ${CHANNEL_ARGS[@]+"${CHANNEL_ARGS[@]}"} >"$log" 2>&1 || channels_rc=$?
     sed 's/^/  /' "$log"
-    fail "渠道约束未通过（日志 $log）"
+
+    # W-6②：子脚本的跳过必须以**可解析形式**回报父脚本（`CHANNELS-SKIP-COUNT <n>` 一行 +
+    # 每处跳过一行 `CHANNELS-SKIP <理由>`），父脚本据此计入 skip()。旧实现里子脚本只
+    # `console.log('SKIP …')`，父脚本的 `SKIP 0` 与"有没有真的跳过"无关 —— 那是假计数。
+    # 无论子脚本退出码如何都要记账（失败路径上也可能是"跳过 + 别处失败"）。
+    skip_report_lines="$(grep -c '^CHANNELS-SKIP-COUNT ' "$log" || true)"
+    child_skip_count="$(sed -n 's/^CHANNELS-SKIP-COUNT //p' "$log" | head -n1)"
+    child_skip_reasons="$(sed -n 's/^CHANNELS-SKIP //p' "$log")"
+    child_skip_reason_count=0
+    if [ -n "$child_skip_reasons" ]; then
+      child_skip_reason_count="$(printf '%s\n' "$child_skip_reasons" | wc -l | tr -d ' ')"
+    fi
+    skip_report_ok=1
+    if [ "$skip_report_lines" != "1" ]; then
+      fail "渠道约束的 SKIP 记账缺失（$log 里应有且仅有一行 CHANNELS-SKIP-COUNT，实得 $skip_report_lines 行）—— 子脚本的跳过没有回报父脚本，SKIP 计数不可信（W-6②）"
+      skip_report_ok=0
+    else
+      case "$child_skip_count" in
+        ''|*[!0-9]*)
+          fail "渠道约束的 SKIP 计数不是非负整数（CHANNELS-SKIP-COUNT '$child_skip_count'）—— 报告协议坏了"
+          skip_report_ok=0 ;;
+        *)
+          if [ "$child_skip_count" -ne "$child_skip_reason_count" ]; then
+            fail "渠道约束的 SKIP 计数（$child_skip_count）与理由行数（$child_skip_reason_count）不符 —— 报告协议坏了"
+            skip_report_ok=0
+          elif [ "$child_skip_count" -gt 0 ]; then
+            while IFS= read -r reason; do skip "渠道约束：$reason"; done <<<"$child_skip_reasons"
+          fi ;;
+      esac
+    fi
+
+    # W-6①：PASS 文案**按实际执行面动态生成** —— 真实渠道仓 dry-run 没跑就不得出现在 PASS 里。
+    if [ "$channels_rc" -eq 0 ]; then
+      if [ "$CHANNELS_DRYRUN" = "ran" ]; then
+        pass "渠道约束：静态判据（冻结正则 / 仓库 pin / 合成夹具 tag→渠道集 / app_origin_scheme 五条负例 / 保留 scheme 契约）+ 真实渠道仓 dry-run 全部通过"
+      else
+        pass "渠道约束：静态判据（冻结正则 / 仓库 pin / 合成夹具 tag→渠道集 / app_origin_scheme 五条负例 / 保留 scheme 契约）通过"
+        if [ "$skip_report_ok" = "1" ] && [ "$child_skip_count" = "0" ]; then
+          # 子脚本说"0 处跳过"而父脚本没给 WASM_CHANNELS_REPO ⇒ 两边对跳过这件事的判断不一致
+          fail "组 7 未提供 WASM_CHANNELS_REPO（真实渠道仓 dry-run 未执行），而子脚本回报 CHANNELS-SKIP-COUNT 0 —— 跳过没有被记账（W-6②）"
+        fi
+        # 显式可选步骤（W-6③）：下面这条不是 PASS 的必要条件，本次**确实**没跑，如实标注。
+        note "真实渠道仓 dry-run 是**显式可选步骤**：本次未执行（要跑请设 WASM_CHANNELS_REPO=<渠道仓检出>，私有渠道仓不在公开仓内，也不联网）"
+      fi
+    else
+      fail "渠道约束未通过（日志 $log）"
+    fi
   fi
 fi
 
@@ -424,79 +544,44 @@ fi
 if want 8; then
   # TST-15：W5 的判据此前只是"文本存在性、无命令"，且只在 gitignore 的 temp 脚本里
   # （`temp/wasm-client-only/l5-acceptance.sh`）—— CI 与 `yarn check` 都碰不到。本组把
-  # 它们变成**可复跑的命令**：纯 grep、无外部依赖、命中行先打印再 fail，每条失败都指回
-  # 总纲条号，让人知道"为什么这条不能松"。
+  # 它们变成**可复跑的命令**，每条失败都指回总纲条号，让人知道"为什么这条不能松"。
   #
-  # 只看**源**文件：`site/dist`/`node_modules`/`.astro` 是构建产物（改了源会被覆盖），
-  # `server/docs/**` 是第三方研究快照（抓取的大 JSON）—— 算进来只会把真正的文案问题淹掉。
-  # 命中最多打印 12 行，避免刷屏。
-  step "8. W5 文档与作者面判据（纯 grep；便携）"
-  AUTHOR_DOC="docs/wasm-app-authoring.md"
-  AUTHOR_SKILL_DIR="server/skills/app-builder"
-  GREP_SRC_OPTS=(--exclude-dir=dist --exclude-dir=node_modules --exclude-dir=.astro --exclude-dir=build
-                 --include='*.md' --include='*.mdx' --include='*.astro' --include='*.ts' --include='*.tsx')
-  # 记录面（**必须**逐字保留旧措辞才有意义）不参与这两条文案判据：
-  #   · docs/planning/**     —— 总纲/台账/早期契约：订正记录要引用被推翻的原话
-  #                              （例如台账 R1-L5-14 必须写"原写『冻结与已下架都不列』"）；
-  #   · docs/decisions/**    —— 作废决策（带作废横幅）；
-  #   · docs/AUDIT-*.md      —— 审计留痕；docs/releases/** —— 历史发布说明。
-  # 它们是"证据"，不是"现行处方"；把它们算进来只会让判据因为**记录本身**永远红。
-  # （这些文件仍被第 2 组的零残留扫描以 C 桶覆盖，不是不管。）
-  GREP_RECORD_EXCLUDES=(--exclude-dir=planning --exclude-dir=decisions --exclude-dir=releases --exclude=AUDIT-*.md)
-  show_hits() {
-    printf '%s\n' "$1" | head -n 12 | sed 's/^/      /'
-    local total
-    total="$(printf '%s\n' "$1" | wc -l | tr -d ' ')"
-    if [ "$total" -gt 12 ]; then note "（命中 $total 行；此处只列前 12 行）"; fi
-  }
-
-  if [ ! -f "$AUTHOR_DOC" ] || [ ! -d "$AUTHOR_SKILL_DIR" ]; then
-    fail "作者面文件缺失（$AUTHOR_DOC / $AUTHOR_SKILL_DIR）—— 判据无处可查不等于通过"
+  # 2026-09-23 三轮审计 W-7/W-9 把五条纯 grep 换成模式判据实现
+  # （`scripts/wasm/check-authoring-claims.mjs`）：
+  #   · ④/⑤/① 是**模式**（照台账 R2-L5-2 的写法），豁免**按分句**（`，。；！？` 切分）而不是整行；
+  #   · ②/③ 钉**结论**（Cache Storage 的可用性取值 / window.ratio 的区间 + 发布期错误码）；
+  #   · 扫描面**目录驱动 + 通配**，根存在性/根下非空/读取失败三条 fail-loud
+  #     （等价于残留扫描器那条"rc≥2 不得当通过"的纪律）；
+  #   · 台账里那批"已闭合"的合成负例在同一次运行里当回归网实跑（正则被削弱即红）。
+  # 子脚本用 `G8-PASS/G8-FAIL/G8-NOTE` 前缀回报，父脚本镜像进自己的组级计数
+  # —— 避免"子脚本说通过、父脚本说另一套"。
+  step "8. W5 文档与作者面判据（模式判据 + 按分句豁免 + 合成负例回归；便携）"
+  log="$LOG_DIR/authoring-claims.log"
+  if ! node --check scripts/wasm/check-authoring-claims.mjs 2>"$log"; then
+    sed 's/^/      /' "$log"
+    fail "守卫脚本本身语法错误（scripts/wasm/check-authoring-claims.mjs 解析失败）"
   else
-    # ① 不得再宣称"不能联网"（§6 硬限制 + R1-RED-9/R2S-12 订正：CSP 不约束顶层导航与弹窗，
-    #    真实边界是"不能主动发起 XHR/fetch 型请求"）。允许"不要对外说成不能联网"这类告诫句。
-    hits="$(grep -rnE '不能联网|零网络' "$AUTHOR_DOC" "$AUTHOR_SKILL_DIR/SKILL.md" 2>/dev/null | grep -vE '不要对外说成|不要写|不等于' || true)"
-    if [ -n "$hits" ]; then
-      fail "作者面仍宣称「不能联网」（§6：真实边界=不能主动发起 XHR/fetch；顶层导航/弹窗由窗口闸门兜底）："
-      show_hits "$hits"
-    else
-      pass "作者面没有「不能联网/零网络」的错误宣称（§6 订正）"
-    fi
-
-    # ② 作者面必须写明 Cache Storage 不可用（§3 F13 / 台账 CTL-3 的落点：custom scheme 上
-    #    cache.put() 抛 TypeError ⇒ 允许 localStorage/IndexedDB，禁止依赖 Cache Storage）。
-    if grep -rq 'Cache Storage' "$AUTHOR_DOC" "$AUTHOR_SKILL_DIR"; then
-      pass "作者面写明 Cache Storage 的可用性口径（§3 F13）"
-    else
-      fail "作者面缺 Cache Storage 口径（§3 F13：可 open、不可 put ⇒ 禁止依赖）"
-    fi
-
-    # ③ 作者面必须有 window.ratio/width/height（§6 作者契约 + §13.2：ratio 越界 ⇒ 发布期 APP_CONFIG_INVALID）。
-    if grep -rqE 'window\.(ratio|width|height)' "$AUTHOR_DOC" "$AUTHOR_SKILL_DIR"; then
-      pass "作者面写明 window.ratio/width/height（§6/§13.2）"
-    else
-      fail "作者面缺 window.ratio/width/height（§6 作者契约；§13.2 要求 ratio 越界在发布期报 APP_CONFIG_INVALID）"
-    fi
-
-    # ④ 目录口径：不得再出现"下架不列/冻结与已下架都不列"（R1-L5-14 订正后：一律列出，
-    #    只是不可打开/标注状态；"入口链接"字段也不存在）。
-    hits="$(grep -rnE '冻结与已下架都不列|下架都列出来|下架不列' "${GREP_SRC_OPTS[@]}" "${GREP_RECORD_EXCLUDES[@]}" docs/ "$AUTHOR_SKILL_DIR" 2>/dev/null || true)"
-    if [ -n "$hits" ]; then
-      fail "仍有「下架不列」类口径（R1-L5-14 订正：目录一律列出，仅不可打开）："
-      show_hits "$hits"
-    else
-      pass "目录口径统一（下架仍列出；R1-L5-14）"
-    fi
-
-    # ⑤ 载体词：全仓不得再出现"内置浏览器加载 / 浏览器标签承载"（§2.1/§4：应用只在桌面
-    #    客户端内、每个应用一个独立窗口；浏览器标签不是承载形态）。
-    hits="$(grep -rnE '内置浏览器加载|浏览器标签承载' "${GREP_SRC_OPTS[@]}" "${GREP_RECORD_EXCLUDES[@]}" \
-      docs site/src server/docs "$AUTHOR_SKILL_DIR" README.md README.zh-CN.md 2>/dev/null || true)"
-    if [ -n "$hits" ]; then
-      fail "仍有把应用描述成「内置浏览器加载 / 浏览器标签承载」的文案（§2.1/§4：应用只在客户端内的独立窗口打开）："
-      show_hits "$hits"
-    else
-      pass "载体口径统一（独立窗口；§2.1/§4）"
+    g8_rc=0
+    node scripts/wasm/check-authoring-claims.mjs >"$log" 2>&1 || g8_rc=$?
+    g8_fail_seen=0
+    g8_pass_seen=0
+    while IFS= read -r line; do
+      case "$line" in
+        'G8-PASS '*) pass "${line#G8-PASS }"; g8_pass_seen=$((g8_pass_seen + 1)) ;;
+        'G8-FAIL '*) fail "${line#G8-FAIL }"; g8_fail_seen=$((g8_fail_seen + 1)) ;;
+        'G8-NOTE '*) note "${line#G8-NOTE }" ;;
+        *) note "$line" ;;
+      esac
+    done <"$log"
+    # 报告协议自检：子脚本的退出码与它回报的 PASS/FAIL 行必须一致，否则"通过"这句话本身不可信。
+    if [ "$g8_rc" -eq 2 ]; then
+      fail "作者面判据**前置缺失**（退出码 2：扫描根不存在/读不出/扫描面为空 —— 判据无处可查不等于通过；日志 $log）"
+    elif [ "$g8_rc" -ne 0 ] && [ "$g8_fail_seen" -eq 0 ]; then
+      fail "作者面判据以退出码 $g8_rc 失败，却没有任何 G8-FAIL 行 —— 报告协议坏了（日志 $log）"
+    elif [ "$g8_rc" -eq 0 ] && [ "$g8_fail_seen" -gt 0 ]; then
+      fail "作者面判据回报了 $g8_fail_seen 条失败却以 0 退出 —— 报告协议不可信（日志 $log）"
+    elif [ "$g8_pass_seen" -eq 0 ] && [ "$g8_fail_seen" -eq 0 ]; then
+      fail "作者面判据一条 PASS/FAIL 都没回报（空集通过）—— 日志 $log"
     fi
   fi
 fi
@@ -515,8 +600,52 @@ DIRTY_END="$(git status --porcelain | wc -l | tr -d ' ')"
 if [ "$HEAD_END" != "$HEAD_START" ]; then
   fail "跑的过程中 HEAD 变了（$HEAD_START → $HEAD_END）：本次结论不可比，必须重跑（本仓有并发编辑史）"
 else
-  note "HEAD 未变（$HEAD_START）；工作树改动 ${DIRTY_START} → ${DIRTY_END}"
+  note "HEAD 未变（$HEAD_START）"
 fi
+
+# W-8③：同一门禁内部两个真源必须互校 —— 零残留扫描写的 residue.json 里有 head，
+# 本绑定文件里也有 head；旧实现两处各记一份、没人对拍（"两端各自钉自己的字面量"的形态）。
+if want 2; then
+  residue_json="$LOG_DIR/residue.json"
+  if [ ! -f "$residue_json" ]; then
+    fail "残留扫描的结构化报告不存在（$residue_json）：本次选了组 2，却没有可与绑定文件对拍的 head"
+  else
+    residue_head=""
+    if ! residue_head="$(node -e '
+      const fs = require("node:fs")
+      const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+      process.stdout.write(typeof report.head === "string" ? report.head : "")
+    ' "$residue_json" 2>/dev/null)"; then
+      residue_head=""
+    fi
+    if [ "$residue_head" != "$HEAD_START" ]; then
+      fail "残留扫描报告的 head（${residue_head:-<不可读>}）与本绑定文件的 HEAD（$HEAD_START）不一致 —— 同一门禁的两个真源必须互校（陈旧报告/跑动中 HEAD 变化都会在这里暴露）"
+    else
+      note "residue.json 的 head 与绑定文件一致（$residue_head）"
+    fi
+  fi
+else
+  note "组 2 不在本次选择内：residue.json 的 head 不参与本次结论（**未选 ≠ 已对拍**）"
+fi
+
+# W-8②：脏树的显式判据（缺省 WARN 进结论行；--require-clean 时红）。旧实现只 note()，
+# 于是"跑的是 HEAD + 一堆未提交改动"和"跑的是干净 HEAD"在结论里长得一模一样。
+if [ "${DIRTY_START:-0}" != "0" ] || [ "${DIRTY_END:-0}" != "${DIRTY_START:-0}" ]; then
+  if [ "$REQUIRE_CLEAN" = "1" ]; then
+    fail "工作树不干净（跑前 ${DIRTY_START} → 跑后 ${DIRTY_END} 个改动），而 --require-clean / WASM_GATE_REQUIRE_CLEAN=1 要求干净树：本次结论不作为可归档的通过"
+  else
+    note "WARN 工作树不干净（跑前 ${DIRTY_START} → 跑后 ${DIRTY_END} 个改动）：本次结论对应「此 HEAD + 这些未提交改动」，不是干净 HEAD；要硬判据请加 --require-clean（CI 应加）"
+  fi
+else
+  note "工作树干净（跑前跑后均 0 个改动）"
+fi
+
+if [ -n "$EXPECT_HEAD" ]; then
+  note "期望 HEAD 已锁定并对上（WASM_GATE_EXPECT_HEAD=$EXPECT_HEAD）"
+else
+  note "WARN 期望 HEAD 未锁定：本次结论只保证「跑前 HEAD == 跑后 HEAD」自洽，不绑任何外部权威（CI 请传 WASM_GATE_EXPECT_HEAD=<github.sha>）"
+fi
+
 note "PASS ${PASS_COUNT} ｜ FAIL ${FAIL} ｜ SKIP ${SKIP_COUNT} ｜ 绑定文件 ${BINDING#"$ROOT/"}"
 
 if [ "$FAIL" -eq 0 ]; then

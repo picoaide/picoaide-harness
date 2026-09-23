@@ -28,10 +28,17 @@
  *   5. `--channels-repo <dir>`（可选）：对真实私有渠道仓检出跑一次正式 tag dry-run。
  *      不给则显式打印 SKIP（本脚本在公开仓里不持有渠道仓，也不联网）。
  *
+ * **跳过必须以可解析形式回报父脚本**（2026-09-23 三轮审计 W-6②）：
+ * 本脚本在退出前**总是**打印两行报告协议给 `scripts/verify-wasm-client-only.sh` 解析 ——
+ *   `CHANNELS-SKIP-COUNT <n>`   本次跳过了几处（0 也要打：父脚本据此判"记账缺失"）
+ *   `CHANNELS-SKIP <理由>`       每处跳过一行
+ * 旧实现只在第 6 节 `console.log('  SKIP …')`，父脚本看不见它 ⇒ 组级 `SKIP 0` 与"有没有真的
+ * 跳过"无关；而组 7 的 PASS 文案又把没跑的 dry-run 说成跑过了（同一 finding 的另一半）。
+ *
  * 用法：
  *   node scripts/verify-wasm-channels.mjs
  *   node scripts/verify-wasm-channels.mjs --channels-repo /path/to/picoaide-channels
- * 退出码：0 = 全部判据通过；1 = 有失败项（逐条打印，含文件与行号）。
+ * 退出码：0 = 全部判据通过（跳过不是失败，但要如实回报）；1 = 有失败项（逐条打印，含文件与行号）。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -63,6 +70,8 @@ const REL = path => path.replace(`${ROOT}/`, '')
 
 const failures = []
 const scratch = []
+/** 显式跳过的步骤（W-6②：退出前以 `CHANNELS-SKIP-COUNT` / `CHANNELS-SKIP` 回报父脚本）。 */
+const skipped = []
 
 function pass(message) {
   console.log(`  PASS ${message}`)
@@ -471,7 +480,11 @@ section('6. 真实渠道仓 dry-run（可选；未给目录时显式 SKIP，不�
   const flagIndex = args.indexOf('--channels-repo')
   const repo = flagIndex >= 0 ? args[flagIndex + 1] : process.env.WASM_CHANNELS_REPO
   if (repo === undefined || repo === '') {
-    console.log('  SKIP 未提供 --channels-repo / WASM_CHANNELS_REPO：跳过真实渠道仓 dry-run（公开仓不持有渠道仓，也不联网）')
+    // 这是**显式可选步骤**（公开仓结构上不持有渠道仓）：如实记入 skipped，
+    // 由本文件末尾的 CHANNELS-SKIP-COUNT / CHANNELS-SKIP 回报父脚本计入组级 SKIP 计数。
+    const reason = '真实渠道仓 dry-run（未提供 --channels-repo / WASM_CHANNELS_REPO：公开仓不持有渠道仓，也不联网）'
+    console.log(`  SKIP ${reason}`)
+    skipped.push(reason)
   } else {
     check(existsSync(join(repo, 'channels')), `${repo} 是渠道仓检出（含 channels/）`)
     const result = runChannels({ source: repo, refName: 'v2.7.6' })
@@ -482,6 +495,12 @@ section('6. 真实渠道仓 dry-run（可选；未给目录时显式 SKIP，不�
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
+
+// 报告协议（父脚本 `scripts/verify-wasm-client-only.sh` 逐行解析；**总是**打印，0 也打）：
+//   CHANNELS-SKIP-COUNT <n>  /  CHANNELS-SKIP <理由>
+// 判据：父脚本要求 COUNT 行**有且仅有一行**，且 n 与理由行数一致 —— 少一行即报"记账缺失"。
+for (const reason of skipped) console.log(`CHANNELS-SKIP ${reason}`)
+console.log(`CHANNELS-SKIP-COUNT ${skipped.length}`)
 
 console.log(`\n===== ${failures.length === 0 ? '全部通过 ✅' : `存在失败项 ❌（${failures.length} 条）`} =====`)
 for (const message of failures) console.error(`- ${message}`)
