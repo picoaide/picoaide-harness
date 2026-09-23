@@ -16,8 +16,10 @@
  *  1. {@link AppAvailabilityReason} 由数组派生（数组就是联合类型的取值集合）；
  *  2. {@link AVAILABILITY_REASON_COPY} 是 `Record<AppAvailabilityReason, …>` ——
  *     少一个 key 就**编译不过**（tsc，`check` 的第一步）；多一个同样是编译错误；
- *  3. `availability-contract.spec.ts` 读**服务端源码文本**解析出真实取值集合，
- *     与本模块做**集合相等**断言（读不到就 throw，不 skip）。
+ *  3. `availability-contract.spec.ts` 读**服务端源码文本**解析出真实取值集合，与本模块做
+ *     **集合相等**断言；并且判据是**写入点计数**（服务端 `Reason:` / `"reason":` /
+ *     `out["reason"] =` 的每一处写入都必须被认出来 —— 常量、大写、别的书写形状一律
+ *     throw，不是"抠不出来就静默"）。读不到就 throw，不 skip。
  *
  * 三条合起来才挡住"只改一侧"：改服务端 ⇒ 对拍红；改客户端数组 ⇒ 对拍红 + tsc 红；
  * 改文案表 ⇒ tsc 红 + 对拍红。
@@ -73,8 +75,25 @@ export interface AvailabilityReasonCopy {
    * 这个判词是否意味着"提交注定失败"，据此在**填表阶段**就地拦下提交（省一次上传）。
    *
    * **必填**（不是可选）：新增判词时必须显式回答这个问题，不许靠"忘了写"静默放行
-   * 一次注定被服务端拒掉的 32 MiB 上传。判据是服务端的 `can_publish` —— 服务端说
-   * 不能发的判词，客户端就不该放行提交。
+   * 一次注定被服务端拒掉的 32 MiB 上传。
+   *
+   * ## 与**服务端 `can_publish`** 的关系（口径按事实写，别按愿望写）
+   *
+   * 提交闸实际读的是**本表**（`PublishForm.verifyAppIdBeforeSubmit` 查 `blocksSubmit`），
+   * **不是**服务端响应里的 `can_publish` 字段 —— 改成读响应字段是一次行为变更（要在提交
+   * 那一刻真的再问一次服务端，且要重定"查重失败时放不放行"的语义），本版有意不做。
+   *
+   * 于是两者的**等价性有前提**：服务端只把 `available` / `yours` 两个判词与
+   * `can_publish=true` 放在一起，其余四个（`taken` / `invalid` / `frozen` / `retired`）
+   * 恒为 `false` —— 即一条 **reasons × can_publish 的组合约束**。这条约束由
+   * `availability-contract.spec.ts` 的「can_publish 的判词映射从服务端源码派生…」用例
+   * 从服务端源码派生并逐项钉住（同时钉住两个不可达组合：`frozen + can_publish=true`、
+   * `available + can_publish=false`）。
+   *
+   * **今天任一侧变化都会让等价失效**：服务端给某个判词改了 `can_publish` 语义（例如给
+   * 管理员接管加一个非 `yours` 的可发布判词）⇒ 那条对拍用例红；客户端改本表 ⇒
+   * 「拦下提交的判词」用例红。届时的动作是拍板"提交闸改读 `can_publish`"还是"重算静态
+   * 表"，**不是**把闸门调绿。
    */
   blocksSubmit: boolean
 }
