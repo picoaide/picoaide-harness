@@ -55,6 +55,25 @@ func (l *loginLimiter) limit() int {
 // 登录——同一出口 NAT 下的整个办公室共用 IP,且只对失败回调计数)。
 const callbackLimiterMaxAttempts = 60
 
+// oidcFlowStartMaxAttempts 是 **OIDC 流程启动**端点
+// (/api/client/v2/auth/{oidc,openid}/login)的单 IP **失败**预算
+// (审计 2026-09-23 R5-A-18)。
+//
+// 与另外两个 IP 桶的本质区别(这就是本条修复):本桶**只对失败计数** ——
+// 判定用 blocked(只读快照),记账只发生在失败出口,成功路径既不记账也不清账
+// (理由见 oidcFlowBudgetKey 与 oidc.go 的 handleOIDCLoginWith)。
+//
+// 修前的形态:它与登录 IP 桶**共用实例与阈值**,而 allow 对每一次被接受的调用
+// 无条件记账 ⇒ 每一次**成功**的 SSO 登录都吃掉一格;该键全仓只有一处构造、
+// **零处 reset** ⇒ 一个 NAT 出口后面 60 人、或早高峰 5 分钟内登录超过 60 次的
+// 组织,第 61 次流程启动永久被 429(纯合法流量即触发,窗口滑出前无自助恢复)。
+//
+// 阈值沿用 60/5min:预算现在只被失败消耗,而正常流量里流程启动失败应当接近零
+// (登录页只会发起合法流程),所以它不再是对合法并发的隐性上限。防"廉价端点被
+// 灌满"的能力改由 oidcMaxFlowsPerIP 的**在途流程配额**承担(与速率无关,
+// 只对"只建不消费"的模式生效)。
+const oidcFlowStartMaxAttempts = 60
+
 // loginIPMaxAttempts 是**单 IP 登录失败预算**(审计 2026-09-13 P1-2)。
 //
 // 为什么必须有这一维:账号桶(u:<username> 与 ip|username)都以用户名为键,
@@ -141,34 +160,9 @@ func (l *loginLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
-	cutoff := now.Add(-l.window)
-
-	if now.Sub(l.lastSweep) >= time.Minute {
-		for k, times := range l.attempts {
-			kept := times[:0]
-			for _, t := range times {
-				if t.After(cutoff) {
-					kept = append(kept, t)
-				}
-			}
-			if len(kept) == 0 {
-				delete(l.attempts, k)
-			} else {
-				l.attempts[k] = kept
-			}
-		}
-		l.lastSweep = now
-	}
-
-	times := l.attempts[key]
-	kept := times[:0]
-	for _, t := range times {
-		if t.After(cutoff) {
-			kept = append(kept, t)
-		}
-	}
+	l.sweepLocked(now)
+	kept := l.pruneKeyLocked(key, now.Add(-l.window))
 	if len(kept) >= l.limit() {
-		l.attempts[key] = kept
 		return false
 	}
 	if _, exists := l.attempts[key]; !exists && len(l.attempts) >= l.maxEntries {
@@ -177,6 +171,70 @@ func (l *loginLimiter) allow(key string) bool {
 	}
 	l.attempts[key] = append(kept, now)
 	return true
+}
+
+// blocked 是**只判定不记账**的快照:true = 该键在当前窗口内已达预算。
+//
+// 与 allow 的分工(审计 2026-09-23 R5-A-18):
+//
+//	allow   = 判定 + 记账(同一临界区) —— 用于"每次调用都该消耗预算"的桶;
+//	blocked = 只判定,由调用方在每个**失败出口**显式 record —— 用于"成功不应
+//	          消耗预算"的桶。此时不能靠成功的 reset 来抵消记账:流程启动这种
+//	          端点的"成功"是**匿名可得**的(任何人发一次合法请求就成功),
+//	          用 reset 会让"失败 ×59 + 成功 ×1"的交替模式把预算永远洗掉。
+//
+// 记账的并发语义(与 E-01 的关系):blocked + 事后 record 确实允许一批并发请求
+// 在第一个 record 落表之前全部通过判定(这正是 E-01 在**登录桶**上修掉的穿透)。
+// 这里可接受,因为穿透能换到的东西是有界的:失败请求不触碰任何共享资源,
+// 而成功请求要占的**在途流程名额**是 provider 里按 IP 原子计数的配额
+// (oidcMaxFlowsPerIP),配额本身就是闸门 ⇒ 穿透换不到放大面。
+//
+// 剪枝与 allow 同源(先丢窗口外时间戳再比较),避免静态窗口退化成"永不清零"。
+func (l *loginLimiter) blocked(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	l.sweepLocked(now)
+	return len(l.pruneKeyLocked(key, now.Add(-l.window))) >= l.limit()
+}
+
+// sweepLocked 做全局过期清扫,但**至多每分钟一次**(审计2026-M9:每次调用都
+// O(n) 全表扫描,攻击者填满 1 万键后每次登录尝试放大 1 万倍 CPU)。
+func (l *loginLimiter) sweepLocked(now time.Time) {
+	if now.Sub(l.lastSweep) < time.Minute {
+		return
+	}
+	cutoff := now.Add(-l.window)
+	for k, times := range l.attempts {
+		kept := times[:0]
+		for _, t := range times {
+			if t.After(cutoff) {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(l.attempts, k)
+		} else {
+			l.attempts[k] = kept
+		}
+	}
+	l.lastSweep = now
+}
+
+// pruneKeyLocked 只清理当前键的过期时间戳并返回剩余部分(已写回)。
+func (l *loginLimiter) pruneKeyLocked(key string, cutoff time.Time) []time.Time {
+	kept := l.attempts[key][:0]
+	for _, t := range l.attempts[key] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		delete(l.attempts, key)
+	} else {
+		l.attempts[key] = kept
+	}
+	return kept
 }
 
 // evictOneLocked 释放一个键位。受害者取**未饱和**(窗口内尝试次数 < 上限)的
@@ -211,12 +269,23 @@ func (l *loginLimiter) evictOneLocked() {
 }
 
 // record notes one failed attempt against the key.
-// 生产路径已不再需要它(allow 判定即记账);保留给测试预置桶状态以及"额外补记
-// 一次失败"的显式语义 —— 对一个 allow 已经记账的键再调 record 会重复计数。
+//
+// 语义(审计 2026-09-23 R5-A-18 起):这是"**只对失败计数**"型桶(见 blocked)
+// 的记账点,调用方必须在**每一个**失败出口各调一次 —— 漏一个出口就是该条失败
+// 路径不计预算。它**不**参与判定(判定是 blocked);两阶段语义在登录桶上被
+// E-01 明确否决,只在本类型桶上保留,理由见 blocked 的注释。
+//
+// 表容量约束与 allow 一致:表满时驱逐一个未饱和的键(C-2),不能因为攻击者
+// 用海量来源 IP 填表就让内存无界增长。
 func (l *loginLimiter) record(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.attempts[key] = append(l.attempts[key], time.Now())
+	now := time.Now()
+	l.sweepLocked(now)
+	if _, exists := l.attempts[key]; !exists && len(l.attempts) >= l.maxEntries {
+		l.evictOneLocked()
+	}
+	l.attempts[key] = append(l.attempts[key], now)
 }
 
 // reset clears the key's history after a successful authentication.
@@ -296,6 +365,30 @@ func loginIPBudgetKey(db *sql.DB, c *gin.Context) string {
 // 现在唯一入口是 gin 的 loginAllowed / loginSucceeded。
 func loginIPBudgetKeyForHost(db *sql.DB, host string) string {
 	return dbLimiterScope(db) + "ip:" + host
+}
+
+// oidcFlowBudgetKeyForHost 是 **OIDC 流程启动桶**键的构造点(与 loginIPBudgetKey
+// 同形的原始形态;host 由调用方按其信任边界解析后传入)。
+//
+// 判定(blocked)与每个失败出口的记账(record)必须出自这一个构造点 ——
+// 本仓有过"三处各自拼键、漏改一处 ⇒ 判定键 ≠ 记账键 ⇒ 桶永远判不满、
+// 限流静默失效"的教训(见 loginIPBudgetKey 的注释),而 R5-A-18 的现场
+// 恰恰是"这个键只有一处构造、却零处清账"。取调用方**一次构造、整条路径复用**:
+// oidc.go 的 handleOIDCLoginWith 把 flowKey 存进局部变量,所有失败出口用的都是它。
+//
+// 为什么不带 dbLimiterScope:本桶是**每 API 实例**的(New 里 newRateLimiter),
+// 不像 loginIPLimiter 是包级单例,不存在跨库共享。若哪天把它也改成单例,
+// 必须同时补 dbLimiterScope,否则测试的临时库之间会互相污染。
+func oidcFlowBudgetKeyForHost(host string) string {
+	return "oidc-flow-ip:" + host
+}
+
+// oidcFlowBudgetKey 是流程启动桶键的 gin 入口(唯一调用点在 handleOIDCLoginWith)。
+//
+// IP 维度必须按**真实客户端 IP**:与 clientIPKey 同一套信任边界说明 ——
+// 用 RemoteAddr 时反代(生产 compose 的 Caddy)会把全组织的流程启动坍缩到代理 IP。
+func oidcFlowBudgetKey(c *gin.Context) string {
+	return oidcFlowBudgetKeyForHost(c.ClientIP())
 }
 
 // loginAllowed guards one login attempt through **three** buckets:

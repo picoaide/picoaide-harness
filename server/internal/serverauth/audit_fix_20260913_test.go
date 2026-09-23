@@ -327,7 +327,7 @@ func TestAuditFixOIDCFlowTableFullFailsClosed(t *testing.T) {
 	for i := 0; i < oidcMaxFlows; i++ {
 		p.flows[fmt.Sprintf("s%d", i)] = &oidcFlow{verifier: "v", nonce: "n", createdAt: time.Now()}
 	}
-	if _, err := p.AuthURL("new-state", ""); err == nil {
+	if _, err := p.AuthURL("new-state", "", "203.0.113.7"); err == nil {
 		t.Fatal("流程表满时仍接受新流程(会驱逐真人在途流程)")
 	} else if !strings.Contains(err.Error(), "in-flight") {
 		t.Fatalf("错误类型不对: %v", err)

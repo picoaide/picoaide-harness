@@ -112,11 +112,25 @@ type IssueResult struct {
 //
 //	① 形状：install_id / nonce / 公钥 / 签名（不合法 ⇒ ErrMalformed）
 //	② 时间：ts 与服务器时间偏移 ≤ ClockSkew（⇒ ErrExpired，客户端要重取时间）
-//	③ nonce 一次性（⇒ ErrReplayed）—— **必须在验签之前**消费：否则同一份签名可以
-//	   先被拿去验一个错误公钥、再被重放，nonce 就失去"一次性"的意义
-//	④ 验签（用提交的公钥；⇒ ErrMalformed）
+//	③ 验签（用**提交的公钥**；⇒ ErrMalformed）
+//	④ nonce 一次性（⇒ ErrReplayed）—— 消费点在**验签通过之后、任何受理动作之前**
 //	⑤ 注册表：未注册则登记，已注册必须同值（⇒ ErrMismatch）
 //	⑥ 用部署密钥签发，绑 (uid, bearer hash, install_id, serverURL, app_id, exp, jti)
+//
+// ④ 为什么排在 ③ 之后（审计 2026-09-23 R5-A-28）：旧顺序把 nonce 消费放在验签
+// **之前**，理由是"否则同一份签名可以先被拿去验一个错误公钥、再被重放"。那个理由
+// 不成立，而代价是真实的：任何持员工 bearer 的调用方只要每次换一个 nonce、签名随便
+// 填，就能按请求速率往一次性表里灌键（未验签请求驱动内部状态增长；叠加当时
+// `ReplayGuard.order` 无界的缺陷 = 纯内存 OOM 面）。
+//
+//	(a) "一次性"仍然成立：消费点在验签通过之后、注册与签发**之前**，所以同一
+//	    (install_id, nonce) 至多有一次验签通过；两个并发的同签名请求由 Consume 的
+//	    原子性保证恰好一个赢（另一个 ErrReplayed）。
+//	(b) 验签失败的请求本来就**没有任何可被重放的效果**（不注册、不签发），让它占用
+//	    一个键只会多出"攻击者用垃圾签名把合法客户端的 nonce 提前烧掉"的拒绝服务面。
+//
+// 因此"未验签的请求不得改变任何内部状态"是这条路径的不变量，回归判据见
+// TestIssueUnverifiedRequestDoesNotGrowReplayState。
 //
 // appID 来自**路由路径**（调用方保证），绝不从请求体/头里取；serverURL 来自
 // **本次请求的实际来源**（`ServerURL`）—— 用它而不是配置项的理由是：
@@ -170,12 +184,14 @@ func (s *Service) Issue(r *http.Request, userID int64, bearerHash, appID string,
 	if serverURL == "" {
 		return nil, fmt.Errorf("appproof: 无法确定服务端地址（签发请求缺少 Host）")
 	}
-	// nonce 一次性：键里带上 install_id，避免不同安装的同名 nonce 互相顶掉。
-	if !s.nonces.Consume(installID + ":" + nonce) {
-		return nil, ErrReplayed
-	}
+	// ③ 验签（提交的公钥 + installID|nonce|ts|serverURL 四段消息）。
 	if !ed25519.Verify(pub, InstallMessage(installID, nonce, req.TS, serverURL), sig) {
 		return nil, ErrMalformed
+	}
+	// ④ nonce 一次性：键里带上 install_id，避免不同安装的同名 nonce 互相顶掉。
+	// 位置见函数头 ④ 的说明（必须在验签之后：未验签的请求不得改变内部状态）。
+	if !s.nonces.Consume(installID + ":" + nonce) {
+		return nil, ErrReplayed
 	}
 	pubB64 := base64.StdEncoding.EncodeToString(pub)
 	if err := s.installs.Register(userID, installID, pubB64); err != nil {

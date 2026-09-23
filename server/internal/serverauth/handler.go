@@ -44,6 +44,14 @@ type API struct {
 	loginIPLimiter *loginLimiter
 	// callbackLimiter:OIDC 回调专用 IP 桶(2026-09-08 P0-2)。
 	callbackLimiter *loginLimiter
+	// oidcFlowLimiter:OIDC **流程启动**专用 IP 桶(审计 2026-09-23 R5-A-18)。
+	//
+	// 与上面两个桶的关键区别:它**只对失败计数**(判定 blocked / 记账 record /
+	// 成功不计数),因此不能与登录 IP 桶共用实例 —— 共用时"成功也记账"的语义
+	// 会互相偷预算,而两套预算的阈值含义也完全不同(实读:修前它直接复用
+	// loginIPLimiter + loginIPMaxAttempts)。每 API 实例专属,因此键里不需要
+	// dbLimiterScope(见 oidcFlowBudgetKeyForHost)。
+	oidcFlowLimiter *loginLimiter
 
 	mu               sync.RWMutex
 	providers        map[string]PasswordProvider
@@ -96,6 +104,7 @@ func New(db *sql.DB) *API {
 		limiter:          sharedLoginLimiter(),
 		loginIPLimiter:   sharedLoginIPLimiter(),
 		callbackLimiter:  newCallbackLimiter(),
+		oidcFlowLimiter:  newRateLimiter(oidcFlowStartMaxAttempts),
 		providers:        map[string]PasswordProvider{},
 		browsers:         map[string]BrowserProvider{},
 		enabledProviders: map[string]bool{},

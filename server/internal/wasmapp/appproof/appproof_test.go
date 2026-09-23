@@ -396,6 +396,99 @@ func TestConsumeJTIIsPerProof(t *testing.T) {
 	}
 }
 
+// R5-A-28 ①③：**低于旧阈值的速率**下 order 也必须被限制。
+//
+// 这是本条缺陷的原始形态：速率 < capacity/TTL 时 seen 永远被过期清扫压在容量之下
+// ⇒ 旧实现里"推进 head"的截断循环永不触发 ⇒ 压缩判据（head > capacity）永不成立
+// ⇒ order 按请求速率永久增长（1 键/秒 ≈ 15MB/天）。
+//
+// 场景（capacity=8、ttl=30s、虚拟时钟每键前进 10s）：seen 稳定在 4~5 条，
+// 远小于 capacity；旧实现跑 64 个键后 OrderLen()==64（必红），新实现 ≤ 2*capacity。
+func TestReplayGuardOrderStaysBoundedAtLowKeyRate(t *testing.T) {
+	const capacity = 8
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	g := NewReplayGuard(capacity, 30*time.Second, func() time.Time { return now })
+
+	const keys = 64 // 8 × capacity：远多于容量，但到达速率远低于 capacity/TTL
+	for i := 0; i < keys; i++ {
+		k := "k-" + strconv.Itoa(i)
+		if !g.Consume(k) {
+			t.Fatalf("第 %d 个不同键首次消费应通过", i)
+		}
+		// 每一步都断言（不只终态）：旧的"按需压缩"会在中途留下无界的切片。
+		if n := g.OrderLen(); n > 2*capacity {
+			t.Fatalf("第 %d 个键后 order 长度 = %d，超过上界 %d（低速率档位下 order 无界 = OOM 面）",
+				i, n, 2*capacity)
+		}
+		now = now.Add(10 * time.Second)
+	}
+	// 两个量必须一起看：只断言 Len() 会得到"一切正常"的假绿
+	// （低速率下 seen 本来就被清扫压在容量之下，而增长的是 order）。
+	if n := g.Len(); n > capacity+1 {
+		t.Fatalf("seen 在册键数 = %d, want <= %d", n, capacity+1)
+	}
+	if n := g.OrderLen(); n > 2*capacity {
+		t.Fatalf("order 长度 = %d, want <= %d", n, 2*capacity)
+	}
+	// 有界不等于失效：TTL 内的键仍然必须判重放。
+	if !g.Consume("replay-probe") {
+		t.Fatal("新键首次消费应通过")
+	}
+	if g.Consume("replay-probe") {
+		t.Fatal("同一键在 TTL 内第二次必须拒（重建不能把去重能力一起丢掉）")
+	}
+}
+
+// R5-A-28 ②④：**未验签的请求不得改变任何内部状态**。
+//
+// 旧实现的 nonce 消费点在 ed25519.Verify **之前**（service.go:174），
+// 于是任何持员工 bearer 的调用方只要每次换一个 nonce、签名随便填，
+// 就能按请求速率往一次性表里灌键（叠加 order 无界 = 纯内存 OOM 面）。
+//
+// 本用例同时钉住两个后果：
+//  1. 签名验不过的请求不增加 nonces 的任何量（Len / OrderLen 都不动）；
+//  2. 攻击者**不能**用垃圾签名把合法客户端的 nonce 提前烧掉（DoS 面）：
+//     先用同一个 nonce 打 5 次坏签名，随后合法签名必须仍然签发出 proof。
+func TestIssueUnverifiedRequestDoesNotGrowReplayState(t *testing.T) {
+	f := newFixture(t)
+	host := "http://example.com"
+
+	// 坏签名：形状合法（64 字节 Ed25519）、base64 合法，但不是用提交的公钥签的。
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nonce = "nonce-unverified-probe"
+	bad := f.signed("install-aaaa-0001", nonce, f.now.Unix(), host)
+	bad.Signature = base64.StdEncoding.EncodeToString(
+		ed25519.Sign(otherPriv, InstallMessage("install-aaaa-0001", nonce, f.now.Unix(), host)))
+
+	for i := 0; i < 5; i++ {
+		if _, err := f.svc.Issue(f.req(host), f.userID, f.bearer, "demo", bad); err == nil {
+			t.Fatalf("第 %d 次坏签名签发必须失败", i+1)
+		}
+		if n := f.svc.nonces.Len(); n != 0 {
+			t.Fatalf("未验签的请求不得进入一次性表：seen = %d, want 0", n)
+		}
+		if n := f.svc.nonces.OrderLen(); n != 0 {
+			t.Fatalf("未验签的请求不得增长 order：len = %d, want 0", n)
+		}
+	}
+	if n := f.svc.installs.Count(f.userID); n != 0 {
+		t.Fatalf("未验签的请求不得写入安装注册表：条目 = %d, want 0", n)
+	}
+
+	// 合法签名（同一个 nonce）必须照常签发：坏签名没有把客户的 nonce 烧掉。
+	good := f.signed("install-aaaa-0001", nonce, f.now.Unix(), host)
+	if _, err := f.svc.Issue(f.req(host), f.userID, f.bearer, "demo", good); err != nil {
+		t.Fatalf("合法签名必须仍可签发（坏签名不得消费 nonce）: %v", err)
+	}
+	// 而这一次成功签发**确实**消费了 nonce（一次性语义没有被挪走而失效）。
+	if _, err := f.svc.Issue(f.req(host), f.userID, f.bearer, "demo", good); !errorsIs(err, ErrReplayed) {
+		t.Fatalf("合法签发之后同一 nonce 必须 ErrReplayed，得到 %v", err)
+	}
+}
+
 // parseKID / payloadOf / sigOf 拆一份 proof 的三段（轮换用例验证"旧密钥仍可验"）。
 func parseKID(t *testing.T, token string) string {
 	t.Helper()

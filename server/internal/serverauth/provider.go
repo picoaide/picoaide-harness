@@ -34,8 +34,9 @@ type BrowserProvider interface {
 	Name() string
 	// AuthURL starts the browser redirect. `returnServer` is the client's
 	// server address recorded from the login page (callback deep link回跳用);
-	// 实现可忽略,接口统一签名。
-	AuthURL(state, returnServer string) (string, error)
+	// `clientIP` 是发起流程的来源 IP(按信任边界解析),供实现在途流程配额用
+	// (审计 2026-09-23 R5-A-18)。实现可忽略任一参数,接口统一签名。
+	AuthURL(state, returnServer, clientIP string) (string, error)
 	HandleCallback(code, state string) (UserInfo, error)
 	Configure(cfg map[string]string) error
 }
