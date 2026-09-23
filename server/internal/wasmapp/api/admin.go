@@ -561,7 +561,9 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 		// 所以拒绝一个 approved 版本会**永久销毁**它的字节 —— 对当前生效版本是
 		// "应用当场没有可交付版本"，对历史版本是"不可恢复地丢掉一个可回滚点"。
 		// 要停服务用 unpublish / freeze；要换内容请发布新版本（版本号本就永久占位）。
-		e := apperr.New(apperr.CodeValidation, "该版本已通过审核，不能审核拒绝").
+		// N-2(2026-09-23,P3):error.code 取共享常量，与 skills/agentshare 两面
+		// **同码同语义** —— 按 error.code 分支的调用方在三面走同一条路。
+		e := apperr.New(apperr.Code(serverstore.CodeReleaseNotRejectable), "该版本已通过审核，不能审核拒绝").
 			WithDetail("app_id", appID).WithDetail("version", version).
 			WithDetail("status", meta.Status).
 			WithHint("审核拒绝只针对待审版本，且会释放该版本的归档字节（不可恢复）；" +
@@ -584,7 +586,9 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 			// 与 agentshare/sharedskills 同码同语义：拒绝即释放归档，之后不能再通过。
 			// 409（不是 400）：这不是"参数写错"，而是"该版本已不可通过"——并发下
 			// 两个管理员一个通过一个拒绝时，后来者必然撞到这条（N-4 的设计）。
-			e := apperr.New(apperr.CodeValidation,
+			// N-2(2026-09-23,P3):code 与两面逐字一致（那两面用的是同一个字面量，
+			// 尚未提取成 serverstore 常量；三面同值即契约）。
+			e := apperr.New(apperr.Code("ARCHIVE_CLEARED"),
 				"该版本归档已在拒绝时清理，无法再通过审核（拒绝即释放存储）").
 				WithDetail("app_id", appID).WithDetail("version", version).
 				WithHint("请让应用发布者上传新版本（版本号永久占位，不能复用）")
@@ -595,7 +599,7 @@ func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
 			//（rejected 分支的 `AND status <> 'approved'`）。与 sharedskills/agentshare
 			// 同码同语义：409 而非 500——这不是"服务出错"，而是"该版本已不可拒绝"。
 			// 归档字节未被销毁（守卫在 UPDATE 之前生效），撤回请走下架流程。
-			e := apperr.New(apperr.CodeValidation,
+			e := apperr.New(apperr.Code(serverstore.CodeReleaseNotRejectable),
 				"该版本已通过审核，不能再拒绝；要停止服务请用下架（unpublish）或冻结（freeze）").
 				WithDetail("app_id", appID).WithDetail("version", version).
 				WithHint("归档字节未被销毁；撤回请走下架流程")

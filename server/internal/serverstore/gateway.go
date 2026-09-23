@@ -634,12 +634,19 @@ var modelConfigCache = newTTLCache(modelConfigTTL)
 func InvalidateModelConfig() { modelConfigCache.invalidateAll() }
 
 // ModelDefaultParams loads a model's default_params by name.
+//
+// N-4(2026-09-23,P3):与路由同口径排除 catalog_missing = TRUE 的行(见
+// llmgateway/upstream.go 的 syncedModelNames 与 llmgateway/models.go 的
+// ListModels)。该过滤只影响不可达路径(能走到这里说明路由已成功,即该名下至少
+// 有一行非缺失),但把"只剩目录缺失行"的退化情形钉成"未找到"(调用方回落 128K
+// 补估上限),而不是把已停用行的参数当生效配置 —— 将来若有人把本函数接到管理端
+// 预览或 bootstrap 兜底路径上,也不会重现"停用行仍参与取参"。
 func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 	if v := modelConfigCache.get(db, "dp:"+name); v != nil {
 		return v.(string), nil
 	}
 	var params string
-	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ?`, name).Scan(&params)
+	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ? AND catalog_missing = FALSE`, name).Scan(&params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -653,6 +660,11 @@ func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 // ModelPrices returns the yuan-per-1M-token input/output prices and the
 // off-peak discount for a model name (0, 0, 0 when the model is missing or
 // unpriced). Used to compute usage cost at record time (0022/0023).
+//
+// N-4(2026-09-23):这里**故意不加** catalog_missing = FALSE —— 本函数是
+// provider 维度取价失败时的**兜底**(历史行 provider_id=0、行被迁移/删除),
+// 此时唯一比"用停用行的价"更差的选项就是"返回 0"(= 免费)。取参/取缓存价的
+// 退化方向是安全的(未找到 ⇒ 回落默认窗口 / 回落输入价),取价不是。
 func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak float64) {
 	if v := modelConfigCache.get(db, "price:"+name); v != nil {
 		p := v.([3]float64)
@@ -742,8 +754,9 @@ func ModelCachePrice(db *sql.DB, name string) float64 {
 		return v.(float64)
 	}
 	var cache sql.NullFloat64
-	// P1-6:同上,确定性取价。
-	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ? ORDER BY provider_id LIMIT 1`, name).Scan(&cache)
+	// P1-6:同上,确定性取价。N-4:同样排除目录缺失行 —— 退化方向是把缓存价
+	// 归 0(costOfAt 随即回落按输入价计费),不会产生免费额度。
+	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&cache)
 	if err != nil || !cache.Valid {
 		if err == nil {
 			modelConfigCache.set(db, "cache:"+name, 0.0)

@@ -810,3 +810,100 @@ func TestRemoveMissingProviderModelsKeepsPricedRows(t *testing.T) {
 		t.Fatalf("provider JSON = %s, want 含 priced(目录恢复后名字应回到清单)", raw)
 	}
 }
+
+// TestModelConfigLookupsSkipCatalogMissingRows：N-4(2026-09-23,P3)——
+// ModelDefaultParams / ModelCachePrice 与路由（syncedModelNames / ListModels）
+// 同口径排除 catalog_missing = TRUE 的行。
+//
+// 为什么值得钉：这是个"当前不可达但同族"的口径分裂 —— 取参/取缓存价的退化方向
+// 是安全的（未找到 ⇒ 回落 128K 补估上限 / 回落输入价），而 ModelPrices（取价
+// 兜底）**故意不排除**（退化成 0 = 免费，比用停用行的价更差）。三种退化方向不同，
+// 必须由用例把"谁过滤谁不过滤"钉死，否则下一次重构会把它们统一成一条 SQL。
+func TestModelConfigLookupsSkipCatalogMissingRows(t *testing.T) {
+	db, cleanup := NewTestDB(t)
+	defer cleanup()
+	const params = `{"context_length":64000,"max_output":4096}`
+	in, out, cache := 3.0, 7.0, 1.5
+
+	mk := func(name string) int64 {
+		pid, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-" + name, BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SyncProviderModel(db, pid, name, params); err != nil {
+			t.Fatal(err)
+		}
+		if err := UpdateModel(db, &Model{
+			ID: modelRowByName(t, db, pid, name).ID, Name: name, ProviderID: pid,
+			DisplayName: name, DefaultParams: params, InputModalities: []string{"text"},
+			InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &cache,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return pid
+	}
+
+	// solo：唯一一行被标记目录缺失 ⇒ 取参与取缓存价都必须"查不到"，取价兜底仍保留。
+	soloPID := mk("solo")
+	// dup：两行同名，低 id 的那行被标记缺失 ⇒ 取缓存价必须落到**高 id 的活行**上
+	// （不过滤时按 ORDER BY provider_id LIMIT 1 会取到缺失行的 1.5）。
+	dupMissingPID := mk("dup")
+	const dupLiveCache = 9.0
+	dupLivePID, err := AddGatewayProvider(db, &GatewayProvider{Name: "p-dup-live", BaseURL: "http://a", APIKeyEnc: "k", Enabled: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncProviderModel(db, dupLivePID, "dup", params); err != nil {
+		t.Fatal(err)
+	}
+	liveCache := dupLiveCache
+	if err := UpdateModel(db, &Model{
+		ID: modelRowByName(t, db, dupLivePID, "dup").ID, Name: "dup", ProviderID: dupLivePID,
+		DisplayName: "dup", DefaultParams: params, InputModalities: []string{"text"},
+		InputPricePer1M: &in, OutputPricePer1M: &out, CacheInputPricePer1M: &liveCache,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if dupMissingPID >= dupLivePID {
+		t.Fatalf("夹具失效:缺失行 provider_id=%d 必须小于活行 %d（否则测不出 ORDER BY 取首行）", dupMissingPID, dupLivePID)
+	}
+	// 目录抖动：两家的名字都不在目录里 ⇒ 有价行被标记缺失（不物理删除）。
+	if _, err := RemoveMissingProviderModels(db, soloPID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveMissingProviderModels(db, dupMissingPID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !modelRowByName(t, db, soloPID, "solo").CatalogMissing {
+		t.Fatal("夹具失效:solo 未被标记 catalog_missing")
+	}
+
+	// ① 唯一行缺失 ⇒ 取参返回 ErrNotFound（调用方回落默认窗口），不再把停用行的参数当生效配置。
+	if got, err := ModelDefaultParams(db, "solo"); !errors.Is(err, ErrNotFound) || got != "" {
+		t.Fatalf("ModelDefaultParams(catalog_missing) = (%q, %v), want (\"\", ErrNotFound)", got, err)
+	}
+	// ② 唯一行缺失 ⇒ 缓存价 0（costOfAt 随即回落按输入价计费）。
+	if got := ModelCachePrice(db, "solo"); got != 0 {
+		t.Fatalf("ModelCachePrice(catalog_missing) = %v, want 0", got)
+	}
+	// ③ 取价兜底**故意不过滤**：宁可沿用停用行的价，也不能退化成 0（免费）。
+	if gotIn, gotOut, _ := ModelPrices(db, "solo"); gotIn != in || gotOut != out {
+		t.Fatalf("ModelPrices(catalog_missing) = (%v,%v), want (%v,%v) —— 取价兜底不得因标记而变成 0",
+			gotIn, gotOut, in, out)
+	}
+	// ④ 同名两行：缺失行 id 更小，但取缓存价必须落到活行。
+	if got := ModelCachePrice(db, "dup"); got != dupLiveCache {
+		t.Fatalf("ModelCachePrice(dup) = %v, want %v（活行；取到 %v 说明未排除 catalog_missing）",
+			got, dupLiveCache, cache)
+	}
+	// ⑤ 目录恢复：标记清除后两处都恢复原值。
+	if err := SyncProviderModel(db, soloPID, "solo", params); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ModelDefaultParams(db, "solo"); err != nil || got != params {
+		t.Fatalf("目录恢复后 ModelDefaultParams(solo) = (%q, %v), want (%q, nil)", got, err, params)
+	}
+	if got := ModelCachePrice(db, "solo"); got != cache {
+		t.Fatalf("目录恢复后 ModelCachePrice(solo) = %v, want %v", got, cache)
+	}
+}

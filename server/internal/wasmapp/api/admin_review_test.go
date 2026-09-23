@@ -352,6 +352,11 @@ func TestAdminReviewApproveAfterRejectIsRefused(t *testing.T) {
 	if len(eb.Error.Hints) == 0 {
 		t.Fatalf("409 必须带 hints（告诉管理员下一步怎么办）：%+v", eb.Error)
 	}
+	// N-2(2026-09-23,P3)：code 与 skills/agentshare 两面逐字一致（那两面用的是
+	// 同一个字面量，尚未提取成 serverstore 常量）。
+	if eb.Error.Code != "ARCHIVE_CLEARED" {
+		t.Fatalf("approve-after-reject 的 error.code = %q, want ARCHIVE_CLEARED（三面同值）", eb.Error.Code)
+	}
 	if status, archiveEmpty, _ := e.releaseState("race-tool", "1.1.0"); status != serverstore.ReleaseStatusRejected || !archiveEmpty {
 		t.Fatalf("被拒版本不得被改成 approved：status=%q archiveEmpty=%v", status, archiveEmpty)
 	}
@@ -361,19 +366,32 @@ func TestAdminReviewApproveAfterRejectIsRefused(t *testing.T) {
 // 拒绝与释放归档是同一条 UPDATE（N-4），所以拒绝一个已通过审核的版本会**永久**
 // 销毁它的字节：对线上版本是"应用当场没有可交付版本"，对历史版本是"不可恢复地
 // 丢掉一个可回滚点"。两条都必须被拒。
+//
+// N-2(2026-09-23,P3)：除 HTTP 409 外还必须断言 **error.code** —— 三面
+// （wasmapp / sharedskills / agentshare）共用 serverstore.CodeReleaseNotRejectable，
+// 按 error.code 分支的调用方在三面走同一条路；只钉状态码测不出"wasm 面回
+// VALIDATION、另外两面回 APPROVED_NOT_REJECTABLE"这种口径分裂。
 func TestAdminRejectApprovedReleaseIsRefused(t *testing.T) {
 	e := newTestEnv(t) // 开关关闭：发布的版本直接生效
 	e.publishOK(e.tokens["alice"], "live-tool", "1.0.0", testGuestModule(t), goodConfig())
 	e.publishOK(e.tokens["alice"], "live-tool", "1.1.0", testGuestModule(t), goodConfig())
 
 	// ① 线上生效版本（current）。
-	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.1.0/reject", "",
+	eb1 := e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.1.0/reject", "",
 		map[string]any{"reason": "用例要验的是「拒绝线上版本」必须被拒，理由先给足"}),
 		http.StatusConflict)
+	if eb1.Error.Code != serverstore.CodeReleaseNotRejectable {
+		t.Fatalf("①拒绝线上版本的 error.code = %q, want %q（与 skills/agentshare 两面同码）",
+			eb1.Error.Code, serverstore.CodeReleaseNotRejectable)
+	}
 	// ② 历史 approved 版本（不是 current，但仍是可回滚点）。
-	e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.0.0/reject", "",
+	eb2 := e.decodeErr(e.req(http.MethodPost, "/api/server/admin/wasm-apps/live-tool/releases/1.0.0/reject", "",
 		map[string]any{"reason": "同上：历史 approved 也是可回滚点"}),
 		http.StatusConflict)
+	if eb2.Error.Code != serverstore.CodeReleaseNotRejectable {
+		t.Fatalf("②拒绝历史 approved 版本的 error.code = %q, want %q（与 skills/agentshare 两面同码）",
+			eb2.Error.Code, serverstore.CodeReleaseNotRejectable)
+	}
 
 	for _, v := range []string{"1.0.0", "1.1.0"} {
 		status, archiveEmpty, size := e.releaseState("live-tool", v)
