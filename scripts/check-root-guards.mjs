@@ -90,13 +90,36 @@ export function parseGuardTable(source) {
 }
 
 /**
+ * `expiresOn` 必须是 `YYYY-MM-DD` 形式的**真实**日期（第六轮复审 V2 边界②）。
+ *
+ * 与编排器 `check-workspaces.mjs` 的 `validateAdvisoryRegistry` 是**同一条规则的两份独立实现**：
+ * 本运行器刻意不 import 编排器（后者在模块顶层直接跑整轮调度，import 会连带执行）。
+ * 独立实现是这类"双通道"判据的**要求**而非重复代码：两边各自解析、各自拒绝，
+ * 才能在一侧被改坏时仍然咬住。
+ *
+ * 为什么必须判格式：`expiresOn` 只判"有没有"时，一个乱字符串会让 `expiresOn < 今天`
+ * **静默不成立** ⇒ 豁免变成"永不过期"。`2026-02-31` 这类会被 `Date.parse` 滚到 3 月 3 日，
+ * 所以第三档用 UTC 往返逐字比对挡掉它。
+ *
+ * @param value - 登记表里的 `expiresOn` 取值。
+ * @returns 是否是真实日历日。
+ */
+function isAdvisoryExpiresOn(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00Z`)
+  if (Number.isNaN(parsed)) return false
+  return new Date(parsed).toISOString().slice(0, 10) === value
+}
+
+/**
  * 从编排器的源码里解析 `ADVISORY_REGISTRY`（advisory 的**登记制**，R6-C-1）。
  *
  * `advisory` 曾经是条目上的一个自由字段：加一个词就能让任一条守卫在 `yarn check` 与
  * 本运行器里同时变成"只告警"。现在它必须在编排器里逐条登记，本运行器**独立**复核
  * 这份登记（不依赖编排器是否跑过 —— docs-only 的 PR 上编排器根本不跑）。
  *
- * 解析是**有判据**的：找不到登记表 = fail-loud（不是"当作没有 advisory"）。
+ * 解析是**有判据**的：找不到登记表 = fail-loud（不是"当作没有 advisory"）；`expiresOn`
+ * 取值非法同样是配置错误（`exit 2`），不得当成"没有到期日"放过。
  *
  * @param source - `scripts/check-workspaces.mjs` 的源码文本。
  * @returns `{ entries }` 或 `{ error }`。
@@ -115,11 +138,19 @@ export function parseAdvisoryRegistry(source) {
   for (const chunk of body.split(/\n {2}\{/u).slice(1)) {
     const name = /name:\s*'([^']+)'/u.exec(chunk)?.[1]
     if (name === undefined) return { error: `ADVISORY_REGISTRY 的条目解析失败（缺 name）：${chunk.slice(0, 80)}…` }
+    const expiresOn = /expiresOn:\s*'([^']*)'/u.exec(chunk)?.[1]
+    if (expiresOn !== undefined && expiresOn !== '' && !isAdvisoryExpiresOn(expiresOn)) {
+      return {
+        error: `ADVISORY_REGISTRY 的 \`${name}\` 的 \`expiresOn\`（${JSON.stringify(expiresOn)}）不是`
+          + ' `YYYY-MM-DD` 形式的真实日期 ⇒ 到期判据（`expiresOn < 今天`）会**静默不成立**，'
+          + '豁免变成"永不过期"（第六轮复审 V2 边界②）。请写成真实日历日（例：`2026-10-31`）。',
+      }
+    }
     entries.push({
       name,
       reason: /reason:\s*'([^']*)'/u.exec(chunk)?.[1],
       approvedBy: /approvedBy:\s*'([^']*)'/u.exec(chunk)?.[1],
-      expiresOn: /expiresOn:\s*'([^']*)'/u.exec(chunk)?.[1],
+      expiresOn,
     })
   }
   if (entries.length === 0) return { error: 'ADVISORY_REGISTRY 表解析出 0 条（表结构变了？）' }
