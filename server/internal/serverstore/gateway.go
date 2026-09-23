@@ -81,20 +81,64 @@ func GetExcludedModels(db *sql.DB, providerID int64) ([]string, error) {
 	return names, nil
 }
 
-// AddExcludedModel 把模型名加入排除名单(幂等)。
+// AddExcludedModel 把模型名加入排除名单(幂等)。自开事务 + 提交后失效缓存,
+// 语义与历史逐字一致;要与其它写库(删除模型行)同事务请用 AddExcludedModelTx。
 func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
-	names, err := GetExcludedModels(db, providerID)
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	if _, err := AddExcludedModelTx(tx, providerID, name); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateSettings()
+	return nil
+}
+
+// AddExcludedModelTx 在调用方事务内把模型名加入排除名单(幂等),返回"是否真的
+// 改了"(名字已在名单里返回 (false, nil) 且不写库)。
+//
+// 2026-09-23(第三轮 §7.3 C):旧实现是「读名单(经 settings 缓存)→ append →
+// SetSetting 整串覆写」三句各自 autocommit、中间没有任何锁 ⇒ 两个并发的
+// DELETE /models/:id(同一渠道型上游的两个模型;双管理员或双击两行即可)各自
+// 读到同一份旧名单、各自整串覆写,**后写者覆盖前写者**。丢掉的那一项 =
+// 管理员显式删除的渠道模型不在排除名单里 ⇒ 下一轮渠道同步的
+// RemoveMissingProviderModels 把它当"上游已下架"重新上架,webadmin 删除确认
+// 文案承诺的「删除后同步不会自动恢复」被撤销。
+//
+// 修法与 RemoveExcludedModelTx 同口径(读-改-写必须在**事务快照 + 行锁**下),
+// 并补上它没有的那一步:
+//   - 先 `INSERT … ON CONFLICT (key) DO NOTHING` 保证名单行存在 —— settings.key
+//     是主键,并发首次插入由唯一键裁决(后到者会等先到者提交/回滚),不会双写;
+//   - 再用 `SELECT … FOR UPDATE` 钉住该行(见 excludedModelsTx)。行锁把
+//     "读 → append → 写回"整段串起来,后到的调用者读到的是前者的结果。
+//
+// 返回 (changed, err) 让调用方能区分"真的加了"与"本来就在"(审计/日志口径)。
+// 缓存:读**不经** settingsCache(缓存不参与事务),写走 SetSettingTx 且不失效
+// 缓存 —— 调用方必须在 Commit 之后 InvalidateSettings()。
+func AddExcludedModelTx(tx *sql.Tx, providerID int64, name string) (bool, error) {
+	key := excludedModelsKey(providerID)
+	if _, err := tx.Exec(`INSERT INTO settings (key, value) VALUES (?, '[]') ON CONFLICT (key) DO NOTHING`, key); err != nil {
+		return false, err
+	}
+	names, err := excludedModelsTx(tx, providerID)
+	if err != nil {
+		return false, err
+	}
 	for _, n := range names {
 		if n == name {
-			return nil
+			return false, nil
 		}
 	}
-	names = append(names, name)
-	b, _ := json.Marshal(names)
-	return SetSetting(db, excludedModelsKey(providerID), string(b))
+	b, _ := json.Marshal(append(names, name))
+	if err := SetSettingTx(tx, key, string(b)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RemoveExcludedModelTx 在调用方事务内把模型名移出排除名单,返回"是否真的
@@ -112,8 +156,9 @@ func AddExcludedModel(db *sql.DB, providerID int64, name string) error {
 // 复活(H2 保护被一次失败请求撤销)。只留事务版 ⇒ 调用方不可能漏掉这一步。
 //
 // 名单读的是**事务内**的 settings 行(不走 settingsCache:缓存不参与事务,
-// 读-改-写必须以事务快照为准);写走 SetSettingTx,**不失效缓存**,提交后由
-// 调用方 InvalidateSettings()。
+// 读-改-写必须以事务快照为准;2026-09-23 起该读还带 `FOR UPDATE` 行锁 ——
+// 与 AddExcludedModelTx 共用 excludedModelsTx,两个方向的读-改-写都被串行化);
+// 写走 SetSettingTx,**不失效缓存**,提交后由调用方 InvalidateSettings()。
 func RemoveExcludedModelTx(tx *sql.Tx, providerID int64, name string) (bool, error) {
 	names, err := excludedModelsTx(tx, providerID)
 	if err != nil {
@@ -132,9 +177,17 @@ func RemoveExcludedModelTx(tx *sql.Tx, providerID int64, name string) (bool, err
 
 // excludedModelsTx 在事务内直读排除名单(语义与 GetExcludedModels 一致:
 // 键不存在或空串 = 空名单,JSON 解析失败 = 错误,只是不经过 settings 缓存)。
+//
+// 2026-09-23(第三轮 §7.3 C):读**必须带 `FOR UPDATE`** —— 本函数只有两个调用方
+// (AddExcludedModelTx 加名字 / RemoveExcludedModelTx 移名字),两者都是
+// "读-改-写整串覆写":不加行锁时并发的加/移各自基于同一份旧快照覆写,后写者
+// 静默覆盖前写者(删除丢项 ⇒ 下一轮渠道同步把管理员删掉的模型复活)。
+// 行不存在时 `FOR UPDATE` 锁不到东西,但这不构成漏洞:名单行的创建只在
+// AddExcludedModelTx 里、由 `INSERT … ON CONFLICT (key) DO NOTHING` 先做过
+// (唯一键裁决),拿到行锁后的读一定看得到那一次插入的结果。
 func excludedModelsTx(tx *sql.Tx, providerID int64) ([]string, error) {
 	var v string
-	err := tx.QueryRow(`SELECT value FROM settings WHERE key = ?`, excludedModelsKey(providerID)).Scan(&v)
+	err := tx.QueryRow(`SELECT value FROM settings WHERE key = ? FOR UPDATE`, excludedModelsKey(providerID)).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && v == "") {
 		return nil, nil
 	}
@@ -181,9 +234,14 @@ func scanProvider(scan interface{ Scan(...any) error }) (*GatewayProvider, error
 	return &p, nil
 }
 
+// gatewayProviderColumns 是 gateway_providers 的读列清单(唯一一份实现):
+// ListGatewayProviders / GetGatewayProvider / GetGatewayProviderTx 共用,
+// 避免"某个入口漏读一列 ⇒ scanProvider 静默拿到零值"。
+const gatewayProviderColumns = `id, name, base_url, api_key_enc, models, enabled, channel, protocol`
+
 // ListGatewayProviders returns all providers.
 func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
-	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, enabled, channel, protocol
+	rows, err := db.Query(`SELECT ` + gatewayProviderColumns + `
 		FROM gateway_providers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -202,7 +260,7 @@ func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
 
 // GetGatewayProvider loads one provider.
 func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
-	row := db.QueryRow(`SELECT id, name, base_url, api_key_enc, models, enabled, channel, protocol
+	row := db.QueryRow(`SELECT `+gatewayProviderColumns+`
 		FROM gateway_providers WHERE id = ?`, id)
 	p, err := scanProvider(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -211,13 +269,62 @@ func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
 	return p, err
 }
 
+// GetGatewayProviderTx 在调用方事务内读一个 provider。
+//
+// 2026-09-23(第三轮 §7.3 B):`forUpdate=true` 时用 `SELECT … FOR UPDATE` 取行锁
+// —— 管理端 PUT /providers/:id 必须把**基线读取**也放进事务(并在锁下读),
+// 否则"事务外读快照 → 事务内整行写回"之间别的写者提交的字段(轮换后的密钥/
+// 改名/清单)会被这份过期快照覆盖:并发改名能把刚轮换的密钥写回旧密文。
+// 行锁同时让"读基线 → 计算 → 写回 → 审计"整段串行,后到者基于前者的结果。
+//
+// 语义与非事务版逐字一致(ErrNotFound / 列清单 / scanProvider),不取锁时
+// (forUpdate=false)与 GetGatewayProvider 等价,只是走事务连接。
+func GetGatewayProviderTx(tx *sql.Tx, id int64, forUpdate bool) (*GatewayProvider, error) {
+	q := `SELECT ` + gatewayProviderColumns + ` FROM gateway_providers WHERE id = ?`
+	if forUpdate {
+		q += ` FOR UPDATE`
+	}
+	p, err := scanProvider(tx.QueryRow(q, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return p, err
+}
+
 // AddGatewayProvider inserts a provider; name conflicts return ErrDuplicate.
 func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
+	id, err := insertProvider(func(query string, args ...any) (int64, error) {
+		return InsertID(db, query, args...)
+	}, p)
+	if err != nil {
+		return 0, err
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return id, nil
+}
+
+// AddGatewayProviderTx 在调用方事务内插入 provider 行,返回新行 id
+// (name 冲突 → ErrDuplicate,语义与 AddGatewayProvider 一致)。
+//
+// **不失效缓存**:事务可能回滚,失效只能在 Commit 之后由调用方做
+// (与 AddModelTx / UpdateGatewayProviderTx 同一纪律)。管理端 POST /providers
+// 需要把「插行 + 手动型清单同步 + 审计」放进同一个事务,故有此变体。
+func AddGatewayProviderTx(tx *sql.Tx, p *GatewayProvider) (int64, error) {
+	return insertProvider(func(query string, args ...any) (int64, error) {
+		return InsertIDTx(tx, query, args...)
+	}, p)
+}
+
+// insertProvider 是 provider INSERT 的唯一实现(AddGatewayProvider /
+// AddGatewayProviderTx 共用):只写库 + 回填 p.ID + 把唯一键冲突归一为
+// ErrDuplicate;缓存失效由调用方按"提交后"语义决定。
+func insertProvider(insert insertFunc, p *GatewayProvider) (int64, error) {
 	if p.Protocol == "" {
 		p.Protocol = "openai" // 存量/未指定:默认 OpenAI 兼容(0043 迁移默认一致)
 	}
 	modelsJSON, _ := json.Marshal(p.Models)
-	id, err := InsertID(db, `INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel, protocol)
+	id, err := insert(`INSERT INTO gateway_providers (name, base_url, api_key_enc, models, enabled, channel, protocol)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, p.Name, p.BaseURL, p.APIKeyEnc, string(modelsJSON), p.Enabled, p.Channel, p.Protocol)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -226,9 +333,7 @@ func AddGatewayProvider(db *sql.DB, p *GatewayProvider) (int64, error) {
 		return 0, err
 	}
 	p.ID = id
-	InvalidateModelConfig()
-	InvalidateModelsChanged()
-	return p.ID, nil
+	return id, nil
 }
 
 // UpdateGatewayProvider updates all fields.
@@ -654,14 +759,37 @@ func scanModel(scan interface{ Scan(...any) error }) (*Model, error) {
 	return &m, nil
 }
 
-// GetModel loads a model by id.
-func GetModel(db *sql.DB, id int64) (*Model, error) {
-	row := db.QueryRow(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
+// modelSelectColumns 是"模型 + 所属上游"的最小读列清单(唯一一份实现):
+// GetModel / GetModelTx / ListAdminModels 共用。
+const modelSelectColumns = `m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
 		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
 		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
-		m.catalog_missing, p.name, p.channel, p.enabled
+		m.catalog_missing, p.name, p.channel, p.enabled`
+
+// GetModel loads a model by id.
+func GetModel(db *sql.DB, id int64) (*Model, error) {
+	row := db.QueryRow(`SELECT `+modelSelectColumns+`
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// GetModelTx 在调用方事务内按 id 读模型(语义与 GetModel 逐字一致)。
+//
+// 2026-09-23(第三轮 §7.3 C):`forUpdate=true` 时对模型行取 `FOR UPDATE` 锁 ——
+// 管理端 DELETE /models/:id 要"读该行(名字/所属上游/是否渠道型)→ 写排除名单 →
+// 删行"整段原子,基线读必须在锁下,否则并发删除同一行时第二次读到的状态可能
+// 与真正删掉的那一行不一致。
+func GetModelTx(tx *sql.Tx, id int64, forUpdate bool) (*Model, error) {
+	q := `SELECT ` + modelSelectColumns + `
+		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`
+	if forUpdate {
+		q += ` FOR UPDATE OF m`
+	}
+	m, err := scanModel(tx.QueryRow(q, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -963,9 +1091,28 @@ func DeleteModel(db *sql.DB, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := DeleteModelTx(tx, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateModelConfig()
+	InvalidateSettings()
+	InvalidateModelsChanged()
+	return nil
+}
+
+// DeleteModelTx 在调用方事务内删除模型行(不提交、不失效缓存)。
+//
+// 2026-09-23(第三轮 §7.3 C):管理端 DELETE /models/:id 需要把「读该行 → 渠道型
+// 记入排除名单 → 删行 → 审计」放进同一个事务(否则"排除名单写了但删行失败"会
+// 把模型留在名单里,或反之),故把写入逻辑抽成事务版。缓存失效与 settings
+// 失效(default_model 可能被清空)由调用方在 Commit 之后做。
+func DeleteModelTx(tx *sql.Tx, id int64) error {
 	var name string
 	var providerID int64
-	err = tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", id).Scan(&name, &providerID)
+	err := tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", id).Scan(&name, &providerID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -986,12 +1133,6 @@ func DeleteModel(db *sql.DB, id int64) error {
 	if err := clearDefaultModelIf(tx, name); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	InvalidateModelConfig()
-	InvalidateSettings()
-	InvalidateModelsChanged()
 	return nil
 }
 
@@ -1051,10 +1192,7 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 // 展示全部模型(含已停用上游的,审计修复 M3):管理页需能管理禁用上游的模型,
 // 客户端可见性由 ListModels 的 WHERE p.enabled = 1 单独控制。
 func ListAdminModels(db *sql.DB) ([]Model, error) {
-	rows, err := db.Query(`SELECT m.id, m.name, m.provider_id, COALESCE(m.display_name, m.name),
-		COALESCE(m.default_params, '{}'), COALESCE(m.input_modalities, '["text"]'),
-		m.input_price_per_1m, m.output_price_per_1m, m.cache_input_price_per_1m, m.offpeak_discount,
-		m.catalog_missing, p.name, p.channel, p.enabled
+	rows, err := db.Query(`SELECT ` + modelSelectColumns + `
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
 		ORDER BY m.id`)
 	if err != nil {
