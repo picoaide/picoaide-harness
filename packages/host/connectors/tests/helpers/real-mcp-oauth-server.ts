@@ -39,6 +39,16 @@ export interface RealMcpServer {
    * makes that window deterministic instead of machine-speed dependent.
    */
   setMcpDelay: (ms: number) => void
+  /**
+   * Answer the next `count` RFC 9728 resource-metadata requests with 500.
+   *
+   * The transient shape that makes a REGISTRATION fail its discovery round trip
+   * while the MCP endpoint itself keeps working: `mcpAuthProvider` then returns
+   * no provider at all, and the transport authenticates with the bearer baked
+   * into `requestInit.headers` — a snapshot nothing re-reads (V3A-N6). `0`
+   * restores the healthy endpoint.
+   */
+  setMetadataFailure: (count: number) => void
   /** counts + observations for assertions */
   stats: {
     registrations: number
@@ -48,6 +58,9 @@ export interface RealMcpServer {
     toolCalls: number
     refreshTokensIssued: string[]
     revokedRefreshReuse: number
+    /** resource-metadata requests: total, and how many were answered 500. */
+    metadataRequests: number
+    metadataRejected: number
     /**
      * The bearer every `/mcp` request presented, in arrival order (`''` = the
      * request carried no `Authorization` header at all).
@@ -69,10 +82,12 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
   const stats: RealMcpServer['stats'] = {
     registrations: 0, grants: [], tokenRequests: [], mcpUnauthorized: 0, toolCalls: 0,
     refreshTokensIssued: [], revokedRefreshReuse: 0, mcpBearerTokens: [],
+    metadataRequests: 0, metadataRejected: 0,
   }
   let tokenLifetimeMs = 60 * 60 * 1000
   let rotateRefresh = true
   let mcpDelayMs = 0
+  let metadataFailures = 0
   /** token -> { expiresAt, kind } */
   const tokens = new Map<string, { expiresAt: number, kind: 'access' | 'refresh', used: boolean }>()
   const clients = new Map<string, { redirectUris: string[] }>()
@@ -118,6 +133,12 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
 
     // ---- RFC 9728 protected resource metadata -----------------------------
     if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+      stats.metadataRequests++
+      if (metadataFailures > 0) {
+        metadataFailures--
+        stats.metadataRejected++
+        return json(res, 500, { error: 'temporarily_unavailable' })
+      }
       return json(res, 200, { resource: `${o}/mcp`, authorization_servers: [o], bearer_methods_supported: ['header'] })
     }
     // ---- RFC 8414 authorization server metadata ---------------------------
@@ -244,6 +265,7 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
     },
     setRotateRefresh: (rotate) => { rotateRefresh = rotate },
     setMcpDelay: (ms) => { mcpDelayMs = Math.max(0, Math.floor(ms)) },
+    setMetadataFailure: (count) => { metadataFailures = Math.max(0, Math.floor(count)) },
     stats,
     close: () => new Promise<void>(resolve => { http.close(() => resolve()) }),
   }
@@ -275,7 +297,16 @@ export interface StaticTokenMcpServer {
  * connector class: POST /connect → the panel submits fields → the transport is
  * built with `headers.Authorization`). No OAuth, no refresh.
  */
-export async function startStaticTokenMcpServer(expectedToken: string): Promise<StaticTokenMcpServer> {
+export async function startStaticTokenMcpServer(
+  expectedToken: string,
+  /**
+   * The header the endpoint authenticates. `Authorization` is the default; a
+   * definition that auto-fills a BEARER into a header of its own name
+   * (`X-Probe-Key: ''` — "leave empty to fill in the bearer") needs its own, or
+   * the wire assertion would read a header the transport never sends (V3A-N1).
+   */
+  header = 'Authorization',
+): Promise<StaticTokenMcpServer> {
   const seenTokens: string[] = []
   const json = (res: ServerResponse, status: number, body: unknown): void => {
     res.writeHead(status, { 'content-type': 'application/json' })
@@ -284,7 +315,8 @@ export async function startStaticTokenMcpServer(expectedToken: string): Promise<
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     if (url.pathname !== '/mcp') return json(res, 404, { error: 'not_found' })
-    const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/iu, '')
+    const raw = req.headers[header.toLowerCase()]
+    const token = String(Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '')).replace(/^Bearer\s+/iu, '')
     seenTokens.push(token)
     if (token !== expectedToken) {
       res.writeHead(401, { 'content-type': 'application/json' })

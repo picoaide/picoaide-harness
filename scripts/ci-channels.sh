@@ -65,13 +65,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# 值形态归一化（2026-09-24 第七轮审计 R7-D P3-3 同族 + 第八轮 R8-D-13）：`CI_CHANNELS_PIN`
-# 由上游 job output 或 secret 传来，可能带 CRLF（Windows 复制粘贴 / `gh secret set --body`）
-# 或结尾换行。留着 `\r` 会让 40-hex 形状判据失败、报成「pin 形状非法」—— 那是换行符问题，
-# 不是形状问题；所以**传输形态**的换行一律先归一（`\r` 与 `\n` 全去掉），再交给
-# `require_pin_shape` 做**整值**判定。多行注入（`<40hex>\nEVIL=1`）归一后长度就不再是 40，
-# 于是被形状判据点名（而不是像从前那样一路走到"渠道仓里没有 pin 的 commit"才失败）。
-PIN="$(printf '%s' "$PIN" | tr -d '\r\n')"
+# pin 值**不做任何归一化**（2026-09-24 补轮 / V3-B P3 定案）：换行/回车一律由
+# `require_pin_shape` 在**原始值**上 fail-loud（那里的注释写了为什么"先归一化再判形状"是错的）。
+# 老写法是 `PIN="$(printf '%s' "$PIN" | tr -d '\r\n')"`：它把 `<39hex>\n0` 这类多行值
+# 悄悄拼成恰好 40 位 hex ⇒ 判据被归一化绕过、值被静默接受（V3-B 实测）。
+# 生产链的 pin 不带换行：它经 GitHub job output（`${{ needs.gate.outputs.channels_rev }}`，
+# 平台会去掉尾随换行）或 `--pin <sha>` 传入。
 
 REPO="${CI_CHANNELS_REPO:-picoaide/channels}"
 # 原始名字留着只用于告警(见下);**渠道集判定不在这里**,交给唯一真源
@@ -299,13 +298,26 @@ echo "channels credential form: $(credential_form)" >&2
 # pin 形状校验:只接受 40 位小写 hex(解析方给的就是 `git ls-remote` 的原样输出)。
 # 失败信息**不回显收到的值**(它可能来自被污染的 workflow 变量)。
 require_pin_shape() {
-  # **整值**锚定（2026-09-24 第八轮审计 R8-D-13，已 REPRODUCED）：老字面
-  # `grep -Eq '^[0-9a-f]{40}$'` 是**按行**匹配 —— `<40hex>\nEVIL=1` 这种多行值第一行就命中、
-  # 照样过闸门，直到后面"渠道仓里没有 pin 的 commit"才失败（报错指向"pin 不存在"而**不是**
-  # "pin 非法"，排查被带偏）。注意 `grep -x` **也锚不住整个值**（它只锚定"行"），所以这里
-  # 先显式拒绝多行值，再做整行 40-hex 判定；调用点传进来的值已经过换行归一化，
-  # 这一层是纵深防御（`REV` 来自 ls-remote 的 stdout，同样是单行）。
   local value="$1"
+  # ① **先拒换行/回车，再谈形状**（2026-09-24 补轮 / V3-B P3，已 REPRODUCED）。
+  #
+  # 为什么顺序不能反：老写法先 `tr -d '\r\n'` 再判整值，于是 `<39hex>\n0`（以及任何
+  # "归一化后恰好凑成 40 位 hex"的多行值）会被**静默接受**并继续走 git —— 判据被归一化绕过。
+  # 现在在**原始值**上判：含 `\n` 或 `\r` 一律 fail-loud，且**文案与"形状非法"分开** ——
+  # 两者的处置完全不同：换行 ⇒ 去掉 secret/job output 里的换行；形状 ⇒ 值本身取错了。
+  # 生产链不产生换行（pin 经 GitHub job output 或 `--pin <sha>`），所以这条只对手工塞值发声。
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      echo "::error::渠道仓 pin 含换行/回车（不是 40 位十六进制 commit SHA 的合法形态）—— 常见来源：secret 值里带了换行、或把文件内容整段塞进了 secret/job output。请去掉换行后重跑(值不回显)" >&2
+      exit 1
+      ;;
+  esac
+  # ② **整值**锚定（2026-09-24 第八轮审计 R8-D-13）：老字面 `grep -Eq '^[0-9a-f]{40}$'` 是
+  # **按行**匹配 —— `<40hex>\nEVIL=1` 第一行就命中、照样过闸门，直到后面"渠道仓里没有 pin 的
+  # commit"才失败（报错指向"pin 不存在"而**不是**"pin 非法"，排查被带偏）。注意 `grep -x`
+  # **也锚不住整个值**（它只锚定"行"，实测 `printf '%s' "<40hex>\nEVIL=1" | grep -Eqx
+  # '[0-9a-f]{40}'` 仍 EXIT=0），所以除了上面的换行拒绝，这里再显式要求单行 —— 纵深防御，
+  # 也覆盖 `REV` 这类从 stdout 解析出来的调用点。
   if [ "$(printf '%s' "$value" | wc -l | tr -d ' ')" -ne 0 ] \
     || ! printf '%s' "$value" | grep -Eqx '[0-9a-f]{40}'; then
     echo "::error::渠道仓 pin 形状非法:必须是 40 位小写十六进制 commit SHA(值不回显)" >&2

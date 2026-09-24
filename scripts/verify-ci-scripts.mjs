@@ -1599,32 +1599,73 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       '已有检出目录(CI_CHANNELS_SOURCE)形态应报 source')
   }
 
-  // (j) `CI_CHANNELS_PIN` 的**整值**形状判据（R8-D-13）：多行值必须在**任何 git 调用之前**
-  //     就被判为"形状非法"（老写法是行匹配 ⇒ `<40hex>\nEVIL=1` 一路走到"渠道仓里没有 pin 的
-  //     commit"才失败，报错指向 pin 不存在而不是 pin 非法）。
+  // (j) `CI_CHANNELS_PIN` 的值形态判据：**先拒换行/回车，再判整值 40-hex**。
+  //
+  // 现场（2026-09-24 补轮 / V3-B P3，已 REPRODUCED）：R8-D-13 的修法是"先 `tr -d '\r\n'`
+  // 归一化、再判整值"，而 `<39hex>\n0`（39 位 hex + 换行 + 1 个 hex 字符）归一化后**恰好凑成
+  // 40 位 hex** ⇒ 判据被归一化绕过、值被静默接受并继续走 git（用真 pin 的前 39 位 + 换行 +
+  // 末位构造即可复现"完全合法地构建成功"）。所以判据必须在**原始值**上做，且换行/形状两类
+  // 故障的文案要分开（处置不同：去掉换行 vs 值取错了）。
+  //
+  // 三条形态都取自**同一个 bare 仓的真实 HEAD**（headRev），因此"归一化后是合法 pin"这个
+  // 前提成立 —— 否则"被拒绝"可能只是因为值本来就不对（假绿）。
   {
+    // 夹具：一个**合法**的合成渠道仓（目录数 = 下限、无清单）被 bare 化 —— 正例必须真的能
+    // 构建成功，否则"带换行被拒"可能只是因为值本来就不对（假绿）。
+    const pinRepo = fixtureRepo()
+    padChannelRepo(pinRepo)
+    fixtureCommit(pinRepo, 'channels/README.md', 'pins', '2026-09-01T10:00:00+08:00')
+    const pinBare = join(tempDir('ci-channels-pinbare-'), 'repo.git')
+    fixtureMustGit(pinRepo, ['clone', '--bare', pinRepo, pinBare])
+    const pinRev = fixtureMustGit(pinBare, ['rev-parse', 'HEAD'])
+    check(/^[0-9a-f]{40}$/u.test(pinRev), '夹具前置：bare 仓必须有一个 40 位 hex 的 HEAD')
+
+    // 正例（同一份值、不带换行）必须先通过：防"一刀切拒绝"式的假绿。
     const before = gitCalls().length
-    const multi = runChannels({
+    const ok = runChannels({
       source: undefined,
       refName: 'v9.9.9',
       ref: 'refs/tags/v9.9.9',
       dest: 'channels',
-      list: 'r8d-pin.list',
-      env: fakeEnv({
-        CI_CHANNELS_PIN: `${'a'.repeat(40)}\nEVIL=1`,
-        CI_CHANNELS_URL: `file://${bare}`,
-        FAKE_GIT_MODE: 'pass',
-      }),
+      list: 'r8d-pin-ok.list',
+      env: fakeEnv({ CI_CHANNELS_PIN: pinRev, CI_CHANNELS_URL: `file://${pinBare}`, FAKE_GIT_MODE: 'pass' }),
     })
-    const err = `${multi.stderr ?? ''}`
-    const text = `${multi.stdout ?? ''}${err}`
-    check(multi.status !== 0, '多行 pin 必须失败')
-    check(err.includes('pin 形状非法'), `多行 pin 必须被判成"形状非法"（不是"pin 不存在"），实际：${err}`)
-    check(!text.includes('EVIL=1'), 'pin 形状失败信息不得回显收到的值')
-    check(
-      gitCalls().length === before,
-      `pin 形状非法必须在**任何 git 调用之前**中止，实际多出：${JSON.stringify(gitCalls().slice(before))}`,
-    )
+    check(ok.status === 0, `不带换行的合法 pin 必须通过（防一刀切拒绝），实际 ${String(ok.status)}：${ok.stderr}`)
+    check(ok.selected.length > 0, '正例必须真的选出渠道（否则"通过"没有意义）')
+
+    const forms = [
+      ['<39hex>\n<末位>（归一化后恰好 40 hex ⇒ 老写法静默接受）', `${pinRev.slice(0, 39)}\n${pinRev.slice(39)}`],
+      ['<40hex>\r\n（CRLF 尾巴 ⇒ 老写法归一化后静默接受）', `${pinRev}\r\n`],
+      ['<40hex>\nEVIL=1（老写法归一化成 46 字符 ⇒ 误诊为"形状非法"）', `${pinRev}\nEVIL=1`],
+    ]
+    for (const [label, pin] of forms) {
+      const callMark = gitCalls().length
+      const run = runChannels({
+        source: undefined,
+        refName: 'v9.9.9',
+        ref: 'refs/tags/v9.9.9',
+        dest: 'channels',
+        list: 'r8d-pin-bad.list',
+        env: fakeEnv({ CI_CHANNELS_PIN: pin, CI_CHANNELS_URL: `file://${pinBare}`, FAKE_GIT_MODE: 'pass' }),
+      })
+      const err = `${run.stderr ?? ''}`
+      const text = `${run.stdout ?? ''}${err}`
+      check(run.status !== 0, `pin ${label} 必须失败（不得被归一化绕过）`)
+      check(
+        err.includes('pin 含换行/回车'),
+        `pin ${label} 必须**点名是换行问题**（与"形状非法"分开：处置不同），实际：${err}`,
+      )
+      check(
+        !/\bEVIL=1\b/u.test(text) && !text.includes(pinRev.slice(0, 39)),
+        `pin ${label} 的失败信息不得回显收到的值`,
+      )
+      check(
+        gitCalls().length === callMark,
+        `pin ${label} 必须在**任何 git 调用之前**中止，实际多出：${JSON.stringify(gitCalls().slice(callMark))}`,
+      )
+      check(!existsSync(run.listPath), `pin ${label} 失败时不得写出渠道列表`)
+    }
+    check(gitCalls().length > before, '夹具前置：正例必须真的调用过 git（否则这三条是空断言）')
   }
 
   // (k) 传输失败的分类词表（R8-D-10）：git/ssh 的常见传输失败形态都要落到"网络不可达"，
@@ -1734,9 +1775,16 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       codeLines.some(line => /grep -Eqx '\[0-9a-f\]\{40\}'/u.test(line)),
       "pin 形状判据必须用 `grep -Eqx '[0-9a-f]{40}'`（整行锚定）+ 多行值显式拒绝（R8-D-13）",
     )
+    // pin 的换行/回车必须在**原始值**上 fail-loud，且**不得先归一化**（2026-09-24 补轮 / V3-B P3）：
+    // 老的 `PIN="$(printf '%s' "$PIN" | tr -d '\r\n')"` 会把 `<39hex>\n0` 悄悄拼成恰好
+    // 40 位 hex ⇒ 判据被归一化绕过、值被静默接受。
     check(
-      codeLines.some(line => /tr -d '\\r\\n'/u.test(line)),
-      'pin 值必须先做换行归一化（\\r 与 \\n），否则多行注入会一路走到"pin 不存在"才失败（R8-D-13）',
+      codeLines.some(line => /\*\$'\\n'\*\|\*\$'\\r'\*/u.test(line)),
+      "pin 的换行/回车必须在原始值上被显式拒绝（`case … in *$'\\n'*|*$'\\r'*)`，V3-B P3）",
+    )
+    check(
+      !codeLines.some(line => /(?:^|\s)PIN="\$\(printf '%s' "\$PIN" \| tr -d/u.test(line)),
+      'pin 值**不得在判据之前归一化**（`tr -d` 会把 `<39hex>\n0` 凑成合法 40 hex ⇒ 静默放行，V3-B P3）',
     )
     // 私钥落盘必须先收 umask（裸 `>` 重定向按 022 建文件 ⇒ 0644 窗口，R8-D-12）。
     check(

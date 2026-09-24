@@ -46,7 +46,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
-import { callRoute, createHarness, seedCredential, waitFor } from './helpers/connector-harness.ts'
+import { callRoute, createHarness, scopeDir, seedCredential, waitFor } from './helpers/connector-harness.ts'
 import {
   completeAuthorization,
   startRealMcpServer,
@@ -54,6 +54,7 @@ import {
   type RealMcpServer,
   type StaticTokenMcpServer,
 } from './helpers/real-mcp-oauth-server.ts'
+import { ConnectorStore } from '../src/store.ts'
 import type { ConnectorDef } from '../src/types.ts'
 
 const servers: Array<RealMcpServer | StaticTokenMcpServer> = []
@@ -329,7 +330,15 @@ describe('R8-B-1: a declared Authorization is the connector\'s own credential', 
     }
   }, 40_000)
 
-  it('a case-insensitive spelling is kept too', async () => {
+  it('a case-insensitive spelling goes out under ONE canonical name and still authenticates', async () => {
+    // The SDK builds its headers as
+    // `new Headers({ ...(token ? { Authorization: `Bearer ${token}` } : {}), ...normalizeHeaders(requestInit.headers) })`.
+    // An EXACT-case `Authorization` key is overwritten by that spread, while a
+    // lower-case `authorization` survives as a second key and `new Headers()`
+    // APPENDS — the endpoint then receives one comma-joined value
+    // (`Bearer <token>, ApiKey <field>`) and rejects it (V3A-N2). Rendering the
+    // slot under one canonical spelling is what makes "the declared value wins"
+    // true for every spelling.
     const as = await startRealMcpServer()
     servers.push(as)
     const mcp = await startStaticTokenMcpServer('ApiKey sekret-2')
@@ -338,8 +347,63 @@ describe('R8-B-1: a declared Authorization is the connector\'s own credential', 
     const h = createHarness([apiKeyOAuthDef(as.origin, `${mcp.origin}/mcp`, 'authorization')], dir, { refreshSweepIntervalMs: 0 })
     await seedCredential(dir, 'apikey-mcp', { fields: { API_KEY: 'sekret-2' } })
     const config = await register(h, 'apikey-mcp', 1)
-    expect(config.headers?.authorization, '小写声明形态同样必须保留').toBe('ApiKey sekret-2')
-  }, 30_000)
+    expect(config.headers?.Authorization, '小写声明形态同样必须保留').toBe('ApiKey sekret-2')
+    // …and it must be the ONLY authorization-slot key, or the wire value is a
+    // comma-joined pair again.
+    expect(Object.keys(config.headers ?? {}).filter(name => name.toLowerCase() === 'authorization')).toEqual(['Authorization'])
+
+    const client = new Client({ name: 'r8b-declared-lower', version: '1' }, { capabilities: {} })
+    await client.connect(productionTransport(config))
+    try {
+      const call = await client.callTool({ name: 'ping', arguments: {} })
+      expect(call.content?.[0]?.text).toBe('pong')
+      // Wire evidence — the assertion V3A-N2 found missing: the endpoint really
+      // received the declared scheme, not a merged value.
+      expect(mcp.seenTokens[0]).toBe('ApiKey sekret-2')
+    } finally {
+      await client.close().catch(() => {})
+      h.dispose()
+    }
+  }, 40_000)
+
+  it('an EMPTY declared value on a header of ANOTHER name keeps its auto-filled bearer', async () => {
+    // "Leave the value empty and we fill in `Bearer <token>`" is offered for ANY
+    // header name in the admin console. Only the authorization slot is OUR copy
+    // of the credential — the one a live provider must be allowed to replace. A
+    // header of another name belongs to the definition, and deleting it turned a
+    // working connector into a failing one (`connected` → `error`, V3A-N1).
+    const as = await startRealMcpServer()
+    servers.push(as)
+    // Placeholder endpoint: the registration only has to succeed at this point,
+    // and the token is issued by the flow below.
+    const shape = await startStaticTokenMcpServer('unused-until-the-flow-issues-one', 'X-Probe-Key')
+    servers.push(shape)
+    const dir = mkdtempSync(join(tmpdir(), 'r8b-empty-custom-'))
+    const def = apiKeyOAuthDef(as.origin, `${shape.origin}/mcp`)
+    ;(def.mcp[0] as { headers?: Record<string, string> }).headers = { 'X-Probe-Key': '' }
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
+    const config = await register(h, 'apikey-mcp', 1)
+    expect(config.authProvider, '前置：oauth 连接器必须拿到 provider').toBeDefined()
+    const issued = (await new ConnectorStore({ baseDir: dir }).readCredential('apikey-mcp'))?.accessToken
+    expect(issued, '前置：授权完成后必须有一枚访问令牌').toBeTruthy()
+    expect(config.headers?.['X-Probe-Key'], '空值声明的自定义头必须保留').toBe(`Bearer ${String(issued)}`)
+    expect(config.headers?.Authorization, '框架自己的 Authorization 仍必须被摘掉').toBeUndefined()
+
+    // Wire evidence: an endpoint that authenticates THIS header accepts exactly
+    // the value the transport sends.
+    const endpoint = await startStaticTokenMcpServer(String(issued), 'X-Probe-Key')
+    servers.push(endpoint)
+    const client = new Client({ name: 'r8b-empty-custom', version: '1' }, { capabilities: {} })
+    await client.connect(productionTransport({ ...config, url: `${endpoint.origin}/mcp` }))
+    try {
+      const call = await client.callTool({ name: 'ping', arguments: {} })
+      expect(call.content?.[0]?.text).toBe('pong')
+      expect(endpoint.seenTokens[0], 'wire：声明的头必须逐字到达').toBe(String(issued))
+    } finally {
+      await client.close().catch(() => {})
+      h.dispose()
+    }
+  }, 40_000)
 
   it('the framework\'s own baked bearer is still dropped, and the no-header class is untouched', async () => {
     // R7-B's invariant, restated where the new rule lives: with NO declared
@@ -378,4 +442,226 @@ describe('R8-B-1: a declared Authorization is the connector\'s own credential', 
     expect(h.warns.filter(line => line.includes('[declared-authorization]')), '没有 provider 就不是"声明 vs 提供者"的形态').toEqual([])
     h.dispose()
   }, 30_000)
+})
+
+describe('V3A-N6: a provider-LESS http transport must still be rebuilt on a credential change', () => {
+  /**
+   * A registration whose OAuth discovery round trip fails (offline, a 5xx on the
+   * RFC 9728 metadata endpoint, an enterprise proxy) gets NO `authProvider`: the
+   * transport authenticates with the bearer `renderHeaders` baked into its
+   * `requestInit.headers` — a registration-time snapshot. Such a transport is
+   * the second class a credential change MUST rebuild (R8-B-2 narrowed the event
+   * to "things that cannot read the credential per request", and a baked bearer
+   * cannot). Without it the row keeps saying `connected` with a fresh
+   * `expiresAt` while every tool call 401s on the token that rotated away.
+   *
+   * Both cases force the shape the way production does: a real authorization
+   * flow first (so the stored token is one the endpoint accepts), then the
+   * credential is moved inside the 60s refresh lead window so the NEXT
+   * registration cannot take the network-free static-endpoint path, and the
+   * metadata endpoint answers 500 while `/mcp` keeps working.
+   */
+  function probeDef(origin: string): ConnectorDef {
+    return httpDef(origin, false)
+  }
+
+  /** Register once with discovery down, and assert the provider-less shape. */
+  async function registerWithoutProvider(
+    server: RealMcpServer,
+    label: string,
+  ): Promise<{ h: ReturnType<typeof createHarness>, dir: string, stale: string }> {
+    const dir = mkdtempSync(join(tmpdir(), label))
+    const h = createHarness([probeDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    await callRoute(h, '/api/pico/connectors/gated-mcp/connect', 'POST')
+    await completeAuthorization(await awaitAuthorizeUrl(h, 'gated-mcp'))
+    await waitFor(() => h.configs.length === 1, 8000)
+    expect((h.configs[0] as unknown as RegisteredTransport).authProvider).toBeDefined()
+    // Inside the refresh lead window ⇒ the registration must go through the
+    // discovery round trip instead of the static-endpoint fast path.
+    const store = new ConnectorStore({ baseDir: dir })
+    const seeded = await store.readCredential('gated-mcp')
+    const stale = String(seeded?.accessToken ?? '')
+    await store.updateCredential('gated-mcp', { ...(seeded as never), expiresAt: Date.now() + 30_000 } as never)
+    server.setMetadataFailure(4)
+    h.emitSession({ username: 'user-a', serverURL: 'https://harness.example.com' })
+    await waitFor(() => h.configs.length === 2, 15_000)
+    const baked = h.configs[1] as unknown as RegisteredTransport
+    expect(baked.authProvider, '前置：发现失败的那次注册没有 provider').toBeUndefined()
+    expect(baked.headers?.Authorization, '前置：只有注册期烘焙的 bearer').toBe(`Bearer ${stale}`)
+    expect(server.stats.metadataRejected, '前置：元数据端点真的被打了 500').toBeGreaterThan(0)
+    return { h, dir, stale }
+  }
+
+  it('a real panel refresh rebuilds it — and the rebuilt transport carries a provider', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const { h, dir, stale } = await registerWithoutProvider(server, 'r8b-n6-refresh-')
+    try {
+      // Discovery is healthy again: "refresh now" rotates the credential and the
+      // listener must hand the new token to a transport that cannot read it.
+      server.setMetadataFailure(0)
+      const refreshed = await callRoute(h, '/api/pico/connectors/gated-mcp/refresh', 'POST')
+      expect(refreshed.status).toBe(200)
+      await waitFor(() => h.configs.length === 3, 15_000)
+      const rebuilt = h.configs[2] as unknown as RegisteredTransport
+      const fresh = (await new ConnectorStore({ baseDir: dir }).readCredential('gated-mcp'))?.accessToken
+      expect(fresh, '前置：刷新真的换了令牌').not.toBe(stale)
+      // The rebuilt transport reads the credential per request from now on …
+      expect(rebuilt.authProvider, '重建必须拿到 provider（发现已恢复）').toBeDefined()
+      // … so our baked copy is gone, i.e. the live token wins.
+      expect(rebuilt.headers?.Authorization, '重建后不得再有注册期烘焙的 bearer').toBeUndefined()
+      const live = (await rebuilt.authProvider?.tokens())?.access_token
+      expect(live).toBeTruthy()
+      expect(live).not.toBe(stale)
+      // The previous fibre was retired (the rebuild is a replacement, not an
+      // extra registration): exactly one live fibre owns the name.
+      expect(h.fibers.filter(fiber => fiber.dispose.mock.calls.length === 0).length).toBeGreaterThanOrEqual(1)
+    } finally {
+      h.dispose()
+    }
+  }, 60_000)
+
+  it('a rebuild while discovery is STILL down carries the FRESH baked bearer', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const { h, dir, stale } = await registerWithoutProvider(server, 'r8b-n6-baked-')
+    try {
+      // The credential moves exactly as a refresh leaves it (the engine writes
+      // the store and announces the id — the route itself would need discovery,
+      // which is still down), and the rebuild cannot get a provider either: it
+      // must bake the NEW token instead of keeping the registration-time one.
+      server.setMetadataFailure(4)
+      const store = new ConnectorStore({ baseDir: dir })
+      await store.updateCredential('gated-mcp', { accessToken: 'at-fresh-direct', expiresAt: Date.now() + 30_000 })
+      h.emit('pico/connector-credentials-changed', { id: 'gated-mcp' })
+      await waitFor(() => h.configs.length === 3, 15_000)
+      const rebuilt = h.configs[2] as unknown as RegisteredTransport
+      expect(rebuilt.authProvider, '发现仍失败 ⇒ 重建后仍没有 provider').toBeUndefined()
+      expect(rebuilt.headers?.Authorization, '重建必须带上刷新后的新 bearer').toBe('Bearer at-fresh-direct')
+      expect(rebuilt.headers?.Authorization).not.toContain(stale)
+    } finally {
+      h.dispose()
+    }
+  }, 60_000)
+
+  it('REVERSE CONTROL: a transport that HAS a provider is not re-registered', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'r8b-n6-control-'))
+    const h = createHarness([probeDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+    const config = await register(h, 'gated-mcp', 1)
+    expect(config.authProvider).toBeDefined()
+    try {
+      const refreshed = await callRoute(h, '/api/pico/connectors/gated-mcp/refresh', 'POST')
+      expect(refreshed.status).toBe(200)
+      // Let the (empty) re-registration work settle before counting.
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(h.configs.length, 'provider 在手的 http 传输不得被重注册').toBe(1)
+      expect(h.fibers[0]?.dispose, '活传输不得被 dispose').not.toHaveBeenCalled()
+    } finally {
+      h.dispose()
+    }
+  }, 60_000)
+})
+
+describe('V3A-N3: the declared-authorization report is scoped per account/deployment', () => {
+  it('two accounts sharing one plugin instance each report their own line', async () => {
+    const as = await startRealMcpServer()
+    servers.push(as)
+    const mcp = await startStaticTokenMcpServer('ApiKey sekret-scope')
+    servers.push(mcp)
+    // Two ACCOUNTS: the store follows the session, so each account has its own
+    // credential directory — the scope `deadGrants` keys on too.
+    // The scoped layout lives under `DSH_HOME`; without a stub the store would
+    // try to create directories inside the real user home.
+    const home = mkdtempSync(join(tmpdir(), 'r8b-warn-home-'))
+    vi.stubEnv('DSH_HOME', home)
+    const def: ConnectorDef = {
+      id: 'apikey-mcp',
+      name: 'ApiKey MCP',
+      description: 'audit',
+      authMode: 'oauth',
+      tokenFields: [{ key: 'API_KEY', label: 'API key', type: 'password', required: false }],
+      auth: {
+        authorizeUrl: `${as.origin}/oauth/authorize`,
+        tokenUrl: `${as.origin}/oauth/token`,
+        clientId: '',
+        redirectUri: 'http://127.0.0.1/callback',
+        pkce: true,
+        publicClient: true,
+        discoveryUrl: `${as.origin}/mcp`,
+        scopes: 'mcp.read offline_access',
+      },
+      mcp: [{ serverName: 'apikey-mcp', transport: 'streamable-http', url: `${mcp.origin}/mcp`, headers: { Authorization: 'ApiKey ${API_KEY}' } }],
+    }
+    // `storeBaseDir: undefined` makes the plugin resolve its store from the
+    // SESSION (account + deployment), which is the scope under test.
+    const h = createHarness([def], home, {
+      refreshSweepIntervalMs: 0,
+      storeBaseDir: undefined,
+      connectors: [def],
+    })
+    const marker = '[declared-authorization]'
+    try {
+      // Each account gets its own credential file in its own scoped directory.
+      for (const username of ['user-a', 'user-b']) {
+        await seedCredential(scopeDir(username, null), 'apikey-mcp', {
+          accessToken: `at-${username}`,
+          expiresAt: Date.now() + 3_600_000,
+          fields: { API_KEY: `sekret-${username}` },
+        })
+      }
+      h.emitSession({ username: 'user-a' })
+      await waitFor(() => h.configs.length === 1, 15_000)
+      expect(h.warns.filter(line => line.includes(marker)).length, 'A 报一条').toBe(1)
+      h.emitSession({ username: 'user-b' })
+      await waitFor(() => h.configs.length === 2, 15_000)
+      // The same DEFINITION shape under a different account scope is a different
+      // report: without `store.dir` in the key the second account is silenced.
+      const lines = h.warns.filter(line => line.includes(marker))
+      expect(lines.length, 'B 必须自己再报一条（去重键含账号作用域）').toBe(2)
+      expect(lines[0]).toBe(lines[1])
+    } finally {
+      h.dispose()
+      vi.unstubAllEnvs()
+    }
+  }, 60_000)
+})
+
+describe('V3A-N4: the name-conflict compensation honours the rebuild subset', () => {
+  it('a leftover instance holding the stdio name does not cost the live http transport', async () => {
+    // `registerMcp`'s `already in use` branch exists for a name held by an
+    // instance this plugin does not own (an HMR leftover, a previous
+    // generation). Its compensation used to unregister the WHOLE connector —
+    // i.e. a credential-change rebuild that selected only the stdio child would
+    // dispose the live http transport as a side effect of that defensive path
+    // (V3A-N4). Here the leftover keeps the stdio name taken, so the branch
+    // really runs.
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'r8b-n4-'))
+    const h = createHarness([mixedDef(server.origin)], dir, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    await callRoute(h, '/api/pico/connectors/gated-mcp/connect', 'POST')
+    await completeAuthorization(await awaitAuthorizeUrl(h, 'gated-mcp'))
+    await waitFor(() => h.configs.length === 2, 8000)
+    const configs = h.configs as unknown as RegisteredTransport[]
+    const httpIndex = configs.findIndex(entry => entry.transport === 'streamable-http')
+    const stdioIndex = configs.findIndex(entry => entry.transport === 'stdio')
+    expect(httpIndex).toBeGreaterThanOrEqual(0)
+    expect(stdioIndex).toBeGreaterThanOrEqual(0)
+    // The leftover: its disposer never releases the reserved name.
+    h.fibers[stdioIndex]!.dispose = vi.fn(() => {}) as never
+    try {
+      const store = new ConnectorStore({ baseDir: dir })
+      await store.updateCredential('gated-mcp', { accessToken: 'at-after-change', expiresAt: Date.now() + 3_600_000 })
+      h.emit('pico/connector-credentials-changed', { id: 'gated-mcp' })
+      // The rebuild is expected to fail (the name is still taken) — what matters
+      // is WHICH transports the compensation touched.
+      await new Promise(resolve => setTimeout(resolve, 250))
+      expect(h.fibers[httpIndex]!.dispose, '冲突补偿不得拆掉不在重建集合里的 http 传输').not.toHaveBeenCalled()
+      expect(h.warns.some(line => line.includes('重注册失败')) || h.configs.length > 2).toBe(true)
+    } finally {
+      h.dispose()
+    }
+  }, 60_000)
 })
