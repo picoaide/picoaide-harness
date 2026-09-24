@@ -362,6 +362,93 @@ describe('TokenRefresher', () => {
     expect(server.grants).toEqual([])
   })
 
+  it('a forced refresh is NOT swallowed by an in-flight clock-path refresh', async () => {
+    // R7-B P2-b：`force` 原先只作用于**创建 inflight 槽位**的那一次。在飞的"看时钟"
+    // 请求会走"还新鲜，什么都不做"的快路径（零令牌端点请求）并回报 `ok: true`，把
+    // 随后到达的强制请求（401 路径：服务器说这枚令牌已死，本地 `expiresAt` 还在未来）
+    // 整个吞掉 —— 401 钩子于是 adopt 一枚死令牌，重试照旧 401。
+    //
+    // 判据不是"赢得竞态"：把时钟请求**停在** `read` 里做确定性握手，强制请求必然落在
+    // 它的飞行窗口内（`refresh()` 在第一次 await 之前就同步登记了 inflight 槽位）。
+    const server = await startServer({ expiresIn: 3600 })
+    const { store } = tempStore()
+    // 本地时钟说这枚令牌还能用一小时 —— 正是被 401 推翻的那个状态。
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() + 60 * 60 * 1000 }))
+
+    let releaseRead!: () => void
+    const gate = new Promise<void>(resolve => { releaseRead = resolve })
+    let enteredRead!: () => void
+    const readEntered = new Promise<void>(resolve => { enteredRead = resolve })
+    let parked = true
+    const refresher = new TokenRefresher({
+      read: async (id) => {
+        if (parked) {
+          parked = false
+          enteredRead()
+          await gate
+        }
+        return await store.readCredential(id)
+      },
+      write: (id, patch) => store.updateCredential(id, patch),
+      target: () => discoveryTarget(server.origin),
+    })
+
+    const clockPath = refresher.refresh('example-mcp')
+    await readEntered
+    expect(refresher.isRefreshing('example-mcp'), '前置：时钟路径必须真的在飞').toBe(true)
+    const forced = refresher.refresh('example-mcp', { force: true })
+    releaseRead()
+
+    const [clockOutcome, forcedOutcome] = await Promise.all([clockPath, forced])
+    expect(clockOutcome.ok).toBe(true)
+    expect(forcedOutcome.ok).toBe(true)
+    // 修复前：强制请求复用了那次快路径 ⇒ 令牌端点零请求，两个结果都是旧令牌。
+    expect(server.grants).toEqual(['refresh_token'])
+    const stored = await store.readCredential('example-mcp')
+    expect(stored?.accessToken).toBe('at-1')
+    expect(stored?.refreshToken).toBe('rt-1')
+    expect(forcedOutcome.ok && forcedOutcome.tokens.accessToken).toBe('at-1')
+    expect(forcedOutcome.ok && forcedOutcome.tokens.accessToken).not.toBe('at-stale')
+  })
+
+  it('a forced refresh reuses an in-flight run that DID reach the server (one grant, no double spend)', async () => {
+    // 反向对照：强制请求只能被"越过时钟快路径"的在飞请求满足。这条钉住另一侧 ——
+    // 在飞请求自己就是一次真实续期时，后来的强制请求**不得**再刷一次（同一个单次
+    // refresh token 出示两次会被轮换复用检测吊销整条授权）。
+    const server = await startServer({ expiresIn: 3600 })
+    const { store } = tempStore()
+    await store.writeCredential('example-mcp', credential({ expiresAt: Date.now() - 60_000 }))
+    let releaseWrite!: () => void
+    const gate = new Promise<void>(resolve => { releaseWrite = resolve })
+    let enteredWrite!: () => void
+    const writeEntered = new Promise<void>(resolve => { enteredWrite = resolve })
+    let parked = true
+    const refresher = new TokenRefresher({
+      read: (id) => store.readCredential(id),
+      write: async (id, patch) => {
+        if (parked) {
+          parked = false
+          enteredWrite()
+          await gate
+        }
+        return await store.updateCredential(id, patch)
+      },
+      target: () => discoveryTarget(server.origin),
+    })
+
+    // 时钟路径这次真的会续期（本地也判定已过期），把它停在**落盘**那一步。
+    const clockPath = refresher.refresh('example-mcp')
+    await writeEntered
+    const forced = refresher.refresh('example-mcp', { force: true })
+    releaseWrite()
+
+    const [clockOutcome, forcedOutcome] = await Promise.all([clockPath, forced])
+    expect(clockOutcome.ok && forcedOutcome.ok).toBe(true)
+    expect(server.grants).toEqual(['refresh_token'])
+    const stored = await store.readCredential('example-mcp')
+    expect(stored?.accessToken).toBe('at-1')
+  })
+
   it('leaves the stored credential untouched when the refresh is retryable', async () => {
     const server = await startServer()
     server.failGrant = 'server_error'
