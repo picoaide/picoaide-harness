@@ -146,8 +146,43 @@ jobs:
       - run: yarn install --immutable
       # 清单与运行器:`scripts/check-root-guards.mjs` 解析编排器的 GUARDS 表(解析不到
       # 即 fail-loud),不跑任何 workspace 包的 check(那部分属于下面的 gate)。
+      #
+      # 判定权上移(第十一轮复审 J1 的 N1/N4):**不看退出码,只认通过凭据**。
+      # 为什么:判决不可信的进程照样能说出"我退 0"—— J1 实测 `NODE_OPTIONS=--import=<钩子>`
+      # 同时覆写 `process.exit` 与 `process.reallyExit` 时,守卫一条没跑、整份日志 713 字节、
+      # EXIT=0(旧实现在 `try { reallyExit } catch { SIGKILL }` 里,钩子不抛 ⇒ 兜底不可达)。
+      # 运行器现在只在"每个登记的守卫都真的跑过、且没有一条失败"时打印这行凭据:
+      #   `check-root-guards: VERDICT PASS guards=<N>`(N = 实跑数)
+      # 被拒绝运行的进程、零守卫的进程都**打印不出**它 ⇒ 这一步必须自己要求它出现。
       - name: Root guards (every PR shape)
-        run: node scripts/check-root-guards.mjs
+        run: |
+          set -euo pipefail
+          node scripts/check-root-guards.mjs 2>&1 | tee /tmp/root-guards.log
+          # 唯一凭据:行首锚定 + guards=N 且 N ≥ 1(非通过行里刻意不出现 `VERDICT PASS` ⇒ 零守卫 /
+          # 被拒绝运行的进程说不出这句话,而它照样能退出 0)
+          if ! grep -qE '^check-root-guards: VERDICT PASS guards=[1-9][0-9]*' /tmp/root-guards.log; then
+            echo "::error::根守卫输出里没有行首锚定的通过凭据(形如 check-root-guards: VERDICT PASS guards=N,N ≥ 1)"
+            echo "::error::⇒ 被拒绝运行 / 零守卫的进程会退出 0 但打印不出这一行(N1 现场:整份日志 713 字节、守卫一条没跑)"
+            exit 1
+          fi
+      # 严格面参数通道(第十一轮复审 J1 的 N2 ②;K1 已把 `--require-clean` 做成本脚本的参数)。
+      #
+      # 为什么必须是**独立的直接调用**:`--require-clean` 写在 `run:` 的 argv 里、**不在**
+      # 环境面上 —— 被钉步骤体里一行 `unset CI GITHUB_ACTIONS`(或 `env -u …`)能把
+      # "工作树↔HEAD 锚定"这条唯一的承重网从 CI 硬判据降级成本地告警(J1 实测 EXIT 1→0),
+      # 而 env 信号(`GITHUB_EVENT_PATH`/`GITHUB_SHA`/…)本质上是"默认就严格",关得掉;
+      # **参数**才是不可由环境面关闭的那一半。两个都要在才叫分界钉死。
+      # 不挂进 `scripts/check-workspaces.mjs` 的守卫通道:那要在 `check-root-guards.mjs` 的
+      # `REGISTERED_GUARD_ARG_TAILS` 里登记,而登记之后**任何**本地脏树(并发泳道同时在改
+      # `scripts/**`)都会跟着红 —— 代价大于收益(K1 报告 §5.1 的取舍,原样采纳)。
+      #
+      # 与下面 gate job 里那条 2026-09-23「不接 `--require-clean`」的决定**不是同一件事**:
+      # 那条说的是 `verify-wasm-client-only.sh` 的**整跑期工作树洁净**口径(本机共享工作树
+      # 必然脏 ⇒ 假红);这里的 `--require-clean` 只断言**登记的执行体入口文件 == HEAD**
+      # (`scripts/**` + `.yarnrc.yml` + `.gitignore` + `package.json`),CI 的检出树按构造就是
+      # 干净的 —— 已在干净检出上实测稳定为绿(见 temp/r11/fix-K3/verify-require-clean.sh 的正证)。
+      - name: Guard parser integrity (strict worktree↔HEAD anchor)
+        run: node scripts/check-guard-parser-integrity.mjs --require-clean
 
   gate:
     name: Gate (tests + workspace build)
@@ -350,7 +385,29 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         env:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
-        run: yarn check
+        run: |
+          set -euo pipefail
+          # `|&` 把 stdout 与 stderr 都交给 tee;`set -o pipefail` 保证 `yarn check` 的失败
+          # 仍然让这一步红(而不是只在断言里体现)。判定权上移:这一步**不看退出码就通过**,
+          # 只有下面那条通过凭据在场才算门禁真的跑过(第十一轮复审 J1 的 N1/N4:
+          # `--import` 钩子覆写 `exit`+`reallyExit` 时零任务 + EXIT=0;`yarnPath` 顶掉 yarn 时
+          # 同样零任务 + EXIT=0 —— 两种形态都打印不出通过凭据)。
+          yarn check |& tee /tmp/gate.log
+          # ① 形态:行首锚定的 `check-workspaces: VERDICT PASS planned=N executed=N`
+          #    (非通过行 `VERDICT FAIL`/`VERDICT ZERO-TASKS` 里刻意不出现 `VERDICT PASS`)
+          if ! grep -E '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' /tmp/gate.log > /tmp/gate-verdict.txt; then
+            echo "::error::门禁输出里没有行首锚定的通过凭据(形如 check-workspaces: VERDICT PASS planned=N executed=N)"
+            echo "::error::⇒ 被拒绝运行 / 被 yarnPath 顶替 / 零任务的编排器会退出 0 但打印不出这一行(N1/N4 现场:整份日志 713 字节)"
+            exit 1
+          fi
+          # ② 语义:N>0 且 planned == executed。只取"数字开头的那一段"——
+          #    凭据行后面还有中文说明(含 `**实跑 == 计划 > 0**` 这类字样,里面有数字 0),
+          #    用 gsub 抽全行数字会把 32 变成 320。
+          if ! awk '{ p = $4; sub(/^planned=/, "", p); sub(/[^0-9].*$/, "", p); e = $5; sub(/^executed=/, "", e); sub(/[^0-9].*$/, "", e) } p + 0 > 0 && p + 0 == e + 0 { ok = 1 } END { exit ok ? 0 : 1 }' /tmp/gate-verdict.txt; then
+            echo "::error::通过凭据的计数不成立:必须 planned=N > 0 且 planned == executed(零任务/少跑任务一律拒)"
+            echo "::error::⇒ 现场读到的凭据行:$(tr '\n' ' ' < /tmp/gate-verdict.txt)"
+            exit 1
+          fi
       # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`
       # 对它 0 引用;组 6 只在本地手跑)。接在这里的原因:本 job 已装 xvfb(`yarn check`
       # 里的图形门禁需要它)、也已 `yarn install`(探针用仓内 Electron)⇒ 接线成本 = 一个
