@@ -139,7 +139,7 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
       call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
     } catch (error) {
       const grants = server.stats.grants.filter(g => g === 'refresh_token').length
-      console.log('TEMP-DIAG flake:', JSON.stringify({
+      console.log('TEMP-DIAG v2 flake:', JSON.stringify({
         grants,
         tokenRequests: server.stats.tokenRequests.map(r => r.get('grant_type')),
         revokedRefreshReuse: server.stats.revokedRefreshReuse,
