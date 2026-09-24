@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import type { DesktopNotification, DesktopRuntime } from '../src/runtime.ts'
 import { apply, Config, type Config as LoopNotifyConfig } from '../src/loop-notify.ts'
+import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 const config: LoopNotifyConfig = {
   enabled: true,
@@ -78,7 +79,8 @@ describe('desktop loop notification Host plugin', () => {
     const { ctx, notifications } = await createHarness()
     emitIdle(ctx, 'root-1')
     emitIdle(ctx, 'sub-1', 1, 'subagent')
-    await vi.waitFor(() => { expect(notifications.length).toBe(1) })
+    // 现象：idle 事件经 10ms 合并窗口后弹出一次通知。
+    await vi.waitFor(() => { expect(notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(notifications[0]).toMatchObject({
       title: 'Task finished',
       sessionId: 'root-1',
@@ -89,7 +91,8 @@ describe('desktop loop notification Host plugin', () => {
     const { ctx, notifications } = await createHarness()
     emitIdle(ctx, 'a')
     emitIdle(ctx, 'b')
-    await vi.waitFor(() => { expect(notifications.length).toBe(1) })
+    // 现象：两次并发完成合并成一条通知（10ms 窗口）。
+    await vi.waitFor(() => { expect(notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(notifications[0]?.title).toBe('2 tasks finished')
   })
 
@@ -98,7 +101,8 @@ describe('desktop loop notification Host plugin', () => {
     await dispatchTool(ctx, 'ask_user_question', {
       questions: [{ id: 'q1', question: 'Which API should I use?' }],
     }, agent('root-2'))
-    await vi.waitFor(() => { expect(notifications.length).toBe(1) })
+    // 现象：ask_user_question 触发提问通知。
+    await vi.waitFor(() => { expect(notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(notifications[0]).toMatchObject({
       title: 'Your input is needed',
       body: 'Which API should I use?',
@@ -112,7 +116,8 @@ describe('desktop loop notification Host plugin', () => {
       plan: '# Plan',
       questions: [],
     }, agent('root-3'))
-    await vi.waitFor(() => { expect(notifications.length).toBe(1) })
+    // 现象：exit_plan_mode 触发提问通知。
+    await vi.waitFor(() => { expect(notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(notifications[0]?.title).toBe('Your input is needed')
   })
 
@@ -124,7 +129,8 @@ describe('desktop loop notification Host plugin', () => {
       reason: 'Run rm -rf',
     })
     expect(outcome).toBe('allowed-once')
-    await vi.waitFor(() => { expect(notifications.length).toBe(1) })
+    // 现象：approval/request 触发审批通知。
+    await vi.waitFor(() => { expect(notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(notifications[0]).toMatchObject({
       title: 'Approval needed',
       body: 'Tool bash requests approval: Run rm -rf',
@@ -149,7 +155,8 @@ describe('desktop loop notification Host plugin', () => {
   it('honors notifyWhenFocused true and a disabled config', async () => {
     const enabled = await createHarness({ config: { notifyWhenFocused: true } })
     emitIdle(enabled.ctx, 'root-6')
-    await vi.waitFor(() => { expect(enabled.notifications.length).toBe(1) })
+    // 现象：notifyWhenFocused=true 时仍弹出通知。
+    await vi.waitFor(() => { expect(enabled.notifications.length).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(enabled.notifications[0]?.title).toBe('Task finished')
 
     const disabled = await createHarness({ config: { enabled: false } })

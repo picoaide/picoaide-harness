@@ -59,14 +59,18 @@
  * 另外，`advisory` 还必须先登记在编排器的 `ADVISORY_REGISTRY` 里，否则这里直接 exit 2。
  */
 
-import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ORCHESTRATOR = join(ROOT, 'scripts', 'check-workspaces.mjs')
+
+/** `selfTestGuardEnvironment()` 至少执行的断言条数(3 条键表 + 2 条真子进程行为)。 */
+const SELFTEST_GUARD_ENV_ASSERTIONS = 5
 
 /** 下限（不是清单）：这些守卫的判据覆盖文档/提交信息，见文件头。 */
 const MINIMUM_REQUIRED_GUARDS = [
@@ -91,25 +95,43 @@ const MINIMUM_REQUIRED_GUARDS = [
  * **脚本路径**（`script`，逐字）。新守卫必须登记进本表，否则 fail-loud（exit 2）。
  * 第二判据在 `scripts/verify-check-workspaces.mjs`（它另有一份**独立**的登记表：
  * 两处同时被改才会静默，导入本表等于把两个判据合并成一个）。
+ *
+ * ## `digest` = 脚本**内容**的摘要（2026-09-24 第十轮审计 C-06）
+ *
+ * 第九轮把「守卫 → argv → 脚本路径」绑在一条链上（对，且实测有效），但**脚本内容本身仍无
+ * 判据**：把 `scripts/check-theme-tokens.mjs` 的内容整段换成 `process.exit(0)`、或把它换成
+ * 同名**符号链接**指向另一个能通过的守卫之后，运行器照报 `✓ check:theme-tokens`
+ * （审计在副本里实测：这一条从 ✗ 翻成 ✓，两条门禁都看不出区别）。
+ *
+ * 所以每条登记多一个 `digest`（该脚本文件的 sha256，**64 位小写 hex**），由
+ * `scripts/check-guard-parser-integrity.mjs` 复算对拍；第二判据在
+ * `scripts/verify-check-workspaces.mjs`（独立复算 + 符号链接断言）。本文件只校验**字段形态**
+ * （缺字段 / 不是 64 位 hex ⇒ exit 2）—— 比较留给那两条判据，避免把比较逻辑也塞进运行器。
+ * 换守卫脚本的内容 = 必须在同一个 PR 里更新这里的 digest（可评审的 diff）；
+ * 重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [] }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [] }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [] }],
-  ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [] }],
-  ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [] }],
-  ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [] }],
-  ['check:inventories', { script: 'node scripts/verify-inventories.mjs', argvTail: [] }],
-  ['check:theme-tokens', { script: 'node scripts/check-theme-tokens.mjs', argvTail: [] }],
-  ['check:glitchtip', { script: 'node scripts/verify-glitchtip-ops-check.mjs', argvTail: [] }],
-  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [] }],
-  ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [] }],
-  ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [] }],
-  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [] }],
-  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [] }],
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'e14487254512a93a2ae28dde89a9bbfd6e4f930255cd43e27df3bcbbf35af7f4' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '7f4f3446a4f936d4ac4cd9201c92784e9b51f19ccdd99bf3c6ca5a10c75edcc1' }],
+  ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
+  ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: '92697e806d4402f67d5bf7fe9a06ea2d4774a4dd30c0f62e7105861523bc8f44' }],
+  ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
+  ['check:inventories', { script: 'node scripts/verify-inventories.mjs', argvTail: [], digest: '39528c7984ee7baf0cad92faaa3b421f7f64e4d08b524d63417e896abb57267d' }],
+  ['check:theme-tokens', { script: 'node scripts/check-theme-tokens.mjs', argvTail: [], digest: '1ad99bf7efaa0b0636908cf5a90d8e99d3dde45611ee91a3e818973e4f01063f' }],
+  ['check:glitchtip', { script: 'node scripts/verify-glitchtip-ops-check.mjs', argvTail: [], digest: 'f73f2ebcecbfeaaa57c069ca2e662dc1842b9d37d53eb413fc36bb85a987be3e' }],
+  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: 'c6947c1bd3784f2315cab983c921cfabd11bcda48b2f993d8466f9d50758d72e' }],
+  ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [], digest: 'c1a84c22a47bea2c1368bfba32f33b20feca66deb30abcbbc0eb40318f807285' }],
+  ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: 'fad3de592353ad16751906c25b2181a6adf3fc164a889fa3adfd6847645b7803' }],
+  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '30b4a6f3266b61602b2d90be1672a71c3a93f38f9ac7db174f80d70c72b31df7' }],
+  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
-  ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'] }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [] }],
+  ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '00fd8c90848089613226c7dc8c5213eb016a37ce4586aeb2dcd5cfb63ef5e091' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '96b5f0b0d940cc74c5e2d0d9a5069c5eb744c446d78e214413ef425a96592db1' }],
+  // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
+  //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
+  //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'befe4a473dc7fd37a1fc2796501ae0901daae9ca560e2c66162ad9cefba26d11' }],
 ])
 
 /**
@@ -141,6 +163,88 @@ const SEMANTICS_CHANGING_FLAGS = [
   '--dry-run',
   '--allow-advisory',
 ]
+
+/**
+ * 交给守卫子进程的**危险键族**（2026-09-24 第十轮审计 D-03 的后半条）。
+ *
+ * 现场（审计方实跑）：在被钉步骤的**步骤体**里加一行
+ * `export NODE_OPTIONS="--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+ * 之后，`check-workflows` 一个字都不报（它只看 YAML 的 `env:`），而真跑这条命令时
+ * 16 个根守卫**全部"跑而恒绿"**：`runGuard()` 的 `env: { ...process.env, FORCE_COLOR: '0' }`
+ * 把 `NODE_OPTIONS` **原样透传**给每个守卫子进程，注入的退出钩子在守卫进程退出时把
+ * `process.exitCode` 改回 0。实测：同一条命令在有 1 项违规的树上打印「1 项未通过」却 EXIT=0。
+ *
+ * 这是本文件的第二道收口（第一道在 `scripts/check-workflows.mjs` 的 [SK-17]：被钉步骤的
+ * 步骤体/env 键必须登记在白名单里）。为什么"层"之外还要这一道：静态判据总会被推到下一层
+ * （第八轮 argv → 第九轮进程环境 → 第十轮步骤体），而**清洗交给子进程的环境**与"层"无关。
+ *
+ * 语义：**键名在危险族里、又不在 `GUARD_CHILD_ENV_ALLOWED` 登记表里 ⇒ 丢弃**（fail-closed：
+ * 认不出的一律丢）。不在危险族里的键照常透传（`CHECK_CONCURRENCY` / `PG_DSN_TEST` /
+ * 各种 token 都靠它）。`HOME` / `XDG_CACHE_HOME` 刻意**不**在这里丢：守卫要靠真实 HOME
+ * 找到 git/pg 配置与 corepack 缓存，丢掉它们会让门禁在本机直接跑不起来 —— 它们的入口
+ * （`COREPACK_HOME` 那条链）由静态白名单封住。
+ */
+const GUARD_CHILD_ENV_DENIED_PREFIXES = ['NODE_', 'BASH_', 'LD_', 'COREPACK_', 'YARN_', 'NPM_CONFIG_', 'npm_config_']
+/** 精确匹配的危险键（不带前缀的形态）。 */
+const GUARD_CHILD_ENV_DENIED_KEYS = [
+  'ENV', // POSIX sh 的启动文件（与 BASH_ENV 同族）
+  'SHELLOPTS',
+  'BASHOPTS',
+  'PROMPT_COMMAND',
+  'PYTHONSTARTUP',
+  'PERL5OPT',
+  'RUBYOPT',
+]
+/**
+ * 允许**透传**的危险族键（登记制：每条带理由，当前为空）。
+ *
+ * 加一条 = 明确承认"这个键会被守卫子进程继承"，必须在同一个 PR 里写清为什么它不会
+ * 改变判据结论。空表是 fail-closed 的默认形态。
+ */
+const GUARD_CHILD_ENV_ALLOWED = []
+
+/**
+ * 清洗交给守卫子进程的环境（第十轮审计 D-03）：丢弃危险族里未登记的键。
+ *
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns `{ env, dropped }`（`dropped` = 被丢掉的键名，按字母序；用于打印证据）。
+ */
+export function sanitizeGuardEnvironment(env = process.env) {
+  const allowed = new Set(GUARD_CHILD_ENV_ALLOWED.map(entry => entry.key))
+  const cleaned = {}
+  const dropped = []
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof key !== 'string' || key === '') continue
+    const risky = GUARD_CHILD_ENV_DENIED_KEYS.includes(key)
+      || GUARD_CHILD_ENV_DENIED_PREFIXES.some(prefix => key.startsWith(prefix))
+    if (risky && !allowed.has(key)) {
+      dropped.push(key)
+      continue
+    }
+    cleaned[key] = value
+  }
+  dropped.sort()
+  return { env: cleaned, dropped }
+}
+
+/**
+ * 本进程自己的环境里有没有"能改写解释器行为"的键（同族的上游证据）。
+ *
+ * 只用来**打印警告**：注入的 `--import` 钩子在模块求值之前就已经加载了，任何进程内检查
+ * 都无法把它卸载。真正让结论可信的是两件事（都在下面）：
+ *   ① 子进程环境清洗 —— 守卫本身跑在干净环境里，它们的判定是真的；
+ *   ② 显式且加固的退出路径（`process.removeAllListeners('exit')` + `process.exit(code)`）。
+ * 诚实边界：如果钩子**改写了 `process.exit`/`process.reallyExit` 本身**，进程内没有任何
+ * 办法自证（实测：`process.exit = () => {}` 之后连 `process.exit(1)` 都是 no-op）——
+ * 那正是静态白名单（[SK-17] 判据面）必须存在的原因，不能靠运行期兜。
+ *
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns 命中的键名（按字母序）。
+ */
+export function contaminatedRunnerKeys(env = process.env) {
+  const { dropped } = sanitizeGuardEnvironment(env)
+  return dropped
+}
 
 /**
  * 根 `package.json` 里守卫脚本**允许的形态**：直接执行 `scripts/` 下的一个脚本文件。
@@ -220,6 +324,17 @@ export function guardScriptProblem(name, body) {
     return `\`${name}\` 的脚本体 ${JSON.stringify(body)} 与登记值 ${JSON.stringify(registered.script)} 不一致`
       + ' —— "跑一个脚本"这个形态还不够，必须**是那一个**脚本：重定向到别的守卫时，名字与 argv'
       + '一字不改、运行器照报 `✓ <名字>`，而这条守卫的判据一次都没跑（第九轮审计 B 泳道 P1-5 的现场）。'
+  }
+  // ④ `digest` 必须存在且是 64 位小写 hex（第十轮审计 C-06）。**只校验形态**：比较在
+  // `scripts/check-guard-parser-integrity.mjs`（本表是它的输入）与
+  // `scripts/verify-check-workspaces.mjs`（独立复算）里做 —— 三个地方各留一份比较逻辑
+  // 只会漂移。缺字段 ⇒ 那两条判据读不到登记值，等于内容判据静默消失，所以这里 fail-loud。
+  if (typeof registered.digest !== 'string' || !/^[0-9a-f]{64}$/u.test(registered.digest)) {
+    return `\`${name}\` 的登记项缺少合法的 \`digest\`（实际 ${JSON.stringify(registered.digest ?? null)}）`
+      + ' —— `digest` 必须是该守卫脚本 sha256 的 64 位小写 hex：'
+      + '把守卫脚本内容掏空（`process.exit(0)`）或换成同名符号链接时，名字/argv/形态三者全对，'
+      + '运行器照报 `✓` 而判据一次没跑（第十轮审计 C-06 在副本里实测）。'
+      + '重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。'
   }
   return null
 }
@@ -329,6 +444,96 @@ export function parseAdvisoryRegistry(source) {
   return { entries }
 }
 
+/**
+ * 子进程环境清洗的**自证**（第十轮审计 D-03 的后半条）。
+ *
+ * 为什么必须有:**清洗**是本条修复的唯一"与层无关"的收口,而它的失效是完全静默的 ——
+ * 把 `env: { ...GUARD_CHILD_ENV.env, … }` 改回 `{ ...process.env, … }` 之后,门禁照样
+ * 打印「16 个根守卫:16 通过、0 失败」(审计实测)。所以这里用**真子进程**证明两件事:
+ *   ① 未清洗的环境里,注入的退出钩子确实能把 `process.exitCode = 1` 改写成 0(现场复现);
+ *   ② 清洗后的环境里,同一个子进程如实退出 1(**清洗真的咬到了**,不是形状断言)。
+ * 另加两组键表断言(危险族必丢 / 普通键必留),防止"一刀切把整个环境清空"这种反向破坏。
+ *
+ * @returns `{ failures, assertions }`。
+ */
+export function selfTestGuardEnvironment() {
+  const failures = []
+  let assertions = 0
+  const dangerous = {
+    NODE_OPTIONS: '--max-old-space-size=64',
+    BASH_ENV: '/tmp/hooks.sh',
+    COREPACK_HOME: '/tmp/yc',
+    LD_PRELOAD: '/tmp/x.so',
+    LD_LIBRARY_PATH: '/tmp/lib',
+    'BASH_FUNC_node%%': '() { return 0; }',
+    ENV: '/tmp/sh-env',
+    SHELLOPTS: 'errexit',
+    BASHOPTS: 'extglob',
+    PROMPT_COMMAND: 'true',
+    YARN_CACHE_FOLDER: '/tmp/cache',
+    NPM_CONFIG_FUND: 'false',
+    npm_config_yes: 'true',
+    PYTHONSTARTUP: '/tmp/py',
+  }
+  const harmless = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: process.env.HOME ?? '/tmp',
+    CHECK_CONCURRENCY: '2',
+    PG_DSN_TEST: 'postgres://example/db',
+    R2_BUCKET: 'artifacts',
+    CHANNELS_REPO_TOKEN: 'token',
+    DSH_TELEMETRY_DISABLED: '1',
+    FORCE_COLOR: '0',
+  }
+  const { env: cleaned, dropped } = sanitizeGuardEnvironment({ ...dangerous, ...harmless })
+  assertions += 1
+  const leaked = Object.keys(dangerous).filter(key => Object.hasOwn(cleaned, key))
+  if (leaked.length > 0) {
+    failures.push(`[guard-env-selftest] 危险族键没有被清洗掉:${leaked.join('、')}`
+      + ' ⇒ 守卫子进程会继承它们(第十轮审计 D-03:NODE_OPTIONS 的退出钩子让"1 项未通过"却 EXIT=0)。')
+  }
+  assertions += 1
+  const lost = Object.keys(harmless).filter(key => !Object.hasOwn(cleaned, key))
+  if (lost.length > 0) {
+    failures.push(`[guard-env-selftest] 普通键被误清:${lost.join('、')}`
+      + ' ⇒ 清洗不能一刀切(守卫要靠 PATH/HOME/环境里的凭据与开关跑起来)。')
+  }
+  assertions += 1
+  const expectedDropped = Object.keys(dangerous).sort()
+  if (dropped.join(',') !== expectedDropped.join(',')) {
+    failures.push(`[guard-env-selftest] 丢弃清单与预期不符:实际 ${dropped.join('、') || '(空)'}`
+      + ` / 预期 ${expectedDropped.join('、')}(丢弃清单是打印给 CI 看的证据,不能与实际不一致)。`)
+  }
+  // 行为判据:真子进程 + 真退出钩子。
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-guard-env-selftest-'))
+  try {
+    const hook = join(directory, 'hook.mjs')
+    writeFileSync(hook, 'process.on("exit", () => { process.exitCode = 0 })\n')
+    const program = ['-e', 'process.exitCode = 1']
+    const injected = spawnSync(process.execPath, program, {
+      env: { ...cleaned, NODE_OPTIONS: `--import=${hook}` },
+      stdio: 'ignore',
+    })
+    assertions += 1
+    if (injected.status !== 0) {
+      failures.push(`[guard-env-selftest] 校准失败:未清洗环境里注入退出钩子后子进程没有退 0`
+        + `(实际 ${injected.status})⇒ 本机复现不出 D-03 的现场,这条自证的**后半条**不成立。`)
+    }
+    const sanitized = spawnSync(process.execPath, program, {
+      env: { ...sanitizeGuardEnvironment({ ...cleaned, NODE_OPTIONS: `--import=${hook}` }).env },
+      stdio: 'ignore',
+    })
+    assertions += 1
+    if (sanitized.status !== 1) {
+      failures.push(`[guard-env-selftest] 清洗后再注入同一个钩子,子进程仍然退 ${sanitized.status}`
+        + '(期望 1)⇒ 清洗没有真的拦住 NODE_OPTIONS,守卫的判定还是会被改写。')
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+  return { failures, assertions }
+}
+
 function parseArgs(argv) {
   const options = { list: false, concurrency: null, fullOutput: false, allowAdvisory: false }
   for (let index = 0; index < argv.length; index += 1) {
@@ -356,11 +561,13 @@ function parseArgs(argv) {
 function runGuard(guard) {
   return new Promise(resolveTask => {
     const started = Date.now()
+    // 清洗(第十轮审计 D-03):`process.env` **不再原样透传** —— 危险族里未登记的键
+    // (`NODE_OPTIONS`/`BASH_ENV`/`COREPACK_HOME`/…)会被丢掉,守卫本身跑在干净环境里。
     const child = spawn('corepack', ['yarn', ...guard.args], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: { ...GUARD_CHILD_ENV.env, FORCE_COLOR: '0' },
     })
     let output = ''
     child.stdout.on('data', chunk => { output += chunk })
@@ -414,6 +621,29 @@ if (parsed.error !== undefined) {
   process.exit(2)
 }
 const guards = parsed.guards
+
+// 子进程环境清洗的**自证**(D-03):危险族必丢 / 普通键必留 / 丢弃清单与实际一致 /
+// 真子进程在注入退出钩子时"未清洗 ⇒ 0、清洗后 ⇒ 1"。任何一条不成立 ⇒ exit 2
+// (配置错误:清洗失效是静默的,不能降级成告警)。
+const guardEnvSelftest = selfTestGuardEnvironment()
+if (!Array.isArray(guardEnvSelftest?.failures) || typeof guardEnvSelftest?.assertions !== 'number') {
+  console.error('check-root-guards: selfTestGuardEnvironment() 的返回形状不对(需要 {failures, assertions})')
+  process.exit(2)
+}
+if (guardEnvSelftest.failures.length > 0 || guardEnvSelftest.assertions < SELFTEST_GUARD_ENV_ASSERTIONS) {
+  for (const detail of guardEnvSelftest.failures) console.error(`check-root-guards: ${detail}`)
+  if (guardEnvSelftest.assertions < SELFTEST_GUARD_ENV_ASSERTIONS) {
+    console.error(`check-root-guards: 环境清洗自检只执行了 ${guardEnvSelftest.assertions} 条断言`
+      + `(期望 ≥ ${SELFTEST_GUARD_ENV_ASSERTIONS}) ⇒ 自检被掏空。`)
+  }
+  console.error('  ⇒ 拒绝在"子进程环境清洗失效"的情况下继续:它失效时门禁会打印'
+    + '「16 个根守卫:16 通过、0 失败」而守卫的退出码全被改写(第十轮审计 D-03)。')
+  process.exit(2)
+}
+
+// 子进程环境**只算一次**（第十轮审计 D-03）：守卫的判定必须在干净环境里跑。
+const GUARD_CHILD_ENV = sanitizeGuardEnvironment()
+const CONTAMINATED_KEYS = contaminatedRunnerKeys()
 
 // advisory 的**登记制**（R6-C-1）：本运行器独立复核编排器里的 ADVISORY_REGISTRY，
 // 不依赖编排器跑没跑过 —— docs-only 的 PR 上编排器根本不跑，而这条路径正是它唯一的防线。
@@ -489,6 +719,21 @@ const defaultConcurrency = Math.max(1, Math.min(4, availableParallelism()))
 const concurrency = options.concurrency
   ?? (Number.isFinite(envConcurrency) && envConcurrency > 0 ? envConcurrency : defaultConcurrency)
 
+// 环境清洗的**证据**(不是"存在性断言"):真的丢了哪些键,逐条打出来。
+if (GUARD_CHILD_ENV.dropped.length > 0) {
+  console.log(`check-root-guards: 子进程环境已清洗 —— 丢弃 ${GUARD_CHILD_ENV.dropped.length} 个"会改写解释器"
+    的键:${GUARD_CHILD_ENV.dropped.join('、')}(守卫子进程不再继承它们;登记表见 GUARD_CHILD_ENV_ALLOWED)`)
+} else {
+  console.log('check-root-guards: 子进程环境已清洗 —— 本次没有命中危险族键(丢弃 0 个)')
+}
+// 本进程自己被污染时**明说**（不静默）:退出钩子在模块求值前就装好了,进程内卸不掉,
+// 但子进程环境已清洗 + 退出路径已加固(removeAllListeners + process.exit)。
+if (CONTAMINATED_KEYS.length > 0) {
+  console.error(`check-root-guards: WARNING — 本进程自己的环境里有危险族键(${CONTAMINATED_KEYS.join('、')});`
+    + '\n  这是"守卫跑而恒绿"的注入面(第十轮审计 D-03)。子进程环境已清洗,退出路径已加固,'
+    + '但**判据面的第一道**在 scripts/check-workflows.mjs 的 [SK-17](被钉单元的 env/步骤体白名单)。')
+}
+
 console.log(`check-root-guards — 并发 ${concurrency}；docs-only 的 PR 也必须跑到的根守卫（${guards.length} 个）`
   + `${options.allowAdvisory ? '；**--allow-advisory**：advisory 失败只告警' : ''}`)
 console.log(`check-root-guards: argv 登记校验通过 —— ${guards.length} 条守卫的 argv 全部是 \`run <条目名>\``
@@ -521,4 +766,13 @@ for (const result of tolerated) {
   console.error(`\n===== ${result.guard.name} 失败(advisory，--allow-advisory 下不拦门禁) =====`)
   console.error(options.fullOutput ? result.output.trimEnd() : summarize(result.output))
 }
-if (failed.length > 0) process.exit(1)
+// **显式且加固的退出**(第十轮审计 D-03):只设 `process.exitCode` 会被 `--import` 注入的
+// 退出钩子改写(实测:`NODE_OPTIONS=--import=<hook>` + `process.exitCode = 1` ⇒ EXIT=0)。
+// 光调 `process.exit(1)` 同样会被改写 —— 因为钩子的 `process.on('exit')` 处理器在退出前
+// 仍然跑得到,它把 `process.exitCode` 改回 0(本机 Node 24.16.0 实测)。所以先摘掉**所有**
+// 退出钩子(本运行器自己不注册任何 `exit`/`beforeExit` 监听器,摘掉是安全的),再显式退出。
+// 诚实边界:钩子若改写 `process.exit` 本身,进程内无解(实测 `process.exit = () => {}` 之后
+// 连 `process.exit(1)` 都是 no-op)—— 那由 [SK-17] 的静态白名单负责拦在 CI 之外。
+process.removeAllListeners('exit')
+process.removeAllListeners('beforeExit')
+process.exit(failed.length > 0 ? 1 : 0)

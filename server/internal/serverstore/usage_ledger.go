@@ -255,7 +255,12 @@ func ledgerDetailSource(extraSources []string) string {
 
 // rebuildUsageLedgerRowsFrom 是 rebuildUsageLedgerRows 的"明细来源可扩展"版本：
 // extraSources 里的关系（清理路径的**表形态孤儿**）与 usage 一起参与同一次聚合。
-func rebuildUsageLedgerRowsFrom(db *sql.DB, from, to time.Time, extraSources []string) error {
+//
+// R10-D-01（P1）：句柄从 `*sql.DB` 放宽到 usageExecer —— 清理路径的补账必须在
+// **与 DETACH/DROP 同一个持锁事务**里跑（见 reclaimUsagePartitionAtomically /
+// dropDetachedOrphanAtomically），否则 [补账, DROP] 之间提交的行会被 DROP 级联
+// 删除且没进账本（真 PG 实测 SILENT_LOSS=5.00/6.00/4.00，而 failures=0/skipped=0）。
+func rebuildUsageLedgerRowsFrom(db usageExecer, from, to time.Time, extraSources []string) error {
 	from, to = normalizeDayRange(from, to)
 	if from.IsZero() || to.IsZero() || from.After(to) {
 		return nil
@@ -404,8 +409,27 @@ type usageRelationShape struct {
 	// 见 scanUsageMonthTables 的 SQL）：与 Root=="usage" 的区别只在"另一个
 	// schema 里同名"的形态上（R8-A-7），那种关系不是 usage 的后代。
 	AttachedUsage bool
-	Partition     bool // pg_class.relispartition
-	Children      int  // pg_inherits 里以本关系为父的关系数
+	// DirectParentUsage 报告该关系的**直接**父关系就是 public.usage（判据同样按
+	// **oid**，来自 scanUsageMonthTables 的 `p.oid = to_regclass('public.usage')`）。
+	//
+	// R10-A-07（P3）：`directChildOfUsage()` 此前比的是 `Parent == "usage"`（裸
+	// relname）—— 与 R8-A-7 已经统一到 oid 的 attachedToUsage 不同口径：另一个
+	// schema 里同名 `usage` 下的 `public.usage_<YYYYMM>` 会被判成"usage 的直接子
+	// 分区"，随后的 `ALTER TABLE usage DETACH PARTITION` 报 42809/42P01（fail-loud，
+	// 不是静默），但判据面与统一口径不一致、且产出误导性的失败。现在两个判据同源
+	// **同事实**（都是 oid 比较），`Parent` 只用于展示与拼 DDL。
+	DirectParentUsage bool
+	Partition         bool // pg_class.relispartition
+	Children          int  // pg_inherits 里以本关系为父的关系数
+	// ReclaimWindow 是本轮**进入临界区之前**算好的补账窗口（名义月 ∪ 该关系实际持有
+	// 的行覆盖的北京日 ∪ 相邻月整月，见 retentionLedgerWindow 与 CleanupUsageRetention）。
+	//
+	// R10-D-01（P1）：补账必须与 DETACH/DROP 在**同一个持锁事务**里 —— 叶子月分区
+	// 正是产品实际布局，而 [补账, DROP] 之间提交的行会被 DROP 级联删除且没进账本
+	// （真 PG 实测 SILENT_LOSS=5.00/6.00/4.00，而 failures=0/skipped=0）。窗口是
+	// 临界区的**输入**，所以随形态一起传（零值 ⇒ 按关系名的名义月，见
+	// reclaimUsagePartitionAtomically 的兼容分支）。
+	ReclaimWindow retentionWindow
 }
 
 // attachedToUsage 报告该关系是不是 usage 的**后代分区**（传递祖先：直接分区、
@@ -441,7 +465,11 @@ func (s usageRelationShape) attachedToUsage() bool { return s.Partition && s.Att
 // 只有这一层能做 `ALTER TABLE usage DETACH PARTITION <rel>`：更深的子分区属于
 // 别的父表（`usage_<YYYY>`），摘它等于替管理员拆分区树（同一棵子树里可能还有
 // 别的月份）⇒ 清理只补账、不 DETACH/DROP（见 CleanupUsageRetention 的 SKIP 分支）。
-func (s usageRelationShape) directChildOfUsage() bool { return s.Parent == "usage" }
+//
+// R10-A-07：判据取 DirectParentUsage（**oid** 比较，与 attachedToUsage 同源同事实），
+// 不再是 `Parent == "usage"` 的裸 relname 比较 —— 另一个 schema 里同名的 usage
+// 下的关系不是本表的直接子分区。
+func (s usageRelationShape) directChildOfUsage() bool { return s.DirectParentUsage }
 
 // tableLike 报告该关系是不是"可能持有 usage 明细行"的表形态。
 // 视图/物化视图不在此列：它们没有自己的明细行（物化视图的内容是派生的），
@@ -459,18 +487,50 @@ func (s usageRelationShape) leafTable() bool { return s.Kind == "r" && s.Childre
 // R6-A-1（复审 V1 §1.5-A）后表形态（'r'/'p'）**不再**走这个函数：它们可能持有
 // usage 明细行，而孤儿关系不在 usage 之下 ⇒ 聚合与账本都读不到它的行，直接
 // DROP 就是**金额永久丢失**（复审探针实证：同数据同一轮清理，孤儿路径
-// `ledger_rows_after=0` ↔ 真分区对照 `=1`）。表形态现在走
-// cleanupDetachedUsageTable（先并入 + 补账，再决定 DROP）。
+// `ledger_rows_after=0` ↔ 真分区对照 `=1`）。表形态现在走 planDetachedCleanup +
+// dropDetachedOrphanAtomically（先并入 + 持锁补账，再决定 DROP）。
 //
 // 其余形态（索引、序列、外部表、复合类型…）→ **跳过**：同名的非表对象是人工
 // 事故，服务端不替管理员决定删它（与 misboundedPartitionErr「不自动 DROP/改写
 // 外来对象」同一条纪律），调用方记警告并计入 skipped。
+//
+// R10-D-05（P3）：映射本身收在 dropDDLForRelKind（**唯一一份** relkind → DROP
+// 动词），本函数只是它在"清理路径可删集合"上的投影（只 v/m）。
 func dropStatementForViewLike(rel, kind string) (stmt string, ok bool) {
+	stmt, ok = dropDDLForRelKind(rel, kind)
+	if !ok {
+		return "", false
+	}
+	return stmt, kind == "v" || kind == "m"
+}
+
+// dropDDLForRelKind 返回"清理一个占用了 usage_<YYYYMM> 名字的关系"可执行的 DDL
+// —— **唯一一份** relkind → DROP 动词映射（R10-D-05，P3）。
+//
+// 缺陷形态：`/readyz` 的 write_blocked_action 对**任何**非分区占名都写"确认无用
+// 再由人工 DROP TABLE <rel>"，而索引/序列/视图/物化视图下这句话**不可执行**
+// （`… is not a table`；真 PG 10 种同名形态实测：i/S/v/m 全中）—— 运维照着做只
+// 会拿到一个错。现在按 relkind 分流，与清理路径共用同一份映射，两处不会分叉。
+//
+// ok=false = 服务端不提供可执行指引（外部表之外的怪形态留给人工判断，与清理路径
+// "服务端不替管理员决定删非表对象"同一条纪律）。
+func dropDDLForRelKind(rel, kind string) (stmt string, ok bool) {
+	ident := quoteRelationIdent(rel)
 	switch kind {
+	case "r", "p":
+		// 'p' = 自身又是分区父表：DROP TABLE 会连子关系一起删 ⇒ 调用方必须先用
+		// pg_inherits 确认整株子树都能删（清理路径只对叶子走 DROP）。
+		return "DROP TABLE IF EXISTS " + ident, true
 	case "v":
-		return "DROP VIEW IF EXISTS " + quoteRelationIdent(rel), true
+		return "DROP VIEW IF EXISTS " + ident, true
 	case "m":
-		return "DROP MATERIALIZED VIEW IF EXISTS " + quoteRelationIdent(rel), true
+		return "DROP MATERIALIZED VIEW IF EXISTS " + ident, true
+	case "i":
+		return "DROP INDEX IF EXISTS " + ident, true
+	case "S":
+		return "DROP SEQUENCE IF EXISTS " + ident, true
+	case "f":
+		return "DROP FOREIGN TABLE IF EXISTS " + ident, true
 	}
 	return "", false
 }
@@ -563,7 +623,8 @@ func scanUsageMonthTables(db *sql.DB) (usageMonthTables, error) {
 	rows, err := db.Query(`SELECT c.relname, COALESCE(p.relname, ''), c.relispartition, c.relkind,
        (SELECT count(*) FROM pg_inherits ch WHERE ch.inhparent = c.oid),
        CASE WHEN c.relispartition THEN COALESCE(root.relname, '') ELSE '' END,
-       COALESCE(c.relispartition AND pg_partition_root(c.oid) = to_regclass('public.usage'), false)
+       COALESCE(c.relispartition AND pg_partition_root(c.oid) = to_regclass('public.usage'), false),
+       COALESCE(p.oid = to_regclass('public.usage'), false)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
@@ -578,9 +639,9 @@ ORDER BY c.relname`)
 	out := usageMonthTables{Shapes: map[string]usageRelationShape{}}
 	for rows.Next() {
 		var rel, parent, kind, root string
-		var isPartition, attached sql.NullBool
+		var isPartition, attached, directParent sql.NullBool
 		var children int
-		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root, &attached); err != nil {
+		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root, &attached, &directParent); err != nil {
 			return usageMonthTables{}, err
 		}
 		if _, ok := usageMonthRelationOf(rel); !ok {
@@ -594,7 +655,9 @@ ORDER BY c.relname`)
 			// R8-A-7:归属判据按 **oid** 比较(pg_partition_root = public.usage),
 			// 不比裸 relname —— 另一个 schema 里同名的分区树不算 usage 的后代。
 			AttachedUsage: attached.Valid && attached.Bool,
-			Children:      children,
+			// R10-A-07:直接父同样按 **oid** 比较（与上面同源同事实）。
+			DirectParentUsage: directParent.Valid && directParent.Bool,
+			Children:          children,
 		}
 		out.Shapes[rel] = shape
 		if shape.attachedToUsage() {
@@ -644,27 +707,36 @@ ORDER BY c.relname`)
 //
 // 判据取自行本身（不是分区边界）：边界读不懂、更宽覆盖、二级分区、孤儿表都
 // 用同一个查询回答"它到底持有哪些月份的行"。
+//
+// R10-D-02（P2）：读 <rel> 会等它的锁 ⇒ 这一读也要有界（等锁上界）。清理路径
+// 是**被管理端同步调用**的，无界等待会把 HTTP 请求一起挂住。
 func detailMonthsOutside(db *sql.DB, rel string, start, end time.Time) ([]time.Time, error) {
 	q := fmt.Sprintf(`SELECT DISTINCT %s AS m FROM %s WHERE NOT (%s) ORDER BY 1`,
 		usageDetailMonthExpr("created_at"), quoteRelationIdent(rel), usageDayPredicate("created_at"))
-	rows, err := db.Query(q, start.Format(dateFmt), end.Format(dateFmt))
-	if err != nil {
-		return nil, fmt.Errorf("scan detail months of %s: %w", rel, err)
-	}
-	defer rows.Close()
 	var out []time.Time
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
+	err := withUsageLockBudget(db, usageReclaimLockTimeoutMS, func(tx *sql.Tx) error {
+		rows, qerr := tx.Query(q, start.Format(dateFmt), end.Format(dateFmt))
+		if qerr != nil {
+			return fmt.Errorf("scan detail months of %s: %w", rel, qerr)
 		}
-		m, perr := time.Parse("200601", key)
-		if perr != nil {
-			return nil, fmt.Errorf("scan detail months of %s: 无法解析月份标签 %q: %w", rel, key, perr)
+		defer rows.Close()
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				return err
+			}
+			m, perr := time.Parse("200601", key)
+			if perr != nil {
+				return fmt.Errorf("scan detail months of %s: 无法解析月份标签 %q: %w", rel, key, perr)
+			}
+			out = append(out, m)
 		}
-		out = append(out, m)
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // moveRowsIntoUsage 原子地把 <rel> 里满足 where 的行移进 usage（按 created_at
@@ -677,6 +749,9 @@ func detailMonthsOutside(db *sql.DB, rel string, start, end time.Time) ([]time.T
 // 列集是**动态**读出来的（relationColumnNames），并要求 <rel> 含 usage 的
 // 全部列：列集不一致的关系（人工建的怪表）一律 fail-loud，由调用方按"跳过并
 // 记录"处置 —— 绝不按列序猜（猜错就是把别的列的值写进金额列）。
+//
+// R10-D-02（P2）：整条语句包在带等锁上界的事务里 —— 它既要读 rel 又要写 usage，
+// 任一侧被 ACCESS EXCLUSIVE 挡住时不能让清理轮（以及同步等它的管理端请求）无界挂住。
 func moveRowsIntoUsage(db *sql.DB, rel, where string, args ...any) (int64, error) {
 	usageCols, err := relationColumnNames(db, "usage")
 	if err != nil {
@@ -706,15 +781,23 @@ func moveRowsIntoUsage(db *sql.DB, rel, where string, args ...any) (int64, error
 	}
 	stmt := fmt.Sprintf(`WITH moved AS (DELETE FROM %s WHERE %s RETURNING %s)
 INSERT INTO usage (%s) SELECT %s FROM moved`, quoteRelationIdent(rel), where, cols, cols, cols)
-	res, err := db.Exec(stmt, args...)
+	var moved int64
+	err = withUsageLockBudget(db, usageReclaimLockTimeoutMS, func(tx *sql.Tx) error {
+		res, eerr := tx.Exec(stmt, args...)
+		if eerr != nil {
+			return eerr
+		}
+		n, rerr := res.RowsAffected()
+		if rerr != nil {
+			return rerr
+		}
+		moved = n
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+	return moved, nil
 }
 
 // foldAdjacentMonthsIntoUsage 把 <rel> 里"北京月 ∈ months（≠ 名义月 m）"的明细
@@ -759,10 +842,14 @@ func foldAdjacentMonthsIntoUsage(db *sql.DB, rel string, m time.Time, months []t
 // 与 scanUsageMonthTables 的 attachedToUsage 判据**同源同事实**（同一个
 // pg_partition_root + 同一个 oid 比较），只是入口不同：那里是"扫一遍全部月关系"，
 // 这里是"核对某一个关系"。两处若分叉，"落桶"与"动手前复检"就会给出不同结论。
-func usagePartitionRoot(db *sql.DB, rel string) (string, bool, error) {
+// R10-A-01（P1）：参数从 `*sql.DB` 放宽到 usageQuerier —— 同一个判据既要能在**池**上
+// 问（落桶后的前置复检），也要能在**临界区的事务**里问（持锁复检，见
+// dropDetachedOrphanAtomically）。两处若各写一份 SQL，"落桶/前置/持锁"三个结论就会
+// 分叉，而这正是 R10-A-01/R10-A-02 的缺陷形态。
+func usagePartitionRoot(q usageQuerier, rel string) (string, bool, error) {
 	var root string
 	var attached sql.NullBool
-	err := db.QueryRow(`SELECT CASE WHEN c.relispartition THEN COALESCE(r.relname, '') ELSE '' END,
+	err := q.QueryRow(`SELECT CASE WHEN c.relispartition THEN COALESCE(r.relname, '') ELSE '' END,
        COALESCE(c.relispartition AND pg_partition_root(c.oid) = to_regclass('public.usage'), false)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -787,8 +874,14 @@ WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&root, &attached)
 // 落桶判据（scanUsageMonthTables 的传递祖先 + attachedToUsage）已经保证这一点；
 // 这里在**动手之前**再按 catalog 事实复检一次：判定与动作各自独立成立，任何一条
 // 回归都在这里 fail-loud（调用方记失败并**不 DROP**），而不是把金额写错。
-func assertDetachedFromUsage(db *sql.DB, rel string) error {
-	root, attached, err := usagePartitionRoot(db, rel)
+//
+// R10-A-01（P1）：复检的**入口**有两处，判据只有这一份实现 ——
+//   - 落桶之后的**前置复检**（池）；归属在这里变了 ⇒ 良性 deferred（见
+//     CleanupUsageRetention 的孤儿分支，R10-A-02）；
+//   - 临界区里**持锁复检**（事务）：此刻归属与行集合都已冻结，判定与 DROP 之间
+//     不再有窗口（R10-A-01 的 H1/H2 都发生在"判定一处、动作用另一份谓词"上）。
+func assertDetachedFromUsage(q usageQuerier, rel string) error {
+	root, attached, err := usagePartitionRoot(q, rel)
 	if err != nil {
 		return fmt.Errorf("核对 %s 的分区树根: %w", rel, err)
 	}
@@ -814,8 +907,12 @@ func assertDetachedFromUsage(db *sql.DB, rel string) error {
 // 「保留清理失败」（配置其实已提交并已审计），调度器每轮告警、真实失败被淹没。
 //
 // 探测失败（读不到 catalog）**不算** gone：判据不建立在对失败的猜测上。
+//
+// R10-D-02（P2）：探测带等锁上界（探测里的 pg_get_expr 会打开关系）—— 清理路径
+// 被管理端**同步**调用，等锁必须有界；超时按 timeout 分类延后（R10-A-03），
+// 不会在这里被误判成"关系已消失"。
 func usageRelationGone(db *sql.DB, rel string) bool {
-	probe, err := probeUsagePartition(db, rel, usageMonthPartitionSpec(time.Now()).parent)
+	probe, err := probeUsagePartitionBudget(db, rel, usageMonthPartitionSpec(time.Now()).parent, usageReclaimLockTimeoutMS)
 	return err == nil && !probe.Exists
 }
 
@@ -852,15 +949,27 @@ func usageFailureIsBenignRace(db *sql.DB, rel string, err error) bool {
 
 // cleanupDetachedStepHook 是**仅测试**的注入点（生产恒为 nil，形态与 migrate.go 的
 // testMigrationHook 同源）：在"孤儿/脱离关系"清理路径的两个语句边界上各调一次，
-// 供确定性复现 R9C-2 的 W3/W4 窗口 —— 探针在回调里用**另一条连接**把关系 DROP 掉，
-// 再放行，于是"关系在两条语句之间被并发回收"这件事不再依赖调度运气。
+// 供确定性复现 R9C-2 的 W3/W4 窗口 —— 探针在回调里用**另一条连接**把关系 DROP 掉
+// （R10-A-01 的探针则在这里用**生产入口** ensureUsagePartition 把它领回 usage），
+// 再放行，于是"关系在两条语句之间被并发回收/改挂"这件事不再依赖调度运气。
 //
 //	step = "detail-months"：min/max 探测之后、detailMonthsOutside（W3）之前；
-//	step = "backfill"     ：detailMonthsOutside 与相邻月并入之后、retentionBackfill（W4）之前。
+//	step = "backfill"     ：detailMonthsOutside 与相邻月并入之后、进入临界区之前（W4）。
 var cleanupDetachedStepHook func(rel, step string)
 
-// cleanupDetachedUsageTable 处理"名为 usage_<YYYYMM> 的**表形态**孤儿"
-// （relkind='r'/'p'，且**不是** usage 的后代 —— 见 assertDetachedFromUsage）。
+// detachedCleanupPlan 是"表形态孤儿"清理在**临界区之前**算好的全部输入。
+type detachedCleanupPlan struct {
+	// winFrom/winTo 是补账窗口：名义月 ∪ 该关系实际持有的行覆盖的北京日 ∪
+	// 相邻月的**整月**（见 retentionLedgerWindow 的同一条纪律）。
+	winFrom, winTo time.Time
+	// foldErr 非 nil = 相邻月并入失败（相邻月的分区覆盖不到那些瞬时，或同名关系被
+	// 外来对象占用）⇒ 临界区里**只补账、不 DROP**：那些行还在 rel 里，DROP 就是
+	// 丢账；补账照做（窗口已扩到整月）⇒ 聚合与账本仍然一致、都不丢（§1.5-B）。
+	foldErr error
+}
+
+// planDetachedCleanup 处理"名为 usage_<YYYYMM> 的**表形态**孤儿"（relkind='r'/'p'，
+// 且**不是** usage 的后代 —— 见 assertDetachedFromUsage）在临界区之前的全部前置工作。
 //
 // 为什么不能直接 DROP（§1.5-A 实证）：孤儿不在 usage 之下 ⇒ `SELECT … FROM
 // usage` 读不到它的行，聚合与永久账本双双失明；DROP 之后那些金额就再也没有
@@ -868,47 +977,57 @@ var cleanupDetachedStepHook func(rel, step string)
 //
 //  1. 相邻月明细并入（foldAdjacentMonthsIntoUsage）—— 与 B 同一修法；
 //  2. 补账：把孤儿与 usage 放进**同一次**聚合（union），窗口 = 名义月 ∪
-//     该关系实际持有的行所覆盖的北京日 ∪ 相邻月的**整月**；
-//  3. 任何一步失败 ⇒ 返回错误，调用方**不 DROP**（补账已完成 ⇒ 金额仍在
-//     永久账本里，只是这条关系留给人工处置）。
+//     该关系实际持有的行所覆盖的北京日 ∪ 相邻月的**整月**。
 //
-// 返回 nil 表示"明细已被永久账本覆盖，可以安全 DROP"。
-func cleanupDetachedUsageTable(db *sql.DB, rel string, m time.Time) error {
+// R10-A-01（P1）：第 2 步**不在这里做**。它的位置被移到临界区里（持锁之后、
+// DROP 之前，见 dropDetachedOrphanAtomically）—— 判据（"它不是 usage 的后代"）
+// 与动作（`usage ∪ rel` 的 UNION ALL 补账 + `DROP TABLE`）之间此前隔着多轮 SQL
+// 往返（同机秒级），而生产路径**会**在这个窗口里把同名孤儿领回 usage 下
+// （ensureUsagePartition → adoptDetachedMonthPartition）：
+//
+//	H1 账本翻倍：rel 已在 usage 树下 ⇒ 同一行被算两遍（实测 12.5 → 25.0）；
+//	H2 活分区被删：`DROP TABLE IF EXISTS rel` 对"已挂回 usage 的分区"成功
+//	   ⇒ 清理路径静默拆掉一块 usage 分区树，而整轮 err=nil/failures=0/skipped=0。
+//
+// 本函数的**唯一**正确性前提仍是"该关系不是 usage 的后代"，所以前置复检留在这里
+// fail-loud；临界区里还有一次**持锁复检**（同一个 assertDetachedFromUsage）。
+func planDetachedCleanup(db *sql.DB, rel string, m time.Time) (detachedCleanupPlan, error) {
+	plan := detachedCleanupPlan{winFrom: dayKey(m), winTo: dayKey(m).AddDate(0, 1, -1)}
 	// R8-A-2/R8-D-1：关系已经被**另一个**清理轮次（或管理员）回收掉了 ⇒ 良性，
-	// 直接返回 nil（补账随之无意义：行已经不在盘上）。判据与 retentionLedgerWindow
+	// 直接返回（补账随之无意义：行已经不在盘上）。判据与 retentionLedgerWindow
 	// 的 `!probe.Exists` 同口径 —— 同一个函数里两处对"关系不存在"给出相反结论
 	// 就是判据不自洽，而它的表现是"管理端保存保留期偶发 500"。
 	if usageRelationGone(db, rel) {
 		log.Printf("usage retention: %s 已不存在(并发/重叠的清理轮次或管理员已回收);按良性处理,不再补账也不 DROP", rel)
-		return nil
+		return plan, nil
 	}
-	// R7-A（P1）双保险：本函数的**唯一**正确性前提是"该关系不是 usage 的后代"
-	// （否则第 2 步的 union 会把同一行算两遍）。落桶判据已经过传递祖先，这里在
+	// R7-A（P1）双保险：这里的**唯一**正确性前提是"该关系不是 usage 的后代"
+	// （否则补账的 union 会把同一行算两遍）。落桶判据已经过传递祖先，这里在
 	// 动手前再按 catalog 事实复检一次：判据回归（例如退回"只看直接父"）时在这里
 	// fail-loud，而不是静默把金额写成两倍、再把一株活分区 DROP 掉。
 	if err := assertDetachedFromUsage(db, rel); err != nil {
-		return err
+		return plan, err
 	}
-	winFrom, winTo := dayKey(m), dayKey(m).AddDate(0, 1, -1)
 	// 实际持有的行覆盖的北京日（空关系返回 NULL ⇒ 只有名义月窗口）。
-	var lo, hi sql.NullTime
-	if err := db.QueryRow(fmt.Sprintf(`SELECT min(created_at), max(created_at) FROM %s`,
-		quoteRelationIdent(rel))).Scan(&lo, &hi); err != nil {
+	// R10-D-02：这一读也要有界（等锁上界），否则前半轮会被任一月分区的
+	// ACCESS EXCLUSIVE 无界挂住。
+	lo, hi, err := detachedWindowBounds(db, rel)
+	if err != nil {
 		if usageRelationGone(db, rel) {
 			// 探测与 DROP 之间被另一轮回收（42P01）—— 同上，良性。
 			log.Printf("usage retention: %s 在探测窗口前已被并发轮次回收;按良性处理", rel)
-			return nil
+			return plan, nil
 		}
-		return fmt.Errorf("探测 %s 持有的明细窗口: %w", rel, err)
+		return plan, fmt.Errorf("探测 %s 持有的明细窗口: %w", rel, err)
 	}
 	if lo.Valid {
-		if d := BeijingDay(lo.Time); d.Before(winFrom) {
-			winFrom = d
+		if d := BeijingDay(lo.Time); d.Before(plan.winFrom) {
+			plan.winFrom = d
 		}
 	}
 	if hi.Valid {
-		if d := BeijingDay(hi.Time); d.After(winTo) {
-			winTo = d
+		if d := BeijingDay(hi.Time); d.After(plan.winTo) {
+			plan.winTo = d
 		}
 	}
 	if cleanupDetachedStepHook != nil { // 仅测试：见该变量的注释（R9C-2 的 W3）
@@ -916,31 +1035,141 @@ func cleanupDetachedUsageTable(db *sql.DB, rel string, m time.Time) error {
 	}
 	months, err := detailMonthsOutside(db, rel, dayKey(m), dayKey(m).AddDate(0, 1, -1))
 	if err != nil {
-		return err
+		return plan, err
 	}
 	if len(months) > 0 {
 		// 账本窗口必须覆盖相邻月的**整月**：那些月的明细分区还在（聚合会读明细），
 		// 账本必须与它一致（否则同一个月的两个口径给出两个数）。
-		if months[0].Before(winFrom) {
-			winFrom = months[0]
+		if months[0].Before(plan.winFrom) {
+			plan.winFrom = months[0]
 		}
-		if last := months[len(months)-1].AddDate(0, 1, -1); last.After(winTo) {
-			winTo = last
+		if last := months[len(months)-1].AddDate(0, 1, -1); last.After(plan.winTo) {
+			plan.winTo = last
 		}
 	}
-	_, foldErr := foldAdjacentMonthsIntoUsage(db, rel, m, months)
+	_, plan.foldErr = foldAdjacentMonthsIntoUsage(db, rel, m, months)
 	if cleanupDetachedStepHook != nil { // 仅测试：见该变量的注释（R9C-2 的 W4）
 		cleanupDetachedStepHook(rel, "backfill")
 	}
-	// 孤儿的行对 usage 不可见 ⇒ 必须与 usage **同一次**聚合（union），
-	// 否则同一 (user,model,day) 的两份金额会互相覆盖成其中一份。
-	if err := retentionBackfill(db, winFrom, winTo, []string{rel}); err != nil {
-		return err
+	return plan, nil
+}
+
+// cleanupDetachedUsageTable 是**历史入口**（既有回归用例
+// audit_r8_retention_fix_test.go 用它断言"重复处理已被 DROP 的孤儿必须返回 nil"）：
+// 语义已经收窄为"前置计划算完，可以进入临界区"（nil = 可以）。
+//
+// 补账与 DROP 现在都在 dropDetachedOrphanAtomically 的**同一个持锁事务**里
+// （R10-A-01），所以这里不再有"返回 nil 表示明细已被账本覆盖"的含义 ——
+// 名字保留只为兼容既有调用点与用例，判定/动作的唯一实现是 planDetachedCleanup
+// 与 dropDetachedOrphanAtomically。
+func cleanupDetachedUsageTable(db *sql.DB, rel string, m time.Time) error {
+	_, err := planDetachedCleanup(db, rel, m)
+	return err
+}
+
+// detachedWindowBounds 读 public.<rel> 的 min/max(created_at)（清理路径专用：
+// 带等锁上界，R10-D-02）。
+func detachedWindowBounds(db *sql.DB, rel string) (lo, hi sql.NullTime, err error) {
+	err = withUsageLockBudget(db, usageReclaimLockTimeoutMS, func(tx *sql.Tx) error {
+		return tx.QueryRow(fmt.Sprintf(`SELECT min(created_at), max(created_at) FROM %s`,
+			quoteRelationIdent(rel))).Scan(&lo, &hi)
+	})
+	return lo, hi, err
+}
+
+// dropDetachedOrphanAtomically 是**孤儿路径**的收口：与 attached 路径
+// （reclaimUsagePartitionAtomically）**同形** ——
+//
+//	进临界区前取锁（`usage` → `rel`，与写入路径/DETACH 同序，环不成立）
+//	→ 持锁复检归属（同一个 assertDetachedFromUsage，不是第二份谓词）
+//	→ 持锁补账（`usage ∪ rel` 的**同一次**聚合）
+//	→ DROP（或按调用方要求只补账）
+//	→ COMMIT
+//
+// 归属在**动手时**已变（另一轮或本轮自己的 adopt 把它领回了 usage）⇒
+// usageReclaimNotAttached：良性 deferred，一行不动、不记失败（与
+// `usageReclaimNotAttached` 在 attached 路径上的语义逐字同构，R10-A-02 要的
+// 就是这个对照物）。
+//
+// 为什么要连 `usage` 一起锁：`ATTACH PARTITION` 对**新父表**取 SHARE UPDATE
+// EXCLUSIVE、对**被挂的表**取 ACCESS EXCLUSIVE（PG 18.6 实测），所以 `rel` 的锁
+// 已经挡住"再领回"；锁 `usage` 保持与 attached 路径同一把锁序（先 usage 后 rel），
+// 避免与管理员 `ALTER TABLE usage DETACH/…`（父表 ACCESS EXCLUSIVE → 子表）成环。
+func dropDetachedOrphanAtomically(db *sql.DB, rel string, plan detachedCleanupPlan, dropStmt string) usageReclaimResult {
+	fail := func(op string, err error) usageReclaimResult {
+		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
 	}
-	if foldErr != nil {
-		return foldErr // 补账已完成：不 DROP，等人工处置
+	tx, err := db.Begin()
+	if err != nil {
+		return fail("begin-detached-drop", err)
 	}
-	return nil
+	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
+	rollback := func() { _ = tx.Rollback() }
+
+	if err := setUsageRetentionStatementBudget(tx); err != nil {
+		rollback()
+		return fail("set-lock-timeout", err)
+	}
+	if _, err := tx.Exec("LOCK TABLE ONLY " + quoteRelationIdent("usage") + " IN ACCESS EXCLUSIVE MODE"); err != nil {
+		rollback()
+		return usageReclaimLockFailure(db, rel, "lock-usage", err)
+	}
+	if _, err := tx.Exec("LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"); err != nil {
+		rollback()
+		return usageReclaimLockFailure(db, rel, "lock-subtree", err)
+	}
+	// 关系已被并发轮次回收：拿锁成功说明它刚刚还在，这里只是把"不存在"也归良性。
+	exists, xerr := usageRelationExistsTx(tx, rel)
+	if xerr != nil {
+		rollback()
+		return fail("verify-exists", xerr)
+	}
+	if !exists {
+		rollback()
+		return usageReclaimResult{outcome: usageReclaimGone, op: "verify-exists"}
+	}
+	// 持锁复检归属 —— 判据与落桶判据/attached 路径同源（同一份 SQL）。
+	//
+	// 归属在**动手时**已变（另一轮或本轮自己的 adopt 把它领回了 usage）⇒ 本轮
+	// **不 DROP**（H2：删它就是静默拆 usage 的分区树）。补账仍然做，但**去掉额外
+	// 来源**：它已经挂在 usage 树下 ⇒ 它的行本来就在 `SELECT … FROM usage` 里，
+	// 再 union 一次就是把同一行算两遍（H1：12.5 → 25.0）。这与 attached 路径的补账
+	// 走的是同一条 SQL（extraSources=nil），所以两条路径对"此刻归属"的结论一致。
+	ownerChanged := assertDetachedFromUsage(tx, rel) != nil
+	extra := []string{rel}
+	if ownerChanged {
+		extra = nil
+	}
+	// 持锁补账：归属与行集合此刻都已冻结（再 ATTACH 需要 rel 的 ACCESS EXCLUSIVE）
+	// ⇒ 补账覆盖的行 = 接下来 DROP 会删掉的行（D-01 的窗口在孤儿路径上同样闭合）。
+	if !plan.winFrom.IsZero() && !plan.winTo.IsZero() {
+		if err := rebuildUsageLedgerRowsFrom(tx, plan.winFrom, plan.winTo, extra); err != nil {
+			rollback()
+			return fail("rebuild-ledger-detached", err)
+		}
+	}
+	if ownerChanged {
+		if err := tx.Commit(); err != nil {
+			return fail("commit-detached-deferred", err)
+		}
+		// 良性 deferred：一行数据都没动（DROP 没做），账本按"此刻归属"口径补齐。
+		return usageReclaimResult{outcome: usageReclaimNotAttached, op: "verify-detached"}
+	}
+	if dropStmt == "" {
+		// 只补账、不 DROP（相邻月并入失败）：金额进永久账本，关系留给人工处置。
+		if err := tx.Commit(); err != nil {
+			return fail("commit-detached-backfill", err)
+		}
+		return usageReclaimResult{outcome: usageReclaimBackfilled, op: "backfill-detached"}
+	}
+	if _, err := tx.Exec(dropStmt); err != nil {
+		rollback()
+		return fail("drop-detached", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail("commit-detached-drop", err)
+	}
+	return usageReclaimResult{outcome: usageReclaimDropped, op: "drop-detached"}
 }
 
 // retentionWindow 是"清理某个到期月关系之前必须补算的账本窗口"+ 该关系的形态
@@ -970,7 +1199,8 @@ type retentionWindow struct {
 //     行,补账只让账本有数,聚合仍会从相邻月的明细段里少掉它们(§1.5-B)。
 func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) retentionWindow {
 	win := retentionWindow{from: m, to: m.AddDate(0, 1, -1)}
-	probe, perr := probeUsagePartition(db, rel, usageMonthPartitionSpec(m).parent)
+	// R10-D-02：探测带等锁上界（见 probeUsagePartitionBudget）—— 前半轮不得无界挂住。
+	probe, perr := probeUsagePartitionBudget(db, rel, usageMonthPartitionSpec(m).parent, usageReclaimLockTimeoutMS)
 	if perr != nil {
 		// 探测失败 ≠ 形态异常:读不到 catalog 时不做任何猜测,按名义月补账并要求
 		// 调用方在日志里看见(perr 会作为形态信息被打印)。exact 保持 false ⇒
@@ -1027,7 +1257,7 @@ func partitionBoundIsExactMonth(bound string, m time.Time) bool {
 	return atFrom.Equal(wantFrom) && atTo.Equal(wantTo)
 }
 
-// retentionBackfill 是清理路径的补账入口:**唯一实现**。
+// retentionBackfill 是清理路径的补账入口:**唯一实现**（"先备关系、再聚合"两段）。
 //
 //   - 先备好 usage_daily 年分区(账本**自己的**关系,缺了聚合结果写不进去 =
 //     真失败),再做**纯聚合** —— 全程不碰 usage 明细月分区,因此"该月分区形态
@@ -1039,7 +1269,38 @@ func partitionBoundIsExactMonth(bound string, m time.Time) bool {
 //     **资格判据是"不在 usage 之下"**（不是"名字像月分区但直接父不是 usage"）：
 //     挂 usage 之下的关系（含多级布局的孙辈叶子）必须走 extraSources=nil 的普通
 //     路径，否则同一行被算两遍（R7-A，P1，见 ledgerDetailSource 的注释）。
+//
+// 清理路径**不用**这个入口进临界区：它把两段拆开（关系准备在临界区外、聚合在
+// 持锁事务里），见 CleanupUsageRetention / reclaimUsagePartitionAtomically
+// （R10-D-01）。本函数保留给"不需要锁"的调用点（相邻月并入失败时的兜底补账）。
 func retentionBackfill(db *sql.DB, from, to time.Time, extraSources []string) error {
+	if err := ensureRetentionLedgerRelations(db, from, to); err != nil {
+		return err
+	}
+	return rebuildUsageLedgerRowsFrom(db, from, to, extraSources)
+}
+
+// retentionBackfillBudget 是**清理路径**的补账入口：与 retentionBackfill 同一份
+// 实现（先备关系、再聚合），只是聚合跑在"带 lock_timeout + 计划期裁剪"的事务里
+// （R10-D-02：清理被管理端**同步**调用，任一处等锁都必须有界）。
+func retentionBackfillBudget(db *sql.DB, from, to time.Time, extraSources []string) error {
+	if err := ensureRetentionLedgerRelations(db, from, to); err != nil {
+		return err
+	}
+	return withUsageLockBudget(db, usageReclaimLockTimeoutMS, func(tx *sql.Tx) error {
+		return rebuildUsageLedgerRowsFrom(tx, from, to, extraSources)
+	})
+}
+
+// ensureRetentionLedgerRelations 备好补账窗口内每个月的 usage_daily 年分区
+// （账本**自己的**关系；缺了聚合结果写不进去 = 真失败）。
+//
+// R10-D-01（P1）：这一步必须在**进入临界区之前**完成 —— 临界区持有 usage 的
+// ACCESS EXCLUSIVE，而 ensureUsageDailyPartition 可能真的建表（DDL 走连接池，
+// 池上限可能被配成 1：PICOAI_DB_MAX_OPEN_CONNS / 测试里的 SetMaxOpenConns(1)，
+// 持有事务连接时再向池里要第二条连接会自锁）。临界区里因此只允许**事务句柄上的
+// 纯 DML**（聚合 + 两条 UPSERT）。
+func ensureRetentionLedgerRelations(db *sql.DB, from, to time.Time) error {
 	from, to = normalizeDayRange(from, to)
 	if from.IsZero() || to.IsZero() || from.After(to) {
 		return nil
@@ -1049,7 +1310,7 @@ func retentionBackfill(db *sql.DB, from, to time.Time, extraSources []string) er
 			return err
 		}
 	}
-	return rebuildUsageLedgerRowsFrom(db, from, to, extraSources)
+	return nil
 }
 
 // rebuildLedgerForRetention 是清理路径补账的**无额外来源**入口(挂在 usage 下的
@@ -1131,31 +1392,15 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	var failures []string
 	failed := 0
 	failedRels := make([]string, 0, 1)
-	noteFailure := func(rel, op string, err error) {
-		// R9C-2（审计 2026-09-24，P2）：良性竞态必须走**同一个出口**。
-		// R8-A-2/R8-D-1 的"关系已被并发轮次回收 ⇒ 良性"只补了 5 个窗口里的 2 个
-		// （W3 detailMonthsOutside / W4 retentionBackfill / W5 DETACH 过渡态仍会把
-		// 42P01 记成失败）—— 4 路并发清理实测"一轮里 4/4 路返回非 nil"，管理端
-		// 保存保留期仍会偶发 500「保留清理失败」，正是那次修复声称消灭的症状。
-		// 逐窗口补丁会持续漏（每加一个"先探测再动手"的窗口就多一个），所以判据
-		// 收在这里：**只要该关系此刻确实已不存在，本轮对它的任何工作都失去了
-		// 对象**（谁清掉的、以什么错误失败都一样）⇒ 恶性失败只在"关系还在"时记录。
-		if usageFailureIsBenignRace(db, rel, err) {
-			return
-		}
-		failed++
-		failedRels = append(failedRels, rel)
-		code, ok := pgErrorCode(err)
-		if !ok {
-			code = "unknown"
-		}
-		log.Printf("usage retention: FAILED %s op=%s sqlstate=%s err=%v;"+
-			" 继续清理其余到期关系(R6-A-1:单条失败不得让整轮停摆,下一轮会重试它)",
-			rel, op, code, err)
-		failures = append(failures, fmt.Sprintf("%s (%s, sqlstate=%s): %v", rel, op, code, err))
-	}
+
 	clearedDetached := 0
 	skipped := 0
+	// R10-D-02（P2）：`usage` 的 ACCESS EXCLUSIVE 是**所有**关系共同的锁点
+	// （临界区的第一把锁）。一旦某一处等它超时，本轮其余关系的临界区都会同样
+	// 各等一个 5s ⇒ 整轮时长随关系数线性增长，而管理端是**同步**调用。第一处
+	// 超时已经证明"父表被占"，所以其余的按同一条原因直接延后：整轮的上界与
+	// 关系数无关（可读性不变：每条关系仍然逐个进 unreclaimed/skipped_by_reason）。
+	usageLockContended := false
 	round.Relations = len(tables.Orphans) + len(tables.Partitions) + len(tables.AttachedNonLeaf)
 	// skipReasons 是"没有回收"的**按原因计数**（R8-A-3 的可判定面）：日志里逐条，
 	// 状态里逐类 —— 深后代永不回收这件事从此在 /readyz 上可读。
@@ -1170,6 +1415,60 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		skipReasons[reason]++
 		unreclaimed = append(unreclaimed, rel+"("+reason+")")
 		log.Printf("usage retention: SKIP %s %s reason=%s: %s", kind, rel, reason, msg)
+	}
+	noteFailure := func(rel, op string, err error) {
+		// R9C-2（审计 2026-09-24，P2）：良性竞态必须走**同一个出口**。
+		// R8-A-2/R8-D-1 的"关系已被并发轮次回收 ⇒ 良性"只补了 5 个窗口里的 2 个
+		// （W3 detailMonthsOutside / W4 retentionBackfill / W5 DETACH 过渡态仍会把
+		// 42P01 记成失败）—— 4 路并发清理实测"一轮里 4/4 路返回非 nil"，管理端
+		// 保存保留期仍会偶发 500「保留清理失败」，正是那次修复声称消灭的症状。
+		// 逐窗口补丁会持续漏（每加一个"先探测再动手"的窗口就多一个），所以判据
+		// 收在这里：**只要该关系此刻确实已不存在，本轮对它的任何工作都失去了
+		// 对象**（谁清掉的、以什么错误失败都一样）⇒ 恶性失败只在"关系还在"时记录。
+		// R10-A-03（P2）：**锁等待/语句超时**与真失败必须可区分。顺序也重要：
+		// 这个判据必须**先于**下面的良性竞态探测 —— 那个探测本身要读 catalog
+		// （probeUsagePartition 会打开关系），在"月分区被 ACCESS EXCLUSIVE 锁住"
+		// 的场景里它自己也会等锁 5s ⇒ 一条关系白白多花 5s（R10-D-02 的"有界"之外
+		// 还要"够快"：管理端是同步调用）。超时结论不依赖"关系是否已消失"。
+		//
+		// R10-A-03（P2）：**锁等待/语句超时**与真失败必须可区分。
+		//
+		// 缺陷形态：任何持有 `usage`（或任一月分区）ACCESS SHARE 超过
+		// usageReclaimLockTimeoutMS 的**读**事务，都会让该关系记一次失败 ⇒ 整轮非
+		// nil ⇒ 管理端 `PUT /api/server/admin/…` 回 500「保留清理失败」（配置其实
+		// 已提交并已审计）+ `/readyz` 的 failed_rounds 增长。危害是**信号质量**：
+		// 一次锁竞争被读成故障。判据是结构化的 SQLSTATE（55P03/57014），不是
+		// "看起来像超时"—— 任何其它错误仍然是真失败、仍然 fail-loud。
+		//
+		// 超时走"本轮延后"的 skip 分类：计数进 skipped_by_reason、关系名进
+		// unreclaimed、日志留一行（数据一行未动，下一轮自动重试）。
+		if reason, ok := usageFailureTimeoutReason(err); ok {
+			noteSkip("deferred relation", rel, reason, fmt.Sprintf("op=%s: %v（等锁/语句超时，"+
+				"本轮整体回滚、一行数据未动；下一轮自动重试。R10-A-03：超时是延后，不是失败）", op, err))
+			return
+		}
+		if usageFailureIsBenignRace(db, rel, err) {
+			return
+		}
+		failed++
+		failedRels = append(failedRels, rel)
+		code, ok := pgErrorCode(err)
+		if !ok {
+			code = "unknown"
+		}
+		log.Printf("usage retention: FAILED %s op=%s sqlstate=%s err=%v;"+
+			" 继续清理其余到期关系(R6-A-1:单条失败不得让整轮停摆,下一轮会重试它)",
+			rel, op, code, err)
+		failures = append(failures, fmt.Sprintf("%s (%s, sqlstate=%s): %v", rel, op, code, err))
+	}
+	// noteReclaimOutcome 记一次临界区结果，并维护"父表锁被占"的轮级判定。
+	noteReclaimOutcome := func(rel, op string, err error) {
+		if op == "lock-usage" && err != nil {
+			if _, timedOut := usageFailureTimeoutReason(err); timedOut {
+				usageLockContended = true
+			}
+		}
+		noteFailure(rel, op, err)
 	}
 	for _, rel := range tables.Orphans {
 		m, ok := usageMonthRelationOf(rel)
@@ -1196,41 +1495,100 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		// ALL，只有两边**不相交**时"同一行算两遍"才不成立；判据一旦回归（例如
 		// 退回"只看直接父"），必须在这里 fail-loud（记失败 + **不 DROP**），而不是
 		// 静默把金额写成两倍、再把一株活分区删掉。
+		//
+		// R10-A-02（P2）：复检命中**有两种语义完全不同**的来源，必须分开 ——
+		//  ① 轮首快照（shape.AttachedUsage，来自 scanUsageMonthTables 的同一份 SQL
+		//     事实，落桶判据 attachedToUsage() 就是它的投影）说它**当时确实不在**
+		//     usage 树下 ⇒ 落桶是对的，而此刻它已在树里 ⇒ **归属在动手之前变了**
+		//     （并发轮次的 adopt，或**本轮自己**的 foldAdjacentMonthsIntoUsage 的
+		//     领回）。这是**良性 deferred**：与 attached 路径的
+		//     usageReclaimNotAttached 逐字同构 —— 一行不动、不记失败，留给下一轮的
+		//     普通分区路径（它的行已经能被聚合读到）。旧实现在这里 noteFailure ⇒
+		//     "本轮自愈成功"被记成"判据回归"，整轮非 nil ⇒ 管理端保存保留期
+		//     500「保留清理失败」，而失败主体正是自愈成功的证据。
+		//  ② 快照说它**本来就在** usage 树下 ⇒ 落桶判据与 catalog 事实不一致
+		//     （分类回归）⇒ fail-loud。这是"账本翻倍 + 删活分区"这两件静默事故的
+		//     唯一守卫，不允许被 ① 的良性分支吞掉。
 		if aerr := assertDetachedFromUsage(db, rel); aerr != nil {
-			noteFailure(rel, "orphan-ownership", aerr)
+			if shape.AttachedUsage {
+				noteFailure(rel, "orphan-ownership", aerr)
+			} else {
+				log.Printf("usage retention: %s 在落桶之后已回到 usage 分区树里(并发轮次或本轮自己的 adopt 领回);"+
+					"本轮不动它,下一轮由分区路径按普通口径处理 —— 与 attached 路径的 usageReclaimNotAttached 同一语义"+
+					"(R10-A-02:自愈不是失败)", rel)
+			}
 			continue
 		}
 		if shape.tableLike() {
 			// R6-A-1 复审 V1 §1.5-A（P1，已实证）：表形态孤儿可能**持有明细**
 			// 且不在 usage 之下（聚合与账本都读不到它的行）⇒ 只 DROP 等于金额
-			// 永久丢失。顺序固定为"先并入相邻月 + 补账（与正常分区同一条路径），
-			// 再决定 DROP"。
-			if perr := cleanupDetachedUsageTable(db, rel, m); perr != nil {
+			// 永久丢失。顺序固定为"先并入相邻月 + 持锁补账（与正常分区同一条
+			// 路径），再决定 DROP"。
+			plan, perr := planDetachedCleanup(db, rel, m)
+			if perr != nil {
 				noteFailure(rel, "backfill-detached", perr)
 				continue
 			}
 			if !relationExistsForCleanup(db, rel) {
 				// R8-A-2：并发轮次已经把它回收掉了（补账也无对象可补）—— 良性。
-				log.Printf("usage retention: %s 已被并发轮次回收(cleanupDetachedUsageTable 返回前消失);按良性处理", rel)
+				log.Printf("usage retention: %s 已被并发轮次回收(planDetachedCleanup 返回前消失);按良性处理", rel)
+				continue
+			}
+			// 账本**自己的**关系（usage_daily 年分区）必须在进入临界区之前备好：
+			// 临界区持有 usage 的 ACCESS EXCLUSIVE，池上的第二条连接可能自锁
+			// （见 ensureRetentionLedgerRelations 的注释）。备不齐 ⇒ 账算不出来
+			// ⇒ 不 DROP、也不补账（fail-loud）。
+			if err := ensureRetentionLedgerRelations(db, plan.winFrom, plan.winTo); err != nil {
+				noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
 				continue
 			}
 			if !shape.leafTable() {
 				// 父表 / 带子关系：DROP TABLE 会连子关系一起删（relkind='p' 的
 				// 声明式分区）或被 PG 拒绝（2BP01），而清单里只有别的名字的
-				// 关系 —— 服务端不替管理员决定删一整棵子树。账本已按它实际
-				// 持有的明细补齐 ⇒ 金额不会丢，这里**跳过并记录**。
-				noteSkip("detached relation", rel, usageSkipDetachedNonLeaf, fmt.Sprintf("relkind=%q children=%d:"+
-					"父表/带子关系需人工处置(账本已按它实际持有的明细补齐,金额不会丢;"+
-					"DROP TABLE 会连子关系一起删,服务端不替管理员做这个决定)", shape.Kind, shape.Children))
+				// 关系 —— 服务端不替管理员决定删一整棵子树。补账照做（金额不会
+				// 丢），关系留给人工处置。
+				//
+				// 读数面按**实际结果**分流（不允许把"归属已变/已被回收"写成
+				// "需人工处置"）：只有真的"补账完成、关系原样留着"才计 skip。
+				switch res := dropDetachedOrphanAtomically(db, rel, plan, ""); res.outcome {
+				case usageReclaimFailed:
+					noteFailure(rel, res.op, res.err)
+				case usageReclaimGone:
+					log.Printf("usage retention: %s 已被并发轮次回收(%s 时关系已不存在);按良性处理", rel, res.op)
+				case usageReclaimNotAttached:
+					log.Printf("usage retention: %s 在临界区复检时已回到 usage 分区树里;本轮不动它(良性 deferred)", rel)
+				default: // usageReclaimBackfilled：补账已提交、关系保留（无人可自动处置）
+					noteSkip("detached relation", rel, usageSkipDetachedNonLeaf, fmt.Sprintf("relkind=%q children=%d:"+
+						"父表/带子关系需人工处置(账本已按它实际持有的明细补齐,金额不会丢;"+
+						"DROP TABLE 会连子关系一起删,服务端不替管理员做这个决定)", shape.Kind, shape.Children))
+				}
 				continue
 			}
-			if _, derr := db.Exec("DROP TABLE IF EXISTS " + quoteRelationIdent(rel)); derr != nil {
-				noteFailure(rel, "drop-detached", derr)
-				continue
+			// 相邻月并入失败 ⇒ 本轮只补账、不 DROP（那些行还在 rel 里）。
+			dropStmt, _ := dropDDLForRelKind(rel, shape.Kind)
+			if plan.foldErr != nil {
+				dropStmt = ""
 			}
-			clearedDetached++
-			log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage;"+
-				"其明细已并入相邻月并补进永久账本)", rel, shape.Kind)
+			res := dropDetachedOrphanAtomically(db, rel, plan, dropStmt)
+			switch res.outcome {
+			case usageReclaimDropped:
+				clearedDetached++
+				log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage;"+
+					"其明细已并入相邻月并补进永久账本)", rel, shape.Kind)
+			case usageReclaimBackfilled:
+				// 补账已在持锁事务里提交，关系保留（相邻月明细还在里面）。
+				noteFailure(rel, "fold-adjacent", plan.foldErr)
+			case usageReclaimGone:
+				log.Printf("usage retention: %s 已被并发轮次回收(%s 时关系已不存在);按良性处理", rel, res.op)
+			case usageReclaimNotAttached:
+				// 良性且**不动数据**：临界区复检发现它已回到 usage 树下（另一轮或
+				// 本轮的 adopt 领回）—— 它的行已经能被聚合读到，本轮 DROP 就是删
+				// 活分区（R10-A-01 的 H2）。留给下一轮的普通分区路径。
+				log.Printf("usage retention: %s 在临界区复检时已回到 usage 分区树里;"+
+					"本轮不动它(良性 deferred,与 attached 路径的 usageReclaimNotAttached 同义)", rel)
+			default:
+				noteReclaimOutcome(rel, res.op, res.err)
+			}
 			continue
 		}
 		stmt, droppable := dropStatementForViewLike(rel, shape.Kind)
@@ -1239,13 +1597,21 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 				"其余形态需人工处置(服务端不替管理员决定删非表对象)", shape.Kind))
 			continue
 		}
-		if _, derr := db.Exec(stmt); derr != nil {
-			noteFailure(rel, "drop-detached", derr)
-			continue
+		// 视图/物化视图不持有明细行 ⇒ 不需要补账（窗口零值），但**同样**走临界区
+		// （锁 → 持锁复检归属 → DROP → COMMIT）：判据与动作之间不留窗口。
+		res := dropDetachedOrphanAtomically(db, rel, detachedCleanupPlan{}, stmt)
+		switch res.outcome {
+		case usageReclaimDropped:
+			clearedDetached++
+			log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage)",
+				rel, shape.Kind)
+		case usageReclaimGone:
+			log.Printf("usage retention: %s 已被并发轮次回收(%s 时关系已不存在);按良性处理", rel, res.op)
+		case usageReclaimNotAttached:
+			log.Printf("usage retention: %s 在临界区复检时已回到 usage 分区树里;本轮不动它(良性 deferred)", rel)
+		default:
+			noteReclaimOutcome(rel, res.op, res.err)
 		}
-		clearedDetached++
-		log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage)",
-			rel, shape.Kind)
 	}
 	// 到期关系集合 = 叶子分区 + 二级分区（两者都是**传递地**挂在 usage 下的，
 	// 见 usageMonthTables.Partitions / AttachedNonLeaf）。
@@ -1290,6 +1656,14 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		// 让人知道该月的新写入需要人工处置 —— 清理本身照常进行。
 		win := retentionLedgerWindow(db, rel, m)
 		if win.shapeErr != nil {
+			// R10-D-02：**等锁超时**要立刻延后这一条关系，而不是继续往下走
+			// （形态探测 → 相邻月扫描 → 临界区里两把锁，每处各自再有 5s 上界 ⇒
+			// 一条关系能把一轮拖成十几个有界等待之和）。管理端是**同步**调用，
+			// 所以"有界"之外还要"够快"：第一处等锁超时即按 timeout 分类延后。
+			if _, timedOut := usageFailureTimeoutReason(win.shapeErr); timedOut {
+				noteFailure(rel, "scan-window", win.shapeErr)
+				continue
+			}
 			log.Printf("usage retention: %s 的形态判定未通过(或无法判定):%v;"+
 				"重建其明细账本(窗口 %s..%s,按它实际持有的行)后再决定 DETACH+DROP"+
 				"(R5-A-9:分区形态只影响该月新写入,不得让整轮保留清理停摆;"+
@@ -1313,7 +1687,8 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		// 可能在这段窗口里提交。权威判定在 reclaimUsagePartitionAtomically 的
 		// 临界区里（持锁后、DETACH/DROP 之前），两处判据同源（同一个函数）。
 		if !shape.leafTable() {
-			holds, herr := usageSubtreeHoldsRetainedRows(db, rel, cutoffMonth)
+			// R10-D-02：前置筛也带等锁上界（谓词与临界区里的权威复检同源）。
+			holds, herr := usageSubtreeHoldsRetainedRowsBudget(db, rel, cutoffMonth)
 			if herr != nil {
 				if usageRelationGone(db, rel) {
 					continue // 并发轮次已回收 ⇒ 良性
@@ -1359,23 +1734,37 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 				}
 			}
 		}
-		// 补账(账本 UPSERT,幂等):失败**保持 fail-loud** —— 账没算出来就不 DROP,
-		// 否则明细被删而账本没补上,金额永久丢失。但失败**只隔离到这一条关系**
-		// (R6-A-1):其余到期月份照常清理,该月下一轮重试。
-		if err := retentionBackfill(db, win.from, win.to, nil); err != nil {
-			noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
-			continue
-		}
+		// 补账的**关系准备**（usage_daily 年分区）必须在进入临界区之前完成：临界区
+		// 持有 usage 的 ACCESS EXCLUSIVE，池上的第二条连接可能自锁（见
+		// ensureRetentionLedgerRelations 的注释）。备不齐 ⇒ 账算不出来 ⇒ 不 DROP
+		// （R6-A-1 同一条纪律：账没算出来就不 DROP，否则明细被删而账本没补上）。
+		//
+		// R10-D-01（P1）：**聚合本身**移进临界区（持锁后、DETACH/DROP 之前）——
+		// 旧顺序 [池上补账, DROP] 之间提交的行会被 DROP 级联删除且没进账本（真 PG
+		// 3 轮实测 SILENT_LOSS=5.00/6.00/4.00，而 failures=0/skipped=0）。
 		if foldErr != nil {
 			// 相邻月明细还在 rel 里 ⇒ 这一步**不能** DROP（DROP 就是让相邻月的
-			// 明细段永久少计）；账本已补齐，人工处置相邻月分区形态后下一轮再清。
+			// 明细段永久少计）；补账照做（窗口已扩到整月 ⇒ 聚合与账本一致、都不丢），
+			// 人工处置相邻月分区形态后下一轮再清。
+			if berr := retentionBackfillBudget(db, win.from, win.to, nil); berr != nil {
+				noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", berr))
+				continue
+			}
 			noteFailure(rel, "fold-adjacent", foldErr)
 			continue
 		}
+		if usageLockContended {
+			noteSkip("deferred relation", rel, usageSkipLockTimeout,
+				"op=lock-usage: 本轮已判定 usage 的 ACCESS EXCLUSIVE 被占（父表是共同的锁点），"+
+					"其余到期关系同样延后到下一轮（R10-D-02：整轮上界与关系数无关）")
+			continue
+		}
+		// 补账窗口随形态一起交给临界区（零值 ⇒ 名义月的兼容分支）。
+		shape.ReclaimWindow = win
 		if !shape.directChildOfUsage() {
 			// R7-A（审计 2026-09-24，P1）：多级布局 `usage → usage_<YYYY> →
 			// usage_<YYYYMM>` 里的**深层**后代叶子走到这里。它既不是孤儿（它的
-			// 行对 `SELECT … FROM usage` 可见，所以上面的补账走的是**不带**
+			// 行对 `SELECT … FROM usage` 可见，所以补账走的是**不带**
 			// extraSources 的普通路径 —— 不重复计），也不该按孤儿 DROP；
 			// 而 `ALTER TABLE usage DETACH PARTITION` 只对 usage 的**直接**
 			// 子分区有效 —— 摘一株深层子分区等于替管理员拆分区树（同一棵子树里
@@ -1386,6 +1775,13 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 			// （沿用 R4-C-8 的"洞要看得见"口径：该月磁盘不会被本轮回收）。
 			// 金额侧没有代价：明细仍在 usage 子树里 ⇒ 聚合读得到，账本也已补齐，
 			// 两个口径一致（见 r7a 判据里的 ledger == aggregate == 清理前的值）。
+			//
+			// R10-D-01：这一步的补账走**池上**入口（它不 DROP，所以不存在
+			// [补账, DROP] 窗口）；失败保持 fail-loud。
+			if berr := retentionBackfillBudget(db, win.from, win.to, nil); berr != nil {
+				noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", berr))
+				continue
+			}
 			noteSkip("descendant partition", rel, usageSkipDescendant, fmt.Sprintf("parent=%s, 传递根=usage:"+
 				"明细已按普通分区路径补进永久账本(不重复计、也不隐藏),但 DETACH 只对 usage 的直接子分区有效"+
 				"⇒ 不替管理员拆分区树(多级布局需人工处置;该月磁盘本轮不回收)", shape.Parent))
@@ -1411,7 +1807,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 			log.Printf("usage retention: %s 已不再直接挂在 usage 下(并发轮次已摘或人工改挂);"+
 				"本轮不动它,下一轮由孤儿路径把它的明细并入账本后再回收", rel)
 		default:
-			noteFailure(rel, res.op, res.err)
+			noteReclaimOutcome(rel, res.op, res.err)
 		}
 	}
 	// 显式记录"跳过的月份"(R4-C-8):保留区间里没有被清掉的空缺月份 —— 该月零用量
@@ -1441,6 +1837,10 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	round.Failures = failed
 	round.SkippedByReason = skipReasons
 	round.Unreclaimed = unreclaimed
+	// R10-A-05（P3）：**失败关系**也进机器可读面（此前它们只出现在 last_error 的
+	// 自由文本里，`unreclaimed` 只收 skipped ⇒ "哪条关系真的失败了"在 /readyz 上
+	// 不可判定）。
+	round.FailedRelations = failedRels
 	log.Printf("usage retention: round summary cleared_partitions=%d cleared_detached=%d skipped=%d failures=%d cutoff=%s retention_months=%d skip_reasons=%s",
 		dropped, clearedDetached, skipped, failed, monthKey(cutoffMonth), n, formatSkipReasons(skipReasons))
 	if len(failures) > 0 {
@@ -1452,26 +1852,163 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 
 // usageQuerier 是 *sql.DB 与 *sql.Tx 的共同读面。
 //
-// 保留期判据（usageSubtreeHoldsRetainedRows）有两处调用点：清理主循环里的**前置筛**
-// 走连接池（*sql.DB），临界区里的**权威复检**必须走**同一个事务**（*sql.Tx，
-// 见 reclaimUsagePartitionAtomically）。判据只能有一份实现（§3.2 禁止复制粘贴），
-// 用最小接口把两种句柄统一起来。
+// 保留期判据（usageSubtreeHoldsRetainedRows / usagePartitionRoot / assertDetachedFromUsage）
+// 的每一处调用点都有两种句柄：清理主循环里的**前置筛/前置复检**走连接池（*sql.DB），
+// 临界区里的**权威复检**必须走**同一个事务**（*sql.Tx，见
+// reclaimUsagePartitionAtomically / dropDetachedOrphanAtomically）。判据只能有一份实现
+// （§3.2 禁止复制粘贴），用最小接口把两种句柄统一起来 —— R10-A-01 的根因正是
+// "判定一处、动作用另一份谓词"，所以持锁复检与落桶判据必须共用同一份 SQL。
 type usageQuerier interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
+// usageExecer 是 *sql.DB 与 *sql.Tx 的共同写面。
+//
+// 账本补账（rebuildUsageLedgerRowsFrom 的两条 UPSERT）必须能在**临界区的事务**里跑
+// （R10-D-01：补账与 DROP 同一个持锁事务），也必须能在池上跑（启动补算/自愈路径）。
+type usageExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // usageReclaimLockTimeoutMS 是"回收到期关系"临界区里等待锁的上限（毫秒）。
 //
-// 取值权衡：临界区里只做「复检 + DETACH + DROP」（形态探测、相邻月并入、账本补算
-// 全部在临界区之外 —— 见 CleanupUsageRetention 的调用点），复检谓词是**可索引 +
-// 可按分区边界裁剪**的（见 usageSubtreeHoldsRetainedRows 的注释：20 万行规模的
-// 子树实测 33.8ms → 0.6ms）。5s 足够覆盖"等一个正在提交的计量写入事务结束"，
-// 又不会让清理线程在长事务后面无限期挂住。
+// 取值权衡：复检谓词是**可索引 + 可按分区边界裁剪**的（见
+// usageSubtreeHoldsRetainedRows 的注释：20 万行规模的子树实测 33.8ms → 0.6ms）。
+// 5s 足够覆盖"等一个正在提交的计量写入事务结束"，又不会让清理线程在长事务后面
+// 无限期挂住。
 //
-// 超时**不是**静默跳过：55P03(lock_not_available) 会走 noteFailure ⇒ 本轮返回
-// 非 nil、`/readyz` 的 failed_rounds 增长、下一轮自动重试；并且**一行数据都没动**
-// （见 reclaimUsagePartitionAtomically 的回滚语义）。
+// R10-A-03（P2）：锁等待超时（55P03）与**真失败**必须是**可区分的结果** ——
+// 见 usageFailureTimeoutReason 与 noteFailure：超时走"本轮延后、下一轮重试"的
+// skip 分类（reason=lock-timeout），不把管理端的 `PUT /api/server/admin/…`
+// （同步调用 CleanupUsageRetention，见 internal/llmgateway/admin.go）变成一次
+// 500「保留清理失败」，也不让 `/readyz` 的 failed_rounds 把锁竞争记成故障。
+// 判据是 SQLSTATE（结构化事实），不是"看起来像超时"的猜测。
 const usageReclaimLockTimeoutMS = 5000
+
+// usageReclaimStatementBudgetMS 是临界区里**单条语句**的时长上限（毫秒）。
+//
+// 为什么需要它：临界区现在必须把"补账"也包进来（R10-D-01：叶子分区的
+// [补账, DROP] 窗口会把并发提交的明细连行带账一起丢掉），而补账是一次窗口聚合
+// —— 持锁时长因此不再只由 DETACH+DROP（实测 2M 行分区整事务 15.7ms）决定。
+// 这条预算给"我们自己持锁多久"一个上界：超时 ⇒ 整事务回滚（一行没动）、按
+// timeout 分类延后到下一轮，绝不让计量写入在 AEX 后面无限期排队。
+//
+// 取值：20s。它**只**覆盖临界区，前半轮的读写另有 usageReclaimLockTimeoutMS 的
+// 等锁上界（R10-D-02）。
+const usageReclaimStatementBudgetMS = 20000
+
+// SQLSTATE：清理路径必须能把"等锁/语句超时"与真失败分开（R10-A-03）。
+// 55P03 = lock_not_available（lock_timeout 到点）；57014 = query_canceled
+// （statement_timeout 到点）。两者都表示"这一轮没做成、数据一行没动、下一轮再来"。
+const (
+	pgSQLStateLockNotAvailable = "55P03"
+	pgSQLStateQueryCanceled    = "57014"
+)
+
+// usageFailureTimeoutReason 报告 err 是否只是"等锁/语句超时"（R10-A-03）。
+//
+// 判据是**结构化的 SQLSTATE**（pgErrorCode 优先走 errors.As 取 *pgconn.PgError）：
+// 只有 55P03/57014 才算超时；任何其它错误（含 42P01「关系不存在」之外的 DDL/连接
+// 失败）仍然是真失败，必须 fail-loud。返回的 reason 是写进
+// `skipped_by_reason`/`unreclaimed` 的封闭取值（与 usage_retention_status.go 的同名）。
+func usageFailureTimeoutReason(err error) (string, bool) {
+	code, ok := pgErrorCode(err)
+	if !ok {
+		return "", false
+	}
+	switch code {
+	case pgSQLStateLockNotAvailable:
+		return usageSkipLockTimeout, true
+	case pgSQLStateQueryCanceled:
+		return usageSkipStatementTimeout, true
+	}
+	return "", false
+}
+
+// withUsageLockBudget 在**带 lock_timeout 的事务**里跑 fn（清理路径的前半轮专用）。
+//
+// R10-D-02（P2）：任意会话对任意月分区持 ACCESS EXCLUSIVE 时，前半轮的读
+// （probeUsagePartition 的 pg_get_expr 要打开关系、retentionBackfill 读父表）
+// 此前**既无 lock_timeout 也无 context** ⇒ 整轮无界挂住，而
+// `PUT /api/server/admin/…` 是**同步**调用 ⇒ 管理端请求一起挂到 HTTP 写超时。
+// 判据必须与危害同构：把"等锁"变成有界 + 结构化（55P03 ⇒ timeout 分类），
+// 而不是让调用方无限等待。
+//
+// 只用于**清理路径**：计量写入路径（ensureRangePartition 的热路径）必须继续
+// **等**锁 —— 那里把等待改成失败就是把"慢"变成"全站 503 METERING_FAILED"。
+func withUsageLockBudget(db *sql.DB, ms int, fn func(*sql.Tx) error) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读/短事务，回滚失败无副作用
+	if err := applyUsageRetentionBudget(tx, ms, 0); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// applyUsageRetentionBudget 给清理路径的事务装上**有界语义 + 计划期裁剪**。
+//
+//   - lock_timeout：等锁上界（R10-D-02）；
+//   - statement_timeout：单语句时长上界（只在临界区给，见 usageReclaimStatementBudgetMS）；
+//   - `plan_cache_mode = force_custom_plan`：**计划期分区裁剪**（R10-D-02 的纵深）。
+//     补账的聚合是参数化语句（窗口边界是 $n）；PG 在**通用计划**下把裁剪推迟到
+//     执行期，而执行期裁剪必须**锁住全部分区**（ACCESS SHARE）—— 于是任一月分区上
+//     的一把无关锁（另一个清理轮次的临界区、管理员 ALTER/VACUUM）都会挡住本次
+//     聚合，把"某一月被锁"放大成"所有月份的补账都被挡"。实测：同一语句第 6 次
+//     执行（PG 从第 6 次起可能选通用计划）真的会被一个无关分区的 ACCESS EXCLUSIVE
+//     卡住（2s lock_timeout 命中）。强制自定义计划 ⇒ 用真实窗口值在**计划期**裁剪，
+//     只锁窗口内的分区（代价是每次重规划这条聚合，微秒级）。
+func applyUsageRetentionBudget(tx *sql.Tx, lockTimeoutMS, statementTimeoutMS int) error {
+	if lockTimeoutMS > 0 {
+		if _, err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeoutMS)); err != nil {
+			return err
+		}
+	}
+	if statementTimeoutMS > 0 {
+		if _, err := tx.Exec(fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", statementTimeoutMS)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// setUsageRetentionStatementBudget 给清理的**临界区**事务装上有界语义
+// （等锁上界 + 单语句时长上界 + 计划期裁剪）。
+func setUsageRetentionStatementBudget(tx *sql.Tx) error {
+	return applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, usageReclaimStatementBudgetMS)
+}
+
+// usageRelationExistsTx 报告 public.<rel> 此刻是否存在（可在事务里读；与
+// usagePartitionRoot 同源——都用 catalog 事实，不靠名字猜）。
+func usageRelationExistsTx(q usageQuerier, rel string) (bool, error) {
+	var exists bool
+	if err := q.QueryRow(`SELECT to_regclass('public.' || ?) IS NOT NULL`, rel).Scan(&exists); err != nil {
+		return false, fmt.Errorf("核对 %s 是否仍存在: %w", rel, err)
+	}
+	return exists, nil
+}
+
+// usageReclaimLockFailure 处理"临界区里没拿到锁"：等锁超时（55P03/57014）直接按
+// 失败/延后返回 —— 分类由调用方的 noteFailure 做（timeout ⇒ 延后、不记失败），
+// 而"关系是否已被并发轮次回收"的良性探测在超时情形下**故意不做**：那会再加一次
+// 5s 的有界等待，而两种结论的对外后果相同（都不记失败、下一轮重试）。R10-D-02。
+func usageReclaimLockFailure(db *sql.DB, rel, op string, err error) usageReclaimResult {
+	if _, timedOut := usageFailureTimeoutReason(err); timedOut {
+		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
+	}
+	if usageRelationGone(db, rel) {
+		return usageReclaimResult{outcome: usageReclaimGone, op: op}
+	}
+	return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
+}
 
 // usageReclaimOutcome 是 reclaimUsagePartitionAtomically 的结果分类（封闭取值）。
 type usageReclaimOutcome int
@@ -1485,9 +2022,16 @@ const (
 	usageReclaimGone
 	// usageReclaimNotAttached：复检时它已不是 usage 的**直接**子分区（并发轮次
 	// 已摘/人工改挂）⇒ 良性，本轮不动它（它的行没进这次补账，交给下一轮的
-	// 孤儿路径补账后回收）。
+	// 孤儿路径补账后回收）。孤儿路径上同名的良性分支是
+	// dropDetachedOrphanAtomically 的"归属已变"出口（R10-A-02）。
 	usageReclaimNotAttached
+	// usageReclaimBackfilled：**只补账、不 DROP**（孤儿路径专用：相邻月并入失败、
+	// 或调用方明确要求本轮不动这条关系）⇒ 补账已在持锁事务里提交，关系留给
+	// 人工处置/下一轮（R6-A-1 §1.5-B 的既有语义）。
+	usageReclaimBackfilled
 	// usageReclaimFailed：拿不到锁 / 任一步 SQL 失败 ⇒ 已回滚，数据未动，下一轮重试。
+	// （注意：55P03/57014 会被调用方按 timeout 分类成"延后"而不是失败，见
+	// usageFailureTimeoutReason —— 结果类别本身不加区分，分类只发生在记账处。）
 	usageReclaimFailed
 )
 
@@ -1497,8 +2041,8 @@ type usageReclaimResult struct {
 	err     error
 }
 
-// reclaimUsagePartitionAtomically 在**一个事务**里完成「先锁 → 复检 → DETACH →
-// DROP」，是"子树仍持有保留期内行"这道闸门唯一的**决策点**。
+// reclaimUsagePartitionAtomically 在**一个事务**里完成「先锁 → 复检 → 补账 →
+// DETACH → DROP」，是"子树仍持有保留期内行"这道闸门唯一的**决策点**。
 //
 // R9-A-1（审计 2026-09-24，P1，已确定性复现）的缺陷形态：判定
 // （usageSubtreeHoldsRetainedRows）与 `DROP TABLE` 之间隔着形态探测 / 相邻月扫描 /
@@ -1523,13 +2067,40 @@ type usageReclaimResult struct {
 //     正要路由进子树"与"绕过 usage 直接写子分区"两条写入路径。
 //  3. 两把锁都到手后子树的行集合**冻结**；READ COMMITTED 下随后的复检是新快照 ⇒
 //     判定时已提交的保留期行必然可见（不会再出现"判无 → 并发提交 → 再删"）。
-//  4. 仍持锁时 DETACH + DROP，最后 COMMIT。
+//  4. **仍持锁时补账**（R10-D-01，P1）—— 这一步原先在临界区之外，于是
+//     [补账, DROP] 之间提交的行被 DROP 带走了明细、又没进账本（真 PG 3 轮实测
+//     SILENT_LOSS=5.00/6.00/4.00，`failures=0 skipped=0`）。补账的 SQL 与
+//     池上版本**同一份实现**（rebuildUsageLedgerRowsFrom），只是句柄换成事务。
+//  5. 仍持锁时 DETACH + DROP，最后 COMMIT。
 //
-// 回滚语义：DETACH 与 DROP 同事务，不存在"摘了没删 / 删了没摘"的中间态；任何
-// 一步失败都回滚 —— **绝不在未持锁（或复检没过）的情况下 DROP**。
+// 回滚语义：补账 / DETACH / DROP 同事务，不存在"补了没删 / 摘了没删"的中间态；
+// 任何一步失败都回滚 —— **绝不在未持锁（或复检没过）的情况下 DROP**。
+//
+// 窗口来源：`shape.ReclaimWindow`（调用方在临界区之前按"名义月 ∪ 实际持有的行 ∪
+// 相邻月整月"算好）。零值 ⇒ 按关系名的名义月（只用 4 参的兼容调用点，例如
+// audit_r9c2_benign_race_test.go 直接调本函数的用例）。
+//
+// 有界语义（R10-A-03/R10-D-02）：锁等待 5s、单条语句 20s（见两个常量），超时
+// 一律整体回滚、按 timeout 分类延后 —— 不把一次锁竞争变成管理端 500。
 func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelationShape, cutoffMonth time.Time) usageReclaimResult {
 	fail := func(op string, err error) usageReclaimResult {
 		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
+	}
+	win := shape.ReclaimWindow
+	if win.from.IsZero() || win.to.IsZero() {
+		// 兼容分支：旧调用点只给关系 + 截止月 ⇒ 窗口取名义月（与
+		// retentionLedgerWindow 的缺省窗口同一口径）。
+		m, ok := usageMonthRelationOf(rel)
+		if !ok {
+			return fail("reclaim-window", fmt.Errorf("无法从关系名 %q 推出补账窗口", rel))
+		}
+		win = retentionWindow{from: dayKey(m), to: dayKey(m).AddDate(0, 1, -1)}
+	}
+	// 账本**自己的**关系（usage_daily 年分区）必须在进入临界区之前备好：临界区持有
+	// usage 的 ACCESS EXCLUSIVE，池上的第二条连接可能自锁（见
+	// ensureRetentionLedgerRelations 的注释）。备不齐 ⇒ 账算不出来 ⇒ 不 DROP。
+	if err := ensureRetentionLedgerRelations(db, win.from, win.to); err != nil {
+		return fail("rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -1543,45 +2114,24 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	// 时再向池里要第二条连接会自锁。
 	rollback := func() { _ = tx.Rollback() }
 
-	if _, err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", usageReclaimLockTimeoutMS)); err != nil {
+	if err := setUsageRetentionStatementBudget(tx); err != nil {
 		rollback()
 		return fail("set-lock-timeout", err)
 	}
 	if _, err := tx.Exec("LOCK TABLE ONLY " + quoteRelationIdent("usage") + " IN ACCESS EXCLUSIVE MODE"); err != nil {
 		rollback()
-		if usageRelationGone(db, rel) {
-			return usageReclaimResult{outcome: usageReclaimGone, op: "lock-usage"}
-		}
-		return fail("lock-usage", err)
+		return usageReclaimLockFailure(db, rel, "lock-usage", err)
 	}
 	if _, err := tx.Exec("LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"); err != nil {
 		rollback()
-		if usageRelationGone(db, rel) {
-			return usageReclaimResult{outcome: usageReclaimGone, op: "lock-subtree"}
-		}
-		return fail("lock-subtree", err)
-	}
-	// 权威复检（判据与前置筛同源，只是此刻行集合已冻结）。只有非叶子关系需要
-	// 判"子树"——叶子关系只能持有它自己名义月的行（product 路径建的月分区边界
-	// 恰是北京月，且元组路由只会写"覆盖当前时刻"的那一支），与第八轮的判据面
-	// 保持一致，不新增跳过语义。
-	if !shape.leafTable() {
-		holds, herr := usageSubtreeHoldsRetainedRows(tx, rel, cutoffMonth)
-		if herr != nil {
-			rollback()
-			return fail("recheck-subtree-retention", herr)
-		}
-		if holds {
-			rollback()
-			return usageReclaimResult{outcome: usageReclaimSkippedRetained}
-		}
+		return usageReclaimLockFailure(db, rel, "lock-subtree", err)
 	}
 	// 动作前再看一眼 catalog：并发轮次可能已经把它摘出分区树（DETACH 成功但
 	// DROP 还没做）、或人工把它改挂到了别处。**这种情况下一律不在本轮 DROP**：
-	// 上面的补账只覆盖"经 `SELECT … FROM usage` 可见"的行，而它已经不在 usage
-	// 的分区树里 ⇒ 它的行根本没进这次补账，DROP 就是金额永久丢失（R6-A-1 的
+	// 补账只覆盖"经 `SELECT … FROM usage` 可见"的行，而它已经不在 usage 的
+	// 分区树里 ⇒ 它的行根本没进这次补账，DROP 就是金额永久丢失（R6-A-1 的
 	// 孤儿形态）。按**良性**留给下一轮：届时 catalog 扫描会把它落进孤儿桶，
-	// 由 cleanupDetachedUsageTable 把它的行与 usage 放进**同一次**聚合再回收。
+	// 由 dropDetachedOrphanAtomically 把它的行与 usage 放进**同一次**聚合再回收。
 	// （旧实现在这里直接 DROP —— 与 R8-A-2 的"已经摘下来就直接删"同形，那是一条
 	// 窄但真实的静默丢账路径；本次 DETACH+DROP 原子化之后，正常路径不再产生
 	// "已摘未删"的残留，这条判据只剩人工/历史残留一种入口。）
@@ -1592,7 +2142,48 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	}
 	if !directChild {
 		rollback()
-		return usageReclaimResult{outcome: usageReclaimNotAttached}
+		return usageReclaimResult{outcome: usageReclaimNotAttached, op: "verify-attached"}
+	}
+	// 权威复检（判据与前置筛同源，只是此刻行集合已冻结）。
+	//
+	// R10-D-01（P1）：**行集合的冻结由这把锁负责**，补账在同一事务里（见下面的
+	// rebuildUsageLedgerRowsFrom）—— 这才是"叶子窗口"的修法：临界区里补账 ⇒
+	// 补账覆盖的行 = DROP 会删掉的行。实测：把补账移出临界区，本用例的
+	// SILENT_LOSS 立刻从 0.00 变成 169.00/133.00/129.00（三轮回同形）。
+	//
+	// 为什么"子树里还有保留期内的行"这道闸门**只对非叶子**：叶子是**月名**关系
+	// （`usage_<YYYYMM>`），
+	//   - 它自己名义月的行 = 该月聚合的**明细分段来源**，到期就该删（账本已在同一
+	//     事务里补齐）；
+	//   - 它持有的**别的月**（更宽/错界布局）的行**不是**那些月的分段来源 ——
+	//     `usageAggregateSegments` 只认**与月同名**的关系，那些月的聚合走永久账本，
+	//     而账本刚在本事务里按它实际的窗口补齐了。
+	// 所以"叶子还持有保留期内的行"不构成"删了会看不见"的理由；反过来把它当闸门
+	// 会让**合法**的更宽分区（DBA 按季度预建，r7 srvbill-3 明确判为合法配置）永远
+	// 不被回收 —— 这条取舍由既有回归 `TestUsageRetentionWiderPartitionLedgersEveryCoveredMonth`
+	// 钉住（它要求更宽分区在补账之后**被清掉**，且被覆盖的每个月账本都有数）。
+	// 非叶子则是另一回事：DROP 会**连子分区一起删**，而子分区通常是**与月同名**的
+	// 月分区（那些月的明细分段来源）⇒ 必须按行事实拦住（R8-A-4）。
+	//
+	// 归属复检（上面 usageRelationIsDirectChildOfUsage）对**所有**形态都做 ——
+	// 叶子也有一次持锁复检，只是它回答的问题是"这株子树现在还是不是我的"。
+	var holds bool
+	var herr error
+	if !shape.leafTable() {
+		holds, herr = usageSubtreeHoldsRetainedRows(tx, rel, cutoffMonth)
+	}
+	if herr != nil {
+		rollback()
+		return fail("recheck-subtree-retention", herr)
+	}
+	if holds {
+		rollback()
+		return usageReclaimResult{outcome: usageReclaimSkippedRetained, op: "recheck-subtree-retention"}
+	}
+	// 持锁补账（R10-D-01）：此刻行集合已冻结 ⇒ 补账覆盖的行 = 接下来 DROP 会删掉的行。
+	if err := rebuildUsageLedgerRowsFrom(tx, win.from, win.to, nil); err != nil {
+		rollback()
+		return fail("rebuild-ledger-in-lock", err)
 	}
 	if _, err := tx.Exec("ALTER TABLE usage DETACH PARTITION " + quoteRelationIdent(rel)); err != nil {
 		rollback()
@@ -1605,17 +2196,22 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	if err := tx.Commit(); err != nil {
 		return fail("commit-reclaim", err)
 	}
-	return usageReclaimResult{outcome: usageReclaimDropped}
+	return usageReclaimResult{outcome: usageReclaimDropped, op: "reclaim"}
 }
 
 // usageRelationIsDirectChildOfUsage 报告 rel 此刻是否仍是 usage 的**直接**子分区
 // （临界区专用；与 scanUsageMonthTables 的 `directChildOfUsage` 同一判据面，
 // 区别只是按**当下**的 catalog 事实读，并且能在事务里读）。
 //
+// R10-A-07（P3）：判据从 `p.relname = 'usage'` 改成 **oid** 比较
+// （`p.oid = to_regclass('public.usage')`）—— 与 attachedToUsage 的口径统一：
+// 另一个 schema 里同名 `usage` 下的 public.usage_<YYYYMM> 不是本表的直接子分区
+// （旧判据会漏过它，让随后的 `ALTER TABLE usage DETACH PARTITION` 报 42809/42P01）。
+//
 // 关系不存在（并发轮次已回收）按"不是"返回 —— 调用方按良性处理。
 func usageRelationIsDirectChildOfUsage(q usageQuerier, rel string) (bool, error) {
 	var direct sql.NullBool
-	err := q.QueryRow(`SELECT COALESCE(p.relname, '') = 'usage'
+	err := q.QueryRow(`SELECT COALESCE(p.oid = to_regclass('public.usage'), false)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
@@ -1655,8 +2251,9 @@ func formatSkipReasons(reasons map[string]int) string {
 // 合法的日粒度子分区（`usage_20260601`）名字不是月，却整株都已到期。只有"这条
 // 关系里真的还有没有保留期内的行"同时回答这两种形态。
 //
-// 代价有界：只对**非叶子**候选关系调用（多数部署为零），且是 `LIMIT 1`
-// 存在性检查（命中即返回）。关系已不存在（并发轮次回收）由调用方按良性处理。
+// 代价有界：前置筛只对**非叶子**候选关系调用，临界区里的复检对**叶子也调用**
+// （R10-D-01：叶子月分区是产品实际布局），且是 `LIMIT 1` 存在性检查（命中即返回）。
+// 关系已不存在（并发轮次回收）由调用方按良性处理。
 //
 // R9-A-1（审计 2026-09-24，P1）：谓词从 `bjWallExpr(created_at)::date >= ?::date`
 // 改写为**语义等价**的 `created_at >= ?::timestamptz`（BeijingDayInstant(cutoff)
@@ -1689,6 +2286,19 @@ func usageSubtreeHoldsRetainedRows(q usageQuerier, rel string, cutoffMonth time.
 func relationExistsForCleanup(db *sql.DB, rel string) bool {
 	gone := usageRelationGone(db, rel)
 	return !gone
+}
+
+// usageSubtreeHoldsRetainedRowsBudget 是前置筛的"带等锁上界"版本（R10-D-02）：
+// 谓词与临界区里的权威复检**同一个函数**，只多一条 lock_timeout —— 前半轮不得
+// 被任一月分区的 ACCESS EXCLUSIVE 无界挂住。
+func usageSubtreeHoldsRetainedRowsBudget(db *sql.DB, rel string, cutoffMonth time.Time) (bool, error) {
+	var holds bool
+	err := withUsageLockBudget(db, usageReclaimLockTimeoutMS, func(tx *sql.Tx) error {
+		var herr error
+		holds, herr = usageSubtreeHoldsRetainedRows(tx, rel, cutoffMonth)
+		return herr
+	})
+	return holds, err
 }
 func UsageAggregateWithLedger(db *sql.DB, from, to time.Time, group string, opts ...UsageAggregateOption) ([]UsageAggregateRow, error) {
 	if group == "dept" {

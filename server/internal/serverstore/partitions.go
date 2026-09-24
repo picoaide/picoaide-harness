@@ -147,6 +147,22 @@ const partitionProbeDateStyle = "SET LOCAL DateStyle = 'ISO, MDY'"
 // 比较按 oid(to_regclass),不比 relname —— 跨 schema 的同名父表不算同一株树
 // (R8-A-7)。relkind 同时取回:二级分区('p')不能当叶子分区用。
 func probeUsagePartition(db *sql.DB, relation, expectedRoot string) (partitionProbe, error) {
+	return probeUsagePartitionBudget(db, relation, expectedRoot, 0)
+}
+
+// probeUsagePartitionBudget 是 probeUsagePartition 的"带等锁上界"版本
+// （R10-D-02，P2）。
+//
+// 为什么要分开：这个探测里的 `pg_get_expr(c.relpartbound, c.oid)` 会**打开关系**
+// （ACCESS SHARE），所以任一会话对目标关系持 ACCESS EXCLUSIVE 时它会**无界**等锁
+// —— 真 PG 实测：清理轮次整轮挂住（`wait=Lock/relation`、query 就是本函数的
+// SELECT），而 `PUT /api/server/admin/…` 是**同步**调用 CleanupUsageRetention
+// ⇒ 管理端请求跟着挂到 HTTP 写超时。
+//
+// 但**计量写入路径不能有这条上界**：那里把"等锁"变成"失败"就是把一次慢变成全站
+// 503 METERING_FAILED。所以缺省（ms=0）不加 lock_timeout，只有清理路径显式传
+// usageReclaimLockTimeoutMS。判据与危害同构：谁受不了无界等待，谁才带预算。
+func probeUsagePartitionBudget(db *sql.DB, relation, expectedRoot string, lockTimeoutMS int) (partitionProbe, error) {
 	// 只读事务:固定会话渲染(见 partitionProbeDateStyle),读完即回滚。
 	tx, err := db.Begin()
 	if err != nil {
@@ -155,6 +171,11 @@ func probeUsagePartition(db *sql.DB, relation, expectedRoot string) (partitionPr
 	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
 	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
 		return partitionProbe{}, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
+	}
+	if lockTimeoutMS > 0 {
+		if _, err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeoutMS)); err != nil {
+			return partitionProbe{}, err
+		}
 	}
 	var isPartition, rootOK, rootPublic sql.NullBool
 	var relkind, bound, parent, root sql.NullString
@@ -342,13 +363,47 @@ func orRoot(probe partitionProbe) string {
 }
 
 // staleDetachedTableErr 是同名孤儿表的固定错误(F11)。
-func staleDetachedTableErr(relation string) error {
-	return &partitionLayoutError{
-		kind: usagePartitionKindStaleDetached,
-		action: fmt.Sprintf("该关系不是分区（DETACH 后未清理的残留表）：请人工确认它是否还需要；"+
-			"确认无用再由人工 DROP TABLE %s（服务端不会自动 DROP/改写管理员的对象）", quoteRelationIdent(relation)),
-		msg: fmt.Sprintf("%s exists but is not a partition (stale detached table); drop it manually", relation),
+//
+// R10-D-05（P3）：`action` 文案必须按**实际 relkind** 给可执行 DDL —— 此前它对
+// 所有非分区占名都写"DROP TABLE <rel>"，而索引/序列/视图/物化视图下这句话不可
+// 执行（`… is not a table`，真 PG 10 种同名形态实测）。映射与清理路径共用
+// dropDDLForRelKind（唯一一份 relkind → DROP 动词），kind 来自探测到的
+// pg_class.relkind。
+func staleDetachedTableErr(relation string, relkind byte) error {
+	kind := string(relkind)
+	action := fmt.Sprintf("该关系不是分区（DETACH 后未清理的残留对象，relkind=%q）：请人工确认它是否还需要；"+
+		"确认无用再由人工删除（服务端不会自动 DROP/改写管理员的对象）", kind)
+	if stmt, ok := dropDDLForRelKind(relation, kind); ok {
+		action = fmt.Sprintf("该关系不是分区（DETACH 后未清理的残留对象，relkind=%q）：请人工确认它是否还需要；"+
+			"确认无用再由人工执行 %s（服务端不会自动 DROP/改写管理员的对象）", kind, stmt)
 	}
+	return &partitionLayoutError{
+		kind:   usagePartitionKindStaleDetached,
+		action: action,
+		msg: fmt.Sprintf("%s exists but is not a partition (stale detached %s); drop it manually",
+			relation, relKindNoun(kind)),
+	}
+}
+
+// relKindNoun 把 relkind 渲染成给运维读的名词（错误消息与 action 用同一份口径）。
+func relKindNoun(kind string) string {
+	switch kind {
+	case "r":
+		return "table"
+	case "p":
+		return "partitioned table"
+	case "v":
+		return "view"
+	case "m":
+		return "materialized view"
+	case "i":
+		return "index"
+	case "S":
+		return "sequence"
+	case "f":
+		return "foreign table"
+	}
+	return "relation"
 }
 
 // misboundedPartitionErr 是错界真分区的固定错误(N4):fail-loud + 人工处置。
@@ -433,8 +488,16 @@ func subPartitionedErr(spec partitionSpec, probe partitionProbe) error {
 // 注意分工:同名关系(probe.Exists)仍走 verifyPartitionBound 的「读不懂 ⇒
 // 人工核对」契约(审计 r5 §2),本轮的放宽只作用于**异名覆盖分区**的扫描。
 func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
+	return ensureRangePartitionBudget(db, spec, 0)
+}
+
+// ensureRangePartitionBudget 是 ensureRangePartition 的"带等锁上界"版本（R10-D-02）：
+// lockTimeoutMS > 0 时探测带 lock_timeout、CREATE 也走一个带 lock_timeout 的事务。
+// 只有清理路径传预算；计量写入路径（缺省 0）保持"等锁"语义（见
+// probeUsagePartitionBudget 的注释：把等待改成失败 = 全站 503 METERING_FAILED）。
+func ensureRangePartitionBudget(db *sql.DB, spec partitionSpec, lockTimeoutMS int) error {
 	rel := spec.relation()
-	probe, probeErr := probeUsagePartition(db, rel, spec.parent)
+	probe, probeErr := probeUsagePartitionBudget(db, rel, spec.parent, lockTimeoutMS)
 	if probeErr != nil {
 		return probeErr
 	}
@@ -473,21 +536,37 @@ func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 		return nil
 	} else if scan.Attach != "" {
 		logPartitionAttachPoint(spec, scan.Attach)
-		return createRangePartition(db, spec, scan.Attach)
+		return createRangePartition(db, spec, scan.Attach, lockTimeoutMS)
 	}
-	return createRangePartition(db, spec, spec.parent)
+	return createRangePartition(db, spec, spec.parent, lockTimeoutMS)
 }
 
 // createRangePartition 在 parent 下幂等创建 spec 的分区,并把 PG 的两类"建不进去"
 // 翻译成可诊断错误(23514 DEFAULT 分区已有本窗口的行 / 42P17 与既有分区重叠)。
 //
+// runPartitionDDL 执行分区创建 DDL：lockTimeoutMS > 0 时把它包进一个带
+// lock_timeout 的事务（清理路径用；R10-D-02），否则直接 db.Exec（计量写入
+// 热路径的既有语义 —— 在那里必须**等**锁，不能把慢变成失败）。
+func runPartitionDDL(db *sql.DB, stmt string, lockTimeoutMS int) (sql.Result, error) {
+	if lockTimeoutMS <= 0 {
+		return db.Exec(stmt)
+	}
+	var res sql.Result
+	err := withUsageLockBudget(db, lockTimeoutMS, func(tx *sql.Tx) error {
+		var e error
+		res, e = tx.Exec(stmt)
+		return e
+	})
+	return res, err
+}
+
 // parent 由调用方决定:缺省是 spec.parent;多级布局下窗口只被中间父表覆盖时,
 // 是那个**最深的覆盖窗口的中间父表**(见 usagePartitionScan.Attach)。
-func createRangePartition(db *sql.DB, spec partitionSpec, parent string) error {
+func createRangePartition(db *sql.DB, spec partitionSpec, parent string, lockTimeoutMS int) error {
 	rel := spec.relation()
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s
 		FOR VALUES FROM ('%s') TO ('%s')`, rel, quoteRelationIdent(parent), spec.from, spec.to)
-	_, err := db.Exec(stmt)
+	_, err := runPartitionDDL(db, stmt, lockTimeoutMS)
 	if err != nil {
 		// rc3-4:DEFAULT 分区(或 MINVALUE..MAXVALUE 分区)里已经有本窗口的行时,
 		// PG 报 **23514**(不是 42P17):"updated partition constraint for default
@@ -904,7 +983,10 @@ func isOverlapPartitionErr(err error) bool {
 // partitionReadyErr 判定"已存在的关系能否直接当作目标分区使用"。
 func partitionReadyErr(spec partitionSpec, probe partitionProbe) error {
 	if !probe.IsPartition {
-		return staleDetachedTableErr(spec.relation())
+		// R10-D-05：错误与 action 文案按**探测到的 relkind** 分流（'r' → DROP TABLE、
+		// 'v' → DROP VIEW、'i' → DROP INDEX…），不再对索引/序列/视图给出不可执行的
+		// DROP TABLE。
+		return staleDetachedTableErr(spec.relation(), probe.RelKind)
 	}
 	// 判据是**分区树传递根**,不是直接父(R8-A-1,严重级 P2→可用性事故):
 	//

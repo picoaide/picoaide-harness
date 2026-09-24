@@ -14,6 +14,7 @@ import type {
 import type { UpdateCheckResult, UpdateRequest } from '../src/update-checker.ts'
 import { downloadDesktopUpdate, UpdateDownloadError } from '../src/update-download.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
+import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 // 客户端只从**它登录的那台服务端**取更新(2026-09-10 定案):每个检查用例都
 // 必须先有一个会话,否则状态是"请先登录"而不是"检查失败"。
@@ -336,7 +337,8 @@ describe('desktop update Host plugin', () => {
     expect(calls).toContain(`${SERVER}/api/client/v2/channel`)
     expect(calls.every(url => sameOrigin(url, SERVER))).toBe(true)
     // 有可用版本就直接下载(后台静默),不再先问一句"要不要下载"。
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：一次清单请求后状态机发起下载（downloadUpdate 调用一次）。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     await harness.dispose()
   })
 
@@ -359,7 +361,8 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({ packaged: false, request })
 
     await harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：会话建立后的自动检查发起下载。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 切换服务端(或登出)必须清掉上一台的"有新版本",否则会把 A 服务端的
     // 版本提示成 B 服务端可升级。
@@ -413,9 +416,11 @@ describe('desktop update Host plugin', () => {
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
     // 后台流程:先静默下载(不弹任何对话框),下完才通报一次"可安装"。
-    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', expect.any(String)) })
+    // 现象：后台检查走完下载并通报"可安装"（假计时器推进 initialDelayMs 后）。
+    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', expect.any(String)) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
     expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install')
+    // 现象：状态文件真的落到磁盘并读回 v2 形状（真实 I/O）。
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
@@ -423,13 +428,14 @@ describe('desktop update Host plugin', () => {
         downloadedVersion: '2.1.0',
         downloadedPath: expect.any(String),
       })
-    })
+    }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
     if (process.platform !== 'win32') {
       expect((await stat(harness.statePath)).mode & 0o777).toBe(0o600)
     }
 
     await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
-    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(2) })
+    // 现象：第二个轮询周期后版本清单请求计数 +1。
+    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(2) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     // 同一版本已经下好:第二次轮询不重复传输、也不重复通报。
     expect(harness.downloadUpdate).toHaveBeenCalledOnce()
     expect(harness.announceUpdateReady).toHaveBeenCalledOnce()
@@ -447,7 +453,8 @@ describe('desktop update Host plugin', () => {
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：后台检查发起下载（假计时器）。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     const [version, source, signal] = harness.downloadUpdate.mock.calls[0] as [string, { manifestURL: string }, AbortSignal]
     expect(version).toBe('2.1.0')
     // 更新源 = 登录的那台服务端(2026-09-10 定案),随下载请求下传。
@@ -461,7 +468,8 @@ describe('desktop update Host plugin', () => {
     expect(harness.notifications).toEqual([])
 
     resolveDownload('/tmp/picoaide-installer')
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+    // 现象：下载 promise 落定后托盘标签变为"可安装"。
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer')
     expect(harness.notifications).toEqual([])
   })
@@ -479,10 +487,11 @@ describe('desktop update Host plugin', () => {
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
     // 校验和不符属于"可重试":字节留在 .partial 里续传,预算内重试到底才报错。
+    // 现象：6 次传输尝试（各 1ms 退避）后发布 checksum-mismatch。
     await vi.waitFor(() => {
       const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
       expect(last?.lastError).toBe('checksum-mismatch')
-    })
+    }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
     expect(harness.announceUpdateReady).not.toHaveBeenCalled()
     await harness.dispose()
@@ -496,10 +505,11 @@ describe('desktop update Host plugin', () => {
     })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
+    // 现象：同类 6 次尝试后发布 network。
     await vi.waitFor(() => {
       const last = harness.publishedStates.mock.calls.at(-1)?.[0] as { lastError?: string } | undefined
       expect(last?.lastError).toBe('network')
-    })
+    }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
     await harness.dispose()
   })
@@ -512,12 +522,14 @@ describe('desktop update Host plugin', () => {
     })
 
     await harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+    // 现象：下载完成后托盘标签进入"可安装"。
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.downloadUpdate).toHaveBeenCalledOnce()
 
     // 第二个动作 = 安装(不是再下一次):已下载的文件被直接交给平台安装流程。
     await harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer') })
+    // 现象：第二次点击走安装交接（installUpdate 调用）。
+    await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.downloadUpdate).toHaveBeenCalledOnce()
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
   })
@@ -549,7 +561,8 @@ describe('desktop update Host plugin', () => {
         statePath: join(root, 'private', 'state.json'),
       })
 
-      await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+      // 现象：启动期复用校验读状态文件与磁盘安装包后给出"可安装"（真实 I/O）。
+      await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
       expect(harness.downloadUpdate).not.toHaveBeenCalled()
       expect(harness.announceUpdateReady).not.toHaveBeenCalled()
       await harness.dispose()
@@ -567,7 +580,8 @@ describe('desktop update Host plugin', () => {
     const harness = await createHarness({ request: requestSpy })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(manifestRequests(requestSpy)).toHaveLength(1) })
+    // 现象：自动检查发出一次版本清单请求。
+    await vi.waitFor(() => { expect(manifestRequests(requestSpy)).toHaveLength(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     expect(harness.showManualCheckResult).not.toHaveBeenCalled()
     expect(harness.downloadUpdate).not.toHaveBeenCalled()
@@ -618,7 +632,9 @@ describe('desktop update Host plugin', () => {
 
     expect(harness.tray.label()).toBe('Check for Updates…')
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：旧状态被重置后自动检查发起下载。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+    // 现象：状态文件被重写成 v2 并读回（真实 I/O）。
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
@@ -626,7 +642,7 @@ describe('desktop update Host plugin', () => {
         downloadedVersion: '2.1.0',
         downloadedPath: expect.any(String),
       })
-    })
+    }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
     expect(harness.warnings).toEqual([])
   })
 
@@ -661,7 +677,8 @@ describe('desktop update Host plugin', () => {
     })
 
     await harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') })
+    // 现象：一次传输失败后重试成功（退避 1ms）并进入"可安装"。
+    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 网络抖动不该让用户看到失败:重试一次就成功,并且中间态暴露了第几次尝试。
     expect(downloadUpdate).toHaveBeenCalledTimes(2)
@@ -691,9 +708,18 @@ describe('desktop update Host plugin', () => {
     try {
       // 手动检查会一直等到下载结束(含 10 秒退避),所以这里只等快照,不 await 它。
       const pending = harness.tray.invoke()
+      // 现象：进入退避窗口（第一帧带正的 retryDelayMs）⇒ 退避档。
+      //
+      // 等待条件**不能**钉 `retryDelayMs: 10_000` 这个精确值：它是**墙钟现算**的
+      // （`beginRetryWait` 记绝对截止时刻，快照里是 `截止时刻 - Date.now()`），置位与
+      // 首次发布之间只隔两条语句，负载下墙钟越过 1ms 就会发布成 **9_999** —— 此后
+      // 倒计时只减不增，条件**永不可满足**（与等待预算无关）。2026-09-24 四路并发实测
+      // 捕获到正是这一形态：接收到的序列是 `9999 9000 7997 …`，断言照样红。
       await vi.waitFor(() => {
-        expect(harness.publishedStates).toHaveBeenCalledWith(expect.objectContaining({ retryDelayMs: 10_000 }))
-      })
+        const positive = harness.publishedStates.mock.calls
+          .some(call => ((call[0] as { retryDelayMs?: number }).retryDelayMs ?? 0) > 0)
+        expect(positive).toBe(true)
+      }, { timeout: WAIT_BUDGETS.RETRY_BACKOFF_WINDOW_MS })
       const states = harness.publishedStates.mock.calls.map(call => call[0] as {
         readonly availableVersion: string | undefined
         readonly downloadingVersion: string | undefined
@@ -717,9 +743,13 @@ describe('desktop update Host plugin', () => {
         downloadingVersion: '2.1.0',
         retryAttempt: 1,
         retryMaxAttempts: 2,
-        retryDelayMs: 10_000,
         downloadProgress: { receivedBytes: 1024, totalBytes: 2048 },
       })
+      // "整窗"这条性质用**容差**表达:首帧在置位后立刻发布 ⇒ 与 10_000 的差只可能来自
+      // 墙钟误差(允许 100ms)。下界仍排除"已被倒计时 tick 减过一秒"的帧(那会 ≤ 9_000),
+      // 所以判别力不变,只是不再要求毫秒级同时性。
+      expect(retryWait?.retryDelayMs).toBeGreaterThan(9_900)
+      expect(retryWait?.retryDelayMs).toBeLessThanOrEqual(10_000)
       // 等待期不得同时报错:文案是"下载中断，N 秒后重试",不是一个失败状态。
       expect(retryWait?.retryAttempt).toBeLessThan(retryWait?.retryMaxAttempts ?? 0)
       // 退避期间退出应用不得卡住 teardown(定时器被清掉时必须唤醒等待)。
@@ -747,9 +777,15 @@ describe('desktop update Host plugin', () => {
     try {
       const pending = harness.tray.invoke()
       await vi.advanceTimersByTimeAsync(0)
+      // 现象：进入退避窗口（第一帧带正的 retryDelayMs）⇒ 退避档。
+      // 这里同样不钉精确值：等待条件钉墙钟现算的毫秒值 = 条件可能永不可满足
+      // （上一条用例已实测）。"第一帧是完整 10 秒"由下面的 `deltas[0]` 直接断言 ——
+      // 假计时器下 `Date.now()` 只在推进时变化，所以那一处是确定性的。
       await vi.waitFor(() => {
-        expect(harness.publishedStates).toHaveBeenCalledWith(expect.objectContaining({ retryDelayMs: 10_000 }))
-      })
+        const positive = harness.publishedStates.mock.calls
+          .some(call => ((call[0] as { retryDelayMs?: number }).retryDelayMs ?? 0) > 0)
+        expect(positive).toBe(true)
+      }, { timeout: WAIT_BUDGETS.RETRY_BACKOFF_WINDOW_MS })
       // 退避期每过一秒重发一次快照,剩余量随绝对截止时刻递减 —— 旧行为只 publish
       // 一次常量,显示面的 `Math.ceil(delay/1000)` 就永远停在"10 秒后重试"。
       await vi.advanceTimersByTimeAsync(3_000)
@@ -780,9 +816,11 @@ describe('desktop update Host plugin', () => {
     })
 
     const first = harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：两次并发点击共用同一次下载（downloadUpdate 只调用一次）。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     const second = harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() })
+    // 现象：第二次点击仍不新建传输。
+    await vi.waitFor(() => { expect(harness.downloadUpdate).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     rejectDownload(new Error('offline'))
     await Promise.all([first, second])
 
@@ -808,7 +846,8 @@ describe('desktop update Host plugin', () => {
       }),
     })
     const pendingCheck = checking.tray.invoke()
-    await vi.waitFor(() => { expect(checkSignal).toBeDefined() })
+    // 现象：检查请求发出并暴露 AbortSignal。
+    await vi.waitFor(() => { expect(checkSignal).toBeDefined() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     await checking.dispose()
     await pendingCheck
     expect(checkSignal?.aborted).toBe(true)
@@ -827,7 +866,8 @@ describe('desktop update Host plugin', () => {
       }),
     })
     const pendingDownload = downloading.tray.invoke()
-    await vi.waitFor(() => { expect(downloadSignal).toBeDefined() })
+    // 现象：下载开始并暴露 AbortSignal。
+    await vi.waitFor(() => { expect(downloadSignal).toBeDefined() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     await downloading.dispose()
     await pendingDownload
     expect(downloadSignal?.aborted).toBe(true)
@@ -844,7 +884,8 @@ describe('desktop update Host plugin', () => {
       showManualCheckResult: async () => dialog,
     })
     const pending = harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.showManualCheckResult).toHaveBeenCalledOnce() })
+    // 现象：手动结果对话框被打开（等的是打开，不是用户关闭）。
+    await vi.waitFor(() => { expect(harness.showManualCheckResult).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     await harness.dispose()
     expect(harness.registrationDispose).toHaveBeenCalledOnce()
@@ -867,7 +908,8 @@ describe('desktop update Host plugin', () => {
 
     const first = harness.tray.invoke()
     const second = harness.tray.invoke()
-    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(1) })
+    // 现象：两次并发手动检查合并成一条清单请求。
+    await vi.waitFor(() => { expect(manifestRequests(request)).toHaveLength(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.tray.label()).toBe('Checking for Updates…')
     await vi.advanceTimersByTimeAsync(testConfig.requestTimeoutMs)
     // 每次重试各自计时:一次 1ms 推进就把每一轮的"退避 → 下一次请求 → 再超时"
@@ -914,15 +956,18 @@ describe('desktop update Host plugin', () => {
       const manifests = (of: string): typeof requested =>
         requested.filter(call => call.phase === of && call.url.endsWith('/updates/manifest'))
 
-      await vi.waitFor(() => { expect(manifests('boot')).toHaveLength(1) })
+      // 现象：启动期清单请求出现（状态里已有待安装件）。
+      await vi.waitFor(() => { expect(manifests('boot')).toHaveLength(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
       // 检查在飞时用户切换服务端(登录/登出/换服务端):第三个操作插入同一条
       // 清单请求路径 —— 共享定时器槽时代它会把检查请求已经装好的超时清掉。
       phase = 'check'
       const check = harness.tray.invoke()
-      await vi.waitFor(() => { expect(manifests('check')).toHaveLength(1) })
+      // 现象：手动检查的清单请求出现。
+      await vi.waitFor(() => { expect(manifests('check')).toHaveLength(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
       phase = 'session-change'
       harness.emitSession({ serverURL: 'https://other.test' })
-      await vi.waitFor(() => { expect(manifests('session-change')).toHaveLength(1) })
+      // 现象：会话切换触发的清单请求出现。
+      await vi.waitFor(() => { expect(manifests('session-change')).toHaveLength(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
       const checkSignal = manifests('check')[0]?.signal
       expect(manifests('check')[0]?.url).toBe(OFFICIAL_MANIFEST_URL)
 
@@ -956,7 +1001,8 @@ describe('desktop update Host plugin', () => {
 
     // An available version publishes a downloadable snapshot.
     await harness.tray.invoke()
-    await vi.waitFor(() => { expect(harness.publishedStates).toHaveBeenCalled() })
+    // 现象：可用版本的渲染进程快照被发布。
+    await vi.waitFor(() => { expect(harness.publishedStates).toHaveBeenCalled() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.publishedStates).toHaveBeenLastCalledWith(expect.objectContaining({
       availableVersion: '2.3.0',
       downloadingVersion: undefined,
@@ -969,13 +1015,14 @@ describe('desktop update Host plugin', () => {
     expect(typeof harness.checkNow).toBe('function')
     // The trigger drives the same manual flow: 检查 → 静默下载 → 可安装。
     harness.checkNow?.()
+    // 现象：渲染进程触发检查 → 下载（含停滞/总预算参数）。
     await vi.waitFor(() => {
       expect(harness.downloadUpdate).toHaveBeenCalledWith(
         '2.3.0', expect.anything(), expect.any(AbortSignal), expect.any(Function),
         // B-08:插件必须把停滞/总预算下发给适配器（只在适配器忽略时才靠看门狗兜底）。
         { stallTimeoutMs: testConfig.downloadStallTimeoutMs, totalTimeoutMs: testConfig.downloadTotalTimeoutMs },
       )
-    })
+    }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
   })
 })
 
@@ -989,8 +1036,10 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
     const harness = await createHarness({ currentVersion: '2.1.0-rc.1', request })
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
-    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0-rc.2', expect.any(String)) })
+    // 现象：预发布清单 → 通报"可安装"（假计时器）。
+    await vi.waitFor(() => { expect(harness.announceUpdateReady).toHaveBeenCalledWith('2.1.0-rc.2', expect.any(String)) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install')
+    // 现象：状态文件写入并读回（真实 I/O）。
     await vi.waitFor(async () => {
       expect(JSON.parse(await readFile(harness.statePath, 'utf8'))).toEqual({
         version: 2,
@@ -998,7 +1047,7 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
         downloadedVersion: '2.1.0-rc.2',
         downloadedPath: expect.any(String),
       })
-    })
+    }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
 
     await harness.dispose()
   })
@@ -1031,7 +1080,8 @@ describe('desktop update channel from the manifest (prerelease installs)', () =>
 
     await vi.advanceTimersByTimeAsync(testConfig.initialDelayMs)
     // 复用校验要先读状态文件与磁盘(真实 I/O),再回落到"可安装"。
-    await vi.waitFor(() => { expect(restarted.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install') })
+    // 现象：重启后复用校验读状态与真实磁盘安装包 → 托盘"可安装"（真实 I/O）。
+    await vi.waitFor(() => { expect(restarted.tray.label()).toBe('PicoAide Harness 2.1.0-rc.2 Ready to Install') }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
     await vi.advanceTimersByTimeAsync(testConfig.intervalMs)
     // 后续轮询看到"这一版已经在待安装位":不重下、也不再提示。
     expect(restarted.downloadUpdate).not.toHaveBeenCalled()
@@ -1118,20 +1168,22 @@ describe('安装包传输的有界性（B-08）', () => {
     })
 
     await harness.tray.invoke()
+    // 现象：真实下载器在停滞/重试预算内失败并发布 lastError（真实 I/O）。
     await vi.waitFor(() => {
       expect(harness.publishedStates).toHaveBeenLastCalledWith(
         expect.objectContaining({ lastError: 'network', downloadingVersion: undefined }),
       )
-    }, { timeout: 10_000 })
+    }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
 
     // 停滞按可重试的网络故障处理:重试预算用尽(首次 + 每个退避项一次)。
     expect(harness.downloadUpdate).toHaveBeenCalledTimes(testConfig.transferRetryDelaysMs.length + 1)
     // 占位必须放掉:否则 runBackgroundCheck 与手动检查会永久早退（缺陷本体）。
     const attempts = harness.downloadUpdate.mock.calls.length
     await harness.tray.invoke()
+    // 现象：失败后 downloadTask 占位被放掉 ⇒ 再点会重新传输（真实 I/O）。
     await vi.waitFor(() => {
       expect(harness.downloadUpdate.mock.calls.length).toBeGreaterThan(attempts)
-    }, { timeout: 10_000 })
+    }, { timeout: WAIT_BUDGETS.REAL_IO_MS })
 
     await harness.dispose()
     await rm(root, { recursive: true, force: true })
@@ -1147,11 +1199,12 @@ describe('安装包传输的有界性（B-08）', () => {
     })
 
     await harness.tray.invoke()
+    // 现象：storage 类本地失败发布 lastError。
     await vi.waitFor(() => {
       expect(harness.publishedStates).toHaveBeenLastCalledWith(
         expect.objectContaining({ lastError: 'storage' }),
       )
-    })
+    }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 磁盘满重试没有意义:一次就够,且不能报成网络问题。
     expect(harness.downloadUpdate).toHaveBeenCalledTimes(1)

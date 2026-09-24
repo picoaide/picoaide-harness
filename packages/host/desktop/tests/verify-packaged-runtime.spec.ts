@@ -64,6 +64,7 @@ import {
   type SentrySmokeLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { TEST_BUDGETS } from './wait-budgets.ts'
 
 function context(
   appOutDir: string,
@@ -635,7 +636,10 @@ describe('反向 oracle：清单必须覆盖产物（第三轮审计 P-1，2026-
     ).toThrow(/覆盖计数低于棘轮下限/u)
   })
 
-  it('产物反推出的每一条：从生效清单里删掉都必须红（随树状态自适应，不写死清单）', () => {
+  // 预算理由（现象）：本条要在**真实产物**上遍历 `node_modules/@picoaide/**` 后逐条反推，
+  // 空闲机实测 911ms，三路套件并发时实测撞穿 vitest 缺省的 5s `testTimeout`
+  // （`Test timed out in 5000ms`）⇒ 显式给产物派生档，不吃缺省。
+  it('产物反推出的每一条：从生效清单里删掉都必须红（随树状态自适应，不写死清单）', { timeout: TEST_BUDGETS.ARTIFACT_DERIVATION_MS }, () => {
     // 与上一条互补：上一条走"清单驱动"的棘轮（构建无关），这一条走"产物驱动"的
     // 覆盖判据 —— 派生出来的每一条都真的参与判定，而不是只在错误消息里出现过。
     const census = collectWorkspaceSurface(desktopRoot)

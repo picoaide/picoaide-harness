@@ -208,8 +208,31 @@ function liveHeadersOf(provider: unknown): Record<string, string> | undefined {
  *
  * Only non-GET requests count: the SDK's GET is the long-lived SSE stream, so
  * counting it would mark every connected transport permanently busy.
+ *
+ * A bucket is a map of ticket id -> start time, never a bare counter (R10-B-06).
+ * The counter this replaced was decremented in the `finally` of
+ * `await options.base(...)`, so a `base` that NEVER settles (a fetch that
+ * ignores its signal, or a socket that hangs) left the endpoint permanently
+ * busy: every later rebuild walked the full grace and logged the misleading
+ * `重建等待在途调用超时` line while nothing was on the wire. Tickets make both
+ * repairs possible — {@link pruneOutboundActivity} can drop the ones that are
+ * older than a bound, and a late `finally` from a request whose ticket was
+ * already dropped is a no-op instead of decrementing somebody else's count.
  */
-const outboundActivity = new Map<string, number>()
+const outboundActivity = new Map<string, Map<number, number>>()
+
+/** Ticket ids: unique per counted request, so a stale release cannot subtract. */
+let outboundTicketSeq = 0
+
+/**
+ * The longest a counted request can legitimately still be on the wire.
+ *
+ * The tool budget of an MCP call (`toolCallTimeoutMs`, 120 s — see the
+ * registration in `index.ts`) is the ceiling: a request older than that is
+ * beyond the budget that protects it, so it stops charging future rebuilds even
+ * if its `base` never settles.
+ */
+const OUTBOUND_ACTIVITY_MAX_MS = 120_000
 
 /** The activity bucket of one request URL, or null for a URL without a host. */
 function activityKeyOf(url: string | URL): string | null {
@@ -219,6 +242,49 @@ function activityKeyOf(url: string | URL): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Drop every ticket of one endpoint older than `maxAgeMs`, removing the bucket
+ * when nothing is left.
+ * @param key - the endpoint's activity key.
+ * @param maxAgeMs - age at which a ticket stops counting.
+ * @returns the surviving bucket, or undefined when the endpoint is idle.
+ */
+function pruneOutboundActivity(key: string, maxAgeMs: number): Map<number, number> | undefined {
+  const bucket = outboundActivity.get(key)
+  if (bucket === undefined) return undefined
+  const now = Date.now()
+  for (const [id, startedAt] of bucket) if (now - startedAt >= maxAgeMs) bucket.delete(id)
+  if (bucket.size === 0) {
+    outboundActivity.delete(key)
+    return undefined
+  }
+  return bucket
+}
+
+/** Register one counted request; the id is what {@link endOutboundActivity} releases. */
+function beginOutboundActivity(key: string): number {
+  const id = ++outboundTicketSeq
+  const bucket = outboundActivity.get(key)
+  if (bucket === undefined) outboundActivity.set(key, new Map([[id, Date.now()]]))
+  else bucket.set(id, Date.now())
+  return id
+}
+
+/**
+ * Release one counted request.
+ *
+ * Looked up by ticket id, not by key alone: a ticket whose bucket was pruned
+ * (or given up on) must not decrement a LATER request's count.
+ * @param key - the endpoint's activity key.
+ * @param id - the ticket returned by {@link beginOutboundActivity}.
+ */
+function endOutboundActivity(key: string, id: number): void {
+  const bucket = outboundActivity.get(key)
+  if (bucket === undefined) return
+  bucket.delete(id)
+  if (bucket.size === 0) outboundActivity.delete(key)
 }
 
 /** The transport's own URL as a full href, read live (see {@link URL_FIELD}). */
@@ -236,7 +302,7 @@ function ownHrefOf(read: (() => unknown) | undefined): string | null {
  */
 export function isMcpOutboundBusy(target: string): boolean {
   const key = activityKeyOf(target)
-  return key !== null && (outboundActivity.get(key) ?? 0) > 0
+  return key !== null && (pruneOutboundActivity(key, OUTBOUND_ACTIVITY_MAX_MS)?.size ?? 0) > 0
 }
 
 /**
@@ -247,6 +313,12 @@ export function isMcpOutboundBusy(target: string): boolean {
  * audit R9A-3). The wait ends as soon as the counter reaches zero, so the
  * common case costs one poll; the bound exists so a stalled call cannot starve
  * the credential update forever.
+ *
+ * The bound is also where the bookkeeping is given back (R10-B-06): a call that
+ * outlived the grace we were willing to wait for is one this rebuild cuts
+ * anyway, so its ticket stops counting. Without that, ONE request whose `base`
+ * never settles kept the endpoint busy forever and every later rebuild paid the
+ * full grace and logged the timeout line for a wire that was empty.
  * @param target - the MCP endpoint URL of the definition.
  * @param timeoutMs - upper bound on the wait.
  * @returns `'idle'` when the endpoint drained (or already was idle), `'busy'`
@@ -254,13 +326,18 @@ export function isMcpOutboundBusy(target: string): boolean {
  */
 export async function whenMcpOutboundIdle(target: string, timeoutMs: number): Promise<'idle' | 'busy'> {
   const key = activityKeyOf(target)
-  if (key === null || (outboundActivity.get(key) ?? 0) === 0) return 'idle'
+  if (key === null || (pruneOutboundActivity(key, OUTBOUND_ACTIVITY_MAX_MS)?.size ?? 0) === 0) return 'idle'
   const deadline = Date.now() + Math.max(0, timeoutMs)
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, ACTIVITY_POLL_MS))
-    if ((outboundActivity.get(key) ?? 0) === 0) return 'idle'
+    if ((pruneOutboundActivity(key, OUTBOUND_ACTIVITY_MAX_MS)?.size ?? 0) === 0) return 'idle'
   }
-  return (outboundActivity.get(key) ?? 0) === 0 ? 'idle' : 'busy'
+  if ((pruneOutboundActivity(key, OUTBOUND_ACTIVITY_MAX_MS)?.size ?? 0) === 0) return 'idle'
+  // Gave up: release every ticket this wait was willing to wait for, then still
+  // report `busy` — the bound really did expire with a call on the wire, which
+  // is what the caller's warn line says.
+  pruneOutboundActivity(key, Math.max(0, timeoutMs))
+  return 'busy'
 }
 
 /** Poll interval of {@link whenMcpOutboundIdle}: far below any tool budget. */
@@ -929,16 +1006,20 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     // R9A-3 bookkeeping: the provider-less rebuild retires (and closes) this
     // transport, which killed a tool call that was still on the wire. The
     // count is what lets that rebuild wait for the call instead of cutting it.
+    // The ticket (not a bare increment) is what makes the count recoverable
+    // when `base` never settles (R10-B-06): the wait's own bound releases it,
+    // and this `finally` — should it ever run, possibly much later — releases
+    // only THIS request.
     const ownHref = ownHrefOf(options.ownUrl)
     const activityKey = ownHref === null ? null : activityKeyOf(ownHref)
     const counted = activityKey !== null
       && activityKey === activityKeyOf(target)
       && (init?.method ?? 'GET').toUpperCase() !== 'GET'
-    if (counted) outboundActivity.set(activityKey, (outboundActivity.get(activityKey) ?? 0) + 1)
+    const ticket = counted && activityKey !== null ? beginOutboundActivity(activityKey) : null
     try {
       return await options.base(input, next)
     } finally {
-      if (counted) outboundActivity.set(activityKey, Math.max(0, (outboundActivity.get(activityKey) ?? 1) - 1))
+      if (ticket !== null && activityKey !== null) endOutboundActivity(activityKey, ticket)
     }
   }
   Object.defineProperty(wrapped, FENCED_FETCH, { value: true, enumerable: false })

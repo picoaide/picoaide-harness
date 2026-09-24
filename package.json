@@ -79,6 +79,7 @@
     "check:doc-claims": "node scripts/check-doc-claims.mjs",
     "check:integration-tests": "node scripts/check-integration-tests.mjs",
     "check:no-real-domains": "node scripts/check-no-real-domains.mjs",
+    "check:guard-parser-integrity": "node scripts/check-guard-parser-integrity.mjs",
     "prebuild": "yarn workspace dsh-plugin-desktop prebuild",
     "check": "node scripts/check-workspaces.mjs",
     "check:fast": "node scripts/check-workspaces.mjs --changed",

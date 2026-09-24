@@ -17,6 +17,7 @@ package serverstore
 // `skip_reasons=…`。
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,12 +30,19 @@ import (
 //   - subtree-retained：子树里还有保留期内的行 —— **自动**，等子树内最后一个
 //     到期月被回收后本轮自然继续；
 //   - detached-non-leaf：DETACH 之后留下的父表/带子关系 —— 人工；
-//   - non-table：视图/物化视图/序列/外部表等非表对象占名 —— 人工。
+//   - non-table：视图/物化视图/序列/外部表等非表对象占名 —— 人工；
+//   - lock-timeout / statement-timeout（R10-A-03）：这一轮的某一处**等锁/语句**
+//     超时 ⇒ 整事务回滚、一行数据没动、下一轮自动重试 —— **自动**。
+//     与上面几类的区别是它**不是失败**：管理端保存保留期不得因此 500、
+//     `/readyz` 的 failed_rounds 也不得把它记成故障（判据是 SQLSTATE
+//     55P03/57014，见 usageFailureTimeoutReason）。
 const (
-	usageSkipDescendant      = "descendant"
-	usageSkipSubtreeRetained = "subtree-retained"
-	usageSkipDetachedNonLeaf = "detached-non-leaf"
-	usageSkipNonTable        = "non-table"
+	usageSkipDescendant       = "descendant"
+	usageSkipSubtreeRetained  = "subtree-retained"
+	usageSkipDetachedNonLeaf  = "detached-non-leaf"
+	usageSkipNonTable         = "non-table"
+	usageSkipLockTimeout      = "lock-timeout"
+	usageSkipStatementTimeout = "statement-timeout"
 	// usageSkipOrphanRetained：名为 usage_<YYYYMM> 的关系**不在 usage 树里**、而名字的那
 	// 个月**仍在保留期内**（R9-D R9D-07）。保留期内不能删它的明细，所以它不进回收面 ——
 	// 但它占着当月分区名，写入路径要么把它领回去（自愈）、要么该月写入永久失败。
@@ -65,6 +73,7 @@ type usageRetentionRound struct {
 	Failures              int
 	SkippedByReason       map[string]int
 	Unreclaimed           []string
+	FailedRelations       []string
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -77,8 +86,11 @@ type usageRetentionRound struct {
 //	configured_months / cutoff_month 生效的保留期与它推出的清理边界
 //	cleared_partitions/detached     本轮真正回收的关系数
 //	skipped / skipped_by_reason     本轮**没有**回收的关系数与原因（R8-A-3 的核心：
-//	                                深后代永不回收从此是可判定的计数）
+//	                                深后代永不回收从此是可判定的计数；R10-A-03 起
+//	                                "等锁/语句超时 ⇒ 本轮延后"也在这里，**不计失败**）
 //	unreclaimed                     未回收的关系名（有界抽样，带原因）
+//	failures / failed_relations     真失败的关系数与关系名（R10-A-05：关系名也要进
+//	                                机器可读面，此前只出现在 last_error 的自由文本里）
 type UsageRetentionStatus struct {
 	ConfiguredMonths int   `json:"configured_months"`
 	RoundNumber      int64 `json:"rounds"`
@@ -92,6 +104,12 @@ type UsageRetentionStatus struct {
 	ClearedDetached   int    `json:"cleared_detached"`
 	Skipped           int    `json:"skipped"`
 	Failures          int    `json:"failures"`
+	// FailedRelations 是**真失败**的关系名（有界抽样，与 Unreclaimed 同形）。
+	// R10-A-05（P3）：此前失败关系只出现在 LastError 的自由文本里，而机器可读面
+	// （unreclaimed）只收 skipped ⇒ "哪条关系失败了"在读面上不可判定。
+	FailedRelations []string `json:"failed_relations,omitempty"`
+	// FailedRelationsTruncated 报告失败关系清单是否被上限截断（Failures 仍是全量）。
+	FailedRelationsTruncated bool `json:"failed_relations_truncated,omitempty"`
 	// SkippedByReason 是"本轮没有回收"的**按原因计数**（精确，不受清单上限影响）。
 	SkippedByReason map[string]int `json:"skipped_by_reason,omitempty"`
 	// Unreclaimed 是未回收的关系名 + 原因（`usage_202607(descendant)`），有界。
@@ -129,6 +147,24 @@ type UsageRetentionStatus struct {
 	WriteBlockedAction string `json:"write_blocked_action,omitempty"`
 	WriteBlockedSince  string `json:"write_blocked_since,omitempty"`
 	WriteBlockedCount  int64  `json:"write_blocked_count,omitempty"`
+
+	// ---- 写入面（非分区布局的瞬时失败）----
+	//
+	// R10-A-06（P3）：`write_blocked_*` 的文档语义是"当月计量写入被**分区布局**
+	// 挡住"（用户面后果 = 每一次对话 503，且处置动作是分区 DDL）。而
+	// noteUsagePartitionWriteFailure 对**任何** ensureUsagePartition 失败都置位，
+	// 包括未分类的瞬时错误（连接/探测/DDL 失败，kind="other"）—— 语义漂移：
+	// 运维会拿着 write_blocked_action 去核对一个可能完全正确的分区树，而
+	// write_blocked_action 在 other 上本来就是空串。
+	//
+	// 现在按**判据面**分流：只有 partitionLayoutError 家族（有封闭 kind）进
+	// write_blocked_*；未分类的瞬时失败单列 write_error_*（同样可读，但不冒充
+	// "布局阻塞"，也没有分区动作）。两者都由一次成功写入清除。
+	WriteError        bool   `json:"write_error,omitempty"`
+	WriteErrorMonth   string `json:"write_error_month,omitempty"`
+	WriteErrorMessage string `json:"write_error_message,omitempty"`
+	WriteErrorSince   string `json:"write_error_since,omitempty"`
+	WriteErrorCount   int64  `json:"write_error_count,omitempty"`
 }
 
 var (
@@ -175,6 +211,17 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 		}
 		st.Unreclaimed = append([]string(nil), round.Unreclaimed[:limit]...)
 	}
+	// R10-A-05：失败关系用同一套有界抽样口径（计数 Failures 仍是全量）。
+	st.FailedRelations = nil
+	st.FailedRelationsTruncated = false
+	if n := len(round.FailedRelations); n > 0 {
+		limit := n
+		if limit > usageRetentionUnreclaimedMax {
+			limit = usageRetentionUnreclaimedMax
+			st.FailedRelationsTruncated = true
+		}
+		st.FailedRelations = append([]string(nil), round.FailedRelations[:limit]...)
+	}
 	if !round.EndedAt.IsZero() {
 		st.LastRoundAt = round.EndedAt.UTC().Format(time.RFC3339)
 	}
@@ -200,37 +247,74 @@ type usageWriteBlockState struct {
 
 var usageWriteBlockVal atomic.Pointer[usageWriteBlockState]
 
+// usageWriteErrorVal 是"未分类的**瞬时**写入失败"（kind="other"）的进程内过程事实
+// （R10-A-06）。与 usageWriteBlockVal 分开存放：判据面不同（分区布局 vs 瞬时错误），
+// 处置动作也不同（DDL vs 重试/看日志），混在一个字段里就是语义漂移。
+var usageWriteErrorVal atomic.Pointer[usageWriteBlockState]
+
 // noteUsagePartitionWriteFailure 记下"这一笔计量没能落账"（写路径唯一记账点）。
 //
 // 热路径成本：只在**失败**时进入（失败本身已经要打日志/返回 503），成功路径只做一次
 // atomic load（见 noteUsagePartitionWriteOK），不引入互斥。
+//
+// R10-A-06（P3）：只有 `*partitionLayoutError`（分区布局结构性阻塞，带封闭 kind 与
+// 可执行 action）才置 `write_blocked_*`；其余错误（连接/探测/DDL 的瞬时失败）进
+// `write_error_*`。判据是结构化的（errors.As 命中），不靠 kind 字符串比对。
 func noteUsagePartitionWriteFailure(month time.Time, err error) {
 	key := monthKey(BeijingMonth(month))
+	var le *partitionLayoutError
+	if !errors.As(err, &le) {
+		kind, _, msg := partitionLayoutFailure(err)
+		storeUsageWriteError(&usageWriteErrorVal, key, kind, msg)
+		return
+	}
 	kind, action, msg := partitionLayoutFailure(err)
-	prev := usageWriteBlockVal.Load()
+	storeWriteBlock(&usageWriteBlockVal, key, kind, action, msg)
+}
+
+// storeWriteBlock 按"同月累加、跨月重置"的语义写入一份写入面状态。
+func storeWriteBlock(slot *atomic.Pointer[usageWriteBlockState], key, kind, action, msg string) {
+	prev := slot.Load()
 	next := &usageWriteBlockState{Month: key, Since: time.Now(), Kind: kind, Action: action, Err: msg, Count: 1}
 	if prev != nil && prev.Month == key {
 		next.Since = prev.Since
 		next.Count = prev.Count + 1
 	}
-	usageWriteBlockVal.Store(next)
+	slot.Store(next)
+}
+
+// storeUsageWriteError 同上（write_error 面：无 action）。
+func storeUsageWriteError(slot *atomic.Pointer[usageWriteBlockState], key, kind, msg string) {
+	storeWriteBlock(slot, key, kind, "", msg)
 }
 
 // noteUsagePartitionWriteOK 在**成功**创建/确认当月分区后清掉挡住状态。
 //
 // 只在"确实记过同一个月的失败"时才做 CompareAndSwap（热路径是一次 atomic load，
-// 没有互斥、没有分配）。
+// 没有互斥、没有分配）。两个面一起清：一次成功写入同时证明"分区布局可用"与
+// "刚才那次瞬时失败已过去"。
 func noteUsagePartitionWriteOK(month time.Time) {
-	prev := usageWriteBlockVal.Load()
-	if prev == nil || prev.Month != monthKey(BeijingMonth(month)) {
-		return
+	key := monthKey(BeijingMonth(month))
+	if prev := usageWriteBlockVal.Load(); prev != nil && prev.Month == key {
+		usageWriteBlockVal.CompareAndSwap(prev, nil)
 	}
-	usageWriteBlockVal.CompareAndSwap(prev, nil)
+	if prev := usageWriteErrorVal.Load(); prev != nil && prev.Month == key {
+		usageWriteErrorVal.CompareAndSwap(prev, nil)
+	}
 }
 
 // usageWriteBlockForReadyz 返回**当月**的写入阻塞状态（别的月份的历史阻塞不冒充当月）。
 func usageWriteBlockForReadyz() *usageWriteBlockState {
-	prev := usageWriteBlockVal.Load()
+	return usageWriteStateForReadyz(&usageWriteBlockVal)
+}
+
+// usageWriteErrorForReadyz 返回**当月**的瞬时写入失败状态。
+func usageWriteErrorForReadyz() *usageWriteBlockState {
+	return usageWriteStateForReadyz(&usageWriteErrorVal)
+}
+
+func usageWriteStateForReadyz(slot *atomic.Pointer[usageWriteBlockState]) *usageWriteBlockState {
+	prev := slot.Load()
 	if prev == nil || prev.Month != monthKey(BeijingMonth(time.Now())) {
 		return nil
 	}
@@ -238,9 +322,12 @@ func usageWriteBlockForReadyz() *usageWriteBlockState {
 	return &cp
 }
 
-// resetUsageWriteBlockForTest 清空写入阻塞状态（仅测试；与 resetUsageRetentionStatusForTest
+// resetUsageWriteBlockForTest 清空写入面状态（仅测试；与 resetUsageRetentionStatusForTest
 // 同一约定，由 NewTestDB 调用）。
-func resetUsageWriteBlockForTest() { usageWriteBlockVal.Store(nil) }
+func resetUsageWriteBlockForTest() {
+	usageWriteBlockVal.Store(nil)
+	usageWriteErrorVal.Store(nil)
+}
 
 // CurrentUsageRetentionStatus 返回保留清理的过程事实快照（进程内；未跑过清理时
 // 为零值，**不伪造**"一切正常"的读数 —— `rounds=0` 本身就说明这个进程还没跑过
@@ -270,6 +357,16 @@ func CurrentUsageRetentionStatus() UsageRetentionStatus {
 		st.WriteBlockedCount = wb.Count
 		if !wb.Since.IsZero() {
 			st.WriteBlockedSince = wb.Since.UTC().Format(time.RFC3339)
+		}
+	}
+	// 未分类的瞬时写入失败（R10-A-06）：单列一面，不冒充"分区布局阻塞"。
+	if we := usageWriteErrorForReadyz(); we != nil {
+		st.WriteError = true
+		st.WriteErrorMonth = we.Month
+		st.WriteErrorMessage = we.Err
+		st.WriteErrorCount = we.Count
+		if !we.Since.IsZero() {
+			st.WriteErrorSince = we.Since.UTC().Format(time.RFC3339)
 		}
 	}
 	return st

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DesktopShellSpec, DesktopUpdateSource } from '../src/runtime.ts'
 import { desktopDiagnosticsPrivacyCopy } from '../src/tray-locale.ts'
+import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 /** 下载用例共用的更新源:客户端只从登录的那台服务端取包。 */
 const UPDATE_SOURCE: DesktopUpdateSource = {
@@ -559,12 +560,14 @@ describe('Electron compatibility runtime', () => {
 
     // First crash: reload the app URL once (the documented single retry).
     gone({}, { reason: 'crashed', exitCode: 1 })
-    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) })
+    // 现象：首次渲染进程崩溃触发一次 reload。
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(electron.loadURL).toHaveBeenLastCalledWith('http://127.0.0.1:43120/')
 
     // Second crash: the error page with an explicit retry button.
     gone({}, { reason: 'crashed', exitCode: 1 })
-    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) })
+    // 现象：第二次崩溃改载错误页（loadURL 第 2 次）。
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     const errorPage = String(electron.loadURL.mock.calls[1]?.[0])
     expect(errorPage.startsWith('data:text/html;charset=utf-8,')).toBe(true)
     const html = decodeURIComponent(errorPage.slice('data:text/html;charset=utf-8,'.length))
@@ -679,7 +682,8 @@ describe('Electron compatibility runtime', () => {
     })
 
     const mounted = runtime.mountScheduled(beforeInteractive)
-    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledOnce() })
+    // 现象：窗口挂载时加载应用地址一次。
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(electron.trays).toHaveLength(0)
     expect(beforeInteractive).not.toHaveBeenCalled()
 
@@ -776,7 +780,8 @@ describe('Electron compatibility runtime', () => {
       expect.objectContaining({ label: 'web', type: 'radio', checked: false }),
     ])
     profile?.submenu?.[0]?.click?.()
-    await vi.waitFor(() => { expect(invoke).toHaveBeenCalledOnce() })
+    // 现象：Profile 菜单点击调用宿主 invoke。
+    await vi.waitFor(() => { expect(invoke).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     await release()
   })
@@ -883,7 +888,8 @@ describe('Electron compatibility runtime', () => {
     }
 
     runtime.reportRendererBoot(report)
-    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce() })
+    // 现象：Loader 失败报告 → 原生恢复对话框弹出一次。
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     runtime.reportRendererBoot({ status: 'healthy' })
 
     expect(onRendererBoot).toHaveBeenCalledWith(report)
@@ -909,13 +915,15 @@ describe('Electron compatibility runtime', () => {
     const missingError = new ElectronDesktopRuntime(async () => {})
     missingError.setLocalePreference('zh')
     missingError.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
-    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(1) })
+    // 现象：分支一的恢复对话框（第 1 次）。
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 分支二：Loader 报了 error，但没有任何条目停在非 ACTIVE 态（plugins 为空）。
     const missingPlugins = new ElectronDesktopRuntime(async () => {})
     missingPlugins.setLocalePreference('zh')
     missingPlugins.reportRendererBoot({ status: 'failed', plugins: [], error: 'boom' })
-    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(2) })
+    // 现象：分支二的恢复对话框（第 2 次）。
+    await vi.waitFor(() => { expect(electron.dialog.showMessageBox).toHaveBeenCalledTimes(2) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     const recoveryCalls = electron.dialog.showMessageBox.mock.calls as unknown as Array<[{ title?: string, detail?: string }]>
     expect(recoveryCalls[0]?.[0].title).toBe('插件恢复')
@@ -949,7 +957,8 @@ describe('Electron compatibility runtime', () => {
     const runtime = new ElectronDesktopRuntime(restart)
 
     runtime.reportRendererBoot({ status: 'failed', plugins: ['dsh-vision-router'] })
-    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() })
+    // 现象：选择重启 → 有序重启被请求一次。
+    await vi.waitFor(() => { expect(restart).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
   })
 
   it('uses Electron networking and confirmation-gated macOS update handoff', async () => {
@@ -1074,7 +1083,8 @@ describe('Electron compatibility runtime', () => {
 
     await runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, new AbortController().signal)
     const pending = runtime.updates.installUpdate('2.1.0', 'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
-    await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
+    // 现象：Windows 安装包交接调用 spawn（子进程替身）。
+    await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(childProcess.spawn).toHaveBeenCalledWith(
       'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe',
       ['--updated', '--force-run'],
@@ -1103,7 +1113,8 @@ describe('Electron compatibility runtime', () => {
 
     await runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, new AbortController().signal)
     const pending = runtime.updates.installUpdate('2.1.0', 'C:\\Updates\\DSH-Desktop-2.1.0-windows.exe')
-    await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() })
+    // 现象：spawn 失败路径同样要走到 spawn。
+    await vi.waitFor(() => { expect(childProcess.spawn).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     childProcess.emit('error', new Error('blocked'))
 
     await expect(pending).rejects.toThrow('blocked')
@@ -1151,7 +1162,8 @@ describe('Electron compatibility runtime', () => {
     const controller = new AbortController()
 
     const pending = runtime.updates.downloadUpdate('2.1.0', UPDATE_SOURCE, controller.signal)
-    await vi.waitFor(() => { expect(updater.download).toHaveBeenCalledOnce() })
+    // 现象：下载开始并暴露 AbortSignal。
+    await vi.waitFor(() => { expect(updater.download).toHaveBeenCalledOnce() }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     controller.abort()
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
@@ -1444,7 +1456,8 @@ describe('崩溃回退：框架判据 + 串行化（B-01/B-03）', () => {
     const { release, didFailLoad } = await mounted()
 
     didFailLoad({}, -105, 'ERR_NAME_NOT_RESOLVED', 'http://127.0.0.1:43120/', true)
-    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) })
+    // 现象：主框架加载失败触发一次自动恢复。
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(electron.loadURL).toHaveBeenLastCalledWith('http://127.0.0.1:43120/')
     await release()
 
@@ -1472,7 +1485,8 @@ describe('崩溃回退：框架判据 + 串行化（B-01/B-03）', () => {
 
     // 第三次事件：重试额度已用尽 ⇒ 只显示错误页，绝不再次 reload 应用 URL。
     gone({}, { reason: 'crashed', exitCode: 1 })
-    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) })
+    // 现象：崩溃与加载失败并发后只再导航一次（错误页）。
+    await vi.waitFor(() => { expect(electron.loadURL).toHaveBeenCalledTimes(2) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(String(electron.loadURL.mock.calls[1]?.[0])).toContain('data:text/html')
     await release()
   })

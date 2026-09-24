@@ -33,6 +33,7 @@ import { provideAppAiRunner } from '../src/app-ai-runner.ts'
 import { WASM_APPS_AI_RUNNER_SERVICE } from '@picoaide/dsh-wasm-apps-host'
 import { readFileSync } from 'node:fs'
 import type { AiChatTurnRunner } from '@picoaide/dsh-wasm-apps-host/ai-chat'
+import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 /** 一段文本回答的流（字符级 `text-delta`，便于断言增量顺序）。 */
 function textResponse(text: string): StreamChunk[] {
@@ -253,13 +254,15 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
       signal: controller.signal,
     })
     // 等到活体会话出现（模型已开始流）。
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app'))?.header.origin).toBe('subagent')
+    // 现象：模型开始流之后活体会话可见于会话存储（状态传播）。
+    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app'))?.header.origin, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBe('subagent')
     const session = ctx.sessions.get(SessionId('app:demo-app'))
     expect(session?.header.cwd).toBe('/tmp/app-ai')
     expect(session?.header.delegationDepth).toBeUndefined()
     controller.abort()
     await expect(pending).rejects.toThrow(/cancel/iu)
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app'))).toBeUndefined()
+    // 现象：取消后活体会话从会话存储消失（状态传播）。
+    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app')), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
   })
 
   it('判据 7：增量按序回调、done 的正文来自日志；取消 ⇒ AbortError 且不留活体会话', async () => {
@@ -294,10 +297,12 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
       onDelta: (text) => { deltas.push(text) },
       signal: controller.signal,
     })
-    await expect.poll(() => deltas.join('')).toBe('半句')
+    // 现象：增量回调把"半句"累积出来（状态传播）。
+    await expect.poll(() => deltas.join(''), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBe('半句')
     controller.abort()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app'))).toBeUndefined()
+    // 现象：取消后会话从存储消失（状态传播）。
+    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app')), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
     expect(ctx.agents.get(SessionId('app:demo-app'))).toBeUndefined()
   })
 
