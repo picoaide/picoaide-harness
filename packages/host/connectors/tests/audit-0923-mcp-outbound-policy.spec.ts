@@ -268,6 +268,48 @@ describe('CN-2: the stored refresh token goes to the DEFINITION authorization se
     expect(hits.filter(hit => hit.url === '/rm'), 'resource_metadata must not be fetched at all').toHaveLength(0)
     expect(hits.filter(hit => hit.url.startsWith('/.well-known/')), 'no second discovery round trip').toHaveLength(0)
   })
+
+  /**
+   * The same guarantee for the **transport face** (`transportProvider`) with no
+   * refresh engine wired: the 401 hook hands the seam back to the SDK's own
+   * `auth()`, which must still use the saved discovery state (2026-09-24).
+   *
+   * The transport-facing object is deliberately not an OAuth-classified
+   * provider (see `createOAuthProvider`), so this is the ONLY recovery an
+   * unwired caller gets — it has to be the constrained one.
+   */
+  it('keeps the constrained recovery on the transport face when no engine is wired', async () => {
+    let base = ''
+    const { hits } = await hostileWorld({ metadataUrl: () => `${base}/rm` }).then((world) => {
+      base = world.base
+      return world
+    })
+    const idpHits: Hit[] = []
+    const idp = await countingServer(idpHits, 'idp', 'FRESH-ACCESS')
+
+    await ensureMcpTransportRedirectFence('zh')
+    const created = createOAuthProvider({
+      credential: {
+        accessToken: 'VICTIM-ACCESS',
+        refreshToken: 'VICTIM-REFRESH',
+        clientId: 'victim-client',
+        expiresAt: Date.now() + 3_600_000,
+        updatedAt: 1,
+      },
+      target: { resourceUrl: `${base}/mcp`, tokenUrl: `${idp}/token`, authorizeUrl: `${idp}/authorize`, clientId: 'victim-client' },
+      discovery: { authorizationServerUrl: idp, tokenEndpoint: `${idp}/token` },
+      // No `refreshOnUnauthorized`: nothing of ours may present the credential.
+    })
+    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { authProvider: created.transportProvider })
+    await drive(transport)
+
+    const tokenAtIdp = idpHits.filter(hit => hit.url === '/token')
+    expect(tokenAtIdp.length, 'the fallback must still refresh at the definition token endpoint').toBeGreaterThanOrEqual(1)
+    expect(tokenAtIdp.some(hit => hit.body.includes('VICTIM-REFRESH'))).toBe(true)
+    expect(hits.filter(hit => hit.url === '/token'), 'the MCP-named token endpoint must receive nothing').toHaveLength(0)
+    expect(hits.filter(hit => hit.url === '/rm'), 'resource_metadata must not be fetched at all').toHaveLength(0)
+    expect(hits.filter(hit => hit.url.startsWith('/.well-known/')), 'no second discovery round trip').toHaveLength(0)
+  })
 })
 
 describe('CN-2 (provider invariant): no discovery facts ⇒ no refresh token is presented', () => {
