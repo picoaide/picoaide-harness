@@ -28,15 +28,25 @@ package main
 //
 //	"调度器还活着吗"     rounds / failed_rounds / last_round_at / last_error
 //	"这一轮为什么没回收"  skipped / skipped_by_reason / unreclaimed
+//	                      + needs_manual_months（**按设计**不自动回收、需人工处置的月，
+//	                        长期可 grep；它们**不会**进停摆位）
 //	"保留策略还在推进吗"  deferred_stalled（**唯一需要进告警规则的那一位**）
 //	                      + stalled_relations（点名）/ deferred_streak（逐关系连续轮数）
 //	                      + deferred_stalled_rounds（累计停摆**轮数**，不回退）
 //	                      + oldest_unreclaimed_month / _reason / _since / _rounds
-//	                      + reclaim_stalled（**跨重启**的停摆位，R11-D-03）
+//	                      + reclaim_stalled（**跨重启**的停摆位，R11-D-03；
+//	                        判据面 = reclaim_blocked_*，见下面的语义边界）
+//	                      + reclaim_blocked_month / _reason / _rounds / _due_since /
+//	                        _age_seconds（真停摆账：**只有真受阻的月**进这里）
 //	                      + oldest_unreclaimed_due_since / _age_seconds（逾期时长的
 //	                        推导基准与读数）
 //	"哪个月写不进去"      write_blocked_*（当月）+ write_blocked_other_months（非当月）
 //	                      + write_error_* / write_error_other_months（未分类瞬时失败）
+//	"月初写入被挡了多久"  write_ddl_lock_waits / write_ddl_lock_wait_ms_max /
+//	                      write_ddl_lock_budget_exhausted（建分区 DDL 的锁等待账，
+//	                        R12-N2 P2-01：清理轮次持 usage 的隐式 ACCESS SHARE 到
+//	                        COMMIT 时，第一次计量写入要等它 —— 这条等待此前只有
+//	                        日志，没有任何读数）
 //
 // 为什么"延后"需要单独一面（复审 N3）：`failed_rounds` 表达的是"有没有报错"，而按
 // R10-A-03 的契约**锁竞争/语句超时不算失败**（它们让管理端保存保留期回 500 是已修
@@ -67,19 +77,38 @@ package main
 //     (a) `deferred_stalled=true`：**至少一条**到期关系连续 ≥5 个**调度轮次**
 //     （6h/轮 ⇒ ≈**24h**；**首轮即计入**，不是 30h —— R11-D-06 的注释勘误）既没被
 //     回收、也没有真失败；它依赖**进程内**累积（重启归零）。
-//     (b) `reclaim_stalled=true`：最早未回收的到期月**逾期 ≥24h**
-//     （`oldest_unreclaimed_due_since` / `oldest_unreclaimed_age_seconds`）——
-//     这一条由 catalog 事实 + 保留期推导（**纯函数**），**重启后第一轮就成立**
-//     （R11-D-03：旧实现只有 (a)，重启快于 ≈24h 的部署永远看不到告警）。
+//     (b) `reclaim_stalled=true`：**真的停摆**（R12-N2 P1-01 收口语义）—— 存在一个
+//     **已到期**（`month < cutoff_month`）的月，既没被回收、又不是"按设计跳过"，
+//     且满足下面任一条：
+//       ① 它本轮进了 `failed_relations`（真失败），且
+//          `reclaim_blocked_age_seconds ≥ 24h`（月龄由 catalog 事实 + 保留期推导
+//          ⇒ **纯函数**，重启后第一轮就成立 —— R11-D-03 要的正是这一条）；
+//       ② 它**连续 ≥4 个调度轮次**（6h/轮 ⇒ ≈24h，`reclaim_blocked_rounds`）都只被
+//          **有界延后**（lock-timeout / statement-timeout / settle-budget-timeout）。
+//     为什么必须分成①②：到期月的"月龄"天然远超 24h，拿它当延后类的判据等于"只要
+//     有一轮 5s 锁竞争就算停摆"（R12-A P1-01 ① 实测的抖动：`deferred_streak=1`
+//     而 `reclaim_stalled=true`，下一轮自愈）。延后类因此改判**连续轮次**。
 //     两位**故意不合并**：`deferred_stalled` 的既有契约（W3-4，由回归用例钉住）是
 //     "连续调度轮次"且"连点保存不得假告警"，并进"逾期时长"会让月份本就逾期的夹具
 //     在分钟级连点下读成 true。
 //     管理端保存保留期会**同步**多跑一轮（llmgateway/admin.go），启动补跑也走同一
-//     个函数：这些**非调度轮次**（与上次计入的轮次相隔 < 6h）**不计入** streak
-//     （否则连点几次保存就是一次分钟级假告警）—— 判据是"节奏 + 来源"双判据
-//     （R11A-05：旧的 1h 间隔闸门挡不住相隔 65min 的运维轮次，实测 6 轮 5.4h 就把
-//     它置真）。任一条成立后，都会在该关系被回收后的下一轮自动回落 false
-//     （reclaim_stalled 报告跨重启的那一条是否成立）。
+//     个函数：这些**非调度轮次**（与上次计入的轮次相隔 < 6h）**不计入** streak 与
+//     真停摆账的轮数（否则连点几次保存就是一次分钟级假告警）—— 判据是"节奏 + 来源"
+//     双判据（R11A-05：旧的 1h 间隔闸门挡不住相隔 65min 的运维轮次，实测 6 轮 5.4h
+//     就把它置真）。任一条成立后，都会在该关系被回收后的下一轮自动回落 false。
+//   - **`reclaim_stalled` 与 `oldest_unreclaimed_*` 是两套口径**（R12-N2 P1-01）：
+//     `oldest_unreclaimed_month` 回答"**最早那个没被回收的月**是谁、持续多久"，
+//     它**含**按设计跳过（多级布局的深层后代、子树里还有保留期内的行、非表对象占名、
+//     保留期内被点名的同名孤儿…）与真失败；那些形态是本项目**显式支持**的正常布局，
+//     永远不会被自动回收 ⇒ 把它们算进停摆位就是长期假告警（R12-A P1-01 ② 实测两轮
+//     同形）。所以停摆位的判据面收在 `reclaim_blocked_*`（只含真受阻的月），
+//     两者的**差集**就是 `needs_manual_months`（需人工处置，按设计不自动回收）。
+//   - `needs_manual_months`（+ `needs_manual_count`）是"按设计不自动回收、只能人工
+//     处置"的月关系清单（`usage_<YYYYMM>(原因)`，有界升序）：多级布局的深层后代、
+//     错界分区的"相邻月并入失败"（`fold-misbounded`，R12-N2 P1-04）、非表对象占名…
+//     判据是"服务端按设计不动手"而不是"出错了"：所以它们**不进** failed_rounds、
+//     **不进** reclaim_stalled，但每轮都会在这里点名 —— 只要形态还在，读数是稳定的，
+//     不会像 skipped_by_reason 那样只给一个计数。
 //   - deferred_stalled_rounds 是**累计轮数**（不是"事件次数"），不随回落清零 ——
 //     用它做趋势/复盘；
 //   - oldest_unreclaimed_month 是"最早那个既没回收也没失败的到期月"（含**真失败**

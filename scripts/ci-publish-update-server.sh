@@ -235,6 +235,7 @@ verify_remote_object() { # $1=对象键 $2=本地文件 $3=中性标签(不含�
 # `An error occurred (404) when calling the HeadObject operation: Not Found`,退出 254);
 # 能读到对象、或读回来的不是 404(例如根本连不上端点)都 fail-loud —— `<ver>/` 是
 # immutable 的客户取包面,宁可中止发布,也不能留一个不可枚举的探测残留。
+# **匹配的是那条报文本身,不是 `404` 这个子串**(成因与实测见函数体里的注释)。
 verify_remote_object_absent() { # $1=对象键 $2=中性标签(不含渠道名)
   local key="$1" label="$2"
   local output status
@@ -250,7 +251,14 @@ verify_remote_object_absent() { # $1=对象键 $2=中性标签(不含渠道名)
     echo "::error::更新服务器发布失败(${label}:删除后对象仍能被读到(head-object 成功)—— 拒绝把残留留在版本目录里)" >&2
     return 1
   fi
-  if ! printf '%s\n' "$output" | grep -q '404'; then
+  # 判据必须是**真 CLI 的 404 报文本身**,不能是"输出里出现过 404 这个子串"
+  # (2026-09-24 现场,CI 因此红在探测对象用例上而且归因错误):
+  # aws 的失败信息**自身会回显对象键** —— `Could not connect to the endpoint URL:
+  # "http://…/<channel>/releases/<ver>/.probe-<RANDOM><RANDOM>-<pid>"` —— 而键里带两段
+  # `$RANDOM` 数字。只要那串数字里恰好出现 `404`,裸 `grep -q '404'` 就会把"端点不可达"
+  # 判成"对象已消失" ⇒ 收尾静默放行(实测发生率 1.0%:400 次里 4 次,`$RANDOM` 模拟
+  # 1.048%)。真 CLI 2.37.1 的形态是固定报文(见上面注释),按它匹配既精确又不看运气。
+  if ! printf '%s\n' "$output" | grep -qE '\((404|NoSuchKey)\)[[:space:]]+when calling the HeadObject operation'; then
     printf '%s\n' "$output" | brand_sanitize >&2
     echo "::error::更新服务器发布失败(${label}:删除后无法确认对象已消失(head-object 既不是 404 也不是成功);上方输出已脱敏)" >&2
     return 1
@@ -284,7 +292,8 @@ PROBE_BYTES=5
 # **`trap … EXIT` 是覆盖语义,而本脚本不是唯一的安装者**:`scripts/ci-brand-mask.sh`
 # 的 `brand_mask_init` 在首次登记渠道时也会装一个 EXIT trap(清理掩码临时文件,里面
 # 装着品牌串)。所以这里必须**链**在它后面 —— 记下安装时刻已有的 EXIT trap,在自己的
-# 收尾里先回放它,再做探测对象的删除与校验。若直接 `trap cleanup_probe_object EXIT`,
+# 收尾里回放它(回放的**时机**见 cleanup_probe_object:脱敏要用的掩码文件必须活到收尾
+# 之后)。若直接 `trap cleanup_probe_object EXIT`,
 # 脱敏库的清理会被顶掉(临时文件里的品牌串留在 /tmp),而且**这个覆盖是静默的**:
 # 只有真跑失败路径才看得见(本泳道实测:先写的一版 trap 从未执行过)。
 probe_object_live=''
@@ -308,20 +317,29 @@ capture_exit_trap() {
   printf '%s' "$current"
 }
 cleanup_probe_object() {
-  local status=$?
-  # 先回放被我们"接管"的那个 trap(脱敏库的临时文件清理)。
-  if [ -n "$probe_previous_exit_trap" ]; then eval "$probe_previous_exit_trap"; fi
+  local status=$? cleanup_status=0
   if [ -n "$probe_tmp_file" ]; then rm -f "$probe_tmp_file"; fi
   if [ -n "$manifest_tmp_key_live" ]; then
     local tmp_key="$manifest_tmp_key_live"
     manifest_tmp_key_live=''
     # 与探测对象同一条纪律:删除 + **证明它真的没了**(读不回 404 即 fail-loud)。
-    if ! verify_remote_object_absent "$tmp_key" "指针临时键(收尾)"; then exit 1; fi
+    if ! verify_remote_object_absent "$tmp_key" "指针临时键(收尾)"; then cleanup_status=1; fi
   fi
-  if [ -z "$probe_object_live" ]; then exit "$status"; fi
-  local key="$probe_object_live"
-  probe_object_live=''
-  if ! verify_remote_object_absent "$key" "上传前探测(收尾)"; then exit 1; fi
+  if [ -n "$probe_object_live" ]; then
+    local key="$probe_object_live"
+    probe_object_live=''
+    if ! verify_remote_object_absent "$key" "上传前探测(收尾)"; then cleanup_status=1; fi
+  fi
+  # **最后**才回放被我们"接管"的那个 trap(脱敏库的临时文件清理):它删掉的
+  # `$BRAND_MASK_FILE` 正是 `brand_sanitize` 的输入。此前"先回放、后收尾"⇒ 上面两次
+  # `verify_remote_object_absent` 的失败报文在脱敏那一步以 `node ENOENT` 崩掉,失败
+  # 路径上只剩一段 node 栈迹、看不到脱敏后的真实报文(2026-09-24 实测,探测对象用例 (c)
+  # 的现场证据就是这么被吃掉的)。放在最后既保住清理,又让掩码活到不再需要它为止;
+  # 下面两个 `exit` 都在它之后 ⇒ 任何退出路径都不会把掩码临时文件留在 /tmp。
+  if [ -n "$probe_previous_exit_trap" ]; then eval "$probe_previous_exit_trap"; fi
+  # 两个临时键的收尾**都要跑**(此前前一个失败就 `exit 1`,把后一个的残留留在远端);
+  # 原退出码不为 0 时保持它,收尾自身失败则一律 1(不让原退出码把它盖成"只是校验失败")。
+  if [ "$cleanup_status" -ne 0 ]; then exit 1; fi
   exit "$status"
 }
 # 在**渠道登记之后**安装(那时脱敏库的 trap 才存在):链在它后面,而不是顶掉它。

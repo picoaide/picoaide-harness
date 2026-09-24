@@ -93,8 +93,27 @@ process.on('uncaughtException', error => {
  *                              只有"删除后 head-object 必须 404"这条判据能咬住它
  *   FAKE_AWS_HEAD_ERROR_KEY=<子串> head-object 对匹配对象回一条**非 404** 的错误
  *                              (端点不可达),用于证明"无法确认对象已消失"也算失败
+ *   FAKE_AWS_HEAD_ERROR_CALLPOINT=absent|present|any
+ *                              上面的注入**落在哪个调用点**(缺省 `absent`)。
+ *                              判据是假 aws 自己能观察到的事实:这一次 head-object 时
+ *                              对象在不在假存储里 —— `present` = 上传阶段的
+ *                              `verify_remote_object`(读刚 PUT 上去的对象),
+ *                              `absent` = 删除之后的**缺席检查**。取值非法即 fail-loud
+ *                              (写错一个字母不许静默退化成"不注入")。
  *   FAKE_AWS_LS_FAIL=1            `s3 ls` 失败并在 stderr 回显前缀(含渠道目录段),
  *                              用于证明列表失败 fail-loud 且输出经过脱敏
+ *
+ * **按调用点,不是按"键范围"**(2026-09-24 现场:master push 因此红灯 + 归因错误):
+ * `FAKE_AWS_HEAD_ERROR_KEY` 原先只按键匹配、**无条件**生效,于是注入落在**上传阶段**
+ * 的 `verify_remote_object` 上 —— 删除之后那次缺席检查根本没被执行到,用例看到的
+ * 是"上传前探测:读不回远端对象元数据"这个**别处**的失败分类;而它的断言又只查
+ * stderr 里有没有"无法确认",那句话来自 EXIT trap 的收尾检查,收尾检查又被
+ * `scripts/ci-publish-update-server.sh` 里裸 `grep -q '404'` 决定 —— 注入报文会回显
+ * 对象键,键里带两段 `$RANDOM`,数字里凑巧出现 `404` 时收尾就被误判成"对象已消失"
+ * ⇒ **约 1% 的偶发红灯**(实测:400 次里 4 次缺"无法确认";`$RANDOM` 模拟 1.048%;
+ * master 那次失败的键 `.probe-2133517404-18012` 里正好含 `404`)。
+ * 现在注入由 `<…>_CALLPOINT` 显式指定调用点,并把"落在哪一段"记进假 aws 日志
+ * (`head-error injected/skipped (callpoint=…)`)供用例断言 —— 归因不再靠猜。
  *
  * **按对象作用域**(2026-09-23 第六轮审计 R6-C-3):上面三条缺省作用于**所有**对象
  * (K-01 的既有注入面,逐字不变);带上对应的 `<…>_KEY=<对象键子串>` 之后只作用于键含
@@ -345,10 +364,41 @@ case "$cmd" in
     record "head-object $key $query"
     target="$store/$key"
     if [ -n "\${FAKE_AWS_HEAD_ERROR_KEY:-}" ] && inject_scope "$key" "\${FAKE_AWS_HEAD_ERROR_KEY}"; then
-      # "读不回"不是 404:例如端点不可达/权限错误。删除后必须据此 fail-loud
-      # (不能把"无法确认对象已消失"当成"对象已消失")。
-      echo "Could not connect to the endpoint URL: \\"http://127.0.0.1:1/$key\\"" >&2
-      exit 255
+      # **按调用点**生效,不是按"键范围"生效(2026-09-24 现场,见文件头注释里的
+      # FAKE_AWS_HEAD_ERROR_CALLPOINT):假 aws 能观察到的调用点判据就是"这个对象此刻
+      # 在不在假存储里" —— 上传阶段的 verify_remote_object 读的是**刚 PUT 上去**的对象
+      # (存在),删除之后的缺席检查读的是**已经删掉**的对象(不存在)。
+      head_callpoint="\${FAKE_AWS_HEAD_ERROR_CALLPOINT:-absent}"
+      case "$head_callpoint" in
+        absent|present|any) ;;
+        *) echo "fake aws: FAKE_AWS_HEAD_ERROR_CALLPOINT 只能取 absent|present|any(实际:$head_callpoint)" >&2; exit 2 ;;
+      esac
+      head_on_absent=1
+      if [ -f "$target" ]; then head_on_absent=0; fi
+      head_inject=0
+      case "$head_callpoint" in
+        any) head_inject=1 ;;
+        absent) if [ "$head_on_absent" = "1" ]; then head_inject=1; fi ;;
+        present) if [ "$head_on_absent" = "0" ]; then head_inject=1; fi ;;
+      esac
+      if [ "$head_inject" = "1" ]; then
+        # 这两行是"注入落在哪一段"的**证据**:用例必须断言它落在自己指定的调用点上
+        # (只断言"发布失败了"是不够的 —— 归因错误的现场就是这么来的)。
+        if [ "$head_on_absent" = "1" ]; then
+          record "head-error injected (callpoint=absence check, object absent) $key"
+        else
+          record "head-error injected (callpoint=upload stage, object present) $key"
+        fi
+        # "读不回"不是 404:例如端点不可达/权限错误。删除后必须据此 fail-loud
+        # (不能把"无法确认对象已消失"当成"对象已消失")。
+        echo "Could not connect to the endpoint URL: \\"http://127.0.0.1:1/$key\\"" >&2
+        exit 255
+      fi
+      if [ "$head_on_absent" = "1" ]; then
+        record "head-error skipped (callpoint=absence check, object absent) $key"
+      else
+        record "head-error skipped (callpoint=upload stage, object present) $key"
+      fi
     fi
     if [ ! -f "$target" ]; then
       echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2
@@ -1145,7 +1195,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         + ' —— 输入缺失时脚本退出 2,发布会被自己拦下',
       )
     }
-    const gateIndex = gateSteps.findIndex(step => typeof step?.run === 'string' && /(?:^|\s)yarn\s+check(?![\w:-])/u.test(step.run))
+    // 全量门禁步的**两种等价入口**（与上面 `fullGateSteps` 同一份口径，第十二轮红队 C-P0-2①）：
+    // `yarn check`（保留）与 `node scripts/check-workspaces.mjs`（CI 现在的形态：启动器必须是
+    // runner 自己的 node）。只改这一处判定，不改这条判据的语义（仍然是"拓扑判据必须更早"）。
+    const gateIndex = gateSteps.findIndex(step => typeof step?.run === 'string'
+      && /(?:^|\s)(?:yarn\s+check|node\s+scripts\/check-workspaces\.mjs)(?![\w:-])/u.test(step.run))
     check(gateIndex >= 0, 'ci.yml 的 gate 里找不到全量门禁步(扫描器可能已失效)')
     check(
       topologyIndex >= 0 && gateIndex >= 0 && topologyIndex < gateIndex,
@@ -2490,7 +2544,12 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         const script = strippedRun(step)
         const label = `job ${jobId} 的 step「${typeof step?.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`}」`
         if (script.includes('verify-wasm-client-only.sh')) directSteps.push({ label, step })
-        if (/yarn\s+check(?![\w:.-])/u.test(script)) fullGateSteps.push({ label, step })
+        // 全量根门禁的**两种等价入口**（第十二轮红队 C-P0-2①，主控 2026-09-25 批准的最小改动）：
+        //   · `yarn check`（历史形态，保留 —— 将来写回也必须被覆盖）；
+        //   · `node scripts/check-workspaces.mjs`（现在是 CI 用的形态：启动器必须是 runner 自己的
+        //     node —— `yarn check` 会让 yarn 在启动期加载 `.yarnrc.yml` 的 `plugins:`）。
+        // root `package.json` 的 `check` 脚本就是后者，两者是同一条门禁的两种写法。
+        if (/(?:yarn\s+check(?![\w:.-])|node\s+scripts\/check-workspaces\.mjs(?![\w:.-]))/u.test(script)) fullGateSteps.push({ label, step })
       })
     }
     check(directSteps.length > 0, 'ci.yml 里找不到直接跑 verify-wasm-client-only.sh 的步骤(W-8 的接线对象没了)')
@@ -4254,6 +4313,19 @@ echo x > "${distDir}/App.AppImage"
 // the HeadObject operation: Not Found`,退出 254);删除失败 / 仍读得到 / 读不回 404
 // 都 fail-loud。C-24 的"注释说 1 字节、实际 printf 'probe' = 5 字节"也在这里钉住:
 // 注释里的字节数、PROBE_BYTES、PROBE_PAYLOAD 三者必须一致。
+//
+// **"读不回"的两个调用点各有用例**(2026-09-24 现场:master push 红灯 + 归因错误):
+// 探测对象会被 head-object 读两次,而且它们要证明的东西完全不同 ——
+//   ① 上传阶段(`verify_remote_object`,对象**刚 PUT 上去**):读不回 ⇒ 上传不完整;
+//   ② 删除之后的**缺席检查**(`verify_remote_object_absent`,对象**已被删掉**):读不回 ⇒
+//      "无法确认它已消失",同样必须 fail-loud(不能默认对象已消失)。
+// 注入改由 `FAKE_AWS_HEAD_ERROR_CALLPOINT=present|absent` 指定落在哪个调用点,并且
+// 用例必须断言"注入真的落在自己那段"(假 aws 会把 injected/skipped 连同调用点记进日志)。
+// 此前注入按键范围无条件生效 ⇒ (c) 的注入落在①,而断言查的是②的措辞,于是:
+//   * (c) 实际测的是"上传阶段读不回",删除后 404 那条判据一次都没被执行;
+//   * 是否变红取决于 `grep -q '404'` 有没有被对象键里的 `$RANDOM` 数字凑巧命中
+//     ⇒ 约 1% 的偶发红灯(实测 400 次里 4 次;master 的键 `.probe-2133517404-18012`
+//     里正含 `404`)。两处根因(注入面 + 生产脚本的子串判据)都已修。
 {
   const work = tempDir('ci-publish-probe-')
   const store = join(work, 'store')
@@ -4270,7 +4342,6 @@ echo x > "${distDir}/App.AppImage"
     join(work, 'release-bundle', 'official', 'SHA256SUMS'),
     `${createHash('sha256').update(content).digest('hex')}  ${archive}\n`,
   )
-  const firstLine = text => `${text ?? ''}`.split('\n').map(line => line.trim()).filter(line => line !== '')[0] ?? ''
   const releaseDir = join(store, 'official', 'releases', '5.5.5')
   // 只看对象本体:`<key>.checksum` 是假 aws 自己的边车文件,不是远端对象。
   const probeResidue = () => (existsSync(releaseDir)
@@ -4290,10 +4361,40 @@ echo x > "${distDir}/App.AppImage"
     },
   })
 
+  // 断言失败时的**结构化证据**(2026-09-24 现场:用例 (c) 只回显 stderr 的前 300 字符,而
+  // 那 300 字符里是**上传阶段**的失败分类 —— 于是"删除后读不回 404"这条判据红了,读日志的
+  // 人却以为上传阶段坏了,归因整条错位)。三样东西一起给:
+  //   ① 发布脚本自己报的 `::error::` 段落(失败段一眼可见)② 假 aws 的完整调用序列
+  //   (含 `head-error injected/skipped (callpoint=…)` —— 注入落在哪一段是被**断言**的证据)
+  //   ③ 完整 stderr(不截断)。
+  const awsLog = () => readFileSync(log, 'utf8').split('\n').filter(line => line !== '')
+  const failureEvidence = (title, result) => {
+    const stderr = `${result.stderr ?? ''}`.trimEnd()
+    const errorLines = stderr.split('\n').filter(line => line.startsWith('::error::'))
+    const stage = /更新服务器(?:校验|发布)失败\(([^)]*)/u.exec(stderr)?.[1] ?? '<无 ::error:: 段落>'
+    return [
+      `证据[${title}] exit=${String(result.status)} 失败段=${stage}`,
+      `假 aws 调用序列(${awsLog().length} 条):`,
+      ...awsLog().map(line => `    ${line}`),
+      `::error:: 段落(${errorLines.length} 条):`,
+      ...errorLines.map(line => `    ${line}`),
+      '完整 stderr:',
+      ...(stderr === '' ? ['    <空>'] : stderr.split('\n').map(line => `    ${line}`)),
+    ].join('\n')
+  }
+  // 假 aws 记下的"注入落在哪个调用点"事件。用例据此断言注入**真的**打在自己那段 ——
+  // 只断言"发布失败了"是不够的:归因错误的现场就是这么来的。
+  // 入参是 `awsLog()` 的行数组(不是整份文本 —— 传文本会被当成一行,什么也解析不出来)。
+  const headErrorEvents = lines => (Array.isArray(lines) ? lines : [])
+    .map(line => /head-error (injected|skipped) \(callpoint=([^,]+), object (absent|present)\) (\S+)/u.exec(line))
+    .filter(Boolean)
+    .map(match => ({ kind: match[1], callpoint: match[2], presence: match[3], key: match[4] }))
+
   // 正向对照:正常发布 EXIT=0、探测对象被删除且**不残留**。
   resetStore()
   const ok = runPublish({})
-  check(ok.status === 0, `正常发布应成功,实际 ${String(ok.status)}: ${firstLine(ok.stderr)}`)
+  check(ok.status === 0,
+    `正常发布应成功,实际 ${String(ok.status)}\n${failureEvidence('正向对照', ok)}`)
   check(probeResidue().length === 0, `正常发布后不得留下探测对象,实际 ${probeResidue().join(',')}`)
   check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
     '探测对象必须被真的删除(日志里应有一条 rm s3://…/.probe-*)')
@@ -4302,49 +4403,123 @@ echo x > "${distDir}/App.AppImage"
   resetStore()
   const rmFail = runPublish({ FAKE_AWS_RM_FAIL_KEY: '.probe-' })
   check(rmFail.status !== 0,
-    '探测对象删除失败时必须 fail-loud(旧实现用 brand_run_best_effort 吞掉,发布照常 EXIT=0)')
+    `探测对象删除失败时必须 fail-loud(旧实现用 brand_run_best_effort 吞掉,发布照常 EXIT=0)\n${failureEvidence('(a) 删除失败', rmFail)}`)
   check(`${rmFail.stderr ?? ''}`.includes('上传前探测'),
-    `删除失败的报错必须点名是探测对象(中性标签,不回显渠道名),实际: ${firstLine(rmFail.stderr)}`)
+    `删除失败的报错必须点名是探测对象(中性标签,不回显渠道名)\n${failureEvidence('(a) 删除失败', rmFail)}`)
   check(probeResidue().length === 1, '这条用例需要探测对象真的残留在 store 里(否则测的不是删除失败)')
 
   // (b) 删除"看起来成功"但对象还在(silent) ⇒ 只有"删除后 head 必须 404"能咬住它。
   resetStore()
   const rmSilent = runPublish({ FAKE_AWS_RM_SILENT_KEY: '.probe-' })
   check(rmSilent.status !== 0,
-    '删除后对象仍读得到时必须 fail-loud(s3 rm 的退出码不证明对象已消失)')
+    `删除后对象仍读得到时必须 fail-loud(s3 rm 的退出码不证明对象已消失)\n${failureEvidence('(b) 删除静默失败', rmSilent)}`)
   check(`${rmSilent.stderr ?? ''}`.includes('仍能被读到'),
-    `这条失败必须由"删除后仍能被读到"的判据给出,实际: ${firstLine(rmSilent.stderr)}`)
+    `这条失败必须由"删除后仍能被读到"的判据给出\n${failureEvidence('(b) 删除静默失败', rmSilent)}`)
   check(probeResidue().length === 1, '这条用例需要探测对象仍在 store 里')
 
   // (c) 删除后读不回 404(端点不可达/权限错误)⇒ 不能把"无法确认"当"已消失"。
+  //
+  // 注入点必须是**删除之后的缺席检查**(`FAKE_AWS_HEAD_ERROR_CALLPOINT` 缺省 = absent);
+  // 同时断言它在上传阶段"被看见但按调用点跳过"—— 那正是"按调用点而不是按键范围生效"
+  // 的可观察凭据(见本组标题注释里的现场)。
   resetStore()
   const headError = runPublish({ FAKE_AWS_HEAD_ERROR_KEY: '.probe-' })
-  check(headError.status !== 0, '删除后读不回 404 时必须 fail-loud(不能默认对象已消失)')
-  check(`${headError.stderr ?? ''}`.includes('无法确认'),
-    `这条失败必须由"无法确认对象已消失"的判据给出,实际: ${(headError.stderr ?? '').slice(0, 300)}`)
+  const cStderr = `${headError.stderr ?? ''}`
+  check(headError.status !== 0,
+    `删除后读不回 404 时必须 fail-loud(不能默认对象已消失)\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  check(cStderr.includes('删除后无法确认对象已消失'),
+    `这条失败必须由"删除后无法确认对象已消失"的判据给出(而不是上传阶段的读回)\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  check(!cStderr.includes('读不回远端对象元数据'),
+    `失败必须发生在**删除之后**那一次 head-object 上;出现"上传前探测:读不回远端对象元数据"说明注入又落回上传阶段了\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  const cEvents = headErrorEvents(awsLog())
+  const cInjected = cEvents.filter(event => event.kind === 'injected')
+  const cSkipped = cEvents.filter(event => event.kind === 'skipped')
+  check(cInjected.length === 1 && cInjected[0].callpoint === 'absence check',
+    `注入必须**恰好一次**落在"删除之后的缺席检查"这一段(否则这条用例什么也没测到),实际 ${JSON.stringify(cEvents)}\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  check(cSkipped.length >= 1 && cSkipped.every(event => event.callpoint === 'upload stage')
+    && cSkipped.every(event => event.key === cInjected[0]?.key),
+  `注入必须在上传阶段被"看见但按调用点跳过"**同一个对象键**(证明它不再按键范围无条件生效),实际 ${JSON.stringify(cEvents)}\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  check(probeResidue().length === 0,
+    `删除后再读不回也不许把探测对象留在版本目录里(rm 必须已经发生),实际 ${probeResidue().join(',')}\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
+  check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
+    `(c) 这条路径必须真的发出过 rm(证明失败发生在删除之后,而不是没走到删除)\n${failureEvidence('(c) 删除后读不回 404', headError)}`)
 
   // (d) D-04:探测 PUT 成功但读回校验失败 —— 删除点此前不可达,现在由 EXIT trap 收口。
   resetStore()
   const shaMismatch = runPublish({ FAKE_AWS_SHA: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', FAKE_AWS_SHA_KEY: '.probe-' })
-  check(shaMismatch.status !== 0, '探测对象校验和不一致时必须失败(既有行为)')
+  check(shaMismatch.status !== 0,
+    `探测对象校验和不一致时必须失败(既有行为)\n${failureEvidence('(d) 探测校验和 mismatch', shaMismatch)}`)
   check(`${shaMismatch.stderr ?? ''}`.includes('上传前探测'),
-    `校验失败的报错应点名探测对象,实际: ${firstLine(shaMismatch.stderr)}`)
+    `校验失败的报错应点名探测对象\n${failureEvidence('(d) 探测校验和 mismatch', shaMismatch)}`)
   check(probeResidue().length === 0,
     'D-04:探测校验失败这条路径也必须把探测对象删掉(EXIT trap 收口),否则 5 字节对象永久留在版本目录里')
   check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
     'D-04:失败路径上必须真的发出过 rm(证明 trap 走到了删除)')
 
+  // (g) **收尾段**("上传前探测(收尾)")的缺席检查同样不能把"读不回"当"已消失"。
+  //     D-04 的路径(探测 PUT 成功、读回校验失败)上,删除点只剩 EXIT trap —— 这一次的
+  //     "删除后 404"也读不回时,收尾必须 fail-loud,报错要点名**收尾段**,而且脱敏输出
+  //     必须真的打出来(掩码临时文件被提前删掉时,这里只会剩一段 node ENOENT 栈迹)。
+  resetStore()
+  const trapHeadError = runPublish({
+    FAKE_AWS_SHA: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    FAKE_AWS_SHA_KEY: '.probe-',
+    FAKE_AWS_HEAD_ERROR_KEY: '.probe-',
+  })
+  const gStderr = `${trapHeadError.stderr ?? ''}`
+  check(trapHeadError.status !== 0,
+    `收尾段读不回 404 时必须 fail-loud\n${failureEvidence('(g) 收尾段读不回 404', trapHeadError)}`)
+  check(gStderr.includes('上传前探测(收尾):删除后无法确认对象已消失'),
+    `这条失败必须由"收尾段 + 删除后无法确认对象已消失"的判据给出(收尾是 D-04 唯一可达的删除点)\n${failureEvidence('(g) 收尾段读不回 404', trapHeadError)}`)
+  check(gStderr.includes('Could not connect to the endpoint URL: "http://127.0.0.1:1/***/releases/5.5.5/.probe-'),
+    `收尾段的失败输出必须经 brand_sanitize **真的打印出来**(掩码临时文件必须活到收尾之后;提前删掉只会剩 node ENOENT 栈迹)\n${failureEvidence('(g) 收尾段读不回 404', trapHeadError)}`)
+  check(!gStderr.includes('ENOENT'),
+    `收尾段的脱敏不许以 node ENOENT 收场(那会把真实报文吃掉)\n${failureEvidence('(g) 收尾段读不回 404', trapHeadError)}`)
+  check(probeResidue().length === 0, '收尾段读不回也不能把探测对象留在版本目录里(rm 必须在缺席检查之前发生)')
+  check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
+    '(g):这条路径必须真的发出过 rm')
+
+  // (h) **上传阶段**读不回(对象刚 PUT 上去)⇒ 同样 fail-loud,且必须报上传阶段的分类。
+  //     这条用例是本次修复的另一半:此前 (c) 的注入正落在这里,却按"删除后读不回"来断言
+  //     —— 删除阶段那条判据一次都没被执行到。现在两个调用点各有自己的用例。
+  resetStore()
+  const uploadHeadError = runPublish({ FAKE_AWS_HEAD_ERROR_KEY: '.probe-', FAKE_AWS_HEAD_ERROR_CALLPOINT: 'present' })
+  const hStderr = `${uploadHeadError.stderr ?? ''}`
+  check(uploadHeadError.status !== 0,
+    `上传阶段读不回远端元数据时必须 fail-loud\n${failureEvidence('(h) 上传阶段读不回', uploadHeadError)}`)
+  check(hStderr.includes('上传前探测:读不回远端对象元数据'),
+    `这条失败必须由**上传阶段**的"读不回远端对象元数据"判据给出\n${failureEvidence('(h) 上传阶段读不回', uploadHeadError)}`)
+  check(!hStderr.includes('无法确认'),
+    `上传阶段的读不回不得被读成"删除后无法确认对象已消失"(两个调用点的判据必须可区分)\n${failureEvidence('(h) 上传阶段读不回', uploadHeadError)}`)
+  check(headErrorEvents(awsLog()).some(event => event.kind === 'injected' && event.callpoint === 'upload stage'),
+    `调用点开关取 present 时必须真的落在上传阶段(写错取值不许静默不注入)\n${failureEvidence('(h) 上传阶段读不回', uploadHeadError)}`)
+  check(probeResidue().length === 0,
+    '上传阶段失败也要由 trap 把探测对象删掉(D-04 同一条纪律)')
+  check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
+    '(h):这条路径必须真的发出过 rm')
+
+  // (i) 调用点取值写错 ⇒ 假 aws 必须 fail-loud,不许静默退化成"不注入"(那会让整条用例
+  //     变成"什么都没测"的假绿)。
+  resetStore()
+  const badCallpoint = runPublish({ FAKE_AWS_HEAD_ERROR_KEY: '.probe-', FAKE_AWS_HEAD_ERROR_CALLPOINT: 'abset' })
+  check(badCallpoint.status !== 0,
+    `调用点取值非法时假 aws 必须 fail-loud(不许静默不注入)\n${failureEvidence('(i) 调用点取值非法', badCallpoint)}`)
+  check(`${badCallpoint.stderr ?? ''}`.includes('FAKE_AWS_HEAD_ERROR_CALLPOINT'),
+    `非法取值必须被点名报出\n${failureEvidence('(i) 调用点取值非法', badCallpoint)}`)
+
   // (e) C-22:`s3 ls`(保留策略的列表)失败必须 fail-loud 且**输出脱敏**。
   resetStore()
   const lsFail = runPublish({ FAKE_AWS_LS_FAIL: '1' })
   check(lsFail.status !== 0,
-    's3 ls 失败时必须 fail-loud(旧实现的 `|| true` 把"列表读不回来"和"没有更老的版本"压成同一个语义)')
+    `s3 ls 失败时必须 fail-loud(旧实现的 \`|| true\` 把"列表读不回来"和"没有更老的版本"压成同一个语义)\n${failureEvidence('(e) s3 ls 失败', lsFail)}`)
   const lsStderr = `${lsFail.stderr ?? ''}`
-  check(lsStderr.includes('保留策略'), `这条失败必须说明保留策略无法执行,实际: ${firstLine(lsStderr)}`)
+  check(lsStderr.includes('保留策略'),
+    `这条失败必须说明保留策略无法执行\n${failureEvidence('(e) s3 ls 失败', lsFail)}`)
   const lsVisible = lsStderr.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
   check(!lsVisible.includes('official/releases'),
-    's3 ls 的失败输出会回显对象前缀 ⇒ 必须走 brand_sanitize(渠道目录段应变成 ***),实际出现了原始前缀')
-  check(lsVisible.includes('***'), 's3 ls 失败输出应经过脱敏(应出现 ***)')
+    `s3 ls 的失败输出会回显对象前缀 ⇒ 必须走 brand_sanitize(渠道目录段应变成 ***),实际出现了原始前缀\n${failureEvidence('(e) s3 ls 失败', lsFail)}`)
+  check(lsVisible.includes('***'),
+    `s3 ls 失败输出应经过脱敏(应出现 ***)\n${failureEvidence('(e) s3 ls 失败', lsFail)}`)
 
   // (f) C-24:注释里的字节数 / PROBE_BYTES / PROBE_PAYLOAD 三者必须一致。
   const publishSource = readFileSync(publishScript, 'utf8')
@@ -4361,6 +4536,24 @@ echo x > "${distDir}/App.AppImage"
     'C-24:探测对象必须由 PROBE_PAYLOAD 写出(否则"声明的字节数"与实际写的可以是两份)')
   check(publishSource.includes('wc -c < "$probe"'),
     'C-24:写盘后必须复算实际字节数(运行期自检,注释/声明/负载三者不一致时当场失败)')
+
+  // (j) **"删除后必须 404"的判据本身**必须按真 CLI 的报文匹配,不能是裸 `404` 子串。
+  //     这正是 2026-09-24 偶发红灯的另一半根因:aws 的失败信息会回显对象键,而探测/临时键
+  //     里带两段 `$RANDOM` —— 数字里凑巧出现 `404` 时,"端点不可达"会被判成"对象已消失"
+  //     (实测 400 次里 4 次 ≈ 1%)。行为面已由 (c)/(g) 覆盖,这里把**判据形态**钉住:
+  //     只看代码行(注释里写着这条判据的历史,算进去就是恒红)。
+  const absentBody = (() => {
+    const start = publishSource.indexOf('verify_remote_object_absent() {')
+    if (start < 0) return ''
+    const end = publishSource.indexOf('\n}\n', start)
+    return end < 0 ? '' : publishSource.slice(start, end)
+  })()
+  const absentCode = absentBody.split('\n').filter(line => !line.trim().startsWith('#')).join('\n')
+  check(absentCode !== '', '判据面必须存在:verify_remote_object_absent 的函数体不许被删/改名')
+  check(absentCode.includes('when calling the HeadObject operation'),
+    '删除后的缺席检查必须按真 CLI 的 404 报文(含 "when calling the HeadObject operation")匹配')
+  check(!absentCode.includes(`grep -q '404'`),
+    '不得退回裸 `grep -q \'404\'`:aws 的失败信息会回显对象键,键里的 $RANDOM 数字出现 404 时会把"端点不可达"误判成"对象已消失"(约 1% 偶发红灯)')
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
@@ -4922,5 +5115,6 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + 'aws --body 纯路径形态(假 CLI 与真 CLI 同形拒绝:协议前缀/缺必填/未知参数/缺取值 + '
   + 'scripts/*.sh 与 workflow run 块的 fail-closed 静态扫描)/'
   + '探测对象生命周期(删除后必须 404,失败即 fail-loud;EXIT trap 保证校验失败路径也删除;'
+  + '故障注入按**调用点**生效并被逐条断言:上传阶段读不回 / 删除后缺席检查读不回 各有用例;'
   + 'PROBE_PAYLOAD/PROBE_BYTES/注释三者一致)/'
   + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期\n')

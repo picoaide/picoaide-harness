@@ -222,8 +222,14 @@ func SetUsageProvider(db *sql.DB, id, providerID int64) error {
 	if id <= 0 || providerID <= 0 {
 		return nil
 	}
-	_, err := db.Exec(`UPDATE usage SET provider_id = ? WHERE id = ?`, providerID, id)
-	return err
+	// R12-N2（P1-02）：池上入口同样必须"判据与动作看同一个对象"（唯一实现
+	// withUsageSearchPath）。旧实现是裸 `db.Exec` + 未限定名 ⇒ shadow 在场时
+	// provider 绑定静默落到 shadow 行（真 PG 实测 shadow 侧 `0→7`、public 一行未动），
+	// 于是该行的定价回落到 name 口径 —— 没有任何错误面。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE usage SET provider_id = ? WHERE id = ?`, providerID, id)
+		return err
+	})
 }
 
 // recordUsageKindAt 是 RecordUsageKind 的时间注入版本(测试固定时刻)。
@@ -266,11 +272,10 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 	// 判据硬钉在 `public.`（`n.nspname = 'public'` / `to_regclass('public.'||…)`），
 	// 而这条 `INSERT INTO usage` 用的是**未限定名** ⇒ 会话/角色/库级 search_path
 	// 前置了同名 shadow schema 时，计量行会落进 shadow 树、从产品的全部读面上
-	// 消失（而所有健康出口报绿）。同一句 `SET LOCAL` 与
-	// serverstore.applyUsageRetentionBudget 里的那处**逐字相同**（唯一实现、
-	// 三个调用点），`pg_catalog` 在前还封掉同名函数/类型的遮蔽。
-	// 必须在任何关系引用之前执行（本事务的第一条语句）。
-	if _, err := tx.Exec(usageSearchPathPin); err != nil {
+	// 消失（而所有健康出口报绿）。
+	// R12-N2（P1-02）：唯一实现 = `pinUsageSearchPath`（本事务的第一条语句，
+	// 必须在任何关系引用之前执行），不再在调用点抄那句字面量。
+	if err := pinUsageSearchPath(tx); err != nil {
 		return 0, err
 	}
 	var id int64
@@ -307,10 +312,33 @@ func updateUsageTokensAt(db *sql.DB, id, promptTokens, completionTokens int64, n
 func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, cacheTokens int64, estimated, allowOverdraft bool, now time.Time) error {
 	// P0-B:回填路径同样归零(流式 usage 行 / 估算回填都可能带负值)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
+	// 0061/0062: 回填与余额结算同事务。0062 起由 settleUsageCostTx 把该行的
+	// 计费金额**收敛到 cost**(按流水已计费额算差额):重复回填不重复扣,
+	// 费用向下修正自动记 refund 回补(此前只减不补,余额会永久偏离)。
+	//
+	// R12-N2（P1-02）：**整段（含读那一行）都在同一个已钉 search_path 的事务里**。
+	//
+	// 旧实现有三个洞，全都只在 shadow schema 在场时可观测（真 PG 实测）：
+	//  ① 事务**之前**那条 `db.QueryRow("SELECT … FROM usage WHERE id = ?")` 走池上
+	//     未限定名 ⇒ 读到 shadow 的同 id 行（金额/模型/provider 全是 shadow 的）；
+	//  ② `BEGIN` 后没有 `SET LOCAL` ⇒ `SELECT … FOR UPDATE` 与 `UPDATE usage` 打在
+	//     shadow 行上（实测 public `10/5` 一行未动、shadow `10/5→900/300`）；
+	//  ③ shadow 里**没有**同 id 行时，整段以 `sql: no rows in result set` 失败 ⇒
+	//     真实 pending 行**永不结算**（余额不扣、cost 停在 pending 值），随后
+	//     `CleanupPendingUsage` 又只删 shadow ⇒ pending 无界堆积。
+	// 现在读与写同事务、同 pin：`no rows` 只可能来自"这一行真的不在 public"。
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := pinUsageSearchPath(tx); err != nil {
+		return err
+	}
 	var userID, providerID int64
 	var model string
 	var createdAt any
-	if err := db.QueryRow("SELECT user_id, model, created_at, provider_id FROM usage WHERE id = ?", id).
+	if err := tx.QueryRow("SELECT user_id, model, created_at, provider_id FROM usage WHERE id = ?", id).
 		Scan(&userID, &model, &createdAt, &providerID); err != nil {
 		return err
 	}
@@ -324,14 +352,6 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 	in, out, off := ModelPricesForProvider(db, providerID, model)
 	cacheIn := ModelCachePriceForProvider(db, providerID, model)
 	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
-	// 0061/0062: 回填与余额结算同事务。0062 起由 settleUsageCostTx 把该行的
-	// 计费金额**收敛到 cost**(按流水已计费额算差额):重复回填不重复扣,
-	// 费用向下修正自动记 refund 回补(此前只减不补,余额会永久偏离)。
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	// 锁住 usage 行:并发回填按行串行,避免同一行的差额被算两次。
 	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {
 		return err
@@ -349,8 +369,13 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 // DeleteUsage removes a usage row. Used to drop pending rows that can never
 // be backfilled (C-9: failed/aborted streams).
 func DeleteUsage(db *sql.DB, id int64) error {
-	_, err := db.Exec("DELETE FROM usage WHERE id = ?", id)
-	return err
+	// R12-N2（P1-02）：与同族入口同一口径 —— 判据与动作看同一个对象
+	// （旧实现裸 `db.Exec` + 未限定名 ⇒ shadow 在场时删的是 shadow 行，public 的
+	// 待删行仍在，而 `err=nil`）。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec("DELETE FROM usage WHERE id = ?", id)
+		return err
+	})
 }
 
 // CleanupPendingUsage deletes zero-token chat/search rows older than cutoff
@@ -371,10 +396,15 @@ func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 	for _, k := range UsageKindPendingCleanup {
 		kinds = append(kinds, "'"+k+"'")
 	}
-	_, err := db.Exec(`DELETE FROM usage WHERE kind IN (`+strings.Join(kinds, ",")+
-		`) AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
-		pgInstantArg(cutoff))
-	return err
+	// R12-N2（P1-02）：启动清理也是同一条纪律 —— 旧实现裸 `db.Exec` + 未限定名 ⇒
+	// shadow 在场时只删 shadow 的 pending 行，**真实 pending 永不清理**
+	// （0-token 行无界堆积，磁盘按月单调增长，而整条链路 `err=nil`）。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM usage WHERE kind IN (`+strings.Join(kinds, ",")+
+			`) AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at < ?::timestamptz`,
+			pgInstantArg(cutoff))
+		return err
+	})
 }
 
 // UserMonthlyUsage returns the user's total tokens used in the current

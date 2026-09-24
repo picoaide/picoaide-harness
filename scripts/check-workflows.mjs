@@ -378,7 +378,11 @@ function parseShell(content, file) {
  * @returns 失败项列表 + 统计（见 checkWorkflowText）。
  */
 export function checkWorkflow(name) {
-  return checkWorkflowText(name, readFileSync(join(workflowDirectory, name), 'utf8'))
+  // `scannedFile` 是给"只对**真实的那份** workflow 有意义"的判据用的测试缝
+  // （第十二轮红队的 [SK-14⑨]/[SK-14⑩]：它们点名的 job/step 名属于 ci.yml，
+  // 自检的合成样本不可能满足 —— 那种判据不该在样本上判，否则自检全是假红）。
+  // `--workflows-dir` 的变异副本走的是同一条函数 ⇒ 变异验证照常有效。
+  return checkWorkflowText(name, readFileSync(join(workflowDirectory, name), 'utf8'), { scannedFile: name })
 }
 
 /**
@@ -886,6 +890,13 @@ export function checkWorkflowText(name, text, options = {}) {
   // "形态"两条判据之间:文本在、内容对,就是永不执行)。
   const pinnedSteps = checkPinnedStepExecutability(name, document, blocks, allowlist, notes)
   failures.push(...pinnedSteps.failures)
+  // 策略 10b（第十二轮红队 R12-D-01 / C-P1-2）：
+  //   ⑨ **install 期完整性前置校验必须在任何 yarn/corepack 命令之前**（顺序即判据：
+  //      载荷正是靠"判据跑在 install 之后"生效的）；
+  //   ⑩ **通过凭据的断言块**必须在场且形态逐字（凭据的形态、独占目录、一次性 nonce、
+  //      分开的两个流、退出码、恰好一行）—— 没有这一条，把断言块删掉/改弱没有任何静态反应。
+  failures.push(...checkInstallIntegrityPrecedence(name, document, notes, options))
+  failures.push(...checkVerdictAssertionBlocks(name, document, notes, options))
   // 策略 13(2026-09-25 第九轮审计 D 泳道 P1;2026-09-24 第十轮审计 C-01/C-02/C-03/D-03 加强):
   // 被钉步骤/守卫 job 的**进程环境层** —— 白名单式的四层 `env:` + 前序步骤的 `$GITHUB_ENV`
   // 写入 + 被钉步骤自己步骤体里的 `export`/前缀赋值 + 被钉单元里的 `uses:` 委派目标。
@@ -1157,8 +1168,188 @@ const NEGATION_IN_CONDITION = /\b(?:if|elif|while|until)\s+!\s+/u
 const ROOT_GATE_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*(?:corepack\s+yarn|yarn|node\s+scripts\/check-workspaces\.mjs)\s+(check:fast(?![:\w-])|check(?![:\w-]))((?:[ \t]+[^\s;&|>()]+)*)/gu
 /** 减少覆盖面的参数(R3-C C-7 的三种写法 + 两个"什么都不跑"的形态)。 */
 const ROOT_GATE_WEAKENING_FLAGS = ['--no-guards', '--only', '--changed', '--list', '--help', '-h']
+/**
+ * 根门禁调用的**第二种形态**（第十二轮红队 C-P0-2①）：`node scripts/check-workspaces.mjs`
+ * —— 由 **CI 自己的 node** 直接起编排器，不经 yarn。
+ *
+ * 为什么必须有这个形态：`yarn check` 会让 yarn 在**启动期**加载 `.yarnrc.yml` 的 `plugins:`
+ * （顶层模块代码），于是"承载判决的那个进程"的启动器本身由仓内配置决定；而包级 check 仍由
+ * 编排器内部经 yarn 起（那条路上编排器自己拒 `yarnPath`/`plugins`/生命周期钩子）。
+ * 形态等价（root `package.json` 的 `check` 脚本就是 `node scripts/check-workspaces.mjs`），
+ * 所以两条入口是同一件事的两种写法。
+ */
+const ROOT_GATE_DIRECT_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*node\s+scripts\/check-workspaces\.mjs(?![\w:.-])((?:[ \t]+[^\s;&|>()]+)*)/gu
+/**
+ * 根门禁调用的**全部形态**（`yarn check` / `corepack yarn check` / `node scripts/check-workspaces.mjs`）。
+ * @param script - 去注释后的可执行文本。
+ * @returns `{ mode, args }[]`；`mode === 'check'` = 全量门禁，`'check:fast'` = 弱化形态。
+ */
+function rootGateInvocations(script) {
+  const text = String(script)
+  const hits = [...text.matchAll(ROOT_GATE_INVOCATION)].map(match => ({ mode: match[1], args: match[2] }))
+  for (const match of text.matchAll(ROOT_GATE_DIRECT_INVOCATION)) hits.push({ mode: 'check', args: match[1] })
+  return hits
+}
 /** 永远运行那个守卫 job 的 run 内容(docs-only 的 PR 也跑)。 */
 const DOCS_ONLY_GUARD_RUNNER = 'scripts/check-root-guards.mjs'
+/**
+ * 守卫解析器完整性判据的脚本（第十二轮红队 R12-D-04）：它是"工作树↔HEAD 锚定"的承重判据，
+ * 却**从未**进过 `PINNED_STEP_POLICIES` —— `if: false` / 删 `--require-clean` 都能让它静默。
+ */
+const GUARD_PARSER_SCRIPT = 'scripts/check-guard-parser-integrity.mjs'
+/**
+ * 「install 期判据本体完整性」前置校验的脚本（第十二轮红队 R12-D-01 的收口件）。
+ *
+ * 它必须出现在**每个**跑判据的 job 的最前面、且此前不得有任何 `yarn`/`corepack` 命令 ——
+ * 载荷（`.yarnrc.yml` 的 `plugins:` / 工作区 `postinstall`）正是靠"判据跑在 install 之后"
+ * 生效的：install 期改写工作树里的判据本体，`ci.yml` 一字未改即可让全部判定块变绿。
+ */
+const INSTALL_INTEGRITY_PRECHECK = 'scripts/check-install-integrity.mjs'
+/** 必须让前置校验**先于任何 yarn 命令**执行的 job（顺序即判据，见 [SK-14⑨]）。 */
+const INSTALL_INTEGRITY_PRECEDENCE_JOBS = ['gate-guards', 'gate']
+/**
+ * 这一步是不是在**执行**「install 期完整性前置校验」。
+ *
+ * 两种等价形态都认：① 直接 `node scripts/check-install-integrity.mjs`；② 先
+ * `git show HEAD:scripts/check-install-integrity.mjs > "$probe"` 再 `node "$probe"` ——
+ * 后者的**执行体来自 git 对象**（工作树里那份在更早的步里可被改写），是 CI 现在用的形态。
+ * 注意 ② 的判据是 `git show HEAD:<路径>` 这个**动作**在场（不是"文本里提到过路径"）。
+ * @param script - 去注释后的可执行文本。
+ * @returns 是否在执行前置校验。
+ */
+function executesInstallPrecheck(script) {
+  if (commandPositionArgvs(script, INSTALL_INTEGRITY_PRECHECK).length > 0) return true
+  return String(script).includes(`git show HEAD:${INSTALL_INTEGRITY_PRECHECK}`)
+}
+/**
+ * [SK-14⑩] **通过凭据的断言块**的登记表（第十二轮红队 R12-D-03 / C-P1-2 的唯一真源）。
+ *
+ * 每一条 = 一个承载"通过凭据断言"的步骤：`required` 是它必须**逐字**包含的关键件，
+ * `forbidden` 是已废弃的旧形态（固定日志路径 = 前序步骤留下的进程可以往它追加一行凭据）。
+ * 改步骤体必须同步改这张表 —— 登记值进 diff、可评审。
+ */
+/** 承载"通过凭据断言块"的那份 workflow（登记表里的 job/step 名都属于它）。 */
+const VERDICT_WORKFLOW_FILE = 'ci.yml'
+/**
+ * shell **函数定义**形态（`f() { … }` / `function f { … }` / `function f() { … }`）。
+ * 见 [SK-14⑩]：承载凭据的步骤里出现定义即红（同名函数会遮蔽断言用的命令）。
+ */
+const SHELL_FUNCTION_DEFINITION = /(?:^|[\n;&|(])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/gu
+const VERDICT_ASSERTION_STEPS = [
+  {
+    job: 'gate-guards',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      'git show HEAD:scripts/check-install-integrity.mjs',
+      'node "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      'git show HEAD:scripts/check-install-integrity.mjs',
+      'node "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Root guards (every PR shape)',
+    required: [
+      'git show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-root-guards: VERDICT PASS guards=[1-9][0-9]*'",
+      '--min guards 1',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Guard parser integrity (strict worktree↔HEAD anchor)',
+    required: [
+      'git show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'check-guard-parser-integrity.mjs --require-clean',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本'",
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate',
+    name: 'Full gate (packages + all root guards)',
+    required: [
+      'git show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'node scripts/check-workspaces.mjs',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+'",
+      '--min planned 1 --equal planned executed',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/gate.log', '|& tee'],
+  },
+]
+/**
+ * [SK-17]（第十二轮红队 C-P0-1）**`defaults.run.shell`** 的登记表（**空表 = 禁止声明**）。
+ *
+ * 现场：workflow 顶层 `defaults: { run: { shell: … } }` 作用于**每个 job 的每个 step**，
+ * 而它此前不在任何判据面里 —— `shellSteps()` 只解析 step 级与 job 级的 `defaults.run.shell`，
+ * 顶层那份被静默忽略（`item.shell` 回落到 `bash`，于是 [SK-14⑦]/[SK-7a] 的 shell 判据
+ * 全部以为这一步跑在 bash 里）。加一个顶层 `defaults.run.shell` 就能让所有 `run:` 块
+ * 换解释器（`python`/自定义包装器），而"命令位/argv/步骤体"三条判据一字未改。
+ *
+ * 条目形态：`{ scope: 'workflow' | 'job', job: <jobId|null>, shell: <逐字取值>, why }`。
+ */
+const PINNED_DEFAULT_SHELL_REGISTRY = []
 /** docs-only 分类器的登记形态(顺序即判据,见 [SK-10])。 */
 const DOCS_ONLY_CLASSIFIER_CASES = [
   ['docs/*', 'docs'],
@@ -1276,9 +1467,9 @@ const PINNED_STEP_POLICIES = [
   {
     id: 'full-root-gate',
     label: '全量根门禁(`yarn check`)',
-    // 与 [SK-8]/[SK-9] 同一份识别口径:参数向量为空的 `yarn check`。
-    match: script => [...script.matchAll(ROOT_GATE_INVOCATION)]
-      .some(match => match[1] === 'check' && match[2].trim() === ''),
+    // 与 [SK-8]/[SK-9] 同一份识别口径:参数向量为空的全量根门禁（`yarn check` 或
+    // `node scripts/check-workspaces.mjs` —— 见 `ROOT_GATE_DIRECT_INVOCATION`）。
+    match: script => rootGateInvocations(script).some(hit => hit.mode === 'check' && hit.args.trim() === ''),
     ifPolicy: 'fail-safe-docs-only',
   },
   {
@@ -1318,6 +1509,37 @@ const PINNED_STEP_POLICIES = [
     id: 'wasm-case-gate',
     label: `用例级判定(\`${WASM_CASE_GATE_SCRIPT}\`)`,
     match: script => script.includes(WASM_CASE_GATE_SCRIPT),
+    ifPolicy: 'never',
+  },
+  {
+    // R12-D-04（P2，第十二轮红队）：这一步是"判据本体的内容摘要 ↔ 登记值"的承重判据，
+    // 却**从未**进过本表 —— 三种变异实测 `check-workflows` EXIT=0：
+    //   · `if: false`（M11）/ `if: ${{ false }}`（M5）：步骤永不执行，而 [SK-17] 只看得见
+    //     `env:` 层，[SK-8]/[SK-9]/[SK-15] 只问"文本在不在"；
+    //   · 删掉 `--require-clean`（M10）：git 锚定从 CI 硬判据降级成本地告警（J1 复审 N2 ②）。
+    // 识别口径与守卫运行步同一套：**命令位**必须真的执行那个脚本（`:` / `test -f` / `echo` 不算）。
+    id: 'guard-parser-integrity',
+    label: `守卫解析器完整性步(\`${GUARD_PARSER_SCRIPT}\`)`,
+    match: script => commandPositionArgvs(script, GUARD_PARSER_SCRIPT).length > 0,
+    ifPolicy: 'never',
+  },
+  {
+    // R12-D-01（P0，第十二轮红队）：install 期的判据本体完整性前置校验。
+    // 它的**位置**是判据的一部分（必须在任何 yarn/corepack 命令之前，见 [SK-14⑨]），
+    // 这里只负责"这一步本身不会被静默"：`if: false` / `continue-on-error` / 吞码 / 换 shell。
+    id: 'install-integrity-precheck',
+    label: `install 期判据本体完整性前置校验(\`${INSTALL_INTEGRITY_PRECHECK}\`)`,
+    // 识别口径 = "**这一步是它所在 job 里第一个执行前置校验的步骤**"：判据步骤体里也有
+    // `git show HEAD:scripts/check-install-integrity.mjs`（把探针从 git 对象取出来做免疫），
+    // 若按"文本里出现即命中"，`Full gate` 那条（带 docs-only 的 `if:`）会被误判成前置校验步
+    // ——那是与它意图无关的假红。位置本身也是判据（见 [SK-14⑨]）。
+    match: (script, item) => {
+      if (!executesInstallPrecheck(script)) return false
+      const steps = Array.isArray(item?.job?.steps) ? item.job.steps : []
+      const first = steps.findIndex(candidate => typeof candidate?.run === 'string'
+        && executesInstallPrecheck(executableScript(candidate.run)))
+      return first === item?.index
+    },
     ifPolicy: 'never',
   },
   {
@@ -4149,8 +4371,11 @@ function* shellSteps(document, blocks) {
     if (!bySignature.has(key)) bySignature.set(key, block)
   }
   const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  // **workflow 顶层** `defaults.run.shell` 也作用于每一个 step（第十二轮红队 C-P0-1）：
+  // 它此前不在解析链里 ⇒ `item.shell` 会静默回落到 `bash`，而 runner 上跑的是别的解释器。
+  const workflowShell = document?.defaults?.run?.shell
   for (const [jobId, job] of Object.entries(jobs)) {
-    const defaultShell = job?.defaults?.run?.shell
+    const defaultShell = job?.defaults?.run?.shell ?? workflowShell
     const steps = Array.isArray(job?.steps) ? job.steps : []
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]
@@ -4691,14 +4916,14 @@ function checkRootGateIntegrity(file, document, text, notes) {
     steps.forEach((step, index) => {
       if (typeof step?.run !== 'string') return
       const script = stripShellRedirections(executableScript(step.run))
-      for (const match of script.matchAll(ROOT_GATE_INVOCATION)) {
-        const args = match[2].trim() === '' ? [] : match[2].trim().split(/\s+/u)
+      for (const hit of rootGateInvocations(script)) {
+        const args = hit.args.trim() === '' ? [] : hit.args.trim().split(/\s+/u)
         invocations.push({
           jobId,
           stepIndex: index,
           stepName: typeof step.name === 'string' && step.name.trim() !== '' ? step.name : `第 ${index + 1} 步`,
           step,
-          flag: match[1],
+          flag: hit.mode,
           args,
         })
       }
@@ -5278,8 +5503,8 @@ function checkWasmGateWiring(file, document, notes) {
    * `ROOT_GATE_INVOCATION` + 参数向量为空)。`scriptOf` 已去掉注释 ⇒ 把 `yarn check`
    * 注释掉的写法不会被当成跑过门禁。
    */
-  const isFullRootGate = script => [...script.matchAll(ROOT_GATE_INVOCATION)]
-    .some(match => match[1] === 'check' && match[2].trim() === '')
+  const isFullRootGate = script => rootGateInvocations(script)
+    .some(hit => hit.mode === 'check' && hit.args.trim() === '')
   /**
    * ③ 结论绑定权威 HEAD(W-8 接线):step 的 `env` 必须带
    * `WASM_GATE_EXPECT_HEAD: ${{ github.sha }}`。只接受这一个取值 —— 字面量 sha 会在下一次
@@ -6273,6 +6498,17 @@ const PINNED_STEP_ARGV_POLICIES = {
     describe: '不得带任何附加参数(`--list` / `--help` / `--version` 这类会让这一步'
       + '只打印信息、恒退 0 ⇒ 「永不跳过」的守卫 job 变成永久绿灯空转)',
   },
+  'guard-parser-integrity': {
+    // R12-D-04（P2）：锚点只有这一个脚本 —— 判据读的是"这一步**执行**的 argv"，
+    // 而这一步的步骤体里还有 `git show HEAD:scripts/check-install-integrity.mjs`（另一个脚本），
+    // 所以锚点必须**逐策略**指定，不能沿用 `ADVISORY_GUARD_ANCHORS`（那是守卫/编排器运行步的）。
+    anchors: [GUARD_PARSER_SCRIPT],
+    allowed: ['--require-clean'],
+    required: ['--require-clean'],
+    describe: '必须**逐字**带 `--require-clean`（它是"工作树↔HEAD 锚定"的**参数通道**：'
+      + 'env 信号能被一行 `unset CI GITHUB_ACTIONS` 清掉，argv 不能 —— J1 复审 N2 ②），'
+      + '且不得带其它附加参数（`--print-digests` 只打印、不判）',
+  },
 }
 
 /**
@@ -6956,6 +7192,184 @@ function evaluateArithmetic(expression) {
  * @param notes - 提示收集器。
  * @returns 失败项列表。
  */
+/**
+ * [SK-14⑨] **install 期完整性前置校验必须真的在最前面**（第十二轮红队 R12-D-01）。
+ *
+ * 现场：`.yarnrc.yml` 的 `plugins:`（顶层模块代码在 yarn 启动期执行）与工作区
+ * `postinstall` 都能在 `yarn install --immutable` 期间改写工作树里的判据本体
+ * （`scripts/check-*.mjs`）⇒ **ci.yml 一字未改**，三个判定块全部 EXIT=0 而判据一条没跑。
+ * 因此"这一步存在"不够，它的**位置**也是判据：必须在任何 `yarn` / `corepack` 命令之前。
+ *
+ * 判据（对每个登记 job，按 step 顺序）：
+ *   ① 必须存在一个在**命令位**执行 `scripts/check-install-integrity.mjs` 的步骤；
+ *   ② 该步骤之前不得有任何一个步骤在**命令位**执行 `yarn` / `corepack`
+ *      （`uses:` 步骤不算：它们不跑仓内代码；注释与字符串里的字样也不算 —— 走命令位判定）。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkInstallIntegrityPrecedence(file, document, notes, options = {}) {
+  const failures = []
+  // **只对真实的那份 workflow 判**：登记表里的 job 名是 `ci.yml` 的（自检样本是合成文本，
+  // 它们不该被这条判据要求"必须有 gate-guards/gate" —— 那会把自检逼成假红）。
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const jobId of INSTALL_INTEGRITY_PRECEDENCE_JOBS) {
+    const job = jobs[jobId]
+    if (job === undefined || job === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑨] 登记的 job \`${jobId}\` 不在本 workflow 里 —— `
+          + '`INSTALL_INTEGRITY_PRECEDENCE_JOBS` 的每一条都是"判据本体必须在 install 之前校验"的登记，'
+          + 'job 被删/改名必须同步这张表（否则判据静默消失）。',
+      })
+      continue
+    }
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    const scripts = steps.map(step => (typeof step?.run === 'string' ? executableScript(step.run) : ''))
+    const precheckIndexes = scripts
+      .map((script, index) => (executesInstallPrecheck(script) ? index : -1))
+      .filter(index => index >= 0)
+    if (precheckIndexes.length === 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑨] job \`${jobId}\` 里没有"在命令位执行 \`${INSTALL_INTEGRITY_PRECHECK}\`"的步骤 ——`
+          + '判据本体（`scripts/check-*.mjs` / `.yarnrc.yml` / 全部 workspace manifest 的 install 期钩子）'
+          + '在 install 期可被改写，而判据步骤排在 install **之后** ⇒ ci.yml 一字未改也能让全部判定块变绿'
+          + '（第十二轮红队 R12-D-01 实测：三个 verbatim 判定块 EXIT=0、零判据执行）。',
+      })
+      continue
+    }
+    const first = Math.min(...precheckIndexes)
+    const earlier = []
+    for (let index = 0; index < first; index += 1) {
+      const script = scripts[index]
+      for (const command of ['yarn', 'corepack']) {
+        if (commandPositionArgvs(script, command).length > 0) {
+          earlier.push(`第 ${index + 1} 步「${stepName(steps[index], index)}」执行了 \`${command}\``)
+        }
+      }
+    }
+    if (earlier.length > 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑨] job \`${jobId}\` 的 install 期完整性前置校验排在第 ${first + 1} 步，`
+          + `但它之前还有 yarn/corepack 命令：${earlier.join('；')}\n`
+          + '  ⇒ 前置校验必须在**任何** yarn/corepack 命令之前（`.yarnrc.yml` 的 `plugins:` 顶层模块代码'
+          + '在 yarn 启动期就执行，连 `yarn --version` 都会）—— 晚一步它校验的就是"已经被改写的树"。',
+      })
+      continue
+    }
+    notes.push(`[SK-14⑨] job \`${jobId}\` 的 install 期完整性前置校验在第 ${first + 1} 步，`
+      + '此前没有任何 yarn/corepack 命令（顺序即判据）')
+  }
+  return failures
+}
+
+/**
+ * [SK-14⑩] **通过凭据的断言块**必须在场且形态逐字（第十二轮红队 R12-D-03 / C-P1-2）。
+ *
+ * 现场：判定权上移到"只认通过凭据"之后，**断言块自己**没有静态判据 ——
+ * 删掉断言、把 `恰好一行` 改回"出现过就行"、把步骤独占目录换回固定的 `/tmp/*.log`、
+ * 或者去掉 nonce 绑定，`check-workflows` 都 EXIT=0（它可以被静默改弱/伪造）。
+ *
+ * 判据：登记表里的每一步都必须存在、且 `run:` 的可执行文本**逐字包含**它登记的关键件
+ * （凭据形态 / 独占目录 / 一次性 nonce / 两个流分开 / 凭据检查器 / 退出码），
+ * 并且**不得**出现登记表里点名的旧形态（固定日志路径 = R12-D-03 的③号载荷通道）。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkVerdictAssertionBlocks(file, document, notes, options = {}) {
+  const failures = []
+  // 同 [SK-14⑨]：登记表点的是 `ci.yml` 里的 job/step 名，合成样本不该被它要求。
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const entry of VERDICT_ASSERTION_STEPS) {
+    const job = jobs[entry.job]
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    const found = steps
+      .map((step, index) => ({ step, index }))
+      .filter(({ step }) => typeof step?.name === 'string' && step.name.trim() === entry.name)
+    if (found.length !== 1) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑩] job \`${entry.job}\` 里名为「${entry.name}」的步骤有 ${found.length} 个（要求恰好 1 个）`
+          + ' —— 这一步承载通过凭据的断言块，删掉/改名/复制都必须在登记表（`VERDICT_ASSERTION_STEPS`）里显式改。',
+      })
+      continue
+    }
+    const script = executableScript(found[0].step.run)
+    const missing = entry.required.filter(token => !script.includes(token))
+    if (missing.length > 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑩] job \`${entry.job}\` 的步骤「${entry.name}」的断言块少了关键件：`
+          + `${missing.map(token => `\`${token}\``).join('、')}\n`
+          + '  ⇒ 这条断言的作用是把"凭据"从**流属性**抬成"步骤独占文件 + 一次性 nonce"'
+          + '（R12-D-03 的三种载荷：launcher 打印 / 两个流各打半行 / 前序步骤留下的进程往固定路径追加）。'
+          + '删掉任一关键件都会让它退回旧形态；要改形态请同步改 `VERDICT_ASSERTION_STEPS` 并写明理由。',
+      })
+    }
+    // **shell 函数遮蔽**（第十二轮 C 路实测）：在被钉步骤体里定义 `grep() { return 0; }` /
+    // `awk() { … }` 这类同名函数，断言就恒真而文本一字未改。判据：这些承载凭据的步骤里
+    // **不允许定义任何 shell 函数**（要复用逻辑请落到被登记的脚本文件里，那才是判据执行体）。
+    const shadowed = [...script.matchAll(SHELL_FUNCTION_DEFINITION)].map(match => match[0].trim())
+    if (shadowed.length > 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑩] job \`${entry.job}\` 的步骤「${entry.name}」里定义了 shell 函数：`
+          + `${shadowed.slice(0, 2).map(text => `\`${text.split('\n')[0]}\``).join('、')}`
+          + '\n  ⇒ 同名函数会**遮蔽**断言用的命令（实测 `grep() { return 0; }` 让"凭据必须恰好一行" '
+          + '恒真，而步骤体文本一字未改）；承载凭据的步骤里不许定义函数。',
+      })
+    }
+    const forbidden = entry.forbidden.filter(token => script.includes(token))
+    if (forbidden.length > 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-14⑩] job \`${entry.job}\` 的步骤「${entry.name}」里出现了**已废弃**的形态：`
+          + `${forbidden.map(token => `\`${token}\``).join('、')}\n`
+          + '  ⇒ 固定的日志路径可以被"前序步骤留下的进程"盯住并追加一行凭据'
+          + '（第十二轮红队 R12-D-03 的③号载荷：一个只 `process.exit(0)` 的 runner + 一个往'
+          + '`/tmp/root-guards.log` 追加伪造行的守护进程 ⇒ EXIT=0）。',
+      })
+    }
+    if (missing.length === 0 && forbidden.length === 0) {
+      notes.push(`[SK-14⑩] 步骤「${entry.name}」的凭据断言块形态完整（独占目录 + 一次性 nonce + 恰好一行）`)
+    }
+  }
+  return failures
+}
+
+/**
+ * [SK-14] 的实现:被钉住的判据步骤必须**可执行**(判据见常量区注释)。
+ *
+ * 与 [SK-8]/[SK-9]/[SK-12] 的分工:那三条策略负责"这一步在不在"(存在性与形态),
+ * 本条负责"这一步**会不会真的跑、跑了能不能失败**" —— 它们各自只看得见自己那一面,
+ * 而 `if: false` 正好落在两者之间(文本在、内容对,就是永不执行)。
+ *
+ * 步骤枚举走 `shellSteps()`(与 [SK-7a] 同一份"有效 shell"解析),吞码谓词与白名单也整份
+ * 复用 [SK-7a] —— 这里是**收口**,不是第二套语法。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param blocks - extractRunBlocks 的结果(供 shellSteps 解析有效 shell 与行号)。
+ * @param allowlist - 语句级吞码白名单(与 [SK-7a] 共用)。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
 function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) {
   const failures = []
   /** 命中过哪些"被钉住"的类别(供收尾 note 打印证据,避免"存在性断言 = 假绿")。 */
@@ -7014,10 +7428,13 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
           detail: `[SK-14] ${label} 是「${policy.label}」,但${shellProblem}`,
         })
       }
-      // ⑦ **argv 钉子**(第八轮审计 D-21):调用点之后不得带未登记的附加参数。
+      // ⑦ **argv 钉子**(第八轮审计 D-21):调用点之后不得带未登记的附加参数;
+      //    第十二轮红队 R12-D-04 补另一半:**必须带的参数也不许少**(`allowed` 只拒"多"，
+      //    拒不了"少" —— 删掉 `--require-clean` 实测 EXIT=0）。
       const argvPolicy = PINNED_STEP_ARGV_POLICIES[policy.id]
       if (argvPolicy !== undefined) {
-        const anchor = ADVISORY_GUARD_ANCHORS.find(candidate => script.includes(candidate))
+        const anchors = argvPolicy.anchors ?? ADVISORY_GUARD_ANCHORS
+        const anchor = anchors.find(candidate => script.includes(candidate))
         const extra = anchor === undefined ? [] : pinnedStepExtraArgv(script, anchor)
         const unexpected = extra.filter(token => !argvPolicy.allowed.includes(token))
         if (unexpected.length > 0) {
@@ -7031,6 +7448,22 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
               + '恒退 0)就让"永不跳过"的 `gate-guards` 变成永久绿灯空转,而必需的 Gate 检查'
               + '照样看到 success(`yarn check --list` 会被 [SK-8] 咬住,守卫运行步当时没有这颗牙)。'
               + '\n  ⇒ 需要新参数请登记进 `PINNED_STEP_ARGV_POLICIES` 并写明理由(逐字登记,不做通配)。',
+          })
+        }
+        // **必带参数**（第十二轮红队 R12-D-04 的另一半）：在**命令位**上执行的那个调用点，
+        // 必须逐字带上登记的参数。逐字比对、不做通配 —— 与 `allowed` 同一套纪律。
+        const invocation = anchor === undefined ? [] : commandPositionArgvs(script, anchor)
+        const missing = (argvPolicy.required ?? [])
+          .filter(token => !invocation.some(argv => argv.includes(token)))
+        if (missing.length > 0) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-14] ${label} 是「${policy.label}」,但它的调用点少了**必带参数**:`
+              + `${missing.map(token => `\`${token}\``).join(', ')}`
+              + `\n  该类别${argvPolicy.describe}`
+              + '\n  ⇒ 第十二轮红队 R12-D-04 实测:删掉 `--require-clean` 之后 `check-workflows` EXIT=0,'
+              + '而"工作树↔HEAD 锚定"当场从 CI 硬判据降级成本地告警(J1 复审 N2 ② 的同一形态)。',
           })
         }
       }
@@ -7302,6 +7735,45 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
 
   const pinnedJobIds = [...new Set(units.map(unit => unit.jobId))]
 
+  // ③b **`defaults.run.shell` 走登记制**（第十二轮红队 C-P0-1）。
+  //     `shell:` 是"谁来解释这段脚本"的入口：step 级 `shell:` 由 [SK-14⑦] 的整串登记看着，
+  //     但 **workflow 顶层** `defaults.run.shell` 此前不在判据面里（`shellSteps()` 没读它 ⇒
+  //     `item.shell` 回落成 `bash`，runner 上跑的却是别的解释器），**job 级** `defaults.run.shell`
+  //     也只在"该 job 里有被钉步骤"时才被 [SK-14⑦] 顺带看见。这里两个入口一起收：
+  //     登记表 `PINNED_DEFAULT_SHELL_REGISTRY` 为空 = **禁止声明**（要声明必须先登记并写理由）。
+  {
+    const declaredDefaults = []
+    if (document?.defaults?.run?.shell !== undefined && document.defaults.run.shell !== null) {
+      declaredDefaults.push({ scope: 'workflow', job: null, shell: document.defaults.run.shell })
+    }
+    for (const jobId of pinnedJobIds) {
+      const jobShell = jobs[jobId]?.defaults?.run?.shell
+      if (jobShell !== undefined && jobShell !== null) {
+        declaredDefaults.push({ scope: 'job', job: jobId, shell: jobShell })
+      }
+    }
+    for (const entry of declaredDefaults) {
+      const value = typeof entry.shell === 'string' ? entry.shell : String(entry.shell)
+      // 与 [SK-14⑦] 同一份"这个 shell 认不认识"的口径：`bash` / `sh` / 把 `{0}` 当脚本文件的模板
+      // **不改变解释器**（它们就是缺省语义），因此不需要登记；只有"换成别的解释器"才要登记
+      // ——否则每条显式写 `shell: bash` 的合法 workflow 都会被迫进登记表（那是假红）。
+      if (pinnedShellProblem(value) === null) continue
+      const registered = PINNED_DEFAULT_SHELL_REGISTRY.some(item => item.scope === entry.scope
+        && (item.job ?? null) === entry.job && item.shell === value)
+      if (registered) continue
+      const where = entry.scope === 'workflow'
+        ? '**workflow 顶层** `defaults.run.shell`'
+        : `job ${entry.job} 的 \`defaults.run.shell\``
+      reportOnce(`default-shell:${entry.scope}:${entry.job ?? ''}:${value}`, `[SK-17] ${where} = `
+        + `\`${value}\` —— 它作用于该范围内**每一个 step**,而"命令位 / argv / 步骤体"三条判据`
+        + '都建立在"这段脚本由 bash 解释"之上。[SK-14⑦] 只登记 **step 级** `shell:`，'
+        + 'workflow 顶层的这一份此前根本不在解析链里(`item.shell` 静默回落成 `bash`)。'
+        + '\n  ⇒ 与 cwd（`defaults.run.working-directory`）与 `env:` 同族（"执行体由谁提供"）:'
+        + '走**登记制**,要在被钉单元上声明必须先登记进 `PINNED_DEFAULT_SHELL_REGISTRY`'
+        + '`{ scope, job, shell, why }`（当前为空 = 未登记即红）。')
+    }
+  }
+
   // ④ job 级 `env:`(注入该 job 的每个 step)。
   for (const jobId of pinnedJobIds) {
     const jobEnvKeys = envEntries(jobs[jobId]?.env)
@@ -7406,8 +7878,8 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
   for (const unit of units) {
     const jobSteps = stepsOf(unit.jobId)
     const runsFullGate = jobSteps.some(step => typeof step?.run === 'string'
-      && [...stripShellRedirections(executableScript(step.run)).matchAll(ROOT_GATE_INVOCATION)]
-        .some(match => match[1] === 'check' && match[2].trim() === ''))
+      && rootGateInvocations(stripShellRedirections(executableScript(step.run)))
+        .some(hit => hit.mode === 'check' && hit.args.trim() === ''))
     if (!runsFullGate) continue
     jobSteps.forEach((step, index) => {
       const uses = typeof step?.uses === 'string' ? step.uses.trim() : ''
