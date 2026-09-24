@@ -12,6 +12,12 @@
 #   <channel>/releases/<version>/SHA256SUMS                            (immutable)
 #   <channel>/latest.json                                              (no-cache)
 #
+# **`--body` 只能给纯路径**(2026-09-24 发布链阻断事故):`file://` / `fileb://` 前缀
+# 在新 AWS CLI 上被 ParamValidation 直接拒绝 —— 见 abs_path 的注释(含实测证据)。
+#
+# **上传前先探测**(2026-09-24 事故加固):先拿 1 字节对象把「CLI 参数形态对不对 /
+# endpoint 与凭据通不通 / 校验和读不读得回」判死,再去推 ~500MB —— 见循环里的第 0 步。
+#
 # **上传后必须证明远端字节完整**(2026-09-23 审计 K-01):单请求 PUT + 存储侧
 # `ChecksumSHA256`,然后 head-object 把 ContentLength 与 ChecksumSHA256 和本地
 # `stat`/`sha256` 逐字对拍,任一条不符即 fail-loud(不写 latest.json)。
@@ -101,6 +107,39 @@ sha256_b64() {
   else
     node -e 'const c=require("node:crypto"),f=require("node:fs");process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("base64"))' "$1"
   fi
+}
+
+# `--body` 只能给**纯路径** —— 2026-09-24 发布链阻断事故的修复。
+#
+# 现场:tag 发布流水线的 Release job 在「上传版本资产」这一步失败:
+#   aws: [ERROR]: An error occurred (ParamValidation):
+#     Error parsing parameter '--body': Blob values must be a path to a file.
+# 根因是这里原先把 `--body` 写成了带 `fileb://` 前缀的形态。用 AWS CLI 2.37.1
+# 本地实测(`--endpoint-url http://127.0.0.1:1` 只做参数形态验证,不连任何远端):
+#   --body 带 `fileb://` 前缀(相对/绝对路径都一样)→ 上面那条 ParamValidation,退出 252
+#   --body 带 `file://`  前缀(相对/绝对路径都一样)→ 同一条 ParamValidation,退出 252
+#   --body 纯路径(绝对/相对)                  → 通过参数解析,**走到网络层**
+#   --body 纯路径但文件不存在                  → 同一条 ParamValidation(所以必须真实存在)
+# 即:新 CLI **不再接受** `file://` / `fileb://` 前缀形态。**不要"修回" `fileb://`** ——
+# 门禁里的假 aws 已与真 CLI 同形(见 scripts/verify-ci-scripts.mjs,遇这两个前缀即报
+# 同一条错误并非零退出),另有静态判据扫 scripts/*.sh 的每一个 `--body` 取值。
+#
+# 为什么不直接 `realpath`:`realpath` 在精简 runner(Git Bash / busybox)上不保证存在,
+# 而本文件不许引入新依赖 ⇒ 用 dirname/basename + `cd … && pwd` 自己归一。
+abs_path() { # $1=文件 → 绝对路径;不存在即 fail-loud(真 CLI 也会拒)
+  local path="$1" dir base
+  if [ ! -f "$path" ]; then
+    echo "::error::内部错误:--body 只能给真实存在的文件,实际不存在:${path}" >&2
+    return 1
+  fi
+  case "$path" in
+    /*) printf '%s' "$path" ;;
+    *)
+      dir="$(dirname "$path")"
+      base="$(basename "$path")"
+      printf '%s/%s' "$(cd "$dir" && pwd)" "$base"
+      ;;
+  esac
 }
 
 # 上传后**完整性**校验(2026-09-23 审计 K-01)。判据两条,全过才放行:
@@ -201,7 +240,7 @@ while IFS= read -r channel; do
   zip_key="${channel}/releases/${VER}/picoaide-server-${VER}-amd64.zip"
   sums_key="${channel}/releases/${VER}/SHA256SUMS"
 
-  # 本地自洽:SHA256SUMS 必须真的写着本包的 sha256。空文件/写错包名在客户侧表现
+  # 本地产物不自洽:SHA256SUMS 必须真的写着本包的 sha256。空文件/写错包名在客户侧表现
   # 为"校验永远不过",而这里能当场拦下(它跟着包一起进镜像与 R2)。
   zip_sha="$(sha256sum "$zip" | cut -d' ' -f1)"
   if ! grep -qF "$zip_sha" "$sums"; then
@@ -209,10 +248,40 @@ while IFS= read -r channel; do
     exit 1
   fi
 
+  # `--body` 只给**纯路径**(绝对):见上方 abs_path 的注释 —— `fileb://` / `file://`
+  # 前缀在新 AWS CLI 上被 ParamValidation 拒绝,那是本脚本 2026-09-24 阻断发布的原因。
+  zip_body="$(abs_path "$zip")"
+  sums_body="$(abs_path "$sums")"
+
+  # 0) 上传前探测(2026-09-24 事故加固)。真正要推的是 ~500MB,而"能不能推"其实
+  #    取决于三件与包大小无关的事:①CLI 参数形态对不对(本次事故正是形态问题:
+  #    `--body fileb://…` 在真 CLI 上连参数解析都过不去)②endpoint / 凭据 / 桶权限
+  #    通不通 ③`--checksum-sha256` 写进去之后能不能被 head-object 读回(下面
+  #    verify_remote_object 的判据面)。用一个几字节的对象先把这三件事判死,失败
+  #    就在**推大件之前**报错,而不是传了 500MB 才在复查阶段倒下。
+  #    对象键带 `$RANDOM`/pid 后缀(不引新依赖),校验完立刻删除:它落在 `<ver>/`
+  #    目录内,而保留策略只看 `releases/` 下的版本目录,不会被误当成一个版本。
+  probe="$(mktemp)"
+  printf 'probe' > "$probe"
+  probe_key="${channel}/releases/${VER}/.probe-${RANDOM}${RANDOM}-$$"
+  if ! brand_run_checked aws s3api put-object \
+    --bucket "$R2_BUCKET" --key "$probe_key" --body "$(abs_path "$probe")" \
+    --content-type application/octet-stream --cache-control "$NO_CACHE" \
+    --checksum-sha256 "$(sha256_b64 "$probe")"; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传前探测 —— CLI 形态/endpoint/凭据在真正上传之前就不可用;上方输出已脱敏)" >&2
+    rm -f "$probe"
+    exit 1
+  fi
+  verify_remote_object "$probe_key" "$probe" "上传前探测"
+  # 探测对象尽力删掉:删不掉不阻断发布(它只有几字节,且不被任何清单引用),
+  # 但失败时的输出仍走 brand_run_best_effort 的脱敏路径,便于运维定位。
+  brand_run_best_effort aws s3 rm "s3://${R2_BUCKET}/${probe_key}"
+  rm -f "$probe"
+
   # 1) 版本化资产:不可变 + 长缓存(同版本内容永不改)+ 存储侧校验和(见上方
   #    verify_remote_object 的注释:单请求 PUT 才能拿到可与本地对拍的整对象 sha256)。
   if ! brand_run_checked aws s3api put-object \
-    --bucket "$R2_BUCKET" --key "$zip_key" --body "fileb://${zip}" \
+    --bucket "$R2_BUCKET" --key "$zip_key" --body "$zip_body" \
     --content-type application/zip --cache-control "$IMMUTABLE" \
     --checksum-sha256 "$(sha256_b64 "$zip")"; then
     echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传版本资产;上方输出已脱敏)" >&2
@@ -221,7 +290,7 @@ while IFS= read -r channel; do
   verify_remote_object "$zip_key" "$zip" "版本资产"
 
   if ! brand_run_checked aws s3api put-object \
-    --bucket "$R2_BUCKET" --key "$sums_key" --body "fileb://${sums}" \
+    --bucket "$R2_BUCKET" --key "$sums_key" --body "$sums_body" \
     --content-type text/plain --cache-control "$IMMUTABLE" \
     --checksum-sha256 "$(sha256_b64 "$sums")"; then
     echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传校验和;上方输出已脱敏)" >&2
@@ -286,8 +355,10 @@ while IFS= read -r channel; do
   "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 JSON
+  # 同资产:`--body` 只给纯路径(mktemp 一般已是绝对路径,这里一并归一)。
+  manifest_body="$(abs_path "$manifest")"
   if ! brand_run_checked aws s3api put-object \
-    --bucket "$R2_BUCKET" --key "${channel}/latest.json" --body "fileb://${manifest}" \
+    --bucket "$R2_BUCKET" --key "${channel}/latest.json" --body "$manifest_body" \
     --content-type application/json --cache-control "$NO_CACHE" \
     --checksum-sha256 "$(sha256_b64 "$manifest")"; then
     echo "::error::更新服务器发布失败(渠道 ${INDEX}:写版本指针;上方输出已脱敏)" >&2

@@ -79,8 +79,18 @@ export interface ConnectorMcp {
   env?: Record<string, string>
   /**
    * Static request headers (streamable-http). Values containing `${FIELD}`
-   * are rendered from the stored credential fields; an empty `Authorization`
-   * is filled with the stored access token as `Bearer <token>`.
+   * are rendered from the stored credential fields.
+   *
+   * A declared value that renders EMPTY is the documented "leave empty to
+   * auto-fill the bearer" shape — `Authorization: ''`, `X-Probe-Key: ''`, and
+   * equally a template whose fields are unset (`'${MISSING_FIELD}'`) — and the
+   * framework then sends `Bearer <stored access token>` under that name. An
+   * empty resolution is NOT a credential of the definition's own: keeping it as
+   * one shadowed the OAuth provider's live token with an empty header and made
+   * every call 401 while the row still said `connected` (audit R9A-1). With a
+   * provider in play the authorization slot belongs to the provider (the
+   * framework's copy is dropped); a framework-filled value under any OTHER name
+   * stays and is refreshed in place when the credential rotates.
    */
   headers?: Record<string, string>
 }

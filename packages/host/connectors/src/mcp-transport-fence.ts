@@ -146,6 +146,127 @@ const FENCED_FETCH = Symbol('picoaide.mcp.transport-fence.fenced-fetch')
 const HARDENED = Symbol('picoaide.mcp.transport-fence.hardened')
 
 /**
+ * Carries a transport's **live** request-header record on the one object
+ * `hardenTransport` already reaches: the `authProvider` the bridge handed the
+ * SDK.
+ *
+ * Why it exists (audit R9-D-1): the credential-change rebuild set covers stdio
+ * and provider-less http, so a provider-backed http transport was left with
+ * every OTHER registration-time baked value frozen — a definition declaring
+ * `X-Probe-Key: ''` ("leave empty to auto-fill the bearer") kept the FIRST
+ * access token forever and 401ed on every later call while the row still said
+ * `connected`. `Config.headers` cannot be the seam: Schemastery resolves
+ * `z.dict(String)` into a NEW object (`resolved.headers === passed` is false),
+ * so mutating the config the connector built reaches nothing.
+ *
+ * The SDK reads `this._requestInit?.headers` on every request
+ * (`_commonHeaders()`, pinned `@modelcontextprotocol/client@2.0.0`), and
+ * `hardenTransport` is the one place that can replace that object on the live
+ * instance. It therefore installs THIS record when the connector attached one,
+ * and the connector mutates that very object when a credential changes.
+ */
+const LIVE_HEADERS = Symbol('picoaide.mcp.transport-fence.live-headers')
+
+/**
+ * Attach the record a provider-backed transport must read its headers from.
+ *
+ * Non-enumerable: the provider object is also inspected by the SDK
+ * (`isOAuthClientProvider`-style classification) and by
+ * {@link allowedOutboundOriginsOf}, and neither may start seeing a new own key.
+ * @param provider - the object handed to the SDK as `authProvider` (the fence
+ *   reads it off `_authProvider` / `_oauthProvider`).
+ * @param headers - the mutable record the connector will keep updating.
+ */
+export function attachMcpLiveHeaders(provider: object, headers: Record<string, string>): void {
+  Object.defineProperty(provider, LIVE_HEADERS, {
+    value: headers,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  })
+}
+
+/**
+ * Read the live header record off a provider, when it has one.
+ * @param provider - the object in the transport's provider slot.
+ * @returns the record, or undefined for a provider without one.
+ */
+function liveHeadersOf(provider: unknown): Record<string, string> | undefined {
+  if (typeof provider !== 'object' || provider === null) return undefined
+  const value = (provider as Record<symbol, unknown>)[LIVE_HEADERS]
+  return typeof value === 'object' && value !== null ? value as Record<string, string> : undefined
+}
+
+/**
+ * How many requests to one MCP endpoint are awaiting an answer right now.
+ *
+ * Keyed by the endpoint (origin + path), not by the transport instance: the
+ * fence never gets a handle on the instance the connector registered, and the
+ * only caller — the rebuild that is about to retire that instance — knows the
+ * definition's URL. Two transports on one URL share the reading, which is the
+ * conservative direction (they would both be retired by the same name rule).
+ *
+ * Only non-GET requests count: the SDK's GET is the long-lived SSE stream, so
+ * counting it would mark every connected transport permanently busy.
+ */
+const outboundActivity = new Map<string, number>()
+
+/** The activity bucket of one request URL, or null for a URL without a host. */
+function activityKeyOf(url: string | URL): string | null {
+  try {
+    const parsed = typeof url === 'string' ? new URL(url) : url
+    return `${parsed.origin}${parsed.pathname}`
+  } catch {
+    return null
+  }
+}
+
+/** The transport's own URL as a full href, read live (see {@link URL_FIELD}). */
+function ownHrefOf(read: (() => unknown) | undefined): string | null {
+  const value = read?.()
+  if (value instanceof URL) return value.href
+  if (typeof value === 'string') return value
+  return null
+}
+
+/**
+ * Whether an MCP call is on the wire for this endpoint right now.
+ * @param target - the MCP endpoint URL of the definition.
+ * @returns true while at least one non-GET request is unanswered.
+ */
+export function isMcpOutboundBusy(target: string): boolean {
+  const key = activityKeyOf(target)
+  return key !== null && (outboundActivity.get(key) ?? 0) > 0
+}
+
+/**
+ * Wait until no MCP call is on the wire for this endpoint, bounded.
+ *
+ * Used by the provider-less rebuild, whose `retire()` closes the transport the
+ * SDK may still be answering a tool call on (`Connection closed` mid-call,
+ * audit R9A-3). The wait ends as soon as the counter reaches zero, so the
+ * common case costs one poll; the bound exists so a stalled call cannot starve
+ * the credential update forever.
+ * @param target - the MCP endpoint URL of the definition.
+ * @param timeoutMs - upper bound on the wait.
+ * @returns `'idle'` when the endpoint drained (or already was idle), `'busy'`
+ *   when the bound expired with a call still on the wire.
+ */
+export async function whenMcpOutboundIdle(target: string, timeoutMs: number): Promise<'idle' | 'busy'> {
+  const key = activityKeyOf(target)
+  if (key === null || (outboundActivity.get(key) ?? 0) === 0) return 'idle'
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, ACTIVITY_POLL_MS))
+    if ((outboundActivity.get(key) ?? 0) === 0) return 'idle'
+  }
+  return (outboundActivity.get(key) ?? 0) === 0 ? 'idle' : 'busy'
+}
+
+/** Poll interval of {@link whenMcpOutboundIdle}: far below any tool budget. */
+const ACTIVITY_POLL_MS = 25
+
+/**
  * The module `dsh-mcp-client` constructs its streamable-http transport from.
  *
  * Upstream 0.1.6-alpha.2 replaced `@modelcontextprotocol/sdk@1.x` with
@@ -625,7 +746,20 @@ function protoOf(): Proto {
 function hardenTransport(transport: object, locale: () => HostLocale = () => DEFAULT_HOST_LOCALE): void {
   const fields = transport as Record<string | symbol, unknown>
   if (fields[HARDENED] === true) return
+  // The credential's allowed-origin scope: whichever provider slot this SDK
+  // build filled in (OAuth-classified arguments land in the first, our own
+  // `AuthProvider` face in the second — see the field docs above). Read BEFORE
+  // the request fields are rewritten: the same object may carry the transport's
+  // live header record (R9-D-1).
+  const scope = fields[OAUTH_PROVIDER_FIELD] ?? fields[AUTH_PROVIDER_FIELD]
   const requestInit = forceManual(fields[REQUEST_INIT_FIELD] as RequestInit | undefined)
+  // The connector attached this record when it registered the server: the SDK
+  // re-reads `_requestInit.headers` on every request, so installing the record
+  // itself (instead of the resolved copy Schemastery left in the config) is what
+  // lets a rotated credential reach an already-live transport without the
+  // rebuild that would cut the call in flight.
+  const live = liveHeadersOf(scope)
+  if (live !== undefined) requestInit.headers = live
   fields[REQUEST_INIT_FIELD] = requestInit
   const ownUrl = (): unknown => fields[URL_FIELD]
   // Where the SDK's requests really go: the caller-supplied fetch when there is
@@ -635,10 +769,6 @@ function hardenTransport(transport: object, locale: () => HostLocale = () => DEF
   // a wrapper cannot take them back out again.
   const provided = fields[FETCH_FIELD]
   const base: FetchLike = typeof provided === 'function' ? provided as FetchLike : globalFetch
-  // The credential's allowed-origin scope: whichever provider slot this SDK
-  // build filled in (OAuth-classified arguments land in the first, our own
-  // `AuthProvider` face in the second — see the field docs above).
-  const scope = fields[OAUTH_PROVIDER_FIELD] ?? fields[AUTH_PROVIDER_FIELD]
   fields[FETCH_WITH_INIT_FIELD] = createMcpOutboundFetch({
     base,
     ownUrl,
@@ -796,7 +926,20 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     const next: RequestInit = { ...(init ?? {}), redirect: 'manual' }
     if (headers === undefined || Object.keys(headers).length === 0) delete next.headers
     else next.headers = headers
-    return await options.base(input, next)
+    // R9A-3 bookkeeping: the provider-less rebuild retires (and closes) this
+    // transport, which killed a tool call that was still on the wire. The
+    // count is what lets that rebuild wait for the call instead of cutting it.
+    const ownHref = ownHrefOf(options.ownUrl)
+    const activityKey = ownHref === null ? null : activityKeyOf(ownHref)
+    const counted = activityKey !== null
+      && activityKey === activityKeyOf(target)
+      && (init?.method ?? 'GET').toUpperCase() !== 'GET'
+    if (counted) outboundActivity.set(activityKey, (outboundActivity.get(activityKey) ?? 0) + 1)
+    try {
+      return await options.base(input, next)
+    } finally {
+      if (counted) outboundActivity.set(activityKey, Math.max(0, (outboundActivity.get(activityKey) ?? 1) - 1))
+    }
   }
   Object.defineProperty(wrapped, FENCED_FETCH, { value: true, enumerable: false })
   return wrapped
