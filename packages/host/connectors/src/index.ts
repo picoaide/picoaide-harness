@@ -10,8 +10,8 @@ import { ConnectorStore, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
-import { createOAuthProvider, isTerminalRefreshReason, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens, type RefreshFailure } from './mcp-oauth-provider.ts'
-import type { OAuthTarget } from './mcp-oauth-provider.ts'
+import { createOAuthProvider, isTerminalRefreshReason, resolveAuthorizationServer, resolveStaticAuthorizationServer, TokenRefresher, tokenNeedsRefresh, type RefreshedTokens, type RefreshFailure, type RefreshOutcome } from './mcp-oauth-provider.ts'
+import type { McpTransportAuthProvider, OAuthTarget } from './mcp-oauth-provider.ts'
 import { REFRESH_LEAD_MS, REFRESH_SWEEP_INTERVAL_MS } from './token-lifetime.ts'
 import { userScopePath, unscopedConnectorPath } from './user-scope.ts'
 import { ConnectorApprovalStore } from './approvals.ts'
@@ -417,17 +417,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
-   * The official `OAuthClientProvider` for one streamable-http registration.
+   * The OAuth-backed `authProvider` for one streamable-http registration.
    *
    * Discovery is resolved here (through the same policy-checked routine the
-   * refresh engine uses) and handed to the SDK as saved discovery state, so
-   * the SDK's 401 path refreshes through the metadata-named token endpoint
-   * without a second, unfenced discovery round trip.
+   * refresh engine uses) and handed to the SDK as saved discovery state, so the
+   * SDK's refresh goes to the definition's authorization server and never to
+   * one the resource server named — without a second, unfenced discovery round
+   * trip.
+   *
+   * The returned `authProvider` is our `AuthProvider` face, NOT the full
+   * `OAuthClientProvider` (see `createOAuthProvider`): an OAuth-classified
+   * provider is replaced by the SDK's `adaptOAuthProvider`, whose hard-coded
+   * `onUnauthorized` bypasses the per-id single flight on a 401.
    */
   const mcpAuthProvider = async (
     def: ConnectorDef,
     credential: ConnectorCredential | null,
-  ): Promise<{ authProvider?: OAuthClientProvider; handle?: LiveProviderHandle }> => {
+  ): Promise<{ authProvider?: McpTransportAuthProvider; handle?: LiveProviderHandle }> => {
     const target = oauthTargetOf(def)
     if (target === null || credential?.accessToken === undefined) return {}
     // The provider (and any SDK 401 self-heal it drives) belongs to the ACCOUNT
@@ -472,6 +478,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         target,
         discovery: staticResolved.discovery,
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
+        // 401 的强制刷新（2026-09-24）：服务器说这枚访问令牌已死时，看时钟的
+        // `ensureFresh` 会直接跳过（服务器侧失效而本地 `expiresAt` 还在未来），
+        // 于是 SDK 只能自己再刷一次 —— 那条路径不在 per-id 单飞里，并发 401
+        // 会把同一个单次 refresh token 出示两次（轮换复用检测吊销整个授权）。
+        refreshOnUnauthorized: async () => await refreshForUnauthorized(def.id, baseline),
+        log: (message) => ctx.logger?.warn(`pico-connectors: ${def.id} ${message}`),
         // **必须 await 落盘**（2026-09-17 flake 定案）：`saveTokens` 是 SDK 自己
         // 续期后唯一的持久化点，而 provider 的 `tokens()` 又会把内存里的新令牌
         // 交给下一次请求。写盘一旦 fire-and-forget，SDK 的续期就已经"完成"了而
@@ -492,7 +504,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         adopt: (tokens) => created.adopt(tokens),
         syncBaseline: (next) => { baseline.current = next },
       }
-      return { authProvider: created.provider, handle }
+      // The TRANSPORT face, never `created.provider`: an OAuth-classified
+      // provider is replaced by the SDK's `adaptOAuthProvider`, which would
+      // hard-code `onUnauthorized` and bypass our per-id single flight.
+      return { authProvider: created.transportProvider, handle }
     }
     try {
       const resolved = await resolveAuthorizationServer(
@@ -512,6 +527,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         discovery: resolved.discovery,
         ...(resolved.resource === undefined ? {} : { resource: resolved.resource }),
         ensureFresh: async () => await ensureCredentialFresh(def.id, baseline),
+        // 与静态端点分支同一条 401 收口（见上）。
+        refreshOnUnauthorized: async () => await refreshForUnauthorized(def.id, baseline),
+        log: (message) => ctx.logger?.warn(`pico-connectors: ${def.id} ${message}`),
         // The SDK's persistence point: a rotated refresh token or a new
         // access token must reach the store, or the next process (or the
         // next registration) would refresh with a dead grant. Never through
@@ -536,7 +554,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         adopt: (tokens) => created.adopt(tokens),
         syncBaseline: (next) => { baseline.current = next },
       }
-      return { authProvider: created.provider, handle }
+      // The TRANSPORT face, never `created.provider`: an OAuth-classified
+      // provider is replaced by the SDK's `adaptOAuthProvider`, which would
+      // hard-code `onUnauthorized` and bypass our per-id single flight.
+      return { authProvider: created.transportProvider, handle }
     } catch (error) {
       // A policy-blocked URL is an active redirection attempt: register
       // without the provider (the SDK will report 401 plainly) and log loudly.
@@ -684,6 +705,35 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   })
 
   /**
+   * 走**同一个** per-id 单飞刷新一个凭据；`force` 跳过"是否临期"的时钟判断。
+   *
+   * `force=false`（`ensureFresh`，看时钟的保鲜路径）与 `force=true`
+   * （`refreshForUnauthorized`，401 的强制路径）**共用这一处**：判定、记账、CAS
+   * 基准前移只有一份实现，两条路径不可能对"刷新有没有发生"给出不同答案。
+   * @param id - 连接器 id。
+   * @param baseline - 该 provider 的 CAS 基准快照（刷新落盘后同步前移）。
+   * @param force - true 时即使 `expiresAt` 还在未来也真的去刷新。
+   * @returns 刷新引擎的分类结果（`not-applicable` = 这个连接器没有可续期的材料）。
+   */
+  const refreshThroughEngine = async (
+    id: string,
+    baseline: { current: ConnectorCredential },
+    force: boolean,
+  ): Promise<RefreshOutcome> => {
+    const outcome = await tokenRefresher.refresh(id, {
+      ...(force ? { force: true } : {}),
+      locale: locale(),
+    })
+    if (!outcome.ok) return outcome
+    // 刷新引擎的 onRefreshed 已经把新凭据喂给活着的 provider（adopt +
+    // syncBaseline）；这里再把这个 provider 自己的 CAS 基准前移，避免 SDK 之后
+    // 的持久化拿着被取代的快照做比较而静默丢弃。
+    const persisted = await store.readCredential(id)
+    if (persisted !== null) baseline.current = persisted
+    return outcome
+  }
+
+  /**
    * 让 SDK provider 交出令牌前先确保新鲜 —— 走**同一个** per-id 单飞。
    *
    * 2026-09-17：SDK 的 401 自愈（`authInternal` → `tokens()` →
@@ -695,6 +745,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * SDK 的四个 `tokens()` 调用点全部 `await provider.tokens()`，所以收口放在
    * provider 的 `tokens()` 里：快过期时先经这里刷一次，SDK 拿到的是当前世代，
    * 于是它不会再发起自己的刷新 —— 刷新的主人只剩一个（`TokenRefresher`）。
+   *
+   * **这条路看时钟**：服务器侧把访问令牌作废（本地 `expiresAt` 仍在未来）时它会
+   * 直接跳过，那种情况由 {@link refreshForUnauthorized} 处理。
    * @param id - 连接器 id。
    * @param baseline - 该 provider 的 CAS 基准快照（刷新落盘后同步前移）。
    * @returns 刷新后的令牌；未刷新或失败时返回 null（provider 交回旧令牌，SDK 按原
@@ -704,15 +757,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     id: string,
     baseline: { current: ConnectorCredential },
   ): Promise<RefreshedTokens | null> => {
-    const outcome = await tokenRefresher.refresh(id, { locale: locale() })
-    if (!outcome.ok) return null
-    // 刷新引擎的 onRefreshed 已经把新凭据喂给活着的 provider（adopt +
-    // syncBaseline）；这里再把这个 provider 自己的 CAS 基准前移，避免 SDK 之后
-    // 的持久化拿着被取代的快照做比较而静默丢弃。
-    const persisted = await store.readCredential(id)
-    if (persisted !== null) baseline.current = persisted
-    return outcome.tokens
+    const outcome = await refreshThroughEngine(id, baseline, false)
+    return outcome.ok ? outcome.tokens : null
   }
+
+  /**
+   * 401 的刷新入口（`createOAuthProvider` 的 `refreshOnUnauthorized`）。
+   *
+   * 强制语义是这条的全部意义：401 是**服务器侧**的失效事实，本地 `expiresAt`
+   * 常常还在未来（CI 回归正是服务端 `expireAccessTokens()` + 本地一小时后到期），
+   * 所以不允许再问一次时钟。并发 401 由 `TokenRefresher.inflight` 合并成一次刷新
+   * —— 这正是"一个凭据一个刷新主人"在 401 路径上的落地（2026-09-24）。
+   * @param id - 连接器 id。
+   * @param baseline - 该 provider 的 CAS 基准快照。
+   * @returns 分类后的结果；provider 只在 `ok` 时 adopt，其余情况记日志后正常返回。
+   */
+  const refreshForUnauthorized = async (
+    id: string,
+    baseline: { current: ConnectorCredential },
+  ): Promise<RefreshOutcome> => await refreshThroughEngine(id, baseline, true)
   const pendingRequests = new Map<string, ConnectorAuthRequest>()
   /** Server-issued stdio commands waiting for a local decision, keyed by connector id. */
   const pendingApprovals = new Map<string, PendingApproval>()
@@ -1458,11 +1521,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             serverName: server.serverName,
             url: streamableHttpUrl(server, locale()).toString(),
             headers: renderHeaders(server, credential),
-            // MCP authorization spec: the transport is handed the official
-            // `OAuthClientProvider`, so the SDK injects the bearer token,
-            // refreshes it when the server answers 401, persists the rotation
-            // and retries the call. No hand-rolled fetch and no header rewriting.
-            ...(auth.authProvider === undefined ? {} : { authProvider: auth.authProvider }),
+            // MCP authorization spec: the transport is handed the credential
+            // provider, so the SDK injects the bearer token and the 401 hook
+            // refreshes it through our per-id single flight before the SDK
+            // retries the call. No hand-rolled fetch and no header rewriting.
+            // The cast is the shape boundary described on `mcpAuthProvider`:
+            // the config field is declared as `OAuthClientProvider` (upstream
+            // `dsh-mcp-client`), while the object is deliberately the
+            // `AuthProvider` face so the SDK keeps OUR 401 hook.
+            ...(auth.authProvider === undefined ? {} : { authProvider: auth.authProvider as unknown as OAuthClientProvider }),
             toolCallTimeoutMs: 120_000,
             failOnStartupError: false,
           }
