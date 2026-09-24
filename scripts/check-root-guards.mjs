@@ -33,8 +33,10 @@
  * 退出码：0 = 守卫全部通过；1 = 有守卫失败；2 = 用法/解析/登记错误。
  *
  * **`advisory` 默认在本脚本里不生效**（2026-09-23 第六轮审计 R6-C-1）：这里是不跳过的那条
- * 路径，只有显式传 `--allow-advisory` 才会把失败降级成告警 —— CI 的任何调用都不得带它
- * （`scripts/check-workflows.mjs` 会钉住这一点的反面：守卫运行步必须真的在跑）。
+ * 路径，只有显式传 `--allow-advisory` 才会把失败降级成告警 —— CI 的任何调用都不得带它。
+ * 这一点由 `scripts/check-workflows.mjs` 的 **[SK-16]** 钉住（2026-09-23 第七轮审计
+ * R7-C P2-1 补的：此前只钉了"守卫运行步真的在跑"，把这个开关加进 `ci.yml` 实测 EXIT=0）：
+ * 任何 workflow 的可执行文本、以及守卫/编排器调用步的 `env:` 出现 `allow-advisory` 即红。
  * 另外，`advisory` 还必须先登记在编排器的 `ADVISORY_REGISTRY` 里，否则这里直接 exit 2。
  */
 
