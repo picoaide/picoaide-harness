@@ -61,6 +61,19 @@ function liveConfig(h: ReturnType<typeof createHarness>): LiveConfig {
   return config as unknown as LiveConfig
 }
 
+/** Poll the row until the in-flight flow publishes its authorize URL. */
+async function awaitAuthorizeUrl(h: ReturnType<typeof createHarness>, id: string): Promise<string> {
+  const deadline = Date.now() + 8000
+  let url: string | undefined
+  while (Date.now() < deadline && url === undefined) {
+    const res = await callRoute(h, `/api/pico/connectors/${id}/state`, 'GET')
+    url = (JSON.parse(res.body) as { request?: { authorizeUrl?: string } | null }).request?.authorizeUrl
+    if (url === undefined) await new Promise(r => setTimeout(r, 25))
+  }
+  if (url === undefined) throw new Error('no authorize URL')
+  return url
+}
+
 /** Complete one interactive authorization so a credential (with a refresh token) is on disk. */
 async function authorizeOnce(dir: string, server: RealMcpServer): Promise<void> {
   const first = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
@@ -200,34 +213,34 @@ describe('a live transport must adopt a refresh token we rotated out of band', (
 
     const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
     await waitFor(() => h.configs.length === 1, 15_000)
+    // A background refresh rotates the grant and becomes the newest result THIS
+    // plugin instance knows about. The config count deliberately stays 1: an
+    // http transport reads the credential per request, so a refresh does not —
+    // and must not — re-register it (see audit-r8b-credential-change.spec.ts).
     const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
-    // The refresh itself announces the new credential, which re-registers the
-    // connector (config 2). Let that settle first so the config count below is
-    // the one caused by OUR re-authorization, not the refresh's own echo.
-    await waitFor(() => h.configs.length >= 2, 15_000)
-    const configsBefore = h.configs.length
-
-    // A user re-authorization replaces the credential with a grant whose
-    // lifetime is SHORTER than the background refresh result. `expiresAt` alone
-    // would declare the stale refresh newer and adopt it back; the store write
-    // order (`updatedAt`) is the only sound ordering.
     const store = new ConnectorStore({ baseDir: dir })
-    const current = await store.readCredential('example-mcp')
-    await store.updateCredential('example-mcp', {
-      accessToken: 'at-after-reauth',
-      refreshToken: 'rt-after-reauth',
-      expiresAt: Date.now() + 1_000,
-      ...(current?.clientId === undefined ? {} : { clientId: current.clientId }),
-      refreshedAt: Date.now(),
-    })
+    const background = await store.readCredential('example-mcp')
+    expect(background?.refreshToken, '前置：后台续期必须留下可辨识的 refresh token').toBeTruthy()
 
-    // Production re-registration path: any credential change announces itself.
-    h.emit('pico/connector-credentials-changed', { id: 'example-mcp' })
-    await waitFor(() => h.configs.length === configsBefore + 1, 15_000)
+    // The user re-authorizes while that result is still the newest one in
+    // memory, and the fresh grant's lifetime is SHORTER than the background
+    // refresh's ⇒ `expiresAt` alone would declare the stale refresh newer and
+    // adopt it back over the credential the flow just wrote; the store write
+    // order (`updatedAt`) is the only sound ordering.
+    server.setTokenLifetime(5 * 60 * 1000)
+    await callRoute(h, '/api/pico/connectors/example-mcp/connect', 'POST')
+    await completeAuthorization(await awaitAuthorizeUrl(h, 'example-mcp'))
+    await waitFor(() => h.configs.length === 2, 15_000)
+
+    const reauthorized = await store.readCredential('example-mcp')
+    expect(reauthorized?.refreshToken).toBeTruthy()
+    expect(reauthorized?.refreshToken).not.toBe(background?.refreshToken)
+    expect(reauthorized?.updatedAt).toBeGreaterThan(background?.updatedAt ?? 0)
+    expect(reauthorized?.expiresAt).toBeLessThan(background?.expiresAt ?? 0)
     const newest = h.configs[h.configs.length - 1] as unknown as LiveConfig
-    expect((await newest.authProvider?.tokens())?.refresh_token, 'the fresh grant must win').toBe('rt-after-reauth')
-    expect((await newest.authProvider?.tokens())?.access_token).toBe('at-after-reauth')
+    expect((await newest.authProvider?.tokens())?.refresh_token, 'the fresh grant must win').toBe(reauthorized?.refreshToken)
+    expect((await newest.authProvider?.tokens())?.access_token).toBe(reauthorized?.accessToken)
     h.dispose()
   }, 40_000)
 

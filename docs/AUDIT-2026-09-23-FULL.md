@@ -672,11 +672,149 @@ OIDC 流程桶把"自身在途配额满"的 429 也计入失败预算（NAT 出�
 3. **"推荐给用户的形态"必须先在真实环境跑通**（P1-4）：把一个只在"有 stderr 噪声就崩"的路径作为推荐方案，等于把发布风险交给用户；
    任何新增凭据/接入形态都要有"真实远端 + 真实噪声"的回归（假 ssh/git 单测不够，至少要有一条把 stderr 噪声喂进解析流的用例）。
 
-**第七轮的修复批**：`<待登记>`（每条带变异验证 + "修前形态可复现"对照；P1-1 另要求两级布局的 A/B 用例，P1-2 另要求把生产形态收编为回归）。
+**第七轮的修复批**（15 个文件；PR #142 → squash 合入 master `3d4306dded`，分支上逐文件落地的提交为 `ed1b80eed7`…`d21112c0d3`；每条都带"修前形态可复现 / 修后必绿"对照与变异验证）
+
+| 发现 | 修复点（分支提交） | 判据与变异验证 |
+|---|---|---|
+| **P1-1** 多级分区判归属 | `server/internal/serverstore/usage_ledger.go`（`106f2593a9`）+ 新用例 `audit_r7a_retention_multilevel_test.go`（`718ec951cf`） | `attachedToUsage()` 改按 `pg_partition_root` 判**传递根**（`Partition ∧ Root=="usage"`，`LEFT JOIN pg_class root`）；新增 `assertDetachedFromUsage` 预检**fail-loud、绝不 DROP**；深后代只补账不 DETACH/DROP（`SKIP descendant partition …`，`extraSources=nil`）；聚合 `present` 传递化。**变异**：退回 `Parent=="usage"` ⇒ 两条 Multilevel 用例红（账本 `25.0000` want `12.5000`、聚合 `0.0000` want `9.7500`、`dropped detached relation usage_202607`），且第二道锁下**零金额污染、不 DROP** |
+| **P1-2** 连接器生产形态续期 | `packages/host/connectors/src/index.ts`（`cc5da35e4a`）、`src/mcp-oauth-provider.ts`（`bc1011e7bb`）；回归 `audit-r7b-production-shape.spec.ts`（`1368d6183b`）、`audit-e2e-real-server.spec.ts`（`cfbe9d0e7b`）、`helpers/real-mcp-oauth-server.ts`（`4ba6a00981`）、`token-refresh.spec.ts`（`a64d1732d2`） | `renderTransportHeaders(server, credential, providerSuppliesAuthorization)` 在 provider 供令牌时**大小写不敏感地删掉烘焙的 `Authorization`**；`inflight` 改 `InflightRefresh{force,beyondClock,run}` **链式**（非并行）复用。生产形态已收编为回归（`openClient()` 带 `requestInit`）。**变异 4/4 红**：m1 不删烘焙头 ⇒ 独立端到端探针逐字复现 `Server returned 401 after re-authentication` + `deadAfterLive=1`（修复态 `0`）、m2 force 不参与复用 ⇒ 零 grant、m3/m4 ⇒ 同一单次 refresh token 出示两次 |
+| **P1-3** 门禁单链路绕过 | `scripts/check-workflows.mjs`（`d2264a2d6a`） | 步骤体退出码**数值归一**（`exit 00`/`0x0`/`256`/`+0`/`"0"`/`$((0))` 一律按 0 判定）+ 可达性下限；新增 **SK-16** 禁止 workflow 可执行文本出现 `--allow-advisory`（含 step/job `env:`）；样本 u22–u28 / v1–v4 并进 `SELFTEST_EXPECTED_POLICIES` |
+| **P1-4** 发布链 SSH 形态 | `scripts/ci-channels.sh`（`ed1b80eed7`）、`scripts/verify-ci-scripts.mjs`（`0f09e68261`） | `--resolve-only` **只从 stdout 取 revision**（stderr 单列、TOFU `Warning: Permanently added …` 降为 notice、git stderr 脱敏后分类回显）；临时资源改 `TEMP_PATHS` 注册表 + **单一 EXIT trap 在注册发生的 shell 里执行**（子 shell 注册曾让私钥滞留 runner）。假 `ssh`/假 `git` 正反用例 33 条 + TMPDIR 空检查 |
+| **P2** 环境条件型 skip | `scripts/wasm/check-go-test-json.mjs`（`1353ab89de`） | 登记完整性检查**移出** `if (caseSkips.length > 0)`；companion **绑包**（`companionPackage`/`companionWhy`）；内建自检 s1–s9；`--scope` 未命中恢复 exit 2 |
+| **P2** advisory 通道 | `scripts/check-root-guards.mjs`（`43aaccc4ac`） | 独立 `parseAdvisoryRegistry` + `isAdvisoryExpiresOn`（正则 + `Date.parse` + UTC 往返校验）；advisory 默认阻断，不再能用一条开关静音 |
+
+**第七轮修复的独立复审**：V1（服务端 + 连接器，`temp/verify-r7-fixes/V1-server-connectors.md`）判 **P1-1、P1-2 均成立**——
+自建 7 条探针 + 4 条变异全中（`internal/serverstore` 整包 EXIT=0 / 143.4s；connectors 47 文件 / 397 用例绿；
+父提交上用例必红且与审计描述逐字一致）。V1 另登记 7 条新边界，已作为**第八轮的固定审计对象**：
+①深层后代**永久不回收**且无 metric/readyz/管理面（每 6h 重复 SKIP）；②月名中间父表致每轮 `fold-adjacent` 失败（管理端存保留期会 500）；
+③保留期内的孤儿对聚合与账本都不可见；④`rebuildLedgerForRetention:931` 附近的死代码；⑤空令牌 + `publicMcp` 窗口下声明头未删；
+⑥删头按**名字** ⇒ OAuth 连接器声明的非 Bearer `Authorization`（ApiKey 形态）修后被删 = **行为变更，需产品面判定**；
+⑦补丁的 `requestInit` 半**无静态判据**。
+
+**V2（门禁 / 发布链，`temp/verify-r7-fixes/V2-gates-release.md`，375 行）**：9 条判据里 **7 条成立、1 条不成立、1 条部分成立**（全部变异在 `git archive` 副本内完成、每次变异后复核 sha256 一致；主树未改）——
+- 成立：`exit 00` 类**数值归一**覆盖全部 20 个等价形态（父提交上同一变异 EXIT=0 = bug 复现）；`check-go-test-json` 的三条登记检查**脱离 skip 闸门**（真零 skip 的三份合成报告：修复树 EXIT=1 / 父提交全 EXIT=0）与 **companion 绑包**（别包 pass ⇒ 必红并点名）；`--resolve-only` 的 **stdout/stderr 分流**在真实 git 协议 + 真实 TOFU 告警下正确（父提交 `03d55a777e` 同形态 EXIT=1「pin 形状非法」= R7-D P1-1 复现）；TOFU 过滤**不吞真错误**（`Permission denied`/`Host key verification failed` 原样保留且分类正确）；临时资源在成功/失败/SIGTERM/SIGINT 下**零残留**（中间版本 `ccf64da3b9` 的子 shell 登记**真的漏过私钥**，`1a9fbe1aa7` 修掉）；脱敏三种形态（原始 userinfo / git 自剥 / 双 `@`）**零泄漏**、私钥本体 0 次出现。
+- **不成立（可用静音路径，P1 ⇒ 已开修复泳道）**：F1a-② 的「步骤体必须有非零出口」判据可被 **13/15 种写法**绕过（`case …) exit 0 ;;` 两式、`time`/`command`/`builtin` 前缀、`\exit`、`exi\`+续行断词等 **7 种连注释都没认账**；根因 = `scanExitInvocations` 的边界集 `(?:^|[;&|({])` 不含 `)`、只认 `then|do|else`、按 `\n` 切语句 ⇒ 该步真 bash 退出码恒 0 而 `check-workflows` EXIT=0，「根守卫失败 ⇒ 必需 Gate 红」这条**唯一链路**可被静默摘除。
+- **部分成立（可用静音路径，P1 ⇒ 已开修复泳道）**：**workflow 顶层 `env:` 完全不读** ⇒ `env: {ROOT_GUARD_FLAGS: --allow-advisory}` + `run: … $ROOT_GUARD_FLAGS` 时 `check-workflows` EXIT=0，而 argv 替身实测守卫**真收到**该旗标、干净探针实测它把已登记 advisory 守卫的失败从 EXIT=1 翻成 **EXIT=0**（**无需任何混淆**）；同族次要项：`$GITHUB_ENV` 注入与拆分字面量 `--allow-""advisory`。
+- V2 另登记 11 条加固项/固有限制（含 SIGKILL 下私钥必留 = 任何 trap 都做不到、`rev` 未锚定 `$2=="HEAD"` 当前不可达、`403` 归网络桶等），并认账未验证项（未跑真 GitHub Actions、未在真 runner 上带 deploy key 跑 tag、F2 证据为合成报告）。
+- **对照口径教训**：F3 的"修前对照"必须取 `03d55a777e`（与修复 HEAD 是**兄弟**线，merge-base `6e964b9323`）；取 `ccf64da3b9^`（= `69bb5b8760`）会**假绿**（那个提交本来就没这个 bug）。
+
+**同轮认账未修**：P2-a 连接器作用域哈希不归一大写/显式端口（跨 `connectors`/`browser`/`wasm-apps-host` 三包公式 + 迁移成本 = 全部连接器需重新授权，
+属产品决策，未做）。
+
+### 7.42 第八轮审计（2026-09-24，四路独立）：**判据的两份口径 + 生产所有权装配**
+
+**方法**：绑提交 `3d4306dded`（= 第七轮修复 squash 合入后的 master，CI 同内容全绿），代码副本 `temp/r8/tree`（`git archive`），
+四路只读、注入/变异只在副本内；每路必须给可复跑探针与变异证据。范围包含**第七轮修复自身的回归面**（固定动作，连续第五轮生效）。
+
+| 路 | 覆盖 | P0 | P1 | P2 | P3 |
+|---|---|---|---|---|---|
+| **R8-A** 服务端核心 | 多级分区判归属的回归面（12 条探针 / 6 组变异）/ 保留清理并发 / 账本自愈窗口 / 写路径 503 | 0 | 0 | 5 | 4 |
+| **R8-B** 客户端与宿主 | 连接器 401 续期（**生产所有权装配**）/ 声明头 / 产物守卫 | 0 | **1** | 2 | 0 |
+| **R8-C** 门禁 · 发布链 | 第 7 轮门禁修复对抗 / 静默放过扫描 / 发布链真实性 | 0 | **2** | 6 | 4 |
+| **R8-D** 跨模块证伪 | 三处修复的端到端对抗 + 独立复现他人 P1 + **门禁绕过的第二轮**（`gates-findings.md` / `replay2.sh`） | 0 | **5** | 7 | 12 |
+| **合计（首发）** | | **0** | **8** | **20** | **21** |
+| 另：第七轮修复的**独立复审**（V1/V2，见 §7.41 末段） | | 0 | **2** | — | — |
+
+**十条 P1（第八轮 8 条 + 修复复审 2 条）**
+
+1. **连接器 401 续期被自己的重注册掐断**（R8-B，P1，**确定性复现**）：续期成功后 `onRefreshed` 发
+   `pico/connector-credentials-changed` ⇒ 对整条连接器**全量重注册** ⇒ `retire()` 关掉**正在重试的那条活传输**，
+   而 SDK 只在同一条传输上重试一次 ⇒ 用户这次调用以 `ERR:Connection closed` 失败（探针实测 dispose 落在 t+21ms / t+36ms，
+   两种端点形态都中；多 server 连接器一次续期 dispose 两条活传输）。**续期本身完全正确**（1 grant、reuse=0）—— 死的只是这次调用。
+   **为什么现有回归看不见**：`audit-r7b-production-shape.spec.ts` 与 `openClient()` 都是**测试自建传输**，harness 的假 fiber
+   **不持有传输** ⇒ `retire()` 的 dispose 空转（用例名却写着"同一条活着的传输自己就恢复正常"）。
+   **这是"生产所有权装配"缺失导致的假绿，与第七轮 P1-2 的"判据形态 ≠ 生产形态"是同一族**（连续两轮同一根因家族）。
+2. **把根守卫命令注释掉即可零执行**（R8-C + R8-D 独立复现，P1）：`ci.yml` 的 `gate-guards` 里把
+   `node scripts/check-root-guards.mjs` 前加 `#`（并改成块标量 + `set -euo pipefail`）⇒ 根守卫**零执行**、`gate-guards` 恒绿、
+   必需 Gate 恒绿、`check-workflows` **EXIT=0**；SK-14 的覆盖统计从「5 个被钉步骤」静默降到 4，**没有覆盖下限**。
+   根因 = **两份口径**：`root-guard-runner` 的 `match` 读**去注释文本**，而 [SK-9]② 的存在性命中读**原始 `run` 文本**。
+3. **收尾 `exit 1` 改成注释即可摘除唯一链路**（R8-C + R8-D 独立复现，P1）：`ci.yml:188` 的 `# exit 1` 让
+   SK-9③（raw 文本）满足、`root-guard-link`（executable 文本）不再命中 ⇒ **门禁 EXIT=0 且该步真实退出码 0**；
+   **整行删掉会被抓（EXIT=1），只有注释形态同时骗过两条判据**。
+4. **步骤体"必须有非零出口"可被 13/15 种写法绕过**（V2 复审，P1）：`case …) exit 0 ;;` 两式、`time`/`command`/`builtin` 前缀、
+   `\exit`、`exi\`+续行断词等 **7 种连注释都没认账**；根因 = `scanExitInvocations` 边界集 `(?:^|[;&|({])` 不含 `)`、
+   只认 `then|do|else`、按 `\n` 切语句。
+5. **workflow 顶层 `env:` 完全不读**（V2 复审，P1，**无需任何混淆**）：`env: {ROOT_GUARD_FLAGS: --allow-advisory}` +
+   `run: … $ROOT_GUARD_FLAGS` ⇒ `check-workflows` EXIT=0，而 argv 替身实测守卫**真收到**该旗标、干净探针实测它把已登记
+   advisory 守卫的失败从 EXIT=1 翻成 **EXIT=0**；同族：`$GITHUB_ENV` 注入与拆分字面量 `--allow-""advisory`。
+6. **被钉步骤加 `--list` 即变永久绿灯空转**（R8-D-21，P1）：`node scripts/check-root-guards.mjs --list` 只打印清单**恒退 0**
+   ⇒ "永不跳过"的 `gate-guards` 一步不跑也 success，必需 Gate 仍绿；反向对照：同一个 `--list` 加在 `yarn check` 上**会**被 [SK-8] 咬住
+   ⇒ 缺的只是**守卫运行步自己的 argv 钉子**。
+7. **`exit 1` 换成函数定义即可摘除链路**（R8-D-18，P1）：`report_guards() { echo "guards ok"; exit 1; }` ⇒ `check-workflows` **EXIT=0**
+   （轨迹剥离正则 `/[\s;}]+$/` 把证明"exit 在函数体内"的 `; }` 吃掉，而函数定义本身退出 0）。
+8. **加 `shell: python` + `sys.exit(0)` 即可绕过**（R8-D-19，P1）：SK-14 对非 POSIX shell **直接跳过**，且没有任何判据
+   钉住被钉步骤的 shell。
+9. **`check-root-guards.mjs` 的 GUARDS 只校验 `name` 不校验 `args`**（R8-D-22，P1）：`:273` 用 `package.json` 校验名字，
+   `:186` 直接 `spawn('corepack', ['yarn', ...guard.args])` ⇒ 把 16 条 args 全改成 `['--version']`，输出仍是
+   "16 个根守卫：16 通过"（实测 **EXIT=0 / 2.1s / 零守卫执行**）。
+10. **`--require` 没有包绑定**（R8-D-23，P2 但同族）：`casePassPackages.has(name)` 只认裸用例名 ⇒ 关键用例在**别的包**里 pass
+    也报"全部 pass ✅"（第 7 轮把 companion 绑了包，`--require` 漏了）。
+
+**共同根因（本轮最重要的结构性结论）**：门禁内部存在**多份文本口径** —— 原始 `run` 文本 / 去注释后的可执行文本 / 按 shell 分类的块 ——
+**各判据只看其中一份**；而被钉步骤**没有覆盖下限、没有 argv 钉子、没有 shell 钉子**。第 7 轮把"退出码的数值形态"咬死了
+（20 个等价形态全红），但"换一种写法让命令/参数/解释器/收尾语句在执行视角下等价变形"这**整类**都过得去，
+后果与第 7 轮修掉的那条**一模一样**（"根守卫失败 ⇒ 必需 Gate 红"被摘除）。⇒ 判据必须建立在**执行视角**上
+（能被谁执行、收到什么 argv、用什么解释器、这一步是否真的可能失败），而不是建立在文本形态上。
+
+**P2 重点（20 条中最需要处置的）**
+- **凭据原文进公开日志**（R8-D-9，按铁律 0 的代价模型实为最高一档）：`redact_secrets` 的正则 `[^/[:space:]]*` **跨不过 `/`**，
+  基本认证密码含 `/` 时原文进日志，而日志**主动宣称**"已脱敏；token 不会回显"（假声明比没声明更糟）；
+  且 **`git clone` 路径完全没有过滤**，而 `ci.yml` 的四个**生产**调用点走的正是它 ⇒ 第七轮的门禁只补在它修过的那半边。
+- **当月写入 503**（R8-A-1，收紧 V1 §4.4 的严重级）：多级布局覆盖**当前月** ⇒ 每次 `RecordUsage*` 失败 ⇒ 网关
+  **503 METERING_FAILED**（fail-closed、不交付）且**无自愈** —— 不是"历史数据冻结"，是**当月对话全不可用**。
+- **并发清理把良性 `42P01` 记成失败**（R8-A-2 / R8-D-1）：重叠清理轮次把"已被别人 DROP 的关系"记成失败 ⇒
+  `CleanupUsageRetention` 返回非 nil ⇒ 管理端保存保留期**偶发 500**，而同一函数内的 `retentionLedgerWindow` 把
+  `!probe.Exists` 当良性 ⇒ **判据不自洽**。
+- **单个异常月中止整窗口账本自愈**（R8-A-5 / R8-D-2）：`ensureLedgerRelations` 首个错误即 return ⇒ 健康月也不补，只有一行日志。
+- **月名中间父表**（R8-A-4）：每轮 `fold-adjacent` 失败 ⇒ 该库保留期永远保存不下（每次 500）。
+- **声明形态非 Bearer 的 `Authorization` 被按名删除**（R8-B-1，第七轮行为变更）：webadmin 该区块 key placeholder
+  字面就是 `Authorization`、两端校验都不拦 ⇒ 保存成功、运行时静默 401。
+- **单飞只有进程内一份**（R8-D-5）：同一进程第二个 owner 立即复现 refresh token 复用（真授权服务器随即吊销授权）。
+- **作用域哈希仍不归一**（R8-D-6，第七轮已认账的 P2-a）：`https://HARNESS.example.com` 与显式 `:443` 各裂一个新作用域。
+- 门禁面：退出码归一的词法层仍有 5 族反例（`"exit" 0` / `\exit 0` / `command|builtin exit 0` / `eval` / **here-doc 终止词伪装成收尾 `exit 1`**）；
+  `check-go-test-json` 内建自检**无完整性下限**（`selfTest(){return []}` 经全量 `verify-ci-scripts` 仍 EXIT=0）、`--scope` 未命中必须 exit 2 的契约零判据；
+  **正式 tag 的渠道集可静默缩小**（删一个渠道目录 ⇒ `channels selected: 1 of 1`、EXIT=0）；同版本重发 × immutable 长缓存无 purge/无"已存在"判据。
+- 发布链：`CI_CHANNELS_PIN` 的 40-hex 是**行匹配**（多行值可过）；`CI_CHANNELS_URL=" "` 遮蔽可用的 deploy key 且不打凭据形态；
+  私钥在 `chmod` 前是 0644；未知 `assets.*` 键名原样进公开日志；403/404 症状误判。
+
+**判定口径（本轮新增，写进下一轮）**
+1. **同一个事实的两份口径必然分叉**（P1-2/P1-3）：`raw 文本` 与 `去注释文本` 各做一半判据 ⇒ 注释一行的绕过同时骗过两条。
+   **识别判据与能力判据必须同源**：判"某步骤存在"要用**可执行**文本，"某链路真实退出码非零"要用**语义/结构**判定
+   （从 `needs.<job>.result` 出发，而不是从 `exit` 字面量出发）。
+2. **回归必须按"生产所有权"装配**（P1-1）：测试自建传输 ⇒ `dispose` 空转 ⇒ 用例名描述的行为在生产里不成立。
+   凡"某对象被谁持有/谁负责关闭"的链路，回归必须让**生产里的持有者**持有它。
+3. **脱敏必须覆盖全部调用路径与全部字符**（P2）：只在被修过的那条路径上加脱敏 = 把风险推到生产真正走的那条；
+   正则要按"能跨过任意 userinfo 字符"写，且**日志里不得声明做不到的保证**。
+4. **判据的严重级要按"用户面后果"定，不是按触发前提**：V1 把"多级布局"记成"冻结历史数据"，实测同一条路径**也覆盖当月** ⇒ 当月对话全不可用。
+5. **门禁要有覆盖下限**（P2）：`策略 id 命中数` 必须"等于登记数"，少一个即红 —— 否则"步骤还在但能力没了"永远看得见却测不到。
+
+**第八轮的修复批（PR #143，分支 `fix/round8-batch`）与两份独立复审**
+
+修复按五条泳道并行（连接器 / 服务端保留期 / `check-workflows` / `check-root-guards`+`check-go-test-json` / 渠道仓脚本），每条都带"修前可复现 → 修后必绿/必红"对照与变异矩阵；集成后在本机跑：整仓根守卫 **16/16**、connectors **46 文件 / 404 用例**、desktop 产物守卫 24 例 + `tsc`、服务端真 PG 四包（`pass=1456 fail=0 skip=8`）。
+
+**独立复审 V3-A（客户端/宿主）**：R8-B-2 **成立**（生产所有权装配下基线稳定复现 `Connection closed`、修复后 http/stdio 混合与旁路对照全绿）、R8-B-3 **成立**（亲手变异产物守卫必红）、R8-B-1 **部分成立**；另发现 **2 条本轮修复引入的用户可见回归 + 1 条修复不完整**：
+
+- **N6（P2）**：注册期 OAuth 发现失败时那条 http 传输没有 provider、只有注册期烘焙的 bearer；把凭据变更事件窄化成"只重注册 stdio"后**没有任何路径重建它** ⇒ 令牌轮换后持续 401，而行状态仍是 `connected`（面板提示指不到病根）。
+- **N1（P2）**：`renderHeaders` 把**任意头名**的空值都记进 `baked`，新规则于是把 `X-Probe-Key: ''` 这类**声明**也删了（webadmin 该区块 value placeholder 逐字写「留空自动填 Bearer <token>」，key 自由输入 ⇒ 可达；实测基线 `connected` → 修复后 `error`）。
+- **N2（P2，非本轮引入）**：小写 `authorization` 声明在线上被 SDK 以 **append** 语义合成 `Bearer …, ApiKey …` ⇒ 401，而新 warn 写"声明值优先"是假事实、交付说明里的小写断言无证据。
+
+**二次修复（`eea98cda12`）**：重建集合改为「stdio ∪ **没有 provider 的 http 传输**」（provider 在手的 http 仍完全不重建 ⇒ R8-B-2 不退化）；`baked` 收窄为"授权槽里框架合成的那一枚"；声明名大小写**归一**；warn 去重键补 `store.dir`（账号+部署）。**验收用审计方自己的探针**（`v3a-r8b2b-refresh-residual.spec.ts`）做三态对照：`origin/master` 通过（基线本来如此）/ 第一轮态失败（`liveHasProvider=false`、wire 末段 401）/ 本轮通过（`liveHasProvider=true`、wire 末段 200），连跑 5 次稳定；另加 REVERSE CONTROL 证明窄化未被回退。变异 7 条全红。
+
+**独立复审 V3-B（门禁 + 服务端）**：门禁 **4/4 成立**（自建 **24 条**绕过形态：修复版全部非零且点名判据，其中 **17 条**在父提交上 EXIT=0；8 条拆判据变异 7 条决定性全红；凭据脱敏在"URL 尾部与 git fatal 行仍在日志里"的前置条件下零回显），服务端 **3 条成立 + 2 条部分成立** —— 后两条不是修复本体问题，而是"网关 503→200"与"管理端 500→200"这两段**端到端判据不在交付树里**（修复方自述的临时探针未进补丁）。已补为正式回归用例（`b1073149f0`，`server/internal/llmgateway/audit_r8a_retention_delivery_test.go`：HTTP 200 真交付 / 自愈后**第二次对话仍 200** / SSE 收到 `[DONE]` / 管理端保存保留期 200 且 `EffectiveRetentionMonths` 真为 2）；变异 `m11` 还暴露出"去掉子树保留判据 ⇒ PUT 回 200 但保留期内子分区已被 DROP"这类**静默删数据**，现在有判据。V3-B 另报两条 P3（`check-go-test-json` 自检下限无第二层看守、`CI_CHANNELS_PIN` 归一化放行多行值）——后者已收口（`eea98cda12`：改为在**原始值**上先拒换行/回车，三形态修前 EXIT=0 或误诊、修后全部点名，变异 3 条全红）。
+
+**本轮的方法学增量**：修复引入的回归**同样落在"修复自己的收缩面"上**（N6 就是"窄化重注册集合"的副作用），因此**每轮修复之后必须再跑一次面向"修复面"的复审**，且复审的判据必须是**审计方自己的探针**（这次 N6 的验收就是审计方探针的三态对照，而不是修复方新写的用例）。
+
+
 
 ### 7.4 收敛判定
 
+**第八轮结论（2026-09-24）**：第八轮首发 **0 P0 / 8 P1**（1 条连接器续期被自注册掐断 + 7 条门禁可被"执行视角等价变形"绕过：两颗注释绕过、`--list` 空转、函数定义/`shell: python`/拼接旗标、GUARDS 的 args 无人校验），加上第七轮修复的独立复审新增 **2 P1**（步骤体非零出口可绕、workflow 顶层 `env:` 不读），以及**修复后复审**再发现的 **2 条用户可见回归（N6/N1）+ 1 条修复不完整（N2）** ⇒ **仍不是干净轮**；按口径"连续两轮零新增 P0/P1"需要第八、第九轮都干净，因此**必须再跑第九轮**（在第八轮修复批的冻结态上，固定覆盖"上一轮改过的函数/判据"）。第八轮的 8 条 P1 与复审发现的回归**已全部修复**（PR #143：`1e6f3bda1b` 主批 / `b1073149f0` 端到端判据补齐 / `eea98cda12` 二次收口），并按"审计方探针三态对照"验收。**结构性观察**：第八轮的 P1 全部落在"**上一轮刚改过的地方**"或"**上一轮没覆盖到的同族路径**"上（连接器重注册链路、`check-workflows` 的多份文本口径、`redact_secrets` 只补了被修过的那半边、GUARDS 表只校验了名字），这条"上一轮修复面是最高价值入口"的规律**连续五轮成立**；本轮更进一步证明：**门禁判据若建立在文本形态而不是执行视角上，加固只会把绕过推向相邻形态**（第 7 轮修数值退出码 → 第 8 轮出现 argv/解释器/函数包装/参数拼接四种等价变形）。
+
 **判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、第三轮 0 P0 + 19 P1、**第四轮 0 P0 + 8 P1**（R4-A 7 / R4-D 1；另 28 P2 + 31 P3），外加**一条生产现场发现的 P0**（编译缓存自锁，§7.38）—— 四轮都不是干净轮，按口径干净的一对必须顺延到第五、六轮。**第四轮的结构性意义**：它证明"第三轮的新增守卫自身"也需要被审计（R4-A 的 7 条 P1 有 5 条正是**第三轮刚修/刚加的判据**的覆盖面缺口），而"活锁/自愈"是一整类此前完全没有判据的缺陷。
+
+**收敛判定更新（第七轮后，2026-09-24）**：第七轮 0 P0 / **4 P1**（其中 **3 条是第六轮修复自身的回归面**）⇒ 仍未达成"连续两轮零新增 P0/P1"。逐轮计数追加：第六轮 0+7、**第七轮 0+4**；第七轮修复批的独立复审又在其**自身修复面上**新增 **2 条 P1**（V2 的 F1a-② 与 F1b 两条静音路径，见 §7.41 末段）⇒ 按同一口径本轮实际为 **0 P0 / 6 P1**。第七轮修复批已 squash 合入 master `3d4306dded`（PR #142），V1 独立复审判定 P1-1/P1-2 成立。**第八轮已在同一提交（`3d4306dded`）上开跑**，四路分工：服务端核心与第 7 轮服务端修复的回归面 / 客户端宿主与连接器修复的回归面 / 门禁与发布链对抗 / 跨模块证伪；V1 登记的 7 条新边界、V2 的 2 条静音路径与同轮认账未修项（作用域哈希归一）列为该轮**固定审计对象**。按本报告口径，"连续两轮零新增 P0/P1"要求第八、第九轮都不再产出 P0/P1。
+
+**发布侧阻塞（非代码缺陷，2026-09-24）**：tag 流水线的「渠道仓 pin」步（`gate` 第 6 步，仅 tag 触发）需要读私有渠道仓的凭据。三条路径中：`CHANNELS_REPO_TOKEN` 指向的令牌在 CI 内被判 `remote: Repository not found.`（同一令牌在本机可读该仓 ⇒ 需要区分"仓库级 secret 未生效/被同名组织级 secret 遮蔽/令牌作用域"）。**SSH deploy key 路径在 GitHub 组织策略下当前不可用**（`POST /repos/{owner}/{repo}/keys` 返回 422 `Deploy keys are disabled for this repository`，属组织/企业级策略开关），该路径的代码形态本身已由第七轮修复（`ed1b80eed7`）。因此**在凭据打通之前，任何 tag 的发布链都会在 gate 第 6 步红灯**（这一条是 fail-loud，不会静默产出空渠道——判据见 `scripts/ci-channels.sh` 与 `scripts/verify-ci-scripts.mjs`）。
 
 **收口批之后的状态（2026-09-23 同日）**：第三轮的全部 P0/P1 与本轮新增的各条 P2/P3 都已修复、且每条都过了**另一名子代理**的独立复审（§7.37，含"复审发现 → 再修 → 再验"的两轮：如 A-4 的第三个消费面、打包修复自身引入的渠道文件进 asar、以及本批自己撞出的 `TestSkillDiscipline` 门禁红）。但**这不等于收敛**：按本报告口径，"连续两轮零新增 P0/P1"要求的是**新的独立审计轮次**在同一冻结态上都不再产出 P0/P1 —— 本轮做的是"第三轮发现项的闭环 + 复审"。**该段落的后续（2026-09-24 补记）**：第四、第五轮随后都已跑过，且**都不是干净轮**（第四轮 0 P0 + 8 P1 + 一条现场 P0；第五轮 0 P0 + 15 P1，见 §7.38/§7.39），两轮的修复批又各自经过**另一名子代理**的独立复审并闭环（§7.37/§7.39/§7.39b）。因此当前准确状态是：**待跑第六轮**（范围见 §7.39 末段与 `temp/round6-2026-09-23/PROMPTS.md`：服务端核心、客户端与宿主、门禁/发布链、跨模块一致性 + 上一轮新判据的覆盖面 + 活性/自愈两维）。
 

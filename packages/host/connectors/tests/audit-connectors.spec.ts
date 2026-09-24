@@ -174,7 +174,7 @@ describe('audit: refresh failure must not park the connector forever', () => {
     await store.updateCredential('example-mcp', { expiresAt: Date.now() - 1000 })
 
     /** 主动驱动扫掠，直到条件成立（真实 HTTP 往返仍需等待，但不再靠定时器）。 */
-    async function sweepUntil(predicate: () => boolean, budgetMs: number, label: string): Promise<void> {
+    async function sweepUntil(predicate: () => boolean | Promise<boolean>, budgetMs: number, label: string): Promise<void> {
       const deadline = Date.now() + budgetMs
       let rounds = 0
       for (;;) {
@@ -185,7 +185,7 @@ describe('audit: refresh failure must not park the connector forever', () => {
           throw new Error(`sweep threw while waiting for ${label}: ${String(error)}`)
         }
         rounds += 1
-        if (predicate()) return
+        if (await predicate()) return
         if (Date.now() >= deadline) {
           const row = await awaitRow(h, 'example-mcp', () => true, 2_000).catch(() => ({ status: '?' }))
           throw new Error(
@@ -200,10 +200,15 @@ describe('audit: refresh failure must not park the connector forever', () => {
     await sweepUntil(() => server.grants.length >= 1, 20_000, 'first refresh attempt')
     await new Promise(r => setTimeout(r, 120))
 
-    // endpoint comes back: the sweep must try again by itself
+    // endpoint comes back: the sweep must try again by itself. "Recovered" is
+    // observed on the CREDENTIAL the sweep persisted (a new access token), not
+    // on a second registration: a streamable-http transport reads the token per
+    // request, so a successful refresh announces the credential without
+    // re-registering the connector (R8-B-2).
     server.fail = null
     await sweepUntil(
-      () => server.grants.some(g => g === 'refresh_token') && h.configs.length >= 2,
+      async () => (await store.readCredential('example-mcp'))?.accessToken !== undefined
+        && (await store.readCredential('example-mcp'))?.accessToken !== 'at-first',
       30_000,
       'recovery after the endpoint returns',
     )

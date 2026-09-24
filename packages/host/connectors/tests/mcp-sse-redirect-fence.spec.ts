@@ -274,7 +274,8 @@ describe.each(REDIRECT_STATUSES)('R5-P1: the fence covers the GET(SSE) channel (
     // now drives this very chain) before it handed over the config.
     expect(isMcpTransportRedirectFenceInstalled()).toBe(true)
     expect(isMcpTransportRedirectFenceVerified()).toBe(true)
-    expect(config.headers).toMatchObject({ 'x-api-key': API_KEY, authorization: `Bearer ${BEARER}` })
+    // Canonical spelling: `renderHeaders` normalizes every declared case (V3A-N2).
+    expect(config.headers).toMatchObject({ 'x-api-key': API_KEY, Authorization: `Bearer ${BEARER}` })
 
     const chain = await openSpecChain(transportFromRegisteredConfig(config))
     // Non-vacuity: the client really did open the SSE stream and the front

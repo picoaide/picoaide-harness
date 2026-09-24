@@ -227,7 +227,9 @@ describe('R3-N3: the plugin fences the streamable-http transport before it regis
     expect(config.transport).toBe('streamable-http')
     // The plugin installs the fence on apply(), before any config is handed over.
     expect(isMcpTransportRedirectFenceInstalled()).toBe(true)
-    expect(config.headers).toMatchObject({ 'x-api-key': 'SECRET-API-KEY', authorization: 'Bearer FRAMEWORK-BEARER-TOKEN' })
+    // The authorization slot is rendered under its canonical spelling
+    // (`renderHeaders` normalizes every declared case, V3A-N2).
+    expect(config.headers).toMatchObject({ 'x-api-key': 'SECRET-API-KEY', Authorization: 'Bearer FRAMEWORK-BEARER-TOKEN' })
 
     // v2's message for a non-2xx POST is `Error POSTing to endpoint: <body>`
     // (the 307 body is empty); v1 said `Streamable HTTP error`. Either way the

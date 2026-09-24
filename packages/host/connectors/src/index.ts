@@ -880,6 +880,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     /** Connector that owns the live registration. */
     id: string
     dispose: () => void
+    /**
+     * True when this transport was handed an `authProvider` and therefore reads
+     * the credential out of the store on EVERY request.
+     *
+     * A false value means the transport authenticates with the bearer baked into
+     * its `requestInit.headers` at registration time — a snapshot nobody
+     * re-reads. A credential change must rebuild exactly those (V3A-N6): the
+     * provider-backed ones would only have their in-flight call disposed.
+     */
+    providerSupplied: boolean
   }
   const mcpRegistrations = new Map<string, McpRegistration>()
 
@@ -1240,26 +1250,90 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingRequests.set(request.connectorId, request)
   }
 
-  /** Render request headers: static `${FIELD}` templates from credential fields, empty Authorization -> Bearer token, and the default Bearer injection for OAuth/token credentials. */
-  const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): Record<string, string> => {
+  /** Header names are case-insensitive; the SDK and `fetch` normalize them too. */
+  const AUTHORIZATION_HEADER = 'authorization'
+
+  /**
+   * The one spelling every authorization-slot header is rendered under.
+   *
+   * `_commonHeaders()` (pinned SDK) builds its headers as
+   * `new Headers({ ...(token ? { Authorization: `Bearer ${token}` } : {}), ...normalizeHeaders(requestInit.headers) })`.
+   * An object literal keyed EXACTLY `Authorization` therefore OVERWRITES the
+   * provider's copy, while a lower-case `authorization` survives as a second
+   * key and `new Headers()` — which appends — sends one comma-joined value
+   * (`Bearer <token>, ApiKey <field>`), which no server accepts. Rendering every
+   * authorization-slot header under this spelling makes "the declared value
+   * wins" true for every spelling the admin console accepts (R8-B-1 / V3A-N2).
+   */
+  const AUTHORIZATION_KEY = 'Authorization'
+
+  /**
+   * `renderHeaders` output plus the provenance of the framework's OWN credential
+   * header: {@link RenderedHeaders.baked} names the authorization-slot entries
+   * this function filled in from the stored access token.
+   */
+  interface RenderedHeaders {
+    headers: Record<string, string>
+    /**
+     * Key spellings of the AUTHORIZATION-slot entries the framework filled in
+     * itself (a declared empty value, or the injection for a definition with no
+     * headers at all). Only these are ours to drop in favour of a live
+     * provider's token — a declared header of any OTHER name is the
+     * definition's own header and is never touched.
+     */
+    baked: string[]
+  }
+
+  /**
+   * Render request headers: static `${FIELD}` templates from credential fields,
+   * an empty declared value -> `Bearer <stored token>`, and the default Bearer
+   * injection for OAuth/token credentials.
+   *
+   * Two rules the transport shape depends on:
+   *
+   *  - **Provenance, not emptiness.** {@link RenderedHeaders.baked} records only
+   *    the authorization slot. A definition that declares `X-Probe-Key: ''`
+   *    ("leave empty to auto-fill the bearer") keeps that header: it is the
+   *    definition's own header, and deleting it turned a working connector into
+   *    a broken one (V3A-N1).
+   *  - **One spelling for the authorization slot.** Whatever case the definition
+   *    declares (`Authorization`, `authorization`, `AUTHORIZATION`) is rendered
+   *    as {@link AUTHORIZATION_KEY}, so the SDK's object spread collides
+   *    key-for-key with the provider's copy instead of appending a second header
+   *    (V3A-N2).
+   * @param server - the MCP server definition being registered.
+   * @param credential - the credential snapshot this registration was built from.
+   * @returns the rendered headers plus the authorization entries the framework
+   *   baked itself.
+   */
+  const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): RenderedHeaders => {
     const headers: Record<string, string> = {}
+    const baked: string[] = []
+    /** The spelling some declared name goes out under: the authorization slot is normalized. */
+    const keyOf = (name: string): string => (name.toLowerCase() === AUTHORIZATION_HEADER ? AUTHORIZATION_KEY : name)
     for (const [name, value] of Object.entries(server.headers ?? {})) {
       if (value === '') {
-        if (credential?.accessToken) headers[name] = `Bearer ${credential.accessToken}`
+        // "leave empty to auto-fill the bearer": we synthesize the value. It is
+        // OUR copy of the credential only in the authorization slot; for any
+        // other name it is the definition's own header, and the definition keeps
+        // it even when a provider is in play.
+        if (credential?.accessToken) {
+          const key = keyOf(name)
+          headers[key] = `Bearer ${credential.accessToken}`
+          if (key === AUTHORIZATION_KEY) baked.push(key)
+        }
         continue
       }
-      headers[name] = value.replace(/\$\{([^}]+)\}/g, (_, key: string) => credential?.fields?.[key] ?? '')
+      headers[keyOf(name)] = value.replace(/\$\{([^}]+)\}/g, (_, key: string) => credential?.fields?.[key] ?? '')
     }
     // OAuth/token connectors without static headers still authenticate with
     // the stored access token.
     if (Object.keys(headers).length === 0 && credential?.accessToken) {
-      headers.Authorization = `Bearer ${credential.accessToken}`
+      headers[AUTHORIZATION_KEY] = `Bearer ${credential.accessToken}`
+      baked.push(AUTHORIZATION_KEY)
     }
-    return headers
+    return { headers, baked }
   }
-
-  /** Header names are case-insensitive; the SDK and `fetch` normalize them too. */
-  const AUTHORIZATION_HEADER = 'authorization'
 
   /**
    * The request headers a **streamable-http** transport is constructed with.
@@ -1273,14 +1347,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * wins over every token a 401 refresh just obtained. The refresh succeeds,
    * the retry replays the DEAD token, and the first tool call fails with
    * `SdkHttpError: Server returned 401 after re-authentication` (R7-B P1-1,
-   * measured against the real OAuth fixture). Dropping our copy here is what
-   * lets the provider's value through; every other header is untouched, and the
-   * static-token class (no provider ⇒ `providerSuppliesAuthorization === false`)
-   * keeps its baked bearer.
+   * measured against the real OAuth fixture). Dropping our own copy here is
+   * what lets the provider's value through.
+   *
+   * The drop is keyed on **provenance, never on the header name** (R8-B-1):
+   * only the entries `renderHeaders` filled in from the stored token are
+   * removed. A definition that declares its own `Authorization` scheme (`ApiKey
+   * ${FIELD}`, or a bearer of its own) keeps it — that value IS the connector's
+   * credential, it is what the administrator configured, and deleting it left
+   * the connector silently unauthenticated (first call 401, while the panel
+   * blamed the authorization). Registration reports that coexistence once, with
+   * a searchable warn, so "which one wins" is observable instead of implicit.
+   * The static-token class (no provider ⇒ `providerSuppliesAuthorization ===
+   * false`) keeps every baked bearer.
    * @param server - the MCP server definition being registered.
    * @param credential - the credential snapshot this registration was built from.
    * @param providerSuppliesAuthorization - true when the transport also receives
-   *   an `authProvider` that has a token of its own to send.
+   *   an `authProvider` that has a token of its own to send. This is the same
+   *   predicate `mcpAuthProvider` used to BUILD that provider, so "provider
+   *   present" and "our baked copy dropped" cannot drift apart again (R8-D-4).
    * @returns the headers for `requestInit`.
    */
   const renderTransportHeaders = (
@@ -1288,12 +1373,64 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     credential: ConnectorCredential | null,
     providerSuppliesAuthorization: boolean,
   ): Record<string, string> => {
-    const headers = renderHeaders(server, credential)
+    const { headers, baked } = renderHeaders(server, credential)
     if (!providerSuppliesAuthorization) return headers
-    for (const name of Object.keys(headers)) {
-      if (name.toLowerCase() === AUTHORIZATION_HEADER) delete headers[name]
-    }
+    for (const name of baked) delete headers[name]
     return headers
+  }
+
+  /**
+   * Names the DEFINITION declares with a value of its own, i.e. the headers
+   * `renderHeaders` does not bake from the stored token.
+   * @param server - the MCP server definition being registered.
+   * @returns the declared header names, in declaration order.
+   */
+  const declaredHeaderNames = (server: ConnectorMcp): string[] =>
+    Object.entries(server.headers ?? {})
+      .filter(([, value]) => value !== '')
+      .map(([name]) => name)
+
+  /**
+   * Connectors whose declared `Authorization` was already reported.
+   *
+   * The key carries the ACCOUNT/DEPLOYMENT scope (`store.dir` — the resolved
+   * credential directory, the same first segment `deadGrants` uses) plus the
+   * connector, the server and the declared name: `defs` is replaced wholesale on
+   * a session change, so without the scope a shape first reported for one
+   * account (or for one deployment sharing this plugin instance's lifetime)
+   * would silence the line for the next one — the "memory-state keys must carry
+   * the account scope" rule of 2026-09-23 (V3A-N3). The line describes a
+   * DEFINITION shape, so it is reported once per scope rather than on every
+   * re-registration; the set lives with the plugin instance.
+   */
+  const warnedDeclaredAuthorization = new Set<string>()
+
+  /**
+   * Make "the declared header wins over the provider's live token" an
+   * observable fact instead of an implicit one (R8-B-1).
+   *
+   * When an oauth-classified connector declares an `Authorization` header with
+   * a value of its own, `renderTransportHeaders` keeps it and the SDK spreads it
+   * over the token the provider wrote — the declared value wins for EVERY
+   * spelling, because `renderHeaders` normalizes the slot to
+   * {@link AUTHORIZATION_KEY} and the spread then collides key-for-key (a
+   * lower-case spelling used to survive as a second key and be comma-joined with
+   * the provider's token, V3A-N2). That is the administrator's own scheme (an
+   * `ApiKey ${FIELD}` endpoint, for instance) and it must not be deleted — but it
+   * also means a 401 refresh obtains a token this header shadows, so the fact
+   * has to be searchable. The `[declared-authorization]` marker is ASCII on
+   * purpose: a field log stays greppable whatever the host locale is.
+   * @param def - the connector being registered.
+   * @param server - the MCP server whose headers are being rendered.
+   */
+  const warnOnDeclaredAuthorization = (def: ConnectorDef, server: ConnectorMcp): void => {
+    for (const name of declaredHeaderNames(server)) {
+      if (name.toLowerCase() !== AUTHORIZATION_HEADER) continue
+      const key = `${store.dir}\u0000${def.id}\u0000${server.serverName}\u0000${name}`
+      if (warnedDeclaredAuthorization.has(key)) continue
+      warnedDeclaredAuthorization.add(key)
+      ctx.logger?.warn(`pico-connectors: [declared-authorization] ${def.id}/${server.serverName} 声明了 ${name} 头：按 ${AUTHORIZATION_KEY} 发送并覆盖 OAuth 提供者的活令牌（声明值优先）`)
+    }
   }
 
   /**
@@ -1472,11 +1609,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return { pending: prompt }
   }
 
-  /** Register the connector's MCP servers through the mcp-client plugin. */
+  /**
+   * Register the connector's MCP servers through the mcp-client plugin.
+   * @param def - the connector definition to register.
+   * @param outbound - abort signal for this registration attempt.
+   * @param select - optional subset of `def.mcp` to (re)register. Only the
+   *   credential-change path uses it, and it exists for one reason: a refreshed
+   *   token must reach the stdio children (it is baked into their `env` at
+   *   spawn) WITHOUT retiring the live streamable-http transports, whose auth
+   *   provider reads the token per request. Re-registering those disposed the
+   *   very transport the SDK was retrying on (R8-B-2).
+   */
   const registerMcp = async (
     def: ConnectorDef,
     outbound: { signal?: AbortSignal } = {},
+    select?: (server: ConnectorMcp) => boolean,
   ): Promise<McpRegistrationOutcome> => {
+    /** The servers this attempt owns: everything, unless a caller narrowed it. */
+    const targets = select === undefined ? def.mcp : def.mcp.filter(server => select(server))
     // Capture the intent generation up-front: a disconnect (or a newer
     // registration request) bumps it, and every await below re-checks this
     // closure so the old registration cannot spawn after the bump.
@@ -1495,7 +1645,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     noteCredential(def.id, credential)
     if (superseded()) return { rejected: [], superseded: true }
     const rejected: string[] = []
-    const stdioServers = def.mcp.filter(server => (server.transport ?? 'stdio') === 'stdio')
+    const stdioServers = targets.filter(server => (server.transport ?? 'stdio') === 'stdio')
     const gate = await checkStdioApproval(def, stdioServers, credential)
     if (superseded()) return { rejected: [], superseded: true }
     if (gate !== null) {
@@ -1510,7 +1660,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // class BEFORE any such server is registered. Fail closed: when the seam
     // cannot be fenced (or verified), these servers are refused instead of
     // connecting with a transport that follows redirects.
-    const httpServers = def.mcp.filter(server =>
+    const httpServers = targets.filter(server =>
       server.transport === 'streamable-http' && mcpServerProblem(server) === null)
     let httpFenceError: string | null = null
     if (httpServers.length > 0) {
@@ -1532,7 +1682,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
     const { apply: applyMcpClient } = await import('@deepseek-ai/dsh-mcp-client')
     if (superseded()) return { rejected: [], superseded: true }
-    for (const server of def.mcp) {
+    for (const server of targets) {
       if (superseded()) return { rejected: [], superseded: true }
       // The rejection text is shown on the connector row, so it is rendered in
       // the locale resolved for THIS registration.
@@ -1553,15 +1703,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const auth = server.transport === 'streamable-http'
         ? await mcpAuthProvider(def, credential)
         : {}
-      // A live OAuth provider OWNS the `Authorization` header: the SDK writes
-      // its token and then spreads these headers over it, so a baked copy would
-      // win and the 401 retry would replay the dead token (see
-      // `renderTransportHeaders`). The drop is tied to the provider really
-      // having a token to send — `mcpAuthProvider` builds one exactly when the
-      // credential carries an access token — so a definition that supplies its
-      // own header is never left unauthenticated by this branch.
+      // A live OAuth provider owns the bearer IT writes: the SDK writes the
+      // provider's token and then spreads these headers over it, so the copy we
+      // baked from the stored token would win and the 401 retry would replay
+      // the dead token (see `renderTransportHeaders`). Only that baked copy is
+      // dropped — a declared `Authorization` is the definition's own credential
+      // and is kept, with a one-time warn saying so. The predicate is the same
+      // one `mcpAuthProvider` used to BUILD the provider (`authProvider !==
+      // undefined`), so "provider present" and "our baked copy dropped" cannot
+      // drift apart again (R8-D-4: the old second half — a non-empty
+      // accessToken — disagreed with the construction condition and left a
+      // baked header in place whenever the token was the empty string).
       const providerSuppliesAuthorization = auth.authProvider !== undefined
-        && (credential?.accessToken ?? '') !== ''
+      if (providerSuppliesAuthorization) warnOnDeclaredAuthorization(def, server)
       const config = server.transport === 'streamable-http'
         ? {
             transport: 'streamable-http' as const,
@@ -1629,7 +1783,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // exactly once more; a second failure is the caller's to report.
         if (!message.includes('already in use')) throw cause
         ctx.logger?.warn(`pico-connectors: ${def.id} 的 MCP 名被占用，先注销旧实例再重试一次`)
-        await unregisterMcp(def)
+        // Only the servers THIS registration owns: a credential-change rebuild
+        // selects one subset, and retiring the rest here would dispose the very
+        // transports the selection exists to leave alone (V3A-N4).
+        await unregisterMcp(def, select)
         return await load()
       })
       // conn-1: a teardown may have landed WHILE this registration was
@@ -1653,14 +1810,30 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // P2-23 kept: the map holds at most one registration per server key, so
       // the fiber recorded here is the only live instance for that name — and
       // the owner id is what lets the NEXT takeover stop the previous row from
-      // claiming `connected` (CN-4).
-      mcpRegistrations.set(server.serverName, { id: def.id, dispose: () => { void fiber?.dispose?.() } })
+      // claiming `connected` (CN-4). `providerSupplied` records whether THIS
+      // transport can read the credential per request, which is what decides if
+      // a later credential change has to rebuild it (V3A-N6).
+      mcpRegistrations.set(server.serverName, {
+        id: def.id,
+        providerSupplied: auth.handle !== undefined,
+        dispose: () => { void fiber?.dispose?.() },
+      })
     }
     return { rejected }
   }
 
-  const unregisterMcp = async (def: ConnectorDef): Promise<void> => {
-    for (const server of def.mcp) {
+  /**
+   * Tear down this connector's live registrations.
+   * @param def - the connector being retired.
+   * @param select - optional subset of `def.mcp` to retire; omitted = all of
+   *   them. The credential-change rebuild passes the same selection it
+   *   registers, so it never disposes a transport it did not touch (V3A-N4).
+   */
+  const unregisterMcp = async (
+    def: ConnectorDef,
+    select?: (server: ConnectorMcp) => boolean,
+  ): Promise<void> => {
+    for (const server of select === undefined ? def.mcp : def.mcp.filter(server => select(server))) {
       dropLiveProvider(def.id, server.serverName)
       const registration = mcpRegistrations.get(server.serverName)
       // Only this connector's own registration: if another row has since taken
@@ -2278,21 +2451,48 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   /**
    * A refreshed (or re-rotated) credential must reach the running MCP servers
-   * that cannot read it lazily: stdio children get their token in `env` at
-   * spawn. `registerMcp` is idempotent per server key, so re-registering is
-   * the supported way to hand a child the new value.
+   * that cannot read it lazily. Exactly two classes cannot:
+   *
+   *  - **stdio children**, which get the token in `env` at spawn;
+   *  - **streamable-http transports registered WITHOUT an `authProvider`** — the
+   *    registration-time discovery round trip can fail (offline, a 5xx on the
+   *    RFC 9728 metadata endpoint, an enterprise proxy) while the MCP endpoint
+   *    itself keeps answering, and `mcpAuthProvider` then returns no provider at
+   *    all. Such a transport authenticates with the bearer baked into its
+   *    `requestInit.headers`, i.e. a snapshot nothing re-reads; without a
+   *    rebuild the rows stay `connected` with a fresh `expiresAt` while every
+   *    tool call 401s on the token that rotated away (V3A-N6).
+   *
+   * A streamable-http transport whose provider IS installed is deliberately left
+   * alone (R8-B-2): it reads the live credential per request — exactly what the
+   * round-7 fix stopped shadowing with a baked header — so rebuilding it bought
+   * nothing and cost the call in flight: `registerMcp` retires the previous
+   * fibre first, and the shipped bridge's disposer closes the client and its
+   * transport, including the one the SDK is about to retry on. A 401 refresh
+   * therefore killed its own retry with `Connection closed` (measured at
+   * t+21…36 ms on both endpoint shapes; a multi-server connector disposed every
+   * live transport at once). The rebuild below cannot hit that shape: a
+   * provider-less transport has no 401 self-heal to interrupt.
    */
   ctx.on('pico/connector-credentials-changed', (payload: { id: string }) => {
     void runLifecycle(async () => {
       const def = defs.find(entry => entry.id === payload.id)
       if (!def) return
-      // stdio children got the token in `env` at spawn time; an http transport
-      // baked it into its request headers. Both only see a refreshed token after
-      // a re-registration (the provider reads the store on the NEXT request, but
-      // the header it was constructed with is what gets sent first).
-      if (def.mcp.length === 0) return
+      /**
+       * Does this server's live transport need a rebuild to see the new token?
+       * @param server - one MCP server of the connector.
+       * @returns true for stdio children and for provider-less http transports.
+       */
+      const needsRebuild = (server: ConnectorMcp): boolean => {
+        if ((server.transport ?? 'stdio') !== 'streamable-http') return true
+        const registration = mcpRegistrations.get(server.serverName)
+        return registration?.id !== def.id || !registration.providerSupplied
+      }
+      // Nothing to hand a new value to: every live transport reads the
+      // credential per request, and a connector with no servers has none.
+      if (!def.mcp.some(needsRebuild)) return
       if (states.get(def.id)?.status !== 'connected') return
-      const outcome = await registerMcp(def, { signal: teardownController.signal })
+      const outcome = await registerMcp(def, { signal: teardownController.signal }, needsRebuild)
       if (outcome.superseded === true) return
       if (outcome.pendingApproval !== undefined) {
         setState(def.id, { status: 'unauthorized', everConnected: true, error: undefined, errorCode: undefined })

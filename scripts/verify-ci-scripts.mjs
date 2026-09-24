@@ -305,6 +305,69 @@ function tagShapePredicates(jobText) {
   return hits
 }
 
+/** 渠道 id 形状（与 ci-channels.sh 的 ID_PATTERN 同源）。 */
+const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/u
+
+/**
+ * `ci-channels.sh` 声明的渠道目录数下限（R8-C-7 的 identity-free 棘轮常量）。
+ * 从脚本里读而不是在测试里写死：调高下限时夹具会自动跟着补齐，不会静默失配。
+ */
+function channelFloor() {
+  const match = /^MIN_EXPECTED_CHANNELS=(\d+)$/mu.exec(readFileSync(channelsScript, 'utf8'))
+  check(match !== null, 'ci-channels.sh 必须声明 MIN_EXPECTED_CHANNELS(渠道目录数下限,R8-C-7)')
+  return match === null ? 0 : Number(match[1])
+}
+
+/** 渠道仓里**符合 id 形状**的目录名（与脚本的枚举口径一致：不合规目录不计入）。 */
+function channelIdsOf(root) {
+  const dir = join(root, 'channels')
+  if (!existsSync(dir)) return []
+  return readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && CHANNEL_ID_PATTERN.test(entry.name))
+    .map(entry => entry.name)
+}
+
+/** 脚本的定序规则：official 置顶，其余字典序。 */
+function orderedChannelIds(root) {
+  const ids = channelIdsOf(root)
+  const rest = ids.filter(id => id !== 'official').sort()
+  return ids.includes('official') ? ['official', ...rest] : rest
+}
+
+/**
+ * 往渠道仓根目录补足到下限的"填充渠道"（中性名字、合法配置、scheme 互不相同）。
+ *
+ * 为什么每个"稳定 tag + 枚举渠道"的夹具都要补（R8-C-7）：真实渠道仓的目录数 ≥ 下限，
+ * 而**正式 tag 上跌破下限 = 红**。不补的话，那些只想测"某个字段非法"的用例会先被下限
+ * 拦住 —— 断言看似通过，测到的东西却与它声称的无关（本项目最贵的假绿形态）。
+ * 返回补出来的 id 列表。
+ */
+function padChannelRepo(root, min = channelFloor()) {
+  const existing = channelIdsOf(root)
+  const added = []
+  let index = 1
+  while (existing.length + added.length < min) {
+    const id = `filler-${index++}`
+    if (existing.includes(id)) continue
+    mkdirSync(join(root, 'channels', id), { recursive: true })
+    writeFileSync(join(root, 'channels', id, 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: id,
+      identity: { display_name: `${id} AI`, short_name: id },
+      desktop: {
+        product_name: `${id} AI`,
+        slug: `${id}-AI`,
+        app_id: `com.example.${id.replaceAll('-', '')}`,
+        deep_link_scheme: `${id.replaceAll('-', '')}link`,
+        home_dir: `.${id}-harness`,
+        app_origin_scheme: `${id.replaceAll('-', '')}-app`,
+      },
+    }))
+    added.push(id)
+  }
+  return added
+}
+
 /** 造一个假的私有渠道仓:`<root>/channels/<id>/channel.json`。 */
 function fakeChannelRepo(ids, options = {}) {
   const dir = tempDir('ci-channels-repo-')
@@ -351,6 +414,8 @@ function fakeChannelRepo(ids, options = {}) {
   for (const extra of options.extraDirectories ?? []) {
     mkdirSync(join(dir, 'channels', extra), { recursive: true })
   }
+  // 渠道目录数下限（R8-C-7）：真实渠道仓 ≥ 下限，夹具也必须在这个形状上跑（见 padChannelRepo）。
+  if (options.pad !== false) padChannelRepo(dir)
   return dir
 }
 
@@ -541,8 +606,10 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       const expected = fields(policy(`refs/tags/${name}`, name).stdout ?? '').channel_set
       const result = runChannels({ source, refName: name, dest: 'channels', list: 'p.list' })
       check(result.status === 0, `${name}: 渠道发现应成功`)
+      // `all` 的期望值按**实际目录集**算（夹具含 R8-C-7 的下限补位渠道），
+      // 否则这条断言钉住的是夹具的巧合而不是"脚本与策略同源"。
       const expectedSelected = expected === 'all'
-        ? ['official', 'beta', 'example-brand']
+        ? orderedChannelIds(source)
         : expected === 'beta' ? ['beta'] : ['official']
       check(
         JSON.stringify(result.selected) === JSON.stringify(expectedSelected),
@@ -968,27 +1035,49 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
   )
 
-  // 合成渠道仓:提交 1 = official;提交 2 增加 beta(内容差异可观测)。
+  // 合成渠道仓:提交 1 = official + 两个品牌渠道(目录数已达 R8-C-7 的下限 —— 夹具必须与
+  // 真实渠道仓同形,否则这条用例会被"渠道目录数少于下限"先拦住);提交 2 增加 beta
+  // (内容差异可观测:pin 到提交 1 时渠道集里没有 beta)。
   const repo = fixtureRepo()
-  mkdirSync(join(repo, 'channels', 'official'), { recursive: true })
-  writeFileSync(join(repo, 'channels', 'official', 'channel.json'), JSON.stringify({
-    schema: 1,
-    channel_id: 'official',
-    identity: { display_name: 'official AI', short_name: 'official' },
-    desktop: { app_origin_scheme: 'picoaide-app' },
-  }))
-  fixtureCommit(repo, 'channels/official/README.md', 'first', '2026-09-01T10:00:00+08:00')
+  const writeFixtureChannel = (id, file) => {
+    mkdirSync(join(repo, 'channels', id), { recursive: true })
+    const publicChannel = id === 'official' || id === 'beta'
+    writeFileSync(join(repo, 'channels', id, 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: id,
+      identity: { display_name: `${id} AI`, short_name: id },
+      desktop: publicChannel
+        ? { app_origin_scheme: 'picoaide-app', ...(id === 'beta' ? { home_dir: '.picoaide-harness' } : {}) }
+        : {
+            product_name: `${id} AI`,
+            slug: `${id}-AI`,
+            app_id: `com.example.${id.replaceAll('-', '')}`,
+            deep_link_scheme: `${id.replaceAll('-', '')}link`,
+            home_dir: `.${id}-harness`,
+            app_origin_scheme: `${id.replaceAll('-', '')}-app`,
+          },
+    }))
+    fixtureCommit(repo, file, `add ${id}`, '2026-09-01T10:00:00+08:00')
+  }
+  const firstRevIds = []
+  for (const id of ['official', 'example-brand', 'example-ops', 'zeta']) {
+    writeFixtureChannel(id, `channels/${id}/README.md`)
+    firstRevIds.push(id)
+  }
+  // 提交 1 的渠道集按脚本定序规则(official 置顶 + 其余字典序)算,供 pin 判据对拍。
+  const firstExpected = orderedChannelIds(repo)
+  check(
+    firstExpected.length >= channelFloor(),
+    `合成仓库提交 1 的渠道目录数(${firstExpected.length})必须 ≥ 下限(${channelFloor()}),否则 pin 用例会被下限拦住`,
+  )
   const firstRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
-  mkdirSync(join(repo, 'channels', 'beta'), { recursive: true })
-  writeFileSync(join(repo, 'channels', 'beta', 'channel.json'), JSON.stringify({
-    schema: 1,
-    channel_id: 'beta',
-    identity: { display_name: 'beta AI', short_name: 'beta' },
-    desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' },
-  }))
-  fixtureCommit(repo, 'channels/beta/README.md', 'second', '2026-09-02T10:00:00+08:00')
+  writeFixtureChannel('beta', 'channels/beta/README.md')
   const headRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
   check(firstRev !== headRev, '合成仓库必须有两个不同提交(否则 pin 判据没有判别力)')
+  check(
+    !firstExpected.includes('beta') && channelIdsOf(repo).includes('beta'),
+    '夹具前置:beta 必须只在提交 2 里(否则"pin 到旧提交"没有判别力)',
+  )
   const url = `file://${repo}`
 
   const runPinned = (extraEnv, args = []) => runChannels({
@@ -1023,8 +1112,8 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     const pinned = runPinned({ CI_CHANNELS_PIN: firstRev })
     check(pinned.status === 0, `pin 取旧提交应成功,实际 ${String(pinned.status)}: ${pinned.stderr}`)
     check(
-      JSON.stringify(pinned.selected) === JSON.stringify(['official']),
-      `pin 到旧提交时渠道集必须只含旧提交里的渠道(证明取到的是 pinned 内容,不是 HEAD),实际 ${JSON.stringify(pinned.selected)}`,
+      JSON.stringify(pinned.selected) === JSON.stringify(firstExpected),
+      `pin 到旧提交时渠道集必须等于**旧提交**里的目录集(证明取到的是 pinned 内容,不是 HEAD),期望 ${JSON.stringify(firstExpected)},实际 ${JSON.stringify(pinned.selected)}`,
     )
     check((pinned.stdout ?? '').includes(`pinned at ${firstRev}`), 'pinned 路径必须打印解析出的 revision(可审计)')
     const unpinned = runChannels({
@@ -1192,20 +1281,50 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   // 假 git：`pass` 把一切转发给真 git（由 ci-channels.sh 导出的 GIT_SSH_COMMAND 调用同目录的
   // 假 ssh）；`echo-url` 直接回显消息后失败 —— 复刻 git 自己的错误文本（它会把 URL 打出来，
   // 令牌带 `@` 时只剥到第一个 `@`），用来验证脱敏。
+  // 每次调用都把 argv 追加进 `$FAKE_GIT_LOG`（若给了）：**"git 到底有没有被调用"** 是几条
+  // 判据的前置条件（pin 形状非法必须在任何 git 调用之前结束；空白 URL 形态下调用的是哪个 URL）。
   writeFileSync(join(shimDir, 'git'), [
     '#!/usr/bin/env bash',
     '# 假 git（PATH 替身，见 verify-ci-scripts.mjs 1h 的说明）。',
     'set -uo pipefail',
+    'if [ -n "${FAKE_GIT_LOG:-}" ]; then printf "%s %s\\n" "${FAKE_GIT_MODE:-pass}" "$*" >> "$FAKE_GIT_LOG"; fi',
     'case "${FAKE_GIT_MODE:-pass}" in',
     '  pass) exec "$REAL_GIT" "$@" ;;',
     '  echo-url) printf "%s\\n" "$FAKE_GIT_STDERR" >&2; exit "${FAKE_GIT_EXIT:-128}" ;;',
     '  *) printf "%s\\n" "fake git: unknown mode" >&2; exit 127 ;;',
     'esac',
   ].join('\n') + '\n', { mode: 0o755 })
+  // 假 chmod：记录 chmod **之前**的 mode，再转发给真 chmod（R8-D-12 的判据：私钥在
+  // chmod 之前不得有任何组/其他可读窗口；`premode` 就是那个窗口的证据）。
+  writeFileSync(join(shimDir, 'chmod'), [
+    '#!/usr/bin/env bash',
+    '# 假 chmod（PATH 替身，见 verify-ci-scripts.mjs 1h）。',
+    'set -uo pipefail',
+    'mode="${1:-}"; target="${2:-}"',
+    // GNU stat 用 -c,BSD/macOS 用 -f %Lp（GNU 的 -f 是"文件系统状态"且**会成功**,
+    // 所以只能放在 -c 失败之后的回落位;本仓既有夹具已假定 GNU coreutils,这里只是补齐)。
+    'pre="$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target" 2>/dev/null || echo missing)"',
+    'if [ -n "${FAKE_CHMOD_LOG:-}" ]; then printf "mode=%s premode=%s target=%s\\n" "$mode" "$pre" "$target" >> "$FAKE_CHMOD_LOG"; fi',
+    'exec "$REAL_CHMOD" "$@"',
+  ].join('\n') + '\n', { mode: 0o755 })
 
   // openssh 的原文（accept-new 首次连接）+ 一条假的 known_hosts 记录。
   const tofuWarning = "Warning: Permanently added 'github.com' (ED25519) to the list of known hosts."
   const keyMarker = 'FAKE-DEPLOY-KEY-MARKER-7d9c'
+  const gitLog = join(tempDir('ci-channels-gitlog-'), 'git.log')
+  writeFileSync(gitLog, '')
+  const fakeEnv = env => ({
+    PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+    REAL_GIT: realGit,
+    REAL_CHMOD: execFileSync('bash', ['-c', 'command -v chmod'], { encoding: 'utf8' }).trim(),
+    FAKE_SSH_LOG: sshLog,
+    FAKE_SSH_REPO: bare,
+    FAKE_SSH_TOFU_WARNING: tofuWarning,
+    FAKE_SSH_HOSTKEY_ENTRY: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfakefakefakefakefakefakefakefakefake',
+    FAKE_GIT_LOG: gitLog,
+    CI_CHANNELS_REPO: 'local/repo',
+    ...env,
+  })
   const resolveOnly = env => runChannels({
     source: undefined,
     refName: 'v9.9.9',
@@ -1213,17 +1332,18 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     dest: 'channels',
     list: 'r7d.list',
     args: ['--resolve-only'],
-    env: {
-      PATH: `${shimDir}:${process.env.PATH ?? ''}`,
-      REAL_GIT: realGit,
-      FAKE_SSH_LOG: sshLog,
-      FAKE_SSH_REPO: bare,
-      FAKE_SSH_TOFU_WARNING: tofuWarning,
-      FAKE_SSH_HOSTKEY_ENTRY: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfakefakefakefakefakefakefakefakefake',
-      CI_CHANNELS_REPO: 'local/repo',
-      ...env,
-    },
+    env: fakeEnv(env),
   })
+  // 非 tag 的**装载路径**（= ci.yml 四个生产调用点走的那条：真 clone / 真 fetch）。
+  const loadPath = env => runChannels({
+    source: undefined,
+    refName: 'ci-probe',
+    ref: 'refs/heads/ci-probe',
+    dest: 'channels',
+    list: 'r8d-load.list',
+    env: fakeEnv(env),
+  })
+  const gitCalls = () => readFileSync(gitLog, 'utf8').split('\n').filter(Boolean)
 
   // (a) 正常形态：SSH deploy key + accept-new 的主机键告警都在场 ⇒ 仍必须解析出 revision。
   //     这一条正是本缺陷的判据（把实现改回 `2>&1` 必红）。
@@ -1339,6 +1459,248 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     )
   }
 
+  // (g) **clone 路径**（ci.yml 四个**生产**调用点走的那条）的凭据回显 —— R8-D-9 的另一半。
+  //
+  // 现场（已 REPRODUCED）：第七轮的脱敏/分类只加在 `--resolve-only` 上，而生产走 clone：
+  // `git clone` 的 stderr 直接进 job log，基本认证密码含 `/` 时完整凭据原样回显 —— 判据形态
+  // ≠ 生产形态的典型。这里两条判据：
+  //   g1）假 git 保证"URL 带凭据"这一点成立（不依赖 git/curl 版本的报错措辞）；
+  //   g2）真 git 的**生产形态**（password 含 `/`）端到端跑一遍，并用"URL 尾部仍在日志里"
+  //       当前置条件 —— 否则"没看到凭据"可能只是因为 git 压根没回显 URL，而不是脱敏生效。
+  {
+    const password = 'FAKEPAT1/FAKEPAT2'
+    const url = `https://x-access-token:${password}@github.com/local/repo.git`
+    const before = gitCalls().length
+    const leaked = loadPath({
+      CI_CHANNELS_URL: url,
+      FAKE_GIT_MODE: 'echo-url',
+      FAKE_GIT_STDERR: `fatal: unable to access '${url}/': Repository not found`,
+    })
+    const out = `${leaked.stdout ?? ''}${leaked.stderr ?? ''}`
+    check(
+      gitCalls().length > before && gitCalls().some(line => line.includes('clone')),
+      '夹具前置：clone 路径必须真的调用 git（否则这条用例是空断言，测不到 stderr 过滤）',
+    )
+    check(leaked.status !== 0, 'clone 失败必须非零退出')
+    check(
+      !out.includes('FAKEPAT1') && !out.includes('FAKEPAT2'),
+      `clone 路径的失败诊断不得回显凭据（含 `/` 的密码形态；R8-D-9），实际：${out}`,
+    )
+    check(out.includes('<redacted>@github.com'), `clone 路径的诊断同样必须脱敏成 <redacted>@host，实际：${out}`)
+    check(
+      out.includes('症状=凭据权限不足或仓库不可见'),
+      `Repository not found 必须归到 403/404 那一类（不是"网络不可达⇒重试"；R8-D-8），实际：${out}`,
+    )
+
+    // g2）真 git + password 含 `/`：**url-tail 前置条件**让这条非空洞。
+    const realLeak = runChannels({
+      source: undefined,
+      refName: 'ci-probe',
+      ref: 'refs/heads/ci-probe',
+      dest: 'channels',
+      list: 'r8d-real.list',
+      env: {
+        GITHUB_REF: 'refs/heads/ci-probe',
+        CI_CHANNELS_URL: 'http://mirroruser:pa/ssWORD@127.0.0.1:1/x.git',
+      },
+    })
+    const realOut = `${realLeak.stdout ?? ''}${realLeak.stderr ?? ''}`
+    check(realLeak.status !== 0, '真 git 形态下 clone 失败必须非零退出')
+    check(
+      realOut.includes('127.0.0.1:1/x.git'),
+      `前置条件：真 git 必须把 URL 打进诊断（否则"没回显凭据"是空洞的），实际：${realOut}`,
+    )
+    check(
+      !realOut.includes('ssWORD') && !realOut.includes('mirroruser:pa'),
+      `真 git 形态下含 / 的密码同样不得回显（R8-D-9 的生产形态），实际：${realOut}`,
+    )
+    check(realOut.includes('<redacted>@'), `真 git 形态下 URL 的 userinfo 必须被替换成 <redacted>@，实际：${realOut}`)
+  }
+
+  // (h) 私钥落盘窗口（R8-D-12）：fake chmod 记录 chmod **之前**的 mode。
+  //     删掉 `chmod 600` ⇒ 记录里没有那个文件（红）；去掉 `umask 077` ⇒ premode=644（红）。
+  {
+    const chmodLog = join(tempDir('ci-channels-chmodlog-'), 'chmod.log')
+    writeFileSync(chmodLog, '')
+    const prepped = resolveOnly({
+      CHANNELS_REPO_SSH_KEY: keyMarker,
+      FAKE_SSH_MODE: 'ok',
+      FAKE_CHMOD_LOG: chmodLog,
+    })
+    check(prepped.status === 0, `夹具前置：SSH 形态下 --resolve-only 应成功（实际 ${String(prepped.status)}）`)
+    const chmodLines = readFileSync(chmodLog, 'utf8').split('\n').filter(Boolean)
+    const keyLine = chmodLines.find(line => line.includes('id_ed25519'))
+    check(keyLine !== undefined, `私钥必须有显式的 chmod 600（门禁钉住这条；实际记录：${JSON.stringify(chmodLines)}）`)
+    check(
+      keyLine !== undefined && keyLine.includes('mode=600'),
+      `私钥必须被 chmod 600，实际：${String(keyLine)}`,
+    )
+    check(
+      keyLine !== undefined && keyLine.includes('premode=600'),
+      `私钥在 chmod **之前**就必须是 600（裸 > 重定向按 umask 022 建文件 ⇒ premode=644 的窗口，R8-D-12），实际：${String(keyLine)}`,
+    )
+    check(
+      chmodLines.some(line => line.includes('mode=700') && !line.includes('id_ed25519')),
+      `私钥所在目录必须有 chmod 700，实际：${JSON.stringify(chmodLines)}`,
+    )
+  }
+
+  // (i) 空白 `CI_CHANNELS_URL` 不得遮蔽可用的 deploy key（R8-D-11）：形态判定与使用同源。
+  {
+    const before = gitCalls().length
+    const blank = resolveOnly({
+      CI_CHANNELS_URL: ' ',
+      CHANNELS_REPO_SSH_KEY: keyMarker,
+      FAKE_GIT_MODE: 'echo-url',
+      FAKE_GIT_STDERR: 'fatal: unable to access: fake failure',
+    })
+    const calls = gitCalls().slice(before)
+    check(blank.status !== 0, '假 git 失败时 --resolve-only 必须非零退出')
+    check(calls.length > 0, '夹具前置：必须真的调用过 git（否则看不到选了哪个 URL）')
+    check(
+      calls.some(line => line.includes('git@github.com:')),
+      `CI_CHANNELS_URL 是纯空白时必须回落 deploy key（ssh URL），实际调用：${JSON.stringify(calls)}`,
+    )
+    check(
+      !calls.some(line => line.includes('x-access-token:') || /ls-remote --quiet\s+HEAD/u.test(line)),
+      `纯空白的 CI_CHANNELS_URL 不得被拿去跑 git（那是"已设置"的误判，R8-D-11），实际：${JSON.stringify(calls)}`,
+    )
+    check(
+      `${blank.stderr ?? ''}`.includes('channels credential form: ssh'),
+      `启动必须打一行本次选用的凭据形态（不回显内容），实际：${blank.stderr ?? ''}`,
+    )
+
+    // 其余形态各打一行（同一函数判定，不可能"判定的"和"用的"不是同一个）。
+    const urlForm = resolveOnly({
+      CI_CHANNELS_URL: 'https://example.invalid/x.git',
+      FAKE_GIT_MODE: 'echo-url',
+      FAKE_GIT_STDERR: 'fatal: unable to access: fake failure',
+    })
+    check(`${urlForm.stderr ?? ''}`.includes('channels credential form: url'), 'CI_CHANNELS_URL 形态应报 url')
+    const tokenForm = resolveOnly({
+      CHANNELS_REPO_TOKEN: 'FAKEPAT-TOKEN-MARKER',
+      FAKE_GIT_MODE: 'echo-url',
+      FAKE_GIT_STDERR: 'fatal: unable to access: fake failure',
+    })
+    check(`${tokenForm.stderr ?? ''}`.includes('channels credential form: token'), 'PAT 形态应报 token')
+    check(!`${tokenForm.stdout ?? ''}${tokenForm.stderr ?? ''}`.includes('FAKEPAT-TOKEN-MARKER'),
+      '凭据形态那行只报形态，不得回显凭据内容')
+    const noneForm = resolveOnly({})
+    check(`${noneForm.stderr ?? ''}`.includes('channels credential form: none'), '无凭据时应报 none')
+    check(noneForm.status !== 0, '无凭据必须 fail-loud')
+    const sourceForm = runChannels({
+      source: fakeChannelRepo(['official']),
+      refName: 'ci-probe',
+      ref: 'refs/heads/ci-probe',
+      dest: 'channels',
+      list: 'src.list',
+    })
+    check(`${sourceForm.stderr ?? ''}`.includes('channels credential form: source'),
+      '已有检出目录(CI_CHANNELS_SOURCE)形态应报 source')
+  }
+
+  // (j) `CI_CHANNELS_PIN` 的值形态判据：**先拒换行/回车，再判整值 40-hex**。
+  //
+  // 现场（2026-09-24 补轮 / V3-B P3，已 REPRODUCED）：R8-D-13 的修法是"先 `tr -d '\r\n'`
+  // 归一化、再判整值"，而 `<39hex>\n0`（39 位 hex + 换行 + 1 个 hex 字符）归一化后**恰好凑成
+  // 40 位 hex** ⇒ 判据被归一化绕过、值被静默接受并继续走 git（用真 pin 的前 39 位 + 换行 +
+  // 末位构造即可复现"完全合法地构建成功"）。所以判据必须在**原始值**上做，且换行/形状两类
+  // 故障的文案要分开（处置不同：去掉换行 vs 值取错了）。
+  //
+  // 三条形态都取自**同一个 bare 仓的真实 HEAD**（headRev），因此"归一化后是合法 pin"这个
+  // 前提成立 —— 否则"被拒绝"可能只是因为值本来就不对（假绿）。
+  {
+    // 夹具：一个**合法**的合成渠道仓（目录数 = 下限、无清单）被 bare 化 —— 正例必须真的能
+    // 构建成功，否则"带换行被拒"可能只是因为值本来就不对（假绿）。
+    const pinRepo = fixtureRepo()
+    padChannelRepo(pinRepo)
+    fixtureCommit(pinRepo, 'channels/README.md', 'pins', '2026-09-01T10:00:00+08:00')
+    const pinBare = join(tempDir('ci-channels-pinbare-'), 'repo.git')
+    fixtureMustGit(pinRepo, ['clone', '--bare', pinRepo, pinBare])
+    const pinRev = fixtureMustGit(pinBare, ['rev-parse', 'HEAD'])
+    check(/^[0-9a-f]{40}$/u.test(pinRev), '夹具前置：bare 仓必须有一个 40 位 hex 的 HEAD')
+
+    // 正例（同一份值、不带换行）必须先通过：防"一刀切拒绝"式的假绿。
+    const before = gitCalls().length
+    const ok = runChannels({
+      source: undefined,
+      refName: 'v9.9.9',
+      ref: 'refs/tags/v9.9.9',
+      dest: 'channels',
+      list: 'r8d-pin-ok.list',
+      env: fakeEnv({ CI_CHANNELS_PIN: pinRev, CI_CHANNELS_URL: `file://${pinBare}`, FAKE_GIT_MODE: 'pass' }),
+    })
+    check(ok.status === 0, `不带换行的合法 pin 必须通过（防一刀切拒绝），实际 ${String(ok.status)}：${ok.stderr}`)
+    check(ok.selected.length > 0, '正例必须真的选出渠道（否则"通过"没有意义）')
+
+    const forms = [
+      ['<39hex>\n<末位>（归一化后恰好 40 hex ⇒ 老写法静默接受）', `${pinRev.slice(0, 39)}\n${pinRev.slice(39)}`],
+      ['<40hex>\r\n（CRLF 尾巴 ⇒ 老写法归一化后静默接受）', `${pinRev}\r\n`],
+      ['<40hex>\nEVIL=1（老写法归一化成 46 字符 ⇒ 误诊为"形状非法"）', `${pinRev}\nEVIL=1`],
+    ]
+    for (const [label, pin] of forms) {
+      const callMark = gitCalls().length
+      const run = runChannels({
+        source: undefined,
+        refName: 'v9.9.9',
+        ref: 'refs/tags/v9.9.9',
+        dest: 'channels',
+        list: 'r8d-pin-bad.list',
+        env: fakeEnv({ CI_CHANNELS_PIN: pin, CI_CHANNELS_URL: `file://${pinBare}`, FAKE_GIT_MODE: 'pass' }),
+      })
+      const err = `${run.stderr ?? ''}`
+      const text = `${run.stdout ?? ''}${err}`
+      check(run.status !== 0, `pin ${label} 必须失败（不得被归一化绕过）`)
+      check(
+        err.includes('pin 含换行/回车'),
+        `pin ${label} 必须**点名是换行问题**（与"形状非法"分开：处置不同），实际：${err}`,
+      )
+      check(
+        !/\bEVIL=1\b/u.test(text) && !text.includes(pinRev.slice(0, 39)),
+        `pin ${label} 的失败信息不得回显收到的值`,
+      )
+      check(
+        gitCalls().length === callMark,
+        `pin ${label} 必须在**任何 git 调用之前**中止，实际多出：${JSON.stringify(gitCalls().slice(callMark))}`,
+      )
+      check(!existsSync(run.listPath), `pin ${label} 失败时不得写出渠道列表`)
+    }
+    check(gitCalls().length > before, '夹具前置：正例必须真的调用过 git（否则这三条是空断言）')
+  }
+
+  // (k) 传输失败的分类词表（R8-D-10）：git/ssh 的常见传输失败形态都要落到"网络不可达"，
+  //     且分类不再依赖英文环境（脚本已钉 `export LC_ALL=C`，见 (e) 静态面）。
+  {
+    for (const form of [
+      'ssh: connect to host github.com port 22: Network is unreachable',
+      'fatal: unable to access \'https://github.com/x/y.git/\': Failed to connect to github.com port 443: Connection refused',
+      'kex_exchange_identification: Connection closed by remote host',
+      'ssh_exchange_identification: read: Connection reset by peer',
+    ]) {
+      const run = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_GIT_MODE: 'echo-url', FAKE_GIT_STDERR: form })
+      check(
+        `${run.stderr ?? ''}`.includes('症状=网络不可达'),
+        `传输失败形态「${form}」必须分类为网络不可达，实际：${run.stderr ?? ''}`,
+      )
+    }
+    for (const form of [
+      'remote: Invalid username or token. Password authentication failed.',
+      'fatal: unable to access \'https://github.com/x/y.git/\': The requested URL returned error: 403',
+      'ERROR: Repository not found.',
+    ]) {
+      const run = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_GIT_MODE: 'echo-url', FAKE_GIT_STDERR: form })
+      const err = `${run.stderr ?? ''}`
+      check(
+        err.includes('症状=凭据被拒') || err.includes('症状=凭据权限不足或仓库不可见'),
+        `凭据类失败「${form}」必须指到凭据（不是"重试"），实际：${err}`,
+      )
+      check(!err.includes('症状=网络不可达'), `凭据类失败「${form}」不得被归成网络不可达（R8-D-8）`)
+    }
+    // 兜底分支仍在（"未分类"必须还能出现，否则上面的分类判据可能是恒真的）。
+    const unknown = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_GIT_MODE: 'echo-url', FAKE_GIT_STDERR: 'totally unknown failure text' })
+    check(`${unknown.stderr ?? ''}`.includes('症状未分类'), '未知症状仍须落到"未分类"兜底分支')
+  }
+
   // (e) 静态面：解析只从 stdout 取 + 临时资源登记在当前 shell（不在子 shell）。
   {
     const text = readFileSync(channelsScript, 'utf8')
@@ -1368,6 +1730,404 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       codeLines.some(line => /new_temp_dir; CHANNELS_SSH_DIR="\$NEW_TEMP"/u.test(line))
         && codeLines.some(line => /new_temp_dir; CLONE="\$NEW_TEMP"/u.test(line)),
       'SSH 目录与克隆目录都必须走同一套临时资源登记（清理只在那唯一一处 trap 里做）',
+    )
+
+    // ---- R8-D-9/D-10/D-12 的**接线**判据：脱敏/诊断/整值形状都只有一个实现，且每条
+    //      会出网的 git 调用都把 stderr 捕获下来（"新增调用点忘了过滤"是这类洞的复发形态）。
+    //      脱敏正则的字符集里**不能有 `/`**：基本认证密码允许含 `/`，`[^/[:space:]]*`
+    //      会在第一个 `/` 处停下，把密码尾部原样放进公开日志（R8-D-9 的根因）。
+    const sedLines = codeLines.filter(line => line.includes('s#(https?://)'))
+    check(sedLines.length === 1, `脱敏必须只有一处 scheme 锚定的 sed 规则，实际 ${sedLines.length}`)
+    check(
+      sedLines[0] !== undefined && sedLines[0].includes('[^[:space:]]*@'),
+      `脱敏正则必须贪婪到本行最后一个 @（字符集里不得出现 /，R8-D-9），实际：${String(sedLines[0])}`,
+    )
+
+    // 每条**会出网**的 git 调用都必须把 stderr 捕获到临时文件（clone/fetch/ls-remote），
+    // 失败再由 report_git_failure 统一脱敏 + 分类。
+    // 只看**命令位置**的 git（`$(git …` / `git …` / `! git …`）：错误文案里的
+    // `（git ls-remote 非零退出）` 也算"含 git"但不调用任何东西，必须排除。
+    const networkGitLines = codeLines.filter(line =>
+      /(?:^|[\s(]|\$\()git\s+(?:-C\s+"\$CLONE"\s+)?(?:ls-remote|clone|fetch)\b/u.test(line))
+    check(networkGitLines.length >= 4, `会出网的 git 调用点应至少 4 处（ls-remote / fetch×2 / clone），实际 ${networkGitLines.length}`)
+    check(
+      networkGitLines.every(line => /2>\s*"\$[A-Z_]+"/u.test(line)),
+      `每条会出网的 git 调用都必须把 stderr 捕获到文件（否则凭据原文进公开日志，R8-D-9），违规行：`
+        + JSON.stringify(networkGitLines.filter(line => !/2>\s*"\$[A-Z_]+"/u.test(line))),
+    )
+    const reportCalls = codeLines.filter(line => /^\s*report_git_failure\s+"/u.test(line))
+    check(
+      reportCalls.length === 3,
+      `捕获 + 脱敏 + 分类必须收在唯一的 report_git_failure 上（三条 git 路径各一处调用），实际 ${reportCalls.length}: ${JSON.stringify(reportCalls)}`,
+    )
+    const classifierHeads = codeLines.filter(line => /^\s*case "\$errlines" in/u.test(line))
+    check(
+      classifierHeads.length === 1,
+      `症状分类只能有一份实现（两份必然漂移，且新调用点会漏分类），实际 ${classifierHeads.length}`,
+    )
+    // `LC_ALL=C`：git/ssh 的报错文案随 locale 变，而分类按英文片段匹配（R8-D-10）。
+    check(
+      codeLines.some(line => /^\s*export LC_ALL=C\s*$/u.test(line)),
+      '必须显式 `export LC_ALL=C`：否则非英文 runner 上 git 的中文报错会让整条分类静默失效（R8-D-10）',
+    )
+    // pin 形状判据必须锚定**整值**（`grep -x` 只锚定"行"，挡不住多行值）。
+    check(
+      codeLines.some(line => /grep -Eqx '\[0-9a-f\]\{40\}'/u.test(line)),
+      "pin 形状判据必须用 `grep -Eqx '[0-9a-f]{40}'`（整行锚定）+ 多行值显式拒绝（R8-D-13）",
+    )
+    // pin 的换行/回车必须在**原始值**上 fail-loud，且**不得先归一化**（2026-09-24 补轮 / V3-B P3）：
+    // 老的 `PIN="$(printf '%s' "$PIN" | tr -d '\r\n')"` 会把 `<39hex>\n0` 悄悄拼成恰好
+    // 40 位 hex ⇒ 判据被归一化绕过、值被静默接受。
+    check(
+      codeLines.some(line => /\*\$'\\n'\*\|\*\$'\\r'\*/u.test(line)),
+      "pin 的换行/回车必须在原始值上被显式拒绝（`case … in *$'\\n'*|*$'\\r'*)`，V3-B P3）",
+    )
+    check(
+      !codeLines.some(line => /(?:^|\s)PIN="\$\(printf '%s' "\$PIN" \| tr -d/u.test(line)),
+      'pin 值**不得在判据之前归一化**（`tr -d` 会把 `<39hex>\n0` 凑成合法 40 hex ⇒ 静默放行，V3-B P3）',
+    )
+    // 私钥落盘必须先收 umask（裸 `>` 重定向按 022 建文件 ⇒ 0644 窗口，R8-D-12）。
+    check(
+      codeLines.some(line => /umask 077/u.test(line)),
+      '私钥落盘必须先 umask 077（否则 chmod 之前存在世界可读窗口，R8-D-12）',
+    )
+  }
+}
+
+// ---- 1i. "应有渠道集":目录数下限 + 渠道仓自带清单（2026-09-24 第八轮审计 R8-C-7）----
+//
+// 现场（REPRODUCED）：`channel_set=all`（正式 tag）的语义是"发一个正式版 = 所有渠道都发布"，
+// 但"所有" = **渠道仓本次 revision 里恰好存在的那些目录**。从渠道仓删掉一个渠道目录（或克隆
+// 不完整 / 改名）之后，脚本打出 `channels selected: N of N` 并 **EXIT=0** —— 那个客户拿不到
+// 任何交付物（品牌渠道的唯一分发面是更新服务器，GitHub Release 不含它们），全程零红灯。
+//
+// 两层判据，**都不在公开仓里写任何渠道身份**（铁律 0）：
+//   ① 兜底（始终生效）：`MIN_EXPECTED_CHANNELS` = 渠道目录数下限（只是一个数字 —— 渠道数
+//      本来就已经打在公开日志里）。正式 tag 跌破 = 红；正式 tag 之外只告警（预发/PR 线上
+//      渠道正在上下线时不该阻断无关构建，但必须看得见）；多于下限 = 告警提示同步棘轮。
+//   ② 权威（可选）：渠道仓根目录的 `channels.manifest.json`（id 留在私有仓）与枚举结果
+//      **双向**对拍：登记了却没有目录 = 红（会少发）；有目录却没登记 = 红（未评审的新渠道）。
+// 另有 `--list` 的内容对拍：下游四个 job 只按它构建/搬运/发布，少一行就是少一个交付物。
+{
+  // 棘轮：下限可以上调，**下调必须是一次显式评审**。这里把"不得低于 4"钉进判据
+  // （改这条断言 = 一次可见的 diff），否则把它调到 1 就等于把闸门关掉。
+  check(
+    channelFloor() >= 4,
+    `MIN_EXPECTED_CHANNELS 是渠道目录数的棘轮下限，不得低于 4（真实渠道仓的目录数下限）；实际 ${channelFloor()}`,
+  )
+
+  const stableTag = { refName: 'v9.9.9', ref: 'refs/tags/v9.9.9' }
+  const branchRef = { refName: 'ci-probe', ref: 'refs/heads/ci-probe' }
+
+  // ① 正式 tag + 目录数正好等于下限 ⇒ 通过，且 `--list` 必须**逐行等于**目录全集
+  //    （少一行 = 下游少构建/少交付一个渠道；这条同时是"选择集被截断"的判据）。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    const expected = orderedChannelIds(source)
+    check(expected.length === channelFloor(), `夹具前置：目录数应正好等于下限，实际 ${expected.length}`)
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-full.list' })
+    check(run.status === 0, `目录数等于下限的正式 tag 必须通过，实际 ${String(run.status)}：${run.stderr}`)
+    check(
+      JSON.stringify(run.selected) === JSON.stringify(expected),
+      `正式 tag 必须选中全部渠道，实际 ${JSON.stringify(run.selected)}`,
+    )
+    check(
+      JSON.stringify(readFileSync(run.listPath, 'utf8').split('\n').filter(Boolean)) === JSON.stringify(expected),
+      `--list 必须逐行等于选中渠道（下游四个 job 只按它构建/搬运/发布，少一行就是少一个交付物），`
+        + `实际 ${JSON.stringify(readFileSync(run.listPath, 'utf8').split('\n').filter(Boolean))}`,
+    )
+    check(
+      `${run.stderr ?? ''}`.includes('channels.manifest.json'),
+      `渠道仓没有权威清单时必须留一行说明"只有目录数下限在兜底"（不得静默少一层判据），实际：${run.stderr ?? ''}`,
+    )
+  }
+
+  // ② **夹具/本地检出路径**（`CI_CHANNELS_SOURCE`）不得被下限提前中止
+  //    （2026-09-24 集成回归）：本仓两个守卫（`scripts/verify-wasm-channels.mjs` 的组 7 与
+  //    本文件）都用这个模式跑合成夹具，夹具目录数（3 个）天然小于真实渠道仓下限（4 个）。
+  //    若在这里判红，**逐渠道字段校验就永远看不到自己的错误** —— 实测组 7 七条断言全红。
+  //    豁免只给这个模式；生产（clone/pin）那一半由 ⑪ 用真 git 仓库验。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    rmSync(join(source, 'channels', 'example-brand'), { recursive: true, force: true })
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-source-shrunk.list' })
+    check(
+      run.status === 0,
+      `本地检出模式(CI_CHANNELS_SOURCE)下目录数不足不得阻断（否则夹具里逐渠道字段校验全被吞掉），实际 exit=${String(run.status)}：${run.stderr}`,
+    )
+    check(
+      `${run.stderr ?? ''}`.includes('跳过「渠道目录数下限」判定'),
+      `本地检出模式必须留一行说明"下限判据本次不适用"（不得静默少一层判据），实际：${run.stderr ?? ''}`,
+    )
+    check(existsSync(run.listPath), '本地检出模式下 --list 仍必须写出（下游步骤按它构建）')
+
+    // ②b 同一份"目录数不足"的夹具 + 某渠道字段非法 ⇒ 报错必须**点名那个字段**
+    //     （组 7 的最小复刻：这正是被下限吞掉的那类断言）
+    const broken = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    rmSync(join(broken, 'channels', 'example-brand'), { recursive: true, force: true })
+    writeFileSync(join(broken, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: {}, // 缺 desktop.app_origin_scheme（组 7 的第一条负例）
+    }))
+    const brokenRun = runChannels({ source: broken, ...stableTag, dest: 'channels', list: 'c7-source-field.list' })
+    check(
+      brokenRun.status !== 0 && `${brokenRun.stderr ?? ''}`.includes('desktop.app_origin_scheme'),
+      `目录数不足时逐渠道字段校验仍必须可见（报错要点名字段，而不是"渠道数不足"），实际 exit=${String(brokenRun.status)}：${brokenRun.stderr ?? ''}`,
+    )
+    check(
+      !`${brokenRun.stderr ?? ''}`.includes('少于登记下限'),
+      '本地检出模式下不得出现"少于登记下限"（那就是把逐渠道校验吞掉的形态）',
+    )
+  }
+
+  // ③ **生产路径**（clone + pin）+ 删掉一个渠道目录 ⇒ **正式 tag 必须红**（本次审计的现场形态）。
+  //    与 ② 的差别只有"内容从哪来"：这条走的正是 ci.yml 四个调用点的形态。
+  //    同时判"失败时不得写出 --list"（下游拿到列表就会继续构建）。
+  {
+    const repo = fixtureRepo()
+    for (const id of ['official', 'example-brand', 'example-ops', 'zeta']) {
+      mkdirSync(join(repo, 'channels', id), { recursive: true })
+      writeFileSync(join(repo, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: id === 'official'
+          ? { app_origin_scheme: 'picoaide-app' }
+          : {
+              product_name: `${id} AI`,
+              slug: `${id}-AI`,
+              app_id: `com.example.${id.replaceAll('-', '')}`,
+              deep_link_scheme: `${id.replaceAll('-', '')}link`,
+              home_dir: `.${id}-harness`,
+              app_origin_scheme: `${id.replaceAll('-', '')}-app`,
+            },
+      }))
+    }
+    fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
+    const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+    // 先删一个目录并提交，再 pin 到那个 revision（生产路径的实际形态：pin 指向的树里少一个渠道）
+    rmSync(join(repo, 'channels', 'example-brand'), { recursive: true, force: true })
+    fixtureCommit(repo, 'channels/official/README.md', 'drop a channel', '2026-09-02T10:00:00+08:00')
+    const shrunkRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+    const run = runChannels({
+      source: undefined, ...stableTag, dest: 'channels', list: 'c7-prod-shrunk.list',
+      env: { CI_CHANNELS_URL: `file://${repo}`, CI_CHANNELS_PIN: shrunkRev },
+    })
+    check(
+      run.status !== 0,
+      `生产路径(clone+pin)上正式 tag 的渠道目录数少于下限必须 fail-loud（否则会静默少发一个渠道），实际 exit=${String(run.status)}：${run.stderr}`,
+    )
+    check(
+      `${run.stderr ?? ''}`.includes('少于登记下限'),
+      `生产路径的失败信息必须点名"少于登记下限"，实际：${run.stderr ?? ''}`,
+    )
+    check(!existsSync(run.listPath), '失败时不得写出渠道列表（下游步骤拿到它就会继续构建）')
+    check(!/\b(example-brand|example-ops|zeta)\b/u.test(run.stderr ?? ''), '下限判据只报数字，不得回显渠道名')
+    // 同一份仓、同一个 pin、非 tag ⇒ 只告警（分档语义在生产路径上同样成立）
+    const branchRun = runChannels({
+      source: undefined, ...branchRef, dest: 'channels', list: 'c7-prod-branch.list',
+      env: { CI_CHANNELS_URL: `file://${repo}`, CI_CHANNELS_PIN: shrunkRev },
+    })
+    check(
+      branchRun.status === 0 && `${branchRun.stderr ?? ''}`.includes('少于登记下限'),
+      `生产路径的非 tag 上目录数不足只应告警，实际 exit=${String(branchRun.status)}：${branchRun.stderr ?? ''}`,
+    )
+    // 目录数**多于**下限（新增渠道未同步棘轮）⇒ 告警，不阻断
+    const moreRepo = fixtureRepo()
+    // 注意别用 `orderedChannelIds(repo)`：那个夹具刚被删掉一个渠道，会算出"正好等于下限"。
+    const moreIds = ['official', 'example-brand', 'example-ops', 'zeta', 'example-new']
+    for (const id of moreIds) {
+      mkdirSync(join(moreRepo, 'channels', id), { recursive: true })
+      writeFileSync(join(moreRepo, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: id === 'official'
+          ? { app_origin_scheme: 'picoaide-app' }
+          : {
+              product_name: `${id} AI`,
+              slug: `${id}-AI`,
+              app_id: `com.example.${id.replaceAll('-', '')}`,
+              deep_link_scheme: `${id.replaceAll('-', '')}link`,
+              home_dir: `.${id}-harness`,
+              app_origin_scheme: `${id.replaceAll('-', '')}-app`,
+            },
+      }))
+    }
+    fixtureCommit(moreRepo, 'channels/official/README.md', 'one more channel', '2026-09-01T10:00:00+08:00')
+    const moreRev = fixtureMustGit(moreRepo, ['rev-parse', 'HEAD'])
+    const moreRun = runChannels({
+      source: undefined, ...stableTag, dest: 'channels', list: 'c7-prod-more.list',
+      env: { CI_CHANNELS_URL: `file://${moreRepo}`, CI_CHANNELS_PIN: moreRev },
+    })
+    check(moreRun.status === 0, `多于下限不该阻断发布（新渠道该发），实际 ${String(moreRun.status)}：${moreRun.stderr}`)
+    check(
+      `${moreRun.stderr ?? ''}`.includes('多于登记下限'),
+      `多于下限必须提示同步棘轮常量，实际：${moreRun.stderr ?? ''}`,
+    )
+    check(fullRev !== shrunkRev, '夹具前置：pin 判据需要两个不同 revision')
+  }
+
+  // ③b 静态接线：**没有任何 workflow 设置 CI_CHANNELS_SOURCE** —— 下限判据的豁免只给本地/夹具
+  //     模式，生产链（四个调用点）必须始终走 clone/pin，否则"静默缩小 ⇒ 红"会被一条 env 关掉。
+  {
+    const workflow = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+    const codeLines = workflow.split('\n').filter(line => !line.trimStart().startsWith('#'))
+    check(
+      !codeLines.some(line => line.includes('CI_CHANNELS_SOURCE')),
+      'workflow 不得设置 CI_CHANNELS_SOURCE（那是本地/夹具模式，会绕过渠道目录数下限判据）',
+    )
+  }
+
+  // ⑤ 权威清单：与目录集一致 ⇒ 通过。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    writeFileSync(join(source, 'channels.manifest.json'),
+      `${JSON.stringify({ schema: 1, channels: orderedChannelIds(source) })}\n`)
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-manifest-ok.list' })
+    check(run.status === 0, `清单与目录集一致时必须通过，实际 ${String(run.status)}：${run.stderr}`)
+    check(
+      `${run.stderr ?? ''}`.includes('channels manifest verified'),
+      `清单对拍通过时必须留一行可审计的结论，实际：${run.stderr ?? ''}`,
+    )
+  }
+
+  // ⑥ 权威清单声明了一个仓库里**没有**的渠道 ⇒ 红，并**点名缺了谁**。
+  //    id 先登记掩码再打印、且两条都走 stderr（跨流的先后顺序没有保证，先打未掩码的 id
+  //    就是一次公开日志泄露）。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    const ghost = 'ghost-channel'
+    writeFileSync(join(source, 'channels.manifest.json'),
+      `${JSON.stringify({ schema: 1, channels: [...orderedChannelIds(source), ghost] })}\n`)
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-manifest-missing.list' })
+    const err = `${run.stderr ?? ''}`
+    check(run.status !== 0, '清单声明的渠道在仓库里没有对应目录时必须 fail-loud（正式 tag 会少发）')
+    check(err.includes(`::add-mask::${ghost}`), `缺失渠道的 id 必须先登记掩码，实际：${err}`)
+    check(err.includes('缺失：') && err.includes(ghost), `失败信息必须点名缺了谁（本地可读；CI 里已被掩码），实际：${err}`)
+    check(
+      err.indexOf(`::add-mask::${ghost}`) < err.indexOf(`缺失：${ghost}`),
+      '掩码指令必须**先于**取值出现（GitHub 只对之后的输出生效）',
+    )
+    check(!`${run.stdout ?? ''}`.includes(ghost), '掩码与报错都走 stderr，不得写到 stdout（stdout 有别的消费方）')
+    check(!existsSync(run.listPath), '清单对拍失败时不得写出渠道列表')
+  }
+
+  // ⑦ 反向：仓库里有目录但**没登记**进清单 ⇒ 红（未评审的新渠道 —— 它将来被删掉无人发现）。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    const registered = orderedChannelIds(source).filter(id => id !== 'example-ops')
+    writeFileSync(join(source, 'channels.manifest.json'),
+      `${JSON.stringify({ schema: 1, channels: registered })}\n`)
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-manifest-extra.list' })
+    const err = `${run.stderr ?? ''}`
+    check(run.status !== 0, '有渠道目录未登记进清单时必须 fail-loud（否则它消失时没有任何判据）')
+    check(err.includes('未登记') && err.includes('example-ops'), `失败信息必须点名未登记的渠道，实际：${err}`)
+  }
+
+  // ⑧ 清单坏了（非法 JSON / 空数组）⇒ 红：**绝不静默退回**"只有下限兜底"
+  //    （否则把清单改坏就是关掉闸门的最短路径）。
+  for (const [content, why] of [['{ not json', '非法 JSON'], ['{"schema":1,"channels":[]}', '空数组']]) {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    writeFileSync(join(source, 'channels.manifest.json'), `${content}\n`)
+    const run = runChannels({ source, ...stableTag, dest: 'channels', list: 'c7-manifest-bad.list' })
+    check(run.status !== 0, `清单${why}时必须 fail-loud（不得静默降级成只查下限）`)
+    check(
+      `${run.stderr ?? ''}`.includes('channels.manifest.json'),
+      `清单${why}的失败信息必须点名那个文件`,
+    )
+  }
+
+  // ⑨ 权威清单是**仓库级**配置：非 tag 的 PR/分支构建上不一致同样要红
+  //    （那是仓库状态自相矛盾，与本次构建的渠道集无关）。
+  {
+    const source = fakeChannelRepo(['official', 'beta', 'example-brand', 'example-ops'])
+    writeFileSync(join(source, 'channels.manifest.json'),
+      `${JSON.stringify({ schema: 1, channels: [...orderedChannelIds(source), 'ghost-channel'] })}\n`)
+    const run = runChannels({ source, ...branchRef, dest: 'channels', list: 'c7-manifest-branch.list' })
+    check(run.status !== 0, '非 tag 上清单与目录集不一致也必须红（配置自相矛盾）')
+  }
+
+  // ⑩ 静态接线：`--list` 写完后必须复核行数（写盘不完整 / 被并发改写 = 下游少构建一个渠道）。
+  //    这一条用源码级判据，是因为触发它需要真的把写盘弄坏（正常路径下写出来的永远是对的长度）——
+  //    "应有集合"本身由 ①/②/③ 与下面的克隆路径用例守住，这里只钉住那道复核没有被删掉。
+  {
+    const text = readFileSync(channelsScript, 'utf8')
+    check(
+      /LIST_LINES="\$\(grep -c/u.test(text) && /-ne "\$\{#SELECTED\[@\]\}"/u.test(text),
+      '--list 写入后必须复核行数 === 选中渠道数（写盘不完整时下游会静默少交付一个渠道）',
+    )
+  }
+
+  // ⑪ **生产路径**（clone + pin，ci.yml 四个调用点走的形态）上同样成立：
+  //    删一个渠道目录并提交 ⇒ pin 到新 revision 的正式 tag 构建必须红。
+  //    只用 source 模式测会漏掉"判据挂在 `CHECKOUT_ROOT` 上，而克隆路径下那个变量指错"这类缺口。
+  {
+    const repo = fixtureRepo()
+    const ids = ['official', 'example-brand', 'example-ops', 'zeta']
+    for (const id of ids) {
+      mkdirSync(join(repo, 'channels', id), { recursive: true })
+      const publicChannel = id === 'official'
+      writeFileSync(join(repo, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: publicChannel
+          ? { app_origin_scheme: 'picoaide-app' }
+          : {
+              product_name: `${id} AI`,
+              slug: `${id}-AI`,
+              app_id: `com.example.${id.replaceAll('-', '')}`,
+              deep_link_scheme: `${id.replaceAll('-', '')}link`,
+              home_dir: `.${id}-harness`,
+              app_origin_scheme: `${id.replaceAll('-', '')}-app`,
+            },
+      }))
+    }
+    check(orderedChannelIds(repo).length === channelFloor(), '夹具前置：克隆用例的目录数应正好等于下限')
+    fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
+    const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+    const url = `file://${repo}`
+    const okRun = runChannels({
+      source: undefined, ...stableTag, dest: 'channels', list: 'c7-clone-full.list',
+      env: { CI_CHANNELS_URL: url, CI_CHANNELS_PIN: fullRev },
+    })
+    check(okRun.status === 0, `克隆路径 + 目录数等于下限必须通过，实际 ${String(okRun.status)}：${okRun.stderr}`)
+    check(
+      JSON.stringify(okRun.selected) === JSON.stringify(orderedChannelIds(repo)),
+      `克隆路径的渠道集必须等于仓库目录集，实际 ${JSON.stringify(okRun.selected)}`,
+    )
+    // 权威清单在**克隆路径**下也要被读到（路径解析错 = 判据静默失效）。
+    writeFileSync(join(repo, 'channels.manifest.json'),
+      `${JSON.stringify({ schema: 1, channels: [...orderedChannelIds(repo), 'ghost-channel'] })}\n`)
+    fixtureMustGit(repo, ['add', '-A'])
+    fixtureMustGit(repo, ['commit', '-q', '-m', 'manifest'], {
+      GIT_AUTHOR_DATE: '2026-09-02T10:00:00+08:00', GIT_COMMITTER_DATE: '2026-09-02T10:00:00+08:00',
+    })
+    const manifestRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+    const manifestRun = runChannels({
+      source: undefined, ...stableTag, dest: 'channels', list: 'c7-clone-manifest.list',
+      env: { CI_CHANNELS_URL: url, CI_CHANNELS_PIN: manifestRev },
+    })
+    check(
+      manifestRun.status !== 0 && `${manifestRun.stderr ?? ''}`.includes('ghost-channel'),
+      `克隆路径下渠道仓清单必须被读到并对拍（路径解析错就是判据静默失效），实际：${manifestRun.stderr ?? ''}`,
+    )
+    // 再删一个渠道目录并提交 ⇒ pin 到新 revision 的正式 tag 必须红。
+    rmSync(join(repo, 'channels', 'example-brand'), { recursive: true, force: true })
+    rmSync(join(repo, 'channels.manifest.json'), { force: true })
+    fixtureCommit(repo, 'channels/official/README.md', 'drop a channel', '2026-09-03T10:00:00+08:00')
+    const shrunkRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
+    const shrunkRun = runChannels({
+      source: undefined, ...stableTag, dest: 'channels', list: 'c7-clone-shrunk.list',
+      env: { CI_CHANNELS_URL: url, CI_CHANNELS_PIN: shrunkRev },
+    })
+    check(shrunkRun.status !== 0, '克隆路径下（生产形态）渠道目录数少于下限必须红')
+    check(
+      `${shrunkRun.stderr ?? ''}`.includes('少于登记下限'),
+      `生产形态的失败信息必须点名"少于登记下限"，实际：${shrunkRun.stderr ?? ''}`,
     )
   }
 }
@@ -1731,8 +2491,8 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   check(!result.stdout.includes('Bad_Name'), '不合规目录名不得出现在输出里')
   check(result.stderr.includes('已跳过'), '跳过不合规目录时应给出计数告警')
   check(
-    JSON.stringify(result.selected) === JSON.stringify(['official', 'example-brand']),
-    `不合规目录不得进入构建列表,实际 ${JSON.stringify(result.selected)}`,
+    JSON.stringify(result.selected) === JSON.stringify(orderedChannelIds(source)),
+    `不合规目录不得进入构建列表(期望=合规目录全集,含 R8-C-7 的下限补位),实际 ${JSON.stringify(result.selected)}`,
   )
 }
 
@@ -1753,6 +2513,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   writeFileSync(join(missingConfig, 'channels', 'official', 'channel.json'),
     '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(missingConfig, 'channels', 'beta'), { recursive: true }) // 无 channel.json
+  padChannelRepo(missingConfig) // 下限补位：让这条用例只测「缺 channel.json」，不被渠道目录数下限先拦住
   const missing = runChannels({ source: missingConfig, refName: 'v2.7.0', dest: 'channels', list: 'g.list' })
   check(missing.status !== 0, '选中渠道缺 channel.json 时必须失败')
 
@@ -1764,6 +2525,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     '{"schema":1,"channel_id":"official","identity":{"display_name":"Official","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
   mkdirSync(join(branded, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(branded, 'channels', 'example-brand', 'channel.json'), '{"schema":1,"channel_id":"example-brand"}')
+  padChannelRepo(branded) // 下限补位（同上）
   const noBrand = runChannels({ source: branded, refName: 'v2.7.0', dest: 'channels', list: 'h.list' })
   check(noBrand.status !== 0, '渠道包缺品牌字段时必须失败')
   check(noBrand.stderr.includes('品牌字段'), '失败信息应指明缺的是品牌字段')
@@ -1775,6 +2537,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   mkdirSync(join(halfBranded, 'channels', 'official'), { recursive: true })
   writeFileSync(join(halfBranded, 'channels', 'official', 'channel.json'),
     '{"schema":1,"channel_id":"official","identity":{"display_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
+  padChannelRepo(halfBranded) // 下限补位（同上）
   const half = runChannels({ source: halfBranded, refName: 'v2.7.0', dest: 'channels', list: 'i.list' })
   check(half.status !== 0, '只配 display_name 也必须失败')
   check(half.stderr.includes('identity.short_name'), '失败信息应点明缺 short_name')
@@ -1789,6 +2552,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   mkdirSync(join(noCompile, 'channels', 'example-brand'), { recursive: true })
   writeFileSync(join(noCompile, 'channels', 'example-brand', 'channel.json'),
     '{"schema":1,"channel_id":"example-brand","identity":{"display_name":"Example","short_name":"Example"}}')
+  padChannelRepo(noCompile) // 下限补位（同上）
   const compile = runChannels({ source: noCompile, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
   check(compile.status !== 0, '品牌渠道缺编译期字段时必须失败')
   check(compile.stderr.includes('desktop.slug') && compile.stderr.includes('desktop.app_id'),
@@ -1807,6 +2571,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     identity: { display_name: 'Example', short_name: 'Example' },
     desktop: { slug: 'Example AI', app_id: 'com.example.brand', deep_link_scheme: 'Example!', app_origin_scheme: 'examplebrand-app' },
   }))
+  padChannelRepo(badShape) // 下限补位（同上）
   const shape = runChannels({ source: badShape, refName: 'v2.7.0', dest: 'channels', list: 'k.list' })
   check(shape.status !== 0, '字段形状非法时必须失败')
   check(shape.stderr.includes('desktop.slug') && shape.stderr.includes('deep_link_scheme'),
@@ -1826,6 +2591,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand', app_origin_scheme: 'examplebrand-app' },
   }))
   writeFileSync(join(badIcon, 'channels', 'example-brand', 'app-icon.png'), tinyPng(256, 256, 8, 6))
+  padChannelRepo(badIcon) // 下限补位（同上）
   const icon = runChannels({ source: badIcon, refName: 'v2.7.0', dest: 'channels', list: 'l.list' })
   check(icon.status !== 0, 'app-icon.png 尺寸不符时必须失败')
   check(icon.stderr.includes('app-icon.png'), '失败信息应点名 app-icon.png')
@@ -1840,9 +2606,21 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     desktop: { app_origin_scheme: 'picoaide-app' },
     assets: { _note: '注解', logoo: 'logo.svg' },
   }))
+  padChannelRepo(unknownAsset) // 下限补位（同上）
   const unknown = runChannels({ source: unknownAsset, refName: 'v2.7.0', dest: 'channels', list: 'n.list' })
   check(unknown.status === 0, '未知素材字段不应中止发布(只告警)')
-  check(unknown.stderr.includes('logoo'), '未知素材字段应给出告警并点名')
+  // R8-D-14：未知素材字段**只报数量,不回显键名** —— 键名本身就是渠道包里的字符串,
+  // 可能是品牌/渠道标识（实测 `assets.<品牌>_logo` 原样进过公开日志；老写法只对
+  // "非字段名形状"的键脱敏，而品牌标识恰好是字段名形状）。所以这里反过来钉：
+  // 告警必须给**计数**，且**不得**出现键名（这条断言以前钉的是相反的行为）。
+  check(
+    unknown.stderr.includes('1 个未知素材字段') && unknown.stderr.includes('assets.<unknown>'),
+    `未知素材字段的告警必须给出计数与占位名,实际: ${unknown.stderr.trim().slice(0, 200)}`,
+  )
+  check(
+    !`${unknown.stdout}${unknown.stderr}`.includes('logoo'),
+    '未知素材字段的告警不得回显键名(键名可能是品牌标识,而这里进公开日志)',
+  )
 
   // R7-RV-4(P3,复核 2026-09-13):素材脚本特征门禁必须**按结构**判定,不能在
   // 整份正文上跑正则 —— 合法 SVG 的注释、<title>/<desc>/文本节点、CDATA 里写
@@ -1866,6 +2644,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     for (const [fileName, content] of Object.entries(files)) {
       writeFileSync(join(root, 'channels', 'official', fileName), content)
     }
+    padChannelRepo(root) // 下限补位（同所有稳定 tag 夹具）
     return root
   }
   const benignScriptishWords = [
@@ -1973,6 +2752,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     // 三个字段都**非法**:非法值才是会被拼进早先版本错误信息的东西
     desktop: { slug: 'TOP SECRET BRAND', app_id: 'com.secret brand', deep_link_scheme: 'SECRET!', app_origin_scheme: 'examplebrand-app' },
   }))
+  padChannelRepo(leaky) // 下限补位（同上）
   const leak = runChannels({ source: leaky, refName: 'v2.7.0', dest: 'channels', list: 'o.list' })
   const leakOut = `${leak.stdout ?? ''}${leak.stderr ?? ''}`
   check(leak.status !== 0, '非法编译期字段必须中止构建')
@@ -1995,6 +2775,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     desktop: { slug: 'Example-AI', app_id: 'com.example.brand', deep_link_scheme: 'examplebrand', app_origin_scheme: 'examplebrand-app' },
     assets: { logo: 'logo.svg' },
   }))
+  padChannelRepo(missingAsset) // 下限补位（同上）
   const asset = runChannels({ source: missingAsset, refName: 'v2.7.0', dest: 'channels', list: 'm.list' })
   check(asset.status !== 0, '声明的素材文件不存在时必须失败')
   check(asset.stderr.includes('assets.logo'), '失败信息应点名缺哪个素材')
@@ -2004,6 +2785,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   mkdirSync(join(blank, 'channels', 'official'), { recursive: true })
   writeFileSync(join(blank, 'channels', 'official', 'channel.json'),
     '{"schema":1,"channel_id":"official","identity":{"display_name":"   ","short_name":"Official"},"desktop":{"app_origin_scheme":"picoaide-app"}}')
+  padChannelRepo(blank) // 下限补位（同上）
   const blankRun = runChannels({ source: blank, refName: 'v2.7.0', dest: 'channels', list: 'j.list' })
   check(blankRun.status !== 0, '空白品牌名必须视为缺失')
 
@@ -2028,6 +2810,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         ...(homeDirValue === undefined ? {} : { home_dir: homeDirValue }),
       },
     }))
+    padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'p.list' })
   }
 
@@ -2074,6 +2857,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         app_origin_scheme: 'examplebrand-app',
       },
     }))
+    padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'pn.list' })
   }
   for (const [value, why] of [
@@ -2121,6 +2905,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       ...(homeDir === undefined ? {} : { home_dir: homeDir }),
     },
   })
+  padChannelRepo(betaShared) // 下限补位：让目录集形状与真实渠道仓一致（预发线上下限只告警，但形状要一致）
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel('.picoaide-harness'))
   const betaSharedRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
   check(betaSharedRun.status === 0, 'beta 与官方正式版共用数据目录必须通过（预发版要延续既有会话与登录态）')
@@ -2170,6 +2955,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         desktop: { ...base, ...desktop },
       }))
     }
+    padChannelRepo(dir) // 下限补位（同上）：负例只测被测的那条规则
     return dir
   }
   const runOrigin = desktopByChannel => runChannels({
