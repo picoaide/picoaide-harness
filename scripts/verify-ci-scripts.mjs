@@ -1122,6 +1122,256 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   }
 }
 
+// ---- 1h. 渠道仓凭据形态:SSH deploy key（推荐形态）在**有 stderr 噪声**时也必须解析出 revision ----
+//
+// 现场（2026-09-24 第七轮审计 R7-D P1-1，已 REPRODUCED）：新增的推荐形态
+// （`CHANNELS_REPO_SSH_KEY`，只读 deploy key）在真实流水线上**必然失败** —— `--resolve-only`
+// 用 `REMOTE_OUT="$(git ls-remote … 2>&1)"` 把 git 的 stderr 并进被 `awk 'NR==1'` 解析的
+// 那条流，而 `prepare_channels_ssh` 每次新建**空的** known_hosts +
+// `StrictHostKeyChecking=accept-new` ⇒ openssh 首次连接**必然**往 stderr 打一行
+// `Warning: Permanently added '…' to the list of known hosts.` ⇒ `REV=Warning:` ⇒
+// `require_pin_shape` 判红并打印「渠道仓 pin 形状非法」—— 报错指向 pin、与真因毫无关系；
+// 而这一步是发布 tag 的 gate **第一步** ⇒ 三平台与 release 因 needs 全跳过 ⇒ **零交付**。
+// 当时本文件对 SSH 形态零覆盖（全文无 `SSH_KEY`/`ssh`），唯一的 `--resolve-only` 用例走
+// `CI_CHANNELS_URL` 指向本地仓库 ⇒ 不产生任何 stderr。
+//
+// 判据是**行为**而不是文本（夹具 = 假 `ssh` + 假 `git`，全走 PATH 替身，不碰网络）：
+//   (a) 正常：stdout 一行 `<sha>\tHEAD` + stderr 有 accept-new 告警 ⇒ EXIT=0 且 `channels_rev=<sha>`；
+//   (b) 凭据被拒（stderr 同时有 TOFU 告警）：`Permission denied (publickey)` ⇒ EXIT≠0、
+//       分类为「凭据被拒」、**不出现**「pin 形状非法」这种误导信息、TOFU 告警不进错误诊断、
+//       其余 stderr **原文**在日志里；deploy key 不回显；
+//   (c) 别的 stderr（`Could not resolve host`）⇒ 分类正确；令牌不回显（含令牌带 `@`、
+//       git 自己只剥到第一个 `@` 的形态）；
+//   (d) 主机键分支只留主机键处置（不得残留复制粘贴来的「网络不可达」）；
+//   (e) 静态面：`git ls-remote` 的捕获不得出现 `2>&1`、stderr 必须单独落文件；EXIT trap 只有一处。
+{
+  // 合成渠道仓（bare 形态：假 ssh 把它当远端，真 git 走完整的 ls-remote 协议）。
+  const origin = fixtureRepo()
+  fixtureCommit(origin, 'channels/official/README.md', 'first', '2026-09-01T10:00:00+08:00')
+  const bare = join(tempDir('ci-channels-bare-'), 'repo.git')
+  fixtureMustGit(origin, ['clone', '--bare', origin, bare])
+  const headRev = fixtureMustGit(bare, ['rev-parse', 'HEAD'])
+  check(/^[0-9a-f]{40}$/u.test(headRev), '夹具 bare 仓必须有一个 40 位 hex 的 HEAD')
+
+  const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  check(realGit !== '', '夹具需要 PATH 上的真 git（假 git 要转发 ls-remote 给它）')
+
+  const shimDir = tempDir('ci-channels-shim-')
+  const sshLog = join(tempDir('ci-channels-sshlog-'), 'ssh.log')
+  writeFileSync(sshLog, '')
+  // 假 ssh：复刻 OpenSSH 在 `accept-new` + **首次连接**（known_hosts 不存在/为空）时的行为 ——
+  // 先往 stderr 打主机键告警，再 exec 本地 `git-upload-pack <bare>` 把 ssh 远端调用变成本地
+  // 调用。**真正驱动 git 的是它**，所以 stdout/stderr 的分流是 git 的真实行为，而不是替身
+  // 自己编的。known_hosts 非空时不打告警（accept-new 的真实语义；也能发现"known_hosts 不再
+  // 每次新建"这类夹具前提变化）。
+  writeFileSync(join(shimDir, 'ssh'), [
+    '#!/usr/bin/env bash',
+    '# 假 ssh（PATH 替身，见 verify-ci-scripts.mjs 1h 的说明）。',
+    'set -uo pipefail',
+    'printf "%s %s\\n" "${FAKE_SSH_MODE:-ok}" "$*" >> "$FAKE_SSH_LOG"',
+    'mode="${FAKE_SSH_MODE:-ok}"',
+    'known_hosts=""',
+    'for arg in "$@"; do',
+    '  case "$arg" in UserKnownHostsFile=*) known_hosts="${arg#UserKnownHostsFile=}" ;; esac',
+    'done',
+    'if [ "$mode" != "hostkey" ] && [ -n "$known_hosts" ] && [ ! -s "$known_hosts" ]; then',
+    '  printf "%s\\n" "tofu-warning" >> "$FAKE_SSH_LOG"',
+    // 真 OpenSSH 的告警是 **CRLF** 结尾（本机真 ssh 实测 `hosts.\\r\\n`；见 ci-channels.sh
+    // 里那条 `tr -d '\\r'`）—— 夹具必须同形，否则"过滤/判断忘了归一化换行"这类缺口测不出来。
+    '  printf "%s\\r\\n" "$FAKE_SSH_TOFU_WARNING" >&2',
+    '  printf "%s\\n" "$FAKE_SSH_HOSTKEY_ENTRY" >> "$known_hosts"',
+    'fi',
+    'case "$mode" in',
+    '  ok) exec "$REAL_GIT" upload-pack "$FAKE_SSH_REPO" ;;',
+    '  denied) printf "%s\\n" "git@github.com: Permission denied (publickey)." >&2; exit 255 ;;',
+    '  hostkey) printf "%s\\n" "Host key verification failed." >&2; exit 255 ;;',
+    '  nodns) printf "%s\\n" "ssh: Could not resolve hostname github.com: Name or service not known" >&2; exit 255 ;;',
+    '  *) printf "%s\\n" "fake ssh: unknown mode" >&2; exit 255 ;;',
+    'esac',
+  ].join('\n') + '\n', { mode: 0o755 })
+  // 假 git：`pass` 把一切转发给真 git（由 ci-channels.sh 导出的 GIT_SSH_COMMAND 调用同目录的
+  // 假 ssh）；`echo-url` 直接回显消息后失败 —— 复刻 git 自己的错误文本（它会把 URL 打出来，
+  // 令牌带 `@` 时只剥到第一个 `@`），用来验证脱敏。
+  writeFileSync(join(shimDir, 'git'), [
+    '#!/usr/bin/env bash',
+    '# 假 git（PATH 替身，见 verify-ci-scripts.mjs 1h 的说明）。',
+    'set -uo pipefail',
+    'case "${FAKE_GIT_MODE:-pass}" in',
+    '  pass) exec "$REAL_GIT" "$@" ;;',
+    '  echo-url) printf "%s\\n" "$FAKE_GIT_STDERR" >&2; exit "${FAKE_GIT_EXIT:-128}" ;;',
+    '  *) printf "%s\\n" "fake git: unknown mode" >&2; exit 127 ;;',
+    'esac',
+  ].join('\n') + '\n', { mode: 0o755 })
+
+  // openssh 的原文（accept-new 首次连接）+ 一条假的 known_hosts 记录。
+  const tofuWarning = "Warning: Permanently added 'github.com' (ED25519) to the list of known hosts."
+  const keyMarker = 'FAKE-DEPLOY-KEY-MARKER-7d9c'
+  const resolveOnly = env => runChannels({
+    source: undefined,
+    refName: 'v9.9.9',
+    ref: 'refs/tags/v9.9.9',
+    dest: 'channels',
+    list: 'r7d.list',
+    args: ['--resolve-only'],
+    env: {
+      PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+      REAL_GIT: realGit,
+      FAKE_SSH_LOG: sshLog,
+      FAKE_SSH_REPO: bare,
+      FAKE_SSH_TOFU_WARNING: tofuWarning,
+      FAKE_SSH_HOSTKEY_ENTRY: 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfakefakefakefakefakefakefakefakefake',
+      CI_CHANNELS_REPO: 'local/repo',
+      ...env,
+    },
+  })
+
+  // (a) 正常形态：SSH deploy key + accept-new 的主机键告警都在场 ⇒ 仍必须解析出 revision。
+  //     这一条正是本缺陷的判据（把实现改回 `2>&1` 必红）。
+  {
+    const resolved = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_SSH_MODE: 'ok' })
+    const sshRuns = readFileSync(sshLog, 'utf8')
+    check(
+      sshRuns.split('\n').some(line => line.startsWith('ok ')),
+      '夹具前置：假 ssh 必须被真的调用过（git 通过 GIT_SSH_COMMAND 解析 PATH 上的 ssh）—— '
+        + '否则本用例是空断言，发现不了 stdout/stderr 合流',
+    )
+    check(
+      sshRuns.includes('tofu-warning'),
+      '夹具前置：首次连接必须真的产生了 accept-new 主机键告警（known_hosts 每次新建）—— '
+        + '没有这行噪声，本用例就没有判别力',
+    )
+    check(
+      resolved.status === 0,
+      `SSH deploy key 形态下 --resolve-only 应成功（主机键告警只该在 stderr），实际 ${String(resolved.status)}：${resolved.stderr}`,
+    )
+    const lines = (resolved.stdout ?? '').split('\n').filter(Boolean)
+    check(
+      lines.length === 1 && lines[0] === `channels_rev=${headRev}`,
+      `SSH 形态下 stdout 必须恰好一行 channels_rev=<HEAD sha>，实际 ${JSON.stringify(lines)}`
+        + '（stderr 的 ssh 告警混进被解析的流 ⇒ REV=Warning:）',
+    )
+    check(
+      !`${resolved.stderr ?? ''}`.includes('pin 形状非法'),
+      '不得把 stderr 告警当成 revision —— 「pin 形状非法」在真因是 stderr 合流时纯属误导',
+    )
+    check(
+      !`${resolved.stdout ?? ''}${resolved.stderr ?? ''}`.includes(keyMarker),
+      'deploy key 不得出现在任何输出里',
+    )
+  }
+
+  // (b) 凭据被拒（未注册的 deploy key / 失效的 PAT）：分类要指到凭据，且不得误导到 pin。
+  {
+    const denied = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_SSH_MODE: 'denied' })
+    const err = `${denied.stderr ?? ''}`
+    check(denied.status !== 0, '凭据被拒时 --resolve-only 必须非零退出')
+    check(err.includes('症状=凭据被拒'), `凭据被拒必须被分类（实际日志：${err}）`)
+    check(
+      !err.includes('pin 形状非法'),
+      '凭据被拒的诊断里不得出现「pin 形状非法」（解析与诊断分流后，失败路径根本走不到 pin 形状判据）',
+    )
+    check(
+      err.includes('Permission denied (publickey)'),
+      `其余 stderr 必须**原文**进日志（便于对照），实际日志：${err}`,
+    )
+    check(
+      !err.includes('Permanently added'),
+      'accept-new 的 TOFU 告警是正常副作用，不得混进失败诊断',
+    )
+    check(!err.includes(keyMarker), 'deploy key 不得随诊断回显')
+  }
+
+  // (c) 别的 stderr（网络不可达）：分类正确 + 令牌脱敏覆盖 `@` 形态。
+  {
+    const token = 'FAKEPAT1@FAKEPAT2'
+    const dnsFailure = resolveOnly({
+      CHANNELS_REPO_TOKEN: token,
+      FAKE_GIT_MODE: 'echo-url',
+      // git 自己的报错文本会回显 URL；带 `@` 的令牌形态下它只剥到第一个 `@`（R7-D P3-2）。
+      FAKE_GIT_STDERR: `fatal: unable to access 'https://x-access-token:FAKEPAT1@FAKEPAT2@github.com/local/repo.git/': `
+        + 'Could not resolve host: github.com',
+    })
+    const err = `${dnsFailure.stderr ?? ''}`
+    check(dnsFailure.status !== 0, 'ls-remote 失败必须非零退出')
+    check(err.includes('症状=网络不可达'), `Could not resolve host 必须分类为网络不可达（实际日志：${err}）`)
+    check(
+      !err.includes('FAKEPAT1') && !err.includes('FAKEPAT2'),
+      `令牌（含 @ 形态的尾部）不得回显，实际日志：${err}`,
+    )
+    check(err.includes('<redacted>@github.com'), `脱敏必须覆盖 https://<userinfo>@host 全形态，实际日志：${err}`)
+    check(!err.includes('x-access-token:FAKEPAT1'), 'x-access-token 字面形态也必须被吃掉')
+
+    // 同一条分类在 **SSH 形态**下也要成立（ssh 自己的 DNS 失败文案与 https 的措辞不同）。
+    const sshDns = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_SSH_MODE: 'nodns' })
+    const sshErr = `${sshDns.stderr ?? ''}`
+    check(sshDns.status !== 0, 'SSH 形态下 ls-remote 失败必须非零退出')
+    check(
+      sshErr.includes('症状=网络不可达'),
+      `SSH 形态的 Could not resolve host 同样必须分类为网络不可达（实际日志：${sshErr}）`,
+    )
+    check(!sshErr.includes(keyMarker), 'SSH 形态的诊断同样不得回显 deploy key')
+  }
+
+  // (d) 主机键分支：只留主机键处置（历史上这里复制粘贴多打了一行「网络不可达」，给出相反建议）。
+  {
+    const hostkey = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_SSH_MODE: 'hostkey' })
+    const err = `${hostkey.stderr ?? ''}`
+    check(hostkey.status !== 0, 'SSH 主机键校验失败必须非零退出')
+    check(err.includes('症状=SSH 主机键校验失败'), `主机键分支必须给出主机键处置（实际日志：${err}）`)
+    check(
+      !err.includes('症状=网络不可达'),
+      '主机键分支只留主机键处置（不得残留复制粘贴来的「网络不可达」行——它给的是相反的建议）',
+    )
+  }
+
+  // (f) 临时资源必须被**真的**清掉：SSH 私钥目录与 stderr 捕获文件都建在 TMPDIR 里，
+  //     跑完不许留（"唯一那处 EXIT trap"要真有效，而不只是结构上只有一处）。
+  //     这一条抓住过第一版实现的一个真缺陷：`X="$(new_temp_dir)"` 让登记发生在子 shell 里，
+  //     表恒空 ⇒ trap 什么都没删、私钥留在 runner 上。
+  {
+    const tmpRoot = tempDir('ci-channels-tmpdir-')
+    const cleaned = resolveOnly({ CHANNELS_REPO_SSH_KEY: keyMarker, FAKE_SSH_MODE: 'ok', TMPDIR: tmpRoot })
+    check(cleaned.status === 0, `清理用例的前置：SSH 形态下 --resolve-only 应成功（实际 ${String(cleaned.status)}）`)
+    const leftovers = readdirSync(tmpRoot)
+    check(
+      leftovers.length === 0,
+      `跑完 TMPDIR 必须为空（私钥目录 / stderr 捕获文件靠唯一那处 EXIT trap 清理），实际残留 ${JSON.stringify(leftovers)}`,
+    )
+  }
+
+  // (e) 静态面：解析只从 stdout 取 + 临时资源登记在当前 shell（不在子 shell）。
+  {
+    const text = readFileSync(channelsScript, 'utf8')
+    // 只看**代码行**：注释里会出现"错误写法"的字样（本文件就解释了为什么不能那么写）。
+    const codeLines = text.split('\n').filter(line => !line.trimStart().startsWith('#'))
+    // 只认**真的执行** `git ls-remote` 的行（命令替换），注释与错误文案里的字样不算。
+    const lsRemoteLines = codeLines.filter(line => /\$\(git ls-remote\b/u.test(line))
+    check(lsRemoteLines.length === 1, `ci-channels.sh 应只有一处 \`git ls-remote\` 捕获，实际 ${lsRemoteLines.length}`)
+    check(
+      !/2>&1/u.test(lsRemoteLines[0] ?? ''),
+      '`git ls-remote` 的捕获不得把 stderr 并进 stdout（`2>&1` 会让 ssh 的主机键告警被当成 revision）',
+    )
+    check(
+      /2>\s*"\$ERRFILE"/u.test(lsRemoteLines[0] ?? ''),
+      '`git ls-remote` 的 stderr 必须单独落文件（供失败诊断），stdout 只留 revision',
+    )
+    const exitTraps = text.split('\n').filter(line => /^\s*trap\s/u.test(line) && line.includes('EXIT'))
+    check(
+      exitTraps.length === 1,
+      `EXIT trap 必须只有一处（两处会互相替换 ⇒ 私钥/临时目录滞留在 runner 上），实际 ${exitTraps.length}：${JSON.stringify(exitTraps)}`,
+    )
+    check(
+      !codeLines.some(line => /\$\(new_temp_(?:dir|file)\)/u.test(line)),
+      '临时资源登记必须在**当前 shell** 里做：`X="$(new_temp_dir)"` 会让 `TEMP_PATHS+=` 丢在子 shell（登记表恒空 ⇒ 清理什么都不删）',
+    )
+    check(
+      codeLines.some(line => /new_temp_dir; CHANNELS_SSH_DIR="\$NEW_TEMP"/u.test(line))
+        && codeLines.some(line => /new_temp_dir; CLONE="\$NEW_TEMP"/u.test(line)),
+      'SSH 目录与克隆目录都必须走同一套临时资源登记（清理只在那唯一一处 trap 里做）',
+    )
+  }
+}
+
 // ---- 1d. WASM 门禁接线:真跑 W-4 判定脚本的**接线参数**(2026-09-23 审计 W-4/W-5) ----
 //
 // 现场:两条判据的脚本侧早就存在(`scripts/wasm/check-go-test-json.mjs` 与
@@ -2993,5 +3243,6 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
   + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
   + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
+  + '渠道仓 revision 解析的 stdout/stderr 分流(SSH deploy key 形态 + 失败分类 + 脱敏 + 唯一 EXIT trap)/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')
