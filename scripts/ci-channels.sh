@@ -12,12 +12,15 @@
 #   - 构建失败只报中性信息 —— 官方构建跑的是同一套代码路径,排查看官方那份日志。
 #
 # 用法:
+#   CHANNELS_REPO_SSH_KEY="$(cat key)" scripts/ci-channels.sh [--dest channels] [--list channels.list]
 #   CHANNELS_REPO_TOKEN=... scripts/ci-channels.sh [--dest channels] [--list channels.list]
 #   CHANNELS_REPO_TOKEN=... scripts/ci-channels.sh --resolve-only      # 只解析 revision
 #   CHANNELS_REPO_TOKEN=... scripts/ci-channels.sh --pin <sha> […]     # 按 pin 取
 #
 # 环境:
-#   CHANNELS_REPO_TOKEN   读私有渠道仓的令牌(细粒度 PAT,Contents:Read 即可)
+#   CHANNELS_REPO_SSH_KEY 读私有渠道仓的**只读 deploy key 私钥**（推荐：不过期、只对那一个仓；
+#                         给了它就忽略 CHANNELS_REPO_TOKEN）
+#   CHANNELS_REPO_TOKEN   读私有渠道仓的令牌(细粒度 PAT,Contents:Read 即可;兼容形态,会过期)
 #   GITHUB_REF            GitHub 注入的完整 ref(`refs/tags/…` / `refs/heads/…` /
 #                         `refs/pull/…`);**只有 `refs/tags/` 前缀才算 tag**,也是
 #                         `ci-release-policy.sh` 判形态与渠道集的唯一依据
@@ -93,14 +96,40 @@ stage_from() {
   cp -a "$src/channels/." "$DEST/"
 }
 
-# 克隆 URL:缺省 = 带只读令牌的 GitHub URL;`CI_CHANNELS_URL` 覆盖它(本地测试/自建镜像)。
+# 克隆 URL 与凭据（三选一，优先级从高到低）：
+#   1. `CI_CHANNELS_URL`（本地测试/自建镜像，自带凭据）；
+#   2. **SSH deploy key**（`CHANNELS_REPO_SSH_KEY`，2026-09-24 起支持）—— 组织内私有仓
+#      读取的推荐形态：只读、只对那一个仓、**不会过期**（PAT 会过期，本次事故就是
+#      单个人的细粒度 PAT 失效导致 tag 流水线在第一步静默失败）；
+#   3. `CHANNELS_REPO_TOKEN`（HTTPS + x-access-token，历史形态，保留兼容）。
 channels_url() {
   if [ -n "${CI_CHANNELS_URL:-}" ]; then
     printf '%s' "$CI_CHANNELS_URL"
     return 0
   fi
+  if [ -n "${CHANNELS_REPO_SSH_KEY:-}" ]; then
+    printf 'git@github.com:%s.git' "$REPO"
+    return 0
+  fi
   printf 'https://x-access-token:%s@github.com/%s.git' "${CHANNELS_REPO_TOKEN:-}" "$REPO"
 }
+
+# 把 deploy key 落成 600 的临时文件并装好 `GIT_SSH_COMMAND`（只在给了 key 时生效）。
+# `IdentitiesOnly=yes` 防止 runner 上别的 key 抢先；`accept-new` 是 TOFU（首次记录
+# github.com 的主机键），known_hosts 也落在临时目录里，不污染 runner 的 HOME。
+CHANNELS_SSH_DIR=""
+prepare_channels_ssh() {
+  [ -n "${CHANNELS_REPO_SSH_KEY:-}" ] || return 0
+  CHANNELS_SSH_DIR="$(mktemp -d)"
+  chmod 700 "$CHANNELS_SSH_DIR"
+  local key="$CHANNELS_SSH_DIR/id_ed25519"
+  # 允许 secret 里带结尾换行（`gh secret set < file` 就会带），统一归一化成一个 `\n`。
+  printf '%s\n' "${CHANNELS_REPO_SSH_KEY%$'\n'}" > "$key"
+  chmod 600 "$key"
+  export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$CHANNELS_SSH_DIR/known_hosts"
+  trap 'rm -rf "$CHANNELS_SSH_DIR"' EXIT
+}
+prepare_channels_ssh
 
 # pin 形状校验:只接受 40 位小写 hex(解析方给的就是 `git ls-remote` 的原样输出)。
 # 失败信息**不回显收到的值**(它可能来自被污染的 workflow 变量)。
@@ -115,14 +144,41 @@ require_pin_shape() {
 # 供 gate 一次性解析、四处调用点共用(2026-09-23 第五轮审计 R5-C-2)。stdout 只放
 # 那一行(`>> "$GITHUB_OUTPUT"` 直接消费),说明性文字一律走 stderr。
 if [ "$RESOLVE_ONLY" -eq 1 ]; then
-  if [ -z "${CHANNELS_REPO_TOKEN:-}" ] && [ -z "${CI_CHANNELS_URL:-}" ]; then
-    echo "::error::缺少 secret CHANNELS_REPO_TOKEN —— 无法读取私有渠道仓 ${REPO}" >&2
-    echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret" >&2
+  if [ -z "${CHANNELS_REPO_TOKEN:-}" ] && [ -z "${CI_CHANNELS_URL:-}" ] && [ -z "${CHANNELS_REPO_SSH_KEY:-}" ]; then
+    echo "::error::缺少读渠道仓的凭据（CHANNELS_REPO_TOKEN 或 CHANNELS_REPO_SSH_KEY）—— 无法读取私有渠道仓 ${REPO}" >&2
+    echo "::error::推荐形态是只读 SSH deploy key（secret CHANNELS_REPO_SSH_KEY，不过期、只对那一个仓）；" >&2
+    echo "::error::兼容形态是细粒度 PAT（secret CHANNELS_REPO_TOKEN，需该仓 Contents:Read，会过期）" >&2
     exit 1
   fi
-  REV="$(git ls-remote --quiet "$(channels_url)" HEAD 2>/dev/null | awk 'NR==1 {print $1}')"
+  # **失败不能沉默**（2026-09-23 现场）：secret 里的 token 失效时 `git ls-remote` 返回 128，
+  # 而 `set -e` 会在赋值处直接终止脚本；旧写法还把 stderr 丢进 `/dev/null` ⇒ CI 日志里
+  # 只剩一行 "exit code 128"，完全指不到病根（本次就是靠本机复现无效 token 的**同一返回码**
+  # 才反推出是凭据问题）。现在把 git 的 stderr 捕下来、**脱敏后**打进日志，并按症状分类：
+  # 凭据被拒 / 网络不可达 / 未分类，各自给可行动的处置。
+  if ! REMOTE_OUT="$(git ls-remote --quiet "$(channels_url)" HEAD 2>&1)"; then
+    REMOTE_ERR="$(printf '%s' "$REMOTE_OUT" | sed -E 's#(x-access-token:)[^@]*@#\1<redacted>@#g')"
+    echo "::error::读取私有渠道仓失败（git ls-remote 非零退出）：${REPO}" >&2
+    printf '%s\n' "$REMOTE_ERR" | sed 's/^/  /' >&2
+    case "$REMOTE_ERR" in
+      *"Invalid username or token"*|*"鉴权失败"*|*"Authentication failed"*|*"could not read Username"*|*"Permission denied (publickey)"*)
+        echo "::error::症状=凭据被拒 ⇒ 渠道仓凭据（CHANNELS_REPO_SSH_KEY 的 deploy key 是否仍在该仓 / CHANNELS_REPO_TOKEN 是否失效或权限不含 Contents:Read）——凭据值不回显；更新 secret 后重跑本 job" >&2
+        ;;
+      *"Could not resolve host"*|*"Connection timed out"*|*"unable to access"*|*"The requested URL returned error: 5"*)
+        echo "::error::症状=网络不可达/服务端 5xx ⇒ 先重跑本 job；持续失败再查 runner 出网与 GitHub 状态" >&2
+        ;;
+      *"Host key verification failed"*|*"REMOTE HOST IDENTIFICATION HAS CHANGED"*)
+        echo "::error::症状=SSH 主机键校验失败 ⇒ 清理 runner 的 known_hosts 或检查 GIT_SSH_COMMAND（本脚本用临时 known_hosts + accept-new）" >&2
+        echo "::error::症状=网络不可达/服务端 5xx ⇒ 先重跑本 job；持续失败再查 runner 出网与 GitHub 状态" >&2
+        ;;
+      *)
+        echo "::error::症状未分类 ⇒ 看上面的原始 stderr（已脱敏；token 不会回显）" >&2
+        ;;
+    esac
+    exit 1
+  fi
+  REV="$(printf '%s\n' "$REMOTE_OUT" | awk 'NR==1 {print $1}')"
   if [ -z "$REV" ]; then
-    echo "::error::无法解析渠道仓 revision(检查 CHANNELS_REPO_TOKEN 与网络)" >&2
+    echo "::error::渠道仓返回空 revision（HEAD 不存在？）：${REPO}" >&2
     exit 1
   fi
   require_pin_shape "$REV"
@@ -134,9 +190,10 @@ fi
 if [ -n "$SOURCE" ]; then
   stage_from "$SOURCE"
 else
-  if [ -z "${CHANNELS_REPO_TOKEN:-}" ] && [ -z "${CI_CHANNELS_URL:-}" ]; then
-    echo "::error::缺少 secret CHANNELS_REPO_TOKEN —— 无法读取私有渠道仓 ${REPO}" >&2
-    echo "::error::请创建一个只读该仓 Contents 的 fine-grained PAT,并添加为仓库 secret" >&2
+  if [ -z "${CHANNELS_REPO_TOKEN:-}" ] && [ -z "${CI_CHANNELS_URL:-}" ] && [ -z "${CHANNELS_REPO_SSH_KEY:-}" ]; then
+    echo "::error::缺少读渠道仓的凭据（CHANNELS_REPO_TOKEN 或 CHANNELS_REPO_SSH_KEY）—— 无法读取私有渠道仓 ${REPO}" >&2
+    echo "::error::推荐形态是只读 SSH deploy key（secret CHANNELS_REPO_SSH_KEY，不过期、只对那一个仓）；" >&2
+    echo "::error::兼容形态是细粒度 PAT（secret CHANNELS_REPO_TOKEN，需该仓 Contents:Read，会过期）" >&2
     exit 1
   fi
   # **发布 tag 上必须 pin**(2026-09-23 第五轮审计 R5-C-2):pin 由 gate 的
@@ -156,7 +213,7 @@ else
   # 上一轮内容会让后续步骤照常跑完 —— 那正是"静默发错镜像"的来源。
   # 取失败即中止,不留可被误用的半成品。
   CLONE="$(mktemp -d)"
-  trap 'rm -rf "$CLONE"' EXIT
+  trap 'rm -rf "$CLONE" ${CHANNELS_SSH_DIR:+"$CHANNELS_SSH_DIR"}' EXIT
   rm -rf "$DEST" 2>/dev/null || true
   if [ -n "$PIN" ]; then
     require_pin_shape "$PIN"
@@ -166,7 +223,7 @@ else
     # 退回全量 fetch(二者都失败即中止)。
     if ! git -C "$CLONE" fetch --quiet --depth 1 origin "$PIN" 2>/dev/null; then
       if ! git -C "$CLONE" fetch --quiet origin; then
-        echo "::error::无法取回渠道仓的 pin commit(检查 CHANNELS_REPO_TOKEN 与网络)" >&2
+        echo "::error::无法取回渠道仓的 pin commit(检查渠道仓凭据 CHANNELS_REPO_SSH_KEY / CHANNELS_REPO_TOKEN 与网络)" >&2
         exit 1
       fi
     fi
@@ -187,7 +244,7 @@ else
     echo "channel packages pinned at ${PIN}"
   else
     if ! git clone --depth 1 --quiet "$(channels_url)" "$CLONE"; then
-      echo "::error::无法克隆私有渠道仓 ${REPO}(检查 CHANNELS_REPO_TOKEN 是否有效/是否只读该仓)" >&2
+      echo "::error::无法克隆私有渠道仓 ${REPO}(检查渠道仓凭据 CHANNELS_REPO_SSH_KEY / CHANNELS_REPO_TOKEN 是否有效/是否只读该仓)" >&2
       exit 1
     fi
     stage_from "$CLONE"

@@ -178,8 +178,24 @@ const URL_FIELD = '_url'
  * The OAuth provider the transport was constructed with. It carries the
  * allowed-origin scope (`outbound.ts`), which is the only trusted answer to
  * "which hosts may this connector's credential reach".
+ *
+ * Only set when the SDK's `isOAuthClientProvider` predicate classified the
+ * argument as an OAuth provider. Our production construction passes the
+ * `AuthProvider` face instead (see `createOAuthProvider`: an OAuth-classified
+ * provider loses our 401 hook to `adaptOAuthProvider`), and in that shape the
+ * SAME provider object — scope attached — sits in this field:
  */
 const OAUTH_PROVIDER_FIELD = '_oauthProvider'
+/**
+ * The provider slot the transport uses when it was handed an `AuthProvider`
+ * rather than an `OAuthClientProvider` (the production shape since
+ * 2026-09-24). Both slots hold our provider object with the origins attached,
+ * so the scope lookup must read whichever one this build filled in; reading
+ * only the OAuth slot would silently drop the connector's origin allow-list
+ * (the CN-2 control: a refresh may only reach the DEFINITION's authorization
+ * server) for every production transport.
+ */
+const AUTH_PROVIDER_FIELD = '_authProvider'
 /**
  * Outbound entry points of the v2 streamable-http transport.
  *
@@ -619,7 +635,10 @@ function hardenTransport(transport: object, locale: () => HostLocale = () => DEF
   // a wrapper cannot take them back out again.
   const provided = fields[FETCH_FIELD]
   const base: FetchLike = typeof provided === 'function' ? provided as FetchLike : globalFetch
-  const scope = fields[OAUTH_PROVIDER_FIELD]
+  // The credential's allowed-origin scope: whichever provider slot this SDK
+  // build filled in (OAuth-classified arguments land in the first, our own
+  // `AuthProvider` face in the second — see the field docs above).
+  const scope = fields[OAUTH_PROVIDER_FIELD] ?? fields[AUTH_PROVIDER_FIELD]
   fields[FETCH_WITH_INIT_FIELD] = createMcpOutboundFetch({
     base,
     ownUrl,

@@ -590,6 +590,42 @@ OIDC 流程桶把"自身在途配额满"的 429 也计入失败预算（NAT 出�
    而常红的终点通常是整条判据被关掉；正确做法是**登记 + 可证伪的伴随判据**，不是放宽主规则、也不是删用例。
 3. **审计"上一轮修复自身"连续三轮都是最高价值的入口**（第三轮 5/7、第五轮 R5-D 4 条、第六轮 R6-B-1 的破坏性动作）。
 
+### 7.40b 发布前最后一段：三条"只有真跑 CI 才会暴露"的问题（2026-09-24）
+
+第六轮修复批合并进 master 之后，tag 流水线在**第一步**就红，暴露了三类此前所有本地门禁都测不到的问题。它们不是审计发现的，
+而是"把版本真的发出去"这个动作发现的 —— 记在这里，作为下一轮审计的入口。
+
+1. **渠道仓凭据失效 ⇒ 流水线静默 128**：`scripts/ci-channels.sh` 的 `--resolve-only` 把 `git ls-remote` 的 stderr 丢进
+   `/dev/null`，`set -e` 又在赋值处直接终止脚本 ⇒ CI 日志里只剩一行 `exit code 128`，人写的那句"检查 CHANNELS_REPO_TOKEN 与网络"
+   **永远不会执行**。本机用无效 token 复现出**完全相同的 128**，才反推出是凭据问题（原 PAT 在 16:54 还工作、19:58 已失效）。
+   修：捕获 git 的 stderr、**脱敏后**（`x-access-token:<redacted>@`）打进日志，并按症状分类（凭据被拒 / 网络或 5xx / SSH 主机键 /
+   未分类）；同时给凭据形态补上**只读 deploy key（SSH）**一档（组织内私有仓读取的推荐形态：不过期、只对那一个仓），
+   优先级 `CI_CHANNELS_URL` > `CHANNELS_REPO_SSH_KEY` > `CHANNELS_REPO_TOKEN`。
+2. **连接器真机集成用例在 CI 上约 50% 红（本地 12/12 绿）**：`tests/audit-e2e-real-server.spec.ts` 的
+   `recovers mid-session from a server-side token expiry by refreshing`，报 `SdkHttpError: Server returned 401 after re-authentication`。
+   读 pinned SDK 的实现后定位：`StreamableHTTPClientTransport._send` 在 401 时走**文档化的 `authProvider.onUnauthorized()` 钩子**
+   然后**只重试一次**；我们没实现该钩子 ⇒ 走 SDK 自己的 `refreshAuthorization`（模块级函数，**不在**我们的 per-id 单飞里），
+   并发 401 会各自刷一次 ⇒ 启用轮换复用检测的授权服务器吊销授权、其中一个 client 的重试仍带旧令牌。
+   修：实现 `onUnauthorized` —— **强制**走我们的单飞刷新（`expiresAt` 还在未来也要刷：401 是"必须刷新"的信号，不是看时钟），
+   成功后 `adopt` 进 provider 的活视图；失败/无材料只记日志、不抛穿（保持 SDK 既有错误码）；回归判据=并发两次 401
+   恰好一次 `refresh_token` 授权且 `revokedRefreshReuse === 0`。
+3. **"零用例级 skip"的判据在 CI 上必然误红**：`scripts/wasm/check-go-test-json.mjs` 按 `--scope internal/wasmapp,...` 判"范围内
+   任何用例级 skip 即失败"，而 `internal/wasmapp/compile` 有 5 条**需要 bwrap** 的端到端用例，GitHub runner 上没有可用 bwrap
+   ⇒ 它们每次都 skip（失败 run 的 artifact 实测：pass 4131 / fail 0 / skip 14，范围内正是这 5 条）⇒ `Go server` job 从接线起
+   每轮必红，而 `go test` 本身 fail=0。修：新增**环境条件型**登记档，每条必须给 `requires` + `companion`（同能力面的形状判据，
+   不需要该能力）+ `reason`，且**只有 companion 在同一份报告里真的 pass 才接受该 skip** —— 于是"整包静默跳过"仍会被抓住
+   （三条反向对照：companion 不 pass / 登记项改名 / 范围内多一条未登记 skip，全部 exit 1；本机有 bwrap 时它们真跑并 pass，
+   判定仍 exit 0，不制造新的"本机反而红"）。
+
+**判定口径（本轮新增）**
+1. **"本地跑不出来"不等于"不是缺陷"**：这三条里有两条**只**在 CI 的时序/环境上出现（连接器并发 401、runner 无 bwrap）。
+   发布链路上的问题必须**在真实流水线上验证**，本地绿不能替代；反过来，能在本地复现的形态（无效 token ⇒ 同一个 128）
+   要当成"把 CI 现象搬到本地"的证据来用。
+2. **守卫接线要问"这台机器上它必然跳过吗 / 它必然满足吗"**：把"零 skip"套到一个在 CI 环境里必然拿不到能力的用例集合上，
+   等于制造常红，而常红的终点通常是整条判据被关掉。正确做法是**登记 + 可证伪的伴随判据**。
+3. **静默的失败信息本身就是缺陷**：`2>/dev/null` + `set -e` 的组合把"凭据失效"变成"exit code 128"，让一次发布会诊花掉
+   数小时。凡是"外部命令失败即中止"的分支，都必须把**脱敏后的**原始错误打进日志并给出可行动的处置分类。
+
 ### 7.4 收敛判定
 
 **判定：未达成"连续两轮独立审计零新增 P0/P1"。** 第一轮 6 P0 + 66 P1、第二轮 1 P0 + 15 P1、第三轮 0 P0 + 19 P1、**第四轮 0 P0 + 8 P1**（R4-A 7 / R4-D 1；另 28 P2 + 31 P3），外加**一条生产现场发现的 P0**（编译缓存自锁，§7.38）—— 四轮都不是干净轮，按口径干净的一对必须顺延到第五、六轮。**第四轮的结构性意义**：它证明"第三轮的新增守卫自身"也需要被审计（R4-A 的 7 条 P1 有 5 条正是**第三轮刚修/刚加的判据**的覆盖面缺口），而"活锁/自愈"是一整类此前完全没有判据的缺陷。

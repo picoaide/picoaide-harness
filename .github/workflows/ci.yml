@@ -248,6 +248,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
+          # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
+          CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
         run: bash scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
       # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
       # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
@@ -623,6 +626,9 @@ jobs:
         if: ${{ !github.event.pull_request.head.repo.fork }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
+          # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
+          CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
@@ -773,6 +779,9 @@ jobs:
         shell: bash
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
+          # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
+          CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
@@ -961,6 +970,9 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
+          # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
+          CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}
@@ -1127,6 +1139,9 @@ jobs:
       - name: Fetch channel packages (private repo)
         env:
           CHANNELS_REPO_TOKEN: ${{ secrets.CHANNELS_REPO_TOKEN }}
+          # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
+          # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
+          CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
           # 渠道仓 revision:由 gate 解析一次,四处调用点共用同一个 commit
           # (2026-09-23 第五轮审计 R5-C-2:同一次 tag 的包内客户端与镜像内渠道内容必须同源)。
           CI_CHANNELS_PIN: ${{ needs.gate.outputs.channels_rev }}

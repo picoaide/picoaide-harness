@@ -474,9 +474,11 @@ function describeRedirect(response: Response): string {
  * (`WWW-Authenticate: resource_metadata`, then `authorization_servers[0]`).
  * The only component that knows the policy-checked authorization-server facts
  * is the OAuth provider, so the provider attaches them to itself
- * ({@link attachOutboundOrigins}) and the fence reads them back off
- * `transport._oauthProvider` ({@link allowedOutboundOriginsOf}). A `Symbol`
- * keeps this out of the provider's public shape and out of JSON.
+ * ({@link attachOutboundOrigins}) and the fence reads them back off the
+ * transport's provider slot — `_oauthProvider` when the SDK adapted an OAuth
+ * provider, `_authProvider` for the `AuthProvider` face the production
+ * construction passes ({@link allowedOutboundOriginsOf}). A `Symbol` keeps
+ * this out of the provider's public shape and out of JSON.
  */
 export const OUTBOUND_ALLOWED_ORIGINS = Symbol('picoaide.connectors.outbound.allowed-origins')
 
