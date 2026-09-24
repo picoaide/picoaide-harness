@@ -1044,6 +1044,60 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   )
 
   // -------------------------------------------------------------------------
+  // **全部 16 条**根守卫的逐字登记（2026-09-25 第九轮审计 B 泳道 P1-5 的第二判据）。
+  //
+  // 现场：上面那几条只把 **6 条**守卫钉到了具体脚本文件，其余 10 条（含 `check:workflows`
+  // 自己、`check:ci-scripts`、`check:inventories`、`check:patches`…）**没有第二判据** ——
+  // 把 `package.json` 里任意一条的脚本体换成另一个"能通过"的守卫（名字、argv、
+  // 形态三者全对），`check-root-guards.mjs` 会照报 `✓ <名字>`，而这一条门禁看不出区别。
+  // 实测：正在失败的 `check:theme-tokens` 被重定向到 `node scripts/check-workflows.mjs`
+  // 之后转绿，输出仍是「16 个根守卫：16 通过」。
+  //
+  // 这张表**刻意独立写一份**（不 import `check-root-guards.mjs` 的
+  // `REGISTERED_GUARD_ENTRIES`）：第二判据的价值就是"两处同时被改才会静默"，导入等于把
+  // 两个判据合并成一个。两侧还各自对拍编排器表（成员身份 + 非 advisory）。
+  // -------------------------------------------------------------------------
+  const REGISTERED_GUARD_SCRIPTS = new Map([
+    ['check:layout', 'node scripts/verify-layout.mjs'],
+    ['check:workflows', 'node scripts/check-workflows.mjs'],
+    ['check:ci-scripts', 'node scripts/verify-ci-scripts.mjs'],
+    ['check:patch-resolutions', 'node scripts/verify-patch-resolutions.mjs'],
+    ['check:patch-pin', 'node scripts/check-patch-pin.mjs'],
+    ['check:patches', 'node scripts/verify-patches.mjs'],
+    ['check:inventories', 'node scripts/verify-inventories.mjs'],
+    ['check:theme-tokens', 'node scripts/check-theme-tokens.mjs'],
+    ['check:glitchtip', 'node scripts/verify-glitchtip-ops-check.mjs'],
+    ['check:check-workspaces', 'node scripts/verify-check-workspaces.mjs'],
+    ['check:no-leftover-mutants', 'node scripts/check-no-leftover-mutants.mjs'],
+    ['check:migration-range', 'node scripts/check-migration-range.mjs'],
+    ['check:doc-claims', 'node scripts/check-doc-claims.mjs'],
+    ['check:no-real-domains', 'node scripts/check-no-real-domains.mjs'],
+    ['check:wasm-client-only', 'bash scripts/verify-wasm-client-only.sh'],
+    ['check:integration-tests', 'node scripts/check-integration-tests.mjs'],
+  ])
+  const listedGuards = new Set([...guardNames, ...advisoryNames])
+  for (const [name, script] of REGISTERED_GUARD_SCRIPTS) {
+    check(
+      pkg.scripts?.[name] === script,
+      `接线: package.json 的 ${name} 必须**逐字**等于 ${JSON.stringify(script)}`
+        + `（实际 ${JSON.stringify(pkg.scripts?.[name])}）—— "跑一个脚本"这个形态不够，`
+        + '必须是那一个：重定向到别的守卫时名字与 argv 都不动，运行器照报 `✓` 而判据一次没跑',
+    )
+    check(
+      blockingGuard(name),
+      `接线: check-workspaces 的 GUARDS 表必须包含 ${name} **且它不得是 advisory**，实际 ${JSON.stringify(guardLine)}`,
+    )
+  }
+  // 双向：编排器表里出现却没登记的守卫同样红（新守卫必须登记进这张表 + 根守卫运行器的表）。
+  const unregisteredGuards = [...listedGuards].filter(name => !REGISTERED_GUARD_SCRIPTS.has(name))
+  check(
+    unregisteredGuards.length === 0,
+    `接线: 编排器表里的这些守卫没有登记脚本路径：${unregisteredGuards.join(', ')}`
+      + ' ⇒ 新增根守卫必须同时登记进本文件的 REGISTERED_GUARD_SCRIPTS 与 '
+      + 'scripts/check-root-guards.mjs 的 REGISTERED_GUARD_ENTRIES（两张表独立对拍才有意义）',
+  )
+
+  // -------------------------------------------------------------------------
   // advisory **登记制**的第二条独立通道（2026-09-23 第六轮审计 R6-C-1）。
   //
   // 现场：`advisory: true` 曾是一个无判据的红→绿开关 —— `check-workspaces --list`、
@@ -1100,7 +1154,14 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
       writeFileSync(join(probeTree, 'scripts', 'check-workspaces.mjs'), mutatedSource)
       copyFileSync(rootGuardsPath, join(probeTree, 'scripts', 'check-root-guards.mjs'))
       writeFileSync(join(probeTree, 'package.json'),
-        `${JSON.stringify({ name: 'advisory-probe', private: true, scripts: { [guardName]: 'node scripts/noop.mjs' } }, null, 2)}\n`)
+        // 脚本体必须写**真实登记值**（第九轮审计 B 泳道 P1-5 之后 `check-root-guards.mjs`
+        // 会把脚本体与登记值逐字对拍）：`node scripts/noop.mjs` 这种替身会让"正控必须 exit 0"
+        // 被那条**与本探针无关**的判据染红，探针就测不到自己那条（假红）。
+        `${JSON.stringify({
+          name: 'advisory-probe',
+          private: true,
+          scripts: { [guardName]: pkg.scripts?.[guardName] ?? 'node scripts/noop.mjs' },
+        }, null, 2)}\n`)
       const orchestratorProbe = spawnSync(process.execPath, [join(probeTree, 'scripts', 'check-workspaces.mjs'), '--list'],
         { cwd: probeTree, encoding: 'utf8' })
       check(orchestratorProbe.status === 2,
@@ -1181,10 +1242,11 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
         writeFileSync(join(probeTree, 'package.json'),
           // 根守卫还会断言"表里的守卫都必须是**这棵树**的 package.json scripts" ⇒ 合成树要把
           // 真表的守卫名全登记上，否则正控（必须 exit 0）会被那条无关判据染红。
+          // 取值用**真实登记值**（同上：脚本体要逐字等于 `REGISTERED_GUARD_ENTRIES`）。
           `${JSON.stringify({
             name: 'advisory-expiry-probe',
             private: true,
-            scripts: Object.fromEntries(guardNames.map(name => [name, 'node scripts/noop.mjs'])),
+            scripts: Object.fromEntries(guardNames.map(name => [name, pkg.scripts?.[name] ?? 'node scripts/noop.mjs'])),
           }, null, 2)}\n`)
         const expected = sample.legal ? 0 : 2
         const label = `expiresOn=${JSON.stringify(sample.value)}`

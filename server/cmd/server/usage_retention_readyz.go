@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
@@ -94,6 +95,15 @@ func (r *readyzRecorder) statusCode() int {
 //
 // 返回 ok=false 表示**不能合并**（响应体不是 JSON 对象 / 序列化失败）——调用方
 // 原样透传：探针的既有契约优先于新增字段，绝不因为加字段而让探针变成坏响应。
+//
+// R9-D R9D-09（P3）：实现从"map 往返 + 重新 Marshal"改成**在原文里插入一个成员**，
+// 因为 map 往返有两个可观察的副作用（都改变了对外的**字节形态**）：
+//
+//   - 键序从生产内层的**声明序**变成**字典序**（探针/运维脚本按字节对比时全是噪音）；
+//   - 生产内层由 `json.NewEncoder(w).Encode` 产出，**结尾带一个 \n**，往返后丢失。
+//
+// 现在：只在最后一个 `}` 之前插入 `,"usage_retention":<raw>`，其余字节（含尾随空白
+// 与换行）逐字保留。仍然先做一次对象合法性检查 —— 不是 JSON 对象就原样透传。
 func mergeUsageRetentionField(body []byte, st serverstore.UsageRetentionStatus) ([]byte, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
@@ -103,10 +113,43 @@ func mergeUsageRetentionField(body []byte, st serverstore.UsageRetentionStatus) 
 	if err != nil {
 		return nil, false
 	}
-	obj[usageRetentionField] = raw
-	out, err := json.Marshal(obj)
-	if err != nil {
+	end := -1
+	for i := len(body) - 1; i >= 0; i-- {
+		switch body[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '}':
+			end = i
+		}
+		break
+	}
+	if end < 0 {
 		return nil, false
 	}
+	open := -1
+	for i := 0; i < end; i++ {
+		switch body[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{':
+			open = i
+		}
+		break
+	}
+	if open < 0 {
+		return nil, false
+	}
+	sep := ","
+	if strings.TrimSpace(string(body[open+1:end])) == "" {
+		sep = "" // 空对象：不要多一个逗号
+	}
+	out := make([]byte, 0, len(body)+len(raw)+len(usageRetentionField)+4)
+	out = append(out, body[:end]...)
+	out = append(out, sep...)
+	out = append(out, '"')
+	out = append(out, usageRetentionField...)
+	out = append(out, '"', ':')
+	out = append(out, raw...)
+	out = append(out, body[end:]...)
 	return out, true
 }

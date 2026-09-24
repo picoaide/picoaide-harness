@@ -240,9 +240,16 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 	cacheIn := ModelCachePriceForProvider(db, providerID, model)
 	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
 	// 分区写路径:确保 now 所属月份分区存在(幂等 CREATE TABLE IF NOT EXISTS)。
+	//
+	// R9-D R9D-00(P0):这一步失败 = **当月每一次对话**都会被网关 503 METERING_FAILED
+	// 拒掉(fail-closed,不交付)。所以失败必须同时记进**可观测面**(/readyz 的
+	// usage_retention.write_blocked_*),不能只留一行日志 —— 此前"当月全站不可用"
+	// 与"一切正常"在所有健康出口上逐字同形。
 	if err := ensureUsagePartition(db, now); err != nil {
+		noteUsagePartitionWriteFailure(now, err)
 		return 0, fmt.Errorf("ensure usage partition: %w", err)
 	}
+	noteUsagePartitionWriteOK(now)
 	// created_at 显式 = now(请求时刻):与 cost 计费时点同源,回填时使用该
 	// 时刻折价(审计修复 2026-P M4:跨高峰/空闲边界的流式请求按发起时点计价)。
 	//

@@ -46,6 +46,19 @@
  *   [SK-14] **被钉住的判据步骤必须可执行** —— 给步骤加一行 `if: false`(`run` 一字不改)
  *           即可让整套 Go 测试 / 守卫结果链路静默不跑,而 SK-8/SK-9/SK-12 只问"文本在不在"。
  *
+ * 2026-09-25 第九轮审计 D/B 泳道再补两条(同一面的两个方向:放走恶意形态 + 误伤合法写法):
+ *   [SK-17] **进程环境层** —— `env:` 不是 `if:`/argv/`shell:`/步骤体,[SK-14] 的四条判据都
+ *           读不到它。给"永不跳过"的 `gate-guards` 加一行
+ *           `NODE_OPTIONS: "--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+ *           (或 `BASH_ENV: ./.github/shell-hooks.sh`)就能让 16 个根守卫**零执行**而门禁 EXIT=0。
+ *           现在三层 `env:`(workflow / job / step)与 `$GITHUB_ENV`/`$GITHUB_PATH` 的**键名**
+ *           一起判:被钉步骤/根守卫 job 上不得出现改写解释器行为的键。
+ *   [SK-14⑦/⑧ + SK-15] **命令位与整串判据** —— "文本里出现某串"不等于"它被执行":
+ *           `: scripts/check-root-guards.mjs` / `test -f …` / `echo "node …"` 三行 no-op 让
+ *           守卫零执行;`shell: bash -c 'exit 0' {0}` 让脚本体从不执行;发布链 `require` 的
+ *           子串匹配让 R2 上传步 `echo` 化后照样"命中登记"。三者改成命令位/整串判据。
+ *           同批收掉第八轮新引入的三条**假红**(子 shell 收尾 / 重定向当参数 / env 说明文本)。
+ *
  * 用法:node scripts/check-workflows.mjs
  * 退出码:0 = 全部通过;1 = 有块解析失败、策略违规或扫描器退化。
  */
@@ -76,8 +89,8 @@ const NON_POSIX_SHELLS = /^(pwsh|powershell|cmd|python|node)\b/iu
 const BLOCK_SCALAR = /^(\s*)run:\s*([|>])[-+]?\s*$/u
 /** 内联 `run: <命令>`。 */
 const INLINE_RUN = /^(\s*)run:\s*(\S.*)$/u
-/** `shell: <名字>`。 */
-const SHELL_KEY = /^(\s*)shell:\s*(\S+)\s*$/u
+/** `shell: <名字>` —— 取**整值**(第九轮审计 B 泳道 P1-3:只看第一个词会让 `bash -c 'exit 0' {0}` 与 `bash` 等价)。 */
+const SHELL_KEY = /^(\s*)shell:\s*(\S.*?)\s*$/u
 /** `defaults:`(job 级 / workflow 级):只有它下面的 `shell:` 才是默认 shell(R8-D-24)。 */
 const DEFAULTS_KEY = /^(\s*)defaults:\s*$/u
 /** 中转脚本需要的凭据环境变量(aws CLI 认 AWS_*,R2_* 供端点/桶名/HMAC 种子)。 */
@@ -189,7 +202,7 @@ export function extractRunBlocks(text) {
     if (shellMatch !== null) {
       const indent = shellMatch[1].length
       if (jobDefaultsIndent !== undefined && indent > jobDefaultsIndent) {
-        jobDefaultShell = shellMatch[2]
+        jobDefaultShell = normalizeShellValue(shellMatch[2])
       }
       continue
     }
@@ -300,9 +313,28 @@ function nearestShell(lines, runIndex, fallback) {
     const indent = line.length - line.trimStart().length
     if (indent < runIndent) break // 越过了本 step 的起点
     const match = SHELL_KEY.exec(line)
-    if (match !== null && match[1].length === runIndent) return match[2]
+    if (match !== null && match[1].length === runIndent) return normalizeShellValue(match[2])
   }
   return fallback ?? 'bash'
+}
+
+/**
+ * `shell:` 的取值归一:去 YAML 注释、去包裹引号、折叠空白。
+ *
+ * 为什么必须有它(第九轮审计 B 泳道 P1-3):`SHELL_KEY` 现在取**整值**,所以
+ * `shell: bash -e {0}   # 官方模板` 这种写法会连注释一起进来 —— 归一后两条口径
+ * (`extractRunBlocks` 的块级解析 vs YAML 解析出的 `step.shell`)才逐字可比。
+ * @param value - `shell:` 后面的原文。
+ * @returns 归一后的整串取值。
+ */
+function normalizeShellValue(value) {
+  const text = typeof value === 'string' ? value : ''
+  return text
+    .replace(/\s+#.*$/u, '')
+    .trim()
+    .replace(/^["'](.*)["']$/u, '$1')
+    .replace(/\s+/gu, ' ')
+    .trim()
 }
 
 /**
@@ -419,7 +451,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -472,6 +504,38 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'v6-github-env-split-literal', policy: '[SK-16]' },
   { id: 'v7-github-env-dynamic-injection', policy: '[SK-16]' },
   { id: 'v8-workflow-env-unrelated-green', policy: null },
+  // ---- [SK-17] 进程环境层(2026-09-25 第九轮审计 D 泳道 P1)----
+  // 形态 A/B 的最小复现文本 + 同族键 + 三处 `env:` 位置 + `$GITHUB_ENV`/`$GITHUB_PATH`,
+  // 以及两条**必须保持绿**的对照(合法 env / 非判据步骤上的 NODE_OPTIONS)。
+  { id: 'w1-node-options-guard-job-env', policy: '[SK-17]' },
+  { id: 'w2-bash-env-guard-step-env', policy: '[SK-17]' },
+  { id: 'w3-node-options-workflow-env', policy: '[SK-17]' },
+  { id: 'w4-github-env-node-options', policy: '[SK-17]' },
+  { id: 'w5-bash-func-guard-step-env', policy: '[SK-17]' },
+  { id: 'w6-github-path-append', policy: '[SK-17]' },
+  { id: 'w7-pinned-link-step-shellopts', policy: '[SK-17]' },
+  { id: 'w8-pinned-full-gate-node-options', policy: '[SK-17]' },
+  { id: 'w9-guard-env-key-case-variant', policy: '[SK-17]' },
+  { id: 'w10-guard-env-legit-keys-green', policy: null },
+  { id: 'w11-unpinned-step-node-options-green', policy: null },
+  { id: 'w12-unpinned-github-path-green', policy: null },
+  // ---- 第九轮审计 B 泳道的 5 条 P1 + 3 条假红(同属"判据只看文本、不看执行语义")----
+  { id: 'x1-guard-runner-colon-noop', policy: '[SK-9]' },
+  { id: 'x2-guard-runner-test-f', policy: '[SK-9]' },
+  { id: 'x3-guard-runner-echo-literally', policy: '[SK-9]' },
+  { id: 'x4-link-shell-template-noop', policy: '[SK-14]' },
+  { id: 'x5-full-gate-shell-template-noop', policy: '[SK-14]' },
+  { id: 'x6-link-indirect-trap', policy: '[SK-14]' },
+  { id: 'x7-link-trap-substitution', policy: '[SK-14]' },
+  { id: 'x8-release-require-echo-noop', policy: '[SK-15]' },
+  { id: 'x8b-release-require-command-green', policy: null },
+  { id: 'x9-shell-template-script-arg-green', policy: null },
+  { id: 'x10-link-subshell-tail-green', policy: null },
+  { id: 'x11-link-trap-cleanup-green', policy: null },
+  { id: 'x12-guard-runner-redirect-tee-green', policy: null },
+  { id: 'x13-guard-runner-redirect-null-green', policy: null },
+  { id: 'x14-workflow-env-lookalike-green', policy: null },
+  { id: 'x15-workflow-env-other-flag-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -726,6 +790,11 @@ export function checkWorkflowText(name, text, options = {}) {
   // "形态"两条判据之间:文本在、内容对,就是永不执行)。
   const pinnedSteps = checkPinnedStepExecutability(name, document, blocks, allowlist, notes)
   failures.push(...pinnedSteps.failures)
+  // 策略 13(2026-09-25 第九轮审计 D 泳道 P1):被钉步骤/守卫 job 的**进程环境层** ——
+  // `env:` 三层 + `$GITHUB_ENV`/`$GITHUB_PATH` 注入。上面那条 [SK-14] 读的是 argv /
+  // 解析后的 shell / 步骤体 / `if:`,四种通道全都在"命令怎么被写出来"这一层,看不见
+  // "解释器被换掉了"(形态 A:`NODE_OPTIONS=--import=…`;形态 B:`BASH_ENV=…`)。
+  failures.push(...checkPinnedStepEnvironment(name, document, blocks, notes))
   // [SK-14⑧](R8-D-24):块级 shell 与步骤级 shell 两条口径必须一致(危险方向即红)。
   failures.push(...checkShellResolutionConsistency(name, document, blocks, notes))
   // 策略 12(R7-C P2-1):`--allow-advisory` 是 advisory 降级成告警的唯一入口,CI 不得带。
@@ -1083,7 +1152,10 @@ const PINNED_STEP_POLICIES = [
   {
     id: 'root-guard-runner',
     label: `根守卫运行步(\`${DOCS_ONLY_GUARD_RUNNER}\`)`,
-    match: script => script.includes(DOCS_ONLY_GUARD_RUNNER),
+    // **命令位**判据(第九轮审计 B 泳道 P1-1):`includes` 只证明"文本里提到过" ——
+    // `: <脚本>` / `test -f <脚本>` / `echo "node <脚本>"` 三种写法都让这一步零执行,
+    // 而当时的判据（含 5/5 覆盖下限与 argv 钉子）全部满足、门禁 EXIT=0。
+    match: script => guardRunnerCommandProblem(script) === null,
     ifPolicy: 'never',
   },
   {
@@ -1147,6 +1219,110 @@ const PINNED_STEP_IF_POLICIES = {
       (policy?.ifValues ?? []).map(item => `\`${item}\``).join(' 或 ') || '(该步骤没有登记任何取值)'
     }（不接受合取项/取反/换写法的收窄 —— 那会让这一步永不执行而门禁仍绿）`,
   },
+}
+
+// ===== SK-17:被钉住的判据步骤/作业的**进程环境层**(2026-09-25 第九轮审计 D 泳道 P1)=====
+//
+// 现场(第九轮审计 D 泳道,审计方实跑确认):第八轮把判据搬到"执行视角"是对的 —— 也就是说
+// [SK-14] 现在读的是 argv / 解析后的 shell / 步骤体 / `$GITHUB_ENV`。但那四条通道**全都在
+// "命令怎么被写出来"这一层**;进程环境层没有纳入判据面,于是两类形态可以**一个字都不改命令、
+// 不新增任何脚本**,就让"永不跳过"的根守卫 job 静默变绿:
+//
+//   形态 A(零新增文件):
+//     ```yaml
+//     gate-guards:
+//       env:
+//         NODE_OPTIONS: "--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"
+//     ```
+//     `node scripts/check-root-guards.mjs` 的 argv 一字未改、步骤体一字未改,但**每个 node
+//     进程**退出时都会把 `process.exitCode` 改回 0 ⇒ 门禁 EXIT=0。实测:`gate-guards` 的
+//     守卫步真跑在有 7 个守卫失败的树上,仍打印「16 个根守卫:16 通过、0 失败」并 EXIT=0。
+//
+//   形态 B(一个 20 字节的 hook 文件):
+//     ```yaml
+//     env:
+//       BASH_ENV: ./.github/shell-hooks.sh   # 内含 node() { return 0; }
+//     ```
+//     非交互 bash 启动时会 source 它 ⇒ `node` 变成 shell 函数,守卫命令"跑是跑了",但
+//     退出码恒 0。仓库里的 workflow 写的是哪一条命令完全不重要。
+//
+// 同族(同样改解释器行为、同样不改 argv/shell/步骤体):
+//   · `NODE_PATH`      —— 改写模块解析路径(可把 `scripts/*.mjs` 解析到替身);
+//   · `ENV`            —— POSIX `sh` 的启动文件(与 `BASH_ENV` 同族);
+//   · `SHELLOPTS`/`BASHOPTS` —— 改写 bash 选项(`errexit`/`nounset` 等退出语义);
+//   · `PROMPT_COMMAND` —— 注入同名函数/包装器;
+//   · `PATH`           —— 让 `node` 解析到另一个二进制(命令名一字未改);
+//   · `BASH_FUNC_<name>%%` —— **导出的 shell 函数**(`BASH_FUNC_node%%` 与形态 B 等价,
+//     而且连 hook 文件都不需要);
+//   · `LD_PRELOAD`/`LD_AUDIT` —— 动态链接器注入(可拦截 `exit`/`__libc_start_main`)。
+//
+// 判据(三层 `env:` 全扫 + `$GITHUB_ENV`/`$GITHUB_PATH` 覆盖):对被钉住的判定单元 ——
+//   · [SK-14] 的 `PINNED_STEP_POLICIES` 命中的**判据步骤**(含 `gate` 的收尾链路步);
+//   · **根守卫 job**(`SK-9②` 的同一份派生口径,即跑 `check-root-guards.mjs` 的那个 job)——
+//     它的**每一个**步骤都算被钉(它是"永不跳过"的那个作业,任何一层 env 都在守卫链上);
+// 拒绝下面这份键表出现在**三层 `env:` 的任意一层**:
+//   ① workflow 顶层 `env:`(Actions 会把它注入每个 job 的每个 step);
+//   ② job 级 `env:`;
+//   ③ step 级 `env:`(根守卫 job 里连 `uses:` 步骤一起查 —— 那一步也是守卫链的一部分);
+// ④ 同 job 内、**位置在被钉步骤之前**的步骤往 `$GITHUB_ENV` 写入这些键(运行期注入,
+//    `run` 文本里只有 `$VAR`),或往 `$GITHUB_PATH` 追加目录(PATH 覆写)。
+//
+// 取舍(**刻意不做白名单**):这张表里的键在"判据步骤/守卫 job"上没有合法用途 —— 它们改的
+// 是解释器怎么解释命令,不是命令要做什么。有内存调优/工具路径这类真实需求时,请把那种步骤
+// 放到**非判据步骤**上(判据步骤的失败必须能传出去)。所以这里**没有** `ALLOWLIST`:加一条
+// 豁免就等于把"红→绿"的通道原样开回来(与 [SK-16] 对 advisory 开关的取向一致)。
+//
+// 与 [SK-14] 的关系:`env:` **不是** `if:`/argv/shell/步骤体,`[SK-14]` 的四条判据都看不见它;
+// 两条策略互补,不重复报(同一处 env 只有 [SK-17] 报)。
+//
+// 诚实边界(不假装穷尽):命令词/键名是**运行期动态拼出来**的形态静态证明不了 ——
+// `K=NODE_OPTIONS; echo "$K=…" >> "$GITHUB_ENV"`、`cmd=exit; "$cmd" 0` 这类写法本判据不覆盖;
+// 只做常量折叠(`""`/转义拆分会被归一到同一个键名)。取向与 [SK-14] 其余各条一致:
+// **求不出真假 ⇒ 按"会静默"处理**的下一层是"能静态看见的一律拒"。
+/** 会改写解释器行为的环境变量键(`key` = 归一后比较用的大写形态)。 */
+const PINNED_ENV_DENIED_KEYS = [
+  { key: 'NODE_OPTIONS', why: '`node` 的启动参数(`--import=`/`--require=`)可以在进程退出时改写 `process.exitCode`' },
+  { key: 'NODE_PATH', why: '改写模块解析路径(可把 `scripts/*.mjs` 解析到替身)' },
+  { key: 'BASH_ENV', why: '非交互 bash 启动时 source 的文件(可定义 `node() { return 0; }` 之类的同名函数)' },
+  { key: 'ENV', why: 'POSIX `sh` 启动时 source 的文件(与 `BASH_ENV` 同族)' },
+  { key: 'SHELLOPTS', why: 'bash 选项(可改写 `errexit`/`nounset` 等退出语义)' },
+  { key: 'BASHOPTS', why: 'bash `shopt` 选项(同上)' },
+  { key: 'PROMPT_COMMAND', why: 'bash 提示符钩子(可注入同名函数/包装器)' },
+  { key: 'PATH', why: '可让 `node`/`bash` 解析到另一个二进制(命令名一字未改)' },
+  // 第九轮审计**点名键表之外**的同族扩展(审计未逐条实测,但注入能力与形态 A/B 同级)。
+  { key: 'LD_PRELOAD', why: '动态链接器预载库(可拦截 `exit`/`__libc_start_main`)' },
+  { key: 'LD_AUDIT', why: '动态链接器审计库(同上)' },
+]
+/** 前缀形态的键(`BASH_FUNC_<name>%%` = 导出的 shell 函数)。 */
+const PINNED_ENV_DENIED_PREFIXES = [
+  { prefix: 'BASH_FUNC_', why: '导出的 shell 函数(`BASH_FUNC_node%%` 会让 `node` 变成 shell 函数,与 `BASH_ENV` 等价且不需要 hook 文件)' },
+]
+
+/**
+ * 键名是否命中"改写解释器行为"的表。
+ *
+ * 比较用**大写归一**后的键名:Actions 的 env 键在 Linux 上区分大小写,但 Windows runner 上
+ * 环境变量名**不区分**大小写(`Path` 就是 `PATH`)—— 判据不跟着平台走,一律按大写判
+ * (fail-closed:多拒一个大小写变体不会误伤任何真实用法,少拒一个就是一条静默通道)。
+ *
+ * @param key - `env:` 里的原始键名(可能是非字符串?YAML 的键永远是字符串,这里仍防御)。
+ * @returns `null` = 允许;否则是 `{ raw, matched, why }`
+ *   (`raw` = 原样键名供报错点名,`matched` = 命中的登记项/前缀)。
+ */
+function pinnedEnvKeyProblem(key) {
+  if (typeof key !== 'string') return null
+  const normalized = key.trim().toUpperCase()
+  if (normalized === '') return null
+  const exact = PINNED_ENV_DENIED_KEYS.find(entry => entry.key === normalized)
+  if (exact !== undefined) return { raw: key, matched: exact.key, why: exact.why }
+  const prefixed = PINNED_ENV_DENIED_PREFIXES.find(entry => normalized.startsWith(entry.prefix))
+  if (prefixed !== undefined) return { raw: key, matched: `${prefixed.prefix}*`, why: prefixed.why }
+  return null
+}
+
+/** `env:` 映射(非对象一律当空 —— 静态判不了的形态由 YAML 自己的检查兜)。 */
+function envEntries(env) {
+  return typeof env === 'object' && env !== null ? Object.entries(env) : []
 }
 
 /**
@@ -1976,16 +2152,26 @@ function checkReleaseChainSteps(file, document, notes, registry = REGISTRY_DEFAU
       })
     }
     for (const needle of entry.require ?? []) {
-      if (!item.script.includes(needle)) {
-        failures.push({
-          name: file,
-          line: 0,
-          detail: `[SK-15] ${label} 的可执行文本里缺少 \`${needle}\``
-            + `\n  登记依据:${entry.why}`
-            + '\n  ⇒ "步骤还在"不等于"它还在做那件事"(R5-C-8:把 release_kind 判据换成永不匹配的'
-            + '常量、或把命令换成空转,存在性判据都看不出来)。',
-        })
-      }
+      // **命令位**判据(第九轮审计 B 泳道 P1-4):`require` 里的脚本路径必须是**被执行的**
+      // 那条命令。子串匹配下,把 R2 上传步改成 `run: echo "scripts/ci-publish-update-server.sh …"`
+      // 就能让"零上传"通过登记(step 名 / if / continue-on-error / env 全部不动)。
+      const satisfied = isCommandRequire(needle)
+        ? commandRequireSatisfied(item.script, needle)
+        : item.script.includes(needle)
+      if (satisfied) continue
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] ${label} 的可执行文本里缺少 \`${needle}\``
+          + (isCommandRequire(needle)
+            ? '\n  ⇒ 这一条按**命令位**判:登记脚本必须出现在被真的执行的命令上'
+              + `(\`bash ${needle.split(/\s+/u)[0]}\` 这类形态),`
+              + '`echo "…"` / `: …` / `test -f …` 只是**提到**它,不算执行。'
+            : '')
+          + `\n  登记依据:${entry.why}`
+          + '\n  ⇒ "步骤还在"不等于"它还在做那件事"(R5-C-8:把 release_kind 判据换成永不匹配的'
+          + '常量、或把命令换成空转,存在性判据都看不出来)。',
+      })
     }
   }
   const unregistered = [...mandatory.entries()].filter(([key]) => !matched.has(key))
@@ -2585,7 +2771,9 @@ function* shellSteps(document, blocks) {
       const label = typeof step.name === 'string' && step.name.trim() !== ''
         ? step.name.trim()
         : `run#${index + 1}`
-      yield { jobId, job, step, shell, label, block: bySignature.get(normalizeScript(step.run)) }
+      // `index` = 该 step 在 job.steps 里的下标。[SK-17] 需要它来判"某一步是否在某个被钉
+      // 步骤**之前**"(同 job 内 `$GITHUB_ENV`/`$GITHUB_PATH` 的写入会被后续步骤继承)。
+      yield { jobId, job, step, shell, label, index, block: bySignature.get(normalizeScript(step.run)) }
     }
   }
 }
@@ -3113,11 +3301,7 @@ function checkRootGateIntegrity(file, document, text, notes) {
     const steps = Array.isArray(job?.steps) ? job.steps : []
     steps.forEach((step, index) => {
       if (typeof step?.run !== 'string') return
-      const script = step.run
-        .split('\n')
-        .map(line => stripLineComment(line))
-        .join('\n')
-        .replace(/\d?>>?\s*[^\s;&|]+/gu, ' ')
+      const script = stripShellRedirections(executableScript(step.run))
       for (const match of script.matchAll(ROOT_GATE_INVOCATION)) {
         const args = match[2].trim() === '' ? [] : match[2].trim().split(/\s+/u)
         invocations.push({
@@ -3247,7 +3431,7 @@ function checkRootGateIntegrity(file, document, text, notes) {
   const guardJobs = Object.entries(jobs)
     .filter(([, job]) => (Array.isArray(job?.steps) ? job.steps : [])
       .some(step => typeof step?.run === 'string'
-        && executableScript(step.run).includes(DOCS_ONLY_GUARD_RUNNER)))
+        && commandPositionArgvs(executableScript(step.run), DOCS_ONLY_GUARD_RUNNER).length > 0))
   if (guardJobs.length !== 1) {
     failures.push({
       name: file,
@@ -3891,13 +4075,36 @@ function advisoryFlagShape(text) {
 }
 
 /**
+ * 开关的**整词**形态:前后必须是词边界(空白 / 引号 / `=` / 命令分隔符)。
+ *
+ * 为什么必须是整词(2026-09-25 第九轮审计 B 泳道 FP-3):旧判据是裸子串匹配 ⇒
+ * **不同旗标** `--allow-advisory-strict` 也被判红(它根本不是那个开关),
+ * 而且报错文案说"把开关放在了顶层",与事实不符。
+ */
+const ADVISORY_FLAG_WORD = /(?:^|[\s"'=;|&(){}<>$,])--allow-advisory(?=$|[\s"';|&(){}<>$,])/u
+
+/**
  * 文本里是否出现那个静音开关(字面量形态 **或** 引号/转义拆开的形态)。
+ *
+ * `requireFlagVector`(env 取值专用):还要求这段取值是"**旗标向量**"—— 每个空白分隔的
+ * token 都以 `-` 开头。这一半是给 FP-3 的**说明文本**用的:workflow 顶层写
+ * `env: {PICO_NOTE: "do not pass --allow-advisory anywhere"}` 时,那段话里有整词的
+ * `--allow-advisory` 却显然不是"把开关注入 argv";而真正的用法(`ROOT_GUARD_FLAGS:
+ * --allow-advisory` / `--allow-advisory --verbose`)每个 token 都是旗标。
+ *
  * @param text - 原文。
+ * @param options - `requireFlagVector` = 这段文本是 env **取值**还是一段命令文本。
  * @returns 是否命中。
  */
-function carriesAdvisoryFlag(text) {
+function carriesAdvisoryFlag(text, { requireFlagVector = false } = {}) {
   if (typeof text !== 'string') return false
-  return text.includes(ADVISORY_OPT_IN_FLAG) || advisoryFlagShape(text).includes(ADVISORY_OPT_IN_FLAG)
+  const shaped = advisoryFlagShape(text)
+  if (requireFlagVector) {
+    const tokens = shaped.split(/\s+/u).filter(token => token !== '')
+    if (tokens.length === 0 || !tokens.every(token => token.startsWith('-'))) return false
+    return tokens.includes(ADVISORY_OPT_IN_FLAG)
+  }
+  return ADVISORY_FLAG_WORD.test(shaped)
 }
 
 /** `env:` 映射里的字符串取值(非字符串取值静态判不了,原样滤掉)。 */
@@ -3908,6 +4115,14 @@ function envStringValues(env) {
 
 /** 运行期写入"后续步骤环境"的文件(`$GITHUB_ENV` / `$GITHUB_OUTPUT` / `$GITHUB_PATH`)。 */
 const GITHUB_ENV_WRITE = /(?:^|[^A-Za-z0-9_])GITHUB_(?:ENV|OUTPUT|PATH)\b/u
+/**
+ * `$GITHUB_PATH` 的**追加**形态(重定向或 `tee -a`)。
+ *
+ * [SK-17⑥a] 用它把"PATH 覆写"与"顺带提到这个名字"分开:赋值 `GITHUB_PATH=/x` 或注释里的
+ * 说明文字都不算(注释在上面已被 `executableScript` 剥掉),只有真的往那个文件里写目录才算
+ * —— 那正是 Actions 里改后续步骤 PATH 的正式通道。
+ */
+const GITHUB_PATH_APPEND = /(?:>>?|(?:^|\|)\s*tee\s+(?:-a|--append)\s*)\s*"?\$?\{?GITHUB_PATH\}?"?/u
 /** 从 `NAME=value` 里取变量名(判据①c 的另一半:写进去的名字有没有被守卫步消费)。 */
 const ENV_ASSIGNMENT = /(?:^|[^A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=/gu
 /** 一段 shell 文本里引用的 `$VAR` / `${VAR}`。 */
@@ -3931,7 +4146,7 @@ function checkAdvisoryOptIn(file, document, notes) {
   // 什么"是可以随便改的 —— 少一层推理就少一个绕过口(与判据②同一取向)。
   const workflowEnvMap = typeof document?.env === 'object' && document.env !== null ? document.env : {}
   for (const [key, value] of Object.entries(workflowEnvMap)) {
-    if (!carriesAdvisoryFlag(value)) continue
+    if (!carriesAdvisoryFlag(value, { requireFlagVector: true })) continue
     failures.push({
       name: file,
       line: 0,
@@ -4016,8 +4231,12 @@ function checkAdvisoryOptIn(file, document, notes) {
         || ADVISORY_GATE_ALIAS.test(script)
       if (!invokesGuard) return
       guardInvocations += 1
-      const smuggled = [script, ...stepEnv, ...jobEnv, ...workflowEnv]
-        .filter(text => typeof text === 'string' && text.includes('allow-advisory'))
+      const smuggled = [
+        ...(carriesAdvisoryFlag(script) ? [script] : []),
+        ...stepEnv.filter(text => carriesAdvisoryFlag(text, { requireFlagVector: true })),
+        ...jobEnv.filter(text => carriesAdvisoryFlag(text, { requireFlagVector: true })),
+        ...workflowEnv.filter(text => carriesAdvisoryFlag(text, { requireFlagVector: true })),
+      ]
       if (smuggled.length > 0 && !carriesAdvisoryFlag(script)) {
         failures.push({
           name: file,
@@ -4168,16 +4387,25 @@ function pinnedStepFailureTailProblem(script) {
     // ①b/①c:引号里的**代码面**(`trap` 动作 / `eval` 参数)与 `exec` 替换 shell。
     const embedded = embeddedExitProblem(line)
     if (embedded !== null) return embedded
+    // ①b 的另一半:动作本身是**动态构造**的 `trap`(第九轮审计 B 泳道 P1-2)。
+    const dynamicTrap = trapDynamicActionProblem(line)
+    if (dynamicTrap !== null) return dynamicTrap
     const replaced = execReplacementProblem(line)
     if (replaced !== null) return replaced
   }
   // ② 尾部:最后一条有效语句必须以**归一后非零**的 `exit` 收尾(位置不限:裸形态 /
-  //    `;` 序列 / `&&` / `||` / `{ …; exit N; }` 都算 —— 正常 fail-loud 收尾不得误判)。
+  //    `;` 序列 / `&&` / `||` / `{ …; exit N; }` / `( …; exit N )` 都算 —— 正常
+  //    fail-loud 收尾与等价的子 shell 收尾都不得误判)。
   const last = statements[statements.length - 1]
+  // ⓪d **子 shell / 命令组收尾**(2026-09-25 第九轮审计 B 泳道 FP-1):`( exit 1 )` 与
+  //     `{ …; exit 1; }` 在执行视角下**等价**(两者都会真的执行里面的语句,退出码都由里面
+  //     最后一条命令决定)。第八轮的反例样本 u60 收下了 `{ …; exit 1; }`,却把 `( exit 1 )`
+  //     判红(父提交 `3d4306dded` 上实测 EXIT=0)⇒ 同一语义两种结论。归约到内层再判。
+  const effective = unwrapTrailingCommandGroup(last) ?? last
   // ⓪c **函数定义不是失败收尾**(2026-09-24 第八轮审计 D-18)。
-  const definition = functionDefinitionProblem(last)
+  const definition = functionDefinitionProblem(effective)
   if (definition !== null) return definition
-  const tail = last.replace(/[\s;}]+$/u, '')
+  const tail = effective.replace(/[\s;}]+$/u, '')
   const invocations = scanExitInvocations(tail)
   const final = invocations[invocations.length - 1]
   if (final !== undefined && tail.slice(final.end).trim() === '') {
@@ -4198,6 +4426,56 @@ function pinnedStepFailureTailProblem(script) {
       + ' ⇒ 这一步会绿着退出'
   }
   return `最后一条有效语句(\`${last}\`)不是非零 \`exit\` 的失败收尾`
+}
+
+/**
+ * 把"尾部被一对圆括号整包住"的语句**归约到内层**(第九轮审计 B 泳道 FP-1)。
+ *
+ * 只认这一种形态:语句的**最后一个顶层片段**(按 `;` / `&&` / `||` / `|` / `&` 切)恰好被
+ * 一对圆括号包住 —— 即第一个非空字符是 `(`、括号深度在最后一个非空字符处才回到 0。
+ * 这样 `x=$(exit 1)` / `echo $(exit 1)` 这类**命令替换**不会被误放行(它们的退出码由外层
+ * 命令决定,`echo $(exit 1)` 的退出码是 0)。
+ *
+ * @param statement - 最后一条有效语句(已 trim)。
+ * @returns 内层文本;不是"整包住的命令组"时返回 `null`。
+ */
+function unwrapTrailingCommandGroup(statement) {
+  const masked = maskQuotedRegions(statement)
+  let start = 0
+  let depth = 0
+  for (let index = 0; index < masked.length; index += 1) {
+    const char = masked[index]
+    if (char === '(') { depth += 1; continue }
+    if (char === ')') { depth -= 1; continue }
+    if (depth !== 0) continue
+    if (char === ';') { start = index + 1; continue }
+    if ((char === '&' || char === '|') && masked[index + 1] === char) {
+      start = index + 2
+      index += 1
+      continue
+    }
+    if (char === '&' || char === '|') { start = index + 1 }
+  }
+  const maskedSegment = masked.slice(start)
+  const segment = statement.slice(start)
+  if (!maskedSegment.trim().startsWith('(')) return null
+  let level = 0
+  let close = -1
+  for (let index = 0; index < maskedSegment.length; index += 1) {
+    const char = maskedSegment[index]
+    if (char === '(') level += 1
+    if (char !== ')') continue
+    level -= 1
+    if (level < 0) return null
+    if (level === 0) {
+      if (maskedSegment.slice(index + 1).trim() !== '') return null
+      close = index
+    }
+  }
+  if (level !== 0 || close < 0) return null
+  const open = segment.indexOf('(')
+  if (open < 0 || close <= open) return null
+  return segment.slice(open + 1, close)
 }
 
 /**
@@ -4322,16 +4600,63 @@ function checkShellResolutionConsistency(file, document, blocks, notes) {
 }
 
 /**
- * [SK-14⑦] 被钉步骤允许的 **shell**(2026-09-24 第八轮审计 D-19)。
+ * [SK-14⑦] 被钉步骤允许的 **shell**(2026-09-24 第八轮审计 D-19;2026-09-25 第九轮 B 泳道 P1-3 收紧)。
  *
- * 现场:`shell: python` + `sys.exit(0)` 体 —— SK-14 的 ④/⑥ 对**非 POSIX shell 直接
- * `continue`**(静态判不了那个语言的退出语义),而当时**没有任何判据钉住被钉步骤的 shell**
+ * 现场一(D-19):`shell: python` + `sys.exit(0)` 体 —— SK-14 的 ④/⑥ 对**非 POSIX shell
+ * 直接 `continue`**(静态判不了那个语言的退出语义),而当时**没有任何判据钉住被钉步骤的 shell**
  * ⇒ 门禁 EXIT=0,而这一步在 Actions 里跑的是 python,退出码由 `sys.exit(0)` 决定。
  *
- * 判据:被钉步骤的**解析后 shell**(step 级 → job 级默认 → 缺省 bash)必须是 `bash` / `sh`;
- * 其它一律红 —— 认不出退出语义的 shell 不能承载"这一步一定会失败"的判据。
+ * 现场二(P1-3,第九轮 B 泳道):旧判据只看**第一个词** ⇒ `shell: bash -c 'exit 0' {0}` 与
+ * `bash` 等价(首词都是 `bash`)。但 GitHub 的 shell 模板把 `{0}` 替换成脚本路径并**作为参数**
+ * 传给 `bash -c '<代码>'` —— 于是 `run:` 的脚本体**一次都不执行**,而这一步的退出码由那段
+ * 内联代码决定。实测:给**唯一链路步**或 **`run: yarn check` 的全量门禁步**加这一行,
+ * `check-workflows` EXIT=0、`[SK-8/SK-9]` 的"全量门禁恰好一次"照旧命中。
+ *
+ * 判据:**整串**必须是登记形态之一(不是"首词在名单里"):
+ *   · `bash` / `sh`(缺省形态:脚本体就是 `run` 的内容);
+ *   · `bash` / `sh` + 选项 + **`{0}` 作为独立词**(如官方的 `bash -e {0}`:脚本路径是
+ *     **文件参数** ⇒ 脚本体一定被执行)。
+ * 其余一律红,尤其是含 **`-c`** 的模板(`{0}` 只会成为内联代码的 `$0`)与**不含 `{0}`** 的
+ * 模板(脚本内容根本不会被喂给解释器)。要新形态请登记进 `PINNED_STEP_SHELL_FORMS` 并写明
+ * "脚本体为什么一定被执行"。
  */
 const PINNED_STEP_SHELLS = ['bash', 'sh']
+
+/**
+ * `[SK-14⑦]` 的整串判据实现。
+ * @param shell - 解析后的 shell 取值(step 级 → job 默认 → 缺省 `bash`)。
+ * @returns `null` = 登记形态内;否则是人读的不合格原因。
+ */
+function pinnedShellProblem(shell) {
+  const value = normalizeShellValue(shell)
+  if (PINNED_STEP_SHELLS.includes(value)) return null
+  const words = value.split(' ').filter(word => word !== '')
+  const head = (words[0] ?? '').toLowerCase()
+  if (!PINNED_STEP_SHELLS.includes(head)) {
+    return `它的 shell 是 \`${shell}\`(只允许 ${PINNED_STEP_SHELLS.map(name => `\`${name}\``).join(' / ')};`
+      + 'step 级 `shell:` > job 级 `defaults.run.shell` > 缺省 bash)'
+      + '\n  ⇒ 判据的 ④/⑥ 对非 POSIX shell 静态判不了退出语义(直接跳过)⇒ 一个'
+      + '`shell: python` + `sys.exit(0)` 就能让被钉步骤恒绿(第八轮审计 D-19 实测 EXIT=0)。'
+      + '\n  ⇒ 被钉的判据步骤必须跑在本门禁认识的 shell 里;要别的语言请另立判据,'
+      + '不要把这一步换掉。'
+  }
+  const rest = words.slice(1)
+  const program = rest.map(word => normalizeShellValue(word))
+  if (program.some(word => /^-[A-Za-z]*c/u.test(word))) {
+    return `它的 shell 是 \`${shell}\` —— 含 \`-c\` 的**模板**会让脚本体**一次都不执行**`
+      + '(`{0}` 只会成为内联代码的 `$0`,GitHub 把脚本路径当参数传进去,而 `bash -c` 只跑它'
+      + '第一个参数里的代码)'
+      + '\n  ⇒ 实测:给"唯一链路步"或 `run: yarn check` 的全量门禁步加一行'
+      + " `shell: bash -c 'exit 0' {0}`(run 一字不改)⇒ `check-workflows` EXIT=0,"
+      + '而这一步真实退出码 0、整段脚本文本从不执行。'
+      + '\n  ⇒ 被钉步骤的 shell 只允许 `bash` / `sh` 与"把 `{0}` 当脚本文件参数"的模板(如 `bash -e {0}`)。'
+  }
+  if (!program.includes('{0}')) {
+    return `它的 shell 是 \`${shell}\` —— 模板里没有 \`{0}\`(脚本路径)⇒ 脚本文本不会被喂给解释器`
+      + '(GitHub 只执行这个模板本身)。被钉步骤只允许 `bash` / `sh` 或含 `{0}` 的模板(如 `bash -e {0}`)。'
+  }
+  return null
+}
 
 /**
  * [SK-14⑦] 被钉步骤的 **argv 钉子**(2026-09-24 第八轮审计 D-21)。
@@ -4363,14 +4688,177 @@ function pinnedStepExtraArgv(script, anchor) {
   const pattern = new RegExp(`[^\\s;&|(){}]*${escapeRegExp(anchor)}([^\\n;&|]*)`, 'u')
   const match = pattern.exec(script)
   if (match === null) return []
-  return match[1]
+  // 重定向先剥掉(第九轮审计 B 泳道 FP-2):`… 2>&1 | tee log` / `… > /dev/null` 里的
+  // `2>`、`/dev/null` 是**重定向**不是参数,旧口径把两者当"未登记的附加参数"判红,而
+  // 同一个文件里的 `checkRootGateIntegrity` 明确先剥重定向 ⇒ 两份口径必须统一。
+  return stripShellRedirections(match[1])
     .split(/[ \t]+/u)
     .map(token => token.replace(/^["']|["']$/gu, '').trim())
     .filter(token => token !== '')
 }
 
+// ===== [SK-14⑦]/[SK-15] 的**命令位**判据(2026-09-25 第九轮审计 B 泳道 P1-1/P1-4)=====
+//
+// 现场:第八轮把识别口径从"原始 YAML 子串"改成"**去注释后的可执行文本**子串" —— 方向对,
+// 但仍然是**子串**判据:"提到"与"执行"不分。审计方实跑确认三行 no-op 就能让 16 个根守卫
+// 零执行、而 `check-workflows` EXIT=0:
+//   · `run: |` + `: scripts/check-root-guards.mjs`   (`:` 是 bash 内建 no-op,退出码恒 0)
+//   · `run: |` + `test -f scripts/check-root-guards.mjs`
+//   · `run: |` + `echo "node scripts/check-root-guards.mjs"`
+// 同一根因的第二处:把 R2 上传步改成 `run: echo "scripts/ci-publish-update-server.sh --list …"`
+// 之后,发布链登记表照样"命中"(`require` 也是子串匹配)⇒ **品牌渠道唯一分发面零上传而门禁绿**。
+//
+// 判据不是再加一层正则,而是把"这段 shell 跑起来会执行哪些命令"解析出来:按 shell 分隔符
+// 切段 → 用 `maskQuotedRegions` 找到**引号外**的分隔位置 → 在**原文**上切片并分词 → 跳过
+// 前缀词(`env`/`sudo`/`time`/`command`/…)与变量赋值 → 取剩下的第一个词作**命令词**。
+// 只有"命令词本身是目标"或"解释器之后的第一个参数是目标"才算**被执行**。
+//
+// 诚实边界:`$(…)`/变量拼出来的命令词静态证明不了(与 [SK-14] 其余各条同一取向:求不出
+// 真假 ⇒ 按"会静默"处理,所以那种形态拿不到"命令位"认定 ⇒ 判红)。
+/** shell 里"一条新命令开始"的分隔形态(在**屏蔽引号后**的文本上匹配;含换行)。 */
+const COMMAND_SEGMENT_SEPARATOR = /\n|&&|\|\||[;&|(){}]|!(?=\s)|\b(?:if|then|elif|else|while|until|do|done|esac|fi)\b/gu
+/** 能把脚本体当**参数**交给解释器的命令词(命令位判据的认识范围)。 */
+const SHELL_INTERPRETER_COMMANDS = ['node', 'nodejs', 'bash', 'sh', 'dash', 'zsh', 'ksh']
+
 /**
- * [SK-14⑥] 命令位置上的**前缀词**(第七轮独立复审 V2 §1.2 的形态②)。
+ * 把 shell 重定向从文本里**用空格顶掉**(保留下标与长度,便于与屏蔽后的位置对齐)。
+ *
+ * 覆盖 `2>&1` / `2>&-` / `> file` / `>> file` / `< file` / `&> file`;只认**引号外**的
+ * 重定向(位置取自 `maskQuotedRegions` 的结果),所以 `echo "a > b"` 不被误剥。
+ * @param text - 一段 shell 文本。
+ * @returns 重定向被空格顶掉的同长文本。
+ */
+function stripShellRedirections(text) {
+  const masked = maskQuotedRegions(text)
+  const pattern = /(?:\d?>&\d+-?|\d?>&-|\d?&>>?|\d?>>?|\d?<)\s*(?:[^\s;&|()]+)?/gu
+  const chars = text.split('')
+  for (const match of masked.matchAll(pattern)) {
+    for (let index = match.index; index < match.index + match[0].length; index += 1) chars[index] = ' '
+  }
+  return chars.join('')
+}
+
+/** `./x` → `x`(只去"当前目录"前缀;带目录的形态原样保留)。 */
+function normalizeScriptTarget(word) {
+  return word.replace(/^\.\//u, '')
+}
+
+/** 解释器名比较用:取路径最后一段(`/usr/bin/node` 与 `node` 等价)。 */
+function commandHead(word) {
+  const parts = word.split('/')
+  return parts[parts.length - 1] ?? word
+}
+
+/**
+ * 一段 shell 文本里**被真的执行**的命令(命令词 + 后面全部词)。
+ *
+ * 实现要点:**整段一起处理**(不按行切)—— `bash -c '多行载荷'` 这类形态里引号跨行,
+ * 按行切会让 `splitShellWords` 因引号不配对返回 `null`,整段命令就被静默跳过
+ * (`ci.yml` 的渠道 DMG 打包步正是这个形状)。
+ *
+ * @param script - 去注释后的可执行文本。
+ * @returns `{ command, argv }[]`(`argv` = 命令词之后的词,已剥重定向与引号)。
+ */
+function executedCommands(script) {
+  const opened = joinShellContinuations(executableScript(script))
+  const masked = maskQuotedRegions(opened)
+  const segments = []
+  let start = 0
+  COMMAND_SEGMENT_SEPARATOR.lastIndex = 0
+  let match
+  while ((match = COMMAND_SEGMENT_SEPARATOR.exec(masked)) !== null) {
+    segments.push(opened.slice(start, match.index))
+    start = match.index + match[0].length
+  }
+  segments.push(opened.slice(start))
+  const commands = []
+  for (const segment of segments) {
+    const cleaned = stripShellRedirections(segment).trim()
+    if (cleaned === '') continue
+    const words = splitShellWords(cleaned)
+    if (words === null) continue
+    let index = 0
+    while (index < words.length) {
+      const word = words[index].text
+      // 前缀词(`env`/`sudo`/`time`/…)、它们的选项、以及 `FOO=bar` 赋值前缀都不改"命令词是谁"。
+      if (EXIT_PREFIX_WORDS.includes(word)) { index += 1; continue }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) { index += 1; continue }
+      if (word.startsWith('-') && word !== '-') { index += 1; continue }
+      break
+    }
+    const command = words[index]
+    if (command === undefined) continue
+    commands.push({ command: command.text, argv: words.slice(index + 1).map(word => word.text) })
+  }
+  return commands
+}
+
+/**
+ * 目标脚本出现在**命令位**(被真的执行)时,它在各调用点**之后的** argv 词。
+ *
+ * @param script - 去注释后的可执行文本。
+ * @param target - 目标脚本路径(例:`scripts/check-root-guards.mjs`)。
+ * @returns 每个命中调用点的"目标之后"的 argv 词;**空数组 = 一次都没在命令位出现**。
+ */
+function commandPositionArgvs(script, target) {
+  const wanted = normalizeScriptTarget(target)
+  const hits = []
+  for (const entry of executedCommands(script)) {
+    if (normalizeScriptTarget(entry.command) === wanted) {
+      hits.push(entry.argv)
+      continue
+    }
+    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(entry.command))) continue
+    if (normalizeScriptTarget(entry.argv[0] ?? '') !== wanted) continue
+    hits.push(entry.argv.slice(1))
+  }
+  return hits
+}
+
+/**
+ * [SK-15] 的 `require` 里"调用某个脚本"的那一类,按**命令位 + 参数**判。
+ *
+ * 与 `commandPositionArgvs` 的分工:只有 `require` 的第一段**看起来是一个脚本路径**时才走
+ * 命令位判据(`scripts/*.mjs` / `*.sh` / `*.ts`);其余的 `require`(`GITHUB_OUTPUT` /
+ * `docs/releases/` / `test -f` / `exit 1` / `gh release` / `dist:mac:notarize`)是"这段
+ * 文本里必须出现的东西",继续按子串判 —— 它们本来就不是"执行某个脚本"的断言。
+ * @param script - 去注释后的可执行文本。
+ * @param require - 登记项。
+ * @returns 是否满足。
+ */
+function commandRequireSatisfied(script, require) {
+  const words = splitShellWords(require)
+  if (words === null || words.length === 0) return false
+  const [head, ...rest] = words.map(word => word.text)
+  return commandPositionArgvs(script, head).some(argv => {
+    let cursor = 0
+    for (const word of argv) {
+      if (word === rest[cursor]) cursor += 1
+      if (cursor === rest.length) break
+    }
+    return cursor === rest.length
+  })
+}
+
+/** 一个 `require` 是否是"调用某个脚本"那一类(走命令位判据)。 */
+function isCommandRequire(require) {
+  return /^\S*scripts\/[\w./-]+\.(?:mjs|sh|ts|js)$/u.test(splitShellWords(require)?.[0]?.text ?? '')
+}
+
+/** 根守卫运行脚本是否出现在命令位;返回未命中的原因(命中返回 null)。 */
+function guardRunnerCommandProblem(script) {
+  if (commandPositionArgvs(script, DOCS_ONLY_GUARD_RUNNER).length > 0) return null
+  return `文本里出现了 \`${DOCS_ONLY_GUARD_RUNNER}\`,但它不在**命令位**上`
+    + ' ⇒ 这一步**不会执行**那个脚本,"永不跳过"的守卫 job 变成永久绿灯空转。'
+    + '\n  实测三种零执行的写法(门禁当时全部 EXIT=0):'
+    + `\n    · \`: ${DOCS_ONLY_GUARD_RUNNER}\`(bash 内建 \`:\` = no-op,退出码恒 0);`
+    + `\n    · \`test -f ${DOCS_ONLY_GUARD_RUNNER}\`(只测文件在不在);`
+    + `\n    · \`echo "node ${DOCS_ONLY_GUARD_RUNNER}"\`(只回显一行字)。`
+    + '\n  ⇒ 只有 `node <脚本>` / `bash <脚本>` / `./<脚本>`(命令词位)才算执行;'
+    + '命令词由变量/命令替换拼出来的形态静态证明不了,同样不算(求不出真假按"会静默"处理)。'
+}
+
+/** [SK-14⑥] 命令位置上的**前缀词**(第七轮独立复审 V2 §1.2 的形态②)。
  *
  * 它们不改 `exit` 的语义,只改词法形状:`time exit 0` / `command exit 0` / `builtin exit 0`
  * 全都是 `exit 0`(实测退出码 0),而旧边界只认 `then|do|else` 三个关键字。
@@ -4520,6 +5008,57 @@ function embeddedExitProblem(line) {
             : ' ⇒ `eval` 的参数会被 shell 再解析一次,`exit 0` 一样会让整步绿着退出。')
       }
     }
+  }
+  return null
+}
+
+/**
+ * ①b 的另一半:`trap` 的**动作是动态构造**的 ⇒ 按"会静默"处理(2026-09-25 第九轮审计 B 泳道 P1-2)。
+ *
+ * 现场:被钉链路步里写
+ *   ```sh
+ *   A='exit 0'
+ *   trap "$A" EXIT
+ *   echo "::error::root guards failed"
+ *   exit 1
+ *   ```
+ * `embeddedExitProblem` 看不见它:`A='exit 0'` 的载荷被 `maskQuotedRegions` 屏蔽(引号里的
+ * 文本不是代码),而 `trap` 的动作词是 `$A`(不是字面量 `exit`)。门禁 EXIT=0、**零失败项**,
+ * 而真 bash 的退出码是 **0**(EXIT trap 里的 `exit 0` 覆盖最终退出码)⇒"根守卫失败 ⇒ 必需的
+ * Gate 检查也红"这条唯一链路被摘除。同族:`trap "$(printf '%s %s' exit 0)" EXIT`。
+ *
+ * 判据:`trap` 的**动作词**不是"单个单引号字面量"、又含 `$`/反引号 ⇒ fail-closed。
+ * 单引号整词**不做参数展开**,所以 `trap 'rm -rf "$tmp"' EXIT` 这类合法清理必须继续放行
+ * (它有变量,但动作本身是静态字符串);`trap cleanup EXIT`(函数名)同样放行。
+ *
+ * 诚实边界:与 [SK-14] 其余各条一致 —— 动态动作的真实取值静态度量不出,**求不出真假 ⇒
+ * 按"会静默"处理**;取向与 `exit "$code"` 被判红完全一致。
+ *
+ * @param line - 单条语句。
+ * @returns `null` = 合格;否则是不合格原因。
+ */
+function trapDynamicActionProblem(line) {
+  const pattern = new RegExp(
+    `(?:^|[;&|(){}])[ \\t]*(?:(?:${EXIT_PREFIX_WORDS.join('|')})[ \\t]+)*trap(?:\\b|(?=[ \\t]))`,
+    'gu',
+  )
+  for (const match of line.matchAll(pattern)) {
+    const words = splitShellWords(line.slice(match.index + match[0].length))
+    if (words === null || words.length === 0) continue
+    let index = 0
+    // `trap -p` / `trap -l` / `trap --` 这类选项与分隔符不算动作词。
+    while (index < words.length && /^-[lp-]*$/u.test(words[index].raw)) index += 1
+    const action = words[index]
+    if (action === undefined) continue
+    // 单引号整词 = 完全不做参数展开 ⇒ 动作是静态字面量,不是动态构造。
+    if (/^'[^']*'$/u.test(action.raw)) continue
+    if (!/[$`]/u.test(action.text)) continue
+    return `步骤体里的 \`trap\` **动作是动态构造的**(\`${action.raw.trim()}\`)⇒ 静态证明不了`
+      + '它在退出时会做什么(实测 `A=\'exit 0\'; trap "$A" EXIT; …; exit 1` 的退出码是 0:'
+      + 'trap 里的 `exit 0` 覆盖了尾部那句 `exit 1`)。'
+      + '\n  ⇒ 引号载荷被屏蔽、动作词不是字面量 ⇒ ①b 的字面量扫描看不见它。半静态的'
+      + '`trap`(单引号字面量动作,如 `trap \'rm -rf "$tmp"\' EXIT` 清理)不受影响;'
+      + '要动态动作请把退出语义写成**直接执行**的非零 `exit` 收尾。'
   }
   return null
 }
@@ -4850,21 +5389,15 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
             + '\n  ⇒ 判据步骤的失败必须传出去(它是"必需检查红"的唯一来源)。',
         })
       }
-      // ⑦ **shell 钉子**(第八轮审计 D-19):被钉步骤的解析后 shell 必须是 bash/sh。
+      // ⑦ **shell 钉子**(第八轮审计 D-19;第九轮 B 泳道 P1-3 收紧成**整串**登记)。
       //    它必须在 ④/⑥ 的"非 POSIX 就跳过"**之前**判 —— 否则那两个 `continue` 会把
       //    一个换了解释器的被钉步骤整段放过去(`shell: python` + `sys.exit(0)` 实测 EXIT=0)。
-      const shellWord = item.shell.trim().split(/[ \t]+/u)[0].toLowerCase()
-      if (!PINNED_STEP_SHELLS.includes(shellWord)) {
+      const shellProblem = pinnedShellProblem(item.shell)
+      if (shellProblem !== null) {
         failures.push({
           name: file,
           line: 0,
-          detail: `[SK-14] ${label} 是「${policy.label}」,但它的 shell 是 \`${item.shell}\``
-            + `(只允许 ${PINNED_STEP_SHELLS.map(name => `\`${name}\``).join(' / ')};`
-            + 'step 级 `shell:` > job 级 `defaults.run.shell` > 缺省 bash)'
-            + '\n  ⇒ 判据的 ④/⑥ 对非 POSIX shell 静态判不了退出语义(直接跳过)⇒ 一个'
-            + '`shell: python` + `sys.exit(0)` 就能让被钉步骤恒绿(第八轮审计 D-19 实测 EXIT=0)。'
-            + '\n  ⇒ 被钉的判据步骤必须跑在本门禁认识的 shell 里;要别的语言请另立判据,'
-            + '不要把这一步换掉。',
+          detail: `[SK-14] ${label} 是「${policy.label}」,但${shellProblem}`,
         })
       }
       // ⑦ **argv 钉子**(第八轮审计 D-21):调用点之后不得带未登记的附加参数。
@@ -4946,6 +5479,165 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
   // 除了打印,还要把**命中的策略 id** 交出去:main() 用它做覆盖下限(第八轮审计
   // R8-C-1 ②—— 此前少识别一个被钉步骤是完全静默的)。
   return { failures, policies: observed.map(entry => entry.split('@')[0]) }
+}
+
+/**
+ * [SK-17] 的实现(判据与现场见常量区 `PINNED_ENV_DENIED_KEYS` 的注释)。
+ *
+ * 判据面共四处,全部只读 YAML 文档 + `run` 文本(不需要执行任何东西):
+ *   ① workflow 顶层 `env:`   —— Actions 注入**每个 job 的每个 step**;
+ *   ② job 级 `env:`          —— 注入该 job 的每个 step;
+ *   ③ step 级 `env:`         —— 只注入这一步(根守卫 job 里连 `uses:` 步骤一起查);
+ *   ④ `$GITHUB_ENV`/`$GITHUB_PATH` —— 同 job 内、位置在被钉步骤**之前**的步骤写进去的,
+ *      会被后面的步骤继承(命令里只剩 `$VAR`,三层 `env:` 里什么都没有)。
+ *
+ * 判据读的是 `executableScript`(去注释)与词级归一(删空引号对 / 去反斜杠转义)后的文本 ——
+ * 与 [SK-16] 同一套口径:注释里的历史写法不算,而 `NODE_""OPTIONS` 这种"拆开写的同一个键"
+ * 必须算(它写进 `$GITHUB_ENV` 之后就是 `NODE_OPTIONS` 本身)。
+ *
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param blocks - extractRunBlocks 的结果(供 shellSteps 解析有效 shell / 行号 / 下标)。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkPinnedStepEnvironment(file, document, blocks, notes) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const stepsOf = jobId => (Array.isArray(jobs[jobId]?.steps) ? jobs[jobId].steps : [])
+  const unitLabel = unit => `job ${unit.jobId} 的 step「${unit.label}」`
+
+  // ① 根守卫 job 的**结构**识别:与 [SK-9②] 同一份口径(谁的 run 里有 `check-root-guards.mjs`)。
+  //    刻意不写死 job 名 —— 改名/搬家不会让这条判据静默失效(那正是 R8-C-1 的教训)。
+  const guardJobIds = new Set(Object.entries(jobs)
+    .filter(([, job]) => (Array.isArray(job?.steps) ? job.steps : [])
+      .some(step => typeof step?.run === 'string'
+        && commandPositionArgvs(executableScript(step.run), DOCS_ONLY_GUARD_RUNNER).length > 0))
+    .map(([jobId]) => jobId))
+
+  // ② 被钉住的判定单元 = [SK-14] 命中的判据步骤 ∪ 根守卫 job 的**每一步**。
+  //    后者是"永不跳过"的那个作业:它载荷的是根守卫本身,任何一层的 env 都在守卫链上
+  //    (形态 A/B 的现场正是"给 `gate-guards` 加一行 `env:`")。
+  const units = []
+  for (const item of shellSteps(document, blocks)) {
+    const policy = PINNED_STEP_POLICIES.find(entry => entry.match(executableScript(item.step.run), item))
+    const reason = policy !== undefined
+      ? `[SK-14] 的 \`${policy.id}\`(被钉住的判据步骤)`
+      : (guardJobIds.has(item.jobId) ? '根守卫 job(永不跳过)的步骤' : null)
+    if (reason === null) continue
+    units.push({ jobId: item.jobId, step: item.step, index: item.index, label: item.label, reason })
+  }
+  // 根守卫 job 里**没有 `run`** 的步骤(`uses:` 之类的)不进 `shellSteps()` 的枚举,但它们
+  // 同样在守卫链上(给 `actions/checkout` 加一行 `env:` 一样是往这个 job 的环境里塞东西)。
+  for (const jobId of guardJobIds) {
+    stepsOf(jobId).forEach((step, index) => {
+      if (typeof step?.run === 'string') return
+      units.push({ jobId, step, index, label: stepName(step, index), reason: '根守卫 job(永不跳过)的步骤' })
+    })
+  }
+  if (units.length === 0) return failures
+
+  /** 把命中同一登记项的重复报告压掉(同一处 env 只报一次)。 */
+  const reported = new Set()
+  const reportOnce = (dedupeKey, detail) => {
+    if (reported.has(dedupeKey)) return
+    reported.add(dedupeKey)
+    failures.push({ name: file, line: 0, detail })
+  }
+  /** 所有命中项共用的"为什么"尾注(把现场与修法一次说清)。 */
+  const tail = (hit, where) =>
+    `\n  为什么必须拒:${hit.why}。`
+    + '\n  ⇒ 这类键改的是**解释器怎么解释命令**,不是命令要做什么:argv、解析后的 `shell:`、'
+    + '步骤体、`if:` 全部一字未改 ⇒ [SK-14] 的四条判据都看不见它(第九轮审计 D 泳道实测:'
+    + '形态 A/B 下 `check-workflows` EXIT=0,而真跑 `check-root-guards.mjs` 时在有 7 个守卫失败的'
+    + '树上仍打印「16 个根守卫:16 通过、0 失败」并 EXIT=0)。'
+    + `\n  ⇒ ${where}`
+
+  // ③ workflow 顶层 `env:`(注入每个 job 的每个 step)。
+  for (const [key] of envEntries(document?.env)) {
+    const hit = pinnedEnvKeyProblem(key)
+    if (hit === null) continue
+    const sample = units.slice(0, 3).map(unitLabel).join('、')
+    reportOnce(`workflow:${hit.matched}`, `[SK-17] workflow **顶层** \`env:\` 里的 \`${hit.raw}\` `
+      + `会注入**每一个 job 的每一个 step**,包括本 workflow 的 ${units.length} 个被钉住的判定单元`
+      + `(例如 ${sample}${units.length > 3 ? ' 等' : ''})。`
+      + tail(hit, '这类键只能出现在**非判据步骤**上;本判据**没有白名单**(加一条豁免就等于把'
+        + '"判据静默变绿"的通道原样开回来,与 [SK-16] 对 advisory 开关的取向一致)。'))
+  }
+
+  // ④ job 级 `env:`(注入该 job 的每个 step)。
+  for (const jobId of [...new Set(units.map(unit => unit.jobId))]) {
+    for (const [key] of envEntries(jobs[jobId]?.env)) {
+      const hit = pinnedEnvKeyProblem(key)
+      if (hit === null) continue
+      const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
+      reportOnce(`job:${jobId}:${hit.matched}`, `[SK-17] job ${jobId} 的 **job 级** \`env:\` 里的 `
+        + `\`${hit.raw}\` 会注入该 job 的每一个 step,包括它的被钉住判定单元:`
+        + `${labels.slice(0, 4).join('、')}${labels.length > 4 ? ` 等 ${labels.length} 个` : ''}。`
+        + tail(hit, 'job 级 `env:` 是形态 A/B 最省事的挂点:一个 job 加两行、命令一字不改;'
+          + '而"根守卫失败 ⇒ 必需的 Gate 检查也红"这条唯一链路就挂在它上面。'))
+    }
+  }
+
+  // ⑤ step 级 `env:`(只注入这一步)。
+  for (const unit of units) {
+    for (const [key] of envEntries(unit.step?.env)) {
+      const hit = pinnedEnvKeyProblem(key)
+      if (hit === null) continue
+      reportOnce(`step:${unit.jobId}#${unit.index}:${hit.matched}`, `[SK-17] ${unitLabel(unit)} 是`
+        + `${unit.reason},但它的 **step 级** \`env:\` 里有 \`${hit.raw}\`。`
+        + tail(hit, '这一步的退出码就是判据结论;给它挂一个改解释器行为的键,等价于把判据的结论'
+          + '改成"恒绿",而 `run` 文本一个字都没变。'))
+    }
+  }
+
+  // ⑥ `$GITHUB_ENV` / `$GITHUB_PATH`:同 job 内、位置在被钉步骤**之前**的步骤写进去的,
+  //    会被后面的步骤继承(跨 job 不生效 —— 每个 job 是独立 runner)。
+  const writers = new Map()
+  for (const unit of units) {
+    stepsOf(unit.jobId).forEach((step, index) => {
+      if (index >= unit.index || typeof step?.run !== 'string') return
+      const script = executableScript(step.run)
+      if (!GITHUB_ENV_WRITE.test(script)) return
+      writers.set(`${unit.jobId}#${index}`, { jobId: unit.jobId, index, step, script })
+    })
+  }
+  for (const writer of writers.values()) {
+    const targets = units.filter(unit => unit.jobId === writer.jobId && unit.index > writer.index)
+    if (targets.length === 0) continue
+    const writerLabel = `job ${writer.jobId} 的 step「${stepName(writer.step, writer.index)}」`
+    const inherited = `${targets.slice(0, 3).map(unitLabel).join('、')}`
+      + `${targets.length > 3 ? ` 等 ${targets.length} 个被钉单元` : ''}`
+    // ⑥a `$GITHUB_PATH`:追加目录 = PATH 覆写(与 `PATH` 键同级)。
+    if (GITHUB_PATH_APPEND.test(writer.script)) {
+      reportOnce(`ghpath:${writer.jobId}#${writer.index}`, `[SK-17] ${writerLabel} 往 \`$GITHUB_PATH\` `
+        + `追加了目录,而它后面还有被钉住的判定单元会继承这个 PATH(${inherited})。`
+        + '\n  ⇒ `$GITHUB_PATH` 是 Actions 里"改后续步骤 PATH"的正式通道,与 `env: PATH:` 等价:'
+        + '后续步骤里的 `node`/`bash` 可以解析到另一个二进制,而命令名一字未改。'
+        + tail({ why: 'PATH 决定 `node`/`bash` 解析到哪个二进制' },
+          '守卫 job / 判据步骤所在 job 里不要用 `$GITHUB_PATH`;需要工具路径请在**非判据步骤**上处理。'))
+    }
+    // ⑥b `$GITHUB_ENV`:写入的键名命中表 ⇒ 后续步骤继承它。
+    //     词级归一(与 [SK-16] 的 `advisoryFlagShape` 同一手法):`NODE_""OPTIONS=…` 写进
+    //     文件后就是 `NODE_OPTIONS=…`。
+    const normalized = advisoryFlagShape(writer.script)
+    for (const match of normalized.matchAll(ENV_ASSIGNMENT)) {
+      const hit = pinnedEnvKeyProblem(match[1])
+      if (hit === null) continue
+      reportOnce(`ghenv:${writer.jobId}#${writer.index}:${hit.matched}`, `[SK-17] ${writerLabel} 往 `
+        + `\`$GITHUB_ENV\` 写入了 \`${hit.raw}\`,而它后面还有被钉住的判定单元会继承它(${inherited})。`
+        + tail(hit, '这类注入在 `run` 文本里只留一个 `$VAR`,三层 `env:` 里什么都没有 ⇒'
+          + '判据面必须把 `$GITHUB_ENV` 的**键名**也算上(第八轮只扫了它的**取值**层面:'
+          + '`--allow-advisory` 那个开关)。'))
+    }
+  }
+
+  if (failures.length === 0) {
+    notes.push(`[SK-17] 进程环境层:${units.length} 个被钉住的判定单元`
+      + `(${[...new Set(units.map(unit => unit.jobId))].join(', ')})的三层 \`env:\` 与 `
+      + '`$GITHUB_ENV`/`$GITHUB_PATH` 注入均已检查(键表见 PINNED_ENV_DENIED_KEYS)')
+  }
+  return failures
 }
 
 /**
@@ -5717,6 +6409,22 @@ export function selfTestPolicies() {
     // 守卫运行步的 `env:`（[SK-16②] 的样本入口）：null = 不带 env（与真 ci.yml 同形）；
     // 给了数组就走"多行 + env:"形态（**仍然不得带 `if:`** —— [SK-14] 的 `never` 形态）。
     guardStepEnv = null,
+    // 根守卫 **job 级** `env:`（[SK-17④] 的样本入口）：数组 = 该 job 的 `env:` 块内容
+    // （已缩进 4 空格）。形态 A/B 最省事的挂点就是这里（2026-09-25 第九轮审计 D 泳道）。
+    guardJobEnv = null,
+    // 守卫结果链路步（`gate` 的收尾链路步）的 `env:`（[SK-17⑤] 的样本入口）。
+    linkStepEnv = null,
+    // `changes` job 里那一步（**非**判据步骤）的 `env:`（[SK-17] 的绿样本入口：
+    // 判据只钉"判据步骤/守卫 job"，`NODE_OPTIONS: --max-old-space-size=…` 这类
+    // 真实存在的合法用法不许被一刀切）。
+    changesStepEnv = null,
+    // 被钉住的**全量门禁**步（`gate` 的 `yarn check`）的额外 `env:` 行（[SK-17⑤] 的样本入口）。
+    gateStepExtraEnv = [],
+    // 被钉住的**全量门禁**步的 `shell:`（[SK-14⑦] 整串判据的样本入口，R9-B P1-3）。
+    gateStepShell = null,
+    // `changes` job（**没有**判据步骤的 job）里那一步之后的额外步骤（[SK-17] 的绿样本入口：
+    // `$GITHUB_PATH` 这类写法在非判据 job 里是正常姿势，不许被一刀切）。
+    changesExtraSteps = [],
     // 守卫运行步的**块标量**形态（[SK-9②]/R8-C-1 的样本入口：命令被注释掉）。
     // 给了数组就走 `run: |` + 逐行内容（不再有内联 `- run:`）。
     guardRunLines = null,
@@ -5768,13 +6476,16 @@ export function selfTestPolicies() {
     '      code: ${{ steps.scope.outputs.code }}',
     '    steps:',
     '      - id: scope',
+    ...(changesStepEnv === null ? [] : ['        env:', ...changesStepEnv]),
     '        run: echo "code=true" >> "$GITHUB_OUTPUT"',
+    ...changesExtraSteps,
     ...(guardJob ? [
       '  gate-guards:',
       '    runs-on: ubuntu-latest',
       ...(guardNeeds === '' ? [] : [`    needs: ${guardNeeds}`]),
       ...(guardIf === '' ? [] : [`    if: ${guardIf}`]),
       '    timeout-minutes: 20',
+      ...(guardJobEnv === null ? [] : ['    env:', ...guardJobEnv]),
       '    steps:',
       '      - uses: actions/checkout@v7',
       '        with:',
@@ -5807,6 +6518,7 @@ export function selfTestPolicies() {
       '      - name: Root guards must have passed',
       `        if: ${linkIf}`,
       ...(linkShell === null ? [] : [`        shell: ${linkShell}`]),
+      ...(linkStepEnv === null ? [] : ['        env:', ...linkStepEnv]),
       '        run: |',
       ...(linkRun ?? [
         '          set -euo pipefail',
@@ -5823,7 +6535,12 @@ export function selfTestPolicies() {
     ...(gateDepth === null ? [] : [gateDepth]),
     '      - name: 全量门禁',
     `        if: ${gateStepIf}`,
-    ...(expectHeadEnvLine(gateExpectHead) === null ? [] : ['        env:', expectHeadEnvLine(gateExpectHead)]),
+    ...(gateStepShell === null ? [] : [`        shell: ${gateStepShell}`]),
+    ...(expectHeadEnvLine(gateExpectHead) === null && gateStepExtraEnv.length === 0 ? [] : [
+      '        env:',
+      ...(expectHeadEnvLine(gateExpectHead) === null ? [] : [expectHeadEnvLine(gateExpectHead)]),
+      ...gateStepExtraEnv,
+    ]),
     `        run: ${gateRun}`,
     ...(releaseAnchor ? [
       '      - name: Publish channel images to the update server (R2)',
@@ -6372,6 +7089,225 @@ export function selfTestPolicies() {
     guardRun: `node ${DOCS_ONLY_GUARD_RUNNER}`,
   })
 
+  // ---- 策略 13([SK-17]):被钉步骤/守卫 job 的**进程环境层**(2026-09-25 第九轮审计 D 泳道) ----
+  //
+  // 现场:第八轮把 [SK-14] 的判据搬到"执行视角"(argv / 解析后的 shell / 步骤体 / `if:` /
+  // `$GITHUB_ENV` 的**取值**)是对的,但那四条通道全都在"命令怎么被写出来"这一层。审计方
+  // 实跑确认两类形态**不改 argv、不改 shell、不改步骤体、不需要任何新增文件**就能让
+  // "永不跳过"的根守卫 job 静默变绿:
+  //   形态 A  `env: NODE_OPTIONS: "--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+  //   形态 B  `env: BASH_ENV: ./.github/shell-hooks.sh`(内含 `node() { return 0; }`)
+  // 两者都让 `check-workflows` EXIT=0;而真跑 `check-root-guards.mjs` 时,形态 A 在有 7 个
+  // 守卫失败的树上仍打印「16 个根守卫:16 通过、0 失败」并 EXIT=0。
+  //
+  // 下面的样本按**位置 × 键族**逐格覆盖(每一格都是一条独立的绕过路径,删掉哪一格,
+  // 对应的键/位置就会静默回到"没人看着"的状态 —— `SELFTEST_REQUIRED_SAMPLES` 逐条点名):
+  //   位置:job 级(④)/ step 级(⑤)/ workflow 顶层(③)/ `$GITHUB_ENV`(⑥b)/ `$GITHUB_PATH`(⑥a);
+  //   单元:根守卫 job 的守卫步、`gate` 的收尾链路步、被钉住的**全量门禁**步;
+  //   键族:审计点名键(NODE_OPTIONS/BASH_ENV/SHELLOPTS/PATH)+ 前缀形态(`BASH_FUNC_`)+
+  //         大小写变体(Windows 上 `Path` 就是 `PATH`)。
+  const SK17_NODE_OPTIONS = `--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})`
+  // 形态 A 的最省事挂点(job 级 `env:`)。
+  gateSample('w1-node-options-guard-job-env', '[SK-17]', {
+    file: 'ci.yml',
+    guardJobEnv: [`      NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`],
+  })
+  // 形态 B 的最省事挂点(守卫步的 step 级 `env:` ⇐ 审计方实跑的两条形态之一)。
+  gateSample('w2-bash-env-guard-step-env', '[SK-17]', {
+    file: 'ci.yml',
+    guardStepEnv: ['          BASH_ENV: ./.github/shell-hooks.sh'],
+  })
+  // 位置③:workflow 顶层 `env:` —— 注入每个 job 的每个 step(命令里连字面量都不出现)。
+  gateSample('w3-node-options-workflow-env', '[SK-17]', {
+    file: 'ci.yml',
+    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", `  NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`],
+  })
+  // 位置⑥b:`$GITHUB_ENV` 运行期注入键名(第八轮只扫了这个通道的**取值**层面)。
+  gateSample('w4-github-env-node-options', '[SK-17]', {
+    file: 'ci.yml',
+    guardPreSteps: [
+      '      - name: Export interpreter flags',
+      '        run: |',
+      '          set -euo pipefail',
+      `          echo "NODE_OPTIONS=${SK17_NODE_OPTIONS}" >> "$GITHUB_ENV"`,
+    ],
+  })
+  // 前缀形态:导出的 shell 函数(`BASH_FUNC_node%%`),连 hook 文件都不需要。
+  gateSample('w5-bash-func-guard-step-env', '[SK-17]', {
+    file: 'ci.yml',
+    guardStepEnv: ['          BASH_FUNC_node%%: "() { return 0; }"'],
+  })
+  // 位置⑥a:`$GITHUB_PATH` = PATH 覆写(与 `env: PATH:` 同级,命令名一字未改)。
+  gateSample('w6-github-path-append', '[SK-17]', {
+    file: 'ci.yml',
+    guardPreSteps: [
+      '      - name: Prepend a shim directory',
+      '        run: |',
+      '          set -euo pipefail',
+      '          echo "$PWD/scripts/shim" >> "$GITHUB_PATH"',
+    ],
+  })
+  // 单元:`gate` 的收尾链路步(根守卫失败 ⇒ 必需 Gate 红 的**唯一**链路)。
+  gateSample('w7-pinned-link-step-shellopts', '[SK-17]', {
+    file: 'ci.yml',
+    linkStepEnv: ['          SHELLOPTS: errexit'],
+  })
+  // 单元:被钉住的**全量门禁**步(它的退出码就是 gate job 的结论)。
+  gateSample('w8-pinned-full-gate-node-options', '[SK-17]', {
+    file: 'ci.yml',
+    gateStepExtraEnv: [`          NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`],
+  })
+  // 大小写变体:Windows runner 上环境变量名不区分大小写(`Path` 就是 `PATH`),一律按大写判。
+  gateSample('w9-guard-env-key-case-variant', '[SK-17]', {
+    file: 'ci.yml',
+    guardJobEnv: ['      Bash_Env: ./.github/shell-hooks.sh'],
+  })
+  // **绿样本 1**(不得误伤):守卫 job 上的合法 env 必须照常通过 —— 判据拒的是"改解释器
+  // 行为"的键,不是"给守卫 job 传 env"这件事本身。
+  gateSample('w10-guard-env-legit-keys-green', null, {
+    file: 'ci.yml',
+    guardJobEnv: [
+      "      DSH_TELEMETRY_DISABLED: '1'",
+      '      VERSION: "1.2.3"',
+      '      NPM_CONFIG_FUND: "false"',
+      '      R2_BUCKET: artifacts',
+      '      AWS_DEFAULT_REGION: auto',
+    ],
+    guardStepEnv: ['          VERSION: "1.2.3"'],
+    guardPreSteps: [
+      '      - name: Export build metadata',
+      '        run: |',
+      '          set -euo pipefail',
+      '          echo "BUILD_META=guards-ran" >> "$GITHUB_ENV"',
+    ],
+  })
+  // **绿样本 2**(不得一刀切):`NODE_OPTIONS: --max-old-space-size=…` 是本仓/业界真实存在
+  // 的合法用法 —— 它落在**非判据步骤**上(与"判据结论"无关)时必须照常通过。判据的面是
+  // "被钉住的判据步骤 / 根守卫 job",不是"整个文件里不许出现这个键"。
+  gateSample('w11-unpinned-step-node-options-green', null, {
+    file: 'ci.yml',
+    changesStepEnv: ['          NODE_OPTIONS: "--max-old-space-size=4096"'],
+  })
+  // **绿样本 3**(不得一刀切):`$GITHUB_PATH` 在**没有判据步骤**的 job 里是正常写法
+  // (装工具链的标准姿势);它只在"后面还有被钉单元会继承它"时才红。
+  gateSample('w12-unpinned-github-path-green', null, {
+    file: 'ci.yml',
+    changesExtraSteps: [
+      '      - name: Prepend a toolchain directory',
+      '        run: |',
+      '          set -euo pipefail',
+      '          echo "$PWD/tools/bin" >> "$GITHUB_PATH"',
+    ],
+  })
+
+  // ---- 策略 14(P1-1/P1-2/P1-3/P1-4)与第八轮三条假红的回归(2026-09-25 第九轮审计 B 泳道) ----
+  //
+  // B 泳道在"同一面"(判据只看文本、不看执行语义)上又找到 5 条 P1,并实测出第八轮新引入的
+  // 3 条**假红**。两边的样本都放在这里:红样本钉住绕过形态,绿样本钉住"不得误伤"
+  // (FP-1 子 shell 收尾 / FP-2 重定向当参数 / FP-3 env 说明文本 —— 三条都有父提交对照)。
+  //
+  // P1-1:守卫运行步只被"文本里出现脚本路径"识别 ⇒ 三行 no-op 让 16 个根守卫零执行。
+  for (const [id, line] of [
+    ['x1-guard-runner-colon-noop', `: ${DOCS_ONLY_GUARD_RUNNER}`],
+    ['x2-guard-runner-test-f', `test -f ${DOCS_ONLY_GUARD_RUNNER}`],
+    ['x3-guard-runner-echo-literally', `echo "node ${DOCS_ONLY_GUARD_RUNNER}"`],
+  ]) {
+    const result = gateSample(id, '[SK-9]', {
+      file: 'ci.yml',
+      guardRunLines: ['set -euo pipefail', line],
+    })
+    // **判据面**断言(为什么红样本不够):`: <脚本>` 在"识别退回文本子串"时**照样是红的**
+    // —— SK-9 的"0 个守卫 job"独立命中,于是把 `root-guard-runner` 的识别改回
+    // `script.includes(…)`(变异 m2)之后自检全绿,而 P1-1 的洞原样回来。
+    // 这里直接断言**策略命中集合**:这一步不得被当成"被钉住的守卫运行步"。
+    expect(!result.pinnedStepPolicies.includes('root-guard-runner'),
+      `自检:样本 \`${id}\` 把"提到脚本路径"当成了"执行脚本" —— \`root-guard-runner\` 策略仍然命中`
+        + ' ⇒ 识别退回文本子串,`: <脚本>` / `test -f <脚本>` / `echo "node <脚本>"` 重新变成"守卫跑过了"')
+  }
+  {
+    // 正控:真实形态必须仍然被识别(否则 SK-14 的覆盖下限会假红,判据自己把自己咬死)。
+    const result = gateSample('x1b-guard-runner-command-position-green', null, { file: 'ci.yml' })
+    expect(result.pinnedStepPolicies.includes('root-guard-runner'),
+      '自检:真实形态 `- run: node scripts/check-root-guards.mjs` 没有被识别成被钉住的守卫运行步'
+        + ' ⇒ 命令位判据收得过紧(会把真实 ci.yml 判成"守卫 job 不存在")')
+  }
+  // P1-3:`shell:` 模板让脚本体**一次都不执行**(首词仍是 `bash` ⇒ 旧的"首词判据"放行)。
+  gateSample('x4-link-shell-template-noop', '[SK-14]', {
+    file: 'ci.yml',
+    linkShell: "bash -c 'exit 0' {0}",
+  })
+  gateSample('x5-full-gate-shell-template-noop', '[SK-14]', {
+    file: 'ci.yml',
+    gateStepShell: "bash -c 'exit 0' {0}",
+  })
+  // P1-2:链路步的 `trap` 动作是**动态构造**的(引号载荷被屏蔽、动作词不是字面量)。
+  gateSample('x6-link-indirect-trap', '[SK-14]', {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      "          A='exit 0'",
+      '          trap "$A" EXIT',
+      '          echo "::error::root guards failed(result=${{ needs.gate-guards.result }})"',
+      '          exit 1',
+    ],
+  })
+  gateSample('x7-link-trap-substitution', '[SK-14]', {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      "          trap \"$(printf '%s %s' exit 0)\" EXIT",
+      '          echo "::error::root guards failed(result=${{ needs.gate-guards.result }})"',
+      '          exit 1',
+    ],
+  })
+  // P1-4(`echo` 化发布脚本)的样本在 [SK-15] 合成登记表那一节(x8:它要用 sk15Sample)。
+  // 绿样本(P1-3 的正确放行):`bash -e {0}` 是 GitHub 官方模板,`{0}` 是**脚本文件参数**
+  // ⇒ 脚本体一定被执行,必须继续通过。
+  gateSample('x9-shell-template-script-arg-green', null, {
+    file: 'ci.yml',
+    linkShell: 'bash -e {0}',
+  })
+  // 绿样本(FP-1,第八轮新引入的假红):子 shell 收尾 `( exit 1 )` 与 `{ …; exit 1; }`
+  // 执行视角等价,父提交 `3d4306dded` 上实测 EXIT=0。
+  gateSample('x10-link-subshell-tail-green', null, {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      '          echo "::error::root guards failed(result=${{ needs.gate-guards.result }})"',
+      '          ( exit 1 )',
+    ],
+  })
+  // 绿样本(P1-2 的正确放行):单引号字面量动作的 `trap` 清理(含变量但**不做展开**)。
+  gateSample('x11-link-trap-cleanup-green', null, {
+    file: 'ci.yml',
+    linkRun: [
+      '          set -euo pipefail',
+      "          trap 'rm -rf \"$tmp\"' EXIT",
+      '          echo "::error::root guards failed(result=${{ needs.gate-guards.result }})"',
+      '          exit 1',
+    ],
+  })
+  // 绿样本(FP-2,第八轮新引入的假红):守卫运行步把输出落盘 / 接管道。
+  // 父提交上 `… 2>&1 | tee log` 与 `… > /dev/null` 都是绿的(重定向不是参数)。
+  gateSample('x12-guard-runner-redirect-tee-green', null, {
+    file: 'ci.yml',
+    guardRunLines: ['set -euo pipefail', `node ${DOCS_ONLY_GUARD_RUNNER} 2>&1 | tee root-guards.log`],
+  })
+  gateSample('x13-guard-runner-redirect-null-green', null, {
+    file: 'ci.yml',
+    guardRunLines: ['set -euo pipefail', `node ${DOCS_ONLY_GUARD_RUNNER} > /dev/null`],
+  })
+  // 绿样本(FP-3,第八轮新引入的假红):顶层 `env:` 里的**说明文本**与**不同旗标**
+  // 都不是"把开关注入 argv"(旧判据按子串匹配,两条都判红,且文案与事实不符)。
+  gateSample('x14-workflow-env-lookalike-green', null, {
+    file: 'ci.yml',
+    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  PICO_NOTE: "do not pass --allow-advisory anywhere"'],
+  })
+  gateSample('x15-workflow-env-other-flag-green', null, {
+    file: 'ci.yml',
+    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  EXTRA_FLAGS: --allow-advisory-strict'],
+  })
+
   // ---- 策略 12([SK-15]):job / 发布链步骤的**不可静默跳过**(R5-D-1 / R5-D-2) ----
   //
   // 现场:SK-14⑤ 只判"被钉步骤所在 job",别的 job 的 `if:` 没有任何判据读它 ⇒ 把
@@ -6429,6 +7365,16 @@ export function selfTestPolicies() {
     extraSteps: ["- name: Sneaky upload", "  run: aws s3 cp bundle.zip s3://some-bucket/releases/"],
   }))
   sk15Sample('v10-registered-shape-green', sk15Workflow(), null)                        // 正例
+  // P1-4(第九轮审计 B 泳道):发布链步骤的 `require` 曾经是**子串**判据 —— 把真正调用
+  // 发布脚本的那一行换成 `echo`(step 名 / `if:` / `continue-on-error` / `env:` 全不动)
+  // 就能让"零上传"通过登记。现在脚本路径必须出现在**命令位**。
+  sk15Sample('x8-release-require-echo-noop', sk15Workflow({
+    stepRun: 'echo "scripts/ci-release-policy.sh --list channels.list"',
+  }))
+  // 对照(正确放行):真正执行它的写法必须继续通过。
+  sk15Sample('x8b-release-require-command-green', sk15Workflow({
+    stepRun: 'bash scripts/ci-release-policy.sh --list channels.list',
+  }), null)
 
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
@@ -6692,8 +7638,10 @@ export function selfTestPoliciesCoverage(observed) {
   expect(missingRequired.length === 0,
     `[self-test] 定向样本被删或被改成了别的期望:${missingRequired
       .map(entry => `\`${entry.id}\`(期望 ${entry.policy === null ? '绿样本' : `红样本 ${entry.policy}`})`).join(', ')}`
-      + '\n  ⇒ 这批样本钉的是 2026-09-24 第七轮独立复审 V2 实测出的绕过形态'
-      + '(步骤体退出语义的词法形态 + workflow 级 `env:`/`$GITHUB_ENV` 的静音开关通道);'
+      + '\n  ⇒ 这批样本钉的是两批**实跑出来的绕过形态**:'
+      + '①2026-09-24 第七轮独立复审 V2(步骤体退出语义的词法形态 + workflow 级 `env:`/`$GITHUB_ENV` 的静音开关通道);'
+      + '②2026-09-25 第九轮审计 D 泳道与 B 泳道(进程环境层 `env:` 的三层键面 / 命令位判据 / `shell:` 整串 / '
+      + '`trap` 动态动作 / 发布链 `require` 的命令位 / 三条第八轮新引入的假红)。'
       + '删样本 = 把这些形态重新放回"静默摘除唯一链路"的状态。')
   return failures
 }
@@ -7121,9 +8069,12 @@ function main() {
     + 'bash -n + SK-7 策略(吞码 / go test 超时序 / 单行退出码 / 块标量退出语义)'
     + ' + SK-8/SK-8b/SK-9/SK-10/SK-11/SK-12 策略(根门禁调用形态 / 跑门禁的 job 必须完整历史 /\n'
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
-    + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行)\n'
+    + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行:命令位 · 整串 `shell:` · '
+    + '步骤体退出语义)\n'
+    + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:三层 `env:` 的禁用键表 + '
+    + '`$GITHUB_ENV`/`$GITHUB_PATH` 键名注入)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
-    + 'continue-on-error / 效果子串 / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
+    + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {

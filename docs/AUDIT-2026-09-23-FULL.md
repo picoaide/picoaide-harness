@@ -828,9 +828,19 @@ OIDC 流程桶把"自身在途配额满"的 429 也计入失败预算（NAT 出�
 **P2/P3 重点**：R9-A 三条（声明 `Authorization` 解析为空时遮蔽 provider 活令牌、provider-less + 声明了别的头导致默认 bearer 不注入、重建仍会掐断飞行中调用）+ R9-D 的连接器"provider-backed http 上其它注册期烘焙头永不刷新 ⇒ 一次轮换后**永久 401**"（**父提交自愈、第八轮变永久**）；服务端良性归类只覆盖 5 个窗口中的 2 个（并发清理一轮 4/4 路非 nil ⇒ 管理端保存保留期仍偶发 500）；`/readyz.usage_retention.configured_months` 在失败轮次读作 0 而 0 的 API 语义是"永不删除"；门禁的 3 条**新引入假红**（子 shell 收尾 `( exit 1 )`、argv 钉子把 `2>&1` 当参数、`[SK-16]` 子串匹配误伤说明文本与 `--allow-advisory-strict`）。
 
 **本轮方法学增量**
-1. **"上一轮刚改过的地方"连续第六轮是最高价值入口**，而且本轮出现了它的**新子类**："上一轮的修复把原本偶然成立的性质拿掉，改由一个**有窗口**的新判据承担"（R9-D-01/R9-C-1 都是）。⇒ 每轮复审必须对被替换掉的旧行为问一句：**它当时是判据，还是巧合？**
-2. **判据面的推进方向是清楚的**：文本 → 语义 → 执行视角 → **进程环境**。每加一层，都要把上一层的"等价变形"清单重新过一遍（本轮 6 支环境层形态就是第八轮 argv/shell 钉子的"再上一层"）。
+1. **"上一轮刚改过的地方"连续第六轮是最高价值入口**，而且本轮出现了它的**新子类**："上一轮的修复把原本偶然成立的性质拿掉，改由一个**有窗口**的新判据承担"（R9-D-01/R9-C-1 都是）。⇒ 每轮复审必须对被替换掉的旧行为问一句：**它当时是判据，还是巧合？**2. **判据面的推进方向是清楚的**：文本 → 语义 → 执行视角 → **进程环境**。每加一层，都要把上一层的"等价变形"清单重新过一遍（本轮 6 支环境层形态就是第八轮 argv/shell 钉子的"再上一层"）。
 3. **假 CLI/假 aws 会掩盖真实命令行契约**：Release job 的 `--body "fileb://…"` 在现代 AWS CLI 上直接 ParamValidation 失败，而仓库里的**假 aws 主动做了 `#fileb://` 兼容** ⇒ 单测永远绿、真发布必红（见 §7.44）。**假实现必须与真实现同形 —— 连"拒绝"也要同形。**
+
+**第九轮的修复批（PR #144，分支 `fix/round9-batch`）**
+
+五条泳道并行（发布链 / 连接器 / 门禁 / 服务端保留期与写路径 / 服务端良性归类）；集成后在本机：整仓根守卫 **16/16**、connectors **47 文件 / 413 用例**、桌面产物守卫 + `tsc` 绿、真 PG 四包（`serverstore` / `cmd/server` / `usageretention` / `llmgateway`）全绿。要点：
+
+- **发布链**：`--body` 改纯绝对路径 + 假 aws 与真 CLI **同形拒绝**（`file://`/`fileb://` 一律 exit 252 + 同一条报文）+ 静态判据禁止前缀 + **上传前 1 字节探测**（put → 大小/SHA256 校验 → 删除），把形态/端点/校验和失败挡在 500MB 上传之前。变异矩阵 M1–M6 全红且**未修复的 base 树跑自己的门禁是 EXIT 0**（正是"mock 掩盖契约"的实证）。
+- **连接器**：`Authorization` 空解析不再算"自带凭据"（并入"留空自动填 bearer"同一规则）；provider-backed http 的其它注册期烘焙头改为**每请求视图**（不重建传输 ⇒ R8-B-2 不退化，`rotations=5 configs=1 disposed=0`）；provider-less 的默认注入闸门从"整条记录为空"改为"授权槽未被非空声明占用"；`retire()` 前按端点等**非 GET 在途请求**归零（有界 5s，超时留日志后照常重建）。变异 8/8 红。
+- **门禁**：新增 **[SK-17] 进程环境层**判据（被钉单元 × 三层 `env:` × `$GITHUB_ENV`/`$GITHUB_PATH`；禁 `NODE_OPTIONS`/`NODE_PATH`/`BASH_ENV`/`ENV`/`SHELLOPTS`/`BASHOPTS`/`PROMPT_COMMAND`/`PATH`/`BASH_FUNC_*`/`LD_PRELOAD`/`LD_AUDIT`，22 个合法 env 键零误伤）；守卫运行步与发布链步骤改**命令位**判据；`trap` 动态动作 fail-closed；`shell:` **整串**登记（`bash -c 'exit 0' {0}` 红）；守卫脚本**逐字登记**（+ 第二份独立登记表）。三条第八轮假红复绿（子 shell 收尾、argv 先剥重定向、SK-16 整词）。变异矩阵 21/21 + 判据自身变异 7/7。
+- **服务端（保留期竞态）**：DETACH+DROP 收进一个事务，临界区 = `LOCK TABLE ONLY usage ACCESS EXCLUSIVE` → `LOCK TABLE <rel> ACCESS EXCLUSIVE`（PG 递归锁子树）→ **持锁复检** → DETACH → DROP → COMMIT；`lock_timeout=5s` 拿不到锁即 fail-loud 全回滚；复检谓词改成语义等价的 sargable 形式（20 万行子树 33.8ms → 0.6ms）。良性判据收成**唯一出口** `usageFailureIsBenignRace`（判据 = catalog 事实"关系此刻已不存在"，**42P01 但关系还在必须 fail-loud**），W5 用 `usageReclaimNotAttached` 结构化收口（良性且不 DROP）。修前 4 路并发 3 次跑分别 8/20、3/20、4/20 路非 nil ⇒ 修后 0/20、0/20、0/20。
+- **服务端（当月写路径）**：同名孤儿在**单事务**里 DETACH+ATTACH 领回 `usage`（用其自身声明边界）⇒ 当月写入恢复且 DETACH 前的明细重新可见；领不回（分区父表/跨 schema/边界不可读或不覆盖/overlap）则结构化 fail-loud + 可执行 SQL + `/readyz.usage_retention.write_blocked_*`。`scanUsagePartitions`/`partitionReadyErr` 改用**有效边界（声明 ∩ 全部祖先）**；c6（假覆盖）现在建出顶层月分区并写入成功，c11（真被祖先截断）fail-loud 并点名祖先链。
+- **认账未修**：R9-D-04（日账按年分片）、R9-D-06（深层后代永不回收，第八轮既有取舍）、R9-D-08（relations 计数口径）、R9-B 的 P2/P3 残余（`check-go-test-json` 自检下限仍是自报计数、`CI_CHANNELS_PIN` 归一化边界、同版本重发 × immutable 无 purge 判据等）、以及"为把 W3/W4 做成确定性判据而新增的**仅测试**注入点 `cleanupDetachedStepHook`"这一取舍需评审确认。
 
 ### 7.44 第九轮暴露的发布链阻断：`--body fileb://` 与现代 AWS CLI 不再兼容
 

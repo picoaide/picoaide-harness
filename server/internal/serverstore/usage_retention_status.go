@@ -18,6 +18,7 @@ package serverstore
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,12 @@ const (
 	usageSkipSubtreeRetained = "subtree-retained"
 	usageSkipDetachedNonLeaf = "detached-non-leaf"
 	usageSkipNonTable        = "non-table"
+	// usageSkipOrphanRetained：名为 usage_<YYYYMM> 的关系**不在 usage 树里**、而名字的那
+	// 个月**仍在保留期内**（R9-D R9D-07）。保留期内不能删它的明细，所以它不进回收面 ——
+	// 但它占着当月分区名，写入路径要么把它领回去（自愈）、要么该月写入永久失败。
+	// 旧实现直接 `continue`（零计数），于是"有一条关系在挡着当月写入"与"没有可回收的
+	// 关系"在 skip_reasons 上逐字同形。谁在推进它：写路径（adopt 自愈）+ 人工。
+	usageSkipOrphanRetained = "orphan-retained"
 )
 
 // usageRetentionUnreclaimedMax 是状态里保留的"未回收关系清单"长度上限：
@@ -42,16 +49,22 @@ const usageRetentionUnreclaimedMax = 20
 
 // usageRetentionRound 是一轮清理的过程事实（由 CleanupUsageRetention 填写）。
 type usageRetentionRound struct {
-	At                time.Time
-	ConfiguredMonths  int
-	CutoffMonth       string
-	Relations         int
-	ClearedPartitions int
-	ClearedDetached   int
-	Skipped           int
-	Failures          int
-	SkippedByReason   map[string]int
-	Unreclaimed       []string
+	// EndedAt 是本轮**结束**的时刻（由 CleanupUsageRetention 的 defer 在记账前写入）：
+	// `last_round_at` 的语义是"最近一轮何时跑完"，与 rounds/failed_rounds 一起回答
+	// "调度器还活着吗"（R9C-4：此前它记的是**开始**时刻而注释写"结束"）。
+	EndedAt          time.Time
+	ConfiguredMonths int
+	// ConfiguredMonthsKnown 报告 ConfiguredMonths 是否**读到过**（R9D-05：把"还没跑过"
+	// 与"保留期已关"分开）。
+	ConfiguredMonthsKnown bool
+	CutoffMonth           string
+	Relations             int
+	ClearedPartitions     int
+	ClearedDetached       int
+	Skipped               int
+	Failures              int
+	SkippedByReason       map[string]int
+	Unreclaimed           []string
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -67,9 +80,10 @@ type usageRetentionRound struct {
 //	                                深后代永不回收从此是可判定的计数）
 //	unreclaimed                     未回收的关系名（有界抽样，带原因）
 type UsageRetentionStatus struct {
-	ConfiguredMonths  int    `json:"configured_months"`
-	RoundNumber       int64  `json:"rounds"`
-	FailedRounds      int64  `json:"failed_rounds"`
+	ConfiguredMonths int   `json:"configured_months"`
+	RoundNumber      int64 `json:"rounds"`
+	FailedRounds     int64 `json:"failed_rounds"`
+	// LastRoundAt 是最近一轮**结束**的时刻（R9C-4：此前实现记的是开始时刻）。
 	LastRoundAt       string `json:"last_round_at,omitempty"`
 	LastError         string `json:"last_error,omitempty"`
 	CutoffMonth       string `json:"cutoff_month,omitempty"`
@@ -84,6 +98,37 @@ type UsageRetentionStatus struct {
 	Unreclaimed []string `json:"unreclaimed,omitempty"`
 	// UnreclaimedTruncated 报告清单是否被上限截断（计数仍是全量）。
 	UnreclaimedTruncated bool `json:"unreclaimed_truncated,omitempty"`
+	// ConfiguredMonthsKnown 报告 ConfiguredMonths 是**观测值**还是**零值**（R9-D R9D-05）。
+	//
+	// configured_months 在本域里"0 = 永不删除"，而进程跑过第一轮之前它也是 0 —— 同一个
+	// 字段承载"还没跑过"与"保留期已关"两种语义，只有 rounds=0 一个旁证。判据必须能
+	// 区分这两件事，所以显式给出"这个 0 是观测"这一位。
+	ConfiguredMonthsKnown bool `json:"configured_months_known"`
+
+	// ---- 写入面（R9-D R9D-00，P0）：当月到底能不能落账 ----
+	//
+	// 缺陷形态：`ALTER TABLE usage DETACH PARTITION usage_<YYYY>` 之后，子树里仍在保留
+	// 期内的同名孤儿让每一次计量写入失败 ⇒ 网关对**每一次对话**回 503 METERING_FAILED
+	// （fail-closed，不交付），而清理三轮 err=nil/skipped=0、`/readyz` 的 usage_retention
+	// 全绿 ⇒ 从任何观测面都看不出全站对话已经不可用。
+	//
+	// 判据必须与危害同构：**"这一笔计量落不了账"本身必须是一条可读的状态**。字段由写
+	// 路径记账（serverstore.noteUsagePartitionWriteFailure / …OK），装配层只读、不推断。
+	//
+	//	write_blocked         当月（北京月）至少有一次计量写入被分区布局挡住 ——
+	//	                      用户面后果 = 该月每一次对话 503 METERING_FAILED；
+	//	write_blocked_month   被挡住的月份（YYYYMM）；
+	//	write_blocked_kind    封闭取值，见 partitions.go 的 usagePartitionKind*；
+	//	write_blocked_error   最近一次的原始错误（含人工处置文案）；
+	//	write_blocked_action  **可执行的**运维动作（与错误文案同源，只有一份实现）；
+	//	write_blocked_since   第一次失败的时刻；write_blocked_count 失败次数。
+	WriteBlocked       bool   `json:"write_blocked"`
+	WriteBlockedMonth  string `json:"write_blocked_month,omitempty"`
+	WriteBlockedKind   string `json:"write_blocked_kind,omitempty"`
+	WriteBlockedError  string `json:"write_blocked_error,omitempty"`
+	WriteBlockedAction string `json:"write_blocked_action,omitempty"`
+	WriteBlockedSince  string `json:"write_blocked_since,omitempty"`
+	WriteBlockedCount  int64  `json:"write_blocked_count,omitempty"`
 }
 
 var (
@@ -97,9 +142,17 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	usageRetentionStatusMu.Lock()
 	defer usageRetentionStatusMu.Unlock()
 	st := usageRetentionStatusVal
-	st.ConfiguredMonths = round.ConfiguredMonths
+	// R9D-05 / R9C-4：configured_months 的 0 在本域里等于"永不删除"，而**失败轮次**
+	// （读不到生效保留期）此前也会把它写成 0 ⇒ 监视器读到与事实相反的结论。
+	// 判据：只有本轮**真的观测到**（EffectiveRetentionMonths 成功返回）才覆盖这两个
+	// 字段；观测不到时保留上一次的观测值，本轮失败由 failed_rounds / last_error 表达。
+	if round.ConfiguredMonthsKnown {
+		st.ConfiguredMonths = round.ConfiguredMonths
+		st.ConfiguredMonthsKnown = true
+		// 保留期关掉（0 = 永不删除）时 cutoff 本来就不存在 ⇒ 显式清空是对的。
+		st.CutoffMonth = round.CutoffMonth
+	}
 	st.RoundNumber++
-	st.CutoffMonth = round.CutoffMonth
 	st.Relations = round.Relations
 	st.ClearedPartitions = round.ClearedPartitions
 	st.ClearedDetached = round.ClearedDetached
@@ -122,8 +175,8 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 		}
 		st.Unreclaimed = append([]string(nil), round.Unreclaimed[:limit]...)
 	}
-	if !round.At.IsZero() {
-		st.LastRoundAt = round.At.UTC().Format(time.RFC3339)
+	if !round.EndedAt.IsZero() {
+		st.LastRoundAt = round.EndedAt.UTC().Format(time.RFC3339)
 	}
 	if roundErr != nil {
 		st.FailedRounds++
@@ -133,6 +186,61 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	}
 	usageRetentionStatusVal = st
 }
+
+// usageWriteBlockState 是"当月计量写入被分区布局挡住"的**进程内**过程事实
+// （R9-D R9D-00）。子系统自己记账，装配层只读，不推断。
+type usageWriteBlockState struct {
+	Month  string // 被挡住的北京月（YYYYMM）
+	Since  time.Time
+	Kind   string
+	Action string
+	Err    string
+	Count  int64
+}
+
+var usageWriteBlockVal atomic.Pointer[usageWriteBlockState]
+
+// noteUsagePartitionWriteFailure 记下"这一笔计量没能落账"（写路径唯一记账点）。
+//
+// 热路径成本：只在**失败**时进入（失败本身已经要打日志/返回 503），成功路径只做一次
+// atomic load（见 noteUsagePartitionWriteOK），不引入互斥。
+func noteUsagePartitionWriteFailure(month time.Time, err error) {
+	key := monthKey(BeijingMonth(month))
+	kind, action, msg := partitionLayoutFailure(err)
+	prev := usageWriteBlockVal.Load()
+	next := &usageWriteBlockState{Month: key, Since: time.Now(), Kind: kind, Action: action, Err: msg, Count: 1}
+	if prev != nil && prev.Month == key {
+		next.Since = prev.Since
+		next.Count = prev.Count + 1
+	}
+	usageWriteBlockVal.Store(next)
+}
+
+// noteUsagePartitionWriteOK 在**成功**创建/确认当月分区后清掉挡住状态。
+//
+// 只在"确实记过同一个月的失败"时才做 CompareAndSwap（热路径是一次 atomic load，
+// 没有互斥、没有分配）。
+func noteUsagePartitionWriteOK(month time.Time) {
+	prev := usageWriteBlockVal.Load()
+	if prev == nil || prev.Month != monthKey(BeijingMonth(month)) {
+		return
+	}
+	usageWriteBlockVal.CompareAndSwap(prev, nil)
+}
+
+// usageWriteBlockForReadyz 返回**当月**的写入阻塞状态（别的月份的历史阻塞不冒充当月）。
+func usageWriteBlockForReadyz() *usageWriteBlockState {
+	prev := usageWriteBlockVal.Load()
+	if prev == nil || prev.Month != monthKey(BeijingMonth(time.Now())) {
+		return nil
+	}
+	cp := *prev
+	return &cp
+}
+
+// resetUsageWriteBlockForTest 清空写入阻塞状态（仅测试；与 resetUsageRetentionStatusForTest
+// 同一约定，由 NewTestDB 调用）。
+func resetUsageWriteBlockForTest() { usageWriteBlockVal.Store(nil) }
 
 // CurrentUsageRetentionStatus 返回保留清理的过程事实快照（进程内；未跑过清理时
 // 为零值，**不伪造**"一切正常"的读数 —— `rounds=0` 本身就说明这个进程还没跑过
@@ -151,14 +259,20 @@ func CurrentUsageRetentionStatus() UsageRetentionStatus {
 		st.SkippedByReason = cp
 	}
 	st.Unreclaimed = append([]string(nil), st.Unreclaimed...)
+	// 写入面（R9D-00）：与保留清理同一个出口 —— "当月不可写"必须是可读状态，
+	// 不允许"该月写入永久 503 而所有健康面报绿"。
+	if wb := usageWriteBlockForReadyz(); wb != nil {
+		st.WriteBlocked = true
+		st.WriteBlockedMonth = wb.Month
+		st.WriteBlockedKind = wb.Kind
+		st.WriteBlockedError = wb.Err
+		st.WriteBlockedAction = wb.Action
+		st.WriteBlockedCount = wb.Count
+		if !wb.Since.IsZero() {
+			st.WriteBlockedSince = wb.Since.UTC().Format(time.RFC3339)
+		}
+	}
 	return st
-}
-
-// UsageRetentionUnreclaimableCount 返回**本轮**"点名但没有回收"的关系数与原因
-// 计数——给断言与将来的 metric 面用的最小接口（避免调用方自己解析清单）。
-func UsageRetentionUnreclaimableCount() (total int, byReason map[string]int) {
-	st := CurrentUsageRetentionStatus()
-	return st.Skipped, st.SkippedByReason
 }
 
 // resetUsageRetentionStatusForTest 清空进程内状态（仅测试；形态与
@@ -167,4 +281,5 @@ func resetUsageRetentionStatusForTest() {
 	usageRetentionStatusMu.Lock()
 	defer usageRetentionStatusMu.Unlock()
 	usageRetentionStatusVal = UsageRetentionStatus{}
+	resetUsageWriteBlockForTest()
 }
