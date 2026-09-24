@@ -40,8 +40,9 @@
  * @module
  */
 
-import { auth } from '@modelcontextprotocol/client'
+import { auth, extractWWWAuthenticateParams } from '@modelcontextprotocol/client'
 import type {
+  AuthProvider,
   OAuthClientInformationContext,
   OAuthClientInformationMixed,
   OAuthClientMetadata,
@@ -150,6 +151,57 @@ export interface RefreshFailure {
 export type RefreshOutcome = { ok: true; tokens: RefreshedTokens } | RefreshFailure
 
 /**
+ * The 401 context the MCP transport hands `AuthProvider.onUnauthorized`.
+ *
+ * Declared structurally because the pinned SDK exports the interface for
+ * documentation but not from its root entry (`UnauthorizedContext` is missing
+ * from `dist/index.d.mts`'s export list); the shape is verbatim from it.
+ */
+export interface UnauthorizedContextLike {
+  /** The 401 response — `WWW-Authenticate` carries the resource metadata URL. */
+  response: Response
+  /** The MCP server URL this transport talks to. */
+  serverUrl: URL
+  /** The transport's fetch, with `requestInit` applied. */
+  fetchFn: (input: URL | RequestInfo, init?: RequestInit) => Promise<Response>
+}
+
+/**
+ * The object the MCP transport is constructed with — our own `AuthProvider`.
+ *
+ * See {@link createOAuthProvider} for why the transport must NOT be given the
+ * full OAuth face, and what that costs.
+ */
+export interface McpTransportAuthProvider extends AuthProvider {
+  /**
+   * The per-request bearer read (the transport calls it before every request).
+   *
+   * Same value as the full provider's `tokens()`: it goes through the
+   * clock-based freshness check first, so a token that is about to expire is
+   * renewed before the request leaves.
+   */
+  token: () => Promise<string | undefined>
+  /** The 401 hook: refresh through our per-id single flight, then retry once. */
+  onUnauthorized: (ctx: UnauthorizedContextLike) => Promise<void>
+  /**
+   * The live token view, mirrored onto the transport-facing object.
+   *
+   * The host's own regressions and the diagnostics read the credential view off
+   * the object the transport holds; nothing in the SDK's non-OAuth path calls
+   * it.
+   */
+  tokens: () => Promise<StoredOAuthTokens | undefined>
+  /**
+   * The SDK's persistence hook, mirrored for the same reason as `tokens`.
+   *
+   * Without `clientInformation` the SDK never classifies this object as an
+   * OAuth provider, so it does not call this either; it stays the single write
+   * path a caller (or a regression) can use to simulate the SDK's rotation.
+   */
+  saveTokens: (next: StoredOAuthTokens, ctx?: OAuthClientInformationContext) => Promise<void>
+}
+
+/**
  * Whether a failure reason is a **terminal** one: the same stored credential
  * must not be presented again by the automatic sweep (only an interactive
  * re-authorization, a configuration change, or the manual button may retry).
@@ -234,6 +286,34 @@ function authorizationServerUrl(target: OAuthTarget): string | undefined {
  * `discovery` is the already-policy-checked endpoint information; passing it
  * as saved discovery state is the SDK's documented way to avoid a second
  * discovery round trip (`OAuthClientProvider.discoveryState`).
+ *
+ * Returns **two faces** of the same credential view:
+ *
+ *  - `provider` — the full `OAuthClientProvider`, for `auth()` (our refresh
+ *    engine, the interactive flow) and for callers that deliberately want the
+ *    SDK's own OAuth machinery in the transport;
+ *  - `transportProvider` — the `AuthProvider` face the MCP transport must be
+ *    constructed with. It is NOT a convenience alias: handing the transport the
+ *    full face silently disables our 401 hook. The pinned
+ *    `@modelcontextprotocol/client@2.0.0` classifies an `authProvider` as an
+ *    `OAuthClientProvider` with one predicate — `typeof p.tokens === 'function'
+ *    && typeof p.clientInformation === 'function'` (`isOAuthClientProvider`,
+ *    `dist/index.mjs:235`) — and then REPLACES it with
+ *    `adaptOAuthProvider(opts.authProvider, …)`, whose `onUnauthorized` is
+ *    hard-coded to the SDK's own `auth()` run (`dist/index.mjs:270`); a
+ *    provider-level `onUnauthorized` is never called. Measured 2026-09-24, two
+ *    live transports over one credential: both 401 handlers ran the SDK's own
+ *    refresh — 2 `refresh_token` grants, `revokedRefreshReuse: 1`, and the tool
+ *    call failed with the CI signature
+ *    `SdkHttpError: Server returned 401 after re-authentication`.
+ *
+ * Two capabilities ride on the SDK's `_oauthProvider` slot and are therefore
+ * given up on the transport face; both are acceptable here: `finishAuth()` was
+ * never used (this connector completes the redirect itself and exchanges the
+ * code through `auth()`), and a 403 `insufficient_scope` now surfaces as
+ * `InsufficientScopeError` instead of one refresh-and-retry (our
+ * `prepareTokenRequest` never echoed the challenged scope back, so the retry it
+ * performed could not actually broaden the grant).
  */
 export function createOAuthProvider(
   options: {
@@ -252,9 +332,39 @@ export function createOAuthProvider(
      * own refresh paths share ONE owner (2026-09-17).
      */
     ensureFresh?: (() => Promise<RefreshedTokens | null>) | undefined
+    /**
+     * The **401** refresh: our per-id single flight, run in its FORCED form, and
+     * classified.
+     *
+     * A 401 is the server saying "this access token is dead", which no clock can
+     * know: the stored `expiresAt` routinely still lies in the future (measured:
+     * the CI regression below expires the token server-side while the client's
+     * copy says one hour). `ensureFresh` is the *clock* path and therefore
+     * SKIPS this case — the forced form is what makes a 401 recoverable.
+     *
+     * Wired by `registerMcp` to the same `TokenRefresher` the sweep / panel /
+     * restore paths use, so concurrent 401s of one credential (several MCP
+     * servers of a connector, or a transport that is reopened while another one
+     * still runs) coalesce into ONE refresh instead of presenting the same
+     * single-use refresh token twice (RFC 6749 §10.4 ⇒ the authorization server
+     * revokes the grant).
+     *
+     * A classified outcome (not a bare `null`) is what lets the hook tell "our
+     * engine refreshed" from "our engine has nothing to do here" — see
+     * `onUnauthorized` for what each branch does.
+     */
+    refreshOnUnauthorized?: (() => Promise<RefreshOutcome>) | undefined
+    /**
+     * Host log sink for the 401 path (injected by `registerMcp`, which prefixes
+     * the connector id). The hook NEVER throws, so every refusal has to be
+     * visible here instead.
+     */
+    log?: ((message: string) => void) | undefined
   },
 ): {
   provider: OAuthClientProvider
+  /** The object the MCP transport must be constructed with (see above). */
+  transportProvider: McpTransportAuthProvider
   /** The provider's live view of the tokens (updated by `saveTokens` and `adopt`). */
   readonly tokens: StoredOAuthTokens | undefined
   /**
@@ -265,6 +375,8 @@ export function createOAuthProvider(
 } {
   const { credential, target } = options
   const ensureFresh = options.ensureFresh
+  const refreshOnUnauthorized = options.refreshOnUnauthorized
+  const log = options.log
   /**
    * The authorization-server facts this provider works with.
    *
@@ -361,6 +473,135 @@ export function createOAuthProvider(
   // static-endpoint definition the definition's own MCP URL is authoritative.
   const resourceUrl = target.discoveryUrl ?? target.resourceUrl
 
+  /**
+   * 交出令牌前先确保新鲜（2026-09-17）：SDK 的四个 `tokens()` 调用点全部是
+   * `await provider.tokens()`，所以把保鲜放在这里，SDK 拿到的永远是当前世代，
+   * 于是它不会再发起自己的刷新 —— 刷新的主人只剩 `TokenRefresher` 一个。
+   *
+   * 与 `tokenNeedsRefresh` 同判据，但用**活的** `expiresAt`（`adopt` /
+   * `saveTokens` 都会前移它）：没有 refresh token 的连接器永不在这里刷新；
+   * 未记录过期时间视为可能过期（问一次很便宜）。
+   *
+   * 注意这是**看时钟**的路径：401 那条（服务器说令牌已死，而本地时钟可能还在
+   * 未来）走 {@link unauthorizedHook} 的强制刷新，不走这里。
+   */
+  const readTokens = async (): Promise<StoredOAuthTokens | undefined> => {
+    const needsFresh = credential.refreshToken !== undefined
+      && (expiresAt === undefined || expiresAt - REFRESH_LEAD_MS <= Date.now())
+    if (ensureFresh !== undefined && needsFresh) {
+      try {
+        const fresh = await ensureFresh()
+        if (fresh !== null) adoptTokens(fresh)
+      } catch {
+        // 刷新失败不改写这里的行为：交回旧令牌，SDK 随后按原路径处理
+        // （transient 由上层退避，dead grant 由 saveTokens/401 链路升级为
+        // 「需要重新授权」）。
+      }
+    }
+    return withoutRefreshTokenWhenScopeless(tokens)
+  }
+
+  const saveTokens = async (next: StoredOAuthTokens, _ctx?: OAuthClientInformationContext): Promise<void> => {
+    tokens = next
+    // The SDK stamps `issuer` on every value it writes (SEP-2352). Keep it in
+    // memory AND on disk: a credential that loses the stamp reads back as
+    // "unstamped" on the next process, which both re-enables cross-AS reuse
+    // and makes the SDK warn on every single read.
+    if (next.issuer !== undefined) issuer = next.issuer
+    expiresAt = Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000
+    await options.onPersist?.({
+      accessToken: next.access_token,
+      ...(next.refresh_token === undefined ? {} : { refreshToken: next.refresh_token }),
+      ...(next.issuer === undefined ? {} : { issuer: next.issuer }),
+      // `expires_in` is seconds-from-now; store the absolute instant once.
+      expiresAt: Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000,
+      refreshedAt: Date.now(),
+    })
+  }
+
+  /**
+   * The SDK's own OAuth recovery, for a transport face with no engine wired.
+   *
+   * This is verbatim what `handleOAuthUnauthorized` does inside the SDK for an
+   * adapted `OAuthClientProvider` (`dist/index.mjs:241`): `auth()` against the
+   * saved discovery state, so the refresh goes to the authorization server the
+   * CONNECTOR DEFINITION named (`CN-2`, audit 2026-09-23) and never to whatever
+   * the resource server's `WWW-Authenticate` pointed at. Kept so the transport
+   * face is never worse than the SDK's own behaviour for a caller that builds a
+   * provider without our refresh engine.
+   */
+  const sdkAuthFallback = async (ctx: UnauthorizedContextLike | undefined): Promise<void> => {
+    if (ctx === undefined) {
+      log?.('收到 401 但没有上下文，无法走 SDK 授权路径')
+      return
+    }
+    try {
+      // `exactOptionalPropertyTypes`: only forward the two parameters the
+      // challenge actually carried (the SDK distinguishes "absent" from
+      // "explicitly undefined" here).
+      const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response)
+      const result = await auth(provider, {
+        serverUrl: ctx.serverUrl,
+        ...(resourceMetadataUrl === undefined ? {} : { resourceMetadataUrl }),
+        ...(scope === undefined ? {} : { scope }),
+        fetchFn: ctx.fetchFn,
+      })
+      if (result !== 'AUTHORIZED') log?.(`401 后 SDK 授权路径未完成（${result}）`)
+    } catch (error) {
+      // Never escape the auth seam (`markAuthSeamEscape` would have the
+      // transport report this as an auth failure): the transport retries once
+      // and then throws its own `Server returned 401 after re-authentication`.
+      log?.(`401 后 SDK 授权路径失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * 401 的唯一收口：先走**我们的** per-id 单飞（强制），再让传输层重试一次。
+   *
+   * 为什么必须强制：401 是服务器侧的失效事实，本地 `expiresAt` 常常还在未来
+   * （CI 那条回归就是服务端 `expireAccessTokens()` + 本地一小时后到期），看时钟
+   * 的 {@link readTokens} 会直接跳过 —— 于是重试仍带旧令牌，报
+   * `Server returned 401 after re-authentication`。
+   *
+   * 为什么要收口到单飞：同一个凭据的并发 401（一个连接器的多个 MCP server，或
+   * 重连与请求同时命中）以前各自跑一次 SDK 自己的刷新，同一个单次 refresh token
+   * 被出示两次 ⇒ 轮换复用检测（RFC 6749 §10.4）吊销整个授权。2026-09-24 实测：
+   * grants 2、`revokedRefreshReuse: 1`，两次调用一败一挂。
+   *
+   * 失败一律**不抛穿**（SDK 会把它当成 auth-seam escape），记一条可检索日志后正常
+   * 返回，让 SDK 按原路径报它自己的错误（错误码与文案保持不变）。
+   */
+  const unauthorizedHook = async (ctx?: UnauthorizedContextLike): Promise<void> => {
+    if (refreshOnUnauthorized === undefined) {
+      // 没接我们的刷新引擎：保持 SDK 原有的行为（它自己的发现受限 auth() 路径）。
+      log?.('收到 401，但没有接入单飞刷新引擎：交给 SDK 自己的授权路径')
+      await sdkAuthFallback(ctx)
+      return
+    }
+    let outcome: RefreshOutcome
+    try {
+      outcome = await refreshOnUnauthorized()
+    } catch (error) {
+      log?.(`收到 401 后刷新异常：${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (outcome.ok) {
+      // 刷新引擎已经把新凭据喂给活着的 provider（`onRefreshed`）；这里再 adopt 一次
+      // 保证**这个** provider 的活视图前移 —— 传输层的重试读的就是它。
+      adoptTokens(outcome.tokens)
+      return
+    }
+    // 引擎说"这个连接器我无事可做"（没有凭据 / 没有端点 / 没有刷新材料）：同样交给
+    // SDK 自己的路径；接了引擎却刷新失败（transient / 死授权 / 请求被拒）时**不再**
+    // 走第二条刷新路径 —— 那会把同一枚单次 refresh token 立刻再出示一次。
+    if (outcome.reason === 'not-applicable') {
+      log?.(`收到 401，但没有可续期的材料（${outcome.message}）：交给 SDK 自己的授权路径`)
+      await sdkAuthFallback(ctx)
+      return
+    }
+    log?.(`收到 401 后刷新未成功（${outcome.reason}：${outcome.message}），交给 SDK 按原路径报错`)
+  }
+
   const provider = {
     // No redirect URL: the refresh path must never fall through to opening a
     // browser (there is no user gesture and no callback server here).
@@ -375,58 +616,15 @@ export function createOAuthProvider(
       await options.onPersist?.({ clientId: information.client_id })
     },
     /**
-     * Refresh through **our** single-flight, then hand the SDK fresh tokens.
-     *
-     * 只有一个刷新主人的收口（2026-09-17）：SDK 的 401 自愈会读出 refresh token
-     * 自己换一次（`authInternal` → `tokens()` → `refreshAuthorization`），而这条
-     * 路径**不在** `TokenRefresher.inflight` 里。它一旦和我们的刷新（心跳/面板/
-     * 重开恢复）并发，同一个单次 refresh token 会被出示两次，启用轮换复用检测的
-     * 授权服务器（RFC 6749 §10.4）会吊销整个授权 —— CI 里表现为
-     * `InvalidGrantError: refresh token already used`。
-     *
-     * SDK 的四个 `tokens()` 调用点全部是 `await provider.tokens()`，所以这里可以
-     * 在交出令牌前先确保新鲜：快过期/已过期时走同一个 per-id 单飞，SDK 拿到的
-     * 永远是当前世代，于是它不会再发起自己的刷新 —— 刷新的主人只剩我们一个。
+     * 交出令牌前先确保新鲜 —— 判据与实现见 {@link readTokens}：快过期/已过期时
+     * 走同一个 per-id 单飞，SDK 拿到的永远是当前世代。
      *
      * 未注入 `ensureFresh`（没有 OAuth target / 无刷新材料）时保持原语义。
      * @returns 该 provider 当前持有的令牌（刷新失败时仍是旧的，交给 SDK 走原来的
      *   escalate 路径）。
      */
-    tokens: async (_ctx?: OAuthClientInformationContext): Promise<StoredOAuthTokens | undefined> => {
-      // 与 `tokenNeedsRefresh` 同判据，但用**活的** `expiresAt`（`adopt` /
-      // `saveTokens` 都会前移它）：没有 refresh token 的连接器永不在这里刷新；
-      // 未记录过期时间视为可能过期（问一次很便宜）。
-      const needsFresh = credential.refreshToken !== undefined
-        && (expiresAt === undefined || expiresAt - REFRESH_LEAD_MS <= Date.now())
-      if (ensureFresh !== undefined && needsFresh) {
-        try {
-          const fresh = await ensureFresh()
-          if (fresh !== null) adoptTokens(fresh)
-        } catch {
-          // 刷新失败不改写这里的行为：交回旧令牌，SDK 随后按原路径处理
-          // （transient 由上层退避，dead grant 由 saveTokens/401 链路升级为
-          // 「需要重新授权」）。
-        }
-      }
-      return withoutRefreshTokenWhenScopeless(tokens)
-    },
-    saveTokens: async (next: StoredOAuthTokens, _ctx?: OAuthClientInformationContext) => {
-      tokens = next
-      // The SDK stamps `issuer` on every value it writes (SEP-2352). Keep it in
-      // memory AND on disk: a credential that loses the stamp reads back as
-      // "unstamped" on the next process, which both re-enables cross-AS reuse
-      // and makes the SDK warn on every single read.
-      if (next.issuer !== undefined) issuer = next.issuer
-      expiresAt = Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000
-      await options.onPersist?.({
-        accessToken: next.access_token,
-        ...(next.refresh_token === undefined ? {} : { refreshToken: next.refresh_token }),
-        ...(next.issuer === undefined ? {} : { issuer: next.issuer }),
-        // `expires_in` is seconds-from-now; store the absolute instant once.
-        expiresAt: Date.now() + (next.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_MS / 1000 : next.expires_in) * 1000,
-        refreshedAt: Date.now(),
-      })
-    },
+    tokens: readTokens,
+    saveTokens: saveTokens,
     // RFC 6749 §6 refresh grant in the SDK's own parameter object — the
     // endpoint comes from the discovered metadata, not from a URL we build.
     prepareTokenRequest: () => {
@@ -473,14 +671,20 @@ export function createOAuthProvider(
      * the audit counted four token POSTs for one refresh attempt and saw a
      * revoked grant re-presented forever (CN-5). With the rejected tokens
      * forgotten, the retry fails fast as "authorize again" instead.
-     * @param scope - which credential the SDK invalidated.
+     * @param scope - which credential the SDK invalidated. The v2 union also
+     *   carries `verifier` / `discovery`; this provider holds neither (the
+     *   interactive flow's PKCE verifier lives in `auth.ts`, and the discovery
+     *   state is derived from the policy-checked definition facts on every
+     *   read), so those two are no-ops by construction.
      */
-    invalidateCredentials: (scope?: 'all' | 'client' | 'tokens') => {
-      if (scope !== 'client') {
+    invalidateCredentials: (scope?: 'all' | 'verifier' | 'client' | 'tokens' | 'discovery') => {
+      const wantsTokens = scope === undefined || scope === 'all' || scope === 'tokens'
+      const wantsClient = scope === undefined || scope === 'all' || scope === 'client'
+      if (wantsTokens) {
         tokens = undefined
         issuer = undefined
       }
-      if (scope !== 'tokens') clientInformation = undefined
+      if (wantsClient) clientInformation = undefined
     },
     redirectToAuthorization: () => {
       // Reached only when the grant is dead; the panel must drive a new
@@ -535,12 +739,47 @@ export function createOAuthProvider(
         }),
   }
 
-  // The MCP transport fence reads these off `transport._oauthProvider`: they are
-  // the only policy-checked answer to "which hosts may this connector reach".
-  // Everything the SDK may legitimately contact is in here — the MCP resource
-  // (the transport's own URL, always allowed), the authorization server, its
-  // token/registration endpoints and the static definition's endpoints.
+  // The MCP transport fence reads these off the transport's provider slot: they
+  // are the only policy-checked answer to "which hosts may this connector
+  // reach". Everything the SDK may legitimately contact is in here — the MCP
+  // resource (the transport's own URL, always allowed), the authorization
+  // server, its token/registration endpoints and the static definition's
+  // endpoints. Attached to BOTH faces: the fence finds them on
+  // `transport._oauthProvider` when the SDK adapted an OAuth provider and on
+  // `transport._authProvider` otherwise.
   attachOutboundOrigins(provider, [
+    resourceUrl,
+    discoveryFacts?.authorizationServerUrl,
+    discoveryFacts?.tokenEndpoint,
+    discoveryFacts?.authorizationEndpoint,
+    discoveryFacts?.registrationEndpoint,
+    target.discoveryUrl,
+    target.resourceUrl,
+    target.tokenUrl,
+    target.authorizeUrl,
+    target.registrationEndpoint,
+  ])
+
+  /**
+   * The object the MCP transport is constructed with.
+   *
+   * Load-bearing shape, not a convenience alias: `clientInformation` is absent
+   * ON PURPOSE so the pinned SDK's `isOAuthClientProvider` predicate does not
+   * classify this as an `OAuthClientProvider` — an OAuth-classified provider is
+   * replaced by `adaptOAuthProvider`, whose `onUnauthorized` is hard-coded to
+   * the SDK's own `auth()` run, and {@link unauthorizedHook} would never be
+   * called. Full reasoning and the measured failure it prevents: see the
+   * `createOAuthProvider` doc comment. `token`, `tokens` and `saveTokens` are
+   * the same live credential view as the full face, so the host's regressions
+   * and diagnostics read the object the transport really holds.
+   */
+  const transportProvider: McpTransportAuthProvider = {
+    token: async () => (await readTokens())?.access_token,
+    onUnauthorized: unauthorizedHook,
+    tokens: readTokens,
+    saveTokens,
+  }
+  attachOutboundOrigins(transportProvider, [
     resourceUrl,
     discoveryFacts?.authorizationServerUrl,
     discoveryFacts?.tokenEndpoint,
@@ -555,6 +794,7 @@ export function createOAuthProvider(
 
   return {
     provider: provider as unknown as OAuthClientProvider,
+    transportProvider,
     get tokens() { return tokens },
     /**
      * Adopt tokens **our own** refresher obtained out of band.
