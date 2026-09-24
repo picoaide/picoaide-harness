@@ -34,8 +34,16 @@ export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): 
   // 规范化：键排序 + **长度前缀**（纯 `k=v` 用 NUL 连接时，值里含 NUL 会让两份不同
   // 凭据判成相同 —— 2026-09-15 第三轮复核给出的反例：{a:'x',b:'y'} 与
   // {a:'x\u0000b=y'}。长度前缀让拼接无歧义）。
+  //
+  // 值不是字符串时按"该字段不存在"处理（R11-D-02/-07 的同一刀，见
+  // `readCredential` 的归一）：`String(v.length)` 读到 `null.length` 会抛
+  // TypeError，异常从 `updateCredentialIfUnchanged` 穿到刷新路由，用户看到
+  // `POST …/refresh` 500，而同一份值在 `${FIELD}` 里又被渲染成 `Bearer 42` 顶上授权
+  // 槽。两条症状同一个读法，所以指纹也只认字符串值 —— 与渲染、stdio env 注入
+  // （`buildStdioEnv` 的 `typeof value !== 'string'`）逐字同源。
   const fields = (value: ConnectorCredential): string =>
     Object.entries(value.fields ?? {})
+      .filter(([, field]) => typeof field === 'string')
       .sort(([x], [y]) => x.localeCompare(y))
       .map(([k, v]) => `${String(k.length)}:${k}=${String(v.length)}:${v}`)
       .join('|')
@@ -57,6 +65,43 @@ export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): 
  * segments, no NUL, bounded length).
  */
 const CONNECTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+
+/**
+ * Drop the `fields` entries whose value is not a string — **the single read
+ * boundary** where "a credential enters this process" is defined.
+ *
+ * `fields` is typed `Record<string, string>`, but the file it comes from is
+ * hand-editable (the timestamp/expiry sanitizing above exists for exactly that
+ * reason, and the container shape `"fields": null` is already handled as "no
+ * fields" by every consumer since R10 N1). JSON has no such constraint:
+ * `{"fields":{"API_KEY":null}}` and `{"fields":{"API_KEY":42}}` are legal files.
+ * A non-string value is not a credential, and both consumers read it that way or
+ * break:
+ *
+ *  - `sameCredential`'s length-prefixed fingerprint used to read `null.length` and
+ *    throw a TypeError out of `updateCredentialIfUnchanged`; the refresh route then
+ *    answered HTTP 500 and the credential-change chain (live header update + stdio
+ *    re-registration) never ran (R11-D-02);
+ *  - `${FIELD}` rendered it with string coercion, so a stray number became
+ *    `Bearer 42` — non-empty, hence "the administrator's own credential" — took
+ *    the authorization slot away from the provider's live token and produced the
+ *    401 loop R9A-1 / R10-B-01 exist to remove (R11-D-07).
+ *
+ * Normalizing HERE is what makes the rule hold for every consumer instead of one
+ * `typeof` per call site, and it is the same reading as the container shape: a
+ * value that is not a string means "this credential carries no such field", so
+ * the slot is filled from the token (or dropped) exactly like an unknown field
+ * name. The repair lands on disk with the next write of that credential, the way
+ * a hand-edited bad timestamp does.
+ * @param record - the credential parsed from the file (mutated in place).
+ */
+function normalizeFieldValues(record: ConnectorCredential): void {
+  const fields = record.fields
+  if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) return
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value !== 'string') delete (fields as Record<string, unknown>)[key]
+  }
+}
 
 export interface ConnectorCredential {
   /** OAuth access token. */
@@ -243,6 +288,7 @@ export class ConnectorStore {
       if (record.refreshedAt !== undefined && !Number.isFinite(record.refreshedAt)) {
         delete record.refreshedAt
       }
+      normalizeFieldValues(record)
       return record
     } catch {
       return null

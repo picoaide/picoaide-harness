@@ -79,32 +79,68 @@ const usageRetentionUnreclaimedMax = 20
 //
 // 取 5 的理由：
 //   - 调度间隔是 6h（internal/usageretention.DefaultTick）⇒ 5 个**计入 streak 的**
-//     轮次 ≈ 30 小时。任何"读事务/VACUUM/管理员 DDL"都不可能自然持续这么久；
-//     反过来 1~2 轮（6~12h）完全可能是正常的运维窗口，提前告警就是噪音。
+//     轮次 ≈ 24 小时（**首轮即计入**：`prevAt.IsZero()` ⇒ counts=true，所以第 5 个
+//     调度轮次落在 t≈24h，30h 是"第 6 轮"的位置 —— R11-D-06 的注释口径勘误）。
+//     任何"读事务/VACUUM/管理员 DDL"都不可能自然持续这么久；反过来 1~2 轮
+//     （6~12h）完全可能是正常的运维窗口，提前告警就是噪音。
 //   - 它也刻意大于复审判据（`TestV2B_DeferralLiveness` 3 轮）的视野：那条判据
 //     编码的契约是"3 轮锁竞争都不得进失败面"，本阈值不改变那个契约。
 //
-// **计入 streak 的轮次 = 调度轮次（R10-H3 · W3-4）**：管理端保存保留期会**同步**
-// 多跑一轮（internal/llmgateway/admin.go 的 `CleanupUsageRetention`），连点几次
-// 保存就是几轮 —— 若按"调用次数"计数，分钟级就能把 streak 推到 5 ⇒
-// `deferred_stalled=true` 是**假告警**（与"≈30h 的真实停摆"不是一回事）。
-// 阈值语义因此收在**调度节奏**上：只有距上一次计入的轮次
-// ≥ usageRetentionDeferredStreakMinGap 的轮次才推进计数（见 advanceDeferredStreaks）。
+// **计入 streak 的轮次 = 调度轮次（R10-H3 · W3-4；R11A-05 收口）**：管理端保存
+// 保留期会**同步**多跑一轮（internal/llmgateway/admin.go 的
+// `CleanupUsageRetention`），启动补跑也走同一个函数，连点几次保存就是几轮 ——
+// 若按"调用次数"计数，分钟级就能把 streak 推到 5 ⇒ `deferred_stalled=true` 是
+// **假告警**（与"≈24h 的真实停摆"不是一回事）。阈值语义因此收在**调度节奏**上：
+// 只有距上一次计入的轮次 ≥ `usageRetentionSchedulerPeriodGap` 的轮次才推进计数
+// （见 advanceDeferredStreaks）。
+//
+// 另一条**跨重启**的判据（R11-D-03）走**另一个字段** `reclaim_stalled`：最早未回收月
+// 已经到期 ≥ usageReclaimStallAfter —— 它由 catalog 事实推导，不依赖进程内累积
+// （判据在 usageReclaimDueSince 上）。两者不合并的理由见 UsageRetentionStatus.ReclaimStalled。
 const usageRetentionDeferredStallRounds = 5
 
-// usageRetentionDeferredStreakMinGap 是两次**计入 streak** 的轮次之间的最小间隔
-// （R10-H3 · W3-4）。判据不是"谁调用了清理"（服务端唯一的周期执行者是 6h 的
-// usageretention.Scheduler，但管理端保存、启动补跑都走同一个函数），而是**节奏**：
+// usageRetentionSchedulerPeriod 是保留策略**周期执行者**的调度间隔
+// （= internal/usageretention.DefaultTick）。
 //
-//	6h 调度轮    —— 每轮都 ≥ 1h ⇒ 每轮都计入（阈值 5 轮 ≈ 30h 的语义保持不变）；
-//	管理端连点   —— 分钟级 ⇒ 同一关系最多把 streak 推到 1，够不到阈值；
-//	启动/管理端夹在调度轮之间 —— 最多让一小段停顿晚一轮被发现（≤1h，可接受，
-//	                             方向是**少报**而不是多报）。
+// 这里必须有一份值，因为 `advanceDeferredStreaks` 的"这一轮是不是调度轮次"判据
+// 只能从**可观测的节奏**推：`internal/serverstore` 不能 import
+// `internal/usageretention`（后者依赖前者，会成环），而服务端唯一的周期执行者
+// 就是那个调度器（6h）。两份值的一致性由本包的门禁用例
+// （audit_r11_i4 的 TestR11I4SchedulerPeriodMatchesUsageretentionTick，读对方源码）
+// 钉住 —— 改任何一侧而不同步就会红。
+const usageRetentionSchedulerPeriod = 6 * time.Hour
+
+// usageRetentionSchedulerPeriodGap 是两次**计入 streak** 的轮次之间的最小间隔：
+// 取调度周期本身。
 //
-// 取 1h：远小于调度周期（6h，不会漏掉真实的调度轮），又远大于"连点保存"的
-// 分钟级节奏（不会把运维动作读成停摆）。真实停摆的时间判据另有一条**单调**的
-// `oldest_unreclaimed_month`（见下），它不受本间隔影响。
-const usageRetentionDeferredStreakMinGap = time.Hour
+// R11A-05（P3）的修法：旧判据是"间隔 ≥ 1h"，而 1h 只是"比连点保存的分钟级节奏
+// 大"，并不能把**非调度轮次**排除掉 —— 实测 6 次相隔 65min 的启动/管理端轮次
+// （累计墙钟 5.4h，远小于文档承诺的 ≈30h）就把 `deferred_stalled` 置真，读数
+// 因此取决于"谁在调用清理"。
+//
+// 取 6h（= 调度周期）之后，判据变成**节奏 + 来源的双判据**：
+//
+//	6h 调度轮    —— 每轮间隔 ≥ 6h ⇒ 每轮都计入（阈值 5 轮 ≈ 24h 不变）；
+//	管理端连点   —— 分钟级（或任何 < 6h 的间隔）⇒ 只把新关系记到 1，不推进；
+//	启动/管理端夹在调度轮之间 —— 同理不推进；真正"调度器死了"时，那个夹进来的
+//	                             轮次距离上一个计入轮次必然 ≥ 6h ⇒ 照样推进
+//	                             （方向是"该报就报"，不会因为改了节奏而漏报停摆）。
+const usageRetentionSchedulerPeriodGap = usageRetentionSchedulerPeriod
+
+// usageReclaimStallAfter 是"某个到期月**应被回收**之后经过多久算停摆"的阈值
+// （R11-D-03）。
+//
+// 为什么需要它：`deferred_stalled` 原来只由**进程内**累积的 streak 决定
+// （`usageRetentionStatusVal` 是包级单例，无任何持久化）⇒ 任何重启节奏快于
+// ≈24h 的部署（每次发版、容器重启、OOM 重启）都**永远看不到**
+// `deferred_stalled=true`，而"磁盘按经过的月份单调增长"这件事就没有跨重启的
+// 观测面了。
+//
+// 现在的判据是**可持久事实推导**：月 M 变成"应被回收"的时刻是确定的
+// （`BeijingDayInstant(M + retentionMonths + 1)`，见 usageReclaimDueSince），
+// 所以"它已经到期多久还没被回收"是一个纯函数 —— 重启后第一轮就能算出来。
+// 取 24h（= 5 个 6h 调度轮次）保持与 streak 阈值同量级。
+const usageReclaimStallAfter = 24 * time.Hour
 
 // usageRetentionRound 是一轮清理的过程事实（由 CleanupUsageRetention 填写）。
 type usageRetentionRound struct {
@@ -134,6 +170,14 @@ type usageRetentionRound struct {
 	// "枚举完了、什么都在保留期内"完全不同 —— 前者不能清零 streak，也不能前移
 	// `oldest_unreclaimed_month`（"没观测" ≠ "已回收"）。
 	Scanned bool
+	// ExistingMonths 是**本轮结束时仍然存在**的月关系名（YYYYMM，去重、升序）：
+	// = 本轮 catalog 枚举到的集合 − 本轮真的删掉的那些（扫描发生在轮首，而只有
+	// 回收会删除关系 ⇒ 折算不需要第二次扫描）。
+	//
+	// R11A-04（P2）：它是"写入面残留条目是否已经解决"的**唯一事实来源** ——
+	// `usage_<YYYYMM>` 不在这个集合里 ⟺ 该月的分区关系此刻不存在 ⟺ 当初那条
+	// "该月写不进去"的观测所描述的对象已经没了（被回收/被人工删除）。
+	ExistingMonths []string
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -239,6 +283,27 @@ type UsageRetentionStatus struct {
 	OldestUnreclaimedReason string `json:"oldest_unreclaimed_reason,omitempty"`
 	OldestUnreclaimedSince  string `json:"oldest_unreclaimed_since,omitempty"`
 	OldestUnreclaimedRounds int64  `json:"oldest_unreclaimed_rounds,omitempty"`
+	// OldestUnreclaimedDueSince / OldestUnreclaimedAgeSeconds 是**跨重启可判**的那
+	// 一半（R11-D-03）：该月从哪一刻起"应该"已经被回收（纯函数，由保留期推导，
+	// 见 usageReclaimDueSince），以及到本轮结束为止它已经逾期多久。
+	//
+	// 为什么必须另给这两个字段：`deferred_streak` / `deferred_stalled_rounds` /
+	// `oldest_unreclaimed_since|_rounds` 全是**进程内**累积（包级单例、无持久化）
+	// ⇒ 重启即归零，任何重启节奏快于 ≈24h 的部署永远看不到"永久不回收"告警。
+	// 这两位的判据是 catalog 事实 + 保留期设置，重启后第一轮就有值。
+	OldestUnreclaimedDueSince   string `json:"oldest_unreclaimed_due_since,omitempty"`
+	OldestUnreclaimedAgeSeconds int64  `json:"oldest_unreclaimed_age_seconds,omitempty"`
+	// ReclaimStalled 是**跨重启可判**的那一位（R11-D-03）：最早未回收的到期月已经
+	// 逾期 ≥ usageReclaimStallAfter（由 catalog 事实 + 保留期推导，纯函数）。
+	//
+	// 为什么**不**并进 `deferred_stalled`：`deferred_stalled` 的既有语义（第十轮
+	// W3-4 的契约，由 `TestR10G2DeferralIsBoundedAndVisible` 钉住）是"**同一关系
+	// 连续 ≥5 个调度轮次**被延后"，与它并列的还有"连点保存不得造成假告警"这条
+	// 断言；把"逾期时长"OR 进去会让那一轮的分钟级连点在**月份本就逾期**的夹具上
+	// 读成 true（实测：`max_deferred_streak=1` 而 `deferred_stalled=true`）。
+	// 两位都是"保留策略有没有在推进"，运维口径 = `deferred_stalled || reclaim_stalled`，
+	// 差别只在于**谁不依赖进程内累积**：`reclaim_stalled` 在重启后的第一轮就成立。
+	ReclaimStalled bool `json:"reclaim_stalled,omitempty"`
 
 	// deferredStreakAt 是"上一次**计入** streak 的轮次"的结束时刻（W3-4 的节奏判据，
 	// 不进 JSON：它是内部账，对外只有 deferred_streak 的读数）。
@@ -367,7 +432,7 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	}
 	// R10-G3（N2②/N3）：推进/清零"连续延后"计数，并在达阈值时升级为可见告警。
 	// R10-H3（W3-3/W3-4）：只认**有证据**的轮次（早退轮不清零），且只有距上一次
-	// 计入 ≥ usageRetentionDeferredStreakMinGap 的轮次才推进（管理端连点保存不计入）。
+	// 计入 ≥ usageRetentionSchedulerPeriodGap 的轮次才推进（管理端连点保存不计入）。
 	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations, st.deferredStreakAt =
 		advanceDeferredStreaks(st.DeferredStreak, st.deferredStreakAt, round)
 	// R10-H3（W3-3）：**最早未回收的到期月** —— 单调面，"长期没回收"的权威判据。
@@ -387,6 +452,24 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	if len(round.DeferredRelations) > 0 && !round.EndedAt.IsZero() {
 		st.LastDeferredAt = round.EndedAt.UTC().Format(time.RFC3339)
 	}
+	// R11-D-03（P2）：**跨重启可判**的停摆判据。
+	//
+	// streak 是进程内累积的（包级单例、无持久化）⇒ 重启后归零，任何重启节奏快于
+	// ≈24h 的部署永远看不到 deferred_stalled。这里补一条**由 catalog 事实推导**的
+	// 判据：oldest_unreclaimed_month 变成"应被回收"的时刻是确定的纯函数
+	// （usageReclaimDueSince），所以"它已经到期多久还没被回收"重启后第一轮就能算。
+	st.OldestUnreclaimedDueSince, st.OldestUnreclaimedAgeSeconds = "", 0
+	if oldest.Month != "" && !round.EndedAt.IsZero() && round.ConfiguredMonthsKnown {
+		if due, ok := usageReclaimDueSince(oldest.Month, round.ConfiguredMonths); ok {
+			st.OldestUnreclaimedDueSince = due.UTC().Format(time.RFC3339)
+			if age := round.EndedAt.Sub(due); age > 0 {
+				st.OldestUnreclaimedAgeSeconds = int64(age / time.Second)
+			}
+		}
+	}
+	st.ReclaimStalled = round.Scanned && oldest.Month != "" &&
+		st.OldestUnreclaimedAgeSeconds > 0 &&
+		time.Duration(st.OldestUnreclaimedAgeSeconds)*time.Second >= usageReclaimStallAfter
 	if len(st.StalledRelations) > 0 {
 		st.DeferredStalled = true
 		st.DeferredStalledRounds++
@@ -399,6 +482,22 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	} else {
 		st.DeferredStalled = false
 	}
+	if st.ReclaimStalled {
+		// 与 streak 面**互相独立**（各自的字段都在 /readyz 上）；两位都是"保留策略有
+		// 没有在推进"，但这一位**不依赖进程内累积** ⇒ 重启后第一轮就成立。
+		log.Printf("usage retention: STALLED(by-age) %s 自 %s 起已到期 %d 秒仍未被回收"+
+			"(阈值 %s；该判据由 catalog 事实推导，重启后照样成立 —— R11-D-03)。"+
+			"reason=%s configured_months=%d；/readyz 的 usage_retention.reclaim_stalled=true",
+			oldest.Month, st.OldestUnreclaimedDueSince, st.OldestUnreclaimedAgeSeconds,
+			usageReclaimStallAfter, oldest.Reason, st.ConfiguredMonths)
+	}
+	if round.Scanned {
+		// R11A-04（P2）：把"已经解决"的非当月写入面条目收敛掉（见
+		// clearResolvedUsageWriteState）。只在**有证据轮**做 —— 扫描失败的轮次
+		// 没有"关系是否还在"的事实，不做任何猜测。
+		clearResolvedUsageWriteState(&usageWriteBlockVal, round)
+		clearResolvedUsageWriteState(&usageWriteErrorVal, round)
+	}
 	if roundErr != nil {
 		st.FailedRounds++
 		st.LastError = roundErr.Error()
@@ -406,6 +505,25 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 		st.LastError = ""
 	}
 	usageRetentionStatusVal = st
+}
+
+// usageReclaimDueSince 给出"月 <key>（YYYYMM）从哪一刻起**应该**已经被回收"
+// （R11-D-03/R11A-05 的推导基准）。
+//
+// 保留 N 个月 = 删 created_at 早于 `BeijingMonth(now) - N` 的分区（见
+// CleanupUsageRetention），所以月 M 到期 ⟺ `BeijingMonth(now) - N > M`
+// ⟺ `BeijingMonth(now) ≥ M + N + 1` ⟺ `now ≥ 北京时 M+N+1 月 1 日 00:00`。
+// 该时刻与进程状态无关 ⇒ 重启后照样能算，"长期没回收"因此有了跨重启的判据。
+func usageReclaimDueSince(key string, retentionMonths int) (time.Time, bool) {
+	if retentionMonths <= 0 {
+		// 保留期=0 表示"永不删除"，不存在"应被回收"的时刻。
+		return time.Time{}, false
+	}
+	m, err := time.Parse("200601", key)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return BeijingDayInstant(dayKey(m).AddDate(0, retentionMonths+1, 0)), true
 }
 
 // advanceDeferredStreaks 按本轮的过程事实推进"同一关系连续被延后"的计数（R10-G3；
@@ -421,7 +539,7 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 //	   （回收掉 / 仍在保留期 / 深后代只补账 / 非表对象…）落回 0 —— "这一轮它被
 //	   正常处理了"不是停摆。
 //	③ 推进（+1）只在**跨调度轮次**时发生（W3-4）：距上一次计入的轮次
-//	   ≥ usageRetentionDeferredStreakMinGap 才 +1；管理端保存保留期同步触发的
+//	   ≥ usageRetentionSchedulerPeriodGap 才 +1；管理端保存保留期同步触发的
 //	   即时轮次（分钟级）只把新关系记到 1，不会把 streak 推过阈值。
 //
 // 返回新的 streak、其中的最大值、达到阈值的关系名（升序，有界）、以及新的"上次
@@ -432,7 +550,7 @@ func advanceDeferredStreaks(prev map[string]int, prevAt time.Time, round usageRe
 		return prev, maxDeferredStreak(prev), stalledRelations(prev), prevAt
 	}
 	// 节奏判据（W3-4）：首轮/距上次计入 ≥ 间隔 ⇒ 本轮计入。
-	counts := prevAt.IsZero() || round.EndedAt.Sub(prevAt) >= usageRetentionDeferredStreakMinGap
+	counts := prevAt.IsZero() || round.EndedAt.Sub(prevAt) >= usageRetentionSchedulerPeriodGap
 	next := make(map[string]int, len(round.DeferredRelations))
 	for _, rel := range round.DeferredRelations {
 		n := prev[rel]
@@ -709,6 +827,74 @@ func noteUsagePartitionWriteOK(month time.Time) {
 	key := monthKey(BeijingMonth(month))
 	clearUsageWriteState(&usageWriteBlockVal, key)
 	clearUsageWriteState(&usageWriteErrorVal, key)
+}
+
+// clearResolvedUsageWriteState 在**一轮有证据的清理结束之后**收敛"已经解决"的
+// 非当月写入面条目（R11A-04 · P2）。
+//
+// 缺陷形态（第十轮第三波 W3-2 引入）：`write_blocked_other_months` 的条目只在
+// "**该月**下一次成功写入"时清除（noteUsagePartitionWriteOK），而回收窗口里被挡住的
+// 恰恰是**到期月** —— 写路径永不写它（写路径只写当月），于是条目**永久残留**，
+// 消费口径"非空 ⇒ 有某个月写不进去"变成**单向棘轮**：一次历史事件之后永远为真，
+// 只能靠 12 个月滚动自然淘汰。/readyz 的"新出现即告警"用法因此失效。
+//
+// 收敛判据（事实，不是时间窗猜测）：条目描述的对象是 `usage_<YYYYMM>`；所以当
+// **本轮 catalog 枚举里没有这个月的关系**时，这条观测已经不可能再成立
+// （关系没了 = 写不进去这件事没有载体了）⇒ 删掉它。反过来说，关系仍在的条目
+// **一律保留** —— 那正是"现在还有个月写不进去"的真实读数。
+//
+// 只用**有证据轮**（round.Scanned）调用：早退轮（扫描失败/保留期读到 0）没有
+// "关系是否还在"的事实，不做任何猜测（与 advanceDeferredStreaks 的同一条纪律）。
+// 写时复制 + CAS（与 clearUsageWriteState 同形），成功路径不加锁。
+func clearResolvedUsageWriteState(slot *atomic.Pointer[usageWriteStateTable], round usageRetentionRound) {
+	if len(round.ExistingMonths) == 0 {
+		// 本轮一条月关系都没枚举到 ⇒ 所有非当月条目描述的对象都不在了。
+		// （当月条目不在本面里 —— 它在 write_blocked 的当月槽上。）
+		clearAllUsageWriteState(slot)
+		return
+	}
+	exists := make(map[string]bool, len(round.ExistingMonths))
+	for _, key := range round.ExistingMonths {
+		exists[key] = true
+	}
+	for {
+		prev := slot.Load()
+		if prev == nil || len(*prev) == 0 {
+			return
+		}
+		next := make(usageWriteStateTable, len(*prev))
+		removed := false
+		for k, v := range *prev {
+			if exists[v.Month] {
+				next[k] = v
+				continue
+			}
+			removed = true
+		}
+		if !removed {
+			return
+		}
+		var ptr *usageWriteStateTable
+		if len(next) > 0 {
+			ptr = &next
+		}
+		if slot.CompareAndSwap(prev, ptr) {
+			return
+		}
+	}
+}
+
+// clearAllUsageWriteState 清空整张写入面状态表（写时复制 + CAS）。
+func clearAllUsageWriteState(slot *atomic.Pointer[usageWriteStateTable]) {
+	for {
+		prev := slot.Load()
+		if prev == nil || len(*prev) == 0 {
+			return
+		}
+		if slot.CompareAndSwap(prev, nil) {
+			return
+		}
+	}
 }
 
 // clearUsageWriteState 从表里删掉某个月（写时复制 + CAS 重试，成功路径不加锁）。

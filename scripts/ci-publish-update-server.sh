@@ -289,6 +289,10 @@ PROBE_BYTES=5
 # 只有真跑失败路径才看得见(本泳道实测:先写的一版 trap 从未执行过)。
 probe_object_live=''
 probe_tmp_file=''
+# 版本指针的**临时键**(第十一轮审计 C2-B-01):先写临时键 → 校验 → 服务端 copy 覆盖正式键。
+# 失败路径(含被 trap 捕获的中断)必须把这个键收干净,否则渠道根目录会留一个 `.latest-next-*`
+# 残件(它不是 `releases/` 下的版本目录 ⇒ 保留策略管不到它,只能靠这里收)。
+manifest_tmp_key_live=''
 probe_previous_exit_trap=''
 probe_exit_trap_installed=0
 # 读出"当前 EXIT trap 的命令体"(trap -p 的形态:`trap -- 'cmd' EXIT`)。
@@ -308,6 +312,12 @@ cleanup_probe_object() {
   # 先回放被我们"接管"的那个 trap(脱敏库的临时文件清理)。
   if [ -n "$probe_previous_exit_trap" ]; then eval "$probe_previous_exit_trap"; fi
   if [ -n "$probe_tmp_file" ]; then rm -f "$probe_tmp_file"; fi
+  if [ -n "$manifest_tmp_key_live" ]; then
+    local tmp_key="$manifest_tmp_key_live"
+    manifest_tmp_key_live=''
+    # 与探测对象同一条纪律:删除 + **证明它真的没了**(读不回 404 即 fail-loud)。
+    if ! verify_remote_object_absent "$tmp_key" "指针临时键(收尾)"; then exit 1; fi
+  fi
   if [ -z "$probe_object_live" ]; then exit "$status"; fi
   local key="$probe_object_live"
   probe_object_live=''
@@ -494,15 +504,48 @@ while IFS= read -r channel; do
 JSON
   # 同资产:`--body` 只给纯路径(mktemp 一般已是绝对路径,这里一并归一)。
   manifest_body="$(abs_path "$manifest")"
+  # **先写临时键,校验通过再原子替换正式键**(第十一轮审计 C2-B-01,P2)。
+  #
+  # 现场:旧实现直接 PUT `${channel}/latest.json` 再校验 —— 报错文案说"拒绝写 latest.json",
+  # 但**写已经发生**:PUT 被截断/写坏时,上一版**可用的**指针已经被残件覆盖,客户端更新
+  # 链路的第一步(读 latest.json)当场坏掉,直到下一次成功发布。资产(zip/SHA256SUMS)侧
+  # 没有这个问题(它们在写指针之前校验),只有指针自身的校验天然是"写后校验"。
+  #
+  # 现在:临时键(`.latest-next-<rand>`,与探测对象同一命名纪律 ⇒ 不进任何版本目录)
+  # → `verify_remote_object` 对拍大小+SHA256 → `s3api copy-object` 服务端**原子替换**
+  # 正式键(元数据走 COPY,缓存头/内容类型随临时对象继承,仍是 no-cache) → 再对拍正式键。
+  # 任一步失败,正式指针**一个字节都没动**;临时键由 EXIT trap 收尾。
+  manifest_tmp_key="${channel}/.latest-next-${RANDOM}${RANDOM}-$$.json"
+  manifest_tmp_key_live="$manifest_tmp_key"
   if ! brand_run_checked aws s3api put-object \
-    --bucket "$R2_BUCKET" --key "${channel}/latest.json" --body "$manifest_body" \
+    --bucket "$R2_BUCKET" --key "$manifest_tmp_key" --body "$manifest_body" \
     --content-type application/json --cache-control "$NO_CACHE" \
     --checksum-sha256 "$(sha256_b64 "$manifest")"; then
-    echo "::error::更新服务器发布失败(渠道 ${INDEX}:写版本指针;上方输出已脱敏)" >&2
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:写版本指针临时键;上方输出已脱敏)" >&2
+    rm -f "$manifest"
+    exit 1
+  fi
+  verify_remote_object "$manifest_tmp_key" "$manifest" "版本指针(临时键)"
+  # 服务端 copy = 单对象原子替换(不经过本地字节,R2 侧同一个 PUT 语义)。
+  # 元数据用 `REPLACE` **显式重述**缓存头与内容类型:**不依赖"继承"** —— 否则临时对象的
+  # 缓存头一旦被改错(或将来有人把它换成别的前缀/别的写法),正式指针会静默继承一个错值,
+  # 而"逐对象缓存头断言"看到的仍是临时对象那一行。REPLACE + 逐字段重述让正式键的
+  # 缓存头**在写它的那一行**上可被判据读到(判据见 verify-ci-scripts 的 6b 节)。
+  if ! brand_run_checked aws s3api copy-object \
+    --bucket "$R2_BUCKET" --key "${channel}/latest.json" \
+    --copy-source "${R2_BUCKET}/${manifest_tmp_key}" \
+    --metadata-directive REPLACE --content-type application/json --cache-control "$NO_CACHE"; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:用临时键替换版本指针;上方输出已脱敏)" >&2
     rm -f "$manifest"
     exit 1
   fi
   verify_remote_object "${channel}/latest.json" "$manifest" "版本指针"
+  # 正式键已就位 ⇒ 临时键的收尾职责从 trap 手里取走,并立刻收干净。
+  manifest_tmp_key_live=''
+  if ! verify_remote_object_absent "$manifest_tmp_key" "版本指针(临时键)"; then
+    rm -f "$manifest"
+    exit 1
+  fi
   rm -f "$manifest"
   TOTAL=$((TOTAL + 1))
 done < "$LIST"

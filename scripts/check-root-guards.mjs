@@ -46,6 +46,16 @@
  *      `bash scripts/…`），否则同样是"名字还在、判据没了"。
  * 四条都是**配置错误 ⇒ exit 2**（与本文件其它登记错误同码），绝不是"跳过这一条"。
  *
+ * ## 执行体入口：守卫**不经 yarn** 起（2026-09-24 第十一轮审计 I1 泳道 · P0-1）
+ *
+ * 登记面（名字 / argv 尾 / 脚本路径 / 内容摘要）都齐了，**谁把它跑起来**仍是下一层：
+ * `.yarnrc.yml` 的 `plugins:`（或 `yarnPath:`）能在 **yarn 进程内部**往每个被 spawn 的
+ * 脚本环境里注入 `NODE_OPTIONS`/`BASH_ENV`，而子进程环境清洗发生在 yarn **之前**
+ * ⇒ 实测 `corepack yarn check` EXIT 1→0、本运行器 `3 通过、14 失败` → `17 通过、0 失败`。
+ * 现在守卫按登记脚本**直接 spawn**（`process.execPath` / `bash`），回落 yarn 只在
+ * "登记脚本文件不存在"（合成/探针树）且 `yarnEntryTrustProblems()` 为空时发生。
+ * 见下面的「执行体入口」段。
+ *
  * ## 用法与退出码
  *
  * 用法：node scripts/check-root-guards.mjs [--list] [--concurrency N] [--full-output] [--allow-advisory]
@@ -72,7 +82,24 @@ import { fileURLToPath } from 'node:url'
 // 逐字节相同意味着"修了口径但没接线"）。`check-workspaces.mjs` 是编排器 CLI，但它在
 // 文件末尾用 `isEntryPoint()` 守卫了 `main()` ⇒ **被 import 时零副作用**（同一轮修复里
 // 也把本文件改成同样的形态：`check-root-guards.mjs` 被 import 时同样什么都不跑）。
-import { formatFailureReport, selfTestVerdictClassifier } from './check-workspaces.mjs'
+import {
+  SEMANTICS_CHANGING_FLAGS,
+  contaminatedRunnerKeys,
+  formatFailureReport,
+  refuseUntrustedRunner,
+  runnerTrustProblems,
+  sanitizeGuardEnvironment,
+  selfTestVerdictClassifier,
+  spawnRegisteredGuard,
+  spawnYarnFallbackGuard,
+} from './check-workspaces.mjs'
+
+// **共享实现的兼容导出面**（2026-09-24 第十一轮审计 I1）：`sanitizeGuardEnvironment` /
+// `contaminatedRunnerKeys` 的实现已按依赖方向搬进编排器（那里是两者共同的下游，
+// 且"只拷编排器"的合成树不能 import 本文件 —— 详见 `check-workspaces.mjs` 的头注释），
+// 但外部判据（`scripts/verify-check-workspaces.mjs` 的 `typeof … === 'function'` 断言）
+// 仍按本模块取它们 ⇒ 这里原样重导出，导出面不变。
+export { contaminatedRunnerKeys, sanitizeGuardEnvironment }
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ORCHESTRATOR = join(ROOT, 'scripts', 'check-workspaces.mjs')
@@ -131,8 +158,8 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '55710c7789cef9b4861ec48f8fe6e210cce26e4b4faba631c9469868d67b2d57' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '7f4f3446a4f936d4ac4cd9201c92784e9b51f19ccdd99bf3c6ca5a10c75edcc1' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '2ed9be5f8164d566238f4af1ceb9cab34f736b1075f97b75db73722523300886' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'f1d7fa4cdc092fe8d0882408869adf90dca75aa27f87a2610893c357a8c70159' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: '92697e806d4402f67d5bf7fe9a06ea2d4774a4dd30c0f62e7105861523bc8f44' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
@@ -150,7 +177,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'befe4a473dc7fd37a1fc2796501ae0901daae9ca560e2c66162ad9cefba26d11' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'a269c9d9bd6d97f5133bbdfdbfa0398dadb51530271738ff955ae3dcc3809038' }],
 ])
 
 /**
@@ -167,103 +194,21 @@ const REGISTERED_GUARD_ARG_TAILS = new Map(
 )
 
 /**
- * "会改变语义"的旗标：出现在守卫 argv 里一律拒（R8-D-22）。
+ * 取一条已登记守卫的「直接执行」参数（编排器侧用；登记表是**唯一真源**）。
  *
- * 它们都不是"更强的检查"，而是**让守卫什么都不判**：`--list` / `--help` / `--version`
- * 只打印清单或版本，`--dry-run` 只演算不判定，`--allow-advisory` 则是把 advisory 守卫的
- * 失败降级成告警的开关（本文件自己的用法注释写着"CI 的任何调用都不得带它"）。
+ * 为什么编排器不自己读 `package.json`：`yarn run <name>` 的语义就是「跑 package.json 的那一行」，
+ * 而本轮 P0-1 之后守卫不再经 yarn ⇒ 那一步必须由**登记表**承担（登记表与 package.json 的
+ * 一致性由 `guardScriptProblem()` 校验，两侧各自 fail-loud）。
+ * @param name - 守卫名（= 根 `package.json` 里的脚本名）。
+ * @returns `{ script, argvTail }`；未登记时 `null`（调用方必须拒绝执行）。
  */
-const SEMANTICS_CHANGING_FLAGS = [
-  '--list',
-  '--help',
-  '-h',
-  '--version',
-  '-V',
-  '--dry-run',
-  '--allow-advisory',
-]
-
-/**
- * 交给守卫子进程的**危险键族**（2026-09-24 第十轮审计 D-03 的后半条）。
- *
- * 现场（审计方实跑）：在被钉步骤的**步骤体**里加一行
- * `export NODE_OPTIONS="--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
- * 之后，`check-workflows` 一个字都不报（它只看 YAML 的 `env:`），而真跑这条命令时
- * 16 个根守卫**全部"跑而恒绿"**：`runGuard()` 的 `env: { ...process.env, FORCE_COLOR: '0' }`
- * 把 `NODE_OPTIONS` **原样透传**给每个守卫子进程，注入的退出钩子在守卫进程退出时把
- * `process.exitCode` 改回 0。实测：同一条命令在有 1 项违规的树上打印「1 项未通过」却 EXIT=0。
- *
- * 这是本文件的第二道收口（第一道在 `scripts/check-workflows.mjs` 的 [SK-17]：被钉步骤的
- * 步骤体/env 键必须登记在白名单里）。为什么"层"之外还要这一道：静态判据总会被推到下一层
- * （第八轮 argv → 第九轮进程环境 → 第十轮步骤体），而**清洗交给子进程的环境**与"层"无关。
- *
- * 语义：**键名在危险族里、又不在 `GUARD_CHILD_ENV_ALLOWED` 登记表里 ⇒ 丢弃**（fail-closed：
- * 认不出的一律丢）。不在危险族里的键照常透传（`CHECK_CONCURRENCY` / `PG_DSN_TEST` /
- * 各种 token 都靠它）。`HOME` / `XDG_CACHE_HOME` 刻意**不**在这里丢：守卫要靠真实 HOME
- * 找到 git/pg 配置与 corepack 缓存，丢掉它们会让门禁在本机直接跑不起来 —— 它们的入口
- * （`COREPACK_HOME` 那条链）由静态白名单封住。
- */
-const GUARD_CHILD_ENV_DENIED_PREFIXES = ['NODE_', 'BASH_', 'LD_', 'COREPACK_', 'YARN_', 'NPM_CONFIG_', 'npm_config_']
-/** 精确匹配的危险键（不带前缀的形态）。 */
-const GUARD_CHILD_ENV_DENIED_KEYS = [
-  'ENV', // POSIX sh 的启动文件（与 BASH_ENV 同族）
-  'SHELLOPTS',
-  'BASHOPTS',
-  'PROMPT_COMMAND',
-  'PYTHONSTARTUP',
-  'PERL5OPT',
-  'RUBYOPT',
-]
-/**
- * 允许**透传**的危险族键（登记制：每条带理由，当前为空）。
- *
- * 加一条 = 明确承认"这个键会被守卫子进程继承"，必须在同一个 PR 里写清为什么它不会
- * 改变判据结论。空表是 fail-closed 的默认形态。
- */
-const GUARD_CHILD_ENV_ALLOWED = []
-
-/**
- * 清洗交给守卫子进程的环境（第十轮审计 D-03）：丢弃危险族里未登记的键。
- *
- * @param env - 源环境（缺省 `process.env`）。
- * @returns `{ env, dropped }`（`dropped` = 被丢掉的键名，按字母序；用于打印证据）。
- */
-export function sanitizeGuardEnvironment(env = process.env) {
-  const allowed = new Set(GUARD_CHILD_ENV_ALLOWED.map(entry => entry.key))
-  const cleaned = {}
-  const dropped = []
-  for (const [key, value] of Object.entries(env)) {
-    if (typeof key !== 'string' || key === '') continue
-    const risky = GUARD_CHILD_ENV_DENIED_KEYS.includes(key)
-      || GUARD_CHILD_ENV_DENIED_PREFIXES.some(prefix => key.startsWith(prefix))
-    if (risky && !allowed.has(key)) {
-      dropped.push(key)
-      continue
-    }
-    cleaned[key] = value
-  }
-  dropped.sort()
-  return { env: cleaned, dropped }
+export function registeredGuardEntry(name) {
+  const entry = REGISTERED_GUARD_ENTRIES.get(name)
+  if (entry === undefined) return null
+  return { script: entry.script, argvTail: [...(entry.argvTail ?? [])] }
 }
 
-/**
- * 本进程自己的环境里有没有"能改写解释器行为"的键（同族的上游证据）。
- *
- * 只用来**打印警告**：注入的 `--import` 钩子在模块求值之前就已经加载了，任何进程内检查
- * 都无法把它卸载。真正让结论可信的是两件事（都在下面）：
- *   ① 子进程环境清洗 —— 守卫本身跑在干净环境里，它们的判定是真的；
- *   ② 显式且加固的退出路径（`process.removeAllListeners('exit')` + `process.exit(code)`）。
- * 诚实边界：如果钩子**改写了 `process.exit`/`process.reallyExit` 本身**，进程内没有任何
- * 办法自证（实测：`process.exit = () => {}` 之后连 `process.exit(1)` 都是 no-op）——
- * 那正是静态白名单（[SK-17] 判据面）必须存在的原因，不能靠运行期兜。
- *
- * @param env - 源环境（缺省 `process.env`）。
- * @returns 命中的键名（按字母序）。
- */
-export function contaminatedRunnerKeys(env = process.env) {
-  const { dropped } = sanitizeGuardEnvironment(env)
-  return dropped
-}
+
 
 /**
  * 根 `package.json` 里守卫脚本**允许的形态**：直接执行 `scripts/` 下的一个脚本文件。
@@ -580,7 +525,7 @@ function parseArgs(argv) {
 }
 
 /**
- * 与编排器同形地起一个守卫（`corepack yarn <args>`），失败时保留输出尾部。
+ * 起一条**已登记**的守卫（运行器侧）。
  *
  * `guardChildEnv`（= `main()` 里算好的清洗结果）**必须显式传入**：本文件被 import 时
  * 不许跑任何东西，所以那份环境不在模块作用域上求值（第十轮复审 V1 的 P1 附带要求：
@@ -591,39 +536,12 @@ function parseArgs(argv) {
  * @returns 守卫结果（含合并后的 stdout+stderr 与退出码）。
  */
 function runGuard(guard, guardChildEnv) {
-  return new Promise(resolveTask => {
-    const started = Date.now()
-    // 清洗(第十轮审计 D-03):`process.env` **不再原样透传** —— 危险族里未登记的键
-    // (`NODE_OPTIONS`/`BASH_ENV`/`COREPACK_HOME`/…)会被丢掉,守卫本身跑在干净环境里。
-    const child = spawn('corepack', ['yarn', ...guard.args], {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
-      env: { ...guardChildEnv.env, FORCE_COLOR: '0' },
-    })
-    let output = ''
-    child.stdout.on('data', chunk => { output += chunk })
-    child.stderr.on('data', chunk => { output += chunk })
-    child.on('error', error => {
-      resolveTask({ guard, ok: false, ms: Date.now() - started, output: `${output}\n${String(error)}` })
-    })
-    child.on('close', code => {
-      resolveTask({ guard, ok: code === 0, ms: Date.now() - started, output })
-    })
-  })
+  return spawnRegisteredGuard(
+    REGISTERED_GUARD_ENTRIES.get(guard.name)?.script ?? '',
+    REGISTERED_GUARD_ENTRIES.get(guard.name)?.argvTail ?? guard.args.slice(2),
+    { cwd: ROOT, env: guardChildEnv.env, name: guard.name },
+  ).then(result => ({ ...result, guard }))
 }
-
-/**
- * 失败详情（**判定行扫描 + 有界输出**）—— 这里**没有**本地实现（第十轮复审 V1 的 P1）。
- *
- * 历史：本文件曾有一份自己的 `summarize()`（"头 20 + `…（省略 N 行）` + 尾 20"），它把
- * 落在中段的真判定行整条丢掉 —— 独立探针实测判定行出现次数 **0**；而同一段输出交给
- * 编排器的共享实现 `formatFailureReport` 时出现 **1** 次。本文件是 docs-only PR 的
- * **唯一**防线，它的失败详情看不见等于那条防线没有诊断面。
- *
- * 唯一实现 `formatFailureReport` 由 `check-workspaces.mjs` 导出（短输出仍然逐字原样）；
- * 它的口径是：判定行（行首锚定、**先剥离 ANSI**）优先、尾窗兜底、进度噪声只计数不占预算。
- */
 
 /**
  * `COREPACK_HOME` 被清洗掉时的**离线处置指引**（第十轮复审 V1 的 P3-D4，二选一的第②条；
@@ -760,6 +678,13 @@ function isEntryPoint() {
 
 /** 运行器主体（只在"被直接执行"时调用 —— 见 `isEntryPoint()`）。 */
 async function main() {
+  // R11 P0-1（I1 泳道）：**本进程自己的判决可信吗** —— 环境里有"能改写解释器/退出码"的键
+  // （`NODE_OPTIONS=--import=…` / 动态链接器预载 / `BASH_FUNC_*`）时直接拒绝运行。
+  // 放在一切判据之前：这类键能在本进程内执行代码，实测能把 `process.exit(3)` 改写成 0，
+  // 所以"跑完再报"的每一条结论都不可信（`--list` 也一样拒 —— 它正是各判据的输入面）。
+  const runnerTrust = runnerTrustProblems()
+  if (runnerTrust.length > 0) refuseUntrustedRunner('check-root-guards', runnerTrust)
+
   const options = parseArgs(process.argv.slice(2))
   if (options === null) process.exit(2)
 
@@ -930,10 +855,20 @@ async function main() {
   }
   // 本进程自己被污染时**明说**（不静默）:退出钩子在模块求值前就装好了,进程内卸不掉,
   // 但子进程环境已清洗 + 退出路径已加固(removeAllListeners + process.exit)。
-  if (CONTAMINATED_KEYS.length > 0) {
-    console.error(`check-root-guards: WARNING — 本进程自己的环境里有危险族键(${CONTAMINATED_KEYS.join('、')});`
+  //
+  // **两类键必须分开说**（第十一轮复审 J1 的 N3）：`CONTAMINATED_KEYS` 是"清洗清单"（子进程不继承），
+  // 而"判决可不可信"由 `runnerTrustProblems()` 按**能力**判（`NODE_OPTIONS` 看内容）。
+  // 原来一律按"注入面"告警 ⇒ 正当的 `NODE_OPTIONS=--max-old-space-size=…` 会被说成"守卫跑而恒绿"，
+  // 那是把一条已经判定无害的配置讲成攻击。
+  if (runnerTrustProblems().length > 0) {
+    // 理论上不可达（`main()` 开头的 `refuseUntrustedRunner()` 已经拦掉）—— 留着是为了"万一判据漂移"。
+    console.error(`check-root-guards: WARNING — 本进程自己的环境里有**判决不可信**的键(${CONTAMINATED_KEYS.join('、')});`
       + '\n  这是"守卫跑而恒绿"的注入面(第十轮审计 D-03)。子进程环境已清洗,退出路径已加固,'
       + '但**判据面的第一道**在 scripts/check-workflows.mjs 的 [SK-17](被钉单元的 env/步骤体白名单)。')
+  } else if (CONTAMINATED_KEYS.length > 0) {
+    console.log(`check-root-guards: 提示 —— 本进程环境里有 ${CONTAMINATED_KEYS.length} 个键（${CONTAMINATED_KEYS.join('、')}）`
+      + '**不会**传给守卫子进程；它们已由 `runnerTrustProblems()` 判过"改不了本进程的解释器行为/退出码"'
+      + '（例：正当的 `NODE_OPTIONS=--max-old-space-size=…`），因此不构成注入面（J1 复审 N3 的两类之分）。')
   }
 
   console.log(`check-root-guards — 并发 ${concurrency}；docs-only 的 PR 也必须跑到的根守卫（${guards.length} 个）`
@@ -942,6 +877,9 @@ async function main() {
     + `（登记的参数尾：${REGISTERED_GUARD_ARG_TAILS.size === 0
       ? '无'
       : [...REGISTERED_GUARD_ARG_TAILS].map(([name, tail]) => `${name} ${tail.join(' ')}`).join('；')}）`)
+  console.log('check-root-guards: 执行体入口 —— 守卫按登记脚本**直接 spawn**（不经 yarn）'
+    + '；只有"登记脚本文件不存在"时才回落到 `corepack yarn run`，且回落前必须过'
+    + ' `yarnEntryTrustProblems()`（禁 yarnPath/plugins/生命周期钩子）。')
   const startedAt = Date.now()
   const results = []
   await runPool(guards, concurrency, results, GUARD_CHILD_ENV)
@@ -955,6 +893,19 @@ async function main() {
   const tolerated = toleratesAdvisory ? advisory : []
   console.log(`──── ${results.length} 个根守卫：${results.length - failed.length - tolerated.length} 通过、`
     + `${failed.length} 失败、${tolerated.length} 告警(advisory)，总耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`)
+  // R11-J1 N1（把判定权从"被审进程"上移到父进程/CI）：与编排器的 `VERDICT PASS` 同一凭据口径。
+  // 只有"**每个**登记守卫都真的跑过、且没有一条失败"才打印 PASS —— `refuseUntrustedRunner()`
+  // 在打印它之前就结束进程（连"清单"那一行都还没打），`--allow-advisory` 这类显式降级也拿不到它。
+  // 诚实边界：进程内做不到绝对（钩子能改写 `kill`/`abort`/`reallyExit` ⇒ 最后一层是"阻塞不返回"），
+  // 所以父进程/CI 请**认这一行**，不要只认退出码。
+  if (results.length > 0 && failed.length === 0 && tolerated.length === 0) {
+    console.log(`check-root-guards: VERDICT PASS guards=${results.length}`
+      + '（每个登记的根守卫都跑过且通过 —— 这是"根守卫跑过了"的唯一凭据）')
+  } else {
+    console.error(`check-root-guards: VERDICT FAIL guards=${results.length} failed=${failed.length}`
+      + `${tolerated.length > 0 ? ` tolerated=${tolerated.length}` : ''}`
+      + '（这一行与通过行互斥：唯一的凭据是以 `check-root-guards: ` 开头的通过行；非通过的行里刻意不出现那个词）')
+  }
   if (!toleratesAdvisory && advisory.length > 0) {
     console.error(`\n提示：有 ${advisory.length} 条失败落在 advisory 守卫上，但本运行器**默认不认 advisory**`
       + '（docs-only 的 PR 只有这条路）。要让它们不拦门禁，必须显式传 `--allow-advisory`。')

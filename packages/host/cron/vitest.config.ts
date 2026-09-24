@@ -7,11 +7,14 @@ import { defineConfig } from 'vitest/config'
  * 的真实命中），单次预算本就接近 5 s；`yarn check` 并发 4 个包时（19 个任务）会
  * 超时 ⇒ 表现成 flake。这与本仓给 connectors 提预算（真实 socket/spawn 集成测试）
  * 是同一类处置：**不靠重跑**，把预算写进配置。
+ *
+ * 只加预算，**不动发现面**（第十一轮复审 J2-N1）：`include` 与 vitest 缺省的
+ * `defaultInclude` 不等价，声明它会静默排除 `tests/**` 之外的测试文件；收窄会被
+ * `packages/host/desktop/tests/wait-budget-contract.spec.ts` 的「测试发现面契约」
+ * 判红（enterprise 已经因此掉过一个文件四个用例）。
  */
 export default defineConfig({
   test: {
-    environment: 'node',
-    include: ['tests/**/*.spec.ts'],
     testTimeout: 30_000,
   },
 })

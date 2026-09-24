@@ -51,13 +51,15 @@ describe('gateway-model', () => {
     const f = ctxFixture()
     apply(f.ctx)
     f.emit(SESSION)
-    await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'), { timeout: 10_000 })
     expect(f.unset).not.toHaveBeenCalled()
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
       protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
-    }))
+    }), { timeout: 10_000 })
   })
 
   it('syncs an already-restored session on apply (startup race)', async () => {
@@ -70,31 +72,36 @@ describe('gateway-model', () => {
       getSession: () => SESSION,
     }
     apply(f.ctx)
-    await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.set).toHaveBeenCalledWith(expect.anything(), 'tok-1'), { timeout: 10_000 })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
       protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
-    }))
+    }), { timeout: 10_000 })
   })
 
   it('strips trailing slashes from the server URL', async () => {
     const f = ctxFixture()
     apply(f.ctx)
     f.emit({ ...SESSION, serverURL: 'https://gateway.example///' })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
     await vi.waitFor(() => expect(f.update).toHaveBeenCalledWith(expect.anything(), {
       protocol: 'chat-completions',
       baseURL: 'https://gateway.example/v1',
       apiKeyEnv: TOKEN_ENV,
-    }))
+    }), { timeout: 10_000 })
   })
 
   it('clears the credential and resets the section on logout', async () => {
     const f = ctxFixture()
     apply(f.ctx)
     f.emit(null)
-    await vi.waitFor(() => expect(f.unset).toHaveBeenCalledWith(expect.anything()))
-    await vi.waitFor(() => expect(f.replace).toHaveBeenCalledWith(expect.anything(), {}))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.unset).toHaveBeenCalledWith(expect.anything()), { timeout: 10_000 })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.replace).toHaveBeenCalledWith(expect.anything(), {}), { timeout: 10_000 })
     expect(f.set).not.toHaveBeenCalled()
   })
 
@@ -103,7 +110,8 @@ describe('gateway-model', () => {
     f.set.mockRejectedValueOnce(new Error('denied'))
     apply(f.ctx)
     f.emit(SESSION)
-    await vi.waitFor(() => expect(f.ctx.logger.error).toHaveBeenCalled())
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.ctx.logger.error).toHaveBeenCalled(), { timeout: 10_000 })
   })
 
   // 2026-09-20 升级审计 P0：0.1.6-alpha.2 给上游适配器新增了 `protocol`，默认
@@ -116,7 +124,8 @@ describe('gateway-model', () => {
     const f = ctxFixture()
     apply(f.ctx)
     f.emit(SESSION)
-    await vi.waitFor(() => expect(f.update).toHaveBeenCalled())
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(f.update).toHaveBeenCalled(), { timeout: 10_000 })
     const payload = f.update.mock.calls.at(-1)?.[1] as Record<string, unknown> | undefined
     expect(payload?.protocol).toBe('chat-completions')
 

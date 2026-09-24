@@ -972,6 +972,47 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const mcpRegistrations = new Map<string, McpRegistration>()
 
   /**
+   * Header records that are **attached to a transport but not registered yet**:
+   * the record source that closes the registration window (R11-B-01).
+   *
+   * `registerMcp` renders the record from its credential snapshot and hands it to
+   * the fence (`attachMcpLiveHeaders` — which is what makes it
+   * `_requestInit.headers`) BEFORE `ctx.plugin` runs, and only publishes it to
+   * {@link mcpRegistrations} AFTER `ctx.plugin` resolved — i.e. after the real MCP
+   * handshake (`client.connect` = initialize + `listTools`). A refresh landing
+   * anywhere in that window used to reach neither source: the registration map had
+   * no entry yet, and the sibling catch-up `adoptLatestRefresh` feeds only the
+   * provider. So the declared "leave empty to auto-fill the bearer" header
+   * (`X-Probe-Key: ''`, the R9-D-1 shape) kept the REPLACED token, the JSON-RPC
+   * body frames carried a dead bearer, the endpoint answered 401 twice and the
+   * whole registration failed with `Server returned 401 after re-authentication` —
+   * while `restoreAll` still wrote `status: 'connected'`. The window is not a few
+   * milliseconds: it is the entire handshake.
+   *
+   * This is the SAME record, found through a second source — not a second
+   * judgement: {@link refreshLiveHeaders} renders and sweeps both sources with one
+   * body of code (the render is `renderTransportHeaders`, the criterion is
+   * `def.id`), so "should this be refreshed" cannot drift between the registration
+   * path and the refresh path.
+   *
+   * Keyed by `serverName` exactly like {@link mcpRegistrations} (that map holds at
+   * most one registration per name — upstream reserves the name per live
+   * instance), and the owner id travels with the record so a refresh of one
+   * connector can never write into another's record. The record is handed over
+   * (removed here) when its registration publishes, and dropped when that
+   * registration is superseded, fails to load, or is retired.
+   */
+  const pendingLiveHeaders = new Map<string, { id: string, headers: Record<string, string> }>()
+
+  /** Forget an attached-but-unpublished record, unless it belongs to another owner. */
+  const dropPendingLiveHeaders = (serverName: string, ownerId?: string): void => {
+    const pending = pendingLiveHeaders.get(serverName)
+    if (pending === undefined) return
+    if (ownerId !== undefined && pending.id !== ownerId) return
+    pendingLiveHeaders.delete(serverName)
+  }
+
+  /**
    * Retire whatever live registration owns `serverName`, and — when it belonged
    * to ANOTHER connector — stop that connector's row from claiming `connected`.
    *
@@ -985,6 +1026,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const previous = mcpRegistrations.get(serverName)
     if (previous === undefined) return
     dropLiveProvider(previous.id, serverName)
+    // The retired registration's own attached record must not outlive it — but
+    // only when the name is changing hands: a re-registration by the SAME
+    // connector has already attached its new record under this name, and that is
+    // the one a refresh landing during the handshake must reach (R11-B-01).
+    if (previous.id !== ownerId) dropPendingLiveHeaders(serverName, previous.id)
     try { previous.dispose() } catch { /* teardown never throws */ }
     mcpRegistrations.delete(serverName)
     if (previous.id === ownerId) return
@@ -1183,6 +1229,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       try { registration.dispose() } catch { /* teardown never throws */ }
     }
     mcpRegistrations.clear()
+    // Records whose transports are still loading die with the scope that started
+    // them: nothing may write one account's token into a record the next account's
+    // registration could pick up (R11-B-01; same reason as `liveProviders.clear()`).
+    pendingLiveHeaders.clear()
     for (const flow of pendingFlows.values()) flow.abort(new Error(copy('flow.userSwitchedConnect')))
     pendingFlows.clear()
     // BUG-02: connect/submit intents started under the previous session must
@@ -1607,14 +1657,27 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // the stdio re-registration that follows it never running). Any
       // non-record takes the same branch: a string would otherwise resolve
       // `${0}` to a character, which is the same accident class R10 N3 removed.
+      //
+      // A value that is not a string is the same reading one level down
+      // (R11-D-07): `{API_KEY: 42}` in a declared `Authorization: 'Bearer
+      // ${API_KEY}'` used to render `Bearer 42`, which is non-empty, so
+      // `carriesCredential` classified it as the administrator's own credential
+      // and the provider's live token was displaced — a 401 loop over a value
+      // nobody ever entered. `readCredential` already drops such values at the
+      // single read boundary; this `typeof` keeps the render honest for any
+      // credential that reaches here by another route (a snapshot, a fixture, a
+      // future caller), so the two enforce ONE rule rather than two.
       const ownFields = credential?.fields
       const fields = typeof ownFields === 'object' && ownFields !== null && !Array.isArray(ownFields)
         ? ownFields
         : undefined
       const resolved = value === ''
         ? ''
-        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) =>
-          fields !== undefined && Object.hasOwn(fields, field) ? fields[field] ?? '' : '')
+        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) => {
+          if (fields === undefined || !Object.hasOwn(fields, field)) return ''
+          const found: unknown = fields[field]
+          return typeof found === 'string' ? found : ''
+        })
       if (!carriesCredential(slot, resolved)) {
         // Same rule as a missing declaration: the framework fills this slot.
         if (slot === AUTHORIZATION_HEADER && value.trim() !== '') rejectedAuthorization = name
@@ -1736,16 +1799,24 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    *
    * Only registrations that carry a live view are touched; a provider-less
    * transport reads nothing lazily and is still rebuilt (V3A-N6).
+   *
+   * The record has TWO sources, and both are swept by the same code below: a
+   * published registration ({@link mcpRegistrations}) and one whose transport is
+   * still loading ({@link pendingLiveHeaders}, R11-B-01). The window between
+   * attaching the record and publishing it contains the whole MCP handshake, so a
+   * refresh landing there (the handshake's own `ensureFresh` retry, the panel
+   * button, the 60 s sweep) has to reach the record the transport is about to
+   * read — otherwise the declared auto-filled bearer goes to the wire on the
+   * replaced token and the registration fails with 401s while the row claims
+   * `connected`.
    * @param def - the connector whose credential changed.
    * @param credential - the credential as it is on disk now.
    * @returns how many live transports were refreshed.
    */
   const refreshLiveHeaders = (def: ConnectorDef, credential: ConnectorCredential | null): number => {
     let refreshed = 0
-    for (const server of def.mcp) {
-      const registration = mcpRegistrations.get(server.serverName)
-      const live = registration?.liveHeaders
-      if (registration === undefined || registration.id !== def.id || live === undefined) continue
+    /** Apply one rendered credential to one live record. THE one sweep. */
+    const applyTo = (server: ConnectorMcp, live: Record<string, string>): void => {
       const next = renderTransportHeaders(server, credential, true).headers
       // `Object.hasOwn`, never `name in next` (R10-B-05): `in` also sees the
       // prototype chain, so a header the definition happens to name
@@ -1759,6 +1830,32 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       for (const name of Object.keys(live)) if (!Object.hasOwn(next, name)) delete live[name]
       for (const [name, value] of Object.entries(next)) live[name] = value
       refreshed += 1
+    }
+    for (const server of def.mcp) {
+      // BOTH sources are swept, and **both are swept when they coexist**: a
+      // re-registration publishes its new record (above) while the previous
+      // same-owner registration is still in `mcpRegistrations` — the handshake's
+      // await points (`waitForRebuildClearance`) sit between the two — so for a
+      // moment "the record this transport will read" names two objects: the
+      // doomed one and the one about to be read. Stopping at the first match
+      // fed the doomed record and left the new one on the replaced token, so the
+      // registration the refresh was supposed to protect still went to the wire
+      // with a dead bearer and failed with `Server returned 401 after
+      // re-authentication` (round-11 review J2-N2). Ownership is still the only
+      // criterion (`def.id`): another connector's record is never written, in
+      // either source.
+      const registration = mcpRegistrations.get(server.serverName)
+      if (registration !== undefined && registration.id === def.id && registration.liveHeaders !== undefined) {
+        // A published registration is the record source for this name; when it
+        // belongs to another connector the name was taken over and this refresh is
+        // not about that transport (CN-4).
+        applyTo(server, registration.liveHeaders)
+      }
+      const pending = pendingLiveHeaders.get(server.serverName)
+      // The pending record is the one this connector's in-flight registration
+      // will read; it exists only between attach and publication, so an owner
+      // match here is always the NEWER of the two.
+      if (pending !== undefined && pending.id === def.id) applyTo(server, pending.headers)
     }
     return refreshed
   }
@@ -2206,8 +2303,22 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // has always been.
       const renderedHeaders = renderTransportHeaders(server, credential, providerSuppliesAuthorization)
       warnOnHeaderDeclarations(def, server, renderedHeaders, providerSuppliesAuthorization)
+      // Publish this registration's live record to the "attached but not yet
+      // registered" source (R11-B-01). Called twice: at attach below, and again
+      // before the `already in use` retry — that retry goes through
+      // `unregisterMcp`, which drops the records of the servers it retires, and the
+      // retry is the SAME registration whose record object the transport will read.
+      const publishPendingLiveHeaders = (): void => {
+        pendingLiveHeaders.set(server.serverName, { id: def.id, headers: renderedHeaders.headers })
+      }
       if (providerSuppliesAuthorization && auth.authProvider !== undefined) {
         attachMcpLiveHeaders(auth.authProvider, renderedHeaders.headers)
+        // The transport is about to be able to read this record, but the
+        // registration that would publish it is still a handshake away: publish
+        // it to the second record source NOW so a refresh landing anywhere before
+        // `mcpRegistrations.set` below still reaches it (R11-B-01). Handed over /
+        // dropped at every exit of this registration — see `dropPendingLiveHeaders`.
+        publishPendingLiveHeaders()
       }
       const config = server.transport === 'streamable-http'
         ? {
@@ -2243,7 +2354,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // A disconnect/user-switch may have landed while mcpAuthProvider was
       // awaiting discovery; do not retire the old transport or spawn the new
       // one after that intent was invalidated.
-      if (superseded()) return { rejected: [], superseded: true }
+      if (superseded()) {
+        dropPendingLiveHeaders(server.serverName, def.id)
+        return { rejected: [], superseded: true }
+      }
       // R9A-3: `retire()` disposes the live transport, and the shipped bridge's
       // disposer closes the client — including a tool call still on the wire
       // (`Connection closed` mid-call). A provider-less transport has to be
@@ -2251,7 +2365,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // outbound calls to drain first. Bounded, so a stalled call cannot starve
       // the credential update.
       await waitForRebuildClearance(def, server)
-      if (superseded()) return { rejected: [], superseded: true }
+      if (superseded()) {
+        dropPendingLiveHeaders(server.serverName, def.id)
+        return { rejected: [], superseded: true }
+      }
       // The serverName is a per-scope reservation owned by the LIVE fibre: the
       // upstream plugin throws "serverName \"...\" is already in use" when a
       // second instance loads while the first is still alive. A re-registration
@@ -2270,35 +2387,50 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const load = (): Promise<Awaited<ReturnType<typeof ctx.plugin>>> => Promise.resolve(
         ctx.plugin({ inject: ['tools'], apply: applyMcpClient, name: 'mcp-client' }, config),
       )
-      let fiber = await load().catch(async (cause: unknown) => {
-        const message = String(cause instanceof Error ? cause.message : cause)
-        // An authorization rejection during registration is not a crash: the
-        // connector simply has no usable credential yet (first connect, or a
-        // revoked grant). Say what the user has to do instead of leaking the
-        // transport's raw "Error POSTing to endpoint: {\"error\":\"invalid_token\"}".
-        if (/401|invalid_token|Unauthorized/iu.test(message)) {
-          // A stable code travels with this failure: it is what the host uses to
-          // pick the `unauthorized` row state and what the client maps to its
-          // friendly copy. Matching the TEXT here is what broke under i18n.
-          throw new ConnectorError('auth-required', copy('flow.authRequired'), { cause })
-        }
-        // Defensive: a name held by an instance we do not own (HMR leftovers, a
-        // previous generation). Retire whatever this plugin knows about and try
-        // exactly once more; a second failure is the caller's to report.
-        if (!message.includes('already in use')) throw cause
-        ctx.logger?.warn(`pico-connectors: ${def.id} 的 MCP 名被占用，先注销旧实例再重试一次`)
-        // Only the servers THIS registration owns: a credential-change rebuild
-        // selects one subset, and retiring the rest here would dispose the very
-        // transports the selection exists to leave alone (V3A-N4).
-        await unregisterMcp(def, select)
-        return await load()
-      })
+      let fiber: Awaited<ReturnType<typeof ctx.plugin>>
+      try {
+        fiber = await load().catch(async (cause: unknown) => {
+          const message = String(cause instanceof Error ? cause.message : cause)
+          // An authorization rejection during registration is not a crash: the
+          // connector simply has no usable credential yet (first connect, or a
+          // revoked grant). Say what the user has to do instead of leaking the
+          // transport's raw "Error POSTing to endpoint: {\"error\":\"invalid_token\"}".
+          if (/401|invalid_token|Unauthorized/iu.test(message)) {
+            // A stable code travels with this failure: it is what the host uses to
+            // pick the `unauthorized` row state and what the client maps to its
+            // friendly copy. Matching the TEXT here is what broke under i18n.
+            throw new ConnectorError('auth-required', copy('flow.authRequired'), { cause })
+          }
+          // Defensive: a name held by an instance we do not own (HMR leftovers, a
+          // previous generation). Retire whatever this plugin knows about and try
+          // exactly once more; a second failure is the caller's to report.
+          if (!message.includes('already in use')) throw cause
+          ctx.logger?.warn(`pico-connectors: ${def.id} 的 MCP 名被占用，先注销旧实例再重试一次`)
+          // Only the servers THIS registration owns: a credential-change rebuild
+          // selects one subset, and retiring the rest here would dispose the very
+          // transports the selection exists to leave alone (V3A-N4).
+          await unregisterMcp(def, select)
+          // `unregisterMcp` drops the record of every server it retires — but this
+          // retry is the same registration, and the transport it is about to load
+          // still reads the SAME record object, so re-publish it first.
+          if (providerSuppliesAuthorization && auth.authProvider !== undefined) publishPendingLiveHeaders()
+          return await load()
+        })
+      } catch (cause: unknown) {
+        // The transport never loaded: nothing reads this record any more, so it
+        // must not stay behind as a source a later refresh could write into. The
+        // retry above keeps it for its own duration on purpose — the retry IS the
+        // same registration and still wants a refresh to reach it.
+        dropPendingLiveHeaders(server.serverName, def.id)
+        throw cause
+      }
       // conn-1: a teardown may have landed WHILE this registration was
       // starting. Retire the fiber it just created instead of recording it —
       // otherwise the disposer would outlive the teardown that cleared the map
       // (and nothing would ever dispose this one).
       if (superseded()) {
         try { void fiber?.dispose?.() } catch { /* teardown never throws */ }
+        dropPendingLiveHeaders(server.serverName, def.id)
         return { rejected: [], superseded: true }
       }
       // The transport loaded: THIS handle is the one an out-of-band refresh
@@ -2321,6 +2453,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // of by another rebuild (R9-D-1). There is deliberately no second
       // "provider supplied?" flag: `needsRebuild` reads `liveHeaders`, and a
       // field nobody reads is how two truth sources start to drift (R10-B-04).
+      // The record is published now: the pending source hands it over so the same
+      // record is never reachable from two owners at once (R11-B-01).
+      dropPendingLiveHeaders(server.serverName, def.id)
       mcpRegistrations.set(server.serverName, {
         id: def.id,
         // Only the http shape has an endpoint; stdio registrations leave it out,
@@ -2346,6 +2481,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): Promise<void> => {
     for (const server of select === undefined ? def.mcp : def.mcp.filter(server => select(server))) {
       dropLiveProvider(def.id, server.serverName)
+      // A registration still loading has no entry in the map yet, and its record
+      // must go with the intent that retired it (R11-B-01).
+      dropPendingLiveHeaders(server.serverName, def.id)
       const registration = mcpRegistrations.get(server.serverName)
       // Only this connector's own registration: if another row has since taken
       // the name over, disconnecting here must not tear down ITS transport
@@ -2886,6 +3024,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         try { registration.dispose() } catch { /* teardown never throws */ }
       }
       mcpRegistrations.clear()
+      // …and the records whose transports never got that far (R11-B-01).
+      pendingLiveHeaders.clear()
       // P0-1: teardown must abort any in-flight authorization flow — a
       // lingering OAuth/device flow would keep the callback server up and
       // (on a later disconnect) could write back credentials after teardown.

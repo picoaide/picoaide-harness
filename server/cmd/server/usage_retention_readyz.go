@@ -32,6 +32,9 @@ package main
 //	                      + stalled_relations（点名）/ deferred_streak（逐关系连续轮数）
 //	                      + deferred_stalled_rounds（累计停摆**轮数**，不回退）
 //	                      + oldest_unreclaimed_month / _reason / _since / _rounds
+//	                      + reclaim_stalled（**跨重启**的停摆位，R11-D-03）
+//	                      + oldest_unreclaimed_due_since / _age_seconds（逾期时长的
+//	                        推导基准与读数）
 //	"哪个月写不进去"      write_blocked_*（当月）+ write_blocked_other_months（非当月）
 //	                      + write_error_* / write_error_other_months（未分类瞬时失败）
 //
@@ -41,10 +44,14 @@ package main
 // 经过的月份单调增长）在 failed_rounds 上**看不见**，而 skipped_by_reason 每轮被
 // 覆写、也答不了"连续几轮"。这一面就是那个缺口。
 //
-// 示例（每 6h 轮询一次即可，调度间隔就是 6h）：
+// 示例（每 6h 轮询一次即可，调度间隔就是 6h；`deferred_stalled` 的 (b) 条与
+// `oldest_unreclaimed_age_seconds` 在**进程刚启动**时就已经有意义 —— 它们不依赖
+// 本进程累积过多少轮）：
 //
-//	curl -fsS $SERVER/readyz | jq -e '.usage_retention.deferred_stalled != true' \
-//	  || alert "保留策略停摆：$(curl -fsS $SERVER/readyz | jq -c '.usage_retention.stalled_relations')"
+//	curl -fsS $SERVER/readyz | jq -e '(.usage_retention.deferred_stalled != true)
+//	  and (.usage_retention.reclaim_stalled != true)' \
+//	  || alert "保留策略停摆：$(curl -fsS $SERVER/readyz | jq -c '{rels:.usage_retention.stalled_relations,
+//	     month:.usage_retention.oldest_unreclaimed_month, age:.usage_retention.oldest_unreclaimed_age_seconds}')"
 //	# 想知道"停摆**轮数**"（同一次停摆持续 N 轮就计 N —— 它不是"发生了几次"这个
 //	# 事件计数；即使当前这一轮已经自愈，它也不会回退）：
 //	curl -fsS $SERVER/readyz | jq -r '.usage_retention.deferred_stalled_rounds // 0'
@@ -56,18 +63,37 @@ package main
 //	curl -fsS $SERVER/readyz | jq -c '.usage_retention.write_blocked_other_months // []'
 //
 // 四个语义边界（避免误报/漏报）：
-//   - deferred_stalled=true 表示**至少一条**到期关系连续 ≥5 个**调度轮次**（6h/轮
-//     ≈30h）既没被回收、也没有真失败。管理端保存保留期会**同步**多跑一轮
-//     （llmgateway/admin.go），那些即时轮次**不计入** streak（否则连点几次保存就是
-//     一次分钟级假告警）；它会在该关系被回收后的下一轮自动回落 false。
+//   - 停摆有**两位**（运维口径 = `deferred_stalled || reclaim_stalled`）：
+//     (a) `deferred_stalled=true`：**至少一条**到期关系连续 ≥5 个**调度轮次**
+//     （6h/轮 ⇒ ≈**24h**；**首轮即计入**，不是 30h —— R11-D-06 的注释勘误）既没被
+//     回收、也没有真失败；它依赖**进程内**累积（重启归零）。
+//     (b) `reclaim_stalled=true`：最早未回收的到期月**逾期 ≥24h**
+//     （`oldest_unreclaimed_due_since` / `oldest_unreclaimed_age_seconds`）——
+//     这一条由 catalog 事实 + 保留期推导（**纯函数**），**重启后第一轮就成立**
+//     （R11-D-03：旧实现只有 (a)，重启快于 ≈24h 的部署永远看不到告警）。
+//     两位**故意不合并**：`deferred_stalled` 的既有契约（W3-4，由回归用例钉住）是
+//     "连续调度轮次"且"连点保存不得假告警"，并进"逾期时长"会让月份本就逾期的夹具
+//     在分钟级连点下读成 true。
+//     管理端保存保留期会**同步**多跑一轮（llmgateway/admin.go），启动补跑也走同一
+//     个函数：这些**非调度轮次**（与上次计入的轮次相隔 < 6h）**不计入** streak
+//     （否则连点几次保存就是一次分钟级假告警）—— 判据是"节奏 + 来源"双判据
+//     （R11A-05：旧的 1h 间隔闸门挡不住相隔 65min 的运维轮次，实测 6 轮 5.4h 就把
+//     它置真）。任一条成立后，都会在该关系被回收后的下一轮自动回落 false
+//     （reclaim_stalled 报告跨重启的那一条是否成立）。
 //   - deferred_stalled_rounds 是**累计轮数**（不是"事件次数"），不随回落清零 ——
 //     用它做趋势/复盘；
 //   - oldest_unreclaimed_month 是"最早那个既没回收也没失败的到期月"（含**真失败**
 //     的月）：告警规则只看 deferred_stalled 会被"超时/失败交替"或"改保留期"绕过，
-//     这一位不会（它只在那个月真的被回收后前移/清空）；
+//     这一位不会（它只在那个月真的被回收后前移/清空）。但它的 `_since`/`_rounds`
+//     是**进程内**累积（重启归零）⇒ 需要跨重启判据时读 `oldest_unreclaimed_due_since`
+//     与 `oldest_unreclaimed_age_seconds`（纯函数推导，R11-D-03）；
 //   - write_blocked（当月面）的语义与告警口径**不因** write_blocked_other_months
 //     改变：前者是"当月每一次对话 503"（处置=分区 DDL），后者是"某个到期月/迟到
 //     写入落不了账"（处置同源，但影响面是补写而不是当前对话）。
+//   - write_blocked_other_months / write_error_other_months 是**可自愈**的
+//     （R11A-04）：条目描述的对象是 `usage_<月>`，所以"该月关系已不在本轮 catalog
+//     枚举里"（已被回收/删除）或"该月后来写成功"都会让条目自己消失 ⇒
+//     "非空 ⇒ 有月份写不进去"不再是一次事件之后的单向棘轮。
 //   - failed_rounds 不得用来替代上面任何一位：超时按契约不进失败面（见上）。
 //
 // 键序与结尾换行：本文件**不**重新序列化整个响应体（只在最后一个 `}` 前插入一个

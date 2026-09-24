@@ -23,12 +23,45 @@
  */
 
 import { spawn } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, writeSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// **子进程环境清洗 + 守卫执行体入口 = 唯一实现**（2026-09-24 第十一轮审计 I1 泳道）。
+//
+// 为什么两个 runner 都必须走这一份（P1-2 的现场）：第十轮只给 `check-root-guards.mjs`
+// 加了清洗，`yarn check` 这条路径（本编排器）仍然是 `env: { ...process.env, FORCE_COLOR }`
+// ⇒ 同一条 `NODE_OPTIONS=--import=<退出钩子>` 注入在 `yarn check` 上仍然 EXIT 1→0
+// （审计实测）。清洗实现只有一份（`sanitizeGuardEnvironment`），接线有两处，
+// 两处都由 `check-guard-parser-integrity.mjs` 的“两处都清洗”判据看着。
+//
+// 为什么还要 `spawnRegisteredGuard`（P0-1）：守卫经 `corepack yarn run` 起时，
+// `.yarnrc.yml` 的插件钩子能在 **yarn 进程内部**改写脚本子进程的环境（清洗已经跑完），
+// ⇒ 根守卫不能再经 yarn。包级 check 仍需 yarn（那是真实构建链），那里改用
+// `YARN_IGNORE_PATH=1` + 同一份清洗 + 同一套“经 yarn 可信吗”的入口判据。
+
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+
+/**
+ * "会改变语义"的旗标：出现在守卫 argv 里一律拒（R8-D-22 / R11-I1 接线）。
+ *
+ * 它们都不是"更强的检查"，而是**让守卫什么都不判**：`--list` / `--help` / `--version`
+ * 只打印清单或版本，`--dry-run` 只演算不判定，`--allow-advisory` 则是把 advisory 守卫的
+ * 失败降级成告警的开关（运行器的用法注释写着"CI 的任何调用都不得带它"）。
+ *
+ * 定义放在**编排器**里（唯一真源），`check-root-guards.mjs` 的 `guardArgsProblem()` import 它 ——
+ * 两个 runner 对"什么算削弱"必须是同一份表。
+ */
+export const SEMANTICS_CHANGING_FLAGS = [
+  '--list',
+  '--help',
+  '-h',
+  '--version',
+  '-V',
+  '--dry-run',
+  '--allow-advisory',
+]
 
 /** 根守卫脚本(与构建产物无关,可与阶段 1 并行)。 */
 const GUARDS = [
@@ -671,8 +704,134 @@ function parseArgs(argv) {
  * 「未找到判定行」+ 判定形态可能没登记 + `--full-output` 的出路（见
  * {@link summarizeBoundedFailure} 的 `missingVerdict` / `text`）。**混合**场景（有判定行、
  * 但也有未锚定的疑似错误行）同样不许静默丢：那些行进有界的「其它疑似错误行」段。
+ *
+ * **每条形态的 `witness`（第十一轮复审 J1 的 N6）**：该形态的**判定词本身**写成的**最小行**，
+ * 自检断言"这条正则仍然认得它自己的判定词"（见 {@link selfTestVerdictClassifier} ①f）。
+ *
+ * 为什么需要它：`VERDICT_FORM_SAMPLES` 只证明"样本能被分类成判定行"，**样本与正则是同一份
+ * 改动的两侧** —— 把 `count-failed` 的 `\d+\s+failed\b` 收窄成 `\d+\s+ZZfailed\b`、同时把
+ * 它那条样本改成 `3 ZZfailed | 2 passed (5)`，形态数 / 样本数 / 唯一见证数三个棘轮一个都不动，
+ * 自检**全绿**，而真实失败行（`3 failed | 2 passed (5)`）从此在 CI 日志里整行消失（J1 实测：
+ * `classifyVerdictLine('3 failed | 2 passed (5)')` 从 `verdict` 变 `null`，`--list` 仍 EXIT=0）。
+ * `witness` 把"判定词"从样本里**独立**登记出来：收窄正则就得同时改样本、改 witness 三处，
+ * 而 witness 的语义是"这条形态的判定词长什么样"，改它等于当场自认在改判定面。
  */
-const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|●|FAIL(?:ED)?\b|-{3,}[ \t]*FAIL\b|panic\b|not ok\b|AssertionError\b|[A-Za-z_$][\w$]*Error\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|\S+:\d+:\d+[ \t]+-[ \t]+error TS\d+|error TS\d+|\d+:\d+[ \t]+error\b|Tests?:?[ \t]+\d+[ \t]+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯|##\[error\]|npm error\b|Traceback \(most recent call last\):|E {3,}\S|node:internal\/|Unhandled (?:Rejection|Errors?)\b|(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites|errorCount|fatalErrorCount)"\s*:\s*(?!0\b)\d|(?:\{.*)?"success"\s*:\s*false\b|(?:\{.*)?"Action"\s*:\s*"fail")/u
+const VERDICT_LINE_FORMS = [
+  { id: 'times', label: 'vitest/jest 用例行 `×`/`✗`/`✘`', pattern: String.raw`[×✗✘](?:[ \t]|$)`, witness: '× x' },
+  { id: 'heavy-x', label: '重型叉号 `✖`(ava 等运行器)', pattern: String.raw`✖`, witness: '✖ x' },
+  { id: 'bullet', label: 'jest 用例行 `●`', pattern: String.raw`●`, witness: '● x' },
+  { id: 'fail', label: '`FAIL` / `FAILED`(vitest / pytest 汇总)', pattern: String.raw`FAIL(?:ED)?\b`, witness: 'FAIL x' },
+  { id: 'dash-fail', label: 'go 用例级 `--- FAIL:`', pattern: String.raw`-{3,}[ \t]*FAIL\b`, witness: '--- FAIL: x' },
+  { id: 'panic', label: 'go `panic:`', pattern: String.raw`panic\b`, witness: 'panic: x' },
+  { id: 'not-ok', label: 'node --test / TAP `not ok`', pattern: String.raw`not ok\b`, witness: 'not ok 1 - x' },
+  { id: 'assertion-error', label: '`AssertionError`(node/python 断言)', pattern: String.raw`AssertionError\b`, witness: 'AssertionError: x' },
+  { id: 'named-error', label: '栈首 `TypeError:` / `RangeError:` 一类', pattern: String.raw`[A-Za-z_$][\w$]*Error\b`, witness: 'TypeError: x' },
+  { id: 'bare-error', label: '裸栈首 `Error:`', pattern: String.raw`Error\b`, witness: 'Error: x' },
+  { id: 'bare-error-lower', label: '裸 `error:`(yarn/工具链小写形态)', pattern: String.raw`error\b`, witness: 'error x' },
+  { id: 'elifecycle', label: 'yarn/npm `ELIFECYCLE`', pattern: String.raw`ELIFECYCLE\b`, witness: 'ELIFECYCLE x' },
+  { id: 'tsc-paren', label: 'tsc 括号形态 `a.ts(12,5): error TS2345`', pattern: String.raw`\S+\(\d+,\d+\):\s*error TS\d+`, witness: 'a.ts(1,2): error TS1' },
+  { id: 'tsc-pretty', label: 'tsc pretty(TTY)`a.ts:12:5 - error TS2345`', pattern: String.raw`\S+:\d+:\d+[ \t]+-[ \t]+error TS\d+`, witness: 'a.ts:1:2 - error TS1' },
+  { id: 'tsc-bare', label: '裸 `error TS2345`', pattern: String.raw`error TS\d+`, witness: 'error TS1' },
+  { id: 'lint-position', label: 'eslint `12:5  error …`', pattern: String.raw`\d+:\d+[ \t]+error\b`, witness: '1:2  error x' },
+  { id: 'tests-failed', label: 'jest 汇总 `Tests:  1 failed`', pattern: String.raw`Tests?:?[ \t]+\d+[ \t]+failed\b`, witness: 'Tests: 1 failed' },
+  { id: 'test-files-failed', label: 'vitest 汇总 `Test Files  1 failed`', pattern: String.raw`Test Files\s+\d+\s+failed\b`, witness: 'Test Files 1 failed' },
+  { id: 'count-failed', label: '运行器汇总 `3 failed`', pattern: String.raw`\d+\s+failed\b`, witness: '1 failed' },
+  { id: 'rule', label: 'vitest 装饰行 `⎯`', pattern: String.raw`⎯`, witness: '⎯ x' },
+  { id: 'gh-annotation', label: 'GitHub 注解 `##[error]`', pattern: String.raw`##\[error\]`, witness: '##[error]x' },
+  { id: 'npm-error', label: 'npm `npm error`', pattern: String.raw`npm error\b`, witness: 'npm error x' },
+  { id: 'traceback', label: 'python `Traceback (most recent call last):`(栈内)', pattern: String.raw`Traceback \(most recent call last\):`, witness: 'Traceback (most recent call last):' },
+  { id: 'pytest-e', label: 'pytest 断言行 `E   …`', pattern: String.raw`E {3,}\S`, witness: 'E   x' },
+  { id: 'node-internal', label: 'node 加载器栈帧 `node:internal/…`(栈内)', pattern: String.raw`node:internal\/`, witness: 'node:internal/x' },
+  { id: 'unhandled', label: '`Unhandled Rejection` / `Unhandled Error`', pattern: String.raw`Unhandled (?:Rejection|Errors?)\b`, witness: 'Unhandled Rejection: x' },
+  {
+    id: 'json-counts',
+    label: 'jest `--json` 单行计数字段(非 0)',
+    pattern: String.raw`(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites|errorCount|fatalErrorCount)"\s*:\s*(?!0\b)\d`,
+    witness: '{"numFailedTests":1}',
+  },
+  { id: 'json-success', label: 'eslint `--format=json` / `"success":false`', pattern: String.raw`(?:\{.*)?"success"\s*:\s*false\b`, witness: '{"success":false}' },
+  { id: 'go-json-fail', label: 'go `-json` 单行 `{"Action":"fail"}`', pattern: String.raw`(?:\{.*)?"Action"\s*:\s*"fail"`, witness: '{"Action":"fail"}' },
+]
+/**
+ * 判定形态表的**下限**（棘轮:只允许被"变多"越过）。
+ *
+ * 为什么是硬字面量而不是 `VERDICT_LINE_FORMS.length`:`VERDICT_LINE` **由这张表拼出**
+ * (表是唯一真源),用 `length` 当下限等于恒真 —— 删掉一条形态只需要删表里一行。写死之后,
+ * 删形态必须**同时**改这个数字与它的样本(一次显式、可评审的 diff),否则自检当场红。
+ *
+ * 这正是第十一轮审计 C3-02 的现场:29 条形态里有 **10 条没有任何样本**
+ * (`✖` / `not ok` / `Error\b` / `error\b` / `ELIFECYCLE` / tsc 括号形态 / `Test Files N failed` /
+ * `N failed` / `⎯` / `"success":false`),只改正则、不动任何判据的重构就能让这些真实失败行
+ * 在 CI 日志里整行消失,而 `yarn check` 与两条判据全绿。
+ */
+const SELFTEST_VERDICT_FORMS_FLOOR = 29
+/**
+ * 判定形态**样本**的下限(棘轮)。
+ *
+ * 计数口径 = 登记表里**真的被分类过**的样本条数,不是 `check()` 被调用的次数 ——
+ * 第十一轮审计 C3-03 点名的可掏空形态正是"对调用次数计数"(把某条判据改成恒真、或整段删掉,
+ * 调用次数都能保持不变)。样本条数 + 逐形态覆盖率一起判,才与断言内容绑定。
+ */
+const SELFTEST_VERDICT_SAMPLES_FLOOR = 29
+/**
+ * 「**唯一见证样本**」形态数的下限(棘轮)。
+ *
+ * 形态表里有两条是彼此的子集 —— `AssertionError\b` ⊂ `[A-Za-z_$][\w$]*Error\b` 与
+ * `error TS\d+` ⊂ `error\b` —— 它们的样本删掉分支后仍被兄弟命中,所以"去掉即红"只能对
+ * **其余 27 条**成立。这个数字钉住"能逐条做接线变异"的形态数:再退化成子集(或有人拿
+ * 子集关系当借口往表里塞重复形态)就撞下限。
+ */
+const SELFTEST_VERDICT_UNIQUE_WITNESS_FLOOR = 27
+/**
+ * 判定形态的**样本登记**(每条形态 ≥1 条;双向对拍见 `selfTestVerdictClassifier()`)。
+ *
+ * 每条样本声明它**打在哪个分支上**(`form`):自检除了断言"分类结果是 verdict + 埋行仍可见",
+ * 还要用**该分支自己的独立正则**去匹配这条样本 —— 否则 `form` 字段只是一句自述
+ * (登记成 A 分支、样本其实靠 B 分支命中),覆盖率就是假的。
+ */
+const VERDICT_FORM_SAMPLES = [
+  { form: 'times', label: 'vitest 用例行 `×`', line: '× tests/x.spec.ts > a > b' },
+  { form: 'times', label: 'jest 用例行 `✗`', line: '  ✗ suite › case' },
+  { form: 'heavy-x', label: 'ava `✖`', line: '✖ No tests found' },
+  { form: 'bullet', label: 'jest 用例行 `●`', line: '  ● suite name › case name' },
+  { form: 'fail', label: 'vitest 彩色 ` FAIL `(PR #146 现场)', line: '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c' },
+  { form: 'fail', label: 'pytest 汇总 `FAILED`', line: 'FAILED tests/test_x.py::test_y - AssertionError' },
+  { form: 'dash-fail', label: 'go `--- FAIL:`', line: '--- FAIL: TestFoo (0.01s)' },
+  { form: 'panic', label: 'go `panic:`', line: 'panic: test timed out after 10m0s' },
+  { form: 'not-ok', label: 'node --test `not ok`', line: 'not ok 3 - suite case' },
+  { form: 'assertion-error', label: 'node `AssertionError [ERR_ASSERTION]`', line: 'AssertionError [ERR_ASSERTION]: boom' },
+  { form: 'named-error', label: '栈首 `TypeError:`', line: 'TypeError: beta unhandled boom' },
+  { form: 'bare-error', label: '裸 `Error:`(F2 形态 A 的原句)', line: 'Error: build step aborted' },
+  { form: 'bare-error-lower', label: 'yarn `error Command failed with exit code 1.`', line: 'error Command failed with exit code 1.' },
+  { form: 'elifecycle', label: '`ELIFECYCLE`(npm 的 `code ELIFECYCLE` 行首形态)', line: 'ELIFECYCLE Command failed with exit code 1.' },
+  { form: 'tsc-paren', label: 'tsc 括号形态', line: 'src/a.ts(12,5): error TS2345: Argument of type …' },
+  { form: 'tsc-pretty', label: 'tsc pretty(TTY)', line: 'src/a.ts:12:5 - error TS2345: Argument of type …' },
+  { form: 'tsc-bare', label: '裸 `error TS2345`', line: 'error TS2345: Argument of type …' },
+  { form: 'lint-position', label: 'eslint `12:5  error`', line: '  12:5  error  Unexpected var  no-var' },
+  { form: 'tests-failed', label: 'jest 汇总 `Tests:  1 failed`', line: 'Tests:       1 failed, 2 passed, 3 total' },
+  { form: 'test-files-failed', label: 'vitest 汇总 `Test Files  1 failed`', line: ' Test Files  1 failed | 2 passed (3)' },
+  { form: 'count-failed', label: '运行器汇总 `3 failed`', line: '3 failed | 2 passed (5)' },
+  { form: 'rule', label: 'vitest 装饰行 `⎯`', line: '⎯⎯⎯⎯⎯⎯ Unhandled Rejection ⎯⎯⎯⎯⎯⎯' },
+  { form: 'gh-annotation', label: 'GitHub 注解 `##[error]`', line: '##[error]AssertionError: boom' },
+  { form: 'npm-error', label: 'npm `npm error`', line: 'npm error Missing script: "x"' },
+  { form: 'traceback', label: 'python `Traceback …`', line: 'Traceback (most recent call last):' },
+  { form: 'pytest-e', label: 'pytest 断言行', line: 'E   AssertionError: assert 1 == 2' },
+  { form: 'node-internal', label: 'node 加载器栈帧', line: 'node:internal/modules/cjs/loader:1234' },
+  { form: 'unhandled', label: '`Unhandled Rejection:`(无 `⎯` 装饰)', line: 'Unhandled Rejection: boom' },
+  { form: 'json-counts', label: 'jest `--json` 计数', line: '{"numFailedTests":2,"numTotalTests":10}' },
+  { form: 'json-counts', label: 'eslint `--format=json`(靠 `errorCount` 命中)', line: '{"filePath":"a.js","errorCount":1,"messages":[]}' },
+  { form: 'json-success', label: '`"success":false`', line: '{"success":false,"reason":"boom"}' },
+  { form: 'go-json-fail', label: 'go `-json` `Action:fail`', line: '{"Time":"2026-09-24T00:00:00Z","Action":"fail","Package":"x/y"}' },
+]
+/**
+ * 锚定正则的构造:把形态表按**原顺序**拼回 `^[ \t]*(?:A|B|C|…)`(与拆分前逐字节等价)。
+ * 抽成函数是为了让自检能对"注入的形态表"跑同一套判据(变异验证:去掉一条即红)。
+ * @param forms - 形态表(缺省 = `VERDICT_LINE_FORMS`)。
+ * @returns 锚定判定行的正则。
+ */
+const verdictLineOf = (forms = VERDICT_LINE_FORMS) =>
+  new RegExp(`^[ \\t]*(?:${forms.map(form => form.pattern).join('|')})`, 'u')
+const VERDICT_LINE = verdictLineOf()
 /**
  * ANSI 控制序列的剥离（**只用于分类，绝不用于打印**）—— 2026-09-24 第十轮复审 V1 的 P1，
  * 由主控从 PR #146 的真实 CI 日志复现：
@@ -754,10 +913,37 @@ const SELFTEST_VERDICT_ASSERTIONS = 60
  * @returns 分类结果。
  */
 export function classifyVerdictLine(line) {
-  const text = stripAnsiSequences(line)
-  if (!VERDICT_LINE.test(text)) return null
-  return VERDICT_NOISE.test(text) ? 'noise' : 'verdict'
+  for (const segment of crSegmentsOf(line)) {
+    if (segment === '') continue
+    if (!VERDICT_LINE.test(segment)) continue
+    return VERDICT_NOISE.test(segment) ? 'noise' : 'verdict'
+  }
+  return null
 }
+
+/**
+ * 把一行按 `\r`(CR)切成**段**（先剥离 ANSI/C1）—— 每个段的起点在终端里都是**第 0 列**。
+ *
+ * 为什么必须有这一步（第十一轮审计 C3-01，**第十轮锚定改造引入的回归**）：
+ * 旧判据是 `(?:^|\s)(?:FAIL\b|…)`，JS 的 `\s` **包含 `\r`** ⇒ `progress 100%\rFAIL …` 当时能匹配；
+ * 第十轮把锚定换成 `^[ \t]*` 行首，而同时新增的 ANSI 归一**不覆盖 `\r`** ⇒ 判定行从"能看见"
+ * 变成**整行不见**：它既不进判定段，也不进 20/10 行兜底段（`FAIL` / `--- FAIL:` / `×` 不含
+ * `FALLBACK_ERROR_LINE` 的关键词）。门禁仍然 `EXIT=1`，但 CI 日志里**没有任何失败详情** ——
+ * 正是 C-08/C-09 要消灭的那种"红了但不可诊断"。
+ *
+ * 取值口径（取向 = fail-safe，**只放宽到"每个 CR 段各自的行首"**）：
+ *   · `\r` 是"光标回第 0 列"，所以 CR 之后的字符从第 0 列开始写 ⇒ 它是一段新的行首；
+ *   · 逐段判、任一段锚定命中即算判定行 —— 宁可多判（多打印一行详情），
+ *     也不许把真判定行藏起来（隐藏的代价正是这条缺陷本身）；
+ *   · CRLF 的行尾 `\r` 之后是空串，被 `classifyVerdictLine` 跳过，天然不影响整行判定；
+ *   · **不是**放宽成"行内任意位置匹配"：只有段首（终端第 0 列 / 物理行首）才算行首，
+ *     所以 C-09 形态 B 的进度噪声仍然进不了判定段（噪声另有 `VERDICT_NOISE` 一档）。
+ *
+ * 归一化**只用于分类**：打印继续用原行（短输出"逐字原样"的字节不许变）。
+ * @param line - 原始输出行。
+ * @returns 段数组（分类用；`[0]` 之外的段都以 CR 之后的位置开头）。
+ */
+export const crSegmentsOf = line => stripAnsiSequences(line).split('\r')
 
 /**
  * 有界化一个失败任务的输出，并返回**结构化**摘要（判定行 / 噪声 / 兜底 / 尾窗）。
@@ -917,57 +1103,63 @@ export function selfTestVerdictClassifier() {
     assertions += 1
     if (!ok) failures.push(message)
   }
-  // ① 必须锚定进判定段的形态（W1 §3.4 的"整行丢"清单 + 上一轮已覆盖形态的回归）。
-  const anchoredForms = [
-    ['GitHub 注解包装行（PR #146 日志里的形态）', '##[error]AssertionError: boom'],
-    ['npm `npm error`', 'npm error Missing script: "x"'],
-    ['pytest `E   ` 断言行', 'E   AssertionError: assert 1 == 2'],
-    ['python `Traceback (most recent call last):`（栈内）', 'Traceback (most recent call last):'],
-    ['node 加载器栈帧 `node:internal/…`（栈内）', 'node:internal/modules/cjs/loader:1234'],
-    ['jest 用例行 `●`', '  ● suite name › case name'],
-    ['vitest 未处理拒绝正文（栈首 `TypeError:`）', 'TypeError: beta unhandled boom'],
-    ['`Unhandled Rejection`（无 `⎯` 装饰）', 'Unhandled Rejection: boom'],
-    ['go `-json` 单行 `{"Action":"fail"}`', '{"Time":"2026-09-24T00:00:00Z","Action":"fail","Package":"x/y"}'],
-    ['eslint `--format=json`', '{"filePath":"a.js","errorCount":1,"messages":[]}'],
-    ['jest 汇总 `Tests:  1 failed`', 'Tests:       1 failed, 2 passed, 3 total'],
-    ['tsc pretty（TTY）`a.ts:12:5 - error TS2345`', 'src/a.ts:12:5 - error TS2345: Argument of type …'],
-    ['C1（0x9b）引导的 CSI 彩色用例行', '\u009b31m×\u009b39m tests/x.spec.ts > a > b'],
-    ['既有形态回归：彩色 ` FAIL `', '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c'],
-    ['既有形态回归：go 用例级 `--- FAIL:`', '--- FAIL: TestFoo (0.01s)'],
-  ]
-  for (const [label, line] of anchoredForms) {
-    const kind = classifyVerdictLine(line)
-    check(kind === 'verdict',
-      `[verdict-selftest] ${label} 必须被判成锚定判定行（verdict），实际 ${JSON.stringify(kind)}：`
-      + `${JSON.stringify(line)}`)
+  const formById = id => VERDICT_LINE_FORMS.find(form => form.id === id)
+  // ①a **形态表的覆盖面**（第十一轮审计 C3-02）:每条形态至少 1 条样本,且样本声称的分支必须
+  //     真的存在。两个方向都判 —— 少了 = 那条失败行在 CI 日志里整行消失而无人发现;
+  //     多了(样本挂在未登记的分支上) = 登记表与正则已经漂移。
+  const ownPatternOf = form => new RegExp(`^[ \\t]*(?:${form.pattern})`, 'u')
+  const coveredIds = new Set()
+  for (const sample of VERDICT_FORM_SAMPLES) {
+    const form = formById(sample.form)
+    if (form === undefined) {
+      failures.push(`[verdict-selftest] 样本「${sample.label}」登记的分支 \`${sample.form}\` 不在 `
+        + '`VERDICT_LINE_FORMS` 里 ⇒ 登记表与样本已漂移(该样本在给一个不存在的形态作证)。')
+      continue
+    }
+    // **覆盖率由"匹配"算出来,不是由样本自己声明的 `form` 字段算出来**(事实 vs 自述):
+    // 只有"该分支的独立正则真的匹配到这条样本"时才记它被覆盖 —— 于是 `formsCovered`
+    // 这条计数不可能靠改一行字段值伪造。
+    if (crSegmentsOf(sample.line).some(segment => ownPatternOf(form).test(segment))) coveredIds.add(sample.form)
+    // 声明与事实必须一致(逐条给出可读诊断;上一条已经是"事实"口径,这一条是它的诊断面)。
+    check(coveredIds.has(sample.form),
+      `[verdict-selftest] 样本「${sample.label}」声称打在分支 \`${sample.form}\`(${form.label})上,`
+      + `但它并不匹配该分支的独立正则 ⇒ 这条"覆盖"是自述,不是事实:${JSON.stringify(sample.line)}`)
   }
-  // ② 负例：新形态**不许**把"没有失败"的输出拉进判定段。
-  const negativeForms = [
-    ['eslint JSON 全 0（通过）', '{"filePath":"a.js","errorCount":0,"messages":[]}'],
-    ['go `-json` pass', '{"Time":"2026-09-24T00:00:00Z","Action":"pass","Package":"x/y"}'],
-    ['普通说明行', '  note: all packages checked'],
-    ['栈帧的普通 `at …` 行', '\u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m'],
-  ]
-  for (const [label, line] of negativeForms) {
-    const kind = classifyVerdictLine(line)
-    check(kind === null,
-      `[verdict-selftest] ${label} 必须仍然分类为 null（收紧过度会把判定预算烧在噪声上），`
-      + `实际 ${JSON.stringify(kind)}：${JSON.stringify(line)}`)
+  const uncovered = VERDICT_LINE_FORMS.filter(form => !coveredIds.has(form.id))
+  if (uncovered.length > 0) {
+    failures.push(`[verdict-selftest] \`VERDICT_LINE_FORMS\` 里有 ${uncovered.length} 条形态**没有任何样本**`
+      + `(${uncovered.map(form => `\`${form.id}\`(${form.label})`).join('、')})`
+      + '\n  ⇒ 没有样本的形态等于"只改正则、不动任何判据"就能让它下线:那条真实失败行会在 CI 日志里'
+      + '整行消失(既不进判定段、也不进兜底段),而门禁仍然 EXIT=1、看起来红得很有理由。'
+      + '每条形态至少登记一条样本(`VERDICT_FORM_SAMPLES`)。')
   }
-  // ③a C1 与 ESC **逐字节等价**（W1 N4：旧实现只删引导字节、把参数字节留在原地 ⇒ 整行失锚）。
-  const escForm = '\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'
-  const c1Form = '\u009b31m×\u009b39m tests/x.spec.ts > a > b'
-  check(stripAnsiSequences(c1Form) === stripAnsiSequences(escForm),
-    `[verdict-selftest] C1（0x9b）引导与 ESC 引导必须剥离成同一份文本（只换引导字节），`
-    + `实际 C1=${JSON.stringify(stripAnsiSequences(c1Form))} / ESC=${JSON.stringify(stripAnsiSequences(escForm))}`)
-  check(stripAnsiSequences(c1Form) === '× tests/x.spec.ts > a > b',
-    `[verdict-selftest] C1 序列必须**连同参数字节**一起剥离（不能把 \`31m\` 留在行首），`
-    + `实际 ${JSON.stringify(stripAnsiSequences(c1Form))}`)
-  // ③b **行埋在尾窗之外仍然可见**（C-08 的那条性质对每一条新形态同样成立）：
-  //     body 按**当前常量**构造 —— 判定行放在**第 0 行**，后面跟 `MAX_FAILURE_LINES + 50` 行噪声
-  //     与 `MAX_TAIL_LINES` 行尾块 ⇒ ①总行数恒 > `maxVerdictLines + maxTailLines`（恒走**截断**
-  //     分支）；②判定行恒在尾窗（最后 `MAX_TAIL_LINES` 行）**之外**。这样判据测的是
-  //     "可见性来自**锚定**"，而不是"碰巧落进尾窗"，也不会因为有人调常量而假红/假绿。
+  // ①b 形态表与样本的**数量下限**(棘轮):删形态/删样本必须同时改字面量,是一次显式 diff。
+  // ①f **每条形态的判定词(witness)**(第十一轮复审 J1 的 N6):正则必须仍然认得它自己的判定词。
+  //     三个棘轮(形态数/样本数/唯一见证数)拦得住"删形态/删样本",拦不住"收窄正则 + 同步改它
+  //     那条样本"—— 那时形态数、样本数、覆盖率一个都不动。witness 与样本是**两份独立登记**:
+  //     收窄 `count-failed` 之后 `1 failed` 不再匹配 ⇒ 这一条当场红。
+  for (const form of VERDICT_LINE_FORMS) {
+    check(typeof form.witness === 'string' && form.witness.trim() !== '',
+      `[verdict-selftest] 形态 \`${form.id}\`(${form.label})没有登记 \`witness\`(判定词的最小样本行)`
+      + ' ⇒ 收窄正则时"同步改样本"这一条路无人拦(N6 的现场)。')
+    if (typeof form.witness !== 'string' || form.witness.trim() === '') continue
+    check(ownPatternOf(form).test(form.witness),
+      `[verdict-selftest] 形态 \`${form.id}\`(${form.label})的正则**认不出它自己的判定词**了:`
+      + `witness = ${JSON.stringify(form.witness)} / pattern = ${JSON.stringify(form.pattern)}`
+      + '\n  ⇒ 这正是 N6 的形态:正则被收窄(或 witness 被改)而样本同步跟上 —— '
+      + '真实失败行会在 CI 日志里整行消失。')
+    check(classifyVerdictLine(form.witness) === 'verdict',
+      `[verdict-selftest] 形态 \`${form.id}\` 的 witness 必须被判成锚定判定行(verdict),`
+      + `实际 ${JSON.stringify(classifyVerdictLine(form.witness))}:${JSON.stringify(form.witness)}`)
+  }
+  check(VERDICT_LINE_FORMS.length >= SELFTEST_VERDICT_FORMS_FLOOR,
+    `[verdict-selftest] 判定形态只剩 ${VERDICT_LINE_FORMS.length} 条(下限 ${SELFTEST_VERDICT_FORMS_FLOOR})`
+    + ' ⇒ 形态表被削。要真的删形态,请连同 `SELFTEST_VERDICT_FORMS_FLOOR` 与它的样本一起改成可评审的 diff。')
+  check(coveredIds.size >= SELFTEST_VERDICT_SAMPLES_FLOOR,
+    `[verdict-selftest] 被样本覆盖的形态只有 ${coveredIds.size} 条(下限 ${SELFTEST_VERDICT_SAMPLES_FLOOR})`
+    + ' ⇒ 样本集合被削(计数口径是**样本/形态集合**,不是 `check()` 的调用次数)。')
+  // ①c 逐条样本:**必须锚定成 verdict**,并且**埋在尾窗之外仍然可见**(见 ③b 的 body 构造)。
+  //     漏掉可见性这一半,"形态表里有正则"与"CI 日志里真能看见"就还是两件事。
   const buried = line => [
     line,
     ...Array.from({ length: MAX_FAILURE_LINES + 50 }, (_, index) => `noise line ${index}`),
@@ -982,19 +1174,140 @@ export function selfTestVerdictClassifier() {
     const next = rest.search(/\n--- (?=输出末尾|另有 |其它疑似错误行|兜底:|判定行预算已用尽)/u)
     return next < 0 ? rest : rest.slice(0, next)
   }
-  for (const [label, line] of anchoredForms) {
-    const summary = summarizeBoundedFailure(buried(line))
+  for (const sample of VERDICT_FORM_SAMPLES) {
+    const kind = classifyVerdictLine(sample.line)
+    check(kind === 'verdict',
+      `[verdict-selftest] 样本「${sample.label}」必须被判成锚定判定行(verdict),实际 ${JSON.stringify(kind)}:`
+      + `${JSON.stringify(sample.line)}`)
+    const summary = summarizeBoundedFailure(buried(sample.line))
     check(summary.truncated === true,
-      `[verdict-selftest] ${label} 的埋行用例必须落在**截断分支**（否则测的是另一条路径；`
-      + `当前常量 maxVerdict=${MAX_FAILURE_LINES} / maxTail=${MAX_TAIL_LINES}）`)
-    check(summary.missingVerdict === false && summary.verdictLines.includes(line),
-      `[verdict-selftest] ${label} 埋在**尾窗之外**时仍必须被锚定`
-      + `（missingVerdict=${summary.missingVerdict}）`)
-    check(verdictSectionOf(summary.text).includes(line),
-      `[verdict-selftest] ${label} 必须落在**判定段**里（不是碰巧落进尾窗）：`
+      `[verdict-selftest] 样本「${sample.label}」的埋行用例必须落在**截断分支**(否则测的是另一条路径;`
+      + `当前常量 maxVerdict=${MAX_FAILURE_LINES} / maxTail=${MAX_TAIL_LINES})`)
+    check(summary.missingVerdict === false && summary.verdictLines.includes(sample.line),
+      `[verdict-selftest] 样本「${sample.label}」埋在**尾窗之外**时仍必须被锚定`
+      + `(missingVerdict=${summary.missingVerdict})`)
+    check(verdictSectionOf(summary.text).includes(sample.line),
+      `[verdict-selftest] 样本「${sample.label}」必须落在**判定段**里(不是碰巧落进尾窗):`
       + `${JSON.stringify(verdictSectionOf(summary.text).slice(0, 200))}`)
   }
-  return { failures, assertions }
+  // ①d **`\r`(同行进度重写)归一的判据**(第十一轮审计 C3-01,第十轮锚定改造引入的回归)。
+  //     终端的 `\r` 把光标送回第 0 列,后面的字符原地覆盖 ⇒ 屏幕上留下的是**最后一段**。
+  //     旧行为:判定行整行消失(判定段、兜底段都没有)。三条一起钉:裸 CR / CRLF 行尾 / 覆盖形态。
+  for (const [label, line] of [
+    ['裸 `\\r` 前缀(判定行在第 0 列之后)', '\rFAIL tests/x.spec.ts > s > c'],
+    ['同行进度重写(判定行被 CR 推到行中)', 'progress 100%\rFAIL tests/x.spec.ts > s > c'],
+    ['CR 覆盖 + `×` 用例行', 'downloading 55%\r× tests/x.spec.ts > s > c'],
+    ['CR 覆盖 + go `--- FAIL:`', 'ok 1/3\r--- FAIL: TestFoo (0.01s)'],
+    ['CR 覆盖 + `not ok`', 'collecting 3/10\rnot ok 3 - suite case'],
+    ['CRLF 行尾(整行判定)', 'FAIL tests/x.spec.ts > s > c\r'],
+  ]) {
+    const kind = classifyVerdictLine(line)
+    check(kind === 'verdict',
+      `[verdict-selftest] ${label} 必须仍被判成锚定判定行(verdict),实际 ${JSON.stringify(kind)}:`
+      + `${JSON.stringify(line)}`)
+    const summary = summarizeBoundedFailure(buried(line))
+    check(summary.missingVerdict === false && summary.verdictLines.includes(line),
+      `[verdict-selftest] ${label} 埋在**尾窗之外**时仍必须可见`
+      + `(missingVerdict=${summary.missingVerdict})`)
+  }
+  // ①e `\r` 归一的**边界**(取向 = fail-safe,不许把真判定行藏起来):
+  //     · `FAIL …\rprogress 100%`(判定词被 CR 之后的内容覆盖)—— **仍然算判定行**:
+  //       CR 之后是"新的一段行首",而隐藏判定行的代价正是 C3-01 这条缺陷本身;
+  //     · 但**不是**放宽成"行内任意位置匹配":判定词出现在行中(既不在物理行首、
+  //       也不在某个 CR 段首)时仍然不是判定行 —— 那才是 C-09 形态 B 的回归。
+  check(classifyVerdictLine('FAIL tests/x.spec.ts\rprogress 100%') === 'verdict',
+    '[verdict-selftest] `\\r` 之前那段是判定行时必须仍然算判定行(fail-safe:宁可多打印一行详情,'
+    + '也不许把真判定行藏起来)')
+  check(classifyVerdictLine('progress 22% FAIL tests/x.spec.ts > s > c') === null,
+    '[verdict-selftest] 判定词出现在行中(既不在物理行首、也不在 CR 段首)时不得算判定行'
+    + '(否则就是 C-09 形态 B:进度噪声先到先得吃满判定预算)')
+  // ② 负例：新形态**不许**把"没有失败"的输出拉进判定段。
+  const negativeForms = [
+    ['eslint JSON 全 0（通过）', '{"filePath":"a.js","errorCount":0,"messages":[]}'],
+    ['go `-json` pass', '{"Time":"2026-09-24T00:00:00Z","Action":"pass","Package":"x/y"}'],
+    ['普通说明行', '  note: all packages checked'],
+    ['栈帧的普通 `at …` 行', '\u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m'],
+  ]
+  for (const [label, line] of negativeForms) {
+    const kind = classifyVerdictLine(line)
+    check(kind === null,
+      `[verdict-selftest] ${label} 必须仍然分类为 null/noise（收紧过度会把判定预算烧在噪声上），`
+      + `实际 ${JSON.stringify(kind)}：${JSON.stringify(line)}`)
+  }
+  // ②b 噪声形态（**锚定命中但是进度/装饰**）：必须分类成 `noise`（计数、不占判定预算），
+  //     不得进判定段 —— 这正是 C-09 形态 B 的现场（噪声先到先得吃满 150 行，真判定行一行不留）。
+  for (const [label, line] of [
+    ['进度噪声 `× 0 items scanned`', '× 0 items scanned'],
+    ['进度噪声 `✗ 3 files scanned`', '  ✗ 3 files scanned'],
+  ]) {
+    const kind = classifyVerdictLine(line)
+    check(kind === 'noise',
+      `[verdict-selftest] ${label} 必须分类成 noise（计数不占判定预算），实际 ${JSON.stringify(kind)}：`
+      + `${JSON.stringify(line)}`)
+  }
+  // ③a C1 与 ESC **逐字节等价**（W1 N4：旧实现只删引导字节、把参数字节留在原地 ⇒ 整行失锚）。
+  const escForm = '\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'
+  const c1Form = '\u009b31m×\u009b39m tests/x.spec.ts > a > b'
+  check(stripAnsiSequences(c1Form) === stripAnsiSequences(escForm),
+    `[verdict-selftest] C1（0x9b）引导与 ESC 引导必须剥离成同一份文本（只换引导字节），`
+    + `实际 C1=${JSON.stringify(stripAnsiSequences(c1Form))} / ESC=${JSON.stringify(stripAnsiSequences(escForm))}`)
+  check(stripAnsiSequences(c1Form) === '× tests/x.spec.ts > a > b',
+    `[verdict-selftest] C1 序列必须**连同参数字节**一起剥离（不能把 \`31m\` 留在行首），`
+    + `实际 ${JSON.stringify(stripAnsiSequences(c1Form))}`)
+  // ③b **形态表的接线变异**:把注入的形态表里一条去掉之后,挂在它上面的样本必须**不再**被判成
+  //     判定行 —— 证明 ①a/①c 不是恒真断言(表被削 ⇒ 样本当场红)。逐条跑,不抽样。
+  //     例外(如实登记,不做假精度):形态表里存在**子集关系**,那两条分支的样本必然被兄弟形态
+  //     覆盖(`AssertionError\b` ⊂ `[A-Za-z_$][\w$]*Error\b`;`error TS\d+` ⊂ `error\b`)
+  //     —— 对它们改判据为"兄弟形态必须仍覆盖它"(证明确实是子集关系,而不是判据写坏了),
+  //     并用 `uniqueWitness` 的下限兜住"大家都退化成子集"的方向。
+  const ownMatcher = ownPatternOf
+  let wiringChecked = 0
+  let uniqueWitness = 0
+  for (const form of VERDICT_LINE_FORMS) {
+    const sample = VERDICT_FORM_SAMPLES.find(item => item.form === form.id)
+    if (sample === undefined) continue
+    wiringChecked += 1
+    const segments = crSegmentsOf(sample.line).filter(segment => segment !== '')
+    const siblings = VERDICT_LINE_FORMS.filter(item => item.id !== form.id)
+    const shadowedBy = siblings.find(item => segments.some(segment => ownMatcher(item).test(segment)))
+    const mutated = verdictLineOf(siblings)
+    const stillMatched = segments.some(segment => mutated.test(segment))
+    if (shadowedBy === undefined) {
+      uniqueWitness += 1
+      check(!stillMatched,
+        `[verdict-selftest] 去掉形态 \`${form.id}\`(${form.label})之后,它的样本`
+        + `「${sample.label}」必须**不再**被判成判定行 —— 否则这条形态有没有都无所谓`
+        + `(接线变异验证:${JSON.stringify(sample.line)})`)
+    } else {
+      check(stillMatched,
+        `[verdict-selftest] 形态 \`${form.id}\` 的样本被兄弟形态 \`${shadowedBy.id}\` 覆盖(子集关系),`
+        + '那么去掉它之后兄弟形态必须仍然覆盖这条样本 —— 否则"子集"这个解释是错的,'
+        + `两条形态其实都坏了:${JSON.stringify(sample.line)}`)
+    }
+  }
+  check(wiringChecked === VERDICT_LINE_FORMS.length,
+    `[verdict-selftest] 接线变异只覆盖了 ${wiringChecked}/${VERDICT_LINE_FORMS.length} 条形态`
+    + ' ⇒ 有形态没有"去掉即红"的验证。')
+  check(uniqueWitness >= SELFTEST_VERDICT_UNIQUE_WITNESS_FLOOR,
+    `[verdict-selftest] 有**唯一见证样本**的形态只剩 ${uniqueWitness} 条`
+    + `(下限 ${SELFTEST_VERDICT_UNIQUE_WITNESS_FLOOR}) ⇒ 形态表被削,或大量形态退化成彼此的子集`
+    + '(后者的后果:删掉其中一条,那条失败行在 CI 日志里整行消失而没有任何判据变红)。')
+  // ④ **自检通道本身**必须被证明"真的会记失败"（第十一轮审计 C3-03 的同族：靠"调用次数"
+  //    当判据是可掏空的）。把 `check()` 掏成 no-op（计数照加、`failures.push` 删掉）之后，
+  //    上面所有断言全塌也不会有人发现 —— 除非有一条**不经过 check()** 的探针：故意让 check
+  //    记一条已知失败，断言它真的进了 `failures`；没进去就直接裸 push 一条失败
+  //    （这一条不依赖 check，所以掏空 check 反而会被它抓到）。
+  const channelProbe = '[verdict-selftest] 自检通道探针：这条已知为假的断言必须被记录'
+  const probeBefore = failures.length
+  check(false, channelProbe)
+  const probeRecorded = failures.length === probeBefore + 1 && failures[failures.length - 1] === channelProbe
+  if (probeRecorded) failures.pop()
+  else {
+    failures.push('[verdict-selftest] 自检的**失败通道被掏空**：一条已知为假的断言没有进 `failures`'
+      + ' ⇒ 形态表/样本表全塌也不会有判据变红（"计数下限"只证明 `check()` 被调用过，'
+      + '不证明它记了失败 —— 第十一轮审计 C3-03 点名的正是这种可掏空形态）。')
+  }
+  return { failures, assertions, forms: VERDICT_LINE_FORMS.length, samples: VERDICT_FORM_SAMPLES.length, formsCovered: coveredIds.size }
 }
 
 /**
@@ -1196,14 +1509,702 @@ function selectByChanges(files) {
   return { selected: [...selected], global }
 }
 
+/* ===========================================================================
+ * **共享实现**（R11-I1）：守卫子进程环境清洗 + 守卫执行体入口。
+ *
+ * 为什么放在**编排器**里（而不是运行器）：本文件是两者共同的下游依赖 ——
+ * `check-root-guards.mjs` 早就 `import { formatFailureReport } from './check-workspaces.mjs'`，
+ * 所以共享实现放这里不会引入新的 import 环；反过来（运行器放实现、编排器 import）会让
+ * 任何**只拷贝编排器**的合成树（`verify-check-workspaces.mjs` 的 `buildTree`）加载失败
+ * （实测：ERR_MODULE_NOT_FOUND × 87 条断言）。方向是判据逼出来的，不是偏好。
+ *
+ * 判据面见 `scripts/check-guard-parser-integrity.mjs` 的「执行体入口」段：
+ * 两个 runner 都必须走这一份清洗、守卫必须直接 spawn（真子进程 + 必失败的 corepack 桩证明）。
+ * ======================================================================== */
+
+/**
+ * 交给守卫子进程的**危险键族**（2026-09-24 第十轮审计 D-03 的后半条）。
+ *
+ * 现场（审计方实跑）：在被钉步骤的**步骤体**里加一行
+ * `export NODE_OPTIONS="--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+ * 之后，`check-workflows` 一个字都不报（它只看 YAML 的 `env:`），而真跑这条命令时
+ * 16 个根守卫**全部"跑而恒绿"**：`runGuard()` 的 `env: { ...process.env, FORCE_COLOR: '0' }`
+ * 把 `NODE_OPTIONS` **原样透传**给每个守卫子进程，注入的退出钩子在守卫进程退出时把
+ * `process.exitCode` 改回 0。实测：同一条命令在有 1 项违规的树上打印「1 项未通过」却 EXIT=0。
+ *
+ * 这是本文件的第二道收口（第一道在 `scripts/check-workflows.mjs` 的 [SK-17]：被钉步骤的
+ * 步骤体/env 键必须登记在白名单里）。为什么"层"之外还要这一道：静态判据总会被推到下一层
+ * （第八轮 argv → 第九轮进程环境 → 第十轮步骤体），而**清洗交给子进程的环境**与"层"无关。
+ *
+ * 语义：**键名在危险族里、又不在 `GUARD_CHILD_ENV_ALLOWED` 登记表里 ⇒ 丢弃**（fail-closed：
+ * 认不出的一律丢）。不在危险族里的键照常透传（`CHECK_CONCURRENCY` / `PG_DSN_TEST` /
+ * 各种 token 都靠它）。`HOME` / `XDG_CACHE_HOME` 刻意**不**在这里丢：守卫要靠真实 HOME
+ * 找到 git/pg 配置与 corepack 缓存，丢掉它们会让门禁在本机直接跑不起来 —— 它们的入口
+ * （`COREPACK_HOME` 那条链）由静态白名单封住。
+ */
+const GUARD_CHILD_ENV_DENIED_PREFIXES = ['NODE_', 'BASH_', 'LD_', 'COREPACK_', 'YARN_', 'NPM_CONFIG_', 'npm_config_']
+/** 精确匹配的危险键（不带前缀的形态）。 */
+const GUARD_CHILD_ENV_DENIED_KEYS = [
+  'ENV', // POSIX sh 的启动文件（与 BASH_ENV 同族）
+  'SHELLOPTS',
+  'BASHOPTS',
+  'PROMPT_COMMAND',
+  'PYTHONSTARTUP',
+  'PERL5OPT',
+  'RUBYOPT',
+]
+/**
+ * 允许**透传**的危险族键（登记制：每条带理由，当前为空）。
+ *
+ * 加一条 = 明确承认"这个键会被守卫子进程继承"，必须在同一个 PR 里写清为什么它不会
+ * 改变判据结论。空表是 fail-closed 的默认形态。
+ */
+const GUARD_CHILD_ENV_ALLOWED = []
+
+/**
+ * 清洗交给守卫子进程的环境（第十轮审计 D-03）：丢弃危险族里未登记的键。
+ *
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns `{ env, dropped }`（`dropped` = 被丢掉的键名，按字母序；用于打印证据）。
+ */
+export function sanitizeGuardEnvironment(env = process.env) {
+  const allowed = new Set(GUARD_CHILD_ENV_ALLOWED.map(entry => entry.key))
+  const cleaned = {}
+  const dropped = []
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof key !== 'string' || key === '') continue
+    const risky = GUARD_CHILD_ENV_DENIED_KEYS.includes(key)
+      || GUARD_CHILD_ENV_DENIED_PREFIXES.some(prefix => key.startsWith(prefix))
+    if (risky && !allowed.has(key)) {
+      dropped.push(key)
+      continue
+    }
+    cleaned[key] = value
+  }
+  dropped.sort()
+  return { env: cleaned, dropped }
+}
+
+/**
+ * 本进程自己的环境里有没有"能改写解释器行为"的键（同族的上游证据）。
+ *
+ * 只用来**打印警告**：注入的 `--import` 钩子在模块求值之前就已经加载了，任何进程内检查
+ * 都无法把它卸载。真正让结论可信的是两件事（都在下面）：
+ *   ① 子进程环境清洗 —— 守卫本身跑在干净环境里，它们的判定是真的；
+ *   ② 显式且加固的退出路径（`process.removeAllListeners('exit')` + `process.exit(code)`）。
+ * 诚实边界：如果钩子**改写了 `process.exit`/`process.reallyExit` 本身**，进程内没有任何
+ * 办法自证（实测：`process.exit = () => {}` 之后连 `process.exit(1)` 都是 no-op）——
+ * 那正是静态白名单（[SK-17] 判据面）必须存在的原因，不能靠运行期兜。
+ *
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns 命中的键名（按字母序）。
+ */
+export function contaminatedRunnerKeys(env = process.env) {
+  const { dropped } = sanitizeGuardEnvironment(env)
+  return dropped
+}
+
+/* ---------------------------------------------------------------------------
+ * 执行体入口（2026-09-24 第十一轮审计 I1 泳道 · P0-1）：守卫**不经 yarn** 起，
+ * 且"能不能经 yarn"这件事本身有判据。
+ *
+ * ## 现场（审计方实测，本仓第十轮修复看不见）
+ *
+ * `.yarnrc.yml` 里加三行 `plugins:` + 一个 `.yarn/plugins/*.cjs`（`.gitignore:4` 的
+ * `!.yarn/plugins` 让它可提交），插件钩子 `wrapScriptExecution` 在 **yarn 进程内部**
+ * 往每个被 spawn 的脚本环境里塞 `NODE_OPTIONS=--import=<退出钩子>`（+ `BASH_ENV`）：
+ * `corepack yarn check` 从 EXIT=1 → **EXIT=0**（「32 通过、0 失败」），
+ * `node scripts/check-root-guards.mjs` 从 `3 通过、14 失败` → **`17 通过、0 失败`**，
+ * workflow 一个字节都没改。为什么第十轮两道收口都没拦住：
+ *   · `[SK-17]` 白名单判的是 **workflow 文本**（这里没改 workflow）；
+ *   · `sanitizeGuardEnvironment()` 清洗的是"**runner 交给 `corepack yarn` 的那份环境**"，
+ *     而注入发生在 yarn 进程内部、在它 spawn 脚本时才写进子进程环境 ⇒ 清洗已经跑完了
+ *     （攻击态日志照样打印「子进程环境已清洗 —— 丢弃 0 个」）。
+ *
+ * ## 两条收口（缺一条就还有一条通道）
+ *
+ * ① **不经 yarn**：守卫是仓内脚本（`node scripts/x.mjs` / `bash scripts/x.sh`），
+ *    直接 spawn 即可 —— 少一个进程、少一层 shell，也少一个"能改写解释器"的注入点。
+ *    `yarn run` 的语义由 `package.json` 的脚本体显式解析（与运行器已有的
+ *    `guardScriptProblem` 登记校验同源）。
+ * ② **回落路径有判据**：登记脚本文件**不存在**时（合成/探针树：真实实现 + 合成脚本体）
+ *    才回落到 `corepack yarn run <name>`，且回落之前必须先过 `yarnEntryTrustProblems()`
+ *    —— `.yarnrc.yml` 的 `yarnPath`/`plugins`、`.yarn/plugins/**` 与 `.yarn/releases/**`
+ *    的落地文件、`package.json` 的生命周期钩子，任一命中就**当场判这条守卫失败**。
+ *    没有这一条，"删掉守卫脚本 + 装插件"就能把守卫换成恒绿的空壳（注入的退出钩子会把
+ *    `MODULE_NOT_FOUND` 的退出码改写成 0）。
+ * ------------------------------------------------------------------------- */
+
+/**
+ * `.yarnrc.yml` 里"谁能解释/执行脚本"的禁键（出现即问题；登记制在 `check-guard-parser-integrity.mjs`）。
+ *
+ * 导出是为了让两侧**互相**可对拍：本列表是"经 yarn 可信吗"的前置检查用的，
+ * `check-guard-parser-integrity.mjs` 的 `REGISTERED_YARN_CONFIGURATION.forbiddenKeys` 是
+ * 登记制用的（带理由）—— 两边漂移就会出现"回落被拦、登记制放行"（或反之）的裂缝。
+ */
+export const YARN_ENTRY_FORBIDDEN_KEYS = [
+  'yarnPath', // 换掉整个 yarn（一行 `yarnPath: ./noop.cjs` 就能让 install 与全部门禁空转）
+  'plugins', // 插件钩子 `wrapScriptExecution` 在 yarn 进程内部改写脚本环境（本轮 P0-1 的现场）
+]
+/** 根 `package.json` 里"安装期代码执行"的钩子名（登记制在 `check-guard-parser-integrity.mjs`；导出理由同 `YARN_ENTRY_FORBIDDEN_KEYS`）。 */
+export const YARN_LIFECYCLE_HOOKS = [
+  'preinstall',
+  'install',
+  'postinstall',
+  'prepare',
+  'prepublish',
+  'prepublishOnly',
+  'prepack',
+  'postpack',
+]
+/** `.yarn/` 下"可提交 + 会被 yarn 当代码读"的目录（`!.yarn/plugins` / `!.yarn/releases` 让它们进得了仓）。 */
+const YARN_CODE_DIRECTORIES = ['.yarn/plugins', '.yarn/releases']
+
+/**
+ * `.yarnrc.yml` 的**顶级键**（不 import `yaml`：入口判据不能依赖一个可被 `resolutions`
+ * 改写的解析器 —— 那正是 `check-guard-parser-integrity.mjs` 登记 `node_modules/yaml` 的理由）。
+ *
+ * 只认"从第 0 列开始、`key:` 形态"的行：`.yarnrc.yml` 里嵌套键都带缩进，因此顶级键与
+ * 嵌套键不会混。解析不出来（不是缩进形态）= 少读一个键，而少读 = 判据静默变窄，
+ * 所以调用方要按"键集合必须非空"使用它。
+ * @param text - `.yarnrc.yml` 的正文。
+ * @returns 顶级键名（按出现顺序，可重复）。
+ */
+/**
+ * 取 `.yarnrc.yml` 里某个**顶级键**的标量取值（`key: value` 形态；取不到返回 `null`）。
+ *
+ * 只认未加引号的裸标量（`enableScripts: false` / `nodeLinker: node-modules`）：本仓的
+ * 入口判据只需要判这两个值，做完整的 YAML 解析会把判据交给可被 `resolutions` 改写的解析器。
+ * 解析不出来（带引号/块标量/多行）= `null` ⇒ 取值判据红（fail-closed：认不出不算通过）。
+ * @param text - `.yarnrc.yml` 正文。
+ * @param key - 顶级键名。
+ * @returns 标量字符串或 `null`。
+ */
+export function yarnrcScalarValue(text, key) {
+  for (const line of String(text).split('\n')) {
+    const match = new RegExp(`^${key}\\s*:\\s*(\\S+)\\s*$`, 'u').exec(line)
+    if (match !== null) return match[1]
+  }
+  return null
+}
+
+export function yarnrcTopLevelKeys(text) {
+  const keys = []
+  for (const line of String(text).split('\n')) {
+    if (line.trim() === '' || /^\s*#/u.test(line)) continue
+    const match = /^([A-Za-z_][\w-]*)\s*:/u.exec(line)
+    if (match !== null) keys.push(match[1])
+  }
+  return keys
+}
+
+/**
+ * "经 yarn 起脚本"这条路**可信吗**（R11 P0-1 的回落前置判据）。
+ *
+ * 只判"谁能解释/执行脚本"这三面：`.yarnrc.yml` 的入口键、`.yarn/**` 下的可提交代码目录、
+ * 根 `package.json` 的生命周期钩子。**不判**普通依赖/缓存配置（那些改不了判据结论）。
+ *
+ * @param rootDir - 仓库根（探针树会传自己的根）。
+ * @returns 问题清单（空 = 可信）。
+ */
+export function yarnEntryTrustProblems(rootDir = ROOT) {
+  const problems = []
+  const rcPath = join(rootDir, '.yarnrc.yml')
+  if (existsSync(rcPath)) {
+    const stats = lstatSync(rcPath)
+    if (stats.isSymbolicLink()) {
+      problems.push('.yarnrc.yml 是一个符号链接（内容来自仓外 ⇒ 入口不可信）')
+    } else if (stats.isFile()) {
+      const keys = yarnrcTopLevelKeys(readFileSync(rcPath, 'utf8'))
+      if (keys.length === 0) {
+        problems.push('.yarnrc.yml 读不出任何顶级键（解析面失效 ⇒ 拒绝把"读不出"当成"没有"）')
+      }
+      for (const key of YARN_ENTRY_FORBIDDEN_KEYS) {
+        if (keys.includes(key)) {
+          problems.push(`.yarnrc.yml 里有 \`${key}\`（${key === 'yarnPath'
+            ? '换掉整个 yarn：一行 diff 就能让 install 与全部门禁空转'
+            : '插件钩子：在 yarn 进程内部改写被 spawn 脚本的环境（NODE_OPTIONS/BASH_ENV）'}）`)
+        }
+      }
+    } else {
+      problems.push('.yarnrc.yml 不是常规文件')
+    }
+  }
+  for (const relative of YARN_CODE_DIRECTORIES) {
+    const directory = join(rootDir, relative)
+    if (!existsSync(directory)) continue
+    const landed = []
+    const walk = current => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const path = join(current, entry.name)
+        if (entry.isDirectory()) walk(path)
+        else landed.push(path)
+      }
+    }
+    walk(directory)
+    if (landed.length > 0) {
+      problems.push(`${relative}/ 下有 ${landed.length} 个文件（可提交 + 会被 yarn 当代码读）：`
+        + landed.slice(0, 3).map(path => path.slice(rootDir.length + 1)).join('、')
+        + `${landed.length > 3 ? ' …' : ''}`)
+    }
+  }
+  const manifestPath = join(rootDir, 'package.json')
+  if (existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      const hooks = Object.keys(manifest?.scripts ?? {}).filter(name => YARN_LIFECYCLE_HOOKS.includes(name))
+      if (hooks.length > 0) {
+        problems.push(`根 package.json 有安装期生命周期钩子：${hooks.join('、')}`
+          + '（`enableScripts: false` 只挡依赖的构建脚本，**挡不住根 workspace 自己的 postinstall**'
+          + ' —— 它在 `yarn install` 期就能改写守卫脚本与内容摘要登记值）')
+      }
+    } catch (error) {
+      problems.push(`根 package.json 解析失败：${error?.message ?? String(error)}`)
+    }
+  }
+  return problems
+}
+
+/**
+ * 把登记脚本命令（`node scripts/x.mjs` / `bash scripts/x.sh`）解析成可直接 spawn 的 argv。
+ * @param script - `REGISTERED_GUARD_ENTRIES` 里的 `script` 取值。
+ * @param rootDir - 仓库根。
+ * @returns `{ command, argv, scriptPath, problem }`。
+ */
+export function resolveGuardCommand(script, rootDir = ROOT) {
+  const match = /^(node|bash)\s+(scripts\/\S+)$/u.exec(typeof script === 'string' ? script.trim() : '')
+  if (match === null) {
+    return {
+      command: null,
+      argv: [],
+      scriptPath: null,
+      problem: `登记的脚本命令 ${JSON.stringify(script)} 不是 \`node scripts/…\` / \`bash scripts/…\` 形态`,
+    }
+  }
+  const interpreter = match[1] === 'node' ? process.execPath : 'bash'
+  return { command: interpreter, argv: [join(rootDir, match[2])], scriptPath: join(rootDir, match[2]), problem: null }
+}
+
+/**
+ * **唯一的"经 yarn 起守卫"实现**（窄回落；只给"没有可执行的脚本文件/脚本体"的合成树用）。
+ *
+ * 为什么回落也要收在一处：它是**唯一**还经 yarn 的守卫通道，所以它的前置判据
+ * （`yarnEntryTrustProblems()`）必须与调用方无关地生效 —— 调用方有两条：
+ *   · 本文件的 `runTask()`（根 package.json **没有**这条守卫的脚本体：合成/探针树的形态）；
+ *   · `check-root-guards.mjs` 的 `spawnRegisteredGuard()`（登记脚本文件不存在）。
+ * 两条都必须先过同一个可信检查，否则 `删掉执行体 + 装插件` 就能把守卫换成恒绿的空壳。
+ * @param name - 守卫名（`corepack yarn run <name>`）。
+ * @param argvTail - 参数尾。
+ * @param options - `{ env, cwd, started }`。
+ * @returns `{ ok, ms, output, code, signal }`。
+ */
+export function spawnYarnFallbackGuard(name, argvTail, options = {}) {
+  const cwd = options.cwd ?? ROOT
+  const trust = yarnEntryTrustProblems(cwd)
+  if (trust.length > 0) {
+    return Promise.resolve({
+      ok: false,
+      ms: 0,
+      output: `check-workspaces: 「经 yarn 起守卫」这条路不可信（守卫 ${name} 没有可执行的脚本）：\n`
+        + trust.map(problem => `      · ${problem}`).join('\n')
+        + '\n      ⇒ 拒绝回落。判据来源：R11 审计 I1 泳道 P0-1'
+        + '（`yarnPath`/`plugins`/生命周期钩子都能在 yarn 进程内部改写守卫子进程的环境，'
+        + '注入的退出钩子会把"跑不起来"的退出码改写成 0）。',
+      code: null,
+      signal: null,
+    })
+  }
+  return spawnGuardChild('corepack', ['yarn', 'run', name, ...argvTail], {
+    cwd,
+    env: { ...(options.env ?? {}), FORCE_COLOR: '0', YARN_IGNORE_PATH: '1' },
+    started: options.started ?? Date.now(),
+  })
+}
+
+/**
+ * **唯一的"起一条守卫"实现**（本轮 P0-1 ①；两个 runner 共用，见 `check-workspaces.mjs` 的 `runTask`）。
+ *
+ * @param script - 登记的脚本命令（`node scripts/x.mjs` / `bash scripts/x.sh`）。
+ * @param argvTail - 登记的参数尾（`REGISTERED_GUARD_ENTRIES[*].argvTail`）。
+ * @param options - `{ env, cwd, name }`（`env` 必须是 `sanitizeGuardEnvironment()` 的结果；
+ *   `name` 只用于"脚本文件不存在"时的 yarn 回落）。
+ * @returns `{ ok, ms, output, code, signal }`。
+ */
+export function spawnRegisteredGuard(script, argvTail, options = {}) {
+  const cwd = options.cwd ?? ROOT
+  const env = { ...(options.env ?? sanitizeGuardEnvironment().env), FORCE_COLOR: '0' }
+  const started = Date.now()
+  const resolved = resolveGuardCommand(script, cwd)
+  if (resolved.problem !== null) {
+    return Promise.resolve({
+      ok: false,
+      ms: 0,
+      output: `check-root-guards: ${resolved.problem}`,
+      code: null,
+      signal: null,
+    })
+  }
+  // 回落（只在登记脚本文件不存在时）：合成/探针树用真实实现 + 合成脚本体（corepack 桩），
+  // 那时文件本来就不存在。回落的前置判据与被复用的实现都在 `spawnYarnFallbackGuard()` 里。
+  if (!existsSync(resolved.scriptPath)) {
+    return spawnYarnFallbackGuard(options.name ?? '', argvTail, { cwd, env, started })
+  }
+  return spawnGuardChild(resolved.command, [...resolved.argv, ...argvTail], { cwd, env, started })
+}
+
+/**
+ * 真正 spawn 一个守卫子进程并收集输出。
+ * @param command - 可执行文件。
+ * @param argv - 参数向量。
+ * @param options - `{ cwd, env, started }`。
+ * @returns `{ ok, ms, output, code, signal }`。
+ */
+function spawnGuardChild(command, argv, options) {
+  return new Promise(resolveTask => {
+    const child = spawn(command, argv, {
+      cwd: options.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+      env: options.env,
+    })
+    let output = ''
+    child.stdout.on('data', chunk => { output += chunk })
+    child.stderr.on('data', chunk => { output += chunk })
+    child.on('error', error => {
+      resolveTask({
+        ok: false,
+        ms: Date.now() - options.started,
+        output: `${output}\n${String(error)}`,
+        code: null,
+        signal: null,
+      })
+    })
+    child.on('close', (code, signal) => {
+      resolveTask({ ok: code === 0, ms: Date.now() - options.started, output, code, signal })
+    })
+  })
+}
+
+/* ---------------------------------------------------------------------------
+ * 运行器**自己**的环境可信吗（R11 P0-1 的第三道收口）。
+ *
+ * 上面两条关的是"守卫子进程"，这一条关的是"**运行器本身**的判决"：`--import` 注入的
+ * 退出钩子在**模块求值之前**就装好了，进程内卸不掉；实测同一个钩子能把
+ * `process.exitCode = 0`（EXIT=0）、`process.exit(3)`（EXIT=0）都改写掉 ——
+ * 而 `yarn check` 这条路径上的编排器**就是被 yarn spawn 的**，插件注入的首当其冲者正是它。
+ *
+ * 所以：**自己环境里有"能改写本进程解释器行为"的键 ⇒ 拒绝运行**（fail-closed），结束走
+ * `endUninterceptably()`（SIGKILL → abort → reallyExit → **不返回**：结构上不依赖任何
+ * "抛异常"，见其注释 —— 第十一轮复审 J1 的 N1 就是旧版那句"以 SIGKILL 兜底"**结构上不可达**：
+ * 兜底挂在 `catch` 里，而"被换掉的 `reallyExit`"不抛）。
+ *
+ * 判定面按**能力**而不是**键名**：`NODE_OPTIONS` 只在内容含未登记旗标时才命中
+ * （`--max-old-space-size` 这类正当用法不再被拒跑；J1 的 N3）。
+ *
+ * 为什么不是"警告后继续"：判决被改写的进程**说不出真话**。第十轮把 `contaminatedRunnerKeys()`
+ * 停在 WARNING 是对的（它覆盖的那些键多数只影响子进程），但解释器族（本列表）不同 ——
+ * 它们能在本进程里执行任意代码。诚实边界（认账）：钩子若同时改写
+ * `process.exit`/`reallyExit`/`kill`/`abort`，**进程内无解**（那时最后一层是"阻塞不返回"）；
+ * 所以判定权上移到父进程 —— 只有 `VERDICT PASS（计划 == 实跑 > 0）`那一行才算通过，
+ * 而拒绝运行的进程永远不打印它。更外层的静态面是 `check-workflows.mjs` 的 [SK-17] 与
+ * `.yarnrc.yml` 登记制（`check-guard-parser-integrity.mjs`）。
+ * ------------------------------------------------------------------------- */
+
+/** 能在**本进程内**执行代码/替换解释器的键（命中 ⇒ 拒绝运行；与 `contaminatedRunnerKeys()` 的宽清单不同）。 */
+export const RUNNER_TRUST_BREAKING_KEYS = [
+  'NODE_OPTIONS', // --import/--require/--loader：模块求值之前执行任意代码（**按内容**判，见下）
+  'NODE_REPL_EXTERNAL_MODULE',
+  'LD_PRELOAD', // 动态链接器：任何二进制（含 node 自己）
+  'LD_AUDIT',
+  'DYLD_INSERT_LIBRARIES',
+]
+
+/**
+ * `NODE_OPTIONS` 里**允许**留在 runner 自己环境里的旗标（登记制，逐条带理由）。
+ *
+ * 为什么要有这张表（第十一轮复审 J1 的 N3）：`NODE_OPTIONS` **本身不是代码执行** ——
+ * 执行代码的是它携带的 `--import`/`--require`/`--loader` 一类旗标。把整个键一律当
+ * "拒绝运行"，会让**正当用法**（`NODE_OPTIONS=--max-old-space-size=8192 corepack yarn check`：
+ * 大仓库 / 低内存机器的常规做法）直接变成 EXIT=2，连 `--list` 都跑不了 —— 那是把 fail-closed
+ * 用在了**键名**而不是**能力**上，代价是逼着人去掉一个与判据可信度无关的开关。
+ *
+ * 取向与 [SK-17] 的键白名单一致：**只登记"证明改不了解释器行为"的旗标**，
+ * 一条没登记（含拼错、含 `--import=`、含无法识别的取值形态）⇒ 整个 `NODE_OPTIONS` 按危险处理。
+ */
+export const NODE_OPTIONS_BENIGN_FLAGS = [
+  { pattern: /^--max-old-space-size=\d+$/u, why: 'V8 老生代上限（GC 阈值）' },
+  { pattern: /^--max-semi-space-size=\d+$/u, why: 'V8 新生代上限（GC 阈值）' },
+  { pattern: /^--max-http-header-size=\d+$/u, why: 'HTTP 头大小上限' },
+  { pattern: /^--stack-size=\d+$/u, why: 'V8 栈大小' },
+  { pattern: /^--stack-trace-limit=\d+$/u, why: '栈帧打印条数' },
+  { pattern: /^--heapsnapshot-near-heap-limit=\d+$/u, why: '接近堆上限时导出快照（诊断面）' },
+  { pattern: /^--v8-pool-size=\d+$/u, why: 'V8 线程池大小' },
+  { pattern: /^--no-warnings$/u, why: '关掉进程警告输出（纯打印面）' },
+  { pattern: /^--enable-source-maps$/u, why: '栈帧按 sourcemap 展开（纯打印面）' },
+  { pattern: /^--trace-warnings$/u, why: '打印警告栈（纯打印面）' },
+  { pattern: /^--disable-warning=[A-Za-z0-9_]+$/u, why: '关掉指定警告码（纯打印面）' },
+]
+
+/**
+ * `NODE_OPTIONS` 的**内容**判定（第十一轮复审 J1 的 N3）。
+ *
+ * 按空白切词后逐条比对登记表。诚实边界：Node 自己解析 `NODE_OPTIONS` 时有引号剥离规则，
+ * 这里不做同一套解析 —— 含引号/空格的取值会被切成匹配不上任何登记的碎片 ⇒ 落到
+ * "未登记 ⇒ 按危险处理"，方向仍是 fail-closed（宁可拒跑，也不放行一个读不懂的取值）。
+ * @param value - `NODE_OPTIONS` 的取值。
+ * @returns `null` = 每个旗标都在登记表里；否则是"为什么按危险处理"的一句诊断。
+ */
+export function nodeOptionsTrustProblem(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  for (const flag of value.trim().split(/\s+/u)) {
+    if (NODE_OPTIONS_BENIGN_FLAGS.some(entry => entry.pattern.test(flag))) continue
+    const benign = NODE_OPTIONS_BENIGN_FLAGS
+      .map(entry => entry.pattern.source.replace(/^\^|\$$/gu, ''))
+      .join(' / ')
+    return `\`NODE_OPTIONS\` 里的 \`${flag}\` 不在登记表里（已登记：${benign}）—— `
+      + '`--import`/`--require`/`--loader` 一类旗标在模块求值之前执行任意代码，'
+      + '它能改写本进程的退出码与每一条判据的结论'
+  }
+  return null
+}
+
+/**
+ * 本进程环境里"能改写本进程解释器行为"的键。
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns 命中的键名（按字母序；`NODE_OPTIONS` 只在**内容**含未登记旗标时命中）。
+ */
+export function runnerTrustProblems(env = process.env) {
+  const hits = []
+  for (const key of RUNNER_TRUST_BREAKING_KEYS) {
+    const value = env[key]
+    if (typeof value !== 'string' || value === '') continue
+    // `NODE_OPTIONS` 是**唯一**按内容判的键：`--max-old-space-size` 这类旗标改不了解释器行为
+    // （N3 的现场），而 `--import=…` 改得了 ⇒ 判据落在旗标上，不落在键名上。
+    if (key === 'NODE_OPTIONS' && nodeOptionsTrustProblem(value) === null) continue
+    hits.push(key)
+  }
+  // `BASH_FUNC_<name>%%`：bash 的导出函数。我们（以及 yarn 的 shell）起的 bash 会被
+  // 同名函数替换 ⇒ `node` 也可能变成攻击者的壳。
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('BASH_FUNC_')) hits.push(key)
+  }
+  return [...new Set(hits)].sort()
+}
+
+/**
+ * **不可被"抛不抛"决定的**结束路径（第十一轮复审 J1 的 N1，P0）。
+ *
+ * 旧实现的现场（审计方两行载荷实测）：`process.reallyExit(2)` 放在 `try` 里，而**只有它
+ * `throw`** 才走到 `process.kill(pid,'SIGKILL')` 兜底；攻击载荷的 `--import` 钩子同时把
+ * `process.reallyExit` 覆写成一个"正常退出 0"的函数（不抛）⇒ 兜底永不执行 ⇒ 判决不可信的
+ * 进程说出了"通过"（`corepack yarn check` / `check-root-guards` 实测 EXIT=**0**，日志里
+ * 连"计划/实跑 N 个任务"都没有）。
+ *
+ * 现在的结构：结束路径**不依赖任何"抛异常"**，四层依次尝试，且**永不给调用方返回值**：
+ *   ① `SIGKILL` —— 信号处置在**内核**里：没有处理器、不能阻塞、不能忽略，JS 钩子改不了它的
+ *      语义（能改的只有"谁来发这个信号"，即下面 ②③ 存在的理由）；
+ *   ② `process.abort()` —— 与 `kill` 完全不同的原生入口（SIGABRT + 崩溃报告）；
+ *   ③ `process.reallyExit(code)` —— 不触发 `exit` 事件（`process.on('exit', …)` 钩子改不了它）；
+ *   ④ **不返回**：前三层若都被换掉，本函数宁可阻塞（`Atomics.wait` 无超时 ⇒ 零 CPU 占用，
+ *      父进程/CI 的超时会判红）也绝不回到调用方 —— 回到调用方就意味着进程可能继续跑完并打印
+ *      "通过"。**fail-closed 的最后形态是"说不出话"，不是"说不确定"。**
+ *
+ * 诚实边界（认账，与 J1 的 N1 修法要求一致）：`process.kill`/`process.abort`/`process.reallyExit`
+ * 都是 JS 可见属性，同一个钩子理论上能把三个一起换掉 —— **进程内做不到绝对**。所以判定权
+ * 必须上移到父进程：编排器的 `main()` 只在"实跑数 == 计划数 > 0"时打印唯一那行
+ * `VERDICT PASS`，而被拒绝的进程**在打印它之前**就结束（见 `refuseUntrustedRunner`）。
+ * 父进程/CI 只要认那一行（而不是认退出码），这道闸门就不再由被审进程自己说了算。
+ * @param code - 期望的退出码（只在 ③ 那一层用得上）。
+ */
+export function endUninterceptably(code) {
+  process.removeAllListeners('exit')
+  process.removeAllListeners('beforeExit')
+  try {
+    // ① 内核发的 SIGKILL：唯一与 JS 钩子无关的一刀。
+    process.kill(process.pid, 'SIGKILL')
+  } catch {
+    // `process.kill` 本身被换掉时会落到 ②。
+  }
+  try {
+    // ② 另一个原生入口（SIGABRT）。只在 ① 没杀死我们时才可达。
+    process.abort()
+  } catch {
+    // 同上，落到 ③。
+  }
+  try {
+    // ③ 不触发 `exit` 事件（`process.on('exit', () => { process.exitCode = 0 })` 改不了它）。
+    process.reallyExit(code)
+  } catch {
+    // 三层都被换掉 ⇒ 落到 ④：不返回。
+  }
+  // ④ 宁可阻塞也不返回。`Atomics.wait` 无超时参数 ⇒ 永久等待（不烧 CPU），
+  //    父进程/CI 的超时会把它判成失败 —— 而它永远不会打印"通过"。
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+  } catch {
+    // SharedArrayBuffer/Atomics 不可用（理论上不会）：退化成自旋，仍然不返回。
+  }
+  for (;;) {
+    // 有意为空：这是"说不出通过"的最后形态。
+  }
+}
+
+/**
+ * 拒绝运行（判决不可信的进程必须**说不出"通过"**）。
+ *
+ * 输出用 `writeSync` 同步写（进程会立刻死，异步写会被丢掉 —— 那时日志里只剩一个"被信号杀死"，
+ * 指不到病根）；结束走 `endUninterceptably()`（结构上不依赖任何"抛异常"，见其注释）。
+ * @param subject - 打印前缀（`check-root-guards` / `check-workspaces`）。
+ * @param problems - `runnerTrustProblems()` 的结果。
+ * @returns 不返回（进程在此结束；被 import 时同样不返回 —— 调用方只在入口路径上调它）。
+ */
+export function refuseUntrustedRunner(subject, problems) {
+  const message = [
+    `${subject}: 拒绝运行 —— 本进程自己的环境里有"能改写解释器/退出码"的键：${problems.join('、')}`,
+    '  为什么不是警告后继续：这类键（`--import` 钩子 / 动态链接器预载 / `BASH_FUNC_*`）在**本进程内**',
+    '  执行代码，能把下面每一条判据的退出码改写成 0 —— 实测 `NODE_OPTIONS=--import=<exit-hook>` 让',
+    '  `corepack yarn check` 从 EXIT=1 变成 EXIT=0（R11 审计 I1 泳道 P0-1）。判决不可信的进程不许说"通过"。',
+    '  处置：清掉这些键再跑（例：`env -u NODE_OPTIONS -u BASH_ENV corepack yarn check`）；',
+    '  CI 侧由 `scripts/check-workflows.mjs` 的 [SK-17]（被钉单元的 env/步骤体白名单）拦住注入面。',
+    '  结束方式（J1 复审的 N1 修复）：SIGKILL → abort → reallyExit → **不返回**，四层依次尝试；',
+    '  退出路径不依赖任何"抛异常"（旧的 `try { reallyExit } catch { kill }` 结构可以被"把',
+    '  `reallyExit` 换成正常返回"的两行钩子整条绕过，实测 EXIT=0）。',
+    '  ⇒ 本进程**不会**打印通过凭据（`main()` 末尾那一行只在"实跑数 == 计划数 > 0"时打印）：',
+    '  父进程/CI 侧请以那一行为准，不要以退出码为准。',
+  ].join('\n')
+  try {
+    writeSync(2, `${message}\n`)
+  } catch {
+    // 同步写失败（fd 2 被关）不改变结论方向：下面照样以不可改写的方式退出。
+  }
+  endUninterceptably(2)
+}
+
+/**
+ * 失败详情（**判定行扫描 + 有界输出**）—— 这里**没有**本地实现（第十轮复审 V1 的 P1）。
+ *
+ * 历史：本文件曾有一份自己的 `summarize()`（"头 20 + `…（省略 N 行）` + 尾 20"），它把
+ * 落在中段的真判定行整条丢掉 —— 独立探针实测判定行出现次数 **0**；而同一段输出交给
+ * 编排器的共享实现 `formatFailureReport` 时出现 **1** 次。本文件是 docs-only PR 的
+ * **唯一**防线，它的失败详情看不见等于那条防线没有诊断面。
+ *
+ * 唯一实现 `formatFailureReport` 由 `check-workspaces.mjs` 导出（短输出仍然逐字原样）；
+ * 它的口径是：判定行（行首锚定、**先剥离 ANSI**）优先、尾窗兜底、进度噪声只计数不占预算。
+ */
+
+/**
+ * 起一个任务 —— **两条通道**（2026-09-24 第十一轮审计 I1 泳道 P0-1/P1-2）。
+ *
+ * · 根守卫（`kind: 'guard'`）→ `spawnRegisteredGuard()`：**不经 yarn**。
+ *   为什么：`.yarnrc.yml` 的插件钩子 `wrapScriptExecution` 在 **yarn 进程内部**改写被
+ *   spawn 脚本的环境（`NODE_OPTIONS=--import=<退出钩子>` / `BASH_ENV`），而第十轮加的
+ *   `sanitizeGuardEnvironment()` 清洗的是「交给 `corepack yarn` 的那份环境」 —— 注入发生在
+ *   清洗**之后**（实测：`yarn check` EXIT 1→0、`check-root-guards` 3 通过/14 失败 → 17 通过/0 失败）。
+ * · 包级 check → 仍走 `corepack yarn`（真实构建链绕不开），环境**原样继承本进程**（第十一轮
+ *   复审 J1 的 N3：清洗只作用于守卫通道）+ `YARN_IGNORE_PATH=1`。
+ *
+ *   **`YARN_IGNORE_PATH=1` 的作用边界**（N4 的订正，旧注释在这里写错过）：它只对"本编排器
+ *   已经启动起来、由它 spawn 的那些 `yarn`"生效。`corepack yarn check` **入口的那个 yarn**
+ *   读的是仓内 `.yarnrc.yml` —— 一旦那里有 `yarnPath`，整个 yarn 被换掉，**本文件根本不会被
+ *   加载**（实测：`corepack yarn check` 只剩假 yarn 的一行输出、零任务、EXIT=0）。拦住那条路
+ *   的是另外两条：(a) `gate-guards` 里**直接 spawn** 的根守卫（不经 yarn）；(b) `check-guard-parser-integrity`
+ *   的 `.yarnrc.yml` 登记制。而"父进程怎么判"由 `main()` 末尾那行 `VERDICT PASS`（计划 == 实跑 > 0）
+ *   兜 —— 被假 yarn 顶掉的进程永远不会打印它。
+ *
+ * 清洗实现唯一（`sanitizeGuardEnvironment`），接线有两处（本文件与 `check-root-guards.mjs`）——
+ * 两处都由 `scripts/check-guard-parser-integrity.mjs` 的「两处都清洗」判据看着（单边拆掉即红）。
+ * @param task - 任务条目（`{ name, args, kind, cwd?, path?, needs? }`）。
+ * @returns 结果条目（`{ task, ok, ms, output, code, signal, spawnError? }`）。
+ */
+/**
+ * 根 `package.json` 的 `scripts` 表（进程内缓存一次）。
+ *
+ * 为什么编排器需要它：守卫**不再经 yarn 起**（R11 P0-1），所以"`yarn run <name>` 会跑什么"
+ * 必须自己解析 —— 唯一真源就是这一行脚本体（运行器侧的登记表与它的一致性由两条门禁对拍）。
+ * @returns `Record<string, string>`（读不到时为空对象 ⇒ 守卫会 fail-loud 而不是静默跳过）。
+ */
+let ROOT_SCRIPTS_CACHE = null
+function rootScripts() {
+  if (ROOT_SCRIPTS_CACHE === null) {
+    try {
+      ROOT_SCRIPTS_CACHE = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))?.scripts ?? {}
+    } catch {
+      ROOT_SCRIPTS_CACHE = {}
+    }
+  }
+  return ROOT_SCRIPTS_CACHE
+}
+
 function runTask(task) {
+  const started = Date.now()
+  if (task.kind === 'guard') {
+    // 清洗**只用于守卫子进程**（第十一轮复审 J1 的 N3）。为什么不是"两条通道共用一份"：
+    // 清洗拦不住 P0-1 的注入（`.yarnrc.yml` 的插件钩子在 **yarn 进程内部**改写被 spawn 脚本的
+    // 环境，发生在清洗**之后**），所以它拦得住的只有"本进程环境里的危险族键" —— 而那一层
+    // 已经在 `main()` 的 `runnerTrustProblems()` 里按**能力**判过（含 `NODE_OPTIONS` 的内容）。
+    // 把同一份清洗套在包级 check 上，代价却是真实的：`YARN_*`/`npm_config_*`/`COREPACK_*`
+    // 与**正当的** `NODE_OPTIONS=--max-old-space-size=…` 一起从构建环境里消失
+    // （J1 实测：连 `--list` 都变成 EXIT=2）。包级 check 因此只加 `YARN_IGNORE_PATH=1`。
+    const cleaned = sanitizeGuardEnvironment(process.env)
+    const script = rootScripts()[task.name]
+    const tail = Array.isArray(task.args) ? task.args.slice(2) : []
+    // 三条 fail-loud：脚本体缺失 / 参数里出现"会改变语义"的旗标（形态校验由
+    // `spawnRegisteredGuard()` 承担）。判据来源是**根 package.json 的脚本体** ——
+    // 那正是 `yarn run <name>` 的语义，而它与运行器侧登记表（`REGISTERED_GUARD_ENTRIES`）
+    // 的一致性由两条门禁各自对拍：`check-root-guards.mjs`（gate-guards 路径）与
+    // `verify-check-workspaces.mjs`（`yarn check` 路径里的 `check:check-workspaces` 守卫）。
+    // **不 import 运行器**：合成/探针树可能只拷了本编排器（`verify-check-workspaces.mjs` 的
+    // `buildTree`），import 会让那些树直接 ERR_MODULE_NOT_FOUND（实测 87 条断言）。
+    const weakening = tail.filter(argument => SEMANTICS_CHANGING_FLAGS.includes(argument))
+    if (typeof script !== 'string' || script.trim() === '') {
+      // **没有脚本体**：合成/探针树的形态（`verify-check-workspaces.mjs` 的 `buildTree`
+      // 只写 name/workspaces，守卫靠 corepack 桩），走与运行器同一条窄回落 ——
+      // 回落前必须过 `yarnEntryTrustProblems()`（真实树上"没有脚本体"= yarn 直接报
+      // "Couldn't find a script named …" ⇒ 守卫失败，fail-closed）。
+      return spawnYarnFallbackGuard(task.name, tail, {
+        cwd: task.cwd ?? ROOT,
+        env: cleaned.env,
+        started,
+      }).then(result => ({ ...result, task }))
+    }
+    const problem = (weakening.length > 0
+        ? `守卫 ${task.name} 的参数里有"会改变语义"的旗标 ${weakening.map(flag => `\`${flag}\``).join('、')}`
+          + ' ⇒ 拒绝执行（它们让守卫**跑起来却什么都不判**）'
+        : null)
+    if (problem !== null) {
+      return Promise.resolve({
+        task,
+        ok: false,
+        ms: Date.now() - started,
+        output: `check-workspaces: ${problem}`,
+        code: null,
+        signal: null,
+      })
+    }
+    // 守卫**直接 spawn**（`process.execPath` / `bash`，不经 yarn、不经 shell）。
+    return spawnRegisteredGuard(script, tail, {
+      cwd: task.cwd ?? ROOT,
+      env: cleaned.env,
+      name: task.name,
+    }).then(result => ({ ...result, task }))
+  }
   return new Promise(resolve => {
-    const started = Date.now()
     const child = spawn('corepack', ['yarn', ...task.args], {
       cwd: task.cwd ?? ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
-      env: { ...process.env, FORCE_COLOR: '0' },
+      // 包级 check：**本进程环境原样透传**（只加 `FORCE_COLOR=0` 与 `YARN_IGNORE_PATH=1`）。
+      //
+      // 为什么包级仍然安全（N3 的"为什么"）：包级 check 的判据是**子进程的退出码**，而读它的
+      // 是**编排器**（本进程）—— 本进程已经在 `main()` 里拒绝过"能在本进程执行代码"的键
+      // （`runnerTrustProblems()`，含 `NODE_OPTIONS` 的**内容**判定）。危险族键既然进不了本进程，
+      // 也就不会经由这里传给 `corepack yarn`。反过来，清洗会顺手丢掉正当配置
+      // （`YARN_NODE_LINKER` / `npm_config_registry` / `COREPACK_*` / `NODE_OPTIONS=--max-old-space-size=…`），
+      // 那是把"注入面收口"错做成"构建环境阉割"（J1 的 N3 实测）。
+      // `YARN_IGNORE_PATH=1`：让「一行 `yarnPath` 换掉整个 yarn」在**这一层**失效（注意边界：
+      // 它只对本编排器真的启动起来之后 spawn 的那些 yarn 生效；`corepack yarn check` 自己的
+      // 那个 yarn 由 `.yarnrc.yml` 登记制 + `gate-guards` 的直接 spawn 拦住，见 N4 的订正）。
+      env: { ...process.env, FORCE_COLOR: '0', YARN_IGNORE_PATH: '1' },
     })
     let output = ''
     child.stdout.on('data', chunk => { output += chunk })
@@ -1345,6 +2346,26 @@ async function runScheduler(tasks, limit, state) {
  * @param argv - 参数向量（缺省 = `process.argv.slice(2)`；测试可注入）。
  */
 export async function main(argv = process.argv.slice(2)) {
+  // R11 P0-1（I1 泳道）：**本进程自己的判决可信吗**。`yarn check` 这条路径上的编排器
+  // 就是被 yarn spawn 的 —— `.yarnrc.yml` 的插件钩子能在 **yarn 进程内部**给它塞
+  // `NODE_OPTIONS=--import=<退出钩子>`（清洗已经跑完），而那个钩子实测能把
+  // `process.exit(1)` / `process.exitCode = 1` 改写成 0（EXIT=0）。判决不可信的进程
+  // 不许说「通过」⇒ 直接拒绝运行（`--list` 也一样拒：它正是各判据的输入面）。
+  const runnerTrust = runnerTrustProblems()
+  if (runnerTrust.length > 0) refuseUntrustedRunner('check-workspaces', runnerTrust)
+  // P0-1 的第二道（**静态**面）：本进程环境干净，不代表"经 yarn 起脚本"这条路可信 ——
+  // `yarnPath`（换掉整个 yarn）/ `plugins`（钩子在 yarn 进程内部改写脚本子进程的环境）/
+  // 根 package.json 的生命周期钩子（install 期可改写判据执行体）命中任一条 ⇒ 包级 check
+  // 的判据不可信（它们必须经 yarn）⇒ 拒绝调度，而不是"跑完再报"。
+  // 判据与 `check-guard-parser-integrity.mjs` 的登记制同源（两侧清单由该守卫交叉对拍）。
+  const yarnTrust = yarnEntryTrustProblems(ROOT)
+  if (yarnTrust.length > 0) {
+    console.error('check-workspaces: 拒绝调度 —— 「经 yarn 起脚本」这条路不可信（P0-1）：')
+    for (const problem of yarnTrust) console.error(`  · ${problem}`)
+    console.error('  ⇒ 包级 check 必须经 yarn，所以这类入口配置一旦出现，跑的就不再是我们要判的东西。')
+    process.exit(2)
+  }
+
     const options = parseArgs(argv)
   // A usage error sets exitCode 2 in parseArgs; honor it instead of flattening
   // every bad-argument case to 1 (2026-09-16 R9/R2 audit: the assignment was dead
@@ -1384,8 +2405,19 @@ export async function main(argv = process.argv.slice(2)) {
   // `check-root-guards.mjs`（docs-only PR 的唯一防线，那条路径上本函数不跑）。
   {
     const verdictSelftest = selfTestVerdictClassifier()
-    if (verdictSelftest.failures.length > 0 || verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+    // 三条**互不相同**的下限（第十一轮审计 C3-02/C3-03）:
+    //   ① 形态表的样本覆盖率（`formsCovered === forms`，双向对拍）+ 逐形态"去掉即红"验证；
+    //   ② 形态数与样本数（棘轮字面量，不是 `length` 恒真式）；
+    //   ③ `check()` 调用数（旧口径，保留作兜底）。
+    const formsUncovered = verdictSelftest.formsCovered < verdictSelftest.forms
+    if (verdictSelftest.failures.length > 0
+      || formsUncovered
+      || verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
       for (const detail of verdictSelftest.failures) console.error(`check-workspaces: ${detail}`)
+      if (formsUncovered) {
+        console.error(`check-workspaces: 判定形态自检只覆盖了 ${verdictSelftest.formsCovered}`
+          + `/${verdictSelftest.forms} 条形态（每条形态至少要有 1 条样本 + 一条"去掉即红"验证）。`)
+      }
       if (verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
         console.error(`check-workspaces: 判定形态自检只执行了 ${verdictSelftest.assertions} 条断言`
           + `（期望 ≥ ${SELFTEST_VERDICT_ASSERTIONS}）⇒ 断言表被掏空。`)
@@ -1436,7 +2468,8 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const wantsGuards = options.guards
-  const guards = wantsGuards ? GUARDS.map(guard => ({ ...guard })) : []
+  // `kind: 'guard'`：根守卫走「直接 spawn」通道（不经 yarn），见 runTask 的头注释。
+  const guards = wantsGuards ? GUARDS.map(guard => ({ ...guard, kind: 'guard' })) : []
   const selected = PACKAGES.filter(pkg => selectedNames === null || selectedNames.has(pkg.name))
   const selectedSet = new Set(selected.map(pkg => pkg.name))
   const packages = selected.map(pkg => ({
@@ -1461,6 +2494,16 @@ export async function main(argv = process.argv.slice(2)) {
       : ADVISORY_REGISTRY.map(entry => `${entry.name}@${entry.expiresOn}`).join(', ')}`)
     process.exit(0)
   }
+
+  // P1-2 的证据（不是存在性断言）：**守卫子进程**真的丢了哪些键，逐条打出来。第十轮只给
+  // 运行器加了清洗，`yarn check` 这条路径（本编排器）当时仍然原样透传 `process.env` ⇒ 同一条
+  // 注入 EXIT 1→0。第十一轮复审 J1 的 N3 起，清洗**只作用于守卫通道**（包级 check 原样透传本
+  // 进程环境 —— 理由见 `runTask()` 里那一段），所以这条证据也按通道分开打印。
+  const spawnEnvEvidence = sanitizeGuardEnvironment(process.env)
+  console.log(`check-workspaces: 守卫子进程环境已清洗 —— 丢弃 ${spawnEnvEvidence.dropped.length} 个「会改写解释器」的键`
+    + `${spawnEnvEvidence.dropped.length > 0 ? `：${spawnEnvEvidence.dropped.join('、')}` : '（本次没有命中危险族键）'}`
+    + '（守卫走直接 spawn）；包级 check 仍经 yarn，但**原样继承本进程环境** + `YARN_IGNORE_PATH=1`'
+    + '（N3：正当的 `NODE_OPTIONS=--max-old-space-size=…`/`YARN_*`/`npm_config_*` 不再被误清）')
 
   const state = { results: [], failed: [], skipped: [], advisory: [], dropped: [], degraded: [] }
   const startedAt = Date.now()
@@ -1513,6 +2556,39 @@ export async function main(argv = process.argv.slice(2)) {
     console.error('    · 没有包被选中（--changed 的改动集不在任何 PATH_OWNERS 前缀下；改 docs/ 之外的顶层文件会升格为全量），且')
     console.error('    · 根守卫被 `--no-guards` 关掉了（那是本地调试通道：CI 的 `yarn check` 参数向量必须为空，见 [SK-8]）。')
     console.error('    要一次真的门禁：`node scripts/check-workspaces.mjs`（或 `yarn check`）。')
+  }
+
+  // R11-J1 N1/N4（把判定权从"被审进程"上移到父进程/CI）：**通过凭据只在真的跑过任务时打印**。
+  //
+  // 为什么需要它：`refuseUntrustedRunner()` 已经做到"判决不可信的进程说不出通过"，但进程内
+  // 做不到绝对（钩子能改写 `kill`/`abort`/`reallyExit` 三个原生入口 ⇒ 最后一层只能是"阻塞不返回"）。
+  // 另一条同类路径是 `yarnPath`：`corepack yarn check` 的 yarn 被整条换掉时，**本编排器根本
+  // 不会启动**（J1 的 N4 实测：日志只有假 yarn 的一行、EXIT=0、零任务）—— 那一层靠
+  // `gate-guards` 的直接 spawn + `.yarnrc.yml` 登记制，但"父进程怎么判"必须有个统一凭据。
+  //
+  // 凭据的形态：`VERDICT PASS planned=N executed=N`（N>0 且**实跑 == 计划**、零失败/零跳过/
+  // 零未运行/零 advisory/计数自洽）。被拒绝的进程、被假 yarn 顶掉的进程、零任务的进程
+  // **都打印不出这一行** ⇒ 父进程/CI 只要 grep 它，就不必相信任何退出码。
+  // 零任务的退出码**保持 0**（C-16 在 `verify-check-workspaces.mjs` 里钉住了"本地面不改退出码"），
+  // 所以它拿到的是**显式的非通过标记** `VERDICT ZERO-TASKS`（与"零包仍跑根守卫"那条口径统一：
+  // 零任务必须说出来，不能靠"没打印那一行"来推断）。
+  {
+    const complete = planned > 0 && state.results.length === planned
+      && state.failed.length === 0 && state.dropped.length === 0 && !summaryInconsistent
+    if (complete && state.advisory.length === 0) {
+      console.log(`check-workspaces: VERDICT PASS planned=${planned} executed=${state.results.length}`
+        + '（判定通过的唯一凭据：**实跑 == 计划 > 0**；被拒绝运行 / 被 yarnPath 顶替 / 零任务的进程不会打印这一行）')
+    } else if (planned === 0) {
+      console.log('check-workspaces: VERDICT ZERO-TASKS planned=0 executed=0'
+        + '（**不算通过**：退出码 0 只表示"没有任何任务失败"；CI 侧必须要求上面那行通过凭据）')
+    } else {
+      console.error(`check-workspaces: VERDICT FAIL planned=${planned} executed=${state.results.length}`
+        + ` failed=${state.failed.length} skipped=${state.skipped.length} dropped=${state.dropped.length}`
+        + `${state.advisory.length > 0 ? ` advisory=${state.advisory.length}` : ''}`
+        + `${summaryInconsistent ? ' summary-inconsistent' : ''}`
+        + '（这一行与通过行互斥：唯一的"跑过门禁"凭据是以 `check-workspaces: ` 开头的通过行；'
+        + '非通过的行里刻意**不出现**那个词，免得 CI 侧一句朴素 grep 被"提及"满足）')
+    }
   }
 
   // C-8（2026-09-23 三轮审计 P2）：**通过**的守卫里那些"跳过/降级"行必须进摘要。

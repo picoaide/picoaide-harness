@@ -109,7 +109,8 @@ describe('connectors lifecycle serialization (P2-23)', () => {
     harness.emitSession({ username: 'user-a' })
     harness.emitSession({ username: 'user-b' })
 
-    await vi.waitFor(() => { expect(harness.plugin).toHaveBeenCalled() })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(harness.plugin).toHaveBeenCalled() }, { timeout: 10_000 })
     await new Promise(resolve => setTimeout(resolve, 30))
     // Only the newest session change ran; the superseded one never registered.
     expect(harness.plugin).toHaveBeenCalledTimes(1)
@@ -127,7 +128,8 @@ describe('connectors lifecycle serialization (P2-23)', () => {
     await seedStore(dir, ['demo-a', 'demo-b'])
 
     harness.emitSession({ username: 'user-a' })
-    await vi.waitFor(() => { expect(harness.fibers).toHaveLength(2) })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(harness.fibers).toHaveLength(2) }, { timeout: 10_000 })
     await new Promise(resolve => setTimeout(resolve, 30))
 
     expect(harness.fibers[0]!.dispose).toHaveBeenCalledTimes(1)

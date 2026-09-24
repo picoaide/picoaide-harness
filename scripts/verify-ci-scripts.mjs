@@ -30,7 +30,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -151,6 +151,11 @@ usage_error() { usage_block >&2; printf '\\naws: [ERROR]: Unknown options: %s\\n
 # --sse-kms-key-id / --no-progress / --frobnicate 一律 usage + 252)。
 PUT_OBJECT_VALUE_FLAGS="--acl --body --bucket --cache-control --checksum-algorithm --checksum-crc32 --checksum-crc32-c --checksum-crc64-nvme --checksum-md5 --checksum-sha1 --checksum-sha256 --checksum-sha512 --checksum-xxhash128 --checksum-xxhash3 --checksum-xxhash64 --content-disposition --content-encoding --content-language --content-length --content-md5 --content-type --expected-bucket-owner --expires --grant-full-control --grant-read --grant-read-acp --grant-write-acp --if-match --if-none-match --key --metadata --object-lock-event-hold --object-lock-event-hold-duration-days --object-lock-event-hold-duration-years --object-lock-legal-hold-status --object-lock-mode --object-lock-retain-until-date --request-payer --server-side-encryption --sse-customer-algorithm --sse-customer-key --sse-customer-key-md5 --ssekms-encryption-context --ssekms-key-id --storage-class --tagging --website-redirect-location --write-offset-bytes"
 PUT_OBJECT_BOOL_FLAGS="--bucket-key-enabled"
+# s3api copy-object 的取值参数(真 CLI 2.37.1 的服务模型 members;抽样实测:
+# --metadata-directive COPY 与 --copy-source <bucket>/<key> 都能走到网络层,
+# 拼错的 --copy-sourc 一律 usage + 252)。
+COPY_OBJECT_VALUE_FLAGS="--acl --bucket --cache-control --checksum-algorithm --content-disposition --content-encoding --content-language --content-type --copy-source --copy-source-if-match --copy-source-if-modified-since --copy-source-if-none-match --copy-source-if-unmodified-since --expected-bucket-owner --expires --grant-full-control --grant-read --grant-read-acp --grant-write-acp --key --metadata --metadata-directive --object-lock-legal-hold-status --object-lock-mode --object-lock-retain-until-date --request-payer --server-side-encryption --sse-customer-algorithm --sse-customer-key --sse-customer-key-md5 --ssekms-encryption-context --ssekms-key-id --storage-class --tagging --website-redirect-location"
+COPY_OBJECT_BOOL_FLAGS="--bucket-key-enabled"
 # s3api head-object 的取值参数(同上;head-object 没有布尔参数)。
 HEAD_OBJECT_VALUE_FLAGS="--bucket --checksum-mode --expected-bucket-owner --if-match --if-modified-since --if-none-match --if-unmodified-since --key --part-number --range --request-payer --response-cache-control --response-content-disposition --response-content-encoding --response-content-language --response-content-type --response-expires --sse-customer-algorithm --sse-customer-key --sse-customer-key-md5 --version-id"
 HEAD_OBJECT_BOOL_FLAGS=""
@@ -305,6 +310,29 @@ case "$cmd" in
       cp "$body" "$dest"
     fi
     printf '%s' "$sum" > "$dest.checksum"
+    ;;
+  "s3api copy-object")
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$COPY_OBJECT_VALUE_FLAGS" "$COPY_OBJECT_BOOL_FLAGS"
+    unknown="$(join_unknown ", ")"
+    [ -z "$unknown" ] || usage_error "$unknown"
+    require_no_positionals
+    require_bucket_and_key
+    source="\${SCAN_FLAG_VALUE[--copy-source]:-}"
+    record "copy-object \${SCAN_FLAG_VALUE[--key]} <== $source cache=\${SCAN_FLAG_VALUE[--cache-control]:-<none>} directive=\${SCAN_FLAG_VALUE[--metadata-directive]:-<none>}"
+    # 真 CLI 要求 --copy-source 是 bucket/key 形态(不带 s3://);源对象不存在时
+    # NoSuchKey + 254(与 head-object 同族),目标不被创建。
+    [[ "$source" == */* ]] || param_error "argument --copy-source: Invalid value: $source"
+    src_key="\${source#*/}"
+    src="$store/$src_key"
+    if [ ! -f "$src" ]; then
+      echo "An error occurred (NoSuchKey) when calling the CopyObject operation: The specified key does not exist." >&2
+      exit 254
+    fi
+    dest="$store/\${SCAN_FLAG_VALUE[--key]}"
+    mkdir -p "$(dirname "$dest")"
+    cp "$src" "$dest"
+    if [ -f "$src.checksum" ]; then cp "$src.checksum" "$dest.checksum"; else : > "$dest.checksum"; fi
     ;;
   "s3api head-object")
     declare -A SCAN_FLAG_VALUE=()
@@ -3495,8 +3523,25 @@ echo x > "${distDir}/App.AppImage"
       check(cacheOf(key) === 'public, max-age=31536000, immutable',
         `${channel} 的${label}必须带 immutable 长缓存(逐对象断言,不看"别的对象对不对"),实际 ${String(cacheOf(key))}`)
     }
-    check(cacheOf(`${channel}/latest.json`) === 'no-cache',
-      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${String(cacheOf(`${channel}/latest.json`))}`)
+    // latest.json 现在**不再直接 PUT**:先写临时键(校验大小+SHA256),再用服务端
+    // `copy-object` 原子替换正式键(第十一轮审计 C2-B-01)⇒ 缓存头断言必须打在
+    // **替换那一行**上(临时键的 no-cache 另有一条断言)。
+    const copies = awsLog.split('\n').filter(line => line.startsWith(`copy-object ${channel}/latest.json `))
+    check(copies.length === 1,
+      `${channel} 的 latest.json 必须恰好由一次 copy-object 替换(实际 ${copies.length} 次)`
+        + ':直接 PUT 正式键会让"校验失败"留下损坏的指针,覆盖上一版可用指针')
+    check(copies[0]?.includes('cache=no-cache'),
+      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${String(copies[0])}`)
+    check(copies[0]?.includes('directive=REPLACE'),
+      `${channel} 的 latest.json 替换必须用 --metadata-directive REPLACE **显式重述**缓存头`
+        + `(COPY 会让正式指针"继承"临时对象的元数据 ⇒ 缓存头不再在写它的那一行上可判),实际 ${String(copies[0])}`)
+    check(copies[0]?.includes(`<== test-bucket/${channel}/.latest-next-`),
+      `${channel} 的 latest.json 必须由**本次的临时键**替换而来(源对象可追溯),实际 ${String(copies[0])}`)
+    const tmpCache = putObjects
+      .filter(entry => entry.key.startsWith(`${channel}/.latest-next-`))
+      .map(entry => entry.cacheControl)
+    check(tmpCache.length === 1 && tmpCache.every(value => value === 'no-cache'),
+      `${channel} 的指针临时键必须 exactly 一次且 no-cache,实际 ${JSON.stringify(tmpCache)}`)
     const probeCache = putObjects.filter(entry => entry.key.startsWith(`${channel}/releases/2.7.0/.probe-`)).map(entry => entry.cacheControl)
     check(probeCache.length === 1 && probeCache.every(value => value === 'no-cache'),
       `${channel} 的探测对象必须 exactly 一次且 no-cache,实际 ${JSON.stringify(probeCache)}`)
@@ -3698,10 +3743,31 @@ echo x > "${distDir}/App.AppImage"
   check(staleAfterFirstCheck.status !== 0,
     '上传后对象再被弄坏(第 1 次 head 之后截断)时,写指针前的复检必须失败 —— 删掉它会静默写出指向损坏对象的 latest.json')
   check(!existsSync(manifestPath), '写指针前的复检不过时不得写 latest.json')
-  // I. **指针对象**本身也要校:latest.json 被截断 ⇒ 必须失败(客户更新链路的第一步就是读它)。
+  // I. **指针对象**本身也要校。第十一轮审计 C2-B-01 之后指针是"先写临时键 → 校验 →
+  //    copy 替换",所以截断注入必须打在**临时键**上(`.latest-next-`);正式键被直接 PUT
+  //    的形态已经不存在了(下面 J 用例把"非法形态"钉死)。
   resetStore()
-  const pointerTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: 'latest.json' })
-  check(pointerTruncated.status !== 0, 'latest.json 对象被截断时必须失败(指针损坏 = 客户更新链路不可用)')
+  const pointerTruncated = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: '.latest-next' })
+  check(pointerTruncated.status !== 0, '指针临时键被截断时必须失败(指针损坏 = 客户更新链路不可用)')
+  check(!existsSync(manifestPath), '指针临时键校验不过时不得写正式指针')
+  // J. **已有可用指针时的失败路径不许覆盖它**(第十一轮审计 C2-B-01 的原始现场)。
+  //    旧实现直接 PUT 正式键再校验 ⇒ 报错文案写着"拒绝写 latest.json",而 10 字节残件
+  //    **已经**覆盖了上一版可用指针(客户端更新链路的第一步当场坏掉)。
+  //    判据三条:①失败必须发生;②正式指针**逐字节未变**;③临时键不得残留。
+  resetStore()
+  const pointerSeed = runPublish({})
+  check(pointerSeed.status === 0,
+    `J 的前置:第一次发布(种下可用指针)必须成功,实际退出 ${String(pointerSeed.status)}: ${(pointerSeed.stderr ?? '').slice(0, 200)}`)
+  const pointerBytes = statSync(manifestPath).size
+  const pointerText = readFileSync(manifestPath, 'utf8')
+  const tmpKeys = () => readdirSync(join(store, 'official')).filter(name => name.startsWith('.latest-next-'))
+  const brokenSecond = runPublish({ FAKE_AWS_TRUNCATE_BYTES: '10', FAKE_AWS_TRUNCATE_KEY: '.latest-next' })
+  check(brokenSecond.status !== 0, 'J:临时键被截断的第二次发布必须失败')
+  check(existsSync(manifestPath) && readFileSync(manifestPath, 'utf8') === pointerText
+    && statSync(manifestPath).size === pointerBytes,
+  'J:**上一版可用指针必须逐字节未变**(C2-B-01:旧实现把它覆盖成 10 字节残件,报错却说"拒绝写 latest.json")')
+  check(tmpKeys().length === 0,
+    `J:失败路径不得留下指针临时键残件(它是渠道根目录下的对象,保留策略管不到),实际 ${JSON.stringify(tmpKeys())}`)
   // 正向对照(与 E 同一形态,但注入面按对象收窄之后复跑一次):三条校验都该放行。
   resetStore()
   const scopedGreen = runPublish({ FAKE_AWS_TRUNCATE_KEY: 'nothing-matches', FAKE_AWS_SIZE_KEY: 'nothing-matches' })
@@ -3834,19 +3900,41 @@ echo x > "${distDir}/App.AppImage"
     for (const line of text.split(/\r?\n/u)) {
       const previous = logical.length - 1
       if (previous >= 0 && logical[previous].endsWith('\\')) {
-        logical[previous] = `${logical[previous].slice(0, -1)} ${line}`
+        // **shell 语义**的续行合并:bash 在分词之前把 `\`+换行这一对**整对删除**(不插空格)。
+        // 旧实现插了一个空格 ⇒ `--bo\` + 换行 + `dy "fileb://x.zip"`(YAML 块标量会把块缩进
+        // 剥掉,所以续行回到第 0 列)被判据看成两个词 `--bo dy`,旗标名整个看不见
+        // (第十一轮审计 C2-A-04 的 b2 绕过)。仓库里已有现成的同语义实现
+        // (`check-workflows.mjs` 的 `joinShellContinuations`),这里按同一条规则拼接。
+        logical[previous] = logical[previous].slice(0, -1) + line
       } else {
         logical.push(line)
       }
     }
+    // 旗标名**经变量传入**的形态(第十一轮审计 C2-A-04 的 b5):`BODY_FLAG=--body` 之后
+    // `$BODY_FLAG "fileb://x.zip"` —— 命令名里一个字都没有 `--body`,而 bash 会把它拼出来。
+    // 取向 fail-closed:凡是"赋给变量的取值恰好是 `--body`"的变量,它的每一处使用都按
+    // `--body` 判。
+    const bodyFlagVars = new Set()
+    for (const match of text.matchAll(/(?:^|[\s;])([A-Za-z_][A-Za-z0-9_]*)=(?:"--body"|'--body'|--body)(?=[\s;]|$)/gmu)) {
+      bodyFlagVars.add(match[1])
+    }
+    const flagPattern = new RegExp(
+      '(?:^|[\\s"\'=])(?:--body'
+        + (bodyFlagVars.size === 0 ? '' : `|\\$\\{?(?:${[...bodyFlagVars].join('|')})\\}?`)
+        + ')(?:=|\\s+)',
+      'gu',
+    )
     let count = 0
     const offenders = []
     for (const line of logical) {
       if (line.trim().startsWith('#')) continue
-      if (!/(^|\s)--body(\s|=)/u.test(line)) continue
-      count += 1
-      const reason = classifyBodyValue(readBodyToken(line.replace(/^.*?--body(\s|=)/u, '')), text)
-      if (reason !== null) offenders.push(`${name}: ${line.trim()} ⇒ ${reason}`)
+      // **枚举全部**出现(不是只取第一个):同一逻辑行上第二个 `--body` 同样会被 bash 当旗标
+      // 用,而旧实现的 `^.*?--body` 非贪婪替换只判第一个(第十一轮审计 C2-A-04 的 b3)。
+      for (const match of line.matchAll(flagPattern)) {
+        count += 1
+        const reason = classifyBodyValue(readBodyToken(line.slice(match.index + match[0].length)), text)
+        if (reason !== null) offenders.push(`${name}: ${line.trim()} ⇒ ${reason}`)
+      }
     }
     return { count, offenders }
   }
@@ -3873,6 +3961,34 @@ echo x > "${distDir}/App.AppImage"
   ]) {
     check(scanAwsBodyForms('sample.sh', sample).offenders.length === 1,
       `静态判据自证:${label}必须被命中(等价改写绕过判据就是回归)`)
+  }
+  // 第十一轮审计 C2-A-04 的三条**实测绕过**(本轮修复):三条都写在 workflow 的 run 块里时,
+  // 本地两条门禁全绿而真 CI 在 Release job 以 ParamValidation 红 —— 与 2026-09-24 那次
+  // 发布链阻断完全同形。逐条钉住,并给出"bash 真会把它拼成 --body"的边界说明。
+  for (const [label, sample] of [
+    ['旗标名被 `\\`+换行拆开(`--bo`+换行+`dy`)',
+      'aws_cmd s3api put-object --bucket b --key k --bo\\\ndy "fileb://x.zip"\n'],
+    ['同一逻辑行两个 `--body`(第二个是坏形态)',
+      'aws_cmd s3api put-object --bucket b --key k --body "/tmp/ok.zip" --body "fileb://x.zip"\n'],
+    ['旗标名经变量传入(`BODY_FLAG=--body` 后 `$BODY_FLAG`)',
+      'BODY_FLAG=--body\naws_cmd s3api put-object --bucket b --key k $BODY_FLAG "fileb://x.zip"\n'],
+    ['旗标名经变量传入 + 带引号赋值',
+      'BODY_FLAG="--body"\naws_cmd s3api put-object --bucket b --key k ${BODY_FLAG} "FILEB://x.zip"\n'],
+  ]) {
+    check(scanAwsBodyForms('sample.sh', sample).offenders.length === 1,
+      `静态判据自证:${label} 必须被命中(这三条是第十一轮审计实测的绕过形态)`)
+  }
+  // 正向对照:同一批形态里取值**可证明**的写法不得误伤(否则判据会把合法调用逼着改坏)。
+  for (const [label, sample] of [
+    ['旗标名经变量 + 纯路径取值',
+      'BODY_FLAG=--body\naws_cmd s3api put-object --bucket b --key k $BODY_FLAG "/tmp/x.zip"\n'],
+    ['同行两个 `--body` 但取值都可证明',
+      'aws_cmd s3api put-object --bucket b --key k --body "/tmp/a.zip" --body "/tmp/b.zip"\n'],
+    ['正常续行(旗标名不被拆开)',
+      'aws_cmd s3api put-object --bucket b --key k \\\n  --body "/tmp/x.zip"\n'],
+  ]) {
+    check(scanAwsBodyForms('sample.sh', sample).offenders.length === 0,
+      `静态判据自证:${label} 是可证明的纯路径形态,不得命中`)
   }
   // 正向:三种可证明的纯路径形态必须不命中。
   for (const [label, sample] of [

@@ -265,7 +265,8 @@ describe('R-6 F3/F7：URL 出口值级脱敏（页面自选键、裸 fragment、
     const opener = h.adapter.lastView()
     // 页面在 fill 之后 window.open('/popup?pw=' + v)。
     opener.windowOpenHandler?.({ url: `https://app.example/popup?pw=${SECRET}` })
-    await vi.waitFor(() => { expect(h.adapter.views.length).toBeGreaterThan(1) })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(h.adapter.views.length).toBeGreaterThan(1) }, { timeout: 10_000 })
     const child = h.adapter.views.at(-1)!
     child.url = `https://app.example/popup?pw=${SECRET}`
     h.runtime['updateTabState'](h.runtime['tab'](2))
@@ -279,7 +280,8 @@ describe('R-6 F3/F7：URL 出口值级脱敏（页面自选键、裸 fragment、
     expect(h.runtime.credentialWindowOpen(2)).toBe(true)
     // 对照：跨源 popup 只继承值集合（R-5 F7），不继承窗口（新 origin 没有记账）。
     opener.windowOpenHandler?.({ url: 'https://other.example/popup' })
-    await vi.waitFor(() => { expect(h.adapter.views.length).toBeGreaterThan(2) })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(h.adapter.views.length).toBeGreaterThan(2) }, { timeout: 10_000 })
     expect(h.runtime.credentialWindowOpen(3)).toBe(false)
     expect(h.runtime.tab(3).filledSecrets).toEqual([SECRET])
   })
