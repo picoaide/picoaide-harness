@@ -70,7 +70,21 @@ export interface RealMcpServer {
      * (R7-B P1-1). Recording the sequence makes it assertable directly.
      */
     mcpBearerTokens: string[]
+    /** R9-D probe: every `/mcp` request's raw headers, in arrival order. */
+    mcpHeaders: Array<Record<string, string | string[] | undefined>>
+    /**
+     * R9-A-1/R9-D-1: 401 answers split by method.
+     *
+     * The total mixes the tool-call POST with the SDK's long-lived SSE GET, so a
+     * criterion about "the retry must not replay a stale credential" has to read
+     * the POST bucket: exactly one 401 there means the refresh was applied
+     * before the retry left (a second one is the wasted round the field saw on
+     * every call).
+     */
+    mcpUnauthorizedByMethod: Record<string, number>
   }
+  /** R9-D probe: also require this header (non-Authorization) to carry the access token. */
+  requireExtraHeader: (name: string | null) => void
   close: () => Promise<void>
 }
 
@@ -82,12 +96,13 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
   const stats: RealMcpServer['stats'] = {
     registrations: 0, grants: [], tokenRequests: [], mcpUnauthorized: 0, toolCalls: 0,
     refreshTokensIssued: [], revokedRefreshReuse: 0, mcpBearerTokens: [],
-    metadataRequests: 0, metadataRejected: 0,
+    metadataRequests: 0, metadataRejected: 0, mcpHeaders: [], mcpUnauthorizedByMethod: {},
   }
   let tokenLifetimeMs = 60 * 60 * 1000
   let rotateRefresh = true
   let mcpDelayMs = 0
   let metadataFailures = 0
+  let extraHeaderName: string | null = null
   /** token -> { expiresAt, kind } */
   const tokens = new Map<string, { expiresAt: number, kind: 'access' | 'refresh', used: boolean }>()
   const clients = new Map<string, { redirectUris: string[] }>()
@@ -227,7 +242,10 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
     }
     // ---- the protected MCP endpoint ---------------------------------------
     if (url.pathname === '/mcp') {
-      const header = req.headers.authorization ?? ''
+      stats.mcpHeaders.push({ ...req.headers })
+      const extraRaw = extraHeaderName === null ? undefined : req.headers[extraHeaderName.toLowerCase()]
+      const extraValue = String(Array.isArray(extraRaw) ? (extraRaw[0] ?? '') : (extraRaw ?? '')).replace(/^Bearer\s+/iu, '')
+      const header = extraHeaderName === null ? (req.headers.authorization ?? '') : `Bearer ${extraValue}`
       const token = header.replace(/^Bearer\s+/iu, '')
       // Recorded on arrival, BEFORE the delay: the wire fact ("which token did
       // the retry carry") must not depend on whether the caller is still there
@@ -238,6 +256,8 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
       const valid = entry !== undefined && entry.kind === 'access' && entry.expiresAt > Date.now()
       if (!valid) {
         stats.mcpUnauthorized++
+        const method = String(req.method ?? 'GET').toUpperCase()
+        stats.mcpUnauthorizedByMethod[method] = (stats.mcpUnauthorizedByMethod[method] ?? 0) + 1
         res.writeHead(401, {
           'content-type': 'application/json',
           'www-authenticate': `Bearer error="invalid_token", resource_metadata="${o}/.well-known/oauth-protected-resource"`,
@@ -266,6 +286,7 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
     setRotateRefresh: (rotate) => { rotateRefresh = rotate },
     setMcpDelay: (ms) => { mcpDelayMs = Math.max(0, Math.floor(ms)) },
     setMetadataFailure: (count) => { metadataFailures = Math.max(0, Math.floor(count)) },
+    requireExtraHeader: (name) => { extraHeaderName = name },
     stats,
     close: () => new Promise<void>(resolve => { http.close(() => resolve()) }),
   }

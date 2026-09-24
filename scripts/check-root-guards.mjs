@@ -79,17 +79,51 @@ const MINIMUM_REQUIRED_GUARDS = [
 ]
 
 /**
+ * 每条根守卫的**逐条登记**：`{ script, argvTail }`（第九轮审计 B 泳道 P1-5 收紧）。
+ *
+ * 为什么"形态对"还不够（P1-5 的现场）：`GUARD_SCRIPT_INVOCATION` 只证明脚本体长得像
+ * "直接执行一个脚本文件"。于是把**任意**守卫的脚本体换成另一个"能通过"的守卫
+ * （`"check:theme-tokens": "node scripts/check-workflows.mjs"`）之后 —— 名字、argv、
+ * 形态三者全对，`check-root-guards.mjs` 照报 `✓ check:theme-tokens`，而这条守卫的判据
+ * 一次都没跑（实测：本副本环境里正在失败的 `check:theme-tokens` 被重定向后转绿）。
+ *
+ * 所以三者必须绑在同一条链上：**名字**（argv[1]）→ **argv 尾**（`argvTail`）→
+ * **脚本路径**（`script`，逐字）。新守卫必须登记进本表，否则 fail-loud（exit 2）。
+ * 第二判据在 `scripts/verify-check-workspaces.mjs`（它另有一份**独立**的登记表：
+ * 两处同时被改才会静默，导入本表等于把两个判据合并成一个）。
+ */
+const REGISTERED_GUARD_ENTRIES = new Map([
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [] }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [] }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [] }],
+  ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [] }],
+  ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [] }],
+  ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [] }],
+  ['check:inventories', { script: 'node scripts/verify-inventories.mjs', argvTail: [] }],
+  ['check:theme-tokens', { script: 'node scripts/check-theme-tokens.mjs', argvTail: [] }],
+  ['check:glitchtip', { script: 'node scripts/verify-glitchtip-ops-check.mjs', argvTail: [] }],
+  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [] }],
+  ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [] }],
+  ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [] }],
+  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [] }],
+  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [] }],
+  // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
+  ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'] }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [] }],
+])
+
+/**
  * 每条守卫**允许的参数尾**（`['run', <守卫名>]` 之后的部分）—— 登记制（R8-D-22 / GATE-9）。
  *
  * 缺省 = **空尾巴**。想加尾巴就是放宽/改变判据面，必须在这里逐条登记并写明理由
  * （与 `ADVISORY_REGISTRY`、"下限守卫"同一套纪律：一个词/一个参数就能改变门禁语义的
  * 东西，不能是无登记的）。
+ *
+ * 取值来自 `REGISTERED_GUARD_ENTRIES`（唯一真源）—— 两张表各写一份会漂移。
  */
-const REGISTERED_GUARD_ARG_TAILS = new Map([
-  // `check:wasm-client-only` 的 `--portable`：只跑便携子集（需要真 PG / 显示器的组归
-  // server job 与 W6 三平台）。登记值必须与 `scripts/check-workspaces.mjs` 的表逐字一致。
-  ['check:wasm-client-only', ['--portable']],
-])
+const REGISTERED_GUARD_ARG_TAILS = new Map(
+  [...REGISTERED_GUARD_ENTRIES].map(([name, entry]) => [name, entry.argvTail]),
+)
 
 /**
  * "会改变语义"的旗标：出现在守卫 argv 里一律拒（R8-D-22）。
@@ -154,7 +188,14 @@ export function guardArgsProblem(name, args) {
 }
 
 /**
- * 校验根 `package.json` 里某条守卫脚本的**形态**（R8-D-22 的同族通道）。
+ * 校验根 `package.json` 里某条守卫脚本的**形态 + 指向**（R8-D-22 的同族通道；P1-5 收紧）。
+ *
+ * 三层判据，缺一层就有一个绕过口：
+ *   ① 有脚本体、且形态是"直接执行一个脚本文件"（`true` / `echo ok` / `node -e ""` 一律拒）；
+ *   ② 该守卫**登记在** `REGISTERED_GUARD_ENTRIES` 里（新守卫不登记 = 没人看着它跑哪个脚本）；
+ *   ③ 脚本体**逐字等于**登记值（"跑一个脚本"不够，必须是**那一个**脚本 —— 把正在失败的
+ *      `check:theme-tokens` 换成 `node scripts/check-workflows.mjs` 时，名字/argv/形态全对，
+ *      旧判据全绿而运行器照报 `✓`）。
  *
  * @param name - 守卫名。
  * @param body - 根 `package.json` 的 `scripts[name]` 取值。
@@ -168,6 +209,17 @@ export function guardScriptProblem(name, body) {
     return `\`${name}\` 的脚本体 ${JSON.stringify(body)} 不是"直接执行一个脚本文件"的形态`
       + '（允许的形态只有 `node scripts/<file>` / `bash scripts/<file>`，不接受任何参数）'
       + ' —— `true` / `echo ok` / `node -e ""` 这类壳会让守卫"通过"而什么都没判。'
+  }
+  const registered = REGISTERED_GUARD_ENTRIES.get(name)
+  if (registered === undefined) {
+    return `\`${name}\` 没有登记在 \`REGISTERED_GUARD_ENTRIES\` 里`
+      + ' —— 每条根守卫都必须逐字登记"它跑的是哪个脚本"（名字 / argv 尾 / 脚本路径三者同源），'
+      + '否则把任意守卫的脚本体重定向到另一个"能通过"的守卫，运行器会照报 `✓` 而判据一次没跑。'
+  }
+  if (body.trim() !== registered.script) {
+    return `\`${name}\` 的脚本体 ${JSON.stringify(body)} 与登记值 ${JSON.stringify(registered.script)} 不一致`
+      + ' —— "跑一个脚本"这个形态还不够，必须**是那一个**脚本：重定向到别的守卫时，名字与 argv'
+      + '一字不改、运行器照报 `✓ <名字>`，而这条守卫的判据一次都没跑（第九轮审计 B 泳道 P1-5 的现场）。'
   }
   return null
 }
@@ -404,6 +456,14 @@ if (hollowScripts.length > 0) {
   for (const entry of hollowScripts) console.error(`  · ${entry.problem}`)
   console.error('  ⇒ 名字与 argv 都对、实现是壳（`true`/`echo ok`/`node -e ""`/带参数）时，'
     + '本运行器会报"守卫通过"而实际零判定。请把脚本体改回 `node scripts/<file>` / `bash scripts/<file>`。')
+  process.exit(2)
+}
+// 反向对拍（第九轮审计 B 泳道 P1-5）：登记了却不在编排器表里的条目同样 fail-loud ——
+// 陈旧登记留着，下一个人就能把某个"已删守卫"的名字重新指到一个能通过的脚本上。
+const staleRegistered = [...REGISTERED_GUARD_ENTRIES.keys()].filter(name => !guards.some(guard => guard.name === name))
+if (staleRegistered.length > 0) {
+  console.error(`check-root-guards: REGISTERED_GUARD_ENTRIES 里的这些守卫不在编排器表里：${staleRegistered.join(', ')}`)
+  console.error('  ⇒ 守卫被删/改名后登记项必须一起清掉（陈旧登记 = 一个可复用的重定向目标）。')
   process.exit(2)
 }
 // 下限判据 = "在表里 **且 不是 advisory**"：光在表里不够 —— 一个 `advisory: true` 就能让

@@ -97,11 +97,9 @@ func TestR8Fix5UsageRetentionStatusObservable(t *testing.T) {
 		t.Fatalf("深后代 %s 不得被删（判据是「不回收但可见」，不是「删掉它」）", leaf)
 	}
 
-	// 最小计数访问器（供将来的 metric 面复用）必须与快照同源、同值。
-	if total, byReason := UsageRetentionUnreclaimableCount(); total != st.Skipped || byReason[usageSkipDescendant] != 1 {
-		t.Fatalf("UsageRetentionUnreclaimableCount() = (%d, %v)，与快照 (skipped=%d, reasons=%v) 分叉",
-			total, byReason, st.Skipped, st.SkippedByReason)
-	}
+	// R9C-4：`UsageRetentionUnreclaimableCount` 这个导出访问器在仓库内**零消费点**
+	// （只有本用例调用它），已删除 —— 计数面唯一出口是快照本身（`CurrentUsageRetentionStatus`
+	// 的 Skipped / SkippedByReason），少一个会分叉的投影。上面几条断言已经把它钉在快照上。
 
 	// 状态必须能**序列化进 /readyz**（cmd/server 的 usageRetentionReadyzHandler 用它）。
 	raw, err := json.Marshal(st)

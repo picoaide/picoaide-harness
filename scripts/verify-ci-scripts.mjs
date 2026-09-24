@@ -18,6 +18,10 @@
  *   6. 更新服务器(R2)发布:每渠道独立目录、清单内容、保留最近 3 版、
  *      缓存头(资产 immutable / 清单 no-cache)、清单最后写、缺 secrets 跳过、
  *      产物不全 fail-loud —— 这些出错都是静默的,只能在发版时才发现
+ *   7. `--body` 只能是纯路径(2026-09-24 发布链阻断:`fileb://` 前缀在新 AWS CLI 上
+ *      被 ParamValidation 拒绝,Release job 直到上传大件才失败):假 aws 与真 CLI
+ *      **同形**地拒绝两个前缀与不存在的路径,另加静态判据扫 scripts/*.sh ——
+ *      "改回 fileb://"必须在本地就红
  *
  * 用法:node scripts/verify-ci-scripts.mjs
  * 退出码:0 全部通过;1 有断言失败。
@@ -47,6 +51,16 @@ const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
 const failures = []
 const scratch = []
 
+// 意外抛出(例如"上传整条路径失败"之后某个正向对照去 readFileSync 一个不存在的产物)
+// 也必须把**已累积的断言失败条数**打出来:逐条失败信息在 fail() 里已经实时打到 stderr,
+// 但结尾的汇总行会随异常一起丢掉 —— 而"上传路径整体坏掉"恰恰是最需要诊断信息的那种
+// 回归(2026-09-24:脚本改回 `--body fileb://` 时,输出只剩一条 ENOENT 栈迹)。
+process.on('uncaughtException', error => {
+  process.stderr.write(`verify-ci-scripts: 意外异常:${error?.stack ?? String(error)}\n`)
+  process.stderr.write(`verify-ci-scripts: 异常前已累积 ${failures.length} 项断言失败(逐条见上方)\n`)
+  process.exit(1)
+})
+
 /**
  * 假 aws(给 ci-publish-update-server.sh 的本地回归用):把 s3 / s3api 子命令落到
  * 本地目录,并把每次调用记进日志,便于断言。
@@ -55,6 +69,10 @@ const scratch = []
  * `s3api put-object` / `s3api head-object`(2026-09-23 审计 K-01 起,上传走单请求
  * PUT + 存储侧校验和 —— 假 aws 必须同形,否则"上传成功但对象损坏"这类场景在本地
  * 根本构造不出来)。
+ *
+ * `--body` 的**契约**同样必须与真 CLI 同形(2026-09-24 发布链阻断事故):只接受纯
+ * 路径,`file://` / `fileb://` 前缀与"路径不存在"都报同一条 ParamValidation 并非零
+ * 退出。真 CLI 的实测形态见 `--body 形态判据`那两节(6c/6d)。
  *
  * 故障注入(通过**子进程环境变量**给,不用改脚本文本):
  *   FAKE_AWS_TRUNCATE_BYTES=N  put-object 只写前 N 字节(退出码仍为 0 —— 模拟
@@ -119,7 +137,22 @@ case "$cmd" in
         *) i=$((i+1)) ;;
       esac
     done
-    body="\${body#fileb://}"
+    # 与真实 AWS CLI 2.37.1 **同形**(2026-09-24 发布链阻断事故):--body 只接受
+    # **纯路径**。这里此前是一句 body="\${body#fileb://}" —— 假 CLI 主动兼容了真
+    # CLI 拒绝的形态,于是"脚本写 fileb://"在本地门禁里永远绿、到 tag 流水线上才炸
+    # (典型"mock 掩盖契约")。现在两个前缀与"路径不存在"都按真 CLI 报**同一条**
+    # ParamValidation 并非零退出(真 CLI 退出码 252)。不要改回宽容处理。
+    # (注意:本段在 JS 模板字符串里 —— 注释里也不能出现反引号,会提前结束字符串。)
+    case "\${body}" in
+      file://*|fileb://*)
+        echo "aws: [ERROR]: An error occurred (ParamValidation): Error parsing parameter '--body': Blob values must be a path to a file." >&2
+        exit 252
+        ;;
+    esac
+    if [ ! -f "\${body}" ]; then
+      echo "aws: [ERROR]: An error occurred (ParamValidation): Error parsing parameter '--body': Blob values must be a path to a file." >&2
+      exit 252
+    fi
     # 全参数入日志:缓存头断言(max-age / no-cache)就是靠这一行。
     record "\${args[*]}"
     dest="$store/$key"
@@ -3404,8 +3437,12 @@ echo x > "${distDir}/App.AppImage"
     `完整上传 + 正确大小/校验和必须成功(否则上面几条恒红),实际退出 ${String(ok.status)}: ${(ok.stderr ?? '').slice(0, 300)}`,
   )
   check(existsSync(manifestPath), '正向对照应写出 latest.json')
+  // existsSync 前置:正向对照失败时(例如脚本被改回 `--body fileb://`,上传压根没成功)
+  // 这里必须报成**断言失败**,而不是 ENOENT 抛出把后面的判据整段跳过 —— 那样只剩一条
+  // 栈迹,连"静态判据命中了哪几行"都看不到(判据的可诊断性也是判据的一部分)。
   check(
-    readFileSync(join(store, 'official', 'releases', '9.9.9', zipName), 'utf8') === content,
+    existsSync(join(store, 'official', 'releases', '9.9.9', zipName))
+      && readFileSync(join(store, 'official', 'releases', '9.9.9', zipName), 'utf8') === content,
     '正向对照:远端对象应与本地字节一致',
   )
   // 上传必须是**单请求 PUT + 声明整对象 SHA256**:多段上传的校验和是"分片校验和的
@@ -3474,6 +3511,195 @@ echo x > "${distDir}/App.AppImage"
       || scopedLog.includes(`head-object official/${needle}`),
     `正向对照:${needle} 必须被 head-object 校验过(缺了它 ⇒ 该对象的完整性判据不存在)`)
   }
+}
+
+// ---- 6c. `aws … --body` 只能是**纯路径**(静态判据,扫 scripts/*.sh) ----
+//
+// 现场(2026-09-24):tag 发布链的 Release job 在「上传版本资产」这一步失败 ——
+//   aws: [ERROR]: An error occurred (ParamValidation):
+//     Error parsing parameter '--body': Blob values must be a path to a file.
+// 根因是脚本把 `--body` 写成带 `fileb://` 前缀的形态。AWS CLI 2.37.1 实测
+// (`--endpoint-url http://127.0.0.1:1`,只做参数形态验证、不连任何远端):
+// `file://` / `fileb://` 前缀(相对/绝对路径都一样)与"不存在的路径"都被同一条
+// ParamValidation 拒掉(退出 252),纯路径能走到网络层。
+//
+// 6d 的用例直接打在假 aws 上(把宽容处理改回去即红);这一节是**静态**判据 ——
+// 它是唯一覆盖"某条 aws 调用没被任何用例真跑到"的网(例如中转脚本里的调用点,
+// 那里今天没有 `--body`,但判据面必须已经罩住 scripts/*.sh)。
+{
+  /**
+   * 扫一段 shell 文本的 `--body` 取值,返回 `{ count, offenders }`。
+   *
+   * 只看**代码行**(整行 trim 后以 `#` 开头按注释跳过):事故证据必须写进注释,而那
+   * 几行天然含这两个前缀的字面形态 —— 把注释算进去就是恒红。代价是"被注释掉的坏
+   * 调用"不拦(与 check-no-leftover-mutants 只抓行尾挂注释同一口径:判据面写清边界)。
+   * 反斜杠续行先拼回逻辑行,否则 `--body` 与它的取值分处两行时会漏。
+   */
+  const scanAwsBodyForms = (name, text) => {
+    const logical = []
+    for (const line of text.split(/\r?\n/u)) {
+      const previous = logical.length - 1
+      if (previous >= 0 && logical[previous].endsWith('\\')) {
+        logical[previous] = `${logical[previous].slice(0, -1)} ${line}`
+      } else {
+        logical.push(line)
+      }
+    }
+    let count = 0
+    const offenders = []
+    for (const line of logical) {
+      if (line.trim().startsWith('#')) continue
+      if (!/(^|\s)--body(\s|=)/u.test(line)) continue
+      count += 1
+      const value = /--body[=\s]+"?([^"\s]+)/u.exec(line)?.[1] ?? ''
+      if (/^fileb?:\/\//u.test(value)) offenders.push(`${name}: ${line.trim()}`)
+    }
+    return { count, offenders }
+  }
+
+  // 判据自证(正/负向对照):同一个扫描器喂一份**故意写成 fileb://** 的样本必须命中,
+  // 喂纯路径样本必须不命中 —— 否则"零命中"可能只是扫描器坏了(判据恒真)。
+  const badSample = 'if ! brand_run_checked aws s3api put-object \\\n  --bucket "$R2_BUCKET" --key k --body "fileb://${zip}" \\\n  --checksum-sha256 x; then\n'
+  check(scanAwsBodyForms('sample.sh', badSample).offenders.length === 1,
+    '静态判据自证:fileb:// 形态的样本必须被命中(否则这条判据是恒真的)')
+  const goodSample = 'if ! brand_run_checked aws s3api put-object \\\n  --bucket "$R2_BUCKET" --key k --body "$zip_body" \\\n  --checksum-sha256 x; then\n'
+  check(scanAwsBodyForms('sample.sh', goodSample).offenders.length === 0,
+    '静态判据自证:纯路径样本不得命中(否则这条判据是恒红的)')
+
+  const shellScripts = readdirSync(join(root, 'scripts'))
+    .filter(name => name.endsWith('.sh'))
+    .sort()
+  check(
+    shellScripts.includes('ci-publish-update-server.sh') && shellScripts.includes('ci-channel-transfer.sh'),
+    `扫描面必须覆盖两个 R2 脚本,实际: ${shellScripts.join(', ')}`,
+  )
+  let publishBodyArgs = -1
+  const offenders = []
+  for (const name of shellScripts) {
+    const scanned = scanAwsBodyForms(name, readFileSync(join(root, 'scripts', name), 'utf8'))
+    if (name === 'ci-publish-update-server.sh') publishBodyArgs = scanned.count
+    offenders.push(...scanned.offenders)
+  }
+  // 判据面自证:三个上传点(版本资产 / SHA256SUMS / 指针)+ 上传前探测必须在场 ——
+  // 否则"零命中"可能只是"什么都没扫到"(判据面被删/被改名/被拆分)。
+  check(publishBodyArgs >= 3,
+    `ci-publish-update-server.sh 里应至少有 3 处代码级 --body 取值(实际 ${publishBodyArgs})—— 判据面消失即是回归`)
+  check(offenders.length === 0,
+    'aws --body 必须是纯路径,不得用 file:// / fileb:// 前缀(AWS CLI 2.37.1 会以 ParamValidation 拒绝):'
+    + `\n  ${offenders.join('\n  ')}`)
+}
+
+// ---- 6d. 假 aws 的 `--body` 契约必须与真 CLI 同形(2026-09-24 事故) ----
+//
+// 假 aws 此前有一句 `body="${body#fileb://}"`:它主动兼容了真 CLI 拒绝的形态,于是
+// "脚本写 fileb://"在本地门禁里一路绿、到 tag 流水线的 Release job 才炸(典型
+// "mock 掩盖契约")。这一节**直接打在假 aws 上**(不经过发布脚本):前缀形态与不存在
+// 的路径都必须被拒,且报**同一条** ParamValidation(真 CLI 2.37.1 的原文)并非零退出;
+// 纯路径是正向对照(否则上面几条可能只是"什么都不接受")。
+{
+  const work = tempDir('ci-fake-aws-body-')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+  const probe = join(work, 'probe.txt')
+  writeFileSync(probe, 'probe\n')
+
+  // 真 CLI 的原文(实测;退出码 252)。断言只钉"这句必须出现",不钉包装前后缀。
+  const realCliMessage = 'Blob values must be a path to a file'
+  const runFakePut = body => spawnSync(fakeAws, [
+    '--endpoint-url', 'http://127.0.0.1:1', 's3api', 'put-object',
+    '--bucket', 'b', '--key', 'k', '--body', body,
+  ], { encoding: 'utf8', cwd: work })
+
+  for (const [label, body] of [
+    ['fileb:// + 绝对路径', `fileb://${probe}`],
+    ['file:// + 绝对路径', `file://${probe}`],
+    ['fileb:// + 相对路径', 'fileb://probe.txt'],
+    ['file:// + 相对路径', 'file://probe.txt'],
+  ]) {
+    const rejected = runFakePut(body)
+    check(rejected.status !== 0,
+      `假 aws 必须拒绝 ${label}(真 CLI 2.37.1 以 ParamValidation 拒绝,退出 252)`)
+    check(`${rejected.stderr ?? ''}`.includes(realCliMessage),
+      `假 aws 拒 ${label} 时必须报真 CLI 的同一条错误,实际: ${(rejected.stderr ?? '').slice(0, 200)}`)
+  }
+  const missing = runFakePut(join(work, 'nope.txt'))
+  check(missing.status !== 0, '假 aws 必须拒绝不存在的路径(真 CLI 报同一条错误)')
+  check(`${missing.stderr ?? ''}`.includes(realCliMessage),
+    `不存在的路径也要报真 CLI 的同一条错误,实际: ${(missing.stderr ?? '').slice(0, 200)}`)
+
+  // 正向对照:纯路径必须被真的接受并落盘。
+  const okPut = runFakePut(probe)
+  check(okPut.status === 0,
+    `假 aws 必须接受纯路径(正向对照),实际退出 ${String(okPut.status)}: ${okPut.stderr ?? ''}`)
+  check(existsSync(join(store, 'k')) && readFileSync(join(store, 'k'), 'utf8') === 'probe\n',
+    '正向对照:纯路径上传要真的落到 store(否则"拒绝"可能只是因为它什么都不做)')
+}
+
+// ---- 6e. 生产调用形态:`--bundle` 缺省(相对路径)时 `--body` 仍必须是绝对路径 ----
+//
+// ci.yml 里的真实调用是 `bash scripts/ci-publish-update-server.sh --list channels.list`
+// —— **不给 `--bundle`**,于是取缺省值 `release-bundle`(相对当前目录);`--list` 与
+// 产物目录也都是相对的。也就是说 abs_path 的"相对 → 绝对"归一正是**生产路径**,而
+// §6/§6b/§10 传的全是绝对 `--bundle`,覆盖不到它(典型"本地绿、线上红"形态)。
+// 这一节按生产形态真跑一次,并直接断言最终交给 CLI 的 `--body` 取值是绝对路径。
+{
+  const work = tempDir('ci-publish-relative-')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+  writeFileSync(join(work, 'channels.list'), 'official\n')
+  const archive = 'picoaide-server-3.3.3-amd64.zip'
+  const content = 'zip-official-relative-probe'
+  mkdirSync(join(work, 'release-bundle', 'official'), { recursive: true })
+  writeFileSync(join(work, 'release-bundle', 'official', archive), content)
+  writeFileSync(
+    join(work, 'release-bundle', 'official', 'SHA256SUMS'),
+    `${createHash('sha256').update(content).digest('hex')}  ${archive}\n`,
+  )
+  const run = spawnSync('bash', [publishScript, '--list', 'channels.list'], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: 'v3.3.3',
+    },
+  })
+  check(run.status === 0,
+    `按生产形态(相对 --list、缺省 --bundle)发布应成功,实际退出 ${String(run.status)}: ${(run.stderr ?? '').slice(0, 300)}`)
+  const putLines = readFileSync(log, 'utf8').split('\n').filter(line => line.includes('put-object'))
+  check(putLines.length >= 3,
+    `应至少记录 3 次 put-object(上传前探测 + 版本资产/校验和 + 指针),实际 ${putLines.length}`)
+  const bodies = putLines.map(line => /--body (\S+)/u.exec(line)?.[1] ?? '')
+  check(bodies.length > 0 && bodies.every(value => value.startsWith('/')),
+    `相对 --bundle 归一之后,交给 CLI 的 --body 仍必须是绝对路径,实际: ${bodies.join(' | ')}`)
+  check(existsSync(join(store, 'official', 'latest.json'))
+    && readFileSync(join(store, 'official', 'latest.json'), 'utf8').includes('3.3.3'),
+  '生产形态下 latest.json 仍应写出(说明相对参数没有把上传路径弄丢)')
+
+  // 上传前探测(2026-09-24 加固)也必须有判据 —— 否则它会**静默消失**,而消失的代价
+  // 正是这次事故的形态:CLI 形态/endpoint 不对时,要先推完 ~500MB 才失败。
+  const logLines = readFileSync(log, 'utf8').split('\n')
+  const probeKey = /--key (\S*\/\.probe-\S+)/u.exec(putLines.find(line => line.includes('.probe-')) ?? '')?.[1] ?? ''
+  check(probeKey !== '', '必须先上传一个 `.probe-<随机>` 探测对象(去掉它 = 传完大件才知道形态不对)')
+  const probeIndex = putLines.findIndex(line => line.includes('.probe-'))
+  const assetIndex = putLines.findIndex(line => line.includes(archive))
+  check(probeIndex !== -1 && assetIndex !== -1 && probeIndex < assetIndex,
+    '探测上传必须早于版本资产上传(否则起不到"判死在大件之前"的作用)')
+  check(logLines.includes(`head-object ${probeKey} ContentLength`)
+    && logLines.includes(`head-object ${probeKey} ChecksumSHA256`),
+  '探测对象必须走 verify_remote_object 的完整判据(大小 + SHA256 都要读回)')
+  check(logLines.includes(`rm s3://test-bucket/${probeKey}`),
+    '探测对象必须被删除(几字节的临时对象不该留在发布面)')
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
@@ -4031,4 +4257,5 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
   + '渠道仓 revision 解析的 stdout/stderr 分流(SSH deploy key 形态 + 失败分类 + 脱敏 + 唯一 EXIT trap)/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
-  + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫全部符合预期\n')
+  + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫/'
+  + 'aws --body 纯路径形态(假 CLI 与真 CLI 同形拒绝 file://·fileb:// 前缀 + scripts/*.sh 静态扫描)全部符合预期\n')
