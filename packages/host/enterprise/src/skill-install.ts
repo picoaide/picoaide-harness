@@ -1472,6 +1472,9 @@ async function assertRealSkillDirectory(dir: string, name: string, locale: HostL
   if (info === undefined) throw new Error(`skill "${name}" has no SKILL.md`)
   if (info.isSymbolicLink()) {
     // 用户可见(经 auth-gate 的 { error } 回到能力中心面板), 故按宿主语言取。
+    // **库内别名同样拒收**（有意, 不是漏洞）: 能力中心本来就列不出符号链接形态的
+    // 技能目录, 放行它只会让"界面上不存在、上传包里却存在"两种事实并存
+    // （2026-09-24 复审 V3 的 N7）。要恢复打包, 把目录换成真实目录即可。
     throw new Error(hostCopy(
       locale,
       `技能 "${name}" 是符号链接:拒绝打包(技能必须是技能库里的真实目录,不能指向库外)`,
@@ -1516,6 +1519,10 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
     if (real === undefined || (real !== root && !real.startsWith(`${root}${sep}`))) {
       throw new Error(`skill entry escapes the skill root: ${rel}`)
     }
+    // 认账的残量（2026-09-24 复审 V3 的 N8）：**硬链接**不受上面这条落点断言约束
+    // —— `realpath` 对硬链接返回的仍是该目录里的路径（硬链接没有"目标路径"），
+    // 结构性修不了。要利用它，攻击者必须已经能在技能库里创建硬链接（即已有库内
+    // 写权限），因此按"与既有写权限同级"接受，不额外加无效判据。
     if (info.isDirectory()) {
       zip.addFile(`${rel}/`, Buffer.alloc(0), '', 0o755)
       await addDirToZip(zip, root, abs, rel)

@@ -903,7 +903,34 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 2. **`trap ... EXIT` 是覆盖语义**：共享脱敏库 `ci-brand-mask.sh` 也装 EXIT trap（清理含品牌串的临时文件），F3 第一版的清理 trap **从未执行过**；正确形态 = 登记渠道后安装 + `trap -p EXIT` 捕获当时的 trap 并在自己收尾里回放。**任何往这些脚本里加 EXIT trap 的改动都要照此办。**
 3. **同族"修复"可能造出反向回归**：F5 首版把授权槽的"无凭据"判据写成"任意单个 RFC 7230 token"，于是 `Authorization: <opaque>` 这类合法声明会被判成无凭据而被框架 bearer 顶掉/删除 —— 与它要治的病同型、方向相反。⇒ 判据的**白名单**必须只含"确实不携带凭据"的形态（已知方案词），**不在清单里的一律按有凭据处理**。这条与第九轮方法学是同一条：**判据问的问题要问对**（"有没有凭据"≠"像不像方案词"）。
 
-**第十轮认账未修**（顺延，不重复计数）：R9-D-04（日账按年分片）、R9-D-06（深层后代永不回收）、R9-D-08（`relations` 计数语义）、`check-go-test-json` 自检下限仍是自报计数、同版本重发 × immutable 缓存无 purge 判据、`--scope` 子串语义、`cleanupDetachedStepHook`（仅测试注入点，R10-A-03 之后其必要性下降，待评审）、F2 的 C-16（`--changed` 零包仍 EXIT=0，已加显式告警；改退出码需单独拍板）、F4 的裁决项（"子树仍持有保留期内行"这道前置闸门保留为**只对非叶子** —— 变异 M3 证明它不是金额窗口的守卫，而把它套到叶子上会让合法的更宽分区永不回收，与既有回归冲突）。
+**第十轮的三条独立复审（"每条修复由另一名子代理复审 + 变异验证"）**
+
+| 复审 | 对象 | 判定 | 新发现 |
+|---|---|---|---|
+| **V1** 门禁·CI·发布链 | F1/F2/F3（85 条日志 + 6 个自写探针 + `HEAD`/`BASE` 双副本对照） | F1 的 5 条与 F3 的 9 条**逐条经独立变异证明为真**；F2 的 8 条里 **7 条成立**、**C-08 不成立** | **1 P1 + 4 P3** |
+| **V2** 服务端保留期 | F4（自写变异器 + 真 PG 2M 行分区） | **金额正确性成立、可用性代价不成立** | **1 P1 + 2 P2 + 2 P3** |
+| **V3** 客户端·宿主·桌面 | F5/F6（真端点记录头 / 真 zip / 真 SDK 传输 / 真 vitest + 负载对照） | 六条方向**全部成立**，未发现修复引入的用户可见回归；M-1 的两类假红被独立复现 | **2 P2 + 8 P3** |
+
+**复审打回的三条 P1（都已修，见下"第二波"）**
+
+1. **C-08 从未接线（V1）**：`check-root-guards.mjs` 的 `summarize()` 与父提交**逐字节相同**、`grep -c formatFailureReport` = **0** —— F2 已把"判定行扫描 + 有界输出"抽成共享的唯一实现并自证，但 F1 侧从未采纳 ⇒ **根守卫（docs-only PR 的唯一防线）失败时判定行 0 次进日志**。这是**派工与集成的漏洞**：接口交付了，没人负责接线，主控也没在集成时逐条核对"声称已完成"。
+2. **ANSI 让判定行全灭（主控在集成期从真实 CI 日志发现，两份复审都没列）**：PR #146 的失败 job 里编排器打印「本次输出里**一条锚定判定行都没有匹配到**」，而同一份输出里确实有 ` FAIL  tests/…` —— CI 的 vitest 输出带 ANSI（`\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m`），而锚定判据要求**行首**（仅空白之后）就是判定词；本地无 TTY ⇒ 无 ANSI ⇒ **判据"本地绿、CI 瞎"**，且它直接让每一次 CI 失败都变得不可诊断。
+3. **服务端把窗口关闭的代价转成了秒级停顿（V2）**：把补账移进临界区后，`usage`（父表）的 AEX 从 57ms 涨到 **2.5s（空载逐语句 @2M 行）/ 10.9–22.0s（有并发写入）**，**并发计量 `INSERT INTO usage` 被挡同一时长**（PG 慢语句日志坐实 18866ms，`errs=0` ⇒ 不是 503 而是整段停顿）；且 20s 是**每语句**预算而补账已吃到 94%（实测持锁 22.02s > 20s）⇒ 一旦超时被归类为"延后"，该月**永久静默不回收**；`ownerChanged := assertDetachedFromUsage(...) != nil` 把"复检自身报错"当成"归属已变"⇒ 真失败被当良性吞掉。
+
+**由 CI 实证暴露的既有真 bug（P1，非第十轮回归）**：`2c7088aabd` 的**同一 commit 两次 CI 一红一绿**，失败用例是第九轮的 R9-D-1（"重试带旧声明头 ⇒ 第二次 401 ⇒ 现场每次失败再烧一枚 refresh grant"）。G4 泳道用 `BASE`/`HEAD` 双语料对拍证明**两棵树同因同率（整套件 3 路并发下各 1/21 ≈ 4.8%）**、竞态源头**逐字节相同** ⇒ 既有竞态，被本轮的 CI 实证**暴露**（本轮对 connectors 的改动在该路径上行为等价）。机制：活头记录（围栏装进实例 `_requestInit.headers` 的那个对象）的原地更新**只从** `pico/connector-credentials-changed` 监听器进入，而它是 `void handOffLiveHeaders(...)` fire-and-forget、函数体第一件事是 `await store.readCredential(def.id)`；pinned SDK 的 401 自愈在续期 promise 落地后 **3–4ms** 就重读该记录（`_send` 递归里重新 `await this._commonHeaders()`）⇒ **这次磁盘读只要被推迟 ≥1ms，重试就重放被冻死的头**（判别性探针：给交接注入 0ms ⇒ 1×401；**≥1ms ⇒ 2×401 且实测重试头为旧值**）。**关键否证**：整体变慢**不会**翻红（pbkdf2 占满 libuv 线程池把交接推迟 319–1866ms 仍 1×401，因为重试排在同一个 FIFO 队列之后）⇒ 这是"**只推迟交接侧**"的差分停顿型竞态，也正是"本地怎么压都绿、CI 偶红"的原因；窗口（3–4ms）比一次 HTTP 路由往返回还窄，**测试侧确定性等待够不着它** ⇒ 只能修产品侧。
+
+**第二波修复（G1–G4，与第一波同一分支同一 PR）**
+
+| 泳道 | 收口内容 |
+|---|---|
+| **G1** 门禁 | C-08 **接线**（`import { formatFailureReport }`，本地 `summarize()` 整段删除；顶层代码搬进 `main()` + 入口判定，保证被 import 时零副作用）+ **运行级判据**（真 runner + 真编排器，marker 埋 200 行噪声后 ⇒ 判定行必须出现 ≥1 次）；**ANSI 归一**（`stripAnsiSequences` 覆盖 CSI/OSC/裸 ESC，**打印仍用原行**、短输出逐字原样）；判定形态补 go `--- FAIL:`/`panic:`/eslint `12:5 error`/`--reporter=json` + **混合场景有界兜底**；新增 **[SK-18]**（被钉 job/步骤的 `working-directory` 逐字登记制）与 **[SK-19]**（`<<` YAML 合并键 fail-closed）；把 w14 拆成"镜像登记"与"容器 env 键白名单"两个样本（审计原始变异由 EXIT=0 变 EXIT=1）；`COREPACK_HOME` 清洗的**离线代价**写进启动证据与失败文案 |
+| **G2** 客户端·桌面 | 桌面预算静态判据的三条假绿通道（换匹配器钉死墙钟值 / 非 spec helper / `vi['waitFor']` 元素访问）全部收口，时钟钉死改"取值形态"判据 + 显式豁免注释；`${FIELD}` 模板查表改 `Object.hasOwn`（`${constructor}`/`${toString}` 曾让线上发出 `function Object() { [native code] }`）；在途记账的剪枝作用域从 **URL 收到传输实例**（同端点另一条传输的票据不再被误剪）；`it.each`/`it.skipIf`/数值形态预算进判据面；`MCP_TOOL_CALL_TIMEOUT_MS` 收成一处具名常量；包级 `testTimeout` 口径唯一化并认账代价；发布说明补 §八 |
+| **G3** 服务端 | 临界区拆**三段式**：预补账（池上无锁）→ **冻结段**（`usage` AEX + `rel` AEX，只做 DETACH）→ **结算段**（`usage` AS + `rel` AEX：持锁复检归属 → 聚合 → DROP → COMMIT）。父表 AEX 从 **9.0–13.8s 收到 6–19ms**，并发计量写入最长耗时从 **9.0–14.1s 收到 0.32–0.58s**，而金额窗口仍关闭（冻结点 = DETACH 提交；再领回要 `rel` 的 AEX，被结算段挡住）；预算改为**按行数推导**（`base 15s + 20µs/行`，下限 30s/上限 180s）+ 结算段 ctx 总上界；"延后"改**有界**（同一关系连续 5 轮延后升级为可见告警）；`/readyz` 新增 `deferred_streak`/`max_deferred_streak`/`deferred_relations`/`last_deferred_at`/`deferred_stalled`/`stalled_relations`（键序与尾 `\n` 契约未动）；归属复检改**三态**（`unknown` 一律 fail-loud，只有 `attached` 才走良性 deferred）；N5 在 `f325817ae8` 与 HEAD 双语料对拍判"既有" |
+| **G4** 连接器竞态 | 在 `TokenRefresher` 的 `onRefreshed(id, tokens, persisted)` 里用**刚落盘的凭据同步**调 `refreshLiveHeaders` —— 交接路径上**零 await**，SDK 的 401 重试不可能再读到已被存储层抛弃的那一代；异步监听器保留兜底（重放同一次渲染是幂等的），不会把偶发变必然 |
+
+**第二波冻结态实测**：整仓 `corepack yarn check` **32/32 通过 / 0 失败 / 0 跳过，EXIT=0**（`verify-check-workspaces` 从 409 断言 / 26 场景增到 **460 断言 / 30 场景**）；`cd server && make check` **EXIT=0**（**Go 55 包 ok / 0 FAIL**、webadmin **643 用例**）；connectors **52 文件 / 448 用例**；desktop **102 文件 / 1221 通过 + 3 跳过**；R9-D-1 修复后在 4 路并发 ×6 轮下 **24/24 绿**；`check-workflows` / `check-root-guards`（17/17）/ `check-guard-parser-integrity` / `verify-ci-scripts` / `check-no-leftover-mutants` 全 EXIT=0。
+
+**第十轮认账未修**（顺延，不重复计数）：R9-D-04（日账按年分片）、R9-D-06（深层后代永不回收）、R9-D-08（`relations` 计数语义）、`check-go-test-json` 自检下限仍是自报计数、同版本重发 × immutable 缓存无 purge 判据、`--scope` 子串语义、`cleanupDetachedStepHook`（仅测试注入点，R10-A-03 之后其必要性下降，待评审）、F2 的 C-16（`--changed` 零包仍 EXIT=0，已加显式告警；改退出码需单独拍板）、F4 的裁决项（"子树仍持有保留期内行"这道前置闸门保留为**只对非叶子** —— V2 独立复验该裁决**正确**：同一变异下审计方 D-T1 仍 `SILENT_LOSS=0.00`，而套到叶子上会让合法更宽分区永不回收、与既有回归冲突）；V2 的 N5（`ensureUsagePartition` × 清理并发下的瞬时 `partition-bound-unreadable`，双语料对拍判**既有**）；V3 的 N6/N7/N8（工具预算常量已收口；库内符号链接技能一并拒收属有意 fail-loud，已写注释；技能目录内**硬链接**不受 `realpath` 落点断言约束，结构性修不了 ⇒ 按"与库内写权限同级"接受并写注释）。
 
 ### 7.4 收敛判定
 

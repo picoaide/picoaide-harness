@@ -47,7 +47,7 @@ import {
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -2196,6 +2196,324 @@ if (!selfCheckProbeChild) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// C-08 接线 / ANSI 归一化 / 判定形态补表（2026-09-24 第十轮复审 V1 的 P1×2 + P3-D1）
+//
+// 三条现场（都来自真实 CI，不是构造出来的）：
+//   · **C-08**：`check-root-guards.mjs` 的失败摘要曾是自己那份"头 20 + 省略 + 尾 20"，
+//     判定行落在中段时在日志里出现 **0** 次（独立探针实测）；编排器侧抽出的共享实现
+//     `formatFailureReport` 对同一段输出保留 **1** 次 —— 但 F1 侧从未接线（`grep -c
+//     formatFailureReport scripts/check-root-guards.mjs` = 0）。
+//   · **ANSI**：CI 里 vitest 输出带颜色（`\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …`、
+//     `\x1b[31m×\x1b[39m`），而判定行匹配**锚定在行首** ⇒ 彩色的判定行一条都不匹配，
+//     编排器打印「一条锚定判定行都没有匹配到」；本地无 TTY ⇒ 无 ANSI ⇒ 本地绿、CI 瞎。
+//   · **P3-D1**：四类真实失败行形态（go `--- FAIL:`/`panic:`、`--reporter=json` 的单行
+//     JSON、eslint `12:5  error …`）不在锚定表里 ⇒ 落在头 150/尾 200 窗外时原行丢失。
+//
+// 判据形态：
+//   ① **运行级**（probe tree：真 `check-root-guards.mjs` + 真 `check-workspaces.mjs` 的
+//      实现 + corepack 桩）—— 守卫失败 + 判定行埋在中段 ⇒ 判定行必须出现 ≥1 次；
+//   ② **单元级**（import 真模块）—— 彩色输出与去色输出的判定行集合必须相同；四种形态
+//      逐条锚定；被 import 时零副作用（两个脚本都必须如此）。
+// 变异（拆掉修复 ⇒ 本段必红）：把 `check-root-guards.mjs` 换回本地 `summarize()`、
+// 拿掉 ANSI 剥离、从 VERDICT_LINE 里删掉任一形态、删掉 COREPACK_HOME 的离线指引。
+// ---------------------------------------------------------------------------
+
+/**
+ * 从门禁输出里取出**判定段**的正文（判据：本段的判定行可能是 `--- FAIL: …` 这类
+ * **以 `--- ` 开头**的形态 —— 用 `split('\n--- ')` 会把它自己当成段边界，
+ * 于是"形态没锚定"变成假红。这里只在**已知的段头**上切分）。
+ * @param output - 门禁进程的 stdout+stderr。
+ * @returns 判定段正文（没有该段时返回空串）。
+ */
+function verdictSectionOf(output) {
+  const rest = output.split('--- 失败相关行')[1]
+  if (rest === undefined) return ''
+  const next = rest.search(/\n--- (?=输出末尾|另有 |其它疑似错误行|兜底:|判定行预算已用尽)/u)
+  return next < 0 ? rest : rest.slice(0, next)
+}
+
+/** probe tree 里那个"合成守卫"的名字（必须同时出现在 GUARDS 表 / 登记表 / package.json）。 */
+const PROBE_GUARD_NAME = 'check:probe-verdict'
+/** 中段判定行的 marker（只出现在探针输出里）。 */
+const PROBE_VERDICT_MARKER = 'R10G1-C08-MARKER'
+/** 探针树里 corepack 桩的行为：合成守卫打印"长噪声 + 中段判定行 + 长噪声"并退出 1。 */
+const PROBE_STUB_BODY = [
+  `  *${PROBE_GUARD_NAME}*)`,
+  '    i=0; while [ $i -lt 200 ]; do printf \'probe noise line %s\\n\' "$i"; i=$((i+1)); done',
+  `    printf 'AssertionError: ${PROBE_VERDICT_MARKER}\\n'`,
+  '    i=0; while [ $i -lt 400 ]; do printf \'probe tail line %s\\n\' "$i"; i=$((i+1)); done',
+  '    exit 1 ;;',
+  'esac',
+  'exit 0',
+  '',
+].join('\n')
+
+/** 从 `check-root-guards.mjs` 源码里解析下限守卫表（探针树必须把它们都放进去，否则 exit 2）。 */
+function parseMinimumRequiredGuards(source) {
+  const block = /const MINIMUM_REQUIRED_GUARDS = \[([\s\S]*?)\]/u.exec(source)?.[1]
+  if (block === undefined) return null
+  return [...block.matchAll(/'([^']+)'/gu)].map(match => match[1])
+}
+
+/** 把编排器副本里的 `GUARDS` / `ADVISORY_REGISTRY` 两张表替换成合成表（其余字节一律不动）。 */
+function patchOrchestratorTables(source, names) {
+  const guardsBlock = /const GUARDS = \[[\s\S]*?\n\]/u.exec(source)
+  if (guardsBlock === null) throw new Error('找不到 GUARDS 表')
+  const synthetic = ['const GUARDS = [', ...names.map(name => `  { name: '${name}', args: ['run', '${name}'] },`), ']'].join('\n')
+  let out = replaceOnce(source, guardsBlock[0], synthetic)
+  const advisoryBlock = /const ADVISORY_REGISTRY = \[[\s\S]*?\n\]/u.exec(out)
+  if (advisoryBlock === null) throw new Error('找不到 ADVISORY_REGISTRY 表')
+  out = replaceOnce(out, advisoryBlock[0], 'const ADVISORY_REGISTRY = []')
+  return out
+}
+
+/** 把根守卫副本里的 `REGISTERED_GUARD_ENTRIES` 换成同名的合成登记（脚本体与 package.json 一致）。 */
+function patchRunnerRegistry(source, names) {
+  const block = /const REGISTERED_GUARD_ENTRIES = new Map\(\[[\s\S]*?\n\]\)/u.exec(source)
+  if (block === null) throw new Error('找不到 REGISTERED_GUARD_ENTRIES 表')
+  const entries = names.map(name =>
+    `  ['${name}', { script: 'node scripts/${name.replace(/[:]/gu, '-')}.mjs', argvTail: [], digest: '${'a'.repeat(64)}' }],`)
+  return replaceOnce(source, block[0],
+    ['const REGISTERED_GUARD_ENTRIES = new Map([', ...entries, '])'].join('\n'))
+}
+
+/**
+ * 造一棵**根守卫探针树**：真 `check-root-guards.mjs` + 真 `check-workspaces.mjs`（只换两张表）
+ * + corepack 桩。这样"运行级判据"打在**真实实现**上（不是对源码做正则）。
+ * @param options - `env`:额外注入给探针进程的环境变量。
+ * @returns `{ tree, run }`（`run` 已带好 PATH 与 env）。
+ */
+function buildRootGuardProbe(options = {}) {
+  const tree = tempDir('check-root-guards-probe-')
+  scenariosRun += 1
+  mkdirSync(join(tree, 'scripts'))
+  mkdirSync(join(tree, 'bin'))
+  const runnerSource = readFileSync(join(root, 'scripts', 'check-root-guards.mjs'), 'utf8')
+  const minimum = parseMinimumRequiredGuards(runnerSource)
+  check(Array.isArray(minimum) && minimum.length > 0,
+    'C-08(接线): 从 check-root-guards.mjs 里读不出 MINIMUM_REQUIRED_GUARDS —— 本判据的锚点失效')
+  const names = [...(minimum ?? []), PROBE_GUARD_NAME]
+  const orchestratorSource = readFileSync(subject, 'utf8')
+  writeFileSync(join(tree, 'scripts', 'check-workspaces.mjs'), patchOrchestratorTables(orchestratorSource, names))
+  writeFileSync(join(tree, 'scripts', 'check-root-guards.mjs'), patchRunnerRegistry(runnerSource, names))
+  writeFileSync(join(tree, 'package.json'), `${JSON.stringify({
+    name: 'root-guard-probe',
+    private: true,
+    scripts: Object.fromEntries(names.map(name => [name, `node scripts/${name.replace(/[:]/gu, '-')}.mjs`])),
+  }, null, 2)}\n`)
+  const stub = join(tree, 'bin', 'corepack')
+  writeFileSync(stub, `#!/bin/sh\ncase "$*" in\n${PROBE_STUB_BODY}`)
+  chmodSync(stub, 0o755)
+  const run = extraEnv => spawnSync(process.execPath, [join('scripts', 'check-root-guards.mjs'), '--concurrency', '1'], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: {
+      ...cleanGitEnv(),
+      PATH: `${join(tree, 'bin')}:${process.env.PATH}`,
+      FORCE_COLOR: '0',
+      ...(options.env ?? {}),
+      ...(extraEnv ?? {}),
+    },
+  })
+  return { tree, run }
+}
+
+{
+  // ---- ① 运行级：判定行埋在中段 ⇒ 必须出现 ≥1 次（C-08 的正面判据）----------------
+  const probe = buildRootGuardProbe()
+  const result = probe.run()
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  check(result.status === 1,
+    `C-08(运行级): 合成守卫失败时根守卫运行器必须 exit 1（实际 ${result.status}）：${JSON.stringify(output.slice(0, 300))}`)
+  const markerHits = (output.match(new RegExp(PROBE_VERDICT_MARKER, 'gu')) ?? []).length
+  check(markerHits >= 1,
+    'C-08(运行级): 守卫失败 + 判定行埋在中段（200 行噪声之后、400 行尾部噪声之前）时，'
+    + `判定行必须出现 ≥1 次 —— 旧实现（头 20 + 省略 + 尾 20）这里是 0 次；实际 ${markerHits} 次：`
+    + `${JSON.stringify(output.slice(-500))}`)
+  const verdictSection = verdictSectionOf(output)
+  check(verdictSection.includes(PROBE_VERDICT_MARKER),
+    `C-08(运行级): 判定行必须在**判定段**里（不是碰巧落在尾窗），实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+  // 接线证据：共享实现的横幅必须在（本地 summarize 没有这一段）。
+  check(/\(输出共 \d+ 行/u.test(output),
+    `C-08(接线): 失败详情必须来自共享实现 formatFailureReport（横幅 "(输出共 N 行…"），实际 ${JSON.stringify(output.slice(-400))}`)
+  check(!output.includes('（省略'),
+    'C-08(接线): 旧的自建摘要（"…（省略 N 行）"）不得再出现 —— 两条门禁只允许一份实现')
+
+  // ---- ② COREPACK_HOME 的离线处置指引（P3-D4 的第②条：清洗 fail-closed + 显式指引）----
+  const corepack = buildRootGuardProbe({ env: { COREPACK_HOME: '/tmp/r10g1-corepack-home' } })
+  const corepackRun = corepack.run()
+  const corepackOutput = `${corepackRun.stdout ?? ''}${corepackRun.stderr ?? ''}`
+  check(corepackOutput.includes('COREPACK_HOME'),
+    'P3-D4: 清洗掉 COREPACK_HOME 时必须在输出里点名它（证据，不是静默）')
+  check(corepackOutput.includes('$HOME/.cache/node/corepack') && corepackOutput.includes('装进镜像'),
+    'P3-D4: 必须给出离线/自托管 runner 的两条处置（预热默认缓存 `$HOME/.cache/node/corepack` / '
+    + `把 yarn 装进镜像）—— 只清洗不给出路等于把离线 runner 静默推向 npmjs；实际 ${JSON.stringify(corepackOutput.slice(-600))}`)
+}
+
+{
+  // ---- ③ 单元级：被 import 时零副作用 + ANSI 归一化 + 逐形态锚定 -------------------
+  //
+  // 直接 import 真模块（`check-workspaces.mjs` 的 `isEntryPoint()` 守卫是这条判据的前提：
+  // 被 import 时**什么都不许跑**）。import 期间捕获 stdout/stderr —— 任何输出都是缺陷。
+  const captured = []
+  const origLog = console.log
+  const origError = console.error
+  const origOut = process.stdout.write.bind(process.stdout)
+  const origErr = process.stderr.write.bind(process.stderr)
+  console.log = (...args) => captured.push(`log:${args.join(' ')}`)
+  console.error = (...args) => captured.push(`error:${args.join(' ')}`)
+  process.stdout.write = chunk => { captured.push(`stdout:${String(chunk)}`); return true }
+  process.stderr.write = chunk => { captured.push(`stderr:${String(chunk)}`); return true }
+  let subjectModule = null
+  let rootGuardsModule = null
+  let importError = null
+  try {
+    subjectModule = await import(pathToFileURL(subject).href)
+    rootGuardsModule = await import(pathToFileURL(join(root, 'scripts', 'check-root-guards.mjs')).href)
+  } catch (error) {
+    importError = error
+  } finally {
+    console.log = origLog
+    console.error = origError
+    process.stdout.write = origOut
+    process.stderr.write = origErr
+  }
+  check(importError === null,
+    `C-08(import): 两个脚本都必须能被安全 import（被 import 时零副作用），实际抛错 ${importError?.message ?? ''}`)
+  check(captured.length === 0,
+    'C-08(import): `check-workspaces.mjs` / `check-root-guards.mjs` 被 import 时不得产生任何输出'
+    + `（它们现在互相 import 取共享实现；跑整轮门禁/跑守卫都是错的），实际 ${JSON.stringify(captured.slice(0, 5))}`)
+  check(typeof subjectModule?.formatFailureReport === 'function'
+    && typeof subjectModule?.classifyVerdictLine === 'function'
+    && typeof subjectModule?.stripAnsiSequences === 'function',
+  'C-08(import): `check-workspaces.mjs` 必须导出 formatFailureReport / classifyVerdictLine / stripAnsiSequences')
+  check(typeof rootGuardsModule?.sanitizeGuardEnvironment === 'function'
+    && typeof rootGuardsModule?.selfTestGuardEnvironment === 'function',
+  'C-08(import): `check-root-guards.mjs` 必须导出 sanitizeGuardEnvironment / selfTestGuardEnvironment'
+    + '（回归门禁直接调它；导出面被删等于自检通道消失）')
+  // 源码级互补判据：入口守卫必须在（运行时那条"没有输出"会被"Cordis 之外的调度"绕过时兜底）。
+  const runnerSource = readFileSync(join(root, 'scripts', 'check-root-guards.mjs'), 'utf8')
+  check(/^if \(isEntryPoint\(\)\) await main\(\)$/mu.test(runnerSource),
+    'C-08(接线): `check-root-guards.mjs` 必须以 `if (isEntryPoint()) await main()` 收尾'
+    + '（否则被 import 时会跑整轮守卫）')
+  check(/from '\.\/check-workspaces\.mjs'/u.test(runnerSource)
+    && !/function summarize\(/u.test(runnerSource),
+  'C-08(接线): `check-root-guards.mjs` 必须 import `./check-workspaces.mjs` 的共享实现，'
+    + '且**不得**再有自己的 `summarize()`（两份实现必然漂移）')
+
+  if (subjectModule !== null) {
+    const { classifyVerdictLine, summarizeBoundedFailure, stripAnsiSequences } = subjectModule
+    // 逐形态锚定表（P3-D1 的四类 + 既有的三类对照 + 两条负例）。
+    const forms = [
+      ['\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c', 'verdict'],
+      ['\u001b[31m×\u001b[39m tests/b.spec.ts > s > c', 'verdict'],
+      ['--- FAIL: TestFoo (0.01s)', 'verdict'],
+      ['panic: test timed out after 10m0s', 'verdict'],
+      ['{"numFailedTests":2,"numFailedTestSuites":1,"success":false}', 'verdict'],
+      ['  "numFailedTests": 3,', 'verdict'],
+      ['  12:5  error  Parsing error: Unexpected token', 'verdict'],
+      ['  \u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m', null],
+      ['{"numFailedTests":0,"success":true}', null],
+      ['  12:5  warning  unused var', null],
+      ['  × 0 items scanned', 'noise'],
+      ['  \u001b[31m×\u001b[39m 0 items scanned', 'noise'],
+    ]
+    for (const [line, expected] of forms) {
+      check(classifyVerdictLine(line) === expected,
+        `C-08/P3-D1(形态表): ${JSON.stringify(line)} 必须分类为 ${JSON.stringify(expected)}，`
+        + `实际 ${JSON.stringify(classifyVerdictLine(line))}`)
+    }
+    // ANSI 等价：**带 ANSI 的合成输出必须与去色的同一输出判定行集合相同**。
+    const build = line => [...Array.from({ length: 400 }, (_, index) => `noise line ${index}`), line,
+      ...Array.from({ length: 300 }, (_, index) => `tail line ${index}`)].join('\n')
+    const plain = summarizeBoundedFailure(build('× tests/x.spec.ts > a > b'))
+    const colored = summarizeBoundedFailure(build('\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'))
+    check(plain.missingVerdict === false && colored.missingVerdict === false,
+      'C-08(ANSI): 彩色与去色的同一输出都必须锚到判定行（missingVerdict 必须为 false）')
+    check(JSON.stringify(colored.verdictLines.map(stripAnsiSequences)) === JSON.stringify(plain.verdictLines),
+      'C-08(ANSI): 带 ANSI 的输出与去色输出的**判定行集合必须相同**，'
+      + `实际 colored=${JSON.stringify(colored.verdictLines)} / plain=${JSON.stringify(plain.verdictLines)}`)
+    check(colored.verdictLines.every(line => line.includes('\u001b')),
+      'C-08(ANSI/打印契约): 分类可以归一化，但 **verdictLines 必须是原行**（短输出"逐字原样"不许破）')
+    // **混合场景**兜底（P3-D1 的后半条）：有判定行可锚，但输出里还有"读不懂形态"的疑似错误行
+    // 落在尾窗之外 —— 它此前被静默丢弃。判据：必须在「其它疑似错误行」段里有界回显。
+    const mixed = summarizeBoundedFailure([
+      ...Array.from({ length: 400 }, (_, index) => `noise line ${index}`),
+      'AssertionError: anchored verdict',
+      'worker: upload failed with status 500',
+      ...Array.from({ length: 300 }, (_, index) => `tail line ${index}`),
+    ].join('\n'))
+    check(mixed.missingVerdict === false && mixed.text.includes('AssertionError: anchored verdict'),
+      'C-08(混合场景): 有判定行时它必须照常进判定段')
+    check(mixed.text.includes('其它疑似错误行') && mixed.text.includes('worker: upload failed with status 500'),
+      'C-08(混合场景): 未锚定的疑似错误行（落在尾窗之外）必须在「其它疑似错误行」段里有界回显 ——'
+      + '旧的 mixed 行为是**静默丢弃**（只要还有别的判定行，它就永远看不见）')
+    check(!mixed.text.split('--- 失败相关行')[1].split('\n--- ')[0].includes('worker: upload failed'),
+      'C-08(混合场景): 兜底行不得混进判定段（判定段只放锚定判定行）')
+    // 短输出逐字原样（反向负例：加了判定行扫描也不许改字节）。
+    check(subjectModule.formatFailureReport('  × a\nAssertionError: b\n') === '  × a\nAssertionError: b',
+      'C-08(打印契约): 短输出必须逐字原样返回（只 trimEnd）')
+  }
+}
+
+{
+  // ---- ④ 运行级：彩色判定行必须进判定段（"CI 形态也看得见"） ------------------------
+  //
+  // 复刻 PR #146 的真实形态：vitest 的彩色失败行（`\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m`）
+  // 与彩色用例行（`\x1b[31m×\x1b[39m`）埋在中段。修复前它们一条都不匹配（行首锚定被
+  // 转义序列挡住），编排器只打印「未找到判定行」。
+  const ansiBody = [
+    'i=0; while [ $i -lt 200 ]; do printf \'\\033[90mprobe noise %s\\033[39m\\n\' "$i"; i=$((i+1)); done',
+    'printf \'\\033[41m\\033[1m FAIL \\033[22m\\033[49m tests/audit-r10g1.spec.ts > suite > case\\n\'',
+    'printf \'\\033[31m×\\033[39m tests/audit-r10g1.spec.ts > suite > second\\n\'',
+    'i=0; while [ $i -lt 400 ]; do printf \'\\033[90mprobe tail %s\\033[39m\\n\' "$i"; i=$((i+1)); done',
+  ].join('; ')
+  const { tree: ansiTree } = buildTree({ stubExtra: emitterStub('dsh-memory-evolve', ansiBody, 1) })
+  const ansiResult = runSynthetic(ansiTree, [])
+  const ansiOutput = `${ansiResult.stdout}${ansiResult.stderr}`
+  check(ansiResult.status === 1, `C-08(ANSI/运行级): 目标包失败时门禁必须 exit 1（实际 ${ansiResult.status}）`)
+  const ansiSection = verdictSectionOf(ansiOutput)
+  check(ansiSection.includes('tests/audit-r10g1.spec.ts > suite > case'),
+    'C-08(ANSI/运行级): 彩色的 ` FAIL ` 行必须在**判定段**里（CI 里的真实形态；'
+    + '修复前它连判定行都不是，本地无 TTY 所以本地绿、CI 瞎），'
+    + `实际 ${JSON.stringify(ansiSection.slice(0, 300))}`)
+  check(ansiSection.includes('tests/audit-r10g1.spec.ts > suite > second'),
+    `C-08(ANSI/运行级): 彩色的 \`×\` 用例行同样必须在判定段里，实际 ${JSON.stringify(ansiSection.slice(0, 300))}`)
+  check(!ansiOutput.includes('未找到判定行'),
+    'C-08(ANSI/运行级): 彩色输出里明明有判定行 ⇒ 不得打印 fail-loud 的「未找到判定行」')
+}
+
+{
+  // ---- ⑤ 运行级：四类真实失败形态都要能进判定段（P3-D1） ---------------------------
+  const formsBody = [
+    'i=0; while [ $i -lt 200 ]; do printf \'probe noise %s\\n\' "$i"; i=$((i+1)); done',
+    // 注意 `printf` 的第一个参数以 `-` 开头时会被当成选项 ⇒ 必须走 `%s` 形态
+    // （探针自己踩过：`printf '--- FAIL: …'` 什么都不打印，判据就变成"形态没锚定"的假红）。
+    'printf \'%s\\n\' \'--- FAIL: TestR10G1 (0.01s)\'',
+    'printf \'panic: test timed out after 10m0s\\n\'',
+    'printf \'{"numFailedTests":2,"numFailedTestSuites":1,"success":false}\\n\'',
+    'printf \'  12:5  error  Parsing error: Unexpected token\\n\'',
+    'i=0; while [ $i -lt 400 ]; do printf \'probe tail %s\\n\' "$i"; i=$((i+1)); done',
+  ].join('; ')
+  const { tree: formsTree } = buildTree({ stubExtra: emitterStub('dsh-memory-evolve', formsBody, 1) })
+  const formsResult = runSynthetic(formsTree, [])
+  const formsOutput = `${formsResult.stdout}${formsResult.stderr}`
+  check(formsResult.status === 1, `C-08/P3-D1(运行级): 目标包失败时门禁必须 exit 1（实际 ${formsResult.status}）`)
+  const formsSection = verdictSectionOf(formsOutput)
+  for (const [label, needle] of [
+    ['go 用例级 `--- FAIL:`', '--- FAIL: TestR10G1'],
+    ['`panic: test timed out`', 'panic: test timed out after 10m0s'],
+    ['`--reporter=json` 的单行 JSON', '"numFailedTests":2'],
+    ['eslint 风格 `12:5  error …`', '12:5  error  Parsing error'],
+  ]) {
+    check(formsSection.includes(needle),
+      `C-08/P3-D1(运行级): ${label} 必须进**判定段**（形态表缺一条 ⇒ 这种失败行在混合输出里`
+      + `连兜底都进不去），实际 ${JSON.stringify(formsSection.slice(0, 400))}`)
+  }
+}
+
 // 自检① / ②：条数与样本下限。**下限只允许被"变多"越过** —— 断言表被清空、
 // 场景被删掉时这两条立刻红（而它们不经过 fail()，掏空 fail() 也躲不过）。
 if (checksRun < SELFTEST_MIN_CHECKS) {
@@ -2233,6 +2551,9 @@ process.stdout.write(
   + '成环时的运行时 pending 断言（列名 + 计划≠实跑 + exit 1）、'
   + 'C-9/C-10 失败详情必然可见（判定行**行首锚定** / 进度噪声不占判定预算 / '
   + '未锚到时 fail-loud 打印「未找到判定行」+ 兜底疑似错误行 / --full-output 真的绕过截断 / 短输出原样）、'
+  + 'C-08 接线（根守卫运行器必须 import 共享实现 —— 运行级探针证明"判定行埋在中段也看得见"；'
+  + '两个脚本被 import 时零副作用；P3-D1 四类形态进锚定表 + 混合场景有界兜底；'
+  + 'ANSI 归一化后彩色与去色的判定行集合相同；P3-D4 COREPACK_HOME 的离线处置指引）、'
   + 'C-12/F5 真实树包表语义对拍（dir 存在 + package.json 的 name 一致 + script 字段存在 + '
   + '磁盘上的 workspace 包必须都在 PACKAGES 里）三向正负例、'
   + 'C-13 advisory 失败**不计入通过**（四类计数恰好覆盖计划数）、'

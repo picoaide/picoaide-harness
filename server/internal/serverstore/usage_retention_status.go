@@ -18,6 +18,10 @@ package serverstore
 
 import (
 	"errors"
+	"fmt"
+	"log"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +59,25 @@ const (
 // 计数是精确的（SkippedByReason），清单只是给人看的抽样（有界，避免无界增长）。
 const usageRetentionUnreclaimedMax = 20
 
+// usageRetentionDeferredStallRounds 是"同一关系**连续**多少轮被延后 ⇒ 升级为
+// 可见告警"的阈值（R10-G3 · N2②）。
+//
+// 为什么必须存在：复审 N2 的实测 —— 20s 的"每语句"预算被补账吃到 94%，一旦超时
+// 就被分类成"延后"，于是**每一轮都超时、该月永远不回收**，而
+// `failed_rounds=0 / last_error=""`，从任何观测面都看不出来（磁盘按经过的月份
+// 单调增长）。延后本身是对的（一次锁竞争不该变成管理端 500），但"延后"必须
+// **有界**：同一关系连续若干轮还在延后，它已经不是一次竞争，而是停摆。
+//
+// 取 5 的理由：
+//   - 调度间隔是 6h（internal/usageretention.DefaultTick）⇒ 5 轮 ≈ 30 小时。
+//     任何"读事务/VACUUM/管理员 DDL"都不可能自然持续这么久；反过来 1~2 轮
+//     （6~12h）完全可能是正常的运维窗口，提前告警就是噪音。
+//   - 管理端保存保留期会**额外**同步触发一轮（llmgateway/admin.go）⇒ 短时间内
+//     可以连跑好几轮，阈值太小会让"连点几次保存"就升级成告警。
+//   - 它也刻意大于复审判据（`TestV2B_DeferralLiveness` 3 轮）的视野：那条判据
+//     编码的契约是"3 轮锁竞争都不得进失败面"，本阈值不改变那个契约。
+const usageRetentionDeferredStallRounds = 5
+
 // usageRetentionRound 是一轮清理的过程事实（由 CleanupUsageRetention 填写）。
 type usageRetentionRound struct {
 	// EndedAt 是本轮**结束**的时刻（由 CleanupUsageRetention 的 defer 在记账前写入）：
@@ -74,6 +97,10 @@ type usageRetentionRound struct {
 	SkippedByReason       map[string]int
 	Unreclaimed           []string
 	FailedRelations       []string
+	// R10-G3（N2②/N3）：本轮**按超时延后**的关系（去重）—— "连续延后"计数的唯一输入。
+	// 没出现在这里、但本轮被处理过的关系（回收/保留/深后代/非表对象…）在
+	// advanceDeferredStreaks 里自然清零（streak 每轮按本清单重建）。
+	DeferredRelations []string
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -122,6 +149,48 @@ type UsageRetentionStatus struct {
 	// 字段承载"还没跑过"与"保留期已关"两种语义，只有 rounds=0 一个旁证。判据必须能
 	// 区分这两件事，所以显式给出"这个 0 是观测"这一位。
 	ConfiguredMonthsKnown bool `json:"configured_months_known"`
+
+	// ---- 活性面（R10-G3 · N2②/N3）：保留策略到底有没有在推进 ----
+	//
+	// 缺陷形态（复审 N3 实测）：3 轮 × 6 关系全部 lock-timeout 延后，`cleared_*=0`，
+	// 而 `failed_rounds=0 / last_error=""`；唯一的痕迹是**每轮被覆写**的
+	// `skipped_by_reason` —— 它回答"这一轮为什么没回收"，回答不了"同一条关系已经
+	// 连续多少轮没被回收"。于是"保留策略已经停摆"与"刚好有锁竞争"在运维面上同形。
+	//
+	// 现在有两个累积量（读数由子系统自己记账，装配层只读）：
+	//
+	//	deferred_streak        关系名 → **连续**被延后的轮数（本轮被正常处理即清零）
+	//	max_deferred_streak    上面那个 map 的最大值（告警规则可以直接用它）
+	//	deferred_relations     本轮被延后的关系名（与 skipped_by_reason 的计数同源）
+	//	last_deferred_at       最近一次出现延后的时刻
+	//	deferred_stalled       **是否有关系连续 ≥ usageRetentionDeferredStallRounds 轮延后**
+	//	                       —— 这是唯一需要进告警规则的那一位
+	//	stalled_relations      连续延后达阈值的关系名（有界抽样）
+	//	deferred_stalled_rounds 累计"出现过停摆关系"的轮数（计数，不因清零而回退）
+	//
+	// 消费口径（运维脚本/告警规则）：
+	//
+	//	deferred_stalled == true  ⇒ 保留策略**已经停摆**：某条到期关系连续
+	//	                            ≥5 轮（6h/轮）既没被回收也没失败，必须人工看
+	//	                            （stalled_relations 点名；write_blocked_* 说明
+	//	                            是不是"当月写不进去"那一类）。
+	//	deferred_stalled_rounds > 0 且持续增长 ⇒ 停摆在反复发生（即使当前这一轮
+	//	                            deferred_stalled 已因关系被回收而清零）。
+	//	failed_rounds（真失败面，与上一条互补）不得用来做这条判断：按 R10-A-03 的
+	//	                            契约，锁竞争/超时**不进**失败面。
+	//
+	// 为什么"停摆"不把整轮变成失败（即不让 CleanupUsageRetention 返回非 nil）：
+	// 管理端保存保留期是**同步**调用它（llmgateway/admin.go），一次锁竞争就回
+	// 500「保留清理失败」正是 R10-A-03 修掉的缺陷（配置其实已提交并已审计）。
+	// 停摆是 **liveness** 事实而不是"本轮失败"，所以它走**专门的**入口：这两个字段
+	// + 每次升级时的一行 `usage retention: STALLED …` 日志（可 grep、可告警）。
+	DeferredStreak        map[string]int `json:"deferred_streak,omitempty"`
+	MaxDeferredStreak     int            `json:"max_deferred_streak,omitempty"`
+	DeferredRelations     []string       `json:"deferred_relations,omitempty"`
+	LastDeferredAt        string         `json:"last_deferred_at,omitempty"`
+	DeferredStalled       bool           `json:"deferred_stalled,omitempty"`
+	StalledRelations      []string       `json:"stalled_relations,omitempty"`
+	DeferredStalledRounds int64          `json:"deferred_stalled_rounds,omitempty"`
 
 	// ---- 写入面（R9-D R9D-00，P0）：当月到底能不能落账 ----
 	//
@@ -225,6 +294,24 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	if !round.EndedAt.IsZero() {
 		st.LastRoundAt = round.EndedAt.UTC().Format(time.RFC3339)
 	}
+	// R10-G3（N2②/N3）：推进/清零"连续延后"计数，并在达阈值时升级为可见告警。
+	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations = advanceDeferredStreaks(st.DeferredStreak, round)
+	st.DeferredRelations = append([]string(nil), round.DeferredRelations...)
+	if len(round.DeferredRelations) > 0 && !round.EndedAt.IsZero() {
+		st.LastDeferredAt = round.EndedAt.UTC().Format(time.RFC3339)
+	}
+	if len(st.StalledRelations) > 0 {
+		st.DeferredStalled = true
+		st.DeferredStalledRounds++
+		log.Printf("usage retention: STALLED %s —— 连续 ≥%d 轮被延后(每轮 6h)，既没被回收也没有真失败："+
+			"这不是一次锁竞争，是保留策略停摆(N2:延后必须有界)。处置：核对 blocked/deferred 的原因"+
+			"(skipped_by_reason=%s)与是否有长事务/管理员 DDL 长期占着 usage 或该月分区；"+
+			"/readyz 的 usage_retention.deferred_stalled=true、stalled_relations 点名",
+			strings.Join(st.StalledRelations, ","), usageRetentionDeferredStallRounds,
+			formatRetentionSkipReasons(st.SkippedByReason))
+	} else {
+		st.DeferredStalled = false
+	}
 	if roundErr != nil {
 		st.FailedRounds++
 		st.LastError = roundErr.Error()
@@ -232,6 +319,71 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 		st.LastError = ""
 	}
 	usageRetentionStatusVal = st
+}
+
+// advanceDeferredStreaks 按本轮的过程事实推进"同一关系连续被延后"的计数（R10-G3）。
+//
+// 语义（判据与危害同构：**保留策略有没有在推进**）：
+//
+//	streak 每轮按"本轮被延后（lock-timeout / statement-timeout）的关系"**重建**：
+//	  本轮被延后的 +1；本轮出现但**没**被延后的（回收掉 / 仍在保留期 / 深后代
+//	  只补账 / 非表对象…）自然落回 0 —— "这一轮它被正常处理了"不是停摆。
+//
+// 返回新的 streak、其中的最大值、以及达到阈值的关系名（升序，有界）。
+// 关系名会随月份滚动而永久增加，而 streak 只含本轮的键 ⇒ 规模有界（≤ 本轮关系数）。
+func advanceDeferredStreaks(prev map[string]int, round usageRetentionRound) (map[string]int, int, []string) {
+	next := make(map[string]int, len(round.DeferredRelations))
+	for _, rel := range round.DeferredRelations {
+		next[rel] = prev[rel] + 1
+	}
+	if len(next) == 0 {
+		next = nil
+	}
+	return next, maxDeferredStreak(next), stalledRelations(next)
+}
+
+func maxDeferredStreak(streak map[string]int) int {
+	max := 0
+	for _, n := range streak {
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// stalledRelations 返回连续延后达到阈值的关系名（升序、有界）。
+func stalledRelations(streak map[string]int) []string {
+	var out []string
+	for rel, n := range streak {
+		if n >= usageRetentionDeferredStallRounds {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	if len(out) > usageRetentionUnreclaimedMax {
+		out = out[:usageRetentionUnreclaimedMax]
+	}
+	return out
+}
+
+// formatRetentionSkipReasons 把 skip_reasons 渲染成稳定的日志字段（key 升序）；
+// 与 usage_ledger.go 的 formatSkipReasons 同形，但这里只有 map（状态文件的记账
+// 路径不该为了打一行日志依赖清理主循环的局部变量）。
+func formatRetentionSkipReasons(reasons map[string]int) string {
+	if len(reasons) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, reasons[k]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 // usageWriteBlockState 是"当月计量写入被分区布局挡住"的**进程内**过程事实

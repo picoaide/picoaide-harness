@@ -451,7 +451,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -523,12 +523,22 @@ const SELFTEST_REQUIRED_SAMPLES = [
   // 白名单(U-1:未登记即红,含 COREPACK_HOME 这条**已端到端实跑**的解释器替换通道)、
   // 第四层 `container.env`、被钉步骤体内的 `export`/前缀赋值、`uses:` 委派目标。
   { id: 'w13-guard-job-unregistered-env-key', policy: '[SK-17]' },
-  { id: 'w14-container-env-node-options', policy: '[SK-17]' },
+  { id: 'w14-container-image-unregistered', policy: '[SK-17]' },
+  { id: 'w14b-container-env-node-options', policy: '[SK-17]' },
   { id: 'w15-step-body-export-node-options', policy: '[SK-17]' },
   { id: 'w16-step-body-prefix-assignment', policy: '[SK-17]' },
   { id: 'w17-step-body-registered-assignment-green', policy: null },
   { id: 'w18-github-env-unregistered-key', policy: '[SK-17]' },
   { id: 'w19-guard-job-unregistered-uses', policy: '[SK-17]' },
+  // ---- [SK-18]/[SK-19] 第十轮复审 V1 的 C-04/C-05(执行目录 / YAML 合并键)----
+  // 两条判据面各自的**正例**(必须红)与**绿样本**(不得一刀切)都逐条点名:删掉任一条分支
+  // 或把某一格样本改成绿形态,这里立刻报"登记了却没跑到/策略形同不存在"。
+  { id: 'w20-guard-job-defaults-working-directory', policy: '[SK-18]' },
+  { id: 'w21-pinned-gate-step-working-directory', policy: '[SK-18]' },
+  { id: 'w22-unpinned-step-working-directory-green', policy: null },
+  { id: 'w23-guard-job-merge-key', policy: '[SK-19]' },
+  { id: 'w24-env-merge-key', policy: '[SK-19]' },
+  { id: 'w25-anchored-alias-env-green', policy: null },
   // ---- 第九轮审计 B 泳道的 5 条 P1 + 3 条假红(同属"判据只看文本、不看执行语义")----
   { id: 'x1-guard-runner-colon-noop', policy: '[SK-9]' },
   { id: 'x2-guard-runner-test-f', policy: '[SK-9]' },
@@ -824,7 +834,24 @@ export function checkWorkflowText(name, text, options = {}) {
   // 上面那条 [SK-14] 读的是 argv / 解析后的 shell / 步骤体 / `if:`,四种通道全都在
   // "命令怎么被写出来"这一层,看不见"解释器被换掉了"(形态 A:`NODE_OPTIONS=--import=…`;
   // 形态 B:`BASH_ENV=…`;形态 C:`COREPACK_HOME=…` ⇒ 连 `yarn` 都是攻击者的文件)。
-  const pinnedEnv = checkPinnedStepEnvironment(name, document, blocks, notes, { rootDir })
+  // [SK-19] YAML 合并键（第十轮审计 C-05）：解析器不展开 `<<`，而 Actions 会 ——
+  // 判据读不懂"被合并进来的是什么"，一律红（fail-closed）。放在最前面：它是"判据的输入是否
+  // 完整"的问题，后面的每一条判据都建立在"解析结果就是 runner 看到的那份"之上。
+  const mergeKeys = checkYamlMergeKeys(name, document)
+  failures.push(...mergeKeys.failures)
+  if (mergeKeys.failures.length === 0) {
+    notes.push(`[SK-19] YAML 合并键(\`<<\`):已按 fail-closed 判定 `
+      + `${Object.keys(typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}).length} 个 job 块 / `
+      + `${mergeKeys.stepBlocks} 个步骤块(出现合并键即红 —— 解析器不展开它,判据与 runner 的语义会分叉)`)
+  }
+  const pinnedEnv = checkPinnedStepEnvironment(name, document, blocks, notes, {
+    rootDir,
+    // 被钉 job 的**容器镜像登记表**走与 SK-15 同一个 `registries` 测试缝（第十轮复审 V1 的
+    // P3-D3）：`w14` 那个样本同时带了未登记的 `container:`（镜像判据）与 `container.env`
+    // 里的危险键，于是**删掉 `container.env` 的键判定循环后样本照样红**（被相邻判据顶替）——
+    // 那一层就成了"没有自检守住的分支"。拆样本的前提是能单独放行镜像登记，所以这里必须可注入。
+    containerImages: registries.containerImages ?? PINNED_JOB_CONTAINER_REGISTRY,
+  })
   failures.push(...pinnedEnv.failures)
   // [SK-14⑧](R8-D-24):块级 shell 与步骤级 shell 两条口径必须一致(危险方向即红)。
   failures.push(...checkShellResolutionConsistency(name, document, blocks, notes))
@@ -1431,6 +1458,45 @@ const PINNED_ENV_LAYER_REGISTRY = [
  * 必须先在这里登记 `image`(逐字)并写明"这面镜像为什么可以承担判据步骤"。
  */
 const PINNED_JOB_CONTAINER_REGISTRY = []
+
+/**
+ * [SK-18] 被钉 job 允许声明的 **`defaults.run.working-directory`**（第十轮审计 C-04，本轮修复）。
+ *
+ * 现场（审计方实跑）：给 `gate-guards` 加两行
+ * ```yaml
+ *     defaults:
+ *       run:
+ *         working-directory: /tmp/decoy
+ * ```
+ * `check-workflows` **EXIT=0**。机理与 `env:` 同族：`node scripts/check-root-guards.mjs`
+ * 的 argv 一字未改、步骤体一字未改，但它在**另一个目录**里被解析 —— 相对路径的脚本、
+ * `package.json`、`.yarnrc.yml` 全部换成那个目录里的。而"命令去哪解析"此前**不在判据面内**
+ * （第九轮把 `env:` 四层 + `$GITHUB_ENV` + 步骤体都收了进来，唯独漏了 cwd）。
+ *
+ * 判据（**登记制**，fail-closed）：被钉 job 上出现 `defaults.run.working-directory`、
+ * 或被钉单元的任何一步出现步骤级 `working-directory` ⇒ 必须逐字登记在下面两张表里，
+ * 否则红。**例外只允许逐字登记**（`job` + `workingDirectory` 全等）：本仓真实存在的唯一
+ * 一例是 `server` job（`server` 目录，`server` job 里的 `wasm-case-gate` 判据步
+ * `node ../scripts/wasm/check-go-test-json.mjs` 正是按这个 cwd 写的 `../` 前缀）——
+ * 任何**新** job、或**改**这个取值，都必须带着理由进 diff（这才是"可评审"，而不是"看起来人畜无害"）。
+ */
+const PINNED_JOB_WORKING_DIRECTORY_REGISTRY = [
+  {
+    job: 'server',
+    workingDirectory: 'server',
+    why: '`server` job 的 `defaults.run.working-directory: server`：job 内所有步骤都在 `server/`'
+      + '下解析（`make check` / `go test` / `npm ci --prefix` 的既有形态），其中 `wasm-case-gate`'
+      + '判据步写的是 `node ../scripts/wasm/check-go-test-json.mjs` —— `../` 前缀**依赖**这个 cwd。'
+      + '它与"给判据步骤换执行体"无关（判据脚本本身仍在仓内、argv 未变），所以按登记制放行。',
+  },
+]
+/**
+ * [SK-18] 被钉单元**步骤级** `working-directory` 的登记表（当前为空 = 未登记即红）。
+ *
+ * 与 job 级同族：步骤级 `working-directory` 只影响这一步，但"这一步"恰恰是判据步骤时，
+ * 效果与 job 级完全一样（命令在别处解析）。空表是 fail-closed 的默认形态。
+ */
+const PINNED_STEP_WORKING_DIRECTORY_REGISTRY = []
 
 /**
  * 被钉单元里允许出现的 `uses:`(第十轮审计 C-03 / MAINCTL-3)。
@@ -2479,13 +2545,14 @@ const REGISTRY_DEFAULT = {
   jobs: REGISTERED_JOBS,
   steps: REGISTERED_RELEASE_STEPS,
   remoteWrites: REMOTE_WRITE_REGISTERED,
+  containerImages: PINNED_JOB_CONTAINER_REGISTRY,
 }
 /**
  * **空登记表**:内置自检的合成样本默认用它 —— 否则每个合成了 `ci.yml` 形状的样本
  * (SK-8/SK-9/SK-11/SK-12 的那些)都会被 SK-15 拿"真实 ci.yml 的登记值"去套,
  * 得到一堆与样本意图无关的假红(SK-15 的样本改用下面那张合成登记表)。
  */
-const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [] }
+const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [] }
 /**
  * SK-15 自检用的**合成登记表**:一个 job `verify` + 一个步骤 `Gate`。
  * 用它把"登记了却不存在 / 存在却没登记 / 常量假 if / 收窄 if / continue-on-error /
@@ -6229,6 +6296,81 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
 }
 
 /**
+ * [SK-19] **YAML 合并键 `<<`** 让判据看不见被展开的内容（第十轮审计 C-05，本轮修复）。
+ *
+ * 现场：`yaml` 解析器默认**不展开 merge key**（YAML 1.1 的 `<<`）—— `env: { <<: *base }`
+ * 解析成字面键 `<<`，其值是别名指向的 map；`jobs.<id>: { <<: *jobbase }` 同理。于是
+ * **判据面上那些键一个都不出现**：
+ *
+ * ```yaml
+ * x-job: &jobbase
+ *   env:
+ *     NODE_OPTIONS: "--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"
+ * jobs:
+ *   gate-guards:
+ *     <<: *jobbase            # ⇒ 解析后 jobs['gate-guards'].env === undefined
+ * ```
+ *
+ * `jobs.<id>.env` 是 [SK-17④] 的判据入口 —— 合并之后那一层**空着**（计数 0、层层"已检查"），
+ * 而 Actions 在运行期是**会**展开 merge key 的（YAML 1.1，Actions 的解析器支持 `<<`）：
+ * 判据看到的与 runner 执行的不是同一份语义，这就是"三层 `env:` 对判据隐形"。
+ * 同一手法还能藏 `steps:`（那会让"哪些步骤被钉住"整个判据失效）、`container:`、`with:`。
+ *
+ * 判据（fail-closed）：**任何** job 块 / 步骤块 / `env:` / `container:` / `defaults:` /
+ * `with:` / workflow 顶层上出现 `<<` 键 ⇒ 红。为什么按"任何 job"而不是"被钉 job"：
+ * 合并键可以**藏掉 `steps:` 本身**（那正是"这一步算不算被钉"的输入）—— 判据读不懂它展开了
+ * 什么，"读不懂 ⇒ 拒绝"是唯一与 [SK-17] 其余各条一致的取向。确需共享片段时把键**显式写出来**
+ * （或在 `check-workflows.mjs` 里显式展开后再喂给判据），不要用 merge key。
+ *
+ * @param file - workflow 文件名。
+ * @param document - `parseYaml` 的结果。
+ * @returns 失败项数组（空 = 该文件没有任何合并键）。
+ */
+function checkYamlMergeKeys(file, document) {
+  const failures = []
+  const isMap = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const hits = []
+  const scan = (node, path) => {
+    if (!isMap(node)) return
+    if (Object.hasOwn(node, '<<')) hits.push({ path, value: node['<<'] })
+  }
+  scan(document, 'workflow 顶层')
+  scan(document?.env, 'workflow 顶层 `env:`')
+  const jobs = isMap(document?.jobs) ? document.jobs : {}
+  let stepBlocks = 0
+  for (const [jobId, job] of Object.entries(jobs)) {
+    scan(job, `jobs.${jobId}`)
+    scan(job?.env, `jobs.${jobId}.env`)
+    scan(job?.container, `jobs.${jobId}.container`)
+    scan(job?.container?.env, `jobs.${jobId}.container.env`)
+    scan(job?.defaults, `jobs.${jobId}.defaults`)
+    scan(job?.defaults?.run, `jobs.${jobId}.defaults.run`)
+    if (!Array.isArray(job?.steps)) continue
+    job.steps.forEach((step, index) => {
+      stepBlocks += 1
+      scan(step, `jobs.${jobId}.steps[${index}]`)
+      scan(step?.env, `jobs.${jobId}.steps[${index}].env`)
+      scan(step?.with, `jobs.${jobId}.steps[${index}].with`)
+    })
+  }
+  for (const hit of hits) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-19] \`${hit.path}\` 上出现了 YAML **合并键** \`<<\`（值：`
+        + `${isMap(hit.value) ? `别名的 map（${Object.keys(hit.value).join(', ') || '空'}）` : JSON.stringify(hit.value ?? null)}）。`
+        + '\n  ⇒ 解析器（`yaml`）默认**不展开** merge key：它只留下一个字面键 `<<`，'
+        + '而被合并进来的键在判据面（`env:` 各层 / `container:` / `steps:` / `with:` / `defaults:`）上'
+        + '**一个都不出现**；Actions 在运行期却会展开它 ⇒ 判据看到的与 runner 执行的不是同一份语义'
+        + '（第十轮审计 C-05：三层 `env:` 因此对判据隐形，而锚点/别名的**非**合并形态是可见的）。'
+        + '\n  ⇒ 请把这些键**显式写出来**（共享片段用锚点+别名时不要用 `<<`），'
+        + '不要指望判据去展开它 —— "读不懂展开了什么"一律按未登记处理是 [SK-17]/[SK-19] 的共同取向。',
+    })
+  }
+  return { failures, stepBlocks, hits: hits.length }
+}
+
+/**
  * [SK-17] 的实现(判据与现场见常量区 `PINNED_ENV_ALLOWED_KEYS` 的注释)。
  *
  * 判据面共六层,**全部只读 YAML 文档 + `run` 文本**(不执行任何东西),层清单的唯一真源是
@@ -6250,7 +6392,10 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
  * @param document - parseYaml 的结果。
  * @param blocks - extractRunBlocks 的结果(供 shellSteps 解析有效 shell / 行号 / 下标)。
  * @param notes - 提示收集器。
- * @param context - `{ rootDir }`:本地 `uses:` 的解析根(缺省 = 仓库根;自检注入合成树)。
+ * @param context - `{ rootDir, containerImages }`:`rootDir` = 本地 `uses:` 的解析根
+ *   (缺省 = 仓库根;自检注入合成树);`containerImages` = 被钉 job 的容器镜像登记表
+ *   (缺省 = `PINNED_JOB_CONTAINER_REGISTRY`;自检用它单独放行镜像、只留 `container.env`
+ *   的键判定 —— 第十轮复审 V1 的 P3-D3:两个分支必须在**两个样本**上各自可红)。
  * @returns `{ failures, layers, uses }`(`layers` = 逐层枚举结果,供通过行与层清单对账;
  *   `uses` = 被钉单元里实际用到的 `uses:` 取值,供登记表的死条目对账)。
  */
@@ -6367,7 +6512,8 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
     markLayer('container-env', envEntries(typeof container === 'object' ? container.env : undefined).length)
     if (container === undefined || container === null) continue
     const image = typeof container === 'string' ? container : container.image
-    const registered = PINNED_JOB_CONTAINER_REGISTRY.some(entry => entry.image === image)
+    const containerImages = context.containerImages ?? PINNED_JOB_CONTAINER_REGISTRY
+    const registered = containerImages.some(entry => entry.image === image)
     if (!registered) {
       reportOnce(`container-image:${jobId}`, `[SK-17] job ${jobId} 有被钉住的判定单元,但它声明了 `
         + `\`container:\`(image = ${JSON.stringify(image ?? null)})—— 这一步不再跑在 runner 上,`
@@ -6493,6 +6639,42 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
           + '要在这个键上跑判据,先在 `PINNED_ENV_ALLOWED_KEYS` 里登记;'
           + '第二道收口在 `scripts/check-root-guards.mjs`(它清洗交给守卫子进程的环境)。'))
     }
+  }
+
+  // ⑩ **执行目录**（第十轮审计 C-04，本轮修复）：`defaults.run.working-directory`（job 级）
+  //    与步骤级 `working-directory` —— "命令在哪个目录里被解析"此前**不在判据面内**。
+  //    与 `env:` 同族：argv 一字未改，脚本/`package.json`/`.yarnrc.yml` 却换成了别处的
+  //    （审计方实测：给 `gate-guards` 加 `defaults.run.working-directory: /tmp/decoy` ⇒ EXIT=0）。
+  //    登记制例外只认**逐字**匹配（见 `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 的头注释）。
+  for (const jobId of pinnedJobIds) {
+    const runDefaults = jobs[jobId]?.defaults?.run
+    if (runDefaults === null || typeof runDefaults !== 'object') continue
+    if (!Object.hasOwn(runDefaults, 'working-directory')) continue
+    const value = runDefaults['working-directory']
+    const registered = PINNED_JOB_WORKING_DIRECTORY_REGISTRY
+      .some(entry => entry.job === jobId && entry.workingDirectory === value)
+    if (registered) continue
+    const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
+    reportOnce(`cwd:${jobId}`, `[SK-18] job ${jobId} 有被钉住的判定单元`
+      + `(${labels.slice(0, 4).join('、')}${labels.length > 4 ? ` 等 ${labels.length} 个` : ''})，`
+      + `而它声明了 \`defaults.run.working-directory: ${JSON.stringify(value ?? null)}\`。`
+      + '\n  ⇒ `defaults.run.working-directory` 换的是**命令解析的目录**：argv 与步骤体一字未改，'
+      + '可 `node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部来自那个目录 ——'
+      + '与"换成谁的解释器"同级，所以它走**登记制**（第十轮审计 C-04：加上这两行时判据 EXIT=0）。'
+      + '\n  ⇒ 要在这个 job 上换 cwd，先在 `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 里逐字登记'
+      + '`{ job, workingDirectory }` 并写明"判据步骤为什么仍然成立"（本仓合法的一例是 `server` job）。')
+  }
+  for (const unit of units) {
+    if (unit.step === null || typeof unit.step !== 'object') continue
+    if (!Object.hasOwn(unit.step, 'working-directory')) continue
+    const value = unit.step['working-directory']
+    const registered = PINNED_STEP_WORKING_DIRECTORY_REGISTRY
+      .some(entry => entry.job === unit.jobId && entry.step === unit.label && entry.workingDirectory === value)
+    if (registered) continue
+    reportOnce(`cwd:${unit.jobId}#${unit.index}`, `[SK-18] ${unitLabel(unit)} 是${unit.reason}，`
+      + `而这一步声明了 \`working-directory: ${JSON.stringify(value ?? null)}\`。`
+      + '\n  ⇒ 与 job 级同族：命令在**另一个目录**里解析（argv / 步骤体 / `env:` 全都看不出区别）。'
+      + '要给被判据钉住的那一步换 cwd，先在 `PINNED_STEP_WORKING_DIRECTORY_REGISTRY` 里逐字登记并写明理由。')
   }
 
   if (failures.length === 0) {
@@ -7279,6 +7461,24 @@ export function selfTestPolicies() {
     // 根守卫 job 的 `container:` 块（[SK-17③] 的样本入口，第十轮审计 C-02）：数组 =
     // 已缩进 4 空格的 YAML 行（`container:` + `image:` + `env:` …）。
     guardContainer = null,
+    // 根守卫 job 的 `defaults.run.working-directory`（[SK-18] 的样本入口，第十轮审计 C-04）：
+    // 字符串 = 逐字写进 `defaults: / run: / working-directory:`；null = 不声明。
+    guardJobWorkingDirectory = null,
+    // 被钉住的**全量门禁**步的步骤级 `working-directory`（[SK-18] 的第二个样本入口）。
+    gateStepWorkingDirectory = null,
+    // 非判据步骤（`changes` job 那一步）的 `working-directory`（[SK-18] 的绿样本入口：
+    // 判据只钉"被钉单元"，不许一刀切成"整个文件里不许出现这个键"）。
+    changesStepWorkingDirectory = null,
+    // workflow **顶层锚点块**（[SK-19] 的样本入口）：数组 = 已顶格的 YAML 行
+    // （`x-base: &base` + 内容），配合 `guardJobEnvAlias` 使用。
+    rawPrefix = [],
+    // 根守卫 job 的 `env:` 写成**别名**形态（`env: *base`）—— 与 `<<` 合并键形成对照：
+    // 普通别名解析后键是**可见**的（判据照常判），只有合并键会让它们隐形。
+    guardJobEnvAlias = null,
+    // 根守卫 **job 块**上的 YAML **合并键**（`<<: *base`，[SK-19] 的样本入口）：
+    // 字符串 = 别名名（含 `*`），null = 不声明。合并键藏的是**整个 job 块**的内容
+    // （`env:` / `steps:` 都可以被它顶掉，解析结果里只剩一个字面键 `<<`）。
+    guardJobMergeKey = null,
     // 根守卫 job 里**额外**的 `uses:` 步骤（[SK-17⑦] 的样本入口，第十轮审计 C-03）：
     // 数组 = 已缩进 6 空格的 YAML 行。
     guardUsesSteps = [],
@@ -7336,6 +7536,7 @@ export function selfTestPolicies() {
       const filter = trigger === 'push' ? pushFilter : (trigger === 'pull_request' ? prFilter : null)
       return filter === null ? [`  ${trigger}:`] : [`  ${trigger}:`, `    ${filter}`]
     }),
+    ...rawPrefix,
     ...extraTriggers.map(trigger => `  ${trigger}:`),
     ...(workflowEnv === null ? [] : ['env:', ...workflowEnv]),
     'jobs:',
@@ -7347,6 +7548,7 @@ export function selfTestPolicies() {
     '    steps:',
     '      - id: scope',
     ...(changesStepEnv === null ? [] : ['        env:', ...changesStepEnv]),
+    ...(changesStepWorkingDirectory === null ? [] : [`        working-directory: ${changesStepWorkingDirectory}`]),
     '        run: echo "code=true" >> "$GITHUB_OUTPUT"',
     ...changesExtraSteps,
     ...(guardJob ? [
@@ -7356,7 +7558,15 @@ export function selfTestPolicies() {
       ...(guardIf === '' ? [] : [`    if: ${guardIf}`]),
       '    timeout-minutes: 20',
       ...(guardContainer === null ? [] : guardContainer),
-      ...(guardJobEnv === null ? [] : ['    env:', ...guardJobEnv]),
+      ...(guardJobMergeKey === null ? [] : [`    <<: ${guardJobMergeKey}`]),
+      ...(guardJobWorkingDirectory === null ? [] : [
+        '    defaults:',
+        '      run:',
+        `        working-directory: ${guardJobWorkingDirectory}`,
+      ]),
+      ...(guardJobEnvAlias !== null
+        ? [`    env: ${guardJobEnvAlias}`]
+        : (guardJobEnv === null ? [] : ['    env:', ...guardJobEnv])),
       '    steps:',
       '      - uses: actions/checkout@v7',
       '        with:',
@@ -7408,6 +7618,7 @@ export function selfTestPolicies() {
     '      - name: 全量门禁',
     `        if: ${gateStepIf}`,
     ...(gateStepShell === null ? [] : [`        shell: ${gateStepShell}`]),
+    ...(gateStepWorkingDirectory === null ? [] : [`        working-directory: ${gateStepWorkingDirectory}`]),
     ...(expectHeadEnvLine(gateExpectHead) === null && gateStepExtraEnv.length === 0 ? [] : [
       '        env:',
       ...(expectHeadEnvLine(gateExpectHead) === null ? [] : [expectHeadEnvLine(gateExpectHead)]),
@@ -7423,7 +7634,13 @@ export function selfTestPolicies() {
     '',
   ].join('\n')
   const gateSample = (id, expectation, options = {}) => {
-    const entry = { raw: GATE_SHAPE(options), file: options.file ?? 'selftest.yml' }
+    const entry = {
+      raw: GATE_SHAPE(options),
+      file: options.file ?? 'selftest.yml',
+      // `registries` 透传（第十轮复审 V1 的 P3-D3）：样本要能**单独**放行容器镜像登记，
+      // 从而只留 `container.env` 的键判定那一条分支可红（否则两个分支互相顶替）。
+      ...(options.registries === undefined ? {} : { registries: options.registries }),
+    }
     return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
   }
   // 正例:与 ci.yml 同形 ⇒ 一条失败都不许有(假阳性会把真实形态逼着改坏)。
@@ -8092,7 +8309,23 @@ export function selfTestPolicies() {
   //
   // 现场(MAINCTL-2 的判别性对照):同一个键写在 job 级 `env:` 被抓、写在 `container.env`
   // 上静默通过,而通过行还照样打印"三层 `env:` … 均已检查"(`grep -c container` = 0)。
-  gateSample('w14-container-env-node-options', '[SK-17]', {
+  //
+  // **P3-D3（第十轮复审 V1）**:这条判据面里其实有**两条**独立分支 ——"容器镜像登记"与
+  // "已登记镜像下的 `container.env` 键白名单"。旧样本把两者写在同一个 YAML 里(未登记的
+  // 镜像 + 危险键),于是**只删掉第四层键判定循环**(691B)时样本照样红(被镜像那条顶替),
+  // 而 `PINNED_JOB_CONTAINER_REGISTRY=[]` 又保证镜像那条永远命中 ⇒ 分支②没有任何样本守着
+  // (本项目登记的第 2 类假绿:只钉字符串不钉能力)。现在拆成两条,各自单独可红:
+  //   ① `w14`  —— 容器**镜像**未登记(不带 `env:`,把第四层键那条分支排除在外);
+  //   ② `w14b` —— 镜像**已登记**(经 `registries.containerImages` 测试缝单独放行),
+  //      只剩 `container.env` 里的 `NODE_OPTIONS` ⇒ 只有键白名单那条分支能让它红。
+  gateSample('w14-container-image-unregistered', '[SK-17]', {
+    file: 'ci.yml',
+    guardContainer: [
+      '    container:',
+      '      image: node:24-bookworm',
+    ],
+  })
+  gateSample('w14b-container-env-node-options', '[SK-17]', {
     file: 'ci.yml',
     guardContainer: [
       '    container:',
@@ -8100,7 +8333,77 @@ export function selfTestPolicies() {
       '      env:',
       `        NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
     ],
+    // 镜像登记放行 ⇒ 命中只可能来自"第四层键白名单"那一条分支。
+    registries: {
+      ...REGISTRY_NONE,
+      containerImages: [{ image: 'node:24-bookworm', why: '合成样本:单独放行镜像登记,只留 container.env 的键判定' }],
+    },
   })
+  // ---- [SK-18] 被钉单元的**执行目录**(第十轮审计 C-04,本轮修复) ----------------
+  //
+  // 现场(审计方实跑):给 `gate-guards` 加两行
+  //   `defaults: / run: / working-directory: /tmp/decoy`
+  // ⇒ `check-workflows` **EXIT=0**:argv 一字未改,命令却在**另一个目录**里被解析
+  // (`node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml` 全部来自那个目录)。
+  // 判据走**登记制**(`PINNED_JOB_WORKING_DIRECTORY_REGISTRY`),例外只认逐字匹配。
+  gateSample('w20-guard-job-defaults-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    guardJobWorkingDirectory: '/tmp/decoy',
+  })
+  // 第二个入口:**步骤级** `working-directory` —— 只影响这一步,但这"一步"恰好是被钉的
+  // 全量门禁步时,效果与 job 级完全一样(给 `yarn check` 换一个解析目录)。
+  gateSample('w21-pinned-gate-step-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    gateStepWorkingDirectory: '/tmp/decoy',
+  })
+  // **绿样本**(不得一刀切):`working-directory` 落在**非判据步骤**上是本仓真实存在的
+  // 正常写法(`ci.yml` 的 `npm ci` / `npm test` 就带 `working-directory: server/webadmin`)——
+  // 判据的面是"被钉单元",不是"整个文件里不许出现这个键"。
+  gateSample('w22-unpinned-step-working-directory-green', null, {
+    file: 'ci.yml',
+    changesStepWorkingDirectory: 'server/webadmin',
+  })
+
+  // ---- [SK-19] YAML **合并键** `<<`(第十轮审计 C-05,本轮修复) ------------------
+  //
+  // 现场:`yaml` 解析器默认**不展开** merge key ⇒ `env: { <<: *base }` 解析成字面键 `<<`,
+  // 被合并进来的键在判据面(`env:` 各层 / `container:` / `steps:` / `with:` / `defaults:`)
+  // 上**一个都不出现**;而 Actions 在运行期会展开它(YAML 1.1)⇒ 判据看到的与 runner 执行的
+  // 不是同一份语义。判据 fail-closed:出现合并键即红(可以藏掉 `steps:` 本身)。
+  gateSample('w23-guard-job-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-job-base: &job-base',
+      '  env:',
+      `    NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
+      '',
+    ],
+    guardJobMergeKey: '*job-base',
+  })
+  gateSample('w24-env-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-env-base: &env-base',
+      `  NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
+      '',
+    ],
+    // `env:` 里只有一行合并键 —— 被合并进来的 `NODE_OPTIONS` 在判据面上不可见
+    // (`jobs.gate-guards.env` 解析结果只剩一个 `<<`)。
+    guardJobEnv: ['      <<: *env-base'],
+  })
+  // **绿样本**(不得一刀切):普通**别名**(`env: *env-base`)解析后键是**可见**的 ——
+  // 判据照常按白名单判它;只有 `<<` 合并键会让键隐形。这条对照证明判据打的是 merge key,
+  // 不是"文件里出现了锚点/别名"。
+  gateSample('w25-anchored-alias-env-green', null, {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-env-safe: &env-safe',
+      "  DSH_TELEMETRY_DISABLED: '1'",
+      '',
+    ],
+    guardJobEnvAlias: '*env-safe',
+  })
+
   // ---- 第十轮审计 D-03:被钉步骤**自己的步骤体**里的 `export`/前缀赋值 ----
   //
   // 现场(审计方实跑):守卫步里加一行 `export NODE_OPTIONS=…` 之后判据 EXIT=0,而真跑
@@ -9116,6 +9419,10 @@ function main() {
     + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:四层 `env:` 的**白名单登记表** + '
     + '`$GITHUB_ENV` 键名注入 + 被钉步骤体内的 `export`/前缀赋值 + `uses:` 委派目标的'
     + '本地可解析/登记制 + `.github/actions/**` 的内容判据)\n'
+    + '    + SK-18 策略(被钉单元的**执行目录**:job 级 `defaults.run.working-directory` 与'
+    + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
+    + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
+    + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }

@@ -648,15 +648,46 @@ function parseArgs(argv) {
  * 三类行（`classifyVerdictLine` 的返回值）：
  *   · `'verdict'` —— **锚定**的判定行：失败用例名 / 断言 / 编译错误 / 运行器汇总。
  *     形态表见 {@link VERDICT_LINE}（vitest `×`/`FAIL`/`AssertionError`/`⎯`、
- *     `node --test` 的 `not ok`、tsc `error TS…`、yarn `ELIFECYCLE`、栈首 `Error:`…）。
+ *     `node --test` 的 `not ok`、tsc `error TS…`、yarn `ELIFECYCLE`、栈首 `Error:`、
+ *     go `--- FAIL:`/`panic:`、eslint `12:5  error …`、`--reporter=json` 的单行 JSON…）。
  *   · `'noise'` —— 锚定命中但内容是**进度/装饰**（`× 0 items scanned`）：计数、不占预算。
  *   · `null` —— 不是判定行（含**行内**出现关键字的所有自由文本，例如旧口径会误捕的那些）。
  *
+ * **分类前先剥离 ANSI**（见 {@link stripAnsiSequences}）：CI 里 vitest 输出带颜色，
+ * 而锚定看的是行首 —— 不归一化的话 `\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …` 与
+ * `\x1b[31m×\x1b[39m …` 一条都不匹配（本地无 TTY ⇒ 无 ANSI ⇒ "本地绿、CI 瞎"）。
+ * 归一化**只用于分类**：打印仍是原行（短输出"逐字原样"的字节不许变）。
+ *
  * 兜底：一条判定行都没锚到时，**不是**静默给一个空段，而是 fail-loud 打印
  * 「未找到判定行」+ 判定形态可能没登记 + `--full-output` 的出路（见
- * {@link summarizeBoundedFailure} 的 `missingVerdict` / `text`）。
+ * {@link summarizeBoundedFailure} 的 `missingVerdict` / `text`）。**混合**场景（有判定行、
+ * 但也有未锚定的疑似错误行）同样不许静默丢：那些行进有界的「其它疑似错误行」段。
  */
-const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|FAIL(?:ED)?\b|not ok\b|AssertionError\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|error TS\d+|Tests?\s+\d+\s+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯)/u
+const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|FAIL(?:ED)?\b|-{3,}[ \t]*FAIL\b|panic\b|not ok\b|AssertionError\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|error TS\d+|\d+:\d+[ \t]+error\b|Tests?\s+\d+\s+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯|(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites)"\s*:\s*(?!0\b)\d|(?:\{.*)?"success"\s*:\s*false\b)/u
+/**
+ * ANSI 控制序列的剥离（**只用于分类，绝不用于打印**）—— 2026-09-24 第十轮复审 V1 的 P1，
+ * 由主控从 PR #146 的真实 CI 日志复现：
+ *
+ * 现场：失败 job 里编排器打印「本次输出里**一条锚定判定行都没有匹配到**」，而同一份输出里
+ * 确实有 ` FAIL  tests/audit-r9-connector-headers.spec.ts > …`（vitest 的彩色形态是
+ * `\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …`，用例行是 `\x1b[31m×\x1b[39m`，栈行带
+ * `\x1b[90m`）—— 判定词之前先有转义序列，行首锚定就失效。本地无 TTY ⇒ 无 ANSI ⇒
+ * 判据"本地绿、CI 瞎"。ANSI 的另一半动机与 C-09 相同：**分类口径必须与真实输出同形**。
+ *
+ * 覆盖四类：CSI（`ESC [ … 字母`）、OSC（`ESC ] … BEL` 或 `ESC \`；**未闭合的吃到行尾**，
+ * 否则一条被截断的进度条能把整行判定词藏起来）、字符集指定（`ESC ( B` 一类）、
+ * 两字符转义；末尾再兜一次裸 `ESC` / C1 的 `0x9b`（CSI 的单字节形态）。
+ *
+ * @param line - 原始输出行。
+ * @returns 去掉控制序列之后的文本（**用于分类**；打印请继续用原行）。
+ */
+export const stripAnsiSequences = line => line
+  .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/gu, '') // OSC(规范形态)
+  .replace(/\u001b\][^\u0007]*$/gmu, '') // OSC(未闭合:吃到行尾)
+  .replace(/\u001b\[[0-9;:?<=>!]*[ -/]*[@-~]/gu, '') // CSI
+  .replace(/\u001b[()#%][0-9A-Za-z]?/gu, '') // 字符集指定
+  .replace(/\u001b[@-Z\\-_]/gu, '') // 两字符转义
+  .replace(/[\u001b\u009b]/gu, '') // 残留的裸 ESC / C1 CSI
 /**
  * 「进度/装饰噪声」谓词 —— 只对**已经锚定命中**的行判，用来把
  * `× 0 items scanned` 这类计数器从判定行里摘出去（审计现场的原句是
@@ -677,15 +708,28 @@ const MAX_FAILURE_LINES = 150
 const MAX_TAIL_LINES = 200
 /** Cap on the unanchored fallback lines (only used when no verdict line was matched). */
 const MAX_FALLBACK_LINES = 20
+/**
+ * Cap on the **mixed-scenario** fallback lines（有判定行、但输出里同时存在未锚定的疑似错误行）。
+ *
+ * 为什么需要（第十轮复审 V1 的 P3-D1）：`FALLBACK_ERROR_LINE` 那一档此前**只在
+ * `missingVerdict === true` 时**才生效 —— 只要输出里锚到了哪怕一条判定行，其余"读不懂形态"
+ * 的真失败行就被**静默丢弃**。实测的四种真实形态（go 用例级 `--- FAIL: TestX`、`panic: test
+ * timed out`、`--reporter=json` 的单行 JSON、eslint 的 `12:5  error …`）现在已进锚定表，
+ * 但"下一个没登记的形态"不该再由"碰巧还有别的锚定行"决定可见性 ⇒ 这一档是**兜底**。
+ */
+const MAX_MIXED_FALLBACK_LINES = 10
 
 /**
  * 把一行分类成 `'verdict'` / `'noise'` / `null`（见上面那段契约）。
+ *
+ * **分类前剥离 ANSI**（见 {@link stripAnsiSequences}），返回的分类与打印用的原行无关。
  * @param line - 原始输出行（**不要**先 trim：锚定判据看的就是行首）。
  * @returns 分类结果。
  */
 export function classifyVerdictLine(line) {
-  if (!VERDICT_LINE.test(line)) return null
-  return VERDICT_NOISE.test(line) ? 'noise' : 'verdict'
+  const text = stripAnsiSequences(line)
+  if (!VERDICT_LINE.test(text)) return null
+  return VERDICT_NOISE.test(text) ? 'noise' : 'verdict'
 }
 
 /**
@@ -696,18 +740,20 @@ export function classifyVerdictLine(line) {
  *   · 短输出（行数 ≤ `maxVerdictLines + maxTailLines`）**原样返回**（只 `trimEnd`）——
  *     现状不变，不许因为"加了判定行扫描"而改动短输出的字节。
  *   · 长输出：`text` 里判定行在前、尾窗在后，且**判定行一定在尾窗之外也算数**
- *     （这正是 C-08/F2 要修的那条）；进度噪声单独计数、不占判定预算。
+ *     （这正是 C-08/F2 要修的那条）；进度噪声单独计数、不占判定预算；分类前先剥离 ANSI。
  *   · `missingVerdict === true` 时 `text` 里必定有一段 fail-loud 的「未找到判定行」
  *     （不会是空段），并给出 `--full-output` 的出路。
+ *   · **混合场景**（有判定行 + 未锚定的疑似错误行）另行有界回显（`mixedFallbackLines`）。
  *   · `--full-output` 是**调用方**的事：走本函数就直接拿有界结果，不做时间/体积判断。
  * @param output - 任务捕获到的 stdout+stderr。
  * @param options - `maxVerdictLines` / `maxTailLines` / `maxFallbackLines` 可覆盖（测试用）。
- * @returns `{ text, totalLines, truncated, verdictLines, noiseLines, fallbackLines, budgetExhausted, missingVerdict }`
+ * @returns `{ text, totalLines, truncated, verdictLines, noiseLines, fallbackLines, mixedFallbackLines, budgetExhausted, missingVerdict }`
  */
 export function summarizeBoundedFailure(output, options = {}) {
   const maxVerdictLines = options.maxVerdictLines ?? MAX_FAILURE_LINES
   const maxTailLines = options.maxTailLines ?? MAX_TAIL_LINES
   const maxFallbackLines = options.maxFallbackLines ?? MAX_FALLBACK_LINES
+  const maxMixedFallbackLines = options.maxMixedFallbackLines ?? MAX_MIXED_FALLBACK_LINES
   // A trailing newline is a separator, not a line: keeping the empty element
   // made exactly-(MAX_FAILURE_LINES + MAX_TAIL_LINES)-line output take the
   // summary branch (off-by-one).
@@ -722,6 +768,7 @@ export function summarizeBoundedFailure(output, options = {}) {
       verdictLines: [],
       noiseLines: [],
       fallbackLines: [],
+      mixedFallbackLines: [],
       budgetExhausted: false,
       missingVerdict: false,
     }
@@ -747,10 +794,30 @@ export function summarizeBoundedFailure(output, options = {}) {
   const fallbackLines = missingVerdict
     ? lines.filter(line => line.trim() !== '' && FALLBACK_ERROR_LINE.test(line)).slice(0, maxFallbackLines)
     : []
+  // **混合场景**兜底（第十轮复审 V1 的 P3-D1 后半条）：有判定行可锚，但输出里还有
+  // "读不懂形态"的疑似错误行落在尾窗之外 —— 它们此前被静默丢弃。有界回显（不占判定预算），
+  // 并明确"这可能是没登记的判定形态"，把口子指向 VERDICT_LINE 而不是"反正看不见"。
+  const mixedFallbackLines = missingVerdict
+    ? []
+    : lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line, index }) => line.trim() !== ''
+        && index < tailStart
+        && !shownSet.has(index)
+        && classifyVerdictLine(line) === null
+        && FALLBACK_ERROR_LINE.test(line))
+      .slice(0, maxMixedFallbackLines)
+      .map(({ line }) => line)
   const budgetExhausted = verdictLines.length > shown.length
   const parts = [`(输出共 ${lines.length} 行;此处只打印判定行与末尾;完整输出用 --full-output 本地重跑)`]
   if (!missingVerdict) {
     parts.push(`--- 失败相关行(最多 ${maxVerdictLines} 行,按出现顺序;判定行**行首锚定**) ---`, ...shown)
+    if (mixedFallbackLines.length > 0) {
+      // 放在"判定段"之后、噪声计数之前 —— 消费者按 `\n--- ` 切段时判定段仍是纯判定行。
+      parts.push(`--- 其它疑似错误行(未锚定;最多 ${maxMixedFallbackLines} 行 —— 若真判定行长这样,`
+        + '请把它补进 VERDICT_LINE 的**锚定**形态表,而不是让它在混合输出里被静默丢掉) ---',
+      ...mixedFallbackLines)
+    }
     if (noiseLines.length > 0) {
       // 审计现场（C-09 形态 B）：这些行曾经先到先得吃满 150 行预算，把真正的
       // `AssertionError` 挤出判定段。现在只计数、不回显 —— 它们不是判定行。
@@ -780,6 +847,7 @@ export function summarizeBoundedFailure(output, options = {}) {
     verdictLines,
     noiseLines,
     fallbackLines,
+    mixedFallbackLines,
     budgetExhausted,
     missingVerdict,
   }

@@ -32,6 +32,7 @@ import {
   claimMcpTransportFenceTargetWarning,
   ensureMcpTransportRedirectFence,
   isMcpOutboundBusy,
+  MCP_TOOL_CALL_TIMEOUT_MS,
   McpTransportFenceUnavailableError,
   mcpTransportFenceTargetWarning,
   whenMcpOutboundIdle,
@@ -728,6 +729,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         handle.adopt(tokens)
         handle.syncBaseline(persisted)
       }
+      // R9-D-1's deadline is the SDK's 401 retry, which reads
+      // `_requestInit.headers` the moment its refresh resolves — i.e. as soon as
+      // the promise this callback is running inside settles. The event listener
+      // below reaches the same record, but only through an `await
+      // store.readCredential()`, so the retry used to race that disk read
+      // (measured: the retry's header snapshot lands 3–4 ms after the refresh
+      // resolves, and a ≥1 ms stall in the read is enough to replay the stale
+      // declared header and 401 a second time — audit G4 2026-09-24). Apply the
+      // record here, synchronously and from the credential the refresh JUST
+      // persisted: no await between the write and the in-memory update, so the
+      // retry cannot read a generation the store has already left behind. The
+      // listener still runs (it also decides rebuilds, and re-applying the same
+      // render is idempotent).
+      const announced = defs.find(entry => entry.id === id)
+      if (announced !== undefined) refreshLiveHeaders(announced, persisted)
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
@@ -908,6 +924,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   interface McpRegistration {
     /** Connector that owns the live registration. */
     id: string
+    /**
+     * The MCP endpoint this registration's transport talks to, for
+     * streamable-http registrations only (stdio has no URL).
+     *
+     * It exists for ONE decision: whether the rebuild that is about to retire
+     * this transport is the endpoint's only live user. Only then may its
+     * give-up release the endpoint's outbound tickets (R10 N2 — the fence keeps
+     * the tickets per transport instance but the waiter cannot name the
+     * instance, so it needs this proof instead of assuming).
+     */
+    endpoint?: string
     dispose: () => void
     /**
      * The mutable header record the fence installed as this transport's
@@ -1537,9 +1564,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         continue
       }
       const key = slot === AUTHORIZATION_HEADER ? AUTHORIZATION_KEY : name
+      // `${FIELD}` resolves against the credential's OWN fields, never through
+      // the prototype chain (R10 N3, the same closure as R10-B-05): a definition
+      // that spells `${constructor}` / `${toString}` / `${valueOf}` (a mistyped
+      // field name, the most common source of these) used to resolve to a
+      // JavaScript function's SOURCE TEXT — non-empty, so it counted as a
+      // credential, replaced the provider's live bearer, and shipped
+      // `function toString() { [native code] }` to the MCP endpoint. With
+      // `Object.hasOwn` an unknown name is '' : the slot carries no credential
+      // and the framework fills it (or drops it) instead.
+      const fields = credential?.fields
       const resolved = value === ''
         ? ''
-        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) => credential?.fields?.[field] ?? '')
+        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) =>
+          fields !== undefined && Object.hasOwn(fields, field) ? fields[field] ?? '' : '')
       if (!carriesCredential(slot, resolved)) {
         // Same rule as a missing declaration: the framework fills this slot.
         if (slot === AUTHORIZATION_HEADER && value.trim() !== '') rejectedAuthorization = name
@@ -1937,17 +1975,47 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
+   * How many OTHER live registrations talk to this endpoint.
+   *
+   * Read off the registration records (not off `defs` + URL recomputation): the
+   * record set IS the live set, so a connector dropped from the catalogue while
+   * its transport is still alive keeps counting — the direction that must not
+   * be missed.
+   * @param endpoint - the streamable-http URL of the registration being rebuilt.
+   * @param serverName - the server being rebuilt (excluded from the count).
+   * @returns the number of live registrations whose endpoint is the same.
+   */
+  const otherLiveTransportsAt = (endpoint: string, serverName: string): number => {
+    let count = 0
+    for (const [name, registration] of mcpRegistrations) {
+      if (name === serverName) continue
+      if (registration.endpoint === endpoint) count += 1
+    }
+    return count
+  }
+
+  /**
    * Wait for one server's in-flight MCP calls before its transport is retired.
    *
    * Audit R9A-3: the provider-less rebuild (V3A-N6) has to dispose the live
    * transport, and the shipped bridge's disposer closes the client — including
    * a tool call the SDK is still waiting on (`Connection closed` mid-call; the
    * 600–800 ms discovery round trip of the rebuild is exactly the window). The
-   * fence counts non-GET requests per endpoint, so the rebuild can wait for the
+   * fence counts non-GET requests per transport, so the rebuild can wait for the
    * call to finish instead of cutting it.
    *
+   * **Scope of the give-up release** (R10 N2): the fence files tickets per
+   * transport instance, and this waiter can only name the ENDPOINT — so it
+   * asserts `soleLiveTransport` only when no other live registration talks to
+   * the same endpoint. Then every ticket here belongs to the transport this
+   * rebuild is about to cut, and a timeout may stop charging them (R10-B-06).
+   * With another live transport on the endpoint the waiter still waits, but a
+   * give-up releases nothing: under-waiting this rebuild costs one grace, while
+   * clearing the other transport's ticket made its own rebuild read `idle` and
+   * cut a call that could still have settled.
+   *
    * Not a full guarantee, and the residue is stated rather than implied: a call
-   * that starts between the count reaching zero and `retire()` (a few
+   * that starts between the tickets reaching zero and `retire()` (a few
    * microseconds) and a call that outlives the bound are still cut. Both are
    * logged, and the bound is the documented trade-off against starving the
    * credential update.
@@ -1962,7 +2030,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const url = streamableHttpUrl(server, locale()).toString()
     if (!isMcpOutboundBusy(url)) return
     const graceMs = options.rebuildIdleGraceMs ?? MCP_REBUILD_IDLE_GRACE_MS
-    const outcome = await whenMcpOutboundIdle(url, graceMs)
+    const soleLiveTransport = otherLiveTransportsAt(url, server.serverName) === 0
+    const outcome = await whenMcpOutboundIdle(url, graceMs, { soleLiveTransport })
     if (outcome === 'busy') {
       ctx.logger?.warn(`pico-connectors: ${def.id}/${server.serverName} 重建等待在途调用超时（${graceMs}ms），仍按新凭据重建`)
       return
@@ -2102,7 +2171,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             // `dsh-mcp-client`), while the object is deliberately the
             // `AuthProvider` face so the SDK keeps OUR 401 hook.
             ...(auth.authProvider === undefined ? {} : { authProvider: auth.authProvider as unknown as OAuthClientProvider }),
-            toolCallTimeoutMs: 120_000,
+            // The budget this call gets is the SAME number the fence bounds its
+            // outbound bookkeeping with (R10 N6): one exported constant, never a
+            // second literal that can drift away from the accounting.
+            toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
             failOnStartupError: false,
           }
         : {
@@ -2112,7 +2184,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             args: server.args ?? [],
             env: buildStdioEnv(def, server, credential).env,
             cwd: process.cwd(),
-            toolCallTimeoutMs: 120_000,
+            toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
             failOnStartupError: false,
           }
       // A disconnect/user-switch may have landed while mcpAuthProvider was
@@ -2198,6 +2270,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // field nobody reads is how two truth sources start to drift (R10-B-04).
       mcpRegistrations.set(server.serverName, {
         id: def.id,
+        // Only the http shape has an endpoint; stdio registrations leave it out,
+        // so they can never make an http rebuild think it is not alone.
+        ...(server.transport === 'streamable-http' ? { endpoint: streamableHttpUrl(server, locale()).toString() } : {}),
         ...(providerSuppliesAuthorization ? { liveHeaders: renderedHeaders.headers } : {}),
         dispose: () => { void fiber?.dispose?.() },
       })

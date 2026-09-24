@@ -20,6 +20,40 @@ package main
 //
 // 兼容性：只在响应体里**增加**一个对象字段 `usage_retention`；解析不了就原样透传
 // （探针的既有契约优先于新增字段），状态码与所有既有响应头逐字保留。
+//
+// # 字段与消费口径（R10-G3 · N3：给运维脚本/告警规则的可读契约）
+//
+// `usage_retention` 就是 `serverstore.UsageRetentionStatus` 的 JSON（字段名与语义见
+// `serverstore/usage_retention_status.go` 的结构体注释）。运维面最要紧的三组：
+//
+//	"调度器还活着吗"     rounds / failed_rounds / last_round_at / last_error
+//	"这一轮为什么没回收"  skipped / skipped_by_reason / unreclaimed
+//	"保留策略还在推进吗"  deferred_stalled（**唯一需要进告警规则的那一位**）
+//	                      + stalled_relations（点名）/ deferred_streak（逐关系连续轮数）
+//	                      + deferred_stalled_rounds（累计停摆轮数，不回退）
+//
+// 为什么"延后"需要单独一面（复审 N3）：`failed_rounds` 表达的是"有没有报错"，而按
+// R10-A-03 的契约**锁竞争/语句超时不算失败**（它们让管理端保存保留期回 500 是已修
+// 的缺陷）。于是"连续 N 轮都因为超时没回收任何东西"（= 保留策略已经停摆、磁盘按
+// 经过的月份单调增长）在 failed_rounds 上**看不见**，而 skipped_by_reason 每轮被
+// 覆写、也答不了"连续几轮"。这一面就是那个缺口。
+//
+// 示例（每 6h 轮询一次即可，调度间隔就是 6h）：
+//
+//	curl -fsS $SERVER/readyz | jq -e '.usage_retention.deferred_stalled != true' \
+//	  || alert "保留策略停摆：$(curl -fsS $SERVER/readyz | jq -c '.usage_retention.stalled_relations')"
+//	# 想知道"停摆发生过几次"（即使当前这一轮已经自愈）：
+//	curl -fsS $SERVER/readyz | jq -r '.usage_retention.deferred_stalled_rounds // 0'
+//
+// 三个字段的语义边界（避免误报）：
+//   - deferred_stalled=true 表示**至少一条**到期关系连续 ≥5 轮（≈30h）既没被回收、
+//     也没有真失败。它会在该关系被回收后的下一轮自动回落 false；
+//   - deferred_stalled_rounds 是**累计**计数，不随回落清零 —— 用它做趋势/复盘；
+//   - failed_rounds 不得用来替代它：超时按契约不进失败面（见上）。
+//
+// 键序与结尾换行：本文件**不**重新序列化整个响应体（只在最后一个 `}` 前插入一个
+// 成员），所以内层的键序（声明序）与结尾 `\n` 逐字保留；新增字段只出现在
+// `usage_retention` **对象内部**，对既有消费者是纯增量的。
 
 import (
 	"bytes"
