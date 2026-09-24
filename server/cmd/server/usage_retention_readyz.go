@@ -143,7 +143,11 @@ func mergeUsageRetentionField(body []byte, st serverstore.UsageRetentionStatus) 
 	if strings.TrimSpace(string(body[open+1:end])) == "" {
 		sep = "" // 空对象：不要多一个逗号
 	}
-	out := make([]byte, 0, len(body)+len(raw)+len(usageRetentionField)+4)
+	// 容量提示只取 `len(body)`：结果至少与原文一样长，且**不做长度相加** ——
+	// `make([]byte, 0, len(a)+len(b)+c)` 会被 CodeQL 的 go/allocation-size-overflow
+	// 判为未检查的整数相加（第九轮 PR 上真实报出 alert #114）。这里多出来的
+	// 部分（分隔符 + 字段名 + raw）由 append 自己增长，代价可忽略（探针响应几百字节）。
+	out := make([]byte, 0, len(body))
 	out = append(out, body[:end]...)
 	out = append(out, sep...)
 	out = append(out, '"')
