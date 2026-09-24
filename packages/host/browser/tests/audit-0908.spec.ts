@@ -356,7 +356,8 @@ describe('P2-30 window.open opens a tab instead of failing silently', () => {
     const handler = view.windowOpenHandler
     expect(handler).toBeDefined()
     expect(handler?.({ url: 'https://popup.example/x' })).toEqual({ action: 'deny' })
-    await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) }, { timeout: 10_000 })
     expect(runtime.opLog.some((op) => op.tool === 'browser_window_open')).toBe(true)
     runtime.dispose(); rmSync(dir, { recursive: true, force: true })
   })
@@ -371,7 +372,8 @@ describe('P2-30 window.open opens a tab instead of failing silently', () => {
     // only after 交给 AI, in a burst).
     runtime.setUserControl(true, 'user')
     expect(handler?.({ url: 'https://popup.example/user' })).toEqual({ action: 'deny' })
-    await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(runtime.listTabs()).toHaveLength(2) }, { timeout: 10_000 })
     const op = runtime.opLog.find((entry) => entry.tool === 'browser_window_open')
     expect(op?.actor).toBe('user')
     runtime.setUserControl(false, 'user')

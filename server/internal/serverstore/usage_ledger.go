@@ -3,6 +3,7 @@ package serverstore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log"
@@ -223,7 +224,34 @@ func usageMonthHasDetail(db *sql.DB, month time.Time) (bool, error) {
 // 旧实现经 RebuildUsageLedger 无条件 ensureUsagePartition,一个错界老分区让
 // 整轮清理中止(清理被"自己要清的东西"挡住,保留策略永久停摆)。
 func rebuildUsageLedgerRows(db *sql.DB, from, to time.Time) error {
-	return rebuildUsageLedgerRowsFrom(db, from, to, nil)
+	return rebuildUsageLedgerRowsOnPool(db, from, to, nil)
+}
+
+// rebuildUsageLedgerRowsOnPool 是账本聚合的**池上**入口：两条 UPSERT 放进一个
+// 事务，并把 search_path 与判据钉成同源（R11A-02）。
+//
+// 为什么需要它：`db.Exec` 走的是**会话默认** search_path，而账本聚合的来源
+// （`FROM usage`）与写入目标（`usage_daily` / `usage_monthly`）都是未限定名 ⇒
+// shadow schema 在场时会把**虚构金额**写进永久账本（真 PG 实测：账本被 shadow 的
+// 999.00 覆盖，真实明细 12.50 未进账本）。走 `applyUsageRetentionBudget` 的那条
+// 路径已经钉了同一句，这里是池上入口的对应收口（启动补算 / 相邻月并入失败的兜底
+// 补账）。
+//
+// **不加时间上界**：这两条 UPSERT 的既有预算是调用方的事（启动补算、自愈重试），
+// 本函数只负责"判据与动作看到同一个对象"。
+func rebuildUsageLedgerRowsOnPool(db *sql.DB, from, to time.Time, extraSources []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
+	if _, err := tx.Exec(usageSearchPathPin); err != nil {
+		return err
+	}
+	if err := rebuildUsageLedgerRowsFrom(tx, from, to, extraSources); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ledgerDetailSource 构造"日账聚合的明细来源"：无额外来源时就是 `usage`
@@ -617,6 +645,17 @@ func usageMonthRelationOf(rel string) (time.Time, bool) {
 
 // scanUsageMonthTables 枚举 public 模式下全部名为 usage_<YYYYMM> 的关系，分成
 // 「真分区」与「孤儿」两桶（见 usageMonthTables 的说明）。
+//
+// **有意排除 usage_daily_***（R11A-06，P3，**有意不回收，不是漏做**）：永久账本
+// `usage_daily` / `usage_monthly` **没有任何回收路径**，全仓不存在
+// `DELETE FROM usage_daily` / `DROP TABLE …usage_daily…`。保留期（settings
+// `usage.retention_months`）按定义只作用于**明细**月分区 —— 账本是"明细被删之后
+// 仍然要能出报表"的那一份（见 rebuildUsageLedgerRowsFrom 的注释）。
+// 后果如实认账：账本行数按 (user, model, day) 无界增长（年分区**个数**有界，行数
+// 无界），磁盘随"用户数 × 模型数 × 天数"单调增长。
+// 为什么不在本次修：给它加保留期是**产品决策**（"报表能回溯多久"），不是缺陷修复
+// —— 顺手加一条回收会让历史报表静默变短，正是本仓反复登记的"静默少计"形态。
+// 已登记在 temp/r11/fix-I4/REPORT.md 的"需主控决策"一节。
 //
 // 只读一次 catalog（pg_class + pg_inherits）：比旧实现逐月一条查询更省往返，
 // 且判据是**事实**（枚举）而不是**假设**（名字连续）—— R4-C-8 的根因正是后者。
@@ -1291,6 +1330,13 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 	fail := func(op string, err error) usageReclaimResult {
 		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: usageBudgetError(ctx, err)}
 	}
+	// 说明（R11A-03）：本段用 `*sql.Tx` 而**不是** `usageBoundedTx`，因为三个既有
+	// 回归用例（R10-G3 / R10-H W1 ×2）用 `q.(*sql.Tx)` 作为**事务内 vs 池上**的
+	// 故障注入判别器（usageOwnershipProbeHook）。那三处判据不在本泳道的改动面内，
+	// 不能为了"顺手把结算段的 COMMIT 也收口"而打断它们。
+	// ⇒ 代价如实登记：本段的 COMMIT 仍然只有 ctx 的**语句级**中止（`BeginTx(ctx)`），
+	// 提交期处理（提交记录写入之后的等待）不受它约束。真正持有父表 ACCESS
+	// EXCLUSIVE 的是**冻结段**，那一段已按 R11A-03 收口（usageBoundedTx）。
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fail("begin-settle", err)
@@ -1318,11 +1364,11 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 	//     的锁在 PG 里都持到事务结束 ⇒ **没有**"只锚一下再放掉"的写法。
 	if _, err := tx.Exec("LOCK TABLE ONLY " + quoteRelationIdent("usage") + " IN ACCESS SHARE MODE"); err != nil {
 		rollback()
-		return usageReclaimLockFailure(db, rel, "lock-usage", err)
+		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-usage", err)
 	}
 	if _, err := tx.Exec("LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"); err != nil {
 		rollback()
-		return usageReclaimLockFailure(db, rel, "lock-subtree", err)
+		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-subtree", err)
 	}
 	// 关系已被并发轮次回收：拿锁成功说明它刚刚还在，这里只是把"不存在"也归良性。
 	exists, xerr := usageRelationExistsTx(tx, rel)
@@ -1353,6 +1399,25 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 		// 再 union 一次就是把同一行算两遍（H1：12.5 → 25.0）。
 		extra = nil
 	}
+	// R11A-01（P1）：**窗口的算定与使用必须在同一个持锁区间内**。
+	//
+	// 缺陷形态：补账窗口（[from, to]）是调用方在**冻结之前**按"扫描时刻关系里
+	// 实际持有的行"算好的（retentionLedgerWindow → detailMonthsOutside），而冻结
+	// （DETACH）在预补账的整窗口聚合之后才发生 —— 于是 [窗口算定, 冻结] 之间
+	// **提交**、且北京日落在窗口之外的计量行，两边聚合都读不到，却随 DROP 一起
+	// 消失（真 PG 探针：`SILENT_LOSS=7.0000`，而该轮
+	// `err=nil/cleared=5/skipped=0/failures=0`、/readyz 全绿）。
+	//
+	// 此刻 rel 上已有 ACCESS EXCLUSIVE（行集合**不可能**再增加），归属也已复检
+	// ⇒ 关系自身的 min/max(created_at) 就是这段窗口的**事实**。用它单向扩窗：
+	// 判据（窗口）与动作（聚合 + DROP）出自同一个持锁区间，没有第二条时间线。
+	// 只扩不缩 ⇒ 原窗口覆盖的月一个不少（相邻月并入的语义不变）。
+	if wfrom, wto, werr := usageReclaimWindowUnderLock(tx, rel, req.from, req.to); werr != nil {
+		rollback()
+		return fail("window-under-lock", werr)
+	} else {
+		req.from, req.to = wfrom, wto
+	}
 	// 持锁补账（R10-D-01）：此刻行集合已冻结 ⇒ 补账覆盖的行 = 接下来 DROP 会删掉的行。
 	// 与 DROP 同事务：不存在"补了没删 / 删了没补"的中间态（任何一步失败都回滚）。
 	if !req.from.IsZero() && !req.to.IsZero() {
@@ -1380,6 +1445,50 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 		return fail("commit-settle-drop", err)
 	}
 	return usageReclaimResult{outcome: usageReclaimDropped, op: "settle-drop"}
+}
+
+// usageReclaimWindowUnderLock 在**持 rel 的 ACCESS EXCLUSIVE 时**重算补账窗口
+// （R11A-01 的修法：判据与动作同源、同一个持锁区间）。
+//
+// 语义：
+//
+//	rel 此刻的行集合已经冻结 ⇒ min/max(created_at) 是**事实**；
+//	把窗口单向**扩**到覆盖这两个北京日（只扩不缩）：
+//	  - 空关系（min/max 皆 NULL）⇒ 窗口原样返回；
+//	  - 零窗口（调用方没给）⇒ 直接取 [min 的北京日, max 的北京日]。
+//
+// 为什么用"关系自身的 min/max"而不是"再跑一遍 detailMonthsOutside"：
+// 前者是**同一次持锁区间里的单条聚合**（无锁、无 TOCTOU），代价 O(1) 索引扫描；
+// 后者要按谓词扫行、再解析月份，且在"刚好被本段挡住的那个写入者"上并不更准。
+//
+// 上界由**声明边界**保证：PG 强制分区约束 ⇒ rel 里不可能有边界之外的行，所以
+// "实际行窗口 ⊆ 声明边界窗口"是事实（账本关系按声明边界预先备齐，见
+// reclaimUsagePartitionAtomically 的 ensureRetentionLedgerRelations）。
+func usageReclaimWindowUnderLock(q usageQuerier, rel string, from, to time.Time) (time.Time, time.Time, error) {
+	// 零窗口 = 调用方**明确要求不补账**（`dropDetachedOrphanAtomically` 的
+	// 视图/物化视图占名分支：它们不持有明细行，也没有 `created_at` 列）。
+	// 这里必须同口径跳过 —— 否则 `SELECT min(created_at)` 会在 VIEW 上报 42703，
+	// 把一条本来只需 `DROP VIEW` 的良性关系变成真失败
+	// （`TestUsageRetentionViewOccupiedMonthNameIsClearedNotStalling` 抓到的回归）。
+	if from.IsZero() || to.IsZero() {
+		return from, to, nil
+	}
+	var lo, hi sql.NullTime
+	if err := q.QueryRow(fmt.Sprintf(`SELECT min(created_at), max(created_at) FROM %s`,
+		quoteRelationIdent(rel))).Scan(&lo, &hi); err != nil {
+		return from, to, fmt.Errorf("读取 %s 的实际行窗口: %w", rel, err)
+	}
+	if lo.Valid {
+		if d := BeijingDay(lo.Time); !d.IsZero() && (from.IsZero() || d.Before(from)) {
+			from = d
+		}
+	}
+	if hi.Valid {
+		if d := BeijingDay(hi.Time); !d.IsZero() && (to.IsZero() || d.After(to)) {
+			to = d
+		}
+	}
+	return from, to, nil
 }
 
 // dropDetachedOrphanAtomically 是**孤儿路径**的收口：与 attached 路径
@@ -1423,6 +1532,12 @@ type retentionWindow struct {
 	// / 边界读不懂 / 同名孤儿都是 false）。这一条是 §1.5-B 的判据入口：只有边界
 	// 恰等于名义月时，"分区里不可能有别的月的行"才是**事实**而不是假设。
 	exact bool
+	// R11A-01：boundFrom/boundTo 是该关系**声明边界**覆盖的北京日窗口（边界可
+	// 解析时；否则零值）。它不是补账窗口，而是补账窗口的**上界** —— PG 强制分区
+	// 约束 ⇒ rel 里不可能有声明边界之外的行，所以"结算段按实际行重算出来的窗口"
+	// 一定落在它里面。用途只有一个：账本**自己的**关系（usage_daily 年分区）必须
+	// 在进入冻结段之前按这个上界备齐（见 reclaimUsagePartitionAtomically）。
+	boundFrom, boundTo time.Time
 }
 
 // retentionLedgerWindow 返回"清理某个到期月关系之前必须补算的账本窗口",并在
@@ -1452,6 +1567,18 @@ func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) retentionWindow 
 	if !probe.Exists {
 		win.exact = true // 并发下已被别人清掉:仍是"可以继续 DROP"的状态
 		return win
+	}
+	// R11A-01：声明边界窗口先记下来（它是"补账窗口的上界"，账本关系按它预建）。
+	// 与下面"窗口 = 该月 ∪ 声明边界"的扩窗**不是**同一件事：那一步只在形态不
+	// 就绪时发生，而这一步无论形态是否就绪都要有值。
+	if boundFrom, boundTo, ok := splitRangeBound(probe.Bound); ok {
+		if _, at, okF := parsePartitionBoundLiteral(boundFrom); okF {
+			win.boundFrom = BeijingDay(at)
+		}
+		if _, at, okT := parsePartitionBoundLiteral(boundTo); okT {
+			// 上界是开区间:退 1ns 落到最后一个被覆盖的瞬时所在的北京日。
+			win.boundTo = BeijingDay(at.Add(-time.Nanosecond))
+		}
 	}
 	// exact 只在**叶子分区**且边界恰等于名义北京月时为真：二级分区（relkind='p'）
 	// 的覆盖范围无法由父分区的边界一次证明 —— PG 允许子分区的区间超出父分区
@@ -1518,7 +1645,7 @@ func retentionBackfill(db *sql.DB, from, to time.Time, extraSources []string) er
 	if err := ensureRetentionLedgerRelations(db, from, to); err != nil {
 		return err
 	}
-	return rebuildUsageLedgerRowsFrom(db, from, to, extraSources)
+	return rebuildUsageLedgerRowsOnPool(db, from, to, extraSources)
 }
 
 // retentionBackfillBudget 是**清理路径**的补账入口：与 retentionBackfill 同一份
@@ -1641,6 +1768,10 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 
 	clearedDetached := 0
 	skipped := 0
+	// R11A-04：本轮**真的把关系删掉**的集合 —— `existing` 是"扫描时刻存在"的事实，
+	// 而写入面条目的"已解决"判据要用"本轮结束时还存在"（两者只差本轮删掉的那些）。
+	// 必须在**两个桶**（孤儿桶在前、attached 桶在后）之前声明。
+	reclaimedRel := make(map[string]bool)
 	// R10-D-02（P2）：`usage` 的 ACCESS EXCLUSIVE 是**所有**关系共同的锁点
 	// （临界区的第一把锁）。一旦某一处等它超时，本轮其余关系的临界区都会同样
 	// 各等一个 5s ⇒ 整轮时长随关系数线性增长，而管理端是**同步**调用。第一处
@@ -1843,6 +1974,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 			switch res.outcome {
 			case usageReclaimDropped:
 				clearedDetached++
+				reclaimedRel[rel] = true
 				log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage;"+
 					"其明细已并入相邻月并补进永久账本)", rel, shape.Kind)
 			case usageReclaimBackfilled:
@@ -1873,6 +2005,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		switch res.outcome {
 		case usageReclaimDropped:
 			clearedDetached++
+			reclaimedRel[rel] = true
 			log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage)",
 				rel, shape.Kind)
 		case usageReclaimGone:
@@ -2068,6 +2201,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		switch res.outcome {
 		case usageReclaimDropped:
 			dropped++
+			reclaimedRel[rel] = true
 		case usageReclaimSkippedRetained:
 			noteSkip("attached relation", rel, usageSkipSubtreeRetained, fmt.Sprintf("relkind=%q children=%d:"+
 				"持锁复检命中(R9-A-1):子树里还有保留期内的明细行(拆树会连它一起删);账本已按实际明细补齐,"+
@@ -2104,6 +2238,16 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	// R8-A-3：`skipped` 必须按**原因**可见（深后代永不回收 / 子树仍在保留期 /
 	// 非表对象 / DETACH 后的父表）—— 此前只有一行汇总数字，运维看不出"哪一类
 	// 关系永远不会被回收"。同一份计数同时进 UsageRetentionStatus（/readyz）。
+	// R11A-04：`existing` 是**扫描时刻**的事实；写入面条目要判的是"这一轮结束时
+	// 这个月的分区关系还在不在" ⇒ 折算掉本轮已经删掉的那些（reclaimedRel）。
+	round.ExistingMonths = make([]string, 0, len(existing))
+	for key := range existing {
+		if reclaimedRel["usage_"+key] {
+			continue
+		}
+		round.ExistingMonths = append(round.ExistingMonths, key)
+	}
+	sort.Strings(round.ExistingMonths)
 	round.ClearedPartitions = dropped
 	round.ClearedDetached = clearedDetached
 	round.Skipped = skipped
@@ -2219,8 +2363,14 @@ func usageReclaimSettleBudgetMS(rows int64) int {
 }
 
 // usageReclaimRowBytesEstimate 是"从表大小反推行数"时的每行字节估计（只喂预算，
-// 不是判据）。usage 一行十几个列（含 timestamptz/double/numeric）实测 100–200 字节，
-// 取 128 略偏小 ⇒ 反推的行数略偏**大**（预算偏宽），与"估小 = 延后"的代价方向相反。
+// 不是判据）。
+//
+// 方向勘误（R11-D-05，P3）：本注释此前写"取 128 略偏小 ⇒ 反推的行数略偏**大**
+// （预算偏宽）"，方向与实测相反 —— 反推行数 ≈ 表字节 ÷ 本估计，估计取**大**了
+// 反推行数才偏小。本机 20 万行样本实测 **126.0 B/行**
+// （`TestR11DT3BudgetDerivationExtremes`），而 128 > 126.0 ⇒ 反推行数 ≈ **0.98×**
+// 真值 ⇒ 预算方向是**略偏紧**，不是偏宽。实际余量仍然充足：反推口径给到
+// `20µs × 126.0/128 = 19.7µs/行`，对比 R10-G3 记录的重载实测 `9.4µs/行` ⇒ **2.09×**。
 const usageReclaimRowBytesEstimate = 128
 
 // usageReclaimEstimatedRows 给出"这个关系大概有多少行"（**只喂预算**，不是判据）。
@@ -2270,9 +2420,13 @@ func usageReclaimBudgetForRelation(db *sql.DB, rel string) int {
 // 三层上界各回答一个问题：
 //
 //	lock_timeout    —— 等锁（父表 AS / rel AEX）不得无界（R10-D-02 的同一条纪律）；
-//	statement_timeout —— 单条语句（聚合/DROP/COMMIT）不得无界；
-//	ctx deadline    —— **整个结算段**（含 COMMIT）不得无界（N2②：旧实现只有"每语句"
+//	statement_timeout —— 单条语句（聚合/DROP）不得无界；
+//	ctx deadline    —— **整段（含 COMMIT）**不得无界（N2②：旧实现只有"每语句"
 //	                   上界，多语句相加可以远超它，复审实测到 22.02s > 20s）。
+//
+// R11A-03 的边界（如实登记）：本函数仍用 `*sql.Tx`（理由见 settleUsageReclaim 里
+// 关于 `usageOwnershipProbeHook` 的说明）⇒ 这里的 ctx 只罩**语句**，不罩 COMMIT。
+// 真正持父表 ACCESS EXCLUSIVE 的冻结段已改走 `usageBoundedTx`（ctx 罩住 COMMIT）。
 func withUsageSettleBudget(db *sql.DB, rel string, fn func(*sql.Tx) error) error {
 	budget := usageReclaimBudgetForRelation(db, rel)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(budget)*time.Millisecond)
@@ -2363,14 +2517,33 @@ func usageFailureTimeoutReason(err error) (string, bool) {
 // 判据必须与危害同构：把"等锁"变成有界 + 结构化（55P03 ⇒ timeout 分类），
 // 而不是让调用方无限等待。
 //
-// 只用于**清理路径**：计量写入路径（ensureRangePartition 的热路径）必须继续
-// **等**锁 —— 那里把等待改成失败就是把"慢"变成"全站 503 METERING_FAILED"。
+// R11A-03（同族第四条，点名）：这条路径上的事务同样以 `COMMIT` 收尾，而
+// `db.Begin()` + `tx.Commit()` 的终点没有任何上界（`lock_timeout` 只管等锁、
+// `statement_timeout` 不覆盖提交期）。清理路径（`ms > 0`）因此给它一个**结构性**
+// 上界：等锁预算 + `usageReclaimStatementBudgetMS`（这一段的工作量上限：单条探测 /
+// 单条 DDL / 一次窗口扫描），并走 `usageBoundedTx` ⇒ ctx 真的罩住 COMMIT。
+//
+// **`ms == 0` 时故意不加上界**：那是计量写入路径（`ensureRangePartition` 的热路径
+// 传 0），它的契约是"**等**锁"而不是"超时失败" —— 把等待改成失败就是把"慢"变成
+// "全站 503 METERING_FAILED"（见 ensureRangePartitionBudget 的注释）。
+//
+// **本函数仍然用 `*sql.Tx`**（理由见 settleUsageReclaim 里关于
+// `usageOwnershipProbeHook` 的说明）：ctx 只罩**语句**，不罩 COMMIT；且
+// `ms == 0`（热路径）时连 ctx 都不给（保持"等锁"契约）。`search_path` 的钉死
+// （R11A-02）与 `ms` 无关，两条路径都生效。
 func withUsageLockBudget(db *sql.DB, ms int, fn func(*sql.Tx) error) error {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	cancel := func() {}
+	if ms > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(),
+			time.Duration(int64(ms)+usageReclaimStatementBudgetMS)*time.Millisecond)
+	}
+	defer cancel()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck // 只读/短事务，回滚失败无副作用
+	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
 	if err := applyUsageRetentionBudget(tx, ms, 0); err != nil {
 		return err
 	}
@@ -2392,7 +2565,7 @@ func withUsageLockBudget(db *sql.DB, ms int, fn func(*sql.Tx) error) error {
 //     执行（PG 从第 6 次起可能选通用计划）真的会被一个无关分区的 ACCESS EXCLUSIVE
 //     卡住（2s lock_timeout 命中）。强制自定义计划 ⇒ 用真实窗口值在**计划期**裁剪，
 //     只锁窗口内的分区（代价是每次重规划这条聚合，微秒级）。
-func applyUsageRetentionBudget(tx *sql.Tx, lockTimeoutMS, statementTimeoutMS int) error {
+func applyUsageRetentionBudget(tx usageExecer, lockTimeoutMS, statementTimeoutMS int) error {
 	if lockTimeoutMS > 0 {
 		if _, err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", lockTimeoutMS)); err != nil {
 			return err
@@ -2406,13 +2579,167 @@ func applyUsageRetentionBudget(tx *sql.Tx, lockTimeoutMS, statementTimeoutMS int
 	if _, err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
 		return err
 	}
+	// R11A-02（P2）：**判据与动作必须看到同一个对象**。
+	//
+	// 缺陷形态：catalog 判据一律硬钉 `public.`（`n.nspname = 'public'` +
+	// `to_regclass('public.'||…)`），而动作（`LOCK TABLE ONLY usage`、
+	// `ALTER TABLE usage DETACH PARTITION …`、`DROP TABLE IF EXISTS "usage_<M>"`、
+	// 补账聚合的 `FROM usage`、`CREATE TABLE … PARTITION OF "usage"`）全是
+	// **未限定名** ⇒ 会话/角色/库级 `search_path` 前置了一个同名 shadow schema 时，
+	// 判据看的是 public 的真关系、动作作用在 shadow 上。真 PG 实测（同名 shadow
+	// 分区树在场）：真关系**一行未动**、整轮 `err=nil/cleared=0/skipped=0/
+	// failures=0`（保留策略静默停摆、/readyz 全绿），而永久账本被 shadow 的
+	// **虚构金额**覆盖成 999.00（真实明细 12.50 未进账本）。
+	//
+	// 口径选择（为什么统一 search_path 而不是逐个限定名）：本函数是清理路径
+	// **每一个事务**（形态探测 / 读窗口 / 关系 DDL / 冻结段 / 结算段 / 预补账）
+	// 的唯一公共入口，一句 `SET LOCAL` 覆盖**本事务内所有**关系引用 —— 包括辅助
+	// 函数里拼出来的语句（`ledgerDetailSource`、`quoteRelationIdent` 的每个调用点、
+	// `DROP`/`DETACH` 的目标名），不需要逐点枚举，也就不会漏。`pg_catalog` 放在
+	// 最前还顺带封掉**同名函数/操作符/类型**的遮蔽（逐名限定做不到这一半：
+	// `bjWallExpr` 的 `to_char`/`date_trunc`、`beijing.go` 的时区渲染同样可被
+	// shadow schema 顶掉）。`SET LOCAL` 随事务结束自动还原，不污染连接池的其它
+	// 使用者，代价为零。
+	//
+	// 另外两个入口各自钉了同一句（同一判据不允许有第二份实现，这里是**同一句
+	// 字面量**的三个调用点）：计量写入事务（usage.go 的 recordUsageTx）与账本
+	// 关系的池上准备（usage_ledger.go 的 withUsageLockBudget，它本身就调用本函数）。
+	if _, err := tx.Exec(usageSearchPathPin); err != nil {
+		return err
+	}
 	return nil
 }
 
+// usageSearchPathPin 是"判据与动作看到同一个对象"的**唯一实现**（R11A-02）：
+// 清理路径的每一个事务（applyUsageRetentionBudget）与计量写入事务
+// （usage.go 的 recordUsageKindAtCached）都执行这一句。写成常量是为了让
+// "同一份语义只有一处字面量"可被机械核对（两处各写一遍会再次分叉）。
+const usageSearchPathPin = "SET LOCAL search_path = pg_catalog, public"
+
 // setUsageRetentionStatementBudget 给清理的**临界区**事务装上有界语义
-// （等锁上界 + 单语句时长上界 + 计划期裁剪）。
-func setUsageRetentionStatementBudget(tx *sql.Tx) error {
-	return applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, usageReclaimStatementBudgetMS)
+// （等锁上界 + 单语句时长上界 + 计划期裁剪 + search_path 与判据同源）。
+func setUsageRetentionStatementBudget(tx usageExecer) error {
+	return applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, usageReclaimFreezeBudgetMS)
+}
+
+// usageReclaimRollbackBudgetMS 是"回滚一条清理事务"的时长上界（毫秒）。
+// 回滚是空语句级的工作，给 5s 只是为了让"连接已经坏了"这件事尽快有结论。
+const usageReclaimRollbackBudgetMS = 5000
+
+// usageReclaimFreezeBudgetMS 是**冻结段整段（含 COMMIT）**的总上界（毫秒）。
+//
+// 取值与 usageReclaimStatementBudgetMS 同值（20s = 4 个 5s 有界等待之和），但它
+// 约束的是**另一件事**：`statement_timeout` 只罩"每一条语句"，而 COMMIT 属于
+// **提交期**处理 —— 真 PG 实测（`SET LOCAL statement_timeout='1000ms'` + 提交期
+// 执行 5s 的 DEFERRABLE 约束触发器）⇒ `Time: 5012/5463/5008 ms`、`rows_committed=1`。
+// 也就是说 20s 的"每语句上界"根本不是"这一段持锁时长的上界"（R11A-03）。现在它
+// 同时是 `usageBoundedTx` 的 ctx deadline ⇒ 到点连 COMMIT 一起中止。
+//
+// 可变（var）**只为测试**：判据要能在真 PG 上把"COMMIT 挂起"注入进来才咬得到，
+// 而真 PG 里可靠、可控、不牵动整个集群的注入点（事件触发器把一次冻结段 DDL 接进
+// 提交期的 DEFERRABLE 约束触发器）要求判据能把这段预算缩到注入时长之下。
+// 生产装配从不写它；唯一写入点是本包测试的 t.Cleanup（与本文件既有的
+// `usageOwnershipProbeHook` / `cleanupDetachedStepHook` 同一约定）。
+var usageReclaimFreezeBudgetMS = usageReclaimStatementBudgetMS
+
+// usageBoundedTx 是清理临界区的**带 ctx 上界**的事务句柄（R11A-03）。
+//
+// 为什么不能直接用 `database/sql` 的 `*sql.Tx`：`Tx.Commit()` **没有 ctx 参数**，
+// 而 `database/sql` 的 `awaitDone` 兜底在 `Commit()` 已经置位 done 之后是 no-op
+// ⇒ `BeginTx(ctx)` 的 deadline 到点**不会**中止正在进行的 COMMIT。真 PG 实测
+// （temp/r11/fix-I4 的探针 4，注入点见 usageReclaimFreezeBudgetMS 的注释）：
+//
+//	`statement_timeout='20000ms'` + `BeginTx(ctx=800ms)` + `tx.Commit()`
+//	  ⇒ COMMIT **2.173s** 后 `err=nil`（提交**成功**，DETACH 生效）；
+//	同一个注入 + `ExecContext(ctx, "COMMIT")`
+//	  ⇒ COMMIT **792ms** 后 `context deadline exceeded`，事务回滚、DETACH 未生效。
+//
+// 所以本类型的 `commit()` 把 COMMIT 当**语句**执行（走驱动层的 ctx 通道：pgx 在
+// deadline 到点发 cancel request）—— 这同时满足"ctx + 对 COMMIT 的有效约束"与
+// "能在超时后可靠中止的形态"两条要求。
+//
+// 三条纪律：
+//   - `*sql.Conn` 只有 `*Context` 版方法（没有 `Exec`/`QueryRow`），所以这里显式
+//     适配清理路径既有的两个最小句柄接口（usageExecer / usageQuerier）—— 判定与
+//     动作仍然共用同一份实现，不复制谓词；
+//   - 提交失败后**不猜连接状态**：直接弃用这条连接（`driver.ErrBadConn`），既不
+//     发第二条语句（那会产生 `there is no transaction in progress` 的 WARNING，
+//     而 serverstore 的 OnNotice 会把 WARNING 打进日志），也不会把状态未知的
+//     连接放回池；
+//   - `rollback()` **同时把连接放回池** —— 清理路径的纪律是"先回滚再问 catalog"
+//     （池上限可能被配成 1，持事务连接时再向池要第二条会自锁）。
+type usageBoundedTx struct {
+	conn *sql.Conn
+	ctx  context.Context
+	done bool
+}
+
+// beginUsageBoundedTx 独占一条连接并开启事务（BEGIN 也走 ctx）。
+func beginUsageBoundedTx(ctx context.Context, db *sql.DB) (*usageBoundedTx, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &usageBoundedTx{conn: conn, ctx: ctx}, nil
+}
+
+func (t *usageBoundedTx) Exec(query string, args ...any) (sql.Result, error) {
+	return t.conn.ExecContext(t.ctx, query, args...)
+}
+
+func (t *usageBoundedTx) QueryRow(query string, args ...any) *sql.Row {
+	return t.conn.QueryRowContext(t.ctx, query, args...)
+}
+
+func (t *usageBoundedTx) Query(query string, args ...any) (*sql.Rows, error) {
+	return t.conn.QueryContext(t.ctx, query, args...)
+}
+
+// rollback 回滚事务并**把连接放回池**（幂等；提交成功后是 no-op）。
+func (t *usageBoundedTx) rollback() {
+	if t == nil || t.done {
+		return
+	}
+	t.done = true
+	rctx, cancel := context.WithTimeout(context.Background(), usageReclaimRollbackBudgetMS*time.Millisecond)
+	defer cancel()
+	if _, err := t.conn.ExecContext(rctx, "ROLLBACK"); err != nil {
+		usageDiscardConn(t.conn)
+		return
+	}
+	_ = t.conn.Close()
+}
+
+// commit 用**带 ctx** 的形态提交（见类型注释）。失败 ⇒ 弃用连接（状态未知）。
+func (t *usageBoundedTx) commit() error {
+	if t == nil || t.done {
+		return nil
+	}
+	t.done = true
+	if _, err := t.conn.ExecContext(t.ctx, "COMMIT"); err != nil {
+		usageDiscardConn(t.conn)
+		return err
+	}
+	_ = t.conn.Close()
+	return nil
+}
+
+// release 只把连接交回池（幂等；正常路径由 commit/rollback 收尾，这里兜住
+// "提前返回"的每条出口，形态与旧代码的 `defer tx.Rollback()` 逐字等价）。
+func (t *usageBoundedTx) release() { t.rollback() }
+
+// usageDiscardConn 关闭一条**状态未知**的连接：不发任何语句（`driver.ErrBadConn`
+// 让 database/sql 丢弃这条连接而不是放回池，见 `sql.Conn.Raw` 的 release 路径）。
+func usageDiscardConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
 }
 
 // usageRelationExistsTx 报告 public.<rel> 此刻是否存在（可在事务里读；与
@@ -2429,11 +2756,16 @@ func usageRelationExistsTx(q usageQuerier, rel string) (bool, error) {
 // 失败/延后返回 —— 分类由调用方的 noteFailure 做（timeout ⇒ 延后、不记失败），
 // 而"关系是否已被并发轮次回收"的良性探测在超时情形下**故意不做**：那会再加一次
 // 5s 的有界等待，而两种结论的对外后果相同（都不记失败、下一轮重试）。R10-D-02。
-func usageReclaimLockFailure(db *sql.DB, rel, op string, err error) usageReclaimResult {
+//
+// R11A-03：探测函数由调用方传入（`relationGone`）—— 调用方必须**先结束事务、
+// 把连接放回池**再调本函数，否则池上限被配成 1 时会自锁（原实现把 `*sql.DB`
+// 传进来，隐含"已经回滚"这条纪律，却没有任何判据钉住它；改成传探测函数后，
+// "先释放再探测"成为调用点的显式顺序）。
+func usageReclaimLockFailure(relationGone func() bool, op string, err error) usageReclaimResult {
 	if _, timedOut := usageFailureTimeoutReason(err); timedOut {
 		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
 	}
-	if usageRelationGone(db, rel) {
+	if relationGone != nil && relationGone() {
 		return usageReclaimResult{outcome: usageReclaimGone, op: op}
 	}
 	return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
@@ -2543,31 +2875,56 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	// 账本**自己的**关系（usage_daily 年分区）必须在进入冻结段之前备好：冻结段持有
 	// usage 的 ACCESS EXCLUSIVE，池上的第二条连接可能自锁（见
 	// ensureRetentionLedgerRelations 的注释）。备不齐 ⇒ 账算不出来 ⇒ 不 DETACH。
+	//
+	// R11A-01（P1）：备关系的窗口取 **win ∪ 该关系的声明边界**。结算段的补账窗口
+	// 现在是在持锁区间里按 rel 的**实际行**重算的（见 settleUsageReclaim 的
+	// usageReclaimWindowUnderLock），而 PG 强制分区约束 ⇒ 实际行必然落在**声明
+	// 边界**之内。按"实际行窗口的上界"备关系，才不会在结算段才发现"某个年度的
+	// usage_daily 分区还没建"（那会把一次静默丢账换成一次多余的延后）。
 	if err := ensureRetentionLedgerRelations(db, win.from, win.to); err != nil {
 		return fail("rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fail("begin-freeze", err)
+	if !win.boundFrom.IsZero() && !win.boundTo.IsZero() {
+		if err := ensureRetentionLedgerRelations(db, win.boundFrom, win.boundTo); err != nil {
+			return fail("rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", err))
+		}
 	}
-	// 提交成功后 Rollback 是 no-op（返回 sql.ErrTxDone）。
-	defer tx.Rollback() //nolint:errcheck
-	// 先回滚再去问 catalog：`db` 是连接池，池上限可能被配成 1
-	// （PICOAI_DB_MAX_OPEN_CONNS / 测试里的 SetMaxOpenConns(1)），在持有事务连接
-	// 时再向池里要第二条连接会自锁。
-	rollback := func() { _ = tx.Rollback() }
+	// R11A-03（P2）：冻结段事务**必须有有界终点**。旧实现是 `db.Begin()`（无 ctx）
+	// + `lock_timeout=5s` + `statement_timeout=20s`，而 COMMIT 不在
+	// `statement_timeout` 的覆盖面内（真 PG 实测 5012/5463/5008ms）⇒ 持有父表
+	// ACCESS EXCLUSIVE（阻塞全部计量写入的那把锁）的那一段终点无界。
+	// 现在整段（含 COMMIT）罩在 usageReclaimFreezeBudgetMS 的 ctx 里，且 COMMIT
+	// 以**语句**形态执行（usageBoundedTx.commit）⇒ deadline 到点真的中止提交。
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(usageReclaimFreezeBudgetMS)*time.Millisecond)
+	defer cancel()
+	// W3-1 的同一条纪律（本段现在也有 ctx 了）：本段所有失败的出口都要过
+	// usageBudgetError —— "预算到点"这件事**没有 SQLSTATE**，必须在知道 ctx 状态的
+	// 地方打标记，否则它会被记成真失败（管理端 500 + failed_rounds++，且每轮都失败）。
+	failBound := func(op string, err error) usageReclaimResult {
+		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: usageBudgetError(ctx, err)}
+	}
+	tx, err := beginUsageBoundedTx(ctx, db)
+	if err != nil {
+		return failBound("begin-freeze", err)
+	}
+	// 提交成功后 release 是 no-op；每条提前返回的出口都先把连接放回池。
+	defer tx.release()
+	// 先回滚（= 结束事务 + 把连接放回池）再去问 catalog：`db` 是连接池，池上限
+	// 可能被配成 1（PICOAI_DB_MAX_OPEN_CONNS / 测试里的 SetMaxOpenConns(1)），
+	// 在持有事务连接时再向池里要第二条连接会自锁。
+	rollback := func() { tx.rollback() }
 
 	if err := setUsageRetentionStatementBudget(tx); err != nil {
 		rollback()
-		return fail("set-lock-timeout", err)
+		return failBound("set-lock-timeout", err)
 	}
 	if _, err := tx.Exec("LOCK TABLE ONLY " + quoteRelationIdent("usage") + " IN ACCESS EXCLUSIVE MODE"); err != nil {
 		rollback()
-		return usageReclaimLockFailure(db, rel, "lock-usage", err)
+		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-usage", err)
 	}
 	if _, err := tx.Exec("LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"); err != nil {
 		rollback()
-		return usageReclaimLockFailure(db, rel, "lock-subtree", err)
+		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-subtree", err)
 	}
 	// 动作前再看一眼 catalog：并发轮次可能已经把它摘出分区树（另一轮的冻结段已提交）、
 	// 或人工把它改挂到了别处。**这种情况下一律不在本轮 DETACH/DROP**：补账只覆盖
@@ -2578,7 +2935,7 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	directChild, aerr := usageRelationIsDirectChildOfUsage(tx, rel)
 	if aerr != nil {
 		rollback()
-		return fail("verify-attached", aerr)
+		return failBound("verify-attached", aerr)
 	}
 	if !directChild {
 		rollback()
@@ -2614,7 +2971,7 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	}
 	if herr != nil {
 		rollback()
-		return fail("recheck-subtree-retention", herr)
+		return failBound("recheck-subtree-retention", herr)
 	}
 	if holds {
 		rollback()
@@ -2624,10 +2981,10 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	// 随本事务结束立刻释放 —— 补账与 DROP 都在**只锁 rel** 的结算段里做。
 	if _, err := tx.Exec("ALTER TABLE usage DETACH PARTITION " + quoteRelationIdent(rel)); err != nil {
 		rollback()
-		return fail("detach-partition", err)
+		return failBound("detach-partition", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fail("commit-freeze", err)
+	if err := tx.commit(); err != nil {
+		return failBound("commit-freeze", err)
 	}
 	// 第 2 步：结算段（聚合 + DROP，同一个只锁 rel 的事务）。
 	return settleUsageReclaim(db, usageSettleRequest{

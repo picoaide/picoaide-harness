@@ -451,6 +451,22 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
+/**
+ * 自检合成的"被钉 job"用的 `runs-on` —— **必须与真 ci.yml / `PINNED_JOB_RUNS_ON_REGISTRY` 同值**。
+ *
+ * 为什么把取值抽出来:合成样本是"与 ci.yml 同形"的绿样本,写 `ubuntu-latest` 会让新加的
+ * `runs-on` 登记判据在自检里当场假红(门禁自己把自己的绿样本判红 ⇒ 白名单会被逼着放大)。
+ * 想改这个值必须**同时**改 `PINNED_JOB_RUNS_ON_REGISTRY`(那才是"可评审的 diff")。
+ */
+const GATE_SELFTEST_RUNS_ON = 'ubuntu-24.04'
+/**
+ * 自检合成样本的 `runs-on` 登记项（只作用于 `selftestWorkflow()` / `sk15Workflow()` 造的
+ * job `verify`）。与 `SK15_SELFTEST_REGISTRY` 同一手法：样本需要"合成树里的 job 名"也能被
+ * 登记制认出，否则"登记后确实变绿"那一格构造不出来。
+ */
+const SELFTEST_RUNS_ON_REGISTRY = {
+  jobRunsOn: [{ job: 'verify', runsOn: GATE_SELFTEST_RUNS_ON, why: '自检合成样本:`selftestWorkflow()` 造的 job 名' }],
+}
 const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
@@ -530,6 +546,31 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w17-step-body-registered-assignment-green', policy: null },
   { id: 'w18-github-env-unregistered-key', policy: '[SK-17]' },
   { id: 'w19-guard-job-unregistered-uses', policy: '[SK-17]' },
+  // ---- 第十一轮审计 C2-A-01/A-02:发布正文来源(策展文件的可证明性)----
+  { id: 'p12-notes-command-substitution', policy: '[SK-11]' },
+  { id: 'p13-notes-file-unprovable-var', policy: '[SK-11]' },
+  { id: 'p14-notes-file-outside-curated-dir', policy: '[SK-11]' },
+  { id: 'p15-notes-inline-literal-text', policy: '[SK-11]' },
+  { id: 'p16-notes-short-flag-green', policy: null },
+  { id: 'p17-notes-cat-curated-green', policy: null },
+  { id: 'p18-gh-api-release-body', policy: '[SK-11]' },
+  { id: 'p19-gh-release-command-in-array', policy: '[SK-11]' },
+  // ---- 第十一轮审计 P1-3 / P2-1:`with:` 输入与 `runs-on`(8 条 with 变异 + 取值 + 非映射 + 3 条 runs-on + 2 绿样本)
+  { id: 'wa1-with-checkout-repository', policy: '[SK-17]' },
+  { id: 'wa2-with-checkout-ref', policy: '[SK-17]' },
+  { id: 'wa3-with-checkout-token', policy: '[SK-17]' },
+  { id: 'wa4-with-checkout-sparse', policy: '[SK-17]' },
+  { id: 'wa5-with-setup-node-major', policy: '[SK-17]' },
+  { id: 'wa6-with-setup-node-file', policy: '[SK-17]' },
+  { id: 'wa7-with-setup-node-corepack', policy: '[SK-17]' },
+  { id: 'wa8-with-cache-key', policy: '[SK-17]' },
+  { id: 'wa9-with-checkout-fetch-depth-value', policy: '[SK-17]' },
+  { id: 'wa10-with-registered-values-green', policy: null },
+  { id: 'wa11-with-not-a-mapping', policy: '[SK-17]' },
+  { id: 'wr1-runs-on-self-hosted', policy: '[SK-17]' },
+  { id: 'wr2-runs-on-other-image', policy: '[SK-17]' },
+  { id: 'wr3-runs-on-list-form', policy: '[SK-17]' },
+  { id: 'wr4-runs-on-registered-green', policy: null },
   // ---- [SK-18]/[SK-19] 第十轮复审 V1 的 C-04/C-05(执行目录 / YAML 合并键)----
   // 两条判据面各自的**正例**(必须红)与**绿样本**(不得一刀切)都逐条点名:删掉任一条分支
   // 或把某一格样本改成绿形态,这里立刻报"登记了却没跑到/策略形同不存在"。
@@ -617,6 +658,7 @@ function workflowResult(failures, {
   pinnedStepPolicies = [],
   pinnedEnvLayers = [],
   pinnedUses = [],
+  usesWith = [],
 } = {}) {
   return {
     failures,
@@ -627,6 +669,7 @@ function workflowResult(failures, {
     pinnedStepPolicies,
     pinnedEnvLayers,
     pinnedUses,
+    usesWith,
   }
 }
 
@@ -869,6 +912,10 @@ export function checkWorkflowText(name, text, options = {}) {
     // 那一格判成未登记 ⇒ 假红（第一版就是这么红的）。
     jobWorkingDirectories: [...PINNED_JOB_WORKING_DIRECTORY_REGISTRY, ...(registries.jobWorkingDirectories ?? [])],
     workflowWorkingDirectories: [...WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY, ...(registries.workflowWorkingDirectories ?? [])],
+    // [SK-17⑦c] 被钉 job 的 `runs-on` 登记表走同一个测试缝（第十一轮审计 P2-1）：注入语义 =
+    // **追加**（与 cwd 两张表一致）—— 自检合成的 job 名（`verify`）与真 ci.yml 的三个 job 并存，
+    // 这样"登记后确实变绿"那一格能被单独构造出来（只有红样本 = 登记制只被证明了一半）。
+    jobRunsOn: [...PINNED_JOB_RUNS_ON_REGISTRY, ...(registries.jobRunsOn ?? [])],
   })
   failures.push(...pinnedEnv.failures)
   // [SK-14⑧](R8-D-24):块级 shell 与步骤级 shell 两条口径必须一致(危险方向即红)。
@@ -884,6 +931,7 @@ export function checkWorkflowText(name, text, options = {}) {
     pinnedStepPolicies: pinnedSteps.policies,
     pinnedEnvLayers: pinnedEnv.layers,
     pinnedUses: pinnedEnv.uses,
+    usesWith: pinnedEnv.usesWith,
   })
 }
 
@@ -1563,6 +1611,111 @@ const PINNED_USES_REGISTRY = [
 ]
 
 /**
+ * 被钉单元里允许出现的 `with:` **输入**(第十一轮审计 P1-3,本轮修复)。
+ *
+ * 现场(审计方 8/8 条变异实测 `check-workflows` EXIT=0,完整树副本上 13 条根守卫逐条同形):
+ * `PINNED_USES_REGISTRY` 只钉了 `uses:` 的**名字**,同一步的 `with:` 取值完全不在判据面内 ⇒
+ *   · `actions/checkout@v7` 的 `repository:`(换成另一仓)/`ref:`(换成另一分支)/`token:`/
+ *     `sparse-checkout:` 一行就能让"守卫脚本与 workflow 文本的来源"变成**另一个仓库的另一棵树**,
+ *     而 `[SK-17]`/`[SK-14]`/`[SK-18]` 看到的 argv、步骤体、cwd、env 全部原样;
+ *   · `actions/setup-node@v7` 的 `node-version:` / `node-version-file:` / `enable-corepack:`
+ *     换的是**解释器**本身(同族的"执行体由谁提供");
+ *   · `actions/cache@v6` 的 `path:` / `key:` 决定缓存恢复**写进工作区的哪些目录**
+ *     (`path: scripts` 就能在根守卫跑之前把 `scripts/` 覆盖成缓存内容)。
+ * 同一步的 `fetch-depth` 反倒早就有专门判据(`[SK-8b]`)⇒ 同族只收口了一半。
+ *
+ * 判据(取向 = 白名单/逐字登记,与 `PINNED_ENV_ALLOWED_KEYS`、`PINNED_JOB_CONTAINER_REGISTRY` 同形):
+ *   · 被钉单元里的 `uses:` 步骤,其 `with:` 的**每一个键**都必须登记在下面这张表里;
+ *   · 取值必须是登记表里的**逐字**取值之一(去首尾空白后比较) —— 改一个字符就要进 diff;
+ *   · 表里的键必须有被钉单元在用(死条目对账,与 `PINNED_USES_REGISTRY` 同一纪律)。
+ */
+const PINNED_USES_WITH_REGISTRY = [
+  {
+    uses: 'actions/checkout@v7',
+    inputs: [
+      {
+        key: 'fetch-depth',
+        values: ['0'],
+        why: '`fetch-depth: 0` 是 [SK-8b] 明文要求的完整历史(`check-no-real-domains` 的提交信息判据要先解析出区间 base);'
+          + '改成别的取值就是那条判据的静默退化。',
+      },
+      {
+        key: 'submodules',
+        values: ['recursive'],
+        why: '`submodules: recursive` 取上游 pin(`deepseek-harness/`)—— 守卫脚本与 workflow 文本都来自这棵树;'
+          + '去掉它 checkout 出来的是空目录。',
+      },
+    ],
+    why: '官方检出 action:树的内容与来源由这几个输入决定(repository/ref/token/sparse-checkout 一律未登记 = 红)。',
+  },
+  {
+    uses: 'actions/setup-node@v7',
+    inputs: [
+      {
+        key: 'node-version',
+        values: ['24'],
+        why: '仓库要求 Node `^22.19.0` / `>=24.0.0`(AGENTS.md 的 Prerequisites);换版本就是换判据的解释器。'
+          + '取向是逐字登记而不是"范围匹配":改版本必须进 diff 让人看见。',
+      },
+    ],
+    why: '官方 Node 安装 action:判据步骤赖以成立的解释器由它提供(node-version-file/enable-corepack 等未登记 = 红)。',
+  },
+  {
+    uses: 'actions/cache@v6',
+    inputs: [
+      {
+        key: 'path',
+        values: ['.yarn/cache\n~/.cache/electron\n~/.cache/electron-builder'],
+        why: '只允许缓存这三个目录 —— 它们都是**包管理/打包缓存**,恢复它们不会改变任何被判对象。'
+          + '`path: scripts`(或仓内任何源码目录)会让缓存恢复在根守卫跑之前覆盖判据脚本本身。',
+      },
+      {
+        key: 'key',
+        values: ["desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}"],
+        why: '缓存键必须由 `yarn.lock` 的内容派生:换成固定键之后,缓存内容与锁文件脱钩,'
+          + '跨分支复用一份被污染的缓存(actions/cache 的既有风险面),而这一步跑在被钉步骤之前。',
+      },
+    ],
+    why: '官方缓存 action:它写的是**工作区里的目录**(path)且按 key 决定命中哪一份 ⇒ 与判据脚本同权。',
+  },
+]
+
+/**
+ * 被钉 **job** 允许声明的 `runs-on:`(第十一轮审计 P2-1,本轮修复)。
+ *
+ * 现场(审计方 `mutF`):`gate-guards` 的 `runs-on: ubuntu-24.04` 改成 `self-hosted` 或
+ * `ubuntu-22.04`,`check-workflows` **EXIT=0**。`container:` 早就有登记制
+ * (`PINNED_JOB_CONTAINER_REGISTRY`),`runs-on` 是**同一层**("这一步跑在谁的机器上"):
+ * 一旦仓库出现自托管 runner,这一行就是把"永不跳过"的必需检查搬到对手的机器上跑。
+ * 当前不可利用(本仓各处 `runs-on` 全是 GitHub 托管标签,指过去只会挂着不绿),但同层漏项
+ * 必须在同层收口。
+ *
+ * 判据(登记制,fail-closed):**有被钉判定单元的 job**,其 `runs-on` 必须逐字登记在下面这张表里。
+ * 未登记(含列表形态 `runs-on: [self-hosted, linux]`、表达式、非字符串)一律红 —— 判据读不懂
+ * "这一步会跑在哪台机器上"时按"会静默"处理。
+ */
+const PINNED_JOB_RUNS_ON_REGISTRY = [
+  {
+    job: 'gate-guards',
+    runsOn: 'ubuntu-24.04',
+    why: '根守卫 job(永不跳过):根守卫在同一台 GitHub 托管 Ubuntu 24.04 runner 上跑,'
+      + '镜像自带的 python/go/node 版本是判据的一部分 ⇒ 换标签必须进 diff。',
+  },
+  {
+    job: 'gate',
+    runsOn: 'ubuntu-24.04',
+    why: '全量门禁 job(`yarn check` + 发布面判据):与 gate-guards 同一镜像口径 —— 两个 job 跑'
+      + '同一套命令,标签不一致会让"本地绿、CI 红"类问题变成两台机器之间的差异。',
+  },
+  {
+    job: 'server',
+    runsOn: 'ubuntu-24.04',
+    why: 'Go/服务端 job:含被钉的 `wasm-case-gate` 判据步(PG 容器 + `go test -json`),'
+      + '托管 Ubuntu 24.04 是它的既有形态(PG 18 镜像与 go 版本都在这一步的判据面内)。',
+  },
+]
+
+/**
  * 键名是否**未登记**(= 必须红)。判据是白名单,fail-closed:
  * 非字符串 / 空键 / 前后带空白 / 大小写变体 / 表里没有 —— 全部按未登记处理。
  *
@@ -1794,6 +1947,85 @@ function pinnedUsesProblem(uses, rootDir) {
 }
 
 /**
+ * 把一个本地 `uses:` 路径解析到它的 `action.yml`/`action.yaml` 文件。
+ *
+ * 唯一实现（`pinnedUsesProblem` / `localActionDeclaredInputs` / 引用集合收集器共用）——
+ * 三处各写一份"目录还是文件 / yml 还是 yaml"的判断，迟早会分叉。
+ * @param uses - `./…` 形态的本地路径（可带首尾空白）。
+ * @param rootDir - 仓库根。
+ * @returns 绝对路径；解析不到时 `null`。
+ */
+function resolveLocalActionFile(uses, rootDir = root) {
+  if (typeof uses !== 'string' || !uses.trim().startsWith('./')) return null
+  const target = resolve(rootDir, uses.trim())
+  try {
+    const stats = statSync(target)
+    if (stats.isDirectory()) {
+      for (const candidate of ['action.yml', 'action.yaml']) {
+        const path = join(target, candidate)
+        if (existsSync(path)) return path
+      }
+      return null
+    }
+    if (stats.isFile() && /\.ya?ml$/u.test(target)) return target
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 全仓 workflow 文本里**被引用到的**本地 composite action 集合（递归含嵌套 `uses:`）。
+ *
+ * 为什么需要（第十一轮审计 P2-2 的假红边界）：`checkCompositeActionTree()` 此前把
+ * `.github/actions/**` 的**整棵树**都按"被钉单元的白名单"判 —— 将来某个只被**非判据步骤**
+ * （例如打包 job）引用的本地 action，只要它需要 `PATH`/`HOME`/`NODE_OPTIONS` 之类键就会被红，
+ * 而它与被钉单元毫无关系。判据应该只判"**真的会进判据链**的那部分"：引用集合由 workflow
+ * 文本解析得出（不是靠人肉登记），未引用的单独提示（不判）。
+ *
+ * 递归是必须的：composite action 内部还可以 `uses: ./…` 继续委派，闭包里的每个文件都在
+ * 被钉单元的**实际执行链**上。
+ * @param workflowDirectory - `.github/workflows` 目录。
+ * @param rootDir - 仓库根（本地路径的解析基准）。
+ * @returns 被引用到的 action 文件绝对路径集合。
+ */
+function collectReferencedLocalActions(workflowDirectory, rootDir = root) {
+  const referenced = new Set()
+  const visit = uses => {
+    if (typeof uses !== 'string' || !uses.trim().startsWith('./')) return
+    const file = resolveLocalActionFile(uses, rootDir)
+    // 解析不到的路径由 `pinnedUsesProblem()` 自己报（读不懂的目标不能靠"我没引用它"逃掉）。
+    if (file === null || referenced.has(file)) return
+    referenced.add(file)
+    try {
+      const document = parseYaml(readFileSync(file, 'utf8'))
+      for (const step of Array.isArray(document?.runs?.steps) ? document.runs.steps : []) visit(step?.uses)
+    } catch {
+      // YAML 读不懂 ⇒ 由内容判据报（这里只负责算引用闭包）。
+    }
+  }
+  let names
+  try {
+    names = readdirSync(workflowDirectory)
+  } catch {
+    return referenced
+  }
+  for (const name of names.filter(entry => /\.ya?ml$/u.test(entry)).sort()) {
+    let document
+    try {
+      document = parseYaml(readFileSync(join(workflowDirectory, name), 'utf8'))
+    } catch {
+      continue
+    }
+    const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+    for (const job of Object.values(jobs)) {
+      for (const step of Array.isArray(job?.steps) ? job.steps : []) visit(step?.uses)
+    }
+  }
+  return referenced
+}
+
+/**
  * 本地 composite action 的**内容**判据(第十轮审计 C-03 / MAINCTL-3)。
  *
  * 现场:`.github/actions/poison/action.yml`(composite,内部
@@ -1810,9 +2042,9 @@ function pinnedUsesProblem(uses, rootDir) {
  * @param notes - 提示收集器。
  * @returns 失败项数组。
  */
-function checkCompositeActionTree(actionsRoot, notes, rootDir = root) {
+function checkCompositeActionTree(actionsRoot, notes, rootDir = root, options = {}) {
   const failures = []
-  const files = []
+  let files = []
   const walk = directory => {
     let entries
     try {
@@ -1828,8 +2060,23 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root) {
   }
   walk(actionsRoot)
   files.sort()
+  // **只判被引用的**（第十一轮审计 P2-2）：`options.referenced` 由 workflow 文本解析得出
+  // （见 `collectReferencedLocalActions()`）；未引用的 action 不在任何被钉单元的执行链上，
+  // 按被钉白名单判它就是**假红方向的边界**（合法用途会被挡），所以只提示、不判。
+  // 缺省 `null` = 全树判（`selfTestCompositeActions()` 等直接调用方的既有语义，不变）。
+  const referenced = options.referenced ?? null
+  let unchecked = 0
+  if (referenced !== null) {
+    const kept = files.filter(file => referenced.has(file))
+    unchecked = files.length - kept.length
+    files = kept
+  }
   if (files.length === 0) {
-    notes.push('[SK-17] 本地 composite action:`.github/actions/**` 下 0 个 action 文件(扫描面已就位)')
+    notes.push(unchecked === 0
+      ? '[SK-17] 本地 composite action:`.github/actions/**` 下 0 个 action 文件(扫描面已就位)'
+      : `[SK-17] 本地 composite action:\`.github/actions/**\` 下 ${unchecked} 个 action 文件`
+        + '**未被任何 workflow 引用**(不在被钉单元的执行链上,不按被钉白名单判 —— '
+        + '引用集合由 workflow 文本解析得出,见 `collectReferencedLocalActions()`)')
     return failures
   }
   let checkedSteps = 0
@@ -1923,8 +2170,150 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root) {
       }
     })
   }
-  notes.push(`[SK-17] 本地 composite action:${files.length} 个 action 文件、${checkedSteps} 个 composite step `
-    + '的 `env:`/步骤体赋值/`$GITHUB_ENV` 写入/嵌套 `uses:` 已按同一套键表检查')
+  notes.push(`[SK-17] 本地 composite action:${files.length} 个**被 workflow 引用**的 action 文件、`
+    + `${checkedSteps} 个 composite step 的 \`env:\`/步骤体赋值/\`$GITHUB_ENV\` 写入/嵌套 \`uses:\` `
+    + '已按同一套键表检查'
+    + (unchecked === 0
+      ? ''
+      : `(另有 ${unchecked} 个未被引用的 action 文件不在被钉单元的执行链上,不判)`))
+  return failures
+}
+
+/**
+ * `with:` 取值的**归一形态**（用于与登记表逐字比较）。
+ *
+ * YAML 会把 `node-version: 24` 解析成**数字**、`fetch-depth: 0` 同样是数字、`enable-corepack: true`
+ * 是布尔 —— 而登记表里写的是字符串。比较前统一成"字符串 + trim + CRLF→LF"，避免"取值的类型
+ * 差异"变成假绿/假红。非标量（映射/序列）一律 JSON 化：它们本就该按未登记处理。
+ * @param raw - YAML 解析出来的取值。
+ * @returns 归一后的字符串。
+ */
+function normalizeWithValue(raw) {
+  if (typeof raw === 'string') return raw.replace(/\r\n?/gu, '\n').trim()
+  if (typeof raw === 'number' || typeof raw === 'boolean' || typeof raw === 'bigint') return String(raw)
+  return JSON.stringify(raw ?? null)
+}
+
+/**
+ * 一个 `uses:` 步骤的 `with:` 输入是否**未登记**（第十一轮审计 P1-3，本轮修复）。
+ *
+ * 判据（白名单，fail-closed；与 `pinnedUsesWithProblems` 的调用点一起读）：
+ *   · 远端 action：`with:` 的每个键必须登记在 `PINNED_USES_WITH_REGISTRY` 的对应 `uses` 条目里，
+ *     取值必须是登记值的逐字形态 —— 未登记的键 / 改过的取值一律红；
+ *   · 本地 composite action（`./…`）：`with:` 的每个键必须在该 action 的 `action.yml` 的
+ *     `inputs:` 里**声明**过（否则这个输入在执行体里根本读不到，判据也读不懂它想改什么）；
+ *   · `with:` 不是映射（字符串/数字/序列）⇒ 红（判据读不懂这一步给 action 传了什么）。
+ * @param uses - `step.uses` 的取值。
+ * @param withValue - `step.with` 的取值。
+ * @param rootDir - 仓库根（本地 action 的解析基准）。
+ * @returns 问题描述数组（空 = 全部在读取面内）。
+ */
+function pinnedUsesWithProblems(uses, withValue, rootDir = root) {
+  if (withValue === undefined || withValue === null) return []
+  const value = typeof uses === 'string' ? uses.trim() : ''
+  if (typeof withValue !== 'object' || Array.isArray(withValue)) {
+    return [`它的 \`with:\` 不是一个映射（${JSON.stringify(withValue)}）⇒ 判据读不懂这一步给 `
+      + `\`${value}\` 传了哪些输入。被钉单元里的 \`with:\` 必须是逐字登记的键值对。`]
+  }
+  const entries = Object.entries(withValue)
+  if (entries.length === 0) return []
+  const problems = []
+  // 本地 composite action：以它自己声明的 `inputs:` 为准（判据读得到，且"声明了才有意义"）。
+  if (value.startsWith('./')) {
+    const declared = localActionDeclaredInputs(value, rootDir)
+    for (const [key] of entries) {
+      if (declared === null) {
+        problems.push(`它给本地 action \`${value}\` 传了输入 \`${key}\`,但那个 action 的 `
+          + '`action.yml` 读不到（路径不存在 / YAML 解析失败）⇒ 判据无法证明这个输入会做什么。')
+        break
+      }
+      if (declared.includes(key)) continue
+      problems.push(`它给本地 action \`${value}\` 传了输入 \`${key}\`,而那个 action 的 `
+        + `\`action.yml\` 的 \`inputs:\` 里**没有声明**它（已声明:${declared.join('、') || '（无）'}）`
+        + '⇒ 这个输入要么是笔误,要么是执行体通过别的方式读它(那样判据读不懂它的作用)。')
+    }
+    return problems
+  }
+  const entry = PINNED_USES_WITH_REGISTRY.find(item => item.uses === value)
+  if (entry === undefined) {
+    return [`它给 \`${value}\` 传了 ${entries.length} 个输入（${entries.map(([key]) => `\`${key}\``).join('、')}）,`
+      + '而这个 action **没有登记任何允许的输入** ⇒ 未登记即红。']
+  }
+  for (const [key, raw] of entries) {
+    const registered = entry.inputs.find(input => input.key === key)
+    if (registered === undefined) {
+      problems.push(`它的 \`with:\` 里有 \`${key}\`（取值 ${JSON.stringify(raw)}）,而它**不在** `
+        + `\`PINNED_USES_WITH_REGISTRY\` 为 \`${value}\` 登记的输入表里`
+        + `（已登记:${entry.inputs.map(input => `\`${input.key}\``).join('、') || '（无）'}）`
+        + '\n  ⇒ `with:` 决定这一步**实际做什么**:同一步的 `fetch-depth` 早有专门判据([SK-8b]),'
+        + '而"取哪棵树 / 用哪个解释器 / 缓存写进哪些目录"此前完全不在判据面内。'
+        + '\n  ⇒ 要用新的输入,先把它连同**允许的逐字取值**与理由登记进那张表。')
+      continue
+    }
+    const normalized = normalizeWithValue(raw)
+    if (registered.values.includes(normalized)) continue
+    problems.push(`它的 \`with.${key}\` 取值是 ${JSON.stringify(normalized)},`
+      + `而登记值只有 ${registered.values.map(item => JSON.stringify(item)).join(' / ')}`
+      + `\n  为什么必须逐字登记:${registered.why}`)
+  }
+  return problems
+}
+
+/**
+ * 本地 composite action 的 `action.yml` 里**声明过的 `inputs:` 键**。
+ * @param uses - `./…` 形态的本地路径。
+ * @param rootDir - 仓库根。
+ * @returns 键数组；读不到（路径/解析失败）时 `null`（调用方按"证明不了"处理）。
+ */
+function localActionDeclaredInputs(uses, rootDir = root) {
+  const actionFile = resolveLocalActionFile(uses, rootDir)
+  if (actionFile === null) return null
+  try {
+    const document = parseYaml(readFileSync(actionFile, 'utf8'))
+    const inputs = document?.inputs
+    return typeof inputs === 'object' && inputs !== null ? Object.keys(inputs) : []
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `PINNED_USES_WITH_REGISTRY` 的**死条目对账**（与 `pinnedUsesRegistryProblem` 同一纪律）。
+ *
+ * 两个方向都要判：
+ *   · 登记了但没有任何被钉单元在用（值域里的某个取值）⇒ 死条目 = 登记表在长成一个豁免洞；
+ *   · 登记项挂在一个 `PINNED_USES_REGISTRY` 里根本没有的 `uses` 上 ⇒ 配置错误（两张表漂移）。
+ * @param observedKeys - 本次扫描里被钉单元实际用到的 `uses\u0000键名` 集合。
+ * @returns 失败项数组（空 = 每条登记都还在用）。
+ */
+function pinnedUsesWithRegistryProblems(observedKeys) {
+  const used = new Set(Array.isArray(observedKeys) ? observedKeys : [])
+  const failures = []
+  const dead = []
+  for (const entry of PINNED_USES_WITH_REGISTRY) {
+    if (!PINNED_USES_REGISTRY.some(item => item.uses === entry.uses)) {
+      failures.push({
+        name: '[SK-17]',
+        line: 0,
+        detail: `\`PINNED_USES_WITH_REGISTRY\` 里的 \`${entry.uses}\` 不在 \`PINNED_USES_REGISTRY\` 里`
+          + '\n  ⇒ 两张表漂移:能进 `with:` 判据面的 action 必须先是"被钉单元允许委派的目标"。',
+      })
+    }
+    for (const input of entry.inputs) {
+      if (used.has(`${entry.uses}\u0000${input.key}`)) continue
+      dead.push(`  - \`${entry.uses}\` 的 \`with.${input.key}\``)
+    }
+  }
+  if (dead.length > 0) {
+    failures.push({
+      name: '[SK-17]',
+      line: 0,
+      detail: `\`PINNED_USES_WITH_REGISTRY\` 里有 ${dead.length} 条**死条目**(没有任何被钉单元在用):`
+        + `\n${dead.join('\n')}`
+        + '\n  ⇒ 与 `PINNED_USES_REGISTRY` 同一纪律:不用的登记项必须清掉,否则这张表会悄悄长成'
+        + '"谁都能往 `with:` 里塞一个输入"的豁免洞。',
+    })
+  }
   return failures
 }
 
@@ -1932,8 +2321,7 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root) {
  * 绑定在"被钉单元"上的 `uses:` 登记表的**死条目对账**(与 SWALLOW_ALLOWLIST 同一纪律)。
  *
  * @param observed - 本次全仓扫描里被钉单元实际用到的 `uses:` 取值(去重)。
- * @returns 失败项数组(空 = 每条登记都还在用)。
- */
+ * @returns 失败项数组(空 = 每条登记都还在用)。 */
 function pinnedUsesRegistryProblem(observed) {
   const used = new Set(Array.isArray(observed) ? observed : [])
   const dead = PINNED_USES_REGISTRY.filter(entry => !used.has(entry.uses))
@@ -2068,15 +2456,52 @@ function selfTestCompositeActions() {
     //    "函数还在但没人调用")。
     assertions += 1
     const ownSource = readFileSync(import.meta.filename, 'utf8')
-    const wiringNeedle = ['failures.push(...checkComposite', 'ActionTree(join(root'].join('')
+    const wiringNeedle = ['failures.push(...checkComposite', 'ActionTree(actionsRoot'].join('')
     const wiring = ownSource.split('\n').filter(line => line.includes(wiringNeedle))
     if (wiring.length !== 1) {
       failures.push(`[composite-selftest] 本文件源码里的 composite 扫描接线出现 ${wiring.length} 次`
         + '(期望 1 次)⇒ 判据函数还在但**没有接到全仓扫描**上,真实仓里的 composite action 不再被检查。')
     }
+    // ⑤b **引用集合**的接线(第十一轮审计 P2-2):`checkCompositeActionTree()` 必须拿到
+    //     "由 workflow 文本解析出来的引用集合" —— 少了它判据会退化成"整棵树按被钉白名单判",
+    //     将来只被非判据步骤引用的本地 action 会被误红(假红方向的边界)。
+    assertions += 1
+    const referencedNeedle = ['referenced: collectReferenced', 'LocalActions('].join('')
+    const referencedWiring = ownSource.split('\n').filter(line => line.includes(referencedNeedle))
+    if (referencedWiring.length !== 1) {
+      failures.push(`[composite-selftest] 引用集合的接线出现 ${referencedWiring.length} 次(期望 1 次)`
+        + '⇒ 判据退化成"整棵树按被钉白名单判":未被引用的本地 action 会被误红。')
+    }
+    // ⑦ **引用集合**（第十一轮审计 P2-2）：判据只判"被 workflow 引用到的"本地 action。
+    //    行为判据（不是源码字符串）：合成树里放一个**未被引用**的 poison，传入"只引用 poison"
+    //    的集合 ⇒ 它必须**不**被报（否则假红方向的边界没修好），而被引用的那个必须照报。
+    writeAction('poison-unreferenced',
+      poisonLines('echo "NODE_OPTIONS=--import=data:text/javascript,process.exitCode=0" >> "$GITHUB_ENV"'))
+    const referencedOnlyNotes = []
+    const referencedOnly = checkCompositeActionTree(actionsRoot, referencedOnlyNotes, directory, {
+      referenced: new Set([join(actionsRoot, 'poison', 'action.yml')]),
+    })
+    assertions += 1
+    if (referencedOnly.some(entry => entry.name.endsWith('poison-unreferenced/action.yml'))) {
+      failures.push('[composite-selftest] **未被引用**的本地 composite action 被当成被钉单元判了'
+        + '（第十一轮审计 P2-2 的假红边界:引用集合必须真的被用来过滤）。')
+    }
+    assertions += 1
+    if (!referencedOnly.some(entry => entry.name.endsWith('/poison/action.yml'))) {
+      failures.push('[composite-selftest] 被引用的 poison 在没有被报出来'
+        + '（引用集合过滤不能变成"一律不判"）。')
+    }
+    assertions += 1
+    if (!referencedOnlyNotes.some(note => note.includes('未被引用'))) {
+      failures.push('[composite-selftest] 未引用的 action 必须**单独提示**（否则"不判"会静默成'
+        + '"不存在"),实际 notes 里没有那条提示。')
+    }
     // ⑥ 变异:删掉 poison 的那一行之后,同一条判据必须**不再报**(否则它是恒真的)。
     writeAction('poison', poisonLines(null))
-    const mutated = checkCompositeActionTree(actionsRoot, [], directory)
+    // 引用集合也要传（否则上面那个 `poison-unreferenced` 会把这次变异的结果污染成"仍然报红"）。
+    const mutated = checkCompositeActionTree(actionsRoot, [], directory, {
+      referenced: new Set([join(actionsRoot, 'poison', 'action.yml')]),
+    })
     assertions += 1
     if (mutated.some(entry => entry.name.includes('poison'))) {
       failures.push('[composite-selftest] 变异验证:把 poison 的 `$GITHUB_ENV` 写入删掉之后仍然报红'
@@ -2599,7 +3024,12 @@ const REGISTRY_DEFAULT = {
  * (SK-8/SK-9/SK-11/SK-12 的那些)都会被 SK-15 拿"真实 ci.yml 的登记值"去套,
  * 得到一堆与样本意图无关的假红(SK-15 的样本改用下面那张合成登记表)。
  */
-const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [] }
+const REGISTRY_NONE = {
+  files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [],
+  // 自检合成样本的 `runs-on` 登记项(见 `SELFTEST_RUNS_ON_REGISTRY`):缺了它,凡是被钉单元
+  // 出现在合成 job(`verify`)里的样本都会被 `runs-on` 判据判红 —— 那是与样本意图无关的假红。
+  ...SELFTEST_RUNS_ON_REGISTRY,
+}
 /**
  * SK-15 自检用的**合成登记表**:一个 job `verify` + 一个步骤 `Gate`。
  * 用它把"登记了却不存在 / 存在却没登记 / 常量假 if / 收窄 if / continue-on-error /
@@ -2607,6 +3037,8 @@ const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [], contai
  */
 const SK15_SELFTEST_REGISTRY = {
   files: ['selftest.yml'],
+  // 合成树的 job 名同样要登记 `runs-on`(同 `SELFTEST_RUNS_ON_REGISTRY`)。
+  ...SELFTEST_RUNS_ON_REGISTRY,
   jobs: [
     { file: 'selftest.yml', job: 'verify', ifPolicy: 'exact', ifValue: 'true', why: '合成样本:允许的 if 形态只有 `true`' },
   ],
@@ -2636,6 +3068,7 @@ const JOB_IF_POLICIES = {
 }
 
 /** `gh release create|edit` 的调用点(捕获子命令与同一行的其余 argv)。 */
+const GH_API_INVOCATION = /(?:^|[\s;&|(]|\$\()gh\s+api\s+([^\n;&|]*)/gu
 const GH_RELEASE_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*gh\s+release\s+(create|edit)\s+([^\n;&|]*)/gu
 
 /**
@@ -4109,7 +4542,7 @@ function selftestWorkflow(steps, { timeoutMinutes = 45, jobContinueOnError = fal
     ...triggers.map(trigger => `  ${trigger}:`),
     'jobs:',
     '  verify:',
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
     ...(timeoutMinutes === null ? [] : [`    timeout-minutes: ${timeoutMinutes}`]),
     ...(jobNeeds === '' ? [] : [`    needs: ${jobNeeds}`]),
     ...(jobIf === '' ? [] : [`    if: ${jobIf}`]),
@@ -4480,6 +4913,195 @@ function checkDocsOnlyClassifier(file, document, text, notes) {
   }
   notes.push(`[SK-10] docs-only 分类器 = job ${classifier.jobId};登记形态 ${expected.length} 条`)
   return failures
+}
+
+/**
+ * **策展发布说明路径**的判据（第十一轮审计 C2-A-01，本轮修复）。
+ *
+ * 现场：`--notes "$(git log -1 --format=%B)"`（或任何命令替换/变量/管道）让公开 Release 正文
+ * 来自**未评审文本**，而 `SK-11` 的两道策展说明检查 + `gh` 参数判据**全绿** —— 旧判据问的是
+ * "有没有说明来源这个旗标"，不是"正文是不是那份策展文件"。历史上真实域名/IP 正是从
+ * "正文来自提交信息/PR 正文"这条路进公开 Release 的（`--generate-notes` 只是其中一种形态）。
+ *
+ * 判据（fail-closed，与同批 `--body` 判据同一形态）：取值必须**可证明**是
+ * `docs/releases/<tag>.md` —— 前缀逐字、`.md` 结尾、单段文件名、且不含命令替换/反引号/管道。
+ * 证明不了就红（`$PWD/…`、循环变量这类"运行时才成形"的形态同样红：判据问的是可证明性）。
+ * @param value - 已去引号、已解析变量之后的取值文本。
+ * @returns `null` = 可证明是策展文件；否则是人读的原因。
+ */
+function curatedNotesPathProblem(value) {
+  const text = String(value ?? '').trim()
+  if (text === '') return '取值是空的（`--notes-file` 后面什么都没有）'
+  if (text.includes('$(') || text.includes('`')) {
+    return `取值 ${JSON.stringify(text)} 里有命令替换/反引号 ⇒ 正文内容来自那条命令的输出，而不是策展文件`
+  }
+  if (text.includes('|')) return `取值 ${JSON.stringify(text)} 里有管道 ⇒ 正文来源读不出来`
+  if (!/^docs\/releases\/[^/\s]+\.md$/u.test(text)) {
+    return `取值 ${JSON.stringify(text)} 不是 \`docs/releases/<tag>.md\` 形态的路径`
+      + '（公开 Release 正文必须来自那一份**可评审**的策展文件）'
+  }
+  return null
+}
+
+/**
+ * 把一个 shell 取值 token 解析成"可静态证明的文本"（变量按脚本内的赋值链展开，深度 ≤ 4）。
+ * @param raw - 原始 token（可能带引号、可能是 `$VAR` / `${VAR}`）。
+ * @param variables - {@link shellStaticVariables} 的结果。
+ * @param depth - 递归深度（防自引用）。
+ * @returns `{ text, resolvable }`；`resolvable === false` = 判据读不懂这个取值。
+ */
+function resolveShellToken(raw, variables) {
+  const trimmed = String(raw ?? '').trim()
+  const unquoted = /^"(.*)"$/su.test(trimmed)
+    ? trimmed.slice(1, -1)
+    : (/^'(.*)'$/su.test(trimmed) ? trimmed.slice(1, -1) : trimmed)
+  // 命令替换/反引号:不展开(展开会掩盖"正文来自某条命令"这件事),原样交给上层按形态判。
+  if (unquoted.includes('$(') || unquoted.includes('`')) return { text: unquoted, resolvable: true }
+  // 变量替换(与 `--body` 判据同一取向:只在**能证明**时才放行)。
+  // 两个 tag 变量刻意**保留字面形态**:它们的取值由 runner 提供,判据看的是
+  // `docs/releases/<tag>.md` 这个**路径形态**,不是 tag 的具体值。
+  let text = unquoted
+  for (let round = 0; round < 4; round += 1) {
+    let changed = false
+    text = text.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/gu, (whole, name) => {
+      if (name === 'TAG' || name === 'GITHUB_REF_NAME') return whole
+      const assigned = variables.get(name)
+      if (assigned === undefined) return whole
+      changed = true
+      return assigned
+    })
+    if (!changed) break
+  }
+  const leftover = [...text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/gu)]
+    .map(match => match[1])
+    .filter(name => name !== 'TAG' && name !== 'GITHUB_REF_NAME')
+  return { text, resolvable: leftover.length === 0 }
+}
+
+/**
+ * shell 脚本里**可静态解析的变量赋值**（第一处赋值优先）。
+ *
+ * 与 `--body` 的静态判据同一手法：只认"名字=取值"的普通赋值，取第一处（后面的覆盖不追）——
+ * 取向是 fail-closed：解析不出来就算"证明不了"。
+ * @param script - 可执行文本（注释已剥）。
+ * @returns `Map<string, string>`（名字 → 原始取值 token）。
+ */
+function shellStaticVariables(script) {
+  const variables = new Map()
+  const pattern = /(?:^|[\s;])?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|\n]+))/gu
+  for (const match of script.matchAll(pattern)) {
+    const name = match[1]
+    if (variables.has(name)) continue
+    variables.set(name, match[2] ?? match[3] ?? match[4] ?? '')
+  }
+  return variables
+}
+
+/**
+ * 一个 `gh release create|edit` 的 argv 尾巴里，**说明来源**是否可证明是策展文件。
+ *
+ * 三条形态（`gh release create --help` 的短旗标语义逐个相同，见 C2-A-03 的假红）：
+ *   · `--notes-file|-F <取值>`：取值（字面量或脚本内可解析的变量）必须是策展路径；
+ *   · `--notes|-n <取值>`：只放行"取值可证明来自 `cat docs/releases/<tag>.md`"的形态
+ *     （`$(cat <策展路径>)` / `$(< <策展路径>)`），其余（`$(git log …)` / `$VAR` / 字面正文）一律红；
+ *   · 变量形态：`NOTES_FLAG="--notes-file …"` 之类，按同一规则解析它的赋值。
+ * **枚举全部**说明来源旗标并逐个判（不是只取第一个）—— 同一逻辑行上第二个坏取值同样要拦。
+ * @param script - 可执行文本（用于解析变量赋值）。
+ * @param tail - `gh release …` 之后的 argv 文本。
+ * @returns `{ sources, problems }`（`sources` = 可证明的说明来源个数）。
+ */
+function releaseNotesSourceReport(script, tail) {
+  const variables = shellStaticVariables(script)
+  const problems = []
+  let sources = 0
+  // 取值 token 的读法:平衡括号的 `$( … )`(引号里可以再带引号)/ 普通引号串 / 裸 token。
+  // 顺序重要:`"$(cat "${NOTES}")"` 必须整体读成一个取值,否则内层引号会把取值截成 `$(cat `。
+  const notesFlag = /(?:^|[\s"'])(--notes-file|-F|--notes|-n)(?:=|\s+)(?:"(\$\((?:[^()]|\([^()]*\))*\))"|"([^"\n]*)"|'([^'\n]*)'|(\$\((?:[^()]|\([^()]*\))*\)|\S+))/gu
+  const judge = (flag, raw) => {
+    const resolved = resolveShellToken(raw, variables)
+    const isFile = flag === '--notes-file' || flag === '-F'
+    if (!resolved.resolvable) {
+      problems.push(`\`${flag} ${raw}\` 的取值无法静态证明（变量在同一个 step 里没有可解析的赋值，`
+        + '或由命令替换/管道成形）⇒ 正文可能来自未评审文本')
+      return
+    }
+    if (isFile) {
+      const problem = curatedNotesPathProblem(resolved.text)
+      if (problem === null) { sources += 1; return }
+      problems.push(`\`${flag} ${raw}\` ⇒ ${problem}`)
+      return
+    }
+    // `--notes` / `-n`：只认"读那份策展文件"的命令替换。
+    const catForm = /^\$\(\s*cat\s+(.+?)\s*\)$/su.exec(resolved.text) ?? /^\$\(<\s*(.+?)\)$/su.exec(resolved.text)
+    const inner = catForm === null ? null : resolveShellToken(catForm[1].replace(/^["']|["']$/gu, ''), variables)
+    if (inner === null || !inner.resolvable) {
+      problems.push(`\`${flag} ${raw}\` 的取值不是"读策展文件"的形态（只放行 `
+        + '`$(cat docs/releases/<tag>.md)` / `$(< docs/releases/<tag>.md)`，'
+        + '其余（如 `$(git log …)`、`$变量`、字面正文）一律按未评审文本处理）')
+      return
+    }
+    const problem = curatedNotesPathProblem(inner.text)
+    if (problem === null) { sources += 1; return }
+    problems.push(`\`${flag} ${raw}\` ⇒ ${problem}`)
+  }
+  for (const match of tail.matchAll(notesFlag)) {
+    judge(match[1], match[2] ?? match[3] ?? match[4] ?? match[5] ?? '')
+  }
+  // 变量形态：tail 里引用的每个变量，如果它的赋值里含说明来源旗标，就把那段赋值也判一遍。
+  const seenVars = new Set()
+  for (const match of tail.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/gu)) {
+    const name = match[1]
+    if (seenVars.has(name)) continue
+    seenVars.add(name)
+    const assigned = variables.get(name)
+    if (assigned === undefined || !/--(?:notes-file|notes|generate-notes)\b|(?:^|\s)-[Fn](?:\s|=)/u.test(assigned)) continue
+    for (const inner of assigned.matchAll(notesFlag)) judge(inner[1], inner[2] ?? inner[3] ?? inner[4] ?? inner[5] ?? '')
+  }
+  return { sources, problems }
+}
+
+/**
+ * `gh api` 写 Release 正文的判据（第十一轮审计 C2-A-02，本轮修复）。
+ *
+ * 现场：`gh api -X POST repos/${REPO}/releases -f tag_name=… -f body="$(git log -1 --format=%B)"`
+ * 与 `gh release create|edit` **同权**（gh 官方推荐的等价写面），但它不匹配
+ * `GH_RELEASE_INVOCATION` ⇒ 判据面外。判据取向与 `--body` 同：**能力面**而不是命令名。
+ * @param script - 可执行文本。
+ * @param tail - `gh api …` 之后的 argv 文本。
+ * @returns 问题描述数组（空 = 这一步没有经 `gh api` 写 Release 正文，或者取值可证明）。
+ */
+function ghApiReleaseBodyFlagPresent(tail) {
+  return /(?:^|\s)(?:-f|--raw-field|-F|--field)\s+body(?:=|@)/u.test(tail)
+    || /(?:^|\s)--input(?:=|\s)/u.test(tail)
+}
+
+function ghApiReleaseBodyProblems(script, tail) {
+  if (!/releases/u.test(tail)) return []
+  const variables = shellStaticVariables(script)
+  const problems = []
+  const bodyField = /(?:^|\s)(?:-f|--raw-field|-F|--field)\s+body(?:=|@)(?:"([^"\n]*)"|'([^'\n]*)'|(\S+))/gu
+  let hits = 0
+  for (const match of tail.matchAll(bodyField)) {
+    hits += 1
+    const raw = match[1] ?? match[2] ?? match[3] ?? ''
+    const resolved = resolveShellToken(`"${raw}"`, variables)
+    const problem = resolved.resolvable ? curatedNotesPathProblem(resolved.text) : '取值无法静态证明'
+    if (problem === null) continue
+    problems.push(`\`body=${raw}\` ⇒ ${problem}`)
+  }
+  const inputForm = /(?:^|\s)--input\s+(?:"([^"\n]*)"|'([^'\n]*)'|(\S+))/u.exec(tail)
+  if (inputForm !== null) {
+    hits += 1
+    const resolved = resolveShellToken(inputForm[1] ?? inputForm[2] ?? inputForm[3] ?? '', variables)
+    const problem = resolved.resolvable ? curatedNotesPathProblem(resolved.text) : '取值无法静态证明'
+    if (problem !== null) problems.push(`\`--input\` ⇒ ${problem}`)
+  }
+  if (hits === 0) return []
+  return problems.length === 0
+    ? []
+    : [`这一步用 \`gh api\` 写 \`releases\` 的正文（与 \`gh release create|edit\` **同权**的写面）：`
+      + `\n    ${problems.join('\n    ')}`
+      + '\n  ⇒ 正文来源必须与 `gh release` 那条路径同一条判据：策展文件 `docs/releases/<tag>.md`。']
 }
 
 /**
@@ -6522,7 +7144,7 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
       units.push({ jobId, step, index, label: stepName(step, index), reason: '根守卫 job(永不跳过)的步骤' })
     })
   }
-  if (units.length === 0) return { failures, layers: [], uses: [] }
+  if (units.length === 0) return { failures, layers: [], uses: [], usesWith: [] }
 
   /** 所有命中项共用的"为什么"尾注(把现场与修法一次说清)。 */
   const tail = (hit, where) =>
@@ -6619,16 +7241,72 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
   //    "被钉住的判定单元"(单元数 10 → 11),却**从不读它的内容** ⇒ 本地复合 action 里的
   //    `echo NODE_OPTIONS=… >> $GITHUB_ENV` 静默通过。
   const usedUses = []
+  const usedUsesWith = new Set()
+  const usesWithCheck = (label, reason, uses, withValue, where) => {
+    if (typeof uses === 'string') usedUses.push(uses)
+    const problem = pinnedUsesProblem(uses, context.rootDir ?? root)
+    if (problem !== null) {
+      reportOnce(`uses:${where}`, `[SK-17] ${label} 是`
+        + `${reason},但它通过 \`uses: ${typeof uses === 'string' ? uses : JSON.stringify(uses)}\` `
+        + '把执行委托出去,而这个委派目标不在判据的读取面内。'
+        + `\n  ${problem}`)
+      // 委派目标都读不懂 ⇒ 它的 `with:` 更无从判起(不重复报,免得诊断被两行同样的病根刷屏)。
+      return
+    }
+    if (typeof uses === 'string') {
+      for (const key of envEntries(withValue).map(([name]) => name)) {
+        usedUsesWith.add(`${uses.trim()}\u0000${key}`)
+      }
+    }
+    const withProblems = pinnedUsesWithProblems(uses, withValue, context.rootDir ?? root)
+    if (withProblems.length === 0) return
+    reportOnce(`with:${where}`, `[SK-17] ${label} 是${reason},但它的 \`with:\` 输入不在判据面内。`
+      + `\n  ${withProblems.join('\n  ')}`)
+  }
   for (const unit of units) {
     const uses = unit.step?.uses
     if (uses === undefined || uses === null) continue
-    if (typeof uses === 'string') usedUses.push(uses)
-    const problem = pinnedUsesProblem(uses, context.rootDir ?? root)
-    if (problem === null) continue
-    reportOnce(`uses:${unit.jobId}#${unit.index}`, `[SK-17] ${unitLabel(unit)} 是`
-      + `${unit.reason},但它通过 \`uses: ${typeof uses === 'string' ? uses : JSON.stringify(uses)}\` `
-      + '把执行委托出去,而这个委派目标不在判据的读取面内。'
-      + `\n  ${problem}`)
+    usesWithCheck(unitLabel(unit), unit.reason, uses, unit.step?.with, `${unit.jobId}#${unit.index}`)
+  }
+  // ⑦b **同族的第二个入口**:跑全量门禁的那个 job 的 `actions/checkout` —— 它决定"门禁看到的
+  //     是哪一棵树"(口径与 [SK-8b] 一致:`ROOT_GATE_INVOCATION` + 参数向量为空)。
+  //     只对**已登记在 `PINNED_USES_WITH_REGISTRY` 里的 action** 判:其余步骤(如
+  //     `upload-artifact`)不是被钉单元,`with:` 不在本判据的作用域内(判了就是假红)。
+  for (const unit of units) {
+    const jobSteps = stepsOf(unit.jobId)
+    const runsFullGate = jobSteps.some(step => typeof step?.run === 'string'
+      && [...stripShellRedirections(executableScript(step.run)).matchAll(ROOT_GATE_INVOCATION)]
+        .some(match => match[1] === 'check' && match[2].trim() === ''))
+    if (!runsFullGate) continue
+    jobSteps.forEach((step, index) => {
+      const uses = typeof step?.uses === 'string' ? step.uses.trim() : ''
+      if (!PINNED_USES_WITH_REGISTRY.some(entry => entry.uses === uses)) return
+      usesWithCheck(`job ${unit.jobId} 的 step「${stepName(step, index)}」`,
+        `跑全量门禁的 job(它检出的那棵树就是门禁看到的树)`, step.uses, step?.with,
+        `${unit.jobId}#gate-tree#${index}`)
+    })
+  }
+
+  // ⑦c 被钉 job 的 `runs-on`(第十一轮审计 P2-1):与 `container:` 同层 —— "这一步跑在谁的机器上"。
+  //     登记制,fail-closed:未登记 / 列表形态 / 表达式 / 非字符串一律红。
+  for (const jobId of pinnedJobIds) {
+    const raw = jobs[jobId]?.['runs-on']
+    const value = typeof raw === 'string' ? raw.trim() : null
+    const runsOnRegistry = context.jobRunsOn ?? PINNED_JOB_RUNS_ON_REGISTRY
+    const registered = runsOnRegistry.find(entry => entry.job === jobId)
+    const shape = value === null
+      ? (raw === undefined ? '缺失' : `非字符串(${JSON.stringify(raw)})`)
+      : value
+    if (registered !== undefined && value !== null && registered.runsOn === value) continue
+    reportOnce(`runs-on:${jobId}`, `[SK-17] job ${jobId} 有被钉住的判定单元,但它的 \`runs-on\` `
+      + `是 ${shape}${registered === undefined
+        ? '（这个 job **不在** `PINNED_JOB_RUNS_ON_REGISTRY` 里）'
+        : `（该 job 的登记值是 \`${registered.runsOn}\`）`}`
+      + '\n  ⇒ `runs-on` 与 `container:` 是同一层("判据跑在谁的机器上"):换成 `self-hosted`、'
+      + '换一个镜像标签、或写成列表形态,被钉步骤赖以成立的工具链/python/内核版本就全由另一方提供,'
+      + '而 argv、步骤体、`env:`、`working-directory` 一字未改。'
+      + '\n  ⇒ 判据是登记制:要在被钉 job 上用别的 runner,先把它逐字登记进 `PINNED_JOB_RUNS_ON_REGISTRY`'
+      + '并写明"这台机器为什么可以承担判据步骤"。')
   }
 
   // ⑧ `$GITHUB_ENV` / `$GITHUB_PATH`:同 job 内、位置在被钉步骤**之前**的步骤写进去的,
@@ -6775,7 +7453,7 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
       + layers().map(layer => `${layer.label}[${layer.count}]`).join(' · ')
       + `(键表 = PINNED_ENV_ALLOWED_KEYS,共 ${PINNED_ENV_ALLOWED_KEYS.length} 条登记;未登记即红)`)
   }
-  return { failures, layers: layers(), uses: usedUses }
+  return { failures, layers: layers(), uses: usedUses, usesWith: [...usedUsesWith] }
 }
 
 /**
@@ -6811,10 +7489,21 @@ function pinnedStepCoverageProblem(policies) {
 
 function checkReleaseSurface(file, document, text, notes) {
   const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  // 发布面的**执行文本**(注释不算 —— ci.yml 的注释里就提到过 `gh api`)。
+  const releaseScripts = Object.values(jobs)
+    .flatMap(job => (Array.isArray(job?.steps) ? job.steps : []))
+    .filter(step => typeof step?.run === 'string')
+    .map(step => executableScript(step.run))
   // 只在"这份 workflow 有发布面"时生效:合成样本 / 纯测试 workflow 只跑 `yarn check`
   // 却没有 release 步骤是合法的(这条判据的动机是"半发布窗口",前提是先有发布面)。
-  if (!/gh\s+release\s+(?:create|edit|upload)|ci-release-policy\.sh/u.test(text)) return failures
-  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  // **发布面的口径是能力面**(第十一轮审计 C2-A-02):`gh api … releases … body=` 与
+  // `gh release create|edit` **同权**,只按命令名判会让"换一种等价写面"整条判据静默失效。
+  const writesReleaseViaApi = releaseScripts.some(script => [...script.matchAll(GH_API_INVOCATION)]
+    .some(match => /releases/u.test(match[1]) && ghApiReleaseBodyFlagPresent(match[1])))
+  if (!/gh\s+release\s+(?:create|edit|upload)|ci-release-policy\.sh/u.test(text) && !writesReleaseViaApi) {
+    return failures
+  }
   /** 策展发布说明的 fail-loud:判据必须落在**可执行文本**上(注释不算)。 */
   const isNotesGate = step => {
     if (typeof step?.run !== 'string') return false
@@ -6914,7 +7603,40 @@ function checkReleaseSurface(file, document, text, notes) {
     steps.forEach((step, index) => {
       if (typeof step?.run !== 'string') return
       const script = joinContinuations(executableScript(step.run))
-      for (const match of script.matchAll(GH_RELEASE_INVOCATION)) {
+      const stepLabel = `job ${jobId} 的 step「${stepName(step, index)}」`
+      const invocations = [...script.matchAll(GH_RELEASE_INVOCATION)]
+      // ⑦ **写入口不许藏进变量/数组**(第十一轮审计 C2-A-02)。现场:
+      //    `GH_CREATE=(gh release create)` 之后 `"${GH_CREATE[@]}" … --notes "$(git log …)"`
+      //    —— 命令名不在文本里(而且 `(gh release create)` 后面紧跟 `)`,连
+      //    `GH_RELEASE_INVOCATION` 的"命令词后必须有空白"都不满足) ⇒ 判据面外。
+      //    取向:写 Release 正文的**能力**出现在 step 里,但 argv 读不懂 ⇒ fail-closed 红。
+      const indirectWrite = /\bgh\s+release\s+(?:create|edit)\b/u.test(script) && invocations.length === 0
+      if (indirectWrite) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] ${stepLabel} 里有 \`gh release create|edit\` 的文本,但**读不到可判的 argv**`
+            + '(命令名/数组被放进变量,例如 `GH_CREATE=(gh release create)`)'
+            + '\n  ⇒ 这一步能写 Release 正文(含标题与说明来源),而判据看不见它用了哪个旗标、取值从哪来。'
+            + '求不出真假 ⇒ 按会静默处理:把 `gh release …` 写成**字面命令**,或把这种间接形态登记成'
+            + '一条显式的判据(不接受"看起来人畜无害"当豁免)。',
+        })
+      }
+      // ⑧ `gh api` 写 `releases` 正文:与 `gh release create|edit` **同权**的写面,一并判。
+      for (const match of script.matchAll(GH_API_INVOCATION)) {
+        const problems = ghApiReleaseBodyProblems(script, match[1])
+        if (problems.length === 0) continue
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] ${stepLabel} 经 \`gh api\` 写 Release 正文,而正文来源**不可证明**是策展文件。`
+            + `\n  ${problems.join('\n  ')}`,
+        })
+      }
+      if (invocations.length === 0) return
+      // 说明来源的总账:这一步有没有**至少一条可证明来自策展文件**的来源。
+      let provenSources = 0
+      for (const match of invocations) {
         const tail = match[2]
         const title = /(?:^|\s)(?:--title|-t)(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))/u.exec(tail)
         const titleValue = title === null ? undefined : (title[1] ?? title[2] ?? title[3])
@@ -6928,11 +7650,6 @@ function checkReleaseSurface(file, document, text, notes) {
               + '必须 `--title` 且取值引用 tag 变量(`${TAG}` / `$TAG` / `${GITHUB_REF_NAME}` 都接受)。',
           })
         }
-        const assignedNotesVars = new Set(
-          [...script.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=[^\n]*?(--notes-file|--generate-notes|--notes)\b/gu)].map(hit => hit[1]),
-        )
-        const hasNotesInline = /(?:^|\s)--(?:notes-file|notes|generate-notes)\b/u.test(tail)
-        const hasNotesVar = [...assignedNotesVars].some(name => new RegExp(`\\$\\{?${name}\\b`, 'u').test(tail))
         if (!/exit\s+[1-9]/u.test(script)) {
           failures.push({
             name: file,
@@ -6942,13 +7659,19 @@ function checkReleaseSurface(file, document, text, notes) {
               + '(v2.7.0 的教训:公开版本页变成 CI 日志)。这一条判据只认可执行文本,注释里写不算。',
           })
         }
-        if (!hasNotesInline && !hasNotesVar) {
+        // ③/④ **正文来源必须可证明是策展文件**(第十一轮审计 C2-A-01,P1)。旧判据只问
+        //    "有没有说明来源这个旗标" ⇒ `--notes "$(git log -1 --format=%B)"` 全绿而公开
+        //    正文来自未评审文本(提交信息 / 任意命令输出)。现在逐条判取值来源,fail-closed。
+        const report = releaseNotesSourceReport(script, tail)
+        provenSources += report.sources
+        for (const problem of report.problems) {
           failures.push({
             name: file,
             line: 0,
-            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 没有说明来源`
-              + '\n  ⇒ 需要 `--notes-file` / `--notes` / `--generate-notes`,或同一脚本里赋给这些 flag 的变量'
-              + '(本仓的策展说明路径是 docs/releases/<tag>.md)。',
+            detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 的`
+              + `说明来源**不能证明是策展文件**:\n  ${problem}`
+              + '\n  ⇒ 公开 Release 正文必须来自 `docs/releases/<tag>.md`(可评审、进 diff、'
+              + '过 `check-no-real-domains`);来源证明不了的形态一律按未评审文本处理。',
           })
         }
         // ⑤ 绝不回退自动变更日志(2026-09-23 第五轮审计 R5-C-3):`--generate-notes` 的正文
@@ -6965,6 +7688,16 @@ function checkReleaseSurface(file, document, text, notes) {
               + '发布 tag(正式版与预发版)一律用 `--notes-file docs/releases/<tag>.md`。',
           })
         }
+      }
+      if (provenSources === 0) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] ${stepLabel} 里 \`gh release create|edit\` 没有**可证明来自策展文件**的说明来源`
+            + '\n  ⇒ 需要 `--notes-file docs/releases/<tag>.md`(或同一脚本里赋给它的变量;'
+            + '`--notes "$(cat docs/releases/<tag>.md)"` 亦可),或 `-F`/`-n` 短形态。'
+            + '判据问的是"正文是不是那份策展文件",不是"有没有写这个旗标"。',
+        })
       }
     })
   }
@@ -6985,7 +7718,11 @@ export function selfTestPolicies() {
   const failures = []
   const run = (label, steps, options = {}) => {
     const file = options.file ?? 'selftest.yml'
-    const result = checkWorkflowText(file, selftestWorkflow(steps, options))
+    // 合成的被钉 job（`verify`）要用**同一张** `runs-on` 登记表的口径：注入一条合成登记项，
+    // 否则新加的 `runs-on` 判据会把一堆与它无关的绿样本判红（收紧过度也是缺陷）。
+    const result = checkWorkflowText(file, selftestWorkflow(steps, options), {
+      registries: options.registries ?? SELFTEST_RUNS_ON_REGISTRY,
+    })
     return { label, failures: result.failures }
   }
   const tags = (result, tag) => result.failures.filter(failure => failure.detail.includes(tag))
@@ -7114,7 +7851,7 @@ export function selfTestPolicies() {
     const option = WASM_CASE_GATE_OPTIONS[mode]
     return [
       '  server:',
-      '    runs-on: ubuntu-latest',
+      `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
       '    timeout-minutes: 45',
       ...(option.pg ? [
         '    env:',
@@ -7581,6 +8318,9 @@ export function selfTestPolicies() {
     // 根守卫 job 里**额外**的 `uses:` 步骤（[SK-17⑦] 的样本入口，第十轮审计 C-03）：
     // 数组 = 已缩进 6 空格的 YAML 行。
     guardUsesSteps = [],
+    // 根守卫 job 的 `runs-on`（[SK-17⑦c] 的样本入口，第十一轮审计 P2-1）：字符串 = 逐字写进
+    // `runs-on:`；也接受字符串化后的列表形态（`[self-hosted, linux]`）用来测"非标量 ⇒ 红"。
+    guardRunsOn = GATE_SELFTEST_RUNS_ON,
     // 守卫结果链路步（`gate` 的收尾链路步）的 `env:`（[SK-17⑤] 的样本入口）。
     linkStepEnv = null,
     // `changes` job 里那一步（**非**判据步骤）的 `env:`（[SK-17] 的绿样本入口：
@@ -7659,7 +8399,7 @@ export function selfTestPolicies() {
     ...changesExtraSteps,
     ...(guardJob ? [
       '  gate-guards:',
-      '    runs-on: ubuntu-latest',
+      `    runs-on: ${guardRunsOn}`,
       ...(guardNeeds === '' ? [] : [`    needs: ${guardNeeds}`]),
       ...(guardIf === '' ? [] : [`    if: ${guardIf}`]),
       '    timeout-minutes: 20',
@@ -7697,7 +8437,7 @@ export function selfTestPolicies() {
         : ['      - name: Root guards (every PR shape)', `        if: ${guardRunIf}`, `        run: ${guardRun}`]),
     ] : []),
     '  gate:',
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
     `    needs: ${gateNeeds}`,
     `    if: ${gateIf}`,
     '    timeout-minutes: 60',
@@ -8630,6 +9370,64 @@ export function selfTestPolicies() {
     guardUsesSteps: ['      - uses: evil/action@v1'],
   })
 
+  // ---- 第十一轮审计 P1-3:被钉单元里的 **`with:` 输入** ----
+  //
+  // 现场:审计方 8/8 条 `with:` 变异 `check-workflows` EXIT=0,完整树副本上 13 条根守卫逐条
+  // 同形。`uses:` 只钉了 action 的**名字** —— 而"取哪棵树 / 用哪个解释器 / 缓存写进哪些目录"
+  // 全在 `with:` 里。下面 8 条与审计方的 8 条同形,逐条钉住。
+  const WITH_CHECKOUT = lines => ['      - uses: actions/checkout@v7', '        with:', ...lines]
+  const WITH_SETUP_NODE = lines => ['      - uses: actions/setup-node@v7', '        with:', ...lines]
+  for (const [id, steps] of [
+    ['wa1-with-checkout-repository', WITH_CHECKOUT(['          repository: example/other-repo', '          submodules: recursive'])],
+    ['wa2-with-checkout-ref', WITH_CHECKOUT(['          ref: refs/heads/evil', '          submodules: recursive'])],
+    ['wa3-with-checkout-token', WITH_CHECKOUT(['          token: ${{ secrets.SOME_OTHER_TOKEN }}', '          submodules: recursive'])],
+    ['wa4-with-checkout-sparse', WITH_CHECKOUT(['          sparse-checkout: scripts', '          submodules: recursive'])],
+    ['wa5-with-setup-node-major', WITH_SETUP_NODE(['          node-version: 8'])],
+    ['wa6-with-setup-node-file', WITH_SETUP_NODE(['          node-version-file: .nvmrc'])],
+    ['wa7-with-setup-node-corepack', WITH_SETUP_NODE(['          node-version: 24', '          enable-corepack: true'])],
+    ['wa8-with-cache-key', ['      - uses: actions/cache@v6', '        with:',
+      '          path: |', '            .yarn/cache',
+      "          key: desktop-cache-${{ runner.os }}-fixed"]],
+  ]) {
+    gateSample(id, '[SK-17]', { file: 'ci.yml', guardUsesSteps: steps })
+  }
+  // 逐字取值同样要判(登记了键、但取值被改):`fetch-depth: 1` 既有 [SK-8b] 也走 `with:` 白名单。
+  gateSample('wa9-with-checkout-fetch-depth-value', '[SK-17]', {
+    file: 'ci.yml',
+    guardUsesSteps: ['      - uses: actions/checkout@v7', '        with:', '          fetch-depth: 1'],
+  })
+  // **绿样本**(不得一刀切):与真 ci.yml 逐字同形的三个 `with:` 块必须放行。
+  gateSample('wa10-with-registered-values-green', null, {
+    file: 'ci.yml',
+    guardUsesSteps: [
+      ...WITH_CHECKOUT(['          submodules: recursive', '          fetch-depth: 0']),
+      ...WITH_SETUP_NODE(['          node-version: 24']),
+      '      - uses: actions/cache@v6',
+      '        with:',
+      '          path: |',
+      '            .yarn/cache',
+      '            ~/.cache/electron',
+      '            ~/.cache/electron-builder',
+      "          key: desktop-cache-${{ runner.os }}-${{ hashFiles('yarn.lock') }}",
+    ],
+  })
+  // `with:` 不是映射(这里是最容易被当成"等价写法"的字符串化形态)⇒ 红。
+  gateSample('wa11-with-not-a-mapping', '[SK-17]', {
+    file: 'ci.yml',
+    guardUsesSteps: ['      - uses: actions/checkout@v7', '        with: "fetch-depth: 1"'],
+  })
+
+  // ---- 第十一轮审计 P2-1:被钉 job 的 `runs-on`(与 `container:` 同层) ----
+  for (const [id, runsOn] of [
+    ['wr1-runs-on-self-hosted', 'self-hosted'],
+    ['wr2-runs-on-other-image', 'ubuntu-22.04'],
+    ['wr3-runs-on-list-form', '[self-hosted, linux]'],
+  ]) {
+    gateSample(id, '[SK-17]', { file: 'ci.yml', guardRunsOn: runsOn })
+  }
+  // **绿样本**:登记值本身必须放行(否则登记制只被证明了一半)。
+  gateSample('wr4-runs-on-registered-green', null, { file: 'ci.yml', guardRunsOn: GATE_SELFTEST_RUNS_ON })
+
   // ---- 策略 14(P1-1/P1-2/P1-3/P1-4)与第八轮三条假红的回归(2026-09-25 第九轮审计 B 泳道) ----
   //
   // B 泳道在"同一面"(判据只看文本、不看执行语义)上又找到 5 条 P1,并实测出第八轮新引入的
@@ -8760,7 +9558,7 @@ export function selfTestPolicies() {
     '  pull_request:',
     'jobs:',
     '  verify:',
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
     ...(jobIf === null ? [] : [`    if: ${jobIf}`]),
     ...(jobContinueOnError ? ['    continue-on-error: true'] : []),
     '    steps:',
@@ -8881,6 +9679,9 @@ export function selfTestPolicies() {
     gateFirst = true,
     titleFlag = '--title "${TAG}"',
     notesFlag = '${NOTES_FLAG}',
+    // 第十一轮审计 C2-A-01/A-02 的样本入口:`with:` 之外还要能改"写 Release 的那一行/那一段"
+    // （命令替换来源、`gh api` 写正文、把命令名藏进数组）。
+    releaseWrite = null,
     // 2026-09-23 第五轮审计 R5-C-3:策展说明判据不得被"只对正式版"的条件收窄。
     gateNotesIf = '',
     triggers = ['pull_request', 'push'],
@@ -8890,7 +9691,7 @@ export function selfTestPolicies() {
     ...triggers.map(trigger => `  ${trigger}:`),
     'jobs:',
     '  gate:',
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
     '    timeout-minutes: 60',
     '    steps:',
     '      - uses: actions/checkout@v7',
@@ -8945,7 +9746,9 @@ export function selfTestPolicies() {
     '          else',
     '            exit 1',
     '          fi',
-    `          gh release create "\${TAG}" ${titleFlag} ${notesFlag}`,
+    ...(releaseWrite === null
+      ? [`          gh release create "\${TAG}" ${titleFlag} ${notesFlag}`]
+      : releaseWrite),
     ...wasmCaseGateLines('full'),
     '',
   ].join('\n')
@@ -8974,6 +9777,39 @@ export function selfTestPolicies() {
   })
   // R5-C-3:`--generate-notes` 回退本身必须红(自动变更日志 = 提交信息 + PR 标题/正文)。
   releaseSample('p11-generate-notes-fallback', '[SK-11]', { notesFlag: '--generate-notes' })
+  // ---- 第十一轮审计 C2-A-01(P1):正文来源必须**可证明**是策展文件 ----
+  //
+  // 现场:`--notes "$(git log -1 --format=%B)"` 让公开 Release 正文来自未评审文本(提交信息),
+  // 而三道发布面检查全绿 —— 旧判据问的是"有没有说明来源这个旗标",不是"正文是不是那份文件"。
+  releaseSample('p12-notes-command-substitution', '[SK-11]', {
+    notesFlag: '--notes "$(git log -1 --format=%B)"',
+  })
+  releaseSample('p13-notes-file-unprovable-var', '[SK-11]', {
+    notesFlag: '--notes-file "$SOME_EXTERNAL_PATH"',
+  })
+  releaseSample('p14-notes-file-outside-curated-dir', '[SK-11]', {
+    notesFlag: '--notes-file "CHANGELOG.md"',
+  })
+  releaseSample('p15-notes-inline-literal-text', '[SK-11]', {
+    notesFlag: '--notes "hotfix release"',
+  })
+  // 绿样本(C2-A-03 的假红方向):短旗标 `-F`(=`--notes-file`)与"读策展文件"的
+  // `$(cat …)` 形态语义与长形态**逐个相同**,必须放行。
+  releaseSample('p16-notes-short-flag-green', null, { notesFlag: '-F "${NOTES}"' })
+  releaseSample('p17-notes-cat-curated-green', null, { notesFlag: '--notes "$(cat "${NOTES}")"' })
+  // C2-A-02:同族的两条旁路 —— `gh api` 写正文 / 把命令名藏进数组。
+  releaseSample('p18-gh-api-release-body', '[SK-11]', {
+    releaseWrite: [
+      '          gh api -X POST "repos/${REPO}/releases" -f tag_name="${TAG}" '
+        + '-f name="${TAG}" -f body="$(git log -1 --format=%B)" >/dev/null',
+    ],
+  })
+  releaseSample('p19-gh-release-command-in-array', '[SK-11]', {
+    releaseWrite: [
+      '          GH_CREATE=(gh release create)',
+      '          "${GH_CREATE[@]}" "${TAG}" --title "${TAG}" ${NOTES_FLAG}',
+    ],
+  })
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——
   // 不能内联在 selfTestPolicies 体内:那样"把 selfTestPolicies 整条掏空"会连带
   // 把对账一起掏空(第三轮审计 m8 的形态)。这里只做数据收集,断言在
@@ -9431,6 +10267,7 @@ function main() {
   const pinnedStepPolicies = []
   const pinnedEnvLayerIds = new Set()
   const pinnedUses = new Set()
+  const pinnedUsesWith = new Set()
   for (const name of names) {
     const result = checkWorkflow(name)
     // `?? []` 兜底(2026-09-19 第三轮审计 F2-1):将来若有人再加一条忘了统一形状的
@@ -9443,6 +10280,7 @@ function main() {
     pinnedStepPolicies.push(...(result.pinnedStepPolicies ?? []))
     for (const layer of result.pinnedEnvLayers ?? []) pinnedEnvLayerIds.add(layer.id)
     for (const uses of result.pinnedUses ?? []) pinnedUses.add(uses)
+    for (const key of result.usesWith ?? []) pinnedUsesWith.add(key)
   }
 
   // [SK-17] 的**层清单双向对账**(第十轮审计 C-02):`PINNED_ENV_LAYER_REGISTRY` 是判据面的
@@ -9476,9 +10314,15 @@ function main() {
     }
     // `uses:` 登记表的**死条目**对账(与 SWALLOW_ALLOWLIST 同一纪律)。
     failures.push(...pinnedUsesRegistryProblem([...pinnedUses]))
+    // `PINNED_USES_WITH_REGISTRY` 的死条目对账（第十一轮审计 P1-3）：登记了却没有被钉单元在用
+    // 的输入 = 登记表在长成豁免洞。
+    failures.push(...pinnedUsesWithRegistryProblems([...pinnedUsesWith]))
     // 本地 composite action 的内容判据(第十轮审计 C-03):`.github/workflows/` 的平铺扫描面
     // 之外还有一整类**仓内可判**的执行体 —— 它们此前只在被 `uses:` 委派时才"跑",却没人读。
-    failures.push(...checkCompositeActionTree(join(root, '.github', 'actions'), notes))
+    const actionsRoot = join(root, '.github', 'actions')
+    failures.push(...checkCompositeActionTree(actionsRoot, notes, root, {
+      referenced: collectReferencedLocalActions(join(root, '.github', 'workflows'), root),
+    }))
   }
 
   // [SK-13] 的**全仓存在性**对账(只在默认目录):契约挂在"承载发布链的那个 workflow"

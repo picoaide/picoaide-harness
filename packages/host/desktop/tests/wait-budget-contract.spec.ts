@@ -29,7 +29,10 @@
  *    且"内部用到的等待预算"**沿调用传播**：用例调用的本地 helper / `tests/**` 内相对
  *    导入的 helper 里的等待同样算它的（第十轮复审 N3 通道 ③）；
  * 9. 等待条件不得**钉死墙钟现算字段**的精确值（第二类假红，见
- *    `wait-budgets.ts` 的文件头）—— 判据按**取值形态**判，不按匹配器名单判。
+ *    `wait-budgets.ts` 的文件头）—— 判据按**取值形态**判，不按匹配器名单判；
+ * 10. **跨包同宽**（R11-B-02）：`browser` / `connectors` / `cron` / `enterprise` 的
+ *    `tests/**` 走同一份判据（预算口径 = 显式数值 ≥ {@link CROSS_PACKAGE_MIN_WAIT_MS}），
+ *    且每包的 `vitest.config.ts` 缺省 `testTimeout` 必须 ≥ 该包用到的最大等待预算。
  *
  * ## 第十轮复审：三条假绿通道（N1）与三条仍开的通道（N3）都已收口
  *
@@ -54,11 +57,33 @@
  *    `it(…, 5_000)` 调用它 —— 旧判据只在用例语法子树内收集等待键。现在从用例体出发
  *    走调用图（本文件函数体 + `tests/**` 内相对导入，带环路保护）。
  *
- * 认账的边界：动态调用、函数值传递、以及 `tests/**` 之外的模块看不见（契约的扫描面
- * 本来就是 `tests/**`）；这些由预算表的现象下限与包级 30s 兜底罩着。
+ * ## 第十一轮（R11-B-02 / R11-B-03）：把面补宽，把误红纠正
  *
- * 现在的收口：扫描面 = `tests/**` 下**所有** `*.ts` / `*.tsx`（含非 spec）；
- * 拼写面 = 点访问 + 元素访问 + 包装形态 + 解构别名 + 常量别名；
+ * 审计实测（HEAD `3264137997`）**4 种绕法绿 / 3 种正当写法红**，两个方向都收口：
+ *
+ *  - **绕法（已堵）**：`const v = vi; v.waitFor(…)`（对象改名）、
+ *    `import { vitest } from 'vitest'; vitest.waitFor(…)`（命名空间拼写 —— 实测
+ *    `vitest === vi`）、`tests/x.spec.mts`（扫描面原只有 `.ts`/`.tsx`）、
+ *    `tests/helper.ts` 的 `export const w = vi.waitFor` + 别处 `w(…)`（别名表按文件建）。
+ *    另加 fail-closed 的 taint：取值链提到 vitest / 等待 API 却解析不出形状的名字，
+ *    其 `.waitFor(` / `.poll(`（以及"提到等待 API"的名字被直接调用）一律按等待调用判。
+ *  - **误红（已纠正）**：`{ timeout: WAIT_BUDGETS.X } satisfies …`（options 不是对象
+ *    字面量）、`const timeout = WAIT_BUDGETS.X` + `{ timeout }`（简写属性）、
+ *    理由注释与调用之间隔一行预算构造（`const budget = …`）。
+ *  - **跨包面（R11-B-02）**：契约原先只罩桌面包，`browser` / `connectors` / `cron` /
+ *    `enterprise` 还有 40 处等待吃 1s 缺省（`browser` 连 `testTimeout` 都没有、
+ *    `enterprise` 连 `vitest.config.ts` 都没有）。现在四个包都在面内，判据与桌面包
+ *    **共用同一份实现**；预算口径见 {@link CROSS_PACKAGE_MIN_WAIT_MS}（显式数值 +
+ *    现象下限，桌面包仍是"必须引用集中表"）。
+ *
+ * 认账的边界：动态调用、函数值传递、以及 `tests/**` 之外的模块看不见（契约的扫描面
+ * 本来就是各包的 `tests/**`）；这些由预算表的现象下限与包级 30s 兜底罩着。
+ *
+ * 现在的收口：扫描面 = 桌面包 + 四个宿主包的 `tests/**` 下**所有**
+ * `*.ts` / `*.tsx` / `*.mts` / `*.cts`（含非 spec）；拼写面 = 点访问 + 元素访问 +
+ * 包装形态 + 解构别名 + 常量别名 + 命名空间改名/导入 + 跨文件导出的等待 API；
+ * 预算面 = 显式 `timeout`（集中表引用或 ≥ 现象下限的数值）+ 逐处理由注释 +
+ * 用例预算 ≥ 内部等待预算（沿调用图传播）；
  * 钉死判据 = **取值形态**（墙钟字段/它的标量别名只要进了非比较族断言、或与字面量做等值
  * 比较、或在对象字面量里钉非零值，即红），并保留 `wait-budget-contract:allow-clock-value`
  * 的**显式豁免**（要人写下理由，不能靠换匹配器绕过）。
@@ -66,7 +91,8 @@
  * @module dsh-plugin-desktop/tests/wait-budget-contract
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -176,8 +202,63 @@ function scriptKindOf(fileName: string): ts.ScriptKind {
   return fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
 }
 
-/** 一个文件里的一条已解析拼写：本地名 → (`vi` | `expect`) + 方法名。 */
-type AliasMap = Map<string, { object: string, method: string }>
+/** 本契约认作"测试源"的扩展名（第十一轮 R11-B-03：`.mts` 曾整片在面外）。 */
+const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts'] as const
+
+/** `foo.mts` / `foo.ts` / `foo/index.ts` … 的所有扫描面候选路径。 */
+function scannedCandidates(base: string): string[] {
+  return [
+    ...SCANNED_EXTENSIONS.map(extension => `${base}${extension}`),
+    ...SCANNED_EXTENSIONS.map(extension => `${base}/index${extension}`),
+  ]
+}
+
+/**
+ * 一个名字解析到的"等待来源"。
+ *
+ * - 等待 API 本身（`const w = vi.waitFor`）；
+ * - 命名空间对象（`const v = vi`、`import { vitest } from 'vitest'`）；
+ * - `vitest` 模块命名空间（`import * as ns from 'vitest'` ⇒ `ns.vi.waitFor`）。
+ *
+ * 第十二轮（R11-B-03）加的：判据的形态面从"两个标识符文本"扩成"任何最终求值到
+ * `vi.waitFor` / `expect.poll` 的名字"——对象改名（`const v = vi`）、命名空间导入
+ * （`import { vitest }`）、跨文件 `export const w = vi.waitFor` 都在这张表里。
+ */
+type NamespaceValue = 'vi' | 'expect' | 'module'
+
+/** 一个等待 API 的形态（对象名 + 方法名）。 */
+interface WaitApiShape {
+  readonly object: string
+  readonly method: string
+}
+
+/** 一个文件（或一个项目）解析出的等待别名表。 */
+interface WaitAliases {
+  /** 本地名 → 等待 API。 */
+  readonly apis: Map<string, WaitApiShape>
+  /** 本地名 → 命名空间对象。 */
+  readonly namespaces: Map<string, NamespaceValue>
+  /**
+   * "取值可能是等待 API、但解析不出确切形态"的名字（R11-B-03 的 fail-closed 面）。
+   *
+   * `const w = pick(vi.waitFor)` 这类绑定：取值链上确实提到等待 API，只是形状看不见。
+   * 这类名字**被直接调用**（`w(fn)`）时按等待调用判 —— 换个写法绕不过契约。
+   */
+  readonly taintedApis: Set<string>
+  /**
+   * "取值可能是 vitest 命名空间、但解析不出确切形态"的名字。
+   *
+   * `const v = pick(vi)` 这类绑定：这类名字上的 `.waitFor(` / `.poll(` 按等待调用判。
+   * 它**不**覆盖直接调用（`const emit = vi.fn(); emit(x)` 里的 `emit(x)` 不是等待）——
+   * 两类 taint 必须分开，否则 `vi.fn()` 的常见用法会被误杀。
+   */
+  readonly taintedNamespaces: Set<string>
+}
+
+/** 空表（自检用例的单文件路径会就地建表）。 */
+function emptyAliases(): WaitAliases {
+  return { apis: new Map(), namespaces: new Map(), taintedApis: new Set(), taintedNamespaces: new Set() }
+}
 
 /**
  * 剥掉不影响"这是哪个函数"的包装：括号、逗号表达式取右值、`as` / `!` / `<T>` 断言。
@@ -213,16 +294,51 @@ function unwrapWaitCallee(expression: ts.Expression): { inner: ts.Expression, wr
 }
 
 /**
+ * 一个表达式解析到的**命名空间对象**（`vi` / `expect` / `vitest` 模块命名空间）。
+ *
+ * R11-B-03 的四条绕法里有两条藏在这一层：`const v = vi; v.waitFor(…)`（对象改名）
+ * 与 `import { vitest } from 'vitest'; vitest.waitFor(…)`（命名空间拼写 —— vitest 的
+ * 模块导出里 `vitest` 就是 `vi` 本身，实测 `vitest === vi`，是合法且可用的拼写）。
+ * 裸标识符 `vitest` 无条件按 `vi` 认：未导入时那段代码本来就跑不起来，认它只会让
+ * 已经坏掉的文件变红（fail-closed 的方向）。
+ * @param expression - the candidate receiver.
+ * @param aliases - the file's alias table.
+ * @returns the namespace value, or undefined.
+ */
+function namespaceOf(expression: ts.Expression, aliases: WaitAliases): NamespaceValue | undefined {
+  const inner = unwrapWaitCallee(expression).inner
+  if (ts.isIdentifier(inner)) {
+    if (inner.text === 'vi' || inner.text === 'vitest') return 'vi'
+    if (inner.text === 'expect') return 'expect'
+    return aliases.namespaces.get(inner.text)
+  }
+  // `import * as ns from 'vitest'` ⇒ `ns.vi.waitFor(…)` / `ns.vitest.waitFor(…)`.
+  if (ts.isPropertyAccessExpression(inner) && namespaceOf(inner.expression, aliases) === 'module') {
+    if (inner.name.text === 'vi' || inner.name.text === 'vitest') return 'vi'
+    if (inner.name.text === 'expect') return 'expect'
+  }
+  return undefined
+}
+
+/**
  * 一个表达式是不是"对 `vi` / `expect` 的等待 API 的引用"（不调用，只取值）。
  *
  * 覆盖点访问与元素访问两种拼写；`vi.waitFor.bind(vi)` 也算 —— 绑定后的函数就是同一个
  * 等待 API，把它当别的函数放过去，等价于给契约开一条"换个名字"的旁路。
+ *
+ * 接收者先过 {@link namespaceOf}：`const v = vi` 之后 `v.waitFor` 与 `vi.waitFor`
+ * 是同一个 API，只认标识符文本正是 R11-B-03 的头号绕法。
  * @param expression - the candidate.
+ * @param aliases - the file's alias table (namespaces + renamed APIs).
  * @returns the resolved API shape, or undefined.
  */
-function waitReferenceOf(expression: ts.Expression): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined {
+function waitReferenceOf(
+  expression: ts.Expression,
+  aliases: WaitAliases = emptyAliases(),
+): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined {
   const inner = unwrapWaitCallee(expression).inner
-  const match = (receiver: string, method: string, spelling: 'dot' | 'element'): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined => {
+  const match = (receiver: NamespaceValue | undefined, method: string, spelling: 'dot' | 'element'): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined => {
+    if (receiver === undefined || receiver === 'module') return undefined
     const found = WAIT_APIS.find(candidate => candidate.object === receiver && candidate.method === method)
     return found === undefined ? undefined : { api: found, spelling }
   }
@@ -230,115 +346,294 @@ function waitReferenceOf(expression: ts.Expression): { api: typeof WAIT_APIS[num
   // what keeps `const w = vi.waitFor.bind(vi)` from being a rename-shaped bypass.
   if (ts.isCallExpression(inner)) {
     const callee = unwrapWaitCallee(inner.expression).inner
-    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'bind') return waitReferenceOf(callee.expression)
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'bind') return waitReferenceOf(callee.expression, aliases)
     return undefined
   }
-  if (ts.isPropertyAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
-    return match(inner.expression.text, inner.name.text, 'dot')
+  if (ts.isPropertyAccessExpression(inner)) {
+    return match(namespaceOf(inner.expression, aliases), inner.name.text, 'dot')
   }
-  if (ts.isElementAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
+  if (ts.isElementAccessExpression(inner)) {
     const argument = inner.argumentExpression
     if (argument !== undefined && ts.isStringLiteralLike(argument)) {
-      return match(inner.expression.text, argument.text, 'element')
+      return match(namespaceOf(inner.expression, aliases), argument.text, 'element')
     }
+  }
+  // A renamed API (`const w = vi.waitFor`) used through another name.
+  if (ts.isIdentifier(inner)) {
+    const bound = aliases.apis.get(inner.text)
+    if (bound === undefined) return undefined
+    const found = WAIT_APIS.find(candidate => candidate.object === bound.object && candidate.method === bound.method)
+    return found === undefined ? undefined : { api: found, spelling: 'dot' }
   }
   return undefined
 }
 
 /**
  * 解析一个调用点的**拼写**：点访问、元素访问（`vi['waitFor']`）、被包装的直接调用
- * （`(0, vi.waitFor)(fn)`）或别名（`const w = vi.waitFor` / `const { waitFor } = vi`）。
+ * （`(0, vi.waitFor)(fn)`）、别名（`const w = vi.waitFor` / `const { waitFor } = vi`）、
+ * **命名空间改名**（`const v = vi; v.waitFor(…)`）与**跨文件导出的等待 API**
+ * （`import { w } from './helper.ts'`，R11-B-03 的 E 例）。
  * @param node - the call expression.
- * @param aliases - names bound in this file to one of the wait APIs.
+ * @param aliases - the file's alias table (renamed APIs + namespaces + tainted names).
  * @param _file - the source file (kept for future diagnostics).
  * @returns the resolved call shape, or undefined for a call this contract ignores.
  */
 function resolveWaitCall(
   node: ts.CallExpression,
-  aliases: AliasMap,
+  aliases: WaitAliases,
   _file: ts.SourceFile,
 ): { api: typeof WAIT_APIS[number], spelling: WaitForSite['spelling'] } | undefined {
   const { inner, wrapped } = unwrapWaitCallee(node.expression)
   // Direct spellings first, on the unwrapped callee: the wrapping must not decide
   // whether the contract sees the call (复审 N3 通道 ②).
-  const direct = waitReferenceOf(inner)
+  const direct = waitReferenceOf(inner, aliases)
   if (direct !== undefined) {
+    // A call that resolves through the ALIAS TABLE has no `vi.waitFor(` at this code
+    // position, so it is the shape the needle witness cannot count: `const w =
+    // vi.waitFor; w(…)`, `import { vitest } from 'vitest'; vitest.waitFor(…)` and
+    // `const v = vi; v.waitFor(…)` all keep the `alias` spelling (both witnesses
+    // exclude them from the reconciliation). Everything the needle CAN see stays
+    // `dot`/`element`/`wrapped` — i.e. calls whose receiver is the literal
+    // `vi` / `expect` identifier.
+    if (resolvesThroughAliasTable(inner, aliases)) return { api: direct.api, spelling: 'alias' }
     return { api: direct.api, spelling: wrapped ? 'wrapped' : direct.spelling }
   }
-  // `const w = vi.waitFor; w(…)` — the alias is a real call site and must carry a
-  // budget like any other (复审 N3 通道 ①).
   if (ts.isIdentifier(inner)) {
-    const bound = aliases.get(inner.text)
-    if (bound === undefined) return undefined
-    const found = WAIT_APIS.find(candidate => candidate.object === bound.object && candidate.method === bound.method)
-    return found === undefined ? undefined : { api: found, spelling: 'alias' }
+    // Fail-closed: the value chain mentions a wait API but the shape is opaque
+    // (`const w = pick(vi.waitFor); w(fn)`) — that is a wait call for this contract.
+    if (aliases.taintedApis.has(inner.text)) return { api: WAIT_APIS[0], spelling: 'alias' }
+    return undefined
+  }
+  // `x.waitFor(…)` / `x.poll(…)` on a name that could be a namespace but could not
+  // be resolved (`const v = pick(vi)`): fail-closed. Names that never mention
+  // vitest (`server.waitFor`, `helper['waitFor']`) stay out — the contract is about
+  // the vitest wait APIs, not about the method's spelling.
+  if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
+    const method = ts.isPropertyAccessExpression(inner)
+      ? inner.name.text
+      : (inner.argumentExpression !== undefined && ts.isStringLiteralLike(inner.argumentExpression)
+          ? inner.argumentExpression.text
+          : undefined)
+    const receiver = unwrapWaitCallee(inner.expression).inner
+    const taintedNames: readonly Set<string>[] = [aliases.taintedNamespaces, aliases.taintedApis]
+    const receiverIsTainted = ts.isIdentifier(receiver) && taintedNames.some(set => set.has(receiver.text))
+    const found = WAIT_APIS.find(candidate => candidate.method === method)
+    if (receiverIsTainted && found !== undefined) return { api: found, spelling: 'alias' }
   }
   return undefined
 }
 
 /**
- * Collect every local name bound to one of the wait APIs.
+ * 这个 callee 是不是**通过别名表**解析出来的（而不是字面量 `vi` / `expect`）。
  *
- * Two shapes:
+ * 两个见证必须一致：needle 只数代码位置上的 `vi.waitFor(` / `expect.poll(`，所以
+ * 任何"名字与字面量不同"的写法都必须归到 `alias` 拼写，否则覆盖率对账会把一处
+ * 真实调用算成"AST 多看见一处"（或反过来静默缩小契约）。R11-B-03 的 B/C 两例
+ * 正是这一类。
+ * @param callee - the (unwrapped) callee expression.
+ * @param aliases - the file's alias table.
+ * @returns true when the call goes through a renamed API or a namespace alias.
+ */
+function resolvesThroughAliasTable(callee: ts.Expression, aliases: WaitAliases): boolean {
+  if (ts.isIdentifier(callee)) return aliases.apis.has(callee.text) || aliases.namespaces.has(callee.text)
+  if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+    const receiver = unwrapWaitCallee(callee.expression).inner
+    // `vitest` 是模块导出里与 `vi` 同一个对象的那个名字（实测 `vitest === vi`），
+    // 但 needle 只数 `vi.waitFor(` —— 所以它同样属于"needle 看不见"的一类。
+    if (ts.isIdentifier(receiver)) {
+      return receiver.text === 'vitest'
+        || aliases.namespaces.has(receiver.text)
+        || aliases.apis.has(receiver.text)
+    }
+    // `ns.vi.waitFor(…)` (a module namespace import).
+    if (ts.isPropertyAccessExpression(receiver) && ts.isIdentifier(receiver.expression)) {
+      return aliases.namespaces.has(receiver.expression.text)
+    }
+  }
+  return false
+}
+
+/** 一个文件里解析出的别名**与导出**（跨文件别名要读后者的导出表）。 */
+interface FileAliases {
+  readonly aliases: WaitAliases
+  /** 导出名 → 该名字绑定的等待别名（`export const w = vi.waitFor`）。 */
+  readonly exports: Map<string, { kind: 'api', api: WaitApiShape } | { kind: 'namespace', value: NamespaceValue }>
+}
+
+/** 一个导出名在目标文件里的绑定（跨文件别名解析的返回值）。 */
+type ExportedAlias = FileAliases['exports'] extends Map<string, infer T> ? T : never
+
+/**
+ * Collect every local name bound to one of the wait APIs, to a vitest namespace, or
+ * to a "mentions vitest but unresolvable" value.
+ *
+ * Shapes (each one an audit finding when missing — R11-B-03):
+ *
  *  - destructuring (`const { waitFor } = vi`, `const { poll: eventually } = expect`);
  *  - a plain constant bound to the API itself (`const w = vi.waitFor`,
- *    `const w = vi['waitFor']`, `const b = vi.waitFor.bind(vi)`, and chains such as
- *    `const w2 = w`). The second shape is 复审 N3 通道 ①: it used to be invisible to
- *    BOTH witnesses at once (`vi.waitFor(` does not appear in `w(fn)` either), which
- *    is precisely how a budgetless wait stayed green.
+ *    `const w = vi['waitFor']`, `const b = vi.waitFor.bind(vi)`, chains such as
+ *    `const w2 = w`) — 复审 N3 通道 ①;
+ *  - a constant bound to a NAMESPACE (`const v = vi`), so `v.waitFor(…)` resolves
+ *    exactly like `vi.waitFor(…)` — R11-B-03 bypass B;
+ *  - imports (`import { vitest } from 'vitest'`, `import * as ns from 'vitest'`,
+ *    `import { vi as v } from 'vitest'`) — R11-B-03 bypass C;
+ *  - a named import of a wait API or namespace EXPORTED BY ANOTHER SCANNED FILE
+ *    (`export const w = vi.waitFor` in `tests/helper.ts`, `import { w } from
+ *    './helper.ts'`) — R11-B-03 bypass E. `export * from` is deliberately not
+ *    followed: the name stays unresolved, and an unresolved name whose value chain
+ *    mentions a wait API lands in `taintedApis` (fail-closed).
  *
  * Anything more exotic (a function returning the API, an object property) stays out
  * of the alias map — but a wrapper FUNCTION (`const w = (...a) => vi.waitFor(...a)`)
  * is covered by the local-call propagation instead: the wait inside its body is a
  * call site of its own and the case that invokes it inherits the budget.
  * @param file - the source file.
- * @returns local name → call shape.
+ * @param resolveExport - resolves `import { name } from './x.ts'` to that name's
+ *   binding in the target file (undefined when the target is outside the scan set).
+ * @returns the alias table plus this file's own exports.
  */
-function collectAliases(file: ts.SourceFile): AliasMap {
-  const aliases: AliasMap = new Map()
-  const bindings: Array<{ name: string, initializer: ts.Expression }> = []
+function collectAliases(
+  file: ts.SourceFile,
+  resolveExport: (specifier: string, name: string) => ExportedAlias | undefined = () => undefined,
+): FileAliases {
+  const apis: WaitAliases['apis'] = new Map()
+  const namespaces: WaitAliases['namespaces'] = new Map()
+  const taintedApis: WaitAliases['taintedApis'] = new Set()
+  const taintedNamespaces: WaitAliases['taintedNamespaces'] = new Set()
+  const exports: FileAliases['exports'] = new Map()
+  /** 常量绑定，等解析趟处理（顺序无关）。 */
+  const bindings: Array<{ name: string, initializer: ts.Expression, exported: boolean }> = []
+  const table = (): WaitAliases => ({ apis, namespaces, taintedApis, taintedNamespaces })
+  /** 子树里是否出现等待 API 的**取值**（`vi.waitFor` / 已解析的别名）。 */
+  const mentionsWaitApi = (node: ts.Node): boolean => {
+    let found = false
+    const walk = (child: ts.Node): void => {
+      if (found) return
+      if (isWaitApiValue(child)) { found = true; return }
+      if (ts.isIdentifier(child) && (apis.has(child.text) || taintedApis.has(child.text))) { found = true; return }
+      ts.forEachChild(child, walk)
+    }
+    walk(node)
+    return found
+  }
+  /** 子树里是否出现 vitest 命名空间（或它的别名/taint）。 */
+  const mentionsNamespace = (node: ts.Node): boolean => {
+    let found = false
+    const walk = (child: ts.Node): void => {
+      if (found) return
+      if (ts.isIdentifier(child)) {
+        if (child.text === 'vi' || child.text === 'vitest' || child.text === 'expect') { found = true; return }
+        if (namespaces.has(child.text) || taintedNamespaces.has(child.text)) { found = true; return }
+      }
+      ts.forEachChild(child, walk)
+    }
+    walk(node)
+    return found
+  }
   const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      const specifier = node.moduleSpecifier.text
+      const clause = node.importClause?.namedBindings
+      if (clause !== undefined) {
+        if (ts.isNamespaceImport(clause)) {
+          // `import * as ns from 'vitest'` ⇒ `ns.vi.waitFor(…)`.
+          if (specifier === 'vitest') namespaces.set(clause.name.text, 'module')
+        } else if (ts.isNamedImports(clause)) {
+          for (const element of clause.elements) {
+            const imported = (element.propertyName ?? element.name).text
+            const local = element.name.text
+            if (specifier === 'vitest') {
+              // 字面量 `vi` / `vitest` / `expect` 已经由 {@link namespaceOf} 直接
+              // 解析；把它们本身塞进别名表会让"字面量拼写"被误判成"通过别名表"，
+              // 两个见证随即失配（覆盖率对账会红）。只登记**改名**的绑定。
+              const literalNames = local === 'vi' || local === 'vitest' || local === 'expect'
+              if (!literalNames) {
+                if (imported === 'vi' || imported === 'vitest') namespaces.set(local, 'vi')
+                else if (imported === 'expect') namespaces.set(local, 'expect')
+              }
+              continue
+            }
+            const target = resolveExport(specifier, imported)
+            if (target === undefined) continue
+            if (target.kind === 'api') apis.set(local, target.api)
+            else namespaces.set(local, target.value)
+          }
+        }
+      }
+    }
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer !== undefined) {
-      const initializer = node.initializer
-      const source = ts.isIdentifier(initializer)
-        && (initializer.text === 'vi' || initializer.text === 'expect')
-        ? initializer.text
-        : undefined
-      if (source !== undefined) {
+      const source = namespaceOf(node.initializer, table())
+      if (source !== undefined && source !== 'module') {
         for (const element of node.name.elements) {
           const property = element.propertyName
           const key = property === undefined
             ? (ts.isIdentifier(element.name) ? element.name.text : undefined)
             : (ts.isIdentifier(property) || ts.isStringLiteralLike(property) ? property.text : undefined)
           if (key === undefined || !ts.isIdentifier(element.name)) continue
-          aliases.set(element.name.text, { object: source, method: key })
+          apis.set(element.name.text, { object: source, method: key })
         }
       }
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-      bindings.push({ name: node.name.text, initializer: node.initializer })
+      const statement = node.parent.parent
+      const exported = ts.isVariableStatement(statement)
+        && statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword) === true
+      bindings.push({ name: node.name.text, initializer: node.initializer, exported })
     }
     ts.forEachChild(node, visit)
   }
   visit(file)
-  // Two passes so a chain (`const a = vi.waitFor; const b = a`) resolves whichever
-  // order the declarations appear in.
-  for (let pass = 0; pass < 2; pass += 1) {
+  // Three passes so a chain (`const a = vi.waitFor; const b = a`) and a namespace
+  // rename (`const v = vi; const w = v.waitFor`) resolve in any declaration order.
+  for (let pass = 0; pass < 3; pass += 1) {
     for (const binding of bindings) {
-      if (aliases.has(binding.name)) continue
-      const reference = waitReferenceOf(binding.initializer)
-      if (reference !== undefined) {
-        aliases.set(binding.name, { object: reference.api.object, method: reference.api.method })
+      if (binding.name === 'vi' || binding.name === 'vitest' || binding.name === 'expect') continue
+      if (apis.has(binding.name) || namespaces.has(binding.name)) continue
+      const inner = unwrapWaitCallee(binding.initializer).inner
+      const namespace = namespaceOf(binding.initializer, table())
+      // `const v = vi` — a namespace rename. `const w = vi.waitFor` is an API
+      // rename (a VALUE, not a namespace binding) and is handled by `apiValueOf`.
+      if (namespace !== undefined && namespace !== 'module' && ts.isIdentifier(inner)) {
+        namespaces.set(binding.name, namespace)
+        if (binding.exported) exports.set(binding.name, { kind: 'namespace', value: namespace })
         continue
       }
-      const inner = unwrapWaitCallee(binding.initializer).inner
-      if (ts.isIdentifier(inner)) {
-        const bound = aliases.get(inner.text)
-        if (bound !== undefined) aliases.set(binding.name, bound)
+      const reference = apiValueOf(binding.initializer, table())
+      if (reference !== undefined) {
+        apis.set(binding.name, reference)
+        if (binding.exported) exports.set(binding.name, { kind: 'api', api: reference })
+        continue
       }
+      // Fail-closed taint, in two classes so that `const emit = vi.fn(); emit(x)` is
+      // not mistaken for a wait call.
+      if (mentionsWaitApi(binding.initializer)) taintedApis.add(binding.name)
+      else if (mentionsNamespace(binding.initializer)) taintedNamespaces.add(binding.name)
     }
   }
-  return aliases
+  return { aliases: table(), exports }
+}
+
+/** 一个表达式**就是**等待 API 的取值（`vi.waitFor` / `v['waitFor']` / `.bind`）。 */
+function isWaitApiValue(node: ts.Node): boolean {
+  if (!ts.isExpression(node)) return false
+  return waitReferenceOf(node, emptyAliases()) !== undefined
+}
+
+/**
+ * 一个"取值表达式"绑定到哪个等待 API，含别名链（`const w = vi.waitFor`、
+ * `const p = v.poll`、`const b = a`）。裸标识符要看表（那是别名链，不是取值本身）。
+ * @param expression - the initializer.
+ * @param aliases - the table as it stands during this pass.
+ * @returns the API shape, or undefined.
+ */
+function apiValueOf(expression: ts.Expression, aliases: WaitAliases): WaitApiShape | undefined {
+  const inner = unwrapWaitCallee(expression).inner
+  if (!ts.isIdentifier(inner)) {
+    const direct = waitReferenceOf(inner, aliases)
+    if (direct !== undefined) return { object: direct.api.object, method: direct.api.method }
+    return undefined
+  }
+  return aliases.apis.get(inner.text)
 }
 
 /**
@@ -375,6 +670,189 @@ function hasReasonComment(
 }
 
 /**
+ * 在 `at` 的词法位置向外找最近的 `const/let <name> = <init>`。
+ *
+ * 判据要读懂两种正当写法（R11-B-03 的 G/H 两例）：
+ *
+ * ```ts
+ * const timeout = WAIT_BUDGETS.STATE_PROPAGATION_MS
+ * await vi.waitFor(fn, { timeout })
+ * const budget = { timeout: WAIT_BUDGETS.REAL_IO_MS }
+ * await vi.waitFor(fn, budget)
+ * ```
+ *
+ * 解析规则是**词法近似**：从 `at` 向外逐层看作用域，同层取位置在 `at` 之前的声明；
+ * 某个函数作用域把该名字当参数绑定（遮蔽）时就**解析失败**（返回 undefined）——
+ * 宁可判红也不要把外层同名常量借给内层。解析不出 ⇒ 判据按"timeout 不是集中表引用"
+ * 处理（fail-closed 的方向）。
+ * @param name - the identifier to resolve.
+ * @param at - the position the identifier is used at.
+ * @param file - the source file.
+ * @returns the initializer expression, or undefined.
+ */
+function resolveLocalConstant(name: string, at: ts.Node, file: ts.SourceFile): ts.Expression | undefined {
+  const position = at.getStart(file)
+  /** 参数绑定把外层的同名常量遮住 —— 解析失败，而不是借用外层。 */
+  const bindsParameter = (node: ts.Node): boolean => {
+    const parameters = (node as ts.FunctionLikeDeclaration).parameters
+    if (parameters === undefined) return false
+    for (const parameter of parameters) {
+      if (ts.isIdentifier(parameter.name) && parameter.name.text === name) return true
+      if (ts.isObjectBindingPattern(parameter.name) || ts.isArrayBindingPattern(parameter.name)) {
+        const bound = parameter.name.elements.some((element) =>
+          ts.isBindingElement(element) && ts.isIdentifier(element.name) && element.name.text === name)
+        if (bound) return true
+      }
+    }
+    return false
+  }
+  const declares = (node: ts.Node): ts.Expression | undefined => {
+    let found: ts.Expression | undefined
+    const walk = (child: ts.Node): void => {
+      if (found !== undefined) return
+      if (
+        ts.isVariableDeclaration(child)
+        && ts.isIdentifier(child.name)
+        && child.name.text === name
+        && child.initializer !== undefined
+        && child.getStart(file) < position
+      ) {
+        found = child.initializer
+        return
+      }
+      ts.forEachChild(child, walk)
+    }
+    walk(node)
+    return found
+  }
+  for (let current: ts.Node | undefined = at; current !== undefined; current = current.parent) {
+    if (ts.isFunctionLike(current) && bindsParameter(current)) return undefined
+    if (ts.isSourceFile(current) || ts.isBlock(current) || ts.isModuleBlock(current) || ts.isCaseClause(current)) {
+      const found = declares(current)
+      if (found !== undefined) return found
+    }
+  }
+  return undefined
+}
+
+/**
+ * 读出一个等待调用点的 `timeout` 表达式文本（判定与传播只此一份实现）。
+ *
+ * 形态面（R11-B-03 的三条正当写法都在这里）：
+ *
+ *  - `{ timeout: WAIT_BUDGETS.X }`（点访问）；
+ *  - `{ timeout: WAIT_BUDGETS.X } satisfies Record<string, number>` —— 包装不影响
+ *    判定（`satisfies` / `as` / 括号 / 非空断言一律剥掉）；
+ *  - 简写 `{ timeout }` —— 沿本地常量解析出 `WAIT_BUDGETS.X`；
+ *  - 整个 options 是本地常量（`vi.waitFor(fn, budget)` 且 `budget` 的对象字面量在
+ *    同一作用域可见）。
+ *
+ * 其它形态（数值字面量、别的对象、解析不出的标识符）一律返回能显示出来的文本，
+ * 由判据判红 —— 不是"看不懂就放行"。
+ * @param node - the wait call.
+ * @param file - the source file.
+ * @param aliases - the file's alias table (only for diagnostics).
+ * @returns the timeout expression text, or undefined when no second argument exists.
+ */
+function resolveTimeoutText(node: ts.CallExpression, file: ts.SourceFile): string | undefined {
+  const options = node.arguments[1]
+  if (options === undefined) return undefined
+  const resolved = stripWrappers(options)
+  const literal = ts.isIdentifier(resolved)
+    ? resolveLocalConstant(resolved.text, resolved, file)
+    : resolved
+  if (literal === undefined) return `无法解析的预算对象：${options.getText(file)}`
+  const target = stripWrappers(literal)
+  if (!ts.isObjectLiteralExpression(target)) {
+    // `vi.waitFor(fn, 5_000)` 这种数值形态：登记成"给了预算但不是对象"，一律判红。
+    return `非对象形态：${options.getText(file)}`
+  }
+  for (const property of target.properties) {
+    if (ts.isPropertyAssignment(property) && property.name.getText(file) === 'timeout') {
+      return property.initializer.getText(file)
+    }
+    // `{ timeout }` —— 简写属性是 ShorthandPropertyAssignment，旧实现只认
+    // PropertyAssignment，于是同一份正当写法被判红（R11-B-03 的 G 例）。
+    if (
+      ts.isShorthandPropertyAssignment(property)
+      && property.name.getText(file) === 'timeout'
+    ) {
+      const initializer = resolveLocalConstant(property.name.text, property, file)
+      return initializer === undefined
+        ? `无法解析的简写 timeout：${property.name.text}`
+        : initializer.getText(file)
+    }
+  }
+  return `对象里没有 timeout：${target.getText(file)}`
+}
+
+/**
+ * 一个调用点是否带**理由注释**（含"预算构造链"上的注释，R11-B-03 的 H 例）。
+ *
+ * 接受范围与契约文字逐字一致：注释写在调用点**上一行或上方（中间只允许空行）**，
+ * 或写在调用**所在行的行尾**；两条之外再加一条**同链**：调用点消费的预算由上面
+ * 紧邻的 `const` 声明构造（`// 现象…` / `const budget = { timeout: … }` /
+ * `await vi.waitFor(fn, budget)`）时，注释挂在那条声明上同样算"逐处可读"——
+ * 它描述的就是这次等待的预算。链只沿"调用点真正引用到的名字"往回走，
+ * 中间夹一条无关语句不算（那是"同一个用例里随便哪一行"，不放宽）。
+ * @param node - the wait call.
+ * @param file - the source file.
+ * @param lines - the source lines.
+ * @returns true when a `//` reason comment is attached.
+ */
+function hasReasonCommentForCall(node: ts.CallExpression, file: ts.SourceFile, lines: readonly string[]): boolean {
+  const start = file.getLineAndCharacterOfPosition(node.getStart(file))
+  const end = file.getLineAndCharacterOfPosition(node.getEnd())
+  if (hasReasonComment(lines, start, end)) return true
+  // The names this wait consumes as its budget (`vi.waitFor(fn, budget)` /
+  // `{ timeout }`), transitively through local constants.
+  const wanted = new Set<string>()
+  const addNames = (expression: ts.Expression | undefined, depth: number): void => {
+    if (expression === undefined || depth > 4) return
+    const inner = stripWrappers(expression)
+    if (ts.isIdentifier(inner)) {
+      if (wanted.has(inner.text)) return
+      wanted.add(inner.text)
+      addNames(resolveLocalConstant(inner.text, inner, file), depth + 1)
+      return
+    }
+    if (ts.isObjectLiteralExpression(inner)) {
+      for (const property of inner.properties) {
+        if (ts.isPropertyAssignment(property)) addNames(property.initializer, depth + 1)
+        else if (ts.isShorthandPropertyAssignment(property)) addNames(property.name, depth + 1)
+      }
+    }
+  }
+  addNames(node.arguments[1], 0)
+  if (wanted.size === 0) return false
+  /** 调用点所在语句列表里，紧邻在前的语句（含链上声明）逐条回溯。 */
+  let statement: ts.Node = node
+  while (statement.parent !== undefined && !ts.isStatement(statement)) statement = statement.parent
+  const list = statement.parent
+  if (list === undefined || !ts.isSourceFile(list) && !ts.isBlock(list) && !ts.isModuleBlock(list) && !ts.isCaseClause(list)) return false
+  const statements: readonly ts.Node[] = list.statements
+  const index = statements.indexOf(statement)
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const previous = statements[cursor]
+    if (previous === undefined) return false
+    const declared: string[] = []
+    if (ts.isVariableStatement(previous)) {
+      for (const declaration of previous.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) declared.push(declaration.name.text)
+      }
+    }
+    if (!declared.some(name => wanted.has(name))) return false
+    const commentStart = file.getLineAndCharacterOfPosition(previous.getStart(file))
+    const commentEnd = file.getLineAndCharacterOfPosition(previous.getEnd())
+    if (hasReasonComment(lines, commentStart, commentEnd)) return true
+    for (const declaration of (previous as ts.VariableStatement).declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name)) addNames(declaration.initializer, 0)
+    }
+  }
+  return false
+}
+
+/**
  * 在语法树上找等待型调用点，并读出它的 `timeout` 实参。
  *
  * 注释不是语法节点 ⇒ 注释掉的调用**不存在**；空白与折行不改变 AST ⇒
@@ -383,38 +861,27 @@ function hasReasonComment(
  * @param source - 源码文本。
  * @returns 每个调用点的行号、形态、拼写、`timeout` 表达式、上一行与钉死的墙钟值。
  */
-function findWaitForSites(fileName: string, source: string): WaitForSite[] {
+function findWaitForSites(fileName: string, source: string, projectAliases?: WaitAliases): WaitForSite[] {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindOf(fileName))
   const lines = source.split('\n')
-  const aliases = collectAliases(file)
+  // 项目级别名表（跨文件导出、命名空间改名）由调用方给出；自检用例走单文件路径，
+  // 就地建一张表 —— 两条路的**判定实现**是同一个 {@link resolveWaitCall}。
+  const aliases = projectAliases ?? collectAliases(file).aliases
   const found: WaitForSite[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const resolved = resolveWaitCall(node, aliases, file)
       if (resolved !== undefined) {
         const start = file.getLineAndCharacterOfPosition(node.getStart(file))
-        const end = file.getLineAndCharacterOfPosition(node.getEnd())
         const line = start.line + 1
-        const options = node.arguments[1]
-        let timeout: string | undefined
-        if (options !== undefined && ts.isObjectLiteralExpression(options)) {
-          for (const property of options.properties) {
-            if (ts.isPropertyAssignment(property) && property.name.getText(file) === 'timeout') {
-              timeout = property.initializer.getText(file)
-            }
-          }
-        } else if (options !== undefined) {
-          // `vi.waitFor(fn, 5_000)` 这种数值形态：登记成"给了预算但不是对象"，一律判红。
-          timeout = `非对象形态：${options.getText(file)}`
-        }
         const callback = node.arguments[0]
         found.push({
           line,
           api: resolved.api.label,
           spelling: resolved.spelling,
-          timeout,
+          timeout: resolveTimeoutText(node, file),
           previousLine: lines[line - 2] ?? '',
-          reasonComment: hasReasonComment(lines, start, end),
+          reasonComment: hasReasonCommentForCall(node, file, lines),
           clockPins: callback === undefined ? [] : collectClockPins(callback, file, lines),
         })
       }
@@ -425,12 +892,17 @@ function findWaitForSites(fileName: string, source: string): WaitForSite[] {
   return found
 }
 
-/** 剥掉括号 / `as` / 非空断言，只看真正的取值表达式。 */
+/** 剥掉括号 / `as` / `satisfies` / `!` / `<T>` 断言，只看真正的取值表达式。 */
 function stripWrappers(node: ts.Expression): ts.Expression {
   let current = node
   for (;;) {
     if (ts.isParenthesizedExpression(current)) current = current.expression
-    else if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current) || ts.isNonNullExpression(current)) current = current.expression
+    else if (
+      ts.isAsExpression(current)
+      || ts.isSatisfiesExpression(current)
+      || ts.isTypeAssertionExpression(current)
+      || ts.isNonNullExpression(current)
+    ) current = current.expression
     else return current
   }
 }
@@ -635,7 +1107,7 @@ function isExpectationCall(node: ts.Node): boolean {
  * @param source - 源码文本。
  * @returns 等长（按 UTF-16 码元）的掩码文本。
  */
-function maskLiteralsAndComments(fileName: string, source: string): string {
+function maskLiteralsAndComments(fileName: string, source: string, aliases: WaitAliases = emptyAliases()): string {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindOf(fileName))
   const chars = source.split('')
   const blank = (start: number, end: number): void => {
@@ -648,10 +1120,17 @@ function maskLiteralsAndComments(fileName: string, source: string): string {
       if (chars[start + index] !== '\n') chars[start + index] = text[index] ?? ' '
     }
   }
-  /** callee 归一化后的文本（`vi.waitFor`），不是等待调用时为 undefined。 */
+  /**
+   * callee 归一化后的文本（`vi.waitFor`），不是**直接**等待调用时为 undefined。
+   *
+   * 通过别名表解析出来的调用（`w(…)` / `v.waitFor(…)` / `vitest.waitFor(…)`）刻意
+   * **不**归一化：它们的代码位置本来就没有 `vi.waitFor(`，AST 面把这一类记成 `alias`
+   * 并在覆盖率对账里排除 —— 归一化会让 needle 平白多出一处，两个见证随即失配。
+   */
   const normalizedCallee = (callee: ts.Expression): string | undefined => {
-    const reference = waitReferenceOf(callee)
-    return reference === undefined ? undefined : `${reference.api.object}.${reference.api.method}`
+    const reference = waitReferenceOf(callee, aliases)
+    if (reference === undefined || resolvesThroughAliasTable(callee, aliases)) return undefined
+    return `${reference.api.object}.${reference.api.method}`
   }
   const visit = (node: ts.Node): void => {
     // A call whose callee is a wait API in ANY spelling: write the dot spelling over
@@ -746,8 +1225,12 @@ function countCodeOccurrences(masked: string, needle: string): number {
  * 复审 N1 通道 ②：只收 `*.spec.ts` 时，`tests/` 下非 spec 的 helper 里的等待型断言
  * 完全在判据面之外。契约说的是"`tests/**` 里的每一个等待型断言"，扫描面就必须与
  * 契约同宽 —— 今天只有 `wait-budgets.ts` 一个非 spec 文件，明天新增 helper 自动进面。
+ *
+ * 第十一轮 R11-B-03 又把面补宽一次：扩展名原先只有 `.ts` / `.tsx`，一个
+ * `tests/x.spec.mts` 里的裸 `vi.waitFor` 整片不在面内（实测绿）。现在与
+ * `SCANNED_EXTENSIONS` 同源（`.ts` / `.tsx` / `.mts` / `.cts`）。
  * @param root - the tests root directory.
- * @returns relative POSIX paths of every `.ts` / `.tsx` file below it.
+ * @returns relative POSIX paths of every scanned TypeScript file below it.
  */
 function collectTestSources(root: string): string[] {
   const found: string[] = []
@@ -756,7 +1239,7 @@ function collectTestSources(root: string): string[] {
       if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
       const full = join(directory, entry.name)
       if (entry.isDirectory()) walk(full)
-      else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))) {
+      else if (entry.isFile() && SCANNED_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
         found.push(relative(root, full).split('\\').join('/'))
       }
     }
@@ -776,6 +1259,8 @@ interface TestDeclaration {
   /** 柯里化声明（`it.each(…)('…')` / `it.skipIf(…)('…')`）——复审 N5 的形态。 */
   readonly curried: boolean
   readonly waitBudgetKeys: string[]
+  /** 同一批等待的**毫秒数**（跨包面按数值口径比对用例预算）。 */
+  readonly waitBudgetMs: number[]
 }
 
 /**
@@ -812,7 +1297,12 @@ function testDeclarationCall(node: ts.CallExpression): { call: ts.CallExpression
 }
 
 /** 一个文件里所有用例声明（含柯里化形态）。 */
-function findTestDeclarations(fileName: string, source: string, project?: TestProject): TestDeclaration[] {
+function findTestDeclarations(
+  fileName: string,
+  source: string,
+  project?: TestProject,
+  rule: BudgetRule = 'central-table',
+): TestDeclaration[] {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindOf(fileName))
   // 调用图索引：给了整个扫描面就用它（跨文件的前置能力），否则只索引本文件 ——
   // 自检用例（`self.ts`）走的就是单文件那条路。
@@ -836,9 +1326,12 @@ function findTestDeclarations(fileName: string, source: string, project?: TestPr
           options: options?.getText(file),
           numericTimeout: numeric?.getText(file),
           curried: declaration.curried,
-          // 预算键**沿调用传播**：用例体里直接的等待，加上它调用的本地/导入函数体里的
+          // 预算**沿调用传播**：用例体里直接的等待，加上它调用的本地/导入函数体里的
           // 等待（复审 N3 通道 ③）。
-          waitBudgetKeys: waitKeysReachableFrom(callback, owner, files),
+          ...(() => {
+            const reachable = waitKeysReachableFrom(callback, owner, files, rule)
+            return { waitBudgetKeys: reachable.keys, waitBudgetMs: reachable.ms }
+          })(),
         })
       }
     }
@@ -848,30 +1341,70 @@ function findTestDeclarations(fileName: string, source: string, project?: TestPr
   return found
 }
 
-/** 一棵子树里所有等待型断言引用到的 `WAIT_BUDGETS.<键>`。 */
-function collectWaitBudgetKeys(root: ts.Node, file: ts.SourceFile): string[] {
+/**
+ * 一棵子树里所有等待型断言用到的预算。
+ *
+ * 两条口径共用这一份实现（第十一轮 R11-B-02 的跨包面就靠它）：
+ *  - `central-table`（桌面包）：`WAIT_BUDGETS.<键>` —— 键要真实存在；
+ *  - `explicit-number`（其余宿主包）：数值字面量 —— 判据用 {@link CROSS_PACKAGE_MIN_WAIT_MS}
+ *    这个**现象下限**兜住"随便写个小数字"，改小只会让判据变红。
+ *
+ * `timeout` 的读取走 {@link resolveTimeoutText}：`satisfies` 包装、简写属性、整个
+ * options 是本地常量三种正当写法与逐处判据**同一份解析**，不会一处认一处不认。
+ * @param root - the subtree being walked.
+ * @param file - the source file.
+ * @param aliases - the file's alias table.
+ * @param rule - the budget rule in force.
+ * @returns referenced keys (central-table) and every budget in milliseconds.
+ */
+function collectWaitBudgets(
+  root: ts.Node,
+  file: ts.SourceFile,
+  aliases: WaitAliases,
+  rule: BudgetRule,
+): { keys: string[], ms: number[] } {
   const keys: string[] = []
-  const aliases = collectAliases(file)
+  const ms: number[] = []
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      const resolved = resolveWaitCall(node, aliases, file)
-      if (resolved !== undefined) {
-        const options = node.arguments[1]
-        if (options !== undefined && ts.isObjectLiteralExpression(options)) {
-          for (const property of options.properties) {
-            if (ts.isPropertyAssignment(property) && property.name.getText(file) === 'timeout') {
-              const match = /^WAIT_BUDGETS\.([A-Z0-9_]+)$/u.exec(property.initializer.getText(file).trim())
-              if (match?.[1] !== undefined) keys.push(match[1])
-            }
+    if (ts.isCallExpression(node) && resolveWaitCall(node, aliases, file) !== undefined) {
+      const text = resolveTimeoutText(node, file)
+      if (text !== undefined) {
+        const referenced = /^WAIT_BUDGETS\.([A-Z0-9_]+)$/u.exec(text.trim())
+        if (rule === 'central-table') {
+          const budgets: Record<string, number> = { ...WAIT_BUDGETS }
+          if (referenced?.[1] !== undefined) {
+            keys.push(referenced[1])
+            ms.push(budgets[referenced[1]] ?? 0)
           }
+        } else {
+          const numeric = resolveNumericBudget(text)
+          if (numeric !== undefined) ms.push(numeric)
         }
       }
     }
     ts.forEachChild(node, visit)
   }
   visit(root)
-  return keys
+  return { keys, ms }
 }
+
+/** 非桌面包的等待预算现象下限（与桌面 `STATE_PROPAGATION_MS` 同档）。 */
+const CROSS_PACKAGE_MIN_WAIT_MS = 10_000
+
+/** `timeout` 文本 → 毫秒数（数值字面量 / `WAIT_BUDGETS.<键>`）。 */
+function resolveNumericBudget(text: string): number | undefined {
+  const trimmed = text.trim()
+  if (/^\d[\d_]*$/u.test(trimmed)) return Number(trimmed.replaceAll('_', ''))
+  const referenced = /^WAIT_BUDGETS\.([A-Z0-9_]+)$/u.exec(trimmed)
+  if (referenced?.[1] !== undefined) {
+    const budgets: Record<string, number> = { ...WAIT_BUDGETS }
+    return budgets[referenced[1]]
+  }
+  return undefined
+}
+
+/** 预算口径：桌面包必须引用集中表；其余宿主包接受显式数值（≥ 现象下限）。 */
+type BudgetRule = 'central-table' | 'explicit-number'
 
 /** 一个本地函数体（用例预算要沿"用例 → 它调用的本地函数"传播）。 */
 interface LocalFunction {
@@ -889,6 +1422,8 @@ interface FileCalls {
   readonly imports: Map<string, { file: string, name: string }>
   /** 命名空间导入：本地名 → 目标文件（`ns.fn()` 形态）。 */
   readonly namespaces: Map<string, string>
+  /** 本文件的等待别名表（含跨文件导出解析后的结果）。 */
+  readonly aliases: WaitAliases
 }
 
 /** `tests/**` 的调用图索引：文件 → 本文件索引（复审 N3 通道 ③ 的判据基础）。 */
@@ -908,7 +1443,7 @@ type TestProject = Map<string, FileCalls>
 function resolveScannedFile(from: string, specifier: string, scanned: ReadonlySet<string>): string | undefined {
   if (!specifier.startsWith('.')) return undefined
   const base = join(dirname(from), specifier).split('\\').join('/')
-  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`, `${base}/index.tsx`]) {
+  for (const candidate of [base, ...scannedCandidates(base)]) {
     if (scanned.has(candidate)) return candidate
   }
   return undefined
@@ -925,7 +1460,12 @@ function resolveScannedFile(from: string, specifier: string, scanned: ReadonlySe
  * @param scanned - every relative name in the scanned set.
  * @returns the file index.
  */
-function indexFileCalls(name: string, source: string, scanned: ReadonlySet<string>): FileCalls {
+function indexFileCalls(
+  name: string,
+  source: string,
+  scanned: ReadonlySet<string>,
+  aliases: WaitAliases = collectAliases(ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, scriptKindOf(name))).aliases,
+): FileCalls {
   const sourceFile = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, scriptKindOf(name))
   const functions = new Map<string, LocalFunction>()
   const imports = new Map<string, { file: string, name: string }>()
@@ -957,7 +1497,35 @@ function indexFileCalls(name: string, source: string, scanned: ReadonlySet<strin
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
-  return { name, sourceFile, functions, imports, namespaces }
+  return { name, sourceFile, functions, imports, namespaces, aliases }
+}
+
+/**
+ * 建整个扫描面的调用图索引 + **跨文件别名表**（R11-B-03 的 E 例）。
+ *
+ * 两趟：第一趟按文件解析出"本文件能给出的导出"（`export const w = vi.waitFor`），
+ * 第二趟带着导出解析器重跑一次，让 `import { w } from './helper.ts'` 也解析成等待 API。
+ * 旧实现的别名表**按文件**建，跨文件别名因此整片在判据面外 —— 换个写法即绕过。
+ * @param files - `{ name, source }` pairs (relative name, source text).
+ * @returns the project index (call graph + alias table per file).
+ */
+function buildTestProject(files: ReadonlyArray<{ name: string, source: string }>): TestProject {
+  const scannedNames = new Set(files.map(entry => entry.name))
+  const parsed = files.map((entry) => {
+    const sourceFile = ts.createSourceFile(entry.name, entry.source, ts.ScriptTarget.Latest, true, scriptKindOf(entry.name))
+    return { entry, sourceFile, local: collectAliases(sourceFile) }
+  })
+  const exportsByFile = new Map(parsed.map(item => [item.entry.name, item.local.exports]))
+  const project: TestProject = new Map()
+  for (const item of parsed) {
+    const resolve = (specifier: string, name: string): ExportedAlias | undefined => {
+      const target = resolveScannedFile(item.entry.name, specifier, scannedNames)
+      return target === undefined ? undefined : exportsByFile.get(target)?.get(name)
+    }
+    const full = collectAliases(item.sourceFile, resolve)
+    project.set(item.entry.name, indexFileCalls(item.entry.name, item.entry.source, scannedNames, full.aliases))
+  }
+  return project
 }
 
 /**
@@ -979,12 +1547,21 @@ function indexFileCalls(name: string, source: string, scanned: ReadonlySet<strin
  * @param project - the whole scanned set (for cross-file resolution).
  * @returns referenced `WAIT_BUDGETS` keys, in first-seen order, deduplicated.
  */
-function waitKeysReachableFrom(root: ts.Node, owner: FileCalls, project: TestProject): string[] {
+function waitKeysReachableFrom(
+  root: ts.Node,
+  owner: FileCalls,
+  project: TestProject,
+  rule: BudgetRule = 'central-table',
+): { keys: string[], ms: number[] } {
   const keys: string[] = []
+  const ms: number[] = []
   const visited = new Set<string>()
   const add = (key: string): void => { if (!keys.includes(key)) keys.push(key) }
+  const addMs = (value: number): void => { if (!ms.includes(value)) ms.push(value) }
   const walk = (node: ts.Node, file: FileCalls): void => {
-    for (const key of collectWaitBudgetKeys(node, file.sourceFile)) add(key)
+    const collected = collectWaitBudgets(node, file.sourceFile, file.aliases, rule)
+    for (const key of collected.keys) add(key)
+    for (const value of collected.ms) addMs(value)
     const calls: Array<{ file: FileCalls, name: string }> = []
     const collectCalls = (child: ts.Node): void => {
       if (ts.isCallExpression(child)) {
@@ -1015,15 +1592,23 @@ function waitKeysReachableFrom(root: ts.Node, owner: FileCalls, project: TestPro
     }
   }
   walk(root, owner)
-  return keys
+  return { keys, ms }
 }
 
 /**
- * 包缺省的 `testTimeout`（`vitest.config.ts`）。缺失时按 vitest 的 5_000 计 ——
- * "没写"与"写了 5s"在可达性上是同一件事。
+ * 一个包缺省的 `testTimeout`（它的 `vitest.config.ts`）。缺失时按 vitest 的 5_000 计
+ * —— "没写"与"写了 5s"在可达性上是同一件事（R11-B-02 的跨包面就靠这条：没有
+ * `vitest.config.ts` 的包会被按 5s 判）。
+ * @param configPath - absolute path of the package's `vitest.config.ts`.
+ * @returns the declared `testTimeout`, or vitest's 5_000 default.
  */
-function packageTestTimeout(): number {
-  const source = readFileSync(join(testsRoot, '..', 'vitest.config.ts'), 'utf8')
+function testTimeoutOf(configPath: string): number {
+  let source: string
+  try {
+    source = readFileSync(configPath, 'utf8')
+  } catch {
+    return 5_000
+  }
   const file = ts.createSourceFile('vitest.config.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   let value: number | undefined
   const visit = (node: ts.Node): void => {
@@ -1038,6 +1623,11 @@ function packageTestTimeout(): number {
   }
   visit(file)
   return value ?? 5_000
+}
+
+/** 桌面包自己的缺省 `testTimeout`。 */
+function packageTestTimeout(): number {
+  return testTimeoutOf(join(testsRoot, '..', 'vitest.config.ts'))
 }
 
 /** 解析一个 `timeout:` 的取值：数值字面量或 `TEST_BUDGETS.<键>`。 */
@@ -1062,6 +1652,7 @@ function resolveTestBudget(text: string | undefined): number | undefined {
 function contractFindings(
   files: ReadonlyArray<{ name: string, source: string }>,
   fallbackTimeout: number,
+  rule: BudgetRule = 'central-table',
 ): {
   budget: ContractFinding[]
   clock: ContractFinding[]
@@ -1072,27 +1663,39 @@ function contractFindings(
   const clock: ContractFinding[] = []
   const coverage: ContractFinding[] = []
   const caseBudget: ContractFinding[] = []
-  // 调用图索引按**整个传入集合**建一次：跨文件的 helper 也要能被预算判据穿透
-  // （复审 N3 通道 ③）。
-  const scannedNames = new Set(files.map(entry => entry.name))
-  const project: TestProject = new Map(
-    files.map(entry => [entry.name, indexFileCalls(entry.name, entry.source, scannedNames)]),
-  )
+  // 调用图索引与别名表按**整个传入集合**建一次：跨文件的 helper 与跨文件的别名
+  // 都要能被判据穿透（复审 N3 通道 ③ / R11-B-03 的 E 例）。
+  const project = buildTestProject(files)
+  const aliasesOf = (name: string): WaitAliases => project.get(name)?.aliases ?? emptyAliases()
   for (const entry of files) {
-    const found = findWaitForSites(entry.name, entry.source)
+    const found = findWaitForSites(entry.name, entry.source, aliasesOf(entry.name))
     for (const site of found) {
       if (site.timeout === undefined) {
         budget.push({ file: entry.name, line: site.line, message: `${site.api} 没有显式 timeout（吃 vitest 缺省的 1s）` })
         continue
       }
-      const referenced = /^WAIT_BUDGETS\.([A-Z0-9_]+)$/u.exec(site.timeout.trim())
-      if (referenced === null) {
-        budget.push({ file: entry.name, line: site.line, message: `${site.api} 的 timeout 不是集中表的引用：${site.timeout}` })
-        continue
-      }
-      const key = referenced[1] as string
-      if (!Object.hasOwn(WAIT_BUDGETS, key)) {
-        budget.push({ file: entry.name, line: site.line, message: `引用了不存在的预算键 WAIT_BUDGETS.${key}` })
+      if (rule === 'central-table') {
+        const referenced = /^WAIT_BUDGETS\.([A-Z0-9_]+)$/u.exec(site.timeout.trim())
+        if (referenced === null) {
+          budget.push({ file: entry.name, line: site.line, message: `${site.api} 的 timeout 不是集中表的引用：${site.timeout}` })
+        } else {
+          const key = referenced[1] as string
+          if (!Object.hasOwn(WAIT_BUDGETS, key)) {
+            budget.push({ file: entry.name, line: site.line, message: `引用了不存在的预算键 WAIT_BUDGETS.${key}` })
+          }
+        }
+      } else {
+        // 非桌面包：显式数值预算也认，但必须 ≥ 现象下限 —— 把预算改小只会让判据变红。
+        const numeric = resolveNumericBudget(site.timeout)
+        if (numeric === undefined) {
+          budget.push({ file: entry.name, line: site.line, message: `${site.api} 的 timeout 不是显式预算：${site.timeout}` })
+        } else if (numeric < CROSS_PACKAGE_MIN_WAIT_MS) {
+          budget.push({
+            file: entry.name,
+            line: site.line,
+            message: `${site.api} 的预算 ${String(numeric)}ms 低于现象下限 ${String(CROSS_PACKAGE_MIN_WAIT_MS)}ms`,
+          })
+        }
       }
       if (!site.reasonComment) {
         budget.push({
@@ -1109,23 +1712,20 @@ function contractFindings(
     }
     // 两个见证必须一致：需要判的拼写（点/元素访问）在"代码位置计数"与 AST 上
     // 必须给出同一个数。别名拼写只进 AST，因此从不高于 needle 数。
-    const masked = maskLiteralsAndComments(entry.name, entry.source)
+    const masked = maskLiteralsAndComments(entry.name, entry.source, aliasesOf(entry.name))
     const inCode = WAIT_API_NEEDLES
       .reduce((sum, needle) => sum + countCodeOccurrences(masked, needle), 0)
     const direct = found.filter(site => site.spelling !== 'alias').length
     if (inCode !== direct) {
       coverage.push({ file: entry.name, line: 1, message: `代码位置 ${String(inCode)} 处，AST 找到 ${String(direct)} 处` })
     }
-    for (const declaration of findTestDeclarations(entry.name, entry.source, project)) {
-      if (declaration.waitBudgetKeys.length === 0) continue
+    for (const declaration of findTestDeclarations(entry.name, entry.source, project, rule)) {
+      if (declaration.waitBudgetMs.length === 0) continue
       const declared = declaration.options === undefined
         ? declaration.numericTimeout
         : /timeout\s*:\s*([^,}]+)/u.exec(declaration.options)?.[1]
       const budgetMs = declared === undefined ? fallbackTimeout : resolveTestBudget(declared)
-      const needed = Math.max(...declaration.waitBudgetKeys.map((key) => {
-        const budgets: Record<string, number> = { ...WAIT_BUDGETS }
-        return budgets[key] ?? 0
-      }))
+      const needed = Math.max(...declaration.waitBudgetMs)
       if (budgetMs === undefined || budgetMs < needed) {
         caseBudget.push({
           file: entry.name,
@@ -1139,16 +1739,12 @@ function contractFindings(
 }
 
 const scanned = collectTestSources(testsRoot).map(name => ({ name, source: readFileSync(join(testsRoot, name), 'utf8') }))
+/** 扫描面的调用图索引 + 别名表（跨文件 helper 与跨文件别名都用它）。 */
+const scannedProject: TestProject = buildTestProject(scanned)
 const findings = contractFindings(scanned, packageTestTimeout())
-/** 扫描面的调用图索引（跨文件 helper 的预算传播用它）。 */
-const scannedProject: TestProject = new Map(
-  scanned.map(entry => [
-    entry.name,
-    indexFileCalls(entry.name, entry.source, new Set(scanned.map(item => item.name))),
-  ]),
-)
 /** 等待型调用点，按 (文件, 行) 定位（用于"每一个调用点都进了判据"的自检）。 */
-const allSites = scanned.flatMap(entry => findWaitForSites(entry.name, entry.source).map(site => ({ name: entry.name, ...site })))
+const allSites = scanned.flatMap(entry =>
+  findWaitForSites(entry.name, entry.source, scannedProject.get(entry.name)?.aliases).map(site => ({ name: entry.name, ...site })))
 /** 用例声明总数：既有的与 `it.each(…)` 柯里化的都在内。 */
 const declarationLines = scanned.flatMap(entry => findTestDeclarations(entry.name, entry.source, scannedProject).map(declaration => `${entry.name}:${String(declaration.line)}`))
 
@@ -1293,7 +1889,8 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
   it('负样本 ②：tests/ 下非 spec 的 .ts helper 也在扫描面内（复审的 helper 形态）', () => {
     // 扫描面自证：`wait-budgets.ts` 是 tests/ 下的非 spec `.ts`，必须在面内。
     expect(scanned.some(entry => entry.name === 'wait-budgets.ts'), '扫描面漏了 tests/ 下的非 spec .ts').toBe(true)
-    expect(scanned.every(entry => entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))).toBe(true)
+    // 扫描面与 `SCANNED_EXTENSIONS` 同源（R11-B-03 的 D 例：`.mts` 曾整片在面外）。
+    expect(scanned.every(entry => SCANNED_EXTENSIONS.some(extension => entry.name.endsWith(extension)))).toBe(true)
     expect(scanned.some(entry => entry.name.endsWith('.spec.ts'))).toBe(true)
     // 契约在非 spec 文件上的行为：没给预算 ⇒ 红（判据不再按文件名放行）。
     const helper = 'export async function settle(): Promise<void> {\n  await vi.waitFor(() => { expect(done).toBe(true) })\n}\n'
@@ -1577,6 +2174,368 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
 })
 
 /** 判据的"扫描面缩水"自检：目录树被搬空时必须看得见（不是静默通过）。 */
+
+/* ------------------------------------------------------------------------- *
+ * R11-B-02：契约的**跨包面**
+ *
+ * 审计发现（第十一轮）：等待预算契约的扫描面只有桌面包的 `tests/**`，而
+ * `browser` / `enterprise` / `cron` / `connectors` 还有 **40 处**等待型断言吃
+ * `vi.waitFor` 的 1s 缺省（`browser` 连 `testTimeout` 都没有、`enterprise` 连
+ * `vitest.config.ts` 都没有）。同一个 commit 一次红一次绿的那种假红，在这四个包
+ * 里一模一样地成立 —— 而契约的价值恰恰是"不看运气"。
+ *
+ * 处置取向（与审计建议一致）：**先补预算，再把面扩到位**，不为了让判据变绿而放宽。
+ *  - 四个包逐处显式预算（本文件的判据强制：显式数值、带理由注释、且 ≥ 现象下限）；
+ *  - `browser` / `enterprise` 补 `vitest.config.ts`（`testTimeout: 30_000`），
+ *    `cron` / `connectors` 早有 30s；
+ *  - 判据与桌面包**共用同一份实现**（{@link contractFindings}），只有预算口径不同：
+ *    桌面包必须引用集中表 `WAIT_BUDGETS`，其余包接受显式数值（≥ 现象下限）——
+ *    它们的集中表尚未建立，而"数值 + 下限"同样让"把预算改小"变成红灯。
+ * ------------------------------------------------------------------------- */
+
+/** 一个被跨包面覆盖的宿主包。 */
+interface HostPackageScan {
+  readonly name: string
+  /** `tests/**` 根目录（绝对路径）。 */
+  readonly root: string
+  /** 该包的 `vitest.config.ts`（缺失按 5s 判 —— 那正是 R11-B-02 的一半）。 */
+  readonly configPath: string
+}
+
+const hostRoot = join(testsRoot, '..', '..')
+
+/** 跨包面：四个宿主包，路径从桌面包推出（它们永远同仓并存）。 */
+const HOST_PACKAGE_SCANS: readonly HostPackageScan[] = [
+  { name: 'browser', root: join(hostRoot, 'browser', 'tests'), configPath: join(hostRoot, 'browser', 'vitest.config.ts') },
+  { name: 'connectors', root: join(hostRoot, 'connectors', 'tests'), configPath: join(hostRoot, 'connectors', 'vitest.config.ts') },
+  { name: 'cron', root: join(hostRoot, 'cron', 'tests'), configPath: join(hostRoot, 'cron', 'vitest.config.ts') },
+  { name: 'enterprise', root: join(hostRoot, 'enterprise', 'tests'), configPath: join(hostRoot, 'enterprise', 'vitest.config.ts') },
+]
+
+/** 跨包面的调用点总数下限（判据不许在"什么都没扫到"时变绿）。 */
+const MIN_CROSS_PACKAGE_CALL_SITES = 30
+
+interface CrossPackageResult {
+  readonly scan: HostPackageScan
+  readonly files: ReadonlyArray<{ name: string, source: string }>
+  readonly fallback: number
+  readonly findings: ReturnType<typeof contractFindings>
+  readonly sites: ReadonlyArray<{ name: string, line: number, api: string, timeout: string | undefined }>
+}
+
+const crossPackages: readonly CrossPackageResult[] = HOST_PACKAGE_SCANS.map((scan) => {
+  const files = collectTestSources(scan.root).map(name => ({ name, source: readFileSync(join(scan.root, name), 'utf8') }))
+  const fallback = testTimeoutOf(scan.configPath)
+  const project = buildTestProject(files)
+  return {
+    scan,
+    files,
+    fallback,
+    findings: contractFindings(files, fallback, 'explicit-number'),
+    sites: files.flatMap(entry => findWaitForSites(entry.name, entry.source, project.get(entry.name)?.aliases)
+      .map(site => ({ name: `${scan.name}/${entry.name}`, line: site.line, api: site.api, timeout: site.timeout }))),
+  }
+})
+
+describe('wait budget contract · 跨包面（R11-B-02）', () => {
+  it('四个宿主包都在面内，且每个包都真的扫到了调用点（判据不许空转）', () => {
+    expect(crossPackages.map(entry => entry.scan.name)).toEqual(['browser', 'connectors', 'cron', 'enterprise'])
+    for (const entry of crossPackages) {
+      expect(entry.files.length, `${entry.scan.name}: 扫描面是空的（目录搬走或扩展名漏了）`).toBeGreaterThan(3)
+      expect(
+        entry.sites.length,
+        `${entry.scan.name}: 一个等待型调用点都没扫到 —— 该包从判据面里掉出去了`,
+      ).toBeGreaterThanOrEqual(2)
+      expect(
+        entry.findings.coverage,
+        `${entry.scan.name}: AST 与"代码位置计数"不一致（判据可能已经失效）：\n${render(entry.findings.coverage)}`,
+      ).toEqual([])
+    }
+    const total = crossPackages.reduce((sum, entry) => sum + entry.sites.length, 0)
+    expect(total, `跨包面只扫到 ${String(total)} 个调用点（下限 ${String(MIN_CROSS_PACKAGE_CALL_SITES)}）`)
+      .toBeGreaterThanOrEqual(MIN_CROSS_PACKAGE_CALL_SITES)
+  })
+
+  it('跨包面的每个等待都显式给了预算、都不低于现象下限、都带理由注释', () => {
+    for (const entry of crossPackages) {
+      expect(
+        entry.findings.budget,
+        `${entry.scan.name}: 等待预算契约被破坏：\n${render(entry.findings.budget)}`,
+      ).toEqual([])
+      expect(
+        entry.findings.clock,
+        `${entry.scan.name}: 等待条件钉死了墙钟现算的值：\n${render(entry.findings.clock)}`,
+      ).toEqual([])
+    }
+  })
+
+  it('每个包的缺省 testTimeout ≥ 该包最大的等待预算（否则预算用不满）', () => {
+    for (const entry of crossPackages) {
+      const largest = Math.max(
+        CROSS_PACKAGE_MIN_WAIT_MS,
+        ...entry.sites.map(site => resolveNumericBudget(site.timeout ?? '') ?? 0),
+      )
+      expect(
+        entry.fallback,
+        `${entry.scan.name}: 包缺省 testTimeout(${String(entry.fallback)}ms) 小于该包最大的等待预算(${String(largest)}ms)`,
+      ).toBeGreaterThanOrEqual(largest)
+    }
+  })
+
+  it('判据在跨包口径上真的会咬：没有预算 / 预算低于下限 / 没有理由注释，三态全红', () => {
+    const bare = 'it("probe", async () => {\n  await vi.waitFor(() => { expect(x).toBe(1) })\n})\n'
+    const bareReport = contractFindings([{ name: 'tests/probe.spec.ts', source: bare }], 30_000, 'explicit-number')
+    expect(bareReport.budget.map(finding => finding.message).join('|'), '没有预算必须红').toContain('没有显式 timeout')
+    const small = [
+      'it("probe", async () => {',
+      '  // 现象：状态传播档。',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, { timeout: 1_000 })',
+      '})',
+      '',
+    ].join('\n')
+    const smallReport = contractFindings([{ name: 'tests/probe.spec.ts', source: small }], 30_000, 'explicit-number')
+    expect(smallReport.budget.map(finding => finding.message).join('|'), '低于现象下限必须红').toContain('低于现象下限')
+    const noReason = [
+      'it("probe", async () => {',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, { timeout: 10_000 })',
+      '})',
+      '',
+    ].join('\n')
+    const noReasonReport = contractFindings([{ name: 'tests/probe.spec.ts', source: noReason }], 30_000, 'explicit-number')
+    expect(noReasonReport.budget.map(finding => finding.message).join('|'), '没有理由注释必须红').toContain('理由注释')
+    // 反向：正当写法（显式预算 + 理由注释）必须绿 —— 判据不是"见到等待就红"。
+    const ok = [
+      'it("probe", async () => {',
+      '  // 现象：进程内状态传播。',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, { timeout: 10_000 })',
+      '})',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: ok }], 30_000, 'explicit-number')).toEqual({
+      budget: [], clock: [], coverage: [], caseBudget: [],
+    })
+  })
+})
+
+
+/* ------------------------------------------------------------------------- *
+ * R11-B-03：形态面与误红面
+ *
+ * 审计实测（第十一轮，HEAD `3264137997`）：这条判据是"拼写枚举 + 双见证对账"，
+ * **4 种绕法绿 / 3 种正当写法红**：
+ *
+ * | 例 | 写法 | 修复前 |
+ * |---|---|---|
+ * | B | `const v = vi; v.waitFor(…)` | 绿（只认 `vi` / `expect` 两个标识符文本） |
+ * | C | `import { vitest } from 'vitest'; vitest.waitFor(…)` | 绿（命名空间拼写） |
+ * | D | `tests/x.spec.mts` 里的裸 `vi.waitFor` | 绿（扫描面只有 `.ts` / `.tsx`） |
+ * | E | `tests/helper.ts` 的 `export const w = vi.waitFor` + 别的文件 `w(…)` | 绿（别名表按文件建） |
+ * | F | `{ timeout: WAIT_BUDGETS.X } satisfies Record<string, number>` | 红（options 不是对象字面量） |
+ * | G | `const timeout = WAIT_BUDGETS.X; vi.waitFor(fn, { timeout })` | 红（简写属性不是 PropertyAssignment） |
+ * | H | 理由注释与调用之间隔一行预算构造（`const budget = …`） | 红（注释位置 + 非字面引用） |
+ *
+ * 处置：B/C/D/E 四条**堵上**（含 fail-closed 的 taint：取值链提到 vitest 却解析不出
+ * 形状的名字，其 `.waitFor(` / `.poll(` 一律按等待调用判），F/G/H 三条**纠正**（注释
+ * 位置再放宽一档：挂在该次等待**消费的预算构造链**上同样算逐处可读）。判据不许因此
+ * 变松：①"新加一个正当等待（引用集中表 + 紧邻理由注释）必须绿"；②每条修复都配
+ * "改坏 ⇒ 判据必红"的变异（`temp/r11/fix-I3/`）。
+ * ------------------------------------------------------------------------- */
+
+describe('wait budget contract · 形态面（R11-B-03 的四条绕法）', () => {
+  it('B：`const v = vi` 之后的 `v.waitFor(…)` 与 `vi.waitFor(…)` 同罪', () => {
+    const renamed = [
+      'const v = vi',
+      'await v.waitFor(() => { expect(x).toBe(1) })',
+      '',
+    ].join('\n')
+    const sites = findWaitForSites('self.ts', renamed)
+    expect(sites.map(site => `${site.api}/${site.spelling}`), '对象改名必须被 AST 看见').toEqual(['vi.waitFor/alias'])
+    expect(sites[0]?.timeout, '这种写法没有预算').toBeUndefined()
+    const report = contractFindings([{ name: 'tests/probe.spec.ts', source: renamed }], 30_000)
+    expect(report.budget.map(finding => finding.message).join('|'), '没给预算的对象改名必须判红').toContain('没有显式 timeout')
+    // 链式（`const w = v.waitFor`）与 `expect` 命名空间同理。
+    expect(findWaitForSites('self.ts', 'const v = vi\nconst w = v.waitFor\nawait w(() => {})\n').map(site => site.spelling)).toEqual(['alias'])
+    expect(findWaitForSites('self.ts', 'const e = expect\nawait e.poll(() => 1)\n').map(site => site.api)).toEqual(['expect.poll'])
+    // 反向：别的对象的同名方法仍然不受约束（判据不许把任何 `x.waitFor` 都当等待）。
+    expect(findWaitForSites('self.ts', 'const s = server\nawait s.waitFor(() => {})\n')).toEqual([])
+  })
+
+  it('C：命名空间拼写（`import { vitest }` / `import * as ns`）也在面内', () => {
+    const named = [
+      "import { vitest } from 'vitest'",
+      'await vitest.waitFor(() => { expect(x).toBe(1) })',
+      '',
+    ].join('\n')
+    const sites = findWaitForSites('self.ts', named)
+    expect(sites.map(site => `${site.api}/${site.spelling}`), '`vitest` 就是 `vi`（实测 vitest === vi），必须被看见')
+      .toEqual(['vi.waitFor/alias'])
+    const report = contractFindings([{ name: 'tests/probe.spec.ts', source: named }], 30_000)
+    expect(report.budget.map(finding => finding.message).join('|')).toContain('没有显式 timeout')
+    // 两个见证仍然一致：命名空间拼写在 needle 面外，因此必须归 alias（否则覆盖率对账会红）。
+    expect(report.coverage, '命名空间拼写不得让覆盖率对账失配').toEqual([])
+    // 模块命名空间：`ns.vi.waitFor` / `ns.vitest.waitFor` / `ns.expect.poll`。
+    expect(findWaitForSites('self.ts', "import * as ns from 'vitest'\nawait ns.vi.waitFor(() => {})\n").map(site => site.api)).toEqual(['vi.waitFor'])
+    expect(findWaitForSites('self.ts', "import * as ns from 'vitest'\nawait ns.expect.poll(() => 1)\n").map(site => site.api)).toEqual(['expect.poll'])
+    // 别名导入（`vi as v`）与它的元素访问拼写：名字来自别名表，因此两个见证都按
+    // `alias` 记（needle 只认字面量 `vi.waitFor(`）。
+    expect(findWaitForSites('self.ts', "import { vi as v } from 'vitest'\nawait v['waitFor'](() => {})\n").map(site => site.spelling)).toEqual(['alias'])
+  })
+
+  it('D：`.mts` / `.cts` 里的等待同样在扫描面内（扩展名不再漏）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wait-scan-'))
+    try {
+      writeFileSync(join(dir, 'probe.spec.mts'), 'await vi.waitFor(() => { expect(x).toBe(1) })\n')
+      writeFileSync(join(dir, 'other.spec.cts'), 'await vi.waitFor(() => { expect(y).toBe(1) })\n')
+      const found = collectTestSources(dir).sort()
+      expect(found, '.mts / .cts 必须在扫描面内（审计的 D 例就是 .spec.mts）').toEqual(['other.spec.cts', 'probe.spec.mts'])
+      for (const name of found) {
+        const source = readFileSync(join(dir, name), 'utf8')
+        const report = contractFindings([{ name, source }], 30_000)
+        expect(report.budget.map(finding => finding.message).join('|'), `${name} 里的裸等待必须判红`).toContain('没有显式 timeout')
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('E：跨文件导出的等待 API（`export const w = vi.waitFor`）也解析得到', () => {
+    const helper = {
+      name: 'tests/helpers/wait-alias.ts',
+      source: [
+        "import { vi } from 'vitest'",
+        'export const w = vi.waitFor',
+        '',
+      ].join('\n'),
+    }
+    const spec = {
+      name: 'tests/case.spec.ts',
+      source: [
+        'import { w } from "./helpers/wait-alias.ts"',
+        'await w(() => { expect(x).toBe(1) })',
+        '',
+      ].join('\n'),
+    }
+    const report = contractFindings([helper, spec], 30_000)
+    expect(report.budget.map(finding => `$'${finding.file}':${finding.message}`).join('|'), '跨文件别名必须被穿透')
+      .toContain('没有显式 timeout')
+    expect(report.budget.some(finding => finding.file === 'tests/case.spec.ts')).toBe(true)
+    // 反向：跨文件别名给了集中表预算 + 理由注释时必须绿（不许"见到导入就红"）。
+    const budgeted = {
+      name: 'tests/case.spec.ts',
+      source: [
+        'import { w } from "./helpers/wait-alias.ts"',
+        "import { WAIT_BUDGETS } from '../wait-budgets.ts'",
+        '// 现象：状态传播档。',
+        'await w(() => { expect(x).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })',
+        '',
+      ].join('\n'),
+    }
+    expect(contractFindings([helper, budgeted], 30_000).budget).toEqual([])
+  })
+
+  it('fail-closed：取值链提到 vitest 却解析不出形状的名字，其等待调用仍必须给预算', () => {
+    const opaque = [
+      'const w = pick(vi.waitFor)',
+      'await w(() => { expect(x).toBe(1) })',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: opaque }], 30_000).budget.length,
+      '解析不出的等待取值必须 fail-closed（否则换个工厂函数就绕过契约）').toBeGreaterThan(0)
+    const opaqueNamespace = [
+      'const v = pick(vi)',
+      'await v.waitFor(() => { expect(x).toBe(1) })',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: opaqueNamespace }], 30_000).budget.length,
+      '解析不出的命名空间上的 waitFor 同样 fail-closed').toBeGreaterThan(0)
+    // 反向：`vi.fn()` 这类常见用法不得被误判成等待（taint 分两类正是为此）。
+    const mock = [
+      'const emit = vi.fn()',
+      'emit(1)',
+      '// 现象：状态传播档。',
+      'await vi.waitFor(() => {}, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: mock }], 30_000).budget, 'mock 的直接调用不是等待').toEqual([])
+  })
+})
+
+describe('wait budget contract · 误红面（R11-B-03 的三条正当写法）', () => {
+  it('F：`satisfies` 包装的 options 对象仍然是"给了预算"', () => {
+    const source = [
+      'it("probe", async () => {',
+      '  // 现象：状态传播档。',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS } satisfies Record<string, number>)',
+      '})',
+      '',
+    ].join('\n')
+    expect(findWaitForSites('self.ts', source)[0]?.timeout).toBe('WAIT_BUDGETS.STATE_PROPAGATION_MS')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000).budget, '正当写法不得被判红').toEqual([])
+    // `as` 与括号包装同理。
+    const asCast = source.replace('satisfies Record<string, number>', 'as Record<string, number>')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: asCast }], 30_000).budget).toEqual([])
+    const parenthesized = source.replace('{ timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }', '({ timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: parenthesized }], 30_000).budget).toEqual([])
+  })
+
+  it('G：简写属性 `{ timeout }` 沿本地常量解析到集中表', () => {
+    const source = [
+      'it("probe", async () => {',
+      '  const timeout = WAIT_BUDGETS.STATE_PROPAGATION_MS',
+      '  // 现象：状态传播档。',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, { timeout })',
+      '})',
+      '',
+    ].join('\n')
+    expect(findWaitForSites('self.ts', source)[0]?.timeout).toBe('WAIT_BUDGETS.STATE_PROPAGATION_MS')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000).budget, '简写属性是正当写法').toEqual([])
+    // 反向：简写指向别的常量（不是集中表）仍然判红 —— 放宽的是形态，不是要求。
+    const otherConstant = source.replace('const timeout = WAIT_BUDGETS.STATE_PROPAGATION_MS', 'const timeout = 5_000')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: otherConstant }], 30_000).budget.length).toBeGreaterThan(0)
+  })
+
+  it('H：整个 options 是本地常量、理由注释挂在预算构造链上，仍然算逐处可读', () => {
+    const source = [
+      'it("probe", async () => {',
+      '  // 现象：真实 I/O 档（真实磁盘读写）。',
+      '  const budget = { timeout: WAIT_BUDGETS.REAL_IO_MS }',
+      '  await vi.waitFor(() => { expect(x).toBe(1) }, budget)',
+      '})',
+      '',
+    ].join('\n')
+    expect(findWaitForSites('self.ts', source)[0]?.timeout, 'options 是本地常量时必须解析到它的对象字面量').toBe('WAIT_BUDGETS.REAL_IO_MS')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000).budget, '预算构造链上的注释必须被接受').toEqual([])
+    // 反向：链上完全没注释时两条都红（注释位置放宽，不是取消要求）。
+    const undocumented = source.replace('  // 现象：真实 I/O 档（真实磁盘读写）。\n', '')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: undocumented }], 30_000).budget.length).toBeGreaterThan(0)
+    // 反向：链上夹一条无关语句不算"上方"（否则"逐处可读"就没了）。
+    const unrelated = [
+      'it("probe", async () => {',
+      '  // 现象：真实 I/O 档。',
+      '  const unrelated = 1',
+      '  await vi.waitFor(() => { expect(x).toBe(1) })',
+      '})',
+      '',
+    ].join('\n')
+    expect(findWaitForSites('self.ts', unrelated)[0]?.reasonComment).toBe(false)
+  })
+
+  it('新加一个正当等待（引用集中表 + 紧邻理由注释）必须绿', () => {
+    const source = [
+      'it("a brand new case", async () => {',
+      '  // 现象：真实 I/O 档（清单落盘后状态机发布快照）。',
+      '  await vi.waitFor(() => { expect(harness.published).toHaveLength(1) }, { timeout: WAIT_BUDGETS.REAL_IO_MS })',
+      '  // 现象：状态传播档（轮询读取计数）。',
+      '  await expect.poll(() => harness.count(), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBe(1)',
+      '})',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000)).toEqual({
+      budget: [], clock: [], coverage: [], caseBudget: [],
+    })
+  })
+})
+
 describe('desktop waitFor budget contract · 扫描面', () => {
   it('tests 根目录存在且是目录（否则上面的扫描会静默变成空集）', () => {
     expect(statSync(testsRoot).isDirectory()).toBe(true)

@@ -45,9 +45,13 @@
  * ## 硬约束（由 `tests/wait-budget-contract.spec.ts` 静态强制，可被变异打坏）
  *
  * 1. `tests/**` 里**每一个**等待型断言（`vi.waitFor(` / `expect.poll(`）都必须显式给 `timeout`
- *    —— 扫描面是 `tests/**` 下全部 `.ts` / `.tsx`（含非 spec 的 helper），拼写面是点访问、
- *    元素访问（`vi['waitFor']`）、包装形态（`(0, vi.waitFor)(…)`）与别名
- *    （`const { waitFor } = vi`、`const w = vi.waitFor`，含 `.bind` 与链式绑定）；
+ *    —— 扫描面是 `tests/**` 下全部 `.ts` / `.tsx` / `.mts` / `.cts`（含非 spec 的 helper），
+ *    拼写面是点访问、元素访问（`vi['waitFor']`）、包装形态（`(0, vi.waitFor)(…)`）、别名
+ *    （`const { waitFor } = vi`、`const w = vi.waitFor`，含 `.bind` 与链式绑定）、**命名空间
+ *    改名/导入**（`const v = vi; v.waitFor(…)`、`import { vitest } from 'vitest'`）与**跨文件
+ *    导出的等待 API**（`export const w = vi.waitFor` + `import { w } from './helper.ts'`）——
+ *    最后三类是第十一轮 R11-B-03 实测的绕法，已收口；解析不出形状但取值链提到 vitest 的名字
+ *    按 fail-closed 处理；
  * 2. 该 `timeout` 必须引用本表（数值字面量、别的对象都不算）；
  * 3. 引用到的键必须真实存在；
  * 4. 本表每一项都必须 ≥ `WAIT_BUDGET_FLOORS` 里登记的现象下限 ——
@@ -63,7 +67,11 @@
  *    否则等待预算永远用不满（实测形态：`Error: Test timed out in 5000ms`）；`it.each(…)` /
  *    `it.skipIf(…)` 这类柯里化声明同样在面内，且"内部用到的等待预算"**沿调用传播**：
  *    用例调用的本地 helper（以及 `tests/**` 内相对导入的 helper）里的等待同样算它的
- *    （第十轮复审 N3 通道 ③）。
+ *    （第十轮复审 N3 通道 ③）；
+ * 8. **跨包同宽**（第十一轮 R11-B-02）：`browser` / `connectors` / `cron` / `enterprise`
+ *    的 `tests/**` 由**同一份判据实现**覆盖（本表只服务桌面包；那四个包用显式数值预算，
+ *    下限见 `wait-budget-contract.spec.ts` 的 `CROSS_PACKAGE_MIN_WAIT_MS` = 10s，与
+ *    `STATE_PROPAGATION_MS` 同档），且每包的缺省 `testTimeout` 必须 ≥ 该包最大的等待预算。
  *
  * @module dsh-plugin-desktop/tests/wait-budgets
  */

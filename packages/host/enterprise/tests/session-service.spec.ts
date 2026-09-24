@@ -44,7 +44,7 @@ describe('session-service', () => {
     expect(service.getSession()).toBeNull()
     // restore() runs asynchronously; in a non-Electron test it resolves to null
     // and must not flip an already-set session.
-    await vi.waitFor(() => { expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, null) })
+    await vi.waitFor(() => { expect(emit).toHaveBeenCalledWith(SESSION_CHANGED_EVENT, null) }, { timeout: 10_000 })
 
     service.setSession(SAMPLE_SESSION)
     expect(service.isLoggedIn()).toBe(true)
@@ -67,7 +67,8 @@ describe('session-service', () => {
     process.on('unhandledRejection', onRejection)
     try {
       service.setSession(SAMPLE_SESSION)
-      await vi.waitFor(() => { expect(warn).toHaveBeenCalled() })
+      // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+      await vi.waitFor(() => { expect(warn).toHaveBeenCalled() }, { timeout: 10_000 })
       // Give the rejection path a chance to surface if the write were still
       // fire-and-forget: a rejected persist() must never reach the process.
       await new Promise((resolve) => setTimeout(resolve, 50))

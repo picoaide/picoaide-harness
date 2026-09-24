@@ -59,7 +59,8 @@ describe('CronController', () => {
   it('bootstraps the snapshot on start', async () => {
     transport.stateResponses = [() => snapshot({ revision: 7, jobs: [{ id: 'j1' } as never] })]
     controller.start()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(7))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(7), { timeout: 10_000 })
     expect(transport.stateCalls).toBe(1)
   })
 
@@ -73,11 +74,13 @@ describe('CronController', () => {
     transport.stateResponses = [() => snapshot({ revision: 1 })]
     transport.actionResponses = [() => snapshot({ revision: 2, jobs: [{ id: 'job-1' } as never] })]
     controller.start()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1), { timeout: 10_000 })
 
     controller.remove('job-1')
     expect(controller.getSnapshot().pendingJobIds).toEqual(['job-1'])
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2), { timeout: 10_000 })
     expect(controller.getSnapshot().pendingJobIds).toEqual([])
     expect(transport.actionCalls).toEqual([{ kind: 'delete', jobId: 'job-1' }])
   })
@@ -89,7 +92,8 @@ describe('CronController', () => {
     controller.disable('job-1')
     controller.run('job-1')
     controller.rerun('job-1')
-    await vi.waitFor(() => expect(transport.actionCalls).toHaveLength(6))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(transport.actionCalls).toHaveLength(6), { timeout: 10_000 })
     expect(transport.actionCalls[0]).toMatchObject({ kind: 'create', id: 'uuid-1' })
     expect(transport.actionCalls[1]).toEqual({ kind: 'update', jobId: 'job-1', patch: { name: 'Renamed' } })
     expect(transport.actionCalls[2]).toEqual({ kind: 'enable', jobId: 'job-1' })
@@ -100,46 +104,56 @@ describe('CronController', () => {
 
   it('surfaces transport errors and schedules a delayed resync', async () => {
     controller.start()
-    await vi.waitFor(() => expect(transport.stateCalls).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(transport.stateCalls).toBe(1), { timeout: 10_000 })
     transport.stateResponses = [() => { throw new Error('boom') }]
     controller.retryHostSync()
-    await vi.waitFor(() => expect(controller.getSnapshot().transportError).toBe('boom'))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().transportError).toBe('boom'), { timeout: 10_000 })
     expect(controller.getSnapshot().revision).toBe(1)
   })
 
   it('keeps the error visible until a successful refresh clears it', async () => {
     transport.stateResponses = [() => snapshot({ revision: 1 }), () => { throw new Error('down') }, () => snapshot({ revision: 2 })]
     controller.start()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1), { timeout: 10_000 })
     controller.retryHostSync()
-    await vi.waitFor(() => expect(controller.getSnapshot().transportError).toBe('down'))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().transportError).toBe('down'), { timeout: 10_000 })
     controller.retryHostSync()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2), { timeout: 10_000 })
     expect(controller.getSnapshot().transportError).toBeUndefined()
   })
 
   it('debounces event-hint refetches', async () => {
     controller.start()
-    await vi.waitFor(() => expect(transport.stateCalls).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(transport.stateCalls).toBe(1), { timeout: 10_000 })
     transport.stateResponses = [() => snapshot({ revision: 2 }), () => snapshot({ revision: 3 })]
     transport.emit()
     transport.emit()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(2), { timeout: 10_000 })
     expect(transport.stateCalls).toBe(2) // one refresh for two hints
   })
 
   it('refuses a stale read that started before a newer write', async () => {
     controller.start()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1), { timeout: 10_000 })
     // A late state() answer with an older revision must not roll back.
     transport.stateResponses = [() => snapshot({ revision: 0 })]
     controller.retryHostSync()
-    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(controller.getSnapshot().revision).toBe(1), { timeout: 10_000 })
   })
 
   it('dispose stops refetches and clears listeners', async () => {
     controller.start()
-    await vi.waitFor(() => expect(transport.stateCalls).toBe(1))
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => expect(transport.stateCalls).toBe(1), { timeout: 10_000 })
     const listener = vi.fn()
     controller.subscribe(listener)
     controller.dispose()

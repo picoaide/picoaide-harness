@@ -64,7 +64,8 @@ describe('bootstrap sync', () => {
       applyBootstrap(ctx)
       // 触发 sync:回调内部 void sync(),等待其微任务/IO 完成
       await onHandler(SAMPLE_SESSION)
-      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
+      // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() }, { timeout: 10_000 })
 
       // llm-deepseek 配置正确
       expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -98,7 +99,8 @@ describe('bootstrap sync', () => {
     try {
       applyBootstrap(ctx)
       await onHandler(SAMPLE_SESSION)
-      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
+      // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() }, { timeout: 10_000 })
 
       expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         models: [
@@ -125,7 +127,7 @@ describe('bootstrap sync', () => {
     try {
       applyBootstrap(ctx)
       // 没有任何 onHandler 触发：全靠 apply 时的补发。
-      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() })
+      await vi.waitFor(() => { expect(settings.update).toHaveBeenCalled() }, { timeout: 10_000 })
       expect(settings.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         models: [
           { id: 'deepseek-chat', name: 'DeepSeek Chat', maxTokens: 8192 },
@@ -141,7 +143,8 @@ describe('bootstrap sync', () => {
     const { ctx, settings, onHandler } = stubCtx()
     applyBootstrap(ctx)
     await onHandler(null)
-    await vi.waitFor(() => { expect(settings.replace).toHaveBeenCalled() })
+    // 现象：进程内异步状态传播（事件/回调派发后的断言）；vitest 缺省的 1s 在 CI 4 vCPU 负载下不够（R11-B-02）。
+    await vi.waitFor(() => { expect(settings.replace).toHaveBeenCalled() }, { timeout: 10_000 })
     expect(settings.replace).toHaveBeenCalledWith(expect.anything(), {})
     expect(settings.replace).toHaveBeenCalledTimes(3)
   })

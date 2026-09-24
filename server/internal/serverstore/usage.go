@@ -262,6 +262,17 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 		return 0, err
 	}
 	defer tx.Rollback()
+	// R11A-02（P2）：写入路径与清理路径的判据必须看到同一个对象。清理侧一律把
+	// 判据硬钉在 `public.`（`n.nspname = 'public'` / `to_regclass('public.'||…)`），
+	// 而这条 `INSERT INTO usage` 用的是**未限定名** ⇒ 会话/角色/库级 search_path
+	// 前置了同名 shadow schema 时，计量行会落进 shadow 树、从产品的全部读面上
+	// 消失（而所有健康出口报绿）。同一句 `SET LOCAL` 与
+	// serverstore.applyUsageRetentionBudget 里的那处**逐字相同**（唯一实现、
+	// 三个调用点），`pg_catalog` 在前还封掉同名函数/类型的遮蔽。
+	// 必须在任何关系引用之前执行（本事务的第一条语句）。
+	if _, err := tx.Exec(usageSearchPathPin); err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := tx.QueryRow(`INSERT INTO usage (user_id, model, provider_id, prompt_tokens, completion_tokens, cache_prompt_tokens, kind, cost, created_at, estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		userID, model, providerID, promptTokens, completionTokens, cacheTokens, kind, cost, now, estimated).Scan(&id); err != nil {
