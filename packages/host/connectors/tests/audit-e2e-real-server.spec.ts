@@ -70,6 +70,14 @@ interface LiveAuthProvider {
   tokens: () => Promise<{ access_token?: string, refresh_token?: string } | undefined>
 }
 
+/** One `registerMcp` config: the exact object `dsh-mcp-client` builds a transport from. */
+interface RegisteredTransport {
+  url: string
+  serverName?: string
+  headers?: Record<string, string>
+  authProvider: LiveAuthProvider
+}
+
 async function state(h: ReturnType<typeof createHarness>, id: string): Promise<{ status: string, error?: string, request?: { authorizeUrl?: string } | null }> {
   const res = await callRoute(h, `/api/pico/connectors/${id}/state`, 'GET')
   return JSON.parse(res.body) as { status: string, error?: string, request?: { authorizeUrl?: string } | null }
@@ -98,10 +106,31 @@ async function awaitStatus(h: ReturnType<typeof createHarness>, id: string, want
   throw new Error(`status never became ${wanted} (last: ${JSON.stringify(await state(h, id))})`)
 }
 
-/** Drive one registered MCP transport through the REAL SDK client. */
-async function openClient(url: string, authProvider: unknown): Promise<Client> {
+/**
+ * Drive one registered MCP transport through the REAL SDK client, in the
+ * **production construction**.
+ *
+ * This is exactly what `@deepseek-ai/dsh-mcp-client`'s `createTransport` builds
+ * (`patches/dsh-mcp-client@0.1.6-alpha.2.patch`):
+ *
+ *     new StreamableHTTPClientTransport(new URL(config.url), {
+ *       requestInit: { headers: config.headers },
+ *       ...config.authProvider === undefined ? {} : { authProvider: config.authProvider },
+ *     })
+ *
+ * 形态即判据（R7-B P1-1 的教训）：早先这个 helper 只传 `{ authProvider }` ——
+ * 一种生产里**不会出现**的形态 —— 于是 `renderHeaders` 烘焙进 `requestInit.headers`
+ * 的 `Authorization` 从未参与，SDK 先写 provider 活令牌、再被烘焙头覆盖这条链路
+ * 整段落在回归盲区里（"各钉自己的字面量"式假绿）。新的 401 用例必须走这里。
+ * @param config - the config object the plugin registered for this server.
+ * @returns the connected SDK client.
+ */
+async function openClient(config: RegisteredTransport): Promise<Client> {
   const client = new Client({ name: 'audit', version: '1' }, { capabilities: {} })
-  const transport = new StreamableHTTPClientTransport(new URL(url), { authProvider: authProvider as never })
+  const transport = new StreamableHTTPClientTransport(new URL(config.url), {
+    requestInit: { headers: config.headers ?? {} },
+    authProvider: config.authProvider as never,
+  })
   await client.connect(transport)
   return client
 }
@@ -158,14 +187,14 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     await completeAuthorization(await awaitAuthorizeUrl(h, 'real-mcp'))
     await waitFor(() => h.configs.length === 1, 8000)
 
-    const config = h.configs[0] as unknown as { url: string, authProvider: LiveAuthProvider }
+    const config = h.configs[0] as unknown as RegisteredTransport
     // 判据的一半：401 必须经**我们的** `onUnauthorized` 收口（2026-09-24）。
     // 这条不是装饰 —— provider 一旦被 SDK 认成 OAuthClientProvider，
     // `adaptOAuthProvider` 就会硬编码它自己的 `onUnauthorized`，本用例随即变红。
     const hook = vi.spyOn(config.authProvider, 'onUnauthorized')
     const before = server.stats.grants.filter(g => g === 'refresh_token').length
     const beforeToken = (await config.authProvider.tokens())?.access_token
-    const client = await openClient(config.url, config.authProvider)
+    const client = await openClient(config)
     expect(server.stats.toolCalls).toBe(0)
 
     try {
@@ -197,6 +226,57 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     h.dispose()
   }, 30_000)
 
+  it('生产传输形态（requestInit.headers = renderHeaders 输出）下 401 续期后重试带的是新令牌', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-prod-shape-'))
+    const h = createHarness([def(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+
+    await callRoute(h, '/api/pico/connectors/real-mcp/connect', 'POST')
+    await completeAuthorization(await awaitAuthorizeUrl(h, 'real-mcp'))
+    await waitFor(() => h.configs.length === 1, 8000)
+
+    const config = h.configs[0] as unknown as RegisteredTransport
+    // 生产形态的事实之一：走 OAuth provider 的连接器**不再**把 `Authorization`
+    // 烘焙进 requestInit —— SDK 的 `_commonHeaders()` 先写 provider 的活令牌、再用
+    // `...requestInit.headers` 覆盖，烘焙头一旦在，续期拿到的活令牌就永远上不了车。
+    expect(config.headers?.Authorization, 'OAuth 连接器不得烘焙 Authorization').toBeUndefined()
+    expect(config.headers?.authorization, '大小写不敏感：小写形态同样不得烘焙').toBeUndefined()
+
+    const stale = (await config.authProvider.tokens())?.access_token
+    expect(stale, '前置：授权完成后必须有一枚访问令牌').toBeTruthy()
+    const before = server.stats.grants.filter(g => g === 'refresh_token').length
+    const client = await openClient(config)
+
+    try {
+      // 服务端侧作废访问令牌（本地 `expiresAt` 仍在一小时后）：这正是 401 强制
+      // 刷新唯一的触发条件，也是 CI 上"第一次调用必失败"的现场。
+      server.expireAccessTokens()
+      const call = await client.callTool({ name: 'echo', arguments: { text: 'prod-shape' } })
+      expect(call.content?.[0]?.text).toBe('echo:prod-shape')
+      // 服务端确实看到过一枚 refresh_token 授权，且**没有**第二次出示同一个
+      // refresh token（轮换复用检测一旦命中就吊销整条授权）。
+      expect(server.stats.grants.filter(g => g === 'refresh_token').length - before).toBe(1)
+      expect(server.stats.revokedRefreshReuse).toBe(0)
+      // 判据的核心：旧令牌不能出现在续期后的重试里。/mcp 收到的令牌序列中，旧令牌
+      // 只允许出现在续期之前（initialize 与那次 401），活令牌出现之后一次都不许再有。
+      const live = (await config.authProvider.tokens())?.access_token
+      expect(live).toBeDefined()
+      expect(live).not.toBe(stale)
+      const seen = server.stats.mcpBearerTokens
+      expect(seen.at(-1), '最后一次请求必须带活令牌').toBe(live)
+      const firstLive = seen.indexOf(live!)
+      expect(firstLive).toBeGreaterThanOrEqual(0)
+      expect(seen.slice(firstLive).filter(token => token === stale)).toEqual([])
+      // 反面证据：旧令牌**确实**被出示过 —— 否则上面的断言可能只是"根本没有请求"。
+      expect(seen.filter(token => token === stale).length).toBeGreaterThanOrEqual(1)
+    } finally {
+      // 断言失败也要关掉传输：SSE 通道会让 `server.close()` 一直等（afterEach 超时）。
+      await client.close().catch(() => {})
+    }
+    h.dispose()
+  }, 30_000)
+
   it('two MCP servers of ONE credential coalesce concurrent 401s into a single refresh', async () => {
     const server = await startRealMcpServer()
     servers.push(server)
@@ -207,12 +287,12 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     await completeAuthorization(await awaitAuthorizeUrl(h, 'real-mcp'))
     await waitFor(() => h.configs.length === 2, 8000)
 
-    const configs = h.configs as unknown as Array<{ url: string, serverName: string, authProvider: LiveAuthProvider }>
+    const configs = h.configs as unknown as RegisteredTransport[]
     // 两个 server ⇒ 两个 transport ⇒ 两个**不同的** provider 对象，只有一份凭据。
     expect(configs[0]!.authProvider).not.toBe(configs[1]!.authProvider)
     const [a, b] = await Promise.all([
-      openClient(configs[0]!.url, configs[0]!.authProvider),
-      openClient(configs[1]!.url, configs[1]!.authProvider),
+      openClient(configs[0]!),
+      openClient(configs[1]!),
     ])
 
     const before = server.stats.grants.filter(g => g === 'refresh_token').length
@@ -338,7 +418,12 @@ describe('end-to-end against a real static-token MCP server', () => {
     expect(submitted.status).toBe(200)
     await waitFor(() => h.configs.length === 1, 8000)
 
-    const config = h.configs[0] as unknown as { url: string, headers?: Record<string, string> }
+    const config = h.configs[0] as unknown as { url: string, headers?: Record<string, string>, authProvider?: unknown }
+    // 反向对照（R7-B P1-1 的边界）：静态 token 连接器**没有** authProvider，
+    // 烘焙头是它唯一的鉴权方式 —— 修法因此必须是有条件的，一旦无条件去掉
+    // `Authorization`，这条链路立刻 401（下面的 listTools 就是它的活判据）。
+    expect(config.authProvider, '静态 token 连接器不建 provider').toBeUndefined()
+    expect(config.headers?.Authorization).toBe('Bearer secret-token-1')
     const client = new Client({ name: 'audit', version: '1' }, { capabilities: {} })
     const transport = new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers ?? {} } })
     await client.connect(transport)
