@@ -43,6 +43,33 @@ function def(origin: string): ConnectorDef {
   }
 }
 
+/**
+ * One connector authorization, TWO streamable-http MCP servers.
+ *
+ * This is the production shape that makes the 401 path interesting: each server
+ * owns its own transport AND its own provider object (`registerMcp` builds one
+ * per server), while both share the single stored credential and therefore the
+ * single `TokenRefresher`. Only a per-CREDENTIAL single flight can coalesce
+ * their 401s; a per-provider (or per-transport) mutex cannot.
+ */
+function twoServerDef(origin: string): ConnectorDef {
+  const base = def(origin)
+  return {
+    ...base,
+    mcp: [
+      { serverName: 'real-mcp-a', transport: 'streamable-http', url: `${origin}/mcp` },
+      { serverName: 'real-mcp-b', transport: 'streamable-http', url: `${origin}/mcp` },
+    ],
+  }
+}
+
+/** The provider object `registerMcp` hands the transport (see `createOAuthProvider`). */
+interface LiveAuthProvider {
+  token: () => Promise<string | undefined>
+  onUnauthorized: (ctx: unknown) => Promise<void>
+  tokens: () => Promise<{ access_token?: string, refresh_token?: string } | undefined>
+}
+
 async function state(h: ReturnType<typeof createHarness>, id: string): Promise<{ status: string, error?: string, request?: { authorizeUrl?: string } | null }> {
   const res = await callRoute(h, `/api/pico/connectors/${id}/state`, 'GET')
   return JSON.parse(res.body) as { status: string, error?: string, request?: { authorizeUrl?: string } | null }
@@ -69,6 +96,14 @@ async function awaitStatus(h: ReturnType<typeof createHarness>, id: string, want
     await new Promise(r => setTimeout(r, 25))
   }
   throw new Error(`status never became ${wanted} (last: ${JSON.stringify(await state(h, id))})`)
+}
+
+/** Drive one registered MCP transport through the REAL SDK client. */
+async function openClient(url: string, authProvider: unknown): Promise<Client> {
+  const client = new Client({ name: 'audit', version: '1' }, { capabilities: {} })
+  const transport = new StreamableHTTPClientTransport(new URL(url), { authProvider: authProvider as never })
+  await client.connect(transport)
+  return client
 }
 
 describe('end-to-end against a real OAuth-protected MCP server', () => {
@@ -123,20 +158,87 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     await completeAuthorization(await awaitAuthorizeUrl(h, 'real-mcp'))
     await waitFor(() => h.configs.length === 1, 8000)
 
-    const config = h.configs[0] as unknown as { url: string, authProvider: never }
-    const client = new Client({ name: 'audit', version: '1' }, { capabilities: {} })
-    const transport = new StreamableHTTPClientTransport(new URL(config.url), { authProvider: config.authProvider })
-    await client.connect(transport)
+    const config = h.configs[0] as unknown as { url: string, authProvider: LiveAuthProvider }
+    // 判据的一半：401 必须经**我们的** `onUnauthorized` 收口（2026-09-24）。
+    // 这条不是装饰 —— provider 一旦被 SDK 认成 OAuthClientProvider，
+    // `adaptOAuthProvider` 就会硬编码它自己的 `onUnauthorized`，本用例随即变红。
+    const hook = vi.spyOn(config.authProvider, 'onUnauthorized')
+    const before = server.stats.grants.filter(g => g === 'refresh_token').length
+    const beforeToken = (await config.authProvider.tokens())?.access_token
+    const client = await openClient(config.url, config.authProvider)
     expect(server.stats.toolCalls).toBe(0)
 
-    // the access token dies while the session is live: the next call gets 401
-    // and the SDK must refresh with the stored refresh token, then retry
+    try {
+      // the access token dies while the session is live: the next call gets 401
+      // and the provider must refresh with the stored refresh token, then retry
+      server.expireAccessTokens()
+      const call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
+      expect(call.content?.[0]?.text).toBe('echo:after-expiry')
+      expect(server.stats.mcpUnauthorized).toBeGreaterThanOrEqual(1)
+      expect(server.stats.grants).toContain('refresh_token')
+      // 401 之后确实走了 onUnauthorized 的强制刷新（而不是 SDK 自己的那条路径）。
+      // 次数是 1 还是 2 由 SSE 通道的 401 是否同时到达决定（实测两种都会出现），
+      // 判据落在下面的续期次数上：无论几条 401 同时到，续期只能发生一次。
+      expect(hook.mock.calls.length).toBeGreaterThanOrEqual(1)
+      // 恰好一次续期，且**没有**第二次出示同一个 refresh token —— 这正是 CI 常红
+      // （`Server returned 401 after re-authentication`）的直接判据。
+      expect(server.stats.grants.filter(g => g === 'refresh_token').length - before).toBe(1)
+      expect(server.stats.revokedRefreshReuse).toBe(0)
+      // 重试带的是刷新后的活令牌，并且它真的通过了受保护端点的鉴权（上面那次成功的
+      // 工具调用就是证据）；活视图也必须已经前移到服务端刚签发的那一代。
+      const after = await config.authProvider.tokens()
+      expect(after?.access_token).toBeDefined()
+      expect(after?.access_token).not.toBe(beforeToken)
+      expect(after?.refresh_token).toBe(server.stats.refreshTokensIssued.at(-1))
+    } finally {
+      // 断言失败也要关掉传输：SSE 通道会让 `server.close()` 一直等（afterEach 超时）。
+      await client.close().catch(() => {})
+    }
+    h.dispose()
+  }, 30_000)
+
+  it('two MCP servers of ONE credential coalesce concurrent 401s into a single refresh', async () => {
+    const server = await startRealMcpServer()
+    servers.push(server)
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-401-race-'))
+    const h = createHarness([twoServerDef(server.origin)], dir, { refreshSweepIntervalMs: 0 })
+
+    await callRoute(h, '/api/pico/connectors/real-mcp/connect', 'POST')
+    await completeAuthorization(await awaitAuthorizeUrl(h, 'real-mcp'))
+    await waitFor(() => h.configs.length === 2, 8000)
+
+    const configs = h.configs as unknown as Array<{ url: string, serverName: string, authProvider: LiveAuthProvider }>
+    // 两个 server ⇒ 两个 transport ⇒ 两个**不同的** provider 对象，只有一份凭据。
+    expect(configs[0]!.authProvider).not.toBe(configs[1]!.authProvider)
+    const [a, b] = await Promise.all([
+      openClient(configs[0]!.url, configs[0]!.authProvider),
+      openClient(configs[1]!.url, configs[1]!.authProvider),
+    ])
+
+    const before = server.stats.grants.filter(g => g === 'refresh_token').length
     server.expireAccessTokens()
-    const call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
-    expect(call.content?.[0]?.text).toBe('echo:after-expiry')
-    expect(server.stats.mcpUnauthorized).toBeGreaterThanOrEqual(1)
-    expect(server.stats.grants).toContain('refresh_token')
-    await client.close()
+    try {
+      // 两条 401 同时在飞：修复前它们各自跑一次 SDK 自己的刷新，同一个单次 refresh
+      // token 被出示两次 ⇒ 轮换复用检测吊销整个授权，一个调用挂、另一个报
+      // `Server returned 401 after re-authentication`（实测 grants=2 / reuse=1）。
+      const [first, second] = await Promise.all([
+        a.callTool({ name: 'echo', arguments: { text: 'a' } }),
+        b.callTool({ name: 'echo', arguments: { text: 'b' } }),
+      ])
+      expect(first.content?.[0]?.text).toBe('echo:a')
+      expect(second.content?.[0]?.text).toBe('echo:b')
+      // 并发 401 合并成**恰好一次**续期（per-id 单飞，不是 per-provider）。
+      expect(server.stats.grants.filter(g => g === 'refresh_token').length - before).toBe(1)
+      expect(server.stats.revokedRefreshReuse).toBe(0)
+      // 前置：两条请求确实各自撞了一次 401（否则上面的"合并"是假绿）。
+      expect(server.stats.mcpUnauthorized).toBeGreaterThanOrEqual(2)
+    } finally {
+      // 断言失败也要关掉传输：SSE 通道会让 `server.close()` 一直等（afterEach 超时）。
+      await Promise.all([
+        a.close().catch(() => {}),
+        b.close().catch(() => {}),
+      ])
+    }
     h.dispose()
   }, 30_000)
 
