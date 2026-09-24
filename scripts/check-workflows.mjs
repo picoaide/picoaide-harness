@@ -539,6 +539,15 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w23-guard-job-merge-key', policy: '[SK-19]' },
   { id: 'w24-env-merge-key', policy: '[SK-19]' },
   { id: 'w25-anchored-alias-env-green', policy: null },
+  // ---- [SK-18]/[SK-19] 第十轮**复审 W1** 的 N1/N2(两个入口只堵了一个)----
+  // W1 实测:顶层 `defaults.run.working-directory` 与顶层 `defaults.run` 上的 `<<` 都曾是
+  // EXIT=0。这两格红样本 + 两格"登记/显式键后确实变绿"的对照逐条点名 —— 删掉任一条分支、
+  // 或把登记制悄悄改成"顶层一律红/一律绿",这里立刻报出来。
+  { id: 'w26-workflow-defaults-working-directory', policy: '[SK-18]' },
+  { id: 'w27-workflow-defaults-working-directory-green', policy: null },
+  { id: 'w28-guard-job-working-directory-registered-green', policy: null },
+  { id: 'w29-workflow-defaults-merge-key', policy: '[SK-19]' },
+  { id: 'w30-workflow-defaults-explicit-key-green', policy: null },
   // ---- 第九轮审计 B 泳道的 5 条 P1 + 3 条假红(同属"判据只看文本、不看执行语义")----
   { id: 'x1-guard-runner-colon-noop', policy: '[SK-9]' },
   { id: 'x2-guard-runner-test-f', policy: '[SK-9]' },
@@ -842,7 +851,9 @@ export function checkWorkflowText(name, text, options = {}) {
   if (mergeKeys.failures.length === 0) {
     notes.push(`[SK-19] YAML 合并键(\`<<\`):已按 fail-closed 判定 `
       + `${Object.keys(typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}).length} 个 job 块 / `
-      + `${mergeKeys.stepBlocks} 个步骤块(出现合并键即红 —— 解析器不展开它,判据与 runner 的语义会分叉)`)
+      + `${mergeKeys.stepBlocks} 个步骤块(出现合并键即红 —— 解析器不展开它,判据与 runner 的语义会分叉)`
+      + ` + workflow 顶层 \`defaults\`/\`defaults.run\` ${mergeKeys.workflowDefaultsBlocks} 个块`
+      + '(顶层 `defaults.run` 一次作用于所有 job ⇒ W1 复审 N2 补进扫描面)')
   }
   const pinnedEnv = checkPinnedStepEnvironment(name, document, blocks, notes, {
     rootDir,
@@ -851,6 +862,13 @@ export function checkWorkflowText(name, text, options = {}) {
     // 里的危险键，于是**删掉 `container.env` 的键判定循环后样本照样红**（被相邻判据顶替）——
     // 那一层就成了"没有自检守住的分支"。拆样本的前提是能单独放行镜像登记，所以这里必须可注入。
     containerImages: registries.containerImages ?? PINNED_JOB_CONTAINER_REGISTRY,
+    // [SK-18] 的两张 **cwd 登记表**走同一个测试缝（W1 复审 N1 补）：没有它，"已登记例外绿"
+    // 这一格样本就无法构造（真实登记表里只有 `server` job 那一条，而样本的 job 名是
+    // `gate-guards`）—— 只有红样本、没有"登记后确实变绿"的证据，登记制就只被证明了一半。
+    // 注入语义 = **追加**（不是替换）：样本树复刻了 ci.yml 的 `server` job，替换会把真实登记的
+    // 那一格判成未登记 ⇒ 假红（第一版就是这么红的）。
+    jobWorkingDirectories: [...PINNED_JOB_WORKING_DIRECTORY_REGISTRY, ...(registries.jobWorkingDirectories ?? [])],
+    workflowWorkingDirectories: [...WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY, ...(registries.workflowWorkingDirectories ?? [])],
   })
   failures.push(...pinnedEnv.failures)
   // [SK-14⑧](R8-D-24):块级 shell 与步骤级 shell 两条口径必须一致(危险方向即红)。
@@ -1479,6 +1497,12 @@ const PINNED_JOB_CONTAINER_REGISTRY = []
  * 一例是 `server` job（`server` 目录，`server` job 里的 `wasm-case-gate` 判据步
  * `node ../scripts/wasm/check-go-test-json.mjs` 正是按这个 cwd 写的 `../` 前缀）——
  * 任何**新** job、或**改**这个取值，都必须带着理由进 diff（这才是"可评审"，而不是"看起来人畜无害"）。
+ *
+ * 作用域边界（W1 复审 N6，认账）：登记项按 `{ job, workingDirectory }` 逐字匹配 ⇒ 该 job 内
+ * **将来新增**的被钉步骤会自动继承已登记的 cwd，不需要按步骤再登记。当前不可利用
+ * （把三个被钉单元搬进 `server` job 会被 [SK-9]/[SK-9③]/[SK-8b] 拦住，W1 三个探针实测 EXIT=1），
+ * 但这是本表的**已知边界**：给 `server` job 加新判据步骤时，评审者要自己看这个 cwd 对新步骤
+ * 是否仍然成立（判据不代劳）。
  */
 const PINNED_JOB_WORKING_DIRECTORY_REGISTRY = [
   {
@@ -1497,6 +1521,29 @@ const PINNED_JOB_WORKING_DIRECTORY_REGISTRY = [
  * 效果与 job 级完全一样（命令在别处解析）。空表是 fail-closed 的默认形态。
  */
 const PINNED_STEP_WORKING_DIRECTORY_REGISTRY = []
+
+/**
+ * [SK-18] **workflow 级** `defaults.run.working-directory` 的登记表（当前为空 = 未登记即红）。
+ *
+ * 现场（2026-09-25 第十轮复审 W1 的 N1，**P2**）：`defaults` 在 Actions 语法里**两个层级**
+ * 都合法 —— `jobs.<id>.defaults`（W1 之前的判据面）与 workflow **顶层** `defaults`。在
+ * `ci.yml` 顶层写
+ * ```yaml
+ * defaults:
+ *   run:
+ *     working-directory: <某个已入库的目录>
+ * ```
+ * 时，**所有 job**（含 `gate-guards` 的根守卫步、`gate` 的全量门禁步）都在那个目录里解析，
+ * 而 `check-workflows` **EXIT=0** —— 与 C-04 的原始现场同一机理、同一收益（argv / 步骤体 /
+ * `env:` 一字未改，`node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部
+ * 换成别处的）。判据随之一分为二：**两个入口同扫**，只堵一个等于没堵。
+ *
+ * 与 job 级同一条纪律：**顶层非空即未登记即红**，例外只允许逐字登记
+ * `{ workflow, workingDirectory, why }`（`workflow` = workflow 文件名，例如 `ci.yml`），
+ * 并在 `why` 里写明"判据步骤在这个 cwd 下为什么仍然成立"。空表是本仓当前的正确形态
+ * （三个 workflow 都没有顶层 `defaults.run.working-directory`）。
+ */
+const WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY = []
 
 /**
  * 被钉单元里允许出现的 `uses:`(第十轮审计 C-03 / MAINCTL-3)。
@@ -6317,7 +6364,14 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
  * 同一手法还能藏 `steps:`（那会让"哪些步骤被钉住"整个判据失效）、`container:`、`with:`。
  *
  * 判据（fail-closed）：**任何** job 块 / 步骤块 / `env:` / `container:` / `defaults:` /
- * `with:` / workflow 顶层上出现 `<<` 键 ⇒ 红。为什么按"任何 job"而不是"被钉 job"：
+ * `with:` / workflow 顶层上出现 `<<` 键 ⇒ 红。
+ *
+ * 覆盖面（W1 复审 N2 的修复）：workflow **顶层**的 `defaults:` 与 `defaults.run:` 也在
+ * 枚举里 —— 顶层 `defaults.run` **一次作用于所有 job**，它的合并键此前不在扫描面上
+ * （顶层 `x: &s {shell: bash}` + `defaults: {run: {<<: *s}}` ⇒ EXIT=0）。两个入口
+ * （workflow 级 / job 级）必须同扫：只堵一个等于没堵（与 SK-18 的 cwd 两入口同族）。
+ *
+ * 为什么按"任何 job"而不是"被钉 job"：
  * 合并键可以**藏掉 `steps:` 本身**（那正是"这一步算不算被钉"的输入）—— 判据读不懂它展开了
  * 什么，"读不懂 ⇒ 拒绝"是唯一与 [SK-17] 其余各条一致的取向。确需共享片段时把键**显式写出来**
  * （或在 `check-workflows.mjs` 里显式展开后再喂给判据），不要用 merge key。
@@ -6336,6 +6390,16 @@ function checkYamlMergeKeys(file, document) {
   }
   scan(document, 'workflow 顶层')
   scan(document?.env, 'workflow 顶层 `env:`')
+  // workflow 级 `defaults:` / `defaults.run:`（2026-09-25 第十轮复审 W1 的 N2）。
+  //
+  // 现场（W1 探针实测）：顶层 `x-shell: &s {shell: bash}` + `defaults: {run: {<<: *s}}`
+  // ⇒ 旧覆盖面**不含** `document.defaults` ⇒ `check-workflows` EXIT=0。而 Actions 在运行期
+  // 会展开这个合并键，且 workflow 级 `defaults.run` 一次作用于**所有 job** —— 与 N1
+  // （顶层 `defaults.run.working-directory`）组合起来可以同时藏掉"执行目录"与 `defaults`
+  // 下的其它键。判据与 job 级同族：出现合并键即红（读不懂展开了什么 ⇒ 拒绝）。
+  scan(document?.defaults, 'workflow 顶层 `defaults:`')
+  scan(document?.defaults?.run, 'workflow 顶层 `defaults.run:`')
+  const workflowDefaultsBlocks = (isMap(document?.defaults) ? 1 : 0) + (isMap(document?.defaults?.run) ? 1 : 0)
   const jobs = isMap(document?.jobs) ? document.jobs : {}
   let stepBlocks = 0
   for (const [jobId, job] of Object.entries(jobs)) {
@@ -6367,7 +6431,7 @@ function checkYamlMergeKeys(file, document) {
         + '不要指望判据去展开它 —— "读不懂展开了什么"一律按未登记处理是 [SK-17]/[SK-19] 的共同取向。',
     })
   }
-  return { failures, stepBlocks, hits: hits.length }
+  return { failures, stepBlocks, workflowDefaultsBlocks, hits: hits.length }
 }
 
 /**
@@ -6641,17 +6705,45 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
     }
   }
 
-  // ⑩ **执行目录**（第十轮审计 C-04，本轮修复）：`defaults.run.working-directory`（job 级）
-  //    与步骤级 `working-directory` —— "命令在哪个目录里被解析"此前**不在判据面内**。
+  // ⑩ **执行目录**（第十轮审计 C-04，本轮修复；W1 复审 N1 补齐**第三个入口**）：
+  //    workflow 级 `defaults.run.working-directory` / job 级 `defaults.run.working-directory`
+  //    / 步骤级 `working-directory` —— "命令在哪个目录里被解析"此前**不在判据面内**。
   //    与 `env:` 同族：argv 一字未改，脚本/`package.json`/`.yarnrc.yml` 却换成了别处的
   //    （审计方实测：给 `gate-guards` 加 `defaults.run.working-directory: /tmp/decoy` ⇒ EXIT=0）。
   //    登记制例外只认**逐字**匹配（见 `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 的头注释）。
+  //
+  //    ⑩a **workflow 级**（P2）：`defaults` 在 Actions 里两个层级都合法，顶层那份作用于
+  //    **所有 job**（W1 实测：顶层写同一个键 ⇒ 旧判据 EXIT=0，同机理同收益）。
+  {
+    const runDefaults = document?.defaults?.run
+    const value = runDefaults !== null && typeof runDefaults === 'object'
+      && Object.hasOwn(runDefaults, 'working-directory')
+      ? runDefaults['working-directory']
+      : undefined
+    const declared = value !== undefined
+    // 刻意**不**进 `PINNED_ENV_LAYER_REGISTRY`（那张表是"`env:` 键白名单"的覆盖面账，
+    // 与 cwd 不是同一类判据；job 级 / 步骤级两个入口同样不在那张表里）。本分支的防静默
+    // 拆除靠**定向样本**：`w26-workflow-defaults-working-directory`（必须红）+
+    // `SELFTEST_REQUIRED_SAMPLES` 的逐条点名 —— 删掉本分支，自检当场报"策略形同不存在"。
+    const registered = (context.workflowWorkingDirectories ?? WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY)
+      .some(entry => entry.workflow === file && entry.workingDirectory === value)
+    if (declared && !registered) {
+      reportOnce('cwd:workflow', `[SK-18] workflow **顶层**声明了 `
+        + `\`defaults.run.working-directory: ${JSON.stringify(value ?? null)}\`，而本 workflow 里`
+        + `有 ${units.length} 个被钉住的判定单元（${pinnedJobIds.join('、')}）。`
+        + '\n  ⇒ workflow 级 `defaults.run` 作用于**所有 job**：argv 与步骤体一字未改，'
+        + '可 `node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部来自那个目录 ——'
+        + '与"换成谁的解释器"同级，所以它走**登记制**（W1 复审 N1：顶层写这几行时判据 EXIT=0）。'
+        + '\n  ⇒ 要在顶层换 cwd，先在 `WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY` 里逐字登记'
+        + '`{ workflow, workingDirectory }` 并写明"被钉步骤在这个 cwd 下为什么仍然成立"。')
+    }
+  }
   for (const jobId of pinnedJobIds) {
     const runDefaults = jobs[jobId]?.defaults?.run
     if (runDefaults === null || typeof runDefaults !== 'object') continue
     if (!Object.hasOwn(runDefaults, 'working-directory')) continue
     const value = runDefaults['working-directory']
-    const registered = PINNED_JOB_WORKING_DIRECTORY_REGISTRY
+    const registered = (context.jobWorkingDirectories ?? PINNED_JOB_WORKING_DIRECTORY_REGISTRY)
       .some(entry => entry.job === jobId && entry.workingDirectory === value)
     if (registered) continue
     const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
@@ -7464,6 +7556,13 @@ export function selfTestPolicies() {
     // 根守卫 job 的 `defaults.run.working-directory`（[SK-18] 的样本入口，第十轮审计 C-04）：
     // 字符串 = 逐字写进 `defaults: / run: / working-directory:`；null = 不声明。
     guardJobWorkingDirectory = null,
+    // workflow **顶层** `defaults.run.working-directory`（[SK-18] 的第三个样本入口，
+    // 第十轮复审 W1 的 N1）：字符串 = 顶格写 `defaults: / run: / working-directory:`；
+    // null = 不声明。与 job 级同族，但作用于**所有 job**（含根守卫步与全量门禁步）。
+    workflowWorkingDirectory = null,
+    // workflow **顶层** `defaults:` 块里额外的顶格 YAML 行（[SK-19] 的顶层样本入口，
+    // 第十轮复审 W1 的 N2）：配合 `workflowWorkingDirectory` 使用（例如写一行 `  <<: *s`）。
+    workflowDefaultsExtra = [],
     // 被钉住的**全量门禁**步的步骤级 `working-directory`（[SK-18] 的第二个样本入口）。
     gateStepWorkingDirectory = null,
     // 非判据步骤（`changes` job 那一步）的 `working-directory`（[SK-18] 的绿样本入口：
@@ -7539,6 +7638,13 @@ export function selfTestPolicies() {
     ...rawPrefix,
     ...extraTriggers.map(trigger => `  ${trigger}:`),
     ...(workflowEnv === null ? [] : ['env:', ...workflowEnv]),
+    // workflow **顶层** `defaults:`（[SK-18] N1 / [SK-19] N2 的样本入口）：顶格两行 + 可选
+    // 额外的 `run:` 级 YAML 行（`workflowDefaultsExtra` 已是**顶格**形态，调用方自己缩进）。
+    ...(workflowWorkingDirectory === null && workflowDefaultsExtra.length === 0
+      ? []
+      : ['defaults:', '  run:',
+        ...(workflowWorkingDirectory === null ? [] : [`    working-directory: ${workflowWorkingDirectory}`]),
+        ...workflowDefaultsExtra]),
     'jobs:',
     '  changes:',
     '    runs-on: ubuntu-latest',
@@ -8363,6 +8469,48 @@ export function selfTestPolicies() {
     file: 'ci.yml',
     changesStepWorkingDirectory: 'server/webadmin',
   })
+  // ---- [SK-18] 第十轮**复审 W1** 的 N1:**workflow 顶层** `defaults.run.working-directory` ----
+  //
+  // 现场(W1 探针实跑):顶层写
+  //   `defaults: / run: / working-directory: <已存在的目录>`
+  // ⇒ **所有 job**(含 `gate-guards` 的根守卫步、`gate` 的全量门禁步)都在那个目录里解析,
+  // 而旧判据只读 `jobs.<id>.defaults` ⇒ `check-workflows` **EXIT=0**。同一机理、同一收益。
+  // 现在两个入口同扫,顶层同样走**逐字登记制**(`WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY`,
+  // 当前为空 ⇒ 未登记即红)。
+  gateSample('w26-workflow-defaults-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    workflowWorkingDirectory: '/tmp/decoy',
+  })
+  // **绿样本**(不得一刀切):顶层 cwd 走**逐字登记**时放行 —— 证明这条判据是"登记制"而不是
+  // "文件里不许出现顶层 `defaults.run.working-directory`"(登记表为空 ⇒ 顶层非空即红)。
+  // 登记表经与 `containerImages` 同一个 `registries` 测试缝注入,只对合成样本生效。
+  gateSample('w27-workflow-defaults-working-directory-green', null, {
+    file: 'ci.yml',
+    workflowWorkingDirectory: '/tmp/legacy',
+    registries: {
+      ...REGISTRY_NONE,
+      workflowWorkingDirectories: [{
+        workflow: 'ci.yml',
+        workingDirectory: '/tmp/legacy',
+        why: '合成样本:顶层 cwd 逐字登记后放行,证明判据是登记制而非一刀切',
+      }],
+    },
+  })
+  // 同族第二格:**job 级**登记例外也必须真的能放行(绿样本)——
+  // `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 里本仓真实存在一条(`server` job),这条用测试缝
+  // 复刻同一形状。缺了它,"登记制"就只有红样本、没有"登记后确实变绿"的证据。
+  gateSample('w28-guard-job-working-directory-registered-green', null, {
+    file: 'ci.yml',
+    guardJobWorkingDirectory: 'sub',
+    registries: {
+      ...REGISTRY_NONE,
+      jobWorkingDirectories: [{
+        job: 'gate-guards',
+        workingDirectory: 'sub',
+        why: '合成样本:job 级 cwd 逐字登记后放行(证登记表承重且不是一刀切)',
+      }],
+    },
+  })
 
   // ---- [SK-19] YAML **合并键** `<<`(第十轮审计 C-05,本轮修复) ------------------
   //
@@ -8402,6 +8550,27 @@ export function selfTestPolicies() {
       '',
     ],
     guardJobEnvAlias: '*env-safe',
+  })
+  // ---- [SK-19] 第十轮**复审 W1** 的 N2:**workflow 顶层** `defaults` 上的合并键 ----
+  //
+  // 现场(W1 探针实跑):顶层 `x-shell: &s {shell: bash}` + `defaults: {run: {<<: *s}}`
+  // ⇒ 旧 `scan` 覆盖面不含 `document.defaults` ⇒ EXIT=0。而 workflow 级 `defaults.run`
+  // 一次作用于**所有 job**,与 N1 组合可同时藏掉 cwd 与 `defaults` 下的其它键。
+  // 现在顶层 `defaults:` / `defaults.run:` 与 job 级同扫。
+  gateSample('w29-workflow-defaults-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-shell-base: &shell-base',
+      '  shell: bash',
+      '',
+    ],
+    workflowDefaultsExtra: ['    <<: *shell-base'],
+  })
+  // **绿样本**(不得一刀切):顶层 `defaults.run` 上写**普通显式键**(本仓合法且常见的形态,
+  // 例如 `shell: bash`)解析后键是可见的 ⇒ 与 `<<` 无关的写法不许被误伤。
+  gateSample('w30-workflow-defaults-explicit-key-green', null, {
+    file: 'ci.yml',
+    workflowDefaultsExtra: ['    shell: bash'],
   })
 
   // ---- 第十轮审计 D-03:被钉步骤**自己的步骤体**里的 `export`/前缀赋值 ----
@@ -9419,7 +9588,7 @@ function main() {
     + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:四层 `env:` 的**白名单登记表** + '
     + '`$GITHUB_ENV` 键名注入 + 被钉步骤体内的 `export`/前缀赋值 + `uses:` 委派目标的'
     + '本地可解析/登记制 + `.github/actions/**` 的内容判据)\n'
-    + '    + SK-18 策略(被钉单元的**执行目录**:job 级 `defaults.run.working-directory` 与'
+    + '    + SK-18 策略(被钉单元的**执行目录**:workflow 级 / job 级 `defaults.run.working-directory` 与'
     + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
     + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
     + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'

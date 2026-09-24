@@ -40,13 +40,22 @@ import (
 //     与上面几类的区别是它**不是失败**：管理端保存保留期不得因此 500、
 //     `/readyz` 的 failed_rounds 也不得把它记成故障（判据是 SQLSTATE
 //     55P03/57014，见 usageFailureTimeoutReason）。
+//   - settle-budget-timeout（R10-H3 · W3-1）：结算段/预补账的**整段总预算**
+//     （ctx deadline，含 COMMIT）到点。它是"每语句上界挡不住多语句相加"那一层
+//     上界，错误形态**不是 SQLSTATE**（`context deadline exceeded`，或 database/sql
+//     在 ctx 到点后把后续语句拒成的 `sql: transaction has already been committed
+//     or rolled back`）⇒ R10-G3 新增它时漏了分类，于是"预算不够"被记成真失败
+//     （管理端保存保留期 500 + failed_rounds 增长，且预算不会自愈 ⇒ 每轮都失败）。
+//     它与上面两类**同属"有界延后"**：一行数据没动、下一轮重试；单独给一个取值是
+//     因为处置不同 —— 这一类的动作是"调大预算/减少该月行数"，不是"查谁占着锁"。
 const (
-	usageSkipDescendant       = "descendant"
-	usageSkipSubtreeRetained  = "subtree-retained"
-	usageSkipDetachedNonLeaf  = "detached-non-leaf"
-	usageSkipNonTable         = "non-table"
-	usageSkipLockTimeout      = "lock-timeout"
-	usageSkipStatementTimeout = "statement-timeout"
+	usageSkipDescendant          = "descendant"
+	usageSkipSubtreeRetained     = "subtree-retained"
+	usageSkipDetachedNonLeaf     = "detached-non-leaf"
+	usageSkipNonTable            = "non-table"
+	usageSkipLockTimeout         = "lock-timeout"
+	usageSkipStatementTimeout    = "statement-timeout"
+	usageSkipSettleBudgetTimeout = "settle-budget-timeout"
 	// usageSkipOrphanRetained：名为 usage_<YYYYMM> 的关系**不在 usage 树里**、而名字的那
 	// 个月**仍在保留期内**（R9-D R9D-07）。保留期内不能删它的明细，所以它不进回收面 ——
 	// 但它占着当月分区名，写入路径要么把它领回去（自愈）、要么该月写入永久失败。
@@ -69,14 +78,33 @@ const usageRetentionUnreclaimedMax = 20
 // **有界**：同一关系连续若干轮还在延后，它已经不是一次竞争，而是停摆。
 //
 // 取 5 的理由：
-//   - 调度间隔是 6h（internal/usageretention.DefaultTick）⇒ 5 轮 ≈ 30 小时。
-//     任何"读事务/VACUUM/管理员 DDL"都不可能自然持续这么久；反过来 1~2 轮
-//     （6~12h）完全可能是正常的运维窗口，提前告警就是噪音。
-//   - 管理端保存保留期会**额外**同步触发一轮（llmgateway/admin.go）⇒ 短时间内
-//     可以连跑好几轮，阈值太小会让"连点几次保存"就升级成告警。
+//   - 调度间隔是 6h（internal/usageretention.DefaultTick）⇒ 5 个**计入 streak 的**
+//     轮次 ≈ 30 小时。任何"读事务/VACUUM/管理员 DDL"都不可能自然持续这么久；
+//     反过来 1~2 轮（6~12h）完全可能是正常的运维窗口，提前告警就是噪音。
 //   - 它也刻意大于复审判据（`TestV2B_DeferralLiveness` 3 轮）的视野：那条判据
 //     编码的契约是"3 轮锁竞争都不得进失败面"，本阈值不改变那个契约。
+//
+// **计入 streak 的轮次 = 调度轮次（R10-H3 · W3-4）**：管理端保存保留期会**同步**
+// 多跑一轮（internal/llmgateway/admin.go 的 `CleanupUsageRetention`），连点几次
+// 保存就是几轮 —— 若按"调用次数"计数，分钟级就能把 streak 推到 5 ⇒
+// `deferred_stalled=true` 是**假告警**（与"≈30h 的真实停摆"不是一回事）。
+// 阈值语义因此收在**调度节奏**上：只有距上一次计入的轮次
+// ≥ usageRetentionDeferredStreakMinGap 的轮次才推进计数（见 advanceDeferredStreaks）。
 const usageRetentionDeferredStallRounds = 5
+
+// usageRetentionDeferredStreakMinGap 是两次**计入 streak** 的轮次之间的最小间隔
+// （R10-H3 · W3-4）。判据不是"谁调用了清理"（服务端唯一的周期执行者是 6h 的
+// usageretention.Scheduler，但管理端保存、启动补跑都走同一个函数），而是**节奏**：
+//
+//	6h 调度轮    —— 每轮都 ≥ 1h ⇒ 每轮都计入（阈值 5 轮 ≈ 30h 的语义保持不变）；
+//	管理端连点   —— 分钟级 ⇒ 同一关系最多把 streak 推到 1，够不到阈值；
+//	启动/管理端夹在调度轮之间 —— 最多让一小段停顿晚一轮被发现（≤1h，可接受，
+//	                             方向是**少报**而不是多报）。
+//
+// 取 1h：远小于调度周期（6h，不会漏掉真实的调度轮），又远大于"连点保存"的
+// 分钟级节奏（不会把运维动作读成停摆）。真实停摆的时间判据另有一条**单调**的
+// `oldest_unreclaimed_month`（见下），它不受本间隔影响。
+const usageRetentionDeferredStreakMinGap = time.Hour
 
 // usageRetentionRound 是一轮清理的过程事实（由 CleanupUsageRetention 填写）。
 type usageRetentionRound struct {
@@ -101,6 +129,11 @@ type usageRetentionRound struct {
 	// 没出现在这里、但本轮被处理过的关系（回收/保留/深后代/非表对象…）在
 	// advanceDeferredStreaks 里自然清零（streak 每轮按本清单重建）。
 	DeferredRelations []string
+	// Scanned 报告本轮**真的跑过**关系枚举（保留期读到 + catalog 扫描成功）。
+	// R10-H3（W3-3）：早退轮（保留期=0 / 读配置失败 / 扫描失败）在证据面上与
+	// "枚举完了、什么都在保留期内"完全不同 —— 前者不能清零 streak，也不能前移
+	// `oldest_unreclaimed_month`（"没观测" ≠ "已回收"）。
+	Scanned bool
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -157,7 +190,7 @@ type UsageRetentionStatus struct {
 	// `skipped_by_reason` —— 它回答"这一轮为什么没回收"，回答不了"同一条关系已经
 	// 连续多少轮没被回收"。于是"保留策略已经停摆"与"刚好有锁竞争"在运维面上同形。
 	//
-	// 现在有两个累积量（读数由子系统自己记账，装配层只读）：
+	// 现在有三个累积量（读数由子系统自己记账，装配层只读）：
 	//
 	//	deferred_streak        关系名 → **连续**被延后的轮数（本轮被正常处理即清零）
 	//	max_deferred_streak    上面那个 map 的最大值（告警规则可以直接用它）
@@ -166,16 +199,26 @@ type UsageRetentionStatus struct {
 	//	deferred_stalled       **是否有关系连续 ≥ usageRetentionDeferredStallRounds 轮延后**
 	//	                       —— 这是唯一需要进告警规则的那一位
 	//	stalled_relations      连续延后达阈值的关系名（有界抽样）
-	//	deferred_stalled_rounds 累计"出现过停摆关系"的轮数（计数，不因清零而回退）
+	//	deferred_stalled_rounds 累计"出现过停摆关系"的**轮数**（计数，不因清零而回退）
+	//	oldest_unreclaimed_*   **最早未回收的到期月**（单调，见下）
 	//
 	// 消费口径（运维脚本/告警规则）：
 	//
 	//	deferred_stalled == true  ⇒ 保留策略**已经停摆**：某条到期关系连续
-	//	                            ≥5 轮（6h/轮）既没被回收也没失败，必须人工看
-	//	                            （stalled_relations 点名；write_blocked_* 说明
-	//	                            是不是"当月写不进去"那一类）。
-	//	deferred_stalled_rounds > 0 且持续增长 ⇒ 停摆在反复发生（即使当前这一轮
-	//	                            deferred_stalled 已因关系被回收而清零）。
+	//	                            ≥5 个**调度轮次**（6h/轮 ≈ 30h；管理端保存保留期
+	//	                            触发的即时轮次不计入，见 W3-4）既没被回收也没
+	//	                            失败，必须人工看（stalled_relations 点名；
+	//	                            write_blocked_* 说明是不是"当月写不进去"那一类）。
+	//	deferred_stalled_rounds > 0 且持续增长 ⇒ 停摆**轮数**在累积（同一次停摆持续
+	//	                            N 轮即计 N —— 它不是"发生了几次"这个事件计数，
+	//	                            W3-5）；即使当前 deferred_stalled 已因关系被回收
+	//	                            而清零，它也不会回退。
+	//	oldest_unreclaimed_month  ⇒ **长期没回收**的权威判据（W3-3）：最早那个"本轮
+	//	                            枚举到、但既没回收也没失败之外"的到期月（YYYYMM），
+	//	                            外加它被首次观测到的时刻与已持续轮数。它**单调**：
+	//	                            早退轮/无证据轮不动它，单轮失败也不动它，只有该月
+	//	                            真的被回收（或不再落在回收面内）才前移 ⇒ 告警规则
+	//	                            与"改保留期"、"超时/失败交替"这些单轮动作无关。
 	//	failed_rounds（真失败面，与上一条互补）不得用来做这条判断：按 R10-A-03 的
 	//	                            契约，锁竞争/超时**不进**失败面。
 	//
@@ -191,6 +234,17 @@ type UsageRetentionStatus struct {
 	DeferredStalled       bool           `json:"deferred_stalled,omitempty"`
 	StalledRelations      []string       `json:"stalled_relations,omitempty"`
 	DeferredStalledRounds int64          `json:"deferred_stalled_rounds,omitempty"`
+	// OldestUnreclaimedMonth 是"最早未回收的到期月"（YYYYMM，单调；R10-H3 · W3-3）。
+	OldestUnreclaimedMonth  string `json:"oldest_unreclaimed_month,omitempty"`
+	OldestUnreclaimedReason string `json:"oldest_unreclaimed_reason,omitempty"`
+	OldestUnreclaimedSince  string `json:"oldest_unreclaimed_since,omitempty"`
+	OldestUnreclaimedRounds int64  `json:"oldest_unreclaimed_rounds,omitempty"`
+
+	// deferredStreakAt 是"上一次**计入** streak 的轮次"的结束时刻（W3-4 的节奏判据，
+	// 不进 JSON：它是内部账，对外只有 deferred_streak 的读数）。
+	deferredStreakAt time.Time
+	// oldestUnreclaimedAt 是"最早未回收月"首次被观测到的时刻（单调，见上）。
+	oldestUnreclaimedAt time.Time
 
 	// ---- 写入面（R9-D R9D-00，P0）：当月到底能不能落账 ----
 	//
@@ -216,6 +270,19 @@ type UsageRetentionStatus struct {
 	WriteBlockedAction string `json:"write_blocked_action,omitempty"`
 	WriteBlockedSince  string `json:"write_blocked_since,omitempty"`
 	WriteBlockedCount  int64  `json:"write_blocked_count,omitempty"`
+	// WriteBlockedOtherMonths 是**非当月**的布局型写失败（R10-H3 · W3-2）：
+	//   - 触发面：回收一个到期月时 `[DETACH 提交, DROP 提交]` 那段窗口里，对该月
+	//     （或任何迟到写入的月份）的 `ensureUsagePartition` 会以 `*partitionLayoutError`
+	//     失败。**当月永不落在回收面里**（写路径的 created_at=now），所以这一整类
+	//     事实既不在 `write_blocked_*`（只放行当月）里，也不在 `write_error_*`
+	//     （那是未分类的瞬时失败）里 ⇒ 旧实现下 `/readyz` 全绿（W3-2 实测）。
+	//   - 消费口径：非空 ⇒ 有**具体某个月**的分区布局挡住了写入，`relation` 就是
+	//     该月的分区名；`count` 累计次数、`since` 首次发生时刻。月份升序、有界
+	//     （上限见 usageRetentionUnreclaimedMax），总数在 WriteBlockedOtherCount。
+	//   - 该月下一次成功写入清掉它自己那一条；当月面（write_blocked_*）的语义与
+	//     告警口径**不因它改变**。
+	WriteBlockedOtherMonths []UsageWriteBlockOtherMonth `json:"write_blocked_other_months,omitempty"`
+	WriteBlockedOtherCount  int                         `json:"write_blocked_other_count,omitempty"`
 
 	// ---- 写入面（非分区布局的瞬时失败）----
 	//
@@ -234,6 +301,10 @@ type UsageRetentionStatus struct {
 	WriteErrorMessage string `json:"write_error_message,omitempty"`
 	WriteErrorSince   string `json:"write_error_since,omitempty"`
 	WriteErrorCount   int64  `json:"write_error_count,omitempty"`
+	// WriteErrorOtherMonths 是**非当月**的未分类瞬时写失败（与 W3-2 同因同形：
+	// 单槽实现下"别的月份出错"在 `/readyz` 上不可见，且会把当月的状态顶掉）。
+	WriteErrorOtherMonths []UsageWriteBlockOtherMonth `json:"write_error_other_months,omitempty"`
+	WriteErrorOtherCount  int                         `json:"write_error_other_count,omitempty"`
 }
 
 var (
@@ -295,7 +366,23 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 		st.LastRoundAt = round.EndedAt.UTC().Format(time.RFC3339)
 	}
 	// R10-G3（N2②/N3）：推进/清零"连续延后"计数，并在达阈值时升级为可见告警。
-	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations = advanceDeferredStreaks(st.DeferredStreak, round)
+	// R10-H3（W3-3/W3-4）：只认**有证据**的轮次（早退轮不清零），且只有距上一次
+	// 计入 ≥ usageRetentionDeferredStreakMinGap 的轮次才推进（管理端连点保存不计入）。
+	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations, st.deferredStreakAt =
+		advanceDeferredStreaks(st.DeferredStreak, st.deferredStreakAt, round)
+	// R10-H3（W3-3）：**最早未回收的到期月** —— 单调面，"长期没回收"的权威判据。
+	oldest := advanceOldestUnreclaimed(usageOldestUnreclaimed{
+		Month:  st.OldestUnreclaimedMonth,
+		Reason: st.OldestUnreclaimedReason,
+		Since:  st.oldestUnreclaimedAt,
+		Rounds: st.OldestUnreclaimedRounds,
+	}, round)
+	st.OldestUnreclaimedMonth, st.OldestUnreclaimedReason, st.OldestUnreclaimedRounds = oldest.Month, oldest.Reason, oldest.Rounds
+	st.oldestUnreclaimedAt = oldest.Since
+	st.OldestUnreclaimedSince = ""
+	if !oldest.Since.IsZero() {
+		st.OldestUnreclaimedSince = oldest.Since.UTC().Format(time.RFC3339)
+	}
 	st.DeferredRelations = append([]string(nil), round.DeferredRelations...)
 	if len(round.DeferredRelations) > 0 && !round.EndedAt.IsZero() {
 		st.LastDeferredAt = round.EndedAt.UTC().Format(time.RFC3339)
@@ -321,25 +408,150 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	usageRetentionStatusVal = st
 }
 
-// advanceDeferredStreaks 按本轮的过程事实推进"同一关系连续被延后"的计数（R10-G3）。
+// advanceDeferredStreaks 按本轮的过程事实推进"同一关系连续被延后"的计数（R10-G3；
+// R10-H3 修正了两条重置/推进路径）。
 //
 // 语义（判据与危害同构：**保留策略有没有在推进**）：
 //
-//	streak 每轮按"本轮被延后（lock-timeout / statement-timeout）的关系"**重建**：
-//	  本轮被延后的 +1；本轮出现但**没**被延后的（回收掉 / 仍在保留期 / 深后代
-//	  只补账 / 非表对象…）自然落回 0 —— "这一轮它被正常处理了"不是停摆。
+//	① 无证据轮（`!round.Scanned`：保留期=0 早退 / 读配置失败 / catalog 扫描失败）
+//	   **一律不动** —— 旧实现按"本轮延后清单"重建 map，早退轮的空清单把 streak 清零，
+//	   于是"两轮延后 + 一轮早退"永远到不了阈值（W3-3 ① 实测 `2 → 0`）。
+//	② 有证据轮：streak 按"本轮被延后（lock-timeout / statement-timeout /
+//	   settle-budget-timeout）的关系"**重建**；本轮枚举到但没被延后的关系
+//	   （回收掉 / 仍在保留期 / 深后代只补账 / 非表对象…）落回 0 —— "这一轮它被
+//	   正常处理了"不是停摆。
+//	③ 推进（+1）只在**跨调度轮次**时发生（W3-4）：距上一次计入的轮次
+//	   ≥ usageRetentionDeferredStreakMinGap 才 +1；管理端保存保留期同步触发的
+//	   即时轮次（分钟级）只把新关系记到 1，不会把 streak 推过阈值。
 //
-// 返回新的 streak、其中的最大值、以及达到阈值的关系名（升序，有界）。
-// 关系名会随月份滚动而永久增加，而 streak 只含本轮的键 ⇒ 规模有界（≤ 本轮关系数）。
-func advanceDeferredStreaks(prev map[string]int, round usageRetentionRound) (map[string]int, int, []string) {
+// 返回新的 streak、其中的最大值、达到阈值的关系名（升序，有界）、以及新的"上次
+// 计入时刻"。关系名会随月份滚动而永久增加，而 streak 只含本轮的键 ⇒ 规模有界。
+func advanceDeferredStreaks(prev map[string]int, prevAt time.Time, round usageRetentionRound) (map[string]int, int, []string, time.Time) {
+	if !round.Scanned {
+		// 无证据轮：不加、不清、不推进（W3-3 ①）。
+		return prev, maxDeferredStreak(prev), stalledRelations(prev), prevAt
+	}
+	// 节奏判据（W3-4）：首轮/距上次计入 ≥ 间隔 ⇒ 本轮计入。
+	counts := prevAt.IsZero() || round.EndedAt.Sub(prevAt) >= usageRetentionDeferredStreakMinGap
 	next := make(map[string]int, len(round.DeferredRelations))
 	for _, rel := range round.DeferredRelations {
-		next[rel] = prev[rel] + 1
+		n := prev[rel]
+		if counts {
+			n++
+		}
+		if n < 1 {
+			// 新的延后关系：即使这一轮不计入，也要让它从 1 起算（否则读作"没延后"）。
+			n = 1
+		}
+		next[rel] = n
 	}
 	if len(next) == 0 {
 		next = nil
 	}
-	return next, maxDeferredStreak(next), stalledRelations(next)
+	at := prevAt
+	if counts && len(round.DeferredRelations) > 0 {
+		at = round.EndedAt
+	}
+	return next, maxDeferredStreak(next), stalledRelations(next), at
+}
+
+// usageOldestUnreclaimed 是"最早未回收的到期月"的内部账（对外四个 JSON 字段）。
+type usageOldestUnreclaimed struct {
+	Month  string // YYYYMM
+	Reason string // 该月这一轮没被回收的原因（skip_reasons 的封闭取值，或 failed）
+	Since  time.Time
+	Rounds int64
+}
+
+// advanceOldestUnreclaimed 推进**单调**的"最早未回收月"（R10-H3 · W3-3）。
+//
+// 为什么需要它：`deferred_stalled` 表达的是"连续 N 轮**都因超时**没回收"，而"长期
+// 没回收"还有两条它覆盖不到的形态 —— 超时轮与**真失败轮**交替（失败轮也把这月的
+// 行留在盘上，却不进 streak），以及"改保留期"造成的轮次重置。于是"长期没回收"
+// 不蕴含"必达 5 轮阈值"。这个字段直接回答"**最早那个没被回收的到期月是什么、已经
+// 持续多久**"，判据与危害同构，且它是**单调**的：
+//
+//	无证据轮（!Scanned）        —— 不动（"没观测" ≠ "已回收"）；
+//	本轮枚举到的未回收集合非空  —— 取其中**最早**的月；比当前更早则前移，
+//	                             与当前同月则轮数 +1，比当前更晚则说明更早那个月
+//	                             已经不在扫描面里（已被回收）⇒ 前移并重置起点；
+//	本轮枚举到的全都回收了      —— 清空（真的没有未回收月了）。
+//
+// 未回收集合 = 本轮 Unreclaimed（本轮没回收的关系，含超时延后/深后代/保留期内/
+// 非表对象…）∪ FailedRelations（真失败）。两条都取"名字 −> 月"（`usage_<YYYYMM>`
+// 或中间父表 `usage_<YYYY>` 视作该年 1 月起）。
+func advanceOldestUnreclaimed(prev usageOldestUnreclaimed, round usageRetentionRound) usageOldestUnreclaimed {
+	if !round.Scanned {
+		return prev
+	}
+	month, reason, ok := oldestUnreclaimedInRound(round)
+	if !ok {
+		return usageOldestUnreclaimed{}
+	}
+	switch {
+	case prev.Month == "":
+		return usageOldestUnreclaimed{Month: month, Reason: reason, Since: round.EndedAt, Rounds: 1}
+	case month < prev.Month:
+		// 出现了更早的未回收月（多级布局/更早年月的分区被枚举到）⇒ 前移。
+		return usageOldestUnreclaimed{Month: month, Reason: reason, Since: round.EndedAt, Rounds: 1}
+	case month == prev.Month:
+		p := prev
+		p.Reason = reason
+		p.Rounds++
+		return p
+	default:
+		// 更早的那个月已经不在这轮的未回收集合里 ⇒ 它被回收了 ⇒ 单调前移。
+		return usageOldestUnreclaimed{Month: month, Reason: reason, Since: round.EndedAt, Rounds: 1}
+	}
+}
+
+// oldestUnreclaimedInRound 从本轮的过程事实里取"最早未回收的到期月"（升序取首个）。
+func oldestUnreclaimedInRound(round usageRetentionRound) (month, reason string, ok bool) {
+	consider := func(rel, why string) {
+		m, mok := retentionMonthOfRelation(rel)
+		if !mok {
+			return
+		}
+		if !ok || m < month {
+			month, reason, ok = m, why, true
+		}
+	}
+	for _, item := range round.Unreclaimed {
+		rel, why := item, "skipped"
+		if i := strings.IndexByte(item, '('); i > 0 && strings.HasSuffix(item, ")") {
+			rel, why = item[:i], item[i+1:len(item)-1]
+		}
+		consider(rel, why)
+	}
+	for _, rel := range round.FailedRelations {
+		consider(rel, "failed")
+	}
+	return month, reason, ok
+}
+
+// retentionMonthOfRelation 把关系名折算成"它覆盖的最早北京月"（YYYYMM）：
+//
+//	usage_202606   ⇒ 202606（月分区）
+//	usage_2026     ⇒ 202601（中间父表：它覆盖的最早月是 1 月）
+//	其它名字       ⇒ ok=false（不进"最早未回收月"的判据面）
+func retentionMonthOfRelation(rel string) (string, bool) {
+	if m, ok := usageMonthRelationOf(rel); ok {
+		return monthKey(m), true
+	}
+	const prefix = "usage_"
+	if !strings.HasPrefix(rel, prefix) {
+		return "", false
+	}
+	key := rel[len(prefix):]
+	if len(key) != 4 {
+		return "", false
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < '0' || key[i] > '9' {
+			return "", false
+		}
+	}
+	return key + "01", true
 }
 
 func maxDeferredStreak(streak map[string]int) int {
@@ -386,7 +598,7 @@ func formatRetentionSkipReasons(reasons map[string]int) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// usageWriteBlockState 是"当月计量写入被分区布局挡住"的**进程内**过程事实
+// usageWriteBlockState 是"某个月的计量写入被挡住"的**进程内**过程事实
 // （R9-D R9D-00）。子系统自己记账，装配层只读，不推断。
 type usageWriteBlockState struct {
 	Month  string // 被挡住的北京月（YYYYMM）
@@ -397,12 +609,29 @@ type usageWriteBlockState struct {
 	Count  int64
 }
 
-var usageWriteBlockVal atomic.Pointer[usageWriteBlockState]
+// usageWriteStateTable 是"月 → 状态"的**不可变**快照（写时复制）。热路径（成功
+// 写入）只做一次 atomic load；记账路径（失败）复制一份再整表 publish。
+//
+// R10-H3（W3-2）：此前这里是一个**单槽**（`atomic.Pointer[usageWriteBlockState]`），
+// 槽里只留"最近一次失败的月份" ⇒ 两个洞：
+//   - 非当月的失败在 `/readyz` 上完全不可见（`write_blocked_*` 只放行当月）；
+//     而"回收一个到期月"的 `[DETACH, DROP]` 窗口里，唯一能撞上的**恰恰是到期月**
+//     （W3-2 实测 `write_blocked=false`）；
+//   - 反过来，一次非当月的失败会把**当月**的状态顶掉 ⇒ 当月不可写也会读成绿。
+//
+// 现在按月份分槽，出口同时给出"当月"（既有字段语义逐字保留）与"其它月份"。
+type usageWriteStateTable map[string]usageWriteBlockState
+
+// usageWriteStateMonthsMax 是写入面保留的月份上限（有界，避免被长期部署的月份数
+// 撑大；超出时优先淘汰既不是当月、也不是本次写入的那个最早条目）。
+const usageWriteStateMonthsMax = 12
+
+var usageWriteBlockVal atomic.Pointer[usageWriteStateTable]
 
 // usageWriteErrorVal 是"未分类的**瞬时**写入失败"（kind="other"）的进程内过程事实
 // （R10-A-06）。与 usageWriteBlockVal 分开存放：判据面不同（分区布局 vs 瞬时错误），
 // 处置动作也不同（DDL vs 重试/看日志），混在一个字段里就是语义漂移。
-var usageWriteErrorVal atomic.Pointer[usageWriteBlockState]
+var usageWriteErrorVal atomic.Pointer[usageWriteStateTable]
 
 // noteUsagePartitionWriteFailure 记下"这一笔计量没能落账"（写路径唯一记账点）。
 //
@@ -424,53 +653,170 @@ func noteUsagePartitionWriteFailure(month time.Time, err error) {
 	storeWriteBlock(&usageWriteBlockVal, key, kind, action, msg)
 }
 
-// storeWriteBlock 按"同月累加、跨月重置"的语义写入一份写入面状态。
-func storeWriteBlock(slot *atomic.Pointer[usageWriteBlockState], key, kind, action, msg string) {
+// storeWriteBlock 按"同月累加、跨月各留一份"的语义写入一份写入面状态。
+func storeWriteBlock(slot *atomic.Pointer[usageWriteStateTable], key, kind, action, msg string) {
 	prev := slot.Load()
-	next := &usageWriteBlockState{Month: key, Since: time.Now(), Kind: kind, Action: action, Err: msg, Count: 1}
-	if prev != nil && prev.Month == key {
-		next.Since = prev.Since
-		next.Count = prev.Count + 1
+	next := make(usageWriteStateTable, usageWriteStateMonthsMax)
+	if prev != nil {
+		for k, v := range *prev {
+			next[k] = v
+		}
 	}
-	slot.Store(next)
+	st := usageWriteBlockState{Month: key, Since: time.Now(), Kind: kind, Action: action, Err: msg, Count: 1}
+	if old, ok := next[key]; ok {
+		st.Since = old.Since
+		st.Count = old.Count + 1
+	}
+	next[key] = st
+	evictOldestWriteState(next, key)
+	slot.Store(&next)
+}
+
+// evictOldestWriteState 把表压回上限：先淘汰"最早的那条"里**既不是当月、也不是
+// 本次写入**的月份（当月是消费面最要紧的一位，任何情况下都留）。
+func evictOldestWriteState(table usageWriteStateTable, keep string) {
+	if len(table) <= usageWriteStateMonthsMax {
+		return
+	}
+	current := monthKey(BeijingMonth(time.Now()))
+	victim, victimSince := "", time.Time{}
+	for k, v := range table {
+		if k == keep || k == current {
+			continue
+		}
+		if victim == "" || v.Since.Before(victimSince) {
+			victim, victimSince = k, v.Since
+		}
+	}
+	if victim != "" {
+		delete(table, victim)
+	}
 }
 
 // storeUsageWriteError 同上（write_error 面：无 action）。
-func storeUsageWriteError(slot *atomic.Pointer[usageWriteBlockState], key, kind, msg string) {
+func storeUsageWriteError(slot *atomic.Pointer[usageWriteStateTable], key, kind, msg string) {
 	storeWriteBlock(slot, key, kind, "", msg)
 }
 
-// noteUsagePartitionWriteOK 在**成功**创建/确认当月分区后清掉挡住状态。
+// noteUsagePartitionWriteOK 在**成功**创建/确认某月分区后清掉该月的挡住状态。
 //
 // 只在"确实记过同一个月的失败"时才做 CompareAndSwap（热路径是一次 atomic load，
 // 没有互斥、没有分配）。两个面一起清：一次成功写入同时证明"分区布局可用"与
-// "刚才那次瞬时失败已过去"。
+// "刚才那次瞬时失败已过去"。**别的月份**的读数不受影响（各月独立。
+// 这正是 W3-2 要的：当月恢复正常不得抹掉"到期月写不进去"这条事实，
+// 反之亦然）。
 func noteUsagePartitionWriteOK(month time.Time) {
 	key := monthKey(BeijingMonth(month))
-	if prev := usageWriteBlockVal.Load(); prev != nil && prev.Month == key {
-		usageWriteBlockVal.CompareAndSwap(prev, nil)
+	clearUsageWriteState(&usageWriteBlockVal, key)
+	clearUsageWriteState(&usageWriteErrorVal, key)
+}
+
+// clearUsageWriteState 从表里删掉某个月（写时复制 + CAS 重试，成功路径不加锁）。
+func clearUsageWriteState(slot *atomic.Pointer[usageWriteStateTable], key string) {
+	for {
+		prev := slot.Load()
+		if prev == nil {
+			return
+		}
+		if _, ok := (*prev)[key]; !ok {
+			return
+		}
+		next := make(usageWriteStateTable, len(*prev))
+		for k, v := range *prev {
+			if k == key {
+				continue
+			}
+			next[k] = v
+		}
+		var ptr *usageWriteStateTable
+		if len(next) > 0 {
+			ptr = &next
+		}
+		if slot.CompareAndSwap(prev, ptr) {
+			return
+		}
 	}
-	if prev := usageWriteErrorVal.Load(); prev != nil && prev.Month == key {
-		usageWriteErrorVal.CompareAndSwap(prev, nil)
-	}
+}
+
+// UsageWriteBlockOtherMonth 是 `/readyz` 的"**非当月**写入被阻塞/失败"的一条读数
+// （R10-H3 · W3-2）。
+//
+// 为什么必须单独给出来：`write_blocked_*` 的语义是"**当月**计量写入被分区布局挡住"
+// （用户面后果 = 该月每一次对话 503），这个语义必须保留；但"回收一个到期月"的
+// `[DETACH, DROP]` 窗口里，能撞上布局阻塞的恰恰是**到期月**（当月永不落在回收面里）
+// ⇒ 只报当月等于把三段式新造的那个中间态的写失败整片藏起来。
+//
+// 消费口径：`write_blocked_other_months[]` 非空 ⇒ **有别的月份**（relation = 该月的
+// 分区名）写不进去；`count` 是累计次数、`since` 是首次发生的时刻。判据边界：
+//   - 它**不**改变 `write_blocked`（当月面）的语义与告警口径；
+//   - 月份是**布局型**失败（有封闭 kind 与可执行 action 时才进这一面）；
+//     未分类的瞬时失败走 `write_error_other_months`（同形）；
+//   - 该月下一次成功写入会清掉它自己的那一条（与当月面同源）。
+type UsageWriteBlockOtherMonth struct {
+	Month    string `json:"month"`
+	Relation string `json:"relation"`
+	Kind     string `json:"kind,omitempty"`
+	Count    int64  `json:"count"`
+	Since    string `json:"since,omitempty"`
 }
 
 // usageWriteBlockForReadyz 返回**当月**的写入阻塞状态（别的月份的历史阻塞不冒充当月）。
 func usageWriteBlockForReadyz() *usageWriteBlockState {
-	return usageWriteStateForReadyz(&usageWriteBlockVal)
+	return usageWriteStateForReadyz(&usageWriteBlockVal, monthKey(BeijingMonth(time.Now())))
 }
 
 // usageWriteErrorForReadyz 返回**当月**的瞬时写入失败状态。
 func usageWriteErrorForReadyz() *usageWriteBlockState {
-	return usageWriteStateForReadyz(&usageWriteErrorVal)
+	return usageWriteStateForReadyz(&usageWriteErrorVal, monthKey(BeijingMonth(time.Now())))
 }
 
-func usageWriteStateForReadyz(slot *atomic.Pointer[usageWriteBlockState]) *usageWriteBlockState {
+// usageWriteOtherMonthsForReadyz 返回**非当月**的写入面读数（升序、有界；W3-2）。
+func usageWriteOtherMonthsForReadyz(slot *atomic.Pointer[usageWriteStateTable]) ([]UsageWriteBlockOtherMonth, int) {
 	prev := slot.Load()
-	if prev == nil || prev.Month != monthKey(BeijingMonth(time.Now())) {
+	if prev == nil || len(*prev) == 0 {
+		return nil, 0
+	}
+	current := monthKey(BeijingMonth(time.Now()))
+	out := make([]UsageWriteBlockOtherMonth, 0, len(*prev))
+	for k, v := range *prev {
+		if k == current {
+			continue
+		}
+		rel := "usage_" + v.Month
+		if v.Month == "" {
+			rel = ""
+		}
+		out = append(out, UsageWriteBlockOtherMonth{
+			Month: v.Month, Relation: rel, Kind: v.Kind, Count: v.Count,
+			Since: formatUsageWriteSince(v.Since),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Month < out[j].Month })
+	total := len(out)
+	if total > usageRetentionUnreclaimedMax {
+		out = out[:usageRetentionUnreclaimedMax]
+	}
+	return out, total
+}
+
+func formatUsageWriteSince(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// usageWriteStateForReadyz 取某个槽位里**指定月份**的状态（副本；没有则 nil）。
+func usageWriteStateForReadyz(slot *atomic.Pointer[usageWriteStateTable], month string) *usageWriteBlockState {
+	prev := slot.Load()
+	if prev == nil {
 		return nil
 	}
-	cp := *prev
+	st, ok := (*prev)[month]
+	if !ok {
+		return nil
+	}
+	cp := st
 	return &cp
 }
 
@@ -511,6 +857,9 @@ func CurrentUsageRetentionStatus() UsageRetentionStatus {
 			st.WriteBlockedSince = wb.Since.UTC().Format(time.RFC3339)
 		}
 	}
+	// W3-2：**非当月**的布局型写失败也要可读（到期月的 `[DETACH, DROP]` 窗口是
+	// 唯一能撞上它的地方，而它恰恰不是当月）。
+	st.WriteBlockedOtherMonths, st.WriteBlockedOtherCount = usageWriteOtherMonthsForReadyz(&usageWriteBlockVal)
 	// 未分类的瞬时写入失败（R10-A-06）：单列一面，不冒充"分区布局阻塞"。
 	if we := usageWriteErrorForReadyz(); we != nil {
 		st.WriteError = true
@@ -521,6 +870,7 @@ func CurrentUsageRetentionStatus() UsageRetentionStatus {
 			st.WriteErrorSince = we.Since.UTC().Format(time.RFC3339)
 		}
 	}
+	st.WriteErrorOtherMonths, st.WriteErrorOtherCount = usageWriteOtherMonthsForReadyz(&usageWriteErrorVal)
 	return st
 }
 

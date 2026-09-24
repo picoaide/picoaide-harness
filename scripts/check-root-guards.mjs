@@ -72,13 +72,24 @@ import { fileURLToPath } from 'node:url'
 // 逐字节相同意味着"修了口径但没接线"）。`check-workspaces.mjs` 是编排器 CLI，但它在
 // 文件末尾用 `isEntryPoint()` 守卫了 `main()` ⇒ **被 import 时零副作用**（同一轮修复里
 // 也把本文件改成同样的形态：`check-root-guards.mjs` 被 import 时同样什么都不跑）。
-import { formatFailureReport } from './check-workspaces.mjs'
+import { formatFailureReport, selfTestVerdictClassifier } from './check-workspaces.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ORCHESTRATOR = join(ROOT, 'scripts', 'check-workspaces.mjs')
 
 /** `selfTestGuardEnvironment()` 至少执行的断言条数(3 条键表 + 2 条真子进程行为)。 */
 const SELFTEST_GUARD_ENV_ASSERTIONS = 5
+/**
+ * `selfTestVerdictClassifier()` 至少执行的断言条数（下限，防"把断言表掏空"）。
+ *
+ * 为什么同一份自检在**两个**调用方各接一次：本运行器是 **docs-only PR 的唯一防线**
+ * （那条路径上编排器根本不跑），而失败详情走的就是这套形态表 —— 形态表失效时
+ * "守卫失败"在日志里会退化成「未找到判定行」或干脆整行不见。编排器侧（`yarn check` /
+ * CI gate job）也接了一处，见 `check-workspaces.mjs` 的 `main()`。
+ */
+const SELFTEST_VERDICT_ASSERTIONS = 60
+/** `selfTestCorepackGuidance()` 至少执行的断言条数（下限，防"把断言表掏空"）。 */
+const SELFTEST_COREPACK_GUIDANCE_ASSERTIONS = 4
 
 /** 下限（不是清单）：这些守卫的判据覆盖文档/提交信息，见文件头。 */
 const MINIMUM_REQUIRED_GUARDS = [
@@ -120,7 +131,7 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '500539162a2fc542bdd7361d58412070e1e9840136acaa44e7ae2b5fa0b50339' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '55710c7789cef9b4861ec48f8fe6e210cce26e4b4faba631c9469868d67b2d57' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '7f4f3446a4f936d4ac4cd9201c92784e9b51f19ccdd99bf3c6ca5a10c75edcc1' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: '92697e806d4402f67d5bf7fe9a06ea2d4774a4dd30c0f62e7105861523bc8f44' }],
@@ -615,7 +626,8 @@ function runGuard(guard, guardChildEnv) {
  */
 
 /**
- * `COREPACK_HOME` 被清洗掉时的**离线处置指引**（第十轮复审 V1 的 P3-D4，二选一的第②条）。
+ * `COREPACK_HOME` 被清洗掉时的**离线处置指引**（第十轮复审 V1 的 P3-D4，二选一的第②条；
+ * 第十轮复审 W1 的 N3 订正第①条的操作）。
  *
  * 取舍与理由（**不许**改成"静默放行"）：
  *   · 第①条（把 `COREPACK_HOME` 加进 `GUARD_CHILD_ENV_ALLOWED` 并做内容对拍）被否决 ——
@@ -627,19 +639,78 @@ function runGuard(guard, guardChildEnv) {
  *   · 第②条（保持清洗 + 明说处置）：fail-closed 不变，把代价写进**失败文案** ——
  *     靠 `COREPACK_HOME` 预置、不允许出网的 runner 必须改为预热**默认**缓存
  *     （`$HOME/.cache/node/corepack`）或把 yarn 装进镜像。
+ *
+ * 文案必须**可执行**（W1 复审 N3 的 P3：旧文案括号里写「`corepack enable` 或一次
+ * `yarn install` 即可」，而 `corepack enable` **不预热任何东西**）：
+ *   · 实测（W1 探针，`HOME` 与 `--install-directory` 都指向临时目录）：`corepack enable`
+ *     EXIT=0 之后 `$HOME/.cache/node/corepack` **仍不存在**，而 `corepack install -g
+ *     yarn@4.18.0` 真的把它写出来、之后 `corepack yarn --version` = `4.18.0`；
+ *   · 静态佐证：corepack 的 `enable` 只走 `generateLink()`（建 shim 软链，不下载），
+ *     默认缓存路径的真源是 `getCorepackHomeFolder() = COREPACK_HOME ?? (XDG_CACHE_HOME ??
+ *     $HOME/.cache) + /node/corepack`；
+ *   · 所以第①条改成"**需要联网跑一次** `corepack install -g yarn@4.18.0`"（等价写法：在
+ *     runner 上跑一次 `yarn install` —— 它同样会按 `packageManager` 字段把 4.18.0 拉进默认
+ *     缓存），并把 `corepack enable` **明确标成做不到这件事**。为什么这样在离线 runner 上
+ *     成立：预热发生在**构建/准备阶段**（镜像构建或首次联网启动），运行期只剩读缓存；
+ *     缓存一旦就位，corepack 不再访问 registry（`corepack yarn --version` 实测可用）。
  */
 const COREPACK_HOME_GUIDANCE = [
   '注意：本次运行**丢弃了 `COREPACK_HOME`**（它属于"谁能解释 `yarn`"的危险族 —— 保留它等于',
   '保留一条已被端到端验证过的解释器替换通道：预置的 `v1/yarn/<ver>/yarn.js` 只要内容被替换，',
   '全部根守卫就会**换成那个解释器**跑而判据侧零反应）。',
   '⇒ 离线 / 自托管 runner 的正当做法（二选一，都不需要放开清洗）：',
-  '   ① 预热**默认**缓存 `$HOME/.cache/node/corepack`（`corepack enable` 或一次 `yarn install` 即可），或',
-  '   ② 把 yarn 4.18.0 直接装进镜像（例如 `corepack install -g yarn@4.18.0`）。',
+  '   ① **联网跑一次**，把 yarn 4.18.0 预热进**默认**缓存 `$HOME/.cache/node/corepack`：',
+  '      `corepack install -g yarn@4.18.0`（等价：在 runner 上跑一次 `yarn install`）——',
+  '      预热放在构建/准备阶段即可，之后运行期只读缓存、不再访问 registry。',
+  '      ⚠️ `corepack enable` **做不到这件事**（它只创建 shim 软链、不下载任何东西）⇒',
+  '      照它做缓存仍为空，corepack 照样去 registry 取 yarn，症状与这条指引想避免的完全一致。',
+  '   ② 把 yarn 4.18.0 直接装进镜像（例如在 Dockerfile 里跑 `corepack install -g yarn@4.18.0`，',
+  '      或让基础镜像自带），使 runner 完全不需要预热缓存。',
   '  靠 `COREPACK_HOME=<预热目录>` 供网的 runner 请改走上面两条，否则 corepack 会去 npmjs 取 yarn。',
 ].join('\n')
 
 /** 失败详情 = 编排器导出的**唯一实现**（见上面的说明）。 */
 const summarize = output => formatFailureReport(output)
+
+/**
+ * `COREPACK_HOME_GUIDANCE` 的**内容自检**（第十轮复审 W1 的 N3）：文案本身也要有判据。
+ *
+ * 为什么需要（而不是"文案改对了就行"）：这条指引是在**离线 runner 上唯一可执行的补救**，
+ * 而它上一版恰好写了一条**做不到的操作**（`corepack enable` —— 实测只建 shim、不预热默认
+ * 缓存）。文案不是代码，但它的错误代价与代码等价：照做的人在断网 runner 上会得到与
+ * "没有指引"完全一样的失败。判据分两侧：
+ *   · **正**：必须给出 W1 实测可执行的那条命令（`corepack install -g yarn@4.18.0`）与默认
+ *     缓存路径 `$HOME/.cache/node/corepack`、"装进镜像"这条退路；
+ *   · **负**：`corepack enable` 只允许以"**做不到这件事**"的形态出现 —— 一旦它又被写成
+ *     "即可/就行"（旧文案的形态），本自检当场红。
+ *
+ * 判据是**文本级**的（不是执行级）：跑一次 `corepack install` 需要出网 + 可写 HOME，
+ * 门禁里不能做。文案的真实性由一次性实测取证（见 REPORT 的探针日志），这里守的是"别再退回
+ * 那条被证伪的说法"。纯函数：不读磁盘、不 spawn、不抛异常。
+ * @returns `{ failures, assertions }`。
+ */
+export function selfTestCorepackGuidance() {
+  const failures = []
+  let assertions = 0
+  const check = (ok, message) => {
+    assertions += 1
+    if (!ok) failures.push(message)
+  }
+  check(COREPACK_HOME_GUIDANCE.includes('corepack install -g yarn@4.18.0'),
+    '[corepack-guidance] 指引必须给出**实测可执行**的预热命令 `corepack install -g yarn@4.18.0`'
+    + '（W1 实测：它真的把 4.18.0 写进默认缓存；旧文案那条 `corepack enable` 不预热任何东西）')
+  check(COREPACK_HOME_GUIDANCE.includes('$HOME/.cache/node/corepack')
+    && COREPACK_HOME_GUIDANCE.includes('装进镜像'),
+  '[corepack-guidance] 指引必须同时给出默认缓存路径 `$HOME/.cache/node/corepack` 与'
+  + '"把 yarn 装进镜像"这条退路（只清洗不给出路 = 把离线 runner 静默推向 npmjs）')
+  check(/corepack enable[^\n]*做不到/u.test(COREPACK_HOME_GUIDANCE),
+    '[corepack-guidance] `corepack enable` 必须以"**做不到**（只建 shim、不下载）"的形态出现 ——'
+    + '它是这条指引里唯一被实测证伪的操作')
+  check(!/corepack enable[^\n]*(?:即可|就行|即可预热|也可以)/u.test(COREPACK_HOME_GUIDANCE),
+    '[corepack-guidance] 不得再把 `corepack enable` 写成"即可/就行"（W1 N3 的原始缺陷：'
+    + '照它做默认缓存仍为空，corepack 照样去 registry 取 yarn）')
+  return { failures, assertions }
+}
 
 async function runPool(tasks, concurrency, results, guardChildEnv) {
   let cursor = 0
@@ -723,6 +794,46 @@ async function main() {
     }
     console.error('  ⇒ 拒绝在"子进程环境清洗失效"的情况下继续:它失效时门禁会打印'
       + '「16 个根守卫:16 通过、0 失败」而守卫的退出码全被改写(第十轮审计 D-03)。')
+    process.exit(2)
+  }
+
+  // 判定形态表的**逐形态自检**(第十轮复审 W1 的 N4/N5):本运行器是 docs-only PR 的
+  // 唯一防线,而它的失败详情就是这套形态表 —— 表失效时诊断面整行消失,门禁却仍 EXIT=1。
+  // 与上一条同一取向:配置/自检失败 ⇒ exit 2,不降级成告警。
+  const verdictSelftest = selfTestVerdictClassifier()
+  if (!Array.isArray(verdictSelftest?.failures) || typeof verdictSelftest?.assertions !== 'number') {
+    console.error('check-root-guards: selfTestVerdictClassifier() 的返回形状不对(需要 {failures, assertions})')
+    process.exit(2)
+  }
+  if (verdictSelftest.failures.length > 0 || verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+    for (const detail of verdictSelftest.failures) console.error(`check-root-guards: ${detail}`)
+    if (verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+      console.error(`check-root-guards: 判定形态自检只执行了 ${verdictSelftest.assertions} 条断言`
+        + `(期望 ≥ ${SELFTEST_VERDICT_ASSERTIONS}) ⇒ 自检被掏空。`)
+    }
+    console.error('  ⇒ 拒绝在"失败详情看不见"的情况下继续:形态表少一条,那种失败行就会在'
+      + 'CI 日志里整行消失(PR #146 的现场),而"看不见"与"没有失败"几乎同形。')
+    process.exit(2)
+  }
+
+  // `COREPACK_HOME` 离线指引的**内容自检**(第十轮复审 W1 的 N3):这条指引是离线 runner 上
+  // 唯一可执行的补救,而它上一版写的是一条**做不到的操作**(`corepack enable` 不预热缓存)。
+  // 文案错误的代价与代码等价:照做的人在断网 runner 上得到与"没有指引"一样的失败。
+  const corepackGuidanceSelftest = selfTestCorepackGuidance()
+  if (!Array.isArray(corepackGuidanceSelftest?.failures)
+    || typeof corepackGuidanceSelftest?.assertions !== 'number') {
+    console.error('check-root-guards: selfTestCorepackGuidance() 的返回形状不对(需要 {failures, assertions})')
+    process.exit(2)
+  }
+  if (corepackGuidanceSelftest.failures.length > 0
+    || corepackGuidanceSelftest.assertions < SELFTEST_COREPACK_GUIDANCE_ASSERTIONS) {
+    for (const detail of corepackGuidanceSelftest.failures) console.error(`check-root-guards: ${detail}`)
+    if (corepackGuidanceSelftest.assertions < SELFTEST_COREPACK_GUIDANCE_ASSERTIONS) {
+      console.error(`check-root-guards: 离线指引自检只执行了 ${corepackGuidanceSelftest.assertions} 条断言`
+        + `(期望 ≥ ${SELFTEST_COREPACK_GUIDANCE_ASSERTIONS}) ⇒ 自检被掏空。`)
+    }
+    console.error('  ⇒ 拒绝在"给离线 runner 的补救指引不成立"的情况下继续(W1 复审 N3:'
+      + ' 旧文案让人跑 `corepack enable`,而它只建 shim、不预热默认缓存)。')
     process.exit(2)
   }
 

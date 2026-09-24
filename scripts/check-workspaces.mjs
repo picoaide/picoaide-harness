@@ -658,12 +658,21 @@ function parseArgs(argv) {
  * `\x1b[31m×\x1b[39m …` 一条都不匹配（本地无 TTY ⇒ 无 ANSI ⇒ "本地绿、CI 瞎"）。
  * 归一化**只用于分类**：打印仍是原行（短输出"逐字原样"的字节不许变）。
  *
+ * **"栈内"形态的明确策略**（第十轮复审 W1 的 N5）：栈帧/包装/追踪里的行**同样锚定**，
+ * 不靠兜底段（兜底段有界：未锚定时 20 行、混合场景 10 行，真判定行一多就被挤出去）。
+ * 具体锚进表里的行首前缀：pytest `E   `（`E` + ≥3 空格）、python
+ * `Traceback (most recent call last):`、GitHub 注解 `##[error]`、npm `npm error`、
+ * node 栈帧 `node:internal/…`、jest `●`、以及 vitest 未处理拒绝的**正文**（`TypeError:` 一类
+ * `*Error:` 栈首）与无 `⎯` 装饰的 `Unhandled Rejection`。取舍：这些形态都是**行首可判别**的
+ * 固定前缀，锚定它们不会把进度噪声拉进判定段（噪声另有 `VERDICT_NOISE` 一档）；相反，指望
+ * "兜底段一定能看见"是**错的** —— 混合场景的兜底只有 10 行，且它在判定段之外。
+ *
  * 兜底：一条判定行都没锚到时，**不是**静默给一个空段，而是 fail-loud 打印
  * 「未找到判定行」+ 判定形态可能没登记 + `--full-output` 的出路（见
  * {@link summarizeBoundedFailure} 的 `missingVerdict` / `text`）。**混合**场景（有判定行、
  * 但也有未锚定的疑似错误行）同样不许静默丢：那些行进有界的「其它疑似错误行」段。
  */
-const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|FAIL(?:ED)?\b|-{3,}[ \t]*FAIL\b|panic\b|not ok\b|AssertionError\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|error TS\d+|\d+:\d+[ \t]+error\b|Tests?\s+\d+\s+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯|(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites)"\s*:\s*(?!0\b)\d|(?:\{.*)?"success"\s*:\s*false\b)/u
+const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|●|FAIL(?:ED)?\b|-{3,}[ \t]*FAIL\b|panic\b|not ok\b|AssertionError\b|[A-Za-z_$][\w$]*Error\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|\S+:\d+:\d+[ \t]+-[ \t]+error TS\d+|error TS\d+|\d+:\d+[ \t]+error\b|Tests?:?[ \t]+\d+[ \t]+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯|##\[error\]|npm error\b|Traceback \(most recent call last\):|E {3,}\S|node:internal\/|Unhandled (?:Rejection|Errors?)\b|(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites|errorCount|fatalErrorCount)"\s*:\s*(?!0\b)\d|(?:\{.*)?"success"\s*:\s*false\b|(?:\{.*)?"Action"\s*:\s*"fail")/u
 /**
  * ANSI 控制序列的剥离（**只用于分类，绝不用于打印**）—— 2026-09-24 第十轮复审 V1 的 P1，
  * 由主控从 PR #146 的真实 CI 日志复现：
@@ -676,7 +685,17 @@ const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|FAIL(?:ED)?\b|-{3,}[ \
  *
  * 覆盖四类：CSI（`ESC [ … 字母`）、OSC（`ESC ] … BEL` 或 `ESC \`；**未闭合的吃到行尾**，
  * 否则一条被截断的进度条能把整行判定词藏起来）、字符集指定（`ESC ( B` 一类）、
- * 两字符转义；末尾再兜一次裸 `ESC` / C1 的 `0x9b`（CSI 的单字节形态）。
+ * 两字符转义；C1 的 `0x9b` 是 **CSI 的单字节引导形态**，按同一形态整条剥离（见下）。
+ *
+ * **C1（`0x9b`）= CSI 的另一种引导字节，必须连同参数字节一起剥离**（第十轮复审 W1 的 N4）：
+ * 旧实现只在末尾删掉裸 `0x9b` 引导字节，把**参数字节留在原地** ——
+ * `'\u009b31m×\u009b39m name'` 变成 `'31m×39m name'`，判定词不再位于行首 ⇒
+ * `classifyVerdictLine` 返回 `null`（注释却声称覆盖了 C1：注释与实现不一致本身就是缺陷）。
+ * 正确形态与 `ESC [` 那条同构，只换引导字节：`\u009b <参数字节> <终止字节>`；
+ * 这一条必须排在"裸 `ESC`/`0x9b` 兜底"**之前**（否则引导字节先被删掉，参数就永远认不出来了）。
+ *
+ * 只覆盖这两种引导形态（`ESC [` / `0x9b`）：CSI 的第三种引导（UTF-8 的 `0xC2 0x9B`）在实践中
+ * 不会出现在工具输出里，**不做**（这里如实写明，而不是让注释比实现宽）。
  *
  * @param line - 原始输出行。
  * @returns 去掉控制序列之后的文本（**用于分类**；打印请继续用原行）。
@@ -685,9 +704,10 @@ export const stripAnsiSequences = line => line
   .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/gu, '') // OSC(规范形态)
   .replace(/\u001b\][^\u0007]*$/gmu, '') // OSC(未闭合:吃到行尾)
   .replace(/\u001b\[[0-9;:?<=>!]*[ -/]*[@-~]/gu, '') // CSI
+  .replace(/\u009b[0-9;:?<=>!]*[ -/]*[@-~]/gu, '') // CSI(C1 单字节引导:引导+参数+终止一条剥离)
   .replace(/\u001b[()#%][0-9A-Za-z]?/gu, '') // 字符集指定
   .replace(/\u001b[@-Z\\-_]/gu, '') // 两字符转义
-  .replace(/[\u001b\u009b]/gu, '') // 残留的裸 ESC / C1 CSI
+  .replace(/[\u001b\u009b]/gu, '') // 残留的裸 ESC / C1 引导字节(无参形态)
 /**
  * 「进度/装饰噪声」谓词 —— 只对**已经锚定命中**的行判，用来把
  * `× 0 items scanned` 这类计数器从判定行里摘出去（审计现场的原句是
@@ -718,6 +738,13 @@ const MAX_FALLBACK_LINES = 20
  * 但"下一个没登记的形态"不该再由"碰巧还有别的锚定行"决定可见性 ⇒ 这一档是**兜底**。
  */
 const MAX_MIXED_FALLBACK_LINES = 10
+/**
+ * `selfTestVerdictClassifier()` 至少执行的断言条数（防"把断言表掏空"）。
+ *
+ * 与 `check-root-guards.mjs` 的 `SELFTEST_GUARD_ENV_ASSERTIONS` 同一手法：光有
+ * `failures.length === 0` 是恒真的 —— 把断言表清空它就永远通过。下限只允许被"变多"越过。
+ */
+const SELFTEST_VERDICT_ASSERTIONS = 60
 
 /**
  * 把一行分类成 `'verdict'` / `'noise'` / `null`（见上面那段契约）。
@@ -861,6 +888,113 @@ export function summarizeBoundedFailure(output, options = {}) {
  */
 export function formatFailureReport(output, options = {}) {
   return summarizeBoundedFailure(output, options).text
+}
+
+/**
+ * 「判定形态表 + ANSI 归一 + C1 剥离」的**逐形态自检**（第十轮复审 W1 的 N4/N5）。
+ *
+ * 为什么要有（而不是只靠 `verify-check-workspaces.mjs` 的那几条断言）：
+ * 形态表就是这个门禁的**诊断面本身** —— 少一条形态，那条失败行在 CI 日志里整行消失
+ * （PR #146 的现场：彩色 ` FAIL ` 行一条都不匹配，编排器只打「未找到判定行」）。
+ * 而"看不见"与"没有失败"在日志里长得几乎一样，**门禁仍然 EXIT=1**，红得看起来很有理由。
+ * 所以把它做成纯函数自检，挂到**两个调用方**（`main()` 与 `check-root-guards.mjs`）的
+ * 启动路径上：①本编排器 = `yarn check` / CI 的 gate job；②根守卫运行器 = docs-only PR 的
+ * **唯一防线**（那条路径上编排器根本不跑）。自检失败按配置错误处理（exit 2），
+ * 不退化成"跑一遍门禁然后详情看不见"。
+ *
+ * 判据三组：①**必须锚定**的形态（含"栈内"形态 —— 见 `VERDICT_LINE` 的取舍说明）；
+ * ②**不许误伤**的负例（否则判定预算会被噪声吃满，真判定行反而被挤出去）；
+ * ③C1（`0x9b`）与 ESC 两种引导形态**逐字节等价**，且**行埋在尾窗之外**时仍然进判定段。
+ *
+ * 纯函数：不读磁盘、不写 stdout、不抛异常（`main()` 与 `check-root-guards.mjs` 都直接调它）。
+ * @returns `{ failures, assertions }` —— `failures` 为空且 `assertions` ≥
+ *   `SELFTEST_VERDICT_ASSERTIONS` 才算通过（条数下限防"把断言表掏空"）。
+ */
+export function selfTestVerdictClassifier() {
+  const failures = []
+  let assertions = 0
+  const check = (ok, message) => {
+    assertions += 1
+    if (!ok) failures.push(message)
+  }
+  // ① 必须锚定进判定段的形态（W1 §3.4 的"整行丢"清单 + 上一轮已覆盖形态的回归）。
+  const anchoredForms = [
+    ['GitHub 注解包装行（PR #146 日志里的形态）', '##[error]AssertionError: boom'],
+    ['npm `npm error`', 'npm error Missing script: "x"'],
+    ['pytest `E   ` 断言行', 'E   AssertionError: assert 1 == 2'],
+    ['python `Traceback (most recent call last):`（栈内）', 'Traceback (most recent call last):'],
+    ['node 加载器栈帧 `node:internal/…`（栈内）', 'node:internal/modules/cjs/loader:1234'],
+    ['jest 用例行 `●`', '  ● suite name › case name'],
+    ['vitest 未处理拒绝正文（栈首 `TypeError:`）', 'TypeError: beta unhandled boom'],
+    ['`Unhandled Rejection`（无 `⎯` 装饰）', 'Unhandled Rejection: boom'],
+    ['go `-json` 单行 `{"Action":"fail"}`', '{"Time":"2026-09-24T00:00:00Z","Action":"fail","Package":"x/y"}'],
+    ['eslint `--format=json`', '{"filePath":"a.js","errorCount":1,"messages":[]}'],
+    ['jest 汇总 `Tests:  1 failed`', 'Tests:       1 failed, 2 passed, 3 total'],
+    ['tsc pretty（TTY）`a.ts:12:5 - error TS2345`', 'src/a.ts:12:5 - error TS2345: Argument of type …'],
+    ['C1（0x9b）引导的 CSI 彩色用例行', '\u009b31m×\u009b39m tests/x.spec.ts > a > b'],
+    ['既有形态回归：彩色 ` FAIL `', '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c'],
+    ['既有形态回归：go 用例级 `--- FAIL:`', '--- FAIL: TestFoo (0.01s)'],
+  ]
+  for (const [label, line] of anchoredForms) {
+    const kind = classifyVerdictLine(line)
+    check(kind === 'verdict',
+      `[verdict-selftest] ${label} 必须被判成锚定判定行（verdict），实际 ${JSON.stringify(kind)}：`
+      + `${JSON.stringify(line)}`)
+  }
+  // ② 负例：新形态**不许**把"没有失败"的输出拉进判定段。
+  const negativeForms = [
+    ['eslint JSON 全 0（通过）', '{"filePath":"a.js","errorCount":0,"messages":[]}'],
+    ['go `-json` pass', '{"Time":"2026-09-24T00:00:00Z","Action":"pass","Package":"x/y"}'],
+    ['普通说明行', '  note: all packages checked'],
+    ['栈帧的普通 `at …` 行', '\u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m'],
+  ]
+  for (const [label, line] of negativeForms) {
+    const kind = classifyVerdictLine(line)
+    check(kind === null,
+      `[verdict-selftest] ${label} 必须仍然分类为 null（收紧过度会把判定预算烧在噪声上），`
+      + `实际 ${JSON.stringify(kind)}：${JSON.stringify(line)}`)
+  }
+  // ③a C1 与 ESC **逐字节等价**（W1 N4：旧实现只删引导字节、把参数字节留在原地 ⇒ 整行失锚）。
+  const escForm = '\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'
+  const c1Form = '\u009b31m×\u009b39m tests/x.spec.ts > a > b'
+  check(stripAnsiSequences(c1Form) === stripAnsiSequences(escForm),
+    `[verdict-selftest] C1（0x9b）引导与 ESC 引导必须剥离成同一份文本（只换引导字节），`
+    + `实际 C1=${JSON.stringify(stripAnsiSequences(c1Form))} / ESC=${JSON.stringify(stripAnsiSequences(escForm))}`)
+  check(stripAnsiSequences(c1Form) === '× tests/x.spec.ts > a > b',
+    `[verdict-selftest] C1 序列必须**连同参数字节**一起剥离（不能把 \`31m\` 留在行首），`
+    + `实际 ${JSON.stringify(stripAnsiSequences(c1Form))}`)
+  // ③b **行埋在尾窗之外仍然可见**（C-08 的那条性质对每一条新形态同样成立）：
+  //     body 按**当前常量**构造 —— 判定行放在**第 0 行**，后面跟 `MAX_FAILURE_LINES + 50` 行噪声
+  //     与 `MAX_TAIL_LINES` 行尾块 ⇒ ①总行数恒 > `maxVerdictLines + maxTailLines`（恒走**截断**
+  //     分支）；②判定行恒在尾窗（最后 `MAX_TAIL_LINES` 行）**之外**。这样判据测的是
+  //     "可见性来自**锚定**"，而不是"碰巧落进尾窗"，也不会因为有人调常量而假红/假绿。
+  const buried = line => [
+    line,
+    ...Array.from({ length: MAX_FAILURE_LINES + 50 }, (_, index) => `noise line ${index}`),
+    ...Array.from({ length: MAX_TAIL_LINES }, (_, index) => `tail line ${index}`),
+  ].join('\n')
+  // 判定段的切法必须与 `verify-check-workspaces.mjs` 的 `verdictSectionOf()` 同源：
+  // 只按**已知的段头**切，不能按 `\n--- ` 切 —— 判定行本身就可能是 `--- FAIL: …`，
+  // 那样会把它自己切掉（第一版自检就是这么假红的）。
+  const verdictSectionOf = text => {
+    const rest = text.split('--- 失败相关行')[1]
+    if (rest === undefined) return ''
+    const next = rest.search(/\n--- (?=输出末尾|另有 |其它疑似错误行|兜底:|判定行预算已用尽)/u)
+    return next < 0 ? rest : rest.slice(0, next)
+  }
+  for (const [label, line] of anchoredForms) {
+    const summary = summarizeBoundedFailure(buried(line))
+    check(summary.truncated === true,
+      `[verdict-selftest] ${label} 的埋行用例必须落在**截断分支**（否则测的是另一条路径；`
+      + `当前常量 maxVerdict=${MAX_FAILURE_LINES} / maxTail=${MAX_TAIL_LINES}）`)
+    check(summary.missingVerdict === false && summary.verdictLines.includes(line),
+      `[verdict-selftest] ${label} 埋在**尾窗之外**时仍必须被锚定`
+      + `（missingVerdict=${summary.missingVerdict}）`)
+    check(verdictSectionOf(summary.text).includes(line),
+      `[verdict-selftest] ${label} 必须落在**判定段**里（不是碰巧落进尾窗）：`
+      + `${JSON.stringify(verdictSectionOf(summary.text).slice(0, 200))}`)
+  }
+  return { failures, assertions }
 }
 
 /**
@@ -1241,6 +1375,25 @@ export async function main(argv = process.argv.slice(2)) {
     console.error(`check-workspaces: 调度/归属表自检失败（${scheduleProblems.length} 处）—— 这些名字打错时失败形态全是静默的：`)
     for (const problem of scheduleProblems) console.error(`  - ${problem}`)
     process.exit(2)
+  }
+
+  // 判定形态表 / ANSI 归一 / C1 剥离的**逐形态自检**（第十轮复审 W1 的 N4/N5）。
+  // 与上面两条同一取向：自检失败是配置错误（exit 2），不得退化成"跑一遍门禁、然后
+  // 失败详情整行看不见"—— 那种红在日志里与"没有失败"几乎同形。放在调度之前：
+  // 诊断面自己坏了的时候，跑再多任务也只是浪费 CI 分钟。第二个调用方是
+  // `check-root-guards.mjs`（docs-only PR 的唯一防线，那条路径上本函数不跑）。
+  {
+    const verdictSelftest = selfTestVerdictClassifier()
+    if (verdictSelftest.failures.length > 0 || verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+      for (const detail of verdictSelftest.failures) console.error(`check-workspaces: ${detail}`)
+      if (verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+        console.error(`check-workspaces: 判定形态自检只执行了 ${verdictSelftest.assertions} 条断言`
+          + `（期望 ≥ ${SELFTEST_VERDICT_ASSERTIONS}）⇒ 断言表被掏空。`)
+      }
+      console.error('  ⇒ 拒绝在"诊断面自己坏了"的情况下继续（形态表 / ANSI 归一 / C1 剥离失效时，'
+        + '失败详情会整行消失，而门禁仍然 EXIT=1）。')
+      process.exit(2)
+    }
   }
 
   const envConcurrency = Number(process.env.CHECK_CONCURRENCY ?? '')

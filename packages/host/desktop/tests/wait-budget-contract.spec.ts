@@ -20,17 +20,20 @@
  * 2. `timeout` 必须引用 `WAIT_BUDGETS.<键>` —— 数值字面量、别的对象一律不算；
  * 3. 引用到的键必须在 `WAIT_BUDGETS` 里真实存在；
  * 4. 表里每一项都必须 ≥ `WAIT_BUDGET_FLOORS` 登记的现象下限（改小预算 ⇒ 判据红）；
- * 5. 每个调用点上方必须有一行 `//` 理由注释（预算的来源要逐处可读）；
+ * 5. 每个调用点必须带一行 `//` 理由注释：写在上一行 / 上方（中间只允许空行），或写在
+ *    调用所在行的行尾（预算的来源要逐处可读，位置口径与契约文字逐字一致，复审 N5）；
  * 6. 真实产物上逐条派生清单的用例必须显式声明 `TEST_BUDGETS.ARTIFACT_DERIVATION_MS`；
  * 7. 判据自身不空转：扫描面下限 + 扫描器自检（注释/字符串里的同名文本不得被当成调用）；
  * 8. 用例自己的预算（显式 `testTimeout` 或包缺省）必须 ≥ 它内部用到的等待预算，
- *    `it.each(…)` / `it.skipIf(…)` 这类柯里化声明同样在判据面内（第十轮复审 N5）；
+ *    `it.each(…)` / `it.skipIf(…)` 这类柯里化声明同样在判据面内（第十轮复审 N5），
+ *    且"内部用到的等待预算"**沿调用传播**：用例调用的本地 helper / `tests/**` 内相对
+ *    导入的 helper 里的等待同样算它的（第十轮复审 N3 通道 ③）；
  * 9. 等待条件不得**钉死墙钟现算字段**的精确值（第二类假红，见
  *    `wait-budgets.ts` 的文件头）—— 判据按**取值形态**判，不按匹配器名单判。
  *
- * ## 第十轮复审 N1：三条假绿通道与收口
+ * ## 第十轮复审：三条假绿通道（N1）与三条仍开的通道（N3）都已收口
  *
- * 复审实测：把契约改坏之后判据仍 EXIT=0 的三条通道（都曾是本文件的覆盖面缺口）——
+ * N1 实测：把契约改坏之后判据仍 EXIT=0 的三条通道 ——
  *
  * 1. **换匹配器**：等待条件写成 `expect(first).toStrictEqual(10_000)`（`first` 是
  *    从 `retryDelayMs` 取出的局部量）——旧判据只枚举 `toBe`/`toEqual` 与数值字面量属性；
@@ -38,8 +41,24 @@
  * 3. **元素访问拼写**：`vi['waitFor'](…)` —— AST 只认 `Identifier` 接收者，
  *    而"代码位置计数"的 needle 也是 `vi.waitFor(`，双向漏检。
  *
+ * N3 又实测出三条**同一"两个见证"设计下仍开**的通道，本文件一并收口：
+ *
+ * 1. **裸别名**：`const w = vi.waitFor; await w(fn)` —— 别名表只认对象解构，而
+ *    `w(fn)` 里也没有 `vi.waitFor(` 可数，两个见证同时失明。现在别名表覆盖"任何指向
+ *    这两个 API 的常量绑定"（含 `vi['waitFor']`、`.bind(vi)` 与链式 `const b = a`）；
+ * 2. **逗号表达式**：`await (0, vi.waitFor)(fn)` —— callee 被包了一层，
+ *    AST 与 needle 同时看不见。现在 callee 先剥包装（括号 / 逗号 / 断言）再判定，
+ *    且"代码位置计数"在调用节点上把整个 callee 归一成点访问，两个见证必然一致
+ *    （覆盖率对账会把任何不一致打红）；
+ * 3. **模块级 helper**：`async function until() { await vi.waitFor(…, 15s) }` +
+ *    `it(…, 5_000)` 调用它 —— 旧判据只在用例语法子树内收集等待键。现在从用例体出发
+ *    走调用图（本文件函数体 + `tests/**` 内相对导入，带环路保护）。
+ *
+ * 认账的边界：动态调用、函数值传递、以及 `tests/**` 之外的模块看不见（契约的扫描面
+ * 本来就是 `tests/**`）；这些由预算表的现象下限与包级 30s 兜底罩着。
+ *
  * 现在的收口：扫描面 = `tests/**` 下**所有** `*.ts` / `*.tsx`（含非 spec）；
- * 拼写面 = 点访问 + 元素访问 + 解构别名（`const { waitFor } = vi`）；
+ * 拼写面 = 点访问 + 元素访问 + 包装形态 + 解构别名 + 常量别名；
  * 钉死判据 = **取值形态**（墙钟字段/它的标量别名只要进了非比较族断言、或与字面量做等值
  * 比较、或在对象字面量里钉非零值，即红），并保留 `wait-budget-contract:allow-clock-value`
  * 的**显式豁免**（要人写下理由，不能靠换匹配器绕过）。
@@ -113,12 +132,23 @@ interface WaitForSite {
   readonly line: number
   /** 调用形态（`vi.waitFor` / `expect.poll`）。 */
   readonly api: string
-  /** 拼写（`dot` / `element` / `alias`），用于诊断与覆盖率对账。 */
-  readonly spelling: 'dot' | 'element' | 'alias'
+  /**
+   * 拼写（`dot` / `element` / `wrapped` / `alias`），用于诊断与覆盖率对账。
+   *
+   * `wrapped` = 直接调用，但 callee 被括号 / 逗号表达式 / 断言包了一层
+   * （`(0, vi.waitFor)(fn)`）。它仍然是"代码位置上的一次直接调用"，所以两个见证都必须
+   * 看见它：AST 面算它，{@link maskLiteralsAndComments} 也把 callee 归一成点访问。
+   * `alias` = 经本地常量绑定（`const w = vi.waitFor`、`const { waitFor } = vi`）的调用，
+   * 文本上没有 `vi.waitFor(` 可数，因此两个见证一致地把它排除在"直接调用"之外 —— 而
+   * 它自己的调用点仍必须给预算（复审 N3 通道 ①）。
+   */
+  readonly spelling: 'dot' | 'element' | 'wrapped' | 'alias'
   /** 显式 `timeout` 的表达式文本（未给时为 undefined）。 */
   readonly timeout: string | undefined
-  /** 调用点上一行（用于判"逐处留一行理由"）。 */
+  /** 调用点上一行（用于诊断与"理由注释在哪"）。 */
   readonly previousLine: string
+  /** 这个调用点是否带理由注释（上一行、上方隔空行，或同一行行尾）。 */
+  readonly reasonComment: boolean
   /** 等待条件里"钉死墙钟现算值"的形态（第二类假红，见下）。 */
   readonly clockPins: readonly string[]
 }
@@ -150,10 +180,77 @@ function scriptKindOf(fileName: string): ts.ScriptKind {
 type AliasMap = Map<string, { object: string, method: string }>
 
 /**
- * 解析一个调用点的**拼写**：点访问、元素访问（`vi['waitFor']`）或解构别名。
+ * 剥掉不影响"这是哪个函数"的包装：括号、逗号表达式取右值、`as` / `!` / `<T>` 断言。
+ *
+ * 复审 N3 通道 ② 的形态 `(0, vi.waitFor)(fn)` 就是这么藏起来的：callee 是
+ * `ParenthesizedExpression` 包着的逗号表达式，只认 `PropertyAccessExpression` 的
+ * 判据看不见它，而 `vi.waitFor(` 这个文本 needle 同样不匹配（`waitFor` 后面是 `)`）。
+ * 两个见证同时失明 ⇒ 判据假绿。
+ * @param expression - the callee (or any candidate expression).
+ * @returns the unwrapped expression and whether any wrapper was removed.
+ */
+function unwrapWaitCallee(expression: ts.Expression): { inner: ts.Expression, wrapped: boolean } {
+  let current = expression
+  let wrapped = false
+  for (;;) {
+    if (ts.isParenthesizedExpression(current)) {
+      current = current.expression
+      wrapped = true
+      continue
+    }
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      current = current.right
+      wrapped = true
+      continue
+    }
+    if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current) || ts.isNonNullExpression(current)) {
+      current = current.expression
+      wrapped = true
+      continue
+    }
+    return { inner: current, wrapped }
+  }
+}
+
+/**
+ * 一个表达式是不是"对 `vi` / `expect` 的等待 API 的引用"（不调用，只取值）。
+ *
+ * 覆盖点访问与元素访问两种拼写；`vi.waitFor.bind(vi)` 也算 —— 绑定后的函数就是同一个
+ * 等待 API，把它当别的函数放过去，等价于给契约开一条"换个名字"的旁路。
+ * @param expression - the candidate.
+ * @returns the resolved API shape, or undefined.
+ */
+function waitReferenceOf(expression: ts.Expression): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined {
+  const inner = unwrapWaitCallee(expression).inner
+  const match = (receiver: string, method: string, spelling: 'dot' | 'element'): { api: typeof WAIT_APIS[number], spelling: 'dot' | 'element' } | undefined => {
+    const found = WAIT_APIS.find(candidate => candidate.object === receiver && candidate.method === method)
+    return found === undefined ? undefined : { api: found, spelling }
+  }
+  // `vi.waitFor.bind(vi)`: the bound function IS the same wait API. Resolving it is
+  // what keeps `const w = vi.waitFor.bind(vi)` from being a rename-shaped bypass.
+  if (ts.isCallExpression(inner)) {
+    const callee = unwrapWaitCallee(inner.expression).inner
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'bind') return waitReferenceOf(callee.expression)
+    return undefined
+  }
+  if (ts.isPropertyAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
+    return match(inner.expression.text, inner.name.text, 'dot')
+  }
+  if (ts.isElementAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
+    const argument = inner.argumentExpression
+    if (argument !== undefined && ts.isStringLiteralLike(argument)) {
+      return match(inner.expression.text, argument.text, 'element')
+    }
+  }
+  return undefined
+}
+
+/**
+ * 解析一个调用点的**拼写**：点访问、元素访问（`vi['waitFor']`）、被包装的直接调用
+ * （`(0, vi.waitFor)(fn)`）或别名（`const w = vi.waitFor` / `const { waitFor } = vi`）。
  * @param node - the call expression.
- * @param aliases - names bound by `const { waitFor } = vi` in this file.
- * @param file - the source file (for `.getText()` of element access keys).
+ * @param aliases - names bound in this file to one of the wait APIs.
+ * @param _file - the source file (kept for future diagnostics).
  * @returns the resolved call shape, or undefined for a call this contract ignores.
  */
 function resolveWaitCall(
@@ -161,28 +258,17 @@ function resolveWaitCall(
   aliases: AliasMap,
   _file: ts.SourceFile,
 ): { api: typeof WAIT_APIS[number], spelling: WaitForSite['spelling'] } | undefined {
-  const callee = node.expression
-  if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
-    const receiver = callee.expression.text
-    const method = callee.name.text
-    const found = WAIT_APIS.find(candidate => candidate.object === receiver && candidate.method === method)
-    return found === undefined ? undefined : { api: found, spelling: 'dot' }
+  const { inner, wrapped } = unwrapWaitCallee(node.expression)
+  // Direct spellings first, on the unwrapped callee: the wrapping must not decide
+  // whether the contract sees the call (复审 N3 通道 ②).
+  const direct = waitReferenceOf(inner)
+  if (direct !== undefined) {
+    return { api: direct.api, spelling: wrapped ? 'wrapped' : direct.spelling }
   }
-  // `vi['waitFor'](…)` / `vi["waitFor"](…)`: an element access with a string
-  // literal is the SAME call as the dot spelling (audit N1 channel 3).
-  if (ts.isElementAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
-    const argument = callee.argumentExpression
-    if (argument !== undefined && ts.isStringLiteralLike(argument)) {
-      const receiver = callee.expression.text
-      const method = argument.text
-      const found = WAIT_APIS.find(candidate => candidate.object === receiver && candidate.method === method)
-      return found === undefined ? undefined : { api: found, spelling: 'element' }
-    }
-  }
-  // `const { waitFor } = vi` / `const { poll: waitFor } = expect` — the alias is
-  // a real call site and must carry a budget like any other (audit N1 修法 ③).
-  if (ts.isIdentifier(callee)) {
-    const bound = aliases.get(callee.text)
+  // `const w = vi.waitFor; w(…)` — the alias is a real call site and must carry a
+  // budget like any other (复审 N3 通道 ①).
+  if (ts.isIdentifier(inner)) {
+    const bound = aliases.get(inner.text)
     if (bound === undefined) return undefined
     const found = WAIT_APIS.find(candidate => candidate.object === bound.object && candidate.method === bound.method)
     return found === undefined ? undefined : { api: found, spelling: 'alias' }
@@ -191,18 +277,26 @@ function resolveWaitCall(
 }
 
 /**
- * Collect the destructured aliases of `vi` / `expect` in one file.
+ * Collect every local name bound to one of the wait APIs.
  *
- * Only object bindings whose initializer is the bare identifier (`const { waitFor }
- * = vi`) are recognized: those are the spellings a rename produces. Anything more
- * exotic stays invisible, which is why the coverage cross-check below also counts
- * normalized `vi.waitFor(` needles on the source text — a spelling BOTH passes miss
- * makes the counts disagree instead of silently narrowing the contract.
+ * Two shapes:
+ *  - destructuring (`const { waitFor } = vi`, `const { poll: eventually } = expect`);
+ *  - a plain constant bound to the API itself (`const w = vi.waitFor`,
+ *    `const w = vi['waitFor']`, `const b = vi.waitFor.bind(vi)`, and chains such as
+ *    `const w2 = w`). The second shape is 复审 N3 通道 ①: it used to be invisible to
+ *    BOTH witnesses at once (`vi.waitFor(` does not appear in `w(fn)` either), which
+ *    is precisely how a budgetless wait stayed green.
+ *
+ * Anything more exotic (a function returning the API, an object property) stays out
+ * of the alias map — but a wrapper FUNCTION (`const w = (...a) => vi.waitFor(...a)`)
+ * is covered by the local-call propagation instead: the wait inside its body is a
+ * call site of its own and the case that invokes it inherits the budget.
  * @param file - the source file.
  * @returns local name → call shape.
  */
 function collectAliases(file: ts.SourceFile): AliasMap {
   const aliases: AliasMap = new Map()
+  const bindings: Array<{ name: string, initializer: ts.Expression }> = []
   const visit = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer !== undefined) {
       const initializer = node.initializer
@@ -221,10 +315,63 @@ function collectAliases(file: ts.SourceFile): AliasMap {
         }
       }
     }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      bindings.push({ name: node.name.text, initializer: node.initializer })
+    }
     ts.forEachChild(node, visit)
   }
   visit(file)
+  // Two passes so a chain (`const a = vi.waitFor; const b = a`) resolves whichever
+  // order the declarations appear in.
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const binding of bindings) {
+      if (aliases.has(binding.name)) continue
+      const reference = waitReferenceOf(binding.initializer)
+      if (reference !== undefined) {
+        aliases.set(binding.name, { object: reference.api.object, method: reference.api.method })
+        continue
+      }
+      const inner = unwrapWaitCallee(binding.initializer).inner
+      if (ts.isIdentifier(inner)) {
+        const bound = aliases.get(inner.text)
+        if (bound !== undefined) aliases.set(binding.name, bound)
+      }
+    }
+  }
   return aliases
+}
+
+/**
+ * 一个调用点是否带**理由注释**。
+ *
+ * 接受范围与契约文字（`wait-budgets.ts` 第 5 条）逐字一致：注释写在调用点**上一行或
+ * 上方（中间只允许空行）**，或写在调用**所在行的行尾**。第十轮复审 N5 报的是摩擦：
+ * 旧实现只认"紧邻上一行"这一种写法，而契约文字说的是"上方" —— 于是同一份正当的等待
+ * 换个注释位置就红，判据比它自己的文字更严。现在两者对齐，且刻意**只**放宽位置：
+ * 完全没有注释仍然红（这条才是契约要的东西）。
+ *
+ * 行尾注释用调用点的结束位置判定（`end.character` 之后的部分），所以条件里字符串
+ * 字面量中的 `//`（`expect(url).toBe('http://…')`）不会被误读成注释。
+ * @param lines - the source lines.
+ * @param start - the call's start position.
+ * @param end - the call's end position.
+ * @returns true when a `//` reason comment is attached.
+ */
+function hasReasonComment(
+  lines: readonly string[],
+  start: { line: number, character: number },
+  end: { line: number, character: number },
+): boolean {
+  const isComment = (text: string): boolean => /^\s*\/\/\s*\S/u.test(text)
+  // 同一行行尾（`… }, { timeout: … }) // 现象：…`）。
+  if (/\/\/\s*\S/u.test((lines[end.line] ?? '').slice(end.character))) return true
+  // 上方：跳过空行，第一个非空行必须是注释行（"隔一空行"因此也算，与契约文字一致）。
+  for (let line = start.line - 1; line >= 0; line -= 1) {
+    const text = lines[line] ?? ''
+    if (text.trim() === '') continue
+    return isComment(text)
+  }
+  return false
 }
 
 /**
@@ -245,7 +392,9 @@ function findWaitForSites(fileName: string, source: string): WaitForSite[] {
     if (ts.isCallExpression(node)) {
       const resolved = resolveWaitCall(node, aliases, file)
       if (resolved !== undefined) {
-        const line = file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1
+        const start = file.getLineAndCharacterOfPosition(node.getStart(file))
+        const end = file.getLineAndCharacterOfPosition(node.getEnd())
+        const line = start.line + 1
         const options = node.arguments[1]
         let timeout: string | undefined
         if (options !== undefined && ts.isObjectLiteralExpression(options)) {
@@ -265,6 +414,7 @@ function findWaitForSites(fileName: string, source: string): WaitForSite[] {
           spelling: resolved.spelling,
           timeout,
           previousLine: lines[line - 2] ?? '',
+          reasonComment: hasReasonComment(lines, start, end),
           clockPins: callback === undefined ? [] : collectClockPins(callback, file, lines),
         })
       }
@@ -471,11 +621,16 @@ function isExpectationCall(node: ts.Node): boolean {
 
 /**
  * 把源码里的**字符串/模板字面量/正则字面量/注释**内容抹成空格，只留代码位置，
- * 并把元素访问拼写归一成点访问（`vi['waitFor']` → `vi.waitFor`）。
+ * 并把等待调用的 callee 归一成点访问（`vi['waitFor']` → `vi.waitFor`、
+ * `(0, vi.waitFor)` → `vi.waitFor`）。
  *
  * 用途：数"代码位置上出现了几次 `vi.waitFor(`"。字面量与注释由 AST 给出精确区间
  * （注释在字面量抹平之后再扫，所以字符串里出现的 `/*` 不会骗到它），
  * 因此 `vi.waitFor(` 出现在文档/夹具字符串里时不会被当成调用点。
+ *
+ * callee 的归一化发生在**调用节点**上（见下），所以括号 / 逗号表达式 / `as` / `!`
+ * 这些包装形态与点访问一样会被数到 —— 复审 N3 通道 ② 之所以假绿，正是因为 AST 与
+ * 这个 needle 同时看不见 `(0, vi.waitFor)(fn)`。
  * @param fileName - 文件名（仅用于 script kind）。
  * @param source - 源码文本。
  * @returns 等长（按 UTF-16 码元）的掩码文本。
@@ -488,7 +643,30 @@ function maskLiteralsAndComments(fileName: string, source: string): string {
       if (chars[index] !== '\n') chars[index] = ' '
     }
   }
+  const write = (start: number, text: string): void => {
+    for (let index = 0; index < text.length; index += 1) {
+      if (chars[start + index] !== '\n') chars[start + index] = text[index] ?? ' '
+    }
+  }
+  /** callee 归一化后的文本（`vi.waitFor`），不是等待调用时为 undefined。 */
+  const normalizedCallee = (callee: ts.Expression): string | undefined => {
+    const reference = waitReferenceOf(callee)
+    return reference === undefined ? undefined : `${reference.api.object}.${reference.api.method}`
+  }
   const visit = (node: ts.Node): void => {
+    // A call whose callee is a wait API in ANY spelling: write the dot spelling over
+    // the whole callee span (padded — the needle count strips whitespace) and keep
+    // walking the arguments so their literals still get blanked.
+    if (ts.isCallExpression(node)) {
+      const normalized = normalizedCallee(node.expression)
+      if (normalized !== undefined) {
+        const start = node.expression.getStart(file)
+        blank(start, node.expression.getEnd())
+        write(start, normalized)
+        for (const argument of node.arguments) visit(argument)
+        return
+      }
+    }
     // Element access with a string literal IS the dot spelling: rewrite `['waitFor']`
     // into `.waitFor` (padded so every offset stays valid) before the string literal
     // is blanked, so the needle count sees `vi['waitFor'](` too (audit N1 channel 3).
@@ -634,8 +812,13 @@ function testDeclarationCall(node: ts.CallExpression): { call: ts.CallExpression
 }
 
 /** 一个文件里所有用例声明（含柯里化形态）。 */
-function findTestDeclarations(fileName: string, source: string): TestDeclaration[] {
+function findTestDeclarations(fileName: string, source: string, project?: TestProject): TestDeclaration[] {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, scriptKindOf(fileName))
+  // 调用图索引：给了整个扫描面就用它（跨文件的前置能力），否则只索引本文件 ——
+  // 自检用例（`self.ts`）走的就是单文件那条路。
+  const scannedNames = new Set(project === undefined ? [fileName] : [...project.keys()])
+  const owner = project?.get(fileName) ?? indexFileCalls(fileName, source, scannedNames)
+  const files = project ?? new Map([[fileName, owner]])
   const found: TestDeclaration[] = []
   const visit = (node: ts.Node): void => {
     const declaration = ts.isCallExpression(node) ? testDeclarationCall(node) : undefined
@@ -653,7 +836,9 @@ function findTestDeclarations(fileName: string, source: string): TestDeclaration
           options: options?.getText(file),
           numericTimeout: numeric?.getText(file),
           curried: declaration.curried,
-          waitBudgetKeys: collectWaitBudgetKeys(callback, file),
+          // 预算键**沿调用传播**：用例体里直接的等待，加上它调用的本地/导入函数体里的
+          // 等待（复审 N3 通道 ③）。
+          waitBudgetKeys: waitKeysReachableFrom(callback, owner, files),
         })
       }
     }
@@ -685,6 +870,151 @@ function collectWaitBudgetKeys(root: ts.Node, file: ts.SourceFile): string[] {
     ts.forEachChild(node, visit)
   }
   visit(root)
+  return keys
+}
+
+/** 一个本地函数体（用例预算要沿"用例 → 它调用的本地函数"传播）。 */
+interface LocalFunction {
+  /** 定义它的文件（`tests/**` 内的相对路径）。 */
+  readonly body: ts.Node
+}
+
+/** 一个文件的本文件调用索引：函数体、相对导入与命名空间导入。 */
+interface FileCalls {
+  readonly name: string
+  readonly sourceFile: ts.SourceFile
+  /** 本文件里的函数声明 / `const f = () => {}`：名字 → 函数体。 */
+  readonly functions: Map<string, LocalFunction>
+  /** 命名导入：本地名 → 目标文件里的导出名。 */
+  readonly imports: Map<string, { file: string, name: string }>
+  /** 命名空间导入：本地名 → 目标文件（`ns.fn()` 形态）。 */
+  readonly namespaces: Map<string, string>
+}
+
+/** `tests/**` 的调用图索引：文件 → 本文件索引（复审 N3 通道 ③ 的判据基础）。 */
+type TestProject = Map<string, FileCalls>
+
+/**
+ * 把一条相对导入解析成扫描面内的文件。
+ *
+ * 只认 `tests/**` 之内、且真的在扫描集合里的相对导入：面外的模块（`vitest`、
+ * `node:*`、别的包）不属于本契约的扫描面，按"看不见"处理 —— 契约只管
+ * `tests/**` 里的等待型断言（见文件头），跨出这个面的调用不在它的判据范围内。
+ * @param from - the importing file's relative name.
+ * @param specifier - the import specifier.
+ * @param scanned - every relative name in the scanned set.
+ * @returns the resolved relative name, or undefined for anything out of scope.
+ */
+function resolveScannedFile(from: string, specifier: string, scanned: ReadonlySet<string>): string | undefined {
+  if (!specifier.startsWith('.')) return undefined
+  const base = join(dirname(from), specifier).split('\\').join('/')
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}/index.ts`, `${base}/index.tsx`]) {
+    if (scanned.has(candidate)) return candidate
+  }
+  return undefined
+}
+
+/**
+ * 建一个文件的本文件调用索引。
+ *
+ * 函数体只按**名字**登记（函数声明与 `const f = () => {}`）：这是刻意的近似 ——
+ * 判据要的是"用例预算 ≥ 它可能走到的等待预算"，同名遮蔽/动态调用这类边角宁可过宽
+ * （fail-closed，写清预算即可），也不要再留一条看不穿调用的假绿通道。
+ * @param name - the file's relative name (also the diagnostic label).
+ * @param source - its source text.
+ * @param scanned - every relative name in the scanned set.
+ * @returns the file index.
+ */
+function indexFileCalls(name: string, source: string, scanned: ReadonlySet<string>): FileCalls {
+  const sourceFile = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true, scriptKindOf(name))
+  const functions = new Map<string, LocalFunction>()
+  const imports = new Map<string, { file: string, name: string }>()
+  const namespaces = new Map<string, string>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name !== undefined && node.body !== undefined) {
+      functions.set(node.name.text, { body: node.body })
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      const initializer = stripWrappers(node.initializer)
+      if ((ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) && initializer.body !== undefined) {
+        functions.set(node.name.text, { body: initializer.body })
+      }
+    }
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      const target = resolveScannedFile(name, node.moduleSpecifier.text, scanned)
+      const bindings = node.importClause?.namedBindings
+      if (target !== undefined && bindings !== undefined) {
+        if (ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            const imported = (element.propertyName ?? element.name).text
+            imports.set(element.name.text, { file: target, name: imported })
+          }
+        } else if (ts.isNamespaceImport(bindings)) {
+          namespaces.set(bindings.name.text, target)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return { name, sourceFile, functions, imports, namespaces }
+}
+
+/**
+ * 一棵子树里用到的等待预算键，**沿本地函数调用传播**（复审 N3 通道 ③）。
+ *
+ * 旧判据只在用例语法子树内收集等待键，于是
+ *
+ * ```
+ * async function until() { await vi.waitFor(fn, { timeout: WAIT_BUDGETS.REAL_IO_MS }) }
+ * it('…', async () => { await until() }, 5_000)      // 5s 的用例里有 15s 的等待
+ * ```
+ *
+ * 是绿的：用例体里一个 `vi.waitFor` 都没有。现在从用例体出发走一遍调用图 ——
+ * 本文件的函数体、以及 `tests/**` 内可解析的相对导入（含 `ns.fn()`），带环路保护。
+ * 面外的调用（别的包、动态调用、函数值传递）仍然看不见，这是认账的边界：预算表的
+ * 现象下限与包级 30s 兜底仍罩着它们，而"看得见的调用"不再能悄悄超预算。
+ * @param root - the case callback (or any body being walked).
+ * @param owner - the file the root belongs to.
+ * @param project - the whole scanned set (for cross-file resolution).
+ * @returns referenced `WAIT_BUDGETS` keys, in first-seen order, deduplicated.
+ */
+function waitKeysReachableFrom(root: ts.Node, owner: FileCalls, project: TestProject): string[] {
+  const keys: string[] = []
+  const visited = new Set<string>()
+  const add = (key: string): void => { if (!keys.includes(key)) keys.push(key) }
+  const walk = (node: ts.Node, file: FileCalls): void => {
+    for (const key of collectWaitBudgetKeys(node, file.sourceFile)) add(key)
+    const calls: Array<{ file: FileCalls, name: string }> = []
+    const collectCalls = (child: ts.Node): void => {
+      if (ts.isCallExpression(child)) {
+        const callee = unwrapWaitCallee(child.expression).inner
+        if (ts.isIdentifier(callee)) {
+          // 本地函数优先（同名遮蔽时以本文件为准）。
+          if (file.functions.has(callee.text)) calls.push({ file, name: callee.text })
+          else {
+            const imported = file.imports.get(callee.text)
+            const target = imported === undefined ? undefined : project.get(imported.file)
+            if (imported !== undefined && target !== undefined) calls.push({ file: target, name: imported.name })
+          }
+        } else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+          const targetName = file.namespaces.get(callee.expression.text)
+          const target = targetName === undefined ? undefined : project.get(targetName)
+          if (target !== undefined) calls.push({ file: target, name: callee.name.text })
+        }
+      }
+      ts.forEachChild(child, collectCalls)
+    }
+    collectCalls(node)
+    for (const call of calls) {
+      const identity = `${call.file.name}\u0000${call.name}`
+      if (visited.has(identity)) continue
+      visited.add(identity)
+      const body = call.file.functions.get(call.name)?.body
+      if (body !== undefined) walk(body, call.file)
+    }
+  }
+  walk(root, owner)
   return keys
 }
 
@@ -742,6 +1072,12 @@ function contractFindings(
   const clock: ContractFinding[] = []
   const coverage: ContractFinding[] = []
   const caseBudget: ContractFinding[] = []
+  // 调用图索引按**整个传入集合**建一次：跨文件的 helper 也要能被预算判据穿透
+  // （复审 N3 通道 ③）。
+  const scannedNames = new Set(files.map(entry => entry.name))
+  const project: TestProject = new Map(
+    files.map(entry => [entry.name, indexFileCalls(entry.name, entry.source, scannedNames)]),
+  )
   for (const entry of files) {
     const found = findWaitForSites(entry.name, entry.source)
     for (const site of found) {
@@ -758,8 +1094,12 @@ function contractFindings(
       if (!Object.hasOwn(WAIT_BUDGETS, key)) {
         budget.push({ file: entry.name, line: site.line, message: `引用了不存在的预算键 WAIT_BUDGETS.${key}` })
       }
-      if (!/^\s*\/\/\s*\S/u.test(site.previousLine)) {
-        budget.push({ file: entry.name, line: site.line, message: `上方没有理由注释：${JSON.stringify(site.previousLine)}` })
+      if (!site.reasonComment) {
+        budget.push({
+          file: entry.name,
+          line: site.line,
+          message: `调用点没有理由注释（写在上一行/上方，或同一行行尾）：${JSON.stringify(site.previousLine)}`,
+        })
       }
     }
     for (const site of found) {
@@ -776,7 +1116,7 @@ function contractFindings(
     if (inCode !== direct) {
       coverage.push({ file: entry.name, line: 1, message: `代码位置 ${String(inCode)} 处，AST 找到 ${String(direct)} 处` })
     }
-    for (const declaration of findTestDeclarations(entry.name, entry.source)) {
+    for (const declaration of findTestDeclarations(entry.name, entry.source, project)) {
       if (declaration.waitBudgetKeys.length === 0) continue
       const declared = declaration.options === undefined
         ? declaration.numericTimeout
@@ -800,10 +1140,17 @@ function contractFindings(
 
 const scanned = collectTestSources(testsRoot).map(name => ({ name, source: readFileSync(join(testsRoot, name), 'utf8') }))
 const findings = contractFindings(scanned, packageTestTimeout())
+/** 扫描面的调用图索引（跨文件 helper 的预算传播用它）。 */
+const scannedProject: TestProject = new Map(
+  scanned.map(entry => [
+    entry.name,
+    indexFileCalls(entry.name, entry.source, new Set(scanned.map(item => item.name))),
+  ]),
+)
 /** 等待型调用点，按 (文件, 行) 定位（用于"每一个调用点都进了判据"的自检）。 */
 const allSites = scanned.flatMap(entry => findWaitForSites(entry.name, entry.source).map(site => ({ name: entry.name, ...site })))
 /** 用例声明总数：既有的与 `it.each(…)` 柯里化的都在内。 */
-const declarationLines = scanned.flatMap(entry => findTestDeclarations(entry.name, entry.source).map(declaration => `${entry.name}:${String(declaration.line)}`))
+const declarationLines = scanned.flatMap(entry => findTestDeclarations(entry.name, entry.source, scannedProject).map(declaration => `${entry.name}:${String(declaration.line)}`))
 
 /** 把 findings 渲染成判据消息。 */
 function render(findings: readonly ContractFinding[]): string {
@@ -815,7 +1162,15 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
     // 自检 —— 这条用例保护的是**判据**而不是产品代码。
     const canonical = "await vi.waitFor(() => { expect(x).toBe(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })\n"
     expect(findWaitForSites('self.ts', canonical)).toEqual([
-      { line: 1, api: 'vi.waitFor', spelling: 'dot', timeout: 'WAIT_BUDGETS.STATE_PROPAGATION_MS', previousLine: '', clockPins: [] },
+      {
+        line: 1,
+        api: 'vi.waitFor',
+        spelling: 'dot',
+        timeout: 'WAIT_BUDGETS.STATE_PROPAGATION_MS',
+        previousLine: '',
+        reasonComment: false,
+        clockPins: [],
+      },
     ])
     // 注释掉（行注释与块注释）：AST 里没有调用点 —— 文本包含判据会在这里假绿。
     expect(findWaitForSites('self.ts', `// ${canonical}`)).toEqual([])
@@ -836,7 +1191,7 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
     expect(findWaitForSites('self.ts', wrapped)[0]?.timeout).toBe('WAIT_BUDGETS.STATE_PROPAGATION_MS')
     // 缺省形态（无第二参数）必须被看见，并且 timeout 是 undefined。
     expect(findWaitForSites('self.ts', 'await vi.waitFor(() => { expect(x).toBe(1) })\n')).toEqual([
-      { line: 1, api: 'vi.waitFor', spelling: 'dot', timeout: undefined, previousLine: '', clockPins: [] },
+      { line: 1, api: 'vi.waitFor', spelling: 'dot', timeout: undefined, previousLine: '', reasonComment: false, clockPins: [] },
     ])
     // 数值形态（vitest 允许 `waitFor(fn, ms)`）不算"显式预算对象"。
     expect(findWaitForSites('self.ts', 'await vi.waitFor(() => {}, 5_000)\n')[0]?.timeout).toBe('非对象形态：5_000')
@@ -1006,7 +1361,7 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
     const name = 'verify-packaged-runtime.spec.ts'
     const entry = scanned.find(candidate => candidate.name === name)
     expect(entry, `扫描面里没有 ${name}`).toBeDefined()
-    const declarations = findTestDeclarations(name, entry?.source ?? '')
+    const declarations = findTestDeclarations(name, entry?.source ?? '', scannedProject)
       .filter(declaration => declaration.body.includes('collectWorkspaceSurface'))
     expect(declarations.length, `${name} 里没有直接调用 collectWorkspaceSurface 的用例，判据会空转`)
       .toBeGreaterThan(0)
@@ -1036,7 +1391,7 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
     // 旧判据只认 `Identifier === 'it'`，这些声明的等待预算键一个都读不到（判据静默漏检）。
     const updates = scanned.find(entry => entry.name === 'updates.spec.ts')
     expect(updates, '扫描面里没有 updates.spec.ts').toBeDefined()
-    const updatesDeclarations = findTestDeclarations('updates.spec.ts', updates?.source ?? '')
+    const updatesDeclarations = findTestDeclarations('updates.spec.ts', updates?.source ?? '', scannedProject)
     expect(
       updatesDeclarations.filter(entry => entry.curried).length,
       'updates.spec.ts 的三处 it.each(...) 必须全部被识别为用例声明（复审 N5）',
@@ -1075,6 +1430,149 @@ describe('desktop waitFor budget contract (R10 M-1)', () => {
     const report = contractFindings([{ name: 'tests/probe.spec.ts', source: tooSmall }], 30_000)
     expect(report.caseBudget, 'it.each(…) 的用例预算必须被比对').toHaveLength(1)
     expect(report.caseBudget[0]?.message).toContain('12000ms')
+  })
+
+  it('复审 N3 通道 ①：裸别名（const w = vi.waitFor）是必须给预算的调用点', () => {
+    const bareAlias = [
+      'const w = vi.waitFor',
+      'await w(() => { expect(1).toBe(1) })',
+      '',
+    ].join('\n')
+    const sites = findWaitForSites('self.ts', bareAlias)
+    expect(sites.map(site => `${site.api}/${site.spelling}`), '裸别名必须被 AST 看见').toEqual(['vi.waitFor/alias'])
+    expect(sites[0]?.timeout, '裸别名没有预算').toBeUndefined()
+    // 真实求值路径上必须红：没给预算 + 没有理由注释。
+    const report = contractFindings([{ name: 'tests/probe.spec.ts', source: bareAlias }], 30_000)
+    expect(report.budget.map(finding => finding.message).join('|'), '没给预算的裸别名必须判红').toContain('没有显式 timeout')
+    // 换个名字不是旁路：链式、元素访问、`.bind` 三种绑定同样在面内。
+    expect(findWaitForSites('self.ts', 'const a = vi.waitFor\nconst b = a\nawait b(() => {})\n').map(site => site.spelling)).toEqual(['alias'])
+    expect(findWaitForSites('self.ts', "const w = vi['waitFor']\nawait w(() => {})\n").map(site => site.spelling)).toEqual(['alias'])
+    expect(findWaitForSites('self.ts', 'const w = vi.waitFor.bind(vi)\nawait w(() => {})\n').map(site => site.spelling)).toEqual(['alias'])
+    expect(findWaitForSites('self.ts', 'const p = expect.poll\nawait p(() => 1)\n').map(site => site.api)).toEqual(['expect.poll'])
+    // 别的对象的同名方法仍然不受约束（判据不许把任何 `w(...)` 都当等待）。
+    expect(findWaitForSites('self.ts', 'const w = server.waitFor\nawait w(() => {})\n')).toEqual([])
+    expect(findWaitForSites('self.ts', 'const w = helper["waitFor"]\nawait w(() => {})\n')).toEqual([])
+  })
+
+  it('复审 N3 通道 ②：逗号表达式 / 括号包装的 callee 两个见证都要看见', () => {
+    // 形态放在 `it(…, async () => …)` 里，与真实用例同形：`await` 在脚本顶层会被解析成
+    // 标识符（`await (0, x)(y)` 变成 `await(0, x)(y)`），只有异步体里才是等待表达式。
+    const wrap = (body: string): string => `it('probe', async () => {\n${body}\n})\n`
+    const comma = wrap('  await (0, vi.waitFor)(() => { expect(1).toBe(1) })')
+    const commaSites = findWaitForSites('self.ts', comma)
+    expect(commaSites.map(site => site.spelling), '逗号表达式必须被 AST 看见').toEqual(['wrapped'])
+    expect(commaSites[0]?.timeout, '这种写法也没有预算').toBeUndefined()
+    expect(
+      countCodeOccurrences(maskLiteralsAndComments('self.ts', comma), 'vi.waitFor('),
+      '"代码位置"计数必须同样看见它（两个见证同时失明就是假绿）',
+    ).toBe(1)
+    // 覆盖率对账在三种包装形态上都不许失配，且真实求值路径上要红。
+    const paren = wrap('  await (vi.waitFor)(() => {})')
+    expect(findWaitForSites('self.ts', paren).map(site => site.spelling)).toEqual(['wrapped'])
+    expect(countCodeOccurrences(maskLiteralsAndComments('self.ts', paren), 'vi.waitFor(')).toBe(1)
+    const element = wrap("  await (0, vi['waitFor'])(() => {})")
+    expect(findWaitForSites('self.ts', element).map(site => site.spelling)).toEqual(['wrapped'])
+    for (const source of [comma, paren, element]) {
+      const report = contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000)
+      expect(report.coverage, `覆盖率对账不得失配：${source.trim()}`).toEqual([])
+      expect(report.budget, `没给预算的包装形态必须判红：${source.trim()}`).toHaveLength(1)
+    }
+    // 反向：装了预算 + 理由注释的包装形态必须绿（判据认得它，且不误杀）。
+    const budgeted = [
+      "it('probe', async () => {",
+      '  // 现象：状态传播档。',
+      '  await (0, vi.waitFor)(() => {}, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })',
+      '})',
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: budgeted }], 30_000)).toEqual({
+      budget: [], clock: [], coverage: [], caseBudget: [],
+    })
+  })
+
+  it('复审 N3 通道 ③：模块级 helper 里的等待沿调用传播到用例预算（同文件与相对导入）', () => {
+    // 同文件 helper：5s 的用例内部调用了一个等待 15s 的 helper ⇒ 判据必须红。
+    const sameFile = [
+      'async function until(fn: () => void): Promise<void> {',
+      '  // 现象：真实 I/O 档。',
+      '  await vi.waitFor(fn, { timeout: WAIT_BUDGETS.REAL_IO_MS })',
+      '}',
+      "it('case', async () => { await until(() => {}) }, 5_000)",
+      '',
+    ].join('\n')
+    const sameReport = contractFindings([{ name: 'tests/probe.spec.ts', source: sameFile }], 30_000)
+    expect(sameReport.caseBudget, '用例预算检查必须看穿同文件 helper').toHaveLength(1)
+    expect(sameReport.caseBudget[0]?.message).toContain('15000ms')
+    // 反向：预算够（或吃包级 30s 兜底）时不得误报；没被调用的 helper 不牵连别的用例。
+    const bigBudget = sameFile.replace('}, 5_000)', '}, 30_000)')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: bigBudget }], 30_000).caseBudget).toEqual([])
+    const unreferenced = [
+      'async function never(): Promise<void> {',
+      '  // 现象：真实 I/O 档。',
+      '  await vi.waitFor(() => {}, { timeout: WAIT_BUDGETS.REAL_IO_MS })',
+      '}',
+      "it('case', async () => { expect(1).toBe(1) }, 5_000)",
+      '',
+    ].join('\n')
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: unreferenced }], 30_000).caseBudget, '没被调用的 helper 不牵连用例').toEqual([])
+    // 跨文件的相对导入（tests/** 之内）：`tests/**` 里的 helper 同样要看得穿。
+    const helperFile = {
+      name: 'tests/helpers/wait-helper.ts',
+      source: [
+        "import { vi } from 'vitest'",
+        "import { WAIT_BUDGETS } from '../wait-budgets.ts'",
+        'export async function until(fn: () => void): Promise<void> {',
+        '  // 现象：真实 I/O 档。',
+        '  await vi.waitFor(fn, { timeout: WAIT_BUDGETS.REAL_IO_MS })',
+        '}',
+        '',
+      ].join('\n'),
+    }
+    const caseFile = (caseBudget: string): { name: string, source: string } => ({
+      name: 'tests/case.spec.ts',
+      source: [
+        "import { it } from 'vitest'",
+        "import { until } from './helpers/wait-helper.ts'",
+        `it('case', async () => { await until(() => {}) }, ${caseBudget})`,
+        '',
+      ].join('\n'),
+    })
+    const crossReport = contractFindings([helperFile, caseFile('5_000')], 30_000)
+    expect(crossReport.caseBudget, '跨文件 helper 的等待预算必须被看穿').toHaveLength(1)
+    expect(crossReport.caseBudget[0]?.file).toBe('tests/case.spec.ts')
+    // 反向：预算够时必须绿（传播不许变成"见到调用就红"）。
+    expect(contractFindings([helperFile, caseFile('30_000')], 30_000).caseBudget).toEqual([])
+  })
+
+  it('复审 N5：理由注释接受"上一行 / 上方（可隔空行）/ 同一行行尾"，没有注释仍然红', () => {
+    const call = "await vi.waitFor(() => {}, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })"
+    const shapes: Array<[string, string[]]> = [
+      ['上一行', ['// 现象：状态传播档。', call]],
+      ['同一行（行尾）', [`${call} // 现象：状态传播档。`]],
+      ['上方隔一空行', ['// 现象：状态传播档。', '', call]],
+      ['多行调用（行尾在结束行）', [
+        'await vi.waitFor(',
+        '  () => {},',
+        '  { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS },',
+        ') // 现象：状态传播档。',
+      ]],
+    ]
+    for (const [label, lines] of shapes) {
+      const source = `${lines.join('\n')}\n`
+      expect(findWaitForSites('self.ts', source)[0]?.reasonComment, `${label}：必须被接受`).toBe(true)
+      expect(contractFindings([{ name: 'tests/probe.spec.ts', source }], 30_000).budget, `${label}：正当等待不得被拦`).toEqual([])
+    }
+    // 反向：完全没注释仍然红（放宽的是位置，不是要求）。
+    const bare = `${call}\n`
+    expect(findWaitForSites('self.ts', bare)[0]?.reasonComment).toBe(false)
+    expect(contractFindings([{ name: 'tests/probe.spec.ts', source: bare }], 30_000).budget.map(finding => finding.message).join('|'))
+      .toContain('理由注释')
+    // 中间夹着代码不算"上方"（逐处可读不放宽成"同一个用例里随便哪一行"）。
+    const separated = ['// 现象：状态传播档。', 'const unrelated = 1', call, ''].join('\n')
+    expect(findWaitForSites('self.ts', separated)[0]?.reasonComment).toBe(false)
+    // 条件里字符串中的 `//`（URL）不得被当成行尾注释。
+    const urlInCondition = "await vi.waitFor(() => { expect(url).toBe('http://127.0.0.1/x') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })\n"
+    expect(findWaitForSites('self.ts', urlInCondition)[0]?.reasonComment, '字符串里的 // 不是注释').toBe(false)
   })
 })
 

@@ -1279,15 +1279,18 @@ type usageSettleRequest struct {
 // **不 DROP**（H2：删它就是静默拆分区树）且补账去掉额外来源（H1：union 会算两遍），
 // 按良性 deferred 返回；unknown（判据没跑成）⇒ fail-loud。
 func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
-	fail := func(op string, err error) usageReclaimResult {
-		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: err}
-	}
 	rel := req.rel
 	budgetMS := usageReclaimBudgetForRelation(db, rel)
 	// N2②：整段的**总**上界（含 COMMIT）。每语句上界（statement_timeout）挡不住
 	// "多条语句各自刚好不超"的叠加，所以再加一层 ctx deadline。
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(budgetMS)*time.Millisecond)
 	defer cancel()
+	// W3-1：本段所有失败的出口都过 usageBudgetError —— 预算到点这件事**没有
+	// SQLSTATE**（见 usageFailureTimeoutReason），必须在知道 ctx 状态的地方打标记，
+	// 否则它会被记成真失败（管理端 500 + failed_rounds++，且每轮都失败）。
+	fail := func(op string, err error) usageReclaimResult {
+		return usageReclaimResult{outcome: usageReclaimFailed, op: op, err: usageBudgetError(ctx, err)}
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fail("begin-settle", err)
@@ -1300,6 +1303,19 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 		return fail("set-lock-timeout", err)
 	}
 	// 锁序锚点（见函数注释 ②）：先 usage（AS，不挡任何写入），再 rel（AEX，冻结）。
+	//
+	// W3-8（P3）· **已知且接受的代价**：这把 `usage` 的 ACCESS SHARE 会一直持到本段
+	// COMMIT，而**另一轮**的冻结段要 `LOCK ONLY usage ACCESS EXCLUSIVE` ⇒ 两轮重叠
+	// 时，后到的那一轮在"拿父表锁"这一步等到 lock_timeout（5s）后被分类成
+	// **延后**（`op=lock-usage`，err=nil/failures=0，下一轮重试）—— 实测
+	// `并发第二轮：err=<nil> wall=5.045s`。判定为可接受：
+	//   - 轮内关系是**串行**处理的（第一条关系的结算在第二条开始前已提交），所以
+	//     只有"6h 调度轮与启动/管理端触发的即时轮次重叠"才付这个代价；
+	//   - 代价是"延后一轮"（有界、可见、无死锁），不是失败、不是丢数据；
+	//   - 反向的取舍更差：把锚点挪到 rel 之后（或去掉）就破坏了"持 rel 的同时不再
+	//     为 usage 等锁"这条保证 ⇒ 与另一轮 `usage AEX → rel AEX` 成环，PG 死锁
+	//     检测会随机杀掉一方（那才是真失败）。锚点必须在 rel 之前，而 ALTER/LOCK
+	//     的锁在 PG 里都持到事务结束 ⇒ **没有**"只锚一下再放掉"的写法。
 	if _, err := tx.Exec("LOCK TABLE ONLY " + quoteRelationIdent("usage") + " IN ACCESS SHARE MODE"); err != nil {
 		rollback()
 		return usageReclaimLockFailure(db, rel, "lock-usage", err)
@@ -1602,6 +1618,11 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	if err != nil {
 		return err
 	}
+	// R10-H3（W3-3）：从这一行起，本轮**真的观测过**回收面（保留期读到 + catalog
+	// 扫描成功）。它对两条 liveness 判据（连续延后 streak / 最早未回收月）是"证据"
+	// 的分界：早退轮（保留期=0、读配置失败、扫描失败）不得清零 streak、也不得前移
+	// "最早未回收月"（"没观测" ≠ "已回收"）。
+	round.Scanned = true
 	// F11(审计 2026-09-11):孤儿关系(DETACH 成功但 DROP 失败留下的表、或被换成
 	// VIEW 的异常形态)先清掉 —— 它们没有分区身份，留着会让该月的新写入撞同名关系
 	// 而失败。
@@ -1646,7 +1667,8 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		skipped++
 		skipReasons[reason]++
 		unreclaimed = append(unreclaimed, rel+"("+reason+")")
-		if (reason == usageSkipLockTimeout || reason == usageSkipStatementTimeout) && !deferredSeen[rel] {
+		if (reason == usageSkipLockTimeout || reason == usageSkipStatementTimeout ||
+			reason == usageSkipSettleBudgetTimeout) && !deferredSeen[rel] {
 			deferredSeen[rel] = true
 			deferredRels = append(deferredRels, rel)
 		}
@@ -2217,11 +2239,19 @@ const usageReclaimRowBytesEstimate = 128
 // 估小了的后果是"延后"（可观测、可重试、且连续 5 轮会升级为告警），估大了的后果是
 // "多等一会儿才超时" —— 两个方向都不会让金额出错。
 func usageReclaimEstimatedRows(db *sql.DB, rel string) int64 {
-	var rows, size int64
-	if err := db.QueryRow(`SELECT GREATEST(c.reltuples, 0)::bigint, COALESCE(pg_relation_size(c.oid), 0)
+	var rows int64
+	if err := db.QueryRow(`SELECT GREATEST(c.reltuples, 0)::bigint
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relname = $1 AND n.nspname = 'public'`, rel).Scan(&rows, &size); err != nil {
+WHERE c.relname = $1 AND n.nspname = 'public'`, rel).Scan(&rows); err != nil {
 		return 0
+	}
+	// 表大小用 pg_partition_tree 求和：**声明式分区父表自身没有存储**
+	// （pg_relation_size = 0），而回收一个非叶子关系时聚合覆盖的是整株子树
+	// （叶子 + 孙辈叶子）⇒ 必须按叶子求和，否则多级布局下又退回下限。
+	var size int64
+	if err := db.QueryRow(`SELECT COALESCE(sum(pg_relation_size(t.relid)), 0)
+FROM pg_partition_tree(to_regclass('public.' || $1)) AS t`, rel).Scan(&size); err != nil {
+		size = 0
 	}
 	if bySize := size / usageReclaimRowBytesEstimate; bySize > rows {
 		rows = bySize
@@ -2249,16 +2279,16 @@ func withUsageSettleBudget(db *sql.DB, rel string, fn func(*sql.Tx) error) error
 	defer cancel()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return usageBudgetError(ctx, err)
 	}
 	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
 	if err := applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, budget); err != nil {
-		return err
+		return usageBudgetError(ctx, err)
 	}
 	if err := fn(tx); err != nil {
-		return err
+		return usageBudgetError(ctx, err)
 	}
-	return tx.Commit()
+	return usageBudgetError(ctx, tx.Commit())
 }
 
 // SQLSTATE：清理路径必须能把"等锁/语句超时"与真失败分开（R10-A-03）。
@@ -2269,22 +2299,57 @@ const (
 	pgSQLStateQueryCanceled    = "57014"
 )
 
-// usageFailureTimeoutReason 报告 err 是否只是"等锁/语句超时"（R10-A-03）。
+// errUsageSettleBudget 标记"结算段/预补账的**整段总预算**（ctx deadline，含 COMMIT）
+// 到点"（R10-H3 · W3-1）。
 //
-// 判据是**结构化的 SQLSTATE**（pgErrorCode 优先走 errors.As 取 *pgconn.PgError）：
-// 只有 55P03/57014 才算超时；任何其它错误（含 42P01「关系不存在」之外的 DDL/连接
-// 失败）仍然是真失败，必须 fail-loud。返回的 reason 是写进
-// `skipped_by_reason`/`unreclaimed` 的封闭取值（与 usage_retention_status.go 的同名）。
-func usageFailureTimeoutReason(err error) (string, bool) {
-	code, ok := pgErrorCode(err)
-	if !ok {
-		return "", false
+// 为什么需要这个哨兵而不是直接认 `sql.ErrTxDone`：ctx 到点后 database/sql 会把
+// 后续语句一律拒成 `sql: transaction has already been committed or rolled back`
+// （W3 在真库上实测到的原文），而 `sql.ErrTxDone` **也可能**来自真正的编程错误
+// （在已提交/回滚的事务上再用句柄）。判据必须只把"我们自己那层预算真的到点了"
+// 算进延后，所以标记加在**知道 ctx 状态的地方**：见 usageBudgetError。
+var errUsageSettleBudget = errors.New("usage retention: settle budget expired")
+
+// usageBudgetError 在"这一段的总预算 ctx 已经到点"时给错误打上标记
+// （R10-H3 · W3-1）。ctx 没到点时原样返回 ⇒ 真失败仍然是真失败（fail-loud）。
+//
+// 优先级（与 usageFailureTimeoutReason 的判据顺序配套）：SQLSTATE 55P03/57014 先判
+// ——那是**语句级**事实；其余错误只要**本段预算真的到点**就按延后分类。理由：ctx 到点
+// 之后这一段已经没有预算了，本轮注定做不成（不是"这一条语句失败"），下一轮重来才是
+// 正确语义；若这种"每轮都到点"的状态持续，它会由 `oldest_unreclaimed_*` /
+// `deferred_stalled` 两个面暴露成**停摆**（不是静默）。
+func usageBudgetError(ctx context.Context, err error) error {
+	if err == nil || ctx == nil || ctx.Err() == nil {
+		return err
 	}
-	switch code {
-	case pgSQLStateLockNotAvailable:
-		return usageSkipLockTimeout, true
-	case pgSQLStateQueryCanceled:
-		return usageSkipStatementTimeout, true
+	return fmt.Errorf("%w: %w", errUsageSettleBudget, err)
+}
+
+// usageFailureTimeoutReason 报告 err 是否只是"等锁/语句/整段预算到点"（R10-A-03；
+// R10-H3 补第三类）。
+//
+// 判据是**结构化**的：SQLSTATE 优先走 pgErrorCode（errors.As 取 *pgconn.PgError），
+// 只有 55P03/57014 才算超时；整段总预算（ctx deadline）**没有 SQLSTATE**，走哨兵
+// errUsageSettleBudget / context.DeadlineExceeded / context.Canceled。任何其它错误
+// （含 42P01「关系不存在」之外的 DDL/连接失败）仍然是真失败，必须 fail-loud。
+// 返回的 reason 是写进 `skipped_by_reason`/`unreclaimed` 的封闭取值（与
+// usage_retention_status.go 的同名）。
+//
+// W3-1（P2，本波引入的分类回归）：`settle-budget-timeout` 与 55P03/57014 **同类**
+// —— 一行数据没动、下一轮重试；若把它记成真失败，则"预算不够"会让管理端保存保留期
+// 回 500、failed_rounds 增长，而且预算不会自愈 ⇒ **每轮都失败**（同段里的
+// statement_timeout 却被记成延后，同一件事两种分类）。
+func usageFailureTimeoutReason(err error) (string, bool) {
+	if code, ok := pgErrorCode(err); ok {
+		switch code {
+		case pgSQLStateLockNotAvailable:
+			return usageSkipLockTimeout, true
+		case pgSQLStateQueryCanceled:
+			return usageSkipStatementTimeout, true
+		}
+	}
+	if errors.Is(err, errUsageSettleBudget) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return usageSkipSettleBudgetTimeout, true
 	}
 	return "", false
 }

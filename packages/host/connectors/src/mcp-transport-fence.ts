@@ -263,8 +263,32 @@ let outboundTicketSeq = 0
  */
 const OUTBOUND_ACTIVITY_MAX_MS = MCP_TOOL_CALL_TIMEOUT_MS
 
-/** The activity bucket of one request URL, or null for a URL without a host. */
-function activityKeyOf(url: string | URL): string | null {
+/**
+ * The activity bucket of one request URL — **the single normalization** every
+ * "same endpoint" decision is made under, or null for a URL that cannot be
+ * parsed.
+ *
+ * Bookkeeping and proof must agree (R10 N2, the repo's long-standing
+ * "judge/record/clear under one key" rule). Tickets are filed by
+ * {@link beginOutboundActivity} under this key, so the exclusive-transport proof
+ * in `index.ts` has to compare endpoints under THIS key too. It used to compare
+ * `.toString()` values instead, and the second defect of the R10-B-06 release
+ * valve followed: `/mcp?a=1` and `/mcp?a=2` share one ticket bucket (the query
+ * string is dropped here) while the string comparison called them different
+ * endpoints, so the rebuild of the first "proved" it was alone, gave up, and
+ * cleared the second's in-flight ticket — the exact cross-transport damage the
+ * proof was added to prevent (W2 remeasured `busyAfterGiveUp=false` for that
+ * pair, `true` for the same-URL pair).
+ *
+ * The query string is dropped on purpose: an MCP endpoint reached with two query
+ * spellings is still one endpoint as far as "is somebody else on the wire" goes,
+ * and `#`-fragments never reach a server at all. Dropping them is also the
+ * conservative direction — two URLs that normalize together can only make the
+ * caller LESS likely to be proven alone, so a give-up releases nothing.
+ * @param url - the MCP endpoint URL (string or `URL`).
+ * @returns `origin + pathname`, or null when the URL cannot be parsed.
+ */
+export function mcpActivityKey(url: string | URL): string | null {
   try {
     const parsed = typeof url === 'string' ? new URL(url) : url
     return `${parsed.origin}${parsed.pathname}`
@@ -376,7 +400,7 @@ function ownHrefOf(read: (() => unknown) | undefined): string | null {
  * @returns true while at least one non-GET request is unanswered.
  */
 export function isMcpOutboundBusy(target: string, owner?: object): boolean {
-  const key = activityKeyOf(target)
+  const key = mcpActivityKey(target)
   return key !== null && ticketsOf(key, owner) > 0
 }
 
@@ -391,7 +415,9 @@ export interface McpOutboundWaitOptions {
    * The caller has proven that no OTHER live transport talks to this endpoint,
    * so every ticket here belongs to the transport this rebuild retires and the
    * give-up may release them. Default false: an unproven give-up releases
-   * nothing (R10 N2).
+   * nothing (R10 N2). "This endpoint" is the {@link mcpActivityKey} bucket — the
+   * same key the tickets are filed under, so the proof and the bookkeeping
+   * cannot disagree about what "the same endpoint" means.
    */
   soleLiveTransport?: boolean
 }
@@ -408,13 +434,16 @@ export interface McpOutboundWaitOptions {
  * **Whose tickets, and whose release** (R10 N2): the waiter in `index.ts` cannot
  * name the transport instance — the bridge owns it — so it reads the endpoint
  * union and passes `soleLiveTransport: true` only when it has proven that no
- * other live registration talks to this endpoint. In that case every ticket on
- * the endpoint belongs to the transport this rebuild is about to retire, and the
- * give-up may release them (that is R10-B-06's valve: a call that outlived the
- * grace is one this rebuild cuts anyway). With another live transport on the
- * endpoint the give-up **releases nothing**: under-waiting one rebuild is cheap,
- * cutting a call another transport could still have settled is not. Ticket age
- * ({@link OUTBOUND_ACTIVITY_MAX_MS}) remains the unconditional release valve.
+ * other live registration talks to this endpoint. "Same endpoint" there is the
+ * same {@link mcpActivityKey} bucket these tickets live in, which is what makes
+ * the proof and the bookkeeping one decision instead of two spellings. In that
+ * case every ticket on the endpoint belongs to the transport this rebuild is
+ * about to retire, and the give-up may release them (that is R10-B-06's valve: a
+ * call that outlived the grace is one this rebuild cuts anyway). With another
+ * live transport on the endpoint the give-up **releases nothing**: under-waiting
+ * one rebuild is cheap, cutting a call another transport could still have
+ * settled is not. Ticket age ({@link OUTBOUND_ACTIVITY_MAX_MS}) remains the
+ * unconditional release valve.
  * @param target - the MCP endpoint URL of the definition.
  * @param timeoutMs - upper bound on the wait.
  * @param options - optional owner scope and the sole-live-transport assertion.
@@ -426,7 +455,7 @@ export async function whenMcpOutboundIdle(
   timeoutMs: number,
   options: McpOutboundWaitOptions = {},
 ): Promise<'idle' | 'busy'> {
-  const key = activityKeyOf(target)
+  const key = mcpActivityKey(target)
   if (key === null || ticketsOf(key, options.owner) === 0) return 'idle'
   const deadline = Date.now() + Math.max(0, timeoutMs)
   while (Date.now() < deadline) {
@@ -1147,9 +1176,9 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     // `finally` — should it ever run, possibly much later — releases only THIS
     // request, inside THIS transport's own set (R10 N2).
     const ownHref = ownHrefOf(options.ownUrl)
-    const activityKey = ownHref === null ? null : activityKeyOf(ownHref)
+    const activityKey = ownHref === null ? null : mcpActivityKey(ownHref)
     const counted = activityKey !== null
-      && activityKey === activityKeyOf(target)
+      && activityKey === mcpActivityKey(target)
       && (init?.method ?? 'GET').toUpperCase() !== 'GET'
     const ticket = counted && activityKey !== null ? beginOutboundActivity(activityKey, owner) : null
     try {

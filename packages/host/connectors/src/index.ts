@@ -34,6 +34,7 @@ import {
   isMcpOutboundBusy,
   MCP_TOOL_CALL_TIMEOUT_MS,
   McpTransportFenceUnavailableError,
+  mcpActivityKey,
   mcpTransportFenceTargetWarning,
   whenMcpOutboundIdle,
 } from './mcp-transport-fence.ts'
@@ -743,7 +744,26 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // listener still runs (it also decides rebuilds, and re-applying the same
       // render is idempotent).
       const announced = defs.find(entry => entry.id === id)
-      if (announced !== undefined) refreshLiveHeaders(announced, persisted)
+      if (announced !== undefined) {
+        // The synchronous refresh is an OPTIMIZATION of the hand-off the emit
+        // below drives, not a second truth path: that listener re-reads the same
+        // credential and re-applies the same render (`handOffLiveHeaders`, which
+        // has its own catch), and a rebuild re-reads the store again. What must
+        // NOT happen is this call taking the emit down with it — the emit is what
+        // re-registers stdio children (their token lives in the child
+        // environment), and before this guard a throwing render sat in FRONT of
+        // it: one cosmetic defect in a credential file (`"fields": null`, R10 N1)
+        // became a rejected refresh, an HTTP 500 on the panel route and a lost
+        // stdio re-registration. Catch-and-log hides nothing: the same defect
+        // still produces the listener's own `令牌移交给活传输失败` line, and this
+        // one names the connector, so the failure stays searchable in the host
+        // log while the refresh chain keeps working.
+        try {
+          refreshLiveHeaders(announced, persisted)
+        } catch (cause: unknown) {
+          ctx.logger?.warn(`pico-connectors: ${id} 同步刷活头失败（已跳过；事件与重注册继续）`, cause)
+        }
+      }
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
@@ -932,7 +952,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      * this transport is the endpoint's only live user. Only then may its
      * give-up release the endpoint's outbound tickets (R10 N2 — the fence keeps
      * the tickets per transport instance but the waiter cannot name the
-     * instance, so it needs this proof instead of assuming).
+     * instance, so it needs this proof instead of assuming). "Same endpoint" is
+     * compared under the fence's own {@link mcpActivityKey}, never as a raw
+     * string: the tickets of `/mcp?a=1` and `/mcp?a=2` live in one bucket, so
+     * they must count as the same endpoint here too.
      */
     endpoint?: string
     dispose: () => void
@@ -1573,7 +1596,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // `function toString() { [native code] }` to the MCP endpoint. With
       // `Object.hasOwn` an unknown name is '' : the slot carries no credential
       // and the framework fills it (or drops it) instead.
-      const fields = credential?.fields
+      //
+      // `fields` comes off a FILE a user can hand-edit (the store sanitizes
+      // hand-edited timestamps for exactly that reason), so it is not always the
+      // record the type promises: `"fields": null` is a legal file. Looking a
+      // field up in it must mean "this credential carries no such field" — that
+      // is what `Object.hasOwn(null, …)` threw a TypeError over (R10 N1) and it
+      // cost the WHOLE registration (`status="error"` with the raw TypeError, a
+      // later panel refresh answering HTTP 500, and the live-header update plus
+      // the stdio re-registration that follows it never running). Any
+      // non-record takes the same branch: a string would otherwise resolve
+      // `${0}` to a character, which is the same accident class R10 N3 removed.
+      const ownFields = credential?.fields
+      const fields = typeof ownFields === 'object' && ownFields !== null && !Array.isArray(ownFields)
+        ? ownFields
+        : undefined
       const resolved = value === ''
         ? ''
         : value.replace(/\$\{([^}]+)\}/g, (_, field: string) =>
@@ -1981,15 +2018,30 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * record set IS the live set, so a connector dropped from the catalogue while
    * its transport is still alive keeps counting — the direction that must not
    * be missed.
+   *
+   * "This endpoint" is decided by {@link mcpActivityKey} — the SAME normalization
+   * the fence files outbound tickets under, imported rather than re-spelled
+   * (R10 N2). Comparing the raw URLs instead made the proof disagree with the
+   * bookkeeping: `/mcp?a=1` and `/mcp?a=2` share one ticket bucket but are two
+   * different strings, so a rebuild proved itself alone and its give-up cleared
+   * the other transport's in-flight ticket.
    * @param endpoint - the streamable-http URL of the registration being rebuilt.
    * @param serverName - the server being rebuilt (excluded from the count).
    * @returns the number of live registrations whose endpoint is the same.
    */
   const otherLiveTransportsAt = (endpoint: string, serverName: string): number => {
+    const key = mcpActivityKey(endpoint)
+    // An unparseable URL matches nothing, so nothing can be proven: report the
+    // whole live set so the caller is never "alone". (`whenMcpOutboundIdle`
+    // reads the same unparseable URL as idle, so this only decides the release
+    // — and there the answer must be "release nothing".)
+    if (key === null) return mcpRegistrations.size
     let count = 0
     for (const [name, registration] of mcpRegistrations) {
       if (name === serverName) continue
-      if (registration.endpoint === endpoint) count += 1
+      const other = registration.endpoint
+      if (other === undefined) continue
+      if (mcpActivityKey(other) === key) count += 1
     }
     return count
   }
@@ -2007,12 +2059,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * **Scope of the give-up release** (R10 N2): the fence files tickets per
    * transport instance, and this waiter can only name the ENDPOINT — so it
    * asserts `soleLiveTransport` only when no other live registration talks to
-   * the same endpoint. Then every ticket here belongs to the transport this
-   * rebuild is about to cut, and a timeout may stop charging them (R10-B-06).
-   * With another live transport on the endpoint the waiter still waits, but a
-   * give-up releases nothing: under-waiting this rebuild costs one grace, while
-   * clearing the other transport's ticket made its own rebuild read `idle` and
-   * cut a call that could still have settled.
+   * the same endpoint ({@link otherLiveTransportsAt}, which compares under the
+   * fence's own {@link mcpActivityKey}). Then every ticket here belongs to the
+   * transport this rebuild is about to cut, and a timeout may stop charging them
+   * (R10-B-06). With another live transport on the endpoint the waiter still
+   * waits, but a give-up releases nothing: under-waiting this rebuild costs one
+   * grace, while clearing the other transport's ticket made its own rebuild read
+   * `idle` and cut a call that could still have settled.
    *
    * Not a full guarantee, and the residue is stated rather than implied: a call
    * that starts between the tickets reaching zero and `retire()` (a few
