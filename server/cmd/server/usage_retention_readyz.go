@@ -20,6 +20,59 @@ package main
 //
 // 兼容性：只在响应体里**增加**一个对象字段 `usage_retention`；解析不了就原样透传
 // （探针的既有契约优先于新增字段），状态码与所有既有响应头逐字保留。
+//
+// # 字段与消费口径（R10-G3 · N3 / R10-H3：给运维脚本/告警规则的可读契约）
+//
+// `usage_retention` 就是 `serverstore.UsageRetentionStatus` 的 JSON（字段名与语义见
+// `serverstore/usage_retention_status.go` 的结构体注释）。运维面最要紧的四组：
+//
+//	"调度器还活着吗"     rounds / failed_rounds / last_round_at / last_error
+//	"这一轮为什么没回收"  skipped / skipped_by_reason / unreclaimed
+//	"保留策略还在推进吗"  deferred_stalled（**唯一需要进告警规则的那一位**）
+//	                      + stalled_relations（点名）/ deferred_streak（逐关系连续轮数）
+//	                      + deferred_stalled_rounds（累计停摆**轮数**，不回退）
+//	                      + oldest_unreclaimed_month / _reason / _since / _rounds
+//	"哪个月写不进去"      write_blocked_*（当月）+ write_blocked_other_months（非当月）
+//	                      + write_error_* / write_error_other_months（未分类瞬时失败）
+//
+// 为什么"延后"需要单独一面（复审 N3）：`failed_rounds` 表达的是"有没有报错"，而按
+// R10-A-03 的契约**锁竞争/语句超时不算失败**（它们让管理端保存保留期回 500 是已修
+// 的缺陷）。于是"连续 N 轮都因为超时没回收任何东西"（= 保留策略已经停摆、磁盘按
+// 经过的月份单调增长）在 failed_rounds 上**看不见**，而 skipped_by_reason 每轮被
+// 覆写、也答不了"连续几轮"。这一面就是那个缺口。
+//
+// 示例（每 6h 轮询一次即可，调度间隔就是 6h）：
+//
+//	curl -fsS $SERVER/readyz | jq -e '.usage_retention.deferred_stalled != true' \
+//	  || alert "保留策略停摆：$(curl -fsS $SERVER/readyz | jq -c '.usage_retention.stalled_relations')"
+//	# 想知道"停摆**轮数**"（同一次停摆持续 N 轮就计 N —— 它不是"发生了几次"这个
+//	# 事件计数；即使当前这一轮已经自愈，它也不会回退）：
+//	curl -fsS $SERVER/readyz | jq -r '.usage_retention.deferred_stalled_rounds // 0'
+//	# "长期没回收"的权威判据（它**单调**：早退轮/无证据轮/失败轮都不动它）：
+//	curl -fsS $SERVER/readyz | jq -c '{month:.usage_retention.oldest_unreclaimed_month,
+//	  since:.usage_retention.oldest_unreclaimed_since, rounds:.usage_retention.oldest_unreclaimed_rounds,
+//	  reason:.usage_retention.oldest_unreclaimed_reason}'
+//	# 别的月份（到期月的 [DETACH,DROP] 窗口是唯一能撞上布局阻塞的地方）写不进去：
+//	curl -fsS $SERVER/readyz | jq -c '.usage_retention.write_blocked_other_months // []'
+//
+// 四个语义边界（避免误报/漏报）：
+//   - deferred_stalled=true 表示**至少一条**到期关系连续 ≥5 个**调度轮次**（6h/轮
+//     ≈30h）既没被回收、也没有真失败。管理端保存保留期会**同步**多跑一轮
+//     （llmgateway/admin.go），那些即时轮次**不计入** streak（否则连点几次保存就是
+//     一次分钟级假告警）；它会在该关系被回收后的下一轮自动回落 false。
+//   - deferred_stalled_rounds 是**累计轮数**（不是"事件次数"），不随回落清零 ——
+//     用它做趋势/复盘；
+//   - oldest_unreclaimed_month 是"最早那个既没回收也没失败的到期月"（含**真失败**
+//     的月）：告警规则只看 deferred_stalled 会被"超时/失败交替"或"改保留期"绕过，
+//     这一位不会（它只在那个月真的被回收后前移/清空）；
+//   - write_blocked（当月面）的语义与告警口径**不因** write_blocked_other_months
+//     改变：前者是"当月每一次对话 503"（处置=分区 DDL），后者是"某个到期月/迟到
+//     写入落不了账"（处置同源，但影响面是补写而不是当前对话）。
+//   - failed_rounds 不得用来替代上面任何一位：超时按契约不进失败面（见上）。
+//
+// 键序与结尾换行：本文件**不**重新序列化整个响应体（只在最后一个 `}` 前插入一个
+// 成员），所以内层的键序（声明序）与结尾 `\n` 逐字保留；新增字段只出现在
+// `usage_retention` **对象内部**，对既有消费者是纯增量的。
 
 import (
 	"bytes"

@@ -17,8 +17,8 @@
  */
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { basename, join, sep } from 'node:path'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
@@ -1395,10 +1395,17 @@ export async function packSkill(
 ): Promise<SkillPackResult> {
   validateSkillName(name)
   const dir = join(skillsDir, name)
-  await stat(join(dir, 'SKILL.md')).catch(() => {
+  // The walk root must be a REAL directory BEFORE anything is read (R10-B-03):
+  // `stat` follows a symbolic link, so `<skills>/<name>` pointing at a working
+  // copy elsewhere turned "pack this skill" into "pack whatever that directory
+  // holds" — the archive carried files that are not part of the skill at all
+  // (measured: a `secret.txt` living outside the skill root).
+  const root = await assertRealSkillDirectory(dir, name, locale)
+  const skillFile = await lstat(join(root, 'SKILL.md')).catch(() => undefined)
+  if (skillFile === undefined || !skillFile.isFile()) {
     throw new Error(`skill "${name}" has no SKILL.md`)
-  })
-  const meta = await readSkillFrontmatter(join(dir, 'SKILL.md'))
+  }
+  const meta = await readSkillFrontmatter(join(root, 'SKILL.md'))
   const packVersion = version ?? metaString(meta.version)
   if (packVersion === undefined) {
     // 用户可见(经 auth-gate 的 { error } 回到能力中心面板), 故按宿主语言取。
@@ -1410,7 +1417,7 @@ export async function packSkill(
   }
 
   const zip = new AdmZip()
-  await addDirToZip(zip, dir, dir, '')
+  await addDirToZip(zip, root, root, '')
   const archive = zip.toBuffer()
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`skill archive too large (${archive.byteLength} bytes)`)
@@ -1418,7 +1425,7 @@ export async function packSkill(
   await assertArchiveSafe(archive)
   // 发布前本地预检(决策 §5.5):与服务端同一套规则的前 7 步,错误码一致。
   // 在这里失败就不发请求——用户不必等一次网络往返才知道包不合规。
-  const raw = await readFile(join(dir, 'SKILL.md'), 'utf8')
+  const raw = await readFile(join(root, 'SKILL.md'), 'utf8')
   const entryNames = zip.getEntries().map((e) => e.entryName)
   const issues = precheckSkillPackage(raw, name, entryNames, locale)
   if (issues.length > 0) {
@@ -1441,7 +1448,58 @@ export async function packSkill(
   }
 }
 
-/** Recursively add a directory tree into an AdmZip (relative entry names). */
+/**
+ * Assert that one skill directory is a REAL directory, and return its real path.
+ *
+ * The traversal root is the one place the "archive can never smuggle a
+ * reference outside the skill" invariant did NOT hold (R10-B-03): the walk
+ * refused symbolic links INSIDE the tree but happily followed a link that WAS
+ * the skill directory, so every file of the link target — files that are not
+ * part of the skill, and may live anywhere the process can read — went into the
+ * upload archive. A pre-existing link is refused, loudly: a silently empty or
+ * silently partial package would be worse than a refusal.
+ *
+ * The returned real path is what the walk is anchored on, so a legitimately
+ * symlinked SKILL ROOT (`<DSH_HOME>/skills` itself pointing at a working tree)
+ * keeps working while the skill directory does not.
+ * @param dir - `<skillsDir>/<name>` as it was joined.
+ * @param name - the skill name, for the user-facing message.
+ * @param locale - host locale for that message.
+ * @returns the resolved real path of the skill directory.
+ */
+async function assertRealSkillDirectory(dir: string, name: string, locale: HostLocale): Promise<string> {
+  const info = await lstat(dir).catch(() => undefined)
+  if (info === undefined) throw new Error(`skill "${name}" has no SKILL.md`)
+  if (info.isSymbolicLink()) {
+    // 用户可见(经 auth-gate 的 { error } 回到能力中心面板), 故按宿主语言取。
+    // **库内别名同样拒收**（有意, 不是漏洞）: 能力中心本来就列不出符号链接形态的
+    // 技能目录, 放行它只会让"界面上不存在、上传包里却存在"两种事实并存
+    // （2026-09-24 复审 V3 的 N7）。要恢复打包, 把目录换成真实目录即可。
+    throw new Error(hostCopy(
+      locale,
+      `技能 "${name}" 是符号链接:拒绝打包(技能必须是技能库里的真实目录,不能指向库外)`,
+      `Skill "${name}" is a symbolic link: refusing to pack it (a skill must be a real directory in the skill library, not a link pointing outside)`,
+    ))
+  }
+  if (!info.isDirectory()) throw new Error(`skill "${name}" has no SKILL.md`)
+  return await realpath(dir)
+}
+
+/**
+ * Recursively add a directory tree into an AdmZip (relative entry names).
+ *
+ * Two assertions per entry, both fail-loud (R10-B-03):
+ *  - `lstat`, never `stat`, decides what the entry is — a symbolic link is
+ *    refused instead of followed (the same rule the installer applies);
+ *  - the entry's REAL path must stay inside `root` (the skill directory's real
+ *    path), which is the containment half of the invariant and catches any
+ *    traversal the type check above cannot see.
+ * The caller guarantees `root` is a real directory ({@link assertRealSkillDirectory}).
+ * @param zip - archive under construction.
+ * @param root - real path of the skill directory (the containment anchor).
+ * @param dir - directory being walked (always inside `root`).
+ * @param relPrefix - archive-relative prefix of `dir`.
+ */
 async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: string): Promise<void> {
   const entries = await readdir(dir, { withFileTypes: true })
   for (const entry of entries) {
@@ -1451,17 +1509,31 @@ async function addDirToZip(zip: AdmZip, root: string, dir: string, relPrefix: st
     //  - `.picoaide/`：溯源目录，服务端以 PROVENANCE_FORBIDDEN 拒绝（伪造归属防护）；
     //  - `.install-version`：安装器写的版本标记，此前会被打进上传包流出去。
     if (relPrefix === '' && (entry.name === PROVENANCE_DIR || entry.name === INSTALL_VERSION_FILE)) continue
+    const info = await lstat(abs).catch(() => undefined)
+    if (info === undefined) throw new Error(`skill entry vanished while packing: ${rel}`)
     // 拒绝符号链接:打包时即失败(安装侧同样拒绝)。
-    if (entry.isSymbolicLink()) {
+    if (info.isSymbolicLink()) {
       throw new Error(`symlink refused in package: ${rel}`)
     }
-    if (entry.isDirectory()) {
+    const real = await realpath(abs).catch(() => undefined)
+    if (real === undefined || (real !== root && !real.startsWith(`${root}${sep}`))) {
+      throw new Error(`skill entry escapes the skill root: ${rel}`)
+    }
+    // 认账的残量（2026-09-24 复审 V3 的 N8）：**硬链接**不受上面这条落点断言约束
+    // —— `realpath` 对硬链接返回的仍是该目录里的路径（硬链接没有"目标路径"），
+    // 结构性修不了。要利用它，攻击者必须已经能在技能库里创建硬链接（即已有库内
+    // 写权限），因此按"与既有写权限同级"接受，不额外加无效判据。
+    if (info.isDirectory()) {
       zip.addFile(`${rel}/`, Buffer.alloc(0), '', 0o755)
       await addDirToZip(zip, root, abs, rel)
-    } else if (entry.isFile()) {
+    } else if (info.isFile()) {
       const data = await readFile(abs)
-      const st = await stat(abs)
-      zip.addFile(rel, data, '', st.mode & 0o777)
+      zip.addFile(rel, data, '', info.mode & 0o777)
+    } else {
+      // FIFO / socket / device: neither packable nor silently omittable — an
+      // archive that quietly misses an entry is how a "published" skill ends up
+      // different from the one on disk.
+      throw new Error(`unsupported skill entry: ${rel}`)
     }
   }
 }

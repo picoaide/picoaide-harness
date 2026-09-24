@@ -32,7 +32,9 @@ import {
   claimMcpTransportFenceTargetWarning,
   ensureMcpTransportRedirectFence,
   isMcpOutboundBusy,
+  MCP_TOOL_CALL_TIMEOUT_MS,
   McpTransportFenceUnavailableError,
+  mcpActivityKey,
   mcpTransportFenceTargetWarning,
   whenMcpOutboundIdle,
 } from './mcp-transport-fence.ts'
@@ -728,6 +730,40 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         handle.adopt(tokens)
         handle.syncBaseline(persisted)
       }
+      // R9-D-1's deadline is the SDK's 401 retry, which reads
+      // `_requestInit.headers` the moment its refresh resolves — i.e. as soon as
+      // the promise this callback is running inside settles. The event listener
+      // below reaches the same record, but only through an `await
+      // store.readCredential()`, so the retry used to race that disk read
+      // (measured: the retry's header snapshot lands 3–4 ms after the refresh
+      // resolves, and a ≥1 ms stall in the read is enough to replay the stale
+      // declared header and 401 a second time — audit G4 2026-09-24). Apply the
+      // record here, synchronously and from the credential the refresh JUST
+      // persisted: no await between the write and the in-memory update, so the
+      // retry cannot read a generation the store has already left behind. The
+      // listener still runs (it also decides rebuilds, and re-applying the same
+      // render is idempotent).
+      const announced = defs.find(entry => entry.id === id)
+      if (announced !== undefined) {
+        // The synchronous refresh is an OPTIMIZATION of the hand-off the emit
+        // below drives, not a second truth path: that listener re-reads the same
+        // credential and re-applies the same render (`handOffLiveHeaders`, which
+        // has its own catch), and a rebuild re-reads the store again. What must
+        // NOT happen is this call taking the emit down with it — the emit is what
+        // re-registers stdio children (their token lives in the child
+        // environment), and before this guard a throwing render sat in FRONT of
+        // it: one cosmetic defect in a credential file (`"fields": null`, R10 N1)
+        // became a rejected refresh, an HTTP 500 on the panel route and a lost
+        // stdio re-registration. Catch-and-log hides nothing: the same defect
+        // still produces the listener's own `令牌移交给活传输失败` line, and this
+        // one names the connector, so the failure stays searchable in the host
+        // log while the refresh chain keeps working.
+        try {
+          refreshLiveHeaders(announced, persisted)
+        } catch (cause: unknown) {
+          ctx.logger?.warn(`pico-connectors: ${id} 同步刷活头失败（已跳过；事件与重注册继续）`, cause)
+        }
+      }
       ctx.emit('pico/connector-credentials-changed', { id })
     },
     ...(options.outboundTimeoutMs === undefined ? {} : { timeoutMs: options.outboundTimeoutMs }),
@@ -908,17 +944,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   interface McpRegistration {
     /** Connector that owns the live registration. */
     id: string
-    dispose: () => void
     /**
-     * True when this transport was handed an `authProvider` and therefore reads
-     * the credential out of the store on EVERY request.
+     * The MCP endpoint this registration's transport talks to, for
+     * streamable-http registrations only (stdio has no URL).
      *
-     * A false value means the transport authenticates with the bearer baked into
-     * its `requestInit.headers` at registration time — a snapshot nobody
-     * re-reads. A credential change must rebuild exactly those (V3A-N6): the
-     * provider-backed ones would only have their in-flight call disposed.
+     * It exists for ONE decision: whether the rebuild that is about to retire
+     * this transport is the endpoint's only live user. Only then may its
+     * give-up release the endpoint's outbound tickets (R10 N2 — the fence keeps
+     * the tickets per transport instance but the waiter cannot name the
+     * instance, so it needs this proof instead of assuming). "Same endpoint" is
+     * compared under the fence's own {@link mcpActivityKey}, never as a raw
+     * string: the tickets of `/mcp?a=1` and `/mcp?a=2` live in one bucket, so
+     * they must count as the same endpoint here too.
      */
-    providerSupplied: boolean
+    endpoint?: string
+    dispose: () => void
     /**
      * The mutable header record the fence installed as this transport's
      * `_requestInit.headers`, when there is one. Present only for a
@@ -1306,11 +1346,71 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const AUTHORIZATION_KEY = 'Authorization'
 
   /**
+   * The authorization schemes this product REGISTERS as "a scheme word and
+   * nothing else" — a WHITELIST, deliberately.
+   *
+   * This is what makes "does the declaration carry a credential?" a question
+   * about the DECLARATION rather than about emptiness (R10-B-01). `'Bearer '` —
+   * the canonical `Authorization: 'Bearer ${API_KEY}'` with the field unset or
+   * misnamed — is not the empty string, yet it carries nothing: keeping it as
+   * the administrator's own credential shadowed and blanked the provider's live
+   * token, so the handshake 401ed, every retry 401ed, and the row still said
+   * `connected` (the very fault R9A-1 removed for the empty spelling).
+   *
+   * Only the words below (trimmed, case-insensitive) count as that scheme form.
+   * Every OTHER single token is a definition's own OPAQUE credential and must be
+   * sent exactly as written: `Authorization: 'abc123'` / `'sk-live-1234'` /
+   * `'mytoken'` are how several MCP endpoints authenticate, and a shape test
+   * ("one RFC 7230 token") would have silently replaced them with the framework
+   * bearer — or DELETED the header when there is no stored token — which is the
+   * R10-B-01 fault one spelling over, in the opposite direction (R10-F5 review).
+   * So: whitelist in, never a shape rule.
+   */
+  const AUTHORIZATION_SCHEME_WORDS: ReadonlySet<string> = new Set([
+    'bearer', // RFC 6750 — the provider token and `Bearer ${FIELD}` shape this product uses
+    'basic', // RFC 7617 — `Basic ${FIELD}` (base64 user:password)
+    'digest', // RFC 7616 — `Digest ${FIELD}`
+    'negotiate', // RFC 4559 — `Negotiate ${FIELD}` (SPNEGO/Kerberos)
+    'ntlm', // the Windows sibling of Negotiate, same "scheme + credential" shape
+    'apikey', // `ApiKey ${FIELD}` — this repo's own API-key connector fixtures
+    'api-key', // the same scheme, hyphenated spelling seen in the field
+    'token', // `Token ${FIELD}` — opaque-token scheme several MCP endpoints document
+    'jwt', // `JWT ${FIELD}` — opaque-JWT scheme used by several gateways
+    'ssws', // Okta's `SSWS ${FIELD}`
+    'aws4-hmac-sha256', // AWS SigV4 `AWS4-HMAC-SHA256 Credential=…`
+  ])
+
+  /**
+   * Header names the renderer REFUSES explicitly instead of letting JavaScript
+   * semantics decide (R10-B-05).
+   *
+   * `headers['__proto__'] = 'x'` is a no-op on an ordinary object literal (the
+   * inherited setter ignores non-object values), so such a declaration used to
+   * vanish with no trace at all. It cannot be honored either: the pinned SDK
+   * builds `new Headers({ ...record })`, and the `Headers` record branch DROPS
+   * an own `__proto__` key (measured: `new Headers(spreadWithOwnProtoKey)`
+   * enumerates nothing, while the sequence form keeps it). The only honest
+   * disposition is to refuse it out loud — never emitted, never silently lost —
+   * which is what {@link RenderedHeaders.refusedHeaderNames} carries to the
+   * one-time warn.
+   */
+  const UNREPRESENTABLE_HEADER_NAMES = new Set(['__proto__'])
+
+  /**
    * `renderHeaders` output plus the provenance of the framework's OWN credential
    * header: {@link RenderedHeaders.baked} names the authorization-slot entries
    * this function filled in from the stored access token.
    */
   interface RenderedHeaders {
+    /**
+     * The record the transport sends (and, for a provider-backed http
+     * transport, the record the fence keeps refreshing in place).
+     *
+     * A NULL-PROTOTYPE record: `Object.keys` / `Object.hasOwn` are then exact
+     * for every declaration an admin console can produce — a header named
+     * `constructor` is an own key rather than an inherited one, and no
+     * declaration can reach a prototype (R10-B-05).
+     */
     headers: Record<string, string>
     /**
      * Key spellings the framework filled in ITSELF from the stored access
@@ -1324,9 +1424,22 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     /**
      * The declared spelling that owns the authorization slot, or null when the
      * framework fills that slot. Only a non-null value is a credential the
-     * definition declared — an empty resolution is not one (R9A-1).
+     * definition declared — a resolution that carries no credential is not one
+     * (R9A-1, R10-B-01).
      */
     declaredAuthorization: string | null
+    /**
+     * The declared authorization spelling that LOOKED like it meant to carry a
+     * credential (a non-blank literal, or a template) yet resolved to a value
+     * with no credential in it, or null. Reported once so a misnamed
+     * `${FIELD}` is searchable instead of silent (R10-B-01).
+     */
+    ignoredAuthorization: string | null
+    /**
+     * Declared header names refused by {@link UNREPRESENTABLE_HEADER_NAMES},
+     * in declaration order. Reported once (R10-B-05).
+     */
+    refusedHeaderNames: string[]
   }
 
   /**
@@ -1334,16 +1447,27 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * an empty declared value -> `Bearer <stored token>`, and the default Bearer
    * injection for OAuth/token credentials.
    *
-   * Four rules the transport shape depends on:
+   * Five rules the transport shape depends on:
    *
-   *  - **A declared value that resolves to nothing is not a credential.** Both
-   *    spellings of "left empty" — a literal `''` and a template whose fields
-   *    resolve to `''` (`Authorization: '${MISSING_FIELD}'`, which the webadmin
-   *    free-form KV can produce) — render the same way: the framework fills the
-   *    bearer. Keeping the empty result as the administrator's own credential
-   *    shadowed and blanked the provider's live token, so every call (handshake
-   *    included) went out with an EMPTY `Authorization` while the row said
-   *    `connected` (R9A-1).
+   *  - **A declaration that carries no credential is not a credential.** Every
+   *    spelling of "left empty" renders the same way: the framework fills the
+   *    bearer. Both halves of that sentence are load-bearing. The empty ones — a
+   *    literal `''` and a template whose fields resolve to `''`
+   *    (`Authorization: '${MISSING_FIELD}'`, which the webadmin free-form KV can
+   *    produce) — shadowed and blanked the provider's live token, so every call
+   *    (handshake included) went out with an EMPTY `Authorization` while the row
+   *    said `connected` (R9A-1). The ones that resolve to a scheme word with
+   *    nothing after it (`'Bearer ${API_KEY}'` with the field unset or MISNAMED,
+   *    a literal `'Bearer '`, `'Bearer   '`) are the same fault one spelling
+   *    over: `'Bearer '` is not `''`, yet it carries no credential, so keeping it
+   *    sent `Bearer` as the credential, 401ed the handshake, 401ed every retry
+   *    and burned one refresh grant per attempt (R10-B-01). Only the schemes in
+   *    {@link AUTHORIZATION_SCHEME_WORDS} count as that form: a single token
+   *    that is not on the list (`'abc123'`, `'sk-live-1234'`) IS a credential.
+   *  - **One decision point.** {@link carriesCredential} is the ONLY place that
+   *    answers "is this declaration a credential?", and the auto-fill path is
+   *    the other side of the same answer: a declaration it rejects is treated
+   *    exactly like a missing one. Two predicates would drift.
    *  - **A non-empty declaration wins over an empty one for the same slot.**
    *    `{Authorization: 'ApiKey ${API_KEY}', authorization: ''}` used to let the
    *    empty spelling overwrite the configured scheme before the provenance rule
@@ -1353,67 +1477,168 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    *    refresh / ours to drop" is decided by origin. A definition that declares
    *    `X-Probe-Key: ''` keeps that header: deleting it turned a working
    *    connector into a broken one (V3A-N1).
-   *  - **One spelling for the authorization slot.** Whatever case the definition
-   *    declares (`Authorization`, `authorization`, `AUTHORIZATION`) is rendered
-   *    as {@link AUTHORIZATION_KEY}, so the SDK's object spread collides
-   *    key-for-key with the provider's copy instead of appending a second header
-   *    (V3A-N2).
+   *  - **One spelling per HTTP header.** Header names are case-insensitive, so
+   *    every slot is keyed by its lower-case name and the record carries ONE
+   *    entry per slot: the authorization slot under {@link AUTHORIZATION_KEY}
+   *    (so the SDK's object spread collides key-for-key with the provider's copy
+   *    instead of appending a second header, V3A-N2), every other slot under the
+   *    spelling that currently owns it. `{'x-probe-key': 'A', 'X-Probe-Key': ''}`
+   *    used to render TWO keys, which `new Headers()` — appending — sent as one
+   *    comma-joined value nobody can parse (R10-B-02). When the winning
+   *    declaration's spelling differs from the one already written, the old
+   *    spelling is removed in the same step, so "one entry per slot" holds after
+   *    a credential change too.
    * @param server - the MCP server definition being registered.
    * @param credential - the credential snapshot this registration was built from.
    * @returns the rendered headers plus the provenance of what the framework
    *   filled in itself.
    */
   const renderHeaders = (server: ConnectorMcp, credential: ConnectorCredential | null): RenderedHeaders => {
-    const headers: Record<string, string> = {}
+    // Null prototype: see `RenderedHeaders.headers` (R10-B-05).
+    const headers: Record<string, string> = Object.create(null) as Record<string, string>
     const frameworkFilled: string[] = []
+    const refusedHeaderNames: string[] = []
     /** The declared spelling that owns the authorization slot, if any (see above). */
     let declaredAuthorization: string | null = null
-    /** The spelling some declared name goes out under: the authorization slot is normalized. */
-    const keyOf = (name: string): string => (name.toLowerCase() === AUTHORIZATION_HEADER ? AUTHORIZATION_KEY : name)
-    /** Which side owns one normalized slot; a declaration beats a synthesis. */
+    /** The last authorization spelling rejected for carrying no credential. */
+    let rejectedAuthorization: string | null = null
+    /**
+     * Does this declaration carry a credential? THE one predicate.
+     *
+     * A value with no non-whitespace character in it does not — `trim()` also
+     * covers the Unicode spaces (`'\u00a0'`, `'\u3000'`, …) that reach here as
+     * "something was typed in the box". On the authorization slot, a value that
+     * is exactly one of the REGISTERED scheme words does not either
+     * ({@link AUTHORIZATION_SCHEME_WORDS}) — the whitelist is what keeps an
+     * opaque single-token credential (`'abc123'`) on the wire. Every other slot
+     * keeps the literal reading: only blankness means absent (V3A-N1 — a
+     * definition's own `X-Probe-Key` value is a credential even when it looks
+     * like a scheme).
+     * @param slot - lower-case header slot name.
+     * @param resolved - the declaration's value after `${FIELD}` substitution.
+     * @returns true when the declaration is the connector's own credential.
+     */
+    const carriesCredential = (slot: string, resolved: string): boolean => {
+      const text = resolved.trim()
+      if (text === '') return false
+      return !(slot === AUTHORIZATION_HEADER && AUTHORIZATION_SCHEME_WORDS.has(text.toLowerCase()))
+    }
+    /** Which spelling each slot currently goes out under (one entry per slot). */
+    const spelling = new Map<string, string>()
+    /** Which side owns one slot; a declaration beats a synthesis. */
     const owner = new Map<string, 'declared' | 'framework'>()
     const disown = (key: string): void => {
       const index = frameworkFilled.indexOf(key)
       if (index >= 0) frameworkFilled.splice(index, 1)
     }
     /**
-     * "Leave empty to auto-fill the bearer", for one normalized slot. A slot a
-     * declaration already owns is left alone — the administrator's value is the
-     * credential, and an empty sibling declaration must not overwrite it.
+     * Write one slot, dropping the spelling it was previously rendered under.
+     *
+     * The drop is what keeps "one entry per HTTP header" true across a spelling
+     * change: without it the record would carry both spellings and the SDK's
+     * `new Headers()` would comma-join them (R10-B-02).
      */
-    const fillFromToken = (key: string): void => {
-      if (owner.get(key) === 'declared') return
+    const setSlot = (slot: string, key: string, value: string, provenance: 'declared' | 'framework'): void => {
+      const previous = spelling.get(slot)
+      if (previous !== undefined && previous !== key) {
+        delete headers[previous]
+        disown(previous)
+      }
+      spelling.set(slot, key)
+      headers[key] = value
+      if (provenance === 'framework') {
+        if (!frameworkFilled.includes(key)) frameworkFilled.push(key)
+      } else {
+        disown(key)
+      }
+      owner.set(slot, provenance)
+    }
+    /** Drop one slot entirely (no declaration carried a credential and no token). */
+    const clearSlot = (slot: string): void => {
+      const key = spelling.get(slot)
+      if (key === undefined) return
+      delete headers[key]
+      disown(key)
+      spelling.delete(slot)
+      owner.delete(slot)
+    }
+    /**
+     * "Leave empty to auto-fill the bearer", for one slot. A slot a declaration
+     * already owns is left alone — the administrator's value is the credential,
+     * and a declaration that carries none must not overwrite it.
+     * @param slot - lower-case header slot name.
+     * @param key - the spelling this slot is written under.
+     */
+    const fillFromToken = (slot: string, key: string): void => {
+      if (owner.get(slot) === 'declared') return
       const token = credential?.accessToken
       if (token === undefined || token === '') {
-        delete headers[key]
-        owner.delete(key)
-        disown(key)
+        clearSlot(slot)
         return
       }
-      headers[key] = `Bearer ${token}`
-      if (!frameworkFilled.includes(key)) frameworkFilled.push(key)
-      owner.set(key, 'framework')
+      setSlot(slot, key, `Bearer ${token}`, 'framework')
     }
     for (const [name, value] of Object.entries(server.headers ?? {})) {
-      const key = keyOf(name)
-      const resolved = value === ''
-        ? ''
-        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) => credential?.fields?.[field] ?? '')
-      if (resolved === '') {
-        fillFromToken(key)
+      // Header names are case-insensitive: the SLOT is the lower-case name, and
+      // every decision below (owner, spelling, deletion) is made on that slot.
+      const slot = name.toLowerCase()
+      if (UNREPRESENTABLE_HEADER_NAMES.has(slot)) {
+        refusedHeaderNames.push(name)
         continue
       }
-      headers[key] = resolved
-      owner.set(key, 'declared')
-      disown(key)
-      if (key === AUTHORIZATION_KEY) declaredAuthorization = name
+      const key = slot === AUTHORIZATION_HEADER ? AUTHORIZATION_KEY : name
+      // `${FIELD}` resolves against the credential's OWN fields, never through
+      // the prototype chain (R10 N3, the same closure as R10-B-05): a definition
+      // that spells `${constructor}` / `${toString}` / `${valueOf}` (a mistyped
+      // field name, the most common source of these) used to resolve to a
+      // JavaScript function's SOURCE TEXT — non-empty, so it counted as a
+      // credential, replaced the provider's live bearer, and shipped
+      // `function toString() { [native code] }` to the MCP endpoint. With
+      // `Object.hasOwn` an unknown name is '' : the slot carries no credential
+      // and the framework fills it (or drops it) instead.
+      //
+      // `fields` comes off a FILE a user can hand-edit (the store sanitizes
+      // hand-edited timestamps for exactly that reason), so it is not always the
+      // record the type promises: `"fields": null` is a legal file. Looking a
+      // field up in it must mean "this credential carries no such field" — that
+      // is what `Object.hasOwn(null, …)` threw a TypeError over (R10 N1) and it
+      // cost the WHOLE registration (`status="error"` with the raw TypeError, a
+      // later panel refresh answering HTTP 500, and the live-header update plus
+      // the stdio re-registration that follows it never running). Any
+      // non-record takes the same branch: a string would otherwise resolve
+      // `${0}` to a character, which is the same accident class R10 N3 removed.
+      const ownFields = credential?.fields
+      const fields = typeof ownFields === 'object' && ownFields !== null && !Array.isArray(ownFields)
+        ? ownFields
+        : undefined
+      const resolved = value === ''
+        ? ''
+        : value.replace(/\$\{([^}]+)\}/g, (_, field: string) =>
+          fields !== undefined && Object.hasOwn(fields, field) ? fields[field] ?? '' : '')
+      if (!carriesCredential(slot, resolved)) {
+        // Same rule as a missing declaration: the framework fills this slot.
+        if (slot === AUTHORIZATION_HEADER && value.trim() !== '') rejectedAuthorization = name
+        fillFromToken(slot, key)
+        continue
+      }
+      setSlot(slot, key, resolved, 'declared')
+      if (slot === AUTHORIZATION_HEADER) declaredAuthorization = name
     }
     // The default bearer injection is keyed on the AUTHORIZATION SLOT, not on
     // the record being empty: a definition that declares any other header used
     // to lose its `Authorization` entirely, so a provider-less transport went
     // to the wire unauthenticated no matter how often it was rebuilt (R9A-2).
-    fillFromToken(AUTHORIZATION_KEY)
-    return { headers, frameworkFilled, declaredAuthorization }
+    fillFromToken(AUTHORIZATION_HEADER, AUTHORIZATION_KEY)
+    return {
+      headers,
+      frameworkFilled,
+      declaredAuthorization,
+      // Only a slot no declaration ended up owning has a declaration to report
+      // as "looked like a credential, carried none" (a later non-empty sibling
+      // spelling wins the slot, which makes the earlier one moot).
+      ignoredAuthorization: declaredAuthorization === null ? rejectedAuthorization : null,
+      refusedHeaderNames,
+    }
   }
 
 
@@ -1522,7 +1747,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const live = registration?.liveHeaders
       if (registration === undefined || registration.id !== def.id || live === undefined) continue
       const next = renderTransportHeaders(server, credential, true).headers
-      for (const name of Object.keys(live)) if (!(name in next)) delete live[name]
+      // `Object.hasOwn`, never `name in next` (R10-B-05): `in` also sees the
+      // prototype chain, so a header the definition happens to name
+      // `constructor` / `toString` / `valueOf` / `hasOwnProperty` was reported
+      // as still-declared by every render and therefore NEVER removed — the
+      // transport kept sending a value the definition no longer had. The
+      // rendered records are null-prototype (see `RenderedHeaders.headers`), so
+      // an own-property test is exact in both directions; today that prototype
+      // would make `in` agree by accident, and this sweep deliberately does not
+      // depend on the accident.
+      for (const name of Object.keys(live)) if (!Object.hasOwn(next, name)) delete live[name]
       for (const [name, value] of Object.entries(next)) live[name] = value
       refreshed += 1
     }
@@ -1545,39 +1779,60 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const warnedDeclaredAuthorization = new Set<string>()
 
   /**
-   * Make "the declared header wins over the provider's live token" an
-   * observable fact instead of an implicit one (R8-B-1).
+   * Report the declaration shapes a user cannot see any other way, once per
+   * scope.
    *
-   * When an oauth-classified connector declares an `Authorization` header with
-   * a value of its own, `renderTransportHeaders` keeps it and the SDK spreads it
-   * over the token the provider wrote — the declared value wins for EVERY
-   * spelling, because `renderHeaders` normalizes the slot to
-   * {@link AUTHORIZATION_KEY} and the spread then collides key-for-key (a
-   * lower-case spelling used to survive as a second key and be comma-joined with
-   * the provider's token, V3A-N2). That is the administrator's own scheme (an
-   * `ApiKey ${FIELD}` endpoint, for instance) and it must not be deleted — but it
-   * also means a 401 refresh obtains a token this header shadows, so the fact
-   * has to be searchable. The `[declared-authorization]` marker is ASCII on
-   * purpose: a field log stays greppable whatever the host locale is.
+   * Three lines, all ASCII-marked so a field log stays greppable whatever the
+   * host locale is:
+   *
+   *  - `[declared-authorization]` — an oauth-classified connector's own
+   *    `Authorization` value. `renderTransportHeaders` keeps it and the SDK
+   *    spreads it over the token the provider wrote, so the declared value wins
+   *    for EVERY spelling (the slot is normalized to {@link AUTHORIZATION_KEY},
+   *    which is what makes the spread collide key-for-key instead of appending,
+   *    V3A-N2). That is the administrator's own scheme (an `ApiKey ${FIELD}`
+   *    endpoint, for instance) and it must not be deleted — but it also means a
+   *    401 refresh obtains a token this header shadows, so the fact has to be
+   *    searchable (R8-B-1).
+   *  - `[declared-authorization-ignored]` — a declaration that LOOKED like a
+   *    credential (non-blank literal, or a template) but resolved to a value
+   *    carrying none: the shape `'Bearer ${API_KEY}'` with the field unset or
+   *    MISNAMED produces, which is otherwise completely silent while the
+   *    connector runs on the framework's bearer (R10-B-01).
+   *  - `[unsupported-header]` — a declared header name the record cannot
+   *    represent (`__proto__`), refused explicitly instead of vanishing into a
+   *    JavaScript assignment no-op (R10-B-05).
    * @param def - the connector being registered.
    * @param server - the MCP server whose headers are being rendered.
-   * @param credential - the credential snapshot this registration was built
-   *   from; it decides whether the declaration really resolves to a value of
-   *   its own (an empty resolution is the framework's slot, not the
-   *   administrator's — warning about it would name a header that is not sent,
-   *   R9A-1).
+   * @param rendered - the rendered record this registration was built from
+   *   (`renderTransportHeaders` output: its `headers` may have lost the
+   *   framework's authorization copy, the provenance fields are intact).
+   * @param providerSuppliesAuthorization - whether the transport also receives
+   *   an `authProvider` whose live token a declared value would shadow; the
+   *   first line is only meaningful then.
    */
-  const warnOnDeclaredAuthorization = (
+  const warnOnHeaderDeclarations = (
     def: ConnectorDef,
     server: ConnectorMcp,
-    credential: ConnectorCredential | null,
+    rendered: RenderedHeaders,
+    providerSuppliesAuthorization: boolean,
   ): void => {
-    const declared = renderHeaders(server, credential).declaredAuthorization
-    if (declared === null) return
-    const key = `${store.dir}\u0000${def.id}\u0000${server.serverName}\u0000${declared}`
-    if (warnedDeclaredAuthorization.has(key)) return
-    warnedDeclaredAuthorization.add(key)
-    ctx.logger?.warn(`pico-connectors: [declared-authorization] ${def.id}/${server.serverName} 声明了 ${declared} 头：按 ${AUTHORIZATION_KEY} 发送并覆盖 OAuth 提供者的活令牌（声明值优先）`)
+    const scope = `${store.dir}\u0000${def.id}\u0000${server.serverName}\u0000`
+    const once = (kind: string, subject: string, line: string): void => {
+      const key = `${scope}${kind}\u0000${subject}`
+      if (warnedDeclaredAuthorization.has(key)) return
+      warnedDeclaredAuthorization.add(key)
+      ctx.logger?.warn(line)
+    }
+    if (providerSuppliesAuthorization && rendered.declaredAuthorization !== null) {
+      once('declared', rendered.declaredAuthorization, `pico-connectors: [declared-authorization] ${def.id}/${server.serverName} 声明了 ${rendered.declaredAuthorization} 头：按 ${AUTHORIZATION_KEY} 发送并覆盖 OAuth 提供者的活令牌（声明值优先）`)
+    }
+    if (rendered.ignoredAuthorization !== null) {
+      once('ignored', rendered.ignoredAuthorization, `pico-connectors: [declared-authorization-ignored] ${def.id}/${server.serverName} 声明的 ${rendered.ignoredAuthorization} 未解析出凭据（字段缺值/只有方案名）：按未声明处理，由框架填 ${AUTHORIZATION_KEY}`)
+    }
+    for (const name of rendered.refusedHeaderNames) {
+      once('refused', name, `pico-connectors: [unsupported-header] ${def.id}/${server.serverName} 声明的头 ${name} 无法表示，已拒绝发送`)
+    }
   }
 
   /**
@@ -1757,17 +2012,63 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
+   * How many OTHER live registrations talk to this endpoint.
+   *
+   * Read off the registration records (not off `defs` + URL recomputation): the
+   * record set IS the live set, so a connector dropped from the catalogue while
+   * its transport is still alive keeps counting — the direction that must not
+   * be missed.
+   *
+   * "This endpoint" is decided by {@link mcpActivityKey} — the SAME normalization
+   * the fence files outbound tickets under, imported rather than re-spelled
+   * (R10 N2). Comparing the raw URLs instead made the proof disagree with the
+   * bookkeeping: `/mcp?a=1` and `/mcp?a=2` share one ticket bucket but are two
+   * different strings, so a rebuild proved itself alone and its give-up cleared
+   * the other transport's in-flight ticket.
+   * @param endpoint - the streamable-http URL of the registration being rebuilt.
+   * @param serverName - the server being rebuilt (excluded from the count).
+   * @returns the number of live registrations whose endpoint is the same.
+   */
+  const otherLiveTransportsAt = (endpoint: string, serverName: string): number => {
+    const key = mcpActivityKey(endpoint)
+    // An unparseable URL matches nothing, so nothing can be proven: report the
+    // whole live set so the caller is never "alone". (`whenMcpOutboundIdle`
+    // reads the same unparseable URL as idle, so this only decides the release
+    // — and there the answer must be "release nothing".)
+    if (key === null) return mcpRegistrations.size
+    let count = 0
+    for (const [name, registration] of mcpRegistrations) {
+      if (name === serverName) continue
+      const other = registration.endpoint
+      if (other === undefined) continue
+      if (mcpActivityKey(other) === key) count += 1
+    }
+    return count
+  }
+
+  /**
    * Wait for one server's in-flight MCP calls before its transport is retired.
    *
    * Audit R9A-3: the provider-less rebuild (V3A-N6) has to dispose the live
    * transport, and the shipped bridge's disposer closes the client — including
    * a tool call the SDK is still waiting on (`Connection closed` mid-call; the
    * 600–800 ms discovery round trip of the rebuild is exactly the window). The
-   * fence counts non-GET requests per endpoint, so the rebuild can wait for the
+   * fence counts non-GET requests per transport, so the rebuild can wait for the
    * call to finish instead of cutting it.
    *
+   * **Scope of the give-up release** (R10 N2): the fence files tickets per
+   * transport instance, and this waiter can only name the ENDPOINT — so it
+   * asserts `soleLiveTransport` only when no other live registration talks to
+   * the same endpoint ({@link otherLiveTransportsAt}, which compares under the
+   * fence's own {@link mcpActivityKey}). Then every ticket here belongs to the
+   * transport this rebuild is about to cut, and a timeout may stop charging them
+   * (R10-B-06). With another live transport on the endpoint the waiter still
+   * waits, but a give-up releases nothing: under-waiting this rebuild costs one
+   * grace, while clearing the other transport's ticket made its own rebuild read
+   * `idle` and cut a call that could still have settled.
+   *
    * Not a full guarantee, and the residue is stated rather than implied: a call
-   * that starts between the count reaching zero and `retire()` (a few
+   * that starts between the tickets reaching zero and `retire()` (a few
    * microseconds) and a call that outlives the bound are still cut. Both are
    * logged, and the bound is the documented trade-off against starving the
    * credential update.
@@ -1782,7 +2083,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const url = streamableHttpUrl(server, locale()).toString()
     if (!isMcpOutboundBusy(url)) return
     const graceMs = options.rebuildIdleGraceMs ?? MCP_REBUILD_IDLE_GRACE_MS
-    const outcome = await whenMcpOutboundIdle(url, graceMs)
+    const soleLiveTransport = otherLiveTransportsAt(url, server.serverName) === 0
+    const outcome = await whenMcpOutboundIdle(url, graceMs, { soleLiveTransport })
     if (outcome === 'busy') {
       ctx.logger?.warn(`pico-connectors: ${def.id}/${server.serverName} 重建等待在途调用超时（${graceMs}ms），仍按新凭据重建`)
       return
@@ -1896,7 +2198,6 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // accessToken — disagreed with the construction condition and left a
       // baked header in place whenever the token was the empty string).
       const providerSuppliesAuthorization = auth.authProvider !== undefined
-      if (providerSuppliesAuthorization) warnOnDeclaredAuthorization(def, server, credential)
       // The record the transport will read its headers from. For a
       // provider-backed http transport it is handed to the fence
       // (`attachMcpLiveHeaders`) so `_requestInit.headers` IS this object and a
@@ -1904,6 +2205,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // (R9-D-1). For every other shape it is the registration-time snapshot it
       // has always been.
       const renderedHeaders = renderTransportHeaders(server, credential, providerSuppliesAuthorization)
+      warnOnHeaderDeclarations(def, server, renderedHeaders, providerSuppliesAuthorization)
       if (providerSuppliesAuthorization && auth.authProvider !== undefined) {
         attachMcpLiveHeaders(auth.authProvider, renderedHeaders.headers)
       }
@@ -1922,7 +2224,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             // `dsh-mcp-client`), while the object is deliberately the
             // `AuthProvider` face so the SDK keeps OUR 401 hook.
             ...(auth.authProvider === undefined ? {} : { authProvider: auth.authProvider as unknown as OAuthClientProvider }),
-            toolCallTimeoutMs: 120_000,
+            // The budget this call gets is the SAME number the fence bounds its
+            // outbound bookkeeping with (R10 N6): one exported constant, never a
+            // second literal that can drift away from the accounting.
+            toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
             failOnStartupError: false,
           }
         : {
@@ -1932,7 +2237,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             args: server.args ?? [],
             env: buildStdioEnv(def, server, credential).env,
             cwd: process.cwd(),
-            toolCallTimeoutMs: 120_000,
+            toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
             failOnStartupError: false,
           }
       // A disconnect/user-switch may have landed while mcpAuthProvider was
@@ -2009,15 +2314,18 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // P2-23 kept: the map holds at most one registration per server key, so
       // the fiber recorded here is the only live instance for that name — and
       // the owner id is what lets the NEXT takeover stop the previous row from
-      // claiming `connected` (CN-4). `providerSupplied` records whether THIS
-      // transport can read the credential per request, which is what decides if
-      // a later credential change has to rebuild it (V3A-N6); `liveHeaders`
-      // records that this transport reads its header RECORD per request too
-      // (the fence installed it), which is what decides whether a credential
-      // change can be applied in place instead of by another rebuild (R9-D-1).
+      // claiming `connected` (CN-4). ONE criterion decides how a later
+      // credential change reaches this transport: `liveHeaders` is present
+      // exactly when the fence installed the mutable record this registration's
+      // headers ARE, which is what lets the change be applied in place instead
+      // of by another rebuild (R9-D-1). There is deliberately no second
+      // "provider supplied?" flag: `needsRebuild` reads `liveHeaders`, and a
+      // field nobody reads is how two truth sources start to drift (R10-B-04).
       mcpRegistrations.set(server.serverName, {
         id: def.id,
-        providerSupplied: auth.handle !== undefined,
+        // Only the http shape has an endpoint; stdio registrations leave it out,
+        // so they can never make an http rebuild think it is not alone.
+        ...(server.transport === 'streamable-http' ? { endpoint: streamableHttpUrl(server, locale()).toString() } : {}),
         ...(providerSuppliesAuthorization ? { liveHeaders: renderedHeaders.headers } : {}),
         dispose: () => { void fiber?.dispose?.() },
       })

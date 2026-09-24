@@ -15,8 +15,16 @@
 # **`--body` 只能给纯路径**(2026-09-24 发布链阻断事故):`file://` / `fileb://` 前缀
 # 在新 AWS CLI 上被 ParamValidation 直接拒绝 —— 见 abs_path 的注释(含实测证据)。
 #
-# **上传前先探测**(2026-09-24 事故加固):先拿 1 字节对象把「CLI 参数形态对不对 /
-# endpoint 与凭据通不通 / 校验和读不读得回」判死,再去推 ~500MB —— 见循环里的第 0 步。
+# **上传前先探测**(2026-09-24 事故加固):先拿 5 字节对象(`PROBE_PAYLOAD` / `PROBE_BYTES`)
+# 把「CLI 参数形态对不对 / endpoint 与凭据通不通 / 校验和读不读得回」判死,再去推
+# ~500MB —— 见循环里的第 0 步。**注释里的字节数、`PROBE_BYTES` 与 `PROBE_PAYLOAD`
+# 三者由 scripts/verify-ci-scripts.mjs 逐字对拍**:这里此前写「1 字节」而实际是
+# `printf 'probe'` = 5 字节(2026-09-24 审计 C-24),注释漂移属本项目登记的第 8 类假绿。
+#
+# **探测对象必须删掉并证明它真的没了**(2026-09-24 审计 C-21 / D-04):删除失败、或删除后
+# `head-object` 仍能读到它 ⇒ fail-loud,绝不在 immutable 版本目录里留下探测残留;
+# 收口用 EXIT trap,因为 verify_remote_object 的失败分支早于正常的删除点
+# (探测 PUT 成功但读回校验失败那条路径此前连删除都不会尝试)。
 #
 # **上传后必须证明远端字节完整**(2026-09-23 审计 K-01):单请求 PUT + 存储侧
 # `ChecksumSHA256`,然后 head-object 把 ContentLength 与 ChecksumSHA256 和本地
@@ -122,7 +130,16 @@ sha256_b64() {
 #   --body 纯路径但文件不存在                  → 同一条 ParamValidation(所以必须真实存在)
 # 即:新 CLI **不再接受** `file://` / `fileb://` 前缀形态。**不要"修回" `fileb://`** ——
 # 门禁里的假 aws 已与真 CLI 同形(见 scripts/verify-ci-scripts.mjs,遇这两个前缀即报
-# 同一条错误并非零退出),另有静态判据扫 scripts/*.sh 的每一个 `--body` 取值。
+# 同一条错误并非零退出),另有静态判据扫 scripts/*.sh 与 .github/workflows/*.yml 的
+# 每一个 `--body` 取值。
+#
+# 规则比"两个前缀"更宽(2026-09-24 审计 C-19 的补测,同一条报文 + 退出 252):
+#   `FILEB://` `Fileb://` `FILE://`(大小写) · `foo://` `s3://` `http://` `C://`(任意 scheme)
+#   · `file:/x` `fileb:/x`(无斜杠形态) · `foo:bar`(冒号形态) · `./real.txt`(不存在的相对路径)
+#   ⇒ 判据的取向是 **fail-closed**:凡不能证明是「纯字面量绝对路径」的形态一律红。
+#   静态判据因此按"任意 scheme 前缀 + 变量拼接 / 命令替换 / 引号拆分 / 前导空白"判定,
+#   并把 workflow 的 run 文本纳入扫描面(经包装函数调用的等价上传此前完全不在判据面内,
+#   2026-09-24 审计 C-18)。
 #
 # 为什么不直接 `realpath`:`realpath` 在精简 runner(Git Bash / busybox)上不保证存在,
 # 而本文件不许引入新依赖 ⇒ 用 dirname/basename + `cd … && pwd` 自己归一。
@@ -212,12 +229,98 @@ verify_remote_object() { # $1=对象键 $2=本地文件 $3=中性标签(不含�
   fi
 }
 
+# 删除一个对象并**证明它真的没了**(2026-09-24 审计 C-21)。`s3 rm` 的退出码只说明
+# "删除请求被接受",不说明"对象已不存在" —— 权限不足 / 瞬断 / 对象锁都可能让它看起来
+# 成功。判据 = 删除后 `head-object` **必须报 404**(真 CLI 2.37.1 的形态:
+# `An error occurred (404) when calling the HeadObject operation: Not Found`,退出 254);
+# 能读到对象、或读回来的不是 404(例如根本连不上端点)都 fail-loud —— `<ver>/` 是
+# immutable 的客户取包面,宁可中止发布,也不能留一个不可枚举的探测残留。
+verify_remote_object_absent() { # $1=对象键 $2=中性标签(不含渠道名)
+  local key="$1" label="$2"
+  local output status
+  if ! brand_run_checked aws s3 rm "s3://${R2_BUCKET}/${key}"; then
+    echo "::error::更新服务器发布失败(${label}:删除对象失败 —— 拒绝把残留留在版本目录里;上方输出已脱敏)" >&2
+    return 1
+  fi
+  set +e
+  output="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$key" 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    echo "::error::更新服务器发布失败(${label}:删除后对象仍能被读到(head-object 成功)—— 拒绝把残留留在版本目录里)" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$output" | grep -q '404'; then
+    printf '%s\n' "$output" | brand_sanitize >&2
+    echo "::error::更新服务器发布失败(${label}:删除后无法确认对象已消失(head-object 既不是 404 也不是成功);上方输出已脱敏)" >&2
+    return 1
+  fi
+}
+
 IMMUTABLE='public, max-age=31536000, immutable'
 NO_CACHE='no-cache'
 # 保留最近 N 个版本(用户定案);版本序必须用 sort -V:字面序里 2.10.0 < 2.9.0。
 # 留存**总数**是该口径(`$VER` + 次新的 KEEP-1 个,见下面 prune 段),不是"KEEP 个
 # 之外再加本次版本"。
 KEEP=3
+
+# 探测负载与它声明的字节数(见脚本头注释 C-24):
+#   * `PROBE_PAYLOAD` 是唯一真源,写对象时用它(`printf '%s' "$PROBE_PAYLOAD"`);
+#   * `PROBE_BYTES` 在写盘后当场复算(`wc -c`),不一致即 fail-loud —— "注释说的"
+#     与"实际写的"不许各说一套;
+#   * 注释里的字节数由 scripts/verify-ci-scripts.mjs 与 PROBE_BYTES 逐字对拍。
+# 负载内容本身与判据无关(只证明 PUT/HEAD 往返与校验和读回),所以保持 5 字节的
+# 'probe' 不动:改负载只会让"注释 / 声明 / 实际"三者的对拍失去历史基线。
+PROBE_PAYLOAD='probe'
+PROBE_BYTES=5
+
+# 探测对象的收尾(2026-09-24 审计 D-04):`verify_remote_object` 有多条 `exit 1`
+# 失败分支(读不回元数据 / 大小不符 / SHA256 不符),它们都**早于**正常删除点 ——
+# "探测 PUT 成功但读回校验失败"这条路径此前连删除都不会尝试,5 字节对象就这样永久
+# 留在 `<ver>/` 里(而 `$VER` 在保留窗口内永不参与淘汰)。所以删除收口在 EXIT trap:
+# 任何退出路径都尝试删除**并校验**,删除/校验失败时显式 exit 1(不让原来的退出码
+# 把它盖成"只是校验失败")。
+#
+# **`trap … EXIT` 是覆盖语义,而本脚本不是唯一的安装者**:`scripts/ci-brand-mask.sh`
+# 的 `brand_mask_init` 在首次登记渠道时也会装一个 EXIT trap(清理掩码临时文件,里面
+# 装着品牌串)。所以这里必须**链**在它后面 —— 记下安装时刻已有的 EXIT trap,在自己的
+# 收尾里先回放它,再做探测对象的删除与校验。若直接 `trap cleanup_probe_object EXIT`,
+# 脱敏库的清理会被顶掉(临时文件里的品牌串留在 /tmp),而且**这个覆盖是静默的**:
+# 只有真跑失败路径才看得见(本泳道实测:先写的一版 trap 从未执行过)。
+probe_object_live=''
+probe_tmp_file=''
+probe_previous_exit_trap=''
+probe_exit_trap_installed=0
+# 读出"当前 EXIT trap 的命令体"(trap -p 的形态:`trap -- 'cmd' EXIT`)。
+capture_exit_trap() {
+  local current
+  current="$(trap -p EXIT)"
+  current="${current#trap -- }"
+  current="${current% EXIT}"
+  case "$current" in
+    \'*\') current="${current#\'}"; current="${current%\'}" ;;
+    \"*\") current="${current#\"}"; current="${current%\"}" ;;
+  esac
+  printf '%s' "$current"
+}
+cleanup_probe_object() {
+  local status=$?
+  # 先回放被我们"接管"的那个 trap(脱敏库的临时文件清理)。
+  if [ -n "$probe_previous_exit_trap" ]; then eval "$probe_previous_exit_trap"; fi
+  if [ -n "$probe_tmp_file" ]; then rm -f "$probe_tmp_file"; fi
+  if [ -z "$probe_object_live" ]; then exit "$status"; fi
+  local key="$probe_object_live"
+  probe_object_live=''
+  if ! verify_remote_object_absent "$key" "上传前探测(收尾)"; then exit 1; fi
+  exit "$status"
+}
+# 在**渠道登记之后**安装(那时脱敏库的 trap 才存在):链在它后面,而不是顶掉它。
+install_probe_exit_trap() {
+  [ "$probe_exit_trap_installed" = "0" ] || return 0
+  probe_exit_trap_installed=1
+  probe_previous_exit_trap="$(capture_exit_trap)"
+  trap cleanup_probe_object EXIT
+}
 
 TOTAL=0
 INDEX=0
@@ -228,6 +331,8 @@ while IFS= read -r channel; do
   # brand_register_channel 额外登记 slug/显示名/产品名与产物文件名(2026-09-11
   # 泄漏事故:只掩渠道 id 掩不到由 slug 派生的文件名)。
   brand_register_channel "$channel" "$BUNDLE/$channel"
+  # 脱敏库在上面的登记里装好了它的 EXIT trap ⇒ 现在把探测对象的收尾链上去。
+  install_probe_exit_trap
 
   zip="$BUNDLE/$channel/picoaide-server-${VER}-amd64.zip"
   sums="$BUNDLE/$channel/SHA256SUMS"
@@ -257,26 +362,40 @@ while IFS= read -r channel; do
   #    取决于三件与包大小无关的事:①CLI 参数形态对不对(本次事故正是形态问题:
   #    `--body fileb://…` 在真 CLI 上连参数解析都过不去)②endpoint / 凭据 / 桶权限
   #    通不通 ③`--checksum-sha256` 写进去之后能不能被 head-object 读回(下面
-  #    verify_remote_object 的判据面)。用一个几字节的对象先把这三件事判死,失败
-  #    就在**推大件之前**报错,而不是传了 500MB 才在复查阶段倒下。
-  #    对象键带 `$RANDOM`/pid 后缀(不引新依赖),校验完立刻删除:它落在 `<ver>/`
-  #    目录内,而保留策略只看 `releases/` 下的版本目录,不会被误当成一个版本。
+  #    verify_remote_object 的判据面)。用一个 5 字节的对象(PROBE_PAYLOAD /
+  #    PROBE_BYTES,见脚本头注释)先把这三件事判死,失败就在**推大件之前**报错,
+  #    而不是传了 500MB 才在复查阶段倒下。
+  #    对象键带 `$RANDOM`/pid 后缀(不引新依赖),校验完立刻删除并**校验它真的没了**
+  #    (verify_remote_object_absent):它落在 `<ver>/` 目录内,而保留策略只看
+  #    `releases/` 下的版本目录,不会被误当成一个版本,也因此不会被自己清理 ——
+  #    残留只能靠这里收干净。
   probe="$(mktemp)"
-  printf 'probe' > "$probe"
+  printf '%s' "$PROBE_PAYLOAD" > "$probe"
+  probe_tmp_file="$probe"
+  probe_actual_bytes="$(wc -c < "$probe" | tr -d ' ')"
+  if [ "$probe_actual_bytes" != "$PROBE_BYTES" ]; then
+    echo "::error::内部错误:探测负载声明 ${PROBE_BYTES} 字节、实际 ${probe_actual_bytes} 字节(注释 / PROBE_BYTES / PROBE_PAYLOAD 必须一致)" >&2
+    exit 1
+  fi
   probe_key="${channel}/releases/${VER}/.probe-${RANDOM}${RANDOM}-$$"
+  # 从这一行起 trap 接管这个键:**PUT 报失败也要收尾**(请求可能已经落到远端)。
+  probe_object_live="$probe_key"
   if ! brand_run_checked aws s3api put-object \
     --bucket "$R2_BUCKET" --key "$probe_key" --body "$(abs_path "$probe")" \
     --content-type application/octet-stream --cache-control "$NO_CACHE" \
     --checksum-sha256 "$(sha256_b64 "$probe")"; then
     echo "::error::更新服务器发布失败(渠道 ${INDEX}:上传前探测 —— CLI 形态/endpoint/凭据在真正上传之前就不可用;上方输出已脱敏)" >&2
-    rm -f "$probe"
     exit 1
   fi
   verify_remote_object "$probe_key" "$probe" "上传前探测"
-  # 探测对象尽力删掉:删不掉不阻断发布(它只有几字节,且不被任何清单引用),
-  # 但失败时的输出仍走 brand_run_best_effort 的脱敏路径,便于运维定位。
-  brand_run_best_effort aws s3 rm "s3://${R2_BUCKET}/${probe_key}"
+  # 正常路径:先从 trap 手里取走这个键,再做"删除 + 存在性校验"。
+  # 删除失败 / 删除后仍读得到 / 读不回 404 ⇒ fail-loud(不让探测残留污染版本目录)。
+  probe_object_live=''
+  if ! verify_remote_object_absent "$probe_key" "上传前探测"; then
+    exit 1
+  fi
   rm -f "$probe"
+  probe_tmp_file=''
 
   # 1) 版本化资产:不可变 + 长缓存(同版本内容永不改)+ 存储侧校验和(见上方
   #    verify_remote_object 的注释:单请求 PUT 才能拿到可与本地对拍的整对象 sha256)。
@@ -316,7 +435,25 @@ while IFS= read -r channel; do
   # `grep -v` 无匹配时退出码为 1 —— 开头的 `set -o pipefail` 会把整条管道判成
   # 失败,让"某渠道的第一次发布"直接中止。`||` 只兜住管道本身的退出码,stdout
   # 仍是管道输出(`true` 不产生输出),所以版本列表照常拿到。
-  versions="$(aws s3 ls "$base/releases/" | awk '{print $2}' | sed 's#/##' \
+  #
+  # **但 `|| true` 只能兜"下游 grep 无匹配",不能连 `s3 ls` 自身的失败一起吞**
+  # (2026-09-24 审计 C-22 第二重影响):`set -o pipefail` 下管道里任何一段失败都会
+  # 让整体非 0,旧写法于是把"列表读不回来"也判成"没有更老的版本" ⇒ 保留策略静默
+  # 不执行、旧版本无限累积,而流水线全绿。所以列表这一步单独捕获 + 判失败 fail-loud。
+  #
+  # 这一行也是本脚本**唯一**不走 `brand_run_checked` 的 aws 调用点:aws 的失败信息
+  # 自身会回显对象键,而这里的前缀含渠道 id(只有 `::add-mask::` 一层兜底,漏登记
+  # 一次就是一次泄漏)⇒ stderr 必须自己过 `brand_sanitize`(2026-09-24 审计 C-22)。
+  set +e
+  listing="$(aws s3 ls "$base/releases/" 2>&1)"
+  listing_status=$?
+  set -e
+  if [ "$listing_status" -ne 0 ]; then
+    printf '%s\n' "$listing" | brand_sanitize >&2
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:列出版本目录失败 —— 保留策略无法执行,旧版本会无限累积;上方输出已脱敏)" >&2
+    exit 1
+  fi
+  versions="$(printf '%s\n' "$listing" | awk '{print $2}' | sed 's#/##' \
     | grep -E '^[0-9]' | grep -vxF "$VER" || true)"
   printf '%s\n' "$versions" | sort -rV | tail -n +"$KEEP" \
     | while IFS= read -r old; do

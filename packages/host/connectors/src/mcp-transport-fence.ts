@@ -146,6 +146,17 @@ const FENCED_FETCH = Symbol('picoaide.mcp.transport-fence.fenced-fetch')
 const HARDENED = Symbol('picoaide.mcp.transport-fence.hardened')
 
 /**
+ * The owner token of one transport instance's outbound bookkeeping.
+ *
+ * Every ticket a transport's requests create is filed under this object, so the
+ * accounting is per INSTANCE rather than per endpoint (R10 N2). The waiter in
+ * `index.ts` cannot name the instance (the bridge owns it), which is why the
+ * endpoint-wide give-up release is gated on `soleLiveTransport` instead of
+ * assuming the endpoint has one user.
+ */
+const ACTIVITY_OWNER = Symbol('picoaide.mcp.transport-fence.activity-owner')
+
+/**
  * Carries a transport's **live** request-header record on the one object
  * `hardenTransport` already reaches: the `authProvider` the bridge handed the
  * SDK.
@@ -198,27 +209,179 @@ function liveHeadersOf(provider: unknown): Record<string, string> | undefined {
 }
 
 /**
- * How many requests to one MCP endpoint are awaiting an answer right now.
+ * The tool budget of ONE MCP call, in milliseconds.
  *
- * Keyed by the endpoint (origin + path), not by the transport instance: the
- * fence never gets a handle on the instance the connector registered, and the
- * only caller — the rebuild that is about to retire that instance — knows the
- * definition's URL. Two transports on one URL share the reading, which is the
- * conservative direction (they would both be retired by the same name rule).
+ * Sole authority for both sides of the same budget (R10 N6): the registration in
+ * `index.ts` hands this value to the bridge as `toolCallTimeoutMs` (stdio AND
+ * streamable-http), and this module uses it as the ceiling after which a counted
+ * request stops charging future rebuilds. Two literals of the same number is how
+ * a budget silently drifts from the bookkeeping that is supposed to describe it.
+ */
+export const MCP_TOOL_CALL_TIMEOUT_MS = 120_000
+
+/**
+ * Which requests to one MCP endpoint are awaiting an answer right now, **per
+ * transport instance**.
+ *
+ * The ticket set belongs to the transport that made the request (the owner token
+ * {@link createMcpOutboundFetch} is constructed with), not to the endpoint. The
+ * endpoint-only version of this map is what turned R10-B-06's give-up release
+ * into cross-transport damage (R10 N2): with two transports on one URL, the one
+ * being rebuilt gave up, released the endpoint's tickets — including the ticket
+ * of a transport that was NOT being retired — and that transport's own later
+ * rebuild then read `idle` and cut a call which could still have settled inside
+ * its grace window. Releasing is therefore only ever done for a named owner, or
+ * for a caller that has proven it is the endpoint's only live transport
+ * ({@link whenMcpOutboundIdle}'s `soleLiveTransport`).
  *
  * Only non-GET requests count: the SDK's GET is the long-lived SSE stream, so
  * counting it would mark every connected transport permanently busy.
+ *
+ * A ticket set is a map of ticket id -> start time, never a bare counter
+ * (R10-B-06). The counter this replaced was decremented in the `finally` of
+ * `await options.base(...)`, so a `base` that NEVER settles (a fetch that
+ * ignores its signal, or a socket that hangs) left the endpoint permanently
+ * busy: every later rebuild walked the full grace and logged the misleading
+ * `重建等待在途调用超时` line while nothing was on the wire. Tickets make both
+ * repairs possible — the age bound can drop the ones older than a budget, and a
+ * late `finally` from a request whose ticket was already dropped is a no-op
+ * instead of decrementing somebody else's count.
  */
-const outboundActivity = new Map<string, number>()
+const outboundActivity = new Map<string, Map<object, Map<number, number>>>()
 
-/** The activity bucket of one request URL, or null for a URL without a host. */
-function activityKeyOf(url: string | URL): string | null {
+/** Ticket ids: unique per counted request, so a stale release cannot subtract. */
+let outboundTicketSeq = 0
+
+/**
+ * The longest a counted request can legitimately still be on the wire.
+ *
+ * {@link MCP_TOOL_CALL_TIMEOUT_MS} is the ceiling: a request older than that is
+ * beyond the budget that protects it, so it stops charging future rebuilds even
+ * if its `base` never settles. With the endpoint-wide give-up release now gated
+ * on being the endpoint's only live transport, this age bound is the ONLY valve
+ * that always applies — hence the sharing rather than a second literal.
+ */
+const OUTBOUND_ACTIVITY_MAX_MS = MCP_TOOL_CALL_TIMEOUT_MS
+
+/**
+ * The activity bucket of one request URL — **the single normalization** every
+ * "same endpoint" decision is made under, or null for a URL that cannot be
+ * parsed.
+ *
+ * Bookkeeping and proof must agree (R10 N2, the repo's long-standing
+ * "judge/record/clear under one key" rule). Tickets are filed by
+ * {@link beginOutboundActivity} under this key, so the exclusive-transport proof
+ * in `index.ts` has to compare endpoints under THIS key too. It used to compare
+ * `.toString()` values instead, and the second defect of the R10-B-06 release
+ * valve followed: `/mcp?a=1` and `/mcp?a=2` share one ticket bucket (the query
+ * string is dropped here) while the string comparison called them different
+ * endpoints, so the rebuild of the first "proved" it was alone, gave up, and
+ * cleared the second's in-flight ticket — the exact cross-transport damage the
+ * proof was added to prevent (W2 remeasured `busyAfterGiveUp=false` for that
+ * pair, `true` for the same-URL pair).
+ *
+ * The query string is dropped on purpose: an MCP endpoint reached with two query
+ * spellings is still one endpoint as far as "is somebody else on the wire" goes,
+ * and `#`-fragments never reach a server at all. Dropping them is also the
+ * conservative direction — two URLs that normalize together can only make the
+ * caller LESS likely to be proven alone, so a give-up releases nothing.
+ * @param url - the MCP endpoint URL (string or `URL`).
+ * @returns `origin + pathname`, or null when the URL cannot be parsed.
+ */
+export function mcpActivityKey(url: string | URL): string | null {
   try {
     const parsed = typeof url === 'string' ? new URL(url) : url
     return `${parsed.origin}${parsed.pathname}`
   } catch {
     return null
   }
+}
+
+/**
+ * Every ticket set of one endpoint, after dropping the tickets older than
+ * `maxAgeMs`.
+ * @param key - the endpoint's activity key.
+ * @param maxAgeMs - age at which a ticket stops counting.
+ * @returns the surviving buckets (owner -> tickets), or undefined when idle.
+ */
+function liveOwnersOf(key: string, maxAgeMs: number): Map<object, Map<number, number>> | undefined {
+  const owners = outboundActivity.get(key)
+  if (owners === undefined) return undefined
+  const now = Date.now()
+  for (const [owner, tickets] of owners) {
+    for (const [id, startedAt] of tickets) if (now - startedAt >= maxAgeMs) tickets.delete(id)
+    if (tickets.size === 0) owners.delete(owner)
+  }
+  if (owners.size === 0) {
+    outboundActivity.delete(key)
+    return undefined
+  }
+  return owners
+}
+
+/** How many counted requests this endpoint has, for one owner or for all of them. */
+function ticketsOf(key: string, owner: object | undefined): number {
+  const owners = liveOwnersOf(key, OUTBOUND_ACTIVITY_MAX_MS)
+  if (owners === undefined) return 0
+  if (owner === undefined) {
+    let total = 0
+    for (const tickets of owners.values()) total += tickets.size
+    return total
+  }
+  return owners.get(owner)?.size ?? 0
+}
+
+/**
+ * Release the tickets of `owner` (or of every owner, for an endpoint-wide
+ * release) that are older than `maxAgeMs`.
+ * @param key - the endpoint's activity key.
+ * @param maxAgeMs - age at which a ticket is released.
+ * @param owner - the transport whose tickets are released; undefined = all owners.
+ */
+function releaseOutboundActivity(key: string, maxAgeMs: number, owner?: object): void {
+  const owners = outboundActivity.get(key)
+  if (owners === undefined) return
+  const now = Date.now()
+  for (const [candidate, tickets] of owners) {
+    if (owner !== undefined && candidate !== owner) continue
+    for (const [id, startedAt] of tickets) if (now - startedAt >= maxAgeMs) tickets.delete(id)
+    if (tickets.size === 0) owners.delete(candidate)
+  }
+  if (owners.size === 0) outboundActivity.delete(key)
+}
+
+/** Register one counted request; the id is what {@link endOutboundActivity} releases. */
+function beginOutboundActivity(key: string, owner: object): number {
+  const id = ++outboundTicketSeq
+  const owners = outboundActivity.get(key)
+  if (owners === undefined) {
+    outboundActivity.set(key, new Map([[owner, new Map([[id, Date.now()]])]]))
+    return id
+  }
+  const tickets = owners.get(owner)
+  if (tickets === undefined) owners.set(owner, new Map([[id, Date.now()]]))
+  else tickets.set(id, Date.now())
+  return id
+}
+
+/**
+ * Release one counted request.
+ *
+ * Looked up by ticket id inside the OWNER's set: a ticket whose bucket was
+ * pruned (or given up on) must not decrement a LATER request's count, and one
+ * transport must never touch another transport's tickets.
+ * @param key - the endpoint's activity key.
+ * @param owner - the transport that made the request.
+ * @param id - the ticket returned by {@link beginOutboundActivity}.
+ */
+function endOutboundActivity(key: string, owner: object, id: number): void {
+  const owners = outboundActivity.get(key)
+  if (owners === undefined) return
+  const tickets = owners.get(owner)
+  if (tickets === undefined) return
+  tickets.delete(id)
+  if (tickets.size === 0) owners.delete(owner)
+  if (owners.size === 0) outboundActivity.delete(key)
 }
 
 /** The transport's own URL as a full href, read live (see {@link URL_FIELD}). */
@@ -232,11 +395,31 @@ function ownHrefOf(read: (() => unknown) | undefined): string | null {
 /**
  * Whether an MCP call is on the wire for this endpoint right now.
  * @param target - the MCP endpoint URL of the definition.
+ * @param owner - optional transport whose tickets are read; omitted = every
+ *   transport on the endpoint (the conservative reading).
  * @returns true while at least one non-GET request is unanswered.
  */
-export function isMcpOutboundBusy(target: string): boolean {
-  const key = activityKeyOf(target)
-  return key !== null && (outboundActivity.get(key) ?? 0) > 0
+export function isMcpOutboundBusy(target: string, owner?: object): boolean {
+  const key = mcpActivityKey(target)
+  return key !== null && ticketsOf(key, owner) > 0
+}
+
+/** Options of {@link whenMcpOutboundIdle}. */
+export interface McpOutboundWaitOptions {
+  /**
+   * The transport whose tickets this wait concerns. When given, the wait reads
+   * and (on give-up) releases only that transport's tickets.
+   */
+  owner?: object
+  /**
+   * The caller has proven that no OTHER live transport talks to this endpoint,
+   * so every ticket here belongs to the transport this rebuild retires and the
+   * give-up may release them. Default false: an unproven give-up releases
+   * nothing (R10 N2). "This endpoint" is the {@link mcpActivityKey} bucket — the
+   * same key the tickets are filed under, so the proof and the bookkeeping
+   * cannot disagree about what "the same endpoint" means.
+   */
+  soleLiveTransport?: boolean
 }
 
 /**
@@ -244,23 +427,50 @@ export function isMcpOutboundBusy(target: string): boolean {
  *
  * Used by the provider-less rebuild, whose `retire()` closes the transport the
  * SDK may still be answering a tool call on (`Connection closed` mid-call,
- * audit R9A-3). The wait ends as soon as the counter reaches zero, so the
- * common case costs one poll; the bound exists so a stalled call cannot starve
- * the credential update forever.
+ * audit R9A-3). The wait ends as soon as the tickets reach zero, so the common
+ * case costs one poll; the bound exists so a stalled call cannot starve the
+ * credential update forever.
+ *
+ * **Whose tickets, and whose release** (R10 N2): the waiter in `index.ts` cannot
+ * name the transport instance — the bridge owns it — so it reads the endpoint
+ * union and passes `soleLiveTransport: true` only when it has proven that no
+ * other live registration talks to this endpoint. "Same endpoint" there is the
+ * same {@link mcpActivityKey} bucket these tickets live in, which is what makes
+ * the proof and the bookkeeping one decision instead of two spellings. In that
+ * case every ticket on the endpoint belongs to the transport this rebuild is
+ * about to retire, and the give-up may release them (that is R10-B-06's valve: a
+ * call that outlived the grace is one this rebuild cuts anyway). With another
+ * live transport on the endpoint the give-up **releases nothing**: under-waiting
+ * one rebuild is cheap, cutting a call another transport could still have
+ * settled is not. Ticket age ({@link OUTBOUND_ACTIVITY_MAX_MS}) remains the
+ * unconditional release valve.
  * @param target - the MCP endpoint URL of the definition.
  * @param timeoutMs - upper bound on the wait.
+ * @param options - optional owner scope and the sole-live-transport assertion.
  * @returns `'idle'` when the endpoint drained (or already was idle), `'busy'`
  *   when the bound expired with a call still on the wire.
  */
-export async function whenMcpOutboundIdle(target: string, timeoutMs: number): Promise<'idle' | 'busy'> {
-  const key = activityKeyOf(target)
-  if (key === null || (outboundActivity.get(key) ?? 0) === 0) return 'idle'
+export async function whenMcpOutboundIdle(
+  target: string,
+  timeoutMs: number,
+  options: McpOutboundWaitOptions = {},
+): Promise<'idle' | 'busy'> {
+  const key = mcpActivityKey(target)
+  if (key === null || ticketsOf(key, options.owner) === 0) return 'idle'
   const deadline = Date.now() + Math.max(0, timeoutMs)
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, ACTIVITY_POLL_MS))
-    if ((outboundActivity.get(key) ?? 0) === 0) return 'idle'
+    if (ticketsOf(key, options.owner) === 0) return 'idle'
   }
-  return (outboundActivity.get(key) ?? 0) === 0 ? 'idle' : 'busy'
+  if (ticketsOf(key, options.owner) === 0) return 'idle'
+  // Gave up. Release ONLY what this call is entitled to release: its own
+  // transport's tickets when the owner is known, or the whole endpoint when the
+  // caller proved it is the endpoint's only live transport. Then still report
+  // `busy` — the bound really did expire with a call on the wire, which is what
+  // the caller's warn line says.
+  if (options.owner !== undefined) releaseOutboundActivity(key, Math.max(0, timeoutMs), options.owner)
+  else if (options.soleLiveTransport === true) releaseOutboundActivity(key, Math.max(0, timeoutMs))
+  return 'busy'
 }
 
 /** Poll interval of {@link whenMcpOutboundIdle}: far below any tool budget. */
@@ -762,6 +972,12 @@ function hardenTransport(transport: object, locale: () => HostLocale = () => DEF
   if (live !== undefined) requestInit.headers = live
   fields[REQUEST_INIT_FIELD] = requestInit
   const ownUrl = (): unknown => fields[URL_FIELD]
+  // ONE owner token per transport instance, shared by both wrappers below: the
+  // two entry points belong to the same transport, so their tickets must land in
+  // the same set (and in no other transport's).
+  const existingOwner = fields[ACTIVITY_OWNER]
+  const owner: object = typeof existingOwner === 'object' && existingOwner !== null ? existingOwner : {}
+  Object.defineProperty(fields, ACTIVITY_OWNER, { value: owner, enumerable: false, configurable: true })
   // Where the SDK's requests really go: the caller-supplied fetch when there is
   // one (tests inject a recorder; a foreign build may inject a proxy), else the
   // global fetch read lazily at request time. The SDK's own `_fetchWithInit`
@@ -775,18 +991,36 @@ function hardenTransport(transport: object, locale: () => HostLocale = () => DEF
     scope,
     bakedHeaders: requestInit.headers,
     locale,
+    owner,
   })
   // `_startOrAuthSse()` builds its GET with `...this._requestInit` (v2) but the
   // POST/DELETE path and the 401 retries all read `_fetch`; the production
   // construction passes NO `fetch`, so `(this._fetch ?? fetch)` must resolve to
   // OUR wrapper rather than to the global follow-by-default fetch.
-  fields[FETCH_FIELD] = createMcpOutboundFetch({ base, ownUrl, scope, locale })
+  fields[FETCH_FIELD] = createMcpOutboundFetch({ base, ownUrl, scope, locale, owner })
   Object.defineProperty(fields, HARDENED, { value: true, enumerable: false })
 }
 
 /** Whether one transport instance was already hardened by {@link hardenTransport}. */
 export function isMcpTransportFenceHardened(transport: object): boolean {
   return (transport as Record<string | symbol, unknown>)[HARDENED] === true
+}
+
+/**
+ * The outbound-bookkeeping owner token of one hardened transport instance.
+ *
+ * This is the handle {@link whenMcpOutboundIdle} and {@link isMcpOutboundBusy}
+ * take when the caller really holds the instance (a probe, or a future bridge
+ * that hands the transport back): with it, a wait reads and releases only that
+ * transport's tickets, which is the precise form of R10 N2. The rebuild path
+ * cannot use it — the bridge owns the instance and never hands it out — so that
+ * path goes through the endpoint union plus the `soleLiveTransport` proof.
+ * @param transport - the transport instance (hardened or not).
+ * @returns the owner token, or undefined for an instance the fence never saw.
+ */
+export function mcpOutboundOwnerOf(transport: object): object | undefined {
+  const owner = (transport as Record<string | symbol, unknown>)[ACTIVITY_OWNER]
+  return typeof owner === 'object' && owner !== null ? owner : undefined
 }
 
 function forceManual(init: RequestInit | undefined): RequestInit {
@@ -865,6 +1099,13 @@ export interface McpOutboundFetchOptions {
   bakedHeaders?: HeadersInit | undefined
   /** Locale of the messages this wrapper may throw, resolved per request. */
   locale?: (() => HostLocale) | undefined
+  /**
+   * The transport instance this wrapper belongs to, as an opaque token: every
+   * ticket it creates is filed under this object, so one transport's rebuild can
+   * never release another transport's tickets (R10 N2). Omitted (a bare wrapper
+   * built outside {@link hardenTransport}) = this wrapper is its own owner.
+   */
+  owner?: object | undefined
 }
 
 /**
@@ -904,6 +1145,7 @@ export interface McpOutboundFetchOptions {
  * @returns a marked fetch that only performs policy-approved, scoped requests.
  */
 export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchLike {
+  const owner = options.owner ?? {}
   const wrapped: FetchLike = async (input, init) => {
     const locale = options.locale?.() ?? DEFAULT_HOST_LOCALE
     const step = transportStep(locale)
@@ -928,17 +1170,21 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     else next.headers = headers
     // R9A-3 bookkeeping: the provider-less rebuild retires (and closes) this
     // transport, which killed a tool call that was still on the wire. The
-    // count is what lets that rebuild wait for the call instead of cutting it.
+    // tickets are what let that rebuild wait for the call instead of cutting it.
+    // The ticket (not a bare increment) is what makes the set recoverable when
+    // `base` never settles (R10-B-06): the age bound releases it, and this
+    // `finally` — should it ever run, possibly much later — releases only THIS
+    // request, inside THIS transport's own set (R10 N2).
     const ownHref = ownHrefOf(options.ownUrl)
-    const activityKey = ownHref === null ? null : activityKeyOf(ownHref)
+    const activityKey = ownHref === null ? null : mcpActivityKey(ownHref)
     const counted = activityKey !== null
-      && activityKey === activityKeyOf(target)
+      && activityKey === mcpActivityKey(target)
       && (init?.method ?? 'GET').toUpperCase() !== 'GET'
-    if (counted) outboundActivity.set(activityKey, (outboundActivity.get(activityKey) ?? 0) + 1)
+    const ticket = counted && activityKey !== null ? beginOutboundActivity(activityKey, owner) : null
     try {
       return await options.base(input, next)
     } finally {
-      if (counted) outboundActivity.set(activityKey, Math.max(0, (outboundActivity.get(activityKey) ?? 1) - 1))
+      if (ticket !== null && activityKey !== null) endOutboundActivity(activityKey, owner, ticket)
     }
   }
   Object.defineProperty(wrapped, FENCED_FETCH, { value: true, enumerable: false })

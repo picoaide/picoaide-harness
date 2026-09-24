@@ -64,9 +64,9 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 
 const root = resolve(import.meta.dirname, '..')
@@ -451,7 +451,7 @@ const SELFTEST_MIN_RED_SAMPLES = 20
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
  */
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -519,6 +519,35 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w10-guard-env-legit-keys-green', policy: null },
   { id: 'w11-unpinned-step-node-options-green', policy: null },
   { id: 'w12-unpinned-github-path-green', policy: null },
+  // ---- [SK-17] 第十轮审计 C-01/C-02/C-03/D-03 的四层/四通道补样本 ----
+  // 白名单(U-1:未登记即红,含 COREPACK_HOME 这条**已端到端实跑**的解释器替换通道)、
+  // 第四层 `container.env`、被钉步骤体内的 `export`/前缀赋值、`uses:` 委派目标。
+  { id: 'w13-guard-job-unregistered-env-key', policy: '[SK-17]' },
+  { id: 'w14-container-image-unregistered', policy: '[SK-17]' },
+  { id: 'w14b-container-env-node-options', policy: '[SK-17]' },
+  { id: 'w15-step-body-export-node-options', policy: '[SK-17]' },
+  { id: 'w16-step-body-prefix-assignment', policy: '[SK-17]' },
+  { id: 'w17-step-body-registered-assignment-green', policy: null },
+  { id: 'w18-github-env-unregistered-key', policy: '[SK-17]' },
+  { id: 'w19-guard-job-unregistered-uses', policy: '[SK-17]' },
+  // ---- [SK-18]/[SK-19] 第十轮复审 V1 的 C-04/C-05(执行目录 / YAML 合并键)----
+  // 两条判据面各自的**正例**(必须红)与**绿样本**(不得一刀切)都逐条点名:删掉任一条分支
+  // 或把某一格样本改成绿形态,这里立刻报"登记了却没跑到/策略形同不存在"。
+  { id: 'w20-guard-job-defaults-working-directory', policy: '[SK-18]' },
+  { id: 'w21-pinned-gate-step-working-directory', policy: '[SK-18]' },
+  { id: 'w22-unpinned-step-working-directory-green', policy: null },
+  { id: 'w23-guard-job-merge-key', policy: '[SK-19]' },
+  { id: 'w24-env-merge-key', policy: '[SK-19]' },
+  { id: 'w25-anchored-alias-env-green', policy: null },
+  // ---- [SK-18]/[SK-19] 第十轮**复审 W1** 的 N1/N2(两个入口只堵了一个)----
+  // W1 实测:顶层 `defaults.run.working-directory` 与顶层 `defaults.run` 上的 `<<` 都曾是
+  // EXIT=0。这两格红样本 + 两格"登记/显式键后确实变绿"的对照逐条点名 —— 删掉任一条分支、
+  // 或把登记制悄悄改成"顶层一律红/一律绿",这里立刻报出来。
+  { id: 'w26-workflow-defaults-working-directory', policy: '[SK-18]' },
+  { id: 'w27-workflow-defaults-working-directory-green', policy: null },
+  { id: 'w28-guard-job-working-directory-registered-green', policy: null },
+  { id: 'w29-workflow-defaults-merge-key', policy: '[SK-19]' },
+  { id: 'w30-workflow-defaults-explicit-key-green', policy: null },
   // ---- 第九轮审计 B 泳道的 5 条 P1 + 3 条假红(同属"判据只看文本、不看执行语义")----
   { id: 'x1-guard-runner-colon-noop', policy: '[SK-9]' },
   { id: 'x2-guard-runner-test-f', policy: '[SK-9]' },
@@ -546,6 +575,10 @@ const SELFTEST_FATAL_PATH_ASSERTIONS = 6
 const SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS = 5
 /** `selfTestPinnedStepCoverage()` 至少执行的断言条数(1 条全命中 + 每条策略 1 条缺口)。 */
 const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 5
+/** `selfTestPinnedEnvLayers()` 至少执行的断言条数(正向集合相等 + 反向未登记层 + 变异打坏)。 */
+const SELFTEST_PINNED_ENV_LAYER_ASSERTIONS = 3
+/** `selfTestCompositeActions()` 至少执行的断言条数(5 类正反样本 + 接线 + 变异)。 */
+const SELFTEST_COMPOSITE_ACTION_ASSERTIONS = 9
 
 /**
  * `selfTestFatalPaths()` 必须覆盖的致命路径(2026-09-19 第三轮审计 F2-1)。
@@ -582,8 +615,19 @@ function workflowResult(failures, {
   allowlistHits = [],
   goTestTimeoutHits = 0,
   pinnedStepPolicies = [],
+  pinnedEnvLayers = [],
+  pinnedUses = [],
 } = {}) {
-  return { failures, checked, notes, allowlistHits, goTestTimeoutHits, pinnedStepPolicies }
+  return {
+    failures,
+    checked,
+    notes,
+    allowlistHits,
+    goTestTimeoutHits,
+    pinnedStepPolicies,
+    pinnedEnvLayers,
+    pinnedUses,
+  }
 }
 
 /**
@@ -597,6 +641,9 @@ export function checkWorkflowText(name, text, options = {}) {
   const failures = []
   // SK-15 的登记表(默认 = 仓库真实登记值;自检用合成表注入,见 REGISTRY_DEFAULT)。
   const registries = options.registries ?? REGISTRY_DEFAULT
+  // 本地 action 的解析根(第十轮审计 C-03):默认 = 仓库根;自检用临时树注入,
+  // 这样 `uses: ./.github/actions/<name>` 的"能不能在仓内解析到"可以在合成树上判。
+  const rootDir = options.rootDir ?? root
 
   // YAML 缩进不允许 tab;这类错误会让整个文件失效,先单独拦一道。
   if (/^\t|:\s*\t|\s\t/u.test(text)) {
@@ -790,11 +837,40 @@ export function checkWorkflowText(name, text, options = {}) {
   // "形态"两条判据之间:文本在、内容对,就是永不执行)。
   const pinnedSteps = checkPinnedStepExecutability(name, document, blocks, allowlist, notes)
   failures.push(...pinnedSteps.failures)
-  // 策略 13(2026-09-25 第九轮审计 D 泳道 P1):被钉步骤/守卫 job 的**进程环境层** ——
-  // `env:` 三层 + `$GITHUB_ENV`/`$GITHUB_PATH` 注入。上面那条 [SK-14] 读的是 argv /
-  // 解析后的 shell / 步骤体 / `if:`,四种通道全都在"命令怎么被写出来"这一层,看不见
-  // "解释器被换掉了"(形态 A:`NODE_OPTIONS=--import=…`;形态 B:`BASH_ENV=…`)。
-  failures.push(...checkPinnedStepEnvironment(name, document, blocks, notes))
+  // 策略 13(2026-09-25 第九轮审计 D 泳道 P1;2026-09-24 第十轮审计 C-01/C-02/C-03/D-03 加强):
+  // 被钉步骤/守卫 job 的**进程环境层** —— 白名单式的四层 `env:` + 前序步骤的 `$GITHUB_ENV`
+  // 写入 + 被钉步骤自己步骤体里的 `export`/前缀赋值 + 被钉单元里的 `uses:` 委派目标。
+  // 上面那条 [SK-14] 读的是 argv / 解析后的 shell / 步骤体 / `if:`,四种通道全都在
+  // "命令怎么被写出来"这一层,看不见"解释器被换掉了"(形态 A:`NODE_OPTIONS=--import=…`;
+  // 形态 B:`BASH_ENV=…`;形态 C:`COREPACK_HOME=…` ⇒ 连 `yarn` 都是攻击者的文件)。
+  // [SK-19] YAML 合并键（第十轮审计 C-05）：解析器不展开 `<<`，而 Actions 会 ——
+  // 判据读不懂"被合并进来的是什么"，一律红（fail-closed）。放在最前面：它是"判据的输入是否
+  // 完整"的问题，后面的每一条判据都建立在"解析结果就是 runner 看到的那份"之上。
+  const mergeKeys = checkYamlMergeKeys(name, document)
+  failures.push(...mergeKeys.failures)
+  if (mergeKeys.failures.length === 0) {
+    notes.push(`[SK-19] YAML 合并键(\`<<\`):已按 fail-closed 判定 `
+      + `${Object.keys(typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}).length} 个 job 块 / `
+      + `${mergeKeys.stepBlocks} 个步骤块(出现合并键即红 —— 解析器不展开它,判据与 runner 的语义会分叉)`
+      + ` + workflow 顶层 \`defaults\`/\`defaults.run\` ${mergeKeys.workflowDefaultsBlocks} 个块`
+      + '(顶层 `defaults.run` 一次作用于所有 job ⇒ W1 复审 N2 补进扫描面)')
+  }
+  const pinnedEnv = checkPinnedStepEnvironment(name, document, blocks, notes, {
+    rootDir,
+    // 被钉 job 的**容器镜像登记表**走与 SK-15 同一个 `registries` 测试缝（第十轮复审 V1 的
+    // P3-D3）：`w14` 那个样本同时带了未登记的 `container:`（镜像判据）与 `container.env`
+    // 里的危险键，于是**删掉 `container.env` 的键判定循环后样本照样红**（被相邻判据顶替）——
+    // 那一层就成了"没有自检守住的分支"。拆样本的前提是能单独放行镜像登记，所以这里必须可注入。
+    containerImages: registries.containerImages ?? PINNED_JOB_CONTAINER_REGISTRY,
+    // [SK-18] 的两张 **cwd 登记表**走同一个测试缝（W1 复审 N1 补）：没有它，"已登记例外绿"
+    // 这一格样本就无法构造（真实登记表里只有 `server` job 那一条，而样本的 job 名是
+    // `gate-guards`）—— 只有红样本、没有"登记后确实变绿"的证据，登记制就只被证明了一半。
+    // 注入语义 = **追加**（不是替换）：样本树复刻了 ci.yml 的 `server` job，替换会把真实登记的
+    // 那一格判成未登记 ⇒ 假红（第一版就是这么红的）。
+    jobWorkingDirectories: [...PINNED_JOB_WORKING_DIRECTORY_REGISTRY, ...(registries.jobWorkingDirectories ?? [])],
+    workflowWorkingDirectories: [...WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY, ...(registries.workflowWorkingDirectories ?? [])],
+  })
+  failures.push(...pinnedEnv.failures)
   // [SK-14⑧](R8-D-24):块级 shell 与步骤级 shell 两条口径必须一致(危险方向即红)。
   failures.push(...checkShellResolutionConsistency(name, document, blocks, notes))
   // 策略 12(R7-C P2-1):`--allow-advisory` 是 advisory 降级成告警的唯一入口,CI 不得带。
@@ -806,6 +882,8 @@ export function checkWorkflowText(name, text, options = {}) {
     allowlistHits: allowlist.hits,
     goTestTimeoutHits: budget.hits,
     pinnedStepPolicies: pinnedSteps.policies,
+    pinnedEnvLayers: pinnedEnv.layers,
+    pinnedUses: pinnedEnv.uses,
   })
 }
 
@@ -1256,31 +1334,97 @@ const PINNED_STEP_IF_POLICIES = {
 //     而且连 hook 文件都不需要);
 //   · `LD_PRELOAD`/`LD_AUDIT` —— 动态链接器注入(可拦截 `exit`/`__libc_start_main`)。
 //
-// 判据(三层 `env:` 全扫 + `$GITHUB_ENV`/`$GITHUB_PATH` 覆盖):对被钉住的判定单元 ——
+// 判据(**白名单**,第十轮审计 C-01 把黑名单换成登记表):对被钉住的判定单元 ——
 //   · [SK-14] 的 `PINNED_STEP_POLICIES` 命中的**判据步骤**(含 `gate` 的收尾链路步);
 //   · **根守卫 job**(`SK-9②` 的同一份派生口径,即跑 `check-root-guards.mjs` 的那个 job)——
 //     它的**每一个**步骤都算被钉(它是"永不跳过"的那个作业,任何一层 env 都在守卫链上);
-// 拒绝下面这份键表出现在**三层 `env:` 的任意一层**:
+// 下面**每一层**出现的 env 键都必须命中 `PINNED_ENV_ALLOWED_KEYS`(未登记即红,fail-closed):
 //   ① workflow 顶层 `env:`(Actions 会把它注入每个 job 的每个 step);
 //   ② job 级 `env:`;
-//   ③ step 级 `env:`(根守卫 job 里连 `uses:` 步骤一起查 —— 那一步也是守卫链的一部分);
-// ④ 同 job 内、**位置在被钉步骤之前**的步骤往 `$GITHUB_ENV` 写入这些键(运行期注入,
-//    `run` 文本里只有 `$VAR`),或往 `$GITHUB_PATH` 追加目录(PATH 覆写)。
-//
-// 取舍(**刻意不做白名单**):这张表里的键在"判据步骤/守卫 job"上没有合法用途 —— 它们改的
-// 是解释器怎么解释命令,不是命令要做什么。有内存调优/工具路径这类真实需求时,请把那种步骤
-// 放到**非判据步骤**上(判据步骤的失败必须能传出去)。所以这里**没有** `ALLOWLIST`:加一条
-// 豁免就等于把"红→绿"的通道原样开回来(与 [SK-16] 对 advisory 开关的取向一致)。
+//   ③ `jobs.<id>.container.env`(**Actions 的第四层**:该 job 所有 step 的容器环境变量;
+//      第九轮的枚举漏了它,审计用一个键在 job 级被抓、在 container 级静默通过实测确认);
+//   ④ step 级 `env:`(根守卫 job 里连 `uses:` 步骤一起查 —— 那一步也是守卫链的一部分);
+//   ⑤ 同 job 内、**位置在被钉步骤之前**的步骤往 `$GITHUB_ENV` 写入的键(运行期注入,
+//      `run` 文本里只有 `$VAR`),或往 `$GITHUB_PATH` 追加目录(PATH 覆写,无条件红);
+//   ⑥ **被钉步骤自己的步骤体**里 `export` / 前缀赋值(`NODE_OPTIONS=… node …`)写出的键
+//      (第十轮审计 D-03:一行 `export NODE_OPTIONS=…` 让根守卫打印「1 项未通过」却 EXIT=0,
+//      而前三层判据一个字节都看不见它)。
+// 层清单是 `PINNED_ENV_LAYER_REGISTRY`(唯一真源):通过行由**枚举结果**生成,`main()` 还会
+// 断言产出的层 id 与该表双向一致 —— 声明与代码不可能再各写一份(C-02 的现场:日志硬编码
+// "三层…均已检查",代码只枚举了三层)。
 //
 // 与 [SK-14] 的关系:`env:` **不是** `if:`/argv/shell/步骤体,`[SK-14]` 的四条判据都看不见它;
 // 两条策略互补,不重复报(同一处 env 只有 [SK-17] 报)。
 //
-// 诚实边界(不假装穷尽):命令词/键名是**运行期动态拼出来**的形态静态证明不了 ——
-// `K=NODE_OPTIONS; echo "$K=…" >> "$GITHUB_ENV"`、`cmd=exit; "$cmd" 0` 这类写法本判据不覆盖;
-// 只做常量折叠(`""`/转义拆分会被归一到同一个键名)。取向与 [SK-14] 其余各条一致:
-// **求不出真假 ⇒ 按"会静默"处理**的下一层是"能静态看见的一律拒"。
-/** 会改写解释器行为的环境变量键(`key` = 归一后比较用的大写形态)。 */
-const PINNED_ENV_DENIED_KEYS = [
+// 诚实边界(不假装穷尽):键名是**运行期动态拼出来**的形态静态证明不了 ——
+// `K=NODE_OPTIONS; echo "$K=…" >> "$GITHUB_ENV"`、`cmd=exit; "$cmd" 0`、`source hook.sh`
+// 这类写法本判据不覆盖;只做常量折叠(`""`/转义拆分会被归一到同一个键名)。取向与 [SK-14]
+// 其余各条一致:**求不出真假 ⇒ 按"会静默"处理**的下一层是"能静态看见的一律拒"。
+// 第二道(与"层"无关)收口在 `scripts/check-root-guards.mjs`:它**清洗**交给守卫子进程的
+// 环境(丢弃未登记的 `NODE_*`/`BASH_*`/`LD_*`/`COREPACK_*` 等)并显式 `process.exit(code)`。
+/**
+ * [SK-17] 被钉单元上**允许**出现的 env 键 —— **白名单式逐条登记**(2026-09-24 第十轮审计 C-01)。
+ *
+ * 现场(审计方端到端实跑):第九轮的判据是**黑名单**(`PINNED_ENV_DENIED_KEYS`),而
+ * `COREPACK_HOME` 不在表里 —— 给 `gate-guards` 加一步
+ * `echo "COREPACK_HOME=/tmp/yc" >> "$GITHUB_ENV"`(目录里放一个 `process.exit(0)` 的
+ * `v1/yarn/4.18.0/yarn.js`)之后:判据 EXIT=0、而真跑 `check-root-guards.mjs` 时
+ * 16 个根守卫全部"通过"(实测:同树不带该变量是「7 通过、9 失败」EXIT=1)。
+ * 机理:`packageManager: "yarn@4.18.0"` 不带 hash ⇒ Corepack 直接从 `$COREPACK_HOME`
+ * 取解释器且**不做内容校验** ⇒ 16 条守卫的**被执行体由攻击者提供**。
+ *
+ * 逐个补名字追不上下一层(`HOME`/`XDG_CACHE_HOME`/`LD_LIBRARY_PATH`/`GIT_CONFIG_GLOBAL`/
+ * `PYTHONSTARTUP` …都是同族),所以判据取向反过来:
+ *
+ *   **被钉单元(含根守卫 job 的每一步)在四层 `env:` 上出现的键、前序步骤写进
+ *   `$GITHUB_ENV` 的键、以及被钉步骤自己步骤体里 `export`/前缀赋值写出的键,
+ *   必须命中下面这份登记表;未登记一律红。**
+ *
+ * 表的内容 = 本仓 workflow **真实用到**的 22 个键(第九轮审计统计的"22 个合法 env 键零误伤"
+ * 语料,本轮按 `node` 遍历三个 workflow 的四层 `env:` 重建并逐条写清理由)。判据是
+ * **fail-closed** 的:解析不出(`null`/非字符串)、空键、大小写变体、未登记 —— 全部按
+ * "未登记"处理(大小写变体不归一:Windows 上 `Path` 就是 `PATH`,归一就等于放行一条通道)。
+ *
+ * 新增一个合法键 = 在**本文件**里加一条带 `why` 的登记(可评审的 diff);判据不再有
+ * "下一个 COREPACK_HOME"这种黑名单尾巴。
+ */
+const PINNED_ENV_ALLOWED_KEYS = [
+  // ---- 渠道仓检出(私有仓凭据,四个调用点复用) ----
+  { key: 'CHANNELS_REPO_TOKEN', why: '从私有渠道仓取渠道包用的 token(检出步的数据面输入)' },
+  { key: 'CHANNELS_REPO_SSH_KEY', why: '同上,SSH 形态的渠道仓凭据' },
+  { key: 'CI_CHANNELS_PIN', why: 'gate 解析出的渠道仓 commit pin(不 pin 会让同一个 tag 产出不同客户端)' },
+  // ---- 更新服务器(R2 兼容 S3 端点)与 GitHub Release ----
+  { key: 'R2_ACCOUNT_ID', why: '更新服务器端点/桶名/HMAC 种子的输入之一' },
+  { key: 'R2_BUCKET', why: '同上' },
+  { key: 'R2_SECRET_ACCESS_KEY', why: '同上' },
+  { key: 'AWS_ACCESS_KEY_ID', why: 'aws CLI 的真实凭据(它只认 AWS_*)' },
+  { key: 'AWS_SECRET_ACCESS_KEY', why: '同上' },
+  { key: 'AWS_DEFAULT_REGION', why: 'aws CLI 在兼容 S3 端点上要求的区域占位值' },
+  { key: 'GH_TOKEN', why: 'release 步骤创建/更新 GitHub Release 用的 token' },
+  // ---- macOS 签名与公证 ----
+  { key: 'APPLE_API_KEY', why: 'App Store Connect API Key(.p8)内容,公证用' },
+  { key: 'APPLE_API_KEY_ID', why: '同上,key id' },
+  { key: 'APPLE_API_ISSUER', why: '同上,issuer' },
+  { key: 'MAC_CERT_P12_BASE64', why: 'Developer ID 证书(P12 base64),签名用' },
+  { key: 'CSC_KEY_PASSWORD', why: 'P12 口令(签名工具读它)' },
+  { key: 'MACOS_SIGN_IDENTITY', why: '签名身份名(Developer ID Application: …)' },
+  { key: 'CHANNEL_NOTARIZE', why: '渠道 DMG 是否走公证路径的开关(打包脚本读)' },
+  // ---- 门禁/构建自身的元数据(不改变解释器行为) ----
+  { key: 'WASM_GATE_EXPECT_HEAD', why: 'WASM 残留门禁期望的基线 SHA' },
+  { key: 'WASM_GATE_REQUIRE_COVERED_PLATFORM', why: 'WASM 门禁对平台覆盖的硬性要求' },
+  { key: 'PG_DSN_TEST', why: 'server job 的测试数据库 DSN' },
+  { key: 'VERSION', why: '打包/发布步骤的版本号(由 tag 派生)' },
+  { key: 'DSH_TELEMETRY_DISABLED', why: 'workflow 顶层:构建期关掉遥测' },
+]
+
+/**
+ * **诊断用**的"已知危险键"提示表(2026-09-24 第十轮审计 C-01)。
+ *
+ * ⚠️ 它**不是判据**:判据是上面那份白名单 —— 未登记即红,与这张表无关。这里只负责在
+ * 报错时把"为什么这个键危险"讲清楚(第九轮那份黑名单的文本原样保留为**理由库**),
+ * 让被拦下的人一眼看懂该往哪走,而不是把黑名单原样开回来。
+ */
+const PINNED_ENV_DANGEROUS_HINTS = [
   { key: 'NODE_OPTIONS', why: '`node` 的启动参数(`--import=`/`--require=`)可以在进程退出时改写 `process.exitCode`' },
   { key: 'NODE_PATH', why: '改写模块解析路径(可把 `scripts/*.mjs` 解析到替身)' },
   { key: 'BASH_ENV', why: '非交互 bash 启动时 source 的文件(可定义 `node() { return 0; }` 之类的同名函数)' },
@@ -1289,40 +1433,736 @@ const PINNED_ENV_DENIED_KEYS = [
   { key: 'BASHOPTS', why: 'bash `shopt` 选项(同上)' },
   { key: 'PROMPT_COMMAND', why: 'bash 提示符钩子(可注入同名函数/包装器)' },
   { key: 'PATH', why: '可让 `node`/`bash` 解析到另一个二进制(命令名一字未改)' },
-  // 第九轮审计**点名键表之外**的同族扩展(审计未逐条实测,但注入能力与形态 A/B 同级)。
   { key: 'LD_PRELOAD', why: '动态链接器预载库(可拦截 `exit`/`__libc_start_main`)' },
   { key: 'LD_AUDIT', why: '动态链接器审计库(同上)' },
+  { key: 'LD_LIBRARY_PATH', why: '动态链接器搜索路径(同上)' },
+  { key: 'COREPACK_HOME', why: 'Corepack 从这里取 `v1/yarn/<ver>/yarn.js` 且**不校验内容** ⇒ 16 条根守卫的被执行体换成攻击者的文件(第十轮审计 C-01 端到端实跑)' },
+  { key: 'HOME', why: '决定 Corepack/npm/yarn 的缓存与配置根(COREPACK_HOME 的另一条入口)' },
+  { key: 'XDG_CACHE_HOME', why: '同上' },
+  { key: 'GIT_CONFIG_GLOBAL', why: 'git 全局配置(守卫里有 git 调用)' },
+  { key: 'PYTHONSTARTUP', why: 'Python 启动文件(与 `BASH_ENV` 同族的解释器注入)' },
 ]
-/** 前缀形态的键(`BASH_FUNC_<name>%%` = 导出的 shell 函数)。 */
-const PINNED_ENV_DENIED_PREFIXES = [
+/** 前缀形态的危险键提示(`BASH_FUNC_<name>%%` = 导出的 shell 函数)。 */
+const PINNED_ENV_HINT_PREFIXES = [
   { prefix: 'BASH_FUNC_', why: '导出的 shell 函数(`BASH_FUNC_node%%` 会让 `node` 变成 shell 函数,与 `BASH_ENV` 等价且不需要 hook 文件)' },
+  { prefix: 'COREPACK_', why: 'Corepack 的配置族(`COREPACK_HOME`/`COREPACK_ENABLE_*` 都能改"谁来解释 `yarn`")' },
+  { prefix: 'LD_', why: '动态链接器注入族' },
+  { prefix: 'YARN_', why: 'Yarn 配置族(可改它跑哪个脚本/用哪个缓存)' },
 ]
 
 /**
- * 键名是否命中"改写解释器行为"的表。
+ * [SK-17] 判据面的**层清单**(唯一真源,2026-09-24 第十轮审计 C-02)。
  *
- * 比较用**大写归一**后的键名:Actions 的 env 键在 Linux 上区分大小写,但 Windows runner 上
- * 环境变量名**不区分**大小写(`Path` 就是 `PATH`)—— 判据不跟着平台走,一律按大写判
- * (fail-closed:多拒一个大小写变体不会误伤任何真实用法,少拒一个就是一条静默通道)。
+ * 为什么单列一张表:第九轮的通过行**硬编码**写着"三层 `env:` … 均已检查",而代码实际
+ * 只枚举了三层(`container.env` 那一层根本没读,`grep -c container` = 0)—— 同一个键写在
+ * `jobs.<id>.container.env` 上时判据静默放行,**日志却仍然宣称"均已检查"**(假保证比沉默更糟)。
+ * 现在:枚举逐层产出 `{id, detail}`,通过行**由枚举结果生成**,而 `main()` 断言产出的
+ * id 集合与这张表**双向一致**(少一层即红 ⇒ 声明与代码同源,不可能再漂移)。
+ */
+const PINNED_ENV_LAYER_REGISTRY = [
+  { id: 'workflow-env', label: 'workflow 顶层 `env:`' },
+  { id: 'job-env', label: 'job 级 `env:`' },
+  { id: 'container-env', label: '`jobs.<id>.container.env`(Actions 的第四层)' },
+  { id: 'step-env', label: 'step 级 `env:`' },
+  { id: 'github-env-write', label: '前序步骤写入 `$GITHUB_ENV`' },
+  { id: 'step-body-assignment', label: '被钉步骤体内的 `export`/前缀赋值' },
+]
+
+/**
+ * 被钉 job 允许声明的**容器**执行体(第十轮审计 C-02 的同族面:`container:` 一旦出现,
+ * 这一步就不再跑在 runner 上,而是跑在那面镜像里 —— 与"env 换解释器"同级)。
  *
- * @param key - `env:` 里的原始键名(可能是非字符串?YAML 的键永远是字符串,这里仍防御)。
- * @returns `null` = 允许;否则是 `{ raw, matched, why }`
- *   (`raw` = 原样键名供报错点名,`matched` = 命中的登记项/前缀)。
+ * 当前为空(**没有任何被钉 job 声明容器**),空表 = 未登记即红:要在被钉 job 上用容器,
+ * 必须先在这里登记 `image`(逐字)并写明"这面镜像为什么可以承担判据步骤"。
+ */
+const PINNED_JOB_CONTAINER_REGISTRY = []
+
+/**
+ * [SK-18] 被钉 job 允许声明的 **`defaults.run.working-directory`**（第十轮审计 C-04，本轮修复）。
+ *
+ * 现场（审计方实跑）：给 `gate-guards` 加两行
+ * ```yaml
+ *     defaults:
+ *       run:
+ *         working-directory: /tmp/decoy
+ * ```
+ * `check-workflows` **EXIT=0**。机理与 `env:` 同族：`node scripts/check-root-guards.mjs`
+ * 的 argv 一字未改、步骤体一字未改，但它在**另一个目录**里被解析 —— 相对路径的脚本、
+ * `package.json`、`.yarnrc.yml` 全部换成那个目录里的。而"命令去哪解析"此前**不在判据面内**
+ * （第九轮把 `env:` 四层 + `$GITHUB_ENV` + 步骤体都收了进来，唯独漏了 cwd）。
+ *
+ * 判据（**登记制**，fail-closed）：被钉 job 上出现 `defaults.run.working-directory`、
+ * 或被钉单元的任何一步出现步骤级 `working-directory` ⇒ 必须逐字登记在下面两张表里，
+ * 否则红。**例外只允许逐字登记**（`job` + `workingDirectory` 全等）：本仓真实存在的唯一
+ * 一例是 `server` job（`server` 目录，`server` job 里的 `wasm-case-gate` 判据步
+ * `node ../scripts/wasm/check-go-test-json.mjs` 正是按这个 cwd 写的 `../` 前缀）——
+ * 任何**新** job、或**改**这个取值，都必须带着理由进 diff（这才是"可评审"，而不是"看起来人畜无害"）。
+ *
+ * 作用域边界（W1 复审 N6，认账）：登记项按 `{ job, workingDirectory }` 逐字匹配 ⇒ 该 job 内
+ * **将来新增**的被钉步骤会自动继承已登记的 cwd，不需要按步骤再登记。当前不可利用
+ * （把三个被钉单元搬进 `server` job 会被 [SK-9]/[SK-9③]/[SK-8b] 拦住，W1 三个探针实测 EXIT=1），
+ * 但这是本表的**已知边界**：给 `server` job 加新判据步骤时，评审者要自己看这个 cwd 对新步骤
+ * 是否仍然成立（判据不代劳）。
+ */
+const PINNED_JOB_WORKING_DIRECTORY_REGISTRY = [
+  {
+    job: 'server',
+    workingDirectory: 'server',
+    why: '`server` job 的 `defaults.run.working-directory: server`：job 内所有步骤都在 `server/`'
+      + '下解析（`make check` / `go test` / `npm ci --prefix` 的既有形态），其中 `wasm-case-gate`'
+      + '判据步写的是 `node ../scripts/wasm/check-go-test-json.mjs` —— `../` 前缀**依赖**这个 cwd。'
+      + '它与"给判据步骤换执行体"无关（判据脚本本身仍在仓内、argv 未变），所以按登记制放行。',
+  },
+]
+/**
+ * [SK-18] 被钉单元**步骤级** `working-directory` 的登记表（当前为空 = 未登记即红）。
+ *
+ * 与 job 级同族：步骤级 `working-directory` 只影响这一步，但"这一步"恰恰是判据步骤时，
+ * 效果与 job 级完全一样（命令在别处解析）。空表是 fail-closed 的默认形态。
+ */
+const PINNED_STEP_WORKING_DIRECTORY_REGISTRY = []
+
+/**
+ * [SK-18] **workflow 级** `defaults.run.working-directory` 的登记表（当前为空 = 未登记即红）。
+ *
+ * 现场（2026-09-25 第十轮复审 W1 的 N1，**P2**）：`defaults` 在 Actions 语法里**两个层级**
+ * 都合法 —— `jobs.<id>.defaults`（W1 之前的判据面）与 workflow **顶层** `defaults`。在
+ * `ci.yml` 顶层写
+ * ```yaml
+ * defaults:
+ *   run:
+ *     working-directory: <某个已入库的目录>
+ * ```
+ * 时，**所有 job**（含 `gate-guards` 的根守卫步、`gate` 的全量门禁步）都在那个目录里解析，
+ * 而 `check-workflows` **EXIT=0** —— 与 C-04 的原始现场同一机理、同一收益（argv / 步骤体 /
+ * `env:` 一字未改，`node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部
+ * 换成别处的）。判据随之一分为二：**两个入口同扫**，只堵一个等于没堵。
+ *
+ * 与 job 级同一条纪律：**顶层非空即未登记即红**，例外只允许逐字登记
+ * `{ workflow, workingDirectory, why }`（`workflow` = workflow 文件名，例如 `ci.yml`），
+ * 并在 `why` 里写明"判据步骤在这个 cwd 下为什么仍然成立"。空表是本仓当前的正确形态
+ * （三个 workflow 都没有顶层 `defaults.run.working-directory`）。
+ */
+const WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY = []
+
+/**
+ * 被钉单元里允许出现的 `uses:`(第十轮审计 C-03 / MAINCTL-3)。
+ *
+ * 判据(`pinnedUsesProblem`):被钉单元里的每一个 `uses:` 步骤**要么**是能在仓内解析到的
+ * 本地路径(其内容被 `checkCompositeActionTree()` 的同一套判据覆盖),**要么**逐字登记在
+ * 这张表里。空 `why` 一律按配置错误处理(登记 = 必须写清"它能做什么")。
+ *
+ * 表里三条是 `gate-guards`(永不跳过的那条路径)在用的官方 action;新增未登记的 action
+ * 必须红 —— 这正是 MAINCTL-3 的现场:插一步 `uses: ./.github/actions/poison` 之后,
+ * 判据把它**算进了"被钉住的判定单元"**(单元数 10 → 11)却从不读它的内容,EXIT=0。
+ */
+const PINNED_USES_REGISTRY = [
+  { uses: 'actions/checkout@v7', why: '官方检出 action:`gate-guards` 的第一步,取仓 + submodule(守卫脚本与 workflow 文本的来源)' },
+  { uses: 'actions/setup-node@v7', why: '官方 Node 安装 action:守卫运行器要的 node 24(注:corepack enable 必须排在它之后)' },
+  { uses: 'actions/cache@v6', why: '官方缓存 action:只读写 `.yarn/cache` 与 electron 缓存目录,不参与判据结论' },
+]
+
+/**
+ * 键名是否**未登记**(= 必须红)。判据是白名单,fail-closed:
+ * 非字符串 / 空键 / 前后带空白 / 大小写变体 / 表里没有 —— 全部按未登记处理。
+ *
+ * @param key - `env:` 里的原始键名。
+ * @returns `null` = 已登记;否则是 `{ raw, why, hint }`(`hint` = 命中的危险键提示,仅用于文案)。
  */
 function pinnedEnvKeyProblem(key) {
-  if (typeof key !== 'string') return null
-  const normalized = key.trim().toUpperCase()
-  if (normalized === '') return null
-  const exact = PINNED_ENV_DENIED_KEYS.find(entry => entry.key === normalized)
-  if (exact !== undefined) return { raw: key, matched: exact.key, why: exact.why }
-  const prefixed = PINNED_ENV_DENIED_PREFIXES.find(entry => normalized.startsWith(entry.prefix))
-  if (prefixed !== undefined) return { raw: key, matched: `${prefixed.prefix}*`, why: prefixed.why }
-  return null
+  if (typeof key !== 'string') {
+    return {
+      raw: JSON.stringify(key) ?? String(key),
+      why: '键名不是一个字符串(YAML 的映射键理论上都是字符串)⇒ 判据读不懂这一项',
+      hint: null,
+    }
+  }
+  if (key === '' || key.trim() !== key) {
+    return {
+      raw: JSON.stringify(key),
+      why: '键名是空串或前后带空白,判据读不懂它到底是哪个键',
+      hint: null,
+    }
+  }
+  if (PINNED_ENV_ALLOWED_KEYS.some(entry => entry.key === key)) return null
+  const upper = key.toUpperCase()
+  const hint = PINNED_ENV_DANGEROUS_HINTS.find(entry => entry.key === upper)
+  const prefixHint = PINNED_ENV_HINT_PREFIXES.find(entry => upper.startsWith(entry.prefix))
+  if (hint !== undefined) {
+    return {
+      raw: key,
+      why: `${hint.why}${key === hint.key ? '' : `(注意:登记表按**逐字**比较,大小写变体 \`${key}\` 与 \`${hint.key}\` 不是同一个键 —— Windows runner 上它们却是同一个环境变量,所以变体一律按未登记处理)`}`,
+      hint: hint.key,
+    }
+  }
+  if (prefixHint !== undefined) {
+    return { raw: key, why: prefixHint.why, hint: `${prefixHint.prefix}*` }
+  }
+  return {
+    raw: key,
+    why: '它不在 `PINNED_ENV_ALLOWED_KEYS` 的登记表里',
+    hint: null,
+  }
 }
 
 /** `env:` 映射(非对象一律当空 —— 静态判不了的形态由 YAML 自己的检查兜)。 */
 function envEntries(env) {
   return typeof env === 'object' && env !== null ? Object.entries(env) : []
+}
+
+/**
+ * 被钉步骤**自己的步骤体**里写进子进程环境的变量名(第十轮审计 D-03)。
+ *
+ * 现场(审计方实跑):在守卫步的 `run` 里加一行
+ * `export NODE_OPTIONS="--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+ * 之后,`check-workflows` EXIT=0(它只看 YAML 的 `env:` 三层),而真跑那条命令时
+ * 16 个根守卫"跑是跑了"、`process.exitCode` 被退出钩子改回 0 ⇒ 门禁 EXIT=0。
+ * 同族的第二半在 `scripts/check-root-guards.mjs`(它此前把 `process.env` **原样透传**
+ * 给 16 个守卫子进程)。
+ *
+ * 认识范围(**只认真的会进入子进程环境的三类写法**):
+ *   · `export NAME=…` / `export NAME` / `export -x NAME`(裸 `export NAME` 也认:
+ *     它把已有变量导出,同样是"这一步的子进程会看见它");
+ *   · `declare -x NAME` / `typeset -x NAME`(`-x` = 导出属性);
+ *   · **命令位前缀赋值** `NAME=… cmd …`(含 `env NAME=… cmd`:前导前缀词表里已有 `env`)。
+ * 不认:普通赋值语句(`FOO=1` 单独一行,不导出 ⇒ 子进程看不见)、函数定义、`local`、
+ * 以及命令词**之后**的 `NAME=…` 参数(`docker run -e FOO=bar` 那种不是本进程的环境)。
+ *
+ * 分词用与 [SK-14⑥]/[SK-15] 同一套原语(`joinShellContinuations` → `maskQuotedRegions`
+ * 切段 → `stripShellRedirections` → `splitShellWords`),所以"引号里的 `export`"
+ * (`echo "export NODE_OPTIONS=x"`)不会被误判。
+ *
+ * 诚实边界:键名由变量拼出来(`K=NODE_OPTIONS; export "$K"`)、`source hook.sh`、
+ * `eval "$payload"` 这类形态静态证明不了 —— 与 [SK-17] 其余各条同一取向:能静态看见的
+ * 一律判,看不见的由"求不出真假 ⇒ 按会静默处理"之外的第二道(环境清洗)兜。
+ *
+ * @param script - 步骤体的原始 `run` 文本(本函数自己剥注释)。
+ * @returns `[{ name, form }]` 或 `[{ unparsable: true, segment, form }]`(分词失败)。
+ */
+function shellEnvironmentAssignments(script) {
+  if (typeof script !== 'string' || script.trim() === '') return []
+  const results = []
+  const opened = joinShellContinuations(executableScript(script))
+  const masked = maskQuotedRegions(opened)
+  const segments = []
+  let start = 0
+  COMMAND_SEGMENT_SEPARATOR.lastIndex = 0
+  let match
+  while ((match = COMMAND_SEGMENT_SEPARATOR.exec(masked)) !== null) {
+    segments.push(opened.slice(start, match.index))
+    start = match.index + match[0].length
+  }
+  segments.push(opened.slice(start))
+
+  for (const segment of segments) {
+    const cleaned = stripShellRedirections(segment).trim()
+    if (cleaned === '') continue
+    const words = splitShellWords(cleaned)
+    if (words === null) {
+      // 分词失败 ⇒ 判据读不懂这一句。只有它**看起来**在写环境时才 fail-closed
+      // (否则任意一段带引号的文本都会把一个正常的守卫步骤判红)。
+      if (/(?:^|[\s;&|(){}])(?:export|declare|typeset)\b|\b[A-Za-z_][A-Za-z0-9_]*=/u.test(cleaned)) {
+        results.push({ unparsable: true, segment: cleaned, form: '无法分词的赋值片段' })
+      }
+      continue
+    }
+    const texts = words.map(word => word.text)
+    // 命令位:跳过前缀词(`env`/`time`/`sudo`/`eval`/`exec`…)与 `NAME=…` 赋值词。
+    let index = 0
+    const leadingAssignments = []
+    while (index < texts.length) {
+      const word = texts[index]
+      if (EXIT_PREFIX_WORDS.includes(word)) { index += 1; continue }
+      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/u.exec(word)
+      if (assignment !== null) {
+        leadingAssignments.push(assignment[1])
+        index += 1
+        continue
+      }
+      if (word.startsWith('-') && word !== '-') { index += 1; continue }
+      break
+    }
+    // **只有"赋值之后、同一段里还有命令词"才是前缀赋值**(`FOO=1 cmd` ⇒ 子进程看得见)。
+    // 单独一行的 `FOO=1` 是普通 shell 变量(不导出 ⇒ 子进程看不见),不能报 ——
+    // 本仓 `ci.yml` 的 `GO_TEST_STATUS=0` / `CHECK_STATUS=0` 正是这种合法写法。
+    if (index < texts.length) {
+      for (const name of leadingAssignments) results.push({ name, form: `前缀赋值 \`${name}=…\`` })
+    }
+    const command = texts[index]
+    if (command !== 'export' && command !== 'declare' && command !== 'typeset') continue
+    let cursor = index + 1
+    const expectsExportAttribute = command !== 'export'
+    let exportsAttribute = command === 'export'
+    while (cursor < texts.length) {
+      const word = texts[cursor]
+      if (word === '--') { cursor += 1; continue }
+      if (word.startsWith('-') && word !== '-') {
+        // `export -f` = 导出 **shell 函数**(环境里变成 `BASH_FUNC_<name>%%`,与 `BASH_ENV` 等价)。
+        if (/^-[A-Za-z]*f/u.test(word)) {
+          results.push({ unparsable: true, segment: cleaned, form: `\`${command} ${word}\`(导出 shell 函数)` })
+        }
+        if (/^-[A-Za-z]*x/u.test(word)) exportsAttribute = true
+        // `-n`(取消导出属性)之后仍按导出判:fail-closed,不区分"取消"与"设置"。
+        cursor += 1
+        continue
+      }
+      const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
+      if (name === undefined) { cursor += 1; continue }
+      if (!expectsExportAttribute || exportsAttribute) {
+        results.push({ name, form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
+      }
+      cursor += 1
+    }
+  }
+  return results
+}
+
+/**
+ * 一个 `uses:` 是否落在判据的**读取面**内(第十轮审计 C-03 / MAINCTL-3)。
+ *
+ * 判据(与 `PINNED_USES_REGISTRY` 配套):
+ *   · **本地路径**(`./…`):必须能在仓内解析到,必须在 `.github/actions/` 之下(那样它的
+ *     内容才被 `checkCompositeActionTree()` 的同一套键表判据覆盖),且必须是 composite
+ *     (`runs.using === 'composite'`)—— 非 composite 的执行体(js/docker)不在读取面内;
+ *   · **远端引用**:必须逐字登记在 `PINNED_USES_REGISTRY` 里(每条带"它能做什么"的说明)。
+ * 其余形态(表达式、`../` 越界、空值、非字符串)一律红:求不出真假 ⇒ 按会静默处理。
+ *
+ * @param uses - `step.uses` 的取值。
+ * @param rootDir - 仓库根(本地路径的解析基准;自检注入合成树)。
+ * @returns `null` = 在读取面内;否则是人读的原因(含出路)。
+ */
+function pinnedUsesProblem(uses, rootDir) {
+  if (typeof uses !== 'string' || uses.trim() === '') {
+    return `\`uses:\` 取值不是一个非空字符串(${JSON.stringify(uses ?? null)})⇒ 判据读不懂这一步委派给了谁。`
+      + '被钉单元里的 `uses:` 只允许"仓内可解析的本地 composite action"或登记在 '
+      + '`PINNED_USES_REGISTRY` 里的逐字条目。'
+  }
+  const value = uses.trim()
+  if (!value.startsWith('./')) {
+    const registered = PINNED_USES_REGISTRY.find(entry => entry.uses === value)
+    if (registered !== undefined) return null
+    const known = PINNED_USES_REGISTRY.map(entry => `\`${entry.uses}\``).join('、')
+    return `它引用的是**远端 action** \`${value}\`,而它不在 \`PINNED_USES_REGISTRY\` 里`
+      + `(已登记:${known || '（空）'})⇒ 这一步的执行体由仓库之外的东西提供,判据读不到。`
+      + '\n  ⇒ 要在被钉单元上用一个新的远端 action,先在 `PINNED_USES_REGISTRY` 里逐字登记'
+      + '（action 名/ref + 它能做什么 + 为什么可以承担判据步骤）。'
+  }
+  const actionsRoot = join(rootDir, '.github', 'actions')
+  const target = resolve(rootDir, value)
+  if (target !== actionsRoot && !target.startsWith(`${actionsRoot}${sep}`)) {
+    return `它是本地路径 \`${value}\`,但不在 \`.github/actions/\` 之下 ⇒ 它的内容不在`
+      + ' `checkCompositeActionTree()` 的扫描面内(那条判据逐字检查每个 composite action 的'
+      + ' `run:`/`env:`/`uses:`)。被钉单元委派的本地 action 必须放在 `.github/actions/` 下。'
+  }
+  let stats
+  try {
+    stats = statSync(target)
+  } catch {
+    return `它是本地路径 \`${value}\`,但在仓内**解析不到**(路径不存在)⇒ 判据无法读到它的内容。`
+      + '（`uses:` 指向不存在的本地 action 时 Actions 会直接失败;判据同样不能假装它可判。）'
+  }
+  let actionFile = null
+  if (stats.isDirectory()) {
+    for (const candidate of ['action.yml', 'action.yaml']) {
+      const path = join(target, candidate)
+      if (existsSync(path)) { actionFile = path; break }
+    }
+    if (actionFile === null) {
+      return `它是本地路径 \`${value}\`(目录),但目录里没有 \`action.yml\`/\`action.yaml\` ⇒ `
+        + '判据读不到它的执行体。'
+    }
+  } else if (stats.isFile() && /\.ya?ml$/u.test(target)) {
+    actionFile = target
+  } else {
+    return `它是本地路径 \`${value}\`,但它既不是目录也不是 \`.yml\`/\`.yaml\` 文件 ⇒ 判据读不到它的执行体。`
+  }
+  let actionDocument
+  try {
+    actionDocument = parseYaml(readFileSync(actionFile, 'utf8'))
+  } catch (cause) {
+    return `它的 action 文件 \`${relative(rootDir, actionFile)}\` YAML 解析失败`
+      + `(${cause?.message ?? String(cause)})⇒ 判据读不到它的执行体。`
+  }
+  const using = actionDocument?.runs?.using
+  if (using !== 'composite') {
+    return `它是本地 action \`${relative(rootDir, actionFile)}\`,但 \`runs.using\` = `
+      + `${JSON.stringify(using ?? null)}(不是 \`composite\`)⇒ 执行体是 js/docker 而不是可读的 `
+      + '`run:` 文本,不在本判据的读取面内。要用新的执行体,请登记进 `PINNED_USES_REGISTRY`'
+      + '（远端形态）或改成 composite。'
+  }
+  return null
+}
+
+/**
+ * 本地 composite action 的**内容**判据(第十轮审计 C-03 / MAINCTL-3)。
+ *
+ * 现场:`.github/actions/poison/action.yml`(composite,内部
+ * `echo "NODE_OPTIONS=--import=…" >> "$GITHUB_ENV"`)在 `.github/workflows/` 的**平铺
+ * `readdirSync` 扫描面之外** ⇒ 判据把那一步算进了"被钉住的判定单元"(单元数 10 → 11)
+ * 却从不读它的内容,EXIT=0;而 `$GITHUB_ENV` 的写入跨步骤生效 ⇒ 守卫步拿到的就是被污染的
+ * `NODE_OPTIONS`。
+ *
+ * 判据:每个 action 文件的 `runs.steps[]` 都按**同一套**键表判 —— `env:` 键、`run` 文本里的
+ * `export`/前缀赋值(步骤体那一层)、`run` 文本里的 `$GITHUB_ENV` 写入键、以及嵌套的
+ * `uses:`(本地路径 / 登记表,递归同一函数)。
+ *
+ * @param actionsRoot - `.github/actions` 目录(缺省 = 仓库根下那一个;自检注入合成树)。
+ * @param notes - 提示收集器。
+ * @returns 失败项数组。
+ */
+function checkCompositeActionTree(actionsRoot, notes, rootDir = root) {
+  const failures = []
+  const files = []
+  const walk = directory => {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.isFile() && /^action\.ya?ml$/u.test(entry.name)) files.push(path)
+    }
+  }
+  walk(actionsRoot)
+  files.sort()
+  if (files.length === 0) {
+    notes.push('[SK-17] 本地 composite action:`.github/actions/**` 下 0 个 action 文件(扫描面已就位)')
+    return failures
+  }
+  let checkedSteps = 0
+  for (const file of files) {
+    const relativePath = relative(rootDir, file)
+    let document
+    try {
+      document = parseYaml(readFileSync(file, 'utf8'))
+    } catch (cause) {
+      failures.push({
+        name: relativePath,
+        line: 0,
+        detail: `[SK-17] 本地 action 的 YAML 解析失败: ${cause?.message ?? String(cause)}`
+          + '\n  ⇒ 这个 action 被 workflow 引用时执行体是什么,判据读不出来(读不懂按会静默处理)。',
+      })
+      continue
+    }
+    const using = document?.runs?.using
+    if (using !== 'composite') {
+      failures.push({
+        name: relativePath,
+        line: 0,
+        detail: `[SK-17] 本地 action 的 \`runs.using\` = ${JSON.stringify(using ?? null)}(不是 \`composite\`)`
+          + '\n  ⇒ 执行体是 js/docker 或声明缺失,判据读不到它的 `run:` 文本。'
+          + '被钉单元委派的本地 action 必须是 composite;要用别的执行体请登记进 `PINNED_USES_REGISTRY`。',
+      })
+      continue
+    }
+    const steps = Array.isArray(document?.runs?.steps) ? document.runs.steps : []
+    steps.forEach((step, index) => {
+      checkedSteps += 1
+      const label = `${relativePath} 的 step#${index + 1}`
+      for (const [key] of envEntries(step?.env)) {
+        const hit = pinnedEnvKeyProblem(key)
+        if (hit === null) continue
+        failures.push({
+          name: relativePath,
+          line: 0,
+          detail: `[SK-17] ${label} 的 \`env:\` 里有 \`${hit.raw}\`,而它寄宿在本地 composite action 里`
+            + `(会被引用它的被钉单元整段执行)。\n  为什么必须拒:${hit.why}。`
+            + '\n  ⇒ composite action 的 `env:` 与 workflow 里的 `env:` 同权,但它此前落在'
+            + ' `.github/workflows/` 的平铺扫描面之外(第十轮审计 C-03 / MAINCTL-3 的现场)。'
+            + '未登记的键要么去掉,要么先在 `PINNED_ENV_ALLOWED_KEYS` 里登记并写清理由。',
+        })
+      }
+      if (typeof step?.run !== 'string') {
+        if (typeof step?.uses === 'string') {
+          const problem = pinnedUsesProblem(step.uses, rootDir)
+          if (problem !== null) {
+            failures.push({
+              name: relativePath,
+              line: 0,
+              detail: `[SK-17] ${label} 通过 \`uses: ${step.uses}\` 继续委派,而该目标不在判据的读取面内。`
+                + `\n  ${problem}`,
+            })
+          }
+        }
+        return
+      }
+      const script = executableScript(step.run)
+      // 步骤体那一层:`export`/前缀赋值。
+      for (const assignment of shellEnvironmentAssignments(step.run)) {
+        const name = assignment.unparsable === true ? null : pinnedEnvKeyProblem(assignment.name)
+        if (assignment.unparsable !== true && name === null) continue
+        failures.push({
+          name: relativePath,
+          line: 0,
+          detail: `[SK-17] ${label} 的步骤体用 \`${assignment.form}\` 写出了 `
+            + `\`${assignment.name ?? assignment.segment}\`${assignment.unparsable === true ? '(分词失败)' : ''}`
+            + `,而它寄宿在本地 composite action 里(引用它的被钉单元会整段执行它)。`
+            + `\n  为什么必须拒:${assignment.unparsable === true ? '判据读不懂这段 shell 写出了哪个键,按未登记处理' : name.why}。`,
+        })
+      }
+      // `$GITHUB_ENV` 写入:`$GITHUB_ENV` 是 job 级共享文件 ⇒ 键会被**调用方 job 的后续步骤**继承。
+      if (GITHUB_ENV_APPEND.test(script)) {
+        const normalized = advisoryFlagShape(script)
+        for (const match of normalized.matchAll(GITHUB_ENV_KEY_ASSIGNMENT)) {
+          const hit = pinnedEnvKeyProblem(match[1])
+          if (hit === null) continue
+          failures.push({
+            name: relativePath,
+            line: 0,
+            detail: `[SK-17] ${label} 往 \`$GITHUB_ENV\` 写入了 \`${hit.raw}\`,而它寄宿在本地 composite `
+              + 'action 里 —— `$GITHUB_ENV` 是 job 级共享文件,写入的键会被**调用方 job 的后续步骤**'
+              + '(含被钉的守卫步)继承。'
+              + `\n  为什么必须拒:${hit.why}。`
+              + '\n  ⇒ 这正是 MAINCTL-3 的现场:一个仓内可判的文件里的 8 行 YAML 让"永不跳过"的'
+              + '守卫 job 恒绿,而 workflow 文本一个字未改。',
+          })
+        }
+      }
+    })
+  }
+  notes.push(`[SK-17] 本地 composite action:${files.length} 个 action 文件、${checkedSteps} 个 composite step `
+    + '的 `env:`/步骤体赋值/`$GITHUB_ENV` 写入/嵌套 `uses:` 已按同一套键表检查')
+  return failures
+}
+
+/**
+ * 绑定在"被钉单元"上的 `uses:` 登记表的**死条目对账**(与 SWALLOW_ALLOWLIST 同一纪律)。
+ *
+ * @param observed - 本次全仓扫描里被钉单元实际用到的 `uses:` 取值(去重)。
+ * @returns 失败项数组(空 = 每条登记都还在用)。
+ */
+function pinnedUsesRegistryProblem(observed) {
+  const used = new Set(Array.isArray(observed) ? observed : [])
+  const dead = PINNED_USES_REGISTRY.filter(entry => !used.has(entry.uses))
+  if (dead.length === 0) return []
+  return [{
+    name: '[SK-17]',
+    line: 0,
+    detail: `PINNED_USES_REGISTRY 里有 ${dead.length} 条**死条目**(没有任何被钉单元再用它):`
+      + `\n${dead.map(entry => `  - \`${entry.uses}\``).join('\n')}`
+      + '\n  ⇒ 登记表会悄悄长成一个"谁都能往里塞一个 action"的豁免洞:不用的条目必须清掉。',
+  }]
+}
+
+/**
+ * 本地 composite action 判据的**自证**(第十轮审计 C-03 / MAINCTL-3)。
+ *
+ * 为什么必须单独一个自证:这条判据的输入是**目录**(`.github/actions/**`),不是 workflow
+ * 文本 —— `gateSample` 那套合成文本机制覆盖不到它,而"用合成文件树跑一遍真判据"才是
+ * 能被打坏的形态(把 `checkCompositeActionTree()` 的 `$GITHUB_ENV` 那一段删掉,
+ * 下面第 1/3 条断言立刻红)。
+ *
+ * 五个断言各钉一件事:
+ *   ① composite action 里的 `$GITHUB_ENV` 写入被树扫描抓到(而且点名了那个 action);
+ *   ② 干净 action(`export VERSION=…` 这种登记键)不报(不得一刀切);
+ *   ③ 同一份 poison 内容在**workflow 文本只有一个 `uses:` 行**时也会被读到 —— 这是本条
+ *      判据存在的理由(第九轮把它算进了"被钉住的判定单元"却从不读它的内容);
+ *   ④ 本地路径解析不到 / 非 composite 的执行体 ⇒ 红(读不懂的执行体不能算覆盖);
+ *   ⑤ 变异:把 poison 里那一行 `$GITHUB_ENV` 写入删掉之后**必须不再报**
+ *      (证明第 ①③ 条不是恒真断言)。
+ *
+ * @returns `{ failures, assertions }`。
+ */
+function selfTestCompositeActions() {
+  const failures = []
+  let assertions = 0
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-composite-selftest-'))
+  try {
+    const actionsRoot = join(directory, '.github', 'actions')
+    const writeAction = (name, lines) => {
+      mkdirSync(join(actionsRoot, name), { recursive: true })
+      writeFileSync(join(actionsRoot, name, 'action.yml'), [...lines, ''].join('\n'))
+    }
+    const poisonLines = envLine => [
+      `name: ${envLine === null ? 'clean' : 'poison'}`,
+      'runs:',
+      '  using: composite',
+      '  steps:',
+      '    - shell: bash',
+      '      env:',
+      "        VERSION: '1.2.3'",
+      '      run: |',
+      '        set -euo pipefail',
+      ...(envLine === null ? ['        export VERSION=1.2.3'] : [`        ${envLine}`]),
+    ]
+    writeAction('poison', poisonLines('echo "NODE_OPTIONS=--import=data:text/javascript,process.exitCode=0" >> "$GITHUB_ENV"'))
+    writeAction('clean', poisonLines(null))
+    writeAction('nodekind', [
+      'name: nodekind',
+      'runs:',
+      '  using: node20',
+      '  main: index.js',
+    ])
+    const notes = []
+    const treeFailures = checkCompositeActionTree(actionsRoot, notes, directory)
+    assertions += 1
+    const poisonHits = treeFailures.filter(entry => entry.name.includes('poison'))
+    if (poisonHits.length === 0) {
+      failures.push('[composite-selftest] 合成树里的 poison composite action 没有被抓到'
+        + '(它的 `$GITHUB_ENV` 写入会让引用它的被钉单元恒绿)。')
+    } else if (!poisonHits.some(entry => entry.detail.includes('NODE_OPTIONS'))) {
+      failures.push('[composite-selftest] 抓到 poison 但报错里没有点名 `NODE_OPTIONS`(诊断读不出病根)。')
+    }
+    assertions += 1
+    // 键名必须**恰好一个**(第十轮修复过程实测的假阳性):`$GITHUB_ENV` 的键名提取若用宽正则,
+    // `NODE_OPTIONS=--import=data:…` 里的 `import=`、`…process.exitCode=0` 里的 `exitCode=`
+    // 会被当成"又写了两个键"⇒ 白名单下就是两条假红(要求 `GITHUB_ENV_KEY_ASSIGNMENT`)。
+    if (poisonHits.length > 1) {
+      failures.push(`[composite-selftest] 一条 \`$GITHUB_ENV\` 注入被报成 ${poisonHits.length} 条`
+        + `(键名提取把**取值里**的 \`=\` 片段也算成键):${poisonHits.map(entry => entry.detail.split('写入了')[1]?.slice(0, 12)).join(' / ')}`)
+    }
+    assertions += 1
+    const cleanHits = treeFailures.filter(entry => entry.name.includes('clean'))
+    if (cleanHits.length > 0) {
+      failures.push(`[composite-selftest] 干净 composite action 被误报:${cleanHits[0].detail.split('\n')[0]}`)
+    }
+    assertions += 1
+    const nodeKindHits = treeFailures.filter(entry => entry.name.includes('nodekind'))
+    if (nodeKindHits.length === 0) {
+      failures.push('[composite-selftest] `runs.using: node20` 的本地 action 没有被判红'
+        + '(它的执行体是 js,不在判据的读取面内 ⇒ 引用它的被钉单元等于不受判)。')
+    }
+    const workflow = [
+      'name: selftest',
+      'on:',
+      '  push:',
+      'jobs:',
+      '  gate-guards:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: ./.github/actions/poison',
+      '      - run: node scripts/check-root-guards.mjs',
+      '  other:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: ./.github/actions/missing',
+      '      - uses: ./.github/actions/clean',
+      '      - run: node scripts/check-root-guards.mjs',
+      '',
+    ].join('\n')
+    const result = checkWorkflowText('selftest.yml', workflow, { rootDir: directory })
+    assertions += 1
+    // 可解析、且是 composite ⇒ `uses:` 这一层**通过**(内容由 `checkCompositeActionTree()`
+    // 覆盖,上面第 ① 条断言已经证明它抓到了 poison 的那一行)。这里钉住"不得误报"。
+    const localUses = result.failures.filter(entry => entry.detail.includes('.github/actions/poison'))
+    if (localUses.length > 0) {
+      failures.push('[composite-selftest] 可解析的本地 composite action 被 `uses:` 这一层误报:'
+        + `${localUses[0].detail.split('\n')[0]}(它的内容由 .github/actions 的树扫描负责)。`)
+    }
+    assertions += 1
+    if (!result.failures.some(entry => entry.detail.includes('.github/actions/missing'))) {
+      failures.push('[composite-selftest] 指向不存在路径的 `uses:` 没有被判红'
+        + '(判据读不到它的内容,不能假装它可判)。')
+    }
+    assertions += 1
+    if (result.failures.some(entry => entry.detail.includes('actions/clean'))) {
+      failures.push('[composite-selftest] 干净的本地 composite action 在 workflow 侧被误报。')
+    }
+    // ⑤ **接线**断言(变异实测出来的形态):把 `main()` 里那一次 `checkCompositeActionTree()`
+    //    调用删掉之后,上面所有断言**照样绿**(自检直接调函数),而真实 workflow 里的
+    //    poison 不再被抓 —— "判据在、接线没了"。这一条读本文件自己的源码点名那次调用
+    //    (与 `wasm-app-open-route-parity` 那类源码级接线守卫同一手法:行为断言覆盖不到
+    //    "函数还在但没人调用")。
+    assertions += 1
+    const ownSource = readFileSync(import.meta.filename, 'utf8')
+    const wiringNeedle = ['failures.push(...checkComposite', 'ActionTree(join(root'].join('')
+    const wiring = ownSource.split('\n').filter(line => line.includes(wiringNeedle))
+    if (wiring.length !== 1) {
+      failures.push(`[composite-selftest] 本文件源码里的 composite 扫描接线出现 ${wiring.length} 次`
+        + '(期望 1 次)⇒ 判据函数还在但**没有接到全仓扫描**上,真实仓里的 composite action 不再被检查。')
+    }
+    // ⑥ 变异:删掉 poison 的那一行之后,同一条判据必须**不再报**(否则它是恒真的)。
+    writeAction('poison', poisonLines(null))
+    const mutated = checkCompositeActionTree(actionsRoot, [], directory)
+    assertions += 1
+    if (mutated.some(entry => entry.name.includes('poison'))) {
+      failures.push('[composite-selftest] 变异验证:把 poison 的 `$GITHUB_ENV` 写入删掉之后仍然报红'
+        + ' ⇒ 这条判据不是"读到了内容",而是恒真断言。')
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+  return { failures, assertions }
+}
+
+/**
+ * [SK-17] 的**层清单自证**(第十轮审计 C-02:覆盖面声明必须与代码里的枚举同源)。
+ *
+ * 判据:在**合成** workflow 上跑一遍 `checkPinnedStepEnvironment()`,它逐层产出的 id 集合
+ * 必须与 `PINNED_ENV_LAYER_REGISTRY` **双向相等** —— 少一层(有人把某层的枚举删了)即红,
+ * 多一层(有人加了枚举却没登记)也红。这样"通过行里声称检查了哪几层"就不可能再与代码漂移
+ * (C-02 的现场:日志硬编码"三层 `env:` … 均已检查",而 `container.env` 那一层根本没读)。
+ *
+ * @returns `{ failures, assertions }`。
+ */
+function selfTestPinnedEnvLayers() {
+  const failures = []
+  let assertions = 0
+  const text = [
+    'name: selftest',
+    'on:',
+    '  push:',
+    'env:',
+    "  VERSION: '1.2.3'",
+    'jobs:',
+    '  gate-guards:',
+    '    runs-on: ubuntu-latest',
+    '    container:',
+    '      image: node:24-bookworm',
+    '      env:',
+    "        VERSION: '1.2.3'",
+    '    env:',
+    "      VERSION: '1.2.3'",
+    '    steps:',
+    '      - name: Root guards (every PR shape)',
+    '        env:',
+    "          VERSION: '1.2.3'",
+    '        run: |',
+    '          set -euo pipefail',
+    '          export VERSION=1.2.3',
+    '          node scripts/check-root-guards.mjs',
+    '  changes:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: |',
+    '          set -euo pipefail',
+    "          echo \"VERSION=1.2.3\" >> \"$GITHUB_ENV\"",
+    '',
+  ].join('\n')
+  const document = parseYaml(text)
+  const blocks = extractRunBlocks(text)
+  const result = checkPinnedStepEnvironment('selftest.yml', document, blocks, [], { rootDir: root })
+  const produced = new Set((result?.layers ?? []).map(layer => layer.id))
+  assertions += 1
+  const missing = PINNED_ENV_LAYER_REGISTRY.filter(layer => !produced.has(layer.id))
+  if (missing.length > 0) {
+    failures.push('[SK-17] 层清单自证:合成样本上这些层**一次都没被枚举**:'
+      + `${missing.map(layer => `${layer.id}(${layer.label})`).join('、')}`
+      + ' ⇒ 判据面比 `PINNED_ENV_LAYER_REGISTRY` 声明的窄(通过行会撒谎)。')
+  }
+  assertions += 1
+  const unknown = [...produced].filter(id => !PINNED_ENV_LAYER_REGISTRY.some(layer => layer.id === id))
+  if (unknown.length > 0) {
+    failures.push(`[SK-17] 层清单自证:枚举产出了未登记层 ${unknown.join('、')}`
+      + ' ⇒ 新增的判据面没有写进 `PINNED_ENV_LAYER_REGISTRY`(声明与代码必须同源)。')
+  }
+  assertions += 1
+  // 反向:把登记表**临时**砍掉一层,枚举结果必须报出缺口(证明上面那条断言真能被打坏)。
+  const removed = PINNED_ENV_LAYER_REGISTRY.pop()
+  try {
+    const trimmed = new Set((checkPinnedStepEnvironment('selftest.yml', document, blocks, [], { rootDir: root })?.layers ?? [])
+      .map(layer => layer.id))
+    if (trimmed.size === produced.size) {
+      failures.push('[SK-17] 层清单自证:抽掉登记表最后一条之后 id 集合**没有变化** ⇒ '
+        + '断言是恒真的(它证明不了任何东西)。')
+    }
+  } finally {
+    PINNED_ENV_LAYER_REGISTRY.push(removed)
+  }
+  return { failures, assertions }
 }
 
 /**
@@ -1752,13 +2592,14 @@ const REGISTRY_DEFAULT = {
   jobs: REGISTERED_JOBS,
   steps: REGISTERED_RELEASE_STEPS,
   remoteWrites: REMOTE_WRITE_REGISTERED,
+  containerImages: PINNED_JOB_CONTAINER_REGISTRY,
 }
 /**
  * **空登记表**:内置自检的合成样本默认用它 —— 否则每个合成了 `ci.yml` 形状的样本
  * (SK-8/SK-9/SK-11/SK-12 的那些)都会被 SK-15 拿"真实 ci.yml 的登记值"去套,
  * 得到一堆与样本意图无关的假红(SK-15 的样本改用下面那张合成登记表)。
  */
-const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [] }
+const REGISTRY_NONE = { files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [] }
 /**
  * SK-15 自检用的**合成登记表**:一个 job `verify` + 一个步骤 `Gate`。
  * 用它把"登记了却不存在 / 存在却没登记 / 常量假 if / 收窄 if / continue-on-error /
@@ -4116,6 +4957,15 @@ function envStringValues(env) {
 /** 运行期写入"后续步骤环境"的文件(`$GITHUB_ENV` / `$GITHUB_OUTPUT` / `$GITHUB_PATH`)。 */
 const GITHUB_ENV_WRITE = /(?:^|[^A-Za-z0-9_])GITHUB_(?:ENV|OUTPUT|PATH)\b/u
 /**
+ * `$GITHUB_ENV` 的**追加**形态(重定向或 `tee -a`)。
+ *
+ * [SK-17⑧b] 用它把"真的往环境文件里写键"与"顺带提到这个名字"分开。与 `GITHUB_ENV_WRITE`
+ * 的差别是**只认 `$GITHUB_ENV`**:`$GITHUB_OUTPUT` 写的是 step output(供
+ * `${{ steps.x.outputs.y }}` 消费),**不注入后续步骤的进程环境** —— 在"未登记即红"的
+ * 白名单下把输出名也拉进判据面,只会把 `code=` / `version=` 这类正常写法变成假阳性。
+ */
+const GITHUB_ENV_APPEND = /(?:>>?|(?:^|\|)\s*tee\s+(?:-a|--append)\s*)\s*"?\$?\{?GITHUB_ENV\}?"?/u
+/**
  * `$GITHUB_PATH` 的**追加**形态(重定向或 `tee -a`)。
  *
  * [SK-17⑥a] 用它把"PATH 覆写"与"顺带提到这个名字"分开:赋值 `GITHUB_PATH=/x` 或注释里的
@@ -4125,6 +4975,17 @@ const GITHUB_ENV_WRITE = /(?:^|[^A-Za-z0-9_])GITHUB_(?:ENV|OUTPUT|PATH)\b/u
 const GITHUB_PATH_APPEND = /(?:>>?|(?:^|\|)\s*tee\s+(?:-a|--append)\s*)\s*"?\$?\{?GITHUB_PATH\}?"?/u
 /** 从 `NAME=value` 里取变量名(判据①c 的另一半:写进去的名字有没有被守卫步消费)。 */
 const ENV_ASSIGNMENT = /(?:^|[^A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=/gu
+/**
+ * `$GITHUB_ENV` 写入里的**键名**(比 `ENV_ASSIGNMENT` 窄:名字必须出现在行首/空白/引号之后)。
+ *
+ * 为什么不能直接用 `ENV_ASSIGNMENT`([SK-17⑧b] 在"未登记即红"的白名单下会变假阳性机器):
+ * 它按"前一个字符不是字母数字"匹配,于是**取值里**的 `=` 片段也算成键 ——
+ * `NODE_OPTIONS=--import=data:…` 里的 `import=`、`…process.exitCode=0` 里的 `exitCode=`、
+ * 连接串 `?sslmode=require` 里的 `sslmode=` 全都会被当成"往 `$GITHUB_ENV` 写了一个新键"。
+ * 实测(第十轮修复过程):一条 composite 注入被报成 3 个键,而白名单会把这种噪声判红。
+ * `(?:^|[\s"'])` 要求名字前面是空白/引号/行首 ⇒ 取值内部的片段不再入面。
+ */
+const GITHUB_ENV_KEY_ASSIGNMENT = /(?:^|[\s"'])([A-Za-z_][A-Za-z0-9_]*)=/gu
 /** 一段 shell 文本里引用的 `$VAR` / `${VAR}`。 */
 const SHELL_VARIABLE_REFERENCE = /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/gu
 
@@ -5482,14 +6343,110 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
 }
 
 /**
- * [SK-17] 的实现(判据与现场见常量区 `PINNED_ENV_DENIED_KEYS` 的注释)。
+ * [SK-19] **YAML 合并键 `<<`** 让判据看不见被展开的内容（第十轮审计 C-05，本轮修复）。
  *
- * 判据面共四处,全部只读 YAML 文档 + `run` 文本(不需要执行任何东西):
+ * 现场：`yaml` 解析器默认**不展开 merge key**（YAML 1.1 的 `<<`）—— `env: { <<: *base }`
+ * 解析成字面键 `<<`，其值是别名指向的 map；`jobs.<id>: { <<: *jobbase }` 同理。于是
+ * **判据面上那些键一个都不出现**：
+ *
+ * ```yaml
+ * x-job: &jobbase
+ *   env:
+ *     NODE_OPTIONS: "--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"
+ * jobs:
+ *   gate-guards:
+ *     <<: *jobbase            # ⇒ 解析后 jobs['gate-guards'].env === undefined
+ * ```
+ *
+ * `jobs.<id>.env` 是 [SK-17④] 的判据入口 —— 合并之后那一层**空着**（计数 0、层层"已检查"），
+ * 而 Actions 在运行期是**会**展开 merge key 的（YAML 1.1，Actions 的解析器支持 `<<`）：
+ * 判据看到的与 runner 执行的不是同一份语义，这就是"三层 `env:` 对判据隐形"。
+ * 同一手法还能藏 `steps:`（那会让"哪些步骤被钉住"整个判据失效）、`container:`、`with:`。
+ *
+ * 判据（fail-closed）：**任何** job 块 / 步骤块 / `env:` / `container:` / `defaults:` /
+ * `with:` / workflow 顶层上出现 `<<` 键 ⇒ 红。
+ *
+ * 覆盖面（W1 复审 N2 的修复）：workflow **顶层**的 `defaults:` 与 `defaults.run:` 也在
+ * 枚举里 —— 顶层 `defaults.run` **一次作用于所有 job**，它的合并键此前不在扫描面上
+ * （顶层 `x: &s {shell: bash}` + `defaults: {run: {<<: *s}}` ⇒ EXIT=0）。两个入口
+ * （workflow 级 / job 级）必须同扫：只堵一个等于没堵（与 SK-18 的 cwd 两入口同族）。
+ *
+ * 为什么按"任何 job"而不是"被钉 job"：
+ * 合并键可以**藏掉 `steps:` 本身**（那正是"这一步算不算被钉"的输入）—— 判据读不懂它展开了
+ * 什么，"读不懂 ⇒ 拒绝"是唯一与 [SK-17] 其余各条一致的取向。确需共享片段时把键**显式写出来**
+ * （或在 `check-workflows.mjs` 里显式展开后再喂给判据），不要用 merge key。
+ *
+ * @param file - workflow 文件名。
+ * @param document - `parseYaml` 的结果。
+ * @returns 失败项数组（空 = 该文件没有任何合并键）。
+ */
+function checkYamlMergeKeys(file, document) {
+  const failures = []
+  const isMap = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const hits = []
+  const scan = (node, path) => {
+    if (!isMap(node)) return
+    if (Object.hasOwn(node, '<<')) hits.push({ path, value: node['<<'] })
+  }
+  scan(document, 'workflow 顶层')
+  scan(document?.env, 'workflow 顶层 `env:`')
+  // workflow 级 `defaults:` / `defaults.run:`（2026-09-25 第十轮复审 W1 的 N2）。
+  //
+  // 现场（W1 探针实测）：顶层 `x-shell: &s {shell: bash}` + `defaults: {run: {<<: *s}}`
+  // ⇒ 旧覆盖面**不含** `document.defaults` ⇒ `check-workflows` EXIT=0。而 Actions 在运行期
+  // 会展开这个合并键，且 workflow 级 `defaults.run` 一次作用于**所有 job** —— 与 N1
+  // （顶层 `defaults.run.working-directory`）组合起来可以同时藏掉"执行目录"与 `defaults`
+  // 下的其它键。判据与 job 级同族：出现合并键即红（读不懂展开了什么 ⇒ 拒绝）。
+  scan(document?.defaults, 'workflow 顶层 `defaults:`')
+  scan(document?.defaults?.run, 'workflow 顶层 `defaults.run:`')
+  const workflowDefaultsBlocks = (isMap(document?.defaults) ? 1 : 0) + (isMap(document?.defaults?.run) ? 1 : 0)
+  const jobs = isMap(document?.jobs) ? document.jobs : {}
+  let stepBlocks = 0
+  for (const [jobId, job] of Object.entries(jobs)) {
+    scan(job, `jobs.${jobId}`)
+    scan(job?.env, `jobs.${jobId}.env`)
+    scan(job?.container, `jobs.${jobId}.container`)
+    scan(job?.container?.env, `jobs.${jobId}.container.env`)
+    scan(job?.defaults, `jobs.${jobId}.defaults`)
+    scan(job?.defaults?.run, `jobs.${jobId}.defaults.run`)
+    if (!Array.isArray(job?.steps)) continue
+    job.steps.forEach((step, index) => {
+      stepBlocks += 1
+      scan(step, `jobs.${jobId}.steps[${index}]`)
+      scan(step?.env, `jobs.${jobId}.steps[${index}].env`)
+      scan(step?.with, `jobs.${jobId}.steps[${index}].with`)
+    })
+  }
+  for (const hit of hits) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-19] \`${hit.path}\` 上出现了 YAML **合并键** \`<<\`（值：`
+        + `${isMap(hit.value) ? `别名的 map（${Object.keys(hit.value).join(', ') || '空'}）` : JSON.stringify(hit.value ?? null)}）。`
+        + '\n  ⇒ 解析器（`yaml`）默认**不展开** merge key：它只留下一个字面键 `<<`，'
+        + '而被合并进来的键在判据面（`env:` 各层 / `container:` / `steps:` / `with:` / `defaults:`）上'
+        + '**一个都不出现**；Actions 在运行期却会展开它 ⇒ 判据看到的与 runner 执行的不是同一份语义'
+        + '（第十轮审计 C-05：三层 `env:` 因此对判据隐形，而锚点/别名的**非**合并形态是可见的）。'
+        + '\n  ⇒ 请把这些键**显式写出来**（共享片段用锚点+别名时不要用 `<<`），'
+        + '不要指望判据去展开它 —— "读不懂展开了什么"一律按未登记处理是 [SK-17]/[SK-19] 的共同取向。',
+    })
+  }
+  return { failures, stepBlocks, workflowDefaultsBlocks, hits: hits.length }
+}
+
+/**
+ * [SK-17] 的实现(判据与现场见常量区 `PINNED_ENV_ALLOWED_KEYS` 的注释)。
+ *
+ * 判据面共六层,**全部只读 YAML 文档 + `run` 文本**(不执行任何东西),层清单的唯一真源是
+ * `PINNED_ENV_LAYER_REGISTRY` —— 函数逐层产出 `{id, detail}` 交给 `main()` 与通过行,
+ * 所以"声称检查了哪几层"与"代码真的枚举了哪几层"不可能各写一份(C-02 的现场正是两者漂移):
  *   ① workflow 顶层 `env:`   —— Actions 注入**每个 job 的每个 step**;
  *   ② job 级 `env:`          —— 注入该 job 的每个 step;
- *   ③ step 级 `env:`         —— 只注入这一步(根守卫 job 里连 `uses:` 步骤一起查);
- *   ④ `$GITHUB_ENV`/`$GITHUB_PATH` —— 同 job 内、位置在被钉步骤**之前**的步骤写进去的,
- *      会被后面的步骤继承(命令里只剩 `$VAR`,三层 `env:` 里什么都没有)。
+ *   ③ `jobs.<id>.container.env` —— **Actions 的第四层**(该 job 所有 step 的容器环境变量);
+ *   ④ step 级 `env:`         —— 只注入这一步(根守卫 job 里连 `uses:` 步骤一起查);
+ *   ⑤ `$GITHUB_ENV`/`$GITHUB_PATH` —— 同 job 内、位置在被钉步骤**之前**的步骤写进去的,
+ *      会被后面的步骤继承(命令里只剩 `$VAR`,上面四层里什么都没有);
+ *   ⑥ 被钉步骤**自己的步骤体**里的 `export`/前缀赋值 —— 命令文本里看得见,上面五层都看不见。
  *
  * 判据读的是 `executableScript`(去注释)与词级归一(删空引号对 / 去反斜杠转义)后的文本 ——
  * 与 [SK-16] 同一套口径:注释里的历史写法不算,而 `NODE_""OPTIONS` 这种"拆开写的同一个键"
@@ -5499,10 +6456,40 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
  * @param document - parseYaml 的结果。
  * @param blocks - extractRunBlocks 的结果(供 shellSteps 解析有效 shell / 行号 / 下标)。
  * @param notes - 提示收集器。
- * @returns 失败项列表。
+ * @param context - `{ rootDir, containerImages }`:`rootDir` = 本地 `uses:` 的解析根
+ *   (缺省 = 仓库根;自检注入合成树);`containerImages` = 被钉 job 的容器镜像登记表
+ *   (缺省 = `PINNED_JOB_CONTAINER_REGISTRY`;自检用它单独放行镜像、只留 `container.env`
+ *   的键判定 —— 第十轮复审 V1 的 P3-D3:两个分支必须在**两个样本**上各自可红)。
+ * @returns `{ failures, layers, uses }`(`layers` = 逐层枚举结果,供通过行与层清单对账;
+ *   `uses` = 被钉单元里实际用到的 `uses:` 取值,供登记表的死条目对账)。
  */
-function checkPinnedStepEnvironment(file, document, blocks, notes) {
+function checkPinnedStepEnvironment(file, document, blocks, notes, context = {}) {
   const failures = []
+  /** 命中同一登记项的重复报告压掉(同一处 env 只报一次)。 */
+  const reported = new Set()
+  const reportOnce = (dedupeKey, detail) => {
+    if (reported.has(dedupeKey)) return
+    reported.add(dedupeKey)
+    failures.push({ name: file, line: 0, detail })
+  }
+  /**
+   * 逐层登记(唯一真源 = `PINNED_ENV_LAYER_REGISTRY`)。
+   *
+   * `visited` 是**这一层真的被枚举过**的证据 —— 只有跑到的层才进 `layers()`,所以
+   * "把某一层的枚举删掉"会让它的 id 从结果里消失,`main()` 的覆盖面双向对账当场红。
+   * (如果 `layers()` 无条件照抄登记表,那条对账就是恒真的 —— 第十轮修复过程里踩到过:
+   * 删掉 container 枚举之后 `layers()` 照样报 6 层。)
+   */
+  const layerCounts = new Map(PINNED_ENV_LAYER_REGISTRY.map(layer => [layer.id, 0]))
+  const layerVisited = new Set()
+  const markLayer = (id, increment = 0) => {
+    layerVisited.add(id)
+    layerCounts.set(id, (layerCounts.get(id) ?? 0) + increment)
+  }
+  const layers = () => PINNED_ENV_LAYER_REGISTRY
+    .filter(layer => layerVisited.has(layer.id))
+    .map(layer => ({ id: layer.id, label: layer.label, count: layerCounts.get(layer.id) ?? 0 }))
+
   const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
   const stepsOf = jobId => (Array.isArray(jobs[jobId]?.steps) ? jobs[jobId].steps : [])
   const unitLabel = unit => `job ${unit.jobId} 的 step「${unit.label}」`
@@ -5535,80 +6522,134 @@ function checkPinnedStepEnvironment(file, document, blocks, notes) {
       units.push({ jobId, step, index, label: stepName(step, index), reason: '根守卫 job(永不跳过)的步骤' })
     })
   }
-  if (units.length === 0) return failures
+  if (units.length === 0) return { failures, layers: [], uses: [] }
 
-  /** 把命中同一登记项的重复报告压掉(同一处 env 只报一次)。 */
-  const reported = new Set()
-  const reportOnce = (dedupeKey, detail) => {
-    if (reported.has(dedupeKey)) return
-    reported.add(dedupeKey)
-    failures.push({ name: file, line: 0, detail })
-  }
   /** 所有命中项共用的"为什么"尾注(把现场与修法一次说清)。 */
   const tail = (hit, where) =>
     `\n  为什么必须拒:${hit.why}。`
-    + '\n  ⇒ 这类键改的是**解释器怎么解释命令**,不是命令要做什么:argv、解析后的 `shell:`、'
-    + '步骤体、`if:` 全部一字未改 ⇒ [SK-14] 的四条判据都看不见它(第九轮审计 D 泳道实测:'
-    + '形态 A/B 下 `check-workflows` EXIT=0,而真跑 `check-root-guards.mjs` 时在有 7 个守卫失败的'
-    + '树上仍打印「16 个根守卫:16 通过、0 失败」并 EXIT=0)。'
+    + '\n  ⇒ 判据是**白名单**:被钉单元上的每一个 env 键都必须登记在 `PINNED_ENV_ALLOWED_KEYS`'
+    + '(本文件内、逐条带理由,可评审的 diff),未登记即红 —— 逐个补黑名单追不上下一层'
+    + '(第十轮审计 C-01:`COREPACK_HOME` 不在第九轮的禁用表里 ⇒ 16 个根守卫的**被执行体**'
+    + '整体被换成 `process.exit(0)`,判据侧与执行侧同时绿灯)。'
     + `\n  ⇒ ${where}`
 
   // ③ workflow 顶层 `env:`(注入每个 job 的每个 step)。
-  for (const [key] of envEntries(document?.env)) {
+  const workflowEnvKeys = envEntries(document?.env)
+  markLayer('workflow-env', workflowEnvKeys.length)
+  for (const [key] of workflowEnvKeys) {
     const hit = pinnedEnvKeyProblem(key)
     if (hit === null) continue
     const sample = units.slice(0, 3).map(unitLabel).join('、')
-    reportOnce(`workflow:${hit.matched}`, `[SK-17] workflow **顶层** \`env:\` 里的 \`${hit.raw}\` `
+    reportOnce(`workflow:${hit.raw}`, `[SK-17] workflow **顶层** \`env:\` 里的 \`${hit.raw}\` `
       + `会注入**每一个 job 的每一个 step**,包括本 workflow 的 ${units.length} 个被钉住的判定单元`
       + `(例如 ${sample}${units.length > 3 ? ' 等' : ''})。`
-      + tail(hit, '这类键只能出现在**非判据步骤**上;本判据**没有白名单**(加一条豁免就等于把'
-        + '"判据静默变绿"的通道原样开回来,与 [SK-16] 对 advisory 开关的取向一致)。'))
+      + tail(hit, '这类键只能出现在**非判据步骤**上;合法用途请在 `PINNED_ENV_ALLOWED_KEYS` 里'
+        + '登记该键(写清它为什么不会改变判据的结论),不要用"某个键看起来人畜无害"当豁免。'))
   }
 
+  const pinnedJobIds = [...new Set(units.map(unit => unit.jobId))]
+
   // ④ job 级 `env:`(注入该 job 的每个 step)。
-  for (const jobId of [...new Set(units.map(unit => unit.jobId))]) {
-    for (const [key] of envEntries(jobs[jobId]?.env)) {
+  for (const jobId of pinnedJobIds) {
+    const jobEnvKeys = envEntries(jobs[jobId]?.env)
+    markLayer('job-env', jobEnvKeys.length)
+    for (const [key] of jobEnvKeys) {
       const hit = pinnedEnvKeyProblem(key)
       if (hit === null) continue
       const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
-      reportOnce(`job:${jobId}:${hit.matched}`, `[SK-17] job ${jobId} 的 **job 级** \`env:\` 里的 `
+      reportOnce(`job:${jobId}:${hit.raw}`, `[SK-17] job ${jobId} 的 **job 级** \`env:\` 里的 `
         + `\`${hit.raw}\` 会注入该 job 的每一个 step,包括它的被钉住判定单元:`
         + `${labels.slice(0, 4).join('、')}${labels.length > 4 ? ` 等 ${labels.length} 个` : ''}。`
-        + tail(hit, 'job 级 `env:` 是形态 A/B 最省事的挂点:一个 job 加两行、命令一字不改;'
+        + tail(hit, 'job 级 `env:` 是形态 A/B/C 最省事的挂点:一个 job 加两行、命令一字不改;'
           + '而"根守卫失败 ⇒ 必需的 Gate 检查也红"这条唯一链路就挂在它上面。'))
     }
   }
 
-  // ⑤ step 级 `env:`(只注入这一步)。
-  for (const unit of units) {
-    for (const [key] of envEntries(unit.step?.env)) {
+  // ⑤ **第四层**:`jobs.<id>.container.env`(Actions 文档:"在 job 容器内设置环境变量")。
+  //    注入能力与 job 级 `env:` **完全等价**,但第九轮的枚举里没有这个词
+  //    (`grep -c container scripts/check-workflows.mjs` = 0)⇒ 同一个键在 job 级被抓、
+  //    在 container 级静默通过(第十轮审计 C-02 / MAINCTL-2 的判别性对照实测)。
+  for (const jobId of pinnedJobIds) {
+    const container = jobs[jobId]?.container
+    // 这一层"被读过"与"有没有人写"是两件事:没有容器也要记一笔(否则覆盖面会退化成
+    // "当前恰好没人用这一层" —— 那正是 C-02 里"声称三层均已检查"的同族形态)。
+    markLayer('container-env', envEntries(typeof container === 'object' ? container.env : undefined).length)
+    if (container === undefined || container === null) continue
+    const image = typeof container === 'string' ? container : container.image
+    const containerImages = context.containerImages ?? PINNED_JOB_CONTAINER_REGISTRY
+    const registered = containerImages.some(entry => entry.image === image)
+    if (!registered) {
+      reportOnce(`container-image:${jobId}`, `[SK-17] job ${jobId} 有被钉住的判定单元,但它声明了 `
+        + `\`container:\`(image = ${JSON.stringify(image ?? null)})—— 这一步不再跑在 runner 上,`
+        + '而是跑在那面镜像里:判据步骤赖以成立的解释器/工具链全部由这面镜像提供。'
+        + '\n  ⇒ `container:` 与 `env:` 是同一族("执行体由谁提供"),所以它走**登记制**:'
+        + '要在被钉 job 上用容器,必须先在 `PINNED_JOB_CONTAINER_REGISTRY` 里逐字登记 `image`'
+        + '并写明"这面镜像为什么可以承担判据步骤"(当前登记表为空)。')
+    }
+    for (const [key] of envEntries(typeof container === 'object' ? container.env : undefined)) {
       const hit = pinnedEnvKeyProblem(key)
       if (hit === null) continue
-      reportOnce(`step:${unit.jobId}#${unit.index}:${hit.matched}`, `[SK-17] ${unitLabel(unit)} 是`
+      const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
+      reportOnce(`container:${jobId}:${hit.raw}`, `[SK-17] job ${jobId} 的 `
+        + `**\`container.env\`(Actions 的第四层)** 里的 \`${hit.raw}\` 会注入该 job 容器里的`
+        + `每一个 step,包括它的被钉住判定单元:`
+        + `${labels.slice(0, 4).join('、')}${labels.length > 4 ? ` 等 ${labels.length} 个` : ''}。`
+        + tail(hit, '这一层与 job 级 `env:` 注入能力完全等价,但第九轮的枚举漏了它 —— '
+          + '同一个键写在 job 级被抓、写在这里静默通过,而通过行还照样打印"三层 `env:` 均已检查"。'))
+    }
+  }
+
+  // ⑥ step 级 `env:`(只注入这一步)。
+  for (const unit of units) {
+    const stepEnvKeys = envEntries(unit.step?.env)
+    markLayer('step-env', stepEnvKeys.length)
+    for (const [key] of stepEnvKeys) {
+      const hit = pinnedEnvKeyProblem(key)
+      if (hit === null) continue
+      reportOnce(`step:${unit.jobId}#${unit.index}:${hit.raw}`, `[SK-17] ${unitLabel(unit)} 是`
         + `${unit.reason},但它的 **step 级** \`env:\` 里有 \`${hit.raw}\`。`
         + tail(hit, '这一步的退出码就是判据结论;给它挂一个改解释器行为的键,等价于把判据的结论'
           + '改成"恒绿",而 `run` 文本一个字都没变。'))
     }
   }
 
-  // ⑥ `$GITHUB_ENV` / `$GITHUB_PATH`:同 job 内、位置在被钉步骤**之前**的步骤写进去的,
+  // ⑦ `uses:` 的**执行体来路**(第十轮审计 C-03 / MAINCTL-3):被钉单元里的每一个 `uses:`
+  //    步骤要么是能在仓内解析到的本地路径(其内容被 `checkCompositeActionTree()` 用同一套
+  //    判据覆盖),要么逐字登记在 `PINNED_USES_REGISTRY` 里。第九轮把 `uses:` 步算进了
+  //    "被钉住的判定单元"(单元数 10 → 11),却**从不读它的内容** ⇒ 本地复合 action 里的
+  //    `echo NODE_OPTIONS=… >> $GITHUB_ENV` 静默通过。
+  const usedUses = []
+  for (const unit of units) {
+    const uses = unit.step?.uses
+    if (uses === undefined || uses === null) continue
+    if (typeof uses === 'string') usedUses.push(uses)
+    const problem = pinnedUsesProblem(uses, context.rootDir ?? root)
+    if (problem === null) continue
+    reportOnce(`uses:${unit.jobId}#${unit.index}`, `[SK-17] ${unitLabel(unit)} 是`
+      + `${unit.reason},但它通过 \`uses: ${typeof uses === 'string' ? uses : JSON.stringify(uses)}\` `
+      + '把执行委托出去,而这个委派目标不在判据的读取面内。'
+      + `\n  ${problem}`)
+  }
+
+  // ⑧ `$GITHUB_ENV` / `$GITHUB_PATH`:同 job 内、位置在被钉步骤**之前**的步骤写进去的,
   //    会被后面的步骤继承(跨 job 不生效 —— 每个 job 是独立 runner)。
   const writers = new Map()
   for (const unit of units) {
     stepsOf(unit.jobId).forEach((step, index) => {
       if (index >= unit.index || typeof step?.run !== 'string') return
       const script = executableScript(step.run)
-      if (!GITHUB_ENV_WRITE.test(script)) return
+      if (!GITHUB_ENV_APPEND.test(script) && !GITHUB_PATH_APPEND.test(script)) return
       writers.set(`${unit.jobId}#${index}`, { jobId: unit.jobId, index, step, script })
     })
   }
+  markLayer('github-env-write', writers.size)
   for (const writer of writers.values()) {
     const targets = units.filter(unit => unit.jobId === writer.jobId && unit.index > writer.index)
     if (targets.length === 0) continue
     const writerLabel = `job ${writer.jobId} 的 step「${stepName(writer.step, writer.index)}」`
     const inherited = `${targets.slice(0, 3).map(unitLabel).join('、')}`
       + `${targets.length > 3 ? ` 等 ${targets.length} 个被钉单元` : ''}`
-    // ⑥a `$GITHUB_PATH`:追加目录 = PATH 覆写(与 `PATH` 键同级)。
+    // ⑧a `$GITHUB_PATH`:追加目录 = PATH 覆写(与 `PATH` 键同级)。
     if (GITHUB_PATH_APPEND.test(writer.script)) {
       reportOnce(`ghpath:${writer.jobId}#${writer.index}`, `[SK-17] ${writerLabel} 往 \`$GITHUB_PATH\` `
         + `追加了目录,而它后面还有被钉住的判定单元会继承这个 PATH(${inherited})。`
@@ -5617,27 +6658,124 @@ function checkPinnedStepEnvironment(file, document, blocks, notes) {
         + tail({ why: 'PATH 决定 `node`/`bash` 解析到哪个二进制' },
           '守卫 job / 判据步骤所在 job 里不要用 `$GITHUB_PATH`;需要工具路径请在**非判据步骤**上处理。'))
     }
-    // ⑥b `$GITHUB_ENV`:写入的键名命中表 ⇒ 后续步骤继承它。
+    // ⑧b `$GITHUB_ENV`:写入的键名未登记 ⇒ 后续步骤继承它。
     //     词级归一(与 [SK-16] 的 `advisoryFlagShape` 同一手法):`NODE_""OPTIONS=…` 写进
     //     文件后就是 `NODE_OPTIONS=…`。
-    const normalized = advisoryFlagShape(writer.script)
-    for (const match of normalized.matchAll(ENV_ASSIGNMENT)) {
-      const hit = pinnedEnvKeyProblem(match[1])
-      if (hit === null) continue
-      reportOnce(`ghenv:${writer.jobId}#${writer.index}:${hit.matched}`, `[SK-17] ${writerLabel} 往 `
-        + `\`$GITHUB_ENV\` 写入了 \`${hit.raw}\`,而它后面还有被钉住的判定单元会继承它(${inherited})。`
-        + tail(hit, '这类注入在 `run` 文本里只留一个 `$VAR`,三层 `env:` 里什么都没有 ⇒'
-          + '判据面必须把 `$GITHUB_ENV` 的**键名**也算上(第八轮只扫了它的**取值**层面:'
-          + '`--allow-advisory` 那个开关)。'))
+    //     只认 `$GITHUB_ENV`:`$GITHUB_OUTPUT` 写的是 step output(**不注入进程环境**),
+    //     把输出名也拉进白名单会变成一台假阳性机器(`code=` / `version=` 都是正常写法)。
+    if (GITHUB_ENV_APPEND.test(writer.script)) {
+      const normalized = advisoryFlagShape(writer.script)
+      for (const match of normalized.matchAll(GITHUB_ENV_KEY_ASSIGNMENT)) {
+        const hit = pinnedEnvKeyProblem(match[1])
+        if (hit === null) continue
+        reportOnce(`ghenv:${writer.jobId}#${writer.index}:${hit.raw}`, `[SK-17] ${writerLabel} 往 `
+          + `\`$GITHUB_ENV\` 写入了 \`${hit.raw}\`,而它后面还有被钉住的判定单元会继承它(${inherited})。`
+          + tail(hit, '这类注入在 `run` 文本里只留一个 `$VAR`,四层 `env:` 里什么都没有 ⇒'
+            + '判据面必须把 `$GITHUB_ENV` 的**键名**也算上(第八轮只扫了它的**取值**层面:'
+            + '`--allow-advisory` 那个开关;第十轮 C-01 的 `COREPACK_HOME` 正是从这里进来的)。'))
+      }
     }
+  }
+
+  // ⑨ **被钉步骤自己的步骤体**(第十轮审计 D-03):`export NODE_OPTIONS=…` / 前缀赋值
+  //    (`NODE_OPTIONS=… node …`)写出的键。⑤–⑧ 全都在"env 声明"这一侧,命令文本里
+  //    自己 export 出来的键一个都看不见 —— 审计实测:守卫步里加一行
+  //    `export NODE_OPTIONS="--import=data:text/javascript,process.on('exit',()=>{process.exitCode=0})"`
+  //    之后判据 EXIT=0,而同一条命令真跑时守卫打印「1 项未通过」却 EXIT=0。
+  for (const unit of units) {
+    if (typeof unit.step?.run !== 'string') continue
+    const assignments = shellEnvironmentAssignments(unit.step.run)
+    markLayer('step-body-assignment', assignments.length)
+    for (const assignment of assignments) {
+      const hit = assignment.unparsable === true
+        ? {
+          raw: '（读不懂的片段）',
+          why: '这段 shell 里出现了 `export`/`declare`/赋值形态,但分词失败(引号不配对等)⇒ '
+            + '判据读不懂它到底写出了哪个键,按"未登记"处理',
+        }
+        : pinnedEnvKeyProblem(assignment.name)
+      if (hit === null) continue
+      reportOnce(`body:${unit.jobId}#${unit.index}:${assignment.name ?? assignment.segment}`, `[SK-17] `
+        + `${unitLabel(unit)} 是${unit.reason},而它的**步骤体自己**用 \`${assignment.form}\` 写出了 `
+        + `\`${assignment.name ?? assignment.segment}\`${assignment.unparsable === true ? '(分词失败)' : ''}。`
+        + tail(hit, '步骤体里的 `export`/前缀赋值把键直接交给这一步的子进程(`node`/`corepack` 都在里面),'
+          + '而它在 YAML 的 `env:` 里一个字都不出现 ⇒ 四层 `env:` 判据全都看不见它。'
+          + '要在这个键上跑判据,先在 `PINNED_ENV_ALLOWED_KEYS` 里登记;'
+          + '第二道收口在 `scripts/check-root-guards.mjs`(它清洗交给守卫子进程的环境)。'))
+    }
+  }
+
+  // ⑩ **执行目录**（第十轮审计 C-04，本轮修复；W1 复审 N1 补齐**第三个入口**）：
+  //    workflow 级 `defaults.run.working-directory` / job 级 `defaults.run.working-directory`
+  //    / 步骤级 `working-directory` —— "命令在哪个目录里被解析"此前**不在判据面内**。
+  //    与 `env:` 同族：argv 一字未改，脚本/`package.json`/`.yarnrc.yml` 却换成了别处的
+  //    （审计方实测：给 `gate-guards` 加 `defaults.run.working-directory: /tmp/decoy` ⇒ EXIT=0）。
+  //    登记制例外只认**逐字**匹配（见 `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 的头注释）。
+  //
+  //    ⑩a **workflow 级**（P2）：`defaults` 在 Actions 里两个层级都合法，顶层那份作用于
+  //    **所有 job**（W1 实测：顶层写同一个键 ⇒ 旧判据 EXIT=0，同机理同收益）。
+  {
+    const runDefaults = document?.defaults?.run
+    const value = runDefaults !== null && typeof runDefaults === 'object'
+      && Object.hasOwn(runDefaults, 'working-directory')
+      ? runDefaults['working-directory']
+      : undefined
+    const declared = value !== undefined
+    // 刻意**不**进 `PINNED_ENV_LAYER_REGISTRY`（那张表是"`env:` 键白名单"的覆盖面账，
+    // 与 cwd 不是同一类判据；job 级 / 步骤级两个入口同样不在那张表里）。本分支的防静默
+    // 拆除靠**定向样本**：`w26-workflow-defaults-working-directory`（必须红）+
+    // `SELFTEST_REQUIRED_SAMPLES` 的逐条点名 —— 删掉本分支，自检当场报"策略形同不存在"。
+    const registered = (context.workflowWorkingDirectories ?? WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY)
+      .some(entry => entry.workflow === file && entry.workingDirectory === value)
+    if (declared && !registered) {
+      reportOnce('cwd:workflow', `[SK-18] workflow **顶层**声明了 `
+        + `\`defaults.run.working-directory: ${JSON.stringify(value ?? null)}\`，而本 workflow 里`
+        + `有 ${units.length} 个被钉住的判定单元（${pinnedJobIds.join('、')}）。`
+        + '\n  ⇒ workflow 级 `defaults.run` 作用于**所有 job**：argv 与步骤体一字未改，'
+        + '可 `node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部来自那个目录 ——'
+        + '与"换成谁的解释器"同级，所以它走**登记制**（W1 复审 N1：顶层写这几行时判据 EXIT=0）。'
+        + '\n  ⇒ 要在顶层换 cwd，先在 `WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY` 里逐字登记'
+        + '`{ workflow, workingDirectory }` 并写明"被钉步骤在这个 cwd 下为什么仍然成立"。')
+    }
+  }
+  for (const jobId of pinnedJobIds) {
+    const runDefaults = jobs[jobId]?.defaults?.run
+    if (runDefaults === null || typeof runDefaults !== 'object') continue
+    if (!Object.hasOwn(runDefaults, 'working-directory')) continue
+    const value = runDefaults['working-directory']
+    const registered = (context.jobWorkingDirectories ?? PINNED_JOB_WORKING_DIRECTORY_REGISTRY)
+      .some(entry => entry.job === jobId && entry.workingDirectory === value)
+    if (registered) continue
+    const labels = units.filter(unit => unit.jobId === jobId).map(unit => `「${unit.label}」`)
+    reportOnce(`cwd:${jobId}`, `[SK-18] job ${jobId} 有被钉住的判定单元`
+      + `(${labels.slice(0, 4).join('、')}${labels.length > 4 ? ` 等 ${labels.length} 个` : ''})，`
+      + `而它声明了 \`defaults.run.working-directory: ${JSON.stringify(value ?? null)}\`。`
+      + '\n  ⇒ `defaults.run.working-directory` 换的是**命令解析的目录**：argv 与步骤体一字未改，'
+      + '可 `node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml`、`.git` 全部来自那个目录 ——'
+      + '与"换成谁的解释器"同级，所以它走**登记制**（第十轮审计 C-04：加上这两行时判据 EXIT=0）。'
+      + '\n  ⇒ 要在这个 job 上换 cwd，先在 `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 里逐字登记'
+      + '`{ job, workingDirectory }` 并写明"判据步骤为什么仍然成立"（本仓合法的一例是 `server` job）。')
+  }
+  for (const unit of units) {
+    if (unit.step === null || typeof unit.step !== 'object') continue
+    if (!Object.hasOwn(unit.step, 'working-directory')) continue
+    const value = unit.step['working-directory']
+    const registered = PINNED_STEP_WORKING_DIRECTORY_REGISTRY
+      .some(entry => entry.job === unit.jobId && entry.step === unit.label && entry.workingDirectory === value)
+    if (registered) continue
+    reportOnce(`cwd:${unit.jobId}#${unit.index}`, `[SK-18] ${unitLabel(unit)} 是${unit.reason}，`
+      + `而这一步声明了 \`working-directory: ${JSON.stringify(value ?? null)}\`。`
+      + '\n  ⇒ 与 job 级同族：命令在**另一个目录**里解析（argv / 步骤体 / `env:` 全都看不出区别）。'
+      + '要给被判据钉住的那一步换 cwd，先在 `PINNED_STEP_WORKING_DIRECTORY_REGISTRY` 里逐字登记并写明理由。')
   }
 
   if (failures.length === 0) {
     notes.push(`[SK-17] 进程环境层:${units.length} 个被钉住的判定单元`
-      + `(${[...new Set(units.map(unit => unit.jobId))].join(', ')})的三层 \`env:\` 与 `
-      + '`$GITHUB_ENV`/`$GITHUB_PATH` 注入均已检查(键表见 PINNED_ENV_DENIED_KEYS)')
+      + `(${pinnedJobIds.join(', ')})已按**白名单**检查 ${layers().length} 层 —— `
+      + layers().map(layer => `${layer.label}[${layer.count}]`).join(' · ')
+      + `(键表 = PINNED_ENV_ALLOWED_KEYS,共 ${PINNED_ENV_ALLOWED_KEYS.length} 条登记;未登记即红)`)
   }
-  return failures
+  return { failures, layers: layers(), uses: usedUses }
 }
 
 /**
@@ -6412,6 +7550,37 @@ export function selfTestPolicies() {
     // 根守卫 **job 级** `env:`（[SK-17④] 的样本入口）：数组 = 该 job 的 `env:` 块内容
     // （已缩进 4 空格）。形态 A/B 最省事的挂点就是这里（2026-09-25 第九轮审计 D 泳道）。
     guardJobEnv = null,
+    // 根守卫 job 的 `container:` 块（[SK-17③] 的样本入口，第十轮审计 C-02）：数组 =
+    // 已缩进 4 空格的 YAML 行（`container:` + `image:` + `env:` …）。
+    guardContainer = null,
+    // 根守卫 job 的 `defaults.run.working-directory`（[SK-18] 的样本入口，第十轮审计 C-04）：
+    // 字符串 = 逐字写进 `defaults: / run: / working-directory:`；null = 不声明。
+    guardJobWorkingDirectory = null,
+    // workflow **顶层** `defaults.run.working-directory`（[SK-18] 的第三个样本入口，
+    // 第十轮复审 W1 的 N1）：字符串 = 顶格写 `defaults: / run: / working-directory:`；
+    // null = 不声明。与 job 级同族，但作用于**所有 job**（含根守卫步与全量门禁步）。
+    workflowWorkingDirectory = null,
+    // workflow **顶层** `defaults:` 块里额外的顶格 YAML 行（[SK-19] 的顶层样本入口，
+    // 第十轮复审 W1 的 N2）：配合 `workflowWorkingDirectory` 使用（例如写一行 `  <<: *s`）。
+    workflowDefaultsExtra = [],
+    // 被钉住的**全量门禁**步的步骤级 `working-directory`（[SK-18] 的第二个样本入口）。
+    gateStepWorkingDirectory = null,
+    // 非判据步骤（`changes` job 那一步）的 `working-directory`（[SK-18] 的绿样本入口：
+    // 判据只钉"被钉单元"，不许一刀切成"整个文件里不许出现这个键"）。
+    changesStepWorkingDirectory = null,
+    // workflow **顶层锚点块**（[SK-19] 的样本入口）：数组 = 已顶格的 YAML 行
+    // （`x-base: &base` + 内容），配合 `guardJobEnvAlias` 使用。
+    rawPrefix = [],
+    // 根守卫 job 的 `env:` 写成**别名**形态（`env: *base`）—— 与 `<<` 合并键形成对照：
+    // 普通别名解析后键是**可见**的（判据照常判），只有合并键会让它们隐形。
+    guardJobEnvAlias = null,
+    // 根守卫 **job 块**上的 YAML **合并键**（`<<: *base`，[SK-19] 的样本入口）：
+    // 字符串 = 别名名（含 `*`），null = 不声明。合并键藏的是**整个 job 块**的内容
+    // （`env:` / `steps:` 都可以被它顶掉，解析结果里只剩一个字面键 `<<`）。
+    guardJobMergeKey = null,
+    // 根守卫 job 里**额外**的 `uses:` 步骤（[SK-17⑦] 的样本入口，第十轮审计 C-03）：
+    // 数组 = 已缩进 6 空格的 YAML 行。
+    guardUsesSteps = [],
     // 守卫结果链路步（`gate` 的收尾链路步）的 `env:`（[SK-17⑤] 的样本入口）。
     linkStepEnv = null,
     // `changes` job 里那一步（**非**判据步骤）的 `env:`（[SK-17] 的绿样本入口：
@@ -6466,8 +7635,16 @@ export function selfTestPolicies() {
       const filter = trigger === 'push' ? pushFilter : (trigger === 'pull_request' ? prFilter : null)
       return filter === null ? [`  ${trigger}:`] : [`  ${trigger}:`, `    ${filter}`]
     }),
+    ...rawPrefix,
     ...extraTriggers.map(trigger => `  ${trigger}:`),
     ...(workflowEnv === null ? [] : ['env:', ...workflowEnv]),
+    // workflow **顶层** `defaults:`（[SK-18] N1 / [SK-19] N2 的样本入口）：顶格两行 + 可选
+    // 额外的 `run:` 级 YAML 行（`workflowDefaultsExtra` 已是**顶格**形态，调用方自己缩进）。
+    ...(workflowWorkingDirectory === null && workflowDefaultsExtra.length === 0
+      ? []
+      : ['defaults:', '  run:',
+        ...(workflowWorkingDirectory === null ? [] : [`    working-directory: ${workflowWorkingDirectory}`]),
+        ...workflowDefaultsExtra]),
     'jobs:',
     '  changes:',
     '    runs-on: ubuntu-latest',
@@ -6477,6 +7654,7 @@ export function selfTestPolicies() {
     '    steps:',
     '      - id: scope',
     ...(changesStepEnv === null ? [] : ['        env:', ...changesStepEnv]),
+    ...(changesStepWorkingDirectory === null ? [] : [`        working-directory: ${changesStepWorkingDirectory}`]),
     '        run: echo "code=true" >> "$GITHUB_OUTPUT"',
     ...changesExtraSteps,
     ...(guardJob ? [
@@ -6485,12 +7663,22 @@ export function selfTestPolicies() {
       ...(guardNeeds === '' ? [] : [`    needs: ${guardNeeds}`]),
       ...(guardIf === '' ? [] : [`    if: ${guardIf}`]),
       '    timeout-minutes: 20',
-      ...(guardJobEnv === null ? [] : ['    env:', ...guardJobEnv]),
+      ...(guardContainer === null ? [] : guardContainer),
+      ...(guardJobMergeKey === null ? [] : [`    <<: ${guardJobMergeKey}`]),
+      ...(guardJobWorkingDirectory === null ? [] : [
+        '    defaults:',
+        '      run:',
+        `        working-directory: ${guardJobWorkingDirectory}`,
+      ]),
+      ...(guardJobEnvAlias !== null
+        ? [`    env: ${guardJobEnvAlias}`]
+        : (guardJobEnv === null ? [] : ['    env:', ...guardJobEnv])),
       '    steps:',
       '      - uses: actions/checkout@v7',
       '        with:',
       '          submodules: recursive',
       ...(guardDepth === null ? [] : [guardDepth]),
+      ...guardUsesSteps,
       ...guardPreSteps,
       // R4-A-5 的现场形态:守卫运行步本身被常量假 `if:` 摘掉(带 `if:` 时必须展开成多行形态)。
       ...(guardRunLines !== null ? [
@@ -6536,6 +7724,7 @@ export function selfTestPolicies() {
     '      - name: 全量门禁',
     `        if: ${gateStepIf}`,
     ...(gateStepShell === null ? [] : [`        shell: ${gateStepShell}`]),
+    ...(gateStepWorkingDirectory === null ? [] : [`        working-directory: ${gateStepWorkingDirectory}`]),
     ...(expectHeadEnvLine(gateExpectHead) === null && gateStepExtraEnv.length === 0 ? [] : [
       '        env:',
       ...(expectHeadEnvLine(gateExpectHead) === null ? [] : [expectHeadEnvLine(gateExpectHead)]),
@@ -6551,7 +7740,13 @@ export function selfTestPolicies() {
     '',
   ].join('\n')
   const gateSample = (id, expectation, options = {}) => {
-    const entry = { raw: GATE_SHAPE(options), file: options.file ?? 'selftest.yml' }
+    const entry = {
+      raw: GATE_SHAPE(options),
+      file: options.file ?? 'selftest.yml',
+      // `registries` 透传（第十轮复审 V1 的 P3-D3）：样本要能**单独**放行容器镜像登记，
+      // 从而只留 `container.env` 的键判定那一条分支可红（否则两个分支互相顶替）。
+      ...(options.registries === undefined ? {} : { registries: options.registries }),
+    }
     return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
   }
   // 正例:与 ci.yml 同形 ⇒ 一条失败都不许有(假阳性会把真实形态逼着改坏)。
@@ -7084,7 +8279,7 @@ export function selfTestPolicies() {
       '      - name: Export telemetry flag',
       '        run: |',
       '          set -euo pipefail',
-      '          echo "GUARD_NOTE=guards-ran" >> "$GITHUB_ENV"',
+      '          echo "CI_CHANNELS_PIN=guards-ran" >> "$GITHUB_ENV"',
     ],
     guardRun: `node ${DOCS_ONLY_GUARD_RUNNER}`,
   })
@@ -7169,7 +8364,6 @@ export function selfTestPolicies() {
     guardJobEnv: [
       "      DSH_TELEMETRY_DISABLED: '1'",
       '      VERSION: "1.2.3"',
-      '      NPM_CONFIG_FUND: "false"',
       '      R2_BUCKET: artifacts',
       '      AWS_DEFAULT_REGION: auto',
     ],
@@ -7178,7 +8372,7 @@ export function selfTestPolicies() {
       '      - name: Export build metadata',
       '        run: |',
       '          set -euo pipefail',
-      '          echo "BUILD_META=guards-ran" >> "$GITHUB_ENV"',
+      '          echo "CI_CHANNELS_PIN=guards-ran" >> "$GITHUB_ENV"',
     ],
   })
   // **绿样本 2**(不得一刀切):`NODE_OPTIONS: --max-old-space-size=…` 是本仓/业界真实存在
@@ -7198,6 +8392,242 @@ export function selfTestPolicies() {
       '          set -euo pipefail',
       '          echo "$PWD/tools/bin" >> "$GITHUB_PATH"',
     ],
+  })
+
+  // ---- 第十轮审计 C-01:黑名单 → **白名单**(未登记即红) ----
+  //
+  // 现场(审计方端到端实跑):`COREPACK_HOME` 不在第九轮的禁用表里 ⇒ 给守卫 job 加一步
+  // `echo "COREPACK_HOME=/tmp/yc" >> "$GITHUB_ENV"`(目录里放一个 `process.exit(0)` 的
+  // `v1/yarn/4.18.0/yarn.js`)之后,判据 EXIT=0 而 16 个根守卫**全部换成攻击者的解释器**
+  // 跑(实测:同树不带该变量是「7 通过、9 失败」EXIT=1)。逐个补名字追不上下一层,所以判据
+  // 反过来了:被钉单元上的每个 env 键都必须登记在 `PINNED_ENV_ALLOWED_KEYS` 里。
+  gateSample('w13-guard-job-unregistered-env-key', '[SK-17]', {
+    file: 'ci.yml',
+    guardJobEnv: ['      COREPACK_HOME: /tmp/yc'],
+  })
+  // 同一族的"键名变体"样本(第九轮的黑名单按大写归一,白名单按**逐字**比较):
+  // `Path` 在 Windows runner 上就是 `PATH`,未登记 ⇒ 红。
+  gateSample('w13b-guard-job-case-variant-unregistered', '[SK-17]', {
+    file: 'ci.yml',
+    guardJobEnv: ['      Path: /tmp/shim'],
+  })
+  // ---- 第十轮审计 C-02:Actions 的**第四层** `jobs.<id>.container.env` ----
+  //
+  // 现场(MAINCTL-2 的判别性对照):同一个键写在 job 级 `env:` 被抓、写在 `container.env`
+  // 上静默通过,而通过行还照样打印"三层 `env:` … 均已检查"(`grep -c container` = 0)。
+  //
+  // **P3-D3（第十轮复审 V1）**:这条判据面里其实有**两条**独立分支 ——"容器镜像登记"与
+  // "已登记镜像下的 `container.env` 键白名单"。旧样本把两者写在同一个 YAML 里(未登记的
+  // 镜像 + 危险键),于是**只删掉第四层键判定循环**(691B)时样本照样红(被镜像那条顶替),
+  // 而 `PINNED_JOB_CONTAINER_REGISTRY=[]` 又保证镜像那条永远命中 ⇒ 分支②没有任何样本守着
+  // (本项目登记的第 2 类假绿:只钉字符串不钉能力)。现在拆成两条,各自单独可红:
+  //   ① `w14`  —— 容器**镜像**未登记(不带 `env:`,把第四层键那条分支排除在外);
+  //   ② `w14b` —— 镜像**已登记**(经 `registries.containerImages` 测试缝单独放行),
+  //      只剩 `container.env` 里的 `NODE_OPTIONS` ⇒ 只有键白名单那条分支能让它红。
+  gateSample('w14-container-image-unregistered', '[SK-17]', {
+    file: 'ci.yml',
+    guardContainer: [
+      '    container:',
+      '      image: node:24-bookworm',
+    ],
+  })
+  gateSample('w14b-container-env-node-options', '[SK-17]', {
+    file: 'ci.yml',
+    guardContainer: [
+      '    container:',
+      '      image: node:24-bookworm',
+      '      env:',
+      `        NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
+    ],
+    // 镜像登记放行 ⇒ 命中只可能来自"第四层键白名单"那一条分支。
+    registries: {
+      ...REGISTRY_NONE,
+      containerImages: [{ image: 'node:24-bookworm', why: '合成样本:单独放行镜像登记,只留 container.env 的键判定' }],
+    },
+  })
+  // ---- [SK-18] 被钉单元的**执行目录**(第十轮审计 C-04,本轮修复) ----------------
+  //
+  // 现场(审计方实跑):给 `gate-guards` 加两行
+  //   `defaults: / run: / working-directory: /tmp/decoy`
+  // ⇒ `check-workflows` **EXIT=0**:argv 一字未改,命令却在**另一个目录**里被解析
+  // (`node scripts/…` 的相对路径、`package.json`、`.yarnrc.yml` 全部来自那个目录)。
+  // 判据走**登记制**(`PINNED_JOB_WORKING_DIRECTORY_REGISTRY`),例外只认逐字匹配。
+  gateSample('w20-guard-job-defaults-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    guardJobWorkingDirectory: '/tmp/decoy',
+  })
+  // 第二个入口:**步骤级** `working-directory` —— 只影响这一步,但这"一步"恰好是被钉的
+  // 全量门禁步时,效果与 job 级完全一样(给 `yarn check` 换一个解析目录)。
+  gateSample('w21-pinned-gate-step-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    gateStepWorkingDirectory: '/tmp/decoy',
+  })
+  // **绿样本**(不得一刀切):`working-directory` 落在**非判据步骤**上是本仓真实存在的
+  // 正常写法(`ci.yml` 的 `npm ci` / `npm test` 就带 `working-directory: server/webadmin`)——
+  // 判据的面是"被钉单元",不是"整个文件里不许出现这个键"。
+  gateSample('w22-unpinned-step-working-directory-green', null, {
+    file: 'ci.yml',
+    changesStepWorkingDirectory: 'server/webadmin',
+  })
+  // ---- [SK-18] 第十轮**复审 W1** 的 N1:**workflow 顶层** `defaults.run.working-directory` ----
+  //
+  // 现场(W1 探针实跑):顶层写
+  //   `defaults: / run: / working-directory: <已存在的目录>`
+  // ⇒ **所有 job**(含 `gate-guards` 的根守卫步、`gate` 的全量门禁步)都在那个目录里解析,
+  // 而旧判据只读 `jobs.<id>.defaults` ⇒ `check-workflows` **EXIT=0**。同一机理、同一收益。
+  // 现在两个入口同扫,顶层同样走**逐字登记制**(`WORKFLOW_LEVEL_WORKING_DIRECTORY_REGISTRY`,
+  // 当前为空 ⇒ 未登记即红)。
+  gateSample('w26-workflow-defaults-working-directory', '[SK-18]', {
+    file: 'ci.yml',
+    workflowWorkingDirectory: '/tmp/decoy',
+  })
+  // **绿样本**(不得一刀切):顶层 cwd 走**逐字登记**时放行 —— 证明这条判据是"登记制"而不是
+  // "文件里不许出现顶层 `defaults.run.working-directory`"(登记表为空 ⇒ 顶层非空即红)。
+  // 登记表经与 `containerImages` 同一个 `registries` 测试缝注入,只对合成样本生效。
+  gateSample('w27-workflow-defaults-working-directory-green', null, {
+    file: 'ci.yml',
+    workflowWorkingDirectory: '/tmp/legacy',
+    registries: {
+      ...REGISTRY_NONE,
+      workflowWorkingDirectories: [{
+        workflow: 'ci.yml',
+        workingDirectory: '/tmp/legacy',
+        why: '合成样本:顶层 cwd 逐字登记后放行,证明判据是登记制而非一刀切',
+      }],
+    },
+  })
+  // 同族第二格:**job 级**登记例外也必须真的能放行(绿样本)——
+  // `PINNED_JOB_WORKING_DIRECTORY_REGISTRY` 里本仓真实存在一条(`server` job),这条用测试缝
+  // 复刻同一形状。缺了它,"登记制"就只有红样本、没有"登记后确实变绿"的证据。
+  gateSample('w28-guard-job-working-directory-registered-green', null, {
+    file: 'ci.yml',
+    guardJobWorkingDirectory: 'sub',
+    registries: {
+      ...REGISTRY_NONE,
+      jobWorkingDirectories: [{
+        job: 'gate-guards',
+        workingDirectory: 'sub',
+        why: '合成样本:job 级 cwd 逐字登记后放行(证登记表承重且不是一刀切)',
+      }],
+    },
+  })
+
+  // ---- [SK-19] YAML **合并键** `<<`(第十轮审计 C-05,本轮修复) ------------------
+  //
+  // 现场:`yaml` 解析器默认**不展开** merge key ⇒ `env: { <<: *base }` 解析成字面键 `<<`,
+  // 被合并进来的键在判据面(`env:` 各层 / `container:` / `steps:` / `with:` / `defaults:`)
+  // 上**一个都不出现**;而 Actions 在运行期会展开它(YAML 1.1)⇒ 判据看到的与 runner 执行的
+  // 不是同一份语义。判据 fail-closed:出现合并键即红(可以藏掉 `steps:` 本身)。
+  gateSample('w23-guard-job-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-job-base: &job-base',
+      '  env:',
+      `    NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
+      '',
+    ],
+    guardJobMergeKey: '*job-base',
+  })
+  gateSample('w24-env-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-env-base: &env-base',
+      `  NODE_OPTIONS: "${SK17_NODE_OPTIONS}"`,
+      '',
+    ],
+    // `env:` 里只有一行合并键 —— 被合并进来的 `NODE_OPTIONS` 在判据面上不可见
+    // (`jobs.gate-guards.env` 解析结果只剩一个 `<<`)。
+    guardJobEnv: ['      <<: *env-base'],
+  })
+  // **绿样本**(不得一刀切):普通**别名**(`env: *env-base`)解析后键是**可见**的 ——
+  // 判据照常按白名单判它;只有 `<<` 合并键会让键隐形。这条对照证明判据打的是 merge key,
+  // 不是"文件里出现了锚点/别名"。
+  gateSample('w25-anchored-alias-env-green', null, {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-env-safe: &env-safe',
+      "  DSH_TELEMETRY_DISABLED: '1'",
+      '',
+    ],
+    guardJobEnvAlias: '*env-safe',
+  })
+  // ---- [SK-19] 第十轮**复审 W1** 的 N2:**workflow 顶层** `defaults` 上的合并键 ----
+  //
+  // 现场(W1 探针实跑):顶层 `x-shell: &s {shell: bash}` + `defaults: {run: {<<: *s}}`
+  // ⇒ 旧 `scan` 覆盖面不含 `document.defaults` ⇒ EXIT=0。而 workflow 级 `defaults.run`
+  // 一次作用于**所有 job**,与 N1 组合可同时藏掉 cwd 与 `defaults` 下的其它键。
+  // 现在顶层 `defaults:` / `defaults.run:` 与 job 级同扫。
+  gateSample('w29-workflow-defaults-merge-key', '[SK-19]', {
+    file: 'ci.yml',
+    rawPrefix: [
+      'x-shell-base: &shell-base',
+      '  shell: bash',
+      '',
+    ],
+    workflowDefaultsExtra: ['    <<: *shell-base'],
+  })
+  // **绿样本**(不得一刀切):顶层 `defaults.run` 上写**普通显式键**(本仓合法且常见的形态,
+  // 例如 `shell: bash`)解析后键是可见的 ⇒ 与 `<<` 无关的写法不许被误伤。
+  gateSample('w30-workflow-defaults-explicit-key-green', null, {
+    file: 'ci.yml',
+    workflowDefaultsExtra: ['    shell: bash'],
+  })
+
+  // ---- 第十轮审计 D-03:被钉步骤**自己的步骤体**里的 `export`/前缀赋值 ----
+  //
+  // 现场(审计方实跑):守卫步里加一行 `export NODE_OPTIONS=…` 之后判据 EXIT=0,而真跑
+  // 那条命令时 16 个守卫打印「1 项未通过」却 EXIT=0(`process.env` 被原样透传 + 退出钩子
+  // 把 `process.exitCode` 改回 0)。前半条判据在这里,后半条(环境清洗 + 显式退出)在
+  // `scripts/check-root-guards.mjs`。
+  gateSample('w15-step-body-export-node-options', '[SK-17]', {
+    file: 'ci.yml',
+    guardRunLines: [
+      'set -euo pipefail',
+      `export NODE_OPTIONS="${SK17_NODE_OPTIONS}"`,
+      `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // 同族第二种写法:**命令位前缀赋值**(`NODE_OPTIONS=… node …`),env 块里一个字都没有。
+  gateSample('w16-step-body-prefix-assignment', '[SK-17]', {
+    file: 'ci.yml',
+    guardRunLines: [
+      'set -euo pipefail',
+      `NODE_OPTIONS="${SK17_NODE_OPTIONS}" node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // **绿样本**(不得一刀切):登记键的 `export` 是正常写法(守卫步里导出 VERSION 之类),
+  // 以及**不导出**的普通赋值(子进程看不见)更不许误伤 —— 本仓 `ci.yml` 的
+  // `GO_TEST_STATUS=0` / `CHECK_STATUS=0` 正是后者。
+  gateSample('w17-step-body-registered-assignment-green', null, {
+    file: 'ci.yml',
+    guardRunLines: [
+      'set -euo pipefail',
+      'GO_TEST_STATUS=0',
+      'export VERSION="1.2.3"',
+      'CHECK_STATUS=$?',
+      `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // 前序步骤写 `$GITHUB_ENV` 的键同样按白名单判(C-01 的攻击就是从这里进来的);
+  // 注意 `$GITHUB_OUTPUT` 不注入进程环境 ⇒ 输出名(如 `code=`)不在判据面内(见 GITHUB_ENV_APPEND)。
+  gateSample('w18-github-env-unregistered-key', '[SK-17]', {
+    file: 'ci.yml',
+    guardPreSteps: [
+      '      - name: Warm yarn cache metadata',
+      '        run: |',
+      '          set -euo pipefail',
+      '          echo "COREPACK_HOME=/tmp/yc" >> "$GITHUB_ENV"',
+    ],
+  })
+  // ---- 第十轮审计 C-03 / MAINCTL-3:被钉单元里的 `uses:` 委派目标 ----
+  //
+  // 现场:插一步 `uses: ./.github/actions/poison` 之后,判据把它**算进了"被钉住的判定单元"**
+  // (单元数 10 → 11)却从不读它的内容,EXIT=0;而那个 composite action 里的
+  // `echo NODE_OPTIONS=… >> $GITHUB_ENV` 跨步骤生效。本样本钉住"未登记的远端 action 即红",
+  // 本地路径 / composite 内容的判据在 `selfTestCompositeActions()` 里(需要合成 action 文件)。
+  gateSample('w19-guard-job-unregistered-uses', '[SK-17]', {
+    file: 'ci.yml',
+    guardUsesSteps: ['      - uses: evil/action@v1'],
   })
 
   // ---- 策略 14(P1-1/P1-2/P1-3/P1-4)与第八轮三条假红的回归(2026-09-25 第九轮审计 B 泳道) ----
@@ -7301,11 +8731,11 @@ export function selfTestPolicies() {
   // 都不是"把开关注入 argv"(旧判据按子串匹配,两条都判红,且文案与事实不符)。
   gateSample('x14-workflow-env-lookalike-green', null, {
     file: 'ci.yml',
-    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  PICO_NOTE: "do not pass --allow-advisory anywhere"'],
+    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  VERSION: "do not pass --allow-advisory anywhere"'],
   })
   gateSample('x15-workflow-env-other-flag-green', null, {
     file: 'ci.yml',
-    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  EXTRA_FLAGS: --allow-advisory-strict'],
+    workflowEnv: ["  DSH_TELEMETRY_DISABLED: '1'", '  VERSION: --allow-advisory-strict'],
   })
 
   // ---- 策略 12([SK-15]):job / 发布链步骤的**不可静默跳过**(R5-D-1 / R5-D-2) ----
@@ -7952,11 +9382,55 @@ function main() {
       })
     }
   }
+  // 本地 composite action 判据的自证(C-03):输入是目录,不在 gateSample 的文本机制里。
+  const compositeSelftest = selfTestCompositeActions()
+  if (!Array.isArray(compositeSelftest?.failures) || typeof compositeSelftest?.assertions !== 'number') {
+    failures.push({
+      name: '[composite-action-selftest]',
+      line: 0,
+      detail: 'selfTestCompositeActions() 的返回形状不对(需要 {failures, assertions}) —— 自检被改坏了',
+    })
+  } else {
+    for (const detail of compositeSelftest.failures) {
+      failures.push({ name: '[composite-action-selftest]', line: 0, detail })
+    }
+    if (compositeSelftest.assertions < SELFTEST_COMPOSITE_ACTION_ASSERTIONS) {
+      failures.push({
+        name: '[composite-action-selftest]',
+        line: 0,
+        detail: `本地 composite action 自检只执行了 ${compositeSelftest.assertions} 条断言`
+          + `(期望 ≥ ${SELFTEST_COMPOSITE_ACTION_ASSERTIONS}) ⇒ 自检被掏空。`,
+      })
+    }
+  }
+  // [SK-17] 层清单的自证(C-02):判据面声明的层必须与代码里的枚举**同源**。
+  const pinnedEnvLayerSelftest = selfTestPinnedEnvLayers()
+  if (!Array.isArray(pinnedEnvLayerSelftest?.failures) || typeof pinnedEnvLayerSelftest?.assertions !== 'number') {
+    failures.push({
+      name: '[pinned-env-layer-selftest]',
+      line: 0,
+      detail: 'selfTestPinnedEnvLayers() 的返回形状不对(需要 {failures, assertions}) —— 自检被改坏了',
+    })
+  } else {
+    for (const detail of pinnedEnvLayerSelftest.failures) {
+      failures.push({ name: '[pinned-env-layer-selftest]', line: 0, detail })
+    }
+    if (pinnedEnvLayerSelftest.assertions < SELFTEST_PINNED_ENV_LAYER_ASSERTIONS) {
+      failures.push({
+        name: '[pinned-env-layer-selftest]',
+        line: 0,
+        detail: `层清单自证只执行了 ${pinnedEnvLayerSelftest.assertions} 条断言`
+          + `(期望 ≥ ${SELFTEST_PINNED_ENV_LAYER_ASSERTIONS}) ⇒ 自检被掏空。`,
+      })
+    }
+  }
   let total = 0
   const notes = []
   const allowlistHits = []
   let goTestTimeoutHits = 0
   const pinnedStepPolicies = []
+  const pinnedEnvLayerIds = new Set()
+  const pinnedUses = new Set()
   for (const name of names) {
     const result = checkWorkflow(name)
     // `?? []` 兜底(2026-09-19 第三轮审计 F2-1):将来若有人再加一条忘了统一形状的
@@ -7967,6 +9441,44 @@ function main() {
     allowlistHits.push(...(result.allowlistHits ?? []))
     goTestTimeoutHits += result.goTestTimeoutHits ?? 0
     pinnedStepPolicies.push(...(result.pinnedStepPolicies ?? []))
+    for (const layer of result.pinnedEnvLayers ?? []) pinnedEnvLayerIds.add(layer.id)
+    for (const uses of result.pinnedUses ?? []) pinnedUses.add(uses)
+  }
+
+  // [SK-17] 的**层清单双向对账**(第十轮审计 C-02):`PINNED_ENV_LAYER_REGISTRY` 是判据面的
+  // 唯一真源,本次全仓扫描产出的层 id 必须与它**双向相等** —— 少一层(枚举被删/被短路)即红,
+  // 多一层(加了枚举却没登记)也红。通过行由同一份枚举生成 ⇒ "声称检查了哪几层"不可能再与
+  // 代码漂移(C-02 的现场:日志硬编码"三层 `env:` … 均已检查",而 `container.env` 从未被读)。
+  // 与覆盖下限同一口径:只在默认目录的全仓扫描里判(`--workflows-dir` 的合成树可能没有守卫 job)。
+  if (isDefaultDirectory) {
+    const missingLayers = PINNED_ENV_LAYER_REGISTRY.filter(layer => !pinnedEnvLayerIds.has(layer.id))
+    if (missingLayers.length > 0) {
+      failures.push({
+        name: '[SK-17]',
+        line: 0,
+        detail: `进程环境层的**覆盖面不足**:${missingLayers.map(layer => `${layer.id}(${layer.label})`).join('、')}`
+          + ' 本次一次都没被枚举到(实际枚举到:'
+          + `${[...pinnedEnvLayerIds].join('、') || '（空）'})。`
+          + '\n  ⇒ 每层都是一条独立的静默通道(键写在那一层上进不到判据面),少一层等于少一份判据。'
+          + '\n  ⇒ 要调整覆盖面请**显式**改 `PINNED_ENV_LAYER_REGISTRY` 并写明理由 —— '
+          + '不接受"少枚举一层"这种静默降级。',
+      })
+    }
+    const unknownLayers = [...pinnedEnvLayerIds].filter(id => !PINNED_ENV_LAYER_REGISTRY.some(layer => layer.id === id))
+    if (unknownLayers.length > 0) {
+      failures.push({
+        name: '[SK-17]',
+        line: 0,
+        detail: `进程环境层枚举产出了未登记的层:${unknownLayers.join('、')}`
+          + '\n  ⇒ 判据面扩大了却没人知道 ⇒ 通过行(由枚举生成)会宣称检查了注册表里没有的层。'
+          + '请把新层写进 `PINNED_ENV_LAYER_REGISTRY`(它同时驱动通过行与这条对账)。',
+      })
+    }
+    // `uses:` 登记表的**死条目**对账(与 SWALLOW_ALLOWLIST 同一纪律)。
+    failures.push(...pinnedUsesRegistryProblem([...pinnedUses]))
+    // 本地 composite action 的内容判据(第十轮审计 C-03):`.github/workflows/` 的平铺扫描面
+    // 之外还有一整类**仓内可判**的执行体 —— 它们此前只在被 `uses:` 委派时才"跑",却没人读。
+    failures.push(...checkCompositeActionTree(join(root, '.github', 'actions'), notes))
   }
 
   // [SK-13] 的**全仓存在性**对账(只在默认目录):契约挂在"承载发布链的那个 workflow"
@@ -8043,6 +9555,8 @@ function main() {
       process.stderr.write(`  - SWALLOW_ALLOWLIST 的死条目对账被关掉了:${outsideAllowlistFiles.join(', ')} `
         + `不在被扫目录里 ⇒ 这 ${outsideAllowlistFiles.length} 个文件的豁免本次未被核对;\n`)
     }
+    process.stderr.write('  - 本地 composite action(`.github/actions/**`)与 `uses:` 登记表的死条目对账本次**未生效**'
+      + '(它们只在全仓扫描里判);\n')
     process.stderr.write('  - CI 与 `yarn check` 一律不带这个参数;要跑全仓门禁请直接 `node scripts/check-workflows.mjs`。\n')
   }
 
@@ -8071,8 +9585,13 @@ function main() {
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
     + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行:命令位 · 整串 `shell:` · '
     + '步骤体退出语义)\n'
-    + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:三层 `env:` 的禁用键表 + '
-    + '`$GITHUB_ENV`/`$GITHUB_PATH` 键名注入)\n'
+    + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:四层 `env:` 的**白名单登记表** + '
+    + '`$GITHUB_ENV` 键名注入 + 被钉步骤体内的 `export`/前缀赋值 + `uses:` 委派目标的'
+    + '本地可解析/登记制 + `.github/actions/**` 的内容判据)\n'
+    + '    + SK-18 策略(被钉单元的**执行目录**:workflow 级 / job 级 `defaults.run.working-directory` 与'
+    + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
+    + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
+    + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }

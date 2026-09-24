@@ -23,8 +23,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
-import { dirname } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -95,6 +96,15 @@ const GUARDS = [
   // python 语法、`--self-test` 判据夹具（每条判据都配负例）、以及**进程内假网关**驱动的
   // 正/反例（按真契约应答必须绿 / 破坏契约必须红 / provider 未配置必须 SKIP 且不得报 PASS）。
   { name: 'check:integration-tests', args: ['run', 'check:integration-tests'], path: 'integration-tests/**（语法/判据自检/假网关正反例）' },
+  // 2026-09-24 第十轮审计 C-06（P2，F1 泳道新增守卫；编排器侧登记由 F2 泳道同步）：
+  // 第九轮把「守卫 → argv → 脚本路径」三者绑在一条链上，但**脚本内容本身仍无判据** ——
+  // 把某个守卫的脚本内容掏空（`process.exit(0)`）或换成同名符号链接之后，
+  // `check-root-guards.mjs` 照报 `✓ <名字>`（审计在副本里实测：`check:theme-tokens`
+  // 从 ✗ 翻成 ✓，两条门禁都看不出区别）。这条守卫把「文件内容」也变成判据：
+  // 它读 `check-root-guards.mjs` 的 `REGISTERED_GUARD_ENTRIES`（每条守卫带一个
+  // `digest` = 脚本 sha256）并复算真实脚本对拍，第二判据在
+  // `scripts/verify-check-workspaces.mjs`（独立复算 + 符号链接断言）。
+  { name: 'check:guard-parser-integrity', args: ['run', 'check:guard-parser-integrity'], path: '守卫脚本内容摘要（sha256）↔ 登记表' },
 ]
 
 /**
@@ -341,9 +351,35 @@ const PATH_OWNERS = [
   ['community/fabric/', 'dsh-community-fabric'],
 ]
 
-/** 反向依赖:A 改动会波及 B(desktop 的类型/产物是这些包的输入)。 */
+/**
+ * 反向依赖:A 改动会波及 B(desktop 的类型/产物是这些包的输入)。
+ *
+ * **不变量（2026-09-24 第十轮审计 C-11/F7 起由 {@link scheduleTableProblems} 强制）**：
+ * 对 `PACKAGES` 里的每一条 `needs` 边 `A → B`，本字典的 `DEPENDENTS[B]` **必须**含 `A`。
+ * 反方向（本字典里多出来的条目）是**允许**的：`--changed` 只按本表展开**一层**，
+ * 所以"两跳的消费者"（例如 host-locale 的 consumer 的 consumer）要显式列全
+ * —— 宁可多跑几个包，也不能漏跑。
+ *
+ * 脱钩的后果是静默的：改 `A` 不会重跑 `B`，而 `check:fast` 的语义正是"跑受影响的包"，
+ * 于是类型/产物级破坏在 fast 路径上漏检（**同一个改动**在 `yarn check` 上是红的）。
+ */
 const DEPENDENTS = {
-  'dsh-plugin-desktop': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card', '@picoaide/dsh-branding'],
+  // 2026-09-24 C-11：`dsh-cron` 的 needs 里有 desktop（它的 tsc 读 desktop 的
+  // lib/types，见 PACKAGES 头注释），反向表里此前**没有它** ⇒ 改 desktop 不重跑 cron。
+  'dsh-plugin-desktop': ['@picoaide/dsh-enterprise', '@picoaide/dsh-account-card', '@picoaide/dsh-branding', '@picoaide/dsh-cron'],
+  // 2026-09-24 C-11：desktop 的 needs 里有 wasm-apps-host（构建期 import 它）——
+  // 反向条目此前整条缺失 ⇒ 改 wasm-apps-host 不重跑 desktop，而 desktop 的
+  // `lib/` 会把该包内联进产物（真正受影响的那个包反而被漏掉）。
+  '@picoaide/dsh-wasm-apps-host': ['dsh-plugin-desktop'],
+  // 2026-09-24 C-11：browser 的 needs 里有 connectors（browser 的 tsc 读它的
+  // lib/types，见 PACKAGES 里 browser 那条的两条真实边）—— 反向条目此前整条缺失。
+  '@picoaide/dsh-connectors': ['@picoaide/dsh-browser'],
+  // 2026-09-24 C-11：wasm-apps-host 的 needs 里有 browser（它经 browser 导出的
+  // surface seam 取视图/CDP 能力）—— 反向条目此前整条缺失。
+  '@picoaide/dsh-browser': ['@picoaide/dsh-wasm-apps-host'],
+  // 2026-09-24 C-11：account-card 的 needs 里有 enterprise（读它的 lib/types）——
+  // 反向条目此前整条缺失。
+  '@picoaide/dsh-enterprise': ['@picoaide/dsh-account-card'],
   // 叶子包是 browser / connectors / desktop 的构建输入，而 desktop 的
   // `lib/types/{host-locale,desktop-home}.d.ts` 又是 enterprise / cron 的输入 ⇒
   // `--changed` 只展开一层，所以这里把两跳的消费者也列全（宁可多跑几个包）。
@@ -431,7 +467,9 @@ function findScheduleCycle(byName) {
  *      !progressed` 退出 ⇒ 这些包**既不跑、也不进 skipped**（runScheduler 末端的
  *      dropped 断言是第二道网）；
  *   3. `PATH_OWNERS` 前缀/包名打错：`check:fast` 把改动判成"0 个包"并 EXIT=0；
- *   4. `DEPENDENTS` 键/值打错：`--changed` 的反向展开静默少跑。
+ *   4. `DEPENDENTS` 键/值打错：`--changed` 的反向展开静默少跑；
+ *   5. `needs ↔ DEPENDENTS` 脱钩（2026-09-24 第十轮审计 C-11/F7）：同一条真实构建边
+ *      只在其中一张表里 ⇒ 改依赖方不重跑消费方（fast 路径静默漏跑，全量门禁才是红的）。
  *
  * 判据**不依赖任何具体包名**（名字全部从表里现读、再互相对拍）⇒ 新增包自动被覆盖。
  * @returns 问题描述列表（空 = 通过）。
@@ -509,6 +547,28 @@ function scheduleTableProblems() {
       }
     }
   }
+  // needs ↔ DEPENDENTS **双向一致**（2026-09-24 第十轮审计 C-11/F7）。
+  //
+  // 现场：两张表各自手写、互不校验，实测四处脱钩（`dsh-cron → dsh-plugin-desktop` 的
+  // 反向条目缺失、`connectors`/`browser`/`wasm-apps-host` 三条反向键整条不存在）⇒
+  // `--changed` 的反向展开少跑包，而 `check:fast` 的语义就是"跑受影响的包"。
+  //
+  // 判据只做集合对拍（名字全部从表里现读）⇒ 新增包/新增边自动被覆盖；**单边改表即红**。
+  // 反向多出来的条目**不判红**：`--changed` 只展开一层，两跳消费者必须显式列全
+  // （见 DEPENDENTS 头注释），"多跑"是安全方向。
+  for (const pkg of PACKAGES) {
+    for (const need of pkg.needs ?? []) {
+      const dependents = DEPENDENTS[need]
+      if (dependents === undefined) {
+        problems.push(`DEPENDENTS 里没有 ${JSON.stringify(need)} 这条键，而 ${JSON.stringify(pkg.name)} 的 needs 里有它`
+          + ' ⇒ 改依赖方不会重跑消费方（反向表半张 ⇒ check:fast 静默漏跑该包）')
+      } else if (!dependents.includes(pkg.name)) {
+        problems.push(`DEPENDENTS[${JSON.stringify(need)}] 里没有 ${JSON.stringify(pkg.name)}，`
+          + `而 ${JSON.stringify(pkg.name)} 的 needs 里声明了它 ⇒ 同一条真实构建边在两张表里不一致`
+          + `（改 ${need} 不会重跑 ${pkg.name}；请补进 DEPENDENTS，或删掉这条 needs 边）`)
+      }
+    }
+  }
   return problems
 }
 
@@ -571,18 +631,391 @@ function parseArgs(argv) {
 }
 
 /**
- * Lines that carry a test/build verdict, across every runner this gate drives:
- * vitest (`FAIL`, `×`, `AssertionError`, `⎯ Failed Tests`, `Tests 1 failed`),
- * `node --test` (`not ok`), tsc (`error TS…`), and yarn/spawn failures
- * (`ELIFECYCLE`). Deliberately excludes vitest's `Test Files` summary line: it
- * matches on PASSING runs too (`Test Files 16 passed`) and used to consume the
- * bounded verdict budget with noise.
+ * 「判定行（verdict line）扫描 + 有界输出」的**唯一实现**。
+ *
+ * 为什么必须只有一份：这条口径同时被两条门禁用到 —— 本编排器（`yarn check` / `check:fast`）
+ * 与 `scripts/check-root-guards.mjs`（docs-only 的 PR 唯一防线）。两份实现必然漂移，
+ * 而漂移的代价是"某一条路径上失败详情永远看不到"：
+ *   1. **C-08/F1**（2026-09-24 第十轮审计 P1）：根守卫运行器的摘要只有「头 20 + 省略 N 行 +
+ *      尾 20」，**没有判定行扫描** ⇒ 判定行落在中段时在 CI 日志里出现 **0 次**；
+ *   2. **C-09/F2**（同轮 P1）：本编排器的旧 `FAILURE_LINE` 用**行内任意位置**匹配
+ *      （`(?:^|\s)(?:…|×|…)`），于是 `[probe] progress ×0 items scanned` 这类进度噪声
+ *      也进判定列表、先到先得吃满 150 行预算 ⇒ 真正的 `AssertionError` 一行不留。
+ *
+ * 因此判定行的匹配**锚定在行首**（允许前导空白），并把"进度/装饰噪声"单独分类：
+ * 噪声**不得占用判定行预算**（它们不是判定行，回显在摘要里只会骗人）。
+ *
+ * 三类行（`classifyVerdictLine` 的返回值）：
+ *   · `'verdict'` —— **锚定**的判定行：失败用例名 / 断言 / 编译错误 / 运行器汇总。
+ *     形态表见 {@link VERDICT_LINE}（vitest `×`/`FAIL`/`AssertionError`/`⎯`、
+ *     `node --test` 的 `not ok`、tsc `error TS…`、yarn `ELIFECYCLE`、栈首 `Error:`、
+ *     go `--- FAIL:`/`panic:`、eslint `12:5  error …`、`--reporter=json` 的单行 JSON…）。
+ *   · `'noise'` —— 锚定命中但内容是**进度/装饰**（`× 0 items scanned`）：计数、不占预算。
+ *   · `null` —— 不是判定行（含**行内**出现关键字的所有自由文本，例如旧口径会误捕的那些）。
+ *
+ * **分类前先剥离 ANSI**（见 {@link stripAnsiSequences}）：CI 里 vitest 输出带颜色，
+ * 而锚定看的是行首 —— 不归一化的话 `\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …` 与
+ * `\x1b[31m×\x1b[39m …` 一条都不匹配（本地无 TTY ⇒ 无 ANSI ⇒ "本地绿、CI 瞎"）。
+ * 归一化**只用于分类**：打印仍是原行（短输出"逐字原样"的字节不许变）。
+ *
+ * **"栈内"形态的明确策略**（第十轮复审 W1 的 N5）：栈帧/包装/追踪里的行**同样锚定**，
+ * 不靠兜底段（兜底段有界：未锚定时 20 行、混合场景 10 行，真判定行一多就被挤出去）。
+ * 具体锚进表里的行首前缀：pytest `E   `（`E` + ≥3 空格）、python
+ * `Traceback (most recent call last):`、GitHub 注解 `##[error]`、npm `npm error`、
+ * node 栈帧 `node:internal/…`、jest `●`、以及 vitest 未处理拒绝的**正文**（`TypeError:` 一类
+ * `*Error:` 栈首）与无 `⎯` 装饰的 `Unhandled Rejection`。取舍：这些形态都是**行首可判别**的
+ * 固定前缀，锚定它们不会把进度噪声拉进判定段（噪声另有 `VERDICT_NOISE` 一档）；相反，指望
+ * "兜底段一定能看见"是**错的** —— 混合场景的兜底只有 10 行，且它在判定段之外。
+ *
+ * 兜底：一条判定行都没锚到时，**不是**静默给一个空段，而是 fail-loud 打印
+ * 「未找到判定行」+ 判定形态可能没登记 + `--full-output` 的出路（见
+ * {@link summarizeBoundedFailure} 的 `missingVerdict` / `text`）。**混合**场景（有判定行、
+ * 但也有未锚定的疑似错误行）同样不许静默丢：那些行进有界的「其它疑似错误行」段。
  */
-const FAILURE_LINE = /(?:^|\s)(?:FAIL\b|not ok\b|AssertionError|ELIFECYCLE|error TS\d+|\d+\s+failed\b|×|✗|⎯)/u
+const VERDICT_LINE = /^[ \t]*(?:[×✗✘](?:[ \t]|$)|✖|●|FAIL(?:ED)?\b|-{3,}[ \t]*FAIL\b|panic\b|not ok\b|AssertionError\b|[A-Za-z_$][\w$]*Error\b|Error\b|error\b|ELIFECYCLE\b|\S+\(\d+,\d+\):\s*error TS\d+|\S+:\d+:\d+[ \t]+-[ \t]+error TS\d+|error TS\d+|\d+:\d+[ \t]+error\b|Tests?:?[ \t]+\d+[ \t]+failed\b|Test Files\s+\d+\s+failed\b|\d+\s+failed\b|⎯|##\[error\]|npm error\b|Traceback \(most recent call last\):|E {3,}\S|node:internal\/|Unhandled (?:Rejection|Errors?)\b|(?:\{.*)?"(?:numFailedTests|numFailedTestSuites|numRuntimeErrorTestSuites|errorCount|fatalErrorCount)"\s*:\s*(?!0\b)\d|(?:\{.*)?"success"\s*:\s*false\b|(?:\{.*)?"Action"\s*:\s*"fail")/u
+/**
+ * ANSI 控制序列的剥离（**只用于分类，绝不用于打印**）—— 2026-09-24 第十轮复审 V1 的 P1，
+ * 由主控从 PR #146 的真实 CI 日志复现：
+ *
+ * 现场：失败 job 里编排器打印「本次输出里**一条锚定判定行都没有匹配到**」，而同一份输出里
+ * 确实有 ` FAIL  tests/audit-r9-connector-headers.spec.ts > …`（vitest 的彩色形态是
+ * `\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …`，用例行是 `\x1b[31m×\x1b[39m`，栈行带
+ * `\x1b[90m`）—— 判定词之前先有转义序列，行首锚定就失效。本地无 TTY ⇒ 无 ANSI ⇒
+ * 判据"本地绿、CI 瞎"。ANSI 的另一半动机与 C-09 相同：**分类口径必须与真实输出同形**。
+ *
+ * 覆盖四类：CSI（`ESC [ … 字母`）、OSC（`ESC ] … BEL` 或 `ESC \`；**未闭合的吃到行尾**，
+ * 否则一条被截断的进度条能把整行判定词藏起来）、字符集指定（`ESC ( B` 一类）、
+ * 两字符转义；C1 的 `0x9b` 是 **CSI 的单字节引导形态**，按同一形态整条剥离（见下）。
+ *
+ * **C1（`0x9b`）= CSI 的另一种引导字节，必须连同参数字节一起剥离**（第十轮复审 W1 的 N4）：
+ * 旧实现只在末尾删掉裸 `0x9b` 引导字节，把**参数字节留在原地** ——
+ * `'\u009b31m×\u009b39m name'` 变成 `'31m×39m name'`，判定词不再位于行首 ⇒
+ * `classifyVerdictLine` 返回 `null`（注释却声称覆盖了 C1：注释与实现不一致本身就是缺陷）。
+ * 正确形态与 `ESC [` 那条同构，只换引导字节：`\u009b <参数字节> <终止字节>`；
+ * 这一条必须排在"裸 `ESC`/`0x9b` 兜底"**之前**（否则引导字节先被删掉，参数就永远认不出来了）。
+ *
+ * 只覆盖这两种引导形态（`ESC [` / `0x9b`）：CSI 的第三种引导（UTF-8 的 `0xC2 0x9B`）在实践中
+ * 不会出现在工具输出里，**不做**（这里如实写明，而不是让注释比实现宽）。
+ *
+ * @param line - 原始输出行。
+ * @returns 去掉控制序列之后的文本（**用于分类**；打印请继续用原行）。
+ */
+export const stripAnsiSequences = line => line
+  .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/gu, '') // OSC(规范形态)
+  .replace(/\u001b\][^\u0007]*$/gmu, '') // OSC(未闭合:吃到行尾)
+  .replace(/\u001b\[[0-9;:?<=>!]*[ -/]*[@-~]/gu, '') // CSI
+  .replace(/\u009b[0-9;:?<=>!]*[ -/]*[@-~]/gu, '') // CSI(C1 单字节引导:引导+参数+终止一条剥离)
+  .replace(/\u001b[()#%][0-9A-Za-z]?/gu, '') // 字符集指定
+  .replace(/\u001b[@-Z\\-_]/gu, '') // 两字符转义
+  .replace(/[\u001b\u009b]/gu, '') // 残留的裸 ESC / C1 引导字节(无参形态)
+/**
+ * 「进度/装饰噪声」谓词 —— 只对**已经锚定命中**的行判，用来把
+ * `× 0 items scanned` 这类计数器从判定行里摘出去（审计现场的原句是
+ * `[probe] progress ×0 items scanned`，锚定之后它连判定行都不是，这里是第二道）。
+ * 刻意只认"扫描计数"这一族形态：把 `progress` 之类的词整族拉黑会误杀
+ * 真叫这个名字的失败用例。
+ */
+const VERDICT_NOISE = /(?:\bitems?|\bfiles?|\bentries|\bpaths?|\bcases?)\s+scanned\b/u
+/**
+ * 兜底「疑似错误行」谓词：**不锚定**，只在一条判定行都没锚到时使用（有界 20 行）。
+ * 审计现场（F2 形态 A）的判定行写成 `MUST-SURVIVE-VERDICT: Error: build step aborted …`
+ * —— 它不匹配任何锚定形态，但含 `Error`/`aborted`，靠这一档才不至于"一行都没有"。
+ */
+const FALLBACK_ERROR_LINE = /(?:^|\s)(?:error|errors|failed|failure|exception|aborted|panic|timed?\s*out|not ok|assertionerror)\b/iu
 /** Cap on the verdict lines printed per failed task. */
 const MAX_FAILURE_LINES = 150
 /** Cap on the trailing context lines printed per failed task. */
 const MAX_TAIL_LINES = 200
+/** Cap on the unanchored fallback lines (only used when no verdict line was matched). */
+const MAX_FALLBACK_LINES = 20
+/**
+ * Cap on the **mixed-scenario** fallback lines（有判定行、但输出里同时存在未锚定的疑似错误行）。
+ *
+ * 为什么需要（第十轮复审 V1 的 P3-D1）：`FALLBACK_ERROR_LINE` 那一档此前**只在
+ * `missingVerdict === true` 时**才生效 —— 只要输出里锚到了哪怕一条判定行，其余"读不懂形态"
+ * 的真失败行就被**静默丢弃**。实测的四种真实形态（go 用例级 `--- FAIL: TestX`、`panic: test
+ * timed out`、`--reporter=json` 的单行 JSON、eslint 的 `12:5  error …`）现在已进锚定表，
+ * 但"下一个没登记的形态"不该再由"碰巧还有别的锚定行"决定可见性 ⇒ 这一档是**兜底**。
+ */
+const MAX_MIXED_FALLBACK_LINES = 10
+/**
+ * `selfTestVerdictClassifier()` 至少执行的断言条数（防"把断言表掏空"）。
+ *
+ * 与 `check-root-guards.mjs` 的 `SELFTEST_GUARD_ENV_ASSERTIONS` 同一手法：光有
+ * `failures.length === 0` 是恒真的 —— 把断言表清空它就永远通过。下限只允许被"变多"越过。
+ */
+const SELFTEST_VERDICT_ASSERTIONS = 60
+
+/**
+ * 把一行分类成 `'verdict'` / `'noise'` / `null`（见上面那段契约）。
+ *
+ * **分类前剥离 ANSI**（见 {@link stripAnsiSequences}），返回的分类与打印用的原行无关。
+ * @param line - 原始输出行（**不要**先 trim：锚定判据看的就是行首）。
+ * @returns 分类结果。
+ */
+export function classifyVerdictLine(line) {
+  const text = stripAnsiSequences(line)
+  if (!VERDICT_LINE.test(text)) return null
+  return VERDICT_NOISE.test(text) ? 'noise' : 'verdict'
+}
+
+/**
+ * 有界化一个失败任务的输出，并返回**结构化**摘要（判定行 / 噪声 / 兜底 / 尾窗）。
+ *
+ * 契约（调用方可以依赖的部分）：
+ *   · **纯函数**：不读磁盘、不写 stdout、不抛异常（输入是字符串，输出是对象）。
+ *   · 短输出（行数 ≤ `maxVerdictLines + maxTailLines`）**原样返回**（只 `trimEnd`）——
+ *     现状不变，不许因为"加了判定行扫描"而改动短输出的字节。
+ *   · 长输出：`text` 里判定行在前、尾窗在后，且**判定行一定在尾窗之外也算数**
+ *     （这正是 C-08/F2 要修的那条）；进度噪声单独计数、不占判定预算；分类前先剥离 ANSI。
+ *   · `missingVerdict === true` 时 `text` 里必定有一段 fail-loud 的「未找到判定行」
+ *     （不会是空段），并给出 `--full-output` 的出路。
+ *   · **混合场景**（有判定行 + 未锚定的疑似错误行）另行有界回显（`mixedFallbackLines`）。
+ *   · `--full-output` 是**调用方**的事：走本函数就直接拿有界结果，不做时间/体积判断。
+ * @param output - 任务捕获到的 stdout+stderr。
+ * @param options - `maxVerdictLines` / `maxTailLines` / `maxFallbackLines` 可覆盖（测试用）。
+ * @returns `{ text, totalLines, truncated, verdictLines, noiseLines, fallbackLines, mixedFallbackLines, budgetExhausted, missingVerdict }`
+ */
+export function summarizeBoundedFailure(output, options = {}) {
+  const maxVerdictLines = options.maxVerdictLines ?? MAX_FAILURE_LINES
+  const maxTailLines = options.maxTailLines ?? MAX_TAIL_LINES
+  const maxFallbackLines = options.maxFallbackLines ?? MAX_FALLBACK_LINES
+  const maxMixedFallbackLines = options.maxMixedFallbackLines ?? MAX_MIXED_FALLBACK_LINES
+  // A trailing newline is a separator, not a line: keeping the empty element
+  // made exactly-(MAX_FAILURE_LINES + MAX_TAIL_LINES)-line output take the
+  // summary branch (off-by-one).
+  const body = output.endsWith('\n') ? output.slice(0, -1) : output
+  const lines = body.split('\n')
+  const budget = maxVerdictLines + maxTailLines
+  if (lines.length <= budget) {
+    return {
+      text: output.trimEnd(),
+      totalLines: lines.length,
+      truncated: false,
+      verdictLines: [],
+      noiseLines: [],
+      fallbackLines: [],
+      mixedFallbackLines: [],
+      budgetExhausted: false,
+      missingVerdict: false,
+    }
+  }
+  const tailStart = Math.max(0, lines.length - maxTailLines)
+  const verdictLines = []
+  const noiseLines = []
+  for (const line of lines) {
+    const kind = classifyVerdictLine(line)
+    if (kind === 'verdict') verdictLines.push(line)
+    else if (kind === 'noise') noiseLines.push(line)
+  }
+  // 预算按**出现顺序**给锚定判定行（噪声不参与竞争）。
+  const shownIndices = []
+  for (let index = 0; index < lines.length && shownIndices.length < maxVerdictLines; index += 1) {
+    if (classifyVerdictLine(lines[index]) === 'verdict') shownIndices.push(index)
+  }
+  const shown = shownIndices.map(index => lines[index])
+  // Verdict lines already shown above are not repeated inside the tail.
+  const shownSet = new Set(shownIndices)
+  const tail = lines.slice(tailStart).filter((_, offset) => !shownSet.has(tailStart + offset))
+  const missingVerdict = verdictLines.length === 0
+  const fallbackLines = missingVerdict
+    ? lines.filter(line => line.trim() !== '' && FALLBACK_ERROR_LINE.test(line)).slice(0, maxFallbackLines)
+    : []
+  // **混合场景**兜底（第十轮复审 V1 的 P3-D1 后半条）：有判定行可锚，但输出里还有
+  // "读不懂形态"的疑似错误行落在尾窗之外 —— 它们此前被静默丢弃。有界回显（不占判定预算），
+  // 并明确"这可能是没登记的判定形态"，把口子指向 VERDICT_LINE 而不是"反正看不见"。
+  const mixedFallbackLines = missingVerdict
+    ? []
+    : lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line, index }) => line.trim() !== ''
+        && index < tailStart
+        && !shownSet.has(index)
+        && classifyVerdictLine(line) === null
+        && FALLBACK_ERROR_LINE.test(line))
+      .slice(0, maxMixedFallbackLines)
+      .map(({ line }) => line)
+  const budgetExhausted = verdictLines.length > shown.length
+  const parts = [`(输出共 ${lines.length} 行;此处只打印判定行与末尾;完整输出用 --full-output 本地重跑)`]
+  if (!missingVerdict) {
+    parts.push(`--- 失败相关行(最多 ${maxVerdictLines} 行,按出现顺序;判定行**行首锚定**) ---`, ...shown)
+    if (mixedFallbackLines.length > 0) {
+      // 放在"判定段"之后、噪声计数之前 —— 消费者按 `\n--- ` 切段时判定段仍是纯判定行。
+      parts.push(`--- 其它疑似错误行(未锚定;最多 ${maxMixedFallbackLines} 行 —— 若真判定行长这样,`
+        + '请把它补进 VERDICT_LINE 的**锚定**形态表,而不是让它在混合输出里被静默丢掉) ---',
+      ...mixedFallbackLines)
+    }
+    if (noiseLines.length > 0) {
+      // 审计现场（C-09 形态 B）：这些行曾经先到先得吃满 150 行预算，把真正的
+      // `AssertionError` 挤出判定段。现在只计数、不回显 —— 它们不是判定行。
+      parts.push(`--- 另有 ${noiseLines.length} 条"进度/装饰噪声"行锚定命中了判定标记，已排除`
+        + `（噪声不得占用判定行预算，需要看全文请用 --full-output） ---`)
+    }
+  } else {
+    parts.push('--- 未找到判定行(fail-loud) ---',
+      '本次输出里**一条锚定判定行都没有匹配到** —— 这不是"没有失败详情"，而是判定形态没被识别：',
+      '  · 判定行可能用了未登记的形态（形态表见 scripts/check-workspaces.mjs 的 VERDICT_LINE），或',
+      `  · 判定行落在被省略的中间段（本段只保留锚定判定行与末尾 ${maxTailLines} 行）。`,
+      '⇒ 用 `--full-output` 重跑拿完整输出（例如 `node scripts/check-workspaces.mjs --only <包> --full-output`）；',
+      '  若那种形态确实合法，请把它补进 VERDICT_LINE 的**锚定**形态表 —— 不要放宽成"行内任意位置匹配"',
+      '  （那正是 C-09 形态 B：进度噪声会先到先得吃满判定预算）。')
+    if (fallbackLines.length > 0) {
+      parts.push(`--- 兜底:未锚定的"疑似错误行"(最多 ${maxFallbackLines} 行;可能含真正的判定行) ---`, ...fallbackLines)
+    }
+  }
+  if (budgetExhausted) {
+    parts.push(`--- 判定行预算已用尽（≥${maxVerdictLines} 条判定行;可能还有未打印的 ⇒ 用 --full-output 看全） ---`)
+  }
+  parts.push(`--- 输出末尾(最后 ${tail.length} 行) ---`, ...tail)
+  return {
+    text: parts.join('\n'),
+    totalLines: lines.length,
+    truncated: true,
+    verdictLines,
+    noiseLines,
+    fallbackLines,
+    mixedFallbackLines,
+    budgetExhausted,
+    missingVerdict,
+  }
+}
+
+/**
+ * 有界失败报告（字符串形态）—— 给"只要一段可打印文本"的调用方（如根守卫运行器）。
+ * @param output - 任务输出。
+ * @param options - 同 {@link summarizeBoundedFailure}。
+ * @returns 有界报告文本。
+ */
+export function formatFailureReport(output, options = {}) {
+  return summarizeBoundedFailure(output, options).text
+}
+
+/**
+ * 「判定形态表 + ANSI 归一 + C1 剥离」的**逐形态自检**（第十轮复审 W1 的 N4/N5）。
+ *
+ * 为什么要有（而不是只靠 `verify-check-workspaces.mjs` 的那几条断言）：
+ * 形态表就是这个门禁的**诊断面本身** —— 少一条形态，那条失败行在 CI 日志里整行消失
+ * （PR #146 的现场：彩色 ` FAIL ` 行一条都不匹配，编排器只打「未找到判定行」）。
+ * 而"看不见"与"没有失败"在日志里长得几乎一样，**门禁仍然 EXIT=1**，红得看起来很有理由。
+ * 所以把它做成纯函数自检，挂到**两个调用方**（`main()` 与 `check-root-guards.mjs`）的
+ * 启动路径上：①本编排器 = `yarn check` / CI 的 gate job；②根守卫运行器 = docs-only PR 的
+ * **唯一防线**（那条路径上编排器根本不跑）。自检失败按配置错误处理（exit 2），
+ * 不退化成"跑一遍门禁然后详情看不见"。
+ *
+ * 判据三组：①**必须锚定**的形态（含"栈内"形态 —— 见 `VERDICT_LINE` 的取舍说明）；
+ * ②**不许误伤**的负例（否则判定预算会被噪声吃满，真判定行反而被挤出去）；
+ * ③C1（`0x9b`）与 ESC 两种引导形态**逐字节等价**，且**行埋在尾窗之外**时仍然进判定段。
+ *
+ * 纯函数：不读磁盘、不写 stdout、不抛异常（`main()` 与 `check-root-guards.mjs` 都直接调它）。
+ * @returns `{ failures, assertions }` —— `failures` 为空且 `assertions` ≥
+ *   `SELFTEST_VERDICT_ASSERTIONS` 才算通过（条数下限防"把断言表掏空"）。
+ */
+export function selfTestVerdictClassifier() {
+  const failures = []
+  let assertions = 0
+  const check = (ok, message) => {
+    assertions += 1
+    if (!ok) failures.push(message)
+  }
+  // ① 必须锚定进判定段的形态（W1 §3.4 的"整行丢"清单 + 上一轮已覆盖形态的回归）。
+  const anchoredForms = [
+    ['GitHub 注解包装行（PR #146 日志里的形态）', '##[error]AssertionError: boom'],
+    ['npm `npm error`', 'npm error Missing script: "x"'],
+    ['pytest `E   ` 断言行', 'E   AssertionError: assert 1 == 2'],
+    ['python `Traceback (most recent call last):`（栈内）', 'Traceback (most recent call last):'],
+    ['node 加载器栈帧 `node:internal/…`（栈内）', 'node:internal/modules/cjs/loader:1234'],
+    ['jest 用例行 `●`', '  ● suite name › case name'],
+    ['vitest 未处理拒绝正文（栈首 `TypeError:`）', 'TypeError: beta unhandled boom'],
+    ['`Unhandled Rejection`（无 `⎯` 装饰）', 'Unhandled Rejection: boom'],
+    ['go `-json` 单行 `{"Action":"fail"}`', '{"Time":"2026-09-24T00:00:00Z","Action":"fail","Package":"x/y"}'],
+    ['eslint `--format=json`', '{"filePath":"a.js","errorCount":1,"messages":[]}'],
+    ['jest 汇总 `Tests:  1 failed`', 'Tests:       1 failed, 2 passed, 3 total'],
+    ['tsc pretty（TTY）`a.ts:12:5 - error TS2345`', 'src/a.ts:12:5 - error TS2345: Argument of type …'],
+    ['C1（0x9b）引导的 CSI 彩色用例行', '\u009b31m×\u009b39m tests/x.spec.ts > a > b'],
+    ['既有形态回归：彩色 ` FAIL `', '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c'],
+    ['既有形态回归：go 用例级 `--- FAIL:`', '--- FAIL: TestFoo (0.01s)'],
+  ]
+  for (const [label, line] of anchoredForms) {
+    const kind = classifyVerdictLine(line)
+    check(kind === 'verdict',
+      `[verdict-selftest] ${label} 必须被判成锚定判定行（verdict），实际 ${JSON.stringify(kind)}：`
+      + `${JSON.stringify(line)}`)
+  }
+  // ② 负例：新形态**不许**把"没有失败"的输出拉进判定段。
+  const negativeForms = [
+    ['eslint JSON 全 0（通过）', '{"filePath":"a.js","errorCount":0,"messages":[]}'],
+    ['go `-json` pass', '{"Time":"2026-09-24T00:00:00Z","Action":"pass","Package":"x/y"}'],
+    ['普通说明行', '  note: all packages checked'],
+    ['栈帧的普通 `at …` 行', '\u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m'],
+  ]
+  for (const [label, line] of negativeForms) {
+    const kind = classifyVerdictLine(line)
+    check(kind === null,
+      `[verdict-selftest] ${label} 必须仍然分类为 null（收紧过度会把判定预算烧在噪声上），`
+      + `实际 ${JSON.stringify(kind)}：${JSON.stringify(line)}`)
+  }
+  // ③a C1 与 ESC **逐字节等价**（W1 N4：旧实现只删引导字节、把参数字节留在原地 ⇒ 整行失锚）。
+  const escForm = '\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'
+  const c1Form = '\u009b31m×\u009b39m tests/x.spec.ts > a > b'
+  check(stripAnsiSequences(c1Form) === stripAnsiSequences(escForm),
+    `[verdict-selftest] C1（0x9b）引导与 ESC 引导必须剥离成同一份文本（只换引导字节），`
+    + `实际 C1=${JSON.stringify(stripAnsiSequences(c1Form))} / ESC=${JSON.stringify(stripAnsiSequences(escForm))}`)
+  check(stripAnsiSequences(c1Form) === '× tests/x.spec.ts > a > b',
+    `[verdict-selftest] C1 序列必须**连同参数字节**一起剥离（不能把 \`31m\` 留在行首），`
+    + `实际 ${JSON.stringify(stripAnsiSequences(c1Form))}`)
+  // ③b **行埋在尾窗之外仍然可见**（C-08 的那条性质对每一条新形态同样成立）：
+  //     body 按**当前常量**构造 —— 判定行放在**第 0 行**，后面跟 `MAX_FAILURE_LINES + 50` 行噪声
+  //     与 `MAX_TAIL_LINES` 行尾块 ⇒ ①总行数恒 > `maxVerdictLines + maxTailLines`（恒走**截断**
+  //     分支）；②判定行恒在尾窗（最后 `MAX_TAIL_LINES` 行）**之外**。这样判据测的是
+  //     "可见性来自**锚定**"，而不是"碰巧落进尾窗"，也不会因为有人调常量而假红/假绿。
+  const buried = line => [
+    line,
+    ...Array.from({ length: MAX_FAILURE_LINES + 50 }, (_, index) => `noise line ${index}`),
+    ...Array.from({ length: MAX_TAIL_LINES }, (_, index) => `tail line ${index}`),
+  ].join('\n')
+  // 判定段的切法必须与 `verify-check-workspaces.mjs` 的 `verdictSectionOf()` 同源：
+  // 只按**已知的段头**切，不能按 `\n--- ` 切 —— 判定行本身就可能是 `--- FAIL: …`，
+  // 那样会把它自己切掉（第一版自检就是这么假红的）。
+  const verdictSectionOf = text => {
+    const rest = text.split('--- 失败相关行')[1]
+    if (rest === undefined) return ''
+    const next = rest.search(/\n--- (?=输出末尾|另有 |其它疑似错误行|兜底:|判定行预算已用尽)/u)
+    return next < 0 ? rest : rest.slice(0, next)
+  }
+  for (const [label, line] of anchoredForms) {
+    const summary = summarizeBoundedFailure(buried(line))
+    check(summary.truncated === true,
+      `[verdict-selftest] ${label} 的埋行用例必须落在**截断分支**（否则测的是另一条路径；`
+      + `当前常量 maxVerdict=${MAX_FAILURE_LINES} / maxTail=${MAX_TAIL_LINES}）`)
+    check(summary.missingVerdict === false && summary.verdictLines.includes(line),
+      `[verdict-selftest] ${label} 埋在**尾窗之外**时仍必须被锚定`
+      + `（missingVerdict=${summary.missingVerdict}）`)
+    check(verdictSectionOf(summary.text).includes(line),
+      `[verdict-selftest] ${label} 必须落在**判定段**里（不是碰巧落进尾窗）：`
+      + `${JSON.stringify(verdictSectionOf(summary.text).slice(0, 200))}`)
+  }
+  return { failures, assertions }
+}
+
+/**
+ * 失败块的标题（**带真实退出码**，2026-09-24 第十轮审计 C-15/F8）。
+ *
+ * 旧实现把 `code` 在 `runTask` 里丢掉、标题写死"退出码非 0" ⇒ 「测试失败(1)」
+ * 「用法错误(2)」「被信号杀(137)」「超时/OOM」在日志里完全同形，而排障方向相反。
+ * @param result - `runTask` 的结果（含 `code` / `signal` / `spawnError`）。
+ * @returns 形如 `退出码 7` / `信号 SIGKILL（可能是超时/OOM 被杀:128+9=137）` / `启动失败:…`。
+ */
+export function describeTaskExit(result) {
+  if (result.spawnError !== undefined && result.spawnError !== null) return `启动失败:${result.spawnError}`
+  if (typeof result.code === 'number') return `退出码 ${result.code}`
+  if (typeof result.signal === 'string' && result.signal !== '') {
+    const hint = result.signal === 'SIGKILL' || result.signal === 'SIGTERM'
+      ? '（可能是超时/OOM 被杀:128+9=137）'
+      : ''
+    return `信号 ${result.signal}${hint}`
+  }
+  return '退出码未知（既没有 code 也没有 signal）'
+}
 
 /**
  * 「软降级」判定行（2026-09-23 三轮审计 R3-C C-8）。
@@ -687,40 +1120,15 @@ function collectDegraded(result, state) {
 }
 
 /**
- * Bound a failed task's output to something a CI log can actually carry.
- *
- * The real-socket / real-subprocess suites print tens of thousands of lines, and
- * GitHub **truncates the middle** of a job log — so dumping the whole capture
- * pushed the verdict out of view (2026-09-16: a red Gate on
- * `@picoaide/dsh-connectors` could not be diagnosed from the CI log at all;
- * every rerun "fixed" it and every rerun hid why). Print the verdict lines
- * first, then a bounded tail for context. `--full-output` restores the raw dump.
+ * 失败任务的有界报告 —— 实现已提升为**导出的唯一实现** {@link summarizeBoundedFailure}
+ * / {@link formatFailureReport}（2026-09-24 第十轮审计 C-08：`check-root-guards.mjs`
+ * 的 `summarize()` 只有「头 20 + 省略 + 尾 20」、没有判定行扫描，两条门禁必须共用
+ * 同一份口径）。这里保留薄包装，调用点语义不变。
  * @param output - the task's captured stdout+stderr.
  * @returns the bounded report.
  */
 function summarizeFailure(output) {
-  // A trailing newline is a separator, not a line: keeping the empty element
-  // made exactly-(MAX_FAILURE_LINES + MAX_TAIL_LINES)-line output take the
-  // summary branch (off-by-one).
-  const body = output.endsWith('\n') ? output.slice(0, -1) : output
-  const lines = body.split('\n')
-  if (lines.length <= MAX_FAILURE_LINES + MAX_TAIL_LINES) return output.trimEnd()
-  const tailStart = Math.max(0, lines.length - MAX_TAIL_LINES)
-  const flagged = []
-  for (let index = 0; index < lines.length && flagged.length < MAX_FAILURE_LINES; index += 1) {
-    if (FAILURE_LINE.test(lines[index])) flagged.push({ index, line: lines[index] })
-  }
-  // Verdict lines already shown above are not repeated inside the tail.
-  const flaggedInTail = new Set(flagged.filter(entry => entry.index >= tailStart).map(entry => entry.index))
-  const tail = lines.slice(tailStart).filter((_, offset) => !flaggedInTail.has(tailStart + offset))
-  const parts = [`(输出共 ${lines.length} 行;此处只打印判定行与末尾;完整输出用 --full-output 本地重跑)`]
-  if (flagged.length > 0) {
-    parts.push(`--- 失败相关行(最多 ${MAX_FAILURE_LINES} 行,按出现顺序) ---`, ...flagged.map(entry => entry.line))
-  } else {
-    parts.push('--- 未匹配到失败标记行(见下方末尾输出) ---')
-  }
-  parts.push(`--- 输出末尾(最后 ${tail.length} 行) ---`, ...tail)
-  return parts.join('\n')
+  return formatFailureReport(output)
 }
 
 /**
@@ -801,10 +1209,20 @@ function runTask(task) {
     child.stdout.on('data', chunk => { output += chunk })
     child.stderr.on('data', chunk => { output += chunk })
     child.on('error', error => {
-      resolve({ task, ok: false, ms: Date.now() - started, output: `${output}\n${String(error)}` })
+      // C-15（2026-09-24 第十轮审计）：`code`/`signal` 必须一路带到失败块标题，
+      // 否则「测试失败(1)」「用法错误(2)」「被信号杀(超时/OOM)」在日志里同形。
+      resolve({
+        task,
+        ok: false,
+        ms: Date.now() - started,
+        output: `${output}\n${String(error)}`,
+        code: null,
+        signal: null,
+        spawnError: String(error),
+      })
     })
-    child.on('close', code => {
-      resolve({ task, ok: code === 0, ms: Date.now() - started, output })
+    child.on('close', (code, signal) => {
+      resolve({ task, ok: code === 0, ms: Date.now() - started, output, code, signal })
     })
   })
 }
@@ -915,167 +1333,249 @@ async function runScheduler(tasks, limit, state) {
   }
 }
 
-const options = parseArgs(process.argv.slice(2))
-// A usage error sets exitCode 2 in parseArgs; honor it instead of flattening
-// every bad-argument case to 1 (2026-09-16 R9/R2 audit: the assignment was dead
-// code — `process.exit(1)` overrode it).
-if (options === null) process.exit(process.exitCode ?? 1)
 
-if (options.help) {
-  console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')
-  process.exit(0)
-}
+/**
+ * 编排器主体（`yarn check` / `check:fast` 的全部行为都在这里）。
+ *
+ * 为什么是一个函数而不是裸的顶层代码（2026-09-24 第十轮审计 C-08）：本文件同时是
+ * 「判定行扫描 + 有界输出」这条口径的**唯一实现**的宿主 —— `scripts/check-root-guards.mjs`
+ * 会 `import { formatFailureReport } from './check-workspaces.mjs'`（它自己那份
+ * `summarize()` 只有「头 20 + 省略 + 尾 20」，判定行落中段时在 CI 日志里出现 0 次）。
+ * **被 import 时必须零副作用**，否则根守卫一 import 就会递归跑一遍全量门禁。
+ * @param argv - 参数向量（缺省 = `process.argv.slice(2)`；测试可注入）。
+ */
+export async function main(argv = process.argv.slice(2)) {
+    const options = parseArgs(argv)
+  // A usage error sets exitCode 2 in parseArgs; honor it instead of flattening
+  // every bad-argument case to 1 (2026-09-16 R9/R2 audit: the assignment was dead
+  // code — `process.exit(1)` overrode it).
+  if (options === null) process.exit(process.exitCode ?? 1)
 
-// `advisory` 的登记制（2026-09-23 第六轮审计 R6-C-1）：配置非法时**拒绝调度**，
-// 绝不放行成"某个守卫变成只告警"。这条判据对 `--list` 也生效 —— 清单类判据
-// （`verify-check-workspaces.mjs` 等）正是靠 `--list` 读这张表的。
-{
-  const advisoryErrors = validateAdvisoryRegistry(GUARDS)
-  if (advisoryErrors.length > 0) {
-    for (const error of advisoryErrors) console.error(`check-workspaces: ${error}`)
-    console.error('check-workspaces: ADVISORY_REGISTRY 校验未通过 ⇒ 拒绝调度（退出码 2；退出码 0 不得代表一个被静音的门禁）')
+  if (options.help) {
+    console.log('用法: node scripts/check-workspaces.mjs [--changed [ref]] [--only a,b] [--concurrency N] [--list] [--no-guards] [--full-output]')
+    process.exit(0)
+  }
+
+  // `advisory` 的登记制（2026-09-23 第六轮审计 R6-C-1）：配置非法时**拒绝调度**，
+  // 绝不放行成"某个守卫变成只告警"。这条判据对 `--list` 也生效 —— 清单类判据
+  // （`verify-check-workspaces.mjs` 等）正是靠 `--list` 读这张表的。
+  {
+    const advisoryErrors = validateAdvisoryRegistry(GUARDS)
+    if (advisoryErrors.length > 0) {
+      for (const error of advisoryErrors) console.error(`check-workspaces: ${error}`)
+      console.error('check-workspaces: ADVISORY_REGISTRY 校验未通过 ⇒ 拒绝调度（退出码 2；退出码 0 不得代表一个被静音的门禁）')
+      process.exit(2)
+    }
+  }
+
+  // C-2（2026-09-23 三轮审计 P2）：调度/归属表的名字此前**没有任何校验** —— 打错一字符
+  // 就是"静默删掉一条边"或"check:fast 判 0 个包"。放在 `--list` 之前：列计划时就必须拦。
+  const scheduleProblems = scheduleTableProblems()
+  if (scheduleProblems.length > 0) {
+    console.error(`check-workspaces: 调度/归属表自检失败（${scheduleProblems.length} 处）—— 这些名字打错时失败形态全是静默的：`)
+    for (const problem of scheduleProblems) console.error(`  - ${problem}`)
     process.exit(2)
   }
-}
 
-// C-2（2026-09-23 三轮审计 P2）：调度/归属表的名字此前**没有任何校验** —— 打错一字符
-// 就是"静默删掉一条边"或"check:fast 判 0 个包"。放在 `--list` 之前：列计划时就必须拦。
-const scheduleProblems = scheduleTableProblems()
-if (scheduleProblems.length > 0) {
-  console.error(`check-workspaces: 调度/归属表自检失败（${scheduleProblems.length} 处）—— 这些名字打错时失败形态全是静默的：`)
-  for (const problem of scheduleProblems) console.error(`  - ${problem}`)
-  process.exit(2)
-}
-
-const envConcurrency = Number(process.env.CHECK_CONCURRENCY ?? '')
-const defaultConcurrency = Math.max(1, Math.min(4, availableParallelism()))
-const concurrency = options.concurrency ??
-  (Number.isFinite(envConcurrency) && envConcurrency > 0 ? envConcurrency : defaultConcurrency)
-
-let selectedNames = null
-if (options.only !== null) {
-  // 显式点名必须兑现:名字打错时旧行为是"筛出空集 → 0 个任务 → exit 0",
-  // 与"这些包都过了"无法区分(2026-09-17 审计 S15-4)。空值(--only 后面没跟
-  // 东西)同样按用法错误处理。
-  const known = new Set(PACKAGES.map(pkg => pkg.name))
-  const unknown = options.only.filter(name => !known.has(name))
-  if (options.only.length === 0) {
-    console.error('check-workspaces: --only 需要包名列表(逗号分隔),收到空值')
-    process.exit(2)
+  // 判定形态表 / ANSI 归一 / C1 剥离的**逐形态自检**（第十轮复审 W1 的 N4/N5）。
+  // 与上面两条同一取向：自检失败是配置错误（exit 2），不得退化成"跑一遍门禁、然后
+  // 失败详情整行看不见"—— 那种红在日志里与"没有失败"几乎同形。放在调度之前：
+  // 诊断面自己坏了的时候，跑再多任务也只是浪费 CI 分钟。第二个调用方是
+  // `check-root-guards.mjs`（docs-only PR 的唯一防线，那条路径上本函数不跑）。
+  {
+    const verdictSelftest = selfTestVerdictClassifier()
+    if (verdictSelftest.failures.length > 0 || verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+      for (const detail of verdictSelftest.failures) console.error(`check-workspaces: ${detail}`)
+      if (verdictSelftest.assertions < SELFTEST_VERDICT_ASSERTIONS) {
+        console.error(`check-workspaces: 判定形态自检只执行了 ${verdictSelftest.assertions} 条断言`
+          + `（期望 ≥ ${SELFTEST_VERDICT_ASSERTIONS}）⇒ 断言表被掏空。`)
+      }
+      console.error('  ⇒ 拒绝在"诊断面自己坏了"的情况下继续（形态表 / ANSI 归一 / C1 剥离失效时，'
+        + '失败详情会整行消失，而门禁仍然 EXIT=1）。')
+      process.exit(2)
+    }
   }
-  if (unknown.length > 0) {
-    console.error(`check-workspaces: --only 里有不存在的包:${unknown.join(', ')}`)
-    console.error(`可选:${[...known].join(', ')}`)
-    process.exit(2)
+
+  const envConcurrency = Number(process.env.CHECK_CONCURRENCY ?? '')
+  const defaultConcurrency = Math.max(1, Math.min(4, availableParallelism()))
+  const concurrency = options.concurrency ??
+    (Number.isFinite(envConcurrency) && envConcurrency > 0 ? envConcurrency : defaultConcurrency)
+
+  let selectedNames = null
+  if (options.only !== null) {
+    // 显式点名必须兑现:名字打错时旧行为是"筛出空集 → 0 个任务 → exit 0",
+    // 与"这些包都过了"无法区分(2026-09-17 审计 S15-4)。空值(--only 后面没跟
+    // 东西)同样按用法错误处理。
+    const known = new Set(PACKAGES.map(pkg => pkg.name))
+    const unknown = options.only.filter(name => !known.has(name))
+    if (options.only.length === 0) {
+      console.error('check-workspaces: --only 需要包名列表(逗号分隔),收到空值')
+      process.exit(2)
+    }
+    if (unknown.length > 0) {
+      console.error(`check-workspaces: --only 里有不存在的包:${unknown.join(', ')}`)
+      console.error(`可选:${[...known].join(', ')}`)
+      process.exit(2)
+    }
+    selectedNames = new Set(options.only)
+  } else if (options.changed !== null) {
+    const changed = await changedFiles(options.changed)
+    if (changed.error !== undefined) {
+      console.error(`check-workspaces: ${changed.error}`)
+      process.exit(2)
+    }
+    const files = changed.files
+    const { selected, global } = selectByChanges(files)
+    console.log(`check:fast — ${files.length} 个改动文件(相对 ${options.changed})→ ${global ? '全量(顶层文件改动)' : `${selected.length} 个包`}`)
+    // A zero-package selection (README / notes / .gitmodules changes) must still
+    // run the root guards: they read those very files (check:layout verifies
+    // README.i18n.yaml and .gitmodules against upstream.json). Exiting here was a
+    // false-green fast gate — CI full runs caught it only after the push.
+    if (selected.length === 0) console.log('check:fast — 没有包需要重跑;仍执行根守卫')
+    selectedNames = new Set(selected)
   }
-  selectedNames = new Set(options.only)
-} else if (options.changed !== null) {
-  const changed = await changedFiles(options.changed)
-  if (changed.error !== undefined) {
-    console.error(`check-workspaces: ${changed.error}`)
-    process.exit(2)
+
+  const wantsGuards = options.guards
+  const guards = wantsGuards ? GUARDS.map(guard => ({ ...guard })) : []
+  const selected = PACKAGES.filter(pkg => selectedNames === null || selectedNames.has(pkg.name))
+  const selectedSet = new Set(selected.map(pkg => pkg.name))
+  const packages = selected.map(pkg => ({
+    name: pkg.name,
+    // 未被选中的依赖不参与本轮调度(显式指定子集时,其产物由上一次全量门禁提供)
+    needs: pkg.needs.filter(name => selectedSet.has(name)),
+    args: ['workspace', pkg.name, 'run', pkg.script ?? 'check'],
+    firstWave: pkg.firstWave === true,
+  }))
+
+  if (options.list) {
+    for (const pkg of selected) {
+      console.log(`${pkg.name.padEnd(30)} needs: ${pkg.needs.join(', ') || '—'}`)
+    }
+    console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
+    const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
+    if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
+    // 登记表本身也是清单判据的输入（verify-check-workspaces 会与 check-root-guards --list
+    // 对拍这条）—— 空表要**显式**说出来，不能靠"没打印那一行"来推断。
+    console.log(`guards(advisory 登记制): ${ADVISORY_REGISTRY.length === 0
+      ? '无（每条守卫都必须拦门禁）'
+      : ADVISORY_REGISTRY.map(entry => `${entry.name}@${entry.expiresOn}`).join(', ')}`)
+    process.exit(0)
   }
-  const files = changed.files
-  const { selected, global } = selectByChanges(files)
-  console.log(`check:fast — ${files.length} 个改动文件(相对 ${options.changed})→ ${global ? '全量(顶层文件改动)' : `${selected.length} 个包`}`)
-  // A zero-package selection (README / notes / .gitmodules changes) must still
-  // run the root guards: they read those very files (check:layout verifies
-  // README.i18n.yaml and .gitmodules against upstream.json). Exiting here was a
-  // false-green fast gate — CI full runs caught it only after the push.
-  if (selected.length === 0) console.log('check:fast — 没有包需要重跑;仍执行根守卫')
-  selectedNames = new Set(selected)
+
+  const state = { results: [], failed: [], skipped: [], advisory: [], dropped: [], degraded: [] }
+  const startedAt = Date.now()
+  console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
+
+  // 阶段 1:desktop check 与根守卫并行。desktop 内部的 verify:profile 会按需构建
+  // 其余插件包的 lib/(增量 prebuild),此刻不跑那些包自己的 check,避免与它的
+  // profile 冒烟争抢同一份 lib/。firstWave 标记的包(无构建期依赖,如 vendored
+  // 插件的 test)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
+  // 2026-09-20：desktop **不再无条件进第一波** —— 它现在依赖 wasm-apps-host（见上），
+  // 必须由依赖感知调度排在依赖之后。第一波只剩「无构建期依赖」的包与根守卫。
+  const firstWave = [
+    ...guards,
+    ...packages.filter(task => task.firstWave === true),
+  ]
+  if (firstWave.length > 0) await runPool(firstWave, concurrency, state)
+
+  // 阶段 2:依赖感知调度(依赖失败的包直接跳过,不产生级联噪音)。
+  const rest = packages.filter(task => task.firstWave !== true)
+  if (rest.length > 0) await runScheduler(rest, concurrency, state)
+
+  const totalMs = Date.now() - startedAt
+  // C-13（2026-09-24 第十轮审计 F6）：`passed` 必须与「失败 / 告警」**互斥**。
+  // 旧式 `results.length - failed.length` 把 advisory 失败同时算进"通过"与"告警"
+  // （实测：17 个任务的摘要写成「17 通过、0 失败、1 告警」—— 17+1 > 计划 17）。
+  const passed = state.results.length - state.failed.length - state.advisory.length
+  // 摘要刻意把「计划 / 实跑」两个数都打出来：C-1 的失效形态正是"少跑了任务但计数看不出来"
+  // （`passed` 是按实际结果倒算的）。计划数 = 本轮真正排进计划的任务（守卫 + 选中的包）。
+  const planned = firstWave.length + rest.length
+  // 计数自洽（同一条审计的另一半）：四类归属（通过 / 失败 / 告警 / 跳过 / 未运行）必须
+  // 恰好覆盖计划数 —— 只改一侧（例如把某一类漏出摘要）就会在这里露出来。
+  const accounted = passed + state.failed.length + state.advisory.length + state.skipped.length + state.dropped.length
+  const summaryInconsistent = accounted !== planned
+  console.log(`──── 计划 ${planned} / 实跑 ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
+    + `${state.dropped.length > 0 ? `、${state.dropped.length} 未运行` : ''}`
+    + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory，**不算通过**)` : ''},总耗时 ${seconds(totalMs)}`)
+  if (summaryInconsistent) {
+    console.error(`✗ 摘要计数不自洽：通过 ${passed} + 失败 ${state.failed.length} + 告警 ${state.advisory.length}`
+      + ` + 跳过 ${state.skipped.length} + 未运行 ${state.dropped.length} = ${accounted} ≠ 计划 ${planned} —— `
+      + '计数口径被拆开了（漏掉某一类会让摘要看起来"总数正常"）。判据来源：C-13/C-1（2026-09-24 第十轮审计）。')
+  }
+
+  // C-16（2026-09-24 第十轮审计 F9）：`--changed` 零包 + `--no-guards` 曾经是
+  // 「计划 0 / 实跑 0 + EXIT=0」—— 与"所有任务都通过"不可区分。CI 侧由
+  // `check-workflows.mjs` 的 [SK-8] 静态策略钉住（门禁调用不得带参数），
+  // 但本地面会拿到一个绿色退出码 ⇒ 这里把它显式说出来。
+  if (planned === 0) {
+    console.error('⚠ check-workspaces: 本轮**计划 0 个任务** —— 退出码 0 只说明"没有任何任务失败"，'
+      + '**不**说明"门禁跑过了"：')
+    console.error('    · 没有包被选中（--changed 的改动集不在任何 PATH_OWNERS 前缀下；改 docs/ 之外的顶层文件会升格为全量），且')
+    console.error('    · 根守卫被 `--no-guards` 关掉了（那是本地调试通道：CI 的 `yarn check` 参数向量必须为空，见 [SK-8]）。')
+    console.error('    要一次真的门禁：`node scripts/check-workspaces.mjs`（或 `yarn check`）。')
+  }
+
+  // C-8（2026-09-23 三轮审计 P2）：**通过**的守卫里那些"跳过/降级"行必须进摘要。
+  // 只回显判定行（有界），绝不放整份日志 —— 本仓踩过"日志刷爆把失败详情挤出 GitHub
+  // 截断窗口"的坑。固定前缀 `[DEGRADED]` 供 CI 侧 grep。
+  if (state.degraded.length > 0) {
+    console.log(`\n[DEGRADED] ${state.degraded.length} 条"跳过/降级"提示（来自**通过**的任务；只回显判定行，不是日志 dump）`)
+    for (const entry of state.degraded) console.log(`[DEGRADED] ${entry.task}: ${entry.line}`)
+    console.log('[DEGRADED] 处置：这些行说明某条判据本次没有真的判 —— 要么修掉降级路径，要么在守卫里把它改成 fail-loud。')
+  }
+
+  if (state.dropped.length > 0) {
+    console.error(`\n✗ ${state.dropped.length} 个任务**未运行**（依赖成环 / 依赖永不满足）—— 既不算通过、也不算跳过：`)
+    for (const entry of state.dropped) {
+      console.error(`  - ${entry.task.name}（未满足的依赖：${entry.needs.join(', ') || '—'}）`)
+    }
+    console.error('  判据来源：C-1（2026-09-23 三轮审计 P1）。旧实现在此处静默 break，摘要按实际结果倒算')
+    console.error('  ⇒ 打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次都没跑。')
+  }
+
+  if (state.advisory.length > 0) {
+    // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
+    console.error(`\n⚠ ${state.advisory.length} 个 advisory 任务未通过（不拦门禁，但必须处置）：`)
+    for (const advisory of state.advisory) {
+      console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
+      console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
+    }
+    console.error('\n提示：advisory 条目必须先在 ADVISORY_REGISTRY 里登记（理由/批准人/到期日），')
+    console.error('     且 `scripts/check-root-guards.mjs` 只有在显式传 `--allow-advisory` 时才容忍它。')
+    console.error('     到期即失效：要么续期并写明理由，要么把该条目转回阻塞（删掉 `advisory: true`）。')
+  }
+
+  if (state.failed.length > 0 || state.dropped.length > 0 || summaryInconsistent) {
+    for (const failure of state.failed) {
+      // C-15（2026-09-24 第十轮审计 F8）：标题带**真实**退出码 / 信号（旧文案是字面量
+      // 「退出码非 0」，而 `code` 在 runTask 里被丢掉 ⇒ 137/2/1 全同形）。
+      console.error(`\n===== ${failure.task.name} 失败(${describeTaskExit(failure)}) =====`)
+      console.error(options.fullOutput ? failure.output.trimEnd() : summarizeFailure(failure.output))
+    }
+    process.exit(1)
+  }
+
 }
 
-const wantsGuards = options.guards
-const guards = wantsGuards ? GUARDS.map(guard => ({ ...guard })) : []
-const selected = PACKAGES.filter(pkg => selectedNames === null || selectedNames.has(pkg.name))
-const selectedSet = new Set(selected.map(pkg => pkg.name))
-const packages = selected.map(pkg => ({
-  name: pkg.name,
-  // 未被选中的依赖不参与本轮调度(显式指定子集时,其产物由上一次全量门禁提供)
-  needs: pkg.needs.filter(name => selectedSet.has(name)),
-  args: ['workspace', pkg.name, 'run', pkg.script ?? 'check'],
-  firstWave: pkg.firstWave === true,
-}))
-
-if (options.list) {
-  for (const pkg of selected) {
-    console.log(`${pkg.name.padEnd(30)} needs: ${pkg.needs.join(', ') || '—'}`)
+/** 本模块是"被直接执行"还是"被 import"（`check-root-guards.mjs` 只 import 函数）。 */
+function isEntryPoint() {
+  // Node ≥24.2 的原生判据（本仓 CI 与本地都是 24.x）：精确、无路径形态歧义。
+  if (typeof import.meta.main === 'boolean') return import.meta.main
+  // 回退（Node 22.19 线）：`process.argv[1]` 是**已解析**的入口绝对路径（Node 会解析
+  // 符号链接，除非显式 `--preserve-symlinks-main`）。两条比较都不成立 ⇒ 被 import。
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  const self = fileURLToPath(import.meta.url)
+  try {
+    if (resolve(entry) === self) return true
+  } catch {
+    // 比较失败只会让它落到下面的 realpath 比较，不改变结论方向
   }
-  console.log(`guards: ${guards.map(guard => guard.name).join(', ') || '—'}`)
-  const advisories = guards.filter(guard => guard.advisory === true).map(guard => guard.name)
-  if (advisories.length > 0) console.log(`guards(advisory,只告警不拦门禁): ${advisories.join(', ')}`)
-  // 登记表本身也是清单判据的输入（verify-check-workspaces 会与 check-root-guards --list
-  // 对拍这条）—— 空表要**显式**说出来，不能靠"没打印那一行"来推断。
-  console.log(`guards(advisory 登记制): ${ADVISORY_REGISTRY.length === 0
-    ? '无（每条守卫都必须拦门禁）'
-    : ADVISORY_REGISTRY.map(entry => `${entry.name}@${entry.expiresOn}`).join(', ')}`)
-  process.exit(0)
-}
-
-const state = { results: [], failed: [], skipped: [], advisory: [], dropped: [], degraded: [] }
-const startedAt = Date.now()
-console.log(`check — 并发 ${concurrency};按构建依赖分层(desktop 必须先产出 lib/types)`)
-
-// 阶段 1:desktop check 与根守卫并行。desktop 内部的 verify:profile 会按需构建
-// 其余插件包的 lib/(增量 prebuild),此刻不跑那些包自己的 check,避免与它的
-// profile 冒烟争抢同一份 lib/。firstWave 标记的包(无构建期依赖,如 vendored
-// 插件的 test)也放在这一波,把它们的耗时藏进 desktop 的长任务里。
-// 2026-09-20：desktop **不再无条件进第一波** —— 它现在依赖 wasm-apps-host（见上），
-// 必须由依赖感知调度排在依赖之后。第一波只剩「无构建期依赖」的包与根守卫。
-const firstWave = [
-  ...guards,
-  ...packages.filter(task => task.firstWave === true),
-]
-if (firstWave.length > 0) await runPool(firstWave, concurrency, state)
-
-// 阶段 2:依赖感知调度(依赖失败的包直接跳过,不产生级联噪音)。
-const rest = packages.filter(task => task.firstWave !== true)
-if (rest.length > 0) await runScheduler(rest, concurrency, state)
-
-const totalMs = Date.now() - startedAt
-const passed = state.results.length - state.failed.length
-// 摘要刻意把「计划 / 实跑」两个数都打出来：C-1 的失效形态正是"少跑了任务但计数看不出来"
-// （`passed` 是按实际结果倒算的）。计划数 = 本轮真正排进计划的任务（守卫 + 选中的包）。
-const planned = firstWave.length + rest.length
-console.log(`──── 计划 ${planned} / 实跑 ${state.results.length} 个任务:${passed} 通过、${state.failed.length} 失败、${state.skipped.length} 跳过`
-  + `${state.dropped.length > 0 ? `、${state.dropped.length} 未运行` : ''}`
-  + `${state.advisory.length > 0 ? `、${state.advisory.length} 告警(advisory)` : ''},总耗时 ${seconds(totalMs)}`)
-
-// C-8（2026-09-23 三轮审计 P2）：**通过**的守卫里那些"跳过/降级"行必须进摘要。
-// 只回显判定行（有界），绝不放整份日志 —— 本仓踩过"日志刷爆把失败详情挤出 GitHub
-// 截断窗口"的坑。固定前缀 `[DEGRADED]` 供 CI 侧 grep。
-if (state.degraded.length > 0) {
-  console.log(`\n[DEGRADED] ${state.degraded.length} 条"跳过/降级"提示（来自**通过**的任务；只回显判定行，不是日志 dump）`)
-  for (const entry of state.degraded) console.log(`[DEGRADED] ${entry.task}: ${entry.line}`)
-  console.log('[DEGRADED] 处置：这些行说明某条判据本次没有真的判 —— 要么修掉降级路径，要么在守卫里把它改成 fail-loud。')
-}
-
-if (state.dropped.length > 0) {
-  console.error(`\n✗ ${state.dropped.length} 个任务**未运行**（依赖成环 / 依赖永不满足）—— 既不算通过、也不算跳过：`)
-  for (const entry of state.dropped) {
-    console.error(`  - ${entry.task.name}（未满足的依赖：${entry.needs.join(', ') || '—'}）`)
+  try {
+    return realpathSync(entry) === realpathSync(self)
+  } catch {
+    return false
   }
-  console.error('  判据来源：C-1（2026-09-23 三轮审计 P1）。旧实现在此处静默 break，摘要按实际结果倒算')
-  console.error('  ⇒ 打印「N 个任务:N 通过、0 失败、0 跳过」并 EXIT=0，而那些包一次都没跑。')
 }
 
-if (state.advisory.length > 0) {
-  // advisory 不等于通过：把失败原文（有界）打出来，并明确它何时必须转阻塞。
-  console.error(`\n⚠ ${state.advisory.length} 个 advisory 任务未通过（不拦门禁，但必须处置）：`)
-  for (const advisory of state.advisory) {
-    console.error(`\n----- ${advisory.task.name}（advisory：${advisory.task.path ?? ''}）-----`)
-    console.error(options.fullOutput ? advisory.output.trimEnd() : summarizeFailure(advisory.output))
-  }
-  console.error('\n提示：advisory 条目必须先在 ADVISORY_REGISTRY 里登记（理由/批准人/到期日），')
-  console.error('     且 `scripts/check-root-guards.mjs` 只有在显式传 `--allow-advisory` 时才容忍它。')
-  console.error('     到期即失效：要么续期并写明理由，要么把该条目转回阻塞（删掉 `advisory: true`）。')
-}
-
-if (state.failed.length > 0 || state.dropped.length > 0) {
-  for (const failure of state.failed) {
-    console.error(`\n===== ${failure.task.name} 失败(退出码非 0) =====`)
-    console.error(options.fullOutput ? failure.output.trimEnd() : summarizeFailure(failure.output))
-  }
-  process.exit(1)
-}
+if (isEntryPoint()) await main()

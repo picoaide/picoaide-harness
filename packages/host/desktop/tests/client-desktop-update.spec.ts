@@ -11,6 +11,7 @@ import {
   updateActionFor,
 } from '../src/client/desktop-update.tsx'
 import { setActiveLocale } from '../src/client/locales.ts'
+import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 // The badge copy is locale-aware; every case below states the locale it asserts
 // in, and the reset keeps a failing English case from leaking into the next one.
@@ -92,7 +93,8 @@ describe('desktop update shared client store', () => {
 
     const unsubscribeFirst = subscribeDesktopUpdate(first)
     const unsubscribeSecond = subscribeDesktopUpdate(second)
-    await vi.waitFor(() => { expect(request).toHaveBeenCalledTimes(1) })
+    // 现象：首个订阅者触发一次轮询（假计时器 + fetch 替身）。
+    await vi.waitFor(() => { expect(request).toHaveBeenCalledTimes(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 一个窗口一条轮询:第二个订阅者不再开一个定时器。
     await vi.advanceTimersByTimeAsync(5_000)
@@ -116,7 +118,8 @@ describe('desktop update shared client store', () => {
     vi.stubGlobal('fetch', request)
     const listener = vi.fn()
     const unsubscribe = subscribeDesktopUpdate(listener)
-    await vi.waitFor(() => { expect(listener).toHaveBeenCalledTimes(1) })
+    // 现象：首个快照落地并通知订阅者。
+    await vi.waitFor(() => { expect(listener).toHaveBeenCalledTimes(1) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     // 快照没变就不再通知(5 秒一次的轮询不该让三个面反复重渲染)。
     await refreshDesktopUpdate(request)
@@ -154,13 +157,16 @@ describe('desktop update shared client store', () => {
     vi.stubGlobal('fetch', request)
 
     const unsubscribe = subscribeDesktopUpdate(() => {})
-    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.1') })
+    // 现象：首个快照落地（版本 2.3.1）。
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.1') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     documentStub.dispatchEvent(new Event('visibilitychange'))
-    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.2') })
+    // 现象：visibilitychange 后补取（版本 2.3.2）。
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.2') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
 
     ;(globalThis.window as unknown as EventTarget).dispatchEvent(new Event('focus'))
-    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.3') })
+    // 现象：window focus 后补取（版本 2.3.3）。
+    await vi.waitFor(() => { expect(readDesktopUpdate()?.availableVersion).toBe('2.3.3') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
     expect(request).toHaveBeenCalledTimes(3)
 
     // 窗口仍然隐藏时不必补取(切走那一刻本来就不需要新数据)。

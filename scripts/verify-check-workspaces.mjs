@@ -40,10 +40,14 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
+  writeFileSync,
+} from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -51,9 +55,14 @@ const subject = join(root, 'scripts', 'check-workspaces.mjs')
 const failures = []
 const scratch = []
 
-/** 自检下限（实测值见下方 banner；只允许被"变多"越过，变少 = 回归网被掏空）。 */
-const SELFTEST_MIN_CHECKS = 200
-const SELFTEST_MIN_SCENARIOS = 13
+/**
+ * 自检下限（实测值见下方 banner；只允许被"变多"越过，变少 = 回归网被掏空）。
+ *
+ * 2026-09-24 第十轮审计 C-09/C-10/C-12/C-13/C-15/C-16 补了一批判据之后，
+ * 实测 409 条断言 / 26 个合成树场景 ⇒ 下限同步抬高（删掉那批判据就会撞下限）。
+ */
+const SELFTEST_MIN_CHECKS = 380
+const SELFTEST_MIN_SCENARIOS = 24
 /**
  * 自检自身的**登记表**（2026-09-23 第五轮审计 R4-A N3）。
  *
@@ -574,7 +583,163 @@ function readSchedulerTables(source) {
   const owners = [...ownerBlock.matchAll(/\['([^']+)', '([^']+)'\]/gu)].map(match => ({ prefix: match[1], name: match[2] }))
   const depBlock = source.slice(source.indexOf('const DEPENDENTS = {'), source.indexOf('const GLOBAL_PREFIXES'))
   const depKeys = [...depBlock.matchAll(/^  '([^']+)': \[/gmu)].map(match => match[1])
-  return { entries, owners, depKeys }
+  return { entries, owners, depKeys, dependents: parseDependents(depBlock) }
+}
+
+/**
+ * 解析 `DEPENDENTS` 的键 → 值列表（2026-09-24 第十轮审计 C-11：`needs ↔ DEPENDENTS`
+ * 的双向一致判据需要读**值**，旧解析只读键）。
+ *
+ * 逐行解析（不是一条大正则）：条目形态既有单行也有多行数组，值里只会出现
+ * `'包名'` 这一种 token ⇒ `^  '<key>': [` 起一行，遇到 `]` 结束。
+ * @param depBlock - `const DEPENDENTS = {` 到 `const GLOBAL_PREFIXES` 之间的源码片段。
+ * @returns `[{ key, values }]`。
+ */
+function parseDependents(depBlock) {
+  const dependents = []
+  let current = null
+  for (const line of depBlock.split('\n')) {
+    const keyMatch = /^ {2}'([^']+)': \[(.*)$/u.exec(line)
+    let rest = line
+    if (keyMatch !== null) {
+      current = { key: keyMatch[1], values: [] }
+      dependents.push(current)
+      rest = keyMatch[2]
+    }
+    if (current === null) continue
+    for (const value of rest.matchAll(/'([^']+)'/gu)) current.values.push(value[1])
+    if (rest.includes(']')) current = null
+  }
+  return dependents
+}
+
+/**
+ * 从编排器源码里现读 **PACKAGES 的完整条目**（含多行条目：`script` / `firstWave`）。
+ *
+ * 与 {@link readSchedulerTables} 的分工：那一份只读**单行**条目（注入用锚点必须能单点替换），
+ * 这一份读全部条目（C-12/F5 的语义对拍：包目录、`package.json` 的 name、`script` 字段）。
+ * 条目体是 `{ … }` 且体内没有嵌套花括号 ⇒ 用 `\{([^{}]*)\}` 即可，注释里的花括号会被
+ * `name`/`dir` 双缺过滤掉。
+ * @param source - 编排器源码。
+ * @returns `[{ name, dir, script, needs }]`。
+ */
+function readPackageEntries(source) {
+  const block = source.slice(source.indexOf('const PACKAGES = ['), source.indexOf('const PATH_OWNERS = ['))
+  return [...block.matchAll(/\{([^{}]*)\}/gu)]
+    .map(match => {
+      const body = match[1]
+      const needsBlock = /needs:\s*\[([^\]]*)\]/u.exec(body)?.[1] ?? ''
+      return {
+        name: /name:\s*'([^']+)'/u.exec(body)?.[1] ?? null,
+        dir: /dir:\s*'([^']+)'/u.exec(body)?.[1] ?? null,
+        script: /script:\s*'([^']+)'/u.exec(body)?.[1] ?? 'check',
+        needs: [...needsBlock.matchAll(/'([^']+)'/gu)].map(need => need[1]),
+      }
+    })
+    .filter(entry => entry.name !== null && entry.dir !== null)
+}
+
+/**
+ * 展开 root `package.json` 的 workspaces 通配（本仓只用「一层星号」与「两层星号」两种形态，
+ * 例如 `community/<star>` 与 `packages/<star>/<star>` —— 星号在这里刻意不写成字面量，
+ * 免得块注释被 `*` + `/` 的序列提前闭合，那是本项目踩过三次的坑）。
+ */
+function expandWorkspaceGlobs(treeRoot, patterns) {
+  const found = new Set()
+  for (const pattern of patterns) {
+    let dirs = [treeRoot]
+    for (const segment of pattern.split('/')) {
+      const next = []
+      for (const dir of dirs) {
+        if (segment === '*') {
+          if (!existsSync(dir)) continue
+          for (const name of readdirSync(dir)) {
+            const full = join(dir, name)
+            try {
+              if (statSync(full).isDirectory()) next.push(full)
+            } catch {
+              // 读不到的条目不是 workspace 包，跳过
+            }
+          }
+        } else {
+          const full = join(dir, segment)
+          if (existsSync(full)) next.push(full)
+        }
+      }
+      dirs = next
+    }
+    for (const dir of dirs) {
+      if (existsSync(join(dir, 'package.json'))) found.add(resolve(dir))
+    }
+  }
+  return [...found]
+}
+
+/**
+ * 「`PACKAGES` 表 ↔ 磁盘上的 workspace 包」的**语义**对拍（2026-09-24 第十轮审计 C-12/F5）。
+ *
+ * 现场：回归门禁的合成树里 `corepack` 是桩、**没有任何真实包** ⇒ 「把 `@picoaide/dsh-cron`
+ * 从表里整条删掉」「把某包的 `script` 字段换掉」这类破坏**零新增失败**（子泳道差分实测
+ * 0 行）。合成树证明的是"编排器把 argv 发出去了"，证明不了"那个包真的存在/真的该在此时跑"。
+ * 所以这里对**真实树**（或任何给定树）做三条语义判据：
+ *   ① 每条 `PACKAGES` 的 `dir` 必须存在，且其 `package.json` 的 `name` 与表内的 `name` 一致；
+ *   ② 它的 `scripts[script ?? 'check']` 必须真的存在（`--full-output` 之外的**另一种**
+ *      `yarn workspace … run <script>` 静默失效形态：脚本名写错 ⇒ yarn 报用法错误，
+ *      而"表里少一个包"连错误都没有）；
+ *   ③ **双向**：磁盘上每个 workspace 包都必须在表里（删掉一个包 = 整包静默退出门禁）。
+ * @param source - 编排器源码。
+ * @param treeRoot - 要检查的树根。
+ * @returns 问题描述列表（空 = 通过）。
+ */
+function packageTableProblems(source, treeRoot) {
+  const problems = []
+  const entries = readPackageEntries(source)
+  if (entries.length === 0) return ['PACKAGES 表解析不出任何条目（解析锚点失效 ⇒ 这条判据会静默通过）']
+  const declared = new Map()
+  for (const entry of entries) {
+    declared.set(resolve(treeRoot, entry.dir), entry)
+    const dir = join(treeRoot, entry.dir)
+    if (!existsSync(dir)) {
+      problems.push(`${entry.name}: PACKAGES 的 dir ${JSON.stringify(entry.dir)} 在磁盘上不存在`)
+      continue
+    }
+    const pkgFile = join(dir, 'package.json')
+    if (!existsSync(pkgFile)) {
+      problems.push(`${entry.name}: ${entry.dir}/package.json 不存在`)
+      continue
+    }
+    let pkg
+    try {
+      pkg = JSON.parse(readFileSync(pkgFile, 'utf8'))
+    } catch (error) {
+      problems.push(`${entry.name}: ${entry.dir}/package.json 解析失败：${error.message}`)
+      continue
+    }
+    if (pkg.name !== entry.name) {
+      problems.push(`PACKAGES 表里的 name ${JSON.stringify(entry.name)} 与 ${entry.dir}/package.json 的 `
+        + `${JSON.stringify(pkg.name)} 不一致（表里的是名字的第二个真源，漂移 ⇒ 跑错包）`)
+    }
+    if (typeof pkg.scripts?.[entry.script] !== 'string' || pkg.scripts[entry.script].trim() === '') {
+      problems.push(`${entry.name}: ${entry.dir}/package.json 里没有 \`scripts.${entry.script}\` `
+        + `（PACKAGES 的 script 字段 = ${JSON.stringify(entry.script)}；门禁会以 yarn 用法错误收场，`
+        + '而"表里少一个包"连错误都没有）')
+    }
+  }
+  // ③ 双向：磁盘上的 workspace 包必须都在表里。
+  let workspaces = []
+  try {
+    workspaces = JSON.parse(readFileSync(join(treeRoot, 'package.json'), 'utf8')).workspaces ?? []
+  } catch (error) {
+    problems.push(`读不到 ${treeRoot}/package.json 的 workspaces：${error.message}`)
+    return problems
+  }
+  for (const dir of expandWorkspaceGlobs(treeRoot, workspaces)) {
+    if (!declared.has(resolve(dir))) {
+      problems.push(`磁盘上的 workspace 包 ${relative(treeRoot, dir)} 不在 PACKAGES 表里`
+        + ' ⇒ 它永远不会被门禁跑到（整包静默退出门禁）')
+    }
+  }
+  return problems
 }
 
 /** 在源码里做唯一替换（找不到/不唯一即抛：注入没生效却当成"守卫没抓住"是最坏的假结论）。 */
@@ -682,6 +847,39 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
         const { depKeys } = readSchedulerTables(source)
         const out = replaceOnce(source, `  '${depKeys[0]}': [`, `  '${depKeys[0]}zzz': [`)
         return { source: out, names: [`${depKeys[0]}zzz`] }
+      },
+    },
+    {
+      // 2026-09-24 第十轮审计 C-11/F7：两张表**语义脱钩**（单边改表）必须红。
+      // 子泳道实测：删掉一条 `DEPENDENTS` 反向条目 ⇒ `--changed` 静默少跑一个包，
+      // 而旧判据一行都不新增。注入形态 = 把某条 needs 边 `A → B` 的反向条目里的 `A` 删掉。
+      id: 'dependents-missing-edge',
+      label: 'DEPENDENTS 少一条反向边（needs 里有、反向表里没有 ⇒ check:fast 静默漏跑）',
+      must: /DEPENDENTS\[|DEPENDENTS 里没有/u,
+      mutate: source => {
+        const { entries, dependents } = readSchedulerTables(source)
+        let found = null
+        for (const entry of entries) {
+          for (const need of [...entry.needs.matchAll(/'([^']+)'/gu)].map(match => match[1])) {
+            const dep = dependents.find(candidate => candidate.key === need)
+            if (dep !== undefined && dep.values.includes(entry.name)) {
+              found = { pkg: entry.name, need, dep }
+              break
+            }
+          }
+          if (found !== null) break
+        }
+        if (found === null) throw new Error('源码里找不到可用于注入的 needs ↔ DEPENDENTS 组合')
+        const startMarker = `  '${found.need}': [`
+        const start = source.indexOf(startMarker)
+        const end = source.indexOf('],', start)
+        if (start < 0 || end < 0) throw new Error(`找不到 DEPENDENTS 里 ${found.need} 的条目块`)
+        const block = source.slice(start, end + 2)
+        const remaining = found.dep.values.filter(value => value !== found.pkg).map(value => `'${value}'`).join(', ')
+        return {
+          source: replaceOnce(source, block, `  '${found.need}': [${remaining}],`),
+          names: [found.need, found.pkg],
+        }
       },
     },
   ]
@@ -899,6 +1097,347 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
 }
 
 // ---------------------------------------------------------------------------
+// C-09 / C-10 / C-15 / C-16（2026-09-24 第十轮审计）：失败详情**必然可见**
+//
+// 现场（子泳道差分实测，三处变异的新增失败行数都是 **0**）：
+//   · C-09 形态 B：判定行预算（150 行）被含 `×` 的**进度噪声**先到先得吃满 ⇒
+//     真正的 `AssertionError` 一行不留（`[probe] progress ×N items scanned` 那种行）；
+//   · C-09 形态 A：判定行不匹配关键字且落在尾窗之外 ⇒ 一行不留，且输出写着
+//     「未匹配到失败标记行」，读者会以为"本来就没有判定行"；
+//   · C-10：本文件对「输出截断 / `--full-output` / 失败块标题」**零覆盖** ——
+//     把 `summarizeFailure` 掏空、把 `--full-output` 变成死开关，回归网一行都不新增。
+//
+// 这一段的判据形态是**差分法**（子泳道用的就是它）：受控 emitter 造的合成输出，
+// 逐条断言"该看见的行必须出现、不该出现的噪声必须不在判定段里、EXIT / 标题必须如实"。
+// 判据全部落在**真实编排器**上（合成树 + corepack 桩），不是对源码做正则。
+// ---------------------------------------------------------------------------
+
+/** 把合成树里某个任务的 corepack 桩改造成受控 emitter（只影响匹配到的 argv）。 */
+function emitterStub(packageName, body, exitCode = 1) {
+  return ['case "$*" in', `  *${packageName}*) ${body}; exit ${exitCode} ;;`, 'esac', ''].join('\n')
+}
+
+/** 从摘要行里读四类互斥计数（C-13 的口径判据靠它）。 */
+function parseCounts(output) {
+  const match = /计划 (\d+) \/ 实跑 (\d+) 个任务:(\d+) 通过、(\d+) 失败、(\d+) 跳过(?:、(\d+) 未运行)?(?:、(\d+) 告警)?/u
+    .exec(output)
+  if (match === null) return null
+  return {
+    planned: Number(match[1]),
+    ran: Number(match[2]),
+    passed: Number(match[3]),
+    failed: Number(match[4]),
+    skipped: Number(match[5]),
+    dropped: Number(match[6] ?? 0),
+    advisory: Number(match[7] ?? 0),
+  }
+}
+
+{
+  const pkg = 'dsh-memory-evolve'
+  const longBody = [
+    'i=0; while [ $i -lt 400 ]; do printf \'[probe] progress ×%s items scanned\\n\' "$i"; i=$((i+1)); done',
+    'printf \'AssertionError: expected 1 to be 2\\n\'',
+    'i=0; while [ $i -lt 2200 ]; do printf \'filler line %s\\n\' "$i"; i=$((i+1)); done',
+  ].join('; ')
+  /**
+   * 形态 B（C-09 原始现场）：**含 `×` 的进度噪声在前、真断言在中段**。
+   * 噪声共 400 行（> 150 行预算）、断言在第 401 行、输出共 2601 行 ⇒ 断言既不在
+   * 判定预算的"先到先得"里（旧口径会被噪声吃满），也在尾窗（最后 200 行）之外。
+   */
+  {
+    const { tree: noiseTree } = buildTree({ stubExtra: emitterStub(pkg, longBody, 1) })
+    const result = runSynthetic(noiseTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-09(形态B): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    check(output.includes('(输出共'), 'C-09(形态B): 超预算输出必须有截断横幅（接线问题）')
+    check(output.includes('AssertionError: expected 1 to be 2'),
+      'C-09(形态B): 中段（尾窗之外）的**真判定行**必须出现在摘要里 —— 旧口径会被 150 行进度噪声吃满预算，'
+      + `实际输出片段 ${JSON.stringify(output.slice(-600))}`)
+    // 判定行必须在"失败相关行"段内（不能只是恰好出现在尾窗里）。
+    const verdictSection = output.split('--- 失败相关行')[1]?.split('\n--- ')[0] ?? ''
+    check(verdictSection.includes('AssertionError: expected 1 to be 2'),
+      `C-09(形态B): 判定行必须在"失败相关行"段内（而不是碰巧落在尾窗），实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+    check(!verdictSection.includes('items scanned'),
+      `C-09(②): 进度噪声不得回显在判定段里（噪声不得占用判定行预算），实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+  }
+
+  /**
+   * 锚定噪声（`× N items scanned` 行首命中）也必须被摘出去、只计数不回显 ——
+   * 这是"行内匹配 ⇒ 行首锚定"这条修法的第二半：即使噪声**形态合法**，它也不是判定行。
+   */
+  {
+    const anchoredNoise = [
+      'i=0; while [ $i -lt 400 ]; do printf \'× %s items scanned\\n\' "$i"; i=$((i+1)); done',
+      'printf \'AssertionError: anchored-noise probe\\n\'',
+      'i=0; while [ $i -lt 2200 ]; do printf \'filler line %s\\n\' "$i"; i=$((i+1)); done',
+    ].join('; ')
+    const { tree: anchoredTree } = buildTree({ stubExtra: emitterStub(pkg, anchoredNoise, 1) })
+    const result = runSynthetic(anchoredTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-09(锚定噪声): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    const verdictSection = output.split('--- 失败相关行')[1]?.split('\n--- ')[0] ?? ''
+    check(verdictSection.includes('AssertionError: anchored-noise probe'),
+      `C-09(锚定噪声): 真断言必须进判定段（噪声不参与预算竞争），实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+    check(/另有 400 条"进度\/装饰噪声"行/u.test(output),
+      `C-09(锚定噪声): 必须如实报出"多少噪声行被排除在判定预算之外"，实际 ${JSON.stringify(output.slice(-500))}`)
+  }
+
+  /**
+   * **锚定**这一半必须被单独钉住：这些行含 `×` 但**不是**进度计数形态（`VERDICT_NOISE`
+   * 不匹配它们），所以"噪声降级"那一半救不了它们 —— 只有行首锚定才能把它们挡在判定预算之外。
+   * 旧口径（`(?:^|\s)(?:…|×|…)`）会把它们当判定行：300 行在前 ⇒ 150 行预算全被吃掉 ⇒
+   * 第 301 行的真断言一行不留。
+   */
+  {
+    const proseNoise = [
+      'i=0; while [ $i -lt 300 ]; do printf \'note: step ×%s done\\n\' "$i"; i=$((i+1)); done',
+      'printf \'AssertionError: anchor-only probe\\n\'',
+      'i=0; while [ $i -lt 300 ]; do printf \'note: step ×%s done\\n\' "$i"; i=$((i+1)); done',
+    ].join('; ')
+    const { tree: proseTree } = buildTree({ stubExtra: emitterStub(pkg, proseNoise, 1) })
+    const result = runSynthetic(proseTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-09(锚定): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    const verdictSection = output.split('--- 失败相关行')[1]?.split('\n--- ')[0] ?? ''
+    check(verdictSection.includes('AssertionError: anchor-only probe'),
+      'C-09(①锚定): 行内出现 `×` 的**自由文本**不得算判定行 —— 只有行首锚定才能让第 301 行的真断言'
+      + ` 不被 150 行预算吃掉，实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+    check(!verdictSection.includes('note: step ×'),
+      `C-09(①锚定): 自由文本不得占用判定预算，实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+  }
+
+  /**
+   * 形态 A：一条判定行都没锚到 ⇒ **不许静默给空段**，必须 fail-loud 打印「未找到判定行」，
+   * 并把未锚定的疑似错误行作为兜底回显（审计现场的那句就在这一档里）。
+   */
+  {
+    const unmatchable = [
+      'i=0; while [ $i -lt 1200 ]; do printf \'filler line %s\\n\' "$i"; i=$((i+1)); done',
+    ].join('; ')
+    const { tree: blankTree } = buildTree({ stubExtra: emitterStub(pkg, unmatchable, 1) })
+    const result = runSynthetic(blankTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-09(形态A): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    check(output.includes('未找到判定行'),
+      'C-09(形态A/④): 一条判定行都没匹配到时必须 fail-loud 打印「未找到判定行」，不得给空段或让人以为"本来就没有"')
+    check(output.includes('--full-output'), 'C-09(形态A/④): 必须给出 `--full-output` 的出路')
+    check(!/--- 失败相关行/u.test(output),
+      'C-09(形态A/④): 没有判定行时不得打印空的「失败相关行」段（那正是"静默空段"的形态）')
+
+    // 兜底档：未锚定的疑似错误行（审计现场原句）必须被回显出来。
+    const fallbackBody = [
+      'i=0; while [ $i -lt 1500 ]; do printf \'filler line %s\\n\' "$i"; i=$((i+1)); done',
+      'printf \'MUST-SURVIVE-VERDICT: Error: build step aborted at emit.mjs line twelve\\n\'',
+      'i=0; while [ $i -lt 1400 ]; do printf \'filler line %s\\n\' "$i"; i=$((i+1)); done',
+    ].join('; ')
+    const { tree: fallbackTree } = buildTree({ stubExtra: emitterStub(pkg, fallbackBody, 1) })
+    const fallbackResult = runSynthetic(fallbackTree, [])
+    const fallbackOutput = `${fallbackResult.stdout}${fallbackResult.stderr}`
+    check(fallbackResult.status === 1, `C-09(兜底): 目标包失败时门禁必须 exit 1（实际 ${fallbackResult.status}）`)
+    check(fallbackOutput.includes('未锚定的"疑似错误行"'),
+      `C-09(兜底): 未锚定的疑似错误行必须作为最后一档回显（审计现场那句在第 1501 行），实际 ${JSON.stringify(fallbackOutput.slice(-400))}`)
+    check(fallbackOutput.includes('MUST-SURVIVE-VERDICT: Error: build step aborted'),
+      'C-09(兜底): 兜底档必须真的把那行打出来（否则形态 A 仍然"一行都没有"）')
+  }
+
+  /** `--full-output` 必须真的绕过截断（旧实现里它是个死开关也无人发现 —— C-10）。 */
+  {
+    const { tree: fullTree } = buildTree({ stubExtra: emitterStub(pkg, longBody, 1) })
+    const result = runSynthetic(fullTree, ['--full-output'])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-10(--full-output): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    check(!output.includes('(输出共'),
+      `C-10(--full-output): 必须不带截断横幅，实际 ${JSON.stringify(output.slice(0, 200))}`)
+    check(output.includes('filler line 2199'),
+      'C-10(--full-output): 必须真的打印到输出末尾（第 2600 行附近），否则这个开关是死的')
+    check(output.split('\n').length > 1000,
+      `C-10(--full-output): 输出行数必须远大于截断体（实际 ${output.split('\n').length} 行）`)
+  }
+
+  /** 短输出必须**原样**打印（不许因为加了判定行扫描而改变字节：C-10 的反向负例）。 */
+  {
+    const shortBody = 'printf \'× suite > case\\n\'; printf \'AssertionError: short probe\\n\'; printf \'one more line\\n\''
+    const { tree: shortTree } = buildTree({ stubExtra: emitterStub(pkg, shortBody, 1) })
+    const result = runSynthetic(shortTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-10(短输出): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    check(!output.includes('(输出共'), 'C-10(短输出): 短输出不得出现截断横幅/判定段（行为必须与旧版逐字一致）')
+    check(output.includes('× suite > case') && output.includes('AssertionError: short probe'),
+      `C-10(短输出): 短输出必须原样打印，实际 ${JSON.stringify(output.slice(-400))}`)
+  }
+
+  /** C-15：失败块标题必须带**真实**退出码 / 信号（旧文案是字面量「退出码非 0」）。 */
+  {
+    const { tree: codeTree } = buildTree({ stubExtra: emitterStub(pkg, 'printf \'boom\\n\'', 7) })
+    const result = runSynthetic(codeTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-15(退出码): 目标包失败时门禁必须 exit 1（实际 ${result.status}）`)
+    check(output.includes(`===== ${pkg} 失败(退出码 7) =====`),
+      `C-15(退出码): 失败块标题必须带真实退出码 7，实际 ${JSON.stringify(output.split('\n').filter(line => line.startsWith('=====')).slice(0, 3))}`)
+    check(!output.includes('失败(退出码非 0)'),
+      'C-15(退出码): 不得再出现字面量「退出码非 0」（那是旧实现丢弃 code 的形态）')
+  }
+  {
+    const { tree: signalTree } = buildTree({ stubExtra: emitterStub(pkg, 'kill -TERM $$', 0) })
+    const result = runSynthetic(signalTree, [])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 1, `C-15(信号): 被信号杀死的任务必须让门禁 exit 1（实际 ${result.status}）`)
+    check(output.includes(`===== ${pkg} 失败(信号 SIGTERM`),
+      `C-15(信号): 信号形态必须如实打印（旧文案分不出 137 与 1），实际 ${JSON.stringify(output.split('\n').filter(line => line.startsWith('=====')).slice(0, 3))}`)
+  }
+
+  /**
+   * C-13：advisory 失败**不得**被计入"通过"（旧式 `results.length - failed.length` 会让
+   * 同一条任务既进"通过"又进"告警"：实测摘要写成「17 通过、0 失败、1 告警」）。
+   */
+  {
+    let mutated
+    try {
+      mutated = replaceOnce(readFileSync(subject, 'utf8'),
+        "{ name: 'check:layout', args: ['run', 'check:layout']",
+        "{ advisory: true, name: 'check:layout', args: ['run', 'check:layout']")
+      mutated = replaceOnce(mutated, 'const ADVISORY_REGISTRY = []',
+        "const ADVISORY_REGISTRY = [\n  { name: 'check:layout', reason: 'C-13 计数口径副本探针',"
+        + " approvedBy: 'verify-check-workspaces', expiresOn: '2099-12-31' },\n]")
+    } catch (error) {
+      fail(`C-13: 注入失败 —— ${error.message}`)
+      mutated = null
+    }
+    if (mutated !== null) {
+      const { tree: advisoryTree } = buildTree({
+        mutate: () => mutated,
+        stubExtra: ['case "$*" in', '  *check:layout*) exit 3 ;;', 'esac', ''].join('\n'),
+      })
+      const result = runSynthetic(advisoryTree, [])
+      const output = `${result.stdout}${result.stderr}`
+      check(result.status === 0, `C-13: advisory 失败不拦门禁 ⇒ 必须 exit 0（实际 ${result.status}）：${output.slice(-300)}`)
+      const counts = parseCounts(output)
+      check(counts !== null, `C-13: 摘要必须能被解析出四类计数，实际 ${JSON.stringify(output.split('\n').find(line => line.startsWith('────')))}`)
+      if (counts !== null) {
+        check(counts.advisory === 1, `C-13: 必须报出 1 个 advisory（实际 ${counts.advisory}）`)
+        check(counts.passed === counts.planned - 1,
+          `C-13: advisory 失败**不得**计入"通过" —— 计划 ${counts.planned} 个任务里有 1 个 advisory 失败，`
+          + `通过必须为 ${counts.planned - 1}（实际 ${counts.passed}；旧式 results.length - failed.length 会给出 ${counts.planned}）`)
+        check(counts.passed + counts.failed + counts.skipped + counts.dropped + counts.advisory === counts.planned,
+          `C-13: 四类计数必须恰好覆盖计划数（通过 ${counts.passed} + 失败 ${counts.failed} + 跳过 ${counts.skipped}`
+          + ` + 未运行 ${counts.dropped} + 告警 ${counts.advisory} ≠ 计划 ${counts.planned}）`)
+      }
+      check(output.includes('不算通过'),
+        `C-13: 摘要必须显式写明 advisory **不算通过**（口径自洽），实际 ${JSON.stringify(output.split('\n').find(line => line.startsWith('────')))}`)
+      check(output.includes('1 个 advisory 任务未通过'),
+        'C-13: advisory 失败仍必须进「必须处置」段（只告警不等于静默）')
+    }
+  }
+
+  /**
+   * C-16：`--changed` 零包 + `--no-guards` = 「计划 0 / 实跑 0 + EXIT=0」，与"所有任务都通过"
+   * 不可区分。CI 侧由 `[SK-8]` 静态策略钉住，本地面必须至少**显式告警**。
+   */
+  {
+    const { tree: zeroTree } = buildTree()
+    mkdirSync(join(zeroTree, 'docs'), { recursive: true })
+    writeFileSync(join(zeroTree, 'docs', 'note.md'), '# note\n')
+    const result = runSynthetic(zeroTree, ['--changed', 'HEAD', '--no-guards'])
+    const output = `${result.stdout}${result.stderr}`
+    check(result.status === 0, `C-16: 零包 + --no-guards 仍是 EXIT=0（本地面不改退出码，实际 ${result.status}）`)
+    const counts = parseCounts(output)
+    check(counts !== null && counts.planned === 0, `C-16: 这条形态必须真的是"计划 0 个任务"，实际 ${JSON.stringify(output.split('\n').find(line => line.startsWith('────')))}`)
+    check(output.includes('计划 0 个任务') && output.includes('退出码 0 只说明'),
+      `C-16: 零任务必须打印**显式告警**（说明"退出码 0 ≠ 门禁跑过了"），实际 ${JSON.stringify(output.slice(-500))}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// C-12/F5（2026-09-24 第十轮审计）：**真实树**的包表语义对拍（合成树夹具覆盖不到的那一半）
+//
+// 现场：合成树里 `corepack` 是桩、没有任何真实包 ⇒ 「把 `@picoaide/dsh-cron` 从 PACKAGES
+// 表里整条删除（整包静默退出门禁）」「把某包的 `script` 字段换掉」两条变异的新增失败行数
+// 都是 **0**。这一段把判据从"argv 发出去了"推进到**语义**：包目录/名字/脚本必须真的存在，
+// 且磁盘上的每个 workspace 包都必须在表里。
+//
+// 测法：判据函数 `packageTableProblems(source, treeRoot)` 是纯函数（源码 + 树根 → 问题清单）
+// ⇒ ① 真实树必须**零问题**（正控）；② 一棵按真实表搭出来的**合成包树**上做注入，逐条必红。
+// ---------------------------------------------------------------------------
+{
+  const realSource = readFileSync(subject, 'utf8')
+  const realProblems = packageTableProblems(realSource, root)
+  check(realProblems.length === 0,
+    `C-12(正控): 真实树的 PACKAGES 表必须与磁盘一致，实际问题：${realProblems.slice(0, 4).join(' | ')}`)
+
+  // 按真实表搭一棵"包齐全"的合成树（package.json 用真实 name + 真实 script 字段）。
+  const pkgTree = tempDir('package-table-tree-')
+  writeFileSync(join(pkgTree, 'package.json'),
+    `${JSON.stringify({ name: 'synthetic-packages', private: true, workspaces: ['packages/*/*', 'community/*'] }, null, 2)}\n`)
+  const realEntries = readPackageEntries(realSource)
+  check(realEntries.length >= 10, `C-12(接线问题): 从编排器源码里只读出 ${realEntries.length} 个 PACKAGES 条目`)
+  for (const entry of realEntries) {
+    mkdirSync(join(pkgTree, entry.dir), { recursive: true })
+    writeFileSync(join(pkgTree, entry.dir, 'package.json'),
+      `${JSON.stringify({ name: entry.name, version: '0.0.0', scripts: { [entry.script]: 'node noop.mjs' } }, null, 2)}\n`)
+  }
+  check(packageTableProblems(realSource, pkgTree).length === 0,
+    `C-12(接线问题): 按真实表搭出来的合成包树必须零问题，实际 ${packageTableProblems(realSource, pkgTree).slice(0, 3).join(' | ')}`)
+
+  // ① 整包退出门禁（子泳道的 M3 形态）：从表里删掉一个包，磁盘上仍在。
+  {
+    const victim = realEntries.find(entry => entry.script === 'check') ?? realEntries[0]
+    const quoted = victim.needs.map(need => `'${need}'`).join(', ')
+    const singleLine = `{ name: '${victim.name}', dir: '${victim.dir}', needs: [${quoted}] }`
+    let mutated = null
+    try {
+      mutated = replaceOnce(realSource, singleLine, '')
+    } catch {
+      // 多行条目（`script` / `firstWave` 那条）：按 `{` … `},` 的块整体删掉。
+      const start = realSource.indexOf(`{\n    name: '${victim.name}'`)
+      const end = realSource.indexOf('},', start)
+      if (start >= 0 && end > start) mutated = realSource.slice(0, start) + realSource.slice(end + 2)
+    }
+    check(mutated !== null && mutated !== realSource, `C-12(M3 注入): 没能从 PACKAGES 里删掉 ${victim.name}（注入锚点失效）`)
+    if (mutated !== null) {
+      const problems = packageTableProblems(mutated, pkgTree)
+      check(problems.some(problem => problem.includes(victim.dir)),
+        `C-12(M3): 把一个包从 PACKAGES 里整条删掉必须判红（它在磁盘上但不在表里 = 整包静默退出门禁），`
+        + `实际 ${JSON.stringify(problems.slice(0, 3))}`)
+    }
+  }
+
+  // ② `script` 字段写错（子泳道的 M7 形态）：包还在表里，但那个脚本不存在。
+  {
+    const withScript = realEntries.find(entry => entry.script !== 'check') ?? realEntries[0]
+    // 锚点必须带 `dir:` 一起（`script: 'test'` 这种短串在源码注释里也会出现 ⇒ 不唯一）。
+    const needle = `dir: '${withScript.dir}',\n    needs: [],\n    script: '${withScript.script}',`
+    let mutated = null
+    try {
+      mutated = replaceOnce(realSource, needle, needle.replace(`script: '${withScript.script}'`, "script: 'definitely-not-a-script'"))
+    } catch (error) {
+      fail(`C-12(M7 注入): ${error.message}`)
+    }
+    if (mutated !== null) {
+      const problems = packageTableProblems(mutated, pkgTree)
+      check(problems.some(problem => problem.includes('definitely-not-a-script')),
+        `C-12(M7): 把 script 字段换成一个不存在的脚本必须判红，实际 ${JSON.stringify(problems.slice(0, 3))}`)
+    }
+  }
+
+  // ③ 目录打错（子泳道的 M8 形态）：这条是既有判据（`--list` 会红），这里保住它。
+  {
+    const dirVictim = realEntries[0]
+    let mutated = null
+    try {
+      mutated = replaceOnce(realSource, `dir: '${dirVictim.dir}'`, `dir: '${dirVictim.dir}-typo'`)
+    } catch (error) {
+      fail(`C-12(M8 注入): ${error.message}`)
+    }
+    if (mutated !== null) {
+      const problems = packageTableProblems(mutated, pkgTree)
+      check(problems.some(problem => problem.includes(`${dirVictim.dir}-typo`)),
+        `C-12(M8): dir 打错必须判红（不存在 + 该包不在表里两条之一），实际 ${JSON.stringify(problems.slice(0, 3))}`)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 六处形态①④：跨守卫的"缺输入 / 空输入"必须有**具名**判据（合成正/负例）
 //
 // ① `verify-licenses`（桌面包的许可证守卫）空生产依赖树 ⇒ 旧实现打印
@@ -958,6 +1497,48 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
   check(patchesOutput.includes('缺少解压 yarn cache 的依赖目标'),
     `形态④: 必须给出具名原因，实际 ${JSON.stringify(patchesOutput.slice(0, 300))}`)
   check(!/^\s+at .*\(node:/mu.test(patchesOutput), `形态④: 不得以未捕获异常栈收尾，实际 ${JSON.stringify(patchesOutput.slice(0, 300))}`)
+}
+
+/**
+ * 从 `check-root-guards.mjs` 的源码里解析 `REGISTERED_GUARD_ENTRIES`（**只读**别人的文件）。
+ *
+ * 契约（2026-09-24 主控协调的 F1 ↔ F2 接缝）：F1 泳道给每个条目加一个
+ * `digest: '<sha256 hex>'` 字段。本函数**容忍**取值形态（可带 `sha256:` 前缀、大小写任意），
+ * 但 `digest` 字段**缺失**一律 fail-loud（见下面的判据）—— 因为"没有摘要"正是 C-06 的现场：
+ * 登记只到路径一级，把守卫脚本内容掏空或换成同名符号链接之后运行器照报 `✓`。
+ * @param source - `scripts/check-root-guards.mjs` 的源码文本。
+ * @returns `[{ name, script, digest }]`（`digest` 为 `null` 表示字段缺失）。
+ */
+function parseRegisteredGuardEntries(source) {
+  const anchor = source.indexOf('const REGISTERED_GUARD_ENTRIES = new Map([')
+  if (anchor < 0) return null
+  const end = source.indexOf('\n])', anchor)
+  if (end < 0) return null
+  const block = source.slice(anchor, end)
+  return [...block.matchAll(/\['([^']+)',\s*\{([\s\S]*?)\}\]/gu)].map(match => {
+    const body = match[2]
+    const digestRaw = /digest:\s*'([^']*)'/u.exec(body)?.[1] ?? null
+    return {
+      name: match[1],
+      script: /script:\s*'([^']+)'/u.exec(body)?.[1] ?? null,
+      digest: digestRaw === null ? null : digestRaw.trim().replace(/^sha256:/iu, '').toLowerCase(),
+    }
+  })
+}
+
+/** `node scripts/x.mjs` / `bash scripts/x.sh` → `scripts/x.mjs`（登记表里只有这两种形态）。 */
+function guardScriptPath(script) {
+  const match = /^(?:node|bash)\s+(\S+)$/u.exec(script ?? '')
+  return match === null ? null : match[1]
+}
+
+/** 文件的 sha256（十六进制小写）；读不到返回 null。 */
+function sha256File(path) {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex')
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,6 +1655,10 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     ['check:no-real-domains', 'node scripts/check-no-real-domains.mjs'],
     ['check:wasm-client-only', 'bash scripts/verify-wasm-client-only.sh'],
     ['check:integration-tests', 'node scripts/check-integration-tests.mjs'],
+    // 2026-09-24 第十轮审计 C-06（P2）：F1 泳道新增的守卫 —— 它把「守卫脚本的**内容**」
+    // 也变成判据（`digest` = sha256）。本表是**第二份独立登记**（不是 import F1 的表），
+    // 两处同时被改才会静默；下面还有一条独立的"复算摘要对拍"。
+    ['check:guard-parser-integrity', 'node scripts/check-guard-parser-integrity.mjs'],
   ])
   const listedGuards = new Set([...guardNames, ...advisoryNames])
   for (const [name, script] of REGISTERED_GUARD_SCRIPTS) {
@@ -1096,6 +1681,85 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
       + ' ⇒ 新增根守卫必须同时登记进本文件的 REGISTERED_GUARD_SCRIPTS 与 '
       + 'scripts/check-root-guards.mjs 的 REGISTERED_GUARD_ENTRIES（两张表独立对拍才有意义）',
   )
+
+  // -------------------------------------------------------------------------
+  // C-06（2026-09-24 第十轮审计 P2）：登记表止步于**路径**，脚本**内容**没有判据。
+  //
+  // 现场（副本实测）：把已登记的 `scripts/check-theme-tokens.mjs` 内容整体换成
+  // `process.exit(0)`（或换成同名符号链接 → 另一个能通过的守卫）之后，
+  // `check-root-guards.mjs` 照报「16 个根守卫：8 通过」，`✓ check:theme-tokens`；
+  // 而本文件对这次替换的命中数是 **0**（两份登记表都只比 `script` 字符串）。
+  //
+  // 判据（**只读** F1 的文件，不改它）：读 `check-root-guards.mjs` 的
+  // `REGISTERED_GUARD_ENTRIES` → 逐条拿 `script` 路径 → 复算真实脚本的 sha256 →
+  // 与登记项里的 `digest` 对拍；同时断言路径不是**符号链接**（`lstatSync`）。
+  //
+  // ⚠️ `digest` 字段缺失 = **红**（fail-loud）：那正是"判据缺一颗牙"的形态，
+  // 而不是"这条判据不适用"。真要看摘要：`node scripts/verify-check-workspaces.mjs`
+  // 会打印每条守卫的 `path=… sha256=…`，把它填进 F1 的表即可（摘要进 diff 才算评审面）。
+  // -------------------------------------------------------------------------
+  {
+    const rootGuardsSource = readFileSync(join(root, 'scripts', 'check-root-guards.mjs'), 'utf8')
+    const registered = parseRegisteredGuardEntries(rootGuardsSource)
+    check(registered !== null,
+      'C-06(接线问题): 解析不出 check-root-guards.mjs 的 REGISTERED_GUARD_ENTRIES —— 本判据的锚点失效，'
+      + '请同步 parseRegisteredGuardEntries（不要直接删掉这段）')
+    if (registered !== null) {
+      check(registered.length >= REGISTERED_GUARD_SCRIPTS.size,
+        `C-06(接线问题): F1 的登记表只有 ${registered.length} 条，少于本文件的独立登记表 ${REGISTERED_GUARD_SCRIPTS.size} 条`)
+      const registeredNames = new Set(registered.map(entry => entry.name))
+      const registeredScripts = new Map(registered.map(entry => [entry.name, entry.script]))
+      // 两张独立登记表必须一致（名字集合 + 脚本体逐字）。
+      const missingHere = registered.filter(entry => !REGISTERED_GUARD_SCRIPTS.has(entry.name)).map(entry => entry.name)
+      check(missingHere.length === 0,
+        `C-06: F1 登记表里有本文件未登记的守卫：${missingHere.join(', ')} ⇒ 两处同时被改才会静默，别让它们漂移`)
+      const missingThere = [...REGISTERED_GUARD_SCRIPTS.keys()].filter(name => !registeredNames.has(name))
+      check(missingThere.length === 0,
+        `C-06: 本文件登记了但 F1 的 REGISTERED_GUARD_ENTRIES 里没有：${missingThere.join(', ')}`)
+      const scriptMismatch = [...REGISTERED_GUARD_SCRIPTS]
+        .filter(([name, script]) => registeredScripts.has(name) && registeredScripts.get(name) !== script)
+      check(scriptMismatch.length === 0,
+        `C-06: 两份登记表的脚本体不一致：${scriptMismatch.map(([name, script]) => `${name} 本文件=${JSON.stringify(script)} F1=${JSON.stringify(registeredScripts.get(name))}`).join('；')}`)
+      const digestMissing = registered.filter(entry => entry.digest === null).map(entry => entry.name)
+      check(digestMissing.length === 0,
+        `C-06: check-root-guards.mjs 的登记表里这些条目**没有内容摘要字段**（\`digest\`）：${digestMissing.join(', ')}`
+        + ' ⇒ 登记只到路径一级：把守卫脚本内容掏空（`process.exit(0)`）或换成同名符号链接之后，'
+        + '运行器照报 `✓ <名字>`，两条门禁都看不出区别（C-06 的两种实做形态）。'
+        + ' 请在 F1 侧的 REGISTERED_GUARD_ENTRIES 每个条目上补 `digest`（脚本 sha256）；'
+        + '本文件会打印每条守卫的 path/sha256 供填入。')
+      let verified = 0
+      for (const entry of registered) {
+        const relativePath = guardScriptPath(entry.script)
+        if (relativePath === null) {
+          check(false, `C-06: ${entry.name} 的 script 形态不认得（${JSON.stringify(entry.script)}）—— 登记表只允许 \`node <file>\` / \`bash <file>\``)
+          continue
+        }
+        const scriptPath = join(root, relativePath)
+        if (!existsSync(scriptPath)) {
+          check(false, `C-06: ${entry.name} 登记的脚本 ${relativePath} 不存在`)
+          continue
+        }
+        // 符号链接形态（C-06 的 C2）：`lstat` 看的就是 inode 本身。
+        check(!lstatSync(scriptPath).isSymbolicLink(),
+          `C-06: ${entry.name} 的脚本 ${relativePath} 是**符号链接** —— 判据读的是名字、执行的是 inode 指向的字节；`
+          + '守卫脚本必须是真的普通文件（替换成链接后运行器照报 `✓`）')
+        const actual = sha256File(scriptPath)
+        if (entry.digest === null) continue
+        // 占位符（不是 64 位 hex）也要说清楚：F1 落盘时的中间态最容易被误读成"内容被换过"。
+        const placeholder = !/^[0-9a-f]{64}$/u.test(entry.digest)
+        check(actual === entry.digest,
+          `C-06: ${entry.name} 的脚本内容摘要与登记值不符（${relativePath}）：`
+          + `登记 ${entry.digest} / 实际 ${actual}`
+          + `${placeholder ? '（登记值不是 64 位小写 hex ⇒ 看起来还是占位符，需要用真实摘要替换）' : ''}`
+          + ' —— 掏空或替换守卫脚本必须进 diff（这就是本判据的意义）。'
+          + ` 确认本次改动是有意的之后，把 F1 表里的 \`digest\` 更新为 ${actual}。`)
+        verified += 1
+        console.log(`verify-check-workspaces: C-06 摘要对拍 ${entry.name} path=${relativePath} sha256=${actual} ✓`)
+      }
+      check(verified === registered.length,
+        `C-06: 只对拍成功 ${verified}/${registered.length} 条守卫摘要（缺 digest 的条目见上一条）`)
+    }
+  }
 
   // -------------------------------------------------------------------------
   // advisory **登记制**的第二条独立通道（2026-09-23 第六轮审计 R6-C-1）。
@@ -1532,6 +2196,324 @@ if (!selfCheckProbeChild) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// C-08 接线 / ANSI 归一化 / 判定形态补表（2026-09-24 第十轮复审 V1 的 P1×2 + P3-D1）
+//
+// 三条现场（都来自真实 CI，不是构造出来的）：
+//   · **C-08**：`check-root-guards.mjs` 的失败摘要曾是自己那份"头 20 + 省略 + 尾 20"，
+//     判定行落在中段时在日志里出现 **0** 次（独立探针实测）；编排器侧抽出的共享实现
+//     `formatFailureReport` 对同一段输出保留 **1** 次 —— 但 F1 侧从未接线（`grep -c
+//     formatFailureReport scripts/check-root-guards.mjs` = 0）。
+//   · **ANSI**：CI 里 vitest 输出带颜色（`\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m …`、
+//     `\x1b[31m×\x1b[39m`），而判定行匹配**锚定在行首** ⇒ 彩色的判定行一条都不匹配，
+//     编排器打印「一条锚定判定行都没有匹配到」；本地无 TTY ⇒ 无 ANSI ⇒ 本地绿、CI 瞎。
+//   · **P3-D1**：四类真实失败行形态（go `--- FAIL:`/`panic:`、`--reporter=json` 的单行
+//     JSON、eslint `12:5  error …`）不在锚定表里 ⇒ 落在头 150/尾 200 窗外时原行丢失。
+//
+// 判据形态：
+//   ① **运行级**（probe tree：真 `check-root-guards.mjs` + 真 `check-workspaces.mjs` 的
+//      实现 + corepack 桩）—— 守卫失败 + 判定行埋在中段 ⇒ 判定行必须出现 ≥1 次；
+//   ② **单元级**（import 真模块）—— 彩色输出与去色输出的判定行集合必须相同；四种形态
+//      逐条锚定；被 import 时零副作用（两个脚本都必须如此）。
+// 变异（拆掉修复 ⇒ 本段必红）：把 `check-root-guards.mjs` 换回本地 `summarize()`、
+// 拿掉 ANSI 剥离、从 VERDICT_LINE 里删掉任一形态、删掉 COREPACK_HOME 的离线指引。
+// ---------------------------------------------------------------------------
+
+/**
+ * 从门禁输出里取出**判定段**的正文（判据：本段的判定行可能是 `--- FAIL: …` 这类
+ * **以 `--- ` 开头**的形态 —— 用 `split('\n--- ')` 会把它自己当成段边界，
+ * 于是"形态没锚定"变成假红。这里只在**已知的段头**上切分）。
+ * @param output - 门禁进程的 stdout+stderr。
+ * @returns 判定段正文（没有该段时返回空串）。
+ */
+function verdictSectionOf(output) {
+  const rest = output.split('--- 失败相关行')[1]
+  if (rest === undefined) return ''
+  const next = rest.search(/\n--- (?=输出末尾|另有 |其它疑似错误行|兜底:|判定行预算已用尽)/u)
+  return next < 0 ? rest : rest.slice(0, next)
+}
+
+/** probe tree 里那个"合成守卫"的名字（必须同时出现在 GUARDS 表 / 登记表 / package.json）。 */
+const PROBE_GUARD_NAME = 'check:probe-verdict'
+/** 中段判定行的 marker（只出现在探针输出里）。 */
+const PROBE_VERDICT_MARKER = 'R10G1-C08-MARKER'
+/** 探针树里 corepack 桩的行为：合成守卫打印"长噪声 + 中段判定行 + 长噪声"并退出 1。 */
+const PROBE_STUB_BODY = [
+  `  *${PROBE_GUARD_NAME}*)`,
+  '    i=0; while [ $i -lt 200 ]; do printf \'probe noise line %s\\n\' "$i"; i=$((i+1)); done',
+  `    printf 'AssertionError: ${PROBE_VERDICT_MARKER}\\n'`,
+  '    i=0; while [ $i -lt 400 ]; do printf \'probe tail line %s\\n\' "$i"; i=$((i+1)); done',
+  '    exit 1 ;;',
+  'esac',
+  'exit 0',
+  '',
+].join('\n')
+
+/** 从 `check-root-guards.mjs` 源码里解析下限守卫表（探针树必须把它们都放进去，否则 exit 2）。 */
+function parseMinimumRequiredGuards(source) {
+  const block = /const MINIMUM_REQUIRED_GUARDS = \[([\s\S]*?)\]/u.exec(source)?.[1]
+  if (block === undefined) return null
+  return [...block.matchAll(/'([^']+)'/gu)].map(match => match[1])
+}
+
+/** 把编排器副本里的 `GUARDS` / `ADVISORY_REGISTRY` 两张表替换成合成表（其余字节一律不动）。 */
+function patchOrchestratorTables(source, names) {
+  const guardsBlock = /const GUARDS = \[[\s\S]*?\n\]/u.exec(source)
+  if (guardsBlock === null) throw new Error('找不到 GUARDS 表')
+  const synthetic = ['const GUARDS = [', ...names.map(name => `  { name: '${name}', args: ['run', '${name}'] },`), ']'].join('\n')
+  let out = replaceOnce(source, guardsBlock[0], synthetic)
+  const advisoryBlock = /const ADVISORY_REGISTRY = \[[\s\S]*?\n\]/u.exec(out)
+  if (advisoryBlock === null) throw new Error('找不到 ADVISORY_REGISTRY 表')
+  out = replaceOnce(out, advisoryBlock[0], 'const ADVISORY_REGISTRY = []')
+  return out
+}
+
+/** 把根守卫副本里的 `REGISTERED_GUARD_ENTRIES` 换成同名的合成登记（脚本体与 package.json 一致）。 */
+function patchRunnerRegistry(source, names) {
+  const block = /const REGISTERED_GUARD_ENTRIES = new Map\(\[[\s\S]*?\n\]\)/u.exec(source)
+  if (block === null) throw new Error('找不到 REGISTERED_GUARD_ENTRIES 表')
+  const entries = names.map(name =>
+    `  ['${name}', { script: 'node scripts/${name.replace(/[:]/gu, '-')}.mjs', argvTail: [], digest: '${'a'.repeat(64)}' }],`)
+  return replaceOnce(source, block[0],
+    ['const REGISTERED_GUARD_ENTRIES = new Map([', ...entries, '])'].join('\n'))
+}
+
+/**
+ * 造一棵**根守卫探针树**：真 `check-root-guards.mjs` + 真 `check-workspaces.mjs`（只换两张表）
+ * + corepack 桩。这样"运行级判据"打在**真实实现**上（不是对源码做正则）。
+ * @param options - `env`:额外注入给探针进程的环境变量。
+ * @returns `{ tree, run }`（`run` 已带好 PATH 与 env）。
+ */
+function buildRootGuardProbe(options = {}) {
+  const tree = tempDir('check-root-guards-probe-')
+  scenariosRun += 1
+  mkdirSync(join(tree, 'scripts'))
+  mkdirSync(join(tree, 'bin'))
+  const runnerSource = readFileSync(join(root, 'scripts', 'check-root-guards.mjs'), 'utf8')
+  const minimum = parseMinimumRequiredGuards(runnerSource)
+  check(Array.isArray(minimum) && minimum.length > 0,
+    'C-08(接线): 从 check-root-guards.mjs 里读不出 MINIMUM_REQUIRED_GUARDS —— 本判据的锚点失效')
+  const names = [...(minimum ?? []), PROBE_GUARD_NAME]
+  const orchestratorSource = readFileSync(subject, 'utf8')
+  writeFileSync(join(tree, 'scripts', 'check-workspaces.mjs'), patchOrchestratorTables(orchestratorSource, names))
+  writeFileSync(join(tree, 'scripts', 'check-root-guards.mjs'), patchRunnerRegistry(runnerSource, names))
+  writeFileSync(join(tree, 'package.json'), `${JSON.stringify({
+    name: 'root-guard-probe',
+    private: true,
+    scripts: Object.fromEntries(names.map(name => [name, `node scripts/${name.replace(/[:]/gu, '-')}.mjs`])),
+  }, null, 2)}\n`)
+  const stub = join(tree, 'bin', 'corepack')
+  writeFileSync(stub, `#!/bin/sh\ncase "$*" in\n${PROBE_STUB_BODY}`)
+  chmodSync(stub, 0o755)
+  const run = extraEnv => spawnSync(process.execPath, [join('scripts', 'check-root-guards.mjs'), '--concurrency', '1'], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: {
+      ...cleanGitEnv(),
+      PATH: `${join(tree, 'bin')}:${process.env.PATH}`,
+      FORCE_COLOR: '0',
+      ...(options.env ?? {}),
+      ...(extraEnv ?? {}),
+    },
+  })
+  return { tree, run }
+}
+
+{
+  // ---- ① 运行级：判定行埋在中段 ⇒ 必须出现 ≥1 次（C-08 的正面判据）----------------
+  const probe = buildRootGuardProbe()
+  const result = probe.run()
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  check(result.status === 1,
+    `C-08(运行级): 合成守卫失败时根守卫运行器必须 exit 1（实际 ${result.status}）：${JSON.stringify(output.slice(0, 300))}`)
+  const markerHits = (output.match(new RegExp(PROBE_VERDICT_MARKER, 'gu')) ?? []).length
+  check(markerHits >= 1,
+    'C-08(运行级): 守卫失败 + 判定行埋在中段（200 行噪声之后、400 行尾部噪声之前）时，'
+    + `判定行必须出现 ≥1 次 —— 旧实现（头 20 + 省略 + 尾 20）这里是 0 次；实际 ${markerHits} 次：`
+    + `${JSON.stringify(output.slice(-500))}`)
+  const verdictSection = verdictSectionOf(output)
+  check(verdictSection.includes(PROBE_VERDICT_MARKER),
+    `C-08(运行级): 判定行必须在**判定段**里（不是碰巧落在尾窗），实际 ${JSON.stringify(verdictSection.slice(0, 300))}`)
+  // 接线证据：共享实现的横幅必须在（本地 summarize 没有这一段）。
+  check(/\(输出共 \d+ 行/u.test(output),
+    `C-08(接线): 失败详情必须来自共享实现 formatFailureReport（横幅 "(输出共 N 行…"），实际 ${JSON.stringify(output.slice(-400))}`)
+  check(!output.includes('（省略'),
+    'C-08(接线): 旧的自建摘要（"…（省略 N 行）"）不得再出现 —— 两条门禁只允许一份实现')
+
+  // ---- ② COREPACK_HOME 的离线处置指引（P3-D4 的第②条：清洗 fail-closed + 显式指引）----
+  const corepack = buildRootGuardProbe({ env: { COREPACK_HOME: '/tmp/r10g1-corepack-home' } })
+  const corepackRun = corepack.run()
+  const corepackOutput = `${corepackRun.stdout ?? ''}${corepackRun.stderr ?? ''}`
+  check(corepackOutput.includes('COREPACK_HOME'),
+    'P3-D4: 清洗掉 COREPACK_HOME 时必须在输出里点名它（证据，不是静默）')
+  check(corepackOutput.includes('$HOME/.cache/node/corepack') && corepackOutput.includes('装进镜像'),
+    'P3-D4: 必须给出离线/自托管 runner 的两条处置（预热默认缓存 `$HOME/.cache/node/corepack` / '
+    + `把 yarn 装进镜像）—— 只清洗不给出路等于把离线 runner 静默推向 npmjs；实际 ${JSON.stringify(corepackOutput.slice(-600))}`)
+}
+
+{
+  // ---- ③ 单元级：被 import 时零副作用 + ANSI 归一化 + 逐形态锚定 -------------------
+  //
+  // 直接 import 真模块（`check-workspaces.mjs` 的 `isEntryPoint()` 守卫是这条判据的前提：
+  // 被 import 时**什么都不许跑**）。import 期间捕获 stdout/stderr —— 任何输出都是缺陷。
+  const captured = []
+  const origLog = console.log
+  const origError = console.error
+  const origOut = process.stdout.write.bind(process.stdout)
+  const origErr = process.stderr.write.bind(process.stderr)
+  console.log = (...args) => captured.push(`log:${args.join(' ')}`)
+  console.error = (...args) => captured.push(`error:${args.join(' ')}`)
+  process.stdout.write = chunk => { captured.push(`stdout:${String(chunk)}`); return true }
+  process.stderr.write = chunk => { captured.push(`stderr:${String(chunk)}`); return true }
+  let subjectModule = null
+  let rootGuardsModule = null
+  let importError = null
+  try {
+    subjectModule = await import(pathToFileURL(subject).href)
+    rootGuardsModule = await import(pathToFileURL(join(root, 'scripts', 'check-root-guards.mjs')).href)
+  } catch (error) {
+    importError = error
+  } finally {
+    console.log = origLog
+    console.error = origError
+    process.stdout.write = origOut
+    process.stderr.write = origErr
+  }
+  check(importError === null,
+    `C-08(import): 两个脚本都必须能被安全 import（被 import 时零副作用），实际抛错 ${importError?.message ?? ''}`)
+  check(captured.length === 0,
+    'C-08(import): `check-workspaces.mjs` / `check-root-guards.mjs` 被 import 时不得产生任何输出'
+    + `（它们现在互相 import 取共享实现；跑整轮门禁/跑守卫都是错的），实际 ${JSON.stringify(captured.slice(0, 5))}`)
+  check(typeof subjectModule?.formatFailureReport === 'function'
+    && typeof subjectModule?.classifyVerdictLine === 'function'
+    && typeof subjectModule?.stripAnsiSequences === 'function',
+  'C-08(import): `check-workspaces.mjs` 必须导出 formatFailureReport / classifyVerdictLine / stripAnsiSequences')
+  check(typeof rootGuardsModule?.sanitizeGuardEnvironment === 'function'
+    && typeof rootGuardsModule?.selfTestGuardEnvironment === 'function',
+  'C-08(import): `check-root-guards.mjs` 必须导出 sanitizeGuardEnvironment / selfTestGuardEnvironment'
+    + '（回归门禁直接调它；导出面被删等于自检通道消失）')
+  // 源码级互补判据：入口守卫必须在（运行时那条"没有输出"会被"Cordis 之外的调度"绕过时兜底）。
+  const runnerSource = readFileSync(join(root, 'scripts', 'check-root-guards.mjs'), 'utf8')
+  check(/^if \(isEntryPoint\(\)\) await main\(\)$/mu.test(runnerSource),
+    'C-08(接线): `check-root-guards.mjs` 必须以 `if (isEntryPoint()) await main()` 收尾'
+    + '（否则被 import 时会跑整轮守卫）')
+  check(/from '\.\/check-workspaces\.mjs'/u.test(runnerSource)
+    && !/function summarize\(/u.test(runnerSource),
+  'C-08(接线): `check-root-guards.mjs` 必须 import `./check-workspaces.mjs` 的共享实现，'
+    + '且**不得**再有自己的 `summarize()`（两份实现必然漂移）')
+
+  if (subjectModule !== null) {
+    const { classifyVerdictLine, summarizeBoundedFailure, stripAnsiSequences } = subjectModule
+    // 逐形态锚定表（P3-D1 的四类 + 既有的三类对照 + 两条负例）。
+    const forms = [
+      ['\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m tests/a.spec.ts > s > c', 'verdict'],
+      ['\u001b[31m×\u001b[39m tests/b.spec.ts > s > c', 'verdict'],
+      ['--- FAIL: TestFoo (0.01s)', 'verdict'],
+      ['panic: test timed out after 10m0s', 'verdict'],
+      ['{"numFailedTests":2,"numFailedTestSuites":1,"success":false}', 'verdict'],
+      ['  "numFailedTests": 3,', 'verdict'],
+      ['  12:5  error  Parsing error: Unexpected token', 'verdict'],
+      ['  \u001b[90mat Object.<anonymous> (/x/y.js:1:2)\u001b[39m', null],
+      ['{"numFailedTests":0,"success":true}', null],
+      ['  12:5  warning  unused var', null],
+      ['  × 0 items scanned', 'noise'],
+      ['  \u001b[31m×\u001b[39m 0 items scanned', 'noise'],
+    ]
+    for (const [line, expected] of forms) {
+      check(classifyVerdictLine(line) === expected,
+        `C-08/P3-D1(形态表): ${JSON.stringify(line)} 必须分类为 ${JSON.stringify(expected)}，`
+        + `实际 ${JSON.stringify(classifyVerdictLine(line))}`)
+    }
+    // ANSI 等价：**带 ANSI 的合成输出必须与去色的同一输出判定行集合相同**。
+    const build = line => [...Array.from({ length: 400 }, (_, index) => `noise line ${index}`), line,
+      ...Array.from({ length: 300 }, (_, index) => `tail line ${index}`)].join('\n')
+    const plain = summarizeBoundedFailure(build('× tests/x.spec.ts > a > b'))
+    const colored = summarizeBoundedFailure(build('\u001b[31m×\u001b[39m tests/x.spec.ts > a > b'))
+    check(plain.missingVerdict === false && colored.missingVerdict === false,
+      'C-08(ANSI): 彩色与去色的同一输出都必须锚到判定行（missingVerdict 必须为 false）')
+    check(JSON.stringify(colored.verdictLines.map(stripAnsiSequences)) === JSON.stringify(plain.verdictLines),
+      'C-08(ANSI): 带 ANSI 的输出与去色输出的**判定行集合必须相同**，'
+      + `实际 colored=${JSON.stringify(colored.verdictLines)} / plain=${JSON.stringify(plain.verdictLines)}`)
+    check(colored.verdictLines.every(line => line.includes('\u001b')),
+      'C-08(ANSI/打印契约): 分类可以归一化，但 **verdictLines 必须是原行**（短输出"逐字原样"不许破）')
+    // **混合场景**兜底（P3-D1 的后半条）：有判定行可锚，但输出里还有"读不懂形态"的疑似错误行
+    // 落在尾窗之外 —— 它此前被静默丢弃。判据：必须在「其它疑似错误行」段里有界回显。
+    const mixed = summarizeBoundedFailure([
+      ...Array.from({ length: 400 }, (_, index) => `noise line ${index}`),
+      'AssertionError: anchored verdict',
+      'worker: upload failed with status 500',
+      ...Array.from({ length: 300 }, (_, index) => `tail line ${index}`),
+    ].join('\n'))
+    check(mixed.missingVerdict === false && mixed.text.includes('AssertionError: anchored verdict'),
+      'C-08(混合场景): 有判定行时它必须照常进判定段')
+    check(mixed.text.includes('其它疑似错误行') && mixed.text.includes('worker: upload failed with status 500'),
+      'C-08(混合场景): 未锚定的疑似错误行（落在尾窗之外）必须在「其它疑似错误行」段里有界回显 ——'
+      + '旧的 mixed 行为是**静默丢弃**（只要还有别的判定行，它就永远看不见）')
+    check(!mixed.text.split('--- 失败相关行')[1].split('\n--- ')[0].includes('worker: upload failed'),
+      'C-08(混合场景): 兜底行不得混进判定段（判定段只放锚定判定行）')
+    // 短输出逐字原样（反向负例：加了判定行扫描也不许改字节）。
+    check(subjectModule.formatFailureReport('  × a\nAssertionError: b\n') === '  × a\nAssertionError: b',
+      'C-08(打印契约): 短输出必须逐字原样返回（只 trimEnd）')
+  }
+}
+
+{
+  // ---- ④ 运行级：彩色判定行必须进判定段（"CI 形态也看得见"） ------------------------
+  //
+  // 复刻 PR #146 的真实形态：vitest 的彩色失败行（`\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m`）
+  // 与彩色用例行（`\x1b[31m×\x1b[39m`）埋在中段。修复前它们一条都不匹配（行首锚定被
+  // 转义序列挡住），编排器只打印「未找到判定行」。
+  const ansiBody = [
+    'i=0; while [ $i -lt 200 ]; do printf \'\\033[90mprobe noise %s\\033[39m\\n\' "$i"; i=$((i+1)); done',
+    'printf \'\\033[41m\\033[1m FAIL \\033[22m\\033[49m tests/audit-r10g1.spec.ts > suite > case\\n\'',
+    'printf \'\\033[31m×\\033[39m tests/audit-r10g1.spec.ts > suite > second\\n\'',
+    'i=0; while [ $i -lt 400 ]; do printf \'\\033[90mprobe tail %s\\033[39m\\n\' "$i"; i=$((i+1)); done',
+  ].join('; ')
+  const { tree: ansiTree } = buildTree({ stubExtra: emitterStub('dsh-memory-evolve', ansiBody, 1) })
+  const ansiResult = runSynthetic(ansiTree, [])
+  const ansiOutput = `${ansiResult.stdout}${ansiResult.stderr}`
+  check(ansiResult.status === 1, `C-08(ANSI/运行级): 目标包失败时门禁必须 exit 1（实际 ${ansiResult.status}）`)
+  const ansiSection = verdictSectionOf(ansiOutput)
+  check(ansiSection.includes('tests/audit-r10g1.spec.ts > suite > case'),
+    'C-08(ANSI/运行级): 彩色的 ` FAIL ` 行必须在**判定段**里（CI 里的真实形态；'
+    + '修复前它连判定行都不是，本地无 TTY 所以本地绿、CI 瞎），'
+    + `实际 ${JSON.stringify(ansiSection.slice(0, 300))}`)
+  check(ansiSection.includes('tests/audit-r10g1.spec.ts > suite > second'),
+    `C-08(ANSI/运行级): 彩色的 \`×\` 用例行同样必须在判定段里，实际 ${JSON.stringify(ansiSection.slice(0, 300))}`)
+  check(!ansiOutput.includes('未找到判定行'),
+    'C-08(ANSI/运行级): 彩色输出里明明有判定行 ⇒ 不得打印 fail-loud 的「未找到判定行」')
+}
+
+{
+  // ---- ⑤ 运行级：四类真实失败形态都要能进判定段（P3-D1） ---------------------------
+  const formsBody = [
+    'i=0; while [ $i -lt 200 ]; do printf \'probe noise %s\\n\' "$i"; i=$((i+1)); done',
+    // 注意 `printf` 的第一个参数以 `-` 开头时会被当成选项 ⇒ 必须走 `%s` 形态
+    // （探针自己踩过：`printf '--- FAIL: …'` 什么都不打印，判据就变成"形态没锚定"的假红）。
+    'printf \'%s\\n\' \'--- FAIL: TestR10G1 (0.01s)\'',
+    'printf \'panic: test timed out after 10m0s\\n\'',
+    'printf \'{"numFailedTests":2,"numFailedTestSuites":1,"success":false}\\n\'',
+    'printf \'  12:5  error  Parsing error: Unexpected token\\n\'',
+    'i=0; while [ $i -lt 400 ]; do printf \'probe tail %s\\n\' "$i"; i=$((i+1)); done',
+  ].join('; ')
+  const { tree: formsTree } = buildTree({ stubExtra: emitterStub('dsh-memory-evolve', formsBody, 1) })
+  const formsResult = runSynthetic(formsTree, [])
+  const formsOutput = `${formsResult.stdout}${formsResult.stderr}`
+  check(formsResult.status === 1, `C-08/P3-D1(运行级): 目标包失败时门禁必须 exit 1（实际 ${formsResult.status}）`)
+  const formsSection = verdictSectionOf(formsOutput)
+  for (const [label, needle] of [
+    ['go 用例级 `--- FAIL:`', '--- FAIL: TestR10G1'],
+    ['`panic: test timed out`', 'panic: test timed out after 10m0s'],
+    ['`--reporter=json` 的单行 JSON', '"numFailedTests":2'],
+    ['eslint 风格 `12:5  error …`', '12:5  error  Parsing error'],
+  ]) {
+    check(formsSection.includes(needle),
+      `C-08/P3-D1(运行级): ${label} 必须进**判定段**（形态表缺一条 ⇒ 这种失败行在混合输出里`
+      + `连兜底都进不去），实际 ${JSON.stringify(formsSection.slice(0, 400))}`)
+  }
+}
+
 // 自检① / ②：条数与样本下限。**下限只允许被"变多"越过** —— 断言表被清空、
 // 场景被删掉时这两条立刻红（而它们不经过 fail()，掏空 fail() 也躲不过）。
 if (checksRun < SELFTEST_MIN_CHECKS) {
@@ -1562,10 +2544,21 @@ process.stdout.write(
   + '--changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
   + '迁移区间守卫与文档数字守卫的合成正/负例、'
-  + '调度/归属表自检 7 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / '
-  + '嵌套前缀且归属不同包（先声明者胜 ⇒ 死条目或归属按顺序翻转）/ DEPENDENTS 打错）逐条必红、'
+  + '调度/归属表自检 8 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / '
+  + '嵌套前缀且归属不同包（先声明者胜 ⇒ 死条目或归属按顺序翻转）/ DEPENDENTS 打错 / '
+  + 'DEPENDENTS 少一条**反向边**（needs ↔ DEPENDENTS 双向一致））逐条必红、'
   + '同一包的细粒度子前缀必须放行、'
   + '成环时的运行时 pending 断言（列名 + 计划≠实跑 + exit 1）、'
+  + 'C-9/C-10 失败详情必然可见（判定行**行首锚定** / 进度噪声不占判定预算 / '
+  + '未锚到时 fail-loud 打印「未找到判定行」+ 兜底疑似错误行 / --full-output 真的绕过截断 / 短输出原样）、'
+  + 'C-08 接线（根守卫运行器必须 import 共享实现 —— 运行级探针证明"判定行埋在中段也看得见"；'
+  + '两个脚本被 import 时零副作用；P3-D1 四类形态进锚定表 + 混合场景有界兜底；'
+  + 'ANSI 归一化后彩色与去色的判定行集合相同；P3-D4 COREPACK_HOME 的离线处置指引）、'
+  + 'C-12/F5 真实树包表语义对拍（dir 存在 + package.json 的 name 一致 + script 字段存在 + '
+  + '磁盘上的 workspace 包必须都在 PACKAGES 里）三向正负例、'
+  + 'C-13 advisory 失败**不计入通过**（四类计数恰好覆盖计划数）、'
+  + 'C-15 失败块带真实退出码 / 信号、C-16 计划 0 个任务的显式告警、'
+  + 'C-6 守卫脚本 sha256 与登记表对拍（含符号链接断言）、'
   + 'C-8 通过的守卫的降级行必须进摘要（含"无降级行则不打 [DEGRADED]"的负例）、'
   + 'C-8 判据的精度（复审那 9 行里 5 条成功摘要不得进摘要、4 条真降级一条不少）、'
   + '六处形态①④（verify-licenses 空依赖树 / verify-patches 依赖目标缺失）的具名判据、'

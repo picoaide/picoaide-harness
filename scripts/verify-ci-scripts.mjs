@@ -74,11 +74,27 @@ process.on('uncaughtException', error => {
  * 路径,`file://` / `fileb://` 前缀与"路径不存在"都报同一条 ParamValidation 并非零
  * 退出。真 CLI 的实测形态见 `--body 形态判据`那两节(6c/6d)。
  *
+ * **参数校验层**也与真 CLI 同形(2026-09-24 审计 C-20):缺 `--bucket`/`--key`、
+ * 未知参数、`--no-progress` 之类一律 ParamValidation / usage + 252(白名单由真 CLI
+ * 自带的服务模型派生 + 抽样实测,见下面三张表)。**已知的、有意保留的差异**只有两处,
+ * 且都不是"假实现更宽容":①S3 请求本身没有网络 ⇒ 参数层通过之后真 CLI 退 255、假 aws
+ * 落本地目录;②"纯路径但文件不存在"在真 CLI 里同样**发生在参数解析期**、不产生任何
+ * 网络副作用,而脚本侧的 abs_path 又比 CLI 更早一步拦住它 —— 也就是说真 CLI 在这条
+ * 分支上的"网络副作用面"没有任何判据覆盖(2026-09-24 审计 D-07 登记,属"实现更严")
+ *
  * 故障注入(通过**子进程环境变量**给,不用改脚本文本):
  *   FAKE_AWS_TRUNCATE_BYTES=N  put-object 只写前 N 字节(退出码仍为 0 —— 模拟
  *                              "上传成功但字节被截断"的现场形态)
  *   FAKE_AWS_SIZE=…            覆盖 head-object 报的 ContentLength
  *   FAKE_AWS_SHA=…             覆盖 head-object 报的 ChecksumSHA256('None' = 没有)
+ *   FAKE_AWS_RM_FAIL_KEY=<子串>    `s3 rm` 对匹配对象**失败**且不删(真 CLI 的 AccessDenied
+ *                              形态;用于证明"删除失败必须 fail-loud")
+ *   FAKE_AWS_RM_SILENT_KEY=<子串>  `s3 rm` 对匹配对象**报成功但对象仍在**(退出码 0)——
+ *                              只有"删除后 head-object 必须 404"这条判据能咬住它
+ *   FAKE_AWS_HEAD_ERROR_KEY=<子串> head-object 对匹配对象回一条**非 404** 的错误
+ *                              (端点不可达),用于证明"无法确认对象已消失"也算失败
+ *   FAKE_AWS_LS_FAIL=1            `s3 ls` 失败并在 stderr 回显前缀(含渠道目录段),
+ *                              用于证明列表失败 fail-loud 且输出经过脱敏
  *
  * **按对象作用域**(2026-09-23 第六轮审计 R6-C-3):上面三条缺省作用于**所有**对象
  * (K-01 的既有注入面,逐字不变);带上对应的 `<…>_KEY=<对象键子串>` 之后只作用于键含
@@ -110,12 +126,130 @@ inject_scope() {
   [ -z "\${2:-}" ] && return 0
   case "$1" in *"\${2}"*) return 0 ;; *) return 1 ;; esac
 }
+
+# ---- 参数校验层:与真 CLI 2.37.1 同形(2026-09-24 审计 C-20)----
+#
+# 此前这里对"未知参数 / 缺必填 / --no-progress"一律不判(靠 i=$((i+1)) 跳过),
+# 而真 CLI 一律 ParamValidation + 252 ⇒ 误删 --bucket/--key 或加一个 --no-progress
+# 时本地门禁全绿、tag 流水线才红(与 --body 前缀那次事故同一形态)。
+# 报文原文(真 CLI 2.37.1,--endpoint-url http://127.0.0.1:1 把失败钉在参数层):
+#   缺必填:   aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: --bucket, --key
+#   未知参数: usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters] …
+#             aws: [ERROR]: Unknown options: --no-progress
+#   缺取值:   aws: [ERROR]: An error occurred (ParamValidation): argument --body: expected one argument
+# 退出码一律 252。白名单见下面三张表(由真 CLI 自带的服务模型派生 + 抽样实测)。
+usage_block() {
+  printf 'usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\\n'
+  printf 'To see help text, you can run:\\n\\n  aws help\\n  aws <command> help\\n  aws <command> <subcommand> help\\n'
+}
+param_error() { printf 'aws: [ERROR]: An error occurred (ParamValidation): %s\\n' "$1" >&2; usage_block >&2; exit 252; }
+usage_error() { usage_block >&2; printf '\\naws: [ERROR]: Unknown options: %s\\n' "$1" >&2; exit 252; }
+
+# s3api put-object 的取值参数(真 CLI 2.37.1 的服务模型 members,xform_name 形态;
+# 抽样实测通过:--sse-customer-algorithm / --object-lock-event-hold-duration-days /
+# --write-offset-bytes / --if-match 均落网络层,而 --ssecustomer-algorithm /
+# --sse-kms-key-id / --no-progress / --frobnicate 一律 usage + 252)。
+PUT_OBJECT_VALUE_FLAGS="--acl --body --bucket --cache-control --checksum-algorithm --checksum-crc32 --checksum-crc32-c --checksum-crc64-nvme --checksum-md5 --checksum-sha1 --checksum-sha256 --checksum-sha512 --checksum-xxhash128 --checksum-xxhash3 --checksum-xxhash64 --content-disposition --content-encoding --content-language --content-length --content-md5 --content-type --expected-bucket-owner --expires --grant-full-control --grant-read --grant-read-acp --grant-write-acp --if-match --if-none-match --key --metadata --object-lock-event-hold --object-lock-event-hold-duration-days --object-lock-event-hold-duration-years --object-lock-legal-hold-status --object-lock-mode --object-lock-retain-until-date --request-payer --server-side-encryption --sse-customer-algorithm --sse-customer-key --sse-customer-key-md5 --ssekms-encryption-context --ssekms-key-id --storage-class --tagging --website-redirect-location --write-offset-bytes"
+PUT_OBJECT_BOOL_FLAGS="--bucket-key-enabled"
+# s3api head-object 的取值参数(同上;head-object 没有布尔参数)。
+HEAD_OBJECT_VALUE_FLAGS="--bucket --checksum-mode --expected-bucket-owner --if-match --if-modified-since --if-none-match --if-unmodified-since --key --part-number --range --request-payer --response-cache-control --response-content-disposition --response-content-encoding --response-content-language --response-content-type --response-expires --sse-customer-algorithm --sse-customer-key --sse-customer-key-md5 --version-id"
+HEAD_OBJECT_BOOL_FLAGS=""
+# s3 高层命令(rm/cp 是同一族;ls 单独一张)的参数:只登记**实测通过**的那几个 ——
+# 它们不是 s3api 参数,也不吃 --no-progress,而 s3 ls 连 --only-show-errors /
+# --quiet 都不收(实测 rc=252)。**加新参数前先用真 CLI 实测**,否则这里会以
+# Unknown options 拒掉(方向是 fail-closed,不是静默放过)。
+S3_TRANSFER_BOOL_FLAGS="--recursive --dryrun --quiet --only-show-errors --summarize --request-payer"
+S3_TRANSFER_VALUE_FLAGS="--page-size --exclude --include --storage-class --follow-symlinks --source-region"
+S3_LS_BOOL_FLAGS="--recursive --summarize --human-readable"
+S3_LS_VALUE_FLAGS="--page-size"
+# AWS CLI 的全局参数(实测对 s3api / s3 都接受;--only-show-errors 只对 s3 高层有效)。
+GLOBAL_VALUE_FLAGS="--query --output --region --profile --version --color --cli-read-timeout --cli-connect-timeout --cli-binary-format --ca-bundle --cli-input-json --cli-input-yaml --cli-pager"
+GLOBAL_BOOL_FLAGS="--no-paginate --no-sign-request --no-verify-ssl --no-cli-pager --debug"
+
+# 参数扫描:把一张取值表与一张布尔表按真 CLI 的语义吃掉,返回未知参数(逗号连接)。
+# 用法:scan_flags <取值表> <布尔表>;结果写进 SCAN_UNKNOWN / SCAN_POSITIONALS。
+scan_flags() {
+  local value_flags="$1" bool_flags="$2" i=2 arg value
+  SCAN_UNKNOWN_ITEMS=()
+  SCAN_POSITIONALS=0
+  SCAN_POSITIONAL_ITEMS=()
+  SCAN_POSITIONAL_TOKENS=""
+  while [ "$i" -lt "\${#args[@]}" ]; do
+    arg="\${args[$i]}"
+    case " $bool_flags $GLOBAL_BOOL_FLAGS " in
+      *" $arg "*) i=$((i+1)); continue ;;
+    esac
+    case " $value_flags $GLOBAL_VALUE_FLAGS " in
+      *" $arg "*)
+        if [ "$i" -ge "$(( \${#args[@]} - 1 ))" ]; then param_error "argument $arg: expected one argument"; fi
+        value="\${args[$((i+1))]}"
+        SCAN_FLAG_VALUE["$arg"]="$value"
+        i=$((i+2)); continue ;;
+    esac
+    case "$arg" in
+      --*)
+        # 真 CLI 把未知开关**以及紧跟它的那个非开关 token** 一起报进 Unknown options
+        # (实测:s3 rm s3://b/k --frobnicate x → "Unknown options: --frobnicate,x")。
+        SCAN_UNKNOWN_ITEMS+=("$arg")
+        if [ "$((i+1))" -lt "\${#args[@]}" ]; then
+          case "\${args[$((i+1))]}" in
+            --*) ;;
+            *) SCAN_UNKNOWN_ITEMS+=("\${args[$((i+1))]}"); i=$((i+1)) ;;
+          esac
+        fi ;;
+      *) SCAN_POSITIONALS=$((SCAN_POSITIONALS + 1))
+         SCAN_POSITIONAL_ITEMS+=("$arg")
+         # 真 CLI 的位置参数报错是**倒序**的(实测 x y → "Unknown options: y, x")。
+         SCAN_POSITIONAL_TOKENS="$arg\${SCAN_POSITIONAL_TOKENS:+, \${SCAN_POSITIONAL_TOKENS}}" ;;
+    esac
+    i=$((i+1))
+  done
+}
+# 未知项按真 CLI 的分隔符连接:s3api 用 ", ",s3 高层用 ","。
+join_unknown() {
+  local separator="$1" joined="" item
+  for item in \${SCAN_UNKNOWN_ITEMS[@]+"\${SCAN_UNKNOWN_ITEMS[@]}"}; do
+    joined="\${joined:+\${joined}$separator}$item"
+  done
+  printf '%s' "$joined"
+}
+# s3api 不接受位置参数(真 CLI:put-object … x → usage + Unknown options: x + 252)。
+# 上面把每个已知参数与它的取值都吃掉了,落进 SCAN_POSITIONAL_TOKENS 的只可能是
+# "既不是已知参数、也不是某参数取值"的自由 token。
+require_no_positionals() {
+  [ "$SCAN_POSITIONALS" -eq 0 ] || usage_error "$SCAN_POSITIONAL_TOKENS"
+}
+# 必填参数(真 CLI 的必需成员 = Bucket / Key;报文按字典序、逗号+空格连接)。
+require_bucket_and_key() {
+  local missing=""
+  if [ -z "\${SCAN_FLAG_VALUE[--bucket]:-}" ]; then missing="--bucket"; fi
+  if [ -z "\${SCAN_FLAG_VALUE[--key]:-}" ]; then
+    if [ -n "$missing" ]; then missing="$missing, --key"; else missing="--key"; fi
+  fi
+  [ -z "$missing" ] || param_error "the following arguments are required: $missing"
+}
+
 cmd="\${args[0]:-} \${args[1]:-}"
 case "$cmd" in
   "s3 cp")
-    src="\${args[2]}"; dst="\${args[3]}"
-    extra=("\${args[@]:4}")
-    record "cp $src $dst \${extra[*]:-}"
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$S3_TRANSFER_VALUE_FLAGS" "$S3_TRANSFER_BOOL_FLAGS"
+    unknown="$(join_unknown ,)"
+    [ -z "$unknown" ] || param_error "Unknown options: $unknown"
+    [ "$SCAN_POSITIONALS" -ge 2 ] || param_error "the following arguments are required: paths"
+    # 源/目标是**位置参数**(真 CLI 允许 s3 cp --recursive --only-show-errors src dst
+    # 这种"参数写在路径前面"的形态 —— 按 args[2]/args[3] 取会把开关当成路径)。
+    src="\${SCAN_POSITIONAL_ITEMS[0]}"; dst="\${SCAN_POSITIONAL_ITEMS[1]}"
+    record "cp $src $dst"
+    extra=()
+    i=2
+    while [ "$i" -lt "\${#args[@]}" ]; do
+      case "\${args[$i]}" in
+        -*) extra+=("\${args[$i]}") ;;
+      esac
+      i=$((i+1))
+    done
+    [ "\${#extra[@]}" -eq 0 ] || record "cp-flags \${extra[*]}"
     key="\${dst#s3://*/}"
     if [[ "$dst" == */ ]]; then
       # 目录目标:对象键 = 前缀 + 源文件名(与 aws s3 cp 语义一致)
@@ -127,37 +261,45 @@ case "$cmd" in
     cp "$src" "$dest"
     ;;
   "s3api put-object")
-    key=""; body=""; sum=""
-    i=2
-    while [ "$i" -lt "\${#args[@]}" ]; do
-      case "\${args[$i]}" in
-        --key) key="\${args[$((i+1))]}"; i=$((i+2)) ;;
-        --body) body="\${args[$((i+1))]}"; i=$((i+2)) ;;
-        --checksum-sha256) sum="\${args[$((i+1))]}"; i=$((i+2)) ;;
-        *) i=$((i+1)) ;;
-      esac
-    done
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$PUT_OBJECT_VALUE_FLAGS" "$PUT_OBJECT_BOOL_FLAGS"
+    unknown="$(join_unknown ", ")"
+    [ -z "$unknown" ] || usage_error "$unknown"
+    require_no_positionals
+    key="\${SCAN_FLAG_VALUE[--key]:-}"; body="\${SCAN_FLAG_VALUE[--body]:-}"; sum="\${SCAN_FLAG_VALUE[--checksum-sha256]:-}"
+    require_bucket_and_key
     # 与真实 AWS CLI 2.37.1 **同形**(2026-09-24 发布链阻断事故):--body 只接受
     # **纯路径**。这里此前是一句 body="\${body#fileb://}" —— 假 CLI 主动兼容了真
     # CLI 拒绝的形态,于是"脚本写 fileb://"在本地门禁里永远绿、到 tag 流水线上才炸
-    # (典型"mock 掩盖契约")。现在两个前缀与"路径不存在"都按真 CLI 报**同一条**
-    # ParamValidation 并非零退出(真 CLI 退出码 252)。不要改回宽容处理。
-    # (注意:本段在 JS 模板字符串里 —— 注释里也不能出现反引号,会提前结束字符串。)
-    case "\${body}" in
-      file://*|fileb://*)
+    # (典型"mock 掩盖契约")。现在两个前缀(大小写不敏感;真 CLI 对 FILEB:// 同样
+    # 拒绝)与"路径不存在"都按真 CLI 报**同一条** ParamValidation 并非零退出
+    # (真 CLI 退出码 252)。不要改回宽容处理。
+    # **注意 --body 完全缺省不属于参数校验层失败**:真 CLI 接受它并走到网络层
+    # (退出 255 = 连不上端点),所以这里也不拒 —— 落到下面的"空对象"分支。
+    # （D-07 登记的差异:"纯路径但文件不存在"在真 CLI 里同样发生在参数解析期、
+    #   不产生任何网络副作用,而假 aws 无网络可发 ⇒ 这里更严是**实现使然**;
+    #   脚本侧的 abs_path 又比 CLI 更早一步拦住它。若日后有人直接用假 aws 测
+    #   "不存在的路径",要记得真 CLI 那条分支的网络副作用面没有被任何判据覆盖。）
+    if [ -n "\${SCAN_FLAG_VALUE[--body]+given}" ]; then
+      lowered="\${body,,}"
+      case "$lowered" in
+        file://*|fileb://*)
+          echo "aws: [ERROR]: An error occurred (ParamValidation): Error parsing parameter '--body': Blob values must be a path to a file." >&2
+          exit 252
+          ;;
+      esac
+      if [ ! -f "$body" ]; then
         echo "aws: [ERROR]: An error occurred (ParamValidation): Error parsing parameter '--body': Blob values must be a path to a file." >&2
         exit 252
-        ;;
-    esac
-    if [ ! -f "\${body}" ]; then
-      echo "aws: [ERROR]: An error occurred (ParamValidation): Error parsing parameter '--body': Blob values must be a path to a file." >&2
-      exit 252
+      fi
     fi
     # 全参数入日志:缓存头断言(max-age / no-cache)就是靠这一行。
     record "\${args[*]}"
     dest="$store/$key"
     mkdir -p "$(dirname "$dest")"
-    if [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
+    if [ -z "\${SCAN_FLAG_VALUE[--body]+given}" ]; then
+      : > "$dest"
+    elif [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
       head -c "\${FAKE_AWS_TRUNCATE_BYTES}" "$body" > "$dest"
     else
       cp "$body" "$dest"
@@ -165,17 +307,21 @@ case "$cmd" in
     printf '%s' "$sum" > "$dest.checksum"
     ;;
   "s3api head-object")
-    key=""; query=""
-    i=2
-    while [ "$i" -lt "\${#args[@]}" ]; do
-      case "\${args[$i]}" in
-        --key) key="\${args[$((i+1))]}"; i=$((i+2)) ;;
-        --query) query="\${args[$((i+1))]}"; i=$((i+2)) ;;
-        *) i=$((i+1)) ;;
-      esac
-    done
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$HEAD_OBJECT_VALUE_FLAGS" "$HEAD_OBJECT_BOOL_FLAGS"
+    unknown="$(join_unknown ", ")"
+    [ -z "$unknown" ] || usage_error "$unknown"
+    require_no_positionals
+    require_bucket_and_key
+    key="\${SCAN_FLAG_VALUE[--key]}"; query="\${SCAN_FLAG_VALUE[--query]:-}"
     record "head-object $key $query"
     target="$store/$key"
+    if [ -n "\${FAKE_AWS_HEAD_ERROR_KEY:-}" ] && inject_scope "$key" "\${FAKE_AWS_HEAD_ERROR_KEY}"; then
+      # "读不回"不是 404:例如端点不可达/权限错误。删除后必须据此 fail-loud
+      # (不能把"无法确认对象已消失"当成"对象已消失")。
+      echo "Could not connect to the endpoint URL: \\"http://127.0.0.1:1/$key\\"" >&2
+      exit 255
+    fi
     if [ ! -f "$target" ]; then
       echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2
       exit 254
@@ -212,9 +358,19 @@ case "$cmd" in
     fi
     ;;
   "s3 ls")
-    prefix="\${args[2]}"
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$S3_LS_VALUE_FLAGS" "$S3_LS_BOOL_FLAGS"
+    unknown="$(join_unknown ,)"
+    [ -z "$unknown" ] || param_error "Unknown options: $unknown"
+    prefix="\${args[2]:-}"
     key="\${prefix#s3://*/}"
     record "ls $prefix"
+    if [ -n "\${FAKE_AWS_LS_FAIL:-}" ]; then
+      # 真 aws 的 ListObjectsV2 失败信息**自身**会回显前缀(含渠道目录段):
+      # 调用方必须捕获 + 脱敏,且不能把"列表失败"当成"没有更老的版本"。
+      echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation: Access Denied (prefix=$key)" >&2
+      exit 1
+    fi
     # 与真实 aws 同语义:前缀命中**单个对象**时打印那一行,命中"目录"时逐个列目录,
     # 都没有时**退出码 0 且无输出**(所以断言必须查"有没有输出",不能查退出码)。
     if [ -f "$store/$key" ]; then
@@ -222,10 +378,28 @@ case "$cmd" in
     elif [ -d "$store/$key" ]; then ls -d "$store/$key"*/ 2>/dev/null | while read -r d; do echo "PRE $(basename "$d")/"; done; fi
     ;;
   "s3 rm")
+    declare -A SCAN_FLAG_VALUE=()
+    scan_flags "$S3_TRANSFER_VALUE_FLAGS" "$S3_TRANSFER_BOOL_FLAGS"
+    unknown="$(join_unknown ,)"
+    [ -z "$unknown" ] || param_error "Unknown options: $unknown"
+    [ "$SCAN_POSITIONALS" -ge 1 ] || param_error "the following arguments are required: paths"
     target="\${args[2]}"
     key="\${target#s3://*/}"
     record "rm $target"
-    rm -rf "$store/$key"
+    if [ -n "\${FAKE_AWS_RM_FAIL_KEY:-}" ] && inject_scope "$key" "\${FAKE_AWS_RM_FAIL_KEY}"; then
+      # 删除请求**失败**且对象仍在:真 CLI 的 AccessDenied 形态(失败信息回显对象键 ⇒
+      # 调用方必须脱敏)。发布脚本必须据此 fail-loud,而不是把残留留在版本目录里。
+      echo "delete failed: $target AccessDenied" >&2
+      exit 1
+    fi
+    if [ -n "\${FAKE_AWS_RM_SILENT_KEY:-}" ] && inject_scope "$key" "\${FAKE_AWS_RM_SILENT_KEY}"; then
+      # "删除看起来成功、对象其实还在"(权限/瞬断/最终一致):退出码 0 但不删 ——
+      # 只有"删除后 head-object 必须 404"这条判据能咬住它。
+      exit 0
+    fi
+    # .checksum 是假实现自己的边车文件,删除对象时一并清掉(否则"对象已删除"的
+    # 残留判据会被一个实现细节污染)。
+    rm -rf "$store/$key" "$store/$key.checksum"
     ;;
   *) record "other $*" ;;
 esac
@@ -3292,11 +3466,41 @@ echo x > "${distDir}/App.AppImage"
   check(existsSync(join(store, 'official', 'releases', '2.6.0')), '保留窗口内的版本不得误删')
   check(existsSync(join(store, 'official', 'releases', '2.6.1')), '保留窗口内的版本不得误删')
 
-  // 缓存头:资产不可变长缓存、指针 no-cache(否则新版本不生效)。
+  // 缓存头:**逐对象**断言(2026-09-24 审计 C-23)。
+  //
+  // 这里此前是 `awsLog.includes('max-age=31536000, immutable')` —— 整份日志的子串
+  // 匹配,于是"只把 zip 或只把 SHA256SUMS 改成 no-cache"仍然 EXIT=0(实测两个方向
+  // 都漏),而断言文案写的是"版本化资产必须带 immutable"(读起来像逐对象)。
+  // 现在按 put-object 的日志行解析出 `--key` 与 `--cache-control`,对**每个对象**
+  // 各自断言;另外要求每个 put-object 都带 cache-control(不许"漏写也算过")。
   const awsLog = readFileSync(log, 'utf8')
   if (process.env.DEBUG_PUBLISH === '1') process.stderr.write(`--- aws.log ---\n${awsLog}\n--- store ---\n${execFileSync('find', [store, '-type', 'f']).toString()}\n`)
-  check(awsLog.includes('max-age=31536000, immutable'), '版本化资产必须带 immutable 长缓存')
-  check(/latest\.json.*no-cache/.test(awsLog), 'latest.json 必须 no-cache(否则客户端拿不到新版本)')
+  // 注意:cache-control 的取值自身带逗号+空格(`public, max-age=31536000, immutable`),
+  // 不能用 \S+ 抽 —— 抽出来只有 `public,`。这里取到下一个 ` --flag` 之前。
+  const parsePut = line => ({
+    key: /--key (\S+)/u.exec(line)?.[1] ?? '',
+    cacheControl: /--cache-control (.*?)(?= --|$)/u.exec(line)?.[1]?.trim() ?? '',
+  })
+  const putObjects = awsLog.split('\n').filter(line => line.startsWith('s3api put-object ')).map(parsePut)
+  const cacheOf = key => putObjects.find(entry => entry.key === key)?.cacheControl
+  check(putObjects.length >= 12,
+    `应至少记录 3 渠道 × (探测 + 版本资产 + 校验和 + 指针) = 12 个 put-object,实际 ${putObjects.length}`)
+  check(putObjects.every(entry => entry.cacheControl !== ''),
+    '每个 put-object 都必须显式给 --cache-control(漏写会让 CDN 用默认 TTL,新版本不生效)')
+  for (const channel of ['official', 'beta', 'example-brand']) {
+    for (const [label, key] of [
+      ['版本资产(zip)', `${channel}/releases/2.7.0/picoaide-server-2.7.0-amd64.zip`],
+      ['校验和文件(SHA256SUMS)', `${channel}/releases/2.7.0/SHA256SUMS`],
+    ]) {
+      check(cacheOf(key) === 'public, max-age=31536000, immutable',
+        `${channel} 的${label}必须带 immutable 长缓存(逐对象断言,不看"别的对象对不对"),实际 ${String(cacheOf(key))}`)
+    }
+    check(cacheOf(`${channel}/latest.json`) === 'no-cache',
+      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${String(cacheOf(`${channel}/latest.json`))}`)
+    const probeCache = putObjects.filter(entry => entry.key.startsWith(`${channel}/releases/2.7.0/.probe-`)).map(entry => entry.cacheControl)
+    check(probeCache.length === 1 && probeCache.every(value => value === 'no-cache'),
+      `${channel} 的探测对象必须 exactly 一次且 no-cache,实际 ${JSON.stringify(probeCache)}`)
+  }
   const lines = awsLog.split('\n').filter(line => line !== '')
   const firstAsset = lines.findIndex(line => line.includes('official/SHA256SUMS'))
   const firstManifest = lines.findIndex(line => line.includes('latest.json'))
@@ -3513,7 +3717,7 @@ echo x > "${distDir}/App.AppImage"
   }
 }
 
-// ---- 6c. `aws … --body` 只能是**纯路径**(静态判据,扫 scripts/*.sh) ----
+// ---- 6c. `aws … --body` 只能是**纯路径**(静态判据,扫 scripts/*.sh + workflow 的 run 文本) ----
 //
 // 现场(2026-09-24):tag 发布链的 Release job 在「上传版本资产」这一步失败 ——
 //   aws: [ERROR]: An error occurred (ParamValidation):
@@ -3524,9 +3728,99 @@ echo x > "${distDir}/App.AppImage"
 // ParamValidation 拒掉(退出 252),纯路径能走到网络层。
 //
 // 6d 的用例直接打在假 aws 上(把宽容处理改回去即红);这一节是**静态**判据 ——
-// 它是唯一覆盖"某条 aws 调用没被任何用例真跑到"的网(例如中转脚本里的调用点,
-// 那里今天没有 `--body`,但判据面必须已经罩住 scripts/*.sh)。
+// 它是唯一覆盖"某条 aws 调用没被任何用例真跑到"的网。
+//
+// 2026-09-24 审计把这张网补了两个洞:
+//   C-18 扫描面:此前只遍历 `scripts/*.sh`,**workflow 的 run 文本完全不在判据面内**
+//        —— 在 `.github/workflows/ci.yml` 里写经包装函数调用的等价上传
+//        (`aws_cmd s3api put-object … --body "fileb://x.zip"`)时两条门禁都 EXIT=0。
+//   C-19 取值形态:此前是大小写敏感的两个前缀 + `[^"\s]+` 取值 ⇒ 大写(FILEB://)、
+//        变量拼接("${PREFIX}$1")、命令替换("$(printf …)")、引号拆分("file""b://")
+//        与前导空白五种等价改写全部漏网(而真 CLI 对这五种一律同一条 ParamValidation)。
+//        ⇒ 取值判据改成 **fail-closed**:凡不能证明是"纯字面量绝对路径"(或经由
+//        可解析的赋值链/已知产出真实路径的命令替换落到它)的形态一律红。
 {
+  /**
+   * 读 `--body` 之后的原始取值 token(含引号),处理 `--body=x` / `--body x` /
+   * 单双引号 / `$( … )` 里嵌套引号。返回 `{ value, empty, concatenated }`。
+   *
+   * `concatenated` = 收尾引号后面紧跟非空白 ⇒ shell 会把两段拼起来
+   * (`"file""b://$1"`、`"$PREFIX""$1"`),这类形态无法证明是纯路径 ⇒ 红。
+   */
+  const readBodyToken = text => {
+    let index = 0
+    while (index < text.length && (text[index] === ' ' || text[index] === '\t')) index += 1
+    if (text[index] === '=') {
+      index += 1
+      while (index < text.length && (text[index] === ' ' || text[index] === '\t')) index += 1
+    }
+    if (index >= text.length) return { value: '', empty: true, concatenated: false }
+    const quote = text[index]
+    if (quote === '"' || quote === "'") {
+      const start = index + 1
+      let depth = 0
+      index += 1
+      while (index < text.length) {
+        const character = text[index]
+        if (quote === '"' && character === '$' && text[index + 1] === '(') { depth += 1; index += 2; continue }
+        if (quote === '"' && character === ')' && depth > 0) { depth -= 1; index += 1; continue }
+        if (character === quote && depth === 0) break
+        index += 1
+      }
+      const value = text.slice(start, index)
+      // 收尾引号之后必须紧跟空白/续行/EOL;否则是 shell 拼接。
+      const concatenated = index + 1 < text.length && !/^[\s\\]/u.test(text.slice(index + 1))
+      return { value, empty: value === '', concatenated }
+    }
+    let end = index
+    while (end < text.length && !/\s/u.test(text[end])) end += 1
+    const value = text.slice(index, end)
+    return { value, empty: value === '', concatenated: false }
+  }
+
+  /** 静态判据放行的"产出真实路径"的命令替换(本仓只有 abs_path 是自有实现)。 */
+  const SANCTIONED_PATH_COMMANDS = new Set(['abs_path', 'realpath', 'readlink', 'mktemp'])
+  const MAX_VARIABLE_DEPTH = 4
+
+  /**
+   * 判定一个 `--body` 取值;返回 `null` = 可证明是纯路径,否则返回违规原因。
+   *
+   * 这里**不猜** shell 语义:只有三种形态能证明"这个值最终是一个绝对路径" ——
+   *   ①纯字面量绝对路径(`/x/y.zip`);
+   *   ②`$(abs_path …)` / `$(realpath …)` / `$(mktemp)` 这类已知产出真实路径的命令替换;
+   *   ③裸变量引用,且同一个文件里**所有**赋值都递归满足 ①/②。
+   * 其余一律红 —— 变量拼接、命令替换、引号拆分、前导/尾随空白、相对字面量、协议前缀。
+   */
+  const classifyBodyValue = (token, sourceText, depth = 0) => {
+    if (token.empty) return '取值为空(--body 没有取值)'
+    if (token.concatenated) return '取值由多段引号/拼接组成(shell 拼接后无法静态证明是纯路径)'
+    const value = token.value.replace(/^\s+/u, '').replace(/\s+$/u, '')
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value) || /^fileb?:/iu.test(value)) {
+      return '取值带协议前缀(真 CLI 一律以 ParamValidation 拒绝)'
+    }
+    if (/\$\(|\u0060/u.test(value)) {
+      const single = /^\$\(([^()]*)\)$/u.exec(value)
+      const command = single?.[1].trim().split(/\s+/u)[0] ?? ''
+      return SANCTIONED_PATH_COMMANDS.has(command) ? null : '取值是命令替换,无法静态证明它产出绝对路径'
+    }
+    if (/\$/u.test(value)) {
+      const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/u.exec(value)?.[1]
+      if (name === undefined) return '取值是变量拼接(无法静态证明是纯路径)'
+      if (depth > MAX_VARIABLE_DEPTH) return '变量赋值链过深(无法静态证明是纯路径)'
+      const assignments = [...sourceText.matchAll(new RegExp(`^[ \\t]*(?:local[ \\t]+|export[ \\t]+)?${name}=([^\\n]*)`, 'gmu'))]
+        .map(match => match[1])
+      if (assignments.length === 0) return `变量 ${name} 在本文件内没有可解析的赋值(无法静态证明是纯路径)`
+      for (const assignment of assignments) {
+        const verdict = classifyBodyValue(readBodyToken(assignment), sourceText, depth + 1)
+        if (verdict !== null) return `变量 ${name} 的赋值不可证明:${verdict}`
+      }
+      return null
+    }
+    if (/[$;|&<>()*?[\]{}~!\u0060]/u.test(value)) return '取值含 shell 元字符(无法静态证明是纯路径)'
+    if (!value.startsWith('/')) return '取值不是绝对路径(纯字面量相对路径同样无法证明指向哪个文件)'
+    return null
+  }
+
   /**
    * 扫一段 shell 文本的 `--body` 取值,返回 `{ count, offenders }`。
    *
@@ -3551,8 +3845,8 @@ echo x > "${distDir}/App.AppImage"
       if (line.trim().startsWith('#')) continue
       if (!/(^|\s)--body(\s|=)/u.test(line)) continue
       count += 1
-      const value = /--body[=\s]+"?([^"\s]+)/u.exec(line)?.[1] ?? ''
-      if (/^fileb?:\/\//u.test(value)) offenders.push(`${name}: ${line.trim()}`)
+      const reason = classifyBodyValue(readBodyToken(line.replace(/^.*?--body(\s|=)/u, '')), text)
+      if (reason !== null) offenders.push(`${name}: ${line.trim()} ⇒ ${reason}`)
     }
     return { count, offenders }
   }
@@ -3562,9 +3856,58 @@ echo x > "${distDir}/App.AppImage"
   const badSample = 'if ! brand_run_checked aws s3api put-object \\\n  --bucket "$R2_BUCKET" --key k --body "fileb://${zip}" \\\n  --checksum-sha256 x; then\n'
   check(scanAwsBodyForms('sample.sh', badSample).offenders.length === 1,
     '静态判据自证:fileb:// 形态的样本必须被命中(否则这条判据是恒真的)')
-  const goodSample = 'if ! brand_run_checked aws s3api put-object \\\n  --bucket "$R2_BUCKET" --key k --body "$zip_body" \\\n  --checksum-sha256 x; then\n'
+  const goodSample = 'zip_body="$(abs_path "$zip")"\nif ! brand_run_checked aws s3api put-object \\\n  --bucket "$R2_BUCKET" --key k --body "$zip_body" \\\n  --checksum-sha256 x; then\n'
   check(scanAwsBodyForms('sample.sh', goodSample).offenders.length === 0,
     '静态判据自证:纯路径样本不得命中(否则这条判据是恒红的)')
+  // C-19 的五种等价改写:每一种都必须被命中(大小写 / 变量拼接 / 命令替换 / 引号拆分 /
+  // 前导空白)。这些是"拆掉判据就会变绿"的形态,必须逐条钉住。
+  for (const [label, sample] of [
+    ['大写前缀', 'aws s3api put-object --bucket b --key k --body "FILEB://$1"\n'],
+    ['变量拼接', 'PREFIX="fileb://"\naws s3api put-object --bucket b --key k --body "${PREFIX}$1"\n'],
+    ['命令替换', 'aws s3api put-object --bucket b --key k --body "$(printf \'fileb://%s\' "$1")"\n'],
+    ['引号拆分', 'aws s3api put-object --bucket b --key k --body "file""b://$1"\n'],
+    ['前导空白', 'aws s3api put-object --bucket b --key k --body " fileb://$1"\n'],
+    ['相对字面量', 'aws s3api put-object --bucket b --key k --body "release-bundle/x.zip"\n'],
+    ['未解析变量', 'aws s3api put-object --bucket b --key k --body "$SOME_ENV_PATH"\n'],
+    ['= 形态 + 大写', 'aws s3api put-object --bucket b --key k --body=FILEB://x\n'],
+  ]) {
+    check(scanAwsBodyForms('sample.sh', sample).offenders.length === 1,
+      `静态判据自证:${label}必须被命中(等价改写绕过判据就是回归)`)
+  }
+  // 正向:三种可证明的纯路径形态必须不命中。
+  for (const [label, sample] of [
+    ['绝对字面量', 'aws s3api put-object --bucket b --key k --body "/tmp/x.zip"\n'],
+    ['abs_path 命令替换', 'aws s3api put-object --bucket b --key k --body "$(abs_path "$probe")"\n'],
+    ['可解析变量', 'body="$(realpath ./x.zip)"\naws s3api put-object --bucket b --key k --body "$body"\n'],
+  ]) {
+    check(scanAwsBodyForms('sample.sh', sample).offenders.length === 0,
+      `静态判据自证:${label}是可证明的纯路径形态,不得命中`)
+  }
+  // C-18:workflow 的 run 文本走**同一个**扫描器 + ci.yml 真实的 run 块抽取器。
+  const workflowSample = [
+    'jobs:',
+    '  release:',
+    '    steps:',
+    '      - name: upload',
+    '        run: |',
+    '          aws_cmd() { command aws --endpoint-url "$EP" "$@"; }',
+    '          aws_cmd s3api put-object --bucket "$B" --key k --body "fileb://x.zip"',
+    '',
+  ].join('\n')
+  const workflowBlocks = extractRunBlocks(workflowSample)
+  check(workflowBlocks.length === 1 && scanAwsBodyForms('sample.yml:5', workflowBlocks[0].content).offenders.length === 1,
+    '静态判据自证:workflow run 块里**经包装函数**调用的 fileb:// 上传必须被命中(C-18 的判据面)')
+  const workflowGoodSample = [
+    'jobs:',
+    '  release:',
+    '    steps:',
+    '      - name: upload',
+    '        run: bash scripts/ci-publish-update-server.sh --list channels.list',
+    '',
+  ].join('\n')
+  check(extractRunBlocks(workflowGoodSample)
+    .every(block => scanAwsBodyForms('sample.yml', block.content).offenders.length === 0),
+  '静态判据自证:调用发布脚本的 run 块不得命中(否则把合法调用也判红)')
 
   const shellScripts = readdirSync(join(root, 'scripts'))
     .filter(name => name.endsWith('.sh'))
@@ -3582,10 +3925,28 @@ echo x > "${distDir}/App.AppImage"
   }
   // 判据面自证:三个上传点(版本资产 / SHA256SUMS / 指针)+ 上传前探测必须在场 ——
   // 否则"零命中"可能只是"什么都没扫到"(判据面被删/被改名/被拆分)。
-  check(publishBodyArgs >= 3,
-    `ci-publish-update-server.sh 里应至少有 3 处代码级 --body 取值(实际 ${publishBodyArgs})—— 判据面消失即是回归`)
+  check(publishBodyArgs >= 4,
+    `ci-publish-update-server.sh 里应至少有 4 处代码级 --body 取值(探测 + 版本资产 + 校验和 + 指针,实际 ${publishBodyArgs})—— 判据面消失即是回归`)
+
+  // C-18:workflow 的 run 块同样在判据面内(只读别人的文件,不写)。
+  const workflowDir = join(root, '.github', 'workflows')
+  const workflowFiles = readdirSync(workflowDir)
+    .filter(name => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort()
+  let workflowBlocksScanned = 0
+  for (const name of workflowFiles) {
+    const text = readFileSync(join(workflowDir, name), 'utf8')
+    for (const block of extractRunBlocks(text)) {
+      workflowBlocksScanned += 1
+      offenders.push(...scanAwsBodyForms(`${name}:${block.line}`, block.content).offenders)
+    }
+  }
+  check(workflowFiles.length >= 1 && workflowBlocksScanned >= 10,
+    `workflow 的 run 块必须真的被扫到(文件 ${workflowFiles.length} 个 / run 块 ${workflowBlocksScanned} 个)—— 扫描面为空即是回归`)
+
   check(offenders.length === 0,
-    'aws --body 必须是纯路径,不得用 file:// / fileb:// 前缀(AWS CLI 2.37.1 会以 ParamValidation 拒绝):'
+    'aws --body 必须是**可证明的纯路径**(不得用协议前缀 / 变量拼接 / 命令替换 / 引号拆分 / 相对字面量;'
+    + ' AWS CLI 2.37.1 对前四类以 ParamValidation 拒绝):'
     + `\n  ${offenders.join('\n  ')}`)
 }
 
@@ -3637,6 +3998,69 @@ echo x > "${distDir}/App.AppImage"
     `假 aws 必须接受纯路径(正向对照),实际退出 ${String(okPut.status)}: ${okPut.stderr ?? ''}`)
   check(existsSync(join(store, 'k')) && readFileSync(join(store, 'k'), 'utf8') === 'probe\n',
     '正向对照:纯路径上传要真的落到 store(否则"拒绝"可能只是因为它什么都不做)')
+
+  // ---- C-20:参数**元数**与未知参数也必须同形(2026-09-24 审计)----
+  //
+  // 此前假 aws 只按需挑 `--key`/`--body`/`--checksum-sha256`,其余一律 `i+=1` 跳过,
+  // 于是"缺 --bucket / 未知参数 / --no-progress"在本地全绿、tag 才红(真 CLI 一律
+  // ParamValidation + 252)。下面逐条钉住真 CLI 的报文与退出码(原文见
+  // ci-publish-update-server.sh 与假 aws 模板里的实测记录)。
+  const runFake = argv => spawnSync(fakeAws, ['--endpoint-url', 'http://127.0.0.1:1', ...argv], { encoding: 'utf8', cwd: work })
+  const firstLine = text => `${text ?? ''}`.split('\n').map(line => line.trim()).filter(line => line !== '')[0] ?? ''
+  for (const [label, argv, expected] of [
+    ['缺 --key', ['s3api', 'put-object', '--bucket', 'b', '--body', probe],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: --key'],
+    ['缺 --bucket', ['s3api', 'put-object', '--key', 'k', '--body', probe],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: --bucket'],
+    ['缺 --bucket 与 --key', ['s3api', 'put-object', '--body', probe],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: --bucket, --key'],
+    ['head-object 缺 --key', ['s3api', 'head-object', '--bucket', 'b'],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: --key'],
+    ['s3 rm 缺路径', ['s3', 'rm'],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: paths'],
+    ['s3 cp 缺目标', ['s3', 'cp', probe],
+      'aws: [ERROR]: An error occurred (ParamValidation): the following arguments are required: paths'],
+  ]) {
+    const rejected = runFake(argv)
+    check(rejected.status === 252,
+      `假 aws 必须以 252 拒绝「${label}」(真 CLI 2.37.1 实测 252),实际 ${String(rejected.status)}`)
+    check(firstLine(rejected.stderr) === expected,
+      `「${label}」的报文首行必须与真 CLI 逐字相同,实际: ${firstLine(rejected.stderr)}`)
+  }
+  for (const [label, argv] of [
+    ['put-object --no-progress(s3api 不支持)', ['s3api', 'put-object', '--bucket', 'b', '--key', 'k', '--body', probe, '--no-progress']],
+    ['put-object --frobnicate x', ['s3api', 'put-object', '--bucket', 'b', '--key', 'k', '--body', probe, '--frobnicate', 'x']],
+    ['put-object 位置参数', ['s3api', 'put-object', '--bucket', 'b', '--key', 'k', '--body', probe, 'x']],
+    ['head-object --no-progress', ['s3api', 'head-object', '--bucket', 'b', '--key', 'k', '--no-progress']],
+    ['s3 rm --no-progress', ['s3', 'rm', 's3://b/k', '--no-progress']],
+    ['s3 ls --only-show-errors', ['s3', 'ls', 's3://b/', '--only-show-errors']],
+    ['s3 rm --frobnicate x', ['s3', 'rm', 's3://b/k', '--frobnicate', 'x']],
+  ]) {
+    const rejected = runFake(argv)
+    check(rejected.status === 252, `假 aws 必须以 252 拒绝「${label}」,实际 ${String(rejected.status)}`)
+    check(`${rejected.stderr ?? ''}`.includes('Unknown options:'),
+      `「${label}」必须报真 CLI 的 Unknown options(实际: ${firstLine(rejected.stderr)})`)
+  }
+  // `--body` **完全缺省**不属于参数校验层失败:真 CLI 接受它并走到网络层(退出 255)。
+  const noBody = runFake(['s3api', 'put-object', '--bucket', 'b', '--key', 'k'])
+  check(!`${noBody.stderr ?? ''}`.includes(realCliMessage),
+    `缺 --body 时假 aws 不得报 Blob ParamValidation(真 CLI 的参数层接受它,255 是网络层)`)
+  // 正向对照:合法参数(含全局 --query/--output)必须被接受。
+  const legalPut = runFake(['s3api', 'put-object', '--bucket', 'b', '--key', 'k2', '--body', probe, '--query', 'ETag', '--output', 'text'])
+  check(legalPut.status === 0,
+    `合法 put-object(含全局 --query/--output)必须被接受,实际 ${String(legalPut.status)}: ${firstLine(legalPut.stderr)}`)
+  // 脚本真正用到的 s3 高层形态必须继续被接受(否则"更严"会变成假红)。
+  for (const [label, argv] of [
+    ['s3 rm --recursive', ['s3', 'rm', 's3://b/other-key', '--recursive']],
+    ['s3 rm --recursive --only-show-errors', ['s3', 'rm', 's3://b/other-key', '--recursive', '--only-show-errors']],
+    ['s3 cp --recursive --only-show-errors', ['s3', 'cp', '--recursive', '--only-show-errors', probe, 's3://b/prefix/']],
+    ['s3 ls --recursive', ['s3', 'ls', 's3://b/', '--recursive']],
+    ['head-object --checksum-mode ENABLED', ['s3api', 'head-object', '--bucket', 'b', '--key', 'k', '--checksum-mode', 'ENABLED', '--query', 'ChecksumSHA256', '--output', 'text']],
+  ]) {
+    const accepted = runFake(argv)
+    check(accepted.status === 0,
+      `真 CLI 接受的形态「${label}」必须被假 aws 接受(否则门禁会假红),实际 ${String(accepted.status)}: ${firstLine(accepted.stderr)}`)
+  }
 }
 
 // ---- 6e. 生产调用形态:`--bundle` 缺省(相对路径)时 `--body` 仍必须是绝对路径 ----
@@ -3700,6 +4124,127 @@ echo x > "${distDir}/App.AppImage"
   '探测对象必须走 verify_remote_object 的完整判据(大小 + SHA256 都要读回)')
   check(logLines.includes(`rm s3://test-bucket/${probeKey}`),
     '探测对象必须被删除(几字节的临时对象不该留在发布面)')
+}
+
+// ---- 6f. 探测对象的生命周期:删掉并**证明它没了**(2026-09-24 审计 C-21 / D-04 / C-22 / C-24) ----
+//
+// 上传前探测会往 `<channel>/releases/<ver>/` 里 PUT 一个 5 字节的 `.probe-*` 对象。
+// 审计实测的两个缺口:
+//   C-21 删除是"尽力而为"(`brand_run_best_effort`):删除失败时发布照常 EXIT=0,
+//        探测对象永久留在 immutable 版本目录里,而门禁侧没有任何判据;
+//   D-04 探测 PUT 成功但**读回校验失败**时,`verify_remote_object` 直接 exit 1,
+//        早于正常的删除点 —— 这条路径连删除都不会尝试(收口改成 EXIT trap)。
+// 判据 = 删除后 head-object 必须报 404(真 CLI:`An error occurred (404) when calling
+// the HeadObject operation: Not Found`,退出 254);删除失败 / 仍读得到 / 读不回 404
+// 都 fail-loud。C-24 的"注释说 1 字节、实际 printf 'probe' = 5 字节"也在这里钉住:
+// 注释里的字节数、PROBE_BYTES、PROBE_PAYLOAD 三者必须一致。
+{
+  const work = tempDir('ci-publish-probe-')
+  const store = join(work, 'store')
+  const log = join(work, 'aws.log')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+  writeFileSync(join(work, 'channels.list'), 'official\n')
+  const archive = 'picoaide-server-5.5.5-amd64.zip'
+  const content = 'zip-official-probe-lifecycle'
+  mkdirSync(join(work, 'release-bundle', 'official'), { recursive: true })
+  writeFileSync(join(work, 'release-bundle', 'official', archive), content)
+  writeFileSync(
+    join(work, 'release-bundle', 'official', 'SHA256SUMS'),
+    `${createHash('sha256').update(content).digest('hex')}  ${archive}\n`,
+  )
+  const firstLine = text => `${text ?? ''}`.split('\n').map(line => line.trim()).filter(line => line !== '')[0] ?? ''
+  const releaseDir = join(store, 'official', 'releases', '5.5.5')
+  // 只看对象本体:`<key>.checksum` 是假 aws 自己的边车文件,不是远端对象。
+  const probeResidue = () => (existsSync(releaseDir)
+    ? readdirSync(releaseDir).filter(name => name.startsWith('.probe-') && !name.endsWith('.checksum'))
+    : [])
+  const resetStore = () => { rmSync(store, { recursive: true, force: true }); mkdirSync(store, { recursive: true }); writeFileSync(log, '') }
+  const runPublish = extraEnv => spawnSync('bash', [publishScript, '--list', 'channels.list', '--bundle', 'release-bundle'], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: 'v5.5.5',
+      ...extraEnv,
+    },
+  })
+
+  // 正向对照:正常发布 EXIT=0、探测对象被删除且**不残留**。
+  resetStore()
+  const ok = runPublish({})
+  check(ok.status === 0, `正常发布应成功,实际 ${String(ok.status)}: ${firstLine(ok.stderr)}`)
+  check(probeResidue().length === 0, `正常发布后不得留下探测对象,实际 ${probeResidue().join(',')}`)
+  check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
+    '探测对象必须被真的删除(日志里应有一条 rm s3://…/.probe-*)')
+
+  // (a) 删除请求失败 ⇒ 必须 fail-loud(此前 brand_run_best_effort 会静默放行)。
+  resetStore()
+  const rmFail = runPublish({ FAKE_AWS_RM_FAIL_KEY: '.probe-' })
+  check(rmFail.status !== 0,
+    '探测对象删除失败时必须 fail-loud(旧实现用 brand_run_best_effort 吞掉,发布照常 EXIT=0)')
+  check(`${rmFail.stderr ?? ''}`.includes('上传前探测'),
+    `删除失败的报错必须点名是探测对象(中性标签,不回显渠道名),实际: ${firstLine(rmFail.stderr)}`)
+  check(probeResidue().length === 1, '这条用例需要探测对象真的残留在 store 里(否则测的不是删除失败)')
+
+  // (b) 删除"看起来成功"但对象还在(silent) ⇒ 只有"删除后 head 必须 404"能咬住它。
+  resetStore()
+  const rmSilent = runPublish({ FAKE_AWS_RM_SILENT_KEY: '.probe-' })
+  check(rmSilent.status !== 0,
+    '删除后对象仍读得到时必须 fail-loud(s3 rm 的退出码不证明对象已消失)')
+  check(`${rmSilent.stderr ?? ''}`.includes('仍能被读到'),
+    `这条失败必须由"删除后仍能被读到"的判据给出,实际: ${firstLine(rmSilent.stderr)}`)
+  check(probeResidue().length === 1, '这条用例需要探测对象仍在 store 里')
+
+  // (c) 删除后读不回 404(端点不可达/权限错误)⇒ 不能把"无法确认"当"已消失"。
+  resetStore()
+  const headError = runPublish({ FAKE_AWS_HEAD_ERROR_KEY: '.probe-' })
+  check(headError.status !== 0, '删除后读不回 404 时必须 fail-loud(不能默认对象已消失)')
+  check(`${headError.stderr ?? ''}`.includes('无法确认'),
+    `这条失败必须由"无法确认对象已消失"的判据给出,实际: ${(headError.stderr ?? '').slice(0, 300)}`)
+
+  // (d) D-04:探测 PUT 成功但读回校验失败 —— 删除点此前不可达,现在由 EXIT trap 收口。
+  resetStore()
+  const shaMismatch = runPublish({ FAKE_AWS_SHA: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', FAKE_AWS_SHA_KEY: '.probe-' })
+  check(shaMismatch.status !== 0, '探测对象校验和不一致时必须失败(既有行为)')
+  check(`${shaMismatch.stderr ?? ''}`.includes('上传前探测'),
+    `校验失败的报错应点名探测对象,实际: ${firstLine(shaMismatch.stderr)}`)
+  check(probeResidue().length === 0,
+    'D-04:探测校验失败这条路径也必须把探测对象删掉(EXIT trap 收口),否则 5 字节对象永久留在版本目录里')
+  check(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('rm s3://test-bucket/official/releases/5.5.5/.probe-')),
+    'D-04:失败路径上必须真的发出过 rm(证明 trap 走到了删除)')
+
+  // (e) C-22:`s3 ls`(保留策略的列表)失败必须 fail-loud 且**输出脱敏**。
+  resetStore()
+  const lsFail = runPublish({ FAKE_AWS_LS_FAIL: '1' })
+  check(lsFail.status !== 0,
+    's3 ls 失败时必须 fail-loud(旧实现的 `|| true` 把"列表读不回来"和"没有更老的版本"压成同一个语义)')
+  const lsStderr = `${lsFail.stderr ?? ''}`
+  check(lsStderr.includes('保留策略'), `这条失败必须说明保留策略无法执行,实际: ${firstLine(lsStderr)}`)
+  const lsVisible = lsStderr.split('\n').filter(line => !line.startsWith('::add-mask::')).join('\n')
+  check(!lsVisible.includes('official/releases'),
+    's3 ls 的失败输出会回显对象前缀 ⇒ 必须走 brand_sanitize(渠道目录段应变成 ***),实际出现了原始前缀')
+  check(lsVisible.includes('***'), 's3 ls 失败输出应经过脱敏(应出现 ***)')
+
+  // (f) C-24:注释里的字节数 / PROBE_BYTES / PROBE_PAYLOAD 三者必须一致。
+  const publishSource = readFileSync(publishScript, 'utf8')
+  const declaredBytes = /^PROBE_BYTES=(\d+)$/mu.exec(publishSource)?.[1]
+  const payload = /^PROBE_PAYLOAD='([^']*)'$/mu.exec(publishSource)?.[1]
+  const commentBytes = /先拿 (\d+) 字节对象/u.exec(publishSource)?.[1]
+  check(declaredBytes !== undefined && payload !== undefined && commentBytes !== undefined,
+    'C-24:脚本必须同时声明 PROBE_PAYLOAD / PROBE_BYTES,并在头注释里写明探测对象的字节数')
+  check(Buffer.byteLength(payload ?? '', 'utf8') === Number(declaredBytes),
+    `C-24:PROBE_PAYLOAD(${JSON.stringify(payload)})的字节数必须等于 PROBE_BYTES(${String(declaredBytes)})`)
+  check(commentBytes === declaredBytes,
+    `C-24:头注释里的字节数(${String(commentBytes)})必须等于 PROBE_BYTES(${String(declaredBytes)})—— 注释漂移就是这类缺陷本身`)
+  check(publishSource.includes(`printf '%s' "$PROBE_PAYLOAD" > "$probe"`),
+    'C-24:探测对象必须由 PROBE_PAYLOAD 写出(否则"声明的字节数"与实际写的可以是两份)')
+  check(publishSource.includes('wc -c < "$probe"'),
+    'C-24:写盘后必须复算实际字节数(运行期自检,注释/声明/负载三者不一致时当场失败)')
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
@@ -4258,4 +4803,8 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '渠道仓 revision 解析的 stdout/stderr 分流(SSH deploy key 形态 + 失败分类 + 脱敏 + 唯一 EXIT trap)/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫/'
-  + 'aws --body 纯路径形态(假 CLI 与真 CLI 同形拒绝 file://·fileb:// 前缀 + scripts/*.sh 静态扫描)全部符合预期\n')
+  + 'aws --body 纯路径形态(假 CLI 与真 CLI 同形拒绝:协议前缀/缺必填/未知参数/缺取值 + '
+  + 'scripts/*.sh 与 workflow run 块的 fail-closed 静态扫描)/'
+  + '探测对象生命周期(删除后必须 404,失败即 fail-loud;EXIT trap 保证校验失败路径也删除;'
+  + 'PROBE_PAYLOAD/PROBE_BYTES/注释三者一致)/'
+  + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期\n')
