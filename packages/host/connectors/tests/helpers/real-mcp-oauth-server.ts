@@ -38,6 +38,15 @@ export interface RealMcpServer {
     toolCalls: number
     refreshTokensIssued: string[]
     revokedRefreshReuse: number
+    /**
+     * The bearer every `/mcp` request presented, in arrival order (`''` = the
+     * request carried no `Authorization` header at all).
+     *
+     * A status count cannot express WHICH token a retry replayed, and that is
+     * the whole 401-recovery property: "the dead token is never sent again"
+     * (R7-B P1-1). Recording the sequence makes it assertable directly.
+     */
+    mcpBearerTokens: string[]
   }
   close: () => Promise<void>
 }
@@ -49,7 +58,7 @@ function base64url(input: Buffer): string {
 export async function startRealMcpServer(): Promise<RealMcpServer> {
   const stats: RealMcpServer['stats'] = {
     registrations: 0, grants: [], tokenRequests: [], mcpUnauthorized: 0, toolCalls: 0,
-    refreshTokensIssued: [], revokedRefreshReuse: 0,
+    refreshTokensIssued: [], revokedRefreshReuse: 0, mcpBearerTokens: [],
   }
   let tokenLifetimeMs = 60 * 60 * 1000
   let rotateRefresh = true
@@ -188,6 +197,7 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
     if (url.pathname === '/mcp') {
       const header = req.headers.authorization ?? ''
       const token = header.replace(/^Bearer\s+/iu, '')
+      stats.mcpBearerTokens.push(token)
       const entry = token === '' ? undefined : tokens.get(token)
       const valid = entry !== undefined && entry.kind === 'access' && entry.expiresAt > Date.now()
       if (!valid) {
