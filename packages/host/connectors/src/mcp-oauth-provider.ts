@@ -1003,6 +1003,31 @@ export async function refreshCredentialTokens(
 }
 
 /**
+ * One in-flight refresh of a connector, with the strength it was requested at.
+ *
+ * The entry is not a bare promise because **the force level is part of the
+ * reuse judgement** (`TokenRefresher.refresh`, R7-B P2-b): a non-forced (clock)
+ * run answers "still fresh" from `expiresAt` alone and never touches the token
+ * endpoint, so letting a forced caller reuse it would report `ok` without
+ * renewing anything — exactly the 401 case (server revoked the token, the local
+ * clock still says it is valid) the forced form exists for.
+ */
+interface InflightRefresh {
+  /** True when some caller asked for the forced (`force: true`) form. */
+  force: boolean
+  /**
+   * Set by `perform` as soon as the run gets **past** the `expiresAt` fast path.
+   *
+   * That is the point where the outcome stops being a clock guess and starts
+   * being an answer about the live credential (the token endpoint, the retry
+   * classification, "this connector has no refresh material"). Only such a run
+   * can satisfy a forced caller that arrived while it was in flight.
+   */
+  beyondClock: { value: boolean }
+  run: Promise<RefreshOutcome>
+}
+
+/**
  * Serialized refresh per connector id (single flight).
  *
  * Races are routine — the background sweep fires while a tool call hits 401,
@@ -1011,7 +1036,7 @@ export async function refreshCredentialTokens(
  * the first one just stored.
  */
 export class TokenRefresher {
-  private readonly inflight = new Map<string, Promise<RefreshOutcome>>()
+  private readonly inflight = new Map<string, InflightRefresh>()
 
   constructor(
     private readonly deps: {
@@ -1062,18 +1087,68 @@ export class TokenRefresher {
 
   /** Refresh `id` unless it is already fresh; `force` skips the freshness check. */
   async refresh(id: string, options: { force?: boolean; locale?: HostLocale } = {}): Promise<RefreshOutcome> {
+    const force = options.force === true
     const existing = this.inflight.get(id)
-    if (existing) return await existing
-    const run = this.perform(id, options.force === true, options.locale ?? this.deps.locale?.() ?? DEFAULT_HOST_LOCALE)
-    this.inflight.set(id, run)
+    // Reuse judgement: the in-flight run's FORCE LEVEL is part of it.
+    //  - we are the clock path (`!force`): any run answers our question;
+    //  - the in-flight run is forced (>= our strength): reuse it;
+    //  - we are forced and it is not: it is only reused when it got past the
+    //    `expiresAt` fast path. A run that short-circuited on the clock returns
+    //    the OLD token with `ok: true` and never asks the authorization server,
+    //    which is exactly the state a 401 says is wrong (R7-B P2-b). We do not
+    //    start a second refresh beside it either — that would present the same
+    //    single-use refresh token twice (RFC 6749 §10.4) — we CHAIN: wait for
+    //    it, then do the forced refresh.
+    if (existing !== undefined && (existing.force || !force)) return await existing.run
+    // Resolved at CALL time, like the pre-chaining code: a language switch while
+    // a chained forced run waits must not retranslate the failure text.
+    const locale = options.locale ?? this.deps.locale?.() ?? DEFAULT_HOST_LOCALE
+    const entry = this.start(id, force, locale, existing)
+    // Installed synchronously right after the read, so a third caller cannot
+    // slip a second run in beside this one.
+    this.inflight.set(id, entry)
     try {
-      return await run
+      return await entry.run
     } finally {
-      this.inflight.delete(id)
+      if (this.inflight.get(id) === entry) this.inflight.delete(id)
     }
   }
 
-  private async perform(id: string, force: boolean, locale: HostLocale): Promise<RefreshOutcome> {
+  /**
+   * Build the run for one `refresh` request, chaining behind `previous` when a
+   * weaker run is already in flight (see `refresh` for the reuse judgement).
+   * @param id - connector id.
+   * @param force - the forced form.
+   * @param locale - locale resolved by the triggering caller.
+   * @param previous - the in-flight entry this request could not reuse.
+   * @returns the entry to register (its `run` is already started).
+   */
+  private start(
+    id: string,
+    force: boolean,
+    locale: HostLocale,
+    previous: InflightRefresh | undefined,
+  ): InflightRefresh {
+    const beyondClock = { value: false }
+    const run = (async (): Promise<RefreshOutcome> => {
+      if (previous !== undefined) {
+        const prior = await previous.run
+        // The prior clock run did consult the live credential: its answer (new
+        // tokens, a dead grant, a retryable failure) is the current truth, so
+        // the forced request is satisfied by it.
+        if (previous.beyondClock.value) return prior
+      }
+      return await this.perform(id, force, locale, beyondClock)
+    })()
+    return { force, beyondClock, run }
+  }
+
+  private async perform(
+    id: string,
+    force: boolean,
+    locale: HostLocale,
+    beyondClock: { value: boolean },
+  ): Promise<RefreshOutcome> {
     const credential = await this.deps.read(id)
     if (!credential) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
     // Snapshot the account scope at the SAME point as the credential read; the
@@ -1091,6 +1166,10 @@ export class TokenRefresher {
         },
       }
     }
+    // Past the fast path: from here the outcome describes the live credential,
+    // not the clock, so it is strong enough to satisfy a forced caller that
+    // arrives while this run is still in flight.
+    beyondClock.value = true
     const target = this.deps.target(id)
     if (!target) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.unsupported', { id }) }
     let outcome: RefreshOutcome

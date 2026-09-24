@@ -199,6 +199,14 @@ func rebuildUsageLedgerRows(db *sql.DB, from, to time.Time) error {
 // UPSERT：同一个 (user_id, model, day) 在两边都有行时，两次 UPSERT 会让后一次
 // 把前一次的金额**覆盖**成自己那一份（静默少计，正是 §1.5-A 要防的形状）。
 //
+// **额外来源的资格（R7-A，P1，别再踩）**：`extraSources` 只允许放**不在 usage
+// 分区树里**的关系。这条不是风格问题而是正确性前提 —— `SELECT … FROM usage`
+// 已经包含整棵 usage 子树（含多级布局 `usage → usage_<YYYY> → usage_<YYYYMM>`
+// 的孙辈叶子）的行，把其中任何一个再 union 进来，同一行就会被算**两遍**
+// （真 PG 实测：同数据同一轮清理，日账/月账 12.5 → 25.0）。判据链见
+// usageRelationShape.attachedToUsage（传递根）、scanUsageMonthTables 的分桶，
+// 以及 cleanupDetachedUsageTable 入口的 assertDetachedFromUsage（动手前复检）。
+//
 // 列集只取账本聚合真正用到的 7 列（显式列名）：额外来源不需要与 usage 完全同
 // 形，但必须含这 7 列，否则查询 fail-loud、由调用方按"跳过并记录"处置。
 func ledgerDetailSource(extraSources []string) string {
@@ -311,22 +319,34 @@ func ParseRetentionMonths(v string) (int, error) {
 //
 // 修法：**枚举实际存在的关系**（事实），不按名字猜连续性（假设）。
 type usageMonthTables struct {
-	// Partitions 是挂在 usage 下的**叶子**月分区（relispartition=true 且
-	// relkind='r'），按关系名升序 —— 升序即时间升序（YYYYMM）。
+	// Partitions 是挂在 usage 下（**传递地**：直接分区、二级/多级子分区都算）的
+	// **叶子**月分区（relispartition=true 且 relkind='r'），按关系名升序 ——
+	// 升序即时间升序（YYYYMM）。
+	//
+	// R7-A（P1）：判据从"直接父是 usage"改成**传递根是 usage**。多级布局
+	// `usage → usage_<YYYY> → usage_<YYYYMM>` 里的孙辈叶子同样是 usage 明细的
+	// 来源（`SELECT … FROM usage` 会读到它的行），因此：
+	//   - 清理按普通分区路径处理它（补账**不带** extraSources ⇒ 不重复计）；
+	//   - usageAggregateSegments 的"该月明细分区存在"判据也认它 ⇒ 该月聚合读
+	//     明细而不是回落账本（此前它被判成孤儿，明细对聚合**永久不可见**，
+	//     该月读数静默偏小）。
 	Partitions []string
-	// AttachedNonLeaf 是挂在 usage 下、但**自身又是分区父表**的月关系
-	// （relispartition=true 且 relkind='p'，二级分区）。
+	// AttachedNonLeaf 是挂在 usage 下（同样**传递地**）、但**自身又是分区父表**
+	// 的月关系（relispartition=true 且 relkind='p'，二级分区）。
 	//
 	// R6-A-1（复审 V1 §1.5-A）：它们同样是 usage 的明细来源（`SELECT … FROM
 	// usage` 会读到子分区里的行），所以清理必须与叶子分区走**同一条**路径
-	// （先补账再 DETACH+DROP，见 CleanupUsageRetention）；单列一桶是为了不改变
-	// Partitions 的语义 —— usageAggregateSegments 的"该月明细分区是否存在"
-	// 判据一直只认叶子分区，本轮不顺手改聚合口径。
+	// （先补账再 DETACH+DROP，见 CleanupUsageRetention）。
 	AttachedNonLeaf []string
-	// Orphans 是名为 usage_<YYYYMM> 但**不**挂在 usage 下的关系（F11 的 DETACH
+	// Orphans 是名为 usage_<YYYYMM> 但**不**是 usage 后代的关系（F11 的 DETACH
 	// 残留、被手工换成 VIEW 的异常形态、独立的二级分区父表…）。它们没有分区
 	// 身份，但同样占着名字：留着会让该月的新写入撞同名关系而失败，所以清理
 	// 必须一并处理。
+	//
+	// 这一定义是**金额安全**的前提：孤儿补账走 `usage ∪ 孤儿` 的 UNION ALL，
+	// 只有"该关系不在 usage 之下"时两边才**不相交**（否则同一行算两遍、账本
+	// 翻倍）。判据已经过传递祖先，落桶之后还在 cleanupDetachedUsageTable 入口
+	// 再按 catalog 事实复检一次（assertDetachedFromUsage，双保险）。
 	Orphans []string
 	// Shapes 是关系名 → 形态。**清理按形态分流**（R6-A-1 复审 V1 的修法）：
 	// 判据是 catalog 的**事实**（relkind / pg_inherits 父子 / 子关系数），
@@ -341,14 +361,46 @@ type usageMonthTables struct {
 
 // usageRelationShape 是一个名为 usage_<YYYYMM> 的关系的形态事实。
 type usageRelationShape struct {
-	Kind      string // pg_class.relkind
-	Parent    string // pg_inherits 的父关系名（'' = 无父表）
-	Partition bool   // pg_class.relispartition
-	Children  int    // pg_inherits 里以本关系为父的关系数
+	Kind   string // pg_class.relkind
+	Parent string // pg_inherits 的父关系名（'' = 无父表）
+	// Root 是分区树的**传递根**关系名（pg_partition_root；非分区 = ''）。
+	// 只判一层父表是不够的：`usage → usage_<YYYY> → usage_<YYYYMM>` 这种多级
+	// 布局（DBA 手写 DDL 即可产生，见 attachedToUsage）里的孙辈叶子直接父是
+	// usage_<YYYY>，但它**仍然挂在 usage 上**。
+	Root      string
+	Partition bool // pg_class.relispartition
+	Children  int  // pg_inherits 里以本关系为父的关系数
 }
 
-// attachedToUsage 报告该关系是不是 usage 的分区（叶子或二级）。
-func (s usageRelationShape) attachedToUsage() bool { return s.Partition && s.Parent == "usage" }
+// attachedToUsage 报告该关系是不是 usage 的**后代分区**（传递祖先：直接分区、
+// 二级/多级子分区都算）。
+//
+// R7-A（审计 2026-09-24，P1，已实证静默金额多计）的修法：此前的判据是
+// `Partition && Parent == "usage"` —— **只看直接父**，于是一株仍然挂在 usage 上
+// 的孙辈叶子被判成孤儿：
+//
+//   - 孤儿补账走 `usage ∪ 孤儿` 的 UNION ALL，而 `SELECT … FROM usage` **本来
+//     就已经包含这棵子树的行** ⇒ 同一行算两遍（真 PG 实测：同数据同一轮清理，
+//     账本 12.5 → 25.0，日账/月账一起翻倍，且不会再被后续轮次纠正）；
+//   - 随后孤儿循环把它 DROP ⇒ 删掉一株**活分区**（金额真的从 usage 里消失），
+//     善后 ensureUsagePartition 报 42P17 `would overlap partition "usage_2026"`
+//     ⇒ 该月的新写入永久 503 METERING_FAILED。
+//
+// 判据取**传递根**（pg_partition_root）而不是直接父：后者只是传递关系的一层。
+// 形态可由 DBA 手写 DDL 产生（`migrations-pg/**` 只建一级，所以这不是迁移产物，
+// 但它是**静默金额错误**，不能因为"我们没建过"就按不支持处理）。
+//
+// 注意"根"会随 DETACH 变化，这正是我们要的语义：把 usage_<YYYY> 整棵摘下来之后，
+// 它下面的叶子的根就变成 usage_<YYYY>（≠ usage）⇒ 自动回到孤儿语义 —— 那一刻
+// `SELECT … FROM usage` 确实读不到它们了，必须与 usage 做同一次 UNION 聚合。
+func (s usageRelationShape) attachedToUsage() bool { return s.Partition && s.Root == "usage" }
+
+// directChildOfUsage 报告该关系是不是**直接**挂在 usage 下。
+//
+// 只有这一层能做 `ALTER TABLE usage DETACH PARTITION <rel>`：更深的子分区属于
+// 别的父表（`usage_<YYYY>`），摘它等于替管理员拆分区树（同一棵子树里可能还有
+// 别的月份）⇒ 清理只补账、不 DETACH/DROP（见 CleanupUsageRetention 的 SKIP 分支）。
+func (s usageRelationShape) directChildOfUsage() bool { return s.Parent == "usage" }
 
 // tableLike 报告该关系是不是"可能持有 usage 明细行"的表形态。
 // 视图/物化视图不在此列：它们没有自己的明细行（物化视图的内容是派生的），
@@ -468,11 +520,13 @@ func usageMonthRelationOf(rel string) (time.Time, bool) {
 // 且判据是**事实**（枚举）而不是**假设**（名字连续）—— R4-C-8 的根因正是后者。
 func scanUsageMonthTables(db *sql.DB) (usageMonthTables, error) {
 	rows, err := db.Query(`SELECT c.relname, COALESCE(p.relname, ''), c.relispartition, c.relkind,
-       (SELECT count(*) FROM pg_inherits ch WHERE ch.inhparent = c.oid)
+       (SELECT count(*) FROM pg_inherits ch WHERE ch.inhparent = c.oid),
+       CASE WHEN c.relispartition THEN COALESCE(root.relname, '') ELSE '' END
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
 LEFT JOIN pg_class p ON p.oid = i.inhparent
+LEFT JOIN pg_class root ON root.oid = pg_partition_root(c.oid)
 WHERE n.nspname = 'public' AND c.relname LIKE 'usage\_%'
 ORDER BY c.relname`)
 	if err != nil {
@@ -481,10 +535,10 @@ ORDER BY c.relname`)
 	defer rows.Close()
 	out := usageMonthTables{Shapes: map[string]usageRelationShape{}}
 	for rows.Next() {
-		var rel, parent, kind string
+		var rel, parent, kind, root string
 		var isPartition sql.NullBool
 		var children int
-		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children); err != nil {
+		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root); err != nil {
 			return usageMonthTables{}, err
 		}
 		if _, ok := usageMonthRelationOf(rel); !ok {
@@ -493,6 +547,7 @@ ORDER BY c.relname`)
 		shape := usageRelationShape{
 			Kind:      kind,
 			Parent:    parent,
+			Root:      root,
 			Partition: isPartition.Valid && isPartition.Bool,
 			Children:  children,
 		}
@@ -652,8 +707,53 @@ func foldAdjacentMonthsIntoUsage(db *sql.DB, rel string, m time.Time, months []t
 	return moved, nil
 }
 
+// usagePartitionRoot 返回 public.<rel> 所在分区树的**传递根**关系名
+// （pg_partition_root；非分区 / 关系不存在 = 空串）。
+//
+// 与 scanUsageMonthTables 的 attachedToUsage 判据**同源同事实**（同一个
+// pg_partition_root），只是入口不同：那里是"扫一遍全部月关系"，这里是"核对
+// 某一个关系"。两处若分叉，"落桶"与"动手前复检"就会给出不同结论。
+func usagePartitionRoot(db *sql.DB, rel string) (string, error) {
+	var root string
+	err := db.QueryRow(`SELECT CASE WHEN c.relispartition THEN COALESCE(r.relname, '') ELSE '' END
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_class r ON r.oid = pg_partition_root(c.oid)
+WHERE c.relname = ? AND n.nspname = 'public'`, rel).Scan(&root)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+// assertDetachedFromUsage 是"孤儿"这一概念的**双保险**（R7-A，P1）。
+//
+// 孤儿补账走 `usage ∪ 孤儿` 的 UNION ALL，正确性前提是**该关系不在 usage 的
+// 分区树里** —— `SELECT … FROM usage` 已经包含整棵子树（含多级布局的孙辈叶子）
+// 的行，再 union 一次就是同一行算两遍（静默多计，实测 12.5 → 25.0），随后
+// DROP 还会删掉一株仍然挂在 usage 上的活分区。
+//
+// 落桶判据（scanUsageMonthTables 的传递祖先 + attachedToUsage）已经保证这一点；
+// 这里在**动手之前**再按 catalog 事实复检一次：判定与动作各自独立成立，任何一条
+// 回归都在这里 fail-loud（调用方记失败并**不 DROP**），而不是把金额写错。
+func assertDetachedFromUsage(db *sql.DB, rel string) error {
+	root, err := usagePartitionRoot(db, rel)
+	if err != nil {
+		return fmt.Errorf("核对 %s 的分区树根: %w", rel, err)
+	}
+	if root == "usage" {
+		return fmt.Errorf("%s 是 usage 的**后代**分区（传递根 = usage）却被当成孤儿:"+
+			"它的行已经能被 `SELECT … FROM usage` 读到,再与 usage 做 UNION ALL 会把同一行算两遍"+
+			"(账本金额翻倍),DROP 还会删掉一株活分区;拒绝处理,请人工核对该分区树", rel)
+	}
+	return nil
+}
+
 // cleanupDetachedUsageTable 处理"名为 usage_<YYYYMM> 的**表形态**孤儿"
-// （relkind='r'/'p'，且不挂在 usage 之下）。
+// （relkind='r'/'p'，且**不是** usage 的后代 —— 见 assertDetachedFromUsage）。
 //
 // 为什么不能直接 DROP（§1.5-A 实证）：孤儿不在 usage 之下 ⇒ `SELECT … FROM
 // usage` 读不到它的行，聚合与永久账本双双失明；DROP 之后那些金额就再也没有
@@ -667,6 +767,13 @@ func foldAdjacentMonthsIntoUsage(db *sql.DB, rel string, m time.Time, months []t
 //
 // 返回 nil 表示"明细已被永久账本覆盖，可以安全 DROP"。
 func cleanupDetachedUsageTable(db *sql.DB, rel string, m time.Time) error {
+	// R7-A（P1）双保险：本函数的**唯一**正确性前提是"该关系不是 usage 的后代"
+	// （否则第 2 步的 union 会把同一行算两遍）。落桶判据已经过传递祖先，这里在
+	// 动手前再按 catalog 事实复检一次：判据回归（例如退回"只看直接父"）时在这里
+	// fail-loud，而不是静默把金额写成两倍、再把一株活分区 DROP 掉。
+	if err := assertDetachedFromUsage(db, rel); err != nil {
+		return err
+	}
 	winFrom, winTo := dayKey(m), dayKey(m).AddDate(0, 1, -1)
 	// 实际持有的行覆盖的北京日（空关系返回 NULL ⇒ 只有名义月窗口）。
 	var lo, hi sql.NullTime
@@ -799,10 +906,13 @@ func partitionBoundIsExactMonth(bound string, m time.Time) bool {
 //   - 先备好 usage_daily 年分区(账本**自己的**关系,缺了聚合结果写不进去 =
 //     真失败),再做**纯聚合** —— 全程不碰 usage 明细月分区,因此"该月分区形态
 //     异常"不会阻止清理(R5-A-9)。
-//   - extraSources 是**不在 usage 之下**的明细来源(表形态孤儿):它们的行对
-//     `SELECT … FROM usage` 不可见,只 DROP 就是金额永久丢失(§1.5-A)。它们由
+//   - extraSources 是**不在 usage 分区树里**的明细来源（表形态孤儿）：它们的行对
+//     `SELECT … FROM usage` 不可见，只 DROP 就是金额永久丢失（§1.5-A）。它们由
 //     rebuildUsageLedgerRowsFrom 与 usage 放进**同一次**聚合 —— 分两次 UPSERT
 //     会让同一 (user,model,day) 的两份金额互相覆盖成其中一份。
+//     **资格判据是"不在 usage 之下"**（不是"名字像月分区但直接父不是 usage"）：
+//     挂 usage 之下的关系（含多级布局的孙辈叶子）必须走 extraSources=nil 的普通
+//     路径，否则同一行被算两遍（R7-A，P1，见 ledgerDetailSource 的注释）。
 func retentionBackfill(db *sql.DB, from, to time.Time, extraSources []string) error {
 	from, to = normalizeDayRange(from, to)
 	if from.IsZero() || to.IsZero() || from.After(to) {
@@ -888,6 +998,15 @@ func CleanupUsageRetention(db *sql.DB) error {
 			continue
 		}
 		shape := tables.Shapes[rel]
+		// R7-A（P1）双保险：**落进 Orphans 桶的每一条关系**在动手之前都按 catalog
+		// 事实复检一次"它不是 usage 的后代"。孤儿补账走 `usage ∪ 孤儿` 的 UNION
+		// ALL，只有两边**不相交**时"同一行算两遍"才不成立；判据一旦回归（例如
+		// 退回"只看直接父"），必须在这里 fail-loud（记失败 + **不 DROP**），而不是
+		// 静默把金额写成两倍、再把一株活分区删掉。
+		if aerr := assertDetachedFromUsage(db, rel); aerr != nil {
+			noteFailure(rel, "orphan-ownership", aerr)
+			continue
+		}
 		if shape.tableLike() {
 			// R6-A-1 复审 V1 §1.5-A（P1，已实证）：表形态孤儿可能**持有明细**
 			// 且不在 usage 之下（聚合与账本都读不到它的行）⇒ 只 DROP 等于金额
@@ -932,11 +1051,14 @@ func CleanupUsageRetention(db *sql.DB) error {
 		log.Printf("usage retention: dropped detached relation %s (relkind=%s, not a partition of usage)",
 			rel, shape.Kind)
 	}
-	// 到期关系集合 = 叶子分区 + 二级分区（relkind='p' 且挂在 usage 下）。
+	// 到期关系集合 = 叶子分区 + 二级分区（两者都是**传递地**挂在 usage 下的，
+	// 见 usageMonthTables.Partitions / AttachedNonLeaf）。
 	// R6-A-1（复审 V1 §1.5-A）：二级分区同样是 usage 的明细来源（父表查询会读到
 	// 子分区里的行），旧实现把它归进 Orphans 并直接 DROP TABLE —— 而 DROP TABLE
 	// 会连子分区一起删，那些明细既没进账本、也没被聚合读到 ⇒ 金额永久丢失。
 	// 现在它与叶子分区走**完全同一条**路径（补账 + 相邻月并入，再 DETACH+DROP）。
+	// R7-A（P1）：多级布局里的深层后代叶子也在这两个桶里（判据是传递祖先），
+	// 但它在 DETACH 那一步被跳过（只有 usage 的**直接**子分区能摘）。
 	attached := make([]string, 0, len(tables.Partitions)+len(tables.AttachedNonLeaf))
 	attached = append(attached, tables.Partitions...)
 	attached = append(attached, tables.AttachedNonLeaf...)
@@ -958,6 +1080,7 @@ func CleanupUsageRetention(db *sql.DB) error {
 		if !ok || !m.Before(cutoffMonth) {
 			continue // 保留期内(或名字不合法,前一步已排除)
 		}
+		shape := tables.Shapes[rel]
 		var foldErr error
 		// R5-A-9(审计 2026-09-23,P1):补账**不得要求"该月分区形态就绪"**。
 		// 旧实现在 DROP 前调 RebuildUsageLedger(内部无条件 ensureUsagePartition),
@@ -972,8 +1095,9 @@ func CleanupUsageRetention(db *sql.DB) error {
 		win := retentionLedgerWindow(db, rel, m)
 		if win.shapeErr != nil {
 			log.Printf("usage retention: %s 的形态判定未通过(或无法判定):%v;"+
-				"重建其明细账本(窗口 %s..%s,按它实际持有的行)后照常 DETACH+DROP"+
-				"(R5-A-9:分区形态只影响该月新写入,不得让整轮保留清理停摆)",
+				"重建其明细账本(窗口 %s..%s,按它实际持有的行)后再决定 DETACH+DROP"+
+				"(R5-A-9:分区形态只影响该月新写入,不得让整轮保留清理停摆;"+
+				"R7-A:不是 usage 直接子分区的深层后代只补账、不 DETACH)",
 				rel, win.shapeErr, win.from.Format(dateFmt), win.to.Format(dateFmt))
 		}
 		if !win.exact {
@@ -1013,6 +1137,26 @@ func CleanupUsageRetention(db *sql.DB) error {
 			// 相邻月明细还在 rel 里 ⇒ 这一步**不能** DROP（DROP 就是让相邻月的
 			// 明细段永久少计）；账本已补齐，人工处置相邻月分区形态后下一轮再清。
 			noteFailure(rel, "fold-adjacent", foldErr)
+			continue
+		}
+		if !shape.directChildOfUsage() {
+			// R7-A（审计 2026-09-24，P1）：多级布局 `usage → usage_<YYYY> →
+			// usage_<YYYYMM>` 里的**深层**后代叶子走到这里。它既不是孤儿（它的
+			// 行对 `SELECT … FROM usage` 可见，所以上面的补账走的是**不带**
+			// extraSources 的普通路径 —— 不重复计），也不该按孤儿 DROP；
+			// 而 `ALTER TABLE usage DETACH PARTITION` 只对 usage 的**直接**
+			// 子分区有效 —— 摘一株深层子分区等于替管理员拆分区树（同一棵子树里
+			// 可能还有别的月份，且它自己的父表还挂在 usage 上）。
+			//
+			// 取舍（与"独立二级分区父表"同一条纪律：服务端不替管理员决定拆
+			// 分区树）：**只补账、不 DETACH/DROP**，日志点名并计入 skipped
+			// （沿用 R4-C-8 的"洞要看得见"口径：该月磁盘不会被本轮回收）。
+			// 金额侧没有代价：明细仍在 usage 子树里 ⇒ 聚合读得到，账本也已补齐，
+			// 两个口径一致（见 r7a 判据里的 ledger == aggregate == 清理前的值）。
+			skipped++
+			log.Printf("usage retention: SKIP descendant partition %s (parent=%s, 传递根=usage):"+
+				"明细已按普通分区路径补进永久账本(不重复计、也不隐藏),但 DETACH 只对 usage 的直接子分区有效"+
+				"⇒ 不替管理员拆分区树(多级布局需人工处置;该月磁盘本轮不回收)", rel, shape.Parent)
 			continue
 		}
 		if _, derr := db.Exec("ALTER TABLE usage DETACH PARTITION " + quoteRelationIdent(rel)); derr != nil {
@@ -1115,9 +1259,14 @@ type usageAggregateSegment struct {
 // usageAggregateSegments 把闭区间 [from, to] 按"该月明细分区是否存在"切成
 // **相邻同源合并**后的段序列(R4-C-4 的唯一判据实现)。
 //
-// 判据来源是 scanUsageMonthTables 的枚举结果(实际挂在 usage 下的叶子月分区),
-// 不是配置值。相邻同源合并让常规布局(近 N 月 + 更早全无分区)只产生 2 段 ——
-// 与旧实现同样数量的查询;只有中间真有洞时才会多出几段。
+// 判据来源是 scanUsageMonthTables 的枚举结果(实际挂在 usage 下、**传递地**算作
+// usage 子树的叶子月分区),不是配置值 —— R7-A(审计 2026-09-24,P2)之前这里拿到
+// 的是"直接挂在 usage 下的叶子",于是多级布局的孙辈叶子所在月被判成"没有明细
+// 分区":明细真实存在于 `SELECT … FROM usage` 可见的位置,该月聚合却回落账本
+// (账本还没覆盖时读数就是 0),读数静默偏小。现在判据与 attachedToUsage 同源
+// (传递根 = usage),明细在哪、聚合就读哪。相邻同源合并让常规布局(近 N 月 +
+// 更早全无分区)只产生 2 段 —— 与旧实现同样数量的查询;只有中间真有洞时才会
+// 多出几段。
 func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSegment, error) {
 	tables, err := scanUsageMonthTables(db)
 	if err != nil {
@@ -1125,6 +1274,8 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 	}
 	present := make(map[string]bool, len(tables.Partitions))
 	for _, rel := range tables.Partitions {
+		// Partitions 是"传递地挂在 usage 下的叶子月分区"(R7-A):多级布局的孙辈
+		// 叶子同样在这里 ⇒ 它所在的月按**明细**读,与它实际持有的行一致。
 		if m, ok := usageMonthRelationOf(rel); ok {
 			present[monthKey(m)] = true
 		}
