@@ -52,6 +52,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# 值形态归一化（2026-09-24 第七轮审计 R7-D P3-3 同族）：`CI_CHANNELS_PIN` 由上游 job output
+# 或 secret 传来，可能带 CRLF（Windows 复制粘贴 / `gh secret set --body`）。留着 `\r` 会让
+# 40-hex 形状判据失败、报成「pin 形状非法」—— 那是换行符问题，不是形状问题。
+PIN="$(printf '%s' "$PIN" | tr -d '\r')"
+
 REPO="${CI_CHANNELS_REPO:-picoaide/channels}"
 # 原始名字留着只用于告警(见下);**渠道集判定不在这里**,交给唯一真源
 # `scripts/ci-release-policy.sh`(它自己按 `GITHUB_REF` 的类型前缀判是不是 tag)。
@@ -114,20 +119,72 @@ channels_url() {
   printf 'https://x-access-token:%s@github.com/%s.git' "${CHANNELS_REPO_TOKEN:-}" "$REPO"
 }
 
+# ---- 临时资源:集中登记 + **唯一**一处 EXIT trap -----------------------------
+#
+# 为什么必须是同一处（2026-09-24 第七轮审计 R7-D P3-5）：此前 SSH 准备与克隆路径**各设一次**
+# `trap … EXIT`，而一个 shell 只有一个 EXIT trap —— 后者会**替换**前者。今天没出事只是因为
+# 克隆路径的 trap 顺手把 `CHANNELS_SSH_DIR` 也带上了；那是巧合式的正确：任一处将来新增临时
+# 资源（私钥、凭据文件、stderr 捕获文件）而忘了同步另一处，它就会滞留在 runner 上。
+# 现在所有临时路径都进 TEMP_PATHS，清理只在这一处注册。
+TEMP_PATHS=()
+cleanup_temp_paths() {
+  local path
+  for path in "${TEMP_PATHS[@]:-}"; do
+    [ -n "$path" ] || continue
+    rm -rf "$path"
+  done
+  TEMP_PATHS=()
+}
+trap cleanup_temp_paths EXIT
+
+# 注意 `NEW_TEMP` 这个**出参全局变量**的形状：写成 `X="$(new_temp_dir)"` 时函数在**子 shell**
+# 里执行，`TEMP_PATHS+=` 跟着丢在子 shell（登记表恒空 ⇒ 清理什么都不删、私钥留在 runner 上；
+# 第一版就这么错过一次，被"跑完 TMPDIR 必须为空"的用例抓住）。所以函数只写全局变量，
+# 调用点写成 `new_temp_dir; X="$NEW_TEMP"`。
+NEW_TEMP=""
+new_temp_dir() {
+  NEW_TEMP="$(mktemp -d)"
+  TEMP_PATHS+=("$NEW_TEMP")
+}
+
+new_temp_file() {
+  NEW_TEMP="$(mktemp)"
+  TEMP_PATHS+=("$NEW_TEMP")
+}
+
+# 脱敏:URL 里的 userinfo（令牌 / 用户名）整段替换后再进日志。
+#
+# 为什么按 scheme 锚定、并**贪婪到最后一个 `@`**（2026-09-24 第七轮审计 R7-D P3-2）：
+# 老写法只认 `x-access-token:` 字面形态、且 `[^@]*` 到**第一个** `@` 就停；而 git 自己的
+# 匿名化在令牌含 `@` 时也只剥到第一个 `@`（实测报错文本里回显 `https://PART2@github.com/…`）
+# ⇒ 该形态的尾部会原样进公开日志。现在覆盖 `https://<任意 userinfo>@host` 全形态。
+redact_secrets() {
+  sed -E \
+    -e 's#(https?://)[^/[:space:]]*@#\1<redacted>@#g' \
+    -e 's#(x-access-token:)[^@[:space:]]*#\1<redacted>#g'
+}
+
+# openssh 在 `StrictHostKeyChecking=accept-new` + **首次连接**时必然往 stderr 打这一行
+# （`prepare_channels_ssh` 每次都新建空的 known_hosts ⇒ 每次都是首次连接）。它是 TOFU 的
+# 正常副作用、不是故障 ⇒ 失败诊断里按"信息"滤掉；其余 stderr **原文**照旧打进日志。
+TOFU_NOISE_PATTERN="^Warning: Permanently added .* to the list of known hosts\.?$"
+
 # 把 deploy key 落成 600 的临时文件并装好 `GIT_SSH_COMMAND`（只在给了 key 时生效）。
 # `IdentitiesOnly=yes` 防止 runner 上别的 key 抢先；`accept-new` 是 TOFU（首次记录
 # github.com 的主机键），known_hosts 也落在临时目录里，不污染 runner 的 HOME。
 CHANNELS_SSH_DIR=""
 prepare_channels_ssh() {
   [ -n "${CHANNELS_REPO_SSH_KEY:-}" ] || return 0
-  CHANNELS_SSH_DIR="$(mktemp -d)"
+  new_temp_dir; CHANNELS_SSH_DIR="$NEW_TEMP"
   chmod 700 "$CHANNELS_SSH_DIR"
   local key="$CHANNELS_SSH_DIR/id_ed25519"
-  # 允许 secret 里带结尾换行（`gh secret set < file` 就会带），统一归一化成一个 `\n`。
-  printf '%s\n' "${CHANNELS_REPO_SSH_KEY%$'\n'}" > "$key"
+  # 值形态归一化：`gh secret set < file` 会带结尾换行，Windows 复制粘贴 / `gh secret set
+  # --body` 还可能带 CRLF。老写法只剥**一个**结尾 LF，留下 `\r` 会写出损坏的私钥、并且
+  # 报错只落到"症状未分类"（2026-09-24 第七轮审计 R7-D P3-3）。现在先统一去掉 `\r`，
+  # 再由命令替换吃掉全部结尾换行、补一个 `\n`。
+  printf '%s\n' "$(printf '%s' "${CHANNELS_REPO_SSH_KEY}" | tr -d '\r')" > "$key"
   chmod 600 "$key"
   export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$CHANNELS_SSH_DIR/known_hosts"
-  trap 'rm -rf "$CHANNELS_SSH_DIR"' EXIT
 }
 prepare_channels_ssh
 
@@ -155,11 +212,34 @@ if [ "$RESOLVE_ONLY" -eq 1 ]; then
   # 只剩一行 "exit code 128"，完全指不到病根（本次就是靠本机复现无效 token 的**同一返回码**
   # 才反推出是凭据问题）。现在把 git 的 stderr 捕下来、**脱敏后**打进日志，并按症状分类：
   # 凭据被拒 / 网络不可达 / 未分类，各自给可行动的处置。
-  if ! REMOTE_OUT="$(git ls-remote --quiet "$(channels_url)" HEAD 2>&1)"; then
-    REMOTE_ERR="$(printf '%s' "$REMOTE_OUT" | sed -E 's#(x-access-token:)[^@]*@#\1<redacted>@#g')"
+  #
+  # **stdout 与 stderr 必须分流**（2026-09-24 第七轮审计 R7-D P1-1）：revision **只从 stdout 取**
+  # （`git ls-remote` 的 SHA 在 stdout），stderr 单独落文件、**只**用于失败诊断。旧写法
+  # `REMOTE_OUT="$(… 2>&1)"` 把 git 的 stderr 并进被 `awk 'NR==1'` 解析的那条流，而 SSH
+  # deploy key 形态（推荐形态）下 stderr **必然**有一行 openssh 的
+  # `Warning: Permanently added 'github.com' …`（`prepare_channels_ssh` 每次新建空 known_hosts
+  # + `accept-new` ⇒ 每次都是首次连接）⇒ `REV=Warning:` ⇒ `require_pin_shape` 判红并打印
+  # 「pin 形状非法」—— 报错指向 pin，与真因（stderr 混进了被解析的流）毫无关系，且这一步是
+  # 发布 tag 的 gate 第一步 ⇒ 三平台与 release 全部因 needs 跳过 ⇒ 零交付。
+  new_temp_file; ERRFILE="$NEW_TEMP"
+  if ! OUT="$(git ls-remote --quiet "$(channels_url)" HEAD 2>"$ERRFILE")"; then
+    # 诊断文本：先脱敏，再滤掉 accept-new 的 TOFU 告警（见 TOFU_NOISE_PATTERN），
+    # 其余 stderr **原文**打进日志；分类也只看这份滤过的文本（告警本身不构成任何症状）。
+    # `tr -d '\r'`：真 ssh 的告警/错误是 **CRLF** 结尾（本机实测 od 可见 `hosts.\r\n`），
+    # 不归一化的话 `^…$` 形状的过滤与判断都会静默失配（第一版就这么漏过）。
+    ERRTEXT="$(redact_secrets < "$ERRFILE" | tr -d '\r')"
+    ERRLINES="$(printf '%s\n' "$ERRTEXT" | grep -Ev "$TOFU_NOISE_PATTERN" || true)"
+    NOISE="$(printf '%s\n' "$ERRTEXT" | grep -Ec "$TOFU_NOISE_PATTERN" || true)"
     echo "::error::读取私有渠道仓失败（git ls-remote 非零退出）：${REPO}" >&2
-    printf '%s\n' "$REMOTE_ERR" | sed 's/^/  /' >&2
-    case "$REMOTE_ERR" in
+    if [ -n "$ERRLINES" ]; then
+      printf '%s\n' "$ERRLINES" | sed 's/^/  /' >&2
+    else
+      echo "  (git 没有输出可诊断的 stderr)" >&2
+    fi
+    if [ "${NOISE:-0}" -gt 0 ]; then
+      echo "::notice::另已滤除 ${NOISE} 行 ssh 主机键 TOFU 告警（accept-new 首次连接的正常副作用,不是故障）" >&2
+    fi
+    case "$ERRLINES" in
       *"Invalid username or token"*|*"鉴权失败"*|*"Authentication failed"*|*"could not read Username"*|*"Permission denied (publickey)"*)
         echo "::error::症状=凭据被拒 ⇒ 渠道仓凭据（CHANNELS_REPO_SSH_KEY 的 deploy key 是否仍在该仓 / CHANNELS_REPO_TOKEN 是否失效或权限不含 Contents:Read）——凭据值不回显；更新 secret 后重跑本 job" >&2
         ;;
@@ -168,7 +248,6 @@ if [ "$RESOLVE_ONLY" -eq 1 ]; then
         ;;
       *"Host key verification failed"*|*"REMOTE HOST IDENTIFICATION HAS CHANGED"*)
         echo "::error::症状=SSH 主机键校验失败 ⇒ 清理 runner 的 known_hosts 或检查 GIT_SSH_COMMAND（本脚本用临时 known_hosts + accept-new）" >&2
-        echo "::error::症状=网络不可达/服务端 5xx ⇒ 先重跑本 job；持续失败再查 runner 出网与 GitHub 状态" >&2
         ;;
       *)
         echo "::error::症状未分类 ⇒ 看上面的原始 stderr（已脱敏；token 不会回显）" >&2
@@ -176,7 +255,9 @@ if [ "$RESOLVE_ONLY" -eq 1 ]; then
     esac
     exit 1
   fi
-  REV="$(printf '%s\n' "$REMOTE_OUT" | awk 'NR==1 {print $1}')"
+  # 只取 stdout 的第一列（SHA）；`tr -d '\r'` 与 pin 值同一归一化口径（CRLF 形态的 stdout
+  # 会让 40-hex 形状判据失败，报成"pin 形状非法"而与真因无关）。
+  REV="$(printf '%s\n' "$OUT" | awk 'NR==1 {print $1}' | tr -d '\r')"
   if [ -z "$REV" ]; then
     echo "::error::渠道仓返回空 revision（HEAD 不存在？）：${REPO}" >&2
     exit 1
@@ -212,8 +293,8 @@ else
   # 取到临时目录再就位:直接 clone 到非空的 channels/ 会失败,而失败后残留的
   # 上一轮内容会让后续步骤照常跑完 —— 那正是"静默发错镜像"的来源。
   # 取失败即中止,不留可被误用的半成品。
-  CLONE="$(mktemp -d)"
-  trap 'rm -rf "$CLONE" ${CHANNELS_SSH_DIR:+"$CHANNELS_SSH_DIR"}' EXIT
+  # 临时目录走统一登记（清理只在本文件顶部那一处 EXIT trap 里做 —— 这里**不再**重设 trap）。
+  new_temp_dir; CLONE="$NEW_TEMP"
   rm -rf "$DEST" 2>/dev/null || true
   if [ -n "$PIN" ]; then
     require_pin_shape "$PIN"
