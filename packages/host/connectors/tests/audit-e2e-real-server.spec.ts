@@ -132,7 +132,24 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     // the access token dies while the session is live: the next call gets 401
     // and the SDK must refresh with the stored refresh token, then retry
     server.expireAccessTokens()
-    const call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
+    // TEMP-DIAG（2026-09-24，定位 CI 上的 401-after-reauth flake；合并前回退）：
+    // 失败时把服务端观测倾倒出来，区分「刷新被拒/重用检测」与「重试带了旧令牌」。
+    let call: Awaited<ReturnType<typeof client.callTool>>
+    try {
+      call = await client.callTool({ name: 'echo', arguments: { text: 'after-expiry' } })
+    } catch (error) {
+      const grants = server.stats.grants.filter(g => g === 'refresh_token').length
+      console.log('TEMP-DIAG flake:', JSON.stringify({
+        grants,
+        tokenRequests: server.stats.tokenRequests.map(r => r.get('grant_type')),
+        revokedRefreshReuse: server.stats.revokedRefreshReuse,
+        mcpUnauthorized: server.stats.mcpUnauthorized,
+        toolCalls: server.stats.toolCalls,
+        refreshTokensIssued: server.stats.refreshTokensIssued.length,
+        message: error instanceof Error ? error.message : String(error),
+      }))
+      throw error
+    }
     expect(call.content?.[0]?.text).toBe('echo:after-expiry')
     expect(server.stats.mcpUnauthorized).toBeGreaterThanOrEqual(1)
     expect(server.stats.grants).toContain('refresh_token')
