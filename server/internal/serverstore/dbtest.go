@@ -69,6 +69,12 @@ func NewTestDB(t *testing.T) (*sql.DB, func()) {
 	// 清空进程级 TTL 缓存(组织树/模型配置/settings):每个测试独立临时库,
 	// 前一个测试写入的缓存值会污染后续测试(2026-08-31 加缓存后引入)。
 	resetTestCaches()
+	// 保留清理的**过程事实**也是包级单例(UsageRetentionStatus):每个用例都在
+	// 独立临时库上跑,前一个用例的轮数/失败数/原因计数会污染后续断言
+	// (R8-A-2/R8-A-3 的可观测面判据就踩过:整包跑时 failed_rounds 累计成 2)。
+	// 纪律与 resetTestCaches 同形:新增"包级单例 + 进程级累积状态"必须在统一
+	// 测试入口复位。
+	resetUsageRetentionStatusForTest()
 	adminDSN := PgTestDSN()
 	admin := requireTestPG(t, adminDSN)
 	u, err := url.Parse(adminDSN)

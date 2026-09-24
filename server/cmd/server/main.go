@@ -708,7 +708,12 @@ func registerProductionRoutes(r *gin.Engine, d productionDeps) {
 	r.GET("/healthz", bootstrap.NewHandlers(d.DB).Health)
 	// §4.9 运维面：磁盘余量 / 编译队列 / 执行队列 / 编译缓存水位。
 	// 现网 healthz 只做 db.Ping —— 磁盘满仍 healthy，那正是本探针要补的洞。
-	r.GET("/readyz", gin.WrapH(d.Ready))
+	//
+	// R8-A-3(审计 2026-09-24,P2)：保留清理的**过程事实**（跑了几轮 / 清了几条 /
+	// 哪几条没回收、为什么）由 usageRetentionReadyzHandler 并入同一个响应体的
+	// `usage_retention` 字段 —— 此前"深层后代分区永不回收"只有一行日志，
+	// /readyz、指标面、管理端全都看不见（没加路由：路由表逐条不变）。
+	r.GET("/readyz", gin.WrapH(usageRetentionReadyzHandler(d.Ready)))
 }
 
 // accessLogger 是访问日志中间件:语义与 gin.Logger() 一致,但**丢弃查询串**。

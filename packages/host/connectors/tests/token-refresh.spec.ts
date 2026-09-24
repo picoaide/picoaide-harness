@@ -558,6 +558,15 @@ describe('re-registration must not collide with the live MCP instance', () => {
    * up "连接失败" exactly like the field report from 2026-09-14 (Windows,
    * v2.7.3-beta.2: the manual refresh route re-registered while the old instance
    * was still retrying).
+   *
+   * The connector is a STDIO one because that is the class a credential change
+   * still re-registers (R8-B-2): the child receives the token in `env` at spawn
+   * and cannot read the store later. A streamable-http transport reads the live
+   * credential per request, so re-registering it would only dispose the
+   * transport a call in flight is using. The retirement ORDER this case pins is
+   * the same on both paths, and the same-key takeover is additionally covered
+   * for the restore path by `lifecycle.spec.ts > disposes the previous
+   * registration when the same server key is registered again`.
    */
   it('re-registers from the manual refresh route while the old instance is live', async () => {
     const server = await startServer({ expiresIn: 900 })
@@ -576,18 +585,21 @@ describe('re-registration must not collide with the live MCP instance', () => {
         discoveryUrl: `${server.origin}/mcp`,
         scopes: 'offline_access',
       },
-      mcp: [{ serverName: 'example-mcp', transport: 'streamable-http', url: `${server.origin}/mcp` }],
+      mcp: [{ serverName: 'example-mcp', transport: 'stdio', command: process.execPath, args: ['-e', ''] }],
     }
-    const dir = mkdtempSync(join(tmpdir(), 'conn-rereg-http-'))
-    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0 })
+    const dir = mkdtempSync(join(tmpdir(), 'conn-rereg-stdio-'))
+    const h = createHarness([def], dir, { refreshSweepIntervalMs: 0, requestApproval: () => true })
+    // `at-seeded` is a value the fixture cannot issue, so "the child carries the
+    // REFRESHED token" is a decidable statement.
     await seedCredential(dir, 'example-mcp', {
-      accessToken: 'at-1',
+      accessToken: 'at-seeded',
       refreshToken: 'rt-1',
       clientId: 'dyn-1',
       expiresAt: Date.now() + 30 * 60 * 1000,
     })
     h.emitSession({ username: 'user-a' })
     await waitFor(() => h.configs.length === 1)
+    expect(h.configs[0]?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe('at-seeded')
     const first = h.fibers[0]?.dispose
     expect(first).toBeDefined()
 
@@ -596,9 +608,13 @@ describe('re-registration must not collide with the live MCP instance', () => {
     const refreshed = await callRoute(h, '/api/pico/connectors/example-mcp/refresh', 'POST')
     expect(refreshed.status).toBe(200)
     await waitFor(() => h.configs.length === 2)
-    // The previous instance was retired, not leaked.
+    // The previous instance was retired, not leaked — and the new child carries
+    // the token the refresh persisted (the reason the event exists at all).
+    const stored = await new ConnectorStore({ baseDir: dir }).readCredential('example-mcp')
+    expect(stored?.accessToken).not.toBe('at-seeded')
     expect(first).toHaveBeenCalled()
     expect(h.fibers.length).toBeGreaterThanOrEqual(2)
+    expect((h.configs[1] as unknown as { env?: Record<string, string> })?.env?.PICOAIDE_CONNECTOR_ACCESS_TOKEN).toBe(stored?.accessToken)
     h.dispose()
   })
 })

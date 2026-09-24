@@ -27,6 +27,25 @@
  * 一旦它们从编排器表里消失**或被标成 `advisory`**，本脚本会红 —— 那种时候必须有人显式
  * 决定"docs-only 的 PR 还需要跑什么"，而不是让这条路径悄悄变空/变静音。
  *
+ * ## 守卫的 **argv** 也是登记面（2026-09-24 第八轮对抗审计 R8-D-22 / GATE-9）
+ *
+ * 现场（第 8 轮，已复现）：本文件此前只用根 `package.json` 的 scripts 校验
+ * `guard.name`，`guard.args` **一个字节都不校验**，而 `:186` 直接
+ * `spawn('corepack', ['yarn', ...guard.args])`。把编排器表里 16 条的 `args` 全部改成
+ * `['--version']`（`name` 一字不改）之后，输出仍是「16 个根守卫：16 通过」——
+ * EXIT=0（第 8 轮审计实测 2.1s，本泳道复现 3.2s）、**零守卫执行**；同一张表也被 `yarn check` 消费 ⇒ 一次编辑就能把整条
+ * 门禁（含这条**永不跳过**的 docs-only 路径）变成静默成功。同族通道还有
+ * `package.json` 的脚本体被换成 `true` / `echo ok` / `node -e ""`：名字与 argv 都对，
+ * 跑起来的却是什么都不判的壳。
+ *
+ * 所以 argv 与"名字在不在 scripts 里"同级校验（三条一起，缺一条就有一个绕过口）：
+ *   ① `args[0] === 'run'` 且 `args[1] === <条目名>` —— argv 与条目名同源；
+ *   ② 其余参数逐字等于 `REGISTERED_GUARD_ARG_TAILS` 的登记值（缺省 = 空尾巴）；
+ *   ③ 任何位置出现 `SEMANTICS_CHANGING_FLAGS` 里的旗标一律拒（**包括**想把它登记进来）；
+ *   ④ 根 `package.json` 的脚本体必须是**直接执行一个脚本文件**的形态（`node scripts/…` /
+ *      `bash scripts/…`），否则同样是"名字还在、判据没了"。
+ * 四条都是**配置错误 ⇒ exit 2**（与本文件其它登记错误同码），绝不是"跳过这一条"。
+ *
  * ## 用法与退出码
  *
  * 用法：node scripts/check-root-guards.mjs [--list] [--concurrency N] [--full-output] [--allow-advisory]
@@ -60,11 +79,106 @@ const MINIMUM_REQUIRED_GUARDS = [
 ]
 
 /**
+ * 每条守卫**允许的参数尾**（`['run', <守卫名>]` 之后的部分）—— 登记制（R8-D-22 / GATE-9）。
+ *
+ * 缺省 = **空尾巴**。想加尾巴就是放宽/改变判据面，必须在这里逐条登记并写明理由
+ * （与 `ADVISORY_REGISTRY`、"下限守卫"同一套纪律：一个词/一个参数就能改变门禁语义的
+ * 东西，不能是无登记的）。
+ */
+const REGISTERED_GUARD_ARG_TAILS = new Map([
+  // `check:wasm-client-only` 的 `--portable`：只跑便携子集（需要真 PG / 显示器的组归
+  // server job 与 W6 三平台）。登记值必须与 `scripts/check-workspaces.mjs` 的表逐字一致。
+  ['check:wasm-client-only', ['--portable']],
+])
+
+/**
+ * "会改变语义"的旗标：出现在守卫 argv 里一律拒（R8-D-22）。
+ *
+ * 它们都不是"更强的检查"，而是**让守卫什么都不判**：`--list` / `--help` / `--version`
+ * 只打印清单或版本，`--dry-run` 只演算不判定，`--allow-advisory` 则是把 advisory 守卫的
+ * 失败降级成告警的开关（本文件自己的用法注释写着"CI 的任何调用都不得带它"）。
+ */
+const SEMANTICS_CHANGING_FLAGS = [
+  '--list',
+  '--help',
+  '-h',
+  '--version',
+  '-V',
+  '--dry-run',
+  '--allow-advisory',
+]
+
+/**
+ * 根 `package.json` 里守卫脚本**允许的形态**：直接执行 `scripts/` 下的一个脚本文件。
+ *
+ * 为什么不是"存在即可"：`"check:layout": "true"` / `"echo ok"` / `"node -e \"\""` /
+ * `"yarn --version"` 都会让守卫"通过"而什么都没判；带参数（`scripts/x.mjs --list`）同样
+ * 一律拒 —— 要加参数就走 `REGISTERED_GUARD_ARG_TAILS`，那里有登记与理由。
+ */
+const GUARD_SCRIPT_INVOCATION = /^(?:node|bash)\s+scripts\/\S+$/u
+
+/**
+ * 校验一条守卫的 argv（R8-D-22）。返回问题描述；`null` = 通过。
+ *
+ * @param name - 条目名（= 根 `package.json` 里的脚本名）。
+ * @param args - 条目声明的参数向量。
+ * @returns 问题描述或 `null`。
+ */
+export function guardArgsProblem(name, args) {
+  if (!Array.isArray(args) || args.length === 0) {
+    return `\`${name}\` 的 args 不是非空数组（实际 ${JSON.stringify(args)}）`
+      + ' —— 没有 argv 就没有守卫，缺参数必须当场红。'
+  }
+  const weakening = args.filter(arg => SEMANTICS_CHANGING_FLAGS.includes(arg))
+  if (weakening.length > 0) {
+    return `\`${name}\` 的 args 里有"会改变语义"的旗标 ${weakening.map(flag => `\`${flag}\``).join('、')}`
+      + ' —— 它们让守卫**跑起来却什么都不判**（只打印清单/版本/演算），或把失败降级成告警。'
+  }
+  if (args[0] !== 'run') {
+    return `\`${name}\` 的 args 必须以 \`'run'\` 开头（实际 ${JSON.stringify(args)}）`
+      + ' —— `yarn --version` 这类"不是跑脚本"的向量恒退出 0，而运行器会把它当成"守卫通过"'
+      + '（R8-D-22 的现场：16 条全改成 `--version` ⇒「16 通过」且零守卫执行）。'
+  }
+  if (args[1] !== name) {
+    return `\`${name}\` 的 args[1] 必须等于守卫名本身（实际 ${JSON.stringify(args[1] ?? null)}）`
+      + ' —— argv 与条目名必须同源，否则"名字还在、跑的是别的东西"。'
+  }
+  const tail = args.slice(2)
+  const registered = REGISTERED_GUARD_ARG_TAILS.get(name) ?? []
+  if (tail.join('\u0000') !== registered.join('\u0000')) {
+    return `\`${name}\` 的参数尾 ${JSON.stringify(tail)} 与登记值 ${JSON.stringify(registered)} 不一致`
+      + ' —— 参数会改变判据的语义（少跑/多跑/换判据面），必须逐字匹配 `REGISTERED_GUARD_ARG_TAILS`'
+      + '（缺省 = 空尾巴）；确实需要新尾巴时登记它并写明理由。'
+  }
+  return null
+}
+
+/**
+ * 校验根 `package.json` 里某条守卫脚本的**形态**（R8-D-22 的同族通道）。
+ *
+ * @param name - 守卫名。
+ * @param body - 根 `package.json` 的 `scripts[name]` 取值。
+ * @returns 问题描述或 `null`。
+ */
+export function guardScriptProblem(name, body) {
+  if (typeof body !== 'string' || body.trim() === '') {
+    return `\`${name}\` 在根 package.json 里没有脚本体`
+  }
+  if (!GUARD_SCRIPT_INVOCATION.test(body.trim())) {
+    return `\`${name}\` 的脚本体 ${JSON.stringify(body)} 不是"直接执行一个脚本文件"的形态`
+      + '（允许的形态只有 `node scripts/<file>` / `bash scripts/<file>`，不接受任何参数）'
+      + ' —— `true` / `echo ok` / `node -e ""` 这类壳会让守卫"通过"而什么都没判。'
+  }
+  return null
+}
+
+/**
  * 从编排器的源码里解析 `GUARDS` 表（name / args / advisory）。
  *
  * 用正则而不是 import：`check-workspaces.mjs` 是"一跑就跑整轮门禁"的 CLI，import 它
  * 会立刻开始调度。解析是**有判据**的：条数对不上（name 与 args 数量不等、条目切分数量
- * 对不上）就是 fail-loud，而不是"解析到几条算几条"。
+ * 对不上）就是 fail-loud，而不是"解析到几条算几条"；`args` 还必须过 `guardArgsProblem`
+ * 的登记校验（argv 与条目名同源、无"会改变语义"的旗标、参数尾逐字等于登记值 —— R8-D-22）。
  *
  * @param source - `scripts/check-workspaces.mjs` 的源码文本。
  * @returns `{ guards }` 或 `{ error }`。
@@ -85,6 +199,10 @@ export function parseGuardTable(source) {
     }
     const args = [...argsRaw.matchAll(/'([^']+)'/gu)].map(match => match[1])
     if (args.length === 0) return { error: `GUARDS 表里 ${name} 的 args 为空` }
+    // argv 也是登记面（R8-D-22）：只校验 name 时，16 条 args 全改成 `--version` 仍是
+    // 「16 通过」+ 零守卫执行。这里是**逐条**校验，第一条出问题就 fail-loud。
+    const argsProblem = guardArgsProblem(name, args)
+    if (argsProblem !== null) return { error: `GUARDS 表的 args 校验失败：${argsProblem}` }
     guards.push({ name, args, advisory: /advisory:\s*true/u.test(chunk) })
   }
   if (guards.length === 0) return { error: 'GUARDS 表解析出 0 条守卫（表结构变了？）' }
@@ -268,11 +386,24 @@ if (staleAdvisory.length > 0) {
   process.exit(2)
 }
 
-// 守卫名必须真的是根 package.json 里的脚本（改名/删除 ⇒ 这里红，而不是"跑了个不存在的东西"）。
-const rootScripts = Object.keys(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts ?? {})
+// 守卫名必须真的是根 package.json 里的脚本（改名/删除 ⇒ 这里红，而不是"跑了个不存在的东西"）；
+// 脚本体还必须是"直接执行一个脚本文件"的形态 —— 名字与 argv 都对、实现被换成 `true` /
+// `echo ok` / `node -e ""` 时，守卫会"通过"而什么都没判（R8-D-22 的同族通道）。
+const rootPackage = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+const rootScripts = Object.keys(rootPackage.scripts ?? {})
 const unknown = guards.filter(guard => !rootScripts.includes(guard.name)).map(guard => guard.name)
 if (unknown.length > 0) {
   console.error(`check-root-guards: 编排器表里的守卫在 package.json scripts 里不存在：${unknown.join(', ')}`)
+  process.exit(2)
+}
+const hollowScripts = guards
+  .map(guard => ({ name: guard.name, problem: guardScriptProblem(guard.name, rootPackage.scripts?.[guard.name]) }))
+  .filter(entry => entry.problem !== null)
+if (hollowScripts.length > 0) {
+  console.error('check-root-guards: 根 package.json 里的守卫脚本不是"真的在跑一个脚本"：')
+  for (const entry of hollowScripts) console.error(`  · ${entry.problem}`)
+  console.error('  ⇒ 名字与 argv 都对、实现是壳（`true`/`echo ok`/`node -e ""`/带参数）时，'
+    + '本运行器会报"守卫通过"而实际零判定。请把脚本体改回 `node scripts/<file>` / `bash scripts/<file>`。')
   process.exit(2)
 }
 // 下限判据 = "在表里 **且 不是 advisory**"：光在表里不够 —— 一个 `advisory: true` 就能让
@@ -300,6 +431,10 @@ const concurrency = options.concurrency
 
 console.log(`check-root-guards — 并发 ${concurrency}；docs-only 的 PR 也必须跑到的根守卫（${guards.length} 个）`
   + `${options.allowAdvisory ? '；**--allow-advisory**：advisory 失败只告警' : ''}`)
+console.log(`check-root-guards: argv 登记校验通过 —— ${guards.length} 条守卫的 argv 全部是 \`run <条目名>\``
+  + `（登记的参数尾：${REGISTERED_GUARD_ARG_TAILS.size === 0
+    ? '无'
+    : [...REGISTERED_GUARD_ARG_TAILS].map(([name, tail]) => `${name} ${tail.join(' ')}`).join('；')}）`)
 const startedAt = Date.now()
 const results = []
 await runPool(guards, concurrency, results)

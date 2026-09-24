@@ -67,7 +67,7 @@ func (p partitionSpec) relation() string { return p.parent + "_" + p.key }
 //
 //	Exists=false             → 关系不存在,需要建
 //	Exists && !IsPartition   → 同名孤儿表(F11:被 DETACH 但未 DROP)
-//	Exists && IsPartition    → 真分区,还要比对 RelKind / Parent(挂在哪个父表下)
+//	Exists && IsPartition    → 真分区,还要比对 RelKind / 分区树根(挂在哪棵树上)
 //	                           与 Bound(边界表达式原文)
 type partitionProbe struct {
 	Exists      bool
@@ -76,8 +76,21 @@ type partitionProbe struct {
 	// 'p' = 该分区**自身又是分区父表**(二级分区)—— 子分区只覆盖半个窗口时
 	// 写入照样 23514,所以不算「已就绪」(见 partitionReadyErr)。
 	RelKind byte
-	Parent  string
-	Bound   string
+	// Parent 是 pg_inherits 的**直接**父表名('' = 无父表)。
+	Parent string
+	// Root 是分区树的**传递根**关系名(pg_partition_root;非分区 = '')。
+	//
+	// 它与 Parent 的区别就是 R8-A-1 的判据面:多级布局
+	// `usage → usage_<YYYY> → usage_<YYYYMM>` 里的月叶子直接父是 `usage_<YYYY>`,
+	// 但它的传递根仍是 `usage` —— 行照样能被 `SELECT … FROM usage` 读到、
+	// 写入也照样按区间路由进这株树,所以它是**就绪的**月分区。
+	Root string
+	// RootIsExpectedParent 报告传递根**就是** expectedRoot 指定的那个关系。
+	//
+	// 判据按 **oid** 比较(`pg_partition_root(c.oid) = to_regclass('public.'||$n)`),
+	// 不比 relname:另一个 schema 里同名的分区树(R8-A-7)不参与判定。
+	RootIsExpectedParent bool
+	Bound                string
 }
 
 // partitionProbeDateStyle:探测事务里的**会话渲染**固定值(P1,审计 r5 §2)。
@@ -104,11 +117,18 @@ type partitionProbe struct {
 const partitionProbeDateStyle = "SET LOCAL DateStyle = 'ISO, MDY'"
 
 // probeUsagePartition 探测 public.<relation> 的 pg_class 记录,并取回
-// pg_get_expr(relpartbound, oid)(非分区为 NULL → 空串)与继承父表名
-// (pg_inherits → pg_class;无父表为 NULL → 空串)。父表也必须核对:同名关系
-// 若是**别的**分区父表的分区(边界可以恰好一致),写路径照样路由不到本表。
-// relkind 同时取回:二级分区('p')不能当叶子分区用。
-func probeUsagePartition(db *sql.DB, relation string) (partitionProbe, error) {
+// pg_get_expr(relpartbound, oid)(非分区为 NULL → 空串)、继承父表名
+// (pg_inherits → pg_class;无父表为 NULL → 空串)与**分区树传递根**
+// (pg_partition_root)。
+//
+// 根判据(R8-A-1):"该关系能不能直接当作 expectedRoot 的月分区使用"问的是
+// **它是不是这株树里的分区**,而不是"它的直接父是不是 expectedRoot" —— 多级
+// 布局里的孙辈叶子直接父是中间父表,但它的行对 `SELECT … FROM expectedRoot`
+// 可见、写入也按区间路由进同一株树。只比直接父会让**当月每一次计量写入**失败
+// (网关 503 METERING_FAILED,不自愈);比传递根才与"能不能用"同构。
+// 比较按 oid(to_regclass),不比 relname —— 跨 schema 的同名父表不算同一株树
+// (R8-A-7)。relkind 同时取回:二级分区('p')不能当叶子分区用。
+func probeUsagePartition(db *sql.DB, relation, expectedRoot string) (partitionProbe, error) {
 	// 只读事务:固定会话渲染(见 partitionProbeDateStyle),读完即回滚。
 	tx, err := db.Begin()
 	if err != nil {
@@ -118,14 +138,17 @@ func probeUsagePartition(db *sql.DB, relation string) (partitionProbe, error) {
 	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
 		return partitionProbe{}, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
 	}
-	var isPartition sql.NullBool
-	var relkind, bound, parent sql.NullString
-	err = tx.QueryRow(`SELECT c.relispartition, c.relkind, pg_get_expr(c.relpartbound, c.oid), p.relname
+	var isPartition, rootOK sql.NullBool
+	var relkind, bound, parent, root sql.NullString
+	err = tx.QueryRow(`SELECT c.relispartition, c.relkind, pg_get_expr(c.relpartbound, c.oid), p.relname,
+       CASE WHEN c.relispartition THEN COALESCE(r.relname, '') ELSE '' END,
+       COALESCE(c.relispartition AND r.oid = to_regclass('public.' || ?), false)
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
 LEFT JOIN pg_class p ON p.oid = i.inhparent
-WHERE c.relname = ? AND n.nspname = 'public'`, relation).Scan(&isPartition, &relkind, &bound, &parent)
+LEFT JOIN pg_class r ON r.oid = pg_partition_root(c.oid)
+WHERE c.relname = ? AND n.nspname = 'public'`, expectedRoot, relation).Scan(&isPartition, &relkind, &bound, &parent, &root, &rootOK)
 	if errors.Is(err, sql.ErrNoRows) {
 		return partitionProbe{}, nil
 	}
@@ -137,11 +160,13 @@ WHERE c.relname = ? AND n.nspname = 'public'`, relation).Scan(&isPartition, &rel
 		kind = relkind.String[0]
 	}
 	return partitionProbe{
-		Exists:      true,
-		IsPartition: isPartition.Valid && isPartition.Bool,
-		RelKind:     kind,
-		Parent:      parent.String,
-		Bound:       bound.String,
+		Exists:               true,
+		IsPartition:          isPartition.Valid && isPartition.Bool,
+		RelKind:              kind,
+		Parent:               parent.String,
+		Root:                 root.String,
+		RootIsExpectedParent: rootOK.Valid && rootOK.Bool,
+		Bound:                bound.String,
 	}, nil
 }
 
@@ -218,7 +243,7 @@ func subPartitionedErr(spec partitionSpec, probe partitionProbe) error {
 // 人工核对」契约(审计 r5 §2),本轮的放宽只作用于**异名覆盖分区**的扫描。
 func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 	rel := spec.relation()
-	probe, probeErr := probeUsagePartition(db, rel)
+	probe, probeErr := probeUsagePartition(db, rel, spec.parent)
 	if probeErr != nil {
 		return probeErr
 	}
@@ -229,14 +254,32 @@ func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 	// 入口不能只有"同名关系":季度分区覆盖 8 月时,usage_209908 不存在,但窗口
 	// 已被 usage_209909 覆盖 —— 再建月分区必然 overlap(42P17),RecordUsage /
 	// RebuildUsageLedger 全挂、该月 503 且不自愈。
+	//
+	// R8-A-1:扫描面是整株子树(任意深度的后代),不只是直接子分区 —— 多级布局
+	// `usage → usage_<YYYY>[p]` 下窗口可能已被**孙辈叶子**完整覆盖(直接复用),
+	// 也可能只被中间父表覆盖:那时月分区必须建在**那个父表**下面,挂在 usage 下
+	// 必然 42P17 overlap(当月每次计量写入 503 且不自愈)。
 	if scan, serr := scanUsagePartitions(db, spec); serr != nil {
 		return serr
 	} else if scan.Covering != "" {
 		logPartitionWindowCovered(spec, scan.Covering)
 		return nil
+	} else if scan.Attach != "" {
+		logPartitionAttachPoint(spec, scan.Attach)
+		return createRangePartition(db, spec, scan.Attach)
 	}
+	return createRangePartition(db, spec, spec.parent)
+}
+
+// createRangePartition 在 parent 下幂等创建 spec 的分区,并把 PG 的两类"建不进去"
+// 翻译成可诊断错误(23514 DEFAULT 分区已有本窗口的行 / 42P17 与既有分区重叠)。
+//
+// parent 由调用方决定:缺省是 spec.parent;多级布局下窗口只被中间父表覆盖时,
+// 是那个**最深的覆盖窗口的中间父表**(见 usagePartitionScan.Attach)。
+func createRangePartition(db *sql.DB, spec partitionSpec, parent string) error {
+	rel := spec.relation()
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s
-		FOR VALUES FROM ('%s') TO ('%s')`, rel, spec.parent, spec.from, spec.to)
+		FOR VALUES FROM ('%s') TO ('%s')`, rel, quoteRelationIdent(parent), spec.from, spec.to)
 	_, err := db.Exec(stmt)
 	if err != nil {
 		// rc3-4:DEFAULT 分区(或 MINVALUE..MAXVALUE 分区)里已经有本窗口的行时,
@@ -271,7 +314,7 @@ func ensureRangePartition(db *sql.DB, spec partitionSpec) error {
 		if isDuplicateRelationErr(err) {
 			// 并发竞态:另一会话已建好同名分区。复检确认(READ COMMITTED 下新
 			// 语句拿新快照,能看到对方已提交的分区);确认不了就保留原始错误。
-			again, perr := probeUsagePartition(db, rel)
+			again, perr := probeUsagePartition(db, rel, spec.parent)
 			if perr == nil && again.Exists {
 				return partitionReadyErr(spec, again)
 			}
@@ -288,7 +331,7 @@ var partitionSkipLogged sync.Map
 // logPartitionWindowCovered 记录一次"同名关系不存在但窗口已被别的分区覆盖"
 // (r7 r7f1-3):这是季度/年度预建布局被正常复用的诊断线索,同一窗口只记一次。
 func logPartitionWindowCovered(spec partitionSpec, covering string) {
-	key := spec.parent + "." + spec.key
+	key := "covered:" + spec.parent + "." + spec.key
 	if _, loaded := partitionSkipLogged.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
@@ -296,75 +339,150 @@ func logPartitionWindowCovered(spec partitionSpec, covering string) {
 		spec.relation(), spec.from, spec.to, spec.parent, covering)
 }
 
-// usagePartitionScan 是一次"期望窗口 vs spec.parent 现有分区"的扫描结果
-// (r7 r7f1-3,P2):判据是**区间覆盖/重叠**,入口不再只有同名关系。
+// logPartitionAttachPoint 记录一次"窗口只被中间父表覆盖 ⇒ 月分区建在那个父表下"
+// (R8-A-1)。这是多级布局被**写路径自愈**的诊断线索,同一窗口只记一次。
+//
+// 为什么必须自愈而不是 fail-loud:该布局下窗口本身**已经是可写的**(中间父表覆盖
+// 了它),缺的只是一个更贴月粒度的叶子;不建的话每一次计量写入都要失败(网关
+// 503 METERING_FAILED,不交付),而"这笔计量能不能落账"与"叶子挂在哪一层"无关 ——
+// 判据必须与危害同构。
+func logPartitionAttachPoint(spec partitionSpec, parent string) {
+	key := "attach:" + spec.parent + "." + spec.key
+	if _, loaded := partitionSkipLogged.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	log.Printf("usage partition: %s not present; its window FROM '%s' TO '%s' of %s is covered by the multi-level layout — creating the partition under %s (deepest descendant covering the window) instead of %s",
+		spec.relation(), spec.from, spec.to, spec.parent, parent, spec.parent)
+}
+
+// usagePartitionScan 是一次"期望窗口 vs spec.parent 子树"的扫描结果
+// (r7 r7f1-3,P2 + R8-A-1):判据是**区间覆盖/重叠**,入口不再只有同名关系;
+// 扫描面是整株子树(任意深度的后代),不再只有直接子分区。
 type usagePartitionScan struct {
-	// Covering 非空 = 该分区完整覆盖期望窗口(可直接复用,不得再建月/年分区)。
+	// Covering 非空 = 该**叶子**分区完整覆盖期望窗口(可直接复用,不得再建月/年分区)。
 	Covering string
-	// Overlapping 非空 = 该分区与期望窗口部分重叠(再建必然 42P17)。
+	// Attach 非空 = 没有任何叶子覆盖窗口,但该**中间父表**('p')完整覆盖窗口 ⇒
+	// 月分区必须建在它下面(R8-A-1):挂在 spec.parent 下会与它 42P17 overlap,
+	// 当月每一次计量写入都会失败且不自愈。取**最深**的那个覆盖者(最贴近月粒度)。
+	Attach string
+	// Overlapping 非空 = 该分区与期望窗口部分重叠(再建必然 42P17)。只在与创建
+	// 目标同一个父表下的兄弟里找 —— 别的分支上的重叠与本次 CREATE 无关。
 	Overlapping string
 }
 
-// scanUsagePartitions 扫 spec.parent 的所有**叶子**分区,用 partitionBoundCoverage
-// 的同一比较器找出覆盖/重叠期望窗口的那个。
+// partitionDescendant 是分区树里的一个后代关系(见 usageTreeDescendants)。
+type partitionDescendant struct {
+	Rel    string
+	Parent string
+	Kind   string // pg_class.relkind:'r' 叶子 / 'p' 自身又是分区父表 / 其它
+	Depth  int    // 1 = root 的直接子分区
+	Bound  string // pg_get_expr(relpartbound, oid)
+}
+
+// usageTreeDescendants 枚举 root 关系所在分区树的**全部后代**(递归 CTE,任意深度),
+// 返回按深度升序排列的后代清单(root 自身不在结果里)。
 //
-// 只接受叶子分区(relkind='r'):二级分区('p')的覆盖范围无法用一次往返证明
-// (与 partitionReadyErr 的判据同源,不允许再分叉)。
+// 只读事务 + 固定会话渲染(见 partitionProbeDateStyle):边界原文由
+// partitionBoundCoverage/partitionBoundOverlaps 解析,而它们只认 ISO 渲染。
+func usageTreeDescendants(db *sql.DB, root string) ([]partitionDescendant, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
+	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
+		return nil, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
+	}
+	rows, err := tx.Query(`WITH RECURSIVE tree AS (
+    SELECT c.oid AS oid, 0 AS depth
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relname = ? AND n.nspname = 'public'
+  UNION ALL
+    SELECT i.inhrelid, t.depth + 1
+    FROM tree t
+    JOIN pg_inherits i ON i.inhparent = t.oid
+)
+SELECT c.relname, COALESCE(p.relname, ''), c.relkind, t.depth, COALESCE(pg_get_expr(c.relpartbound, c.oid), '')
+FROM tree t
+JOIN pg_class c ON c.oid = t.oid
+LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
+LEFT JOIN pg_class p ON p.oid = i.inhparent
+WHERE t.depth > 0
+ORDER BY t.depth, c.relname`, root)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []partitionDescendant
+	for rows.Next() {
+		var d partitionDescendant
+		if err := rows.Scan(&d.Rel, &d.Parent, &d.Kind, &d.Depth, &d.Bound); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// scanUsagePartitions 扫 spec.parent 子树里的**全部后代**,用 partitionBoundCoverage
+// 的同一比较器找出覆盖期望窗口的那个关系(叶子 ⇒ 复用;中间父表 ⇒ 挂载点)。
+//
+// 只把**叶子**分区('r')当作覆盖者:中间父表('p')的边界覆盖窗口推不出"它自己的
+// 子分区也覆盖了窗口"(与 partitionReadyErr 的判据同源,不允许再分叉),所以它只
+// 能当**挂载点** —— 把月分区建在它下面,由 PG 自己保证行落进这株子树。
 //
 // rc3-4:`DEFAULT` 与 `MINVALUE..MAXVALUE` 由 partitionBoundCoversEverything
 // 在进入字面量比较器**之前**识别为"覆盖一切",命中 Covering 分支、跳过
 // CREATE —— 否则该布局下每月首写都要 CREATE 并吃 23514/42P17。
 func scanUsagePartitions(db *sql.DB, spec partitionSpec) (usagePartitionScan, error) {
-	// 只读事务:固定会话渲染(见 partitionProbeDateStyle),读完即回滚。
-	tx, err := db.Begin()
+	desc, err := usageTreeDescendants(db, spec.parent)
 	if err != nil {
 		return usagePartitionScan{}, err
 	}
-	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
-	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
-		return usagePartitionScan{}, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
-	}
-	rows, err := tx.Query(`SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
-FROM pg_inherits i
-JOIN pg_class c ON c.oid = i.inhrelid
-JOIN pg_class p ON p.oid = i.inhparent
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE p.relname = ? AND n.nspname = 'public' AND c.relkind = 'r'`, spec.parent)
-	if err != nil {
-		return usagePartitionScan{}, err
-	}
-	defer rows.Close()
 	var out usagePartitionScan
-	for rows.Next() {
-		var rel, bound string
-		if err := rows.Scan(&rel, &bound); err != nil {
-			return usagePartitionScan{}, err
-		}
-		if rel == spec.relation() {
+	targetParent := spec.parent
+	for _, d := range desc {
+		if d.Rel == spec.relation() {
 			continue // 同名关系由 probeUsagePartition 判(错误分类更精确)
 		}
 		// rc3-4:最宽的两类覆盖在这里先认 —— DEFAULT / MINVALUE..MAXVALUE 没有
 		// 可解析的字面量,但对**异名**分区来说它们完整覆盖一切(写入经 PG 路由
 		// 正确落进该分区),必须命中 Covering 而跳过 CREATE(否则该布局下每月
 		// 首写都要 CREATE 并吃 23514/42P17)。
-		if partitionBoundCoversEverything(bound) {
-			out.Covering = rel
-			break
+		if partitionBoundCoversEverything(d.Bound) {
+			if d.Kind == "r" {
+				out.Covering = d.Rel
+				break
+			}
+			out.Attach, targetParent = d.Rel, d.Rel
+			continue
 		}
-		covered, _, readable := partitionBoundCoverage(spec, bound)
+		covered, _, readable := partitionBoundCoverage(spec, d.Bound)
 		if !readable {
 			continue // 读不懂的边界不参与判定(交给同名探测/人工)
 		}
 		if covered {
-			out.Covering = rel
-			break
-		}
-		if out.Overlapping == "" && partitionBoundOverlaps(spec, bound) {
-			out.Overlapping = rel
+			if d.Kind == "r" {
+				out.Covering = d.Rel
+				break
+			}
+			// desc 按深度升序:后到的覆盖者更深、窗口更窄、更贴月粒度。
+			out.Attach, targetParent = d.Rel, d.Rel
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return usagePartitionScan{}, err
+	if out.Covering != "" {
+		return out, nil
+	}
+	// 重叠只在**创建目标的兄弟**里找:别的分支上的重叠与本次 CREATE 无关。
+	for _, d := range desc {
+		if d.Rel == spec.relation() || d.Parent != targetParent || partitionBoundCoversEverything(d.Bound) {
+			continue
+		}
+		if partitionBoundOverlaps(spec, d.Bound) {
+			out.Overlapping = d.Rel
+			break
+		}
 	}
 	return out, nil
 }
@@ -396,11 +514,22 @@ func partitionReadyErr(spec partitionSpec, probe partitionProbe) error {
 	if !probe.IsPartition {
 		return staleDetachedTableErr(spec.relation())
 	}
-	// 父表也必须对:同名关系可能是**别的**分区父表的分区(边界甚至能完全一致),
-	// 那样写路径依旧路由不到本表 —— 「已就绪」必须包含这一条。
-	if probe.Parent != spec.parent {
+	// 判据是**分区树传递根**,不是直接父(R8-A-1,严重级 P2→可用性事故):
+	//
+	// 旧判据 `probe.Parent != spec.parent` 只认一层。多级布局
+	// `usage → usage_<YYYY>[p] → usage_<YYYYMM>` 一旦覆盖**当前月**,该月每一次
+	// `RecordUsage*` 都在这里报错 ⇒ 网关侧唯一出口是 fail-closed 的
+	// 503 METERING_FAILED(不交付上游内容),而清理侧的"深层后代只补账不 DETACH"
+	// 取舍又保证它**永不自愈** ⇒ 当月全部对话不可用,只能人工拆分区树。
+	//
+	// 而危害本来只是"这笔计量能不能落账":孙辈叶子的行对 `SELECT … FROM usage`
+	// 可见、写入也按区间路由进同一株树 —— 与"直接挂在 usage 下"逐条等价。判据必须
+	// 与危害同构,所以取 `pg_partition_root`(见 probeUsagePartition),并且按 **oid**
+	// 比较(R8-A-7:另一个 schema 里的同名 `usage` 分区树不算同一株树)。
+	if !probe.RootIsExpectedParent {
 		return misboundedPartitionErr(spec, probe.Bound,
-			fmt.Sprintf("该关系是父表 %q 的分区,期望父表 %q", probe.Parent, spec.parent))
+			fmt.Sprintf("该关系是父表 %q 的分区(分区树根 %q),期望父表 %q(判据是分区树的传递根)",
+				probe.Parent, probe.Root, spec.parent))
 	}
 	// 二级分区('p')不是叶子:边界对不代表子分区覆盖整个窗口(P2,审计 r5 §2)。
 	// 只接受普通表形态;'f'(外部表)/'v'/'m'(视图)/其它同样是"写不进去"的关系。

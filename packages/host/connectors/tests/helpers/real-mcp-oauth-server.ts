@@ -29,6 +29,16 @@ export interface RealMcpServer {
   setRotateRefresh: (rotate: boolean) => void
   /** expire every ACCESS token server-side, leaving the client's copy as-is */
   expireAccessTokens: () => void
+  /**
+   * Delay every `/mcp` answer by this many ms (`0` = answer immediately).
+   *
+   * A 401 recovery is a two-request conversation on ONE transport: the SDK
+   * refreshes, then retries the call. Whether anything the host does during the
+   * refresh can still hurt that retry depends on the retry staying in flight
+   * longer than that work takes — i.e. on a real server's answer time. The knob
+   * makes that window deterministic instead of machine-speed dependent.
+   */
+  setMcpDelay: (ms: number) => void
   /** counts + observations for assertions */
   stats: {
     registrations: number
@@ -62,6 +72,7 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
   }
   let tokenLifetimeMs = 60 * 60 * 1000
   let rotateRefresh = true
+  let mcpDelayMs = 0
   /** token -> { expiresAt, kind } */
   const tokens = new Map<string, { expiresAt: number, kind: 'access' | 'refresh', used: boolean }>()
   const clients = new Map<string, { redirectUris: string[] }>()
@@ -197,7 +208,11 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
     if (url.pathname === '/mcp') {
       const header = req.headers.authorization ?? ''
       const token = header.replace(/^Bearer\s+/iu, '')
+      // Recorded on arrival, BEFORE the delay: the wire fact ("which token did
+      // the retry carry") must not depend on whether the caller is still there
+      // when the answer is ready.
       stats.mcpBearerTokens.push(token)
+      if (mcpDelayMs > 0) await new Promise<void>(resolve => { setTimeout(resolve, mcpDelayMs) })
       const entry = token === '' ? undefined : tokens.get(token)
       const valid = entry !== undefined && entry.kind === 'access' && entry.expiresAt > Date.now()
       if (!valid) {
@@ -228,6 +243,7 @@ export async function startRealMcpServer(): Promise<RealMcpServer> {
       for (const [token, entry] of tokens) if (entry.kind === 'access') tokens.delete(token)
     },
     setRotateRefresh: (rotate) => { rotateRefresh = rotate },
+    setMcpDelay: (ms) => { mcpDelayMs = Math.max(0, Math.floor(ms)) },
     stats,
     close: () => new Promise<void>(resolve => { http.close(() => resolve()) }),
   }
