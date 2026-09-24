@@ -245,7 +245,7 @@ func rebuildUsageLedgerRowsOnPool(db *sql.DB, from, to time.Time, extraSources [
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
-	if _, err := tx.Exec(usageSearchPathPin); err != nil {
+	if err := pinUsageSearchPath(tx); err != nil {
 		return err
 	}
 	if err := rebuildUsageLedgerRowsFrom(tx, from, to, extraSources); err != nil {
@@ -1285,6 +1285,10 @@ type usageSettleRequest struct {
 	// 闸门必须在**冻结（DETACH）之前**判定（见 reclaimUsagePartitionAtomically），
 	// 摘了再判会把不该摘的子树摘成一个孤儿。
 	dropStmt string
+	// kind 是该关系的 relkind（`pg_class.relkind`），**只用于"结算段对目标关系取哪把
+	// 锁"这一步**（R12-N2 P1-03）。空串 = 未提供 ⇒ 按表形态处理（attached 路径的
+	// 关系必然是表/分区；孤儿路径由调用方把 shape.Kind 传进来）。
+	kind string
 }
 
 // settleUsageReclaim 是回收的**第 2 段**（只锁目标关系，可以长）：
@@ -1366,9 +1370,35 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 		rollback()
 		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-usage", err)
 	}
-	if _, err := tx.Exec("LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"); err != nil {
-		rollback()
-		return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-subtree", err)
+	// R12-N2（P1-03）：**结算段对目标关系取哪把锁必须按 relkind 分流**。
+	//
+	// 缺陷形态（R12-A P1-03）：这一句对**物化视图**直接失败 —— PG 的
+	// `RangeVarCallbackForLockTable` 不接受 matview（真 PG 18.6 实测：
+	// `LOCK TABLE <matview> IN ACCESS EXCLUSIVE MODE` ⇒ **42809**
+	// `cannot lock relation "…" / This operation is not supported for materialized
+	// views.`，`ACCESS SHARE` 同样 42809）。于是月名被 `CREATE MATERIALIZED VIEW
+	// usage_<YYYYMM>` 占住时：R11 的零窗口分支（usageReclaimWindowUnderLock 的
+	// `from.IsZero()` 短路）**根本到不了**，这一条关系每轮都进 failures、关系永不
+	// 回收、管理端保存保留期每轮 500（`/readyz` 的 reclaim_stalled 永久为真）。
+	// 对照：**普通视图**可以 LOCK（同一个回调允许 `RELKIND_VIEW`）⇒ 旧实现的 VIEW
+	// 形态恰好能过，matview 形态不能 —— 这就是"同族只收口了一条"。
+	//
+	// 判据：视图/物化视图**不持有明细行**，所以"判据（窗口）与动作（聚合 + DROP）
+	// 出自同一个持锁区间"这条金额纪律对它们**没有对象**（零窗口、没有 created_at
+	// 列）。因此：
+	//
+	//	r/p/其它可锁形态 —— 原样 `ACCESS EXCLUSIVE`（表形态的钱账窗口靠它）；
+	//	m（物化视图）    —— **不取锁**（PG 结构上不支持；它的正确性判据是同一事务里
+	//	                    的归属复检 + DROP MATERIALIZED VIEW 自身的锁）；
+	//	v（视图）        —— 保持原样（可锁，且锁住"判据与动作同一窗口"的成本为零）。
+	//
+	// 不允许"按 kind 猜"：`kind` 由调用方的 catalog 事实（shape.Kind）传入，空串按
+	// 表形态处理（缺省保守）。
+	if lockStmt := usageReclaimTargetLock(rel, req.kind); lockStmt != "" {
+		if _, err := tx.Exec(lockStmt); err != nil {
+			rollback()
+			return usageReclaimLockFailure(func() bool { return usageRelationGone(db, rel) }, "lock-subtree", err)
+		}
 	}
 	// 关系已被并发轮次回收：拿锁成功说明它刚刚还在，这里只是把"不存在"也归良性。
 	exists, xerr := usageRelationExistsTx(tx, rel)
@@ -1447,6 +1477,27 @@ func settleUsageReclaim(db *sql.DB, req usageSettleRequest) usageReclaimResult {
 	return usageReclaimResult{outcome: usageReclaimDropped, op: "settle-drop"}
 }
 
+// usageReclaimTargetLock 给出结算段对**目标关系**该执行的那一句 LOCK（R12-N2 P1-03），
+// 返回空串表示"该形态不取锁"（不是"跳过安全检查"：调用方仍然在同一事务里复检归属，
+// 且 DROP 语句自己会取它需要的锁）。
+//
+// 分流的**唯一依据**是 relkind（`pg_class.relkind`）：
+//
+//	r  普通表 / p 分区表  ⇒ ACCESS EXCLUSIVE（表形态的金额窗口靠它）
+//	v  视图              ⇒ ACCESS EXCLUSIVE（PG 允许 LOCK 视图；保持既有语义）
+//	m  物化视图          ⇒ **不取锁**（PG 结构上不支持任何 LOCK，见调用点注释）
+//	其它（""/i/S/f…）    ⇒ ACCESS EXCLUSIVE（缺省保守：非视图形态本就该按表口径处理）
+//
+// 为什么不是"给 matview 取 ACCESS SHARE"：真 PG 18.6 实测那句同样报 42809
+// （`cannot lock relation … This operation is not supported for materialized views`），
+// 换锁级别解决不了 —— 只有"不取锁"这一条路。
+func usageReclaimTargetLock(rel, kind string) string {
+	if kind == "m" {
+		return ""
+	}
+	return "LOCK TABLE " + quoteRelationIdent(rel) + " IN ACCESS EXCLUSIVE MODE"
+}
+
 // usageReclaimWindowUnderLock 在**持 rel 的 ACCESS EXCLUSIVE 时**重算补账窗口
 // （R11A-01 的修法：判据与动作同源、同一个持锁区间）。
 //
@@ -1509,13 +1560,18 @@ func usageReclaimWindowUnderLock(q usageQuerier, rel string, from, to time.Time)
 // R10-G3（N1）：孤儿关系**已经是摘下来的**，所以这一段不需要父表的 ACCESS
 // EXCLUSIVE（旧实现为了"锁序"把它一起锁上，于是整窗口聚合全程挡住所有计量写入）
 // —— 只用 `LOCK ONLY usage ACCESS SHARE` 做锁序锚点，长锁只落在 rel 上。
-func dropDetachedOrphanAtomically(db *sql.DB, rel string, plan detachedCleanupPlan, dropStmt string) usageReclaimResult {
+//
+// R12-N2（P1-03）：`kind` 是该关系的 relkind（调用方的 catalog 事实
+// `usageRelationShape.Kind`），一路传到结算段的"取哪把锁"那一步 —— 物化视图形态
+// 不能 LOCK（42809），必须在这里分流而不是在锁那里猜。
+func dropDetachedOrphanAtomically(db *sql.DB, rel, kind string, plan detachedCleanupPlan, dropStmt string) usageReclaimResult {
 	// 第 0 步：预补账（口径选择在 usageReclaimPreBackfill 里，判据同源）。
 	if err := usageReclaimPreBackfill(db, rel, plan.winFrom, plan.winTo); err != nil {
 		return preBackfillFailure(rel, err)
 	}
 	return settleUsageReclaim(db, usageSettleRequest{
 		rel:      rel,
+		kind:     kind,
 		from:     plan.winFrom,
 		to:       plan.winTo,
 		dropStmt: dropStmt,
@@ -1951,7 +2007,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 				//
 				// 读数面按**实际结果**分流（不允许把"归属已变/已被回收"写成
 				// "需人工处置"）：只有真的"补账完成、关系原样留着"才计 skip。
-				switch res := dropDetachedOrphanAtomically(db, rel, plan, ""); res.outcome {
+				switch res := dropDetachedOrphanAtomically(db, rel, shape.Kind, plan, ""); res.outcome {
 				case usageReclaimFailed:
 					noteFailure(rel, res.op, res.err)
 				case usageReclaimGone:
@@ -1970,7 +2026,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 			if plan.foldErr != nil {
 				dropStmt = ""
 			}
-			res := dropDetachedOrphanAtomically(db, rel, plan, dropStmt)
+			res := dropDetachedOrphanAtomically(db, rel, shape.Kind, plan, dropStmt)
 			switch res.outcome {
 			case usageReclaimDropped:
 				clearedDetached++
@@ -1979,7 +2035,12 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 					"其明细已并入相邻月并补进永久账本)", rel, shape.Kind)
 			case usageReclaimBackfilled:
 				// 补账已在持锁事务里提交，关系保留（相邻月明细还在里面）。
-				noteFailure(rel, "fold-adjacent", plan.foldErr)
+				// R12-N2（P1-04）：同 attached 路径 —— 记 skip（需人工处置），不记
+				// failure：明细一行未删、账已补齐，把它算成"整轮失败"只会让管理端
+				// 每轮 500 并让 reclaim_stalled 永久为真。
+				noteSkip("detached relation", rel, usageSkipFoldMisbounded,
+					fmt.Sprintf("相邻月并入失败 ⇒ 本轮只补账、不 DROP（该月明细一行未删，金额不会丢）；"+
+						"需人工处置相邻月的分区边界（PG 禁止分区区间重叠，服务端不替管理员改写边界/搬行）：%v", plan.foldErr))
 			case usageReclaimGone:
 				log.Printf("usage retention: %s 已被并发轮次回收(%s 时关系已不存在);按良性处理", rel, res.op)
 			case usageReclaimNotAttached:
@@ -2001,7 +2062,7 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		}
 		// 视图/物化视图不持有明细行 ⇒ 不需要补账（窗口零值），但**同样**走临界区
 		// （锁 → 持锁复检归属 → DROP → COMMIT）：判据与动作之间不留窗口。
-		res := dropDetachedOrphanAtomically(db, rel, detachedCleanupPlan{}, stmt)
+		res := dropDetachedOrphanAtomically(db, rel, shape.Kind, detachedCleanupPlan{}, stmt)
 		switch res.outcome {
 		case usageReclaimDropped:
 			clearedDetached++
@@ -2027,7 +2088,24 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	attached := make([]string, 0, len(tables.Partitions)+len(tables.AttachedNonLeaf))
 	attached = append(attached, tables.Partitions...)
 	attached = append(attached, tables.AttachedNonLeaf...)
+	// R12-N2（P2-02）：**写入面的"已解决"判据必须包含孤儿桶**。
+	//
+	// 缺陷形态（R12-A P2-02）：`round.ExistingMonths` 原先只由 **attached 桶**
+	// （`tables.Partitions` + `tables.AttachedNonLeaf`）拼出，而"有一条 `usage_<M>`
+	// 挡着该月写入"（写路径 503 METERING_FAILED，写失败面记进
+	// `write_blocked_other_months`）的形态恰恰是**孤儿桶**（`tables.Orphans`：
+	// 关系在、但不在 usage 分区树里）—— 于是 R11A-04 的自愈逻辑在**同一轮**里
+	// 把它当成"关系已不在"清掉：清理自己刚报了 `skip=orphan-retained:1`
+	// （证明它知道关系还在、还在挡写入），条目却没了 ⇒ 告警反向漏报，比修复前
+	// 更少（R11A-04 立项要消灭的是"单向棘轮"，实测换来了"反向漏报"）。
+	//
+	// 判据（事实，不是投影）：条目描述的对象是 `usage_<YYYYMM>`；**只要该名字的
+	// 关系此刻还存在**（无论它挂在 usage 树下、还是孤儿桶里），"该月写不进去"
+	// 这条观测就仍然成立。所以"仍然存在的月关系" = attached ∪ orphans − 本轮删掉的。
+	// gaps 日志仍用**只看 attached** 的 `existing`（它问的是"有没有该月的**明细分区**"，
+	// 孤儿不是明细分区），两张集合因此显式分开、不互相污染语义。
 	existing := make(map[string]bool, len(attached))
+	existingRelations := make(map[string]bool, len(attached)+len(tables.Orphans))
 	var oldest time.Time
 	for _, rel := range attached {
 		m, ok := usageMonthRelationOf(rel)
@@ -2035,8 +2113,16 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 			continue
 		}
 		existing[monthKey(m)] = true
+		existingRelations[monthKey(m)] = true
 		if oldest.IsZero() || m.Before(oldest) {
 			oldest = m
+		}
+	}
+	// 孤儿桶也进"关系仍然存在"的集合（R12-N2 P2-02）：它们名字合法、此刻确实
+	// 占着 `usage_<YYYYMM>`，只是不在 usage 分区树下 —— 写入路径正是被它们挡住的。
+	for _, rel := range tables.Orphans {
+		if m, ok := usageMonthRelationOf(rel); ok {
+			existingRelations[monthKey(m)] = true
 		}
 	}
 	dropped := 0
@@ -2156,7 +2242,22 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 				noteFailure(rel, "rebuild-ledger", fmt.Errorf("rebuild ledger before dropping: %w", berr))
 				continue
 			}
-			noteFailure(rel, "fold-adjacent", foldErr)
+			// R12-N2（P1-04）：这一条**不再记 failure**，而是"按设计：需人工处置"的
+			// skip（分类理由与判据见 usageSkipFoldMisbounded 的注释）。
+			//
+			// 为什么不是 fail-loud：**金额不在这里丢**。走到这一步时
+			//   ① 补账已按扩到整月的窗口提交（上面那次 retentionBackfillBudget），
+			//   ② DROP 没做（本轮直接 continue）⇒ rel 的明细一行未删。
+			// 旧实现把它记成 failure 的唯一后果是「整轮非 nil」：管理端保存保留期
+			// 每轮 500 + failed_rounds 单调增长 + reclaim_stalled 永久为真，而与它
+			// 无关的月份照样被清 —— 与 R5-A-9 写在代码里的承诺（"分区形态只影响该月
+			// 新写入,不得让整轮保留清理停摆"）直接冲突（R12-A P1-04 实测两轮
+			// `FAILED op=fold-adjacent sqlstate=42P17`）。真正需要人做的是**修那棵
+			// 错界分区树**（PG 禁止分区区间重叠 ⇒ 只能人工改边界/搬行），所以它进
+			// skipped_by_reason + needs_manual_months 两个长期观测面。
+			noteSkip("attached relation", rel, usageSkipFoldMisbounded,
+				fmt.Sprintf("相邻月并入失败 ⇒ 本轮只补账、不 DROP（该月明细一行未删，金额不会丢）；"+
+					"需人工处置相邻月的分区边界（PG 禁止分区区间重叠，服务端不替管理员改写边界/搬行）：%v", foldErr))
 			continue
 		}
 		if usageLockContended {
@@ -2240,8 +2341,10 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	// 关系永远不会被回收"。同一份计数同时进 UsageRetentionStatus（/readyz）。
 	// R11A-04：`existing` 是**扫描时刻**的事实；写入面条目要判的是"这一轮结束时
 	// 这个月的分区关系还在不在" ⇒ 折算掉本轮已经删掉的那些（reclaimedRel）。
-	round.ExistingMonths = make([]string, 0, len(existing))
-	for key := range existing {
+	// R12-N2（P2-02）：这一份集合取 `existingRelations`（attached ∪ orphans）——
+	// 见它上面那段注释：孤儿关系"存在"这件事同样让"该月写不进去"成立。
+	round.ExistingMonths = make([]string, 0, len(existingRelations))
+	for key := range existingRelations {
 		if reclaimedRel["usage_"+key] {
 			continue
 		}
@@ -2604,17 +2707,59 @@ func applyUsageRetentionBudget(tx usageExecer, lockTimeoutMS, statementTimeoutMS
 	// 另外两个入口各自钉了同一句（同一判据不允许有第二份实现，这里是**同一句
 	// 字面量**的三个调用点）：计量写入事务（usage.go 的 recordUsageTx）与账本
 	// 关系的池上准备（usage_ledger.go 的 withUsageLockBudget，它本身就调用本函数）。
-	if _, err := tx.Exec(usageSearchPathPin); err != nil {
-		return err
-	}
-	return nil
+	return pinUsageSearchPath(tx)
 }
 
-// usageSearchPathPin 是"判据与动作看到同一个对象"的**唯一实现**（R11A-02）：
-// 清理路径的每一个事务（applyUsageRetentionBudget）与计量写入事务
-// （usage.go 的 recordUsageKindAtCached）都执行这一句。写成常量是为了让
+// usageSearchPathPin 是"判据与动作看到同一个对象"的**唯一字面量**（R11A-02 /
+// R12-N2 P1-02）：整个计量—结算—清理—余额链路的事务都执行这一句。写成常量是为了让
 // "同一份语义只有一处字面量"可被机械核对（两处各写一遍会再次分叉）。
-const usageSearchPathPin = "SET LOCAL search_path = pg_catalog, public"
+//
+// R12-N2（P1-02）：**唯一实现**是下面这一对函数（`pinUsageSearchPath` 给已有事务、
+// `withUsageSearchPath` 给池上入口）—— 调用点**只允许**通过它们钉，不允许再把
+// 这句字面量抄到别处（抄一份就多一个"只钉了 3 个调用点"的机会，R12-A P1-02 实测
+// 计量/结算/清理链路上还有 4 条同族面没钉）。完整清单与分类见
+// `audit_r12_n2_searchpath_test.go`（机械守卫：新增触碰本族关系的函数必须登记）。
+// **为什么只写 `public` 而不写 `pg_catalog, public`**（R12-N2 P1-02 的实测发现）：
+// PostgreSQL 的规则是"`pg_catalog` 若**未显式命名**，则隐式排在 search_path 的**最前**"
+// —— 所以只写 `public` 时，函数/操作符/类型的解析顺序仍然是 `pg_catalog` 优先（R11A-02
+// 想封的遮蔽照样封住），而**未限定的 `CREATE TABLE` 目标变成 `public`**。
+// 反过来，把 `pg_catalog` 写进 path 会有一个致命副作用：`CREATE TABLE <未限定名>`
+// 会把新表建到 **path 的第一段**（= `pg_catalog`）⇒ 真 PG 实测
+// `ERROR: permission denied to create "pg_catalog.usage_202610" (SQLSTATE 42501)`。
+// 这条在写路径上尤其致命（`ensureUsagePartition` 的建分区 DDL 一旦进了已钉事务就会撞上），
+// 而且它只在"该月分区还不存在"时才出现 —— 正是月初第一次写入。
+const usageSearchPathPin = "SET LOCAL search_path = public"
+
+// pinUsageSearchPath 在**已有事务**上钉住 search_path（唯一实现之一）。
+func pinUsageSearchPath(tx usageExecer) error {
+	_, err := tx.Exec(usageSearchPathPin)
+	return err
+}
+
+// withUsageSearchPath 是**池上入口**的唯一实现：开一个事务 → 钉 search_path →
+// 跑 fn → 提交。
+//
+// 为什么池上的单条语句也必须开事务：`SET LOCAL` 只在事务块里有意义（事务外是
+// no-op + WARNING），而"判据硬钉 public、动作走未限定名"这条缺陷的受害者正是
+// `db.Exec`/`db.QueryRow` 这些池上入口（R12-A P1-02：流式结算把 shadow 行改成
+// 900/300、`SetUsageProvider` 改 shadow、`DeleteUsage`/`CleanupPendingUsage`
+// 只删 shadow ⇒ 真实 pending 永不结算/永不清理，而 `err=nil`）。
+// 代价是一次 BEGIN/COMMIT 往返；本族关系的池上入口都是每条请求几次的量级，
+// 与"金额写错对象且没有任何错误面"相比这是可忽略的代价。
+func withUsageSearchPath(db *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
+	if err := pinUsageSearchPath(tx); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 // setUsageRetentionStatementBudget 给清理的**临界区**事务装上有界语义
 // （等锁上界 + 单语句时长上界 + 计划期裁剪 + search_path 与判据同源）。

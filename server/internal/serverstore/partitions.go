@@ -169,6 +169,14 @@ func probeUsagePartitionBudget(db *sql.DB, relation, expectedRoot string, lockTi
 		return partitionProbe{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
+	// R12-N2（P1-02）：形态探测的**判据**硬钉 `public.`（`n.nspname = 'public'` +
+	// `to_regclass('public.'||…)`），所以它必须与**动作**（`CREATE TABLE … PARTITION
+	// OF usage`、`ALTER TABLE usage ATTACH PARTITION …`）看到同一个对象 ——
+	// 否则 shadow schema 在场时探测判"public 里没有该分区"、动作却在 shadow 里
+	// 建分区 ⇒ **每一次计量写入都重复建一遍**且 public 的分区永不存在。
+	if err := pinUsageSearchPath(tx); err != nil {
+		return partitionProbe{}, err
+	}
 	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
 		return partitionProbe{}, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
 	}
@@ -545,14 +553,90 @@ func ensureRangePartitionBudget(db *sql.DB, spec partitionSpec, lockTimeoutMS in
 // 翻译成可诊断错误(23514 DEFAULT 分区已有本窗口的行 / 42P17 与既有分区重叠)。
 //
 // runPartitionDDL 执行分区创建 DDL：lockTimeoutMS > 0 时把它包进一个带
-// lock_timeout 的事务（清理路径用；R10-D-02），否则直接 db.Exec（计量写入
-// 热路径的既有语义 —— 在那里必须**等**锁，不能把慢变成失败）。
+// lock_timeout 的事务（清理路径用；R10-D-02），否则走计量写入热路径的
+// **有界 + 可观测**等待（R12-N2 P2-01，见 usageWritePartitionDDLWait）。
 func runPartitionDDL(db *sql.DB, stmt string, lockTimeoutMS int) (sql.Result, error) {
 	if lockTimeoutMS <= 0 {
-		return db.Exec(stmt)
+		return runPartitionDDLWithBoundedWait(db, stmt)
 	}
 	var res sql.Result
 	err := withUsageLockBudget(db, lockTimeoutMS, func(tx *sql.Tx) error {
+		var e error
+		res, e = tx.Exec(stmt)
+		return e
+	})
+	return res, err
+}
+
+// 写路径建分区 DDL 的**有界等待**参数（R12-N2 P2-01）。
+//
+// 缺陷形态（R12-A P2-01，真 PG 实测）：`CREATE TABLE … PARTITION OF usage` 需要
+// `usage` 的 ACCESS EXCLUSIVE，而清理轮的预补账/结算事务读 `usage` 取得的是
+// **隐式** ACCESS SHARE 并持到 COMMIT（提交期不在 statement_timeout 覆盖面内）
+// ⇒ 北京月边界后的**第一次**计量写入会同步等待整段：
+//
+//	结算段预算(30–180s) + 提交期(无界)   ⇒ 实测 6s 注入 = 5.18s 停顿（对照 15ms）
+//
+// 而这条等待此前的语义是"裸 db.Exec、无 lock_timeout、无 ctx"（注释明确写"必须等锁"），
+// 且**没有任何可观测面**（`/readyz` 的 usage_retention 只描述轮次，不描述写入延迟）。
+//
+// 处置 = **有界 + 可观测**，而不是"改成一次失败即 503"（那会把一次慢变成全站
+// METERING_FAILED，正是旧注释要避免的）：
+//
+//	每次尝试   —— 自己的 lock_timeout（usageWritePartitionDDLAttemptMS）；
+//	命中 55P03 —— **退避后重试**（睡眠期间不持任何锁）：它只说明"这一次没抢到"；
+//	整段预算   —— usageWritePartitionDDLWaitBudgetMS（= 结算段预算的**下限** 30s）：
+//	              预算之内语义与旧实现逐字相同（等到锁为止），超预算才失败 ⇒
+//	              只把"无界"变成"有界"，不把"慢"变成"错"；
+//	可观测     —— 每次命中与预算耗尽都记进 /readyz 的 usage_retention.write_ddl_*
+//	              （"月初写入被挡了多久"从此是一条读数，而不是日志里的一行）。
+//
+// 三个值都是 `var`（不是 const）**只为测试**：判据要能在真 PG 上把预算缩到注入时长
+// 之下、才咬得到"预算耗尽"这条分支（与 `usageReclaimFreezeBudgetMS` 同一约定）。
+// 生产装配从不写它们。
+var (
+	usageWritePartitionDDLAttemptMS    = 1000
+	usageWritePartitionDDLWaitBudgetMS = 30000
+	// usageWritePartitionDDLRetryDelay 是两次尝试之间的退避（睡眠期间不持任何锁）。
+	usageWritePartitionDDLRetryDelay = 200 * time.Millisecond
+)
+
+// runPartitionDDLWithBoundedWait 是写路径的 DDL 等待（唯一实现，见上面的常量注释）。
+func runPartitionDDLWithBoundedWait(db *sql.DB, stmt string) (sql.Result, error) {
+	deadline := time.Now().Add(time.Duration(usageWritePartitionDDLWaitBudgetMS) * time.Millisecond)
+	start := time.Now()
+	timedOut := 0
+	for {
+		res, err := runPartitionDDLAttempt(db, stmt)
+		if err == nil {
+			if timedOut > 0 {
+				noteUsagePartitionDDLContention(time.Since(start), timedOut, false)
+			}
+			return res, nil
+		}
+		if _, isTimeout := usageFailureTimeoutReason(err); !isTimeout {
+			return nil, err
+		}
+		timedOut++
+		if !time.Now().Before(deadline) {
+			waited := time.Since(start)
+			noteUsagePartitionDDLContention(waited, timedOut, true)
+			return nil, fmt.Errorf("建分区 DDL 在 %dms 总预算内始终拿不到 usage 的 ACCESS EXCLUSIVE"+
+				"（已尝试 %d 次、累计等待 %s；R12-N2 P2-01：写入路径的等锁从此有界）：%w",
+				usageWritePartitionDDLWaitBudgetMS, timedOut, waited.Round(time.Millisecond), err)
+		}
+		time.Sleep(usageWritePartitionDDLRetryDelay)
+	}
+}
+
+// runPartitionDDLAttempt 是一次带 lock_timeout 的建分区尝试（池上入口的唯一实现
+// withUsageSearchPath ⇒ 判据与动作同源；R12-N2 P1-02）。
+func runPartitionDDLAttempt(db *sql.DB, stmt string) (sql.Result, error) {
+	var res sql.Result
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", usageWritePartitionDDLAttemptMS)); err != nil {
+			return err
+		}
 		var e error
 		res, e = tx.Exec(stmt)
 		return e
@@ -799,6 +883,12 @@ func usageTreeDescendants(db *sql.DB, root string) ([]partitionDescendant, error
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck // 只读事务,回滚失败无副作用
+	// R12-N2（P1-02）：同一族判据（`n.nspname = 'public'`）必须与动作同源 ——
+	// 覆盖扫描说"某分区已覆盖窗口"⇒ 写入路径就会跳过 CREATE；两处看不同对象时
+	// 会静默漏建当月分区（写入 23514，该月全站 503）。
+	if err := pinUsageSearchPath(tx); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(partitionProbeDateStyle); err != nil {
 		return nil, fmt.Errorf("fix partition probe session rendering (%s): %w", partitionProbeDateStyle, err)
 	}

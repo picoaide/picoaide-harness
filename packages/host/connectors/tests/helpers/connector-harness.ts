@@ -39,6 +39,12 @@ export interface CapturedConfig {
   cwd?: string
   url?: string
   headers?: Record<string, string>
+  /**
+   * 只有 provider-backed 的 HTTP/SSE 注册才有（框架把它交给 SDK 传输，让传输每请求读活令牌）。
+   * 类型写成 `unknown` 是**有意**的：探针不解读它，需要时各自断言到 SDK 的 provider 面
+   * （`r11b01-midreg-window.spec.ts` / `r12b-already-in-use-retry.spec.ts` 的用法）。
+   */
+  authProvider?: unknown
 }
 
 export interface Harness {

@@ -335,6 +335,13 @@ func AdjustUserBalance(db *sql.DB, userID int64, delta float64, reason, actor st
 		return 0, err
 	}
 	defer tx.Rollback()
+	// R12-N2（P1-02）：余额链路与计量/结算链路共用同一族关系（`users` /
+	// `balance_ledger`），也必须"判据与动作看同一个对象" —— 否则 shadow schema
+	// 在场时余额与流水落到 shadow（管理端读的是 public ⇒ 加了钱却看不见，而
+	// 账本不变量 `users.balance_money == SUM(balance_ledger.amount)` 在两侧各自成立）。
+	if err := pinUsageSearchPath(tx); err != nil {
+		return 0, err
+	}
 	var old float64
 	if err := tx.QueryRow(`SELECT balance_money FROM users WHERE id = ? FOR UPDATE`, userID).Scan(&old); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -374,6 +381,13 @@ func SetUserBalance(db *sql.DB, userID int64, amount float64, reason, actor stri
 		return 0, err
 	}
 	defer tx.Rollback()
+	// R12-N2（P1-02）：余额链路与计量/结算链路共用同一族关系（`users` /
+	// `balance_ledger`），也必须"判据与动作看同一个对象" —— 否则 shadow schema
+	// 在场时余额与流水落到 shadow（管理端读的是 public ⇒ 加了钱却看不见，而
+	// 账本不变量 `users.balance_money == SUM(balance_ledger.amount)` 在两侧各自成立）。
+	if err := pinUsageSearchPath(tx); err != nil {
+		return 0, err
+	}
 	var old float64
 	if err := tx.QueryRow(`SELECT balance_money FROM users WHERE id = ? FOR UPDATE`, userID).Scan(&old); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -496,6 +510,11 @@ func GrantMonthlyBalance(db *sql.DB, mode string, amount float64, actor string, 
 		return nil, err
 	}
 	defer tx.Rollback()
+	// R12-N2（P1-02）：月度发放写 `users`/`balance_ledger`（经 grantBatchTx），
+	// 与计量/结算链路同一口径 —— 判据与动作看同一个对象。
+	if err := pinUsageSearchPath(tx); err != nil {
+		return nil, err
+	}
 
 	// 候选范围:启用中的普通员工(管理员网关豁免、审计员不可用客户端)。
 	candWhere := `status = 1 AND role = ?`

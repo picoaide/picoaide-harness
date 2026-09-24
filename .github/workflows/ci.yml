@@ -129,6 +129,49 @@ jobs:
           # 根守卫里的 check-no-real-domains 要扫提交信息区间 ⇒ 必须能看见历史
           # (2026-09-23 审计 R3-C C-4;守卫侧另有 fail-loud 兜底)。
           fetch-depth: 0
+      # R12-D-01（第十二轮红队 P0）：**判据本体在 install 期有没有被改写**的前置校验。
+      #
+      # 位置本身就是判据的一部分：`.yarnrc.yml` 的 `plugins:` 指向一个可提交的插件文件，
+      # 它的**顶层模块代码**在任何一次 yarn 调用（连 `yarn --version` 都会）时执行 ⇒ 把工作树里的
+      # `scripts/check-*.mjs` 改写成「打印通过凭据 + process.exit(0)」，于是 ci.yml 一字未改，
+      # 三个判定块全部 EXIT=0 而判据一条没跑。所以这一步必须是本 job 的**第一个执行体**
+      # （此前没有任何 yarn/corepack 命令跑过），且只依赖 git + node 内置模块 —— 不 import
+      # 仓内任何脚本（那些正是可能已被改写的东西），判据输入全部取自 **git 对象**。
+      # 静态面由 `check-workflows.mjs` 的 [SK-14⑨] 钉住（必须在任何 yarn 调用之前）。
+      - name: Judge execution bodies are pristine (runs before any yarn command)
+        run: |
+          set -euo pipefail
+          # 本步是**第一个执行体**：此前没有任何 yarn/corepack 命令跑过，也没有任何仓内脚本
+          # 被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
+          # 正是靠"判据跑在 install 之后"生效的。执行体本身也**从 git 对象取出**（工作树里那份
+          # 在更早的步里可被改写），并只用 `node:*` + `git`（不 import 任何仓内模块）。
+          probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$probe_dir"
+          probe="$probe_dir/check-install-integrity.mjs"
+          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir` 是原子的：已存在即失败 ⇒
+          # 前序步骤留下的进程无法预置它）+ 0700 + 本步一次性 nonce（写在独占目录里，不进 argv）
+          # + stdout/stderr 分开落盘 + **由本步的检查器合成**通过凭据（不是被审进程自己说）。
+          verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$verdict_dir"
+          openssl rand -hex 16 > "$verdict_dir/nonce"
+          nonce=''
+          read -r nonce < "$verdict_dir/nonce"
+          status=0
+          node "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          cat "$verdict_dir/stdout"
+          cat "$verdict_dir/stderr" >&2
+          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 > "$verdict_dir/verdict"
+          cat "$verdict_dir/verdict"
+          verdict_lines=0
+          if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
+            grep -c "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict" > "$verdict_dir/count"
+            read -r verdict_lines < "$verdict_dir/count"
+          fi
+          if [ "$verdict_lines" -ne 1 ]; then
+            echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
+            exit 1
+          fi
       # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false 且会重排
       # PATH —— corepack enable 必须在 setup-node 之后执行,否则 yarn shim 被覆盖。
       - uses: actions/setup-node@v7
@@ -157,12 +200,48 @@ jobs:
       - name: Root guards (every PR shape)
         run: |
           set -euo pipefail
-          node scripts/check-root-guards.mjs 2>&1 | tee /tmp/root-guards.log
-          # 唯一凭据:行首锚定 + guards=N 且 N ≥ 1(非通过行里刻意不出现 `VERDICT PASS` ⇒ 零守卫 /
-          # 被拒绝运行的进程说不出这句话,而它照样能退出 0)
-          if ! grep -qE '^check-root-guards: VERDICT PASS guards=[1-9][0-9]*' /tmp/root-guards.log; then
-            echo "::error::根守卫输出里没有行首锚定的通过凭据(形如 check-root-guards: VERDICT PASS guards=N,N ≥ 1)"
-            echo "::error::⇒ 被拒绝运行 / 零守卫的进程会退出 0 但打印不出这一行(N1 现场:整份日志 713 字节、守卫一条没跑)"
+          # 判据本体免疫（R12-D-01）：install 期（`.yarnrc.yml` 插件的顶层模块代码 / 工作区
+          # postinstall）可能已改写工作树里的判据执行体 ⇒ 探针**自己从 git 对象取出**
+          # （工作树里那份不可信），先比对（不一致即红、指名道姓）、再按 HEAD 恢复
+          # （关掉"比对通过 → 判据启动"之间的改写窗口）。
+          probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$probe_dir"
+          probe="$probe_dir/check-install-integrity.mjs"
+          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          node "$probe" --root "$PWD" --restore
+          # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir -m 700` + `$SRANDOM` 三段 ≈96 位
+          # 随机段；`mkdir` 原子，已存在即失败 ⇒ 前序步骤留下的进程无法预置它）+ stdout/stderr **分开**落盘
+          # （"两个流各打半行"拼不出凭据）+ 本步一次性 nonce（下面的检查器把它回显进通过凭据）。
+          verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$verdict_dir"
+          # nonce 只落在**本步独占目录**里（不进 argv、不进日志）：检查器从文件读它，
+          # 再把它回显进通过凭据 —— 于是"凭据在场"= "本步的检查器认了本步的 nonce"。
+          openssl rand -hex 16 > "$verdict_dir/nonce"
+          nonce=''
+          read -r nonce < "$verdict_dir/nonce"
+          status=0
+          node scripts/check-root-guards.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          cat "$verdict_dir/stdout"
+          cat "$verdict_dir/stderr" >&2
+          # 判定权上移(第十一轮复审 J1 的 N1/N4):**不看退出码,只认通过凭据**。
+          # 为什么:判决不可信的进程照样能说出"我退 0"—— J1 实测 `NODE_OPTIONS=--import=<钩子>`
+          # 同时覆写 `process.exit` 与 `process.reallyExit` 时,守卫一条没跑、整份日志 713 字节、
+          # EXIT=0(旧实现在 `try { reallyExit } catch { SIGKILL }` 里,钩子不抛 ⇒ 兜底不可达)。
+          # 运行器只在"每个登记的守卫都真的跑过、且没有一条失败"时打印这行凭据:
+          #   `check-root-guards: VERDICT PASS guards=<N>`(N = 实跑数)
+          # 被拒绝运行的进程、零守卫的进程都**打印不出**它 ⇒ 这一步必须自己要求它出现。
+          # 检查器（`check-verdict-credential.mjs`，本身是被登记的判据执行体）把四件事一起判：
+          # 凭据在**本步自己的 stdout 捕获文件**里**恰好一行**、计数成立、退出码 0、文件属于本步；
+          # 并通过回显本次 nonce 把凭据绑到**这一步**（"这条流里出现过这句话"不算凭据）。
+          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-root-guards: VERDICT PASS guards=[1-9][0-9]*' --min guards 1 > "$verdict_dir/verdict"
+          cat "$verdict_dir/verdict"
+          verdict_lines=0
+          if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
+            grep -c "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict" > "$verdict_dir/count"
+            read -r verdict_lines < "$verdict_dir/count"
+          fi
+          if [ "$verdict_lines" -ne 1 ]; then
+            echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
             exit 1
           fi
       # 严格面参数通道(第十一轮复审 J1 的 N2 ②;K1 已把 `--require-clean` 做成本脚本的参数)。
@@ -182,7 +261,41 @@ jobs:
       # (`scripts/**` + `.yarnrc.yml` + `.gitignore` + `package.json`),CI 的检出树按构造就是
       # 干净的 —— 已在干净检出上实测稳定为绿(见 temp/r11/fix-K3/verify-require-clean.sh 的正证)。
       - name: Guard parser integrity (strict worktree↔HEAD anchor)
-        run: node scripts/check-guard-parser-integrity.mjs --require-clean
+        run: |
+          set -euo pipefail
+          # 判据本体免疫（R12-D-01）：同上面的守卫步 —— 探针从 git 对象取出，先比对、再按 HEAD 恢复；
+          # 于是这一步跑的 `check-guard-parser-integrity.mjs` 一定是**版本库里的那份**
+          # （红队 AA4 的形态：只改判据本体会被 `--require-clean` 抓住，**同时**改这份锚定判据
+          # 就 EXIT=0 —— 那正是"判据的执行体来自工作树"造成的自指，这里从根上切断）。
+          probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$probe_dir"
+          probe="$probe_dir/check-install-integrity.mjs"
+          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          node "$probe" --root "$PWD" --restore
+          # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录 + 分开的 stdout/stderr + 一次性 nonce。
+          verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$verdict_dir"
+          # nonce 只落在**本步独占目录**里（不进 argv、不进日志）：检查器从文件读它，
+          # 再把它回显进通过凭据 —— 于是"凭据在场"= "本步的检查器认了本步的 nonce"。
+          openssl rand -hex 16 > "$verdict_dir/nonce"
+          nonce=''
+          read -r nonce < "$verdict_dir/nonce"
+          status=0
+          # `--require-clean` 是**参数通道**：env 信号能被一行 `unset CI GITHUB_ACTIONS` 清掉，argv 不能。
+          node scripts/check-guard-parser-integrity.mjs --require-clean > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          cat "$verdict_dir/stdout"
+          cat "$verdict_dir/stderr" >&2
+          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本' > "$verdict_dir/verdict"
+          cat "$verdict_dir/verdict"
+          verdict_lines=0
+          if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
+            grep -c "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict" > "$verdict_dir/count"
+            read -r verdict_lines < "$verdict_dir/count"
+          fi
+          if [ "$verdict_lines" -ne 1 ]; then
+            echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
+            exit 1
+          fi
 
   gate:
     name: Gate (tests + workspace build)
@@ -233,6 +346,44 @@ jobs:
           # changes job 早就付过这个成本,同一个仓不是新增量级;守卫侧另有 fail-loud
           # 兜底(区间解析不到即 EXIT=3),这条是让它**不需要**触发的那一半。
           fetch-depth: 0
+      # R12-D-01（第十二轮红队 P0）：与本文件 gate-guards job 的第一步同一条判据 ——
+      # "判据本体在 install 期有没有被改写"。放在这里的原因同那里：本 job 也会
+      # `yarn install`（下面第 11 步左右），install 之后的任何判决都要求判据本体没被动过。
+      # 静态面由 `check-workflows.mjs` 的 [SK-14⑨] 钉住（必须在任何 yarn 调用之前）。
+      - name: Judge execution bodies are pristine (runs before any yarn command)
+        run: |
+          set -euo pipefail
+          # 本步是**第一个执行体**：此前没有任何 yarn/corepack 命令跑过，也没有任何仓内脚本
+          # 被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
+          # 正是靠"判据跑在 install 之后"生效的。执行体本身也**从 git 对象取出**（工作树里那份
+          # 在更早的步里可被改写），并只用 `node:*` + `git`（不 import 任何仓内模块）。
+          probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$probe_dir"
+          probe="$probe_dir/check-install-integrity.mjs"
+          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir` 是原子的：已存在即失败 ⇒
+          # 前序步骤留下的进程无法预置它）+ 0700 + 本步一次性 nonce（写在独占目录里，不进 argv）
+          # + stdout/stderr 分开落盘 + **由本步的检查器合成**通过凭据（不是被审进程自己说）。
+          verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$verdict_dir"
+          openssl rand -hex 16 > "$verdict_dir/nonce"
+          nonce=''
+          read -r nonce < "$verdict_dir/nonce"
+          status=0
+          node "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          cat "$verdict_dir/stdout"
+          cat "$verdict_dir/stderr" >&2
+          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 > "$verdict_dir/verdict"
+          cat "$verdict_dir/verdict"
+          verdict_lines=0
+          if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
+            grep -c "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict" > "$verdict_dir/count"
+            read -r verdict_lines < "$verdict_dir/count"
+          fi
+          if [ "$verdict_lines" -ne 1 ]; then
+            echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
+            exit 1
+          fi
       # ref 形态 → 渠道集 / 是否发布的**唯一真源**(2026-09-23 审计 K-04)。
       #
       # 为什么放在 gate 的第一步:这条规则曾经有两份实现(ci-channels.sh 的 bash
@@ -387,25 +538,45 @@ jobs:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # `|&` 把 stdout 与 stderr 都交给 tee;`set -o pipefail` 保证 `yarn check` 的失败
-          # 仍然让这一步红(而不是只在断言里体现)。判定权上移:这一步**不看退出码就通过**,
-          # 只有下面那条通过凭据在场才算门禁真的跑过(第十一轮复审 J1 的 N1/N4:
-          # `--import` 钩子覆写 `exit`+`reallyExit` 时零任务 + EXIT=0;`yarnPath` 顶掉 yarn 时
-          # 同样零任务 + EXIT=0 —— 两种形态都打印不出通过凭据)。
-          yarn check |& tee /tmp/gate.log
-          # ① 形态:行首锚定的 `check-workspaces: VERDICT PASS planned=N executed=N`
-          #    (非通过行 `VERDICT FAIL`/`VERDICT ZERO-TASKS` 里刻意不出现 `VERDICT PASS`)
-          if ! grep -E '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' /tmp/gate.log > /tmp/gate-verdict.txt; then
-            echo "::error::门禁输出里没有行首锚定的通过凭据(形如 check-workspaces: VERDICT PASS planned=N executed=N)"
-            echo "::error::⇒ 被拒绝运行 / 被 yarnPath 顶替 / 零任务的编排器会退出 0 但打印不出这一行(N1/N4 现场:整份日志 713 字节)"
-            exit 1
+          # 判据本体免疫（R12-D-01）：install 期可能已改写工作树里的判据执行体 ⇒ 探针从
+          # **git 对象**取出（工作树那份不可信），先比对（不一致即红）、再按 HEAD 恢复。
+          probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$probe_dir"
+          probe="$probe_dir/check-install-integrity.mjs"
+          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          node "$probe" --root "$PWD" --restore
+          # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录 + stdout/stderr **分开**落盘 + 本步
+          # 一次性 nonce。三个一起把"这条流里出现过这句话"换成"本步的检查器逐字回显了本次 nonce"。
+          verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
+          mkdir -m 700 "$verdict_dir"
+          # nonce 只落在**本步独占目录**里（不进 argv、不进日志）：检查器从文件读它，
+          # 再把它回显进通过凭据 —— 于是"凭据在场"= "本步的检查器认了本步的 nonce"。
+          openssl rand -hex 16 > "$verdict_dir/nonce"
+          nonce=''
+          read -r nonce < "$verdict_dir/nonce"
+          status=0
+          # 启动器是 **CI 自己的 node**（C-P0-2①）：`yarn check` 会在 yarn 进程里加载
+          # `.yarnrc.yml` 的 `plugins:`（顶层模块代码在启动期执行）⇒ 判据进程的**启动器**本身
+          # 可被仓内配置改写。包级 check 仍由编排器内部经 yarn 起（那条路上编排器自己会拒
+          # `yarnPath`/`plugins`/生命周期钩子），但**承载判决的这个进程**不再经过 yarn。
+          node scripts/check-workspaces.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          cat "$verdict_dir/stdout"
+          cat "$verdict_dir/stderr" >&2
+          # 判定权上移(第十一轮复审 J1 的 N1/N4):这一步**不看退出码就通过**,只有通过凭据在
+          # 场才算门禁真的跑过（`--import` 钩子覆写 `exit`+`reallyExit` / `yarnPath` 顶掉 yarn
+          # 时都是零任务 + EXIT=0 —— 两种形态都打印不出凭据）。检查器（本身是被登记的判据
+          # 执行体）把四件事一起判：凭据在**本步自己的 stdout 捕获文件**里**恰好一行**、
+          # 计数成立（planned=N>0 且 planned==executed）、退出码 0、文件属于本步，
+          # 并把本次 nonce 回显进通过凭据。
+          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' --min planned 1 --equal planned executed > "$verdict_dir/verdict"
+          cat "$verdict_dir/verdict"
+          verdict_lines=0
+          if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
+            grep -c "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict" > "$verdict_dir/count"
+            read -r verdict_lines < "$verdict_dir/count"
           fi
-          # ② 语义:N>0 且 planned == executed。只取"数字开头的那一段"——
-          #    凭据行后面还有中文说明(含 `**实跑 == 计划 > 0**` 这类字样,里面有数字 0),
-          #    用 gsub 抽全行数字会把 32 变成 320。
-          if ! awk '{ p = $4; sub(/^planned=/, "", p); sub(/[^0-9].*$/, "", p); e = $5; sub(/^executed=/, "", e); sub(/[^0-9].*$/, "", e) } p + 0 > 0 && p + 0 == e + 0 { ok = 1 } END { exit ok ? 0 : 1 }' /tmp/gate-verdict.txt; then
-            echo "::error::通过凭据的计数不成立:必须 planned=N > 0 且 planned == executed(零任务/少跑任务一律拒)"
-            echo "::error::⇒ 现场读到的凭据行:$(tr '\n' ' ' < /tmp/gate-verdict.txt)"
+          if [ "$verdict_lines" -ne 1 ]; then
+            echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
             exit 1
           fi
       # W-5(2026-09-23 第三轮审计):WASM 协议的 4 个探针此前**零自动化**(`.github/`

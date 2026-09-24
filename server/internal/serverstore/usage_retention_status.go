@@ -62,7 +62,50 @@ const (
 	// 旧实现直接 `continue`（零计数），于是"有一条关系在挡着当月写入"与"没有可回收的
 	// 关系"在 skip_reasons 上逐字同形。谁在推进它：写路径（adopt 自愈）+ 人工。
 	usageSkipOrphanRetained = "orphan-retained"
+	// usageSkipFoldMisbounded：**相邻月并入失败**（R6-A-1 §1.5-B 的错界形态，R12-N2
+	// P1-04）。语义：该月关系按**名义月**到期、但它的声明边界与名义北京月错位（典型是
+	// 管理员按 UTC 自然月建的整段分区），于是"把边界外的那些行并入相邻月分区"这一步
+	// 必然失败（PG 禁止分区区间重叠 ⇒ 目标窗口要么已被同名错界关系占着、要么覆盖不全）。
+	//
+	// 本类**不回收、也不 DROP**（DROP 会让相邻月的明细段永久少计），但：
+	//   - 补账照做（窗口已扩到相邻月整月）⇒ **金额不丢**（R12-A 的 W1b 探针实测逐月守恒）；
+	//   - 明细一行未删 ⇒ 这一条**不是**"本轮失败"，而是"需人工处置的形态"。
+	//
+	// 谁在推进它：人工（PG 禁止重叠 ⇒ 只有人能改边界/搬行；服务端不替管理员拆改分区树）。
+	usageSkipFoldMisbounded = "fold-misbounded"
 )
+
+// usageReclaimBlockedFailed 是"真停摆账"里**真失败**那一类的原因字面量（不是 skip
+// 取值：失败关系只出现在 FailedRelations 里，见 noteFailure）。
+const usageReclaimBlockedFailed = "failed"
+
+// usageSkipNeedsManual 报告某个 skip 原因是不是"服务端**按设计**不做、只能人工处置"
+// 的一类（R12-N2 P1-01 的分类判据）。
+//
+// 为什么必须显式分类：`reclaim_stalled` 的立项语义是"保留策略**停摆**了吗"，
+// 而下面这些形态**永远不会**被自动回收，却完全正常 —— 旧实现把它们当成"未回收月"，
+// 于是宽/嵌套/多级布局（本项目**显式支持**的形态）的部署会**长期**挂着
+// `reclaim_stalled=true`（R12-A P1-01 实测两轮同形）⇒ 真正的停摆被假阳性淹没。
+// 它们的可观测面是 `skipped_by_reason` 与 `needs_manual_months`（各自点名），
+// **不是**停摆位。
+func usageSkipNeedsManual(reason string) bool {
+	switch reason {
+	case usageSkipDescendant, usageSkipSubtreeRetained, usageSkipDetachedNonLeaf,
+		usageSkipNonTable, usageSkipOrphanRetained, usageSkipFoldMisbounded:
+		return true
+	}
+	return false
+}
+
+// usageSkipIsDeferral 报告某个 skip 原因是不是"本轮**有界延后**、下一轮自动重试"
+// 的一类（R10-A-03 / R10-H3 的三类超时）。
+func usageSkipIsDeferral(reason string) bool {
+	switch reason {
+	case usageSkipLockTimeout, usageSkipStatementTimeout, usageSkipSettleBudgetTimeout:
+		return true
+	}
+	return false
+}
 
 // usageRetentionUnreclaimedMax 是状态里保留的"未回收关系清单"长度上限：
 // 计数是精确的（SkippedByReason），清单只是给人看的抽样（有界，避免无界增长）。
@@ -136,11 +179,32 @@ const usageRetentionSchedulerPeriodGap = usageRetentionSchedulerPeriod
 // `deferred_stalled=true`，而"磁盘按经过的月份单调增长"这件事就没有跨重启的
 // 观测面了。
 //
-// 现在的判据是**可持久事实推导**：月 M 变成"应被回收"的时刻是确定的
-// （`BeijingDayInstant(M + retentionMonths + 1)`，见 usageReclaimDueSince），
-// 所以"它已经到期多久还没被回收"是一个纯函数 —— 重启后第一轮就能算出来。
-// 取 24h（= 5 个 6h 调度轮次）保持与 streak 阈值同量级。
+// 现在的判据是**可持久事实推导 + 分类**（R12-N2 P1-01 收口）：月 M 变成"应被回收"
+// 的时刻是确定的（`BeijingDayInstant(M + retentionMonths + 1)`，见
+// usageReclaimDueSince），所以"它已经到期多久还没被回收"是一个纯函数 —— 重启后
+// 第一轮就能算出来。取 24h（= 5 个 6h 调度轮次）保持与 streak 阈值同量级。
+//
+// R12-N2 的**两条收口**（第十一轮版把"月龄"直接当成了"停摆时长"）：
+//  1. 判据只作用在**真受阻**的月上（真失败 / 有界延后），**按设计**的跳过形态
+//     （见 usageSkipNeedsManual）一律不进这个面 —— 它们各自有 skip_reasons 与
+//     needs_manual_months 两个观测面；
+//  2. "月龄 ≥ 24h"只对**真失败**类成立（失败是"这一轮真的做不成"的硬事实，且它是
+//     R11-D-03 要的跨重启面）；**延后**类改用轮数判据
+//     （usageReclaimStallRounds，同一关系连续 ≥4 个**调度轮次**），因为一次 5s 的
+//     锁竞争也会让"月龄"远超 24h ⇒ 旧实现下一轮自愈的抖动也会告警（R12-A P1-01 ①）。
 const usageReclaimStallAfter = 24 * time.Hour
+
+// usageReclaimStallRounds 是**延后类**（lock/statement/settle-budget 超时）的轮数阈值
+// （R12-N2 P1-01）。取 `usageReclaimStallAfter / usageRetentionSchedulerPeriod` = 4 个
+// 调度轮次（6h/轮 ⇒ 约 24h），与上面那个时长阈值同一量级：
+//
+//	单次锁竞争      —— 1 个轮次被延后 ⇒ 1 < 4 ⇒ **不置真**（这是 P1-01 ① 的抖动）；
+//	非调度轮次      —— 不计入（与 advanceDeferredStreaks 同一条节奏闸门，W3-4）；
+//	真的持续停摆    —— 每个调度轮次都还在延后 ⇒ 4 轮后置真。
+//
+// 为什么不用"月龄"给延后类兜底：到期月的月龄天然就远超 24h（`due_since` 是保留期的
+// 纯函数），拿它当判据等于"只要有一轮被延后就算停摆"。
+const usageReclaimStallRounds = int64(usageReclaimStallAfter / usageRetentionSchedulerPeriod)
 
 // usageRetentionRound 是一轮清理的过程事实（由 CleanupUsageRetention 填写）。
 type usageRetentionRound struct {
@@ -293,8 +357,27 @@ type UsageRetentionStatus struct {
 	// 这两位的判据是 catalog 事实 + 保留期设置，重启后第一轮就有值。
 	OldestUnreclaimedDueSince   string `json:"oldest_unreclaimed_due_since,omitempty"`
 	OldestUnreclaimedAgeSeconds int64  `json:"oldest_unreclaimed_age_seconds,omitempty"`
-	// ReclaimStalled 是**跨重启可判**的那一位（R11-D-03）：最早未回收的到期月已经
-	// 逾期 ≥ usageReclaimStallAfter（由 catalog 事实 + 保留期推导，纯函数）。
+	// ReclaimStalled 是**跨重启可判**的那一位（R11-D-03，R12-N2 P1-01 收口语义）：
+	// "保留策略**真的停摆**了吗"。
+	//
+	// R12-N2 的语义收口 —— 它**只**反映真受阻（下面的 reclaim_blocked_* 面），
+	// 即"该回收但没回收成功，且不是因为按设计跳过、也不是单次锁竞争"：
+	//
+	//	① 真失败类：某个**已到期**的月本轮进了 failed_relations，且它的月龄
+	//	   （reclaim_blocked_age_seconds，保留期的纯函数）≥ usageReclaimStallAfter
+	//	   ⇒ 重启后第一轮就能成立（R11-D-03 的性质原样保留）；
+	//	② 有界延后类：同一个已到期的月**连续 ≥ usageReclaimStallRounds 个调度轮次**
+	//	   都只被延后 ⇒ 单次 5s 锁竞争（1 轮，下一轮自愈）**不可能**置真。
+	//
+	// **按设计跳过**的形态（descendant / subtree-retained / non-table /
+	// detached-non-leaf / orphan-retained / fold-misbounded）不进这个判据 ⇒ 宽/嵌套/
+	// 多级布局与错界分区不会长期挂着告警位；它们的可读面是 `skipped_by_reason`
+	// 与 `needs_manual_months`。
+	//
+	// `oldest_unreclaimed_*` 与它**刻意不同口径**：那四个字段回答"最早那个没被回收的
+	// 月是什么、持续多久"（**含**按设计跳过与保留期内被点名的形态），是给人看的
+	// 现状清单；本字段回答"保留策略停摆了吗"，判据面只有真受阻的月。两者的差集
+	// 就是"按设计不回收/需人工处置"的那一批（见 needs_manual_months）。
 	//
 	// 为什么**不**并进 `deferred_stalled`：`deferred_stalled` 的既有语义（第十轮
 	// W3-4 的契约，由 `TestR10G2DeferralIsBoundedAndVisible` 钉住）是"**同一关系
@@ -302,14 +385,68 @@ type UsageRetentionStatus struct {
 	// 断言；把"逾期时长"OR 进去会让那一轮的分钟级连点在**月份本就逾期**的夹具上
 	// 读成 true（实测：`max_deferred_streak=1` 而 `deferred_stalled=true`）。
 	// 两位都是"保留策略有没有在推进"，运维口径 = `deferred_stalled || reclaim_stalled`，
-	// 差别只在于**谁不依赖进程内累积**：`reclaim_stalled` 在重启后的第一轮就成立。
+	// 差别只在于**谁不依赖进程内累积**：`reclaim_stalled` 的①在重启后的第一轮就成立。
 	ReclaimStalled bool `json:"reclaim_stalled,omitempty"`
+
+	// ---- 真停摆账（R12-N2 P1-01）：把"按设计跳过"与"真受阻"分开记 ----
+	//
+	// 判据与危害同构：`reclaim_stalled` 要回答的是"保留策略停摆了吗"，所以它只能
+	// 看**真受阻**的月 —— 下面五个字段就是那个面（最早的真受阻月 + 它的原因/轮数/
+	// 逾期时长）。按设计跳过的形态**不进**这里（见 usageSkipNeedsManual），
+	// 它们进 needs_manual_months。
+	//
+	//	reclaim_blocked_month        最早那个"已到期、该回收、但被真失败或超时挡住"的月
+	//	                             （YYYYMM）；空 = 没有真受阻的月
+	//	reclaim_blocked_reason       封闭取值：failed / lock-timeout / statement-timeout
+	//	                             / settle-budget-timeout
+	//	reclaim_blocked_rounds       它**连续**受阻的轮数（延后类 = 连续调度轮次；
+	//	                             失败类 = 本进程内连续观测到的轮数，重启归零）
+	//	reclaim_blocked_due_since    它"应被回收"的时刻（保留期纯函数，跨重启可判）
+	//	reclaim_blocked_age_seconds  到本轮结束为止它已逾期多久（纯函数推导）
+	ReclaimBlockedMonth      string `json:"reclaim_blocked_month,omitempty"`
+	ReclaimBlockedReason     string `json:"reclaim_blocked_reason,omitempty"`
+	ReclaimBlockedRounds     int64  `json:"reclaim_blocked_rounds,omitempty"`
+	ReclaimBlockedDueSince   string `json:"reclaim_blocked_due_since,omitempty"`
+	ReclaimBlockedAgeSeconds int64  `json:"reclaim_blocked_age_seconds,omitempty"`
+
+	// ---- 写路径建分区 DDL 的等待账（R12-N2 P2-01）----
+	//
+	// 为什么必须有一面：月初第一次计量写入要建当月分区，而 `CREATE TABLE …
+	// PARTITION OF usage` 需要 `usage` 的 ACCESS EXCLUSIVE —— 它与清理轮次的
+	// 预补账/结算事务（读 `usage` 取**隐式** ACCESS SHARE、持到 COMMIT，提交期
+	// 不受 statement_timeout 约束）相撞时，用户请求会同步等待整段（真 PG 实测
+	// 5.18s/6s 注入，对照 15ms）。这条等待此前**没有任何可观测面**。
+	//
+	//	write_ddl_lock_waits            累计"命中等锁"次数（一次写入可能要退避重试多次）
+	//	write_ddl_lock_wait_ms_max      单次写入**整段**等待的最大毫秒数（含退避重试）
+	//	write_ddl_lock_budget_exhausted 总预算耗尽 ⇒ 该月写入被 fail-closed 拒掉的次数
+	//
+	// 判据与危害同构：这三个数非零 = "写路径真的被清理轮次挡过"，读法与
+	// `write_blocked_*` 不同（后者是"布局挡住写入"，这里是"锁等待"）。
+	WriteDDLLockWaits           int64 `json:"write_ddl_lock_waits,omitempty"`
+	WriteDDLLockWaitMSMax       int64 `json:"write_ddl_lock_wait_ms_max,omitempty"`
+	WriteDDLLockBudgetExhausted int64 `json:"write_ddl_lock_budget_exhausted,omitempty"`
+
+	// NeedsManualMonths 是"**本轮**按设计没有回收、需要人工处置"的月关系
+	// （`usage_<YYYYMM>(原因)`，有界、升序；原因见 usageSkipNeedsManual）。
+	//
+	// 为什么单列：按设计跳过的形态**不会**自己消失（多级布局的深层后代、
+	// 错界分区的相邻月并入失败、被非表对象占名…），而它们各自的"谁在推进"
+	// 是人。旧实现里这一批要么只出现在每轮被覆写的 skipped_by_reason 计数里
+	// （答不了"是哪个月"），要么（R12-N2 P1-04 之前）被记成"整轮失败"⇒ 管理端
+	// 每轮 500 + reclaim_stalled 永久为真。现在它们有一个**长期、可 grep、带关系名**
+	// 的读数面：只要形态还在，每轮都会在这里点名。
+	NeedsManualMonths []string `json:"needs_manual_months,omitempty"`
+	NeedsManualCount  int      `json:"needs_manual_count,omitempty"`
 
 	// deferredStreakAt 是"上一次**计入** streak 的轮次"的结束时刻（W3-4 的节奏判据，
 	// 不进 JSON：它是内部账，对外只有 deferred_streak 的读数）。
 	deferredStreakAt time.Time
 	// oldestUnreclaimedAt 是"最早未回收月"首次被观测到的时刻（单调，见上）。
 	oldestUnreclaimedAt time.Time
+	// reclaimBlocked 是"真停摆账"的进程内部分（R12-N2 P1-01；不进 JSON，对外读数
+	// 是 reclaim_blocked_* 五个字段）。
+	reclaimBlocked usageReclaimBlocked
 
 	// ---- 写入面（R9-D R9D-00，P0）：当月到底能不能落账 ----
 	//
@@ -433,7 +570,8 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	// R10-G3（N2②/N3）：推进/清零"连续延后"计数，并在达阈值时升级为可见告警。
 	// R10-H3（W3-3/W3-4）：只认**有证据**的轮次（早退轮不清零），且只有距上一次
 	// 计入 ≥ usageRetentionSchedulerPeriodGap 的轮次才推进（管理端连点保存不计入）。
-	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations, st.deferredStreakAt =
+	var deferredCounts bool
+	st.DeferredStreak, st.MaxDeferredStreak, st.StalledRelations, st.deferredStreakAt, deferredCounts =
 		advanceDeferredStreaks(st.DeferredStreak, st.deferredStreakAt, round)
 	// R10-H3（W3-3）：**最早未回收的到期月** —— 单调面，"长期没回收"的权威判据。
 	oldest := advanceOldestUnreclaimed(usageOldestUnreclaimed{
@@ -467,9 +605,35 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 			}
 		}
 	}
-	st.ReclaimStalled = round.Scanned && oldest.Month != "" &&
-		st.OldestUnreclaimedAgeSeconds > 0 &&
-		time.Duration(st.OldestUnreclaimedAgeSeconds)*time.Second >= usageReclaimStallAfter
+	// R12-N2（P1-01）：**真停摆账** —— 只有"该回收但没回收成功、且不是因为按设计跳过"
+	// 的月才进这个面（判据见 UsageRetentionStatus.ReclaimStalled 的注释）。
+	blocked := advanceReclaimBlocked(st.reclaimBlocked, round, st.DeferredStreak, deferredCounts)
+	st.reclaimBlocked = blocked
+	st.ReclaimBlockedMonth, st.ReclaimBlockedReason, st.ReclaimBlockedRounds = blocked.Month, blocked.Reason, blocked.Rounds
+	st.ReclaimBlockedDueSince, st.ReclaimBlockedAgeSeconds = "", 0
+	if blocked.Month != "" && !round.EndedAt.IsZero() && round.ConfiguredMonthsKnown {
+		if due, ok := usageReclaimDueSince(blocked.Month, round.ConfiguredMonths); ok {
+			st.ReclaimBlockedDueSince = due.UTC().Format(time.RFC3339)
+			if age := round.EndedAt.Sub(due); age > 0 {
+				st.ReclaimBlockedAgeSeconds = int64(age / time.Second)
+			}
+		}
+	}
+	switch {
+	case !round.Scanned || blocked.Month == "":
+		st.ReclaimStalled = false
+	case blocked.Reason == usageReclaimBlockedFailed:
+		// ① 真失败类：判据是"这个已到期的月本轮真的做不成" + "它逾期 ≥ 24h"。
+		// 月龄是保留期的纯函数 ⇒ 重启后第一轮就成立（R11-D-03 的性质）。
+		st.ReclaimStalled = st.ReclaimBlockedAgeSeconds > 0 &&
+			time.Duration(st.ReclaimBlockedAgeSeconds)*time.Second >= usageReclaimStallAfter
+	default:
+		// ② 有界延后类：判据是**连续调度轮次**（单次 5s 锁竞争 = 1 轮 ⇒ 不置真）。
+		st.ReclaimStalled = blocked.Rounds >= usageReclaimStallRounds
+	}
+	// 按设计跳过、需人工处置的形态（R12-N2 P1-04 的错界分区并入失败等）：单列一面，
+	// **不进**上面的停摆判据（它们永远不会自动消失，进停摆位就是长期假告警）。
+	st.NeedsManualMonths, st.NeedsManualCount = needsManualMonthsInRound(round)
 	if len(st.StalledRelations) > 0 {
 		st.DeferredStalled = true
 		st.DeferredStalledRounds++
@@ -484,12 +648,23 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	}
 	if st.ReclaimStalled {
 		// 与 streak 面**互相独立**（各自的字段都在 /readyz 上）；两位都是"保留策略有
-		// 没有在推进"，但这一位**不依赖进程内累积** ⇒ 重启后第一轮就成立。
-		log.Printf("usage retention: STALLED(by-age) %s 自 %s 起已到期 %d 秒仍未被回收"+
-			"(阈值 %s；该判据由 catalog 事实推导，重启后照样成立 —— R11-D-03)。"+
-			"reason=%s configured_months=%d；/readyz 的 usage_retention.reclaim_stalled=true",
-			oldest.Month, st.OldestUnreclaimedDueSince, st.OldestUnreclaimedAgeSeconds,
-			usageReclaimStallAfter, oldest.Reason, st.ConfiguredMonths)
+		// 没有在推进"，但这一位**只反映真受阻**（R12-N2 P1-01：按设计跳过的形态不进
+		// 这个面），且失败类不依赖进程内累积 ⇒ 重启后第一轮就成立。
+		log.Printf("usage retention: STALLED(reclaim) %s 应回收时刻=%s 已逾期 %d 秒仍未被回收"+
+			"(reason=%s rounds=%d；失败类阈值 %s / 延后类阈值 %d 个调度轮次)。"+
+			"configured_months=%d；/readyz 的 usage_retention.reclaim_stalled=true、"+
+			"reclaim_blocked_month/reason/rounds 点名",
+			blocked.Month, st.ReclaimBlockedDueSince, st.ReclaimBlockedAgeSeconds,
+			blocked.Reason, blocked.Rounds, usageReclaimStallAfter, usageReclaimStallRounds,
+			st.ConfiguredMonths)
+	}
+	if st.NeedsManualCount > 0 {
+		// 长期可观测（R12-N2 P1-04）：按设计不回收、需人工处置的月关系 —— 每轮点名，
+		// 直到形态被人修掉。它**不是**停摆（服务端按设计不动手），所以不进
+		// reclaim_stalled。
+		log.Printf("usage retention: %d relation(s) need manual action (按设计不自动回收): %s"+
+			"；处置见 skipped_by_reason 与各条 SKIP 日志的 reason=",
+			st.NeedsManualCount, strings.Join(st.NeedsManualMonths, ","))
 	}
 	if round.Scanned {
 		// R11A-04（P2）：把"已经解决"的非当月写入面条目收敛掉（见
@@ -544,10 +719,12 @@ func usageReclaimDueSince(key string, retentionMonths int) (time.Time, bool) {
 //
 // 返回新的 streak、其中的最大值、达到阈值的关系名（升序，有界）、以及新的"上次
 // 计入时刻"。关系名会随月份滚动而永久增加，而 streak 只含本轮的键 ⇒ 规模有界。
-func advanceDeferredStreaks(prev map[string]int, prevAt time.Time, round usageRetentionRound) (map[string]int, int, []string, time.Time) {
+// 第四个返回值是**本轮是否计入**（节奏闸门，W3-4）：R12-N2 P1-01 的真停摆账要用
+// 同一条闸门推进"真失败类"的连续轮数 —— 否则管理端连点保存也能把轮数推上去。
+func advanceDeferredStreaks(prev map[string]int, prevAt time.Time, round usageRetentionRound) (map[string]int, int, []string, time.Time, bool) {
 	if !round.Scanned {
 		// 无证据轮：不加、不清、不推进（W3-3 ①）。
-		return prev, maxDeferredStreak(prev), stalledRelations(prev), prevAt
+		return prev, maxDeferredStreak(prev), stalledRelations(prev), prevAt, false
 	}
 	// 节奏判据（W3-4）：首轮/距上次计入 ≥ 间隔 ⇒ 本轮计入。
 	counts := prevAt.IsZero() || round.EndedAt.Sub(prevAt) >= usageRetentionSchedulerPeriodGap
@@ -570,7 +747,7 @@ func advanceDeferredStreaks(prev map[string]int, prevAt time.Time, round usageRe
 	if counts && len(round.DeferredRelations) > 0 {
 		at = round.EndedAt
 	}
-	return next, maxDeferredStreak(next), stalledRelations(next), at
+	return next, maxDeferredStreak(next), stalledRelations(next), at, counts
 }
 
 // usageOldestUnreclaimed 是"最早未回收的到期月"的内部账（对外四个 JSON 字段）。
@@ -579,6 +756,131 @@ type usageOldestUnreclaimed struct {
 	Reason string // 该月这一轮没被回收的原因（skip_reasons 的封闭取值，或 failed）
 	Since  time.Time
 	Rounds int64
+}
+
+// usageReclaimBlocked 是"真停摆账"的读数（R12-N2 P1-01）：**最早**那个"已到期、
+// 该回收、但被真失败或有界延后挡住"的月，以及它连续受阻的轮数。
+//
+// 它**不含**按设计跳过的形态（`usageSkipNeedsManual`）—— 那些月永远不会被自动回收，
+// 把它们算进"停摆"就是长期假告警（R12-A P1-01 ②）。它们各自的可读面在
+// `skipped_by_reason` 与 `needs_manual_months`。
+type usageReclaimBlocked struct {
+	Month  string
+	Reason string
+	Rounds int64
+}
+
+// usageMonthDueInRound 报告某个月（YYYYMM）在**本轮**是不是"应被回收"。
+//
+// 判据与回收主循环**同源**：`!m.Before(cutoffMonth)` 表示"保留期内（名字合法但没到期）"
+// 被主循环跳过，所以"未回收"只有在 `month < cutoff_month` 时才是"该回收而没回收"。
+// `CutoffMonth` 为空（未观测到保留期/保留期=0）时**一律不算到期** —— 宁可不告警，
+// 也不能把"保留期内、按设计不动它"的月读成停摆（R12-A 实测的抖动来源之一）。
+func usageMonthDueInRound(month string, round usageRetentionRound) bool {
+	return month != "" && round.CutoffMonth != "" && month < round.CutoffMonth
+}
+
+// usageReclaimBlockedInRound 从本轮的过程事实里挑出**最早的真受阻月**：
+//
+//	① FailedRelations（真失败，`noteFailure` 的失败面，只在这里出现）；
+//	② Unreclaimed 里原因为**有界延后**（lock/statement/settle-budget 超时）的那些；
+//
+// 按设计跳过的原因（usageSkipNeedsManual）与未知原因**都不进**（后者是"判据面之外
+// 的取值"，不允许靠猜把它算成停摆）。三个返回值分别是月、原因、关系名。
+func usageReclaimBlockedInRound(round usageRetentionRound) (month, reason, rel string, ok bool) {
+	consider := func(r, why string) {
+		m, mok := retentionMonthOfRelation(r)
+		if !mok || !usageMonthDueInRound(m, round) {
+			return
+		}
+		if !ok || m < month {
+			month, reason, rel, ok = m, why, r, true
+		}
+	}
+	for _, item := range round.Unreclaimed {
+		r, why := item, "skipped"
+		if i := strings.IndexByte(item, '('); i > 0 && strings.HasSuffix(item, ")") {
+			r, why = item[:i], item[i+1:len(item)-1]
+		}
+		if !usageSkipIsDeferral(why) {
+			continue
+		}
+		consider(r, why)
+	}
+	for _, r := range round.FailedRelations {
+		consider(r, usageReclaimBlockedFailed)
+	}
+	return month, reason, rel, ok
+}
+
+// advanceReclaimBlocked 推进真停摆账（R12-N2 P1-01）。
+//
+// 语义与 advanceOldestUnreclaimed 同形（单调、无证据轮不动），差别只有两点：
+//
+//	① 输入只是**真受阻**的月（按设计跳过的不进）；
+//	② 轮数的算法按原因分流：
+//	     真失败类 —— 本进程内"同一个月连续受阻"的轮数（走 counts 节奏闸门，
+//	                 管理端连点保存不推进）；
+//	     延后类   —— 直接取 `DeferredStreak[rel]`（它本来就只在**调度轮次**上推进，
+//	                 所以单次 5s 锁竞争恒为 1、不可能达阈值）。
+func advanceReclaimBlocked(prev usageReclaimBlocked, round usageRetentionRound, streak map[string]int, counts bool) usageReclaimBlocked {
+	if !round.Scanned {
+		return prev // 无证据轮：不动（"没观测" ≠ "已解除"）
+	}
+	month, reason, rel, ok := usageReclaimBlockedInRound(round)
+	if !ok {
+		return usageReclaimBlocked{}
+	}
+	if reason != usageReclaimBlockedFailed {
+		n := int64(streak[rel])
+		if n < 1 {
+			n = 1 // 至少记 1 轮（与 advanceDeferredStreaks 的"新关系从 1 起算"同口径）
+		}
+		return usageReclaimBlocked{Month: month, Reason: reason, Rounds: n}
+	}
+	if prev.Month == month {
+		p := prev
+		p.Reason = reason
+		if counts {
+			p.Rounds++
+		}
+		return p
+	}
+	return usageReclaimBlocked{Month: month, Reason: reason, Rounds: 1}
+}
+
+// needsManualMonthsInRound 收集本轮"按设计不回收、需人工处置"的月关系
+// （`usage_<YYYYMM>(原因)`，去重、升序、有界；R12-N2 P1-04 的长期观测面）。
+func needsManualMonthsInRound(round usageRetentionRound) ([]string, int) {
+	if !round.Scanned {
+		return nil, 0
+	}
+	seen := map[string]string{}
+	for _, item := range round.Unreclaimed {
+		r, why := item, "skipped"
+		if i := strings.IndexByte(item, '('); i > 0 && strings.HasSuffix(item, ")") {
+			r, why = item[:i], item[i+1:len(item)-1]
+		}
+		if !usageSkipNeedsManual(why) {
+			continue
+		}
+		if m, mok := retentionMonthOfRelation(r); mok {
+			seen[m] = why
+		}
+	}
+	if len(seen) == 0 {
+		return nil, 0
+	}
+	out := make([]string, 0, len(seen))
+	for m, why := range seen {
+		out = append(out, m+"("+why+")")
+	}
+	sort.Strings(out)
+	total := len(out)
+	if total > usageRetentionUnreclaimedMax {
+		out = out[:usageRetentionUnreclaimedMax]
+	}
+	return out, total
 }
 
 // advanceOldestUnreclaimed 推进**单调**的"最早未回收月"（R10-H3 · W3-3）。
@@ -745,6 +1047,37 @@ type usageWriteStateTable map[string]usageWriteBlockState
 const usageWriteStateMonthsMax = 12
 
 var usageWriteBlockVal atomic.Pointer[usageWriteStateTable]
+
+// 写路径建分区 DDL 的等待账（R12-N2 P2-01）：三个 atomic 计数器，热路径零分配、
+// 零锁（只有"真的等过锁"的那次写入才会写它们）。
+var (
+	usageDDLLockWaitsVal     atomic.Int64
+	usageDDLLockWaitMSMaxVal atomic.Int64
+	usageDDLLockBudgetVal    atomic.Int64
+)
+
+// noteUsagePartitionDDLContention 记一次"写路径建分区 DDL 被锁挡住"。
+//
+//	waited   —— 本次写入**整段**等了多久（从第一次尝试到成功/放弃）
+//	timedOut —— 本次写入命中 lock_timeout 的次数（≥1）
+//	exhausted—— 是否因总预算耗尽而失败（写入会被 fail-closed 拒掉）
+func noteUsagePartitionDDLContention(waited time.Duration, timedOut int, exhausted bool) {
+	usageDDLLockWaitsVal.Add(int64(timedOut))
+	ms := waited.Milliseconds()
+	for {
+		cur := usageDDLLockWaitMSMaxVal.Load()
+		if ms <= cur || usageDDLLockWaitMSMaxVal.CompareAndSwap(cur, ms) {
+			break
+		}
+	}
+	if exhausted {
+		usageDDLLockBudgetVal.Add(1)
+	}
+	log.Printf("usage partition: 建分区 DDL 遭遇锁等待（R12-N2 P2-01）：等待=%s 命中 lock_timeout=%d 次"+
+		"预算耗尽=%v。挡住它的是持 `usage` ACCESS SHARE/EXCLUSIVE 的长事务（清理轮的预补账/结算段，"+
+		"或另一条建分区 DDL）；/readyz 的 usage_retention.write_ddl_lock_* 是这条事实的读数",
+		waited.Round(time.Millisecond), timedOut, exhausted)
+}
 
 // usageWriteErrorVal 是"未分类的**瞬时**写入失败"（kind="other"）的进程内过程事实
 // （R10-A-06）。与 usageWriteBlockVal 分开存放：判据面不同（分区布局 vs 瞬时错误），
@@ -1057,6 +1390,10 @@ func CurrentUsageRetentionStatus() UsageRetentionStatus {
 		}
 	}
 	st.WriteErrorOtherMonths, st.WriteErrorOtherCount = usageWriteOtherMonthsForReadyz(&usageWriteErrorVal)
+	// R12-N2（P2-01）：写路径建分区 DDL 的锁等待账（"月初写入被挡住多久"的读数）。
+	st.WriteDDLLockWaits = usageDDLLockWaitsVal.Load()
+	st.WriteDDLLockWaitMSMax = usageDDLLockWaitMSMaxVal.Load()
+	st.WriteDDLLockBudgetExhausted = usageDDLLockBudgetVal.Load()
 	return st
 }
 
@@ -1067,4 +1404,7 @@ func resetUsageRetentionStatusForTest() {
 	defer usageRetentionStatusMu.Unlock()
 	usageRetentionStatusVal = UsageRetentionStatus{}
 	resetUsageWriteBlockForTest()
+	usageDDLLockWaitsVal.Store(0)
+	usageDDLLockWaitMSMaxVal.Store(0)
+	usageDDLLockBudgetVal.Store(0)
 }

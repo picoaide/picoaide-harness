@@ -88,11 +88,30 @@
  * 比较、或在对象字面量里钉非零值，即红），并保留 `wait-budget-contract:allow-clock-value`
  * 的**显式豁免**（要人写下理由，不能靠换匹配器绕过）。
  *
+ * ## 第十二轮（R12-B-01 / R12-B-02）：两个"面比事实窄"的通道
+ *
+ * 审计实测（HEAD `12540e681c`）两条：
+ *
+ *  - **R12-B-01（P2）**：发现面契约的 `DISCOVERY_SCANS` 只有五个宿主包，而"配置收窄
+ *    发现面 ⇒ 用例静默掉出门禁"这个失败类与包无关 —— 在 `foot-menu` /
+ *    `panel-surface` / `wasm-apps` / `account-card` / `wasm-apps-host` 里新增
+ *    `tests/x.test.ts`（只匹配缺省面、不匹配该包 `include`）既不被 `vitest list`
+ *    发现，契约也 EXIT=0（实测）。现在面 = **全部带 vitest `test` 脚本的包**（13 个，
+ *    由 {@link workspaceTestPackages} 读各包 `package.json` 双向对拍，新增/改名/
+ *    换运行器的包不同步即红；非 vitest 的 test 脚本走 {@link NON_VITEST_TEST_RUNNERS}
+ *    登记）。
+ *  - **R12-B-02（P3）**：`SCANNED_EXTENSIONS` 是手写清单（`.ts`/`.tsx`/`.mts`/`.cts`），
+ *    比缺省发现面 `**\/*.{test,spec}.?(c|m)[jt]s?(x)` 少 `.mjs`/`.js`/`.cjs`/`.jsx` ——
+ *    `browser/tests/x.spec.mjs` 里的裸 `vi.waitFor` 会被 vitest **真的跑**而跨包判据
+ *    EXIT=0（实测）。现在扩展名**从 `defaultInclude` 推导**（{@link scannedExtensionsOf}，
+ *    读不懂的 glob 语法 fail-loud），并另加两条反向判据：运行面 `tests/**` 的每个文件
+ *    都必须在表内；各包自己 `include` 能收的扩展名也必须在表内。
+ *
  * @module dsh-plugin-desktop/tests/wait-budget-contract
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -199,13 +218,95 @@ interface ContractFinding {
  */
 const CLOCK_DERIVED_FIELDS = new Set(['retryDelayMs'])
 
-/** 按扩展名选 script kind：`.tsx` 用 TSX，其余用 TS（`<T>x` 断言只在 TS 下成立）。 */
+/**
+ * 按扩展名选 script kind。
+ *
+ * 缺省发现面能收的**每一个**扩展名都以 `x` 结尾表示"可含 JSX"（`.tsx` / `.jsx` /
+ * `.mtsx` / `.cjsx`），其余按 TS 解析（`<T>x` 断言只在 TS 下成立）。扩展名集合是
+ * 推导出来的（见 {@link SCANNED_EXTENSIONS}），所以这里不能只认 `.tsx`。
+ * @param fileName - 扫描面文件的相对名。
+ * @returns the script kind TypeScript should parse it with.
+ */
 function scriptKindOf(fileName: string): ts.ScriptKind {
-  return fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  return fileName.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
 }
 
-/** 本契约认作"测试源"的扩展名（第十一轮 R11-B-03：`.mts` 曾整片在面外）。 */
-const SCANNED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts'] as const
+/**
+ * 把一段 glob 的**文件名段**（不含目录）展开成所有可能的字面量。
+ *
+ * 只实现 `defaultInclude` 真正用到的那三类语法：`{a,b}` 选择、`[...]` 字符类、
+ * `?(...)` 可选组。**不认识的通配语法一律抛错**（`?` / `+` / `@` / `!` 单独出现、
+ * 括号不闭合）—— 判据宁可红着要人来看，也不静默吐一个比运行面窄的集合。
+ * @param segment - e.g. `*.{test,spec}.?(c|m)[jt]s?(x)`.
+ * @returns 每一段字面量（`*.test.ts`、`*.spec.mtsx` …，已去重）。
+ */
+function expandGlobNameSegment(segment: string): string[] {
+  let results: string[] = ['']
+  const append = (suffixes: readonly string[]): void => {
+    const next: string[] = []
+    for (const prefix of results) for (const suffix of suffixes) next.push(prefix + suffix)
+    results = next
+  }
+  let index = 0
+  while (index < segment.length) {
+    const char = segment.charAt(index)
+    if (char === '*') {
+      // 通配段对"扩展名"没有贡献：`*.test.ts` 的扩展名只看 `.test.ts` 之后。
+      index += 1
+      continue
+    }
+    if (char === '{' || char === '[' || (char === '?' && segment[index + 1] === '(')) {
+      const close = char === '{' ? '}' : char === '[' ? ']' : ')'
+      const end = segment.indexOf(close, index + 1)
+      if (end === -1) throw new Error(`glob 段 \`${segment}\` 里的 \`${char}\` 没有闭合 —— 判据无法推导扩展名`)
+      const body = segment.slice(index + (char === '?' ? 2 : 1), end)
+      append(char === '{' ? body.split(',') : char === '[' ? [...body] : ['', ...body.split('|')])
+      index = end + 1
+      continue
+    }
+    if (char === '?' || char === '+' || char === '@' || char === '!') {
+      throw new Error(`glob 段 \`${segment}\` 用了判据不认识的通配语法 \`${char}\` —— 先补推导再放行（fail-closed）`)
+    }
+    append([char])
+    index += 1
+  }
+  return [...new Set(results)]
+}
+
+/**
+ * 从**发现面 glob** 推导"本契约认作测试源"的扩展名集合（R12-B-02）。
+ *
+ * 为什么必须推导而不是手写清单：第十一轮把扫描面从 `.ts` / `.tsx` 补到 `.mts` / `.cts`
+ * 时，是按**当时看得见的形态**补的，而真正决定"哪些文件会被运行"的是 vitest 的
+ * 缺省发现面 `**\/*.{test,spec}.?(c|m)[jt]s?(x)` —— 它还能收 `.mjs` / `.js` /
+ * `.cjs` / `.jsx`。实测：`packages/host/browser/tests/x.spec.mjs` 里写裸
+ * `vi.waitFor` 会被 vitest **真的跑**，而等待预算判据 EXIT=0（面比运行面窄一档）。
+ * 两份手写清单一定会再漂移，所以这里只有一条真源：把 glob 展开。
+ * @param patterns - 发现面 glob（缺省是 `vitest/config` 的 `defaultInclude`）。
+ * @returns 去重后的扩展名（含点，按字典序）。
+ */
+function scannedExtensionsOf(patterns: readonly string[]): string[] {
+  const extensions = new Set<string>()
+  for (const pattern of patterns) {
+    const nameSegment = pattern.split('/').pop() ?? pattern
+    for (const name of expandGlobNameSegment(nameSegment)) {
+      const dot = name.lastIndexOf('.')
+      if (dot <= 0) throw new Error(`glob \`${pattern}\` 展开出的 \`${name}\` 里找不到扩展名 —— 推导失效`)
+      extensions.add(name.slice(dot).toLowerCase())
+    }
+  }
+  return [...extensions].sort()
+}
+
+/**
+ * 本契约认作"测试源"的扩展名 —— **从 vitest 缺省的发现面推导**，不是手写清单。
+ *
+ * 被扫描的目录（各包 `tests/**`）里没有任何一个包声明过 `include`（宿主/桌面包的
+ * `vitest.config.ts` 只加预算，见 `vitest.config.ts` 的文件头），所以这些目录的
+ * **运行面就是缺省发现面**；带上"各包 `include` 的扩展名不得越出这张表"的反向判据
+ * （见"运行面与扫描面同源"那条用例）后，两个方向都被钉住。
+ */
+const SCANNED_EXTENSIONS: readonly string[] = scannedExtensionsOf(defaultInclude)
 
 /** `foo.mts` / `foo.ts` / `foo/index.ts` … 的所有扫描面候选路径。 */
 function scannedCandidates(base: string): string[] {
@@ -1229,8 +1330,12 @@ function countCodeOccurrences(masked: string, needle: string): number {
  * 契约同宽 —— 今天只有 `wait-budgets.ts` 一个非 spec 文件，明天新增 helper 自动进面。
  *
  * 第十一轮 R11-B-03 又把面补宽一次：扩展名原先只有 `.ts` / `.tsx`，一个
- * `tests/x.spec.mts` 里的裸 `vi.waitFor` 整片不在面内（实测绿）。现在与
- * `SCANNED_EXTENSIONS` 同源（`.ts` / `.tsx` / `.mts` / `.cts`）。
+ * `tests/x.spec.mts` 里的裸 `vi.waitFor` 整片不在面内（实测绿）。
+ *
+ * 第十二轮 R12-B-02 把这份面改成**从 vitest 缺省发现面推导**（{@link SCANNED_EXTENSIONS}）：
+ * 手写清单在第十一轮漏掉了 `.mjs` / `.js` / `.cjs` / `.jsx` —— browser 里新增
+ * `tests/x.spec.mjs`（裸 `vi.waitFor`）会被 vitest 真的运行而判据全绿。现在扩展名与
+ * 运行面同源，且另有一条反向判据（运行面 `tests/**` 的每个文件都必须在表内）。
  * @param root - the tests root directory.
  * @returns relative POSIX paths of every scanned TypeScript file below it.
  */
@@ -2206,6 +2311,9 @@ interface HostPackageScan {
 
 const hostRoot = join(testsRoot, '..', '..')
 
+/** workspace 的 `packages/`（发现面契约的扫描面从这里派生，含客户端包）。 */
+const packagesRoot = join(hostRoot, '..')
+
 /** 跨包面：四个宿主包，路径从桌面包推出（它们永远同仓并存）。 */
 const HOST_PACKAGE_SCANS: readonly HostPackageScan[] = [
   { name: 'browser', root: join(hostRoot, 'browser', 'tests'), configPath: join(hostRoot, 'browser', 'vitest.config.ts') },
@@ -2355,18 +2463,93 @@ interface DiscoveryScan {
   readonly name: string
   /** 包根（绝对路径）——缺省发现面就在这棵树下。 */
   readonly pkgRoot: string
-  /** 该包的 `vitest.config.ts`（静态面读它）。 */
+  /** 该包的 `vitest.config.ts`（静态面读它；没写的包按"什么都没声明"处理）。 */
   readonly configPath: string
 }
 
-/** 五个宿主包（桌面包也在面内：它的配置是既有文件，同样不许偷偷收窄）。 */
+/**
+ * 面内包的**完整清单**：`packages/<组>/<目录>`（判据按这个键做双向对拍）。
+ *
+ * 第十二轮 R12-B-01 之前这里只有五个宿主包（`browser`/`connectors`/`cron`/`desktop`/
+ * `enterprise`），而"配置收窄发现面 ⇒ 用例静默掉出门禁"这个失败类**与包无关**：
+ * 在 `foot-menu` / `panel-surface` / `wasm-apps` / `account-card` / `wasm-apps-host`
+ * 里新增一个只匹配缺省面、不匹配该包 `include` 的文件（例如
+ * `packages/client/foot-menu/tests/x.test.ts`）既不会被 `vitest list` 发现，契约也
+ * EXIT=0。现在清单 = **全部带 vitest `test` 脚本的包**（13 个），并由
+ * {@link workspaceTestPackages} 从各包 `package.json` 双向对拍 —— 新增/改名/换运行器
+ * 的包不同步这份清单就判红，不再依赖"记得来改这里"。
+ */
 const DISCOVERY_SCANS: readonly DiscoveryScan[] = [
+  // ---- 客户端包（R12-B-01 新纳入：收窄方是它们各自的 vitest.config.ts） ----
+  { name: 'account-card', pkgRoot: join(packagesRoot, 'client', 'account-card'), configPath: join(packagesRoot, 'client', 'account-card', 'vitest.config.ts') },
+  { name: 'branding', pkgRoot: join(packagesRoot, 'client', 'branding'), configPath: join(packagesRoot, 'client', 'branding', 'vitest.config.ts') },
+  { name: 'foot-menu', pkgRoot: join(packagesRoot, 'client', 'foot-menu'), configPath: join(packagesRoot, 'client', 'foot-menu', 'vitest.config.ts') },
+  { name: 'panel-surface', pkgRoot: join(packagesRoot, 'client', 'panel-surface'), configPath: join(packagesRoot, 'client', 'panel-surface', 'vitest.config.ts') },
+  { name: 'wasm-apps', pkgRoot: join(packagesRoot, 'client', 'wasm-apps'), configPath: join(packagesRoot, 'client', 'wasm-apps', 'vitest.config.ts') },
+  // ---- 宿主包（第十一轮就在面内） ----
   { name: 'browser', pkgRoot: join(hostRoot, 'browser'), configPath: join(hostRoot, 'browser', 'vitest.config.ts') },
   { name: 'connectors', pkgRoot: join(hostRoot, 'connectors'), configPath: join(hostRoot, 'connectors', 'vitest.config.ts') },
   { name: 'cron', pkgRoot: join(hostRoot, 'cron'), configPath: join(hostRoot, 'cron', 'vitest.config.ts') },
   { name: 'desktop', pkgRoot: join(hostRoot, 'desktop'), configPath: join(hostRoot, 'desktop', 'vitest.config.ts') },
   { name: 'enterprise', pkgRoot: join(hostRoot, 'enterprise'), configPath: join(hostRoot, 'enterprise', 'vitest.config.ts') },
+  { name: 'host-home', pkgRoot: join(hostRoot, 'host-home'), configPath: join(hostRoot, 'host-home', 'vitest.config.ts') },
+  { name: 'host-locale', pkgRoot: join(hostRoot, 'host-locale'), configPath: join(hostRoot, 'host-locale', 'vitest.config.ts') },
+  { name: 'wasm-apps-host', pkgRoot: join(hostRoot, 'wasm-apps-host'), configPath: join(hostRoot, 'wasm-apps-host', 'vitest.config.ts') },
 ]
+
+/**
+ * 带 `test` 脚本但**不是** vitest 的包：登记制（键 = `packages/` 下的相对路径）。
+ *
+ * 它们不在发现面契约的适用面内（没有 vitest 的 `include`/缺省 glob 语义），但**必须
+ * 逐条登记**：否则"扫描面 = 全部带 test 脚本的包"这句话就是假定而不是判据 ——
+ * 把某个包的 `test` 从 `vitest run` 换成别的运行器时，只有这张登记表能让人看见
+ * "它从发现面契约里退出去了"。
+ */
+const NON_VITEST_TEST_RUNNERS: Readonly<Record<string, string>> = {
+  'vendor/memory-evolve': [
+    '`test` = `node scripts/run-tests.mjs`（node:test 自建驱动 + 它自己的用例发现规则），',
+    '不走 vitest ⇒ 没有 `include`/缺省 glob 构成的发现面可供对拍；',
+    '该包由 `scripts/check-workspaces.mjs` 以 `yarn workspace … run test` 正常接入门禁。',
+  ].join(''),
+}
+
+/**
+ * 从文件系统**派生**"全部带 `test` 脚本的包"（R12-B-01 的权威真源）。
+ *
+ * 判据的扫描面若是一份手写清单，"漏掉一个包"就永远不会被发现 —— 这里改为读各包
+ * `package.json` 的 `scripts.test`：带 vitest 的必须在 {@link DISCOVERY_SCANS} 里，
+ * 不带 vitest 的必须在 {@link NON_VITEST_TEST_RUNNERS} 里，两个方向都判。
+ * @returns 每个带 `test` 脚本的包（`key` 是 `packages/` 下的相对 POSIX 路径）。
+ */
+function workspaceTestPackages(): Array<{ key: string, pkgRoot: string, testScript: string }> {
+  const found: Array<{ key: string, pkgRoot: string, testScript: string }> = []
+  const sorted = (directory: string): string[] =>
+    readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .sort()
+  for (const group of sorted(packagesRoot)) {
+    for (const name of sorted(join(packagesRoot, group))) {
+      const pkgRoot = join(packagesRoot, group, name)
+      let scripts: unknown
+      try {
+        scripts = (JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8')) as { scripts?: unknown }).scripts
+      } catch {
+        continue
+      }
+      const test = (scripts as Record<string, unknown> | undefined)?.test
+      if (typeof test !== 'string' || test.trim() === '') continue
+      found.push({ key: `${group}/${name}`, pkgRoot, testScript: test })
+    }
+  }
+  return found
+}
+
+/** {@link DISCOVERY_SCANS} 的键（与 {@link workspaceTestPackages} 的 `key` 同形）。 */
+function scanKey(scan: DiscoveryScan): string {
+  return relative(packagesRoot, scan.pkgRoot).split('\\').join('/')
+}
+
 
 /**
  * 本判据认识的那一份缺省发现面。
@@ -2396,6 +2579,71 @@ const DISCOVERY_NARROWING: Readonly<Record<string, { readonly files: readonly st
       '正文 import 的是 `node:test`/`node:assert`，没有 vitest —— 它不是 vitest 用例，',
       '收进来只会得到 "No test suite found in file"。本包 `include: [\'tests/**/*.spec.ts\']`',
       '正是为此而写，第十轮（`3264137997`）就存在，不是本轮引入。',
+    ].join(''),
+  },
+  // ---------------------------------------------------------------------------
+  // 以下五个包（R12-B-01 新纳入扫描面后暴露）：它们声明了比缺省**窄**的 `include`，
+  // 但**今天一个文件都没丢**（`files: []`）—— 登记的是"形态"，不是"豁免"。
+  //
+  // 空清单是承重的：`discoveryFindings` 要求"实际丢失清单 == 登记清单"逐字相等，
+  // 所以任何人往这些包的缺口里放一个新用例（`tests/x.test.ts`、`tests/x.spec.mts`、
+  // `src/**` 之外的 `*.spec.tsx` …）都会立刻变成"登记与实际丢失对不上"而判红 ——
+  // 这正是 R12-B-01 的变异用例（`foot-menu/tests/x.test.ts`）所证明的。
+  //
+  // 更彻底的做法是把这五个 `include` 删掉（audit 的修法 b：它们都只差"另一种后缀/
+  // 另一个目录"，`include` 无一处在承担必要职责）—— 但那些 `vitest.config.ts` 不在本轮
+  // 改动面内，故按"逐字登记 + 空丢失清单"收口，改配置时应连同这里一起删。
+  // ---------------------------------------------------------------------------
+  'account-card': {
+    files: [],
+    reason: [
+      '`include: [\'src/**/*.{test,spec}.{ts,tsx}\', \'tests/**/*.{test,spec}.{ts,tsx}\']`：',
+      '缺口 = `.mts`/`.cts`/`.mjs`/`.cjs`/`.js`/`.jsx` 形态。今天一个都没丢（清单为空），',
+      '任何新落进缺口的用例都会让本项与事实对不上而判红。',
+    ].join(''),
+  },
+  'foot-menu': {
+    files: [],
+    reason: [
+      '`include: [\'tests/**/*.spec.ts\', \'tests/**/*.spec.tsx\']`：',
+      '缺口 = `*.test.*` 与 `tests/` 之外的用例（`src/**`）、以及 `.mts`/`.cts`/`.mjs`/… 形态。',
+      'R12-B-01 的复现注入 `tests/x.test.ts` 就落在这个缺口里（修复前契约 EXIT=0）。今天清单为空。',
+    ].join(''),
+  },
+  'host-home': {
+    files: [],
+    reason: [
+      '`include: [\'tests/**/*.spec.ts\']`：缺口 = `*.tsx`/`*.mts`/`*.cts`/`*.js`/`*.mjs`/`*.cjs`/… 形态',
+      '（以及 `tests/` 之外的用例）。该包今天只有 `tests/` 下一个 `.spec.ts`，清单为空。',
+    ].join(''),
+  },
+  'host-locale': {
+    files: [],
+    reason: [
+      '`include: [\'tests/**/*.spec.ts\']`：与 `host-home` 同形 —— 缺口 = `*.tsx`/`*.mts`/`*.cts`/',
+      '`*.js`/`*.mjs`/`*.cjs`/… 形态与 `tests/` 之外的用例；该包今天只有一个 `.spec.ts`，清单为空。',
+    ].join(''),
+  },
+  'panel-surface': {
+    files: [],
+    reason: [
+      '`include: [\'tests/**/*.spec.ts\', \'tests/**/*.spec.tsx\']`：与 `foot-menu` 同形 ——',
+      '缺口 = `*.test.*`、`src/**`、`.mts`/`.cts`/`.mjs`/… 形态；今天一个都没丢（清单为空）。',
+    ].join(''),
+  },
+  'wasm-apps': {
+    files: [],
+    reason: [
+      '`include: [\'src/**/*.spec.ts\', \'src/**/*.spec.tsx\']`：缺口 = **整棵 `tests/`** 与',
+      '`*.test.*`、`.mts`/`.cts`/`.mjs`/… 形态。该包今天所有用例都在 `src/` 下（24 个文件，',
+      '清单为空），但往 `tests/` 放一个用例就会静默掉出门禁 ⇒ 登记为空清单把这条钉住。',
+    ].join(''),
+  },
+  'wasm-apps-host': {
+    files: [],
+    reason: [
+      '`include: [\'src/**/*.spec.ts\']`：缺口 = **整棵 `tests/`**、`*.test.*`、`.tsx`、',
+      '`.mts`/`.cts`/`.mjs`/… 形态。该包今天所有用例都在 `src/` 下（24 个文件，清单为空）。',
     ].join(''),
   },
 }
@@ -2492,11 +2740,20 @@ function discoveryFindings(
   return findings
 }
 
-/** 读配置里 `test: { … }` 的直接属性：名字 → 初始化文本。 */
+/**
+ * 读配置里 `test: { … }` 的直接属性：名字 → 初始化文本。
+ *
+ * 没有 `vitest.config.ts` 的包（`client/branding` 就是）返回空表 —— "没写配置"与
+ * "什么都没声明"是同一件事，不能按"读不到 ⇒ 判据失效"处理（那会把一个合法的包
+ * 判红）。文件存在但读不出 `test` 段仍由调用方 fail-loud。
+ * @param configPath - absolute path of the package's `vitest.config.ts`.
+ * @returns declared `test` properties (empty when the package has no config).
+ */
 function configTestProperties(configPath: string): Map<string, string> {
+  const properties = new Map<string, string>()
+  if (!existsSync(configPath)) return properties
   const source = readFileSync(configPath, 'utf8')
   const file = ts.createSourceFile('vitest.config.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-  const properties = new Map<string, string>()
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAssignment(node) && node.name.getText(file) === 'test' && ts.isObjectLiteralExpression(node.initializer)) {
       for (const member of node.initializer.properties) {
@@ -2528,11 +2785,37 @@ function importsVitest(source: string): boolean {
   return /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)['"]vitest(?:\/[^'"]*)?['"]/u.test(source)
 }
 
+/** 一个包的两种发现面（缺省语义走出来的 vs `vitest list` 报出来的）。 */
+interface DiscoverySurface {
+  readonly scan: DiscoveryScan
+  readonly defaultFiles: readonly string[]
+  readonly effectiveFiles: readonly string[]
+  readonly raw: string
+}
+
+let discoverySurfaceCache: readonly DiscoverySurface[] | undefined
+
+/**
+ * 两种发现面，每个包**只跑一次**（`vitest list` 要 spawn 一个进程：13 个包 ≈ 5s）。
+ *
+ * 迟到的惰性求值（而不是 import 期）：只有真跑到这组用例才付这份代价。
+ * @returns every scanned package's default and effective surface.
+ */
+function discoverySurfaces(): readonly DiscoverySurface[] {
+  if (discoverySurfaceCache === undefined) {
+    discoverySurfaceCache = DISCOVERY_SCANS.map((scan) => {
+      const { files, raw } = effectiveSurfaceFiles(scan)
+      return { scan, defaultFiles: defaultSurfaceFiles(scan.pkgRoot), effectiveFiles: files, raw }
+    })
+  }
+  return discoverySurfaceCache
+}
+
 describe('wait budget contract · 测试发现面（R11-J2-N1）', () => {
   it('缺省发现面的三个常量仍是判据认识的那几个（vitest 改了默认值就必须回来对表）', () => {
     expect(
       [...defaultInclude],
-      'vitest 的 defaultInclude 变了：本判据用"文件名后缀"复刻它（见 DEFAULT_TEST_FILE），必须重新对表',
+      'vitest 的 defaultInclude 变了：本判据用"文件名后缀"复刻它（见 DEFAULT_TEST_FILE）并**推导**扫描面扩展名（见 SCANNED_EXTENSIONS），必须重新对表',
     ).toEqual([...RECOGNIZED_DEFAULT_INCLUDE])
     expect(
       [...defaultExclude],
@@ -2541,17 +2824,44 @@ describe('wait budget contract · 测试发现面（R11-J2-N1）', () => {
     expect(configDefaults.environment, 'vitest 的缺省 environment 不再是 node，配置里显式声明它也不再"与缺省一致"').toBe('node')
   })
 
-  it('五个宿主包的配置都不得收窄发现面（vitest list 的实际集合 == 缺省语义走出的集合）', () => {
-    expect(DISCOVERY_SCANS.map(scan => scan.name)).toEqual(['browser', 'connectors', 'cron', 'desktop', 'enterprise'])
-    let total = 0
+  it('扫描面 = **全部带 test 脚本的包**：清单与各包 package.json 双向对拍（R12-B-01）', () => {
+    const discovered = workspaceTestPackages()
+    expect(
+      discovered.length,
+      `packages/ 下只找到 ${String(discovered.length)} 个带 test 脚本的包 —— 派生失败（目录搬走或 package.json 读不到）`,
+    ).toBeGreaterThanOrEqual(13)
+    const vitestKeys = discovered.filter(entry => /vitest/u.test(entry.testScript)).map(entry => entry.key).sort()
+    expect(
+      DISCOVERY_SCANS.map(scanKey).sort(),
+      '带 vitest `test` 脚本的包必须逐个进 DISCOVERY_SCANS —— 少一个，那个包的发现面收窄就没人看得见（R12-B-01 的假绿通道）',
+    ).toEqual(vitestKeys)
+    const otherKeys = discovered.filter(entry => !/vitest/u.test(entry.testScript)).map(entry => entry.key).sort()
+    expect(
+      Object.keys(NON_VITEST_TEST_RUNNERS).sort(),
+      '带 test 脚本但不用 vitest 的包必须逐条登记（登记 = 明确它为什么不在发现面契约里）',
+    ).toEqual(otherKeys)
+    for (const [key, reason] of Object.entries(NON_VITEST_TEST_RUNNERS)) {
+      expect(reason.length, `${key}: 登记必须写清"谁在跑、为什么不在面内"`).toBeGreaterThan(20)
+    }
+    // 反向：面内的每一项都必须真的带 vitest 的 test 脚本（清单里塞一个没测试的包 = 空转）。
     for (const scan of DISCOVERY_SCANS) {
-      const defaultFiles = defaultSurfaceFiles(scan.pkgRoot)
+      const entry = discovered.find(candidate => candidate.pkgRoot === scan.pkgRoot)
+      expect(entry, `${scan.name}: 在 DISCOVERY_SCANS 里但文件系统上没有这个包（陈旧的清单项）`).toBeDefined()
+      expect(/vitest/u.test(entry!.testScript), `${scan.name}: 面内包的 test 脚本不是 vitest（${entry!.testScript}）`).toBe(true)
+    }
+    // 名字必须唯一：`DISCOVERY_NARROWING` 是按名字登记的，重名会把两处登记混成一处。
+    const names = DISCOVERY_SCANS.map(scan => scan.name)
+    expect(names.length, 'DISCOVERY_SCANS 里有重名项').toBe(new Set(names).size)
+  })
+
+  it('全部带 vitest 的包都不得收窄发现面（vitest list 的实际集合 == 缺省语义走出的集合）', () => {
+    let total = 0
+    for (const { scan, defaultFiles, effectiveFiles, raw } of discoverySurfaces()) {
       expect(
         defaultFiles.length,
         `${scan.name}: 缺省发现面只走出 ${String(defaultFiles.length)} 个文件 —— 判据正在空转（目录搬走或后缀判据失效）`,
-      ).toBeGreaterThan(4)
+      ).toBeGreaterThan(0)
       total += defaultFiles.length
-      const { files: effectiveFiles, raw } = effectiveSurfaceFiles(scan)
       const findings = discoveryFindings(scan.name, defaultFiles, effectiveFiles)
       expect(
         findings,
@@ -2560,13 +2870,87 @@ describe('wait budget contract · 测试发现面（R11-J2-N1）', () => {
         + `\nvitest list 原始输出：\n${raw}`,
       ).toEqual([])
     }
-    expect(total, `五个包的缺省发现面合计只有 ${String(total)} 个文件 —— 判据的扫描面塌了`).toBeGreaterThanOrEqual(200)
+    expect(total, `全部 ${String(DISCOVERY_SCANS.length)} 个包的缺省发现面合计只有 ${String(total)} 个文件 —— 判据的扫描面塌了`)
+      .toBeGreaterThanOrEqual(300)
+  })
+
+  it('运行面里 `tests/**` 的每个文件都必须在等待预算扫描面的扩展名里（R12-B-02 的反向判据）', () => {
+    // 面比运行面窄的形态：`tests/x.spec.mjs` 会被 vitest **真的跑**，而等待预算扫描面
+    // 只认 `.ts`/`.tsx`/`.mts`/`.cts` ⇒ 里面的裸 `vi.waitFor` 吃 1s 缺省且没有判据。
+    // 这条把"扫描面 ⊇ 运行面（`tests/**` 部分）"变成红灯，扩展名换回手写清单即红。
+    const outside: string[] = []
+    for (const { scan, effectiveFiles } of discoverySurfaces()) {
+      for (const file of effectiveFiles) {
+        if (!file.startsWith('tests/')) continue
+        if (SCANNED_EXTENSIONS.some(extension => file.endsWith(extension))) continue
+        outside.push(`${scan.name}/${file}`)
+      }
+    }
+    expect(
+      outside,
+      `这些文件会进运行面（vitest 真的会跑），却不在等待预算扫描面的扩展名里（${SCANNED_EXTENSIONS.join(' / ')}）`
+      + ' —— 面比运行面窄（R12-B-02）',
+    ).toEqual([])
+  })
+
+  it('扫描面扩展名是**推导**出来的：与缺省发现面的文件名正则逐条对拍（R12-B-02）', () => {
+    // 方向 ①：推导集合里的每个扩展名，缺省发现面的正则都必须认。
+    for (const extension of SCANNED_EXTENSIONS) {
+      expect(DEFAULT_TEST_FILE.test(`probe.test${extension}`), `推导出 ${extension}，但缺省正则不认 \`probe.test${extension}\` —— 两份复刻漂移了`).toBe(true)
+      expect(DEFAULT_TEST_FILE.test(`probe.spec${extension}`), `推导出 ${extension}，但缺省正则不认 \`probe.spec${extension}\` —— 两份复刻漂移了`).toBe(true)
+    }
+    // 方向 ②：不在推导集合里的扩展名，缺省正则也不许认（否则就是推导漏了一档）。
+    const probed = ['', '.md', '.json', '.yaml', '.txt', '.cjsx', '.mtsx', '.jsx', '.mjs', '.js', '.tsx', '.ts', '.cts', '.mts', '.cjs', '.ctsx']
+    const outside = probed.filter(extension => !SCANNED_EXTENSIONS.includes(extension))
+    expect(outside.length, '对拍语料全被推导集合吃掉了 —— 方向 ② 空转').toBeGreaterThan(0)
+    for (const extension of outside) {
+      expect(DEFAULT_TEST_FILE.test(`probe.test${extension}`), `缺省正则认 \`probe.test${extension}\`，但推导集合里没有 ${extension || '（无扩展名）'}`).toBe(false)
+    }
+  })
+
+  it('扩展名推导器自身会咬：换一段 glob 就推出另一套扩展名，读不懂的语法 fail-loud', () => {
+    // 推导器必须真的在读 glob，而不是返回一个常量集合。
+    expect(scannedExtensionsOf(['**/*.{test,spec}.[jt]s'])).toEqual(['.js', '.ts'])
+    expect(scannedExtensionsOf(['**/*.{test,spec}.?(c|m)[jt]s?(x)'])).toEqual(
+      ['.cjs', '.cjsx', '.cts', '.ctsx', '.js', '.jsx', '.mjs', '.mjsx', '.mts', '.mtsx', '.ts', '.tsx'],
+    )
+    // 真源的推导结果必须落在同一个集合里（同一份实现，不是两份清单）。
+    expect([...SCANNED_EXTENSIONS]).toEqual(scannedExtensionsOf(defaultInclude))
+    expect(SCANNED_EXTENSIONS, '`.mjs`/`.js` 是 R12-B-02 的现场，必须真的在面内').toEqual(
+      expect.arrayContaining(['.mjs', '.js', '.cjs', '.jsx']),
+    )
+    // fail-closed：解析不出来的 glob 必须抛错，不许静默返回一个更窄的集合。
+    expect(() => scannedExtensionsOf(['**/*.{test,spec}?[jt]s']), '单独 `?` 是不认识的通配语法').toThrow(/通配语法/u)
+    expect(() => scannedExtensionsOf(['**/*.{test,spec.?(c|m)[jt]s?(x)']), '未闭合的 `{`').toThrow(/没有闭合/u)
+    expect(() => scannedExtensionsOf(['**/*']), '展开不出扩展名').toThrow(/找不到扩展名/u)
+  })
+
+  it('每个包自己声明的 include（若有）的扩展名也必须落在扫描面内（R12-B-02 的另一半）', () => {
+    for (const { scan } of discoverySurfaces()) {
+      const include = configTestProperties(scan.configPath).get('include')
+      if (include === undefined) continue
+      const parsed = stringArrayLiteral(include)
+      expect(parsed, `${scan.name}: include 解析不出字符串数组（${include}）—— 判据要跟着改`).not.toBeNull()
+      for (const pattern of parsed ?? []) {
+        for (const extension of scannedExtensionsOf([pattern])) {
+          expect(
+            SCANNED_EXTENSIONS.includes(extension),
+            `${scan.name}: include 里的 \`${pattern}\` 能收 ${extension}，而等待预算扫描面不认这个扩展名`
+            + `（面：${SCANNED_EXTENSIONS.join(' / ')}）—— 运行面比扫描面宽（R12-B-02）`,
+          ).toBe(true)
+        }
+      }
+    }
   })
 
   it('静态面同判：include / exclude / environment 必须"不声明或与缺省逐字一致"，否则必须有登记', () => {
     for (const scan of DISCOVERY_SCANS) {
       const properties = configTestProperties(scan.configPath)
-      expect(properties.size, `${scan.name}: 读不到 vitest.config.ts 的 test 段（配置可能换了写法，判据要跟着改）`).toBeGreaterThan(0)
+      // 没有 `vitest.config.ts`（`client/branding`）＝ 什么都没声明，是合法形态；
+      // 有配置却读不出 `test` 段才是"配置换了写法，判据要跟着改"。
+      if (existsSync(scan.configPath)) {
+        expect(properties.size, `${scan.name}: 读不到 vitest.config.ts 的 test 段（配置可能换了写法，判据要跟着改）`).toBeGreaterThan(0)
+      }
       const include = properties.get('include')
       if (include !== undefined) {
         const parsed = stringArrayLiteral(include)
@@ -2599,11 +2983,23 @@ describe('wait budget contract · 测试发现面（R11-J2-N1）', () => {
     }
   })
 
-  it('豁免不许滥用：登记进 DISCOVERY_NARROWING 的文件必须是可证明的非 vitest 文件', () => {
+  it('豁免不许滥用：登记里的**文件**必须是可证明的非 vitest 文件；空清单登记的是"形态"而不是豁免', () => {
     for (const [name, entry] of Object.entries(DISCOVERY_NARROWING)) {
       const scan = DISCOVERY_SCANS.find(candidate => candidate.name === name)
       expect(scan, `${name}: 登记了一个不在面内的包`).toBeDefined()
       expect(entry.reason.length, `${name}: 豁免必须写下理由（人话，不是"已知"两个字）`).toBeGreaterThan(20)
+      // `files: []` = "声明了比缺省窄的 include，但今天一个文件都没丢"。这不是豁免：
+      // 另一条用例要求"实际丢失清单 == 登记清单"逐字相等，所以往缺口里放一个用例
+      // 就会立刻变成"登记与实际丢失对不上" ⇒ 判红（R12-B-01 的变异用例）。
+      // 这里只钉住"空清单必须真的是声明式收窄（该包确实声明了 include）"，
+      // 防止有人用空清单给一个**已经丢文件**的包打掩护。
+      if (entry.files.length === 0) {
+        const include = configTestProperties(scan!.configPath).get('include')
+        expect(
+          include,
+          `${name}: 登记成空清单，但该包并没有声明 include —— 空清单只能在"声明式收窄、当前零丢失"时使用`,
+        ).toBeDefined()
+      }
       for (const file of entry.files) {
         const full = join(scan!.pkgRoot, file)
         expect(statSync(full, { throwIfNoEntry: false })?.isFile() === true, `${name}: 登记豁免的 ${file} 不存在（陈旧的豁免）`).toBe(true)

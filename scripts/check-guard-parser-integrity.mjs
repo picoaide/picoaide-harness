@@ -56,6 +56,15 @@ import { fileURLToPath } from 'node:url'
 // 是「禁 yarnPath/plugins/生命周期钩子」的唯一判定。**刻意不 import `yaml`**：入口判据不能依赖
 // 一个可被 `resolutions` 改写的解析器（本文件的 C-17 段就是这条）。
 import { YARN_ENTRY_FORBIDDEN_KEYS, YARN_LIFECYCLE_HOOKS, yarnrcScalarValue, yarnrcTopLevelKeys } from './check-workspaces.mjs'
+// **前置校验件的三张清单**（R12-D-01 的收口件）：它是"任何 yarn 命令之前"的第一道，
+// 与上面两份各自枚举同一批禁键 / 钩子名 / 必需标量 —— 三份必须同源（⑥b 逐条对拍）。
+// 该模块只依赖 `node:*` 与 `git`，且被 import 时零副作用（入口有 isEntryPoint 守卫）。
+import {
+  INSTALL_INTEGRITY_FORBIDDEN_YARN_KEYS,
+  INSTALL_INTEGRITY_LIFECYCLE_HOOKS,
+  INSTALL_INTEGRITY_REGISTERED_HOOKS,
+  INSTALL_INTEGRITY_REQUIRED_YARN_SCALARS,
+} from './check-install-integrity.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const GUARD_RUNNER = join(ROOT, 'scripts', 'check-root-guards.mjs')
@@ -92,6 +101,46 @@ const REGISTERED_GATE_PARSER_PACKAGES = [
  */
 function sha256(data) {
   return createHash('sha256').update(data).digest('hex')
+}
+
+/**
+ * 在仓库根跑一次 git（同步；用于"摘要锚到 **git 对象**"这一层 —— R12-D-01 的 B 面）。
+ * @param args - git 参数。
+ * @param encoding - `utf8`（缺省）或 `buffer`。
+ * @returns `spawnSync` 的结果。
+ */
+function gitInRoot(args, encoding = 'utf8') {
+  return spawnSync('git', ['-C', ROOT, ...args], { encoding, maxBuffer: 128 * 1024 * 1024 })
+}
+
+/** 仓库里读不读得到 git 元数据（读不到 ⇒ 摘要只能退化成"工作树 vs 登记值"，走告警通道）。 */
+export function gitMetadataAvailable() {
+  return gitInRoot(['rev-parse', '--git-dir']).status === 0
+}
+
+/**
+ * `git show HEAD:<path>` 的字节（**判据的主输入**）。
+ *
+ * 为什么主判据必须是它、而不是工作树：install 期（`.yarnrc.yml` 的 `plugins:` 顶层模块代码、
+ * 工作区 `postinstall`）能改写工作树里的判据执行体**并顺手改掉登记值** —— 那时"工作树 vs
+ * 登记值"是自洽的，只有 HEAD 对象能看出这件事（R12-D-01 的 A3/A4：只改
+ * `check-root-guards.mjs` 会被 `--require-clean` 抓住，**同时**改这份锚定判据就 EXIT=0）。
+ * @param path - 仓库相对路径。
+ * @returns `Buffer`；不在 HEAD 里 / 读不出 ⇒ `null`。
+ */
+export function readHeadBytes(path) {
+  const result = gitInRoot(['show', `HEAD:${path}`], 'buffer')
+  return result.status === 0 && Buffer.isBuffer(result.stdout) ? result.stdout : null
+}
+
+/** HEAD 里全部 `scripts/check-*.mjs`（判据执行体的**全集**；读不出 ⇒ `null`）。 */
+export function listHeadJudgeBodies() {
+  const result = gitInRoot(['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', 'scripts'])
+  if (result.status !== 0) return null
+  return String(result.stdout)
+    .split('\0')
+    .filter(name => /^scripts\/check-[^/]*\.mjs$/u.test(name))
+    .sort()
 }
 
 /**
@@ -291,6 +340,45 @@ const EXECUTION_ENTRY_PATHS = [
   'scripts/check-root-guards.mjs',
   'scripts/check-workspaces.mjs',
   'scripts/check-guard-parser-integrity.mjs',
+  // R12-D-01 的收口件：装在所有 yarn 命令**之前**的"判据本体完整性"前置校验。
+  // 它自己也是判据执行体（可被改写 ⇒ 前置校验形同虚设），所以在这里登记**内容摘要**：
+  // 改动它必须显式出现在 diff 里（`--print-digests` 打印可粘贴行）。
+  'scripts/check-install-integrity.mjs',
+]
+
+/**
+ * 「install 期判据本体完整性前置校验」这一件的**内容摘要登记**（R12-D-01 ①）。
+ *
+ * 为什么它不能只靠"工作树 == HEAD"：那条判据在**这个脚本自己**被改写时是空的 ——
+ * 改写者会让它打印通过。所以它的内容必须是**被登记、进 diff、可评审**的；
+ * 与守卫脚本的 `REGISTERED_GUARD_ENTRIES[*].digest` 同一套纪律（摘要由本判据复算对拍）。
+ *
+ * `methods` = 该脚本负责的判据面（摘要之外给人看的冗余证据，防止"登记了个空壳"）。
+ */
+const REGISTERED_INSTALL_INTEGRITY_BODIES = [
+  {
+    path: 'scripts/check-install-integrity.mjs',
+    // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
+    sha256: 'ae6360f5c53e404cb9394a44242af33abe46ca0c66433dca6432d845a9f7d7a2',
+    methods: [
+      'judge-body-bytes-equal-head',
+      'yarnrc-forbidden-keys',
+      'yarn-code-directories-empty',
+      'lifecycle-hooks-registered',
+    ],
+  },
+  {
+    // 凭据检查器（R12-D-03 / C-P0-2②）：它把"通过凭据"从流属性抬成"步骤独占文件 + 一次性
+    // nonce"。它自己也是判据执行体 ⇒ 同样按内容摘要登记（改动必须进 diff、可评审）。
+    path: 'scripts/check-verdict-credential.mjs',
+    sha256: 'f09170c2ca392a1cd0d232a4c9c5c387dde9754df2807e1b0830052f7c92d7cf',
+    methods: [
+      'credential-exactly-once',
+      'credential-counter-semantics',
+      'step-private-dir-ownership',
+      'nonce-echo-binding',
+    ],
+  },
 ]
 
 /**
@@ -378,6 +466,36 @@ const YARN_CODE_DIRECTORIES = ['.yarn/plugins', '.yarn/releases']
  * 并说明"为什么必须发生在 install 期"（可评审的 diff 是唯一更新通道）。
  */
 const REGISTERED_ROOT_LIFECYCLE_HOOKS = []
+/**
+ * **工作区** manifest 的安装期生命周期钩子登记（R12-D-02，P1）。
+ *
+ * 现场：同族的 install 期代码执行通道在**工作区包**上完全没判据 ——
+ * `lifecycleHookProblems()` 只被喂了根 manifest（本文件 `main()` 里
+ * `JSON.parse(readFileSync(join(ROOT, 'package.json')))`），而真 yarn 4.18.0 在
+ * `enableScripts: false` 下**照样执行工作区自己的 `postinstall`**（R12-D 的 probe-ws 实测：
+ * `YN0007: │ sub@workspace:packages/sub must be built…` + 标记文件落地）⇒ 在
+ * 任一工作区包的 manifest 里加一行 `postinstall` 就能在 install 期改写判据本体，
+ * 而当时的判据打印的是「根 package.json 无未登记的生命周期钩子」并 EXIT=0。
+ *
+ * 键 = `{ manifest, hook }`（`manifest` 是仓库相对路径），空表 = **禁新增**。
+ */
+const REGISTERED_WORKSPACE_LIFECYCLE_HOOKS = [
+  {
+    manifest: 'packages/host/desktop/package.json',
+    hook: 'prepack',
+    reason: '既有的"打包前必须过 check"约定（`prepack: yarn run check`）：`prepack` 只在 '
+      + '`yarn pack` / 发布打包时执行，**install 期不执行**（真 yarn 4.18.0 实测：'
+      + '`enableScripts: false` 下 workspace 的 `postinstall` 会跑、`prepack`/`prepare` 不跑）'
+      + '⇒ 它不构成 R12-D-02 那条"install 期改写判据本体"的通道',
+    approvedBy: '第十二轮红队 R12-D-02 收口（N1 泳道）',
+  },
+  {
+    manifest: 'community/fabric/package.json',
+    hook: 'prepack',
+    reason: '同 `packages/host/desktop`：`prepack` 只在打包/发布时执行，不在 install 期（真 yarn 实测）',
+    approvedBy: '第十二轮红队 R12-D-02 收口（N1 泳道）',
+  },
+]
 /** 受登记约束的生命周期钩子名。 */
 const ROOT_LIFECYCLE_HOOK_NAMES = [
   'preinstall',
@@ -389,6 +507,8 @@ const ROOT_LIFECYCLE_HOOK_NAMES = [
   'prepack',
   'postpack',
 ]
+/** 工作区 manifest 的文件名形态（`scripts/check-install-integrity.mjs` 侧的清单必须与它一致）。 */
+const WORKSPACE_MANIFEST_PATTERN = /^(?:packages|community)\/[^/]+(?:\/[^/]+)?\/package\.json$/u
 
 /**
  * 根 `.yarnrc.yml` 的登记判据（纯函数；输入来自调用方读到的字节，便于自检/变异验证）。
@@ -454,32 +574,118 @@ export function yarnConfigurationProblems(options, registry = REGISTERED_YARN_CO
 }
 
 /**
- * 根 `package.json` 生命周期钩子的登记判据（纯函数，P1-1 ①）。
- * @param manifest - 根 `package.json` 解析结果。
+ * 一份 manifest 的生命周期钩子登记判据（纯函数，P1-1 ① / R12-D-02）。
+ *
+ * @param manifest - manifest 解析结果。
+ * @param path - 该 manifest 的仓库相对路径（缺省=根 `package.json`；工作区用它的真实路径）。
  * @returns 问题清单。
  */
-export function lifecycleHookProblems(manifest) {
-  const registered = new Set(REGISTERED_ROOT_LIFECYCLE_HOOKS.map(entry => entry.hook))
+export function lifecycleHookProblems(manifest, path = 'package.json') {
+  const isRoot = path === 'package.json'
+  const registered = new Set((isRoot ? REGISTERED_ROOT_LIFECYCLE_HOOKS : REGISTERED_WORKSPACE_LIFECYCLE_HOOKS)
+    .filter(entry => isRoot || entry.manifest === path)
+    .map(entry => entry.hook))
   const hooks = ROOT_LIFECYCLE_HOOK_NAMES.filter(name => typeof manifest?.scripts?.[name] === 'string')
   const problems = []
   for (const hook of hooks) {
     if (registered.has(hook)) continue
-    problems.push(`根 package.json 的 \`scripts.${hook}\` 是**安装期生命周期钩子**且没有登记：`
+    problems.push(`${path} 的 \`scripts.${hook}\` 是**安装期生命周期钩子**且没有登记：`
       + `${JSON.stringify(manifest.scripts[hook])}`
-      + '\n      ⇒ `enableScripts: false` 只挡依赖的构建脚本，**挡不住根 workspace 自己的 postinstall**；'
-      + '而 CI 的 `yarn install --immutable` 排在根守卫之前 —— install 期可以改写守卫脚本'
-      + '并顺手改掉内容摘要登记值（第十一轮 P1-1 实测：内容判据 EXIT 1→0）。'
-      + '\n      ⇒ 确实需要时登记进 `REGISTERED_ROOT_LIFECYCLE_HOOKS`（`{ hook, reason, approvedBy }`），'
+      + '\n      ⇒ `enableScripts: false` 只挡依赖的构建脚本，**挡不住 workspace 自己的 postinstall**'
+      + '（根 workspace 与工作区包都一样：真 yarn 4.18.0 实测，工作区钩子在 enableScripts=false 下'
+      + '照样执行）；而 CI 的 `yarn install --immutable` 排在根守卫之前 —— install 期可以改写守卫脚本'
+      + '并顺手改掉内容摘要登记值（第十一轮 P1-1 / 第十二轮 R12-D-02 实测：内容判据 EXIT 1→0）。'
+      + `\n      ⇒ 确实需要时登记进 ${isRoot ? '`REGISTERED_ROOT_LIFECYCLE_HOOKS`（`{ hook, reason, approvedBy }`）' : '`REGISTERED_WORKSPACE_LIFECYCLE_HOOKS`（`{ manifest, hook, reason, approvedBy }`）'}，`
       + '并写清"为什么必须发生在 install 期"。')
   }
-  const stale = REGISTERED_ROOT_LIFECYCLE_HOOKS
+  const stale = (isRoot ? REGISTERED_ROOT_LIFECYCLE_HOOKS : REGISTERED_WORKSPACE_LIFECYCLE_HOOKS)
+    .filter(entry => isRoot || entry.manifest === path)
     .map(entry => entry.hook)
     .filter(hook => !hooks.includes(hook))
   for (const hook of stale) {
-    problems.push(`登记表里的生命周期钩子 \`${hook}\` 在根 package.json 里并不存在 ——`
+    problems.push(`登记表里的生命周期钩子 \`${path}#${hook}\` 在 ${path} 里并不存在 ——`
       + '陈旧登记必须清掉（留下它等于给下一个人一个"已经批过"的钩子名）')
   }
   return problems
+}
+
+/**
+ * **全部** manifest（根 + 每个 workspace 包）的钩子判据（R12-D-02）。
+ *
+ * 清单**从 HEAD 的根 manifest 展开**（`workspaces` 的 glob），不读工作树：这份清单是
+ * "登记面"的输入，而工作树在 install 期可被改写。展开出 0 个工作区 manifest ⇒ **fail-loud**
+ * （"一个都展开不出来"与"没有工作区"不可区分）。
+ *
+ * @param options - `{ readHeadBlob, root }`。`readHeadBlob(path)` 返回 `Buffer`/`null`。
+ * @returns `{ problems, manifests }`；`manifests` = 参与扫描的相对路径（含根）。
+ */
+export function allLifecycleHookProblems(options) {
+  const problems = []
+  const rootBytes = options.readHeadBlob('package.json')
+  if (rootBytes === null) {
+    return { problems: ['读不到 HEAD 里的 package.json —— 钩子登记面的输入缺席'], manifests: [] }
+  }
+  let rootManifest
+  try {
+    rootManifest = JSON.parse(rootBytes.toString('utf8'))
+  } catch (error) {
+    return { problems: [`HEAD 的 package.json 不是合法 JSON：${error.message}`], manifests: [] }
+  }
+  problems.push(...lifecycleHookProblems(rootManifest, 'package.json'))
+  const workspaceManifests = expandWorkspaceManifests(options.root, rootManifest?.workspaces ?? [])
+  if (workspaceManifests.length === 0) {
+    return {
+      problems: [...problems, '从 HEAD 的 `workspaces` 展开出 0 个 manifest —— 工作区钩子的登记面会静默变空，'
+        + '按判据输入缺席处理（fail-loud，而不是"没有工作区"）'],
+      manifests: ['package.json'],
+    }
+  }
+  for (const path of workspaceManifests) {
+    const bytes = options.readHeadBlob(path)
+    if (bytes === null) {
+      problems.push(`${path} 不在 HEAD 里 —— 工作区 manifest 登记面残缺`)
+      continue
+    }
+    try {
+      problems.push(...lifecycleHookProblems(JSON.parse(bytes.toString('utf8')), path))
+    } catch (error) {
+      problems.push(`${path} 不是合法 JSON（HEAD 那份）：${error.message}`)
+    }
+  }
+  return { problems, manifests: ['package.json', ...workspaceManifests] }
+}
+
+/**
+ * 展开 `workspaces` 里的目录形态（逐段星号；与本仓 `packages/<scope>/<pkg>` /
+ * `community/<name>` 两张 glob 一致，与 `scripts/check-install-integrity.mjs` 的同名实现同源）。
+ * @param root - 仓库根。
+ * @param patterns - `workspaces` 数组。
+ * @returns manifest 相对路径（升序；只保留真的存在 package.json 的目录）。
+ */
+export function expandWorkspaceManifests(root, patterns) {
+  const manifests = new Set()
+  const walk = (directory, segments) => {
+    if (segments.length === 0) {
+      if (existsSync(join(root, directory, 'package.json'))) manifests.add(`${directory}/package.json`)
+      return
+    }
+    const [head, ...rest] = segments
+    if (head !== '*') {
+      walk(directory === '' ? head : `${directory}/${head}`, rest)
+      return
+    }
+    const absolute = directory === '' ? root : join(root, directory)
+    if (!existsSync(absolute)) return
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      walk(directory === '' ? entry.name : `${directory}/${entry.name}`, rest)
+    }
+  }
+  for (const pattern of Array.isArray(patterns) ? patterns : []) {
+    if (typeof pattern !== 'string') continue
+    walk('', pattern.split('/').filter(segment => segment !== ''))
+  }
+  return [...manifests].filter(path => WORKSPACE_MANIFEST_PATTERN.test(path)).sort()
 }
 
 /**
@@ -1075,8 +1281,16 @@ function main(argv) {
   }
 
   let runnerSource
+  // **守卫登记表的宿主也从 git 对象读**（R12-D-01 的 B 面）：工作树里的
+  // `check-root-guards.mjs` 在 install 期可被改写（改写者会顺手改掉登记值），
+  // 只有 HEAD 对象是"install 期不可改写"的那份。读不到 HEAD 时退化成工作树 + 后面报告警。
+  // 严格面（CI）读 HEAD 对象；本地读工作树 —— 与下面摘要对拍的两面口径**必须同源**
+  // （否则"本地改守卫 + 跑 refresh-digests"会拿工作树脚本去撞 HEAD 里的旧登记值 = 假红）。
+  const headRunnerBytes = strictAnchor && gitMetadataAvailable()
+    ? readHeadBytes('scripts/check-root-guards.mjs')
+    : null
   try {
-    runnerSource = readFileSync(GUARD_RUNNER, 'utf8')
+    runnerSource = headRunnerBytes === null ? readFileSync(GUARD_RUNNER, 'utf8') : headRunnerBytes.toString('utf8')
   } catch (error) {
     console.error(`check-guard-parser-integrity: 读不到 ${GUARD_RUNNER}：${error.message}`)
     return 2
@@ -1118,13 +1332,28 @@ function main(argv) {
       failures.push(`守卫 ${entry.name} 的脚本不是一个常规文件：${relative(ROOT, path)}`)
       continue
     }
-    const digest = sha256(readFileSync(path))
+    // **摘要的主判据 = HEAD 对象的字节**（工作树那份可能已被 install 期改写）：
+    //   ① HEAD 摘要 ≠ 登记值 ⇒ 红（"脚本与登记表一起被改"在这里现形）；
+    //   ② 工作树 ≠ HEAD ⇒ 红（严格面）/ 告警（本地脏树）—— 见下面 anchor 段；
+    //   ③ 读不到 HEAD（不在检出里 / 新文件）⇒ 退化到工作树摘要（判据不消失，但不假装锚住了）。
+    const relativePath = relative(ROOT, path)
+    const headBytes = readHeadBytes(relativePath)
+    const worktreeBytes = readFileSync(path)
+    // **严格面（CI）= HEAD 对象的字节**（install 期不可改写的那份）；本地 = 工作树字节 ——
+    // 与本文件 `gitAnchorProblems` 的"本地告警 / CI 硬判据"同一取向：否则"改守卫 →
+    // `refresh-digests` → 本地判据"这条既有开发流程会一直红到提交那一刻（假红机器）。
+    const anchored = strictAnchor && headBytes !== null
+    const digest = sha256(anchored ? headBytes : worktreeBytes)
     actual.push({ name: entry.name, script: entry.script, argvTail: entry.argvTail ?? argvTailLiteral(runnerSource, entry.name), digest })
     if (entry.digest !== digest) {
       failures.push(`守卫 ${entry.name} 的脚本**内容**与登记值不一致：\n`
-        + `      脚本：${relative(ROOT, path)}\n`
-        + `      登记 sha256：${entry.digest}\n`
-        + `      实际 sha256：${digest}`)
+        + `      脚本：${relativePath}\n`
+        + `      ${anchored ? 'HEAD  ' : '工作树'} sha256：${digest}${anchored ? '（严格面：锚到 git 对象）' : ''}\n`
+        + `      登记 sha256：${entry.digest}`
+        + (headBytes === null ? '' : `\n      工作树 sha256：${sha256(worktreeBytes)}（与 HEAD 不一致时另有一条锚定判据）`)
+        + '\n      ⇒ 摘要对拍锚的是 **git 对象**（HEAD），不是工作树：install 期把"脚本 + 登记值"'
+        + '一起改掉的形态在这里现形（第十二轮红队 R12-D-01 的 A4：只改守卫会被抓住，'
+        + '同时改这份锚定判据才 EXIT=0）。')
     }
   }
 
@@ -1184,8 +1413,12 @@ function main(argv) {
   // 谁把判据自己读到、执行的东西跑起来。详见上面「执行体入口的三条收口」段。
   // ===========================================================================
   const executionFailures = []
+  /** 参与钩子判据的 manifest 条数（根 + 工作区；给收尾的通过行用）—— 在块外声明，末尾要引用。 */
+  let manifestCount = 0
   {
     // ① `.yarnrc.yml`（解释器入口）：内容摘要 + 键集合白名单 + 关键键取值。
+    //    **两份都判**（R12-D-01 的 B 面）：工作树那份可能被 install 期改写（改了就连禁键
+    //    一起消失，而"工作树 vs 登记值"会自洽）⇒ 禁键 / 必需标量按 **HEAD 那份**再判一次。
     const rcPath = join(ROOT, REGISTERED_YARN_CONFIGURATION.path)
     const rcExists = existsSync(rcPath)
     let rcText = ''
@@ -1202,14 +1435,26 @@ function main(argv) {
         rcSha256 = sha256(bytes)
       }
     }
+    const rcHeadBytes = readHeadBytes(REGISTERED_YARN_CONFIGURATION.path)
     executionFailures.push(...yarnConfigurationProblems({
       exists: rcExists,
       text: rcText,
       isSymlink: rcIsSymlink,
       isFile: rcIsFile,
+      // 摘要取 HEAD（严格面）/ 工作树（本地），理由同守卫脚本那一段。
       expectedSha256: REGISTERED_YARN_CONFIGURATION.sha256,
-      actualSha256: rcSha256,
+      actualSha256: strictAnchor && rcHeadBytes !== null ? sha256(rcHeadBytes) : rcSha256,
     }))
+    if (rcHeadBytes !== null) {
+      executionFailures.push(...yarnConfigurationProblems({
+        exists: true,
+        text: rcHeadBytes.toString('utf8'),
+        isSymlink: false,
+        isFile: true,
+        expectedSha256: REGISTERED_YARN_CONFIGURATION.sha256,
+        actualSha256: sha256(rcHeadBytes),
+      }).filter(problem => !problem.includes('的内容**与登记值不一致')))
+    }
     // ② `.yarn/plugins/**` / `.yarn/releases/**` 必须是空的（`.gitignore` 已把它们登记为"可提交"）。
     const codeDirectories = YARN_CODE_DIRECTORIES.map(relativeDirectory => {
       const directory = join(ROOT, relativeDirectory)
@@ -1229,8 +1474,18 @@ function main(argv) {
     executionFailures.push(...yarnCodeDirectoryProblems(codeDirectories))
     // ③ `.gitignore` 的 `.yarn` 反向规则（P0-1 的载荷正是靠 `!.yarn/plugins` 进的仓）。
     executionFailures.push(...yarnGitignoreNegationProblems(readFileSync(join(ROOT, '.gitignore'), 'utf8')))
-    // ④ 根 `package.json` 的生命周期钩子（`enableScripts: false` 挡不住根 workspace 自己的 postinstall）。
-    executionFailures.push(...lifecycleHookProblems(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))))
+    // ④ 根与**每一个工作区** manifest 的生命周期钩子（R12-D-02）：`enableScripts: false`
+    //    挡不住 root workspace 自己的 postinstall，**也挡不住工作区包的**（真 yarn 实测）。
+    //    登记面的输入取自 HEAD（工作树在 install 期可被改写）。
+    const readManifestForHooks = path => {
+      if (strictAnchor) return readHeadBytes(path)
+      const absolute = join(ROOT, path)
+      if (existsSync(absolute) && lstatSync(absolute).isFile()) return readFileSync(absolute)
+      return readHeadBytes(path)
+    }
+    const hookScan = allLifecycleHookProblems({ readHeadBlob: readManifestForHooks, root: ROOT })
+    executionFailures.push(...hookScan.problems)
+    manifestCount = hookScan.manifests.length
     // ⑤ 摘要判据的 **git 锚**（P1-1 ②）：工作树必须与 HEAD 逐字节一致。
     //    严格面 = **runner 注入信号**（多个独立变量，任一在场即严格）+ 显式 `--require-clean`
     //    参数；本地脏树只告警（理由与代价见 gitAnchorProblems 的注释、信号清单见
@@ -1238,21 +1493,23 @@ function main(argv) {
     //    两个都能被一行 `unset` 清掉）。
     //    `anchorSignals` / `strictAnchor` 的取值在 main() 的**函数作用域**里算（末尾的通过行
     //    也要用同一份 —— 放进块作用域时末尾那行会 ReferenceError，本仓实测踩过）。
-    const readHead = path => {
-      const result = spawnSync('git', ['show', `HEAD:${path}`], { cwd: ROOT, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 })
-      return result.status === 0 ? result.stdout : null
-    }
-    const gitAvailable = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: ROOT, encoding: 'utf8' }).status === 0
+    const readHead = path => readHeadBytes(path)
+    const gitAvailable = gitMetadataAvailable()
     const readWorktree = path => {
       const absolute = join(ROOT, path)
       return existsSync(absolute) && lstatSync(absolute).isFile() ? readFileSync(absolute) : null
     }
+    // 锚定面 = 入口文件 + 全部登记的守卫脚本 + **HEAD 里的全部 `scripts/check-*.mjs`**
+    //（R12-D-01 的 A 面：那一组"判据执行体"里任何一条被 install 期改写，都必须在严格面上红）
+    // + 全部工作区 manifest（R12-D-02）。
     const anchorPaths = [
       ...new Set([
         ...EXECUTION_ENTRY_PATHS,
+        ...(listHeadJudgeBodies() ?? []),
+        ...hookScan.manifests,
         ...parsed.entries.map(entry => /^(?:node|bash)\s+(scripts\/\S+)$/u.exec(entry.script)?.[1]).filter(Boolean),
       ]),
-    ]
+    ].sort()
     const anchor = gitAnchorProblems({ paths: anchorPaths, readHead, readWorktree, strict: strictAnchor, gitAvailable })
     executionFailures.push(...anchor.failures)
     for (const advisory of anchor.advisories) {
@@ -1272,6 +1529,76 @@ function main(argv) {
     if (hooksInRunner !== hooksHere) {
       executionFailures.push(`生命周期钩子清单在两侧漂移：check-root-guards.mjs 的 \`YARN_LIFECYCLE_HOOKS\` = `
         + `${JSON.stringify(hooksInRunner)} / 本文件的 \`ROOT_LIFECYCLE_HOOK_NAMES\` = ${JSON.stringify(hooksHere)}`)
+    }
+    // ⑥b **第三份**实现（R12-D-01 的收口件 `scripts/check-install-integrity.mjs`）的清单也必须一致：
+    //     它是"任何 yarn 命令之前"的第一道，与上面两份各自枚举同一批禁键 / 钩子名 ——
+    //     任一侧漂移都会留下"前置校验放行、登记制拦住"（或反向）的裂缝。
+    const installer = {
+      INSTALL_INTEGRITY_FORBIDDEN_YARN_KEYS,
+      INSTALL_INTEGRITY_LIFECYCLE_HOOKS,
+      INSTALL_INTEGRITY_REGISTERED_HOOKS,
+      INSTALL_INTEGRITY_REQUIRED_YARN_SCALARS,
+    }
+    const forbiddenInInstaller = [...installer.INSTALL_INTEGRITY_FORBIDDEN_YARN_KEYS].sort().join(',')
+    if (forbiddenInInstaller !== forbiddenHere) {
+      executionFailures.push('禁键清单在**前置校验**与登记制之间漂移：'
+        + `check-install-integrity.mjs = ${JSON.stringify(forbiddenInInstaller)} / `
+        + `本文件 = ${JSON.stringify(forbiddenHere)} ⇒ 三份判定必须同源`)
+    }
+    const scalarsInInstaller = installer.INSTALL_INTEGRITY_REQUIRED_YARN_SCALARS
+      .map(entry => `${entry[0]}=${entry[1]}`).sort().join(',')
+    const scalarsHere = REGISTERED_YARN_CONFIGURATION.requiredScalars
+      .map(entry => `${entry[0]}=${entry[1]}`).sort().join(',')
+    if (scalarsInInstaller !== scalarsHere) {
+      executionFailures.push('`.yarnrc.yml` 必需标量在前置校验与登记制之间漂移：'
+        + `check-install-integrity.mjs = ${JSON.stringify(scalarsInInstaller)} / 本文件 = ${JSON.stringify(scalarsHere)}`)
+    }
+    const hooksInInstaller = [...installer.INSTALL_INTEGRITY_LIFECYCLE_HOOKS].sort().join(',')
+    if (hooksInInstaller !== hooksHere) {
+      executionFailures.push('生命周期钩子清单在前置校验与登记制之间漂移：'
+        + `check-install-integrity.mjs = ${JSON.stringify(hooksInInstaller)} / 本文件 = ${JSON.stringify(hooksHere)}`)
+    }
+    // ⑥d 两份**工作区钩子登记表**必须一致（本文件 ↔ `check-install-integrity.mjs`）：
+    //     前置校验在 install **之前**跑、本判据在之后跑，任何一侧多/少一条登记都会留下
+    //     "前置校验放行、登记制拦住"（或反向）的裂缝 —— 与 ⑥/⑥b 同一套纪律。
+    {
+      const here = REGISTERED_WORKSPACE_LIFECYCLE_HOOKS
+        .map(entry => `${entry.manifest}#${entry.hook}`).sort().join(',')
+      const there = [...installer.INSTALL_INTEGRITY_REGISTERED_HOOKS].sort().join(',')
+      if (here !== there) {
+        executionFailures.push('工作区生命周期钩子的登记表在**前置校验**与登记制之间漂移：'
+          + `\n      check-install-integrity.mjs（install 之前）：${JSON.stringify(there) || '（空）'}`
+          + `\n      本文件（登记制）：${JSON.stringify(here) || '（空）'}`
+          + '\n      ⇒ 两份必须逐条相同（键 = `<manifest>#<hook>`）。')
+      }
+    }
+    // ⑥c **前置校验件自身的内容摘要**（R12-D-01 ①）：它能被改写 ⇒ 它的字节必须登记、进 diff。
+    for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
+      const headBytes = readHeadBytes(registration.path)
+      const absolute = join(ROOT, registration.path)
+      if (headBytes === null) {
+        // 严格面（CI）是硬判据；本地允许"这个 PR 刚把它加进来、还没提交"（否则开发者在
+        // 提交之前永远看到红 —— 与本文件其它几条"本地告警 / CI 硬判据"同一取向）。
+        const message = `登记的前置校验件不在 HEAD 里：${registration.path}`
+          + ' ⇒ install 期"检出后才创建"的形态，或登记路径写错 —— 两种都不许静默通过'
+        if (strictAnchor) executionFailures.push(message)
+        else console.log(`check-guard-parser-integrity: WARNING — ${message}（本地：未提交的新文件，CI 上是硬判据）`)
+        continue
+      }
+      if (!existsSync(absolute)) {
+        executionFailures.push(`登记的前置校验件在工作树里不存在：${registration.path}`)
+        continue
+      }
+      const worktreeBytes = readFileSync(absolute)
+      const anchored = strictAnchor
+      const digest = sha256(anchored ? headBytes : worktreeBytes)
+      if (registration.sha256 !== digest) {
+        executionFailures.push(`前置校验件的**内容**与登记值不一致：${registration.path}\n`
+          + `      登记 sha256：${registration.sha256}\n`
+          + `      ${anchored ? 'HEAD  ' : '工作树'} sha256：${digest}\n`
+          + '      ⇒ 它是"判据本体有没有被 install 期改写"的第一道判据，自己必须是被登记、'
+          + '可评审的那份；有意的改动请用 `--print-digests` 更新本文件的登记行。')
+      }
     }
   }
 
@@ -1374,6 +1701,12 @@ function main(argv) {
     }
     process.stdout.write('\n# 执行体入口摘要（粘回本文件的 REGISTERED_YARN_CONFIGURATION）\n')
     process.stdout.write(`  path: '${REGISTERED_YARN_CONFIGURATION.path}', sha256: '${sha256(readFileSync(join(ROOT, REGISTERED_YARN_CONFIGURATION.path)))}',\n`)
+    process.stdout.write('\n# 前置校验件摘要（粘回本文件的 REGISTERED_INSTALL_INTEGRITY_BODIES）\n')
+    for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
+      const bytes = readHeadBytes(registration.path) ?? readFileSync(join(ROOT, registration.path))
+      process.stdout.write(`  { path: '${registration.path}', sha256: '${sha256(bytes)}',\n`)
+      process.stdout.write(`    methods: ${JSON.stringify(registration.methods)} },\n`)
+    }
     return 0
   }
 
@@ -1400,15 +1733,19 @@ function main(argv) {
   }
 
   process.stdout.write(`check-guard-parser-integrity: OK — ${parsed.entries.length} 条守卫脚本的**内容**摘要与登记值一致`
-    + `（含符号链接检查）；${REGISTERED_GATE_PARSER_PACKAGES.length} 个门禁解析器包的文件集摘要一致：`
+    + `（**锚到 git 对象**：HEAD 那份的 sha256 对拍 + 符号链接检查）；`
+    + `${REGISTERED_GATE_PARSER_PACKAGES.length} 个门禁解析器包的文件集摘要一致：`
     + REGISTERED_GATE_PARSER_PACKAGES
       .map(entry => `${entry.name}@${entry.version}(${entry.files} 个文件, sha256 ${entry.sha256.slice(0, 12)}…)`)
       .join('、')
     + '；根 package.json 的 `resolutions` 里没有这些解析器的 patch 条目；'
     + `执行体入口：${REGISTERED_YARN_CONFIGURATION.path} 的内容摘要与登记值一致（禁键 `
     + `${REGISTERED_YARN_CONFIGURATION.forbiddenKeys.map(entry => entry[0]).join('/')} 缺席、`
-    + `${REGISTERED_YARN_CONFIGURATION.requiredScalars.map(entry => `${entry[0]}=${entry[1]}`).join('、')}）；`
-    + `${YARN_CODE_DIRECTORIES.join('/')} 为空；根 package.json 无未登记的生命周期钩子；`
+    + `${REGISTERED_YARN_CONFIGURATION.requiredScalars.map(entry => `${entry[0]}=${entry[1]}`).join('、')}，`
+    + '**HEAD 与工作树两份都判**）；'
+    + `${YARN_CODE_DIRECTORIES.join('/')} 为空；`
+    + `根 + ${manifestCount - 1} 个工作区 manifest 无未登记的生命周期钩子（R12-D-02）；`
+    + `前置校验件 ${REGISTERED_INSTALL_INTEGRITY_BODIES.map(entry => entry.path).join('、')} 的字节登记一致（R12-D-01）；`
     + '两个 runner 的守卫通道：直接 spawn（不经 yarn）+ 环境清洗（真子进程证明）；'
     + `工作树↔HEAD 锚定 ${strictAnchor
       ? `严格（信号：${requireClean ? '`--require-clean`' : ''}${requireClean && anchorSignals.length > 0 ? '+' : ''}${anchorSignals.join('+') || '—'}）`
