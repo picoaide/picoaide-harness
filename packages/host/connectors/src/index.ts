@@ -1258,6 +1258,44 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return headers
   }
 
+  /** Header names are case-insensitive; the SDK and `fetch` normalize them too. */
+  const AUTHORIZATION_HEADER = 'authorization'
+
+  /**
+   * The request headers a **streamable-http** transport is constructed with.
+   *
+   * `renderHeaders` bakes the stored access token into `Authorization`. That is
+   * right for the static shapes (a token/CLI connector has no other way to
+   * authenticate) and **wrong whenever the transport is also handed an
+   * `authProvider`**: the pinned SDK writes the provider's LIVE token first and
+   * then spreads `requestInit.headers` over it (`_commonHeaders()`,
+   * `@modelcontextprotocol/client@2.0.0` `dist/index.mjs`), so a baked header
+   * wins over every token a 401 refresh just obtained. The refresh succeeds,
+   * the retry replays the DEAD token, and the first tool call fails with
+   * `SdkHttpError: Server returned 401 after re-authentication` (R7-B P1-1,
+   * measured against the real OAuth fixture). Dropping our copy here is what
+   * lets the provider's value through; every other header is untouched, and the
+   * static-token class (no provider ⇒ `providerSuppliesAuthorization === false`)
+   * keeps its baked bearer.
+   * @param server - the MCP server definition being registered.
+   * @param credential - the credential snapshot this registration was built from.
+   * @param providerSuppliesAuthorization - true when the transport also receives
+   *   an `authProvider` that has a token of its own to send.
+   * @returns the headers for `requestInit`.
+   */
+  const renderTransportHeaders = (
+    server: ConnectorMcp,
+    credential: ConnectorCredential | null,
+    providerSuppliesAuthorization: boolean,
+  ): Record<string, string> => {
+    const headers = renderHeaders(server, credential)
+    if (!providerSuppliesAuthorization) return headers
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === AUTHORIZATION_HEADER) delete headers[name]
+    }
+    return headers
+  }
+
   /**
    * Child env for one stdio MCP server (FIX-19, residual A). Two whitelists
    * apply: the definition's own env (protected bootstrap keys are dropped) and
@@ -1515,12 +1553,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       const auth = server.transport === 'streamable-http'
         ? await mcpAuthProvider(def, credential)
         : {}
+      // A live OAuth provider OWNS the `Authorization` header: the SDK writes
+      // its token and then spreads these headers over it, so a baked copy would
+      // win and the 401 retry would replay the dead token (see
+      // `renderTransportHeaders`). The drop is tied to the provider really
+      // having a token to send — `mcpAuthProvider` builds one exactly when the
+      // credential carries an access token — so a definition that supplies its
+      // own header is never left unauthenticated by this branch.
+      const providerSuppliesAuthorization = auth.authProvider !== undefined
+        && (credential?.accessToken ?? '') !== ''
       const config = server.transport === 'streamable-http'
         ? {
             transport: 'streamable-http' as const,
             serverName: server.serverName,
             url: streamableHttpUrl(server, locale()).toString(),
-            headers: renderHeaders(server, credential),
+            headers: renderTransportHeaders(server, credential, providerSuppliesAuthorization),
             // MCP authorization spec: the transport is handed the credential
             // provider, so the SDK injects the bearer token and the 401 hook
             // refreshes it through our per-id single flight before the SDK
