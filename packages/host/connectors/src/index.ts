@@ -1832,18 +1832,30 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       refreshed += 1
     }
     for (const server of def.mcp) {
+      // BOTH sources are swept, and **both are swept when they coexist**: a
+      // re-registration publishes its new record (above) while the previous
+      // same-owner registration is still in `mcpRegistrations` — the handshake's
+      // await points (`waitForRebuildClearance`) sit between the two — so for a
+      // moment "the record this transport will read" names two objects: the
+      // doomed one and the one about to be read. Stopping at the first match
+      // fed the doomed record and left the new one on the replaced token, so the
+      // registration the refresh was supposed to protect still went to the wire
+      // with a dead bearer and failed with `Server returned 401 after
+      // re-authentication` (round-11 review J2-N2). Ownership is still the only
+      // criterion (`def.id`): another connector's record is never written, in
+      // either source.
       const registration = mcpRegistrations.get(server.serverName)
-      if (registration !== undefined) {
+      if (registration !== undefined && registration.id === def.id && registration.liveHeaders !== undefined) {
         // A published registration is the record source for this name; when it
         // belongs to another connector the name was taken over and this refresh is
         // not about that transport (CN-4).
-        if (registration.id !== def.id || registration.liveHeaders === undefined) continue
         applyTo(server, registration.liveHeaders)
-        continue
       }
       const pending = pendingLiveHeaders.get(server.serverName)
-      if (pending === undefined || pending.id !== def.id) continue
-      applyTo(server, pending.headers)
+      // The pending record is the one this connector's in-flight registration
+      // will read; it exists only between attach and publication, so an owner
+      // match here is always the NEWER of the two.
+      if (pending !== undefined && pending.id === def.id) applyTo(server, pending.headers)
     }
     return refreshed
   }

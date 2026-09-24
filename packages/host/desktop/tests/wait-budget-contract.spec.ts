@@ -91,12 +91,14 @@
  * @module dsh-plugin-desktop/tests/wait-budget-contract
  */
 
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { configDefaults, defaultExclude, defaultInclude } from 'vitest/config'
 import {
   TEST_BUDGETS,
   TEST_BUDGET_FLOORS,
@@ -2314,6 +2316,322 @@ describe('wait budget contract · 跨包面（R11-B-02）', () => {
     expect(contractFindings([{ name: 'tests/probe.spec.ts', source: ok }], 30_000, 'explicit-number')).toEqual({
       budget: [], clock: [], coverage: [], caseBudget: [],
     })
+  })
+})
+
+
+/* ------------------------------------------------------------------------- *
+ * 测试发现面契约（R11-J2-N1）
+ *
+ * ## 为什么需要它
+ *
+ * R11-B-02 给 enterprise 新加 `vitest.config.ts` 时顺手写了
+ * `include: ['tests/**\/*.spec.ts']`。vitest 的缺省发现面是
+ * `**\/*.{test,spec}.?(c|m)[jt]s?(x)`（`vitest/config` 的 `defaultInclude`），而该包
+ * 有一个测试文件在 `tests/` **之外**（`src/server-connector/connector.test.ts`）⇒
+ * 四条断言（`validateBootstrap` / `sha256Fingerprint` / `checkFingerprint` /
+ * `saveFingerprint`）**从门禁里静默消失**：整包 62 → 61 个文件，而当时没有任何判据
+ * 会咬到它（跨包等待预算判据的扫描面是各包的 `tests/`，与被收窄的 `include`
+ * **共享同一个盲区**）。
+ *
+ * ## 判据的五条设计要点
+ *
+ * 1. **两个见证，来源不同**：① 文件系统上按缺省 include/exclude 语义走出来的集合
+ *    （{@link defaultSurfaceFiles}，**不读任何配置**）；② `vitest list --filesOnly`
+ *    报出的实际发现集合（走真正的 vitest 配置解析与 glob，**不重写一遍 glob 语义**）。
+ *    两者必须逐字相等 —— "加 config 前后发现的文件集合相同"就是这一条。
+ * 2. **缺省常量先对表**：`defaultInclude` / `defaultExclude` /
+ *    `configDefaults.environment` 必须仍是本文件认识的那几个值，否则 fail-loud
+ *    （vitest 换了默认值，"文件名后缀 + 跳过目录"这个复刻就不再等价）。
+ * 3. **静态面同判**：配置里的 `include` / `exclude` / `environment` 必须"不声明，或与
+ *    缺省逐字一致"，否则必须有 {@link DISCOVERY_NARROWING} 登记（丢失文件清单 + 理由）。
+ * 4. **豁免不许滥用**：登记进 {@link DISCOVERY_NARROWING} 的文件必须是**可证明的非
+ *    vitest 文件**（正文里没有 vitest import）—— 真用例永远不许被"登记成豁免"。
+ * 5. **判据自身会咬**：{@link discoveryFindings} 是纯函数，合成集合上"收窄未登记 /
+ *    比缺省更宽 / 登记与事实对不上"三种都红、"登记一致"绿。
+ * ------------------------------------------------------------------------- */
+
+interface DiscoveryScan {
+  readonly name: string
+  /** 包根（绝对路径）——缺省发现面就在这棵树下。 */
+  readonly pkgRoot: string
+  /** 该包的 `vitest.config.ts`（静态面读它）。 */
+  readonly configPath: string
+}
+
+/** 五个宿主包（桌面包也在面内：它的配置是既有文件，同样不许偷偷收窄）。 */
+const DISCOVERY_SCANS: readonly DiscoveryScan[] = [
+  { name: 'browser', pkgRoot: join(hostRoot, 'browser'), configPath: join(hostRoot, 'browser', 'vitest.config.ts') },
+  { name: 'connectors', pkgRoot: join(hostRoot, 'connectors'), configPath: join(hostRoot, 'connectors', 'vitest.config.ts') },
+  { name: 'cron', pkgRoot: join(hostRoot, 'cron'), configPath: join(hostRoot, 'cron', 'vitest.config.ts') },
+  { name: 'desktop', pkgRoot: join(hostRoot, 'desktop'), configPath: join(hostRoot, 'desktop', 'vitest.config.ts') },
+  { name: 'enterprise', pkgRoot: join(hostRoot, 'enterprise'), configPath: join(hostRoot, 'enterprise', 'vitest.config.ts') },
+]
+
+/**
+ * 本判据认识的那一份缺省发现面。
+ *
+ * `defaultInclude` 是"任意深度 + 文件名形态"，所以它的等价复刻就是**文件名后缀判定**
+ * （见 {@link DEFAULT_TEST_FILE}）；`defaultExclude` 只有两条"整套跳过某目录"的形态，
+ * 等价复刻就是走目录时跳过那两个目录名（见 {@link DEFAULT_EXCLUDED_DIRS}）。
+ * 两条常量一变，复刻就不再等价 ⇒ 第 1 条用例 fail-loud。
+ */
+const RECOGNIZED_DEFAULT_INCLUDE: readonly string[] = ['**/*.{test,spec}.?(c|m)[jt]s?(x)']
+const RECOGNIZED_DEFAULT_EXCLUDE: readonly string[] = ['**/node_modules/**', '**/.git/**']
+const DEFAULT_TEST_FILE = /\.(?:test|spec)\.(?:[cm])?[jt]sx?$/
+const DEFAULT_EXCLUDED_DIRS = new Set(['node_modules', '.git'])
+
+/**
+ * 允许"配置发现面比缺省窄"的登记表：逐文件 + 理由。
+ *
+ * **只有可证明的非 vitest 文件才进得来**（见"豁免不许滥用"那条用例）。任何一处
+ * 未登记的收窄都会让第 2 条用例变红 —— 判据默认"配置不许改变发现面"。
+ */
+const DISCOVERY_NARROWING: Readonly<Record<string, { readonly files: readonly string[], readonly reason: string }>> = {
+  desktop: {
+    files: ['scripts/runtime-closure.spec.mjs'],
+    reason: [
+      '`node:test` 脚本，由 package.json 的 `verify:closure` 用 `node --test` 跑',
+      '（`node --test scripts/runtime-closure.spec.mjs && node scripts/verify-runtime-closure.mjs`），',
+      '正文 import 的是 `node:test`/`node:assert`，没有 vitest —— 它不是 vitest 用例，',
+      '收进来只会得到 "No test suite found in file"。本包 `include: [\'tests/**/*.spec.ts\']`',
+      '正是为此而写，第十轮（`3264137997`）就存在，不是本轮引入。',
+    ].join(''),
+  },
+}
+
+/** 配置里除发现面之外允许出现的字段（它们不影响"哪些文件会被收集"）。 */
+const NON_DISCOVERY_CONFIG_KEYS = new Set(['testTimeout', 'maxWorkers', 'pool', 'poolOptions', 'sequence', 'retry', 'reporters', 'globals', 'restoreMocks', 'clearMocks', 'mockReset', 'silent', 'bail', 'testNamePattern', 'hookTimeout', 'teardownTimeout'])
+
+/** 去掉 ANSI 颜色序列（`vitest list` 在 TTY 下会上色）。 */
+const stripAnsi = (text: string): string => text.replace(/\u001B\[[0-9;]*[A-Za-z]/gu, '')
+
+/**
+ * 按**缺省发现面**在文件系统上走一遍 —— 不读任何配置。
+ * @param pkgRoot - 包根目录。
+ * @returns 相对包根的 POSIX 路径，已排序。
+ */
+function defaultSurfaceFiles(pkgRoot: string): string[] {
+  const found: string[] = []
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        if (!DEFAULT_EXCLUDED_DIRS.has(entry.name)) walk(full)
+      } else if (entry.isFile() && DEFAULT_TEST_FILE.test(entry.name)) {
+        found.push(relative(pkgRoot, full).split('\\').join('/'))
+      }
+    }
+  }
+  walk(pkgRoot)
+  return found.sort()
+}
+
+/**
+ * 用 vitest 自己的发现机制报出该包**实际**会跑的文件集合。
+ *
+ * 判据刻意不重写 glob 语义：`vitest list --filesOnly` 走的就是 `vitest run` 的配置
+ * 解析与文件收集，所以"配置有没有把某个文件排除掉"这件事只有一个权威答案。
+ * @param scan - 目标包。
+ * @returns 相对包根的 POSIX 路径（已排序）与原始输出（失败消息里要给人看）。
+ */
+function effectiveSurfaceFiles(scan: DiscoveryScan): { files: string[], raw: string } {
+  const entry = join(scan.pkgRoot, 'node_modules', 'vitest', 'vitest.mjs')
+  // 别把外层的 vitest 运行期变量带进去：本判据在 worker 里跑，`VITEST*` 是给外层的。
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) if (!/^VITEST/u.test(key)) env[key] = value
+  let stdout: string
+  try {
+    stdout = execFileSync(process.execPath, [entry, 'list', '--filesOnly'], {
+      cwd: scan.pkgRoot,
+      encoding: 'utf8',
+      env,
+      timeout: 120_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (cause: unknown) {
+    const detail = cause as { stdout?: string, stderr?: string }
+    throw new Error(
+      `vitest list 跑不起来（${scan.name}）：${String(cause)}\nstdout:\n${detail.stdout ?? ''}\nstderr:\n${detail.stderr ?? ''}`,
+    )
+  }
+  const files = stdout
+    .split('\n')
+    .map(line => stripAnsi(line).trim())
+    .filter(line => line !== '')
+    .map(line => line.replace(/^\.\//u, '').split('\\').join('/'))
+    .sort()
+  return { files, raw: stdout }
+}
+
+/**
+ * 两侧集合的**纯**判别器（判据自检直接喂合成集合）。
+ * @param scanName - 包名（查 {@link DISCOVERY_NARROWING}）。
+ * @param defaultFiles - 缺省发现面。
+ * @param effectiveFiles - 配置下的实际发现面。
+ * @returns 人类可读的失败行，空数组 = 绿。
+ */
+function discoveryFindings(
+  scanName: string,
+  defaultFiles: readonly string[],
+  effectiveFiles: readonly string[],
+): readonly string[] {
+  const findings: string[] = []
+  const extra = effectiveFiles.filter(file => !defaultFiles.includes(file))
+  if (extra.length > 0) {
+    findings.push(`配置比缺省发现面更宽：多出来 ${extra.join('、')}（不在缺省发现面里的文件会被当用例跑）`)
+  }
+  const lost = [...defaultFiles.filter(file => !effectiveFiles.includes(file))].sort()
+  const registered = DISCOVERY_NARROWING[scanName]
+  const expected = registered === undefined ? [] : [...registered.files].sort()
+  if (expected.join('\n') !== lost.join('\n')) {
+    findings.push(registered === undefined
+      ? `配置收窄了发现面且没有登记：${lost.join('、')}（这些文件不会进任何门禁）`
+      : `登记与实际丢失对不上：登记 [${expected.join('、') || '空'}]，实际丢失 [${lost.join('、') || '空'}]`)
+  }
+  return findings
+}
+
+/** 读配置里 `test: { … }` 的直接属性：名字 → 初始化文本。 */
+function configTestProperties(configPath: string): Map<string, string> {
+  const source = readFileSync(configPath, 'utf8')
+  const file = ts.createSourceFile('vitest.config.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const properties = new Map<string, string>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(file) === 'test' && ts.isObjectLiteralExpression(node.initializer)) {
+      for (const member of node.initializer.properties) {
+        if (ts.isPropertyAssignment(member)) properties.set(member.name.getText(file), member.initializer.getText(file))
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return properties
+}
+
+/** 把 `['a', 'b']` 形态的初始化文本解析成字符串数组（解析不出来返回 null）。 */
+function stringArrayLiteral(text: string): string[] | null {
+  const file = ts.createSourceFile('probe.ts', `const x = ${text}`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  let value: string[] | null = null
+  const visit = (node: ts.Node): void => {
+    if (ts.isArrayLiteralExpression(node) && node.elements.every(element => ts.isStringLiteral(element))) {
+      value = node.elements.map(element => (element as ts.StringLiteral).text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return value
+}
+
+/** 该文件正文里有没有 vitest 的 import（豁免资格的判据）。 */
+function importsVitest(source: string): boolean {
+  return /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bimport\s+)['"]vitest(?:\/[^'"]*)?['"]/u.test(source)
+}
+
+describe('wait budget contract · 测试发现面（R11-J2-N1）', () => {
+  it('缺省发现面的三个常量仍是判据认识的那几个（vitest 改了默认值就必须回来对表）', () => {
+    expect(
+      [...defaultInclude],
+      'vitest 的 defaultInclude 变了：本判据用"文件名后缀"复刻它（见 DEFAULT_TEST_FILE），必须重新对表',
+    ).toEqual([...RECOGNIZED_DEFAULT_INCLUDE])
+    expect(
+      [...defaultExclude],
+      'vitest 的 defaultExclude 变了：本判据用"跳过 node_modules/.git 两个目录"复刻它（见 DEFAULT_EXCLUDED_DIRS），必须重新对表',
+    ).toEqual([...RECOGNIZED_DEFAULT_EXCLUDE])
+    expect(configDefaults.environment, 'vitest 的缺省 environment 不再是 node，配置里显式声明它也不再"与缺省一致"').toBe('node')
+  })
+
+  it('五个宿主包的配置都不得收窄发现面（vitest list 的实际集合 == 缺省语义走出的集合）', () => {
+    expect(DISCOVERY_SCANS.map(scan => scan.name)).toEqual(['browser', 'connectors', 'cron', 'desktop', 'enterprise'])
+    let total = 0
+    for (const scan of DISCOVERY_SCANS) {
+      const defaultFiles = defaultSurfaceFiles(scan.pkgRoot)
+      expect(
+        defaultFiles.length,
+        `${scan.name}: 缺省发现面只走出 ${String(defaultFiles.length)} 个文件 —— 判据正在空转（目录搬走或后缀判据失效）`,
+      ).toBeGreaterThan(4)
+      total += defaultFiles.length
+      const { files: effectiveFiles, raw } = effectiveSurfaceFiles(scan)
+      const findings = discoveryFindings(scan.name, defaultFiles, effectiveFiles)
+      expect(
+        findings,
+        `${scan.name}: 测试发现面对拍失败（配置收窄/放宽了发现面）\n${findings.join('\n')}\n`
+        + `缺省发现面 ${String(defaultFiles.length)} 个文件、实际 ${String(effectiveFiles.length)} 个\n`
+        + `\nvitest list 原始输出：\n${raw}`,
+      ).toEqual([])
+    }
+    expect(total, `五个包的缺省发现面合计只有 ${String(total)} 个文件 —— 判据的扫描面塌了`).toBeGreaterThanOrEqual(200)
+  })
+
+  it('静态面同判：include / exclude / environment 必须"不声明或与缺省逐字一致"，否则必须有登记', () => {
+    for (const scan of DISCOVERY_SCANS) {
+      const properties = configTestProperties(scan.configPath)
+      expect(properties.size, `${scan.name}: 读不到 vitest.config.ts 的 test 段（配置可能换了写法，判据要跟着改）`).toBeGreaterThan(0)
+      const include = properties.get('include')
+      if (include !== undefined) {
+        const parsed = stringArrayLiteral(include)
+        const sameAsDefault = parsed !== null && parsed.join('\n') === [...defaultInclude].join('\n')
+        expect(
+          sameAsDefault || DISCOVERY_NARROWING[scan.name] !== undefined,
+          `${scan.name}: 配置声明了 include = ${include}，它既不等同于缺省 ${JSON.stringify([...defaultInclude])}，也没有登记 —— `
+          + '声明 include 会把 tests/ 之外的测试文件静默排除（J2-N1 就是这么丢掉 connector.test.ts 的）。'
+          + '要么删掉 include（只留预算），要么在 DISCOVERY_NARROWING 里登记丢失清单与理由。',
+        ).toBe(true)
+      }
+      const exclude = properties.get('exclude')
+      if (exclude !== undefined) {
+        const parsed = stringArrayLiteral(exclude)
+        expect(
+          parsed !== null && parsed.join('\n') === [...defaultExclude].join('\n'),
+          `${scan.name}: 配置声明了 exclude = ${exclude}，与缺省 ${JSON.stringify([...defaultExclude])} 不一致 —— 排除项同样要登记`,
+        ).toBe(true)
+      }
+      const environment = properties.get('environment')
+      if (environment !== undefined) {
+        expect(environment, `${scan.name}: environment 只有等于缺省（'node'）才算"与缺省一致"`).toBe(`'${configDefaults.environment}'`)
+      }
+      const unexpected = [...properties.keys()].filter(key =>
+        !NON_DISCOVERY_CONFIG_KEYS.has(key) && key !== 'include' && key !== 'exclude' && key !== 'environment')
+      expect(
+        unexpected,
+        `${scan.name}: test 段出现未登记字段 ${unexpected.join('、')} —— 先判断它是否影响发现面，再决定登记还是放行`,
+      ).toEqual([])
+    }
+  })
+
+  it('豁免不许滥用：登记进 DISCOVERY_NARROWING 的文件必须是可证明的非 vitest 文件', () => {
+    for (const [name, entry] of Object.entries(DISCOVERY_NARROWING)) {
+      const scan = DISCOVERY_SCANS.find(candidate => candidate.name === name)
+      expect(scan, `${name}: 登记了一个不在面内的包`).toBeDefined()
+      expect(entry.reason.length, `${name}: 豁免必须写下理由（人话，不是"已知"两个字）`).toBeGreaterThan(20)
+      for (const file of entry.files) {
+        const full = join(scan!.pkgRoot, file)
+        expect(statSync(full, { throwIfNoEntry: false })?.isFile() === true, `${name}: 登记豁免的 ${file} 不存在（陈旧的豁免）`).toBe(true)
+        const source = readFileSync(full, 'utf8')
+        expect(
+          importsVitest(source),
+          `${name}: ${file} 是**真的 vitest 用例**（正文 import 了 vitest）—— 不许把它登记成"配置收窄的豁免"，`
+          + '那是把静默漏跑合法化。要么把配置改回缺省发现面，要么把文件放进 tests/。',
+        ).toBe(false)
+        expect(
+          DEFAULT_TEST_FILE.test(file),
+          `${name}: ${file} 根本不在缺省发现面里（登记它没有意义）`,
+        ).toBe(true)
+      }
+    }
+  })
+
+  it('判据自身会咬：合成集合上"收窄未登记 / 更宽 / 登记对不上"三种都红，登记一致时绿', () => {
+    const a = ['tests/a.spec.ts', 'src/b.test.ts']
+    expect(discoveryFindings('browser', a, a), '两侧相同必须绿（判据不是"见到配置就红"）').toEqual([])
+    const narrowed = discoveryFindings('browser', a, ['tests/a.spec.ts'])
+    expect(narrowed.join('|'), '收窄且未登记必须红').toContain('没有登记')
+    expect(narrowed.join('|'), '失败消息要点名丢掉的文件').toContain('src/b.test.ts')
+    const widened = discoveryFindings('browser', ['tests/a.spec.ts'], a)
+    expect(widened.join('|'), '比缺省更宽必须红').toContain('更宽')
+    const mismatched = discoveryFindings('desktop', ['tests/a.spec.ts', 'scripts/x.spec.mjs'], ['tests/a.spec.ts'])
+    expect(mismatched.join('|'), '登记与实际丢失对不上必须红').toContain('对不上')
+    expect(discoveryFindings('desktop', ['tests/a.spec.ts', 'scripts/x.spec.mjs'], ['tests/a.spec.ts']).length).toBe(1)
   })
 })
 

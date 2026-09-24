@@ -396,47 +396,57 @@ const ROOT_LIFECYCLE_HOOK_NAMES = [
  * @param options - `{ text, exists, isSymlink, isFile, expectedSha256, actualSha256 }`。
  * @returns 问题清单（空 = 通过）。
  */
-export function yarnConfigurationProblems(options) {
+export function yarnConfigurationProblems(options, registry = REGISTERED_YARN_CONFIGURATION) {
   const problems = []
   if (!options.exists) {
-    problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 不存在 —— 本判据的输入缺席（拒绝把"读不到"当成"没有"）`)
+    problems.push(`${registry.path} 不存在 —— 本判据的输入缺席（拒绝把"读不到"当成"没有"）`)
     return problems
   }
   if (options.isSymlink) {
-    problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 是一个**符号链接** —— 内容来自仓外`
+    problems.push(`${registry.path} 是一个**符号链接** —— 内容来自仓外`
       + '（同族的投放机制：守卫脚本曾被换成同名符号链接），入口配置必须是常规文件')
     return problems
   }
   if (!options.isFile) {
-    problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 不是一个常规文件`)
+    problems.push(`${registry.path} 不是一个常规文件`)
     return problems
   }
   if (options.actualSha256 !== options.expectedSha256) {
-    problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 的**内容**与登记值不一致：\n`
+    problems.push(`${registry.path} 的**内容**与登记值不一致：\n`
       + `      登记 sha256：${options.expectedSha256}\n`
       + `      实际 sha256：${options.actualSha256}`)
   }
   const keys = yarnrcTopLevelKeys(options.text)
   if (keys.length === 0) {
-    problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 读不出任何顶级键（解析面失效 ⇒ 拒绝把"读不出"当成"没有"）`)
+    problems.push(`${registry.path} 读不出任何顶级键（解析面失效 ⇒ 拒绝把"读不出"当成"没有"）`)
     return problems
   }
-  const allowed = new Set(REGISTERED_YARN_CONFIGURATION.allowedKeys.map(entry => entry[0]))
+  const allowed = new Set(registry.allowedKeys.map(entry => entry[0]))
   const allowances = new Set(REGISTERED_YARN_ENTRY_ALLOWANCES.map(entry => entry.key))
   for (const key of [...new Set(keys)]) {
-    if (allowed.has(key) || allowances.has(key)) continue
-    const forbidden = REGISTERED_YARN_CONFIGURATION.forbiddenKeys.find(entry => entry[0] === key)
-    problems.push(forbidden === undefined
-      ? `${REGISTERED_YARN_CONFIGURATION.path} 里有**未登记**的顶级键 \`${key}\``
-        + '\n      ⇒ 新键必须登记进 `REGISTERED_YARN_CONFIGURATION.allowedKeys` 并写明它为什么改不了判据结论。'
-      : `${REGISTERED_YARN_CONFIGURATION.path} 里有**禁键** \`${key}\`：${forbidden[1]}`
+    // **禁键优先**（第十一轮复审 J1 的 N5，P2）：`forbiddenKeys` 是硬约束，`allowedKeys` 是
+    // "新键为什么改不了判据结论"的登记。旧实现先 `if (allowed.has(key) || …) continue`，于是
+    // **把 `plugins` 加进 `allowedKeys` 就让禁键整条消失**（审计方实测：那条只剩 `.yarn/plugins/`
+    // 落地文件这一条**独立**判据还在报），而错误文案写的却是"确实需要时**只能**先登记进
+    // `REGISTERED_YARN_ENTRY_ALLOWANCES`" —— 口径与实现不一致，且少一道网。
+    // 现在：禁键 ⇒ 只有 `allowances`（唯一放行通道）能放行；非禁键 ⇒ 才看 `allowedKeys`。
+    const forbidden = registry.forbiddenKeys.find(entry => entry[0] === key)
+    if (forbidden !== undefined) {
+      if (allowances.has(key)) continue
+      problems.push(`${registry.path} 里有**禁键** \`${key}\`：${forbidden[1]}`
         + '\n      ⇒ 确实需要时**只能**先登记进 `REGISTERED_YARN_ENTRY_ALLOWANCES`（`{ key, reason, approvedBy }`）'
-        + '并写清为什么它不会让判据变空；登记值同样进 diff、同样可评审。')
+        + '并写清为什么它不会让判据变空；登记值同样进 diff、同样可评审。'
+        + '\n      ⇒ 注意：把它加进 `allowedKeys` **不算**登记 —— 禁键优先于 `allowedKeys`（J1 复审 N5）。')
+      continue
+    }
+    if (allowed.has(key)) continue
+    problems.push(`${registry.path} 里有**未登记**的顶级键 \`${key}\``
+      + '\n      ⇒ 新键必须登记进 `registry.allowedKeys` 并写明它为什么改不了判据结论。')
   }
-  for (const [key, expected, why] of REGISTERED_YARN_CONFIGURATION.requiredScalars) {
+  for (const [key, expected, why] of registry.requiredScalars) {
     const actual = yarnrcScalarValue(options.text, key)
     if (actual !== expected) {
-      problems.push(`${REGISTERED_YARN_CONFIGURATION.path} 的 \`${key}\` 必须是 \`${expected}\`（实际 ${JSON.stringify(actual)}）`
+      problems.push(`${registry.path} 的 \`${key}\` 必须是 \`${expected}\`（实际 ${JSON.stringify(actual)}）`
         + `：${why}`)
     }
   }
@@ -606,8 +616,17 @@ export function gitAnchorProblems(options) {
 const SPAWN_WIRING_PROBE_GUARD = 'check:r11-env-probe'
 /** 探针守卫用来证明"环境确实传下来了"的普通键（不在任何危险族里 ⇒ 必须被保留）。 */
 const SPAWN_WIRING_MARKER_KEY = 'R11_GUARD_ENV_PROBE_MARKER'
-/** `selfTestGuardSpawnWiring()` 至少执行的断言条数（5 条：两个 runner + 污染拒绝 + 回落前置判据 + 探针自证）。 */
-const SELFTEST_SPAWN_WIRING_ASSERTIONS = 5
+/**
+ * 探针**包**名（只存在于合成树里）：用来证明"包级 check 的进程环境**原样继承**本进程"
+ * —— 与守卫通道的清洗相对照（第十一轮复审 J1 的 N3）。
+ */
+const SPAWN_WIRING_PROBE_PACKAGE = 'r11-probe-pkg'
+/**
+ * `selfTestGuardSpawnWiring()` 至少执行的断言条数（12 条：两个 runner + 污染拒绝 + **双钩子拒绝**
+ * （J1 复审 N1）+ **正当 `NODE_OPTIONS` 不拒跑、包级继承、守卫仍被清洗**（J1 复审 N3）
+ * + **两个 runner 必须打印通过凭据**（N1/N4）+ 回落前置判据 + 探针自证）。
+ */
+const SELFTEST_SPAWN_WIRING_ASSERTIONS = 12
 
 /**
  * 探针守卫的源码（写进合成树）。它自证三件事并**用不可改写的退出码**报错：
@@ -656,6 +675,24 @@ function patchProbeOrchestratorTables(source, names) {
   if (guardsBlock === null) throw new Error('找不到 GUARDS 表')
   const synthetic = ['const GUARDS = [', ...names.map(name => `  { name: '${name}', args: ['run', '${name}'] },`), ']'].join('\n')
   let out = source.replace(guardsBlock[0], synthetic)
+  // **包表也换成合成的一条**（J1 复审 N3 的运行级证据）：编排器的包级通道只在"真的有包被选中"
+  // 时才会 spawn `corepack`，所以"正当 `NODE_OPTIONS` 是否进到包级环境"必须先有一张包表。
+  // `PATH_OWNERS`/`DEPENDENTS` 同步清空 —— 它们指向真实包名，留着会让 `scheduleTableProblems()`
+  // 报"指向不存在的包"（EXIT=2），那样测的就不是这一条了。
+  const packagesBlock = /const PACKAGES = \[[\s\S]*?\n\]/u.exec(out)
+  if (packagesBlock === null) throw new Error('找不到 PACKAGES 表')
+  out = out.replace(packagesBlock[0], ['const PACKAGES = [',
+    `  { name: '${SPAWN_WIRING_PROBE_PACKAGE}', dir: 'packages/probe/${SPAWN_WIRING_PROBE_PACKAGE}', needs: [], script: 'check' },`,
+    ']'].join('\n'))
+  const pathOwnersBlock = /const PATH_OWNERS = \[[\s\S]*?\n\]/u.exec(out)
+  if (pathOwnersBlock === null) throw new Error('找不到 PATH_OWNERS 表')
+  // `scheduleTableProblems()` 要求每个包的**根目录前缀**恰有一条归属（`--changed` 靠它把改动
+  // 映射到包）⇒ 合成包表必须配一条合成归属，否则编排器直接 EXIT=2（实测踩过）。
+  out = out.replace(pathOwnersBlock[0],
+    `const PATH_OWNERS = [['packages/probe/${SPAWN_WIRING_PROBE_PACKAGE}/', '${SPAWN_WIRING_PROBE_PACKAGE}']]`)
+  const dependentsBlock = /const DEPENDENTS = \{[\s\S]*?\n\}/u.exec(out)
+  if (dependentsBlock === null) throw new Error('找不到 DEPENDENTS 表')
+  out = out.replace(dependentsBlock[0], 'const DEPENDENTS = {}')
   // 空表形态必须先认（`const ADVISORY_REGISTRY = []` 同行收尾）：直接拿 /\[[\s\S]*?\n\]/ 去匹配它，
   // 会一路吃到**下一个**以 `]` 开头的行（实测把 `validateAdvisoryRegistry` 整个函数吞掉，
   // 合成树里的编排器于是 ReferenceError —— 探针树的"接线判据"必须对真实源码形态稳健）。
@@ -705,9 +742,27 @@ export function buildGuardSpawnWiringProbe() {
     private: true,
     scripts: Object.fromEntries(names.map(name => [name, `node ${scriptOf(name)}`])),
   }, null, 2)}\n`)
-  // corepack 桩：被调用就失败（探针树里 yarn **不该**被用到 —— 这正是不经 yarn 的判据）。
+  // 合成包目录（包级 check 的 spawn 目标；`--only <探针包>` 时编排器会经 corepack 起它）。
+  mkdirSync(join(tree, 'packages', 'probe', SPAWN_WIRING_PROBE_PACKAGE), { recursive: true })
+  writeFileSync(join(tree, 'packages', 'probe', SPAWN_WIRING_PROBE_PACKAGE, 'package.json'),
+    `${JSON.stringify({ name: SPAWN_WIRING_PROBE_PACKAGE, private: true, scripts: { check: 'node check.mjs' } }, null, 2)}\n`)
+  // corepack 桩：被调用就失败（探针树里 yarn **不该**被守卫通道用到 —— 这正是不经 yarn 的判据），
+  // 但**把交给它的进程环境落一份留痕**（`R11_COREPACK_ENV_TRACE`）：包级 check 走的就是这条通道，
+  // 于是"清洗只作用于守卫"这件事有运行级证据（J1 复审 N3）。
   const stub = join(tree, 'bin', 'corepack')
-  writeFileSync(stub, '#!/bin/sh\nprintf "R11-WIRING-PROBE-COREPACK-CALLED %s\\n" "$*" >&2\nexit 1\n')
+  writeFileSync(stub, [
+    '#!/bin/sh',
+    'printf "R11-WIRING-PROBE-COREPACK-CALLED %s\\n" "$*" >&2',
+    'if [ -n "${R11_COREPACK_ENV_TRACE:-}" ]; then',
+    '  {',
+    '    printf "NODE_OPTIONS=%s\\n" "${NODE_OPTIONS:-}"',
+    '    printf "R11_MARKER=%s\\n" "${R11_GUARD_ENV_PROBE_MARKER:-}"',
+    '    printf "BASH_ENV=%s\\n" "${BASH_ENV:-}"',
+    '  } > "$R11_COREPACK_ENV_TRACE"',
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'))
   chmodSync(stub, 0o755)
   const init = probeGit(tree, 'init', '-q')
   if (init.status !== 0) throw new Error(`合成树 git init 失败：${init.stderr}`)
@@ -778,6 +833,139 @@ export function selfTestGuardSpawnWiring() {
       failures.push('[spawn-wiring] runner 自己的环境里有 `NODE_OPTIONS=--import=<退出钩子>` 时必须'
         + `**拒绝运行**并给出理由，实际 EXIT=${contaminated.status}：${JSON.stringify(contaminatedOutput.slice(-300))}`)
     }
+    // ③b **两条钩子都覆写**（第十一轮复审 J1 的 N1，P0）：`process.exit` **与** `process.reallyExit`
+    //     同时被换成"正常退出 0"的函数（载荷只多两行）。旧实现把 `reallyExit` 放在 `try` 里、只靠
+    //     它**抛不抛**决定要不要 `SIGKILL` 补刀 ⇒ 被换掉的 `reallyExit` 不抛 ⇒ 兜底永不执行 ⇒
+    //     判决不可信的进程说出"通过"（审计方实测 `corepack yarn check` EXIT=**0**、
+    //     `check-root-guards` EXIT=**0**，日志里连摘要行都没有）。三条判据一起钉：
+    //     退出码非 0 ∧ 有拒绝文案 ∧ **没有**任何"跑过了"的凭据（摘要行 / `VERDICT PASS`）。
+    const twoHook = join(tree, 'r11-two-hook.mjs')
+    writeFileSync(twoHook, [
+      'const realExit = process.exit.bind(process)',
+      'const realReallyExit = process.reallyExit ? process.reallyExit.bind(process) : realExit',
+      'try { Object.defineProperty(process, "exitCode", { configurable: true, get: () => 0, set: () => {} }) } catch {}',
+      'process.exit = () => realExit(0)',
+      'process.reallyExit = () => realReallyExit(0)',
+      'process.on("uncaughtException", () => realExit(0))',
+      'process.on("unhandledRejection", () => realExit(0))',
+      'process.on("exit", () => { process.exitCode = 0 })',
+      '',
+    ].join('\n'))
+    const twoHooked = spawnSync(process.execPath, [join(tree, 'scripts', 'check-root-guards.mjs'), '--list'], {
+      cwd: tree,
+      encoding: 'utf8',
+      env: { ...env, NODE_OPTIONS: `--import=${twoHook}` },
+    })
+    const twoHookedOutput = `${twoHooked.stdout ?? ''}${twoHooked.stderr ?? ''}`
+    assertions += 1
+    if (twoHooked.status === 0) {
+      failures.push('[spawn-wiring] 钩子**同时**覆写 `process.exit` 与 `process.reallyExit` 时，runner 仍然'
+        + `说出了"通过"（EXIT=0）—— 结束路径又被"抛不抛"决定了（J1 复审 N1 的 P0 形态）：`
+        + `${JSON.stringify(twoHookedOutput.slice(-300))}`)
+    }
+    assertions += 1
+    if (!twoHookedOutput.includes('拒绝运行')) {
+      failures.push('[spawn-wiring] 双钩子形态必须仍然打印拒绝文案（否则 CI 日志里只剩"被信号杀死"，指不到病根）：'
+        + `${JSON.stringify(twoHookedOutput.slice(-300))}`)
+    }
+    assertions += 1
+    //    判据取**行首锚定**的凭据形态（拒绝文案里会引用 `VERDICT PASS` 这个词，行内出现不算打印）。
+    if (twoHookedOutput.includes('────')
+      || /(?:^|\n)\s*(?:check-root-guards|check-workspaces): VERDICT PASS/u.test(twoHookedOutput)) {
+      failures.push('[spawn-wiring] 双钩子形态下 runner 打印了"跑过了"的凭据（摘要行 / `VERDICT PASS`）—— '
+        + '那正是"零任务 + 绿"的现场（J1 复审 N1）：'
+        + `${JSON.stringify(twoHookedOutput.slice(-300))}`)
+    }
+    // ⑦ **通过凭据本身必须存在且自洽**（第十一轮复审 J1 的 N1/N4）：两个 runner 在"真的跑过"
+    //    的那次运行里必须打印**行首锚定**的通过行，且"实跑 == 计划 > 0"。
+    //    为什么这条是必须的：这道闸门的全部价值就是"父进程/CI 认那一行，而不是认退出码"——
+    //    那一行被删掉、被改名、或 N 变成 0 时，父进程侧唯一的凭据就消失了（而退出码照样是 0）。
+    //    判据是**行首前缀**（凭据行后面跟一句人读的括注，所以不锚行尾）。
+    const runnerPass = /^check-root-guards: VERDICT PASS guards=(\d+)\b/mu.exec(runner.stdout ?? '')
+    assertions += 1
+    if (runnerPass === null || Number(runnerPass[1]) <= 0) {
+      failures.push('[spawn-wiring] 根守卫运行器"真的跑过"的那次运行必须打印'
+        + ` \`check-root-guards: VERDICT PASS guards=<N>\`（N>0），实际：`
+        + `${JSON.stringify((runner.stdout ?? '').split('\n').filter(line => line.includes('VERDICT')).join(' | ').slice(0, 300))}`
+        + '\n  ⇒ 没有这一行时，父进程/CI 只能相信退出码 —— 而退出码正是 P0-1 载荷能改写的东西（J1 复审 N1/N4）。')
+    }
+    const orchestratorPass = /^check-workspaces: VERDICT PASS planned=(\d+) executed=(\d+)\b/mu.exec(orchestrator.stdout ?? '')
+    assertions += 1
+    if (orchestratorPass === null
+      || Number(orchestratorPass[1]) <= 0
+      || orchestratorPass[1] !== orchestratorPass[2]) {
+      failures.push('[spawn-wiring] 编排器"真的跑过"的那次运行必须打印'
+        + ` \`check-workspaces: VERDICT PASS planned=N executed=N\`（N>0 且两数相等），实际：`
+        + `${JSON.stringify((orchestrator.stdout ?? '').split('\n').filter(line => line.includes('VERDICT')).join(' | ').slice(0, 300))}`
+        + '\n  ⇒ "实跑 == 计划"正是"零任务 + 绿"那条失效形态的反面（J1 复审 N4）。')
+    }
+    // ⑥ **N3 的两半**（第十一轮复审 J1）：正当的 `NODE_OPTIONS=--max-old-space-size=…`
+    //    必须（a）**不再被拒跑**（旧实现按键名一律拒绝 ⇒ 连 `--list` 都 EXIT=2），
+    //    且（b）**仍然进到包级 check 的环境里**（清洗只该作用于守卫通道）—— 同时（c）守卫子进程
+    //    的环境**仍然被清洗**。三个事实在**同一次运行**里各留一份留痕：
+    //      · `R11_GUARD_ENV_PROBE_OUT` = 探针守卫写的 JSON（守卫通道）；
+    //      · `R11_COREPACK_ENV_TRACE` = corepack 桩写的 package 通道环境（见 buildGuardSpawnWiringProbe）。
+    //    为什么必须是运行级：这三件事都是"接线"，源码里换个变量名/换一份 env 对象就能反转，
+    //    而字符串断言在反转后照样绿（第十轮 D-03 / 本轮 N3 是同一类缺陷）。
+    const benignTrace = join(tree, 'r11-benign-node-options.json')
+    const pkgEnvTrace = join(tree, 'r11-package-env.txt')
+    const benign = spawnSync(process.execPath, [
+      join(tree, 'scripts', 'check-workspaces.mjs'), '--only', SPAWN_WIRING_PROBE_PACKAGE,
+    ], {
+      cwd: tree,
+      encoding: 'utf8',
+      env: {
+        ...env,
+        NODE_OPTIONS: '--max-old-space-size=64',
+        R11_GUARD_ENV_PROBE_OUT: benignTrace,
+        R11_COREPACK_ENV_TRACE: pkgEnvTrace,
+      },
+    })
+    assertions += 1
+    // 退出码 1 = 包级 check 真的被调度了、corepack 桩按设计失败（2 = 在入口就被拒 ⇒ N3 的现场）。
+    if (benign.status !== 1) {
+      failures.push('[spawn-wiring] `NODE_OPTIONS=--max-old-space-size=64`（正当用法：堆上限）下编排器必须照常'
+        + `调度（含包级 check；corepack 桩失败 ⇒ EXIT=1），实际 ${benign.status}：`
+        + `${JSON.stringify(`${benign.stdout ?? ''}${benign.stderr ?? ''}`.slice(-300))}`
+        + '\n  ⇒ 旧实现按**键名**拒绝（`NODE_OPTIONS` 一律危险），代价是"给门禁加堆内存"从生效变成直接红（N3）。')
+    }
+    assertions += 1
+    let pkgEnv = null
+    try {
+      pkgEnv = readFileSync(pkgEnvTrace, 'utf8')
+    } catch {
+      pkgEnv = null
+    }
+    if (pkgEnv === null) {
+      failures.push(`[spawn-wiring] 包级 check 那一路没有留下环境留痕（${pkgEnvTrace}）⇒ `
+        + '"正当 `NODE_OPTIONS` 真的传到了包级构建环境"没有被证明（N3 的后半条）')
+    } else {
+      if (!/^NODE_OPTIONS=--max-old-space-size=64$/mu.test(pkgEnv)) {
+        failures.push('[spawn-wiring] 包级 check 的进程环境里**没有**正当的 `NODE_OPTIONS`：'
+          + `${JSON.stringify(pkgEnv)}`
+          + '\n  ⇒ 清洗必须**只**作用于守卫通道（N3）：把同一份清洗套在包级 check 上会顺手丢掉'
+          + ' `NODE_OPTIONS=--max-old-space-size=…` / `YARN_*` / `npm_config_*`，那是把"注入面收口"错做成"构建环境阉割"。')
+      }
+      if (!/^R11_MARKER=yes$/mu.test(pkgEnv)) {
+        failures.push('[spawn-wiring] 包级 check 的进程环境里没有探针 marker（环境没有被原样继承）：'
+          + `${JSON.stringify(pkgEnv)}`)
+      }
+    }
+    assertions += 1
+    let benignFacts = null
+    try {
+      benignFacts = JSON.parse(readFileSync(benignTrace, 'utf8'))
+    } catch {
+      benignFacts = null
+    }
+    if (benignFacts === null) {
+      failures.push(`[spawn-wiring] 正当 \`NODE_OPTIONS\` 的那一路没有留下探针留痕（${benignTrace}）⇒ `
+        + '"拒绝按键名放宽之后守卫仍被清洗"没有被证明')
+    } else if (benignFacts.marker !== 'yes' || benignFacts.nodeOptions !== null || benignFacts.bashEnv !== null) {
+      failures.push('[spawn-wiring] 正当 `NODE_OPTIONS` 的那一路守卫子进程环境不对：'
+        + `${JSON.stringify(benignFacts)}（marker 必须在场；\`NODE_OPTIONS\`/\`BASH_ENV\` 必须缺席 —— `
+        + '判据按**旗标内容**放宽 runner 自身，守卫通道的清洗**不许**跟着放宽）')
+    }
     // ⑤ 回落的**前置判据**（P0-1 的窄回落）：登记脚本文件不存在 + `.yarnrc.yml` 有 `plugins:`
     //    ⇒ 必须**拒绝**回落到 `corepack yarn run` —— 否则"删掉守卫脚本 + 装插件"就能把守卫
     //    换成恒绿的空壳（注入的退出钩子会把 `MODULE_NOT_FOUND` 的退出码改写成 0）。
@@ -829,13 +1017,58 @@ export function selfTestGuardSpawnWiring() {
 }
 
 /**
+ * 「git 锚定」严格面的**判据信号**（第十一轮复审 J1 的 N2，P1）。
+ *
+ * 旧实现只看 `GITHUB_ACTIONS === 'true' || CI === 'true'` —— 而这两个都是**普通环境变量**，
+ * 被钉步骤体里一行 `unset CI GITHUB_ACTIONS`（或 `env -u CI -u GITHUB_ACTIONS …`）就能把
+ * 这条唯一的承重网从"CI 硬判据"降级成"本地告警"（审计方实测：`CI=true node …` = 1，
+ * 同一棵树加一行 `unset` = **0**）。
+ *
+ * 现在取的是**runner 注入、且形如"路径/摘要"的多个独立信号**，任一在场即严格：
+ *   · `GITHUB_EVENT_PATH`（事件 JSON 的**文件路径**：runner 一定写，步骤体没有理由清它）；
+ *   · `GITHUB_SHA`（40 位十六进制）；
+ *   · `GITHUB_RUN_ID`（十进制，Actions 里必有）；
+ *   · `GITHUB_WORKFLOW` / `RUNNER_OS` / `RUNNER_TEMP`（runner 级环境）。
+ * 要静默严格面就得把这些**全部**清掉 —— 那需要多条 `unset`，而静态面已经认 `unset`/`env -u`
+ * （`check-workflows.mjs` 的 [SK-17]，本轮 N2 ①），所以"隐藏的降级"变成"显式可判的 diff"。
+ *
+ * **为什么新判据不能只靠 env**（问题的正解不在 env 里）：任何环境变量都能被步骤体清掉，
+ * 所以这条只是把"一行 unset"变成"六行 unset（且被静态判据拦）"。真正的硬通道是
+ * **参数**：`--require-clean`（本文件支持，CI 侧可显式传）—— 它写在 `run:` 的 argv 里，
+ * 不在环境面上；步骤体要改 argv 就得改命令本身（[SK-14] 的判据面），而命令改了就是评审可见的 diff。
+ * 结论：**env 信号负责"默认就严格"，参数负责"不可被环境面关闭"**；两者都要在才叫分界钉死。
+ * @param env - 源环境（缺省 `process.env`）。
+ * @returns 命中的信号（按检查顺序）；空数组 = 本地姿态（只告警）。
+ */
+export function strictAnchorSignals(env = process.env) {
+  const hits = []
+  if (env.GITHUB_ACTIONS === 'true') hits.push('GITHUB_ACTIONS')
+  if (env.CI === 'true') hits.push('CI')
+  if (typeof env.GITHUB_EVENT_PATH === 'string' && env.GITHUB_EVENT_PATH.trim() !== '') hits.push('GITHUB_EVENT_PATH')
+  if (/^[0-9a-f]{40}$/iu.test(env.GITHUB_SHA ?? '')) hits.push('GITHUB_SHA')
+  if (/^\d+$/u.test(env.GITHUB_RUN_ID ?? '')) hits.push('GITHUB_RUN_ID')
+  if (typeof env.GITHUB_WORKFLOW === 'string' && env.GITHUB_WORKFLOW.trim() !== '') hits.push('GITHUB_WORKFLOW')
+  if (typeof env.RUNNER_OS === 'string' && env.RUNNER_OS.trim() !== '') hits.push('RUNNER_OS')
+  if (typeof env.RUNNER_TEMP === 'string' && env.RUNNER_TEMP.trim() !== '') hits.push('RUNNER_TEMP')
+  return hits
+}
+
+/**
  * 判据主流程。
  * @param argv - 命令行参数（去掉 `node` 与脚本名）。
  * @returns 退出码。
  */
 function main(argv) {
   const printDigests = argv.includes('--print-digests')
-  const unknown = argv.filter(argument => argument !== '--print-digests')
+  // `--require-clean`（第十一轮复审 J1 的 N2 ②）：把"git 锚定"锁成硬判据的**参数通道** ——
+  // 它不在环境面上，步骤体里 `unset`/`env -u` 改不了它（要改就得改命令本身 ⇒ 评审可见）。
+  const requireClean = argv.includes('--require-clean')
+  // 严格面的**信号**在函数作用域里算一次：判据段（git 锚）与末尾的通过行共用同一份取值
+  // （放进块作用域会让末尾那行引用不到 —— Node 直接 ReferenceError，实测踩过）。
+  const anchorSignals = strictAnchorSignals()
+  const strictAnchor = requireClean || anchorSignals.length > 0
+
+  const unknown = argv.filter(argument => argument !== '--print-digests' && argument !== '--require-clean')
   if (unknown.length > 0) {
     console.error(`check-guard-parser-integrity: 未知参数 ${unknown.join(' ')}`)
     return 2
@@ -999,8 +1232,12 @@ function main(argv) {
     // ④ 根 `package.json` 的生命周期钩子（`enableScripts: false` 挡不住根 workspace 自己的 postinstall）。
     executionFailures.push(...lifecycleHookProblems(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))))
     // ⑤ 摘要判据的 **git 锚**（P1-1 ②）：工作树必须与 HEAD 逐字节一致。
-    //    严格面在 CI（`GITHUB_ACTIONS`/`CI`）；本地脏树只告警（理由与代价见 gitAnchorProblems 的注释）。
-    const strictAnchor = process.env.GITHUB_ACTIONS === 'true' || process.env.CI === 'true'
+    //    严格面 = **runner 注入信号**（多个独立变量，任一在场即严格）+ 显式 `--require-clean`
+    //    参数；本地脏树只告警（理由与代价见 gitAnchorProblems 的注释、信号清单见
+    //    `strictAnchorSignals()` 的注释 —— N2 的订正：旧实现只看 `CI`/`GITHUB_ACTIONS`，
+    //    两个都能被一行 `unset` 清掉）。
+    //    `anchorSignals` / `strictAnchor` 的取值在 main() 的**函数作用域**里算（末尾的通过行
+    //    也要用同一份 —— 放进块作用域时末尾那行会 ReferenceError，本仓实测踩过）。
     const readHead = path => {
       const result = spawnSync('git', ['show', `HEAD:${path}`], { cwd: ROOT, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 })
       return result.status === 0 ? result.stdout : null
@@ -1056,6 +1293,74 @@ function main(argv) {
     }
   }
 
+  // ===========================================================================
+  // R11-J1 的两条**纯函数**自检（N5 / N2）：判据的"优先级"与"信号面"这两件事，
+  // 用合成输入直接钉住 —— 它们都不是"文件里有没有那行字"能证明的。
+  // ===========================================================================
+  if (!printDigests) {
+    // N5：**禁键优先于 allowedKeys**。合成登记表：`plugins` 既在 `allowedKeys`（错的登记通道）
+    // 又在 `forbiddenKeys` ⇒ 必须仍然报"禁键"。旧实现先 `continue` 掉 allowed ⇒ 这条静默消失，
+    // 而错误文案说的却是"只能登记进 REGISTERED_YARN_ENTRY_ALLOWANCES"（口径与实现不一致，J1 的 N5）。
+    {
+      const probeRegistry = {
+        ...REGISTERED_YARN_CONFIGURATION,
+        allowedKeys: [...REGISTERED_YARN_CONFIGURATION.allowedKeys, ['plugins', 'J1 复审 N5 的合成登记：走错通道']],
+        forbiddenKeys: [['plugins', 'J1 复审 N5 的合成禁键（钩子在 yarn 进程内部改写脚本环境）']],
+      }
+      const probeText = [
+        // 键集合 = 真实登记的两条 requiredScalars（避免合成文本撞上"取值不对"那条无关判据）
+        'enableScripts: false',
+        'nodeLinker: node-modules',
+        'plugins:',
+        '  - path: .yarn/plugins/probe.cjs',
+        '',
+      ].join('\n')
+      const probeProblems = yarnConfigurationProblems({
+        exists: true,
+        text: probeText,
+        isSymlink: false,
+        isFile: true,
+        expectedSha256: 'x',
+        actualSha256: 'x',
+      }, probeRegistry)
+      executionFailures.push(...(probeProblems.some(problem => problem.includes('禁键'))
+        ? []
+        : ['[yarnrc-precedence] `plugins` 同时出现在 `allowedKeys` 与 `forbiddenKeys` 里时必须报**禁键**'
+          + '（禁键优先）—— 旧实现先放行 allowedKeys ⇒ 把它加进 allowedKeys 就能让禁键整条消失，'
+          + '而错误文案给出的唯一通道是 `REGISTERED_YARN_ENTRY_ALLOWANCES`（J1 复审 N5）。']))
+    }
+    // N2：**严格面的信号面**。`CI`/`GITHUB_ACTIONS` 被清掉、但 runner 注入的信号在场时必须仍然严格
+    // —— 否则被钉步骤体里一行 `unset CI GITHUB_ACTIONS` 就能把 git 锚定降级成本地告警（J1 的 N2）。
+    {
+      const runnerOnly = strictAnchorSignals({ GITHUB_EVENT_PATH: '/tmp/event.json' })
+      const shaOnly = strictAnchorSignals({ GITHUB_SHA: 'a'.repeat(40) })
+      const none = strictAnchorSignals({})
+      if (!runnerOnly.includes('GITHUB_EVENT_PATH')) {
+        executionFailures.push('[strict-anchor] `GITHUB_EVENT_PATH` 必须是一个严格信号（runner 注入的**路径**变量；'
+          + '`unset CI GITHUB_ACTIONS` 清不掉它）—— 旧实现只看 `CI`/`GITHUB_ACTIONS`，一行 `unset` 就能把'
+          + '唯一的承重网降级（J1 复审 N2）。')
+      }
+      if (!shaOnly.includes('GITHUB_SHA')) {
+        executionFailures.push('[strict-anchor] `GITHUB_SHA`（40 位十六进制）必须是一个严格信号（J1 复审 N2）。')
+      }
+      if (none.length !== 0) {
+        executionFailures.push(`[strict-anchor] 空环境必须是"本地告警"姿态（本地脏树不许硬判），实际信号 ${JSON.stringify(none)}。`)
+      }
+      // **接线**（这半条只能是源码级：判据脚本不能在自身判据里递归地跑自己，那会把一次运行变成两次、
+      // 且被 spawn 的那次同样受步骤体影响）。它钉的是"严格面由 strictAnchorSignals() 驱动"，
+      // 行为级证据在 CI 侧（`--require-clean`）与审计报告里。
+      const selfSource = readFileSync(join(ROOT, 'scripts', 'check-guard-parser-integrity.mjs'), 'utf8')
+      //     判据钉的是**调用点**（不只是"某一行长得对"）：`strictAnchorSignals()` 必须真的喂给 `strictAnchor`。
+      //     只钉赋值那一行是不够的 —— 把上一行换成 `process.env.CI === 'true' ? ['CI'] : []` 就绕过了
+      //     （本泳道实测：那样变异之后 EXIT=0，而两行里只有第二行"看起来对"）。
+      if (!/const anchorSignals = strictAnchorSignals\(\)\n\s*const strictAnchor = requireClean \|\| anchorSignals\.length > 0/u.test(selfSource)) {
+        executionFailures.push('[strict-anchor] 接线断了：严格面必须写成 `const anchorSignals = strictAnchorSignals()`'
+          + ' + `const strictAnchor = requireClean || anchorSignals.length > 0`（**同一个** `strictAnchorSignals()` 的取值喂给判定）。'
+          + '回到"只看 CI/GITHUB_ACTIONS"就等于让一行 `unset` 关掉整条判据（J1 复审 N2）。')
+      }
+    }
+  }
+
   if (printDigests) {
     process.stdout.write('# 守卫脚本内容摘要（粘回 scripts/check-root-guards.mjs 的 REGISTERED_GUARD_ENTRIES）\n')
     for (const entry of actual) process.stdout.write(`${pasteLine(entry)}\n`)
@@ -1105,7 +1410,9 @@ function main(argv) {
     + `${REGISTERED_YARN_CONFIGURATION.requiredScalars.map(entry => `${entry[0]}=${entry[1]}`).join('、')}）；`
     + `${YARN_CODE_DIRECTORIES.join('/')} 为空；根 package.json 无未登记的生命周期钩子；`
     + '两个 runner 的守卫通道：直接 spawn（不经 yarn）+ 环境清洗（真子进程证明）；'
-    + `工作树↔HEAD 锚定 ${process.env.GITHUB_ACTIONS === 'true' || process.env.CI === 'true' ? '严格' : '本地告警（CI 上为硬判据）'}\n`)
+    + `工作树↔HEAD 锚定 ${strictAnchor
+      ? `严格（信号：${requireClean ? '`--require-clean`' : ''}${requireClean && anchorSignals.length > 0 ? '+' : ''}${anchorSignals.join('+') || '—'}）`
+      : '本地告警（CI 上为硬判据；`--require-clean` 可显式要求严格）'}\n`)
   return 0
 }
 

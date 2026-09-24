@@ -546,6 +546,12 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w17-step-body-registered-assignment-green', policy: null },
   { id: 'w18-github-env-unregistered-key', policy: '[SK-17]' },
   { id: 'w19-guard-job-unregistered-uses', policy: '[SK-17]' },
+  // ---- 第十一轮复审 J1 的 N2:被钉步骤体里**清除**环境变量(`unset` / `env -u`) ----
+  // 旧判据面只认 `export`/前缀赋值(写入),`unset CI GITHUB_ACTIONS` 一个字都不报 ——
+  // 而它正是把"CI 硬判据"降级成"本地告警"的那一行(审计方实测 gpi EXIT 1→0)。
+  { id: 'w24-step-body-unset-ci', policy: '[SK-17]' },
+  { id: 'w25-step-body-env-unset-ci', policy: '[SK-17]' },
+  { id: 'w26-unpinned-step-unset-green', policy: null },
   // ---- 第十一轮审计 C2-A-01/A-02:发布正文来源(策展文件的可证明性)----
   { id: 'p12-notes-command-substitution', policy: '[SK-11]' },
   { id: 'p13-notes-file-unprovable-var', policy: '[SK-11]' },
@@ -1513,7 +1519,7 @@ const PINNED_ENV_LAYER_REGISTRY = [
   { id: 'container-env', label: '`jobs.<id>.container.env`(Actions 的第四层)' },
   { id: 'step-env', label: 'step 级 `env:`' },
   { id: 'github-env-write', label: '前序步骤写入 `$GITHUB_ENV`' },
-  { id: 'step-body-assignment', label: '被钉步骤体内的 `export`/前缀赋值' },
+  { id: 'step-body-assignment', label: '被钉步骤体内的 `export`/前缀赋值/`unset`/`env -u`' },
 ]
 
 /**
@@ -1764,6 +1770,46 @@ function envEntries(env) {
 }
 
 /**
+ * [SK-17] 被钉步骤体里**允许清除**的环境变量名（登记表，当前为空 = 任何 `unset` 都红）。
+ *
+ * 现场（第十一轮复审 J1 的 N2）：`PINNED_ENV_ALLOWED_KEYS` 是"**出现**在被钉单元环境面上的
+ * 键必须登记"，而 `unset` 是**反向**的一层 —— 它名字里根本没有键，只有"少了一个键"。
+ * 而少一个键的后果和写一个键同级：`unset CI GITHUB_ACTIONS` 把
+ * `check-guard-parser-integrity` 的 git 锚定从"CI 硬判据"降级成"本地告警"
+ * （实测 `CI=true node scripts/check-guard-parser-integrity.mjs` = 1，同一棵树加一行 `unset` = **0**），
+ * `unset WASM_GATE_EXPECT_HEAD` 同理能让一条判据静默退化。
+ *
+ * 因此判据是**独立**的一条：被钉步骤体里出现 `unset <NAME>` / `env -u <NAME>` ⇒ 名字必须逐字
+ * 登记在这里，否则红（空的表 = 这条路径整体关闭）。**不复用** `PINNED_ENV_ALLOWED_KEYS`：
+ * 那张表回答的是"这个键出现在环境面上是否安全"，而 `PG_DSN_TEST`/`WASM_GATE_EXPECT_HEAD`
+ * 这类键出现在表里恰恰是因为**它们必须存在**，清除它们与登记它们的理由正好相反。
+ */
+const PINNED_STEP_UNSET_ALLOWED_KEYS = []
+
+/**
+ * [SK-17] 被钉步骤体里"清除环境变量"的判定（与 `pinnedEnvKeyProblem` 互补，见上面登记表）。
+ * @param key - 被清除的变量名。
+ * @returns `null` = 已登记放行；否则 `{ raw, why, hint }`。
+ */
+function pinnedUnsetKeyProblem(key) {
+  if (typeof key !== 'string' || key === '' || key.trim() !== key) {
+    return {
+      raw: JSON.stringify(key),
+      why: '被清除的键名读不出来（空串/带空白）⇒ 判据不知道这一步抹掉了什么',
+      hint: null,
+    }
+  }
+  if (PINNED_STEP_UNSET_ALLOWED_KEYS.some(entry => entry.key === key)) return null
+  return {
+    raw: key,
+    why: `被钉步骤体**清除**了环境变量 \`${key}\` —— 删除不会让判据报错，只会让它**降级**`
+      + '（J1 复审 N2 的现场：`unset CI GITHUB_ACTIONS` 把 git 锚定从 CI 硬判据变成本地告警，'
+      + '实测 EXIT 1→0；`unset` 掉门禁自己的开关键同族）',
+    hint: key,
+  }
+}
+
+/**
  * 被钉步骤**自己的步骤体**里写进子进程环境的变量名(第十轮审计 D-03)。
  *
  * 现场(审计方实跑):在守卫步的 `run` 里加一行
@@ -1773,11 +1819,16 @@ function envEntries(env) {
  * 同族的第二半在 `scripts/check-root-guards.mjs`(它此前把 `process.env` **原样透传**
  * 给 16 个守卫子进程)。
  *
- * 认识范围(**只认真的会进入子进程环境的三类写法**):
+ * 认识范围(**只认真的会进入/离开子进程环境的三类写法**):
  *   · `export NAME=…` / `export NAME` / `export -x NAME`(裸 `export NAME` 也认:
  *     它把已有变量导出,同样是"这一步的子进程会看见它");
  *   · `declare -x NAME` / `typeset -x NAME`(`-x` = 导出属性);
- *   · **命令位前缀赋值** `NAME=… cmd …`(含 `env NAME=… cmd`:前导前缀词表里已有 `env`)。
+ *   · **命令位前缀赋值** `NAME=… cmd …`(含 `env NAME=… cmd`:前导前缀词表里已有 `env`);
+ *   · **`unset NAME…`(第十一轮复审 J1 的 N2)** 与 **`env -u NAME` / `env --unset=NAME`**:
+ *     方向相反的同族写法 —— 删掉一个键不会让判据报错,只会让它**降级**
+ *     (`unset CI GITHUB_ACTIONS` 就把 CI 硬判据变成本地告警,实测 `CI=true …`=1、加 `unset`=0);
+ *     另有 `env -i`/`--ignore-environment`(清空整份环境)与 `env -S`(再交给一层 shell),
+ *     两者都按 `unparsable` fail-closed 处理。
  * 不认:普通赋值语句(`FOO=1` 单独一行,不导出 ⇒ 子进程看不见)、函数定义、`local`、
  * 以及命令词**之后**的 `NAME=…` 参数(`docker run -e FOO=bar` 那种不是本进程的环境)。
  *
@@ -1790,7 +1841,8 @@ function envEntries(env) {
  * 一律判,看不见的由"求不出真假 ⇒ 按会静默处理"之外的第二道(环境清洗)兜。
  *
  * @param script - 步骤体的原始 `run` 文本(本函数自己剥注释)。
- * @returns `[{ name, form }]` 或 `[{ unparsable: true, segment, form }]`(分词失败)。
+ * @returns `[{ name, kind, form }]`(`kind` = `'set'`/`'unset'`)或
+ *   `[{ unparsable: true, segment, form }]`(分词失败 / `env -i` / `env -S`)。
  */
 function shellEnvironmentAssignments(script) {
   if (typeof script !== 'string' || script.trim() === '') return []
@@ -1814,12 +1866,56 @@ function shellEnvironmentAssignments(script) {
     if (words === null) {
       // 分词失败 ⇒ 判据读不懂这一句。只有它**看起来**在写环境时才 fail-closed
       // (否则任意一段带引号的文本都会把一个正常的守卫步骤判红)。
-      if (/(?:^|[\s;&|(){}])(?:export|declare|typeset)\b|\b[A-Za-z_][A-Za-z0-9_]*=/u.test(cleaned)) {
+      // `unset` / `env -u|-i|--unset` 与 `export`/`declare`/`typeset` 同族（第十一轮复审 J1 的 N2）
+      // —— 读不懂的"清除环境"比读不懂的"写出环境"更危险：它只会让判据**降级**。
+      if (/(?:^|[\s;&|(){}])(?:export|declare|typeset|unset)\b|\benv\s+(?:-u\b|-i\b|--unset\b|--ignore-environment\b)|\b[A-Za-z_][A-Za-z0-9_]*=/u.test(cleaned)) {
         results.push({ unparsable: true, segment: cleaned, form: '无法分词的赋值片段' })
       }
       continue
     }
     const texts = words.map(word => word.text)
+    // **`env` 的"清空/取消"选项**（第十一轮复审 J1 的 N2）——必须在通用前缀扫描**之前**认：
+    // `env -u CI -u GITHUB_ACTIONS node …` 里的 `-u` 会被下面那圈 `word.startsWith('-')` 当普通
+    // 选项跳过，于是 `CI` 被当命令词、这一段的键**一个都看不见**。三种形态：
+    //   · `env -u NAME` / `env --unset NAME` / `env --unset=NAME` ⇒ 清除单个键；
+    //   · `env -i` / `env --ignore-environment` ⇒ 清空**整份**环境（`CI`/`GITHUB_ACTIONS` 全没）；
+    //   · `env -S '…'` / `env --split-string …` ⇒ 判据读不懂（等价于再来一层 shell）。
+    // 前两种按"写入环境面"逐键/整体记录；第三种按 unparsable（fail-closed）。
+    if (texts[0] === 'env') {
+      let cursor = 1
+      while (cursor < texts.length) {
+        const word = texts[cursor]
+        const unsetInline = /^--unset=(.+)$/u.exec(word)
+        if (word === '-u' || word === '--unset') {
+          const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(texts[cursor + 1] ?? '')?.[1]
+          results.push(name === undefined
+            ? { unparsable: true, segment: cleaned, form: '`env -u`(名字读不出来)' }
+            : { name, kind: 'unset', form: `\`env -u ${name}\`(清除该键后执行)` })
+          cursor += 2
+          continue
+        }
+        if (unsetInline !== null) {
+          const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(unsetInline[1])?.[1]
+          results.push(name === undefined
+            ? { unparsable: true, segment: cleaned, form: '`env --unset=`(名字读不出来)' }
+            : { name, kind: 'unset', form: `\`env --unset=${name}\`(清除该键后执行)` })
+          cursor += 1
+          continue
+        }
+        if (word === '-i' || word === '--ignore-environment') {
+          results.push({ unparsable: true, segment: cleaned, form: '`env -i`(清空整份环境)' })
+          cursor += 1
+          continue
+        }
+        if (word === '-S' || word === '--split-string' || word.startsWith('--split-string=')) {
+          results.push({ unparsable: true, segment: cleaned, form: '`env -S`(把命令串再交给 shell)' })
+          cursor += 1
+          continue
+        }
+        if (word.startsWith('-') && word !== '-') { cursor += 1; continue }
+        break
+      }
+    }
     // 命令位:跳过前缀词(`env`/`time`/`sudo`/`eval`/`exec`…)与 `NAME=…` 赋值词。
     let index = 0
     const leadingAssignments = []
@@ -1839,9 +1935,26 @@ function shellEnvironmentAssignments(script) {
     // 单独一行的 `FOO=1` 是普通 shell 变量(不导出 ⇒ 子进程看不见),不能报 ——
     // 本仓 `ci.yml` 的 `GO_TEST_STATUS=0` / `CHECK_STATUS=0` 正是这种合法写法。
     if (index < texts.length) {
-      for (const name of leadingAssignments) results.push({ name, form: `前缀赋值 \`${name}=…\`` })
+      for (const name of leadingAssignments) results.push({ name, kind: 'set', form: `前缀赋值 \`${name}=…\`` })
     }
     const command = texts[index]
+    // **`unset NAME…`**（第十一轮复审 J1 的 N2）：与 `export` 同一层写入面，方向相反 ——
+    // 删掉一个键不会让判据报错，只会让它**降级**。现场：被钉步骤体里一行
+    // `unset CI GITHUB_ACTIONS` 就把 `check-guard-parser-integrity` 的"git 锚定"从 CI 硬判据
+    // 降成本地告警（实测 `CI=true node …` = 1、加 `unset` = 0），而静态判据此前**不认 `unset`**
+    // ⇒ `check-workflows` EXIT=0。选项（`-v`/`-f`/`--`）跳过；名字读不出来的形态按 unparsable 处理。
+    if (command === 'unset') {
+      let cursor = index + 1
+      while (cursor < texts.length) {
+        const word = texts[cursor]
+        if (word === '--' || (word.startsWith('-') && word !== '-')) { cursor += 1; continue }
+        const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
+        if (name === undefined) { cursor += 1; continue }
+        results.push({ name, kind: 'unset', form: `\`unset ${name}\`(清除键)` })
+        cursor += 1
+      }
+      continue
+    }
     if (command !== 'export' && command !== 'declare' && command !== 'typeset') continue
     let cursor = index + 1
     const expectsExportAttribute = command !== 'export'
@@ -1862,7 +1975,7 @@ function shellEnvironmentAssignments(script) {
       const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
       if (name === undefined) { cursor += 1; continue }
       if (!expectsExportAttribute || exportsAttribute) {
-        results.push({ name, form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
+        results.push({ name, kind: 'set', form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
       }
       cursor += 1
     }
@@ -2137,9 +2250,11 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root, options = 
         return
       }
       const script = executableScript(step.run)
-      // 步骤体那一层:`export`/前缀赋值。
+      // 步骤体那一层:`export`/前缀赋值（写入）+ `unset`/`env -u`（清除，J1 的 N2）。
       for (const assignment of shellEnvironmentAssignments(step.run)) {
-        const name = assignment.unparsable === true ? null : pinnedEnvKeyProblem(assignment.name)
+        const name = assignment.unparsable === true
+          ? null
+          : (assignment.kind === 'unset' ? pinnedUnsetKeyProblem(assignment.name) : pinnedEnvKeyProblem(assignment.name))
         if (assignment.unparsable !== true && name === null) continue
         failures.push({
           name: relativePath,
@@ -6264,7 +6379,23 @@ function executedCommands(script) {
     while (index < words.length) {
       const word = words[index].text
       // 前缀词(`env`/`sudo`/`time`/…)、它们的选项、以及 `FOO=bar` 赋值前缀都不改"命令词是谁"。
-      if (EXIT_PREFIX_WORDS.includes(word)) { index += 1; continue }
+      if (EXIT_PREFIX_WORDS.includes(word)) {
+        // **`env` 的"带取值选项"**（第十一轮复审 J1 的 N2 同族）：`-u NAME` / `--unset NAME`
+        // 各自**吃掉一个词**。通用规则只看"以 `-` 开头就跳过"，于是
+        // `env -u CI -u GITHUB_ACTIONS node scripts/…` 的命令词被判成 `CI` ——
+        // 这一步于是**不算执行过那个脚本**，`[SK-14]` 的"命令位"识别与 `[SK-17]` 的步骤体判据
+        // 整条不适用（审计方实测：该形态既不报"没在命令位"，也不报 `unset` 面）。
+        if (word === 'env') {
+          let lookahead = index + 1
+          while (lookahead < words.length && words[lookahead].text.startsWith('-')) {
+            lookahead += (words[lookahead].text === '-u' || words[lookahead].text === '--unset') ? 2 : 1
+          }
+          index = lookahead
+          continue
+        }
+        index += 1
+        continue
+      }
       if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) { index += 1; continue }
       if (word.startsWith('-') && word !== '-') { index += 1; continue }
       break
@@ -7368,18 +7499,21 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
       const hit = assignment.unparsable === true
         ? {
           raw: '（读不懂的片段）',
-          why: '这段 shell 里出现了 `export`/`declare`/赋值形态,但分词失败(引号不配对等)⇒ '
-            + '判据读不懂它到底写出了哪个键,按"未登记"处理',
+          why: '这段 shell 里出现了 `export`/`declare`/`unset`/赋值形态,但分词失败(引号不配对等)⇒ '
+            + '判据读不懂它到底写出了/抹掉了哪个键,按"未登记"处理',
         }
-        : pinnedEnvKeyProblem(assignment.name)
+        : (assignment.kind === 'unset'
+          ? pinnedUnsetKeyProblem(assignment.name)
+          : pinnedEnvKeyProblem(assignment.name))
       if (hit === null) continue
       reportOnce(`body:${unit.jobId}#${unit.index}:${assignment.name ?? assignment.segment}`, `[SK-17] `
         + `${unitLabel(unit)} 是${unit.reason},而它的**步骤体自己**用 \`${assignment.form}\` 写出了 `
         + `\`${assignment.name ?? assignment.segment}\`${assignment.unparsable === true ? '(分词失败)' : ''}。`
         + tail(hit, '步骤体里的 `export`/前缀赋值把键直接交给这一步的子进程(`node`/`corepack` 都在里面),'
-          + '而它在 YAML 的 `env:` 里一个字都不出现 ⇒ 四层 `env:` 判据全都看不见它。'
-          + '要在这个键上跑判据,先在 `PINNED_ENV_ALLOWED_KEYS` 里登记;'
-          + '第二道收口在 `scripts/check-root-guards.mjs`(它清洗交给守卫子进程的环境)。'))
+          + '而它在 YAML 的 `env:` 里一个字都不出现 ⇒ 四层 `env:` 判据全都看不见它;'
+          + '**`unset`/`env -u` 是同一层的反向写法**(J1 复审 N2):删除只会让下游判据降级,不会报错。'
+          + '要在这个键上跑判据,先在 `PINNED_ENV_ALLOWED_KEYS`(写入)/`PINNED_STEP_UNSET_ALLOWED_KEYS`(清除)'
+          + '里登记;第二道收口在 `scripts/check-root-guards.mjs`(它清洗交给守卫子进程的环境)。'))
     }
   }
 
@@ -9346,6 +9480,41 @@ export function selfTestPolicies() {
       'export VERSION="1.2.3"',
       'CHECK_STATUS=$?',
       `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // ---- 第十一轮复审 J1 的 N2:步骤体里**清除**环境变量(与上面两条"写入"互补) ----
+  //
+  // 现场(审计方实跑):把 `set -euo pipefail` + `unset CI GITHUB_ACTIONS` 写进 `gate-guards` 的
+  // 守卫步骤体之后,`check-workflows` EXIT=**0**(旧判据只认 `export`/前缀赋值),而同一棵树
+  // 真跑 `node scripts/check-guard-parser-integrity.mjs` 时"git 锚定"从 CI 硬判据降级成本地告警
+  // ⇒ `CI=true …` = 1、`env -u CI -u GITHUB_ACTIONS …` = **0**。删除只会让判据降级,不会报错。
+  gateSample('w24-step-body-unset-ci', '[SK-17]', {
+    file: 'ci.yml',
+    guardRunLines: [
+      'set -euo pipefail',
+      'unset CI GITHUB_ACTIONS',
+      `node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // 同族第二种写法:`env -u NAME` / `env --unset=NAME`(前缀词 `env` 后面的 `-u` 会被通用前缀
+  // 扫描当普通选项跳过,所以这一形态必须在解析器里**单独**认)。
+  gateSample('w25-step-body-env-unset-ci', '[SK-17]', {
+    file: 'ci.yml',
+    guardRunLines: [
+      'set -euo pipefail',
+      `env -u CI -u GITHUB_ACTIONS node ${DOCS_ONLY_GUARD_RUNNER}`,
+    ],
+  })
+  // **绿样本**(不得一刀切):同一个 `unset` 写在**没有判据步骤**的 job 里是正常写法
+  // (清理环境再跑分类器)。判据面只覆盖"会被判据步骤继承"的位置。
+  gateSample('w26-unpinned-step-unset-green', null, {
+    file: 'ci.yml',
+    changesExtraSteps: [
+      '      - name: Normalize environment for the classifier',
+      '        run: |',
+      '          set -euo pipefail',
+      '          unset CI GITHUB_ACTIONS',
+      '          echo "classifier"',
     ],
   })
   // 前序步骤写 `$GITHUB_ENV` 的键同样按白名单判(C-01 的攻击就是从这里进来的);

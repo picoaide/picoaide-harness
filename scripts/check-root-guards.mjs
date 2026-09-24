@@ -158,7 +158,7 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'ef798eb49f8353495b62c9d8ff4ea4aa11b5efa95954d80a36578441a5bca7ce' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '2ed9be5f8164d566238f4af1ceb9cab34f736b1075f97b75db73722523300886' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'f1d7fa4cdc092fe8d0882408869adf90dca75aa27f87a2610893c357a8c70159' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: '92697e806d4402f67d5bf7fe9a06ea2d4774a4dd30c0f62e7105861523bc8f44' }],
@@ -177,7 +177,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '5dfe27d6cfbe5fba20a3e63d6bc47338a3094073923ba4c139cea4fa5f7c48d5' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'a269c9d9bd6d97f5133bbdfdbfa0398dadb51530271738ff955ae3dcc3809038' }],
 ])
 
 /**
@@ -855,10 +855,20 @@ async function main() {
   }
   // 本进程自己被污染时**明说**（不静默）:退出钩子在模块求值前就装好了,进程内卸不掉,
   // 但子进程环境已清洗 + 退出路径已加固(removeAllListeners + process.exit)。
-  if (CONTAMINATED_KEYS.length > 0) {
-    console.error(`check-root-guards: WARNING — 本进程自己的环境里有危险族键(${CONTAMINATED_KEYS.join('、')});`
+  //
+  // **两类键必须分开说**（第十一轮复审 J1 的 N3）：`CONTAMINATED_KEYS` 是"清洗清单"（子进程不继承），
+  // 而"判决可不可信"由 `runnerTrustProblems()` 按**能力**判（`NODE_OPTIONS` 看内容）。
+  // 原来一律按"注入面"告警 ⇒ 正当的 `NODE_OPTIONS=--max-old-space-size=…` 会被说成"守卫跑而恒绿"，
+  // 那是把一条已经判定无害的配置讲成攻击。
+  if (runnerTrustProblems().length > 0) {
+    // 理论上不可达（`main()` 开头的 `refuseUntrustedRunner()` 已经拦掉）—— 留着是为了"万一判据漂移"。
+    console.error(`check-root-guards: WARNING — 本进程自己的环境里有**判决不可信**的键(${CONTAMINATED_KEYS.join('、')});`
       + '\n  这是"守卫跑而恒绿"的注入面(第十轮审计 D-03)。子进程环境已清洗,退出路径已加固,'
       + '但**判据面的第一道**在 scripts/check-workflows.mjs 的 [SK-17](被钉单元的 env/步骤体白名单)。')
+  } else if (CONTAMINATED_KEYS.length > 0) {
+    console.log(`check-root-guards: 提示 —— 本进程环境里有 ${CONTAMINATED_KEYS.length} 个键（${CONTAMINATED_KEYS.join('、')}）`
+      + '**不会**传给守卫子进程；它们已由 `runnerTrustProblems()` 判过"改不了本进程的解释器行为/退出码"'
+      + '（例：正当的 `NODE_OPTIONS=--max-old-space-size=…`），因此不构成注入面（J1 复审 N3 的两类之分）。')
   }
 
   console.log(`check-root-guards — 并发 ${concurrency}；docs-only 的 PR 也必须跑到的根守卫（${guards.length} 个）`
@@ -883,6 +893,19 @@ async function main() {
   const tolerated = toleratesAdvisory ? advisory : []
   console.log(`──── ${results.length} 个根守卫：${results.length - failed.length - tolerated.length} 通过、`
     + `${failed.length} 失败、${tolerated.length} 告警(advisory)，总耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`)
+  // R11-J1 N1（把判定权从"被审进程"上移到父进程/CI）：与编排器的 `VERDICT PASS` 同一凭据口径。
+  // 只有"**每个**登记守卫都真的跑过、且没有一条失败"才打印 PASS —— `refuseUntrustedRunner()`
+  // 在打印它之前就结束进程（连"清单"那一行都还没打），`--allow-advisory` 这类显式降级也拿不到它。
+  // 诚实边界：进程内做不到绝对（钩子能改写 `kill`/`abort`/`reallyExit` ⇒ 最后一层是"阻塞不返回"），
+  // 所以父进程/CI 请**认这一行**，不要只认退出码。
+  if (results.length > 0 && failed.length === 0 && tolerated.length === 0) {
+    console.log(`check-root-guards: VERDICT PASS guards=${results.length}`
+      + '（每个登记的根守卫都跑过且通过 —— 这是"根守卫跑过了"的唯一凭据）')
+  } else {
+    console.error(`check-root-guards: VERDICT FAIL guards=${results.length} failed=${failed.length}`
+      + `${tolerated.length > 0 ? ` tolerated=${tolerated.length}` : ''}`
+      + '（这一行与通过行互斥：唯一的凭据是以 `check-root-guards: ` 开头的通过行；非通过的行里刻意不出现那个词）')
+  }
   if (!toleratesAdvisory && advisory.length > 0) {
     console.error(`\n提示：有 ${advisory.length} 条失败落在 advisory 守卫上，但本运行器**默认不认 advisory**`
       + '（docs-only 的 PR 只有这条路）。要让它们不拦门禁，必须显式传 `--allow-advisory`。')
