@@ -118,6 +118,16 @@ export interface AuthRunOptions {
    */
   outboundTimeoutMs?: number
   /**
+   * 「建流 + 等用户回调」这一段的兜底预算（毫秒）。缺省
+   * {@link OAUTH_FLOW_TIMEOUT_MS}（5 分钟），生产只有这一个取值。
+   *
+   * 存在的理由与 `outboundTimeoutMs` 相同：这段收尾（摘 abort 监听、停超时定时器、
+   * 关回调服务器）是 R16B-02 那条 P1 的判据，而 5 分钟在用例里不可等待 —— 没有这个
+   * 注入点就只能断言"abort 有效"，无法断言"**等待阶段仍有一颗武装着的定时器**"
+   * （后者正是被提前 `clearTimeout` 打掉的那一半）。
+   */
+  flowTimeoutMs?: number
+  /**
    * Locale for every user-visible string this flow builds (thrown errors and
    * the loopback callback page). The caller resolves it per connect request
    * from the probed `desktopRuntime`; omitting it keeps the product default,
@@ -192,6 +202,12 @@ function outboundLocale(outbound: OutboundCallOptions): HostLocale {
 const DEFAULT_POLL_INTERVAL_MS = 1500
 const DEFAULT_POLL_TIMEOUT_MS = 300_000
 const TOKEN_REQUEST_TIMEOUT_MS = 60_000
+/**
+ * 「建流 + 等用户回调」的兜底预算（5 分钟）。用户关掉授权页之后不会有人再回调，
+ * 没有它这一段就永不结束、loopback 端口永不释放（R16B-02）。生产不覆盖；
+ * 测试经 `AuthRunOptions.flowTimeoutMs` 注入短预算。
+ */
+const OAUTH_FLOW_TIMEOUT_MS = 300_000
 
 async function sleep(ms: number, signal: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -401,7 +417,6 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
   // browser is closed. Abort (user cancel / disconnect / overall timeout)
   // closes the callback server and rejects the code promise so runAuth
   // unwinds in bounded time.
-  const OAuthFlowTimeoutMs = 300_000 // 5 minutes
   const abortFlow = (reason: string): void => {
     // Guard against double-settlement: rejectCode fires only once, but the
     // callback path may race an abort — an already-settled promise is a
@@ -467,10 +482,21 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     server.on('error', reject)
     callbackServer = server
   })
-  // 取消与超时只对「建流 + 等用户回调」这一段有意义：放在 listen 成功之后再武装，
+  // 取消与超时覆盖**整段**「建流 + 等用户回调」：放在 listen 成功之后再武装，
   // listen 失败时就不会留下孤儿定时器（R3B2-1）。
+  //
+  // R16B-02（2026-09-25）：这三条收尾（摘 abort 监听 / 停超时定时器 / 丢回调服务器
+  // 句柄）曾经被搬到 `await codePromise` **之前**（缩进多出 6 个空格的一次机械搬移），
+  // 于是**等待阶段**里：abort 信号无人监听（`/cancel`、`disconnect`、插件卸载三处
+  // 全部失效）、5 分钟兜底成为死键、`abortFlow`/`releaseFlow` 再也够不着回调服务器
+  // ⇒ 用户每放弃一次授权就永久多一个仍在 accept 的 loopback 端口 + 一个永不 settle
+  // 的 promise，面板永远停在「连接中…」。
+  //
+  // 唯一正确归属是本函数下面 `try/finally` 里的 `releaseFlow()`：它同时覆盖
+  // 「建流阶段抛出」（R3B2-1 的目标）与「等待阶段被取消/超时」。这里**不得**再提前
+  // 摘监听或清定时器 —— 那正是本条 P1 的形态。
   options.signal.addEventListener('abort', onAbort, { once: true })
-  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), OAuthFlowTimeoutMs)
+  const flowTimer = setTimeout(() => abortFlow(hostT(locale, 'auth.flowTimeout')), options.flowTimeoutMs ?? OAUTH_FLOW_TIMEOUT_MS)
   // 兜底：即便将来又有新路径绕过 releaseFlow，也不让 rejectCode 变成 unhandled rejection。
   codePromise.catch(() => {})
   let redirectUri = ''
@@ -508,10 +534,7 @@ async function runOAuth(def: ConnectorDef, options: AuthRunOptions): Promise<Par
     // RFC 8707: the token must be bound to the MCP server resource.
     if (discovered?.resource) authorizeUrl.searchParams.set('resource', discovered.resource)
     options.onRequest({ connectorId: def.id, authorizeUrl: authorizeUrl.toString() })
-      options.signal.removeEventListener('abort', onAbort)
-      clearTimeout(flowTimer)
-      callbackServer = null
-      code = await codePromise
+    code = await codePromise
   } finally {
     // 流已结束（拿到 code / OAuth 错误 / 用户取消 / 建流阶段抛出）：摘监听、停定时器、
     // 关回调服务器，让后续的 token 交换不与已取消的流竞争。

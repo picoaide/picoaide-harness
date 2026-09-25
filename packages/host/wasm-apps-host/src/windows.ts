@@ -368,6 +368,18 @@ export function classifyAppWindowNavigation(
 export type AppWindowHandle = unknown
 
 /**
+ * 应用窗口的**健康快照**（R16B-19）。
+ *
+ * `crashed` = 渲染进程崩溃或顶层文档加载失败之后、还没有一次成功的应用文档加载的
+ * 那段时间。它是**模型面 `crashed` 字段的唯一真源**（经 surface 注册表投影到
+ * `browser_list_tabs`）：修这条之前应用窗口那一列被硬编码成 `false`，于是"窗口永久
+ * 空白"这件事用户和 AI 都看不见。
+ */
+export interface AppWindowHealth {
+  crashed: boolean
+}
+
+/**
  * 应用窗口 surface 的**注册面**（§16.1 冻结的 `kind:'app'` 那一半）。
  *
  * 归属说明（为什么是一个结构化接口而不是直接 import browser 包的类）：真实的注册表
@@ -389,9 +401,26 @@ export interface AppSurfaceRegistrar {
     appScheme: string
     webContents?: unknown
     scope?: string
+    /**
+     * 注册时的崩溃状态（缺省 = 健康）。
+     *
+     * 注册表可能**晚于**窗口出现（browser 行在本插件之后加载），而窗口可以在那之前
+     * 就崩掉 —— 补注册时必须把当时的状态一起带上，否则那一次崩溃永久不可见。
+     */
+    crashed?: boolean
   }): { id: number }
   /** 注销（窗口关闭/被用户关掉/登出）。 */
   unregister(id: number): void
+  /**
+   * 更新某个应用 surface 的崩溃状态（R16B-19）。
+   *
+   * **可选**：注册表缺席该方法时（旧 browser 包/替身）宿主只记在自己的映射里，
+   * 模型面看不到 `crashed` —— fail-open 的降级方向是"少一条上报"，而不是"建窗失败"
+   * （与 {@link WasmAppsWindowAdapter.isAlive} 同一取向）。
+   * @param id - 该应用的 surface id（{@link registerApp} 的返回值）。
+   * @param crashed - 是否处于崩溃/加载失败状态。
+   */
+  markAppCrashed?(id: number, crashed: boolean): void
 }
 
 /**
@@ -478,8 +507,35 @@ export interface WasmAppsWindowAdapter {
    * 销毁的，宿主收不到任何回调。没有存活判据时管理器会一直把已销毁的句柄当"已打开"
    * ⇒ 第二次 `open` 回 `focused`、`has()` 为真、屏幕上却**一个窗口都没有**
    * （正是"契约对、现象空"那类缺陷）。实现方缺席 ⇒ 按"永远活着"处理（旧替身不受影响）。
+   *
+   * ⚠️ 这**不是**发现"用户自己关窗"的正常途径 ——
+   * {@link onAppWindowClosed} 才是。只靠 `isAlive()` 时，窗口管理器要等到有人
+   * `has()`/`open()` 才清（R16B-20：幽灵 surface 的成因）。
    */
   isAlive?(handle: AppWindowHandle): boolean
+  /**
+   * 订阅该窗口的**原生销毁**（R16B-20：用户点了窗口自己的关闭按钮）。
+   *
+   * 修这条之前，`isAlive()` 是唯一能发现"用户自己关窗"的途径，而它只在
+   * `has()/open()/openApps()/registerOpenWindows()` 里被问一次 ⇒ `windows` 映射、
+   * `windowPartitions`、`webContentsIds`（**分区请求闸门的白名单**）与 surface
+   * 注册表都继续留着那个死窗口：`browser_list_tabs` 列出不存在的窗口、
+   * `browser_navigate{app_id}` 对已销毁的 webContents 调 `loadURL`。
+   *
+   * 语义要求：**订阅时窗口已经销毁 ⇒ 立刻回调一次**（订阅可能晚于关窗）。
+   * 实现方缺席 ⇒ 退回 `isAlive()` 的惰性清扫（fail-open：只是清得晚，不是清不掉）。
+   */
+  onAppWindowClosed?(handle: AppWindowHandle, listener: () => void): void
+  /**
+   * 订阅该窗口的**健康状态**（R16B-19：渲染进程崩溃 / 顶层文档加载失败）。
+   *
+   * 语义要求：**订阅时立刻回报一次当前状态**（崩溃可以发生在建窗与订阅之间，
+   * 只报"变化"会让那一次崩溃永久不可见）。
+   *
+   * 实现方缺席 ⇒ 模型面的 `crashed` 恒为 `false`（与修前一致）—— 降级方向是
+   * "看不到它坏了"，**不是**"建窗失败"（fail-open，与 {@link isAlive} 同一取向）。
+   */
+  onAppWindowHealth?(handle: AppWindowHandle, listener: (snapshot: AppWindowHealth) => void): void
   /**
    * 当前显示器工作区（多显示器：每次打开重新求值）。
    *
@@ -588,6 +644,23 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
    * 所以命中已有窗口时再比一次分区：不一致就关掉重建，而不是 focus。
    */
   const windowPartitions = new Map<string, string>()
+  /**
+   * 每个应用窗口**建窗时**记下的 `webContents.id`。
+   *
+   * 为什么不在 `forget` 里现问适配器（R16B-20 的关键细节）：窗口被原生销毁后
+   * `webContentsId(handle)` 返回 `undefined`（真实适配器在 `isDestroyed()` 时就不给），
+   * 于是那个死 id **永远留在 `webContentsIds` 里** —— 分区请求闸门会继续把来自它的
+   * 请求当成"应用窗口发的"放行（探针实测 `appGateWhitelistStillAdmitsDeadWebContents
+   * = true`）。建窗时记下来才删得掉。
+   */
+  const windowWebContentsIds = new Map<string, number>()
+  /**
+   * 处于崩溃/加载失败状态的应用（R16B-19；模型面 `crashed` 的来源）。
+   *
+   * 与 `windows` 同生命周期：`forget` 一并删除（新窗口的初始状态必须是"健康"，
+   * 不能继承上一个窗口的崩溃态）。
+   */
+  const crashedApps = new Set<string>()
   /** 已注册进 surface 注册表的窗口（app_id → surface id；注销要按它）。 */
   const surfaceIds = new Map<string, number>()
   let surfaceSeq = 0
@@ -614,6 +687,9 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
         appScheme: options.appScheme,
         ...(webContents === undefined ? {} : { webContents }),
         scope: options.partition(),
+        // 注册可能晚于窗口出现（browser 行在后），而窗口可以在那之前就崩掉 ——
+        // 带上当时的状态，那一次崩溃才不会因为"注册表还没到"而永久不可见。
+        crashed: crashedApps.has(appId),
       })
       surfaceIds.set(appId, surface.id)
     } catch (cause) {
@@ -655,14 +731,60 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
 
   /** 丢掉一个已被原生侧销毁的句柄（用户手动关窗；见 `isAlive` 的契约注释）。 */
   const forget = (appId: string, handle: AppWindowHandle): void => {
+    // **句柄同一性守卫**（R16B-20）：原生事件是异步派发的，同一个 app_id 完全可能
+    // 先后有两个原生窗口（用户关掉再打开），而旧窗口的 `closed`/健康回调可能排在新
+    // 窗口建好之后才到。没有这条守卫时，一个迟到的旧回调会把**新**窗口从映射、surface
+    // 注册表和分区闸门白名单里一起抹掉（用户看到的是"刚打开就没了"）。
+    if (windows.get(appId) !== handle) return
     windows.delete(appId)
     windowPartitions.delete(appId)
+    crashedApps.delete(appId)
     // 窗口没了 ⇒ 它在 browser runtime 里的 surface 也必须消失：留着会让模型
     // 按 `app_id` 寻址到一个已经销毁的 webContents（工具面会报一个看不懂的错）。
     unregisterSurface(appId)
-    const wcId = options.adapter.webContentsId?.(handle)
-    if (typeof wcId === 'number') webContentsIds.delete(wcId)
+    const wcId = windowWebContentsIds.get(appId)
+    if (wcId !== undefined) {
+      windowWebContentsIds.delete(appId)
+      webContentsIds.delete(wcId)
+    }
   }
+
+  /**
+   * 把崩溃状态写进 surface 注册表（模型面 `crashed` 的唯一写入点）。
+   *
+   * 注册表可能缺席（browser 行还没加载）或没实现 `markAppCrashed`（旧版本）：
+   * 两种情况都只记在自己的集合里，补注册时随 `registerApp` 一起带上。
+   * @param appId - 应用 id。
+   * @param crashed - 是否坏了。
+   */
+  const setAppCrashed = (appId: string, crashed: boolean): void => {
+    if (crashed) crashedApps.add(appId)
+    else crashedApps.delete(appId)
+    const id = surfaceIds.get(appId)
+    if (id === undefined) return
+    try {
+      options.surfaces?.()?.markAppCrashed?.(id, crashed)
+    } catch (cause) {
+      warn(`pico-wasm-apps-host: reporting the crash state of ${appId} to the surface registry failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    }
+  }
+
+  /**
+   * 订阅一个窗口的原生**销毁**与**健康**事件（R16B-19 / R16B-20）。
+   *
+   * 两条订阅都必须带**句柄同一性守卫**：回调闭包捕获的是 `appId`，而原生事件可能
+   * 在窗口已经被替换之后才到（见 {@link forget}）。
+   * @param appId - 应用 id。
+   * @param handle - 刚建好的窗口句柄。
+   */
+  const installWindowWatchers = (appId: string, handle: AppWindowHandle): void => {
+    options.adapter.onAppWindowHealth?.(handle, (snapshot) => {
+      if (windows.get(appId) !== handle) return
+      setAppCrashed(appId, snapshot.crashed)
+    })
+    options.adapter.onAppWindowClosed?.(handle, () => { forget(appId, handle) })
+  }
+
   /** 该应用当前活着的窗口句柄（已销毁的顺手清掉）。 */
   const liveHandle = (appId: string): AppWindowHandle | undefined => {
     const handle = windows.get(appId)
@@ -737,14 +859,22 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
       windows.set(appId, handle)
       windowPartitions.set(appId, partition)
       const wcId = options.adapter.webContentsId?.(handle)
-      if (typeof wcId === 'number') webContentsIds.add(wcId)
-      else warn('pico-wasm-apps-host: the window adapter did not report a webContents id; application-scheme subresource requests will be refused (fail-closed)')
+      if (typeof wcId === 'number') {
+        webContentsIds.add(wcId)
+        // 建窗时记下来：窗口被原生销毁后适配器不再报 id（R16B-20），不记就删不掉。
+        windowWebContentsIds.set(appId, wcId)
+      } else {
+        warn('pico-wasm-apps-host: the window adapter did not report a webContents id; application-scheme subresource requests will be refused (fail-closed)')
+      }
       options.adapter.installAppWindowGuards?.(handle, appId)
       if (declaredRatio !== undefined) options.adapter.setAspectRatio(handle, declaredRatio, { width: 0, height: 0 })
       // §16.1：**建窗即注册** surface（`kind:'app'`）—— 注册表里没有它，AI 的
       // `browser_list_tabs` 永远看不到应用窗口、`app_id` 寻址永远报"没有这个应用窗口"。
       // 必须在窗口句柄进入 `windows` 之后（注销路径按同一个映射找 id）。
       registerSurface(appId, handle)
+      // R16B-19/20：订阅原生销毁与健康状态。必须在句柄进入 `windows` **之后**
+      // （两条回调都带句柄同一性守卫，依赖这个映射已经就位）。
+      installWindowWatchers(appId, handle)
       memory.set(appId, {
         width: rect.width,
         height: rect.height,
@@ -773,18 +903,22 @@ export function createWasmAppsWindows(options: WasmAppsWindowsOptions): WasmApps
     async close(appId) {
       const handle = windows.get(appId)
       if (handle === undefined) return
-      windows.delete(appId)
-      windowPartitions.delete(appId)
-      unregisterSurface(appId)
-      const wcId = options.adapter.webContentsId?.(handle)
-      if (typeof wcId === 'number') webContentsIds.delete(wcId)
+      // 收口走**同一个** `forget`（否则"主动关窗"与"用户自己关窗"两条路径会漂移：
+      // 崩溃态/白名单/surface 三件事漏一件就是另一条幽灵路径）。
+      forget(appId, handle)
       options.adapter.closeAppWindow(handle)
     },
     async closeAll() {
-      for (const handle of windows.values()) options.adapter.closeAppWindow(handle)
+      // 先复制句柄（`forget` 会改 `windows`，边遍历边删是未定义行为）。
+      for (const [appId, handle] of [...windows.entries()]) {
+        options.adapter.closeAppWindow(handle)
+        forget(appId, handle)
+      }
       for (const appId of [...surfaceIds.keys()]) unregisterSurface(appId)
       windows.clear()
       windowPartitions.clear()
+      windowWebContentsIds.clear()
+      crashedApps.clear()
       webContentsIds.clear()
     },
     isAppSurfaceWebContents(webContentsId) {

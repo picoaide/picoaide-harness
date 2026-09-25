@@ -35,7 +35,11 @@
       "types": "./lib/types/skill-telemetry.d.ts",
       "default": "./lib/skill-telemetry.js"
     },
-    "./session-service": {
+    "./session-identity": {
+   "types": "./lib/types/session-identity.d.ts",
+   "default": "./lib/session-identity.js"
+  },
+  "./session-service": {
       "types": "./lib/types/session-service.d.ts",
       "default": "./lib/session-service.js"
     },

@@ -86,6 +86,15 @@ export function useChannel(): ChannelConfig | null {
   useEffect(() => {
     const l = () => setB(current)
     listeners.add(l)
+    // R16B-06（2026-09-25）：**订完立刻回读一次 `current`**。
+    //
+    // `useState(current)` 求值在 render 期，而监听装在 passive effect 里 —— 两者
+    // 之间隔着一整个 commit（同一次提交里其它组件的 layout effect 都会先跑）。
+    // 落在这个窗口里的 `set()` 没有任何监听者 ⇒ 组件永远停在旧值，直到下一次
+    // `set()` 才追上（换渠道/随包品牌播种后品牌名一直是旧的，且没有任何报错）。
+    // 回读把窗口关掉：React 对相同值的 setState 会 bail out，所以正常路径
+    //（值没变）不会多一次重渲染。
+    l()
     return () => { listeners.delete(l) }
   }, [])
   return b

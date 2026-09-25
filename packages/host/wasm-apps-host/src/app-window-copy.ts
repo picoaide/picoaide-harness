@@ -117,3 +117,37 @@ export function onboardingCard(locale: HostLocale): Array<{ title: string, body:
     },
   ]
 }
+
+/**
+ * 崩溃 / 加载失败页的三段文案（R16B-19）。
+ *
+ * 与 shell 窗口的失败页逐字对标（`desktop/src/tray-locale.ts` 的
+ * `desktopCrashPageCopy`）：那条路径早已有"失败页 + 手动重试"，而应用窗口此前
+ * **一个都没有** —— 渲染进程崩了就是永久空白窗口，用户与 AI 都看不到它坏了。
+ */
+export interface AppWindowFailureCopy {
+  /** 大标题。 */
+  heading: string
+  /** 一句话说明（说清楚"可以重试"，不要只说"出错了"）。 */
+  body: string
+  /** 重试按钮的文字。 */
+  retry: string
+}
+
+/**
+ * 失败页文案（**按调用**求值：`data:text/html` 是独立文档，拿不到客户端字典，
+ * 所以宿主每次渲染时按当时的语言解析）。
+ * @param locale - 宿主语言。
+ * @returns 三段文案。
+ */
+export function appWindowFailureCopy(locale: HostLocale): AppWindowFailureCopy {
+  return {
+    heading: hostCopy(locale, '应用已停止运行', 'The app stopped running'),
+    body: hostCopy(
+      locale,
+      '这个应用窗口遇到了问题，可以重新加载。',
+      'This app window ran into a problem. You can reload it.',
+    ),
+    retry: retryAction(locale),
+  }
+}

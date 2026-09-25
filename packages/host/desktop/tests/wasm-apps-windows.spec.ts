@@ -163,6 +163,18 @@ describe('provideWasmAppsWindows（桌面壳 → 插件的服务接线）', () =
     expect(profile).toMatch(/userDataDir\?: string/)
     expect(profile).toMatch(/\.\.\.\(userDataDir === undefined \|\| userDataDir === '' \? \{\} : \{ userDataDir \}\)/)
   })
+
+  /**
+   * R16B-19：崩溃 / 加载失败页的语言必须**按当时**解析。
+   *
+   * 那张失败页是 `data:text/html` 独立文档，拿不到客户端字典 ⇒ 语言只能由宿主注入。
+   * 传**值**（`locale: runtime.locale`）会在启动期把语言钉死：用户在应用内切到英文后
+   * 崩溃，看到的仍是中文页。判据打在接线形状上（thunk）—— 传值的写法红在这一条。
+   */
+  it('main.ts 给应用窗口适配器注入**按调用求值**的语言（崩溃失败页跟随应用内语言）', () => {
+    const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+    expect(main).toMatch(/createRealElectronWindowAdapter\(\{[\s\S]{0,600}?locale: \(\) => runtime\.locale/)
+  })
 })
 
 /** 防止"用替身把契约换掉"：真实适配器的构造入口必须存在（形状由另一个 spec 钉住）。 */

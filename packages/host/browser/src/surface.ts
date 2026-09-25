@@ -180,6 +180,17 @@ export interface BrowserSurface {
   readonly appScheme?: string
   /** 会话/分区标识（切账号时按它清理；可选）。 */
   readonly scope?: string
+  /**
+   * 应用窗口是否处于**崩溃 / 加载失败**状态（R16B-19；`kind:'app'`）。
+   *
+   * 唯一写入点是宿主（`@picoaide/dsh-wasm-apps-host` 的 `windows.ts`，它订阅原生
+   * `render-process-gone` / `did-fail-load`）。**缺省 = 健康**：浏览器标签的崩溃态
+   * 来自池子（`BrowserTabState.crashed`），不走这个字段。
+   *
+   * 修这条之前 `browser_list_tabs` 把应用窗口的 `crashed` **硬编码成 `false`**
+   * （注释自承"应用窗口没有崩溃自动重载"）⇒ 窗口崩了以后模型看到的一切都正常。
+   */
+  readonly crashed?: boolean
 }
 
 /** 寻址输入（工具参数的语义面）。 */
@@ -226,11 +237,34 @@ export interface SurfaceRegistry {
      * `'user'` 传进来即可，工具面/闸门无需再改（它们只读归属）。
      */
     control?: SurfaceControlOwner
+    /** 注册时的崩溃状态（缺省 = 健康；宿主可以晚于窗口出现，见 {@link markAppCrashed}）。 */
+    crashed?: boolean
   }): BrowserSurface
   /** 按 id 取。 */
   get(id: number): BrowserSurface | undefined
   /** 按 app_id 取应用 surface。 */
   appSurface(appId: string): BrowserSurface | undefined
+  /**
+   * 更新一个应用 surface 的崩溃状态（R16B-19：模型面 `crashed` 的唯一写入口）。
+   *
+   * 语义：`true` ⇒ 渲染进程崩溃或顶层文档加载失败且还没有一次成功加载；`false` ⇒
+   * 一次成功的应用文档加载之后。
+   * @param id - surface id（{@link registerApp} 的返回值）。
+   * @param crashed - 新状态。
+   * @returns 更新后的 surface；id 未知 / 不是应用 surface ⇒ undefined（调用方不记状态）。
+   */
+  markAppCrashed(id: number, crashed: boolean): BrowserSurface | undefined
+  /**
+   * 清掉 `webContents` **已明确销毁**的应用 surface（R16B-20 的纵深防御）。
+   *
+   * 主修在宿主侧（适配器订阅原生 `closed`/`destroyed` 后即时 `unregister`）；这条
+   * 覆盖"宿主适配器没实现订阅"与"事件早于订阅"两种漏网，所以判据必须**窄**：
+   * 只有 `isDestroyed()` 明确返回 `true` 才清 —— 报不出来（方法缺席）、明确活着、
+   * 或查询抛错的 surface **一律保留**（fail-open：宁可模型多看到一个条目，也不能把
+   * 活着的窗口从模型面抹掉，那会让 `browser_navigate{app_id}` 报"没有这个应用窗口"）。
+   * @returns 被清掉的 surface id（诊断/测试用）。
+   */
+  pruneDestroyedAppSurfaces(): number[]
   /** 浏览器标签（台账/列表/配额只认它们）。 */
   browserTabs(): readonly BrowserSurface[]
   /** 应用 surface（不在浏览器台账里）。 */
@@ -323,6 +357,9 @@ export function createSurfaceRegistry(options: SurfaceRegistryOptions): SurfaceR
         appScheme: input.appScheme,
         ...(input.webContents === undefined ? {} : { webContents: input.webContents }),
         ...(input.scope === undefined ? {} : { scope: input.scope }),
+        // 只写"坏"这一半：`crashed: false` 与"没这个字段"在语义上等价（缺省 = 健康），
+        // 少写一次就少一份可能与宿主状态漂移的副本。
+        ...(input.crashed === true ? { crashed: true } : {}),
       }
       byId.set(id, surface)
       appIds.set(input.appId, id)
@@ -336,6 +373,38 @@ export function createSurfaceRegistry(options: SurfaceRegistryOptions): SurfaceR
     appSurface(appId) {
       const id = appIds.get(appId)
       return id === undefined ? undefined : byId.get(id)
+    },
+    markAppCrashed(id, crashed) {
+      const surface = byId.get(id)
+      // 只认应用 surface：浏览器的崩溃态由池子维护（`TabPool` 的 `crashed`），
+      // 让宿主把它写到标签行上会造成两份真源。
+      if (surface === undefined || surface.kind !== 'app') return undefined
+      const next: BrowserSurface = {
+        ...surface,
+        ...(crashed ? { crashed: true } : { crashed: false }),
+      }
+      byId.set(id, next)
+      return next
+    },
+    pruneDestroyedAppSurfaces() {
+      const pruned: number[] = []
+      for (const surface of [...byId.values()]) {
+        if (surface.kind !== 'app') continue
+        const contents = asSurfaceWebContents(surface.webContents)
+        // `webContents` 缺席/形态不认识 ⇒ 报不出存活 ⇒ 保留（fail-open）。
+        if (contents === undefined) continue
+        let destroyed = false
+        try {
+          destroyed = contents.isDestroyed?.() === true
+        } catch {
+          // 查询本身抛错 = "报不出来" ⇒ 保留（与上面同一条判据）。
+          destroyed = false
+        }
+        if (!destroyed) continue
+        pruned.push(surface.id)
+        this.unregister(surface.id)
+      }
+      return pruned
     },
     browserTabs() {
       return [...byId.values()].filter(surface => surface.kind === 'browser-tab')

@@ -1722,6 +1722,11 @@ export class BrowserRuntime {
    * 调用时机 = 每次工具面寻址之前（`resolveTarget`）。理由：池子的增删点有十来处
    * （开/关/恢复/清理/切账号），逐点插桩必然漏；镜像一次是 O(标签数)，代价可忽略，
    * 而且**幂等**——所以"漏插桩"这个 bug 类在结构上不存在。
+   *
+   * R16B-20：应用窗口那一半也在这里做**存活性清扫**（纵深防御）。主修在宿主侧
+   * （适配器订阅原生 `closed`/`destroyed` 后即时 `unregister`），这条覆盖"宿主适配器
+   * 没实现订阅"与"窗口在订阅之前就被关掉"两种漏网；判据窄到只认明确销毁
+   * （`pruneDestroyedAppSurfaces` 的 fail-open 注释），拿不准的一律保留。
    */
   syncSurfaces(): void {
     const registry = this.surfaces
@@ -1736,6 +1741,8 @@ export class BrowserRuntime {
     for (const [id, webContents] of live) {
       registry.registerBrowserTab(id, webContents)
     }
+    // 应用窗口：`pruned` 只用于诊断（空数组 = 没有需要清的）。
+    registry.pruneDestroyedAppSurfaces()
   }
 
   resolveTab(tabId: number | undefined): number {
