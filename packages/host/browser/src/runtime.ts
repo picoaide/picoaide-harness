@@ -27,6 +27,7 @@ import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from '@picoaide/dsh-ho
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type {
+  BrowserInteractionHit,
   BrowserOpLogEntry,
   BrowserSnapshotElement,
   BrowserTabState,
@@ -83,6 +84,32 @@ const EVAL_SUMMARY_LIMIT = 60 + 'eval: '.length
 const PAGE_STATE_SUMMARY_LIMIT = 120 + 'after-change: '.length
 const SCREENSHOT_FALLBACK_SUMMARY_LIMIT = 120 + 'capturePage unavailable (); captured via CDP fromSurface:false'.length
 const SELECT_VALUE_SUMMARY_LIMIT = 80
+/**
+ * op log 里一次点击摘要的上限（R15B-01）。
+ *
+ * 命中身份会带上模型看到的那段元素文本（`Cancel` 这种），它是页面可控内容，
+ * 必须有界；`record` 先做值级擦除再按本上限截断，所以口令不会被切成明文残片。
+ */
+const CLICK_SUMMARY_LIMIT = 'click at (1234, 1234) hit no element (hidden window: DOM dispatch)'.length + 160
+
+/**
+ * op log 里"命中了哪个元素"的后缀（R15B-01）。
+ *
+ * 只进 op log（活动面板/留痕），不进模型面的工具结果 —— 那里由 tools.ts 用同一份
+ * 身份单独渲染。缺省（调用方没给身份）⇒ 空串，摘要与历史逐字相同。
+ * @param hit - 本次交互实际命中的元素身份。
+ * @returns 形如 ` [hit #2 button "Cancel" → #cancel @snapshot#1]` 的后缀。
+ */
+function hitSuffix(hit: BrowserInteractionHit | undefined): string {
+  if (hit === undefined) return ''
+  const parts: string[] = []
+  if (hit.index !== undefined) parts.push(`#${hit.index}`)
+  if (hit.kind !== undefined) parts.push(hit.kind)
+  if (hit.text !== undefined && hit.text !== '') parts.push(JSON.stringify(hit.text))
+  const who = parts.length === 0 ? '' : ` ${parts.join(' ')}`
+  const snapshot = hit.snapshot === undefined ? '' : ` @snapshot#${hit.snapshot}`
+  return ` [hit${who} → ${hit.selector}${snapshot}]`
+}
 
 /**
  * 胶囊态「提示可见」时临时放大的 overlay 矩形（2026-09-21 壳层缺陷 #7）。
@@ -419,6 +446,25 @@ export interface RuntimeDeps {
 }
 
 /**
+ * 一个 tab 的**模型面快照锚点**（R15B-01，2026-09-25）。
+ *
+ * 数字 target 的解析只认它：`elements` 是模型**看到的那一份**清单，`index` 是
+ * 那份清单里的位置序号。`url` 用来判"页面是不是已经换了" —— 导航过的页面必然
+ * 重新编号，此时锚点作废、显式报 `stale-snapshot`，而不是拿新页面重新解析。
+ *
+ * 诚实边界：同文档重渲染（SPA 换内容）时 `url` 不变，锚点仍然有效 —— 这正是
+ * 想要的（模型看到的编号就指向它当时看到的那个选择器）；若那个选择器在新页面
+ * 里已经不存在，定位会以 `not-found` 明确失败，而不是静默点到别的元素。
+ */
+export interface SnapshotAnchor {
+  /** 单调世代号（每锚定一份模型面快照 +1）。 */
+  readonly generation: number
+  /** 抽这份快照时该 tab 的 URL。 */
+  readonly url: string
+  readonly elements: readonly BrowserSnapshotElement[]
+}
+
+/**
  * The embedded browser service (v4.2 single pool). Constructed by the plugin
  * with the real adapter; tests inject a mock adapter plus optional deps.
  */
@@ -506,6 +552,18 @@ export class BrowserRuntime {
   private activeOperationDeadlineAt: number | undefined
   readonly pool: TabPool
   store: BrowserStore
+
+  // ------------------------------------------------------- snapshot anchor
+  //
+  // 模型面快照的**锚点**（R15B-01，2026-09-25）。契约：工具参数里的数字是
+  // **该 tab 最近一次模型面快照**（`browser_get_snapshot`）里的编号。此前数字
+  // target 在**动作时刻**重新抽一份快照按序号解析 —— 页面在"模型看到"与
+  // "动作发生"之间重渲染过时，模型点到的就是自己从未见过的那个元素，而返回值
+  // 与 op log 都没有元素身份（2026-09-15 已判 P1 的"selector 三层不锚定"同族，
+  // 那次只收口了选择器歧义）。锚点让"数字 → 元素"这一跳不再重新派生。
+  private readonly snapshotAnchors = new Map<number, SnapshotAnchor>()
+  /** 单调世代号：每锚定一份模型面快照 +1（进工具结果与 op log）。 */
+  private snapshotGeneration = 0
 
   constructor(
     private readonly adapter: ElectronAdapter,
@@ -2488,6 +2546,9 @@ export class BrowserRuntime {
   private destroyTab(id: number): void {
     // BR-2：标签没了，崩溃计数与退避定时器一起丢（定时器不然会加载进已销毁视图）。
     this.clearCrashState(id)
+    // R15B-01：标签没了，它的模型面快照锚点一起丢 —— tab id 会被复用，
+    // 留着旧锚点会把新标签的 1 号解析成上一个页面的元素。
+    this.snapshotAnchors.delete(id)
     const tab = this.tabs.get(id)
     if (tab !== undefined) {
       try {
@@ -2590,6 +2651,51 @@ export class BrowserRuntime {
     }, signal)
     this.record('browser_get_snapshot', resolved, `snapshot: ${out.elements.length} elements`)
     return out
+  }
+
+  /**
+   * 模型面快照：抽取 + **锚定**到该 tab（R15B-01）。
+   *
+   * 这是 `browser_get_snapshot` 的唯一入口 —— 它比 {@link snapshotWithMeta} 多的
+   * 就是"这一份编号从此刻起对数字 target 有效"。返回的 `generation` 会进工具结果
+   * 与 op log，使"模型看到的是第几版快照"可追溯。
+   * @param tabId - 目标标签页。
+   * @param signal - abort 信号。
+   * @returns 元素清单、抽取元数据与该份快照的世代号。
+   */
+  async modelSnapshot(tabId: number, signal?: AbortSignal): Promise<{ elements: BrowserSnapshotElement[]; meta: SnapshotExtractionMeta; generation: number }> {
+    const resolved = this.resolveTab(tabId)
+    const out = await this.snapshotWithMeta(resolved, signal)
+    const generation = ++this.snapshotGeneration
+    this.snapshotAnchors.set(resolved, { generation, url: this.tabState(resolved).url, elements: out.elements })
+    return { elements: out.elements, meta: out.meta, generation }
+  }
+
+  /**
+   * 把数字 target 解析成"模型当时看到的那个元素"（R15B-01）。
+   *
+   * 与旧实现的关键差别：**不再重新抽快照**。数字只在锚定的那份清单里查；没有
+   * 锚点（该 tab 还没取过快照）或页面已经导航走 ⇒ `stale-snapshot`，让模型重新
+   * 取一份，而不是按新页面重新编号去点。
+   * @param tabId - 目标标签页。
+   * @param index - `browser_get_snapshot` 给出的 1 基编号。
+   * @returns 锚点里的元素与它所属的快照世代号。
+   */
+  resolveSnapshotIndex(tabId: number, index: number): { element: BrowserSnapshotElement; generation: number } {
+    const resolved = this.resolveTab(tabId)
+    const anchor = this.snapshotAnchors.get(resolved)
+    if (anchor === undefined) {
+      throw browserError('stale-snapshot', `browser: no snapshot is anchored for this tab, so element ${index} cannot be resolved — call browser_get_snapshot and use the numbers it lists (numbers are never re-derived from a fresh page)`)
+    }
+    const current = this.tabState(resolved).url
+    if (anchor.url !== current) {
+      throw browserError('stale-snapshot', `browser: the page navigated after snapshot #${anchor.generation} was taken (was ${JSON.stringify(anchor.url)}, now ${JSON.stringify(current)}), so its numbering no longer applies — call browser_get_snapshot again and use the new numbers`)
+    }
+    const element = anchor.elements.find((item) => item.index === index)
+    if (element === undefined) {
+      throw browserError('not-found', `browser: snapshot #${anchor.generation} has no element ${index} — call browser_get_snapshot first (${anchor.elements.length} elements)`)
+    }
+    return { element, generation: anchor.generation }
   }
 
   async text(tabId: number, selector: string | undefined, signal?: AbortSignal): Promise<string> {
@@ -3136,8 +3242,14 @@ export class BrowserRuntime {
     }, signal)
   }
 
-  async clickAt(tabId: number, point: { x: number; y: number }, signal?: AbortSignal): Promise<void> {
+  /**
+   * `hit` 是这次交互**实际命中的元素身份**（R15B-01）：只进 op log（活动面板
+   * 与留痕），不进任何模型面文案 —— 参与点击的坐标不受它影响。缺省时行为与
+   * 以前逐字相同（`click at (x, y)`），旧调用点不需要改。
+   */
+  async clickAt(tabId: number, point: { x: number; y: number }, signal?: AbortSignal, hit?: BrowserInteractionHit): Promise<void> {
     const resolved = this.resolveTab(tabId)
+    const suffix = hitSuffix(hit)
     await this.agentRun('browser_click', async () => {
       const tab = this.tab(resolved)
       // 2026-09-12: synthesized OS-level input (CDP `Input.dispatchMouseEvent`)
@@ -3158,7 +3270,7 @@ export class BrowserRuntime {
         await tab.cdp.send('Input.dispatchMouseEvent', {
           type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
         })
-        this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})`)
+        this.record('browser_click', resolved, `click at (${Math.round(point.x)}, ${Math.round(point.y)})${suffix}`, false, 'ai', CLICK_SUMMARY_LIMIT)
         return
       }
       const target = await this.activateAtPoint(tab, point)
@@ -3166,9 +3278,11 @@ export class BrowserRuntime {
         'browser_click',
         resolved,
         target === 'none'
-          ? `click at (${Math.round(point.x)}, ${Math.round(point.y)}) hit no element (hidden window: DOM dispatch)`
-          : `click at (${Math.round(point.x)}, ${Math.round(point.y)}) via DOM dispatch (hidden window)`,
+          ? `click at (${Math.round(point.x)}, ${Math.round(point.y)}) hit no element (hidden window: DOM dispatch)${suffix}`
+          : `click at (${Math.round(point.x)}, ${Math.round(point.y)}) via DOM dispatch (hidden window)${suffix}`,
         target === 'none',
+        'ai',
+        CLICK_SUMMARY_LIMIT,
       )
       if (target === 'none') {
         throw browserError('not-found', `browser: nothing to click at (${Math.round(point.x)}, ${Math.round(point.y)}) — the point is outside any element`)
@@ -3221,8 +3335,9 @@ export class BrowserRuntime {
     return result.result?.value === 'element' ? 'element' : 'none'
   }
 
-  async typeInto(tabId: number, selector: string, text: string, clear = true, signal?: AbortSignal): Promise<void> {
+  async typeInto(tabId: number, selector: string, text: string, clear = true, signal?: AbortSignal, hit?: BrowserInteractionHit): Promise<void> {
     const resolved = this.resolveTab(tabId)
+    const suffix = hitSuffix(hit)
     await this.agentRun('browser_type', async () => {
       const tab = this.tab(resolved)
       const before = await this.textFieldState(tab, selector)
@@ -3246,7 +3361,7 @@ export class BrowserRuntime {
       // 组件也认），并把实际路径写进操作日志。
       const after = await this.textFieldState(tab, selector)
       if (this.contentChanged(before, after)) {
-        this.record('browser_type', resolved, `type into ${selector}`)
+        this.record('browser_type', resolved, `type into ${selector}${suffix}`)
         await this.afterChangeSummary(tab)
         return
       }
@@ -3254,7 +3369,7 @@ export class BrowserRuntime {
       this.record(
         'browser_type',
         resolved,
-        `type into ${selector} via DOM write (hidden window)${outcome === 'typed' ? '' : ` — ${outcome}`}`,
+        `type into ${selector} via DOM write (hidden window)${outcome === 'typed' ? '' : ` — ${outcome}`}${suffix}`,
         outcome !== 'typed',
       )
       if (outcome !== 'typed') {
@@ -3446,8 +3561,9 @@ export class BrowserRuntime {
     return typeof value === 'string' ? value : 'dispatched'
   }
 
-  async selectOption(tabId: number, selector: string, value: string, signal?: AbortSignal): Promise<void> {
+  async selectOption(tabId: number, selector: string, value: string, signal?: AbortSignal, hit?: BrowserInteractionHit): Promise<void> {
     const resolved = this.resolveTab(tabId)
+    const suffix = hitSuffix(hit)
     await this.agentRun('browser_select', async () => {
       const tab = this.tab(resolved)
       const result = await tab.cdp.send<EvalResult>('Runtime.evaluate', {
@@ -3472,7 +3588,7 @@ export class BrowserRuntime {
         throw this.interactionError(tab, 'not-found', `browser: select failed — ${(result.result.value as { error: string }).error}`)
       }
     }, signal)
-    this.record('browser_select', resolved, `select ${selector} = ${value}`, false, 'ai', `select ${selector} = `.length + SELECT_VALUE_SUMMARY_LIMIT)
+    this.record('browser_select', resolved, `select ${selector} = ${value}${suffix}`, false, 'ai', `select ${selector} = `.length + SELECT_VALUE_SUMMARY_LIMIT + suffix.length)
   }
 
   async scroll(tabId: number, deltaY: number, selector: string | undefined, signal?: AbortSignal): Promise<void> {

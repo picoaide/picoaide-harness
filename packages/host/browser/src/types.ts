@@ -84,6 +84,30 @@ export interface BrowserSnapshotElement {
   readonly disabled: boolean
 }
 
+/**
+ * 一次交互**实际命中**的元素身份（R15B-01，2026-09-25）。
+ *
+ * 为什么必须回传：`browser_click/type/select` 此前只回 `{ok:true}`、活动时间线
+ * 只记坐标/选择器 —— 点错元素时模型与用户**都拿不到证据**，只能靠页面副作用
+ * 自己发现。返回值 + render + op log 三处都带这份身份，"点错"从静默变成可见。
+ *
+ * 数字 target 的身份取自**模型看到的那份快照**（`index`/`snapshot`/`kind`/`text`），
+ * 字符串 target 只有 `selector`（没有"模型看到的那一份"可锚定）—— 两种来源都带
+ * `selector`：它是这次操作**真正作用于**的元素，也就是"点错"时唯一能事后对账的证据。
+ */
+export interface BrowserInteractionHit {
+  /** 模型面快照里的编号（字符串 target 时缺省）。 */
+  readonly index?: number
+  /** 该编号所属的模型面快照世代号（字符串 target 时缺省）。 */
+  readonly snapshot?: number
+  /** 实际用于定位的 CSS 选择器（数字 target 时是快照里记下的那一个）。 */
+  readonly selector: string
+  /** 模型看到该元素时的类型（数字 target 时缺省）。 */
+  readonly kind?: string
+  /** 模型看到该元素时的文本（数字 target 时缺省）。 */
+  readonly text?: string
+}
+
 /** Runtime config surfaced to the model about the embedded browser. */
 export interface BrowserToolOptions {
   /** Maximum tabs (default 8). */

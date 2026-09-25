@@ -294,7 +294,8 @@ describe('2026-09-15 P2：browser_press / browser_scroll 不得静默成功', ()
       return { result: { value: 'ok' } }
     }
 
-    await expect(harness.call('browser_scroll', { target: '#ok' })).resolves.toEqual({ ok: true })
+    // R15B-01：字符串 target 的结果也带命中身份（selector 是唯一可知的部分）。
+    await expect(harness.call('browser_scroll', { target: '#ok' })).resolves.toEqual({ ok: true, hit: { selector: '#ok' } })
     const expressions = view.transport.commands
       .filter((command) => command.method === 'Runtime.evaluate')
       .map((command) => String(command.params?.['expression'] ?? ''))
