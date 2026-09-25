@@ -22,6 +22,16 @@
  *    那个账号自己的历史，同账号重登仍然续用；而换账号后新 id 已经指向另一个会话）。
  *    订阅走叶子包的 `subscribeSessionChanges`（唯一实现：先订阅 + 补发恢复型启动那一次）
  *    —— 裸 `ctx.on` 会漏掉"重启后带着有效会话"这条最常见的启动路径。
+ *  - **释放窗口的闸门**（R14 C-02）与它的两条修补（R14 lane N）：
+ *    ①**所有权栅栏**（VB-N2）：`runTurn` 的 `finally` 只能丢弃**自己那一代**登记在 `live`
+ *      里的条目（`dropAgent` 的 `owner` 凭证）—— 否则被放弃那一轮的收尾只要晚于"闸门放行
+ *      + 新轮发布句柄"，就会 dispose 掉**新轮**的句柄（`live` 清空、agent 消失，流式中途
+ *      被偷则整轮以 `the application AI turn produced no assistant message` 失败）；
+ *    ②**有界且看 signal 的等待**（VB-N3）：`openAgent` 等上一个活体收尾时，abort 必须能
+ *      退出（页面关闭/超时），超预算必须**显式报错**
+ *      （{@link AppAiSessionReleasePendingError}，码 {@link APP_AI_SESSION_RELEASE_PENDING}）
+ *      而**不是**永久挂住、也**不是**放开闸门去撞第二个写句柄
+ *      （`SessionAlreadyOwnedError`）。
  *
  * ## 上下文对账（为什么不是"把 messages 原样喂进去"）
  *
@@ -67,12 +77,97 @@ export const APP_AI_SYSTEM_PROMPT = [
 /** 平台系统提示的分段名（装配瀑布按它收敛 sections）。 */
 export const APP_AI_PROMPT_SECTION = 'pico-app-ai'
 
+/**
+ * 「上一个活体的收尾还没落地」的**显式错误码**（R14 VB-N3）。
+ *
+ * 为什么要有它：释放窗口的闸门（R14 C-02）是"新轮等旧轮真的 dispose 完"——而 `dispose()`
+ * 要等被放弃那一轮的模型流收尾，**上游读永不结束**（无超时/连接半开）时它永不结算。
+ * 修复前这条等待**没有上限也不看 signal** ⇒ 该隐藏会话 id 的**每一轮**（以及排队链上
+ * 的所有后续轮次）永久挂住，直到进程重启。lane G 当初不设上限的理由是"设上限会把撞写
+ * 句柄引回来"（`SessionAlreadyOwnedError`）—— 本实现在**不放行第二个写句柄**的前提下
+ * 有界放弃：超预算就抛这个码，绝不退化成"静默撞句柄"，也绝不永久楔死。
+ */
+export const APP_AI_SESSION_RELEASE_PENDING = 'app_ai_session_release_pending'
+
+/**
+ * 等"上一个活体收尾"落地的预算（毫秒；R14 VB-N3）。
+ *
+ * 取值口径 = 正常释放窗口的实测最坏值的若干倍：真 jsonl 持久化下 `releaseAll` 一次收尾
+ * 实测 1.5 s 量级（见 `tests/app-ai-release-window.spec.ts` 的注释），15 s 给足调度余量，
+ * 同时远小于"用户愿意等"的上限。**超预算不是重试信号，而是"这个会话现在不可用"**：
+ * 上层把它变成一张明确的错误卡片（`app_ai_unavailable` + 收尾未完成的文案），
+ * 而不是无限转圈；一旦卡住的那条上游真的收尾了，闸门自动放行（`releasing` 条目随
+ * `trackReleasing` 的 `then` 摘除），无需重启。
+ */
+export const APP_AI_RELEASE_BUDGET_MS = 15_000
+
+/**
+ * `releaseAll()` 自己等收尾落地的预算（毫秒；R14 VB-N3）。
+ *
+ * 与 {@link APP_AI_RELEASE_BUDGET_MS} 是**两件事**：这一条管"换账号/登出的清理路径不能在
+ * 订阅回调里永久挂住"（它是 `pico/session-changed` 的 fire-and-forget 路径），那一条管
+ * "新一轮能不能开工"。两者都不放宽栅栏：`releasing` 条目照样留着，`openAgent` 照样拒绝
+ * 在收尾落地前开第二个写句柄。
+ */
+export const APP_AI_RELEASE_RETURN_BUDGET_MS = 15_000
+
+/**
+ * 收尾未落地的显式错误（`code` 是稳定标识：日志、判据、排查都按它判定）。
+ *
+ * 识别方式说明：协议包（`wasm-apps-host/src/ai-chat.ts` 的 `mapTurnFailure`）**按 `name`
+ * 认它**，而不是 import 本类 —— 依赖方向是桌面包 → 协议包，反向 import 会成环。
+ * `name` 与 `code` 都是本类的一部分，两处口径由用例对拍（见 `app-ai-release-gate.spec.ts`
+ * 的"协议层映射"用例：用**真** `handleAiChat` + **真** 本错误断言信封）。
+ */
+export class AppAiSessionReleasePendingError extends Error {
+  /** 稳定错误码（等于 {@link APP_AI_SESSION_RELEASE_PENDING}）。 */
+  readonly code = APP_AI_SESSION_RELEASE_PENDING
+
+  /** 被卡住的隐藏会话 id。 */
+  readonly sessionId: string
+
+  /** 已经等掉的预算（毫秒）。 */
+  readonly budgetMs: number
+
+  /**
+   * 刻意不用 TS 的**参数属性**（`constructor(readonly x: T)`）：Node 的类型剥离
+   * （`--experimental-strip-types`，v24 起是缺省行为）不支持那种语法 —— 本仓的 `temp/**`
+   * 探针正是用 `import('<...>/src/app-ai-runner.ts')` 直接跑源码的（V14-B 就是这么做的），
+   * 参数属性会让探针在 import 期直接 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`。
+   * @param sessionId - 被卡住的隐藏会话 id。
+   * @param budgetMs - 已经等掉的预算（毫秒）。
+   * @param pending - 还在收尾的会话数（诊断用；正常是 1）。
+   */
+  constructor(sessionId: string, budgetMs: number, pending = 1) {
+    super(
+      `the application AI session ${JSON.stringify(sessionId)} is still being released after ${String(budgetMs)}ms `
+      + `(code ${APP_AI_SESSION_RELEASE_PENDING}, ${String(pending)} session(s) pending); `
+      + 'refusing to open a second write handle for it — the session becomes usable again as soon as the release lands',
+    )
+    this.name = 'AppAiSessionReleasePendingError'
+    this.sessionId = sessionId
+    this.budgetMs = budgetMs
+  }
+}
+
 /** 隐藏会话的工作目录（`{{cwd}}` 变量必须有值；AI 没有文件面，这个路径只是元数据）。 */
 export interface AppAiRunnerOptions {
   /** 隐藏会话的 `cwd` 元数据（绝对路径；缺省会话不带 cwd 时 persona 模板会渲染失败）。 */
   cwd: string
   /** 诊断出口。 */
   warn?: ((message: string) => void) | undefined
+  /**
+   * 等"上一个活体收尾"落地的预算（毫秒；缺省 {@link APP_AI_RELEASE_BUDGET_MS}）。
+   *
+   * 存在的理由：判据要能在毫秒级验证"超预算 ⇒ 显式错误码 + 不放行第二个写句柄"，
+   * 不能真等 15 秒。生产接线（`provideAppAiRunner`）不传它。
+   */
+  releaseBudgetMs?: number | undefined
+  /**
+   * `releaseAll()` 自己等收尾落地的预算（毫秒；缺省 {@link APP_AI_RELEASE_RETURN_BUDGET_MS}）。
+   * 同样是判据注入点（见上一条）。
+   */
+  releaseReturnBudgetMs?: number | undefined
 }
 
 /**
@@ -95,6 +190,11 @@ export interface AppAiRunnerState {
    * 语义：在飞的那一轮被取消、每个活体 agent `dispose()`、排队中的轮次在起跑前被拒
    * （`AbortError` ⇒ 应用侧看到 `ai_cancelled`）。**磁盘会话不删**：它是那个账号自己的
    * 历史（同账号重登继续续用），而换账号后新 id 已经指向另一个会话文件。
+   *
+   * **有界返回**（R14 VB-N3）：收尾（`dispose()` 等被放弃那一轮的模型流结束）在
+   * `releaseReturnBudgetMs` 内没落地就返回并记 warn —— 订阅者不会被一条永不结束的上游读
+   * 挂死。但那**不是**"放弃栅栏"：那些会话在收尾落地前仍拒绝开第二个写句柄
+   * （新一轮会拿到显式错误码 {@link APP_AI_SESSION_RELEASE_PENDING}），落地后自动恢复。
    */
   releaseAll(reason: string): Promise<void>
 }
@@ -106,6 +206,17 @@ export type AppAiRunnerHandle = AiChatTurnRunner & AppAiRunnerState
 interface ConversationTurn {
   readonly role: 'user' | 'assistant'
   readonly content: string
+}
+
+/**
+ * 一次 `openAgent` 的结果：句柄 + **这一轮在 `live` 里登记的那一条**。
+ *
+ * `owner` 是**所有权凭证**（按引用比较身份，不比较内容）—— `runTurn` 的 `finally`
+ * 只允许丢弃自己那一代登记过的条目（R14 VB-N2）。
+ */
+interface OpenedAgent {
+  readonly handle: AgentHandle
+  readonly owner: Promise<AgentHandle>
 }
 
 /** 把内容块投影成纯文本（非文本块不参与对账：AI 桥的 `messages` 只有字符串）。 */
@@ -185,6 +296,9 @@ function aborted(): Error {
  */
 export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AppAiRunnerHandle {
   const warn = options.warn ?? ((): void => {})
+  /** 判据可注入的两条预算（生产接线不传 ⇒ 用导出的常量）。 */
+  const releaseBudgetMs = options.releaseBudgetMs ?? APP_AI_RELEASE_BUDGET_MS
+  const releaseReturnBudgetMs = options.releaseReturnBudgetMs ?? APP_AI_RELEASE_RETURN_BUDGET_MS
   /** 每会话串行化：一个隐藏会话同一时刻只能跑一轮（第二个请求排队而不是撞进度）。 */
   const queues = new Map<string, Promise<unknown>>()
   /**
@@ -282,27 +396,75 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
     })
   }
 
-  const openAgent = async (sessionId: string): Promise<AgentHandle> => {
+  /** 在预算内结算就返回 `true`，超预算返回 `false`（**不抛**：口径由调用方决定）。 */
+  const settlesWithin = async (work: Promise<unknown>, budgetMs: number): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<false>((resolve) => { timer = setTimeout(() => { resolve(false) }, budgetMs) })
+    try {
+      // `work` 的失败也算"结算"（收尾失败在 `trackReleasing` 里已经被吞成 warn）。
+      return await Promise.race([work.then(() => true, () => true), timeout])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 等"上一个活体收尾"落地：**有界**且**看 signal**（R14 VB-N3）。
+   *
+   * 三条出口：
+   *  - 收尾真的落地 ⇒ 正常返回（闸门放行的常规路径）；
+   *  - `signal` abort（页面关闭 / 应用侧超时）⇒ 抛 `AbortError`（上层映射成 `ai_cancelled`）
+   *    —— 修复前这条等待完全看不见 signal，页面关了也照样挂着；
+   *  - 超预算 ⇒ 抛 {@link AppAiSessionReleasePendingError}（**显式错误码**）。
+   *
+   * 第三条刻意**不**退化成"放开闸门、开第二个写句柄"：那会把 C-02 已经修掉的
+   * `SessionAlreadyOwnedError` 引回来，且失败形态更难查（真后端报"已被写句柄占用"，
+   * 无持久化平面报"会话已存在"）。有界失败 + 明确错误码是这里的取舍。
+   * @param sessionId - 隐藏会话 id。
+   * @param settling - 该 id 上"上一个活体正在收尾"的 promise。
+   * @param signal - 本次请求的取消信号。
+   */
+  const waitForRelease = async (sessionId: string, settling: Promise<void>, signal: AbortSignal): Promise<void> => {
+    if (signal.aborted) throw aborted()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let abort: (() => void) | undefined
+    try {
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new AppAiSessionReleasePendingError(sessionId, releaseBudgetMs)
+          warn(`dsh-plugin-desktop: ${error.message}`)
+          reject(error)
+        }, releaseBudgetMs)
+        abort = (): void => { reject(aborted()) }
+        // 登记与上面的 `signal.aborted` 复检之间**没有 await**（同一个同步段）⇒ 不会漏事件。
+        signal.addEventListener('abort', abort, { once: true })
+        settling.then(() => { resolve() }, () => { resolve() })
+      })
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (abort !== undefined) signal.removeEventListener('abort', abort)
+    }
+  }
+
+  const openAgent = async (sessionId: string, signal: AbortSignal): Promise<OpenedAgent> => {
     const cached = live.get(sessionId)
     if (cached !== undefined) {
       const handle = await cached
       // 活体判据：agent 已经离开注册表（被别处 dispose）= 缓存过期，重开一次。
-      if ((ctx.get('agents') as { get?: (id: SessionIdType) => Agent | undefined } | undefined)?.get?.(SessionId(sessionId)) !== undefined) {
-        return handle
-      }
+      if (agentOf(sessionId) !== undefined) return { handle, owner: cached }
       live.delete(sessionId)
     }
-    // 释放窗口闸门（R14 C-02）：同一个会话 id 的上一个活体必须**真的收尾**（写句柄已
+    // 释放窗口闸门（R14 C-02 + VB-N3）：同一个会话 id 的上一个活体必须**真的收尾**（写句柄已
     // 释放）之后才允许开下一个。没有这道闸门时，`releaseAll` 的窗口里到达的新一轮会
     // 撞上还没释放的写句柄 —— 真 jsonl 持久化实测
     // `SessionAlreadyOwnedError: session "…" is already owned by an active write handle`
     // （无持久化平面同形：`session "…" already exists`），窗口外重试才成功。
     const settling = releasing.get(sessionId)
-    if (settling !== undefined) await settling
+    if (settling !== undefined) await waitForRelease(sessionId, settling, signal)
     const pending = openAgentUncached(sessionId)
     live.set(sessionId, pending)
     try {
-      return await pending
+      return { handle: await pending, owner: pending }
     } catch (cause) {
       if (live.get(sessionId) === pending) live.delete(sessionId)
       throw cause
@@ -337,11 +499,29 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
     })
   }
 
-  /** 丢弃隐藏会话（取消/出错路径：不留活体循环，也不留半截状态）。 */
-  const dropAgent = async (sessionId: string): Promise<void> => {
+  /**
+   * 丢弃隐藏会话（取消/出错路径：不留活体循环，也不留半截状态）。
+   *
+   * **所有权栅栏（R14 VB-N2）**：传了 `owner` 就只允许丢弃**就是自己那一代**的条目。
+   * 起因是 `runTurn` 的 `finally` 无条件调本函数，而它可能晚于"闸门放行 + 新轮发布句柄"
+   * 落地 —— 修复前它会 dispose 掉**新轮**的句柄（`live` 被清空、agent 从注册表消失；
+   * 流式中途被偷则整轮以 `the application AI turn produced no assistant message` 失败）。
+   * 加宽窗口的对照实测 6/6 命中，所以这不是理论缺陷。
+   *
+   * 不传 `owner`（`cancel()` 的路径）保持无条件语义："取消这个会话上现在活着的那一个"。
+   * @param sessionId - 隐藏会话 id。
+   * @param owner - 这一轮在 `live` 里登记的那一条（`openAgent` 给的凭证）；省略 = 无条件。
+   */
+  const dropAgent = async (sessionId: string, owner?: Promise<AgentHandle>): Promise<void> => {
     const cached = live.get(sessionId)
-    live.delete(sessionId)
+    if (owner !== undefined && cached !== owner) {
+      // 自己已经不是 owner：闸门已经把该 id 交给新一代（或被 `releaseAll` 收走），
+      // 别人的句柄不归这一轮处置 —— 直接返回，连"收尾记账"都不写（写进去会把它自己
+      // 那一代的 disposal 串到新轮前面，正是 VB-N2 的反向形态）。
+      return
+    }
     if (cached === undefined) return
+    live.delete(sessionId)
     const disposal = (async (): Promise<void> => {
       try {
         const handle = await cached
@@ -374,6 +554,12 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
    * **收尾窗口有闸门**（R14 C-02）：`live`/`queues` 是同步清空的，而 `dispose()` 要等被
    * 放弃那一轮的模型流收尾。窗口里到达的**同一个隐藏会话 id** 的新一轮会在 `openAgent`
    * 里等本次收尾落地（{@link trackReleasing}），而不是撞上还没释放的写句柄。
+   *
+   * **本函数自己有界返回**（R14 VB-N3）：它是 `pico/session-changed` 的订阅回调路径，不能
+   * 因为某条上游读永不结束就永久挂住。超 `releaseReturnBudgetMs` 就返回并记一条带
+   * {@link APP_AI_SESSION_RELEASE_PENDING} 的 warn；**闸门不放宽** —— 那些会话在收尾真的
+   * 落地之前仍然拒绝开第二个写句柄（`openAgent` 超预算抛
+   * {@link AppAiSessionReleasePendingError}），落地之后自动恢复，无需重启。
    */
   const releaseAll = async (reason: string): Promise<void> => {
     generation += 1
@@ -402,7 +588,17 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
       const disposal = disposals[index]
       if (disposal !== undefined) trackReleasing(sessionId, disposal)
     })
-    await Promise.all(disposals)
+    // 收尾**有界放弃**（R14 VB-N3）：上游读永不结束时 `dispose()` 永不结算，而本函数是
+    // `pico/session-changed` 订阅里的清理路径 —— 不能把订阅者永久挂住。超预算就返回，
+    // 但**不放宽栅栏**：`releasing` 条目照旧留着，`openAgent` 仍拒绝在收尾落地前开第二个
+    // 写句柄（超预算抛 `AppAiSessionReleasePendingError`）。
+    if (!await settlesWithin(Promise.all(disposals), releaseReturnBudgetMs)) {
+      warn(
+        `dsh-plugin-desktop: releasing the application AI sessions after ${reason} did not settle within `
+        + `${String(releaseReturnBudgetMs)}ms (code ${APP_AI_SESSION_RELEASE_PENDING}); `
+        + 'the affected sessions stay gated until their release lands',
+      )
+    }
   }
 
   /** 一轮对话（已在会话串行队列里）。 */
@@ -414,14 +610,14 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
     startedAt: number,
   ): Promise<AiChatTurnResult> => {
     if (signal.aborted) throw aborted()
-    const handle = await openAgent(sessionId)
+    const opened = await openAgent(sessionId, signal)
     // 等上一个活体收尾期间又换代（再次换账号/登出）⇒ 这一轮已不属于任何人：
     // 丢弃刚开的会话并按取消收场（`openAgent` 的等待是有时长的，代次检查必须复检）。
     if (startedAt !== generation) {
-      await dropAgent(sessionId)
+      await dropAgent(sessionId, opened.owner)
       throw aborted()
     }
-    const agent = handle.agent
+    const agent = opened.handle.agent
     const disposeStream = agent.ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
       if (subject !== agent) return
       if (frame.type !== 'chunk') return
@@ -487,8 +683,9 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
       disposeStream()
       disposeErrors()
       // 只有"这一轮正常收尾"才留着会话：取消与出错都丢弃（前者是页面关闭/用户停止，
-      // 后者是会话可能停在半截状态）。
-      if (!finished) await dropAgent(sessionId)
+      // 后者是会话可能停在半截状态）。**只丢弃自己那一代**（R14 VB-N2）：本函数可能晚于
+      // "闸门放行 + 新轮发布句柄"才走到这里，那时的 `live` 条目已经属于新轮，不能动。
+      if (!finished) await dropAgent(sessionId, opened.owner)
     }
   }
 
