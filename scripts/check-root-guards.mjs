@@ -157,7 +157,7 @@ const MINIMUM_REQUIRED_GUARDS = [
  * 重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'b087a84463044cef0abe22327a6604aed5eac4e09a01cc793c313ac92744c565' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '823521b553f426441fbd08366332359dbb6cba143d44ed4d224746f55ea1bb6a' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'e66d7a45a66035d6ac7855f289a677309143f6f0ee88da3f8de62a0f61f26fe2' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
