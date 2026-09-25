@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -355,29 +356,100 @@ func PushWebhook(ctx context.Context, hookURL string, body *ReportBody) error {
 	return nil
 }
 
-// DispatchAll 生成报表并推送给全部启用的订阅;返回 成功/失败 计数。
+// DispatchAll 生成报表并推送给**待补跑**的启用订阅;返回 成功/失败 计数。
+//
+// 三件事在这里一次做完（R19B-02 + R19A-S1-06/S1-07，审计 2026-09-25；判据面在
+// delivery_policy.go，这里只做编排）：
+//
+//	① **订阅粒度过滤**（R19B-02，P1；第十八轮 R18C-03 修复引入的回归）：修前这里对
+//	   **全部** enabled 订阅无条件重推，而唯一调用方 tryRun 的 should 判据是
+//	   per-subscription 的（"任一订阅待补跑"就开跑）⇒ 只要有一个订阅持续失败，**健康**
+//	   订阅每小时都会重收同一期月报（真实部署里每小时一轮、直到本北京月底，最坏约 700
+//	   次真实出站 webhook）。过滤必须落在订阅粒度：只有 `SubscriptionDuePeriod` 说
+//	   "欠投"的才推。
+//	② **期号由策略给出**（R19A-S1-07）：每家的期号可能不同（有待补期号的补那一期），
+//	   所以按**期号**生成报表（同一期只生成一次）。生成发生在"确实有欠投订阅"之后 ——
+//	   修前先 `GenerateMonthlyReport` 一次全量聚合、再无条件推（稳态下每小时白跑）。
+//	③ **投递认领**（R19A-S1-06 ②）：每个订阅推之前先取 PG advisory lock（按订阅 id），
+//	   取不到 = 另一个实例正在投它 ⇒ 跳过（不计数、记一行日志）。修前两个实例同时 tick
+//	   会把同一期投两遍。
+//
+// 失败退避（S1-06 ①）由 `MarkReportAttempt` 落 `fail_streak`/`next_attempt_at` 承担：
+// 永久坏的 webhook 不再每 tick 被重投。
 func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed int, err error) {
-	body, err := GenerateMonthlyReport(db, month)
-	if err != nil {
-		return 0, 0, err
-	}
 	list, err := serverstore.ListReportSubscriptions(db)
 	if err != nil {
 		return 0, 0, err
 	}
+	type job struct {
+		sub    serverstore.ReportSubscription
+		period string
+	}
+	pending := make([]job, 0, len(list))
 	for _, sub := range list {
-		if !sub.Enabled {
-			continue
+		period, due := SubscriptionDuePeriod(month, sub)
+		if !due {
+			continue // 已投递 / 退避窗口内 / 已禁用 ⇒ 不欠投，绝不重推
 		}
-		if err := PushWebhook(ctx, sub.HookURL, body); err != nil {
+		pending = append(pending, job{sub: sub, period: period})
+	}
+	if len(pending) == 0 {
+		return 0, 0, nil
+	}
+	bodies := map[string]*ReportBody{}
+	for _, j := range pending {
+		body, cached := bodies[j.period]
+		if !cached {
+			body, err = GenerateMonthlyReportForPeriod(db, j.period)
+			if err != nil {
+				return ok, failed, err
+			}
+			bodies[j.period] = body
+		}
+		conn, claimed, cerr := claimReportDelivery(ctx, db, j.sub.ID)
+		if cerr != nil {
+			// 认领面读不出来 ⇒ 不投（fail-closed：宁可下一轮再投，也不要两个实例同时投）。
+			log.Printf("reports: claim subscription %d: %v", j.sub.ID, cerr)
 			failed++
-			_ = serverstore.MarkReportRun(db, sub.ID, false, err.Error())
 			continue
 		}
-		ok++
-		_ = serverstore.MarkReportRun(db, sub.ID, true, "")
+		if !claimed {
+			// 另一个实例正在投这一条 —— 这一轮跳过，而且**不是失败**（对方会落账）。
+			log.Printf("reports: subscription %d is being delivered by another instance; skipped this round", j.sub.ID)
+			continue
+		}
+		// 落账走**认领那一条连接**（MarkReportAttemptOn）：认领连接在整个投递期间被持有，
+		// 再回池里要第二条就是 hold-and-wait（R14-K：池上限 = 并发数时自锁且不可恢复）。
+		perr := PushWebhook(ctx, j.sub.HookURL, body)
+		if perr != nil {
+			failed++
+			_ = serverstore.MarkReportAttemptOn(ctx, conn, j.sub.ID, j.period, false, perr.Error(),
+				ptrTime(nextAttemptAfterFailure(month, j.sub.FailStreak+1)))
+		} else {
+			ok++
+			_ = serverstore.MarkReportAttemptOn(ctx, conn, j.sub.ID, j.period, true, "", nil)
+		}
+		releaseReportDelivery(ctx, conn, j.sub.ID)
 	}
 	return ok, failed, nil
+}
+
+// ptrTime 取 time.Time 的地址（MarkReportAttempt 的"退避到何时"参数）。
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// GenerateMonthlyReportForPeriod 生成**指定期号**（`YYYY-MM`，北京月）的月报。
+//
+// 期号是 `pending_period` 的存储形态，所以补投路径必须能按期号生成（R19A-S1-07）：
+// 修前只能传"现在"，于是 `GenerateMonthlyReport` 永远取"当前月的上一月"，跨月的
+// 那一期再也回不来。实现上一行不重复：期号 → 该期结束后的那个月 → 复用同一份生成器。
+func GenerateMonthlyReportForPeriod(db *sql.DB, period string) (*ReportBody, error) {
+	start, err := time.ParseInLocation("2006-01", period, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("报表期号不合法（want YYYY-MM）: %q", period)
+	}
+	// 期号 = start 所在月；把它当"下一月的 1 日"喂给 GenerateMonthlyReport，
+	// 后者取 prev = start 所在月 ⇒ 期号与内容都对齐。
+	return GenerateMonthlyReport(db, start.AddDate(0, 1, 0))
 }
 
 // ShouldRunMonthly 判断该订阅这一轮要不要投递月报：

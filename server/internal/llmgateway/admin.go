@@ -2028,12 +2028,15 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 	if limit <= 0 || limit > 500 {
 		limit = 500
 	}
-	ids, err := serverstore.ListGatewayFilesForPurge(db, q, limit)
+	// R19A-S1-05（审计 2026-09-25，P2）：快照必须**带世代号** —— 下面的逐条删除是串行
+	// 上游往返（最多 500 条），期间被主人合法续期/重传的行世代会 +1；只带 file_id 时
+	// 认领协议照样成立，于是那个**有效文件**的上游对象与台账行会被整条销毁。
+	cands, err := serverstore.ListGatewayFilePurgeCandidates(db, q, limit)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取待清理文件失败")
 		return
 	}
-	if len(ids) == 0 {
+	if len(cands) == 0 {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 0, "failed": 0, "matched": 0})
 		return
 	}
@@ -2045,21 +2048,23 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 	// 逐条走带世代围栏的删除（R18C-02）：拿不到删除权 / 世代在窗口内变了 ⇒ **不删上游、
 	// 不删行**，计入 skipped 如实回报（批量清理是 500 条串行循环，窗口本来就长）。
 	deleted, failed, skipped := 0, 0, 0
-	for _, id := range ids {
-		switch api.deleteGatewayFileFenced(id, up) {
+	for _, cand := range cands {
+		switch api.deleteGatewayFileFencedAt(cand.FileID, cand.ReapGeneration, up) {
 		case gatewayFileDeleteDone:
 			deleted++
 		case gatewayFileDeleteBusy, gatewayFileDeleteAbandoned:
+			// busy = 别的删除权持有中；abandoned = 快照之后世代变了（被续期/转手）⇒
+			// 上游对象留给新一代，这里如实计入 skipped。
 			skipped++
 		case gatewayFileDeleteMissing:
 			// 列表与删除之间被别的路径收敛掉了：既不是我们的删除，也不是失败。
 			skipped++
 		default:
-			log.Printf("gateway: admin purge file: fenced delete failed (id=%s)", id)
+			log.Printf("gateway: admin purge file: fenced delete failed (id=%s)", cand.FileID)
 			failed++
 		}
 	}
 	_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_purge",
-		fmt.Sprintf("%s 删除 %d 跳过 %d 失败 %d 命中 %d", target, deleted, skipped, failed, len(ids)))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": deleted, "skipped": skipped, "failed": failed, "matched": len(ids)})
+		fmt.Sprintf("%s 删除 %d 跳过 %d 失败 %d 命中 %d", target, deleted, skipped, failed, len(cands)))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": deleted, "skipped": skipped, "failed": failed, "matched": len(cands)})
 }

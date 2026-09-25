@@ -185,7 +185,8 @@ export default function UsageModels() {
 
       {canReadGateway && (!models.some((m) => isModelPriced(m))) && rows.length > 0 && (
         <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          存在未配置价格的模型:其费用按 0 计,金额口径可能被低估(在网关「模型管理」中配置单价)。
+          存在未配置价格的模型:缺省策略下它们的调用会被拒绝(429 MODEL_NOT_PRICED,不转发也不产生费用);
+          确实免费/内部时请在网关配置单价,或把「未定价模型策略」改成「允许使用」(那时费用才按 0 记)。
         </div>
       )}
     </div>

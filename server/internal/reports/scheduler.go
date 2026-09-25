@@ -79,12 +79,13 @@ func (s *Scheduler) tryRun() error {
 		log.Printf("reports: list subscriptions: %v", err)
 		return err
 	}
+	// should 的判据必须与 DispatchAll 的过滤**同一个实现**（SubscriptionDuePeriod）：
+	// 修前这里是 `ShouldRunMonthly`，而 DispatchAll 无条件重推（R19B-02）；R18C-03 之后
+	// 只要有一条订阅退避/待补跑，两者就会分叉。现在两侧共用一处策略：
+	// 退避窗口内的订阅不再触发整轮（也就不再刷"dispatch done (ok=0 failed=N)"日志）。
 	should := false
 	for _, sub := range list {
-		if !sub.Enabled {
-			continue
-		}
-		if ShouldRunMonthly(now, sub.LastRunAt) {
+		if _, due := SubscriptionDuePeriod(now, sub); due {
 			should = true
 			break
 		}

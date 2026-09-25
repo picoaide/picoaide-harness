@@ -3,7 +3,7 @@
 ## 1. 服务端(PostgreSQL,PG-only 2026-08)
 
 > 2026-08 起 SQLite 已全面下线:服务端数据库为 PostgreSQL(内置容器或外部实例)。
-> 迁移在 `internal/serverstore/migrations-pg/`(0001–0081;0007 已废弃;0028 下线
+> 迁移在 `internal/serverstore/migrations-pg/`(0001–0082;0007 已废弃;0028 下线
 > 知识库/MCP 表并独立审计表 audit_logs;0039 usage 按月原生分区 + 日/月账本;
 > 0040/0041 归档直存 DB;0042 connectors;0043/0044 provider protocol;
 > 0045 glitchtip 下架;0046 rbac 角色;0047 brand 快照;0048 审计哈希链;
@@ -169,8 +169,23 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 - `expires_at` = min(上游返回的过期时间, 上传时刻 + `gateway.file_expiry_days`);上游那侧也由网关**重写上传体**收敛到同一上限(见 03-api-reference §5);过期行视为**不存在**——既不再授权读取,也**允许他人重新占用同名 id**(`RecordGatewayFile` 的 `ON CONFLICT … WHERE (user_id = EXCLUDED.user_id OR expires_at <= now()) AND (reaping_at IS NULL OR reaping_at < now() - 租约)`:存活行不转手防"重传抢归属",过期行可转手防"上游按内容去重时第二个上传者引用自己的文件 404";永久文件永不转手)。**0081 起多一道判据**:认领标记仍在租约内的行**拒绝转手**并返回 `serverstore.ErrGatewayFileReapClaimed`(`/v1/files` 上传路径据此回 503,客户端回落 base64 内联)—— 那份上游对象正在被回收器删除,把行转给新上传者会让"新上传者的对象被删掉、台账却说他有效"(审计 2026-09-23 R4-C-1)。租约过期后的转手照旧允许,但会推进下面说的世代号。
 - 容量与回收:官方限制是**每 key 25 GiB / 10000 个文件**(公司级共享,非按人)。过期行有两条收敛路径:①`PurgeExpiredGatewayFiles`(同一事务内 `SELECT … FOR UPDATE SKIP LOCKED` → `DELETE`)只清台账;②网关的**文件回收器**(`internal/llmgateway/files_reaper.go`,启动先跑一轮、之后每 5 分钟)先 `ClaimExpiredGatewayFile`(事务内 `FOR UPDATE` + 复检仍过期)再删上游对象,失败按快照写回台账行留待下轮。`ListGatewayFileIDs` 供列表过滤用途(上限 20000 行)。
 - 管理面另有 `size_bytes` 汇总与清理索引(0078):按员工看占用、按员工/状态过滤与按过期时间排序都走这些索引。
-- **回收标记 `reaping_at`(0079)**:认领 = 事务内锁行 + 复检仍过期 + 打标记（**不删行**）⇒ 删上游对象 ⇒ 带标记删行收尾。之所以不"认领即删行":认领与删上游之间进程中断时,删掉的行会让上游对象**再无凭据**（共享配额静默泄漏）;保留行 + 标记则可重入（下一轮重新认领、重删 404=成功、再收尾）。标记有 10 分钟租约(`serverstore.ReapClaimLease`):租约内不进候选列表、不被重复认领,过期后可重新认领（崩溃自愈）;并发重新登记（上传转手过期行）会清空标记 ⇒ 回收器放弃删上游对象。后台 `PurgeExpiredGatewayFiles` 跳过**任何**带标记的行（比另两处更严，因为它不删上游对象、删行会让那份对象失去凭据）；回收候选列表与管理端清理只跳过**租约内**的标记行（租约过期的可重新认领/由管理员显式删除）。- **回收世代号 `reap_gen`(0081,fencing token)**:行世代号,认领时 +1、重新登记(转手/续期)时也 +1。回收器认领后持有自己那一代,并在**发上游 DELETE 之前**与**收尾删行之前**各校验一次"世代未变 + 标记仍在租约内"(`GatewayFileReapClaimHeld` / `FinishReapedGatewayFile` 的谓词):任何一次发现世代变了就放弃(行留给新一代,日志点名 `file_id` + 世代)。这样"删除权"不会被转手给新一代夺取 —— 修复前"复检 claim → 上游 DELETE 返回"之间被重新登记时,回收器会把**新上传者的上游对象**删掉而台账仍标记它有效(审计 2026-09-23 R4-C-1 确定性复现)。同族:`ClaimExpiredGatewayFile` 的世代号在同一句 `UPDATE … RETURNING` 里 +1 并回读,避免"先读后写"的竞态。
+- **回收标记 `reaping_at`(0079)**:认领 = 事务内锁行 + 复检仍过期 + 打标记（**不删行**）⇒ 删上游对象 ⇒ 带标记删行收尾。之所以不"认领即删行":认领与删上游之间进程中断时,删掉的行会让上游对象**再无凭据**（共享配额静默泄漏）;保留行 + 标记则可重入（下一轮重新认领、重删 404=成功、再收尾）。标记有 10 分钟租约(`serverstore.ReapClaimLease`):租约内不进候选列表、不被重复认领,过期后可重新认领（崩溃自愈）;并发重新登记（上传转手过期行）会清空标记 ⇒ 回收器放弃删上游对象。后台 `PurgeExpiredGatewayFiles` 跳过**任何**带标记的行（比另两处更严，因为它不删上游对象、删行会让那份对象失去凭据）；回收候选列表与管理端清理只跳过**租约内**的标记行（租约过期的可重新认领/由管理员显式删除）。**管理端删除同样要先取得认领**（2026-09-25 起，R18C-02）：与回收器共用同一条认领协议，租约内被别人持有 ⇒ `409 FILE_BUSY`（对象与行都原样保留，刷新后重试），窗口内被重新登记 ⇒ 上游对象已删但行归新一代 ⇒ `409 FILE_RECLAIMED`；**批量清理**（`POST …/files/purge`）的快照额外带**世代号**（R19A-S1-05）：清理循环是"取快照 → 逐条串行上游 DELETE"，快照之后被主人合法**续期/转手**的行世代 +1 ⇒ 该条的删除权自动作废、整条跳过（计入响应里的 `skipped`，不删上游对象也不删行）。修前快照只带 `file_id` 且认领对任意世代都成立 ⇒ 被续期的**有效文件**会被连上游对象一起删掉，而 `skipped` 计数看不见它。- **回收世代号 `reap_gen`(0081,fencing token)**:行世代号,认领时 +1、重新登记(转手/续期)时也 +1。回收器认领后持有自己那一代,并在**发上游 DELETE 之前**与**收尾删行之前**各校验一次"世代未变 + 标记仍在租约内"(`GatewayFileReapClaimHeld` / `FinishReapedGatewayFile` 的谓词):任何一次发现世代变了就放弃(行留给新一代,日志点名 `file_id` + 世代)。这样"删除权"不会被转手给新一代夺取 —— 修复前"复检 claim → 上游 DELETE 返回"之间被重新登记时,回收器会把**新上传者的上游对象**删掉而台账仍标记它有效(审计 2026-09-23 R4-C-1 确定性复现)。同族:`ClaimExpiredGatewayFile` 的世代号在同一句 `UPDATE … RETURNING` 里 +1 并回读,避免"先读后写"的竞态。
 **认账残留**：④`PurgeExpiredGatewayFiles` 只清台账行、不删上游对象 —— 新上传的对象由上游按 `expires_after` 自行到期，所以不长期泄漏；但改造前的"永久"老行若被本函数先一步清掉行，那份上游对象就再无凭据（靠回收器的 `NormalizeLegacyPermanentGatewayFiles` + 认领流程尽量先处理，属已认账的窗口）。
+
+### report_subscriptions(0056;0082 加待补期号与重试退避)
+
+月度用量报表订阅:`{id, name, enabled, hook_url, last_run_at, last_error, created_at, updated_at}`。
+`last_run_at` = **最近一次成功**投递的时刻(失败不推进它 —— 否则失败的那一期在本月内永不重投,R18C-03)。
+
+**0082 起三列**(R19A-S1-06/S1-07,审计 2026-09-25):
+- `pending_period TEXT`(`YYYY-MM`,北京月):"最早未成功投递的那一期"。失败时**首次写入、之后不覆盖** ⇒ 失败跨过月界时下一轮仍补投**那一期**,
+  不会静默跳期(修前只能从 `last_run_at` 反推"上一月",跨月即丢期);补投成功且期号相符时清空。
+- `fail_streak INTEGER`:连续失败次数(成功清零)。
+- `next_attempt_at TIMESTAMPTZ`:退避窗口的"最早可再试时刻";调度器的候选判据是
+  `pending_period 非空 ⇒ 补那一期`,否则"本月未成功 + 已过退避窗口"才投当前期的上一期。
+  退避形态 = **首次 1 小时、之后 24 小时**(永久坏的 webhook 收敛到 1 次/天/实例,修前 = 每 tick 一次 = 24 次/天)。
+- 投递前按订阅 id 取 PG **advisory lock** 认领(`pg_advisory_lock(int4,int4)`,classid 见 `internal/reports/delivery_policy.go`);
+  取不到 = 另一个实例正在投它 ⇒ 本轮跳过(所以**多实例部署不会重复投递**同一期),不是失败。
 
 ### model_concurrency_stats(0049,按模型并发峰值)
 `model, day(UTC), max_concurrency, peak_at`——`PRIMARY KEY(model, day)`。网关内存 in-flight 计数每 15s 采样落库;`max_concurrency` 用 `GREATEST` 累计(永不回退),`peak_at` 记录首次触发峰值时刻。供管理后台「服务器信息 → 模型并发」展示(当前/90 天峰值/目标),是向模型上游申请扩容的量化依据。目标值配置在 `models.default_params` 的 `concurrency_target`(如 flash 2500 / pro 500),不在此表。
