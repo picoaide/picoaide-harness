@@ -199,7 +199,7 @@ jobs:
           set -euo pipefail
           # R13-D-02 / V13-A 的 R1：**先复位 PATH**，再跑任何仓内东西。
           #
-          # 为什么这一行是承重的：`"${{ …outputs.interp }}" scripts/<x>.sh` 只冻结了**解释器**，
+          # 为什么这一行是承重的：把冻结步的输出插进 argv（`"<冻结解释器>" scripts/<x>.sh`）只冻结了**解释器**，
           # 脚本体里的裸 `node` 仍按 `$PATH` 解析 ⇒ 一个只拦某一条判据、其余转发真 node 的假
           # `node`（一行 `echo … >> $GITHUB_PATH`，不碰 git、不改被跟踪文件）就能把
           # `scripts/verify-wasm-client-only.sh` 的 `pass=2 fail=1 / EXIT=1` 翻成
@@ -412,7 +412,7 @@ jobs:
       #
       # 它把载荷**真的跑一遍**：造一个假 `node`（会写标记文件并自己回显一条"通过凭据"），
       # 先按本 job 的冻结步取冻结值，再 prepend 假 bin 到 `$PATH` 后执行**本文件里那段真字节**
-      # 的判据步体（`${{ … }}` 换成 runner 展开后的冻结值）⇒ 必须仍跑真判据、假 node 零调用。
+      # 的判据步体（文件里的表达式占位换成 runner 展开后的冻结值）⇒ 必须仍跑真判据、假 node 零调用。
       # 探针内部还带一个**正控**：把冻结点拆掉后同一个载荷**必须**能把判据换掉 ——
       # 没有正控的探针只能证明"绿"，证明不了"它抓得住"。
       - name: Frozen launcher behavioural probe (PATH injection cannot swap the judge launcher)
