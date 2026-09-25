@@ -34,6 +34,13 @@ const skt = (key, params) => translate(SKILL_DICT, key, params)
 const smt = (key, params) => translate(SKILL_MSG_DICT, key, params, getLocale())
 import { join } from 'node:path'
 import { resolveSafeRepoTarget, writeFileAtomicSafeAt, writeTargetRefusedError } from './sync/filesets.js'
+// R18B-03（2026-09-25）：per-name 文件锁的**唯一实现**在 coi/skills-sync.js
+// （`<技能库>/.skill-locks/<name>.lock`，与能力中心安装器同一份协议常量）。
+// 模型面工具的写入落点与安装器的整树换入落点是**同一个目录**，此前它完全不参与
+// 这把锁：真进程持锁时安装器如实 `SkillLockedError`，而 `skill_manage` 照旧
+// `ok:true` 写进同一落点（并发窗口落进安装器的两处 `rename` 之间会让活落点只剩
+// 模型写的那一个 SKILL.md）。这里 import 同一份实现，不再复制常量/判据。
+import { acquireSkillDirLock } from './coi/skills-sync.js'
 
 /** Skill name grammar (matches DSH's isSkillName; kebab-case rules out traversal). */
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -299,6 +306,10 @@ function firstBlockedSkillRelPath(rootDir, name, fromDir) {
  * （指向任意目录）→ 如实拒收、库外零写入；`<name>` 是普通文件 → 可读拒收，
  * 不再交给原生 cp 去 abort 进程。
  *
+ * per-name 锁（R18B-03，2026-09-25）：整个临界区（落点断言 + rename/拷贝）在
+ * `<技能库>/.skill-locks/<name>.lock` 之下 —— 与能力中心安装器、随包同步器、
+ * `skill_manage` 的直写**同一把**；拿不到锁如实拒收。
+ *
  * @param {string} pendingDir - the pending-skills directory.
  * @param {string} skillDir - the live skills directory.
  * @param {string} name - the skill name (kebab-case).
@@ -311,6 +322,29 @@ export function approvePendingSkill(pendingDir, skillDir, name) {
   if (!existsSync(join(from, 'SKILL.md'))) {
     return { ok: false, message: smt('skillmsg.pendingMissing', { name }) }
   }
+  // R18B-03：采纳**写的是活落点**（`renameSync` 整目录换入，或 Windows 跨卷时的
+  // 逐文件合并拷贝）——与能力中心安装器、随包同步器是同一个落点 ⇒ 必须取同一把
+  // per-name 锁；拿不到就如实拒收（等待用户在下一轮面板操作里重试），
+  // 绝不在别人换入的中途写进去（那会留下"半份内容 + 溯源对不上"的终态）。
+  const lock = acquireSkillDirLock(skillDir, name)
+  if (lock.ok !== true) {
+    return { ok: false, message: `${smt('skillmsg.locked', { name })}（${lock.message}）` }
+  }
+  try {
+    return approvePendingSkillLocked(skillDir, name, from)
+  } finally {
+    lock.release()
+  }
+}
+
+/**
+ * {@link approvePendingSkill} 的临界区（调用方必须已持有 per-name 锁）。
+ * @param {string} skillDir - the live skills directory.
+ * @param {string} name - the skill name (kebab-case).
+ * @param {string} from - 待确认队列里的源目录。
+ * @returns {{ok: true, path: string} | {ok: false, message: string}} the outcome.
+ */
+function approvePendingSkillLocked(skillDir, name, from) {
   const to = resolveSkillLanding(skillDir, name, { leaf: 'dir' })
   if (to === null) return { ok: false, message: smt('skillmsg.landingRefused', { name }) }
   if (existsSync(join(to, 'SKILL.md'))) {
@@ -416,6 +450,33 @@ function writeSkill(rootDir, name, content) {
 }
 
 /**
+ * 持 **per-name 文件锁** 跑一段写入（R18B-03）。
+ *
+ * 锁的协议、常量与判据全部来自 {@link acquireSkillDirLock}（`coi/skills-sync.js`
+ * 的实现，与能力中心安装器同一份）——本函数只负责"取锁 → 跑 → 一定释放"，并把
+ * "拿不到锁"翻译成调用方能如实上报的结果。
+ *
+ * **零等待、fail-loud**（与同步侧同一口径）：安装器持锁的窗口是几百毫秒级的一次
+ * 换入，这里拿不到就**不写**并如实说"稍后重试"，绝不无锁写入 —— 无锁写入正是
+ * R18B-03 的缺陷形态（并发终态是"活落点只剩模型写的那份 SKILL.md"）。
+ * @param {string} rootDir - 技能库根（锁落点 `<rootDir>/.skill-locks/<name>.lock`）。
+ * @param {string} name - 技能名（kebab-case）。
+ * @param {() => string} run - 持锁期间执行的写入（返回值原样透出）。
+ * @returns {{ok:true, value:string} | {ok:false, message:string}}
+ */
+function withSkillDirLock(rootDir, name, run) {
+  const lock = acquireSkillDirLock(rootDir, name)
+  if (lock.ok !== true) {
+    return { ok: false, message: `${smt('skillmsg.locked', { name })}（${lock.message}）` }
+  }
+  try {
+    return { ok: true, value: run() }
+  } finally {
+    lock.release()
+  }
+}
+
+/**
  * Whether the calling agent has read the skill before (read-before-write):
  * its own session log must contain a `skill_manage action=read <name>`
  * tool call. The session log is the authoritative reconstruction boundary.
@@ -477,6 +538,31 @@ export function skillManageTool(ctx, config) {
     ok: false,
     message: `${smt('skillmsg.writeRefused', { name })}（${String(error?.message ?? error)}）`,
   })
+
+  /**
+   * 持 per-name 锁提交一次直写（R18B-03）：拿不到锁 / 落点被拒都返回
+   * `{ok:false}`，成功才给 `{ok:true, message}`。
+   * @param {(name: string, error: unknown) => object} refuse - 落点被拒的结果构造器。
+   * @param {string} rootDir - 技能库根。
+   * @param {string} name - 技能名。
+   * @param {string} body - SKILL.md 全文。
+   * @param {string} okMessage - 成功文案。
+   * @returns {object} 工具结果。
+   */
+  const commitSkillWrite = (refuse, rootDir, name, body, okMessage) => {
+    // 落点被拒（符号链接 / 越界 / 同名普通文件）必须变成**可读的工具结果**，
+    // 不能抛穿 execute（A4）——因此把 writeSkill 的异常收进返回值里再分派。
+    const locked = withSkillDirLock(rootDir, name, () => {
+      try {
+        return { landed: writeSkill(rootDir, name, body) }
+      } catch (error) {
+        return { error }
+      }
+    })
+    if (locked.ok !== true) return { ok: false, message: locked.message }
+    if ('error' in locked.value) return refuse(name, locked.value.error)
+    return { ok: true, message: okMessage, name }
+  }
 
   /** Validate a create/patch body against the canonical format. */
   const validateBody = (name, description, body) => {
@@ -610,12 +696,10 @@ export function skillManageTool(ctx, config) {
               name,
             }
           }
-          try {
-            writeSkill(dir, name, args.body)
-          } catch (error) {
-            return refusedResult(name, error)
-          }
-          return { ok: true, message: smt('skillmsg.created', { name, bytes: args.body.length }), name }
+          // R18B-03：直写是**同一个落点**的第三个写者（前两个是能力中心安装器与
+          // 随包同步器），因此必须取同一把 per-name 锁；拿不到就如实说"稍后重试"，
+          // 绝不无锁写入（无锁写入正是并发终态被破坏的那条路径）。
+          return commitSkillWrite(refusedResult, dir, name, args.body, smt('skillmsg.created', { name, bytes: args.body.length }))
         }
         case 'patch': {
           const checked = validateBody(name, undefined, args.body)
@@ -631,12 +715,8 @@ export function skillManageTool(ctx, config) {
               message: smt('skillmsg.readFirst', { name, tool: config.skillManageToolName }),
             }
           }
-          try {
-            writeSkill(dir, name, args.body)
-          } catch (error) {
-            return refusedResult(name, error)
-          }
-          return { ok: true, message: smt('skillmsg.updated', { name, bytes: args.body.length }), name }
+          // R18B-03：与 create 同一把锁（patch 覆盖的是同一份 SKILL.md）。
+          return commitSkillWrite(refusedResult, dir, name, args.body, smt('skillmsg.updated', { name, bytes: args.body.length }))
         }
         default:
           return { ok: false, message: smt('skillmsg.unknownAction', { action }) }

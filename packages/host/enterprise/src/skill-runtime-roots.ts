@@ -20,6 +20,15 @@
  * 与上游 `discoverRoot` 逐条对齐）在**全部已知根**里查同名；不属于自己能管的根 ⇒ 抛
  * `RESIDUE`（列条目名 + 根 + 指引），**绝不返回成功**。
  *
+ * R18B-01（2026-09-25）：**project 根也在"已知根"里**。此前本表只在调用方显式给出
+ * `projectRoot` 时才产出 project 根，而生产调用点（能力中心的本机安装/卸载路由）
+ * 从来不给 ⇒ `<项目>/.dsh/skills`（rank 100，**排在被管的 400 之前**）里的同名技能
+ * 让"安装成功 / 卸载成功"两个方向都变成界面上的说法，而模型读的是项目里那一份；
+ * 更糟的是那个目录在工作区里（= 沙箱可写根），随仓库克隆或 agent 自己写下都能形成
+ * 持久的系统提示词注入面。现在调用方拿**已登记工作区**（`workspaceRegistry`）经
+ * {@link workspaceProjectRoots} 折成项目根传进来（`projectRoots`），install/uninstall
+ * 两侧因此都能如实报 `RESIDUE`。
+ *
  * 本模块只放"根表 + 路径推导"（纯数据/纯函数，不 import 安装器，避免循环依赖）；
  * 逐根扫描与合并留在 `skill-install.ts` 的 `discoverRuntimeSkills` /
  * `discoverRuntimeSkillsAcrossRoots` —— 判据实现只有一份。
@@ -29,6 +38,7 @@
  * 与本表**逐项相等**（含反向对照：不在表里的目录必须**不**被上游加载）。上游增删
  * 根 ⇒ 该用例红 ⇒ 本表必须跟着改。
  */
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -85,11 +95,20 @@ export interface RuntimeSkillRootsOptions {
   readonly home?: string | undefined
   /**
    * 当前工作区/项目根。上游只在 `list({cwd})` 给出 cwd 且找得到项目根时扫描
-   * project 根；卸载面拿不到 cwd（能力中心的本机路由不带工作区），所以生产路径
-   * 通常不传 —— 这是**登记在案的边界**：project 根不在"已知根"集合里。
-   * 传了就如实纳入（判据与上游同一份 roots() 顺序）。
+   * project 根。传了就**原样**纳入（不再向上找 `.git` —— 调用方已经给出了项目根）。
    */
   readonly projectRoot?: string | undefined
+  /**
+   * 多个项目根（R18B-01）：调用方拿到的是**会话工作区目录**时，先用
+   * {@link workspaceProjectRoots} 折成项目根（判据与上游 `findProjectRoot` 同一份），
+   * 再传进来。每个项目根贡献 project-dsh(100) 与 project-agents(200) 两条。
+   *
+   * 为什么需要多根：能力中心的技能库是**机器作用域**的（一个根服务全部会话），
+   * 而运行时按**每个会话的 cwd** 决定 project 根 ⇒ "装好了 == 运行时加载的是刚装的
+   * 那一份"这条不变量必须对**本机已登记的每一个工作区**成立，否则某个工作区里的
+   * 同名技能会把能力中心那一份整个盖住（模型读的是仓库里那一份）。
+   */
+  readonly projectRoots?: readonly string[] | undefined
   /** 上游 `customSkillDirs` 的等价物（桌面组合没有配它，默认空）。 */
   readonly customSkillDirs?: readonly string[] | undefined
 }
@@ -106,11 +125,71 @@ export function defaultAgentsHome(env: Record<string, string | undefined> = proc
 }
 
 /**
+ * 「会话工作区目录 → 项目根」的推导：**逐条镜像** pinned 上游
+ * `skill-filesystem` 的 `findProjectRoot(cwd)`（同文件 `roots()` 里 project 根的来源）：
+ *
+ *	从 resolve(cwd) 起**向上**找第一个含 `.git` 的目录；一路到文件系统根都没找到
+ *	就回落到 cwd 本身。
+ *
+ * 为什么必须照抄而不是"就用 cwd"：`.git` 可以在工作区的**祖先**目录里（用户把
+ * 工作区设成 monorepo 的子目录时最常见），此时上游扫的是祖先里的
+ * `<祖先>/.dsh/skills` —— 用 cwd 直接拼会指向一个**运行时根本不读**的目录，
+ * 判据于是恒为空（假绿）。漂移由行为探针守住：
+ * `tests/skill-runtime-roots.spec.ts` 真跑上游注册表（带 `cwd`）与这里逐例对拍。
+ *
+ * @param cwd - 会话工作区目录（可以是子目录）。
+ * @param hasGitMarker - `.git` 存在性判据（测试 seam；缺省 `existsSync`）。
+ *   注意上游只看"这个路径存不存在"（工作树里 `.git` 是**文件**，正常仓库里是目录）。
+ * @returns 项目根绝对路径（找不到 `.git` 时 = `resolve(cwd)`）。
+ */
+export function resolveWorkspaceProjectRoot(
+  cwd: string,
+  hasGitMarker: (candidate: string) => boolean = candidate => existsSync(candidate),
+): string {
+  const start = resolve(cwd)
+  let current = start
+  for (;;) {
+    if (hasGitMarker(join(current, '.git'))) return current
+    const parent = dirname(current)
+    if (parent === current) return start
+    current = parent
+  }
+}
+
+/**
+ * 把**多个**会话工作区目录折成去重后的项目根列表（顺序 = 输入顺序）。
+ *
+ * 去重按 {@link skillRootPathKey}（同目录的不同拼写只算一个根）；空串/纯空白跳过
+ * （注册表里出现过占位取值时不要把它当根）。
+ *
+ * @param workspacePaths - 已登记工作区的目录。
+ * @param hasGitMarker - 见 {@link resolveWorkspaceProjectRoot}。
+ * @returns 项目根（已 resolve、已去重）。
+ */
+export function workspaceProjectRoots(
+  workspacePaths: readonly string[],
+  hasGitMarker?: (candidate: string) => boolean,
+): string[] {
+  const seen = new Set<string>()
+  const roots: string[] = []
+  for (const path of workspacePaths) {
+    if (typeof path !== 'string' || path.trim() === '') continue
+    const projectRoot = resolveWorkspaceProjectRoot(path, hasGitMarker)
+    const key = skillRootPathKey(projectRoot)
+    if (seen.has(key)) continue
+    seen.add(key)
+    roots.push(projectRoot)
+  }
+  return roots
+}
+
+/**
  * 列出**运行时真正会扫描**的技能根（顺序 = 上游 `roots()` 的顺序，rank 升序）。
  *
  * 与上游的三点差异，都是显式的：
  *  1. `includeDefaultRoots` 恒为 true（桌面组合没有把它关掉的地方）；
- *  2. project 根只在调用方给出 `projectRoot` 时出现（见 {@link RuntimeSkillRootsOptions.projectRoot}）；
+ *  2. project 根只在调用方给出 `projectRoot`/`projectRoots` 时出现（见
+ *     {@link RuntimeSkillRootsOptions.projectRoots}）；
  *  3. bundled 根只在 `$DSH_BUNDLED_SKILL_DIR` 非空时出现（与上游同判据）。
  */
 export function runtimeSkillRoots(options: RuntimeSkillRootsOptions = {}): RuntimeSkillRoot[] {
@@ -123,8 +202,16 @@ export function runtimeSkillRoots(options: RuntimeSkillRootsOptions = {}): Runti
   const managedRoot = options.skillsDir !== undefined ? resolve(options.skillsDir) : join(dshHome, 'skills')
 
   const roots: RuntimeSkillRoot[] = []
-  if (options.projectRoot !== undefined) {
-    const projectRoot = resolve(options.projectRoot)
+  // project 根：单个 `projectRoot` 与多个 `projectRoots` 走**同一条**产出路径
+  // （不再有第二份"根从哪来"的手抄），并且按目录去重 —— 同一个项目根被两条来源
+  // 同时给到（或注册表里有两个工作区落在同一项目）时只出现一次。
+  const projectSeen = new Set<string>()
+  for (const candidate of [...options.projectRoot === undefined ? [] : [options.projectRoot], ...options.projectRoots ?? []]) {
+    if (typeof candidate !== 'string' || candidate.trim() === '') continue
+    const projectRoot = resolve(candidate)
+    const key = skillRootPathKey(projectRoot)
+    if (projectSeen.has(key)) continue
+    projectSeen.add(key)
     roots.push(
       { path: join(projectRoot, '.dsh/skills'), source: 'project-dsh', rank: RUNTIME_SKILL_ROOT_RANKS.projectDsh, skipSystem: false, managed: false },
       { path: join(projectRoot, '.agents/skills'), source: 'project-agents', rank: RUNTIME_SKILL_ROOT_RANKS.projectAgents, skipSystem: false, managed: false },

@@ -22,7 +22,9 @@ import {
   resolveSkillsDir,
   uninstallSkill,
   validateSkillName,
+  type SkillInstallLog,
 } from './skill-install.ts'
+import { runtimeSkillRoots, workspaceProjectRoots, type RuntimeSkillRoot } from './skill-runtime-roots.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { createWasmAppsRoute } from './wasm-apps.ts'
 import { registerWasmAppTools } from './wasm-app-tools.ts'
@@ -1134,6 +1136,72 @@ export function archiveTooLargeError(locale: HostLocale): string {
   )
 }
 
+/**
+ * 本机已登记的工作区目录（R18B-01）。
+ *
+ * 来源是**宿主侧权威** `ctx.workspaceRegistry`（上游 workspace 包的服务，会话 cwd 的
+ * 唯一登记处）—— 与 `wasm-apps.ts` 的 `readRoots` 同款做法：**结构类型 + 请求期解析**，
+ * 不为它增加 import（服务缺席时退化成"没有项目根"，与旧行为一致）。
+ *
+ * 为什么不要一个第二份来源：技能库是**机器作用域**的（一个根服务全部会话），而运行时
+ * 按**每个会话的 cwd** 决定 project 根 ⇒ 要判"装/卸是否真的生效"，就必须看到本机
+ * 所有会话可能用到的项目根。客户端下发的 cwd 不作数（那是安全判据的输入，不能由
+ * 被判定方提供）。
+ * @param ctx - Host 上下文。
+ * @returns 已登记工作区的目录（过滤掉空/非字符串取值；注册表未就绪时为空数组）。
+ */
+function registeredWorkspacePaths(ctx: Context): string[] {
+  const registry = (ctx as unknown as {
+    get?: (name: string) => unknown
+  }).get?.('workspaceRegistry') as { list?: () => Array<{ path?: unknown }> } | undefined
+  const paths: string[] = []
+  try {
+    for (const item of registry?.list?.() ?? []) {
+      const path = item?.path
+      if (typeof path === 'string' && path.trim() !== '') paths.push(path)
+    }
+  } catch {
+    // 注册表尚未就绪（启动早期/最小组合）：只按 env 派生的根表，不放行任何项目根。
+  }
+  return paths
+}
+
+/**
+ * 技能安装/卸载路由用的**运行时根表**（R18B-01）。
+ *
+ * 在 `runtimeSkillRoots` 的 env 派生根表之上，把**已登记工作区**折成的项目根
+ * （`<project>/.dsh/skills` rank 100、`<project>/.agents/skills` rank 200，
+ * 都排在能力中心落点 400 之前）一并算进"已知根"：
+ *   - **卸载**：删掉落点之后项目根那份会接管 ⇒ `listCrossRootSkillResidues` 如实报
+ *     `RESIDUE`（此前根表里没有项目根，于是"卸载成功"只是界面上的说法）；
+ *   - **安装**：项目根那份排在落点之前 ⇒ `listOutrankingSkillResidues` 报 `RESIDUE`
+ *     （此前"装好了"同样是假象，而项目根在工作区里 = 沙箱可写根，随仓库克隆或
+ *     agent 自写都能形成持久的系统提示词注入面）。
+ *
+ * 根表本身仍是**一份实现**（`skill-runtime-roots.ts` 的 `runtimeSkillRoots`）；
+ * 这里只补"项目根从哪来"。
+ * @param ctx - Host 上下文。
+ * @param skillsDir - 能力中心管的技能库根。
+ * @returns 运行时发现根（rank 升序）。
+ */
+function skillRuntimeRootsForHost(ctx: Context, skillsDir: string): RuntimeSkillRoot[] {
+  return runtimeSkillRoots({ skillsDir, projectRoots: workspaceProjectRoots(registeredWorkspacePaths(ctx)) })
+}
+
+/**
+ * 安装器日志出口（R18B-04）：接线到 Cordis logger。
+ *
+ * 桌面**唯一**会写 `<userData>/logs` 的通道是 `hostCtx.logger.exporter(fileExporter)`
+ * （`packages/host/desktop/src/main.ts`），而诊断包只收 `<userData>/logs`；Windows GUI
+ * 没有 stderr ⇒ 安装器的 `console.warn`（技能库清理/自愈/回滚失败的唯一痕迹）在生产
+ * 彻底静默，"为什么这个技能/这个目录不见了"无从追溯。这里按调用注入 `ctx.logger`。
+ * @param ctx - Host 上下文。
+ * @returns 交给 `installSkillArchive` / `uninstallSkill` 的日志出口。
+ */
+function skillInstallLogForHost(ctx: Context): SkillInstallLog {
+  return { warn: message => { ctx.logger?.warn?.(message) } }
+}
+
 export function apply(ctx: Context, config: Config): void {
   // srvcore-1 客户端一半(R3-F3-N1a/N1b,2026-09-13):深链守卫必须在**本进程
   // 任何深链可能到达之前**就进入严格模式,而且是**无条件**的 —— 包括没有预置
@@ -2025,6 +2093,10 @@ export function apply(ctx: Context, config: Config): void {
                 server: s.serverURL,
                 // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
                 overwrite,
+                // R18B-01：项目根（rank 100/200）排在落点（400）之前 —— 工作区里的
+                // 同名技能会让"装好了"变成假象；R18B-04：清理/自愈日志走 ctx.logger。
+                runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
+                log: skillInstallLogForHost(ctx),
               })
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
@@ -2059,7 +2131,12 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               // Purely local operation — no gateway round-trip needed.
-              await uninstallSkill(resolveSkillsDir(), name, { overwrite, serverURL: s.serverURL })
+              await uninstallSkill(resolveSkillsDir(), name, {
+                overwrite,
+                serverURL: s.serverURL,
+                runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
+                log: skillInstallLogForHost(ctx),
+              })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)
@@ -2107,6 +2184,9 @@ export function apply(ctx: Context, config: Config): void {
                 server: s.serverURL,
                 // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
                 overwrite,
+                // R18B-01 / R18B-04：见内置技能那条同类注释。
+                runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
+                log: skillInstallLogForHost(ctx),
               })
               // 审计 2026-09-23 A11：**回传真实安装版本**。市场归档端点只按
               // "当前 approved 最高版"取（服务端不支持按版本安装），请求里带的
@@ -2141,7 +2221,14 @@ export function apply(ctx: Context, config: Config): void {
             try {
               // Purely local operation — no gateway round-trip needed.
               // `overwrite` = 用户已确认删除本机自制内容（审计 A3）。
-              await uninstallSkill(resolveSkillsDir(), name, { overwrite, serverURL: s.serverURL })
+              await uninstallSkill(resolveSkillsDir(), name, {
+                overwrite,
+                serverURL: s.serverURL,
+                // R18B-01：卸载的"成功"必须等于"运行时不再加载"——项目根（rank 100/200）
+                // 也在已知根里；R18B-04：清理/自愈日志走 ctx.logger。
+                runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
+                log: skillInstallLogForHost(ctx),
+              })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)
@@ -2570,6 +2657,9 @@ export function apply(ctx: Context, config: Config): void {
                 server: s.serverURL,
                 // 覆盖本机同名自制内容必须由面板显式确认（审计 A2）。
                 overwrite,
+                // R18B-01 / R18B-04：见内置技能那条同类注释。
+                runtimeRoots: skillRuntimeRootsForHost(ctx, skillsDir),
+                log: skillInstallLogForHost(ctx),
               })
               // 真实落盘版本以响应为准（审计 A11：请求里的版本可能被服务端忽略）。
               json(res, 200, { ok: true, name, version: result.version ?? ver })
@@ -2607,7 +2697,14 @@ export function apply(ctx: Context, config: Config): void {
               return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
             }
             try {
-              await uninstallSkill(skillsDir, name, { overwrite, serverURL: s.serverURL })
+              await uninstallSkill(skillsDir, name, {
+                overwrite,
+                serverURL: s.serverURL,
+                // R18B-01：卸载的"成功"必须等于"运行时不再加载"——项目根（rank 100/200）
+                // 也在已知根里；R18B-04：清理/自愈日志走 ctx.logger。
+                runtimeRoots: skillRuntimeRootsForHost(ctx, skillsDir),
+                log: skillInstallLogForHost(ctx),
+              })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)

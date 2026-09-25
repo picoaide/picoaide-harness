@@ -37,7 +37,7 @@ export interface UpstreamSkill {
 
 interface UpstreamContext {
   plugin: (plugin: unknown, config?: unknown) => Promise<void>
-  skills: { list: () => Promise<UpstreamSkill[]> }
+  skills: { list: (options?: { cwd?: string }) => Promise<UpstreamSkill[]> }
 }
 
 let cached: { cordis: { Context: new () => UpstreamContext }, registry: unknown, provider: unknown } | undefined
@@ -72,13 +72,17 @@ async function loadUpstream(): Promise<NonNullable<typeof cached>> {
  * R13-GH3（H2 跨根）：`agentsHome` / `bundledDir` 可显式注入 —— "运行时发现根"的
  * 行为探针要在**每个候选根**里各放一个唯一名字的技能，才能断言上游实际读了哪些根
  * （含反向对照：不在我们根表里的目录必须**不**被读取）。
+ *
+ * R18B-01（2026-09-25）：`cwd` 可注入 —— 上游**只在给了 cwd 时**才扫 project 根
+ * （`findProjectRoot(cwd)` 向上找 `.git`），"项目根技能盖住能力中心落点"这条
+ * 判定只有带 cwd 才测得出来。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
- * @param options - `agentsHome`/`bundledDir` 覆盖（缺省与生产同形）。
+ * @param options - `agentsHome`/`bundledDir`/`cwd` 覆盖（缺省与生产同形）。
  * @returns 运行时注册表内容（同名先到先得，已是赢家）。
  */
 export async function listRuntimeSkills(
   skillsDir: string,
-  options: { agentsHome?: string, bundledDir?: string } = {},
+  options: { agentsHome?: string, bundledDir?: string, cwd?: string } = {},
 ): Promise<UpstreamSkill[]> {
   const { cordis, registry, provider } = await loadUpstream()
   const home = dirname(skillsDir)
@@ -90,5 +94,5 @@ export async function listRuntimeSkills(
     ...options.bundledDir === undefined ? {} : { bundledSkillDir: options.bundledDir },
     watch: false,
   })
-  return await ctx.skills.list()
+  return await ctx.skills.list(options.cwd === undefined ? undefined : { cwd: options.cwd })
 }
