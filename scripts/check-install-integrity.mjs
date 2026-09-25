@@ -30,28 +30,35 @@
  *
  *   ① **判据执行体逐字节等于 HEAD**：**执行体全集**（见下"执行体全集"）的 HEAD 侧与工作树侧
  *      取并集（检出后才新建的文件也算问题）+ `.yarnrc.yml` + `.gitignore` + 根 `package.json`
- *      + **根与每一个 workspace 包的 `package.json`**；
+ *      + **根与每一个 workspace 包的 `package.json`** + **每一个非 workspace 的 npm 项目
+ *      `package.json`**（`server/webadmin` / `site` 这类：CI 的 `npm ci` 在它的目录里跑，
+ *      就会执行它声明的 install 期钩子）；
  *   ② 根 `.yarnrc.yml` 里**禁键** `yarnPath` / `plugins` 缺席、`enableScripts: false` 与
  *      `nodeLinker: node-modules` 在位，且必须是常规文件（符号链接 = 内容来自仓外）；
  *      **解析面必须覆盖真 YAML 的等价写法**（BOM / 引号键 / 缩进的根映射 / 显式键 `? key`）——
  *      六种形态见 `yarnrcKeyValuePairs()` 与 `temp/r13/…` 的回归用例；
  *   ③ `.yarn/plugins` 与 `.yarn/releases`（"可提交 + 会被 yarn 当代码读"）**工作树与
  *      HEAD 两侧都为空**；
- *   ④ 根与**每一个 workspace manifest** 都没有**未登记**的 install 期生命周期钩子
- *      （登记表 `INSTALL_INTEGRITY_REGISTERED_HOOKS` 当前为空 = 禁新增）；
+ *   ④ 根、**每一个 workspace manifest** 与**每一个非 workspace 的 npm 项目 manifest** 都没有
+ *      **未登记**的 install 期生命周期钩子（登记表 `INSTALL_INTEGRITY_REGISTERED_HOOKS`
+ *      当前为空 = 禁新增）；
  *   ⑤ **平台锚**（第十三轮 R13-D-01）：`git rev-parse HEAD` 必须等于 `$GITHUB_SHA`
  *      （CI 上必在场；不等 / 缺失 ⇒ **退出码 2**）。锚在**平台侧不可改写值**上，而不是
  *      "本进程读得到的那个 HEAD" —— 载荷可以改写本地 git 对象库并 `git commit`，让
  *      `git show HEAD:` 与工作树自洽，从而让①②③④全部失效；
  *   ⑥ **执行体全集按"是否被执行"取，不按"目录形状"取**（第十三轮 V13-A §4.4 / §11③ 的
  *      收口）。全集 = **形状族**（`scripts/check-*.mjs`、`scripts/wasm/**`、
- *      `scripts/verify-*.{mjs,sh}`、`scripts/ci-*.sh`、`packages/<scope>/<pkg>/scripts/**`
+ *      `scripts/verify-*.{mjs,sh}`、`scripts/ci-*.sh`、
+ *      `packages/<scope>/<pkg>/scripts/**`（**任意深度**；递归时显式跳过
+ *      {@link EXCLUDED_JUDGE_TREE_DIRECTORIES} 那几类依赖/构建目录）
  *      —— 这些是"目录形状"看得见的那一半）∪ **执行点推导**（从真实的执行点反推出来的
  *      仓内路径，见 {@link deriveExecutionPoints}）：`.github/workflows/*.yml` 的每个
  *      `run:` 块里**位于命令位/解释器实参位**的路径、根与各工作区 `package.json` 的
  *      scripts 值里的路径、`integration-tests/` 守卫的 spawn 目标 + 它**按目录枚举**的
- *      语法面、各包决定"哪些 spec / 哪些产物真的进判定"的 `vitest.config.ts` /
- *      `tsdown.config.ts`。
+ *      语法面、各包（含**非 yarn workspace 的 npm 项目**，见
+ *      {@link NPM_PROJECT_MANIFEST_REGISTRY}）决定"哪些 spec / 哪些文件被类型检查 /
+ *      哪些产物真的进判定"的 `vitest.config.ts` / `tsdown.config.ts` / `tsconfig*.json`
+ *      一族（{@link PACKAGE_JUDGE_CONFIG_PATTERNS}）。
  *
  *      **为什么按"是否被执行"取**：目录形状是**代理指标**，它只在"执行体恰好都放在
  *      `scripts/` 一族目录里"时才等于真集合 —— V13-A §4.4 实测的五个同类物
@@ -84,8 +91,11 @@
  * ```
  *
  * `--root <dir>`（缺省：cwd 的 git 顶层）、`--restore`（比对后把执行体按 HEAD 重写，
- * 关掉"比对通过→判据启动"之间的改写窗口）、`--json <path>`（落一份摘要封印，供留痕）、
- * `--print-execution-face`（打印三张登记表 + 执行点推导的合取结果，供把新的执行体粘回本文件）。
+ * 关掉"比对通过→判据启动"之间的改写窗口）、`--json <path>`（落一份摘要封印，供留痕；
+ * **带 `verdict` / `ok` / `exitCode` / `problems`** —— 只有判定通过时才写"通过状"内容
+ * （`digests` 封印），失败运行写的是**失败形态**：B-05 的现场是"EXIT=1 的那次留下的封印里
+ * `headEqualsGithubSha:true`、`digests{…}`，没有任何'这次没通过'的痕迹"）、
+ * `--print-execution-face`（打印四张登记表 + 执行点推导的合取结果，供把新的执行体粘回本文件）。
  * 退出码：0 = 全部通过；1 = 有未通过项；2 = 判据自身读不到输入（不在检出里 / HEAD 缺失 /
  * 必需的判据执行体不在 HEAD 里 / **HEAD ≠ `$GITHUB_SHA`** / 参数不合法）。
  *
@@ -209,9 +219,9 @@ const YARN_CODE_DIRECTORIES = ['.yarn/plugins', '.yarn/releases']
  * ⚠️ **它只是执行面的一半**：形状是"执行体长在哪些目录里"的**代理指标**，按它取会漏掉
  * "真被执行但不在这些目录里"的东西（第十三轮 V13-A §4.4 实测的五类）。另一半由
  * {@link deriveExecutionPoints} 从**执行点**反推（workflow `run:` 的命令位、manifest
- * scripts、`integration-tests/` 守卫的 spawn 目标与枚举面、包内的 `vitest/tsdown.config.ts`），
- * 登记在 {@link EXECUTION_POINT_REGISTRY}。两张表**互斥**（执行点表只承载形状族之外的部分），
- * 合起来才是完整执行面。
+ * scripts、`integration-tests/` 守卫的 spawn 目标与枚举面、包内的 `vitest/tsdown.config.ts`
+ * 与 `tsconfig*.json`），登记在 {@link EXECUTION_POINT_REGISTRY}。两张表**互斥**（执行点表
+ * 只承载形状族之外的部分），合起来才是完整执行面。
  */
 const JUDGE_BODY_PATTERNS = [
   /^scripts\/[^/]+\.(?:mjs|cjs|js|ts|sh)$/u,
@@ -220,8 +230,39 @@ const JUDGE_BODY_PATTERNS = [
   // 门禁**清单**（判决的数据面）：`wasm-gate-inventory.json` 的桶资格/预算在这里，
   // 它和判据脚本一样能决定红绿（第三轮审计 W-1 的形态）。
   /^scripts\/wasm\/[^/]+\.json$/u,
-  /^packages\/[^/]+\/[^/]+\/scripts\/[^/]+\.(?:mjs|cjs|ts|js)$/u,
+  // 包内 `scripts/**`：**任意深度**（第十四轮 E-01 的收口）。上一版是
+  // `...\/scripts\/[^/]+\.(mjs|cjs|ts|js)$`（只认**直接子文件**）⇒
+  // `packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs`
+  // （被 `scripts/verify-renderer-error-capture.mjs` 当 Electron 主脚本 spawn，它打印的
+  // 那一行就是那条判据的**全部观察输入**）落在面外：掏空它，两道 install 期锚照打
+  // `VERDICT PASS … 与 HEAD 逐字节一致`、`--restore` 也不还原（E-01 现场实测）。
+  // 递归的形状面与 `scripts/**` 同一口径；构建/依赖目录的排除判据见
+  // {@link EXCLUDED_JUDGE_TREE_DIRECTORIES}（HEAD 侧由 `git ls-tree` 天然过滤，
+  // 排除只作用于**工作树枚举**，避免把 `lib/`、`dist/` 里的产物变成假红）。
+  /^packages\/[^/]+\/[^/]+\/scripts\/.+\.(?:mjs|cjs|ts|js)$/u,
 ]
+
+/**
+ * 工作树**递归枚举**时要显式跳过的目录名（E-01 的排除判据，白名单式：只跳过这些）。
+ *
+ * 为什么需要它：形状族改成递归之后，`packages/<scope>/<pkg>/scripts/**` 下任何名字命中
+ * 扩展名的**构建产物 / 依赖**（`scripts/lib/*.mjs`、`scripts/node_modules/...`）都会被
+ * 工作树枚举看见，而它们按定义不在 HEAD 里 ⇒ 判据会**假红**（"不在 HEAD 里（工作树里却有）"）。
+ * 排除只影响"形状族"的**工作树侧**枚举：HEAD 侧来自 `git ls-tree`（忽略文件根本不会列出），
+ * 所以**递归的 HEAD 面不会因此变小** —— 一条被跟踪的 `scripts/lib/foo.mjs` 仍然进面、
+ * 仍然要登记、仍然逐字节对拍。
+ */
+const EXCLUDED_JUDGE_TREE_DIRECTORIES = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'lib',
+  'out',
+  'coverage',
+  '__pycache__',
+  '.cache',
+  '.git',
+])
 
 /** 判定一个仓库相对路径是否是"形状族"执行体（{@link JUDGE_BODY_PATTERNS} 之一）。 */
 export function isExecutionFacePath(path) {
@@ -248,6 +289,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/e2e-foot-lane.mjs',
   'packages/host/desktop/scripts/e2e-right-sidebar.mjs',
   'packages/host/desktop/scripts/e2e-terminal.mjs',
+  // 递归形状族新增的那一条（E-01）：`packages/<scope>/<pkg>/scripts/**` 任意深度。
+  // 它是 `scripts/verify-renderer-error-capture.mjs` 的 **Electron 主脚本**，那条门禁的
+  // 全部观察（`RENDERER_CAPTURE_SMOKE_RESULT` 行）都由它打印 —— 改写它 = 改写判据的观察端。
+  'packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs',
   'packages/host/desktop/scripts/generate-mac-app-icon.mjs',
   'packages/host/desktop/scripts/generate-tray-icons.mjs',
   'packages/host/desktop/scripts/mac-runtime.ts',
@@ -363,6 +408,47 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
 
 
 /**
+ * **非 yarn workspace 的 npm 项目 manifest** 的登记表（第十四轮 B-02 的收口）。
+ *
+ * ## 它比"workspace manifest"多管什么
+ *
+ * 判据此前只认根 + `workspaces` 展开出来的 manifest（本仓 16 个）。`server/webadmin`
+ * 与 `site` **不是** yarn workspace（根 `workspaces` 只有 `packages/<scope>/<pkg>` 与
+ * `community/<name>` 两张 glob），
+ * 于是它们一条都不在比对面、也不进生命周期钩子的扫描集。而 CI 的 `server` job 恰恰在
+ * `server/webadmin` 里跑 `npm ci` —— 真 npm 实测**会执行项目自己的 `postinstall`**
+ * （`npm ci` 不因 `enableScripts: false` 而豁免：那条只挡 yarn 的依赖构建脚本），
+ * 钩子跑在 `go vet` / `go test` / `make build-server` **之前**，可以改写工作树里的
+ * `server/**` 源码而没有任何守卫把 `server/**` 与 HEAD 对拍（B-02 现场：提交一条
+ * `postinstall` ⇒ 本判据 EXIT=0；只改工作树里的 `server/webadmin/vitest.config.ts`
+ * ⇒ 同样 EXIT=0）。
+ *
+ * ## 派生口径（不手抄名单）
+ *
+ * 派生 = **HEAD 路径全集里除根 manifest 与 workspace manifest 之外的每一个
+ * `package.json`**（见 {@link npmProjectManifestPaths}）—— "每一条 `package.json` 都是
+ * 一个 install 期执行面"是结构事实，不是枚举：新加一个 `server/<x>/package.json` 会
+ * **派生得出来却没登记 ⇒ 红**，删掉一条 ⇒ 死条目红。
+ *
+ * ## 它们同时是"包"（判据配置的来源 (d)）
+ *
+ * 非 workspace 的 npm 项目与 workspace 包一样有自己的 `vitest.config.ts`（决定
+ * `npm test` 跑哪些 spec）与 `tsconfig*.json`（决定 `tsc` 判哪些文件），所以它们也进
+ * {@link deriveExecutionPoints} 的来源 (d)，而不是只做一次字节对拍。
+ *
+ * 双向对拍：见 `main()` 的 ②d 段（未登记即红 / 死条目即红）。
+ */
+export const NPM_PROJECT_MANIFEST_REGISTRY = [
+  // 桌面宿主服务的 smoke 夹具包（`yarn check` 之外的 afterPack/冒烟面）。
+  'packages/host/desktop/tests/fixtures/desktop-host-services-smoke-plugin/package.json',
+  // CI `server` job 的 `npm ci` / `npm test` 就在这个目录里跑：webadmin 的 668 个用例。
+  'server/webadmin/package.json',
+  // 官网（Astro/Starlight）：本地与部署侧都按 npm 项目装依赖。
+  'site/package.json',
+]
+
+
+/**
  * **执行点全集的登记表**（第十三轮 V13-A §4.4 / §11③ 的收口）。
  *
  * ## 它比 `EXECUTION_FACE_REGISTRY` 多管什么
@@ -414,31 +500,66 @@ export const EXECUTION_POINT_REGISTRY = [
   'integration-tests/electron-shots/report.mjs',
   'integration-tests/openldap/ldap-rbac-brand-test.py',
   'integration-tests/run-all.sh',
+  // ── B-01（第十四轮）：包内 `tsconfig*.json` —— 与 `vitest.config.ts` **同一条分界线**
+  //    （一个决定"哪些 spec 跑"、一个决定 `tsc -p` 判哪些文件；改它会让别的判决换结论）。
+  //    按基名形态派生（`tsconfig.<面>.json` 自动进面），未登记即红。
+  'packages/client/account-card/tsconfig.client.json',
+  'packages/client/account-card/tsconfig.json',
   'packages/client/account-card/tsdown.config.ts',
   'packages/client/account-card/vitest.config.ts',
+  'packages/client/branding/tsconfig.client.json',
+  'packages/client/branding/tsconfig.json',
   'packages/client/branding/tsdown.config.ts',
+  'packages/client/foot-menu/tsconfig.client.json',
+  'packages/client/foot-menu/tsconfig.json',
   'packages/client/foot-menu/tsdown.config.ts',
   'packages/client/foot-menu/vitest.config.ts',
+  'packages/client/panel-surface/tsconfig.client.json',
+  'packages/client/panel-surface/tsconfig.json',
   'packages/client/panel-surface/tsdown.config.ts',
   'packages/client/panel-surface/vitest.config.ts',
+  'packages/client/wasm-apps/tsconfig.client.json',
+  'packages/client/wasm-apps/tsconfig.json',
   'packages/client/wasm-apps/tsdown.config.ts',
   'packages/client/wasm-apps/vitest.config.ts',
+  'packages/host/browser/tsconfig.client.json',
+  'packages/host/browser/tsconfig.json',
   'packages/host/browser/tsdown.config.ts',
   'packages/host/browser/vitest.config.ts',
+  'packages/host/connectors/tsconfig.client.json',
+  'packages/host/connectors/tsconfig.json',
   'packages/host/connectors/tsdown.config.ts',
   'packages/host/connectors/vitest.config.ts',
+  'packages/host/cron/tsconfig.client.json',
+  'packages/host/cron/tsconfig.json',
   'packages/host/cron/tsdown.config.ts',
   'packages/host/cron/vitest.config.ts',
+  'packages/host/desktop/tsconfig.client.json',
+  'packages/host/desktop/tsconfig.json',
+  'packages/host/desktop/tsconfig.tests.client.json',
+  'packages/host/desktop/tsconfig.tests.json',
   'packages/host/desktop/tsdown.config.ts',
   'packages/host/desktop/vitest.config.ts',
+  'packages/host/enterprise/tsconfig.client.json',
+  'packages/host/enterprise/tsconfig.json',
   'packages/host/enterprise/tsdown.config.ts',
   'packages/host/enterprise/vitest.config.ts',
+  'packages/host/host-home/tsconfig.json',
   'packages/host/host-home/tsdown.config.ts',
   'packages/host/host-home/vitest.config.ts',
+  'packages/host/host-locale/tsconfig.json',
   'packages/host/host-locale/tsdown.config.ts',
   'packages/host/host-locale/vitest.config.ts',
+  'packages/host/wasm-apps-host/tsconfig.json',
   'packages/host/wasm-apps-host/tsdown.config.ts',
   'packages/host/wasm-apps-host/vitest.config.ts',
+  'packages/vendor/memory-evolve/tsconfig.json',
+  // ── B-02（第十四轮）：**非 yarn workspace 的 npm 项目**的判据配置
+  //    （CI 的 `npm ci` 在 `server/webadmin` 里跑 ⇒ 它的 manifest 与 vitest/tsc 面
+  //    都是执行面；登记表 `NPM_PROJECT_MANIFEST_REGISTRY` 管 manifest 那一半）。
+  'server/webadmin/tsconfig.json',
+  'server/webadmin/vitest.config.ts',
+  'site/tsconfig.json',
 ]
 
 /**
@@ -491,7 +612,8 @@ function listHeadJudgeBodies(root) {
  *
  * 两面合成：
  *   · **形状族**：`scripts/**`（含 `wasm/`、`wasm/probes/`）与
- *     `packages/<scope>/<pkg>/scripts/*` —— 与 {@link JUDGE_BODY_PATTERNS} 一一对应；
+ *     `packages/<scope>/<pkg>/scripts/**`（**任意深度**，跳过
+ *     {@link EXCLUDED_JUDGE_TREE_DIRECTORIES}）—— 与 {@link JUDGE_BODY_PATTERNS} 一一对应；
  *   · **执行点形态**（`faces`，由 {@link deriveExecutionPoints} 从 HEAD 归纳）：
  *     `integration-tests/**` 按守卫的扩展名集合递归、以及每个执行点的父目录 + 同扩展名。
  *     没有这一面时，"检出之后才新增的执行点"（新加一个 `integration-tests/*.mjs`、
@@ -505,20 +627,22 @@ function listHeadJudgeBodies(root) {
  */
 function listWorktreeJudgeBodies(root, faces = []) {
   const found = new Set()
-  const walk = relativeDirectory => {
+  const walk = (relativeDirectory, recursive) => {
     const absolute = join(root, relativeDirectory)
     if (!existsSync(absolute)) return
     for (const entry of readdirSync(absolute, { withFileTypes: true })) {
       const path = `${relativeDirectory}/${entry.name}`
       if (entry.isDirectory()) {
-        // `scripts/` 全深度递归；`packages/<scope>/<pkg>/scripts/` 只认直接子文件。
-        if (relativeDirectory === 'scripts' || relativeDirectory === 'scripts/wasm') walk(path)
+        // `scripts/**` 与 `packages/<scope>/<pkg>/scripts/**` 都**全深度递归**（E-01）。
+        // 递归时跳过 {@link EXCLUDED_JUDGE_TREE_DIRECTORIES}：那些目录里的是依赖与构建
+        // 产物（不在 HEAD 里），枚举进来只会制造"不在 HEAD 里（工作树里却有）"的假红。
+        if (recursive && !EXCLUDED_JUDGE_TREE_DIRECTORIES.has(entry.name)) walk(path, recursive)
         continue
       }
       if ((entry.isFile() || entry.isSymbolicLink()) && isExecutionFacePath(path)) found.add(path)
     }
   }
-  walk('scripts')
+  walk('scripts', true)
   const packages = join(root, 'packages')
   if (existsSync(packages)) {
     for (const scope of readdirSync(packages, { withFileTypes: true })) {
@@ -526,7 +650,7 @@ function listWorktreeJudgeBodies(root, faces = []) {
       const scopeDirectory = join(packages, scope.name)
       for (const pkg of readdirSync(scopeDirectory, { withFileTypes: true })) {
         if (!pkg.isDirectory()) continue
-        walk(`packages/${scope.name}/${pkg.name}/scripts`)
+        walk(`packages/${scope.name}/${pkg.name}/scripts`, true)
       }
     }
   }
@@ -792,15 +916,19 @@ export function ciReferencedExecutionBodies(workflowTexts) {
  *   (a) `.github/workflows/*.yml` 的每个 `run:` 块里**位于命令位 / 解释器实参位**的
  *       仓内路径（`node scripts/x.mjs` 里的那个实参）—— 不是"文本里提到过"：
  *       `git show HEAD:scripts/x.mjs` 是**实参位**（被读的输入），不算：
- *   (b) 根 `package.json` 的全部 scripts 值（`check:*` 是门禁入口表）与各工作区
- *       `package.json` 的 `test` / `check` 值里的仓内路径 token（相对路径按**包目录**解析，
- *       因为 yarn 跑这些脚本时的 cwd 就是包目录）；
+ *   (b) 根 `package.json` 的全部 scripts 值（`check:*` 是门禁入口表）与各工作区 /
+ *       **非 workspace 的 npm 项目** `package.json` 的 `test` / `check` 值里的仓内路径 token
+ *       （相对路径按**包目录**解析，因为 yarn/npm 跑这些脚本时的 cwd 就是包目录）；
  *   (c) `scripts/check-integration-tests.mjs`（`yarn check` 里真跑的守卫）的 spawn 目标，
  *       以及**它按目录枚举的语法面** —— 扩展名集合是**从它的文本里抽出来的**
  *       （`INTEGRATION_SCANNED_EXTENSIONS`），它改扫描面本集合跟着变，不在这里手抄；
- *   (d) 各工作区包目录下的 `vitest.config.ts` / `tsdown.config.ts`（
- *       {@link PACKAGE_JUDGE_CONFIG_BASENAMES}）—— 前者决定"哪些 spec 真的会跑"，
- *       后者决定各包 `build` 的入口表。
+ *   (d) 各包目录下的 `vitest.config.ts` / `tsdown.config.ts`（
+ *       {@link PACKAGE_JUDGE_CONFIG_BASENAMES}）与 `tsconfig*.json` 一族
+ *       （{@link PACKAGE_JUDGE_CONFIG_PATTERNS}）—— 前者决定"哪些 spec 真的会跑"，
+ *       其次决定各包 `build` 的入口表，最后决定 `tsc -p` **判哪些文件**。
+ *       "各包"= yarn workspace 包 ∪ **非 workspace 的 npm 项目**
+ *       （{@link NPM_PROJECT_MANIFEST_REGISTRY}：`server/webadmin` 的 `vitest.config.ts`
+ *       决定它那 668 个用例跑哪些，「不是 workspace」与「不在判据面」是两件事）。
  *
  * ## 语料不进这里（口径）
  *
@@ -851,6 +979,48 @@ export function normalizeRepoPath(path) {
  * 谁在哪个包里都得算；加一个要写明它决定了什么。
  */
 export const PACKAGE_JUDGE_CONFIG_BASENAMES = ['vitest.config.ts', 'tsdown.config.ts']
+
+/**
+ * 同一分界线上的**同族形态**（第十四轮 B-01 的收口）：`tsconfig.json` /
+ * `tsconfig.client.json` / `tsconfig.tests.json` / `tsconfig.tests.client.json` …
+ *
+ * 为什么它们与 `vitest.config.ts` 是**一对一孪生**：一个决定"哪些 spec 真的会跑"，
+ * 一个决定 `tsc -p` **判哪些文件**（`check` 脚本就是 `tsc -p tsconfig.<x>.json`）。
+ * 改它会让**别的**判决换一个结论（类型检查面静默变小）⇒ 按本文件自己的分界线，
+ * 它在"执行体"一侧。B-01 现场：改 `packages/host/desktop/tsconfig.json`（= install 期
+ * 改写）⇒ 本判据 EXIT=0 **并打印真凭据**，而改同族的 `vitest.config.ts` ⇒ EXIT=1。
+ *
+ * 按**基名形态**取而不是手抄名单：包里新加一个 `tsconfig.<新面>.json` 自动进面
+ * （派生结果必须登记，未登记即红）。递归深度不放开 —— 只认包根（`<pkg>/tsconfig*.json`）。
+ */
+export const PACKAGE_JUDGE_CONFIG_PATTERNS = [
+  /^tsconfig(?:\.[A-Za-z0-9_-]+)*\.json$/u,
+]
+
+/**
+ * **非 yarn workspace 的 npm 项目 manifest**的派生（{@link NPM_PROJECT_MANIFEST_REGISTRY}）。
+ *
+ * 口径："**每一条 `package.json` 都是一个 install 期执行面**"—— 根 manifest 由
+ * {@link EXTRA_EXECUTION_ENTRY_PATHS} 覆盖，workspace manifest 由 `workspaces` 展开覆盖，
+ * 剩下的一条不落地全部由这里派生（不手抄名单）。`npm ci` 在某个目录里跑，就会执行那个
+ * 目录的 manifest 声明的 install 期钩子（真 npm 实测），所以"是不是 workspace"与
+ * "会不会在 install 期执行"是两件事。
+ * @param headPaths - HEAD 的路径集合（`Set` 或数组）。
+ * @param workspaceManifests - 已由 `workspaces` 展开出来的 manifest 路径。
+ * @returns 排序后的路径数组。
+ */
+export function npmProjectManifestPaths(headPaths, workspaceManifests = []) {
+  const listed = headPaths instanceof Set ? headPaths : new Set(headPaths ?? [])
+  const covered = new Set(workspaceManifests)
+  const found = new Set()
+  for (const path of listed) {
+    if (path === 'package.json') continue
+    if (!String(path).endsWith('/package.json')) continue
+    if (covered.has(path)) continue
+    found.add(path)
+  }
+  return [...found].sort()
+}
 
 /**
  * 一段 shell 的**命令段**切分（引号感知）。
@@ -1046,16 +1216,17 @@ export function integrationReferencedPaths(text) {
  * **执行点推导（唯一实现）**：从四条来源算出"被执行 / 决定判定"的仓内路径全集。
  *
  * 纯函数：只吃文本与存在性谓词，不碰文件系统、不跑 git。
- * @param options - `{ workflowTexts, rootManifest, workspaceManifests, guardText, headPaths }`。
- *   `workflowTexts` 是 `[文件名, 文本]`；`workspaceManifests` 是 `[{ path, manifest }]`；
- *   `headPaths` 是 HEAD 的路径集合（`Set` 或数组）。
+ * @param options - `{ workflowTexts, rootManifest, workspaceManifests, npmProjectManifests, guardText, headPaths }`。
+ *   `workflowTexts` 是 `[文件名, 文本]`；`workspaceManifests` / `npmProjectManifests` 是
+ *   `[{ path, manifest }]`（前者由 `workspaces` 展开、后者由 {@link npmProjectManifestPaths}
+ *   从 HEAD 派生）；`headPaths` 是 HEAD 的路径集合（`Set` 或数组）。
  * @returns `{ points, faces, counts, extensions, missingSources }`。
  */
 export function deriveExecutionPoints(options = {}) {
   const headPaths = options.headPaths instanceof Set ? options.headPaths : new Set(options.headPaths ?? [])
   const exists = path => headPaths.has(path)
   const points = new Set()
-  const counts = { workflow: 0, manifest: 0, 'integration-guard': 0, 'package-config': 0 }
+  const counts = { workflow: 0, manifest: 0, 'npm-project': 0, 'integration-guard': 0, 'package-config': 0 }
   const record = (source, paths) => {
     for (const path of paths) { counts[source] += points.has(path) ? 0 : 1; points.add(path) }
   }
@@ -1076,14 +1247,30 @@ export function deriveExecutionPoints(options = {}) {
       .filter(path => path.startsWith('integration-tests/') && extensions.includes(extensionOf(path))))
   }
 
+  // 来源 (d) 的**包根**集合 = yarn workspace 包 ∪ 非 workspace 的 npm 项目
+  // （`server/webadmin`、`site`、smoke 夹具包）。两者的"判据配置"语义完全一样：
+  // 前者由 `workspaces` 展开，后者由 {@link npmProjectManifestPaths} 从 HEAD 派生并双向登记。
   const configurations = new Set()
-  for (const entry of options.workspaceManifests ?? []) {
+  const packageRoots = [
+    ...(options.workspaceManifests ?? []).map(entry => ({ ...entry, source: 'manifest' })),
+    ...(options.npmProjectManifests ?? []).map(entry => ({ ...entry, source: 'npm-project' })),
+  ]
+  for (const entry of packageRoots) {
     const directory = String(entry.path).replace(/\/package\.json$/u, '')
+    const source = entry.source ?? 'manifest'
     for (const key of ['test', 'check']) {
-      record('manifest', manifestScriptPaths(entry.manifest?.scripts?.[key], directory, exists))
+      record(source, manifestScriptPaths(entry.manifest?.scripts?.[key], directory, exists))
     }
     for (const name of PACKAGE_JUDGE_CONFIG_BASENAMES) {
       if (exists(`${directory}/${name}`)) configurations.add(`${directory}/${name}`)
+    }
+    for (const path of headPaths) {
+      if (!String(path).startsWith(`${directory}/`)) continue
+      const basename = String(path).slice(directory.length + 1)
+      // 非递归：只认**包根**的判据配置（`<pkg>/tsconfig.json`），不认深层同名文件
+      // （深层那些是各自的语料/夹具，把它们卷进来等于按目录形状取）。
+      if (basename.includes('/')) continue
+      if (PACKAGE_JUDGE_CONFIG_PATTERNS.some(pattern => pattern.test(basename))) configurations.add(path)
     }
   }
   record('package-config', [...configurations])
@@ -1272,11 +1459,13 @@ function main(argv) {
   const derivation = {
     points: [],
     faces: [],
-    counts: { workflow: 0, manifest: 0, 'integration-guard': 0, 'package-config': 0 },
+    counts: { workflow: 0, manifest: 0, 'npm-project': 0, 'integration-guard': 0, 'package-config': 0 },
     extensions: [],
     missingSources: [],
   }
   let ciReferenced = []
+  // 非 yarn workspace 的 npm 项目 manifest（B-02）：从 **HEAD 路径全集**派生（不手抄名单）。
+  let npmManifestPaths = []
   {
     // 输入全部取自 **HEAD 字节**（install 期能改写工作树，读工作树那份等于让载荷自己选判据面）。
     const headWorkflowTexts = []
@@ -1318,10 +1507,24 @@ function main(argv) {
         // manifest 不是合法 JSON 这件事由 ⑥ 段单独报（那里也要用同一份字节），这里跳过即可。
       }
     }
+    // 非 workspace 的 npm 项目（B-02）：派生 → 读 HEAD 字节 → 与 workspace 包同一套口径
+    // （判据配置来源 (d) + install 期钩子扫描 + 逐字节对拍）。
+    npmManifestPaths = npmProjectManifestPaths(headPaths, workspaceManifests)
+    const npmManifestData = []
+    for (const path of npmManifestPaths) {
+      const bytes = readHeadBlob(root, path)
+      if (bytes === null) continue
+      try {
+        npmManifestData.push({ path, manifest: JSON.parse(bytes.toString('utf8')) })
+      } catch {
+        // 同上：非法 JSON 由 ⑥ 段报。
+      }
+    }
     Object.assign(derivation, deriveExecutionPoints({
       workflowTexts: headWorkflowTexts,
       rootManifest: headRootManifest,
       workspaceManifests: workspaceManifestData,
+      npmProjectManifests: npmManifestData,
       guardText: guardBytes.toString('utf8'),
       headPaths,
     }))
@@ -1345,8 +1548,10 @@ function main(argv) {
     print('EXECUTION_FACE_REGISTRY', familyHeadBodies)
     print('EXECUTION_POINT_REGISTRY', outsideFamily)
     print('CI_REFERENCED_EXECUTION_REGISTRY', ciReferenced)
+    print('NPM_PROJECT_MANIFEST_REGISTRY', npmManifestPaths)
     process.stdout.write(`# 执行点推导合计 ${derivation.points.length} 条`
       + `（workflow 命令位 ${derivation.counts.workflow} · manifest scripts ${derivation.counts.manifest}`
+      + ` · npm 项目 ${derivation.counts['npm-project']}`
       + ` · integration-tests 守卫 ${derivation.counts['integration-guard']}`
       + ` · 包内判据配置 ${derivation.counts['package-config']}）；`
       + `其中形状族已覆盖 ${derivedFamily.length} 条、EXECUTION_POINT_REGISTRY 承载 ${outsideFamily.length} 条`
@@ -1380,11 +1585,23 @@ function main(argv) {
       '`.github/workflows/*.yml` 里被引用的执行体就是"CI 里真在跑的东西"—— 它必须与登记表双向相等'
       + '（未登记 = 新执行体悄悄进了 CI；死条目 = 登记表在长成豁免洞）。',
     ))
+    // 第四条边（B-02）：非 workspace 的 npm 项目 manifest。派生 = HEAD 里除根/工作区之外的
+    // 每一条 `package.json` —— 未登记 = 新的 npm 项目（它的 install 期钩子与判据配置）悄悄
+    // 进了判据面之外；死条目 = 那条 manifest 已经不在了。
+    problems.push(...bidirectionalRegistryProblems(
+      'NPM_PROJECT_MANIFEST_REGISTRY',
+      NPM_PROJECT_MANIFEST_REGISTRY,
+      npmManifestPaths,
+      '非 yarn workspace 的 npm 项目 manifest 必须登记（`--print-execution-face` 打印可粘贴表）'
+      + '—— CI 的 `npm ci` 在它的目录里跑就会执行它声明的 install 期钩子（真 npm 实测），'
+      + '而"不是 workspace"不等于"不在 install 期执行"。',
+    ))
     notes.push(`执行体全集：${headBodies.length} 条 = 形状族 ${familyHeadBodies.length} 条`
       + ` + 执行点推导 ${derivation.points.length} 条（workflow 命令位 ${derivation.counts.workflow}`
       + ` · manifest scripts ${derivation.counts.manifest}`
+      + ` · npm 项目 ${derivation.counts['npm-project']}`
       + ` · integration-tests 守卫 ${derivation.counts['integration-guard']}`
-      + ` · 包内判据配置 ${derivation.counts['package-config']}），三张登记表双向对拍通过`)
+      + ` · 包内判据配置 ${derivation.counts['package-config']}），四张登记表双向对拍通过`)
   }
 
   const worktreeBodies = listWorktreeJudgeBodies(root, derivation.faces)
@@ -1394,6 +1611,8 @@ function main(argv) {
     ...EXTRA_EXECUTION_ENTRY_PATHS,
     ...bodyPaths,
     ...workspaceManifests,
+    // B-02：npm 侧 manifest 与执行体同一条纪律 —— 工作树那份必须与 HEAD 逐字节一致。
+    ...npmManifestPaths,
   ])].sort()
 
   // ③ 逐字节对拍（两侧都读 git 对象：工作树那份**可能已被 install 期改写**）。
@@ -1514,12 +1733,14 @@ function main(argv) {
     }
   }
 
-  // ⑥ install 期生命周期钩子：根 + **每一个** workspace manifest（读 HEAD 那份字节）。
-  const manifestPaths = ['package.json', ...workspaceManifests]
+  // ⑥ install 期生命周期钩子：根 + **每一个** workspace manifest + **每一个**非 workspace 的
+  //     npm 项目 manifest（读 HEAD 那份字节）。B-02：`npm ci` 在 `server/webadmin` 里跑就会
+  //     执行它自己的 `postinstall`，而这条通道此前一条判据都没有。
+  const manifestPaths = ['package.json', ...workspaceManifests, ...npmManifestPaths]
   for (const path of manifestPaths) {
     const bytes = readHeadBlob(root, path)
     if (bytes === null) {
-      problems.push(`${path} 不在 HEAD 里 —— 工作区 manifest 登记面残缺`)
+      problems.push(`${path} 不在 HEAD 里 —— manifest 登记面残缺`)
       continue
     }
     let manifest
@@ -1531,30 +1752,56 @@ function main(argv) {
     }
     problems.push(...lifecycleHookProblems(path, manifest))
   }
-  notes.push(`install 期生命周期钩子：根 + ${workspaceManifests.length} 个工作区 manifest 全部无未登记钩子`)
+  notes.push(`install 期生命周期钩子：根 + ${workspaceManifests.length} 个工作区 manifest`
+    + ` + ${npmManifestPaths.length} 个 npm 项目 manifest 全部无未登记钩子`)
 
   if (options.restore && restored.length > 0) {
     notes.push(`已按 HEAD 重写 ${restored.length} 条执行体：${restored.slice(0, 5).join('、')}${restored.length > 5 ? ' …' : ''}`)
   }
 
+  // ⑦ **封印（`--json`）必须与判定同形**（第十四轮 B-05 的收口）。
+  //
+  //    现场：写 json 的语句排在上面的 `if (problems.length > 0) … return 1` **之前**，写出的对象里
+  //    没有 `verdict` / `exitCode` / `problems` 任何字段 ⇒ **EXIT=1 的那次运行**留下一枚
+  //    `headEqualsGithubSha:true / judgeBodies:… / digests{…}` 的"通过状"封印
+  //    （锚致命、退出码 2 时确实不写 —— 那一半是对的）。
+  //    全仓当时没有消费者，但"封印"这个词会让人把它当通过记录 ⇒ 现在按**结论分形态**：
+  //    通过才写 `digests` 封印；失败写的是失败形态（`verdict/ok/exitCode/problemCount/problems`）。
   if (options.json !== null) {
+    const jsonPayload = () => ({
+      // 结论三件套（先于任何"通过状"内容）。
+      verdict: problems.length > 0 ? 'FAIL' : 'PASS',
+      ok: problems.length === 0,
+      exitCode: problems.length > 0 ? 1 : 0,
+      head,
+      // 平台锚（第十三轮 R13-D-01）：CI 侧断言按这个值对拍 `$GITHUB_SHA`。
+      githubSha: anchor.sha,
+      headEqualsGithubSha: anchor.sha !== null,
+      judgeBodies: bodyPaths.length,
+      // 执行点推导（第十三轮 V13-A §4.4）：形状族之外那一半的面。
+      executionPoints: derivation.points.length,
+      executionPointRegistry: EXECUTION_POINT_REGISTRY.length,
+      npmProjectManifests: npmManifestPaths.length,
+      ciReferencedExecutionBodies: CI_REFERENCED_EXECUTION_REGISTRY.length,
+      workspaceManifests: workspaceManifests.length,
+      restored,
+      // "通过状"内容（逐条执行体的摘要封印）**只在判定通过时**写。
+      ...(problems.length === 0
+        ? { digests }
+        : {
+          problemCount: problems.length,
+          // 只记每条的首行：够定位，且不把整份 diff 再抄一遍进封印。
+          problems: problems.map(detail => String(detail).split('\n')[0]),
+        }),
+    })
+    const writeJson = () => writeFileSync(options.json, `${JSON.stringify(jsonPayload(), null, 2)}\n`)
     try {
-      writeFileSync(options.json, `${JSON.stringify({
-        head,
-        // 平台锚（第十三轮 R13-D-01）：CI 侧断言按这个值对拍 `$GITHUB_SHA`。
-        githubSha: anchor.sha,
-        headEqualsGithubSha: anchor.sha !== null,
-        judgeBodies: bodyPaths.length,
-        // 执行点推导（第十三轮 V13-A §4.4）：形状族之外那一半的面。
-        executionPoints: derivation.points.length,
-        executionPointRegistry: EXECUTION_POINT_REGISTRY.length,
-        ciReferencedExecutionBodies: CI_REFERENCED_EXECUTION_REGISTRY.length,
-        workspaceManifests: workspaceManifests.length,
-        restored,
-        digests,
-      }, null, 2)}\n`)
+      writeJson()
     } catch (error) {
       problems.push(`写不出 --json ${options.json}：${error.message}`)
+      // "写不出封印"本身就是一条未通过项 ⇒ 结论从 PASS 变成 FAIL，补写一次失败形态。
+      // 仍然写不出去就只在 stderr 上留痕（不吞）。
+      try { writeJson() } catch { /* 已在 problems 里 */ }
     }
   }
 
@@ -1562,6 +1809,12 @@ function main(argv) {
     for (const detail of problems) process.stderr.write(`\ncheck-install-integrity: ${detail}\n`)
     process.stderr.write(`\ncheck-install-integrity: ${problems.length} 项未通过`
       + `（判据执行体 ${bodyPaths.length} 条 · manifest ${manifestPaths.length} 个 · HEAD ${head.slice(0, 12)}）\n`)
+    // `--restore` 在失败运行里同样有副作用 —— 与 `--json` 同一条纪律：**不许只在通过路径上报**。
+    // （此前这条 note 只出现在下面的 OK 凭据行里，于是"失败 + 已还原"的运行对操作者不可见。）
+    if (options.restore && restored.length > 0) {
+      process.stderr.write(`check-install-integrity: 已按 HEAD 重写 ${restored.length} 条执行体：`
+        + `${restored.slice(0, 5).join('、')}${restored.length > 5 ? ' …' : ''}\n`)
+    }
     process.stderr.write('  ⇒ 这一步是"判据本体在 install 期有没有被改写"的前置校验，'
       + '**必须在任何 yarn/corepack 命令之前**跑：它一旦红，后面的判定块无论打印什么都不作数。\n')
     return 1
@@ -1572,9 +1825,10 @@ function main(argv) {
     + ` manifests=${manifestPaths.length} head=${head.slice(0, 12)}`
     + ` github-sha=${anchor.sha ?? 'absent'}\n`)
   process.stdout.write(`check-install-integrity: OK — 判据执行体 ${bodyPaths.length} 条（形状族 ${familyHeadBodies.length}`
-    + ` + 执行点推导 ${derivation.points.length}：workflow 命令位 / manifest scripts /`
-    + ` integration-tests 守卫 / 包内判据配置`
-    + ` + .yarnrc.yml + .gitignore + package.json + ${workspaceManifests.length} 个工作区 manifest）`
+    + ` + 执行点推导 ${derivation.points.length}：workflow 命令位 / manifest scripts / npm 项目 /`
+    + ` integration-tests 守卫 / 包内判据配置（vitest / tsdown / tsconfig*）`
+    + ` + .yarnrc.yml + .gitignore + package.json + ${workspaceManifests.length} 个工作区 manifest`
+    + ` + ${npmManifestPaths.length} 个 npm 项目 manifest）`
     + `与 HEAD(${head.slice(0, 12)}) **逐字节一致**；${notes.join('；')}\n`)
   return 0
 }

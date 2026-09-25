@@ -898,7 +898,7 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: server/webadmin/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: server/webadmin
       # 2026-09-06 补上门禁缺口(审计 G1/G2):gofmt 与 webadmin 测试此前只在
       # server/Makefile check 中,CI 从未执行。
