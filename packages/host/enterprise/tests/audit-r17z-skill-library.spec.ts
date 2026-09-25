@@ -152,9 +152,9 @@ describe('R17B-01：符号链接条目（运行时加载 / 企业侧镜像必须
     // 卸载：用户自建的链接影子还让运行时加载得到 ⇒ 必须报 RESIDUE，绝不返回成功。
     // R19A-S2-09（2026-09-26）：判据前移到**删除之前** ⇒ 文案说"nothing was removed"，
     // 且落点必须真的还在（旧实现是"报失败但库里那份已经没了"的部分成功）。
-    await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS }))
+    await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS, locale: 'en' }))
       .rejects.toThrow(/still loaded by the runtime from the skill root itself.*"alink"/su)
-    await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS }))
+    await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS, locale: 'en' }))
       .rejects.toThrow(/nothing was removed/su)
     expect(existsSync(join(skillsDir, 'ghost', 'SKILL.md')), '拒绝时一个字节都不动').toBe(true)
     // 用户的链接与库外内容一字未动
@@ -168,7 +168,7 @@ describe('R17B-01：符号链接条目（运行时加载 / 企业侧镜像必须
     // `alink` < `ghost`（localeCompare）⇒ 链接在"同名先到先得"里赢
     await symlink(join(outside, 'ghost-skill'), join(skillsDir, 'alink'), 'dir')
 
-    await expect(installSkillArchive({ name: 'ghost', archive: zipOf('ghost', 'HUB'), skillsDir, channel: 'market' }))
+    await expect(installSkillArchive({ name: 'ghost', archive: zipOf('ghost', 'HUB'), skillsDir, channel: 'market', locale: 'en' }))
       .rejects.toThrow(/runtime still loads "alink".*symbolic link/su)
     // 内容确实写进了落点（如实说明"写了但模型读不到"），链接与库外内容仍在
     expect(await readFile(join(skillsDir, 'ghost', 'SKILL.md'), 'utf8')).toContain('HUB')

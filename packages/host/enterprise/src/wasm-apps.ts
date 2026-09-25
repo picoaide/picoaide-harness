@@ -52,6 +52,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { gatewayFetch, normalizeServerURL } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
+import { isAiRowsConsentScopeError } from './wasm-apps-ai-rows-consent.ts'
 
 /** 本地路由前缀（唯一入口；管理面只在主站，§4.7 的 F-52e）。 */
 export const WASM_APPS_PREFIX = '/api/pico/apps/wasm'
@@ -1775,7 +1776,13 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     //
     // 为什么是一条**本机**路由而不是平台调用：闸门在宿主工具（`wasm_app_rows`）里，
     // 而授权动作发生在渲染进程的面板上 —— 这条路由是两端唯一的连接点（与 app AI
-    // 的 `…/wasm-apps/ai/consent` 同一形态，只是授权维度按 app 而不是按用户×app）。
+    // 的 `…/wasm-apps/ai/consent` 同一形态）。
+    //
+    // 授权维度是 **用户 ⊕ 服务端 ⊕ 应用**（第十九轮审计 R19B-03）：作用域由 store 自己
+    // 从当前会话解析（`auth-gate.ts` 装配处注入的 `scope` 提供者），本路由**不传**任何
+    // 作用域 —— 传参就等于给了"路由与工具各构造一份键"的机会。拿不到用户名/服务端地址时
+    // 写面被 store 拒绝，这里把它映射成 401 `AUTH_REQUIRED`（与兄弟闸门
+    // `wasm-apps-host` 的"拿不到用户名 ⇒ 401"同形），绝不落一条陌生记录。
     //
     // 读与写都要**持有性证明**（含 GET）：这个布尔值就是"AI 能不能读这个应用的数据"
     // 的开关，与 `rows` 同口径 —— `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"。
@@ -1817,6 +1824,17 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
       try {
         await fence.aiRowsConsent.setEnabled(appID, row.enabled)
       } catch (cause) {
+        // 作用域缺失（未登录 / 会话缺用户名或服务端地址）：**不是**磁盘故障，回 401 ——
+        // 与兄弟闸门 `wasm-apps-host` 的"拿不到用户名 ⇒ 401 AUTH_REQUIRED"同形。
+        // 写面 fail-closed 保证这里不会落一条"谁都不是"的记录给下一个账号继承。
+        if (isAiRowsConsentScopeError(cause)) {
+          return fail(res, {
+            code: 'AUTH_REQUIRED',
+            message: hostCopy(locale, '未登录', 'not logged in'),
+            status: 401,
+            hints: ['授权按「账号 + 服务端 + 应用」记录：先登录，再在数据面板里打开这个开关'],
+          })
+        }
         // 写失败**必须**让用户看见：静默成功会让面板显示"已允许"而工具仍然拒绝
         //（下一次调用回 AI_ROWS_NOT_AUTHORIZED），而那看起来像 AI 坏了。
         ctx.logger?.warn?.(`pico-wasm-apps: persisting the AI rows consent failed (${cause instanceof Error ? cause.message : String(cause)})`)

@@ -111,7 +111,8 @@ describe('R13-GH3 H2：卸载的"成功"必须覆盖全部运行时根', () => {
       await seed(join(agentsHome, 'skills'), 'alpha', 'alpha', 'FROM-AGENTS-ROOT')
 
       // ① 先被拒
-      await expect(uninstallSkill(skillsDir, 'alpha', { overwrite: true })).rejects.toThrow(/RESIDUE|still loads it/su)
+      await expect(uninstallSkill(skillsDir, 'alpha', { overwrite: true, locale: 'en' }))
+        .rejects.toThrow(/still loads it/su)
       // 用户在 agent 根里删掉那一份（产品不替用户删），再重装 + 卸载一次
       await rm(join(agentsHome, 'skills', 'alpha'), { recursive: true, force: true })
       await seed(skillsDir, 'alpha', 'alpha', 'FROM-SKILL-LIBRARY')

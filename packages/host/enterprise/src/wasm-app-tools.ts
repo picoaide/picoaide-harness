@@ -370,7 +370,9 @@ export const AI_ROWS_NOT_AUTHORIZED = 'AI_ROWS_NOT_AUTHORIZED'
  *
  * 三条不变量：
  *  - 即使被授权，AI 也**只看得到脱敏列**（`wasm_app_rows` 没有 `unmask` 参数）；
- *  - 授权是**按应用**的（看得到 A 不等于看得到 B）；
+ *  - 授权是**按（用户 ⊕ 服务端 ⊕ 应用）**的（看得到 A 不等于看得到 B；换账号或换服务端
+ *    地址都**不继承** —— R19B-03，2026-09-25 口径变更；键的唯一实现在
+ *    `wasm-apps-ai-rows-consent.ts` 的 `aiRowsConsentKey`）；
  *  - 拒绝里**不落**任何行内容（一个字节都没有，因为压根没有出站）。
  * @param locale - 宿主语言（按调用解析）。
  * @param appId - 应用标识。

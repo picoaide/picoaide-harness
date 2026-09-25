@@ -720,7 +720,10 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     // R19A-S2-02（2026-09-26）：临时区不再直接用字符串路径拼（`.skill-tmp` 是库外链接/
     // junction/挂载点时 staging 会被建到**库外**），而是走**过闸**的唯一入口 —— 位置契约
     // 的方向不变（仍是 `.skill-tmp` 的第二层），只是"从哪拿 tempRoot"收口到一处。
-    expect(source).toContain('const tempRoot = await ensureLibraryTempRoot(skillsDir)')
+    // R20A-K-01（2026-09-26）：那个入口返回的是**锚定结果**（路径 + 逐段身份），
+    // staging 仍从它的 `.path` 派生 —— 后续两次 `rename` + 一次 `rm` 各自紧邻复检。
+    expect(source).toContain('const tempAnchor = await ensureLibraryTempRoot(skillsDir, locale)')
+    expect(source).toContain('const tempRoot = tempAnchor.path')
     expect(source).toContain('anchorLibraryPath(skillsDir, SKILL_TEMP_DIR')
     // R17B-03 更新了这一条位置契约（方向不变、更严）：备份仍在 `.skill-tmp` 的第二层
     // （运行时看不见），但**不再放在 staging 之内** —— 旧形态 `<staging>/backup` 的

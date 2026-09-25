@@ -1687,14 +1687,19 @@ export function apply(ctx: Context, config: Config): void {
   /**
    * 「允许 AI 读取此应用的数据」的授权状态（**默认关**，2026-09-21 用户拍板）。
    *
-   * 三条接线事实在这里一次说清：
+   * 四条接线事实在这里一次说清：
    *  1. **一个实例、两个消费方** —— 本机路由（`/:app_id/ai-rows-consent`，人在面板上点）
    *     与宿主工具（`wasm_app_rows` 的闸门）共用下面这一个对象；
    *  2. **落盘位置** = `$DSH_HOME/wasm-apps-ai-rows-consent.json`（0600，原子写）——
    *     与 `server-connector/tls.ts` 的指纹库同一形态（企业插件既有的"随装小状态"落点）；
    *     不用 `ctx.settings`：那是用户可编辑的产品配置域，且 `bootstrap.ts` 在退出登录时
    *     会 `replace()` 清掉命名空间 ⇒ 授权会随重登消失；
-   *  3. **数据根不可信时**（`dshHomeSafe()` 拒绝：DSH_HOME 指向系统关键目录）退化成
+   *  3. **作用域 = 用户 ⊕ 服务端 ⊕ 应用**（第十九轮审计 R19B-03）：作用域由 store
+   *     自己经下面的 `scope` 提供者**每次调用**解析 —— 登录、换账号、换服务端都发生在
+   *     同一个进程里，构造期快照会让下一个账号继承上一个人的授权。拿不到用户名或
+   *     服务端地址时 store 的写面拒绝（路由据此回 401 `AUTH_REQUIRED`，与
+   *     `wasm-apps-host` 的同名闸门同形），读面回 false；
+   *  4. **数据根不可信时**（`dshHomeSafe()` 拒绝：DSH_HOME 指向系统关键目录）退化成
    *     **内存记录**（照样 fail-closed，只是重启即忘），而不是让插件 apply 失败。
    */
   const aiRowsConsentFile = ((): string | undefined => {
@@ -1707,6 +1712,11 @@ export function apply(ctx: Context, config: Config): void {
   })()
   const aiRowsConsent = createAiRowsConsentStore({
     ...(aiRowsConsentFile === undefined ? {} : { file: aiRowsConsentFile }),
+    // 每次调用求值：`session()` 是同一个进程里随登录状态变化的权威来源。
+    scope: () => {
+      const current = session()
+      return current === null ? null : { user: current.username, server: current.serverURL }
+    },
     warn: message => { ctx.logger?.warn?.(message) },
   })
 
@@ -2131,6 +2141,8 @@ export function apply(ctx: Context, config: Config): void {
                 // 同名技能会让"装好了"变成假象；R18B-04：清理/自愈日志走 ctx.logger。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
@@ -2170,6 +2182,8 @@ export function apply(ctx: Context, config: Config): void {
                 serverURL: s.serverURL,
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               json(res, 200, { ok: true, name })
             } catch (cause) {
@@ -2221,6 +2235,8 @@ export function apply(ctx: Context, config: Config): void {
                 // R18B-01 / R18B-04：见内置技能那条同类注释。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               // 审计 2026-09-23 A11：**回传真实安装版本**。市场归档端点只按
               // "当前 approved 最高版"取（服务端不支持按版本安装），请求里带的
@@ -2262,6 +2278,8 @@ export function apply(ctx: Context, config: Config): void {
                 // 也在已知根里；R18B-04：清理/自愈日志走 ctx.logger。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               json(res, 200, { ok: true, name })
             } catch (cause) {
@@ -2695,6 +2713,8 @@ export function apply(ctx: Context, config: Config): void {
                 // R18B-01 / R18B-04：见内置技能那条同类注释。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, skillsDir),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               // 真实落盘版本以响应为准（审计 A11：请求里的版本可能被服务端忽略）。
               json(res, 200, { ok: true, name, version: result.version ?? ver })
@@ -2739,6 +2759,8 @@ export function apply(ctx: Context, config: Config): void {
                 // 也在已知根里；R18B-04：清理/自愈日志走 ctx.logger。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, skillsDir),
                 log: skillInstallLogForHost(ctx),
+                // R19B-09：拒绝文案按**本次请求**的语言取中英。
+                locale: hostLocale(req),
               })
               json(res, 200, { ok: true, name })
             } catch (cause) {

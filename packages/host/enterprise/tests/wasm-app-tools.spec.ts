@@ -48,6 +48,11 @@ import {
   wasmAppToolHeadroomMs,
 } from '../src/wasm-app-tools.ts'
 import { APP_BUILDER_SKILL } from '../src/builtin-skills.ts'
+import {
+  AI_ROWS_CONSENT_FILE_NAME,
+  aiRowsConsentKey,
+  serializeAiRowsConsent,
+} from '../src/wasm-apps-ai-rows-consent.ts'
 import type { Session } from '../src/server-connector/config.ts'
 
 // `publishApp` 换成计数 spy（实现不变）：这样"路由"与"工具"两条路径是否命中**同一个
@@ -1394,12 +1399,20 @@ describe('作者回读面：AI 也能"看"，但看不到被脱敏的原值', ()
   })
 
   it('三条回读工具对审计账号放行（只读面与 list 同口径），未登录一律零出站拒绝', async () => {
+    // rows 还有第二道闸（AI 读取默认关）：这道闸在会话闸门**之内**，审计账号也要过。
+    // R19B-03 起这道闸**按账号**判（用户 ⊕ 服务端 ⊕ 应用）：员工 alice 的授权**不会**
+    // 被 `audit` 账号继承（反向判据见 tests/wasm-app-ai-rows-consent-scope.spec.ts），
+    // 所以这里为 audit **自己**那段作用域种一条记录 —— 审计账号在客户端是只读的
+    //（写面被 writeGuard 拒），面板打不开，这条记录代表"audit 自己此前授权过"。
+    const auditorKey = aiRowsConsentKey({ user: AUDITOR.username, server: AUDITOR.serverURL }, 'a')
+    expect(auditorKey, 'audit 的作用域必须能构造出键（用户名/服务端都在）').not.toBeNull()
+    await writeFile(
+      join(home, AI_ROWS_CONSENT_FILE_NAME),
+      serializeAiRowsConsent(new Set([auditorKey!])),
+      { mode: 0o600 },
+    )
     for (const name of ['wasm_app_schema', 'wasm_app_diagnostics', 'wasm_app_rows']) {
-      // rows 还有第二道闸（AI 读取默认关）：这道闸在会话闸门**之内**，审计账号也要过。
-      // 但授权本身只能由员工打开（审计账号是只读的，写面由 writeGuard 拒）——
-      // 所以先用**员工** harness 走本机路由授权（同一个数据根，落盘后对下面可见）。
       // ⚠️ 顺序有讲究：每个 `harness()` 都会换掉全局 fetch，被测的那个必须**最后**建。
-      if (name === 'wasm_app_rows') await authorizeAiRows(harness(() => json(200, {}), SESSION), 'a')
       const auditor = harness(() => json(200, {}), AUDITOR)
       const ok = await auditor.run(name, name === 'wasm_app_rows' ? { appId: 'a', table: 't' } : { appId: 'a' })
       expect(ok.ok).toBe(true)
@@ -1410,5 +1423,14 @@ describe('作者回读面：AI 也能"看"，但看不到被脱敏的原值', ()
       expect(denied.ok).toBe(false)
       expect(anonymous.outbound).toHaveLength(0)
     }
+  })
+
+  it('员工本人的读行授权不会漏给 audit：换账号后同一个 app 仍被拒、零出站（R19B-03）', async () => {
+    // 员工走本机路由授权（生产里面板做的就是这件事）。
+    await authorizeAiRows(harness(() => json(200, {}), SESSION), 'a')
+    const auditor = harness(() => json(200, {}), AUDITOR)
+    const denied = await auditor.run('wasm_app_rows', { appId: 'a', table: 't' })
+    expect(denied.ok).toBe(false)
+    expect(auditor.outbound).toHaveLength(0)
   })
 })

@@ -578,8 +578,11 @@ describe('R19A-S2-05/06/07：项目根只来自"仍在使用的工作区"', () =
       console.log('[S2-09] HTTP =', read().code, JSON.stringify(read().body).slice(0, 200))
       expect(read().code).toBe(422)
       expect(read().body.code).toBe('RESIDUE')
-      expect(String(read().body.error)).toMatch(/not uninstalled/su)
-      expect(String(read().body.error)).toMatch(/nothing was removed/su)
+      // R19B-09：这条路由的文案按**调用解析出的宿主语言**取（缺省中文），所以断言
+      // 只钉**语言无关**的可行动信息（点名那份残留的条目名与根路径），不再钉英文整句
+      // —— 语言面由 audit-r20-skill-library.spec.ts 的 zh/en 对照用例覆盖。
+      expect(String(read().body.error)).toContain('"epsilon" in')
+      expect(String(read().body.error)).toContain(join(base, 'agents', 'skills'))
       expect(existsSync(target), '拒绝时落点必须原样保留（修前是"报失败但已删掉"）').toBe(true)
     } finally {
       await rm(base, { recursive: true, force: true })

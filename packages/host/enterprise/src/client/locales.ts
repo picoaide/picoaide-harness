@@ -90,10 +90,14 @@ export const zh = {
   // 配一句后果提示 —— 否则用户点下去才知道自己改过的正文与自加的文件被整树替换了。
   'capability.conflictConfirmDirty': '技能「{name}」已被本地修改（改过正文或加过自己的文件），更新会整目录替换、这些改动会丢失。确定继续？',
   'capability.forceInstallDirty': '仍要更新',
-  'capability.confirmUninstallLocal': '「{name}」是本机自制技能（不是能力中心安装的），删除会连同你自己的文件一起移除。',
+  // 卸载确认（R19B-07）：宿主的两条 `RESIDUE` 判据在**删除之前**判，命中就 422 且
+  // **一个字都不删**（同根用户自建影子 / 项目·用户·内置等其它技能根里的同名条目）。
+  // 所以这里只能说"会删掉本机这一份"，并把它可能被拒绝、以及被拒后先做什么讲清楚 ——
+  // 修前写的是"会连同你自己的文件一起移除"，那是一句**无条件承诺**。
+  'capability.confirmUninstallLocal': '「{name}」是本机自制技能（不是能力中心安装的）：删除会移除本机这一份（你自己的文件）；若同名技能还存在于项目/用户/内置等其它技能根，卸载会被拒绝、本地内容不会被删除，请先处理那一份再重试。',
   'capability.deleteLocal': '仍要删除',
   // 商店装来但被本地修改过（R4-B-3）：删除同样会带走用户的改动，措辞不能说成"自制"。
-  'capability.confirmUninstallDirty': '技能「{name}」已被本地修改（改过正文或加过自己的文件），删除会连同这些改动一起移除。',
+  'capability.confirmUninstallDirty': '技能「{name}」已被本地修改（改过正文或加过自己的文件）：删除会移除本机这一份与这些改动；若同名技能还存在于项目/用户/内置等其它技能根，卸载会被拒绝、本地内容不会被删除，请先处理那一份再重试。',
   // 市场技能的归档端点只按当前 approved 最高版取（审计 A11）：不给"按版本安装"的假入口。
   'capability.marketLatestOnly': '市场技能只能安装当前最新版。',
   // 站级闸（审计 C-03）：`install()` 对"有动作在飞"静默 return ⇒ 按钮必须禁用并说明原因，
@@ -227,11 +231,15 @@ export const en: Record<keyof typeof zh, string> = {
   // is their own edits disappearing.
   'capability.conflictConfirmDirty': 'The skill "{name}" has local modifications (edited text or files you added). Updating replaces the whole directory and discards those changes. Continue?',
   'capability.forceInstallDirty': 'Update anyway',
-  'capability.confirmUninstallLocal': '"{name}" is a locally authored skill on this machine (not installed from the Capability Hub). Deleting it removes your own files too.',
+  // Uninstall confirmation (R19B-07): both `RESIDUE` checks run *before* anything is
+  // deleted, so a same-named copy in another skill root (or a user-created shadow in the
+  // same root) means 422 and nothing local is deleted. The copy used to promise removal
+  // unconditionally; it must now state the refusal and what to do first.
+  'capability.confirmUninstallLocal': '"{name}" is a locally authored skill on this machine (not installed from the Capability Hub): deleting it removes this local copy and your own files; if the same name is still loaded from another skill root (project, user or bundled), the uninstall is refused and nothing local is deleted — handle that copy first, then uninstall again.',
   'capability.deleteLocal': 'Delete anyway',
   // Store content edited locally (R4-B-3): deleting takes those edits with it, and the
   // wording must not claim this copy is locally authored (it came from the Hub).
-  'capability.confirmUninstallDirty': 'The skill "{name}" has local modifications (edited text or files you added). Deleting it removes those changes too.',
+  'capability.confirmUninstallDirty': 'The skill "{name}" has local modifications (edited text or files you added): deleting it removes this local copy and those changes; if the same name is still loaded from another skill root (project, user or bundled), the uninstall is refused and nothing local is deleted — handle that copy first, then uninstall again.',
   // The marketplace archive endpoint only serves the current highest approved version (audit A11).
   'capability.marketLatestOnly': 'Marketplace skills install the current latest version only.',
   // Station-wide gate (audit C-03): `install()` silently returns while another action is in
