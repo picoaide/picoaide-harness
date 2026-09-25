@@ -2846,6 +2846,49 @@ func (c *usageReadConn) Close() error {
 	return c.tx.Rollback()
 }
 
+// ---------------------------------------------------------------------------
+// R13-GH3：本族 pin 的**跨包接缝**（唯一实现的导出别名）
+// ---------------------------------------------------------------------------
+//
+// 为什么需要导出：`internal/llmgateway` 也读同一批族内关系（模型目录、上游路由与
+// 密钥、provider 的模型配置快照），而它原先用的是**裸池 + 未限定名** ——
+// 连接/角色/库级 search_path 前置同名 shadow schema 时：
+//
+//	`SELECT … FROM models m JOIN gateway_providers p …`（ListModels）→ 客户端目录
+//	  里出现 shadow 的诱饵模型；
+//	`SELECT id, name, base_url, api_key_enc … FROM gateway_providers …`
+//	  （loadUpstreamsDB）→ **上游路由与密钥**读自 shadow（静默改路由）；
+//	`SELECT … FROM models WHERE provider_id = ?`（providerModelConfigSnapshot）→
+//	  审计基线与"该 provider 还有没有模型"的守卫都读 shadow。
+//
+// 修法口径与包内一致：**不允许在包外再写一份 BEGIN + `SET LOCAL`**，也不允许
+// 包外自己 `db.Begin()` 开一个会碰族内关系的事务 —— 只允许经下面这几个导出名
+// （它们是上面同一批实现的别名，不是第二份实现）。机械守卫
+// `audit_r13gh3_searchpath_serverface_test.go` 会扫整个 `server/` 核对这一条。
+//
+// 方向说明：依赖方向是 `llmgateway → serverstore`（llmgateway 早已 import
+// serverstore 取 GatewayProvider / AuditLogTx 等），所以接缝只能开在 serverstore
+// 这一侧；反向（serverstore import llmgateway）会成环，这也是"不要各写一份判定"
+// 的结构性理由。
+func UsageWriteTx(db *sql.DB) (*sql.Tx, error) { return usageWriteTx(db) }
+
+// WithUsageSearchPath 是 withUsageSearchPath 的导出别名（池上写入口）。
+func WithUsageSearchPath(db *sql.DB, fn func(*sql.Tx) error) error {
+	return withUsageSearchPath(db, fn)
+}
+
+// WithUsageSearchPathRead 是 withUsageSearchPathRead 的导出别名（池上读入口）。
+func WithUsageSearchPathRead(db *sql.DB, fn func(*sql.Tx) error) error {
+	return withUsageSearchPathRead(db, fn)
+}
+
+// UsageReadConn 是 usageReadConn 的导出别名（同一类型，不是第二份实现）：
+// 让包外调用点也能用 `QueryRow`/`Query` 形态逐条读族内关系。
+type UsageReadConn = usageReadConn
+
+// NewUsageReadConn 是 newUsageReadConn 的导出别名。
+func NewUsageReadConn(db *sql.DB) (*UsageReadConn, error) { return newUsageReadConn(db) }
+
 // withUsageSearchPathRead 是 usageReadConn 的闭包形态（同一实现的第二个门面，
 // 给"body 里只有一两条读语句"的调用点用；两者共用 newUsageReadConn，不存在第二份
 // BEGIN + `SET LOCAL` 字面量）。

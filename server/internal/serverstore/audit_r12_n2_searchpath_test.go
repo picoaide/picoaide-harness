@@ -33,7 +33,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -85,32 +84,13 @@ func r12n2PoolWithShadow(t *testing.T, db *sql.DB) *sql.DB {
 
 // r12n2PoolWithShadowNamed 是参数化 schema 的形态（R13-GE 的读面判据用自己那株
 // shadow，避免与 r12n2 的用例互相 DROP）。
+//
+// R13-GH3：夹具收敛到**唯一实现** `OpenShadowSearchPathPool`（与跨包的
+// `internal/llmgateway` 判据同一份）—— 两边各写一份"造敌对池"的代码，
+// 就会出现"一边的夹具其实没生效、判据静默变成在 public 上跑"的假绿。
 func r12n2PoolWithShadowNamed(t *testing.T, db *sql.DB, schema string) *sql.DB {
 	t.Helper()
-	u, err := url.Parse(r10f4DSNFor(r10gCurDB(t, db)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := u.Query()
-	q.Set("options", "-csearch_path="+schema+",public")
-	u.RawQuery = q.Encode()
-	side, err := openPG(u.String())
-	if err != nil {
-		t.Fatalf("openPG(shadow): %v", err)
-	}
-	t.Cleanup(func() { side.Close() })
-	if err := side.Ping(); err != nil {
-		t.Fatalf("search_path 池 ping: %v", err)
-	}
-	var sp string
-	if err := side.QueryRow("SHOW search_path").Scan(&sp); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(sp, schema) {
-		t.Fatalf("旁路池 search_path=%q，第一段必须是 %s（夹具无效）", sp, schema)
-	}
-	t.Logf("旁路池 search_path=%q", sp)
-	return side
+	return OpenShadowSearchPathPool(t, db, schema)
 }
 
 // r12n2Cell 读某侧 usage 行的某列（两侧都读，用于"谁被改了"的判据）。
@@ -360,64 +340,73 @@ const (
 var r13geSearchPathInventory = map[string]r13gePinMode{
 	// —— 已钉（池上入口经唯一实现：newUsageReadConn / withUsageSearchPathRead /
 	//    withUsageSearchPath / usageWriteTx / pinUsageSearchPath / applyUsageRetentionBudget）——
-	"BalanceLedgerPage":                    r13gePinned, // balance.go
-	"BalanceLedgerSum":                     r13gePinned, // balance.go
-	"ClaimExpiredGatewayFile":              r13gePinned, // gateway_files.go
-	"CleanupPendingUsage":                  r13gePinned, // usage.go
-	"DeleteGatewayFileRow":                 r13gePinned, // gateway_files.go
-	"DeleteGatewayProvider":                r13gePinned, // gateway.go
-	"DeleteSetting":                        r13gePinned, // settings.go
-	"DeleteUsage":                          r13gePinned, // usage.go
-	"DeleteUser":                           r13gePinned, // users.go
-	"FinishReapedGatewayFile":              r13gePinned, // gateway_files.go
-	"GatewayFileOwner":                     r13gePinned, // gateway_files.go
-	"GatewayFileReapBacklogStats":          r13gePinned, // gateway_files.go
-	"GatewayFileReapClaimHeld":             r13gePinned, // gateway_files.go
-	"GatewayFileRowExists":                 r13gePinned, // gateway_files.go
-	"GatewayFileSummary":                   r13gePinned, // gateway_files.go
-	"GatewayFileTotals":                    r13gePinned, // gateway_files.go
-	"GatewayFilesOwnedBy":                  r13gePinned, // gateway_files.go
-	"GetAllSettings":                       r13gePinned, // settings.go
-	"GetGatewayProvider":                   r13gePinned, // gateway.go
-	"GetModel":                             r13gePinned, // gateway.go
-	"ListAdminModels":                      r13gePinned, // gateway.go
-	"ListExpiredGatewayFiles":              r13gePinned, // gateway_files.go
-	"ListGatewayFileIDs":                   r13gePinned, // gateway_files.go
-	"ListGatewayFiles":                     r13gePinned, // gateway_files.go
-	"ListGatewayFilesForPurge":             r13gePinned, // gateway_files.go
-	"ListGatewayProviders":                 r13gePinned, // gateway.go
-	"ListUsageRequests":                    r13gePinned, // requests.go
-	"ModelHasUsage":                        r13gePinned, // gateway.go
-	"ModelProviderMap":                     r13gePinned, // usage_provider.go
-	"NormalizeLegacyPermanentGatewayFiles": r13gePinned, // gateway_files.go
-	"PurgeExpiredGatewayFiles":             r13gePinned, // gateway_files.go
-	"QueryWasmAppAIUsage":                  r13gePinned, // wasm_app_opens_summary.go
-	"RecordGatewayFileSize":                r13gePinned, // gateway_files.go
-	"ReleaseReapClaim":                     r13gePinned, // gateway_files.go
-	"RemoveMissingProviderModels":          r13gePinned, // gateway.go
-	"SetSetting":                           r13gePinned, // settings.go
-	"SetUsageAppID":                        r13gePinned, // wasm_app_opens.go
-	"SetUsageProvider":                     r13gePinned, // usage.go
-	"SyncProviderModel":                    r13gePinned, // gateway.go
-	"UpdateModel":                          r13gePinned, // gateway.go
-	"UsageAggregate":                       r13gePinned, // usage.go
-	"UsageAggregateFromLedger":             r13gePinned, // usage_ledger.go
-	"UserDayUsageCost":                     r13gePinned, // usage.go
-	"UserMonthlyCost":                      r13gePinned, // usage.go
-	"UserMonthlyCostBatch":                 r13gePinned, // usage.go
-	"UserMonthlyUsage":                     r13gePinned, // usage.go
-	"UserMonthlyUsageBatch":                r13gePinned, // usage.go
-	"UserTotalUsageCost":                   r13gePinned, // usage.go
-	"gatewayFileReapClaimActive":           r13gePinned, // gateway_files.go
-	"ledgerMonthHasRows":                   r13gePinned, // usage_ledger.go
-	"ledgerWindowEmpty":                    r13gePinned, // usage_ledger.go
-	"moveRowsIntoUsage":                    r13gePinned, // usage_ledger.go
-	"probeUsagePartitionBudget":            r13gePinned, // partitions.go
-	"reclaimUsagePartitionAtomically":      r13gePinned, // usage_ledger.go
-	"recordUsageKindAtCached":              r13gePinned, // usage.go
-	"updateUsageTokensAtCached":            r13gePinned, // usage.go
-	"usageMonthHasDetail":                  r13gePinned, // usage_ledger.go
-	"usageTreeDescendants":                 r13gePinned, // partitions.go
+	"AuditLogTx":                           r13geViaCaller, // audit.go —— 由调用方的已钉事务钉（见 owners）
+	"PurgeOldAuditLogs":                    r13gePinned,    // audit.go —— withUsageSearchPath
+	"writeAuditBatch":                      r13gePinned,    // audit.go —— usageWriteTx
+	"BalanceLedgerPage":                    r13gePinned,    // balance.go
+	"BalanceLedgerSum":                     r13gePinned,    // balance.go
+	"ClaimExpiredGatewayFile":              r13gePinned,    // gateway_files.go
+	"CleanupPendingUsage":                  r13gePinned,    // usage.go
+	"DeleteGatewayFileRow":                 r13gePinned,    // gateway_files.go
+	"DeleteGatewayProvider":                r13gePinned,    // gateway.go
+	"DeleteSetting":                        r13gePinned,    // settings.go
+	"DeleteUsage":                          r13gePinned,    // usage.go
+	"DeleteUser":                           r13gePinned,    // users.go
+	"FinishReapedGatewayFile":              r13gePinned,    // gateway_files.go
+	"GatewayFileOwner":                     r13gePinned,    // gateway_files.go
+	"GatewayFileReapBacklogStats":          r13gePinned,    // gateway_files.go
+	"GatewayFileReapClaimHeld":             r13gePinned,    // gateway_files.go
+	"GatewayFileRowExists":                 r13gePinned,    // gateway_files.go
+	"GatewayFileSummary":                   r13gePinned,    // gateway_files.go
+	"GatewayFileTotals":                    r13gePinned,    // gateway_files.go
+	"GatewayFilesOwnedBy":                  r13gePinned,    // gateway_files.go
+	"GetAllSettings":                       r13gePinned,    // settings.go
+	"GetGatewayProvider":                   r13gePinned,    // gateway.go
+	"GetModel":                             r13gePinned,    // gateway.go
+	"ListAdminModels":                      r13gePinned,    // gateway.go
+	"ListExpiredGatewayFiles":              r13gePinned,    // gateway_files.go
+	"ListGatewayFileIDs":                   r13gePinned,    // gateway_files.go
+	"ListGatewayFiles":                     r13gePinned,    // gateway_files.go
+	"ListGatewayFilesForPurge":             r13gePinned,    // gateway_files.go
+	"ListGatewayProviders":                 r13gePinned,    // gateway.go
+	"ListUsageRequests":                    r13gePinned,    // requests.go
+	"ModelHasUsage":                        r13gePinned,    // gateway.go
+	"ModelProviderMap":                     r13gePinned,    // usage_provider.go
+	"NormalizeLegacyPermanentGatewayFiles": r13gePinned,    // gateway_files.go
+	"PurgeExpiredGatewayFiles":             r13gePinned,    // gateway_files.go
+	"QueryWasmAppAIUsage":                  r13gePinned,    // wasm_app_opens_summary.go
+	"RecordGatewayFileSize":                r13gePinned,    // gateway_files.go
+	"ReleaseReapClaim":                     r13gePinned,    // gateway_files.go
+	"RemoveMissingProviderModels":          r13gePinned,    // gateway.go
+	"SetSetting":                           r13gePinned,    // settings.go
+	"SetUsageAppID":                        r13gePinned,    // wasm_app_opens.go
+	"SetUsageProvider":                     r13gePinned,    // usage.go
+	"SyncProviderModel":                    r13gePinned,    // gateway.go
+	"UpdateModel":                          r13gePinned,    // gateway.go
+	"UsageAggregate":                       r13gePinned,    // usage.go
+	"UsageAggregateFromLedger":             r13gePinned,    // usage_ledger.go
+	"UserDayUsageCost":                     r13gePinned,    // usage.go
+	"UserMonthlyCost":                      r13gePinned,    // usage.go
+	"UserMonthlyCostBatch":                 r13gePinned,    // usage.go
+	"UserMonthlyUsage":                     r13gePinned,    // usage.go
+	"UserMonthlyUsageBatch":                r13gePinned,    // usage.go
+	"UserTotalUsageCost":                   r13gePinned,    // usage.go
+	"gatewayFileReapClaimActive":           r13gePinned,    // gateway_files.go
+	"GrantMonthlyBalance":                  r13gePinned,    // balance.go —— 事务内 pinUsageSearchPath
+	"GetGrantStatus":                       r13gePinned,    // balance.go —— withUsageSearchPathRead
+	"LastBalanceGrant":                     r13gePinned,    // balance.go —— withUsageSearchPathRead
+	"GetBalanceGrant":                      r13gePinned,    // balance.go —— withUsageSearchPathRead
+	"queryBalanceGrant":                    r13geViaCaller, // balance.go —— LastBalanceGrant / GetBalanceGrant（已钉只读事务）
+	"ledgerMonthHasRows":                   r13gePinned,    // usage_ledger.go
+	"listAuditLogsOn":                      r13geViaCaller, // audit.go —— listAuditLogs（withUsageSearchPathRead）
+	"ledgerWindowEmpty":                    r13gePinned,    // usage_ledger.go
+	"moveRowsIntoUsage":                    r13gePinned,    // usage_ledger.go
+	"probeUsagePartitionBudget":            r13gePinned,    // partitions.go
+	"reclaimUsagePartitionAtomically":      r13gePinned,    // usage_ledger.go
+	"recordUsageKindAtCached":              r13gePinned,    // usage.go
+	"updateUsageTokensAtCached":            r13gePinned,    // usage.go
+	"usageMonthHasDetail":                  r13gePinned,    // usage_ledger.go
+	"usageTreeDescendants":                 r13gePinned,    // partitions.go
 	// —— 由调用方事务钉住（每个都必须在 r13geViaCallerOwners 里有点名）——
 	"AddExcludedModelTx":                r13geViaCaller, // gateway.go
 	"DeleteModelTx":                     r13geViaCaller, // gateway.go
@@ -451,11 +440,15 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	// —— 只读 pg_catalog / to_regclass('public.'||…)（shadow 顶不掉，无动作面）——
 	"scanUsageMonthTables":      r13geCatalogOnly, // usage_ledger.go
 	"usageReclaimEstimatedRows": r13geCatalogOnly, // usage_ledger.go
+	"verifyAuditChainOn":        r13geViaCaller,   // audit.go —— VerifyAuditChain（withUsageSearchPathRead）
 }
 
 // r13geViaCallerOwners 给每一个 via-caller 登记"谁钉的"，避免"以为有人钉"。
 var r13geViaCallerOwners = map[string]string{
 	// 事务版（同一个函数的 Tx 形态）：由它们的池上包装钉。
+	"AuditLogTx":              "llmgateway admin 的 provider 创建/更新 / 模型删除事务（serverstore.UsageWriteTx 开出的已钉事务）",
+	"listAuditLogsOn":         "listAuditLogs（withUsageSearchPathRead）",
+	"verifyAuditChainOn":      "VerifyAuditChain（withUsageSearchPathRead）",
 	"GetGatewayProviderTx":    "GetGatewayProvider（已钉只读事务）",
 	"GetModelTx":              "GetModel（已钉只读事务）",
 	"SetSettingTx":            "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
@@ -481,6 +474,7 @@ var r13geViaCallerOwners = map[string]string{
 	"modelDefaultParamsQ":         "ModelDefaultParams（已钉只读事务）",
 	"getSettingQ":                 "GetSetting / loadPeakWindowsQ（已钉只读事务）",
 	// 只拼 SQL 文本 / catalog 判据（没有 *sql.DB，语句由调用方的已钉事务执行）：
+	"queryBalanceGrant":                 "LastBalanceGrant / GetBalanceGrant（withUsageSearchPathRead 的已钉只读事务）",
 	"ledgerDetailSource":                "rebuildUsageLedgerRowsFrom（调用方的已钉事务）",
 	"rebuildUsageLedgerRowsFrom":        "rebuildUsageLedgerRowsOnPool / applyUsageRetentionBudget 的已钉事务",
 	"usagePartitionRoot":                "scanUsageMonthTables / probeUsagePartitionBudget 等（catalog 判据）",
@@ -492,8 +486,13 @@ var r13geViaCallerOwners = map[string]string{
 // r13geFamilyRelRe 匹配"对族内关系的**动作**"（未限定名或 public. 限定都算；
 // 注释先被剥掉）。刻意**不含** `to_regclass(` —— 它是"限定名构造器"
 // （`to_regclass('public.usage')`），单独由 r13geToRegclassRe 断言必须带 `public.` 前缀。
+//
+// R13-GH3：关系名不再写在本正则里，而是**从登记表 searchPathRelations 派生**
+// （`searchPathFamilyAlternation()`，见 audit_r13gh3_searchpath_serverface_test.go）
+// —— 关系集合是显式登记的数据，尺子与登记表不可能分叉；新增关系只改登记表。
 var r13geFamilyRelRe = regexp.MustCompile(
-	`\b(?:FROM|INTO|UPDATE|JOIN|TABLE|PARTITION\s+OF|DELETE\s+FROM)\s*['"]?\s*(?:public\.|pg_catalog\.|ONLY\s+)?["']?(?:usage_daily|usage_monthly|usage|balance_ledger|gateway_providers|gateway_files|models|settings)\b`)
+	`\b(?:FROM|INTO|UPDATE|JOIN|TABLE|PARTITION\s+OF|DELETE\s+FROM)\s*['"]?\s*(?:public\.|pg_catalog\.|ONLY\s+)?["']?(?:` +
+		searchPathFamilyAlternation() + `)\b`)
 
 // r13geToRegclassRe 抓 `to_regclass(<实参>`，用于断言实参必须硬钉 `public.`。
 var r13geToRegclassRe = regexp.MustCompile(`to_regclass\(\s*([^)]*)`)
@@ -502,11 +501,17 @@ var r13geToRegclassRe = regexp.MustCompile(`to_regclass\(\s*([^)]*)`)
 var r13geCatalogRelRe = regexp.MustCompile(`\b(?:pg_class|pg_namespace|pg_inherits|pg_partition_tree|pg_get_expr|pg_partition_root)\b`)
 
 // r13gePinMarkers 是"钉住 search_path"的全部合法记号（唯一实现的入口集合）。
+//
+// R13-GH3：加入**跨包接缝**的导出名（见 usage_ledger.go 的「本族 pin 的跨包接缝」
+// 一节）—— 包外调用点（`internal/llmgateway`）只允许经这几个名字钉，因此它们必须
+// 与包内名字一样被认作合法 pin 记号；否则"包外也钉了"会被误判成未收口。
 var r13gePinMarkers = []string{
 	"pinUsageSearchPath", "withUsageSearchPath", "withUsageSearchPathRead",
 	"newUsageReadConn", "newUsageReadConnContext", "usageWriteTx",
 	"applyUsageRetentionBudget", "withUsageLockBudget", "setUsageRetentionStatementBudget",
 	"withUsageSettleBudget",
+	// —— 跨包接缝（导出别名，与上面同一批实现）——
+	"UsageWriteTx", "WithUsageSearchPathRead", "WithUsageSearchPath", "NewUsageReadConn",
 }
 
 // r13geQuerierMarkers：形参里出现这些记号 ⇒ 函数开不出自己的事务（由调用方钉）。

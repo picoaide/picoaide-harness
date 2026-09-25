@@ -70,8 +70,10 @@
  * 防"根还在、但内容被搬走或排除规则把文件吃空"。任一条不成立即**退出码 2**。
  */
 
+import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const args = process.argv.slice(2)
 let root = resolve(process.cwd())
@@ -364,6 +366,59 @@ function passLineFor(covered) {
 }
 
 /**
+ * 通过行探测的**子进程开关**（第十三轮 V13-C R-1）。
+ *
+ * 父进程用它把"真脚本真 stdout"那一次运行与"打印路径断言"分开：子进程只负责把通过行
+ * 真的打出去，父进程把**它打出去的字节**抓回来反解断言。与 `check-integration-tests.mjs`
+ * 的 `CHECK_IT_*_SCRIPT` 测试缝同一套纪律 —— **CI 语境下不得设置**（否则这条判据可以被
+ * 一句环境变量关掉）。
+ */
+const VERDICT_PROBE_ENV = 'CHECK_DOC_CLAIMS_VERDICT_PROBE'
+
+/** 取 stdout 里的**非空行**（通过行探测用）。 */
+function verdictLines(stdout) {
+  return String(stdout).split('\n').map(line => line.trimEnd()).filter(line => line.trim() !== '')
+}
+
+/** 取 stdout 里**最后一行非空**（= 真正被当成"通过行"打出去的那一行）。 */
+function verdictLineFrom(stdout) {
+  const lines = verdictLines(stdout)
+  return lines.length === 0 ? '' : lines[lines.length - 1]
+}
+
+/**
+ * 反解**真正打印出去的那一行**（而不是断言内部变量）。
+ *
+ * 现场（第十三轮 V13-C R-1，探针 `d6`）：`printVerdict()` 先 `passLineProblems(summaryLine)`
+ * 再 `console.log(summaryLine)` —— 断言钉的是**变量**。把 `console.log(summaryLine)` 换成
+ * `console.log('check-doc-claims: 文档数字与真源一致（覆盖 2 项）✅')` 之后，守卫 **EXIT=0 且
+ * 打印一句比判据面宽的自述**，与函数自己的注释（"必须钉在打印这条路径上"）相反。
+ *
+ * 判据：喂进来的必须是**进程真实打出去的那段 stdout**（子进程捕获 / 本进程 `write` 拦截），
+ * 然后只认它。
+ * @param stdout - 真实 stdout 片段。
+ * @param covered - 本轮真正产出过断言的项。
+ * @returns 问题列表（空 = 通过）。
+ */
+function printedVerdictProblems(stdout, covered) {
+  const problems = []
+  const line = verdictLineFrom(stdout)
+  if (line === '') {
+    problems.push('通过行探测：真实 stdout 里一行都没有 —— 通过凭据没有真的被打印出去')
+    return problems
+  }
+  // 「打出去的那一行」还必须**唯一**：先打真行再补一句更宽的自述，读者拿到的仍是宽于事实的结论。
+  const suspects = verdictLines(stdout).filter(candidate => candidate.includes(PASS_LINE_PREFIX)
+    || candidate.includes(RETIRED_PASS_CLAIM))
+  if (suspects.length !== 1) {
+    problems.push(`通过行探测：真实 stdout 里有 ${suspects.length} 行"像通过行"的文字（必须恰好 1 行）：`
+      + suspects.map(candidate => JSON.stringify(candidate.trim().slice(0, 160))).join(' | '))
+  }
+  problems.push(...passLineProblems(line, covered))
+  return problems
+}
+
+/**
  * **反解断言通过行本身**（不是断言它存在）：① `已覆盖 N 项` 的 N 必须等于本轮真正
  * 产出断言的项数；② 逐条标签必须**按序**出现（数量对但张冠李戴也红）；③ 不得出现
  * 无边界的旧措辞。
@@ -441,6 +496,19 @@ function selfTest() {
       'selftest: 无边界的旧措辞必须被拒'],
     [passLineProblems(passLineFor(coveredSample).replace('平台模块表', '别的东西'), coveredSample).length > 0,
       'selftest: 通过行张冠李戴必须被拒'],
+    // 打印路径判据（第十三轮 V13-C R-1）：断言必须吃"真 stdout"，且只认最后一行。
+    [verdictLineFrom('诊断行\n\n   \ncheck-doc-claims: 已覆盖 2 项：上游 pin、平台模块表 —— 全部与真源一致 ✅\n')
+      === passLineFor(coveredSample), 'selftest: 通过行探测应取最后一行非空'],
+    [printedVerdictProblems(`${passLineFor(coveredSample)}\n`, coveredSample).length === 0,
+      'selftest: 真 stdout 里的自洽通过行必须被接受'],
+    [printedVerdictProblems('check-doc-claims: 文档数字与真源一致（覆盖 2 项）✅\n', coveredSample).length > 0,
+      'selftest: 打印路径被换成**写死的假自述**（V13-C d6 原形态）必须被拒'],
+    [printedVerdictProblems('check-doc-claims: 已覆盖 7 项：上游 pin、平台模块表 —— 全部与真源一致 ✅\n', coveredSample).length > 0,
+      'selftest: 打印路径声称的项数与实际不符必须被拒'],
+    [printedVerdictProblems(`${passLineFor(coveredSample)}\ncheck-doc-claims: 文档数字与真源一致 ✅\n`, coveredSample).length > 0,
+      'selftest: 真行之后再补一句更宽的自述（"像通过行"的行必须恰好 1 行）必须被拒'],
+    [printedVerdictProblems('诊断行\n', coveredSample).length > 0,
+      'selftest: 没有任何通过凭据被打印出去时必须被拒'],
   ]
   const failed = cases.filter(([ok]) => !ok).map(([, name]) => name)
   if (failed.length > 0) {
@@ -453,6 +521,19 @@ function selfTest() {
 }
 
 if (selftest) selfTest()
+
+// 测试缝的纪律（第十三轮 F-21 的同款口径）：`VERDICT_PROBE_ENV` 只给**本进程自己**拉起的
+// 通过行探测子进程用；它在 CI 语境下被外部设置 = 把"打印路径判据"一句话关掉 ⇒ 当场红。
+{
+  const ciContext = (process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false')
+    || process.env.GITHUB_ACTIONS === 'true'
+  if (ciContext && process.env[VERDICT_PROBE_ENV] !== undefined && process.env[VERDICT_PROBE_ENV] !== '') {
+    console.error(`check-doc-claims: 测试缝 ${VERDICT_PROBE_ENV} 在 CI 语境下不得设置`
+      + `（实际 ${JSON.stringify(process.env[VERDICT_PROBE_ENV])}）—— 它会把"通过行必须钉在打印路径上"`
+      + '这条判据整个关掉（第十三轮 V13-C R-1 的收口件不允许有外部开关）。')
+    process.exit(2)
+  }
+}
 
 const failures = []
 const hits = []
@@ -645,18 +726,71 @@ for (const message of passLineProblems(summaryLine, coveredItems)) {
 }
 
 /**
- * ✅ 行的**唯一出口**：打印前再反解断言一次（与上面覆盖率汇总处同一份实现）。
- * 双保险的理由：断言与打印若各写一份，"改打印不改断言"就能让通过行说谎 ——
- * 「自我陈述」类判据必须钉在**打印**这条路径上。
+ * ✅ 行的**唯一出口**：必须在**打印这条路径上**被反解断言（第十三轮 V13-C R-1 的收口）。
+ *
+ * 三层，缺一不可：
+ *   ① 进程内先按变量断言一遍（与覆盖率汇总处同一份 `passLineProblems`）；
+ *   ② **跑一次真脚本、读真输出**：把自己当子进程再跑一遍（`VERDICT_PROBE_ENV=1`），
+ *      把它 stdout 里**最后一行非空**抓回来 —— 那是"真实运行会打出去的通过行"。
+ *      这是唯一能咬住"改打印不改断言"的层：断言钉的是子进程真正写出的字节，不是变量。
+ *   ③ 本进程打出去的那一段字节同样被拦截并反解断言（打印与断言是同一个字符串）。
+ *
+ * 自己的 stdout 用 `process.stdout.write` 拦截（`console.log` 最终走的就是它）——
+ * 于是"断言过的"与"打出去的"是同一段字节，而不是各写一份。
  */
 function printVerdict() {
+  // ① 变量层（同一份实现被调用两次；②③ 才是真正的打印路径判据）。
   const problems = passLineProblems(summaryLine, coveredItems)
   if (problems.length > 0) {
     for (const message of problems) console.error(`  [PASS-LINE] ${message}`)
     console.error('check-doc-claims: 通过行与真实覆盖面不一致 —— 拒绝打印"一致 ✅"')
     process.exit(1)
   }
-  console.log(summaryLine)
+
+  // ② 真脚本、真 stdout：子进程这次运行**真的**打出去的是哪一行？
+  const probe = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: { ...process.env, [VERDICT_PROBE_ENV]: '1' },
+  })
+  if (probe.error !== undefined) {
+    console.error(`check-doc-claims: 无法跑通过行探测子进程（${probe.error.message}）`
+      + ' —— 不把"探测跑不起来"当通过')
+    process.exit(1)
+  }
+  if (probe.status !== 0) {
+    console.error(`check-doc-claims: 通过行探测子进程 exit ${probe.status}（同一份实现、同一棵树，'
+      + '本应同为通过）—— 拒绝出结论：${String(probe.stderr ?? '').trim().slice(-300)}`)
+    process.exit(1)
+  }
+  const captured = verdictLineFrom(probe.stdout ?? '')
+  const capturedProblems = printedVerdictProblems(probe.stdout ?? '', coveredItems)
+  if (capturedProblems.length > 0) {
+    for (const message of capturedProblems) console.error(`  [PASS-LINE] ${message}`)
+    console.error('check-doc-claims: **真实 stdout 里打出去的那一行**过不了通过行断言 —— '
+      + '这正是"改打印不改断言"的形态（第十三轮 V13-C R-1 的探针 d6）：'
+      + '断言必须钉在打印路径上，不是钉在变量上。')
+    process.exit(1)
+  }
+
+  // ③ 打印，并把"打出去的那一段字节"抓回来再反解一次 —— 断言与打印必须是同一个字符串。
+  const original = process.stdout.write
+  let emitted = null
+  process.stdout.write = (chunk, ...rest) => {
+    emitted = String(chunk)
+    return original.call(process.stdout, chunk, ...rest)
+  }
+  try {
+    console.log(captured)
+  } finally {
+    process.stdout.write = original
+  }
+  const emittedProblems = printedVerdictProblems(emitted ?? '', coveredItems)
+  if (emittedProblems.length > 0) {
+    for (const message of emittedProblems) console.error(`  [PASS-LINE] ${message}`)
+    console.error('check-doc-claims: 本进程**实际写出去**的通过行过不了断言 —— 拒绝以"一致 ✅"收尾')
+    process.exit(1)
+  }
 }
 
 // 最低扫描量：空扫描/扫描面失效必须红（本仓守卫的既定纪律）。
@@ -779,4 +913,10 @@ if (hits.length > 0 || moduleHits.length > 0 || failures.length > 0) {
 
 // 通过行由登记表生成、且刚刚被 `passLineProblems` 反解断言过（数量 + 逐条标签）——
 // 它只声称本轮**真的判过**的项。`--json` 模式只出 JSON（否则那份输出不是合法 JSON）。
-if (!json) printVerdict()
+//
+// `VERDICT_PROBE_ENV` 是**通过行探测子进程**：它只把通过行真的打出去（父进程随后把这段
+// 字节抓回来反解断言）。父进程 `/ 子进程` 走的是同一份实现 —— 差别只有这一行。
+if (!json) {
+  if (process.env[VERDICT_PROBE_ENV] === '1') console.log(passLineFor(coveredItems))
+  else printVerdict()
+}

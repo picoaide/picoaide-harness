@@ -13,7 +13,7 @@
  * 不用我们自己的规则复述；卸载那条更是逐字照 R13-B 的要求：安装 → 卸载 →
  * **再列一次运行时注册表**，断言该技能消失（不是只断言目录被删）。
  */
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,6 +25,13 @@ import {
   uninstallSkill,
 } from '../src/skill-install.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
+import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
+
+// R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +
+// `<agentsHome>/skills` + bundled），而 `<agentsHome>` 默认指向**真实 `~/.agents`** ⇒ 不隔离时
+// 本文件的用例会变成"开发机上装了哪些技能"的函数（命中同名就正确地报 422 RESIDUE）。
+// 隔离实现与实测形态见 tests/helpers/runtime-skill-roots.ts。
+beforeEach(isolateRuntimeSkillRoots)
 
 /** 一份合规的 SKILL.md（frontmatter 名可指定，与目录名解耦）。 */
 function skillMd(name: string, marker: string): string {

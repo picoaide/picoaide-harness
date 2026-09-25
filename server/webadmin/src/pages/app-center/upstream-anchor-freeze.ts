@@ -23,9 +23,14 @@
  *
  * ## 更新方式
  *
- * 改 `deepseek-harness` 的 pin 或该适配器之后：从
+ * 以下任一情况都必须同步下面的常量（判据两条都会咬住，不改就红）：
+ * - `deepseek-harness` 的 pin 变了；
+ * - 该适配器里**那一行本身**改了（换头名、改取值表达式）；
+ * - 路径变了（`ATTRIBUTION_CHAIN_ANCHORS.sender`）。
+ *
+ * 做法：从
  * `deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/adapter.ts`
- * 复制那一行原文替换下面的常量，并在同一个 PR 里提交（判据会强制你做这件事）。
+ * 复制那一行原文替换下面的常量，并在同一个 PR 里提交。
  */
 export const UPSTREAM_SESSION_HEADER_LINE =
   "        ? { 'x-deepseek-harness-session-id': String(options.sessionId) }"

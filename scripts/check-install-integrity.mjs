@@ -43,11 +43,32 @@
  *      （CI 上必在场；不等 / 缺失 ⇒ **退出码 2**）。锚在**平台侧不可改写值**上，而不是
  *      "本进程读得到的那个 HEAD" —— 载荷可以改写本地 git 对象库并 `git commit`，让
  *      `git show HEAD:` 与工作树自洽，从而让①②③④全部失效；
- *   ⑥ **执行体全集的双向登记**：集合来源 = 真实族形态（`scripts/check-*.mjs`、
- *      `scripts/wasm/check-*.mjs`、`scripts/wasm/probes/*.cjs`、`scripts/verify-*.{mjs,sh}`、
- *      `scripts/ci-*.sh`、`packages/<scope>/<pkg>/scripts/**`）∪ **`.github/workflows/*.yml`
- *      里真的被引用的执行体**；登记表 `EXECUTION_FACE_REGISTRY` 与两侧**双向**对拍 ——
- *      未登记即红、登记了却不在集合里也红（死条目）。`--restore` 的覆盖集 = 同一份全集；
+ *   ⑥ **执行体全集按"是否被执行"取，不按"目录形状"取**（第十三轮 V13-A §4.4 / §11③ 的
+ *      收口）。全集 = **形状族**（`scripts/check-*.mjs`、`scripts/wasm/**`、
+ *      `scripts/verify-*.{mjs,sh}`、`scripts/ci-*.sh`、`packages/<scope>/<pkg>/scripts/**`
+ *      —— 这些是"目录形状"看得见的那一半）∪ **执行点推导**（从真实的执行点反推出来的
+ *      仓内路径，见 {@link deriveExecutionPoints}）：`.github/workflows/*.yml` 的每个
+ *      `run:` 块里**位于命令位/解释器实参位**的路径、根与各工作区 `package.json` 的
+ *      scripts 值里的路径、`integration-tests/` 守卫的 spawn 目标 + 它**按目录枚举**的
+ *      语法面、各包决定"哪些 spec / 哪些产物真的进判定"的 `vitest.config.ts` /
+ *      `tsdown.config.ts`。
+ *
+ *      **为什么按"是否被执行"取**：目录形状是**代理指标**，它只在"执行体恰好都放在
+ *      `scripts/` 一族目录里"时才等于真集合 —— V13-A §4.4 实测的五个同类物
+ *      （`integration-tests/**`、各包的 `vitest/tsdown.config.ts`、`community/fabric/scripts/`）
+ *      **真被执行/真决定判定**却一条都不落在形状里：改写它们，本判据此前照样 EXIT=0。
+ *      形状看得见的东西容易再补一条正则，看不见的东西补不出来 —— 所以口径从"目录形状"
+ *      换成"从执行点推导"：**执行点在哪里，判据面就延伸到哪里**。
+ *
+ *      两张登记表（`EXECUTION_FACE_REGISTRY` = 形状族、`EXECUTION_POINT_REGISTRY` =
+ *      形状族**之外**的推导结果）与各自的来源**双向**对拍 —— 派生却未登记即红、
+ *      登记了却派生不出即红（死条目）。`--restore` 的覆盖集 = 同一份全集；
+ *
+ *      **语料不进这个集合（口径写死）**：**执行体 = 被执行 / 决定判定的东西；语料 = 被读的
+ *      输入**。`packages/<scope>/<pkg>/tests/**`（各包 300+ 个 spec）与 `integration-tests/`
+ *      里的图片等 fixture 属于**语料**：改写一份 spec 不会让**别的**判决换结论，它们由各自
+ *      包的测试面负责；而 `vitest.config.ts`（决定"哪些 spec 真的会跑"）在**执行面**里 ——
+ *      这正是"决定判定"与"被判定"的分界。本判据只管前者；
  *   ⑦ **yarn 入口族的环境面**：`YARN_YARN_PATH` 一族键不得出现在判据进程的环境里
  *      （真 yarn 4.18.0 实测 `YARN_YARN_PATH=<仓内 .cjs>` 会执行仓内代码；文件面的禁键判据
  *      看不见环境面这条输入通道）。
@@ -64,7 +85,7 @@
  *
  * `--root <dir>`（缺省：cwd 的 git 顶层）、`--restore`（比对后把执行体按 HEAD 重写，
  * 关掉"比对通过→判据启动"之间的改写窗口）、`--json <path>`（落一份摘要封印，供留痕）、
- * `--print-execution-face`（打印两张登记表，供把新的执行体粘回本文件）。
+ * `--print-execution-face`（打印三张登记表 + 执行点推导的合取结果，供把新的执行体粘回本文件）。
  * 退出码：0 = 全部通过；1 = 有未通过项；2 = 判据自身读不到输入（不在检出里 / HEAD 缺失 /
  * 必需的判据执行体不在 HEAD 里 / **HEAD ≠ `$GITHUB_SHA`** / 参数不合法）。
  *
@@ -83,9 +104,17 @@
  *   · **平台锚的残余边界（R13-D-01/02 认账）**：`$GITHUB_SHA` 值来自平台，但本进程仍与
  *     被审代码同一个 uid —— 同 job 里的仓内执行点理论上可以改写**本进程的环境**（例如在
  *     更早的步骤里往 `$GITHUB_ENV` 写 `GITHUB_SHA`）。所以第一道网是"**任何仓内执行点之前
- *     的第一个执行体**"这个**位置**（由 `check-workflows.mjs` 的 [SK-14⑨] 钉住），
- *     第二道网是 `check-guard-parser-integrity.mjs` 的**远端对象库锚**（判据执行体按
- *     `$GITHUB_SHA` 从 `origin` 取回，载荷改不了远端）。本脚本自己只做第一道网。
+ *     的第一个执行体**"这个**位置**（由 `check-workflows.mjs` 的 [SK-14⑨] 钉住）。
+ *     第二道网是 `check-guard-parser-integrity.mjs` 的**远端对象库锚**：它按 `$GITHUB_SHA`
+ *     从 `origin` 取回同一批判据执行体再复算登记值 —— 那是**另一个域上的独立确认**，
+ *     但**不是**一条"字节不符就能红"的判据：它的 `expected` 由 `git show HEAD:` 的字节派生，
+ *     远端取的是**同一个 commit** 的 blob，内容寻址下两者必然逐字节相同 ⇒ 产线上它实际
+ *     退化成一句**可用性探测**（"这个 job 能不能从 origin 取回 `$GITHUB_SHA`"）；
+ *     "字节不符"那条分支只有**合成 `expected`** 的变异才会命中（第十三轮 V13-A §2.3 的
+ *     实测：生产同形恒为一致，只有人工构造的 expected 才能触发 mismatch）。
+ *     另外它为判定链**新增了一次网络依赖**：取不回（离线 / 凭据抖动 / origin 暂时不可达）
+ *     = 严格面红 —— 那是 fail-closed 的设计意图，但属**运维面**而不是内容面。
+ *     本脚本自己只做第一道网（纯本地、无网络、无凭据）。
  *   · **启动器（`node`）不在本判据的收口面内**：它由 CI 侧的"冻结启动器"步骤 + 静态判据
  *     收口（`scripts/check-frozen-launchers.mjs`）。
  */
@@ -167,16 +196,22 @@ const EXTRA_EXECUTION_ENTRY_PATHS = ['.yarnrc.yml', '.gitignore', 'package.json'
 const YARN_CODE_DIRECTORIES = ['.yarn/plugins', '.yarn/releases']
 
 /**
- * **执行体形态**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口）。
+ * **形状族**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口）。
  *
  * 第十二轮只认 `^scripts/check-[^/]*\.mjs$`（`[^/]*` 显式排除子目录）—— 于是把
  * `scripts/wasm/check-deletion-surface.mjs` 换成恒绿空壳即可让**真实错误状态**
  * 由 `group 2 pass=2 fail=1 / EXIT=1` 变成 `pass=3 fail=0 / EXIT=0`，而两道 install 期锚
  * 同时打 `VERDICT PASS judge-bodies=13` 与 OK（审计实测，可复跑）。
  *
- * 现在的形态**按"CI 里真被执行的执行体"取值**（不是手写清单）：六条族形态覆盖
- * `scripts/**` 的全部判据执行体与 `packages/<scope>/<pkg>/scripts/**`（desktop 的
- * `verify-packaged-runtime.ts` 等 afterPack 判据就在这里）。
+ * 这一族覆盖 `scripts/**` 的全部判据执行体与 `packages/<scope>/<pkg>/scripts/**`（desktop
+ * 的 `verify-packaged-runtime.ts` 等 afterPack 判据就在这里）。
+ *
+ * ⚠️ **它只是执行面的一半**：形状是"执行体长在哪些目录里"的**代理指标**，按它取会漏掉
+ * "真被执行但不在这些目录里"的东西（第十三轮 V13-A §4.4 实测的五类）。另一半由
+ * {@link deriveExecutionPoints} 从**执行点**反推（workflow `run:` 的命令位、manifest
+ * scripts、`integration-tests/` 守卫的 spawn 目标与枚举面、包内的 `vitest/tsdown.config.ts`），
+ * 登记在 {@link EXECUTION_POINT_REGISTRY}。两张表**互斥**（执行点表只承载形状族之外的部分），
+ * 合起来才是完整执行面。
  */
 const JUDGE_BODY_PATTERNS = [
   /^scripts\/[^/]+\.(?:mjs|cjs|js|ts|sh)$/u,
@@ -188,7 +223,7 @@ const JUDGE_BODY_PATTERNS = [
   /^packages\/[^/]+\/[^/]+\/scripts\/[^/]+\.(?:mjs|cjs|ts|js)$/u,
 ]
 
-/** 判定一个仓库相对路径是否是"执行体形态"（六条族形态之一）。 */
+/** 判定一个仓库相对路径是否是"形状族"执行体（{@link JUDGE_BODY_PATTERNS} 之一）。 */
 export function isExecutionFacePath(path) {
   return JUDGE_BODY_PATTERNS.some(pattern => pattern.test(path))
 }
@@ -328,6 +363,85 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
 
 
 /**
+ * **执行点全集的登记表**（第十三轮 V13-A §4.4 / §11③ 的收口）。
+ *
+ * ## 它比 `EXECUTION_FACE_REGISTRY` 多管什么
+ *
+ * 族形态按**目录形状**取（`scripts/**`、`packages/<scope>/<pkg>/scripts/**`），于是
+ * "真被执行、真决定判定、但不住在这些目录里"的东西一条都进不了比对面，也不进
+ * `--restore` 的覆盖集 —— 改写它们，本判据**照样 EXIT=0**（V13-A §4.4 实测）。
+ * 这张表承载的就是那一半：**从执行点推导**（{@link deriveExecutionPoints}）出来、
+ * 而形状族看不见的路径。
+ *
+ * ## 四条来源（每条都只认"执行"这个事实，不认目录名）
+ *
+ *   · **workflow `run:` 的命令位 / 解释器实参位** —— `node scripts/x.mjs`、`bash y.sh`
+ *     里的那个实参。**不是**"文本里提到过"：`git show HEAD:scripts/x.mjs` 这种**实参位**
+ *     不算（它是被读的输入），所以本表不会因为 workflow 里多一句注释而漂移；
+ *   · **根与各工作区 `package.json` 的 scripts 值** —— 根侧扫全部值（`check:*` 是门禁
+ *     的入口表），包侧至少覆盖 `test` / `check`（它们决定"这个包怎么被判"）；
+ *   · **`integration-tests/` 守卫**（`scripts/check-integration-tests.mjs`）—— 它 `spawn` /
+ *     `spawnSync` 的目标，以及**它按目录枚举的语法面**（扩展名集合是从**它自己的文本**里
+ *     抽出来的，不是这里手写的：它改扫描面，本集合跟着变）；
+ *   · **包内决定"哪些 spec / 哪些产物真的进判定"的配置** —— `vitest.config.ts`
+ *     （哪些 spec 会被 vitest 收进来跑）与 `tsdown.config.ts`（各包 `build` 的入口表，
+ *     产物面）。`CODEOWNERS` 也把前者列进"判据面"，此前两边口径不一致。
+ *
+ * ## 语料不进这张表（口径，别再往回加）
+ *
+ * **执行体 = 被执行 / 决定判定的东西；语料 = 被读的输入。**
+ * `packages/<scope>/<pkg>/tests/**`（300+ 个 spec）与 `integration-tests/electron-shots/*.png`
+ * 是**语料**：它们由各自的测试面（`vitest.config.ts` 收哪些 spec、`--self-test` 的夹具）
+ * 负责，本判据不把它们拉进比对面 —— 否则每加一个 spec 都要改这张表，而那样得到的
+ * "覆盖"只是把语料抄了一遍，并不增加任何"判据本体没被改写"的保证。分界线就是
+ * "改它会不会让**别的**判决换一个结论"：改 `vitest.config.ts` 会（少跑一批 spec），
+ * 改一份 spec 不会。
+ *
+ * ## 双向对拍
+ *
+ * 本表与 `deriveExecutionPoints()` 的结果（**减去形状族已覆盖的部分**）双向相等：
+ * 派生却未登记 ⇒ 红；登记了却派生不出 ⇒ 红（死条目 —— 例如那个执行点已经不再被任何
+ * workflow / manifest / 守卫引用）。形状族那一半由 `EXECUTION_FACE_REGISTRY` 负责，
+ * 两张表互斥、合起来 = 完整执行面（`--print-execution-face` 打印两张表与合取结果）。
+ */
+export const EXECUTION_POINT_REGISTRY = [
+  'community/fabric/scripts/verify-docs.mjs',
+  'integration-tests/contractkit.py',
+  'integration-tests/dex/config.yaml',
+  'integration-tests/dex/dex-sso-test.py',
+  'integration-tests/electron-shots/assertions.mjs',
+  'integration-tests/electron-shots/electron-shots.mjs',
+  'integration-tests/electron-shots/report.mjs',
+  'integration-tests/openldap/ldap-rbac-brand-test.py',
+  'integration-tests/run-all.sh',
+  'packages/client/account-card/tsdown.config.ts',
+  'packages/client/account-card/vitest.config.ts',
+  'packages/client/branding/tsdown.config.ts',
+  'packages/client/foot-menu/tsdown.config.ts',
+  'packages/client/foot-menu/vitest.config.ts',
+  'packages/client/panel-surface/tsdown.config.ts',
+  'packages/client/panel-surface/vitest.config.ts',
+  'packages/client/wasm-apps/tsdown.config.ts',
+  'packages/client/wasm-apps/vitest.config.ts',
+  'packages/host/browser/tsdown.config.ts',
+  'packages/host/browser/vitest.config.ts',
+  'packages/host/connectors/tsdown.config.ts',
+  'packages/host/connectors/vitest.config.ts',
+  'packages/host/cron/tsdown.config.ts',
+  'packages/host/cron/vitest.config.ts',
+  'packages/host/desktop/tsdown.config.ts',
+  'packages/host/desktop/vitest.config.ts',
+  'packages/host/enterprise/tsdown.config.ts',
+  'packages/host/enterprise/vitest.config.ts',
+  'packages/host/host-home/tsdown.config.ts',
+  'packages/host/host-home/vitest.config.ts',
+  'packages/host/host-locale/tsdown.config.ts',
+  'packages/host/host-locale/vitest.config.ts',
+  'packages/host/wasm-apps-host/tsdown.config.ts',
+  'packages/host/wasm-apps-host/vitest.config.ts',
+]
+
+/**
  * 一段字节的 sha256（小写 hex）。
  * @param data - 文件 / 对象内容。
  * @returns 摘要。
@@ -375,12 +489,21 @@ function listHeadJudgeBodies(root) {
 /**
  * 工作树里的执行体（含符号链接：符号链接本身也是问题，交给比对环节报）。
  *
- * 递归面 = `scripts/**`（含 `wasm/`、`wasm/probes/`）与 `packages/<scope>/<pkg>/scripts/*`
- * ——与 {@link JUDGE_BODY_PATTERNS} 的族形态一一对应。
+ * 两面合成：
+ *   · **形状族**：`scripts/**`（含 `wasm/`、`wasm/probes/`）与
+ *     `packages/<scope>/<pkg>/scripts/*` —— 与 {@link JUDGE_BODY_PATTERNS} 一一对应；
+ *   · **执行点形态**（`faces`，由 {@link deriveExecutionPoints} 从 HEAD 归纳）：
+ *     `integration-tests/**` 按守卫的扩展名集合递归、以及每个执行点的父目录 + 同扩展名。
+ *     没有这一面时，"检出之后才新增的执行点"（新加一个 `integration-tests/*.mjs`、
+ *     包根新加一个 `*.config.ts`）在工作树里**枚举不到**，也就不会被"不在 HEAD 里"那条判红。
+ *
+ * ⚠️ 工作树侧刻意是**超集**（宁可多枚举、不可漏）：多出来的路径只会在比对环节被判
+ * "不在 HEAD 里（工作树里却有）"或逐字节一致 —— 两个方向都不产生假绿。
  * @param root - 仓库根。
+ * @param faces - 执行点形态（缺省空：只枚举形状族）。
  * @returns 相对路径数组（升序）。
  */
-function listWorktreeJudgeBodies(root) {
+function listWorktreeJudgeBodies(root, faces = []) {
   const found = new Set()
   const walk = relativeDirectory => {
     const absolute = join(root, relativeDirectory)
@@ -407,7 +530,40 @@ function listWorktreeJudgeBodies(root) {
       }
     }
   }
+  for (const face of faces) {
+    const absolute = join(root, face.dir)
+    if (!existsSync(absolute)) continue
+    // 与 `scripts/check-integration-tests.mjs` 自己的枚举口径一致：跳过这三个目录
+    // （它们不是仓内内容，装了依赖/跑过 python 之后不该把工作树枚举面变成假红）。
+    const skipped = new Set(['node_modules', '__pycache__', '.git'])
+    const collect = (directory, relativeDirectory, recursive) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (skipped.has(entry.name)) continue
+        const path = `${relativeDirectory}/${entry.name}`
+        if (entry.isDirectory()) {
+          if (recursive) collect(join(directory, entry.name), path, recursive)
+          continue
+        }
+        if (entry.isFile() || entry.isSymbolicLink()) {
+          if (face.extensions.includes(extensionOf(entry.name))) found.add(path)
+        }
+      }
+    }
+    collect(absolute, face.dir, face.recursive)
+  }
   return [...found].sort()
+}
+
+/**
+ * HEAD 里全部路径（执行点推导的**存在性谓词**来源：workflow / manifest 里提到的相对路径
+ * 只有真的在版本库里才算执行点）。
+ * @param root - 仓库根。
+ * @returns `Set<string>`；读不出 ⇒ `null`。
+ */
+function listHeadPaths(root) {
+  const result = git(root, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'])
+  if (result.status !== 0) return null
+  return new Set(String(result.stdout).split('\0').filter(name => name !== ''))
 }
 
 /**
@@ -618,6 +774,353 @@ export function ciReferencedExecutionBodies(workflowTexts) {
 }
 
 /**
+ * ===========================================================================
+ * 执行点推导（第十三轮 V13-A §4.4 / §11③ 的收口）
+ * ===========================================================================
+ *
+ * ## 为什么要有这一段
+ *
+ * 族形态（{@link JUDGE_BODY_PATTERNS}）按**目录形状**取执行体 —— 那是个**代理指标**：
+ * 只有当"执行体恰好都住在 `scripts/**` 与 `packages/<scope>/<pkg>/scripts/**` 里"时，
+ * 它才等于真集合。V13-A §4.4 的实测反例有五类（`integration-tests/**` 的守卫用例、
+ * 两个 `.py` 契约脚本与聚合层、各包的 `vitest.config.ts` / `tsdown.config.ts`、
+ * `community/fabric/scripts/verify-docs.mjs`）：它们**真被执行 / 真决定判定**，却一条都
+ * 不落在形状里 —— 在工作树里改写它们，本判据照样 EXIT=0。
+ *
+ * 所以这一段**从执行点反推**：谁是执行点，"被执行的东西"就是谁。四条来源：
+ *
+ *   (a) `.github/workflows/*.yml` 的每个 `run:` 块里**位于命令位 / 解释器实参位**的
+ *       仓内路径（`node scripts/x.mjs` 里的那个实参）—— 不是"文本里提到过"：
+ *       `git show HEAD:scripts/x.mjs` 是**实参位**（被读的输入），不算：
+ *   (b) 根 `package.json` 的全部 scripts 值（`check:*` 是门禁入口表）与各工作区
+ *       `package.json` 的 `test` / `check` 值里的仓内路径 token（相对路径按**包目录**解析，
+ *       因为 yarn 跑这些脚本时的 cwd 就是包目录）；
+ *   (c) `scripts/check-integration-tests.mjs`（`yarn check` 里真跑的守卫）的 spawn 目标，
+ *       以及**它按目录枚举的语法面** —— 扩展名集合是**从它的文本里抽出来的**
+ *       （`INTEGRATION_SCANNED_EXTENSIONS`），它改扫描面本集合跟着变，不在这里手抄；
+ *   (d) 各工作区包目录下的 `vitest.config.ts` / `tsdown.config.ts`（
+ *       {@link PACKAGE_JUDGE_CONFIG_BASENAMES}）—— 前者决定"哪些 spec 真的会跑"，
+ *       后者决定各包 `build` 的入口表。
+ *
+ * ## 语料不进这里（口径）
+ *
+ * **执行体 = 被执行 / 决定判定的东西；语料 = 被读的输入。** 判据是"改它会不会让**别的**
+ * 判决换一个结论"：改 `vitest.config.ts` 会（少跑一批 spec），改一份 spec 不会 ⇒
+ * `packages/<scope>/<pkg>/tests/**` 与 `integration-tests/electron-shots/` 下的截图（图片 fixture）
+ * 留在集合外。
+ *
+ * ## 纯度
+ *
+ * 全部函数都是**纯函数**（输入是"文本 + 存在性谓词"），便于单独做正/反用例；
+ * 读 HEAD 字节这件事只发生在 `main()` 里。判据**不 import 任何仓内模块**，也不联网。
+ */
+
+/** 解释器 / 启动器词：出现在命令位时，它的**第一个非 flag 实参**才是被执行的东西。 */
+const LAUNCHER_WORDS = new Set([
+  'node', 'nodejs', 'tsx', 'ts-node', 'deno', 'bun',
+  'bash', 'sh', 'zsh', 'dash', 'pwsh', 'powershell',
+  'python', 'python3', 'ruby', 'perl',
+  'npx', 'corepack', 'yarn', 'pnpm', 'npm',
+  'env', 'sudo', 'time', 'exec', 'command', 'nohup', 'xargs', 'systemd-run', 'choco', 'apt-get',
+])
+
+/** 仓内路径 token 形态（至少一段 `/`、以扩展名结尾、不含 shell 元字符与变量）。 */
+const REPO_PATH_TOKEN = /^[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+$/u
+
+/** 文件扩展名（含点）；没有扩展名 ⇒ `''`。 */
+function extensionOf(path) {
+  const name = String(path).slice(String(path).lastIndexOf('/') + 1)
+  const dot = name.lastIndexOf('.')
+  return dot <= 0 ? '' : name.slice(dot)
+}
+
+/** POSIX 口径归一化（折叠 `.` / `..` / 重复 `/`；不用 `node:path`，免得被平台分隔符带偏）。 */
+export function normalizeRepoPath(path) {
+  const segments = []
+  for (const segment of String(path).split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') { segments.pop(); continue }
+    segments.push(segment)
+  }
+  return segments.join('/')
+}
+
+/**
+ * 各包"决定哪些 spec / 哪些产物真的进判定"的配置文件基名（{@link deriveExecutionPoints} 的
+ * 来源 (d)）。这是一份**声明式口径**而不是"目录形状"：它说的是"这两个文件决定判定"，
+ * 谁在哪个包里都得算；加一个要写明它决定了什么。
+ */
+export const PACKAGE_JUDGE_CONFIG_BASENAMES = ['vitest.config.ts', 'tsdown.config.ts']
+
+/**
+ * 一段 shell 的**命令段**切分（引号感知）。
+ *
+ * 与 {@link ciReferencedExecutionBodies} 的"整份文本扫 token"不同：这里只认**语法位置**。
+ * 切分符 = 换行 / `;` / `&&` / `||` / `|` / `&` / `$(` / `)` / 反引号；`>` `<` 是**词**分隔符
+ * （重定向目标不是命令）；`#` 在词首时吃掉该行剩余（shell 注释），于是 workflow 里大段的
+ * 中文注释不会贡献任何"命令位"。引号内的切分符不生效（`echo "a) scripts/x.mjs"` 不会把
+ * 实参位误判成命令位）。
+ * @param text - shell 文本。
+ * @returns 命令数组，每条是词数组（引号已去）。
+ */
+export function shellCommands(text) {
+  const commands = []
+  let words = []
+  let current = ''
+  let quote = null
+  const flushWord = () => { if (current !== '') { words.push(current); current = '' } }
+  const flushCommand = () => { flushWord(); if (words.length > 0) commands.push(words); words = [] }
+  const source = String(text)
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+    if (quote !== null) {
+      if (char === quote) { quote = null; continue }
+      if (quote === '"' && char === '\\') { current += source[index + 1] ?? ''; index += 1; continue }
+      current += char
+      continue
+    }
+    if (char === '"' || char === "'") { quote = char; continue }
+    if (char === '\\' && source[index + 1] === '\n') { index += 1; continue }
+    if (char === '#' && current === '' && words.length === 0) {
+      while (index < source.length && source[index] !== '\n') index += 1
+      flushCommand()
+      continue
+    }
+    if (char === '\n' || char === ';' || char === '`') { flushCommand(); continue }
+    if (char === '&' || char === '|') { flushCommand(); if (source[index + 1] === char) index += 1; continue }
+    if (char === '$' && source[index + 1] === '(') { flushCommand(); index += 1; continue }
+    if (char === ')') { flushCommand(); continue }
+    if (char === ' ' || char === '\t' || char === '\r' || char === '>' || char === '<') { flushWord(); continue }
+    current += char
+  }
+  flushCommand()
+  return commands
+}
+
+/**
+ * 一个词是不是"启动器"（命令位上的解释器）：裸解释器名，或 runner 侧展开出来的
+ * `${{ steps.… }}` 表达式（本仓的判据步一律用它取**冻结的绝对路径**启动器）。
+ * @param word - 去引号后的词。
+ * @returns 是否启动器。
+ */
+function isLauncherWord(word) {
+  if (LAUNCHER_WORDS.has(word)) return true
+  return /^\$\{\{[^}]*\}\}$/u.test(word)
+}
+
+/**
+ * 从 workflow 文本里抽出全部 `run:` 块（块标量 `|` / `>` 与其变体，以及行内形态）。
+ * @param text - workflow 文本。
+ * @returns 块文本数组（块标量的公共缩进已剥掉）。
+ */
+export function workflowRunBlocks(text) {
+  const lines = String(text).split('\n')
+  const blocks = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^([ \t]*)(?:-[ \t]+)?run:[ \t]*(.*)$/u.exec(lines[index])
+    if (match === null) continue
+    const indent = match[1].length
+    const rest = match[2].trim()
+    if (rest !== '' && !/^[|>][-+]?[0-9]*$/u.test(rest)) { blocks.push(rest); continue }
+    const body = []
+    let cursor = index + 1
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor]
+      if (line.trim() === '') { body.push(''); continue }
+      if (line.length - line.trimStart().length <= indent) break
+      body.push(line)
+    }
+    const indents = body.filter(line => line.trim() !== '').map(line => line.length - line.trimStart().length)
+    const cut = indents.length > 0 ? Math.min(...indents) : 0
+    blocks.push(body.map(line => line.slice(cut)).join('\n'))
+    index = cursor - 1
+  }
+  return blocks
+}
+
+/**
+ * 从一段 shell 文本里抽**位于命令位 / 解释器实参位**的仓内路径。
+ *
+ * 命令位 = 每条命令的第一个词；解释器实参位 = 启动器词之后**跳过 flag 与 `NAME=VALUE`**
+ * 的第一个词（链式：`corepack yarn …` 会继续往下走）。两者之外的词一律不看 ——
+ * 这正是"被执行"与"被提到"的分界。
+ * @param text - shell 文本。
+ * @param exists - 存在性谓词（缺省全真；调用方传 `HEAD` 的路径集合）。
+ * @returns 仓内路径数组（升序、去重）。
+ */
+export function commandPositionPaths(text, exists = () => true) {
+  const found = new Set()
+  for (const words of shellCommands(text)) {
+    const candidates = [words[0]]
+    let index = 0
+    let hops = 0
+    while (index < words.length && hops < 8) {
+      hops += 1
+      if (!isLauncherWord(words[index])) break
+      let next = index + 1
+      while (next < words.length
+        && (words[next].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[next]))) next += 1
+      if (next >= words.length) break
+      candidates.push(words[next])
+      index = next
+    }
+    for (const token of candidates) {
+      if (!REPO_PATH_TOKEN.test(token) || extensionOf(token) === '') continue
+      const path = normalizeRepoPath(token)
+      if (exists(path)) found.add(path)
+    }
+  }
+  return [...found].sort()
+}
+
+/**
+ * 从一段 manifest `scripts` 值里抽仓内路径 token。
+ *
+ * `baseDir` 非空时按**包目录**解析（yarn 跑包脚本的 cwd 就是包目录：`node scripts/build.mjs`
+ * 指的是 `<包>/scripts/build.mjs`），解析不出再退回仓库根口径。
+ * @param value - script 值。
+ * @param baseDir - 包目录（仓库根传 `''`）。
+ * @param exists - 存在性谓词。
+ * @returns 仓内路径数组（升序、去重）。
+ */
+export function manifestScriptPaths(value, baseDir = '', exists = () => true) {
+  const found = new Set()
+  for (const raw of String(value ?? '').split(/[\s;&|()<>]+/u)) {
+    const token = raw.replace(/^["']|["']$/gu, '')
+    if (!REPO_PATH_TOKEN.test(token) || extensionOf(token) === '') continue
+    const local = normalizeRepoPath(baseDir === '' ? token : `${baseDir}/${token}`)
+    if (exists(local)) { found.add(local); continue }
+    if (exists(token)) found.add(token)
+  }
+  return [...found].sort()
+}
+
+/**
+ * 从 `scripts/check-integration-tests.mjs` 的**文本**里抽"按目录枚举"的扩展名集合。
+ *
+ * 不在这里手抄 `.py` / `.mjs`：那个守卫自己声明了扫描面（`INTEGRATION_SCANNED_EXTENSIONS`
+ * 与两处 `endsWith('…')`），它改口径本集合跟着变 —— 这正是"从执行点推导"而不是
+ * "把当前形状抄成常量"的区别。抽不出任何扩展名 ⇒ 返回空数组，调用方按**推导面失效**处理
+ * （fail-closed：不把"读不出"当成"没有执行点"）。
+ * @param text - 守卫文本。
+ * @returns 扩展名数组（含点，升序）。
+ */
+export function integrationScanExtensions(text) {
+  const source = String(text)
+  const extensions = new Set()
+  const declaration = /INTEGRATION_SCANNED_EXTENSIONS\s*=\s*\[([^\]]*)\]/u.exec(source)
+  if (declaration !== null) {
+    for (const match of declaration[1].matchAll(/'(\.[A-Za-z0-9]+)'|"(\.[A-Za-z0-9]+)"/gu)) {
+      extensions.add(match[1] ?? match[2])
+    }
+  }
+  if (extensions.size === 0) {
+    for (const match of source.matchAll(/endsWith\(\s*['"](\.[A-Za-z0-9]+)['"]\s*\)/gu)) extensions.add(match[1])
+  }
+  return [...extensions].sort()
+}
+
+/**
+ * 从守卫文本里抽它**引用到**的 `integration-tests/…` 路径（字面量，或 `join(ROOT, 'a','b')`）。
+ *
+ * 这是"被它读/被它 spawn"的那一面；与 {@link integrationScanExtensions} 的枚举面合起来
+ * 才是完整的来源 (c)：枚举面覆盖"按扩展名会被扫到的全部文件"，引用面兜住"枚举面之外的
+ * 具名目标"（守卫改写法时不会漏）。
+ * @param text - 守卫文本。
+ * @returns 路径数组（升序、去重）。
+ */
+export function integrationReferencedPaths(text) {
+  const source = String(text)
+  const found = new Set()
+  for (const match of source.matchAll(/['"]([A-Za-z0-9_.@/-]*integration-tests\/[A-Za-z0-9_.@/-]+)['"]/gu)) {
+    found.add(normalizeRepoPath(match[1]))
+  }
+  for (const match of source.matchAll(/join\(\s*ROOT\s*,\s*((?:'[^']*'|"[^"]*")(?:\s*,\s*(?:'[^']*'|"[^"]*"))*)\s*\)/gu)) {
+    const parts = [...match[1].matchAll(/'([^']*)'|"([^"]*)"/gu)].map(quote => quote[1] ?? quote[2])
+    if (parts.length > 0 && parts[0] === 'integration-tests') found.add(normalizeRepoPath(parts.join('/')))
+  }
+  return [...found].sort()
+}
+
+/**
+ * **执行点推导（唯一实现）**：从四条来源算出"被执行 / 决定判定"的仓内路径全集。
+ *
+ * 纯函数：只吃文本与存在性谓词，不碰文件系统、不跑 git。
+ * @param options - `{ workflowTexts, rootManifest, workspaceManifests, guardText, headPaths }`。
+ *   `workflowTexts` 是 `[文件名, 文本]`；`workspaceManifests` 是 `[{ path, manifest }]`；
+ *   `headPaths` 是 HEAD 的路径集合（`Set` 或数组）。
+ * @returns `{ points, faces, counts, extensions, missingSources }`。
+ */
+export function deriveExecutionPoints(options = {}) {
+  const headPaths = options.headPaths instanceof Set ? options.headPaths : new Set(options.headPaths ?? [])
+  const exists = path => headPaths.has(path)
+  const points = new Set()
+  const counts = { workflow: 0, manifest: 0, 'integration-guard': 0, 'package-config': 0 }
+  const record = (source, paths) => {
+    for (const path of paths) { counts[source] += points.has(path) ? 0 : 1; points.add(path) }
+  }
+
+  const workflowTexts = options.workflowTexts ?? []
+  for (const [, text] of workflowTexts) record('workflow', commandPositionPaths(text, exists))
+
+  for (const value of Object.values(options.rootManifest?.scripts ?? {})) {
+    record('manifest', manifestScriptPaths(value, '', exists))
+  }
+
+  const guardText = String(options.guardText ?? '')
+  const extensions = integrationScanExtensions(guardText)
+  if (extensions.length > 0) {
+    record('integration-guard', integrationReferencedPaths(guardText)
+      .filter(path => exists(path) && extensions.includes(extensionOf(path))))
+    record('integration-guard', [...headPaths]
+      .filter(path => path.startsWith('integration-tests/') && extensions.includes(extensionOf(path))))
+  }
+
+  const configurations = new Set()
+  for (const entry of options.workspaceManifests ?? []) {
+    const directory = String(entry.path).replace(/\/package\.json$/u, '')
+    for (const key of ['test', 'check']) {
+      record('manifest', manifestScriptPaths(entry.manifest?.scripts?.[key], directory, exists))
+    }
+    for (const name of PACKAGE_JUDGE_CONFIG_BASENAMES) {
+      if (exists(`${directory}/${name}`)) configurations.add(`${directory}/${name}`)
+    }
+  }
+  record('package-config', [...configurations])
+
+  // 工作树侧的**同类形态**：形状族看不见的那一半也要能在工作树里被枚举到
+  // （否则"检出之后才新建的执行点"照旧隐形）。两张形态，都从上面的派生结果归纳：
+  //   ① `integration-tests/**` 递归 + 守卫枚举的扩展名集合；
+  //   ② 每个执行点的**父目录 + 同扩展名**（非递归）—— 于是包根新加一个
+  //      `*.config.ts`、`community/fabric/scripts/` 新加一个 `.mjs` 都会被看见。
+  const faces = []
+  const seenFaces = new Set()
+  const addFace = (directory, recursive, faceExtensions) => {
+    if (directory === '' || faceExtensions.length === 0) return
+    const key = `${recursive ? 'recursive' : 'direct'}:${directory}:${[...faceExtensions].sort().join(',')}`
+    if (seenFaces.has(key)) return
+    seenFaces.add(key)
+    faces.push({ dir: directory, recursive, extensions: [...faceExtensions].sort() })
+  }
+  if (extensions.length > 0 && [...points].some(path => path.startsWith('integration-tests/'))) {
+    addFace('integration-tests', true, extensions)
+  }
+  for (const path of points) {
+    addFace(path.slice(0, path.lastIndexOf('/')), false, [extensionOf(path)])
+  }
+
+  const sorted = [...points].sort()
+  return {
+    points: sorted,
+    faces,
+    counts,
+    extensions,
+    missingSources: [...(extensions.length === 0 ? ['integration-guard'] : []),
+      ...(workflowTexts.length === 0 ? ['workflow'] : [])],
+  }
+}
+
+/**
  * 双向登记对拍（登记表 vs 派生集合）。
  * @param label - 表名（用于报错）。
  * @param registered - 登记表。
@@ -730,58 +1233,18 @@ function main(argv) {
   }
   if (anchor.note !== null) notes.push(anchor.note)
 
-  // ① 判据执行体集合：HEAD 侧 ∪ 工作树侧（检出后才新建的脚本也必须在集合里报出来）。
-  const headBodies = listHeadJudgeBodies(root)
-  if (headBodies === null) {
+  // ① 判据执行体的**形状族**（HEAD 侧）。
+  const familyHeadBodies = listHeadJudgeBodies(root)
+  if (familyHeadBodies === null) {
     process.stderr.write('check-install-integrity: 读不出 HEAD 的执行体清单\n')
     return 2
   }
   for (const required of REQUIRED_JUDGE_BODIES) {
-    if (!headBodies.includes(required)) {
+    if (!familyHeadBodies.includes(required)) {
       process.stderr.write(`check-install-integrity: 必需的判据执行体不在 HEAD 里：${required}\n`
         + '  ⇒ 判据面残缺，拒绝在"少了几份判据"的树上判"通过"。\n')
       return 2
     }
-  }
-  const worktreeBodies = listWorktreeJudgeBodies(root)
-  const bodyPaths = [...new Set([...headBodies, ...worktreeBodies])].sort()
-
-  // ①b **执行体全集的双向登记**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口）。
-  //     集合来源不是手写清单：族形态命中的 HEAD 侧文件 ∪ workflow 文本里被引用的执行体。
-  {
-    const headWorkflowTexts = []
-    const workflowNames = git(root, ['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', '.github/workflows'])
-    if (workflowNames.status !== 0) {
-      process.stderr.write('check-install-integrity: 读不出 HEAD 的 `.github/workflows/` 清单\n')
-      return 2
-    }
-    for (const name of String(workflowNames.stdout).split('\0').filter(entry => /\.ya?ml$/u.test(entry))) {
-      const bytes = readHeadBlob(root, name)
-      if (bytes === null) continue
-      headWorkflowTexts.push([name, bytes.toString('utf8')])
-    }
-    if (headWorkflowTexts.length === 0) {
-      process.stderr.write('check-install-integrity: HEAD 里一份 workflow 都读不到 ⇒'
-        + '"CI 里真被执行的执行体"这条来源缺席，拒绝把"读不到"当成"没有"\n')
-      return 2
-    }
-    const ciReferenced = ciReferencedExecutionBodies(headWorkflowTexts)
-    problems.push(...bidirectionalRegistryProblems(
-      'EXECUTION_FACE_REGISTRY',
-      EXECUTION_FACE_REGISTRY,
-      headBodies,
-      '新增执行体必须登记（`node scripts/check-install-integrity.mjs --print-execution-face` 打印可粘贴表）'
-      + '—— 未登记的执行体不进"工作树 == HEAD"的比对面，也不进 `--restore` 的覆盖集。',
-    ))
-    problems.push(...bidirectionalRegistryProblems(
-      'CI_REFERENCED_EXECUTION_REGISTRY',
-      CI_REFERENCED_EXECUTION_REGISTRY,
-      ciReferenced,
-      '`.github/workflows/*.yml` 里被引用的执行体就是"CI 里真在跑的东西"—— 它必须与登记表双向相等'
-      + '（未登记 = 新执行体悄悄进了 CI；死条目 = 登记表在长成豁免洞）。',
-    ))
-    notes.push(`执行体全集：${headBodies.length} 条（族形态）+ workflow 引用 ${ciReferenced.length} 条，`
-      + '两张登记表双向对拍通过')
   }
 
   // ② 根 manifest 的 workspaces（HEAD 侧：登记面按**提交的那份**算，避免被 install 期改动带偏）。
@@ -804,22 +1267,128 @@ function main(argv) {
     return 2
   }
 
-  if (options.printExecutionFace) {
-    const headBodiesNow = listHeadJudgeBodies(root) ?? []
-    const workflowTexts = []
+  // ②b **执行点推导**（第十三轮 V13-A §4.4 / §11③ 的收口）：执行体全集不再只按目录形状取，
+  //     另一半由"谁真的被执行"反推（{@link deriveExecutionPoints}）。
+  const derivation = {
+    points: [],
+    faces: [],
+    counts: { workflow: 0, manifest: 0, 'integration-guard': 0, 'package-config': 0 },
+    extensions: [],
+    missingSources: [],
+  }
+  let ciReferenced = []
+  {
+    // 输入全部取自 **HEAD 字节**（install 期能改写工作树，读工作树那份等于让载荷自己选判据面）。
+    const headWorkflowTexts = []
     const workflowNames = git(root, ['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', '.github/workflows'])
+    if (workflowNames.status !== 0) {
+      process.stderr.write('check-install-integrity: 读不出 HEAD 的 `.github/workflows/` 清单\n')
+      return 2
+    }
     for (const name of String(workflowNames.stdout).split('\0').filter(entry => /\.ya?ml$/u.test(entry))) {
       const bytes = readHeadBlob(root, name)
-      if (bytes !== null) workflowTexts.push([name, bytes.toString('utf8')])
+      if (bytes === null) continue
+      headWorkflowTexts.push([name, bytes.toString('utf8')])
     }
+    if (headWorkflowTexts.length === 0) {
+      process.stderr.write('check-install-integrity: HEAD 里一份 workflow 都读不到 ⇒'
+        + '"CI 里真被执行的执行体"这条来源缺席，拒绝把"读不到"当成"没有"\n')
+      return 2
+    }
+    ciReferenced = ciReferencedExecutionBodies(headWorkflowTexts)
+
+    const headPaths = listHeadPaths(root)
+    if (headPaths === null) {
+      process.stderr.write('check-install-integrity: 读不出 HEAD 的路径清单（执行点推导的存在性谓词）\n')
+      return 2
+    }
+    const guardBytes = readHeadBlob(root, 'scripts/check-integration-tests.mjs')
+    if (guardBytes === null) {
+      process.stderr.write('check-install-integrity: HEAD 里没有 scripts/check-integration-tests.mjs ⇒'
+        + '"`integration-tests/` 守卫的执行点"这条来源缺席，拒绝把"读不到"当成"没有"\n')
+      return 2
+    }
+    const workspaceManifestData = []
+    for (const path of workspaceManifests) {
+      const bytes = readHeadBlob(root, path)
+      if (bytes === null) continue
+      try {
+        workspaceManifestData.push({ path, manifest: JSON.parse(bytes.toString('utf8')) })
+      } catch {
+        // manifest 不是合法 JSON 这件事由 ⑥ 段单独报（那里也要用同一份字节），这里跳过即可。
+      }
+    }
+    Object.assign(derivation, deriveExecutionPoints({
+      workflowTexts: headWorkflowTexts,
+      rootManifest: headRootManifest,
+      workspaceManifests: workspaceManifestData,
+      guardText: guardBytes.toString('utf8'),
+      headPaths,
+    }))
+    if (derivation.missingSources.length > 0) {
+      process.stderr.write(`check-install-integrity: 执行点推导的来源缺席（${derivation.missingSources.join('、')}）⇒`
+        + '判据面会静默变小，拒绝把"读不出"当成"没有执行点"\n')
+      return 2
+    }
+  }
+
+  // ②c **执行体全集 = 形状族 ∪ 执行点推导**（两侧都取自 HEAD）。
+  const headBodies = [...new Set([...familyHeadBodies, ...derivation.points])].sort()
+
+  if (options.printExecutionFace) {
     const print = (label, paths) => {
       process.stdout.write(`# ${label}（${paths.length} 条）\n`)
       for (const path of paths) process.stdout.write(`  '${path}',\n`)
     }
-    print('EXECUTION_FACE_REGISTRY', headBodiesNow)
-    print('CI_REFERENCED_EXECUTION_REGISTRY', ciReferencedExecutionBodies(workflowTexts))
+    const outsideFamily = derivation.points.filter(path => !isExecutionFacePath(path))
+    const derivedFamily = derivation.points.filter(path => isExecutionFacePath(path))
+    print('EXECUTION_FACE_REGISTRY', familyHeadBodies)
+    print('EXECUTION_POINT_REGISTRY', outsideFamily)
+    print('CI_REFERENCED_EXECUTION_REGISTRY', ciReferenced)
+    process.stdout.write(`# 执行点推导合计 ${derivation.points.length} 条`
+      + `（workflow 命令位 ${derivation.counts.workflow} · manifest scripts ${derivation.counts.manifest}`
+      + ` · integration-tests 守卫 ${derivation.counts['integration-guard']}`
+      + ` · 包内判据配置 ${derivation.counts['package-config']}）；`
+      + `其中形状族已覆盖 ${derivedFamily.length} 条、EXECUTION_POINT_REGISTRY 承载 ${outsideFamily.length} 条`
+      + `（两侧互斥、并集 = 完整执行面 ${headBodies.length} 条）\n`)
     return 0
   }
+
+  // ②d **双向登记**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口 + V13-A §4.4 的执行点面）。
+  //     三张表各自与"自己的派生来源"双向对拍：派生却未登记 ⇒ 红、登记了却派生不出 ⇒ 红。
+  {
+    problems.push(...bidirectionalRegistryProblems(
+      'EXECUTION_FACE_REGISTRY',
+      EXECUTION_FACE_REGISTRY,
+      familyHeadBodies,
+      '新增执行体必须登记（`node scripts/check-install-integrity.mjs --print-execution-face` 打印可粘贴表）'
+      + '—— 未登记的执行体不进"工作树 == HEAD"的比对面，也不进 `--restore` 的覆盖集。',
+    ))
+    const pointsOutsideFamily = derivation.points.filter(path => !isExecutionFacePath(path))
+    problems.push(...bidirectionalRegistryProblems(
+      'EXECUTION_POINT_REGISTRY',
+      EXECUTION_POINT_REGISTRY,
+      pointsOutsideFamily,
+      '"被执行 / 决定判定但不在形状族目录里"的执行点必须登记（同一份 `--print-execution-face` 打印）'
+      + '—— 它们同样要进"工作树 == HEAD"的比对面与 `--restore` 的覆盖集；'
+      + '语料（各包 `tests/**` 的 spec）**不**属于这一面，别把它们加进来。',
+    ))
+    problems.push(...bidirectionalRegistryProblems(
+      'CI_REFERENCED_EXECUTION_REGISTRY',
+      CI_REFERENCED_EXECUTION_REGISTRY,
+      ciReferenced,
+      '`.github/workflows/*.yml` 里被引用的执行体就是"CI 里真在跑的东西"—— 它必须与登记表双向相等'
+      + '（未登记 = 新执行体悄悄进了 CI；死条目 = 登记表在长成豁免洞）。',
+    ))
+    notes.push(`执行体全集：${headBodies.length} 条 = 形状族 ${familyHeadBodies.length} 条`
+      + ` + 执行点推导 ${derivation.points.length} 条（workflow 命令位 ${derivation.counts.workflow}`
+      + ` · manifest scripts ${derivation.counts.manifest}`
+      + ` · integration-tests 守卫 ${derivation.counts['integration-guard']}`
+      + ` · 包内判据配置 ${derivation.counts['package-config']}），三张登记表双向对拍通过`)
+  }
+
+  const worktreeBodies = listWorktreeJudgeBodies(root, derivation.faces)
+  const bodyPaths = [...new Set([...headBodies, ...worktreeBodies])].sort()
 
   const entryPaths = [...new Set([
     ...EXTRA_EXECUTION_ENTRY_PATHS,
@@ -976,6 +1545,9 @@ function main(argv) {
         githubSha: anchor.sha,
         headEqualsGithubSha: anchor.sha !== null,
         judgeBodies: bodyPaths.length,
+        // 执行点推导（第十三轮 V13-A §4.4）：形状族之外那一半的面。
+        executionPoints: derivation.points.length,
+        executionPointRegistry: EXECUTION_POINT_REGISTRY.length,
         ciReferencedExecutionBodies: CI_REFERENCED_EXECUTION_REGISTRY.length,
         workspaceManifests: workspaceManifests.length,
         restored,
@@ -996,9 +1568,12 @@ function main(argv) {
   }
 
   process.stdout.write(`check-install-integrity: VERDICT PASS judge-bodies=${bodyPaths.length}`
+    + ` execution-points=${derivation.points.length}`
     + ` manifests=${manifestPaths.length} head=${head.slice(0, 12)}`
     + ` github-sha=${anchor.sha ?? 'absent'}\n`)
-  process.stdout.write(`check-install-integrity: OK — 判据执行体 ${bodyPaths.length} 条（执行体全集的登记表`
+  process.stdout.write(`check-install-integrity: OK — 判据执行体 ${bodyPaths.length} 条（形状族 ${familyHeadBodies.length}`
+    + ` + 执行点推导 ${derivation.points.length}：workflow 命令位 / manifest scripts /`
+    + ` integration-tests 守卫 / 包内判据配置`
     + ` + .yarnrc.yml + .gitignore + package.json + ${workspaceManifests.length} 个工作区 manifest）`
     + `与 HEAD(${head.slice(0, 12)}) **逐字节一致**；${notes.join('；')}\n`)
   return 0

@@ -2441,9 +2441,18 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
 {
   const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
   const blocks = extractRunBlocks(workflowText)
-  const caseGateBlock = blocks.find(entry => entry.content.includes('check-go-test-json.mjs'))
+  // **必须命中"命令位"，不是"文本里出现过"**：步骤体里的注释也会提到脚本名
+  // （第十三轮 GH1 重写判据步骤后实测 —— W-5 抓到的是注释里那句
+  // `# scripts/verify-wasm-client-only.sh 的 …`，于是拿不到真实 argv 而假红）。
+  // 口径：逐行看，**跳过注释行**（`#` 开头），其余行里出现脚本名即算命令位。
+  const invokedIn = (script) => (entry) => entry.content.split('\n').some((line) => {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('#')) return false
+    return trimmed.includes(script)
+  })
+  const caseGateBlock = blocks.find(invokedIn('check-go-test-json.mjs'))
   check(caseGateBlock !== undefined, 'ci.yml 里找不到 W-4 的用例级判定步骤(接线被删?)')
-  const probeBlock = blocks.find(entry => entry.content.includes('verify-wasm-client-only.sh'))
+  const probeBlock = blocks.find(invokedIn('verify-wasm-client-only.sh'))
   check(probeBlock !== undefined, 'ci.yml 里找不到 W-5 的协议探针步骤(接线被删?)')
 
   if (caseGateBlock !== undefined) {

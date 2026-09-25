@@ -30,6 +30,13 @@ import {
   writeProvenance,
 } from '../src/skill-install.ts'
 import { MAX_ARCHIVE_BYTES } from '../src/archive-util.ts'
+import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
+
+// R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +
+// `<agentsHome>/skills` + bundled），而 `<agentsHome>` 默认指向**真实 `~/.agents`** ⇒ 不隔离时
+// 本文件的用例会变成"开发机上装了哪些技能"的函数（命中同名就正确地报 422 RESIDUE）。
+// 隔离实现与实测形态见 tests/helpers/runtime-skill-roots.ts。
+beforeEach(isolateRuntimeSkillRoots)
 
 /** Pack a directory into a gzipped tar buffer (relative paths, portable). */
 async function packDir(dir: string): Promise<Buffer> {

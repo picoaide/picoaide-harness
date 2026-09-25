@@ -709,14 +709,20 @@ type GrantStatus struct {
 }
 
 // GetGrantStatus 统计当月发放覆盖情况。
+//
+// R13-GH3：`balance_grant_items` 是族内关系（发放幂等锚 ⇒ 读错对象会静默报错金额/
+// 错人数）⇒ 这条聚合读走**唯一 pin 实现**的只读事务。旧实现是裸池 + 未限定名：
+// shadow schema 在场时"已发放人数"读自 shadow（恒 0 或诱饵值），而健康出口全绿。
 func GetGrantStatus(db *sql.DB, now time.Time) (*GrantStatus, error) {
 	month := monthKey(BeijingMonth(now))
 	out := &GrantStatus{Month: month}
-	if err := db.QueryRow(`SELECT COUNT(*),
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT COUNT(*),
   COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM balance_grant_items i WHERE i.user_id = u.id AND i.month = ?)),
   COUNT(*) FILTER (WHERE u.balance_activated_at IS NOT NULL)
 FROM users u WHERE u.status = 1 AND u.role = ?`, month, RoleUser).
-		Scan(&out.Eligible, &out.Granted, &out.Activated); err != nil {
+			Scan(&out.Eligible, &out.Granted, &out.Activated)
+	}); err != nil {
 		return nil, err
 	}
 	out.Pending = out.Eligible - out.Granted
@@ -743,21 +749,43 @@ type BalanceGrant struct {
 }
 
 // LastBalanceGrant 返回最近一次发放批次(无记录时 nil)。
+//
+// R13-GH3：`balance_grants`（发放批次台账）是族内关系 ⇒ 读面走唯一 pin 实现的
+// 只读事务；句柄由 `*sql.DB` 收紧为"已钉事务"（`queryBalanceGrant` 只认 `*sql.Tx`），
+// 类型上排除"把裸池传进来"这条路径。
 func LastBalanceGrant(db *sql.DB) (*BalanceGrant, error) {
-	return queryBalanceGrant(db, `SELECT month, mode, amount, affected, actor, created_at
+	var out *BalanceGrant
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		var err error
+		out, err = queryBalanceGrant(tx, `SELECT month, mode, amount, affected, actor, created_at
 FROM balance_grants ORDER BY month DESC LIMIT 1`)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// GetBalanceGrant 返回指定北京月的发放批次(nil = 未发放)。
+// GetBalanceGrant 返回指定北京月的发放批次(nil = 未发放)。R13-GH3：同 LastBalanceGrant。
 func GetBalanceGrant(db *sql.DB, month string) (*BalanceGrant, error) {
-	return queryBalanceGrant(db, `SELECT month, mode, amount, affected, actor, created_at
+	var out *BalanceGrant
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		var err error
+		out, err = queryBalanceGrant(tx, `SELECT month, mode, amount, affected, actor, created_at
 FROM balance_grants WHERE month = ?`, month)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func queryBalanceGrant(db *sql.DB, q string, args ...any) (*BalanceGrant, error) {
+// queryBalanceGrant 只接受**已钉 search_path 的事务**（R13-GH3 的类型纪律：
+// 族内读的唯一语句入口不接受裸 `*sql.DB`，见 usage_ledger.go 的跨包接缝说明）。
+func queryBalanceGrant(tx *sql.Tx, q string, args ...any) (*BalanceGrant, error) {
 	var g BalanceGrant
 	var created any
-	err := db.QueryRow(q, args...).Scan(&g.Month, &g.Mode, &g.Amount, &g.Affected, &g.Actor, &created)
+	err := tx.QueryRow(q, args...).Scan(&g.Month, &g.Mode, &g.Amount, &g.Affected, &g.Actor, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

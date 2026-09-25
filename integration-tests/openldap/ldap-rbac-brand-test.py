@@ -88,6 +88,20 @@ AUDITOR_USER, AUDITOR_PASSWORD = 'audit01', 'audit12345'
 READONLY_PERMS = {'audit:read', 'usage:read', 'user:read'}
 LOGO_PATH = '/api/client/v2/channel/logo'
 
+# SKIP 的**原因码闭集**(本用例允许打出的那几个)。
+# 门禁(scripts/check-integration-tests.mjs)按它做双向对账:登记表里的 skipReasons 必须与这里
+# 逐字相等、每个原因码都必须有调用点、每个调用点都必须给登记过的原因码。新增原因码要同时
+# 改这里与门禁的 SKIP_REASON_CODES —— "未登记的原因"不再是一张免检牌。
+SKIP_REASONS = ('missing-server', 'missing-provider')
+
+
+def skip(reason, detail):
+    """让本用例以 SKIP(77) 收尾的**唯一出口**;原因码必须登记在 SKIP_REASONS 里。"""
+    assert reason in SKIP_REASONS, f'未登记的 SKIP 原因码: {reason}'
+    assert detail, 'SKIP 必须带可读的观测细节(否则聚合层只剩"跳过"两个字)'
+    print(f'SKIP[{reason}]: {detail} —— 本次未验证任何东西')
+    return EXIT_SKIP
+
 
 # ---------------------------------------------------------------------------
 # HTTP 会话(cookie jar:管理后台的会话是 HttpOnly cookie,不是 bearer)
@@ -694,8 +708,8 @@ def main(argv):
     probe = Session()
     status, body, _ = probe.get(server + '/healthz')
     if status != 200:
-        print(f'SKIP: {server}/healthz 不可达/非 200(status={status}) —— 服务端没起来,本次未验证任何东西')
-        return EXIT_SKIP
+        return skip('missing-server',
+                    f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')
     status, body, _ = probe.get(server + '/api/server/admin/auth/methods')
     if status == 200:
         try:
@@ -703,9 +717,9 @@ def main(argv):
         except (ValueError, AttributeError):
             configured = set()
         if configured and 'ldap' not in configured:
-            print(f'SKIP: 服务端未启用 LDAP(configured={sorted(configured)}) —— '
-                  '本用例验证的是 LDAP 登录/RBAC,配置缺失时未验证任何东西')
-            return EXIT_SKIP
+            return skip('missing-provider',
+                        f'服务端未启用 LDAP(configured={sorted(configured)}) —— '
+                        '本用例验证的是 LDAP 登录/RBAC')
 
     # 1. LDAP 员工面登录(独立会话,与后面 admin/auditor 的 cookie 互不干扰)。
     employee = Session()

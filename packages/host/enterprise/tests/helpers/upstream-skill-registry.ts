@@ -65,16 +65,30 @@ async function loadUpstream(): Promise<NonNullable<typeof cached>> {
 /**
  * 用 pinned 上游注册表列出 `skillsDir` 里**运行时真正会加载**的技能。
  *
- * 与桌面运行时同形：`dshHome` = 技能库的父目录，`agentsHome` 指到不存在的路径，
- * 关掉 watcher（测试不需要文件监听）。
+ * 与桌面运行时同形：`dshHome` = 技能库的父目录，`agentsHome` 缺省指到
+ * `<home>/.agents`（与上游缺省 `join(homedir(), '.agents')` 同形，只是落在临时 home
+ * 里），关掉 watcher（测试不需要文件监听）。
+ *
+ * R13-GH3（H2 跨根）：`agentsHome` / `bundledDir` 可显式注入 —— "运行时发现根"的
+ * 行为探针要在**每个候选根**里各放一个唯一名字的技能，才能断言上游实际读了哪些根
+ * （含反向对照：不在我们根表里的目录必须**不**被读取）。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @param options - `agentsHome`/`bundledDir` 覆盖（缺省与生产同形）。
  * @returns 运行时注册表内容（同名先到先得，已是赢家）。
  */
-export async function listRuntimeSkills(skillsDir: string): Promise<UpstreamSkill[]> {
+export async function listRuntimeSkills(
+  skillsDir: string,
+  options: { agentsHome?: string, bundledDir?: string } = {},
+): Promise<UpstreamSkill[]> {
   const { cordis, registry, provider } = await loadUpstream()
   const home = dirname(skillsDir)
   const ctx = new cordis.Context()
   await ctx.plugin((registry as { default: unknown }).default)
-  await ctx.plugin(provider, { dshHome: home, agentsHome: join(home, '.agents'), watch: false })
+  await ctx.plugin(provider, {
+    dshHome: home,
+    agentsHome: options.agentsHome ?? join(home, '.agents'),
+    ...options.bundledDir === undefined ? {} : { bundledSkillDir: options.bundledDir },
+    watch: false,
+  })
   return await ctx.skills.list()
 }

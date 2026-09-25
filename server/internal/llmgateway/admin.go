@@ -313,7 +313,12 @@ func createProvider(c *gin.Context, db *sql.DB) {
 	// "上游暂时不可用"变成"创建失败并回滚"。因此渠道型的事务只覆盖"插行 + 审计",
 	// 出网同步在 Commit **之后**执行,结果如实放进响应体的 sync 字段(失败不回滚,
 	// 管理员可用同步按钮重试;这与 PUT 路径的既有契约逐字一致)。
-	tx, err := db.Begin()
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
+	// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
+	// —— 真 PG + 敌对 search_path 实测。
+	tx, err := serverstore.UsageWriteTx(db)
 	if err != nil {
 		log.Printf("gateway provider create: 开启事务失败 name=%s: %v", p.Name, err)
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
@@ -422,7 +427,12 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	//
 	// 事务开在 JSON 绑定与请求体校验**之后**:绑定与 URL 校验(含 DNS)不持锁,
 	// 响应码次序也保持不变(400 校验在前、404 在事务内那次读上)。
-	tx, err := db.Begin()
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
+	// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
+	// —— 真 PG + 敌对 search_path 实测。
+	tx, err := serverstore.UsageWriteTx(db)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
 		return
@@ -628,16 +638,16 @@ func (c providerModelConfig) hasPrice() bool {
 	return c.In != "-" || c.Out != "-" || c.Cache != "-" || c.Offpeak != "-"
 }
 
-// rowQuerier 是审计用模型配置快照需要的查询面:*sql.DB 与 *sql.Tx 都满足。
-// 变更前的快照走 *sql.DB(事务开始前),变更后的快照走 *sql.Tx —— 后者读到的是
-// 本次写入的结果,且事务回滚时不会留下"配置被改"的误报。
-type rowQuerier interface {
-	Query(query string, args ...any) (*sql.Rows, error)
-}
-
 // providerModelConfigSnapshot 读 provider 下每个模型的运营方配置(审计基线)。
 // 读失败时不阻塞更新:返回已读到的部分(审计退化为"没有可比基线"),并记日志。
-func providerModelConfigSnapshot(q rowQuerier, providerID int64) map[string]providerModelConfig {
+//
+// R13-GH3：形参由 `rowQuerier`（`*sql.DB` 与 `*sql.Tx` 都满足）收紧为 `*sql.Tx`
+// —— 本函数读的是族内关系(`models`)，而**类型**是"这条读一定在已钉 search_path
+// 的事务里"的最强保证：旧签名允许调用方把裸池传进来（shadow 在场时审计基线与
+// "该 provider 还有没有模型"的守卫都读 shadow），机械守卫只能核对函数体、核不到
+// 调用方手里的句柄。现在两个调用点都在 `serverstore.UsageWriteTx` 开出的已钉事务里
+// （见 updateProvider 注释），传裸池直接编译不过。
+func providerModelConfigSnapshot(q *sql.Tx, providerID int64) map[string]providerModelConfig {
 	out := map[string]providerModelConfig{}
 	rows, err := q.Query(`SELECT name, input_price_per_1m, output_price_per_1m,
 		cache_input_price_per_1m, offpeak_discount, COALESCE(default_params, ''),
@@ -930,7 +940,12 @@ func createModel(c *gin.Context, db *sql.DB) {
 			return
 		}
 	} else {
-		tx, err := db.Begin()
+		// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+		// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+		// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
+		// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
+		// —— 真 PG + 敌对 search_path 实测。
+		tx, err := serverstore.UsageWriteTx(db)
 		if err != nil {
 			log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
@@ -1114,7 +1129,12 @@ func deleteModel(c *gin.Context, db *sql.DB) {
 	// 现在:行锁(模型行)+ 名单行锁(AddExcludedModelTx 内的 FOR UPDATE)把
 	// 读-改-写整段串起来;审计失败即整体回滚(删除不留痕与"删了但没删干净"都不
 	// 允许静默)。基线读也在锁下,避免"读到 A 行、删掉 B 行"的错位。
-	tx, err := db.Begin()
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
+	// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
+	// —— 真 PG + 敌对 search_path 实测。
+	tx, err := serverstore.UsageWriteTx(db)
 	if err != nil {
 		log.Printf("gateway model delete: 开启事务失败 id=%d: %v", id, err)
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
@@ -1449,7 +1469,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 范式与 serverauth/admin.go 的 F14(认证配置事务化)一致:Begin +
 	// defer Rollback + 逐键 SetSettingTx + Commit;提交后**必须**
 	// InvalidateSettings()(SetSettingTx 不失效缓存,见 auditSetSettingTx 注释)。
-	tx, err := db.Begin()
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
+	// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
+	// —— 真 PG + 敌对 search_path 实测。
+	tx, err := serverstore.UsageWriteTx(db)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return

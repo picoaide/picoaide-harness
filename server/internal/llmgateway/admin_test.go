@@ -19,13 +19,22 @@ import (
 
 func adminTestSetup(t *testing.T) (http.Handler, *sql.DB, map[string]string) {
 	t.Helper()
+	db, cleanup := serverstore.NewTestDB(t)
+	t.Cleanup(cleanup)
+	return adminTestSetupOnDB(t, db)
+}
+
+// adminTestSetupOnDB 是 adminTestSetup 的"用调用方给的池"形态（R13-GH3：敌对
+// search_path 的判据要用**旁路池**建路由树，才能在真实管理端调用链上断言"读/写
+// 落在 public 还是 shadow"）。建用户与登录都走传入的池 —— 非族内关系（users /
+// admin_sessions）在 shadow 里没有同名表，因此登录行为与主池一致。
+func adminTestSetupOnDB(t *testing.T, db *sql.DB) (http.Handler, *sql.DB, map[string]string) {
+	t.Helper()
 	t.Setenv("PICOAI_MASTER_KEY", "0123456789abcdef0123456789abcdef")
 	// adminLoginLimiter 是包级共享(默认 10 次/5min):测试反复登录 boss,
 	// 用例增多后触发限流 → login 429 → csrf 为空(flaky)。按该 env 设计用途放宽。
 	t.Setenv("PICOAI_LOGIN_MAX_ATTEMPTS", "10000")
 	DecryptSecret = func(s string) (string, error) { return s, nil }
-	db, cleanup := serverstore.NewTestDB(t)
-	t.Cleanup(cleanup)
 	// channel-type provider creation now syncs immediately: default the
 	// fetchFn to a canned catalog so tests never hit the real upstream
 	prev := syncFetchFn

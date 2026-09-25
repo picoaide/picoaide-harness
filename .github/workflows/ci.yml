@@ -190,14 +190,25 @@ jobs:
       # 它的**顶层模块代码**在任何一次 yarn 调用（连 `yarn --version` 都会）时执行 ⇒ 把工作树里的
       # `scripts/check-*.mjs` 改写成「打印通过凭据 + process.exit(0)」，于是 ci.yml 一字未改，
       # 三个判定块全部 EXIT=0 而判据一条没跑。所以这一步必须是本 job 的**第一个执行体**
-      # （此前没有任何 yarn/corepack 命令跑过），且只依赖 git + node 内置模块 —— 不 import
-      # 仓内任何脚本（那些正是可能已被改写的东西），判据输入全部取自 **git 对象**。
+      # （此前没有任何 yarn/corepack 命令、也没有任何仓内脚本被执行过），且只依赖 git +
+      # node 内置模块 —— 不 import 仓内任何脚本（那些正是可能已被改写的东西），
+      # 判据输入全部取自 **git 对象**。
       # 静态面由 `check-workflows.mjs` 的 [SK-14⑨] 钉住（必须在任何 yarn 调用之前）。
       - name: Judge execution bodies are pristine (runs before any yarn command)
         run: |
           set -euo pipefail
-          # 本步是**第一个执行体**：此前没有任何 yarn/corepack 命令跑过，也没有任何仓内脚本
-          # 被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
+          # R13-D-02 / V13-A 的 R1：**先复位 PATH**，再跑任何仓内东西。
+          #
+          # 为什么这一行是承重的：`"${{ …outputs.interp }}" scripts/<x>.sh` 只冻结了**解释器**，
+          # 脚本体里的裸 `node` 仍按 `$PATH` 解析 ⇒ 一个只拦某一条判据、其余转发真 node 的假
+          # `node`（一行 `echo … >> $GITHUB_PATH`，不碰 git、不改被跟踪文件）就能把
+          # `scripts/verify-wasm-client-only.sh` 的 `pass=2 fail=1 / EXIT=1` 翻成
+          # `pass=3 fail=0 / EXIT=0`（V13-A §3.3 实测复现）。复位 PATH 之后，脚本体
+          # **以及它起的子进程**也回到冻结那一刻的解析面。
+          # 本步在 setup-node 之前 ⇒ 用**冻结步自己**那份（工具链还没进来，本步也不需要）。
+          # 静态判据：[SK-20]「判据步必须显式导出冻结 PATH」（形态与顺序都是判据）。
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
+          # 此前没有任何仓内脚本被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
           # 正是靠"判据跑在 install 之后"生效的。执行体本身也**从 git 对象取出**（工作树里那份
           # 在更早的步里可被改写），并只用 `node:*` + `git`（不 import 任何仓内模块）。
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
@@ -233,6 +244,46 @@ jobs:
         with:
           node-version: 24
       - run: corepack enable
+      # V13-A §3.3 / R1 的收口件：**把"冻结的 PATH"合成为一份判据步真的能用的 PATH**。
+      #
+      # 为什么需要这一步：冻结步排在任何仓内执行点**之前**（[SK-20] 的位置判据），所以它抓到的
+      # `path` 是"工具链之前"的那份 —— 判据步不能直接拿它复位 PATH：`Full gate` 经
+      # `corepack yarn` 起包级 check，需要 setup-node 的 node 与 corepack 的 shim 在 PATH 上。
+      # 这一步把"工具链新增的目录"**逐条过白名单**之后合成：
+      #   · 只放行 `${{ runner.tool_cache }}/node/` 之下的目录 —— runner 侧展开的常量，仓内代码
+      #     改不到；setup-node 把工具链装在那里，`corepack enable` 的 shim 也在同一个 bin 目录；
+      #   · **任何其它新增目录一律当场红**：那正是 `$GITHUB_PATH` 注入（R13-D-02 的载荷形态）
+      #     留下的痕迹 —— 于是"注入"从"被忽略"升级成"被抓住"（fail-closed）。
+      # 本步自己不执行任何仓内代码（纯 shell 读 `$PATH` 并 printf），但它的**输入** `$PATH`
+      # 可能已被更早的步骤污染 ⇒ 白名单就是这条输入的判据。静态形态由 [SK-20] 钉住。
+      - name: Compose the frozen PATH with the toolchain (allowlisted dirs only)
+        id: frozen-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          frozen="${{ steps.frozen-launchers.outputs.path }}"
+          allowed_root="${{ runner.tool_cache }}/node/"
+          added=''
+          IFS=':'
+          for entry in $PATH
+          do
+            if [ -z "$entry" ]
+            then
+              continue
+            fi
+            case ":$frozen:" in
+              *":$entry:"*) continue ;;
+            esac
+            case "$entry/" in
+              "$allowed_root"*) added="${added:+$added:}$entry" ;;
+              *)
+                echo "::error::冻结 PATH 合成失败:当前 PATH 里出现了冻结那一刻没有的目录 $entry(不在白名单 $allowed_root 之下)—— 要么它是 GITHUB_PATH 注入(R13-D-02 的载荷形态)留下的痕迹,要么 runner 把工具链装到了别处;两种都得先在这里红,不许带着它继续跑判据(真需要放行就把前缀登记进 allowed_root 并写明理由)"
+                exit 1
+                ;;
+            esac
+          done
+          printf 'path=%s\n' "${added:+$added:}$frozen" >> "$GITHUB_OUTPUT"
+          echo "frozen PATH composed: added=[${added:-（无）}]"
       - name: Cache yarn (and electron for the linux packaging job)
         uses: actions/cache@v6
         with:
@@ -255,6 +306,9 @@ jobs:
       - name: Root guards (every PR shape)
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：**先复位 PATH**再跑任何仓内东西。本步用**合成后**那份
+          # （`scripts/check-root-guards.mjs` 里要经 `corepack yarn` 起部分守卫）。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           # 判据本体免疫（R12-D-01）：install 期（`.yarnrc.yml` 插件的顶层模块代码 / 工作区
           # postinstall）可能已改写工作树里的判据执行体 ⇒ 探针**自己从 git 对象取出**
           # （工作树里那份不可信），先比对（不一致即红、指名道姓）、再按 HEAD 恢复
@@ -318,6 +372,8 @@ jobs:
       - name: Guard parser integrity (strict worktree↔HEAD anchor)
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH 到合成后的冻结值，再跑任何仓内东西。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           # 判据本体免疫（R12-D-01）：同上面的守卫步 —— 探针从 git 对象取出，先比对、再按 HEAD 恢复；
           # 于是这一步跑的 `check-guard-parser-integrity.mjs` 一定是**版本库里的那份**
           # （红队 AA4 的形态：只改判据本体会被 `--require-clean` 抓住，**同时**改这份锚定判据
@@ -362,6 +418,8 @@ jobs:
       - name: Frozen launcher behavioural probe (PATH injection cannot swap the judge launcher)
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH 到合成后的冻结值，再跑任何仓内东西。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.node }}" scripts/check-frozen-launchers.mjs --root "$PWD"
 
   gate:
@@ -469,8 +527,11 @@ jobs:
       - name: Judge execution bodies are pristine (runs before any yarn command)
         run: |
           set -euo pipefail
-          # 本步是**第一个执行体**：此前没有任何 yarn/corepack 命令跑过，也没有任何仓内脚本
-          # 被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
+          # R13-D-02 / V13-A 的 R1：**先复位 PATH**，再跑任何仓内东西（理由与形态见
+          # gate-guards job 的同名步骤）。本步在 setup-node 之前 ⇒ 用冻结步自己那份。
+          # 静态判据：[SK-20]「判据步必须显式导出冻结 PATH」。
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
+          # 此前没有任何仓内脚本被执行过 —— 载荷（`.yarnrc.yml` 的 `plugins:` 顶层模块代码 / 工作区 postinstall）
           # 正是靠"判据跑在 install 之后"生效的。执行体本身也**从 git 对象取出**（工作树里那份
           # 在更早的步里可被改写），并只用 `node:*` + `git`（不 import 任何仓内模块）。
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
@@ -513,6 +574,9 @@ jobs:
         id: release_policy
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH，再跑仓内脚本（本步在 setup-node 之前 ⇒
+          # 用冻结步自己那份）。
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
       # 发布 tag 的**拓扑判据**(2026-09-23 第五轮审计 R5-C-2 / M1)。
       #
@@ -532,6 +596,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH，再跑仓内脚本（本步在 setup-node 之前 ⇒
+          # 用冻结步自己那份）。
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.git }}" fetch --quiet --no-recurse-submodules origin \
             '+refs/heads/master:refs/remotes/origin/master' '+refs/tags/*:refs/tags/*'
           "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
@@ -555,6 +622,9 @@ jobs:
           CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH，再跑仓内脚本（本步在 setup-node 之前 ⇒
+          # 用冻结步自己那份）。
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
       # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
       # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
@@ -582,6 +652,38 @@ jobs:
           node-version: 24
       - if: needs.changes.outputs.code != 'false'
         run: corepack enable
+      # 与 gate-guards job 的同名步骤同一条（V13-A §3.3 / R1 的收口件）：把冻结的 PATH 与
+      # **白名单内的**工具链目录合成一份判据步能用的 PATH；任何其它新增目录（= `$GITHUB_PATH`
+      # 注入的痕迹）一律当场红。docs-only 上 setup-node/corepack 被跳过 ⇒ 没有新增条目，
+      # 合成的就是冻结那份。静态形态由 [SK-20] 钉住。
+      - name: Compose the frozen PATH with the toolchain (allowlisted dirs only)
+        id: frozen-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          frozen="${{ steps.frozen-launchers.outputs.path }}"
+          allowed_root="${{ runner.tool_cache }}/node/"
+          added=''
+          IFS=':'
+          for entry in $PATH
+          do
+            if [ -z "$entry" ]
+            then
+              continue
+            fi
+            case ":$frozen:" in
+              *":$entry:"*) continue ;;
+            esac
+            case "$entry/" in
+              "$allowed_root"*) added="${added:+$added:}$entry" ;;
+              *)
+                echo "::error::冻结 PATH 合成失败:当前 PATH 里出现了冻结那一刻没有的目录 $entry(不在白名单 $allowed_root 之下)—— 要么它是 GITHUB_PATH 注入(R13-D-02 的载荷形态)留下的痕迹,要么 runner 把工具链装到了别处;两种都得先在这里红,不许带着它继续跑判据(真需要放行就把前缀登记进 allowed_root 并写明理由)"
+                exit 1
+                ;;
+            esac
+          done
+          printf 'path=%s\n' "${added:+$added:}$frozen" >> "$GITHUB_OUTPUT"
+          echo "frozen PATH composed: added=[${added:-（无）}]"
       # 版本一致性判据(2026-09-23 第五轮审计 R5-C-5)。产品版本分布在两处 manifest
       # (root package.json 与 packages/host/desktop/package.json),此前**只有** release
       # job 第 4 步校验 —— 也就是四平台构建 40 分钟之后才红,而分支/PR 侧零判据
@@ -598,6 +700,8 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：先复位 PATH 到合成后的冻结值，再跑任何仓内东西。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.node }}" scripts/version.mjs manifests
           case "${GITHUB_REF}" in
             refs/tags/v*) "${{ steps.frozen-launchers.outputs.node }}" scripts/version.mjs check "${GITHUB_REF_NAME}" ;;
@@ -656,6 +760,11 @@ jobs:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1：**先复位 PATH**。这一格尤其承重：`scripts/check-workspaces.mjs`
+          # 会经 `corepack yarn run <pkg> check` 起包级 check（子进程走 PATH）—— 不复位的话，
+          # 一个只拦某条判据、其余转发真 node 的假 `node` 就能让包级 check"全绿"。
+          # 本步必须用**合成后**那份（工具链要真的可解析：corepack shim 在白名单目录里）。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           # 判据本体免疫（R12-D-01）：install 期可能已改写工作树里的判据执行体 ⇒ 探针从
           # **git 对象**取出（工作树那份不可信），先比对（不一致即红）、再按 HEAD 恢复。
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
@@ -714,6 +823,10 @@ jobs:
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # R13-D-02 / V13-A 的 R1（**这条就是实测出洞的那一格**）：`scripts/verify-wasm-client-only.sh`
+          # 的脚本体里有 11 处裸 `node`，只冻结解释器不够 —— 必须先复位 PATH，否则假 `node`
+          # 能把 `pass=2 fail=1 / EXIT=1` 翻成 `pass=3 fail=0 / EXIT=0`（V13-A §3.3 端到端复现）。
+          export PATH="${{ steps.frozen-toolchain.outputs.path }}"
           "${{ steps.frozen-launchers.outputs.interp }}" scripts/verify-wasm-client-only.sh --groups 6
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。

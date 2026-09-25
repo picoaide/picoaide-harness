@@ -23,6 +23,11 @@ import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { invocationBooleanVerdict, precheckSkillPackage } from './manifest-precheck.ts'
+import {
+  isSameSkillRoot,
+  runtimeSkillRoots,
+  type RuntimeSkillRoot,
+} from './skill-runtime-roots.ts'
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
@@ -1098,9 +1103,13 @@ async function readRuntimeSkillMetadata(skillMdPath: string): Promise<{ name: st
  * 差集里的技能"卸载成功而模型照旧能用"、界面按真目录说"已是最新"而模型读的是
  * 旧备份内容。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @param options - `skipSystem: false` = 这个根**不**跳过 `.system`（上游只给 `user-dsh`
+ *   根设 `skipSystem`；agent/bundled 根里的 `.system` 照样是候选 —— R13-GH3 跨根收口
+ *   必须逐根同判据，不能拿一个根的口径去扫另一个根）。
  * @returns discovered skills in runtime precedence order; unreadable root = 空。
  */
-export async function discoverRuntimeSkills(skillsDir: string): Promise<DiscoveredSkill[]> {
+export async function discoverRuntimeSkills(skillsDir: string, options: { skipSystem?: boolean } = {}): Promise<DiscoveredSkill[]> {
+  const skipSystem = options.skipSystem ?? true
   let entries
   try {
     entries = await readdir(skillsDir, { withFileTypes: true })
@@ -1109,7 +1118,7 @@ export async function discoverRuntimeSkills(skillsDir: string): Promise<Discover
   }
   const rows: DiscoveredSkill[] = []
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
-    if (entry.name === SKILL_SYSTEM_DIR) continue
+    if (skipSystem && entry.name === SKILL_SYSTEM_DIR) continue
     const isDir = entry.isDirectory()
     const isLooseMarkdown = entry.isFile() && entry.name.endsWith('.md')
     if (!isDir && !isLooseMarkdown) continue
@@ -1185,6 +1194,67 @@ export async function sweepInstallerOwnedShadowSkills(skillsDir: string, name: s
   return removed
 }
 
+/** 运行时多根发现的一行：哪个根里的哪一条被当成了 `name`。 */
+export interface RuntimeSkillResidue {
+  /** 发现根（含 source/rank/managed，供报告"是哪一种根"）。 */
+  readonly root: RuntimeSkillRoot
+  /** 该根里被运行时当作 `name` 加载的条目（SKILL.md 所在目录 / 根上散落的 .md）。 */
+  readonly skill: DiscoveredSkill
+}
+
+/**
+ * 按**运行时同一判据**在**全部已知根**里查同名技能（R13-GH3 · H2「跨根」）。
+ *
+ * 为什么不能只看一个根：运行时发现面是多根合并（见 {@link runtimeSkillRoots} 的模块头），
+ * 而能力中心只拥有 `<dshHome>/skills`。同一个名字若还在别的根里（最常见的是
+ * `<agentsHome>/skills`），"卸载成功"就只是界面上的说法 —— 模型照旧读得到。
+ *
+ * 合并口径与上游注册表一致：**rank 小的赢**，同 rank 按传入顺序；每个根内部按
+ * {@link discoverRuntimeSkills} 的顺序（条目名 `localeCompare` 升序）先到先得。
+ * 因此返回的行直接就是"这些根里会被加载的那个名字来自哪里"（第一名 = 赢家）。
+ * @param roots - the runtime discovery roots (see {@link runtimeSkillRoots}).
+ * @param name - the skill name (frontmatter name); 省略 = 列出全部同名合并结果。
+ * @returns 每个被加载的名字对应的一行（同名只留赢家），按运行时优先级排序。
+ */
+export async function discoverRuntimeSkillsAcrossRoots(
+  roots: readonly RuntimeSkillRoot[],
+  name?: string,
+): Promise<RuntimeSkillResidue[]> {
+  const ordered = [...roots].sort((a, b) => a.rank - b.rank)
+  const winners = new Map<string, RuntimeSkillResidue>()
+  for (const root of ordered) {
+    // 逐根用**同一个**判据扫（skipSystem 也逐根取上游的值，不拿一个根的口径套全部）。
+    for (const skill of await discoverRuntimeSkills(root.path, { skipSystem: root.skipSystem })) {
+      if (name !== undefined && skill.name !== name) continue
+      if (winners.has(skill.name)) continue // rank 小的先到先得 = 上游的赢家
+      winners.set(skill.name, { root, skill })
+    }
+  }
+  return [...winners.values()]
+}
+
+/**
+ * 「卸载后运行时仍会加载这个名字」的**跨根残留**：全部已知根里，除了我正在管的
+ * 那一个根以外，还有哪些根里有同名技能。
+ *
+ * 判据与"运行时会加载什么"同一份实现（{@link discoverRuntimeSkills}）：根里的条目
+ * 是不是候选、frontmatter 名是什么、点号目录算不算、`.system` 跳不跳，全部按上游
+ * `discoverRoot` 的口径 —— 不是"目录名 == 技能名"的近似。
+ * @param roots - the runtime discovery roots (see {@link runtimeSkillRoots}).
+ * @param managedSkillsDir - 我能管的那个根（`<dshHome>/skills`）；它自己由调用方单独处理。
+ * @param name - the skill name (frontmatter name).
+ * @returns 残留（按运行时优先级；空数组 = 没有跨根残留）。
+ */
+export async function listCrossRootSkillResidues(
+  roots: readonly RuntimeSkillRoot[],
+  managedSkillsDir: string,
+  name: string,
+): Promise<RuntimeSkillResidue[]> {
+  const foreign = roots.filter(root => !isSameSkillRoot(root.path, managedSkillsDir))
+  const rows = await discoverRuntimeSkillsAcrossRoots(foreign, name)
+  return rows.filter(row => row.skill.name === name)
+}
+
 /**
  * Uninstall one skill: remove `<skillsDir>/<name>` after verifying it really
  * is an installed skill (valid name + SKILL.md present). Everything else is
@@ -1204,16 +1274,23 @@ export async function sweepInstallerOwnedShadowSkills(skillsDir: string, name: s
  * 第四轮 R4-B-4：删掉的若是 `channel === 'plugin'` 的随包技能，成功之后写一个
  * **墓碑**（{@link SKILL_REMOVED_DIR}），否则下一次开机同步看到落点不存在就走
  * "首次安装"路径原样装回 —— 用户视角是"卸载后重启，技能又回来了"。
+ *
+ * R13-GH3（H2 跨根）：成功语义扩到**跨根**——不是"本根删掉了"，而是"**运行时再列一次
+ * 看不到它**"（上游发现面是多根合并，见 {@link runtimeSkillRoots}）。别的根里还有
+ * 同名技能 ⇒ 抛 `RESIDUE`，不返回成功。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
  * @param name - the skill directory name (single safe segment).
- * @param options - `overwrite: true` = 用户已确认删除本机内容。
+ * @param options - `overwrite: true` = 用户已确认删除本机内容；`runtimeRoots` 覆盖运行时
+ *   根表（测试 seam；生产走 `runtimeSkillRoots({ skillsDir })`，即 pinned 上游
+ *   `roots()` 的用户/agent/bundled 三个根），`env` 是同一推导用的环境 seam。
  * @returns the removed directory path.
- * @throws Error when the name is invalid, the skill is not installed, or local content needs confirmation.
+ * @throws Error when the name is invalid, the skill is not installed, local content needs
+ *   confirmation, or the runtime would still load it (单根影子 / 跨根残留都报 `RESIDUE`).
  */
 export async function uninstallSkill(
   skillsDir: string,
   name: string,
-  options: { overwrite?: boolean | undefined } = {},
+  options: { overwrite?: boolean | undefined, runtimeRoots?: readonly RuntimeSkillRoot[] | undefined, env?: Record<string, string | undefined> | undefined } = {},
 ): Promise<string> {
   validateSkillName(name)
   return await withSkillLock(skillsDir, name, async () => {
@@ -1259,6 +1336,34 @@ export async function uninstallSkill(
         + `${residue.map(row => `"${row.entryName}"`).join(', ')} — `
         + 'rename or delete them (they are your own files, so the Capability Hub will not touch them) '
         + `and the skill will really be gone`,
+      )
+    }
+
+    // R13-GH3（H2 跨根）：运行时发现面是**多根合并**（上游 `skill-filesystem` 的
+    // `roots()`：project → custom → `<dshHome>/skills` → `<agentsHome>/skills` →
+    // bundled），而能力中心只拥有 `<dshHome>/skills`。所以"把本根清干净"**不等于**
+    // "运行时不再加载"：同名技能还在 `<agentsHome>/skills`（默认
+    // `$DSH_AGENTS_HOME` 或 `~/.agents`）时，V13-B 的边界探针实测
+    // `uninstallSkill` 返回成功、`listInstalledSkills` = []，而 pinned 上游注册表
+    // 照旧加载它（`runtime = [["alpha","FROM-AGENTS-ROOT"]]`）。
+    //
+    // 判据口径（任务给出的 (a) 方案）：按**运行时同一判据**在**全部已知根**里查同名；
+    // 不属于自己能管的根 ⇒ 抛 `RESIDUE`（列条目名 + 根 + 指引），**绝不返回成功**。
+    // 根表是单一真源（`skill-runtime-roots.ts`，由 pinned 上游 `roots()` 派生，
+    // 行为探针 `tests/skill-runtime-roots.spec.ts` 守住漂移）。
+    const roots = options.runtimeRoots ?? runtimeSkillRoots({ skillsDir, env: options.env })
+    const foreign = await listCrossRootSkillResidues(roots, skillsDir, name)
+    if (foreign.length > 0) {
+      const where = foreign
+        .map(row => `"${row.skill.entryName}" in ${row.root.path} (${row.root.source})`)
+        .join(', ')
+      throw new ArchiveInstallRefusal(
+        'RESIDUE',
+        `skill "${name}" was removed from the Capability Hub skill root, but the runtime still loads it `
+        + `from ${foreign.length} other discovery root(s): ${where} — `
+        + 'those roots are not managed by the Capability Hub (they belong to the agent/project/bundled '
+        + `skill roots), so the skill is NOT uninstalled: rename or delete that copy there `
+        + `(or point $DSH_AGENTS_HOME elsewhere) and it will really be gone`,
       )
     }
     return target

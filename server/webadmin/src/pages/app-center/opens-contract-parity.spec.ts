@@ -473,6 +473,9 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4 / R13-GB）', () => 
         // 用冻结件判（见 upstream-anchor-freeze.ts 的头注释），**不静默 skip**。
         if (label !== '上游出站头名') { missing.push(`${label}: 文件不存在 ${rel}`); continue }
         if (!pattern.test(UPSTREAM_SESSION_HEADER_LINE)) {
+          // 先记来源再报错：否则先触发的是下面那条"sources 少一条"的断言，
+          // 看不到本条真正想说的话（V13-B 复审实测）。
+          sources.push(`${label}: submodule 缺席 ⇒ 按冻结件判定（但冻结件不含锚点）`)
           missing.push(`${label}: 冻结件本身不含锚点（upstream-anchor-freeze.ts 与锚点模式不一致）`)
           continue
         }

@@ -359,7 +359,7 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
   {
     path: 'scripts/check-install-integrity.mjs',
     // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
-    sha256: '05229efb18c528747738a8d04aef3748c35dee00021695427c544121cfb1893e',
+    sha256: 'd025b21313e6fe3b34294dbbb943efe777858cb1a14107e625e0b4015ee74cf6',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
@@ -1273,13 +1273,29 @@ export function strictAnchorSignals(env = process.env) {
  *   ② **远端对象库锚**：把登记的执行体按 `$GITHUB_SHA` 从 `origin` **取回**到
  *      `$RUNNER_TEMP` 下的干净目录（`git init` + `fetch --depth 1 --filter=blob:none`
  *      + 按需 `cat-file blob`），用**那份字节**复算摘要并与登记值对拍。
- *      远端对象库是**载荷改不了的**：本地 `git commit` 改不动 `origin` 上那个提交。
  *
- * 成本与取舍（如实写在这里，也写进报告）：多一次浅取回。用 `--filter=blob:none` 只取
- * commit + tree，**blob 按需惰性取回**（每个登记件一次往返），因此代价与"要验几个文件"
- * 成正比、与"仓有多大"无关。**离线/无 origin 的场景**：非严格面（本地）只告警；
- * **严格面（CI / `--require-clean`）下取不回 ⇒ 红** —— "锚不可达"不能当成"锚成立"。
- * 这与"只比 HEAD"的区别是结构性的：那条路在载荷 `git commit` 之后是**自洽**的。
+ * **② 的真实效力（V13-A §2.3 / §10 R4 的诚实降级；不要再照旧口径高估它）**：
+ * 它是**另一个域上的独立确认**，**不是**"结构性收口"、**不是**"载荷改不了的字节比对"、
+ * 更不是"第二道防线"。理由是纯内容寻址的：调用点先要求 `HEAD == $GITHUB_SHA`（① 成立），
+ * 而 `expected[path]` 由 `sha256(git show HEAD:<path>)` 派生（本文件 `readHeadBytes`），
+ * 远端 `cat-file` 取的是**同一个 commit** 的同名 blob —— 同一个 SHA 在 git 内容寻址下
+ * 必然同字节。⇒ **`mismatches`（字节不符）分支在生产调用路径上不可达**，只有**伪造/合成
+ * `expected`**（或 SHA-1 碰撞）才能命中它；`missing` 分支同理（键就是从那个 commit 读出来的）。
+ * 生产路径上它实际退化为一条**可用性探测**：「能不能从 `origin` 按裸 `$GITHUB_SHA` 取回」。
+ * 覆盖面也只有 `REGISTERED_INSTALL_INTEGRITY_BODIES` 的 **2 条**前置校验件，
+ * **不是** 96 条执行体那一面（那一面由本文件其余判据 + `check-install-integrity.mjs` 负责）。
+ * 合成 `expected` 触发该分支的变异证据 = `temp/r13/GA/mutate.sh` 的 M3（`temp/` 不入库；
+ * 该条目自身标注为变异，不代表产线行为）。
+ *
+ * 成本与取舍（如实写在这里，也写进报告）：多一次浅取回 —— **新增一次网络依赖**。用
+ * `--filter=blob:none` 只取 commit + tree，**blob 按需惰性取回**（每个登记件一次往返），
+ * 因此代价与"要验几个文件"成正比、与"仓有多大"无关。**离线/无 origin 的场景**：非严格面
+ * （本地、无 runner 信号）只告警、不动退出码（V13-A §2.1 实测 T2b2 = EXIT 0）；环境里
+ * **没有 `$GITHUB_SHA`** 时 ② 连探测都不做（`sha === null` ⇒ `status: 'skipped'`，
+ * 由 ① 去报"判据输入缺席"）；
+ * **严格面（CI / `--require-clean`）下取不回 ⇒ 红** —— 这是 **fail-closed 的设计意图**
+ * （"锚不可达"不能当成"锚成立"），不是新的假红来源：CI 上 `$GITHUB_SHA` 恒在平台对象库里，
+ * 取不回只可能是网络/凭据/权限异常，那正是应该红的情况。
  * ------------------------------------------------------------------------- */
 
 /** 远端锚在 `$RUNNER_TEMP` 下的工作目录名（每次运行唯一）。 */
@@ -1287,6 +1303,11 @@ const REMOTE_ANCHOR_DIR_PREFIX = 'gate-remote-anchor-'
 
 /**
  * `assertHeadEqualsEnv`：`HEAD` 与平台值的一致性（R13-D-01）。
+ *
+ * 这是两条平台锚里**唯一在生产调用路径上真正生效**的一条：`HEAD` 取自本地 git 对象库
+ * （与被审对象同域可写），`$GITHUB_SHA` 由平台注入（仓内执行点改不了）—— 两者跨域，
+ * 不相等就是"判据在自己的可写域里自洽"这一失效态的**结构性**识别。
+ *
  * @param options - `{ head, env, strict }`。
  * @returns `{ failures, advisories, sha, note }`。
  */
@@ -1320,8 +1341,15 @@ export function assertHeadEqualsEnv(options = {}) {
 }
 
 /**
- * **远端对象库锚**（R13-D-01 的结构性收口）：把登记的执行体按 `$GITHUB_SHA` 从 `origin`
+ * **远端对象库锚**（R13-D-01 的 ②）：把登记的执行体按 `$GITHUB_SHA` 从 `origin`
  * 取回到一个干净目录，用那份字节复算摘要。
+ *
+ * 效力边界见上方头注释（V13-A §2.3 / §10 R4）：调用点已先要求 `HEAD == $GITHUB_SHA`，
+ * 而 `expected` 是从**同一个 commit** 的 `git show HEAD:` 派生的 ⇒ 这里的字节对拍在
+ * **生产调用路径上不可达**（内容寻址必然同字节），只有合成 `expected` 才命中
+ * `mismatches`。它实际兑现的是"能否从 `origin` 按裸 `$GITHUB_SHA` 取回"的**可用性探测**
+ * 与"取不回 ⇒ 严格面红"的 fail-closed 语义，且只覆盖 2 条前置校验件。
+ * **不要把它读成"载荷改不了的第二道防线 / 结构性收口"。**
  *
  * @param options - `{ sha, paths, env, strict }`；`paths` = 要验的仓库相对路径。
  * @returns `{ failures, advisories, note, status }`；`status` ∈ `ok|skipped|unavailable`。
@@ -1727,8 +1755,11 @@ function main(argv) {
           + '\n      ⇒ 两份必须逐条相同（键 = `<manifest>#<hook>`）。')
       }
     }
-    // ⓪ **平台锚**（R13-D-01）：`HEAD` 必须等于 `$GITHUB_SHA`，且登记的执行体必须能从
-    //    `origin@$GITHUB_SHA`（**载荷改不了**的那份）取回、复算摘要一致。
+    // ⓪ **平台锚**（R13-D-01）：① `HEAD` 必须等于 `$GITHUB_SHA`（跨域，生产路径上真正生效的
+    //    那一条）；② 再把登记的执行体从 `origin@$GITHUB_SHA` 取回复算摘要 —— 因为 ① 成立时
+    //    `expected` 与远端 blob 出自同一个 commit，② 的字节对拍**必然相等**（内容寻址），
+    //    它兑现的是"能否按裸 SHA 取回"的可用性探测与"取不回 ⇒ 严格面红"；
+    //    效力边界见 `remoteAnchorProblems` 上方头注释（V13-A §2.3 / §10 R4）。
     {
       const headShaResult = gitInRoot(['rev-parse', 'HEAD'])
       const headSha = headShaResult.status === 0 ? String(headShaResult.stdout).trim() : ''

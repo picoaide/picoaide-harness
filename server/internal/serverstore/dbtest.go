@@ -301,3 +301,51 @@ func ensureTestPartitions(db *sql.DB) error {
 	}
 	return nil
 }
+
+// OpenShadowSearchPathPool 是"敌对 search_path 旁路池"的**唯一实现**（导出给跨包
+// 判据用：`internal/llmgateway` 的 R13-GH3 探针要在一个被改过 search_path 的部署
+// 形态上断言"读/写落在 public 还是 shadow"，而跨包测试不能 import 对方的 _test.go）。
+//
+// 形态与"角色/库级 `ALTER ROLE … SET search_path=<shadow>,public`"或 DSN options
+// 等价：同一个库、同一批数据，只有解析顺序被前置了一个同名 shadow schema。
+// 连接必须走生产 `openPG`（`?`→`$N` 重写层在这儿；裸 `sql.Open("pgx")` 会让每条
+// 带 `?` 的语句变成 42601 假失败 —— R12-A 的 P3 实测）。
+//
+// 夹具自检 fail-loud：`SHOW search_path` 的第一段必须**是**传入的 schema，否则
+// 调用方的"敌对"前提不成立，判据会静默变成"在 public 上跑"。
+//
+// @param t - the calling test (used for cleanup and fatal reporting).
+// @param db - an already-open pool on the target database (any search_path).
+// @param schema - the shadow schema name to front the search_path with.
+// @returns a second pool whose search_path starts with `schema`.
+func OpenShadowSearchPathPool(t *testing.T, db *sql.DB, schema string) *sql.DB {
+	t.Helper()
+	var cur string
+	if err := db.QueryRow("SELECT current_database()").Scan(&cur); err != nil {
+		t.Fatalf("读 current_database: %v", err)
+	}
+	u, err := url.Parse(PgTestDSN())
+	if err != nil {
+		t.Fatalf("解析测试 DSN: %v", err)
+	}
+	u.Path = "/" + cur
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema+",public")
+	u.RawQuery = q.Encode()
+	side, err := openPG(u.String())
+	if err != nil {
+		t.Fatalf("开旁路池(search_path=%s,public): %v", schema, err)
+	}
+	t.Cleanup(func() { side.Close() })
+	if err := side.Ping(); err != nil {
+		t.Fatalf("旁路池 ping: %v", err)
+	}
+	var sp string
+	if err := side.QueryRow("SHOW search_path").Scan(&sp); err != nil {
+		t.Fatalf("SHOW search_path: %v", err)
+	}
+	if !strings.HasPrefix(sp, schema) {
+		t.Fatalf("旁路池 search_path=%q，第一段必须是 %s（夹具无效）", sp, schema)
+	}
+	return side
+}

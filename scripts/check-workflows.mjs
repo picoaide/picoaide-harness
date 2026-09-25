@@ -1195,6 +1195,67 @@ const FROZEN_LAUNCHER_PROBE_JOBS = ['gate-guards']
 const FROZEN_LAUNCHER_PROBE = 'scripts/check-frozen-launchers.mjs'
 /** 冻结步必须写出的输出键。 */
 const FROZEN_LAUNCHER_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
+/**
+ * **第二个冻结点**：把"冻结的 PATH"与**白名单内的工具链目录**合成一份判据步真能用的 PATH
+ * （V13-A §3.3 / R1 的收口件）。
+ *
+ * 为什么需要它：第一个冻结点排在任何仓内执行点**之前**（位置即判据），所以它抓到的 `path`
+ * 是"工具链之前"那份；而 `Full gate` 经 `corepack yarn` 起包级 check，需要 setup-node 的
+ * node 与 corepack shim 在 PATH 上。直接拿冻结那份复位 PATH = 用 runner **预装**的 node
+ * 跑 `yarn install` 装出来的依赖（版本/ABI 面不一致）—— 那是"用一个可能坏掉的构建换一个
+ * 看起来安全的形态"。所以这一格把工具链目录**按白名单**放进来：
+ *   · 只放行 `${{ runner.tool_cache }}/node/` 之下的目录（runner 侧展开的常量，仓内代码改不到）；
+ *   · 其它任何**新增**目录一律当场红 —— 那正是 `$GITHUB_PATH` 注入留下的痕迹。
+ */
+const FROZEN_TOOLCHAIN_STEP_ID = 'frozen-toolchain'
+/**
+ * **允许被 `export PATH=…` 复位的两个冻结点**（`FROZEN_LAUNCHER_PATH_EXPORT` 的正则里逐字写着
+ * 这两个名字；这里再做一次纯字符串对拍 —— 两处漂移时 [SK-17] 的例外会失效而不是放宽）。
+ */
+const FROZEN_LAUNCHER_STEP_IDS = [FROZEN_LAUNCHER_STEP_ID, FROZEN_TOOLCHAIN_STEP_ID]
+/**
+ * 判据步里允许出现的**外部命令**（登记制）。
+ *
+ * 为什么不再逐个写冻结点输出（V13-A §3.3 顺带点名的 `openssl`）：复位 `PATH` 之后，
+ * `openssl`/`cat`/`grep`/`mkdir` 与 `node`/`git`/`bash` 走的是**同一份**解析面 ——
+ * 冻结的是"整份 PATH"，逐个工具再写一个冻结点输出只是把同一件事说几遍。但"步骤能跑什么"
+ * 仍是判据面的一部分 ⇒ 按**登记制**收口：判据步里新出现一个未登记的外部命令即红
+ * （要么登记它并写清为什么不需要单独的冻结输出，要么别在判据步里用它）。
+ */
+const FROZEN_LAUNCHER_EXTERNAL_TOOLS = [
+  ['openssl', '凭据通道用它造一次性 nonce（`openssl rand -hex 16 > "$verdict_dir/nonce"`）'],
+  ['mkdir', '造步骤独占目录（`mkdir -m 700 "$verdict_dir"`：原子性本身就是判据的一部分）'],
+  ['cat', '把步骤自己的 stdout/stderr 捕获文件打回日志（凭据只从捕获文件里认）'],
+  ['grep', '在通过凭据文件里数"恰好一行"'],
+  ['tar', '打包 workspace 构建产物（不跑仓内代码，产物面判据）'],
+]
+/** shell 内建 / 关键字：不是外部命令，不需要登记。 */
+const SHELL_BUILTIN_OR_KEYWORD_WORDS = new Set([
+  'set', 'export', 'unset', 'declare', 'typeset', 'readonly', 'local', 'shift', 'eval', 'exec',
+  'source', '.', 'command', 'builtin', 'type', 'hash', 'umask', 'shopt', 'alias', 'unalias',
+  'echo', 'printf', 'read', 'test', '[', ']', '[[', ']]', ':', 'true', 'false', 'let', 'getopts',
+  'cd', 'pwd', 'pushd', 'popd', 'dirs', 'exit', 'return', 'break', 'continue', 'trap', 'wait',
+  'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in',
+  'select', 'time', 'coproc', 'function',
+])
+/** 合成步体里必须逐字出现的判据（冻结值来源 / 白名单锚 / 输出通道 / 拒绝路径）。 */
+const FROZEN_TOOLCHAIN_FRAGMENTS = [
+  'steps.frozen-launchers.outputs.path',
+  'runner.tool_cache',
+  '>> "$GITHUB_OUTPUT"',
+  'exit 1',
+]
+/**
+ * 判据步体里"复位 PATH"的那一行。**两个冻结点都认**（早于工具链就位的步骤只能用第一份）。
+ * 与 [SK-17] 的 PATH 例外（`FROZEN_LAUNCHER_PATH_EXPORT`，定义在下面的 [SK-20] 常量区）
+ * **逐字相同**：逐字 + 两端锚定 —— 多加一个字符（例如在后面再接一个目录）即不再豁免。
+ * 两份字面量必须同步；漂移由 `FROZEN_LAUNCHER_STEP_IDS` 的纯字符串对拍兜住。
+ */
+const FROZEN_LAUNCHER_PATH_EXPORT_ANY = /^export\s+PATH="\$\{\{\s*steps\.(frozen-launchers|frozen-toolchain)\.outputs\.path\s*\}\}"$/u
+/** 命令位的冻结表达式（`"${{ steps.<id>.outputs.<key> }}" …`）。 */
+const FROZEN_EXPRESSION_COMMAND_POSITION = /(?:^|[\n;&|(]|&&|\|\|)\s*"\$\{\{\s*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+\s*\}\}"/u
+/** 命令位直接跑仓内路径（`scripts/…` / `packages/…` / `integration-tests/…`）。 */
+const REPO_PATH_COMMAND_POSITION = /(?:^|[\n;&|(]|&&|\|\|)\s*(?:\.\/)?(?:scripts|packages|integration-tests)\//u
 /** 冻结步体里必须逐字出现的形态（绝对路径 + 步骤输出通道）。 */
 const FROZEN_LAUNCHER_FREEZE_FRAGMENTS = [
   'command -v node',
@@ -1203,7 +1264,7 @@ const FROZEN_LAUNCHER_FREEZE_FRAGMENTS = [
   '>> "$GITHUB_OUTPUT"',
 ]
 /** `export PATH="${{ steps.<id>.outputs.path }}"`（SK-17 body-assignment 的**唯一** PATH 例外）。 */
-const FROZEN_LAUNCHER_PATH_EXPORT = /export\s+PATH="\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.path\s*\}\}"/u
+const FROZEN_LAUNCHER_PATH_EXPORT = /^export\s+PATH="\$\{\{\s*steps\.(frozen-launchers|frozen-toolchain)\.outputs\.path\s*\}\}"$/u
 /** 冻结启动器的 node 调用形态（runner 侧展开的绝对路径）。 */
 const FROZEN_LAUNCHER_NODE_EXPRESSION = 'steps.frozen-launchers.outputs.node'
 /** 冻结的 `git`（取判据执行体来源的那条链）。 */
@@ -1343,14 +1404,21 @@ const VERDICT_ASSERTION_STEPS = [
 //
 // 收口形态（本规则钉住的形态）：
 //   ① 每个跑判据的 job 有且只有一个**冻结步**：`id: frozen-launchers`，且它之前没有执行仓内
-//      代码的步骤 —— 它把 `command -v node/bash/git` 的绝对路径与当时的 `$PATH` 写进 `$GITHUB_OUTPUT`；
+//      代码的步骤 —— 它把 `command -v node/bash/git` 的绝对路径与当时的 `$PATH` 写进
+//      `$GITHUB_OUTPUT`；
 //   ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用 `"${{ steps.frozen-launchers.outputs.node }}"`
 //      （runner 侧展开的绝对路径；步骤输出在步骤结束时被 runner 读走，后续仓内进程改不到）；
-//   ③ 用了冻结 node 的步骤体必须 `export PATH="${{ steps.frozen-launchers.outputs.path }}"`
-//      （让 `git`/`openssl`/`bash` 也回到冻结那一刻的解析面）；
+//   ③ **每个跑仓内执行体的判据步**都必须 `export PATH="${{ steps.<冻结点>.outputs.path }}"`
+//      —— 而且是该步里**任何仓内命令之前**的第一条（V13-A §3.3 / R1：只冻结"步骤命令位的
+//      启动器"冻不到仓内脚本体里的裸 `node`，实测能把 wasm 门禁翻成 EXIT=0）；
+//      冻结点有两个：`frozen-launchers`（工具链就位之前的那份）与
+//      `frozen-toolchain`（把冻结 PATH 与**白名单内**的工具链目录合成后的那份 —— 白名单是
+//      `${{ runner.tool_cache }}/node/`，其它任何新增目录 ⇒ 当场红，那正是 `$GITHUB_PATH`
+//      注入的痕迹）；引用哪一个都行，但被引用的冻结点必须在本步**之前**；
 //   ④ 该 job 里必须有一个步骤**真的跑**行为探针 `scripts/check-frozen-launchers.mjs`
 //      （静态判据只能证明"文本形态对"，跑一遍才能证明"PATH 注入换不掉启动器"，
-//      探针内部自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针恒绿）。
+//      探针内部自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针恒绿；
+//      另有一个**R1 形态的正控**：只拆掉 PATH 复位、保留冻结解释器 ⇒ 必须变红）。
 //
 // 诚实边界：收口的是 `$PATH` 注入这条**低成本**通道；GitHub 托管 runner 上 runner 用户有
 // 免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径 —— 见行为探针的末尾输出。
@@ -1421,8 +1489,108 @@ const VERDICT_WORKFLOW_FILE = 'ci.yml'
  * @returns 是否放行。
  */
 function isFrozenLauncherPathExport(segment) {
-  const match = FROZEN_LAUNCHER_PATH_EXPORT.exec(String(segment))
-  return match !== null && match[1] === FROZEN_LAUNCHER_STEP_ID
+  const match = FROZEN_LAUNCHER_PATH_EXPORT.exec(String(segment ?? '').trim())
+  return match !== null && FROZEN_LAUNCHER_STEP_IDS.includes(match[1])
+}
+
+/**
+ * 把 shell 的行继续（行尾 `\`）接起来 —— "命令位"判定必须在**逻辑行**上做，否则
+ * `tar -czf x.tgz \` 后面每一行都以路径开头，会被误判成"在命令位跑仓内脚本"。
+ * @param script - 去注释后的可执行文本。
+ * @returns 逻辑行数组。
+ */
+function joinedLogicalLines(script) {
+  const joined = []
+  let buffer = ''
+  for (const line of String(script).split('\n')) {
+    if (/\\$/u.test(line)) {
+      buffer += `${line.replace(/\\$/u, ' ')}`
+      continue
+    }
+    joined.push(`${buffer}${line}`)
+    buffer = ''
+  }
+  if (buffer !== '') joined.push(buffer)
+  return joined
+}
+
+/**
+ * 这一步是不是"跑仓内执行体的判据步"：命令位出现**冻结表达式**或**仓内路径**。
+ *
+ * 只用同一份口径判定"哪些步骤必须复位 PATH"，避免"按步骤名手写清单"（清单会漂移）。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 是否判据步。
+ */
+function isJudgeStepRun(run) {
+  for (const line of joinedLogicalLines(run)) {
+    const code = line.replace(/#.*$/u, '')
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(code.trim())) continue
+    if (FROZEN_EXPRESSION_COMMAND_POSITION.test(code)) return true
+    if (REPO_PATH_COMMAND_POSITION.test(code)) return true
+  }
+  return false
+}
+
+/**
+ * 判据步体里第一次"执行仓内东西"的**逻辑行**下标（复位 PATH 那一行不算）；没有 ⇒ -1。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 下标。
+ */
+function firstJudgeInvocationLine(run) {
+  const lines = joinedLogicalLines(run)
+  for (let index = 0; index < lines.length; index += 1) {
+    const code = lines[index].replace(/#.*$/u, '')
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(code.trim())) continue
+    if (FROZEN_EXPRESSION_COMMAND_POSITION.test(code)) return index
+    if (REPO_PATH_COMMAND_POSITION.test(code)) return index
+  }
+  return -1
+}
+
+/**
+ * 判据步体里"复位 PATH"那一行的**逻辑行**下标；没有 ⇒ -1。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 下标。
+ */
+function frozenPathExportLine(run) {
+  const lines = joinedLogicalLines(run)
+  for (let index = 0; index < lines.length; index += 1) {
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(lines[index].replace(/#.*$/u, '').trim())) return index
+  }
+  return -1
+}
+
+/**
+ * 判据步体里出现的**外部命令**（跳过赋值前缀、shell 关键字/内建、冻结表达式与仓内路径）。
+ *
+ * 用途只有一个：判据步里"新出现一个没登记的外部命令"要红（见 `FROZEN_LAUNCHER_EXTERNAL_TOOLS`）。
+ * 它是**近似的 shell 词法**（不做完整解析），因此只对"命令位第一个词"判，且内建/关键字按
+ * 白名单放过 —— 宁可漏判一个奇怪写法，也不要因为误判把正常判据步骤判红（假红的下场是
+ * 整条判据被关掉）。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 外部命令名数组（去重、排序）。
+ */
+function externalCommandWords(run) {
+  const found = new Set()
+  const known = new Set(FROZEN_LAUNCHER_EXTERNAL_TOOLS.map(([tool]) => tool))
+  for (const line of joinedLogicalLines(run)) {
+    const code = line.replace(/#.*$/u, '')
+    for (const segment of code.split(/(?:&&|\|\||[;&|])/u)) {
+      const words = segment.trim().split(/\s+/u).filter(word => word !== '')
+      let index = 0
+      while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index])) index += 1
+      while (index < words.length && SHELL_BUILTIN_OR_KEYWORD_WORDS.has(words[index])) index += 1
+      const word = words[index]
+      if (word === undefined) continue
+      if (word.startsWith('"') || word.startsWith("'") || word.startsWith('$')) continue
+      if (/^(?:\.\/)?(?:scripts|packages|integration-tests|docs|server|\.github)\//u.test(word)) continue
+      const name = /([^/]+)$/u.exec(word)?.[1] ?? word
+      if (SHELL_BUILTIN_OR_KEYWORD_WORDS.has(name) || known.has(name)) continue
+      if (!/^[A-Za-z][A-Za-z0-9._-]*$/u.test(name)) continue
+      found.add(name)
+    }
+  }
+  return [...found].sort()
 }
 
 /**
@@ -1506,17 +1674,96 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
     // ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用冻结的绝对路径。
     //    同时：取判据执行体来源的 `git show HEAD:` 与仓内 `bash <脚本>` 也必须走冻结值 ——
     //    它们与 `node` 同属"启动器"（假 `git`/假 `bash` 一样能把探针来源/脚本换成攻击者的）。
-    //    **不**在这里复位 PATH：`yarn`/`corepack` 仍按活的 PATH 解析（corepack 的 yarn shim
-    //    自己会 exec `node`），复位会让 job 里后面的工具链解析到冻结那一刻的旧 PATH
-    //    —— 那是"用一个坏掉的构建换一个看起来安全的形态"，写进诚实边界而不是偷偷做掉。
+    //    ③（V13-A §3.3 / R1）**冻结点只冻结了"步骤命令位"的启动器，冻不到仓内脚本体内的裸命令**：
+    //    `"${{ …outputs.interp }}" scripts/<x>.sh` 里的 `node` 仍按 `$PATH` 解析 ⇒ 一个只拦
+    //    某条判据、其余转发真 node 的假 `node` 能把 `pass=2 fail=1/EXIT=1` 翻成
+    //    `pass=3 fail=0/EXIT=0`（端到端实测）。所以**每个跑仓内执行体的判据步**都必须在
+    //    任何仓内命令之前把 PATH 复位到冻结值（工具链就位之前用第一份、之后用合成那份）——
+    //    复位方向与攻击相反（攻击往 PATH **前面**塞假 bin），形态逐字登记。
+    const composeIndex = steps.findIndex(step => typeof step?.id === 'string' && step.id.trim() === FROZEN_TOOLCHAIN_STEP_ID)
+    const composeScript = composeIndex < 0 ? '' : scripts[composeIndex]
+    if (composeIndex < 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有 \`id: ${FROZEN_TOOLCHAIN_STEP_ID}\` 的**PATH 合成步** ——\n`
+          + '  ⇒ 冻结步排在任何仓内执行点之前（位置即判据），它抓到的 `path` 是"工具链之前"那份；'
+          + '判据步要么复位成它（`Full gate` 经 `corepack yarn` 起包级 check 时工具链解析不到），'
+          + '要么复位成"合成份"——而合成份必须由**登记过的白名单规则**产生，不能就地拼字符串。',
+      })
+    } else {
+      for (const fragment of FROZEN_TOOLCHAIN_FRAGMENTS) {
+        if (composeScript.includes(fragment)) continue
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里缺少 \`${fragment}\` —— 它必须：`
+            + '① 从冻结输出取基准 PATH；② 只放行 `${{ runner.tool_cache }}/node/` 之下的新增目录'
+            + '（runner 侧常量，仓内代码改不到）；③ 用 `$GITHUB_OUTPUT` 交出合成值；'
+            + '④ 遇到任何其它新增目录就 `exit 1`（那正是 `$GITHUB_PATH` 注入的痕迹）。',
+        })
+      }
+      if (composeIndex < freezeIndex) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步排在冻结步**之前** —— 它没有基准 PATH 可取。`,
+        })
+      }
+      notes.push(`[SK-20] job \`${jobId}\` 的 PATH 合成步在第 ${composeIndex + 1} 步`
+        + '（白名单目录 + 其它新增目录即红）')
+    }
     let frozenCalls = 0
+    let frozenPathSteps = 0
     steps.forEach((step, index) => {
       if (typeof step?.run !== 'string') return
       // 冻结步自己**豁免**：它跑在任何冻结值存在之前，`command -v node` 在这里是
       // "解析路径"而不是"启动判据"（冻结之后每一步都必须走冻结值）。
       if (index === freezeIndex) return
+      // PATH 合成步也豁免：它就是"把冻结值变成可用值"的那一步，自身不跑仓内执行体。
+      if (index === composeIndex) return
       const script = scripts[index]
       const label = `job \`${jobId}\` 的第 ${index + 1} 步「${stepName(step, index)}」`
+      // ③a 判据步必须复位 PATH（形态 + 顺序都是判据）。
+      if (isJudgeStepRun(step.run)) {
+        const exportLine = frozenPathExportLine(step.run)
+        const firstInvocation = firstJudgeInvocationLine(step.run)
+        if (exportLine < 0) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] ${label} 是**跑仓内执行体的判据步**，但步骤体里没有`
+              + ' `export PATH="${{ steps.<冻结点>.outputs.path }}"` ——\n'
+              + '  ⇒ 冻结只罩住了"步骤命令位的启动器"：仓内 `.sh`/`.mjs` 体（以及它起的子进程）'
+              + '里的裸 `node` 仍按**活 PATH** 解析，一个只拦某条判据、其余转发真 node 的假 `node`'
+              + '（一行 `echo … >> $GITHUB_PATH`，不碰 git、不改被跟踪文件）就能把'
+              + ' `pass=2 fail=1/EXIT=1` 翻成 `pass=3 fail=0/EXIT=0`（V13-A §3.3 端到端实测）。',
+          })
+        } else if (firstInvocation >= 0 && exportLine > firstInvocation) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] ${label} 的 PATH 复位排在第 ${exportLine + 1} 个逻辑行，`
+              + `但它第 ${firstInvocation + 1} 个逻辑行就已经在跑仓内东西了 ——\n`
+              + '  ⇒ 复位必须在**任何仓内命令之前**（晚一步，那之前的命令已经按活 PATH 解析过了）。',
+          })
+        } else if (firstInvocation >= 0) {
+          frozenPathSteps += 1
+          // ③b 外部命令登记制（V13-A §3.3 顺带点名的 `openssl`）：复位 PATH 之后它们与
+          //     `node`/`git`/`bash` 同一解析面 ⇒ 不需要逐个写冻结点输出，但**新出现的**
+          //     外部命令必须登记（登记表 = `FROZEN_LAUNCHER_EXTERNAL_TOOLS`，逐条带理由）。
+          for (const tool of externalCommandWords(step.run)) {
+            jobFailures.push({
+              name: file,
+              line: 0,
+              detail: `[SK-20] ${label} 用了一个**未登记的外部命令** \`${tool}\` —— 判据步对外部`
+                + '命令的解析面是那一行 `export PATH=…` 复位出来的 PATH，所以它们不需要各自写一个'
+                + '冻结点输出；但"这一步能跑什么"必须进登记表（可评审的 diff）。'
+                + `\n  ⇒ 登记进 \`FROZEN_LAUNCHER_EXTERNAL_TOOLS\` 并写清它在这条判据里干什么。`,
+            })
+          }
+        }
+      }
       const nodeHits = rawCommandPositionArgvs(script, 'node')
       const usesFrozenNode = step.run.includes(FROZEN_LAUNCHER_NODE_EXPRESSION)
       if (nodeHits.length > 0) {
@@ -1583,7 +1830,7 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
     if (jobFailures.length === 0) {
       notes.push(`[SK-20] job \`${jobId}\` 的启动器已冻结:冻结步在第 ${freezeIndex + 1} 步(输出 `
         + `${FROZEN_LAUNCHER_OUTPUT_KEYS.join('/')} · 冻结调用 ${frozenCalls} 处 · 裸 node 0 处)`
-        + ` · 行为探针 ${probeSteps.length} 处`)
+        + ` · PATH 复位 ${frozenPathSteps} 个判据步 · 行为探针 ${probeSteps.length} 处`)
     }
   }
   return failures
@@ -2484,7 +2731,8 @@ function shellEnvironmentAssignments(script) {
     // 单独一行的 `FOO=1` 是普通 shell 变量(不导出 ⇒ 子进程看不见),不能报 ——
     // 本仓 `ci.yml` 的 `GO_TEST_STATUS=0` / `CHECK_STATUS=0` 正是这种合法写法。
     if (index < texts.length) {
-      for (const name of leadingAssignments) results.push({ name, kind: 'set', form: `前缀赋值 \`${name}=…\`` })
+      // `segment` 让调用方能判"这一句是不是那个唯一的 PATH 例外"（[SK-20] / [SK-17]）。
+      for (const name of leadingAssignments) results.push({ name, kind: 'set', segment: cleaned, form: `前缀赋值 \`${name}=…\`` })
     }
     const command = texts[index]
     // **`unset NAME…`**（第十一轮复审 J1 的 N2）：与 `export` 同一层写入面，方向相反 ——
@@ -2499,7 +2747,7 @@ function shellEnvironmentAssignments(script) {
         if (word === '--' || (word.startsWith('-') && word !== '-')) { cursor += 1; continue }
         const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
         if (name === undefined) { cursor += 1; continue }
-        results.push({ name, kind: 'unset', form: `\`unset ${name}\`(清除键)` })
+        results.push({ name, kind: 'unset', segment: cleaned, form: `\`unset ${name}\`(清除键)` })
         cursor += 1
       }
       continue
@@ -2524,7 +2772,7 @@ function shellEnvironmentAssignments(script) {
       const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
       if (name === undefined) { cursor += 1; continue }
       if (!expectsExportAttribute || exportsAttribute) {
-        results.push({ name, kind: 'set', form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
+        results.push({ name, kind: 'set', segment: cleaned, form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
       }
       cursor += 1
     }

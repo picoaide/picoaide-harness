@@ -148,6 +148,101 @@ const CONTRACT_CRITERIA = new Map([
 ])
 
 /**
+ * `electron-shots` 判据表的**登记值**（第四轮审计 R4-A-17/R4-A-18 的修复）。
+ *
+ * 与 `SELFTEST_EXPECTED_POLICIES` / `CHECK_*` 同一手法：声明一份清单，断言实际跑到的
+ * 就是它 —— 删掉一条判据、改名、或把表换成别的东西都会红（"表还在但判据少了"是最容易
+ * 被忽略的退化形态：判据数量掉下去没有任何函数签名会变）。
+ *
+ * ⚠️ 改判据表必须同步这里（这是有意的：登记值进 diff 才会被评审看见）。
+ */
+const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
+  'left-login-page',
+  'method-picker',
+  'screenshot-nonempty',
+  'script-completed',
+  'server-filled',
+  'step1-login-page',
+  'step2-brand',
+  'step2-shot-differs-from-step1',
+  'two-step-login-page',
+]
+/**
+ * 夹具总数下限（当前 29 条 = 正例 + 负例）。
+ *
+ * 与 `minCases` 同一口径的棘轮：删夹具必须同时改这个常量并进 diff。
+ * **诚实边界**：单个**冗余**负例夹具被删（同一判据还有别的负例）本条拦不住 —— 那种
+ * 删除不降低判别力（剩下的负例照样会拒掉恒真判据），所以不为此加精确夹具清单
+ * （精确清单会让每次补夹具都要改两处，代价大于收益）。
+ */
+const ELECTRON_SHOTS_MIN_FIXTURES = 24
+/**
+ * `electron-shots.mjs` 里"以判据 id 为首参的调用点"数量下限（当前 10 处）。
+ *
+ * 棘轮：删调用点 = 运行期不再判那条判据（既有的"id 必须出现在源码里"判据连**注释**里
+ * 出现都算），所以必须按调用点计数。增删判据调用时同步改这个常量并进 diff。
+ */
+const ELECTRON_SHOTS_MIN_RUNTIME_CALLS = 10
+
+/**
+ * `run-all.sh` 里一条接线（`run "<名>" <runner> <路径> [额外实参…]`）的**唯一解析口径**。
+ *
+ * ## 为什么不能写 `\s`（第十三轮 V13-C R-5：新引入的真缺陷）
+ *
+ * 旧口径是 `/^run\s+"([^"]+)"\s+(\S+)\s+(\S+)(?:\s+.*)?$/gmu`。JS 的 `\s` **包含 `\n`**，
+ * 而尾巴 `(?:\s+.*)?` 是可选的 ⇒ 一条**不带额外实参**的 `run` 行会把它的下一行整个吃掉：
+ *
+ * ```
+ * run "1. A" python3 a.py      ← 这一行没有尾参
+ * run "2. B" python3 b.py      ← 被上一行的 `\s+` 吃进尾巴，解析结果只有 1 条
+ * ```
+ *
+ * 现场方向是**假红**（新插一条无尾参的接线时，守卫报"接线数与登记值不一致 / 缺第 N 条"，
+ * 理由与真实缺陷无关），但它会让下一个人照着错误的方向修 —— 所以收紧成"行内水平空白"。
+ * `[^\S\n]` = `\s` 去掉 `\n`（保留 `\r` 之外的制表符/空格/全角空格等）。
+ *
+ * **判据**（`aggregateParserSelfTest()`，每次跑守卫都执行）：两行相邻的 `run` 必须解析成
+ * **两条**；带尾参的行不得吞掉下一行；缩进行 / 注释行不算接线。
+ */
+const AGGREGATE_RUN_LINE = /^run[^\S\n]+"([^"]+)"[^\S\n]+(\S+)[^\S\n]+(\S+)(?:[^\S\n]+.*)?$/gmu
+
+/**
+ * 解析 `run-all.sh` 的接线行 —— **唯一实现**（登记制对账与自检共用同一份）。
+ * @param source - `run-all.sh` 的文本。
+ * @returns `{{ name: string, runner: string, path: string }}[]`（按出现顺序）。
+ */
+function parseAggregateRuns(source) {
+  return [...source.matchAll(AGGREGATE_RUN_LINE)]
+    .map(match => ({ name: match[1], runner: match[2], path: match[3] }))
+}
+
+/**
+ * 解析器自己的正/反用例（第十三轮 V13-C R-5 的回归判据）。
+ *
+ * 没有这一条时，"有人把 `[^\S\n]` 改回 `\s`"这件事**在真仓上不可见** —— 真仓三条接线
+ * 恰好都带尾参（`"$SERVER_BASE"`），跨行合并不会发生，守卫照旧全绿。所以这条自检断言的是
+ * **解析器的能力**（相邻两行 ⇒ 两条），而不是"当前这份 run-all.sh 恰好解析对了"。
+ */
+function aggregateParserSelfTest() {
+  const adjacent = 'run "1. A" python3 a.py\nrun "2. B" python3 b.py\n'
+  const parsedAdjacent = parseAggregateRuns(adjacent)
+  check(parsedAdjacent.length === 2,
+    '形态⑦: run-all.sh 解析器把**两行相邻的 `run`** 解析成了 '
+      + `${parsedAdjacent.length} 条（必须 2 条）—— 正则里的空白类吃了换行（V13-C R-5 的形态），`
+      + `实际：${JSON.stringify(parsedAdjacent)}`)
+  check(parsedAdjacent.map(entry => entry.path).join(',') === 'a.py,b.py',
+    '形态⑦: 两行相邻 `run` 的解析结果错位（必须按序 a.py / b.py）：'
+      + JSON.stringify(parsedAdjacent.map(entry => entry.path)))
+  const withTail = parseAggregateRuns('run "1. A" node a.mjs --server "$BASE"\nrun "2. B" python3 b.py\n')
+  check(withTail.length === 2 && withTail[0].path === 'a.mjs' && withTail[1].path === 'b.py',
+    '形态⑦: 带额外实参的接线不得吞掉下一行，也不得把尾参当成路径：' + JSON.stringify(withTail))
+  const noise = parseAggregateRuns('# run "0. 注释里的调用" python3 ghost.py\n  run "1. A" python3 a.py\n')
+  check(noise.length === 0,
+    '形态⑦: 注释行与缩进行都不算接线（`^run` 必须锚在行首）：' + JSON.stringify(noise))
+  notes.push(`聚合层解析器: 相邻两行 ⇒ 2 条、尾参不吞行、注释/缩进行不误判 ✓`)
+}
+
+/**
  * `integration-tests/**` 的**用例登记表**（第十三轮审计 F-03 的修复）。
  *
  * 现场：这个面**只有"减少"有判据、"增加"没有** —— 新增一个必然 `exit 77` 的用例
@@ -167,17 +262,36 @@ const CONTRACT_CRITERIA = new Map([
  * `aggregateName` + `runner` + `aggregatePath` 就是 `run-all.sh` 里那一行的形状：
  *   `run "<aggregateName>" <runner> <aggregatePath>`
  * 双向对账（登记了却不在 ⇒ 红；在却没登记 ⇒ 红；顺序不同 ⇒ 红）见 §0。
+ *
+ * ## 判别力下限（第十三轮 V13-C R-2：F-03 的残留那一半）
+ *
+ * 登记制只买到**可见性**，买不到**阻止**：V13-C 实测（探针 `p07d`）把"必然 `exit 77`、
+ * 什么都不验"的新用例**登记齐、顺序对**（`role: 'fixture'`）之后，守卫照旧 `EXIT=0` ——
+ * `fixture` 这个角色在旧实现里**零角色要求**。所以每条登记项多两个字段：
+ *
+ *   · `minJudgments`  —— **运行期非 SKIP 的判定条数下限**（棘轮）。只有 1 条硬规矩：
+ *     想**接进聚合层**（有 `aggregateName`）就必须声明它，且必须与这条腿**自己的机器可读
+ *     判定清单**（`contract-test` 的 `--dump-criteria` / `judged-runner` 的判据表）逐数相等；
+ *     非判定角色（`fixture` / `judge-channel` / `assertion-table` / `aggregate`）**不得**接进聚合层
+ *     —— "登记了却零判定"于是变成一条当场红的结构判据，而不是靠评审看 diff。
+ *   · `skipReasons`   —— 这条腿**允许**打出的 SKIP 原因码（闭集见 {@link SKIP_REASON_CODES}）。
+ *
+ * 组级再有 `GROUP_MIN_JUDGMENTS`（Σ `minJudgments` 的下限）：新增一条腿不能靠"多一条
+ * 恒 SKIP 的接线"把总量撑住，也不能靠删判据把总量压下去。
  */
 const INTEGRATION_ENTRIES = [
-  { path: 'integration-tests/run-all.sh', role: 'aggregate' },
-  { path: 'integration-tests/contractkit.py', role: 'judge-channel' },
-  { path: 'integration-tests/dex/config.yaml', role: 'fixture' },
+  { path: 'integration-tests/run-all.sh', role: 'aggregate', skipReasons: [] },
+  { path: 'integration-tests/contractkit.py', role: 'judge-channel', skipReasons: [] },
+  { path: 'integration-tests/dex/config.yaml', role: 'fixture', skipReasons: [] },
   {
     path: 'integration-tests/dex/dex-sso-test.py',
     role: 'contract-test',
     runner: 'python3',
     aggregatePath: 'dex/dex-sso-test.py',
     aggregateName: '1. Dex SSO 流程测试',
+    minJudgments: DEX_EXPECTED_CRITERIA.length,
+    skipOutlet: 'skip',
+    skipReasons: ['missing-server', 'missing-provider'],
   },
   {
     path: 'integration-tests/openldap/ldap-rbac-brand-test.py',
@@ -185,17 +299,50 @@ const INTEGRATION_ENTRIES = [
     runner: 'python3',
     aggregatePath: 'openldap/ldap-rbac-brand-test.py',
     aggregateName: '2. LDAP + RBAC + 渠道集成测试',
+    minJudgments: LDAP_EXPECTED_CRITERIA.length,
+    skipOutlet: 'skip',
+    skipReasons: ['missing-server', 'missing-provider'],
   },
-  { path: 'integration-tests/electron-shots/assertions.mjs', role: 'assertion-table' },
-  { path: 'integration-tests/electron-shots/report.mjs', role: 'judge-channel' },
+  { path: 'integration-tests/electron-shots/assertions.mjs', role: 'assertion-table', skipReasons: [] },
+  { path: 'integration-tests/electron-shots/report.mjs', role: 'judge-channel', skipReasons: [] },
   {
     path: 'integration-tests/electron-shots/electron-shots.mjs',
     role: 'judged-runner',
     runner: 'node',
     aggregatePath: 'electron-shots/electron-shots.mjs',
     aggregateName: '3. Electron 截图验证(需打包 app)',
+    minJudgments: ELECTRON_SHOTS_EXPECTED_ASSERTIONS.length,
+    skipOutlet: 'skip',
+    skipReasons: ['missing-app', 'missing-display', 'missing-server'],
   },
 ]
+
+/**
+ * **SKIP 原因的闭集**（第十三轮 V13-C R-2 的第二条修法：`SKIP` 只能来自登记过的原因码）。
+ *
+ * 现场：`exit 77` 此前是一张**无记名**的免检牌 —— 脚本可以因为任何理由（包括"我什么都不想验"）
+ * 打一句 `SKIP: 环境缺失` 走人，聚合层照记 SKIP，门禁照绿。现在每条腿必须：
+ *   ① 在自己的源码里声明 `SKIP_REASONS`（= 它的原因码清单），且与本登记表的 `skipReasons` 逐字相等；
+ *   ② 只经**唯一出口**（`skipOutlet`）打 SKIP，出口必须校验原因码 ∈ `SKIP_REASONS`；
+ *   ③ 调用点给出的原因码**双向**对账（声明了没用 / 用了没声明 都红）；
+ *   ④ 真跑一次 SKIP 路径，断言输出里真的是 `SKIP[<已登记原因码>]:`。
+ * 未登记的原因码在任何一层都过不去 ⇒ "恒 SKIP 的新用例"不再是一张免检牌。
+ */
+const SKIP_REASON_CODES = new Map([
+  ['missing-server', '服务端 /healthz 不可达/非 200（Docker / PG / 服务端没起，或地址不对）'],
+  ['missing-provider', '服务端没配置本用例要求的 IdP / LDAP provider'],
+  ['missing-app', '缺打包产物（Electron app 目录不存在）'],
+  ['missing-display', '没有可用的 X 显示（DISPLAY 与 X socket 都不可用）'],
+])
+
+/** 能提供"机器可读判定清单"的角色 —— 只有它们可以接进聚合层。 */
+const JUDGMENT_BEARING_ROLES = new Set(['contract-test', 'judged-runner'])
+/**
+ * 组级判别力下限（棘轮 = 当前 Σ `minJudgments`）。
+ * 新增一条腿**不能**靠"多一条恒 SKIP 的接线"把总量撑住，删判据也不能把总量压下去。
+ */
+const GROUP_MIN_JUDGMENTS = DEX_EXPECTED_CRITERIA.length
+  + LDAP_EXPECTED_CRITERIA.length + ELECTRON_SHOTS_EXPECTED_ASSERTIONS.length
 
 /**
  * 语法/判据面扫描的扩展名（`INTEGRATION_ENTRIES` 必须覆盖它们全部）。
@@ -261,42 +408,6 @@ const CONTRACT_RUNTIME_WRAPPER_BREAK = {
   expect: /经 report\(\) 求值期望|只打了/u,
 }
 
-/**
- * `electron-shots` 判据表的**登记值**（第四轮审计 R4-A-17/R4-A-18 的修复）。
- *
- * 与 `SELFTEST_EXPECTED_POLICIES` / `CHECK_*` 同一手法：声明一份清单，断言实际跑到的
- * 就是它 —— 删掉一条判据、改名、或把表换成别的东西都会红（"表还在但判据少了"是最容易
- * 被忽略的退化形态：判据数量掉下去没有任何函数签名会变）。
- *
- * ⚠️ 改判据表必须同步这里（这是有意的：登记值进 diff 才会被评审看见）。
- */
-const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
-  'left-login-page',
-  'method-picker',
-  'screenshot-nonempty',
-  'script-completed',
-  'server-filled',
-  'step1-login-page',
-  'step2-brand',
-  'step2-shot-differs-from-step1',
-  'two-step-login-page',
-]
-/**
- * 夹具总数下限（当前 29 条 = 正例 + 负例）。
- *
- * 与 `minCases` 同一口径的棘轮：删夹具必须同时改这个常量并进 diff。
- * **诚实边界**：单个**冗余**负例夹具被删（同一判据还有别的负例）本条拦不住 —— 那种
- * 删除不降低判别力（剩下的负例照样会拒掉恒真判据），所以不为此加精确夹具清单
- * （精确清单会让每次补夹具都要改两处，代价大于收益）。
- */
-const ELECTRON_SHOTS_MIN_FIXTURES = 24
-/**
- * `electron-shots.mjs` 里"以判据 id 为首参的调用点"数量下限（当前 10 处）。
- *
- * 棘轮：删调用点 = 运行期不再判那条判据（既有的"id 必须出现在源码里"判据连**注释**里
- * 出现都算），所以必须按调用点计数。增删判据调用时同步改这个常量并进 diff。
- */
-const ELECTRON_SHOTS_MIN_RUNTIME_CALLS = 10
 
 /**
  * 用例脚本的绝对路径。
@@ -556,6 +667,9 @@ async function main() {
   const registered = new Map(INTEGRATION_ENTRIES.map(entry => [entry.path, entry]))
   check(registered.size === INTEGRATION_ENTRIES.length,
     '登记表 INTEGRATION_ENTRIES 里有重复路径 —— 登记值必须一一对应')
+  // 聚合层解析器自己的能力自检（V13-C R-5 的回归判据；真仓三条接线恰好都带尾参，
+  // 不跑这一条的话"正则改回 `\s`"在真仓上不可见）。
+  aggregateParserSelfTest()
 
   // ① 登记了却不在磁盘上 ⇒ 红（"登记表指向一个已经不存在的用例"）。
   for (const entry of INTEGRATION_ENTRIES) {
@@ -594,8 +708,8 @@ async function main() {
     ? readFileSync(join(ROOT, 'integration-tests', 'run-all.sh'), 'utf8')
     : ''
   // 允许路径之后还有额外实参（`"$SERVER_BASE"` 这类）；最少三段：名字 / runner / 路径。
-  const aggregateLines = [...runner.matchAll(/^run\s+"([^"]+)"\s+(\S+)\s+(\S+)(?:\s+.*)?$/gmu)]
-    .map(match => ({ name: match[1], runner: match[2], path: match[3] }))
+  // 解析口径见 `AGGREGATE_RUN_LINE`（`\s` 吃换行的缺陷已收紧，并带回归自检）。
+  const aggregateLines = parseAggregateRuns(runner)
   const expectedAggregate = INTEGRATION_ENTRIES
     .filter(entry => typeof entry.aggregateName === 'string')
     .map(entry => ({ name: entry.aggregateName, runner: entry.runner, path: entry.aggregatePath }))
@@ -638,6 +752,177 @@ async function main() {
     }
   }
   notes.push(`登记制: ${onDisk.length} 个可执行体全部登记、聚合层 ${aggregateLines.length} 条接线双向对账 ✓`)
+
+  // -------------------------------------------------------------------------
+  // ⑥ **判别力下限 + SKIP 原因码登记制**（第十三轮 V13-C R-2）
+  //
+  // 现场（探针 `p07d`，V13-C 实跑 `EXIT=0`）：新增 `integration-tests/extra/always-skip.py`
+  // —— 打印一句 `SKIP: 环境缺失` 就 `sys.exit(77)`，**什么都不验** —— 只要在
+  // `INTEGRATION_ENTRIES` 里登记成 `role: 'fixture'`（并在 `run-all.sh` 里接一条线），
+  // 旧登记制就照报「9 个可执行体全部登记、聚合层 4 条接线双向对账 ✓」并 `EXIT=0`：
+  // `fixture` 这个角色当时**零角色要求**。也就是说 F-03 的修法拿到的是"可见性"而不是"阻止"。
+  //
+  // 现在两条结构性判据（都能被打坏 —— 变异证据见报告 §H2）：
+  //   · **接进聚合层 = 必须提供判定**：`aggregateName` 只允许出现在 `JUDGMENT_BEARING_ROLES`
+  //     的角色上，且 `minJudgments` 必须与该腿**自己的机器可读判定清单**逐数相等；
+  //   · **SKIP 必须具名**：原因码闭集 + 声明/使用双向对账 + 唯一出口 + 真跑一次。
+  // -------------------------------------------------------------------------
+  const expectedAggregateByPath = new Map(expectedAggregate.map(entry => [entry.path, entry]))
+  for (const entry of INTEGRATION_ENTRIES) {
+    const wired = typeof entry.aggregateName === 'string'
+    const label = `${entry.path}（角色 ${entry.role}）`
+
+    // ---- ⑥a 角色 ↔ 判别力 ------------------------------------------------
+    if (wired) {
+      check(JUDGMENT_BEARING_ROLES.has(entry.role),
+        `形态⑥: ${label} 接进了聚合层，但它的角色不提供判定清单（可判定的角色只有 `
+          + `${[...JUDGMENT_BEARING_ROLES].join(' / ')}）`
+          + '\n  ⇒ "登记齐、顺序对、但恒 SKIP（什么都验不了）"的新用例在旧实现里是一条'
+          + ' `EXIT=0` 的通道（V13-C 探针 p07d）：`fixture` 零角色要求。'
+          + '零判定的东西不得出现在聚合层 —— 真要跑它，就给它一份判定清单并把 `minJudgments` 写进登记表。')
+      check(Number.isInteger(entry.minJudgments) && entry.minJudgments > 0,
+        `形态⑥: ${label} 接进了聚合层却没有 \`minJudgments\`（运行期非 SKIP 判定条数下限，正整数）`
+          + ' —— 没有下限的接线等于"跑不跑、验没验都不影响门禁"')
+    } else {
+      check(entry.minJudgments === undefined,
+        `形态⑥: ${label} 没有接进聚合层却声明了 \`minJudgments\` —— 判定条数只能来自聚合层里真的跑起来的腿`)
+    }
+
+    const entrySource = existsSync(join(ROOT, entry.path)) ? readFileSync(join(ROOT, entry.path), 'utf8') : ''
+    const declaredSkip = Array.isArray(entry.skipReasons) ? entry.skipReasons : null
+    check(declaredSkip !== null,
+      `形态⑥: ${label} 缺 \`skipReasons\`（数组；不能 SKIP 的腿写 \`[]\`）`
+        + ' —— 原因码清单必须进登记表才可能被评审看见')
+    if (declaredSkip === null) continue
+    check(new Set(declaredSkip).size === declaredSkip.length,
+      `形态⑥: ${label} 的 \`skipReasons\` 有重复项：${declaredSkip.join(', ')}`)
+    for (const code of declaredSkip) {
+      check(SKIP_REASON_CODES.has(code),
+        `形态⑥: ${label} 声明了**未登记**的 SKIP 原因码 ${JSON.stringify(code)}`
+          + `\n  ⇒ 已登记的原因码：${[...SKIP_REASON_CODES.keys()].join(', ')}`
+          + '（新增原因码必须同时进 SKIP_REASON_CODES 并写明含义 —— 否则它是无记名免检牌）')
+    }
+
+    if (declaredSkip.length === 0) {
+      // 不声明任何原因码 = 这条腿**不得**打 SKIP（少了这一条，新增的夹具/通道类条目
+      // 仍可以偷偷 `exit 77` 混过聚合层）。
+      const stray = sourceCodeLines(entrySource).filter(line => line.includes('SKIP[') || /SKIP:(?!\])/u.test(line))
+      check(stray.length === 0,
+        `形态⑥: ${label} 没有声明任何 SKIP 原因码，代码里却有 SKIP 输出：`
+          + `${stray.map(line => JSON.stringify(line.trim().slice(0, 120))).join(' | ')}`
+          + '\n  ⇒ 要么给它登记原因码（`skipReasons` + 源码里的 `SKIP_REASONS`），要么别打 SKIP')
+      continue
+    }
+
+    // ---- ⑥b 源码声明 ↔ 登记表（双向逐字） -------------------------------
+    const codeLines = sourceCodeLines(entrySource)
+    const declaredInSource = skipReasonsFromSource(codeLines.join('\n'))
+    check(declaredInSource !== null,
+      `形态⑥: ${label} 在登记表里声明了 SKIP 原因码，源码里却没有 \`SKIP_REASONS\` 声明`
+        + `（登记：${declaredSkip.join(', ')}）—— SKIP 原因码必须由脚本自己声明，`
+        + '否则"打的是哪个原因"只存在于守卫的登记表里，脚本怎么改都不会红')
+    if (declaredInSource !== null) {
+      const sorted = values => [...values].sort().join(',')
+      check(sorted(declaredInSource) === sorted(declaredSkip),
+        `形态⑥: ${label} 的 SKIP 原因码声明与登记表不一致`
+          + `\n  源码:${sorted(declaredInSource) || '(空)'}\n  登记:${sorted(declaredSkip) || '(空)'}`)
+    }
+
+    // ---- ⑥c 唯一出口 + 无裸 SKIP ----------------------------------------
+    const outlet = entry.skipOutlet
+    check(typeof outlet === 'string' && outlet !== '',
+      `形态⑥: ${label} 声明了 SKIP 原因码却没有 \`skipOutlet\`（唯一出口的函数名）`
+        + ' —— 没有唯一出口就无法保证"原因码必须登记"这件事在运行期成立')
+    const outlets = codeLines.filter(line => line.includes('SKIP['))
+    check(outlets.length === 1,
+      `形态⑥: ${label} 的代码里有 ${outlets.length} 处 \`SKIP[\` —— 必须恰好 1 处（唯一出口）`
+        + `\n  实际:${outlets.map(line => line.trim().slice(0, 120)).join(' | ') || '(空)'}`)
+    const bareSkip = codeLines.filter(line => /SKIP:(?!\])/u.test(line))
+    check(bareSkip.length === 0,
+      `形态⑥: ${label} 里出现了**不带原因码**的 \`SKIP:\` 输出：`
+        + `${bareSkip.map(line => JSON.stringify(line.trim().slice(0, 120))).join(' | ')}`
+        + '\n  ⇒ 未登记的原因（含"什么都不说"）不得成为免检牌；所有 SKIP 必须经唯一出口带上登记过的原因码')
+    if (typeof outlet === 'string' && outlet !== '') {
+      const used = [...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*'([a-z][a-z-]*)'`, 'gu'))]
+        .map(match => match[1])
+      const usedSet = [...new Set(used)]
+      const sorted = values => [...values].sort().join(',')
+      check(sorted(usedSet) === sorted(declaredSkip),
+        `形态⑥: ${label} 的 SKIP 调用点原因码与登记表不一致（双向：声明了没用 / 用了没声明 都红）`
+          + `\n  调用点:${sorted(usedSet) || '(空)'}\n  登记:${sorted(declaredSkip) || '(空)'}`)
+      const guardLines = codeLines.filter(line => line.includes('SKIP_REASONS'))
+      check(guardLines.length >= 2,
+        `形态⑥: ${label} 声明了 SKIP_REASONS 却只有 ${guardLines.length} 处代码引用它`
+          + ' —— 出口必须拿它做校验（未登记的原因码要在运行期就被拒，而不是只写在注释里）')
+    }
+    notes.push(`${entry.path.split('/').pop()}: SKIP 原因码 ${declaredSkip.join('/')} 声明/使用/唯一出口双向对账 ✓`)
+  }
+
+  // ---- ⑥d 组级判别力下限 ------------------------------------------------
+  const groupJudgments = INTEGRATION_ENTRIES
+    .filter(entry => typeof entry.aggregateName === 'string' && Number.isInteger(entry.minJudgments))
+    .reduce((sum, entry) => sum + entry.minJudgments, 0)
+  check(groupJudgments >= GROUP_MIN_JUDGMENTS,
+    `形态⑥: 聚合层的判定条数下限合计 ${groupJudgments} 条 < 登记下限 ${GROUP_MIN_JUDGMENTS} 条`
+      + ' —— 判据被删/被换成恒 SKIP（棘轮只允许被"变多"越过；真要下调必须同时改 '
+      + 'GROUP_MIN_JUDGMENTS 并写明理由）')
+
+  // ---- ⑥e 角色 ↔ 门禁的判据面（不许"新登记一条腿就绕开门禁"）----------
+  const contractEntries = INTEGRATION_ENTRIES.filter(entry => entry.role === 'contract-test')
+  check(contractEntries.map(entry => entry.path).sort().join(',') === CONTRACT_TESTS.map(test => test.path).sort().join(','),
+    '形态⑥: `role: contract-test` 的登记项与门禁的 `CONTRACT_TESTS`（判据面）不是同一集合'
+      + `\n  登记:${contractEntries.map(entry => entry.path).join(', ')}`
+      + `\n  判据面:${CONTRACT_TESTS.map(test => test.path).join(', ')}`
+      + '\n  ⇒ 新增一条 contract-test 必须同时在 CONTRACT_TESTS 里登记它的判据面'
+      + '（否则这条腿只是"登记了"却在门禁里零判据）')
+  for (const entry of contractEntries) {
+    const test = CONTRACT_TESTS.find(candidate => candidate.path === entry.path)
+    const registryRows = test === undefined ? [] : (CONTRACT_CRITERIA.get(test.id) ?? [])
+    check(entry.minJudgments === registryRows.length,
+      `形态⑥: ${entry.path} 的 \`minJudgments\`=${entry.minJudgments}，而判据表登记 ${registryRows.length} 条判据`
+        + ' —— 判别力下限必须与判据表逐数相等（`--dump-criteria` 已另行与登记值对账）')
+  }
+  for (const entry of INTEGRATION_ENTRIES.filter(item => item.role === 'judged-runner')) {
+    const table = entry.assertionTable ?? 'integration-tests/electron-shots/assertions.mjs'
+    let count = null
+    try {
+      const mod = await import(pathToFileURL(join(ROOT, table)).href)
+      count = Array.isArray(mod?.SHOTS_ASSERTIONS) ? mod.SHOTS_ASSERTIONS.length : null
+    } catch (err) {
+      fail(`形态⑥: ${entry.path}（judged-runner）的判据表 ${table} 读不出来（${err?.message ?? err}）`
+        + ' —— 判据条数不可见时不得把这条腿算进判别力下限')
+    }
+    if (count !== null) {
+      check(entry.minJudgments === count,
+        `形态⑥: ${entry.path} 的 \`minJudgments\`=${entry.minJudgments}，而判据表 ${table} 有 ${count} 条判据`
+          + ' —— 判别力下限必须与判据表逐数相等（改判据表必须同步登记值）')
+    }
+  }
+  notes.push(`判别力下限: 聚合层 ${groupJudgments} 条判定（下限 ${GROUP_MIN_JUDGMENTS}）、`
+    + `SKIP 原因码闭集 ${SKIP_REASON_CODES.size} 个 ✓`)
+}
+
+/**
+ * 取"代码行"（丢掉整行注释）—— 供 SKIP 出口 / 裸 `SKIP:` 的静态扫描用。
+ *
+ * 为什么必须丢注释：三个腿的**文档块**里就有 `SKIP: 前置环境缺失` 这类示例（它们正是
+ * "原因码此前无登记"的历史写法）；把注释算进去会让判据对着文档打架。
+ * @param source - 文件全文。
+ * @returns 去掉整行注释后的行数组。
+ */
+function sourceCodeLines(source) {
+  return source.split('\n').filter(line => !/^\s*(?:#|\/\/|\*|\/\*)/u.test(line))
+}
+
+/**
+ * 从腿自己的源码里取它声明的 SKIP 原因码（`SKIP_REASONS = ('a', 'b')` / `= ['a', 'b']`）。
+ * @param source - 文件全文。
+ * @returns 原因码数组；没有这一行时返回 `null`（调用方据此 fail-loud）。
+ */
+function skipReasonsFromSource(source) {
+  const match = /SKIP_REASONS\s*=\s*[[(]([^\])]*)[\])]/u.exec(source)
+  if (match === null) return null
+  return [...match[1].matchAll(/'([a-z][a-z-]*)'|"([a-z][a-z-]*)"/gu)].map(item => item[1] ?? item[2])
 }
 
 // ---------------------------------------------------------------------------
@@ -742,6 +1027,10 @@ for (const file of mjsFiles) {
   const skipOutput = `${skipRun.stdout ?? ''}${skipRun.stderr ?? ''}`
   check(skipRun.status === 77, `形态⑥: 缺打包产物必须 exit 77(SKIP)（实际 ${skipRun.status}）：${skipOutput.slice(0, 200)}`)
   check(skipOutput.includes('SKIP'), `形态⑥: 必须打印 SKIP 原因，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
+  // SKIP 必须**具名**（V13-C R-2）：原因码来自登记闭集，且必须是这个触发条件对应的那一个。
+  check(skipOutput.includes('SKIP[missing-app]:'),
+    `形态⑧: 缺打包产物的 SKIP 必须带登记过的原因码 \`SKIP[missing-app]:\`（V13-C R-2：无记名的 `
+      + `\`SKIP:\` 是免检牌），实际 ${JSON.stringify(skipOutput.split('\n').find(line => line.includes('SKIP'))?.slice(0, 200))}`)
   check(!skipOutput.includes('RESULT: PASS'), `形态⑥: SKIP 时不得打印 RESULT: PASS，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
 
   // 端到端：未知参数 ⇒ 用法错误 2（不要让它变成"静默用默认值跑下去"）。
@@ -1303,10 +1592,13 @@ const SCENARIOS = [
   {
     scenario: 'skip', test: CONTRACT_TESTS[0], expect: 77,
     must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ dex 必须显式 SKIP(77) 且不得报 PASS',
+    // SKIP 必须**具名**：登记过的原因码（V13-C R-2 的第二条修法 —— 无记名的 `SKIP:` 是免检牌）。
+    mustCode: 'missing-provider',
   },
   {
     scenario: 'skip', test: CONTRACT_TESTS[1], expect: 77,
     must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ ldap 必须显式 SKIP(77) 且不得报 PASS',
+    mustCode: 'missing-provider',
   },
   {
     scenario: 'dex-http-deeplink', test: CONTRACT_TESTS[0], expect: 1,
@@ -1345,9 +1637,91 @@ for (const item of SCENARIOS) {
       fail(`[${item.scenario}] ${item.label} —— 输出里出现了不该有的 ${item.mustNot}：${detail}`)
       continue
     }
+    if (item.mustCode !== undefined) {
+      // SKIP 必须**具名**（V13-C R-2）：输出的 SKIP 行必须带上登记过的原因码，
+      // 且必须是这个触发条件对应的那一个（拿别的原因码顶替 ⇒ 红）。
+      const emitted = [...output.matchAll(/SKIP\[([a-z][a-z-]*)\]/gu)].map(match => match[1])
+      if (!emitted.includes(item.mustCode)) {
+        fail(`[${item.scenario}] ${item.label} —— 输出里的 SKIP 没有登记过的原因码 `
+          + `\`SKIP[${item.mustCode}]:\`（实际 ${emitted.length > 0 ? emitted.map(code => `SKIP[${code}]`).join(', ') : '没有任何具名 SKIP'}）`
+          + `：${detail}`)
+        continue
+      }
+      const unknown = emitted.filter(code => !SKIP_REASON_CODES.has(code))
+      if (unknown.length > 0) {
+        fail(`[${item.scenario}] ${item.label} —— 输出了**未登记**的 SKIP 原因码：${unknown.join(', ')}`
+          + `（已登记：${[...SKIP_REASON_CODES.keys()].join(', ')}）`)
+        continue
+      }
+    }
     notes.push(`[${item.scenario}] ${item.test.id}: exit ${status} ✓`)
   } finally {
     await gateway.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 端到端覆盖面 **↔ CI 的真实命中数**（第十三轮 V13-C 附加结论的收口）。
+//
+// 现场：`grep -rn -i "integration" .github/workflows/` **0 命中** ⇒ 本目录的真机端到端
+// （Docker + 真实服务端 + 显示器）在 CI 内 **0 执行**。这件事此前只在通过行的**末尾**用散文
+// 声明（"文本上诚实，但作为保证不够"）—— 没有任何机制会因为端到端继续腐烂而失败：
+// OIDC 授权码流、LDAP 登录/RBAC、渠道契约、深链 handoff 这些**产品行为**在 CI 里 0 次验证，
+// 而 `check-integration-tests: OK` 这个名字照旧会被读成"集成测试 OK"。
+//
+// 收口（最小改动、语义不变）：
+//   ① 通过行改成 `… OK — VERDICT PASS static-only …`，把"这条绿只覆盖静态面"提到**凭据行**上；
+//   ② 命中数变成**判据**：`.github/workflows/**` 对 `integration-tests` / `run-all.sh` /
+//      `dex-sso` / `ldap-rbac` 的命中数必须**等于**登记值 `E2E_CI_HITS_DECLARED`。从 0 变 1
+//      （有人接了真机 job）或从 1 变 0（真机 job 被摘线）都**当场红**，逼下一个人显式决定：
+//      要么把登记值与 static-only 声明一起改掉（改口径要进 diff），要么恢复原状。
+//      —— 这与本仓"一个词就能改门禁语义"的登记制同一套纪律。
+// ---------------------------------------------------------------------------
+const E2E_CI_REFERENCE_PATTERN = /integration-tests|run-all\.sh|dex-sso|ldap-rbac/iu
+/** 登记值：CI 内引用 integration-tests 的行数（0 = 真机端到端在 CI 内 0 执行）。 */
+const E2E_CI_HITS_DECLARED = 0
+{
+  const workflowsDir = join(ROOT, '.github', 'workflows')
+  const workflowHits = []
+  if (!existsSync(workflowsDir)) {
+    fail('形态⑨: 找不到 .github/workflows/ —— 端到端覆盖面声明必须与 CI 的真实命中数对拍，'
+      + '目录不存在时不得把"读不到"当成"0 命中"')
+  } else {
+    for (const name of readdirSync(workflowsDir).filter(file => /\.ya?ml$/u.test(file)).sort()) {
+      const lines = readFileSync(join(workflowsDir, name), 'utf8').split('\n')
+      lines.forEach((line, index) => {
+        if (E2E_CI_REFERENCE_PATTERN.test(line)) workflowHits.push(`.github/workflows/${name}:${index + 1}`)
+      })
+    }
+    check(workflowHits.length === E2E_CI_HITS_DECLARED,
+      `形态⑨: \`.github/workflows/**\` 对 \`${E2E_CI_REFERENCE_PATTERN.source}\` 的命中 ${workflowHits.length} 处，`
+        + `而登记值（E2E_CI_HITS_DECLARED）是 ${E2E_CI_HITS_DECLARED} 处`
+        + `\n  命中:${workflowHits.join(', ') || '(无)'}`
+        + '\n  ⇒ 本守卫的绿只覆盖**静态面**。命中数变了就必须显式做决定：'
+        + '\n     · 接了真机 job（0 → 1）：把 E2E_CI_HITS_DECLARED 改成实际命中数，'
+        + '并把通过行的 `static-only` 与"CI 内 0 执行"的措辞一起改掉（口径要进 diff 才可评审）；'
+        + '\n     · 真机 job 被摘线（1 → 0）：同上反向改回，或恢复那条接线。'
+        + '\n     不允许"命中数悄悄变了、通过行照旧写 static-only"。')
+    notes.push(`端到端覆盖面: CI 引用命中 ${workflowHits.length} 处（登记 ${E2E_CI_HITS_DECLARED}）—— `
+      + '通过行据此声明 static-only ✓')
+  }
+
+  // ---- step 名/描述也要说出边界 ------------------------------------------
+  // 通过行只在日志里可见；CI 列表上看到的是**这个守卫的名字与描述**（`✓ check:integration-tests`
+  // 与编排器 GUARDS 表里的 `path`）。"这条绿只覆盖静态面"必须在**读者的入口处**就成立，
+  // 而不是要读完 stdout 末尾才知道 —— 所以 `static-only` 是 step 描述里的**判据**，不是文案。
+  const orchestratorPath = join(ROOT, 'scripts', 'check-workspaces.mjs')
+  const orchestratorSource = existsSync(orchestratorPath) ? readFileSync(orchestratorPath, 'utf8') : ''
+  const guardEntry = /^\s*\{[^\n]*name: 'check:integration-tests'[^\n]*$/mu.exec(orchestratorSource)
+  check(guardEntry !== null,
+    '形态⑨: 编排器 GUARDS 表里找不到 `check:integration-tests` 这一条 —— '
+      + '找不到就不得默认"它的 step 名已经说清覆盖面了"')
+  if (guardEntry !== null) {
+    check(/static-only/u.test(guardEntry[0]),
+      '形态⑨: 编排器 GUARDS 表里 `check:integration-tests` 的 step 名/描述里没有 `static-only`'
+        + `\n  实际:${guardEntry[0].trim()}`
+        + '\n  ⇒ 这条守卫的绿只覆盖静态面（真机端到端在 CI 内 0 执行）：'
+        + '名字里不写出来，读者（含只看 CI 列表的人）仍会把它读成"集成测试 OK"（V13-C 附加结论）。')
   }
 }
 
@@ -1366,17 +1740,25 @@ if (failures.length > 0) {
   return 1
 }
 
+
 // ---------------------------------------------------------------------------
 // 通过行**必须与真实覆盖面一致**（第十三轮 F-01 的直接教训）。
 //
 // 旧通过行写的是「2 个契约脚本判据自检通过」—— 读者会读成"这两个脚本的判据被钉住了"，
 // 而当时它们可以在 24/24、29/29 全绿的前提下被整体掏空。现在通过行**枚举**真的判了的
 // 层，并**断言枚举条数等于登记项数**（断言通过行本身，而不是断言它存在）。
+//
+// 第十三轮 V13-C 的附加结论之后，凭据行还必须说出**这条绿的边界**：`static-only`
+// （真机端到端需要 Docker + 真实服务端 + 显示器，CI 内 0 执行 —— 上面那条命中数判据钉住）。
+// 措辞里刻意不出现"跳过/未覆盖"这类词：那会把这条**结论行**误收进 `check-workspaces` 的
+// `[DEGRADED]` 摘要（关键词判据），而它不是"某条判据没真的判"。
 // ---------------------------------------------------------------------------
 const COVERED_LAYERS = [
   `语法（${pyFiles.length} 个 .py ast.parse / ${mjsFiles.length} 个 .mjs node --check）`,
   `登记制（${INTEGRATION_ENTRIES.length} 项：登记了不在 / 在却没登记 / 聚合层少调多调或换序 全红）`,
   `聚合层接线（${INTEGRATION_ENTRIES.filter(entry => entry.aggregateName !== undefined).length} 条逐字对拍）`,
+  `判别力下限（聚合层 ${GROUP_MIN_JUDGMENTS} 条判定：接进聚合层的腿必须给出机器可读判定清单，零判定的条目红）`,
+  `环境缺失的原因码登记制（闭集 ${SKIP_REASON_CODES.size} 个：源码声明 / 调用点 / 唯一出口 双向对账 + 真跑一次确认具名）`,
   `契约判据表（${CONTRACT_TESTS.map(test => `${test.id} ${(CONTRACT_CRITERIA.get(test.id) ?? []).length} 条`).join(' / ')}：`
     + '精确 id 集合 + 逐 id 正负例条数 + 运行期逐条引用 + 观测非空）',
   `契约判据本体自证（--self-test，每条判据正/负例夹具）`,
@@ -1385,19 +1767,35 @@ const COVERED_LAYERS = [
   'electron-shots（接线 + SKIP(77) 契约 + 判据表自检 + 判定通道自检 + 4 条判定通道变异）',
   `假网关场景（${SCENARIOS.length} 条：正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）`,
   '聚合层三项全 SKIP ⇒ 77 且不报 PASS',
+  `端到端覆盖面 ↔ CI 命中数（\`.github/workflows/**\` 命中 ${E2E_CI_HITS_DECLARED} 处 = 登记值；变了即红）`,
 ]
 // 通过行自己也要被钉住：枚举条数必须等于登记项数（改一个而漏改另一个 ⇒ 红）。
-const EXPECTED_COVERED_LAYERS = 10
+const EXPECTED_COVERED_LAYERS = 13
 if (COVERED_LAYERS.length !== EXPECTED_COVERED_LAYERS) {
   process.stderr.write(`\ncheck-integration-tests: 通过行的覆盖面枚举 ${COVERED_LAYERS.length} 项，`
     + `与登记值 ${EXPECTED_COVERED_LAYERS} 项不一致 —— 通过行的自我陈述必须与真实覆盖面一致\n`)
   return 1
 }
+/**
+ * 通过凭据行的**形态登记值**（第十三轮 V13-C 附加结论）：`static-only` 必须出现在凭据行上，
+ * 否则"这条绿只覆盖静态面"就只活在 stdout 末尾的散文里（读者只看那一行总结论）。
+ * 拿掉 `static-only` / `VERDICT PASS` / 项数自证中的任一段 ⇒ 红。
+ */
+const VERDICT_CREDENTIAL_PATTERN = /^check-integration-tests: OK — VERDICT PASS static-only 已覆盖 \d+ 项：$/u
+const verdictCredentialLine = `check-integration-tests: OK — VERDICT PASS static-only 已覆盖 ${COVERED_LAYERS.length} 项：`
+if (!VERDICT_CREDENTIAL_PATTERN.test(verdictCredentialLine)) {
+  process.stderr.write(`\ncheck-integration-tests: 通过凭据行不合登记形态（${VERDICT_CREDENTIAL_PATTERN}）——`
+    + ` 实际 ${JSON.stringify(verdictCredentialLine)}\n`
+    + '  ⇒ 凭据行必须自己说出"只覆盖静态面（static-only）"：它才是 CI 列表/日志里被读的那一行。\n')
+  return 1
+}
 process.stdout.write(
-  `check-integration-tests: OK — 已覆盖 ${COVERED_LAYERS.length} 项：\n`
+  `${verdictCredentialLine}\n`
   + COVERED_LAYERS.map(layer => `  · ${layer}\n`).join('')
-  + '  （**不在本守卫覆盖面内**：integration-tests 的真机端到端需要 Docker + 真实服务端 + 显示器，'
-  + 'CI 语境下 0 执行；本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',
+  + `  （**本绿只覆盖静态面（static-only）**：integration-tests 的真机端到端需要 Docker + 真实服务端`
+  + ` + 显示器，\`.github/workflows/**\` 对它的引用命中 ${E2E_CI_HITS_DECLARED} 处 ⇒ 在 CI 内 0 执行；`
+  + '命中数由本守卫对拍（0↔1 都会红），所以"这条绿覆盖到哪里"在 CI 列表上就是可见的。'
+  + '本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',
 )
 return 0
 }

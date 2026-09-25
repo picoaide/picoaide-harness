@@ -2725,13 +2725,30 @@ function discoverPackageRoots(root: string): Array<{ key: string, name: string, 
 
 /**
  * 派生整棵包面：`workspaces` glob（覆盖性） + 任意深度递归枚举（事实）。
+ *
+ * **事实面不能只从 `packages/` 生根**（R13 E-P2-1 / V13-B 复审）：仓库根的
+ * `workspaces` 还包含 `community/*`，那些包带 `test` 脚本时同样会被
+ * `yarn workspace … run test` 跑，但只扫 `packages/` 会让它们整体不在面内 ——
+ * 子验证员据此构造出过一个"48 passed"的假绿。现在事实面 =
+ * `packages/` 递归 ∪ **`workspaces` glob 自己展开出的每一个目录**（去重后按 key 排序）。
  * @param roots - the `packages/` root and the repository root.
  * @returns one entry per package on disk, in key order.
  */
 function derivePackageSurface(roots: { readonly packagesRoot: string, readonly repoRoot: string }): PackageSurfaceEntry[] {
-  const covered = new Set(expandWorkspaceGlobs(roots.repoRoot, workspaceGlobs(roots.repoRoot))
-    .map(directory => relative(roots.repoRoot, directory).split('\\').join('/')))
-  return discoverPackageRoots(roots.packagesRoot).map((entry) => {
+  const expanded = expandWorkspaceGlobs(roots.repoRoot, workspaceGlobs(roots.repoRoot))
+  const covered = new Set(expanded.map(directory => relative(roots.repoRoot, directory).split('\\').join('/')))
+  const found = new Map<string, { key: string, name: string, pkgRoot: string }>()
+  for (const entry of discoverPackageRoots(roots.packagesRoot)) found.set(entry.pkgRoot, entry)
+  // key 的基准与 `discoverPackageRoots` 一致：**相对 `packages/`**；不在 `packages/`
+  // 之下的 workspace（本仓目前只有 `community/*`）用仓库相对路径当 key。
+  const packagesPrefix = `${relative(roots.repoRoot, roots.packagesRoot).split('\\').join('/')}/`
+  for (const directory of expanded) {
+    if (!existsSync(join(directory, 'package.json'))) continue
+    const relRepo = relative(roots.repoRoot, directory).split('\\').join('/')
+    const key = relRepo.startsWith(packagesPrefix) ? relRepo.slice(packagesPrefix.length) : relRepo
+    found.set(directory, { key, name: key.split('/').at(-1) ?? key, pkgRoot: directory })
+  }
+  return [...found.values()].sort((a, b) => a.key.localeCompare(b.key)).map((entry) => {
     let testScript: string | undefined
     try {
       const manifest = JSON.parse(readFileSync(join(entry.pkgRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }
