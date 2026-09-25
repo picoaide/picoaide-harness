@@ -1144,6 +1144,24 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 - **`scripts/check-root-guards.mjs` 真正在做的事**是**运行器侧**的三条：① 每个守卫以**真子进程**运行、退出码**不可被 `NODE_OPTIONS=--import` 之类的退出钩子改写**（钩子同时覆写 `process.exit` 与 `process.reallyExit` 时，运行器仍以"每个登记的守卫都真的跑过 + 没有一条失败"为条件打印通过凭据）；② 交给守卫子进程的环境经过**清洗**（危险族键不传递）；③ 被判进程"拒绝运行"或"零守卫"时**打印不出**通过凭据。
 - 换句话说：本仓的收口是"**判定权上移 + 凭据必须由本步的检查器合成**"，不是"让某个函数不可中断地结束"。凡引用 `endUninterruptably` 的表述一律以本条为准。
 
+**tag-only 判据步的口径（第十四轮 lane B 复核，2026-09-25 就地登记）**
+
+第十四轮 lane B 复核 `gate` 里三条"只在 tag 上才有意义"的判据步（`Classify the release tag` /
+`Release topology` / `Resolve the channel packages revision`）时，顺带核对了一句流传中的说法
+——"这三条**从未在任何真实运行里执行过**"。**核对结果：这句话不在本报告里**（本节、全文与
+`temp/r13/**` 的报告 `grep` 零命中，`git log --all -S` 亦无），它只作为"不该这么写"的引文
+出现在 lane B 的 `REPORT.md` 里。为免它日后被当作本报告的口径引用，**正确表述写在这里**：
+
+- **已被覆盖**：`[SK-20]` 把这三条算进 `gate` 的 7 个 PATH 复位判据步；行为探针
+  `scripts/check-frozen-launchers.mjs` 的逐判据步金丝雀格子**每个 PR** 都把这三条步骤体的
+  **原字节**跑两遍（各自一次 + "只冻结解释器、不复位 PATH"的正控 B 一次），且冻结输出缺席时
+  以 127 失败（fail-loud，lane B 实测）。
+- **未被覆盖**：**真 tag 参数组合**（`GITHUB_REF_NAME` 是真 tag、`docs/releases/<tag>.md` 在位、
+  `origin` 上真有那批 tag）。
+- ⇒ 正确口径：**"步体已被 canary 级行为探针覆盖；真 tag 参数组合是它第一次真跑"**。
+  完整记账见 `docs/decisions/2026-09-25-gate-definition-authority.md` §5.2（同处 §5.1 记
+  "哪些 job 有冻结点、哪些没有、残余攻击面是什么"）。
+
 **D-§8.5 的诚实边界（整段原文引用）**
 
 > **在没有结构性收口的前提下，本仓"门禁绿"能承诺什么、不能承诺什么。**

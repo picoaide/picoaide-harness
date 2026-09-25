@@ -54,6 +54,32 @@
  *   · `openssl` 等**外部工具**不再逐个写冻结点输出：复位 `PATH` 之后它们与 `node`/`git`/`bash`
  *     走**同一份**解析面（`check-workflows.mjs` 的 `FROZEN_LAUNCHER_EXTERNAL_TOOLS` 是它们的
  *     登记表 —— 判据步里新出现一个未登记的外部命令即红）。
+ *   · **冻结点只存在于 `gate-guards` 与 `gate` 两个 job**（`ci.yml` 里 `id: frozen-launchers`
+ *     只有两处；登记表 = `check-workflows.mjs` 的 `FROZEN_LAUNCHER_JOBS`）。**没有**冻结点的 job：
+ *     `changes`（分类器，纯 `git diff` + `$GITHUB_OUTPUT`）、`server`、`desktop-linux`、
+ *     `desktop-windows`、`desktop-macos`、`release`、`pr-summary`。这些 job 里跑仓内代码的步骤
+ *     全是**裸解释器**（`bash scripts/ci-*.sh`、`node scripts/version.mjs`），也没有任何 PATH 复位，
+ *     所以"同 job 内更早的步骤写 `$GITHUB_PATH`"这条通道在那些 job 里**没有任何判据**。
+ *     当前可接受的理由（第十四轮审计 lane B 的 B-06：本节如实记账，**不**声称已完全收口）：
+ *       · `desktop-*` 与 `release` 的 `needs` 链把它们挡在 `gate → gate-guards` **之后**
+ *         （`desktop-*` 需要 `gate`；`release` 需要 `gate` + `server` + 三个 `desktop-*`）；
+ *       · `release` 是"纵深为零"而不是"已被绕开"：它一次 `install` 都没有，第一个仓内执行点
+ *         是纯 `test -f` 的策展说明检查，此前没有任何能写 `$GITHUB_PATH` 的仓内代码；
+ *       · 真正**绕开**守卫链的是 `server`（`needs: changes`，与 `gate-guards` 无依赖关系），
+ *         它的安装面（`server/webadmin` 的 `npm ci`）不在任何安装期判据里 —— 那条已单独记为
+ *         R14-08（`server/webadmin/**` 的 npm 侧在判据面之外），由**另一条泳道**收口；
+ *         本探针既不覆盖它、也不声称覆盖它。
+ *   · **tag-only 三条判据步的执行覆盖**（口径，第十四轮审计 lane B 的 B-07 更正）：`gate` 的
+ *     `Classify the release tag` / `Release topology` / `Resolve the channel packages revision`
+ *     三步**不是**"从未被执行过" —— `[SK-20]` 把它们算进 `gate` 的 7 个 PATH 复位判据步，
+ *     本探针的逐判据步格子**每个 PR 都会把它们的步骤体原字节**在金丝雀仓里跑两遍（各自一次 +
+ *     "只冻结解释器、不复位 PATH"的正控 B 一次），冻结输出缺席/为空时它们会以 127 失败
+ *     （fail-loud）。**没有被覆盖**的是"**真 tag 参数组合**"（`GITHUB_REF_NAME` 是真 tag、
+ *     `docs/releases/<tag>.md` 在位、`origin` 上真有那批 tag）⇒ 正确表述是
+ *     "**步体已被 canary 级行为探针覆盖；真 tag 参数组合是它第一次真跑**"。
+ *   · 本判据**不覆盖**的还有：白名单**内部**目录的替换（需要写权限/免密 sudo）、非 PATH 的
+ *     启动器替换通道（例如修改 `$GITHUB_ENV`/runner 状态）、以及上面那些无冻结点 job 里的
+ *     裸解释器。
  *
  * ## 用法
  *
@@ -72,11 +98,35 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+// 两张登记表的**单一真源**（第十四轮审计 lane E 的 E-03）：此前本文件手抄了 `PINNED_JOBS` /
+// `FREEZE_OUTPUT_KEYS` 两份字面量，注释自称"与 check-workflows.mjs 同一份登记/同源"，而两文件
+// 互不 import、全仓零交叉对拍 ⇒ 把本文件那一侧缩成 `['node']` 后，`check-workflows` 与
+// `check-frozen-launchers` **同时 EXIT=0**（漂移不可见）。现在改成真 import。
+//
+// **为什么这个 import 是安全的（本文件是被 spawn 的判据执行体）**：
+//   · 它由 CI 以 `"<冻结 node>" scripts/check-frozen-launchers.mjs --root "$PWD"` 从**工作区里
+//     就地**执行（`ci.yml` 的 gate-guards 判据步），不是 `git show HEAD:… > $RUNNER_TEMP` 那种
+//     换目录执行的形态 —— ESM 的相对 import 按**本文件自己的位置**解析，与 cwd 无关；
+//   · `check-workflows.mjs` 的 import 面只有 Node 内建 + 根 `yaml`（gate-guards 在跑本探针之前
+//     已经 `yarn install --immutable`），且模块顶层只有常量/函数定义（主流程在 `main()` 里、
+//     由 argv 相等与否守卫）⇒ import 它没有副作用。
+//   · 若将来有人把本文件复制到别处执行（例如 `git show > $RUNNER_TEMP/probe.mjs`），这条 import
+//     会解析失败 ⇒ **那是显式红灯**（fail-loud），不是静默降级；要那么做必须同时改这里。
+import { FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS } from './check-workflows.mjs'
+import { FROZEN_TOOLCHAIN_ALLOWLIST_VALUE, FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE } from './check-workflows.mjs'
 
-/** 必须逐 job 解析冻结点的 job（与 `check-workflows.mjs` 的 `FROZEN_LAUNCHER_JOBS` 同一份登记）。 */
-const PINNED_JOBS = ['gate-guards', 'gate']
-/** 冻结步必须写出的输出键（与 `check-workflows.mjs` 的 `FROZEN_LAUNCHER_OUTPUT_KEYS` 同源）。 */
-const FREEZE_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
+/**
+ * **登记表不再在本文件里声明**（第十四轮审计 lane E 的 E-03 的修法）：必须逐 job 解析冻结点的
+ * job 与冻结步必须写出的输出键都来自上面那条 import —— `check-workflows.mjs` 导出的
+ * `FROZEN_LAUNCHER_JOBS` / `FROZEN_LAUNCHER_OUTPUT_KEYS` 是**唯一**一份。
+ *
+ * 本文件里**连别名都不留**（`const X = FROZEN_LAUNCHER_Y` 也不写）：接线判据
+ * （`check-workflows.mjs` 的 `checkFrozenRegistryWiring`）把"出现本地声明"直接判红 ——
+ * 别名正是漂移的载体（改别名 = 改小登记表而另一侧不知情，E-03 的原始形态）。
+ *
+ * 收窄登记表的后果由**双向对拍**兜住（见主流程的冻结输出核对）：冻结步**真跑出来的**输出键
+ * 集合必须与登记表逐字相等 —— 少了即"没有写出该键"，多了即"写出了未登记的键"，两个方向都红。
+ */
 
 /** 正控/反控共用的假 `node`：留下标记文件，并打印一条"看起来通过"的凭据。 */
 const FAKE_NODE_SOURCE = `#!/bin/sh
@@ -336,12 +386,21 @@ function stripPathExport(text) {
 /**
  * 把 runner 侧展开的表达式换成冻结值：
  *   · `${{ steps.<id>.outputs.<key> }}` ⇒ 对应冻结点那一次运行的输出；
- *   · `${{ runner.tool_cache }}` ⇒ 同名环境变量（本机复刻时缺省空串）。
+ *   · `${{ runner.tool_cache }}` ⇒ 调用方给的本机替身（缺省取同名环境变量，再缺省空串）。
  * 剩下的未展开表达式由调用方按"引用了不存在的冻结点"报红（runner 会把它展开成空串，
  * 而那正是"没有启动器"的形态）。
+ *
+ * `toolCache` 必须是**参数**而不是只读环境变量：白名单负控（B-03）要把
+ * `${{ runner.tool_cache }}` 展开成一个真实存在的本机目录，才能分别构造"白名单之内"与
+ * "白名单之外"两种 PATH。
+ *
+ * @param text - 步骤体原文。
+ * @param outputsByStepId - `{ <stepId>: { <key>: value } }`。
+ * @param toolCache - `${{ runner.tool_cache }}` 的展开值。
+ * @returns 替换后的文本。
  */
-function substituteFrozenOutputs(text, outputsByStepId) {
-  let result = String(text).replaceAll('\${{ runner.tool_cache }}', process.env.RUNNER_TOOL_CACHE ?? '')
+function substituteFrozenOutputs(text, outputsByStepId, toolCache = process.env.RUNNER_TOOL_CACHE ?? '') {
+  let result = String(text).replaceAll('\${{ runner.tool_cache }}', toolCache)
   for (const [id, outputs] of Object.entries(outputsByStepId)) {
     for (const [key, value] of Object.entries(outputs)) {
       result = result.replaceAll(`\${{ steps.${id}.outputs.${key} }}`, String(value))
@@ -364,6 +423,37 @@ function repoPathTokens(text) {
 /** 仓内执行体的金丝雀源码（`.sh`/`.bash` 走 shell，其余走 JS）。 */
 function canarySourceFor(path) {
   return /\.(?:sh|bash)$/u.test(path) ? CANARY_SHELL_SOURCE : CANARY_MJS_SOURCE
+}
+
+/**
+ * 构造"白名单被放行成 `/`"的**对照体**（白名单负控的正控；第十四轮审计 lane B 的 A8b 形态：
+ * 把 `allowed_root` 改成 `/`，并另加一行把登记串留在**可执行字符串**里）。
+ *
+ * 为什么需要它：没有这条正控，"注入被拒绝"这一格可能是恒绿的（例如步骤体已经不按 PATH 判了）
+ * —— 与正控 A/B 同一条纪律：判据必须能被打坏。
+ *
+ * 取值与变量名都来自 `check-workflows.mjs` 的登记常量（**不在这里手抄**，E-03 的教训）；
+ * 找不到那条登记赋值 ⇒ 返回 `null`，调用方必须**报红**（而不是静默跳过这一格）。
+ *
+ * @param body - PATH 合成步的步骤体原文。
+ * @returns 放行成 `/` 的对照体；找不到登记赋值 ⇒ `null`。
+ */
+function widenAllowlistControl(body) {
+  const lines = String(body).split('\n')
+  const index = lines.findIndex((line) => {
+    const match = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*?)[ \t]*$/u.exec(line.replace(/\r$/u, ''))
+    return match !== null && match[1] === FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE
+      && match[2] === FROZEN_TOOLCHAIN_ALLOWLIST_VALUE
+  })
+  if (index < 0) return null
+  const indent = /^(\s*)/u.exec(lines[index])[1]
+  lines.splice(
+    index,
+    1,
+    `${indent}${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}="/"`,
+    `${indent}allowlist_anchor=${FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}`,
+  )
+  return lines.join('\n')
 }
 
 /**
@@ -429,6 +519,17 @@ function main(argv) {
   // 判据步体会在 `$RUNNER_TEMP` 下 `mkdir` 自己的独占目录 ⇒ 父目录必须先存在
   // （GitHub runner 上它本来就在；本地探针要自己建）。
   mkdirSync(join(scratch, 'runner-temp'), { recursive: true })
+  // 白名单**负控**（第十四轮审计 lane B 的 B-03）用的三个目录：
+  //   · `toolCacheRoot` = `${{ runner.tool_cache }}` 的本机替身（`…/node/<ver>/<arch>/bin` 是
+  //     **登记白名单之下**的目录 ⇒ 合成步必须接受它）；
+  //   · `injectedDir` 模拟 `echo … >> "$GITHUB_PATH"` 留下的那个"冻结那一刻没有的目录"
+  //     ⇒ 合成步必须**拒绝**它（exit≠0 且不写 `path=`）。
+  const toolCacheRoot = join(scratch, 'runner-tool-cache')
+  const allowedToolchainDir = join(toolCacheRoot, 'node', '24.21.0', 'x64', 'bin')
+  const injectedDir = join(scratch, 'injected-bin')
+  mkdirSync(allowedToolchainDir, { recursive: true })
+  mkdirSync(injectedDir, { recursive: true })
+  const basePath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'
 
   const runShell = (script, env, cwd = work) => spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
     cwd,
@@ -447,21 +548,27 @@ function main(argv) {
     : String(headRev.stdout ?? '').trim()
 
   try {
-    /** 跑一个"冻结点步骤体"并把它的步骤输出解析成对象。 */
-    const runFreezeBody = (body, extraOutputs = {}) => {
+    /**
+     * 跑一个"冻结点步骤体"并把它的步骤输出解析成对象。
+     * @param body - 步骤体原文（`${{ … }}` 由 `substituteFrozenOutputs` 替换）。
+     * @param extraOutputs - 可替换进步骤体的冻结点输出（`{ <stepId>: { <key>: value } }`）。
+     * @param envOverride - `{ path?, toolCache? }`：本机替身 PATH 与 `${{ runner.tool_cache }}`
+     *   （负控要用"注入目录 + 白名单目录"两种 PATH 各跑一遍，见下面 ④/⑤）。
+     */
+    const runFreezeBody = (body, extraOutputs = {}, envOverride = {}) => {
       const outputFile = join(scratch, `github-output-${Math.random().toString(36).slice(2)}`)
       writeFileSync(outputFile, '')
-      const substituted = substituteFrozenOutputs(body, extraOutputs)
+      const toolCache = envOverride.toolCache ?? process.env.RUNNER_TOOL_CACHE ?? ''
+      const substituted = substituteFrozenOutputs(body, extraOutputs, toolCache)
       const result = runShell(substituted, {
-        PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+        PATH: envOverride.path ?? process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_OUTPUT: outputFile,
         GITHUB_PATH: join(scratch, 'github-path'),
         GITHUB_ENV: join(scratch, 'github-env'),
         RUNNER_TEMP: join(scratch, 'runner-temp'),
         GITHUB_SHA: anchorSha,
-        // `${{ runner.tool_cache }}` 是 runner 侧展开的常量；本机复刻时按同名环境变量取，
-        // 缺省空（⇒ 合成步只认"冻结那份"，本地没有工具链新增目录 ⇒ 结论不受影响）。
-        RUNNER_TOOL_CACHE: process.env.RUNNER_TOOL_CACHE ?? '',
+        // `${{ runner.tool_cache }}` 是 runner 侧展开的常量；本机复刻时按同名环境变量取。
+        RUNNER_TOOL_CACHE: toolCache,
       })
       const outputs = {}
       for (const line of readFileSync(outputFile, 'utf8').split('\n')) {
@@ -477,7 +584,7 @@ function main(argv) {
     for (const job of jobs) {
       const steps = parseSteps(lines, job.start, job.end)
       const freezeStep = steps.find(step => step.id === options.freezeStepId)
-      const pinned = PINNED_JOBS.includes(job.id)
+      const pinned = FROZEN_LAUNCHER_JOBS.includes(job.id)
       if (freezeStep === undefined || freezeStep.run === null) {
         if (pinned) {
           failures.push(`job \`${job.id}\` 里没有 \`id: ${options.freezeStepId}\` 的**冻结步**（或它的 `
@@ -494,11 +601,29 @@ function main(argv) {
         continue
       }
       const outputs = { [options.freezeStepId]: { ...freeze.outputs } }
-      for (const key of FREEZE_OUTPUT_KEYS) {
+      // 登记表 ↔ **真跑出来的输出键**：双向对拍（第十四轮审计 lane E 的 E-03）。
+      //
+      // 少了某个键 = 冻结步没有交出那份值（下一步会把它展开成空串）；
+      // **多了**某个键 = 冻结步写出了登记表之外的输出 ⇒ 登记表被收窄时（无论收窄的是哪一侧，
+      // 现在两侧只有一份）这里会红 —— 没有这一半，"把登记表改小"就是一条静默丢掉核验面的路径。
+      for (const key of FROZEN_LAUNCHER_OUTPUT_KEYS) {
         if (typeof outputs[options.freezeStepId][key] !== 'string' || outputs[options.freezeStepId][key].trim() === '') {
           failures.push(`job \`${job.id}\` 的冻结步没有写出 \`${key}\` 输出`
             + '（步骤输出是"后续步骤改不到"的那份值）')
         }
+      }
+      const unregisteredOutputs = Object.keys(freeze.outputs)
+        .filter(key => !FROZEN_LAUNCHER_OUTPUT_KEYS.includes(key))
+      if (unregisteredOutputs.length > 0) {
+        failures.push(`job \`${job.id}\` 的冻结步写出了**未登记**的输出键：`
+          + `${unregisteredOutputs.map(key => `\`${key}\``).join('、')} —— 登记表 `
+          + `\`FROZEN_LAUNCHER_OUTPUT_KEYS\` 现在只有 `
+          + `${FROZEN_LAUNCHER_OUTPUT_KEYS.map(key => `\`${key}\``).join('/')}。`
+          + '这一半是"收窄登记表"这条路径的判据：少了它，把登记表改小就等于静默丢掉对'
+          + '那些键的核验（E-03 的原始形态）。要么补登记（那是可评审的 diff），要么别写这个键。')
+      } else if (Object.keys(freeze.outputs).length === FROZEN_LAUNCHER_OUTPUT_KEYS.length) {
+        notes.push(`job \`${job.id}\` 的冻结输出键与登记表**双向相等**（`
+          + `${FROZEN_LAUNCHER_OUTPUT_KEYS.join('/')}）`)
       }
       for (const key of ['node', 'interp', 'git']) {
         const value = outputs[options.freezeStepId][key] ?? ''
@@ -510,7 +635,7 @@ function main(argv) {
       // 工具链合成步（可选但被判据步引用时必需）：它把冻结 PATH 与**白名单内**的工具链目录合成。
       const toolchainStep = steps.find(step => step.id === options.toolchainStepId)
       if (toolchainStep !== undefined && toolchainStep.run !== null) {
-        const composed = runFreezeBody(toolchainStep.run, outputs)
+        const composed = runFreezeBody(toolchainStep.run, outputs, { toolCache: toolCacheRoot })
         if (composed.result.status !== 0) {
           failures.push(`job \`${job.id}\` 的 PATH 合成步 EXIT=${composed.result.status}\n`
             + `      stderr: ${JSON.stringify((composed.result.stderr ?? '').slice(0, 300))}`)
@@ -520,6 +645,65 @@ function main(argv) {
           } else {
             outputs[options.toolchainStepId] = { path: composed.outputs.path }
           }
+        }
+        // ④ 白名单**负控**（第十四轮审计 lane B 的 B-03，P1）：往 PATH 前置一个"冻结那一刻
+        //    没有的目录"（= `echo … >> "$GITHUB_PATH"` 留下的痕迹），合成步必须**拒绝**它。
+        //
+        //    为什么这一格是承重的：原来的探针只断言"EXIT=0 且 `path` 非空" —— 而在本机复刻里
+        //    步骤体看到的 `$PATH` 与冻结点记录的那份是同一个值 ⇒ **没有任何"新增目录"** ⇒
+        //    那两条断言恒真。lane B 实测：把白名单改成 `allowed_root="/"` 后，静态判据与探针
+        //    双绿，而同一步骤体在真 PATH 下把注入目录写进了 `path=`。
+        const injectedPath = `${injectedDir}:${basePath}`
+        const negative = runFreezeBody(toolchainStep.run, outputs,
+          { path: injectedPath, toolCache: toolCacheRoot })
+        if (negative.result.status === 0) {
+          failures.push(`job \`${job.id}\` 的 PATH 合成步**没有拒绝注入目录**：把 `
+            + `${injectedDir} 前置到 PATH（模拟 \`echo … >> "$GITHUB_PATH"\`）之后它仍然 `
+            + `EXIT=0${typeof negative.outputs.path === 'string' ? `，并把注入目录写进了 \`path=${negative.outputs.path}\`` : ''}`
+            + ' —— 合成步是"白名单之外的新增目录即红"的承重件；它接受注入就等于这道判据消失'
+            + '（B-03：白名单只剩子串判据时，静态与行为会双绿）。')
+        } else {
+          notes.push(`白名单负控成立：往 PATH 前置注入目录后合成步 EXIT=${negative.result.status}`
+            + '（拒绝，且没有写出 `path=`）')
+        }
+        // ⑤ **负控的正控**：把白名单取值换成 `/`（lane B 的 A8b 形态：另加一行把登记串留在
+        //    可执行文本里）之后，同一个注入**必须**被接受 —— 否则这一格是恒绿的（证明不了任何
+        //    东西）。纪律与正控 A/B 相同：判据必须能被打坏。
+        const widened = widenAllowlistControl(toolchainStep.run)
+        if (widened === null) {
+          failures.push(`job \`${job.id}\` 的 PATH 合成步里找不到可替换的登记赋值 `
+            + `（\`allowed_root="\${{ runner.tool_cache }}/node/"\`）⇒ 白名单负控的**正控**`
+            + '无从构造，这一格会退化成恒绿。')
+        } else {
+          const positiveControl = runFreezeBody(widened, outputs,
+            { path: injectedPath, toolCache: toolCacheRoot })
+          if (positiveControl.result.status !== 0 || typeof positiveControl.outputs.path !== 'string') {
+            failures.push(`**白名单负控的正控失败**：把白名单取值换成 \`/\` 之后，同一个注入目录仍然`
+              + `被拒绝（EXIT=${positiveControl.result.status}）⇒ ④ 那一格抓不到"白名单被放行"这条`
+              + '载荷（绿是恒绿）。要么解析器/替换形态变了，要么"拒绝"来自别处（例如步骤体已经不再'
+              + '按 PATH 判）。')
+          } else if (!positiveControl.outputs.path.startsWith(`${injectedDir}:`)) {
+            failures.push('**白名单负控的正控失败**：白名单换成 `/` 之后注入目录虽然被接受，'
+              + `但 \`path=${positiveControl.outputs.path}\` 里看不到它 ⇒ ④ 那一格的判据面不是`
+              + '真正的合成值。')
+          } else {
+            notes.push('白名单负控的正控成立：把白名单换成 `/` 后同一个注入被接受并写进 `path=`'
+              + ' ⇒ ④ 那一格有判别力')
+          }
+        }
+        // ⑥ 白名单**之内**的目录必须仍被接受（防"用拒绝一切换绿"）：把 `…/node/…/bin`
+        //    前置到 PATH，合成步必须接受它并把合成值放进 `path`。
+        const allowedPath = `${allowedToolchainDir}:${basePath}`
+        const positive = runFreezeBody(toolchainStep.run, outputs,
+          { path: allowedPath, toolCache: toolCacheRoot })
+        if (positive.result.status !== 0) {
+          failures.push(`job \`${job.id}\` 的 PATH 合成步拒绝了**白名单之内**的工具链目录 `
+            + `${allowedToolchainDir}（EXIT=${positive.result.status}）—— 那会让"拒绝注入"变成`
+            + '"拒绝一切"，判据的判别力就没了（真 runner 上 setup-node 装出来的工具链就在这个前缀下）。')
+        } else if (typeof positive.outputs.path !== 'string'
+          || !positive.outputs.path.startsWith(`${allowedToolchainDir}:`)) {
+          failures.push(`job \`${job.id}\` 的 PATH 合成步接受了白名单目录，但合成值里看不到它`
+            + `（\`path=${String(positive.outputs.path)}\`）—— 白名单分支没有真的生效。`)
         }
       }
       freezeOutputsByJob.set(job.id, outputs)
@@ -649,16 +833,16 @@ function main(argv) {
 
     // ---- 端到端格子：把 gate-guards 的判据步体按原字节在**真仓**里跑一遍 ----
     const judgeName = 'Judge execution bodies are pristine (runs before any yarn command)'
-    const gateGuards = jobs.find(job => job.id === PINNED_JOBS[0])
+    const gateGuards = jobs.find(job => job.id === FROZEN_LAUNCHER_JOBS[0])
     const canonical = gateGuards === undefined
       ? undefined
       : parseSteps(lines, gateGuards.start, gateGuards.end)
         .find(step => step.name === judgeName)
     if (canonical === undefined || canonical.run === null) {
-      failures.push(`抽不出 \`${PINNED_JOBS[0]}\` 的「${judgeName}」步骤体（它是"判据本体在 install 期`
+      failures.push(`抽不出 \`${FROZEN_LAUNCHER_JOBS[0]}\` 的「${judgeName}」步骤体（它是"判据本体在 install 期`
         + '有没有被改写"的前置校验，必须逐字可跑）')
     } else {
-      const outputs = freezeOutputsByJob.get(PINNED_JOBS[0]) ?? {}
+      const outputs = freezeOutputsByJob.get(FROZEN_LAUNCHER_JOBS[0]) ?? {}
       const judgeTemplate = substituteFrozenOutputs(canonical.run, outputs)
       if (!judgeTemplate.includes(`steps.${options.freezeStepId}.outputs.node`.replace('steps.', ''))) {
         notes.push('判据步体里已看不到冻结表达式（替换后）—— 下面跑的是替换后的真字节')
@@ -740,12 +924,25 @@ function main(argv) {
       return 1
     }
     process.stdout.write(`check-frozen-launchers: VERDICT PASS frozen=${options.freezeStepId}`
-      + ` node=${freezeOutputsByJob.get(PINNED_JOBS[0])?.[options.freezeStepId]?.node ?? '(未取到)'}`
+      + ` node=${freezeOutputsByJob.get(FROZEN_LAUNCHER_JOBS[0])?.[options.freezeStepId]?.node ?? '(未取到)'}`
       + ` jobs=${freezeOutputsByJob.size} steps=${judgeSteps.length} probes=${behaviorProbes + 1}\n`)
     for (const note of notes) process.stdout.write(`check-frozen-launchers: ${note}\n`)
     process.stdout.write('check-frozen-launchers: 诚实边界 — 本判据收口的是 `$PATH` 注入这条**低成本**通道；'
       + 'GitHub 托管 runner 上 runner 用户有免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径'
       + '（本判据不承诺"启动器不可被替换"，只承诺"PATH 注入换不掉判据的启动器、也换不掉仓内执行体里的裸命令"）。\n')
+    process.stdout.write('check-frozen-launchers: 覆盖面 — 冻结点只在 `gate-guards`/`gate` 两个 job'
+      + '（登记表 = check-workflows.mjs 的 FROZEN_LAUNCHER_JOBS）；`server`/`desktop-*`/`release`/'
+      + '`changes`/`pr-summary` **没有**冻结点、那些 job 里的仓内命令是裸解释器：`desktop-*` 与 '
+      + '`release` 由 `needs → gate → gate-guards` 挡在后面（`release` 连 install 都没有），'
+      + '真正绕开守卫链的是 `server`（`needs: changes`，npm 侧安装面不在判据面内 —— 另记 R14-08，'
+      + '由另一条泳道收口）⇒ **不声称已完全收口**。\n')
+    process.stdout.write('check-frozen-launchers: tag-only 口径 — 三条 tag-only 判据步'
+      + '（Classify the release tag / Release topology / Resolve the channel packages revision）的'
+      + '**步骤体原字节**每个 PR 都在金丝雀仓里被跑两遍（各自一次 + 正控 B 一次，见上面的逐判据步格子），'
+      + '冻结输出缺席时以 127 fail-loud；**真 tag 参数组合**（GITHUB_REF_NAME 是真 tag + '
+      + 'docs/releases/<tag>.md 在位 + origin 上真有那批 tag）没有被覆盖 ⇒ 正确表述是'
+      + '"步体已被 canary 级行为探针覆盖；真 tag 参数组合是它第一次真跑"，'
+      + '**不是**"从未在任何真实运行里执行过"。\n')
     return 0
   } finally {
     rmSync(scratch, { recursive: true, force: true })

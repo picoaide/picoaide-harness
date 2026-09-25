@@ -135,3 +135,44 @@ pre-existing required status check"）。换完再把 `ci.yml` 里那 5 个 job 
    **让"保留 job 名换 body"这条路径在诚实 workflow 下不再足以伪造绿**（因为判据本体、
    启动器、平台锚三层都被钉住）—— 但只要 workflow 文件本身可以被替换，这三层就整体失效。
    要真正收口，必须做 §4 里的平台设置。
+
+### 5.1 冻结启动器的**覆盖面**：哪些 job 有冻结点、哪些没有、残余攻击面是什么
+
+**本节是 2026-09-25 第十四轮审计（lane B 的 B-06）之后补的第二条诚实边界 —— 原文只写了
+"`yarn`/`corepack` 仍按活 PATH 解析"，没有写"哪些 job 根本没有冻结点"。不要把它读成"已完全收口"。**
+
+`ci.yml` 里 `id: frozen-launchers` 只出现 **2** 次：`gate-guards`（第 2 步）与 `gate`（第 3 步）。
+登记表 = `scripts/check-workflows.mjs` 的 `FROZEN_LAUNCHER_JOBS`（单一真源；行为探针 import 它）。
+
+| job | 有冻结点 | 该 job 里的仓内执行点 | 当前判定 |
+|---|---|---|---|
+| `gate-guards` | ✅ | 5 个判据步（含行为探针本身） | 已收口：PATH 复位 + 逐判据步金丝雀 |
+| `gate` | ✅ | 7 个判据步（含三条 tag-only 步与 `Full gate`） | 同上 |
+| `changes` | ❌ | `git diff` 分类器（纯 shell + `$GITHUB_OUTPUT`） | 不跑判据、不产出交付物 ⇒ 只读影响分类结果 |
+| `server` | ❌ | `npm ci`（`server/webadmin`）+ `go vet`/`go test`/`make build-server` | **真正的绕过点**：`needs: changes` 绕开 `gate-guards`，且 npm 侧安装面不在任何安装期判据里（R14-08，由另一条泳道收口） |
+| `desktop-linux` / `-windows` / `-macos` | ❌ | `bash scripts/ci-*.sh`、`yarn workspace … dist:*` | 由 `needs → gate → gate-guards` 挡在后面；job 内仍是裸解释器 |
+| `release` | ❌ | `bash scripts/ci-release-policy.sh`、裸 `node scripts/version.mjs`、**唯一的 R2 写入步** | "纵深为零"而非"已被绕开"：`needs` 挡在 `gate` **与** `server` 之后，且它**一次 install 都没有**、第一个仓内执行点是纯 `test -f` ⇒ 此前没有任何能写 `$GITHUB_PATH` 的仓内代码 |
+| `pr-summary` | ❌ | PR 评论（fork PR 跳过） | 不跑判据、不产出交付物 |
+
+**残余攻击面（如实记账）**：上面 5 个无冻结点的 job 里，同 job 内更早的步骤若能写
+`$GITHUB_PATH`（唯一的现实入口是安装期钩子，见 R14-08），就能替换那些 job 里的裸解释器；
+**没有任何判据读这条通道**。当前可接受是因为"交付通道"（`release`/`desktop-*`）被
+`needs → gate → gate-guards` 挡着，而唯一绕开这条链的 `server` 不产出交付物 —— 这只是
+**纵深**，不是收口。要真正收口得给这几个 job 也加冻结点（每个 job 两步 + 一处登记），
+或把 npm 侧纳入安装期判据（R14-08）。
+
+### 5.2 tag-only 三条判据步的执行覆盖（口径，2026-09-25 第十四轮 lane B 更正）
+
+`gate` 里有三条**只在 tag 上才真正有用**的判据步：`Classify the release tag (single source of truth)`、
+`Release topology (previous release tag is an ancestor; tag is on the mainline)`、
+`Resolve the channel packages revision (once per run)`。
+
+- **已被覆盖的一半**：`[SK-20]` 把它们算进 `gate` 的 7 个 PATH 复位判据步；行为探针
+  `scripts/check-frozen-launchers.mjs` 的**逐判据步金丝雀**格子每个 PR 都会把这三条步骤体的
+  **原字节**在 scratch 金丝雀仓里跑两遍（各自一次 + "只冻结解释器、不复位 PATH"的正控 B 一次），
+  冻结输出缺席/为空时它们以 **127** 失败（`bash: 行 1: : 未找到命令`，配 `set -euo pipefail` ⇒ 红）。
+- **没有被覆盖的一半**：**真 tag 参数组合** —— `GITHUB_REF_NAME` 是真 tag、
+  `docs/releases/<tag>.md` 在位、`origin` 上真有那批 tag。探针只喂
+  `GITHUB_REF=refs/heads/main` 这类非 tag 输入。
+- ⇒ 正确表述是"**步体已被 canary 级行为探针覆盖；真 tag 参数组合是它第一次真跑**"。
+  **不要**写成"从未在任何真实运行里执行过"（那是过头话：它们的步骤体确实每个 PR 都在跑）。

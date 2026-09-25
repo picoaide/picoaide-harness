@@ -1221,14 +1221,28 @@ const ROOT_GATE_WEAKENING_FLAGS = ['--no-guards', '--only', '--changed', '--list
 // ---- [SK-20] 的常量（放在这里是因为 `ROOT_GATE_DIRECT_INVOCATION` 等判据正则要用它们）----
 /** 冻结步的 `id`（契约：被钉步骤用 `steps.<id>.outputs.*` 引用它）。 */
 const FROZEN_LAUNCHER_STEP_ID = 'frozen-launchers'
-/** 必须使用冻结启动器的 job（跑判据的那两个）。 */
-const FROZEN_LAUNCHER_JOBS = ['gate-guards', 'gate']
+/**
+ * 必须使用冻结启动器的 job（跑判据的那两个）。
+ *
+ * **单一真源（第十四轮审计 lane E 的 E-03）**：行为探针 `scripts/check-frozen-launchers.mjs`
+ * **import 本常量**（不再手抄一份）。此前两处是两份手抄字面量、靠注释自称"同一份登记/同源"，
+ * 零交叉对拍 —— lane E 实测把探针侧缩成 `['node']` 后两个守卫**同时 EXIT=0**（漂移不可见）。
+ * 现在只有这一份；"探针必须 import 它、不得自持副本"由下面的
+ * {@link checkFrozenRegistryWiring} 逐字钉住（拆掉 import 即红）。
+ */
+export const FROZEN_LAUNCHER_JOBS = ['gate-guards', 'gate']
 /** 必须**真的跑**行为探针的 job（"永不跳过"的那一个；其余 job 不必各跑一遍）。 */
 const FROZEN_LAUNCHER_PROBE_JOBS = ['gate-guards']
 /** 行为探针脚本（必须真的被某个被钉 job 执行）。 */
 const FROZEN_LAUNCHER_PROBE = 'scripts/check-frozen-launchers.mjs'
-/** 冻结步必须写出的输出键。 */
-const FROZEN_LAUNCHER_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
+/**
+ * 冻结步必须写出的输出键（**单一真源**，探针 import 它；理由见 `FROZEN_LAUNCHER_JOBS`）。
+ *
+ * 收窄本表的后果：`[SK-20]` 只再要求剩下的键出现在冻结步体里，探针也只再核对剩下的键 ——
+ * 所以探针另有一条**双向对拍**（冻结步**真跑出来的**输出键集合必须与本表逐字相等，
+ * 多一个"未登记"的键也红），防止"收窄登记表"这条路径静默丢掉核验面。
+ */
+export const FROZEN_LAUNCHER_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
 /**
  * **第二个冻结点**：把"冻结的 PATH"与**白名单内的工具链目录**合成一份判据步真能用的 PATH
  * （V13-A §3.3 / R1 的收口件）。
@@ -1272,13 +1286,39 @@ const SHELL_BUILTIN_OR_KEYWORD_WORDS = new Set([
   'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in',
   'select', 'time', 'coproc', 'function',
 ])
-/** 合成步体里必须逐字出现的判据（冻结值来源 / 白名单锚 / 输出通道 / 拒绝路径）。 */
+/**
+ * 合成步体里必须逐字出现的**非白名单**判据（冻结值来源 / 输出通道 / 拒绝路径）。
+ *
+ * 为什么 `runner.tool_cache` **不在**这张表里：它原本是一条**子串**判据，而子串判据证明不了
+ * "白名单的**取值**是什么"（第十四轮审计 lane B 的 B-03，P1）：把合成步改成
+ * `allowed_root="/"` 再另加一行 `allowlist_anchor="${{ runner.tool_cache }}/node/"`
+ * （注释会被剥，**字符串字面量不剥**），四条片段判据全过 ⇒ `check-workflows` EXIT=0，
+ * 而同一份步骤体在真 PATH 前置注入目录时**不再拒绝**、把注入目录写进了 `path=`（行为探针当时
+ * 只断言"EXIT=0 且 `path` 非空" ⇒ 也绿）。白名单的**取值**现在由下面三条登记式判据钉住
+ * （{@link FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE} / `…_VALUE` / `…_ARM`），行为面由探针的
+ * **注入负控**钉住（注入目录必须被拒；把白名单换成 `/` 的正控必须被接受）。
+ */
 const FROZEN_TOOLCHAIN_FRAGMENTS = [
   'steps.frozen-launchers.outputs.path',
-  'runner.tool_cache',
   '>> "$GITHUB_OUTPUT"',
   'exit 1',
 ]
+/** 白名单根所在的变量名（逐字；见 {@link FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}）。 */
+export const FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE = 'allowed_root'
+/**
+ * 白名单根的**登记取值**（逐字相等，不是"包含某个子串"）。
+ *
+ * 形态即判据：`${{ runner.tool_cache }}/node/` 是 runner 侧展开的常量（仓内代码改不到），
+ * 逐字钉住它之后，"白名单被放行成 `/`"、"被改成另一个前缀"、"取值被二次赋值覆盖"都会红。
+ */
+export const FROZEN_TOOLCHAIN_ALLOWLIST_VALUE = '"${{ runner.tool_cache }}/node/"'
+/**
+ * 接受臂必须逐字用这个前缀模式（`case "$entry/" in "$allowed_root"*)`）。
+ *
+ * 为什么单独钉一条：取值登记对了、却没被用在接受臂上（例如另加一条 `/*)` 的通配臂）时，
+ * "取值"判据看不出来 —— 而那条通配臂就是"全放行"的另一种写法。
+ */
+const FROZEN_TOOLCHAIN_ALLOWLIST_ARM = '"$allowed_root"*)'
 /**
  * 判据步体里"复位 PATH"的那一行。**两个冻结点都认**（早于工具链就位的步骤只能用第一份）。
  * 与 [SK-17] 的 PATH 例外（`FROZEN_LAUNCHER_PATH_EXPORT`，定义在下面的 [SK-20] 常量区）
@@ -1628,6 +1668,90 @@ function externalCommandWords(run) {
 }
 
 /**
+ * 取一段 shell 可执行文本里对某个变量的**全部赋值右值**（`name=…` / `export name=…`，含行继续）。
+ *
+ * 用途只有一个：[SK-20] 的"白名单**取值**逐字登记"（B-03）。子串判据证明不了取值，而"取值"
+ * 必须先被抽出来才能与登记值比较。返回**全部**赋值而不只是第一处：后一处会覆盖前一处，
+ * 所以"赋值恰好一次"本身也是判据的一部分。
+ *
+ * 只认"整行就是一条赋值"的形态（`^\s*(?:export\s+)?name=…\s*$`）——与 `ci.yml` 的登记形态一致。
+ * 一行里带 `;`/`&&` 的复合写法会因"取值不是登记值"而红（fail-closed：复合行后面还可能再赋值
+ * 一次，静态切不干净就不放过）。宁可对奇怪写法假红一次，也不要让"取值判据"重新退化成子串判据
+ * ——假红的下场是改回登记形态，假绿的下场是注入判据消失。
+ *
+ * @param script - 去掉注释后的可执行文本。
+ * @param variable - 变量名（与捕获到的名字做**字符串**比较，不进正则）。
+ * @returns 赋值右值数组（按出现顺序；已去首尾空白）。
+ */
+function shellAssignmentValues(script, variable) {
+  const values = []
+  for (const raw of joinShellContinuations(script).split('\n')) {
+    const match = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*?)[ \t]*$/u.exec(raw.replace(/\r$/u, ''))
+    if (match === null || match[1] !== variable) continue
+    values.push(match[2])
+  }
+  return values
+}
+
+/**
+ * [SK-20] / E-03：**登记表只允许一份** —— 行为探针必须从本文件 import 两个登记常量，
+ * 不得再手抄一份副本。
+ *
+ * 现场（第十四轮审计 lane E 的 E-03）：探针里曾有两份手抄字面量（`PINNED_JOBS` /
+ * `FREEZE_OUTPUT_KEYS`），注释自称"与 `check-workflows.mjs` 的 `FROZEN_LAUNCHER_JOBS` /
+ * `FROZEN_LAUNCHER_OUTPUT_KEYS` 同一份登记/同源"，而两文件**互不 import**、全仓零交叉对拍
+ * ⇒ 把探针侧缩成 `['node']` 后两个守卫**同时 EXIT=0**（漂移不可见）。
+ *
+ * 现在改成真 import（结构性同源）。本判据钉住"接线还在"：import 必须在、**本地副本必须不在**。
+ * 为什么需要它：真 import 之后"有人再手抄一份并改小"这条路径在语义上又变得可能，而没有任何
+ * 语义判据会因此变红 —— 所以用一条源码级接线判据把它钉死（与仓内既有的"源码级接线守卫"同一取向）。
+ */
+const FROZEN_LAUNCHER_REGISTRY_IMPORT = /import\s*\{[^}]*\bFROZEN_LAUNCHER_JOBS\b[^}]*\bFROZEN_LAUNCHER_OUTPUT_KEYS\b[^}]*\}\s*from\s*'\.\/check-workflows\.mjs'/u
+/** 探针里**不得**出现的本地登记副本（注释剥掉之后判，避免注释里的说明文本误伤）。 */
+const FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY = /\b(?:const|let|var)\s+(?:PINNED_JOBS|FREEZE_OUTPUT_KEYS|FROZEN_LAUNCHER_JOBS|FROZEN_LAUNCHER_OUTPUT_KEYS)\s*=/u
+
+/**
+ * [SK-20] / E-03 的接线判据实现（理由见上面两个常量）。
+ * @param file - workflow 文件名（失败项归属）。
+ * @returns 失败项列表。
+ */
+function checkFrozenRegistryWiring(file) {
+  const failures = []
+  const probePath = join(root, FROZEN_LAUNCHER_PROBE)
+  if (!existsSync(probePath)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] 读不到行为探针 \`${FROZEN_LAUNCHER_PROBE}\`（${probePath}）—— 登记表的`
+        + '单一真源与"探针必须 import 它"这条接线都无从核对；探针被删/改名必须同步本判据。',
+    })
+    return failures
+  }
+  const text = readFileSync(probePath, 'utf8')
+  if (!FROZEN_LAUNCHER_REGISTRY_IMPORT.test(text)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] \`${FROZEN_LAUNCHER_PROBE}\` 没有从 \`./check-workflows.mjs\` import `
+        + '`{ FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS }` —— 两张登记表必须**真同源**'
+        + '（第十四轮 lane E 的 E-03：两份手抄字面量 + 注释自称"同源" ⇒ 单侧缩小后两个守卫'
+        + '同时 EXIT=0）。要么恢复这条 import，要么把本判据与两份字面量一起重新论证。',
+    })
+  }
+  if (FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY.test(executableScript(text))) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] \`${FROZEN_LAUNCHER_PROBE}\` 里又出现了**本地的登记副本**`
+        + '（`PINNED_JOBS` / `FREEZE_OUTPUT_KEYS` / `FROZEN_LAUNCHER_JOBS` / '
+        + '`FROZEN_LAUNCHER_OUTPUT_KEYS` 之一被本地声明）—— 副本一旦与 import 的取值不同，'
+        + '漂移就又不可见了（E-03 的原始形态）。请直接用 import 进来的名字。',
+    })
+  }
+  return failures
+}
+
+/**
  * [SK-20] 冻结启动器的静态判据（现场说明见上面常量区）。
  * @param file - workflow 文件名。
  * @param document - parseYaml 的结果。
@@ -1735,6 +1859,54 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
             + '① 从冻结输出取基准 PATH；② 只放行 `${{ runner.tool_cache }}/node/` 之下的新增目录'
             + '（runner 侧常量，仓内代码改不到）；③ 用 `$GITHUB_OUTPUT` 交出合成值；'
             + '④ 遇到任何其它新增目录就 `exit 1`（那正是 `$GITHUB_PATH` 注入的痕迹）。',
+        })
+      }
+      // ③b 白名单的**取值**必须逐字等于登记值（第十四轮审计 lane B 的 B-03，P1）。
+      //
+      // 现场：这四条判据原本都是**子串**包含（`composeScript.includes(fragment)`），其中
+      // `runner.tool_cache` 那条不能证明"白名单的取值是什么" —— 把 `allowed_root` 改成 `"/"`、
+      // 再把 `runner.tool_cache` 留在另一行的**字符串字面量**里（注释会被剥、字面量不剥），
+      // 四条片段判据全过：`check-workflows` EXIT=0，行为探针也只断言 "EXIT=0 且 path 非空" ⇒
+      // 双绿；而同一份步骤体在真 PATH 前置注入目录时**不再拒绝**、把注入目录写进了 `path=`
+      // （lane B 实测：原形态 EXIT=1 拒绝，变异形态 EXIT=0 接受）。
+      // ⇒ 判"取值"：赋值必须**恰好一次**，且右值逐字等于登记值；接受臂必须逐字用那个前缀变量。
+      const allowlistValues = shellAssignmentValues(composeScript, FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE)
+      if (allowlistValues.length === 0) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里没有把白名单根赋给 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}\`（期望逐字：`
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}=${FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}\`）——`
+            + '白名单的**取值**是这条判据的判据面；抽不出取值 ⇒ "白名单"只剩一个名字。',
+        })
+      } else if (allowlistValues.length > 1) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步把 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}\` 赋值了 ${allowlistValues.length} 次`
+            + `（${allowlistValues.map(value => `\`${value}\``).join('、')}）—— 后一处会覆盖前一处，`
+            + '取值判据必须对"最终生效的那一个"成立；请只保留一处登记赋值。',
+        })
+      } else if (allowlistValues[0] !== FROZEN_TOOLCHAIN_ALLOWLIST_VALUE) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步把白名单根设成了 `
+            + `\`${allowlistValues[0]}\`，登记值是 \`${FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}\` ——`
+            + '白名单必须**逐字**等于登记值（"包含 `runner.tool_cache` 这个子串"证明不了取值：'
+            + '`allowed_root="/"` 再加一行写着该子串的锚注释，曾让静态判据与行为探针双绿）。'
+            + '要放行别的前缀，请同时改登记值并写明理由（那是可评审的 diff）。',
+        })
+      }
+      if (!composeScript.includes(FROZEN_TOOLCHAIN_ALLOWLIST_ARM)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里没有逐字出现接受臂 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_ARM}\` —— 取值登记对了、却没被用在 \`case\` 的接受臂上`
+            + '（例如另加一条 `/` 通配臂）时，"取值"判据看不出来，而那条通配臂就是另一种"全放行"。',
         })
       }
       if (composeIndex < freezeIndex) {
@@ -1867,6 +2039,9 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
         + ` · PATH 复位 ${frozenPathSteps} 个判据步 · 行为探针 ${probeSteps.length} 处`)
     }
   }
+  // E-03：登记表的单一真源接线（探针必须 import、不得自持副本）。放在 job 循环之后：
+  // 它判的是"探针与登记表的关系"，与某个 job 的形态无关，报一次即可。
+  failures.push(...checkFrozenRegistryWiring(file))
   return failures
 }
 
