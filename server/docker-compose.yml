@@ -131,6 +131,31 @@ services:
       # 单账号登录失败上限(留空 = 服务端默认)。**仅测试环境**建议调大,
       # 免得反复登录把管理员账号锁死。
       PICOAI_LOGIN_MAX_ATTEMPTS: ${PICOAI_LOGIN_MAX_ATTEMPTS:-}
+      # 每用户 in-flight(并发)请求上限,缺省 32。**注意它不是"请求速率"限制**:
+      # 速率上限是 settings 的 gateway.rate_limit(缺省 0 = 不限速)。
+      # R16C-06(审计 2026-09-25,P2):这个旋钮此前**只有文档**(AI-DEPLOY §网关 /
+      # server/docs/04-auth.md 都写"可调"),却不在本文件的 environment 映射里,
+      # 也没有 env_file ⇒ 写进 .env 后静默不生效、零回显。现在按既有风格接线。
+      PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER: ${PICOAI_GATEWAY_MAX_INFLIGHT_PER_USER:-}
+      # 数据库连接池上限(留空 = 服务端按实例数推导的默认;见 serverstore/db.go)。
+      # 多实例部署/托管 PG 配额有限时下调。
+      PICOAI_DB_MAX_OPEN_CONNS: ${PICOAI_DB_MAX_OPEN_CONNS:-}
+      # 允许保存**非回环明文** ldap:// 认证配置(逃生阀,默认关闭=拒绝)。
+      # 只有在目录服务确实不支持 LDAPS/StartTLS 时才置 1 —— bind 密码会明文过网。
+      # (审计 2026-09-13 的安全加固默认值;文档:docs/AUDIT-2026-09-13-SERVER-SECURITY.md)
+      PICOAI_LDAP_ALLOW_PLAINTEXT: ${PICOAI_LDAP_ALLOW_PLAINTEXT:-}
+      # 遥测采集的每用户/每技能限流(留空 = 服务端默认 60/10/10)。
+      # 客户端错误上报另有独立预算(第三项)。
+      PICOAI_TELEMETRY_MAX_PER_MIN: ${PICOAI_TELEMETRY_MAX_PER_MIN:-}
+      PICOAI_TELEMETRY_MAX_PER_SKILL_PER_MIN: ${PICOAI_TELEMETRY_MAX_PER_SKILL_PER_MIN:-}
+      PICOAI_TELEMETRY_ERROR_REPORTING_MAX_PER_MIN: ${PICOAI_TELEMETRY_ERROR_REPORTING_MAX_PER_MIN:-}
+      # OIDC 登录回跳时额外信任的服务端主机名(逗号分隔)。反代/多域名部署时补,
+      # 留空 = 只用请求自身的主机名与已保存 issuer(见 serverauth/oidc.go)。
+      PICOAI_TRUSTED_HOSTS: ${PICOAI_TRUSTED_HOSTS:-}
+      # 审计哈希链周期校验的间隔(Go duration,如 15m;留空 = 1h)。
+      # 它同时是"篡改可见性窗口"与"每轮一次 audit_logs 全表只读扫描"的取舍旋钮。
+      # 非法值会打 WARNING 并回落默认,不静默。
+      PICOAI_AUDIT_CHAIN_INTERVAL: ${PICOAI_AUDIT_CHAIN_INTERVAL:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data

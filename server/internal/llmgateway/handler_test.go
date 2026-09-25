@@ -79,6 +79,13 @@ func newGateway(t *testing.T, f *fakeUpstream) (*gin.Engine, *sql.DB, string) {
 	// 每个测试独立临时 DB:清空上游路由缓存,防前一测试的 provider 污染
 	// (2026-08-31 加 LoadUpstreams 缓存后引入)。
 	InvalidateUpstreams()
+	// R16C-02:余额准入侧的两块状态是**进程级**(计数/最近一条/"学到的下限",
+	// keyed by userID),而每个用例的 userID 都从 1 开始、DB 却是新的 ⇒ 前一个用例
+	// 抬起的下限会把后一个用例的"余额 0.01 应该放行"打成 429(实测:
+	// TestBalanceSettlementOverdraftChargesStream 变成 429)。纪律同
+	// resetSharedLimitersForTest:包级单例 + 进程级累积状态必须在统一测试入口复位。
+	serverstore.ResetBalanceAdmissionForTest()
+	resetBalanceRejectionLogForTest()
 	db, cleanup := serverstore.NewTestDB(t)
 	t.Cleanup(cleanup)
 

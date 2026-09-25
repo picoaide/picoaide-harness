@@ -937,48 +937,51 @@ func createModel(c *gin.Context, db *sql.DB) {
 		OutputPricePer1M: req.OutputPricePer1M.Value, CacheInputPricePer1M: req.CacheInputPricePer1M.Value,
 		OffpeakDiscount: req.OffpeakDiscount.Value,
 	}
-	if prov.Channel == "" {
-		// 手动型上游不参与同步,没有排除名单语义:单条 INSERT(autocommit),
-		// 缓存失效由 AddModel 自己完成 —— 行为与历史逐字一致。
-		if _, err := serverstore.AddModel(db, m); err != nil {
-			writeModelCreateError(c, err)
-			return
-		}
-	} else {
-		// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
-		// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
-		// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
-		// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
-		// —— 真 PG + 敌对 search_path 实测。
-		tx, err := serverstore.UsageWriteTx(db)
-		if err != nil {
-			log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
-		defer tx.Rollback() // 提交后为 no-op
+	// R16C-01(审计 2026-09-25,P1):**两条分支都收进一个事务**,审计走 AuditLogTx。
+	//
+	// 修前:手动型上游走 AddModel(autocommit),渠道型走事务;两条分支都在**事务外**
+	// `_ = AuditLog(...)` —— 审计写失败时模型带着新价格静默落库(与 PUT /models/:id
+	// 同一个缺陷形态:改配置即改钱却无痕)。现在"建行 + 移出排除名单 + 审计"同事务,
+	// 审计失败即整体回滚 + 500。
+	//
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	tx, err := serverstore.UsageWriteTx(db)
+	if err != nil {
+		log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
+
+	if prov.Channel != "" {
+		// 渠道型上游才需要"移出排除名单"(手动型没有名单语义)。
 		if _, err := serverstore.RemoveExcludedModelTx(tx, req.ProviderID, req.Name); err != nil {
 			log.Printf("gateway model create: 移出排除名单失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 			return
 		}
-		if _, err := serverstore.AddModelTx(tx, m); err != nil {
-			// 400/500:defer 的 Rollback 会把本次请求对名单的改动一并撤销。
-			writeModelCreateError(c, err)
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			log.Printf("gateway model create: 提交失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
-		// 提交成功后失效:①排除名单(settings 键,RemoveExcludedModelTx 不失效);
-		// ②模型目录/定价(AddModelTx 不失效)。顺序无依赖,都是"提交后立刻可见"。
-		serverstore.InvalidateSettings()
-		serverstore.InvalidateModelConfig()
-		serverstore.InvalidateModelsChanged()
 	}
-	_ = serverstore.AuditLog(db, auditActor(c), "model_create", auditModelDetail(m))
+	if _, err := serverstore.AddModelTx(tx, m); err != nil {
+		// 400/500:defer 的 Rollback 会把本次请求对名单的改动一并撤销。
+		writeModelCreateError(c, err)
+		return
+	}
+	if err := serverstore.AuditLogTx(tx, auditActor(c), "model_create", auditModelDetail(m)); err != nil {
+		log.Printf("gateway model create: 审计写入失败,已回滚本次创建 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("gateway model create: 提交失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	// 提交成功后失效:①排除名单(settings 键,RemoveExcludedModelTx 不失效);
+	// ②模型目录/定价(AddModelTx 不失效)。顺序无依赖,都是"提交后立刻可见"。
+	serverstore.InvalidateSettings()
+	serverstore.InvalidateModelConfig()
+	serverstore.InvalidateModelsChanged()
 	c.JSON(http.StatusOK, gin.H{"model": m})
 }
 
@@ -998,7 +1001,24 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
-	m, err := serverstore.GetModel(db, id)
+	// R16C-01(审计 2026-09-25,P1):模型价格是**"改配置即改钱"**的路径 ——
+	// usage 的每一分钱都由这行价格算出来,而修前"读原值 → UpdateModel(自己的事务)
+	// → `_ = AuditLog`(fire-and-forget)"三段各自提交:只让 model_update 这条审计
+	// 写不进去时,PUT 仍回 200、价格真的改了 100 倍、审计 0 行、日志 0 行。
+	// 孪生路径 PUT /providers/:id 早已是"审计与业务写同事务"(见 provider 更新),
+	// 规则真源写在 serverstore/audit.go 的 AuditLogTx 头注释里。
+	//
+	// 现在整段收进**一个事务**(与 deleteModel 同形态):行锁下的基线读 + 更新 +
+	// AuditLogTx,审计失败即整体回滚 + 500 —— "改了价却没留痕"不再可能。
+	tx, err := serverstore.UsageWriteTx(db)
+	if err != nil {
+		log.Printf("gateway model update: 开启事务失败 id=%d: %v", id, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
+
+	m, err := serverstore.GetModelTx(tx, id, true)
 	if errors.Is(err, serverstore.ErrNotFound) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在")
 		return
@@ -1023,7 +1043,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	// 改名会破坏 usage 历史口径并使默认模型悬空。渠道同步模型本由上游命名,
 	// 改名必被下次同步覆盖;有用量记录的模型改名会错位历史费用。
 	if req.Name != "" && req.Name != m.Name {
-		if has, err := serverstore.ModelHasUsage(db, m.Name); err == nil && has {
+		// 已持事务:必须用 *Tx 形态读 usage —— 池上入口会在事务内再要一条连接
+		// （hold-and-wait，R14-K 守卫点过；同事务读也更准：判定与动作看同一个快照）。
+		if has, err := serverstore.ModelHasUsageTx(tx, m.Name); err == nil && has {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "该模型已有用量记录,不允许改名")
 			return
 		}
@@ -1034,7 +1056,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		m.Name = req.Name
 	}
 	if req.ProviderID > 0 {
-		if _, err := serverstore.GetGatewayProvider(db, req.ProviderID); err != nil {
+		if _, err := serverstore.GetGatewayProviderTx(tx, req.ProviderID, false); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "所属上游不存在")
 			return
 		}
@@ -1064,7 +1086,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	if req.OffpeakDiscount.Set {
 		m.OffpeakDiscount = req.OffpeakDiscount.Value
 	}
-	if err := serverstore.UpdateModel(db, m); err != nil {
+	if err := serverstore.UpdateModelTx(tx, m); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名已存在")
 			return
@@ -1101,9 +1123,23 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	if !optF64Eq(m.OffpeakDiscount, orig.OffpeakDiscount) {
 		ch = append(ch, "offpeak:"+priceStr(orig.OffpeakDiscount)+"→"+priceStr(m.OffpeakDiscount))
 	}
+	// 审计与业务写**同事务**(R16C-01):价格/参数变更明细的口径即计费,
+	// 审计写不进去就整体回滚,不留"改了价没留痕"的组合。
 	if len(ch) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "model_update", m.Name+": "+strings.Join(ch, ", "))
+		if err := serverstore.AuditLogTx(tx, auditActor(c), "model_update", m.Name+": "+strings.Join(ch, ", ")); err != nil {
+			log.Printf("gateway model update: 审计写入失败,已回滚本次更新 id=%d name=%s: %v", id, m.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
 	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("gateway model update: 提交失败 id=%d name=%s: %v", id, m.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	// 缓存失效必须在**提交之后**(UpdateModelTx 不失效模型缓存,见其注释)。
+	serverstore.InvalidateModelConfig()
+	serverstore.InvalidateModelsChanged()
 	c.JSON(http.StatusOK, gin.H{"model": m})
 }
 

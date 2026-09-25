@@ -99,6 +99,19 @@ export default function Capabilities() {
   const [tab, setTab] = useState('pending')
   const [typeFilter, setTypeFilter] = useState<'all' | 'skill' | 'agent'>('all')
   const [error, setError] = useState('')
+  /**
+   * **列表读取**失败（R16A-18，审计 2026-09-25，P3）：必须与 `error`（**动作**失败：
+   * 拒绝理由为空 / approve / reject / delete / 上下架的 catch）分开。
+   *
+   * 合用一个状态时，一次**写**请求失败就会把整张表换成「审批列表未读取成功 /
+   * 读取失败时不渲染任何行」—— 而列表读**从未**失败，文案还反过来说"为避免把上一页
+   * 的数据当成当前结果"。同族修法（R15C-W-04）在 Departments/Apps/Balance/Audit
+   * 已经就位（`loadError`），本页与 Connectors 是漏掉的两处。
+   *
+   * 渲染口径不变：`loadError` 非空 ⇒ 页面级确定态（不渲染任何行，指回刷新入口）；
+   * `error` 非空 ⇒ 只显示横幅，**表格照常渲染**（动作失败不改变"当前数据是这一份"）。
+   */
+  const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(true)
   const [confirm, setConfirm] = useState<ApprovalRow | null>(null)
   const [confirmKind, setConfirmKind] = useState<'approve' | 'reject' | 'delete'>('approve')
@@ -123,6 +136,9 @@ export default function Capabilities() {
   const load = useCallback(async (status: string, kind: 'all' | 'skill' | 'agent') => {
     const current = ++loadSeq.current
     setLoading(true)
+    // 只清"读取失败"；**不清**动作失败的横幅（否则一次自动重拉会把管理员刚看到的
+    // "删除失败：xxx"悄悄抹掉，而他们正需要据此重试或换做法）。
+    setLoadError('')
     setError('')
     try {
       // status=all 必须显式传(服务端缺省=仅 pending);type 缺省=全部。
@@ -138,7 +154,7 @@ export default function Capabilities() {
       // —— 管理员点「已拒绝」本意是清理已拒绝的版本，屏幕上却是待审版本，删除还会
       // 不可恢复地释放归档字节。与 Apps.tsx「列表读取失败 = 页面级的确定态」同口径。
       setAllRows([])
-      setError(err.message)
+      setLoadError(err.message)
     } finally {
       if (current === loadSeq.current) setLoading(false)
     }
@@ -275,12 +291,15 @@ export default function Capabilities() {
         </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {/* 横幅：**读取失败与动作失败都显示原文**（否则读取失败的具体原因只剩
+          「…未读取成功」一句，运维拿不到 500 里的细节）。与 Departments.tsx 同口径。 */}
+      {(loadError || error) && <p className="text-sm text-destructive">{loadError || error}</p>}
 
       {loading ? (
         <EmptyState icon={<Share2 className="h-6 w-6" />} title="加载中…" desc="请稍候" />
-      ) : error ? (
+      ) : loadError ? (
         // 失败 ≠ 空态：说清"没读到"，并指回可用的重试入口（右上角刷新 / 切换 tab）。
+        // 判据必须是 **loadError**（列表读失败），不是 error（动作失败）——见 state 注释。
         <EmptyState icon={<Share2 className="h-6 w-6" />} title="审批列表未读取成功"
           desc="为避免把上一页的数据当成当前结果，读取失败时不渲染任何行；请点右上角刷新重试" />
       ) : shown.length === 0 ? (

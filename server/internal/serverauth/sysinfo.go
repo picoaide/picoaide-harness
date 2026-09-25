@@ -37,6 +37,13 @@ type sysinfoResponse struct {
 	// UpdateCheck 是实时版本检查结果(2026-08-31 新增);服务不可达/非
 	// SemVer 时为 null,前端静默降级(绝不因版本检查失败打扰管理员)。
 	UpdateCheck *updatecheck.Result `json:"update_check"`
+	// Balance 是**余额闸门准入侧**的拒绝证据(R16C-02,审计 2026-09-25,P1)。
+	//
+	// 修前:余额 0.01 的账号可以无限次请求 —— 每次都已真实调用上游、随后结算失败
+	// 整笔回滚,usage/余额/流水一行不动、管理端零痕迹。现在被拒的请求走准入闸门
+	// (不转发上游)并**留下计数与最近一条的形状**,让"谁在被拒、依据是什么
+	// (non_positive | learned_floor | min_billable)、差多少钱"可检索。
+	Balance balanceHealth `json:"balance"`
 	// Audit 是审计链与审计写入的健康状态(FIX-12,审计 2026-09-12 P1)。
 	//
 	// 为什么挂在这里而不是新开一个 admin 端点:审计写入失败以前**完全不可
@@ -56,14 +63,44 @@ type auditHealth struct {
 	// ChainIntact:链完整;ChainBrokenID:第一处断链/哈希不符的条目 id。
 	ChainIntact   bool  `json:"chain_intact"`
 	ChainBrokenID int64 `json:"chain_broken_id"`
-	// ChainCheckedAt 是启动校验的时刻(RFC3339)。
+	// ChainCheckedAt 是最近一次校验的时刻(RFC3339)。
 	ChainCheckedAt string `json:"chain_checked_at"`
+	// R16C-03(审计 2026-09-25,P2):**新鲜度**与执行者。修前这里只有启动那一刻的
+	// 结论,长跑实例把过期的 true 当当前状态对外(篡改不重启就零告警)。
+	//   - ChainAgeSeconds:最近一次校验距今多少秒(-1 = 本进程还没校验过);
+	//   - ChainStale:结论是否已过期(超过 serverstore.AuditChainStaleAfter);
+	//     过期结论不得看起来像实时结论 —— 判据由 serverstore 唯一实现,这里只投影;
+	//   - ChainSource:执行者(startup | periodic);
+	//   - ChainChecks:本进程累计校验次数(周期执行者真的在跑吗);
+	//   - ChainRows / ChainDurationMS:最近一轮扫描规模与耗时(全表扫描的开销可见);
+	//   - ChainError:校验**本身**的失败原因(与"链断了"是两件事)。
+	ChainAgeSeconds int64  `json:"chain_age_seconds"`
+	ChainStale      bool   `json:"chain_stale"`
+	ChainSource     string `json:"chain_source,omitempty"`
+	ChainChecks     int64  `json:"chain_checks"`
+	ChainRows       int64  `json:"chain_rows"`
+	ChainDurationMS int64  `json:"chain_duration_ms"`
+	ChainError      string `json:"chain_error,omitempty"`
 	// WriteFailures / DroppedEntries / Retries 是**进程内**累计计数:
 	// dropped_entries 是彻底丢失、从未落库的审计条目数。两者非零即说明审计
 	// 有缺口,应立刻排查(日志里同时有 `ERROR audit: ...` 行)。
 	WriteFailures  int64 `json:"write_failures"`
 	DroppedEntries int64 `json:"dropped_entries"`
 	Retries        int64 `json:"retries"`
+	// LastFailure 是最近一次审计写入失败的**原因**(R16C-05,审计 2026-09-25,P2):
+	// 修前 worker 只打 "entry dropped after retries action=… username=…",不带底层
+	// 错误,而全仓 90+ 个调用点写的是 `_ = AuditLog(...)` ⇒ 错误在每一处被丢掉,
+	// 运维只知"丢了几条"不知"为什么丢"。现在原因随日志(`cause=`)一起进进程内快照,
+	// 直接在这里可读(含 `cause_class=sqlstate:<码>`)。
+	LastFailure *serverstore.AuditFailureInfo `json:"last_failure,omitempty"`
+}
+
+// balanceHealth 是余额准入闸门的拒绝证据快照(进程内计数,重启归零)。
+type balanceHealth struct {
+	// AdmissionRejections 是准入处被余额闸门拒绝的累计次数(每次都不产生上游调用)。
+	AdmissionRejections int64 `json:"admission_rejections"`
+	// LastRejection 是最近一条拒绝的形状(用户/端点/模型/依据/要求金额/当时余额)。
+	LastRejection *serverstore.BalanceAdmissionRejection `json:"last_rejection,omitempty"`
 }
 
 type memInfo struct {
@@ -128,17 +165,34 @@ func (a *AdminAPI) handleServerInfo(c *gin.Context) {
 	}
 	resp.DB = dbStats
 
-	// FIX-12:审计链校验结果(启动时由 cmd/server 执行并缓存)+ 进程内写入计数。
-	checked, intact, brokenID, checkedAt, _ := serverstore.AuditChainStatus()
+	// FIX-12:审计链校验结果(启动 + **周期** 两个执行者,结果缓存在 serverstore)
+	// + 进程内写入计数。R16C-03:结论带**新鲜度**(age/stale)与执行者,
+	// 过期结论不再看起来像实时结论。R16C-05:最近一次写入失败的原因也在这一块。
+	chain := serverstore.AuditChainStatusDetail()
 	failures, dropped, retries := serverstore.AuditWriteStats()
 	resp.Audit = auditHealth{
-		ChainChecked:   checked,
-		ChainIntact:    intact,
-		ChainBrokenID:  brokenID,
-		ChainCheckedAt: checkedAt,
-		WriteFailures:  failures,
-		DroppedEntries: dropped,
-		Retries:        retries,
+		ChainChecked:    chain.Checked,
+		ChainIntact:     chain.Intact,
+		ChainBrokenID:   chain.BrokenID,
+		ChainCheckedAt:  chain.CheckedAt,
+		ChainAgeSeconds: chain.AgeSeconds,
+		ChainStale:      chain.Stale,
+		ChainSource:     chain.Source,
+		ChainChecks:     chain.Checks,
+		ChainRows:       chain.Rows,
+		ChainDurationMS: chain.DurationMS,
+		ChainError:      chain.Err,
+		WriteFailures:   failures,
+		DroppedEntries:  dropped,
+		Retries:         retries,
+	}
+	if last, ok := serverstore.AuditWriteLastFailure(); ok {
+		resp.Audit.LastFailure = &last
+	}
+
+	// R16C-02:余额闸门准入侧的拒绝证据(进程内计数 + 最近一条)。
+	if n, last, ok := serverstore.BalanceAdmissionStats(); ok {
+		resp.Balance = balanceHealth{AdmissionRejections: n, LastRejection: &last}
 	}
 
 	// 实时版本检查(2026-08-31):查询 GitHub Releases latest,对比当前版本。

@@ -411,6 +411,8 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	// —— 由调用方事务钉住（每个都必须在 r13geViaCallerOwners 里有点名）——
 	"AddExcludedModelTx":                r13geViaCaller, // gateway.go
 	"DeleteModelTx":                     r13geViaCaller, // gateway.go
+	"UpdateModelTx":                     r13geViaCaller, // gateway.go —— R16C-01：llmgateway admin 的"改价 + 审计"同事务
+	"ModelHasUsageTx":                   r13geViaCaller, // gateway.go —— R16C-01：updateModel 的改名防护（事务内读，避免 hold-and-wait）
 	"GetGatewayProviderTx":              r13geViaCaller, // gateway.go
 	"GetModelTx":                        r13geViaCaller, // gateway.go
 	"SetSettingTx":                      r13geViaCaller, // settings.go
@@ -456,6 +458,8 @@ var r13geViaCallerOwners = map[string]string{
 	"SetSettingTx":            "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
 	"setUsageAppIDTx":         "SetUsageAppID（withUsageSearchPath）/ SetUsageAppIDVerified（同一已钉事务内先查 apps 再写）",
 	"DeleteModelTx":           "DeleteModel（usageWriteTx）/ llmgateway admin 的显式事务",
+	"UpdateModelTx":           "UpdateModel（usageWriteTx）/ llmgateway admin 的改价事务（R16C-01：审计同事务）",
+	"ModelHasUsageTx":         "llmgateway admin 的 updateModel 事务（R16C-01：避免事务内 hold-and-wait）",
 	"SyncProviderModelsTx":    "SyncProviderModel 的调用方事务（llmgateway admin，已钉）",
 	"UpdateGatewayProviderTx": "llmgateway admin 的 provider 更新事务（usageWriteTx 同源）",
 	"AddExcludedModelTx":      "llmgateway admin 的排除名单事务",
