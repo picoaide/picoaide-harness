@@ -37,6 +37,12 @@ package serverstore
 //	        以字面量形态看见，要么就是本条尺子的盲区 —— **盲区是盲区，不假装覆盖**；
 //	        新增动态读时请按本条判据的取向改写成"字面量 + 已钉事务"。
 //
+// **盲区的登记（R14-O · VC-F3）**：复审泳道 V14-C 用一把更宽的自制尺子做差集，找到了
+// 4 个"构造动态关系名但本尺子看不见"的函数（其中 `createRangePartition` **两把尺子都
+// 看不见**）。它们已如实登记在 `r14kDynamicRelKnownUncovered`（值域来源 + 为什么无行为
+// 风险 + 形态标记），由 `TestAuditR14KDynamicRelationKnownUncoveredRegistry` 做双向核对。
+// 结论：动态形态是开放集 ⇒ 本判据的取向是"登记/改写"，不是"用正则穷举"。
+//
 // 为什么"登记/豁免"而不是"一律禁止"：动态关系名有合法用法（分区 DDL 的关系名来自
 // `pg_inherits` 的 catalog 事实、授权表名来自编译期常量表、WASM 应用的表名属于应用自己的
 // SQLite 库）。禁掉等于让人绕道写更晦涩的形态；登记 + 写清值域，才能让"下一次新增动态读"
@@ -288,4 +294,97 @@ func TestAuditR14KDynamicRelationRulerSelfCheck(t *testing.T) {
 			t.Errorf("豁免项 %q 不是 server/ 下已登记的包（拼写错误或包已搬家）", pkg)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// R14-O · VC-F3：尺子**看不见**的动态关系名构造点（known-uncovered 登记）
+// ---------------------------------------------------------------------------
+//
+// 复审泳道 V14-C 用一把更宽的自制尺子（拼接 + Sprintf，不限"同一字面量里必须有 SQL
+// 动词"、不限不能跨行）做差集，发现本判据面内还有 4 个函数构造动态关系名而**两把尺子
+// 都看不见或看不见其中一部分**。它们的值域各自封闭、事务都钉住 ⇒ 无行为风险，
+// 但它们证明了一件事：**动态关系名的形态是开放集，"再加一条正则"不闭合**。
+//
+// 登记口径（与 `r14kDynamicRelationCallers` 的区别）：
+//
+//	`r14kDynamicRelationCallers` —— 尺子**看得见**、必须回答"值域从哪来"；
+//	本表 —— 尺子**看不见**，如实登记"为什么值域封闭/为什么当前无行为风险"，
+//	         并用 `markers` 钉住「形态没被改写」（函数被删/改名/改成字面量 ⇒ 红，
+//	         逼人回来更新或收回这条登记）。
+//
+// 诚实边界：本表只做"函数仍在 + 形态标记仍在 + 理由够长"三项机械核对，
+// **不校验值域**（那需要读代码判断，是评审动作，不是判据）。
+var r14kDynamicRelKnownUncovered = map[string]struct {
+	why     string
+	markers []string
+}{
+	"internal/serverstore.AccessibleSharedResourceNames": {
+		why: "关系名/列名来自**编译期常量表** sharedResourceTables（Table 恒为 app_grants，Col 是该表结构体的字面量字段），与请求输入无关。" +
+			"尺子看不见它：关系名所在的那几个字面量里**没有 SQL 动词**（`\" FROM \" + table.Table`），而 pattern A 要求同一字面量里先有动词。",
+		markers: []string{`" FROM " + table.Table`},
+	},
+	"internal/serverstore.ledgerDetailSource": {
+		why: "关系名来自回收路径的 **catalog 事实**（孤儿分区表名），且经 quoteRelationIdent **引号化**（标识符不再走 search_path 解析）。" +
+			"尺子看不见它：关系名插在语句中间、不是 fmt.Sprintf 的直接实参（`\"SELECT \" + cols + \" FROM \" + quoteRelationIdent(rel)`）。",
+		markers: []string{`" FROM "+quoteRelationIdent(rel)`},
+	},
+	"internal/serverstore.rebuildUsageLedgerRowsFrom": {
+		why: "关系名同上（ledgerDetailSource 的返回值），且 4 个调用点全部传 `tx`（清理路径的**已钉事务**）。" +
+			"尺子看不见它：关系名在**多行 raw string 中间**（`FROM `+source+``），而 pattern A 的字符类排除了换行。",
+		markers: []string{"FROM `+source+`"},
+	},
+	"internal/serverstore.createRangePartition": {
+		why: "关系名 = spec.relation() = parent + \"_\" + key，而 partitionSpec 的生产构造点只有两处（usage_ledger.go:79/99），parent 恒为 usage/usage_daily、key 由时间派生 ⇒ 值域封闭；" +
+			"DDL 经 runPartitionDDL →（withUsageLockBudget | runPartitionDDLAttempt → withUsageSearchPath）执行，两条路径**都已钉 search_path**。" +
+			"**lane K 的尺子与本表对应的宽尺子都看不见它**（`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s`：%s 前面分别是 EXISTS/OF/(，不是关系关键字）—— 这条是「开放集」结论的实证。",
+		markers: []string{"PARTITION OF %s"},
+	},
+}
+
+// TestAuditR14KDynamicRelationKnownUncoveredRegistry 是登记表的机械核对：
+// 双向（登记的函数必须还在，且形态标记还在）+ 理由长度下限。
+func TestAuditR14KDynamicRelationKnownUncoveredRegistry(t *testing.T) {
+	if len(r14kDynamicRelKnownUncovered) < 4 {
+		t.Fatalf("known-uncovered 登记表只剩 %d 条（下限 4：V14-C 差集给出的 4 个函数）—— 判据面被改坏",
+			len(r14kDynamicRelKnownUncovered))
+	}
+	units := r14kLoadServerUnits(t)
+	ix := r14kBuildIndex(t, units)
+	bodies := map[string]string{}
+	for _, u := range units {
+		for _, fd := range collectDecls(u.file) {
+			d := ix.declFor(u, fd)
+			if d == nil {
+				continue
+			}
+			if _, want := r14kDynamicRelKnownUncovered[d.key]; !want {
+				continue
+			}
+			start := u.fset.Position(fd.Body.Pos()).Offset
+			end := u.fset.Position(fd.Body.End()).Offset
+			if start >= 0 && end <= len(u.raw) && start < end {
+				bodies[d.key] = string(u.raw[start:end])
+			}
+		}
+	}
+	for key, reg := range r14kDynamicRelKnownUncovered {
+		body, ok := bodies[key]
+		if !ok {
+			t.Errorf("known-uncovered 登记项 %q 在 server/ 里已不存在（函数被删/改名）—— "+
+				"该处要么已被改写成字面量（收回登记），要么换了名字（同步登记）", key)
+			continue
+		}
+		for _, m := range reg.markers {
+			if !strings.Contains(body, m) {
+				t.Errorf("known-uncovered 登记项 %q 的形态标记 %q 已不在函数体里 —— "+
+					"该处可能已被改写成字面量 SQL（那是好事：请收回这条登记），"+
+					"或形态变了（请更新标记与理由）", key, m)
+			}
+		}
+		if len(strings.TrimSpace(reg.why)) < 40 {
+			t.Errorf("known-uncovered 登记项 %q 的理由过短（%q）：必须写清值域来源与为什么无行为风险", key, reg.why)
+		}
+	}
+	t.Logf("known-uncovered 登记：%d 条，全部仍在位且形态标记未变（这把尺子看不见它们，见 r14kDynamicRelKnownUncovered 的说明）",
+		len(r14kDynamicRelKnownUncovered))
 }

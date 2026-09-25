@@ -108,7 +108,7 @@ var searchPathRelations = map[string]searchPathRelation{
 	// R14-K（D-03）勘误：原理由（"遮蔽读 ⇒ 可见地失败，不静默错数字"）只对**点查**
 	// 成立。`users` 上有一条**金额聚合读**（GetBalanceSummary 的人数/余额合计与欠款）
 	// —— 它与 shadow 的同名表完全同形，`err=nil`、数字是错的（真 PG 实测 public
-	// 2 人/100.00 vs 敌对池 3 人/9999.00）。该读已单独 pin 到 public（不得再退回裸池）；
+	// 2 人/150.00 vs 敌对池 3 人/6166.00）。该读已单独 pin 到 public（不得再退回裸池）；
 	// 其余 `users` 读仍是点查，non-family 的分类对它们继续成立。
 	"users":                         {searchPathRelNonFamily, "点查（按 id/username）遮蔽读 ⇒ 登录/余额查询可见地失败；**金额聚合读**（GetBalanceSummary 的 COUNT/SUM/欠款）已单独 pin（R14-K · D-03），余额正确性另有 balance_ledger 族内面保证"},
 	"groups":                        {searchPathRelNonFamily, "部门树：遮蔽读 ⇒ 列表/授权可见地报空或失败"},
