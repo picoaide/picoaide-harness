@@ -781,6 +781,20 @@ func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publ
 		return nil, verr
 	}
 	// ---- 制品配额（§5.3：每用户 1 GiB，含全部版本）----
+	//
+	// 恢复路径（R15C-G-03，2026-09-25）：这条闸门是 fail-closed 的，所以它必须
+	// 回答"被挡住之后用户还能做什么"。今天有两条真实出路，且都有判据：
+	//   ① 删除不再使用的应用（DELETE /apps/wasm/:app_id → SoftDeleteWasmApp
+	//      释放该应用名下全部版本的字节）；
+	//   ② 平台管理员代为清理（super_admin 可删任意应用）。
+	// 报错文案（registry.CheckArtifactQuota）与这两条逐字对应，不得再写"删除版本"
+	// 或"联系管理员扩容"（前者没有端点、后者没有配置项）。
+	//
+	// ⚠️ 已知残留（R15C-G-06，P3，阅读级）：这里是 check-then-act —— 读用量与
+	// commitRelease 的落库之间没有串行化，同一用户并发发布可小幅超配额
+	// （上界 = 并发发布数 × 单次制品上限）。它不产生错误终态（只是配额软一点），
+	// 且失败发布的字节今天会被补偿软删退回；要彻底关掉需要按**发布者**串行化
+	// （会话级 advisory lock 或把闸门挪进落库事务），留待排期。
 	used, qerr := h.artifactUsed(c.Request.Context(), u.Username)
 	if qerr != nil {
 		return nil, internalErr("查询失败", qerr)

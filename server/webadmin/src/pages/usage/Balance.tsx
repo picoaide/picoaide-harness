@@ -104,6 +104,13 @@ export default function UsageBalance() {
   const [ledger, setLedger] = useState<LedgerItem[]>([])
   const [ledgerSum, setLedgerSum] = useState<number | null>(null)
   const [ledgerBusy, setLedgerBusy] = useState(false)
+  /**
+   * 流水弹窗**自己的**失败态(R15C-W-05,审计 2026-09-25,P2):此前失败写进
+   * `dialogErr`,而它只在"单人调整"弹窗里渲染 ⇒ 流水弹窗内 100% 不可见,且错误
+   * 文本会**残留**到之后打开的调整弹窗。资金审计面里"没有流水"与"流水没读出来"
+   * 被渲染成同一屏,管理员会据此下"没有异常变动"的结论。
+   */
+  const [ledgerError, setLedgerError] = useState('')
 
   const [searchParams] = useSearchParams()
   const presetUser = searchParams.get('user') ?? ''
@@ -278,12 +285,15 @@ export default function UsageBalance() {
     setLedgerBusy(true)
     setLedger([])
     setLedgerSum(null)
+    setLedgerError('')
     try {
       const r = await request<any>(`${ADMIN_API}/users/${u.id}/balance/ledger?size=50`)
       setLedger(r.items ?? [])
       setLedgerSum(typeof r.ledger_sum === 'number' ? r.ledger_sum : null)
     } catch (e: any) {
-      setDialogErr(e.message || '流水加载失败')
+      // 只写本弹窗自己的失败态(不回写 dialogErr:那是调整弹窗的状态)。
+      setLedger([])
+      setLedgerError(e.message || '流水加载失败')
     } finally {
       setLedgerBusy(false)
     }
@@ -544,7 +554,13 @@ export default function UsageBalance() {
               {ledgerSum !== null && <> 流水合计 <span className="font-mono">{fmtY(ledgerSum)}</span>,应等于当前余额。</>}
             </DialogDescription>
           </DialogHeader>
-          {ledgerBusy ? <Skeleton className="h-64 w-full" /> : (
+          {ledgerBusy ? <Skeleton className="h-64 w-full" /> : ledgerError ? (
+            // 失败 ≠ 空态:明说没读到 + 就地重试(修前这里渲染的是「暂无流水」)。
+            <div className="space-y-3">
+              <div className="text-sm text-destructive">流水读取失败：{ledgerError}</div>
+              <Button size="sm" variant="outline" onClick={() => { if (ledgerUser) void openLedger(ledgerUser) }}>重试</Button>
+            </div>
+          ) : (
             <Table>
               <TableHeader>
                 <TableRow>

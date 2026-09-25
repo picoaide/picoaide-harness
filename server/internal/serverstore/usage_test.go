@@ -219,7 +219,7 @@ func TestUsageAggregateUserJoinsUsername(t *testing.T) {
 	if _, err := RecordUsageKind(db, other, "m", 2, 2, "chat"); err != nil {
 		t.Fatal(err)
 	}
-	if err := DeleteUser(db, other); err != nil {
+	if _, err := DeleteUser(db, other); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = UsageAggregate(db, time.Time{}, time.Time{}, "user")

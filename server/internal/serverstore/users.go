@@ -334,16 +334,34 @@ func UpdateUserPassword(db *sql.DB, userID int64, newHash string, mustChange boo
 	return tx.Commit()
 }
 
-// SetUserMFA 保存/更新 TOTP 配置(secret 为 AES-GCM 密文; enabled=1 仅由
-// verify 成功后写入)。
+// SetUserMFA 登记 TOTP 配置(secret 为 AES-GCM 密文; enabled=1 仅由 verify
+// 成功后写入)。
+//
+// R15C-02(审计 2026-09-25,P1):守卫写进 UPDATE 本身 —— **仅当该用户尚未开启
+// MFA 时**才允许写入。这是"不变量必须在唯一写入口成立"的纪律(与 wasmapps 的
+// owner 守卫同精神):陈旧或并发的 enable 挑战到达这里时不会覆盖已登记的密钥
+// (旧验证器不会被动失效)。要更换验证器必须先走 disableMyMFA(主密码 + 当前
+// 动态码双验),再由用户重新开启。
+//
+// @returns ErrMFAAlreadyEnabled = 该用户已开启 MFA(0 行命中且用户存在)。
 func SetUserMFA(db *sql.DB, userID int64, totpSecretCipher string, enabled bool) error {
-	res, err := db.Exec(`UPDATE users SET totp_secret=?, totp_enabled=?, updated_at=`+NowExpr()+` WHERE id=?`,
+	res, err := db.Exec(`UPDATE users SET totp_secret=?, totp_enabled=?, updated_at=`+NowExpr()+`
+		WHERE id=? AND totp_enabled=0`,
 		totpSecretCipher, boolInt(enabled), userID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+		// 0 行有两个成因:用户不存在 / 已开启(谓词未命中)。必须分开报,
+		// 否则"已开启"会被误诊成 500 或"用户不存在"。
+		var current bool
+		if err := db.QueryRow(`SELECT totp_enabled FROM users WHERE id = ?`, userID).Scan(&current); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		return ErrMFAAlreadyEnabled
 	}
 	return nil
 }
@@ -520,31 +538,59 @@ func nilIfZeroTime(t time.Time) any {
 	return t
 }
 
-// DeleteUser removes a user and all their FK-referenced rows
-// (api_tokens, usage, admin_sessions, user_groups) in a single transaction
-// so deletion never trips the FK constraint. Deleting the last remaining
-// admin rolls back with ErrLastAdmin (C-17: the guard runs inside the
-// transaction, closing the count-then-delete TOCTOU).
+// ErasedUserLedgers 汇总删除用户时**被抹除**的账目（调用方写审计留痕用）。
 //
-// 权衡(审计 L4):usage 为计费原始记录,删除用户会物理删除其全部用量/费用,
-// 历史统计与部门预算成本随之减少、不可追溯。当前采用硬删以保证 FK 完整与
-// 「删即消失」的管理语义;如后续需要计费审计留存,应改为软删(users.status
-// 墓碑态 + usage 保留),本函数签名与调用方需同步调整。
-func DeleteUser(db *sql.DB, id int64) error {
+// R15C-01（审计 2026-09-25，P1）：DeleteUser 是"删即消失"的抹除动作 —— 它删掉的
+// 用量金额与资金流水金额必须能说清，否则历史报表对不上时无从解释。这些数字在
+// **同一事务内、删除之前**读出（与抹除动作看到同一个快照），由调用方写进 0048
+// 哈希链审计。
+type ErasedUserLedgers struct {
+	UsageCost     float64 // 用量明细费用合计（元）
+	UsageRequests int64   // 用量明细记录数
+	BalanceAmount float64 // 资金流水净额（元，= 该用户全部流水之和）
+	BalanceRows   int64   // 资金流水条数
+}
+
+// DeleteUser removes a user and all their ledger rows
+// (api_tokens, usage, usage_daily, usage_monthly, balance_ledger,
+// balance_grant_items, admin_sessions, user_groups) in a single transaction
+// so deletion never trips the FK constraint and never leaves half-erased
+// books. Deleting the last remaining admin rolls back with ErrLastAdmin
+// (C-17: the guard runs inside the transaction, closing the count-then-delete
+// TOCTOU).
+//
+// 语义（R15C-01，审计 2026-09-25，P1）：**删除 = 抹除**。用户行被物理删除时，
+// 其用量**明细**与**日/月汇总**、资金**流水**与发放锚必须同事务一并清除。
+// 此前只删明细，留下三处不可自愈的分叉：
+//   - 日/月汇总仍持有被删用户的金额（同月 `明细 ≠ 日账 ≠ 月账`）；
+//   - 读面按"该月是否还有明细行"逐月切读源（usage_ledger.go 的
+//     usageAggregateSegments）⇒ 该月明细一旦归零（删掉该月仅有的用量用户即可，
+//     不必等保留期 DROP），被删用户的费用会**回涨**，并出现 label 为数字 user_id
+//     的幽灵行；
+//   - 永久账本**没有任何回收路径**，启动补算又是纯 UPSERT、只从明细算 ⇒ 那些行
+//     永远不会被纠正；
+//   - `balance_ledger` 留下孤儿流水，`SUM(balance_ledger.amount) ≠
+//     SUM(users.balance_money)`（AGENTS.md §7 的硬不变量），且没有任何界面出口。
+//
+// 被抹除的金额由返回值交给调用方写审计（见 ErasedUserLedgers）。若产品日后需要
+// "保留历史 + 匿名化"（而不是抹除），那要改的是 users 行的墓碑态与这三个关系的
+// 口径，不能只改这一处。
+func DeleteUser(db *sql.DB, id int64) (ErasedUserLedgers, error) {
+	var erased ErasedUserLedgers
 	// R13-GE（V2-2）：本事务里带 `DELETE FROM usage WHERE user_id = ?`（族内关系）
 	// ⇒ 事务本身必须钉 search_path（否则删的是 shadow 的用量行，public 一行不动）。
 	tx, err := usageWriteTx(db)
 	if err != nil {
-		return err
+		return erased, err
 	}
 	defer tx.Rollback()
 	var username string
 	var role string
 	if err := tx.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&username, &role); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return erased, ErrNotFound
 		}
-		return err
+		return erased, err
 	}
 	wasSuperAdmin := role == RoleSuperAdmin
 	// 最后管理员保护(C-17 + 2026-09 并发修复):两个管理员并发互相删除时,
@@ -553,23 +599,38 @@ func DeleteUser(db *sql.DB, id int64) error {
 	// 串行化该检查:第二个事务须等第一个 commit 后再 count(此时已只剩 0 或 1)。
 	if wasSuperAdmin {
 		if _, err := tx.Exec("SELECT id FROM users WHERE role = ? FOR UPDATE", RoleSuperAdmin); err != nil {
-			return err
+			return erased, err
 		}
+	}
+	// 抹除前读数（审计凭据）：与下面的删除同事务、同快照。
+	if err := tx.QueryRow(`SELECT COALESCE(SUM(cost),0), COUNT(*) FROM usage WHERE user_id = ?`, id).
+		Scan(&erased.UsageCost, &erased.UsageRequests); err != nil {
+		return erased, err
+	}
+	if err := tx.QueryRow(`SELECT COALESCE(SUM(amount),0), COUNT(*) FROM balance_ledger WHERE user_id = ?`, id).
+		Scan(&erased.BalanceAmount, &erased.BalanceRows); err != nil {
+		return erased, err
 	}
 	// cascade stmts keyed by user id
 	for _, stmt := range []string{
 		"DELETE FROM api_tokens WHERE user_id = ?",
 		"DELETE FROM usage WHERE user_id = ?",
+		// 0041/0039 的日账与月账：不删就会在明细归零后"回涨"（见函数头）。
+		"DELETE FROM usage_daily WHERE user_id = ?",
+		"DELETE FROM usage_monthly WHERE user_id = ?",
+		// 0062 的资金账本与发放锚：不删就留下孤儿流水（I1 不变量）。
+		"DELETE FROM balance_ledger WHERE user_id = ?",
+		"DELETE FROM balance_grant_items WHERE user_id = ?",
 		"DELETE FROM admin_sessions WHERE user_id = ?",
 		"DELETE FROM user_groups WHERE user_id = ?",
 	} {
 		if _, err := tx.Exec(stmt, id); err != nil {
-			return err
+			return erased, err
 		}
 	}
 	// 同名用户重建不得继承旧授权(权限体系:用户级授权随用户删除级联)
 	if _, err := tx.Exec("DELETE FROM app_grants WHERE grantee_type = 'user' AND lower(grantee) = lower(?)", username); err != nil {
-		return err
+		return erased, err
 	}
 	// 审计修复 2026-P (H1): 0036 共享资源授权表同样随用户删除级联——
 	// shared_skill_grants / agent_preset_grants 的 user 级授权若不清除,
@@ -578,15 +639,15 @@ func DeleteUser(db *sql.DB, id int64) error {
 	// 删除担任部门主管的用户:清空其主管身份(审计 M1),否则悬空
 	// leader_id 会卡死该部门的后续更新(UpdateDepartment 校验主管存在)。
 	if _, err := tx.Exec("UPDATE groups SET leader_id = 0 WHERE leader_id = ?", id); err != nil {
-		return err
+		return erased, err
 	}
 	res, err := tx.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
-		return err
+		return erased, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return ErrNotFound
+		return erased, ErrNotFound
 	}
 	// C-17: guard runs after the delete inside the same transaction; if the
 	// deleted row was a super_admin and none remain, roll back (v3b: count
@@ -594,13 +655,16 @@ func DeleteUser(db *sql.DB, id int64) error {
 	if wasSuperAdmin {
 		var admins int
 		if err := tx.QueryRow("SELECT COUNT(*) FROM users WHERE role = ?", RoleSuperAdmin).Scan(&admins); err != nil {
-			return err
+			return erased, err
 		}
 		if admins == 0 {
-			return ErrLastAdmin
+			return erased, ErrLastAdmin
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return erased, err
+	}
+	return erased, nil
 }
 
 // BindExternalIdentity 把本地行绑定到 IdP 主体(审计 2026-09-13 P2-9)。

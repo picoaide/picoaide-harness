@@ -35,6 +35,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/telemetry"
+	"github.com/picoaide/picoaide/internal/tokenretention"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/usageretention"
 	"github.com/picoaide/picoaide/internal/util"
@@ -320,6 +321,16 @@ func main() {
 	// ctx 退出。经 startUsageRetentionScheduler(usage_retention.go 的装配接缝)调用
 	// —— 与网关回收器/审计保留同款:删掉那一行时 cmd/server 的装配级用例会红。
 	startUsageRetentionScheduler(ctx, db, usageretention.DefaultTick)
+	// API 令牌过期回收(R15C-R-01 ①,审计 2026-09-25,P1):启动先跑一轮,之后每小时
+	// 分批删除 expires_at < now() 的行(每批 BatchSize,走 idx_tokens_expires ——
+	// 迁移 0031 建了这条索引但此前**没有任何查询用它**);随 ctx 退出。
+	//
+	// 此前 api_tokens **完全没有回收者**:过期只是"校验时拒绝",行永久留下;而任何
+	// 持证员工每次登录都会插一行且不限次 ⇒ 表随运行时长无界增长,读取面(无分页)
+	// 单请求就能把进程堆推到 656 MB。经 startTokenRetentionScheduler
+	// (token_retention.go 的装配接缝)调用 —— 那一行被摘掉时 cmd/server 的装配级
+	// 用例会红(与审计/usage 保留调度器同款判据)。
+	startTokenRetentionScheduler(ctx, db, tokenretention.DefaultTick)
 	// R6-A-2(审计 2026-09-23,P1):调度器可观测出口 —— 全部后台调度器装配完后
 	// 打一行/台 `scheduler status (startup): name=… started=… runs=… last_error=…`
 	// (scheduler_status.go)。两个此前裸调的调度器(reports/balance)死掉时不再
@@ -348,6 +359,14 @@ func main() {
 	} else {
 		log.Printf("audit chain verified: intact")
 	}
+	// R15C-R-03(审计 2026-09-25,P2):已废除配置的启动期提示 —— 设计总纲 §12 与
+	// AI-DEPLOY 的"存量部署清理"都写着「启动要 warn 并给清理命令」,而修复前
+	// 三条废除项(两条 env + settings wasm.apps_base_domain)同时存在时启动日志
+	// 命中 0 次、服务照常启动 ⇒ 典型"改了配置但静默失效"。检测表在
+	// legacy_config.go(每条带替代项/文档/可执行清理命令);不阻断启动(配置本身
+	// 无害,只是不再被读取),但每次都吵。读取失败会打**另一条** ERROR 行 ——
+	// "读不到"绝不当成"没设置"。
+	warnLegacyConfig(db)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)

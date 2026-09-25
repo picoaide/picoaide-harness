@@ -390,9 +390,12 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUDITOR_NOT_ALLOWED", "审计账号不可登录客户端,请使用管理后台")
 		return
 	}
-	token, err := IssueToken(a.DB, user.ID)
+	// R15C-R-01 ③(审计 2026-09-25,P1):自助签发走配额闸(按 user_id + 10min 窗口,
+	// 成功签发消耗预算)—— 此前"每次登录一条 90 天令牌、不去重不限次",实测
+	// 9.0 次/秒 ⇒ 77.6 万行/天,是"任何员工单方面把 api_tokens 推大"的那条路径。
+	token, err := a.issueTokenForLogin(c, user)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
+		writeTokenIssueError(c, err)
 		return
 	}
 	// v3b 审计: 登录成功留痕。

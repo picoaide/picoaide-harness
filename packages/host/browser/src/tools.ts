@@ -20,7 +20,7 @@ import type { BrowserSurface } from './surface.ts'
 import { httpOriginOf } from './credential-site.ts'
 import { snapshotNote } from './snapshot.ts'
 import { BROWSER_TOOL_TIMEOUT_MS, BROWSER_WAIT_FOR_DEADLINE_MS, TOOL_DEADLINE_MARGIN_MS, WAIT_FOR_MAX_MS } from './budgets.ts'
-import type { BrowserWaitUntil } from './types.ts'
+import type { BrowserInteractionHit, BrowserWaitUntil } from './types.ts'
 
 /** Valid waitUntil values for navigation tools. */
 const WAIT_UNTILS: readonly BrowserWaitUntil[] = ['domcontentloaded', 'load', 'networkidle']
@@ -30,27 +30,114 @@ const WAIT_CONDITIONS = ['element-present', 'element-visible', 'text-appear', 'u
 /** Tool guidance band shown to the model (v4 wording). */
 const BROWSER_GUIDANCE = `You have an embedded browser shared with the user. Rules:
 1. Start with browser_open (url optional), then browser_navigate. browser_get_snapshot lists numbered interactable elements; target them by number or CSS selector.
-2. After navigation or any page change, take a fresh snapshot — pages re-render and renumber.
+2. A number always means "that element of the snapshot you last took on this tab" — it is never re-resolved against the live page. After navigation or any page change, take a fresh snapshot first: pages re-render and renumber, so a stale number is refused with a 'stale-snapshot' error instead of clicking something you never saw. Every click/type/select result reports which element it actually hit.
 3. browser_screenshot only for visual confirmation; snapshots/text are cheaper. browser_eval runs one expression (a heuristic guardrail rejects statements/assignments and eval/Function; fetch/XHR and any page JS are allowed) and returns its resolved value — promise results are awaited.
 4. The user may take over the browser at any time from the browser window. Your queued actions then wait; only the user gives control back — never ask for it back, there is no tool for that, so do not fight the user. While the user holds control your browser actions fail with a 'window-controlled' error saying the user is operating the browser: that is NOT a broken page — ask the user to hand control back from the browser window, then retry (browser_list_tabs reports the same state).
 5. Use wait_for before acting on dynamic pages (SPAs) instead of sleeping.
 6. Bookmarks/history/downloads are shared with the user; save important pages with bookmarks_add; check your results via downloads_list (paths are usable by file tools).
 7. Close tabs you no longer need with browser_close_tab. Tabs are GLOBAL: every session and the user share one tab pool.`
 
-/** Resolve `target` (snapshot number or CSS selector) to a selector. */
-async function resolveTarget(runtime: BrowserRuntime, tabId: number, target: number | string, signal?: AbortSignal): Promise<string> {
+/**
+ * 交互工具返回值里 `hit` 的 schema（R15B-01）。
+ *
+ * 放在这里当常量是因为 click/type/select/scroll 四个工具必须逐字同形 —— 各写
+ * 一份正是本仓反复出现的"两端各钉自己的字面量"失效形态。
+ */
+const INTERACTION_HIT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  description: 'The element this call actually acted on. For a numeric target it is the element of the snapshot you last took on this tab (index/snapshot/kind/text); for a CSS selector only the selector is known.',
+  properties: {
+    index: { type: 'integer' },
+    snapshot: { type: 'integer' },
+    selector: { type: 'string' },
+    kind: { type: 'string' },
+    text: { type: 'string' },
+  },
+} as const
+
+/**
+ * 命中身份在**模型面出口**的擦除（R7 P0，2026-09-13）。
+ *
+ * `selector` 由页面可控的 id/class 拼成（`el.id = <口令>` 时就是 `#<口令>`），与
+ * `browser_get_snapshot` 的 `elements[].selector` 是同一条出口规则 —— 后者早已按
+ * 值级口径擦除，R15B-01 新增的 `hit` 必须同口径，否则"点一下"就成了口令回传的
+ * 新通道。定位本身用的是未擦除的那一份（擦过的选择器当 CSS 选择器会失败），
+ * 所以只在**回传**时替换。
+ * @param runtime - 浏览器运行时（提供按 tab 的值集合）。
+ * @param tabId - 目标标签页。
+ * @param hit - 原始命中身份。
+ * @returns 擦除后的命中身份（没有可擦内容时原样返回）。
+ */
+function safeHit(runtime: BrowserRuntime, tabId: number, hit: BrowserInteractionHit): BrowserInteractionHit {
+  const selector = runtime.redactTabSecrets(tabId, hit.selector, { verbatim: true })
+  return selector === hit.selector ? hit : { ...hit, selector }
+}
+
+/**
+ * 一次交互工具（click/type/select/scroll）解析出来的目标。
+ *
+ * `hit` 是**实际命中**的元素身份（R15B-01）：数字 target 走锚定快照，
+ * `index`/`snapshot`/`kind`/`text` 是模型**看到的那一份**；字符串 target 只有
+ * `selector`。它同时进工具返回值、render 与 op log —— 点错元素不能再静默。
+ */
+interface ResolvedTarget {
+  readonly selector: string
+  readonly hit: BrowserInteractionHit
+}
+
+/**
+ * 解析 `target`（快照编号或 CSS 选择器）到"要操作哪个元素"。
+ *
+ * 数字分支**绝不重新抽快照**（R15B-01）：编号只在 `runtime.modelSnapshot`
+ * 锚定的那份清单里查，页面已经导航走就报 `stale-snapshot`。旧实现在这里
+ * 重新抽一份新快照再按位置序号解析 —— 页面在"模型看到"与"动作发生"之间
+ * 重渲染过时，模型点到的就是自己从未见过的那个元素（2026-09-15 已判 P1 的
+ * "selector 三层不锚定"同族，那次只收口了选择器歧义）。
+ * @param runtime - 浏览器运行时（提供锚点解析）。
+ * @param tabId - 目标标签页。
+ * @param target - 快照编号（≥1 的整数）或 CSS 选择器。
+ * @returns 选择器 + 命中身份。
+ */
+function resolveTarget(runtime: BrowserRuntime, tabId: number, target: number | string): ResolvedTarget {
   if (typeof target === 'string') {
     if (target.trim() === '') throw new Error('target selector must not be empty')
-    return target.trim()
+    const selector = target.trim()
+    return { selector, hit: { selector } }
   }
   if (!Number.isInteger(target) || target < 1) throw new Error('target number must be a positive integer')
-  const snapshot = await runtime.snapshot(tabId, signal)
-  const entry = snapshot.find((item) => item.index === target)
-  if (entry === undefined) {
-    throw browserError('not-found', `browser: no snapshot element ${target} — call browser_get_snapshot first (${snapshot.length} elements)`)
+  const { element, generation } = runtime.resolveSnapshotIndex(tabId, target)
+  return {
+    selector: element.selector,
+    hit: {
+      index: element.index,
+      snapshot: generation,
+      kind: element.kind,
+      text: element.text,
+      selector: element.selector,
+    },
   }
-  return entry.selector
 }
+
+/**
+ * 把命中身份渲染成模型面的一行（R15B-01）。
+ *
+ * 为什么必须可见：以前点错元素照样回 `{ok:true}`、render 只说 "Click." ——
+ * 模型没有任何办法发现自己点的是另一个元素。这里把"这次操作作用于哪个元素"
+ * 逐字写出来（数字 target 还带上它是第几版快照的第几号），使"点错"当场可读。
+ * @param title - 工具动词（Click/Type/Select option/Scroll）。
+ * @param value - 工具返回值。
+ * @returns 一行可读结论。
+ */
+function formatInteraction(title: string, value: unknown): string {
+  const hit = (value as { hit?: BrowserInteractionHit } | null | undefined)?.hit
+  if (hit === undefined) return `${title}.`
+  const target = hit.index === undefined
+    ? `selector ${hit.selector}`
+    : `#${hit.index} (${hit.kind ?? 'element'}${hit.text === undefined || hit.text === '' ? '' : ` "${hit.text}"`}) → ${hit.selector}${hit.snapshot === undefined ? '' : ` [snapshot #${hit.snapshot}]`}`
+  return `${title} — hit ${target}.`
+}
+
 
 /** Present a pending browser operation as a generic card. */
 function present(title: string): (args: unknown) => GenericCallView {
@@ -573,15 +660,15 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     name: string
     title: string
     description: string
-    run: (r: BrowserRuntime, id: number, sel: string, signal: AbortSignal | undefined, args: Record<string, unknown>) => Promise<unknown> | unknown
+    run: (r: BrowserRuntime, id: number, target: ResolvedTarget, signal: AbortSignal | undefined, args: Record<string, unknown>) => Promise<unknown> | unknown
   }> = [
-    { name: 'browser_click', title: 'Click', description: '[interact] Click an element of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal) => (async () => {
-      const point = await r.locateElement(id, sel, signal)
-      await r.clickAt(id, point, signal)
+    { name: 'browser_click', title: 'Click', description: '[interact] Click an element of your tab (snapshot number or CSS selector). A snapshot number always means the element of the snapshot you last took on this tab; if the page navigated since, the call fails (stale-snapshot) instead of clicking a re-numbered element. The result reports which element was actually hit.', run: (r, id, target, signal) => (async () => {
+      const point = await r.locateElement(id, target.selector, signal)
+      await r.clickAt(id, point, signal, target.hit)
       return { ok: true }
     })() },
-    { name: 'browser_type', title: 'Type', description: '[interact] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default.', run: (r, id, sel, signal, args) => r.typeInto(id, sel, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal) },
-    { name: 'browser_select', title: 'Select option', description: '[interact] Select an option in a dropdown of your tab (snapshot number or CSS selector).', run: (r, id, sel, signal, args) => r.selectOption(id, sel, (args as { value: string }).value, signal) },
+    { name: 'browser_type', title: 'Type', description: '[interact] Type text into an input of your tab (snapshot number or CSS selector); clears the field first by default. A snapshot number always means the element of the snapshot you last took on this tab (stale-snapshot otherwise); the result reports which element was actually hit.', run: (r, id, target, signal, args) => r.typeInto(id, target.selector, String((args as { text: string }).text), (args as { clear?: boolean }).clear !== false, signal, target.hit) },
+    { name: 'browser_select', title: 'Select option', description: '[interact] Select an option in a dropdown of your tab (snapshot number or CSS selector). A snapshot number always means the element of the snapshot you last took on this tab (stale-snapshot otherwise); the result reports which element was actually hit.', run: (r, id, target, signal, args) => r.selectOption(id, target.selector, (args as { value: string }).value, signal, target.hit) },
   ]
   for (const spec of interactSpecs) {
     register(defineTool({
@@ -589,13 +676,13 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       description: spec.description,
       parameters: {
         tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
-        target: { oneOf: [{ type: 'integer' }, { type: 'string' }], required: true, description: 'Snapshot element number or CSS selector.' },
+        target: { oneOf: [{ type: 'integer' }, { type: 'string' }], required: true, description: 'Snapshot element number (as listed by browser_get_snapshot on this tab) or CSS selector.' },
         ...(spec.name === 'browser_type' ? { text: { type: 'string', required: true, description: 'The text to type (any Unicode).' }, clear: { type: 'boolean', description: 'Clear the field before typing (default true).' } } : {}),
         ...(spec.name === 'browser_select' ? { value: { type: 'string', required: true, description: 'The option value to select.' } } : {}),
       },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
-        render: () => [{ type: 'text', text: `${spec.title}.` }],
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, hit: INTERACTION_HIT_SCHEMA } },
+        render: (_args, value) => [{ type: 'text', text: formatInteraction(spec.title, value) }],
       },
       timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
       isConcurrencySafe: () => false,
@@ -603,10 +690,10 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       async execute(args, exec) {
         noteAgent(runtime, exec.agent)
         const tabId = await tabOf((args as { tab?: number }).tab)
-        const selector = await resolveTarget(runtime, tabId, (args as { target: number | string }).target, exec.signal)
-        await spec.run(runtime, tabId, selector, exec.signal, args)
+        const target = resolveTarget(runtime, tabId, (args as { target: number | string }).target)
+        await spec.run(runtime, tabId, target, exec.signal, args)
         exec.signal.throwIfAborted()
-        return { ok: true }
+        return { ok: true, hit: safeHit(runtime, tabId, target.hit) }
       },
     }))
   }
@@ -639,15 +726,15 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_scroll',
-    description: '[interact] Scroll your tab by a vertical delta, or bring a snapshot element into view. A target that does not exist on the page fails (not-found) instead of reporting a successful scroll.',
+    description: '[interact] Scroll your tab by a vertical delta, or bring a snapshot element into view. A target that does not exist on the page fails (not-found) instead of reporting a successful scroll. A snapshot number always means the element of the snapshot you last took on this tab (stale-snapshot otherwise); the result reports which element was actually hit.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       deltaY: { type: 'integer', description: 'Vertical scroll amount in pixels (negative scrolls up).' },
-      target: { oneOf: [{ type: 'integer' }, { type: 'string' }], description: 'Snapshot element number or CSS selector to bring into view.' },
+      target: { oneOf: [{ type: 'integer' }, { type: 'string' }], description: 'Snapshot element number (as listed by browser_get_snapshot on this tab) or CSS selector to bring into view.' },
     },
     output: {
-      schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
-      render: () => [{ type: 'text', text: 'Scrolled.' }],
+      schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, hit: INTERACTION_HIT_SCHEMA } },
+      render: (_args, value) => [{ type: 'text', text: formatInteraction('Scrolled', value) }],
     },
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     isConcurrencySafe: () => false,
@@ -656,7 +743,8 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       const { tab, deltaY, target } = args as { tab?: number; deltaY?: number; target?: number | string }
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf(tab)
-      const selector = target === undefined ? undefined : await resolveTarget(runtime, tabId, target, exec.signal)
+      const resolved = target === undefined ? undefined : resolveTarget(runtime, tabId, target)
+      const selector = resolved?.selector
       // 2026-09-15 审计 P2：`runtime.scroll` 的页内脚本在元素不存在时只返回
       // 'not found'，而 runtime 丢弃了这个返回值、照常记一条成功——工具于是回
       // {ok:true}，模型以为滚过去了。工具层用一次与 browser_type 同口径的真实
@@ -668,7 +756,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
       if (selector !== undefined) await runtime.locateElement(tabId, selector, exec.signal)
       await runtime.scroll(tabId, deltaY ?? 0, selector, exec.signal)
       exec.signal.throwIfAborted()
-      return { ok: true }
+      return resolved === undefined ? { ok: true } : { ok: true, hit: safeHit(runtime, tabId, resolved.hit) }
     },
   }))
 
@@ -749,7 +837,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_get_snapshot',
-    description: '[read] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered). The list is bounded: when it was cut, or when the page contains sub-frames / shadow roots whose content this snapshot does NOT include, `truncated`/`total`/`note` say so — an absent element is not proof it does not exist.',
+    description: '[read] List the numbered interactable elements of your tab (links, buttons, inputs, selects, textareas) plus page header info (url/title). Numbers are the targets for click/type/select/scroll — and they always mean "this snapshot", never a re-numbered live page: after the page navigates, a stale number is refused (stale-snapshot) so you can never act on an element you have not seen. Password fields are listed (number/selector usable) but never expose their value: the text reads the field label or "(password field)". On a tab that received credentials through browser_fill_credentials, the injected values are masked (****) in the element text, url and title — VERBATIM occurrences only (a value the page transformed is not covered). The list is bounded: when it was cut, or when the page contains sub-frames / shadow roots whose content this snapshot does NOT include, `truncated`/`total`/`note` say so — an absent element is not proof it does not exist.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
     },
@@ -775,6 +863,9 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
           },
           url: { type: 'string' },
           title: { type: 'string' },
+          // R15B-01：这一版编号的世代号。click/type/select/scroll 的数字参数
+          // 就是按它解析，结果里也会带回同一个号 —— "点的是哪一版快照"可追溯。
+          snapshot: { type: 'integer', description: 'Generation of this snapshot on this tab. Numbers below stay valid for it until the page navigates; a number from an older generation is refused.' },
           // 2026-09-15 审计 P2：截断/盲区必须对模型可见（旧实现到上限直接
           // break，输出既没有命中总数也没有截断标记，模型会把不完整的列表当完整）。
           truncated: { type: 'boolean', description: 'The element list itself was cut at the limit — the note also reports sub-frames/shadow roots that are not included at all (those do not set this flag).' },
@@ -791,7 +882,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     async execute(args, exec) {
       noteAgent(runtime, exec.agent)
       const tabId = await tabOf((args as { tab?: number }).tab)
-      const { elements, meta } = await runtime.snapshotWithMeta(tabId, exec.signal)
+      const { elements, meta, generation } = await runtime.modelSnapshot(tabId, exec.signal)
       exec.signal.throwIfAborted()
       const state = runtime.tabState(tabId)
       // R7（2026-09-13）P0：`selector` 由页面可控的 id/class 拼成（`el.id = password`
@@ -813,6 +904,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         elements: safeElements,
         url: state.url,
         title: state.title,
+        snapshot: generation,
         truncated: meta.truncated,
         total: meta.total,
         ...(note === undefined ? {} : { note }),
@@ -1354,21 +1446,24 @@ function formatNavigation(value: unknown): string {
 }
 
 function formatSnapshot(value: unknown): string {
-  const v = value as { elements?: Array<{ index: number; kind: string; text: string; selector: string; visible: boolean; disabled: boolean }>; url?: string; title?: string; note?: string }
+  const v = value as { elements?: Array<{ index: number; kind: string; text: string; selector: string; visible: boolean; disabled: boolean }>; url?: string; title?: string; note?: string; snapshot?: number }
   const elements = v.elements ?? []
   const header = [v.title !== undefined && v.title !== '' ? String(v.title) : '', v.url !== undefined ? String(v.url) : ''].filter(Boolean).join(' · ')
   const head = header === '' ? '' : `Page: ${header}\n`
   // 2026-09-15 审计 P2：截断/盲区提示必须出现在模型真正读到的那段文本里
   // （只放进 JSON 字段等于没提示——模型读的是 render 的输出）。
   const note = v.note === undefined || v.note === '' ? '' : `\n${String(v.note)}`
+  // R15B-01：编号属于**这一版**快照。把世代号写在模型真正读到的那行上，
+  // "点的是哪一版"才有据可查（工具结果与 op log 里同样带它）。
+  const version = v.snapshot === undefined ? '' : `snapshot #${String(v.snapshot)} — `
   if (elements.length === 0) {
-    return `${head}No interactable elements found.${note}`
+    return `${head}${version}No interactable elements found.${note}`
   }
   const lines = elements.map((e) => {
     const flags = `${e.visible ? '' : ' (off-screen)'}${e.disabled ? ' (disabled)' : ''}`
     return `${e.index}: [${e.kind}] ${e.text || '(no text)'}${flags}`
   })
-  return `${head}Interactable elements:\n${lines.join('\n')}${note}`
+  return `${head}${version}Interactable elements:\n${lines.join('\n')}${note}`
 }
 
 function formatText(value: unknown): string {

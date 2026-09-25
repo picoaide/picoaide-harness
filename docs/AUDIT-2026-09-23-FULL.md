@@ -1319,3 +1319,56 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 **复审对复审的两条更正（本轮的价值恰在于此）**：① V14-C 的 `judge-attack.sh` 有量具 bug（spec 拆分截断）⇒ 它"拆掉被测物仍绿"的结论对**其中一条**不成立，lane O 实跑纠正并把真形态（别名池句柄）补成判据；② V14-C 把 `setAuthConfig` 记成"池守卫的战果"是口径串线 —— 该处事务里没有池调用，它是由 `[R13GH3]` 咬住的（池守卫**正确地不报**）。
 
 **本轮修复批的门禁**：`node scripts/check-root-guards.mjs` **17/17 EXIT=0**；`corepack yarn check`（见下表）；`check-doc-claims` 不带 `CI` 与 `CI=true` 都 EXIT=0 且打印通过行；`check-no-real-domains` 零命中（含 18 条提交信息）；`check-no-leftover-mutants` 零残留。**一条本地红是外来的**：`check-install-integrity` 判"工作树 == HEAD"，而共享工作树里**另一会话暂存了 `.gitignore`**（`normify-picoaide/` 忽略行，未提交）⇒ 本地 EXIT=1、其余 184 条执行体与 19 个 manifest 逐字节通过；CI 的干净检出不受影响（master 上该 job 已绿）。
+
+---
+
+### 7.50 第十五轮审计（2026-09-25，五路）：修复批的判据面仍在漏，产品面第一次被系统性新扫
+
+**本轮首次同时做两件事**：① 对抗审计**第十四轮修复批本身**（R15-A）；② 对**产品面做系统性新扫掠**（R15-B 客户端 / R15-C 服务端，后者含三个子泳道 webadmin / Go 存储 / 运行时探针）。结论：**0 P0 / 8 P1 / 约 15 P2**（去重后 P1 = 8）⇒ **仍未达成"连续两轮零新增 P0/P1"**。逐轮计数追加：第十三轮 5+9、第十四轮 3+6（+复审 4 P1）、**第十五轮 0+8**。
+
+**结构性观察**：第十四轮的修复把 P0 清掉了（本轮 0 P0），但**判据面的"同族补集"仍在漏**（R15A-03），而**产品面**（此前十四轮主要盯判据与新建模块）第一次被系统扫，立刻掉出 5 条 P1 —— 其中两条是"**fail-closed 闸门没有恢复路径**"这一**已被本仓判过 P0 的同形事故**（第四轮编译缓存自锁）在新模块上的重演。
+
+#### P1（8 条，去重后 7 条独立）
+
+| 编号 | 位置 | 现场 | 证据 |
+|---|---|---|---|
+| **R15A-03** | `check-integration-tests` 的 CI 执行面闭包 | **5 种同族新形态**让闭包不触达 `integration-tests/run-all.sh` 而 CI 真的执行它：`timeout 900 make -C …` / `bash -c "make …"` / `npm exec -- make …` / `docker compose -f … run …`（命令在 compose 文件）/ `python3 x.py`（`runpy.run_path` 或 `exec(open(...))`）；守门仍打 `static-only / 真实接线 0 处`。两条根因：`make` 跟随只认 `sudo\|time\|command\|env\|nohup\|exec` 前缀且命令位必须**就是** `make`；`.py` 抽取器只认 `subprocess.*`/`os.*` 而文本第二张网**显式排除非 `.sh/.bash` 脚本体** ⇒ 字面量路径在两张网之间掉出去 | `temp/r15/A/probe/area2-attacks3.py`（提交态 4/5 静态守卫仍 0） |
+| **R15B-01** | `packages/host/browser/src/tools.ts:41-53,578-611` + `runtime.ts:3161` | `browser_click/type/select` 的**数字 target** 在**动作时刻**重新抽快照、按**位置序号**解析，而模型面文案说编号来自"你看到的那份快照" ⇒ 页面变过就点到另一个元素；工具只回 `{ok:true}`、op log 只记坐标 ⇒ **模型与用户都拿不到证据**（2026-09-15 已判 P1 的"selector 三层不锚定"的**同族未收口面**） | `temp/r15/B/probe-browser/click-index.spec.ts`（模型看到 2 号=`#cancel`，重渲染后 `click(target:2)` 命中 `#delete-account`，返回 `{ok:true}`） |
+| **R15C-01** | `serverstore/users.go:559-572` | `DeleteUser` 只删 `usage` 明细，**不清** `usage_daily`/`usage_monthly`/`balance_ledger`；永久账本**无回收路径**、重建是**纯 UPSERT（只从明细算）**⇒ 不可自愈；读面按"该月明细行归零"切读源 ⇒ 同一历史月金额 **21 → 删用户后 14 → 回涨 21**，出现 label 为 `"1"` 的**幽灵行**，资金账本留**孤儿流水**（全局 100.00 ≠ 现存余额 0.00）；而 webadmin 二次确认**逐字承诺**「同时清除其…用量记录」 | 真 PG + 真 HTTP（`temp/r15/C/REPORT.md`） |
+| **R15C-02**（+ **R15C-W-01** 同因） | `serverauth/admin.go:588-628` + `serverstore/users.go:339-349` + webadmin `mfa-settings-dialog.tsx:29-41` | 已开启 MFA 的管理员**只凭主密码**再走一次「开启」即可**覆盖既有 TOTP 密钥**（`enableMyMFA` 无 `u.TotpEnabled` 守卫；`SetUserMFA` 无条件 `UPDATE`），而「关闭」要求主密码+动态码**双验** ⇒ **更强的动作被更弱的闸门守着**；触发面是 webadmin 在 `GET /me/mfa` **失败**时谎报「未开启」且失败**零出口**、写面解锁 | 实测：disable 只给密码 401；enable 只给密码 **200 + 密文 `mUL91…→sP2bX…`**、旧验证器登录 401 |
+| **R15C-G-01** | 模型清单剪枝路径 | provider 同步剪掉某模型时，三条**兄弟路径**都清 `settings.gateway.default_model`，**唯独这一条不清** ⇒ 默认模型指向已不存在的模型 | 子泳道 G（真 PG + 变异，主控复核 4/4 FAIL） |
+| **R15C-G-02** | `RecomputeAppProjection` | 读-改-写**无守卫** ⇒ 并发审批**丢更新**（后写覆盖前写） | 同上 |
+| **R15C-G-03**（主报告判"最该先修"） | WASM 制品配额 | **唯一的"闸门关上后用户永久出不来"且不需要攻击者**的一条：软删**不清字节**、唯一 GC **排除软删行** ⇒ 一次普通发布失败的**补偿软删**就永久吃掉最多 32 MiB；配额用尽 ⇒ 发布永远失败 ⇒ GC 永不运行（**结构上不可能自愈**）；报错文案承诺的两条出路（删版本 / 管理员扩容）**都不存在**。直接违反上一轮刚定案的口径"**每条 fail-closed 都必须回答恢复路径**"（来源＝第四轮 P0 编译缓存自锁的同形事故） | 同上 |
+| **R15C-R-01** | `api_tokens` | **无回收者**（`idx_tokens_expires` 的 `idx_scan=0`）+ 管理端列表**无分页**：表 1,001,883 行时单次管理页 **130.8 MiB / 堆 +656 MB**、3 并发 **1.59 GB**；而**任何员工**都能自造令牌（实测 **9.0 次/秒**）⇒ 普通员工可单方面把管理端放大成全站 OOM | 真 HTTP + 真 PG（子泳道 R） |
+
+#### P2 / P3（约 15 条，摘要）
+
+**判据面（R15-A）**：**R15A-01** doc-claims 通过行自证的两处不对称（层③ `emitted` **只保留最后一次 write** ⇒ 真通过行**之前**多打一行看不见，连含前缀的伪通过行也 EXIT=0；层② 的"像通过行的行恰好 1 行"是**字面量识别** ⇒ 换措辞的宽自述也 EXIT=0 —— R13-GF 要根治的"自我陈述比覆盖面宽"仍可复现，且该缝**基线就有**）；**R15A-02** 44 条 `--selftest` **没有任何调用方** ⇒ 整条删掉 `client-platforms` 规则（36 条断言）主入口仍 EXIT=0 且通过行自洽缩成"已覆盖 6 项"；**R15A-04** AST 尺子两条未登记盲区（**方法值 `qr := db.QueryRow`**、**接口洗白 `hand.(*sql.DB)`** —— 真 PG 下与基线同样 3.00s 取不到连接而守卫绿）；**R15A-06/07/08**（新子入口无内容摘要登记；`[SK-22]` 的 `-` 收窄把**合法**表达式 `${{ github.run_number - 1 > 0 }}` 判红；汇总 note 在判红时仍打 ✓）。
+**客户端（R15-B）**：**R15B-02** 服务端稳定码 `403 PASSWORD_CHANGE_REQUIRED` 客户端零处理（被压成 `502` 且**丢 code**）；**R15B-03** `manifest-precheck` 的 11 个限额是与 Go 的**两份手抄**（数值一致但**无对拍守卫**），服务端 6 条规则（`MaxSkillMDBytes`、frontmatter 深度/集合/列表项/锚点、`changelog` 长度）在预检里**完全不存在**、`maxChangelog` 是**死常量** ⇒ 预检放行的内容上传后被拒；**R15B-04** 同服务端**换账号**没有任何"身份变了"的信号 ⇒ 已加载页面继续用旧账号渲染状态跑在新令牌下。
+**服务端（R15-C）**：**W-02…W-08** 七个 webadmin 页面把"**读取失败**"当成确定态（其中 W-02 的删除会**不可恢复地释放归档**）；**R15C-03** compose 的 `CADDY_IP` 可配而 `PICOAI_TRUSTED_PROXIES` 缺省**硬编码同一 IP** ⇒ 改网段部署**静默**失去 XFF、限流桶坍缩成全组织共桶；**R15C-04** 唯一超管被 dirsync 停用后 `--bootstrap-admin` **静默 no-op**（只看 `IsSuperAdmin` 不看 `status`）⇒ 文档兜底对该态无效；**R-02** SSE 上游中途断连**静默收尾**（无 error 事件、无 DONE、零日志）；**R-03** 三条已废除配置**启动期零提示**；**G-04** `UpsertApp` 缺官方归属守卫。
+
+#### 本轮判为"打不坏"（实跑攻击失败）
+
+- **入口探测本体**（VA-02-F2 的修复）：`--verdict-probe` / 已废除 env（含**空串**）/ `NODE_OPTIONS=--import` 伪造 argv / 旧 Node 回退分支 —— 全部 exit 2 或 fail-closed；**子入口被冒充不能把红翻绿**。主控独立复跑确认（`--verdict-probe` 与 `NODE_OPTIONS` 伪造都是 exit 2）。
+- **VC-F1 的行为判据**：6 种别名形态（局部别名 / 结构体字段 / `interface{ QueryRow(...) }` 变量 / 闭包捕获 / 方法值 / 切片容器）在保留 pin 记号下**全 RED** —— 它咬"读到哪个 schema"而不是句法，是本批最结实的一条。
+- **认账表双向 + 陈旧核对**：抽掉一条认账 ⇒ 主判据 RED；加幽灵认账 ⇒ 注册表判据 RED。
+- **反面对照（确实咬住）**：`make -C/-f/include/$(MAKE)`、`yarn workspace`、复合 action、`defaults.run.working-directory`、`subprocess.run([...])` 全 EXIT=1；变量目标名 EXIT=1（fail-closed）。
+- **客户端历史三条已修**（R15-B 复跑）：selector 根锚定 + 唯一性自检、`kindOf` 与 `SEL` 同口径 + 兜底 `other`、store `.tmp`+`renameSync`；browser 703 用例 / cron 245 用例全绿。
+
+#### 方法学（本轮新增两条）
+
+① **"fail-closed 闸门必须回答恢复路径"这条口径要用判据钉住，不能只写在文档里**：G-03 与第四轮的编译缓存自锁是**同形事故**，说明"定案口径"本身需要一个判据面（例如"每个 fail-closed 闸门必须在同一处给出恢复入口，且该入口在闸门关闭时仍可用"）。② **读源切换的判据是"该月明细行归零"而不是"保留期到期"**（R15-C 的实测），所以"删用户后金额回涨"的触发条件比直觉低得多。
+
+#### 第十五轮修复批（5 条泳道）
+
+| 泳道 | 提交 | 覆盖 | 自证要点（修前 → 修后） |
+|---|---|---|---|
+| P（客户端） | `bd7316f5cf`（13 文件） | R15B-01(P1) + R15B-02/03/04 | 数字 target 改 **per-tab 锚定模型面最近一次快照**（`runtime.modelSnapshot` 是唯一写点；无锚点或已导航 ⇒ `stale-snapshot`）＋命中身份进返回值/render/op log，且 `hit.selector` 过 `safeHit()` 值级擦除（防 R7 的"新出口逐字回传口令"P0 复发）⇒ R15-B 探针 **2 passed → 1 failed**（`['#cancel']` vs `['#delete-account']`），变异（还原"重新抽快照"）**7/12 红**；强制改密按码保留（403 + `action` + `hint`，不清会话、幂等落回 `mustChangePassword`）；预检补齐 6 条服务端规则 + 读 `manifest.go` 的跨端对拍 spec（真源缺席 fail-loud）⇒ 判据脚本由 `UNUSED 1 / MISSING 5 / 守卫 NONE` 变 **11/11 OK / 守卫 FOUND**；身份口径唯一化（`session-identity.ts`）+ 看门狗按「登出 / identity 变 / 须改密」三判据重载。browser 715 用例、enterprise 860 用例全绿。**R15-B 那条 `session-switch` 探针不具判别力**（修复前后都 2 passed，只钉了脚本文本）⇒ 已如实标注并改用新增判据 |
+| Q（服务端） | `9b22871fe4`（28 文件） | R15C-02(P1) + R15C-01(P1) + W-01…W-08 + 两处共享树红 | MFA「开启」加 `TotpEnabled` 守卫（**修前：enable 只给主密码 ⇒ 200 且密文 `mUL91…→sP2bX…`、旧验证器登录 401；修后 409**，第三方探针双向验证）；删用户在同一事务抹除两侧（明细 + 日/月汇总 + 账本）并把 webadmin 承诺文案改成与实现一致；webadmin 七个页面补「成功才解锁 + 读取失败不得当确定态」闸门（W-01…W-08） |
+| R（判据面） | `43d0fcf093`（6 文件，全 `scripts/**`） | R15A-03(P1) + R15A-01/02/06/08 | 闭包把"包装链"处理成**任意深度**（`timeout`/`bash -c`/`npm exec --` 等已登记包装位逐层剥到命令位，读不懂 fail-closed）＋ `make` 目标体跟随 ＋ `.py` 进**文本第二张网** ＋ compose 文件命令纳入 ⇒ R15-A 的 **5 种形态全部由 EXIT=0 假绿变 EXIT=1 且具名点名**，**每条一个独立变异、全部 BITE**；`--selftest` 接线进 `verify-check-workspaces`（真跑 + 条数下限 47 + 拆规则必具名红）；层②识别面改"断言语气"三点集、层③累积全部 stdout（C1–C7 全红）；子入口摘要登记 + owner 双向对账；汇总行按结论选符号。**R15A-07 经复核判为"finding 不成立"**（GitHub 表达式**没有算术算子**；照建议放宽会把"本地绿 / GitHub 解析期 0 job"的 P0 类放回来）⇒ 改为补 `w42`（整类算术算子必红）/`w43`（合法负号四形态必绿）两格显式判据并订正自述 |
+| S（服务端存储/配额） | `8db0897d8c`（12 文件） | R15C-G-01/02/03(P1) + G-04(P2) | ①剪枝路径补 `clearDefaultModelIf` 并把三处内联副本收敛到唯一实现（判据＝四条路径终态逐字段等价 + 三个反向）；②`RecomputeAppProjection` 收进同一事务 + `FOR UPDATE`，读快照在取锁之后（判据断言**每个写者的返回值 == 当时真相**——S 实测"只钉终态会假绿"）；③配额自锁按"**软删即释放字节** + 退役在同事务释放该应用全部版本字节 + 配额只计未软删 + GC 兜底历史死字节 + 文案只写真实出路"两半齐修，端到端判据走**真实发布链路**（触发器让 `commitRelease` 恰死在版本行落库之后 → 走真实 `compensate`）：三轮失败发布每轮 `used` 回到 baseline 且版本号仍永久占位；变异回退 ⇒ DAO 三条 + 端到端一条全红。**S 修改了一条既有判据**（`wasmapps_test.go` 原先在软删后断言"仍能读回字节"）—— 主控复核其依据成立：`SoftDeleteWasmRelease` 的**唯一生产调用方**就是发布补偿闭包（`publish.go:1159`），且全仓**零** `deleted_at = NULL` 复原写入 |
+| T（令牌/网关） | `7407ae784e` | R15C-R-01(P1) + R-02/R-03(P2) | `api_tokens` 回收 + 列表有界返回（披露 total/truncated）+ 自助签发配额；SSE 上游中途断连改**显式收尾**（error 事件/非正常结束标记 + 可检索日志）；三条已废除配置改**启动期可检索提示**（含替代项与文档位置） |
+
+**门禁**：`node scripts/check-root-guards.mjs` **17/17 EXIT=0**；`bash scripts/verify-wasm-client-only.sh --portable` **PASS 13 / FAIL 0**（Q 把 R15A/T 的新文件按门禁自己的机制登记：`legacy_config.go` 是"拒绝清单 + 给运维的清理命令"性质的**契约模块**，按 `appcfg` 同款机制整文件声明 + 独立预算 5，并**拒绝**用"把键名拆串"这类规避手法；`budgets.ann` 第一版按 67 改过、实测契约模块优先归 B 后 **改回 66，不放宽不需要放宽的预算**）；`corepack yarn check` 见下；Go 侧 S 跑 `internal/wasmapp/...` 30 包 + `internal/serverstore` 全包（1239.9s）+ 五个相邻包全绿，Q 跑 serverstore 整包与 webadmin 全量（45 文件 / 691 用例）；`gofmt -l` 空。
+
+**本轮引入的语义变更（已复核并登记）**：WASM 版本的"软删"从"保留字节"改为"**释放字节**"（配额可恢复性的前提），依据是"唯一调用方是发布补偿闭包 + 无任何复原写入"；若日后引入"恢复已删版本"的端点，必须同时把字节保留语义与配额口径一起改回来。

@@ -399,6 +399,23 @@ const CONTRACT_MODULES = [
     budget: BUDGETS.modules.appcfg,
     reason: 'I6 明文要求的兼容面：AccessPublic（"历史值，只读"）/ `login_required=false ⇒ access=public` 的旧 schema 映射 / AccessValues（历史只读集合）/ publicAccessRejected（写侧拒绝的**结构化错误**）/ 基线历史 public 的读侧映射',
   },
+  {
+    // R15C-R-03（审计 2026-09-25，P2）：`server/cmd/server/legacy_config.go` 是
+    // **已废除配置的登记表** —— 它是 B 桶定义里"拒绝/忽略清单"的又一成员：旧键名
+    // 必须**逐字**存在才有意义（`os.LookupEnv` / `GetSetting` 的比对对象，以及给
+    // 运维可直接复制的清理命令）。键名写成拼接/运行时合成会让检测失效，那正是
+    // 门禁禁止的规避手法，所以这里按 appcfg 的同款做法**整文件声明为契约面**
+    // 并给它独立预算（inventory 的 budgets.contractModules['legacy-config'] = 5：
+    // 两条键的声明 + 清理命令 4 处 + 表头注释 1 处），超出即红 —— 契约模块不是无上限白名单。
+    //
+    // 与"旧模型能力实现"的区分：该文件没有按 Host 反查 app_id、没有子域门控、没有
+    // 换票 Cookie、没有入口路由；它只是"发现残留就 warn"的检测表。
+    test: /^server\/cmd\/server\/legacy_config\.go$/u,
+    label: 'legacy-config',
+    // 预算 4 的真源 = scripts/wasm/wasm-gate-inventory.json 的 budgets.contractModules['legacy-config']
+    budget: BUDGETS.modules['legacy-config'],
+    reason: 'R15C-R-03 的已废除配置登记表：`PICOAI_APPS_BASE_DOMAIN`（env）与 `wasm.apps_base_domain`（settings）两个已废除键名必须逐字存在，检测与清理命令都以它们为准',
+  },
 ]
 
 /**

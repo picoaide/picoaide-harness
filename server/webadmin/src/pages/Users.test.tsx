@@ -99,6 +99,75 @@ describe('Users 用户管理页', () => {
     ))
   })
 
+  it('R15C-R-01:令牌列表被截断时必须如实说明「仅显示最近 N 条(共 M 条)」', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
+      }
+      if (path === '/api/server/admin/users/1/tokens') {
+        return {
+          tokens: [{ id: 9, name: 'login', created_at: '2026-09-25T00:00:00Z', expires_at: '2026-12-24T00:00:00Z', last_used_at: '', revoked: 0 }],
+          total: 600,
+          truncated: true,
+        }
+      }
+      return {}
+    })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+    await screen.findByText('alice')
+    fireEvent.click(screen.getByRole('button', { name: '令牌' }))
+    await waitFor(() => expect(screen.getByTestId('tokens-truncated-note')).toBeInTheDocument())
+    expect(screen.getByTestId('tokens-truncated-note').textContent).toContain('仅显示最近 1 条(共 600 条)')
+  })
+
+  it('对照:令牌未被截断时不得出现「仅显示最近」提示', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
+      }
+      if (path === '/api/server/admin/users/1/tokens') {
+        return {
+          tokens: [{ id: 9, name: 'login', created_at: '2026-09-25T00:00:00Z', expires_at: '2026-12-24T00:00:00Z', last_used_at: '', revoked: 0 }],
+          total: 1,
+          truncated: false,
+        }
+      }
+      return {}
+    })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+    await screen.findByText('alice')
+    fireEvent.click(screen.getByRole('button', { name: '令牌' }))
+    await waitFor(() => expect(screen.getByText('login')).toBeInTheDocument())
+    expect(screen.queryByTestId('tokens-truncated-note')).toBeNull()
+  })
+
+  it('R15C-01:删除二次确认的承诺必须等于服务端真实动作(抹除用量与余额流水)', async () => {
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/server/admin/users?page=')) {
+        return { users: [{ id: 1, username: 'alice', is_admin: false, status: 1, groups: [] }], total: 1, page: 1, size: 20 }
+      }
+      if (path === '/api/server/admin/departments') return { departments: depts }
+      if (path === '/api/server/admin/users/1' && init?.method === 'DELETE') return { ok: true }
+      return {}
+    })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+    await screen.findByText('alice')
+    confirmSpy.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(mockRequest).toHaveBeenCalledWith(
+      '/api/server/admin/users/1', expect.objectContaining({ method: 'DELETE' }),
+    ))
+    // 承诺必须逐项对上服务端在同一事务里的级联：用量（明细与日/月汇总）+ 余额流水。
+    // 文案弱化（例如退回只说"用量记录"）即视为承诺与实现脱钩。
+    // 类型注记：confirmSpy 是 `vi.fn(() => true)`（无参签名 ⇒ mock.calls 的元组类型为空），
+    // 这里按真实运行时形状读回调实参。
+    const calls = confirmSpy.mock.calls as unknown as unknown[][]
+    const promise = calls.map((c) => String(c[0])).join('\n')
+    expect(promise).toContain('用量记录(明细与日/月汇总)')
+    expect(promise).toContain('余额流水')
+    expect(promise).toContain('审计日志')
+  })
+
   it('新建用户失败:错误显示在对话框内(中3)', async () => {
     mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.startsWith('/api/server/admin/users?page=')) {

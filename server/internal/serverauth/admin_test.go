@@ -463,14 +463,14 @@ func TestDeleteLastAdminRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := serverstore.DeleteUser(db, bID); err != nil {
+	if _, err := serverstore.DeleteUser(db, bID); err != nil {
 		t.Fatalf("delete adminB while adminA remains: %v", err)
 	}
 	a, err := serverstore.GetUserByUsername(db, "adminA")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := serverstore.DeleteUser(db, a.ID); err == nil {
+	if _, err := serverstore.DeleteUser(db, a.ID); err == nil {
 		t.Fatal("last admin deletion succeeded, want rollback")
 	}
 	if _, err := serverstore.GetUserByUsername(db, "adminA"); err != nil {

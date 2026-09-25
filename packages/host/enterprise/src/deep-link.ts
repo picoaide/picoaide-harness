@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { DEFAULT_DEEP_LINK_SCHEME } from 'dsh-plugin-desktop/desktop-channel'
 import { assertServerURLAllowed, AuthError, fetchJSON } from './server-connector/auth.ts'
+import { sessionIdentityChanged } from './session-identity.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 声明桌面壳转发的深链事件(desktop shell 的 ctx.emit)。
@@ -292,6 +293,12 @@ export function installDeepLinkListener(
         return
       }
       ctx.logger?.info(`pico-deep-link: logged in as ${JSON.stringify(session.username)}`)
+      // R15B-04：同服务端换账号在这里是放行的（与 login 路由同一口径），但必须
+      // 留下"换了人"的信号 —— 注入应用页的看门狗按同一个身份判据把已加载的页面
+      // 重载掉，旧账号的渲染状态不会活到新账号的令牌下。
+      if (sessionIdentityChanged(getCurrent?.() ?? null, session)) {
+        ctx.logger?.warn('pico-deep-link: session identity changed on this server; the loaded app page will reload (the previous account render state must not survive)')
+      }
       applySession(session)
     })()
   })

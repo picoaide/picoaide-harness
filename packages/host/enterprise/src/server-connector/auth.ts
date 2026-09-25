@@ -5,6 +5,38 @@ import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-deskt
 export type AuthErrorKind = 'invalid_credentials' | 'auth_expired' | 'network' | 'server_error'
 
 /**
+ * 服务端"先改密"守卫的稳定错误码（`serverauth/handler.go` 对
+ * `password_must_change` 用户白名单外的一切接口回 `403 {error:{code}}`）。
+ *
+ * 它**必须**在客户端被当成契约而不是一句文案：`fetchJSON` 会把它放进
+ * `ApiError.code`，auth-gate 的代理层按码回 403 + 可操作路径（此前被压成
+ * `502 {"error":"gateway error: …"}` ⇒ 码丢了、面板只剩一句被包了一层的文本，
+ * 任何"把用户送回改密页"的分支都无从下手）。R15B-02，2026-09-25。
+ */
+export const PASSWORD_CHANGE_REQUIRED_CODE = 'PASSWORD_CHANGE_REQUIRED'
+
+/**
+ * 该错误是不是"服务端要求先改密"。
+ *
+ * 判据只看码（不看 message）：服务端文案是中文散文、可随时改，而码是稳定契约
+ * —— 与 `AccountSection` 从"嗅探中文原文"改为"读稳定码"是同一口径。
+ * @param cause - 任意被捕获的值。
+ * @returns true 表示必须先改密再重试。
+ */
+export function isPasswordChangeRequired(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.code === PASSWORD_CHANGE_REQUIRED_CODE
+}
+
+/**
+ * 「先改密」应答里给界面的动作名（R15B-02）。
+ *
+ * 与 `code` 一样是**跨端契约**：面板/账号页据此把用户送到改密页，而不是各写各的
+ * 文案匹配。客户端已有的那条路径是 `/change-password`（auth-gate 的精确路由，
+ * 也是索引渲染在 `mustChangePassword` 时给出的页面）。
+ */
+export const PASSWORD_CHANGE_REQUIRED_ACTION = 'change-password'
+
+/**
  * User-facing message per auth failure kind (shown by the login page).
  *
  * 这些消息**用户可见**: 登录页把 `AuthError.message` 原样渲染出来, 所以按宿主
