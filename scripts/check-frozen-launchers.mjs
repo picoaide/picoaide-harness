@@ -112,8 +112,45 @@ import { fileURLToPath } from 'node:url'
 //     由 argv 相等与否守卫）⇒ import 它没有副作用。
 //   · 若将来有人把本文件复制到别处执行（例如 `git show > $RUNNER_TEMP/probe.mjs`），这条 import
 //     会解析失败 ⇒ **那是显式红灯**（fail-loud），不是静默降级；要那么做必须同时改这里。
-import { FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS } from './check-workflows.mjs'
-import { FROZEN_TOOLCHAIN_ALLOWLIST_VALUE, FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE } from './check-workflows.mjs'
+//
+// ## 为什么改成**受控的动态 import**（第十四轮 V14-A 的 VA-03-F2，P3）
+//
+// 现场：在"只有本探针、缺兄弟模块 / 缺根 `yaml`"的检出里，静态 import 让进程在**模块求值之前**
+// 就炸掉，日志只有 `Error [ERR_MODULE_NOT_FOUND]: Cannot find module …`（原始堆栈、没有一条
+// 说得出"缺什么、为什么缺、怎么办"的具名诊断）。ESM 的静态 import 失败发生在链接期，
+// 文件体里的任何检查都跑不到 ⇒ 只能把 import 变成**受控的**（`await import`）才能给出诊断。
+// 判据面不变：接线判据（`check-workflows.mjs` 的 `checkFrozenRegistryWiring`）同时接受静态与
+// 动态两种形态，并继续禁止**本地登记副本**（E-03 的原始形态）。
+/**
+ * 加载同目录 `check-workflows.mjs` 失败时的**具名诊断**（第十四轮 V14-A 的 VA-03-F2，P3）。
+ *
+ * 为什么单独一个函数：静态 import 的失败发生在**模块求值之前**，文件体里的任何检查都跑不到 ⇒
+ * 只能把 import 改成受控的 `await import` + 这个 catch。诊断必须点名"缺什么、为什么缺、怎么办"，
+ * 而不是把 `ERR_MODULE_NOT_FOUND` 的原始堆栈当结论。
+ * @param error - `await import` 抛出的错误。
+ */
+function reportFrozenRegistryLoadFailure(error) {
+  console.error('check-frozen-launchers: **无法加载同目录的 check-workflows.mjs** —— 本探针要逐 job'
+    + '解析冻结点，而那份登记表（`FROZEN_LAUNCHER_JOBS` / `FROZEN_LAUNCHER_OUTPUT_KEYS`）的**单一真源**'
+    + '就在它里面；读不到它，探针就无从知道该验什么，**拒绝把"读不到"当成"没有要验的"**。'
+    + `\n  期望路径：${fileURLToPath(new URL('./check-workflows.mjs', import.meta.url))}`
+    + `\n  实际原因：${error?.code ?? '(无 code)'} ${error?.message ?? error}`
+    + '\n  ⇒ 常见成因（都属显式红灯，不是静默降级）：'
+    + '\n     · 把本文件复制到别处执行（`git show HEAD:scripts/check-frozen-launchers.mjs > $RUNNER_TEMP/probe.mjs`）'
+    + '—— ESM 的相对 import 按**本文件自己的位置**解析；'
+    + '\n     · 检出里缺 `scripts/check-workflows.mjs`（被删/改名）；'
+    + '\n     · 依赖没装（`check-workflows.mjs` import 根 `yaml`；CI 里 `yarn install --immutable` 排在判据之前）。')
+  process.exit(2)
+}
+
+let frozenRegistryModule
+try {
+  frozenRegistryModule = await import('./check-workflows.mjs')
+} catch (error) {
+  reportFrozenRegistryLoadFailure(error)
+}
+const { FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS } = frozenRegistryModule
+const { FROZEN_TOOLCHAIN_ALLOWLIST_VALUE, FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE } = frozenRegistryModule
 
 /**
  * **登记表不再在本文件里声明**（第十四轮审计 lane E 的 E-03 的修法）：必须逐 job 解析冻结点的

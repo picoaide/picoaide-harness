@@ -139,15 +139,38 @@ export function hiddenSessionScope(scope: AiChatScope): string {
 }
 
 /**
- * 隐藏会话 id 变成**文件名**之后的字节预算（R14 C-03）。
+ * 上游 legacy 探测文件名相对会话目录名的**额外字节数**（R14 VB-N1）。
+ *
+ * `SessionPersistenceJsonl.findLog()` 在**每个**项目目录里先做一次"不支持的 flat 布局"
+ * 探测：`exists(join(project, encodeSegment(id) + logSuffix(compression)))`，而
+ * `logSuffix('zstd')` = `.jsonl.zstd`（11 字节）；`exists()` 只吞 `ENOENT`，
+ * `ENAMETOOLONG` 原样抛出（`lib/index.js` 的 `rejectLegacyFlatArtifact`）。
+ */
+export const AI_LEGACY_FLAT_PROBE_SUFFIX_BYTES = '.jsonl.zstd'.length
+
+/**
+ * 隐藏会话 id 变成**文件名**之后的字节预算（R14 C-03，VB-N1 修正）。
  *
  * 会话落盘的目录名是上游 `session-persistence-jsonl` 的 `encodeSegment(sessionId)`
  * （`format.ts:198`）。多数文件系统（ext4/APFS/NTFS）单个名字段的上限是 **255 字节**，
  * 超了就 `ENAMETOOLONG` —— 而该错误**不会**浮到调用方：`run` 照常 resolve、磁盘上一个
  * 文件都没有（隐藏会话的多轮上下文重启即失、诊断包里也看不到它）。真机实测
  * （app_id=20 + 14 个中文字符的账号名）：`files under root: 0` 且 `run => resolved`。
+ *
+ * **有效预算不是 255 而是 244**（R14 VB-N1 的修正）：目录名之上还有一次
+ * {@link AI_LEGACY_FLAT_PROBE_SUFFIX_BYTES} 的 legacy 探测（见上），它拼出的 basename
+ * 比目录名长 11 字节，**只要会话根里存在任意项目目录**（生产的常态：用户有工作区就会
+ * 有项目目录）就会对每一轮都 `ENAMETOOLONG`；空 root 只是"第一轮成功、第二轮失败"的
+ * 更隐蔽形态。所以预算 = `255 − 11 = 244`：
+ *
+ *	encoded = 50 + |app_id| + 14 × (账号名里的非安全码元数)
+ *	244 ⇒ app_id=20 时 12 个中文字符（238B）仍内联、13 个（252B）必须换摘要形态
+ *
+ * **为什么这个收窄没有回归**：245..255 这一段**从来就落不下盘**（legacy 探测必然先抛），
+ * 也就是说"修复前能落盘的账号"= 内联名 ≤ 244 的那些 —— 新预算对它们逐字不变，
+ * 上下文不断档；换形态的账号本来就没有可续的历史（它们的目录名连 `mkdir` 都做不出来）。
  */
-export const AI_HIDDEN_SESSION_ID_MAX_BYTES = 255
+export const AI_HIDDEN_SESSION_ID_MAX_BYTES = 255 - AI_LEGACY_FLAT_PROBE_SUFFIX_BYTES
 
 /**
  * 超预算时账号段换用的**定长摘要**标签。
@@ -167,7 +190,8 @@ export const AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG = ':u32:'
  * 非安全字符**只可能**是 `:`（前缀）、`#`（分隔符）、`@`（服务端哈希分隔符）与内联账号段
  * 里的 `~`（转义标记本身）。这正是 C-03 的算术：账号名里每个非 `[A-Za-z0-9._-]` 字符
  * 在内联段里先变成 `~<HEX>~`（6 字符），编码时两个 `~` 各自再涨 4 字节
- * ⇒ **每个字符占 14 字节文件名**（真机实测 13 个中文字符 = 252B 落得下、14 个 = 266B 落不下）。
+ * ⇒ **每个字符占 14 字节文件名**（真机实测：app_id=20 时 12 个中文字符 = 238B 落得下、
+ * 13 个 = 252B 在 255 之下**却落不下**——见 {@link AI_HIDDEN_SESSION_ID_MAX_BYTES} 的 244 口径）。
  *
  * 与上游的**逐码元**口径一致（`charCodeAt` 而不是码点）：星光平面字符会被算成两个码元、
  * 各 5 字节 —— 我们要的是"上界成立"，不是"再实现一遍编码器"。
@@ -214,9 +238,10 @@ export function hiddenSessionScopeDigest(scope: AiChatScope): string {
  * 作用域（正是本函数要杜绝的缺陷），超长 id 会让持久化**静默不落盘**（R14 C-03）——所以这
  * 里抛错或换形态，而不是悄悄产出一个"看起来能用"的 id。
  *
- * 长度预算（R14 C-03）：先按内联形态算 `encodeSegment` 后的字节数，超
- * {@link AI_HIDDEN_SESSION_ID_MAX_BYTES} 就换成定长摘要段；换完再超（结构上不可达：
- * 最大 app_id 63 + 定长 37 = 105）则**抛错**，绝不放一个落不下盘的 id 出去。
+ * 长度预算（R14 C-03 + VB-N1）：先按内联形态算 `encodeSegment` 后的字节数，超
+ * {@link AI_HIDDEN_SESSION_ID_MAX_BYTES}（= 255 − 11 的 legacy 探测后缀）就换成定长摘要
+ * 段；换完再超（结构上不可达：最大 app_id 63 + 定长 37 = 105）则**抛错**，绝不放一个
+ * 落不下盘的 id 出去。
  * @param scope - 当前账号 + 服务端地址。
  * @param appId - 已校验的 app_id（平台域名标签形态）。
  * @returns 会话 id（可用作会话键与服务端归因）。
@@ -491,12 +516,36 @@ export async function handleAiChat(
   return { kind: 'sse', status: 200, frames }
 }
 
+/**
+ * 执行面"**上一个活体还在收尾**"的显式错误名（R14 VB-N3）。
+ *
+ * 桌面包的 `app-ai-runner.ts` 导出 `AppAiSessionReleasePendingError`（带稳定 `code` =
+ * `app_ai_session_release_pending`）。协议包**按 `name` 认它**而不是 import 那个类：依赖
+ * 方向是桌面包 → 协议包，反向 import 会成环；两处口径由桌面包的 `app-ai-release-gate.spec.ts`
+ * 用**真** `handleAiChat` + **真** 那个错误类对拍（不是钉字符串）。
+ *
+ * 为什么值得一条独立分支：修复前这种形态表现为**永久挂起**（应用页一直转圈、日志里什么都
+ * 没有）；现在它是**有界失败**，且文案明确指向"上一次收尾还没完成"——把"AI 不可用"与
+ * "这个会话正在关闭中"分开，是这条缺陷唯一的可诊断出口。
+ */
+const RELEASE_PENDING_ERROR_NAME = 'AppAiSessionReleasePendingError'
+
 /** 把 runner 的失败映射成契约里的错误码（不泄漏上游细节）。 */
 function mapTurnFailure(cause: unknown, warn: (message: string) => void): { kind: 'json', status: number, body: Record<string, unknown> } {
   const message = cause instanceof Error ? cause.message : String(cause)
   warn(`pico-wasm-apps-host: an application AI turn failed (${message})`)
   if (cause instanceof Error && cause.name === 'AbortError') {
     return { kind: 'json', status: 499, body: { error: { code: 'ai_cancelled', message: 'the turn was cancelled' } } }
+  }
+  if (cause instanceof Error && cause.name === RELEASE_PENDING_ERROR_NAME) {
+    // 信封 code 仍是冻结集合里的 `app_ai_unavailable`（§21.2 的码集不改；新增码会让客户端
+    // 把它折叠回同一个码，只是多一条两端要同步的契约）。可区分性由**文案**与宿主的 warn
+    // 日志（带 `app_ai_session_release_pending`）承担。
+    return {
+      kind: 'json',
+      status: 503,
+      body: { error: { code: 'app_ai_unavailable', message: 'the previous AI turn on this application is still shutting down; retry in a moment' } },
+    }
   }
   if (/insufficient|balance/iu.test(message)) {
     return { kind: 'json', status: 402, body: { error: { code: 'ai_balance_insufficient', message: 'the account balance is insufficient for AI usage' } } }

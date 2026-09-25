@@ -655,17 +655,26 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
 
   // 已废除的测试缝：**任何语境**下被外部设置都必须 exit 2（新语义；旧语义只在 CI 下拒绝，
   // 既放过了本地攻击、又让判据在 CI 下自杀 —— 两个方向都要钉住）。
+  //
+  // **取值矩阵里有空串**（第十四轮 V14-A 的 VA-02-F1，P3）：旧实现把 `''` 当成"没设置"，
+  // 于是"任何语境下都不得设置"这句自述对空串不成立（实测 EXIT=0 + 通过行）。空串同样是
+  // "被设置"，必须一样拒绝 —— 这一格由**第二个守卫**独立钉住（守卫自己那份自检在
+  // `check-doc-claims.mjs` 里，两处同时被改才会静默）。
   for (const [label, baseEnv] of [['CI=true', { ...process.env, CI: 'true' }], ['无 CI', noCiEnv]]) {
-    const seamSet = spawnSync(process.execPath, [guard], {
-      cwd: root,
-      env: { ...baseEnv, [VERDICT_SEAM_ENV]: '1' },
-      encoding: 'utf8',
-    })
-    check(seamSet.status === 2,
-      `文档数字守卫：外部设置已废除的测试缝 ${VERDICT_SEAM_ENV}（${label}）必须 exit 2，`
-      + `实际 exit=${seamSet.status}；stderr=${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
-    check(seamSet.stderr.includes('测试缝已废除') && seamSet.stderr.includes(VERDICT_SEAM_ENV),
-      `文档数字守卫：拒绝文案必须点名已废除的开关（${label}）：${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
+    for (const seamValue of ['1', '']) {
+      const shown = JSON.stringify(seamValue)
+      const seamSet = spawnSync(process.execPath, [guard], {
+        cwd: root,
+        env: { ...baseEnv, [VERDICT_SEAM_ENV]: seamValue },
+        encoding: 'utf8',
+      })
+      check(seamSet.status === 2,
+        `文档数字守卫：外部设置已废除的测试缝 ${VERDICT_SEAM_ENV}=${shown}（${label}）必须 exit 2，`
+        + `实际 exit=${seamSet.status}；stderr=${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
+      check(seamSet.stderr.includes('测试缝已废除') && seamSet.stderr.includes(VERDICT_SEAM_ENV),
+        `文档数字守卫：拒绝文案必须点名已废除的开关（${label}，取值 ${shown}）：`
+        + `${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
+    }
   }
 }
 
