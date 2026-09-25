@@ -14,10 +14,11 @@
  *  - R17B-05（P2）Windows 保留设备名在**写侧**拒绝（运行时判据不动，已存在的那一份仍可列出/卸载）。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import AdmZip from 'adm-zip'
 import { gzipSync } from 'node:zlib'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -340,6 +341,19 @@ describe('R17B-03：换入崩溃窗口（旧内容副本移出清扫面 + 自愈
     await writeFile(join(orphan2, 'SKILL.md'), skillMd('notes', 'ORPHAN-2'))
     expect(await recoverInterruptedSkillSwaps(skillsDir, { onlyName: 'notes' })).toEqual([])
     expect(existsSync(orphan2)).toBe(true)
+  })
+
+  it('位置契约（源码判据）：备份落在 `.skill-tmp/backup-<name>-<ts>`，**不在** staging 之内', () => {
+    // 为什么这条读源码：备份只在盘上存在几毫秒（两处 rename 之间），行为用例观测不到
+    // "崩溃瞬间它在哪"；而**在哪**正是这一条 finding 的全部内容 —— 放在 `<staging>/backup`
+    // 时它的祖先是 `install-*`，会被 24h 清扫连整目录删掉（旧内容的唯一副本）。
+    // 变异验证：把 `backupDir` 改回 `join(staging, 'backup')` ⇒ 这条红。
+    const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
+    expect(source).toContain('`${BACKUP_PREFIX}${name}-${Date.now()}`')
+    expect(source).toContain('const backupDir = join(tempRoot,')
+    expect(source).not.toContain("const backupDir = join(staging, 'backup')")
+    // 清扫器的判据只收 `install-*`（`backup-*` 天然免疫）
+    expect(source).toContain("if (!entry.name.startsWith('install-')) continue")
   })
 
   it('全量自愈有年龄闸门：**新鲜**的别名字副本不动（不与正在跑的换入抢）', async () => {
