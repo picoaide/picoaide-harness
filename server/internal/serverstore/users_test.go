@@ -132,7 +132,7 @@ func TestDeleteUserWithReferencedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := DeleteUser(db, id); err != nil {
+	if _, err := DeleteUser(db, id); err != nil {
 		t.Fatalf("DeleteUser with referenced rows failed: %v", err)
 	}
 	// 用户及其全部关联行都应消失
@@ -173,7 +173,7 @@ func TestDeleteUserCascadesSharedGrants(t *testing.T) {
 			t.Fatalf("seed app_grants(%s): %v", kind, err)
 		}
 	}
-	if err := DeleteUser(db, id); err != nil {
+	if _, err := DeleteUser(db, id); err != nil {
 		t.Fatalf("DeleteUser with shared grants failed: %v", err)
 	}
 	// P2:三张授权表已合并为 app_grants(kind 区分技能/智能体)。
@@ -206,10 +206,10 @@ func TestDeleteUserLastAdminGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := DeleteUser(db, aID); err != nil {
+	if _, err := DeleteUser(db, aID); err != nil {
 		t.Fatalf("delete adminA with adminB left: %v", err)
 	}
-	if err := DeleteUser(db, bID); !errors.Is(err, ErrLastAdmin) {
+	if _, err := DeleteUser(db, bID); !errors.Is(err, ErrLastAdmin) {
 		t.Fatalf("last admin delete err = %v, want ErrLastAdmin", err)
 	}
 	if _, err := GetUserByUsername(db, "adminB"); err != nil {
@@ -246,7 +246,7 @@ func TestDeleteUserLastAdminConcurrent(t *testing.T) {
 		go func(i int, id int64) {
 			defer wg.Done()
 			<-start
-			errs[i] = DeleteUser(db, id)
+			_, errs[i] = DeleteUser(db, id)
 		}(i, id)
 	}
 	close(start)
@@ -366,7 +366,7 @@ func TestDeleteUserClearsDeptLeadership(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 删除主管
-	if err := DeleteUser(db, leadID); err != nil {
+	if _, err := DeleteUser(db, leadID); err != nil {
 		t.Fatalf("delete leader user: %v", err)
 	}
 	var leaderID int64

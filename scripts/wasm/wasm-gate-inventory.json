@@ -61,18 +61,24 @@
     ]
   },
   "capabilityAllowlist": {
-    "why": "W-1b 的修法：残留判据此前判的是 2026-09-19 那份词汇表，换个名字重新实现同一能力（按 Host 分发 + 一次性换票）完全隐形。这里登记的是『结构指纹命中但确认与旧模型无关』的文件，每条必须带理由、必须真实存在、必须仍然命中（否则是陈旧登记 ⇒ 红），且条数 ≤ budgets.capabilityAllowlist。默认空。",
-    "entries": []
+    "why": "W-1b 的修法：残留判据此前判的是 2026-09-19 那份词汇表，换个名字重新实现同一能力（按 Host 分发 + 一次性换票）完全隐形。这里登记的是『结构指纹命中但确认与旧模型无关』的文件，每条必须带理由、必须真实存在、必须仍然命中（否则是陈旧登记 ⇒ 红），且条数 ≤ budgets.capabilityAllowlist。当前 1 条（上限 = budgets.capabilityAllowlist = 1）：2026-09-25 R15C-R-03 的『已废除配置启动期提示』登记表，见下 entries。",
+    "entries": [
+      {
+        "file": "server/cmd/server/legacy_config.go",
+        "capability": "legacy-app-origin-env",
+        "reason": "R15C-R-03（审计 2026-09-25，P2）的『已废除配置启动期提示』登记表。该文件逐字保留 `PICOAI_APPS_BASE_DOMAIN`（env）与 `wasm.apps_base_domain`（settings）这两个**已废除**的键名，唯一用途是启动期 `os.LookupEnv`/`GetSetting` 检测残留、并打印可直接执行的清理命令 —— 键名在这里出现是**判据本身的要求**（键名写成拼接/运行时合成会让检测失效，正是门禁禁止的规避手法）。它不实现任何旧模型能力：没有按 Host 反查 app_id、没有子域门控、没有换票 Cookie、没有入口路由；对外应用子域与匿名面已随 W4 删除。与 `server/internal/wasmapp/appcfg` 的历史取值兼容读同性质（旧名必须存在才有意义）。"
+      }
+    ]
   },
   "budgets": {
     "schema": "wasm-residue-budgets/1",
     "why": "W-3 的修法：上限此前直接取自环境变量（WASM_RESIDUE_CONTRACT_BUDGET=999 能把 B=36>34 的红翻成绿）。现在上限的唯一真源是本文件；环境变量只允许**收紧**（更小的正整数），取值非法或大于本文件的值一律 fail-loud。放宽上限 = 改这里的数并写理由 —— 一个必须进 diff、可被评审的有意识动作。",
-    "contract": { "value": 34, "reason": "B 桶（契约型保留）实测构成：client 13 + webadmin 7 + appcfg.go/inherit.go 14 = 34；零余量（多一条即红）" },
-    "ann": { "value": 66, "reason": "ANN 桶（带删除/废弃标注的注释）实测 65（原 64；2026-09-23 把 §8.4 明列的已删符号 `CheckOrigin` 补进残留词汇表 ⇒ 注释里的提及 +1），留 1 条余量" },
+    "contract": { "value": 39, "reason": "B 桶（契约型保留）实测构成：client 13 + webadmin 7 + appcfg.go/inherit.go 14 + **legacy-config 契约模块 5**（2026-09-25 R15C-R-03：`server/cmd/server/legacy_config.go` 的已废除键名逐字表 —— 两条键 × 声明处 + 清理命令各 1 处；该文件按『拒绝/忽略清单』口径整文件声明为契约面，见 CONTRACT_MODULES 的 legacy-config 条目与其独立预算 budgets.contractModules） = 39；零余量（多一条即红）" },
+    "ann": { "value": 66, "reason": "ANN 桶（带删除/废弃标注的注释）实测 66（原 65；2026-09-23 把 §8.4 明列的已删符号 `CheckOrigin` 补进残留词汇表 ⇒ 注释里的提及 +1，留 1 条余量到 66）。**不需要**再上调：2026-09-25 R15C-R-03 的 `server/cmd/server/legacy_config.go` 表头注释虽然也是「已废除」标注，但该文件已按『拒绝/忽略清单』整文件声明为**契约模块**（bucketOf 里契约模块优先于 ANN）⇒ 那一条计入 B 而不是 ANN（实测 ANN 仍为 66）" },
     "whitelisted": { "value": 520, "reason": "C 桶（夹具/历史文档/不可变迁移）实测 489（479 + 原 D 桶前缀豁免的 5 处随包技能文档 + CheckOrigin 词汇 +5）。C 的**主判据是资格规则**（测试文件形态 / 文档 / 不可变迁移 / testdata 夹具），上限只拦『成批塞入文档目录』；留 ~6% 余量给记录面的正常增长，避免把别人的文档提交打成假红" },
     "derived": { "value": 0, "reason": "D 桶（纯生成物）不再有整目录前缀豁免：只有 isGenerated 命中的产物才算，且必须逐文件登记（本文件 capabilityAllowlist 同级的 derivedAllowance）。当前实测 0 处 ⇒ 上限 0" },
-    "contractModules": { "appcfg": 14 },
-    "capabilityAllowlist": 0
+    "contractModules": { "appcfg": 14, "legacy-config": 5 },
+    "capabilityAllowlist": 1
   },
   "derivedAllowance": {
     "why": "生成物里出现旧模型字面量时，逐文件登记 + 说明（而不是按 server/demoapps/**、server/skills/** 整目录豁免 —— 那正是 W-3a 把业务残留藏进 server/demoapps/ 就能 A=0 的原因）。",

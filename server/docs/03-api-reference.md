@@ -49,8 +49,8 @@
 | POST | `/api/server/admin/login/mfa` | 两步登录第二步(0057,公开):body `{mfa_ticket, code}`(TOTP 6 位码)→ 与一步登录相同响应 `{csrf_token, user, must_change_password}`;挑战 5 分钟有效、失败 ≥5 次作废、一次性消费 |
 | POST | `/api/server/admin/me/password` | 改自己密码(0057):body `{old_password, new_password}`;校验旧密码;成功后吊销其全部 api_tokens 与 admin_sessions(含当前),webadmin 强制登出 |
 | GET | `/api/server/admin/me/mfa` | 当前管理员 MFA 状态 `{enabled}`(0057) |
-| POST | `/api/server/admin/me/mfa/enable` | 开启 MFA(0057,第一步):body `{password}`(主密码)→ `{secret, otpauth_url, ticket}`(密钥仅此一次下发;60s 内完成 verify) |
-| POST | `/api/server/admin/me/mfa/verify` | 开启 MFA(0057,第二步):body `{ticket, code}` 验证通过 → 启用并吊销该管理员其他已登录会话(当前保留) |
+| POST | `/api/server/admin/me/mfa/enable` | 开启 MFA(0057,第一步):body `{password}`(主密码)→ `{secret, otpauth_url, ticket}`(密钥仅此一次下发;60s 内完成 verify)。**已开启时拒绝**:409 `MFA_ALREADY_ENABLED`(2026-09-25 R15C-02;要换验证器必须先 disable,不能只凭主密码替换第二因子) |
+| POST | `/api/server/admin/me/mfa/verify` | 开启 MFA(0057,第二步):body `{ticket, code}` 验证通过 → 启用并吊销该管理员其他已登录会话(当前保留)。写入侧守卫:该挑战签发后账号若已开启 MFA(并发/陈旧 ticket),同样 409 `MFA_ALREADY_ENABLED` 且既有密钥一字不动 |
 | POST | `/api/server/admin/me/mfa/disable` | 关闭 MFA(0057):body `{password, code}` 主密码+当前动态码双验 → 吊销其他会话(当前保留) |
 | PUT | `/api/server/admin/users/:id/mfa` | 重置(关闭)其他管理员的 MFA(0057,`PermUserWrite`):清空密钥并吊销其全部会话;不能对自己操作 |
 | GET | `/api/server/admin/auth/methods` | 登录方式发现(公开) |
@@ -59,14 +59,14 @@
 | GET | `/api/server/admin/users` | 用户列表(附带 `role`、余额字段与 `monthly_usage`/`monthly_cost` 本月用量/费用。**2026-09-11 起不再含 `quota_tokens`/`quota_money`** —— 员工配额已下线) |
 | POST | `/api/server/admin/users` | 创建用户 `{username, password?, display_name?, email?, role?\|is_admin?, source?}`(role ∈ super_admin/auditor/user;is_admin 为兼容别名) |
 | PUT | `/api/server/admin/users/:id` | 更新用户(改密/角色/启用停用;改密/降权/禁用自动吊销 token)。⚠️ **`quota_tokens`/`quota_money`/`quota_clear`/`quota_money_clear` 已被 handler 显式忽略:请求照常 200,但零写入**(2026-09-11 配额下线;列与这些字段保留只是为了不砸旧客户端)。要控额度请用余额:`POST /users/:id/balance` 与 `PUT /balance` |
-| DELETE | `/api/server/admin/users/:id` | 删除用户 |
+| DELETE | `/api/server/admin/users/:id` | 删除用户。**语义 = 抹除**(2026-09-25 R15C-01):同一事务内清除其 api_tokens、用量明细与**日/月汇总**(`usage`/`usage_daily`/`usage_monthly`)、资金流水与发放锚(`balance_ledger`/`balance_grant_items`)、admin_sessions、组归属与用户级授权,使 `SUM(balance_ledger.amount) == SUM(users.balance_money)` 与「同月同用户 明细==日账==月账」两条不变量在删除后仍成立。被抹除的金额写入审计 `user_delete` 明细(0048 哈希链),不可恢复 |
 | PUT | `/api/server/admin/users/:id/department` | 设置用户部门归属(2026-09 多部门):body `{group_ids:[n1,n2,...]}`(空=清空);兼容旧 `{group_id:n}`。授权 = 全部所属部门+祖先链同时生效 |
 | GET | `/api/server/admin/users/:id/groups` | 用户组/部门列表 |
 | GET | `/api/server/admin/departments` | 部门树(`parent`/`leader`;`budget_money` 已随部门预算下线) |
 | POST | `/api/server/admin/departments` | 新建部门 |
 | PUT | `/api/server/admin/departments/:id` | 更新部门(parent/leader;`budget_money` 请求体里该字段被忽略) |
 | DELETE | `/api/server/admin/departments/:id` | 删除部门(须无成员/子部门/授权引用) |
-| GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 |
+| GET | `/api/server/admin/users/:id/tokens` | 用户 token 列表 `{tokens,total,truncated}`。**有界返回**（2026-09-25 R15C-R-01）：最多 `TokenListMax=500` 条（id 倒序，最近的在前），`total` 为该用户令牌总行数、`truncated=total>len(tokens)`；过期行由登录路径的 `PurgeExpiredTokens` 顺带回收（走 `idx_tokens_expires`），不再永久堆积 |
 | POST | `/api/server/admin/tokens/:id/revoke` | 吊销指定 token |
 | GET | `/api/server/admin/usage` | 用量汇总(按用户/模型/时间;`group=user` 展示用户名) |
 | GET | `/api/server/admin/server-info` | 版本/数据库驱动(PG)/迁移版本/运行环境摘要 + `update_check`(实时更新服务器版本检查:current/latest/update_available/image_tag/manifest_url,失败为 null) |

@@ -216,10 +216,14 @@ var searchPathGuardPackages = map[string]searchPathPkgClass{
 	// R14-K（D-02）：`collectDBStats` 的表名/语句已改成字面量（原先是
 	// `SELECT COUNT(*) FROM " + t` 的动态形态，既逃逸 SQL 尺子又读自 shadow），
 	// ⇒ 本包从 no-family-sql 升为 family-bearing，函数逐条登记在下方 §③。
-	"internal/serverauth":               searchPathPkgFamilyBearing,
-	"internal/sharedskills":             searchPathPkgNoFamilySQL,
-	"internal/skillmanifest":            searchPathPkgNoFamilySQL,
-	"internal/telemetry":                searchPathPkgNoFamilySQL,
+	"internal/serverauth":    searchPathPkgFamilyBearing,
+	"internal/sharedskills":  searchPathPkgNoFamilySQL,
+	"internal/skillmanifest": searchPathPkgNoFamilySQL,
+	"internal/telemetry":     searchPathPkgNoFamilySQL,
+	// R15C-R-01 ①（2026-09-25）：令牌过期回收调度器。包内**没有**任何族内关系 SQL
+	// （它只调 serverstore.PurgeExpiredTokens），按 no-family-sql 登记；新增包必须
+	// 在这里登记，否则本用例红（R13-GH3 的"面"守卫）。
+	"internal/tokenretention":           searchPathPkgNoFamilySQL,
 	"internal/updatecheck":              searchPathPkgNoFamilySQL,
 	"internal/usageretention":           searchPathPkgNoFamilySQL,
 	"internal/util":                     searchPathPkgNoFamilySQL,

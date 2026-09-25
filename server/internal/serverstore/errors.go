@@ -29,6 +29,11 @@ var (
 	// chat|embedding|search 过滤)。**必须显式失败**而不是退化成不过滤 ——
 	// 后者会让统计徽标给出偏大的数字,与明细表口径不一致(静默错数)。
 	ErrUnsupportedFilter = errors.New("unsupported filter")
+	// ErrMFAAlreadyEnabled 表示目标用户**已开启** MFA,而调用方试图登记一份
+	// 新的 TOTP 配置(审计 2026-09-25 R15C-02,P1):第二因子只能由
+	// disableMyMFA(主密码 + 当前动态码双验)先移除,再重新登记 —— 不允许任何
+	// 路径用更弱的凭据把它**替换**掉。见 SetUserMFA 的写入侧守卫。
+	ErrMFAAlreadyEnabled = errors.New("mfa already enabled")
 )
 
 // ErrDepartmentInUse guards department deletion when members, children or
