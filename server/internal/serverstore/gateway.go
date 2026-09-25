@@ -1032,12 +1032,24 @@ type modelPriceInputs struct {
 }
 
 // loadModelPriceInputs 在**一个**已钉 search_path 的只读事务里读齐全部计价输入
-// （唯一实现）：价目、缓存价、峰谷窗口。
+// （**池上入口**）：价目、缓存价、峰谷窗口。
 //
 // 为什么合成一个事务而不是让每个取价函数各开一个：这三条读永远一起用（同一次
 // 记录 / 结算），合起来只多一次 BEGIN/ROLLBACK，而不是三次。峰谷窗口虽然住在
 // `settings` 表里，但它直接乘进 cost（低谷折扣），与价目同属"计价输入"，必须
 // 与价目看同一个库。
+//
+// **只允许在调用方自己没有持有事务时使用**（R14-K · D-01）：本函数会向池里
+// **再要一条连接**（`newUsageReadConn` → `db.BeginTx`）。如果调用方此刻已经握着
+// 一条事务连接，就构成"持一条、再等一条"（hold-and-wait）：池上限 = 并发数时
+// 两边互相等，而 `BeginTx(context.Background(), …)` 没有 deadline、
+// `SetConnMaxLifetime` 对**在用**连接无效 ⇒ **池不可恢复**，之后登录/健康/管理面
+// 全部一起阻塞（db.go:158 记录过同形态的真实事故：池 200 时流式回填风暴 →
+// 1490 goroutine 卡 waitForConn）。
+//
+// 持有事务时**必须**用 `loadModelPriceInputsQ(q = 该事务)` —— 语句只有一份实现，
+// 两种入口只是"谁来提供已钉的事务句柄"。机械守卫：
+// `audit_r14k_poolwait_test.go`（扫整个 `server/` 的"已开事务仍向池要连接"）。
 //
 // 失败语义与旧实现逐字一致：打不开只读事务时返回零值输入（= 不加价 / 无峰谷
 // 折扣），由调用方照旧落账 —— 不改变"计量优先于计费精度"这一既有取向。
@@ -1048,9 +1060,26 @@ func loadModelPriceInputs(db *sql.DB, providerID int64, name string) modelPriceI
 		return out
 	}
 	defer rd.Close() //nolint:errcheck // 只读事务回滚
-	out.inputPer1M, out.outputPer1M, out.offpeak = modelPricesForProviderQ(rd, db, providerID, name)
-	out.cachePer1M = modelCachePriceForProviderQ(rd, db, providerID, name)
-	out.peakWindows = loadPeakWindowsQ(rd, db)
+	return loadModelPriceInputsQ(rd, db, providerID, name)
+}
+
+// loadModelPriceInputsQ 是全部计价输入的**唯一一份语句实现**（R14-K · D-01）：
+// `q` 是调用方**已持有的、已钉 search_path** 的事务语句入口（`*sql.Tx`，或池上
+// 入口自己开的那条只读事务）。三类输入必须取自同一个 `q` —— 判据（金额）与动作
+// （落账）必须看同一个库（R13-GE · V2-2）。
+//
+// 为什么必须存在这个 Q 形态：`updateUsageTokensAtCached` 的整段（读 usage 行 →
+// 取价 → UPDATE → 结算）都在**同一个**事务里，而价目/缓存价/峰谷窗口都是族内关系、
+// 必须有 pin。第十三轮读面收口时它在事务里又调了池上入口 ⇒ 每次流式回填**恒定**
+// 多占一条连接（即使三处 TTL 缓存全部命中，因为在池上入口里 BEGIN 在前、查缓存
+// 在后）；真 PG 复现：池上限 2 / 并发 2 ⇒ 两个 goroutine 永久阻塞（lane D 探针
+// HEAD 挂起 vs 基线 17ms）。Q 形态在缓存命中时**零额外连接**（Q 函数先查缓存，
+// 命中即返回），缓存未命中时也只走那条已经持有的连接。
+func loadModelPriceInputsQ(q rowQuerier, scope *sql.DB, providerID int64, name string) modelPriceInputs {
+	var out modelPriceInputs
+	out.inputPer1M, out.outputPer1M, out.offpeak = modelPricesForProviderQ(q, scope, providerID, name)
+	out.cachePer1M = modelCachePriceForProviderQ(q, scope, providerID, name)
+	out.peakWindows = loadPeakWindowsQ(q, scope)
 	return out
 }
 

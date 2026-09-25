@@ -105,7 +105,12 @@ var searchPathRelations = map[string]searchPathRelation{
 
 	// —— 非族内：遮蔽读的后果**不静默**（可见的登录/列表/鉴权/审批失败，
 	//    或与金额链无关的独立计数）——
-	"users":                         {searchPathRelNonFamily, "遮蔽读 ⇒ 登录/余额查询可见地失败（不静默错数字）；余额正确性由 balance_ledger 族内面保证"},
+	// R14-K（D-03）勘误：原理由（"遮蔽读 ⇒ 可见地失败，不静默错数字"）只对**点查**
+	// 成立。`users` 上有一条**金额聚合读**（GetBalanceSummary 的人数/余额合计与欠款）
+	// —— 它与 shadow 的同名表完全同形，`err=nil`、数字是错的（真 PG 实测 public
+	// 2 人/100.00 vs 敌对池 3 人/9999.00）。该读已单独 pin 到 public（不得再退回裸池）；
+	// 其余 `users` 读仍是点查，non-family 的分类对它们继续成立。
+	"users":                         {searchPathRelNonFamily, "点查（按 id/username）遮蔽读 ⇒ 登录/余额查询可见地失败；**金额聚合读**（GetBalanceSummary 的 COUNT/SUM/欠款）已单独 pin（R14-K · D-03），余额正确性另有 balance_ledger 族内面保证"},
 	"groups":                        {searchPathRelNonFamily, "部门树：遮蔽读 ⇒ 列表/授权可见地报空或失败"},
 	"user_groups":                   {searchPathRelNonFamily, "部门归属：同上"},
 	"api_tokens":                    {searchPathRelNonFamily, "遮蔽读 ⇒ 鉴权可见地失败（401）"},
@@ -182,33 +187,36 @@ const (
 // 为什么逐个登记而不是"动态枚举就完了"：动态枚举只能保证"扫描当前存在的包"，
 // 保证不了"新包也在判据面内"—— 新增包不登记即红，这条才是"面"的守卫。
 var searchPathGuardPackages = map[string]searchPathPkgClass{
-	"internal/serverstore":              searchPathPkgFamilyBearing,
-	"internal/llmgateway":               searchPathPkgFamilyBearing,
-	"cmd/picoaide-app-compile":          searchPathPkgNoFamilySQL,
-	"cmd/picoaide-limits-gen":           searchPathPkgNoFamilySQL,
-	"cmd/picoaide-wasm-imports-gen":     searchPathPkgNoFamilySQL,
-	"cmd/server":                        searchPathPkgNoFamilySQL,
-	"cmd/wasm-app-headers-gen":          searchPathPkgNoFamilySQL,
-	"demoapps/board":                    searchPathPkgNoFamilySQL,
-	"demoapps/forum":                    searchPathPkgNoFamilySQL,
-	"demoapps/internal/demoapp":         searchPathPkgNoFamilySQL,
-	"demoapps/showcase":                 searchPathPkgNoFamilySQL,
-	"internal/agentshare":               searchPathPkgNoFamilySQL,
-	"internal/appstore":                 searchPathPkgNoFamilySQL,
-	"internal/archiveutil":              searchPathPkgNoFamilySQL,
-	"internal/auditretention":           searchPathPkgNoFamilySQL,
-	"internal/balance":                  searchPathPkgNoFamilySQL,
-	"internal/bootstrap":                searchPathPkgNoFamilySQL,
-	"internal/capabilities":             searchPathPkgNoFamilySQL,
-	"internal/channel":                  searchPathPkgNoFamilySQL,
-	"internal/clientrelease":            searchPathPkgNoFamilySQL,
-	"internal/connectors":               searchPathPkgNoFamilySQL,
-	"internal/llmgateway/channels":      searchPathPkgNoFamilySQL,
-	"internal/marketplace":              searchPathPkgNoFamilySQL,
-	"internal/portal":                   searchPathPkgNoFamilySQL,
-	"internal/reports":                  searchPathPkgNoFamilySQL,
-	"internal/router":                   searchPathPkgNoFamilySQL,
-	"internal/serverauth":               searchPathPkgNoFamilySQL,
+	"internal/serverstore":          searchPathPkgFamilyBearing,
+	"internal/llmgateway":           searchPathPkgFamilyBearing,
+	"cmd/picoaide-app-compile":      searchPathPkgNoFamilySQL,
+	"cmd/picoaide-limits-gen":       searchPathPkgNoFamilySQL,
+	"cmd/picoaide-wasm-imports-gen": searchPathPkgNoFamilySQL,
+	"cmd/server":                    searchPathPkgNoFamilySQL,
+	"cmd/wasm-app-headers-gen":      searchPathPkgNoFamilySQL,
+	"demoapps/board":                searchPathPkgNoFamilySQL,
+	"demoapps/forum":                searchPathPkgNoFamilySQL,
+	"demoapps/internal/demoapp":     searchPathPkgNoFamilySQL,
+	"demoapps/showcase":             searchPathPkgNoFamilySQL,
+	"internal/agentshare":           searchPathPkgNoFamilySQL,
+	"internal/appstore":             searchPathPkgNoFamilySQL,
+	"internal/archiveutil":          searchPathPkgNoFamilySQL,
+	"internal/auditretention":       searchPathPkgNoFamilySQL,
+	"internal/balance":              searchPathPkgNoFamilySQL,
+	"internal/bootstrap":            searchPathPkgNoFamilySQL,
+	"internal/capabilities":         searchPathPkgNoFamilySQL,
+	"internal/channel":              searchPathPkgNoFamilySQL,
+	"internal/clientrelease":        searchPathPkgNoFamilySQL,
+	"internal/connectors":           searchPathPkgNoFamilySQL,
+	"internal/llmgateway/channels":  searchPathPkgNoFamilySQL,
+	"internal/marketplace":          searchPathPkgNoFamilySQL,
+	"internal/portal":               searchPathPkgNoFamilySQL,
+	"internal/reports":              searchPathPkgNoFamilySQL,
+	"internal/router":               searchPathPkgNoFamilySQL,
+	// R14-K（D-02）：`collectDBStats` 的表名/语句已改成字面量（原先是
+	// `SELECT COUNT(*) FROM " + t` 的动态形态，既逃逸 SQL 尺子又读自 shadow），
+	// ⇒ 本包从 no-family-sql 升为 family-bearing，函数逐条登记在下方 §③。
+	"internal/serverauth":               searchPathPkgFamilyBearing,
 	"internal/sharedskills":             searchPathPkgNoFamilySQL,
 	"internal/skillmanifest":            searchPathPkgNoFamilySQL,
 	"internal/telemetry":                searchPathPkgNoFamilySQL,
@@ -277,6 +285,10 @@ var searchPathCrossPackageInventory = map[string]r13gePinMode{
 	"internal/llmgateway.loadUpstreamsDB":             r13gePinned,
 	"internal/llmgateway.syncedModelNames":            r13geViaCaller,
 	"internal/llmgateway.providerModelConfigSnapshot": r13geViaCaller,
+	// R14-K（D-02）：管理端「服务器信息」页的族内关系行数统计（settings /
+	// gateway_providers / models / usage / audit_logs）。语句是字面量，每条读经
+	// serverstore.NewUsageReadConn（唯一 pin 实现）各自开一个已钉只读事务。
+	"internal/serverauth.collectDBStats": r13gePinned,
 }
 
 // searchPathCrossPackageOwners 给包外每一个 via-caller 登记"谁钉的"。

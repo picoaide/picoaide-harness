@@ -380,6 +380,7 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"RemoveMissingProviderModels":          r13gePinned,    // gateway.go
 	"SetSetting":                           r13gePinned,    // settings.go
 	"SetUsageAppID":                        r13gePinned,    // wasm_app_opens.go
+	"SetUsageAppIDVerified":                r13gePinned,    // wasm_app_opens.go —— 存在性校验与写入同一已钉事务（R14-K · D-04）
 	"SetUsageProvider":                     r13gePinned,    // usage.go
 	"SyncProviderModel":                    r13gePinned,    // gateway.go
 	"UpdateModel":                          r13gePinned,    // gateway.go
@@ -413,6 +414,7 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"GetGatewayProviderTx":              r13geViaCaller, // gateway.go
 	"GetModelTx":                        r13geViaCaller, // gateway.go
 	"SetSettingTx":                      r13geViaCaller, // settings.go
+	"setUsageAppIDTx":                   r13geViaCaller, // wasm_app_opens.go —— SetUsageAppID / SetUsageAppIDVerified（均已钉）
 	"SyncProviderModelsTx":              r13geViaCaller, // gateway.go
 	"UpdateGatewayProviderTx":           r13geViaCaller, // gateway.go
 	"addModel":                          r13geViaCaller, // gateway.go
@@ -452,6 +454,7 @@ var r13geViaCallerOwners = map[string]string{
 	"GetGatewayProviderTx":    "GetGatewayProvider（已钉只读事务）",
 	"GetModelTx":              "GetModel（已钉只读事务）",
 	"SetSettingTx":            "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
+	"setUsageAppIDTx":         "SetUsageAppID（withUsageSearchPath）/ SetUsageAppIDVerified（同一已钉事务内先查 apps 再写）",
 	"DeleteModelTx":           "DeleteModel（usageWriteTx）/ llmgateway admin 的显式事务",
 	"SyncProviderModelsTx":    "SyncProviderModel 的调用方事务（llmgateway admin，已钉）",
 	"UpdateGatewayProviderTx": "llmgateway admin 的 provider 更新事务（usageWriteTx 同源）",

@@ -144,6 +144,19 @@ func GetSetting(db *sql.DB, key string) (string, bool, error) {
 	return getSettingQ(rd, db, key)
 }
 
+// GetSettingTx 在**调用方已持有的、已钉 search_path 的事务**里读一个设置键
+// （`getSettingQ` 的导出形态，语句仍然只有一份实现）。缓存语义与 GetSetting
+// 逐字相同（TTL 命中不发语句）。
+//
+// 为什么必须有它（R14-K · D-01 同族）：池上入口 `GetSetting(db,…)` 在缓存未命中
+// 时会向池里**再要一条连接**；调用方若正握着一个事务连接（例如
+// `UsageWriteTx` 开出的已钉写事务里还要读旧值做审计变更明细），就是"持一条、
+// 再等一条"—— 池上限 = 并发数时自锁且不可恢复。持有事务时**只允许**用本函数。
+// 机械守卫：`audit_r14k_poolwait_test.go`。
+func GetSettingTx(tx *sql.Tx, scope *sql.DB, key string) (string, bool, error) {
+	return getSettingQ(tx, scope, key)
+}
+
 // getSettingQ 是 GetSetting 的语句实现（唯一一份；q 为已钉事务的语句入口）。
 func getSettingQ(q rowQuerier, scope *sql.DB, key string) (string, bool, error) {
 	if v := settingsCache.get(scope, "s:"+key); v != nil {

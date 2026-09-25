@@ -856,17 +856,27 @@ func GetBalanceSummary(db *sql.DB, now time.Time) (*BalanceSummary, error) {
 	} else {
 		return nil, err
 	}
-	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(balance_money),0) FROM users
+	// R14-K（D-03）：`users` 的**两条金额聚合读**（人数/余额合计、欠款）必须走已钉
+	// 只读事务。登记表把 `users` 归 non-family 的理由是"遮蔽读 ⇒ 登录/余额查询
+	// **可见地**失败（不静默错数字）"——那条理由对**点查**（按 id/username）成立，
+	// 对**聚合读**不成立：这条 `SELECT COUNT(*), COALESCE(SUM(balance_money),0)
+	// FROM users` 与 shadow 的同名表完全同形，`err=nil`、数字是错的（真 PG 实测：
+	// public `2 人 / 100.00` vs 敌对池 `3 人 / 9999.00`）。本函数其余读
+	// （settings / 发放台账 / 发放覆盖）从第十三轮起已经是已钉事务 ⇒ 不修就是
+	// "**一个响应里两组数字来自两个库**"（半真半假比整块读错更难发现）。
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(balance_money),0) FROM users
 WHERE status = 1 AND role = ?`, RoleUser).Scan(&out.Users, &out.Total); err != nil {
+			return err
+		}
+		// 欠款(余额 < 0)单独聚合:欠款额按**正数**输出,与 total_balance 分开看。
+		return tx.QueryRow(`SELECT COUNT(*), COALESCE(-SUM(balance_money),0) FROM users
+WHERE status = 1 AND role = ? AND balance_money < 0`, RoleUser).
+			Scan(&out.OverdrawnUsers, &out.OverdrawnDebt)
+	}); err != nil {
 		return nil, err
 	}
 	out.Total = QuantizeMoney(out.Total)
-	// 欠款(余额 < 0)单独聚合:欠款额按**正数**输出,与 total_balance 分开看。
-	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(-SUM(balance_money),0) FROM users
-WHERE status = 1 AND role = ? AND balance_money < 0`, RoleUser).
-		Scan(&out.OverdrawnUsers, &out.OverdrawnDebt); err != nil {
-		return nil, err
-	}
 	out.OverdrawnDebt = QuantizeMoney(out.OverdrawnDebt)
 	return out, nil
 }

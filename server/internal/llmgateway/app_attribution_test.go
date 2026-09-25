@@ -58,6 +58,9 @@ func TestSanitizeUsageAppIDIsNarrowerThanRegistry(t *testing.T) {
 func TestBindUsageAppIDDoesNotTouchBilling(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
+	// R14-K（D-04）：归因现在要求 app_id 指向真实存在、未软删的 wasm 应用
+	// ⇒ 判据本身必须先播一个（否则测的是"应用不存在"那条路径）。
+	seedAttributionApp(t, db, "notes")
 	uid := createAttributionUser(t, db, "u-bill")
 	id, err := serverstore.RecordUsageKind(db, uid, "demo-model", 100, 50, "chat")
 	if err != nil {
@@ -110,6 +113,7 @@ func TestBindUsageAppIDSkipsInvalidAndEmpty(t *testing.T) {
 func TestBindUsageAppIDIgnoresSelfDeclaredHeader(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
+	seedAttributionApp(t, db, "notes") // R14-K（D-04）：正对照需要一个真实应用
 	uid := createAttributionUser(t, db, "u-self")
 	id, err := serverstore.RecordUsageKind(db, uid, "demo-model", 1, 1, "chat")
 	if err != nil {

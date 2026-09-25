@@ -35,17 +35,25 @@ import {
  * `opens-contract-parity.spec.ts` 读 Go 源码逐键对拍。
  *
  * 四条必须守住的语义：
- *   ① **账单归使用者账号，应用维度靠归因**：归因来自**会话链路** —— 隐藏会话 id 的
- *      `app:<app_id>` 前缀由上游出站头 `x-deepseek-harness-session-id` 带上，网关按前缀
- *      派生 `app_id`（§21.7⑤ 的替代路径；自报头 `X-Pico-App-Id` 发不出来，网关只识别并
- *      忽略）。链路已接线（`AI_ATTRIBUTION_WIRING === 'wired'`，三段锚点由
- *      `opens-contract-parity.spec.ts` 机械对拍）⇒ `attribution_available=false` 只表示
- *      "该窗口内没有带归因的调用"，**不得**再把成因推给客户端版本或客户环境；
+ *   ① **账单归使用者账号，应用维度靠归因 —— 而该归因是"参考口径"不是事实**：标签取自
+ *      **客户端请求头**（隐藏会话 id 的 `app:<app_id>` 前缀经上游出站头
+ *      `x-deepseek-harness-session-id` 带到网关，网关按前缀派生 `app_id`；自报头
+ *      `X-Pico-App-Id` 发不出来，网关只识别并忽略）。服务端**只校验形状与存在性**
+ *      （app_id 规则 + 该应用真实存在且未删除），**不校验调用方与该应用的关系** ⇒
+ *      任何员工都能把用量记到另一个真实存在的应用上，本面板**不得**用于对账 / 计费 /
+ *      授权（唯一可信的账是 `usage.user_id` 那一侧）。链路已接线
+ *      （`AI_ATTRIBUTION_WIRING === 'wired'`，三段锚点由 `opens-contract-parity.spec.ts`
+ *      机械对拍）⇒ `attribution_available=false` 只表示"该窗口内没有带归因的调用"，
+ *      **不得**再把成因推给客户端版本或客户环境；
  *   ② **"统计未上线" ≠ "零调用"**（§5.1c B / §21.4）：`attribution_available=false`
  *      ⇒ 渲染"统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
  *      两者数字都是 0、含义相反，合并渲染即违反 §21.4；
  *   ③ **缺后端不得显示 0**：端点 404 / 形状漂移 ⇒ 明说"服务端尚未提供"，数字显示 `—`；
  *   ④ **窗口不得静默**：显式请求 `days=`，并把服务端回显的生效窗口渲染出来。
+ *
+ * 「服务端到底校验了什么 / 没校验什么」与本文件渲染的 `AI_ATTRIBUTION_NOTE` 的一致性
+ * 由 `app-attribution-claim-parity.spec.ts` 逐条对拍（读 Go 源码 + 读那段文案，
+ * 任一侧缺证据即红）。
  *
  * 应用 AI 的完整链路（每应用一个隐藏会话、仅对话、SSE、窗口关闭即取消）见 §21.2，
  * 客户端侧实现归 L2/L3；管理端只读它的用量结果，不参与执行。

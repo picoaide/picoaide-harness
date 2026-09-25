@@ -357,17 +357,66 @@ func SanitizeUsageAppID(raw string) string {
 // 一次真实的回归风险），而 UPDATE 只碰一个**不参与计费**的列。
 //
 // 空标签 ⇒ 直接返回（不写库）：把"没有归因"表示成缺省空串，而不是写一个空 UPDATE。
+//
+// ⚠️ 本函数**不校验应用是否存在**（只做形状收窄）。网关侧的归因入口用的是
+// `SetUsageAppIDVerified`（R14-K · D-04）—— 新调用点请优先用它；本函数保留给
+// "标签已经由别的路径确认过"的场景与既有判据。
 func SetUsageAppID(db *sql.DB, id int64, appID string) error {
-	if id <= 0 {
-		return nil
-	}
 	label := SanitizeUsageAppID(appID)
-	if label == "" {
+	if id <= 0 || label == "" {
 		return nil
 	}
 	// R13-GE（V2-2 写面同族）：usage 的池上写入口经唯一实现 withUsageSearchPath。
 	return withUsageSearchPath(db, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
-		return err
+		return setUsageAppIDTx(tx, id, label)
 	})
+}
+
+// setUsageAppIDTx 是归因写入的**唯一一份语句实现**（只碰 app_id 这一列）。
+func setUsageAppIDTx(tx *sql.Tx, id int64, label string) error {
+	_, err := tx.Exec(`UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
+	return err
+}
+
+// SetUsageAppIDVerified 是**带存在性校验**的归因写入（R14-K · D-04）：在**同一个已钉
+// 事务**里先确认 label 对应一个真实存在、未软删的 `wasm_app`，再写 usage.app_id；
+// 返回 false = 该 app_id 不是本平台上的应用（调用方据此丢弃标签并留痕）。
+//
+// 它修的是什么：`usage.app_id` 的值完全来自**客户端请求头**（`x-deepseek-harness-session-id`
+// 的 `app:` 前缀），服务端原先只校验**形状** ⇒ 任何持员工 Bearer 的调用方都能把用量
+// 记到任意 app_id 上，包括**平台上根本不存在的应用**（真 PG 实测：`brand-new-not-in-db`
+// 落库成功，管理端 ai-usage 如实统计且 `attribution_available=true`）。存在性校验把
+// 这一类去掉了（标签至少指向一个真实应用）。
+//
+// **仍然不校验的**（如实登记，不要把它当可信来源）：label 所指应用与调用方的关系。
+// 员工用别人的应用是**正常业务**（应用被授权给他人使用），所以"调用者必须是 owner"
+// 是错的判据；而服务端今天**没有**可验证的会话↔应用凭据链路（隐藏会话是客户端本地
+// 概念，网关只看到一个请求头）⇒ 把用量记到**另一个真实存在**的应用上仍然可能。
+// 因此管理端的应用维度成本是**参考口径**，不得用于对账/计费/授权（`app_attribution.go`
+// 与 webadmin 面板文案由 `app-attribution-claim-parity.spec.ts` 对拍这一条）。
+func SetUsageAppIDVerified(db *sql.DB, id int64, appID string) (bool, error) {
+	label := SanitizeUsageAppID(appID)
+	if id <= 0 || label == "" {
+		return false, nil
+	}
+	written := false
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		var exists bool
+		// 只认 kind=wasm_app（技能/智能体的同名 app_id 不得成为应用归因的目标），
+		// 且已软删的行不算存在（退役应用不该继续出现在新的成本统计里）。
+		if err := tx.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM apps WHERE kind = ? AND app_id = ? AND deleted_at IS NULL)`,
+			AppKindWasmApp, label).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		written = true
+		return setUsageAppIDTx(tx, id, label)
+	})
+	if err != nil {
+		return false, err
+	}
+	return written, nil
 }

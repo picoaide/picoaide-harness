@@ -366,7 +366,14 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 		billAt = t
 	}
 	// P1-6:回填也按该行绑定的 provider 取价(前端已 SetUsageProvider)。
-	pi := loadModelPriceInputs(db, providerID, model)
+	//
+	// R14-K（D-01 · P0）：取价**必须在这个已钉事务里读**（loadModelPriceInputsQ），
+	// 不得调池上入口 loadModelPriceInputs —— 后者会在"本函数已持有 tx 连接"的同时
+	// 再向池里要一条连接（hold-and-wait）：池上限 = 并发数时全池自锁且不可恢复
+	// （真 PG 复现：池 2 / 并发 2 ⇒ 两个 goroutine 永久挂起；旧实现还让每次流式
+	// 回填的连接需求从"缓存命中 0 条额外连接"变成"恒定多 1 条"）。三类计价输入与
+	// usage 行同事务、同 pin，也保证金额与落账看同一个库（R13-GE · V2-2）。
+	pi := loadModelPriceInputsQ(tx, db, providerID, model)
 	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows)
 	// 锁住 usage 行:并发回填按行串行,避免同一行的差额被算两次。
 	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {

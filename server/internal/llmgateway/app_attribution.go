@@ -16,16 +16,35 @@ import (
 // 的隐藏会话 id 带 `app:` 前缀 ⇒ 网关按前缀派生 `app_id` 并记进 `usage.app_id` ——
 // 于是"这个应用吃掉多少 AI 成本"可以一条 SQL 答出来。
 //
-// ⚠️ 不再是"自报头"：初版设计的 `X-Pico-App-Id` 在客户端**发不出来**（§21.7⑤：出站头
-// 的唯一构造点没有 header 通道），而且它没有可校验的链路 —— 任何调用方都能自报一个。
-// 现在唯一被信任的来源是**会话链路**（`app:` 前缀），自报头一律忽略并记一条 warn
-// （§21.4 的后半判据）。解析口径的唯一实现与真源见 `app_session_id.go` +
-// `app-session-id.json`。
+// ## 这个标签的信任等级（R14-K · D-04：口径必须与代码判据逐字一致）
+//
+// ⚠️ **标签的值完全来自客户端请求头，它不是服务端可验证的事实**。初版设计的
+// `X-Pico-App-Id` 在客户端发不出来（§21.7⑤：出站头唯一构造点没有 header 通道），
+// 于是改成读隐藏会话 id 的 `app:` 前缀 —— 但**前缀同样由客户端构造**：任何持员工
+// Bearer 的调用方都能发 `x-deepseek-harness-session-id: app:<任意 app_id>#…`。
+//
+// 服务端**校验**两件事（`SetUsageAppIDVerified`，同一个已钉事务里）：
+//
+//	① **形状**：`app_session_id.go` 的权威规则（小写、长度、字符集）——不合形状 ⇒ 无归因；
+//	② **存在性**：`apps` 里必须有一行 `kind='wasm_app' AND app_id=<label> AND deleted_at IS NULL`
+//	   ——2026-09-23 之前**没有**这一条，实测能把用量记到 `brand-new-not-in-db`
+//	   这种平台上根本不存在的应用上（管理端如实统计，`attribution_available=true`）。
+//
+// 服务端**不校验**（也没有能力校验，不要读成"已校验"）：
+//
+//	③ **调用方与该应用的关系**：员工使用他人的应用是正常业务，所以"必须是 owner"
+//	   是错的判据；而"该会话确属该应用"今天没有服务端凭据链路可查（隐藏会话是
+//	   客户端本地概念，网关看到的只有一个请求头）⇒ 把用量记到**另一个真实存在**的
+//	   应用上仍然可能。
+//
+// 结论（webadmin 面板文案与本节由 `opens-contract-parity.spec.ts` 同族对拍）：
+// 应用维度成本是**参考口径**，可被任何员工污染，**不得**用于对账、计费或授权判定。
+// 唯一可信的账是 `usage.user_id` 那一侧（它来自鉴权中间件，不来自请求头）。
 //
 // 三条纪律（与迁移 0076 的注释逐条对应）：
 //
-//	① **best-effort**：头缺失/不是应用会话/非法 ⇒ 记空串，绝不影响计费（`SetUsageAppID`
-//	   内部对空标签直接返回，连 UPDATE 都不发）；
+//	① **best-effort**：头缺失/不是应用会话/非法/应用不存在 ⇒ 记空串，绝不影响计费
+//	   （`SetUsageAppIDVerified` 内部对空标签直接返回，连 UPDATE 都不发）；
 //	② **不参与计费**：cost / 余额 / 账本三者的计算完全不读这一列 —— 它只是标签，
 //	   改它永远不该改变任何金额（否则"伪造一个头就能改价"）；
 //	③ **不扫全表**：归因写成 post-hoc 的单行 UPDATE（与既有的 `SetUsageProvider`
@@ -42,6 +61,9 @@ import (
 // 只认会话 id 的 `app:` 前缀（见 `app_session_id.go` 的长注释）：自报头
 // `X-Pico-App-Id` 被显式忽略并记一条日志 —— "归因静默消失"在运营面上与"没人用"长得
 // 一样，所以忽略这件事必须留下痕迹。
+//
+// ⚠️ 这里只做**形状**判定（授权/存在性在 bindUsageAppID 里，同一个已钉事务内）。
+// 返回值是"客户端声称的应用"，不是"已证实的事实"。
 func appIDFromRequest(c *gin.Context) string {
 	if c == nil {
 		return ""
@@ -61,6 +83,13 @@ func appIDFromRequest(c *gin.Context) string {
 // 失败**不**返回错误、也**不**改变响应：归因是统计口径，它的问题不该让一次正常的
 // LLM 调用失败（与 §8.9「计数失败不影响打开」同一条纪律）。失败会记一条日志，
 // 因为"归因静默消失"在运营面上与"没人用"长得一样。
+//
+// 三种结局都留痕（R14-K · D-04）：
+//
+//	标签为空（非应用会话/形状非法）      ⇒ 静默返回（这是绝大多数请求的常态）；
+//	标签不指向真实应用（伪造/应用已删）  ⇒ **记一条 warn**（旧实现会照写，把不存在的
+//	                                     应用写进成本统计）；
+//	写库失败                            ⇒ 记一条 warn（既有行为）。
 func (a *API) bindUsageAppID(c *gin.Context, usageID int64) {
 	if a == nil || usageID <= 0 {
 		return
@@ -69,7 +98,13 @@ func (a *API) bindUsageAppID(c *gin.Context, usageID int64) {
 	if appID == "" {
 		return
 	}
-	if err := serverstore.SetUsageAppID(a.DB, usageID, appID); err != nil {
+	written, err := serverstore.SetUsageAppIDVerified(a.DB, usageID, appID)
+	if err != nil {
 		log.Printf("gateway: 应用维度归因失败（不影响计费）usage_id=%d app_id=%s: %v", usageID, appID, err)
+		return
+	}
+	if !written {
+		log.Printf("gateway: 丢弃应用维度归因（不影响计费）：app_id=%q 不是本平台上存在且未删除的 wasm 应用 usage_id=%d",
+			appID, usageID)
 	}
 }

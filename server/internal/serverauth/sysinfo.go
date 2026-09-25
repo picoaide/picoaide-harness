@@ -91,13 +91,9 @@ type dbStats struct {
 	SchemaMig    int64            `json:"schema_migrations"` // 迁移版本
 }
 
-// statTables 是需要统计行数的业务表(与 serverstore 迁移一致)。
-var statTables = []string{
-	"users", "groups", "user_groups", "settings", "api_tokens",
-	// P5:旧的 skills/skill_grants 已下线,统计改为统一应用模型的三张表。
-	"gateway_providers", "models", "usage", "apps", "app_releases", "app_grants",
-	"audit_logs", "admin_sessions",
-}
+// statTables 的行数统计口径已内联进 collectDBStats（R14-K · D-02）：
+// 表名不再是**变量**——语句必须是字面量，否则守卫的 SQL 尺子看不见（旧形态
+// `db.QueryRow("SELECT COUNT(*) FROM " + t)` 就是靠这一点逃逸的）。
 
 // handleServerInfo 返回服务器系统信息 + 数据库统计(AdminAuth 保护)。
 func (a *AdminAPI) handleServerInfo(c *gin.Context) {
@@ -189,17 +185,61 @@ func defaultUpdateChecker() *updatecheck.CachedChecker {
 }
 
 // collectDBStats 按驱动收集行数与磁盘大小。
+//
+// R14-K（D-02）：**表名与语句都必须是字面量，且每条读经 serverstore 的唯一 pin
+// 实现**。旧实现是 `statTables []string` + `db.QueryRow("SELECT COUNT(*) FROM " + t)`：
+//
+//	① 表名来自变量 ⇒ 守卫的 SQL 尺子（"SQL 关键字后紧跟**字面**表名"）零命中，
+//	   于是 `server/` 的读面收口在这条路径上整片失效（正/负对照：同样的
+//	   `SELECT COUNT(*) FROM usage` 写成字面量会立刻打红守卫，写成拼接则完全看不见）；
+//	② 裸池 + 未限定名 ⇒ 连接/角色/库级 `search_path` 前置同名 shadow schema 时，
+//	   `settings` / `gateway_providers` / `models` / `usage` / `audit_logs` 这 5 张
+//	   **族内关系**的行数读自 shadow（运行期实测：旁路池 `usage=3 / audit_logs=5`，
+//	   而 public 是 `1 / 1`）。这正是当年把 `audit_logs` 纳入族内集合的理由
+//	   ——"审计 0 条看不出是读错了对象"——只是这条路径没被覆盖。
+//
+// 现在：语句在函数内的字面量表里逐条写死（`t.count` 只是**取用**，值域封闭在本
+// 函数的字面量集合里），每条读各自经 `serverstore.NewUsageReadConn` 开一个**已钉**
+// 只读事务 —— 串行、用完即还，既不会"持有一条再向池要第二条"（R14-K 的池自锁判据），
+// 也不会读到 shadow。表缺失（旧库）仍逐条跳过，与旧实现逐字一致。
 func collectDBStats(db *sql.DB) (dbStats, error) {
 	s := dbStats{Tables: map[string]int64{}}
 	// PG-only(2026-08 SQLite 已下线):驱动固定 pg,磁盘大小查 pg_database_size
 	s.Driver = "pg"
 
+	statTables := []struct {
+		name  string
+		count string
+	}{
+		{"users", `SELECT COUNT(*) FROM users`},
+		{"groups", `SELECT COUNT(*) FROM groups`},
+		{"user_groups", `SELECT COUNT(*) FROM user_groups`},
+		{"settings", `SELECT COUNT(*) FROM settings`},
+		{"api_tokens", `SELECT COUNT(*) FROM api_tokens`},
+		// P5:旧的 skills/skill_grants 已下线,统计改为统一应用模型的三张表。
+		{"gateway_providers", `SELECT COUNT(*) FROM gateway_providers`},
+		{"models", `SELECT COUNT(*) FROM models`},
+		{"usage", `SELECT COUNT(*) FROM usage`},
+		{"apps", `SELECT COUNT(*) FROM apps`},
+		{"app_releases", `SELECT COUNT(*) FROM app_releases`},
+		{"app_grants", `SELECT COUNT(*) FROM app_grants`},
+		{"audit_logs", `SELECT COUNT(*) FROM audit_logs`},
+		{"admin_sessions", `SELECT COUNT(*) FROM admin_sessions`},
+	}
 	for _, t := range statTables {
+		rd, err := serverstore.NewUsageReadConn(db)
+		if err != nil {
+			// 连"已钉只读事务"都开不出来：这不是"表缺失"，如实失败
+			// （旧实现这里是 continue ⇒ 连接坏了会渲染成"所有表 0 行"）。
+			return dbStats{}, err
+		}
 		var n int64
-		if err := db.QueryRow("SELECT COUNT(*) FROM " + t).Scan(&n); err != nil {
+		err = rd.QueryRow(t.count).Scan(&n)
+		_ = rd.Close() //nolint:errcheck // 只读事务回滚
+		if err != nil {
 			continue // 表不存在(旧库可能缺)跳过
 		}
-		s.Tables[t] = n
+		s.Tables[t.name] = n
 		s.TotalRows += n
 	}
 	s.SchemaMig = schemaVersion(db)
