@@ -346,24 +346,6 @@ func deactivateMissingExternalUsers(db *sql.DB, keep map[string]bool) ([]string,
 	return deactivated, nil
 }
 
-// SyncDirectoryLoop 定时执行目录同步(启动后立即一轮,然后固定间隔)。
-func SyncDirectoryLoop(db *sql.DB, interval time.Duration, runner DirectorySyncRunner) {
-	if interval <= 0 {
-		interval = LDAPSyncInterval
-	}
-	if runner == nil {
-		runner = LDAPDirectorySync{}
-	}
-	for {
-		if res, err := runner.Run(db); err != nil {
-			log.Printf("ldap directory sync: %v", err)
-		} else if res.Added > 0 || res.Deact > 0 || res.Updated > 0 {
-			log.Printf("ldap directory sync: +%d updated=%d deactivated=%d", res.Added, res.Updated, res.Deact)
-		}
-		time.Sleep(interval)
-	}
-}
-
 // SyncDirectoryOnce 立即执行一轮(配置保存后同步调用)。
 func SyncDirectoryOnce(db *sql.DB, runner DirectorySyncRunner) (*DirSyncResult, error) {
 	if runner == nil {

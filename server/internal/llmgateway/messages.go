@@ -381,7 +381,8 @@ func (a *API) handleMessages(c *gin.Context) {
 	}
 	// R16C-02 + R17A-06：钱闸门（含"未定价模型"）唯一出口 —— 命中即写响应并返回，
 	// 被拒请求绝不转发上游。
-	if a.rejectBalanceAdmission(c, user, req.Model, raw, "messages", "anthropic") {
+	// 同源估量（R19A-S1-01）：anthropic messages 的出站体由本文件自建但文本取自同一 body。
+	if a.rejectBalanceAdmission(c, user, req.Model, admissionTokensFromBody(raw), "messages", "anthropic") {
 		return
 	}
 

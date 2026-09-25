@@ -54,7 +54,7 @@ Employee clients / third-party integrations ──HTTPS + Bearer token──▶
 ## Database
 
 - PostgreSQL only (PG-only; the deployment form is the container built into compose, and the binary also accepts an external instance via `-pg-dsn`),
-  with migrations under `migrations-pg/` (numbered 0001–0081; some numbers were dropped historically, hence the gaps);
+  with migrations under `migrations-pg/` (numbered 0001–0082; some numbers were dropped historically, hence the gaps);
 - usage details are natively partitioned by month (retention configurable in months, default 6), while the daily/monthly ledgers are kept forever (10 years of historical statistics never lost);
 - Shared skill / agent archives are stored directly in the DB; audit hash chain (tamper-evident), RBAC roles, balance-grant idempotency anchor.
 

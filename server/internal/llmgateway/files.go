@@ -157,10 +157,32 @@ const (
 // 认领是**行级标记 + 世代号**：即使本函数中途崩溃，行仍在（下一轮可重新认领/重删），
 // 不会留下"再无凭据"的孤儿上游对象。
 func (a *API) deleteGatewayFileFenced(fileID string, up Upstream) gatewayFileDeleteResult {
+	// 按 id 单条删除：**不**要求世代（R18C-02 的既有语义 —— 管理员明确点了这一行）。
+	return a.deleteGatewayFileFencedAt(fileID, gatewayFileAnyGeneration, up)
+}
+
+// gatewayFileAnyGeneration 表示"不要求世代谓词"（单条删除路径）。
+const gatewayFileAnyGeneration = int64(-1)
+
+// deleteGatewayFileFencedAt 是带世代围栏删除的**唯一实现**。
+//
+// wantGeneration >= 0 时多一条约束：只有行的当前世代仍等于快照里那一个才认领
+// （R19A-S1-05：批量清理先取快照、再逐条删，期间被主人合法续期/重传的行世代会 +1，
+// 那时必须**跳过**——否则会删掉一个有效文件的上游对象与台账行，而 skipped 计数看不见）。
+func (a *API) deleteGatewayFileFencedAt(fileID string, wantGeneration int64, up Upstream) gatewayFileDeleteResult {
 	if a == nil || a.DB == nil {
 		return gatewayFileDeleteFailed
 	}
-	gen, claimed, err := serverstore.ClaimGatewayFileForDeletion(a.DB, fileID)
+	var (
+		gen     int64
+		claimed bool
+		err     error
+	)
+	if wantGeneration >= 0 {
+		gen, claimed, err = serverstore.ClaimGatewayFileForDeletionAtGeneration(a.DB, fileID, wantGeneration)
+	} else {
+		gen, claimed, err = serverstore.ClaimGatewayFileForDeletion(a.DB, fileID)
+	}
 	if err != nil {
 		if errors.Is(err, serverstore.ErrNotFound) {
 			return gatewayFileDeleteMissing

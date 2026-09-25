@@ -37,9 +37,15 @@ import (
 )
 
 // 调度器名字（登记键；日志与状态表共用同一份字面量）。
+//
+// R19B-05（审计 2026-09-25，P2）：新增 model_sync / directory_sync —— 这两条后台循环
+// 此前**根本没进**这张表（也没有 ctx 与任何装配判据），是进程内最后两条"死了没人知道"
+// 的周期执行者（其中模型同步循环还是 CleanupPendingUsage 的唯一周期执行者）。
 const (
-	schedulerReports = "reports"
-	schedulerBalance = "balance"
+	schedulerReports       = "reports"
+	schedulerBalance       = "balance"
+	schedulerModelSync     = "model_sync"
+	schedulerDirectorySync = "directory_sync"
 )
 
 // observableScheduler 是装配接缝要求的完整面：能被 Start(ctx)，且能报出运行状态。

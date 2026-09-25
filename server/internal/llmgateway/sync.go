@@ -217,7 +217,11 @@ func SyncIteration(db *sql.DB, fetchFn func(url string) ([]byte, error)) ([]Sync
 //
 // 抽成独立函数只为可测:用例直接调用它并捕获真实 log 输出,不必起 goroutine +
 // sleep(那种写法既慢又会把 SyncLoop 永久跑在测试进程里)。
-func syncIterationLogged(db *sql.DB, fetchFn func(url string) ([]byte, error)) {
+//
+// R19B-05(审计 2026-09-25,P2):返回值从"无"改为把本轮错误**交给调用方记账** ——
+// 唯一生产调用方是 ModelSyncScheduler.TryRun(装配层据此填 last_error 读数)。
+// 调用点写成语句形式时语义与修前逐字一致(丢弃返回值),日志一字未改。
+func syncIterationLogged(db *sql.DB, fetchFn func(url string) ([]byte, error)) error {
 	results, err := SyncIteration(db, fetchFn)
 	if err != nil {
 		log.Printf("gateway sync: %v", err)
@@ -228,15 +232,5 @@ func syncIterationLogged(db *sql.DB, fetchFn func(url string) ([]byte, error)) {
 		}
 		log.Printf("gateway sync: provider %s 同步失败: %s", r.Provider, r.Error)
 	}
-}
-
-// SyncLoop 定时执行 SyncIteration,固定间隔。
-func SyncLoop(db *sql.DB, interval time.Duration, fetchFn func(url string) ([]byte, error)) {
-	if interval <= 0 {
-		interval = time.Hour
-	}
-	for {
-		syncIterationLogged(db, fetchFn)
-		time.Sleep(interval)
-	}
+	return err
 }

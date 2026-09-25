@@ -56,7 +56,7 @@ Capability Hub
 |---|---|
 | **Install** | Install a skill or agent package from the market/org; if a same-name item already exists locally, an **overwrite confirmation dialog** appears (decision: no `?force=1` assumption interface, client-side confirmation only) |
 | **Update** | Shows "Update to vX" when an item is installed and a higher approved version exists; goes through the same install confirmation |
-| **Uninstall** | Confirms, then uninstalls and removes the local directory |
+| **Uninstall** | Confirms, then uninstalls and removes the local directory. **Two cases are refused** (with the reason surfaced, never silently): ① same-name content still exists in a higher-priority skill root (project/user) ⇒ `422 RESIDUE` — deal with that copy first; ② the local content was modified ⇒ `409 LOCAL_CONTENT` — the delete happens only after an explicit overwrite (`?overwrite=1`) |
 | **Upload shared** | Package and upload a local skill/agent (`packSkill` / `packPreset`, archive-safety validation on both sides), which enters `pending` awaiting admin review; you can re-upload a new version |
 | **View status** | The "Mine" partition shows the review status of your uploaded content (In review / Shared / Rejected + reason) |
 

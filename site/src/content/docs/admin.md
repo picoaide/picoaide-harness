@@ -72,7 +72,7 @@ description: PicoAide Harness 管理后台（webadmin）功能指南：用户与
 - **默认模型**：全局选择（下拉）；
 - **限流**：per-user 限流策略；
 - **高峰时段**：多段高峰窗口（`usage.peak_windows`，北京时间），支持每周几选择 + 开始/结束时间；高峰外按模型 `offpeak_discount` 折算计价；
-- **模型定价**：每模型 input/output 单价（元/M tokens，`input_price_per_1m` / `output_price_per_1m`），另有**缓存命中输入价**（`cache_input_price_per_1m`）与**低谷折扣率**（`offpeak_discount`，0-1）——未定价模型费用按 0 计；修改价格/折扣只影响之后产生的费用（历史费用按记录时定价留存）；
+- **模型定价**：每模型 input/output 单价（元/M tokens，`input_price_per_1m` / `output_price_per_1m`），另有**缓存命中输入价**（`cache_input_price_per_1m`）与**低谷折扣率**（`offpeak_discount`，0-1）——**未配置价格的模型在缺省策略下会被拒绝调用**（429 `MODEL_NOT_PRICED`，不转发也不产生费用；确实免费/自建时把 `gateway.unpriced_model_policy` 设为 `allow`，那时费用才按 0 计）；**输入价 0/极低但输出价正常**的模型照常可用（按输出侧计费）；修改价格/折扣只影响之后产生的费用（历史费用按记录时定价留存）；
 - **缓存命中计费**：命中缓存的输入 token 按缓存价计费，未配置缓存价时回退输入价（DeepSeek 缓存价）；
 - **峰谷折算**：高峰窗口外（空闲时段）且模型配置了低谷折扣率时，费用 = 标准价 × 折扣率；高峰时段按标准价；DeepSeek 官方当前政策（2026-08 起）= 周一至周五 09:00-12:00、14:00-18:00 为高峰，其余（含周末）为空闲，空闲价 = 高峰价 × 50%。
 - **登录模式**：不在本页配置；登录方式（local / LDAP / OIDC）见独立的「认证 `/auth`」页。

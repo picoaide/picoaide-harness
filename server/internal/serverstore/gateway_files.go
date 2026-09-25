@@ -800,8 +800,20 @@ func GatewayFileReapBacklogStats(db *sql.DB) (GatewayFileReapBacklog, error) {
 	return out, rows.Err()
 }
 
-// ListGatewayFilesForPurge 取一批"按条件可清理"的行（管理端按员工/状态清理用）。
-func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]string, error) {
+// GatewayFilePurgeCandidate 是一条"候选可清理"的快照：除了 file_id 还带上**世代号**。
+//
+// 为什么必须带世代（R19A-S1-05，审计 2026-09-25，P2）：批量清理是"先取一批快照、再逐条
+// 串行调上游 DELETE"（最多 500 条），而 `ClaimGatewayFileForDeletion` 对**任意世代**都成立
+// （它自己就把世代 +1）⇒ 快照之后被主人合法续期/重传的行（世代 +1、expires_at 推到未来）
+// 照样会被删掉上游对象与台账行 —— 有效文件被销毁，而新增的 `skipped` 计数看不见它
+// （认领会成功）。带上世代后，删除前多一条"世代未变"的谓词，快照之后被动过的行一律跳过。
+type GatewayFilePurgeCandidate struct {
+	FileID         string
+	ReapGeneration int64
+}
+
+// ListGatewayFilePurgeCandidates 取一批"按条件可清理"的**快照**（含世代号）。
+func ListGatewayFilePurgeCandidates(db *sql.DB, q GatewayFileQuery, limit int) ([]GatewayFilePurgeCandidate, error) {
 	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
 	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
 	rd, err := newUsageReadConn(db)
@@ -815,20 +827,38 @@ func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]stri
 	}
 	where, args := gatewayFileWhere(q)
 	args = append(args, limit)
-	rows, err := rd.Query(`SELECT g.file_id FROM gateway_files g`+where+` ORDER BY g.created_at ASC LIMIT ?`, args...)
+	rows, err := rd.Query(`SELECT g.file_id, g.reap_gen FROM gateway_files g`+where+` ORDER BY g.created_at ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []string{}
+	out := []GatewayFilePurgeCandidate{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var c GatewayFilePurgeCandidate
+		if err := rows.Scan(&c.FileID, &c.ReapGeneration); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ListGatewayFilesForPurge 取一批"按条件可清理"的 file_id（在 Candidates 之上取 id 列）。
+//
+// 保留这个薄入口是为了不动既有调用点/判据；**生产删除路径必须用
+// ListGatewayFilePurgeCandidates**（只有它带世代号，能挡住"快照后被续期"）。
+func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]string, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	cands, err := ListGatewayFilePurgeCandidates(db, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.FileID)
+	}
+	return out, nil
 }
 
 // GatewayFileRowExists 判定台账里是否存在该 file_id（**不看过期**）。
@@ -887,7 +917,7 @@ type GatewayFileForReap struct {
 //
 // 返回 ok=false 表示"已经不过期 / 已被别的路径处理 / 标记仍在租约内"（调用方跳过）。
 func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
-	return claimGatewayFile(db, fileID, true)
+	return claimGatewayFile(db, fileID, true, nil)
 }
 
 // ClaimGatewayFileForDeletion 认领一行**任意状态**的台账（R18C-02，审计 2026-09-25，P1）：
@@ -907,7 +937,21 @@ func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, boo
 // 返回 `err = ErrNotFound` 表示台账里没有这一行；返回 `(0, false, nil)` 表示"别人正持有
 // 这一行的删除权（标记在租约内）"——调用方必须放弃删除，不要动上游对象。
 func ClaimGatewayFileForDeletion(db *sql.DB, fileID string) (generation int64, claimed bool, err error) {
-	snap, ok, err := claimGatewayFile(db, fileID, false)
+	snap, ok, err := claimGatewayFile(db, fileID, false, nil)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	return snap.ReapGeneration, true, nil
+}
+
+// ClaimGatewayFileForDeletionAtGeneration 与上一条同形，但多一条**世代谓词**：
+// 只有当行的当前世代仍等于 `wantGeneration`（快照之后没被续期/转手）时才认领。
+//
+// 批量清理（`admin` 的 purge 循环）用这一条 —— 它先取快照、再逐条删，窗口长（最多
+// 500 次串行上游往返）；R19A-S1-05 实测：快照之后被主人合法续期的有效文件会被
+// "无世代谓词"的认领放行并整条销毁（上游对象 + 台账行），而 skipped 计数看不见它。
+func ClaimGatewayFileForDeletionAtGeneration(db *sql.DB, fileID string, wantGeneration int64) (generation int64, claimed bool, err error) {
+	snap, ok, err := claimGatewayFile(db, fileID, false, &wantGeneration)
 	if err != nil || !ok {
 		return 0, false, err
 	}
@@ -920,7 +964,7 @@ func ClaimGatewayFileForDeletion(db *sql.DB, fileID string) (generation int64, c
 // `reaping_at = now()` + `reap_gen = reap_gen + 1`（RETURNING 回读，避免"先读后写"竞态）
 // → 提交。`WHERE (reaping_at IS NULL OR 标记早于租约)` 既是"别人正在删"的互斥，也是
 // 认领方崩溃后的自愈窗口。
-func claimGatewayFile(db *sql.DB, fileID string, requireExpired bool) (GatewayFileForReap, bool, error) {
+func claimGatewayFile(db *sql.DB, fileID string, requireExpired bool, wantGeneration *int64) (GatewayFileForReap, bool, error) {
 	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return GatewayFileForReap{}, false, err
@@ -948,13 +992,21 @@ func claimGatewayFile(db *sql.DB, fileID string, requireExpired bool) (GatewayFi
 		return GatewayFileForReap{}, false, err
 	}
 	// 世代号在**同一条语句**里 +1 并回读（RETURNING），避免"先读后写"的竞态。
-	err = tx.QueryRow(`UPDATE gateway_files SET reaping_at = now(), reap_gen = reap_gen + 1
+	//
+	// wantGeneration 非 nil 时多一条 `reap_gen = ?` 谓词（R19A-S1-05：批量清理的快照
+	// 世代）—— 快照之后被续期/转手的行世代已经变了，认领必须**失败**（调用方按
+	// "跳过"处置），绝不删一个已经不属于快照形态的对象。
+	query = `UPDATE gateway_files SET reaping_at = now(), reap_gen = reap_gen + 1
 	                    WHERE file_id = ?
-	                      AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
-	                    RETURNING reap_gen`,
-		fileID, ReapClaimLease.Seconds()).Scan(&snap.ReapGeneration)
+	                      AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))`
+	args := []any{fileID, ReapClaimLease.Seconds()}
+	if wantGeneration != nil {
+		query += ` AND reap_gen = ?`
+		args = append(args, *wantGeneration)
+	}
+	err = tx.QueryRow(query+` RETURNING reap_gen`, args...).Scan(&snap.ReapGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
-		return GatewayFileForReap{}, false, nil // 别的批次正持有标记（租约内）
+		return GatewayFileForReap{}, false, nil // 别的批次正持有标记（租约内）或世代已变（快照已过期）
 	}
 	if err != nil {
 		return GatewayFileForReap{}, false, err

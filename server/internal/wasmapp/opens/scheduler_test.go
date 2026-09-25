@@ -161,3 +161,105 @@ func seedUser(t *testing.T, db *sql.DB, name string) int64 {
 	}
 	return id
 }
+
+// TestSchedulerKeepsDailyRollupAcrossRetentionBoundary 是 R19B-01（审计 2026-09-25，P1，
+// **不可逆的数据损坏**）的判据。
+//
+// 缺陷形态（修前实测）：清理边界是**裸瞬时** now-90d（落在某一天的正中间），而日汇总
+// 是**整日分桶 + 全量覆盖**（ON CONFLICT DO UPDATE SET pv = EXCLUDED.pv）⇒ 清理把边界
+// 那一天只删一半后，下一轮从"剩下的那半天"重算并覆盖同一天，日汇总逐轮缩水；等边界扫过
+// 该日，明细已删完 ⇒ 长期保留的日汇总永久停在"最后一个 5 分钟 tick 的量"。
+// 一天 4 次打开 ⇒ 修前最终 pv=1（want 4），日志 `deleted=2 / 1 / 1`。
+//
+// 变异（必须变红）：把 TryRun 的 `purgeBefore` 换回裸瞬时
+// `now.AddDate(0, 0, -serverstore.WasmAppOpensRetentionDays)`（汇总上界与清理边界一起
+// 退回修前形态）⇒ 本用例在"日汇总缩水"那一条上报错，终值断言也会红（pv=1）。
+//
+// 两条断言，缺一条都咬不住：
+//   - **单调性**：日汇总在维护过程中只能变大不能变小（明细只会被删；出现缩水必然是
+//     "某一天被部分删除过"）；
+//   - **终值 + 整日清理**：明细清空后该日 pv 仍是 4，且剩余明细不得落在被清那一天之内。
+func TestSchedulerKeepsDailyRollupAcrossRetentionBoundary(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	// 边界日 = now-90d 那一天（cutoff 12:00 落在日中间，正是修前的形态）。
+	boundary := serverstore.LocalDay(now.AddDate(0, 0, -serverstore.WasmAppOpensRetentionDays))
+	userID := seedUser(t, db, "u-boundary")
+
+	// 边界日里 4 次打开（00:30 / 06:00 / 12:30 / 18:00）——修前 00:30 与 06:00 先过期。
+	for i, off := range []time.Duration{
+		30 * time.Minute,
+		6 * time.Hour,
+		12*time.Hour + 30*time.Minute,
+		18 * time.Hour,
+	} {
+		if err := serverstore.RecordWasmAppOpen(ctx, db, serverstore.WasmAppOpen{
+			AppID: "notes", UserID: userID, At: boundary.Add(off)}); err != nil {
+			t.Fatalf("写边界日明细 %d: %v", i, err)
+		}
+	}
+	// 保留期内的另一天：它绝不能被算进"被清的那一天"，也必须原样留着（整日清理的反面判据）。
+	kept := boundary.AddDate(0, 0, 2).Add(3 * time.Hour)
+	if err := serverstore.RecordWasmAppOpen(ctx, db, serverstore.WasmAppOpen{
+		AppID: "notes", UserID: userID, At: kept}); err != nil {
+		t.Fatalf("写保留期内明细: %v", err)
+	}
+
+	clock := now
+	s := NewScheduler(db, 5*time.Minute, func() time.Time { return clock })
+	pvOf := func(day time.Time) int64 {
+		series, err := serverstore.QueryWasmAppOpens(ctx, db, serverstore.WasmOpenQuery{
+			AppID: "notes", From: day, To: day, Granularity: "day"})
+		if err != nil {
+			t.Fatalf("查汇总: %v", err)
+		}
+		var sum int64
+		for _, pt := range series.Points {
+			sum += pt.PV
+		}
+		return sum
+	}
+	if got := pvOf(boundary); got != 0 {
+		t.Fatalf("前置条件不成立：维护开始前该日汇总应为 0，实得 %d", got)
+	}
+
+	prev := int64(-1)
+	for i := 0; i < 400; i++ {
+		s.TryRun(ctx)
+		got := pvOf(boundary)
+		if prev >= 0 && got < prev {
+			t.Fatalf("第 %d 轮：日汇总由 %d 缩到 %d —— 日汇总被更小的值覆盖（"+
+				"清理边界必须与汇总上界一起对齐到日边界）", i, prev, got)
+		}
+		if got > prev {
+			prev = got
+		}
+		clock = clock.Add(5 * time.Minute)
+		if clock.After(now.Add(30 * time.Hour)) {
+			break
+		}
+	}
+
+	if prev != 4 {
+		t.Fatalf("明细过期后该日日汇总 pv = %d, want 4（明细已删 ⇒ 不可重算，这类损坏不可逆）", prev)
+	}
+	var leftBoundary, leftKept int64
+	if err := db.QueryRow(`SELECT count(*) FROM wasm_app_opens
+		WHERE app_id='notes' AND opened_at >= $1 AND opened_at < $2`,
+		boundary.UTC(), boundary.AddDate(0, 0, 1).UTC()).Scan(&leftBoundary); err != nil {
+		t.Fatalf("数边界日明细: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM wasm_app_opens
+		WHERE app_id='notes' AND opened_at >= $1 AND opened_at < $2`,
+		serverstore.LocalDay(kept).UTC(),
+		serverstore.LocalDay(kept).AddDate(0, 0, 1).UTC()).Scan(&leftKept); err != nil {
+		t.Fatalf("数保留期内明细: %v", err)
+	}
+	if leftBoundary != 0 {
+		t.Fatalf("边界日明细剩余 = %d, want 0（超保留期必须整日清掉）", leftBoundary)
+	}
+	if leftKept != 1 {
+		t.Fatalf("保留期内明细剩余 = %d, want 1（不得被提前清理）", leftKept)
+	}
+}

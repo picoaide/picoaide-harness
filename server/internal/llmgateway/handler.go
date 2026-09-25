@@ -110,7 +110,9 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 	}
 	// R16C-02 + R17A-06：钱闸门（含"未定价模型"）唯一出口 —— 命中即写响应并返回，
 	// 被拒请求绝不转发上游。
-	if a.rejectBalanceAdmission(c, user, req.Model, raw, "chat", "openai") {
+	// 准入估量必须与结算兜底同源（R19A-S1-01）：chat 的出站体就是客户端原始 body，
+	// 结算 `estimatePromptFallback` 走 estimatePromptTokensFromBody ⇒ 用同一个入口。
+	if a.rejectBalanceAdmission(c, user, req.Model, admissionTokensFromBody(raw), "chat", "openai") {
 		return
 	}
 

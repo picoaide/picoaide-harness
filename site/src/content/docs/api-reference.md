@@ -24,7 +24,8 @@ description: PicoAide Harness 服务端 HTTP API 参考：认证、LLM 网关、
 | `VALIDATION` | 400 | 参数校验失败 |
 | `UPSTREAM` | 502 | 上游 LLM 错误 |
 | `RATE_LIMITED` | 429 | 触发限流 |
-| `BALANCE_EXHAUSTED` | 429 | 余额闸门开启且账户余额 ≤ 0（admin 豁免；2026-09-11 起 token 配额 / 金额配额 / 部门预算已下线，余额是唯一闸门） |
+| `BALANCE_EXHAUSTED` | 429 | 钱闸门开启，且**三种成因之一**成立（admin 豁免）：①余额分位口径 ≤ 0；②**学到的下限**——上次结算因余额不足失败且余额未增长；③余额盖不住**本次请求的最小计费额**（prompt 估算 token × 输入价）。2026-09-11 起 token 配额 / 金额配额 / 部门预算已下线，余额是唯一闸门 |
+| `MODEL_NOT_PRICED` | 429 | 模型在该端点**无法计费**：输入价与输出价都为空/≤0（缺省策略 `reject`），或本次请求的最小应付额折到账本最小单位（1 微元）仍为 0。免费/内部模型由管理员显式放行（`gateway.unpriced_model_policy=allow`）；**输入价 0/极低但输出价正常**的模型不受影响（按输出侧计费） |
 | `INTERNAL` | 500 | 内部错误 |
 
 ## 认证（员工面）

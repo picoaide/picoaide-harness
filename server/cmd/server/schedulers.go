@@ -83,3 +83,18 @@ func startObservedScheduler(
 	registerSchedulerStatus(name, tick, s)
 	s.Start(ctx)
 }
+
+// startObservedSchedulerWith 是 background_sync.go 两条循环（模型同步 / 目录同步）
+// 共用的装配体：构造已在接缝内完成（它们的第三参分别是 fetchFn / runner，不是 nowFn，
+// 所以无法共用上面的构造器签名），这里只做"登记 + 启动"。
+//
+// ⚠️ 顺序是判据的一部分：**先登记后启动**，且 main() 里的调用必须排在
+// `logSchedulerStatuses("startup")` **之前** —— 否则启动日志的状态行会漏掉这两条
+// （R6-A-2 的可观测面正好丢掉要观测的东西）。
+func startObservedSchedulerWith(ctx context.Context, name string, tick time.Duration, sched observableScheduler) {
+	if sched == nil {
+		return
+	}
+	registerSchedulerStatus(name, tick, sched)
+	sched.Start(ctx)
+}

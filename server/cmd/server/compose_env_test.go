@@ -38,7 +38,9 @@ const composePath = "../../docker-compose.yml"
 // composeServerEnvironment 解析 docker-compose.yml，返回 services.server.environment
 // 的**键集合**。缺服务/缺 environment 直接 Fatal —— 判据锚点漂移必须响亮地失败，
 // 而不是"没找到键 ⇒ 空集合 ⇒ 判据变成恒真"。
-func composeServerEnvironment(t *testing.T) map[string]string {
+// composeDoc 解析 docker-compose.yml 成 map（R15C-03 的编排级对拍也要用它，
+// 所以从 composeServerEnvironment 里抽出来做唯一实现）。
+func composeDoc(t *testing.T) map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(composePath)
 	if err != nil {
@@ -51,6 +53,12 @@ func composeServerEnvironment(t *testing.T) map[string]string {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("解析 %s: %v", composePath, err)
 	}
+	return doc
+}
+
+func composeServerEnvironment(t *testing.T) map[string]string {
+	t.Helper()
+	doc := composeDoc(t)
 	services, ok := doc["services"].(map[string]any)
 	if !ok {
 		t.Fatalf("%s 里没有 services 映射（判据锚点漂移）", composePath)

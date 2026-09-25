@@ -1,6 +1,7 @@
 package serverstore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -29,8 +30,16 @@ type ReportSubscription struct {
 	HookURL   string     `json:"hook_url"`
 	LastRunAt *time.Time `json:"last_run_at,omitempty"`
 	LastError string     `json:"last_error"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	// PendingPeriod 是"最早未成功投递的那一期"（北京月，`YYYY-MM`；空 = 没有欠投）。
+	// R19A-S1-07（审计 2026-09-25，P2）：失败跨过月界时，投递必须仍在补**这一期**，
+	// 而不是静默跳到最新一期（迁移 0082）。
+	PendingPeriod string `json:"pending_period,omitempty"`
+	// FailStreak 是连续失败次数（成功后清零）；用于指数退避（R19A-S1-06 ①）。
+	FailStreak int `json:"fail_streak,omitempty"`
+	// NextAttemptAt 是"最早何时可以再试"（退避窗口；NULL = 立即可试）。
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // MarshalJSON 脱敏序列化:hook_url 一律以 MaskedHookURL 输出。
@@ -57,7 +66,8 @@ func MaskHookURL(raw string) string {
 
 // ListReportSubscriptions 全量列表(按 id)。
 func ListReportSubscriptions(db *sql.DB) ([]ReportSubscription, error) {
-	rows, err := db.Query(`SELECT id, name, enabled, hook_url, last_run_at, last_error, created_at, updated_at
+	rows, err := db.Query(`SELECT id, name, enabled, hook_url, last_run_at, last_error,
+			pending_period, fail_streak, next_attempt_at, created_at, updated_at
 		FROM report_subscriptions ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -66,12 +76,16 @@ func ListReportSubscriptions(db *sql.DB) ([]ReportSubscription, error) {
 	out := []ReportSubscription{}
 	for rows.Next() {
 		var r ReportSubscription
-		var last sql.NullTime
-		if err := rows.Scan(&r.ID, &r.Name, &r.Enabled, &r.HookURL, &last, &r.LastError, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		var last, next sql.NullTime
+		if err := rows.Scan(&r.ID, &r.Name, &r.Enabled, &r.HookURL, &last, &r.LastError,
+			&r.PendingPeriod, &r.FailStreak, &next, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if last.Valid {
 			r.LastRunAt = &last.Time
+		}
+		if next.Valid {
+			r.NextAttemptAt = &next.Time
 		}
 		out = append(out, r)
 	}
@@ -143,22 +157,76 @@ func DeleteReportSubscription(db *sql.DB, id int64) error {
 //     并重投，直到成功；
 //   - 同月内成功一次即不再重复投递（`last_run_at` 落进本月 ⇒ ShouldRunMonthly false）。
 //
-// 残留（诚实边界，与 reports 包内同名说明一致）：若失败持续**跨过月界**（整整一个月都
-// 没投出去），下一轮生成的是"最新的一期"，被跨过去的那一期不再补投 —— 单靠
-// `last_run_at` 一个时间戳无法表达"待补的期号"，要闭合得加一列存期号（本轮不引入迁移）。
+// R19A-S1-06/S1-07（审计 2026-09-25，P2，**已闭合**）：上面那条"跨月丢期"的残留由
+// 迁移 0082 的三列闭合 —— 投递路径改用 `MarkReportAttempt`（带期号 + 退避时刻）：
+//   - 失败把 `pending_period` 钉在**最早未投递的那一期**（此后不覆盖），跨月仍投它；
+//   - 失败累加 `fail_streak` 并写 `next_attempt_at`（指数退避，见 internal/reports），
+//     永久坏的 webhook 不再每天被重试 24 次；
+//   - 成功推进 `last_run_at`、清 `last_error`、清"正是这一期"的 pending 标记、
+//     归零退避。
+//
+// 本函数保留为**不带期号**的兼容入口（既有调用点/测试），语义与修前逐字一致。
 //
 // 审计 2026-09-12 P1-4:errMsg 经 SanitizeReportError 去掉目标地址,
 // 不再原样存 err.Error() 全文——net/http 的错误串会回显目标 URL
 // (`Post "https://qyapi.weixin.qq.com/...?key=SECRET": dial tcp ...`),
 // 而该字段会随列表响应下发,等于把刚脱敏的凭据又从错误列泄漏出去。
 func MarkReportRun(db *sql.DB, id int64, ok bool, errMsg string) error {
+	// period 传空：成功时按"清空 pending"处置（兼容入口无从知道期号），失败时不写
+	// pending_period（只累加退避计数）—— 既有测试断言的 last_run_at / last_error
+	// 语义逐字不变。
+	return MarkReportAttempt(db, id, "", ok, errMsg, nil)
+}
+
+// MarkReportAttempt 记录一次投递**尝试**（迁移 0082；R19A-S1-06/S1-07，审计
+// 2026-09-25，P2）。period 是本次尝试投递的期号（北京月 `YYYY-MM`，空 = 未知）。
+//
+// 成功：
+//   - `last_run_at = now()`、`last_error = ”`、`fail_streak = 0`、`next_attempt_at = NULL`；
+//   - `pending_period` 只在"它正是这一期"时清空（补投成功即闭合；不会是别的期号，
+//     因为投递路径永远先补最早的那一期）。period 为空（兼容入口）时一律清空。
+//
+// 失败：
+//   - `last_error = SanitizeReportError(errMsg)`、`fail_streak = fail_streak + 1`、
+//     `next_attempt_at = nextAttemptAt`（退避窗口，nil = 立即可再试）；
+//   - `last_run_at` **不动**（R18C-03 的语义：它记的是最后一次**成功**）；
+//   - `pending_period` **第一次失败时写入、之后不覆盖** ⇒ 跨月也一直补那一期。
+func MarkReportAttempt(db *sql.DB, id int64, period string, ok bool, errMsg string, nextAttemptAt *time.Time) error {
+	return MarkReportAttemptOn(context.Background(), db, id, period, ok, errMsg, nextAttemptAt)
+}
+
+// reportAttemptExecer 是 MarkReportAttemptOn 需要的执行面（*sql.DB 与 *sql.Conn 都满足）。
+type reportAttemptExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// MarkReportAttemptOn 与 MarkReportAttempt 同语义，但在**调用方给定的执行体**上执行。
+//
+// 为什么需要它（R14-K hold-and-wait 守则）：投递路径必须"先取认领连接（PG advisory
+// lock 是**会话级**锁，加解锁要在同一条连接上）、再落账" —— 若落账再回池里要第二条
+// 连接，就构成 hold-and-wait（池上限 = 并发数时两边互等、池不可恢复）。因此调用方
+// 已持有连接时，必须在同一条连接上把记账做完。
+func MarkReportAttemptOn(ctx context.Context, ex reportAttemptExecer, id int64, period string, ok bool, errMsg string, nextAttemptAt *time.Time) error {
+	if ex == nil {
+		return nil
+	}
 	if ok {
-		_, err := db.Exec(`UPDATE report_subscriptions SET last_run_at = now(), last_error = '', updated_at = now() WHERE id = ?`, id)
+		_, err := ex.ExecContext(ctx, `UPDATE report_subscriptions
+			SET last_run_at = now(), last_error = '', fail_streak = 0, next_attempt_at = NULL,
+			    pending_period = CASE WHEN ? = '' OR pending_period = ? THEN '' ELSE pending_period END,
+			    updated_at = now()
+			WHERE id = ?`, period, period, id)
 		return err
 	}
-	// 只记错误与 updated_at：last_run_at **不动**（它记的是最后一次成功）。
-	_, err := db.Exec(`UPDATE report_subscriptions SET last_error = ?, updated_at = now() WHERE id = ?`,
-		SanitizeReportError(errMsg), id)
+	var next any
+	if nextAttemptAt != nil {
+		next = nextAttemptAt.UTC()
+	}
+	_, err := ex.ExecContext(ctx, `UPDATE report_subscriptions
+		SET last_error = ?, fail_streak = fail_streak + 1, next_attempt_at = ?,
+		    pending_period = CASE WHEN pending_period = '' THEN ? ELSE pending_period END,
+		    updated_at = now()
+		WHERE id = ?`, SanitizeReportError(errMsg), next, period, id)
 	return err
 }
 

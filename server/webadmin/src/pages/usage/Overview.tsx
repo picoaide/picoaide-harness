@@ -215,7 +215,8 @@ export default function UsageOverview() {
       </div>
 
       <div className="text-[11px] text-muted-foreground">
-        费用口径:按模型定价折算(未定价模型计 0),含 embedding;与配额 enforcement 同口径。
+        费用口径:按模型定价折算,含 embedding;未定价模型在缺省策略下被拒绝调用(429,不产生费用记录),
+        「允许使用」策略下才按 0 计。
         区间消耗合计 {rangeSum ? fmtY(rangeSum.cost) : '—'} ({fmtFull(rangeSum?.tokens ?? 0)} tokens)。
       </div>
     </div>
