@@ -219,4 +219,23 @@ for (const readmeName of ['README.md', 'README.en.md']) {
   }
 }
 
+// workspace manifest 必须是 **Yarn 规范形态**（`JSON.stringify(parsed, null, 2) + '\n'`）。
+//
+// 为什么需要这条（2026-09-25 第十六轮的真实 CI 红）：`yarn install --immutable` 会把**非规范形态**的
+// manifest 重新序列化（实测：一处 `exports` 子块缩进少了两格 ⇒ install 后整个文件被改写）。于是同一次
+// CI 里 —— ①"判据执行体有没有被 install 期改写"的前置校验在 install **之后**跑，会看到 `工作树 ≠ HEAD`
+// 并把这次**规范化**当成"载荷改写了执行体"判红；②失败信息指向"install 期有人动了判据"，而不是"你的
+// manifest 不是规范形态"，排查成本极高。这条判据把同一类问题**提前到 install 之前**并给出可操作原因。
+const nonCanonicalManifests = []
+for (const manifestPath of ['package.json', ...workspaceDirs.map(dir => `${dir}/package.json`)]) {
+  const raw = readFileSync(resolve(root, manifestPath), 'utf8')
+  if (raw !== `${JSON.stringify(JSON.parse(raw), null, 2)}\n`) nonCanonicalManifests.push(manifestPath)
+}
+if (nonCanonicalManifests.length > 0) {
+  fail(`这些 manifest 不是 Yarn 规范形态（应为 JSON.stringify(parsed, null, 2) 加一个换行）：`
+    + `${nonCanonicalManifests.join('、')} —— \`yarn install\` 会重新序列化它们，使工作树与 HEAD 不一致，`
+    + '进而让 install 之后的判据锚把这次**规范化**误判成"判据执行体被改写"（CI 必红且信息误导）。'
+    + '修法：跑一次 `yarn install` 并把被改写的文件一并提交（等价于按 2 空格缩进重排）。')
+}
+
 process.stdout.write(`verify-layout: Yarn workspace and upstream ${upstream.commit.slice(0, 10)} are consistent\n`)

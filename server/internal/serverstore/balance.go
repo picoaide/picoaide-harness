@@ -105,6 +105,26 @@ func GetBalanceSettings(db *sql.DB) (BalanceSettings, error) {
 
 // SaveBalanceSettings 持久化三键(逐键 upsert;单键失败返回错误由调用方回滚语义处理)。
 func SaveBalanceSettings(db *sql.DB, s BalanceSettings) error {
+	return saveBalanceSettingsQ(func(key, value string) error { return SetSetting(db, key, value) }, s)
+}
+
+// SaveBalanceSettingsTx 在**调用方事务**内持久化三键(R17C-02 同族,审计 2026-09-25)。
+//
+// 为什么需要它:月度额度(`balance.monthly_amount`)与闸门开关(`balance.enabled`)
+// 是**改钱**的配置 —— 它决定每个员工每月自动到账多少钱、以及余额耗尽时拦不拦。
+// 管理端 PUT /api/server/admin/balance 原先的形态是"设置独立事务提交 → 审计
+// fire-and-forget(`_ = AuditLog`)"⇒ 审计写不进去时额度照改、零痕迹。现在配置与
+// 审计在同一个事务里(与 models/providers/balance_adjust 同形)。
+//
+// 不失效缓存:与 SetSettingTx 同一约定 —— 缓存失效只能在**提交后**做,由调用方
+// 在 Commit 之后调用 InvalidateSettings()。
+func SaveBalanceSettingsTx(tx *sql.Tx, s BalanceSettings) error {
+	return saveBalanceSettingsQ(func(key, value string) error { return SetSettingTx(tx, key, value) }, s)
+}
+
+// saveBalanceSettingsQ 是两条入口(池上 / 事务内)的**唯一**实现:键、取值归一与
+// 校验只写一次,避免"池上版本改了、事务版本忘了改"的口径分叉。
+func saveBalanceSettingsQ(set func(key, value string) error, s BalanceSettings) error {
 	if s.MonthlyAmount < 0 {
 		return ErrValidation
 	}
@@ -112,13 +132,13 @@ func SaveBalanceSettings(db *sql.DB, s BalanceSettings) error {
 	if s.MonthlyMode == BalanceModeCover {
 		mode = BalanceModeCover
 	}
-	if err := SetSetting(db, BalanceEnabledSetting, strconv.FormatBool(s.Enabled)); err != nil {
+	if err := set(BalanceEnabledSetting, strconv.FormatBool(s.Enabled)); err != nil {
 		return err
 	}
-	if err := SetSetting(db, BalanceMonthlyAmount, formatMoney(s.MonthlyAmount)); err != nil {
+	if err := set(BalanceMonthlyAmount, formatMoney(s.MonthlyAmount)); err != nil {
 		return err
 	}
-	return SetSetting(db, BalanceMonthlyMode, mode)
+	return set(BalanceMonthlyMode, mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,10 +346,6 @@ WHERE id = ? RETURNING balance_money`, delta, userID).Scan(&after)
 // AdjustUserBalance 在余额上原子增减 delta(正=加,负=扣),并记一条 adjust 流水。
 // delta 自动钳制:不允许余额被扣成负数(最多扣到 0,修「残值扣不动」死角)。
 func AdjustUserBalance(db *sql.DB, userID int64, delta float64, reason, actor string) (float64, error) {
-	delta = roundMoney(delta)
-	if math.IsNaN(delta) || math.IsInf(delta, 0) {
-		return 0, ErrValidation
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -341,6 +357,28 @@ func AdjustUserBalance(db *sql.DB, userID int64, delta float64, reason, actor st
 	// 账本不变量 `users.balance_money == SUM(balance_ledger.amount)` 在两侧各自成立）。
 	if err := pinUsageSearchPath(tx); err != nil {
 		return 0, err
+	}
+	next, err := AdjustUserBalanceTx(tx, userID, delta, reason, actor)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// AdjustUserBalanceTx 在**调用方事务**内做余额增减（校验 + 行锁 + 钳制 + 流水）。
+//
+// R16C-01 同族（审计 2026-09-25，P1 扫描出的第三处）：管理端 `POST /users/:id/balance`
+// 是**直接动钱**的路径，而它的审计此前是事务外的 `_ = AuditLog(...)` —— 审计写失败时
+// 余额已经改了、流水已经写了、审计 0 行，与"改了价没留痕"是同一个缺陷形态。
+// 调用方（serverauth/admin.go 的 adjustUserBalance）现在把「调整 + 审计」收进一个
+// 事务；本函数不提交、不开事务、不失效任何缓存（与 AddModelTx/UpdateModelTx 同约定）。
+func AdjustUserBalanceTx(tx *sql.Tx, userID int64, delta float64, reason, actor string) (float64, error) {
+	delta = roundMoney(delta)
+	if math.IsNaN(delta) || math.IsInf(delta, 0) {
+		return 0, ErrValidation
 	}
 	var old float64
 	if err := tx.QueryRow(`SELECT balance_money FROM users WHERE id = ? FOR UPDATE`, userID).Scan(&old); err != nil {
@@ -359,23 +397,12 @@ func AdjustUserBalance(db *sql.DB, userID int64, delta float64, reason, actor st
 			delta = -roundMicro(old)
 		}
 	}
-	next, err := adjustBalanceTx(tx, userID, delta, reason, actor)
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return next, nil
+	return adjustBalanceTx(tx, userID, delta, reason, actor)
 }
 
 // SetUserBalance 把余额直接设为 amount(>= 0),并记一条 adjust 流水(差额)。
 // amount = 0 是合法操作(清零),不再被拒绝。
 func SetUserBalance(db *sql.DB, userID int64, amount float64, reason, actor string) (float64, error) {
-	amount = roundMoney(amount)
-	if amount < 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
-		return 0, ErrValidation
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -388,15 +415,7 @@ func SetUserBalance(db *sql.DB, userID int64, amount float64, reason, actor stri
 	if err := pinUsageSearchPath(tx); err != nil {
 		return 0, err
 	}
-	var old float64
-	if err := tx.QueryRow(`SELECT balance_money FROM users WHERE id = ? FOR UPDATE`, userID).Scan(&old); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrNotFound
-		}
-		return 0, err
-	}
-	delta := roundMicro(amount - old)
-	next, err := adjustBalanceTx(tx, userID, delta, reason, actor)
+	next, err := SetUserBalanceTx(tx, userID, amount, reason, actor)
 	if err != nil {
 		return 0, err
 	}
@@ -404,6 +423,23 @@ func SetUserBalance(db *sql.DB, userID int64, amount float64, reason, actor stri
 		return 0, err
 	}
 	return next, nil
+}
+
+// SetUserBalanceTx 在**调用方事务**内把余额设为 amount（>= 0，差额记一条 adjust 流水）。
+// 与 AdjustUserBalanceTx 同一约定：不提交、不开事务、不失效缓存。
+func SetUserBalanceTx(tx *sql.Tx, userID int64, amount float64, reason, actor string) (float64, error) {
+	amount = roundMoney(amount)
+	if amount < 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return 0, ErrValidation
+	}
+	var old float64
+	if err := tx.QueryRow(`SELECT balance_money FROM users WHERE id = ? FOR UPDATE`, userID).Scan(&old); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, err
+	}
+	return adjustBalanceTx(tx, userID, roundMicro(amount-old), reason, actor)
 }
 
 // BalanceLedgerPage 返回某用户的流水分页(最新在前)。

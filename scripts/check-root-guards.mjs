@@ -157,7 +157,7 @@ const MINIMUM_REQUIRED_GUARDS = [
  * 重新生成：`node scripts/check-guard-parser-integrity.mjs --print-digests`。
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
-  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
+  ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: 'b087a84463044cef0abe22327a6604aed5eac4e09a01cc793c313ac92744c565' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '823521b553f426441fbd08366332359dbb6cba143d44ed4d224746f55ea1bb6a' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'e66d7a45a66035d6ac7855f289a677309143f6f0ee88da3f8de62a0f61f26fe2' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
@@ -173,7 +173,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
   ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '00fd8c90848089613226c7dc8c5213eb016a37ce4586aeb2dcd5cfb63ef5e091' }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '1a7ed535724659a1c2a3bc468bba8c96562fd19d2c987cbd266959a302dce453' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '3f1f821cd6c7fa643a367a40bed7c5b49d1608c9844a783275994b8faf958648' }],
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。

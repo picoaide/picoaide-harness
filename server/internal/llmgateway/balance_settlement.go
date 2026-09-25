@@ -132,6 +132,10 @@ const (
 func rejectSettlementFailure(c *gin.Context, err error, where string) {
 	if isBalanceSettlementFailure(err) {
 		log.Printf("gateway: insufficient balance, rejecting %s before delivery: %v", where, err)
+		// R16C-02 第 2 层:把"这个余额已经买不起一次真实调用"变成一条**准入下限**
+		// ——失败会整笔回滚余额(rollback),所以余额不增长时下限不会自我解除,
+		// 后续请求在准入处就被拒,不再产生上游调用(修前每次都会真实调用上游)。
+		recordBalanceSettlementFailure(serverauth.CurrentUser(c))
 		rejectBalanceSettlement(c)
 		return
 	}

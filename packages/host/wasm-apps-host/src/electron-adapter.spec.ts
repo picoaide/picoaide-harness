@@ -807,3 +807,199 @@ describe('createRealElectronWindowAdapter', () => {
     }
   })
 })
+
+/** 让恢复路径（`loadURL` 的 promise 链）跑完：恢复是异步的，事件监听是同步的。 */
+async function settleRecovery(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+/**
+ * R16B-19（第十六轮审计泳道 B，P1）：应用窗口的**崩溃 / 加载失败恢复**。
+ *
+ * 修前形态：`createAppWindow` 只挂 `page-title-updated`，唯一的加载处理是
+ * `loadURL().catch(reportLoadFailure)`（一行 warn）。渲染进程崩了或首次加载失败 ⇒
+ * **永久空白窗口**：没有错误面、没有重试、没有自动重载，用户与 AI 都看不到它坏了。
+ * 对照 `desktop/src/electron-runtime.ts` 的 shell 窗口，那条路径两者都有。
+ *
+ * 修后形态（照 shell 的 `reloadOrShowCrashFallback` 的**形状**，简化版）：
+ * 单飞 + 状态机（`idle → retrying → reloaded|failed`）、两个事件源共用同一入口、
+ * 至多自动重载一次、之后显示带「重试」按钮的 `data:text/html` 失败页，重试目标在
+ * 重载**之前**捕获。
+ *
+ * 变异验证：把 `render-process-gone` 的监听摘掉 ⇒ ①红；把 `did-fail-load` 的
+ * `isMainFrame !== true` 早退删掉 ⇒ ③红；把单飞去掉（每次都新起一轮）⇒ ②/④红。
+ */
+describe('createRealElectronWindowAdapter — 崩溃 / 加载失败恢复（R16B-19）', () => {
+  const APP_SCHEME = 'recovery-probe-app'
+  const PARTITION = 'persist:agent-browser-alice'
+  let warned: string[] = []
+
+  beforeEach(() => {
+    FakeBrowserWindow.created.length = 0
+    warned = []
+  })
+
+  /** 建窗 + 返回替身实例（恢复路径要断言原生窗口收到的导航序列）。 */
+  function openWindow(adapter: ReturnType<typeof createRealElectronWindowAdapter>, appId = 'demo') {
+    const handle = adapter.createAppWindow({
+      appId,
+      url: `${APP_SCHEME}://${appId}/`,
+      title: '演示应用 · PicoAide Harness',
+      partition: PARTITION,
+      width: 1280,
+      height: 720,
+      x: 0,
+      y: 0,
+      minimumWidth: 320,
+      minimumHeight: 240,
+    })
+    const win = FakeBrowserWindow.created[FakeBrowserWindow.created.length - 1]!
+    return { handle, win }
+  }
+
+  /** 派发一次渲染进程崩溃（真机上的 `reason` 取值）。 */
+  function crash(win: FakeBrowserWindow, reason = 'crashed'): void {
+    win.webContents.emit('render-process-gone' as never, { preventDefault: () => {} } as never, { reason, exitCode: 139 } as never)
+  }
+
+  /** 派发一次 `did-fail-load`（第 5 参 `isMainFrame` 是顶层/子框架的唯一判据）。 */
+  function failLoad(win: FakeBrowserWindow, options: { errorCode?: number, url?: string, isMainFrame?: boolean } = {}): void {
+    win.webContents.emit(
+      'did-fail-load' as never,
+      { preventDefault: () => {} } as never,
+      (options.errorCode ?? -105) as never,
+      'NAME_NOT_RESOLVED' as never,
+      (options.url ?? `${APP_SCHEME}://demo/`) as never,
+      (options.isMainFrame ?? true) as never,
+    )
+  }
+
+  it('①渲染进程崩溃后**自动重载一次**（否则永久空白窗口）', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { win } = openWindow(adapter)
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`])
+
+    crash(win)
+    await settleRecovery()
+
+    // 恰好多一次导航，且目标是**同一个应用 URL**（不是空白页、不是外站）。
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`, `${APP_SCHEME}://demo/`])
+    // 崩溃必须有可见痕迹（诊断面）。
+    expect(warned.some(message => message.includes('render-process-gone') || message.includes('crashed'))).toBe(true)
+  })
+
+  it('②重载之后再次崩溃 ⇒ 显示带「重试」按钮的失败页（不再自动重载）', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { win } = openWindow(adapter)
+
+    crash(win)
+    await settleRecovery()
+    expect(win.loaded).toHaveLength(2)
+
+    // 第二次崩溃：自动重载额度已用尽 ⇒ 只能给失败页。
+    crash(win)
+    await settleRecovery()
+
+    expect(win.loaded).toHaveLength(3)
+    const page = win.loaded[2]!
+    expect(page.startsWith('data:text/html')).toBe(true)
+    const html = decodeURIComponent(page)
+    // 失败页必须带**可点的重试入口**，且重试目标 = 崩溃前的应用 URL（重载前捕获）。
+    expect(html).toContain('id="retry"')
+    expect(html).toContain(`${APP_SCHEME}://demo/`)
+    expect(html).toContain('location.href')
+    expect(html).not.toContain('id="retry" disabled')
+  })
+
+  it('④同一 tick 的两个事件源（崩溃会同时派发进程级 + 导航级）只触发一次重载', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { win } = openWindow(adapter)
+
+    // 真机上 `render-process-gone` 与 `did-fail-load` 会先后到达；非单飞的实现会
+    // 并发发起两次 `loadURL`（错误页与 reload 谁后完成谁说了算）。
+    crash(win)
+    failLoad(win)
+    await settleRecovery()
+
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`, `${APP_SCHEME}://demo/`])
+    // 并发事件加入同一轮恢复 ⇒ 不出现第二个失败页/第二次 reload。
+    expect(win.loaded.filter(url => url.startsWith('data:'))).toHaveLength(0)
+  })
+
+  it('③子框架 did-fail-load（isMainFrame=false）**不**触发恢复；主框架 -3（被顶掉）也不', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { win } = openWindow(adapter)
+
+    failLoad(win, { errorCode: -312, url: 'https://example.com/embed', isMainFrame: false })
+    await settleRecovery()
+    // 一次 iframe 失败把整个窗口重载（或换成失败页）会把用户的草稿与视图状态掀掉。
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`])
+    expect(warned.some(message => message.includes('subframe'))).toBe(true)
+
+    // 顶层但被后续导航顶掉（ERR_ABORTED）不是故障。
+    failLoad(win, { errorCode: -3 })
+    await settleRecovery()
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`])
+
+    // 正对照：顶层真失败仍然走恢复（否则上一条断言只是因为"什么都不做"）。
+    failLoad(win, { errorCode: -105 })
+    await settleRecovery()
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`, `${APP_SCHEME}://demo/`])
+  })
+
+  it('健康状态订阅：崩溃⇒true、重载成功⇒false、失败页⇒true（模型面 crashed 的唯一真源）', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { handle, win } = openWindow(adapter)
+    const health: boolean[] = []
+    adapter.onAppWindowHealth?.(handle, snapshot => health.push(snapshot.crashed))
+    // 订阅即回报当前状态（否则"崩溃发生在订阅之前"会被永久漏掉）。
+    expect(health).toEqual([false])
+
+    crash(win)
+    await settleRecovery()
+    // 重载成功 ⇒ 窗口真的好了。
+    expect(health).toEqual([false, true, false])
+
+    // 第二次崩溃 ⇒ 失败页 ⇒ 状态停在"坏"。
+    crash(win)
+    await settleRecovery()
+    expect(health.at(-1)).toBe(true)
+  })
+
+  it('崩溃后再加载失败 ⇒ 状态仍是"坏"（失败页不是恢复）', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { handle, win } = openWindow(adapter)
+    const health: boolean[] = []
+    adapter.onAppWindowHealth?.(handle, snapshot => health.push(snapshot.crashed))
+
+    // 自动重载也失败：`loadURL` reject（被顶掉的那类不算，所以用真错误）。
+    win.webContents.failNextLoad(new Error('ERR_CONNECTION_REFUSED'))
+    crash(win)
+    await settleRecovery()
+
+    // 序列 = 首次加载 / 自动重载（失败）/ 失败页。
+    expect(win.loaded).toHaveLength(3)
+    expect(win.loaded[1]).toBe(`${APP_SCHEME}://demo/`)
+    expect(win.loaded[2]!.startsWith('data:text/html')).toBe(true)
+    expect(health.at(-1)).toBe(true)
+  })
+
+  it('用户点窗口自己的关闭按钮 ⇒ 订阅者收到通知（R16B-20 的原生事件源）', () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME })
+    const { handle, win } = openWindow(adapter)
+    let closed = 0
+    adapter.onAppWindowClosed?.(handle, () => { closed += 1 })
+    expect(closed).toBe(0)
+    // Electron 在用户关窗后派发 `closed`（宿主此前收不到任何回调）。
+    win.emit('closed' as never)
+    expect(closed).toBe(1)
+  })
+
+  it('clean-exit / killed 不算崩溃（正常退出与主动结束不得弹失败页）', async () => {
+    const adapter = createRealElectronWindowAdapter({ appScheme: APP_SCHEME, warn: message => warned.push(message) })
+    const { win } = openWindow(adapter)
+    for (const reason of ['clean-exit', 'killed']) crash(win, reason)
+    await settleRecovery()
+    expect(win.loaded).toEqual([`${APP_SCHEME}://demo/`])
+  })
+})

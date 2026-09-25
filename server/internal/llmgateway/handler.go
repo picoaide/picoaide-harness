@@ -108,8 +108,9 @@ func (a *API) handleChatCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
-	if blocked, msg := a.quotaBlocked(user); blocked {
-		serverauth.WriteError(c, http.StatusTooManyRequests, "BALANCE_EXHAUSTED", msg)
+	// R16C-02 + R17A-06：钱闸门（含"未定价模型"）唯一出口 —— 命中即写响应并返回，
+	// 被拒请求绝不转发上游。
+	if a.rejectBalanceAdmission(c, user, req.Model, raw, "chat") {
 		return
 	}
 
@@ -1582,23 +1583,16 @@ func (a *API) rateLimitPerMinute() int {
 	return n
 }
 
-// quotaBlocked 报告该用户是否应被网关拦截,以及可解释的原因。
-//
 // 2026-09-11 收敛:唯一的"钱"闸门 = **账户余额**(存量、消费即扣、同事务)。
 // 部门预算 / 员工金额配额 / 员工 token 配额全部下线(设计文档
 // docs/planning/2026-09-11-balance-quota-consolidation.md):
 // 多套并行的额度机制互相打架(充了钱仍被配额拦住),且只有余额是可对账的。
 //
-// 规则(仅一条):闸门开启 且 已开通余额账户 且 分位口径余额 <= 0 → 拒绝。
-// 未开通余额账户的用户不受余额闸门约束(存量部署开启闸门不会误拦全员)。
-// 查询失败一律 fail-closed(计费强制路径上 DB 瞬时故障不得放行)。
-func (a *API) quotaBlocked(user *serverstore.User) (bool, string) {
-	if user.IsAdmin {
-		return false, "" // 管理员豁免
-	}
-	return serverstore.BalanceBlocked(a.DB, user)
-}
-
+// R16C-02(审计 2026-09-25,P1)起,准入侧的判定**只有一处实现**:
+// `balanceAdmissionBlocked`(balance_gate.go) —— 它在"分位余额 <= 0 → 拒绝"这条
+// 历史规则之外追加了"最小计费额"与"学到的下限"两层(修前只判前者:余额 0.01 的
+// 账号可无限次真实调用上游并整笔回滚,账上零痕迹)。
+// 旧的 `quotaBlocked` 包装已删除 —— 判据与动作必须同源,不允许第二份入口。
 // rateLimiter is a per-user token bucket with bounded map and lazy cleanup.
 type rateLimiter struct {
 	mu      sync.Mutex

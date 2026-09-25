@@ -1139,8 +1139,10 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
   // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
   { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
-  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 13 条 + 锚点表的 `cordis.patch.yml`。
-  { package: 'dsh-enterprise', flattened: 0, effective: 14, library: 12 },
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 14 条 + 锚点表的 `cordis.patch.yml`。
+  // 14 条（原 13 条 + R16B-01 新增的 `session-identity`）：account-card 的余额快照要盖
+  // 会话身份章，而身份口径的唯一实现在 enterprise ⇒ 多一条真实的跨包 specifier。
+  { package: 'dsh-enterprise', flattened: 0, effective: 15, library: 13 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
   { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
@@ -1152,10 +1154,12 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 115
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 116
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
+// 114 → 116（R16B-01）：新增 `@picoaide/dsh-enterprise/session-identity`（account-card
+// 的余额快照身份章，跨包 specifier 真实存在）+ 它在 ASAR 导出表里的一条落点。
 
 /**
  * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
@@ -1601,6 +1605,9 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   //   `@picoaide/dsh-enterprise`                 ← profile 行 `picoaide-enterprise` 的入口
   //   `@picoaide/dsh-enterprise/loopback`        ← account-card `lib/index.js` 值导入
   //   `@picoaide/dsh-enterprise/server-connector/auth` ← account-card `lib/index.js` 值导入
+  //   `@picoaide/dsh-enterprise/session-identity` ← account-card `lib/index.js` 值导入
+  //     （R16B-01：余额快照的身份章。会话身份口径的唯一实现在 enterprise，account-card
+  //      只 import 它、不就地再拼一份 `serverURL + username`。）
   //   `@picoaide/dsh-connectors`                 ← profile 行 `pico-connectors` 的入口
   //   `@picoaide/dsh-connectors/invariant`       ← 该包声明的 `./invariant` 伴生入口
   //   `@picoaide/dsh-connectors/store`           ← browser `lib/index.js` 值导入
@@ -1609,6 +1616,7 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/index.js' },
   { specifier: '@picoaide/dsh-enterprise/loopback', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/loopback.js' },
   { specifier: '@picoaide/dsh-enterprise/server-connector/auth', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js' },
+  { specifier: '@picoaide/dsh-enterprise/session-identity', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/session-identity.js' },
   { specifier: '@picoaide/dsh-enterprise/package.json', archivePath: 'node_modules/@picoaide/dsh-enterprise/package.json' },
   { specifier: '@picoaide/dsh-connectors', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/index.js' },
   { specifier: '@picoaide/dsh-connectors/invariant', archivePath: 'node_modules/@picoaide/dsh-connectors/lib/invariant.js' },

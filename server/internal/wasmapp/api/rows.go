@@ -101,7 +101,7 @@ type rowsColumn struct {
 
 // rows 是员工面（**仅发布者本人**）的行浏览。
 func (h *Handlers) rows(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -119,7 +119,7 @@ func (h *Handlers) rows(c *gin.Context) {
 // 管理员能看的原因与"管理员能看诊断"一致：排障与合规。审计同样逐次留痕（动作名相同，
 // 但 `auditApp` 记录的是操作者账号 ⇒ 事后能分清"作者看的"与"管理员看的"）。
 func (h *Handlers) adminRows(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -506,7 +506,7 @@ func splitIdentifier(name string) []string {
 // 也不该借用他人令牌（审计会记错人）。这里用管理会话 + `capability:read`，
 // 操作者账号如实进审计。
 func (h *Handlers) adminSchema(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}

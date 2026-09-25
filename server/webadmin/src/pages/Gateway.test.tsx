@@ -590,6 +590,8 @@ describe('Gateway 保存面(F-07)', () => {
       'rate_limit',
       'retention_months',
       'server_base_url',
+      // R17A-06:未定价模型的准入策略(缺省 reject)也是本页的正常字段。
+      'unpriced_model_policy',
     ])
     for (const foreign of ['error_reporting_dsn', 'error_reporting_enabled', 'error_reporting_level', 'error_reporting_heartbeat', 'glitchtip_base_url', 'glitchtip_organization']) {
       expect(body[foreign]).toBeUndefined()
@@ -706,6 +708,20 @@ describe('出站体加工的两个闸门字段', () => {
     expect(puts[0].max_file_refs).toBe('600')
     expect(puts[0].body_parse_budget_mb).toBe('128')
     expect(puts[0].file_expiry_days).toBe('7')
+  })
+
+  // R17A-06:未定价模型的准入策略必须可运维 —— 缺省回显 reject,改选后原样提交,
+  // 且服务端没下发该字段时也回落到 reject(fail-closed 方向)。
+  it('未定价模型策略:缺省回显 reject,可改成 allow 并提交', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    expect(screen.getByLabelText('未定价模型').textContent).toContain('拒绝请求')
+    fireEvent.click(screen.getByLabelText('未定价模型'))
+    fireEvent.click(await screen.findByRole('option', { name: '允许使用(免费/内部模型)' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts[0].unpriced_model_policy).toBe('allow')
   })
 
   it('越界值被前端拦下（引用上限 0 与内存预算 32 都不提交）', async () => {

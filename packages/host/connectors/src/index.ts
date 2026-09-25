@@ -409,6 +409,50 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       ? { baseDir: options.storeBaseDir }
       : { username: currentUser(), serverURL: currentServerURL() },
   )
+
+  /**
+   * 凭据作用域闸门（R16B-04，第十六轮审计泳道 B）—— **写路径的前置条件**。
+   *
+   * 缺陷形态：`pico/session-changed` 的处理被丢进 `runLifecycle`（串行队列），任务
+   * 是 `await teardownAll()` → `await syncServerDefs()`（**一次真实网络往返**，预算
+   * 30s）→ `reconfigureUser()`（**`store` 只在这里被换成新账号的作用域**）。而
+   * `POST /api/pico/connectors/:id/connect` 是 HTTP 路由，**不在那条队列里**：窗口内
+   * 它读到的仍是上一个账号的凭据目录 —— token 模式会带着旧账号的 `fields`/令牌直接
+   * `registerMcp`，OAuth 模式会用旧账号的 refresh token 去换票，于是新账号的会话里
+   * 跑着旧账号凭据的 MCP 传输（同机两人共用时是跨账号泄漏；`teardownAll` 又把
+   * `states` 清空，面板此刻正好把每张卡画成「未连接」，主动邀请这一击）。
+   *
+   * 为什么是"拒绝"而不是"排队等切换完成"：排队会把 HTTP 请求挂在一条可能长达 30s
+   * （bootstrap 预算）的网络上；本仓既有取向是 **fail-closed 且不无限等待** —— 明确
+   * 拒绝 + 可诊断错误，让用户重试。
+   *
+   * 为什么不是"会话事件置位、`reconfigureUser()` 之后清位"的布尔闩：闩需要置位与
+   * 清账两处记账，任务一旦抛错或被更新的换代顶掉，闩就会永久关闭（或永久打开），
+   * 正是本仓"判定与记账各写一处"的历史教训。这里只有一个**单调的目标键**，判定就是
+   * 它本身：`credentialScopeSwitching()` ⇔「手上这个 `store` 不是这次会话要求的作用域」。
+   * 它自愈：`reconfigureUser()` 一落地 `store.dir` 就等于目标，闸门自动打开；目标被
+   * 更晚的会话事件覆盖时旧目标自动失效。任务抛错 ⇒ 闸门保持关闭（fail-closed：那时
+   * `store` 确实还是旧账号的目录），下一次会话事件即重试路径。
+   */
+  let scopeSwitchTarget: string | null = null
+  /** 唯一的闸门判定（与目标键同源，不存在第二个"是否正在切换"的读数）。 */
+  const credentialScopeSwitching = (): boolean =>
+    scopeSwitchTarget !== null && scopeSwitchTarget !== store.dir
+  /**
+   * 唯一的置位点：会话事件**同步**调用它（见下面 `pico/session-changed` 监听），用与
+   * `reconfigureUser()` 完全相同的取值链（服务读优先、事件载荷兜底）算出"这次会话
+   * 要求的作用域目录"。
+   *
+   * `options.storeBaseDir` 显式给定时作用域从不随账号变，因此不存在可切换的目标
+   * ——直接放行（固定目录的组合/嵌入方行为逐字不变）。
+   */
+  const beginCredentialScopeSwitch = (eventServerURL: string | null): void => {
+    if (options.storeBaseDir) return
+    scopeSwitchTarget = new ConnectorStore({
+      username: currentUser(),
+      serverURL: currentServerURL() ?? eventServerURL,
+    }).dir
+  }
   const states = new Map<string, ConnectorState>()
   /**
    * Ids whose STORED credential currently carries a refresh token — i.e. exactly
@@ -1335,6 +1379,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // catalog is synced from bootstrap FIRST so the restore registers the
   // current server directory (defs are server-issued now).
   ctx.on('pico/session-changed', (next: unknown) => {
+    // R16B-04：闸门必须在**会话事件一开始**就落下（同步、早于任何 await）——
+    // 生命周期任务里的 `reconfigureUser()` 要等一次网络往返，这段窗口里 `store`
+    // 还是上一个账号的目录。判定只看目标键，所以这里置位、`reconfigureUser()`
+    // 落地即自动解除（见 `credentialScopeSwitching` 的注释）。
+    beginCredentialScopeSwitch((next as { serverURL?: string } | null)?.serverURL ?? null)
     void runLifecycle(async () => {
       const epoch = lifecycleEpoch
       await teardownAll()
@@ -2713,6 +2762,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const startConnect = async (id: string): Promise<void> => {
     const def = getDef(id)
     if (!def) throw new Error(`unknown connector: ${id}`)
+    // R16B-04（纵深防御）：路由面已经用过同一条闸门，但 `startConnect` 还有别的
+    // 调用点（`submitAuth` 之后的续跑，以及将来新增的内部调用），所以闸门在**凭据
+    // 读取之前**再判一次 —— 判定函数只有 `credentialScopeSwitching()` 这一个，
+    // 不设第二个读数。抛错让调用方按普通连接失败分类，行上会出现
+    // `flow.scopeSwitching` 的文案。
+    if (credentialScopeSwitching()) throw new Error(copy('flow.scopeSwitching'))
     // P0-1: re-entrancy guard — a second connect on the same connector while
     // a flow is in flight must not start a duplicate authorization flow
     // (two callback ports, two browser windows, credential writeback race).
@@ -3311,6 +3366,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      * {@link applyRefreshFailure} the other two paths use.
      */
     const refreshTokens: JsonHandler = async (req, res) => {
+      // R16B-04：读凭据 + 写凭据（续期）都在这个作用域上 ⇒ 先过闸门。
+      if (refuseScopeSwitch(res)) return
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
@@ -3351,6 +3408,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
 
     const connect: JsonHandler = (req, res) => {
+      // R16B-04（本轮缺陷的正面入口）：token 模式会立刻用这里的凭据注册 MCP，
+      // OAuth/device 模式会把旧账号的 refresh token / client 注册发给 IdP ——
+      // 两者都必须在**任何凭据读取之前**被闸门拦住。
+      if (refuseScopeSwitch(res)) return
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
@@ -3403,6 +3464,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
 
     const authSubmit: JsonHandler = async (req, res) => {
+      // R16B-04：这个路由把用户填的凭据**写进** `store`，写的是哪个账号的目录
+      // 由作用域决定 ⇒ 同样先过闸门（否则字段会落进上一个账号的目录）。
+      if (refuseScopeSwitch(res)) return
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
@@ -3446,6 +3510,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
 
     const disconnectHandler: JsonHandler = async (req, res) => {
+      // R16B-04：`disconnect()` 会删掉这个作用域里的凭据文件 —— 换号窗口内那一发
+      // 删的是**上一个账号**的文件，用户以为删的是自己刚看到的这张卡。
+      if (refuseScopeSwitch(res)) return
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
@@ -3460,6 +3527,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      * this answer arrives.
      */
     const approve: JsonHandler = async (req, res) => {
+      // R16B-04：这一发会写 `approvals`（同样是按账号+服务端作用域的账本）并立刻
+      // `registerMcp` 用那个作用域的凭据起传输 ⇒ 先过闸门。
+      if (refuseScopeSwitch(res)) return
       const rawId = decodeSegment(req.url?.split('/')[4] ?? '')
       if (rawId === null) return json(res, 400, { error: 'malformed connector id' })
       const id = rawId
@@ -3514,6 +3584,28 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     }
 
     /**
+     * R16B-04：凭据作用域闸门的**路由面**。返回 true = 已拒绝（响应已写完），
+     * 调用方必须 `return`。
+     *
+     * 这是"写路径的前置闸门"：换号窗口内 `store` 仍指向上一个账号的凭据目录，
+     * 凡是会读/写那份凭据（或它派生出的本地审批账本）的路由都必须先问这一句。
+     * 判据只有 {@link credentialScopeSwitching} 一个（与 `startConnect()` 内部的
+     * 那一处共用），所以不存在"路由漏判、内部另判"的漏点。
+     *
+     * 409（Conflict，而不是 500/503）：请求本身没问题，是这台机器此刻的状态不允许
+     * —— `{error, hint}` 两个字段与同文件其它拒绝信封同形，客户端 `fetchJson` 会把
+     * `error` 原样渲染给用户，`hint` 说明"稍后重试即可"。
+     */
+    const refuseScopeSwitch = (res: ServerResponse): boolean => {
+      if (!credentialScopeSwitching()) return false
+      json(res, 409, {
+        error: copy('flow.scopeSwitching'),
+        hint: copy('flow.scopeSwitchingHint'),
+      })
+      return true
+    }
+
+    /**
      * R7-RV-3（第三轮）：`guard()` 之上再要一份持有性证明——口径与
      * `packages/host/enterprise/src/auth-gate.ts` 的 r7c-6 逐条一致。
      *
@@ -3559,13 +3651,21 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const requireWriteProof = (req: IncomingMessage, res: ServerResponse): boolean =>
       req.method === 'GET' || proofOfPossession(req, res)
 
-    const disposers = [
-      ctx.webServer.register({ kind: 'exact', path: '/api/pico/connectors', handler: (req, res) => {
+    // R16B-14（第十六轮审计泳道 B）：`ctx.webServer.register` **不是 Cordis
+    // effect** —— Cordis 只在 effect 回调**正常返回**时收集返回的 disposer。
+    // 早先这两条 register 写在数组字面量里，第二条（prefix）抛错时第一条
+    // （exact）的 disposer 既没进 Cordis 的账、也没人调用，路由就留在一个已卸载
+    // 的世代上（同仓 cron 用 try + 部分回滚，这里照它的形态）。
+    // 注意 catch 里必须**把错误抛出去**：吞掉就等于"注册失败但插件看起来加载成功"，
+    // 少一条路由却没有任何信号。返回的 disposer 语义也保持"全部注册成功才返回"。
+    const disposers: Array<() => void> = []
+    try {
+      disposers.push(ctx.webServer.register({ kind: 'exact', path: '/api/pico/connectors', handler: (req, res) => {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
         if (!guard(req, res)) return
         list(req, res)
-      } }),
-      ctx.webServer.register({ kind: 'prefix', path: '/api/pico/connectors', handler: async (req, res) => {
+      } }))
+      disposers.push(ctx.webServer.register({ kind: 'prefix', path: '/api/pico/connectors', handler: async (req, res) => {
         const segments = req.url?.split('/') ?? []
         const action = segments[5]?.split('?')[0]
         const handlers: Record<string, JsonHandler> = {
@@ -3604,8 +3704,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // and surface as an unhandled rejection when it throws.
         if (handler) return await handler(req, res)
         json(res, 404, { error: 'not found' })
-      } }),
-    ]
+      } }))
+    } catch (error) {
+      // 部分回滚：已经注册成功的那几条必须先 dispose 再把错误交给 Cordis。
+      for (const dispose of disposers.splice(0).reverse()) dispose()
+      throw error
+    }
     return () => { for (const dispose of disposers) dispose() }
   }, 'pico connectors: http routes')
 

@@ -336,7 +336,12 @@ func (a *API) handleLogin(c *gin.Context) {
 	}
 	// P2: bound credential lengths — a multi-MB "username" would otherwise
 	// reach the password provider (LDAP query / hash compare) as-is.
-	if len(req.Username) > 128 || len(req.Password) > 1024 {
+	//
+	// R17A-09（审计 2026-09-25，P3）：用户名上限是**唯一真源**
+	// （serverstore.MaxUsernameBytes，与写入侧 CreateUser 的同一道闸）——
+	// 两端必须同值，否则"库里存在一个永远登不进来的账号"，而审计行里的
+	// username 还会被 EscapeControlLimit 静默截断（与 users.username 不再逐字相等）。
+	if len(req.Username) > serverstore.MaxUsernameBytes || len(req.Password) > 1024 {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名或密码过长")
 		return
 	}

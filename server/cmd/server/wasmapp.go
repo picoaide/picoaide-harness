@@ -220,7 +220,7 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 	// 编译子系统缺一个可选的辅助二进制（picoaide-app-compile）不该让**整个**
 	// 服务端起不来 —— 登录/网关/审计/客户端面都与它无关。因此这里**不 Fatalf**：
 	// 失败时把 compiler 留 nil，发布链路会以可读的错误 fail-closed
-	// （api.requireReady 对 nil Compiler 返回明确信封 + AllowPublish 还会因
+	// （api.requireCompiler 对 nil Compiler 返回明确信封 + AllowPublish 还会因
 	// compile_available=false 拒绝发布），其余功能照常。
 	// ⚠️ 部署面必须构建该二进制并与 server 放在同一目录（见 Dockerfile/Makefile）：
 	// 不修交付链 = 发布功能静默不可用（会在日志里"大声"记录 + /readyz 上可见）。

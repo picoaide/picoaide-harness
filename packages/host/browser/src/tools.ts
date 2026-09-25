@@ -603,9 +603,14 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
         title: '',
         loading: false,
         active: false,
-        // 应用窗口不在浏览器标签池里、也没有"崩溃自动重载"，所以恒为 false
-        // （字段在两个 kind 上都存在，模型不需要按行判形状）。
-        crashed: false,
+        // **如实上报**（R16B-19）：宿主在渲染进程崩溃 / 顶层文档加载失败时把它标成
+        // `crashed`，并在一次成功的应用文档加载之后清回 false（唯一写入点是
+        // `@picoaide/dsh-wasm-apps-host` 的 windows.ts，经 surface 注册表投影到这里）。
+        //
+        // 修这条之前这里是硬编码 `false`，注释自承"应用窗口没有崩溃自动重载"——
+        // 那句话早就不是事实了，而后果是**窗口永久空白时模型看到的一切都正常**
+        // （用户与 AI 都不知道它坏了）。字段在两个 kind 上都存在，模型不需要按行判形状。
+        crashed: surface.crashed === true,
       }))
       return {
         tabs: [...browserTabs, ...appTabs],
@@ -1498,7 +1503,14 @@ function formatTabs(value: unknown): string {
         const label = isApp
           ? `app_id=${t.app_id !== undefined && t.app_id !== '' ? t.app_id : '(unknown)'}`
           : (t.title || t.url)
-        return `${t.id}: [${kind}] ${label}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}${t.crashed === true ? ' [crashed — retry with browser_reload]' : ''}`
+        // 崩溃提示按 kind 分（R16B-19）：`browser_reload` 只认浏览器标签
+        // （`resolveTab` 对 `kind:'app'` 明确拒绝），把应用窗口的模型送到那个工具上
+        // 只会得到一条必然报错。应用窗口的出路是**窗口里的失败页**（宿主已挂上
+        // 带「重试」按钮的 `data:text/html`），所以这里只说事实。
+        const crashed = t.crashed === true
+          ? (isApp ? ' [crashed]' : ' [crashed — retry with browser_reload]')
+          : ''
+        return `${t.id}: [${kind}] ${label}${t.active ? ' (active)' : ''}${t.loading ? ' [loading]' : ''}${crashed}`
       })
   // 2026-09-16：把"用户拿着控制权"直接写在模型看得到的地方（此前只有被拒的
   // 工具调用会带这个信息，而现场那条出口被工具预算吞掉了）。

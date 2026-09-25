@@ -36,6 +36,8 @@ export const zh = {
   'capability.builtinRetry': '重试',
   'capability.builtinBadge': '平台内置',
   'capability.dirty': '已本地修改',
+  'capability.originOtherServer': '来自另一台服务端',
+  'capability.originSymlink': '符号链接（不支持上传）',
   'capability.runtimeName': '调用名',
   'capability.pending': '审核中',
   'capability.approved': '已共享',
@@ -70,6 +72,10 @@ export const zh = {
   'capability.loading': '加载中…',
   'capability.retry': '重试',
   'capability.loadError': '加载失败',
+  // R16B-26：失败面塌缩（与 R16B-08 同族）——只回一句「加载失败」时
+  // 401/403/404/5xx/形状漂移全不可区分。带 cause 的文案单独一键，
+  // 让"用户可读"与"排障可读"同时成立。
+  'capability.loadErrorDetail': '加载失败：{error}',
   'capability.failed': '操作失败：{error}',
   'capability.nameTaken': '名称已被占用:「{name}」已存在于能力中心,请更换名称或联系管理员',
   'capability.installedName': '已安装 {name}',
@@ -173,6 +179,8 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.builtinRetry': 'Retry',
   'capability.builtinBadge': 'Built-in',
   'capability.dirty': 'Locally modified',
+  'capability.originOtherServer': 'From another server',
+  'capability.originSymlink': 'Symbolic link (upload unsupported)',
   'capability.runtimeName': 'Invoke as',
   'capability.pending': 'In review',
   'capability.approved': 'Shared',
@@ -202,6 +210,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.loading': 'Loading…',
   'capability.retry': 'Retry',
   'capability.loadError': 'Failed to load',
+  'capability.loadErrorDetail': 'Failed to load: {error}',
   'capability.failed': 'Action failed: {error}',
   'capability.nameTaken': 'Name already taken: "{name}" already exists in the Capability Hub. Choose another name or contact your administrator.',
   'capability.installedName': 'Installed {name}',

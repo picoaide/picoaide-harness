@@ -1372,3 +1372,43 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 **门禁**：`node scripts/check-root-guards.mjs` **17/17 EXIT=0**；`bash scripts/verify-wasm-client-only.sh --portable` **PASS 13 / FAIL 0**（Q 把 R15A/T 的新文件按门禁自己的机制登记：`legacy_config.go` 是"拒绝清单 + 给运维的清理命令"性质的**契约模块**，按 `appcfg` 同款机制整文件声明 + 独立预算 5，并**拒绝**用"把键名拆串"这类规避手法；`budgets.ann` 第一版按 67 改过、实测契约模块优先归 B 后 **改回 66，不放宽不需要放宽的预算**）；`corepack yarn check` 见下；Go 侧 S 跑 `internal/wasmapp/...` 30 包 + `internal/serverstore` 全包（1239.9s）+ 五个相邻包全绿，Q 跑 serverstore 整包与 webadmin 全量（45 文件 / 691 用例）；`gofmt -l` 空。
 
 **本轮引入的语义变更（已复核并登记）**：WASM 版本的"软删"从"保留字节"改为"**释放字节**"（配额可恢复性的前提），依据是"唯一调用方是发布补偿闭包 + 无任何复原写入"；若日后引入"恢复已删版本"的端点，必须同时把字节保留语义与配额口径一起改回来。
+
+---
+
+### 7.51 第十六轮审计（2026-09-25，三路）：判据面被打穿一次，产品面两条"钱"的洞
+
+**本轮 = 1 路对抗审计（上一轮修复批）+ 2 路产品面新扫掠（客户端 / 服务端）**。结论：**0 P0 / 约 15 P1 / 约 25 P2** ⇒ 仍未达成"连续两轮零新增 P0/P1"。逐轮计数追加：第十四轮 3+6、第十五轮 0+8、**第十六轮 0+~15**。**特征变化**：连续两轮零 P0（结构性的"闸门自锁/判据自杀"类没有再现），但 P1 数量是本轮最高 —— 因为**产品面第一次被 lanes B/C 系统扫**（两条"钱"的洞）与**判据面被对抗审计打穿一次**（18 种形态）同时发生。
+
+#### 判据面：CI 执行面闭包被打穿，随后**语义反转**（本轮最重要的一处）
+
+R16-A 用 **18 种新形态**证明 R15A-03 的修法方向不闭合：四条静态根守卫全绿的同时，端到端入口**真的会被执行**（tripwire 实测 14 条 `REACHED`）。形态包括：`env -S/--split-string='<命令>'`、`flock <锁文件> make …`、`taskset <掩码> make …`、`npm exec --call='…'`/`npx --call='…'`、`bash --noprofile --norc -c '…'`、`xargs -a F -I{} make …`、`find … -exec make … \;`、`poetry run make …`、`just <recipe>`、`python3 -m <模块>`、`node <仓根脚本>`、`node -e "$(cat f)"`、Makefile 顶层 `X := $(shell bash …)`（**解析期**执行）、compose `command: *锚点` / `command: bash ${E2E}` + `--env-file` 插值 / `run --entrypoint=bash`。
+
+**修法（`458ddda55d`）= 把语义反过来**：从"枚举我认识的包装词、剥不到就放过"改成 **"命令位上的可执行名必须登记，未登记即红 + 读不懂即红"**；跟随面从 5 个目录前缀扩到**仓内任何被跟踪路径**。结果：**18/18 判红且逐条具名点名**，13 条对照 12 红 1 绿"与预期不符 0 条"；**每条形态一条独立变异、18/18 复漏**（附带发现：只拆修法保留自证时守卫仍红 ⇒ 每条变异实际是"拆修法+拆自证"，已如实写明）；交叉矩阵 18×4 每条至少一条守卫红；**18/18 `gate=exit 1` ⇒ 红在守卫处、根本没跑**（`prove-gated.log`）。
+**新口径（凭据行已逐字写出）**：CI **入口形态**（workflow `run:` / manifest 别名值 / Makefile 目标体与 `$(shell …)` / compose `command`·`entrypoint`）命令位上，凡不在 `CI_STANDARD_COMMANDS`（223 个标准词）里的可执行名必须在 `CI_COMMAND_REGISTRY` 登记（含形态+理由+批准人），**未登记即红、死条目也红**；**认账边界**：登记制只罩入口形态，被跟随脚本**正文**不逐词登记（第一版罩进去产生 1028 条误报 —— 脚本命令位含自定义函数与 shell 语法构件），那部分由"载体跟随 + token 网 + 文本网 + make/compose 扩张"覆盖。
+
+#### 产品面两条"钱"的洞（P1）
+
+| 编号 | 位置 | 现场 | 证据 |
+|---|---|---|---|
+| **R16C-01** | `llmgateway/admin.go:1105` | `PUT /api/server/admin/models/:id` 改价格的审计是 **fire-and-forget**，而同文件**孪生路径** `PUT /providers/:id` 已加固为 `AuditLogTx` 同事务 ⇒ 表级 CHECK 只阻断 `model_update` 审计时：**HTTP 200 + 价格 1.0→100.0 落库 + 审计 0 行 + 日志 0 行**（同法阻断 `provider_update` = 500 + 整体回滚 + SQLSTATE）。规则真源 `serverstore/audit.go:145-151`：**改配置即改钱**的路径不许这种不一致 | 真 PG + 真 HTTP；修后 **500 + 行逐列不变**，`createModel` 与全仓扫描出的第三处 `balance_adjust`（直接动钱）一并收口 |
+| **R16C-02** | `serverstore/balance.go:816` | 余额闸门只判"分位余额 > 0"，**不预留最小计费额** ⇒ 余额 **0.01 元**的账号可**无限次**请求：每次**真实调用上游**（假上游命中 +13、服务端算出 cost 0.02），随后被 429 拒绝并**整事务回滚** ⇒ 四张账表**一字不变**、webadmin 无痕迹；默认不限速 + 只限并发 32 ⇒ 循环无终点 | 修后：上游命中 **+0**，`server-info.balance.admission_rejections=12`（带 reason/required/balance）+ 12 行可检索拒绝日志；三层 = 最小计费额（prompt 估算×输入价，微元精度）+ **学到的下限**（结算失败即抬到当时余额之上、充值后自动解除）+ 计数/日志/`server-info` |
+
+#### 客户端 5 条 P1（R16-B）
+
+- **R16B-02（R16-B 判最该先修；上一批修复引入的回归）**：OAuth「等用户回调」阶段把 abort 监听提前摘掉、清掉 5 分钟定时器、丢掉回调 server 句柄 ⇒ **取消是假的**、超时永不触发、**每放弃一次泄漏一个仍在监听的 loopback 端口**。修法＝三条收尾交还 `finally` 的 `releaseFlow()`，并加可注入的 `flowTimeoutMs` 让"等待阶段仍有武装定时器"**可判**（3 变异全红：只搬 `callbackServer=null` 那条红在**端口断言**）。
+- **R16B-01**：同服务端**换号 A→B** 后 `/api/pico/account/usage` 在 300ms 去抖窗口内回 **200 + A 的余额**并渲染成 `Bbob·¥11.00`（跨账号金额交付）。修法＝宿主快照按 `sessionKey` 建键、键变**立刻**丢数据并撤在途；路由出口 `owns()` 不符即 401；200 响应带 `sessionIdentity()` 身份章、渲染期 `identityMismatch` 即作废。4 变异全红，其中一条**逐字复现**审计现场 `expected 'Bbob·¥11.00' not to contain '11.00'`。
+- **R16B-04**：换号后 `store` 要等一次网络往返（≤30s）才切换，窗口内 `POST /connect` 读**上一个账号的凭据目录**注册 MCP。修法＝写路径前置**作用域闸门**（单调目标键 + 唯一判定函数，接在 connect/auth-submit/refresh/disconnect/approve 五条路由，409+提示），复核变异逐字复现缺陷签名。
+- **R16B-19**：WASM 应用窗口**零崩溃恢复、零加载失败恢复**（shell 窗口两者都有），模型面硬编码 `crashed:false` ⇒ 用户与 AI 都看不出它坏了。修法＝照 shell 窗口形态补 `render-process-gone`/`did-fail-load`（只认主框架、跳 `-3`）/`did-finish-load` + 单飞状态机 + 失败页重试，并把 `crashed` 如实上报。
+- **R16B-03**：「未登录记住这次打开 ⇒ 登录后自动继续」在登录那一跳**没有消费方**（整文档导航、面板未挂载），真正兑现点是**下次激活应用中心**⇒ 承诺没兑现且会自己弹窗。修法＝消费点搬到页面装载那一跳 + **原子认领** `claimOpenIntent`（实测"先清后开"不足以防两次开窗）。
+
+#### 其余 P2/P3（摘要）
+
+`R16A-17`（`SoftDeleteWasmApp` 清 **pending** 版本归档却不置 `deleted_at` ⇒ approve 谓词放行、真 PG 可产出 `approved + archive IS NULL`，而注释明文声称"任何交错都产不出"）；`R16A-18`（webadmin `Capabilities`/`Connectors` 的"读取失败=确定态"用了与**动作失败共享**的 error ⇒ 一次写失败把整表换成"读取失败"）；`R16C-03`（审计哈希链校验**只有进程启动一个执行者** ⇒ 篡改后不重启仍报 `chain_intact: true`）；`R16C-04`（`audit_logs.username` 不转义控制字符，而它承载**未认证**输入 ⇒ `\n` 造出"第二行"、NUL 让该条审计**永远写不进去** ⇒ 登录失败留痕可被攻击者自己抹掉）；`R16C-05`（审计批量写失败原因不进日志）；`R16C-06`（文档点名"可调"的两个旋钮没进 compose ⇒ 写进 `.env` 也静默无效）；以及客户端 20 条（装载器每次无关 DOM 变更整面板重渲染、`archiveUpstreamError` 吞上游 code/message、write-proof 拒绝信封 6 包 8 处手抄无对拍、关窗遗留 ghost surface、能力中心 30s 轮询可回滚乐观状态、cron SSE 路由 disposer 缺口、wasm-apps-host 无 teardown 等）。
+
+#### 本轮判为"打不坏"（实跑攻击失败）
+
+**Q 面**：MFA 409 **不锁死**（自助 disable / 管理员 resetUserMFA / CLI `--reset-mfa` 三条出路都走 `ClearUserMFA`，不受新谓词影响）；`DeleteUser` 级联真 PG 完整（8 表各 0 行、被删用户自己的审计仍可查、资金不变量成立）。**S 面**：GC 新分支不碰活版本、配额少算只覆盖不可服务行、无 restore 路径、文案已同步。**T 面**：生产分页接线被 `TestR15CTokenListWiringUsesPagedHandler` 钉住（改回旧实现当场红）、**4 实例并发回收**真 PG 恰好删 2000 条 / 0 错误 / 活令牌完好、配额桶满淘汰而非拒绝。**P 面**：`safeHit()` 值级擦除链与"强制改密 403 按 **code** 分支（不动其它 403）"。
+
+#### 方法学（本轮新增三条）
+
+① **"打不坏"清单与"打得坏"清单同等重要**：三路共记录 30+ 项实跑失败的攻击，它们是"这条修复真的承重"的唯一证据。② **量具自检要写进结论**：R16-A 用"13 个对照（12 必须红 + 1 必须绿）13/13 与预期一致"证明"绿不是量具坏了"；R16-C 记录两次差点误判的量具故障（单实例锁让 env 用例全红、在已篡改的库上验链完整性）。③ **判据的"枚举方向"本身是缺陷源**：闭包从"枚举包装词"到"命令位登记制"的反转，是本轮唯一一处**结构性**修复 —— 它把"我认识的形态"换成"我不认识就拒绝"，这也是后续轮次能否收敛的关键杠杆。**本轮另记一条 P2 残留**：WASM 门禁的组级台账在**同一工作树并发运行**时会被互相污染（本主控实测：同时跑 `verify-wasm-client-only.sh` 与含该门禁的 `check-root-guards.mjs` ⇒ 台账出现两行 group 2、计数面与台账面不同源而假红；串行复跑 17/17 PASS）—— CI 是串行的不受影响，但本地/并发会话会踩。

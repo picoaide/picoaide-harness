@@ -584,14 +584,28 @@ func SetReleaseStatus(db *sql.DB, kind, appID, version, status, reason string) e
 
 // SetReleaseStatusForReview 是**审核路径专用**的状态写入(F2-N3 + N-4):
 //
-//   - approved:条件 UPDATE(`archive IS NOT NULL AND deleted_at IS NULL`),
-//     与「归档非空」在同一语句里判定。条件不满足时区分「行不存在」
-//     (ErrNotFound)与「归档已被拒绝释放」(ErrReleaseArchiveCleared),
+//   - approved:条件 UPDATE(`archive IS NOT NULL AND deleted_at IS NULL
+//     AND 应用未退役`),与「归档非空」在同一语句里判定。条件不满足时区分
+//     「行不存在」(ErrNotFound)与「归档已被释放」(ErrReleaseArchiveCleared),
 //     调用方据此回 404 / 409。
 //     `status <> 'rejected'` 的例外:从未被拒过的行(历史/播种数据)archive
 //     列为 NULL 时仍允许通过审核 —— 「归档被释放」这件事**只**发生在下面的
 //     rejected 转换里,所以 `status='rejected' AND archive IS NULL` 与「被
 //     释放过」等价;这条例外让迁移前的存量行不受影响(它们仍走串行审核)。
+//
+//     **应用未退役**(R16A-17 的收口点,2026-09-25 修正为谓词侧):退役
+//     (`SoftDeleteWasmApp`)会清空该应用名下**全部**版本的 archive —— 包括
+//     `status='pending'` 的待审版本 —— 而上面的例外对 pending 行恒真 ⇒ 没有
+//     这条条件时,"退役 + 审核通过"的交错会产出 `approved + archive IS NULL`
+//     的坏行(应用已退役,今天潜伏;一旦有"恢复应用"或任何以 status='approved'
+//     为判据的读面,它立刻变成"当前生效版本没有字节")。
+//     为什么放在这里而不是"退役时给 release 行置 deleted_at":那种写法会把
+//     退役变成**版本级删除**,退役后保留期内作者/管理员就读不到版本清单了
+//     (`TestMyReleasesSurvivesRetirement` 钉住的产品语义,见 SoftDeleteWasmApp
+//     的注释)。跨表 EXISTS 在这里是安全的:两个并发写者最终都要拿 release 行的
+//     行锁,后到的那条在 EPQ 里用新快照重新求值整条 WHERE(含子查询)⇒ 谁先提交
+//     谁说了算,交错产不出坏行。
+//
 //   - rejected:拒绝与释放归档在**同一条 UPDATE**里完成(agentshare-5 的
 //     存储上界:拒绝即释放,否则员工可无限循环「上传 → 被拒」堆字节)。
 //     调用方不需要、也不应该再补一次清归档 —— 「置 rejected」与「清 archive」
@@ -616,7 +630,10 @@ func SetReleaseStatusForReview(db *sql.DB, kind, appID, version, status, reason 
 		res, err := db.Exec(`UPDATE app_releases SET status = ?, reason = '',
 			updated_at = `+NowExpr()+`
 			WHERE kind = ? AND app_id = ? AND version = ? AND deleted_at IS NULL
-			  AND (archive IS NOT NULL OR status <> 'rejected')`,
+			  AND (archive IS NOT NULL OR status <> 'rejected')
+			  AND EXISTS (SELECT 1 FROM apps a
+			              WHERE a.kind = app_releases.kind AND a.app_id = app_releases.app_id
+			                AND a.deleted_at IS NULL)`,
 			status, kind, appID, version)
 		if err != nil {
 			return err

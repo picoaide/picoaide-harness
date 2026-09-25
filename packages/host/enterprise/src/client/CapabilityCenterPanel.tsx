@@ -104,8 +104,20 @@ interface CapabilityItem {
   originChannel?: string | undefined
   /** 溯源：来源应用 ID（即使用户改了目录名也能认出归属）。 */
   originAppId?: string | undefined
+  /**
+   * 溯源：来源**服务端**——只在"这一份是另一台服务端（另一个部署/租户）装的"时下发
+   * （R17B-04）。此时宿主已把它按本机内容处理（更新/删除都要确认），面板只负责把
+   * 事实说出来：同名同版本在别的服务端上"已安装"是假象，模型读的是上一租户的内容。
+   */
+  originServer?: string | undefined
   /** 溯源：安装后内容被本地修改过。 */
   dirty?: boolean | undefined
+  /**
+   * 本机那一份是库根里的**符号链接**（R17B-01）：运行时照旧加载它，但
+   * `packSkill` 有意拒收链接形态（避免把链接目标里的库外文件打进上传包）⇒
+   * 这一格不给「上传」按钮，只标"符号链接"。
+   */
+  originSymlink?: boolean | undefined
   /** 运行时技能名（SKILL.md 的 name）；与 name 不同时需显式提示。 */
   runtimeName?: string | undefined
   /**
@@ -487,6 +499,8 @@ export type CardActionPlan =
   | { kind: 'transferred' }
   /** 已下架且本机没有可卸的那一份（R5-B-1）：同样只报状态。 */
   | { kind: 'delisted' }
+  /** 库根里的**符号链接**形态（R17B-01）：运行时会加载，但打包/上传入口有意拒收 ⇒ 不给假按钮。 */
+  | { kind: 'linked' }
 
 /**
  * 本机这一份是不是"从目录装进来的那一份"（{@link isDelistedItem} 推断判据的一半）。
@@ -614,6 +628,9 @@ export function planCardAction(item: CapabilityItem): CardActionPlan {
         localContent: needsOverwriteConfirm(item),
       }
     }
+    // R17B-01：符号链接形态（运行时加载得到、但打包入口有意拒收）⇒ 只报事实。
+    // 位置在"转让/下架/可卸载"三档之后：本机若真有规范落点可卸，卸载仍是可达动作。
+    if (item.originSymlink === true) return { kind: 'linked' }
     if (item.uploadStatus === 'rejected') return { kind: 'reupload' }
     if (item.uploadStatus === 'pending') return { kind: 'review', status: 'pending' }
     if (item.uploadStatus === 'approved') return { kind: 'review', status: 'approved' }
@@ -907,7 +924,9 @@ function mergeItemGroup(rows: readonly CapabilityItem[]): CapabilityItem {
     localOwnership: local?.localOwnership ?? 'unknown',
     originChannel: local?.originChannel ?? pickByAuthority(byAuthority, row => row.originChannel, () => true),
     originAppId: local?.originAppId ?? pickByAuthority(byAuthority, row => row.originAppId, () => true),
+    originServer: local?.originServer ?? pickByAuthority(byAuthority, row => row.originServer, () => true),
     dirty: local?.dirty ?? pickByAuthority(byAuthority, row => row.dirty, () => true),
+    originSymlink: local?.originSymlink ?? pickByAuthority(byAuthority, row => row.originSymlink, () => true),
     runtimeName: pickByAuthority(byAuthority, row => row.runtimeName, v => v !== ''),
     isLocal: rows.some(row => row.isLocal === true) ? true : undefined,
     uploadStatus: local?.uploadStatus ?? pickByAuthority(byAuthority, row => row.uploadStatus, () => true),
@@ -1239,8 +1258,20 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       if (seq !== loadSeqRef.current) return
       setItems(prev => applySectionRows(prev, key, rows))
       setSection(key, { status: 'ok' })
-    } catch {
+    } catch (cause) {
       if (seq !== loadSeqRef.current) return
+      // R16B-26（2026-09-25，与 R16B-08 同族）：catch 把 cause **整个丢掉** ⇒ 用户
+      // 只看到「加载失败」+ 重试，401/403/404/5xx/形状漂移一律不可区分，而且**零日志**
+      // （打包版没有可见控制台，连支持都拿不到线索）。两个 fetcher 抛的都是
+      // `HTTP <status>`（服务端业务信封原文优先），带上它：可见文案走带占位符的那条
+      // 字典键（用户仍读到本地化的"加载失败"，机器可读的部分跟在后面），同时打一条
+      // 可检索的 warn 供诊断包取用。
+      const detail = cause instanceof Error ? cause.message : ''
+      if (detail !== '') {
+        console.warn(`[capability] loading the ${key} section failed: ${detail}`)
+        setSection(key, { status: 'error', error: t('capability.loadErrorDetail', { error: detail }) })
+        return
+      }
       setSection(key, { status: 'error', error: t('capability.loadError') })
     }
   }
@@ -1549,6 +1580,7 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
           <Chip tone="neutral" plain>{`v${item.version}`}</Chip>
         )}
         {item.dirty === true && <Chip tone="warn">{t('capability.dirty')}</Chip>}
+        {item.originServer !== undefined && <Chip tone="warn">{t('capability.originOtherServer')}</Chip>}
       </>
     )
   }
@@ -1715,6 +1747,10 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
                     // 已下架且本机没有可卸的一份（R5-B-1）：同样只报状态。
                     : plan.kind === 'delisted'
                       ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="neutral" plain>{t('capability.delisted')}</Chip></span>
+                      // 符号链接形态（R17B-01）：`packSkill` 有意拒收（避免把链接目标里的
+                      // 库外文件打进上传包）⇒ 上传按钮点了必然失败，这一格只标事实。
+                      : plan.kind === 'linked'
+                        ? <span style={{ flex: 1, display: 'flex', justifyContent: 'center' }}><Chip tone="neutral" plain>{t('capability.originSymlink')}</Chip></span>
                       : plan.kind === 'upload'
                       ? <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void upload(item) }}>{t('capability.upload')}</PanelButton>
                       : <PanelButton variant="primary" size="md" block disabled={blocked} onClick={() => { void install(item) }}>{t('capability.install')}</PanelButton>}

@@ -12,6 +12,7 @@ import {
   describeArchiveFailure,
   INSTALL_VERSION_FILE,
   installSkillArchive,
+  isForeignServerProvenance,
   isInstalledSkillDirty,
   isStoreProvenance,
   listInstalledSkills,
@@ -1492,21 +1493,40 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * 二进制/归档代理的网关失败分支（R15B-02）。
+   * 二进制/归档代理的网关失败分支（R15B-02 / R16B-08）。
    *
    * 这些路径直接用 `gatewayFetch` 拿 `Response`，不经过 `fetchJSON`，所以它们的
-   * `!upstream.ok` 分支**没有**任何错误对象可判 —— 此前一律回 `{error:'gateway error'}`。
-   * 这里读一次错误信封（`clone()` 不消费原响应体，与改动前的行为一致）：命中
-   * "先改密"就与 `gatewayError` 走同一条出口，其余情况逐字保持原样。
+   * `!upstream.ok` 分支**没有**任何错误对象可判 —— 曾经一律回 `{error:'gateway error'}`。
+   * 这里读一次错误信封（`clone()` 不消费原响应体）：
+   *  - 命中"先改密"就与 `gatewayError` 走同一条出口；
+   *  - **有信封就逐字透传**（状态 + 服务端原文 + 稳定码）；
+   *  - 非 JSON / 空 body 才退回原兜底文案。
+   *
+   * R16B-08（2026-09-25）：修 R15B-02 时把"解析出来的信封只在改密那一支用、其余
+   * 一律丢回 `'gateway error'`"当成"行为不变"，实际是把**已经拿到手的诊断信息丢掉**：
+   * 能力中心那 6 条归档路径的失败于是只剩面板上那句「操作失败:gateway error」——
+   * 状态码、稳定码、服务端原文全部消失，用户与支持都无法区分"令牌过期 / 没有权限 /
+   * 版本不存在 / 服务端 500"。本仓既有口径是**业务信封原样透传**（`wasm-apps.ts` 的
+   * `forwardAuthAware` 连字节都不重新序列化），这里照同一口径补上：`error` 放服务端
+   * 原文（渲染层读的就是这个字符串字段），`code` 单列供分档。
    * @param res - 本地响应对象。
    * @param upstream - 网关响应。
    * @returns 已写出应答（调用方直接 return）。
    */
   const archiveUpstreamError = async (res: ServerResponse, upstream: Response): Promise<void> => {
     const envelope = await upstream.clone().json().catch(() => null) as { error?: { code?: string, message?: string } } | null
-    if (envelope?.error?.code === PASSWORD_CHANGE_REQUIRED_CODE) {
-      return passwordChangeRequired(res, envelope.error.message ?? hostCopy(hostLocale(), '请先修改密码', 'Change your password first'))
+    const failure = envelope?.error
+    if (failure?.code === PASSWORD_CHANGE_REQUIRED_CODE) {
+      return passwordChangeRequired(res, failure.message ?? hostCopy(hostLocale(), '请先修改密码', 'Change your password first'))
     }
+    if (typeof failure?.message === 'string' && failure.message.trim() !== '') {
+      return json(res, upstream.status, {
+        error: failure.message,
+        ...(typeof failure.code === 'string' && failure.code !== '' ? { code: failure.code } : {}),
+      })
+    }
+    // 非 JSON body（网关 HTML 错误页 / 空 body）：没有信封可透传，逐字保持原行为
+    // —— 这一段正是既有回归里那条"非 JSON 对照"钉住的形态。
     json(res, upstream.status, { error: 'gateway error' })
   }
 
@@ -2039,7 +2059,7 @@ export function apply(ctx: Context, config: Config): void {
             }
             try {
               // Purely local operation — no gateway round-trip needed.
-              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite, serverURL: s.serverURL })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)
@@ -2121,7 +2141,7 @@ export function apply(ctx: Context, config: Config): void {
             try {
               // Purely local operation — no gateway round-trip needed.
               // `overwrite` = 用户已确认删除本机自制内容（审计 A3）。
-              await uninstallSkill(resolveSkillsDir(), name, { overwrite })
+              await uninstallSkill(resolveSkillsDir(), name, { overwrite, serverURL: s.serverURL })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)
@@ -2587,7 +2607,7 @@ export function apply(ctx: Context, config: Config): void {
               return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
             }
             try {
-              await uninstallSkill(skillsDir, name, { overwrite })
+              await uninstallSkill(skillsDir, name, { overwrite, serverURL: s.serverURL })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)
@@ -2658,19 +2678,29 @@ export function apply(ctx: Context, config: Config): void {
             // 溯源(D6):优先读 .picoaide/release.json(应用 ID/渠道/版本 +
             // 安装时内容哈希),回退旧 .install-version 标记;并重算当前内容
             // 哈希判定「是否被本地修改过」。
-            const provenance = new Map<string, { appId: string, channel: string, version: string, dirty: boolean }>()
+            const provenance = new Map<string, { appId: string, channel: string, version: string, dirty: boolean, originServer?: string }>()
             for (const r of localSkills) {
               const dir = join(skillsDir, r.name)
               const prov = await readProvenance(dir)
               // 来源判定（审计 A2/A3）：面板据 installedOrigin 决定"更新/卸载要不要确认"。
               // 与安装器/卸载器的判据同一份实现（isStoreProvenance）。
-              skillOrigins.set(r.name, isStoreProvenance(prov, r.name) ? 'store' : 'local')
+              skillOrigins.set(r.name, isStoreProvenance(prov, r.name, s.serverURL) ? 'store' : 'local')
               if (prov !== undefined) {
                 // R4-B-3：dirty 的**唯一实现**在安装器里（isInstalledSkillDirty）——
                 // 面板的徽章与宿主的覆盖/删除闸门必须消费同一份事实，否则会出现
                 // "面板显示「已本地修改」、宿主放行整树覆盖"的两端漂移。
                 const dirty = await isInstalledSkillDirty(dir, prov)
-                provenance.set(r.name, { appId: prov.appId, channel: prov.channel, version: prov.version, dirty })
+                // R17B-04：来源服务端与当前会话不同 ⇒ 把那一台透出给面板（徽章），
+                // 归属判据本身已由 isStoreProvenance 的服务端维度接管（越权更新/删除
+                // 会走 LOCAL_CONTENT 确认条）。判据比较只有一处实现，这里只搬事实。
+                const foreignServer = isForeignServerProvenance(prov, s.serverURL) ? prov.server : undefined
+                provenance.set(r.name, {
+                  appId: prov.appId,
+                  channel: prov.channel,
+                  version: prov.version,
+                  dirty,
+                  ...foreignServer === undefined ? {} : { originServer: foreignServer },
+                })
                 localSkillVersions.set(r.name, prov.version !== '' ? prov.version : r.version)
                 continue
               }
@@ -2687,7 +2717,7 @@ export function apply(ctx: Context, config: Config): void {
               const v = await readInstalledPresetVersion(dir)
               if (v !== undefined) localPresetVersions.set(l.name, v)
               // 与技能同一份来源判据（共享 Agent 的 provenance 同格式）。
-              presetOrigins.set(l.name, isStoreProvenance(await readProvenance(dir), l.name) ? 'store' : 'local')
+              presetOrigins.set(l.name, isStoreProvenance(await readProvenance(dir), l.name, s.serverURL) ? 'store' : 'local')
             }
 
             // 本地创作行(我的分区):磁盘上存在的技能/预设,带上传状态(若在
@@ -2705,7 +2735,11 @@ export function apply(ctx: Context, config: Config): void {
                 version: prov?.version !== undefined && prov.version !== '' ? prov.version : (l.version ?? '1.0.0'),
                 description: l.description ?? '', author: '',
                 // 归属与本地改动(D6):面板据此显示「来自市场 · vX · 已本地修改」。
+                // R17B-04：`originServer` 只在"来源服务端 ≠ 当前会话服务端"时下发 ——
+                // 面板据此渲染「来自另一台服务端」徽章（判据比较在 isStoreProvenance /
+                // isForeignServerProvenance 里，这里只透传事实）。
                 ...prov === undefined ? {} : { originChannel: prov.channel, originAppId: prov.appId, dirty: prov.dirty },
+                ...prov?.originServer === undefined ? {} : { originServer: prov.originServer },
                 // 本机那一份的来源（审计 A2/A3）。builtin/plugin 的本地行靠它渲染「卸载」。
                 installedOrigin: skillOrigins.get(l.name) ?? 'local',
                 status: match !== undefined ? (match as { status?: string }).status : undefined,
@@ -2729,6 +2763,9 @@ export function apply(ctx: Context, config: Config): void {
                 // （见 CapabilityCenterPanel 的 `isDelistedItem` 第 3 条）—— 那是一个
                 // 跨账号的破坏性动作。**不发 `'other'`**：没有任何事实能证明"是第三方装的"。
                 localOwnership: match !== undefined ? 'mine' : 'unknown',
+                // R17B-01：库根里的符号链接形态（运行时会加载，但打包/上传入口有意
+                // 拒收）——面板据此不给「上传」按钮，改标"符号链接（只读）"。
+                ...l.symlink === true ? { originSymlink: true } : {},
               })
             }
             for (const l of localPresets) {

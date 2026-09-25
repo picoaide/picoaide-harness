@@ -937,48 +937,51 @@ func createModel(c *gin.Context, db *sql.DB) {
 		OutputPricePer1M: req.OutputPricePer1M.Value, CacheInputPricePer1M: req.CacheInputPricePer1M.Value,
 		OffpeakDiscount: req.OffpeakDiscount.Value,
 	}
-	if prov.Channel == "" {
-		// 手动型上游不参与同步,没有排除名单语义:单条 INSERT(autocommit),
-		// 缓存失效由 AddModel 自己完成 —— 行为与历史逐字一致。
-		if _, err := serverstore.AddModel(db, m); err != nil {
-			writeModelCreateError(c, err)
-			return
-		}
-	} else {
-		// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
-		// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
-		// 旧实现是裸 `db.Begin()`：shadow schema 在场时，本事务里的读（模型配置快照、
-		// 行锁下的基线读）与写（provider/模型行、设置键）会落在 shadow，而 public 一行不动
-		// —— 真 PG + 敌对 search_path 实测。
-		tx, err := serverstore.UsageWriteTx(db)
-		if err != nil {
-			log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
-		defer tx.Rollback() // 提交后为 no-op
+	// R16C-01(审计 2026-09-25,P1):**两条分支都收进一个事务**,审计走 AuditLogTx。
+	//
+	// 修前:手动型上游走 AddModel(autocommit),渠道型走事务;两条分支都在**事务外**
+	// `_ = AuditLog(...)` —— 审计写失败时模型带着新价格静默落库(与 PUT /models/:id
+	// 同一个缺陷形态:改配置即改钱却无痕)。现在"建行 + 移出排除名单 + 审计"同事务,
+	// 审计失败即整体回滚 + 500。
+	//
+	// R13-GH3：本事务会读写族内关系（models / gateway_providers / settings）⇒ 必须经
+	// serverstore 的**唯一 pin 实现**开事务（= 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	tx, err := serverstore.UsageWriteTx(db)
+	if err != nil {
+		log.Printf("gateway model create: 开启事务失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
+
+	if prov.Channel != "" {
+		// 渠道型上游才需要"移出排除名单"(手动型没有名单语义)。
 		if _, err := serverstore.RemoveExcludedModelTx(tx, req.ProviderID, req.Name); err != nil {
 			log.Printf("gateway model create: 移出排除名单失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 			return
 		}
-		if _, err := serverstore.AddModelTx(tx, m); err != nil {
-			// 400/500:defer 的 Rollback 会把本次请求对名单的改动一并撤销。
-			writeModelCreateError(c, err)
-			return
-		}
-		if err := tx.Commit(); err != nil {
-			log.Printf("gateway model create: 提交失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
-			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
-			return
-		}
-		// 提交成功后失效:①排除名单(settings 键,RemoveExcludedModelTx 不失效);
-		// ②模型目录/定价(AddModelTx 不失效)。顺序无依赖,都是"提交后立刻可见"。
-		serverstore.InvalidateSettings()
-		serverstore.InvalidateModelConfig()
-		serverstore.InvalidateModelsChanged()
 	}
-	_ = serverstore.AuditLog(db, auditActor(c), "model_create", auditModelDetail(m))
+	if _, err := serverstore.AddModelTx(tx, m); err != nil {
+		// 400/500:defer 的 Rollback 会把本次请求对名单的改动一并撤销。
+		writeModelCreateError(c, err)
+		return
+	}
+	if err := serverstore.AuditLogTx(tx, auditActor(c), "model_create", auditModelDetail(m)); err != nil {
+		log.Printf("gateway model create: 审计写入失败,已回滚本次创建 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("gateway model create: 提交失败 provider=%d name=%s: %v", req.ProviderID, req.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
+		return
+	}
+	// 提交成功后失效:①排除名单(settings 键,RemoveExcludedModelTx 不失效);
+	// ②模型目录/定价(AddModelTx 不失效)。顺序无依赖,都是"提交后立刻可见"。
+	serverstore.InvalidateSettings()
+	serverstore.InvalidateModelConfig()
+	serverstore.InvalidateModelsChanged()
 	c.JSON(http.StatusOK, gin.H{"model": m})
 }
 
@@ -998,7 +1001,24 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "无效 ID")
 		return
 	}
-	m, err := serverstore.GetModel(db, id)
+	// R16C-01(审计 2026-09-25,P1):模型价格是**"改配置即改钱"**的路径 ——
+	// usage 的每一分钱都由这行价格算出来,而修前"读原值 → UpdateModel(自己的事务)
+	// → `_ = AuditLog`(fire-and-forget)"三段各自提交:只让 model_update 这条审计
+	// 写不进去时,PUT 仍回 200、价格真的改了 100 倍、审计 0 行、日志 0 行。
+	// 孪生路径 PUT /providers/:id 早已是"审计与业务写同事务"(见 provider 更新),
+	// 规则真源写在 serverstore/audit.go 的 AuditLogTx 头注释里。
+	//
+	// 现在整段收进**一个事务**(与 deleteModel 同形态):行锁下的基线读 + 更新 +
+	// AuditLogTx,审计失败即整体回滚 + 500 —— "改了价却没留痕"不再可能。
+	tx, err := serverstore.UsageWriteTx(db)
+	if err != nil {
+		log.Printf("gateway model update: 开启事务失败 id=%d: %v", id, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
+
+	m, err := serverstore.GetModelTx(tx, id, true)
 	if errors.Is(err, serverstore.ErrNotFound) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "模型不存在")
 		return
@@ -1023,7 +1043,9 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	// 改名会破坏 usage 历史口径并使默认模型悬空。渠道同步模型本由上游命名,
 	// 改名必被下次同步覆盖;有用量记录的模型改名会错位历史费用。
 	if req.Name != "" && req.Name != m.Name {
-		if has, err := serverstore.ModelHasUsage(db, m.Name); err == nil && has {
+		// 已持事务:必须用 *Tx 形态读 usage —— 池上入口会在事务内再要一条连接
+		// （hold-and-wait，R14-K 守卫点过；同事务读也更准：判定与动作看同一个快照）。
+		if has, err := serverstore.ModelHasUsageTx(tx, m.Name); err == nil && has {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "该模型已有用量记录,不允许改名")
 			return
 		}
@@ -1034,7 +1056,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 		m.Name = req.Name
 	}
 	if req.ProviderID > 0 {
-		if _, err := serverstore.GetGatewayProvider(db, req.ProviderID); err != nil {
+		if _, err := serverstore.GetGatewayProviderTx(tx, req.ProviderID, false); err != nil {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "所属上游不存在")
 			return
 		}
@@ -1064,7 +1086,7 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	if req.OffpeakDiscount.Set {
 		m.OffpeakDiscount = req.OffpeakDiscount.Value
 	}
-	if err := serverstore.UpdateModel(db, m); err != nil {
+	if err := serverstore.UpdateModelTx(tx, m); err != nil {
 		if errors.Is(err, serverstore.ErrDuplicate) {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "模型名已存在")
 			return
@@ -1101,9 +1123,23 @@ func updateModel(c *gin.Context, db *sql.DB) {
 	if !optF64Eq(m.OffpeakDiscount, orig.OffpeakDiscount) {
 		ch = append(ch, "offpeak:"+priceStr(orig.OffpeakDiscount)+"→"+priceStr(m.OffpeakDiscount))
 	}
+	// 审计与业务写**同事务**(R16C-01):价格/参数变更明细的口径即计费,
+	// 审计写不进去就整体回滚,不留"改了价没留痕"的组合。
 	if len(ch) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "model_update", m.Name+": "+strings.Join(ch, ", "))
+		if err := serverstore.AuditLogTx(tx, auditActor(c), "model_update", m.Name+": "+strings.Join(ch, ", ")); err != nil {
+			log.Printf("gateway model update: 审计写入失败,已回滚本次更新 id=%d name=%s: %v", id, m.Name, err)
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+			return
+		}
 	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("gateway model update: 提交失败 id=%d name=%s: %v", id, m.Name, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "更新失败")
+		return
+	}
+	// 缓存失效必须在**提交之后**(UpdateModelTx 不失效模型缓存,见其注释)。
+	serverstore.InvalidateModelConfig()
+	serverstore.InvalidateModelsChanged()
 	c.JSON(http.StatusOK, gin.H{"model": m})
 }
 
@@ -1226,6 +1262,9 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 	if fileExpiryDays == "" {
 		fileExpiryDays = strconv.Itoa(DefaultFileExpiryDays)
 	}
+	// R17A-06：与运行期**同一份**读取实现（含非法取值的 fail-closed 回落），
+	// 不在这里另写一份判定。
+	unpricedPolicy := serverstore.UnpricedModelPolicy(db)
 	c.JSON(http.StatusOK, gin.H{
 		"default_model":             settings["gateway.default_model"],
 		"rate_limit":                rateLimit,
@@ -1242,6 +1281,9 @@ func getGatewayConfig(c *gin.Context, db *sql.DB) {
 		"max_file_refs":             maxFileRefs,    // 单请求 file_id 引用数上限
 		"body_parse_budget_mb":      parseBudget,    // 进程级在飞请求体字节预算(MiB)
 		"file_expiry_days":          fileExpiryDays, // 网关强制执行的文件保留上限(天)
+		// R17A-06：未定价模型（输入价 NULL/0）的准入策略。缺省即 reject —— 管理端
+		// 永远看到一个具体取值，不需要理解"缺省 = 不安全的那一侧"。
+		"unpriced_model_policy": unpricedPolicy,
 	})
 }
 
@@ -1299,6 +1341,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		MaxFileRefs             *FlexibleString `json:"max_file_refs"`
 		BodyParseBudgetMB       *FlexibleString `json:"body_parse_budget_mb"`
 		FileExpiryDays          *FlexibleString `json:"file_expiry_days"`
+		// R17A-06：未定价模型的准入策略（reject | allow）。缺省（未提供）= 不覆盖。
+		UnpricedModelPolicy *string `json:"unpriced_model_policy"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "请求体错误")
@@ -1334,6 +1378,17 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		if _, ok := ParseBodyParseBudgetMB(string(*req.BodyParseBudgetMB)); !ok {
 			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
 				fmt.Sprintf("body_parse_budget_mb 必须是 %d~%d 的整数", MinBodyParseBudgetMB, MaxBodyParseBudgetMB))
+			return
+		}
+	}
+	// R17A-06：取值白名单。未知取值一律 400（**不**静默回落成 reject —— 管理员
+	// 写错一个字母就想关掉闸门时要当场知道；运行期读取仍对库里的脏值 fail-closed）。
+	if req.UnpricedModelPolicy != nil {
+		switch *req.UnpricedModelPolicy {
+		case serverstore.UnpricedModelPolicyReject, serverstore.UnpricedModelPolicyAllow:
+		default:
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION",
+				"unpriced_model_policy 必须是 reject 或 allow")
 			return
 		}
 	}
@@ -1517,6 +1572,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	if req.UnpricedModelPolicy != nil {
+		if err := auditSetSettingTx(tx, db, serverstore.UnpricedModelPolicySetting, "未定价模型策略", *req.UnpricedModelPolicy, &changes); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
 	if req.FileExpiryDays != nil {
 		if err := auditSetSettingTx(tx, db, SettingFileExpiryDays, "文件保留上限(天)", string(*req.FileExpiryDays), &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
@@ -1593,6 +1654,30 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 			return
 		}
 	}
+	// 审计**与配置写在同一个事务里**(R17C-02,审计 2026-09-25,P1)。
+	//
+	// 缺陷形态:本端点的审计此前是 `tx.Commit()` **之后**的
+	// `_ = serverstore.AuditLog(...)`(fire-and-forget,错误被丢弃)。表级 CHECK
+	// 精确阻断 `gateway_config` 这一条审计后实测:**HTTP 200 + 峰谷计费窗口照改
+	// + 审计 0 行 + 零回滚**。而这个端点改的正是**计费口径**
+	// (`usage.peak_windows` 决定每一次调用是否乘 `offpeak_discount`,
+	// `retention_months` 决定明细/账本的生死),"钱动了没留痕"在这里与 R16C-01
+	// 收口的 `updateModel`(改价)完全同类。
+	//
+	// 与 R16 收口的四处(:596 / :970 / :1129 / :1217)同形:审计写不进去 ⇒ 整体
+	// 回滚 + 500,绝不出现"配置已生效、没人知道是谁改的"。位置在事务**末尾**
+	// (AuditLogTx 内部取链尾 advisory lock;先做完 settings/model 写再取锁,
+	// 锁序与 AuditLogTx 的注释一致)。
+	//
+	// 原来那条"审计先于破坏性清理"的顺序纪律同样成立且更强:审计现在不在
+	// "清理之前还是之后"的问题里 —— 它要么与配置一起提交,要么一起回滚;
+	// CleanupUsageRetention 仍然只在提交之后跑。
+	if len(changes) > 0 {
+		if err := serverstore.AuditLogTx(tx, auditActor(c), "gateway_config", strings.Join(changes, ", ")); err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
@@ -1605,13 +1690,6 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	// 出站体加工的两个闸门值走自己的进程内 10s TTL 缓存(见 body_memory.go)——
 	// 保存后必须主动失效,否则管理员改完最多 10s 内仍按旧值拒绝/放行。
 	InvalidateGatewayLimits()
-	// 审计**先于**破坏性清理(2026-09-19,N2):配置此刻已经提交生效,"谁改了什么"
-	// 的可追溯性不得取决于 CleanupUsageRetention 的成败 —— 旧实现把 AuditLog
-	// 放在清理之后,清理失败(500「保留清理失败」)会留下"配置已生效但零审计"
-	// 的缺口。detail 与成功路径逐字一致(同一次 changes 组装,不掺入清理结果)。
-	if len(changes) > 0 {
-		_ = serverstore.AuditLog(db, auditActor(c), "gateway_config", strings.Join(changes, ", "))
-	}
 	if req.RetentionMonths != nil {
 		if err := serverstore.CleanupUsageRetention(db); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保留清理失败")
