@@ -211,8 +211,12 @@ export interface InstallPresetArchiveOptions {
 }
 
 /** 本机那一份预设的来源：'store'（能力中心装的）或 'local'（用户自制/来源不明）。 */
-export async function classifyInstalledPreset(dir: string, name: string): Promise<'store' | 'local'> {
-  return isStoreProvenance(await readProvenance(dir), name) ? 'store' : 'local'
+export async function classifyInstalledPreset(
+  dir: string,
+  name: string,
+  currentServer?: string | undefined,
+): Promise<'store' | 'local'> {
+  return isStoreProvenance(await readProvenance(dir), name, currentServer) ? 'store' : 'local'
 }
 
 /**
@@ -250,7 +254,7 @@ export async function installPresetArchive(options: InstallPresetArchiveOptions)
   )
   if (exists && options.overwrite !== true) {
     const prov = await readProvenance(targetDir)
-    const origin = isStoreProvenance(prov, name) ? 'store' : 'local'
+    const origin = isStoreProvenance(prov, name, options.server) ? 'store' : 'local'
     // R4-B-3：与技能侧共用同一份 dirty 判据（`isInstalledSkillDirty`）与同一份
     // "要不要确认"判据（`requiresRemoveConfirmation`）—— 面板对已本地修改的智能体
     // 也会出确认条，两端必须同源，否则这里会静默吃掉用户改过的内容。
@@ -433,7 +437,15 @@ export async function mapLocalPresets(
 export async function uninstallPreset(
   presetsDir: string,
   name: string,
-  options: { overwrite?: boolean | undefined } = {},
+  options: {
+    overwrite?: boolean | undefined
+    /**
+     * 当前登录会话的服务端地址（R19A-S2-04）：与技能侧同一份判据 —— 目标那一份的
+     * 溯源 `server` 与它不同（或**这台机器的会话没有地址**）时按"本机内容"处理，
+     * 删除要显式确认。省略 = 无法证明归属 ⇒ 保守。
+     */
+    serverURL?: string | undefined
+  } = {},
 ): Promise<string> {
   validatePresetId(name)
   const target = join(presetsDir, name)
@@ -449,7 +461,7 @@ export async function uninstallPreset(
   } catch {
     throw new ArchiveInstallRefusal('NOT_INSTALLED', `preset "${name}" is not installed`)
   }
-  if (await classifyInstalledPreset(target, name) === 'local' && options.overwrite !== true) {
+  if (await classifyInstalledPreset(target, name, options.serverURL) === 'local' && options.overwrite !== true) {
     throw new ArchiveInstallRefusal(
       'LOCAL_CONTENT',
       `the preset directory "${name}" was not installed by the Capability Hub; `

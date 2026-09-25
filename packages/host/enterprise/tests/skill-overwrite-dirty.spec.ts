@@ -51,6 +51,12 @@ import {
 } from '../src/skill-install.ts'
 
 const NAME = 'zeta'
+/**
+ * R19A-S2-04（2026-09-26）：来源判据不再把"没有当前服务端地址"当成"不比较" ——
+ * 标记里有来源、而这次调用没有地址时走保守档。要建模"同一台服务端的商店内容"，
+ * 就必须像真路由那样给出服务端地址（生产路由恒传 `s.serverURL`）。
+ */
+const STORE_SERVER = 'https://harness.example'
 const BUNDLED = BUILTIN_SKILLS[0] as string
 
 let root = ''
@@ -104,7 +110,7 @@ describe('R4-B-3 判据本身（与面板同一份事实）', () => {
 
 describe('R4-B-3 宿主闸门：dirty 的商店技能不能被静默整树覆盖/删除', () => {
   const install = (version: string, opts: { overwrite?: boolean } = {}) =>
-    installSkillArchive({ name: NAME, archive: zipOf(NAME, version), skillsDir, version, channel: 'market', ...opts })
+    installSkillArchive({ name: NAME, archive: zipOf(NAME, version), skillsDir, version, channel: 'market', server: STORE_SERVER, ...opts })
 
   it('用户改过之后：无确认 ⇒ 409 LOCAL_CONTENT + 点名"本地修改"，文件一字未动', async () => {
     await install('1.0.0')
@@ -150,12 +156,12 @@ describe('R4-B-3 宿主闸门：dirty 的商店技能不能被静默整树覆盖
     const dir = join(skillsDir, NAME)
     await writeFile(join(dir, 'my-notes.md'), 'user notes\n')
 
-    const refused = await uninstallSkill(skillsDir, NAME).catch((e: unknown) => e)
+    const refused = await uninstallSkill(skillsDir, NAME, { serverURL: STORE_SERVER }).catch((e: unknown) => e)
     expect((refused as ArchiveInstallRefusal).code).toBe('LOCAL_CONTENT')
     expect((refused as ArchiveInstallRefusal).message).toMatch(/local modifications/i)
     expect(existsSync(dir), '未确认时目录必须还在').toBe(true)
 
-    await uninstallSkill(skillsDir, NAME, { overwrite: true })
+    await uninstallSkill(skillsDir, NAME, { overwrite: true, serverURL: STORE_SERVER })
     expect(existsSync(dir)).toBe(false)
   })
 })
@@ -199,8 +205,8 @@ describe('R4-B-4 卸载随包技能是持久终态（墓碑 + 同步侧跳过）
   })
 
   it('只有 plugin 渠道的卸载落墓碑：卸载商店（market）技能不留永久记录', async () => {
-    await installSkillArchive({ name: NAME, archive: zipOf(NAME, '1.0.0'), skillsDir, version: '1.0.0', channel: 'market' })
-    await uninstallSkill(skillsDir, NAME)
+    await installSkillArchive({ name: NAME, archive: zipOf(NAME, '1.0.0'), skillsDir, version: '1.0.0', channel: 'market', server: STORE_SERVER })
+    await uninstallSkill(skillsDir, NAME, { serverURL: STORE_SERVER })
     expect(existsSync(join(skillsDir, SKILL_REMOVED_DIR, `${NAME}.json`))).toBe(false)
   })
 

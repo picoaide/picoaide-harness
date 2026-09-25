@@ -129,8 +129,12 @@ describe('R13-B P1-2：已安装集合 == 运行时集合（真跑 pinned 上游
       await seed(join(root, 'My_Gamma'), 'gamma', 'USER-OWN-COPY') // 用户自建（目录名非 kebab）
 
       await expect(uninstallSkill(root, 'gamma', { overwrite: true }))
-        .rejects.toThrow(/still make the runtime load "gamma".*"My_Gamma"/su)
-      // 规范落点已经删掉（用户确认过），但自建那一份**原样保留**（不能替用户删内容）。
+        .rejects.toThrow(/still loaded by the runtime from the skill root itself.*"My_Gamma"/su)
+      // R19A-S2-09（2026-09-26）：判据前移到**删除之前** —— 规范落点必须原样保留
+      // （旧实现是"报失败但落点已经删掉"的部分成功：用户既没得到技能，也没得到
+      // "已卸载"）。用户自建那一份当然也一字不动。
+      await expect(uninstallSkill(root, 'gamma', { overwrite: true })).rejects.toThrow(/nothing was removed/su)
+      expect(await listInstalledSkills(root), '拒绝时落点必须还在').toEqual(['gamma'])
       const residue = await listShadowingSkills(root, 'gamma')
       expect(residue.map(r => r.entryName)).toEqual(['My_Gamma'])
       expect(residue[0]?.installerOwned).toBe(false)
