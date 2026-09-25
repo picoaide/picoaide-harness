@@ -1527,7 +1527,7 @@ describe('应用中心 · F16 打开次数列与降级', () => {
 
     // ③ AI 用量：默认夹具是 attribution_available=false（**统计尚未上线**）⇒ 空状态而不是 0
     expect(await screen.findByTestId('app-ai-usage-block')).toBeInTheDocument()
-    expect(await screen.findByText('统计尚未上线：暂无应用归因')).toBeInTheDocument()
+    expect(await screen.findByText('暂无应用归因记录')).toBeInTheDocument()
     expect(screen.queryByTestId('app-ai-calls')).toBeNull()
   })
 

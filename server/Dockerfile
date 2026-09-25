@@ -178,10 +178,25 @@ ENV PICOAI_CLIENT_RELEASE_DIR=/opt/picoaide/client
 #
 # **逐个列出，不用 `skills/*/` 通配**：通配会把误放进来的非技能目录（或将来某个
 # 没有平台必需 frontmatter 的目录）一起 COPY 进镜像，而 skillseed 只会把它们记成
-# "被跳过的坏资产"，把真正的告警淹掉。新增一个平台内置技能 = 这里加一行 + 该技能
-# 带齐平台 frontmatter（version/title/description/author/category 缺一不可，且
-# 目录名必须等于 frontmatter 的 name —— 不一致会被 skillmanifest 校验拒掉、
-# 整条技能被静默跳过，只能在启动日志里看到）。
+# "被跳过的坏资产"，把真正的告警淹掉。
+#
+# **新增一个平台内置技能 = 三处一起改**（缺一处就红）：判据是
+# server/internal/wasmapp/skillseed/builtin_skills_test.go 的
+# TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests —— 它把
+# 「磁盘上的 server/skills/*/」「本节的 COPY 清单」「builtinSkillRegistry +
+# seededSkillDigests 的技能集合」三方**双向**对拍（真解析本文件的 COPY 指令；
+# 注释或字符串里出现过不算数）：
+#   ① 磁盘：skills/<name>/SKILL.md，带齐平台 frontmatter
+#      （version/title/description/author/category 缺一不可，且目录名必须等于
+#      frontmatter 的 name —— 不一致会被 skillmanifest 校验拒掉、整条技能被静默跳过，
+#      只能在启动日志里看到）；
+#   ② 本文件：加一行 `COPY skills/<name>/ /opt/picoaide/skills/<name>/`
+#      （目标必须逐字是 <PICOAI_SKILL_SEED_DIR>/<name>/，否则服务端扫不到）；
+#   ③ 登记：skillseed 的 builtinSkillRegistry 加一条 + skill_version_test.go 的
+#      seededSkillDigests 加一组摘要（否则技能不受「内容变 ⇒ 版本必须变」的纪律约束，
+#      R1-pm-8 那类"装过的员工永远拿不到新版"会静默复发）。
+# 只想把某个目录留在仓库里而**不**随镜像下发 ⇒ 在 builtinSkillRegistry 里登记
+# {Shipped: false, Reason: …}（豁免逐条显式，不接受通配/整目录豁免）。
 COPY skills/app-builder/ /opt/picoaide/skills/app-builder/
 # 目录位置固定，服务端直接读（无需 entrypoint 落盘）。可用该 env 覆盖成
 # 别的路径（如挂载宿主机目录做现场排查），照 clientrelease 的

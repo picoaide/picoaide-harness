@@ -7,7 +7,7 @@
  *         │  协议 handler 本地拦截（这一条路径不进信封、不出站）
  *         ▼
  * ① 首次授权闸门（用户 × 应用；未授权 ⇒ 403 app_ai_denied，不消耗任何 token）
- * ② 取该应用的**隐藏会话** `app:<app_id>`（侧边栏不出现，诊断可查）
+ * ② 取该应用的**隐藏会话** `app:<app_id>#<账号作用域>`（侧边栏不出现，诊断可查）
  * ③ 跑一轮**仅对话**的 AI（无工具、无记忆、只带本次 messages）—— 经 `runTurn` 注入
  * ④ assistant 增量以 SSE 回给应用页；页面关闭/取消 ⇒ 该轮被 cancel（不留孤儿循环）
  * ```
@@ -16,14 +16,72 @@
  * 隐藏会话寻址、SSE 帧、错误码、取消。真正"跑一轮模型"由 `runTurn` 注入 —— 它属于
  * 客户端 AI loop（宿主面），本模块不复制任何 LLM 逻辑。
  *
+ * ## 隐藏会话 id 的**账号作用域**（2026-09-24，R13-GB）
+ *
+ * 隐藏会话 id = `app:<app_id>#<账号作用域>`，作用域 = `<编码用户名>[@<服务端哈希>]`。
+ * 三条理由（缺一条都会复发同一个缺陷）：
+ *
+ *  ① 授权是 **(用户 × 应用)** 粒度的（`aiConsentKey`），而隐藏会话承载的是**某个账号的
+ *     对话本体** —— 键里没有账号，同一台机器上换账号（共用工作站的常见形态）就会让
+ *     第二个账号续用第一个账号的对话：实测第二个账号那一轮的模型请求里带着第一个账号
+ *     的用户消息与 assistant 回复（R13-E-04 / B-P0-1，真 agent-loop 探针）；
+ *  ② 服务端哈希是**同一台机器上的多租户**维度：`persist:` / 数据根都在机器级，测试与
+ *     正式服务端并存时同名用户名是两个人（与 `2026-09-21` 分区哈希 P1-10 同源）；
+ *  ③ app_id **必须挨着前缀**（`app:<app_id>#…`）而不是 `app:<user>:<app_id>`：服务端归因
+ *     按前缀派生（`server/internal/llmgateway/app_session_id.go`），"取第一个分隔符之前
+ *     的那段"是可判定的；"从右往左数第二段"在用户名含分隔符时就只能猜。
+ *
+ * 编码表与分区名**共用一份实现**（`partition.ts` 的 `encodePartitionSegment`，与
+ * browser/connectors 逐字一致）；形状的唯一真源是
+ * `server/internal/llmgateway/app-session-id.json`，两端由
+ * `app-session-id-contract.spec.ts` 用同一份语料对拍。
+ *
+ * ## 文件名预算（2026-09-25，R14 C-03）
+ *
+ * 会话落盘的**目录名**是上游 `encodeSegment(sessionId)`，而它把内联段 `~XXXX~` 里的 `~`
+ * **再转义一次**（`~` → `~007E`）⇒ 账号名里每个非 `[A-Za-z0-9._-]` 字符占 **14 字节**
+ * 文件名；`50 + |app_id| + 14n > 255` 就是 `ENAMETOOLONG`，而该错误**浮不出来**：`run`
+ * 照常 resolve、磁盘上零文件（真机实测 app_id=20 时 13 个中文字符落得下、14 个落不下）。
+ * 所以 {@link hiddenSessionId} 在构造时算一次 {@link encodedSessionIdBytes}：
+ * **内联形态超 255 字节就换成定长摘要段**（{@link hiddenSessionScopeDigest}，形如
+ * `#:u32:<32 hex>`，78 字节量级）——功能照常、按 (账号 × 服务端) 分域，只是文件名里
+ * 不再有账号名。**只有本来就落不下盘的账号会换形态**（它们没有任何可续的历史），
+ * 其余账号的 id 逐字不变。
+ *
+ * **历史形态** `app:<app_id>`（无账号维度）不再被本模块构造，但磁盘上可能已存在：
+ * 按"**读得到、不复用**"处理 —— 新 id 永远不等于旧 id，所以旧会话不会被任何账号
+ * `resume`（它反而**不能**迁移：那份日志里已经混进了多个账号的对话，迁移到任何一个
+ * 账号头上都是把别人的内容记成他的）。它仍是该机的历史记录，诊断包照常列出。
+ *
  * @module @picoaide/dsh-wasm-apps-host/ai-chat
  */
+
+import { createHash } from 'node:crypto'
+import { encodePartitionSegment, serverPartitionHash } from './partition.ts'
 
 /** 保留路径（§21.2 冻结；协议 handler 本地处理，绝不外发）。 */
 export const AI_CHAT_PATH = '/__picoaide/ai/chat'
 
-/** 隐藏会话前缀（§21.1 Q5：每应用一个隐藏会话 `app:<app_id>`）。 */
+/** 隐藏会话前缀（§21.1 Q5 / 契约 `app-session-id.json`：`app:`）。 */
 export const AI_HIDDEN_SESSION_PREFIX = 'app:'
+
+/** 隐藏会话 id 里"前缀之后"的**账号作用域**分隔符（契约 `scope_separator`）。 */
+export const AI_HIDDEN_SESSION_SCOPE_SEPARATOR = '#'
+
+/** app_id 形态镜像（契约 `app_id_pattern`；真源 = `wasmapp/limits` 的 `AppIDPattern`）。 */
+export const AI_APP_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
+
+/** app_id 长度上限镜像（契约 `app_id_max_length` = DNS label 上限）。 */
+export const AI_APP_ID_MAX_LENGTH = 63
+
+/**
+ * 出站会话 id 头名（契约 `session_id_header`）。
+ *
+ * 服务端**按它派生应用维度归因**（`app:` 前缀 ⇒ `app_id`）：上游 `llm-deepseek` 的两个
+ * 适配器都无条件按 `options.sessionId` 带上这个头，所以隐藏会话 id 就是归因链路本身，
+ * 不需要额外的自报头（§21.7⑤）。
+ */
+export const AI_SESSION_ID_HEADER = 'x-deepseek-harness-session-id'
 
 /** `messages` 条数上限（§21.2 冻结：≤64 条）。 */
 export const AI_CHAT_MAX_MESSAGES = 64
@@ -33,6 +91,19 @@ export const AI_CHAT_MAX_CONTENT_BYTES = 16 * 1024
 
 /** 允许的角色（仅对话：没有 tool/system 的注入面）。 */
 const AI_ROLES = ['user', 'assistant'] as const
+
+/**
+ * 隐藏会话的**账号作用域**：谁 + 哪个服务端。
+ *
+ * 两个字段都不可省：用户名区分同一台机器上的两个人，服务端地址区分同名用户在两个
+ * 租户（测试/正式并存）里的身份。
+ */
+export interface AiChatScope {
+  /** 当前员工（`picoSession` 的 `username`）。 */
+  readonly userId: string
+  /** 当前服务端地址（取不到 ⇒ 只按账号分域，不影响会话可用性）。 */
+  readonly serverURL?: string | null
+}
 
 /** 一条对话消息。 */
 export interface AiChatMessage {
@@ -53,12 +124,123 @@ export interface AiChatInvalid {
 }
 
 /**
- * 隐藏会话 id（**唯一实现**）：`app:<app_id>`。
- * @param appId - 已校验的 app_id。
- * @returns 会话 id。
+ * 账号作用域段（**唯一实现**）：`<编码用户名>[@<服务端哈希>]`。
+ *
+ * 编码表来自 `partition.ts` 的 `encodePartitionSegment`（与 browser 分区名、connectors
+ * 的用户目录同一张表：`A-Za-z0-9_-` 原样，其余 `~<HEX>~`）—— 账号名进名字段只允许有
+ * 一份实现，抄第二份就会在"用户名里有点号/中文/大写"时算出两个不同的作用域。
+ * @param scope - 当前账号 + 服务端地址。
+ * @returns 可安全放进会话 id 的作用域段（非空）。
  */
-export function hiddenSessionId(appId: string): string {
-  return `${AI_HIDDEN_SESSION_PREFIX}${appId}`
+export function hiddenSessionScope(scope: AiChatScope): string {
+  const user = encodePartitionSegment(scope.userId.trim())
+  const server = serverPartitionHash(scope.serverURL ?? undefined)
+  return server === undefined ? user : `${user}@${server}`
+}
+
+/**
+ * 隐藏会话 id 变成**文件名**之后的字节预算（R14 C-03）。
+ *
+ * 会话落盘的目录名是上游 `session-persistence-jsonl` 的 `encodeSegment(sessionId)`
+ * （`format.ts:198`）。多数文件系统（ext4/APFS/NTFS）单个名字段的上限是 **255 字节**，
+ * 超了就 `ENAMETOOLONG` —— 而该错误**不会**浮到调用方：`run` 照常 resolve、磁盘上一个
+ * 文件都没有（隐藏会话的多轮上下文重启即失、诊断包里也看不到它）。真机实测
+ * （app_id=20 + 14 个中文字符的账号名）：`files under root: 0` 且 `run => resolved`。
+ */
+export const AI_HIDDEN_SESSION_ID_MAX_BYTES = 255
+
+/**
+ * 超预算时账号段换用的**定长摘要**标签。
+ *
+ * `:` 不可能出现在内联编码段里（`encodePartitionSegment` 只原样保留 `A-Za-z0-9_-`，
+ * 其余一律 `~<HEX>~`）⇒ 两种形态永不互相冒充：摘要形态的 id 既稳定（同一账号 + 同一
+ * 服务端永远算出同一个 id），也不会与任何内联形态撞成同一个会话。
+ */
+export const AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG = ':u32:'
+
+/**
+ * `sessionId` 经上游 `encodeSegment` 之后的**字节长度**（只算长度，不复制那份实现）。
+ *
+ * 上游的规则（`session-persistence-jsonl/src/format.ts:198`）：`-`/`.`/`_` 与
+ * `[A-Za-z0-9]` 原样 1 字节，**其余每个 UTF-16 码元**写成 `~` + 4 位大写十六进制
+ * （固定 5 字节）。所以"编码后长度 = 原长 + 4 × 非安全码元数"——而隐藏会话 id 里的
+ * 非安全字符**只可能**是 `:`（前缀）、`#`（分隔符）、`@`（服务端哈希分隔符）与内联账号段
+ * 里的 `~`（转义标记本身）。这正是 C-03 的算术：账号名里每个非 `[A-Za-z0-9._-]` 字符
+ * 在内联段里先变成 `~<HEX>~`（6 字符），编码时两个 `~` 各自再涨 4 字节
+ * ⇒ **每个字符占 14 字节文件名**（真机实测 13 个中文字符 = 252B 落得下、14 个 = 266B 落不下）。
+ *
+ * 与上游的**逐码元**口径一致（`charCodeAt` 而不是码点）：星光平面字符会被算成两个码元、
+ * 各 5 字节 —— 我们要的是"上界成立"，不是"再实现一遍编码器"。
+ * @param sessionId - 隐藏会话 id。
+ * @returns `encodeSegment(sessionId)` 的字节长度。
+ */
+export function encodedSessionIdBytes(sessionId: string): number {
+  let bytes = 0
+  for (let index = 0; index < sessionId.length; index += 1) {
+    const char = sessionId[index] as string
+    bytes += char !== '~' && /^[A-Za-z0-9._-]$/u.test(char) ? 1 : 5
+  }
+  return bytes
+}
+
+/**
+ * 账号作用域的**定长摘要**形态（内联形态超过文件名预算时使用）。
+ *
+ * 为什么是"摘要"而不是"直接报错"：报错会让这些账号的**应用 AI 整体不可用**（应用页只
+ * 拿到一张错误卡片），而摘要形态让功能照常工作、id 照样按 (账号 × 服务端) 分域 —— 换来的
+ * 只是会话文件名里看不到账号名（隐藏会话本来也不给用户看，只在诊断包里出现）。
+ * 为什么不是"一律用摘要"：那会改掉**所有**账号的隐藏会话 id ⇒ 已有用户的隐藏会话上下文
+ * 全部读不到；混合形态下只有"以前根本落不下盘"的那些账号会换形态（它们本来就没有可续的
+ * 历史），其余账号逐字不变。
+ *
+ * 摘要的输入必须与内联段**同一份归一化**（`trim` + `serverPartitionHash` 的"去尾斜杠"）：
+ * 否则 `https://a.example` 与 `https://a.example/` 会算出两个隐藏会话（同一台客户端只要
+ * 有一次把地址写成带斜杠，上下文就断成两半）—— 契约语料第 4 条钉的正是内联形态的这条性质。
+ * @param scope - 当前账号 + 服务端地址。
+ * @returns 定长（`AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG` + 32 位 hex）的账号作用域段。
+ */
+export function hiddenSessionScopeDigest(scope: AiChatScope): string {
+  const server = serverPartitionHash(scope.serverURL ?? undefined) ?? ''
+  const material = `${scope.userId.trim()}\u0000${server}`
+  const digest = createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 32)
+  return `${AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG}${digest}`
+}
+
+/**
+ * 隐藏会话 id（**唯一实现**）：`app:<app_id>#<账号作用域>`。
+ *
+ * 三个 fail-loud 的入参校验都指向同一个后果：**id 一旦不可归因/可共享/落不下盘，就不该被
+ * 构造**。非法 app_id 会让服务端派生不出归因（用量静默丢失），空账号会让两个账号落进同一个
+ * 作用域（正是本函数要杜绝的缺陷），超长 id 会让持久化**静默不落盘**（R14 C-03）——所以这
+ * 里抛错或换形态，而不是悄悄产出一个"看起来能用"的 id。
+ *
+ * 长度预算（R14 C-03）：先按内联形态算 `encodeSegment` 后的字节数，超
+ * {@link AI_HIDDEN_SESSION_ID_MAX_BYTES} 就换成定长摘要段；换完再超（结构上不可达：
+ * 最大 app_id 63 + 定长 37 = 105）则**抛错**，绝不放一个落不下盘的 id 出去。
+ * @param scope - 当前账号 + 服务端地址。
+ * @param appId - 已校验的 app_id（平台域名标签形态）。
+ * @returns 会话 id（可用作会话键与服务端归因）。
+ * @throws app_id 不是平台 app_id、账号为空、或（理论上不可达）连摘要形态都超预算时。
+ */
+export function hiddenSessionId(scope: AiChatScope, appId: string): string {
+  if (appId.length > AI_APP_ID_MAX_LENGTH || !AI_APP_ID_PATTERN.test(appId)) {
+    throw new Error(`the hidden session id needs a platform app_id (got ${JSON.stringify(appId)}); an unusable id would silently lose the usage attribution`)
+  }
+  if (scope.userId.trim() === '') {
+    throw new Error('the hidden session id needs an account scope (empty user id); a shared scope would leak one account\'s conversation into another')
+  }
+  const head = `${AI_HIDDEN_SESSION_PREFIX}${appId}${AI_HIDDEN_SESSION_SCOPE_SEPARATOR}`
+  const inline = `${head}${hiddenSessionScope(scope)}`
+  const id = encodedSessionIdBytes(inline) <= AI_HIDDEN_SESSION_ID_MAX_BYTES
+    ? inline
+    : `${head}${hiddenSessionScopeDigest(scope)}`
+  if (encodedSessionIdBytes(id) > AI_HIDDEN_SESSION_ID_MAX_BYTES) {
+    throw new Error(
+      `the hidden session id would not fit a filesystem name (${String(encodedSessionIdBytes(id))} > `
+      + `${String(AI_HIDDEN_SESSION_ID_MAX_BYTES)} bytes); refusing to build an id whose session could never be persisted`,
+    )
+  }
+  return id
 }
 
 /**
@@ -156,14 +338,18 @@ export type AiChatGateResult =
  *
  * 判据顺序是契约的一部分：**先**查授权，**再**碰任何模型调用 —— 反过来就会出现
  * "没授权也花了一次 token"。
+ *
+ * 授权是 (账号 × 应用) 粒度；隐藏会话是 (账号 × 服务端 × 应用) 粒度。两者**不共键**也
+ * 不该共键：授权回答"许不许可"，作用域回答"这份对话属于谁" —— 用授权粒度当会话键正是
+ * R13-E-04 的缺陷（换账号后被授权过 ≠ 该续用前一个账号的对话）。
  * @param authorization - 授权记录。
- * @param userId - 当前员工。
+ * @param scope - 当前账号 + 服务端地址。
  * @param appId - 应用。
- * @returns 通过时给出隐藏会话 id。
+ * @returns 通过时给出该账号在该应用上的隐藏会话 id。
  */
-export async function gateAppAi(authorization: AiChatAuthorization, userId: string, appId: string): Promise<AiChatGateResult> {
-  if (!await authorization.isGranted(userId, appId)) return { ok: false, status: 403, code: 'app_ai_denied' }
-  return { ok: true, sessionId: hiddenSessionId(appId) }
+export async function gateAppAi(authorization: AiChatAuthorization, scope: AiChatScope, appId: string): Promise<AiChatGateResult> {
+  if (!await authorization.isGranted(scope.userId, appId)) return { ok: false, status: 403, code: 'app_ai_denied' }
+  return { ok: true, sessionId: hiddenSessionId(scope, appId) }
 }
 
 /** SSE 响应的头（与 `Response` 构造共用，便于单测断言）。 */
@@ -181,8 +367,13 @@ export interface AiChatBridgeDeps {
   authorization: AiChatAuthorization
   /** 一轮对话的执行面（客户端 AI loop）。 */
   runner: AiChatTurnRunner | undefined
-  /** 当前员工 id（未登录 ⇒ 不服务）。 */
-  userId: () => string | null
+  /**
+   * 当前员工的**作用域**（账号 + 服务端地址；未登录 ⇒ `null`）。
+   *
+   * 一次调用只解析一次：隐藏会话的键必须取自**同一个**会话快照 —— 分两次读（授权读一次、
+   * 会话 id 再读一次）会在请求中途换账号时拼出"甲的授权 + 乙的会话"。
+   */
+  scope: () => AiChatScope | null
   /** 诊断出口。 */
   warn?: ((message: string) => void) | undefined
 }
@@ -220,9 +411,13 @@ export async function handleAiChat(
     // 没有 AI loop（宿主未接线 / 该构建不含 AI）：如实报不可用，**不**静默返回空答案。
     return fail(503, 'app_ai_unavailable', 'the application AI bridge is not available in this client')
   }
-  const userId = deps.userId()
-  if (userId === null) return fail(401, 'app_ai_unavailable', 'not signed in')
-  const gate = await gateAppAi(deps.authorization, userId, appId)
+  const scope = deps.scope()
+  if (scope === null || scope.userId.trim() === '') {
+    // 空账号**不是**"匿名作用域"：那会让所有未登录/半登录状态共用一个隐藏会话
+    // （跨账号复用的一条侧门）。宁可不服务。
+    return fail(401, 'app_ai_unavailable', 'not signed in')
+  }
+  const gate = await gateAppAi(deps.authorization, scope, appId)
   if (!gate.ok) return fail(gate.status, gate.code, 'the user has not authorized AI use for this application')
 
   const sessionId = gate.sessionId

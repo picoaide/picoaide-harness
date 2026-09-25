@@ -6,10 +6,26 @@
 2. 跟随该 Location:必须真的落在 **IdP 的登录页**(页面上有密码表单字段)
 3. POST IdP 凭据:必须**离开**登录页(停在带错误文案的登录表单上 = 凭据被拒)
 4. IdP 要求授权确认时 POST approve:必须继续往服务端回调走
-5. 服务端回调:必须 302 到**深链** `<scheme>://auth?token=…&user=…`(读 Location 头)
+5. 服务端回调:必须 302 到**深链** `<scheme>://auth?token=…&user=…`(读 Location 头);
+   且回调链里必须真的出现过带 `code=` 的回调地址
 6. 深链 token 必须能调 /api/client/v2/auth/me,且返回的就是**本次登录的那个账号**
 
-为什么"手动跟随重定向"(2026-09-23 审计 W3-02):
+## 判据纪律(2026-09-23 第十三轮审计 F-01,P0)
+
+上面 6 条契约落地为 `CRITERIA` 表的 **7 条判据** —— 这张表是**唯一真源**,运行期按 **id**
+经 `contractkit.Reporter.report()` 求值,`--self-test` / `--self-check` 逐条自证。
+为什么不能像 2026-09-23 之前那样把 `check(name, problems, detail)` 散在运行期代码里:
+
+    把 6/7 条运行期判据换成 check(name, [], '') ⇒ --self-test 仍是 24/24、
+    check-integration-tests 照打「2 个契约脚本判据自检通过」、REAL_GATE_EXIT=0
+
+即"判据的自我陈述比它实际判的东西宽"。现在同样的掏空会让**负例夹具**当场失败
+(每条判据都配了正例 + 负例;`scripts/check-integration-tests.mjs` 还会在**变异副本**上
+逐条复跑,要求它变红 —— 见那里的 `criteria-tautology` / `judge-tautology` /
+`count-side-zero` / `runtime-wrapper` 四个变异)。
+
+## 为什么"手动跟随重定向"(2026-09-23 审计 W3-02)
+
     urllib **无法跟随自定义 scheme**(`picoaide://…`):它抛 HTTPError,而旧 `fetch()` 的
     异常分支返回的是**传入的 url**(=回调地址)⇒ `'picoaide://' in url` 恒假、else 分支
     必然执行 —— 即使 SSO 全流程正常,用例也永远 `RESULT: FAIL`(深链断言结构上不可达)。
@@ -17,14 +33,18 @@
     读出来(见 `follow()`)。**负向对照**:把深链换成 http 目标时 `follow()` 会继续跟随到
     终点 ⇒ "有没有拿到深链"是有判别力的,不是恒真/恒假。
 
-环境缺失时**显式 SKIP**(退出码 77),绝不打印 PASS:
+## 环境缺失时**显式 SKIP**
+
+退出码 77,绝不打印 PASS:
     · /healthz 不可达(服务端没起)
     · /api/server/admin/auth/methods 显示 oidc/openid 都未配置
 退出码:0 = PASS;1 = FAIL(契约不满足);2 = 用法错误;77 = SKIP(未验证任何东西)。
 
 用法:
     python3 dex-sso-test.py [server_base] [--user <login>] [--password <pw>]
-    python3 dex-sso-test.py --self-test      # 判据自检,不需要服务端/Docker/Dex
+    python3 dex-sso-test.py --self-test        # 判据本体自证(每条判据的正/负例夹具)
+    python3 dex-sso-test.py --self-check       # 判定通道自证(夹具经运行期 report() 求值)
+    python3 dex-sso-test.py --dump-criteria    # 判据表登记值(JSON,供门禁对账)
 环境变量:DEX_BASE(可选)断言 IdP 落在该 origin;DEX_DEEP_LINK_SCHEME(可选)断言深链 scheme;
         DEX_EXPECTED_USER 覆盖期望账号。
 数据(integration-tests/dex/config.yaml):admin@example.com / admin123。
@@ -37,13 +57,49 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 契约判据通道(判定 + 计数 + 自检)在两个 .py 与门禁之间**只允许一份实现**。
+# 关掉 .pyc 落地:本目录不在 .gitignore 的 __pycache__ 白名单里,导入本地模块
+# 会在工作树里留下未跟踪目录(门禁每跑一次就多一份噪声)。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from contractkit import (  # noqa: E402 - 路径必须先插入,导入位置由设计决定
+        EXIT_FAIL,
+        EXIT_PASS,
+        EXIT_SKIP,
+        EXIT_USAGE,
+        CriteriaError,
+        Reporter,
+        criteria_dump,
+        observation_of,
+        report_self_check_result,
+        report_self_test_result,
+        run_criteria_self_test,
+        run_reporter_self_check,
+    )
+except ImportError as exc:  # pragma: no cover - 只在文件布局被破坏时触发
+    print(f'dex-sso-test: 无法加载契约判据通道 contractkit({exc})', file=sys.stderr)
+    raise SystemExit(1)
+
 DEFAULT_BASE = 'http://127.0.0.1:8091'
 DEFAULT_USER = 'admin@example.com'
 DEFAULT_PASSWORD = 'admin123'
 PROVIDER = 'oidc'
 CALLBACK_PATH = f'/api/client/v2/auth/{PROVIDER}/callback'
 
-EXIT_PASS, EXIT_FAIL, EXIT_USAGE, EXIT_SKIP = 0, 1, 2, 77
+# SKIP 的**原因码闭集**(本用例允许打出的那几个)。
+# 门禁(scripts/check-integration-tests.mjs)按它做双向对账:登记表里的 skipReasons 必须与这里
+# 逐字相等、每个原因码都必须有调用点、每个调用点都必须给登记过的原因码。新增原因码要同时
+# 改这里与门禁的 SKIP_REASON_CODES —— "未登记的原因"不再是一张免检牌。
+SKIP_REASONS = ('missing-server', 'missing-provider')
+
+
+def skip(reason, detail):
+    """让本用例以 SKIP(77) 收尾的**唯一出口**;原因码必须登记在 SKIP_REASONS 里。"""
+    assert reason in SKIP_REASONS, f'未登记的 SKIP 原因码: {reason}'
+    assert detail, 'SKIP 必须带可读的观测细节(否则聚合层只剩"跳过"两个字)'
+    print(f'SKIP[{reason}]: {detail} —— 本次未验证任何东西')
+    return EXIT_SKIP
 
 # ---------------------------------------------------------------------------
 # HTTP 原语(全部**不**自动跟随重定向 —— 跟随由 follow() 显式驱动)
@@ -80,7 +136,7 @@ def is_http(url):
 def follow(op, url, data=None, headers=None, max_hops=10):
     """手动跟随 http(s) 重定向。
 
-    返回 (status, final_url, body, headers, deep_link, hops)：
+    返回 (status, final_url, body, headers, deep_link, hops):
     遇到**非 http(s)** 的 Location(即桌面深链)时立刻停下,把它放在 deep_link 里;
     其它情况 deep_link 为空串。hops = [(status, url), …] 供诊断与"经过回调"断言。
     """
@@ -101,7 +157,7 @@ def follow(op, url, data=None, headers=None, max_hops=10):
 
 
 # ---------------------------------------------------------------------------
-# 判据(纯函数,便于 --self-test 用合成夹具证明"有判别力")
+# 判据本体的辅助纯函数(只被 CRITERIA 的 evaluate 调用,便于逐条夹具取证)
 # ---------------------------------------------------------------------------
 def parse_deep_link(location):
     """把深链 Location 拆成 (scheme, host, query dict)。"""
@@ -190,74 +246,322 @@ def me_problems(status, body, expected_user, expected_email):
 
 
 # ---------------------------------------------------------------------------
-# 用例自检(不需要服务端):每条判据都要**拒绝**它的负例 —— 只有正例过 = 恒真
+# 判据表(**唯一真源**)
+#
+# ⚠️ 每条 `evaluate` 的**第一句**必须是 `obs = observation_of(obs, '<id>')`:
+#    它既是观测形状校验,也是门禁端到端变异的**注入锚点**
+#    (锚点消失时门禁判失败而不是静默跳过 —— 见 scripts/check-integration-tests.mjs)。
+# ⚠️ 改这张表(增删判据 / 改 id / 改名字)**必须**同步门禁里的
+#    `DEX_EXPECTED_CRITERIA` 与夹具条数下限(登记值进 diff 才会被评审看见)。
+# ---------------------------------------------------------------------------
+def _eval_login_start(obs):
+    obs = observation_of(obs, 'login-start')
+    if obs.get('status') == 302 and obs.get('location'):
+        return []
+    return [f'status={obs.get("status")} Location={str(obs.get("location"))[:80]!r}']
+
+
+def _eval_idp_login_page(obs):
+    obs = observation_of(obs, 'idp-login-page')
+    return login_page_problems(obs.get('url', ''), obs.get('body', ''), obs.get('idp_origin', ''))
+
+
+def _eval_submit_credentials(obs):
+    obs = observation_of(obs, 'submit-credentials')
+    return login_submit_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_approval_advance(obs):
+    obs = observation_of(obs, 'approval-advance')
+    # IdP 没要求授权确认时这一步**未被执行**(与旧脚本一致,是显式的"不适用"而不是静默通过;
+    # 门禁的 `good` 假网关恒要求授权确认,所以这条判据在门禁里真的被求值)。
+    if not obs.get('required'):
+        return []
+    return approve_problems(obs.get('status'), obs.get('url', ''), obs.get('body', ''))
+
+
+def _eval_callback_reached(obs):
+    obs = observation_of(obs, 'callback-reached')
+    hops = obs.get('hops')
+    if not isinstance(hops, list):
+        return ['回调链不可读(hops 缺失)—— "有没有经过回调"无法判定']
+    reached = any(isinstance(hop, (list, tuple)) and len(hop) == 2
+                  and CALLBACK_PATH in str(hop[1]) and 'code=' in str(hop[1]) for hop in hops)
+    if reached:
+        return []
+    return ['回调链里没有出现带 code 的回调地址']
+
+
+def _eval_deep_link(obs):
+    obs = observation_of(obs, 'deep-link')
+    return deep_link_problems(obs.get('location', ''), obs.get('expected_scheme', ''))
+
+
+def _eval_deep_link_identity(obs):
+    obs = observation_of(obs, 'deep-link-identity')
+    return me_problems(obs.get('status'), obs.get('body', ''),
+                       obs.get('expected_user', ''), obs.get('expected_email', ''))
+
+
+CRITERIA = [
+    {
+        'id': 'login-start',
+        'name': f'[1] GET /auth/{PROVIDER}/login → 302 且 Location 指向 IdP',
+        'evaluate': _eval_login_start,
+    },
+    {
+        'id': 'idp-login-page',
+        'name': '[2] 落在 IdP 登录页(有密码表单)',
+        'evaluate': _eval_idp_login_page,
+    },
+    {
+        'id': 'submit-credentials',
+        'name': '[3] 提交 IdP 凭据后离开登录页',
+        'evaluate': _eval_submit_credentials,
+    },
+    {
+        'id': 'approval-advance',
+        'name': '[4] 授权确认后离开 approval(继续往回调走)',
+        'evaluate': _eval_approval_advance,
+    },
+    {
+        'id': 'callback-reached',
+        'name': f'[5] 授权码回到 {CALLBACK_PATH}',
+        'evaluate': _eval_callback_reached,
+    },
+    {
+        'id': 'deep-link',
+        'name': '[5] 回调 302 到深链 <scheme>://auth?token=…',
+        'evaluate': _eval_deep_link,
+    },
+    {
+        'id': 'deep-link-identity',
+        'name': '[6] 深链 token 调 /auth/me 且身份=本次登录账号',
+        'evaluate': _eval_deep_link_identity,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# 自检夹具:**每条判据都必须有正例与负例**(纯合成数据,不需要服务端/Docker/Dex)
 # ---------------------------------------------------------------------------
 GOOD_DEEP_LINK = 'picoaide://auth?token=' + 'a1b2c3d4' * 5 + '&user=admin'
 GOOD_LOGIN_PAGE = '<html><form method="post" action="/dex/auth/local?req=x">' \
     '<input type="text" name="login"><input type="password" name="password"></form></html>'
+IDP_ORIGIN = 'http://127.0.0.1:5556'
+GOOD_HOPS = [(303, IDP_ORIGIN + '/dex/approval?req=x'),
+             (302, 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=code-42&state=state-ffff')]
+
+SELF_TEST_FIXTURES = [
+    # ---- login-start ----
+    {
+        'id': 'login-start', 'expect': True,
+        'why': '正常:302 + Location 指向 IdP',
+        'observation': {'status': 302, 'location': IDP_ORIGIN + '/dex/auth/local?req=x'},
+    },
+    {
+        'id': 'login-start', 'expect': False,
+        'why': '负例:启动登录流返回 200(没有跳 IdP)',
+        'observation': {'status': 200, 'location': ''},
+    },
+    {
+        'id': 'login-start', 'expect': False,
+        'why': '负例:302 但没有 Location 头',
+        'observation': {'status': 302, 'location': ''},
+    },
+
+    # ---- idp-login-page ----
+    {
+        'id': 'idp-login-page', 'expect': True,
+        'why': '正常:落在 IdP 且有密码表单',
+        'observation': {'url': IDP_ORIGIN + '/dex/auth/local?req=x', 'body': GOOD_LOGIN_PAGE, 'idp_origin': IDP_ORIGIN},
+    },
+    {
+        'id': 'idp-login-page', 'expect': False,
+        'why': '负例:停在服务端(未到 IdP)',
+        'observation': {'url': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+                        'body': GOOD_LOGIN_PAGE, 'idp_origin': IDP_ORIGIN},
+    },
+    {
+        'id': 'idp-login-page', 'expect': False,
+        'why': '负例:没有密码表单',
+        'observation': {'url': IDP_ORIGIN + '/dex/auth/local', 'body': '<html>error</html>', 'idp_origin': IDP_ORIGIN},
+    },
+
+    # ---- submit-credentials ----
+    {
+        'id': 'submit-credentials', 'expect': True,
+        'why': '正常:303 离开登录页',
+        'observation': {'status': 303, 'body': ''},
+    },
+    {
+        'id': 'submit-credentials', 'expect': False,
+        'why': '负例:仍停在登录表单',
+        'observation': {'status': 200, 'body': GOOD_LOGIN_PAGE},
+    },
+    {
+        'id': 'submit-credentials', 'expect': False,
+        'why': '负例:回显登录失败',
+        'observation': {'status': 200, 'body': '<p>Invalid login</p>'},
+    },
+    {
+        'id': 'submit-credentials', 'expect': False,
+        'why': '负例:5xx',
+        'observation': {'status': 500, 'body': 'boom'},
+    },
+
+    # ---- approval-advance ----
+    {
+        'id': 'approval-advance', 'expect': True,
+        'why': '正常:已离开 approval',
+        'observation': {'required': True, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
+    },
+    {
+        'id': 'approval-advance', 'expect': True,
+        'why': '不适用:IdP 未要求授权确认(该步未执行,显式记为通过而不是静默跳过)',
+        'observation': {'required': False, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
+    },
+    {
+        'id': 'approval-advance', 'expect': False,
+        'why': '负例:仍停在 approval 页',
+        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/approval?req=x',
+                        'body': '<form action="/approval"></form>'},
+    },
+    {
+        'id': 'approval-advance', 'expect': False,
+        'why': '负例:回到登录表单',
+        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/auth/local', 'body': GOOD_LOGIN_PAGE},
+    },
+    {
+        'id': 'approval-advance', 'expect': False,
+        'why': '负例:5xx',
+        'observation': {'required': True, 'status': 500, 'url': IDP_ORIGIN + '/dex/approval', 'body': 'boom'},
+    },
+
+    # ---- callback-reached ----
+    {
+        'id': 'callback-reached', 'expect': True,
+        'why': '正常:回调链里有带 code 的回调地址',
+        'observation': {'hops': GOOD_HOPS},
+    },
+    {
+        'id': 'callback-reached', 'expect': False,
+        'why': '负例:回调链里从来没有回调地址(用户没被送回来)',
+        'observation': {'hops': [(303, IDP_ORIGIN + '/dex/approval?req=x'), (200, IDP_ORIGIN + '/dex/approval?req=x')]},
+    },
+    {
+        'id': 'callback-reached', 'expect': False,
+        'why': '负例:经过回调但没有 code(W3-02 之前那条恒假断言的孪生形态)',
+        'observation': {'hops': [(302, 'http://127.0.0.1:8091' + CALLBACK_PATH + '?state=x')]},
+    },
+    {
+        'id': 'callback-reached', 'expect': False,
+        'why': '负例:hops 缺失(观测不可读)',
+        'observation': {},
+    },
+
+    # ---- deep-link ----
+    {
+        'id': 'deep-link', 'expect': True,
+        'why': '正常:自定义 scheme + host=auth + 足够长的 token',
+        'observation': {'location': GOOD_DEEP_LINK, 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:http 目标(不是深链)',
+        'observation': {'location': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:相对地址',
+        'observation': {'location': '/auth/callback?code=x', 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:空 Location',
+        'observation': {'location': '', 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:host 不是 auth',
+        'observation': {'location': 'picoaide://evil?token=' + 'a' * 40, 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:token 过短',
+        'observation': {'location': 'picoaide://auth?token=abc', 'expected_scheme': ''},
+    },
+    {
+        'id': 'deep-link', 'expect': False,
+        'why': '负例:scheme 与期望不符',
+        'observation': {'location': GOOD_DEEP_LINK, 'expected_scheme': 'example-harness'},
+    },
+    {
+        'id': 'deep-link', 'expect': True,
+        'why': '正常:scheme 命中期望',
+        'observation': {'location': GOOD_DEEP_LINK, 'expected_scheme': 'picoaide'},
+    },
+
+    # ---- deep-link-identity ----
+    {
+        'id': 'deep-link-identity', 'expect': True,
+        'why': '正常:本次登录账号',
+        'observation': {'status': 200, 'body': '{"user":{"username":"admin"}}',
+                        'expected_user': 'admin', 'expected_email': 'admin@example.com'},
+    },
+    {
+        'id': 'deep-link-identity', 'expect': True,
+        'why': '正常:邮箱命中',
+        'observation': {'status': 200, 'body': '{"user":{"email":"admin@example.com"}}',
+                        'expected_user': 'admin', 'expected_email': 'admin@example.com'},
+    },
+    {
+        'id': 'deep-link-identity', 'expect': False,
+        'why': '负例:别的账号',
+        'observation': {'status': 200, 'body': '{"user":{"username":"alice"}}',
+                        'expected_user': 'admin', 'expected_email': 'admin@example.com'},
+    },
+    {
+        'id': 'deep-link-identity', 'expect': False,
+        'why': '负例:仅含 admin 字样的其它字段',
+        'observation': {'status': 200, 'body': '{"user":{"id":7,"role":"admin"}}',
+                        'expected_user': 'admin', 'expected_email': 'admin@example.com'},
+    },
+    {
+        'id': 'deep-link-identity', 'expect': False,
+        'why': '负例:401',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_REQUIRED"}}',
+                        'expected_user': 'admin', 'expected_email': 'admin@example.com'},
+    },
+]
+
+# 夹具条数下限(棘轮):删夹具必须同时改这个常量与门禁里的登记值并写明理由。
+DEX_MIN_FIXTURES = 32
 
 
-def self_test():
-    cases = []
+def _new_reporter():
+    """运行期的判定通道(`--self-check` 与真实跑**共用同一个构造点**)。
 
-    def expect(label, problems, want_empty):
-        cases.append((label, (len(problems) == 0) == want_empty, problems))
-
-    expect('深链/正例(picoaide://auth?token=…)', deep_link_problems(GOOD_DEEP_LINK), True)
-    expect('深链/负例:http 目标', deep_link_problems('http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=x'), False)
-    expect('深链/负例:相对地址', deep_link_problems('/auth/callback?code=x'), False)
-    expect('深链/负例:空 Location', deep_link_problems(''), False)
-    expect('深链/负例:host 不是 auth', deep_link_problems('picoaide://evil?token=' + 'a' * 40), False)
-    expect('深链/负例:token 过短', deep_link_problems('picoaide://auth?token=abc'), False)
-    expect('深链/负例:scheme 与期望不符',
-           deep_link_problems(GOOD_DEEP_LINK, expected_scheme='example-harness'), False)
-    expect('深链/正例:scheme 命中期望',
-           deep_link_problems(GOOD_DEEP_LINK, expected_scheme='picoaide'), True)
-
-    idp = 'http://127.0.0.1:5556'
-    expect('IdP 登录页/正例', login_page_problems(idp + '/dex/auth/local?req=x', GOOD_LOGIN_PAGE, idp), True)
-    expect('IdP 登录页/负例:停在服务端(未到 IdP)',
-           login_page_problems('http://127.0.0.1:8091/api/client/v2/auth/oidc/login', GOOD_LOGIN_PAGE, idp), False)
-    expect('IdP 登录页/负例:没有密码表单',
-           login_page_problems(idp + '/dex/auth/local', '<html>error</html>', idp), False)
-
-    expect('提交登录/正例:303 离开登录页', login_submit_problems(303, ''), True)
-    expect('提交登录/负例:仍停在登录表单', login_submit_problems(200, GOOD_LOGIN_PAGE), False)
-    expect('提交登录/负例:回显登录失败', login_submit_problems(200, '<p>Invalid login</p>'), False)
-    expect('提交登录/负例:5xx', login_submit_problems(500, 'boom'), False)
-
-    expect('授权确认/正例:已离开 approval', approve_problems(200, 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=x', ''), True)
-    expect('授权确认/负例:仍停在 approval 页',
-           approve_problems(200, 'http://127.0.0.1:5556/dex/approval?req=x', '<form action="/approval"></form>'), False)
-    expect('授权确认/负例:回到登录表单', approve_problems(200, 'http://127.0.0.1:5556/dex/auth/local', GOOD_LOGIN_PAGE), False)
-    expect('授权确认/负例:5xx', approve_problems(500, 'http://127.0.0.1:5556/dex/approval', 'boom'), False)
-
-    expect('me/正例:本次登录账号', me_problems(200, '{"user":{"username":"admin"}}', 'admin', 'admin@example.com'), True)
-    expect('me/正例:邮箱命中', me_problems(200, '{"user":{"email":"admin@example.com"}}', 'admin', 'admin@example.com'), True)
-    expect('me/负例:别的账号', me_problems(200, '{"user":{"username":"alice"}}', 'admin', 'admin@example.com'), False)
-    expect('me/负例:仅含 admin 字样的其它字段',
-           me_problems(200, '{"user":{"id":7,"role":"admin"}}', 'admin', 'admin@example.com'), False)
-    expect('me/负例:401', me_problems(401, '{"error":{"code":"AUTH_REQUIRED"}}', 'admin', 'admin@example.com'), False)
-
-    bad = [label for label, ok, _ in cases if not ok]
-    for label, ok, detail in cases:
-        print(f'  {"ok  " if ok else "FAIL"} {label}{"" if ok else "  " + str(detail)}')
-    print(f'self-test: {len(cases) - len(bad)}/{len(cases)} 条判据夹具符合预期')
-    if bad:
-        print(f'self-test: FAIL —— 有判别力的判据不足: {bad}')
-        return EXIT_FAIL
-    return EXIT_PASS
+    门禁的 `runtime-wrapper` 变异就注入在这里 —— 把通道换成恒真包装之后
+    `--self-check` 必须非零(自检消费的就是运行期这条通道)。
+    """
+    return Reporter(CRITERIA)
 
 
 # ---------------------------------------------------------------------------
 def parse_args(argv):
-    server, user, password, want_self_test = DEFAULT_BASE, DEFAULT_USER, DEFAULT_PASSWORD, False
+    server, user, password = DEFAULT_BASE, DEFAULT_USER, DEFAULT_PASSWORD
+    want_self_test, want_self_check, want_dump = False, False, False
     positional = []
     rest = list(argv)
     while rest:
         item = rest.pop(0)
         if item == '--self-test':
             want_self_test = True
+        elif item == '--self-check':
+            want_self_check = True
+        elif item == '--dump-criteria':
+            want_dump = True
         elif item == '--user' and rest:
             user = rest.pop(0)
         elif item == '--password' and rest:
@@ -275,28 +579,57 @@ def parse_args(argv):
         raise SystemExit(EXIT_USAGE)
     if positional:
         server = positional[0].rstrip('/')
-    return server, user, password, want_self_test
+    modes = [want_self_test, want_self_check, want_dump].count(True)
+    if modes > 1:
+        print('dex-sso-test: --self-test / --self-check / --dump-criteria 只能给一个', file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
+    return server, user, password, want_self_test, want_self_check, want_dump
+
+
+def self_test():
+    """判据本体自证:每条判据的正/负例夹具都必须给出期望结论。"""
+    result = run_criteria_self_test(CRITERIA, SELF_TEST_FIXTURES)
+    status = report_self_test_result(result)
+    if result['total'] < DEX_MIN_FIXTURES:
+        print(f'self-test: 夹具只剩 {result["total"]} 条(下限 {DEX_MIN_FIXTURES})'
+              ' —— 夹具被删到没有判别力;确实要下调请同时改 DEX_MIN_FIXTURES 与门禁登记值')
+        return EXIT_FAIL
+    return status
+
+
+def self_check():
+    """判定通道自证:全部夹具经**运行期那条 report()** 求值。"""
+    reporter = _new_reporter()
+    try:
+        result = run_reporter_self_check(reporter, CRITERIA, SELF_TEST_FIXTURES)
+    except CriteriaError as exc:
+        print(f'  FAIL {exc}')
+        print('reporter self-check: 0/0 条夹具经 report() 求值符合预期')
+        return EXIT_FAIL
+    return report_self_check_result(result)
 
 
 def main(argv):
-    server, login, password, want_self_test = parse_args(argv)
+    server, login, password, want_self_test, want_self_check, want_dump = parse_args(argv)
     if want_self_test:
         return self_test()
+    if want_self_check:
+        return self_check()
+    if want_dump:
+        print(json.dumps(criteria_dump(CRITERIA, SELF_TEST_FIXTURES), ensure_ascii=False, indent=2))
+        return EXIT_PASS
 
     expected_user = os.environ.get('DEX_EXPECTED_USER') or login.split('@')[0]
     expected_email = login
     idp_expected = os.environ.get('DEX_BASE', '').rstrip('/')
     expected_scheme = os.environ.get('DEX_DEEP_LINK_SCHEME', '')
 
-    results = []
+    reporter = _new_reporter()
 
-    def check(name, problems, detail=''):
-        ok = not problems
-        results.append(ok)
-        print(f'{"✓" if ok else "✗"} {name}{("  " + detail) if detail else ""}')
-        for problem in problems:
-            print(f'    - {problem}')
-        return ok
+    def finish():
+        ok = reporter.failures() == 0
+        print('RESULT:', 'PASS' if ok else 'FAIL')
+        return EXIT_PASS if ok else EXIT_FAIL
 
     print(f'== Dex SSO 集成测试(server={server} provider={PROVIDER} login={login}) ==')
 
@@ -306,8 +639,8 @@ def main(argv):
     # 0. 环境探测 —— 先分清"环境没起来(SKIP)"与"契约不满足(FAIL)"。
     status, _, body, _ = request(op, server + '/healthz')
     if status != 200:
-        print(f'SKIP: {server}/healthz 不可达/非 200(status={status}) —— 服务端没起来,本次未验证任何东西')
-        return EXIT_SKIP
+        return skip('missing-server',
+                    f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')
     status, _, methods_body, _ = request(op, server + '/api/server/admin/auth/methods')
     if status == 200:
         try:
@@ -315,59 +648,48 @@ def main(argv):
         except (ValueError, AttributeError):
             names = set()
         if names and not names & {'oidc', 'openid'}:
-            print(f'SKIP: 服务端未配置浏览器跳转登录(configured={sorted(names)}) —— '
-                  '本用例验证的是 OIDC 授权码流,配置缺失时未验证任何东西')
-            return EXIT_SKIP
+            return skip('missing-provider',
+                        f'服务端未配置浏览器跳转登录(configured={sorted(names)}) —— '
+                        '本用例验证的是 OIDC 授权码流')
 
     # 1. 启动登录流:不跟随,拿 state cookie + IdP 授权地址。
     status, authorize, _, _ = request(op, f'{server}/api/client/v2/auth/{PROVIDER}/login')
-    check(f'[1] GET /auth/{PROVIDER}/login → 302 且 Location 指向 IdP',
-          [] if status == 302 and authorize else [f'status={status} Location={authorize[:80]!r}'],
-          f'status={status} Location={authorize[:70]}')
-    if status != 302 or not authorize:
-        print('RESULT: FAIL')
-        return EXIT_FAIL
+    if not reporter.report('login-start', {'status': status, 'location': authorize}):
+        return finish()
 
     # 2. 跟随到 IdP(第一次跳转就吃自定义 scheme 的话说明配置把 IdP 指成了非 http)。
     status, url, body, _, deep_link, hops = follow(op, authorize)
-    check('[2] 落在 IdP 登录页(有密码表单)',
-          login_page_problems(url, body, idp_expected or urllib.parse.urlparse(authorize).scheme + '://'
-                              + urllib.parse.urlparse(authorize).netloc),
-          f'status={status} url={url[:90]}')
-    if not results[-1]:
-        print('RESULT: FAIL')
-        return EXIT_FAIL
+    idp_origin = idp_expected or (urllib.parse.urlparse(authorize).scheme + '://'
+                                  + urllib.parse.urlparse(authorize).netloc)
+    if not reporter.report('idp-login-page', {'url': url, 'body': body, 'idp_origin': idp_origin}):
+        return finish()
 
     # 3. 提交凭据(表单 POST 到当前 url,带 state;Dex 表单无 csrf)。
     form = urllib.parse.urlencode({'login': login, 'password': password}).encode()
     status, url, body, _, deep_link, hops = follow(
         op, url, data=form,
         headers={'Content-Type': 'application/x-www-form-urlencoded', 'Referer': url})
-    check('[3] 提交 IdP 凭据后离开登录页', login_submit_problems(status, body),
-          f'status={status} url={url[:90]}')
+    reporter.report('submit-credentials', {'status': status, 'body': body})
 
     # 4. IdP 要求授权确认时继续提交(不能只是"看到 approval 就跳过")。
-    if 'approval' in url:
+    approval_required = 'approval' in url
+    if approval_required:
         form = urllib.parse.urlencode({'approve': 'true', 'grant_scope': 'openid profile email'}).encode()
         status, url, body, _, deep_link, hops = follow(
             op, url, data=form,
             headers={'Content-Type': 'application/x-www-form-urlencoded', 'Referer': url})
-        check('[4] 授权确认后离开 approval(继续往回调走)', approve_problems(status, url, body),
-              f'status={status} url={url[:90]}')
     else:
-        print(f'  ·  [4] IdP 未要求授权确认(直接回调),跳过 approve 提交')
+        print('  ·  [4] IdP 未要求授权确认(直接回调),approve 提交未执行')
+    reporter.report('approval-advance',
+                    {'required': approval_required, 'status': status, 'url': url, 'body': body})
 
-    reached_callback = any(CALLBACK_PATH in hop_url and 'code=' in hop_url for _, hop_url in hops)
-    check(f'[5] 授权码回到 {CALLBACK_PATH}', [] if reached_callback else ['回调链里没有出现带 code 的回调地址'],
-          '；'.join(f'{code} {hop[:70]}' for code, hop in hops[-3:]))
+    reporter.report('callback-reached', {'hops': hops})
 
     # 5. 回调必须下发深链 —— 读 Location 头(不跟随自定义 scheme)。
-    check('[5] 回调 302 到深链 <scheme>://auth?token=…', deep_link_problems(deep_link, expected_scheme),
-          f'Location={deep_link[:90]}')
+    reporter.report('deep-link', {'location': deep_link, 'expected_scheme': expected_scheme})
     if not deep_link:
         print('  （深链缺失:回调响应见上一步诊断；服务端 302 目标不是自定义 scheme 即判失败）')
-        print('RESULT: FAIL')
-        return EXIT_FAIL
+        return finish()
 
     # 6. 深链 token 必须真的能登录,且是本次登录的账号。
     _, _, query = parse_deep_link(deep_link)
@@ -375,12 +697,10 @@ def main(argv):
     print(f'  ·  深链 token 长度={len(token)}')
     status, _, body, _ = request(make_opener(http.cookiejar.CookieJar()), f'{server}/api/client/v2/auth/me',
                                  headers={'Authorization': 'Bearer ' + token})
-    check('[6] 深链 token 调 /auth/me 且身份=本次登录账号',
-          me_problems(status, body, expected_user, expected_email), f'status={status} body={body[:90]}')
+    reporter.report('deep-link-identity', {'status': status, 'body': body,
+                                           'expected_user': expected_user, 'expected_email': expected_email})
 
-    ok = all(results)
-    print('RESULT:', 'PASS' if ok else 'FAIL')
-    return EXIT_PASS if ok else EXIT_FAIL
+    return finish()
 
 
 if __name__ == '__main__':

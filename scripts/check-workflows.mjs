@@ -59,6 +59,14 @@
  *           子串匹配让 R2 上传步 `echo` 化后照样"命中登记"。三者改成命令位/整串判据。
  *           同批收掉第八轮新引入的三条**假红**(子 shell 收尾 / 重定向当参数 / env 说明文本)。
  *
+ * 2026-09-25 第十四轮现场再补一条(判据与现场说明见 [SK-22] 的常量区):
+ *   [SK-22] **表达式的词法字符集** —— 一个 `run: |` 块的 **shell 注释**里写了
+ *           `${{ …outputs.interp }}`(U+2026 省略号):YAML 合法、`bash -n` 合法(那行就是注释)、
+ *           本文件此前所有判据都看不见它,而推上 GitHub 后**整条 CI 零 job**
+ *           (run 0 秒 / 0 job 的 startup_failure,`pull_request` 下连 run 都不创建)。
+ *           判据按**全文**(含 `#` 注释行、heredoc、字符串)扫 `${{ … }}`,剥掉 `'…'`
+ *           单引号字面量后剩字符必须落在表达式词法器允许的集合里;未闭合 / 空表达式同样红。
+ *
  * 用法:node scripts/check-workflows.mjs
  * 退出码:0 = 全部通过;1 = 有块解析失败、策略违规或扫描器退化。
  */
@@ -471,7 +479,7 @@ const GATE_SELFTEST_RUNS_ON = 'ubuntu-24.04'
 const SELFTEST_RUNS_ON_REGISTRY = {
   jobRunsOn: [{ job: 'verify', runsOn: GATE_SELFTEST_RUNS_ON, why: '自检合成样本:`selftestWorkflow()` 造的 job 名' }],
 }
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-22', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -616,6 +624,17 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'x13-guard-runner-redirect-null-green', policy: null },
   { id: 'x14-workflow-env-lookalike-green', policy: null },
   { id: 'x15-workflow-env-other-flag-green', policy: null },
+  // ---- [SK-22] 表达式词法字符集(2026-09-25 第十四轮现场:整条 workflow 解析失败 ⇒ 0 job)----
+  // 现场原形是"`run:` 的 **shell 注释**里的表达式带 U+2026";四条红样本 + 四条绿样本逐条点名
+  // (尤其绿样本钉的是"必须剥掉单引号字面量 / 取体必须字符串感知"这两件容易做错的半件事)。
+  { id: 'w31-run-comment-expression-ellipsis', policy: '[SK-22]' },
+  { id: 'w32-expression-non-ascii-outside-literals', policy: '[SK-22]' },
+  { id: 'w33-unterminated-expression', policy: '[SK-22]' },
+  { id: 'w34-expression-disallowed-ascii-operator', policy: '[SK-22]' },
+  { id: 'w35-expression-charset-green', policy: null },
+  { id: 'w36-expression-literal-non-ascii-green', policy: null },
+  { id: 'w37-expression-literal-braces-green', policy: null },
+  { id: 'w38-expression-brace-in-literal-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -669,6 +688,7 @@ function workflowResult(failures, {
   pinnedEnvLayers = [],
   pinnedUses = [],
   usesWith = [],
+  expressionBodies = 0,
 } = {}) {
   return {
     failures,
@@ -680,6 +700,7 @@ function workflowResult(failures, {
     pinnedEnvLayers,
     pinnedUses,
     usesWith,
+    expressionBodies,
   }
 }
 
@@ -692,6 +713,9 @@ function workflowResult(failures, {
  */
 export function checkWorkflowText(name, text, options = {}) {
   const failures = []
+  // 提示收集器（"策略真的跑过了"的证据）。声明在这里而不是 SK-7 那一段之后：判定顺序最前的
+  // [SK-22]（表达式词法字符集）就要往里面写通过证据，而它必须跑在 YAML 解析之前。
+  const notes = []
   // SK-15 的登记表(默认 = 仓库真实登记值;自检用合成表注入,见 REGISTRY_DEFAULT)。
   const registries = options.registries ?? REGISTRY_DEFAULT
   // 本地 action 的解析根(第十轮审计 C-03):默认 = 仓库根;自检用临时树注入,
@@ -702,6 +726,14 @@ export function checkWorkflowText(name, text, options = {}) {
   if (/^\t|:\s*\t|\s\t/u.test(text)) {
     failures.push({ name, line: 0, detail: 'YAML 缩进中不允许出现 tab 字符' })
   }
+
+  // 策略 14（[SK-22]，2026-09-25 第十四轮现场）：**表达式的词法字符集**。
+  // 放在 YAML 解析**之前**，理由有两条：
+  //   ① 它是"GitHub 能不能解析这个文件"的另一条独立失败面 —— 现场那份 ci.yml 的 YAML
+  //      完全合法、`bash -n` 完全合法（非法字符就在一行 shell 注释里），只有模板解析器看得见；
+  //   ② 放在最早 ⇒ YAML 也坏时两条诊断都在（本文件反复强调"门禁自己不能吞诊断"）。
+  const expressionLexis = checkExpressionCharacterSet(name, text, notes)
+  failures.push(...expressionLexis.failures)
 
   // 结构解析(2026-09-10 补):bash -n 只看得见 shell 语法,看不见 YAML 语义。
   // 实测踩过一次:`- name: ... (fork PR: no channel access)` 里的 `: ` 让 YAML
@@ -859,7 +891,7 @@ export function checkWorkflowText(name, text, options = {}) {
   }
 
   // ===== SK-7 三条静态策略(2026-09-19 第三批:吞码 / 超时序 / 单行退出码)=====
-  const notes = []
+  // （`notes` 已在函数开头声明：判定顺序更早的 [SK-22] 要往里面写通过证据。）
   const allowlist = new AllowlistUse()
   // 策略 1 先跑:它报过的语句不再被策略 3 重复报(同一句话两个毛病只报一次)。
   const reported = new Set()
@@ -897,6 +929,12 @@ export function checkWorkflowText(name, text, options = {}) {
   //      分开的两个流、退出码、恰好一行）—— 没有这一条，把断言块删掉/改弱没有任何静态反应。
   failures.push(...checkInstallIntegrityPrecedence(name, document, notes, options))
   failures.push(...checkVerdictAssertionBlocks(name, document, notes, options))
+  // 策略 10c（第十三轮红队 R13-D-02，P0）：**判据步的启动器必须冻结** ——
+  // 载荷只往 `$GITHUB_PATH` 追加一个假 `node` 目录（那行写在 `.sh` 里 ⇒ 上面两条静态判据
+  // 都看不见）就能把探针 / 编排器 / 凭据检查器三次 `node` 调用全换掉，假 node 自己回显凭据。
+  failures.push(...checkFrozenLaunchers(name, document, notes, options))
+  // 策略 10d（第十三轮 C 泳道 C-05，P3）：**永不跳过的守卫 job 的权限面**逐字登记。
+  failures.push(...checkPinnedJobPermissions(name, document, notes, options))
   // 策略 13(2026-09-25 第九轮审计 D 泳道 P1;2026-09-24 第十轮审计 C-01/C-02/C-03/D-03 加强):
   // 被钉步骤/守卫 job 的**进程环境层** —— 白名单式的四层 `env:` + 前序步骤的 `$GITHUB_ENV`
   // 写入 + 被钉步骤自己步骤体里的 `export`/前缀赋值 + 被钉单元里的 `uses:` 委派目标。
@@ -949,6 +987,8 @@ export function checkWorkflowText(name, text, options = {}) {
     pinnedEnvLayers: pinnedEnv.layers,
     pinnedUses: pinnedEnv.uses,
     usesWith: pinnedEnv.usesWith,
+    // [SK-22]：全文扫到的表达式处数（main() 用它做"扫描器退化"对账：全仓一处都扫不到即红）。
+    expressionBodies: expressionLexis.expressions,
   })
 }
 
@@ -1178,7 +1218,290 @@ const ROOT_GATE_WEAKENING_FLAGS = ['--no-guards', '--only', '--changed', '--list
  * 形态等价（root `package.json` 的 `check` 脚本就是 `node scripts/check-workspaces.mjs`），
  * 所以两条入口是同一件事的两种写法。
  */
-const ROOT_GATE_DIRECT_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*node\s+scripts\/check-workspaces\.mjs(?![\w:.-])((?:[ \t]+[^\s;&|>()]+)*)/gu
+// ---- [SK-20] 的常量（放在这里是因为 `ROOT_GATE_DIRECT_INVOCATION` 等判据正则要用它们）----
+/** 冻结步的 `id`（契约：被钉步骤用 `steps.<id>.outputs.*` 引用它）。 */
+const FROZEN_LAUNCHER_STEP_ID = 'frozen-launchers'
+/**
+ * 必须使用冻结启动器的 job（跑判据的那两个）。
+ *
+ * **单一真源（第十四轮审计 lane E 的 E-03）**：行为探针 `scripts/check-frozen-launchers.mjs`
+ * **import 本常量**（不再手抄一份）。此前两处是两份手抄字面量、靠注释自称"同一份登记/同源"，
+ * 零交叉对拍 —— lane E 实测把探针侧缩成 `['node']` 后两个守卫**同时 EXIT=0**（漂移不可见）。
+ * 现在只有这一份；"探针必须 import 它、不得自持副本"由下面的
+ * {@link checkFrozenRegistryWiring} 逐字钉住（拆掉 import 即红）。
+ */
+export const FROZEN_LAUNCHER_JOBS = ['gate-guards', 'gate']
+/** 必须**真的跑**行为探针的 job（"永不跳过"的那一个；其余 job 不必各跑一遍）。 */
+const FROZEN_LAUNCHER_PROBE_JOBS = ['gate-guards']
+/** 行为探针脚本（必须真的被某个被钉 job 执行）。 */
+const FROZEN_LAUNCHER_PROBE = 'scripts/check-frozen-launchers.mjs'
+/**
+ * 冻结步必须写出的输出键（**单一真源**，探针 import 它；理由见 `FROZEN_LAUNCHER_JOBS`）。
+ *
+ * 收窄本表的后果：`[SK-20]` 只再要求剩下的键出现在冻结步体里，探针也只再核对剩下的键 ——
+ * 所以探针另有一条**双向对拍**（冻结步**真跑出来的**输出键集合必须与本表逐字相等，
+ * 多一个"未登记"的键也红），防止"收窄登记表"这条路径静默丢掉核验面。
+ */
+export const FROZEN_LAUNCHER_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
+/**
+ * **第二个冻结点**：把"冻结的 PATH"与**白名单内的工具链目录**合成一份判据步真能用的 PATH
+ * （V13-A §3.3 / R1 的收口件）。
+ *
+ * 为什么需要它：第一个冻结点排在任何仓内执行点**之前**（位置即判据），所以它抓到的 `path`
+ * 是"工具链之前"那份；而 `Full gate` 经 `corepack yarn` 起包级 check，需要 setup-node 的
+ * node 与 corepack shim 在 PATH 上。直接拿冻结那份复位 PATH = 用 runner **预装**的 node
+ * 跑 `yarn install` 装出来的依赖（版本/ABI 面不一致）—— 那是"用一个可能坏掉的构建换一个
+ * 看起来安全的形态"。所以这一格把工具链目录**按白名单**放进来：
+ *   · 只放行 `${{ runner.tool_cache }}/node/` 之下的目录（runner 侧展开的常量，仓内代码改不到）；
+ *   · 其它任何**新增**目录一律当场红 —— 那正是 `$GITHUB_PATH` 注入留下的痕迹。
+ */
+const FROZEN_TOOLCHAIN_STEP_ID = 'frozen-toolchain'
+/**
+ * **允许被 `export PATH=…` 复位的两个冻结点**（`FROZEN_LAUNCHER_PATH_EXPORT` 的正则里逐字写着
+ * 这两个名字；这里再做一次纯字符串对拍 —— 两处漂移时 [SK-17] 的例外会失效而不是放宽）。
+ */
+const FROZEN_LAUNCHER_STEP_IDS = [FROZEN_LAUNCHER_STEP_ID, FROZEN_TOOLCHAIN_STEP_ID]
+/**
+ * 判据步里允许出现的**外部命令**（登记制）。
+ *
+ * 为什么不再逐个写冻结点输出（V13-A §3.3 顺带点名的 `openssl`）：复位 `PATH` 之后，
+ * `openssl`/`cat`/`grep`/`mkdir` 与 `node`/`git`/`bash` 走的是**同一份**解析面 ——
+ * 冻结的是"整份 PATH"，逐个工具再写一个冻结点输出只是把同一件事说几遍。但"步骤能跑什么"
+ * 仍是判据面的一部分 ⇒ 按**登记制**收口：判据步里新出现一个未登记的外部命令即红
+ * （要么登记它并写清为什么不需要单独的冻结输出，要么别在判据步里用它）。
+ */
+const FROZEN_LAUNCHER_EXTERNAL_TOOLS = [
+  ['openssl', '凭据通道用它造一次性 nonce（`openssl rand -hex 16 > "$verdict_dir/nonce"`）'],
+  ['mkdir', '造步骤独占目录（`mkdir -m 700 "$verdict_dir"`：原子性本身就是判据的一部分）'],
+  ['cat', '把步骤自己的 stdout/stderr 捕获文件打回日志（凭据只从捕获文件里认）'],
+  ['grep', '在通过凭据文件里数"恰好一行"'],
+  ['tar', '打包 workspace 构建产物（不跑仓内代码，产物面判据）'],
+]
+/** shell 内建 / 关键字：不是外部命令，不需要登记。 */
+const SHELL_BUILTIN_OR_KEYWORD_WORDS = new Set([
+  'set', 'export', 'unset', 'declare', 'typeset', 'readonly', 'local', 'shift', 'eval', 'exec',
+  'source', '.', 'command', 'builtin', 'type', 'hash', 'umask', 'shopt', 'alias', 'unalias',
+  'echo', 'printf', 'read', 'test', '[', ']', '[[', ']]', ':', 'true', 'false', 'let', 'getopts',
+  'cd', 'pwd', 'pushd', 'popd', 'dirs', 'exit', 'return', 'break', 'continue', 'trap', 'wait',
+  'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in',
+  'select', 'time', 'coproc', 'function',
+])
+/**
+ * 合成步体里必须逐字出现的**非白名单**判据（冻结值来源 / 输出通道 / 拒绝路径）。
+ *
+ * 为什么 `runner.tool_cache` **不在**这张表里：它原本是一条**子串**判据，而子串判据证明不了
+ * "白名单的**取值**是什么"（第十四轮审计 lane B 的 B-03，P1）：把合成步改成
+ * `allowed_root="/"` 再另加一行 `allowlist_anchor="${{ runner.tool_cache }}/node/"`
+ * （注释会被剥，**字符串字面量不剥**），四条片段判据全过 ⇒ `check-workflows` EXIT=0，
+ * 而同一份步骤体在真 PATH 前置注入目录时**不再拒绝**、把注入目录写进了 `path=`（行为探针当时
+ * 只断言"EXIT=0 且 `path` 非空" ⇒ 也绿）。白名单的**取值**现在由下面三条登记式判据钉住
+ * （{@link FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE} / `…_VALUE` / `…_ARM`），行为面由探针的
+ * **注入负控**钉住（注入目录必须被拒；把白名单换成 `/` 的正控必须被接受）。
+ */
+const FROZEN_TOOLCHAIN_FRAGMENTS = [
+  'steps.frozen-launchers.outputs.path',
+  '>> "$GITHUB_OUTPUT"',
+  'exit 1',
+]
+/** 白名单根所在的变量名（逐字；见 {@link FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}）。 */
+export const FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE = 'allowed_root'
+/**
+ * 白名单根的**登记取值**（逐字相等，不是"包含某个子串"）。
+ *
+ * 形态即判据：`${{ runner.tool_cache }}/node/` 是 runner 侧展开的常量（仓内代码改不到），
+ * 逐字钉住它之后，"白名单被放行成 `/`"、"被改成另一个前缀"、"取值被二次赋值覆盖"都会红。
+ */
+export const FROZEN_TOOLCHAIN_ALLOWLIST_VALUE = '"${{ runner.tool_cache }}/node/"'
+/**
+ * 接受臂必须逐字用这个前缀模式（`case "$entry/" in "$allowed_root"*)`）。
+ *
+ * 为什么单独钉一条：取值登记对了、却没被用在接受臂上（例如另加一条 `/*)` 的通配臂）时，
+ * "取值"判据看不出来 —— 而那条通配臂就是"全放行"的另一种写法。
+ */
+const FROZEN_TOOLCHAIN_ALLOWLIST_ARM = '"$allowed_root"*)'
+/**
+ * 判据步体里"复位 PATH"的那一行。**两个冻结点都认**（早于工具链就位的步骤只能用第一份）。
+ * 与 [SK-17] 的 PATH 例外（`FROZEN_LAUNCHER_PATH_EXPORT`，定义在下面的 [SK-20] 常量区）
+ * **逐字相同**：逐字 + 两端锚定 —— 多加一个字符（例如在后面再接一个目录）即不再豁免。
+ * 两份字面量必须同步；漂移由 `FROZEN_LAUNCHER_STEP_IDS` 的纯字符串对拍兜住。
+ */
+const FROZEN_LAUNCHER_PATH_EXPORT_ANY = /^export\s+PATH="\$\{\{\s*steps\.(frozen-launchers|frozen-toolchain)\.outputs\.path\s*\}\}"$/u
+/** 命令位的冻结表达式（`"${{ steps.<id>.outputs.<key> }}" …`）。 */
+const FROZEN_EXPRESSION_COMMAND_POSITION = /(?:^|[\n;&|(]|&&|\|\|)\s*"\$\{\{\s*steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_-]+\s*\}\}"/u
+/** 命令位直接跑仓内路径（`scripts/…` / `packages/…` / `integration-tests/…`）。 */
+const REPO_PATH_COMMAND_POSITION = /(?:^|[\n;&|(]|&&|\|\|)\s*(?:\.\/)?(?:scripts|packages|integration-tests)\//u
+/** 冻结步体里必须逐字出现的形态（绝对路径 + 步骤输出通道）。 */
+const FROZEN_LAUNCHER_FREEZE_FRAGMENTS = [
+  'command -v node',
+  'command -v bash',
+  'command -v git',
+  '>> "$GITHUB_OUTPUT"',
+]
+/** `export PATH="${{ steps.<id>.outputs.path }}"`（SK-17 body-assignment 的**唯一** PATH 例外）。 */
+const FROZEN_LAUNCHER_PATH_EXPORT = /^export\s+PATH="\$\{\{\s*steps\.(frozen-launchers|frozen-toolchain)\.outputs\.path\s*\}\}"$/u
+/** 冻结启动器的 node 调用形态（runner 侧展开的绝对路径）。 */
+const FROZEN_LAUNCHER_NODE_EXPRESSION = 'steps.frozen-launchers.outputs.node'
+/** 冻结的 `git`（取判据执行体来源的那条链）。 */
+const FROZEN_LAUNCHER_GIT_EXPRESSION = 'steps.frozen-launchers.outputs.git'
+/**
+ * 冻结的解释器（执行仓内脚本的那条链）。
+ *
+ * 输出键叫 `interp` 而不是它的常见名字：静态判据 `[SK-7c]` 把 `sh`/`ba*sh` 这类**词**当成
+ * "把命令交给另一个 shell"，冻结步里出现那个词会被它判红（`command -v <词>` 与带引号的
+ * 写法都在内，实测）。判据的形态学不该被绕过，但也不该为了一个名字把收口写变形 ——
+ * 键名换掉、语义不变。
+ */
+const FROZEN_LAUNCHER_BASH_EXPRESSION = 'steps.frozen-launchers.outputs.interp'
+/**
+ * shell **函数定义**形态（`f() { … }` / `function f { … }` / `function f() { … }`）。
+ * 见 [SK-14⑩]：承载凭据的步骤里出现定义即红（同名函数会遮蔽断言用的命令）。
+ */
+const SHELL_FUNCTION_DEFINITION = /(?:^|[\n;&|(])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/gu
+const VERDICT_ASSERTION_STEPS = [
+  {
+    job: 'gate-guards',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '"${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      // [SK-20] / R13-D-01：凭据必须把**平台锚**一起回显（`github-sha=` 由判据自己写出，
+      // 值是它读到的 `$GITHUB_SHA`）—— 于是「HEAD == 平台值」这件事进凭据、进汇总，
+      // 可被这一步逐字断言（判据侧不等就退出码 2，凭据根本打印不出来）。
+      '--expect github-sha "$GITHUB_SHA"',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '"${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      // [SK-20] / R13-D-01：凭据必须把**平台锚**一起回显（`github-sha=` 由判据自己写出，
+      // 值是它读到的 `$GITHUB_SHA`）—— 于是「HEAD == 平台值」这件事进凭据、进汇总，
+      // 可被这一步逐字断言（判据侧不等就退出码 2，凭据根本打印不出来）。
+      '--expect github-sha "$GITHUB_SHA"',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Root guards (every PR shape)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-root-guards: VERDICT PASS guards=[1-9][0-9]*'",
+      '--min guards 1',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Guard parser integrity (strict worktree↔HEAD anchor)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'check-guard-parser-integrity.mjs --require-clean',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本'",
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate',
+    name: 'Full gate (packages + all root guards)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      '"${{ steps.frozen-launchers.outputs.node }}" scripts/check-workspaces.mjs',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+'",
+      '--min planned 1 --equal planned executed',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/gate.log', '|& tee'],
+  },
+]
+
+// ===== SK-20:被钉步骤的**启动器**必须冻结（第十三轮 R13-D-02，P0） =====
+//
+// 现场（第十三轮 D 泳道实测）：载荷**不碰 git、不改任何被跟踪文件**，只把假 `node` 目录写进
+// `$GITHUB_PATH`（那行写在某个 `.sh` 里 ⇒ 读 YAML 的静态判据看不见）⇒ 探针 / 编排器 /
+// **凭据检查器**三次 `node` 调用全被替换；假 `node` 按 `--nonce-file` 把凭据自己回显回去，
+// 于是 `EXIT=0`、工作树干净、日志里凭据"齐全"，而一条判据都没跑。
+//
+// 收口形态（本规则钉住的形态）：
+//   ① 每个跑判据的 job 有且只有一个**冻结步**：`id: frozen-launchers`，且它之前没有执行仓内
+//      代码的步骤 —— 它把 `command -v node/bash/git` 的绝对路径与当时的 `$PATH` 写进
+//      `$GITHUB_OUTPUT`；
+//   ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用 `"${{ steps.frozen-launchers.outputs.node }}"`
+//      （runner 侧展开的绝对路径；步骤输出在步骤结束时被 runner 读走，后续仓内进程改不到）；
+//   ③ **每个跑仓内执行体的判据步**都必须 `export PATH="${{ steps.<冻结点>.outputs.path }}"`
+//      —— 而且是该步里**任何仓内命令之前**的第一条（V13-A §3.3 / R1：只冻结"步骤命令位的
+//      启动器"冻不到仓内脚本体里的裸 `node`，实测能把 wasm 门禁翻成 EXIT=0）；
+//      冻结点有两个：`frozen-launchers`（工具链就位之前的那份）与
+//      `frozen-toolchain`（把冻结 PATH 与**白名单内**的工具链目录合成后的那份 —— 白名单是
+//      `${{ runner.tool_cache }}/node/`，其它任何新增目录 ⇒ 当场红，那正是 `$GITHUB_PATH`
+//      注入的痕迹）；引用哪一个都行，但被引用的冻结点必须在本步**之前**；
+//   ④ 该 job 里必须有一个步骤**真的跑**行为探针 `scripts/check-frozen-launchers.mjs`
+//      （静态判据只能证明"文本形态对"，跑一遍才能证明"PATH 注入换不掉启动器"，
+//      探针内部自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针恒绿；
+//      另有一个**R1 形态的正控**：只拆掉 PATH 复位、保留冻结解释器 ⇒ 必须变红）。
+//
+// 诚实边界：收口的是 `$PATH` 注入这条**低成本**通道；GitHub 托管 runner 上 runner 用户有
+// 免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径 —— 见行为探针的末尾输出。
+const ROOT_GATE_FROZEN_NODE_TOKEN = String.raw`"\$\{\{\s*steps\.${FROZEN_LAUNCHER_STEP_ID}\.outputs\.node\s*\}\}"`
+const ROOT_GATE_DIRECT_INVOCATION = new RegExp(
+  `(?:^|[;&|(\\n]|\\$\\()\\s*(?:node|${ROOT_GATE_FROZEN_NODE_TOKEN})\\s+scripts/check-workspaces[.]mjs`
+  + `(?![\\w:.-])((?:[ \\t]+[^\\s;&|>()]+)*)`,
+  'gu',
+)
 /**
  * 根门禁调用的**全部形态**（`yarn check` / `corepack yarn check` / `node scripts/check-workspaces.mjs`）。
  * @param script - 去注释后的可执行文本。
@@ -1219,7 +1542,11 @@ const INSTALL_INTEGRITY_PRECEDENCE_JOBS = ['gate-guards', 'gate']
  */
 function executesInstallPrecheck(script) {
   if (commandPositionArgvs(script, INSTALL_INTEGRITY_PRECHECK).length > 0) return true
-  return String(script).includes(`git show HEAD:${INSTALL_INTEGRITY_PRECHECK}`)
+  // 判据是 `git show HEAD:<路径>` 这个**动作**在场。命令词可能是冻结的 git 表达式
+  // （`"${{ steps.frozen-launchers.outputs.git }}" show HEAD:…`）⇒ 按"命令词 + show HEAD:"
+  // 判，而不是按整串字面量（[SK-20] 之后字面量形态不再出现）。
+  const escaped = INSTALL_INTEGRITY_PRECHECK.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  return new RegExp(`show\\s+HEAD:${escaped}`, 'u').test(String(script))
 }
 /**
  * [SK-14⑩] **通过凭据的断言块**的登记表（第十二轮红队 R12-D-03 / C-P1-2 的唯一真源）。
@@ -1231,113 +1558,818 @@ function executesInstallPrecheck(script) {
 /** 承载"通过凭据断言块"的那份 workflow（登记表里的 job/step 名都属于它）。 */
 const VERDICT_WORKFLOW_FILE = 'ci.yml'
 /**
- * shell **函数定义**形态（`f() { … }` / `function f { … }` / `function f() { … }`）。
- * 见 [SK-14⑩]：承载凭据的步骤里出现定义即红（同名函数会遮蔽断言用的命令）。
+ * 这段步骤体是不是"从冻结输出复位 PATH"的那一行（SK-17 的 PATH 例外）。
+ * @param segment - `shellEnvironmentAssignments()` 报出的原始片段。
+ * @returns 是否放行。
  */
-const SHELL_FUNCTION_DEFINITION = /(?:^|[\n;&|(])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/gu
-const VERDICT_ASSERTION_STEPS = [
+function isFrozenLauncherPathExport(segment) {
+  const match = FROZEN_LAUNCHER_PATH_EXPORT.exec(String(segment ?? '').trim())
+  return match !== null && FROZEN_LAUNCHER_STEP_IDS.includes(match[1])
+}
+
+/**
+ * 把 shell 的行继续（行尾 `\`）接起来 —— "命令位"判定必须在**逻辑行**上做，否则
+ * `tar -czf x.tgz \` 后面每一行都以路径开头，会被误判成"在命令位跑仓内脚本"。
+ * @param script - 去注释后的可执行文本。
+ * @returns 逻辑行数组。
+ */
+function joinedLogicalLines(script) {
+  const joined = []
+  let buffer = ''
+  for (const line of String(script).split('\n')) {
+    if (/\\$/u.test(line)) {
+      buffer += `${line.replace(/\\$/u, ' ')}`
+      continue
+    }
+    joined.push(`${buffer}${line}`)
+    buffer = ''
+  }
+  if (buffer !== '') joined.push(buffer)
+  return joined
+}
+
+/**
+ * 这一步是不是"跑仓内执行体的判据步"：命令位出现**冻结表达式**或**仓内路径**。
+ *
+ * 只用同一份口径判定"哪些步骤必须复位 PATH"，避免"按步骤名手写清单"（清单会漂移）。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 是否判据步。
+ */
+function isJudgeStepRun(run) {
+  for (const line of joinedLogicalLines(run)) {
+    const code = line.replace(/#.*$/u, '')
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(code.trim())) continue
+    if (FROZEN_EXPRESSION_COMMAND_POSITION.test(code)) return true
+    if (REPO_PATH_COMMAND_POSITION.test(code)) return true
+  }
+  return false
+}
+
+/**
+ * 判据步体里第一次"执行仓内东西"的**逻辑行**下标（复位 PATH 那一行不算）；没有 ⇒ -1。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 下标。
+ */
+function firstJudgeInvocationLine(run) {
+  const lines = joinedLogicalLines(run)
+  for (let index = 0; index < lines.length; index += 1) {
+    const code = lines[index].replace(/#.*$/u, '')
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(code.trim())) continue
+    if (FROZEN_EXPRESSION_COMMAND_POSITION.test(code)) return index
+    if (REPO_PATH_COMMAND_POSITION.test(code)) return index
+  }
+  return -1
+}
+
+/**
+ * 判据步体里"复位 PATH"那一行的**逻辑行**下标；没有 ⇒ -1。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 下标。
+ */
+function frozenPathExportLine(run) {
+  const lines = joinedLogicalLines(run)
+  for (let index = 0; index < lines.length; index += 1) {
+    if (FROZEN_LAUNCHER_PATH_EXPORT_ANY.test(lines[index].replace(/#.*$/u, '').trim())) return index
+  }
+  return -1
+}
+
+/**
+ * 判据步体里出现的**外部命令**（跳过赋值前缀、shell 关键字/内建、冻结表达式与仓内路径）。
+ *
+ * 用途只有一个：判据步里"新出现一个没登记的外部命令"要红（见 `FROZEN_LAUNCHER_EXTERNAL_TOOLS`）。
+ * 它是**近似的 shell 词法**（不做完整解析），因此只对"命令位第一个词"判，且内建/关键字按
+ * 白名单放过 —— 宁可漏判一个奇怪写法，也不要因为误判把正常判据步骤判红（假红的下场是
+ * 整条判据被关掉）。
+ * @param run - 步骤的原始 `run` 文本。
+ * @returns 外部命令名数组（去重、排序）。
+ */
+function externalCommandWords(run) {
+  const found = new Set()
+  const known = new Set(FROZEN_LAUNCHER_EXTERNAL_TOOLS.map(([tool]) => tool))
+  for (const line of joinedLogicalLines(run)) {
+    const code = line.replace(/#.*$/u, '')
+    for (const segment of code.split(/(?:&&|\|\||[;&|])/u)) {
+      const words = segment.trim().split(/\s+/u).filter(word => word !== '')
+      let index = 0
+      while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index])) index += 1
+      while (index < words.length && SHELL_BUILTIN_OR_KEYWORD_WORDS.has(words[index])) index += 1
+      const word = words[index]
+      if (word === undefined) continue
+      if (word.startsWith('"') || word.startsWith("'") || word.startsWith('$')) continue
+      if (/^(?:\.\/)?(?:scripts|packages|integration-tests|docs|server|\.github)\//u.test(word)) continue
+      const name = /([^/]+)$/u.exec(word)?.[1] ?? word
+      if (SHELL_BUILTIN_OR_KEYWORD_WORDS.has(name) || known.has(name)) continue
+      if (!/^[A-Za-z][A-Za-z0-9._-]*$/u.test(name)) continue
+      found.add(name)
+    }
+  }
+  return [...found].sort()
+}
+
+/**
+ * 取一段 shell 可执行文本里对某个变量的**全部赋值右值**（`name=…` / `export name=…`，含行继续）。
+ *
+ * 用途只有一个：[SK-20] 的"白名单**取值**逐字登记"（B-03）。子串判据证明不了取值，而"取值"
+ * 必须先被抽出来才能与登记值比较。返回**全部**赋值而不只是第一处：后一处会覆盖前一处，
+ * 所以"赋值恰好一次"本身也是判据的一部分。
+ *
+ * 只认"整行就是一条赋值"的形态（`^\s*(?:export\s+)?name=…\s*$`）——与 `ci.yml` 的登记形态一致。
+ * 一行里带 `;`/`&&` 的复合写法会因"取值不是登记值"而红（fail-closed：复合行后面还可能再赋值
+ * 一次，静态切不干净就不放过）。宁可对奇怪写法假红一次，也不要让"取值判据"重新退化成子串判据
+ * ——假红的下场是改回登记形态，假绿的下场是注入判据消失。
+ *
+ * @param script - 去掉注释后的可执行文本。
+ * @param variable - 变量名（与捕获到的名字做**字符串**比较，不进正则）。
+ * @returns 赋值右值数组（按出现顺序；已去首尾空白）。
+ */
+function shellAssignmentValues(script, variable) {
+  const values = []
+  for (const raw of joinShellContinuations(script).split('\n')) {
+    const match = /^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*?)[ \t]*$/u.exec(raw.replace(/\r$/u, ''))
+    if (match === null || match[1] !== variable) continue
+    values.push(match[2])
+  }
+  return values
+}
+
+/**
+ * [SK-20] / E-03：**登记表只允许一份** —— 行为探针必须从本文件 import 两个登记常量，
+ * 不得再手抄一份副本。
+ *
+ * 现场（第十四轮审计 lane E 的 E-03）：探针里曾有两份手抄字面量（`PINNED_JOBS` /
+ * `FREEZE_OUTPUT_KEYS`），注释自称"与 `check-workflows.mjs` 的 `FROZEN_LAUNCHER_JOBS` /
+ * `FROZEN_LAUNCHER_OUTPUT_KEYS` 同一份登记/同源"，而两文件**互不 import**、全仓零交叉对拍
+ * ⇒ 把探针侧缩成 `['node']` 后两个守卫**同时 EXIT=0**（漂移不可见）。
+ *
+ * 现在改成真 import（结构性同源）。本判据钉住"接线还在"：import 必须在、**本地副本必须不在**。
+ * 为什么需要它：真 import 之后"有人再手抄一份并改小"这条路径在语义上又变得可能，而没有任何
+ * 语义判据会因此变红 —— 所以用一条源码级接线判据把它钉死（与仓内既有的"源码级接线守卫"同一取向）。
+ */
+const FROZEN_LAUNCHER_REGISTRY_IMPORT = /import\s*\{[^}]*\bFROZEN_LAUNCHER_JOBS\b[^}]*\bFROZEN_LAUNCHER_OUTPUT_KEYS\b[^}]*\}\s*from\s*'\.\/check-workflows\.mjs'/u
+/** 探针里**不得**出现的本地登记副本（注释剥掉之后判，避免注释里的说明文本误伤）。 */
+const FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY = /\b(?:const|let|var)\s+(?:PINNED_JOBS|FREEZE_OUTPUT_KEYS|FROZEN_LAUNCHER_JOBS|FROZEN_LAUNCHER_OUTPUT_KEYS)\s*=/u
+
+/**
+ * [SK-20] / E-03 的接线判据实现（理由见上面两个常量）。
+ * @param file - workflow 文件名（失败项归属）。
+ * @returns 失败项列表。
+ */
+function checkFrozenRegistryWiring(file) {
+  const failures = []
+  const probePath = join(root, FROZEN_LAUNCHER_PROBE)
+  if (!existsSync(probePath)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] 读不到行为探针 \`${FROZEN_LAUNCHER_PROBE}\`（${probePath}）—— 登记表的`
+        + '单一真源与"探针必须 import 它"这条接线都无从核对；探针被删/改名必须同步本判据。',
+    })
+    return failures
+  }
+  const text = readFileSync(probePath, 'utf8')
+  if (!FROZEN_LAUNCHER_REGISTRY_IMPORT.test(text)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] \`${FROZEN_LAUNCHER_PROBE}\` 没有从 \`./check-workflows.mjs\` import `
+        + '`{ FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS }` —— 两张登记表必须**真同源**'
+        + '（第十四轮 lane E 的 E-03：两份手抄字面量 + 注释自称"同源" ⇒ 单侧缩小后两个守卫'
+        + '同时 EXIT=0）。要么恢复这条 import，要么把本判据与两份字面量一起重新论证。',
+    })
+  }
+  if (FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY.test(executableScript(text))) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] \`${FROZEN_LAUNCHER_PROBE}\` 里又出现了**本地的登记副本**`
+        + '（`PINNED_JOBS` / `FREEZE_OUTPUT_KEYS` / `FROZEN_LAUNCHER_JOBS` / '
+        + '`FROZEN_LAUNCHER_OUTPUT_KEYS` 之一被本地声明）—— 副本一旦与 import 的取值不同，'
+        + '漂移就又不可见了（E-03 的原始形态）。请直接用 import 进来的名字。',
+    })
+  }
+  return failures
+}
+
+/**
+ * [SK-20] 冻结启动器的静态判据（现场说明见上面常量区）。
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @param options - `{ scannedFile }`（只对真实的那份 workflow 判）。
+ * @returns 失败项列表。
+ */
+function checkFrozenLaunchers(file, document, notes, options = {}) {
+  const failures = []
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const jobId of FROZEN_LAUNCHER_JOBS) {
+    const job = jobs[jobId]
+    if (job === undefined || job === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] 登记的 job \`${jobId}\` 不在本 workflow 里 —— \`FROZEN_LAUNCHER_JOBS\` 的每一条`
+          + '都是"这个 job 跑判据、所以它的启动器必须冻结"的登记，job 被删/改名必须同步这张表。',
+      })
+      continue
+    }
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    const scripts = steps.map(step => (typeof step?.run === 'string' ? executableScript(step.run) : ''))
+    const jobFailures = []
+    const freezeIndex = steps.findIndex(step => typeof step?.id === 'string' && step.id.trim() === FROZEN_LAUNCHER_STEP_ID)
+    if (freezeIndex < 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有 \`id: ${FROZEN_LAUNCHER_STEP_ID}\` 的**冻结步** ——\n`
+          + '  ⇒ 后续判据步里的 `node` 会按 `$PATH` 解析，而同 job 里任何一个更早的步骤都可以把假'
+          + '`node` 目录追加进 `$GITHUB_PATH`（第十三轮 R13-D-02：探针 / 编排器 / 凭据检查器三次调用'
+          + '全被替换，假 node 自己回显凭据 ⇒ EXIT=0、工作树干净、判据一条没跑）。',
+      })
+      continue
+    }
+    const freezeScript = scripts[freezeIndex] ?? ''
+    for (const fragment of FROZEN_LAUNCHER_FREEZE_FRAGMENTS) {
+      if (!freezeScript.includes(fragment)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的冻结步里缺少 \`${fragment}\` —— 冻结步必须把`
+            + ' `command -v node/bash/git` 的**绝对路径**与当时的 `$PATH` 写进 `$GITHUB_OUTPUT`'
+            + '（步骤输出由 runner 读走，后续仓内进程改不到）。',
+        })
+      }
+    }
+    for (const key of FROZEN_LAUNCHER_OUTPUT_KEYS) {
+      if (!new RegExp(`(?:^|[^A-Za-z0-9_-])${key}=`, 'u').test(freezeScript)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] 冻结步没有写出 \`${key}=\` 输出 —— 被钉步骤要按 `
+            + `\`steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.${key}\` 引用它。`,
+        })
+      }
+    }
+    // 冻结步之前不得有**执行仓内代码**的步骤（`echo`/`exit` 这类纯 shell 不算）。
+    const earlier = []
+    for (let index = 0; index < freezeIndex; index += 1) {
+      const script = scripts[index]
+      if (script === '') continue
+      const runsRepoCode = ['node', 'yarn', 'corepack', 'bash'].some(command => commandPositionArgvs(script, command).length > 0)
+        || /(?:^|[\s;&|])"?\.?\/?(?:scripts|packages)\//u.test(script)
+      if (runsRepoCode) earlier.push(`第 ${index + 1} 步「${stepName(steps[index], index)}」`)
+    }
+    if (earlier.length > 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 的冻结步排在第 ${freezeIndex + 1} 步，但它之前还有执行仓内`
+          + `代码的步骤：${earlier.join('；')}\n  ⇒ 冻结必须在**任何仓内执行点之前**（在那之前跑过的`
+          + '东西都可以改写 `$PATH`/`$GITHUB_ENV`，冻结出来的就是被污染的值）。',
+      })
+    }
+    // ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用冻结的绝对路径。
+    //    同时：取判据执行体来源的 `git show HEAD:` 与仓内 `bash <脚本>` 也必须走冻结值 ——
+    //    它们与 `node` 同属"启动器"（假 `git`/假 `bash` 一样能把探针来源/脚本换成攻击者的）。
+    //    ③（V13-A §3.3 / R1）**冻结点只冻结了"步骤命令位"的启动器，冻不到仓内脚本体内的裸命令**：
+    //    `"${{ …outputs.interp }}" scripts/<x>.sh` 里的 `node` 仍按 `$PATH` 解析 ⇒ 一个只拦
+    //    某条判据、其余转发真 node 的假 `node` 能把 `pass=2 fail=1/EXIT=1` 翻成
+    //    `pass=3 fail=0/EXIT=0`（端到端实测）。所以**每个跑仓内执行体的判据步**都必须在
+    //    任何仓内命令之前把 PATH 复位到冻结值（工具链就位之前用第一份、之后用合成那份）——
+    //    复位方向与攻击相反（攻击往 PATH **前面**塞假 bin），形态逐字登记。
+    const composeIndex = steps.findIndex(step => typeof step?.id === 'string' && step.id.trim() === FROZEN_TOOLCHAIN_STEP_ID)
+    const composeScript = composeIndex < 0 ? '' : scripts[composeIndex]
+    if (composeIndex < 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有 \`id: ${FROZEN_TOOLCHAIN_STEP_ID}\` 的**PATH 合成步** ——\n`
+          + '  ⇒ 冻结步排在任何仓内执行点之前（位置即判据），它抓到的 `path` 是"工具链之前"那份；'
+          + '判据步要么复位成它（`Full gate` 经 `corepack yarn` 起包级 check 时工具链解析不到），'
+          + '要么复位成"合成份"——而合成份必须由**登记过的白名单规则**产生，不能就地拼字符串。',
+      })
+    } else {
+      for (const fragment of FROZEN_TOOLCHAIN_FRAGMENTS) {
+        if (composeScript.includes(fragment)) continue
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里缺少 \`${fragment}\` —— 它必须：`
+            + '① 从冻结输出取基准 PATH；② 只放行 `${{ runner.tool_cache }}/node/` 之下的新增目录'
+            + '（runner 侧常量，仓内代码改不到）；③ 用 `$GITHUB_OUTPUT` 交出合成值；'
+            + '④ 遇到任何其它新增目录就 `exit 1`（那正是 `$GITHUB_PATH` 注入的痕迹）。',
+        })
+      }
+      // ③b 白名单的**取值**必须逐字等于登记值（第十四轮审计 lane B 的 B-03，P1）。
+      //
+      // 现场：这四条判据原本都是**子串**包含（`composeScript.includes(fragment)`），其中
+      // `runner.tool_cache` 那条不能证明"白名单的取值是什么" —— 把 `allowed_root` 改成 `"/"`、
+      // 再把 `runner.tool_cache` 留在另一行的**字符串字面量**里（注释会被剥、字面量不剥），
+      // 四条片段判据全过：`check-workflows` EXIT=0，行为探针也只断言 "EXIT=0 且 path 非空" ⇒
+      // 双绿；而同一份步骤体在真 PATH 前置注入目录时**不再拒绝**、把注入目录写进了 `path=`
+      // （lane B 实测：原形态 EXIT=1 拒绝，变异形态 EXIT=0 接受）。
+      // ⇒ 判"取值"：赋值必须**恰好一次**，且右值逐字等于登记值；接受臂必须逐字用那个前缀变量。
+      const allowlistValues = shellAssignmentValues(composeScript, FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE)
+      if (allowlistValues.length === 0) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里没有把白名单根赋给 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}\`（期望逐字：`
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}=${FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}\`）——`
+            + '白名单的**取值**是这条判据的判据面；抽不出取值 ⇒ "白名单"只剩一个名字。',
+        })
+      } else if (allowlistValues.length > 1) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步把 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}\` 赋值了 ${allowlistValues.length} 次`
+            + `（${allowlistValues.map(value => `\`${value}\``).join('、')}）—— 后一处会覆盖前一处，`
+            + '取值判据必须对"最终生效的那一个"成立；请只保留一处登记赋值。',
+        })
+      } else if (allowlistValues[0] !== FROZEN_TOOLCHAIN_ALLOWLIST_VALUE) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步把白名单根设成了 `
+            + `\`${allowlistValues[0]}\`，登记值是 \`${FROZEN_TOOLCHAIN_ALLOWLIST_VALUE}\` ——`
+            + '白名单必须**逐字**等于登记值（"包含 `runner.tool_cache` 这个子串"证明不了取值：'
+            + '`allowed_root="/"` 再加一行写着该子串的锚注释，曾让静态判据与行为探针双绿）。'
+            + '要放行别的前缀，请同时改登记值并写明理由（那是可评审的 diff）。',
+        })
+      }
+      if (!composeScript.includes(FROZEN_TOOLCHAIN_ALLOWLIST_ARM)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里没有逐字出现接受臂 `
+            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_ARM}\` —— 取值登记对了、却没被用在 \`case\` 的接受臂上`
+            + '（例如另加一条 `/` 通配臂）时，"取值"判据看不出来，而那条通配臂就是另一种"全放行"。',
+        })
+      }
+      if (composeIndex < freezeIndex) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步排在冻结步**之前** —— 它没有基准 PATH 可取。`,
+        })
+      }
+      notes.push(`[SK-20] job \`${jobId}\` 的 PATH 合成步在第 ${composeIndex + 1} 步`
+        + '（白名单目录 + 其它新增目录即红）')
+    }
+    let frozenCalls = 0
+    let frozenPathSteps = 0
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      // 冻结步自己**豁免**：它跑在任何冻结值存在之前，`command -v node` 在这里是
+      // "解析路径"而不是"启动判据"（冻结之后每一步都必须走冻结值）。
+      if (index === freezeIndex) return
+      // PATH 合成步也豁免：它就是"把冻结值变成可用值"的那一步，自身不跑仓内执行体。
+      if (index === composeIndex) return
+      const script = scripts[index]
+      const label = `job \`${jobId}\` 的第 ${index + 1} 步「${stepName(step, index)}」`
+      // ③a 判据步必须复位 PATH（形态 + 顺序都是判据）。
+      if (isJudgeStepRun(step.run)) {
+        const exportLine = frozenPathExportLine(step.run)
+        const firstInvocation = firstJudgeInvocationLine(step.run)
+        if (exportLine < 0) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] ${label} 是**跑仓内执行体的判据步**，但步骤体里没有`
+              + ' `export PATH="${{ steps.<冻结点>.outputs.path }}"` ——\n'
+              + '  ⇒ 冻结只罩住了"步骤命令位的启动器"：仓内 `.sh`/`.mjs` 体（以及它起的子进程）'
+              + '里的裸 `node` 仍按**活 PATH** 解析，一个只拦某条判据、其余转发真 node 的假 `node`'
+              + '（一行 `echo … >> $GITHUB_PATH`，不碰 git、不改被跟踪文件）就能把'
+              + ' `pass=2 fail=1/EXIT=1` 翻成 `pass=3 fail=0/EXIT=0`（V13-A §3.3 端到端实测）。',
+          })
+        } else if (firstInvocation >= 0 && exportLine > firstInvocation) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] ${label} 的 PATH 复位排在第 ${exportLine + 1} 个逻辑行，`
+              + `但它第 ${firstInvocation + 1} 个逻辑行就已经在跑仓内东西了 ——\n`
+              + '  ⇒ 复位必须在**任何仓内命令之前**（晚一步，那之前的命令已经按活 PATH 解析过了）。',
+          })
+        } else if (firstInvocation >= 0) {
+          frozenPathSteps += 1
+          // ③b 外部命令登记制（V13-A §3.3 顺带点名的 `openssl`）：复位 PATH 之后它们与
+          //     `node`/`git`/`bash` 同一解析面 ⇒ 不需要逐个写冻结点输出，但**新出现的**
+          //     外部命令必须登记（登记表 = `FROZEN_LAUNCHER_EXTERNAL_TOOLS`，逐条带理由）。
+          for (const tool of externalCommandWords(step.run)) {
+            jobFailures.push({
+              name: file,
+              line: 0,
+              detail: `[SK-20] ${label} 用了一个**未登记的外部命令** \`${tool}\` —— 判据步对外部`
+                + '命令的解析面是那一行 `export PATH=…` 复位出来的 PATH，所以它们不需要各自写一个'
+                + '冻结点输出；但"这一步能跑什么"必须进登记表（可评审的 diff）。'
+                + `\n  ⇒ 登记进 \`FROZEN_LAUNCHER_EXTERNAL_TOOLS\` 并写清它在这条判据里干什么。`,
+            })
+          }
+        }
+      }
+      const nodeHits = rawCommandPositionArgvs(script, 'node')
+      const usesFrozenNode = step.run.includes(FROZEN_LAUNCHER_NODE_EXPRESSION)
+      if (nodeHits.length > 0) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 在**命令位**调用裸 \`node\`（${nodeHits.length} 处）—— 它的解析面是`
+            + '步骤自己的 `$PATH`，而 `$GITHUB_PATH` 注入的目录会前置到它前面（R13-D-02 的载荷形态：'
+            + '假 `node` 按 `--nonce-file` 把凭据自己回显回去）。'
+            + "\n  ⇒ 判据步必须用 `\"${{ " + FROZEN_LAUNCHER_NODE_EXPRESSION + " }}\"`"
+            + '（runner 侧展开的冻结绝对路径：步骤输出在步骤结束时被 runner 读走，后续仓内进程改不到）。',
+        })
+      }
+      if (usesFrozenNode) frozenCalls += 1
+      // `git show HEAD:<path>`：判据执行体的**来源**。假 `git` 可以让它吐出攻击者的字节。
+      const gitHits = rawCommandPositionArgvs(script, 'git')
+      const frozenGitGit = step.run.includes(FROZEN_LAUNCHER_GIT_EXPRESSION)
+      if (gitHits.length > 0 && !frozenGitGit) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 在**命令位**调用裸 \`git\`（${gitHits.length} 处）——`
+            + '`git show HEAD:<判据执行体>` 是"探针来源"的取字节动作，假 `git`（PATH 注入）可以让'
+            + '它吐出攻击者的字节，于是从 git 对象取执行体这条免疫整体失效。'
+            + "\n  ⇒ 用 `\"${{ " + FROZEN_LAUNCHER_GIT_EXPRESSION + " }}\"`"
+            + '（冻结的绝对路径）。',
+        })
+      }
+      // `bash <仓内脚本>`：仓内脚本的解释器同样是"启动器"。
+      const bashHits = rawCommandPositionArgvs(script, 'bash').filter(hit => /(?:^|\/)(?:scripts|packages)\/\S+/u.test(hit.join(' ')))
+      if (bashHits.length > 0 && !step.run.includes(FROZEN_LAUNCHER_BASH_EXPRESSION)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 用裸 \`bash\` 执行仓内脚本（${bashHits.length} 处）——`
+            + '假 `bash`（PATH 注入）可以在这条链上换掉脚本行为。'
+            + "\n  ⇒ 用 `\"${{ " + FROZEN_LAUNCHER_BASH_EXPRESSION + " }}\"`。",
+        })
+      }
+    })
+    if (frozenCalls === 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有任何步骤使用冻结的 node 启动器`
+          + `（\`${FROZEN_LAUNCHER_NODE_EXPRESSION}\`）—— 冻结步存在但没被用上等于没有收口。`,
+      })
+    }
+    // ③ 行为探针必须真的被**永不跳过**的那个 job 执行（`gate-guards`：docs-only 的 PR 也跑它；
+    //    要求每个 job 各跑一遍只是把同一件事做两次，成本换不来新的证据）。
+    const probeSteps = steps
+      .filter(step => typeof step?.run === 'string'
+        && commandPositionArgvs(executableScript(step.run), FROZEN_LAUNCHER_PROBE).length > 0)
+    if (probeSteps.length === 0 && FROZEN_LAUNCHER_PROBE_JOBS.includes(jobId)) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有步骤在**命令位**执行行为探针 \`${FROZEN_LAUNCHER_PROBE}\` ——`
+          + '静态判据只能证明"文本形态对"；跑一遍才能证明"PATH 注入换不掉启动器"'
+          + '（探针内部自带正控：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针自己就是恒绿）。',
+      })
+    }
+    failures.push(...jobFailures)
+    if (jobFailures.length === 0) {
+      notes.push(`[SK-20] job \`${jobId}\` 的启动器已冻结:冻结步在第 ${freezeIndex + 1} 步(输出 `
+        + `${FROZEN_LAUNCHER_OUTPUT_KEYS.join('/')} · 冻结调用 ${frozenCalls} 处 · 裸 node 0 处)`
+        + ` · PATH 复位 ${frozenPathSteps} 个判据步 · 行为探针 ${probeSteps.length} 处`)
+    }
+  }
+  // E-03：登记表的单一真源接线（探针必须 import、不得自持副本）。放在 job 循环之后：
+  // 它判的是"探针与登记表的关系"，与某个 job 的形态无关，报一次即可。
+  failures.push(...checkFrozenRegistryWiring(file))
+  return failures
+}
+
+// ===== SK-21:"永不跳过"的守卫 job 的**权限面**必须逐字登记（第十三轮 C-05，P3） =====
+//
+// 现场（第十三轮 C 泳道）：给 `gate-guards` 加 `permissions: contents: write`，
+// `check-workflows` EXIT=0（绿）—— 那个 job 是"永不跳过"的守卫 job，却可以带着写权限跑，
+// 而权限面此前只继承 workflow 顶层的 `contents: read`，没有任何静态判据盯它。
+// 同族的 `strategy` / `timeout-minutes` 取值面也是同样的"未被管"，但它们的失败方向是
+// fail-safe（矩阵任一腿红则 job 红、超时只会更容易失败），所以只登记**权限**这一条
+// （能改变"这一步能做什么"的那一条）。
+/**
+ * 「永不跳过的守卫 job」的权限面登记表（逐字相等；缺省/多键/取值不同都红）。
+ * 加一条 = 显式的、可评审的决定（并写清那个 job 为什么需要它）。
+ */
+const PINNED_JOB_PERMISSIONS_REGISTRY = [
   {
     job: 'gate-guards',
-    name: 'Judge execution bodies are pristine (runs before any yarn command)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      'node "$probe" --root "$PWD"',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
-      '--min judge-bodies 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/', '|& tee'],
-  },
-  {
-    job: 'gate',
-    name: 'Judge execution bodies are pristine (runs before any yarn command)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      'node "$probe" --root "$PWD"',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
-      '--min judge-bodies 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/', '|& tee'],
-  },
-  {
-    job: 'gate-guards',
-    name: 'Root guards (every PR shape)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-root-guards: VERDICT PASS guards=[1-9][0-9]*'",
-      '--min guards 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/root-guards.log'],
-  },
-  {
-    job: 'gate-guards',
-    name: 'Guard parser integrity (strict worktree↔HEAD anchor)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'check-guard-parser-integrity.mjs --require-clean',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本'",
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/root-guards.log'],
-  },
-  {
-    job: 'gate',
-    name: 'Full gate (packages + all root guards)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'node scripts/check-workspaces.mjs',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+'",
-      '--min planned 1 --equal planned executed',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/gate.log', '|& tee'],
+    // 只读：它取仓、跑根守卫、跑两个 install 期锚与行为探针 —— 没有任何一步需要写仓库。
+    permissions: { contents: 'read' },
+    why: '永不跳过的守卫 job：它只读仓（检出 + 判据），写权限对它没有任何用途；'
+      + '给它 `contents: write` 等于让"永不跳过"的那条链带上仓库写面（第三轮 C-05 实测 EXIT=0）。',
   },
 ]
+
+/**
+ * [SK-21] 「永不跳过的守卫 job」的权限面判据。
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @param options - `{ scannedFile }`（只对真实的那份 workflow 判）。
+ * @returns 失败项列表。
+ */
+function checkPinnedJobPermissions(file, document, notes, options = {}) {
+  const failures = []
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const entry of PINNED_JOB_PERMISSIONS_REGISTRY) {
+    const job = jobs[entry.job]
+    if (job === undefined || job === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-21] 登记的 job \`${entry.job}\` 不在本 workflow 里 —— `
+          + '`PINNED_JOB_PERMISSIONS_REGISTRY` 的每一条都是"这个 job 的权限面被钉死"的登记。',
+      })
+      continue
+    }
+    const actual = job.permissions
+    const expected = entry.permissions
+    const normalize = value => (typeof value === 'object' && value !== null
+      ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, String(item)]).sort())
+      : value ?? null)
+    const same = JSON.stringify(normalize(actual)) === JSON.stringify(normalize(expected))
+    if (!same) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-21] job \`${entry.job}\` 的 \`permissions\` 与登记值不一致：\n`
+          + `      登记：${JSON.stringify(expected)}\n      实际：${JSON.stringify(actual ?? null)}\n`
+          + `  ⇒ ${entry.why}\n`
+          + '  ⇒ 要改权限面必须同步改 `PINNED_JOB_PERMISSIONS_REGISTRY`（进 diff、可评审）。',
+      })
+    } else {
+      notes.push(`[SK-21] job \`${entry.job}\` 的权限面逐字等于登记值（${JSON.stringify(expected)}）`)
+    }
+  }
+  return failures
+}
+
+// ===== SK-22:表达式的**词法字符集**（2026-09-25 第十四轮现场：整个 workflow 解析失败 ⇒ 0 job）=====
+//
+// 现场:`.github/workflows/ci.yml` 里一个 `run: |` 块的 **shell 注释**中写了
+// `# … "${{ …outputs.interp }}" scripts/<x>.sh 只冻结了解释器 …`,其中 `…` 是 U+2026。
+// YAML 完全合法;`bash -n` 完全合法(那只是一行注释);本文件此前所有判据都看不见它。
+// 推上 GitHub 后**整条 CI 一个 job 都没起来**:run 是 0 秒 / 0 job 的 startup_failure,
+// `pull_request` 事件下连 run 都没创建(同提交的 CodeQL 照常跑),PR 因此永远等不到检查。
+//
+// 判据层的关键事实(这条判据存在的全部理由):**GitHub 的模板/表达式解析不理会 shell 注释**
+// —— `${{` 出现在 `run:` 标量的**任何位置**(含 `#` 注释行、heredoc、字符串字面量内部)
+// 都会开始一个表达式,并且必须在**解析期**合法。所以"它只是注释 / 只是字符串"不是豁免理由。
+// 反过来,`'…'` 单引号字面量是**表达式自己的**语法(`''` 是"一个字面单引号"的转义写法),
+// 字面量内部的字符不参与词法 —— 中文标签、`'refs/tags/v'` 里的 `/`、`format('{0}')` 里的
+// 花括号都因此必须放行(下面的 `w36`/`w37` 就是钉这两格的绿样本)。
+//
+// 字符集来源:GitHub 表达式词法器允许的字符。对拍物 = 本机 actionlint 的报错原文
+// (`got unexpected character '…' while lexing expression, expecting 'a'..'z', 'A'..'Z',
+// '_', '0'..'9', ''', '}', '(', ')', '[', ']', '.', '!', '<', '>', '=', '&', '|', '*',
+// ',', ' '`)。本判据把 `'''` 单独处理(字面量剥离),再补一个 `-`(负数字面量:
+// `${{ -1 < 0 }}` 实测 actionlint EXIT=0)。
+//
+// **这是近似,不是复刻**(诚实的边界,写在这里免得被当成"等价于真实解析器"):
+//   · `-` 只在负数字面量里合法 —— 实测 `${{ github.run_number - 1 }}` 被 actionlint 拒
+//     ("while lexing integer part of number, expecting '0'..'9'"),而本判据整体放行 `-`;
+//   · 判据是"表达式可解析"的**必要条件**而非充分条件:`${{ 1 2 }}` 这类**语法**错误
+//     (字符全合法)漏判;`${{ github.ref }} }}` 这种多余 `}` 会被判红(单 `}` 不在集合里);
+//   · 表达式之外的解析期拒绝面(重复键 / 别名循环 / `on:` 形态)不在这里,见 [SK-19] 等。
+// 结论性证据仍然是"真实 push 之后 run 真的起来"—— 本判据只能把这一类**字符级**的
+// 解析期失败拦在本地,拦不到的形态必须在别处有判据(报告里逐条认账)。
+/**
+ * 表达式体里允许出现的 ASCII 标点。
+ *
+ * 与 actionlint 的期望集合逐字对齐(见上面的注释),`'` 由 {@link checkExpressionCharacterSet}
+ * 在扫描时单独处理(字面量剥离),`-` 是本判据有意补的一项(负数字面量)。
+ */
+const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!', '<', '>', '=', '&', '|', '*', ',', '-'])
+/** 空白字符(表达式可以跨行:`${{ github.event_name\n  == 'push' }}`)。 */
+const EXPRESSION_WHITESPACE = new Set([' ', '\t', '\n', '\r'])
+/**
+ * 一个文件最多逐条打印几处非法字符。超出的部分用一条汇总失败项接着报 ——
+ * 既不静默吞掉(数量与首个位置still可见),也不让一个被写坏的文件刷出几千行。
+ */
+const EXPRESSION_OFFENDER_REPORT_LIMIT = 8
+
+/**
+ * 单个字符是否落在表达式词法器允许的集合里。
+ * @param character - 单个 code point(调用方已保证不是 `'`,字面量在扫描时整体跳过)。
+ * @returns 允许 = true。
+ */
+function isAllowedExpressionCharacter(character) {
+  if (EXPRESSION_WHITESPACE.has(character)) return true
+  if (EXPRESSION_ALLOWED_PUNCTUATION.has(character)) return true
+  const code = character.codePointAt(0)
+  if (code >= 0x30 && code <= 0x39) return true // 0-9
+  if (code >= 0x41 && code <= 0x5a) return true // A-Z
+  if (code >= 0x61 && code <= 0x7a) return true // a-z
+  return false
+}
+
+/**
+ * 把文本里的每个字符映射成 `{line, column}`(1 起,按 GitHub/Actions 日志的习惯列号从 1 开始)。
+ * 只对**要报出来的位置**调用(非法字符数被 {@link EXPRESSION_OFFENDER_REPORT_LIMIT} 限住)。
+ * @param text - workflow 全文。
+ * @param offsets - 升序的字符下标。
+ * @returns 与 offsets 等长的位置数组。
+ */
+function positionsAt(text, offsets) {
+  const starts = [0]
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '\n') starts.push(index + 1)
+  }
+  return offsets.map(offset => {
+    let low = 0
+    let high = starts.length - 1
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2)
+      if (starts[mid] <= offset) low = mid
+      else high = mid - 1
+    }
+    return { line: low + 1, column: offset - starts[low] + 1 }
+  })
+}
+
+/** 码点转 `U+XXXX`(超出 BMP 的用 5-6 位,与 Unicode 的写法一致)。 */
+function codePointLabel(character) {
+  return `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+/** 把一段文本压成单行、截断(诊断里回显表达式片段用)。 */
+function truncateForDiagnostic(text, limit = 120) {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`
+}
+
+/**
+ * [SK-22] 表达式词法字符集判据(现场与边界见上面的常量区注释)。
+ *
+ * 扫描面 = **workflow 全文**(不只是"代码行"):`run:` 的 `#` 注释、heredoc、YAML 字符串
+ * 里的 `${{` 一样会被 GitHub 展开,一样必须在解析期合法。判定顺序:
+ *   ① 找 `${{`,再找它后面**第一个** `}}`(与模板读取器的"字面终止符"语义一致);
+ *      找不到 ⇒ 未闭合,**fail-closed 判红**(不猜意图,也不静默放行);
+ *   ② 表达式体为空 ⇒ 判红(actionlint 对 `${{ }}` 报
+ *      `unexpected end of input while parsing …`,实测 EXIT=1);
+ *   ③ 在体内扫描:遇到 `'` 就整体跳过一个字符串字面量(`''` = 转义),字面量没闭合也判红;
+ * 扫描面 = **workflow 全文**(不只是"代码行"):`run:` 的 `#` 注释、heredoc、YAML 字符串
+ * 里的 `${{` 一样会被 GitHub 展开,一样必须在解析期合法。判定顺序:
+ *   ① 从 `${{` 起**单趟**走:遇到 `'` 就进入字符串字面量(`''` = 一个转义的字面单引号),
+ *      字面量**内部**的 `}}` 不算终止符 —— 与真实解析器同形(`${{ format('{0}}}', x) }}`
+ *      实测 actionlint EXIT=0,即字符串感知的取体);不在字面量里的第一个 `}}` = 表达式结束;
+ *   ② 走到文件结尾都没有结束标记 ⇒ **fail-closed 判红**,并且按"停在哪"给更准的诊断:
+ *      停在字面量里 = 字面量没闭合(它把后面的 `}}` 一起吞了),否则 = 表达式未闭合;
+ *   ③ 表达式体为空 ⇒ 判红(actionlint 对 `${{ }}` 报
+ *      `unexpected end of input while parsing …`,实测有错);
+ *   ④ 其余每个字符必须落在 {@link isAllowedExpressionCharacter} 的集合里。
+ *
+ * @param file - workflow 文件名。
+ * @param text - workflow 全文。
+ * @param notes - 提示收集器。
+ * @returns `{failures, expressions, literals}`(`expressions` 供 main() 做"扫描器退化"对账)。
+ */
+function checkExpressionCharacterSet(file, text, notes) {
+  const failures = []
+  const offenders = []
+  let expressions = 0
+  let literals = 0
+  let cursor = 0
+  let unterminated = null
+  for (;;) {
+    const open = text.indexOf('${{', cursor)
+    if (open < 0) break
+    // 单趟:取结束标记 + 逐字符判字符集 + 数字面量。
+    const pending = []
+    let index = open + 3
+    let inLiteral = false
+    let literalStart = -1
+    let close = -1
+    while (index < text.length) {
+      const character = text[index]
+      if (inLiteral) {
+        if (character !== "'") {
+          index += 1
+          continue
+        }
+        if (text[index + 1] === "'") {
+          index += 2
+          continue
+        }
+        inLiteral = false
+        literals += 1
+        index += 1
+        continue
+      }
+      if (character === "'") {
+        inLiteral = true
+        literalStart = index
+        index += 1
+        continue
+      }
+      if (character === '}' && text[index + 1] === '}') {
+        close = index
+        break
+      }
+      if (!isAllowedExpressionCharacter(character)) {
+        pending.push({ kind: 'character', index, character })
+      }
+      index += 1
+    }
+    if (close < 0) {
+      // 未闭合:它之后**还剩几处** `${{` 一起报出来(同一个坏文件里往往不止一处)。
+      // 这一段的字符不逐条报(表达式本该在哪里结束已经无从判断,报出来只会是噪音)。
+      unterminated = {
+        open,
+        literalStart: inLiteral ? literalStart : -1,
+        remaining: text.slice(open + 3).split('${{').length - 1,
+      }
+      break
+    }
+    expressions += 1
+    const body = text.slice(open + 3, close)
+    // 空表达式(`${{ }}` / `${{   }}`):没有字符可判,但它本身不是合法表达式。
+    if (body.trim() === '') pending.push({ kind: 'empty', index: open + 3 })
+    for (const entry of pending) offenders.push({ ...entry, snippet: body })
+    cursor = close + 2
+  }
+
+  if (unterminated !== null) {
+    const [where] = positionsAt(text, [unterminated.open])
+    if (unterminated.literalStart >= 0) {
+      const [literalWhere] = positionsAt(text, [unterminated.literalStart])
+      failures.push({
+        name: file,
+        line: literalWhere.line,
+        detail: `[SK-22] 表达式里的单引号字面量没有闭合,位置 ${file}:${literalWhere.line}:${literalWhere.column}`
+          + `(该 \`\${{ \` 在 ${file}:${where.line}:${where.column};其后还有 ${unterminated.remaining} 处 \`\${{ \`)\n`
+          + '  ⇒ 表达式里表示一个**字面单引号**要写两个(`\'\'`);单个 `\'` 会一直吃到文件结尾,'
+          + '连它后面的 `}}` 也被吞掉(字符串感知的取体是这样,真实解析器同样报'
+          + ' "unexpected EOF while lexing end of string literal")⇒ 整个 workflow 解析失败。\n'
+          + '  ⇒ 与未闭合表达式同一口径:**fail-closed**,不放行。',
+      })
+    } else {
+      failures.push({
+        name: file,
+        line: where.line,
+        detail: `[SK-22] \`\${{ \` 没有配对的 \`}}\`(未闭合表达式),位置 ${file}:${where.line}:${where.column}`
+          + `(其后还有 ${unterminated.remaining} 处 \`\${{ \`)\n`
+          + '  ⇒ GitHub 的模板读取器以字面 `}}` 作为表达式结束标记:找不到就是"这份 workflow 无法解析"'
+          + ' —— 与非法字符同一类后果(整个文件 0 job,PR 上连 run 都不创建)。\n'
+          + '  ⇒ 这里按 **fail-closed** 判:没有终止符的 `\${{ ` 之后的任何形态都不放行'
+          + '(不猜"它是不是只想当字面量"—— 模板展开不看上下文)。',
+      })
+    }
+  }
+  if (offenders.length > 0) {
+    const reported = offenders.slice(0, EXPRESSION_OFFENDER_REPORT_LIMIT)
+    const positions = positionsAt(text, reported.map(entry => entry.index))
+    reported.forEach((entry, order) => {
+      const { line, column } = positions[order]
+      const at = `${file}:${line}:${column}`
+      if (entry.kind === 'empty') {
+        failures.push({
+          name: file,
+          line,
+          detail: `[SK-22] 表达式体为空:\`\${{ }}\`,位置 ${at}\n`
+            + '  ⇒ 空表达式不是合法表达式(actionlint 实测报 "unexpected end of input while parsing '
+            + 'variable access, function call, null, bool, int, float or string")⇒ 整个 workflow 解析失败。',
+        })
+        return
+      }
+      failures.push({
+        name: file,
+        line,
+        detail: `[SK-22] 表达式体里有词法非法字符 \`${entry.character}\`(${codePointLabel(entry.character)}),位置 ${at}\n`
+          + `      该表达式:\`\${{ ${truncateForDiagnostic(entry.snippet ?? '')} }}\`\n`
+          + '  ⇒ GitHub 的模板/表达式解析**不理会 shell 注释**:`\${{ ` 出现在 `run:` 标量里的任何位置'
+          + '(含 `#` 注释行、heredoc、字符串内部)都会开始一个表达式,且必须在**解析期**合法。\n'
+          + '     这个字符让**整个 workflow 解析失败** —— run 起来是 0 秒 / 0 个 job(startup_failure),'
+          + '`pull_request` 事件下连 run 都不会创建,PR 永远等不到检查(第十四轮现场)。\n'
+          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白;'
+          + "单引号字面量(`'…'`,`''` 表示一个字面单引号)内部的字符不参与词法。\n"
+          + '  ⇒ 修法:把该字符移进单引号字面量,或改成 ASCII 写法(例如 `...` 代替 `…`)。',
+      })
+    })
+    if (offenders.length > reported.length) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-22] 本文件还有 ${offenders.length - reported.length} 处非法字符未逐条打印`
+          + `(上面只列了前 ${reported.length} 处)—— 判据同样把它们算作失败。`,
+      })
+    }
+  } else {
+    notes.push(`[SK-22] 表达式词法字符集:全文扫描到 ${expressions} 处 \`\${{ … }}\``
+      + `(含 \`run:\` 的 \`#\` 注释行 / heredoc,注释不是豁免理由),剥掉 ${literals} 处单引号字面量后`
+      + '剩余字符全部落在表达式词法器允许的集合里')
+  }
+  return { failures, expressions, literals }
+}
+
 /**
  * [SK-17]（第十二轮红队 C-P0-1）**`defaults.run.shell`** 的登记表（**空表 = 禁止声明**）。
  *
@@ -1547,6 +2579,15 @@ const PINNED_STEP_POLICIES = [
     label: 'WASM 协议探针(`verify-wasm-client-only.sh`)',
     match: script => script.includes('verify-wasm-client-only.sh'),
     ifPolicy: 'fail-safe-docs-only',
+  },
+  {
+    // [SK-20]（第十三轮红队 R13-D-02，P0）：**冻结启动器的行为探针**。
+    // 它是"PATH 注入换不掉判据启动器"这条承诺的**唯一**运行级证据（静态面只能证明文本形态）；
+    // 与 `guard-parser-integrity` 同族：`if: false` / 删掉调用都能让它静默，而静态面全绿。
+    id: 'frozen-launcher-probe',
+    label: `冻结启动器行为探针(\`${FROZEN_LAUNCHER_PROBE}\`)`,
+    match: script => commandPositionArgvs(script, FROZEN_LAUNCHER_PROBE).length > 0,
+    ifPolicy: 'never',
   },
 ]
 /**
@@ -2157,7 +3198,8 @@ function shellEnvironmentAssignments(script) {
     // 单独一行的 `FOO=1` 是普通 shell 变量(不导出 ⇒ 子进程看不见),不能报 ——
     // 本仓 `ci.yml` 的 `GO_TEST_STATUS=0` / `CHECK_STATUS=0` 正是这种合法写法。
     if (index < texts.length) {
-      for (const name of leadingAssignments) results.push({ name, kind: 'set', form: `前缀赋值 \`${name}=…\`` })
+      // `segment` 让调用方能判"这一句是不是那个唯一的 PATH 例外"（[SK-20] / [SK-17]）。
+      for (const name of leadingAssignments) results.push({ name, kind: 'set', segment: cleaned, form: `前缀赋值 \`${name}=…\`` })
     }
     const command = texts[index]
     // **`unset NAME…`**（第十一轮复审 J1 的 N2）：与 `export` 同一层写入面，方向相反 ——
@@ -2172,7 +3214,7 @@ function shellEnvironmentAssignments(script) {
         if (word === '--' || (word.startsWith('-') && word !== '-')) { cursor += 1; continue }
         const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
         if (name === undefined) { cursor += 1; continue }
-        results.push({ name, kind: 'unset', form: `\`unset ${name}\`(清除键)` })
+        results.push({ name, kind: 'unset', segment: cleaned, form: `\`unset ${name}\`(清除键)` })
         cursor += 1
       }
       continue
@@ -2197,7 +3239,7 @@ function shellEnvironmentAssignments(script) {
       const name = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word)?.[1]
       if (name === undefined) { cursor += 1; continue }
       if (!expectsExportAttribute || exportsAttribute) {
-        results.push({ name, kind: 'set', form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
+        results.push({ name, kind: 'set', segment: cleaned, form: `\`${command}${exportsAttribute ? '' : ' -x'} ${name}\`` })
       }
       cursor += 1
     }
@@ -2474,6 +3516,9 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root, options = 
       const script = executableScript(step.run)
       // 步骤体那一层:`export`/前缀赋值（写入）+ `unset`/`env -u`（清除，J1 的 N2）。
       for (const assignment of shellEnvironmentAssignments(step.run)) {
+        // [SK-20] 的**唯一** PATH 例外：`export PATH="${{ steps.frozen-launchers.outputs.path }}"`
+        // 把 PATH **复位**到冻结值（方向与攻击相反 —— 攻击要往 PATH 前面塞假 bin）。
+        if (assignment.name === 'PATH' && isFrozenLauncherPathExport(assignment.segment)) continue
         const name = assignment.unparsable === true
           ? null
           : (assignment.kind === 'unset' ? pinnedUnsetKeyProblem(assignment.name) : pinnedEnvKeyProblem(assignment.name))
@@ -6572,9 +7617,25 @@ function stripShellRedirections(text) {
   return chars.join('')
 }
 
-/** `./x` → `x`(只去"当前目录"前缀;带目录的形态原样保留)。 */
+/**
+ * 冻结启动器表达式的**命令名等价**（[SK-20]）。
+ *
+ * `"${{ steps.frozen-launchers.outputs.node }}" <脚本>` 里的命令词在 `splitShellWords` 之后是
+ * 那个表达式本身 —— 判据面必须知道它**就是** `node`/`bash`/`git`，否则收口会把下面这些
+ * 既有判据全部打死（实测：加冻结前缀后 [SK-14] 覆盖率 8→3、`PINNED_USES_REGISTRY` 冒出
+ * 8 条假死条目）：`guardRunnerCommandProblem` / `executesInstallPrecheck` /
+ * `rootGateInvocations` / `wasmGate*` / `PINNED_STEP_POLICIES` 的每一条 match。
+ */
+const FROZEN_LAUNCHER_TARGET_ALIASES = new Map([
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.node }}`, 'node'],
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.interp }}`, 'bash'],
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.git }}`, 'git'],
+])
+
+/** `./x` → `x`(只去"当前目录"前缀;带目录的形态原样保留)；冻结启动器表达式 → 它等价的那个命令名。 */
 function normalizeScriptTarget(word) {
-  return word.replace(/^\.\//u, '')
+  const normalized = word.replace(/^\.\//u, '')
+  return FROZEN_LAUNCHER_TARGET_ALIASES.get(normalized.trim()) ?? normalized
 }
 
 /** 解释器名比较用:取路径最后一段(`/usr/bin/node` 与 `node` 等价)。 */
@@ -6658,7 +7719,38 @@ function commandPositionArgvs(script, target) {
       hits.push(entry.argv)
       continue
     }
-    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(entry.command))) continue
+    // [SK-20]：解释器判定必须先过 `normalizeScriptTarget` —— 冻结启动器的命令词是
+    // `${{ steps.frozen-launchers.outputs.node }}` 这种表达式，`commandHead` 认不出它是 `node`。
+    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(normalizeScriptTarget(entry.command)))) continue
+    if (normalizeScriptTarget(entry.argv[0] ?? '') !== wanted) continue
+    hits.push(entry.argv.slice(1))
+  }
+  return hits
+}
+
+/**
+ * 与 {@link commandPositionArgvs} 同源，但**不**把冻结启动器表达式算作目标命令。
+ *
+ * 为什么需要它（[SK-20]）：`normalizeScriptTarget` 把
+ * `"${{ steps.frozen-launchers.outputs.node }}"` 归一成 `node`（否则 `guardRunnerCommandProblem` /
+ * `rootGateInvocations` / `PINNED_STEP_POLICIES` 的每一条 match 都会被冻结前缀打死），
+ * 于是"这一步有没有调用裸 `node`"这个问题不能再问 `commandPositionArgvs` —— 它会把
+ * 我们**要的**那个形态也数进去。这里按"命令词的原文是不是冻结表达式"过滤。
+ * @param script - 去注释后的可执行文本。
+ * @param target - 目标命令名（`node` / `bash` / `git`）。
+ * @returns 每个命中调用点的 argv；空数组 = 没有**裸**调用。
+ */
+function rawCommandPositionArgvs(script, target) {
+  const wanted = normalizeScriptTarget(target)
+  const hits = []
+  for (const entry of executedCommands(script)) {
+    const raw = entry.command.trim()
+    if (FROZEN_LAUNCHER_TARGET_ALIASES.has(raw)) continue
+    if (normalizeScriptTarget(entry.command) === wanted) {
+      hits.push(entry.argv)
+      continue
+    }
+    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(normalizeScriptTarget(entry.command)))) continue
     if (normalizeScriptTarget(entry.argv[0] ?? '') !== wanted) continue
     hits.push(entry.argv.slice(1))
   }
@@ -7968,6 +9060,8 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
     const assignments = shellEnvironmentAssignments(unit.step.run)
     markLayer('step-body-assignment', assignments.length)
     for (const assignment of assignments) {
+      // [SK-20] 的**唯一** PATH 例外（理由见上面那条同名判断）。
+      if (assignment.name === 'PATH' && isFrozenLauncherPathExport(assignment.segment)) continue
       const hit = assignment.unparsable === true
         ? {
           raw: '（读不懂的片段）',
@@ -10451,6 +11545,59 @@ export function selfTestPolicies() {
       '          "${GH_CREATE[@]}" "${TAG}" --title "${TAG}" ${NOTES_FLAG}',
     ],
   })
+  // ---- 策略 14([SK-22]):表达式的**词法字符集**(2026-09-25 第十四轮现场) ----
+  //
+  // 现场:一个 `run: |` 块的 **shell 注释**里写了 `${{ …outputs.interp }}`(U+2026)——
+  // YAML 合法、`bash -n` 合法(那一行就是注释)、本文件此前所有判据都看不见它,而推上
+  // GitHub 之后**整条 CI 零 job**(run 0 秒 / 0 job 的 startup_failure,`pull_request`
+  // 事件下连 run 都不创建)。样本按"判据面 × 正反"逐格点名(`SELFTEST_REQUIRED_SAMPLES`
+  // 逐条登记:删掉任一格,对应形态就回到"没人看着"的状态):
+  //   红:①`run:` 注释里的表达式(现场原形) ②表达式里的非 ASCII(不在注释里)
+  //       ③未闭合的 `${{` ④表达式体里的非法 ASCII 标点(`+` —— actionlint 实测词法报错)
+  //   绿:⑤普通表达式 + 单引号字面量 `'refs/tags/v'`(里面的 `/` 只有被剥掉才不误伤)
+  //       ⑥字面量里的非 ASCII(`'标签/中文'`) ⑦字面量里的花括号(`format('{0}-{1}', …)`)
+  //       ⑧字面量**内部**的 `}}`(`format('{0}}}', …)` —— 取体必须字符串感知)
+  expectRed('w31-run-comment-expression-ellipsis', '[SK-22]', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          # 承重行:`"${{ …outputs.interp }}" scripts/x.sh` 只冻结了**解释器**',
+    '          echo done',
+  ])
+  expectRed('w32-expression-non-ascii-outside-literals', '[SK-22]', [
+    '      - name: judge ${{ github.event_name — github.ref }}',
+    '        run: echo ok',
+  ])
+  expectRed('w33-unterminated-expression', '[SK-22]', [
+    '      - name: judge ${{ github.ref',
+    '        run: echo ok',
+  ])
+  expectRed('w34-expression-disallowed-ascii-operator', '[SK-22]', [
+    '      - run: echo ok',
+    "        if: ${{ github.run_number + 1 > 0 }}",
+  ])
+  expectGreen('w35-expression-charset-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ steps.x.outputs.y }}"',
+    "          echo \"${{ startsWith(github.ref, 'refs/tags/v') }}\"",
+  ])
+  expectGreen('w36-expression-literal-non-ascii-green', [
+    '      - run: echo ok',
+    "        if: ${{ contains('标签/中文', github.ref_name) }}",
+  ])
+  expectGreen('w37-expression-literal-braces-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    "          echo \"${{ format('{0}-{1}', github.ref, github.sha) }}\"",
+  ])
+  // 绿样本⑧:字面量**内部**的 `}}` 不是结束标记(取体是字符串感知的 —— actionlint 对
+  // `format('{0}}}', …)` 整条表达式 EXIT=0)。没有这一格,把取体改回 `indexOf('}}')`
+  // 会静默切掉合法写法,而红样本一条都不会响。
+  expectGreen('w38-expression-brace-in-literal-green', [
+    '      - run: echo ok',
+    "        if: ${{ format('{0}}}', github.ref) == 'x' }}",
+  ])
+
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——
   // 不能内联在 selfTestPolicies 体内:那样"把 selfTestPolicies 整条掏空"会连带
   // 把对账一起掏空(第三轮审计 m8 的形态)。这里只做数据收集,断言在
@@ -10905,6 +12052,9 @@ function main() {
   const notes = []
   const allowlistHits = []
   let goTestTimeoutHits = 0
+  // [SK-22] 的扫描器退化对账（与 `goTestTimeoutHits` 同一手法）：全仓一处表达式都扫不到，
+  // 要么是扫描器坏了，要么是 CI 里一个 `${{ … }}` 都不剩 —— 两种都必须说清，不能静默"通过"。
+  let expressionBodyCount = 0
   const pinnedStepPolicies = []
   const pinnedEnvLayerIds = new Set()
   const pinnedUses = new Set()
@@ -10918,6 +12068,7 @@ function main() {
     notes.push(...(result.notes ?? []))
     allowlistHits.push(...(result.allowlistHits ?? []))
     goTestTimeoutHits += result.goTestTimeoutHits ?? 0
+    expressionBodyCount += result.expressionBodies ?? 0
     pinnedStepPolicies.push(...(result.pinnedStepPolicies ?? []))
     for (const layer of result.pinnedEnvLayers ?? []) pinnedEnvLayerIds.add(layer.id)
     for (const uses of result.pinnedUses ?? []) pinnedUses.add(uses)
@@ -11032,6 +12183,24 @@ function main() {
       + '  「全仓至少一处单包预算」这条存在性对账本次**未生效**,不能当作该策略已通过。\n')
   }
 
+  // [SK-22] 的扫描器退化对账(与上面 `go test` 同口径):全文扫描器一旦失效(正则/循环被改坏),
+  // 它会**永远绿** —— 这正是本判据存在的理由的反面。全仓 0 处表达式 ⇒ 红(默认目录);
+  // 临时目录(--workflows-dir 的变异验证)只如实 WARNING,不制造假红。
+  if (expressionBodyCount === 0) {
+    if (isDefaultDirectory) {
+      failures.push({
+        name: '[SK-22]',
+        line: 0,
+        detail: '全文扫描在**所有** workflow 里一处 `${{ … }}` 都没找到 —— 要么扫描器退化了'
+          + '(判据静默变绿),要么 CI 里真的一个表达式都不剩(那样的 workflow 不可能是本仓的 CI 形态)。\n'
+          + '  ⇒ 与"解析出 0 个 run 块即失败"同一纪律:扫描器失效必须响,而不是放行。',
+      })
+    } else {
+      process.stderr.write('check-workflows: WARNING — 本次是对临时目录跑变异验证且没有扫到任何 '
+        + '`${{ … }}`;\n  [SK-22] 的"全仓至少一处表达式"存在性对账本次**未生效**,不能当作该策略已通过。\n')
+    }
+  }
+
   // `--workflows-dir` 的显式降级声明(F3-3):带参数 ⇒ 这不是全仓门禁。
   if (!isDefaultDirectory) {
     process.stderr.write(`check-workflows: WARNING — 正在检查**非默认目录**(${workflowDirectory}),这不是全仓门禁:\n`)
@@ -11070,6 +12239,11 @@ function main() {
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
     + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行:命令位 · 整串 `shell:` · '
     + '步骤体退出语义)\n'
+    + '    + SK-20 策略(被钉步骤的**启动器必须冻结**:`command -v node/bash/git` 的绝对路径写进步骤输出、'
+    + '后续判据步只用冻结值 —— `$GITHUB_PATH` 注入换不掉启动器;运行级证据是行为探针'
+    + ' `scripts/check-frozen-launchers.mjs`,它自带正控)\\n'
+    + '    + SK-21 策略(「永不跳过的守卫 job」的 `permissions` 逐字登记:该 job 只读仓)'
+    + '\\n'
     + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:四层 `env:` 的**白名单登记表** + '
     + '`$GITHUB_ENV` 键名注入 + 被钉步骤体内的 `export`/前缀赋值 + `uses:` 委派目标的'
     + '本地可解析/登记制 + `.github/actions/**` 的内容判据)\n'
@@ -11077,6 +12251,9 @@ function main() {
     + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
     + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
     + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
+    + `    + SK-22 策略(表达式**词法字符集**:全文 ${expressionBodyCount} 处 \`\${{ … }}\` —— 含 `
+    + '`run:` 的 `#` 注释行 / heredoc(模板解析不看上下文);剥掉 `\'…\'` 单引号字面量后剩字符必须落在 '
+    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白里;未闭合 / 空表达式 / 未闭合字面量同样红)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }

@@ -359,7 +359,7 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
   {
     path: 'scripts/check-install-integrity.mjs',
     // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
-    sha256: 'ae6360f5c53e404cb9394a44242af33abe46ca0c66433dca6432d845a9f7d7a2',
+    sha256: '473a6895ebb2d5fc8bfc989e9c82a34cc0ed31222dd0900fa786367e407b7936',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
@@ -371,7 +371,7 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // 凭据检查器（R12-D-03 / C-P0-2②）：它把"通过凭据"从流属性抬成"步骤独占文件 + 一次性
     // nonce"。它自己也是判据执行体 ⇒ 同样按内容摘要登记（改动必须进 diff、可评审）。
     path: 'scripts/check-verdict-credential.mjs',
-    sha256: 'f09170c2ca392a1cd0d232a4c9c5c387dde9754df2807e1b0830052f7c92d7cf',
+    sha256: '402ec25d13178f638768bd57325308795e1ac91e7c874f9baa6afef9a01f1650',
     methods: [
       'credential-exactly-once',
       'credential-counter-semantics',
@@ -1259,6 +1259,186 @@ export function strictAnchorSignals(env = process.env) {
   return hits
 }
 
+/* ---------------------------------------------------------------------------
+ * R13-D-01（第十三轮红队 P0）的两条**平台锚**：判据执行体的字节从哪里来才算数。
+ *
+ * 现场：载荷改写判据执行体**并 `git commit`** ⇒ `git show HEAD:` 与工作树自洽，
+ * `--restore` / `--require-clean` / 摘要登记全部失效，Full gate **EXIT=0** 且打印**真凭据**。
+ * 根因是"锚"取在**本地 git 对象库**上（与被审对象同域可写）。两条收口：
+ *
+ *   ① **`assertHeadEqualsEnv`**：`git rev-parse HEAD` 必须等于 `$GITHUB_SHA`（平台注入值，
+ *      仓内执行点改不了 —— 要改它得先写本进程的环境，而"第一道执行体"这个**位置**判据
+ *      （`check-install-integrity.mjs` + `check-workflows.mjs` 的 [SK-14⑨]）挡在那里）。
+ *      不相等 ⇒ **退出码 2**（`--require-clean` 或 CI 信号在场时；本地无信号时只告警）。
+ *   ② **远端对象库锚**：把登记的执行体按 `$GITHUB_SHA` 从 `origin` **取回**到
+ *      `$RUNNER_TEMP` 下的干净目录（`git init` + `fetch --depth 1 --filter=blob:none`
+ *      + 按需 `cat-file blob`），用**那份字节**复算摘要并与登记值对拍。
+ *
+ * **② 的真实效力（V13-A §2.3 / §10 R4 的诚实降级；不要再照旧口径高估它）**：
+ * 它是**另一个域上的独立确认**，**不是**"结构性收口"、**不是**"载荷改不了的字节比对"、
+ * 更不是"第二道防线"。理由是纯内容寻址的：调用点先要求 `HEAD == $GITHUB_SHA`（① 成立），
+ * 而 `expected[path]` 由 `sha256(git show HEAD:<path>)` 派生（本文件 `readHeadBytes`），
+ * 远端 `cat-file` 取的是**同一个 commit** 的同名 blob —— 同一个 SHA 在 git 内容寻址下
+ * 必然同字节。⇒ **`mismatches`（字节不符）分支在生产调用路径上不可达**，只有**伪造/合成
+ * `expected`**（或 SHA-1 碰撞）才能命中它；`missing` 分支同理（键就是从那个 commit 读出来的）。
+ * 生产路径上它实际退化为一条**可用性探测**：「能不能从 `origin` 按裸 `$GITHUB_SHA` 取回」。
+ * 覆盖面也只有 `REGISTERED_INSTALL_INTEGRITY_BODIES` 的 **2 条**前置校验件，
+ * **不是** 96 条执行体那一面（那一面由本文件其余判据 + `check-install-integrity.mjs` 负责）。
+ * 合成 `expected` 触发该分支的变异证据 = `temp/r13/GA/mutate.sh` 的 M3（`temp/` 不入库；
+ * 该条目自身标注为变异，不代表产线行为）。
+ *
+ * 成本与取舍（如实写在这里，也写进报告）：多一次浅取回 —— **新增一次网络依赖**。用
+ * `--filter=blob:none` 只取 commit + tree，**blob 按需惰性取回**（每个登记件一次往返），
+ * 因此代价与"要验几个文件"成正比、与"仓有多大"无关。**离线/无 origin 的场景**：非严格面
+ * （本地、无 runner 信号）只告警、不动退出码（V13-A §2.1 实测 T2b2 = EXIT 0）；环境里
+ * **没有 `$GITHUB_SHA`** 时 ② 连探测都不做（`sha === null` ⇒ `status: 'skipped'`，
+ * 由 ① 去报"判据输入缺席"）；
+ * **严格面（CI / `--require-clean`）下取不回 ⇒ 红** —— 这是 **fail-closed 的设计意图**
+ * （"锚不可达"不能当成"锚成立"），不是新的假红来源：CI 上 `$GITHUB_SHA` 恒在平台对象库里，
+ * 取不回只可能是网络/凭据/权限异常，那正是应该红的情况。
+ * ------------------------------------------------------------------------- */
+
+/** 远端锚在 `$RUNNER_TEMP` 下的工作目录名（每次运行唯一）。 */
+const REMOTE_ANCHOR_DIR_PREFIX = 'gate-remote-anchor-'
+
+/**
+ * `assertHeadEqualsEnv`：`HEAD` 与平台值的一致性（R13-D-01）。
+ *
+ * 这是两条平台锚里**唯一在生产调用路径上真正生效**的一条：`HEAD` 取自本地 git 对象库
+ * （与被审对象同域可写），`$GITHUB_SHA` 由平台注入（仓内执行点改不了）—— 两者跨域，
+ * 不相等就是"判据在自己的可写域里自洽"这一失效态的**结构性**识别。
+ *
+ * @param options - `{ head, env, strict }`。
+ * @returns `{ failures, advisories, sha, note }`。
+ */
+export function assertHeadEqualsEnv(options = {}) {
+  const env = options.env ?? {}
+  const head = String(options.head ?? '')
+  const raw = typeof env.GITHUB_SHA === 'string' ? env.GITHUB_SHA.trim() : ''
+  const failures = []
+  const advisories = []
+  if (raw === '') {
+    const message = '平台锚（`HEAD == $GITHUB_SHA`）**未验证**：环境里没有 `GITHUB_SHA`'
+    if (options.strict) {
+      failures.push(`${message} —— 严格面（\`--require-clean\` 或 CI 信号在场）下这是判据输入缺席：`
+        + '`HEAD` 取自**本地 git 对象库**，而它与被审对象同域可写（R13-D-01：改写判据并 `git commit` 后，'
+        + '`git show HEAD:` 与工作树自洽 ⇒ 全部比对"自洽地通过"）。CI 上 `GITHUB_SHA` 必在场。')
+    } else advisories.push(message)
+    return { failures, advisories, sha: null, note: null }
+  }
+  if (!/^[0-9a-f]{40}$/u.test(raw)) {
+    failures.push(`\`GITHUB_SHA\` 形态非法：${JSON.stringify(raw)}（必须是 40 位小写 hex）`)
+    return { failures, advisories, sha: null, note: null }
+  }
+  if (raw !== head) {
+    failures.push(`**平台锚不一致**：\`git rev-parse HEAD\` = ${head} · \`$GITHUB_SHA\` = ${raw}\n`
+      + '      ⇒ 判据比对的是"本地 git 对象库里的 HEAD"，而它**与被审对象同域可写**：'
+      + '载荷改写判据执行体并 `git commit` 之后，`git show HEAD:` 与工作树自洽 ⇒ 摘要登记、'
+      + '`--restore`、`--require-clean` **全部失效**而门禁 EXIT=0（第十三轮 R13-D-01 实测）。')
+    return { failures, advisories, sha: raw, note: null }
+  }
+  return { failures, advisories, sha: raw, note: `平台锚一致：HEAD == $GITHUB_SHA == ${raw.slice(0, 12)}…` }
+}
+
+/**
+ * **远端对象库锚**（R13-D-01 的 ②）：把登记的执行体按 `$GITHUB_SHA` 从 `origin`
+ * 取回到一个干净目录，用那份字节复算摘要。
+ *
+ * 效力边界见上方头注释（V13-A §2.3 / §10 R4）：调用点已先要求 `HEAD == $GITHUB_SHA`，
+ * 而 `expected` 是从**同一个 commit** 的 `git show HEAD:` 派生的 ⇒ 这里的字节对拍在
+ * **生产调用路径上不可达**（内容寻址必然同字节），只有合成 `expected` 才命中
+ * `mismatches`。它实际兑现的是"能否从 `origin` 按裸 `$GITHUB_SHA` 取回"的**可用性探测**
+ * 与"取不回 ⇒ 严格面红"的 fail-closed 语义，且只覆盖 2 条前置校验件。
+ * **不要把它读成"载荷改不了的第二道防线 / 结构性收口"。**
+ *
+ * @param options - `{ sha, paths, env, strict }`；`paths` = 要验的仓库相对路径。
+ * @returns `{ failures, advisories, note, status }`；`status` ∈ `ok|skipped|unavailable`。
+ */
+export function remoteAnchorProblems(options = {}) {
+  const failures = []
+  const advisories = []
+  const sha = options.sha
+  const paths = options.paths ?? []
+  if (sha === null || paths.length === 0) return { failures, advisories, note: null, status: 'skipped' }
+  const env = options.env ?? process.env
+  const runnerTemp = typeof env.RUNNER_TEMP === 'string' && env.RUNNER_TEMP.trim() !== ''
+    ? env.RUNNER_TEMP.trim()
+    : (env.TMPDIR ?? tmpdir())
+  const remote = gitInRoot(['remote', 'get-url', 'origin'])
+  if (remote.status !== 0 || String(remote.stdout).trim() === '') {
+    const message = '取不回远端对象库：本仓没有 `origin` remote（无法把判据执行体按 `$GITHUB_SHA` 从**载荷改不了的**那份取回）'
+    if (options.strict) failures.push(message + ' ⇒ 严格面下"锚不可达"不能当成"锚成立"。')
+    else advisories.push(message)
+    return { failures, advisories, note: null, status: 'unavailable' }
+  }
+  const directory = mkdtempSync(join(runnerTemp, REMOTE_ANCHOR_DIR_PREFIX))
+  const run = (args, encoding = 'utf8') => spawnSync('git', ['-C', directory, ...args],
+    { encoding, maxBuffer: 128 * 1024 * 1024 })
+  try {
+    if (run(['init', '--quiet']).status !== 0) throw new Error('git init 失败')
+    // origin 可能是**相对路径**（本机把远端指向相邻目录的常见形态）；工作目录是临时目录，
+    // 相对 URL 在那里解析不到 ⇒ 先按本仓根绝对化（`scheme://` 与 `user@host:path` 原样保留）。
+    const rawRemote = String(remote.stdout).trim()
+    const remoteUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//u.test(rawRemote) || /^[^/]+@[^/]+:/u.test(rawRemote)
+      ? rawRemote
+      : resolve(ROOT, rawRemote)
+    if (run(['remote', 'add', 'origin', remoteUrl]).status !== 0) throw new Error('git remote add 失败')
+    // `--filter=blob:none`：只取 commit + tree，blob 在 `cat-file` 时**按需**取回
+    // （每个登记件一次往返）—— 代价与"要验几个文件"成正比，与仓的大小无关。
+    let fetch = run(['fetch', '--quiet', '--depth', '1', '--filter=blob:none', 'origin', sha])
+    if (fetch.status !== 0) {
+      // 服务端不支持 partial clone ⇒ 回落整份浅取（更强但更贵）。
+      fetch = run(['fetch', '--quiet', '--depth', '1', 'origin', sha])
+    }
+    if (fetch.status !== 0) throw new Error(`git fetch 失败：${String(fetch.stderr).trim().split('\n').slice(-1)[0] ?? ''}`)
+    const head = run(['rev-parse', 'FETCH_HEAD'])
+    if (head.status !== 0 || String(head.stdout).trim() !== sha) {
+      throw new Error(`取回的提交不是 $GITHUB_SHA（实际 ${String(head.stdout).trim().slice(0, 12)}）`)
+    }
+    const mismatches = []
+    const missing = []
+    for (const path of paths) {
+      const blob = run(['cat-file', 'blob', `FETCH_HEAD:${path}`], 'buffer')
+      if (blob.status !== 0 || !Buffer.isBuffer(blob.stdout)) {
+        missing.push(path)
+        continue
+      }
+      const remoteDigest = sha256(blob.stdout)
+      const registered = (options.expected ?? {})[path]
+      if (typeof registered === 'string' && registered !== remoteDigest) {
+        mismatches.push(`${path}\n        登记值 sha256：${registered}\n        远端 sha256：${remoteDigest}`)
+      }
+    }
+    if (missing.length > 0) {
+      failures.push(`远端提交 ${sha.slice(0, 12)} 里读不到这些判据执行体：${missing.join('、')}\n`
+        + '      ⇒ 要么登记表指向了一条不在平台提交里的路径，要么取回被截断（"读不到"不等于"没问题"）。')
+    }
+    if (mismatches.length > 0) {
+      failures.push(`**远端对象库锚不一致**（${mismatches.length} 条）：\n      ${mismatches.join('\n      ')}\n`
+        + '      ⇒ 登记值对应的字节**不在平台提交里** —— 本地的"工作树 == HEAD == 登记值"三份自洽'
+        + '在这里失效（载荷可以 `git commit`，但改不了 `origin`）。这就是 R13-D-01 的结构性收口。')
+    }
+    if (failures.length === 0) {
+      return {
+        failures,
+        advisories,
+        note: `远端对象库锚一致：${paths.length} 条判据执行体的字节在 origin@${sha.slice(0, 12)} 上复算与登记值相同`,
+        status: 'ok',
+      }
+    }
+    return { failures, advisories, note: null, status: 'ok' }
+  } catch (error) {
+    const message = `远端对象库锚**取不回**：${error.message}`
+    if (options.strict) {
+      failures.push(`${message}\n      ⇒ 严格面（CI / \`--require-clean\`）下"锚不可达"不能当成"锚成立"：`
+        + '请检查网络/凭据；要临时跳过必须改代码（进 diff），不要用一个环境变量把这条降级。')
+    } else advisories.push(message)
+    return { failures, advisories, note: null, status: 'unavailable' }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+}
+
 /**
  * 判据主流程。
  * @param argv - 命令行参数（去掉 `node` 与脚本名）。
@@ -1273,6 +1453,9 @@ function main(argv) {
   // （放进块作用域会让末尾那行引用不到 —— Node 直接 ReferenceError，实测踩过）。
   const anchorSignals = strictAnchorSignals()
   const strictAnchor = requireClean || anchorSignals.length > 0
+  /** R13-D-01 的平台锚：失败进 `executionFailures`，本地姿态进这里（不静默）。 */
+  const anchorAdvisories = []
+  let anchorNote = null
 
   const unknown = argv.filter(argument => argument !== '--print-digests' && argument !== '--require-clean')
   if (unknown.length > 0) {
@@ -1572,6 +1755,34 @@ function main(argv) {
           + '\n      ⇒ 两份必须逐条相同（键 = `<manifest>#<hook>`）。')
       }
     }
+    // ⓪ **平台锚**（R13-D-01）：① `HEAD` 必须等于 `$GITHUB_SHA`（跨域，生产路径上真正生效的
+    //    那一条）；② 再把登记的执行体从 `origin@$GITHUB_SHA` 取回复算摘要 —— 因为 ① 成立时
+    //    `expected` 与远端 blob 出自同一个 commit，② 的字节对拍**必然相等**（内容寻址），
+    //    它兑现的是"能否按裸 SHA 取回"的可用性探测与"取不回 ⇒ 严格面红"；
+    //    效力边界见 `remoteAnchorProblems` 上方头注释（V13-A §2.3 / §10 R4）。
+    {
+      const headShaResult = gitInRoot(['rev-parse', 'HEAD'])
+      const headSha = headShaResult.status === 0 ? String(headShaResult.stdout).trim() : ''
+      const anchor = assertHeadEqualsEnv({ head: headSha, env: process.env, strict: strictAnchor })
+      executionFailures.push(...anchor.failures)
+      anchorAdvisories.push(...anchor.advisories)
+      if (anchor.note !== null) anchorNote = anchor.note
+      const expected = {}
+      for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
+        const bytes = readHeadBytes(registration.path)
+        if (bytes !== null) expected[registration.path] = sha256(bytes)
+      }
+      const remote = remoteAnchorProblems({
+        sha: anchor.sha,
+        paths: Object.keys(expected),
+        expected,
+        env: process.env,
+        strict: strictAnchor,
+      })
+      executionFailures.push(...remote.failures)
+      anchorAdvisories.push(...remote.advisories)
+      if (remote.note !== null) anchorNote = `${anchorNote === null ? '' : `${anchorNote}；`}${remote.note}`
+    }
     // ⑥c **前置校验件自身的内容摘要**（R12-D-01 ①）：它能被改写 ⇒ 它的字节必须登记、进 diff。
     for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
       const headBytes = readHeadBytes(registration.path)
@@ -1720,6 +1931,9 @@ function main(argv) {
     for (const detail of executionFailures) {
       process.stderr.write(`\ncheck-guard-parser-integrity: ${detail}\n`)
     }
+    for (const detail of anchorAdvisories) {
+      process.stderr.write(`\ncheck-guard-parser-integrity: [平台锚·告警] ${detail}\n`)
+    }
     process.stderr.write('\ncheck-guard-parser-integrity: 修法（两条，按"这次改动是不是你有意的"选）\n')
     process.stderr.write('  ① **有意的**改动（修守卫 / 加判据 / 升级依赖）：在同一个 PR 里更新登记值 ——\n')
     process.stderr.write('     `node scripts/check-guard-parser-integrity.mjs --print-digests` 会打印可直接粘回\n')
@@ -1747,6 +1961,8 @@ function main(argv) {
     + `根 + ${manifestCount - 1} 个工作区 manifest 无未登记的生命周期钩子（R12-D-02）；`
     + `前置校验件 ${REGISTERED_INSTALL_INTEGRITY_BODIES.map(entry => entry.path).join('、')} 的字节登记一致（R12-D-01）；`
     + '两个 runner 的守卫通道：直接 spawn（不经 yarn）+ 环境清洗（真子进程证明）；'
+    + `${anchorNote === null ? '' : `${anchorNote}；`}`
+    + `${anchorAdvisories.length === 0 ? '' : `平台锚告警：${anchorAdvisories.join('；')}；`}`
     + `工作树↔HEAD 锚定 ${strictAnchor
       ? `严格（信号：${requireClean ? '`--require-clean`' : ''}${requireClean && anchorSignals.length > 0 ? '+' : ''}${anchorSignals.join('+') || '—'}）`
       : '本地告警（CI 上为硬判据；`--require-clean` 可显式要求严格）'}\n`)

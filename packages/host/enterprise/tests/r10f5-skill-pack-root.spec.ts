@@ -20,8 +20,15 @@ import { mkdir, mkdtemp, readdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { listInstalledSkills, packSkill, uninstallSkill } from '../src/skill-install.ts'
+import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
+
+// R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +
+// `<agentsHome>/skills` + bundled），而 `<agentsHome>` 默认指向**真实 `~/.agents`** ⇒ 不隔离时
+// 本文件的用例会变成"开发机上装了哪些技能"的函数（命中同名就正确地报 422 RESIDUE）。
+// 隔离实现与实测形态见 tests/helpers/runtime-skill-roots.ts。
+beforeEach(isolateRuntimeSkillRoots)
 
 /** A sentinel that must never appear in an archive built from inside a skill. */
 const OUTSIDE = 'R10F5-OUTSIDE-SENTINEL'

@@ -17,6 +17,11 @@
  *    触发 `agent.cancel({kind:'user'})`。
  *  - **无孤儿循环**：一轮结束（成功/失败/取消）即 `dispose()` 该 agent —— 会话退出
  *    活体、循环收敛；下一次调用按持久化会话恢复（多轮上下文来自隐藏会话自身）。
+ *  - **换账号即释放**（R13-GB）：`pico/session-changed` ⇒ `releaseAll()`：在飞的那一轮
+ *    被取消、全部活体会话 `dispose()`、排队中的轮次被拒。**磁盘上的会话不删**（它是
+ *    那个账号自己的历史，同账号重登仍然续用；而换账号后新 id 已经指向另一个会话）。
+ *    订阅走叶子包的 `subscribeSessionChanges`（唯一实现：先订阅 + 补发恢复型启动那一次）
+ *    —— 裸 `ctx.on` 会漏掉"重启后带着有效会话"这条最常见的启动路径。
  *
  * ## 上下文对账（为什么不是"把 messages 原样喂进去"）
  *
@@ -37,6 +42,7 @@ import type { Agent, AgentHandle, AgentOptions, CreateAgentOptions } from '@deep
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
+import { subscribeSessionChanges } from '@picoaide/dsh-host-locale/session-events'
 import type {
   AiChatMessage,
   AiChatTurnResult,
@@ -68,6 +74,33 @@ export interface AppAiRunnerOptions {
   /** 诊断出口。 */
   warn?: ((message: string) => void) | undefined
 }
+
+/**
+ * 应用 AI 执行面的**自省与释放面**（判据用；`AiChatTurnRunner` 的生产超集）。
+ *
+ * 为什么把这些计数做成公开面：换账号后"活体会话与队列都清空"这条判据必须有**可观测**
+ * 的输入 —— 否则只能靠"再跑一轮看看请求体里有没有别人的内容"这种间接证据（那正是
+ * R13-E-04 探针的形态，能证明缺陷存在，却不适合当长期回归判据）。
+ */
+export interface AppAiRunnerState {
+  /** 当前**活体**隐藏会话数（`live` 的条目数）。 */
+  liveSessions(): number
+  /** 当前**排队中**的隐藏会话数（`queues` 的条目数）。 */
+  queuedSessions(): number
+  /** 会话代次：每次释放 +1（0 = 从未释放）。 */
+  generation(): number
+  /**
+   * 释放全部活体会话与队列（`pico/session-changed` 的生产路径）。
+   *
+   * 语义：在飞的那一轮被取消、每个活体 agent `dispose()`、排队中的轮次在起跑前被拒
+   * （`AbortError` ⇒ 应用侧看到 `ai_cancelled`）。**磁盘会话不删**：它是那个账号自己的
+   * 历史（同账号重登继续续用），而换账号后新 id 已经指向另一个会话文件。
+   */
+  releaseAll(reason: string): Promise<void>
+}
+
+/** 执行面 + 自省面（`createAppAiRunner` / `provideAppAiRunner` 的返回类型）。 */
+export type AppAiRunnerHandle = AiChatTurnRunner & AppAiRunnerState
 
 /** 会话日志里的一条对话（只有 user/assistant 的文本面）。 */
 interface ConversationTurn {
@@ -150,10 +183,18 @@ function aborted(): Error {
  * @param options - 隐藏会话元数据与诊断出口。
  * @returns 一轮对话的执行面。
  */
-export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AiChatTurnRunner {
+export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AppAiRunnerHandle {
   const warn = options.warn ?? ((): void => {})
   /** 每会话串行化：一个隐藏会话同一时刻只能跑一轮（第二个请求排队而不是撞进度）。 */
   const queues = new Map<string, Promise<unknown>>()
+  /**
+   * 会话**代次**：换账号/登出（`releaseAll`）时 +1。
+   *
+   * 排队中的轮次在起跑前比对它 —— 一句 `queues.clear()` 只是清了记账，`serialize` 手里
+   * 的 promise 链仍会把这批任务跑到（它们属于**上一个账号**的请求，会重新 `resume` 那个
+   * 账号的会话）。代次让它们在起跑时被拒，而不是把已释放的会话又拉起来。
+   */
+  let generation = 0
 
   const serialize = async <T>(key: string, task: () => Promise<T>): Promise<T> => {
     const previous = queues.get(key) ?? Promise.resolve()
@@ -213,6 +254,34 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
    */
   const live = new Map<string, Promise<AgentHandle>>()
 
+  /**
+   * 每个会话 id 上「上一个活体正在收尾」的 promise —— **释放窗口的闸门**（R14 C-02）。
+   *
+   * 为什么必须有它：`dropAgent`/`releaseAll` 都是"先从 `live` 里摘掉，再 `await dispose()`"，
+   * 而 `dispose()` 要等被放弃那一轮的模型流真正收尾（真机上是一段可观测的时间：释放窗口
+   * 实测 1.5 s 量级）。窗口里同一个隐藏会话 id 的新一轮会因为 `live` 已空而走
+   * `openAgentUncached` ⇒ 上一个写句柄还没释放 ⇒ 持久化平面直接拒绝：
+   *
+   *	SessionAlreadyOwnedError: session "app:demo#alice@…" is already owned by an active write handle
+   *
+   * （没有持久化平面的宿主同形：`session "…" already exists`。窗口之外重试就成功 ——
+   * 这正是"偶发失败、重试即好"的形态，应用侧只看到一张错误卡片。）
+   *
+   * 记账口径：登记发生在**任何 await 之前**（`dropAgent`/`releaseAll` 同步段），所以新一轮
+   * 只要进 `openAgent` 就一定看得到它；收尾完成即从表里摘掉（不留长期引用）。
+   */
+  const releasing = new Map<string, Promise<void>>()
+
+  /** 记账一次"某会话正在收尾"（同 id 多次收尾按顺序串起来，后一次不会先于前一次完成）。 */
+  const trackReleasing = (sessionId: string, disposal: Promise<void>): void => {
+    const previous = releasing.get(sessionId) ?? Promise.resolve()
+    const chained = previous.then(() => disposal, () => disposal).catch(() => undefined)
+    releasing.set(sessionId, chained)
+    void chained.then(() => {
+      if (releasing.get(sessionId) === chained) releasing.delete(sessionId)
+    })
+  }
+
   const openAgent = async (sessionId: string): Promise<AgentHandle> => {
     const cached = live.get(sessionId)
     if (cached !== undefined) {
@@ -223,6 +292,13 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
       }
       live.delete(sessionId)
     }
+    // 释放窗口闸门（R14 C-02）：同一个会话 id 的上一个活体必须**真的收尾**（写句柄已
+    // 释放）之后才允许开下一个。没有这道闸门时，`releaseAll` 的窗口里到达的新一轮会
+    // 撞上还没释放的写句柄 —— 真 jsonl 持久化实测
+    // `SessionAlreadyOwnedError: session "…" is already owned by an active write handle`
+    // （无持久化平面同形：`session "…" already exists`），窗口外重试才成功。
+    const settling = releasing.get(sessionId)
+    if (settling !== undefined) await settling
     const pending = openAgentUncached(sessionId)
     live.set(sessionId, pending)
     try {
@@ -266,12 +342,67 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
     const cached = live.get(sessionId)
     live.delete(sessionId)
     if (cached === undefined) return
-    try {
-      const handle = await cached
-      await handle.dispose()
-    } catch (cause) {
-      warn(`dsh-plugin-desktop: disposing the application AI session failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    const disposal = (async (): Promise<void> => {
+      try {
+        const handle = await cached
+        await handle.dispose()
+      } catch (cause) {
+        warn(`dsh-plugin-desktop: disposing the application AI session failed (${cause instanceof Error ? cause.message : String(cause)})`)
+      }
+    })()
+    // 登记在**任何 await 之前**（R14 C-02）：`cancel()` 是 fire-and-forget 调用本函数的，
+    // 紧接着到来的新一轮必须看得见"这个会话还在收尾"。
+    trackReleasing(sessionId, disposal)
+    await disposal
+  }
+
+  /** 该会话当前的活体 agent（可能已经不在注册表里）。 */
+  const agentOf = (sessionId: string): Agent | undefined =>
+    (ctx.get('agents') as { get?: (id: SessionIdType) => Agent | undefined } | undefined)?.get?.(SessionId(sessionId))
+
+  /**
+   * 释放全部活体会话与队列（`pico/session-changed` 的生产路径；见 {@link AppAiRunnerState}）。
+   *
+   * 三步，顺序不能反：① 换代次（让排队中的轮次起跑即拒）→ ② 取消在飞的那一轮
+   * （`agent.cancel({kind:'user'})`：循环立刻收尾，**不留写一半的会话**）→ ③ `dispose()`
+   * 每个活体（会话退出注册表、循环收敛）。
+   *
+   * **磁盘上的隐藏会话一律不删**：那是那个账号自己的对话本体（同账号重登仍要续用它的
+   * 多轮上下文），而"换账号"在新 id 形态下已经天然指向另一个会话文件（账号作用域）。
+   * 删它才是错的：既毁掉历史，又会在同一账号重登时把上下文清空。
+   *
+   * **收尾窗口有闸门**（R14 C-02）：`live`/`queues` 是同步清空的，而 `dispose()` 要等被
+   * 放弃那一轮的模型流收尾。窗口里到达的**同一个隐藏会话 id** 的新一轮会在 `openAgent`
+   * 里等本次收尾落地（{@link trackReleasing}），而不是撞上还没释放的写句柄。
+   */
+  const releaseAll = async (reason: string): Promise<void> => {
+    generation += 1
+    const released = [...live.entries()]
+    live.clear()
+    queues.clear()
+    if (released.length === 0) return
+    for (const [sessionId] of released) {
+      try {
+        agentOf(sessionId)?.cancel({ kind: 'user' })
+      } catch (cause) {
+        warn(`dsh-plugin-desktop: cancelling the application AI turn failed after ${reason} (${cause instanceof Error ? cause.message : String(cause)})`)
+      }
     }
+    const disposals = released.map(async ([, cached]): Promise<void> => {
+      try {
+        const handle = await cached
+        await handle.dispose()
+      } catch (cause) {
+        warn(`dsh-plugin-desktop: releasing the application AI session failed after ${reason} (${cause instanceof Error ? cause.message : String(cause)})`)
+      }
+    })
+    // 登记在**任何 await 之前**（上面 `live.clear()` 到这里的同步段）：窗口里到来的新一轮
+    // 必须看得见"这些会话还在收尾"。
+    released.forEach(([sessionId], index) => {
+      const disposal = disposals[index]
+      if (disposal !== undefined) trackReleasing(sessionId, disposal)
+    })
+    await Promise.all(disposals)
   }
 
   /** 一轮对话（已在会话串行队列里）。 */
@@ -280,9 +411,16 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
     messages: readonly AiChatMessage[],
     onDelta: (text: string) => void,
     signal: AbortSignal,
+    startedAt: number,
   ): Promise<AiChatTurnResult> => {
     if (signal.aborted) throw aborted()
     const handle = await openAgent(sessionId)
+    // 等上一个活体收尾期间又换代（再次换账号/登出）⇒ 这一轮已不属于任何人：
+    // 丢弃刚开的会话并按取消收场（`openAgent` 的等待是有时长的，代次检查必须复检）。
+    if (startedAt !== generation) {
+      await dropAgent(sessionId)
+      throw aborted()
+    }
     const agent = handle.agent
     const disposeStream = agent.ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
       if (subject !== agent) return
@@ -335,6 +473,8 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
       agent.followup(createUserMessage({ content: [{ type: 'text', text: driver.content }], source: { kind: 'user' } }))
       await agent.whenIdle()
       if (signal.aborted) throw aborted()
+      // 这一轮跑完之前被 `releaseAll` 释放（换账号/登出）⇒ 结果不再属于任何人的请求。
+      if (startedAt !== generation) throw aborted()
       if (failure !== undefined) throw failure
       const final = lastAssistant(agent)
       if (final === null) throw new Error('the application AI turn produced no assistant message')
@@ -352,16 +492,42 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
     }
   }
 
+  /**
+   * 换账号/登出 ⇒ 释放全部活体会话（R13-GB 的第二半）。
+   *
+   * 订阅用叶子包的 {@link subscribeSessionChanges}（**唯一实现**：先订阅 + 用
+   * `isRestored()` 补发"恢复型启动"那一次）。裸 `ctx.on` 在这里尤其危险：`provide` 发生在
+   * profile 树挂载之前，恢复完成的那一刻恰好可能早于/晚于本订阅，漏掉它就等于"换账号后
+   * 前一个账号的活体会话一直留着"。
+   *
+   * 回调里的失败只记日志：释放是一条尽力而为的清理路径，它不该把桌面主进程的
+   * fail-loud 处理器（未处理拒绝 = 致命）牵进来。
+   */
+  subscribeSessionChanges(ctx, () => {
+    void releaseAll('session-changed').catch((cause: unknown) => {
+      warn(`dsh-plugin-desktop: releasing the application AI sessions failed (${cause instanceof Error ? cause.message : String(cause)})`)
+    })
+  })
+
   return {
     async run({ sessionId, messages, onDelta, signal }): Promise<AiChatTurnResult> {
-      return await serialize(sessionId, async () => await runTurn(sessionId, messages, onDelta, signal))
+      const startedAt = generation
+      return await serialize(sessionId, async () => {
+        // 排队期间被释放（换账号/登出）⇒ 起跑即拒：这一轮属于**上一个**账号的请求，
+        // 放它跑就是"释放之后又把那个账号的会话拉起来"。
+        if (startedAt !== generation) throw aborted()
+        return await runTurn(sessionId, messages, onDelta, signal, startedAt)
+      })
     },
     cancel(sessionId: string): void {
-      const agent = (ctx.get('agents') as { get?: (id: SessionIdType) => Agent | undefined } | undefined)?.get?.(SessionId(sessionId))
-      agent?.cancel({ kind: 'user' })
+      agentOf(sessionId)?.cancel({ kind: 'user' })
       // 取消后立刻丢弃：下一次调用重新建立会话（活体只服务"正在跑的那一轮"）。
       void dropAgent(sessionId)
     },
+    releaseAll,
+    liveSessions: (): number => live.size,
+    queuedSessions: (): number => queues.size,
+    generation: (): number => generation,
   }
 }
 
@@ -375,7 +541,7 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ai
  * `Context`** 断言 `ctx.get(WASM_APPS_AI_RUNNER_SERVICE)` 确实拿得到 runner——
  * 这就是"接线存在"的行为判据，而不是钉字符串。
  */
-export function provideAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AiChatTurnRunner {
+export function provideAppAiRunner(ctx: Context, options: AppAiRunnerOptions): AppAiRunnerHandle {
   const runner = createAppAiRunner(ctx, options)
   ctx.provide(WASM_APPS_AI_RUNNER_SERVICE, runner)
   return runner

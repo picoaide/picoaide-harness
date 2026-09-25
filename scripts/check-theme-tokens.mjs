@@ -29,6 +29,11 @@
  * 而"非空"可以是只放了一个 README —— 此时每个根贡献 0 个源码文件，整守卫打印
  * `OK（0 个文件、0 条提示、0 条阻断）` 并 exit 0：**扫了个寂寞却报绿**。
  * 现在每个根都登记 `minSources` 下限，且全局 `scanned === 0` 直接红。
+ *
+ * 副本的"我是副本"标记走 **argv**（`--entry-self-test-fence`，父进程自己构造），**不是**
+ * 环境变量 —— 2026-09-25 的同族收口：`CHECK_THEME_TOKENS_SKIP_ENTRY_TEST` 这个环境变量
+ * 可在**任何语境**（含 CI）关掉 S15-8/S15-9 的真实入口自证，且此前零判据拦它；
+ * 现在它被废除，外部设置即 exit 2。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -38,6 +43,35 @@ import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+
+/**
+ * 入口自检子进程的 **argv** 开关（2026-09-25，第十三轮 R14-F 的同族收口）。
+ *
+ * {@link entryPointSelfTest} 把本脚本**复制**进合成树、用它自己的入口跑；副本必须不再
+ * 派生子进程（否则无穷递归）—— 这个"我是副本"的标记原先走环境变量
+ * `CHECK_THEME_TOKENS_SKIP_ENTRY_TEST`，而**环境是外部可改的输入面**：一句
+ * `CHECK_THEME_TOKENS_SKIP_ENTRY_TEST=1`（`$GITHUB_ENV` / `env` / 继承）就能让本守卫在
+ * **任何语境**（含 CI）跳过 S15-8/S15-9 的真实入口自证，且没有任何判据拦它。
+ * 现改为父进程把 {@link ENTRY_SELF_TEST_FENCE_ARG} **追加到自己 argv 的副本**上。
+ */
+const ENTRY_SELF_TEST_FENCE_ARG = '--entry-self-test-fence'
+
+/** 已**废除**的环境变量开关（只留名字给"外部设置即攻击面"的判据用）。 */
+const RETIRED_ENTRY_TEST_ENV = 'CHECK_THEME_TOKENS_SKIP_ENTRY_TEST'
+
+/**
+ * {@link RETIRED_ENTRY_TEST_ENV} 在**任何语境**下被设置 ⇒ exit 2（修好后它没有合法来源）。
+ */
+function refuseRetiredTestSeam() {
+  const value = process.env[RETIRED_ENTRY_TEST_ENV]
+  if (value === undefined || value === '') return
+  console.error(`check-theme-tokens: 测试缝已废除：环境变量 ${RETIRED_ENTRY_TEST_ENV} **任何语境下都不得设置**`
+    + `（实际 ${JSON.stringify(value)}）—— 入口自检副本的标记已改由 argv 自调用（${ENTRY_SELF_TEST_FENCE_ARG}）传递，`
+    + '这个环境变量没有合法来源，外部设置它一律视为攻击面（唯一效果是跳过真实入口自证）。')
+  process.exit(2)
+}
+
+refuseRetiredTestSeam()
 
 /** 上游主题样式的权威目录（pinned submodule）。 */
 const THEME_ROOT = join(ROOT, 'deepseek-harness', 'packages', 'client', 'ui-theme', 'src')
@@ -336,7 +370,8 @@ function suggestions(token, defined) {
  * 副本靠环境变量掐断递归：副本不会再派生子进程。
  */
 function entryPointSelfTest() {
-  if (process.env.CHECK_THEME_TOKENS_SKIP_ENTRY_TEST === '1') return
+  // 副本标记走 **argv**（父进程追加），不看环境 —— 见 {@link ENTRY_SELF_TEST_FENCE_ARG}。
+  if (process.argv.includes(ENTRY_SELF_TEST_FENCE_ARG)) return
   const scratch = mkdtempSync(join(tmpdir(), 'check-theme-tokens-entry-'))
   try {
     const scriptsDir = join(scratch, 'scripts')
@@ -354,10 +389,11 @@ function entryPointSelfTest() {
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, 'probe.ts'), 'export const probe = 1\n')
     }
-    const run = () => spawnSync(process.execPath, [join('scripts', 'check-theme-tokens.mjs')], {
+    const run = () => spawnSync(process.execPath, [join('scripts', 'check-theme-tokens.mjs'), ENTRY_SELF_TEST_FENCE_ARG], {
       cwd: scratch,
       encoding: 'utf8',
-      env: { ...process.env, CHECK_THEME_TOKENS_SKIP_ENTRY_TEST: '1' },
+      // 不再注入任何自检开关：副本靠 **argv** 认出自己（环境是外部可改的输入面）。
+      env: { ...process.env },
     })
     const healthy = run()
     if (healthy.status !== 0) {

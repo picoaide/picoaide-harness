@@ -346,7 +346,14 @@ export function apply(ctx: Context, config: Config = {}): void {
         {
           authorization: aiAuthorization,
           runner: aiRunner,
-          userId: () => currentSession()?.username ?? null,
+          // 隐藏会话的作用域 = 账号 + 服务端地址（**不**只是"是否登录"）：换账号或换服务端
+          // 都必须落到另一个隐藏会话上（R13-E-04）。这里与 `scopeKey()` 用同一个会话快照，
+          // 且**一次调用只解析一次**（中途换账号不会拼出"甲的授权 + 乙的会话"）。
+          scope: () => {
+            const session = currentSession()
+            if (session === null) return null
+            return { userId: session.username ?? '', serverURL: session.serverURL }
+          },
           warn,
         },
         appId,

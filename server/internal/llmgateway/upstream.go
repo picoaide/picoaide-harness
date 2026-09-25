@@ -8,6 +8,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
 // DecryptSecret decrypts an upstream API key. 默认报错(未接线即失败,
@@ -96,54 +98,89 @@ type Upstream struct {
 	Protocol string
 }
 
+// loadUpstreamsDB 读**上游路由与密钥**(`gateway_providers`)与每 provider 的已同步
+// 模型名(`models`)—— 两条都是族内关系。
+//
+// R13-GH3(`search_path` 同族第三条路径):旧实现是裸池上的未限定名查询,连接/角色/
+// 库级 search_path 前置同名 shadow schema 时,`base_url` + `api_key_enc`(上游路由与
+// **密钥**)与模型清单都读自 shadow —— 管理员在 public 改路由,网关却按 shadow 的
+// 诱饵路由发请求,且没有任何错误面(真 PG + 敌对 search_path 实测)。现在整段
+// (provider 扫描 + 逐 provider 的 syncedModelNames)在**同一个已钉 search_path 的
+// 只读事务**里读;`loadUpstreamsCached` 的 30s 缓存语义不变。
 func loadUpstreamsDB(db *sql.DB) ([]Upstream, error) {
-	rows, err := db.Query(`SELECT id, name, base_url, api_key_enc, models, channel, protocol FROM gateway_providers WHERE enabled = 1 ORDER BY id`)
+	var ups []Upstream
+	err := serverstore.WithUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT id, name, base_url, api_key_enc, models, channel, protocol FROM gateway_providers WHERE enabled = 1 ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		// 先把 provider 行**全部读进内存再关 rows**：*sql.Tx 只持有一条连接，
+		// 在 rows 未读完时再发下一条语句会让驱动报 "driver: bad connection"
+		// （R13-GH3 实跑踩到：N+1 的逐 provider 读原先在池上、每条各占一条连接，
+		// 收进同一个事务后必须先排空再进下一轮）。
+		type providerRow struct {
+			id                             int64
+			name, baseURL, key, modelsJSON string
+			channel, protocol              string
+		}
+		var list []providerRow
+		for rows.Next() {
+			var r providerRow
+			if err := rows.Scan(&r.id, &r.name, &r.baseURL, &r.key, &r.modelsJSON, &r.channel, &r.protocol); err != nil {
+				rows.Close()
+				return err
+			}
+			list = append(list, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		for _, r := range list {
+			u := Upstream{ID: r.id, Name: r.name, BaseURL: r.baseURL, Channel: r.channel, Protocol: r.protocol}
+			key, err := DecryptSecret(r.key)
+			if err != nil {
+				log.Printf("gateway: skip provider %s: decrypt api key: %v", u.Name, err)
+				continue
+			}
+			u.APIKey = key
+			if u.Protocol != "anthropic" && u.Protocol != "openai" && u.Protocol != "both" {
+				// 未知协议(防御):不参与任何路由,与损坏 key 同档处理
+				log.Printf("gateway: skip provider %s: unknown protocol %q", u.Name, u.Protocol)
+				continue
+			}
+			if err := json.Unmarshal([]byte(r.modelsJSON), &u.Models); err != nil {
+				log.Printf("gateway: skip provider %s: bad models json: %v", u.Name, err)
+				continue
+			}
+			// ponytail: N+1 per provider; admin-managed table is tiny, a JOIN adds no value
+			synced, err := syncedModelNames(tx, r.id)
+			if err != nil {
+				log.Printf("gateway: skip provider %s: load synced models: %v", u.Name, err)
+				continue
+			}
+			u.Models = mergeModelNames(u.Models, synced)
+			ups = append(ups, u)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ups []Upstream
-	for rows.Next() {
-		var u Upstream
-		var id int64
-		var key, modelsJSON string
-		if err := rows.Scan(&id, &u.Name, &u.BaseURL, &key, &modelsJSON, &u.Channel, &u.Protocol); err != nil {
-			return nil, err
-		}
-		key, err := DecryptSecret(key)
-		if err != nil {
-			log.Printf("gateway: skip provider %s: decrypt api key: %v", u.Name, err)
-			continue
-		}
-		u.ID = id
-		u.APIKey = key
-		if u.Protocol != "anthropic" && u.Protocol != "openai" && u.Protocol != "both" {
-			// 未知协议(防御):不参与任何路由,与损坏 key 同档处理
-			log.Printf("gateway: skip provider %s: unknown protocol %q", u.Name, u.Protocol)
-			continue
-		}
-		if err := json.Unmarshal([]byte(modelsJSON), &u.Models); err != nil {
-			log.Printf("gateway: skip provider %s: bad models json: %v", u.Name, err)
-			continue
-		}
-		// ponytail: N+1 per provider; admin-managed table is tiny, a JOIN adds no value
-		synced, err := syncedModelNames(db, id)
-		if err != nil {
-			log.Printf("gateway: skip provider %s: load synced models: %v", u.Name, err)
-			continue
-		}
-		u.Models = mergeModelNames(u.Models, synced)
-		ups = append(ups, u)
-	}
-	return ups, rows.Err()
+	return ups, nil
 }
 
 // syncedModelNames returns the model names a provider has in the models table.
 // 2026-09-23(审计 G-02):排除 catalog_missing = TRUE 的行 —— 它们已不在上游
 // 目录里(渠道同步发现目录缺失时停用而非删除,以保住定价),路由池必须按可用性
 // 过滤掉,否则会把请求发往一个上游目录中已不存在的模型。
-func syncedModelNames(db *sql.DB, providerID int64) ([]string, error) {
-	rows, err := db.Query(`SELECT name FROM models WHERE provider_id = ? AND catalog_missing = FALSE`, providerID)
+//
+// R13-GH3:形参是**已钉 search_path 的事务**(由 loadUpstreamsDB 提供)——函数自己
+// 开不出事务,只能作为已钉事务的语句入口(机械守卫按 via-caller 登记)。
+func syncedModelNames(tx *sql.Tx, providerID int64) ([]string, error) {
+	rows, err := tx.Query(`SELECT name FROM models WHERE provider_id = ? AND catalog_missing = FALSE`, providerID)
 	if err != nil {
 		return nil, err
 	}

@@ -289,18 +289,23 @@ describe('打开次数面板 · 口径', () => {
   })
 })
 
-describe('AI 用量面板 · 「统计未上线」/「确实零调用」/ 有数据 / 降级（§5.1c B）', () => {
-  it('attribution_available=false ⇒ "统计尚未上线"，明说**不是 0 次调用**、不渲染 0', async () => {
+describe('AI 用量面板 · 「无归因记录」/「确实零调用」/ 有数据 / 降级（§5.1c B）', () => {
+  it('attribution_available=false ⇒ "暂无应用归因记录"，明说**不是 0 次调用**、不渲染 0', async () => {
     // 变异验证：把 aiUsageView 的 no_attribution 分支去掉（落到 zero_calls 或 data）⇒
     // 本用例必红 —— §21.4：两者数字都是 0、含义相反，合并渲染就是在编数据。
     render(<AppAiUsageSection appId="share-note" canRead />)
-    expect(await screen.findByText('统计尚未上线：暂无应用归因')).toBeInTheDocument()
+    expect(await screen.findByText('暂无应用归因记录')).toBeInTheDocument()
     expect(screen.queryByTestId('app-ai-calls')).toBeNull()
     const block = screen.getByTestId('app-ai-usage-block')
     expect(block.textContent).toContain('attribution_available=false')
     expect(block.textContent).toContain('这不是 0 次调用')
-    // 归因说明：账单归使用者账号 + 老客户端无归因
-    expect(block.textContent).toContain('X-Pico-App-Id')
+    // 归因说明（R13-GB 起语义收窄）：账单归使用者账号；归因走**会话链路**
+    //（隐藏会话 id 的 `app:` 前缀 ⇒ 上游出站头），并且**不得**再说"平台侧尚未接线"
+    // —— 那是接线前的成因；现在这么写就是在编数据（成因由 AI_ATTRIBUTION_WIRING 决定，
+    // 通道若再次断开，对拍用例会先把常量改回 not_wired 并改回相应文案）。
+    expect(block.textContent).toContain('app:')
+    expect(block.textContent).toContain('x-deepseek-harness-session-id')
+    expect(block.textContent).not.toContain('尚未接线')
   })
 
   it('attribution_available=true 且全零 ⇒ "确实零调用"（**与上一档文案不同**）', async () => {
@@ -308,7 +313,7 @@ describe('AI 用量面板 · 「统计未上线」/「确实零调用」/ 有数
     aiMode = 'zero_calls'
     render(<AppAiUsageSection appId="share-note" canRead />)
     expect(await screen.findByText('该应用确实零调用')).toBeInTheDocument()
-    expect(screen.queryByText('统计尚未上线：暂无应用归因')).toBeNull()
+    expect(screen.queryByText('暂无应用归因记录')).toBeNull()
     expect(screen.getByTestId('app-ai-usage-block').textContent).toContain('attribution_available=true')
     // 空状态不渲染 0 次 / ¥0.00 的行（数字行只在 data 档出现）。
     expect(screen.queryByTestId('app-ai-calls')).toBeNull()
@@ -385,7 +390,7 @@ describe('AI 用量面板 · 「统计未上线」/「确实零调用」/ 有数
     render(<AppAiUsageSection appId="share-note" canRead />)
     const failure = await screen.findByTestId('app-ai-failure')
     expect(failure.textContent).toContain('days')
-    expect(screen.queryByText('统计尚未上线：暂无应用归因')).toBeNull()
+    expect(screen.queryByText('暂无应用归因记录')).toBeNull()
     expect(screen.queryByText('该应用确实零调用')).toBeNull()
   })
 

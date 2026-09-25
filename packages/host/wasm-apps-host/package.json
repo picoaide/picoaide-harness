@@ -57,7 +57,8 @@
   "dependencies": {
     "@deepseek-ai/dsh-atomic-write": "0.1.6-alpha.2",
     "@deepseek-ai/schemastery": "^3.18.2",
-    "@picoaide/dsh-browser": "workspace:*"
+    "@picoaide/dsh-browser": "workspace:*",
+    "@picoaide/dsh-host-locale": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

@@ -22,8 +22,9 @@
  * at startup (main.ts), so every downstream consumer that reads the
  * environment agrees on one location.
  */
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, parse, resolve, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, win32 } from 'node:path'
 
 /** Environment variable that overrides the product home. */
 export const DSH_HOME_ENV = 'DSH_HOME'
@@ -130,33 +131,182 @@ export function resolveDshHome(
   return resolve(expandHomePath(selected, home))
 }
 
-/** 系统关键目录前缀(审计 2026-08-25 P2-3):home 不得指向这些根。
- * 刻意不含 /tmp:e2e/测试/沙箱隔离确实用 /tmp 下的 home,拒绝会破坏产品。 */
-const FORBIDDEN_HOME_PREFIXES = ['/', '/proc', '/sys', '/etc', '/usr', '/var', '/boot', '/dev', '/opt']
+/**
+ * 系统关键目录的**唯一真源**（POSIX 面）。
+ *
+ * 数据根闸门（`isSafeDshHome`）与打包应用 cwd 闸门（`isSystemWorkingDirectory`）共用
+ * 这一张表。此前是两份：cwd 那份带 Windows 根表与大小写归一，数据根那份没有，于是
+ * 同族判据只在一条路径上收口（R13-B P2-3：`DSH_HOME=<链接 → /etc>`、`/ETC`、
+ * `C:\Windows` 三种形态都能绕过数据根闸门）。新增/调整系统目录只改这里一处。
+ *
+ * `'/'` 是特例：**只匹配根本身**（否则任何绝对路径都会被它吃掉）。`/tmp` 及其子目录
+ * 刻意不在表内 —— e2e/测试与沙箱隔离确实用 /tmp 下的 home（如 `/tmp/home`），拒绝会
+ * 破坏测试与产品行为；威胁模型里 /tmp 由同用户权限隔离，风险低于 / 与系统根。
+ *
+ * `'/private/etc'`、`'/private/var'` 是 macOS 上 `/etc`、`/var` 的**真实路径**（那两个
+ * 是符号链接）——别名形态必须在任何平台上都拒绝，否则"平台无关地拒绝"只在 Linux 成立。
+ * `/private/tmp` 不在此表（它是 /tmp 的真实路径，必须与 /tmp 一样放行）。
+ */
+const POSIX_SYSTEM_ROOTS: readonly string[] = ['/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/opt', '/private/etc', '/private/var', '/proc', '/sbin', '/sys', '/usr', '/var']
+
+/**
+ * Windows 系统根的内置默认形态。**在任何平台上都按 win32 语义识别**：本机是 Linux 时
+ * 也拒绝 `C:\Windows`（`resolve()` 会把它变成 cwd 下的相对目录名，于是"注入一个系统
+ * 目录"变成"数据根随启动目录漂移"，两条都是要防的）。env 里另行声明的根在
+ * `systemRoots()` 里合并进来。
+ */
+const WINDOWS_DEFAULT_SYSTEM_ROOTS: readonly string[] = ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData']
+
+/** 声明 Windows 系统根的环境变量名（与内置默认形态同一张表，别再各写一份）。 */
+const WINDOWS_ROOT_ENV_KEYS: readonly string[] = ['SystemRoot', 'windir', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData']
+
+/** 盘符开头（`C:\…`、`C:/…`，也含盘符相对 `C:foo`）。 */
+const WINDOWS_DRIVE = /^[A-Za-z]:/u
+/** 盘符相对（`C:`、`C:foo`）：落点取决于该盘的当前目录，判不了 ⇒ 拒绝。 */
+const WINDOWS_DRIVE_RELATIVE = /^[A-Za-z]:(?![\\/])/u
+/** UNC（`\\server\share`、`//server/share`）与设备命名空间（`\\?\C:\…`、`\\.\C:`）。 */
+const WINDOWS_UNC_OR_DEVICE = /^[\\/]{2}/u
+/** 归一后的盘符根比较键（`c:`）。 */
+const WINDOWS_DRIVE_ROOT_KEY = /^[a-z]:$/u
+
+/** 判据接收的环境映射（`process.env` 的形状）。 */
+type EnvLike = Record<string, string | undefined>
+
+/**
+ * 归一成比较键：去尾部分隔符（`/` 自身除外）、分隔符统一为 `/`、**小写**
+ * （macOS/Windows 默认大小写不敏感 ⇒ `/ETC` 就是 `/etc`，判据必须平台无关地拒绝）。
+ * 手写剥离而不用 `/[\\/]+$/`：同类回溯正则在本仓被 CodeQL 判过
+ * js/polynomial-redos。
+ */
+function normalizePathForCompare(value: string): string {
+  let end = value.length
+  while (end > 1 && (value[end - 1] === '/' || value[end - 1] === '\\')) end--
+  return value.slice(0, end).split('\\').join('/').toLowerCase()
+}
+
+/**
+ * 系统根（比较键）：POSIX 表 + Windows 内置默认形态 + `SystemRoot`/`windir`/… 声明的根。
+ * 一处产出，两条闸门共用。
+ * @param env - 环境映射（测试 seam：显式传入，不依赖本机环境）。
+ */
+function systemRoots(env: EnvLike): string[] {
+  const roots = [...POSIX_SYSTEM_ROOTS, ...WINDOWS_DEFAULT_SYSTEM_ROOTS].map(normalizePathForCompare)
+  for (const name of WINDOWS_ROOT_ENV_KEYS) {
+    const value = env[name]
+    if (value === undefined || value.trim() === '') continue
+    roots.push(normalizePathForCompare(value.trim()))
+  }
+  return roots
+}
+
+/**
+ * macOS 临时目录例外（既有文档化行为）：`os.tmpdir()` 在 macOS 上是
+ * `/var/folders/<随机>/T/`，与 Linux `/tmp` 等价（同用户权限隔离的临时目录），
+ * e2e/profile 冒烟/沙箱用它作 DSH_HOME，拒绝会破坏这些场景。
+ * 两种拼写都算（`/var/folders/...` 与它的真实路径 `/private/var/folders/...`），
+ * 比较键已小写 ⇒ 大小写不敏感平台上的 `.../t/...` 同样算例外。
+ */
+function isMacTempDirKey(key: string): boolean {
+  const underVarFolders = key.startsWith('/var/folders/') || key.startsWith('/private/var/folders/')
+  return underVarFolders && key.includes('/t/')
+}
+
+/** 比较键是否落在系统根内（`'/'` 只算根本身，不做前缀匹配）。 */
+function isUnderSystemRoot(key: string, roots: readonly string[]): boolean {
+  if (isMacTempDirKey(key)) return false
+  for (const root of roots) {
+    if (root === '/') {
+      if (key === '/') return true
+      continue
+    }
+    if (key === root || key.startsWith(`${root}/`)) return true
+  }
+  return false
+}
+
+/**
+ * 路径的**真实落点**：取最深的已存在祖先的 `realpathSync.native`（一次解掉任意跳数的
+ * 符号链接），再把余下尚不存在的段按内核顺序拼回（`..` 在 realpath 之后才生效）。
+ *
+ * 判据宁严不宽：realpath 失败（不存在/权限/链接环）时回落到拼写路径，绝不因此放宽 ——
+ * 调用方始终**同时**检查拼写路径与真实落点，任一命中即拒。
+ * @param absolute - 绝对路径（调用方保证）。
+ */
+function realpathNearestExisting(absolute: string): string {
+  const tail: string[] = []
+  let current = absolute
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return tail.length === 0 ? real : resolve(join(real, ...tail))
+    } catch {
+      const parent = dirname(current)
+      if (parent === current || parent === '') return absolute
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * Windows 形态的取值按 win32 语义判定（拼写路径 + 系统根，不做 realpath：本机 POSIX
+ * 上 realpath 对盘符形态没有意义）。
+ */
+function isWindowsSystemPath(raw: string, roots: readonly string[]): boolean {
+  // UNC/设备命名空间（`\\server\share`、`\\?\C:\…`）不是本机路径：fail-closed。
+  if (WINDOWS_UNC_OR_DEVICE.test(raw)) return true
+  // 盘符相对（`C:`、`C:foo`）的落点取决于该盘的当前目录，判不了 ⇒ 拒绝。
+  if (WINDOWS_DRIVE_RELATIVE.test(raw)) return true
+  const key = normalizePathForCompare(win32.resolve(raw))
+  if (WINDOWS_DRIVE_ROOT_KEY.test(key)) return true // `C:\`、`C:/`
+  return isUnderSystemRoot(key, roots)
+}
+
+/**
+ * **系统路径的唯一内部谓词**：`isSafeDshHome` 与 `isSystemWorkingDirectory` 都走它
+ * （R13-B P2-3：此前两份实现，符号链接 / 大小写 / Windows 形态只在其中一份上收口）。
+ *
+ * 判定覆盖四个面，任一命中即"系统路径"：
+ *  1. 平台无关的 Windows 形态（盘符根、盘符相对、UNC/设备、Windows 系统根）；
+ *  2. 大小写归一后的拼写路径（`/ETC` ⇒ `/etc`）；
+ *  3. 绝对化后的拼写路径（相对路径按 cwd 解析，`..` 先按字面归一）；
+ *  4. 真实落点（`realpathNearestExisting`，符号链接跳数不限）。
+ *
+ * 空串由调用方定语义（cwd 闸门把空串当拒绝），这里返回 false。
+ * @param target - 候选路径（拼写形态即可）。
+ * @param env - 环境映射（Windows 系统根 seam）。
+ */
+function isSystemPath(target: string, env: EnvLike): boolean {
+  const raw = target.trim()
+  if (raw === '') return false
+  const roots = systemRoots(env)
+  if (WINDOWS_DRIVE.test(raw) || WINDOWS_UNC_OR_DEVICE.test(raw)) return isWindowsSystemPath(raw, roots)
+  // 拼写路径与真实落点**分别**成候选（任一命中即拒）：realpath 只是其中一面，
+  // 它不可用时（不存在/权限）字面归一仍要独立成立 —— 判据宁严不宽。
+  const spelled = resolve(raw)
+  const real = realpathNearestExisting(isAbsolute(raw) ? raw : spelled)
+  const candidates = [
+    normalizePathForCompare(raw),
+    normalizePathForCompare(spelled),
+    normalizePathForCompare(real),
+  ]
+  return candidates.some(key => isUnderSystemRoot(key, roots))
+}
 
 /**
  * Refuse a resolved home placed in a system-critical directory.
  * 审计 2026-08-25 P2-3:调用方传入的 DSH_HOME 若被同机进程注入为系统
- * 关键目录,拒绝而非静默使用(返回 false)。注意:/tmp 及其子目录**允许**
- * ——e2e/测试与沙箱隔离确实用 /tmp 下的 home(如 /tmp/home),拒绝会破坏
- * 测试与产品行为;威胁模型里 /tmp 由同用户权限隔离,风险低于 / 与系统根。
+ * 关键目录,拒绝而非静默使用(返回 false)。
+ *
+ * R13-B P2-3 收口:判据不再只看拼写路径 —— 符号链接(跳数不限,取最近存在祖先的
+ * realpath)、大小写变体与 Windows 形态都与 cwd 闸门**共用同一份实现**
+ * (`isSystemPath`:一张系统根表)。注意:/tmp 及其子目录**允许**,macOS 的
+ * `/var/folders/.../T/...` 同样允许(与"临时目录不是系统目录"同一条例外)。
  * @param resolved - absolute normalized home path (from resolveDshHome).
+ * @param env - environment used to locate the Windows system roots (test seam).
  */
-export function isSafeDshHome(resolved: string): boolean {
-  const normalized = resolve(resolved)
-  if (normalized === '/') return false
-  for (const prefix of FORBIDDEN_HOME_PREFIXES) {
-    if (normalized === prefix || normalized.startsWith(`${prefix}/`) || normalized.startsWith(`${prefix}\\`)) {
-      // macOS 例外:os.tmpdir() 返回 /var/folders/<random>/T/(与 Linux /tmp
-      // 等价——同用户权限隔离的临时目录;e2e/profile 冒烟/沙箱用它作
-      // DSH_HOME,拒绝会破坏这些场景,也与「/tmp 允许」的威胁模型一致)。
-      if (prefix === '/var' && normalized.startsWith('/var/folders/') && normalized.includes('/T/')) {
-        continue
-      }
-      return false
-    }
-  }
-  return true
+export function isSafeDshHome(resolved: string, env: EnvLike = process.env): boolean {
+  return !isSystemPath(resolved, env)
 }
 
 /** Resolve the product home and refuse an unsafe override (throws a clear error). */
@@ -171,7 +321,7 @@ export function dshHomeSafe(
   } = {},
 ): string {
   const resolved = resolveDshHome(options.configured, options.env, options.home, options.productDir)
-  if (!isSafeDshHome(resolved)) {
+  if (!isSafeDshHome(resolved, options.env ?? process.env)) {
     const source = options.env?.[DSH_HOME_ENV] ?? options.configured
     throw new Error(`unsafe DSH_HOME: ${String(source ?? resolved)} resolves into a system directory`)
   }
@@ -209,20 +359,6 @@ export function dshHomePath(...segments: string[]): string {
   return join(resolveDshHome(), ...segments)
 }
 
-/** POSIX system directories a packaged app must never use as a cwd. */
-const POSIX_SYSTEM_DIRS = ['/usr', '/etc', '/var', '/bin', '/sbin', '/boot', '/dev', '/proc', '/sys', '/lib', '/lib64', '/opt']
-
-/**
- * Strip trailing path separators and normalize to forward slashes without a
- * backtracking regex (`/[\\/]+$/` is polynomial on uncontrolled input —
- * CodeQL js/polynomial-redos).
- */
-function normalizePathForCompare(value: string): string {
-  let end = value.length
-  while (end > 0 && (value[end - 1] === '/' || value[end - 1] === '\\')) end--
-  return value.slice(0, end).split('\\').join('/').toLowerCase()
-}
-
 /**
  * Is `cwd` a filesystem root or a system directory (P2-34)? A packaged app
  * launched with such a working directory (desktop-entry `Path=`, a Windows
@@ -231,26 +367,16 @@ function normalizePathForCompare(value: string): string {
  * or harmful. The old check only compared against the POSIX `/`, so Windows
  * `C:\`, `C:\Windows` and Program Files slipped through.
  *
- * Root detection covers both path flavours explicitly: `parse` uses the host
- * flavour, so a Windows-style `C:\` is only recognized through `win32.parse`
- * when the check runs on Linux (and vice versa for tests).
+ * R13-B P2-3:本闸门与数据根闸门（`isSafeDshHome`）**共用同一份实现**
+ * （`isSystemPath`：一张系统根表、一套 Windows 形态判定、一次大小写归一、一次
+ * realpath 归一），不再各写一份。根目录（POSIX `/`、`C:\`、UNC 根）、`/ETC` 这类
+ * 大小写变体、以及指向系统目录的符号链接都因此一并覆盖。
  * @param cwd - candidate working directory.
  * @param env - environment used to locate the Windows system roots (test seam).
  */
-export function isSystemWorkingDirectory(cwd: string, env: Record<string, string | undefined> = process.env): boolean {
-  const raw = cwd.trim()
-  if (raw === '') return true
-  // Root detection covers both path flavours and runs on the RAW value:
-  // `resolve('C:\\')` on Linux would rewrite the drive path away. `parse`
-  // follows the host flavour, so `C:\` is only recognized through win32.parse.
-  if (parse(raw).root === raw || win32.parse(raw).root === raw) return true
-  const target = normalizePathForCompare(resolve(raw))
-  for (const base of [env.SystemRoot, env.windir, env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramData]) {
-    if (base === undefined || base.trim() === '') continue
-    const root = normalizePathForCompare(resolve(base))
-    if (target === root || target.startsWith(`${root}/`)) return true
-  }
-  return POSIX_SYSTEM_DIRS.some(dir => target === dir || target.startsWith(`${dir}/`))
+export function isSystemWorkingDirectory(cwd: string, env: EnvLike = process.env): boolean {
+  if (cwd.trim() === '') return true
+  return isSystemPath(cwd, env)
 }
 
 /** Resolve the product home from the live environment. */

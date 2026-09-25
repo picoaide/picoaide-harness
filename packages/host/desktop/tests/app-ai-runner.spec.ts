@@ -9,8 +9,9 @@
  *
  * 判据与用例的对应：
  *  - 判据 4（工具集为空）：注册一个**全局**工具 ⇒ 请求的 `tools` 必须为空；
- *  - 判据 5（隐藏会话）：会话 id 是 `app:<app_id>`、header.origin = 'subagent'
- *    （普通会话树按它排除）、带 cwd（诊断可查）；
+ *  - 判据 5（隐藏会话）：会话 id 是 `app:<app_id>#<账号作用域>`、header.origin =
+ *    'subagent'（普通会话树按它排除）、带 cwd（诊断可查）。账号作用域本身（换账号不复用
+ *    对话、换账号释放活体会话）在 `app-ai-scope.spec.ts`；
  *  - 判据 6（仅本次 messages）：全局 `systemPrompt.context` 注入 + 全局 persona ⇒
  *    请求里只有平台提示与本轮对话；第二轮只带新增的那条用户消息；
  *  - 判据 7（增量顺序 + 取消）：`text-delta` 顺序回调、取消 ⇒ `AbortError` 且不留活体会话。
@@ -32,7 +33,7 @@ import { APP_AI_PROMPT_SECTION, APP_AI_SYSTEM_PROMPT, createAppAiRunner } from '
 import { provideAppAiRunner } from '../src/app-ai-runner.ts'
 import { WASM_APPS_AI_RUNNER_SERVICE } from '@picoaide/dsh-wasm-apps-host'
 import { readFileSync } from 'node:fs'
-import type { AiChatTurnRunner } from '@picoaide/dsh-wasm-apps-host/ai-chat'
+import { hiddenSessionId, type AiChatTurnRunner } from '@picoaide/dsh-wasm-apps-host/ai-chat'
 import { WAIT_BUDGETS } from './wait-budgets.ts'
 
 /** 一段文本回答的流（字符级 `text-delta`，便于断言增量顺序）。 */
@@ -122,6 +123,9 @@ async function harness(adapter: LlmAdapter, persona = ''): Promise<Context> {
   return ctx
 }
 
+/** 判据用的隐藏会话 id（真构造在 `ai-chat.ts` 的 `hiddenSessionId`，不在这里拼）。 */
+const SESSION_ID = hiddenSessionId({ userId: 'probe-user', serverURL: 'https://harness.example.com' }, 'demo-app')
+
 /** 一轮的驱动：把 runner 包成"给定 messages 就跑"的小工具。 */
 async function turn(
   runner: AiChatTurnRunner,
@@ -131,7 +135,7 @@ async function turn(
 ): Promise<{ content: string, deltas: string[] }> {
   const deltas: string[] = []
   const result = await runner.run({
-    sessionId: `app:${appId}`,
+    sessionId: SESSION_ID,
     appId,
     messages,
     onDelta: (text) => { deltas.push(text) },
@@ -230,14 +234,17 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     const runner = createAppAiRunner(ctx, { cwd: '/tmp/app-ai' })
     await turn(runner, 'demo-app', [{ role: 'user', content: 'hi' }])
 
-    const session = ctx.sessions.get(SessionId('app:demo-app'))
-    expect(session?.id).toBe('app:demo-app')
+    const session = ctx.sessions.get(SessionId(SESSION_ID))
+    expect(session?.id).toBe(SESSION_ID)
+    // 账号作用域在位（换账号 ⇒ 另一个会话）：形状由
+    // `wasm-apps-host/src/app-session-id-contract.spec.ts` 与服务端契约对拍。
+    expect(SESSION_ID).toMatch(/^app:demo-app#probe-user@[0-9a-f]{32}$/u)
     // 侧边栏可见性判据（上游 `ui-workspace/tree.ts` 的 `sessionVisible`）：
     // `origin !== 'subagent'` 是唯一的"隐藏"位。
     expect(session?.header.origin).toBe('subagent')
     expect(session?.header.cwd).toBe('/tmp/app-ai')
     // 模型请求带着同一个会话身份出站（归因链路的客户端半边）。
-    expect(adapter.requests[0]?.sessionId).toBe('app:demo-app')
+    expect(adapter.requests[0]?.sessionId).toBe(SESSION_ID)
   })
 
   it('判据 5（第二半）：会话进行中可见于会话存储，且 origin=subagent / 非空 cwd', async () => {
@@ -247,7 +254,7 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     const runner = createAppAiRunner(ctx, { cwd: '/tmp/app-ai' })
     const controller = new AbortController()
     const pending = runner.run({
-      sessionId: 'app:demo-app',
+      sessionId: SESSION_ID,
       appId: 'demo-app',
       messages: [{ role: 'user', content: 'hi' }],
       onDelta: () => {},
@@ -255,14 +262,14 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     })
     // 等到活体会话出现（模型已开始流）。
     // 现象：模型开始流之后活体会话可见于会话存储（状态传播）。
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app'))?.header.origin, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBe('subagent')
-    const session = ctx.sessions.get(SessionId('app:demo-app'))
+    await expect.poll(() => ctx.sessions.get(SessionId(SESSION_ID))?.header.origin, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBe('subagent')
+    const session = ctx.sessions.get(SessionId(SESSION_ID))
     expect(session?.header.cwd).toBe('/tmp/app-ai')
     expect(session?.header.delegationDepth).toBeUndefined()
     controller.abort()
     await expect(pending).rejects.toThrow(/cancel/iu)
     // 现象：取消后活体会话从会话存储消失（状态传播）。
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app')), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
+    await expect.poll(() => ctx.sessions.get(SessionId(SESSION_ID)), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
   })
 
   it('判据 7：增量按序回调、done 的正文来自日志；取消 ⇒ AbortError 且不留活体会话', async () => {
@@ -272,7 +279,7 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     const runner = createAppAiRunner(ctx, { cwd: '/tmp/app-ai' })
     const deltas: string[] = []
     const result = await runner.run({
-      sessionId: 'app:demo-app',
+      sessionId: SESSION_ID,
       appId: 'demo-app',
       messages: [{ role: 'user', content: '数数' }],
       onDelta: (text) => { deltas.push(text) },
@@ -291,7 +298,7 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     const controller = new AbortController()
     const deltas: string[] = []
     const pending = runner.run({
-      sessionId: 'app:demo-app',
+      sessionId: SESSION_ID,
       appId: 'demo-app',
       messages: [{ role: 'user', content: '长回复' }],
       onDelta: (text) => { deltas.push(text) },
@@ -302,8 +309,8 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     controller.abort()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     // 现象：取消后会话从存储消失（状态传播）。
-    await expect.poll(() => ctx.sessions.get(SessionId('app:demo-app')), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
-    expect(ctx.agents.get(SessionId('app:demo-app'))).toBeUndefined()
+    await expect.poll(() => ctx.sessions.get(SessionId(SESSION_ID)), { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS }).toBeUndefined()
+    expect(ctx.agents.get(SessionId(SESSION_ID))).toBeUndefined()
   })
 
   it('取消信号在开跑前已中止 ⇒ 直接 AbortError，一次模型调用都不发生', async () => {
@@ -314,7 +321,7 @@ describe('应用 AI 执行面（隐藏会话 + 仅对话）', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(runner.run({
-      sessionId: 'app:demo-app',
+      sessionId: SESSION_ID,
       appId: 'demo-app',
       messages: [{ role: 'user', content: 'hi' }],
       onDelta: () => {},

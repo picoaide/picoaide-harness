@@ -72,6 +72,29 @@ describe('precheckSkillPackage（与服务端同码）', () => {
     expect(precheckSkillPackage(md({ 'user-invocable': 'no' }), 'demo-skill')).toEqual([])
   })
 
+  it('调用策略布尔「键存在但取值为空」必须被拒（R13-B P1-1：上游会丢弃整份技能）', () => {
+    // YAML 空值 / null / ~ / 空串：上游 frontmatterBoolean 全部 throw，调用方 catch
+    // 后丢弃整份技能 —— 此前这里被当成「没声明」放过（三关全绿而模型永远看不到）。
+    for (const raw of ['', 'null', '~', '""']) {
+      const issues = precheckSkillPackage(md({ 'user-invocable': raw }), 'demo-skill')
+      const hit = issues.find((i) => i.code === PrecheckCode.InvocationInvalid)
+      expect(hit?.field, `user-invocable: ${raw}`).toBe('user-invocable')
+      expect(hit?.message, '文案必须说清后果与改法').toContain('整份技能')
+    }
+    // 同一个 frontmatterBoolean 读的另一个键同理。
+    expect(precheckSkillPackage(md({ 'disable-model-invocation': 'null' }), 'demo-skill')
+      .some((i) => i.code === PrecheckCode.InvocationInvalid)).toBe(true)
+  })
+
+  it('调用策略字符串不做 trim（与上游一致：带空白的字面量同样非法）', () => {
+    expect(precheckSkillPackage(md({ 'user-invocable': '" true "' }), 'demo-skill')
+      .some((i) => i.code === PrecheckCode.InvocationInvalid)).toBe(true)
+    expect(precheckSkillPackage(md({ 'user-invocable': '"TRUE"' }), 'demo-skill')).toEqual([])
+    expect(precheckSkillPackage(md({ 'user-invocable': '1' }), 'demo-skill')).toEqual([])
+    expect(precheckSkillPackage(md({ 'user-invocable': '2' }), 'demo-skill')
+      .some((i) => i.code === PrecheckCode.InvocationInvalid)).toBe(true)
+  })
+
   it('文法助手与服务端同规则', () => {
     expect(isAppId('dws')).toBe(true)
     expect(isAppId('a')).toBe(false)

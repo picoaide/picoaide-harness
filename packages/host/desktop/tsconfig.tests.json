@@ -1,7 +1,15 @@
 {
+  // 测试工程（`tsc -p tsconfig.tests.json --noEmit`，桌面包 package.json 的 typecheck:tests）。
+  //
+  // `rootDir` 取仓库根而不是包目录（2026-09-25，R14 lane G）：本工程的用例里有**跨包读源码**
+  // 的对拍（`tests/app-ai-hidden-session-id-persistence.spec.ts` 直接引
+  // `../../wasm-apps-host/src/ai-chat.ts`，因为那条判据必须在**源码**上跑 —— 走构建产物会
+  // 拿到旧 lib 而测出假绿）。`rootDir: "."` 会把这种 import 判成 TS6059（文件不在 rootDir 下）
+  // 而让整包 typecheck 变红；放宽到仓库根后这些被引用的源码**照样进类型检查**（覆盖面只增
+  // 不减）。注意 `include` 仍然是包内的 scripts/src/tests，不会把别的包整体拉进来。
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": ".",
+    "rootDir": "../..",
     "noEmit": true,
     "emitDeclarationOnly": false
   },

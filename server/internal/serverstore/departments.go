@@ -64,8 +64,18 @@ func ListDepartments(db *sql.DB) ([]DepartmentInfo, error) {
 }
 
 // GroupByID returns one group.
-func GroupByID(db *sql.DB, id int64) (*Group, error) {
-	row := db.QueryRow(`SELECT id, name, parent_id, leader_id, description FROM groups WHERE id = ?`, id)
+func GroupByID(db *sql.DB, id int64) (*Group, error) { return groupByIDQ(db, id) }
+
+// groupByIDQ 是 GroupByID 的**唯一一份语句实现**：q 可以是池句柄，也可以是
+// 调用方**已持有的**事务句柄。
+//
+// 为什么必须有 Q 形态（R14-K · D-01 同族）：`DeleteDepartment` 在 `db.Begin()`
+// 之后、同一个函数体里调用了本函数 —— 池上入口会在**持有一条事务连接**的同时
+// 再向池里要第二条连接（hold-and-wait）。池上限 = 并发数时自锁，且
+// `BeginTx(context.Background())` 无 deadline ⇒ 池不可恢复。持有事务时**只允许**
+// 走本形态。机械守卫：`audit_r14k_poolwait_test.go`。
+func groupByIDQ(q rowQuerier, id int64) (*Group, error) {
+	row := q.QueryRow(`SELECT id, name, parent_id, leader_id, description FROM groups WHERE id = ?`, id)
 	var g Group
 	err := row.Scan(&g.ID, &g.Name, &g.ParentID, &g.LeaderID, &g.Description)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -191,7 +201,10 @@ func DeleteDepartment(db *sql.DB, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	if g, err := GroupByID(db, id); err == nil && g.Name == EveryoneGroupName {
+	// R14-K（D-01 同族）：本函数已持有事务连接，保留名判定必须走**同一个**事务
+	// （groupByIDQ），不得用池上入口 GroupByID —— 后者会再向池要一条连接
+	// （hold-and-wait，池上限 = 并发数时自锁且不可恢复）。
+	if g, err := groupByIDQ(tx, id); err == nil && g.Name == EveryoneGroupName {
 		return ErrValidation // 保留名
 	}
 	// P2 后三张授权表合并为 app_grants:此处从「数三张表」收敛为一次统计

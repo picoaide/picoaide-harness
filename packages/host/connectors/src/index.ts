@@ -410,8 +410,37 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       : { username: currentUser(), serverURL: currentServerURL() },
   )
   const states = new Map<string, ConnectorState>()
-  /** Ids whose STORED credential currently carries a refresh token. */
+  /**
+   * Ids whose STORED credential currently carries a refresh token — i.e. exactly
+   * the fact behind the panel's "refresh now" affordance.
+   *
+   * Keyed by **(credential scope, connector id)**, the same account dimension
+   * `deadGrants` / `warnedDeclaredAuthorization` carry (2026-09-23 rule: a fact
+   * about "this account's credential file at this generation" must not be keyed
+   * by the connector alone). A credential read from account A's directory must
+   * never make account B's row look refreshable.
+   *
+   * Unlike those two terminal markers this one is a **pure projection of disk**
+   * (`noteCredential` is the only writer and `restoreAll` re-derives it from the
+   * new account's credentials), so it is ALSO cleared on every session switch —
+   * see {@link teardownAll}. Without that clear, a `noteCredential` from a write
+   * that was already in flight when the session moved on would leave the
+   * previous account's id behind for the whole of the next account's restore
+   * pass, and `canRefresh` would offer a refresh that reads an empty credential
+   * and answers `not-applicable` (R13-B-P2-4).
+   */
   const refreshable = new Set<string>()
+  /**
+   * ONE key constructor for the write and the read of {@link refreshable}.
+   *
+   * Split ownership is this repository's recurring defect shape (the judgement,
+   * the bookkeeping and the cleanup must agree on the key): `\u0000` cannot occur
+   * in a directory path, so scope and id can never be re-split ambiguously.
+   * @param scope - credential scope (`ConnectorStore.dir`) the credential came from.
+   * @param id - connector id.
+   * @returns the set key.
+   */
+  const refreshableKey = (scope: string, id: string): string => `${scope}\u0000${id}`
 
   /**
    * The refresh target of one connector: only the OAuth facts a refresh needs.
@@ -1243,6 +1272,18 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     pendingApprovals.clear()
     pendingFieldRequestKind.clear()
     states.clear()
+    // ...and the row projection that makes the panel offer "refresh now"
+    // (R13-B-P2-4). `restoreAll` re-derives it from the NEW account's
+    // credentials, so the next account starts from its own facts and never from
+    // the previous account's — a connector B never authorized must not look
+    // refreshable in the window before that restore pass finishes (and would
+    // only earn a `not-applicable` error when clicked).
+    //
+    // `deadGrants` and `warnedDeclaredAuthorization` deliberately survive this
+    // teardown: they are terminal facts about a scope-keyed credential file and
+    // are already keyed by `store.dir`, whereas this set is a pure projection of
+    // whatever is on disk right now (see `refreshable`'s own comment).
+    refreshable.clear()
     // A NEW controller for the tasks the new session enqueues: the signal above
     // must stay aborted for everything that captured it.
     teardownController = new AbortController()
@@ -1347,12 +1388,12 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     const refreshChanged = patch.refreshToken !== undefined && patch.refreshToken !== current?.refreshToken
     const clientChanged = patch.clientId !== undefined && patch.clientId !== current?.clientId
     if (!tokenChanged && !refreshChanged && !clientChanged) {
-      noteCredential(id, current)
+      noteCredential(target.dir, id, current)
       return current
     }
     const saved = await target.updateCredentialIfUnchanged(id, expected, patch)
     if (saved === null) return null
-    noteCredential(id, saved)
+    noteCredential(target.dir, id, saved)
     const token = saved.accessToken ?? ''
     if (token === '' || lastAnnouncedToken.get(id) === token) return saved
     lastAnnouncedToken.set(id, token)
@@ -1360,11 +1401,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return saved
   }
 
-  const noteCredential = (id: string, credential: ConnectorCredential | null): void => {
+  /**
+   * Mirror a credential's token facts onto {@link refreshable} and the row state.
+   *
+   * The **scope travels with the credential** (the caller passes the directory of
+   * the very store instance it read from): taking it from the module-level
+   * `store` here would key a credential read under account A against whichever
+   * account happens to be current by the time the await resolved.
+   * @param scope - credential scope (`ConnectorStore.dir`) of the credential.
+   * @param id - connector id.
+   * @param credential - the credential that was read, or null when there is none.
+   */
+  const noteCredential = (scope: string, id: string, credential: ConnectorCredential | null): void => {
     // Live set, so the list route can still report the manual-refresh
     // affordance while the row is idle (state is only written on transitions).
-    if (credential?.refreshToken === undefined) refreshable.delete(id)
-    else refreshable.add(id)
+    const key = refreshableKey(scope, id)
+    if (credential?.refreshToken === undefined) refreshable.delete(key)
+    else refreshable.add(key)
     setState(id, {
       expiresAt: credential?.expiresAt,
       refreshedAt: credential?.refreshedAt,
@@ -2220,9 +2273,45 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // conn-1: a logout/user switch that lands while this registration is
     // awaiting must not resurrect the previous user's MCP servers.
     if (superseded()) return { rejected: [], superseded: true }
+    // Scope and credential are read in the SAME synchronous step (no await
+    // between): the row projection below is keyed by the directory the
+    // credential came from, and taking the scope after the awaits of this entry
+    // window would key account A's credential against whichever account is
+    // current by then (2026-09-23 credential-scope rule).
+    const credentialScope = store.dir
     const credential = await store.readCredential(def.id)
+    // The generation this registration's snapshots belong to: the store's own
+    // write ordering (`updatedAt`), which is what `adoptLatestRefresh` compares
+    // too. `catchUpEntryCredential` below re-checks it before the snapshot is
+    // turned into a provider and a live-header record — a refresh landing in
+    // this entry window must not go on the wire as the replaced token.
+    let credentialGeneration = credential?.updatedAt ?? 0
+    /** The newest credential this registration knows of (entry snapshot first). */
+    let effectiveCredential = credential
+    /**
+     * Catch this registration up to a credential that landed AFTER its entry read.
+     *
+     * The entry snapshot is consumed much later: the stdio approval gate, the
+     * transport fence and the dynamic import of the MCP bridge are all awaited
+     * before the provider and the live-header record are built from it. A refresh
+     * landing anywhere in that window left both of them holding the **replaced**
+     * token; the record reached the wire on the handshake and cost an extra 401
+     * plus an extra refresh exchange, while the row stayed `connected` only
+     * because the SDK's 401 self-heal eventually adopted the new token (R13 V2
+     * item 7 CASE A — red on the unfixed tree).
+     *
+     * Deliberately synchronous: this closes the window rather than moving it, and
+     * `latestRefresh` is the same source `adoptLatestRefresh` uses, so "which
+     * generation is newest" has one answer on both paths.
+     */
+    const catchUpEntryCredential = (): void => {
+      const latest = latestRefresh.get(def.id)
+      if (latest === undefined || latest.updatedAt <= credentialGeneration) return
+      effectiveCredential = latest.credential
+      credentialGeneration = latest.updatedAt
+    }
     // Mirror the token facts onto the row (the panel's poll reads state only).
-    noteCredential(def.id, credential)
+    noteCredential(credentialScope, def.id, credential)
     if (superseded()) return { rejected: [], superseded: true }
     const rejected: string[] = []
     const stdioServers = targets.filter(server => (server.transport ?? 'stdio') === 'stdio')
@@ -2275,13 +2364,17 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         rejected.push(copy('flow.fenceUnavailable', { serverName: server.serverName, error: httpFenceError }))
         continue
       }
+      // ...but first catch up to a credential that landed during the entry
+      // window above (R13 V2 item 7): everything below is built from the
+      // snapshot, and the snapshot must be the newest one we know of.
+      catchUpEntryCredential()
       // Resolve the provider BEFORE the superseded check below (the discovery
       // round trip is one of the awaited windows that check exists for), but do
       // NOT install its handle yet: installation waits until the transport has
       // actually loaded, so a superseded registration — or one whose plugin
       // fails to load — cannot clobber the handle that is really in use.
       const auth = server.transport === 'streamable-http'
-        ? await mcpAuthProvider(def, credential)
+        ? await mcpAuthProvider(def, effectiveCredential)
         : {}
       // A live OAuth provider owns the bearer IT writes: the SDK writes the
       // provider's token and then spreads these headers over it, so the copy we
@@ -2301,7 +2394,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // later credential change can be applied in place, with no rebuild
       // (R9-D-1). For every other shape it is the registration-time snapshot it
       // has always been.
-      const renderedHeaders = renderTransportHeaders(server, credential, providerSuppliesAuthorization)
+      const renderedHeaders = renderTransportHeaders(server, effectiveCredential, providerSuppliesAuthorization)
       warnOnHeaderDeclarations(def, server, renderedHeaders, providerSuppliesAuthorization)
       // Publish this registration's live record to the "attached but not yet
       // registered" source (R11-B-01). Called twice: at attach below, and again
@@ -2346,7 +2439,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             serverName: server.serverName,
             command: server.command ?? '',
             args: server.args ?? [],
-            env: buildStdioEnv(def, server, credential).env,
+            env: buildStdioEnv(def, server, effectiveCredential).env,
             cwd: process.cwd(),
             toolCallTimeoutMs: MCP_TOOL_CALL_TIMEOUT_MS,
             failOnStartupError: false,
@@ -2441,7 +2534,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // plugin was loading cannot slip between install and adopt.
       if (auth.handle !== undefined) {
         installLiveProvider(def.id, server.serverName, auth.handle)
-        adoptLatestRefresh(def.id, auth.handle, credential)
+        adoptLatestRefresh(def.id, auth.handle, effectiveCredential)
       }
       // P2-23 kept: the map holds at most one registration per server key, so
       // the fiber recorded here is the only live instance for that name — and
@@ -2869,8 +2962,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     )
     await store.clearCredential(id)
     // The card renders "有效期至 …" from these facts: a disconnected connector
-    // must not keep advertising the token it no longer has.
-    refreshable.delete(id)
+    // must not keep advertising the token it no longer has. Keyed the same way
+    // the entry was written: the credential just removed came from THIS store.
+    refreshable.delete(refreshableKey(store.dir, id))
     lastAnnouncedToken.delete(id)
     // No credential and no live transports remain (unregisterMcp dropped their
     // handles): the cached refresh result must not be adopted by a later
@@ -2929,7 +3023,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         const scope = target.dir
         const credential = await target.readCredential(def.id)
         if (stale()) return
-        noteCredential(def.id, credential)
+        noteCredential(scope, def.id, credential)
         if (!credential) {
           // No credential for THIS (account, server): clear the token facts the
           // previous scope left on the row (states survive a session change; the
@@ -3175,6 +3269,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
 
   ctx.effect(() => {
     const list: JsonHandler = (_req, res) => {
+      // The scope this response speaks for: the store the credentials on disk
+      // belong to. Read once so every row of one response is judged under the
+      // same key (a session switch cannot land mid-render — this handler is
+      // synchronous — but the key must not be re-derived per row either).
+      const scope = store.dir
       const body = defs.map((def) => {
         const state = states.get(def.id) ?? { status: 'disconnected' as const, everConnected: false }
         return {
@@ -3190,7 +3289,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           // so a slow disk never delays the panel's 2s poll.
           expiresAt: state.expiresAt ?? null,
           refreshedAt: state.refreshedAt ?? null,
-          canRefresh: (refreshable.has(def.id) || state.refreshToken === true) && oauthTargetOf(def) !== null,
+          canRefresh: (refreshable.has(refreshableKey(scope, def.id)) || state.refreshToken === true) && oauthTargetOf(def) !== null,
           refreshing: tokenRefresher.isRefreshing(def.id),
           ...state,
         }
@@ -3246,7 +3345,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           ...(terminal ? { errorCode: 'auth-required' as const } : {}),
         })
       }
-      noteCredential(id, await store.readCredential(id))
+      noteCredential(scope, id, await store.readCredential(id))
       setState(id, { status: 'connected', everConnected: true, error: undefined, errorCode: undefined })
       json(res, 200, { ok: true, expiresAt: outcome.tokens.expiresAt })
     }

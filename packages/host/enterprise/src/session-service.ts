@@ -2,6 +2,8 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { subscribeSessionChanges } from '@picoaide/dsh-host-locale/session-events'
+import { SESSION_CHANGED_EVENT } from '@picoaide/dsh-host-locale/session-events'
 import type { Session } from './server-connector/config.ts'
 import { loadElectronModule } from './server-connector/electron.ts'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
@@ -26,7 +28,7 @@ export function defaultTokenFile(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /** Cordis event emitted whenever the session is set, restored, or cleared. */
-export const SESSION_CHANGED_EVENT = 'pico/session-changed'
+export { SESSION_CHANGED_EVENT } from '@picoaide/dsh-host-locale/session-events'
 
 /**
  * 订阅会话变更，并**补发启动时那一次**。
@@ -45,6 +47,12 @@ export const SESSION_CHANGED_EVENT = 'pico/session-changed'
  * 判据用现成的 `isRestored()`：它在 `restore()` 的 `finally` 里置位，而事件是在那
  * 之前 `emit` 的。所以 `isRestored() === false` ⇒ 那次 emit 还没发生（后续必然收到），
  * `=== true` ⇒ 已经错过（这里立即补一次）。两个方向都不重不漏。
+ *
+ * 2026-09-24（R13）：顺序与判据的实现已收口到零依赖叶子包
+ * `@picoaide/dsh-host-locale/session-events` 的 {@link subscribeSessionChanges} ——
+ * desktop（应用 AI 执行面）与 wasm-apps-host（窗口/缓存作用域）不可能 import 本包
+ * （它们在构建图上游），此前各自抄了一份，而"抄一份"正是本仓反复出现的失效形态。
+ * 本函数保留原签名，只是把它交给那一份实现。
  * @param ctx - 宿主插件上下文（需注入 `picoSession`）。
  * @param listener - 收到会话（或 null）时的回调。
  * @returns 取消订阅的函数。
@@ -53,11 +61,7 @@ export function subscribeSession(
   ctx: Context,
   listener: (session: Session | null) => void,
 ): () => void {
-  const off = ctx.on(SESSION_CHANGED_EVENT, listener)
-  // 补发只针对"恢复完成"那一刻的状态；此刻 session 可能是 null（没有持久化会话），
-  // 那也是消费方必须知道的状态（等于"未登录"），与事件语义一致。
-  if (ctx.picoSession.isRestored()) listener(ctx.picoSession.getSession())
-  return off
+  return subscribeSessionChanges(ctx, listener)
 }
 
 declare module '@deepseek-ai/cordis' {

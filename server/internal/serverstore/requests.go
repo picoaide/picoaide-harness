@@ -87,15 +87,24 @@ func ListUsageRequests(db *sql.DB, from, to time.Time, username, model, kind str
 		cond = " WHERE " + strings.Join(where, " AND ")
 	}
 
+	// R13-GE（V2-2 读面收口）：用量明细分页读是族内读面，池上入口走已钉
+	// search_path 的只读事务（唯一实现 usageReadConn）—— 计数与分页两条语句
+	// 必须在**同一个**已钉事务里读，否则两个数字可能来自两个库。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+
 	var total int64
-	if err := db.QueryRow(`SELECT COUNT(*) FROM usage u`+cond, args...).Scan(&total); err != nil {
+	if err := rd.QueryRow(`SELECT COUNT(*) FROM usage u`+cond, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	qargs := make([]any, 0, len(args)+2)
 	qargs = append(qargs, args...)
 	qargs = append(qargs, size, (page-1)*size)
-	rows, err := db.Query(`SELECT u.id, u.created_at, u.user_id, u.model, u.kind,
+	rows, err := rd.Query(`SELECT u.id, u.created_at, u.user_id, u.model, u.kind,
 		u.prompt_tokens, u.completion_tokens, u.cache_prompt_tokens, u.cost, u.estimated,
 		COALESCE(us.username, '')
 		FROM usage u LEFT JOIN users us ON us.id = u.user_id`+cond+`

@@ -111,16 +111,27 @@ const SHOTS = flagValue('--shots') ?? SCRIPT_DIR
 const APP = flagValue('--app') ?? process.env.ELECTRON_SHOTS_APP ?? join(PACKAGE_ROOT, 'dist', 'linux-unpacked', 'dsh-plugin-desktop')
 const CDP = 9224
 
-/** 打印 SKIP 原因并以 77 退出("未验证任何东西"必须与 PASS/FAIL 可区分)。 */
-function skip(reason, hint) {
-  console.log(`SKIP: ${reason} —— 本次未验证任何东西`)
+/**
+ * SKIP 的**原因码闭集**（本用例允许打出的那几个）。
+ *
+ * 门禁（`scripts/check-integration-tests.mjs`）按它做双向对账：它的登记表里的 `skipReasons`
+ * 必须与这里逐字相等、每个原因码都必须有调用点、每个调用点都必须给登记过的原因码。
+ * 新增原因码要同时改这里与门禁的 `SKIP_REASON_CODES` —— "未登记的原因"不再是一张免检牌。
+ */
+const SKIP_REASONS = ['missing-app', 'missing-display', 'missing-server']
+
+/** 以 SKIP(77) 收尾的**唯一出口**（原因码必须登记在 SKIP_REASONS 里）。 */
+function skip(code, reason, hint) {
+  if (!SKIP_REASONS.includes(code)) throw new Error(`未登记的 SKIP 原因码: ${code}`)
+  if (!reason) throw new Error('SKIP 必须带可读的观测细节（否则聚合层只剩"跳过"两个字）')
+  console.log(`SKIP[${code}]: ${reason} —— 本次未验证任何东西`)
   if (hint !== undefined) console.log(`  处置: ${hint}`)
   process.exit(EXIT_SKIP)
 }
 
 // ── 前置探测 1:打包产物 ──────────────────────────────────────────────────────
 if (!existsSync(APP)) {
-  skip(`未找到打包产物: ${APP}`,
+  skip('missing-app', `未找到打包产物: ${APP}`,
     '先构建: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild（或用 --app / ELECTRON_SHOTS_APP 指向已有产物）')
 }
 
@@ -130,7 +141,7 @@ if (process.platform === 'linux') {
   const screen = /^:(\d+)/u.exec(DISPLAY)?.[1]
   const socket = screen === undefined ? undefined : `/tmp/.X11-unix/X${screen}`
   if (socket === undefined || !existsSync(socket)) {
-    skip(`没有可用的 X 显示（DISPLAY=${DISPLAY}，找不到 ${socket ?? 'X socket'}）`,
+    skip('missing-display', `没有可用的 X 显示（DISPLAY=${DISPLAY}，找不到 ${socket ?? 'X socket'}）`,
       '起一个: Xvfb :99 -screen 0 1440x900x24 &（或用 --display 指向已存在的显示）')
   }
 }
@@ -147,7 +158,8 @@ if (process.platform === 'linux') {
     detail = error?.message ?? String(error)
   }
   if (!ok) {
-    skip(`服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`, '起服务端或用 --server 指向正确的地址')
+    skip('missing-server', `服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`,
+      '起服务端或用 --server 指向正确的地址')
   }
 }
 

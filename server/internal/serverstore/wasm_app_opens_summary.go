@@ -340,15 +340,24 @@ func QueryWasmAppAIUsage(ctx context.Context, db *sql.DB, appID string, from, to
 	startAt := LocalDay(from).UTC()
 	endAt := LocalDay(to).AddDate(0, 0, 1).UTC()
 
+	// R13-GE（V2-2 读面收口）：应用 AI 用量读的是族内关系 usage ⇒ 池上读入口走
+	// 已钉 search_path 的只读事务（唯一实现 usageReadConn，带 ctx 形态）；归因探针
+	// 与日聚合两条语句必须在**同一个**已钉事务里读。
+	rd, err := newUsageReadConnContext(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+
 	// 归因是否已启用：只要窗口里存在**任何**非空 app_id 行，就说明客户端已经在带
 	// 归因头（此时本应用为 0 = 真的没调用）。
-	if err := db.QueryRowContext(ctx,
+	if err := rd.QueryRow(
 		`SELECT EXISTS (SELECT 1 FROM usage WHERE app_id <> '' AND created_at >= $1 AND created_at < $2)`,
 		startAt, endAt).Scan(&out.AttributionAvailable); err != nil {
 		return nil, fmt.Errorf("查归因可用性: %w", err)
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := rd.Query(`
 		SELECT (created_at AT TIME ZONE $4)::date::text AS day,
 		       count(*), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		       COALESCE(SUM(cache_prompt_tokens),0), COALESCE(SUM(cost),0)

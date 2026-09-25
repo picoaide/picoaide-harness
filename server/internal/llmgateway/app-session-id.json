@@ -1,0 +1,160 @@
+{
+  "schema": "picoaide-app-session-id/1",
+  "prefix": "app:",
+  "scope_separator": "#",
+  "app_id_pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+  "app_id_max_length": 63,
+  "session_id_header": "x-deepseek-harness-session-id",
+  "legacy_form": "app:<app_id>",
+  "scope_encoding": "A-Za-z0-9_- verbatim, every other code point as ~<UPPER-HEX>~; the account scope is <encoded-user>[@<sha256(server_url)[:32]>]",
+  "build_cases": [
+    {
+      "user": "alice",
+      "server_url": "https://harness.example.com",
+      "app_id": "demo",
+      "session_id": "app:demo#alice@4a54f91a306086cb9240010905674512"
+    },
+    {
+      "user": "bob",
+      "server_url": "https://harness.example.com",
+      "app_id": "demo",
+      "session_id": "app:demo#bob@4a54f91a306086cb9240010905674512"
+    },
+    {
+      "user": "alice@example.com",
+      "server_url": "https://harness.example.com",
+      "app_id": "my-notes",
+      "session_id": "app:my-notes#alice~40~example~2E~com@4a54f91a306086cb9240010905674512"
+    },
+    {
+      "user": "alice",
+      "server_url": "https://harness.example.com/",
+      "app_id": "demo",
+      "session_id": "app:demo#alice@4a54f91a306086cb9240010905674512"
+    },
+    {
+      "user": "alice",
+      "server_url": "https://second.example.com",
+      "app_id": "demo",
+      "session_id": "app:demo#alice@f9e0ff7f77434c9c30ed47f173aa3a3a"
+    },
+    {
+      "user": "张伟",
+      "server_url": "https://harness.example.com",
+      "app_id": "demo",
+      "session_id": "app:demo#~5F20~~4F1F~@4a54f91a306086cb9240010905674512"
+    }
+  ],
+  "parse_cases": [
+    {
+      "session_id": "app:demo#alice@4a54f91a306086cb9240010905674512",
+      "app_id": "demo",
+      "note": "当前形态：应用 + 账号作用域（账号 + 服务端哈希）"
+    },
+    {
+      "session_id": "app:my-notes#bob",
+      "app_id": "my-notes",
+      "note": "只带账号（取不到服务端地址时的退化形态，仍带账号维度）"
+    },
+    {
+      "session_id": "app:demo#",
+      "app_id": "demo",
+      "note": "空作用域：本仓不会构造，但前缀 + 合法 app_id 仍可归因"
+    },
+    {
+      "session_id": "app:demo",
+      "app_id": "demo",
+      "note": "历史形态（无账号维度）：历史会话与旧客户端仍归因到同一应用"
+    },
+    {
+      "session_id": "app:notes#alice#extra",
+      "app_id": "notes",
+      "note": "作用域里再出现分隔符：取第一个分隔符之前的部分"
+    },
+    {
+      "session_id": "app:demo#alice@4a54f91a306086cb9240010905674512#tail",
+      "app_id": "demo",
+      "note": "多分隔符：同上"
+    },
+    {
+      "session_id": "app:a1",
+      "app_id": "a1",
+      "note": "单段最长 63 字符里的短形态"
+    },
+    {
+      "session_id": "app:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "app_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "app_id 恰为 63 字符（上限内）"
+    },
+    {
+      "session_id": "app:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "app_id": "",
+      "note": "app_id 64 字符：超上限 ⇒ 无归因"
+    },
+    {
+      "session_id": "session-12",
+      "app_id": "",
+      "note": "普通会话：不是应用会话 ⇒ 无归因（非会话链路不得归因）"
+    },
+    {
+      "session_id": "",
+      "app_id": "",
+      "note": "空会话 id ⇒ 无归因"
+    },
+    {
+      "session_id": "app:",
+      "app_id": "",
+      "note": "空 app_id ⇒ 无归因"
+    },
+    {
+      "session_id": "app:Demo",
+      "app_id": "",
+      "note": "大写不合法（app_id 一律小写）"
+    },
+    {
+      "session_id": "app:a--b",
+      "app_id": "",
+      "note": "连续连字符不合法"
+    },
+    {
+      "session_id": "app:-x",
+      "app_id": "",
+      "note": "首连字符不合法"
+    },
+    {
+      "session_id": "app:x-",
+      "app_id": "",
+      "note": "末连字符不合法"
+    },
+    {
+      "session_id": "app:notes/../etc",
+      "app_id": "",
+      "note": "路径注入形态"
+    },
+    {
+      "session_id": "app:notes.example",
+      "app_id": "",
+      "note": "点号不合法（app_id 是单段域名标签）"
+    },
+    {
+      "session_id": "app:notes_1",
+      "app_id": "",
+      "note": "下划线不合法"
+    },
+    {
+      "session_id": " app:demo",
+      "app_id": "",
+      "note": "前缀必须逐字在开头（带前导空白不算）"
+    },
+    {
+      "session_id": "x-app:demo",
+      "app_id": "",
+      "note": "前缀必须逐字在开头（前面有别的字符不算）"
+    },
+    {
+      "session_id": "APP:demo",
+      "app_id": "",
+      "note": "前缀大小写敏感"
+    }
+  ]
+}

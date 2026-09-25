@@ -117,7 +117,13 @@ export const WORKSPACE_PACKAGES: readonly WorkspacePackage[] = [
   // 3) 客户端专属 WASM 应用 origin：`electron-adapter.ts` 值导入
   //    `@picoaide/dsh-browser/guard` ⇒ 必须排在 browser 之后、desktop 之前
   //    （desktop 的 main.ts/app-ai-runner.ts 静态 import 它）。
-  { workspace: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', deps: ['packages/host/browser'] },
+  // 2026-09-24：`src/session.ts` 的订阅契约收口到叶子包（`session-events` 子路径）
+  // ⇒ 它也是 wasm-apps-host 的构建输入。
+  {
+    workspace: '@picoaide/dsh-wasm-apps-host',
+    dir: 'packages/host/wasm-apps-host',
+    deps: ['packages/host/browser', 'packages/host/host-locale'],
+  },
   // 4) desktop：读叶子包与 wasm-apps-host 的 lib/types，产出全仓共用的
   //    lib/types + build/。
   {

@@ -202,7 +202,12 @@ func usageMonthHasDetail(db *sql.DB, month time.Time) (bool, error) {
 	start := dayKey(BeijingMonth(month))
 	end := start.AddDate(0, 1, 0)
 	var one int
-	err := db.QueryRow(`SELECT 1 FROM usage
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚（R13-GE：族内读面唯一实现）
+	err = rd.QueryRow(`SELECT 1 FROM usage
 	                     WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
 	                     LIMIT 1`,
 		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end))).Scan(&one)
@@ -2714,11 +2719,13 @@ func applyUsageRetentionBudget(tx usageExecer, lockTimeoutMS, statementTimeoutMS
 // R12-N2 P1-02）：整个计量—结算—清理—余额链路的事务都执行这一句。写成常量是为了让
 // "同一份语义只有一处字面量"可被机械核对（两处各写一遍会再次分叉）。
 //
-// R12-N2（P1-02）：**唯一实现**是下面这一对函数（`pinUsageSearchPath` 给已有事务、
-// `withUsageSearchPath` 给池上入口）—— 调用点**只允许**通过它们钉，不允许再把
+// R12-N2（P1-02）：**唯一实现**是下面这一族函数（`pinUsageSearchPath` 给已有事务、
+// `withUsageSearchPath` 给池上写入口、`usageReadConn` / `withUsageSearchPathRead`
+// 给池上**读**入口）—— 调用点**只允许**通过它们钉，不允许再把
 // 这句字面量抄到别处（抄一份就多一个"只钉了 3 个调用点"的机会，R12-A P1-02 实测
-// 计量/结算/清理链路上还有 4 条同族面没钉）。完整清单与分类见
-// `audit_r12_n2_searchpath_test.go`（机械守卫：新增触碰本族关系的函数必须登记）。
+// 计量/结算/清理链路上还有 4 条同族面没钉；R13 的 V2-2 实测**读面**同样没钉）。
+// 完整清单与分类见 `audit_r12_n2_searchpath_test.go`（机械守卫：新增触碰本族关系的
+// 函数必须登记，且**没有"读面已认账"这一档**——读面同样必须钉）。
 // **为什么只写 `public` 而不写 `pg_catalog, public`**（R12-N2 P1-02 的实测发现）：
 // PostgreSQL 的规则是"`pg_catalog` 若**未显式命名**，则隐式排在 search_path 的**最前**"
 // —— 所以只写 `public` 时，函数/操作符/类型的解析顺序仍然是 `pg_catalog` 优先（R11A-02
@@ -2747,45 +2754,196 @@ func pinUsageSearchPath(tx usageExecer) error {
 // 代价是一次 BEGIN/COMMIT 往返；本族关系的池上入口都是每条请求几次的量级，
 // 与"金额写错对象且没有任何错误面"相比这是可忽略的代价。
 func withUsageSearchPath(db *sql.DB, fn func(*sql.Tx) error) error {
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // 提交成功后回滚是 no-op
-	if err := pinUsageSearchPath(tx); err != nil {
-		return err
-	}
 	if err := fn(tx); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+// usageReadConn 是**族内读面的池上唯一入口**（R13-GE · V2-2 读面收口）：
+// 它把"读族内关系（usage / usage_daily / usage_monthly / models / gateway_providers /
+// gateway_files / balance_ledger / settings）"这件事固定成"在一个**已钉 search_path**
+// 的只读事务里读"。
+//
+// 为什么读面必须和写面一样钉（R12-A P1-02 / R13 的 V2-2）：写面从第十二轮起已经
+// 全部收口（六条写路径真 PG 实测全落 public），但**读面**仍是裸 `db.QueryRow` ⇒
+// 连接/角色/库级 search_path 前置了同名 shadow schema 时：
+//
+//	定价读 `SELECT … FROM models`     → 拿到 shadow 价目（真 PG 实测 in=1000/out=2000，
+//	                                     而 public 价目是 1.0/2.0）⇒ 结算金额按 shadow 价
+//	                                     落进 **public 行**（少收/多收都可能，`err=nil`）；
+//	报表读 `SELECT … FROM usage`      → 读到 shadow 的诱饵行（实测 777.00 vs public 1000.00）
+//	                                     ⇒ 管理端/员工端看到的金额与真实用量不是一个库。
+//
+// 这类缺陷的形态与写面完全同族：**判据硬钉 `public.`、动作走未限定名**，两条读路径
+// 都返回 `err=nil`，所有健康出口报绿。所以读面不允许再有第二份实现，也不允许在
+// 调用点各写一遍 `SET LOCAL`（那正是"只钉了 3 个调用点"的来源）。
+//
+// 为什么只读也要开事务：`SET LOCAL` 只在事务块里有意义（事务外是 no-op + WARNING），
+// 而受害者恰恰是池上入口。收尾用 `Rollback()`（只读事务没有需要提交的东西；与提交
+// 同价的一次往返，但不产生 WAL、不占事务快照直到提交）。
+//
+// 关闭顺序约定：调用方先 `defer rd.Close()`，再对每个 `Query` 结果 `defer rows.Close()`
+// —— defer 是后进先出，所以 rows 一定先关、事务后结束（顺序反了会让 Rollback 等
+// 未读完的语句）。
+type usageReadConn struct{ tx *sql.Tx }
+
+// newUsageReadConn 开出唯一实现（唯一构造点，不允许在别处再写 BEGIN + SET LOCAL）。
+func newUsageReadConn(db *sql.DB) (*usageReadConn, error) {
+	return newUsageReadConnContext(context.Background(), db)
+}
+
+// newUsageReadConnContext 是带 ctx 的形态（调用方自己有取消/超时预算时用）。
+func newUsageReadConnContext(ctx context.Context, db *sql.DB) (*usageReadConn, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := pinUsageSearchPath(tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &usageReadConn{tx: tx}, nil
+}
+
+// usageWriteTx 开一个**已钉 search_path** 的写事务并把句柄交给调用方（唯一实现）：
+// 与 withUsageSearchPath 共用同一个 pin 原语，只是提交由调用方自己掌控。
+// 它是"这个函数体很长、有多条分支与早起返回，包成闭包不划算"时的形态 ——
+// 调用点只允许把 `db.Begin()` 换成 `usageWriteTx(db)`，不允许再写 `db.Begin()` +
+// 自己在事务里跑族内关系的语句（那样就是又一个"只钉了几个调用点"）。
+func usageWriteTx(db *sql.DB) (*sql.Tx, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	if err := pinUsageSearchPath(tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// QueryRow 与 Query 是族内读面唯一的两个语句入口（签名与 `*sql.DB` 一致，
+// 让调用点只需把接收者从 `db` 换成 `rd`，不引入第二套调用形态）。
+func (c *usageReadConn) QueryRow(query string, args ...any) *sql.Row {
+	return c.tx.QueryRow(query, args...)
+}
+
+func (c *usageReadConn) Query(query string, args ...any) (*sql.Rows, error) {
+	return c.tx.Query(query, args...)
+}
+
+// Close 结束只读事务。只读 ⇒ 回滚即完成，错误没有语义（连接已坏时下次取连接自会失败）。
+func (c *usageReadConn) Close() error {
+	if c == nil || c.tx == nil {
+		return nil
+	}
+	return c.tx.Rollback()
+}
+
+// ---------------------------------------------------------------------------
+// R13-GH3：本族 pin 的**跨包接缝**（唯一实现的导出别名）
+// ---------------------------------------------------------------------------
+//
+// 为什么需要导出：`internal/llmgateway` 也读同一批族内关系（模型目录、上游路由与
+// 密钥、provider 的模型配置快照），而它原先用的是**裸池 + 未限定名** ——
+// 连接/角色/库级 search_path 前置同名 shadow schema 时：
+//
+//	`SELECT … FROM models m JOIN gateway_providers p …`（ListModels）→ 客户端目录
+//	  里出现 shadow 的诱饵模型；
+//	`SELECT id, name, base_url, api_key_enc … FROM gateway_providers …`
+//	  （loadUpstreamsDB）→ **上游路由与密钥**读自 shadow（静默改路由）；
+//	`SELECT … FROM models WHERE provider_id = ?`（providerModelConfigSnapshot）→
+//	  审计基线与"该 provider 还有没有模型"的守卫都读 shadow。
+//
+// 修法口径与包内一致：**不允许在包外再写一份 BEGIN + `SET LOCAL`**，也不允许
+// 包外自己 `db.Begin()` 开一个会碰族内关系的事务 —— 只允许经下面这几个导出名
+// （它们是上面同一批实现的别名，不是第二份实现）。机械守卫
+// `audit_r13gh3_searchpath_serverface_test.go` 会扫整个 `server/` 核对这一条。
+//
+// 方向说明：依赖方向是 `llmgateway → serverstore`（llmgateway 早已 import
+// serverstore 取 GatewayProvider / AuditLogTx 等），所以接缝只能开在 serverstore
+// 这一侧；反向（serverstore import llmgateway）会成环，这也是"不要各写一份判定"
+// 的结构性理由。
+func UsageWriteTx(db *sql.DB) (*sql.Tx, error) { return usageWriteTx(db) }
+
+// WithUsageSearchPath 是 withUsageSearchPath 的导出别名（池上写入口）。
+func WithUsageSearchPath(db *sql.DB, fn func(*sql.Tx) error) error {
+	return withUsageSearchPath(db, fn)
+}
+
+// WithUsageSearchPathRead 是 withUsageSearchPathRead 的导出别名（池上读入口）。
+func WithUsageSearchPathRead(db *sql.DB, fn func(*sql.Tx) error) error {
+	return withUsageSearchPathRead(db, fn)
+}
+
+// UsageReadConn 是 usageReadConn 的导出别名（同一类型，不是第二份实现）：
+// 让包外调用点也能用 `QueryRow`/`Query` 形态逐条读族内关系。
+type UsageReadConn = usageReadConn
+
+// NewUsageReadConn 是 newUsageReadConn 的导出别名。
+func NewUsageReadConn(db *sql.DB) (*UsageReadConn, error) { return newUsageReadConn(db) }
+
+// withUsageSearchPathRead 是 usageReadConn 的闭包形态（同一实现的第二个门面，
+// 给"body 里只有一两条读语句"的调用点用；两者共用 newUsageReadConn，不存在第二份
+// BEGIN + `SET LOCAL` 字面量）。
+func withUsageSearchPathRead(db *sql.DB, fn func(*sql.Tx) error) error {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return fn(rd.tx)
+}
+
 // setUsageRetentionStatementBudget 给清理的**临界区**事务装上有界语义
 // （等锁上界 + 单语句时长上界 + 计划期裁剪 + search_path 与判据同源）。
+//
+// R13-GE（V2-6）：这里的**单语句**预算只允许取 `usageReclaimStatementBudgetMS`。
+// 旧实现取的是 `usageReclaimFreezeBudgetMS` —— 同一个 `var` 既是冻结段整段的 ctx
+// deadline，又被当成段内 `statement_timeout` ⇒ 两个语义被一个旋钮绑死：
+// 为慢月放大段预算会顺带把单语句上界一起放大；把它调小做测试时也会同时收紧
+// 语句预算（V2 的 F1(a) 实测：把段预算设成 1234 ⇒ 段内
+// `statement_timeout="1234ms"`，真实预算被压缩 16 倍）。
 func setUsageRetentionStatementBudget(tx usageExecer) error {
-	return applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, usageReclaimFreezeBudgetMS)
+	return applyUsageRetentionBudget(tx, usageReclaimLockTimeoutMS, usageReclaimStatementBudgetMS)
 }
 
 // usageReclaimRollbackBudgetMS 是"回滚一条清理事务"的时长上界（毫秒）。
 // 回滚是空语句级的工作，给 5s 只是为了让"连接已经坏了"这件事尽快有结论。
 const usageReclaimRollbackBudgetMS = 5000
 
-// usageReclaimFreezeBudgetMS 是**冻结段整段（含 COMMIT）**的总上界（毫秒）。
+// usageReclaimFreezeCommitMarginMS 是冻结段预算里**留给提交期（COMMIT）**的余量
+// （毫秒；R13-GE · V2-6）。
 //
-// 取值与 usageReclaimStatementBudgetMS 同值（20s = 4 个 5s 有界等待之和），但它
-// 约束的是**另一件事**：`statement_timeout` 只罩"每一条语句"，而 COMMIT 属于
-// **提交期**处理 —— 真 PG 实测（`SET LOCAL statement_timeout='1000ms'` + 提交期
-// 执行 5s 的 DEFERRABLE 约束触发器）⇒ `Time: 5012/5463/5008 ms`、`rows_committed=1`。
-// 也就是说 20s 的"每语句上界"根本不是"这一段持锁时长的上界"（R11A-03）。现在它
-// 同时是 `usageBoundedTx` 的 ctx deadline ⇒ 到点连 COMMIT 一起中止。
+// 为什么段预算必须**严格大于**单语句预算：`statement_timeout` 只罩"每一条语句"，
+// 而 COMMIT 属于**提交期**处理 —— 真 PG 实测（`SET LOCAL statement_timeout='1000ms'`
+// + 提交期执行 5s 的 DEFERRABLE 约束触发器）⇒ `Time: 5012/5463/5008 ms`、
+// `rows_committed=1`。也就是说"每语句上界"根本不是"这一段持锁时长的上界"
+// （R11A-03）。段预算 = 单语句预算 + 本余量，这样①单语句仍然被严上界罩住、
+// ②段（含 COMMIT）另有独立上界、③两个旋钮互不牵连。
+const usageReclaimFreezeCommitMarginMS = 5000
+
+// usageReclaimFreezeBudgetMS 是**冻结段整段（含 COMMIT）**的总上界（毫秒），
+// **只**作为 `usageBoundedTx` 的 ctx deadline；段内单语句上界是独立的
+// `usageReclaimStatementBudgetMS`（R13-GE · V2-6 把一变量两语义拆开）。
 //
 // 可变（var）**只为测试**：判据要能在真 PG 上把"COMMIT 挂起"注入进来才咬得到，
 // 而真 PG 里可靠、可控、不牵动整个集群的注入点（事件触发器把一次冻结段 DDL 接进
 // 提交期的 DEFERRABLE 约束触发器）要求判据能把这段预算缩到注入时长之下。
 // 生产装配从不写它；唯一写入点是本包测试的 t.Cleanup（与本文件既有的
 // `usageOwnershipProbeHook` / `cleanupDetachedStepHook` 同一约定）。
-var usageReclaimFreezeBudgetMS = usageReclaimStatementBudgetMS
+//
+// 序关系（由 TestAuditR13GEReclaimBudgetOrderingInvariants 钉住）：
+//
+//	usageReclaimLockTimeoutMS  <  usageReclaimStatementBudgetMS  <  usageReclaimFreezeBudgetMS
+//	usageReclaimFreezeBudgetMS + usageReclaimRollbackBudgetMS  <  usageRetentionSchedulerPeriod
+var usageReclaimFreezeBudgetMS = usageReclaimStatementBudgetMS + usageReclaimFreezeCommitMarginMS
 
 // usageBoundedTx 是清理临界区的**带 ctx 上界**的事务句柄（R11A-03）。
 //
@@ -3367,7 +3525,12 @@ func ledgerMonthHasRows(db *sql.DB, month time.Time) (bool, error) {
 	start := dayKey(BeijingMonth(month))
 	end := start.AddDate(0, 1, 0)
 	var one int
-	err := db.QueryRow(`SELECT 1 FROM usage_daily WHERE day >= ?::date AND day < ?::date LIMIT 1`,
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚（R13-GE：族内读面唯一实现）
+	err = rd.QueryRow(`SELECT 1 FROM usage_daily WHERE day >= ?::date AND day < ?::date LIMIT 1`,
 		start.Format(dateFmt), end.Format(dateFmt)).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -3394,7 +3557,12 @@ func ledgerWindowEmpty(db *sql.DB, from, to time.Time) (bool, error) {
 	}
 	q += " LIMIT 1"
 	var one int
-	err := db.QueryRow(q, args...).Scan(&one)
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚（R13-GE：族内读面唯一实现）
+	err = rd.QueryRow(q, args...).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}
@@ -3529,7 +3697,12 @@ func UsageAggregateFromLedger(db *sql.DB, from, to time.Time, group string, opts
 		args = append(args, q.Username)
 	}
 	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
-	rows, err := db.Query(qstr, args...)
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚（R13-GE：族内读面唯一实现）
+	rows, err := rd.Query(qstr, args...)
 	if err != nil {
 		return nil, err
 	}

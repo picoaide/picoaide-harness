@@ -57,11 +57,46 @@ const LIMITS = {
 /** 与上游 `@deepseek-ai/dsh-skill` 的 SKILL_NAME 逐字一致。 */
 const APP_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u
-const BOOLEAN_LITERALS = new Set(['true', 'yes', 'on', 'false', 'no', 'off', '1', '0'])
+/**
+ * 上游 `frontmatterBoolean` 接受的布尔**字符串**字面量（小写比较，**不 trim**）。
+ *
+ * **不要**把它当成"我们自己的规则"：它是从 pinned 上游实现里逐字取出来的，
+ * 由 `tests/skill-invocation-upstream-parity.spec.ts` **读上游源码**派生后对拍
+ * （上游加/减一个字面量 ⇒ 用例红）。R13-B P1-1 的教训正是"两端各钉自己的
+ * 字面量集合"，所以这里只留取值，判据与期望都在对拍用例里。
+ */
+export const INVOCATION_BOOLEAN_LITERALS: readonly string[] = ['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']
+const BOOLEAN_LITERALS = new Set(INVOCATION_BOOLEAN_LITERALS)
 const LEGACY_INVOCATION: Record<string, string> = {
   disableModelInvocation: 'disable-model-invocation',
   modelInvocable: 'disable-model-invocation',
   userInvocable: 'user-invocable',
+}
+
+/**
+ * `disable-model-invocation` / `user-invocable` 取值的判定结果。
+ * - `ok`：上游 `frontmatterBoolean` 接受；
+ * - `empty`：键**存在**但取值为空（YAML 空值 / `null` / `~` / 空串）——上游 **throw**；
+ * - `invalid`：其他任何取值（非法字符串、非 0/1 的数字、数组、映射）——上游同样 **throw**。
+ *
+ * 后两种在**产品后果上没有区别**（上游 `parseSkillFile` 的 catch 把整份技能
+ * 丢弃），分开只为给作者一条可行动的文案。判定逐条对齐 pinned 上游
+ * `skill-filesystem/src/index.ts` 的 `frontmatterBoolean`：
+ *   `boolean` → 用它；`1`/`'1'` → true；`0`/`'0'` → false；字符串只做
+ *   `toLowerCase()`（**不 trim**）后匹配 8 个字面量；其余一律 throw。
+ * @param raw - frontmatter 里该键的取值（调用方须先确认键存在）。
+ * @returns 判定结果（`ok` = 上游可加载）。
+ */
+export function invocationBooleanVerdict(raw: unknown): 'ok' | 'empty' | 'invalid' {
+  if (typeof raw === 'boolean') return 'ok'
+  if (typeof raw === 'number') return raw === 1 || raw === 0 ? 'ok' : 'invalid'
+  if (typeof raw === 'string') {
+    // 不 trim：上游对 `' true '` 一样抛错，trim 会让"装得上、加载不到"复现。
+    if (BOOLEAN_LITERALS.has(raw.toLowerCase())) return 'ok'
+    return raw.trim() === '' ? 'empty' : 'invalid'
+  }
+  if (raw === null || raw === undefined) return 'empty'
+  return 'invalid'
 }
 
 const runes = (s: string): number => [...s].length
@@ -105,6 +140,7 @@ interface PrecheckMessages {
   bodyTooShort: (min: number) => string
   legacyInvocation: (legacy: string, canonical: string) => string
   invocationNotBoolean: (key: string) => string
+  invocationEmpty: (key: string) => string
   provenanceForbidden: string
   provenanceDirForbidden: string
 }
@@ -173,7 +209,11 @@ function precheckMessages(locale: HostLocale): PrecheckMessages {
       { legacy, canonical },
     ),
     invocationNotBoolean: (key) => fill(
-      c('字段 {key} 必须是布尔值(true/false)', 'Field {key} must be a boolean (true/false)'),
+      c('字段 {key} 必须是布尔字面量(true/false、yes/no、on/off、1/0):其他取值会让运行时丢弃**整份技能**', 'Field {key} must be a boolean literal (true/false, yes/no, on/off, 1/0); any other value makes the runtime discard the whole skill'),
+      { key },
+    ),
+    invocationEmpty: (key) => fill(
+      c('字段 {key} 存在但取值为空:运行时会因此丢弃**整份技能**(装上了也永远加载不到)。请写 true/false(或 yes/no、on/off、1/0),或整行删掉', 'Field {key} is present but has an empty value, which makes the runtime discard the whole skill (installed but never loaded). Write true/false (or yes/no, on/off, 1/0), or remove the line'),
       { key },
     ),
     provenanceForbidden: c(
@@ -315,12 +355,17 @@ export function precheckSkillPackage(
     }
   }
   for (const key of ['disable-model-invocation', 'user-invocable']) {
-    const raw = data[key]
-    if (raw === undefined || raw === null || typeof raw === 'boolean') continue
-    const text = scalar(raw)
-    if (text === undefined || !BOOLEAN_LITERALS.has(text.trim().toLowerCase())) {
-      out.push(issue(PrecheckCode.InvocationInvalid, m.invocationNotBoolean(key), key))
-    }
+    // 键**存在**就必须是合法布尔字面量：`raw === null` 不是"没声明"，而是
+    // "声明成了空值" —— 上游 frontmatterBoolean 对它 throw，整份技能被丢弃
+    // （R13-B P1-1：客户端预检/服务端校验/安装器三关全绿而模型永远看不到）。
+    if (!Object.hasOwn(data, key)) continue
+    const verdict = invocationBooleanVerdict(data[key])
+    if (verdict === 'ok') continue
+    out.push(issue(
+      PrecheckCode.InvocationInvalid,
+      verdict === 'empty' ? m.invocationEmpty(key) : m.invocationNotBoolean(key),
+      key,
+    ))
   }
 
   const metadata = data.metadata

@@ -418,8 +418,10 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	}
 
 	// ⚠️ sessionKey 不再有消费者（它过去是 `ai.chat` 在手令牌的会话维度）：
-	// 服务端 AI 已删除，§21.4 的应用维度归因改由**客户端**在出站头
-	// `X-Pico-App-Id` 上承担。参数保留是因为 `ServeClientRequest` 把它作为
+	// 服务端 AI 已删除，§21.4 的应用维度归因改由**客户端 AI loop** 的会话链路承担
+	// （隐藏会话 id 的 `app:` 前缀 ⇒ 上游出站头 `x-deepseek-harness-session-id` ⇒
+	// 网关 `internal/llmgateway/app_session_id.go` 派生 `usage.app_id`；初版设计的自报头
+	// `X-Pico-App-Id` 发不出来也不再被采信）。参数保留是因为 `ServeClientRequest` 把它作为
 	// 契约 §8.2 的显式传参（登出/改密后的吊销回调已随 aichat 一起消失）。
 	_ = sessionKey
 	started := s.now()

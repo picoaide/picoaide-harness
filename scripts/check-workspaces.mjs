@@ -110,7 +110,10 @@ const GUARDS = [
   // 0.1.6-alpha.2），插件开发页声称平台模块表「与上游逐字一致」却只列了 8/9 项 —— 两处
   // 「文档引用真源数字」此前同样零守卫。这条把它们绑到 `upstream.json` 与
   // `scripts/platform-modules.mjs` 上（扫描器失效/空扫描一律 fail-loud）。
-  { name: 'check:doc-claims', args: ['run', 'check:doc-claims'], path: '文档里的上游 pin / 平台模块表 ↔ 真源' },
+  // 2026-09-25 第十三轮 GF §12 的收口：自述必须与真实覆盖面一致（F-04 的同族形态，方向相反）。
+  // 判据面早已是 6 项（pin / 平台模块表 / 保留版本数 / 首检延迟 / 检查周期 / 平台数），
+  // 而这条描述只写了前两项 —— "自我陈述窄于覆盖面"同样是漂移。
+  { name: 'check:doc-claims', args: ['run', 'check:doc-claims'], path: '文档里的硬数字（pin / 平台模块表 / 更新服务器保留版本数 / 客户端更新节奏 / 客户端平台数，共 6 项）↔ 代码真源' },
   // 2026-09-20 补上的那一环：本仓**公开**，「真实客户/部署域名永不出现」这条规则原先只有
   // 人工 `git grep`，而且规则条文自己把真实域名写进了示例 ⇒ 自检永远命中规则本身，等于没有
   // 守卫（历史提交信息里也真的进过客户域名与预发/生产主机名）。白名单式**前向**守卫：
@@ -128,7 +131,11 @@ const GUARDS = [
   // 契约、用伪造 cookie 的恒真"非 200"断言）。本守卫把可静态执行的那部分接进来：
   // python 语法、`--self-test` 判据夹具（每条判据都配负例）、以及**进程内假网关**驱动的
   // 正/反例（按真契约应答必须绿 / 破坏契约必须红 / provider 未配置必须 SKIP 且不得报 PASS）。
-  { name: 'check:integration-tests', args: ['run', 'check:integration-tests'], path: 'integration-tests/**（语法/判据自检/假网关正反例）' },
+  // 2026-09-25 第十三轮 V13-C 附加结论：这条守卫的绿**只覆盖静态面**（真机端到端要 Docker +
+  // 真实服务端 + 显示器，`.github/workflows/**` 对 integration-tests 零引用 ⇒ CI 内 0 执行）。
+  // 旧通过行（`check-integration-tests: OK`）会被读成"集成测试 OK"，所以 step 名/描述与通过行
+  // 都改成显式的 `static-only`，并由该守卫自己对拍 CI 命中数（0↔1 都红）。
+  { name: 'check:integration-tests', args: ['run', 'check:integration-tests'], path: 'integration-tests/**（**static-only**：语法/判据自检/假网关正反例；真机端到端在 CI 内 0 执行，命中数由该守卫对拍）' },
   // 2026-09-24 第十轮审计 C-06（P2，F1 泳道新增守卫；编排器侧登记由 F2 泳道同步）：
   // 第九轮把「守卫 → argv → 脚本路径」三者绑在一条链上，但**脚本内容本身仍无判据** ——
   // 把某个守卫的脚本内容掏空（`process.exit(0)`）或换成同名符号链接之后，
@@ -332,7 +339,10 @@ const PACKAGES = [
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
   // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
   // 分派）⇒ 构建期依赖 browser 的 lib/types，必须先于它产出。
-  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser'] },
+  // 2026-09-24（R13）：`src/session.ts` 的会话订阅收口到零依赖叶子包
+  // `@picoaide/dsh-host-locale/session-events` ⇒ 真实构建边多一条（叶子包无出边，
+  // 不会引入新的环；`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
+  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser', '@picoaide/dsh-host-locale'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级

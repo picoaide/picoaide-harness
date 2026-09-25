@@ -374,8 +374,10 @@ describe('真实工作区的声明面对拍（静态读取，不扫 lib/）', ()
     expect(entries).toContain('bin')
     expect(entries).toContain('preload/renderer-error')
     expect(entries).toContain('client')
-    // 单行对象字面量的 entry（host-locale 的 index/loopback）同样要读出来。
-    expect(tsdownEntryKeys(join(repoRoot, 'packages/host/host-locale'))).toEqual(['index', 'loopback'])
+    // 单行对象字面量的 entry（host-locale 的 index/loopback/session-events）同样要读出来。
+    // 2026-09-24：新增 `session-events`（`pico/session-changed` 订阅契约的唯一实现），
+    // 它**必须**同时出现在 exports 子路径与 tsdown entry 里（"声明了的入口就必须构建"）。
+    expect(tsdownEntryKeys(join(repoRoot, 'packages/host/host-locale'))).toEqual(['index', 'loopback', 'session-events'])
   })
 
   it('cron 的 ./src/* 通配不进判据（进则永远重建）', () => {

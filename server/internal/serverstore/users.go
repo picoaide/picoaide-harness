@@ -531,7 +531,9 @@ func nilIfZeroTime(t time.Time) any {
 // 「删即消失」的管理语义;如后续需要计费审计留存,应改为软删(users.status
 // 墓碑态 + usage 保留),本函数签名与调用方需同步调整。
 func DeleteUser(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
+	// R13-GE（V2-2）：本事务里带 `DELETE FROM usage WHERE user_id = ?`（族内关系）
+	// ⇒ 事务本身必须钉 search_path（否则删的是 shadow 的用量行，public 一行不动）。
+	tx, err := usageWriteTx(db)
 	if err != nil {
 		return err
 	}

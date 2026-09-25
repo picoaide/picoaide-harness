@@ -253,6 +253,11 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 所以各自的 `src/loopback.ts` re-export 不会被内联）。缺它就是**启动期**
   // ERR_MODULE_NOT_FOUND —— 正是本清单存在的理由，故逐条登记。
   'node_modules/@picoaide/dsh-host-locale/lib/loopback.js',
+  // 2026-09-24（R13）：`pico/session-changed` 的订阅契约收口到叶子包后，
+  // enterprise / wasm-apps-host / desktop 的 lib 都**运行期** import 这个子路径
+  // （`session-service.ts`、`session.ts`、`app-ai-runner.ts`）⇒ 与 loopback 同理，
+  // 缺它就是启动期 ERR_MODULE_NOT_FOUND（不是"某个插件不装配"）。
+  'node_modules/@picoaide/dsh-host-locale/lib/session-events.js',
   'node_modules/@picoaide/dsh-host-locale/package.json',
   'node_modules/@picoaide/dsh-host-home/lib/index.js',
   'node_modules/@picoaide/dsh-host-home/package.json',
@@ -1138,7 +1143,7 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   { package: 'dsh-enterprise', flattened: 0, effective: 14, library: 12 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
-  { package: 'dsh-host-locale', flattened: 3, effective: 3, library: 2 },
+  { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
   { package: 'dsh-wasm-apps', flattened: 5, effective: 5, library: 3 },
   { package: 'dsh-wasm-apps-host', flattened: 6, effective: 6, library: 4 },
 ]
@@ -1147,7 +1152,7 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 114
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 115
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。

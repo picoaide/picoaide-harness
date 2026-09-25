@@ -126,13 +126,25 @@ func SyncProvider(db *sql.DB, ch channels.Channel, p *serverstore.GatewayProvide
 	// 读失败时退化成空集合 ⇒ added 报成全量新增(仅计数偏差,不改库)。
 	// 判定:可接受 —— 为一次统计读失败而让整个 provider 同步失败,代价大于收益;
 	// 因此保留该降级,只把它记进日志以免静默。
+	//
+	// R13-GH3：这条基线读的是族内关系(`models`)⇒ 必须经唯一 pin 实现读
+	// （旧实现是裸池：shadow schema 在场时基线读自 shadow，Added 计数与真实目录
+	// 脱钩，而这里的降级路径让它更隐蔽）。读失败仍按原语义降级。
 	beforeSet := make(map[string]bool)
-	if before, err := syncedModelNames(db, p.ID); err == nil {
+	var beforeErr error
+	if err := serverstore.WithUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		before, err := syncedModelNames(tx, p.ID)
+		if err != nil {
+			return err
+		}
 		for _, n := range before {
 			beforeSet[n] = true
 		}
-	} else {
-		log.Printf("gateway sync: provider %d 同步前模型清单读取失败,Added 计数可能偏大: %v", p.ID, err)
+		return nil
+	}); err != nil {
+		beforeErr = err
+		beforeSet = make(map[string]bool)
+		log.Printf("gateway sync: provider %d 同步前模型清单读取失败,Added 计数可能偏大: %v", p.ID, beforeErr)
 	}
 	cl, mo := ch.DefaultModelCaps()
 	type caps struct {

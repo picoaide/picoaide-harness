@@ -101,8 +101,22 @@ func ParsePeakWindows(v string) []PeakWindow {
 }
 
 // loadPeakWindows 从 settings 读高峰窗口(每次记录时调用,单行查询开销可忽略)。
+//
+// R13-GE（V2-2 读面收口）：峰谷窗口直接乘进 cost（低谷折扣），与价目同属"计价
+// 输入" ⇒ 也必须与判据看同一个库。池上入口走已钉 search_path 的只读事务
+// （唯一实现 usageReadConn）。
 func loadPeakWindows(db *sql.DB) []PeakWindow {
-	v, ok, err := GetSetting(db, PeakWindowsSetting)
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return loadPeakWindowsQ(rd, db)
+}
+
+// loadPeakWindowsQ 是 loadPeakWindows 的语句实现（唯一一份解析逻辑）。
+func loadPeakWindowsQ(q rowQuerier, scope *sql.DB) []PeakWindow {
+	v, ok, err := getSettingQ(q, scope, PeakWindowsSetting)
 	if err != nil || !ok {
 		return nil
 	}
@@ -242,9 +256,12 @@ func recordUsageKindAtCached(db *sql.DB, userID, providerID int64, model string,
 	// P0-B:负 token 既不进费用也不落库(月用量/报表/对账都会被负数污染)。
 	promptTokens, completionTokens, cacheTokens = clampTokens(promptTokens, completionTokens, cacheTokens)
 	// P1-6:按实际命中的 provider 取价(providerID=0 时回退 name 口径)。
-	in, out, off := ModelPricesForProvider(db, providerID, model)
-	cacheIn := ModelCachePriceForProvider(db, providerID, model)
-	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	//
+	// R13-GE（V2-2 读面收口）：计价输入（价目 + 缓存价 + 峰谷窗口）在**一个已钉
+	// search_path 的只读事务**里读齐（唯一实现 loadModelPriceInputs）。旧实现是
+	// 四条裸池上读 ⇒ shadow 在场时取到 shadow 价目，却把金额落进 public 行。
+	pi := loadModelPriceInputs(db, providerID, model)
+	cost := costOfAt(now, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows)
 	// 分区写路径:确保 now 所属月份分区存在(幂等 CREATE TABLE IF NOT EXISTS)。
 	//
 	// R9-D R9D-00(P0):这一步失败 = **当月每一次对话**都会被网关 503 METERING_FAILED
@@ -349,9 +366,15 @@ func updateUsageTokensAtCached(db *sql.DB, id, promptTokens, completionTokens, c
 		billAt = t
 	}
 	// P1-6:回填也按该行绑定的 provider 取价(前端已 SetUsageProvider)。
-	in, out, off := ModelPricesForProvider(db, providerID, model)
-	cacheIn := ModelCachePriceForProvider(db, providerID, model)
-	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, in, out, cacheIn, off, loadPeakWindows(db))
+	//
+	// R14-K（D-01 · P0）：取价**必须在这个已钉事务里读**（loadModelPriceInputsQ），
+	// 不得调池上入口 loadModelPriceInputs —— 后者会在"本函数已持有 tx 连接"的同时
+	// 再向池里要一条连接（hold-and-wait）：池上限 = 并发数时全池自锁且不可恢复
+	// （真 PG 复现：池 2 / 并发 2 ⇒ 两个 goroutine 永久挂起；旧实现还让每次流式
+	// 回填的连接需求从"缓存命中 0 条额外连接"变成"恒定多 1 条"）。三类计价输入与
+	// usage 行同事务、同 pin，也保证金额与落账看同一个库（R13-GE · V2-2）。
+	pi := loadModelPriceInputsQ(tx, db, providerID, model)
+	cost := costOfAt(billAt, promptTokens, completionTokens, cacheTokens, pi.inputPer1M, pi.outputPer1M, pi.cachePer1M, pi.offpeak, pi.peakWindows)
 	// 锁住 usage 行:并发回填按行串行,避免同一行的差额被算两次。
 	if _, err := tx.Exec("SELECT id FROM usage WHERE id = ? FOR UPDATE", id); err != nil {
 		return err
@@ -413,8 +436,13 @@ func CleanupPendingUsage(db *sql.DB, cutoff time.Time) error {
 // 月窗口 = **北京月**(BeijingMonthInstant),与进程 TZ/PG 会话时区无关:
 // 旧实现按服务器本地月界,UTC 容器的"本月"会比北京晚 8 小时重置。
 func UserMonthlyUsage(db *sql.DB, userID int64) (int64, error) {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var total int64
-	err := db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)
+	err = rd.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0)
 		FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
 		userID, pgInstantArg(BeijingMonthInstant(time.Now()))).Scan(&total)
 	return total, err
@@ -429,7 +457,12 @@ func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error)
 	if len(userIDs) == 0 {
 		return out, nil
 	}
-	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(`SELECT user_id, COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0) AS t
 		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
 		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
 	if err != nil {
@@ -450,8 +483,13 @@ func UserMonthlyUsageBatch(db *sql.DB, userIDs []int64) (map[int64]int64, error)
 // calendar month (SUM of denormalized usage.cost, 0022). 月窗口同
 // UserMonthlyUsage(北京月界,与环境时区无关)。
 func UserMonthlyCost(db *sql.DB, userID int64) (float64, error) {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var total float64
-	err := db.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
+	err = rd.QueryRow(`SELECT COALESCE(SUM(cost),0) FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz`,
 		userID, pgInstantArg(BeijingMonthInstant(time.Now()))).Scan(&total)
 	return total, err
 }
@@ -464,7 +502,12 @@ func UserMonthlyCostBatch(db *sql.DB, userIDs []int64) (map[int64]float64, error
 		return out, nil
 	}
 	// P2-7:数组参数,见 UserMonthlyUsageBatch 注释。
-	rows, err := db.Query(`SELECT user_id, COALESCE(SUM(cost),0) AS c
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(`SELECT user_id, COALESCE(SUM(cost),0) AS c
 		FROM usage WHERE created_at >= ?::timestamptz AND user_id = ANY(?::bigint[]) GROUP BY user_id`,
 		pgInstantArg(BeijingMonthInstant(time.Now())), pgInt64Array(userIDs))
 	if err != nil {
@@ -694,7 +737,16 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 		args = append(args, pgInt64Array(deptGroupIDs))
 	}
 	qstr += " GROUP BY " + groupExpr + " ORDER BY label"
-	rows, err := db.Query(qstr, args...)
+	// R13-GE（V2-2 读面收口）：报表读是族内读面 —— 池上入口走已钉 search_path
+	// 的只读事务（唯一实现）。旧实现是裸 `db.Query` ⇒ shadow 在场时读到 shadow
+	// 的诱饵行（真 PG 实测 777.00 vs public 1000.00），管理端/员工端看到的金额
+	// 与真实用量不是一个库，而 `err=nil`。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(qstr, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +787,12 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 // 见 beijing.go),不再依赖进程 TZ。边界用绝对瞬时参数(显式 UTC 偏移),
 // 也不再依赖 PG 会话时区(2026-09-10 时区缺陷修复)。
 func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cost float64, err error) {
-	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	err = rd.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cost),0)
 		FROM usage WHERE user_id = ? AND created_at >= ?::timestamptz AND created_at < ?::timestamptz`,
 		userID, dayStartArg(day), dayEndArgInclusive(day)).Scan(&usage, &cost)
@@ -744,7 +801,12 @@ func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cos
 
 // UserTotalUsageCost 返回用户全历史 tokens 与费用(SUM(cost),无日期过滤)。
 func UserTotalUsageCost(db *sql.DB, userID int64) (usage int64, cost float64, err error) {
-	err = db.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	err = rd.QueryRow(`SELECT COALESCE(SUM(prompt_tokens),0) + COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(cost),0)
 		FROM usage WHERE user_id = ?`, userID).Scan(&usage, &cost)
 	return usage, cost, err

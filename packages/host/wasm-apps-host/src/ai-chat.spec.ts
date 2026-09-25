@@ -5,6 +5,7 @@
  * 必红；把 `parseAiChatRequest` 的未知字段检查去掉 ⇒ 严格校验用例必红。
  */
 import { describe, expect, it, vi } from 'vitest'
+import { serverPartitionHash } from './partition.ts'
 import {
   AI_CHAT_MAX_CONTENT_BYTES,
   AI_CHAT_MAX_MESSAGES,
@@ -15,8 +16,13 @@ import {
   parseAiChatRequest,
   sseFrame,
   type AiChatAuthorization,
+  type AiChatScope,
   type AiChatTurnRunner,
 } from './ai-chat.ts'
+
+/** 判据用的账号作用域（真编码在 `partition.ts`，这里只取它的形状）。 */
+const ALICE_SERVER = 'https://harness.example.com'
+const ALICE: AiChatScope = { userId: 'alice', serverURL: ALICE_SERVER }
 
 /** 授权记录替身。 */
 function authorizationOf(granted: boolean): AiChatAuthorization & { granted: Set<string> } {
@@ -57,7 +63,7 @@ async function framesOf(outcome: Awaited<ReturnType<typeof handleAiChat>>): Prom
 describe('frozen wire contract (§21.2)', () => {
   it('keeps the reserved path and the hidden session id', () => {
     expect(AI_CHAT_PATH).toBe('/__picoaide/ai/chat')
-    expect(hiddenSessionId('my-notes')).toBe('app:my-notes')
+    expect(hiddenSessionId(ALICE, 'my-notes')).toBe('app:my-notes#alice@' + serverPartitionHash(ALICE_SERVER))
   })
 
   it('rejects unknown fields, bad roles, oversize and empty payloads', () => {
@@ -88,7 +94,7 @@ describe('authorization gate (§21.1 Q9 / §21.6)', () => {
   it('refuses with 403 app_ai_denied and consumes no tokens', async () => {
     const runner = runnerOf()
     const outcome = await handleAiChat(
-      { authorization: authorizationOf(false), runner, userId: () => 'alice' },
+      { authorization: authorizationOf(false), runner, scope: () => ALICE },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }] }),
       new AbortController().signal,
@@ -102,7 +108,7 @@ describe('authorization gate (§21.1 Q9 / §21.6)', () => {
   it('serves after the user granted once, and revoking refuses again', async () => {
     const authorization = authorizationOf(false)
     const runner = runnerOf()
-    const deps = { authorization, runner, userId: () => 'alice' }
+    const deps = { authorization, runner, scope: () => ALICE }
     const request = body({ messages: [{ role: 'user', content: 'hi' }], stream: false })
     expect((await handleAiChat(deps, 'my-notes', request, new AbortController().signal)).kind).toBe('json')
     await authorization.grant('alice', 'my-notes')
@@ -110,12 +116,12 @@ describe('authorization gate (§21.1 Q9 / §21.6)', () => {
     expect(granted).toMatchObject({ kind: 'json', status: 200, body: { content: 'echo:hi' } })
     expect(runner.calls).toBe(1)
     await authorization.revoke('alice', 'my-notes')
-    await expect(gateAppAi(authorization, 'alice', 'my-notes')).resolves.toMatchObject({ ok: false, code: 'app_ai_denied' })
+    await expect(gateAppAi(authorization, ALICE, 'my-notes')).resolves.toMatchObject({ ok: false, code: 'app_ai_denied' })
   })
 
   it('reports a readable unavailable error instead of silently returning an empty answer', async () => {
     const outcome = await handleAiChat(
-      { authorization: authorizationOf(true), runner: undefined, userId: () => 'alice' },
+      { authorization: authorizationOf(true), runner: undefined, scope: () => ALICE },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }] }),
       new AbortController().signal,
@@ -128,7 +134,7 @@ describe('authorization gate (§21.1 Q9 / §21.6)', () => {
 describe('streaming and cancellation (§21.6)', () => {
   it('streams delta frames in order and closes with done', async () => {
     const outcome = await handleAiChat(
-      { authorization: authorizationOf(true), runner: runnerOf(), userId: () => 'alice' },
+      { authorization: authorizationOf(true), runner: runnerOf(), scope: () => ALICE },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }] }),
       new AbortController().signal,
@@ -150,12 +156,12 @@ describe('streaming and cancellation (§21.6)', () => {
       },
     }
     await handleAiChat(
-      { authorization: authorizationOf(true), runner, userId: () => 'alice' },
+      { authorization: authorizationOf(true), runner, scope: () => ALICE },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }], stream: false }),
       new AbortController().signal,
     )
-    expect(seen).toEqual([{ sessionId: 'app:my-notes', appId: 'my-notes', messages: [{ role: 'user', content: 'hi' }] }])
+    expect(seen).toEqual([{ sessionId: `app:my-notes#alice@${serverPartitionHash(ALICE_SERVER)}`, appId: 'my-notes', messages: [{ role: 'user', content: 'hi' }] }])
   })
 
   it('aborts the turn when the page goes away and reports ai_cancelled', async () => {
@@ -169,7 +175,7 @@ describe('streaming and cancellation (§21.6)', () => {
       },
     }
     const outcome = await handleAiChat(
-      { authorization: authorizationOf(true), runner, userId: () => 'alice' },
+      { authorization: authorizationOf(true), runner, scope: () => ALICE },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }], stream: false }),
       controller.signal,
@@ -179,7 +185,7 @@ describe('streaming and cancellation (§21.6)', () => {
 
   it('maps balance / rate-limit failures to the frozen error codes', async () => {
     const failing = (message: string): AiChatTurnRunner => ({ run: async () => { throw new Error(message) } })
-    const deps = (runner: AiChatTurnRunner) => ({ authorization: authorizationOf(true), runner, userId: () => 'alice' })
+    const deps = (runner: AiChatTurnRunner) => ({ authorization: authorizationOf(true), runner, scope: () => ALICE })
     const request = body({ messages: [{ role: 'user', content: 'hi' }], stream: false })
     const balance = await handleAiChat(deps(failing('insufficient balance')), 'my-notes', request, new AbortController().signal)
     expect(JSON.stringify(balance)).toContain('ai_balance_insufficient')
@@ -192,7 +198,7 @@ describe('streaming and cancellation (§21.6)', () => {
   it('rejects a malformed body without touching the runner', async () => {
     const runner = runnerOf()
     const outcome = await handleAiChat(
-      { authorization: authorizationOf(true), runner, userId: () => 'alice' },
+      { authorization: authorizationOf(true), runner, scope: () => ALICE },
       'my-notes',
       Buffer.from('{ not json'),
       new AbortController().signal,
@@ -201,7 +207,7 @@ describe('streaming and cancellation (§21.6)', () => {
     expect(runner.calls).toBe(0)
     const warn = vi.fn()
     const signedOut = await handleAiChat(
-      { authorization: authorizationOf(true), runner, userId: () => null, warn },
+      { authorization: authorizationOf(true), runner, scope: () => null, warn },
       'my-notes',
       body({ messages: [{ role: 'user', content: 'hi' }] }),
       new AbortController().signal,

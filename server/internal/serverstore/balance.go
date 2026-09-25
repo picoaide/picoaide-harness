@@ -420,12 +420,20 @@ func BalanceLedgerPage(db *sql.DB, userID int64, kind string, page, size int) ([
 		where += " AND kind = ?"
 		args = append(args, kind)
 	}
+	// R13-GE（V2-2 读面收口）：余额流水是族内读面（balance_ledger），池上入口走
+	// 已钉 search_path 的只读事务（唯一实现 usageReadConn）—— 计数与分页两条语句
+	// 在同一个已钉事务里读，避免两个数字来自两个库。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var total int64
-	if err := db.QueryRow(`SELECT COUNT(*) FROM balance_ledger WHERE `+where, args...).Scan(&total); err != nil {
+	if err := rd.QueryRow(`SELECT COUNT(*) FROM balance_ledger WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := db.Query(`SELECT id, user_id, kind, amount, balance_after, reason, actor, usage_id, month, created_at
+	rows, err := rd.Query(`SELECT id, user_id, kind, amount, balance_after, reason, actor, usage_id, month, created_at
 FROM balance_ledger WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, 0, err
@@ -451,8 +459,13 @@ FROM balance_ledger WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 
 // BalanceLedgerSum 返回某用户流水合计(对账用:应等于 users.balance_money)。
 func BalanceLedgerSum(db *sql.DB, userID int64) (float64, error) {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var sum float64
-	err := db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM balance_ledger WHERE user_id = ?`, userID).Scan(&sum)
+	err = rd.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM balance_ledger WHERE user_id = ?`, userID).Scan(&sum)
 	return sum, err
 }
 
@@ -696,14 +709,20 @@ type GrantStatus struct {
 }
 
 // GetGrantStatus 统计当月发放覆盖情况。
+//
+// R13-GH3：`balance_grant_items` 是族内关系（发放幂等锚 ⇒ 读错对象会静默报错金额/
+// 错人数）⇒ 这条聚合读走**唯一 pin 实现**的只读事务。旧实现是裸池 + 未限定名：
+// shadow schema 在场时"已发放人数"读自 shadow（恒 0 或诱饵值），而健康出口全绿。
 func GetGrantStatus(db *sql.DB, now time.Time) (*GrantStatus, error) {
 	month := monthKey(BeijingMonth(now))
 	out := &GrantStatus{Month: month}
-	if err := db.QueryRow(`SELECT COUNT(*),
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		return tx.QueryRow(`SELECT COUNT(*),
   COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM balance_grant_items i WHERE i.user_id = u.id AND i.month = ?)),
   COUNT(*) FILTER (WHERE u.balance_activated_at IS NOT NULL)
 FROM users u WHERE u.status = 1 AND u.role = ?`, month, RoleUser).
-		Scan(&out.Eligible, &out.Granted, &out.Activated); err != nil {
+			Scan(&out.Eligible, &out.Granted, &out.Activated)
+	}); err != nil {
 		return nil, err
 	}
 	out.Pending = out.Eligible - out.Granted
@@ -730,21 +749,43 @@ type BalanceGrant struct {
 }
 
 // LastBalanceGrant 返回最近一次发放批次(无记录时 nil)。
+//
+// R13-GH3：`balance_grants`（发放批次台账）是族内关系 ⇒ 读面走唯一 pin 实现的
+// 只读事务；句柄由 `*sql.DB` 收紧为"已钉事务"（`queryBalanceGrant` 只认 `*sql.Tx`），
+// 类型上排除"把裸池传进来"这条路径。
 func LastBalanceGrant(db *sql.DB) (*BalanceGrant, error) {
-	return queryBalanceGrant(db, `SELECT month, mode, amount, affected, actor, created_at
+	var out *BalanceGrant
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		var err error
+		out, err = queryBalanceGrant(tx, `SELECT month, mode, amount, affected, actor, created_at
 FROM balance_grants ORDER BY month DESC LIMIT 1`)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// GetBalanceGrant 返回指定北京月的发放批次(nil = 未发放)。
+// GetBalanceGrant 返回指定北京月的发放批次(nil = 未发放)。R13-GH3：同 LastBalanceGrant。
 func GetBalanceGrant(db *sql.DB, month string) (*BalanceGrant, error) {
-	return queryBalanceGrant(db, `SELECT month, mode, amount, affected, actor, created_at
+	var out *BalanceGrant
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		var err error
+		out, err = queryBalanceGrant(tx, `SELECT month, mode, amount, affected, actor, created_at
 FROM balance_grants WHERE month = ?`, month)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func queryBalanceGrant(db *sql.DB, q string, args ...any) (*BalanceGrant, error) {
+// queryBalanceGrant 只接受**已钉 search_path 的事务**（R13-GH3 的类型纪律：
+// 族内读的唯一语句入口不接受裸 `*sql.DB`，见 usage_ledger.go 的跨包接缝说明）。
+func queryBalanceGrant(tx *sql.Tx, q string, args ...any) (*BalanceGrant, error) {
 	var g BalanceGrant
 	var created any
-	err := db.QueryRow(q, args...).Scan(&g.Month, &g.Mode, &g.Amount, &g.Affected, &g.Actor, &created)
+	err := tx.QueryRow(q, args...).Scan(&g.Month, &g.Mode, &g.Amount, &g.Affected, &g.Actor, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -815,17 +856,27 @@ func GetBalanceSummary(db *sql.DB, now time.Time) (*BalanceSummary, error) {
 	} else {
 		return nil, err
 	}
-	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(balance_money),0) FROM users
+	// R14-K（D-03）：`users` 的**两条金额聚合读**（人数/余额合计、欠款）必须走已钉
+	// 只读事务。登记表把 `users` 归 non-family 的理由是"遮蔽读 ⇒ 登录/余额查询
+	// **可见地**失败（不静默错数字）"——那条理由对**点查**（按 id/username）成立，
+	// 对**聚合读**不成立：这条 `SELECT COUNT(*), COALESCE(SUM(balance_money),0)
+	// FROM users` 与 shadow 的同名表完全同形，`err=nil`、数字是错的（真 PG 实测：
+	// public `2 人 / 100.00` vs 敌对池 `3 人 / 9999.00`）。本函数其余读
+	// （settings / 发放台账 / 发放覆盖）从第十三轮起已经是已钉事务 ⇒ 不修就是
+	// "**一个响应里两组数字来自两个库**"（半真半假比整块读错更难发现）。
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(balance_money),0) FROM users
 WHERE status = 1 AND role = ?`, RoleUser).Scan(&out.Users, &out.Total); err != nil {
+			return err
+		}
+		// 欠款(余额 < 0)单独聚合:欠款额按**正数**输出,与 total_balance 分开看。
+		return tx.QueryRow(`SELECT COUNT(*), COALESCE(-SUM(balance_money),0) FROM users
+WHERE status = 1 AND role = ? AND balance_money < 0`, RoleUser).
+			Scan(&out.OverdrawnUsers, &out.OverdrawnDebt)
+	}); err != nil {
 		return nil, err
 	}
 	out.Total = QuantizeMoney(out.Total)
-	// 欠款(余额 < 0)单独聚合:欠款额按**正数**输出,与 total_balance 分开看。
-	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(-SUM(balance_money),0) FROM users
-WHERE status = 1 AND role = ? AND balance_money < 0`, RoleUser).
-		Scan(&out.OverdrawnUsers, &out.OverdrawnDebt); err != nil {
-		return nil, err
-	}
 	out.OverdrawnDebt = QuantizeMoney(out.OverdrawnDebt)
 	return out, nil
 }

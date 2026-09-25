@@ -376,7 +376,7 @@ func writeAuditBatch(db *sql.DB, batch []auditRequest) []error {
 		}
 		return errs
 	}
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db)
 	if err != nil {
 		return failAll(err, 0)
 	}
@@ -489,8 +489,27 @@ func auditHashPayloadV2(prevHash, username, action, detail, createdAt, appID str
 // P2-1:保留策略清理后,链的起点是 PurgeOldAuditLogs 保留的「锚」(其
 // prev_hash 指向已删除的更早条目),故第一个条目只校验自身哈希、不校验
 // 链尾衔接;其后每条仍必须与上一条 hash 严格衔接。
+// R13-GH3（登记缺口收口）：`audit_logs` 也纳入族内关系集合 ⇒ 读面与写面同等钉
+// search_path。旧实现是裸池上的未限定名语句：连接/角色/库级 search_path 前置同名
+// shadow schema 时，审计**静默落到 shadow**（public 的链一行不动），而
+// `VerifyAuditChain` / 管理端列表读的也是 shadow ⇒ 两侧自洽、健康出口全绿，
+// "审计为 0 条"却看起来像"没发生过"。现在本函数只在**已钉 search_path 的只读
+// 事务**里读（唯一实现 withUsageSearchPathRead）。
 func VerifyAuditChain(db *sql.DB) (int64, error) {
-	rows, err := db.Query("SELECT id, username, action, detail, prev_hash, hash, created_at, hash_version, app_id FROM audit_logs ORDER BY id ASC")
+	var brokenID int64
+	var brokenErr error
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		brokenID, brokenErr = verifyAuditChainOn(tx)
+		return nil // 查询失败经 brokenErr 上报（与旧实现的返回语义逐字一致）
+	}); err != nil {
+		return 0, err
+	}
+	return brokenID, brokenErr
+}
+
+// verifyAuditChainOn 是 VerifyAuditChain 的**已钉事务**形态（函数自己开不出事务）。
+func verifyAuditChainOn(tx *sql.Tx) (int64, error) {
+	rows, err := tx.Query("SELECT id, username, action, detail, prev_hash, hash, created_at, hash_version, app_id FROM audit_logs ORDER BY id ASC")
 	if err != nil {
 		return 0, err
 	}
@@ -566,7 +585,23 @@ func ListAuditLogsByApp(db *sql.DB, appID string, limit int) ([]AuditLogEntry, e
 
 // listAuditLogs 是所有审计分页查询的唯一实现(action/username/appID 为空 =
 // 不过滤;appID 的过滤走 0069 的 idx_audit_logs_app)。
+// R13-GH3：审计分页读同样只在**已钉 search_path 的只读事务**里读（唯一实现
+// withUsageSearchPathRead）—— 否则管理端"审计为 0 条"可能只是读到了 shadow。
 func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string) ([]AuditLogEntry, int64, error) {
+	var out []AuditLogEntry
+	var total int64
+	var readErr error
+	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
+		out, total, readErr = listAuditLogsOn(tx, offset, limit, action, username, appID)
+		return nil // 查询失败经 readErr 上报（与旧实现的返回语义逐字一致）
+	}); err != nil {
+		return nil, 0, err
+	}
+	return out, total, readErr
+}
+
+// listAuditLogsOn 是 listAuditLogs 的**已钉事务**形态（函数自己开不出事务）。
+func listAuditLogsOn(tx *sql.Tx, offset, limit int, action, username, appID string) ([]AuditLogEntry, int64, error) {
 	where := ""
 	args := []any{}
 	if action != "" {
@@ -587,7 +622,7 @@ func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string
 	if where != "" {
 		countQ += " WHERE " + where
 	}
-	if err := db.QueryRow(countQ, args...).Scan(&total); err != nil {
+	if err := tx.QueryRow(countQ, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	q := "SELECT id, username, action, detail, prev_hash, hash, created_at, app_id FROM audit_logs"
@@ -596,7 +631,7 @@ func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string
 	}
 	q += " ORDER BY id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
-	rows, err := db.Query(q, args...)
+	rows, err := tx.Query(q, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -624,16 +659,26 @@ func listAuditLogs(db *sql.DB, offset, limit int, action, username, appID string
 // R4-D-4(审计 2026-09-23,P2):返回值从 error 变成 (删除行数, error) —— 保留策略
 // 现在有一个**周期执行者**(`internal/auditretention`),它需要"这次清了什么"才能
 // 打出一条可观测的日志(否则只能证明"跑过了",不能证明"清掉了")。
+// R13-GH3：清理写面同样只在**已钉 search_path 的事务**里跑（唯一实现
+// withUsageSearchPath）—— 否则 shadow 在场时删的是 shadow 的审计行，public
+// 一条不动，而返回值报"清了 N 条"。
 func PurgeOldAuditLogs(db *sql.DB, cutoff time.Time) (int64, error) {
-	// cutoff 是绝对瞬时:用会话时区无关的瞬时字面量(裸墙钟字符串会被按 PG
-	// 会话时区解释,进程 TZ 与会话时区不同时保留边界会偏 8 小时)。
-	res, err := db.Exec(`DELETE FROM audit_logs a
+	var n int64
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		// cutoff 是绝对瞬时:用会话时区无关的瞬时字面量(裸墙钟字符串会被按 PG
+		// 会话时区解释,进程 TZ 与会话时区不同时保留边界会偏 8 小时)。
+		res, err := tx.Exec(`DELETE FROM audit_logs a
 		WHERE a.created_at < ?::timestamptz AND EXISTS (
 			SELECT 1 FROM audit_logs b WHERE b.created_at < ?::timestamptz AND b.id > a.id)`,
-		pgInstantArg(cutoff), pgInstantArg(cutoff))
+			pgInstantArg(cutoff), pgInstantArg(cutoff))
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
 	return n, nil
 }

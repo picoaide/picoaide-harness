@@ -67,7 +67,8 @@ type DBStats struct {
 // `internal/wasmapp/aichat/**` 整包删除，能力实现侧不再有任何 AI 依赖。
 // 应用要调模型必须走**客户端 AI loop**（§21.2：应用前端 JS → 宿主保留路径
 // `/__picoaide/ai/chat` → 结果回传 wasm 落库），计费走客户端既有 LLM 链路，
-// 应用维度归因由客户端的出站头 `X-Pico-App-Id` 承担（§21.4）。
+// 应用维度归因由该链路的**会话 id 前缀**承担（`app:<app_id>…` ⇒ 出站头
+// `x-deepseek-harness-session-id` ⇒ 网关派生 `usage.app_id`，§21.4 / §21.7⑤）。
 
 // Assets 是包内资源读取能力（§5.1：无文件系统语义、无路径穿越）。
 //

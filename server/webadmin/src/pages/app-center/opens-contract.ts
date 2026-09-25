@@ -59,14 +59,17 @@
  *    - **必须消费 `attribution_available`**（§5.1c B + §21.4）：`false` ⇒ 渲染
  *      "统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
  *      **两者数字都是 0、含义相反，合并渲染即违反 §21.4。**
- *    - 归因来自客户端出站头 `X-Pico-App-Id`（读方在网关 `internal/llmgateway/app_attribution.go`；
- *      伪造头忽略 + warn）。
- *    - **平台侧归因通道尚未接线（`AI_ATTRIBUTION_WIRING = 'not_wired'`）**：全仓**没有**
- *      任何发送方（客户端 `packages/client/wasm-apps/src/client/app-ai.ts` 明写"不做该头"，
- *      出站头唯一构造点在上游 `llm-deepseek` 适配器、没有 header 通道）⇒ `attribution_available`
- *      恒为 `false`，且这个 `false` **不是**"老客户端没上报"，而是"这条路还没接上"。
- *      文案不得把成因推给客户端版本或客户环境。已接线后本常量必须随之改为 `'wired'`
- *      （判据 = `opens-contract-parity.spec.ts` 的归因通道扫描：出现发送方即红，逼着同步改文案）。
+ *    - 归因来自**会话链路**（`ATTRIBUTION_CHAIN_ANCHORS`）：隐藏会话 id 的前缀
+ *      `app:<app_id>` ⇒ 上游出站头 `x-deepseek-harness-session-id` ⇒ 网关按前缀派生
+ *      `usage.app_id`（读方在 `internal/llmgateway/app_session_id.go`）。§21.4 初版设计的
+ *      自报头 `X-Pico-App-Id` **发不出来**（上游没有 header 通道），2026-09-24 起网关只
+ *      识别并忽略它（记一条 warn）—— 登记表仍在，用途是"冒出写方即红"。
+ *    - **归因通道已接线（`AI_ATTRIBUTION_WIRING = 'wired'`，2026-09-24 R13-GB）**：
+ *      三段锚点（客户端前缀 / 上游头名 / 服务端契约）齐备且由
+ *      `opens-contract-parity.spec.ts` 机械对拍 ⇒ 新客户端的应用 AI 调用**会产生归因**。
+ *      因此 `attribution_available = false` 的含义收窄成**唯一一种**："该窗口内没有带
+ *      应用归因的调用记录"，文案**不得**再写成"平台侧尚未接线"（那是接线前的成因）。
+ *      通道若再次断开（某段锚点消失）⇒ 对拍用例红，那时才改回 `'not_wired'` 与相应文案。
  * ④ 计数是 best-effort：接口失败/计数异常**不影响打开**（§5.1b）；管理端同理 ——
  *    拿不到数据就显示"不可用"。
  */
@@ -102,29 +105,58 @@ export function aiUsagePath(appId: string, query = ''): string {
 export const AI_USAGE_WINDOW_DAYS = 30
 
 /**
- * 应用维度 AI 归因的**接线状态**（R4-D-4）。
+ * 应用维度 AI 归因的**接线状态**（R4-D-4；2026-09-24 R13-GB 改判为 `'wired'`）。
  *
- * 服务端的 `attribution_available` 只说"这个窗口里有没有带归因的 usage 行"，它把**两种
- * 成因**合并成了一个 `false`：①平台侧还没有任何发送方（工程未完成）；②确实还没人调用过。
- * 管理端**不能**替它猜，只能按一个**可判定的事实**渲染 —— 那个事实就是本常量。
+ * 链路（§21.4 + §21.7⑤ 的替代路径）：
  *
- * 取值与判据（`opens-contract-parity.spec.ts` 的归因通道扫描）：
- *   - `'not_wired'`：全仓**没有** `X-Pico-App-Id` 的发送方（`ATTRIBUTION_HEADER_WRITERS`
- *     为空）⇒ 任何客户端版本、任何客户环境都不产生归因 ⇒ 文案只能写"平台侧尚未接线"，
- *     **禁止**归因于"老客户端/客户端未上报"；
- *   - `'wired'`：出现发送方 ⇒ 本常量与文案必须一起改（扫描用例会红）。
+ * ```
+ * 隐藏会话 id = app:<app_id>#<账号作用域>            （客户端 packages/host/wasm-apps-host/src/ai-chat.ts）
+ *   → 上游 llm-deepseek 适配器按 options.sessionId 发
+ *     x-deepseek-harness-session-id                  （pinned 上游，本仓以 submodule 引入）
+ *   → 网关按 app: 前缀派生 app_id                     （server/internal/llmgateway/app_session_id.go
+ *                                                      + app-session-id.json 契约）
+ *   → usage.app_id                                    （迁移 0076）
+ * ```
+ *
+ * 为什么不再由 `ATTRIBUTION_HEADER_WRITERS` 派生：那条派生说的是**已废弃的自报头**
+ * `X-Pico-App-Id`（它没有可校验的链路，网关现在只识别并忽略它），而真实链路是**会话 id
+ * 本身**（出站头由上游无条件带上，不需要新的自报头）。发送方在 pinned 上游 submodule 里，
+ * 不在本仓的扫描面内，所以"接线状态"这个值改为**手写 + 三段锚点机械对拍**：
+ * `opens-contract-parity.spec.ts` 的"归因链路三段锚点"用例会读
+ * ①客户端前缀常量 ②上游适配器里的头名字面量 ③服务端契约（前缀 + 正则）——
+ * 任何一段缺失/漂移，或本常量与三段锚点不一致 ⇒ 红。
+ *
+ * 取值与文案口径：
+ *   - `'wired'`：三段锚点齐备 ⇒ 新客户端的应用 AI 调用**会产生归因**；`attribution_available
+ *     = false` 只表示"该窗口内没有带归因的调用"，**不得**再说成"平台侧尚未接线"；
+ *   - `'not_wired'`：链路断了（锚点扫描红） ⇒ 文案必须写"平台侧尚未接线"，
+ *     **禁止**归因于"老客户端/客户端未上报"。
  */
 export type AiAttributionWiring = 'not_wired' | 'wired'
+
+/** 会话 id 出站头名（上游 `llm-deepseek` 按 `options.sessionId` 无条件带上）。 */
+export const ATTRIBUTION_SESSION_HEADER = 'x-deepseek-harness-session-id'
+
+/** 隐藏会话 id 前缀（服务端按它派生 `app_id`；契约 `server/internal/llmgateway/app-session-id.json`）。 */
+export const ATTRIBUTION_SESSION_PREFIX = 'app:'
+
+/** 归因链路三段锚点（每段一个文件；对拍用例逐个读并断言锚点，缺一段即判链路未接）。 */
+export const ATTRIBUTION_CHAIN_ANCHORS = {
+  /** ① 客户端构造：隐藏会话 id 的前缀常量。 */
+  client: 'packages/host/wasm-apps-host/src/ai-chat.ts',
+  /** ② 传输：pinned 上游适配器里发这个头的那一行。 */
+  sender: 'deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/adapter.ts',
+  /** ③ 服务端解析：契约（前缀 + app_id 正则）与它的解析实现。 */
+  contract: 'server/internal/llmgateway/app-session-id.json',
+  reader: 'server/internal/llmgateway/app_session_id.go',
+} as const
 
 /**
  * 出站头 `X-Pico-App-Id` 的**发送方**登记表（仓库内相对路径）。
  *
- * **当前为空 = 平台侧归因通道尚未接线**：出站头的唯一构造点在上游 `llm-deepseek`
- * 适配器，而平台侧没有 header 通道（结构性上限，见设计总纲 §21.7）；客户端
- * `packages/client/wasm-apps/src/client/app-ai.ts` 也明写"不做该头"。
- * 一旦有人接上发送方，必须把路径登记到这里（`opens-contract-parity.spec.ts` 会先把
- * 未登记的发送方扫出来判红），并同时把 {@link AI_ATTRIBUTION_WIRING} 改成 `'wired'`、
- * 改掉所有把成因推给客户端的文案。
+ * **当前为空**：该头是 §21.4 的初版设计，实施期实测**发不出来**（出站头唯一构造点没有
+ * header 通道），2026-09-24 起网关也**不再据此归因**（只识别并记一条 warn）⇒ 它既没有
+ * 发送方也不该有新的发送方。真实链路见 {@link ATTRIBUTION_CHAIN_ANCHORS}。
  */
 export const ATTRIBUTION_HEADER_WRITERS: readonly string[] = []
 
@@ -135,31 +167,35 @@ export const ATTRIBUTION_HEADER_WRITERS: readonly string[] = []
  * 登记了却搜不到、搜到了却没登记都判红），于是"某天冒出一个发送方"这件事无法静默发生。
  */
 export const ATTRIBUTION_HEADER_READERS: readonly string[] = [
+  // 唯一**真的读它**的文件：读出来只为识别并记一条 warn（不再据此归因）。
   'server/internal/llmgateway/app_attribution.go',
+  // 归因列的**读侧**（汇总/看板）：列语义仍按本头名解释，故留在这里。
   'server/internal/serverstore/wasm_app_opens.go',
   'server/internal/serverstore/wasm_app_opens_summary.go',
-  'server/internal/wasmapp/api/admin_opens.go',
+  // 说明"归因改由会话链路承担"的那处（契约 §8.2 的传参注释）。
   'server/internal/wasmapp/appserver/serve.go',
-  'server/internal/wasmapp/capapi/capapi.go',
 ]
 
 /**
  * 提到该头名、但**既不是读方也不是写方**的文件（只在注释/文本里出现）。
  *
- * 目前两处：
+ * 目前三处：
  *  - 客户端 `app-ai.ts` 的"不做（明确留给别的层）"清单（**明确声明不做发送方**）；
- *  - 不可变迁移 `0076_usage_app_id.sql` 里解释 `usage.app_id` 列语义的注释。
+ *  - 不可变迁移 `0076_usage_app_id.sql` 里解释 `usage.app_id` 列语义的注释；
+ *  - 网关的会话 id 归因模块（`app_session_id.go`）：解释"为什么不再读自报头"。
  *
- * 单列而不是塞进读方表，是为了让"平台侧没有发送方"这件事在登记表上一眼可见。
+ * 单列而不是塞进读方表，是为了让"平台侧没有自报头发送方"这件事在登记表上一眼可见。
  */
 export const ATTRIBUTION_HEADER_TEXT_ONLY: readonly string[] = [
   'packages/client/wasm-apps/src/client/app-ai.ts',
   'server/internal/serverstore/migrations-pg/0076_usage_app_id.sql',
+  'server/internal/llmgateway/app_session_id.go',
 ]
 
-/** 归因接线状态（派生自发送方登记表：**不手写**，两者不可能不一致）。 */
-export const AI_ATTRIBUTION_WIRING: AiAttributionWiring =
-  ATTRIBUTION_HEADER_WRITERS.length > 0 ? 'wired' : 'not_wired'
+/**
+ * 归因接线状态（**手写 + 三段锚点机械对拍**：见 {@link AiAttributionWiring} 的长注释）。
+ */
+export const AI_ATTRIBUTION_WIRING: AiAttributionWiring = 'wired'
 
 /** 口径说明（页面统一引用，避免三处各写一份说法）。 */
 export const OPENS_COUNT_NOTE =
@@ -172,8 +208,11 @@ export const OPENS_PRIVACY_NOTE =
   '打开明细含 user_id / 部门 / 打开时间，仅 capability:read 可见；本期不提供导出。'
 export const AI_ATTRIBUTION_NOTE =
   AI_ATTRIBUTION_WIRING === 'wired'
-    ? 'AI 调用按**使用者账号**计费；应用维度按客户端出站头 X-Pico-App-Id 归因（计费不受影响）。'
-    : 'AI 调用按**使用者账号**计费；应用维度按客户端出站头 X-Pico-App-Id 归因，但**平台侧归因通道尚未接线**（客户端与网关都还没有发送方）⇒ 任何客户端版本都不产生归因，与客户端新旧无关；计费不受影响。'
+    ? `AI 调用按**使用者账号**计费（\`usage.user_id\`，来自鉴权中间件，不来自请求头）。应用维度只是**归因标签**：` +
+      `取自客户端请求头（隐藏会话 id 的 \`${ATTRIBUTION_SESSION_PREFIX}\` 前缀 ⇒ 上游出站头 ${ATTRIBUTION_SESSION_HEADER} ⇒ \`usage.app_id\`），` +
+      `服务端**只校验形状与存在性**（app_id 规则 + 该应用真实存在且未删除），**不校验调用方与该应用的关系** ` +
+      `⇒ 任何员工都能把用量记到另一个真实存在的应用上。故本面板是**参考口径**，不得用于对账 / 计费 / 授权；计费不受影响。`
+    : 'AI 调用按**使用者账号**计费；应用维度按会话链路归因，但**平台侧归因通道尚未接线**（客户端与网关之间还差一段）⇒ 任何客户端版本都不产生归因，与客户端新旧无关；计费不受影响。'
 
 // ---------------------------------------------------------------------------
 // 响应类型（只声明我们真正渲染的字段）

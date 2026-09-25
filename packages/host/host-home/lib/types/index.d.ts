@@ -55,15 +55,21 @@ export declare function expandHomePath(path: string, home?: string): string;
  * @returns the normalized absolute product home path.
  */
 export declare function resolveDshHome(configured?: string, env?: Record<string, string | undefined>, home?: string, productDir?: string): string;
+/** 判据接收的环境映射（`process.env` 的形状）。 */
+type EnvLike = Record<string, string | undefined>;
 /**
  * Refuse a resolved home placed in a system-critical directory.
  * 审计 2026-08-25 P2-3:调用方传入的 DSH_HOME 若被同机进程注入为系统
- * 关键目录,拒绝而非静默使用(返回 false)。注意:/tmp 及其子目录**允许**
- * ——e2e/测试与沙箱隔离确实用 /tmp 下的 home(如 /tmp/home),拒绝会破坏
- * 测试与产品行为;威胁模型里 /tmp 由同用户权限隔离,风险低于 / 与系统根。
+ * 关键目录,拒绝而非静默使用(返回 false)。
+ *
+ * R13-B P2-3 收口:判据不再只看拼写路径 —— 符号链接(跳数不限,取最近存在祖先的
+ * realpath)、大小写变体与 Windows 形态都与 cwd 闸门**共用同一份实现**
+ * (`isSystemPath`:一张系统根表)。注意:/tmp 及其子目录**允许**,macOS 的
+ * `/var/folders/.../T/...` 同样允许(与"临时目录不是系统目录"同一条例外)。
  * @param resolved - absolute normalized home path (from resolveDshHome).
+ * @param env - environment used to locate the Windows system roots (test seam).
  */
-export declare function isSafeDshHome(resolved: string): boolean;
+export declare function isSafeDshHome(resolved: string, env?: EnvLike): boolean;
 /** Resolve the product home and refuse an unsafe override (throws a clear error). */
 export declare function dshHomeSafe(options?: {
     configured?: string;
@@ -101,12 +107,14 @@ export declare function dshHomePath(...segments: string[]): string;
  * or harmful. The old check only compared against the POSIX `/`, so Windows
  * `C:\`, `C:\Windows` and Program Files slipped through.
  *
- * Root detection covers both path flavours explicitly: `parse` uses the host
- * flavour, so a Windows-style `C:\` is only recognized through `win32.parse`
- * when the check runs on Linux (and vice versa for tests).
+ * R13-B P2-3:本闸门与数据根闸门（`isSafeDshHome`）**共用同一份实现**
+ * （`isSystemPath`：一张系统根表、一套 Windows 形态判定、一次大小写归一、一次
+ * realpath 归一），不再各写一份。根目录（POSIX `/`、`C:\`、UNC 根）、`/ETC` 这类
+ * 大小写变体、以及指向系统目录的符号链接都因此一并覆盖。
  * @param cwd - candidate working directory.
  * @param env - environment used to locate the Windows system roots (test seam).
  */
-export declare function isSystemWorkingDirectory(cwd: string, env?: Record<string, string | undefined>): boolean;
+export declare function isSystemWorkingDirectory(cwd: string, env?: EnvLike): boolean;
 /** Resolve the product home from the live environment. */
 export declare function dshHome(): string;
+export {};

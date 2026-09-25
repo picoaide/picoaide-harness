@@ -1482,7 +1482,14 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	// F14(审计 2026-09-11):全部设置键在**同一事务**内落库,任一失败整体
 	// 回滚。此前 20+ 个 `_ = upsert(...)` 静默吞错,DB 抖动会留下半套配置
 	// (例如 client_secret 未落库而 enabled 已改)却返回"保存成功"。
-	tx, err := a.DB.Begin()
+	//
+	// R14-K（D-02 同族，由"包面分类"守卫逼出来的第四处）：本事务全部语句都是
+	// `settings`（**族内关系**）⇒ 必须经 serverstore 的唯一 pin 实现开事务
+	// （`UsageWriteTx` = 同一个 BEGIN + `SET LOCAL search_path = public`）。
+	// 旧实现是裸 `a.DB.Begin()`：连接/角色/库级 search_path 前置同名 shadow schema 时，
+	// **认证配置整体写进 shadow**（public 一行不动，而管理端与登录路径读的是别的库），
+	// 与 R12-N2 的写面形态逐字同形 —— 这一处当时漏在"判据面 = serverstore 包内"。
+	tx, err := serverstore.UsageWriteTx(a.DB)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return

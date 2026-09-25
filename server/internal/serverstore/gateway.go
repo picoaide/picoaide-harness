@@ -241,7 +241,13 @@ const gatewayProviderColumns = `id, name, base_url, api_key_enc, models, enabled
 
 // ListGatewayProviders returns all providers.
 func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
-	rows, err := db.Query(`SELECT ` + gatewayProviderColumns + `
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(`SELECT ` + gatewayProviderColumns + `
 		FROM gateway_providers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -260,7 +266,13 @@ func ListGatewayProviders(db *sql.DB) ([]GatewayProvider, error) {
 
 // GetGatewayProvider loads one provider.
 func GetGatewayProvider(db *sql.DB, id int64) (*GatewayProvider, error) {
-	row := db.QueryRow(`SELECT `+gatewayProviderColumns+`
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	row := rd.QueryRow(`SELECT `+gatewayProviderColumns+`
 		FROM gateway_providers WHERE id = ?`, id)
 	p, err := scanProvider(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -385,7 +397,9 @@ func UpdateGatewayProviderTx(tx *sql.Tx, p *GatewayProvider) error {
 // DeleteGatewayProvider removes a provider (and its models);
 // 若默认模型属于该 provider,同步重置 gateway.default_model。
 func DeleteGatewayProvider(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
+	// R13-GE（V2-2）：族内关系（gateway_providers / models / settings）的池上写事务
+	// 一律经唯一实现 usageWriteTx（BEGIN + SET LOCAL search_path = public 同源）。
+	tx, err := usageWriteTx(db)
 	if err != nil {
 		return err
 	}
@@ -589,7 +603,7 @@ func hasOperatorModelConfig(in, out, cache, off sql.NullFloat64, params, modalit
 // 时的"停用"),本轮命中即视为**重新出现在上游目录** —— 清标记并把名字加回
 // provider JSON(RemoveMissingProviderModels 曾把它移出),价格与参数分毫不动。
 func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string) error {
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return err
 	}
@@ -638,7 +652,7 @@ func SyncProviderModel(db *sql.DB, providerID int64, name, defaultParams string)
 // 已标记的行不重复处理(幂等:同一轮抖动重复触发只计一次)。若被处理的行正是
 // gateway.default_model,重置为空串。返回"不再可路由的行数"(停用 + 删除)。
 func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (int, error) {
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return 0, err
 	}
@@ -768,7 +782,13 @@ const modelSelectColumns = `m.id, m.name, m.provider_id, COALESCE(m.display_name
 
 // GetModel loads a model by id.
 func GetModel(db *sql.DB, id int64) (*Model, error) {
-	row := db.QueryRow(`SELECT `+modelSelectColumns+`
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	row := rd.QueryRow(`SELECT `+modelSelectColumns+`
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id WHERE m.id = ?`, id)
 	m, err := scanModel(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -823,19 +843,35 @@ func InvalidateModelConfig() { modelConfigCache.invalidateAll() }
 // promptEstimateCapForModel(上游漏报 usage 时的**输入侧补估上限**),于是同一条
 // 请求的补估 token 数与费用可以差两个数量级,并与同族取价函数的口径分叉
 // (30s 的 modelConfigCache 只是把"这一次碰巧读到的那一份"钉住,放大可见性而非修复)。
+// R13-GE（V2-2 读面收口）：取价 / 取参 / 取缓存价这一族是**族内读面**，池上入口
+// 一律走"已钉 search_path 的只读事务"唯一实现（`usageReadConn` / `withUsageSearchPathRead`）。
+// 旧实现是裸 `db.QueryRow` ⇒ shadow schema 在场时读到 shadow 的价目（真 PG 实测
+// in=1000/out=2000，而 public 是 1.0/2.0），而结算金额落进 **public 行**（少收/多收
+// 都可能，`err=nil`，所有健康出口报绿）。`*Q` 变体是这些函数的**唯一语句实现**：
+// q 是已钉事务的语句入口，scope 只用于 TTL 缓存的作用域绑定（缓存按原池绑定，
+// 钉 search_path 不改变缓存语义）。
 func ModelDefaultParams(db *sql.DB, name string) (string, error) {
-	if v := modelConfigCache.get(db, "dp:"+name); v != nil {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return "", err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return modelDefaultParamsQ(rd, db, name)
+}
+
+func modelDefaultParamsQ(q rowQuerier, scope *sql.DB, name string) (string, error) {
+	if v := modelConfigCache.get(scope, "dp:"+name); v != nil {
 		return v.(string), nil
 	}
 	var params string
-	err := db.QueryRow(`SELECT default_params FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&params)
+	err := q.QueryRow(`SELECT default_params FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
 	}
-	modelConfigCache.set(db, "dp:"+name, params)
+	modelConfigCache.set(scope, "dp:"+name, params)
 	return params, err
 }
 
@@ -848,13 +884,22 @@ func ModelDefaultParams(db *sql.DB, name string) (string, error) {
 // 此时唯一比"用停用行的价"更差的选项就是"返回 0"(= 免费)。取参/取缓存价的
 // 退化方向是安全的(未找到 ⇒ 回落默认窗口 / 回落输入价),取价不是。
 func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak float64) {
-	if v := modelConfigCache.get(db, "price:"+name); v != nil {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, 0, 0
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return modelPricesQ(rd, db, name)
+}
+
+func modelPricesQ(q rowQuerier, scope *sql.DB, name string) (inputPer1M, outputPer1M, offpeak float64) {
+	if v := modelConfigCache.get(scope, "price:"+name); v != nil {
 		p := v.([3]float64)
 		return p[0], p[1], p[2]
 	}
 	var in, out, off sql.NullFloat64
 	// P1-6:同名多 provider 时必须确定性取价(物理行序会随 UPSERT 漂移)。
-	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ? ORDER BY provider_id LIMIT 1`, name).Scan(&in, &out, &off)
+	err := q.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount FROM models WHERE name = ? ORDER BY provider_id LIMIT 1`, name).Scan(&in, &out, &off)
 	if err != nil {
 		return 0, 0, 0
 	}
@@ -868,7 +913,7 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak floa
 	if off.Valid {
 		r[2] = off.Float64
 	}
-	modelConfigCache.set(db, "price:"+name, r)
+	modelConfigCache.set(scope, "price:"+name, r)
 	return r[0], r[1], r[2]
 }
 
@@ -876,19 +921,29 @@ func ModelPrices(db *sql.DB, name string) (inputPer1M, outputPer1M, offpeak floa
 // 优先 (provider_id, name);该组合不存在(模型被迁移/删除)或 providerID==0
 // (历史行)时回退到 name 口径(ModelPrices 自身已带确定性排序,不再随物理行序漂移)。
 func ModelPricesForProvider(db *sql.DB, providerID int64, name string) (inputPer1M, outputPer1M, offpeak float64) {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		// 与 ModelPrices 的失败语义同形（取价失败 ⇒ 0 = 不加价，由调用方照旧落账）
+		return 0, 0, 0
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return modelPricesForProviderQ(rd, db, providerID, name)
+}
+
+func modelPricesForProviderQ(q rowQuerier, scope *sql.DB, providerID int64, name string) (inputPer1M, outputPer1M, offpeak float64) {
 	if providerID <= 0 {
-		return ModelPrices(db, name)
+		return modelPricesQ(q, scope, name)
 	}
 	key := fmt.Sprintf("pprice:%d:%s", providerID, name)
-	if v := modelConfigCache.get(db, key); v != nil {
+	if v := modelConfigCache.get(scope, key); v != nil {
 		p := v.([3]float64)
 		return p[0], p[1], p[2]
 	}
 	var in, out, off sql.NullFloat64
-	err := db.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount
+	err := q.QueryRow(`SELECT input_price_per_1m, output_price_per_1m, offpeak_discount
 		FROM models WHERE provider_id = ? AND name = ?`, providerID, name).Scan(&in, &out, &off)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ModelPrices(db, name) // 该 provider 下无此模型行 → 回退 name 口径
+		return modelPricesQ(q, scope, name) // 该 provider 下无此模型行 → 回退 name 口径
 	}
 	if err != nil {
 		return 0, 0, 0
@@ -903,50 +958,129 @@ func ModelPricesForProvider(db *sql.DB, providerID int64, name string) (inputPer
 	if off.Valid {
 		r[2] = off.Float64
 	}
-	modelConfigCache.set(db, key, r)
+	modelConfigCache.set(scope, key, r)
 	return r[0], r[1], r[2]
 }
 
 // ModelCachePriceForProvider 是 ModelCachePrice 的 provider 维度版本(P1-6)。
 func ModelCachePriceForProvider(db *sql.DB, providerID int64, name string) float64 {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return modelCachePriceForProviderQ(rd, db, providerID, name)
+}
+
+func modelCachePriceForProviderQ(q rowQuerier, scope *sql.DB, providerID int64, name string) float64 {
 	if providerID <= 0 {
-		return ModelCachePrice(db, name)
+		return modelCachePriceQ(q, scope, name)
 	}
 	key := fmt.Sprintf("pcache:%d:%s", providerID, name)
-	if v := modelConfigCache.get(db, key); v != nil {
+	if v := modelConfigCache.get(scope, key); v != nil {
 		return v.(float64)
 	}
 	var cache sql.NullFloat64
-	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE provider_id = ? AND name = ?`,
+	err := q.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE provider_id = ? AND name = ?`,
 		providerID, name).Scan(&cache)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ModelCachePrice(db, name)
+		return modelCachePriceQ(q, scope, name)
 	}
 	if err != nil || !cache.Valid {
 		return 0
 	}
-	modelConfigCache.set(db, key, cache.Float64)
+	modelConfigCache.set(scope, key, cache.Float64)
 	return cache.Float64
 }
 
 // ModelCachePrice returns the cache-hit input price (yuan per 1M tokens,
 // 0029). 0 = 未配置缓存价(命中按输入价计费)。
 func ModelCachePrice(db *sql.DB, name string) float64 {
-	if v := modelConfigCache.get(db, "cache:"+name); v != nil {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return modelCachePriceQ(rd, db, name)
+}
+
+func modelCachePriceQ(q rowQuerier, scope *sql.DB, name string) float64 {
+	if v := modelConfigCache.get(scope, "cache:"+name); v != nil {
 		return v.(float64)
 	}
 	var cache sql.NullFloat64
 	// P1-6:同上,确定性取价。N-4:同样排除目录缺失行 —— 退化方向是把缓存价
 	// 归 0(costOfAt 随即回落按输入价计费),不会产生免费额度。
-	err := db.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&cache)
+	err := q.QueryRow(`SELECT cache_input_price_per_1m FROM models WHERE name = ? AND catalog_missing = FALSE ORDER BY provider_id LIMIT 1`, name).Scan(&cache)
 	if err != nil || !cache.Valid {
 		if err == nil {
-			modelConfigCache.set(db, "cache:"+name, 0.0)
+			modelConfigCache.set(scope, "cache:"+name, 0.0)
 		}
 		return 0
 	}
-	modelConfigCache.set(db, "cache:"+name, cache.Float64)
+	modelConfigCache.set(scope, "cache:"+name, cache.Float64)
 	return cache.Float64
+}
+
+// modelPriceInputs 是一次计量 / 结算需要的**全部读面**（R13-GE · V2-2）。
+type modelPriceInputs struct {
+	inputPer1M  float64
+	outputPer1M float64
+	cachePer1M  float64
+	offpeak     float64
+	peakWindows []PeakWindow
+}
+
+// loadModelPriceInputs 在**一个**已钉 search_path 的只读事务里读齐全部计价输入
+// （**池上入口**）：价目、缓存价、峰谷窗口。
+//
+// 为什么合成一个事务而不是让每个取价函数各开一个：这三条读永远一起用（同一次
+// 记录 / 结算），合起来只多一次 BEGIN/ROLLBACK，而不是三次。峰谷窗口虽然住在
+// `settings` 表里，但它直接乘进 cost（低谷折扣），与价目同属"计价输入"，必须
+// 与价目看同一个库。
+//
+// **只允许在调用方自己没有持有事务时使用**（R14-K · D-01）：本函数会向池里
+// **再要一条连接**（`newUsageReadConn` → `db.BeginTx`）。如果调用方此刻已经握着
+// 一条事务连接，就构成"持一条、再等一条"（hold-and-wait）：池上限 = 并发数时
+// 两边互相等，而 `BeginTx(context.Background(), …)` 没有 deadline、
+// `SetConnMaxLifetime` 对**在用**连接无效 ⇒ **池不可恢复**，之后登录/健康/管理面
+// 全部一起阻塞（db.go:158 记录过同形态的真实事故：池 200 时流式回填风暴 →
+// 1490 goroutine 卡 waitForConn）。
+//
+// 持有事务时**必须**用 `loadModelPriceInputsQ(q = 该事务)` —— 语句只有一份实现，
+// 两种入口只是"谁来提供已钉的事务句柄"。机械守卫：
+// `audit_r14k_poolwait_test.go`（扫整个 `server/` 的"已开事务仍向池要连接"）。
+//
+// 失败语义与旧实现逐字一致：打不开只读事务时返回零值输入（= 不加价 / 无峰谷
+// 折扣），由调用方照旧落账 —— 不改变"计量优先于计费精度"这一既有取向。
+func loadModelPriceInputs(db *sql.DB, providerID int64, name string) modelPriceInputs {
+	var out modelPriceInputs
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return out
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return loadModelPriceInputsQ(rd, db, providerID, name)
+}
+
+// loadModelPriceInputsQ 是全部计价输入的**唯一一份语句实现**（R14-K · D-01）：
+// `q` 是调用方**已持有的、已钉 search_path** 的事务语句入口（`*sql.Tx`，或池上
+// 入口自己开的那条只读事务）。三类输入必须取自同一个 `q` —— 判据（金额）与动作
+// （落账）必须看同一个库（R13-GE · V2-2）。
+//
+// 为什么必须存在这个 Q 形态：`updateUsageTokensAtCached` 的整段（读 usage 行 →
+// 取价 → UPDATE → 结算）都在**同一个**事务里，而价目/缓存价/峰谷窗口都是族内关系、
+// 必须有 pin。第十三轮读面收口时它在事务里又调了池上入口 ⇒ 每次流式回填**恒定**
+// 多占一条连接（即使三处 TTL 缓存全部命中，因为在池上入口里 BEGIN 在前、查缓存
+// 在后）；真 PG 复现：池上限 2 / 并发 2 ⇒ 两个 goroutine 永久阻塞（lane D 探针
+// HEAD 挂起 vs 基线 17ms）。Q 形态在缓存命中时**零额外连接**（Q 函数先查缓存，
+// 命中即返回），缓存未命中时也只走那条已经持有的连接。
+func loadModelPriceInputsQ(q rowQuerier, scope *sql.DB, providerID int64, name string) modelPriceInputs {
+	var out modelPriceInputs
+	out.inputPer1M, out.outputPer1M, out.offpeak = modelPricesForProviderQ(q, scope, providerID, name)
+	out.cachePer1M = modelCachePriceForProviderQ(q, scope, providerID, name)
+	out.peakWindows = loadPeakWindowsQ(q, scope)
+	return out
 }
 
 // AddModel inserts a model row(autocommit;插入成功后失效模型缓存)。
@@ -1008,7 +1142,7 @@ func addModel(insert insertFunc, m *Model) (int64, error) {
 // UpdateModel updates a model row.
 func UpdateModel(db *sql.DB, m *Model) error {
 	modalitiesJSON, _ := json.Marshal(NormalizeInputModalities(m.InputModalities))
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return err
 	}
@@ -1084,8 +1218,15 @@ func addProviderModelName(tx *sql.Tx, providerID int64, name string) error {
 // ModelHasUsage reports whether the model name has recorded usage rows.
 // 改名防护(审计修复 M7):有用量记录的模型改名会破坏历史费用口径。
 func ModelHasUsage(db *sql.DB, name string) (bool, error) {
+	// R13-GE（V2-2 读面收口）：读数决定"模型能不能删"（有用量的模型拒删）⇒
+	// shadow 在场时读 shadow 的计数会得到相反答案。池上入口走已钉只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM usage WHERE model = ?`, name).Scan(&n)
+	err = rd.QueryRow(`SELECT COUNT(*) FROM usage WHERE model = ?`, name).Scan(&n)
 	return n > 0, err
 }
 
@@ -1095,7 +1236,9 @@ func ModelHasUsage(db *sql.DB, name string) (bool, error) {
 // mergeModelNames(provider JSON, models 表),只删 models 行会让模型仍被路由
 // 匹配到(ModelPrices 查不到行 → cost=0,平台付费零计量)。
 func DeleteModel(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
+	// R13-GE（V2-2）：委托给 DeleteModelTx，但事务本身必须钉 search_path
+	// （DeleteModelTx 里读/删的都是族内关系 models）。
+	tx, err := usageWriteTx(db)
 	if err != nil {
 		return err
 	}
@@ -1201,7 +1344,13 @@ func clearDefaultModelIf(tx *sql.Tx, name string) error {
 // 展示全部模型(含已停用上游的,审计修复 M3):管理页需能管理禁用上游的模型,
 // 客户端可见性由 ListModels 的 WHERE p.enabled = 1 单独控制。
 func ListAdminModels(db *sql.DB) ([]Model, error) {
-	rows, err := db.Query(`SELECT ` + modelSelectColumns + `
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(`SELECT ` + modelSelectColumns + `
 		FROM models m JOIN gateway_providers p ON p.id = m.provider_id
 		ORDER BY m.id`)
 	if err != nil {

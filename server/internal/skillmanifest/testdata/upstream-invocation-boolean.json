@@ -1,0 +1,173 @@
+{
+  "note": "pinned 上游 skill-filesystem 的 frontmatterBoolean 判据快照。 来源：deepseek-harness/packages/skill/skill-filesystem/src/index.ts 的 frontmatterBoolean（submodule，pin 由 gitlink 固定）。 再生成/对拍：packages/host/enterprise/tests/skill-invocation-upstream-parity.spec.ts （UPDATE_UPSTREAM_FIXTURE=1 时用活的上游文件重写本文件；否则逐项断言本文件与活的上游一致）。 corpus[].upstreamLoads 由「真跑 pinned 上游 SkillRegistry」得出，不是人工判断。 server CI job 不 checkout submodule ⇒ 那份 job 里只有本文件可用；gate job 的 TS 对拍用例会校验本文件与活文件一致。",
+  "derivedFrom": {
+    "submoduleSource": "deepseek-harness/packages/skill/skill-filesystem/src/index.ts",
+    "installedLib": "packages/host/desktop/node_modules/@deepseek-ai/dsh-skill-filesystem/lib/index.js"
+  },
+  "submoduleSourceSha256": "0eaa88f6055fa4809afc3325110fa0ddfca714e5fd96553ecd2cd89a2b99f382",
+  "installedLibSha256": "244e92e032ef15e96cb60c9e2cfddf5d89e167eb171fcbfd83e9415b0455a0d7",
+  "acceptedStringLiterals": [
+    "0",
+    "1",
+    "false",
+    "no",
+    "off",
+    "on",
+    "true",
+    "yes"
+  ],
+  "acceptedNumbers": [
+    0,
+    1
+  ],
+  "acceptsBoolean": true,
+  "lowercases": true,
+  "trims": false,
+  "throwsOtherwise": true,
+  "corpus": [
+    {
+      "id": "absent",
+      "line": null,
+      "upstreamLoads": true,
+      "why": "键不存在 ⇒ frontmatterBoolean 返回 undefined（默认允许）"
+    },
+    {
+      "id": "bool-true",
+      "line": "user-invocable: true",
+      "upstreamLoads": true,
+      "why": "YAML 布尔 true"
+    },
+    {
+      "id": "bool-false",
+      "line": "user-invocable: false",
+      "upstreamLoads": true,
+      "why": "YAML 布尔 false"
+    },
+    {
+      "id": "caps-true",
+      "line": "user-invocable: True",
+      "upstreamLoads": true,
+      "why": "YAML 1.2 core 的 True 也是布尔"
+    },
+    {
+      "id": "str-true",
+      "line": "user-invocable: \"true\"",
+      "upstreamLoads": true,
+      "why": "字符串字面量 true"
+    },
+    {
+      "id": "upper-str-true",
+      "line": "user-invocable: \"TRUE\"",
+      "upstreamLoads": true,
+      "why": "字符串只做 toLowerCase，大小写不敏感"
+    },
+    {
+      "id": "str-yes",
+      "line": "user-invocable: yes",
+      "upstreamLoads": true,
+      "why": "字符串字面量 yes（YAML 1.2 core 里 yes 不是布尔）"
+    },
+    {
+      "id": "str-on",
+      "line": "user-invocable: on",
+      "upstreamLoads": true,
+      "why": "字符串字面量 on"
+    },
+    {
+      "id": "str-no",
+      "line": "user-invocable: no",
+      "upstreamLoads": true,
+      "why": "字符串字面量 no"
+    },
+    {
+      "id": "str-off",
+      "line": "user-invocable: \"off\"",
+      "upstreamLoads": true,
+      "why": "字符串字面量 off"
+    },
+    {
+      "id": "num-1",
+      "line": "user-invocable: 1",
+      "upstreamLoads": true,
+      "why": "数字 1"
+    },
+    {
+      "id": "int-0",
+      "line": "user-invocable: 0",
+      "upstreamLoads": true,
+      "why": "数字 0"
+    },
+    {
+      "id": "str-1",
+      "line": "user-invocable: '1'",
+      "upstreamLoads": true,
+      "why": "字符串 \"1\""
+    },
+    {
+      "id": "str-0",
+      "line": "user-invocable: '0'",
+      "upstreamLoads": true,
+      "why": "字符串 \"0\""
+    },
+    {
+      "id": "empty-value",
+      "line": "user-invocable:",
+      "upstreamLoads": false,
+      "why": "YAML 空值(null) ⇒ throw（R13-B P1-1 的载体）"
+    },
+    {
+      "id": "null-word",
+      "line": "user-invocable: null",
+      "upstreamLoads": false,
+      "why": "YAML null ⇒ throw"
+    },
+    {
+      "id": "tilde",
+      "line": "user-invocable: ~",
+      "upstreamLoads": false,
+      "why": "YAML ~ ⇒ null ⇒ throw"
+    },
+    {
+      "id": "empty-string",
+      "line": "user-invocable: \"\"",
+      "upstreamLoads": false,
+      "why": "空字符串不在字面量集合里 ⇒ throw"
+    },
+    {
+      "id": "padded-str",
+      "line": "user-invocable: \" true \"",
+      "upstreamLoads": false,
+      "why": "上游不 trim ⇒ 带空白的字符串照样 throw"
+    },
+    {
+      "id": "maybe",
+      "line": "user-invocable: maybe",
+      "upstreamLoads": false,
+      "why": "非法字面量 ⇒ throw"
+    },
+    {
+      "id": "num-2",
+      "line": "user-invocable: 2",
+      "upstreamLoads": false,
+      "why": "只有数字 1/0 被接受 ⇒ throw"
+    },
+    {
+      "id": "seq",
+      "line": "user-invocable: [true]",
+      "upstreamLoads": false,
+      "why": "数组 ⇒ throw"
+    },
+    {
+      "id": "map",
+      "line": "user-invocable: {a: 1}",
+      "upstreamLoads": false,
+      "why": "映射 ⇒ throw"
+    },
+    {
+      "id": "disable-empty",
+      "line": "disable-model-invocation:",
+      "upstreamLoads": false,
+      "why": "同一个 frontmatterBoolean 读的另一个键，同样 throw"
+    }
+  ]
+}
