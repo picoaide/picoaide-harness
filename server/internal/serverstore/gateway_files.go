@@ -180,6 +180,36 @@ func GatewayFileOwnedBy(db *sql.DB, fileID string, userID int64) (bool, error) {
 	return ok && owner == userID, nil
 }
 
+// GatewayFileOwnedByGeneration 是 `GatewayFileOwnedBy` + **读那一刻的行世代**
+// （R18C-02，审计 2026-09-25，P1）。
+//
+// 为什么需要世代：`GET /files/:id` 拿到上游 404 后要把悬垂行收敛掉，而"读归属"与
+// "删行"之间隔着一次上游往返 —— 窗口内该行可能被转手（过期行转手是 `RecordGatewayFileSize`
+// 的既定语义，世代 +1）。只按 file_id 删行会删掉**新归属人**刚写的行（对象还在、
+// 本地却 404）。调用方拿到这里返回的世代后必须用 `DeleteGatewayFileRowIfGeneration`
+// 收尾。
+//
+// 过期行按"不存在"处理（与 GatewayFileOwner 同一口径）。
+func GatewayFileOwnedByGeneration(db *sql.DB, fileID string, userID int64) (generation int64, owned bool, err error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	var owner int64
+	row := rd.QueryRow(
+		`SELECT user_id, reap_gen FROM gateway_files
+		 WHERE file_id = ? AND (expires_at IS NULL OR expires_at > now())`, fileID)
+	switch err := row.Scan(&owner, &generation); {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, err
+	}
+	return generation, owner == userID, nil
+}
+
 // gatewayFilesOwnedByChunk 是 `IN (...)` 展开的分片大小。
 //
 // 为什么必须分片：PostgreSQL 扩展协议一条语句最多 65535 个绑定参数（`IN` 还会带上
@@ -243,7 +273,13 @@ func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]str
 	return owned, nil
 }
 
-// DeleteGatewayFileRow 删除归属行（上游删除成功、或已确认上游 404 时调用）。
+// DeleteGatewayFileRow 无条件删除归属行。
+//
+// **只允许在没有外部副作用的路径上使用**（现役调用点：回收器丢弃"形状非法、拼不出
+// 上游 URL"的台账行 —— 那种行本来就没有可删的上游对象）。任何"先删上游对象、再收敛
+// 台账"的路径都必须先经 `ClaimGatewayFileForDeletion` 取得带世代的删除权，否则窗口内
+// 被转手（`RecordGatewayFileSize` 允许过期行转手并 +1 世代）的行会把**新归属人**的
+// 台账行删掉（R18C-02，审计 2026-09-25，P1）。
 func DeleteGatewayFileRow(db *sql.DB, fileID string) error {
 	// R13-GE（V2-2）：gateway_files 属族内关系 ⇒ 池上写入口经唯一实现 withUsageSearchPath
 	// （否则 shadow 在场时删的是 shadow 行，真实台账一行不动且 err=nil）。
@@ -251,6 +287,30 @@ func DeleteGatewayFileRow(db *sql.DB, fileID string) error {
 		_, err := tx.Exec(`DELETE FROM gateway_files WHERE file_id = ?`, fileID)
 		return err
 	})
+}
+
+// DeleteGatewayFileRowIfGeneration 条件删除：**只在世代未变时**删行，返回是否真的删掉。
+//
+// 用途：**没有外部副作用**的收敛路径（`GET /files/:id` 拿到上游 404 后把悬垂行丢掉）——
+// 那条路径先读归属与世代、再发上游请求、最后删行；窗口内该行被转手（世代 +1）时，
+// 删掉的就是**新归属人**的行（本地 404、对象还在）。返回 false = 行已归新一代，调用方
+// 必须如实记为"未收敛"并打日志，不得当成成功。
+//
+// 与 `ClaimGatewayFileForDeletion` 的分工：需要先删**上游对象**的路径用认领协议（外部
+// 副作用必须被围栏罩住），只收敛本地行的路径用本函数即可。
+func DeleteGatewayFileRowIfGeneration(db *sql.DB, fileID string, generation int64) (bool, error) {
+	// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath。
+	removed := false
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM gateway_files WHERE file_id = ? AND reap_gen = ?`, fileID, generation)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		removed = n > 0
+		return nil
+	})
+	return removed, err
 }
 
 // GatewayFile 台账的单次查询上限：官方 Files API 每账号最多 10000 个文件，
@@ -827,19 +887,63 @@ type GatewayFileForReap struct {
 //
 // 返回 ok=false 表示"已经不过期 / 已被别的路径处理 / 标记仍在租约内"（调用方跳过）。
 func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
+	return claimGatewayFile(db, fileID, true)
+}
+
+// ClaimGatewayFileForDeletion 认领一行**任意状态**的台账（R18C-02，审计 2026-09-25，P1）：
+// 锁行、打回收标记、世代 +1 并回读，提交。**不删行**。
+//
+// 为什么需要它：管理端「按 id 删除」/「批量清理」与用户侧 `DELETE /files/:id` 都是
+// "读台账 → 上游 DELETE（**外部副作用**）→ 删台账行"，而 0081 引入的 `reap_gen` 世代号
+// 只有回收器在用 ⇒ 窗口内该行被转手（过期行转手 = `RecordGatewayFileSize` 的既定语义）
+// 时，删掉的是**新归属人**的上游对象与台账行。修法 = 让这三条路径走同一套认领协议：
+// 先认领（世代 +1 + 标记），再发上游 DELETE，收尾用 `FinishReapedGatewayFile(gen)`；
+// 拿不到认领就**放弃删除**并如实回报（不得静默删行）。
+//
+// 与 `ClaimExpiredGatewayFile` 的差别只有"候选行是否要求已过期"——管理端删除按 id 操作，
+// 有效行同样有删除按钮（审计 2026-09-22 R6 P2）。其余语义（租约、世代 +1、认领期拒绝
+// 转手、崩溃自愈）**逐字相同**，两条入口共用 `claimGatewayFile` 这一个实现。
+//
+// 返回 `err = ErrNotFound` 表示台账里没有这一行；返回 `(0, false, nil)` 表示"别人正持有
+// 这一行的删除权（标记在租约内）"——调用方必须放弃删除，不要动上游对象。
+func ClaimGatewayFileForDeletion(db *sql.DB, fileID string) (generation int64, claimed bool, err error) {
+	snap, ok, err := claimGatewayFile(db, fileID, false)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	return snap.ReapGeneration, true, nil
+}
+
+// claimGatewayFile 是**认领协议的唯一实现**（`requireExpired` 决定候选行是否必须已过期）。
+
+// 两个入口（回收器 / 删除路径）在这里共用：锁行 → 复检状态 → 同一条 UPDATE 里
+// `reaping_at = now()` + `reap_gen = reap_gen + 1`（RETURNING 回读，避免"先读后写"竞态）
+// → 提交。`WHERE (reaping_at IS NULL OR 标记早于租约)` 既是"别人正在删"的互斥，也是
+// 认领方崩溃后的自愈窗口。
+func claimGatewayFile(db *sql.DB, fileID string, requireExpired bool) (GatewayFileForReap, bool, error) {
 	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return GatewayFileForReap{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var snap GatewayFileForReap
-	row := tx.QueryRow(`SELECT file_id, user_id, created_at, expires_at, size_bytes FROM gateway_files
+	// 两条候选谓词都是**代码内常量**（不含任何调用方输入）：过期要求是回收器与删除路径
+	// 的唯一差别，其余逐字相同。
+	query := `SELECT file_id, user_id, created_at, expires_at, size_bytes FROM gateway_files
+	                     WHERE file_id = ? FOR UPDATE`
+	if requireExpired {
+		query = `SELECT file_id, user_id, created_at, expires_at, size_bytes FROM gateway_files
 	                     WHERE file_id = ? AND expires_at IS NOT NULL AND expires_at <= now()
-	                     FOR UPDATE`, fileID)
+	                     FOR UPDATE`
+	}
+	var snap GatewayFileForReap
+	row := tx.QueryRow(query, fileID)
 	switch err := row.Scan(&snap.FileID, &snap.UserID, &snap.CreatedAt, &snap.ExpiresAt, &snap.SizeBytes); {
 	case errors.Is(err, sql.ErrNoRows):
-		return GatewayFileForReap{}, false, nil // 已续期/已被处理
+		if requireExpired {
+			return GatewayFileForReap{}, false, nil // 已续期/已被处理
+		}
+		return GatewayFileForReap{}, false, ErrNotFound // 删除路径：台账里没有这一行
 	case err != nil:
 		return GatewayFileForReap{}, false, err
 	}
@@ -920,14 +1024,27 @@ func FinishReapedGatewayFile(db *sql.DB, fileID string, generation int64) (bool,
 	return removed, err
 }
 
-// ReleaseReapClaim 放弃回收标记（上游删除失败时调用）：下一轮立刻可以重试，
-// 不必等租约过期。
-func ReleaseReapClaim(db *sql.DB, fileID string) error {
+// ReleaseReapClaim 放弃回收标记（上游删除失败 / 复检发现删除权已失效时调用）：
+// 下一轮（或下一个调用方）立刻可以重试，不必等租约过期。
+//
+// **必须带世代谓词**（R18C-02，审计 2026-09-25）：无谓词的 `reaping_at = NULL` 会把
+// **新一代**正在使用的认领一并清掉 —— 那一代随后会在 `GatewayFileReapClaimHeld` 上
+// 得到"仍有删除权"的假象（它的 fencing 被我们拆了）。世代已经变了（`reap_gen <> generation`）
+// 或行已不在时什么都不做，返回 released=false；调用方据此判断"这份标记还是不是我的"。
+func ReleaseReapClaim(db *sql.DB, fileID string, generation int64) (released bool, err error) {
 	// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath。
-	return withUsageSearchPath(db, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`UPDATE gateway_files SET reaping_at = NULL WHERE file_id = ?`, fileID)
-		return err
+	err = withUsageSearchPath(db, func(tx *sql.Tx) error {
+		res, eerr := tx.Exec(
+			`UPDATE gateway_files SET reaping_at = NULL WHERE file_id = ? AND reap_gen = ? AND reaping_at IS NOT NULL`,
+			fileID, generation)
+		if eerr != nil {
+			return eerr
+		}
+		n, _ := res.RowsAffected()
+		released = n > 0
+		return nil
 	})
+	return released, err
 }
 
 // NormalizeLegacyPermanentGatewayFiles 把"没有过期时间"的存量行按上限补齐

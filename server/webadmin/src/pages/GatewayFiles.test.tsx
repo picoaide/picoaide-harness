@@ -421,6 +421,26 @@ describe('网关文件台账页', () => {
     expect(JSON.parse(purge.body!)).toEqual({ state: 'expired', user: 'bob' })
   })
 
+  it('批量清理：服务端跳过（skipped）的条数必须显示出来，不能只说"删除 N"', async () => {
+    // R18C-02：拿不到删除权 / 删除期间世代已变的行会被跳过（没有调用上游、行原样保留）。
+    // 服务端响应新增 skipped ⇒ 页面必须如实显示，否则"命中 2 删除 1"看起来像静默失败。
+    const calls = installMock()
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      calls.push({ path: String(path), method, body: init?.body ? String(init.body) : undefined })
+      const base = String(path).split('?')[0]!
+      if (base === '/api/server/admin/gateway/files') return { rows: DEFAULT_ROWS, total: 1, totals: TOTALS }
+      if (base === '/api/server/admin/gateway/files/purge') return { ok: true, deleted: 1, failed: 0, matched: 2, skipped: 1 }
+      return {}
+    })
+    vi.spyOn(window, 'prompt').mockReturnValue('确认')
+    render(<GatewayFiles />)
+    await waitFor(() => expect(screen.getByText('file-api-aaa')).toBeTruthy())
+    await pickSelect('状态', '已过期')
+    fireEvent.click(screen.getByText('按条件清理'))
+    await waitFor(() => expect(screen.getByText(/清理完成：命中 2，删除 1，失败 0，跳过 1/)).toBeTruthy())
+  })
+
   it('批量清理：没填员工时请求体只有 state（不带 user 键）', async () => {
     const calls = installMock()
     vi.spyOn(window, 'prompt').mockReturnValue('确认')

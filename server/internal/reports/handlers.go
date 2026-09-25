@@ -48,7 +48,8 @@ type subReq struct {
 // 旧实现 trim 后只用于校验、落库仍写 req.HookURL 原文:提交
 // `" https://x "` 会 201/200 成功,但 PushWebhook 用同一份原文
 // http.NewRequest ⇒ `parse " https://… ": first path segment in URL cannot
-// contain colon` ⇒ 订阅永久发不出去(且失败也写 last_run_at,当月不再重试)。
+// contain colon` ⇒ 订阅永久发不出去(修前失败还会推进 last_run_at ⇒ 当月不再重试;
+// R18C-03 起失败不推进 `last_run_at`，调度器每小时那一轮会重投同一期)。
 // 现在校验与落库共用同一个归一化值。
 func (r *subReq) validate() (name, hookURL, msg string) {
 	name = strings.TrimSpace(r.Name)

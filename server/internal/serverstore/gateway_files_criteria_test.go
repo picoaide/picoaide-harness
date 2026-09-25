@@ -1507,8 +1507,10 @@ func TestRecordGatewayFileRefusesTransferDuringActiveClaim(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if err := ReleaseReapClaim(db, idReleased); err != nil {
+	if released, err := ReleaseReapClaim(db, idReleased, snapRel.ReapGeneration); err != nil {
 		t.Fatal(err)
+	} else if !released {
+		t.Fatal("本世代的释放必须命中（行与世代都没变）")
 	}
 	if err := RecordGatewayFile(db, idReleased, bob, &future); err != nil {
 		t.Fatalf("释放认领后的转手应被允许: %v", err)

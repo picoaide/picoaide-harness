@@ -42,7 +42,8 @@ type sysinfoResponse struct {
 	// 修前:余额 0.01 的账号可以无限次请求 —— 每次都已真实调用上游、随后结算失败
 	// 整笔回滚,usage/余额/流水一行不动、管理端零痕迹。现在被拒的请求走准入闸门
 	// (不转发上游)并**留下计数与最近一条的形状**,让"谁在被拒、依据是什么
-	// (non_positive | learned_floor | min_billable)、差多少钱"可检索。
+	// (non_positive | learned_floor | min_billable | unpriced_model | unbillable_price)、
+	// 差多少钱"可检索。
 	Balance balanceHealth `json:"balance"`
 	// Audit 是审计链与审计写入的健康状态(FIX-12,审计 2026-09-12 P1)。
 	//

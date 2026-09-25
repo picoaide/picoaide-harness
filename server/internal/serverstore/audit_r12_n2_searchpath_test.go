@@ -340,20 +340,26 @@ const (
 var r13geSearchPathInventory = map[string]r13gePinMode{
 	// —— 已钉（池上入口经唯一实现：newUsageReadConn / withUsageSearchPathRead /
 	//    withUsageSearchPath / usageWriteTx / pinUsageSearchPath / applyUsageRetentionBudget）——
-	"AuditLogTx":                           r13geViaCaller, // audit.go —— 由调用方的已钉事务钉（见 owners）
-	"PurgeOldAuditLogs":                    r13gePinned,    // audit.go —— withUsageSearchPath
-	"writeAuditBatch":                      r13gePinned,    // audit.go —— usageWriteTx
-	"BalanceLedgerPage":                    r13gePinned,    // balance.go
-	"BalanceLedgerSum":                     r13gePinned,    // balance.go
-	"ClaimExpiredGatewayFile":              r13gePinned,    // gateway_files.go
+	"AuditLogTx":        r13geViaCaller, // audit.go —— 由调用方的已钉事务钉（见 owners）
+	"PurgeOldAuditLogs": r13gePinned,    // audit.go —— withUsageSearchPath
+	"writeAuditBatch":   r13gePinned,    // audit.go —— usageWriteTx
+	"BalanceLedgerPage": r13gePinned,    // balance.go
+	"BalanceLedgerSum":  r13gePinned,    // balance.go
+	// R18C-02：两个认领入口都只是 claimGatewayFile 的薄包装（认领协议的唯一实现，
+	// 已钉写事务在那里），所以它们是 via-caller。
+	"ClaimExpiredGatewayFile":              r13geViaCaller, // gateway_files.go —— claimGatewayFile
+	"ClaimGatewayFileForDeletion":          r13geViaCaller, // gateway_files.go —— claimGatewayFile
+	"claimGatewayFile":                     r13gePinned,    // gateway_files.go —— R18C-02：回收器/删除路径共用的认领唯一实现
 	"CleanupPendingUsage":                  r13gePinned,    // usage.go
 	"DeleteGatewayFileRow":                 r13gePinned,    // gateway_files.go
+	"DeleteGatewayFileRowIfGeneration":     r13gePinned,    // gateway_files.go —— R18C-02：带世代谓词的条件删行
 	"DeleteGatewayProvider":                r13gePinned,    // gateway.go
 	"DeleteSetting":                        r13gePinned,    // settings.go
 	"DeleteUsage":                          r13gePinned,    // usage.go
 	"DeleteUser":                           r13gePinned,    // users.go
 	"FinishReapedGatewayFile":              r13gePinned,    // gateway_files.go
 	"GatewayFileOwner":                     r13gePinned,    // gateway_files.go
+	"GatewayFileOwnedByGeneration":         r13gePinned,    // gateway_files.go —— R18C-02：归属 + 读那一刻的行世代
 	"GatewayFileReapBacklogStats":          r13gePinned,    // gateway_files.go
 	"GatewayFileReapClaimHeld":             r13gePinned,    // gateway_files.go
 	"GatewayFileRowExists":                 r13gePinned,    // gateway_files.go
@@ -371,6 +377,7 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"ListGatewayProviders":                 r13gePinned,    // gateway.go
 	"ListUsageRequests":                    r13gePinned,    // requests.go
 	"ModelHasUsage":                        r13gePinned,    // gateway.go
+	"ModelPricesForProviders":              r13gePinned,    // gateway.go —— R18C-01：候选 provider 维度批量取价（同一条已钉只读事务）
 	"ModelProviderMap":                     r13gePinned,    // usage_provider.go
 	"NormalizeLegacyPermanentGatewayFiles": r13gePinned,    // gateway_files.go
 	"PurgeExpiredGatewayFiles":             r13gePinned,    // gateway_files.go
@@ -450,29 +457,31 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 // r13geViaCallerOwners 给每一个 via-caller 登记"谁钉的"，避免"以为有人钉"。
 var r13geViaCallerOwners = map[string]string{
 	// 事务版（同一个函数的 Tx 形态）：由它们的池上包装钉。
-	"AuditLogTx":              "llmgateway admin 的 provider 创建/更新 / 模型删除事务（serverstore.UsageWriteTx 开出的已钉事务）",
-	"listAuditLogsOn":         "listAuditLogs（withUsageSearchPathRead）",
-	"verifyAuditChainOn":      "VerifyAuditChain（withUsageSearchPathRead）",
-	"GetGatewayProviderTx":    "GetGatewayProvider（已钉只读事务）",
-	"GetModelTx":              "GetModel（已钉只读事务）",
-	"SetSettingTx":            "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
-	"setUsageAppIDTx":         "SetUsageAppID（withUsageSearchPath）/ SetUsageAppIDVerified（同一已钉事务内先查 apps 再写）",
-	"DeleteModelTx":           "DeleteModel（usageWriteTx）/ llmgateway admin 的显式事务",
-	"UpdateModelTx":           "UpdateModel（usageWriteTx）/ llmgateway admin 的改价事务（R16C-01：审计同事务）",
-	"ModelHasUsageTx":         "llmgateway admin 的 updateModel 事务（R16C-01：避免事务内 hold-and-wait）",
-	"SyncProviderModelsTx":    "SyncProviderModel 的调用方事务（llmgateway admin，已钉）",
-	"UpdateGatewayProviderTx": "llmgateway admin 的 provider 更新事务（usageWriteTx 同源）",
-	"AddExcludedModelTx":      "llmgateway admin 的排除名单事务",
-	"excludedModelsTx":        "AddExcludedModelTx / removeProviderModelName 的调用方事务",
-	"providerModelRowsTx":     "RemoveMissingProviderModels / SyncProviderModelsTx 的已钉事务",
-	"addProviderModelName":    "UpdateModel / SyncProviderModelsTx 的已钉事务",
-	"removeProviderModelName": "DeleteModelTx / UpdateModel 的已钉事务",
-	"clearDefaultModelIf":     "UpdateModel / DeleteModelTx 的已钉事务",
-	"addModel":                "AddModel / AddModelTx（后者由调用方钉）",
-	"insertProvider":          "AddGatewayProvider（withUsageSearchPath）/ AddGatewayProviderTx",
-	"insertLedgerTx":          "settleUsageCostTx / adjustBalanceTx / grantBatchTx（均已在事务首句钉）",
-	"grantBatchTx":            "GrantMonthlyBalance（usageWriteTx 族）",
-	"settleUsageCostTx":       "recordUsageKindAtCached / updateUsageTokensAtCached / 结算段（均已钉）",
+	"AuditLogTx":                  "llmgateway admin 的 provider 创建/更新 / 模型删除事务（serverstore.UsageWriteTx 开出的已钉事务）",
+	"listAuditLogsOn":             "listAuditLogs（withUsageSearchPathRead）",
+	"verifyAuditChainOn":          "VerifyAuditChain（withUsageSearchPathRead）",
+	"ClaimExpiredGatewayFile":     "claimGatewayFile（R18C-02：认领协议的唯一实现，内部 usageWriteTx 已钉）",
+	"ClaimGatewayFileForDeletion": "claimGatewayFile（R18C-02：删除路径与回收器共用同一认领实现）",
+	"GetGatewayProviderTx":        "GetGatewayProvider（已钉只读事务）",
+	"GetModelTx":                  "GetModel（已钉只读事务）",
+	"SetSettingTx":                "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
+	"setUsageAppIDTx":             "SetUsageAppID（withUsageSearchPath）/ SetUsageAppIDVerified（同一已钉事务内先查 apps 再写）",
+	"DeleteModelTx":               "DeleteModel（usageWriteTx）/ llmgateway admin 的显式事务",
+	"UpdateModelTx":               "UpdateModel（usageWriteTx）/ llmgateway admin 的改价事务（R16C-01：审计同事务）",
+	"ModelHasUsageTx":             "llmgateway admin 的 updateModel 事务（R16C-01：避免事务内 hold-and-wait）",
+	"SyncProviderModelsTx":        "SyncProviderModel 的调用方事务（llmgateway admin，已钉）",
+	"UpdateGatewayProviderTx":     "llmgateway admin 的 provider 更新事务（usageWriteTx 同源）",
+	"AddExcludedModelTx":          "llmgateway admin 的排除名单事务",
+	"excludedModelsTx":            "AddExcludedModelTx / removeProviderModelName 的调用方事务",
+	"providerModelRowsTx":         "RemoveMissingProviderModels / SyncProviderModelsTx 的已钉事务",
+	"addProviderModelName":        "UpdateModel / SyncProviderModelsTx 的已钉事务",
+	"removeProviderModelName":     "DeleteModelTx / UpdateModel 的已钉事务",
+	"clearDefaultModelIf":         "UpdateModel / DeleteModelTx 的已钉事务",
+	"addModel":                    "AddModel / AddModelTx（后者由调用方钉）",
+	"insertProvider":              "AddGatewayProvider（withUsageSearchPath）/ AddGatewayProviderTx",
+	"insertLedgerTx":              "settleUsageCostTx / adjustBalanceTx / grantBatchTx（均已在事务首句钉）",
+	"grantBatchTx":                "GrantMonthlyBalance（usageWriteTx 族）",
+	"settleUsageCostTx":           "recordUsageKindAtCached / updateUsageTokensAtCached / 结算段（均已钉）",
 	// 语句实现（唯一一份 SQL，接收已钉事务的语句入口 rowQuerier）：
 	"modelPricesQ":                "newUsageReadConn 的两个构造点（ModelPrices / loadModelPriceInputs）",
 	"modelPricesForProviderQ":     "ModelPricesForProvider / loadModelPriceInputs（已钉只读事务）",

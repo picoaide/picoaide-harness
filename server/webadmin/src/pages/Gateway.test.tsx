@@ -758,3 +758,65 @@ describe('出站体加工的两个闸门字段', () => {
     expect(puts[0].file_expiry_days).toBe('7')
   })
 })
+
+// R18C-04（审计 2026-09-25，P2）：峰谷 `weekdays` 的三态不能被合并。
+//   - 键缺省（老数据）= 每天 ⇒ 7 个星期全亮；
+//   - **显式空数组 / 全非法** ⇒ 页面必须如实显示"一个都没勾"（修前映射成 ALL_WEEKDAYS，
+//     等于把服务端的静默反转又照抄一遍：页面看不出配置已变成"每天都是高峰"）；
+//   - 提交前必须拦住"一行一个星期一都没勾"，不发 PUT（服务端也已 400，这里是体验层）。
+describe('峰谷 weekdays 的三态（R18C-04）', () => {
+  function storeGateway(getBody: Record<string, unknown>) {
+    const puts: Array<Record<string, unknown>> = []
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/gateway' && init?.method === 'PUT') {
+        puts.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, warnings: [] }
+      }
+      if (path === '/api/server/admin/gateway') return getBody
+      if (path === '/api/server/admin/providers') return []
+      if (path === '/api/server/admin/models') return []
+      if (path === '/api/server/admin/channels') return { channels: [] }
+      return baseImpl(path, init)
+    })
+    return puts
+  }
+
+  it('键缺省（老数据）= 每天：7 个星期全部点亮', async () => {
+    storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '[{"start":"09:00","end":"12:00"}]' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    for (const d of ['一', '二', '三', '四', '五', '六', '日']) {
+      expect(screen.getByRole('button', { name: `周${d}` }).getAttribute('aria-pressed')).toBe('true')
+    }
+  })
+
+  it('显式空数组：一个都不点亮，且提交被拦下并给出修法', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '[{"start":"09:00","end":"12:00","weekdays":[]}]' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    for (const d of ['一', '二', '三', '四', '五', '六', '日']) {
+      expect(screen.getByRole('button', { name: `周${d}` }).getAttribute('aria-pressed')).toBe('false')
+    }
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/高峰时段每行至少要勾选一个生效星期/)
+    expect(puts.length).toBe(0)
+  })
+
+  it('把 7 个星期全部取消勾选后提交：被拦下，不发 PUT', async () => {
+    const puts = storeGateway({ default_model: 'deepseek-chat', rate_limit: '0', peak_windows: '[{"start":"09:00","end":"12:00","weekdays":[1,2,3,4,5]}]' })
+    render(<Gateway />)
+    await waitForGatewayLoaded()
+    for (const d of ['一', '二', '三', '四', '五']) {
+      fireEvent.click(screen.getByRole('button', { name: `周${d}` }))
+    }
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText(/高峰时段每行至少要勾选一个生效星期/)
+    expect(puts.length).toBe(0)
+    // 勾回一天 ⇒ 恢复可保存（不把管理员困死在这一屏）。
+    fireEvent.click(screen.getByRole('button', { name: '周一' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存')
+    expect(puts.length).toBe(1)
+    expect(String(puts[0].peak_windows)).toContain('"weekdays":[1]')
+  })
+})

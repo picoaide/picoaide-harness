@@ -97,9 +97,15 @@ function parsePeakWindows(s: string): PeakParse {
       keyId: `pk-${uid()}`,
       start: w.start,
       end: w.end,
-      weekdays: Array.isArray(w.weekdays) && w.weekdays.length > 0
-        ? w.weekdays.filter((d: any) => Number.isInteger(d) && d >= 1 && d <= 7)
-        : ALL_WEEKDAYS,
+      // R18C-04:weekdays 的三态必须分开 —— 键缺省/null = 每天(老数据);
+      // **显式数组**则只保留 1..7（可能是空数组 ⇒ 一天都不勾选,由提交校验拦住）。
+      // 旧实现把"显式空数组/全非法"也映射成 ALL_WEEKDAYS,等于把服务端的静默反转
+      // 又照抄了一遍:页面看不出配置已经被改写成"每天都是高峰"。
+      weekdays: w.weekdays === undefined || w.weekdays === null
+        ? ALL_WEEKDAYS
+        : (Array.isArray(w.weekdays)
+          ? w.weekdays.filter((d: any) => Number.isInteger(d) && d >= 1 && d <= 7)
+          : ALL_WEEKDAYS),
     }))
   // 非空数组却一行都没解析出来 = 结构已不是本页认得的形态(旧版本/手改),
   // 同样按解析失败处理:不拿空列表去覆盖它。
@@ -292,6 +298,13 @@ export default function Gateway() {
     }
     if (peakList.some((w) => !w.start || !w.end || w.start >= w.end)) {
       setError('高峰时段每行的开始时间必须早于结束时间')
+      return
+    }
+    // R18C-04:显式空星期是**语义反转**的入口(服务端按字面语义 = 该档一天都不生效,
+    // 而旧实现把它当"每天"),服务端已 400;前端在这里先拦住并给出修法,别让管理员
+    // 提交后才看到一句 VALIDATION。
+    if (peakList.some((w) => w.weekdays.length === 0)) {
+      setError('高峰时段每行至少要勾选一个生效星期(一天都不选请删除该行;要清空全部峰谷配置请用「清空高峰时段配置」)')
       return
     }
     setBusy('save-gateway')
@@ -992,7 +1005,9 @@ export default function Gateway() {
                     value={w.end}
                     onChange={(e) => updatePeak(i, 'end', e.target.value)}
                   />
-                  {/* 星期多选:1=周一…7=周日;空 = 每天 */}
+                  {/* 星期多选:1=周一…7=周日。R18C-04:服务端已不接受"一个都不选"
+                      (那种形态的字面语义是该档不生效,旧实现却当成"每天");这里保持
+                      可取消到 0 个,由上面的提交校验提示修法。 */}
                   <div className="flex items-center gap-0.5" aria-label={`星期选择 ${i + 1}`}>
                     {WEEKDAY_LABELS.map((lbl, idx) => {
                       const d = idx + 1

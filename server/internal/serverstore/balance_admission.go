@@ -110,8 +110,10 @@ type BalanceAdmissionRejection struct {
 	// Endpoint 是拒绝发生的端点标签（chat / completions / embeddings / responses / messages）。
 	Endpoint string `json:"endpoint"`
 	Model    string `json:"model"`
-	// Reason 是拒绝依据：non_positive（分位余额 <= 0）|
-	// learned_floor（上次结算因余额不足失败，余额未增长）| min_billable（小于本次最小计费额）。
+	// Reason 是拒绝依据（封闭集合）：non_positive（分位余额 <= 0）|
+	// learned_floor（上次结算因余额不足失败，余额未增长）| min_billable（小于本次最小计费额）|
+	// unpriced_model（候选 provider 里任一家的生效输入价 <= 0，R17A-06/R18C-01）|
+	// unbillable_price（单价 > 0 但**这次请求**的最小应付额折到 0 微元，R18A-05）。
 	Reason string `json:"reason"`
 	// RequiredMoney 是本次要求的下限（元）；non_positive 时为 0。
 	RequiredMoney float64 `json:"required_money"`

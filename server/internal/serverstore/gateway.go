@@ -971,6 +971,35 @@ func modelPricesForProviderQ(q rowQuerier, scope *sql.DB, providerID int64, name
 	return r[0], r[1], r[2]
 }
 
+// ModelPricesForProviders 批量取"每个候选 provider 各自的生效价"（R18C-01，审计 2026-09-25，P1）。
+//
+// 为什么需要这个形状：网关**准入闸门**必须按"这次请求可能被路由到的 provider 集合"
+// 取价，而不是按模型名取一行（`ModelPrices` = `ORDER BY provider_id LIMIT 1`）——
+// 后者与结算侧的 `ModelPricesForProvider(实际命中的 provider, name)` 在同名模型挂
+// 两个 provider、且实际服务的那家未定价（渠道同步建 NULL 价行是常规路径）时分叉：
+// 闸门以为"已定价"而放行，结算算出 cost = 0 ⇒ 余额一分不减、学到的下限永不置位。
+//
+// **与结算同一实现**：逐项调用 `modelPricesForProviderQ`（结算路径用的就是它，含
+// "该 provider 下无此行 ⇒ 回落 name 口径"的既定语义），只是共用**一条**已钉
+// search_path 的只读事务（避免 N 个候选各开一条连接：准入在热路径上，且 R14-K 的
+// 口径要求族内关系同看一个 q）。缓存命中时零额外语句（与单条形态一致）。
+func ModelPricesForProviders(db *sql.DB, providerIDs []int64, name string) (map[int64][3]float64, error) {
+	out := make(map[int64][3]float64, len(providerIDs))
+	if len(providerIDs) == 0 {
+		return out, nil // 空集合不开事务（零往返）
+	}
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	for _, providerID := range providerIDs {
+		in, o, off := modelPricesForProviderQ(rd, db, providerID, name)
+		out[providerID] = [3]float64{in, o, off}
+	}
+	return out, nil
+}
+
 // ModelCachePriceForProvider 是 ModelCachePrice 的 provider 维度版本(P1-6)。
 func ModelCachePriceForProvider(db *sql.DB, providerID int64, name string) float64 {
 	rd, err := newUsageReadConn(db)

@@ -132,8 +132,12 @@ func (a *API) ReapExpiredGatewayFiles(limit int) (deleted, failed int) {
 		if err := deleteUpstreamFile(client, up, id); err != nil {
 			log.Printf("gateway: file reaper: delete upstream file failed (id=%s gen=%d): %v", id, gen, err)
 			// 释放标记让下一轮立刻重试（不必等租约过期）；行保留 = 清理责任不丢。
-			if rerr := serverstore.ReleaseReapClaim(a.DB, id); rerr != nil {
+			// 释放**带世代谓词**（R18C-02）：世代已变说明这份标记不归本世代，
+			// 无谓词的释放会把新一代正在用的认领清掉、拆掉它的 fencing。
+			if released, rerr := serverstore.ReleaseReapClaim(a.DB, id, gen); rerr != nil {
 				log.Printf("gateway: file reaper: release reap claim failed (id=%s gen=%d): %v", id, gen, rerr)
+			} else if !released {
+				log.Printf("gateway: file reaper: file %s gen=%d: reap claim no longer belongs to this generation; left in place", id, gen)
 			}
 			failed++
 			continue
