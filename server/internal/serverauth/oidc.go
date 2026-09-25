@@ -501,9 +501,11 @@ func (a *API) handleOIDCCallbackWith(p BrowserProvider) gin.HandlerFunc {
 			writeError(c, http.StatusUnauthorized, "AUDITOR_NOT_ALLOWED", "审计账号不可登录客户端,请使用管理后台")
 			return
 		}
-		token, err := IssueToken(a.DB, user.ID)
+		// R15C-R-01 ③(审计 2026-09-25,P1):OIDC 回调与本地登录共用同一个
+		// 自助签发配额(按 user_id 计,两条路径合计一份预算)。
+		token, err := a.issueTokenForLogin(c, user)
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "INTERNAL", "令牌签发失败")
+			writeTokenIssueError(c, err)
 			return
 		}
 		// v3b 审计: OIDC 成功留痕。

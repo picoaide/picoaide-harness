@@ -657,6 +657,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 	idleTimedOut := false
 	lineTooLong := false
 	lineEOF := false
+	// sawTerminal = 整条流是否出现过**收尾标记**（`data: [DONE]` / Responses 的
+	// response.completed / chat chunk 的 finish_reason）。R15C-R-02：EOF 到来时
+	// 它就是"正常结束"与"上游中途断连"的唯一区分依据 —— 没有它，两种形态在
+	// 客户端与服务端日志里都是"流没了"。
+	sawTerminal := false
 	var forwardedBytes int64
 	// deliveredContentBytes/Chunks 是**正文内容**口径(r7 r7f1-2,P2):只有解析到
 	// 正文/工具调用增量才累加,data: [DONE]/event:/注释/纯 usage 行/上游 error
@@ -774,6 +779,11 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					deliveredContentChunks++
 					deliveredContentBytes += n
 				}
+				// R15C-R-02：逐行看有没有收尾标记。sawTerminal 一旦为真就不再判
+				// （短路在前，热路径上通常只剩几次 strings.Contains 的开销）。
+				if !sawTerminal && streamTerminalMarkerSeen(line) {
+					sawTerminal = true
+				}
 				if !clientGone {
 					if _, werr := c.Writer.WriteString(line); werr != nil {
 						clientGone = true
@@ -798,6 +808,34 @@ func (a *API) serveStream(c *gin.Context, resp *http.Response, usageID int64, se
 					}
 				} else { // EOF / 上游关闭
 					lineEOF = true
+					// R15C-R-02（审计 2026-09-25，P2）：上游在**收尾标记之前**断连时
+					// 必须显式收尾。此前这里只置 lineEOF 就 break —— 客户端拿到
+					// "HTTP 200 + 半截正文"，既没有 `data: {"error":…}` 也没有
+					// `data: [DONE]`，服务端**零日志**（实测 MODE:truncate →
+					// 200 / 174 B / 无 error / 无 DONE / 新增日志 0 行）。
+					// 后果是调用方无法区分"答完了"与"上游挂了"：网关已按已交付字节
+					// 估算结算，客户端却把截断的答案当完整答案渲染。
+					//
+					// 判据：**见过收尾标记**才算正常结束（sawTerminal，见
+					// streamTerminalMarkerSeen）。没见到就与同一函数里另外两条异常
+					// 出口（idle 超时 / 单行过大）**完全同形**：写一条 in-band
+					// error 事件 + 一行可检索日志，并保留"按已交付内容估算"的既有
+					// 结算语义。
+					//
+					// 客户端已断开（clientGone）时两者都不做：那种"截断"是客户端
+					// 自己造成的，写不回响应，记日志只会把每个正常的中断都变成噪音
+					// （drain 阶段上游跟着关闭是常态）。
+					if !sawTerminal && !clientGone {
+						log.Printf("gateway: upstream stream closed before the completion marker "+
+							"(forwarded=%d bytes, delivered_content=%d bytes, chunks=%d): "+
+							"treating as truncated and closing with an error event",
+							forwardedBytes, deliveredContentBytes, deliveredContentChunks)
+						fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游流在完成标记之前中断"}}`)
+						if fl != nil {
+							touchSSEWriteDeadline(c)
+							fl.Flush()
+						}
+					}
 				}
 			}
 		case <-idleTick.C:
@@ -1066,6 +1104,91 @@ func parseUsage(raw []byte) (pt, ct, cacheHit int64, ok bool, err error) {
 	}
 	// P0-B:负值一律归零(计费侧 costOfAt 另有一层,纵深防御)。
 	return clampTokensNonNeg(pt), clampTokensNonNeg(ct), clampTokensNonNeg(cacheHit), true, nil
+}
+
+// ---------------------------------------------------------------------------
+// 流式收尾标记（R15C-R-02，审计 2026-09-25，P2）
+// ---------------------------------------------------------------------------
+//
+// 缺陷形态：`serveStream` 的 EOF 分支只置 `lineEOF = true` 就退出循环 —— 上游在
+// 收尾标记之前断连时，客户端拿到"200 + 半截正文"，既没有 in-band error 事件也没有
+// `data: [DONE]`，服务端零日志；而同函数内另外两条异常出口（idle 超时、单行过大）
+// 都写 `data: {"error":…}`。调用方因此无法区分"答完了"与"上游挂了"。
+//
+// 判据必须**按协议**取，不能一律用 `[DONE]`：OpenAI Chat/Completions 的收尾标记是
+// `data: [DONE]`；Responses 的终结事件是 `response.completed`（**不发** `[DONE]`，
+// 拿 `[DONE]` 判会把每一条正常 Responses 流判成异常）；Anthropic 是 `message_stop`
+// （走 messages.go 的另一条泵，本函数只在别名/兜底路径见到它）。此外很多兼容上游
+// 在 `[DONE]` 之前就把 `choices[].finish_reason` 置为非空 —— 那是"模型已收尾"的
+// 协议内信号，同样算见过标记（宁可放过"少了哨兵但确实答完"的流，也不要把正常流
+// 打成失败：反向对照是这条判据的一半）。
+//
+// 成本：只在 sawTerminal 为假时逐行调用；先做几次 `strings.Contains` 门控，
+// 只有真的疑似收尾事件才 json.Unmarshal ⇒ 正文增量行的额外开销是一次子串扫描
+// （与紧随其后的 contentTracker.observe 同量级）。
+func streamTerminalMarkerSeen(line string) bool {
+	s := strings.TrimSpace(line)
+	switch {
+	case s == "" || strings.HasPrefix(s, ":"), strings.HasPrefix(s, "id:"), strings.HasPrefix(s, "retry:"):
+		return false
+	case strings.HasPrefix(s, "event:"):
+		return isTerminalStreamEventType(strings.TrimSpace(strings.TrimPrefix(s, "event:")))
+	case strings.HasPrefix(s, "data:"):
+		payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s, "data:"), " "))
+		if payload == "[DONE]" {
+			return true
+		}
+		return streamPayloadTerminates(payload)
+	case strings.HasPrefix(s, "{"):
+		// 上游忽略了 stream 参数、整行就是 JSON 响应体（rc3-3 的 D 形态）：
+		// 那是一份**完整**响应（成功体或错误体），不是被截断的流 ⇒ 只要它是
+		// 合法 JSON 对象就算见过收尾（截断的 JSON 解析不过，仍会被判为异常）。
+		var v map[string]any
+		return json.Unmarshal([]byte(s), &v) == nil
+	}
+	return false
+}
+
+// isTerminalStreamEventType 判定 SSE `event:` 名是否就是流的终结事件。
+//
+// 只认**精确**的终结事件，不认 `*.done` 后缀：Responses 的 `response.output_text.done`
+// / `response.output_item.done` 等都是在流中途发出的分段事件，用后缀匹配会把它们
+// 误判成"流已正常收尾"（那正好是这条修复要防的假绿）。
+func isTerminalStreamEventType(t string) bool {
+	switch t {
+	case "response.completed", "response.done", "message_stop":
+		return true
+	}
+	return false
+}
+
+// streamPayloadTerminates 判定一个 SSE data 载荷（或整包 JSON）是否携带收尾信号。
+func streamPayloadTerminates(payload string) bool {
+	if !strings.Contains(payload, "finish_reason") && !strings.Contains(payload, "response.completed") &&
+		!strings.Contains(payload, "message_stop") && !strings.Contains(payload, "response.done") {
+		return false
+	}
+	var v map[string]any
+	if json.Unmarshal([]byte(payload), &v) != nil {
+		return false
+	}
+	if t, _ := v["type"].(string); isTerminalStreamEventType(t) {
+		return true
+	}
+	choices, ok := v["choices"].([]any)
+	if !ok {
+		return false
+	}
+	for _, c := range choices {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fr, ok := cm["finish_reason"].(string); ok && fr != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

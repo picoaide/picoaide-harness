@@ -62,7 +62,7 @@ func TestListTokensByUser(t *testing.T) {
 	}
 
 	// empty
-	toks, err := ListTokensByUser(db, uid)
+	toks, _, err := ListTokensByUser(db, uid, TokenListMax)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestListTokensByUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	toks, err = ListTokensByUser(db, uid)
+	toks, _, err = ListTokensByUser(db, uid, TokenListMax)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestListTokensByUser(t *testing.T) {
 	if _, err := CreateToken(db, uid2, "list-tok-3", now.Add(90*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	toks, _ = ListTokensByUser(db, uid)
+	toks, _, _ = ListTokensByUser(db, uid, TokenListMax)
 	if len(toks) != 2 {
 		t.Fatalf("other user token leaked: %d", len(toks))
 	}

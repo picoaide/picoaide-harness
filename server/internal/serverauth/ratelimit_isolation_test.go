@@ -40,8 +40,13 @@ import (
 //
 // 只清**内容**、不替换实例:已经构造好的 API/AdminAPI 持有旧指针(handler.go
 // 的 New() 在构造期取单例),替换实例会让清空对它们无效。
+//
+// R15C-R-01 ③(审计 2026-09-25,P1):自助**签发配额**桶同样是包级单例(键 = DB 作用域 +
+// user_id),也必须在这里重置 —— 否则"前一个用例用同一 user_id 打满配额"会让后面的
+// 正常登录用例假红(新增"包级单例 + 进程级累积状态"必须挂进本统一入口是本仓纪律,
+// 先例见 telemetry.resetErrorReportingLimiter)。
 func resetSharedLimitersForTest() {
-	for _, l := range []*loginLimiter{sharedLoginLimiter(), sharedLoginIPLimiter()} {
+	for _, l := range []*loginLimiter{sharedLoginLimiter(), sharedLoginIPLimiter(), sharedTokenIssueQuotaLimiter()} {
 		if l == nil {
 			continue
 		}
