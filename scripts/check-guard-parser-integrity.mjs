@@ -382,6 +382,81 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
 ]
 
 /**
+ * **判据的执行体**（守卫在运行期 spawn / import 的仓内文件）的内容摘要登记（第十五轮 R15A-06，P3）。
+ *
+ * ## 现场
+ *
+ * `scripts/doc-claims-passline-child.mjs` 是 `check-doc-claims.mjs` 通过行自证的**第二层**
+ * （父进程 spawn 它、读它真正打出去的 stdout）—— 也就是说它是判据的**观察端**。它此前只在
+ * `check-install-integrity.mjs` 的 `EXECUTION_FACE_REGISTRY` 里（那张表判的是"工作树 == HEAD"），
+ * 而**没有内容摘要**。实测（`temp/r15/A/probe/` 的假子入口：不 import 主模块、直接打死通过行）：
+ *
+ *   未提交：install-integrity exit=1（工作树 ≠ HEAD）
+ *   提交后：install-integrity=0  guard-parser-integrity=0  workflows=0  integration-tests=0
+ *
+ * 而它的宿主 `check-doc-claims.mjs` 改一个字节就要动摘要表 —— **同一条纪律必须对称**：
+ * install 期锚只防"安装期被改写"，防不住"提交时就改"。
+ *
+ * ## 判据
+ *
+ *   · 每条 `sha256` 与磁盘字节（严格面 = HEAD blob）对拍：改一个字节 ⇒ 红；
+ *   · 登记项必须**真的被 owner 守卫引用**（双向对账：守卫不再引用它 ⇒ 死条目 ⇒ 红）；
+ *   · owner 必须是 `REGISTERED_GUARD_ENTRIES` 里的根守卫（悬空 owner ⇒ 红）。
+ */
+const REGISTERED_GUARD_JUDGE_BODIES = [
+  {
+    path: 'scripts/doc-claims-passline-child.mjs',
+    guard: 'check:doc-claims',
+    // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
+    sha256: '64f9ffc8436eaeb73205f39822d308d11c1d43a4bbb907e6c84ce7d4cb7b48cf',
+    methods: [
+      'passline-child-imports-main-module',
+      'passline-child-prints-main-module-pass-line',
+      'passline-child-rejects-extra-argv',
+    ],
+  },
+]
+
+/**
+ * 两张"判据执行体内容登记"表的**合并视图**（判据只走这一条：漏掉一张就等于那一张没有判据）。
+ */
+const REGISTERED_DIGEST_BODIES = [...REGISTERED_INSTALL_INTEGRITY_BODIES, ...REGISTERED_GUARD_JUDGE_BODIES]
+
+/**
+ * `REGISTERED_GUARD_JUDGE_BODIES` 的**双向对账**（R15A-06）：owner 必须是已登记的根守卫，
+ * 且那条守卫的脚本必须**真的**引用被登记的执行体（死条目 ⇒ 红）。
+ * @returns 问题列表（空 = 通过）。
+ */
+export function guardJudgeBodyProblems() {
+  const problems = []
+  const guardsSource = readFileSync(join(ROOT, 'scripts', 'check-root-guards.mjs'), 'utf8')
+  for (const registration of REGISTERED_GUARD_JUDGE_BODIES) {
+    const entryPattern = new RegExp(
+      `\\['${registration.guard.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}',\\s*\\{\\s*script:\\s*'([^']+)'`, 'u')
+    const script = entryPattern.exec(guardsSource)?.[1]
+    if (script === undefined) {
+      problems.push(`判据执行体 ${registration.path} 的 owner \`${registration.guard}\` 不在 `
+        + '`scripts/check-root-guards.mjs` 的 `REGISTERED_GUARD_ENTRIES` 里 —— 悬空 owner 意味着'
+        + '没人会跑它，登记也就没有意义。')
+      continue
+    }
+    // 登记表里的 `script` 是**完整执行形态**（`node scripts/x.mjs` / `bash scripts/x.sh`），
+    // 这里要的是文件路径本身（剥掉解释器词）。
+    const ownerRelative = script.replace(/^(?:node|bash)\s+/u, '')
+    const ownerPath = join(ROOT, ownerRelative)
+    if (!existsSync(ownerPath)) {
+      problems.push(`判据执行体 ${registration.path} 的 owner 脚本不在工作树里：${ownerRelative}`)
+      continue
+    }
+    if (!readFileSync(ownerPath, 'utf8').includes(registration.path)) {
+      problems.push(`判据执行体 ${registration.path} 已经不再被它的 owner \`${registration.guard}\`（${ownerRelative}）`
+        + '引用 —— 死条目会让登记表看起来比实际宽，请在改掉那处引用时同步删掉这条登记。')
+    }
+  }
+  return problems
+}
+
+/**
  * 根 `.yarnrc.yml` 的登记（**唯一真源**）。
  *
  * 为什么要它：`.yarnrc.yml` 是"谁能解释 `yarn`、谁能往脚本环境里写东西"的入口配置，
@@ -1755,6 +1830,8 @@ function main(argv) {
           + '\n      ⇒ 两份必须逐条相同（键 = `<manifest>#<hook>`）。')
       }
     }
+    // ⑦ **判据执行体的 owner 双向对账**（R15A-06）：owner 必须是已登记的根守卫、且真的引用它。
+    executionFailures.push(...guardJudgeBodyProblems())
     // ⓪ **平台锚**（R13-D-01）：① `HEAD` 必须等于 `$GITHUB_SHA`（跨域，生产路径上真正生效的
     //    那一条）；② 再把登记的执行体从 `origin@$GITHUB_SHA` 取回复算摘要 —— 因为 ① 成立时
     //    `expected` 与远端 blob 出自同一个 commit，② 的字节对拍**必然相等**（内容寻址），
@@ -1768,7 +1845,7 @@ function main(argv) {
       anchorAdvisories.push(...anchor.advisories)
       if (anchor.note !== null) anchorNote = anchor.note
       const expected = {}
-      for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
+      for (const registration of REGISTERED_DIGEST_BODIES) {
         const bytes = readHeadBytes(registration.path)
         if (bytes !== null) expected[registration.path] = sha256(bytes)
       }
@@ -1783,8 +1860,9 @@ function main(argv) {
       anchorAdvisories.push(...remote.advisories)
       if (remote.note !== null) anchorNote = `${anchorNote === null ? '' : `${anchorNote}；`}${remote.note}`
     }
-    // ⑥c **前置校验件自身的内容摘要**（R12-D-01 ①）：它能被改写 ⇒ 它的字节必须登记、进 diff。
-    for (const registration of REGISTERED_INSTALL_INTEGRITY_BODIES) {
+    // ⑥c **判据执行体自身的内容摘要**（R12-D-01 ① / R15A-06）：它能被改写 ⇒ 它的字节必须
+    //     登记、进 diff（两张表同一套判据：前置校验件 + 守卫运行期 spawn 的观察端）。
+    for (const registration of REGISTERED_DIGEST_BODIES) {
       const headBytes = readHeadBytes(registration.path)
       const absolute = join(ROOT, registration.path)
       if (headBytes === null) {
@@ -1918,6 +1996,12 @@ function main(argv) {
       process.stdout.write(`  { path: '${registration.path}', sha256: '${sha256(bytes)}',\n`)
       process.stdout.write(`    methods: ${JSON.stringify(registration.methods)} },\n`)
     }
+    process.stdout.write('\n# 判据执行体摘要（粘回本文件的 REGISTERED_GUARD_JUDGE_BODIES）\n')
+    for (const registration of REGISTERED_GUARD_JUDGE_BODIES) {
+      const bytes = readHeadBytes(registration.path) ?? readFileSync(join(ROOT, registration.path))
+      process.stdout.write(`  { path: '${registration.path}', guard: '${registration.guard}',\n`)
+      process.stdout.write(`    sha256: '${sha256(bytes)}', methods: ${JSON.stringify(registration.methods)} },\n`)
+    }
     return 0
   }
 
@@ -1959,7 +2043,8 @@ function main(argv) {
     + '**HEAD 与工作树两份都判**）；'
     + `${YARN_CODE_DIRECTORIES.join('/')} 为空；`
     + `根 + ${manifestCount - 1} 个工作区 manifest 无未登记的生命周期钩子（R12-D-02）；`
-    + `前置校验件 ${REGISTERED_INSTALL_INTEGRITY_BODIES.map(entry => entry.path).join('、')} 的字节登记一致（R12-D-01）；`
+    + `判据执行体 ${REGISTERED_DIGEST_BODIES.map(entry => entry.path).join('、')} 的字节登记一致`
+    + `（R12-D-01 / R15A-06：前置校验件 + 守卫运行期 spawn 的观察端，owner 双向对账）；`
     + '两个 runner 的守卫通道：直接 spawn（不经 yarn）+ 环境清洗（真子进程证明）；'
     + `${anchorNote === null ? '' : `${anchorNote}；`}`
     + `${anchorAdvisories.length === 0 ? '' : `平台锚告警：${anchorAdvisories.join('；')}；`}`

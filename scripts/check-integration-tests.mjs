@@ -84,6 +84,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
 const notes = []
+/**
+ * 汇总行（`notes`）的**符号必须按结论选**（第十五轮 R15A-08，P3）。
+ *
+ * 现场：修前无论红绿一律 `…）✓`，于是同一轮输出里出现过
+ * `CI 执行面闭包: …（真实 0 / 合成 SKIP 探针 1 / **未登记 1**）✓` 与 `形态⑨ … 判红` 并排 ——
+ * 只看汇总行的读者会以为这一层是绿的。这正是本仓"通过行必须与覆盖面一致"那条规矩的另一半：
+ * 符号也是陈述。
+ *
+ * 口径：一条汇总行绿，当且仅当**自上一条汇总行以来没有新增失败**。这样归因是"这一行
+ * 覆盖的那段断言"，而不是"整轮有没有红"；两段之间确实没有汇总行的失败会被保守地算到
+ * 下一行头上（宁可多打一个 ✗，也不假绿）。
+ */
+let noteFailuresAtLastPush = 0
+const note = text => {
+  notes.push({ text: String(text).replace(/\s*✓$/u, ''), ok: failures.length === noteFailuresAtLastPush })
+  noteFailuresAtLastPush = failures.length
+}
 const fail = message => failures.push(message)
 /** 条件断言（失败即记一条原因，与 check-* 系列守卫同形）。 */
 const check = (condition, message) => {
@@ -239,7 +256,7 @@ function aggregateParserSelfTest() {
   const noise = parseAggregateRuns('# run "0. 注释里的调用" python3 ghost.py\n  run "1. A" python3 a.py\n')
   check(noise.length === 0,
     '形态⑦: 注释行与缩进行都不算接线（`^run` 必须锚在行首）：' + JSON.stringify(noise))
-  notes.push(`聚合层解析器: 相邻两行 ⇒ 2 条、尾参不吞行、注释/缩进行不误判 ✓`)
+  note(`聚合层解析器: 相邻两行 ⇒ 2 条、尾参不吞行、注释/缩进行不误判 ✓`)
 }
 
 /**
@@ -438,7 +455,7 @@ function integrationReferenceScopeSelfTest() {
   check(ok.unregistered.length === 0 && ok.present.length === 1,
     '形态⑩自证: 扫描面扩展名内的引用不得误报 ——'
       + `实际 unregistered=[${ok.unregistered.join(', ')}] present=[${ok.present.join(', ')}]`)
-  notes.push('integration-tests 引用面扩展名对账自证: 面外未登记必红 / 登记后放行 / 面内不误报 / 未落盘不算缺口 ✓')
+  note('integration-tests 引用面扩展名对账自证: 面外未登记必红 / 登记后放行 / 面内不误报 / 未落盘不算缺口 ✓')
 }
 
 /**
@@ -815,7 +832,7 @@ async function main() {
     check(scope.deadEntries.length === 0,
       `形态⑩: 这些登记项在本守卫的正文里已经不再被引用（死条目）：${scope.deadEntries.join(', ')}`
         + ' —— 登记表比实际引用面宽，同样是"自述与事实不一致"')
-    notes.push(`integration-tests 引用面: 落盘引用 ${scope.present.length} 条、`
+    note(`integration-tests 引用面: 落盘引用 ${scope.present.length} 条、`
       + `面外登记 ${INTEGRATION_REFERENCE_SCOPE_REGISTRY.length} 条、`
       + `扩展名全部落在判据面（${INTEGRATION_SCANNED_EXTENSIONS.join('/')}）或已登记 ✓`)
   }
@@ -869,7 +886,7 @@ async function main() {
       check(source.includes(flag), `形态⑦: ${entry.path}（contract-test）必须实现 ${flag} —— ${why}`)
     }
   }
-  notes.push(`登记制: ${onDisk.length} 个可执行体全部登记、聚合层 ${aggregateLines.length} 条接线双向对账 ✓`)
+  note(`登记制: ${onDisk.length} 个可执行体全部登记、聚合层 ${aggregateLines.length} 条接线双向对账 ✓`)
 
   // -------------------------------------------------------------------------
   // ⑥ **判别力下限 + SKIP 原因码登记制**（第十三轮 V13-C R-2）
@@ -973,7 +990,7 @@ async function main() {
         `形态⑥: ${label} 声明了 SKIP_REASONS 却只有 ${guardLines.length} 处代码引用它`
           + ' —— 出口必须拿它做校验（未登记的原因码要在运行期就被拒，而不是只写在注释里）')
     }
-    notes.push(`${entry.path.split('/').pop()}: SKIP 原因码 ${declaredSkip.join('/')} 声明/使用/唯一出口双向对账 ✓`)
+    note(`${entry.path.split('/').pop()}: SKIP 原因码 ${declaredSkip.join('/')} 声明/使用/唯一出口双向对账 ✓`)
   }
 
   // ---- ⑥d 组级判别力下限 ------------------------------------------------
@@ -1016,7 +1033,7 @@ async function main() {
           + ' —— 判别力下限必须与判据表逐数相等（改判据表必须同步登记值）')
     }
   }
-  notes.push(`判别力下限: 聚合层 ${groupJudgments} 条判定（下限 ${GROUP_MIN_JUDGMENTS}）、`
+  note(`判别力下限: 聚合层 ${groupJudgments} 条判定（下限 ${GROUP_MIN_JUDGMENTS}）、`
     + `SKIP 原因码闭集 ${SKIP_REASON_CODES.size} 个 ✓`)
 }
 
@@ -1219,7 +1236,7 @@ for (const file of mjsFiles) {
     check(ok === total, `形态⑤: assertions.mjs --self-test: ${ok}/${total} —— 有判据夹具不符合预期（判据被改成常量?）`)
     check(total === fixtures.length,
       `形态⑤: --self-test 实跑 ${total} 条夹具,而判据表登记 ${fixtures.length} 条 ⇒ 有夹具没被跑（自检被掏空）`)
-    notes.push(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
+    note(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
   }
 
   // 接线:运行期脚本必须逐条引用表里的 id,且不得自带常量真判据。
@@ -1264,7 +1281,7 @@ for (const file of mjsFiles) {
       `形态⑤: 判定通道自检 ${ok}/${total} —— 有夹具经 report() 求值不符合预期（report() 被掏空?）`)
     check(total === fixtures.length,
       `形态⑤: --self-check 实跑 ${total} 条夹具,而判据表登记 ${fixtures.length} 条 ⇒ 有夹具没经运行期通道求值`)
-    notes.push(`electron-shots 判定通道: --self-check ${ok}/${total} 条夹具经 report() 求值 ✓`)
+    note(`electron-shots 判定通道: --self-check ${ok}/${total} 条夹具经 report() 求值 ✓`)
   }
   // 接线:运行期脚本必须用共用通道,且不得自带判定逻辑(自带 = 掏空点回到运行期脚本)。
   check(/from\s+['"]\.\/report\.mjs['"]/u.test(shotsSource),
@@ -1414,7 +1431,7 @@ for (const file of mjsFiles) {
     check(breakCase.expect.test(mutantOutput),
       `形态⑤: 变异 \`${breakCase.id}\` 必须被**具名**咬住（期望输出匹配 ${breakCase.expect}）`
       + `：${mutantOutput.trim().slice(-200)}`)
-    notes.push(`electron-shots 判定通道: 变异「${breakCase.label}」⇒ --self-check 非零 ✓`)
+    note(`electron-shots 判定通道: 变异「${breakCase.label}」⇒ --self-check 非零 ✓`)
   }
 }
 
@@ -1445,7 +1462,7 @@ for (const file of mjsFiles) {
   check(aggregate.status === 77, `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
   check(output.includes('RESULT: SKIP'), `形态⑥: 聚合层必须打印 RESULT: SKIP，实际 ${detail}`)
   check(!output.includes('RESULT: PASS'), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS，实际 ${detail}`)
-  notes.push('聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓')
+  note('聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓')
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,7 +1554,7 @@ for (const test of CONTRACT_TESTS) {
   if (total < test.minCases) {
     fail(`${test.path} --self-test 只有 ${total} 条判据夹具（下限 ${test.minCases}）—— 判据被删到没有判别力`)
   }
-  notes.push(`${test.id}: --self-test ${ok}/${total} 条夹具`)
+  note(`${test.id}: --self-test ${ok}/${total} 条夹具`)
 
   // ---- ① 登记值对账（--dump-criteria）--------------------------------------
   const dumpRun = runContractScript(scriptPathFor(test), ['--dump-criteria'], ROOT)
@@ -1571,7 +1588,7 @@ for (const test of CONTRACT_TESTS) {
     check(Number(dumped.fixtures) === total,
       `形态⑧: --dump-criteria 登记 ${dumped.fixtures} 条夹具，而 --self-test 实跑 ${total} 条`
         + ' ⇒ 有夹具没被自检跑到（自检被掏空）')
-    notes.push(`${test.id}: 判据表 ${criteria.length} 条 / 逐 id 正负例条数对账 ✓`)
+    note(`${test.id}: 判据表 ${criteria.length} 条 / 逐 id 正负例条数对账 ✓`)
   }
 
   // ---- ② 运行期逐条引用 ----------------------------------------------------
@@ -1621,7 +1638,7 @@ for (const test of CONTRACT_TESTS) {
     check(checkTotal === total,
       `形态⑧: ${test.path} --self-check 实跑 ${checkTotal} 条夹具，而判据表登记 ${total} 条`
         + ' ⇒ 有夹具没经运行期通道求值')
-    notes.push(`${test.id}: 判定通道 --self-check ${checkOk}/${checkTotal} 条夹具经 report() 求值 ✓`)
+    note(`${test.id}: 判定通道 --self-check ${checkOk}/${checkTotal} 条夹具经 report() 求值 ✓`)
   }
 
   // ---- ④b 端到端变异：**逐条判据**被掏成恒真 ⇒ --self-test 必须具名变红 ---------
@@ -1643,7 +1660,7 @@ for (const test of CONTRACT_TESTS) {
       `形态⑧: 变异 \`criteria-tautology:${test.id}:${id}\` 必须被**具名**咬住`
         + `（期望输出里出现判据 id）:${mutant.output.trim().slice(-200)}`)
   }
-  notes.push(`${test.id}: 变异「逐条判据 evaluate 掏成 return []」×${expectedIds.length} ⇒ --self-test 全部非零且具名 ✓`)
+  note(`${test.id}: 变异「逐条判据 evaluate 掏成 return []」×${expectedIds.length} ⇒ --self-test 全部非零且具名 ✓`)
 
   // ---- ④c 端到端变异：判定通道被掏空 ⇒ --self-check 必须非零 -------------------
   for (const breakCase of CONTRACT_KIT_BREAK_CASES) {
@@ -1670,7 +1687,7 @@ for (const test of CONTRACT_TESTS) {
         + `所以必须有 --self-check 这一层），实际 exit ${fixtureLayer.status}：`
         + fixtureLayer.output.trim().slice(-200))
     }
-    notes.push(`${test.id}: 变异「${breakCase.label}」⇒ ${breakCase.command} 非零 ✓`)
+    note(`${test.id}: 变异「${breakCase.label}」⇒ ${breakCase.command} 非零 ✓`)
   }
 
   // ---- ④d 端到端变异：运行期通道被整体替换 ⇒ --self-check 必须非零 -------------
@@ -1691,7 +1708,7 @@ for (const test of CONTRACT_TESTS) {
       check(CONTRACT_RUNTIME_WRAPPER_BREAK.expect.test(mutant.output),
         `形态⑧: 变异 \`${CONTRACT_RUNTIME_WRAPPER_BREAK.id}\` 必须被**具名**咬住`
         + `（期望输出匹配 ${CONTRACT_RUNTIME_WRAPPER_BREAK.expect}）：${mutant.output.trim().slice(-200)}`)
-      notes.push(`${test.id}: 变异「${CONTRACT_RUNTIME_WRAPPER_BREAK.label}」⇒ --self-check 非零 ✓`)
+      note(`${test.id}: 变异「${CONTRACT_RUNTIME_WRAPPER_BREAK.label}」⇒ --self-check 非零 ✓`)
     }
   }
 }
@@ -1772,7 +1789,7 @@ for (const item of SCENARIOS) {
         continue
       }
     }
-    notes.push(`[${item.scenario}] ${item.test.id}: exit ${status} ✓`)
+    note(`[${item.scenario}] ${item.test.id}: exit ${status} ✓`)
   } finally {
     await gateway.close()
   }
@@ -1881,14 +1898,46 @@ const CI_SURFACE_SCRIPT_EXTENSIONS = [
 const CI_SURFACE_SCRIPT_PATTERN = new RegExp(
   `^(?:\\./)?(?:scripts|integration-tests|packages|server|community)/[A-Za-z0-9_./@+-]+\\.`
   + `(?:${CI_SURFACE_SCRIPT_EXTENSIONS.map(extension => extension.slice(1)).join('|')})$`, 'u')
+/**
+ * **包装链尽头的变量命令位**：闭包判不了它跑什么 ⇒ fail-closed 记红 —— 除非这一处
+ * 逐字登记在这里（登记制 + **死条目双向对账**：登记项必须仍然真的命中，否则红）。
+ *
+ * 为什么需要这张表而不是"看见 `$` 就一律判红"：`timeout 60 "$SOME_BIN" …` 这种写法在本仓
+ * 已有先例（`scripts/verify-wasm-client-only.sh` 拉 Electron 探针），把它判红等于让判据
+ * 无法使用；而"把 `make` 藏进一个变量再经包装链调用"（`timeout 900 $R15A_TARGET`）确实是
+ * 同族旁路。两者的形态**逐字相同** ⇒ 只能靠登记制区分：新出现的一律红，已认账的留痕。
+ *
+ * 每条 = `{ file, word, why }`；`word` 是包装链尽头那一位的**首词**（含 `$`）。
+ */
+const CI_SURFACE_VARIABLE_COMMAND_ACK = [
+  {
+    file: 'scripts/verify-wasm-client-only.sh',
+    word: '$ELECTRON_BIN',
+    why: '真机探针用 `timeout "$PROBE_TIMEOUT" "$ELECTRON_BIN" --no-sandbox …` 拉起打包版'
+      + ' Electron（第 6 组）—— 被包装的是 Electron 二进制，变量在同一脚本顶部由 `ELECTRON_BIN=` 赋值；'
+      + '不接端到端入口（`integration-tests/run-all.sh` 不在这条链上）。',
+  },
+]
 /** 闭包深度上限与节点上限（超限 fail-loud）。 */
 const CI_SURFACE_MAX_HOPS = 8
 const CI_SURFACE_MAX_NODES = 400
+/**
+ * **文本第二张网**适用的脚本体扩展名：shell 与 Python 的正体本身就是"脚本"，
+ * 里面**逐字**写出端到端入口就是执行意图（与 `run-all.sh` 里的写法同族）。
+ *
+ * 为什么 JS/TS 不在内：JS 正体里的字符串绝大多数是数据/夹具（本守卫自己的
+ * `INTEGRATION_ENTRIES` 就是反例），把它算进"提到"会让判据退化成文本判据。
+ * `CI_SURFACE_TEXT_NET_SCRIPT_EXTENSIONS` 上必须有自证：扫描面里的**非 JS 家族**
+ * 可执行扩展名一个都不能少（R15A-03 的 C5/C6 正是 `.py` 缺在这里）。
+ */
+const CI_SURFACE_TEXT_NET_SCRIPT_EXTENSIONS = [...INTEGRATION_SCANNED_EXTENSIONS, '.bash']
+  .filter(extension => !INTEGRATION_DATA_EXTENSIONS.includes(extension))
+  .filter(extension => !['.mjs', '.cjs', '.js', '.ts'].includes(extension))
 /** JS 正文里"执行调用"的实参窗口长度 / 调用名。 */
 const CI_SURFACE_ARG_WINDOW = 400
 const CI_SURFACE_EXEC_CALL = /\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/gu
 /** Python 正文里"执行调用"的形态（`subprocess.run(['bash', …])` / `os.system(…)`）。 */
-const CI_SURFACE_PY_EXEC_CALL = /\b(?:subprocess\.(?:run|call|check_call|check_output|Popen)|os\.(?:system|popen|execv|execve|execvp|execvpe|spawnv|spawnve|spawnvp|spawnvpe))\s*\(/gu
+const CI_SURFACE_PY_EXEC_CALL = /\b(?:subprocess\.(?:run|call|check_call|check_output|Popen)|os\.(?:system|popen|execv|execve|execvp|execvpe|execv|execl|execle|execlp|execlpe|spawnv|spawnve|spawnvp|spawnvpe)|runpy\.run_path|runpy\.run_module|importlib\.import_module|importlib\.util\.spec_from_file_location|exec|eval|compile|__import__)\s*\(/gu
 /**
  * `make` 调用的**递归词**：`$(MAKE)` 在解析前先归一成它，于是"命令位是不是 make"
  * 与"`-C` / `-f` 的值位"两件事都能在同一套词法里判。
@@ -1899,8 +1948,216 @@ const MAKE_VALUE_FLAGS = new Set([
   '-C', '-f', '-I', '-o', '-W', '--directory', '--file', '--makefile', '--include-dir',
   '--old-file', '--new-file', '--assume-old', '--assume-new', '--eval', '--load-average', '--max-load',
 ])
-/** 命令位前置的启动器词（`sudo make …` / `time make …`）：跳过它们再判命令位。 */
-const MAKE_LAUNCHER_WORDS = new Set(['sudo', 'time', 'command', 'env', 'nohup', 'exec'])
+/**
+ * 命令位**包装链**的登记表（第十五轮 R15A-03 的收口，P1）。
+ *
+ * ## 现场（修前实测）
+ *
+ * `expandMakeCalls` 原先只承认一份**固定词表**的前置启动器
+ * （`sudo|time|command|env|nohup|exec`）且要求"跳过它们之后命令位**就是** `make`"。
+ * 于是把 make 藏进**参数位**的同族形态一个都判不出来（`temp/r15/A/probe/area2-attacks3.py`
+ * 的 C2/C3/C4 全 EXIT=0，而 CI 真的会执行它）：
+ *
+ * ```yaml
+ * - run: timeout 900 make -C server r15a        # 时长在 make 之前
+ * - run: bash -c "make -C server r15a"          # 内层是另一段 shell 文本
+ * - run: npm exec -- make -C server r15a        # 包运行器的 exec 面
+ * ```
+ *
+ * ## 判据：把"前缀壳"处理成**任意深度的包装链**
+ *
+ * 每条登记项只回答一个问题："吃掉自己（含旗标与位置参数）之后，真正的命令从哪一位开始"。
+ * 链条一直走到**不在表里**的词为止 —— 那一位就是命令位；若它还是 `make|gmake|$(MAKE)`，
+ * 就按既有逻辑跟随目标体。读不懂的位（`timeout $D make`、`bash -c "$CMD"`）一律
+ * **fail-closed** 记 problem，绝不静默当成"这一层没有端到端"。
+ *
+ * `valueFlags` = 该旗标**带走下一个词**（`timeout -k 5 …`）；`execFlags` = 该旗标的取值
+ * **就是命令文本**（`npm exec -c "make …"`），按内层 shell 文本递归；`lookupFlags` =
+ * 这一位不是执行而是查询（`command -v make`），整条命令就此结束；`positional` = 固定
+ * 个数的位置参数（`timeout <时长>`）；`assignments` = 还要吃掉前缀里的 `VAR=值`（`env`）。
+ */
+const COMMAND_WRAPPER_SPECS = new Map([
+  // 直通型：`<词> [旗标…] <命令>`
+  ['sudo', { valueFlags: ['-u', '-g', '-p', '-C', '-D', '-R', '-T', '-U', '-h', '--user', '--group', '--prompt', '--chdir', '--close-from', '--host', '--other-user', '--role', '--type'] }],
+  ['doas', { valueFlags: ['-u', '-C'] }],
+  ['time', { valueFlags: ['-o', '-f', '--output', '--format'] }],
+  ['command', { valueFlags: [], lookupFlags: ['-v', '-V'] }],
+  ['nohup', { valueFlags: [] }],
+  ['exec', { valueFlags: ['-a'] }],
+  ['nice', { valueFlags: ['-n', '--adjustment'] }],
+  ['ionice', { valueFlags: ['-c', '-n', '-p', '-P', '-u'] }],
+  ['setsid', { valueFlags: [] }],
+  ['stdbuf', { valueFlags: ['-i', '-o', '-e'] }],
+  ['chrt', { valueFlags: ['-p', '-P', '-m', '-o', '-r', '-d', '-T', '-D'] }],
+  ['taskset', { valueFlags: ['-c', '-p'] }],
+  ['flock', { valueFlags: ['-w', '-E', '-o', '--wait', '--conflict-exit-code'] }],
+  ['watch', { valueFlags: ['-n', '-d', '-i', '--interval', '--differences'] }],
+  // 取值型：旗标之后还有**固定个数**的位置参数（`timeout <时长> <命令>`）
+  ['timeout', { valueFlags: ['-k', '-s', '--signal', '--kill-after'], positional: 1 }],
+  ['env', { valueFlags: ['-u', '-C', '-S', '--unset', '--chdir', '--split-string'], assignments: true }],
+  // 包运行器的 exec 面：`npx <命令>` / `bunx <命令>`（`--` 由通用规则吃掉）
+  ['npx', { valueFlags: ['-p', '--package'], execFlags: ['-c', '--call'] }],
+  ['bunx', { valueFlags: ['-p', '--package', '--bun'] }],
+])
+/** 两词包装（`<词1> <词2> …`）：登记表与单词表同形，命中后一起吃掉两个词。 */
+const COMMAND_MULTI_WORD_WRAPPERS = new Map([
+  ['npm exec', { valueFlags: ['-p', '--package'], execFlags: ['-c', '--call'] }],
+  ['npm x', { valueFlags: ['-p', '--package'], execFlags: ['-c', '--call'] }],
+  ['yarn dlx', { valueFlags: [] }],
+  ['yarn exec', { valueFlags: [] }],
+  ['pnpm exec', { valueFlags: ['-c', '--shell-mode'] }],
+  ['pnpm dlx', { valueFlags: [] }],
+  ['bun x', { valueFlags: ['-p', '--package', '--bun'] }],
+])
+/** shell 词：带 `-c` 时它的取值是**另一段 shell 文本**，要按同一套词法递归解析。 */
+const COMMAND_SHELL_WORDS = new Set(['bash', 'sh', 'dash', 'zsh', 'ksh', 'ash'])
+/** 位置参数/旗标取值读不懂时的**统一拒绝口径**（fail-closed）。 */
+function isUnreadableCommandWord(value) {
+  return value === undefined || value.includes('$') || value.includes('{{') || value.includes(MAKE_RECURSIVE_WORD)
+}
+/**
+ * 一段内层 shell 文本的**命令位**能不能读。
+ *
+ * 判据是"**命令本身**是不是变量拼出来的"，不是"文本里有没有 `$`"：
+ * `bash -c 'set -e; make -C server x'` 里的 `$`/`${VAR}` 是脚本内的变量引用（正常），
+ * 而 `sh -c "$(cat wrapper.sh)"` / `bash -c "$CMD"` 的命令位本身就是替换 ⇒ 判不了跑什么。
+ * @param text - 内层 shell 文本。
+ * @returns `true` = 命令位读不懂（调用方 fail-closed）。
+ */
+function nestedCommandUnreadable(text) {
+  if (text === undefined || text.includes('{{')) return true
+  const first = shellCommandWordLists(text)[0]?.[0]
+  if (first === undefined) return false // 空脚本：没有命令可藏
+  return first.startsWith('$') || first.includes('$(') || first.includes('${')
+}
+
+/**
+ * 命令 → **包装链的尽头**（纯词法，不做语义分析）。
+ *
+ * @param words - 一条命令的词数组（{@link shellCommandWordLists} 的输出）。
+ * @returns `{ heads, nestedTexts, problems }`：
+ *   · `heads` —— 真正可能被执行的命令（通常 1 条；命令位不在包装表里时就是它本身）；
+ *   · `nestedTexts` —— 内层 shell 文本（`bash -c '<文本>'` / `npm exec -c '<文本>'`），
+ *     调用方递归解析；
+ *   · `problems` —— 读不懂的包装位（调用方 fail-closed）。
+ */
+function unwrapCommandWords(words) {
+  const heads = []
+  const nestedTexts = []
+  const problems = []
+  let index = 0
+  /** 是否已经吃掉了至少一层**已登记**的包装（决定"命令位是变量"要不要 fail-closed）。 */
+  let wrapped = false
+  const stop = () => ({ heads, nestedTexts, problems })
+  /** 吃掉选项终止符 `--` 与前导环境赋值 `VAR=值`（它们都不是命令）。 */
+  const skipNoise = () => {
+    while (index < words.length
+      && (words[index] === '--' || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index]))) index += 1
+  }
+  /**
+   * 吃掉一段旗标；`execFlags` 的取值是命令文本，`lookupFlags` 命中 ⇒ 这一位不是执行。
+   *
+   * 旗标位上的**变量展开**（`sudo $OPTS make …`）不在这里猜"它吃掉几个词"：循环遇到它就
+   * 停下，由下面的"命令位是变量展开"判据记 problem（fail-closed）—— 一次展开吃掉几个词
+   * 不可知，正是"把 make 藏进参数位"的同族形态。
+   */
+  const skipFlags = spec => {
+    let execText = null
+    let lookup = false
+    while (index < words.length && words[index].startsWith('-') && words[index] !== '--') {
+      const word = words[index]
+      const [name] = word.split('=')
+      index += 1
+      if ((spec.lookupFlags ?? []).includes(name)) lookup = true
+      if ((spec.execFlags ?? []).includes(name) && !word.includes('=')) {
+        execText = words[index]
+        index += 1
+      } else if ((spec.valueFlags ?? []).includes(name) && !word.includes('=')) {
+        index += 1
+      }
+    }
+    return { execText, lookup }
+  }
+  /** 内层命令文本必须能读（变量拼出来的命令 ⇒ fail-closed）。 */
+  const acceptNested = (flag, text) => {
+    if (nestedCommandUnreadable(text)) {
+      problems.push(`包装位 \`${flag}\` 的内层命令读不懂（${text ?? '(缺参数)'}）—— `
+        + '变量/表达式拼出来的命令闭包判不了它跑什么，按 fail-closed 记红（请把它写成字面量）')
+      return false
+    }
+    nestedTexts.push(text)
+    return true
+  }
+  for (let hops = 0; hops <= CI_SURFACE_MAX_HOPS; hops += 1) {
+    skipNoise()
+    const head = words[index]
+    if (head === undefined) return stop()
+    // ① shell 的 `-c <内层文本>`：内层是**另一段 shell 文本**（C3 的形态）。
+    if (COMMAND_SHELL_WORDS.has(head)) {
+      let cursor = index + 1
+      let callFlag = null
+      while (cursor < words.length && words[cursor].startsWith('-') && !words[cursor].startsWith('--')) {
+        if (/^-[A-Za-z]*c[A-Za-z]*$/u.test(words[cursor])) callFlag = words[cursor]
+        cursor += 1
+      }
+      if (callFlag !== null) {
+        acceptNested(`${head} ${callFlag}`, words[cursor])
+        return stop()
+      }
+      heads.push(words.slice(index))
+      return stop()
+    }
+    // ② 两词包装（`npm exec -- <命令>` / `yarn dlx <命令>`）。
+    const multi = COMMAND_MULTI_WORD_WRAPPERS.get(`${head} ${words[index + 1] ?? ''}`)
+    if (multi !== undefined) {
+      const label = `${head} ${words[index + 1]}`
+      index += 2
+      wrapped = true
+      const { execText, lookup } = skipFlags(multi)
+      if (execText !== null) { acceptNested(label, execText); return stop() }
+      if (lookup) return stop()
+      continue
+    }
+    // ③ 单词包装。
+    const spec = COMMAND_WRAPPER_SPECS.get(head)
+    if (spec === undefined) {
+      // **包装链尽头是变量展开**（`timeout 60 $RUNNER …` / `sudo $OPTS make …`）：跑什么不可知
+      // ⇒ fail-closed。只对"经已登记包装走到的位"生效 —— 裸命令位上的 `"$@"` / `$line` 这类
+      // 循环变量是 shell 常规写法（本仓多处如此），把它们一律判红会让判据无法使用，
+      // 而它们并不属于"包装链把 make 藏起来"这一族。
+      if (wrapped && (head.startsWith('$') || head.includes('$('))) {
+        problems.push({
+          kind: 'variable-command',
+          word: head,
+          raw: words.slice(index).join(' '),
+          message: `包装链尽头的命令位是变量展开（${words.slice(index).join(' ')}）——`
+            + ' 闭包判不了它跑什么，按 fail-closed 记红（请把它写成字面量，'
+            + `或把这一处逐字登记进 \`CI_SURFACE_VARIABLE_COMMAND_ACK\`）`,
+        })
+        return stop()
+      }
+      heads.push(words.slice(index))
+      return stop()
+    }
+    const label = head
+    index += 1
+    wrapped = true
+    const { execText, lookup } = skipFlags(spec)
+    if (execText !== null) { acceptNested(`${label} -c`, execText); return stop() }
+    if (lookup) return stop()
+    if (spec.assignments === true) skipNoise()
+    // 位置参数的**个数是固定的**（`timeout <时长>`）：取值读不懂也不影响"它跑哪条命令"，
+    // 按个数跳过即可（时长/优先级不是命令）。
+    for (let taken = 0; taken < (spec.positional ?? 0); taken += 1) {
+      if (words[index] === undefined) break
+      index += 1
+    }
+  }
+  problems.push(`命令位的包装链超过深度上限 ${CI_SURFACE_MAX_HOPS}（${words.join(' ')}）——`
+    + ' 读不懂 ⇒ fail-closed（不把"解析不了"当成"这一层没有端到端"）')
+  return stop()
+}
+
 /** 同一目录下 Makefile 的候选名（GNU make 的查找顺序）。 */
 const MAKEFILE_NAMES = ['Makefile', 'makefile', 'GNUmakefile']
 
@@ -2098,60 +2355,221 @@ function workflowRunBlocks(text) {
 }
 
 /**
- * 一段文本 → **`make` 调用**（含 `$(MAKE)` 递归、`cd <dir> && make …`）。
+ * 一段文本 → **`docker compose … run <服务>` 调用**（第十五轮 R15A-03 的 C8）。
  *
- * 只解析"命令位是 make/gmake/`$(MAKE)`"的那些命令（命令位允许前置的 `VAR=value`、
- * `sudo`/`time`/`command`/`env` 这类启动器词）；每个调用给出 `-C` 目录、`-f` 文件与目标表。
- * **读不懂的位不猜**：值位/目标位里出现变量或 GitHub 表达式时记进 `unresolved`，
- * 由调用方 fail-closed（VA-05-F1 的收口纪律）。
- * @param text - shell / Makefile 正文（workflow 的 `run:` 块 / `.sh` 正体 / Makefile 配方）。
- * @returns `{ invocations }`，每项 `{ raw, dir, makefile, targets, unresolved, cwd }`。
+ * 现场（修前）：把命令写进 compose 文件、`ci.yml` 里只留
+ * `docker compose -f ci-r15a.yml run e2e` ⇒ 闭包三张网全绿（命令在数据文件里）。
+ * compose 是**第三种载体**（前两种是 Makefile 与包装脚本），所以它必须进闭包。
+ *
+ * 与 {@link makeInvocations} 同源：同样先走 {@link unwrapCommandWords} 的包装链
+ * （`env FOO=1 docker compose …` / `timeout 60 docker compose …` 也要能读），
+ * 然后只认 `docker|podman compose` 或 `docker-compose` 的 `run` 子命令。
+ * `-f/--file` 的取值与 service 名读不懂（变量/表达式）时记 `problems`（fail-closed）。
+ * @param text - shell / Makefile / 配方正文。
+ * @returns `{ invocations, problems }`；每项 `{ raw, files, service, override }`。
  */
-function makeInvocations(text) {
+function composeRunInvocations(text) {
   const invocations = []
+  const problems = []
+  for (const words of shellCommandWordLists(text)) {
+    const chain = unwrapCommandWords(words)
+    problems.push(...chain.problems)
+    for (const head of chain.heads) {
+      const isComposeWrapper = head[0] === 'docker-compose'
+      const isComposeSubcommand = (head[0] === 'docker' || head[0] === 'podman') && head[1] === 'compose'
+      if (!isComposeWrapper && !isComposeSubcommand) continue
+      const invocation = { raw: head.join(' '), files: [], projectDir: undefined, service: undefined, override: [] }
+      let index = isComposeWrapper ? 1 : 2
+      let subcommand = null
+      for (; index < head.length; index += 1) {
+        const word = head[index]
+        if (word === '-f' || word === '--file') {
+          const value = head[index + 1]
+          index += 1
+          if (isUnreadableCommandWord(value)) invocation.files.push(undefined)
+          else invocation.files.push(value)
+          continue
+        }
+        if (word.startsWith('--file=')) { invocation.files.push(word.slice('--file='.length)); continue }
+        if (word === '--project-directory') {
+          invocation.projectDir = isUnreadableCommandWord(head[index + 1]) ? undefined : head[index + 1]
+          index += 1
+          continue
+        }
+        if (word.startsWith('--project-directory=')) { invocation.projectDir = word.slice('--project-directory='.length); continue }
+        // 其余 compose 级旗标：`-p` / `--profile` / `--env-file` / `--ansi` / `--project-name` 带取值。
+        if (['-p', '--project-name', '--profile', '--env-file', '--ansi', '--progress'].includes(word)) { index += 1; continue }
+        if (word.startsWith('-')) continue
+        subcommand = word
+        break
+      }
+      if (subcommand !== 'run') continue // `config -q` / `up -d` 之类不是"执行文件里的命令"
+      for (index += 1; index < head.length; index += 1) {
+        const word = head[index]
+        if (word === '--') continue
+        if (word.startsWith('-')) {
+          // `run` 的旗标里 `-e/--env` / `-v/--volume` / `-u/--user` / `-w/--workdir` 带取值。
+          if (['-e', '--env', '-v', '--volume', '-u', '--user', '-w', '--workdir', '-p', '--publish', '-l', '--label', '--name', '--entrypoint'].includes(word)) index += 1
+          continue
+        }
+        invocation.service = word
+        invocation.override = head.slice(index + 1)
+        break
+      }
+      invocations.push(invocation)
+    }
+  }
+  return { invocations, problems }
+}
+
+/**
+ * 极简 compose 读取器：取 `services.<服务>.command` / `.entrypoint`（第十五轮 R15A-03 的 C8）。
+ *
+ * 只做这一件事（不引 YAML 依赖，闭包保持"纯文本 + 谓词"的形态），但**读不懂就 fail-closed**：
+ * 找不到 `services:`、找不到该服务、`command:` 的取值形态不认识 —— 一律记 problem，
+ * 绝不把"解析不了"当成"这个服务没跑端到端"。
+ * @param text - compose 文件正文。
+ * @param service - 目标服务名。
+ * @returns `{ commands, problems }`（`commands` = 该服务的命令文本列表，含 `entrypoint`）。
+ */
+function composeServiceCommands(text, service) {
+  const problems = []
+  const commands = []
+  const lines = []
+  for (const rawLine of String(text).split('\n')) {
+    const trimmed = rawLine.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    lines.push({ indent: rawLine.length - rawLine.trimStart().length, text: trimmed })
+  }
+  /** 取 `key: value` 形态（只认**块式** YAML：顶层键冒号后可以有值）。 */
+  const keyOf = line => {
+    const match = /^([A-Za-z0-9_.\-"']+):(?:[ \t]+(.*))?$/u.exec(line.text)
+    if (match === null) return null
+    return { key: match[1].replace(/^["']|["']$/gu, ''), value: (match[2] ?? '').trim() }
+  }
+  const indexOfKey = (key, from, until, indent) => {
+    for (let index = from; index < until; index += 1) {
+      if (indent !== undefined && lines[index].indent !== indent) continue
+      const parsed = keyOf(lines[index])
+      if (parsed !== null && parsed.key === key) return index
+    }
+    return -1
+  }
+  const blockEnd = (start, indent) => {
+    let end = start + 1
+    while (end < lines.length && lines[end].indent > indent) end += 1
+    return end
+  }
+  const servicesIndex = indexOfKey('services', 0, lines.length, 0)
+  if (servicesIndex < 0) {
+    problems.push('compose 文件里找不到顶层 `services:` —— 服务命令读不出来，按 fail-closed 记红')
+    return { commands, problems }
+  }
+  const servicesEnd = blockEnd(servicesIndex, lines[servicesIndex].indent)
+  const serviceIndex = indexOfKey(service, servicesIndex + 1, servicesEnd, undefined)
+  if (serviceIndex < 0) {
+    problems.push(`compose 文件里找不到服务 \`${service}\`（\`services:\` 块内只有 `
+      + `${lines.slice(servicesIndex + 1, servicesEnd).map(line => keyOf(line)?.key).filter(Boolean).join('、') || '(空)'}）`
+      + ' —— 读不到它的命令 ⇒ fail-closed')
+    return { commands, problems }
+  }
+  const serviceEnd = blockEnd(serviceIndex, lines[serviceIndex].indent)
+  for (const key of ['command', 'entrypoint']) {
+    const commandIndex = indexOfKey(key, serviceIndex + 1, serviceEnd, undefined)
+    if (commandIndex < 0) continue
+    const { value } = keyOf(lines[commandIndex])
+    if (value !== '' && !/^[|>][-+]?[0-9]*$/u.test(value)) {
+      // 行内标量或行内列表（`command: [bash, x.sh]`）。
+      commands.push(value.replace(/^\[/u, '').replace(/\]$/u, '').replace(/,\s*/gu, ' ').replace(/["']/gu, ''))
+      continue
+    }
+    // 块标量（`|` / `>`）或嵌套列表（`- item`）：取该键之后、缩进更深的那些行。
+    const items = []
+    for (let index = commandIndex + 1; index < serviceEnd && lines[index].indent > lines[commandIndex].indent; index += 1) {
+      items.push(lines[index].text.replace(/^-\s*/u, ''))
+    }
+    if (items.length === 0) {
+      problems.push(`compose 文件里 \`${key}:\` 的取值形态读不懂（${lines[commandIndex].text}）——`
+        + ' 闭包判不了它跑什么，按 fail-closed 记红（请把它写成行内标量或 `- ` 列表）')
+      continue
+    }
+    commands.push(items.join(' '))
+  }
+  return { commands, problems }
+}
+
+/**
+ * 一段文本 → **`make` 调用**（含 `$(MAKE)` 递归、`cd <dir> && make …`、任意深度的包装链）。
+ *
+ * 命令位由 {@link unwrapCommandWords} 解析：**包装链**（`sudo`/`timeout`/`env`/`npx`/
+ * `npm exec --`/`bash -c` 等已登记形态，任意深度）走到尽头之后，若那一位是
+ * `make`/`gmake`/`$(MAKE)`，就给出 `-C` 目录、`-f` 文件与目标表；`bash -c '<文本>'`
+ * 的内层按**同一套词法递归**（第十五轮 R15A-03：这三种形态修前全部漏网）。
+ * **读不懂的位不猜**：包装位、值位、目标位里出现变量或 GitHub 表达式时记进
+ * `unresolved` / `problems`，由调用方 fail-closed（VA-05-F1 的收口纪律）。
+ * @param text - shell / Makefile 正文（workflow 的 `run:` 块 / `.sh` 正体 / Makefile 配方）。
+ * @param depth - 内层 shell 文本的递归深度（`bash -c` / `npm exec -c`）。
+ * @returns `{ invocations, problems }`：每项 `{ raw, dir, makefile, targets, unresolved, cwd }`。
+ */
+function makeInvocations(text, depth = 0) {
+  const invocations = []
+  const problems = []
   /** `cd <dir> && make …`：上一条命令的 `cd` 是下一条命令的工作目录。 */
   let cwd = null
   for (const words of shellCommandWordLists(text)) {
     if (words[0] === 'cd' && words.length === 2 && !words[1].includes('$')) { cwd = words[1]; continue }
-    let index = 0
-    while (index < words.length
-      && (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index]) || MAKE_LAUNCHER_WORDS.has(words[index]))) index += 1
-    const head = words[index]
-    if (head !== 'make' && head !== 'gmake' && head !== MAKE_RECURSIVE_WORD) continue
-    const invocation = {
-      raw: words.join(' '), dir: undefined, makefile: undefined, targets: [], unresolved: [], cwd,
+    const chain = unwrapCommandWords(words)
+    problems.push(...chain.problems)
+    if (chain.nestedTexts.length > 0) {
+      if (depth >= CI_SURFACE_MAX_HOPS) {
+        problems.push(`\`bash -c\` 一类内层 shell 文本的嵌套超过深度上限 ${CI_SURFACE_MAX_HOPS}`
+          + `（${words.join(' ')}）—— 读不懂 ⇒ fail-closed`)
+      } else {
+        for (const nested of chain.nestedTexts) {
+          const inner = makeInvocations(nested, depth + 1)
+          invocations.push(...inner.invocations)
+          problems.push(...inner.problems)
+        }
+      }
     }
-    for (let cursor = index + 1; cursor < words.length; cursor += 1) {
-      const word = words[cursor]
-      if (word.includes('$') || word.includes(MAKE_RECURSIVE_WORD) || word.includes('{{')) {
-        invocation.unresolved.push(word)
-        continue
+    for (const head of chain.heads) {
+      const command = head[0]
+      if (command !== 'make' && command !== 'gmake' && command !== MAKE_RECURSIVE_WORD) continue
+      const invocation = {
+        raw: head.join(' '), dir: undefined, makefile: undefined, targets: [], unresolved: [], cwd,
       }
-      const assign = (key, value) => {
-        if (key === 'dir') invocation.dir = value
-        else invocation.makefile = value
+      for (let cursor = 1; cursor < head.length; cursor += 1) {
+        const word = head[cursor]
+        if (word.includes('$') || word.includes(MAKE_RECURSIVE_WORD) || word.includes('{{')) {
+          invocation.unresolved.push(word)
+          continue
+        }
+        const assign = (key, value) => {
+          if (key === 'dir') invocation.dir = value
+          else invocation.makefile = value
+        }
+        if (MAKE_VALUE_FLAGS.has(word)) {
+          const value = head[cursor + 1]
+          cursor += 1
+          if (value === undefined || value.includes('$')) invocation.unresolved.push(word)
+          else assign(word === '-C' || word === '--directory' ? 'dir' : 'file', value)
+          continue
+        }
+        // `-j` / `-l` 的参数是**可选**的（`make -j 4 t` 与 `make -j t` 都合法）：
+        // 只把"看起来是数字"的下一个词当取值，免得把目标名吃掉。
+        if ((word === '-j' || word === '-l') && /^[0-9.]+$/u.test(head[cursor + 1] ?? '')) { cursor += 1; continue }
+        const attached = /^(--(?:directory|file|makefile))=(.+)$/u.exec(word)
+        if (attached !== null) { assign(attached[1].startsWith('--directory') ? 'dir' : 'file', attached[2]); continue }
+        if (/^-C.+/u.test(word)) { invocation.dir = word.slice(2); continue }
+        if (/^-f.+/u.test(word)) { invocation.makefile = word.slice(2); continue }
+        if (word.startsWith('-')) continue // 其余旗标（`-s` / `-n` / `-k` …）不影响目标表
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue // `VAR=value`
+        invocation.targets.push(word)
       }
-      if (MAKE_VALUE_FLAGS.has(word)) {
-        const value = words[cursor + 1]
-        cursor += 1
-        if (value === undefined || value.includes('$')) invocation.unresolved.push(word)
-        else assign(word === '-C' || word === '--directory' ? 'dir' : 'file', value)
-        continue
-      }
-      // `-j` / `-l` 的参数是**可选**的（`make -j 4 t` 与 `make -j t` 都合法）：
-      // 只把"看起来是数字"的下一个词当取值，免得把目标名吃掉。
-      if ((word === '-j' || word === '-l') && /^[0-9.]+$/u.test(words[cursor + 1] ?? '')) { cursor += 1; continue }
-      const attached = /^(--(?:directory|file|makefile))=(.+)$/u.exec(word)
-      if (attached !== null) { assign(attached[1].startsWith('--directory') ? 'dir' : 'file', attached[2]); continue }
-      if (/^-C.+/u.test(word)) { invocation.dir = word.slice(2); continue }
-      if (/^-f.+/u.test(word)) { invocation.makefile = word.slice(2); continue }
-      if (word.startsWith('-')) continue // 其余旗标（`-s` / `-n` / `-k` …）不影响目标表
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue // `VAR=value`
-      invocation.targets.push(word)
+      invocations.push(invocation)
     }
-    invocations.push(invocation)
   }
-  return { invocations }
+  return { invocations, problems }
 }
 
 /**
@@ -2261,6 +2679,9 @@ function ciExecutionSurface(options) {
   const mentioning = new Map()
   const reached = new Map()
   const problems = []
+  /** 命中的"包装链尽头是变量命令位"（`{ file, word, raw }`）—— 用于**死条目对账**。 */
+  const variableCommands = []
+  const seenVariableCommands = new Set()
   const nodes = []
   const seen = new Set()
   let truncated = false
@@ -2284,8 +2705,15 @@ function ciExecutionSurface(options) {
     nodes.push(node.key)
     if (nodes.length > CI_SURFACE_MAX_NODES) { truncated = true; break }
     const text = String(node.text ?? '')
-    // "正文提到"面：只对 shell 与 YAML/manifest 生效（JS/TS 正体里的字符串是数据，不算执行）。
-    const textNetApplies = node.kind !== 'script' || /\.(?:sh|bash)$/u.test(node.file)
+    // "正文提到"面：只对 shell / YAML / manifest 与**脚本语言**的正体生效
+    // （JS/TS 正体里的字符串是数据，不算执行 —— 本守卫自己的登记表就是反例）。
+    //
+    // R15A-03 的 C5/C6：修前这里**显式排除**了非 `.sh/.bash` 的脚本体，于是
+    // `scripts/x.py` 里**逐字**写着 `integration-tests/run-all.sh`（`runpy.run_path` /
+    // `exec(open(...).read())`）时，它在"执行形态抽取"与"正文文本网"**两张网之间**掉了出去
+    // （抽取器只认 `subprocess.*` / `os.*`；文本网又把它排除）⇒ 守卫绿而 CI 真的会执行。
+    const textNetApplies = node.kind !== 'script'
+      || CI_SURFACE_TEXT_NET_SCRIPT_EXTENSIONS.some(extension => node.file.endsWith(extension))
     if (textNetApplies && E2E_END_TO_END_PATTERN.test(text)) mentioning.set(node.file, node.via)
     /** 一条命令**可能**在哪些目录里跑：节点自己的 dir ∪ workflow 声明的 `working-directory`。 */
     const workingDirsFor = raw => {
@@ -2303,6 +2731,28 @@ function ciExecutionSurface(options) {
       return [...dirs]
     }
     /**
+     * 闭包 problem 的**唯一落点**：字符串 ⇒ 直接记红；结构化项（`{ kind, word, message }`）
+     * ⇒ 先过 {@link CI_SURFACE_VARIABLE_COMMAND_ACK} 的登记制，未登记才记红（并记下命中，
+     * 供"死条目双向对账"用）。
+     * @param problem - `string` 或 `{ kind, word, message }`。
+     */
+    const reportClosureProblem = problem => {
+      if (typeof problem === 'string') { problems.push(`${node.file}：${problem}`); return }
+      if (problem.kind !== 'variable-command') {
+        problems.push(`${node.file}：${problem.message ?? String(problem)}`)
+        return
+      }
+      // **去重**：同一条命令会被 `make` 与 `docker compose` 两个扫描器各走一遍（它们的输入
+      // 是同一段文本），同一个变量命令位只算一次 —— 否则"登记 1 处、命中 2 次"会让死条目
+      // 对账永远算不平。
+      const key = `${node.file}\u0000${problem.word}\u0000${problem.raw}`
+      if (seenVariableCommands.has(key)) return
+      seenVariableCommands.add(key)
+      const acked = CI_SURFACE_VARIABLE_COMMAND_ACK.some(entry => entry.file === node.file && entry.word === problem.word)
+      variableCommands.push({ file: node.file, word: problem.word, raw: problem.raw, acked })
+      if (!acked) problems.push(`${node.file}：${problem.message}`)
+    }
+    /**
      * `make` 间接的扩张（VA-05-F1）。**读不懂就 fail-closed**：值位/目标位含变量、
      * Makefile 不存在 / 读不出、`include` 解析不出、目标在 Makefile 里找不到 ——
      * 一律记一条 problem（判据红且诊断点名文件与形态），不静默当成"这一层没有端到端"。
@@ -2310,7 +2760,11 @@ function ciExecutionSurface(options) {
      * @param dirs - 这条命令可能的工作目录（`-C` 缺席时按它们逐个找 Makefile）。
      */
     const expandMakeCalls = (raw, dirs) => {
-      for (const invocation of makeInvocations(raw).invocations) {
+      const scanned = makeInvocations(raw)
+      // 包装位读不懂（`timeout $T make …` / `bash -c "$CMD"` / 包装链过深）**同样是** fail-closed：
+      // R15A-03 的形态正是"把 make 藏进参数位"，只报 unresolved 会让它静默溜走。
+      for (const problem of scanned.problems) reportClosureProblem(problem)
+      for (const invocation of scanned.invocations) {
         if (invocation.unresolved.length > 0) {
           problems.push(`${node.file} 里的 \`make\` 调用读不懂（${invocation.raw}）：`
             + `这些位是变量/表达式 \`${invocation.unresolved.join(' ')}\` —— 值位或目标位含变量时`
@@ -2364,6 +2818,71 @@ function ciExecutionSurface(options) {
           problems.push(`${node.file} 里的 \`make\` 调用（${invocation.raw}）的目标 `
             + `\`${invocation.targets.join(' ')}\` 在候选 Makefile（${existing.join('、')}）里都找不到 ——`
             + ' 按 fail-closed 记红：读不到目标体就无法判定它是否触达端到端入口。')
+        }
+      }
+    }
+    /**
+     * `docker compose … run <服务>` 的扩张（R15A-03 的 C8）：命令写在 **compose 文件**里时，
+     * `ci.yml` 的 run 块只有 `docker compose -f <文件> run <服务>` —— 闭包必须读那个文件。
+     * **读不懂就 fail-closed**：compose 文件不存在 / 服务名读不出 / `command:` 形态不认识 /
+     * `-f` 的取值是变量 —— 一律记 problem。
+     * @param raw - 可能含 `docker compose … run` 调用的正文。
+     * @param dirs - 这条命令可能的工作目录（`-f` 是相对路径时按它们逐个找）。
+     */
+    const expandComposeCalls = (raw, dirs) => {
+      const scanned = composeRunInvocations(raw)
+      for (const problem of scanned.problems) reportClosureProblem(problem)
+      for (const invocation of scanned.invocations) {
+        if (invocation.service === undefined) {
+          problems.push(`${node.file} 里的 \`docker compose … run\` 没有服务名（${invocation.raw}）——`
+            + ' 读不到服务名就不知道它跑哪条命令，按 fail-closed 记红。')
+          continue
+        }
+        if (invocation.files.some(file => file === undefined)) {
+          problems.push(`${node.file} 里的 \`docker compose ${invocation.raw}\` 的 \`-f\` 取值是变量 ——`
+            + ' 闭包无法判定它读哪份 compose 文件，按 fail-closed 记红（请把它写成字面量）。')
+          continue
+        }
+        const bases = invocation.projectDir !== undefined
+          ? [invocation.projectDir]
+          : dirs.length > 0 ? dirs : ['']
+        const requested = invocation.files.length > 0
+          ? invocation.files
+          : ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']
+        const candidates = [...new Set(bases.flatMap(base => requested
+          .map(file => (/^\.\.?\//u.test(file) || file.includes('/') ? joinSurfacePath(base, file) : file))))]
+        const existing = candidates.filter(candidate => options.exists(candidate))
+        if (existing.length === 0) {
+          problems.push(`${node.file} 里的 \`docker compose … run ${invocation.service}\` 找不到 compose 文件：`
+            + `试过 ${candidates.join('、')} —— 读不到文件就没法知道它跑什么，按 fail-closed 记红。`)
+          continue
+        }
+        let followed = 0
+        for (const composeFile of existing) {
+          const parsed = composeServiceCommands(options.read(composeFile), invocation.service)
+          problems.push(...parsed.problems.map(message => `${node.file} → ${composeFile}：${message}`))
+          for (const [index, command] of parsed.commands.entries()) {
+            followed += 1
+            enqueue({
+              key: `${composeFile}#service:${invocation.service}:${index}`, file: composeFile, kind: 'shell-value',
+              text: command, dir: composeFile.includes('/') ? composeFile.slice(0, composeFile.lastIndexOf('/')) : '',
+              via: [...node.via, `${composeFile} services.${invocation.service}.command`], hops: node.hops + 1,
+            })
+          }
+        }
+        // `docker compose run <服务> <命令…>` 的命令行覆盖项同样必须跟随（它优先级最高）。
+        if (invocation.override.length > 0) {
+          followed += 1
+          enqueue({
+            key: `${existing[0]}#service:${invocation.service}:override`, file: existing[0], kind: 'shell-value',
+            text: invocation.override.join(' '), dir: '',
+            via: [...node.via, `${invocation.raw} 的命令行覆盖`], hops: node.hops + 1,
+          })
+        }
+        if (followed === 0) {
+          problems.push(`${node.file} 里的 \`docker compose … run ${invocation.service}\` 在 `
+            + `${existing.join('、')} 里既没有 \`command:\`/\`entrypoint:\`、也没有命令行覆盖命令 ——`
+            + ' 按 fail-closed 记红：读不到命令就无法判定它是否触达端到端入口。')
         }
       }
     }
@@ -2423,21 +2942,30 @@ function ciExecutionSurface(options) {
       }
       expandTokens(shellCommandTokens(text), node.dir)
       // `make` 只在 **`run:` 块**上找（步骤名/注释里的 `make` 是散文，不是命令）。
-      for (const block of workflowRunBlocks(text)) expandMakeCalls(block, workingDirsFor(text))
+      for (const block of workflowRunBlocks(text)) {
+        expandMakeCalls(block, workingDirsFor(text))
+        expandComposeCalls(block, workingDirsFor(text))
+      }
     } else if (node.kind === 'manifest' || node.kind === 'shell-value') {
       expandTokens(shellCommandTokens(text), node.dir)
       expandMakeCalls(text, workingDirsFor(text))
+      expandComposeCalls(text, workingDirsFor(text))
     } else if (node.kind === 'script') {
-      // 按语言选抽取器：`.sh` 走命令位、`.py` 走 `subprocess.*` 实参窗口、其余走 JS 家族。
+      // 按语言选抽取器：`.sh` 走命令位、`.py` 走 `subprocess.*`/`runpy`/`exec` 实参窗口、
+      // 其余走 JS 家族。`make` / `docker compose` 的跟随按语言各自的门（见下）。
       expandTokens(scriptExecutionLiterals(node.file, text, scriptKeys), node.dir)
-      if (/\.(?:sh|bash|py)$/u.test(node.file)) expandMakeCalls(text, workingDirsFor(text))
+      if (/\.(?:sh|bash|py)$/u.test(node.file)) {
+        expandMakeCalls(text, workingDirsFor(text))
+        expandComposeCalls(text, workingDirsFor(text))
+      }
     } else if (node.kind === 'makefile') {
       // 目标的配方体（已含前置目标的配方）：按 shell 口径继续闭包，并跟随其中的 `$(MAKE)` 递归。
       expandTokens(shellCommandTokens(text), node.dir)
       expandMakeCalls(text, [node.dir])
+      expandComposeCalls(text, [node.dir])
     }
   }
-  return { mentioning, reached, problems, nodes, truncated }
+  return { mentioning, reached, problems, nodes, truncated, variableCommands }
 }
 
 /**
@@ -2608,6 +3136,29 @@ function ciExecutionSurfaceSelfTest() {
       'name: python-wrap\njobs:\n  a:\n    steps:\n      - run: python3 scripts/probe-wrapper.py\n'],
     ['scripts/probe-wrapper.py',
       "import subprocess\n\nsubprocess.run(['bash', 'integration-tests/run-all.sh'], check=True)\n"],
+    // **包装链**（R15A-03）：`timeout`/`bash -c`/`npm exec --` 把目标藏在参数位里 ——
+    // 修前这三种形态全 EXIT=0（闭包不触达），而 CI 真的会执行它。
+    ['.github/workflows/wrapper-chain.yml',
+      'name: wrapper-chain\njobs:\n  a:\n    steps:\n'
+      + '      - run: timeout 900 make -f wrapper-timeout.mk e2e\n'
+      + '      - run: bash -c "make -f wrapper-bashc.mk e2e"\n'
+      + '      - run: npm exec -- make -f wrapper-npmexec.mk e2e\n'],
+    ['wrapper-timeout.mk', 'e2e:\n\tbash integration-tests/run-all.sh\n'],
+    ['wrapper-bashc.mk', 'e2e:\n\tbash integration-tests/run-all.sh\n'],
+    ['wrapper-npmexec.mk', 'e2e:\n\tbash integration-tests/run-all.sh\n'],
+    // **compose 载体**（R15A-03 的 C8）：命令写在 compose 文件里。
+    ['.github/workflows/compose-run.yml',
+      'name: compose-run\njobs:\n  a:\n    steps:\n      - run: docker compose -f ci-probe.compose.yml run e2e\n'],
+    ['ci-probe.compose.yml',
+      'services:\n  e2e:\n    image: example/e2e:latest\n    command: bash integration-tests/run-all.sh\n'],
+    // **`.py` 正文文本网**（R15A-03 的 C5/C6）：`runpy` / `exec(open(...))` 两条都不在
+    // `subprocess.*` 抽取器里，修前它们在"抽取器"与"文本网"之间掉出去。
+    ['.github/workflows/python-runpy.yml',
+      'name: python-runpy\njobs:\n  a:\n    steps:\n      - run: python3 scripts/probe-runpy.py\n'],
+    ['scripts/probe-runpy.py', "import runpy\nrunpy.run_path('integration-tests/run-all.sh')\n"],
+    ['.github/workflows/python-exec.yml',
+      'name: python-exec\njobs:\n  a:\n    steps:\n      - run: python3 scripts/probe-exec.py\n'],
+    ['scripts/probe-exec.py', "exec(open('integration-tests/run-all.sh').read())\n"],
     ['.github/workflows/orchestrator.yml',
       'name: orchestrator\njobs:\n  a:\n    steps:\n      - run: yarn check\n'],
     ['scripts/orchestrator.mjs',
@@ -2661,10 +3212,65 @@ function ciExecutionSurfaceSelfTest() {
     ['server/Makefile', '`make -C server <目标>` 展开到的目标体（VA-05-F1 的形态）'],
     ['ci-probe.mk', '`make -f <文件> <目标>` 的候选 Makefile'],
     ['scripts/probe-wrapper.py', '`.py` 包装脚本（VA-05-F2 的形态）'],
+    ['ci-probe.compose.yml', '`docker compose -f <文件> run <服务>` 的 compose 载体（R15A-03 的 C8）'],
+    ['scripts/probe-runpy.py', '`.py` 里 `runpy.run_path(<字面量>)` 的包装脚本（R15A-03 的 C5）'],
+    ['scripts/probe-exec.py', '`.py` 里 `exec(open(<字面量>).read())` 的包装脚本（R15A-03 的 C6）'],
   ]) {
     check(surface.reached.has(file),
       `形态⑨自证: CI 执行面闭包没认出${label}（${file}）—— 补上扩展名/跟随规则但抽取器不认，`
         + `等于把同一个洞换个写法。实际 reached：${[...surface.reached.keys()].join(', ')}`)
+  }
+  // R15A-03 的 5 种同族形态：**每一种**都必须让闭包触达端到端入口（否则守卫又会"没扫到 = 0 接线"）。
+  // 载体文件**两两不同**，这样每一条断言都只能被它对应的那种形态满足（共用 `server/Makefile`
+  // 时，四种形态里只要有一种能解析就全绿 —— 那是"自证覆盖之外"）。
+  for (const [file, label] of [
+    ['wrapper-timeout.mk', '`timeout 900 make -f <文件> <目标>`（包装词在 make 之前）'],
+    ['wrapper-bashc.mk', '`bash -c "make -f <文件> <目标>"`（内层 shell 文本）'],
+    ['wrapper-npmexec.mk', '`npm exec -- make -f <文件> <目标>`（包运行器的 exec 面）'],
+    ['ci-probe.compose.yml', '`docker compose -f <文件> run <服务>`（命令写在 compose 文件里）'],
+    ['scripts/probe-runpy.py', '`python3 <包装脚本>`（内含 `runpy.run_path`）'],
+    ['scripts/probe-exec.py', '`python3 <包装脚本>`（内含 `exec(open(...).read())`）'],
+  ]) {
+    check(surface.reached.has(file),
+      `形态⑨自证: 包装链形态「${label}」没有被认成"触达端到端入口"（${file}）——`
+        + ' 这正是第十五轮 R15A-03 的现场：目标藏在**参数位**里而闭包只认"命令位就是 make"。'
+        + ` 实际 reached：${[...surface.reached.keys()].join(', ')}`)
+  }
+  // 反面对照：登记过的包装词**不得**因为"看见 `timeout`"就误报（记 problem 会让真仓变红）。
+  check(surface.problems.length === 0,
+    '形态⑨自证: 包装链夹具（`timeout 900 make …` / `bash -c "make …"` / `npm exec -- make …` /'
+      + ` compose run）不得产生"读不懂"的 problem：${JSON.stringify(surface.problems)}`)
+  // **包装链尽头的变量命令位**：fail-closed（未登记即 problem）+ 登记制（登记后放行）。
+  const ackProbeFixture = new Map([
+    ['.github/workflows/var-command.yml',
+      'name: var-command\njobs:\n  a:\n    steps:\n      - run: timeout 900 $R15A_RUNNER --target\n'],
+  ])
+  const ackProbe = ciExecutionSurface({
+    workflowTexts: [['.github/workflows/var-command.yml', ackProbeFixture.get('.github/workflows/var-command.yml')]],
+    rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+    exists: path => ackProbeFixture.has(path), read: path => ackProbeFixture.get(path) ?? '',
+  })
+  check(ackProbe.problems.some(message => message.includes('变量展开')),
+    '形态⑨自证: `timeout 900 $RUNNER …`（包装链尽头是变量）必须 fail-closed 记 problem ——'
+      + ' 否则"把 make 藏进一个变量再经包装链调用"就是新的旁路：'
+      + ` 实际 problems=${JSON.stringify(ackProbe.problems)}`)
+  check(ackProbe.variableCommands.length === 1 && ackProbe.variableCommands[0].acked === false,
+    '形态⑨自证: 变量命令位必须被记进 `variableCommands` 且标成**未登记**（死条目对账的另一半）：'
+      + ` 实际 ${JSON.stringify(ackProbe.variableCommands)}`)
+  // 深度上限：包装链超过 {@link CI_SURFACE_MAX_HOPS} 层（`timeout 1` 套 `timeout 1` …）⇒
+  // fail-closed（记 problem），**不静默**。
+  {
+    const layers = CI_SURFACE_MAX_HOPS + 2
+    const nested = `${'timeout 1 '.repeat(layers)}make -f wrapper-timeout.mk e2e`
+    const deepNest = ciExecutionSurface({
+      workflowTexts: [['.github/workflows/deep.yml',
+        `name: deep\njobs:\n  a:\n    steps:\n      - run: ${nested}\n`]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: () => false, read: () => '',
+    })
+    check(deepNest.problems.some(message => message.includes('深度上限')),
+      '形态⑨自证: 包装链的层数超过深度上限时必须 fail-closed（记 problem），不静默丢弃：'
+        + ` 实际 problems=${JSON.stringify(deepNest.problems)}`)
   }
   // 闭包的**跟随集**必须覆盖扫描面里的可执行扩展名（VA-05-F2 的同源口径）：
   // 少一个（例如把 `.py` 从派生里摘掉）即红，不需要另一条判据盯着。
@@ -2727,7 +3333,7 @@ function ciExecutionSurfaceSelfTest() {
   check(aliasTextHits === 0,
     '形态⑨自证: 别名形态的 workflow **文本**里本就不该有那 4 个 token（这正是旧判据说谎的原因）——'
       + `实际命中 ${aliasTextHits} 处，自证夹具已被写坏`)
-  notes.push('CI 执行面闭包自证: 直接接线 / `package.json` 别名 / 复合 action / `.sh` 包装链 /'
+  note('CI 执行面闭包自证: 直接接线 / `package.json` 别名 / 复合 action / `.sh` 包装链 /'
     + ' `.mjs` spawn 目标 / 变量拼路径的 `.sh` 六种形态全部可区分 ✓')
 }
 {
@@ -2755,7 +3361,7 @@ function ciExecutionSurfaceSelfTest() {
         + '并把通过行的 `static-only` 与"CI 内 0 执行"的措辞一起改掉（口径要进 diff 才可评审）；'
         + '\n     · 真机 job 被摘线（1 → 0）：同上反向改回，或恢复那条接线。'
         + '\n     不允许"命中数悄悄变了、通过行照旧写 static-only"。')
-    notes.push(`端到端覆盖面（文本面）: \`.github/workflows/**\` 命中 ${workflowHits.length} 处`
+    note(`端到端覆盖面（文本面）: \`.github/workflows/**\` 命中 ${workflowHits.length} 处`
       + `（登记 ${E2E_CI_TEXT_HITS_DECLARED}）✓`)
   }
 
@@ -2792,7 +3398,7 @@ function ciExecutionSurfaceSelfTest() {
           } catch {
             // 工作区 manifest 坏了由别的判据负责报；这里不把它当成"没有这条别名"，
             // 也不因它中断闭包 —— 记一条 note，让"读不出来"在输出里可见。
-            notes.push(`CI 执行面闭包: ${dir}/package.json 解析失败（非 JSON）—— 该工作区的别名未纳入闭包`)
+            note(`CI 执行面闭包: ${dir}/package.json 解析失败（非 JSON）—— 该工作区的别名未纳入闭包`)
           }
         }
       }
@@ -2850,7 +3456,17 @@ function ciExecutionSurfaceSelfTest() {
           `形态⑨: 登记项 ${entry.file}（mode: ${entry.mode}）已经不再触及端到端入口 ——`
             + ' 死条目会让登记表看起来比实际宽，请在改掉那条探针/引用时同步删掉这条登记')
       }
-      notes.push(`CI 执行面闭包: ${surface.nodes.length} 个节点、`
+      // 反向（**死条目双向对账**，与 E2E_CI_SURFACE_REGISTRY 同款纪律）：包装链尽头的变量
+      // 命令位登记项必须**仍然真的命中** —— 变量被改名/那行被删掉之后，这条认账就成了
+      // "说自己还在看着一个早就不存在的洞"，必须跟着删。
+      const hitVariableCommands = new Set(surface.variableCommands.map(item => `${item.file}\u0000${item.word}`))
+      for (const entry of CI_SURFACE_VARIABLE_COMMAND_ACK) {
+        check(hitVariableCommands.has(`${entry.file}\u0000${entry.word}`),
+          `形态⑨: \`CI_SURFACE_VARIABLE_COMMAND_ACK\` 里的登记项 ${entry.file} 的 \`${entry.word}\` `
+            + '已经不再命中（那一行被删/被改名/被写成字面量）—— 死条目会让认账表看起来比实际宽，'
+            + '请在改掉那处写法时同步删掉这条登记。')
+      }
+      note(`CI 执行面闭包: ${surface.nodes.length} 个节点、`
         + `触达端到端入口的来源 ${new Set([...surface.mentioning.keys(), ...surface.reached.keys()]).size} 个（真实 ${classified.real.length} / `
         + `合成 SKIP 探针 ${classified.synthetic.length} / 未登记 ${classified.unregistered.length}）✓`)
     }
@@ -2883,7 +3499,9 @@ for (const dir of scratchDirs) {
     // 清理失败不影响判据结论
   }
 }
-for (const message of notes) process.stdout.write(`check-integration-tests: ${message}\n`)
+for (const item of notes) {
+  process.stdout.write(`check-integration-tests: ${item.text} ${item.ok ? '✓' : '✗'}\n`)
+}
 if (failures.length > 0) {
   process.stderr.write(`\ncheck-integration-tests: ${failures.length} 项断言失败\n`)
   for (const message of failures) process.stderr.write(`- ${message}\n`)
