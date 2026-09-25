@@ -102,10 +102,31 @@ export function stepScalar(text, stepName, key) {
   if (anchor < 0) return null
   for (let index = anchor; index < lines.length; index += 1) {
     if (index > anchor && /^\s*-\s*(name|uses):/u.test(lines[index])) break
-    const match = new RegExp(`^\\s*${key}:\\s*(\\S.*)$`, 'u').exec(lines[index])
-    if (match !== null) return match[1].trim()
+    const value = scalarOnLine(lines[index], key)
+    if (value !== null) return value
   }
   return null
+}
+
+/**
+ * 读一行里的**顶层 `key: 取值`** 标量。
+ *
+ * **不要**改回 `new RegExp(\`^\\s*${key}:…\`)`：`key` 与待比较的取值都来自调用方 /
+ * 命令行参数，动态构造 RegExp 会被 CodeQL 判为 `js/regex-injection`（high）——
+ * 本仓的 Code Scanning 门禁会因此变红（第十三轮 PR #149 实测两条）。
+ * 这里用**字面量正则 + 纯字符串比较**，语义与原来逐字相同：
+ * 只认「可选前导空白 + 可选的 `- ` + `键:` + 非空取值」。
+ *
+ * @param line - 一行文本。
+ * @param key - 键名（与捕获到的键做**字符串**比较，不进正则）。
+ * @returns 取值（已 trim）；该行不是这个键 / 取值为空 ⇒ `null`。
+ */
+function scalarOnLine(line, key) {
+  const match = /^\s*(?:-\s*)?([A-Za-z0-9_-]+):\s*(\S.*)?$/u.exec(line)
+  if (match === null || match[1] !== key) return null
+  if (match[2] === undefined) return null
+  const value = match[2].trim()
+  return value === '' ? null : value
 }
 
 /**
@@ -150,7 +171,7 @@ function main(argv) {
   const freezeById = (() => {
     const lines = workflowText.split('\n')
     for (let index = 0; index < lines.length; index += 1) {
-      if (!new RegExp(`^\\s*-?\\s*id:\\s*${options.freezeStepId}\\s*$`, 'u').test(lines[index])) continue
+      if (scalarOnLine(lines[index], 'id') !== options.freezeStepId) continue
       // 往回找最近的 `- name:`，再用它抽 run 体。
       for (let back = index; back >= 0; back -= 1) {
         const match = /^\s*-\s*name:\s*(\S.*)$/u.exec(lines[back])
@@ -178,7 +199,7 @@ function main(argv) {
   // 冻结步必须是**第一个执行体**：它之前不得有别的 `run:` 步骤（`uses:` 不跑仓内代码）。
   {
     const lines = workflowText.split('\n')
-    const idLine = lines.findIndex(line => new RegExp(`^\\s*-?\\s*id:\\s*${options.freezeStepId}\\s*$`, 'u').test(line))
+    const idLine = lines.findIndex(line => scalarOnLine(line, 'id') === options.freezeStepId)
     let jobStart = 0
     for (let index = idLine; index >= 0; index -= 1) {
       if (/^ {2}[A-Za-z0-9_-]+:\s*$/u.test(lines[index])) { jobStart = index; break }
@@ -228,6 +249,14 @@ function main(argv) {
     env: { HOME: scratch, ...env },
   })
 
+  // 平台锚值：CI 上必须用 `$GITHUB_SHA`（runner 注入、仓内代码改不到）；本地没有它时
+  // 退回本地 HEAD —— 否则把**空串**喂给判据步体会让 `check-install-integrity` 判
+  // 「平台锚缺席」而 exit 2，探针在本地永远红（第十三轮修复批自测时踩到）。
+  const headRev = runShell('git rev-parse HEAD', { PATH: process.env.PATH ?? '/usr/bin:/bin' }, root)
+  const anchorSha = (process.env.GITHUB_SHA ?? '').trim() !== ''
+    ? String(process.env.GITHUB_SHA).trim()
+    : String(headRev.stdout ?? '').trim()
+
   try {
     // ① 跑**冻结步体本身**（未做任何替换：它的形态就是产线形态）。
     const outputFile = join(scratch, 'github-output')
@@ -238,7 +267,7 @@ function main(argv) {
       GITHUB_PATH: join(scratch, 'github-path'),
       GITHUB_ENV: join(scratch, 'github-env'),
       RUNNER_TEMP: join(scratch, 'runner-temp'),
-      GITHUB_SHA: process.env.GITHUB_SHA ?? '',
+      GITHUB_SHA: anchorSha,
     })
     if (freezeRun.status !== 0) {
       process.stderr.write(`check-frozen-launchers: 冻结步体 EXIT=${freezeRun.status}\n${freezeRun.stdout}\n${freezeRun.stderr}\n`)
@@ -276,19 +305,34 @@ function main(argv) {
       PATH: `${fakebin}:${process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`,
       RUNNER_TEMP: join(scratch, 'runner-temp'),
       FAKE_NODE_MARKER: marker,
-      GITHUB_SHA: process.env.GITHUB_SHA ?? '',
+      GITHUB_SHA: anchorSha,
     }, root)
     const fakeUsed = existsSync(marker)
     const stdout = judgeRun.stdout ?? ''
     if (fakeUsed) {
       failures.push(`**冻结启动器没有生效**：判据步仍然执行了被注入的假 \`node\`（标记文件 ${marker} 存在）\n`
         + `      ⇒ 假 node 会自己回显凭据：\`${readFileSync(marker, 'utf8').split('\n')[0]}\``)
-    } else if (!stdout.includes('check-install-integrity: VERDICT PASS')) {
-      failures.push('判据步既没用假 node，也没打印真判据的通过凭据 ⇒ 它根本没跑到判据（EXIT='
-        + `${judgeRun.status}）\n      stdout: ${JSON.stringify(stdout.slice(0, 400))}\n`
-        + `      stderr: ${JSON.stringify((judgeRun.stderr ?? '').slice(0, 400))}`)
     } else {
-      notes.push(`冻结启动器生效：PATH 前置了假 \`node\`（${fakebin}）之后，判据步仍跑真判据并打印通过凭据（EXIT=${judgeRun.status}）`)
+      const passed = stdout.includes('check-install-integrity: VERDICT PASS')
+      // 「真判据在跑」的证据 = 它自己的输出前缀出现在两个流里。**不能**只看 PASS 行：
+      // 本地脏树（工作树 ≠ HEAD）上真判据会红，而那恰恰证明跑的是真判据而不是假 node。
+      const judgeRan = /check-install-integrity:/u.test(stdout) || /check-install-integrity:/u.test(judgeRun.stderr ?? '')
+      const platformAnchor = (process.env.GITHUB_SHA ?? '').trim() !== ''
+      if (!judgeRan) {
+        failures.push('判据步既没用假 node，也没跑到真判据 ⇒ 它什么都没跑（EXIT='
+          + `${judgeRun.status}）\n      stdout: ${JSON.stringify(stdout.slice(0, 400))}\n`
+          + `      stderr: ${JSON.stringify((judgeRun.stderr ?? '').slice(0, 400))}`)
+      } else if (!passed && platformAnchor) {
+        // CI 语境（平台给了 GITHUB_SHA）：检出树应当等于 HEAD ⇒ 判据必须 PASS。
+        failures.push('判据步跑到了真判据但**没有通过凭据**（EXIT='
+          + `${judgeRun.status}）—— CI 上检出树应当等于 HEAD，这里必须 PASS\n`
+          + `      stderr: ${JSON.stringify((judgeRun.stderr ?? '').slice(0, 400))}`)
+      } else if (!passed) {
+        notes.push(`冻结启动器生效：PATH 前置了假 \`node\`（${fakebin}）之后，判据步仍跑**真**判据`
+          + `（EXIT=${judgeRun.status}，本地脏树上判据本身会红，属预期；CI 上要求 PASS）`)
+      } else {
+        notes.push(`冻结启动器生效：PATH 前置了假 \`node\`（${fakebin}）之后，判据步仍跑真判据并打印通过凭据（EXIT=${judgeRun.status}）`)
+      }
     }
 
     // ③ **正控**：把冻结拆掉（裸 `node` + 不重置 PATH），同一个载荷必须能把判据换掉。
@@ -305,7 +349,7 @@ function main(argv) {
       PATH: `${fakebin}:${process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'}`,
       RUNNER_TEMP: join(scratch, 'runner-temp'),
       FAKE_NODE_MARKER: controlMarker,
-      GITHUB_SHA: process.env.GITHUB_SHA ?? '',
+      GITHUB_SHA: anchorSha,
     }, root)
     if (!existsSync(controlMarker)) {
       failures.push('**正控失败**：把冻结拆除之后，假 `node` 仍然没有被执行 ⇒ 本探针抓不到"PATH 注入换启动器"'
