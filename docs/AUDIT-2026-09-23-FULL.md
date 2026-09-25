@@ -1412,3 +1412,43 @@ R16-A 用 **18 种新形态**证明 R15A-03 的修法方向不闭合：四条静
 #### 方法学（本轮新增三条）
 
 ① **"打不坏"清单与"打得坏"清单同等重要**：三路共记录 30+ 项实跑失败的攻击，它们是"这条修复真的承重"的唯一证据。② **量具自检要写进结论**：R16-A 用"13 个对照（12 必须红 + 1 必须绿）13/13 与预期一致"证明"绿不是量具坏了"；R16-C 记录两次差点误判的量具故障（单实例锁让 env 用例全红、在已篡改的库上验链完整性）。③ **判据的"枚举方向"本身是缺陷源**：闭包从"枚举包装词"到"命令位登记制"的反转，是本轮唯一一处**结构性**修复 —— 它把"我认识的形态"换成"我不认识就拒绝"，这也是后续轮次能否收敛的关键杠杆。**本轮另记一条 P2 残留**：WASM 门禁的组级台账在**同一工作树并发运行**时会被互相污染（本主控实测：同时跑 `verify-wasm-client-only.sh` 与含该门禁的 `check-root-guards.mjs` ⇒ 台账出现两行 group 2、计数面与台账面不同源而假红；串行复跑 17/17 PASS）—— CI 是串行的不受影响，但本地/并发会话会踩。
+
+---
+
+### 7.52 第十七轮审计（2026-09-25，三路）：判据面被打穿第二次，两条"钱/权限"的口径缺口
+
+**本轮 = 1 路对抗审计（第十六轮修复批）+ 1 路技能库深挖（本任务最初指定的重点面）+ 1 路服务端新扫**。结论：**0 P0 / 约 7 P1 / 约 10 P2** ⇒ **仍未达成"连续两轮零新增 P0/P1"**。逐轮计数追加：第十五轮 0+8、第十六轮 0+~15、**第十七轮 0+~7**。**特征**：P0 连续三轮为零、P1 数量自第十六轮峰值回落；但**判据面第二次被打穿**（第十六轮语义反转后，第十七轮又找出"整族"绕过），说明"枚举式判据"到"fail-closed 判据"的迁移还没走完。
+
+#### 判据面：命令位登记制被整族绕过 ⇒ 改成"常量传播 + 读不懂即 fail-closed"
+
+| 编号 | 现场 | 修后 |
+|---|---|---|
+| **R17A-01 (P1)** | `executableNameCandidate()` 对含 `$`/反引号的**首词**返回 `undefined` ⇒ `isRegisteredCommandWord()` 直接 `return true` ⇒ `unregistered-command` 永不触发：`$(echo make) …`、`` `echo make` … ``、`M=ma; ${M}ke …`、`MAKE=make; $MAKE …`（守卫 EXIT=0 且 tripwire **真执行到入口**） | 同段**常量传播**解析可执行名（`NAME=字面量`/`$NAME`/`${NAME}`/`$NAME后缀`/`$(echo <字面量>)`/反引号），解析不出即 `command-shape-unreadable` **fail-closed** |
+| **R17A-02 (P1)** | 字符串参数执行面不在任何网内：`eval '<cmd>'`、`trap '<cmd>' EXIT`、`bash <<< '<cmd>'`、`bash <(echo '<cmd>')`、`command eval`（含放进复合 action） | `eval` 按入口形态递归、`trap` 按宽松面递归、here-string 跟随、**进程替换 fail-closed** |
+| **R17A-03 (P1)** | **三张网同时失效**：`D=integration; N=run; bash "$D-tests/$N-all.sh"`（正文无 `integration-tests`/`run-all.sh` ⇒ 文本网 0 命中、token 网无路径可跟随、命令位是登记过的 `bash`） | 常量传播放进**词法层**，token/载体/文本三张网共用同一份解析 |
+| **R17A-04 (P2)** | 新口径误报：`python3 -m pip`、`python3 -m json.tool`、`npx eslint .` 判红 | 仓内归属判定（模块顶层段属本仓才要求解析出载体）+ 包运行器参数位按"外部包内 bin"处理 |
+| **R17A-05 (P3)** | `ssh <host> <cmd>`/`docker run|exec <img|ctr> <cmd>` 参数位不在网内 | 纳入网内，本仓对应形态登记（`postgres`/`pg_isready`，含理由+批准人，死条目对账） |
+
+**验证**：R16-W 原探针复跑 **31/31 与预期一致**（12 条已知被覆盖仍红 + 1 条无害仍绿 + 18 个 R16-W 形态仍红）；12 条独立变异**全部复漏**；tripwire **13 形态全部 gate=EXIT=1（根本没跑）**；性能代价 +2.5s（7.6–9.3s → 10.4–10.8s）。
+
+#### 服务端与技能库的三条 P1
+
+- **R17A-06（钱）**：余额准入第③层（最小计费额）在**输入价 NULL/0 的模型**上整体不参与（`ModelPrices` 把 NULL→0、`minBillableMicro` 返回 `ok=false`），成本侧同价算 0 ⇒ 不产生 `ErrInsufficientBalance` ⇒ 第②层"学到的下限"**永不置位**：余额 0.01 的账号 **20/20 请求 200 交付、20 次真实上游命中**、余额一分不减（迁移 0022 允许 `input_price_per_1m` 为 NULL ⇒ **新建模型未填价即此状态**）。
+  **修法**：默认 **429 `MODEL_NOT_PRICED`** + 逃生门 `gateway.unpriced_model_policy=allow`（PUT /gateway 可写、进审计明细、webadmin 有下拉、三处文档写明）。**兜底价方案被论证否掉**：最小计费额 = token × 单价，而余额可任意小、成本侧恒为 0 ⇒ 只有拒绝能闭合。
+- **R17C-01（权限/应急）**：WASM 平台把"发布面"的**编译器闸门**盖到了发现面/管理面/应急面（`requireReady()` 把 `Compiler == nil` 与 DB/DataRoot 绑在一条判据里，33 个调用点全过它）⇒ 编译子系统缺席（compose 缺省 `auto`、Dockerfile 自注 bwrap 需非特权 userns 或 SYS_ADMIN）时，员工目录/可用性/schema/rows/diagnostics/releases/export 与**整个管理端**（列表、freeze、unpublish、delete、review、limits）全 500，而同进程执行面正常、`/readyz {ok:true}`、启动日志写"其余功能正常" ⇒ **降级态下管理员失去下架异常应用的能力**。
+  **修法**：拆 `requirePlatform()`（DB/DataRoot）与 `requireCompiler()`（仅上传/校验/发布，31 个调用点），`/readyz` 与启动日志口径与实现一致。
+- **R17B-01（技能库）**：上游 `nodeEntryKind`/`fs-local.probe` **跟随符号链接**而企业侧 `discoverRuntimeSkills` 不跟随 ⇒ 库根里的链接条目"**运行时加载、企业侧完全看不见**"：面板看不到也卸不掉、装好同名技能后面板说"已安装"而模型读库外那份、**卸载返回成功零残留而运行时照旧加载**、跨根 `RESIDUE` 同样失明 —— 正面打掉本仓自己的两条不变量（"已安装集合 == 运行时集合"、"卸载成功 == 运行时不再加载"）。
+  **修法**：企业侧对 `isSymbolicLink()` 条目补 `stat` 跟随（与上游逐条同判据）、链接按用户内容（`installerOwned=false`）、安装面新增 `findShadowWinner` ⇒ 影子赢下注册表即报 `RESIDUE`、**删除面保持只 unlink**（不引入写穿）。
+
+#### 其余 P2/P3
+
+`R17C-02`（`PUT /admin/gateway` 改**峰谷计费窗口**的审计事务外 fire-and-forget ⇒ 阻断审计后 200 + 窗口照改 + 审计 0 行；已改 `AuditLogTx` 并扫出同族 `balance_settings`）· `R17C-03`（`PUT /balance` 部分失败仍回 200 `{ok:true, run:null}`，webadmin 与"已发放"显示同一句）· `R17C-04`（用量趋势日期轴 ≠ 请求窗口：明细段整月补零、账本段不补 ⇒ 缺省 90 天窗口实测只回 32 天）· `R17C-05`（管理面/客户端面 >1 MiB 报 400 而非 413）· `R17C-06`（发放调度间隔两处真源不符：文档 10 分钟 vs 装配 1h）· `R17A-07`（拒绝路径"按用户节流"是声称面 ⇒ 30 次拒绝 30 行日志，已改节流）· `R17A-09`（用户名 128 字节上限只在登录路径 ⇒ 审计行与 `users.username` 不逐字相等，已收敛到 DAO 建号入口）· `R17B-02`（"安装器所有"仍是名字启发式 ⇒ 用户自建 `.install-*` 被无确认删除；本轮**只补可诊断性**并给出不改语义的理由）· `R17B-03`（换入崩溃窗口：唯一副本落在清扫面内 ⇒ 备份移出清扫面 + `recoverInterruptedSkillSwaps` 自愈）· `R17B-04`（`provenance.server` 写了读了**零消费** ⇒ 并入商店归属唯一实现，换服务端要确认 + 徽章）· `R17B-05`（Windows 保留设备名两端放行 ⇒ 写侧与归档双通道拒绝；**运行时判据故意不动**以免造出"看得见删不掉"）。
+
+#### 本轮另修好两条**CI 红**（都是"修复自身/流程"的问题，记入方法学）
+
+1. **`yarn install` 会重写非规范形态的 `package.json`**：手写的 `exports` 子块缩进少了两格 ⇒ install 重新序列化整个文件 ⇒ worktree ≠ HEAD ⇒ 安装**之后**跑的"判据执行体有没有被 install 期改写"这条锚当场红，且失败信息指向"有人在 install 期动了判据"（误导）。**修法**：①把该文件按 Yarn 规范形态（`JSON.stringify(parsed, null, 2) + '\n'`）重排；②在 `scripts/verify-layout.mjs`（`check:layout`）新增**提前判据** —— 根与全部 workspace manifest 必须是该形态，否则红并给出可操作原因（变异：改坏缩进 ⇒ EXIT=1）。
+2. **`TestMyReleasesSurvivesRetirement` 回归**（只有**全量 Go 套件**在 CI 里抓到）：第十六轮为堵 `approved + archive IS NULL` 坏行，在 `SoftDeleteWasmApp` 里"清字节同时置 `deleted_at`" ⇒ 退役后 `ListWasmReleases(..., allowDeleted=false)` 返回空 ⇒ **"退役后作者仍应能回看版本清单"这条既有承诺被打破**。**定责方法（可复用）**：以"用例名 + 文档注释 + 同族调用点实参"**三条真源**判定产品口径 ⇒ 退役只清字节、坏行改由 approve 谓词的 `EXISTS(未退役 apps 行)` 收口；**没有靠改用例变绿**。教训：修 `serverstore`/`wasmapp` 时至少要跑 `./internal/wasmapp/... ./internal/serverstore/...`。
+
+#### 方法学（本轮新增两条）
+
+① **"改夹具"必须逐条自证不是"改口径"**：本轮有 6 条既有用例的夹具被调整（模型定价、技能契约、scroll 结果带 hit）——每条都要说明"语义未变、只是夹具不再中性"，否则就是本仓明令禁止的"改用例让它变绿"。② **判据从"枚举"到"fail-closed"的迁移要一次做完**：第十六轮把闭包改成命令位登记制，第十七轮立刻用"非标识符首词/字符串参数/路径拆词"整族打穿 —— 只要还有"取不出名字就放行"这类**默认通过**的分支，判据就还在漏。
