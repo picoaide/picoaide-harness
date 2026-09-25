@@ -32,9 +32,20 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
 // single source of truth. Every member must exist, be a valid package, and
 // carry a name whose final segment matches its directory basename (this
 // admits both flat members like `dsh-community-fabric` and scoped members
-// like `plugins/dsh-enterprise` -> `@picoaide/dsh-enterprise`). The glob
-// patterns `packages/*/*` and `community/*` enumerate the same members that
-// the workspace glob yields, so the manifest check stays directory-driven.
+// like `plugins/dsh-enterprise` -> `@picoaide/dsh-enterprise`). The member
+// directory set is **derived by expanding the root `workspaces` globs** —
+// not by a hardcoded directory scan.
+//
+// ## 为什么必须按 glob 派生（R18A-G-02，2026-09-25）
+//
+// 修前这里是 `collectWorkspaceMembers('packages', 1)` / `('community', 1)`
+// 的**硬编码目录扫描**，而同一段注释却自称"glob 是唯一真源"。后果：判据的
+// **文件集**与 Yarn 实际认的成员集可以分叉 —— 往根 `workspaces` 里加一条
+// 新 glob（`tools/*`、`apps/*`…）之后，那个新成员的 manifest 无论多不
+// 规范（会被 `yarn install` 重新序列化 ⇒ 门禁在 install 之后误判"执行体
+// 被改写"）都判不到，守卫照旧 EXIT=0。现在文件集直接来自 glob：**新增一个
+// workspace 成员即被纳入**，与 `scripts/check-workspaces.mjs` 和 Yarn 自己
+// 的口径同一份真源。
 if (!Array.isArray(workspace.workspaces) || workspace.workspaces.length === 0) {
   fail('the root Yarn workspace must declare a non-empty workspaces list')
 }
@@ -76,50 +87,90 @@ const packageNameTable = new Map([
   ['community/fabric', 'dsh-community-fabric'],
 ])
 const nameForPath = dir => packageNameTable.get(dir)
-const workspaceDirs = []
-const workspaceManifests = new Map()
-const collectWorkspaceMembers = (tree, depth, prefix = '') => {
-  const scanRoot = resolve(root, prefix || tree)
-  if (!existsSync(scanRoot)) fail(`workspace glob root ${tree} is missing`)
+/**
+ * 展开一条根 `workspaces` glob → 匹配到的**目录**（POSIX 相对路径，已排序）。
+ *
+ * 只支持 glob 在本仓真正用到的形态：`*` 段（单层通配）与字面量段。`**` 也实现
+ * （递归），这样将来加一条 `packages/**` 之类的写法不会静默退化成"匹配不到任何成员"
+ * —— 匹配不到是 fail-loud 的（见下面的 `memberCount` 对账）。
+ *
+ * 不引入 glob 依赖：本判据的输入面是**仓内目录树本身**，用 `readdirSync` 逐段展开
+ * 既是最小实现，也避免"解析器可被 resolutions 改写"这一类问题（见
+ * `scripts/check-guard-parser-integrity.mjs` 的 C-17）。
+ * @param pattern - 根 `workspaces` 里的一条模式。
+ * @returns 匹配目录的仓库相对路径（升序、去重）。
+ */
+const expandWorkspaceGlob = pattern => {
+  const walk = (base, segments) => {
+    if (segments.length === 0) return [base]
+    const [segment, ...rest] = segments
+    if (segment === '') return walk(base, rest)
+    if (segment === '**') {
+      const out = walk(base, rest)
+      for (const name of readDirectoryNames(base)) {
+        out.push(...walk(base === '' ? name : `${base}/${name}`, segments))
+      }
+      return out
+    }
+    if (segment === '*') {
+      return readDirectoryNames(base).flatMap(name => walk(base === '' ? name : `${base}/${name}`, rest))
+    }
+    const next = base === '' ? segment : `${base}/${segment}`
+    if (!existsSync(resolve(root, next))) fail(`workspace glob ${pattern} 的路径段 ${next} 不存在`)
+    return walk(next, rest)
+  }
+  return [...new Set(walk('', pattern.split('/').filter(Boolean)))].sort()
+}
+/**
+ * 读一个目录下的**子目录名**（跳过 `node_modules` 与隐藏目录）。
+ * @param base - 仓库相对目录（`''` = 仓根）；不存在时返回空表（由调用方的对账兜底）。
+ * @returns 子目录名列表。
+ */
+function readDirectoryNames(base) {
+  const target = base === '' ? root : resolve(root, base)
   let names
   try {
-    names = readdirSync(scanRoot)
+    names = readdirSync(target)
   } catch {
-    fail(`workspace glob root ${tree} is unreadable`)
+    return []
   }
-  for (const name of names) {
-    const dir = prefix ? `${prefix}/${name}` : `${tree}/${name}`
-    const full = resolve(root, dir)
-    if (!lstatSync(full).isDirectory()) continue
-    if (depth === 1) {
-      if (existsSync(resolve(full, 'package.json'))) {
-        const manifest = readJson(`${dir}/package.json`)
-        const expected = nameForPath(dir)
-        if (expected !== manifest.name) {
-          fail(`workspace member ${dir} must own ${expected ?? '<declared in packageNameTable>'} (got ${manifest.name ?? 'missing'})`)
-        }
-        workspaceManifests.set(manifest.name, manifest)
-        workspaceDirs.push(dir)
-      } else {
-        collectWorkspaceMembers(tree, 2, dir)
-      }
-    } else {
-      const manifestPath = resolve(root, dir, 'package.json')
-      if (!existsSync(manifestPath)) continue
-      const manifest = readJson(`${dir}/package.json`)
-      const expected = nameForPath(dir)
-      if (expected !== manifest.name) {
-        fail(`workspace member ${dir} must own ${expected ?? '<declared in packageNameTable>'} (got ${manifest.name ?? 'missing'})`)
-      }
-      workspaceManifests.set(manifest.name, manifest)
-      workspaceDirs.push(dir)
+  return names.filter(name => name !== 'node_modules' && !name.startsWith('.')).filter((name) => {
+    try {
+      return lstatSync(resolve(target, name)).isDirectory()
+    } catch {
+      return false
     }
+  })
+}
+const workspaceDirs = []
+const workspaceManifests = new Map()
+for (const pattern of workspace.workspaces) {
+  if (typeof pattern !== 'string' || pattern === '') {
+    fail(`根 workspaces 里出现了非字符串/空模式：${JSON.stringify(pattern)} —— 判据的文件集由它派生，读不懂即红`)
+  }
+  for (const dir of expandWorkspaceGlob(pattern)) {
+    if (!existsSync(resolve(root, dir, 'package.json'))) continue
+    const manifest = readJson(`${dir}/package.json`)
+    const expected = nameForPath(dir)
+    if (expected !== manifest.name) {
+      fail(`workspace member ${dir} must own ${expected ?? '<declared in packageNameTable>'} (got ${manifest.name ?? 'missing'})`
+        + ` —— 它是根 workspaces 的 \`${pattern}\` 匹配到的成员，所以**必须**同时登记进 packageNameTable`
+        + '（判据的文件集按 glob 派生：新成员不进表就既不校验名字也不校验 manifest 形态）')
+    }
+    workspaceManifests.set(manifest.name, manifest)
+    workspaceDirs.push(dir)
   }
 }
-collectWorkspaceMembers('packages', 1)
-collectWorkspaceMembers('community', 1)
 if (workspaceDirs.length === 0) {
   fail('the workspace tree must contain at least one package')
+}
+// 反向（死条目）：名字表里的每一条都必须仍然是 glob 匹配到的成员 —— 成员被删/被搬走
+// 之后，这条映射就成了"说自己还在看着一个不存在的包"。
+for (const dir of packageNameTable.keys()) {
+  if (!workspaceDirs.includes(dir)) {
+    fail(`packageNameTable 里的 ${dir} 不再是根 workspaces 匹配到的成员 ——`
+      + ' 死条目会让这张表看起来比实际宽，请在改掉目录/glob 时同步删掉它')
+  }
 }
 for (const [name, manifest] of workspaceManifests) {
   if (manifest.packageManager !== undefined) fail(`${name} must inherit the root Yarn release`)
@@ -219,23 +270,91 @@ for (const readmeName of ['README.md', 'README.en.md']) {
   }
 }
 
-// workspace manifest 必须是 **Yarn 规范形态**（`JSON.stringify(parsed, null, 2) + '\n'`）。
+// workspace manifest 必须是 **Yarn 会原样保留的形态**。
 //
-// 为什么需要这条（2026-09-25 第十六轮的真实 CI 红）：`yarn install --immutable` 会把**非规范形态**的
-// manifest 重新序列化（实测：一处 `exports` 子块缩进少了两格 ⇒ install 后整个文件被改写）。于是同一次
-// CI 里 —— ①"判据执行体有没有被 install 期改写"的前置校验在 install **之后**跑，会看到 `工作树 ≠ HEAD`
-// 并把这次**规范化**当成"载荷改写了执行体"判红；②失败信息指向"install 期有人动了判据"，而不是"你的
-// manifest 不是规范形态"，排查成本极高。这条判据把同一类问题**提前到 install 之前**并给出可操作原因。
+// 为什么需要这条（2026-09-25 第十六轮的真实 CI 红）：`yarn install --immutable` 会把
+// Yarn **会重新序列化**的 manifest 写回磁盘（实测：一处 `exports` 子块缩进少了两格 ⇒
+// install 后整个文件被改写）。于是同一次 CI 里 —— ①"判据执行体有没有被 install 期改写"的
+// 前置校验在 install **之后**跑，会看到 `工作树 ≠ HEAD` 并把这次**规范化**当成"载荷改写了
+// 执行体"判红；②失败信息指向"install 期有人动了判据"，而不是"你的 manifest 不是 Yarn 会
+// 保留的形态"，排查成本极高。这条判据把同一类问题**提前到 install 之前**并给出可操作原因。
+//
+// ## 判据 = Yarn 4.18.0 自己的判据（R18A-G-01 的收口）
+//
+// 修前这里是 `raw !== JSON.stringify(JSON.parse(raw), null, 2) + '\n'`，把**4 空格缩进 /
+// Tab 缩进 / CRLF** 这三种**合法且 Yarn 不会改写**的形态判红，并在消息里给出"跑一次
+// `yarn install` 提交被改写的文件"这种**空操作**修法（照做永远绿不了）。
+//
+// 现在按 Yarn 的真实实现建模（`.yarn/releases` 那份 4.18.0 bundle 的
+// `Manifest.loadFromText` / `persistManifest` / `xfs.changeFileTextPromise`）：
+//   · **缩进单位取自文件本身**：`text.match(/^[ \t]+/m)` 的首个匹配（缺省 `'  '`）；
+//   · **换行风格取自文件本身**：`automaticNewlines` 把新内容的每个 `\r?\n` 换成
+//     原文第一个换行（`convertNewlines`）；
+//   · 其余必须等于 `JSON.stringify(parsed, null, <该缩进>)`：`": "` 分隔符、无空行、
+//     无尾随空白、末尾恰好一个换行。
+// 于是"4 空格 / Tab / CRLF 不改写、紧凑冒号 / 缺末尾换行 / 尾随空行 / 子块缩进错位要改写"
+// 这四条实测结论与判据逐条对上（见下面的自证表 `YARN_MANIFEST_FORM_CASES`）。
+/**
+ * Yarn 4 的缩进探测（`Manifest.loadFromText` 逐字同形）。
+ * @param raw - manifest 原文。
+ * @returns 缩进单位（缺省两个空格）。
+ */
+const yarnManifestIndent = raw => /^[ \t]+/mu.exec(raw)?.[0] ?? '  '
+/**
+ * Yarn 4 的换行探测（`convertNewlines` 取原文第一个换行）。
+ * @param raw - manifest 原文。
+ * @returns `'\r\n'` 或 `'\n'`。
+ */
+const yarnManifestNewline = raw => /\r?\n/u.exec(raw)?.[0] ?? '\n'
+/**
+ * Yarn 4 写完之后的**期望字节**。
+ * @param raw - manifest 原文（只用来探测缩进与换行）。
+ * @returns Yarn 会写出的文本。
+ */
+const yarnManifestCanonical = raw => {
+  const indent = yarnManifestIndent(raw)
+  const newline = yarnManifestNewline(raw)
+  return `${JSON.stringify(JSON.parse(raw), null, indent)}\n`.replace(/\r?\n/gu, newline)
+}
+/**
+ * 判据自身的**形态自证**：三种"合法且 Yarn 不改写"的形态必须放行，四种"Yarn 会改写"的
+ * 形态必须判红。表里的期望值是 2026-09-25 审计用合成工程实测 corepack yarn 4.18.0
+ * `install --immutable` 的 `rewritten` 结果（留痕 `temp/r18/A/artifacts/out-yarn-rewrite*.txt`），
+ * 并与上面从 4.18.0 bundle 读出的实现逐条一致。
+ */
+const YARN_MANIFEST_FORM_CASES = [
+  ['规范形态（两空格 + LF + 末尾一个换行）', 'pass', '{\n  "name": "x",\n  "version": "0.0.0-use.local",\n  "private": true\n}\n'],
+  // R18A-G-01 的三种**放行**用例：合法 JSON，且 yarn 4.18.0 实测 `rewritten=false`。
+  ['4 空格缩进（合法 JSON，Yarn 保缩进 ⇒ 不改写）', 'pass', '{\n    "name": "x",\n    "version": "0.0.0-use.local",\n    "private": true\n}\n'],
+  ['Tab 缩进（合法 JSON，Yarn 保缩进 ⇒ 不改写）', 'pass', '{\n\t"name": "x",\n\t"version": "0.0.0-use.local",\n\t"private": true\n}\n'],
+  ['CRLF（合法 JSON，Yarn 保换行风格 ⇒ 不改写）', 'pass', '{\r\n  "name": "x",\r\n  "version": "0.0.0-use.local",\r\n  "private": true\r\n}\r\n'],
+  ['紧凑冒号（Yarn 用 `": "` 重排 ⇒ 改写）', 'rewrite', '{\n  "name":"x",\n  "version":"0.0.0-use.local",\n  "private":true\n}\n'],
+  ['缺末尾换行（Yarn 补一个 ⇒ 改写）', 'rewrite', '{\n  "name": "x",\n  "version": "0.0.0-use.local",\n  "private": true\n}'],
+  ['尾随空行（Yarn 去掉 ⇒ 改写）', 'rewrite', '{\n  "name": "x",\n  "version": "0.0.0-use.local",\n  "private": true\n}\n\n'],
+  ['子块缩进少两格（Yarn 按探测到的缩进重排 ⇒ 改写）', 'rewrite', '{\n  "name": "x",\n  "exports": {\n    ".": "./lib/index.js"\n}\n}\n'],
+]
+for (const [label, expected, sample] of YARN_MANIFEST_FORM_CASES) {
+  const canonical = yarnManifestCanonical(sample) === sample
+  if (canonical !== (expected === 'pass')) {
+    fail(`判据自身自证失败：形态「${label}」被判成 ${canonical ? 'pass' : 'rewrite'}，`
+      + `而 yarn 4.18.0 的实测结论是 ${expected} —— 规范形态判据与 Yarn 的实现分叉了`
+      + '（放行面/判红面都必须与 Yarn 逐条一致，否则要么误报、要么放过真会被改写的 manifest）')
+  }
+}
 const nonCanonicalManifests = []
 for (const manifestPath of ['package.json', ...workspaceDirs.map(dir => `${dir}/package.json`)]) {
   const raw = readFileSync(resolve(root, manifestPath), 'utf8')
-  if (raw !== `${JSON.stringify(JSON.parse(raw), null, 2)}\n`) nonCanonicalManifests.push(manifestPath)
+  if (yarnManifestCanonical(raw) !== raw) nonCanonicalManifests.push(manifestPath)
 }
 if (nonCanonicalManifests.length > 0) {
-  fail(`这些 manifest 不是 Yarn 规范形态（应为 JSON.stringify(parsed, null, 2) 加一个换行）：`
-    + `${nonCanonicalManifests.join('、')} —— \`yarn install\` 会重新序列化它们，使工作树与 HEAD 不一致，`
-    + '进而让 install 之后的判据锚把这次**规范化**误判成"判据执行体被改写"（CI 必红且信息误导）。'
-    + '修法：跑一次 `yarn install` 并把被改写的文件一并提交（等价于按 2 空格缩进重排）。')
+  fail(`这些 manifest 不是 Yarn 会**原样保留**的形态：${nonCanonicalManifests.join('、')} ——`
+    + '`yarn install` 会重新序列化它们（缩进单位取文件首个缩进行的前导空白、换行风格取文件首个换行，'
+    + '其余必须等于 `JSON.stringify(parsed, null, <该缩进>)`：`": "` 分隔符、无空行/无尾随空白、'
+    + '末尾恰好一个换行），使工作树与 HEAD 不一致，进而让 install 之后的判据锚把这次**规范化**'
+    + '误判成"判据执行体被改写"（CI 必红且信息误导）。'
+    + '修法：按当前缩进与换行风格把该文件重排成 `JSON.stringify(parsed, null, <缩进>)` 的形态'
+    + '（等价于跑一次 `yarn install` 并提交**被改写**的文件）。注意：4 空格缩进 / Tab / CRLF '
+    + '本身是 Yarn 保留的形态，不需要、也不会因为跑 install 而变化。')
 }
 
 process.stdout.write(`verify-layout: Yarn workspace and upstream ${upstream.commit.slice(0, 10)} are consistent\n`)
