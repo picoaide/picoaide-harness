@@ -1848,14 +1848,61 @@ const E2E_CI_SURFACE_REGISTRY = [
 ]
 /** 端到端**执行入口**：命中即"CI 能真的把它跑起来"的候选。 */
 const E2E_END_TO_END_PATTERN = /integration-tests\/(?:run-all\.sh|dex\/|openldap\/|electron-shots\/)|(?:^|[^\w.-])(?:dex-sso|ldap-rbac|run-all\.sh)(?![\w.-])/iu
+/**
+ * 扫描面里**不是可执行脚本**的数据扩展名（显式口径：闭包不跟随它们）。
+ *
+ * `.yaml` 进扫描面是**语料**口径（`integration-tests/dex/config.yaml` 是夹具）——
+ * 它不是"能被执行的东西"，闭包跟随它没有意义。
+ */
+const INTEGRATION_DATA_EXTENSIONS = ['.yaml', '.yml']
+/**
+ * 闭包**可跟随**的脚本扩展名 —— **从 {@link INTEGRATION_SCANNED_EXTENSIONS} 派生**。
+ *
+ * ## 为什么必须派生（第十四轮 V14-A 的 VA-05-F2，P1）
+ *
+ * 现场：`ci.yml` 加一步 `- run: python3 scripts/wrap-e2e.py`，脚本内
+ * `subprocess.run(['bash','integration-tests/run-all.sh'])` ⇒ 三个守卫全 EXIT=0、
+ * workflow 文本 0 token。原因：闭包只跟随 `.sh|bash|mjs|cjs|js|ts`，而
+ * `check-install-integrity.mjs` 的**执行点推导**（从本文件的文本里抽
+ * `INTEGRATION_SCANNED_EXTENSIONS`）**显式**把 `integration-tests/*.py` 当判据执行体 ——
+ * **两个守卫的扩展名集合不一致**，`.py` 就从两张网之间掉了出去。
+ *
+ * 收口：闭包的跟随集**由本文件自己的扫描面派生**（`扫描面 ∖ 数据面`），
+ * 于是"新增一个可执行扩展名"只有**一处**要改，而 `check-install-integrity.mjs`
+ * 从同一份 `INTEGRATION_SCANNED_EXTENSIONS` 字面量派生它的执行点集合 —— 两处同源。
+ * JS/TS 家族（`.bash` / `.cjs` / `.js` / `.ts`）不在语法扫描面里（它们的语法闸门是
+ * `node --check` / `tsc`），所以显式列在这里，并写清它们为什么可跟随。
+ */
+const CI_SURFACE_SCRIPT_EXTENSIONS = [
+  ...INTEGRATION_SCANNED_EXTENSIONS.filter(extension => !INTEGRATION_DATA_EXTENSIONS.includes(extension)),
+  '.bash', '.cjs', '.js', '.ts',
+].sort()
 /** 闭包可跟随的仓内脚本路径形态（命令位/实参窗口里的裸路径）。 */
-const CI_SURFACE_SCRIPT_PATTERN = /^(?:\.\/)?(?:scripts|integration-tests|packages|server|community)\/[A-Za-z0-9_./@+-]+\.(?:sh|bash|mjs|cjs|js|ts)$/u
+const CI_SURFACE_SCRIPT_PATTERN = new RegExp(
+  `^(?:\\./)?(?:scripts|integration-tests|packages|server|community)/[A-Za-z0-9_./@+-]+\\.`
+  + `(?:${CI_SURFACE_SCRIPT_EXTENSIONS.map(extension => extension.slice(1)).join('|')})$`, 'u')
 /** 闭包深度上限与节点上限（超限 fail-loud）。 */
 const CI_SURFACE_MAX_HOPS = 8
 const CI_SURFACE_MAX_NODES = 400
 /** JS 正文里"执行调用"的实参窗口长度 / 调用名。 */
 const CI_SURFACE_ARG_WINDOW = 400
 const CI_SURFACE_EXEC_CALL = /\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/gu
+/** Python 正文里"执行调用"的形态（`subprocess.run(['bash', …])` / `os.system(…)`）。 */
+const CI_SURFACE_PY_EXEC_CALL = /\b(?:subprocess\.(?:run|call|check_call|check_output|Popen)|os\.(?:system|popen|execv|execve|execvp|execvpe|spawnv|spawnve|spawnvp|spawnvpe))\s*\(/gu
+/**
+ * `make` 调用的**递归词**：`$(MAKE)` 在解析前先归一成它，于是"命令位是不是 make"
+ * 与"`-C` / `-f` 的值位"两件事都能在同一套词法里判。
+ */
+const MAKE_RECURSIVE_WORD = '\u0000MAKE\u0000'
+/** `make` 的值位旗标：**其后一个 token 是取值，不是目标**。 */
+const MAKE_VALUE_FLAGS = new Set([
+  '-C', '-f', '-I', '-o', '-W', '--directory', '--file', '--makefile', '--include-dir',
+  '--old-file', '--new-file', '--assume-old', '--assume-new', '--eval', '--load-average', '--max-load',
+])
+/** 命令位前置的启动器词（`sudo make …` / `time make …`）：跳过它们再判命令位。 */
+const MAKE_LAUNCHER_WORDS = new Set(['sudo', 'time', 'command', 'env', 'nohup', 'exec'])
+/** 同一目录下 Makefile 的候选名（GNU make 的查找顺序）。 */
+const MAKEFILE_NAMES = ['Makefile', 'makefile', 'GNUmakefile']
 
 /**
  * shell 文本 → "命令位 token"（近似提取，只用于闭包扩张，不做语义分析）。
@@ -1922,6 +1969,264 @@ function jsManifestKeyLiterals(source, keys) {
 }
 
 /**
+ * Python 正文 → `subprocess.*` / `os.*` **实参窗口**里的字符串字面量。
+ *
+ * 与 {@link jsExecArgumentLiterals} 同口径（只看执行调用、不扫全文），只是调用名换一族：
+ * `.py` 进了闭包的跟随面（VA-05-F2），就必须有能读懂 `.py` 里"跑什么"的抽取器 ——
+ * 否则"跟随 `.py`"只是把文件读进来却看不见它的执行形态。
+ * @param source - Python 源码文本。
+ * @returns 字面量列表。
+ */
+function pythonExecArgumentLiterals(source) {
+  const text = String(source)
+  const literals = []
+  for (const match of text.matchAll(CI_SURFACE_PY_EXEC_CALL)) {
+    const window = text.slice(match.index, match.index + CI_SURFACE_ARG_WINDOW)
+    for (const literal of window.matchAll(/['"`]([^'"`\n]+)['"`]/gu)) literals.push(literal[1])
+  }
+  return literals
+}
+
+/**
+ * 一份"可跟随脚本"的正文 → **执行形态里的字符串**（按语言选抽取器）。
+ *
+ * 为什么要分语言：`spawn('bash', …)` 是 JS 的写法，`subprocess.run([…])` 是 Python 的，
+ * 拿 JS 的调用名去读 `.py` 会一条都抽不到（VA-05-F2 的现场就是"扩展名不在跟随面"，
+ * 补上扩展名却用错抽取器会变成同一个洞换一个形态）。
+ * @param file - 脚本的仓库相对路径。
+ * @param text - 正文。
+ * @param scriptKeys - manifest 脚本键集合（JS/TS 家族才会用到）。
+ * @returns 字面量 / token 列表。
+ */
+function scriptExecutionLiterals(file, text, scriptKeys) {
+  if (/\.(?:sh|bash)$/u.test(file)) return shellCommandTokens(text)
+  if (/\.py$/u.test(file)) return pythonExecArgumentLiterals(text)
+  return [...jsExecArgumentLiterals(text), ...jsManifestKeyLiterals(text, scriptKeys)]
+}
+
+/**
+ * 文本 → **命令**（每条 = 词数组）。**逐字符**切分（不是按行近似）：
+ * 分隔符 = 换行 / `;` / `&&` / `||` / `|` / `&` / `(` / `)` / 反引号，`>` `<` 是词分隔符，
+ * `#` 在词首时吃掉该行剩余（shell 注释），引号内的分隔符不生效。
+ *
+ * 与 {@link shellCommandTokens} 的区别只有两点，都是为 `make` 判据服务的：
+ *   · **保留旗标与 `$(VAR)` 形态的词**（`-C` / `-f` / `$(TARGET)` 都要能看见 —— 后者
+ *     要能被判成"这一位读不懂"并 fail-closed，而不是被剥成一个看不出问题的碎片）；
+ *   · `$(MAKE)` 先归一成 {@link MAKE_RECURSIVE_WORD}，递归 make 与普通 make 同形处理。
+ * @param text - shell / Makefile 正文。
+ * @returns 词数组的数组（按出现顺序）。
+ */
+function shellCommandWordLists(text) {
+  const commands = []
+  const source = String(text).replace(/\$\(MAKE\)/gu, MAKE_RECURSIVE_WORD)
+  let words = []
+  let current = ''
+  let quote = null
+  const flushWord = () => { if (current !== '') { words.push(current); current = '' } }
+  const flushCommand = () => { flushWord(); if (words.length > 0) commands.push(words); words = [] }
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (quote !== null) {
+      if (character === quote) { quote = null; continue }
+      current += character
+      continue
+    }
+    if (character === '"' || character === "'") { quote = character; continue }
+    if (character === '#' && current === '' && words.length === 0) {
+      while (index < source.length && source[index] !== '\n') index += 1
+      flushCommand()
+      continue
+    }
+    if (character === '\n' || character === ';' || character === '`') { flushCommand(); continue }
+    if (character === '&' || character === '|') { flushCommand(); if (source[index + 1] === character) index += 1; continue }
+    if (character === '$' && source[index + 1] === '(') {
+      // `$(VAR)` 整块保留（含 `$(shell …)` 这类嵌套）：它的"读不懂"由调用方判，不是在这里撕碎。
+      let depth = 0
+      let cursor = index
+      for (; cursor < source.length; cursor += 1) {
+        if (source[cursor] === '(') depth += 1
+        else if (source[cursor] === ')') { depth -= 1; if (depth === 0) break }
+      }
+      current += source.slice(index, cursor + 1)
+      index = cursor
+      continue
+    }
+    if (character === '(' || character === ')') { flushCommand(); continue }
+    if (character === ' ' || character === '\t' || character === '\r' || character === '>' || character === '<') {
+      flushWord()
+      continue
+    }
+    current += character
+  }
+  flushCommand()
+  return commands
+}
+
+/**
+ * workflow 文本 → `run:` **块**（块标量 `|` / `>` 与其变体，以及行内形态）。
+ *
+ * 为什么 `make` 判据只在 `run:` 块上跑，而不是整份 YAML：`name: make sure the build passes`
+ * 这类**步骤名**里的 `make` 是散文，不是命令 —— 在整份 YAML 上找 `make` 会把它当成一次调用，
+ * 再去 Makefile 里找不到目标 ⇒ 假红。与 `check-install-integrity.mjs` 的同名抽取同形
+ * （那边用它取"命令位"，这里用它取"命令文本"），但独立实现（判据不 import 被它判的东西）。
+ * @param text - workflow 全文。
+ * @returns 块文本数组（块标量的公共缩进已剥掉）。
+ */
+function workflowRunBlocks(text) {
+  const lines = String(text).split('\n')
+  const blocks = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^([ \t]*)(?:-[ \t]+)?run:[ \t]*(.*)$/u.exec(lines[index])
+    if (match === null) continue
+    const indent = match[1].length
+    const rest = match[2].trim()
+    if (rest !== '' && !/^[|>][-+]?[0-9]*$/u.test(rest)) { blocks.push(rest); continue }
+    const body = []
+    let cursor = index + 1
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor]
+      if (line.trim() === '') { body.push(''); continue }
+      if (line.length - line.trimStart().length <= indent) break
+      body.push(line)
+    }
+    const indents = body.filter(line => line.trim() !== '').map(line => line.length - line.trimStart().length)
+    const cut = indents.length > 0 ? Math.min(...indents) : 0
+    blocks.push(body.map(line => line.slice(cut)).join('\n'))
+    index = cursor - 1
+  }
+  return blocks
+}
+
+/**
+ * 一段文本 → **`make` 调用**（含 `$(MAKE)` 递归、`cd <dir> && make …`）。
+ *
+ * 只解析"命令位是 make/gmake/`$(MAKE)`"的那些命令（命令位允许前置的 `VAR=value`、
+ * `sudo`/`time`/`command`/`env` 这类启动器词）；每个调用给出 `-C` 目录、`-f` 文件与目标表。
+ * **读不懂的位不猜**：值位/目标位里出现变量或 GitHub 表达式时记进 `unresolved`，
+ * 由调用方 fail-closed（VA-05-F1 的收口纪律）。
+ * @param text - shell / Makefile 正文（workflow 的 `run:` 块 / `.sh` 正体 / Makefile 配方）。
+ * @returns `{ invocations }`，每项 `{ raw, dir, makefile, targets, unresolved, cwd }`。
+ */
+function makeInvocations(text) {
+  const invocations = []
+  /** `cd <dir> && make …`：上一条命令的 `cd` 是下一条命令的工作目录。 */
+  let cwd = null
+  for (const words of shellCommandWordLists(text)) {
+    if (words[0] === 'cd' && words.length === 2 && !words[1].includes('$')) { cwd = words[1]; continue }
+    let index = 0
+    while (index < words.length
+      && (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index]) || MAKE_LAUNCHER_WORDS.has(words[index]))) index += 1
+    const head = words[index]
+    if (head !== 'make' && head !== 'gmake' && head !== MAKE_RECURSIVE_WORD) continue
+    const invocation = {
+      raw: words.join(' '), dir: undefined, makefile: undefined, targets: [], unresolved: [], cwd,
+    }
+    for (let cursor = index + 1; cursor < words.length; cursor += 1) {
+      const word = words[cursor]
+      if (word.includes('$') || word.includes(MAKE_RECURSIVE_WORD) || word.includes('{{')) {
+        invocation.unresolved.push(word)
+        continue
+      }
+      const assign = (key, value) => {
+        if (key === 'dir') invocation.dir = value
+        else invocation.makefile = value
+      }
+      if (MAKE_VALUE_FLAGS.has(word)) {
+        const value = words[cursor + 1]
+        cursor += 1
+        if (value === undefined || value.includes('$')) invocation.unresolved.push(word)
+        else assign(word === '-C' || word === '--directory' ? 'dir' : 'file', value)
+        continue
+      }
+      // `-j` / `-l` 的参数是**可选**的（`make -j 4 t` 与 `make -j t` 都合法）：
+      // 只把"看起来是数字"的下一个词当取值，免得把目标名吃掉。
+      if ((word === '-j' || word === '-l') && /^[0-9.]+$/u.test(words[cursor + 1] ?? '')) { cursor += 1; continue }
+      const attached = /^(--(?:directory|file|makefile))=(.+)$/u.exec(word)
+      if (attached !== null) { assign(attached[1].startsWith('--directory') ? 'dir' : 'file', attached[2]); continue }
+      if (/^-C.+/u.test(word)) { invocation.dir = word.slice(2); continue }
+      if (/^-f.+/u.test(word)) { invocation.makefile = word.slice(2); continue }
+      if (word.startsWith('-')) continue // 其余旗标（`-s` / `-n` / `-k` …）不影响目标表
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue // `VAR=value`
+      invocation.targets.push(word)
+    }
+    invocations.push(invocation)
+  }
+  return { invocations }
+}
+
+/**
+ * Makefile 正文 → **规则表**（目标 → 前置 + 配方行）与 `include` 指令。
+ *
+ * 只认三种行：`include…`、规则行（`目标…: 前置…[; 配方]`）、TAB 起的配方行；其余
+ * （变量赋值 / 条件指令 / 注释）不进规则表。`.PHONY` 这类以 `.` 开头的特殊目标不算目标
+ * （它没有配方）。多目标行（`a b: c`）的每个目标都拿到同一份配方。
+ * @param text - Makefile 正文。
+ * @returns `{ rules, includes, variables }`。
+ */
+function makefileRules(text) {
+  const rules = new Map()
+  const includes = []
+  const variables = new Map()
+  let currentRules = []
+  for (const rawLine of String(text).split('\n')) {
+    if (/^\t/u.test(rawLine)) {
+      const recipe = rawLine.slice(1)
+      for (const rule of currentRules) rule.recipe.push(recipe)
+      continue
+    }
+    const line = rawLine.replace(/(?:^|\s)#.*$/u, '').trimEnd()
+    if (line.trim() === '') { currentRules = []; continue }
+    const includeMatch = /^(?:-?include|sinclude)\s+(.+)$/u.exec(line.trim())
+    if (includeMatch !== null) {
+      includes.push(...includeMatch[1].trim().split(/\s+/u).filter(Boolean))
+      currentRules = []
+      continue
+    }
+    const assignment = /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?+]?=\s*(.*)$/u.exec(line.trim())
+    if (assignment !== null) {
+      // 只留"最后一次赋值"（与 make 的语义近似；`+=` 按覆盖处理 —— 判据只需要能解析
+      // 常见的 `RUNNER := bash` 这类常量，解析不出就保持原样、物化成"看不见的 token"）。
+      variables.set(assignment[1], assignment[2].trim())
+      currentRules = []
+      continue
+    }
+    const ruleMatch = /^([^=]*?):(?!=)(.*)$/u.exec(line)
+    if (ruleMatch === null || ruleMatch[1].trim() === '') { currentRules = []; continue }
+    const names = ruleMatch[1].trim().split(/\s+/u).filter(name => name !== '' && !name.startsWith('.'))
+    const tail = ruleMatch[2]
+    const semicolon = tail.indexOf(';')
+    const prereqs = (semicolon >= 0 ? tail.slice(0, semicolon) : tail).trim().split(/\s+/u).filter(Boolean)
+    const inline = semicolon >= 0 ? [tail.slice(semicolon + 1).trim()] : []
+    currentRules = []
+    for (const name of names) {
+      const rule = rules.get(name) ?? { prereqs: [], recipe: [] }
+      rule.prereqs.push(...prereqs)
+      rule.recipe.push(...inline)
+      rules.set(name, rule)
+      currentRules.push(rule)
+    }
+  }
+  return { rules, includes, variables }
+}
+
+/**
+ * 把 Makefile 里的 `$(VAR)` / `${VAR}` 展开成字面量（只展开**已赋值**的变量；其余原样保留
+ * ⇒ 那些 token 含 `$`，闭包的 token 口径本来就会跳过它们 —— 与 shell 的既有边界同一句认账）。
+ * @param text - 待展开的文本。
+ * @param variables - `makefileRules()` 给的变量表。
+ * @param depth - 递归深度（缺省 0）。
+ * @returns 展开后的文本。
+ */
+function expandMakeVariables(text, variables, depth = 0) {
+  if (depth > 4) return String(text)
+  const replaced = String(text).replace(/\$[({]([A-Za-z_][A-Za-z0-9_]*)[)}]/gu, (whole, name) => {
+    const value = variables.get(name)
+    return value === undefined ? whole : value
+  })
+  return replaced === String(text) ? replaced : expandMakeVariables(replaced, variables, depth + 1)
+}
+
+/**
  * **CI 执行面闭包**（纯函数：只吃文本与存在性/读取谓词，不碰文件系统、不跑 git）。
  *
  * @param options - `{ workflowTexts, rootManifest, rootManifestText, workspaceManifests, exists, read }`。
@@ -1955,6 +2260,7 @@ function ciExecutionSurface(options) {
   }
   const mentioning = new Map()
   const reached = new Map()
+  const problems = []
   const nodes = []
   const seen = new Set()
   let truncated = false
@@ -1981,11 +2287,96 @@ function ciExecutionSurface(options) {
     // "正文提到"面：只对 shell 与 YAML/manifest 生效（JS/TS 正体里的字符串是数据，不算执行）。
     const textNetApplies = node.kind !== 'script' || /\.(?:sh|bash)$/u.test(node.file)
     if (textNetApplies && E2E_END_TO_END_PATTERN.test(text)) mentioning.set(node.file, node.via)
+    /** 一条命令**可能**在哪些目录里跑：节点自己的 dir ∪ workflow 声明的 `working-directory`。 */
+    const workingDirsFor = raw => {
+      const dirs = new Set()
+      if (typeof node.dir === 'string' && node.dir !== '') dirs.add(node.dir)
+      if (node.kind === 'yaml') {
+        // 仓库根也是一个候选：`run:` 块可能跑在没有 `working-directory` 的 job 里，而"每个
+        // run 块属于哪个 job"要解析 job/step 两层 YAML —— 这里不去猜，把两种解释**都跟随**
+        // （所有解析得出的候选 Makefile 都跟），只在**全都解析不出目标**时才 fail-closed。
+        dirs.add('')
+        for (const match of String(raw).matchAll(/^[^\S\n]*(?:-[^\S\n]+)?working-directory:[^\S\n]*(\S+)[^\S\n]*$/gmu)) {
+          if (!match[1].includes('$')) dirs.add(match[1].replace(/^\.\//u, ''))
+        }
+      }
+      return [...dirs]
+    }
+    /**
+     * `make` 间接的扩张（VA-05-F1）。**读不懂就 fail-closed**：值位/目标位含变量、
+     * Makefile 不存在 / 读不出、`include` 解析不出、目标在 Makefile 里找不到 ——
+     * 一律记一条 problem（判据红且诊断点名文件与形态），不静默当成"这一层没有端到端"。
+     * @param raw - 可能含 `make` 调用的正文。
+     * @param dirs - 这条命令可能的工作目录（`-C` 缺席时按它们逐个找 Makefile）。
+     */
+    const expandMakeCalls = (raw, dirs) => {
+      for (const invocation of makeInvocations(raw).invocations) {
+        if (invocation.unresolved.length > 0) {
+          problems.push(`${node.file} 里的 \`make\` 调用读不懂（${invocation.raw}）：`
+            + `这些位是变量/表达式 \`${invocation.unresolved.join(' ')}\` —— 值位或目标位含变量时`
+            + '闭包无法判定它跑什么，按 fail-closed 记红（请把它写成字面量）。')
+          continue
+        }
+        if (invocation.targets.length === 0) {
+          problems.push(`${node.file} 里的 \`make\` 调用没有目标（${invocation.raw}）——`
+            + ' 它跑的是 Makefile 的第一个目标，闭包判不了 ⇒ fail-closed。')
+          continue
+        }
+        // 工作目录：`cd <dir> &&` 优先，其次 `-C <dir>`，最后是这条命令可能的工作目录们。
+        // 候选（工作目录 × Makefile 名）**逐个都跟随**，只在**一个都解析不出目标**时才红。
+        const cdBase = invocation.cwd !== null && invocation.cwd !== undefined
+          ? (dirs.length > 0 ? dirs : ['']).map(base => joinSurfacePath(base, invocation.cwd))
+          : dirs.length > 0 ? dirs : ['']
+        const baseDirs = invocation.dir !== undefined
+          ? cdBase.map(base => joinSurfacePath(base, invocation.dir))
+          : cdBase
+        const candidates = []
+        for (const base of baseDirs) {
+          if (invocation.makefile !== undefined) candidates.push(joinSurfacePath(base, invocation.makefile))
+          else for (const name of MAKEFILE_NAMES) candidates.push(joinSurfacePath(base, name))
+        }
+        const existing = [...new Set(candidates)].filter(candidate => options.exists(candidate))
+        if (existing.length === 0) {
+          problems.push(`${node.file} 里的 \`make\` 调用（${invocation.raw}）找不到 Makefile：`
+            + `试过 ${[...new Set(candidates)].join('、')} —— 读不到 Makefile 就没法知道这个目标跑什么，`
+            + '按 fail-closed 记红（把 `-C <dir>` / `-f <file>` 写成闭包能解析的字面量）。')
+          continue
+        }
+        let resolved = 0
+        for (const makefile of existing) {
+          const parsed = followMakefile(options, makefile)
+          if (parsed.problems.length > 0) {
+            problems.push(...parsed.problems.map(message => `${node.file} → ${makefile}：${message}`))
+            continue
+          }
+          for (const target of invocation.targets) {
+            const body = makeTargetBody(target, parsed.rules, parsed.variables)
+            if (body.text === undefined) continue // 这个候选里没有这个目标 ⇒ 换下一个候选
+            resolved += 1
+            enqueue({
+              key: `${makefile}#make:${target}`, file: makefile, kind: 'makefile', text: body.text,
+              dir: makefile.includes('/') ? makefile.slice(0, makefile.lastIndexOf('/')) : '',
+              via: [...node.via, `${makefile} make ${target}`], hops: node.hops + 1,
+            })
+          }
+        }
+        if (resolved === 0) {
+          problems.push(`${node.file} 里的 \`make\` 调用（${invocation.raw}）的目标 `
+            + `\`${invocation.targets.join(' ')}\` 在候选 Makefile（${existing.join('、')}）里都找不到 ——`
+            + ' 按 fail-closed 记红：读不到目标体就无法判定它是否触达端到端入口。')
+        }
+      }
+    }
     /** 把"命令位 token / 实参字面量"继续扩张成节点；命中端到端入口的记进 `reached`。 */
     const expandTokens = (tokens, dir) => {
       for (const token of tokens) {
-        if (E2E_END_TO_END_PATTERN.test(token)) reached.set(node.file, node.via)
-        const script = resolveScript(token, dir)
+        // 相对路径（`../integration-tests/run-all.sh`）按**这条命令的工作目录**归一化后再判，
+        // 否则 make 配方里的相对路径既命中不了端到端入口、也跟随不了包装脚本。
+        const relative = dir === '' || !/^\.\.?\//u.test(token) ? token : joinSurfacePath(dir, token)
+        if (E2E_END_TO_END_PATTERN.test(token) || E2E_END_TO_END_PATTERN.test(relative)) {
+          reached.set(node.file, node.via)
+        }
+        const script = resolveScript(token, dir) ?? resolveScript(relative, '')
         if (script !== undefined) {
           enqueue({
             key: script, file: script, kind: 'script', text: options.read(script), dir: '',
@@ -2031,18 +2422,109 @@ function ciExecutionSurface(options) {
         }
       }
       expandTokens(shellCommandTokens(text), node.dir)
+      // `make` 只在 **`run:` 块**上找（步骤名/注释里的 `make` 是散文，不是命令）。
+      for (const block of workflowRunBlocks(text)) expandMakeCalls(block, workingDirsFor(text))
     } else if (node.kind === 'manifest' || node.kind === 'shell-value') {
       expandTokens(shellCommandTokens(text), node.dir)
+      expandMakeCalls(text, workingDirsFor(text))
     } else if (node.kind === 'script') {
-      const literals = /\.(?:sh|bash)$/u.test(node.file)
-        ? shellCommandTokens(text)
-        // JS/TS：只看**执行调用的实参窗口**（`spawn('bash', ['scripts/x.sh'])`）与
-        // 编排器"按名字解析守卫"的形态（引号包裹的 manifest 脚本键）。
-        : [...jsExecArgumentLiterals(text), ...jsManifestKeyLiterals(text, scriptKeys)]
-      expandTokens(literals, node.dir)
+      // 按语言选抽取器：`.sh` 走命令位、`.py` 走 `subprocess.*` 实参窗口、其余走 JS 家族。
+      expandTokens(scriptExecutionLiterals(node.file, text, scriptKeys), node.dir)
+      if (/\.(?:sh|bash|py)$/u.test(node.file)) expandMakeCalls(text, workingDirsFor(text))
+    } else if (node.kind === 'makefile') {
+      // 目标的配方体（已含前置目标的配方）：按 shell 口径继续闭包，并跟随其中的 `$(MAKE)` 递归。
+      expandTokens(shellCommandTokens(text), node.dir)
+      expandMakeCalls(text, [node.dir])
     }
   }
-  return { mentioning, reached, nodes, truncated }
+  return { mentioning, reached, problems, nodes, truncated }
+}
+
+/**
+ * 读一个 Makefile 并跟随它的 `include` 链（深度受限）。
+ * @param options - 闭包的 `{ exists, read }` 谓词。
+ * @param makefile - Makefile 的仓库相对路径。
+ * @returns `{ rules, variables, problems }`。
+ */
+function followMakefile(options, makefile) {
+  const { rules, includes, variables } = makefileRules(options.read(makefile))
+  const problems = []
+  const pending = [...includes]
+  const visited = new Set([makefile])
+  let hops = 0
+  while (pending.length > 0) {
+    if (hops >= CI_SURFACE_MAX_HOPS) { problems.push('`include` 链超过深度上限 —— 按 fail-closed 记红。'); break }
+    hops += 1
+    const requested = pending.shift()
+    const resolved = expandMakeVariables(requested, variables)
+    if (resolved.includes('$')) {
+      problems.push(`\`include ${requested}\` 的路径是变量且展开不出字面量 ——`
+        + ' 闭包无法判定它把哪些规则包含进来，按 fail-closed 记红。')
+      continue
+    }
+    const path = joinSurfacePath(makefile.includes('/') ? makefile.slice(0, makefile.lastIndexOf('/')) : '', resolved)
+    if (visited.has(path)) continue
+    visited.add(path)
+    if (!options.exists(path)) {
+      problems.push(`\`include ${requested}\` 指向的 ${path} 不在仓库里（或读不到）——`
+        + ' 按 fail-closed 记红：包含文件里的目标体对闭包不可见。')
+      continue
+    }
+    const included = makefileRules(options.read(path))
+    for (const [name, rule] of included.rules) {
+      const existing = rules.get(name) ?? { prereqs: [], recipe: [] }
+      existing.prereqs.push(...rule.prereqs)
+      existing.recipe.push(...rule.recipe)
+      rules.set(name, existing)
+    }
+    for (const [name, value] of included.variables) if (!variables.has(name)) variables.set(name, value)
+    pending.push(...included.includes)
+  }
+  return { rules, variables, problems }
+}
+
+/**
+ * 取一个目标（含其前置目标）的**配方体**（展开变量后）。
+ *
+ * 前置目标的配方也会被执行（先于目标本身），所以一起收进来；找不到目标 / 目标没有配方
+ * ⇒ 返回 `{ text: undefined }`，由调用方在"候选 Makefile 全都不成立"时记一条 fail-closed
+ * 诊断（单看某一个候选文件时"没有这个目标"是正常的：另一个候选才是它真正属于的那个）。
+ * 前置里的**文件名**（不是本 Makefile 的目标）只当依赖，不当作配方来源。
+ * @param target - 目标名。
+ * @param rules - 规则表。
+ * @param variables - 变量表。
+ * @returns `{ text }`（`text === undefined` = 这个 Makefile 里没有可用的目标体）。
+ */
+function makeTargetBody(target, rules, variables) {
+  if (!rules.has(target)) return { text: undefined }
+  const collected = []
+  const visited = new Set()
+  const walk = (name, depth) => {
+    if (depth > CI_SURFACE_MAX_HOPS || visited.has(name)) return
+    visited.add(name)
+    const rule = rules.get(name)
+    if (rule === undefined) return
+    for (const prereq of rule.prereqs) walk(prereq, depth + 1)
+    if (rule.recipe.length > 0) collected.push(expandMakeVariables(rule.recipe.join('\n'), variables))
+  }
+  walk(target, 0)
+  if (collected.length === 0) return { text: undefined }
+  return { text: collected.join('\n') }
+}
+
+/**
+ * 仓库相对路径拼接 + `..` / `.` / 重复斜杠折叠（纯字符串，不碰文件系统）。
+ * @param parts - 路径片段。
+ * @returns 归一化后的路径。
+ */
+function joinSurfacePath(...parts) {
+  const segments = []
+  for (const part of parts.join('/').split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') { segments.pop(); continue }
+    segments.push(part)
+  }
+  return segments.join('/')
 }
 
 /**
@@ -2114,6 +2596,18 @@ function ciExecutionSurfaceSelfTest() {
     // 只有**正文提到**、执行形态解析不出来的那一半：token 含 `$`（变量拼路径）⇒
     // 归 `mentioning ∖ reached`，必须登记成 `data-reference` 才算"看见并认账"。
     ['scripts/probe-dynamic.sh', '#!/usr/bin/env bash\nDIR="$(cd "$(dirname "$0")" && pwd)"\nbash "$DIR/run-all.sh"\n'],
+    // `make` 目标间接（VA-05-F1）：闭包必须跟随到 `server/Makefile` 那个**目标体**里。
+    ['.github/workflows/maketarget.yml',
+      'name: maketarget\njobs:\n  a:\n    steps:\n      - run: make -C server probe-e2e\n'],
+    ['server/Makefile', 'BIN := bin/x\n.PHONY: probe-e2e\nprobe-e2e: probe-dep\n\tbash ../integration-tests/run-all.sh\nprobe-dep:\n\t@true\n'],
+    ['.github/workflows/makefile-flag.yml',
+      'name: makefile-flag\njobs:\n  a:\n    steps:\n      - run: make -f ci-probe.mk e2e\n'],
+    ['ci-probe.mk', 'e2e:\n\tbash integration-tests/run-all.sh\n'],
+    // `.py` 包装脚本（VA-05-F2）：扩展名由扫描面派生 ⇒ 必须被跟随，且要用 Python 的抽取器。
+    ['.github/workflows/python-wrap.yml',
+      'name: python-wrap\njobs:\n  a:\n    steps:\n      - run: python3 scripts/probe-wrapper.py\n'],
+    ['scripts/probe-wrapper.py',
+      "import subprocess\n\nsubprocess.run(['bash', 'integration-tests/run-all.sh'], check=True)\n"],
     ['.github/workflows/orchestrator.yml',
       'name: orchestrator\njobs:\n  a:\n    steps:\n      - run: yarn check\n'],
     ['scripts/orchestrator.mjs',
@@ -2163,6 +2657,39 @@ function ciExecutionSurfaceSelfTest() {
   check(surface.nodes.includes('scripts/probe-wrapper.sh') && surface.nodes.includes('scripts/probe-dynamic.sh'),
     '形态⑨自证: 命令位上的 `.sh` 包装脚本必须被**跟随**（否则包装链把端到端藏起来就看不见）：'
       + `闭包节点 ${surface.nodes.join(', ')}`)
+  for (const [file, label] of [
+    ['server/Makefile', '`make -C server <目标>` 展开到的目标体（VA-05-F1 的形态）'],
+    ['ci-probe.mk', '`make -f <文件> <目标>` 的候选 Makefile'],
+    ['scripts/probe-wrapper.py', '`.py` 包装脚本（VA-05-F2 的形态）'],
+  ]) {
+    check(surface.reached.has(file),
+      `形态⑨自证: CI 执行面闭包没认出${label}（${file}）—— 补上扩展名/跟随规则但抽取器不认，`
+        + `等于把同一个洞换个写法。实际 reached：${[...surface.reached.keys()].join(', ')}`)
+  }
+  // 闭包的**跟随集**必须覆盖扫描面里的可执行扩展名（VA-05-F2 的同源口径）：
+  // 少一个（例如把 `.py` 从派生里摘掉）即红，不需要另一条判据盯着。
+  for (const extension of INTEGRATION_SCANNED_EXTENSIONS) {
+    if (INTEGRATION_DATA_EXTENSIONS.includes(extension)) continue
+    check(CI_SURFACE_SCRIPT_EXTENSIONS.includes(extension),
+      `形态⑨自证: 扫描面里的可执行扩展名 \`${extension}\` 不在闭包的跟随集里（`
+        + `${CI_SURFACE_SCRIPT_EXTENSIONS.join(', ')}）—— 它会在两张网之间掉出去（VA-05-F2）`)
+  }
+  // `make` 的**读不懂**必须 fail-closed（否则"把端到端藏进 $() 里"就是新的旁路）。
+  const unresolvedMake = ciExecutionSurface({
+    workflowTexts: [['.github/workflows/bad-make.yml',
+      'name: bad-make\njobs:\n  a:\n    steps:\n      - run: make -C server $(TARGET)\n']],
+    rootManifest: JSON.parse(fixture.get('package.json')),
+    rootManifestText: fixture.get('package.json'),
+    workspaceManifests: [],
+    exists: path => fixture.has(path),
+    read: path => fixture.get(path) ?? '',
+  })
+  check(unresolvedMake.problems.length > 0,
+    '形态⑨自证: `make` 的目标位写成 `$(TARGET)` 时必须 fail-closed（记 problem），'
+      + `实际 problems=${JSON.stringify(unresolvedMake.problems)}`)
+  check(surface.problems.length === 0,
+    '形态⑨自证: 自证夹具本身不该产生"读不懂"的 problem：'
+      + `${JSON.stringify(surface.problems)}`)
   check(surface.reached.has('scripts/probe-runner.mjs')
     && !surface.reached.has('scripts/probe-dynamic.sh')
     && surface.mentioning.has('scripts/probe-dynamic.sh')
@@ -2282,6 +2809,15 @@ function ciExecutionSurfaceSelfTest() {
       check(!surface.truncated,
         `形态⑨: CI 执行面闭包的节点数超过上限 ${CI_SURFACE_MAX_NODES} —— 闭包异常扩张时`
           + ' fail-loud，不静默截断（截断会让"没扫到"看起来像"0 条真实接线"）')
+      // `make` 间接的**读不懂**必须 red（VA-05-F1 的收口纪律）：闭包只跟随它能静态解析的
+      // 执行形态，解析不出的（值位/目标位含变量、Makefile 读不到、目标找不到、`include`
+      // 解析不出）一律 fail-closed —— 否则"把端到端藏进一层 make"就只是换了个写法。
+      check(surface.problems.length === 0,
+        `形态⑨: CI 执行面闭包里有 ${surface.problems.length} 处**读不懂的执行形态**（fail-closed）：`
+          + `\n    ${surface.problems.join('\n    ')}`
+          + '\n  ⇒ 闭包跟随 `make [-C <dir>] [-f <file>] <目标>` 一层层读到配方体；'
+          + ' 读不懂的形态不许当成"这一层没有端到端"（第十四轮 V14-A 的 VA-05-F1 正是'
+          + ' "多一层 make ⇒ 三张网全绿"）。把它写成字面量，或把目标体搬到闭包能读到的 Makefile 里。')
       const classified = classifyCiSurface(surface.mentioning, surface.reached, E2E_CI_SURFACE_REGISTRY, GUARD_RELATIVE_PATH)
       const describe = items => items
         .map(item => `${item.file}（链：${item.via.join(' → ')}）`).join('\n    ')

@@ -331,6 +331,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/vendor/memory-evolve/scripts/run-tests.mjs',
   'packages/vendor/memory-evolve/scripts/sync-worker.mjs',
   'scripts/check-doc-claims.mjs',
+  // 通过行探测的**独立子入口**（第十四轮 V14-A 的 VA-02-F2 收口）：它 import 主守卫、
+  // 打印通过行，父进程把它的 stdout 抓回去反解断言 ⇒ 它进不了面（被改写）就等于
+  // "探测子进程的输出没有任何锚定"。形状族（`scripts/*.mjs`）本来就会枚举到它。
+  'scripts/doc-claims-passline-child.mjs',
   'scripts/check-frozen-launchers.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-install-integrity.mjs',
@@ -600,8 +604,18 @@ export const EXECUTION_POINT_REGISTRY = [
   // ── B-02（第十四轮）：**非 yarn workspace 的 npm 项目**的判据配置
   //    （CI 的 `npm ci` 在 `server/webadmin` 里跑 ⇒ 它的 manifest 与 vitest/tsc 面
   //    都是执行面；登记表 `NPM_PROJECT_MANIFEST_REGISTRY` 管 manifest 那一半）。
+  // ── 第十四轮 V14-A 的 VA-04-F1/F2/F3/F4：**同一条构建管线的同族配置**
+  //    （`*.config.<ext>` 形态派生，见 `PACKAGE_JUDGE_CONFIG_PATTERNS` 的第二条与
+  //     `PACKAGE_SRC_JUDGE_CONFIG_PATTERN`）。掏空其中的任何一个都换一个构建产物：
+  //    tailwind/postcss 决定 webadmin 产物里的 CSS 与变换链，astro/content 决定站点
+  //    构建哪些文档进产物。此前 `vite.config.ts` 单独在面内而它们在外（V14-A 实测）。
+  'server/webadmin/postcss.config.js',
+  'server/webadmin/tailwind.config.js',
+  'server/webadmin/vite.config.ts',
   'server/webadmin/tsconfig.json',
   'server/webadmin/vitest.config.ts',
+  'site/astro.config.mjs',
+  'site/src/content.config.ts',
   'site/tsconfig.json',
 ]
 
@@ -1038,7 +1052,29 @@ export const PACKAGE_JUDGE_CONFIG_BASENAMES = ['vitest.config.ts', 'tsdown.confi
  */
 export const PACKAGE_JUDGE_CONFIG_PATTERNS = [
   /^tsconfig(?:\.[A-Za-z0-9_-]+)*\.json$/u,
+  // ── 第十四轮 V14-A 的 VA-04-F1/F2（P2）：**同一条构建管线的同族配置**
+  //
+  // 现场：`server/webadmin/vite.config.ts`（决定 webadmin 产物怎么打）**早就在面内**，
+  // 而同一条管线的 `tailwind.config.js`（决定产物里生成哪些 CSS）与 `postcss.config.js`
+  // （决定同一产物的变换链）**不在**：把它们掏空，本判据照旧 EXIT=0 —— 同一条分界线上
+  // 一半在面内、一半不在，是"按目录形状取执行体"的典型漏法。
+  //
+  // 收口用**同族形态**（`<名字>.config.<js|cjs|mjs|ts>`）而不是再加两条死字面量：
+  // 包里新加一个 `*.config.ts` 自动进面（派生结果必须登记，未登记即红）。
+  // `site/astro.config.mjs`（决定站点构建/侧栏/集成）也因此进面（V14-A 的 VA-04-F3）。
+  /^[A-Za-z0-9_-]+\.config\.(?:js|cjs|mjs|ts)$/u,
 ]
+
+/**
+ * **包内 `src/` 顶层的同族配置**（非递归一层）：`<pkg>/src/*.config.<ext>`。
+ *
+ * 现场（V14-A 的 VA-04-F4，P3）：`site/src/content.config.ts` 决定 Astro 的内容集合
+ * （哪些文档进构建），而它比包根深一层 ⇒ 上面那条"包根同族"规则看不见它。
+ * 口径与包根那份完全一样（"改它会不会让**别的**判决换一个结论"：会 —— 站点产物变），
+ * 只是位置不同。目录名固定为 `src`、不递归：`<pkg>/src/components/**.config.ts` 之类的
+ * 深层同名文件仍是各自的语料/夹具。
+ */
+export const PACKAGE_SRC_JUDGE_CONFIG_PATTERN = /^src\/[A-Za-z0-9_-]+\.config\.(?:js|cjs|mjs|ts|json)$/u
 
 /**
  * **非 yarn workspace 的 npm 项目 manifest**的派生（{@link NPM_PROJECT_MANIFEST_REGISTRY}）。
@@ -1312,8 +1348,12 @@ export function deriveExecutionPoints(options = {}) {
       const basename = String(path).slice(directory.length + 1)
       // 非递归：只认**包根**的判据配置（`<pkg>/tsconfig.json`），不认深层同名文件
       // （深层那些是各自的语料/夹具，把它们卷进来等于按目录形状取）。
-      if (basename.includes('/')) continue
-      if (PACKAGE_JUDGE_CONFIG_PATTERNS.some(pattern => pattern.test(basename))) configurations.add(path)
+      if (!basename.includes('/')) {
+        if (PACKAGE_JUDGE_CONFIG_PATTERNS.some(pattern => pattern.test(basename))) configurations.add(path)
+        continue
+      }
+      // `src/` 顶层的同族配置（VA-04-F4 的 `site/src/content.config.ts`）：只多认这一层。
+      if (PACKAGE_SRC_JUDGE_CONFIG_PATTERN.test(basename)) configurations.add(path)
     }
   }
   record('package-config', [...configurations])
@@ -1343,11 +1383,33 @@ export function deriveExecutionPoints(options = {}) {
   }
 
   const sorted = [...points].sort()
+  // **跨守卫的扩展名口径对账**（第十四轮 V14-A 的 VA-05-F2，P1）。
+  //
+  // 现场：`check-integration-tests.mjs` 的 CI 执行面闭包只跟随 `.sh|bash|mjs|cjs|js|ts`，
+  // 而本守卫从**同一份文本**里抽的 `INTEGRATION_SCANNED_EXTENSIONS` 含 `.py` ⇒
+  // `- run: python3 scripts/wrap-e2e.py`（脚本内 `subprocess.run([...run-all.sh])`）在各
+  // 张网之间掉出去：三守卫全 EXIT=0、workflow 文本 0 token。
+  //
+  // 判据**只看"跟随集是不是从扫描面派生的"这件事**，不看它的取值（取值由
+  // `check-integration-tests.mjs` 自己的自证逐条钉住：`扫描面 ∖ 数据面 ⊆ 跟随集`）：
+  // 两处各自手写一份集合时，新增一个可执行扩展名必然有一处漏掉 —— 这正是本条的成因。
+  const crossGuardProblems = []
+  const followDeclaration = /const CI_SURFACE_SCRIPT_EXTENSIONS = \[([\s\S]*?)\n\]/u.exec(guardText)
+  if (guardText !== '' && followDeclaration === null) {
+    crossGuardProblems.push('scripts/check-integration-tests.mjs 里找不到 `CI_SURFACE_SCRIPT_EXTENSIONS`'
+      + ' 的定义 —— 闭包的跟随集读不出来时不得当成"两个守卫口径一致"'
+      + '（删掉/改名去那个常量会让本判据静默失效）。')
+  } else if (followDeclaration !== null && !followDeclaration[1].includes('INTEGRATION_SCANNED_EXTENSIONS')) {
+    crossGuardProblems.push('闭包的跟随集（`CI_SURFACE_SCRIPT_EXTENSIONS`）不再从本守卫解析的'
+      + ' `INTEGRATION_SCANNED_EXTENSIONS` 派生 —— 两个守卫的扩展名集合会再次各写一份，'
+      + '新增的可执行扩展名（例如 `.py`）就会从两张网之间掉出去（VA-05-F2 的成因）。')
+  }
   return {
     points: sorted,
     faces,
     counts,
     extensions,
+    crossGuardProblems,
     missingSources: [...(extensions.length === 0 ? ['integration-guard'] : []),
       ...(workflowTexts.length === 0 ? ['workflow'] : [])],
   }
@@ -1577,6 +1639,7 @@ function main(argv) {
       guardText: guardBytes.toString('utf8'),
       headPaths,
     }))
+    for (const message of derivation.crossGuardProblems ?? []) problems.push(message)
     if (derivation.missingSources.length > 0) {
       process.stderr.write(`check-install-integrity: 执行点推导的来源缺席（${derivation.missingSources.join('、')}）⇒`
         + '判据面会静默变小，拒绝把"读不出"当成"没有执行点"\n')

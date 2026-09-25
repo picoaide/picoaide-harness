@@ -158,7 +158,7 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '62398122f7bcb2110e4f6361a74a7ddc8f4db76521e1b297178db9dcb753742b' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'd8362ac44201309af61c5651217fc1986b45196b0f61fc5191d65c6b4ac79ff9' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '1d0bce6738fea33cfdcd0824491e60f2bcc22e0e1161e5afac774f7ab84a4fec' }],
   ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'e66d7a45a66035d6ac7855f289a677309143f6f0ee88da3f8de62a0f61f26fe2' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
@@ -166,18 +166,18 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:inventories', { script: 'node scripts/verify-inventories.mjs', argvTail: [], digest: '39528c7984ee7baf0cad92faaa3b421f7f64e4d08b524d63417e896abb57267d' }],
   ['check:theme-tokens', { script: 'node scripts/check-theme-tokens.mjs', argvTail: [], digest: '1523cdf07984516d5696ee76aaa87cdb12cf5c94c69908b27ac4ec7e210bc5e4' }],
   ['check:glitchtip', { script: 'node scripts/verify-glitchtip-ops-check.mjs', argvTail: [], digest: 'f73f2ebcecbfeaaa57c069ca2e662dc1842b9d37d53eb413fc36bb85a987be3e' }],
-  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: 'eca3bc4ccdb166cd1b0e0eef669977b699712e1087b30a22d6918340508d22fb' }],
+  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: 'c5024074769515dbedf62b83d5fa532afebfec2373c1c3bf068ee206d2773a02' }],
   ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [], digest: 'c1a84c22a47bea2c1368bfba32f33b20feca66deb30abcbbc0eb40318f807285' }],
   ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: 'fad3de592353ad16751906c25b2181a6adf3fc164a889fa3adfd6847645b7803' }],
-  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '6c9a93afd517a247e5927470201a355dfb7e9e398405d0fe69c5d7366369edf8' }],
+  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '9790f3d34cde9c1a46f127215659d8e4d8fae25579026323b2176d44fc15f778' }],
   ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
   ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '00fd8c90848089613226c7dc8c5213eb016a37ce4586aeb2dcd5cfb63ef5e091' }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: 'c1127b735367bc06df496b779fd1c57218dd41fb2f6f1f473046ddbb24346c27' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '10665875b465307c999f835e1bff2bbfc86c89fd08cd5ff620625e32a1fce497' }],
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'e5a07863e05b953cbe343b384818e08df6a99c57175cd1f82c3fc99ee69fedf2' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '08fb43c5a441cfe1ec5d53a7454541823a5413d9a6233e5a91c57c0fe17e50a9' }],
 ])
 
 /**

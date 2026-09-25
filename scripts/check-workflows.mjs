@@ -635,6 +635,10 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w36-expression-literal-non-ascii-green', policy: null },
   { id: 'w37-expression-literal-braces-green', policy: null },
   { id: 'w38-expression-brace-in-literal-green', policy: null },
+  // 第十四轮 V14-A 的两条新格子：`-` 的算术误用（假阴性）与 YAML 层注释（假阳性）。
+  { id: 'w39-expression-dash-arithmetic', policy: '[SK-22]' },
+  { id: 'w40-expression-dash-green-forms', policy: null },
+  { id: 'w41-yaml-comment-expression-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -1277,6 +1281,47 @@ const FROZEN_LAUNCHER_EXTERNAL_TOOLS = [
   ['grep', '在通过凭据文件里数"恰好一行"'],
   ['tar', '打包 workspace 构建产物（不跑仓内代码，产物面判据）'],
 ]
+/**
+ * shell 文本 → `case` 语句块（`{ subject, arms: [{ patterns, body }] }`）。
+ *
+ * 覆盖面与边界（写清楚，免得被当成通用 shell 解析器）：
+ *   · 认 `case <词> in` 到同缩进的 `esac`；臂 = "**模式行**"（首个 `)` 之前没有未加引号的空白）
+ *     + 其后的体行，直到下一个模式行或 `esac`；
+ *   · 不展开变量、不处理 `esac` 出现在引号内的极端形态 —— 读不懂时返回空数组，
+ *     由调用方按 fail-closed 处理（[SK-20] 的判据里"找不到以白名单变量为接受臂的 case"就是红）。
+ * @param script - shell 文本（步骤体）。
+ * @returns case 块数组（按出现顺序）。
+ */
+function shellCaseBlocks(script) {
+  const lines = String(script).split('\n')
+  const blocks = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const open = /^([ \t]*)case[ \t]+(.+?)[ \t]+in[ \t]*$/u.exec(lines[index])
+    if (open === null) continue
+    const indent = open[1].length
+    const subject = open[2].trim()
+    const arms = []
+    let current = null
+    let cursor = index + 1
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor]
+      if (line.trim() === '') continue
+      const lineIndent = line.length - line.trimStart().length
+      if (lineIndent <= indent && /^esac\b/u.test(line.trim())) break
+      const arm = /^[ \t]*([^()\s]*(?:[ \t]+[^()\s]+)*?)\)[ \t]*(.*)$/u.exec(line)
+      if (arm !== null && !arm[1].startsWith('#')) {
+        current = { patterns: arm[1].split('|').map(pattern => pattern.trim()).filter(Boolean), body: [arm[2]] }
+        arms.push(current)
+        continue
+      }
+      if (current !== null) current.body.push(line.trim())
+    }
+    blocks.push({ subject, arms })
+    index = cursor
+  }
+  return blocks
+}
+
 /** shell 内建 / 关键字：不是外部命令，不需要登记。 */
 const SHELL_BUILTIN_OR_KEYWORD_WORDS = new Set([
   'set', 'export', 'unset', 'declare', 'typeset', 'readonly', 'local', 'shift', 'eval', 'exec',
@@ -1313,12 +1358,29 @@ export const FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE = 'allowed_root'
  */
 export const FROZEN_TOOLCHAIN_ALLOWLIST_VALUE = '"${{ runner.tool_cache }}/node/"'
 /**
- * 接受臂必须逐字用这个前缀模式（`case "$entry/" in "$allowed_root"*)`）。
- *
- * 为什么单独钉一条：取值登记对了、却没被用在接受臂上（例如另加一条 `/*)` 的通配臂）时，
- * "取值"判据看不出来 —— 而那条通配臂就是"全放行"的另一种写法。
+ * 接受臂的**模式**（`case "$entry/" in "$allowed_root"*)` 里的 `"$allowed_root"*`；
+ * `)` 是臂的终结符，不是模式的一部分 —— {@link shellCaseBlocks} 按模式逐个返回）。
  */
-const FROZEN_TOOLCHAIN_ALLOWLIST_ARM = '"$allowed_root"*)'
+const FROZEN_TOOLCHAIN_ALLOWLIST_ARM = '"$allowed_root"*'
+/**
+ * 白名单 `case` 的**臂集合登记值**（逐字；顺序不敏感，**集合相等**才算过）。
+ *
+ * ## 为什么必须是"集合相等"而不是"包含某个子串"（第十四轮 V14-A 的 VA-03-F1，P2）
+ *
+ * 旧判据是 `composeScript.includes('"$allowed_root"*)')` —— **子串**判据只证明"那一行还在"。
+ * V14-A 实测（M-J6 载荷）：保留登记取值、**另加一条 `/*)` 的通配臂** ⇒
+ * `check-workflows` **EXIT=0**（静态漏），只有行为探针 `check-frozen-launchers.mjs` 抓住
+ * （它跑真步骤体，注入目录被接受 ⇒ EXIT=1）。而旧注释里"例如另加一条 `/*)` 的通配臂"
+ * 那句**高估了静态判据的覆盖面**。
+ *
+ * 现在静态判据改成：解析 `case` 语句，取**全部臂模式**，与这份登记值做**集合相等**
+ * （多一条、少一条、改一条都红），并额外要求 fail 臂（`*)`）的体里有 `exit 1`
+ * （"臂还在、体被掏空"同样是全放行）。
+ *
+ * 行为探针仍是**独立第二张网**（两条独立判据）：它跑真步骤体、真做 PATH 注入，
+ * 静态判据读不懂的形态（`eval` 生成、变量拼模式）由它兜住。
+ */
+const FROZEN_TOOLCHAIN_ALLOWLIST_ARMS = [FROZEN_TOOLCHAIN_ALLOWLIST_ARM, '*']
 /**
  * 判据步体里"复位 PATH"的那一行。**两个冻结点都认**（早于工具链就位的步骤只能用第一份）。
  * 与 [SK-17] 的 PATH 例外（`FROZEN_LAUNCHER_PATH_EXPORT`，定义在下面的 [SK-20] 常量区）
@@ -1706,7 +1768,20 @@ function shellAssignmentValues(script, variable) {
  * 为什么需要它：真 import 之后"有人再手抄一份并改小"这条路径在语义上又变得可能，而没有任何
  * 语义判据会因此变红 —— 所以用一条源码级接线判据把它钉死（与仓内既有的"源码级接线守卫"同一取向）。
  */
-const FROZEN_LAUNCHER_REGISTRY_IMPORT = /import\s*\{[^}]*\bFROZEN_LAUNCHER_JOBS\b[^}]*\bFROZEN_LAUNCHER_OUTPUT_KEYS\b[^}]*\}\s*from\s*'\.\/check-workflows\.mjs'/u
+/**
+ * 探针里"两张登记表真同源"的**两种合法形态**（顺序即优先级）：
+ *   · 静态：`import { FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS } from './check-workflows.mjs'`；
+ *   · 动态（第十四轮 V14-A 的 VA-03-F2 之后有意的形态）：`await import('./check-workflows.mjs')`
+ *     之后解构出这两个名字 —— 目的只是让"缺兄弟模块/缺 `yaml`"这类**链接期失败**变成一条
+ *     具名诊断（静态 import 失败发生在模块求值之前，文件体里的任何检查都跑不到）。
+ *     两种形态都必须把名字**从那个模块**取出来，且都不得出现本地登记副本（见下一条）。
+ */
+const FROZEN_LAUNCHER_REGISTRY_IMPORTS = [
+  /import\s*\{[^}]*\bFROZEN_LAUNCHER_JOBS\b[^}]*\bFROZEN_LAUNCHER_OUTPUT_KEYS\b[^}]*\}\s*from\s*'\.\/check-workflows\.mjs'/u,
+  /await\s+import\(\s*'\.\/check-workflows\.mjs'\s*\)[\s\S]{0,600}?const\s*\{[^}]*\bFROZEN_LAUNCHER_JOBS\b[^}]*\bFROZEN_LAUNCHER_OUTPUT_KEYS\b[^}]*\}\s*=/u,
+]
+/** 动态形态必须带**具名诊断**（否则"受控 import"退化成又一次原始堆栈）。 */
+const FROZEN_LAUNCHER_REGISTRY_DIAGNOSTIC = '无法加载同目录的 check-workflows.mjs'
 /** 探针里**不得**出现的本地登记副本（注释剥掉之后判，避免注释里的说明文本误伤）。 */
 const FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY = /\b(?:const|let|var)\s+(?:PINNED_JOBS|FREEZE_OUTPUT_KEYS|FROZEN_LAUNCHER_JOBS|FROZEN_LAUNCHER_OUTPUT_KEYS)\s*=/u
 
@@ -1728,7 +1803,7 @@ function checkFrozenRegistryWiring(file) {
     return failures
   }
   const text = readFileSync(probePath, 'utf8')
-  if (!FROZEN_LAUNCHER_REGISTRY_IMPORT.test(text)) {
+  if (!FROZEN_LAUNCHER_REGISTRY_IMPORTS.some(pattern => pattern.test(text))) {
     failures.push({
       name: file,
       line: 0,
@@ -1736,6 +1811,15 @@ function checkFrozenRegistryWiring(file) {
         + '`{ FROZEN_LAUNCHER_JOBS, FROZEN_LAUNCHER_OUTPUT_KEYS }` —— 两张登记表必须**真同源**'
         + '（第十四轮 lane E 的 E-03：两份手抄字面量 + 注释自称"同源" ⇒ 单侧缩小后两个守卫'
         + '同时 EXIT=0）。要么恢复这条 import，要么把本判据与两份字面量一起重新论证。',
+    })
+  }
+  if (FROZEN_LAUNCHER_REGISTRY_IMPORTS[1].test(text) && !text.includes(FROZEN_LAUNCHER_REGISTRY_DIAGNOSTIC)) {
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-20] \`${FROZEN_LAUNCHER_PROBE}\` 用的是**动态** import，却没有那句具名诊断`
+        + `（\`${FROZEN_LAUNCHER_REGISTRY_DIAGNOSTIC}\`）—— 那样"缺兄弟模块/缺 yaml"时`
+        + '又只剩一条 `ERR_MODULE_NOT_FOUND` 原始堆栈（第十四轮 V4-A 的 VA-03-F2 现场）。',
     })
   }
   if (FROZEN_LAUNCHER_REGISTRY_LOCAL_COPY.test(executableScript(text))) {
@@ -1900,14 +1984,49 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
             + '要放行别的前缀，请同时改登记值并写明理由（那是可评审的 diff）。',
         })
       }
-      if (!composeScript.includes(FROZEN_TOOLCHAIN_ALLOWLIST_ARM)) {
+      // ③c 白名单 `case` 的**臂集合逐字相等**（第十四轮 V14-A 的 VA-03-F1，P2）。
+      //
+      // 现场：旧判据是子串 `includes(FROZEN_TOOLCHAIN_ALLOWLIST_ARM)`，只证明"那一行还在"；
+      // V14-A 的 M-J6 载荷（保留登记取值 + **另加一条 `/*)` 通配臂**）实测静态 EXIT=0，
+      // 只有行为探针抓住。旧注释里"例如另加一条 `/*)` 的通配臂"那句高估了静态覆盖面 ——
+      // 现在静态判据解析 `case` 并做**集合相等**（多/少/改一条都红），并单独钉 fail 臂的体。
+      const allowlistCase = shellCaseBlocks(composeScript)
+        .find(block => block.arms.some(arm => arm.patterns.some(pattern => pattern.includes(FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE))))
+      if (allowlistCase === undefined) {
         jobFailures.push({
           name: file,
           line: 0,
-          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里没有逐字出现接受臂 `
-            + `\`${FROZEN_TOOLCHAIN_ALLOWLIST_ARM}\` —— 取值登记对了、却没被用在 \`case\` 的接受臂上`
-            + '（例如另加一条 `/` 通配臂）时，"取值"判据看不出来，而那条通配臂就是另一种"全放行"。',
+          detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里找不到**以 \`${FROZEN_TOOLCHAIN_ALLOWLIST_VARIABLE}\` 为接受臂**的 `
+            + '`case` 语句 —— 白名单的取值登记对了、却没被用在接受臂上时，"取值"判据看不出来，'
+            + `而"全放行"的写法正是换一条臂（本条判据解析不出 \`case\` 时也按红处理，不把"读不懂"当成"没问题"）。`,
         })
+      } else {
+        const actualArms = allowlistCase.arms.flatMap(arm => arm.patterns)
+        const expectedArms = FROZEN_TOOLCHAIN_ALLOWLIST_ARMS
+        const missingArms = expectedArms.filter(arm => !actualArms.includes(arm))
+        const extraArms = actualArms.filter(arm => !expectedArms.includes(arm))
+        if (missingArms.length > 0 || extraArms.length > 0) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步里 \`case ${allowlistCase.subject}\` 的**臂集合**与登记值不符：`
+              + `\n      登记：${expectedArms.map(arm => `\`${arm}\``).join('、')}`
+              + `\n      实际：${actualArms.map(arm => `\`${arm}\``).join('、')}`
+              + `${missingArms.length > 0 ? `\n      缺少：${missingArms.map(arm => `\`${arm}\``).join('、')}` : ''}`
+              + `${extraArms.length > 0 ? `\n      多出：${extraArms.map(arm => `\`${arm}\``).join('、')}` : ''}`
+              + '\n  ⇒ 多一条通配臂（例如 `/*)`）= 另一种"全放行"；少一条就是白名单本身没了。'
+              + '臂集合是**逐个模式的逐字相等**，不是"包含某一行"（旧判据的子串口径实测漏掉过 M-J6）。',
+          })
+        }
+        const failArm = allowlistCase.arms.find(arm => arm.patterns.includes('*'))
+        if (failArm === undefined || !failArm.body.some(line => /\bexit[ \t]+1\b/u.test(line))) {
+          jobFailures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-20] job \`${jobId}\` 的 PATH 合成步的 fail 臂（\`*)\`）里没有 \`exit 1\` ——`
+              + ' 臂集合对了、体被掏空同样是"注入目录被静默接受"（判据必须同时钉臂与体）。',
+          })
+        }
       }
       if (composeIndex < freezeIndex) {
         jobFailures.push({
@@ -2147,7 +2266,24 @@ function checkPinnedJobPermissions(file, document, notes, options = {}) {
  * 与 actionlint 的期望集合逐字对齐(见上面的注释),`'` 由 {@link checkExpressionCharacterSet}
  * 在扫描时单独处理(字面量剥离),`-` 是本判据有意补的一项(负数字面量)。
  */
-const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!', '<', '>', '=', '&', '|', '*', ',', '-'])
+const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!', '<', '>', '=', '&', '|', '*', ','])
+/**
+ * `-` **单独处理**（第十四轮 V14-A 的 VA-01-F2，P2）：它只在**负数字面量的起始位**合法。
+ *
+ * 现场：旧实现把 `-` 放进 {@link EXPRESSION_ALLOWED_PUNCTUATION} 整体放行，于是
+ * `${{ github.run_number - 1 }}` 本判据 **green**，而 actionlint 报
+ * `got unexpected character ' ' while lexing integer part of number, expecting '0'..'9'`
+ * —— 同一个失败类（词法错 ⇒ 整个 workflow 解析失败 ⇒ 0 job），只是字符换成了 ASCII。
+ *
+ * 现在 `-` 只在两种位置放行（与 actionlint 的**词法器**逐例对拍，见下面两条规则）：
+ *   · **负数字面量的起始位**：前一位（跳过空白）是运算符/开括号或表达式体开头，后一位是数字
+ *     —— `${{ -1 < 0 }}` / `${{ x == -1 }}` / `${{ (-1) < 0 }}` 绿；
+ *   · **标识符内部**：紧邻的前后字符都是标识符字符（无空白）—— `steps.frozen-launchers.outputs.git`
+ *     绿（actionlint 把它词法成一个属性名 `frozen-launchers`；`github.run_number-1` 同理）。
+ * 其余位置（`${{ a - 1 }}` / `${{ a[0] - 1 }}`）与 actionlint 一样判红：
+ * `got unexpected character ' ' while lexing integer part of number, expecting '0'..'9'`。
+ */
+const EXPRESSION_DASH_BEFORE = new Set(['(', '[', ',', '!', '<', '>', '=', '&', '|', '*'])
 /** 空白字符(表达式可以跨行:`${{ github.event_name\n  == 'push' }}`)。 */
 const EXPRESSION_WHITESPACE = new Set([' ', '\t', '\n', '\r'])
 /**
@@ -2169,6 +2305,97 @@ function isAllowedExpressionCharacter(character) {
   if (code >= 0x41 && code <= 0x5a) return true // A-Z
   if (code >= 0x61 && code <= 0x7a) return true // a-z
   return false
+}
+
+/**
+ * 表达式体里第 `index` 位的 `-` 是否合法（VA-01-F2 的收口，逐例与 actionlint 对拍）。
+ *
+ * 两条放行规则（缺一即红）：
+ *   · **标识符内部**：紧邻的前后字符都是标识符字符 —— `steps.frozen-launchers.outputs.git`
+ *     是真实写法，actionlint 把它词法成属性名（`-` 属于标识符）；
+ *   · **负数字面量起始位**：往前跳过空白后是运算符/开括号或体首，往后跳过空白后是数字。
+ * `${{ a - 1 }}`（前后都有空白的算术写法）两条都不满足 ⇒ 红，与 actionlint 的
+ * `got unexpected character ' ' while lexing integer part of number` 同一类。
+ * @param body - 表达式体（`${{` 与 `}}` 之间的原文）。
+ * @param index - `-` 在体内的下标。
+ * @returns 允许 = true。
+ */
+function isAllowedExpressionDash(body, index) {
+  const previous = body[index - 1]
+  const next = body[index + 1]
+  const identifierCharacter = character => character !== undefined && /[A-Za-z0-9_-]/u.test(character)
+  if (identifierCharacter(previous) && identifierCharacter(next)) return true
+  let before = index - 1
+  while (before >= 0 && EXPRESSION_WHITESPACE.has(body[before])) before -= 1
+  if (before >= 0 && !EXPRESSION_DASH_BEFORE.has(body[before])) return false
+  let after = index + 1
+  while (after < body.length && EXPRESSION_WHITESPACE.has(body[after])) after += 1
+  return after < body.length && body[after] >= '0' && body[after] <= '9'
+}
+
+/**
+ * YAML **层注释**的偏移区间（半开区间 `[start, end)`，相对全文）。
+ *
+ * ## 为什么要把它算出来（第十四轮 V14-A 的 VA-01-F1，P2）
+ *
+ * 现场：`# 工作流里可以用 ${{ …outputs.interp }} 取路径` —— 这一行是 **YAML 注释**，
+ * YAML 解析器整行丢弃 ⇒ GitHub 的模板展开（作用在**解析后的字符串值**上）根本看不到它；
+ * 而旧实现按"全文扫 `${{`"判红（假阳性：有人正是在 YAML 注释里**记录**那次事故）。
+ * actionlint 对同一份文件 **EXIT=0**。
+ *
+ * ## 与"`run:` 块里的 shell 注释"的分界（这条不能改错方向）
+ *
+ * R14-01 的现场恰恰是 **shell 注释里的 `${{ … }}`**：它属于 `run:` 标量的**内容**，
+ * 模板展开看得到 ⇒ **必须继续扫**。分界就是"这个 `#` 是不是 YAML 的注释"：
+ * 块标量（`run: |` / `>` 及其变体）**内部**的行一律**不是** YAML 注释，只有块标量之外、
+ * 且 `#` 处于词首或前面是空白的那些才是。所以扫描时要按行跟踪"当前是否在块标量里"，
+ * 并按 YAML 的缩进规则判断块标量何时结束。
+ * @param text - workflow 全文。
+ * @returns 区间数组（按起点升序）。
+ */
+function yamlCommentRanges(text) {
+  const source = String(text)
+  const ranges = []
+  let offset = 0
+  /** 当前块标量的**父级**缩进（`null` = 不在块标量里）。 */
+  let blockIndent = null
+  for (const rawLine of source.split('\n')) {
+    const lineStart = offset
+    offset += rawLine.length + 1
+    const indent = rawLine.length - rawLine.trimStart().length
+    if (blockIndent !== null) {
+      if (rawLine.trim() === '') continue // 空行属于块标量
+      if (indent > blockIndent) continue // 仍在块标量内容里（这里的 `#` 是 shell 注释）
+      blockIndent = null
+    }
+    const commentAt = yamlCommentStart(rawLine)
+    if (commentAt >= 0) ranges.push([lineStart + commentAt, lineStart + rawLine.length])
+    if (YAML_BLOCK_SCALAR_LINE.test(rawLine)) blockIndent = indent
+  }
+  return ranges
+}
+
+/** YAML 块标量头（`key: |` / `- run: >-` / `script: |2- # 说明`）。 */
+const YAML_BLOCK_SCALAR_LINE = /^[ \t]*(?:-[ \t]+)?(?:[^\s#'"][^:]*|'[^']*'|"[^"]*"):[ \t]*[|>][0-9+-]*[ \t]*(?:#.*)?$/u
+
+/**
+ * 一行里 YAML 注释的起点（`#` 在词首或前面是空白，且不在引号里）；没有则 `-1`。
+ * @param line - 一行原文（含缩进）。
+ * @returns 注释起点的列下标，或 `-1`。
+ */
+function yamlCommentStart(line) {
+  let quote = null
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]
+    if (quote !== null) {
+      if (character === quote) quote = null
+      else if (quote === '"' && character === '\\') index += 1
+      continue
+    }
+    if (character === '"' || character === "'") { quote = character; continue }
+    if (character === '#' && (index === 0 || /\s/u.test(line[index - 1]))) return index
+  }
+  return -1
 }
 
 /**
@@ -2235,6 +2462,8 @@ function truncateForDiagnostic(text, limit = 120) {
 function checkExpressionCharacterSet(file, text, notes) {
   const failures = []
   const offenders = []
+  const commentRanges = yamlCommentRanges(text)
+  let yamlComments = 0
   let expressions = 0
   let literals = 0
   let cursor = 0
@@ -2242,6 +2471,14 @@ function checkExpressionCharacterSet(file, text, notes) {
   for (;;) {
     const open = text.indexOf('${{', cursor)
     if (open < 0) break
+    // YAML **层注释**里的 `${{`（第十四轮 V14-A 的 VA-01-F1）：YAML 解析器整行丢弃它 ⇒
+    // 模板展开看不到它 ⇒ 不是解析期失败面。**只跳这一类**：`run:` 标量内部的 shell 注释
+    // 是标量内容，必须继续扫（R14-01 的现场就是它）。
+    if (commentRanges.some(([start, end]) => open >= start && open < end)) {
+      yamlComments += 1
+      cursor = open + 3
+      continue
+    }
     // 单趟:取结束标记 + 逐字符判字符集 + 数字面量。
     const pending = []
     let index = open + 3
@@ -2273,6 +2510,14 @@ function checkExpressionCharacterSet(file, text, notes) {
       if (character === '}' && text[index + 1] === '}') {
         close = index
         break
+      }
+      if (character === '-') {
+        // `-` 只在负数字面量起始位合法（VA-01-F2）：`${{ a - 1 }}` 必须红。
+        if (!isAllowedExpressionDash(text.slice(open + 3), index - (open + 3))) {
+          pending.push({ kind: 'character', index, character })
+        }
+        index += 1
+        continue
       }
       if (!isAllowedExpressionCharacter(character)) {
         pending.push({ kind: 'character', index, character })
@@ -2363,9 +2608,11 @@ function checkExpressionCharacterSet(file, text, notes) {
       })
     }
   } else {
-    notes.push(`[SK-22] 表达式词法字符集:全文扫描到 ${expressions} 处 \`\${{ … }}\``
-      + `(含 \`run:\` 的 \`#\` 注释行 / heredoc,注释不是豁免理由),剥掉 ${literals} 处单引号字面量后`
-      + '剩余字符全部落在表达式词法器允许的集合里')
+    notes.push(`[SK-22] 表达式词法字符集:扫描 ${expressions} 处 \`\${{ … }}\``
+      + `(含 \`run:\` 标量里的 \`#\` 注释行 / heredoc —— 那些是标量内容,不是豁免理由),`
+      + `剥掉 ${literals} 处单引号字面量后剩余字符全部落在表达式词法器允许的集合里`
+      + `${yamlComments > 0 ? `;另有 ${yamlComments} 处 \`\${{ \` 落在 **YAML 层注释**里被跳过`
+        + '(YAML 解析器整行丢弃 ⇒ GitHub 的模板展开看不到它,VA-01-F1)' : ''}`)
   }
   return { failures, expressions, literals }
 }
@@ -11596,6 +11843,56 @@ export function selfTestPolicies() {
   expectGreen('w38-expression-brace-in-literal-green', [
     '      - run: echo ok',
     "        if: ${{ format('{0}}}', github.ref) == 'x' }}",
+  ])
+  // [SK-20] 臂集合判据的**能力自证**（第十四轮 V14-A 的 VA-03-F1）：
+  // 登记取值还在、**另加一条通配臂**时必须被解析出来 —— 这是"静态挡不住"的那个载荷
+  // （旧判据是子串 `includes`，实测 EXIT=0）。没有这一格，把臂集合判据拆回子串口径
+  // 不会让任何样本变红（真仓的 ci.yml 恰好是干净的）。
+  {
+    const armFixture = [
+      'case "$entry/" in',
+      '  "$allowed_root"*) added="$entry" ;;',
+      '  /*) added="$entry" ;;',
+      '  *)',
+      '    exit 1',
+      '    ;;',
+      'esac',
+    ].join('\n')
+    const parsed = shellCaseBlocks(armFixture)
+      .find(block => block.arms.some(arm => arm.patterns.includes(FROZEN_TOOLCHAIN_ALLOWLIST_ARM)))
+    const patterns = parsed === undefined ? [] : parsed.arms.flatMap(arm => arm.patterns)
+    expect(parsed !== undefined,
+      '[SK-20] 自证: `shellCaseBlocks` 必须认出以白名单变量为接受臂的 `case`（读不懂 ⇒ 判据会静默失效）')
+    expect(patterns.includes('/*') && patterns.length === 3,
+      `[SK-20] 自证: 臂集合必须把多出来的通配臂解析出来（实际 [${patterns.join(', ')}]）——`
+        + ' 否则"保留登记取值 + 另加 `/*)`"这条载荷又会从静态判据里溜过去（VA-03-F1）')
+    expect(patterns.filter(pattern => FROZEN_TOOLCHAIN_ALLOWLIST_ARMS.includes(pattern)).length
+      === FROZEN_TOOLCHAIN_ALLOWLIST_ARMS.length,
+      '[SK-20] 自证: 登记臂必须逐字出现在解析结果里（集合相等的两侧都要有判据）')
+  }
+  // 红样本⑨(VA-01-F2 的收口):`-` 前后都有空白的**算术**写法 —— actionlint 的
+  // `got unexpected character ' ' while lexing integer part of number, expecting '0'..'9'`
+  // 与 U+2026 是同一个失败类(词法错 ⇒ 整个 workflow 解析失败 ⇒ 0 job)。
+  expectRed('w39-expression-dash-arithmetic', '[SK-22]', [
+    '      - run: echo ok',
+    '        if: ${{ github.run_number - 1 > 0 }}',
+  ])
+  // 绿样本⑨:两条**合法**的 `-` —— 负数字面量起始位、标识符内部(与 actionlint 逐例对拍:
+  // 前者 GREEN;后者被它词法成属性名 `frozen-launchers`,只有语义层"属性未定义"的抱怨)。
+  // 没有这一格,把 `-` 一刀切成"一律非法"会把真实写法判红。
+  expectGreen('w40-expression-dash-green-forms', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ -1 < 0 }}"',
+    '          echo "${{ steps.frozen-launchers.outputs.git }}"',
+    '          echo "${{ github.run_number == -1 }}"',
+  ])
+  // 绿样本⑩(VA-01-F1 的收口):`${{ … }}` 落在 **YAML 层注释**里 —— YAML 解析器整行丢弃,
+  // GitHub 的模板展开看不到它。**注意与 w31 的分界**:w31 是 `run:` 标量**内部**的 shell
+  // 注释,那是标量内容,必须继续判红(把这一格当成"注释都放行"就会把 R14-01 的现场放回去)。
+  expectGreen('w41-yaml-comment-expression-green', [
+    '      # 说明:工作流里可以用 ${{ …outputs.interp }} 取路径(YAML 注释,不是标量)',
+    '      - run: echo ok',
   ])
 
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——

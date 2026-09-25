@@ -56,9 +56,9 @@
  * 退出码：0 = 全部一致；1 = 有漂移；2 = 用法错误 / **扫描面缩水（前置失败，见下）**
  *      / **外部设置了已废除的测试缝**（见下节）。
  *
- * ## 通过行探测：argv 自调用，不是环境变量（2026-09-25，第十三轮 R14-F）
+ * ## 通过行探测：**独立子入口**，不是本入口上的开关（2026-09-25，第十四轮 V14-A + lane M）
  *
- * **现场（CI run `36086661679` 的 `gate-guards` job，分支 `fix/round13-batch`）**：
+ * **现场一（CI run `36086661679` 的 `gate-guards` job，分支 `fix/round13-batch`）**：
  * `check:doc-claims` 与 `check:check-workspaces` 双双失败，日志逐字为
  *
  * ```
@@ -71,24 +71,42 @@
  * 拉起子进程；子进程**继承 `CI=true`** ⇒ 撞上本文件那条"测试缝在 CI 语境下不得设置"的规则
  * （exit 2）⇒ 父进程判"探测子进程 exit 2"⇒ 守卫必然失败。**判据的判据在另一个语境下判它
  * 自己非法**：本地（`CI` 未设）全绿、CI 必红，PR 永远不可能绿。
+ * 第一次修法把开关从 env 迁到 **argv**（`--verdict-probe`）。
  *
- * **修法（两条一起）**：
- *   ① 父子判定改成 **argv 开关** `--verdict-probe`：父进程把它**追加到自己 argv 的副本**上
- *      （`[本文件, ...process.argv.slice(2), VERDICT_PROBE_ARG]`），拉子进程时 `env` 不再注入
- *      任何探测开关（`{ ...process.env }` 即可）。
- *      **为什么这样是安全的**：外部载荷能改的是**环境**（`$GITHUB_ENV` / `env` / 父进程继承）
- *      与**仓内文件**；前者**没有任何锚定**（一句环境变量就能把这条判据关掉），后者要先过
- *      `scripts/check-install-integrity.mjs` 的执行体锚定 + `check-root-guards.mjs` 对每条守卫
- *      argv 的登记校验（`argvTail: []`，`verify-check-workspaces.mjs` 的 C-06 二次对拍）。
- *      父进程**自己构造的 argv** 不在那两条外部通道里。
- *   ② {@link refuseRetiredTestSeam} 升级为更强的规则：`CHECK_DOC_CLAIMS_VERDICT_PROBE`
- *      **任何语境**下被设置 ⇒ exit 2（修好后它没有合法来源；旧的"仅 CI 下拒绝"既放过了
- *      本地攻击，又让判据在 CI 下自杀）。
+ * **现场二（第十四轮独立复审泳道 V14-A 的 VA-02-F2，P1）**：argv 同样是**外部输入面** ——
+ * `NODE_OPTIONS="--import=<载荷>"`（纯环境变量）能在主模块求值前 `process.argv.push(...)`
+ * 把开关塞进去。实测（V14-A §2.4，lane M 复跑）：把探测子进程的打印路径改成更宽的自述
+ * （d6 形态）后，**朴素跑 EXIT=1、`--verdict-probe` 直跑 EXIT=0、
+ * `NODE_OPTIONS=--import=…` 伪造 EXIT=0**（两种 CI 语境都是）—— 第 ② 层要保护的那条判据
+ * 被从红翻绿，而 `NODE_OPTIONS` 正是第一次修法声明"已废除"的那条通道。
  *
- * 同族排查（本轮一并做的）：`scripts/check-integration-tests.mjs` 的 `CHECK_IT_*_SCRIPT`、
+ * **修法（V14-A 首选）：不要把"探测"做成被判对象**同一入口**上的开关。**
+ *   ① 探测子进程拆成**独立入口** {@link PASS_LINE_CHILD_ENTRY}
+ *      （`scripts/doc-claims-passline-child.mjs`）：它 **import 本模块**（拿的是同一份判据的
+ *      导出面：`summaryLine` / `failures` / `hits` / `moduleHits` / `surfaceProblems`），
+ *      **不接受任何改变行为的开关**（只透传 `--root <dir>`，其余参数一律 exit 2），
+ *      干净就把通过行打出去、否则按同样的退出码拒绝；
+ *   ② 本入口**再没有任何"探测模式"**：`--verdict-probe` 现在是**未知参数**（exit 2），
+ *      argv 里被塞任何东西都只会让判据更严，翻不了绿；
+ *   ③ 本模块的"打印 + 出结论"这一段用 **`import.meta.main`**（Node ≥24.2 的**加载器**判定，
+ *      argv 改不动它）护住 —— 被 import 时只提供导出面，不打印、不出结论。
+ *      旧 Node 上退回"独立子入口在 import 前设置的进程内标记"（同样不是 env/argv 通道）；
+ *      两条路都**不会**因外部输入而跳过这一段。
+ *   ④ {@link refuseRetiredTestSeam} 保持更强的规则：`CHECK_DOC_CLAIMS_VERDICT_PROBE`
+ *      **任何语境**下被设置（含空串）⇒ exit 2（它没有任何合法来源）。
+ *
+ * **变异判据**：`--verdict-probe` 直跑 / `NODE_OPTIONS=--import=…` 伪造，在 d6 变异下都必须
+ * **不再是 EXIT=0**（lane M 实跑见 `temp/r14/laneM/REPORT.md` §1）。
+ *
+ * **残余面（认账）**：能**在进程内执行任意代码**的对手（同一个 `NODE_OPTIONS=--import` 载荷
+ * 改全局标记 / patch `import.meta`）不在本判据的拦截面里 —— 那是"控制进程启动"的对手。
+ * 本判据拦的是**纯数据通道**（env / argv / 仓内文件）：前两者已被上面三条关掉，后者要过
+ * `check-install-integrity.mjs` 的执行体锚定（子入口**逐字节 == HEAD**）。
+ *
+ * 同族排查（第十三轮一并做的）：`scripts/check-integration-tests.mjs` 的 `CHECK_IT_*_SCRIPT`、
  * `check-patch-pin.mjs` / `check-theme-tokens.mjs` 的 `*_SKIP_*`、`verify-glitchtip-ops-check.mjs`
  * 的 `CHECK_GLITCHTIP_SCRIPT` 都**没有**"自己也用该 env 拉子进程"的形态（见 REPORT.md 的逐条判定表），
- * 所以不跟着改语义 —— 只把本条从"环境"迁到"argv"。
+ * 所以不跟着改语义。
  *
  * ## 缩面判据（2026-09-23 第四轮审计 R4-A-4）
  *
@@ -111,36 +129,53 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 通过行探测的开关：**argv**，不是环境变量
-//（2026-09-25 修复「判据的判据在另一个语境下判它自己非法」；现场见文件头同名小节）
+// 通过行探测：**独立子入口**（不是一个开关）
+//（2026-09-25 第二轮：env → argv → 拆入口；现场见文件头「通过行探测」小节）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 通过行探测子进程的 argv 开关。
+ * 通过行探测的**独立子入口**（仓库相对路径）。
  *
- * 父进程把它**追加到自己 argv 的副本**上拉起子进程（见 {@link printVerdict} 的第 ② 层）；
- * 子进程只负责把通过行真的打出去，父进程把**它打出去的字节**抓回来反解断言。
- * **不要手写这个参数** —— 它是本进程对自身的一次受控自调用，不是给人用的 CLI 选项。
+ * 它 import 本模块（同一份判据的实现），干净就把通过行打出去；**不接受任何改变行为的开关**。
+ * 父进程按这个路径 spawn 它（见 {@link printVerdict} 的第 ② 层）。
+ *
+ * 为什么不是"本入口上的一个 argv 开关"：argv 与 env 一样是**外部输入面**
+ * （`NODE_OPTIONS=--import=<载荷>` 能在主模块求值前改写 `process.argv`）——
+ * 第十四轮 V14-A 的 VA-02-F2 实测：d6 变异下伪造开关能把 EXIT=1 翻成 EXIT=0。
  */
-const VERDICT_PROBE_ARG = '--verdict-probe'
+export const PASS_LINE_CHILD_ENTRY = 'scripts/doc-claims-passline-child.mjs'
+
+/**
+ * 本文件自己被**当作入口**执行吗？
+ *
+ * 优先用 `import.meta.main`（Node ≥24.2：由**加载器**判定，`process.argv` 改不动它）。
+ * 旧 Node 上没有这个属性 ⇒ 退回"独立子入口在 import 之前设置的进程内标记"
+ * （{@link PASS_LINE_CHILD_MARK}）—— 那**不是** env/argv 通道，外部塞不进这个标记。
+ * 两条路的默认值都是"我是主入口"：不确定时**多跑**判据（fail-closed），
+ * 绝不在不确定时跳过"打印 + 出结论"这一段。
+ */
+export const PASS_LINE_CHILD_MARK = Symbol.for('picoaide.check-doc-claims.passline-child')
+
+/** 见 {@link PASS_LINE_CHILD_MARK}：本进程是不是被独立子入口 import 的。 */
+export const IS_PASS_LINE_CHILD = globalThis[PASS_LINE_CHILD_MARK] === true
+
+/**
+ * `import.meta.main`（Node ≥24.2）优先；旧 Node 退回子入口标记（标记缺席 = 主入口）。
+ * @returns 本模块是不是被当作入口执行。
+ */
+function isEntryModule() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main
+  return !IS_PASS_LINE_CHILD
+}
 
 /**
  * 已**废除**的环境变量开关（只留名字给"外部设置即攻击面"的判据用）。
  *
- * 修好之后**没有任何合法路径**会设置它：探测子进程走 argv，拉子进程时 `env` 里不再出现
+ * 修好之后**没有任何合法路径**会设置它：探测子进程走独立入口，拉子进程时 `env` 里不再出现
  * 这个名字。所以 {@link refuseRetiredTestSeam} 的规则比旧规则更强 —— **任何语境**下被设置
  * 都 exit 2（旧的"仅 CI 语境下拒绝"既放过了本地攻击，又让判据在 CI 下自杀）。
  */
 const VERDICT_PROBE_ENV = 'CHECK_DOC_CLAIMS_VERDICT_PROBE'
-
-/**
- * 本进程是不是「通过行探测子进程」—— 只看 **argv**。
- * @param argv - 参数数组（`process.argv.slice(2)`）。
- * @returns 带 {@link VERDICT_PROBE_ARG} 时为 true。
- */
-function verdictProbeFrom(argv) {
-  return argv.includes(VERDICT_PROBE_ARG)
-}
 
 /**
  * **已废除的测试缝**：{@link VERDICT_PROBE_ENV} 在**任何语境**下被设置 ⇒ exit 2。
@@ -148,18 +183,21 @@ function verdictProbeFrom(argv) {
  * 为什么与语境无关（而旧实现只在 CI 下拒绝）：修好之后这个环境变量**没有任何合法来源**，
  * 于是"它被设上了"只剩一种解释 —— 有人想关掉"通过行必须钉在打印路径上"这条判据。
  * 旧规则的两个漏洞正是 2026-09-25 那次 CI 必红的成因：本地设它**完全无声**（攻击面），
- * CI 下它又杀死了判据**自己拉起的**子进程（自相矛盾）。诊断里保留固定短语
- * `测试缝已废除` 便于检索。
+ * CI 下它又杀死了判据**自己拉起的**子进程（自相矛盾）。
+ *
+ * **空串同样是"被设置"**（第十四轮 V14-A 的 VA-02-F1）：旧实现把 `''` 当成"没设置"，
+ * 于是"任何语境下都不得设置"这句自述对空串不成立；它没有合法来源，一律 exit 2。
+ * 诊断里保留固定短语 `测试缝已废除` 便于检索。
  */
 function refuseRetiredTestSeam() {
   const value = process.env[VERDICT_PROBE_ENV]
-  if (value === undefined || value === '') return
+  if (value === undefined) return
   console.error(`check-doc-claims: 测试缝已废除：环境变量 ${VERDICT_PROBE_ENV} **任何语境下都不得设置**`
-    + `（实际 ${JSON.stringify(value)}）—— 通过行探测已改由 argv 自调用`
-    + `（${VERDICT_PROBE_ARG}：父进程把开关追加到自己 argv 的副本上，env 里不再注入任何探测开关）。`
-    + '所以这个环境变量没有任何合法来源，外部设置它一律视为攻击面：'
+    + `（实际 ${JSON.stringify(value)}）—— 通过行探测已改由独立子入口承担`
+    + `（${PASS_LINE_CHILD_ENTRY}：父进程按路径 spawn 它，env 里不再注入任何探测开关）。`
+    + '所以这个环境变量没有任何合法来源（**空串也算被设置**），外部设置它一律视为攻击面：'
     + '它唯一的效果是把"通过行必须钉在打印路径上"这条判据整个关掉。'
-    + '环境（`$GITHUB_ENV` / `env` / 父进程继承）是外部可改的，父进程自己构造的 argv 不是 ——'
+    + '环境（`$GITHUB_ENV` / `env` / 父进程继承）与 argv 都是外部可改的，独立入口不是 ——'
     + '详见文件头「通过行探测」小节。')
   process.exit(2)
 }
@@ -170,10 +208,7 @@ const args = process.argv.slice(2)
 let root = resolve(process.cwd())
 let json = false
 let selftest = false
-/** argv 开关在 {@link verdictProbeFrom} 里单独判定（它不参与常规参数解析，也不接受取值）。 */
-const verdictProbe = verdictProbeFrom(args)
 for (let index = 0; index < args.length; index += 1) {
-  if (args[index] === VERDICT_PROBE_ARG) continue
   if (args[index] === '--root') {
     const value = args[index + 1]
     if (value === undefined) {
@@ -188,6 +223,27 @@ for (let index = 0; index < args.length; index += 1) {
     console.error(`check-doc-claims: 未知参数 ${args[index]}`)
     process.exit(2)
   }
+}
+
+/** 独立子入口的绝对路径（按**本文件自己的位置**解析 —— 与 cwd 无关）。 */
+const childEntryPath = fileURLToPath(new URL('./doc-claims-passline-child.mjs', import.meta.url))
+
+/**
+ * 交给独立子入口的参数：**只透传 `--root <dir>`**（判定哪一棵树），其余一律不透传。
+ *
+ * 子入口不接受任何"改变行为"的开关：`--json` / `--selftest` 之类的取值不会让它少判一步，
+ * 而父进程只信它 stdout 里那一行。所以"伪造 argv"在这里没有可伪造的东西 ——
+ * 这一条正是第十四轮 V14-A 的 VA-02-F2（P1）的收口点。
+ * @returns 子入口的参数数组。
+ */
+function rootArgsForChild() {
+  const forwarded = []
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== '--root') continue
+    if (args[index + 1] !== undefined) forwarded.push('--root', args[index + 1])
+    index += 1
+  }
+  return forwarded
 }
 
 /** 扫描面（与 check-migration-range.mjs 同形：文档 + 官网 wiki + 包内 README）。 */
@@ -730,9 +786,15 @@ function selfTest() {
       'selftest: 没有任何通过凭据被打印出去时必须被拒'],
     // 探测开关的**载体**（2026-09-25）：只看 argv，且**不看环境** —— 环境里出现那个
     // 已废除的名字时本进程早已 exit 2（`refuseRetiredTestSeam`），绝不会被当成"我是子进程"。
-    [verdictProbeFrom(['--root', 'x', VERDICT_PROBE_ARG]), 'selftest: argv 里的探测开关应被认出'],
-    [verdictProbeFrom([]) === false && verdictProbeFrom(['--json']) === false, 'selftest: 没有 argv 开关时不得自称探测子进程'],
-    [VERDICT_PROBE_ARG !== VERDICT_PROBE_ENV && !VERDICT_PROBE_ARG.includes('='), 'selftest: 开关必须是 argv 形态（不是 env 赋值）'],
+    // 通过行探测的**载体**（第十四轮 V14-A 的 VA-02-F2 收口）：**独立入口**，不是一个开关。
+    // 三条断言都是行为级的：子入口真的在盘上 / 主入口不自称探测子进程 /
+    // `--verdict-probe` 这个旧开关名现在是**未知参数**（exit 2，翻不了绿）。
+    [existsSync(fileURLToPath(new URL('./doc-claims-passline-child.mjs', import.meta.url))),
+      `selftest: 通过行探测的独立子入口必须存在（${PASS_LINE_CHILD_ENTRY}）`],
+    [IS_PASS_LINE_CHILD === false && isEntryModule(),
+      'selftest: 主入口下不得自称探测子进程（入口判定必须来自加载器/进程内标记，不是 env/argv）'],
+    [spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--verdict-probe'], { encoding: 'utf8' }).status === 2,
+      'selftest: `--verdict-probe` 必须是未知参数（exit 2）—— 本入口不再有任何"探测模式"开关'],
   ]
   const failed = cases.filter(([ok]) => !ok).map(([, name]) => name)
   if (failed.length > 0) {
@@ -943,8 +1005,8 @@ for (const message of passLineProblems(summaryLine, coveredItems)) {
  *
  * 三层，缺一不可：
  *   ① 进程内先按变量断言一遍（与覆盖率汇总处同一份 `passLineProblems`）；
- *   ② **跑一次真脚本、读真输出**：把自己当子进程再跑一遍（argv 里追加
- *      {@link VERDICT_PROBE_ARG}，**不是**环境变量 —— 见文件头），
+ *   ② **跑一次真脚本、读真输出**：spawn **独立子入口** {@link PASS_LINE_CHILD_ENTRY}
+ *      （它 import 本模块、跑同一份判据，只把通过行打出去 —— 见文件头），
  *      把它 stdout 里**最后一行非空**抓回来 —— 那是"真实运行会打出去的通过行"。
  *      这是唯一能咬住"改打印不改断言"的层：断言钉的是子进程真正写出的字节，不是变量。
  *   ③ 本进程打出去的那一段字节同样被拦截并反解断言（打印与断言是同一个字符串）。
@@ -961,13 +1023,14 @@ function printVerdict() {
     process.exit(1)
   }
 
-  // ② 真脚本、真 stdout：子进程这次运行**真的**打出去的是哪一行？
+  // ② 真脚本、真 stdout：**独立子入口**这次运行真的打出去的是哪一行？
   //
-  // 开关走 **argv**（追加到本进程 argv 的**副本**上），`env` 里**不再注入任何探测开关**：
-  // 探测的判据不能被"环境"这种外部可改的输入面决定（2026-09-25 的 CI 自相矛盾现场 ——
-  // 子进程继承 `CI=true` 就被本文件自己的 CI 规则拒掉）。`env` 只原样继承，便于子进程
-  // 在同一棵树/同一语境下复算。
-  const probe = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2), VERDICT_PROBE_ARG], {
+  // 子进程按**路径**拉起（不是"本文件 + 一个开关"）：argv 与 env 都是外部输入面
+  // （`NODE_OPTIONS=--import=<载荷>` 能在主模块求值前改写 `process.argv`），把探测做成
+  // 同一入口上的开关 ⇒ 伪造开关就能跳过这一层（第十四轮 V14A 的 VA-02-F2 实测）。
+  // 参数只透传 `--root`：子入口的其他参数一律 exit 2（见它自己的参数解析）。
+  // `env` 只原样继承（子进程要在同一语境下复算：`CI=true` 时也必须能起来）。
+  const probe = spawnSync(process.execPath, [childEntryPath, ...rootArgsForChild()], {
     cwd: process.cwd(),
     encoding: 'utf8',
     env: { ...process.env },
@@ -1095,60 +1158,79 @@ if (strictSurface) {
   }
 }
 
-if (json) {
-  console.log(JSON.stringify({
-    root, expectedPin, expectedModules, scanned, pinClaims, moduleClaims,
-    numericRules: numericRules.map(rule => ({
-      id: rule.id, label: rule.label, source: rule.source,
-      truth: rule.truth ?? null, hits: rule.hits, excluded: rule.excluded, min: rule.min,
-    })),
-    coverage: { declared: COVERAGE_ITEMS.map(item => item.label), judged: coveredItems.map(item => item.label), passLine: summaryLine },
-    perScanPath: Object.fromEntries(perScanPath), hits, moduleHits, failures, surfaceProblems,
-  }, null, 2))
-} else {
-  console.log(`check-doc-claims: 上游 pin ${expectedPin}；平台模块表 ${expectedModules.length} 项；扫描 ${scanned} 个 md / ${pinClaims} 条 pin 断言`)
-  console.log(`  扫描面：${SCAN_PATHS.map(target => `${target} ${perScanPath.get(target)?.files ?? 0}`
-    + `(pin ${perScanPath.get(target)?.pinClaims ?? 0})`).join(' / ')}${strictSurface ? '' : '（夹具树：只查非空，不查绝对下限）'}`)
-  const truthLines = numericRules.filter(rule => rule.truth !== undefined)
-    .map(rule => `${rule.label} ${rule.truth}（${rule.source}）`)
-  console.log(`  数字真源：${truthLines.length > 0 ? truthLines.join('；') : '（夹具树：无硬数字真源，对应项不计入覆盖面）'}`)
-  console.log(`  数字断言：${numericRules.map(rule => `${rule.label} ${rule.hits} 条`).join(' / ')}`
-    + `${numericRules.some(rule => rule.excluded > 0)
-      ? `（另有 ${numericRules.map(rule => rule.excluded).reduce((a, b) => a + b, 0)} 条同形语句因上下文锚不符被排除，不计入本项）` : ''}`)
-}
-
-for (const hit of [...hits, ...moduleHits]) {
-  console.error(`  [${hit.kind ?? 'MODULES'}] ${hit.file}:${hit.line}: ${hit.reason}`)
-  console.error(`          ${hit.text}`)
-}
-for (const message of failures) console.error(`  [SCAN] ${message}`)
-
-// 扫描面缩水 = **前置失败**：此时"一致 ✅"是一个没被检查过的结论，退出码 2 与
-// "有漂移"（1）区分开（与 check-authoring-claims 的 0/1/2 同款语义）。
-if (surfaceProblems.length > 0) {
-  for (const message of surfaceProblems) console.error(`  [SURFACE] ${message}`)
-  console.error(`\ncheck-doc-claims: 扫描面缩水/前置缺失 ${surfaceProblems.length} 处 —— 拒绝把"没扫到"当"一致"。\n`
-    + '  修法：把被删的扫描根加回 SCAN_PATHS（要真的收窄口径，必须同时改 REQUIRED_SCAN_PATHS 并进 diff）；'
-    + '夹具树请只放被扫文档，绝对值下限只在真仓形态的根上强制。')
-  process.exit(2)
-}
-
-if (hits.length > 0 || moduleHits.length > 0 || failures.length > 0) {
-  console.error(`\n文档数字漂移 ${hits.length + moduleHits.length} 处 / 扫描器问题 ${failures.length} 处。`
-    + '修法：把文档里的数字改成真源值（上游 pin 见 `upstream.json`，平台模块表见 '
-    + '`scripts/platform-modules.mjs`，硬数字的真源见上面每条断言里点名的文件）；'
-    + '若该行是**记录当时事实**的历史文档，'
-    + `请加行内标记 \`${ALLOW_MARKER}\`（不要改扫描面）。`)
-  process.exit(1)
-}
-
-// 通过行由登记表生成、且刚刚被 `passLineProblems` 反解断言过（数量 + 逐条标签）——
-// 它只声称本轮**真的判过**的项。`--json` 模式只出 JSON（否则那份输出不是合法 JSON）。
+// ─────────────────────────────────────────────────────────────────────────────
+// 打印 + 出结论：**只有主入口**做这一段（第十四轮 V14-A 的 VA-02-F2 收口）。
 //
-// `VERDICT_PROBE_ARG` 是**通过行探测子进程**：它只把通过行真的打出去（父进程随后把这段
-// 字节抓回来反解断言）。父进程 / 子进程 走的是同一份实现 —— 差别只有这一行。开关在 **argv**
-// 上（父进程自己构造），不在环境里：环境的任何取值都不该改变本判据的结论（2026-09-25 现场）。
-if (!json) {
-  if (verdictProbe) console.log(passLineFor(coveredItems))
-  else printVerdict()
+// 独立子入口（`scripts/doc-claims-passline-child.mjs`）import 本模块时：
+//   · 上面的**判据本体**（扫描 / 断言 / 缩面判据 / 通过行自证）已经跑完，结果挂在导出面上；
+//   · 这一段（打印诊断 + 出结论 + 打印通过行）**不跑** —— 由子入口按导出面自己出结论。
+// 入口判定用 `import.meta.main`（Node 的**加载器**给的，argv 改不动）；旧 Node 退回
+// 独立子入口在 import 之前设置的**进程内标记**（同样不是 env/argv 通道）。
+// **不确定时默认"我是主入口"**：多跑判据是 fail-closed，跳过这一段才是漏洞。
+// ─────────────────────────────────────────────────────────────────────────────
+if (isEntryModule()) {
+  if (json) {
+    console.log(JSON.stringify({
+      root, expectedPin, expectedModules, scanned, pinClaims, moduleClaims,
+      numericRules: numericRules.map(rule => ({
+        id: rule.id, label: rule.label, source: rule.source,
+        truth: rule.truth ?? null, hits: rule.hits, excluded: rule.excluded, min: rule.min,
+      })),
+      coverage: { declared: COVERAGE_ITEMS.map(item => item.label), judged: coveredItems.map(item => item.label), passLine: summaryLine },
+      perScanPath: Object.fromEntries(perScanPath), hits, moduleHits, failures, surfaceProblems,
+    }, null, 2))
+  } else {
+    console.log(`check-doc-claims: 上游 pin ${expectedPin}；平台模块表 ${expectedModules.length} 项；扫描 ${scanned} 个 md / ${pinClaims} 条 pin 断言`)
+    console.log(`  扫描面：${SCAN_PATHS.map(target => `${target} ${perScanPath.get(target)?.files ?? 0}`
+      + `(pin ${perScanPath.get(target)?.pinClaims ?? 0})`).join(' / ')}${strictSurface ? '' : '（夹具树：只查非空，不查绝对下限）'}`)
+    const truthLines = numericRules.filter(rule => rule.truth !== undefined)
+      .map(rule => `${rule.label} ${rule.truth}（${rule.source}）`)
+    console.log(`  数字真源：${truthLines.length > 0 ? truthLines.join('；') : '（夹具树：无硬数字真源，对应项不计入覆盖面）'}`)
+    console.log(`  数字断言：${numericRules.map(rule => `${rule.label} ${rule.hits} 条`).join(' / ')}`
+      + `${numericRules.some(rule => rule.excluded > 0)
+        ? `（另有 ${numericRules.map(rule => rule.excluded).reduce((a, b) => a + b, 0)} 条同形语句因上下文锚不符被排除，不计入本项）` : ''}`)
+  }
+
+  for (const hit of [...hits, ...moduleHits]) {
+    console.error(`  [${hit.kind ?? 'MODULES'}] ${hit.file}:${hit.line}: ${hit.reason}`)
+    console.error(`          ${hit.text}`)
+  }
+  for (const message of failures) console.error(`  [SCAN] ${message}`)
+
+  // 扫描面缩水 = **前置失败**：此时"一致 ✅"是一个没被检查过的结论，退出码 2 与
+  // "有漂移"（1）区分开（与 check-authoring-claims 的 0/1/2 同款语义）。
+  if (surfaceProblems.length > 0) {
+    for (const message of surfaceProblems) console.error(`  [SURFACE] ${message}`)
+    console.error(`\ncheck-doc-claims: 扫描面缩水/前置缺失 ${surfaceProblems.length} 处 —— 拒绝把"没扫到"当"一致"。\n`
+      + '  修法：把被删的扫描根加回 SCAN_PATHS（要真的收窄口径，必须同时改 REQUIRED_SCAN_PATHS 并进 diff）；'
+      + '夹具树请只放被扫文档，绝对值下限只在真仓形态的根上强制。')
+    process.exit(2)
+  }
+
+  if (hits.length > 0 || moduleHits.length > 0 || failures.length > 0) {
+    console.error(`\n文档数字漂移 ${hits.length + moduleHits.length} 处 / 扫描器问题 ${failures.length} 处。`
+      + '修法：把文档里的数字改成真源值（上游 pin 见 `upstream.json`，平台模块表见 '
+      + '`scripts/platform-modules.mjs`，硬数字的真源见上面每条断言里点名的文件）；'
+      + '若该行是**记录当时事实**的历史文档，'
+      + `请加行内标记 \`${ALLOW_MARKER}\`（不要改扫描面）。`)
+    process.exit(1)
+  }
+
+  // 通过行由登记表生成、且刚刚被 `passLineProblems` 反解断言过（数量 + 逐条标签）——
+  // 它只声称本轮**真的判过**的项。`--json` 模式只出 JSON（否则那份输出不是合法 JSON）。
+  //
+  // 探测子进程走的是**独立入口**（`scripts/doc-claims-passline-child.mjs`，见文件头）：
+  // 它 import 本模块拿的是同一份判据的导出面，本入口上**没有任何探测开关**可伪造。
+  if (!json) {
+    printVerdict()
+  }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导出面（**只有**通过行探测的独立子入口用）。
+//
+// 判据本体在上面已经跑完（import 本模块即执行），这里交出去的是**它的结果**：
+// 子入口只允许"干净 ⇒ 打印通过行 / 有问题 ⇒ 按同样的退出码拒绝"，不得用它重新实现判据。
+// `summaryLine` 就是主入口打印路径上那一行的生成结果（`passLineFor(coveredItems)`）。
+// ─────────────────────────────────────────────────────────────────────────────
+export { coveredItems, summaryLine, failures, hits, moduleHits, surfaceProblems, scanned, pinClaims }

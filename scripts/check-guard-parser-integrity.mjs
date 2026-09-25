@@ -359,7 +359,7 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
   {
     path: 'scripts/check-install-integrity.mjs',
     // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
-    sha256: '473a6895ebb2d5fc8bfc989e9c82a34cc0ed31222dd0900fa786367e407b7936',
+    sha256: 'fc1b11e1c22fe4789755f2a9ffb84786bbdb942dedae704d552b8f5789d96242',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
