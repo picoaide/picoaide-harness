@@ -23,6 +23,8 @@ import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { invocationBooleanVerdict, precheckSkillPackage } from './manifest-precheck.ts'
+import { isWindowsReservedDeviceNameSegment } from './skill-name-rules.ts'
+import { normalizeServerURL } from './server-connector/auth.ts'
 import {
   isSameSkillRoot,
   runtimeSkillRoots,
@@ -65,6 +67,33 @@ export function validateSkillName(name: string): string {
     throw new ArchiveInstallRefusal('NAME_INVALID', `invalid skill name ${JSON.stringify(name)}`)
   }
   return name
+}
+
+/**
+ * **写侧**名字闸门：Windows 保留设备名（R17 泳道 Z，R17B-05）。
+ *
+ * 只装在**写**路径（安装 / 覆盖）上，**不**动 {@link validateSkillName}：后者同时是
+ * `uninstallSkill` 与 `packSkill` 的路径段校验，而 `con` 在 Linux/macOS 上运行时
+ * 确实会加载 —— 把它塞进 `validateSkillName` 会让"看得见的技能删不掉"，正是本仓
+ * 反复消灭的那类"面板与运行时不一致"。判据的单一真源在
+ * `skill-name-rules.ts`（服务端 `internal/skillmanifest` 是它的镜像，两端同判据）。
+ *
+ * 为什么值得拒绝而不是"照装、让 Windows 自己报错"：Windows 上建目录会失败在
+ * `EINVAL`，而 `ERRNO_HINT` 没有这一条 ⇒ 用户拿到的是 502 兜底文案，既不知道
+ * 是名字问题也不知道改什么。这里给出的文案点名保留名与出路，错误码走既有
+ * `NAME_INVALID`（面板按 422 + code 展示）。
+ * @param name - the skill id (also the directory name).
+ * @throws ArchiveInstallRefusal `NAME_INVALID` when the name is a Win32 device name.
+ */
+export function assertInstallableSkillName(name: string): void {
+  if (!isWindowsReservedDeviceNameSegment(name)) return
+  throw new ArchiveInstallRefusal(
+    'NAME_INVALID',
+    `skill name ${JSON.stringify(name)} is a reserved device name on Windows `
+    + '(CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 — with or without an extension); '
+    + 'such a skill installs on Linux/macOS but can never be created on Windows. '
+    + 'Rename the skill (for example "con-skill") and publish it again',
+  )
 }
 
 /**
@@ -220,6 +249,27 @@ const STALE_TEMP_MS = 24 * 60 * 60 * 1000
 
 /** 回滚失败时旧内容的保留前缀 —— 清扫器**不碰**它（宁可留垃圾，不可删用户内容）。 */
 const ORPHAN_PREFIX = 'orphan-'
+
+/**
+ * 换入前旧内容的备份前缀（R17B-03）。
+ *
+ * 落点 `<skills>/.skill-tmp/backup-<name>-<ts>`：**在清扫面之外**（清扫器只删
+ * `install-*`），因为进程死在两处 `rename` 之间时，这一份是旧内容的**唯一副本** ——
+ * 旧实现把它放在 `<staging>/backup`（祖先目录名 `install-*`），会被 24h 清扫
+ * 无日志删掉。恢复由 {@link recoverInterruptedSkillSwaps} 负责。
+ */
+const BACKUP_PREFIX = 'backup-'
+
+/**
+ * **全量**换入自愈（{@link recoverInterruptedSkillSwaps} 不带 `onlyName` 时）的最小年龄。
+ *
+ * 为什么需要它：换入期间备份只在盘上存在几毫秒（`rename` 两次），但"目标暂时缺失 +
+ * 备份存在"这个瞬间形态与"崩溃遗留"完全同形。全量扫描若不设年龄闸门，就可能把**另一个
+ * 正在换入的进程**的备份搬回落点，让它的 `rename(unpacked → target)` 失败（不丢数据，
+ * 但会把一次正常安装变成假失败）。10 分钟远大于一次安装的耗时，又远小于任何人会等待的
+ * 时间；持 per-name 锁的那条路径（`onlyName`）不受此闸门约束。
+ */
+export const INTERRUPTED_SWAP_MIN_AGE_MS = 10 * 60 * 1000
 
 /**
  * per-name 文件锁的**协议常量**（独立复审 r3 F3 的修复）—— 跨包契约，与
@@ -497,6 +547,8 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
   const { name, skillsDir } = options
   // 名字先于锁校验（非法名不参与排队）。
   validateSkillName(name)
+  // R17B-05：Windows 保留设备名在**写侧**拒绝（运行时判据不动，见该函数注释）。
+  assertInstallableSkillName(name)
   // per-name 文件锁（跨包协议，见 SKILL_LOCK_DIR）：随包插件的开机同步取的是**同一把**，
   // 两端因此互斥；拿不到就在 waitMs 之后 fail-loud，绝不无锁写入。
   return await withSkillLock(skillsDir, name, () => runInstallSkillArchive(options), { waitMs: options.lockWaitMs })
@@ -518,6 +570,16 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
     }
   }
 
+  // 崩溃自愈（R17B-03）：上一次换入若死在两处 `rename` 之间，落点是空的、旧内容的
+  // 唯一副本在 `.skill-tmp/backup-<name>-<ts>`（或旧形态 `install-*/backup/`）——
+  // 先把这一份放回落点，再谈覆盖/清扫。**必须先于清扫**：清扫会删掉陈旧的
+  // `install-*`，里面正是旧布局的备份。
+  await recoverInterruptedSkillSwaps(skillsDir, { onlyName: name })
+  // 别的名字的崩溃遗留：只在**副本足够旧**时才动（不与正在跑的换入抢，见
+  // {@link INTERRUPTED_SWAP_MIN_AGE_MS}）。安装是所有客户端都会走的路径，
+  // 因此它就是"下次安装顺手自愈"的那个钩子。
+  await recoverInterruptedSkillSwaps(skillsDir, { minAgeMs: INTERRUPTED_SWAP_MIN_AGE_MS })
+
   // 陈旧 staging 清扫（审计 A12）：SIGKILL/断电会留下 `.install-*`（旧布局）或
   // `.skill-tmp/install-*`（新布局），此前没有任何清扫者，会一直堆积
   // （每个最多 16MiB 原始 + 64MiB 解包）。只清"超过阈值"的，正在跑的那一份不受影响。
@@ -529,17 +591,19 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   // 409 `LOCAL_CONTENT`。三档共用同一份判据（{@link requiresOverwriteConfirmation}），
   // 面板侧是它的镜像（`CapabilityCenterPanel.needsOverwriteConfirm`）。
   const targetDir = join(skillsDir, name)
-  const existingOrigin = await classifyInstalledSkill(targetDir, name)
+  // 溯源只读一次：被判成 'local' 的那一档也要能说出"来自哪台服务端"（R17B-04）。
+  const existingProv = await readProvenance(targetDir)
+  const existingOrigin = await classifyInstalledSkill(targetDir, name, server)
   if (existingOrigin !== undefined && overwrite !== true) {
-    const existingProv = existingOrigin === 'store' ? await readProvenance(targetDir) : undefined
     const existingChannel = existingProv?.channel
     // R4-B-3：`dirty` 与面板同一份事实（同一次内容哈希），否则会出现"面板挂了
     // 「已本地修改」徽章、宿主却照旧放行整树覆盖"的两端漂移。
     const existingDirty = await isInstalledSkillDirty(targetDir, existingProv)
     if (requiresOverwriteConfirmation(existingOrigin, existingChannel, channel, existingDirty)) {
+      const foreignServer = isForeignServerProvenance(existingProv, server) ? existingProv?.server : undefined
       throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
-        describeOverwriteRefusal(name, existingOrigin, existingChannel, channel, existingDirty),
+        describeOverwriteRefusal(name, existingOrigin, existingChannel, channel, existingDirty, foreignServer),
       )
     }
   }
@@ -599,7 +663,14 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
     // 审计 2026-08-25 P2-4:此前直接 rm(targetDir)+rename——两步之间 crash
     // 窗口会让已装技能目录整个消失。改为「rename 旧 → backup,rename 新 →
     // target,成功后删 backup」;失败时回滚旧目录。
-    const backupDir = join(staging, 'backup')
+    //
+    // R17B-03：backup **不放在 staging 之内**。旧实现 `<staging>/backup` 的祖先
+    // 是 `install-*` ⇒ 在两处 `rename` 之间死掉的进程会把"旧内容的唯一副本"留在
+    // **清扫面之内**，24h 后由 {@link sweepStaleSkillTemps} 无日志删除（`orphan-`
+    // 的"永不清理"只覆盖"回滚 rename 失败"那条分支）。现在落点是
+    // `.skill-tmp/backup-<name>-<ts>`：清扫器只删 `install-*`，这一份天然免疫，
+    // 由 {@link recoverInterruptedSkillSwaps} 在下一次安装/卸载时放回落点。
+    const backupDir = join(tempRoot, `${BACKUP_PREFIX}${name}-${Date.now()}`)
     try {
       await rename(targetDir, backupDir).catch((cause: NodeJS.ErrnoException) => {
         if (cause.code !== 'ENOENT') throw cause // 不存在 = 首次安装
@@ -656,6 +727,24 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
     // 覆盖守卫负责确认）。
     await sweepInstallerOwnedShadowSkills(skillsDir, name)
 
+    // R17B-01（后果②的收口）：**"装好了"还必须等于"运行时加载的是刚装的那一份"**。
+    // 上面清掉的只是**安装器自己**写下的影子；用户自建的同名目录、根上散落的
+    // `<name>.md`、以及库内指向别处（甚至库外）的**符号链接**都不动 —— 而它们按
+    // `localeCompare` 先到先得完全可能抢在刚落地的规范落点之前。此时面板按落点说
+    // "已安装"、模型读的却是用户那一份（符号链接形态下 `resourceBase` 也在库外）。
+    // 判据与运行时同源（{@link findShadowWinner}），如实报 `RESIDUE` 而不是静默成功。
+    const shadowWinner = await findShadowWinner(skillsDir, name)
+    if (shadowWinner !== undefined) {
+      throw new ArchiveInstallRefusal(
+        'RESIDUE',
+        `skill "${name}" was written to its install location, but the runtime still loads `
+        + `"${shadowWinner.entryName}"${shadowWinner.symlink ? ' (a symbolic link)' : ''} first, so the model `
+        + `would not read the copy just installed: ${shadowWinner.skillMdPath} — `
+        + 'that entry is your own file (the Capability Hub never touches it): rename or delete it, '
+        + `then install "${name}" again`,
+      )
+    }
+
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))
@@ -668,44 +757,220 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
 }
 
 /**
+ * 一次"安装器清理"的可判定记录（R17B-02：谁被删、为什么）。
+ *
+ * 起因：两条删除路径此前**零日志** —— 用户自建的 `.install-*` 目录被 24h 清扫器
+ * 或同名影子清扫 `rm -rf` 之后，客户端日志里没有任何痕迹，"我的目录是谁删的、
+ * 依据什么"完全不可诊断（与本文件"回滚失败宁可留垃圾（`orphan-`）"的口径相反）。
+ * 现在每次删除都：①打一条可检索日志（`[skill-install] removed …`）；②回调一条
+ * 结构化记录（计数与判据都在里面，测试与诊断包直接消费）。
+ */
+export interface SkillCleanupRecord {
+  /** 被删条目的绝对路径。 */
+  readonly path: string
+  /** 直接子条目名（技能库根上的形态；`.skill-tmp` 之下的是 staging 名）。 */
+  readonly entryName: string
+  /** 判定依据：清扫面里的陈旧 staging / 旧布局 staging / 旧布局备份 / 同名安装器影子。 */
+  readonly layout: 'stale-temp' | 'legacy-staging' | 'legacy-backup' | 'installer-shadow'
+  /** 观测到的年龄（ms；同名影子路径是即时清扫，年龄只是观测量）。 */
+  readonly ageMs: number
+  /** 触发删除的阈值（ms；同名影子路径为 0 = 不按年龄判）。 */
+  readonly thresholdMs: number
+  /** 一句可检索的理由（进日志）。 */
+  readonly reason: string
+}
+
+/**
  * 清扫陈旧安装临时目录（审计 A12/A7）。
  *
  * 只删超过 `maxAgeMs`（缺省 24h）的条目，因此正在进行的安装不受影响；
- * `orphan-`（回滚失败时保留的旧内容）**永不清理**。全程 best-effort：清扫
- * 失败绝不能让安装本身失败。
+ * `orphan-`（回滚失败时保留的旧内容）与 `backup-*`（换入中断时旧内容的唯一副本，
+ * 见 {@link BACKUP_PREFIX}）**永不清理**。全程 best-effort：清扫失败绝不能让安装
+ * 本身失败。
+ *
+ * R17B-02：每次删除都打一条可检索日志并回调一条 {@link SkillCleanupRecord}
+ * （此前全程静默 ⇒ 用户内容被删后无从追溯）。
  * @param skillsDir - the user skill root.
  * @param maxAgeMs - age threshold in ms.
+ * @param onRemoved - 观测钩子（诊断/测试用）；每条被删记录回调一次。
  * @returns 清掉的目录数（诊断/测试用）。
  */
-export async function sweepStaleSkillTemps(skillsDir: string, maxAgeMs: number = STALE_TEMP_MS): Promise<number> {
+export async function sweepStaleSkillTemps(
+  skillsDir: string,
+  maxAgeMs: number = STALE_TEMP_MS,
+  onRemoved?: (record: SkillCleanupRecord) => void,
+): Promise<number> {
   const now = Date.now()
   let removed = 0
-  const stale = async (path: string): Promise<boolean> => {
+  const staleAge = async (path: string): Promise<number | undefined> => {
     const st = await lstat(path).catch(() => undefined)
-    if (st === undefined) return false
-    return now - st.mtimeMs >= maxAgeMs
+    if (st === undefined) return undefined
+    const age = now - st.mtimeMs
+    return age >= maxAgeMs ? age : undefined
   }
-  const drop = async (path: string): Promise<void> => {
-    await rm(path, { recursive: true, force: true }).then(() => { removed++ }).catch(() => {})
+  const drop = async (path: string, record: SkillCleanupRecord): Promise<void> => {
+    await rm(path, { recursive: true, force: true }).then(() => {
+      removed++
+      console.warn(`[skill-install] removed "${record.entryName}" (${record.reason})`)
+      onRemoved?.(record)
+    }).catch(() => { /* best-effort：删不掉不算安装失败 */ })
   }
   // 当前布局：<skills>/.skill-tmp/install-*
   const tempRoot = join(skillsDir, SKILL_TEMP_DIR)
   for (const entry of await readdir(tempRoot, { withFileTypes: true }).catch(() => [])) {
     if (!entry.name.startsWith('install-')) continue
     const path = join(tempRoot, entry.name)
-    if (await stale(path)) await drop(path)
+    const age = await staleAge(path)
+    if (age === undefined) continue
+    await drop(path, {
+      path,
+      entryName: entry.name,
+      layout: 'stale-temp',
+      ageMs: age,
+      thresholdMs: maxAgeMs,
+      reason: `stale install staging under ${SKILL_TEMP_DIR}/, age ${hours(age)}h >= ${hours(maxAgeMs)}h`,
+    })
   }
   // 旧布局(≤2.8.1)：staging/备份直接建在技能库根，名字形如 `.install-<name>-XXXXXX`
   // 与 `.<name>.backup-<pid>-<ts>`。旧备份的**根上就有 SKILL.md**，运行时会把整份
   // 技能重复加载（A7 实测："卸载后技能仍然可用"）⇒ 升级后第一次安装顺手清掉。
+  //
+  // R17B-02 的**认账边界**：这一档只看名字（`.install-` 前缀 / `.<name>.backup-<pid>-<ts>`
+  // 形态），不看内容 —— 用户把一个**自己写的**技能目录命名成 `.install-notes` 时，
+  // 命中的是用户内容。收窄判据会与既有契约冲突（R14 C-01 的 18 形态矩阵与
+  // `skill-sweep-root-guard.spec.ts` 明确要求散落 `.install-*.md`、目录形态
+  // `.install-<name>-<ts>/SKILL.md` 都被清掉，否则"卸载后仍加载"复发），因此本轮
+  // 只补**可诊断性**（记录 + 日志 + 计数），误删面如实登记在报告里。
   for (const entry of await readdir(skillsDir, { withFileTypes: true }).catch(() => [])) {
     const isLegacyStaging = entry.name.startsWith('.install-')
     const isLegacyBackup = /^\..+\.backup-\d+-\d+$/u.test(entry.name)
     if (!isLegacyStaging && !isLegacyBackup) continue
     const path = join(skillsDir, entry.name)
-    if (await stale(path)) await drop(path)
+    const age = await staleAge(path)
+    if (age === undefined) continue
+    await drop(path, {
+      path,
+      entryName: entry.name,
+      layout: isLegacyStaging ? 'legacy-staging' : 'legacy-backup',
+      ageMs: age,
+      thresholdMs: maxAgeMs,
+      reason: `legacy installer layout ${isLegacyStaging ? '.install-<name>-XXXXXX' : '.<name>.backup-<pid>-<ts>'} `
+        + `on the skill root, age ${hours(age)}h >= ${hours(maxAgeMs)}h`,
+    })
   }
   return removed
+}
+
+/** 年龄的日志展示（保留一位小数，便于比对阈值）。 */
+function hours(ms: number): string {
+  return (ms / 3_600_000).toFixed(1)
+}
+
+/** 一次换入中断的恢复结果（R17B-03）。 */
+export interface RecoveredSkillSwap {
+  /** 从备份里认出的技能名（= 规范落点名）。 */
+  readonly name: string
+  /** `restored` = 落点缺失、旧内容已放回；`discarded` = 落点已存在、副本已作废删除。 */
+  readonly action: 'restored' | 'discarded'
+  /** 备份/孤儿副本的绝对路径。 */
+  readonly sourcePath: string
+  /** 规范落点绝对路径。 */
+  readonly targetDir: string
+}
+
+/**
+ * 换入崩溃的自愈（R17B-03）：把"两处 `rename` 之间死掉"留下的旧内容副本放回落点。
+ *
+ * 崩溃后的盘上形态（旧实现在 `<staging>/backup`，其祖先名 `install-*` **在清扫面内**）：
+ *
+ * ```
+ * <skills>/<name>                                ← 不存在（旧内容已 rename 走、新内容还没到位）
+ * <skills>/.skill-tmp/install-XXXXXX/backup/     ← 旧内容的唯一副本（24h 后被无日志删除）
+ * ```
+ *
+ * 现在换入前先把旧内容 rename 到 `.skill-tmp/backup-<name>-<ts>`（清扫器的
+ * `install-*` 判据之外），并由本函数在下一次安装/卸载时回收：
+ *  - 落点**不存在** ⇒ 副本 rename 回落点（`restored`，用户看到"技能突然不见了"的自愈）；
+ *  - 落点**存在**（换入其实已完成，只是没删掉副本）⇒ 副本作废删除（`discarded`）——
+ *    与正常路径安装成功后删 backup 的语义完全相同；
+ *  - `orphan-<ts>-<name>`（回滚 rename 也失败的分支）：落点缺失时同样放回，落点存在时
+ *    **保持原样**（"orphan- 永不清理"的既有契约不变）。
+ *
+ * 旧布局的 `install-&lt;random&gt;/backup/`（**升级前**崩溃留下的形态，盘上可能真实存在）也在这里
+ * 认出来：读 `backup/SKILL.md` 的 frontmatter 名，落点缺失才放回。
+ * @param skillsDir - the user skill root.
+ * @param options - `onlyName` = 只恢复这个名字（安装/卸载路径**持 per-name 锁**时的口径，
+ *   无需年龄闸门）；`minAgeMs` = 只处理足够旧的副本（全量扫描用，避开正在跑的换入，
+ *   见 {@link INTERRUPTED_SWAP_MIN_AGE_MS}）。
+ * @returns 每个被动过的副本一条记录（含 `restored` 与 `discarded`）。
+ */
+export async function recoverInterruptedSkillSwaps(
+  skillsDir: string,
+  options: { onlyName?: string | undefined, minAgeMs?: number | undefined } = {},
+): Promise<RecoveredSkillSwap[]> {
+  const { onlyName, minAgeMs } = options
+  const tempRoot = join(skillsDir, SKILL_TEMP_DIR)
+  const out: RecoveredSkillSwap[] = []
+  const entries = await readdir(tempRoot, { withFileTypes: true }).catch(() => [])
+  /** 年龄闸门（只在调用方给了 `minAgeMs` 时生效，见 {@link INTERRUPTED_SWAP_MIN_AGE_MS}）。 */
+  const oldEnough = async (path: string): Promise<boolean> => {
+    if (minAgeMs === undefined) return true
+    const info = await lstat(path).catch(() => undefined)
+    if (info === undefined) return false
+    return Date.now() - info.mtimeMs >= minAgeMs
+  }
+  /** 把一份副本放回落点（或如实作废）；返回是否动过。 */
+  const settle = async (name: string, sourcePath: string, targetDir: string): Promise<boolean> => {
+    if (!isLoadableSkillName(name)) return false
+    if (existsSync(targetDir)) {
+      await rm(sourcePath, { recursive: true, force: true }).then(() => {
+        out.push({ name, action: 'discarded', sourcePath, targetDir })
+        console.warn(`[skill-install] discarded the interrupted-swap copy of "${name}" (the install location is populated again)`)
+      }).catch(() => { /* best-effort */ })
+      return true
+    }
+    await rename(sourcePath, targetDir).then(() => {
+      out.push({ name, action: 'restored', sourcePath, targetDir })
+      console.warn(`[skill-install] restored "${name}" from an interrupted skill swap (previous content was the only copy left)`)
+    }).catch((cause: unknown) => {
+      console.warn(`[skill-install] could not restore "${name}" from ${basename(sourcePath)}: ${cause instanceof Error ? cause.message : String(cause)}`)
+    })
+    return true
+  }
+  for (const entry of entries) {
+    const path = join(tempRoot, entry.name)
+    // 当前布局：backup-<name>-<ts>（末尾时间戳，名字里可以有连字符）。
+    const backup = /^backup-(.+)-(\d+)$/u.exec(entry.name)
+    if (backup !== null) {
+      const name = backup[1] as string
+      if (onlyName !== undefined && name !== onlyName) continue
+      if (!await oldEnough(path)) continue
+      await settle(name, path, join(skillsDir, name))
+      continue
+    }
+    // 回滚失败分支：orphan-<ts>-<name>（落点存在时**绝不删** —— 既有契约）。
+    const orphan = /^orphan-(\d+)-(.+)$/u.exec(entry.name)
+    if (orphan !== null) {
+      const name = orphan[2] as string
+      if (onlyName !== undefined && name !== onlyName) continue
+      if (!await oldEnough(path)) continue
+      if (!existsSync(join(skillsDir, name))) await settle(name, path, join(skillsDir, name))
+      continue
+    }
+    // 升级前的旧崩溃形态：install-*/backup/（名字不在目录名里，只能读 frontmatter）。
+    if (!entry.name.startsWith('install-')) continue
+    const legacyBackup = join(path, 'backup')
+    const meta = await readRuntimeSkillMetadata(join(legacyBackup, 'SKILL.md'))
+    if (meta === undefined) continue
+    if (onlyName !== undefined && meta.name !== onlyName) continue
+    if (!await oldEnough(path)) continue
+    if (!await settle(meta.name, legacyBackup, join(skillsDir, meta.name))) continue
+    // 抢救/作废之后，这一份 staging 残骸一并清掉：里面只剩安装器自己的构件
+    // （`unpacked/`、`archive.tar.gz`），而 `rename` 会刷新**父目录** mtime ⇒
+    // 不清它就还得再等一个 24h 阈值才被清扫器看到（年龄闸门已保证没有在跑的安装）。
+    await rm(path, { recursive: true, force: true }).catch(() => { /* 清不掉就留给清扫器 */ })
+  }
+  return out
 }
 
 /**
@@ -716,29 +981,70 @@ export async function sweepStaleSkillTemps(skillsDir: string, maxAgeMs: number =
  * （用户内容）处理 —— 宁可多问一次，不可静默覆盖/删除。
  * @param skillDir - the candidate skill directory.
  * @param name - the expected skill id (directory name).
+ * @param currentServer - 当前登录会话的服务端地址（R17B-04 的服务端维度；
+ *   省略 = 不做服务端比较，保持老行为）。
  * @returns `'store'` / `'local'`；目标不存在时 `undefined`。
  */
-export async function classifyInstalledSkill(skillDir: string, name: string): Promise<InstalledSkillOrigin | undefined> {
+export async function classifyInstalledSkill(
+  skillDir: string,
+  name: string,
+  currentServer?: string | undefined,
+): Promise<InstalledSkillOrigin | undefined> {
   try {
     await lstat(skillDir)
   } catch {
     return undefined
   }
   const prov = await readProvenance(skillDir)
-  return isStoreProvenance(prov, name) ? 'store' : 'local'
+  return isStoreProvenance(prov, name, currentServer) ? 'store' : 'local'
 }
 
 /**
  * 溯源标记是否表示"这份内容由能力中心/平台装进来的"（分类的**唯一谓词**）。
  *
- * 三个条件必须同时成立：标记可读 + 渠道是商店来源 + appId 与目录名一致。
+ * 三个条件必须同时成立：标记可读 + 渠道是商店来源 + appId 与目录名一致；
+ * 传了 `currentServer`（当前会话的服务端）时还要求**来源服务端一致**
+ * （R17B-04：同一渠道换服务端/换租户后，上一部署那一份不再算"我的商店内容"）。
  * {@link classifyInstalledSkill} 与能力中心聚合面共用它，避免"两处各判一次"漂移。
  * @param prov - the provenance marker (undefined when absent).
  * @param name - the expected skill id (directory name).
- * @returns 商店来源为 true，其余（含标记缺失）为 false。
+ * @param currentServer - 当前会话的服务端地址；省略 = 不做服务端比较。
+ * @returns 商店来源为 true，其余（含标记缺失、来源服务端不同）为 false。
  */
-export function isStoreProvenance(prov: SkillProvenance | undefined, name: string): boolean {
-  return prov !== undefined && isStoreChannel(prov.channel) && prov.appId === name
+export function isStoreProvenance(
+  prov: SkillProvenance | undefined,
+  name: string,
+  currentServer?: string | undefined,
+): boolean {
+  if (prov === undefined || !isStoreChannel(prov.channel) || prov.appId !== name) return false
+  return !isForeignServerProvenance(prov, currentServer)
+}
+
+/**
+ * 这份内容的溯源标记是不是来自**另一台服务端**（R17B-04；判据的唯一实现）。
+ *
+ * 为什么需要它：`SkillProvenance.server` 从 2026-09-01 起就写在盘上、也被读出来，
+ * 但**全仓零消费**。后果在"同一渠道 + 换服务端/换租户"时成立（本仓自己的拓扑就有
+ * 测试/生产/同机两栈）：同名同版本 ⇒ 面板显示"已安装"、**不给更新入口**，模型继续
+ * 读上一租户的内容；同名不同版本 ⇒ 渠道相同即放行整树替换，零确认。技能库是机器
+ * 作用域（第十六轮已认账）改不了，但"这一次比较"是代码里能收口的那一半。
+ *
+ * 两条边界：
+ *  - `currentServer` 未传（老调用点 / 离线场景）⇒ false（保持老行为，不突然要求确认）；
+ *  - 标记里没有 `server`（老版本写的，或随包插件写的 `plugin` 标记）⇒ false
+ *    （**fail-open**：凭空判"换了服务端"会让全量技能瞬间都要确认）。
+ * @param prov - the provenance marker.
+ * @param currentServer - 当前会话的服务端地址。
+ * @returns 两侧都有服务端且（归一化后）不同为 true。
+ */
+export function isForeignServerProvenance(
+  prov: SkillProvenance | undefined,
+  currentServer?: string | undefined,
+): boolean {
+  if (prov === undefined || currentServer === undefined) return false
+  const origin = prov.server
+  if (origin === undefined || origin === '') return false
+  return normalizeServerURL(origin) !== normalizeServerURL(currentServer)
 }
 
 /**
@@ -867,6 +1173,7 @@ function describeOverwriteRefusal(
   existingChannel: string | undefined,
   incomingChannel: SkillProvenanceChannel,
   existingDirty: boolean,
+  foreignServer?: string | undefined,
 ): string {
   if (existingDirty && existingOrigin === 'store' && existingChannel === incomingChannel) {
     // R4-B-3：这一条必须点明"你改过的东西会丢" —— 用户看到的徽章是「已本地修改」，
@@ -876,6 +1183,13 @@ function describeOverwriteRefusal(
       + '— confirm the overwrite to continue'
   }
   if (existingOrigin === 'local') {
+    // R17B-04：来源服务端不同时**点名**这一事实 —— 只说"不是能力中心装的"会让用户
+    // 以为是自己手写的，实际是上一台服务端（另一个部署/租户）装的那一份。
+    if (foreignServer !== undefined) {
+      return `the skill "${name}" was installed from another server (${foreignServer}, `
+        + `"${String(existingChannel)}" channel); installing the ${JSON.stringify(incomingChannel)} version `
+        + 'replaces that copy — confirm the overwrite to continue'
+    }
     return `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
       + 'installing would replace it (including your own files) — confirm the overwrite to continue'
   }
@@ -1038,6 +1352,15 @@ export interface DiscoveredSkill {
   dir: string
   /** SKILL.md 的绝对路径。 */
   skillMdPath: string
+  /**
+   * 该条目本身是不是**符号链接**（R17B-01）。
+   *
+   * 上游 `nodeEntryKind` 对符号链接会 `stat()` **跟随**，所以链接指向的目录/文件
+   * 与真目录一样是运行时候选；但链接**不是安装器写的形态**（安装器只写真实目录，
+   * 归档里的链接条目由 `archive-util` 拒绝）⇒ 一律按用户内容对待，删除面只
+   * `unlink` 链接本身、绝不 realpath 之后再删（那会写穿到库外）。
+   */
+  symlink: boolean
   /** 该条目是不是安装器写下的形态（见 {@link isInstallerOwnedSkillEntry}）。 */
   installerOwned: boolean
 }
@@ -1089,6 +1412,41 @@ async function readRuntimeSkillMetadata(skillMdPath: string): Promise<{ name: st
 }
 
 /**
+ * 一个直接子条目的类型 —— 与 pinned 上游 `nodeEntryKind`
+ * （`skill-filesystem/src/index.ts:899-917`）**逐条同判据**（R17B-01）。
+ *
+ * 上游的顺序是：`isDirectory()` → `isFile()` → 不是符号链接就 `undefined`；
+ * 是符号链接则 `stat()` **跟随**（目录 → `directory`，文件 → `file`，其它/失败 →
+ * `undefined` 并只 warn）。`fs-local` 的 `listDirectory` 走的是同一条语义
+ * （`fsio.ts` 的 `probe` 注释逐字 "symlinks are followed"）。
+ *
+ * 企业侧镜像此前只认前两步 ⇒ **符号链接条目整条被跳过**：库根里的链接（含散落的
+ * `*.md` 链接）"运行时加载、企业侧看不见"，于是面板看不到也卸载不掉、卸载返回成功
+ * 而运行时照旧加载（正是本文件反复声称已闭合的两条不变量）。
+ *
+ * @param fullPath - the entry's absolute path（跟随链接用）。
+ * @param entry - `readdir(..., { withFileTypes: true })` 的那一项。
+ * @returns 上游会给出的类型；`undefined` = 不是候选（含悬空链接/特殊文件）。
+ */
+async function runtimeEntryKind(
+  fullPath: string,
+  entry: { isDirectory(): boolean, isFile(): boolean, isSymbolicLink(): boolean },
+): Promise<'directory' | 'file' | undefined> {
+  if (entry.isDirectory()) return 'directory'
+  if (entry.isFile()) return 'file'
+  if (!entry.isSymbolicLink()) return undefined
+  try {
+    const info = await stat(fullPath)
+    if (info.isDirectory()) return 'directory'
+    if (info.isFile()) return 'file'
+    return undefined
+  } catch {
+    // 悬空链接 / 跟随失败：上游同样只 warn 后忽略（这里没有 logger，语义一致即可）。
+    return undefined
+  }
+}
+
+/**
  * 运行时**真正会加载**的技能集合（审计 R13-B P1-2 的唯一判据）。
  *
  * 与上游 `discoverRoot` 逐条对齐（本地真跑 pinned 注册表实测过）：
@@ -1096,12 +1454,18 @@ async function readRuntimeSkillMetadata(skillMdPath: string): Promise<{ name: st
  *    本身就是候选；
  *  - 只跳过名字恰为 {@link SKILL_SYSTEM_DIR} 的那一个（**其他点号目录照样发现**
  *    —— 这正是 `.alpha.backup-<pid>-<ts>` 能挤掉真目录的原因）；
+ *  - **符号链接条目按目标类型参与**（R17B-01：{@link runtimeEntryKind} 与上游
+ *    `nodeEntryKind` 同判据；悬空链接忽略）；
  *  - 技能名取自 **frontmatter**，不是目录名；名字必须匹配运行时的 kebab 正则；
  *  - 按条目名 `localeCompare` 升序，同名先到先得（调用方按顺序取第一份即"赢家"）。
  *
  * 旧实现只认「非点号目录 + 目录名 kebab + 有 SKILL.md」，于是与运行时是两个集合：
  * 差集里的技能"卸载成功而模型照旧能用"、界面按真目录说"已是最新"而模型读的是
- * 旧备份内容。
+ * 旧备份内容。**只认 `isDirectory()`/`isFile()` 是同一族的第二个形态**：库根里的
+ * 符号链接（指向另一块盘/另一个 git 检出、或第三方技能管理器的软链）运行时照旧
+ * 加载，而企业侧整条看不见 ⇒ ①面板看不到也卸载不掉；②装好同名技能后面板说
+ * "已安装"、模型读的却是链接指向的那一份（`resourceBase` 也在库外）；③卸载
+ * 返回成功、零残留（{@link listShadowingSkills} 为空）而运行时照旧加载。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
  * @param options - `skipSystem: false` = 这个根**不**跳过 `.system`（上游只给 `user-dsh`
  *   根设 `skipSystem`；agent/bundled 根里的 `.system` 照样是候选 —— R13-GH3 跨根收口
@@ -1119,8 +1483,10 @@ export async function discoverRuntimeSkills(skillsDir: string, options: { skipSy
   const rows: DiscoveredSkill[] = []
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
     if (skipSystem && entry.name === SKILL_SYSTEM_DIR) continue
-    const isDir = entry.isDirectory()
-    const isLooseMarkdown = entry.isFile() && entry.name.endsWith('.md')
+    const kind = await runtimeEntryKind(join(skillsDir, entry.name), entry)
+    if (kind === undefined) continue
+    const isDir = kind === 'directory'
+    const isLooseMarkdown = kind === 'file' && entry.name.endsWith('.md')
     if (!isDir && !isLooseMarkdown) continue
     const dir = isDir ? join(skillsDir, entry.name) : skillsDir
     const skillMdPath = isDir ? join(dir, 'SKILL.md') : join(skillsDir, entry.name)
@@ -1129,12 +1495,17 @@ export async function discoverRuntimeSkills(skillsDir: string, options: { skipSy
     // 只认运行时的 kebab 正则（长度上限是**写侧**规则：我们从不装超长名字，
     // 但用户手放的超长名字运行时确实会加载 ⇒ 这里必须如实列出，否则又成差集）。
     if (!SKILL_NAME_PATTERN.test(meta.name)) continue
+    const symlink = entry.isSymbolicLink()
     rows.push({
       name: meta.name,
       entryName: entry.name,
       dir,
       skillMdPath,
-      installerOwned: isInstallerOwnedSkillEntry(entry.name),
+      symlink,
+      // 链接一律按**用户内容**对待：安装器从不写链接（归档里的链接条目由
+      // `archive-util` 拒绝），所以"名字像旧布局"的链接不是安装器留下的东西 ——
+      // 无确认删除它等于删用户自己放进来的目录链接（R17B-01 的删除面口径）。
+      installerOwned: !symlink && isInstallerOwnedSkillEntry(entry.name),
     })
   }
   return rows
@@ -1172,6 +1543,30 @@ export async function listShadowingSkills(skillsDir: string, name: string): Prom
 }
 
 /**
+ * 装好 `name` 之后，运行时**实际会先加载**的那一条是不是规范落点 `<skillsDir>/<name>`；
+ * 不是就返回抢在它前面的那一条（R17B-01 的安装面收口）。
+ *
+ * 为什么需要它：{@link discoverRuntimeSkills} 忠实镜像上游的 `localeCompare` 先到先得，
+ * 而 `sweepInstallerOwnedShadowSkills` **只清安装器自己写下的形态**（用户自建的目录、
+ * 根上散落的 `.md`、库内/库外的**符号链接**一律不动）。于是"装好了 == 运行时加载的
+ * 是刚装的那一份"这条不变量在"用户自建同名条目排在规范落点之前"时就为假 ——
+ * 面板按落点说"已安装"，模型读的却是用户自己那一份（R17B-01 的后果②）。
+ * 判据只有一条、且与运行时同源：{@link discoverRuntimeSkills} 顺序里该名字的第一行。
+ *
+ * 卸载面用 {@link listShadowingSkills}（列**全部**同名条目）：删掉落点之后任何一条
+ * 同名条目都会成为加载者，所以那里必须全列、由调用方报 `RESIDUE`。
+ * @param skillsDir - the user skill root.
+ * @param name - the skill name (frontmatter name).
+ * @returns 抢在规范落点之前的同名条目；没有（或没有同名条目）时为 undefined。
+ */
+export async function findShadowWinner(skillsDir: string, name: string): Promise<DiscoveredSkill | undefined> {
+  const canonical = join(skillsDir, name)
+  const winner = (await discoverRuntimeSkills(skillsDir)).find(row => row.name === name)
+  if (winner === undefined) return undefined
+  return winner.entryName === name && winner.dir === canonical ? undefined : winner
+}
+
+/**
  * 删除**一个**「安装器所有」的影子条目的**唯一删除点**（R14 C-01 根守卫）。
  *
  * 为什么不能直接 `rm(shadow.dir, {recursive: true})`：{@link discoverRuntimeSkills} 忠实
@@ -1186,8 +1581,14 @@ export async function listShadowingSkills(skillsDir: string, name: string): Prom
  *  - `dir` 是技能库根的直接子目录 ⇒ 旧 staging / 旧备份就是这个形态：允许递归删除；
  *  - 其它（更深的路径、根之外的路径）⇒ 不是本函数认识的形态：**不删**（宁可留下，
  *    也不让一个来历不明的路径成为 `rm -rf` 的目标）。
+ *
+ * **符号链接条目到不了这里**（R17B-01）：{@link discoverRuntimeSkills} 把链接一律按
+ * 用户内容对待（`installerOwned === false`），所以本函数只会被真实目录/真实文件调用；
+ * 链接形态的删除只发生在 {@link uninstallSkill} 的规范落点（`rm(<skills>/<name>)`，
+ * 对链接只 unlink、库外目标一字不动）。**绝不要**在这里引入 `realpath` 之后再删 ——
+ * 那正是"删一个链接、写穿到库外"的形态。
  * @param skillsDir - the user skill root.
- * @param shadow - 一个 `installerOwned === true` 的影子条目。
+ * @param shadow - 一个 `installerOwned === true` 的影子条目（真实目录/文件）。
  * @returns 真的删掉了返回 `true`（删的是文件或那个直接子目录）。
  */
 async function removeInstallerOwnedShadow(skillsDir: string, shadow: DiscoveredSkill): Promise<boolean> {
@@ -1216,11 +1617,25 @@ async function removeInstallerOwnedShadow(skillsDir: string, shadow: DiscoveredS
  * @param name - the skill name.
  * @returns 删掉的 SKILL.md 路径（诊断/测试用）。
  */
-export async function sweepInstallerOwnedShadowSkills(skillsDir: string, name: string): Promise<string[]> {
+export async function sweepInstallerOwnedShadowSkills(
+  skillsDir: string,
+  name: string,
+  onRemoved?: (shadow: DiscoveredSkill) => void,
+): Promise<string[]> {
   const removed: string[] = []
   for (const shadow of await listShadowingSkills(skillsDir, name)) {
     if (!shadow.installerOwned) continue
-    if (await removeInstallerOwnedShadow(skillsDir, shadow)) removed.push(shadow.skillMdPath)
+    if (await removeInstallerOwnedShadow(skillsDir, shadow)) {
+      removed.push(shadow.skillMdPath)
+      // R17B-02：删除必须留痕（此前全程静默 ⇒ 用户内容被删后无从追溯）。
+      // 判据、条目名与"为什么"一起进日志，诊断时可直接 grep `removed installer-owned shadow`。
+      console.warn(
+        `[skill-install] removed installer-owned shadow "${shadow.entryName}" of skill "${name}" `
+        + `(${isInstallerOwnedSkillEntry(shadow.entryName) ? 'legacy installer layout' : 'installer layout'})`
+        + ` — the runtime would have loaded it instead of ${join(skillsDir, name)}`,
+      )
+      onRemoved?.(shadow)
+    }
   }
   return removed
 }
@@ -1321,10 +1736,22 @@ export async function listCrossRootSkillResidues(
 export async function uninstallSkill(
   skillsDir: string,
   name: string,
-  options: { overwrite?: boolean | undefined, runtimeRoots?: readonly RuntimeSkillRoot[] | undefined, env?: Record<string, string | undefined> | undefined } = {},
+  options: {
+    overwrite?: boolean | undefined
+    runtimeRoots?: readonly RuntimeSkillRoot[] | undefined
+    env?: Record<string, string | undefined> | undefined
+    /**
+     * 当前登录会话的服务端地址（R17B-04）：目标那一份的溯源 `server` 与它不同时，
+     * 按"本机内容"处理（删除要显式确认）。省略 = 不做服务端比较（老行为）。
+     */
+    serverURL?: string | undefined
+  } = {},
 ): Promise<string> {
   validateSkillName(name)
   return await withSkillLock(skillsDir, name, async () => {
+    // R17B-03：换入崩溃留下的旧内容副本先放回落点 —— 否则这里会报"未安装"，
+    // 而用户上一次安装确实写过东西（面板/日志里没有任何解释）。
+    await recoverInterruptedSkillSwaps(skillsDir, { onlyName: name })
     const target = join(skillsDir, name)
     try {
       await stat(join(target, 'SKILL.md'))
@@ -1332,16 +1759,23 @@ export async function uninstallSkill(
       throw new ArchiveInstallRefusal('NOT_INSTALLED', `skill "${name}" is not installed`)
     }
     const prov = await readProvenance(target)
-    const origin = isStoreProvenance(prov, name) ? 'store' : 'local'
+    // R17B-04：来源判据带上"当前会话的服务端"——上一部署（另一台服务端）装的
+    // 同名技能不再算"我的商店内容"，删除必须由用户显式确认。
+    const origin = isStoreProvenance(prov, name, options.serverURL) ? 'store' : 'local'
     const dirty = await isInstalledSkillDirty(target, prov)
     if (options.overwrite !== true && requiresRemoveConfirmation(origin, dirty)) {
+      // R17B-04：来源服务端不同时点名"上一台服务端"（否则用户以为是自己手写的）。
+      const foreignServer = isForeignServerProvenance(prov, options.serverURL) ? prov?.server : undefined
       throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
-        origin === 'local'
-          ? `the skill directory "${name}" was not installed by the Capability Hub; `
-            + 'deleting it removes your own files — confirm the deletion to continue'
-          : `the skill "${name}" has local modifications; deleting it discards your changes `
-            + '— confirm the deletion to continue',
+        foreignServer !== undefined
+          ? `the skill "${name}" was installed from another server (${foreignServer}, `
+            + `"${String(prov?.channel)}" channel); deleting it removes that copy — confirm the deletion to continue`
+          : origin === 'local'
+            ? `the skill directory "${name}" was not installed by the Capability Hub; `
+              + 'deleting it removes your own files — confirm the deletion to continue'
+            : `the skill "${name}" has local modifications; deleting it discards your changes `
+              + '— confirm the deletion to continue',
       )
     }
     await rm(target, { recursive: true, force: true })
@@ -1639,6 +2073,15 @@ export interface LocalSkillRow {
   displayName?: string | undefined
   description?: string | undefined
   version?: string | undefined
+  /**
+   * 库根里那一份是**符号链接**（R17B-01）。
+   *
+   * 运行时照旧加载它（上游 `nodeEntryKind` 会 `stat` 跟随），但**打包/上传入口有意
+   * 拒收链接形态**（`packSkill` 的 `assertRealSkillDirectory`，R10-B-03：否则会把
+   * 链接目标里的库外文件打进上传包）。面板据此不给「上传」按钮，而是如实标注
+   * "符号链接（只读）"—— 否则用户点下去必然失败。
+   */
+  symlink?: boolean | undefined
 }
 
 /** Extract a trimmed string from an unknown YAML value ('' → undefined). */
@@ -1672,6 +2115,7 @@ export async function listLocalSkills(skillsDir: string): Promise<LocalSkillRow[
       ...displayName === undefined ? {} : { displayName },
       ...description === undefined ? {} : { description },
       ...version === undefined ? {} : { version },
+      ...row.symlink ? { symlink: true } : {},
     })
   }
   return result

@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { listInstalledSkills, packSkill, uninstallSkill } from '../src/skill-install.ts'
+import { discoverRuntimeSkills, listInstalledSkills, listLocalSkills, packSkill, uninstallSkill } from '../src/skill-install.ts'
 import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 
 // R13-GH3（H2 跨根）：卸载的"成功"覆盖运行时**全部已知根**（`<dshHome>/skills` +
@@ -93,10 +93,22 @@ describe('R10-B-03: packSkill refuses a skill root that is a symlink', () => {
       )
     }
     expect(packed.error.message, '拒绝文案必须点名符号链接（用户要看得懂）').toMatch(/符号链接|symbolic link/u)
+    // R17B-01 更新了这一条（**目标不变**：打包入口仍然拒收链接；变的只是列表）：
+    // "列表"的判据是**运行时到底加载了什么**（上游 `nodeEntryKind` 会 `stat` 跟随
+    // 符号链接 ⇒ 这个技能模型真的用得到），所以链接形态必须**列出来**，只是带上
+    // `symlink` 标记让面板不给「上传」（点了必然被上面的拒绝挡下）。
+    // 旧断言 `toEqual([])` 把"打包拒收"错误地当成"列表也要隐藏"，结果正是 R17B-01
+    // 的 P1：面板看不到 → 卸载不掉 → 卸载返回成功而运行时照旧加载。
     expect(
       await listInstalledSkills(skills),
-      '同一处置：符号链接不是技能（列表与打包入口必须一致）',
-    ).toEqual([])
+      '链接形态运行时确实会加载 ⇒ 列表必须如实列出（否则面板/卸载判据与运行时出现差集）',
+    ).toEqual(['linked'])
+    const rows = await discoverRuntimeSkills(skills)
+    expect(rows.map(row => [row.name, row.symlink])).toEqual([['linked', true]])
+    expect(
+      (await listLocalSkills(skills)).map(row => [row.name, row.symlink]),
+      '面板行必须带 symlink 标记（据它把「上传」换成"符号链接（只读）"）',
+    ).toEqual([['linked', true]])
   }, 30_000)
 
   it('control: a real skill directory next to it still packs, and carries no outside bytes', async () => {
@@ -114,7 +126,9 @@ describe('R10-B-03: packSkill refuses a skill root that is a symlink', () => {
       packed.archive.includes(Buffer.from(OUTSIDE)),
       '归档里不得出现技能库外的任何字节（符号链接目标的哨兵）',
     ).toBe(false)
-    expect(await listInstalledSkills(skills), '列表只认真实目录').toEqual(['plain-skill'])
+    // 链接形态也在列表里（见上一条），但真实目录照旧可打包（控制组的意义不变）。
+    expect(await listInstalledSkills(skills), '链接与真实目录都在，且都可判定').toEqual(['linked', 'plain-skill'])
+    expect((await listLocalSkills(skills)).find(row => row.name === 'plain-skill')?.symlink).toBeUndefined()
   }, 30_000)
 
   it('an inner symlink to a FILE is still refused (the existing entry-level rule)', async () => {

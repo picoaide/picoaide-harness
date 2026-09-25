@@ -15,6 +15,7 @@
  */
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { parse as parseYaml } from 'yaml'
+import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from './skill-name-rules.ts'
 
 /** 与服务端 skillmanifest 相同的稳定错误码。 */
 export const PrecheckCode = {
@@ -93,8 +94,7 @@ export const MERGE_KEY_PATTERN = /<<[ ]*:/u
 
 /** 与上游 `@deepseek-ai/dsh-skill` 的 SKILL_NAME 逐字一致。 */
 const APP_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
-const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u
-/**
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u/**
  * 上游 `frontmatterBoolean` 接受的布尔**字符串**字面量（小写比较，**不 trim**）。
  *
  * **不要**把它当成"我们自己的规则"：它是从 pinned 上游实现里逐字取出来的，
@@ -249,6 +249,8 @@ interface PrecheckMessages {
   mergeKeyForbidden: (what: string) => string
   provenanceForbidden: string
   provenanceDirForbidden: string
+  reservedDeviceName: (name: string) => string
+  reservedArchiveEntry: (entry: string) => string
 }
 
 /** 按语言取一份消息表（每次调用重建, 不缓存 —— 语言可能随时变）。 */
@@ -353,12 +355,44 @@ function precheckMessages(locale: HostLocale): PrecheckMessages {
       '归档不得包含 .picoaide/ 目录:它由安装器写入,用于标记技能来源',
       'The archive must not contain a .picoaide/ directory: the installer writes it to record the skill origin',
     ),
+    reservedDeviceName: (name) => fill(
+      c(
+        '技能名 "{name}" 是 Windows 保留设备名(CON/PRN/AUX/NUL/COM1-9/LPT1-9,带扩展名也算):'
+        + '它在 Linux/macOS 装得上,在 Windows 上永远建不出来;请改名(例如 {name}-skill)后重新发布',
+        'Skill name "{name}" is a reserved device name on Windows (CON/PRN/AUX/NUL/COM1-9/LPT1-9, '
+        + 'with or without an extension): it installs on Linux/macOS but can never be created on Windows; '
+        + 'rename it (for example {name}-skill) and publish again',
+      ),
+      { name },
+    ),
+    reservedArchiveEntry: (entry) => fill(
+      c(
+        '归档条目 "{entry}" 是 Windows 保留设备名:Windows 上解包会失败;请改名后重新打包',
+        'Archive entry "{entry}" is a reserved device name on Windows: unpacking fails there; rename it and repack',
+      ),
+      { entry },
+    ),
   }
 }
 
 /** 是否合法应用 ID(与服务端 IsAppID 同规则)。 */
 export function isAppId(value: string): boolean {
   return value.length >= LIMITS.minAppId && value.length <= LIMITS.maxAppId && APP_ID.test(value)
+}
+
+/**
+ * 名字是不是 Windows 保留设备名（R17B-05；判据真源 = `skill-name-rules.ts`）。
+ *
+ * `isAppId` **故意**不把保留名算作非法：`con` 在 Linux/macOS 上运行时确实会加载，
+ * 并进"合法 ID"会让盘上已有的 `con` 技能被预检/卸载路径拒掉（"看得见删不掉"）。
+ * 保留名只在**写侧**（这里 + 安装器 + 归档扫描）拒绝，错误码复用既有的
+ * `INVALID_APP_ID` —— 不新造码：`tests/audit-r15b-manifest-parity.spec.ts` 要求
+ * 客户端用到的每个码在服务端 `skillmanifest` 都存在，而服务端那一半不在本泳道。
+ * @param value - the skill id / app id.
+ * @returns 命中 Win32 保留设备名为 true。
+ */
+export function isWindowsReservedName(value: string): boolean {
+  return isWindowsReservedDeviceNameSegment(value)
 }
 
 /** 是否合法 semver(与服务端 IsVersion 同规则)。 */
@@ -484,6 +518,10 @@ export function precheckSkillPackage(
   if ('issue' in name) out.push(name.issue)
   else if (!isAppId(name.value)) {
     out.push(issue(PrecheckCode.InvalidAppID, m.invalidAppId(name.value), 'name'))
+  } else if (isWindowsReservedName(name.value)) {
+    // R17B-05：合法的 kebab-case，但是 Win32 保留设备名 —— 写侧必须拒（错误码复用
+    // INVALID_APP_ID，与 Go 侧同码；保留名**不**并进 isAppId，见该函数注释）。
+    out.push(issue(PrecheckCode.InvalidAppID, m.reservedDeviceName(name.value), 'name'))
   } else if (name.value !== appId) {
     out.push(issue(PrecheckCode.IdentityMismatch, m.identityMismatch(name.value, appId), 'name'))
   }
@@ -562,6 +600,12 @@ export function precheckSkillPackage(
   }
   if (entries.some((e) => e.startsWith('.picoaide/'))) {
     out.push(issue(PrecheckCode.ProvenanceForbidden, m.provenanceDirForbidden))
+  }
+  // R17B-05（归档条目面）：技能目录里放 `aux.txt` / `nul` 这类名字，在 Windows 上
+  // 解包同样失败 —— 预检在**上传之前**就拦下来（安装侧还有 `archive-util` 的第二道）。
+  const reservedEntry = entries.map(entry => reservedDeviceNameInArchivePath(entry)).find(entry => entry !== undefined)
+  if (reservedEntry !== undefined) {
+    out.push(issue(PrecheckCode.InvalidAppID, m.reservedArchiveEntry(reservedEntry)))
   }
   return out
 }
