@@ -1065,8 +1065,9 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     expect(text).toContain('event: delta\ndata: {"delta":"好"}')
     expect(text).toContain('event: done')
     expect(calls).toHaveLength(1)
-    // 隐藏会话 id 由闸门给出（不是应用可控的输入）。
-    expect(calls[0]?.sessionId).toBe('app:demo')
+    // 隐藏会话 id 由闸门给出（不是应用可控的输入），且带**账号作用域** ——
+    // 换账号必须落到另一个隐藏会话上（R13-GB）。
+    expect(calls[0]?.sessionId).toBe(`app:demo#alice@${serverPartitionHash(ALICE.serverURL)!}`)
 
     // ③ 撤销（设置/面板里的那个出口）⇒ 下一次调用 403。
     const revoked = await consent(h, proof, { app_id: 'demo', granted: false })
@@ -1110,6 +1111,41 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     const response = await chat(h, { messages: [{ role: 'user', content: 'hi' }] })
     expect(response.status).toBe(403)
     expect(calls).toHaveLength(0)
+  })
+
+  it('隐藏会话按 (账号 × 服务端 × 应用) 分域：换账号拿到的是**另一个**会话 id', async () => {
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, {})
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+
+    const alice = await chat(h, { messages: [{ role: 'user', content: 'alice-1' }], stream: false })
+    expect(alice.status).toBe(200)
+
+    // ② 直接换账号（不登出）：bob 也授权过同一个应用。
+    h.setSession({ serverURL: ALICE.serverURL, token: 'tok2', username: 'bob' })
+    h.fireSessionChanged()
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    const bob = await chat(h, { messages: [{ role: 'user', content: 'bob-1' }], stream: false })
+    expect(bob.status).toBe(200)
+
+    expect(calls).toHaveLength(2)
+    const aliceId = `app:demo#alice@${serverPartitionHash(ALICE.serverURL)!}`
+    const bobId = `app:demo#bob@${serverPartitionHash(ALICE.serverURL)!}`
+    expect(calls[0]?.sessionId).toBe(aliceId)
+    // 变异：把作用域退回"只有应用"（`app:<app_id>`）⇒ 两行逐字相同，本断言红。
+    expect(calls[1]?.sessionId).toBe(bobId)
+    expect(calls[1]?.sessionId).not.toBe(calls[0]?.sessionId)
+
+    // ③ 同名账号换服务端（测试/正式并存）同样是另一个作用域。
+    h.setSession({ serverURL: 'https://second.example.com', token: 'tok3', username: 'bob' })
+    h.fireSessionChanged()
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    const elsewhere = await chat(h, { messages: [{ role: 'user', content: 'bob-2' }], stream: false })
+    expect(elsewhere.status).toBe(200)
+    expect(calls[2]?.sessionId).toBe(`app:demo#bob@${serverPartitionHash('https://second.example.com')!}`)
+    expect(calls[2]?.sessionId).not.toBe(bobId)
   })
 
   it('授权路由要求持有性证明 / 已登录 / 合法 app_id / 布尔 granted', async () => {

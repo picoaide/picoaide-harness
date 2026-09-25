@@ -60,8 +60,9 @@ describe('AI 桥保留路径：客户端真源逐字对拍（L7 §五② / J6）
   })
 
   it('隐藏会话前缀两端一致（客户端注释/文档都按同一前缀描述）', () => {
-    // 客户端半边不构造会话 id（那是宿主的事），但它把前缀写进了契约注释；这里钉住
-    // 宿主值本身，防止"文档写 app:、实现写 pico-app:"这类漂移。
+    // 客户端半边不构造会话 id（那是宿主的事），但它把形状写进了契约注释；这里钉住
+    // 宿主值本身，防止"文档写 app:、实现写 pico-app:"这类漂移。形状的**权威**对拍在
+    // `app-session-id-contract.spec.ts`（与服务端 app-session-id.json 同一份语料）。
     expect(AI_HIDDEN_SESSION_PREFIX).toBe('app:')
     expect(clientSource()).toContain('app:<app_id>')
   })

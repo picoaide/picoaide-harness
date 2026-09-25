@@ -8,16 +8,24 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
-// 应用维度归因（迁移 0076 / 契约 §21.4）。
+// 应用维度归因（迁移 0076 / 契约 §21.4 / §21.7⑤）。
 //
 // 背景：应用内的 AI 调用走**员工自己的** LLM 链路（密钥在服务端、计费进使用者账户），
-// 因此 usage 行天然只带 user_id。客户端在出站请求上带 `X-Pico-App-Id`，网关把它记进
-// `usage.app_id` —— 于是"这个应用吃掉多少 AI 成本"可以一条 SQL 答出来。
+// 因此 usage 行天然只带 user_id。客户端在出站请求上带**会话 id**（上游
+// `llm-deepseek` 的 `x-deepseek-harness-session-id`，值就是该轮的会话 id），而应用 AI
+// 的隐藏会话 id 带 `app:` 前缀 ⇒ 网关按前缀派生 `app_id` 并记进 `usage.app_id` ——
+// 于是"这个应用吃掉多少 AI 成本"可以一条 SQL 答出来。
+//
+// ⚠️ 不再是"自报头"：初版设计的 `X-Pico-App-Id` 在客户端**发不出来**（§21.7⑤：出站头
+// 的唯一构造点没有 header 通道），而且它没有可校验的链路 —— 任何调用方都能自报一个。
+// 现在唯一被信任的来源是**会话链路**（`app:` 前缀），自报头一律忽略并记一条 warn
+// （§21.4 的后半判据）。解析口径的唯一实现与真源见 `app_session_id.go` +
+// `app-session-id.json`。
 //
 // 三条纪律（与迁移 0076 的注释逐条对应）：
 //
-//	① **best-effort**：头缺失/非法 ⇒ 记空串，绝不影响计费（`SetUsageAppID` 内部
-//	   对空标签直接返回，连 UPDATE 都不发）；
+//	① **best-effort**：头缺失/不是应用会话/非法 ⇒ 记空串，绝不影响计费（`SetUsageAppID`
+//	   内部对空标签直接返回，连 UPDATE 都不发）；
 //	② **不参与计费**：cost / 余额 / 账本三者的计算完全不读这一列 —— 它只是标签，
 //	   改它永远不该改变任何金额（否则"伪造一个头就能改价"）；
 //	③ **不扫全表**：归因写成 post-hoc 的单行 UPDATE（与既有的 `SetUsageProvider`
@@ -29,21 +37,23 @@ import (
 // 代价是"插行与 UPDATE 之间进程崩溃"会丢一次归因（可接受：归因是统计口径，
 // 而扣费与落账在同一事务里，不受影响）。
 
-// appIDHeader 是应用标识的**出站**头名（客户端 → 平台）。
+// appIDFromRequest 读本次请求的**应用会话链路**并派生应用标识（无归因 ⇒ 空串）。
 //
-// 与 `X-Pico-App-Proof`（持有性证明）刻意分成两个头：一个是"是谁在调用"的密码学
-// 证明，一个是"为哪个应用记账"的**自报标签**。合并会让"标签缺失"看起来像"证明失败"。
-const appIDHeader = "X-Pico-App-Id"
-
-// appIDFromRequest 读并规范化本次请求声明应用标识（缺失/非法 ⇒ 空串 = 无归因）。
-//
-// 只从**头**读，不从请求体/查询串读：归因标签必须与认证发生在同一层
-// （同一份凭证的语义），而请求体/查询串是应用可控的更深一层输入。
+// 只认会话 id 的 `app:` 前缀（见 `app_session_id.go` 的长注释）：自报头
+// `X-Pico-App-Id` 被显式忽略并记一条日志 —— "归因静默消失"在运营面上与"没人用"长得
+// 一样，所以忽略这件事必须留下痕迹。
 func appIDFromRequest(c *gin.Context) string {
 	if c == nil {
 		return ""
 	}
-	return serverstore.SanitizeUsageAppID(c.GetHeader(appIDHeader))
+	if sessionID := c.GetHeader(appSessionIDHeaderName()); sessionID != "" {
+		return AppIDFromSessionID(sessionID)
+	}
+	if selfDeclared := c.GetHeader(legacyAppIDHeader); selfDeclared != "" {
+		log.Printf("gateway: 忽略没有会话链路的应用归因头 %s（应用维度归因只认会话 id 的 %q 前缀）",
+			legacyAppIDHeader, appSessionID.Prefix)
+	}
+	return ""
 }
 
 // bindUsageAppID 把本次请求声明的应用标识绑到一行 usage 上（best-effort）。

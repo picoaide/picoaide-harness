@@ -1190,7 +1190,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         '拓扑判据必须把本次要发的 tag 从基线候选里排除(--exclude-tag)',
       )
       check(
-        typeof step.run === 'string' && step.run.includes('git fetch'),
+        // 第十三轮 R13-D-02：`git` 也可能来自**冻结启动器**（`"${{ …outputs.git }}" fetch …`）
+        // ⇒ 判据认两种形态，否则收口之后这条会假红。
+        typeof step.run === 'string'
+          && (step.run.includes('git fetch')
+            || /\$\{\{\s*steps\.frozen-launchers\.outputs\.git\s*\}\}"?\s+fetch/u.test(step.run)),
         '拓扑判据步骤必须显式补齐判据输入(主线 ref + 全部 tag),不能依赖 checkout 恰好带了什么'
         + ' —— 输入缺失时脚本退出 2,发布会被自己拦下',
       )
@@ -1199,7 +1203,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
     // `yarn check`（保留）与 `node scripts/check-workspaces.mjs`（CI 现在的形态：启动器必须是
     // runner 自己的 node）。只改这一处判定，不改这条判据的语义（仍然是"拓扑判据必须更早"）。
     const gateIndex = gateSteps.findIndex(step => typeof step?.run === 'string'
-      && /(?:^|\s)(?:yarn\s+check|node\s+scripts\/check-workspaces\.mjs)(?![\w:-])/u.test(step.run))
+      && /(?:^|\s)(?:yarn\s+check|node\s+scripts\/check-workspaces\.mjs|"?\$\{\{\s*steps\.frozen-launchers\.outputs\.node\s*\}\}"?\s+scripts\/check-workspaces\.mjs)(?![\w:-])/u.test(step.run))
     check(gateIndex >= 0, 'ci.yml 的 gate 里找不到全量门禁步(扫描器可能已失效)')
     check(
       topologyIndex >= 0 && gateIndex >= 0 && topologyIndex < gateIndex,
@@ -2549,7 +2553,10 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         //   · `node scripts/check-workspaces.mjs`（现在是 CI 用的形态：启动器必须是 runner 自己的
         //     node —— `yarn check` 会让 yarn 在启动期加载 `.yarnrc.yml` 的 `plugins:`）。
         // root `package.json` 的 `check` 脚本就是后者，两者是同一条门禁的两种写法。
-        if (/(?:yarn\s+check(?![\w:.-])|node\s+scripts\/check-workspaces\.mjs(?![\w:.-]))/u.test(script)) fullGateSteps.push({ label, step })
+        // 第十三轮 R13-D-02：判据步的启动器被**冻结**了（`"${{ steps.frozen-launchers.outputs.node }}"`
+        // 是 runner 侧展开的绝对路径）⇒ 原来的 `node <路径>` 文本形态不再出现。扫描面必须
+        // 同时认三种写法，否则"接线对象没了"这条判据会在收口之后**假红**（本轮实测：4 项断言失败）。
+        if (/(?:yarn\s+check(?![\w:.-])|node\s+scripts\/check-workspaces\.mjs(?![\w:.-])|"?\$\{\{\s*steps\.frozen-launchers\.outputs\.node\s*\}\}"?\s+scripts\/check-workspaces\.mjs)/u.test(script)) fullGateSteps.push({ label, step })
       })
     }
     check(directSteps.length > 0, 'ci.yml 里找不到直接跑 verify-wasm-client-only.sh 的步骤(W-8 的接线对象没了)')

@@ -17,10 +17,15 @@ const PACKAGE_NAME = '@picoaide/dsh-host-locale'
  * re-export 消费。它只 import `node:http` 的**类型**，零依赖不变量不受影响；
  * 只作为**子路径**导出，不并进 `index` —— 否则 `dsh-plugin-desktop/host-locale`
  * 的 `export *` 会把 `isLoopback*` 一并搬到桌面包的对外面上。
+ *
+ * 2026-09-24：新增第三个入口 `session-events`（`pico/session-changed` 的订阅契约：
+ * 先订阅 + 用 `isRestored()` 补发"恢复型启动"那一次）。同样零依赖（上下文按结构最小面
+ * 声明，不 import cordis），同样只作为子路径导出。它存在的理由同样是构建环：desktop
+ * 不可能 import enterprise 的 `subscribeSession`，而这段顺序原本在仓里有**三份拷贝**。
  */
 export default defineConfig({
   name: PACKAGE_NAME,
-  entry: { index: 'src/index.ts', loopback: 'src/loopback.ts' },
+  entry: { index: 'src/index.ts', loopback: 'src/loopback.ts', 'session-events': 'src/session-events.ts' },
   outDir: 'lib',
   format: 'esm',
   platform: 'node',

@@ -5,6 +5,16 @@ import { join, resolve } from 'node:path'
 import { request } from '../api'
 import { setCurrentAdmin, type MeUser } from '../lib/rbac'
 import Audit, { ACTION_LABEL } from './Audit'
+import {
+  analyzeAuditGraph,
+  blankComments,
+  deriveStoreAppenders,
+  parseFuncLiterals,
+  parseGoFuncs,
+  scanCalls,
+  type AuditSinkSeed,
+  type GoSourceFile,
+} from '../lib/audit-sinks'
 
 // ---------------------------------------------------------------------------
 // 审计 R7 branding-4:审计日志 CSV 导出必须做公式注入转义 + 带 UTF-8 BOM。
@@ -320,23 +330,31 @@ describe('审计动作表覆盖组织共享库动作(SG-5)', () => {
 
 
 // ---------------------------------------------------------------------------
-// 审计动作真源对拍（R1-uxw-3,2026-09-19 第三波修复）
+// 审计动作真源对拍（R1-uxw-3 → R13-F F-07 / W-2：从"grep 字面量"升级为"按调用图/参数流"）
 //
-// 上一版这里是**手写夹具** SERVER_ACTIONS —— 拿自己当判据：服务端新增写点而没人
-// 同步本表时用例照样绿（文件里原本就写着这条口径更正）。而 wasm_* 那一族 17 个
-// 动作一条都没登记 ⇒「v1.2.0 为什么被拒」在审计页查不了（R1-uxw-3 的现场）。
+// 上一版真源取自服务端 Go 源码，但抽取器**只认字面量**（`^"([^"]*)"$` 挂在登记 sink
+// 的动作实参位上）。实测假绿（R13-F 探针 W-P5c）：把动作名经**参数传入**的本地包装
+// 写出
+//     func probeAuditWrapper2(db *sql.DB, username, action, detail string) {
+//         _ = serverstore.AuditLog(db, username, action, detail)
+//     }
+//     probeAuditWrapper2(db, adminUsername(c), "probe_new_action2", conn.ID)
+// ⇒ 本文件 18 用例 `EXIT=0`（正对照：同一动作名直接挂已登记 sink ⇒ 3 failed）。
 //
-// 现在真源取自**服务端 Go 源码**：扫 server/ 下全部非 `_test.go` 文件，解析审计
-// 写入点的动作实参。写入点形状共五种（这就是"真源"的确切定义，与
-// `server/internal/serverstore/audit.go` 的两个写入函数一一对应）：
-//   serverstore.AuditLog(db, username, ACTION, detail)       ← 通用写入
-//   serverstore.AuditLogApp(db, appID, username, ACTION, …)  ← 应用维度写入
-//   h.auditApp(appID, username, ACTION, detail)              ← wasm 应用级
-//   h.auditOrg(username, ACTION, detail)                     ← wasm 组织级
-//   *.opt.Audit(username, ACTION, detail)                    ← 注入的审计闭包
+// 现在真源 = `lib/audit-sinks.ts` 的**调用图闭包**：
+//   ① 以登记的审计出口为种子（store 追加 API + 注入式/方法式出口），沿调用图把
+//      「承载动作的形参位」向外传播到不动点（一层/多层本地包装、把 action 作为形参
+//      透传、`*Tx` 变体、参数换位都在内）；
+//   ② 闭包内每个承载位上的**动作名字面量**就是真源动作集（不再是"sink 实参位才算"）。
+// 同时给 sink 集合本身补完整性判据（新增一个能写审计行的函数而不登记 ⇒ 红）：
+//   - 任何函数体里出现 `INSERT INTO audit_logs` ⇒ 必须登记为行写入点（登记动作形参位，
+//     或登记为 plumbing 并写明理由）；
+//   - `internal/serverstore/audit.go` 里"声明了 action 形参且能到达写入点"的函数
+//     ⇒ 必须登记为 store 追加 API；
+//   - 任何 `func(… action …)` 型结构体字段 ⇒ 必须登记为转发出口。
 // 双向断言（缺任一方向即红）：
-//   ① 服务端有写点、标签表没有 ⇒ 红，且断言筛选下拉里选不到它；
-//   ② 标签表有、服务端抽不到字面量 ⇒ 红，除非落在下面两张**显式白名单**里，
+//   ① 闭包里有、标签表没有 ⇒ 红，且断言筛选下拉里选不到它；
+//   ② 标签表有、闭包抽不到 ⇒ 红，除非落在下面两张**显式白名单**里，
 //      而白名单自己也要过判据：DERIVED 的动作名必须在源码里仍有字面量（helper
 //      参数传进写入点），LEGACY 的动作名必须真的已从源码消失（存量行专用）。
 // ---------------------------------------------------------------------------
@@ -411,18 +429,41 @@ const LEGACY_ACTIONS: Record<string, string> = {
   wasm_apps_base_domain_change: '应用基域配置面已随「客户端专属」改造删除（2026-09-19）',
 }
 
-/** 审计写入点形状：sink 名 + 动作实参在参数表里的下标（0 基）。 */
-const AUDIT_SINKS: ReadonlyArray<{ name: string; actionArg: number }> = [
-  { name: 'AuditLogApp', actionArg: 3 },
-  { name: 'AuditLog', actionArg: 2 },
-  // provider PUT 事务化（0dd74681b7）把审计写入从 AuditLog 换成 AuditLogTx；
-  // 签名是 (tx, username, action, detail) ⇒ action 仍在 2 号位。漏登记会让
-  // provider_update 被判成「凭空发明的动作名」——本仓「跨面拼接」缺陷类的又一例。
-  { name: 'AuditLogTx', actionArg: 2 },
-  { name: 'auditApp', actionArg: 2 },
-  { name: 'auditOrg', actionArg: 1 },
-  { name: 'Audit', actionArg: 1 },
+/**
+ * 直接写 `audit_logs` 行的函数登记表（**完整性判据**：源码里出现 `INSERT INTO audit_logs`
+ * 的函数若不在本表 ⇒ 红）。
+ *
+ * `actionArg: null` 表示动作不是位置形参（plumbing，动作来自结构体字段）—— 这类也必须
+ * 显式登记，否则"新增一个绕过位置形参的写入点"会静默逃出对拍。
+ */
+const AUDIT_ROW_WRITERS: ReadonlyArray<{ name: string; actionArg: number | null; reason: string }> = [
+  { name: 'AuditLogTx', actionArg: 2, reason: '调用方事务内直写：(tx, username, ACTION, detail)' },
+  { name: 'writeAuditBatch', actionArg: null, reason: 'worker 批量写：动作来自 auditRequest 结构体字段，不是位置形参' },
 ]
+
+/**
+ * `serverstore` 的审计追加 API（`internal/serverstore/audit.go` 的导出面）。
+ *
+ * 这里**不是免检名单**：用例用 `deriveStoreAppenders()` 从该文件重新派生
+ * "声明了 `action` 形参且能到达 `INSERT INTO audit_logs`"的函数集合，双向对拍。
+ */
+const AUDIT_STORE_SINKS: ReadonlyArray<{ name: string; actionArg: number; reason: string }> = [
+  { name: 'AuditLog', actionArg: 2, reason: '通用追加（异步 worker + 哈希链）' },
+  { name: 'auditLog', actionArg: 3, reason: 'AuditLog/AuditLogApp 的共同实现（appID 为空 = 0048 老口径）' },
+  { name: 'AuditLogApp', actionArg: 3, reason: '应用维度追加（0069 起带 app_id 列）' },
+  { name: 'AuditLogTx', actionArg: 2, reason: '调用方事务内追加（P0-2：改配置即改钱的路径必须同事务）' },
+]
+
+/** `serverstore` 之外的审计出口（方法 / 注入的闭包字段）；同样要过完整性判据。 */
+const AUDIT_FORWARDING_SINKS: ReadonlyArray<{ name: string; actionArg: number; reason: string }> = [
+  { name: 'auditApp', actionArg: 2, reason: 'wasmapp/api 方法 (appID, username, ACTION, detail) → AuditLogApp' },
+  { name: 'auditOrg', actionArg: 1, reason: 'wasmapp/api 方法 (username, ACTION, detail) → 注入的 Audit 或 AuditLog' },
+  { name: 'Audit', actionArg: 1, reason: 'func(username, ACTION, detail) 型注入字段（handlers.Options / appseed.Options）' },
+]
+
+/** 闭包种子 = 全部登记的审计出口。 */
+const AUDIT_SINKS: ReadonlyArray<AuditSinkSeed> = [...AUDIT_STORE_SINKS, ...AUDIT_FORWARDING_SINKS]
+  .map((s) => ({ name: s.name, actionArg: s.actionArg }))
 
 /** 递归收集服务端非测试 Go 文件（webadmin/node_modules/data 不是服务端写入面）。 */
 function goSourceFiles(dir: string, out: string[] = []): string[] {
@@ -438,55 +479,11 @@ function goSourceFiles(dir: string, out: string[] = []): string[] {
   return out
 }
 
-/**
- * 从一次调用表达式里切出**顶层**实参（跳过字符串与嵌套括号/花括号里的逗号）。
- * 手写而不是正则：动作实参前面常有 `db, adminUsername(c),` 这类嵌套调用。
- */
-function callArgs(src: string, start: number): string[] {
-  const args: string[] = []
-  let depth = 0
-  let cur = ''
-  let quote: string | null = null
-  for (let i = start; i < src.length; i++) {
-    const ch = src[i]!
-    if (quote !== null) {
-      cur += ch
-      if (ch === '\\') { cur += src[++i] ?? ''; continue }
-      if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === '`' || ch === "'") { quote = ch; cur += ch; continue }
-    if (ch === '(' || ch === '[' || ch === '{') { depth++; cur += ch; continue }
-    if (ch === ')' || ch === ']' || ch === '}') {
-      if (depth === 0) { args.push(cur); return args }
-      depth--; cur += ch; continue
-    }
-    if (ch === ',' && depth === 0) { args.push(cur); cur = ''; continue }
-    cur += ch
-  }
-  return args
-}
-
-/** 扫描服务端源码，返回 `动作名 → 首个出现位置`（只认字面量动作名）。 */
-function extractServerAuditActions(): Map<string, string> {
-  const found = new Map<string, string>()
-  for (const file of goSourceFiles(SERVER_DIR)) {
-    const src = readFileSync(file, 'utf8')
-    for (const sink of AUDIT_SINKS) {
-      const re = new RegExp(`\\b(?:[A-Za-z_][\\w]*\\.)?${sink.name}\\s*\\(`, 'g')
-      let m: RegExpExecArray | null
-      while ((m = re.exec(src)) !== null) {
-        const arg = callArgs(src, m.index + m[0].length)[sink.actionArg]
-        if (arg === undefined) continue
-        const literal = /^"([^"]*)"$/.exec(arg.trim())
-        if (literal === null) continue
-        const action = literal[1]!
-        if (!found.has(action)) found.set(action, file.slice(SERVER_DIR.length))
-      }
-    }
-  }
-  return found
-}
+/** 服务端源码文件清单（webadmin/node_modules/data 不是服务端写入面）。 */
+const GO_SOURCES: GoSourceFile[] = goSourceFiles(SERVER_DIR).map((f) => ({
+  path: f.slice(SERVER_DIR.length + 1),
+  text: readFileSync(f, 'utf8'),
+}))
 
 /** 真源不可见时必须红，而不是静默跳过（跳过 = 又一条假绿）。 */
 function assertServerSourceVisible(): void {
@@ -494,20 +491,22 @@ function assertServerSourceVisible(): void {
     existsSync(join(SERVER_DIR, 'internal', 'serverstore', 'audit.go')),
     `服务端审计写入点不可见：${SERVER_DIR}（真源必须可读，动作对拍不能静默跳过）`,
   ).toBe(true)
+  expect(GO_SOURCES.length, `服务端 Go 源码一个都没扫到：${SERVER_DIR}`).toBeGreaterThan(100)
 }
 
-const SERVER_AUDIT_ACTIONS = (() => {
+/** 调用图闭包分析（动作抽取 + sink 面派生）。 */
+const AUDIT_GRAPH = (() => {
   assertServerSourceVisible()
-  return extractServerAuditActions()
+  return analyzeAuditGraph(GO_SOURCES, AUDIT_SINKS)
 })()
 
-/** 服务端**字面量**写点全集（排序后，用于渲染用例）。 */
+/** 闭包内**动作名字面量**全集（`action → file:line`）。 */
+const SERVER_AUDIT_ACTIONS = AUDIT_GRAPH.actions
+
+/** 服务端**闭包**写点全集（排序后，用于渲染用例）。 */
 const SERVER_ACTIONS: readonly string[] = [...SERVER_AUDIT_ACTIONS.keys()].sort()
 
-const RAW_SERVER_SOURCE = (() => {
-  assertServerSourceVisible()
-  return goSourceFiles(SERVER_DIR).map((f) => readFileSync(f, 'utf8')).join('\n')
-})()
+const RAW_SERVER_SOURCE = GO_SOURCES.map((f) => f.text).join('\n')
 
 describe('审计动作表 = 服务端写点真源（R1-uxw-3 双向对拍）', () => {
   it('真源本身非空且含 wasm 一族（抽取器坏掉/路径漂移都要红，不许"零动作=全绿"）', () => {
@@ -519,6 +518,37 @@ describe('审计动作表 = 服务端写点真源（R1-uxw-3 双向对拍）', (
       'wasm_app_delete', 'wasm_app_export', 'wasm_app_prune_failed',
     ]) {
       expect(SERVER_AUDIT_ACTIONS.has(a), `真源里应当有 ${a}`).toBe(true)
+    }
+  })
+
+  it('参数流传真自证：闭包 ⊇ 只认字面量的旧口径，且多出来的动作确实来自"包装/形参透传"', () => {
+    // 旧口径（R1-uxw-3 的抽取器）：只在**登记 sink 的动作实参位**上看字面量。
+    // 新口径必须严格包含它（否则是回归），并且多出真实条目 —— 多出来的那些就是
+    // "动作名经参数传入本地包装"的形态（R13-F F-07 的假绿形态）。
+    const literalOnly = new Set<string>()
+    const sinkNames = new Set(AUDIT_SINKS.map((s) => s.name))
+    for (const file of GO_SOURCES) {
+      const text = blankComments(file.text)
+      for (const call of scanCalls(text)) {
+        if (!sinkNames.has(call.name)) continue
+        for (const sink of AUDIT_SINKS) {
+          if (sink.name !== call.name) continue
+          const arg = call.args[sink.actionArg]?.trim()
+          const literal = arg === undefined ? null : /^"([^"]*)"$/.exec(arg)
+          if (literal !== null) literalOnly.add(literal[1]!)
+        }
+      }
+    }
+    expect(literalOnly.size, '旧口径自证：登记 sink 的动作实参位上必须仍有字面量').toBeGreaterThan(40)
+    const missed = [...literalOnly].filter((a) => !SERVER_AUDIT_ACTIONS.has(a))
+    expect(missed, `闭包丢了旧口径能找到的动作：${missed.join(', ')}`).toEqual([])
+    const viaWrapper = [...SERVER_AUDIT_ACTIONS.keys()].filter((a) => !literalOnly.has(a)).sort()
+    // 这些动作的字面量只出现在**包装函数的调用点**上（如 marketplace/admin.go 的
+    // applyGrant(db, c, …, "skill_grant", "skill_revoke")、sharedskills/agentshare 的
+    // decide(db, status, "…")），旧口径一条都看不到。
+    expect(viaWrapper.length, '闭包必须比"只认字面量"多找到参数传入的动作').toBeGreaterThan(5)
+    for (const a of ['skill_grant', 'skill_revoke', 'shared_skill_approve', 'agent_preset_approve']) {
+      expect(viaWrapper, `${a} 应当只经包装函数的调用点出现（参数传入形态）`).toContain(a)
     }
   })
 
@@ -638,5 +668,105 @@ describe('审计动作表 = 服务端写点真源（R1-uxw-3 双向对拍）', (
       const hit = mockRequest.mock.calls.find(([p]) => String(p).includes('action=wasm_app_release_reject'))
       expect(hit, '必须发出带 action=wasm_app_release_reject 的审计查询').toBeTruthy()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 审计写入面完整性（R13-F F-07 / W-2）：**sink 集合本身**也要有判据。
+//
+// 只对"已登记的 sink"抽动作，等于把"哪些函数能写审计行"这份集合当成手抄免检名单：
+// 新写一个能写审计行的函数（直写 INSERT / 新加一个 store 追加 API / 新加一个
+// func(…action…) 型注入出口）而没人登记 ⇒ 它的动作照样隐形。三条派生判据都在这里。
+// ---------------------------------------------------------------------------
+describe('审计写入面完整性（R13-F F-07 / W-2）', () => {
+  it('直接写 audit_logs 的函数 ↔ 行写入点登记表（双向；新增写入点不登记即红）', () => {
+    const derived = AUDIT_GRAPH.rowWriters
+    expect(AUDIT_GRAPH.insertStatements, 'INSERT INTO audit_logs 一条都没找到：写入面变了，必须红').toBeGreaterThan(1)
+    // 派生集合非空自证（解析器坏掉时不许"零命中=全绿"）。
+    expect([...derived.keys()].sort()).toContain('AuditLogTx')
+    const derivedNames = [...derived.keys()].sort()
+    const registered = AUDIT_ROW_WRITERS.map((r) => r.name).sort()
+    expect(
+      derivedNames.filter((n) => !registered.includes(n)),
+      '这些函数会往 audit_logs 写行但没登记（补 AUDIT_ROW_WRITERS：登记动作形参位，或登记为 plumbing 并写明理由）',
+    ).toEqual([])
+    expect(
+      registered.filter((n) => !derivedNames.includes(n)),
+      'AUDIT_ROW_WRITERS 里有源码里已不存在的写入点（删了写入点要同步收缩登记表）',
+    ).toEqual([])
+    for (const entry of AUDIT_ROW_WRITERS) {
+      expect(derived.get(entry.name)?.actionArg, `${entry.name} 的动作实参位与源码不一致`).toBe(entry.actionArg)
+    }
+  })
+
+  it('serverstore 审计追加 API ↔ 派生集合（声明 action 形参且能到达写入点者必须登记）', () => {
+    const auditGo = GO_SOURCES.find((f) => f.path.endsWith('internal/serverstore/audit.go'))
+    expect(auditGo, 'internal/serverstore/audit.go 必须在扫描面内').toBeTruthy()
+    const derived = deriveStoreAppenders(auditGo!)
+    const derivedNames = [...derived.keys()].sort()
+    const registered = AUDIT_STORE_SINKS.map((s) => s.name).sort()
+    expect(
+      derivedNames.filter((n) => !registered.includes(n)),
+      'audit.go 新增了"声明 action 形参且能到达写入点"的函数但没登记（否则它的动作会隐形）',
+    ).toEqual([])
+    expect(
+      registered.filter((n) => !derivedNames.includes(n)),
+      'AUDIT_STORE_SINKS 里登记了 audit.go 已不存在/到不了写入点的函数',
+    ).toEqual([])
+    // 登记的动作形参位必须与 Go 签名里叫 `action` 的那个形参位一致。
+    const funcs = parseGoFuncs(auditGo!)
+    for (const sink of AUDIT_STORE_SINKS) {
+      const fn = funcs.find((f) => f.name === sink.name)
+      expect(fn, `${sink.name} 在 audit.go 里找不到`).toBeTruthy()
+      expect(fn!.params[sink.actionArg], `${sink.name} 的第 ${sink.actionArg} 个形参必须是 action`).toBe('action')
+    }
+  })
+
+  it('func(… action …) 型注入出口 ↔ 转发登记表（新增出口字段不登记即红）', () => {
+    const derived = AUDIT_GRAPH.auditFields
+    expect([...derived.keys()], '审计注入出口字段派生为空：解析器失效或面变了').toContain('Audit')
+    const derivedNames = [...derived.keys()].sort()
+    const registeredFields = AUDIT_FORWARDING_SINKS.filter((s) => derivedNames.includes(s.name) || s.name === 'Audit')
+      .map((s) => s.name)
+      .sort()
+    expect(
+      derivedNames.filter((n) => !AUDIT_FORWARDING_SINKS.some((s) => s.name === n)),
+      '新增了 func(…action…) 型字段但没登记为审计出口（它的调用点会逃出动作对拍）',
+    ).toEqual([])
+    expect(registeredFields).toEqual(derivedNames)
+    for (const name of derivedNames) {
+      const entry = AUDIT_FORWARDING_SINKS.find((s) => s.name === name)!
+      expect(entry.actionArg, `${name} 的动作形参位与声明不一致`).toBe(derived.get(name)!.actionArg)
+    }
+  })
+
+  it('转发出口真的转发：方法体/注入实现必须把动作透传进 store 追加 API', () => {
+    const storeNames = new Set(AUDIT_STORE_SINKS.map((s) => s.name))
+    // ① 声明为方法的出口（auditApp / auditOrg）：函数体里必须至少有一次 store 追加调用。
+    for (const name of ['auditApp', 'auditOrg']) {
+      const fn = GO_SOURCES.flatMap((f) => parseGoFuncs(f)).find((f) => f.name === name)
+      expect(fn, `${name} 在服务端源码里找不到`).toBeTruthy()
+      const forwards = scanCalls(fn!.body).filter((c) => storeNames.has(c.name))
+      expect(forwards.length, `${name} 没有把动作转发进任何 store 追加 API`).toBeGreaterThan(0)
+      const wired = forwards.some((c) => {
+        const sink = AUDIT_STORE_SINKS.find((s) => s.name === c.name)!
+        return c.args[sink.actionArg]?.trim() === 'action'
+      })
+      expect(wired, `${name} 没有把 action 形参透传到 store 追加 API 的动作实参位`).toBe(true)
+    }
+    // ② 注入字段（Audit）：必须有 func 字面量实现，且把 action 形参透传进 store 追加 API。
+    const auditField = AUDIT_FORWARDING_SINKS.find((s) => s.name === 'Audit')!
+    const impls = GO_SOURCES.flatMap((f) => parseFuncLiterals(f))
+      .filter((l) => l.fieldName === 'Audit' && l.params.includes('action'))
+    expect(impls.length, 'Audit 注入出口没有任何 func 字面量实现（接线断了）').toBeGreaterThan(0)
+    const wired = impls.filter((l) => {
+      const param = l.params[auditField.actionArg]
+      return scanCalls(l.body).some((c) => {
+        if (!storeNames.has(c.name)) return false
+        const sink = AUDIT_STORE_SINKS.find((s) => s.name === c.name)!
+        return c.args[sink.actionArg]?.trim() === param
+      })
+    })
+    expect(wired.length, 'Audit 的实现没有把 action 形参透传进 store 追加 API').toBeGreaterThan(0)
   })
 })

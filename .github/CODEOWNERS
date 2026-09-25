@@ -1,0 +1,52 @@
+# 门禁「判据面」的评审归属（CODEOWNERS）
+#
+# ## 这个文件为什么存在（第十三轮审计 R13-D-§8）
+#
+# `on: pull_request` 跑的是 **PR merge ref 里的那份 workflow 文件**，而分支保护按
+# **（context 名, app_id）** 匹配必需检查 —— 于是"保留 5 个 job 的 `name:`、把 job 体换成
+# `echo ok`"就能让 5 个必需检查全绿，而仓内**没有任何一条判据会因此变红**（R13-D 泳道
+# 用官方文档逐字 + 分支保护原始 JSON + `ci.yml` 静态映射把机制说死）。
+#
+# 本仓当前的分支保护是 `required_approving_review_count: 0`、`require_code_owner_reviews: false`，
+# 所以"判据的定义版本 = 被审版本"这件事**没有任何平台约束**兜底。这个文件是那件事的
+# **第一半**（谁该点头）；第二半（让平台真的要求它）需要仓库设置，属人工步骤 ——
+# 命令与取舍写在 `docs/decisions/2026-09-25-gate-definition-authority.md`。
+#
+# ## ⚠️ 待人工执行（当前**未闭环**）
+#
+# 下面的负责人是**占位团队** `@picoaide/gate-owners`：该团队不存在时，GitHub 视为
+# "这些路径没有 code owner" ⇒ 本文件**不产生任何强制**（fail-safe：不会挡住合并）。
+# 要让本文件真的生效，需要仓库管理员：
+#
+#   1. 建团队并把真实的门禁负责人加进去；
+#   2. 把下面的 `@picoaide/gate-owners` 换成真实团队/账号（**这一步必须由人来拍**，
+#      代码里猜不出谁该负责）；
+#   3. 开 `require_code_owner_reviews`（或 ruleset 的 `required_reviewers`）。
+#      命令见决策文档 §4。
+#
+# 在那之前，本文件的作用是**把"哪些路径属于判据面"写成可评审的清单**：
+# 任何改动这些路径的 PR 都会被列出来，评审者能一眼看到"这条 PR 动了判据的定义"。
+
+# 默认：全仓（保证任何 PR 都有一个可见的归属条目；不是"什么都要求审批"）。
+*                                   @picoaide/gate-owners
+
+# ---- 判据的「定义」：CI 的工作流与 composite action -------------------------
+# 改这里 = 改"哪些判据会被调用、以什么形态被调用"（R13-D-§8 的那条通道）。
+/.github/                           @picoaide/gate-owners
+
+# ---- 判据的「执行体」：所有在 CI / 门禁里真的被执行的脚本 -------------------
+# 与 `scripts/check-install-integrity.mjs` 的 `EXECUTION_FACE_REGISTRY` 同一张面。
+/scripts/                           @picoaide/gate-owners
+/packages/host/desktop/scripts/     @picoaide/gate-owners
+/packages/vendor/memory-evolve/scripts/ @picoaide/gate-owners
+
+# ---- 判据的「输入面」：install 期与依赖解析 ---------------------------------
+/.yarnrc.yml                        @picoaide/gate-owners
+/package.json                       @picoaide/gate-owners
+/yarn.lock                          @picoaide/gate-owners
+/patches/                           @picoaide/gate-owners
+/.yarn/patches/                     @picoaide/gate-owners
+
+# ---- 判据的「语料面」：打包后置判据与各包的验证脚本配置 ---------------------
+/packages/*/*/vitest.config.ts      @picoaide/gate-owners
+/packages/*/*/tsconfig*.json        @picoaide/gate-owners

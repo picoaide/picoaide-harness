@@ -15,6 +15,10 @@
       "types": "./lib/types/loopback.d.ts",
       "default": "./lib/loopback.js"
     },
+    "./session-events": {
+      "types": "./lib/types/session-events.d.ts",
+      "default": "./lib/session-events.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

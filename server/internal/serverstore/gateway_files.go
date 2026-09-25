@@ -65,8 +65,13 @@ func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *t
 	// 认领租约在 WHERE 里出现两次判据（"标记仍在租约内"），用同一个真源常量。
 	lease := ReapClaimLease.Seconds()
 	for attempt := 0; attempt < 2; attempt++ {
-		res, err := db.Exec(
-			`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
+		// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath（每次重试各开一个
+		// 已钉事务，不在重试之间持锁）。
+		var res sql.Result
+		err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+			var eerr error
+			res, eerr = tx.Exec(
+				`INSERT INTO gateway_files (file_id, user_id, expires_at, size_bytes) VALUES (?, ?, ?, ?)
 			 ON CONFLICT (file_id) DO UPDATE
 			   SET expires_at = EXCLUDED.expires_at, user_id = EXCLUDED.user_id,
 			       -- 重新登记 = 这份文件又有主了 ⇒ 必须清掉回收标记，否则回收器仍以为自己在删
@@ -84,8 +89,10 @@ func RecordGatewayFileSize(db *sql.DB, fileID string, userID int64, expiresAt *t
 			   -- R4-C-1：认领在租约内的行不得转手（上游对象正在被删）。
 			   AND (gateway_files.reaping_at IS NULL
 			        OR gateway_files.reaping_at < now() - make_interval(secs => ?))`,
-			fileID, userID, expiresAt, sizeBytes, lease,
-		)
+				fileID, userID, expiresAt, sizeBytes, lease,
+			)
+			return eerr
+		})
 		if err != nil {
 			return err
 		}
@@ -119,8 +126,15 @@ var ErrGatewayFileReapClaimed = errors.New("gateway file has an active reap clai
 
 // gatewayFileReapClaimActive 报告该行是否正被回收器认领（标记在租约内）。
 func gatewayFileReapClaimActive(db *sql.DB, fileID string) (bool, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var active bool
-	switch err := db.QueryRow(
+	switch err := rd.QueryRow(
 		`SELECT reaping_at IS NOT NULL AND reaping_at >= now() - make_interval(secs => ?)
 		   FROM gateway_files WHERE file_id = ?`, ReapClaimLease.Seconds(), fileID).Scan(&active); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -138,7 +152,14 @@ func gatewayFileReapClaimActive(db *sql.DB, fileID string) (bool, error) {
 // 只会让调用方拿到一个上游 404 而不是干净的"文件不存在"（口径与列表过滤一致 ——
 // 审计 2026-09-22 G-6 指出两处口径曾相反）。
 func GatewayFileOwner(db *sql.DB, fileID string) (userID int64, ok bool, err error) {
-	row := db.QueryRow(
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	row := rd.QueryRow(
 		`SELECT user_id FROM gateway_files
 		 WHERE file_id = ? AND (expires_at IS NULL OR expires_at > now())`, fileID)
 	switch err := row.Scan(&userID); {
@@ -178,8 +199,15 @@ const gatewayFilesOwnedByChunk = 5000
 func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]struct{}, error) {
 	owned := make(map[string]struct{}, len(ids))
 	if len(ids) == 0 {
-		return owned, nil
+		return owned, nil // 空集合不开事务（零往返）
 	}
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	for start := 0; start < len(ids); start += gatewayFilesOwnedByChunk {
 		end := start + gatewayFilesOwnedByChunk
 		if end > len(ids) {
@@ -191,7 +219,7 @@ func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]str
 		for _, id := range batch {
 			args = append(args, id)
 		}
-		rows, err := db.Query(
+		rows, err := rd.Query(
 			`SELECT file_id FROM gateway_files
 			 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
 			   AND file_id IN (`+qmarks(len(batch))+`)`, args...)
@@ -217,8 +245,12 @@ func GatewayFilesOwnedBy(db *sql.DB, ids []string, userID int64) (map[string]str
 
 // DeleteGatewayFileRow 删除归属行（上游删除成功、或已确认上游 404 时调用）。
 func DeleteGatewayFileRow(db *sql.DB, fileID string) error {
-	_, err := db.Exec(`DELETE FROM gateway_files WHERE file_id = ?`, fileID)
-	return err
+	// R13-GE（V2-2）：gateway_files 属族内关系 ⇒ 池上写入口经唯一实现 withUsageSearchPath
+	// （否则 shadow 在场时删的是 shadow 行，真实台账一行不动且 err=nil）。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM gateway_files WHERE file_id = ?`, fileID)
+		return err
+	})
 }
 
 // GatewayFile 台账的单次查询上限：官方 Files API 每账号最多 10000 个文件，
@@ -227,7 +259,14 @@ const gatewayFilesListLimit = 20000
 
 // ListGatewayFileIDs 返回该用户登记的**未过期** file_id 集合（列表过滤用）。
 func ListGatewayFileIDs(db *sql.DB, userID int64) (map[string]struct{}, error) {
-	rows, err := db.Query(
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(
 		`SELECT file_id FROM gateway_files
 		 WHERE user_id = ? AND (expires_at IS NULL OR expires_at > now())
 		 ORDER BY created_at DESC
@@ -263,7 +302,7 @@ func PurgeExpiredGatewayFiles(db *sql.DB, limit int) (int64, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return 0, err
 	}
@@ -435,10 +474,17 @@ func escapeLike(s string) string {
 
 // ListGatewayFiles 分页查询台账（管理端「网关文件」页）。
 func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	q = normalizeGatewayFileQuery(q)
 	where, args := gatewayFileWhere(q)
 	var total int64
-	if err := db.QueryRow(`SELECT count(*) FROM gateway_files g`+where, args...).Scan(&total); err != nil {
+	if err := rd.QueryRow(`SELECT count(*) FROM gateway_files g`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	// 排序子句是**常量**（白名单 → 固定字符串），SQL 里不拼接任何变量：
@@ -451,7 +497,7 @@ func ListGatewayFiles(db *sql.DB, q GatewayFileQuery) ([]GatewayFileRow, int64, 
 	            FROM gateway_files g LEFT JOIN users u ON u.id = g.user_id` + where +
 		` ` + orderClause + ` LIMIT ? OFFSET ?`
 	args = append(args, q.Limit, q.Offset)
-	rows, err := db.Query(query, args...)
+	rows, err := rd.Query(query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -527,8 +573,15 @@ const gatewayFilePageMaxCapped = 32
 // 列表时会静默错位（审计 2026-09-22 R6 P1-C 实测三档全部错位一列，`sort=bytes`
 // 的首行不是占用最大的人）。
 func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummaryRow, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	orderClause := gatewayFileSummaryOrderClause(sort, desc)
-	rows, err := db.Query(`SELECT g.user_id, COALESCE(u.username, '') AS username,
+	rows, err := rd.Query(`SELECT g.user_id, COALESCE(u.username, '') AS username,
 	                              COALESCE(u.display_name, '') AS display_name,
 	                              count(*) AS files,
 	                              COALESCE(sum(g.size_bytes), 0) AS bytes,
@@ -554,7 +607,14 @@ func GatewayFileSummary(db *sql.DB, sort string, desc bool) ([]GatewayFileSummar
 
 // GatewayFileTotals 返回全量合计（文件数 / 字节数 / 已过期数）。
 func GatewayFileTotals(db *sql.DB) (files, bytes, expired int64, err error) {
-	err = db.QueryRow(`SELECT count(*), COALESCE(sum(size_bytes), 0),
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	err = rd.QueryRow(`SELECT count(*), COALESCE(sum(size_bytes), 0),
 	                          count(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at <= now())
 	                     FROM gateway_files`).Scan(&files, &bytes, &expired)
 	return files, bytes, expired, err
@@ -579,10 +639,17 @@ func GatewayFileTotals(db *sql.DB) (files, bytes, expired int64, err error) {
 //
 // 注意：这一列是**两用**的（fencing token + 尝试次数），改认领语义时必须同时看这里。
 func ListExpiredGatewayFiles(db *sql.DB, limit int) ([]string, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
-	rows, err := db.Query(`SELECT file_id FROM gateway_files
+	rows, err := rd.Query(`SELECT file_id FROM gateway_files
 	                        WHERE expires_at IS NOT NULL AND expires_at <= now()
 	                          AND (reaping_at IS NULL OR reaping_at < now() - make_interval(secs => ?))
 	                        ORDER BY reap_gen ASC, expires_at ASC LIMIT ?`, ReapClaimLease.Seconds(), limit)
@@ -635,8 +702,15 @@ type GatewayFileReapBacklog struct {
 
 // GatewayFileReapBacklogStats 采集回收积压口径（回收器每轮调用一次，只读）。
 func GatewayFileReapBacklogStats(db *sql.DB) (GatewayFileReapBacklog, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return GatewayFileReapBacklog{}, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var out GatewayFileReapBacklog
-	if err := db.QueryRow(`SELECT count(*),
+	if err := rd.QueryRow(`SELECT count(*),
 	                              count(*) FILTER (WHERE reap_gen > 0),
 	                              count(*) FILTER (WHERE reap_gen >= ?),
 	                              COALESCE(max(reap_gen), 0)
@@ -648,7 +722,7 @@ func GatewayFileReapBacklogStats(db *sql.DB) (GatewayFileReapBacklog, error) {
 	if out.Stuck == 0 {
 		return out, nil
 	}
-	rows, err := db.Query(`SELECT file_id, reap_gen FROM gateway_files
+	rows, err := rd.Query(`SELECT file_id, reap_gen FROM gateway_files
 	                        WHERE expires_at IS NOT NULL AND expires_at <= now() AND reap_gen >= ?
 	                        ORDER BY reap_gen DESC, expires_at ASC LIMIT ?`,
 		GatewayFileReapStuckThreshold, gatewayFileStuckSampleLimit)
@@ -668,13 +742,20 @@ func GatewayFileReapBacklogStats(db *sql.DB) (GatewayFileReapBacklog, error) {
 
 // ListGatewayFilesForPurge 取一批"按条件可清理"的行（管理端按员工/状态清理用）。
 func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]string, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	q = normalizeGatewayFileQuery(q)
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
 	where, args := gatewayFileWhere(q)
 	args = append(args, limit)
-	rows, err := db.Query(`SELECT g.file_id FROM gateway_files g`+where+` ORDER BY g.created_at ASC LIMIT ?`, args...)
+	rows, err := rd.Query(`SELECT g.file_id FROM gateway_files g`+where+` ORDER BY g.created_at ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -695,8 +776,15 @@ func ListGatewayFilesForPurge(db *sql.DB, q GatewayFileQuery, limit int) ([]stri
 // 管理端的单条删除用它：过期行也允许管理员按 id 删掉（列表里"已过期"那一行同样有
 // 删除按钮；审计 2026-09-22 R6 P2 实测旧实现走 GatewayFileOwner ⇒ 过期行 404）。
 func GatewayFileRowExists(db *sql.DB, fileID string) (bool, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var one int
-	switch err := db.QueryRow(`SELECT 1 FROM gateway_files WHERE file_id = ?`, fileID).Scan(&one); {
+	switch err := rd.QueryRow(`SELECT 1 FROM gateway_files WHERE file_id = ?`, fileID).Scan(&one); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
 	case err != nil:
@@ -739,7 +827,7 @@ type GatewayFileForReap struct {
 //
 // 返回 ok=false 表示"已经不过期 / 已被别的路径处理 / 标记仍在租约内"（调用方跳过）。
 func ClaimExpiredGatewayFile(db *sql.DB, fileID string) (GatewayFileForReap, bool, error) {
-	tx, err := db.Begin()
+	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return GatewayFileForReap{}, false, err
 	}
@@ -789,8 +877,15 @@ const ReapClaimLease = 10 * time.Minute
 //
 // 任何一种为 false 都意味着调用方必须**放弃删上游对象**（对象可能已属于新一代）。
 func GatewayFileReapClaimHeld(db *sql.DB, fileID string, generation int64) (bool, error) {
+	// R13-GE（V2-2 读面收口）：族内读面 —— 池上入口走已钉 search_path 的只读事务
+	// （唯一实现 usageReadConn）。先 defer Close，再 defer rows.Close（LIFO 保证 rows 先关）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var held bool
-	switch err := db.QueryRow(
+	switch err := rd.QueryRow(
 		`SELECT reaping_at IS NOT NULL AND reap_gen = ?
 		          AND reaping_at >= now() - make_interval(secs => ?)
 		   FROM gateway_files WHERE file_id = ?`,
@@ -809,21 +904,30 @@ func GatewayFileReapClaimHeld(db *sql.DB, fileID string, generation int64) (bool
 // 这里不会误删新一代的行。返回 finished=false 表示"这一行已经不归本世代处置"
 // —— 调用方必须把这次删除如实记为"对象已删、台账行留给新一代"（并打日志）。
 func FinishReapedGatewayFile(db *sql.DB, fileID string, generation int64) (bool, error) {
-	res, err := db.Exec(
-		`DELETE FROM gateway_files WHERE file_id = ? AND reaping_at IS NOT NULL AND reap_gen = ?`,
-		fileID, generation)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath。
+	removed := false
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`DELETE FROM gateway_files WHERE file_id = ? AND reaping_at IS NOT NULL AND reap_gen = ?`,
+			fileID, generation)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		removed = n > 0
+		return nil
+	})
+	return removed, err
 }
 
 // ReleaseReapClaim 放弃回收标记（上游删除失败时调用）：下一轮立刻可以重试，
 // 不必等租约过期。
 func ReleaseReapClaim(db *sql.DB, fileID string) error {
-	_, err := db.Exec(`UPDATE gateway_files SET reaping_at = NULL WHERE file_id = ?`, fileID)
-	return err
+	// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE gateway_files SET reaping_at = NULL WHERE file_id = ?`, fileID)
+		return err
+	})
 }
 
 // NormalizeLegacyPermanentGatewayFiles 把"没有过期时间"的存量行按上限补齐
@@ -842,10 +946,17 @@ func NormalizeLegacyPermanentGatewayFiles(db *sql.DB, cap time.Duration, limit i
 	// 用 make_interval(secs => ?) 而不是 `created_at + ?`：Go 的 time.Duration 不是
 	// PG 的 interval，直接传会被驱动拒绝（实测 500）。秒数走 float8。
 	seconds := cap.Seconds()
-	res, err := db.Exec(`UPDATE gateway_files SET expires_at = created_at + make_interval(secs => ?)
+	// R13-GE（V2-2）：族内写入口经唯一实现 withUsageSearchPath（子查询与 UPDATE
+	// 目标都必须是同一个 public 台账）。
+	var res sql.Result
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		var eerr error
+		res, eerr = tx.Exec(`UPDATE gateway_files SET expires_at = created_at + make_interval(secs => ?)
 	                      WHERE file_id IN (
 	                        SELECT file_id FROM gateway_files WHERE expires_at IS NULL LIMIT ?
 	                      )`, seconds, limit)
+		return eerr
+	})
 	if err != nil {
 		return 0, err
 	}

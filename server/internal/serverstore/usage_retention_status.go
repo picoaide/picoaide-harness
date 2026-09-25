@@ -409,6 +409,16 @@ type UsageRetentionStatus struct {
 	ReclaimBlockedDueSince   string `json:"reclaim_blocked_due_since,omitempty"`
 	ReclaimBlockedAgeSeconds int64  `json:"reclaim_blocked_age_seconds,omitempty"`
 
+	// ReclaimBlockedMonths 是**本轮全部**真受阻月（YYYYMM，升序、去重）。
+	//
+	// 为什么必须有这一面（R13-GE · V2-1 的残留缺口）：上面那五个字段只报**最早**
+	// 那个受阻月，于是"更晚的一个月已经连续失败 5 轮、更早的一个月刚被第一次延后"
+	// 这种序列里，真失败会被更早月的一次新延后从读数面（与停摆位）上顶掉 ——
+	// A4 实测 `true→false`。停摆位现在按"**任一**受阻月达标"判定（见下方
+	// usageReclaimStalledFor），而这一面把被顶掉的那些月也如实列出来：
+	// 谁在场、各自连续受阻几轮，全部可见。
+	ReclaimBlockedMonths []string `json:"reclaim_blocked_months,omitempty"`
+
 	// ---- 写路径建分区 DDL 的等待账（R12-N2 P2-01）----
 	//
 	// 为什么必须有一面：月初第一次计量写入要建当月分区，而 `CREATE TABLE …
@@ -445,8 +455,16 @@ type UsageRetentionStatus struct {
 	// oldestUnreclaimedAt 是"最早未回收月"首次被观测到的时刻（单调，见上）。
 	oldestUnreclaimedAt time.Time
 	// reclaimBlocked 是"真停摆账"的进程内部分（R12-N2 P1-01；不进 JSON，对外读数
-	// 是 reclaim_blocked_* 五个字段）。
+	// 是 reclaim_blocked_* 五个字段）。**读数是"最早那个"**（最逾期者，给人看的
+	// 现状清单），而停摆位按**全部**受阻月判定。
 	reclaimBlocked usageReclaimBlocked
+	// reclaimBlockedRounds 是"**每个**真受阻月各自连续受阻的轮数"（R13-GE · V2-1）。
+	//
+	// 单值账（reclaimBlocked.Rounds）只能记住**一个**月的连续性，于是"更晚月持续
+	// 真失败"会被"更早月刚被延后"顶掉（A4 实测 true→false：真失败被掩盖）。这里
+	// 按**月**记（而不是按关系名）—— 同一个月可能对应多个关系形态（孤儿表/分区），
+	// 而停摆语义的单位是"月该不该被回收"。
+	reclaimBlockedRounds map[string]int64
 
 	// ---- 写入面（R9-D R9D-00，P0）：当月到底能不能落账 ----
 	//
@@ -609,27 +627,33 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	// 的月才进这个面（判据见 UsageRetentionStatus.ReclaimStalled 的注释）。
 	blocked := advanceReclaimBlocked(st.reclaimBlocked, round, st.DeferredStreak, deferredCounts)
 	st.reclaimBlocked = blocked
+	// R13-GE（V2-1）：停摆位的判据面是**全部**受阻月（不是"最早那一条"）。
+	blockedAll := usageReclaimBlockedAllInRound(round)
+	st.reclaimBlockedRounds = advanceReclaimBlockedRounds(st.reclaimBlockedRounds, round, st.DeferredStreak, deferredCounts)
+	st.ReclaimBlockedMonths = nil
+	for _, b := range blockedAll {
+		st.ReclaimBlockedMonths = append(st.ReclaimBlockedMonths, b.Month)
+	}
 	st.ReclaimBlockedMonth, st.ReclaimBlockedReason, st.ReclaimBlockedRounds = blocked.Month, blocked.Reason, blocked.Rounds
 	st.ReclaimBlockedDueSince, st.ReclaimBlockedAgeSeconds = "", 0
 	if blocked.Month != "" && !round.EndedAt.IsZero() && round.ConfiguredMonthsKnown {
 		if due, ok := usageReclaimDueSince(blocked.Month, round.ConfiguredMonths); ok {
 			st.ReclaimBlockedDueSince = due.UTC().Format(time.RFC3339)
-			if age := round.EndedAt.Sub(due); age > 0 {
-				st.ReclaimBlockedAgeSeconds = int64(age / time.Second)
+			// 月龄的**唯一实现**（停摆判据 per-month 也用它，见 usageReclaimMonthAge），
+			// 避免"读数一个口径、判据另一个口径"。
+			if age, ok := usageReclaimMonthAge(blocked.Month, round); ok {
+				st.ReclaimBlockedAgeSeconds = age
 			}
 		}
 	}
 	switch {
-	case !round.Scanned || blocked.Month == "":
+	case !round.Scanned || len(blockedAll) == 0:
 		st.ReclaimStalled = false
-	case blocked.Reason == usageReclaimBlockedFailed:
-		// ① 真失败类：判据是"这个已到期的月本轮真的做不成" + "它逾期 ≥ 24h"。
-		// 月龄是保留期的纯函数 ⇒ 重启后第一轮就成立（R11-D-03 的性质）。
-		st.ReclaimStalled = st.ReclaimBlockedAgeSeconds > 0 &&
-			time.Duration(st.ReclaimBlockedAgeSeconds)*time.Second >= usageReclaimStallAfter
 	default:
-		// ② 有界延后类：判据是**连续调度轮次**（单次 5s 锁竞争 = 1 轮 ⇒ 不置真）。
-		st.ReclaimStalled = blocked.Rounds >= usageReclaimStallRounds
+		// R13-GE（V2-1）：**任一**受阻月达标即置位（旧实现只看最早那一条 ⇒ 更晚月的
+		// 持续真失败会被更早月的一次新延后抹掉，A4 实测 true→false）。
+		st.ReclaimStalled = usageReclaimStalledFor(blockedAll, st.reclaimBlockedRounds,
+			func(m string) (int64, bool) { return usageReclaimMonthAge(m, round) })
 	}
 	// 按设计跳过、需人工处置的形态（R12-N2 P1-04 的错界分区并入失败等）：单列一面，
 	// **不进**上面的停摆判据（它们永远不会自动消失，进停摆位就是长期假告警）。
@@ -768,6 +792,8 @@ type usageReclaimBlocked struct {
 	Month  string
 	Reason string
 	Rounds int64
+	// Rel 是代表这一个月受阻的关系名（点名用；同月多形态时取真失败优先的那个）。
+	Rel string
 }
 
 // usageMonthDueInRound 报告某个月（YYYYMM）在**本轮**是不是"应被回收"。
@@ -788,14 +814,57 @@ func usageMonthDueInRound(month string, round usageRetentionRound) bool {
 // 按设计跳过的原因（usageSkipNeedsManual）与未知原因**都不进**（后者是"判据面之外
 // 的取值"，不允许靠猜把它算成停摆）。三个返回值分别是月、原因、关系名。
 func usageReclaimBlockedInRound(round usageRetentionRound) (month, reason, rel string, ok bool) {
+	all := usageReclaimBlockedAllInRound(round)
+	if len(all) == 0 {
+		return "", "", "", false
+	}
+	// 读数 = 最早那个（最逾期者）；**判据**用全部（见 usageReclaimStalledFor）。
+	first := all[0]
+	return first.Month, first.Reason, first.Rel, true
+}
+
+// usageReclaimMonthAge 返回某个月（YYYYMM）到本轮结束为止"已经逾期多久"（秒）。
+//
+// 判据与危害同构：真失败类的停摆阈值是**月龄**（保留期的纯函数 ⇒ 重启后第一轮就成立，
+// R11-D-03 的性质）。它是月龄的**唯一实现**：`reclaim_blocked_age_seconds` 这个读数与
+// `usageReclaimStalledFor` 的逐月判定都必须经它，不允许两处各推一遍。
+func usageReclaimMonthAge(month string, round usageRetentionRound) (int64, bool) {
+	if month == "" || round.EndedAt.IsZero() || !round.ConfiguredMonthsKnown {
+		return 0, false
+	}
+	due, ok := usageReclaimDueSince(month, round.ConfiguredMonths)
+	if !ok {
+		return 0, false
+	}
+	age := round.EndedAt.Sub(due)
+	if age <= 0 {
+		return 0, false
+	}
+	return int64(age / time.Second), true
+}
+
+// usageReclaimBlockedAllInRound 返回本轮**全部**真受阻月（按月份升序、按月去重）。
+//
+// R13-GE（V2-1）：单值读数只能承载一个月，而"保留策略停摆了吗"这个问题的判据面
+// 是**所有**该回收却没回收成功的月。同一个月可能有多个关系形态受阻（孤儿表 + 分区），
+// 取其中任意一个代表即可（原因/关系名用于点名，不参与阈值判定）。
+func usageReclaimBlockedAllInRound(round usageRetentionRound) []usageReclaimBlocked {
+	byMonth := map[string]usageReclaimBlocked{}
 	consider := func(r, why string) {
 		m, mok := retentionMonthOfRelation(r)
 		if !mok || !usageMonthDueInRound(m, round) {
 			return
 		}
-		if !ok || m < month {
-			month, reason, rel, ok = m, why, r, true
+		if _, seen := byMonth[m]; seen {
+			// 同月多形态：真失败优先于延后（失败是更严重、也更需要点名的形态）。
+			if byMonth[m].Reason == usageReclaimBlockedFailed {
+				return
+			}
+			if why != usageReclaimBlockedFailed {
+				return
+			}
 		}
+		byMonth[m] = usageReclaimBlocked{Month: m, Reason: why, Rel: r}
 	}
 	for _, item := range round.Unreclaimed {
 		r, why := item, "skipped"
@@ -810,7 +879,15 @@ func usageReclaimBlockedInRound(round usageRetentionRound) (month, reason, rel s
 	for _, r := range round.FailedRelations {
 		consider(r, usageReclaimBlockedFailed)
 	}
-	return month, reason, rel, ok
+	if len(byMonth) == 0 {
+		return nil
+	}
+	out := make([]usageReclaimBlocked, 0, len(byMonth))
+	for _, b := range byMonth {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Month < out[j].Month })
+	return out
 }
 
 // advanceReclaimBlocked 推进真停摆账（R12-N2 P1-01）。
@@ -847,6 +924,80 @@ func advanceReclaimBlocked(prev usageReclaimBlocked, round usageRetentionRound, 
 		return p
 	}
 	return usageReclaimBlocked{Month: month, Reason: reason, Rounds: 1}
+}
+
+// advanceReclaimBlockedRounds 按**月**推进"连续受阻轮数"（R13-GE · V2-1）。
+//
+// 语义与 advanceReclaimBlocked 同一份节奏口径（无证据轮不动、真失败类走 counts
+// 闸门、延后类直接取 DeferredStreak[rel]），区别只有"记账单位"：这里**每个月各记一份**，
+// 所以更晚月的持续失败不会被更早月的一次新延后抹掉。
+//
+// 本轮没被枚举到（或本轮被正常处理了）的月**直接从账上删掉** —— 与
+// advanceDeferredStreaks 的"重建而非累积"同一口径："这一轮它被正常处理了"不是停摆。
+func advanceReclaimBlockedRounds(prev map[string]int64, round usageRetentionRound,
+	streak map[string]int, counts bool) map[string]int64 {
+	if !round.Scanned {
+		return prev // 无证据轮：不动（"没观测" ≠ "已解除"）
+	}
+	all := usageReclaimBlockedAllInRound(round)
+	if len(all) == 0 {
+		return nil
+	}
+	next := make(map[string]int64, len(all))
+	for _, b := range all {
+		if b.Reason == usageReclaimBlockedFailed {
+			n := prev[b.Month]
+			if counts {
+				n++
+			}
+			if n < 1 {
+				// 未计入过（首轮 / counts=false 的第一次观测）：至少记 1 轮，
+				// 与 advanceReclaimBlocked 的"新关系从 1 起算"同口径。
+				n = 1
+			}
+			next[b.Month] = n
+			continue
+		}
+		n := int64(streak[b.Rel])
+		if n < 1 {
+			n = 1
+		}
+		next[b.Month] = n
+	}
+	return next
+}
+
+// usageReclaimStalledFor 是**停摆位**的唯一判据（R13-GE · V2-1）：
+// "**任一**受阻月满足阈值" ⇒ 停摆。
+//
+// 为什么不能只看最早那个月（被审形态）：读数面（reclaim_blocked_month）取最早受阻月
+// 是**对的**（最逾期者最该被点名），但把停摆位也绑在它身上就错了 —— A4 实测的序列
+//
+//	第 1..5 轮：202606 真失败（stalled=true）
+//	第 6 轮    ：202604 第一次被延后（lock-timeout，rounds=1）
+//
+// 会让停摆位**翻回 false**，而 202606 的失败一轮都没停过。停摆是"保留策略有没有在
+// 推进"，只要**还有**一个月卡在阈值之上，策略就没有在推进。
+//
+// 阈值按原因分流（与旧口径逐字一致，只把"取最早那条"换成"扫全部"）：
+//
+//	真失败类 —— 逾期时长 ≥ usageReclaimStallAfter（保留期纯函数，跨重启可判）；
+//	延后类   —— 该月连续受阻轮数 ≥ usageReclaimStallRounds（单次锁竞争恒为 1 轮）。
+func usageReclaimStalledFor(all []usageReclaimBlocked, rounds map[string]int64,
+	monthAge func(string) (int64, bool)) bool {
+	for _, b := range all {
+		if b.Reason == usageReclaimBlockedFailed {
+			if age, ok := monthAge(b.Month); ok &&
+				time.Duration(age)*time.Second >= usageReclaimStallAfter {
+				return true
+			}
+			continue
+		}
+		if rounds[b.Month] >= usageReclaimStallRounds {
+			return true
+		}
+	}
+	return false
 }
 
 // needsManualMonthsInRound 收集本轮"按设计不回收、需人工处置"的月关系

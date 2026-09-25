@@ -22,18 +22,42 @@ interface LockRow {
  */
 export function CapabilityLockPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [locks, setLocks] = useState<LockRow[]>([])
+  // 写面闸门（第十二轮规则 1「成功才解锁」，审计 R13-F F-13）：`locksLoaded` 只在
+  // **成功**分支置 true。读失败时清单必须回到「未知」，不能留成「上一份」——
+  // 否则用户会把服务端早已解除（或本次根本没读到）的锁定当成当前清单，
+  // 点「解除」真的会发出 `DELETE …/capability-locks/skill/<旧行>`。
+  const [locksLoaded, setLocksLoaded] = useState(false)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [kind, setKind] = useState<'skill' | 'agent'>('skill')
   const [name, setName] = useState('')
   const [reason, setReason] = useState('')
 
+  // 渲染期归零（第十二轮规则 2，同族收口）：`useEffect` 在绘制**之后**才跑，会留下
+  // 一帧「上一次打开的锁定行 + 可点的解除」。这里在 `open` false→true 的当帧同步清空
+  // （React 认可的「props 变化时调整 state」写法：条件成立才 setState，不会死循环）。
+  const [stateOpen, setStateOpen] = useState(open)
+  if (stateOpen !== open) {
+    setStateOpen(open)
+    if (open) {
+      setLocks([])
+      setLocksLoaded(false)
+      setErr('')
+    }
+  }
+
   const load = useCallback(async () => {
     try {
       const data = await request<{ locks: LockRow[] }>(`${ADMIN_API}/capability-locks`)
       setLocks(data.locks ?? [])
       setErr('')
-    } catch (e) { setErr((e as Error).message) }
+      setLocksLoaded(true)
+    } catch (e) {
+      setErr((e as Error).message)
+      // 失败分支：清空 + 降闸门（两个动作一起做，缺一条就会留下可点的旧行）。
+      setLocks([])
+      setLocksLoaded(false)
+    }
   }, [])
   useEffect(() => { if (open) void load() }, [open, load])
 
@@ -47,6 +71,8 @@ export function CapabilityLockPanel({ open, onClose }: { open: boolean; onClose:
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
   const remove = async (l: LockRow) => {
+    // 闸门（与列表渲染同一个 `locksLoaded`）：清单没读到就不允许按「当前清单」处置。
+    if (!locksLoaded || busy) return
     if (!window.confirm(`解除「${l.name}」的锁定?解除后员工可再次上传该名称。`)) return
     setBusy(true)
     try {
@@ -78,7 +104,14 @@ export function CapabilityLockPanel({ open, onClose }: { open: boolean; onClose:
             <Input className="w-72" placeholder="锁定理由(员工可见)" value={reason} onChange={(e) => { setReason(e.target.value) }} />
             <Button size="sm" disabled={busy || !name.trim()} onClick={() => { void add() }}>锁定</Button>
           </div>
-          {locks.length === 0
+          {!locksLoaded && (
+            // 「未知」不能装成「空」：读失败/在途时说「暂无锁定名称」等于替服务端下结论，
+            // 与 R3「写面闸门一律成功才解锁」同一条口径。
+            <p className="text-sm text-muted-foreground">
+              {err === '' ? '正在读取锁定清单…' : '锁定清单未加载成功：下方不显示任何行，请关闭后重试。'}
+            </p>
+          )}
+          {locksLoaded && (locks.length === 0
             ? <p className="text-sm text-muted-foreground">暂无锁定名称</p>
             : (
               <Table>
@@ -93,13 +126,13 @@ export function CapabilityLockPanel({ open, onClose }: { open: boolean; onClose:
                       <TableCell className="text-xs text-muted-foreground">{l.reason || '—'}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{l.locked_by || '—'}</TableCell>
                       <TableCell className="text-right">
-                        <Button size="sm" variant="ghost" disabled={busy} onClick={() => { void remove(l) }}>解除</Button>
+                        <Button size="sm" variant="ghost" disabled={busy || !locksLoaded} onClick={() => { void remove(l) }}>解除</Button>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
-            )}
+            ))}
         </div>
       </DialogContent>
     </Dialog>

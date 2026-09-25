@@ -44,13 +44,25 @@
  *     `scripts/check-install-integrity.mjs`（判据本体在 install 期不可被改写）+ 判据执行体
  *     按 HEAD 字节恢复，本脚本只负责把凭据从"流属性"抬成"步骤独占文件 + 一次性 nonce"。
  *
+ *   7. **平台锚的回显**（第十三轮 R13-D-01/C-04）：`--expect <key> <literal>` 要求凭据行里
+ *      恰好出现一次 `key=<literal>` —— 用于把「HEAD == `$GITHUB_SHA`」这个值钉进凭据
+ *      （`--expect github-sha "$GITHUB_SHA"`）。值是**runner 侧展开**的，不受步骤体影响。
+ *
+ * ## `--since` 已被移除（第十三轮 C-04，认账）
+ *
+ * 旧实现有一个可选参数 `--since`（毫秒下界）。它同时是"这个 stdout 捕获文件属于本步"这条
+ * 判据的**关闭开关**：给任一处调用加 `--since 1`（毫秒下界 1 ⇒ 恒真）就能把 mtime 绑定关掉，
+ * 而 `check-workflows` 的静态面只钉关键片段、看不见多出来的 argv（实测 `EXIT=0`）。
+ * 参数面越小越好 ⇒ 现在传 `--since` 一律**退出码 2**（"这个参数不受支持"），
+ * mtime 绑定固定取**独占目录自己的 mtime**，没有第二条件。
+ *
  * 用法：
  * ```bash
- * node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce "$nonce" \
+ * node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" \
  *   --status "$status" --pattern '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' \
- *   --min planned 1 --equal planned executed
+ *   --min planned 1 --equal planned executed --expect github-sha "$GITHUB_SHA"
  * ```
- * 退出码：0 = 通过；1 = 断言失败；2 = 用法/输入错误（读不出目录或文件）。
+ * 退出码：0 = 通过；1 = 断言失败；2 = 用法/输入错误（读不出目录或文件 / 参数不受支持）。
  */
 
 import { appendFileSync, lstatSync, readFileSync, statSync } from 'node:fs'
@@ -65,6 +77,19 @@ import { resolve } from 'node:path'
  * 一条 —— 否则 `--pattern '.'` 这种写法会把整个检查器变成恒真的空壳。
  */
 const CREDENTIAL_ANCHORS = ['VERDICT PASS', ': OK — ']
+
+/**
+ * 解析 `key=<取值>`（从凭据行里抽；取值不做数字解释）。
+ * @param line - 凭据行。
+ * @param key - 键名。
+ * @returns 取值；抽不到 ⇒ `null`。
+ */
+function literalOf(line, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const pattern = new RegExp(`(?:^|[\\s(（])${escaped}=([^\\s]+)`, 'u')
+  const match = pattern.exec(line)
+  return match === null ? null : match[1]
+}
 
 /**
  * 解析 `key=<数字>`（从凭据行里抽）。
@@ -84,7 +109,7 @@ function counterOf(line, key) {
  * @returns 退出码。
  */
 function main(argv) {
-  const options = { dir: null, nonce: null, 'nonce-file': null, status: null, pattern: null, since: null, mins: [], equals: [] }
+  const options = { dir: null, nonce: null, 'nonce-file': null, status: null, pattern: null, mins: [], equals: [], expects: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     const take = count => {
@@ -93,8 +118,18 @@ function main(argv) {
       index += count
       return values
     }
+    // `--since` 已被移除（第十三轮 C-04）：它是"stdout 捕获文件属于本步"那条 mtime 绑定的
+    // **关闭开关**（`--since 1` 恒真），而静态面只钉关键片段、看不见多出来的 argv。
+    // 参数面越小越好 ⇒ 传它就退出码 2（不受支持），mtime 绑定固定取独占目录自己的 mtime。
+    if (argument === '--since') {
+      process.stderr.write('check-verdict-credential: `--since` 不受支持（第十三轮 C-04 已移除该参数通道）：\n'
+        + '  它是"凭据文件属于本步"那条 mtime 绑定的关闭开关（`--since 1` 恒真 ⇒ 绑定失效），\n'
+        + '  而静态判据只钉步骤体的关键片段、看不见多出来的 argv。mtime 绑定现在固定取\n'
+        + '  **步骤独占目录**的 mtime，没有第二条件。\n')
+      return 2
+    }
     if (argument === '--dir' || argument === '--nonce' || argument === '--nonce-file' || argument === '--status'
-      || argument === '--pattern' || argument === '--since') {
+      || argument === '--pattern') {
       const values = take(1)
       if (values === null) {
         process.stderr.write(`check-verdict-credential: \`${argument}\` 需要一个取值\n`)
@@ -103,14 +138,15 @@ function main(argv) {
       options[argument.slice(2)] = values[0]
       continue
     }
-    if (argument === '--min' || argument === '--equal') {
+    if (argument === '--min' || argument === '--equal' || argument === '--expect') {
       const values = take(2)
       if (values === null) {
         process.stderr.write(`check-verdict-credential: \`${argument}\` 需要两个取值\n`)
         return 2
       }
       if (argument === '--min') options.mins.push(values)
-      else options.equals.push(values)
+      else if (argument === '--equal') options.equals.push(values)
+      else options.expects.push(values)
       continue
     }
     process.stderr.write(`check-verdict-credential: 未知参数 ${argument}\n`)
@@ -122,12 +158,10 @@ function main(argv) {
     return 1
   }
   for (const [key, value] of Object.entries(options)) {
-    if (key === 'mins' || key === 'equals') continue
+    if (key === 'mins' || key === 'equals' || key === 'expects') continue
     // `--nonce` 与 `--nonce-file` 二选一：步骤体更推荐后者（nonce 不进 argv / 不进日志）。
     if (key === 'nonce' && options['nonce-file'] !== null) continue
     if (key === 'nonce-file' && options.nonce !== null) continue
-    // `--since` 可选：缺省取**独占目录自己的 mtime**（它由步骤体在起手处创建）。
-    if (key === 'since') continue
     if (value === null) {
       process.stderr.write(`check-verdict-credential: 缺少 \`--${key}\`（凭据检查器的输入不完整 ⇒ 拒绝把"没得判"当成"通过"）\n`)
       return 2
@@ -193,12 +227,9 @@ function main(argv) {
   if (typeof process.getuid === 'function' && fileStats.uid !== process.getuid()) {
     return fail(`${stdoutPath} 的属主 uid=${fileStats.uid} 不是当前 euid=${process.getuid()}`)
   }
-  // `--since` 缺省时取**目录**的 mtime：目录是步骤体在起手处创建的，它天然就是"本步起点"。
-  const since = options.since === null ? dirStats.mtimeMs : Number(options.since)
-  if (!Number.isFinite(since)) {
-    process.stderr.write('check-verdict-credential: `--since` 必须是毫秒时间戳\n')
-    return 2
-  }
+  // mtime 绑定固定取**目录**的 mtime：目录是步骤体在起手处创建的，它天然就是"本步起点"。
+  // （第十三轮 C-04：`--since` 参数通道已删除 —— 它曾是这个绑定的关闭开关。）
+  const since = dirStats.mtimeMs
   {
     {
     // 2s 容差：容器/runner 上文件系统时间戳与 shell 取时的粒度不同，不放容差会偶发假红。
@@ -243,9 +274,25 @@ function main(argv) {
     if (a !== b) return fail(`凭据行的 \`${left}=${a}\` 与 \`${right}=${b}\` 不相等`)
   }
 
-  const summary = Object.entries(counters)
+  // ⑦ **平台锚的回显断言**（第十三轮 R13-D-01）：`--expect <key> <literal>`。
+  //    值由**调用点**（runner 侧展开的 `$GITHUB_SHA`）给出 —— 于是"判据自己写出的那个值"
+  //    与"runner 说的那个值"必须在凭据行里逐字相等。
+  const expected = {}
+  for (const [key, literal] of options.expects) {
+    const actual = literalOf(credential, key)
+    if (actual === null) return fail(`凭据行里抽不到 \`${key}=\`（--expect ${key} ${literal}）`)
+    if (actual !== literal) {
+      return fail(`凭据行的 \`${key}=${actual}\` 与期望值 \`${literal}\` 不相等\n`
+        + '      ⇒ 判据自己写出的平台锚值与 runner 说的那个值不一致（第十三轮 R13-D-01：'
+        + 'HEAD 与 $GITHUB_SHA 不等时判据会以退出码 2 收场，凭据根本打印不出来；'
+        + '这条断言挡住的是"凭据被别的进程补了一行/判据读的环境被改过"）')
+    }
+    expected[key] = actual
+  }
+
+  const summary = [...Object.entries(counters)
     .filter(([, value]) => value !== null)
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([key, value]) => `${key}=${value}`), ...Object.entries(expected).map(([key, value]) => `${key}=${value}`)]
     .join(' ')
   const line = `picoaide-verdict: PASS nonce=${options.nonce} status=0 lines=1${summary === '' ? '' : ` ${summary}`}`
   process.stdout.write(`${line}\n`)

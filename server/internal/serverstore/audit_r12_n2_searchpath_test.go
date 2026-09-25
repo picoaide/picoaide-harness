@@ -24,9 +24,10 @@ package serverstore
 //	A. 行为判据（真 PG + 真 shadow 树）：每一个族内入口的**动作都落在 public**、
 //	   shadow 一行不动；结算金额落 public 行、pending 行被真清理；写路径建的分区
 //	   也在 public；
-//	B. 机械守卫：5 个族内文件里**每一个**触碰族内关系 SQL 的函数都必须在
-//	   `r12n2SearchPathInventory` 里登记并声明它怎么钉 —— 新增函数不登记即红，
-//	   "第 N 个漏点"从此不可能静默出现。
+//	B. 机械守卫（R13-GE 扩面）：包内**全部**非测试源文件里**每一个**触碰族内关系
+//	   SQL 的函数都必须在 `r13geSearchPathInventory` 里登记并声明它怎么钉 ——
+//	   新增函数/新增文件不登记即红，"第 N 个漏点"从此不可能静默出现；
+//	   **且没有「读面已认账」这一档**（读面与写面同等收口）。
 
 import (
 	"database/sql"
@@ -34,6 +35,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -78,12 +80,19 @@ func r12n2InstallShadow(t *testing.T, db *sql.DB) *sql.DB {
 // 裸 `sql.Open("pgx")` 不支持 `?` 占位符 ⇒ 每条语句 42601 假失败）。
 func r12n2PoolWithShadow(t *testing.T, db *sql.DB) *sql.DB {
 	t.Helper()
+	return r12n2PoolWithShadowNamed(t, db, r12n2ShadowSchema)
+}
+
+// r12n2PoolWithShadowNamed 是参数化 schema 的形态（R13-GE 的读面判据用自己那株
+// shadow，避免与 r12n2 的用例互相 DROP）。
+func r12n2PoolWithShadowNamed(t *testing.T, db *sql.DB, schema string) *sql.DB {
+	t.Helper()
 	u, err := url.Parse(r10f4DSNFor(r10gCurDB(t, db)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	q := u.Query()
-	q.Set("options", "-csearch_path="+r12n2ShadowSchema+",public")
+	q.Set("options", "-csearch_path="+schema+",public")
 	u.RawQuery = q.Encode()
 	side, err := openPG(u.String())
 	if err != nil {
@@ -97,8 +106,8 @@ func r12n2PoolWithShadow(t *testing.T, db *sql.DB) *sql.DB {
 	if err := side.QueryRow("SHOW search_path").Scan(&sp); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(sp, r12n2ShadowSchema) {
-		t.Fatalf("旁路池 search_path=%q，第一段必须是 %s（夹具无效）", sp, r12n2ShadowSchema)
+	if !strings.HasPrefix(sp, schema) {
+		t.Fatalf("旁路池 search_path=%q，第一段必须是 %s（夹具无效）", sp, schema)
 	}
 	t.Logf("旁路池 search_path=%q", sp)
 	return side
@@ -291,172 +300,324 @@ func r12n2UserBalance(t *testing.T, db *sql.DB, schema string, uid int64) float6
 // ---------------------------------------------------------------------------
 // B. 机械守卫：族内函数清单
 // ---------------------------------------------------------------------------
-
-// r12n2SearchPathFile 是被守卫的族内文件（改动面）。
-var r12n2SearchPathFiles = []string{
-	"usage.go", "usage_ledger.go", "usage_retention_status.go", "partitions.go", "balance.go",
+// r13geSearchPathFiles 是被守卫的**文件面**：包内全部非测试 Go 源文件。
+//
+// R13-GE（V2-2 读面收口）：R12-N2 的守卫把扫描面硬编码成 5 个文件
+// （usage.go / usage_ledger.go / usage_retention_status.go / partitions.go /
+// balance.go），于是 `gateway.go` / `settings.go` / `gateway_files.go` /
+// `requests.go` / `usage_provider.go` / `wasm_app_opens*.go` 里的族内 SQL
+// **连登记都没有** —— 定价读 `ModelPricesForProvider`（把 shadow 价目算进
+// public 行）就是这么漏掉的。现在改成"动态枚举包内全部非测试源文件"：
+// **新增文件自动进入判据面**，不再需要有人记得往清单里加名字。
+func r13geSearchPathFiles(t *testing.T) []string {
+	t.Helper()
+	all, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("枚举包内 .go: %v", err)
+	}
+	var out []string
+	for _, f := range all {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	if len(out) < 20 {
+		t.Fatalf("只枚举到 %d 个非测试源文件（守卫失效，不能静默通过）", len(out))
+	}
+	return out
 }
 
-// r12n2PinMode 是"这个函数的 SQL 怎么与判据看同一个对象"的封闭取值。
-type r12n2PinMode string
+// r13gePinMode 是"这个函数的族内 SQL 怎么与判据看同一个对象"的**封闭取值**。
+type r13gePinMode string
 
 const (
-	// r12n2Pinned：函数自己（或它直接调用的唯一实现）钉了 search_path。
-	r12n2Pinned r12n2PinMode = "pinned"
-	// r12n2ViaCaller：函数只接受 `*sql.Tx`（或从调用方拿事务），由**调用者**钉；
-	// 每一个这样的函数都必须在 r12n2ViaCallerOwners 里点名谁钉了它。
-	r12n2ViaCaller r12n2PinMode = "via-caller"
-	// r12n2CatalogOnly：只读 `pg_catalog`（`pg_class` / `pg_namespace` / `pg_inherits`…）
+	// r13gePinned：函数自己（或它直接调用的唯一实现）钉了 search_path。
+	r13gePinned r13gePinMode = "pinned"
+	// r13geViaCaller：函数**开不出自己的事务**（形参里有 `*sql.Tx` / `rowQuerier` /
+	// `usageQuerier` / `usageExecer` / `exec func(...)`），由调用方钉；每一个这样的
+	// 函数都必须在 r13geViaCallerOwners 里点名谁钉了它。
+	r13geViaCaller r13gePinMode = "via-caller"
+	// r13geCatalogOnly：只读 `pg_catalog`（`pg_class` / `pg_namespace` / `pg_inherits`…）
 	// 与 `to_regclass('public.'||…)`：pg_catalog 永远隐式排在 search_path 最前，
 	// shadow schema 顶不掉它；判据本身硬钉 `public.`，没有"动作面"。
-	r12n2CatalogOnly r12n2PinMode = "catalog-only"
-	// r12n2ReadAcknowledged：报表/管理端**读**面（R12-A §3.2 第 5 行，已认账：
-	// 读面仍按 search_path，属独立课题，不在本次"计量—结算—清理"写入链路的改动面内）。
-	r12n2ReadAcknowledged r12n2PinMode = "read-acknowledged"
+	r13geCatalogOnly r13gePinMode = "catalog-only"
 )
 
-// r12n2SearchPathInventory 是"触碰族内关系 SQL 的函数"的**完整清单**（R12-N2 P1-02）。
+// r13geSearchPathInventory 是"触碰族内关系 SQL 的函数"的**完整清单**。
 //
-// 守卫判据（TestAuditR12N2SearchPathInventoryIsComplete）：族内 5 个文件里**每一个**
-// 含族内关系 SQL（非注释）的函数都必须在这里登记；登记了却不存在、或模式与实现不符，
-// 同样红。⇒ 新增一个未钉的入口不可能静默出现（这正是"只钉了 3 个调用点"的防线）。
-var r12n2SearchPathInventory = map[string]r12n2PinMode{
-	// —— 计量写入 / 结算 / 绑定 / 删除 / 清理（本次修复面）——
-	"recordUsageKindAtCached":      r12n2Pinned, // 事务内 pinUsageSearchPath
-	"updateUsageTokensAtCached":    r12n2Pinned, // 读+写同事务、同一 pin
-	"SetUsageProvider":             r12n2Pinned, // withUsageSearchPath
-	"DeleteUsage":                  r12n2Pinned, // withUsageSearchPath
-	"CleanupPendingUsage":          r12n2Pinned, // withUsageSearchPath
-	"rebuildUsageLedgerRowsOnPool": r12n2Pinned, // pinUsageSearchPath
-	"rebuildUsageLedgerRowsFrom":   r12n2ViaCaller,
-	"ledgerDetailSource":           r12n2ViaCaller, // 只拼 SQL 文本，由调用方的事务执行
-	"applyUsageRetentionBudget":    r12n2Pinned,
-	"pinUsageSearchPath":           r12n2Pinned,
-	"withUsageSearchPath":          r12n2Pinned,
-	"runPartitionDDLAttempt":       r12n2Pinned,
-	// —— 写路径的分区探测 / 覆盖扫描（判据硬钉 public.，动作是 CREATE/ATTACH）——
-	"probeUsagePartitionBudget": r12n2Pinned,
-	"usageTreeDescendants":      r12n2Pinned,
-	// —— 余额链路（与结算同族，本次一并收口）——
-	"AdjustUserBalance":   r12n2Pinned,
-	"SetUserBalance":      r12n2Pinned,
-	"GrantMonthlyBalance": r12n2Pinned,
-	// —— 由调用方事务钉住的余额辅助（每个都必须有 owner）——
-	"settleUsageCostTx":               r12n2ViaCaller, // recordUsageKindAtCached / updateUsageTokensAtCached / 结算段
-	"adjustBalanceTx":                 r12n2ViaCaller, // AdjustUserBalance / SetUserBalance / grantBatchTx
-	"insertLedgerTx":                  r12n2ViaCaller, // settleUsageCostTx / adjustBalanceTx / grantBatchTx
-	"grantBatchTx":                    r12n2ViaCaller, // GrantMonthlyBalance
-	"moveRowsIntoUsage":               r12n2ViaCaller, // 清理路径的临界区事务（applyUsageRetentionBudget）
-	"CleanupUsageRetention":           r12n2ViaCaller, // 主循环：每个事务都经 applyUsageRetentionBudget
-	"reclaimUsagePartitionAtomically": r12n2ViaCaller,
-
-	// —— 只读 `pg_catalog` / `to_regclass('public.'||…)` 的判据（shadow schema 顶不掉
-	// pg_catalog —— 它永远隐式排在 search_path 最前；判据本身硬钉 public.，没有动作面）——
-	"usageMonthHasDetail":               r12n2CatalogOnly,
-	"scanUsageMonthTables":              r12n2CatalogOnly,
-	"usagePartitionRoot":                r12n2CatalogOnly,
-	"usageRelationIsDirectChildOfUsage": r12n2CatalogOnly,
-	"guardErr":                          r12n2CatalogOnly,
-	"partitionAncestorBounds":           r12n2CatalogOnly,
-	"usageReclaimEstimatedRows":         r12n2CatalogOnly,
-
-	// —— 报表/管理端**读**面（R12-A §3.2 第 5 行，审计已认账：它们仍是"判据硬钉
-	// public、动作走 search_path"，属独立课题）。登记在这里是为了让它们**可见**：
-	// 一旦决定收口，这里就是完整的待改清单（守卫会强迫新增读面也登记）。
-	"UserMonthlyUsage":         r12n2ReadAcknowledged,
-	"UserMonthlyUsageBatch":    r12n2ReadAcknowledged,
-	"UserMonthlyCost":          r12n2ReadAcknowledged,
-	"UserMonthlyCostBatch":     r12n2ReadAcknowledged,
-	"UserDayUsageCost":         r12n2ReadAcknowledged,
-	"UserTotalUsageCost":       r12n2ReadAcknowledged,
-	"UsageAggregate":           r12n2ReadAcknowledged,
-	"UsageAggregateWithLedger": r12n2ReadAcknowledged,
-	"UsageAggregateFromLedger": r12n2ReadAcknowledged,
-	"ledgerMonthHasRows":       r12n2ReadAcknowledged,
-	"ledgerWindowEmpty":        r12n2ReadAcknowledged,
-	"BalanceLedgerPage":        r12n2ReadAcknowledged,
-	"BalanceLedgerSum":         r12n2ReadAcknowledged,
-	"GetBalanceSummary":        r12n2ReadAcknowledged,
-	"GetGrantStatus":           r12n2ReadAcknowledged,
+// 族内关系（family）= `usage` / `usage_daily` / `usage_monthly` / `models` /
+// `gateway_providers` / `gateway_files` / `balance_ledger` / `settings`：
+// 这些关系上"读错/写错对象"的共同后果是**静默的错数字或静默丢账**——金额、
+// 价目、计量行、余额流水、回收台账、峰谷/保留期配置——而所有健康出口报绿。
+// （`users` / `user_groups` / `api_tokens` / `admin_sessions` 不在此列：它们的
+// 遮蔽读会**可见地**失败（登录/列表/鉴权），不产生静默错金额。）
+//
+// **本清单没有"已认账 / read-acknowledged"这一档**（R13-GE 删除了它）：
+// 读面与写面同等收口。新增一个"判据硬钉 public、动作走 search_path"的入口
+// **不可能静默出现** —— 它要么让守卫变红，要么必须在这里登记并被分类。
+var r13geSearchPathInventory = map[string]r13gePinMode{
+	// —— 已钉（池上入口经唯一实现：newUsageReadConn / withUsageSearchPathRead /
+	//    withUsageSearchPath / usageWriteTx / pinUsageSearchPath / applyUsageRetentionBudget）——
+	"BalanceLedgerPage":                    r13gePinned, // balance.go
+	"BalanceLedgerSum":                     r13gePinned, // balance.go
+	"ClaimExpiredGatewayFile":              r13gePinned, // gateway_files.go
+	"CleanupPendingUsage":                  r13gePinned, // usage.go
+	"DeleteGatewayFileRow":                 r13gePinned, // gateway_files.go
+	"DeleteGatewayProvider":                r13gePinned, // gateway.go
+	"DeleteSetting":                        r13gePinned, // settings.go
+	"DeleteUsage":                          r13gePinned, // usage.go
+	"DeleteUser":                           r13gePinned, // users.go
+	"FinishReapedGatewayFile":              r13gePinned, // gateway_files.go
+	"GatewayFileOwner":                     r13gePinned, // gateway_files.go
+	"GatewayFileReapBacklogStats":          r13gePinned, // gateway_files.go
+	"GatewayFileReapClaimHeld":             r13gePinned, // gateway_files.go
+	"GatewayFileRowExists":                 r13gePinned, // gateway_files.go
+	"GatewayFileSummary":                   r13gePinned, // gateway_files.go
+	"GatewayFileTotals":                    r13gePinned, // gateway_files.go
+	"GatewayFilesOwnedBy":                  r13gePinned, // gateway_files.go
+	"GetAllSettings":                       r13gePinned, // settings.go
+	"GetGatewayProvider":                   r13gePinned, // gateway.go
+	"GetModel":                             r13gePinned, // gateway.go
+	"ListAdminModels":                      r13gePinned, // gateway.go
+	"ListExpiredGatewayFiles":              r13gePinned, // gateway_files.go
+	"ListGatewayFileIDs":                   r13gePinned, // gateway_files.go
+	"ListGatewayFiles":                     r13gePinned, // gateway_files.go
+	"ListGatewayFilesForPurge":             r13gePinned, // gateway_files.go
+	"ListGatewayProviders":                 r13gePinned, // gateway.go
+	"ListUsageRequests":                    r13gePinned, // requests.go
+	"ModelHasUsage":                        r13gePinned, // gateway.go
+	"ModelProviderMap":                     r13gePinned, // usage_provider.go
+	"NormalizeLegacyPermanentGatewayFiles": r13gePinned, // gateway_files.go
+	"PurgeExpiredGatewayFiles":             r13gePinned, // gateway_files.go
+	"QueryWasmAppAIUsage":                  r13gePinned, // wasm_app_opens_summary.go
+	"RecordGatewayFileSize":                r13gePinned, // gateway_files.go
+	"ReleaseReapClaim":                     r13gePinned, // gateway_files.go
+	"RemoveMissingProviderModels":          r13gePinned, // gateway.go
+	"SetSetting":                           r13gePinned, // settings.go
+	"SetUsageAppID":                        r13gePinned, // wasm_app_opens.go
+	"SetUsageProvider":                     r13gePinned, // usage.go
+	"SyncProviderModel":                    r13gePinned, // gateway.go
+	"UpdateModel":                          r13gePinned, // gateway.go
+	"UsageAggregate":                       r13gePinned, // usage.go
+	"UsageAggregateFromLedger":             r13gePinned, // usage_ledger.go
+	"UserDayUsageCost":                     r13gePinned, // usage.go
+	"UserMonthlyCost":                      r13gePinned, // usage.go
+	"UserMonthlyCostBatch":                 r13gePinned, // usage.go
+	"UserMonthlyUsage":                     r13gePinned, // usage.go
+	"UserMonthlyUsageBatch":                r13gePinned, // usage.go
+	"UserTotalUsageCost":                   r13gePinned, // usage.go
+	"gatewayFileReapClaimActive":           r13gePinned, // gateway_files.go
+	"ledgerMonthHasRows":                   r13gePinned, // usage_ledger.go
+	"ledgerWindowEmpty":                    r13gePinned, // usage_ledger.go
+	"moveRowsIntoUsage":                    r13gePinned, // usage_ledger.go
+	"probeUsagePartitionBudget":            r13gePinned, // partitions.go
+	"reclaimUsagePartitionAtomically":      r13gePinned, // usage_ledger.go
+	"recordUsageKindAtCached":              r13gePinned, // usage.go
+	"updateUsageTokensAtCached":            r13gePinned, // usage.go
+	"usageMonthHasDetail":                  r13gePinned, // usage_ledger.go
+	"usageTreeDescendants":                 r13gePinned, // partitions.go
+	// —— 由调用方事务钉住（每个都必须在 r13geViaCallerOwners 里有点名）——
+	"AddExcludedModelTx":                r13geViaCaller, // gateway.go
+	"DeleteModelTx":                     r13geViaCaller, // gateway.go
+	"GetGatewayProviderTx":              r13geViaCaller, // gateway.go
+	"GetModelTx":                        r13geViaCaller, // gateway.go
+	"SetSettingTx":                      r13geViaCaller, // settings.go
+	"SyncProviderModelsTx":              r13geViaCaller, // gateway.go
+	"UpdateGatewayProviderTx":           r13geViaCaller, // gateway.go
+	"addModel":                          r13geViaCaller, // gateway.go
+	"addProviderModelName":              r13geViaCaller, // gateway.go
+	"clearDefaultModelIf":               r13geViaCaller, // gateway.go
+	"excludedModelsTx":                  r13geViaCaller, // gateway.go
+	"getSettingQ":                       r13geViaCaller, // settings.go
+	"grantBatchTx":                      r13geViaCaller, // balance.go
+	"guardErr":                          r13geViaCaller, // usage_ledger.go
+	"insertLedgerTx":                    r13geViaCaller, // balance.go
+	"insertProvider":                    r13geViaCaller, // gateway.go
+	"ledgerDetailSource":                r13geViaCaller, // usage_ledger.go
+	"modelCachePriceForProviderQ":       r13geViaCaller, // gateway.go
+	"modelCachePriceQ":                  r13geViaCaller, // gateway.go
+	"modelDefaultParamsQ":               r13geViaCaller, // gateway.go
+	"modelPricesForProviderQ":           r13geViaCaller, // gateway.go
+	"modelPricesQ":                      r13geViaCaller, // gateway.go
+	"partitionAncestorBounds":           r13geViaCaller, // partitions.go
+	"providerModelRowsTx":               r13geViaCaller, // gateway.go
+	"rebuildUsageLedgerRowsFrom":        r13geViaCaller, // usage_ledger.go
+	"removeProviderModelName":           r13geViaCaller, // gateway.go
+	"settleUsageCostTx":                 r13geViaCaller, // balance.go
+	"usagePartitionRoot":                r13geViaCaller, // usage_ledger.go
+	"usageRelationIsDirectChildOfUsage": r13geViaCaller, // usage_ledger.go
+	// —— 只读 pg_catalog / to_regclass('public.'||…)（shadow 顶不掉，无动作面）——
+	"scanUsageMonthTables":      r13geCatalogOnly, // usage_ledger.go
+	"usageReclaimEstimatedRows": r13geCatalogOnly, // usage_ledger.go
 }
 
-// r12n2ViaCallerOwners 给每一个 via-caller 登记"谁钉的"，避免"以为有人钉"。
-var r12n2ViaCallerOwners = map[string]string{
-	"rebuildUsageLedgerRowsFrom":      "rebuildUsageLedgerRowsOnPool / applyUsageRetentionBudget 的已钉事务",
-	"ledgerDetailSource":              "同上（只返回 SQL 文本）",
-	"settleUsageCostTx":               "recordUsageKindAtCached / updateUsageTokensAtCached / settleUsageReclaim（均已在事务首句钉）",
-	"adjustBalanceTx":                 "AdjustUserBalance / SetUserBalance / grantBatchTx",
-	"insertLedgerTx":                  "settleUsageCostTx / adjustBalanceTx / grantBatchTx",
-	"grantBatchTx":                    "GrantMonthlyBalance（事务首句钉）",
-	"moveRowsIntoUsage":               "applyUsageRetentionBudget 的已钉事务",
-	"CleanupUsageRetention":           "applyUsageRetentionBudget / withUsageLockBudget / withUsageSettleBudget（每个事务都钉）",
-	"reclaimUsagePartitionAtomically": "setUsageRetentionStatementBudget（= applyUsageRetentionBudget）",
+// r13geViaCallerOwners 给每一个 via-caller 登记"谁钉的"，避免"以为有人钉"。
+var r13geViaCallerOwners = map[string]string{
+	// 事务版（同一个函数的 Tx 形态）：由它们的池上包装钉。
+	"GetGatewayProviderTx":    "GetGatewayProvider（已钉只读事务）",
+	"GetModelTx":              "GetModel（已钉只读事务）",
+	"SetSettingTx":            "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",
+	"DeleteModelTx":           "DeleteModel（usageWriteTx）/ llmgateway admin 的显式事务",
+	"SyncProviderModelsTx":    "SyncProviderModel 的调用方事务（llmgateway admin，已钉）",
+	"UpdateGatewayProviderTx": "llmgateway admin 的 provider 更新事务（usageWriteTx 同源）",
+	"AddExcludedModelTx":      "llmgateway admin 的排除名单事务",
+	"excludedModelsTx":        "AddExcludedModelTx / removeProviderModelName 的调用方事务",
+	"providerModelRowsTx":     "RemoveMissingProviderModels / SyncProviderModelsTx 的已钉事务",
+	"addProviderModelName":    "UpdateModel / SyncProviderModelsTx 的已钉事务",
+	"removeProviderModelName": "DeleteModelTx / UpdateModel 的已钉事务",
+	"clearDefaultModelIf":     "UpdateModel / DeleteModelTx 的已钉事务",
+	"addModel":                "AddModel / AddModelTx（后者由调用方钉）",
+	"insertProvider":          "AddGatewayProvider（withUsageSearchPath）/ AddGatewayProviderTx",
+	"insertLedgerTx":          "settleUsageCostTx / adjustBalanceTx / grantBatchTx（均已在事务首句钉）",
+	"grantBatchTx":            "GrantMonthlyBalance（usageWriteTx 族）",
+	"settleUsageCostTx":       "recordUsageKindAtCached / updateUsageTokensAtCached / 结算段（均已钉）",
+	// 语句实现（唯一一份 SQL，接收已钉事务的语句入口 rowQuerier）：
+	"modelPricesQ":                "newUsageReadConn 的两个构造点（ModelPrices / loadModelPriceInputs）",
+	"modelPricesForProviderQ":     "ModelPricesForProvider / loadModelPriceInputs（已钉只读事务）",
+	"modelCachePriceQ":            "ModelCachePrice / loadModelPriceInputs（已钉只读事务）",
+	"modelCachePriceForProviderQ": "ModelCachePriceForProvider / loadModelPriceInputs（已钉只读事务）",
+	"modelDefaultParamsQ":         "ModelDefaultParams（已钉只读事务）",
+	"getSettingQ":                 "GetSetting / loadPeakWindowsQ（已钉只读事务）",
+	// 只拼 SQL 文本 / catalog 判据（没有 *sql.DB，语句由调用方的已钉事务执行）：
+	"ledgerDetailSource":                "rebuildUsageLedgerRowsFrom（调用方的已钉事务）",
+	"rebuildUsageLedgerRowsFrom":        "rebuildUsageLedgerRowsOnPool / applyUsageRetentionBudget 的已钉事务",
+	"usagePartitionRoot":                "scanUsageMonthTables / probeUsagePartitionBudget 等（catalog 判据）",
+	"usageRelationIsDirectChildOfUsage": "reclaimUsagePartitionAtomically / dropDetachedOrphanAtomically 的已钉事务",
+	"partitionAncestorBounds":           "usagePartitionRoot / probeUsagePartitionBudget 的 catalog 判据",
+	"guardErr":                          "usageQuerier 形态：全部调用点都在已钉事务或 catalog 判据里",
 }
 
-// TestAuditR12N2SearchPathInventoryIsComplete 是守卫判据 B。
+// r13geFamilyRelRe 匹配"对族内关系的**动作**"（未限定名或 public. 限定都算；
+// 注释先被剥掉）。刻意**不含** `to_regclass(` —— 它是"限定名构造器"
+// （`to_regclass('public.usage')`），单独由 r13geToRegclassRe 断言必须带 `public.` 前缀。
+var r13geFamilyRelRe = regexp.MustCompile(
+	`\b(?:FROM|INTO|UPDATE|JOIN|TABLE|PARTITION\s+OF|DELETE\s+FROM)\s*['"]?\s*(?:public\.|pg_catalog\.|ONLY\s+)?["']?(?:usage_daily|usage_monthly|usage|balance_ledger|gateway_providers|gateway_files|models|settings)\b`)
+
+// r13geToRegclassRe 抓 `to_regclass(<实参>`，用于断言实参必须硬钉 `public.`。
+var r13geToRegclassRe = regexp.MustCompile(`to_regclass\(\s*([^)]*)`)
+
+// r13geCatalogRelRe 抓只读 catalog 的函数。
+var r13geCatalogRelRe = regexp.MustCompile(`\b(?:pg_class|pg_namespace|pg_inherits|pg_partition_tree|pg_get_expr|pg_partition_root)\b`)
+
+// r13gePinMarkers 是"钉住 search_path"的全部合法记号（唯一实现的入口集合）。
+var r13gePinMarkers = []string{
+	"pinUsageSearchPath", "withUsageSearchPath", "withUsageSearchPathRead",
+	"newUsageReadConn", "newUsageReadConnContext", "usageWriteTx",
+	"applyUsageRetentionBudget", "withUsageLockBudget", "setUsageRetentionStatementBudget",
+	"withUsageSettleBudget",
+}
+
+// r13geQuerierMarkers：形参里出现这些记号 ⇒ 函数开不出自己的事务（由调用方钉）。
+var r13geQuerierMarkers = []string{"*sql.Tx", "rowQuerier", "usageQuerier", "usageExecer", "func(query string"}
+
+// TestAuditR13GESearchPathInventoryIsComplete 是守卫判据（R13-GE · V2-2）。
 //
-// 实现口径：把族内 5 个文件的函数体切出来（gofmt 之后的 Go 源码里函数体结束于列 0
-// 的 `}`），**去掉注释**后匹配"族内关系的 SQL 上下文"，与清单逐条对拍。
-func TestAuditR12N2SearchPathInventoryIsComplete(t *testing.T) {
-	found := map[string]r12n2PinMode{}
-	for _, file := range r12n2SearchPathFiles {
+// 与 R12-N2 版的三点差别：①文件面 = 包内全部非测试源文件（动态枚举）；
+// ②分类改为**按签名**判"能不能开自己的事务"（不再靠 `*sql.Tx` 字符串出现在函数体里）；
+// ③**删除了 read-acknowledged 档** —— 读面必须与写面同样钉住。
+func TestAuditR13GESearchPathInventoryIsComplete(t *testing.T) {
+	found := map[string]r13gePinMode{}
+	files := r13geSearchPathFiles(t)
+	for _, file := range files {
 		raw, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatalf("读 %s: %v", file, err)
 		}
-		for name, body := range r12n2FuncBodies(t, file, string(raw)) {
-			mode, ok := r12n2ClassifyFamilySQL(body)
+		for name, body := range r13geFuncBodies(t, file, string(raw)) {
+			mode, ok := r13geClassifyFamilySQL(body)
 			if !ok {
 				continue
 			}
 			found[name] = mode
 		}
 	}
+	if n := len(r13geFuncBodiesAll); n < r13geMinFuncBodies {
+		t.Fatalf("包内 %d 个源文件里只切出 %d 个函数（下限 %d）—— 守卫失效，不能静默通过",
+			len(files), n, r13geMinFuncBodies)
+	}
 	// ① 覆盖：族内 SQL 出现在清单之外的函数 ⇒ 新漏点
 	var missing []string
 	for name := range found {
-		if _, ok := r12n2SearchPathInventory[name]; !ok {
+		if _, ok := r13geSearchPathInventory[name]; !ok {
 			missing = append(missing, name)
 		}
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		t.Errorf("这些函数触碰了族内关系 SQL 但**没有登记**在 r12n2SearchPathInventory 里：%v\n"+
-			"⇒ 新增一个「判据硬钉 public、动作走 search_path」的入口不会被任何人发现（R12-A P1-02 的形态）。"+
-			"请登记它并声明 pin 模式（pinned / via-caller / catalog-only / read-acknowledged）", missing)
+		t.Errorf("这些函数触碰了族内关系 SQL 但**没有登记**在 r13geSearchPathInventory 里：%v\n"+
+			"⇒ 新增一个「判据硬钉 public、动作走 search_path」的入口不会被任何人发现"+
+			"（R12-A P1-02 写面 / R13 V2-2 读面都是这个形态）。请登记它并声明 pin 模式"+
+			"（pinned / via-caller / catalog-only）；**没有「读面已认账」这一档**。", missing)
 	}
 	// ② 反向：清单里的 pinned 项必须真的钉了（防止"登记了却没钉"）
-	for name, mode := range r12n2SearchPathInventory {
-		body, ok := r12n2FuncBodiesAll[name]
+	for name, mode := range r13geSearchPathInventory {
+		body, ok := r13geFuncBodiesAll[name]
 		if !ok {
-			t.Errorf("清单登记了 %q，但族内 5 个文件里找不到这个函数（清单陈旧）", name)
+			t.Errorf("清单登记了 %q，但包内源文件里找不到这个函数（清单陈旧）", name)
 			continue
 		}
-		pinned := strings.Contains(body, "pinUsageSearchPath") || strings.Contains(body, "withUsageSearchPath") ||
-			strings.Contains(body, "applyUsageRetentionBudget") || strings.Contains(body, "withUsageLockBudget") ||
-			strings.Contains(body, "setUsageRetentionStatementBudget") || strings.Contains(body, "withUsageSettleBudget")
+		clean := r13geStripComments(body)
 		switch mode {
-		case r12n2Pinned:
-			if !pinned {
-				t.Errorf("%q 被登记为 pinned，但函数体里既没有 pinUsageSearchPath/withUsageSearchPath，"+
-					"也没有走 applyUsageRetentionBudget 家族 —— 登记与实现不符", name)
+		case r13gePinned:
+			if !r13geHasPinMarker(clean) {
+				t.Errorf("%q 被登记为 pinned，但函数体里没有任何 pin 记号（%v）—— 登记与实现不符",
+					name, r13gePinMarkers)
 			}
-		case r12n2ViaCaller:
-			if _, ok := r12n2ViaCallerOwners[name]; !ok {
-				t.Errorf("%q 登记为 via-caller，但没有在 r12n2ViaCallerOwners 里点名谁钉了它", name)
+		case r13geViaCaller:
+			if _, ok := r13geViaCallerOwners[name]; !ok {
+				t.Errorf("%q 登记为 via-caller，但没有在 r13geViaCallerOwners 里点名谁钉了它", name)
+			}
+		case r13geCatalogOnly:
+			if r13geFamilyRelRe.MatchString(clean) {
+				t.Errorf("%q 登记为 catalog-only，但函数体里有对族内关系的**动作**（未限定名）—— "+
+					"catalog 判据不得顺带读写族内关系", name)
+			}
+		default:
+			t.Errorf("%q 的模式 %q 不在封闭集合 {pinned, via-caller, catalog-only} 里", name, mode)
+		}
+	}
+	// ③ 封闭性：不允许出现任何"认账但未收口"的档（R12-N2 的 read-acknowledged 已删除）
+	for name, mode := range r13geSearchPathInventory {
+		if mode != r13gePinned && mode != r13geViaCaller && mode != r13geCatalogOnly {
+			t.Errorf("清单条目 %q 的模式 %q 不合法：本清单只允许 pinned / via-caller / catalog-only"+
+				"（读面与写面同等收口，没有「已认账」这一档）", name, mode)
+		}
+	}
+	t.Logf("族内 SQL 函数共 %d 个，清单登记 %d 个（pinned=%d via-caller=%d catalog-only=%d）",
+		len(found), len(r13geSearchPathInventory), r13geCountMode(r13gePinned),
+		r13geCountMode(r13geViaCaller), r13geCountMode(r13geCatalogOnly))
+}
+
+// TestAuditR13GEToRegclassIsAlwaysPublicQualified 是配套的第二个机械判据：
+// 族内关系的动态名构造只允许 `to_regclass('public.'||…)` —— 未限定的
+// `to_regclass('usage')` 会按 search_path 解析（正是 shadow 场景），而它比
+// 裸 `FROM usage` 更隐蔽（catalog 函数看起来"没有动作面"）。
+func TestAuditR13GEToRegclassIsAlwaysPublicQualified(t *testing.T) {
+	for _, file := range r13geSearchPathFiles(t) {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("读 %s: %v", file, err)
+		}
+		for _, m := range r13geToRegclassRe.FindAllStringSubmatch(r13geStripComments(string(raw)), -1) {
+			arg := strings.TrimSpace(m[1])
+			// 只对"指向族内关系"的实参做要求；`to_regclass($1)` 这类变量形态在
+			// 本包不存在（若将来出现，会命中下面这条 fail-loud）。
+			if !strings.Contains(arg, "public.") {
+				t.Errorf("%s：to_regclass(%s) 没有硬钉 public. 前缀 —— shadow schema 在场时"+
+					"它会解析到别的库，而调用点看起来只是「查一个 catalog 事实」", file, arg)
 			}
 		}
 	}
-	t.Logf("族内 SQL 函数共 %d 个，清单登记 %d 个（pinned=%d via-caller=%d catalog-only=%d read-acknowledged=%d）",
-		len(found), len(r12n2SearchPathInventory), r12n2CountMode(r12n2Pinned), r12n2CountMode(r12n2ViaCaller),
-		r12n2CountMode(r12n2CatalogOnly), r12n2CountMode(r12n2ReadAcknowledged))
 }
 
-// r12n2FuncBodiesAll 是所有函数体（不按类过滤），供反向判据用。
-var r12n2FuncBodiesAll = map[string]string{}
+// r13geFuncBodiesAll 是所有函数体（不按类过滤），供反向判据用。
+var r13geFuncBodiesAll = map[string]string{}
 
-// r12n2FuncBodies 把源码切成 `函数名 → 函数体`（gofmt 形态：函数体结束于列 0 的 `}`）。
-func r12n2FuncBodies(t *testing.T, file, src string) map[string]string {
+// r13geFuncBodies 把源码切成 `函数名 → 函数体`（gofmt 形态：函数体结束于列 0 的 `}`）。
+// 返回的 body **包含签名行**（分类要用签名判"能不能开自己的事务"）。
+func r13geFuncBodies(t *testing.T, file, src string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	re := regexp.MustCompile(`(?m)^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
@@ -470,49 +631,56 @@ func r12n2FuncBodies(t *testing.T, file, src string) map[string]string {
 		}
 		body := src[start:end]
 		out[name] = body
-		r12n2FuncBodiesAll[name] = body
+		r13geFuncBodiesAll[name] = body
 	}
-	if len(out) == 0 {
-		t.Fatalf("%s：一个函数都没切出来（守卫失效，不能静默通过）", file)
-	}
+	// 允许"只有包级变量、没有函数"的源文件（例如 errors.go）；但**整体**切不出
+	// 函数就是守卫失效 —— 用调用方的总数下限兜住（见下面的 r13geMinFuncBodies）。
 	return out
 }
 
-// 族内关系名（`public.` 限定与否都算）与它们的 SQL 上下文。
-var (
-	r12n2FamilyRelRe = regexp.MustCompile(
-		`\b(?:FROM|INTO|UPDATE|JOIN|TABLE|PARTITION\s+OF|DELETE\s+FROM|to_regclass\()\s*['"` + "`" + `(]?\s*(?:public\.|pg_catalog\.|ONLY\s+)?["']?(?:usage_daily|usage_monthly|usage|balance_ledger|users|models|user_groups)\b`)
-	r12n2CatalogRelRe = regexp.MustCompile(`\b(?:pg_class|pg_namespace|pg_inherits|pg_partition_tree|pg_get_expr|pg_partition_root)\b`)
-)
+// r13geMinFuncBodies 是"切函数"这一步的下限：包内函数总数低于它 ⇒ 守卫失效
+// （正则被改坏/文件被整体搬走），必须 fail-loud 而不是静默通过。
+const r13geMinFuncBodies = 600
 
-// r12n2ClassifyFamilySQL 判断函数体（**已去注释**）里有没有族内关系 SQL，并给出模式。
-func r12n2ClassifyFamilySQL(body string) (r12n2PinMode, bool) {
-	clean := r12n2StripComments(body)
-	if !r12n2FamilyRelRe.MatchString(clean) {
-		// 只看 catalog 的（判据硬钉 public.，没有动作面）也算"触碰"——
-		// 它们大多是 catalog-only，登记后由清单声明。
-		if !r12n2CatalogRelRe.MatchString(clean) {
-			return "", false
-		}
+// r13geClassifyFamilySQL 判断函数（**已去注释**）里有没有族内关系 SQL，并给出模式。
+func r13geClassifyFamilySQL(body string) (r13gePinMode, bool) {
+	clean := r13geStripComments(body)
+	fam := r13geFamilyRelRe.MatchString(clean)
+	cat := r13geCatalogRelRe.MatchString(clean)
+	if !fam && !cat {
+		return "", false
 	}
-	pinned := strings.Contains(clean, "pinUsageSearchPath") || strings.Contains(clean, "withUsageSearchPath") ||
-		strings.Contains(clean, "applyUsageRetentionBudget") || strings.Contains(clean, "withUsageLockBudget") ||
-		strings.Contains(clean, "setUsageRetentionStatementBudget") || strings.Contains(clean, "withUsageSettleBudget")
-	if pinned {
-		return r12n2Pinned, true
+	if r13geHasPinMarker(clean) {
+		return r13gePinned, true
 	}
-	if strings.Contains(clean, "*sql.Tx") {
-		return r12n2ViaCaller, true
+	// 开不出自己的事务 ⇒ 由调用方钉（签名判据，不看函数体）。
+	sig := clean
+	if i := strings.Index(clean, "{"); i >= 0 {
+		sig = clean[:i]
 	}
-	if !r12n2FamilyRelRe.MatchString(clean) {
-		return r12n2CatalogOnly, true
+	if !strings.Contains(sig, "*sql.DB") {
+		return r13geViaCaller, true
 	}
-	return r12n2ReadAcknowledged, true
+	if !fam {
+		return r13geCatalogOnly, true
+	}
+	// 有 *sql.DB、有族内关系动作、又没有 pin 记号 ⇒ 未收口（登记表里不该有它）。
+	return r13gePinned, true
 }
 
-// r12n2StripComments 去掉行注释与块注释（只用于"这段代码里有没有族内 SQL"的判据：
+// r13geHasPinMarker 报告这段代码是否调用了任一 pin 唯一实现。
+func r13geHasPinMarker(clean string) bool {
+	for _, m := range r13gePinMarkers {
+		if strings.Contains(clean, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// r13geStripComments 去掉行注释与块注释（只用于"这段代码里有没有族内 SQL"的判据：
 // 注释里大段讨论 `FROM usage` 是常态，不能把注释算成动作面）。
-func r12n2StripComments(src string) string {
+func r13geStripComments(src string) string {
 	src = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(src, "")
 	var b strings.Builder
 	for _, line := range strings.Split(src, "\n") {
@@ -525,9 +693,9 @@ func r12n2StripComments(src string) string {
 	return b.String()
 }
 
-func r12n2CountMode(m r12n2PinMode) int {
+func r13geCountMode(m r13gePinMode) int {
 	n := 0
-	for _, v := range r12n2SearchPathInventory {
+	for _, v := range r13geSearchPathInventory {
 		if v == m {
 			n++
 		}

@@ -1067,3 +1067,96 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 7. **覆盖面（第四轮新增）**：审计"本轮刚修的判据"与"刚加的守卫"是**独立审计对象**——R4-A 的 7 条 P1 里 5 条属于这一类；同时，任何"证据只在注释/测试里"的机制都可能长期不被判据覆盖（编译缓存那条就是），把它们提成判据是每轮固定动作。
 
 **第十轮结论（2026-09-24）**：第十轮首发 **0 P0 / 10 P1**（去重后）—— 门禁面 7 条（"执行体由谁提供"5 条 + "红但不可诊断"2 条）、服务端 2 条（保留期回收的同族两条路径各自留着窗口）、连接器 1 条（授权槽判据问的是"是不是空串"而不是"有没有凭据"），另 13 条 P2 / 19 条 P3，并附主控独立取证的一条 master Gate 假红（同一棵树一红一绿）⇒ **仍不是干净轮**；按口径"连续两轮零新增 P0/P1"必须顺延到第十一轮。**第十轮的结构性意义**：它给出了判据面推进的**最后一层**——第九轮把判据推进到"进程环境"是对的，但环境变量是**黑名单**枚举，而黑名单必然有下一层；第十轮实测的五条通道（`COREPACK_HOME` 换解释器 / `container.env` 第四层 / `uses:` 的执行体内容 / 判据自己依赖的 `yaml` 解析器 / 被钉步骤**步骤体内**的 shell 赋值）共同的特征是**"workflow 文本里那一行命令一个字都没改，而判据读不到真正被执行的东西"**。同时它再次验证了连续七轮成立的那条规律（"上一轮刚改过的地方是最高价值入口"），并给出它的第三个子类：**"同族两条路径只收口了一条"**（第九轮修了 attached 路径的持锁复检、孤儿路径没有；修了授权槽的"空声明"、其它头名没有），以及一条**日志层的假保证**（通过行声明"三层均已检查"，而代码里就只有三层枚举）。
+
+**第十三轮结论（2026-09-25）**：第十三轮首发 **5 P0 / 9 P1**（去重后，见 §7.48）⇒ **仍未达成"连续两轮零新增 P0/P1"**。逐轮计数追加：第十一轮 1+6、第十二轮 2+7、**第十三轮 5+9**。**第十三轮的结构性意义**：它把判据面从"判据读什么"推进到**"哪一份字节在跑、以及这份字节由谁定义"** —— 三条门禁 P0 的共性是**判据没有撒谎，但判据不是那个该跑的判据**（本地 git 对象库与被审对象同域可写；启动器来自活 PATH；workflow 取自 PR merge ref）。其中第三条是**平台性质**（本仓代码侧只能提高门槛），前两条已在第十三轮修复批里做了结构性收口（平台锚 `HEAD == $GITHUB_SHA` + 远端对象库锚 + 冻结启动器 + 执行体全集双向登记）。另一条贯穿性的规律第七次成立：**"同族只收口一条"**（覆盖面只认 `scripts/check-*.mjs`；`search_path` 只收写面；`pendingLiveHeaders` 只收后半窗口；integration-tests 的判据纪律只加在一条腿上；webadmin 只对"权限点"做了双向对账）。
+
+---
+
+### 7.48 第十三轮审计（2026-09-25，七路独立）：判据的"执行"与"定义"
+
+**方法**：绑提交 `1816718f32`（= `origin/master` 合并 PR #148 后的头；四路审计对象 `b5dab30565` 的树与它逐字节相同）。七路 = A 服务端 / B 客户端技能库 / C 门禁·构建链·CI / D 对抗证伪（含主控追加的定向攻击面 §8）/ E 客户端其余面 / F 外设面（integration-tests + webadmin + 站点 + 文档 + fabric）/ V1 对第十二轮门禁修复的独立验证。全部只读；变异只在 `git archive` 副本内做，逐条 `trap` + `timeout` + 还原后复算 sha256。**本轮不是干净轮**：新增 **5 条 P0**（去重后：D-01 / D-02 / D-§8 / B·E 应用 AI 跨账号 / F-01）与 **9 条 P1**（去重后：判据执行体覆盖面 / 空 `user-invocable` / 已安装集合 ≠ 运行时集合 / 发现面判据输入源 / 官网硬数字判据的自我陈述 / integration-tests 接线与新增登记 / webadmin 路由/审计 sink 登记族 / `search_path` **读面**未收口 / `pendingLiveHeaders` 更早窗口）。另有两路**独立验证**（V1 门禁面、V2 服务端+客户端面）对第十二轮修复批逐条判定。
+
+| 来源 | 覆盖 | P0 | P1 | P2 | P3 |
+|---|---|---|---|---|---|
+| **R13-A** 服务端 | 补账/分区/搜索路径/限额/审计 | 0 | 0 | 3 | 2 |
+| **R13-B** 客户端技能库 | 应用 AI 隐藏会话 / 技能清单 / 安装集合 / 落点 | **1** | 2 | 3 | 3 |
+| **R13-C** 门禁·构建链·CI | 判据语料 / 输入源 / 凭据 argv / 门禁 job 形态 | 0 | 1 | 2 | 2 |
+| **R13-D** 对抗证伪（含 §8 定向面） | 平台锚 / 启动器 / 覆盖面 / 时间日历面 / workflow 变异电池 | **3** | 1 | 1 | 1 |
+| **R13-E** 客户端其余面 | 等待预算契约 / 发现面 / 输入源 / 内存作用域 | 0 | 2 | 2 | 1 |
+| **R13-F** 外设面 | integration-tests / webadmin / 站点 / 文档 / fabric | **1** | 3 | 8 | 9 |
+| **合计（去重后）** | | **4** | **4** | ~19 | ~18 |
+| **V1** 对第十二轮的独立判定 | 门禁面 16 项 | CLOSED 12 / PARTIAL 2 / NOT-CLOSED 2 / REGRESSION 0 | | | |
+| **V2** 服务端第十二轮的独立判定 | 10 项逐条（见 `temp/r13/V2/REPORT.md` §0） | 见报告（1 条 PARTIAL 被证伪为 NOT-CLOSED） | | | |
+
+**四条 P0**
+
+1. **锚定物可被同 job 的仓内执行点改写（R13-D-01）**：载荷改写判据执行体**并 `git commit`** ⇒ `git show HEAD:` 与工作树**自洽**，`--restore` / `--require-clean` / 摘要登记**全部失效**；实测 Full gate **EXIT=0** 且打印**真凭据**（`planned=32 executed=32`），**一条测试没跑**。`HEAD != $GITHUB_SHA`，而全仓**没有判据比对这两个值**。
+2. **启动器可被替换（R13-D-02）**：**不碰 git、不改任何被跟踪文件**，只把假 `node` 目录写进 `$GITHUB_PATH`（写在 `.sh` 里 ⇒ YAML 静态判据看不见）⇒ 探针 / 编排器 / **凭据检查器**三次 `node` 调用全被替换，假 node 按 `--nonce-file` 自己回显凭据，`EXIT=0`、工作树干净。
+3. **判据的「定义版本」= 被审版本（R13-D-§8）**：`on: pull_request` 用 **PR merge ref 的 workflow 文件**；分支保护按 **(context 名, app_id=15368=GitHub Actions)** 匹配 ⇒ **保留 5 个 `name:`、把 job 体换成 `echo ok`**，5 个必需检查全绿而**仓内没有一条判据会红**。现状：`required_approving_review_count: 0`、`require_code_owner_reviews: false`、无 `CODEOWNERS`、`rulesets=[]`。
+4. **应用 AI 隐藏会话跨账号复用（B-P0-1 / E-P1-04）**：`app-ai-runner.ts:214` 的 `live` 与磁盘会话只按 `app:<app_id>` 建键（`wasm-apps-host/src/ai-chat.ts:60-62`），`main.ts:543` 进程级 provide 一次、**无 `pico/session-changed` 释放**；真 agent-loop 探针实测：A 账号用过某 app 的 AI → 登出 → B 账号登录 → B 对**同一 app_id** 发一轮，**请求体的对话消息逐字为 `[A 的 user 消息, A 的 assistant 回复, B 的 user 消息]`**；而"同意使用应用 AI"的授权本身是按账号的（`ai-authorization.ts:53` 的 `aiConsentKey = userId\0appId`）。反向：B 取消会 `dropAgent` 掉 A 的活体会话。
+
+5. **integration-tests 的运行期判据可被整体掏空而门禁 EXIT=0（R13-F-01）**：`integration-tests/dex/dex-sso-test.py` 与 `integration-tests/openldap/ldap-rbac-brand-test.py` 的运行期判据（**14/17 条**）换成恒真 `check(name, [], '')` 后，`--self-test` 仍报 **24/24、29/29**，`scripts/check-integration-tests.mjs` 照打「2 个契约脚本判据自检通过」且 **`REAL_GATE_EXIT=0`**。根因：第 4–6 轮把「判据表 + 逐条正负例 + 运行期逐条引用 + 端到端变异」这套纪律**只加在 `electron-shots` 一条腿**上（该面共 **3 条腿 / 26 条运行期判据**）。⇒ 又一次「**同族只收口一条**」，且这次收口的是**判据纪律本身**。另：该端到端面在 CI 语境下 **0 执行**（`ci.yml` 对 integration/dex/openldap 的命中数为 0），因此它连"跑过"都不成立。
+
+**九条 P1**
+
+1. **判据执行体的覆盖面只认 `scripts/check-*.mjs`（R13-D-03 / C-01 / V1 §4.1，三路独立复现）**：把 `scripts/wasm/check-deletion-surface.mjs` 换成恒绿空壳 ⇒ 真错误状态（`server/internal/wasmapp/` 下新增未登记包）由 `group 2 pass=2 fail=1 / EXIT=1` 变成 `pass=3 fail=0 / EXIT=0`，而 `check-install-integrity` 打 `VERDICT PASS judge-bodies=13`、`check-guard-parser-integrity --require-clean` 打 OK。集外同类物至少 9 类。
+2. **空的 `user-invocable:` 三关全绿而运行时丢弃整份技能（B-P1-1）**：客户端预检与服务端 `skillmanifest` 都把 `null` 当"未声明"跳过，安装器只复核 name/description；而上游 `frontmatterBoolean` 对 `null` **throw** ⇒ 整份技能被丢弃。上传 201 → 审核通过 → 装上 → **模型永远看不到，全链路零报错**。
+3. **企业侧「已安装技能」集合 ≠ 运行时加载集合（B-P1-2）**：`listInstalledSkills` 只认「非点号目录 + 目录名 kebab + 有 SKILL.md」，上游按 **frontmatter 名** 认**全部直接子目录**。差集里的幽灵目录**在上游赢下注册表**（模型读到旧备份内容），而界面说"已是最新"、`uninstallSkill` 返回成功 ⇒ **「卸载成功而模型照旧能用」**。
+4. **发现面契约的判据输入源 ≠ 生产形态（E-P1-01）**：判据用裸 `vitest list --filesOnly`，生产跑 `scripts.test`。把 `test` 改成 `vitest run tests`（配置一字未改）⇒ 判据 **40/40 全绿**，生产只跑 1 文件 / 4 用例，另 7 个文件静默掉出门禁；`-c <另一配置>` / `--exclude` 同样。
+5. **`check:doc-claims` 的自我陈述比覆盖面宽（F-04）**：把官网「保留最近 3 个版本」改成 5（真源 `scripts/ci-publish-update-server.sh:273` 的 `KEEP=3`）、「60 秒 / 6 小时」改成 30 秒 / 1 小时（真源 `packages/host/desktop/src/updates.ts:136-137`）后，守卫仍 **EXIT=0 并打印「文档数字与真源一致 ✅」** —— **通过行比覆盖面宽**是最隐蔽的一类假绿（判据自己说它判了）。
+6. **integration-tests 的接线与新增登记（F-02 / F-03）**：`run-all.sh` 对两个 `.py` **零接线判据**；新增一个 integration test（"必然 77"或恒真用例）**全绿**，只有**删除**才红 ⇒ 登记制只做了单向的一半。
+7. **webadmin「路由 / 审计动作 sink」两族没有双向对拍（F-P2-1/P2-2）**：只加一条 `<Route path="/probe-unregistered">` ⇒ 全量 **644 用例 EXIT=0**；新审计动作经**参数传入**的本地包装写出 ⇒ `Audit.test.tsx` **EXIT=0**（正对照直接挂已登记 sink 则红）—— 同一仓里"权限点"做了双向对拍，这两族没做。
+8. **`search_path` **读面**未收口（V12-2 第 2 项，PARTIAL ⇒ 有计费后果）**：第十二轮把写/结算/删除/清理/余额/计量六条写路径收口到 `public`（3 → **14 个调用点**），但**定价读 `ModelPricesForProvider` 与报表读**在 shadow schema 在场时仍读 shadow —— 真 PG 实测结算把 shadow 价目（1000）算进 public 行。**同族只收口了一条**（读面），且这些函数不在机械守卫的扫描面内。
+9. **`pendingLiveHeaders` 的更早窗口没有追赶（V12-2 第 7 项，PARTIAL）**：追赶（`adoptLatestRefresh`）本身承重，但「`registerMcp` 入口读凭据 → 记录渲染」这段**更早窗口**未变异时就红：死令牌上线一次、多花一次 refresh 兑换、一次多余 401（靠 SDK 401 自愈兜住）。**同一条链上只收口了后半个窗口。**
+
+**V2 对第十二轮服务端/客户端修复的独立判定（10 项）**
+
+| # | 被验项 | 判定 |
+|---|---|---|
+| 1 | `reclaim_stalled` = 真停摆还是月龄 | CLOSED（+1 残留：停摆位只由**最早**受阻月推导 ⇒ 更晚月的持续真失败会被更早月一次新延后掩盖） |
+| 2 | `usageSearchPathPin` 统一 `search_path` | **PARTIAL**（写面 6/6 全绿；**读面未收口** ⇒ 见 P1-8） |
+| 3 | `write_blocked_other_months` 自愈 + `reclaim_blocked_*` | CLOSED（真写路径三段） |
+| 4 | `write_ddl_lock_*` 与 `LOCK TABLE` 对 matview 42809 | CLOSED（LOCK 矩阵 r/p/v 可锁、m/i/S/f 全 42809；清理只对 r/p/v/m 取锁 ⇒ 无同族残留） |
+| 5 | `fold-adjacent` 错界分区 42P17 | CLOSED（按"跳过 + 结构化登记"取向；金额守恒） |
+| 6 | 两阶段 reclaim 窗口在持锁区间内 | CLOSED（交错行 17.00 = 10 + 7，拆掉即 `SILENT_LOSS=7.0`）；`usageReclaimFreezeBudgetMS` **一变量两语义仍在**（实测 `statement_timeout="1234ms"`） |
+| 7 | `pendingLiveHeaders` 注册期追赶 | CLOSED（追赶）/ **PARTIAL**（更早窗口 ⇒ 见 P1-9） |
+| 8 | `fields` 归一 / `mcpActivityKey` / `onRefreshed` 零 await / 方案词表 | `fields` CLOSED；`mcpActivityKey` CLOSED 但**承重面只有一条用例**、尾斜杠 `/mcp` vs `/mcp/` 不归一且无判据；`onRefreshed` **PARTIAL**（真 await 红；等价的 `setTimeout(0)` 延后时 connectors 全量 465 用例全绿）；词表 **PARTIAL**（删 `bearer` 红、加假词红、**删 `ssws` 零红**） |
+| 9 | `r12b-already-in-use-retry.spec.ts` 真行为还是假绿 | CLOSED（删接线必红；5 条判据逐级恒真化后失败点依次后移 ⇒ 非假绿） |
+| 10 | 发现面契约 | CLOSED（8 类负例全红） |
+
+**V2 的回归判定**：`go test ./... -count=1 -p 2 -timeout 1800s` = **EXIT=0（55 包 0 FAIL）**；**新引入回归 0 条**（第十二轮客户端只改测试/文档 ⇒ 上表第 8 项的缺口是**继承缺口**而非回归）。环境提醒：全量测试在"并发跑探针 + 变异 + 两条 vitest"下 `llmgateway` 从 327s 涨到 **1726s**（距 1800s 超时仅 74s）⇒ 跑服务端全量判据前必须先停掉并发重型测试。
+
+**V1 对第十二轮门禁修复的独立判定（16 项）**
+
+| 判定 | 条数 | 项 |
+|---|---|---|
+| **CLOSED** | 12 | R12-D-01 主攻击面（13 条判据执行体 / `.yarnrc.yml` 禁键 / `.yarn/plugins\|releases` 空 / 工作区 postinstall / 符号链接 / 新增未登记执行体 / `--restore`）；CI 侧凭据形态（`planned=0`、半行、stderr、ANSI、CR 分段、两行、`planned≠executed`、退出码≠0、零输出）；`guards=0`；弱 `--pattern`；`defaults.run.shell`（workflow 级与含 `-c` 的 job 级）；被钉步骤 `if/continue-on-error/working-directory/runs-on/shell`；发布正文三条绕过；前置校验步骤顺序；`2>&1 \| tee` 旧形态；固定 `/tmp` 路径旧形态；断言块被删；`exit()` 函数遮蔽；YAML 合并键；新增未登记 workflow；判定行 CR 分段；`patch:` 协议新增补丁；404 判据（新旧形态 + 真 CLI 报文 + 30/30 回归）；`check-root-guards.mjs` 的 3 处 digest 改动 |
+| **PARTIAL** | 2 | ①覆盖面只到 `scripts/check-*.mjs` 一族（=本轮 P1-1）；②`VERDICT_LINE` 的 `witness` **不是独立见证**（pattern 与样本、witness 同文件同表 ⇒ **三处同文件编辑即 EXIT=0**） |
+| **NOT-CLOSED** | 2 | ①**`endUninterruptably` 形态的修复在本树中不存在**（全树 `grep` 零命中，含全部审计报告）⇒ 第十一/十二轮报告里的这条**自述不实**（详见下）；②`check-install-integrity` 对 `packages/*/*/{tests,scripts}/**` 的改写**完全无判据**（302 个 spec + 50 个执行体，实测两个独立判据都 PASS） |
+| **REGRESSION** | 0 | 未发现本批引入的回归 |
+
+**`endUninterruptably` 更正（V1 NOT-CLOSED ①，本轮如实更正）**
+
+第十一/十二轮报告把 `endUninterruptably` 写成"已实施的修复"。V1 逐条复核：**全树（`scripts/`、`.github/`、`temp/` 含全部审计报告）`grep` 零命中，`git log -S` 亦无** —— 该项在本树中**没有对应物**（既不是"已闭合"也不是"未修"，而是**无对应物**）。真实的退出路径加固现状在别处，写清楚是：
+
+- **`scripts/check-root-guards.mjs` 真正在做的事**是**运行器侧**的三条：① 每个守卫以**真子进程**运行、退出码**不可被 `NODE_OPTIONS=--import` 之类的退出钩子改写**（钩子同时覆写 `process.exit` 与 `process.reallyExit` 时，运行器仍以"每个登记的守卫都真的跑过 + 没有一条失败"为条件打印通过凭据）；② 交给守卫子进程的环境经过**清洗**（危险族键不传递）；③ 被判进程"拒绝运行"或"零守卫"时**打印不出**通过凭据。
+- 换句话说：本仓的收口是"**判定权上移 + 凭据必须由本步的检查器合成**"，不是"让某个函数不可中断地结束"。凡引用 `endUninterruptably` 的表述一律以本条为准。
+
+**D-§8.5 的诚实边界（整段原文引用）**
+
+> **在没有结构性收口的前提下，本仓"门禁绿"能承诺什么、不能承诺什么。**
+>
+> **能承诺**：①在**同一份被审提交**内，已登记的判据执行体（`scripts/check-*.mjs` + 三个入口 + 15 个工作区 manifest）与 `HEAD` 逐字节一致，且"没有未登记的 install 期钩子 / `.yarnrc.yml` 禁键 / `.yarn/plugins|releases` 为空"；②在**该提交自己定义的 workflow**里，被钉步骤的 argv/shell/env/工作目录/`with:`/`runs-on` 与登记值一致，凭据由本步的检查器回显本次 nonce；③**若**这些 job 真的被调用且 `HEAD == $GITHUB_SHA`，那么"32 个包的门禁任务真的跑过"这句话在该提交内成立。
+>
+> **不能承诺**：①**不能承诺这些 job 真的被调用过**——`.github/workflows/ci.yml` 与被钉 job 的 `name:` 都在被审提交里，`pull_request` 事件使用 **PR merge ref 的 workflow 文件**，而分支保护按 **(context 名, app_id=15368=GitHub Actions)** 匹配；保留 5 个 `name:`、把 job 体换成 `echo ok`，5 个必需 context 全部 success，而**没有任何一条本仓判据会因此变红**（本仓全部静态判据都在同一个可被替换的 workflow 里）。②**不能承诺 `HEAD` 是平台的那个提交**——R13-D-01 证明"锚到 git 对象"不等于"锚到平台值"，`HEAD` 与工作区同域可写，且 `$GITHUB_SHA` 在 4 条锚定判据里只有 WASM 门禁用了。③**不能承诺"第一道探针之后判据没被动过"**——R13-D-02 用 `$GITHUB_PATH` 换掉 `node` 启动器即可，静态判据只读 YAML 文本、看不见 `.sh` 里的操作。④**不能承诺"评审兜住了"**——`required_approving_review_count: 0`、`require_code_owner_reviews: false`、仓库无 `CODEOWNERS`：平台的审批要求是"零"，所以"唯一区分机制是评审"目前**只是流程约定**，没有平台强制。⑤因此，**"门禁绿"当前的准确含义是"在一个诚实的 workflow 定义与一个未被改写的 checkout 下，本仓自带的判据都通过"**；它**不等于**"这些判据在本次 PR 上被调用过"，也**不等于**"有一个独立于本 PR 的第三方确认过这件事"。
+>
+> **要把它变成可承诺，需要平台上的一次配置改动（不是代码改动）**：`required_approving_review_count ≥ 1` + `CODEOWNERS` 覆盖 `.github/**`（或 ruleset 的 `required_reviewers.file_patterns`），以及/或者把必需 context 的来源换成 PR 改不到的 app 或 `pull_request_target` 定义的可信工作流（详见 §8.3）。
+
+**本轮方法学增量：判据面的台阶再上一级 = 「判据的执行」与「判据的定义」**
+
+前十轮的推进脉络是"判据读什么"：命令文本（SK-7 系列）→ argv/shell/步骤体（第八、九轮）→ **进程环境层与"执行体由谁提供"**（第十、十一轮）→ **"判据的本体"与"判据的启动"之间的缝**（第十二轮）。第十三轮把它明确拆成**两个不同的环节**，并各给出结构性收口：
+
+- **「判据的执行」**：判据确实跑了，且跑的是**平台那个提交定义的**判据 —— 收口 = ①平台锚（`HEAD == $GITHUB_SHA`，本轮 D-01）+ ②**冻结启动器**（`node/bash/git` 的绝对路径进步骤输出，后续判据步只用冻结值，本轮 D-02）+ ③判据执行体的**执行体全集**双向登记（本轮 D-03）。三者的共同点：**收口的是"哪一份字节在跑"**，而不是"那一行命令怎么写"。
+- **「判据的定义」**：判据还能不能被调用、以及它是不是**被审提交自己定义**的 —— 这是**平台侧**的问题（`pull_request` 用 merge ref 的 workflow、必需检查按 (context, app_id) 匹配），代码侧只能**提高门槛**（`CODEOWNERS` + 静态钉法），**不能**收口。本轮把它写成 `docs/decisions/2026-09-25-gate-definition-authority.md`，并把三条可用的平台收口与"为什么本仓刻意不做整仓 `pull_request_target` 迁移"逐条写清 —— 结论是：**在平台设置改完之前，"能承诺"的那三条（§8.5 上半段）必须加上"若 job 真的被调用"这个前提**。
+
+同轮还有两条**独立**的方法学复现，都是旧形态的新实例：④**同族只收口一条**（覆盖面只认 `scripts/check-*.mjs`；`--restore` 的覆盖集只到 entryPaths 那 20 条）；⑤**"判据的输入源"与"生产形态"不一致**（E-P1-01：裸 `vitest list` vs `scripts.test`；B-P1-1：判据把 `null` 当"未声明"而运行时 throw）。

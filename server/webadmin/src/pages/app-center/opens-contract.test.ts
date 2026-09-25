@@ -3,6 +3,8 @@ import {
   AI_ATTRIBUTION_NOTE,
   AI_ATTRIBUTION_WIRING,
   AI_USAGE_WINDOW_DAYS,
+  ATTRIBUTION_SESSION_HEADER,
+  ATTRIBUTION_SESSION_PREFIX,
   OPENS_DETAIL_RETENTION_DAYS,
   OPENS_MISSING_ROW_NOTE,
   OPENS_PRIVACY_NOTE,
@@ -177,18 +179,22 @@ describe('AI 用量 · 三态（§5.1c B：「统计未上线」≠「零调用�
     expect(countText(aiUsageTokens({ prompt_tokens: 600 }))).toBe('—')
   })
 
-  it('归因说明写清"账单归使用者账号 / 归因缺失的真实成因"（R4-D-4）', () => {
-    expect(AI_ATTRIBUTION_NOTE).toContain('X-Pico-App-Id')
+  it('归因说明写清"账单归使用者账号 / 归因缺失的真实成因"（R4-D-4 / R13-GB）', () => {
     expect(AI_ATTRIBUTION_NOTE).toContain('计费')
     if (AI_ATTRIBUTION_WIRING === 'not_wired') {
-      // 通道未接线时**只能**说"平台侧尚未接线"——归因到客户端版本/客户环境就是错的
-      // （全仓没有发送方，任何版本都不产生归因）。这条断言与
-      // `opens-contract-parity.spec.ts` 的发送方扫描成对存在。
+      // 通道未接线时**只能**说"平台侧尚未接线"—— 归因到客户端版本/客户环境就是错的。
+      // 这条断言与 `opens-contract-parity.spec.ts` 的三段锚点用例成对存在。
       expect(AI_ATTRIBUTION_NOTE).toContain('尚未接线')
       expect(AI_ATTRIBUTION_NOTE).not.toContain('老客户端')
       expect(AI_ATTRIBUTION_NOTE).not.toContain('未上报')
     } else {
+      // 已接线（2026-09-24 起）：成因是**会话链路**（隐藏会话 id 的 `app:` 前缀 ⇒ 上游
+      // 出站头 ⇒ `usage.app_id`），不得再说"尚未接线"，也不得把成因推给客户端版本。
+      expect(AI_ATTRIBUTION_NOTE).toContain(ATTRIBUTION_SESSION_HEADER)
+      expect(AI_ATTRIBUTION_NOTE).toContain(ATTRIBUTION_SESSION_PREFIX)
       expect(AI_ATTRIBUTION_NOTE).not.toContain('尚未接线')
+      expect(AI_ATTRIBUTION_NOTE).not.toContain('老客户端')
+      expect(AI_ATTRIBUTION_NOTE).not.toContain('未上报')
     }
   })
 })

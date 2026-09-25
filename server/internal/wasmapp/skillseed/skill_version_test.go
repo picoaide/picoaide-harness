@@ -41,11 +41,14 @@ import (
 // `cmd/picoaide-limits-gen` 决定 —— 改 limits 的真源（limitsspec.go）并重跑生成器后，
 // 这里会红，那不是误报：交付给员工的手册变了，版本就该提。
 
-// seededSkillDigests 是「内置技能内容摘要 → SKILL.md 的 version」登记表。
+// appBuilderSkillDigests 是 **app-builder** 技能的「内容摘要 → SKILL.md 的 version」登记表。
 //
 // 登记的是**要交付出去的那一份内容**（本分支合并后的状态）。尚未提交、也没下发过的
 // 中间态可以就地替换（同一版本只留一条），已提交/已发布的条目只增不减。
-var seededSkillDigests = map[string]string{
+//
+// 本表按技能分组进文件末尾的 `seededSkillDigests`：分组键 = `server/skills/` 下的技能
+// 目录名，也是 R13-F-05「技能集合三方对账」的第 3 个集合（判据在 builtin_skills_test.go）。
+var appBuilderSkillDigests = map[string]string{
 	// 2.0.0 = 九阶段「陪小白把设计做完」手册（三轮设计访谈 + 五角色评审与追问话术）
 	//   + 前后端分离示例（静态前端 web/* 经 pack-assets 打进 wasm 自定义段 + wasm 只做
 	//   JSON API）+ 应用内 AI 改「客户端 AI loop」口径修正（六错误码、撤销入口在应用
@@ -279,35 +282,69 @@ var seededSkillDigests = map[string]string{
 	"bdb5e7c71299e2938e52f72b4972edd88869f6b9c9ca0b559e698d9151edf375": "2.10.0",
 }
 
-// TestBuiltinSkillVersionTracksContent 断言当前技能内容的摘要已在登记表里，且登记的
-// 版本与 SKILL.md 写的一致（并反向断言"一个版本只对应一次内容交付"）。
+// seededSkillDigests 是「**技能目录 → 内容摘要 → version**」的两级登记表：
+// 分组键 = `server/skills/` 下的技能目录名，值是那个技能的摘要登记表（历史只增不减）。
+//
+// 为什么要分组（R13-F-05）：此前它是一张**扁平**表，"它到底覆盖哪些技能"只能靠人读注释，
+// 于是"在 `server/skills/` 下新增一个技能目录、本表一个字不动"是**全绿**的 —— 新技能既不
+// 受版本纪律约束，也不会进镜像（`server/Dockerfile` 逐个 COPY）。分组后判据可以**双向对账**
+// 三个集合：磁盘上的技能目录 / Dockerfile COPY 的清单 / 本表的分组键
+// （`builtin_skills_test.go` 的 TestBuiltinSkillInventoryMatchesDiskDockerfileAndDigests）。
+//
+// ⚠️ 新增一个平台内置技能 = 磁盘目录 + `server/Dockerfile` 一行 COPY +
+// `builtinSkillRegistry` 一条 + 这里加一组（四处缺一即红）。
+var seededSkillDigests = map[string]map[string]string{
+	"app-builder": appBuilderSkillDigests,
+}
+
+// TestBuiltinSkillVersionTracksContent 断言**每个已登记技能**的当前内容摘要已在
+// seededSkillDigests 里，且登记的版本与 SKILL.md 写的一致（并反向断言"一个版本只对应
+// 一次内容交付"）。
+//
+// 遍历登记表本身（不是某个写死的目录）：新增技能只要登记了摘要就被覆盖，不必再改测试代码 ——
+// 写死单目录正是 R13-F-05 的形态（"枚举一个集合来判、集合外留同类物"）。
 func TestBuiltinSkillVersionTracksContent(t *testing.T) {
-	digest, files := skillContentDigest(t, repoSkillDir)
-	version := skillFrontmatterVersion(t, filepath.Join(repoSkillDir, SkillFile))
-	if files < 10 {
-		t.Fatalf("只摘要到 %d 个文件（技能目录被搬走或变空？）", files)
+	if len(seededSkillDigests) == 0 {
+		t.Fatal("seededSkillDigests 是空的 —— 内置技能摘要登记表被清掉了？")
 	}
-	want, ok := seededSkillDigests[digest]
-	if !ok {
-		t.Fatalf("内置技能内容变了，但 seededSkillDigests 里没有这个摘要（R1-pm-8）：\n"+
-			"  内容摘要 = %s（%d 个文件）\n"+
-			"  当前 SKILL.md 的 version = %s\n"+
-			"  修复：①把 SKILL.md 的 version 提一级 —— 内容变就必须提，已安装的员工靠它判「有更新」；\n"+
-			"        ②把 %q: %q 加进本文件的 seededSkillDigests。",
-			digest, files, version, digest, "<新版本>")
-	}
-	if want != version {
-		t.Fatalf("内容摘要 %s 登记的是 version %s，而 SKILL.md 写的是 %s（提了版本但忘了同步登记表？）",
-			digest, want, version)
-	}
-	// 反向断言：一个 version 只能对应一个内容摘要（否则"提版本"可以被绕过：
-	// 改内容 + 把新摘要也标成同一个版本号）。
-	byVersion := map[string]string{}
-	for d, v := range seededSkillDigests {
-		if prev, dup := byVersion[v]; dup {
-			t.Fatalf("version %s 对应了多个内容摘要（%s 与 %s）—— 版本号必须唯一标识一次内容交付", v, prev, d)
-		}
-		byVersion[v] = d
+	for _, dir := range sortedKeys(seededSkillDigests) {
+		t.Run(dir, func(t *testing.T) {
+			root := repoSkillDirFor(dir)
+			table := seededSkillDigests[dir]
+			if len(table) == 0 {
+				t.Fatalf("%s 的摘要登记表是空的 —— 至少要登记当前内容的摘要（R1-pm-8）", dir)
+			}
+			digest, files := skillContentDigest(t, root)
+			version := skillFrontmatterVersion(t, filepath.Join(root, SkillFile))
+			if files == 0 {
+				t.Fatalf("%s 一个普通文件都没摘要到（技能目录被搬走或变空？）", root)
+			}
+			want, ok := table[digest]
+			if !ok {
+				t.Fatalf("内置技能内容变了，但 seededSkillDigests[%q] 里没有这个摘要（R1-pm-8）：\n"+
+					"  技能目录 = %s\n"+
+					"  内容摘要 = %s（%d 个文件）\n"+
+					"  当前 SKILL.md 的 version = %s\n"+
+					"  修复：①把 %s 的 version 提一级 —— 内容变就必须提，已安装的员工靠它判「有更新」；\n"+
+					"        ②把 %q: %q 加进本文件的 seededSkillDigests[%q]。",
+					dir, root, digest, files, version, filepath.Join(root, SkillFile), digest, "<新版本>", dir)
+			}
+			if want != version {
+				t.Fatalf("%s：内容摘要 %s 登记的是 version %s，而 SKILL.md 写的是 %s（提了版本但忘了同步登记表？）",
+					dir, digest, want, version)
+			}
+			// 反向断言：**同一个技能内**一个 version 只能对应一个内容摘要（否则"提版本"可以被
+			// 绕过：改内容 + 把新摘要也标成同一个版本号）。跨技能不比较 —— 不同技能各自从
+			// 1.0.0 起版本是正常的。
+			byVersion := map[string]string{}
+			for d, v := range table {
+				if prev, dup := byVersion[v]; dup {
+					t.Fatalf("%s：version %s 对应了多个内容摘要（%s 与 %s）—— 版本号必须唯一标识一次内容交付",
+						dir, v, prev, d)
+				}
+				byVersion[v] = d
+			}
+		})
 	}
 }
 

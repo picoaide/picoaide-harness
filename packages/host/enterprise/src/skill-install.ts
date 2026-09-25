@@ -22,7 +22,7 @@ import { basename, join, sep } from 'node:path'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
-import { precheckSkillPackage } from './manifest-precheck.ts'
+import { invocationBooleanVerdict, precheckSkillPackage } from './manifest-precheck.ts'
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
@@ -644,6 +644,13 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
     // 之后**，失败路径不动墓碑（宁可保持用户的选择）。
     await clearSkillTombstone(skillsDir, name)
 
+    // R13-B P1-2：**"装好了"必须等于"运行时加载的是刚装的那一份"**。旧安装器
+    // （≤2.8.1）留下的同名备份 `.name.backup-<pid>-<ts>` 排在同名真目录之前，
+    // 会赢下运行时注册表 —— 界面按 `.install-version` 说"已是最新"，模型读的却是
+    // 旧备份内容。清掉安装器自己的同名影子（用户自建的同名条目不动，由面板的
+    // 覆盖守卫负责确认）。
+    await sweepInstallerOwnedShadowSkills(skillsDir, name)
+
     return { name, version, skillsDir, targetDir }
   } catch (cause) {
     throw cause instanceof Error ? cause : new Error(String(cause))
@@ -882,6 +889,13 @@ export type InstalledSkillOrigin = 'store' | 'local'
  * `name`/`description` 必填、`name` 必须匹配运行时正则。额外加一条**一致性**：
  * `name` 必须等于技能 ID（目录名），否则能力中心的"已装/卸载/遥测"全按目录名
  * 记账，而模型侧看到的是另一个名字（`@` 谁都不对）。
+ *
+ * 审计 R13-B P1-1（第三关）：invocation 布尔也要复核。上游
+ * `frontmatterBoolean` 对"键存在但取值不是合法布尔字面量"（含 YAML 空值 /
+ * `null` / `~` / 空串 / `' true '` 这类带空白的字符串）**直接 throw**，调用方
+ * catch 后把**整份技能丢弃** —— 只在发布前预检拦是不够的：市场上已经存在的
+ * 存量技能、或绕过预检的归档，装到这里时同样必须被拒，否则能力中心显示
+ * "已安装"而模型永远加载不到（这正是 A1 要消灭的形态）。
  * @param dir - the unpacked skill directory.
  * @param name - the skill id being installed.
  * @throws ArchiveInstallRefusal with a user-readable reason.
@@ -908,6 +922,21 @@ export async function assertLoadableSkillMetadata(dir: string, name: string): Pr
     throw new ArchiveInstallRefusal(
       'FRONTMATTER_INVALID',
       `SKILL.md name ${JSON.stringify(fmName)} must equal the skill id ${JSON.stringify(name)}`,
+    )
+  }
+  // 取值语料与上游 `frontmatterBoolean` 逐条对齐（判定实现只有一处：
+  // `manifest-precheck.ts` 的 `invocationBooleanVerdict`，本函数不再写第二份）。
+  for (const key of ['disable-model-invocation', 'user-invocable']) {
+    if (!Object.hasOwn(meta, key)) continue
+    const verdict = invocationBooleanVerdict(meta[key])
+    if (verdict === 'ok') continue
+    throw new ArchiveInstallRefusal(
+      'FRONTMATTER_INVALID',
+      verdict === 'empty'
+        ? `SKILL.md field ${key} is present but empty; the runtime discards the entire skill, `
+          + 'so it would install but never load — write true/false (or yes/no, on/off, 1/0), or remove the line'
+        : `SKILL.md field ${key} must be a boolean literal (true/false, yes/no, on/off, 1/0); `
+          + 'any other value makes the runtime discard the entire skill',
     )
   }
 }
@@ -976,40 +1005,184 @@ export function resolveSkillsDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(dshHomeSafe({ env }), 'skills')
 }
 
+/** 上游 `skipSystem` 根里唯一被跳过的目录名（skill-filesystem 的 `roots()`）。 */
+export const SKILL_SYSTEM_DIR = '.system'
+
+/** ≤2.8.1 的安装器在技能库根写下的备份形态 `.<name>.backup-<pid>-<ts>`。 */
+const LEGACY_SKILL_BACKUP_NAME = /^\..+\.backup-\d+-\d+$/u
+/** 同一时期的 staging 形态 `.install-<name>-XXXXXX`。 */
+const LEGACY_SKILL_STAGING_PREFIX = '.install-'
+
 /**
- * List installed skills: directories under the skill root that carry a
- * SKILL.md — the exact layout `installSkillArchive` produces and the
- * upstream `@deepseek-ai/dsh-skill-filesystem` provider discovers. A missing
- * or unreadable root yields an empty list.
- *
- * 只列**运行时真的能加载**的那些（点号开头 / 非 kebab 名字一律不算），因此：
- *  - 安装器自己的 `.skill-tmp`（staging/备份）不会被列成"已安装技能"（审计 A7）；
- *  - 旧版本留下的 `.install-*`、`.<name>.backup-*` 同理（同样不会被运行时加载，
- *    但要靠 {@link sweepStaleSkillTemps} 清掉，见 A12）。
- * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
- * @returns installed skill directory names, sorted.
+ * 直接子条目名是不是**安装器自己**写下的形态（旧备份 / 旧暂存）。
+ * 这类目录里可能带着一份完整技能（根上就有 SKILL.md），而运行时把它们当候选 ——
+ * 于是它们能"赢下"同名真目录。属于安装器的东西可以无确认删除；用户自建的不行。
+ * @param entryName - the direct child name under the skill root.
  */
-export async function listInstalledSkills(skillsDir: string): Promise<string[]> {
+export function isInstallerOwnedSkillEntry(entryName: string): boolean {
+  return LEGACY_SKILL_BACKUP_NAME.test(entryName) || entryName.startsWith(LEGACY_SKILL_STAGING_PREFIX)
+}
+
+/** 运行时会发现的一份技能（判据与上游 `discoverRoot` 逐条对齐）。 */
+export interface DiscoveredSkill {
+  /** frontmatter 里的 `name` —— **运行时注册表用的就是它**（不是目录名）。 */
+  name: string
+  /** 技能库里的直接子条目名（目录名，或根上散落 `.md` 的文件名）。 */
+  entryName: string
+  /** SKILL.md 所在目录（根上散落 `.md` 时为技能库根）。 */
+  dir: string
+  /** SKILL.md 的绝对路径。 */
+  skillMdPath: string
+  /** 该条目是不是安装器写下的形态（见 {@link isInstallerOwnedSkillEntry}）。 */
+  installerOwned: boolean
+}
+
+/**
+ * 上游 `skill-filesystem/src/index.ts` 的 `parseSkillFile` 逐条对齐的元数据读取：
+ * 首行必须**恰是** `---`，收尾是其后第一行**恰为** `---` 的那一行，区间内必须是
+ * YAML 映射，`name`/`description` 必须是非空**字符串**。
+ *
+ * 不复用 {@link readSkillFrontmatter}：那个是"展示用"的宽松解析（收尾正则只要
+ * 出现 `\n---` 即可），宽松方向会让"我们说已安装、运行时其实不加载"复活。
+ * @param skillMdPath - path to the candidate SKILL.md.
+ */
+async function readRuntimeSkillMetadata(skillMdPath: string): Promise<{ name: string, description: string } | undefined> {
+  let raw: string
+  try {
+    raw = await readFile(skillMdPath, 'utf8')
+  } catch {
+    return undefined
+  }
+  const firstLineEnd = raw.indexOf('\n')
+  if (firstLineEnd < 0) return undefined
+  if (raw.slice(0, firstLineEnd).replace(/\r$/u, '') !== '---') return undefined
+  let front: string | undefined
+  let lineStart = firstLineEnd + 1
+  while (lineStart <= raw.length) {
+    const nextNewline = raw.indexOf('\n', lineStart)
+    const lineEnd = nextNewline < 0 ? raw.length : nextNewline
+    if (raw.slice(lineStart, lineEnd).replace(/\r$/u, '') === '---') {
+      front = raw.slice(firstLineEnd + 1, lineStart)
+      break
+    }
+    if (nextNewline < 0) return undefined
+    lineStart = nextNewline + 1
+  }
+  if (front === undefined) return undefined
+  let parsed: unknown
+  try {
+    parsed = parseYaml(front)
+  } catch {
+    return undefined
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const meta = parsed as Record<string, unknown>
+  const name = typeof meta.name === 'string' && meta.name.length > 0 ? meta.name : undefined
+  const description = typeof meta.description === 'string' && meta.description.length > 0 ? meta.description : undefined
+  if (name === undefined || description === undefined) return undefined
+  return { name, description }
+}
+
+/**
+ * 运行时**真正会加载**的技能集合（审计 R13-B P1-2 的唯一判据）。
+ *
+ * 与上游 `discoverRoot` 逐条对齐（本地真跑 pinned 注册表实测过）：
+ *  - 只看技能库的**直接子条目**；目录取 `<dir>/SKILL.md`，根上散落的 `.md` 文件
+ *    本身就是候选；
+ *  - 只跳过名字恰为 {@link SKILL_SYSTEM_DIR} 的那一个（**其他点号目录照样发现**
+ *    —— 这正是 `.alpha.backup-<pid>-<ts>` 能挤掉真目录的原因）；
+ *  - 技能名取自 **frontmatter**，不是目录名；名字必须匹配运行时的 kebab 正则；
+ *  - 按条目名 `localeCompare` 升序，同名先到先得（调用方按顺序取第一份即"赢家"）。
+ *
+ * 旧实现只认「非点号目录 + 目录名 kebab + 有 SKILL.md」，于是与运行时是两个集合：
+ * 差集里的技能"卸载成功而模型照旧能用"、界面按真目录说"已是最新"而模型读的是
+ * 旧备份内容。
+ * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @returns discovered skills in runtime precedence order; unreadable root = 空。
+ */
+export async function discoverRuntimeSkills(skillsDir: string): Promise<DiscoveredSkill[]> {
   let entries
   try {
     entries = await readdir(skillsDir, { withFileTypes: true })
   } catch {
     return []
   }
-  const result: string[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    // 点号开头 = 安装器/插件的私有目录（staging、备份、.system 等），永远不是技能。
-    if (entry.name.startsWith('.')) continue
-    if (!isLoadableSkillName(entry.name)) continue
-    try {
-      await stat(join(skillsDir, entry.name, 'SKILL.md'))
-      result.push(entry.name)
-    } catch {
-      // Directory without a SKILL.md — not a skill (or mid-write); skip.
-    }
+  const rows: DiscoveredSkill[] = []
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name === SKILL_SYSTEM_DIR) continue
+    const isDir = entry.isDirectory()
+    const isLooseMarkdown = entry.isFile() && entry.name.endsWith('.md')
+    if (!isDir && !isLooseMarkdown) continue
+    const dir = isDir ? join(skillsDir, entry.name) : skillsDir
+    const skillMdPath = isDir ? join(dir, 'SKILL.md') : join(skillsDir, entry.name)
+    const meta = await readRuntimeSkillMetadata(skillMdPath)
+    if (meta === undefined) continue
+    // 只认运行时的 kebab 正则（长度上限是**写侧**规则：我们从不装超长名字，
+    // 但用户手放的超长名字运行时确实会加载 ⇒ 这里必须如实列出，否则又成差集）。
+    if (!SKILL_NAME_PATTERN.test(meta.name)) continue
+    rows.push({
+      name: meta.name,
+      entryName: entry.name,
+      dir,
+      skillMdPath,
+      installerOwned: isInstallerOwnedSkillEntry(entry.name),
+    })
   }
-  return result.sort((a, b) => a.localeCompare(b))
+  return rows
+}
+
+/**
+ * List installed skills: **the names the runtime actually loads**.
+ *
+ * 审计 R13-B P1-2：判据收敛到与运行时同一来源（{@link discoverRuntimeSkills}）——
+ * 按 frontmatter 名 + 全部直接子条目，而不是"非点号目录 + 目录名 kebab"。否则
+ * 差集里的技能在上游赢下注册表（模型读到旧备份内容）而界面说"已是最新"、
+ * `uninstallSkill` 返回成功却仍可加载 —— 与 A7 声称已消灭的症状同形。
+ * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
+ * @returns 去重后的技能名（= 运行时注册表的键），排序。
+ */
+export async function listInstalledSkills(skillsDir: string): Promise<string[]> {
+  const rows = await discoverRuntimeSkills(skillsDir)
+  return [...new Set(rows.map(row => row.name))].sort((a, b) => a.localeCompare(b))
+}
+
+/**
+ * 同名**影子**：`<skillsDir>` 下所有"运行时会当作 `name` 加载、但不是规范落点
+ * `<skillsDir>/<name>` 那一份"的条目（旧备份、旧暂存、根上散落的 `<name>.md`、
+ * 目录名非 kebab 但 frontmatter 名合法的自建目录…）。
+ *
+ * 它们的存在意味着"删掉规范落点"不等于"运行时不再加载这个技能"。
+ * @param skillsDir - the user skill root.
+ * @param name - the skill name (frontmatter name).
+ * @returns 影子条目（运行时顺序），没有则空数组。
+ */
+export async function listShadowingSkills(skillsDir: string, name: string): Promise<DiscoveredSkill[]> {
+  const canonical = join(skillsDir, name)
+  return (await discoverRuntimeSkills(skillsDir))
+    .filter(row => row.name === name && !(row.entryName === name && row.dir === canonical))
+}
+
+/**
+ * 清掉同名影子里**属于安装器**的那些（旧备份 / 旧暂存）。
+ *
+ * 运行时的同名先到先得按 `localeCompare` 排序，而 `.` 开头的备份恰好排在同名真
+ * 目录之前 ⇒ 它会赢下注册表。安装/卸载都必须先把它清掉，否则"装好了"与"卸载了"
+ * 都只是界面上的说法。
+ *
+ * **用户自建的同名条目一律不动**（那是用户内容，删除要显式确认）——调用方用
+ * {@link listShadowingSkills} 如实报告残留。
+ * @param skillsDir - the user skill root.
+ * @param name - the skill name.
+ * @returns 删掉的 SKILL.md 路径（诊断/测试用）。
+ */
+export async function sweepInstallerOwnedShadowSkills(skillsDir: string, name: string): Promise<string[]> {
+  const removed: string[] = []
+  for (const shadow of await listShadowingSkills(skillsDir, name)) {
+    if (!shadow.installerOwned) continue
+    const ok = await rm(shadow.dir, { recursive: true, force: true }).then(() => true).catch(() => false)
+    if (ok) removed.push(shadow.skillMdPath)
+  }
+  return removed
 }
 
 /**
@@ -1069,6 +1242,25 @@ export async function uninstallSkill(
     // 记录，还会在用户日后重新安装同名技能时干扰判断）。写失败不致命：最坏情况
     // 退回升级前的行为（下次开机会装回来），而删除本身已经成功。
     if (prov?.channel === 'plugin') await writeSkillTombstone(skillsDir, name, prov)
+
+    // R13-B P1-2：**"卸载成功"必须等于"运行时不再加载"**。删掉规范落点之后：
+    //  1. 先清掉安装器自己的同名影子（旧备份/旧暂存 —— 它们排在同名真目录之前，
+    //     会赢下运行时注册表：界面显示已卸载、模型照旧读得到旧内容）；
+    //  2. 再复核运行时集合。**用户自建**的同名条目（目录名非 kebab 的自建目录、
+    //     根上散落的 `<name>.md`…）一律不删（那是用户内容），而是如实报成残留 ——
+    //     绝不返回成功却不生效。
+    await sweepInstallerOwnedShadowSkills(skillsDir, name)
+    const residue = await listShadowingSkills(skillsDir, name)
+    if (residue.length > 0) {
+      throw new ArchiveInstallRefusal(
+        'RESIDUE',
+        `skill "${name}" was removed from its install location, but ${residue.length} other copy/copies `
+        + `in the skill root still make the runtime load "${name}": `
+        + `${residue.map(row => `"${row.entryName}"`).join(', ')} — `
+        + 'rename or delete them (they are your own files, so the Capability Hub will not touch them) '
+        + `and the skill will really be gone`,
+      )
+    }
     return target
   })
 }
@@ -1327,21 +1519,26 @@ function metaString(value: unknown): string | undefined {
  * @returns rows sorted by name.
  */
 export async function listLocalSkills(skillsDir: string): Promise<LocalSkillRow[]> {
-  const names = await listInstalledSkills(skillsDir)
-  const rows: LocalSkillRow[] = []
-  for (const name of names) {
-    const meta = await readSkillFrontmatter(join(skillsDir, name, 'SKILL.md'))
+  // 用**运行时发现的行**（带落点路径）而不是"名字 → join(skillsDir, name)"：目录名与
+  // frontmatter 名不一致时（用户自建目录、旧备份），按名字拼路径会读错文件（R13-B P1-2）。
+  const rows = await discoverRuntimeSkills(skillsDir)
+  const seen = new Set<string>()
+  const result: LocalSkillRow[] = []
+  for (const row of rows) {
+    if (seen.has(row.name)) continue
+    seen.add(row.name)
+    const meta = await readSkillFrontmatter(row.skillMdPath)
     const displayName = metaString(meta.name)
     const description = metaString(meta.description)
     const version = metaString(meta.version)
-    rows.push({
-      name,
+    result.push({
+      name: row.name,
       ...displayName === undefined ? {} : { displayName },
       ...description === undefined ? {} : { description },
       ...version === undefined ? {} : { version },
     })
   }
-  return rows
+  return result
 }
 
 /** Parse the YAML frontmatter of a SKILL.md (best-effort). */

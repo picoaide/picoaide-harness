@@ -7,6 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import type { DesktopUpdateSource, UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import {
+  MAX_TIMER_DELAY_MS,
   updateRetryDelayMs,
   type DesktopUpdateErrorCategory,
   type UpdateRetryPolicy,
@@ -50,7 +51,9 @@ export const name = 'desktop-updates'
 /** Native adapter required for network, tray, confirmation, and installer access. */
 export const inject = ['desktopRuntime']
 
-const MAX_TIMER_DELAY_MS = 2_147_483_647
+// 每个延时字段的 schema 上界 = 定时器能真正接受的上界（`desktop-update-contract.ts`
+// 导出，`updateRetryDelayMs` 的抖动后钳制用的是同一个常量）：抖动的**对称**性会让
+// `base = 上界` + `retryJitterRatio = 1` 组合出 1.5×上界，只钉 schema 挡不住（R13-E-P3）。
 const MAX_STATE_BYTES = 4 * 1024
 
 /**

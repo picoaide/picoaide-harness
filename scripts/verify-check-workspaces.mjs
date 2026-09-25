@@ -79,6 +79,62 @@ const SELFTEST_MIN_SCENARIOS = 24
  *      `SELFCHECK_PROBE_CHILD_ARG`),副本必须 EXIT=1 且把那句话打到 stderr ——
  *      把 `selfCheckFail()` 掏成 no-op 之后副本会 EXIT=0 ⇒ 本文件必红。
  */
+
+// ============================================================================
+// P1-2（第十三轮独立验证 V1 §4.2）：`VERDICT_LINE` 形态的**独立见证**。
+//
+// 现场：`check-workspaces.mjs` 的每条形态把 `pattern` / 样本 / `witness` 三样放在**同一个
+// 文件的同一张表**里 —— 三处同文件编辑（收窄正则 + 改样本 + 改 witness）之后，
+// `--list` **EXIT=0**：真实失败行（`3 failed`）在 CI 日志里整行消失，而门禁照样报"有失败"。
+// 判定权落在**被判定集合的内部**。
+//
+// 收口：见证样本搬到**这个文件**（不同文件、不同登记值通道 —— 本文件的字节由
+// `check-root-guards.mjs` 的 `check:check-workspaces` digest 锚着，而 `check-workspaces.mjs`
+// 的判定表由它自己的自检看着），并对拍两端：
+//   ① 被判定表里的每一条形态都必须在这里有见证（少一条即红）；
+//   ② 这里的每一条见证都必须对应被判定表里真实存在的形态（死条目即红）；
+//   ③ 用**被判定表里的正则**去匹配**这里的**见证 —— 收窄正则就必须同时改这个文件
+//      （以及它的 digest 登记），一次性编辑不再成立；
+//   ④ **负控**：把一条见证对应的正则人为收窄，检查必须报出来（证明这条判据能被打坏，
+//      不是恒真）。
+// ============================================================================
+/** 独立见证：形态 id → 一行**真实运行器输出形态**的样本（由本文件维护，不进被判定表）。 */
+const INDEPENDENT_VERDICT_WITNESSES = new Map([
+  ['times', '× adds two numbers'],
+  ['heavy-x', '✖ 2 tests failed'],
+  ['bullet', '● can render a panel'],
+  ['fail', 'FAIL src/components/foo.test.tsx'],
+  ['dash-fail', '--- FAIL: TestLoginBudget (0.12s)'],
+  ['panic', 'panic: runtime error: index out of range [1] with length 1'],
+  ['not-ok', 'not ok 3 - adds numbers'],
+  ['assertion-error', 'AssertionError [ERR_ASSERTION]: expected 1 to be 2'],
+  ['named-error', 'ReferenceError: marker is not defined'],
+  ['bare-error', 'Error: connect ECONNREFUSED 127.0.0.1:1'],
+  ['bare-error-lower', 'error Command failed with exit code 1.'],
+  ['elifecycle', 'npm ERR! ELIFECYCLE Command failed with exit code 1.'],
+  ['tsc-paren', 'src/a.ts(12,5): error TS2345: Argument of type …'],
+  ['tsc-pretty', 'src/a.ts:12:5 - error TS2345: Argument of type …'],
+  ['tsc-bare', 'error TS6133: declared but its value is never read'],
+  ['lint-position', '  12:5  error  Unexpected var, use let or const instead  no-var'],
+  ['tests-failed', 'Tests:       3 failed, 7 passed, 10 total'],
+  ['test-files-failed', ' Test Files  2 failed | 5 passed (7)'],
+  ['count-failed', '     3 failed | 12 passed (15)'],
+  ['rule', '⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯⎯⎯'],
+  ['gh-annotation', '##[error]Process completed with exit code 1.'],
+  ['npm-error', 'npm error code ELIFECYCLE'],
+  ['traceback', 'Traceback (most recent call last):'],
+  ['pytest-e', 'E   assert 1 == 2'],
+  ['node-internal', '    at node:internal/modules/cjs/loader:1503:19'],
+  ['unhandled', 'Unhandled Rejection: Error: boom'],
+  ['json-counts', '{"numFailedTestSuites":2,"numFailedTests":3}'],
+  ['json-success', '{"results":[{"filePath":"a","success":false}]}'],
+  ['go-json-fail', '{"Time":"2026-09-25T00:00:00Z","Action":"fail","Package":"x"}'],
+])
+/** 被判定表所在的文件（正则的**来源**；见证的**宿主**是本文件）。 */
+const CHECK_WORKSPACES_PATH = new URL('./check-workspaces.mjs', import.meta.url)
+/** 独立见证的条数下限（棘轮：删一条形态必须同时改这里与被判定表，两处都进 diff）。 */
+const SELFTEST_VERDICT_WITNESS_FLOOR = 29
+
 const SELF_CHECKS = [
   { id: 'checks-floor', label: 'check() 执行条数下限' },
   { id: 'scenarios-floor', label: '合成树场景数下限' },
@@ -90,6 +146,7 @@ const SELF_CHECKS = [
   { id: 'domain-root-anchor', label: '域名守卫的扫描根断言可被 --selftest 打坏(R4-A N4)' },
   { id: 'channel-events', label: '检测通道与计票通道一致(数组长度 == 事件计数)' },
   { id: 'exit-channel', label: '任一通道有失败事件 ⇒ 退出码必须为 1(检测 ≠ 退出)' },
+  { id: 'verdict-witness-independent', label: 'VERDICT_LINE 形态的见证来自独立文件(第十三轮 V1 §4.2)' },
 ]
 /** 自检条数下限（棘轮:删登记项必须同时改这个常量并进 diff）。 */
 const SELFTEST_MIN_SELF_CHECKS = SELF_CHECKS.length
@@ -2516,6 +2573,65 @@ function buildRootGuardProbe(options = {}) {
 
 // 自检① / ②：条数与样本下限。**下限只允许被"变多"越过** —— 断言表被清空、
 // 场景被删掉时这两条立刻红（而它们不经过 fail()，掏空 fail() 也躲不过）。
+{
+  // ---- ⑤ 独立见证：`VERDICT_LINE` 形态的判定词住在**另一个文件**里（V1 §4.2）---------
+  //
+  // 判据（现场与理由见 `INDEPENDENT_VERDICT_WITNESSES` 的注释）：
+  //   ① 被判定表里的每一条形态都必须在这里有见证；
+  //   ② 这里的每一条见证都必须对应被判定表里真实存在的形态（死条目即红）；
+  //   ③ 用**被判定表里的正则**匹配**这里的**见证（收窄正则 ⇒ 本文件必须同步改）；
+  //   ④ 负控：人为收窄一条正则，这条判据必须报出来（证明它不是在恒真）。
+  const verdictSource = readFileSync(CHECK_WORKSPACES_PATH, 'utf8')
+  const forms = new Map()
+  {
+    // 正则的**来源**只能是被判定表（本文件不重写正则，只提供独立见证）。
+    const pattern = /id: '([a-z0-9-]+)',[\s\S]{0,400}?pattern: String\.raw`([^`]*)`/gu
+    let match
+    while ((match = pattern.exec(verdictSource)) !== null) forms.set(match[1], match[2])
+  }
+  check(forms.size >= SELFTEST_VERDICT_WITNESS_FLOOR,
+    `P1-2: 从 \`check-workspaces.mjs\` 里只解析出 ${forms.size} 条判定形态（下限 `
+    + `${SELFTEST_VERDICT_WITNESS_FLOOR}）—— 形态表被删/被改名，独立见证就失去了对拍对象`)
+  check(INDEPENDENT_VERDICT_WITNESSES.size >= SELFTEST_VERDICT_WITNESS_FLOOR,
+    `P1-2: 独立见证表只有 ${INDEPENDENT_VERDICT_WITNESSES.size} 条（下限 ${SELFTEST_VERDICT_WITNESS_FLOOR}）`
+    + '—— 见证表被清空就等于把判定权交回被判定集合内部')
+  const missing = [...forms.keys()].filter(id => !INDEPENDENT_VERDICT_WITNESSES.has(id))
+  const dead = [...INDEPENDENT_VERDICT_WITNESSES.keys()].filter(id => !forms.has(id))
+  check(missing.length === 0,
+    `P1-2: 这些判定形态在**独立见证表**里没有见证：${missing.join('、') || '（无）'}`
+    + '\n  ⇒ 见证必须来自另一个文件（本文件）：同文件三处编辑（正则 + 样本 + witness）'
+    + '就能让真实失败行在 CI 日志里整行消失，而门禁照样报"有失败"（V1 §4.2 实测 EXIT=0）。')
+  check(dead.length === 0,
+    `P1-2: 独立见证表里有**死条目**（被判定表里没有这条形态）：${dead.join('、') || '（无）'}`
+    + '\n  ⇒ 死条目 = 见证在为一个不存在的形态作证（形态被删/改名而见证没跟上）。')
+  for (const [id, witness] of INDEPENDENT_VERDICT_WITNESSES) {
+    const pattern = forms.get(id)
+    if (typeof pattern !== 'string') continue
+    let compiled = null
+    try {
+      compiled = new RegExp(pattern, 'u')
+    } catch (error) {
+      check(false, `P1-2: 形态 \`${id}\` 的正则编译失败：${error.message}`)
+      continue
+    }
+    check(compiled.test(witness),
+      `P1-2: 形态 \`${id}\` 的正则**认不出独立见证**：pattern = ${JSON.stringify(pattern)} / `
+      + `witness(独立) = ${JSON.stringify(witness)}\n  ⇒ 正则被收窄了（或见证被改坏了）—— `
+      + '这条判据的全部意义就是"判定词不能由被判定表自己说了算"。')
+  }
+  // ④ 负控：把 `count-failed` 的正则人为收窄，这条对拍必须报出来。
+  {
+    const probeForms = new Map(forms)
+    probeForms.set('count-failed', String.raw`\d+\s+ZZfailed\b`)
+    const witness = INDEPENDENT_VERDICT_WITNESSES.get('count-failed')
+    const bites = witness !== undefined && !new RegExp(probeForms.get('count-failed'), 'u').test(witness)
+    check(bites === true,
+      'P1-2(负控): 把 `count-failed` 的正则收窄成 `\\d+\\s+ZZfailed\\b` 之后，独立见证必须**认不出**它'
+      + '（否则这条对拍是恒真的：它测不出任何收窄）')
+  }
+  selfCheckPass('verdict-witness-independent')
+}
+
 if (checksRun < SELFTEST_MIN_CHECKS) {
   selfCheckFail('checks-floor', `只执行了 ${checksRun} 条断言（下限 ${SELFTEST_MIN_CHECKS}）—— 回归网的断言表被清空/缩水`)
 } else {

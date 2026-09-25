@@ -111,8 +111,12 @@ func main() {
 	// 明细永不删除(磁盘随经过的月份单调增长)。同一形态在审计侧已由
 	// internal/auditretention 修好(R4-D-4),usage 侧当时漏了。
 	if n, rerr := serverstore.EffectiveRetentionMonths(db); rerr == nil {
-		// 北京日口径(不依赖容器 TZ);RebuildUsageLedger 内部亦会归一。
-		from := serverstore.BeijingDay(time.Now()).AddDate(0, -max(n, 6), 0)
+		// R13-GE（R13A-02）：窗口起点必须走**唯一实现** RetentionWindowStart —— 它
+		// 先归一到北京月初再回溯 N 个月。旧实现是 `BeijingDay(now).AddDate(0,-N,0)`，
+		// 而 AddDate 会归一化溢出（8 月 31 日减 6 个月 = 2 月 31 日 → 3 月 3 日）⇒
+		// 仍**在保留期内**的最早一个月被整月跳过自愈（≈10 天/年触发，该月的账本洞
+		// 此后没有任何执行者会补）。
+		from := serverstore.RetentionWindowStart(time.Now(), max(n, 6))
 		if lerr := serverstore.RebuildUsageLedger(db, from, time.Now()); lerr != nil {
 			log.Printf("startup rebuild usage ledger: %v", lerr)
 		}

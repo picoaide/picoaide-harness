@@ -1,3 +1,22 @@
+/**
+ * Largest delay one timer may be given, in milliseconds.
+ *
+ * Node (and therefore Electron) stores a `setTimeout` delay in a 32-bit signed
+ * integer; anything above this bound is **clamped to 1 ms** and reported through
+ * a `TimeoutOverflowWarning`. A retry configured as "try again in ~24.8 days"
+ * would therefore become "retry immediately" — silently, because that warning is
+ * not surfaced to the user.
+ *
+ * The value handed to `setTimeout` is the **jittered** delay, never the
+ * configured one, so the bound has to be applied after the jitter (see
+ * {@link updateRetryDelayMs}). Capping the configuration alone leaves the cap
+ * reachable from below: `base = MAX_TIMER_DELAY_MS` with `jitterRatio = 1` is a
+ * combination the config schema itself allows, and symmetric jitter pushes it to
+ * `1.5 × MAX` (R13-E-P3). This export is the ONE constant for both uses — the
+ * schema's per-field maximum and the clamp — so the two cannot drift apart.
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 /** Same-origin endpoint serving the live desktop update badge snapshot. */
 export const DESKTOP_UPDATE_PATH = '/api/pico/desktop/update'
 
@@ -86,10 +105,17 @@ export interface UpdateRetryPolicy {
  * Jitter is derived from the attempt number instead of randomness so that one
  * update flow produces the same schedule on every client and in every test: the
  * purpose is only to keep many clients from retrying on the same millisecond.
+ *
+ * **The 32-bit bound is applied to the returned value, i.e. AFTER the jitter**
+ * (R13-E-P3). The jitter is symmetric — `base ± spread/2` — so `base = MAX` with
+ * `jitterRatio = 1` (both accepted by the config schema) produces `1.5 × MAX`,
+ * which `setTimeout` silently clamps to 1 ms: a "retry in ~24.8 days" became
+ * "retry right now". Clamping here, where the value is produced, is the only
+ * place that sees the final number.
  * @param policy - bounded retry policy.
  * @param attempt - attempt that just failed (1 for the initial attempt).
  * @param seed - stable per-operation seed, normally the version under transfer.
- * @returns delay in milliseconds.
+ * @returns delay in milliseconds, always within `[0, MAX_TIMER_DELAY_MS]`.
  */
 export function updateRetryDelayMs(
   policy: UpdateRetryPolicy,
@@ -98,7 +124,7 @@ export function updateRetryDelayMs(
 ): number {
   if (policy.delaysMs.length === 0) return 0
   const base = policy.delaysMs[Math.min(Math.max(attempt, 1), policy.delaysMs.length) - 1] ?? 0
-  if (base <= 0 || policy.jitterRatio <= 0) return Math.max(0, base)
+  if (base <= 0 || policy.jitterRatio <= 0) return clampTimerDelay(base)
   const bucketCount = 100
   // FNV-1a over the seed and attempt: stable, cheap, and dependency-free.
   let hash = 0x811c9dc5
@@ -108,7 +134,22 @@ export function updateRetryDelayMs(
   }
   const spread = Math.round(base * policy.jitterRatio)
   const offset = spread === 0 ? 0 : ((hash % (bucketCount + 1)) / bucketCount) * spread - spread / 2
-  return Math.max(0, Math.round(base + offset))
+  return clampTimerDelay(Math.round(base + offset))
+}
+
+/**
+ * Clamp one delay into the range `setTimeout` can actually honour.
+ *
+ * Shared by every return path of {@link updateRetryDelayMs} so "what the policy
+ * produced" and "what the timer will be given" are the same number: a negative
+ * or over-32-bit delay is a scheduling bug either way, and the caller has no
+ * second chance to notice (the clamp inside Node is invisible and becomes 1 ms).
+ * @param value - delay the policy computed, in milliseconds.
+ * @returns the delay, never below 0 and never above {@link MAX_TIMER_DELAY_MS}.
+ */
+function clampTimerDelay(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(MAX_TIMER_DELAY_MS, Math.max(0, value))
 }
 
 /** Empty snapshot before the update coordinator has produced any state. */

@@ -33,6 +33,39 @@
  *      · `ldap-rbac-fall-open`：auditor 的写请求被放行(200) ⇒ ldap 必须 exit 1
  *        （旧脚本那条恒真断言在这里是绿的 —— 变异验证的靶子）。
  *
+ *   4. **两个 `.py` 契约脚本的判据表 / 判定通道 / 端到端变异**（2026-09-23 第十三轮审计
+ *      F-01，P0）：第 4–6 轮把上面第 2b/2c 段那套纪律**只加在 `electron-shots` 一条腿**上，
+ *      两个 `.py` 停在"`--self-test` 夹具数 ≥15 + 3 条假网关负例"。现场：
+ *
+ *          dex 掏空运行期判据: 6 / ldap 掏空运行期判据: 8
+ *          self-test: 24/24 条判据夹具符合预期   ← 夹具层完全看不出掏空
+ *          check-integration-tests: OK — … 2 个契约脚本判据自检通过 …   REAL_GATE_EXIT=0
+ *
+ *      即"判据的自我陈述比它实际判的东西宽"。现在两个脚本的契约落进**判据表**
+ *      （`CRITERIA`，唯一真源），运行期按 id 经 `contractkit.Reporter.report()` 求值，
+ *      本守卫做四层检查：
+ *        ① **登记值对账**：精确 id 集合 + **逐 id 正/负例条数**（`--dump-criteria`）——
+ *           删判据、改 id、删夹具都必须同时改这里的登记清单；
+ *        ② **运行期逐条引用**：每条判据 id 都必须有一个"以该 id 字面量为首参"的调用点，
+ *           且被调方**逐字**是 `reporter.report`、观测非空（`{}` = 没把观测传进来）；
+ *        ③ **判据本体自证**：`--self-test` 每条判据的正/负例夹具必须给出期望结论；
+ *        ④ **判定通道自证 + 端到端变异**：`--self-check` 把全部夹具经**运行期那条
+ *           `report()`** 求值；再在**变异副本**上复跑四种掏空形态 ——
+ *           · `criteria-tautology`（逐条判据 × 两个脚本：把 `evaluate` 掏成 `return []`）
+ *             ⇒ `--self-test` 必须非零，且必须**具名**咬住被掏空的那条；
+ *           · `judge-tautology`（`judge()` 恒真）⇒ `--self-check` 必须非零，
+ *             而 `--self-test` 照旧绿（证明两层互补，单靠夹具层是盲的 —— N7 的形态）；
+ *           · `count-side-zero`（只改计票侧 `failures += 0`）⇒ `--self-check` 必须非零；
+ *           · `runtime-wrapper`（运行期通道换成恒真包装，id 引用一字未改）
+ *             ⇒ `--self-check` 必须非零。
+ *
+ *   5. **用例登记制 + 聚合层双向对账**（第十三轮 F-02 / F-03，P1）：
+ *      `integration-tests/**` 下每个可执行体（`.py` / `.mjs` / `.sh`）都必须在
+ *      `INTEGRATION_ENTRIES` 里登记角色；**登记了却不在 / 在却没登记都红**。
+ *      聚合层 `run-all.sh` 的 `run "<名>" <runner> <路径>` 行与登记表里
+ *      `aggregateName` 的条目**双向逐条对拍**（顺序也钉住）—— 此前只有
+ *      `electron-shots` 的接线被钉住，两个 `.py` 从聚合层摘线**零判据**。
+ *
  * 找不到 python3 时**判失败**（不是跳过）：本仓 CI runner（ubuntu-24.04）自带 python3，
  * "工具不在 ⇒ 静默不查"正是本守卫要根除的形态。
  *
@@ -40,7 +73,9 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -68,9 +103,163 @@ function tempDir(prefix) {
 
 /** 契约用例脚本（带 --self-test 与真实断言的那两个）。 */
 const CONTRACT_TESTS = [
-  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 15 },
-  { id: 'ldap', path: 'integration-tests/openldap/ldap-rbac-brand-test.py', minCases: 15 },
+  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 32 },
+  { id: 'ldap', path: 'integration-tests/openldap/ldap-rbac-brand-test.py', minCases: 35 },
 ]
+
+/**
+ * 两个 `.py` 契约脚本的**判据表登记值**（第十三轮审计 F-01 的修复）。
+ *
+ * 与 `ELECTRON_SHOTS_EXPECTED_ASSERTIONS` 同一手法，但多一列：**逐 id 的正/负例条数**。
+ * 为什么必须有条数这一列 —— 只用"夹具总数 ≥ 下限"当棘轮时，实测 dex 可删 9/24（37.5%）、
+ * ldap 可删 14/29（48%）而门禁全绿（第十三轮 F-04），且每次只删 1 条、分 9/14 次提交，
+ * 任何单次 diff 都看不出退化。条数写进登记值之后，删任何一条夹具都必须改这里的数字
+ * （登记值进 diff 才会被评审看见）。
+ *
+ * ⚠️ 改 `CRITERIA` / 增删夹具**必须**同步这张表。`positive >= 1 && negative >= 1` 已由
+ * `--self-test` 自身强制（缺正例/负例都会红），这里记的是**精确条数**。
+ */
+const DEX_EXPECTED_CRITERIA = [
+  { id: 'login-start', positive: 1, negative: 2 },
+  { id: 'idp-login-page', positive: 1, negative: 2 },
+  { id: 'submit-credentials', positive: 1, negative: 3 },
+  { id: 'approval-advance', positive: 2, negative: 3 },
+  { id: 'callback-reached', positive: 1, negative: 3 },
+  { id: 'deep-link', positive: 2, negative: 6 },
+  { id: 'deep-link-identity', positive: 2, negative: 3 },
+]
+const LDAP_EXPECTED_CRITERIA = [
+  { id: 'employee-login', positive: 1, negative: 3 },
+  { id: 'admin-login', positive: 1, negative: 3 },
+  { id: 'auditor-employee-rejected', positive: 1, negative: 2 },
+  { id: 'auditor-admin-login', positive: 1, negative: 1 },
+  { id: 'auditor-permissions', positive: 1, negative: 2 },
+  { id: 'auditor-read', positive: 1, negative: 1 },
+  { id: 'auditor-write-forbidden', positive: 1, negative: 4 },
+  { id: 'anonymous-write-control', positive: 1, negative: 1 },
+  { id: 'channel-contract', positive: 1, negative: 6 },
+  { id: 'portal-download-section', positive: 1, negative: 2 },
+]
+
+/** 逐用例的判据登记表（唯一真源：上面两张表）。 */
+const CONTRACT_CRITERIA = new Map([
+  [CONTRACT_TESTS[0].id, DEX_EXPECTED_CRITERIA],
+  [CONTRACT_TESTS[1].id, LDAP_EXPECTED_CRITERIA],
+])
+
+/**
+ * `integration-tests/**` 的**用例登记表**（第十三轮审计 F-03 的修复）。
+ *
+ * 现场：这个面**只有"减少"有判据、"增加"没有** —— 新增一个必然 `exit 77` 的用例
+ * （或一个恒真断言的用例）接进 `run-all.sh`，门禁照 `EXIT=0`，还会计进
+ * "3 个 Python 用例语法通过"。删掉已登记用例反而会红。这正是本仓已登记的假绿类
+ * 「判据的语料完整性」。
+ *
+ * 角色（决定这条登记项还要满足哪些判据）：
+ *   · `aggregate`      —— 聚合层脚本（`run-all.sh`）：必须有 SKIP(77) 契约。
+ *   · `contract-test`  —— 带 `CRITERIA` 判据表的契约用例：必须有 `--self-test` /
+ *     `--self-check` / `--dump-criteria` 三个入口，判据表与夹具受 `CONTRACT_CRITERIA`
+ *     登记值对账，且**必须被聚合层调用**（`aggregateName`）。
+ *   · `assertion-table`—— `electron-shots` 的判据表（被运行期脚本与门禁共同消费）。
+ *   · `judge-channel`  —— 判据通道模块（被 `contract-test` 引用，不单独跑）。
+ *   · `judged-runner`  —— 消费判据表的运行期脚本，**必须被聚合层调用**。
+ *
+ * `aggregateName` + `runner` + `aggregatePath` 就是 `run-all.sh` 里那一行的形状：
+ *   `run "<aggregateName>" <runner> <aggregatePath>`
+ * 双向对账（登记了却不在 ⇒ 红；在却没登记 ⇒ 红；顺序不同 ⇒ 红）见 §0。
+ */
+const INTEGRATION_ENTRIES = [
+  { path: 'integration-tests/run-all.sh', role: 'aggregate' },
+  { path: 'integration-tests/contractkit.py', role: 'judge-channel' },
+  { path: 'integration-tests/dex/config.yaml', role: 'fixture' },
+  {
+    path: 'integration-tests/dex/dex-sso-test.py',
+    role: 'contract-test',
+    runner: 'python3',
+    aggregatePath: 'dex/dex-sso-test.py',
+    aggregateName: '1. Dex SSO 流程测试',
+  },
+  {
+    path: 'integration-tests/openldap/ldap-rbac-brand-test.py',
+    role: 'contract-test',
+    runner: 'python3',
+    aggregatePath: 'openldap/ldap-rbac-brand-test.py',
+    aggregateName: '2. LDAP + RBAC + 渠道集成测试',
+  },
+  { path: 'integration-tests/electron-shots/assertions.mjs', role: 'assertion-table' },
+  { path: 'integration-tests/electron-shots/report.mjs', role: 'judge-channel' },
+  {
+    path: 'integration-tests/electron-shots/electron-shots.mjs',
+    role: 'judged-runner',
+    runner: 'node',
+    aggregatePath: 'electron-shots/electron-shots.mjs',
+    aggregateName: '3. Electron 截图验证(需打包 app)',
+  },
+]
+
+/**
+ * 语法/判据面扫描的扩展名（`INTEGRATION_ENTRIES` 必须覆盖它们全部）。
+ *
+ * 为什么连 `.yaml` 也在内：`dex/config.yaml` 是**夹具**（Dex 的测试用户/客户端定义），
+ * 改它等于改这个用例的前置，而此前它与"新增一个没人管的夹具"一样零判据。
+ * 只登记可执行体、把夹具留在集合外，正是 F-03 那条"判据的语料完整性"的同族形态。
+ */
+const INTEGRATION_SCANNED_EXTENSIONS = ['.py', '.mjs', '.sh', '.yaml', '.yml']
+
+/**
+ * 判据被掏成恒真的**注入锚点**：每条 `evaluate` 的第一句。
+ *
+ * 锚点是**契约**而不是巧合：`contractkit.observation_of()` 的文档里写明了门禁靠它做
+ * 端到端变异。锚点消失时下面的变异会 `fail(...)` 而不是静默跳过（"判据还在不在"这件事
+ * 不能因为源码形状变了就没人管）。
+ * @param criterionId - 判据 id。
+ * @returns 该判据 `evaluate` 里必须逐字出现的那一行。
+ */
+const criteriaAnchor = criterionId => `obs = observation_of(obs, '${criterionId}')`
+
+/**
+ * 判定通道（`contractkit.py`）的**掏空形态**变异表 —— 与 `electron-shots` 的
+ * `BREAK_CASES` 同形：每条都必须在**变异副本**上被 `--self-check` 咬住。
+ */
+const CONTRACT_KIT_BREAK_CASES = [
+  {
+    id: 'judge-tautology',
+    label: 'judge() 恒真（N7 原形态）',
+    needle: "    problems = item['evaluate'](observation)",
+    replacement: '    problems = []',
+    command: '--self-check',
+    expect: /经 report\(\) 求值期望/u,
+    // 夹具层对这条形态是**盲的**（--self-test 直接调 evaluate）—— 这条变异存在的意义
+    // 就是证明"两层互补"：单靠夹具层看不出运行期已经不再按表判。
+    fixtureLayerStillGreen: true,
+  },
+  {
+    id: 'count-side-zero',
+    label: '只改计票侧（failures += 0，R5-D-4 原形态）',
+    needle: '            self._failures += 1',
+    replacement: '            self._failures += 0',
+    command: '--self-check',
+    expect: /判定结论.*与失败计数.*不一致/u,
+  },
+]
+
+/**
+ * 运行期通道被**整体替换**的变异（注入在脚本的 `_new_reporter()` 里；id 引用一字未改）。
+ * 静态判据只钉"调用点还在、还走 `reporter.report`、还传了观测"，管道被换掉只有动态能咬。
+ */
+const CONTRACT_RUNTIME_WRAPPER_BREAK = {
+  id: 'runtime-wrapper',
+  label: '运行期通道换成恒真包装（D-1 原形态）',
+  needle: '    return Reporter(CRITERIA)',
+  replacement: '    return type(\'M\', (), {\n'
+    + '        \'report\': lambda self, criterion_id, observation: True,\n'
+    + '        \'failures\': lambda self: 0,\n'
+    + '        \'events\': lambda self: [],\n'
+    + '        \'lines\': lambda self: [],\n'
+    + '        \'exit_code\': lambda self: 0,\n'
+    + '    })()',
+  expect: /经 report\(\) 求值期望|只打了/u,
+}
 
 /**
  * `electron-shots` 判据表的**登记值**（第四轮审计 R4-A-17/R4-A-18 的修复）。
@@ -350,6 +539,107 @@ function startGateway(scenario) {
 /** 场景表：每个场景断言"谁是主角、期望退出码、输出里必须/不得出现什么"。 */
 /** 主流程：语法闸门 → 判据自检 → 假网关正/反例。返回 0/1。 */
 async function main() {
+// ---------------------------------------------------------------------------
+// 0. 用例登记制 + 聚合层双向对账（第十三轮审计 F-02 / F-03，P1）
+//
+// 现场（两条都在本轮实测可复跑）：
+//   · F-02：删掉 `run-all.sh` 里两个 `.py` 的调用行 ⇒ 门禁 `EXIT=0`
+//           （只有 `electron-shots` 的接线被钉住 —— 同一个文件里的两种接线，只有一种有判据）；
+//   · F-03：新增一个必然 `exit 77` 的用例（或恒真断言用例）并接进 `run-all.sh` ⇒ `EXIT=0`，
+//           还会计进"3 个 Python 用例语法通过"。删掉已登记用例反而红
+//           ⇒ 这个面**只有"减少"有判据、"增加"没有**。
+//
+// 处置：登记表（`INTEGRATION_ENTRIES`）+ **双向**对账 —— 登记了却不在 ⇒ 红、
+// 在却没登记 ⇒ 红、聚合层少调/多调/顺序不对 ⇒ 红。
+// ---------------------------------------------------------------------------
+{
+  const registered = new Map(INTEGRATION_ENTRIES.map(entry => [entry.path, entry]))
+  check(registered.size === INTEGRATION_ENTRIES.length,
+    '登记表 INTEGRATION_ENTRIES 里有重复路径 —— 登记值必须一一对应')
+
+  // ① 登记了却不在磁盘上 ⇒ 红（"登记表指向一个已经不存在的用例"）。
+  for (const entry of INTEGRATION_ENTRIES) {
+    check(existsSync(join(ROOT, entry.path)),
+      `形态⑦: 登记表里的 ${entry.path}（角色 ${entry.role}）在磁盘上不存在 —— `
+      + '登记了却不在 ⇒ 红（先删登记项，或把用例补回来）')
+  }
+
+  // ② 在磁盘上却没登记 ⇒ 红（"新增用例不登记"的现场形态）。
+  const integrationDir = join(ROOT, 'integration-tests')
+  /** 递归收集登记面内的全部文件（扩展名见 INTEGRATION_SCANNED_EXTENSIONS）。 */
+  const walkRegistered = dir => {
+    const out = []
+    for (const entry of readdirSync(dir)) {
+      if (entry === 'node_modules' || entry === '__pycache__' || entry === '.git') continue
+      const path = join(dir, entry)
+      if (statSync(path).isDirectory()) out.push(...walkRegistered(path))
+      else if (INTEGRATION_SCANNED_EXTENSIONS.some(ext => entry.endsWith(ext))) out.push(relative(ROOT, path))
+    }
+    return out
+  }
+  const onDisk = (existsSync(integrationDir) ? walkRegistered(integrationDir) : []).sort()
+  const unregistered = onDisk.filter(path => !registered.has(path))
+  check(unregistered.length === 0,
+    `形态⑦: integration-tests/ 下这些可执行体没有登记（角色）: ${unregistered.join(', ')}`
+      + '\n  ⇒ 新增用例**必须**在 scripts/check-integration-tests.mjs 的 INTEGRATION_ENTRIES 里登记'
+      + '（登记值进 diff 才会被评审看见；"新增用例不登记"正是第十三轮 F-03 的假绿通道）')
+  const staleEntries = [...registered.keys()].filter(path => !onDisk.includes(path)).sort()
+  check(staleEntries.length === 0,
+    `形态⑦: 登记表里这些条目不在扫描面内（扩展名不在 ${INTEGRATION_SCANNED_EXTENSIONS.join('/')} 里？）: `
+      + `${staleEntries.join(', ')}`)
+
+  // ③ 聚合层双向对账：`run-all.sh` 的 `run "<名>" <runner> <路径>` 行 ↔ 登记表里
+  //    带 aggregateName 的条目（顺序也钉住 —— 顺序变了同样是"聚合层被改过"）。
+  const runner = existsSync(join(ROOT, 'integration-tests', 'run-all.sh'))
+    ? readFileSync(join(ROOT, 'integration-tests', 'run-all.sh'), 'utf8')
+    : ''
+  // 允许路径之后还有额外实参（`"$SERVER_BASE"` 这类）；最少三段：名字 / runner / 路径。
+  const aggregateLines = [...runner.matchAll(/^run\s+"([^"]+)"\s+(\S+)\s+(\S+)(?:\s+.*)?$/gmu)]
+    .map(match => ({ name: match[1], runner: match[2], path: match[3] }))
+  const expectedAggregate = INTEGRATION_ENTRIES
+    .filter(entry => typeof entry.aggregateName === 'string')
+    .map(entry => ({ name: entry.aggregateName, runner: entry.runner, path: entry.aggregatePath }))
+  check(aggregateLines.length === expectedAggregate.length,
+    `形态⑦: run-all.sh 里有 ${aggregateLines.length} 条 \`run "…"\` 调用，登记表要求 `
+      + `${expectedAggregate.length} 条 —— 聚合层的接线数与登记值不一致`
+      + `\n  实际:${aggregateLines.map(line => line.path).join(', ') || '(空)'}`
+      + `\n  登记:${expectedAggregate.map(line => line.path).join(', ') || '(空)'}`)
+  for (const [index, expected] of expectedAggregate.entries()) {
+    const actual = aggregateLines[index]
+    if (actual === undefined) {
+      fail(`形态⑦: run-all.sh 缺少第 ${index + 1} 条接线 —— 必须逐字是 `
+        + `\`run "${expected.name}" ${expected.runner} ${expected.path}\``
+        + '\n  ⇒ 两个 .py 从聚合层摘线此前**零判据**（F-02），现在少一条、改一行、换顺序都红')
+      continue
+    }
+    check(actual.name === expected.name && actual.runner === expected.runner && actual.path === expected.path,
+      `形态⑦: run-all.sh 第 ${index + 1} 条接线与登记值不一致`
+        + `\n  实际:run "${actual.name}" ${actual.runner} ${actual.path}`
+        + `\n  登记:run "${expected.name}" ${expected.runner} ${expected.path}`)
+  }
+  // ④ 反向：聚合层里出现的调用必须都能在登记表里找到（"在却没登记"）。
+  for (const line of aggregateLines) {
+    const matched = expectedAggregate.some(expected => expected.path === line.path
+      && expected.runner === line.runner && expected.name === line.name)
+    check(matched,
+      `形态⑦: run-all.sh 调用了未登记的 \`${line.runner} ${line.path}\` —— `
+      + '聚合层里出现的调用必须都能在 INTEGRATION_ENTRIES 里找到（否则它是个没人管的用例）')
+  }
+
+  // ⑤ contract-test 的三个入口必须真的存在（登记角色 = 承诺）。
+  for (const entry of INTEGRATION_ENTRIES.filter(item => item.role === 'contract-test')) {
+    const source = readFileSync(join(ROOT, entry.path), 'utf8')
+    for (const [flag, why] of [
+      ['--self-test', '判据本体自证（每条判据的正/负例夹具）'],
+      ['--self-check', '判定通道自证（全部夹具经运行期 report() 求值）'],
+      ['--dump-criteria', '判据表登记值（供本守卫做精确 id 集合与逐 id 条数对账）'],
+    ]) {
+      check(source.includes(flag), `形态⑦: ${entry.path}（contract-test）必须实现 ${flag} —— ${why}`)
+    }
+  }
+  notes.push(`登记制: ${onDisk.length} 个可执行体全部登记、聚合层 ${aggregateLines.length} 条接线双向对账 ✓`)
+}
+
 // ---------------------------------------------------------------------------
 // 1. 语法闸门：integration-tests 下所有 .py 必须能解析
 // ---------------------------------------------------------------------------
@@ -686,7 +976,17 @@ for (const file of mjsFiles) {
   ]
   for (const breakCase of BREAK_CASES) {
     const mutantDir = tempDir(`shots-mutant-${breakCase.id}-`)
-    for (const file of ['electron-shots.mjs', 'assertions.mjs', 'report.mjs']) {
+    const copies = ['electron-shots.mjs', 'assertions.mjs', 'report.mjs']
+    // 素材缺失时**报一条可读的失败**并跳过（登记制 §0 已经报了"登记了却不在"）——
+    // 此前这里会以未捕获的 `ENOENT … copyfile` 结束，后续所有判据（含 assertions 自检）
+    // 一行都不再执行，诊断退化成裸栈（第十三轮 F-06/F-20）。
+    const missing = copies.filter(file => !existsSync(join(ROOT, 'integration-tests', 'electron-shots', file)))
+    if (missing.length > 0) {
+      fail(`形态⑤: electron-shots 的 ${missing.join(', ')} 不存在 —— 判定通道的端到端变异无法开展`
+        + '（修好缺失文件后本段自动恢复；不以未捕获 ENOENT 收尾）')
+      continue
+    }
+    for (const file of copies) {
       copyFileSync(join(ROOT, 'integration-tests', 'electron-shots', file), join(mutantDir, file))
     }
     const targetName = breakCase.file ?? 'report.mjs'
@@ -742,22 +1042,87 @@ for (const file of mjsFiles) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. 判据自检（--self-test）：每条判据的负例必须被拒
+// 2. 两个 `.py` 契约脚本：判据表登记值 + 运行期逐条引用 + 判定通道 + 端到端变异
+//    （第十三轮审计 F-01，P0）
+//
+// 现场（本守卫自己复跑出来的，见 temp/r13/F/sub-integration/repro-f01-real-tree.sh）：
+//   把 dex 6/7、ldap 8/10 条运行期 `check(name, problems, …)` 换成 `check(name, [], '')`
+//   （其余一字不改）⇒ 变异体的 `--self-test` 仍是 24/24、29/29
+//   ⇒ 本守卫照打「2 个契约脚本判据自检通过」、`REAL_GATE_EXIT=0`。
+//
+// 判据的**自我陈述比它实际判的东西宽**：`--self-test` 数的是"夹具还在不在"，而夹具一直
+// 在 —— 没了的是"运行期还按不按它们判"。所以下面四层缺一不可（与 electron-shots 同形）：
+//   ① 登记值对账（`--dump-criteria`）：精确 id 集合 + 逐 id 正/负例条数；
+//   ② 运行期逐条引用：每条 id 都必须有"以该 id 字面量为首参"的调用点，被调方逐字是
+//      `reporter.report`、观测非空；
+//   ③ 判据本体自证：`--self-test`；
+//   ④ 判定通道自证（`--self-check`）+ 在变异副本上复跑四种掏空形态要求变红。
+//
+// ⚠️ 测试缝（`CHECK_IT_*_SCRIPT`）在这条修复之后更重要了 —— 它现在能重定向**判据面本体**。
+// CI 语境下不得设置（第十三轮 F-21 的后半：缝有文档说"CI 不得设置"，但此前**零判据**拦）。
 // ---------------------------------------------------------------------------
+
+{
+  const ciContext = (process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false')
+    || process.env.GITHUB_ACTIONS === 'true'
+  for (const test of CONTRACT_TESTS) {
+    const key = `CHECK_IT_${test.id.toUpperCase()}_SCRIPT`
+    const value = process.env[key]
+    if (ciContext && value !== undefined && value !== '') {
+      fail(`形态⑧: 测试缝 ${key} 在 CI 语境下不得设置（实际指向 ${JSON.stringify(value)}）`
+        + ' —— 它能重定向被判的契约脚本，等于把"哪个文件被审"变成环境变量'
+        + '（第十三轮 F-21：缝的文档写了"CI 不得设置"，但此前没有判据拦）')
+    }
+  }
+}
+
+/**
+ * 在一个**临时副本**里复现两个契约用例的目录布局（`contractkit.py` + 用例脚本）。
+ *
+ * 为什么要保布局：脚本按 `__file__` 的父目录的父目录找 `contractkit.py`（与运行期一致），
+ * 所以副本必须长得像真树，否则变异体连导入都过不去 —— 那种红证明不了任何关于判据的事。
+ * @returns `{{ dir: string, script: string, kit: string }}` 副本目录、脚本路径、判据通道路径。
+ */
+function contractMutantTree(test) {
+  const dir = tempDir(`it-contract-${test.id}-`)
+  const relativeScript = test.path.replace(/^integration-tests\//u, '')
+  const script = join(dir, relativeScript)
+  mkdirSync(dirname(script), { recursive: true })
+  const kit = join(dir, 'contractkit.py')
+  copyFileSync(join(ROOT, 'integration-tests', 'contractkit.py'), kit)
+  copyFileSync(join(ROOT, test.path), script)
+  return { dir, script, kit }
+}
+
+/** 跑一个契约用例脚本的子命令，返回 `{ status, output }`。 */
+function runContractScript(script, args, cwd) {
+  const result = spawnSync('python3', [script, ...args], { cwd, encoding: 'utf8' })
+  return {
+    status: result.status,
+    output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+    error: result.error,
+  }
+}
+
 for (const test of CONTRACT_TESTS) {
-  const result = spawnSync('python3', [scriptPathFor(test), '--self-test'], { cwd: ROOT, encoding: 'utf8' })
-  if (result.error !== undefined) {
-    fail(`${test.path}: 无法执行 --self-test（${result.error.message}）—— 没有 python3 时判失败，不静默跳过`)
+  const source = existsSync(scriptPathFor(test)) ? readFileSync(scriptPathFor(test), 'utf8') : ''
+  const expected = CONTRACT_CRITERIA.get(test.id) ?? []
+  const expectedIds = expected.map(entry => entry.id).sort()
+
+  // ---- ③ 判据本体自证（--self-test）----------------------------------------
+  const selfTestRun = runContractScript(scriptPathFor(test), ['--self-test'], ROOT)
+  if (selfTestRun.error !== undefined) {
+    fail(`${test.path}: 无法执行 --self-test（${selfTestRun.error.message}）—— 没有 python3 时判失败，不静默跳过`)
     continue
   }
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
-  if (result.status !== 0) {
-    fail(`${test.path} --self-test 失败（exit=${result.status}）：${output.trim().slice(-400)}`)
+  const selfTestOutput = selfTestRun.output
+  if (selfTestRun.status !== 0) {
+    fail(`${test.path} --self-test 失败（exit=${selfTestRun.status}）：${selfTestOutput.trim().slice(-400)}`)
     continue
   }
-  const summary = /self-test: (\d+)\/(\d+) 条判据夹具符合预期/u.exec(output)
+  const summary = /self-test: (\d+)\/(\d+) 条判据夹具符合预期/u.exec(selfTestOutput)
   if (summary === null) {
-    fail(`${test.path} --self-test 没有打印夹具汇总结论（判据数量不可见）：${output.trim().slice(-200)}`)
+    fail(`${test.path} --self-test 没有打印夹具汇总结论（判据数量不可见）：${selfTestOutput.trim().slice(-200)}`)
     continue
   }
   const [, ok, total] = summary.map(Number)
@@ -766,6 +1131,167 @@ for (const test of CONTRACT_TESTS) {
     fail(`${test.path} --self-test 只有 ${total} 条判据夹具（下限 ${test.minCases}）—— 判据被删到没有判别力`)
   }
   notes.push(`${test.id}: --self-test ${ok}/${total} 条夹具`)
+
+  // ---- ① 登记值对账（--dump-criteria）--------------------------------------
+  const dumpRun = runContractScript(scriptPathFor(test), ['--dump-criteria'], ROOT)
+  let dumped = null
+  try {
+    dumped = JSON.parse(dumpRun.output)
+  } catch {
+    fail(`${test.path} --dump-criteria 没有输出可解析的判据表 JSON（exit=${dumpRun.status}）：`
+      + selfTestOutputFree(dumpRun.output))
+  }
+  if (dumped !== null) {
+    const criteria = Array.isArray(dumped.criteria) ? dumped.criteria : []
+    const observedIds = criteria.map(entry => entry.id).sort()
+    check(observedIds.join(',') === expectedIds.join(','),
+      `形态⑧: ${test.path} 的判据 id 集合与登记值不一致`
+        + `\n  实际:${observedIds.join(', ') || '(空)'}`
+        + `\n  登记:${expectedIds.join(', ') || '(空)'}`
+        + '\n  ⇒ 增删判据/改 id 必须同步本文件的 CONTRACT_CRITERIA（登记值进 diff 才会被评审看见）')
+    for (const want of expected) {
+      const got = criteria.find(entry => entry.id === want.id)
+      if (got === undefined) continue
+      check(Number(got.positive) >= 1 && Number(got.negative) >= 1,
+        `形态⑧: 判据 ${want.id} 必须正例与负例都有（正 ${got.positive} / 负 ${got.negative}）`
+          + ' —— 缺负例的判据无法区分"还在判"和"恒真"')
+      check(Number(got.positive) === want.positive && Number(got.negative) === want.negative,
+        `形态⑧: 判据 ${want.id} 的夹具条数与登记值不一致`
+          + `（实际 正 ${got.positive} / 负 ${got.negative}，登记 正 ${want.positive} / 负 ${want.negative}）`
+          + '\n  ⇒ 删一条夹具也必须改登记值：只用"总数下限"当棘轮时，'
+          + 'dex 可删 9/24、ldap 可删 14/29 而门禁全绿（第十三轮 F-04）')
+    }
+    check(Number(dumped.fixtures) === total,
+      `形态⑧: --dump-criteria 登记 ${dumped.fixtures} 条夹具，而 --self-test 实跑 ${total} 条`
+        + ' ⇒ 有夹具没被自检跑到（自检被掏空）')
+    notes.push(`${test.id}: 判据表 ${criteria.length} 条 / 逐 id 正负例条数对账 ✓`)
+  }
+
+  // ---- ② 运行期逐条引用 ----------------------------------------------------
+  const callSites = [...source.matchAll(
+    /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(['"])([^'"]+)\2\s*,/gu,
+  )].filter(match => expectedIds.includes(match[3]))
+  const citedIds = new Set(callSites.map(match => match[3]))
+  for (const id of expectedIds) {
+    check(citedIds.has(id),
+      `形态⑧: ${test.path} 没有引用判据 ${JSON.stringify(id)}`
+        + ' ⇒ 表里声明了但运行期不判（掏空的另一种写法）')
+  }
+  const foreignCallees = [...new Set(callSites
+    .filter(match => match[1] !== 'reporter.report')
+    .map(match => `${match[1]}(${JSON.stringify(match[3])}, …)`))]
+  check(foreignCallees.length === 0,
+    '形态⑧: 以判据 id 为首参的调用点，被调方必须是 `reporter.report`（判定通道的唯一入口）——'
+      + ` 实得 ${foreignCallees.join(' / ')}`
+      + '\n  ⇒ 换一个名字的包装（`verdictOf(...)` 这类"异名恒真"）会让运行期结论不再来自通道')
+  const emptyObservations = [...source.matchAll(/reporter\.report\(\s*(['"])([^'"]+)\1\s*,\s*\{\s*\}\s*\)/gu)]
+    .filter(match => expectedIds.includes(match[2]))
+  check(emptyObservations.length === 0,
+    `形态⑧: 这些调用点传了**空观测** \`{}\`：${emptyObservations.map(match => match[2]).join(', ')}`
+      + '\n  ⇒ 不传运行期观测 = 判据对着 `undefined` 求值'
+      + '（`check(name, [], \'\')` 那一句的同义改写）')
+  check(/def\s+_new_reporter\(\)/u.test(source) && /_new_reporter\(\)/u.test(source),
+    `形态⑧: ${test.path} 必须经唯一构造点 \`_new_reporter()\` 取判定通道`
+      + '（`--self-check` 与真实跑共用它，端到端变异注入点也在这里）')
+  check(/run_reporter_self_check\(\s*reporter\s*,/u.test(source),
+    `形态⑧: ${test.path} 的 \`--self-check\` 必须把**运行期那个** reporter 交给 run_reporter_self_check`
+      + ' —— 自检另建通道 = 证明的不是运行期那条')
+
+  // ---- ④ 判定通道自证（--self-check）--------------------------------------
+  const selfCheckRun = runContractScript(scriptPathFor(test), ['--self-check'], ROOT)
+  const selfCheckOutput = selfCheckRun.output
+  check(selfCheckRun.status === 0,
+    `形态⑧: ${test.path} --self-check 必须 exit 0（实际 ${selfCheckRun.status}）：`
+      + selfCheckOutput.trim().slice(-400))
+  const checkSummary = /reporter self-check: (\d+)\/(\d+) 条夹具经 report\(\) 求值符合预期/u.exec(selfCheckOutput)
+  if (checkSummary === null) {
+    fail(`形态⑧: ${test.path} --self-check 没有打印判定通道的汇总结论（"运行期判了几条"不可见）：`
+      + selfCheckOutput.trim().slice(-200))
+  } else {
+    const [, checkOk, checkTotal] = checkSummary.map(Number)
+    check(checkOk === checkTotal,
+      `形态⑧: ${test.path} 判定通道自检 ${checkOk}/${checkTotal} —— 有夹具经 report() 求值不符合预期`)
+    check(checkTotal === total,
+      `形态⑧: ${test.path} --self-check 实跑 ${checkTotal} 条夹具，而判据表登记 ${total} 条`
+        + ' ⇒ 有夹具没经运行期通道求值')
+    notes.push(`${test.id}: 判定通道 --self-check ${checkOk}/${checkTotal} 条夹具经 report() 求值 ✓`)
+  }
+
+  // ---- ④b 端到端变异：**逐条判据**被掏成恒真 ⇒ --self-test 必须具名变红 ---------
+  for (const id of expectedIds) {
+    const tree = contractMutantTree(test)
+    const anchor = criteriaAnchor(id)
+    const target = readFileSync(tree.script, 'utf8')
+    if (!target.includes(anchor)) {
+      fail(`形态⑧: ${test.path} 的判据 ${id} 缺少变异注入锚点（\`${anchor}\`）`
+        + ' —— 端到端变异无法开展，请同步本守卫的锚点，不要直接删掉这段')
+      continue
+    }
+    writeFileSync(tree.script, target.replace(anchor, `${anchor}\n    return []`))
+    const mutant = runContractScript(tree.script, ['--self-test'], tree.dir)
+    check(mutant.status !== 0,
+      `形态⑧: 变异 \`criteria-tautology:${test.id}:${id}\`（把判据 ${id} 的 evaluate 掏成 `
+      + '`return []`）之后 `--self-test` 仍然 exit 0 ⇒ 判据是假绿（这正是 F-01 的现场形态）')
+    check(new RegExp(id, 'u').test(mutant.output),
+      `形态⑧: 变异 \`criteria-tautology:${test.id}:${id}\` 必须被**具名**咬住`
+        + `（期望输出里出现判据 id）:${mutant.output.trim().slice(-200)}`)
+  }
+  notes.push(`${test.id}: 变异「逐条判据 evaluate 掏成 return []」×${expectedIds.length} ⇒ --self-test 全部非零且具名 ✓`)
+
+  // ---- ④c 端到端变异：判定通道被掏空 ⇒ --self-check 必须非零 -------------------
+  for (const breakCase of CONTRACT_KIT_BREAK_CASES) {
+    const tree = contractMutantTree(test)
+    const kitSource = readFileSync(tree.kit, 'utf8')
+    if (!kitSource.includes(breakCase.needle)) {
+      fail(`形态⑧: contractkit.py 的变异 \`${breakCase.id}\` 注入锚点失效（形状变了）`
+        + ' —— 判定通道的端到端变异无法开展，请同步本守卫的锚点，不要直接删掉这段')
+      continue
+    }
+    writeFileSync(tree.kit, kitSource.replace(breakCase.needle, breakCase.replacement))
+    const mutant = runContractScript(tree.script, [breakCase.command], tree.dir)
+    check(mutant.status !== 0,
+      `形态⑧: 变异 \`${breakCase.id}\`（${breakCase.label}）之后 \`${breakCase.command}\` 仍然 exit 0 `
+      + `⇒ 判定通道的判据是假绿：${mutant.output.trim().slice(-200)}`)
+    check(breakCase.expect.test(mutant.output),
+      `形态⑧: 变异 \`${breakCase.id}\` 必须被**具名**咬住（期望输出匹配 ${breakCase.expect}）：`
+      + mutant.output.trim().slice(-200))
+    if (breakCase.fixtureLayerStillGreen === true) {
+      // 这条是**证据**而不是判据：夹具层对"运行期不再按表判"是盲的 —— 两层互补。
+      const fixtureLayer = runContractScript(tree.script, ['--self-test'], tree.dir)
+      check(fixtureLayer.status === 0,
+        `形态⑧: 变异 \`${breakCase.id}\` 之后 \`--self-test\` 本应**照旧绿**（证明夹具层对这一层是盲的、`
+        + `所以必须有 --self-check 这一层），实际 exit ${fixtureLayer.status}：`
+        + fixtureLayer.output.trim().slice(-200))
+    }
+    notes.push(`${test.id}: 变异「${breakCase.label}」⇒ ${breakCase.command} 非零 ✓`)
+  }
+
+  // ---- ④d 端到端变异：运行期通道被整体替换 ⇒ --self-check 必须非零 -------------
+  {
+    const tree = contractMutantTree(test)
+    const scriptSource = readFileSync(tree.script, 'utf8')
+    if (!scriptSource.includes(CONTRACT_RUNTIME_WRAPPER_BREAK.needle)) {
+      fail(`形态⑧: ${test.path} 的变异 \`${CONTRACT_RUNTIME_WRAPPER_BREAK.id}\` 注入锚点失效`
+        + `（找不到 ${JSON.stringify(CONTRACT_RUNTIME_WRAPPER_BREAK.needle)}）`
+        + ' —— 判定通道的端到端变异无法开展，请同步本守卫的锚点，不要直接删掉这段')
+    } else {
+      writeFileSync(tree.script,
+        scriptSource.replace(CONTRACT_RUNTIME_WRAPPER_BREAK.needle, CONTRACT_RUNTIME_WRAPPER_BREAK.replacement))
+      const mutant = runContractScript(tree.script, ['--self-check'], tree.dir)
+      check(mutant.status !== 0,
+        `形态⑧: 变异 \`${CONTRACT_RUNTIME_WRAPPER_BREAK.id}\`（${CONTRACT_RUNTIME_WRAPPER_BREAK.label}）之后 `
+        + '`--self-check` 仍然 exit 0 ⇒ 判定通道的判据是假绿（id 引用一字未改）')
+      check(CONTRACT_RUNTIME_WRAPPER_BREAK.expect.test(mutant.output),
+        `形态⑧: 变异 \`${CONTRACT_RUNTIME_WRAPPER_BREAK.id}\` 必须被**具名**咬住`
+        + `（期望输出匹配 ${CONTRACT_RUNTIME_WRAPPER_BREAK.expect}）：${mutant.output.trim().slice(-200)}`)
+      notes.push(`${test.id}: 变异「${CONTRACT_RUNTIME_WRAPPER_BREAK.label}」⇒ --self-check 非零 ✓`)
+    }
+  }
+}
+
+/** 把可能很长的子进程输出压成一行（诊断用，不参与判据）。 */
+function selfTestOutputFree(output) {
+  return JSON.stringify(String(output).trim().slice(-200))
 }
 
 // ---------------------------------------------------------------------------
@@ -839,17 +1365,44 @@ if (failures.length > 0) {
   for (const message of failures) process.stderr.write(`- ${message}\n`)
   return 1
 }
+
+// ---------------------------------------------------------------------------
+// 通过行**必须与真实覆盖面一致**（第十三轮 F-01 的直接教训）。
+//
+// 旧通过行写的是「2 个契约脚本判据自检通过」—— 读者会读成"这两个脚本的判据被钉住了"，
+// 而当时它们可以在 24/24、29/29 全绿的前提下被整体掏空。现在通过行**枚举**真的判了的
+// 层，并**断言枚举条数等于登记项数**（断言通过行本身，而不是断言它存在）。
+// ---------------------------------------------------------------------------
+const COVERED_LAYERS = [
+  `语法（${pyFiles.length} 个 .py ast.parse / ${mjsFiles.length} 个 .mjs node --check）`,
+  `登记制（${INTEGRATION_ENTRIES.length} 项：登记了不在 / 在却没登记 / 聚合层少调多调或换序 全红）`,
+  `聚合层接线（${INTEGRATION_ENTRIES.filter(entry => entry.aggregateName !== undefined).length} 条逐字对拍）`,
+  `契约判据表（${CONTRACT_TESTS.map(test => `${test.id} ${(CONTRACT_CRITERIA.get(test.id) ?? []).length} 条`).join(' / ')}：`
+    + '精确 id 集合 + 逐 id 正负例条数 + 运行期逐条引用 + 观测非空）',
+  `契约判据本体自证（--self-test，每条判据正/负例夹具）`,
+  `契约判定通道自证（--self-check，全部夹具经**运行期** report() 求值）`,
+  `契约端到端变异（逐条判据掏成恒真 / judge 恒真 / 只改计票侧 / 运行期通道换恒真包装 —— 全部必须变红）`,
+  'electron-shots（接线 + SKIP(77) 契约 + 判据表自检 + 判定通道自检 + 4 条判定通道变异）',
+  `假网关场景（${SCENARIOS.length} 条：正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）`,
+  '聚合层三项全 SKIP ⇒ 77 且不报 PASS',
+]
+// 通过行自己也要被钉住：枚举条数必须等于登记项数（改一个而漏改另一个 ⇒ 红）。
+const EXPECTED_COVERED_LAYERS = 10
+if (COVERED_LAYERS.length !== EXPECTED_COVERED_LAYERS) {
+  process.stderr.write(`\ncheck-integration-tests: 通过行的覆盖面枚举 ${COVERED_LAYERS.length} 项，`
+    + `与登记值 ${EXPECTED_COVERED_LAYERS} 项不一致 —— 通过行的自我陈述必须与真实覆盖面一致\n`)
+  return 1
+}
 process.stdout.write(
-  `check-integration-tests: OK — ${pyFiles.length} 个 Python 用例语法通过、${mjsFiles.length} 个 Node 用例语法通过、`
-  + `${CONTRACT_TESTS.length} 个契约脚本判据自检通过、${SCENARIOS.length} 个假网关场景`
-  + '（正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）、'
-  + 'electron-shots 的接线与 SKIP(77) 契约 + **判据表自检（每条判据配正例/负例夹具、'
-  + '运行期逐条引用）**、聚合层 run-all.sh 全 SKIP ⇒ 77 且不报 PASS 全部符合预期\n',
+  `check-integration-tests: OK — 已覆盖 ${COVERED_LAYERS.length} 项：\n`
+  + COVERED_LAYERS.map(layer => `  · ${layer}\n`).join('')
+  + '  （**不在本守卫覆盖面内**：integration-tests 的真机端到端需要 Docker + 真实服务端 + 显示器，'
+  + 'CI 语境下 0 执行；本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',
 )
 return 0
 }
 
-export { CONTRACT_TESTS, runTest, scriptPathFor, startGateway }
+export { CONTRACT_TESTS, INTEGRATION_ENTRIES, runTest, scriptPathFor, startGateway }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
   process.exit(await main())

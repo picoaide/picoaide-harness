@@ -16,7 +16,14 @@ import (
 
 // ModelProviderMap 返回当前 模型名 → provider 名 映射(models 表)。
 func ModelProviderMap(db *sql.DB) (map[string]string, error) {
-	rows, err := db.Query(`SELECT m.name, COALESCE(p.name, '') FROM models m
+	// R13-GE（V2-2 读面收口）：模型→渠道映射是族内读面（models + gateway_providers），
+	// 池上入口走已钉 search_path 的只读事务（唯一实现 usageReadConn）。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query(`SELECT m.name, COALESCE(p.name, '') FROM models m
 		LEFT JOIN gateway_providers p ON p.id = m.provider_id ORDER BY m.id`)
 	if err != nil {
 		return nil, err

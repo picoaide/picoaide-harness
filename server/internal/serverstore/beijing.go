@@ -72,6 +72,30 @@ func BeijingMonthInstant(d time.Time) time.Time {
 // BeijingNow 返回当前时刻的北京日期值(等价北京时区的"今天")。
 func BeijingNow() time.Time { return BeijingDay(time.Now()) }
 
+// RetentionWindowStart 返回"保留窗口起点"的**唯一实现**（R13-GE · R13A-02）：
+// 从 now 起回溯 months 个**北京月**的月初。
+//
+// 为什么必须先归一到月初再 AddDate（这条是缺陷本体）：
+// Go 的 `time.Time.AddDate` 与 `time.Date` 一样会**归一化**（官方文档原文
+// "AddDate normalizes its result in the same way that Date does"）。于是
+// `BeijingDay(2026-08-31).AddDate(0, -6, 0)` = 2026-02-31 → 归一化成
+// **2026-03-03**；下游 `dayKey()` 把起点截到月初 ⇒ 整个 **2026-02 月**从窗口里
+// 消失，而它此刻仍在保留期内（cutoff = 2026-02，回收只删 < cutoff 的月）。
+// 后果：进程恰好在"目标月没有该日"的那几天（3/5/7/10/12 月 31 日 + 8 月
+// 29/30/31 日，≈10 天/年）启动时，保留期内**最早一个月**的日账/月账洞不会被
+// 本轮或后续任何清理轮修补 —— 一旦明细后来被回收，报表静默少计那个月。
+//
+// 同族三处（usage_ledger.go 的补账窗口、usage_retention_status.go 的到期推导、
+// usage.go 的 monthFill）早已先归一到月初；这一处是唯一漏掉的（"同族只收口了一条"
+// 的又一实例）。判据见 audit_r13ge_calendar_test.go 的 21 个 (年,月,日,N) 组合。
+func RetentionWindowStart(now time.Time, months int) time.Time {
+	if months < 0 {
+		months = 0
+	}
+	// 先归一到月初 ⇒ AddDate 的目标月**一定存在该日**（1 日），不会溢出。
+	return BeijingMonth(now).AddDate(0, -months, 0)
+}
+
 // BeijingDayAt 返回北京日期值 d 当天 hour:00 的绝对瞬时(夹具/边界构造用)。
 func BeijingDayAt(d time.Time, hour int) time.Time {
 	return BeijingDayInstant(d).Add(time.Duration(hour) * time.Hour)

@@ -66,7 +66,7 @@ func TestBindUsageAppIDDoesNotTouchBilling(t *testing.T) {
 	before := readAttributionRow(t, db, id)
 
 	api := &API{DB: db}
-	c := ginContextWithHeader(appIDHeader, "notes")
+	c := ginContextWithHeader(appSessionIDHeaderName(), "app:notes#alice@4a54f91a306086cb9240010905674512")
 	api.bindUsageAppID(c, id)
 
 	after := readAttributionRow(t, db, id)
@@ -78,7 +78,7 @@ func TestBindUsageAppIDDoesNotTouchBilling(t *testing.T) {
 	}
 }
 
-// TestBindUsageAppIDSkipsInvalidAndEmpty 钉住 best-effort：非法/缺失标签一律不写库。
+// TestBindUsageAppIDSkipsInvalidAndEmpty 钉住 best-effort：非法/缺失链路一律不写库。
 func TestBindUsageAppIDSkipsInvalidAndEmpty(t *testing.T) {
 	db, cleanup := serverstore.NewTestDB(t)
 	defer cleanup()
@@ -88,11 +88,42 @@ func TestBindUsageAppIDSkipsInvalidAndEmpty(t *testing.T) {
 		t.Fatalf("落 usage: %v", err)
 	}
 	api := &API{DB: db}
-	for _, bad := range []string{"", "has space", "-x", "notes/../etc"} {
-		api.bindUsageAppID(ginContextWithHeader(appIDHeader, bad), id)
+	for _, bad := range []string{
+		"",                               // 没有头
+		"session-12",                     // 普通会话：不是应用会话
+		"app:",                           // 空 app_id
+		"app:Demo",                       // 大写不合法
+		"app:notes/../etc",               // 路径注入形态
+		"app:" + strings.Repeat("a", 64), // 超长
+	} {
+		api.bindUsageAppID(ginContextWithHeader(appSessionIDHeaderName(), bad), id)
 		if got := readAttributionRow(t, db, id).appID; got != "" {
-			t.Fatalf("标签 %q 非法却写进了库（app_id = %q）", bad, got)
+			t.Fatalf("会话 id %q 不该归因却写进了库（app_id = %q）", bad, got)
 		}
+	}
+}
+
+// TestBindUsageAppIDIgnoresSelfDeclaredHeader 是 §21.4 后半的判据：
+// **没有会话链路的自报头**（`X-Pico-App-Id`）一律忽略 —— 它没有可校验的来源。
+//
+// 变异：把 `appIDFromRequest` 改回"读自报头" ⇒ 本用例红（伪造头就能写标签）。
+func TestBindUsageAppIDIgnoresSelfDeclaredHeader(t *testing.T) {
+	db, cleanup := serverstore.NewTestDB(t)
+	defer cleanup()
+	uid := createAttributionUser(t, db, "u-self")
+	id, err := serverstore.RecordUsageKind(db, uid, "demo-model", 1, 1, "chat")
+	if err != nil {
+		t.Fatalf("落 usage: %v", err)
+	}
+	api := &API{DB: db}
+	api.bindUsageAppID(ginContextWithHeader(legacyAppIDHeader, "notes"), id)
+	if got := readAttributionRow(t, db, id).appID; got != "" {
+		t.Fatalf("自报头（无会话链路）被当成归因来源：app_id = %q", got)
+	}
+	// 正对照：同一行，**带会话链路**时必须归因（证明上一条不是因为别的原因恒空）。
+	api.bindUsageAppID(ginContextWithHeader(appSessionIDHeaderName(), "app:notes"), id)
+	if got := readAttributionRow(t, db, id).appID; got != "notes" {
+		t.Fatalf("带会话链路却没有归因：app_id = %q", got)
 	}
 }
 

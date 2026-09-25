@@ -365,6 +365,9 @@ func SetUsageAppID(db *sql.DB, id int64, appID string) error {
 	if label == "" {
 		return nil
 	}
-	_, err := db.Exec(`UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
-	return err
+	// R13-GE（V2-2 写面同族）：usage 的池上写入口经唯一实现 withUsageSearchPath。
+	return withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE usage SET app_id = ? WHERE id = ?`, label, id)
+		return err
+	})
 }

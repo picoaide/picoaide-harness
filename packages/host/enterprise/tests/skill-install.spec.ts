@@ -15,6 +15,7 @@ import {
   isLoadableSkillName,
   listInstalledSkills,
   listLocalSkills,
+  listShadowingSkills,
   packSkill,
   readProvenance,
   resolveSkillsDir,
@@ -22,8 +23,8 @@ import {
   SKILL_LOCK_DIR,
   SKILL_NAME_PATTERN,
   ArchiveInstallRefusal,
+  sweepInstallerOwnedShadowSkills,
   sweepStaleSkillTemps,
-  synthesizeSkillFrontmatter,
   uninstallSkill,
   validateSkillName,
   writeProvenance,
@@ -667,15 +668,30 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'pico-a7-')) })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
-  it('staging/备份都在 .skill-tmp 之下：listInstalledSkills 与运行时都看不到它们', async () => {
+  it('staging 残留在 .skill-tmp 之下：listInstalledSkills 与运行时都看不到它们', async () => {
     // 模拟"换入被打断"：备份目录里有完整 SKILL.md（旧实现会把它当技能加载）。
     await mkdir(join(root, '.skill-tmp', 'install-abc123', 'backup'), { recursive: true })
     await writeFile(join(root, '.skill-tmp', 'install-abc123', 'backup', 'SKILL.md'), skillMdWith('ghost'))
-    // 旧布局的残留（≤2.8.1）：点号开头的 staging 与 `.<name>.backup-<pid>-<ts>`。
+    // 旧布局的 staging（≤2.8.1）：`.install-*` 里的是**第二层**（unpacked/），
+    // 直接子条目上并没有 SKILL.md ⇒ 运行时也看不见。
     await mkdir(join(root, '.install-ghost-def456', 'unpacked'), { recursive: true })
     await writeFile(join(root, '.install-ghost-def456', 'unpacked', 'SKILL.md'), skillMdWith('ghost'))
+    expect(await listInstalledSkills(root)).toEqual([])
+  })
+
+  it('旧布局的 `.<name>.backup-<pid>-<ts>` 在直接子目录层级 ⇒ 两侧都必须看得见（R13-B P1-2）', async () => {
+    // 这条断言是**反向**的：此前这里写的是 `toEqual([])`，而那正是被审的缺陷 ——
+    // 备份目录是技能库的**直接子条目**、根上就有完整 SKILL.md、frontmatter 名与真目录
+    // 相同，而点号按 `localeCompare` 排在前面 ⇒ pinned 上游**会加载它、并且它赢**。
+    // "已安装集合"必须与运行时同源 ⇒ 期望它**出现**；清除由
+    // `sweepInstallerOwnedShadowSkills`（安装/卸载收口）负责。
     await mkdir(join(root, '.ghost.backup-123-456'), { recursive: true })
     await writeFile(join(root, '.ghost.backup-123-456', 'SKILL.md'), skillMdWith('ghost'))
+    expect(await listInstalledSkills(root)).toEqual(['ghost'])
+    const leftovers = await listShadowingSkills(root, 'ghost')
+    expect(leftovers.map(row => row.entryName)).toEqual(['.ghost.backup-123-456'])
+    expect(leftovers[0]?.installerOwned, '安装器自己写下的形态可以无确认清除').toBe(true)
+    expect(await sweepInstallerOwnedShadowSkills(root, 'ghost')).toHaveLength(1)
     expect(await listInstalledSkills(root)).toEqual([])
   })
 

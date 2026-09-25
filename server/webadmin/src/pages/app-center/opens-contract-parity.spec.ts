@@ -34,9 +34,12 @@ import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   AI_ATTRIBUTION_WIRING,
+  ATTRIBUTION_CHAIN_ANCHORS,
   ATTRIBUTION_HEADER_TEXT_ONLY,
   ATTRIBUTION_HEADER_READERS,
   ATTRIBUTION_HEADER_WRITERS,
+  ATTRIBUTION_SESSION_HEADER,
+  ATTRIBUTION_SESSION_PREFIX,
   OPENS_DETAIL_RETENTION_DAYS,
 } from './opens-contract'
 
@@ -408,7 +411,7 @@ const ATTRIBUTION_WRITE_PATTERNS: Array<[string, RegExp]> = [
   ['TS: headers.set(...)', /\.(?:set|append)\(\s*['"]x-pico-app-id['"]/iu],
 ]
 
-describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4）', () => {
+describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4 / R13-GB）', () => {
   const found = scanAttributionHeaderFiles(REPO_ROOT)
   const declared = [
     ...ATTRIBUTION_HEADER_READERS,
@@ -428,7 +431,6 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4）', () => {
   })
 
   it('接线状态与"是否真的有人写出站头"一致（未接线时不得出现写方句法）', () => {
-    expect(AI_ATTRIBUTION_WIRING).toBe(ATTRIBUTION_HEADER_WRITERS.length > 0 ? 'wired' : 'not_wired')
     const offenders: string[] = []
     for (const rel of found.hits) {
       const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
@@ -442,8 +444,41 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4）', () => {
         `平台侧归因通道标为"未接线"，但这些文件在写出站头（接线状态与文案必须一起改）：${offenders.join(', ')}`,
       ).toEqual([])
     } else {
-      expect(ATTRIBUTION_HEADER_WRITERS.length, "标为 'wired' 就必须登记发送方文件").toBeGreaterThan(0)
+      // 2026-09-24 起 `'wired'` 说的是**会话链路**（见下一条），不再来自自报头的发送方；
+      // 自报头必须仍然**零写方**（它的设计发不出来，网关也只识别并忽略）。
+      expect(
+        offenders,
+        `自报头 X-Pico-App-Id 不该有任何写方（真实链路是会话 id 的前缀）：${offenders.join(', ')}`,
+      ).toEqual([])
     }
+  })
+
+  it('归因链路三段锚点齐备（客户端前缀 / 上游头名 / 服务端契约），且与接线状态双向一致', () => {
+    // 这条替代原先"从自报头发送方登记表派生接线状态"的判据：真实链路是**会话 id 本身**
+    // （§21.7⑤ 的替代路径），发送方在 pinned 上游 submodule 里、不在本仓扫描面内，
+    // 所以改用**三段锚点机械对拍** —— 任何一段缺失或漂移都判红。
+    const anchors = [
+      ['客户端前缀常量', ATTRIBUTION_CHAIN_ANCHORS.client, new RegExp(`AI_HIDDEN_SESSION_PREFIX\\s*=\\s*'${ATTRIBUTION_SESSION_PREFIX}'`, 'u')],
+      ['上游出站头名', ATTRIBUTION_CHAIN_ANCHORS.sender, new RegExp(`'${ATTRIBUTION_SESSION_HEADER}':\\s*String\\(options\\.sessionId\\)`, 'u')],
+      ['服务端契约前缀', ATTRIBUTION_CHAIN_ANCHORS.contract, new RegExp(`"prefix":\\s*"${ATTRIBUTION_SESSION_PREFIX}"`, 'u')],
+      ['服务端解析实现', ATTRIBUTION_CHAIN_ANCHORS.reader, /func AppIDFromSessionID\(sessionID string\) string/u],
+    ] as const
+    const missing: string[] = []
+    for (const [label, rel, pattern] of anchors) {
+      const path = join(REPO_ROOT, rel)
+      if (!existsSync(path)) { missing.push(`${label}: 文件不存在 ${rel}`); continue }
+      const text = readFileSync(path, 'utf8')
+      if (!pattern.test(text)) missing.push(`${label}: ${rel} 里找不到锚点`)
+    }
+    expect(
+      missing,
+      `归因链路的三段锚点必须齐备（缺一段 ⇒ 归因不会产生，面板文案必须改回"尚未接线"）：${missing.join('；')}`,
+    ).toEqual([])
+    // 双向：锚点齐备 ⇔ `'wired'`。
+    expect(
+      AI_ATTRIBUTION_WIRING,
+      '三段锚点齐备 ⇒ 接线状态必须是 wired（反向：改回 not_wired 也就必须让锚点消失）',
+    ).toBe('wired')
   })
 
   it('文案不得把"没有归因"归因于客户端版本/客户环境（文本锚点）', () => {
@@ -456,8 +491,12 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4）', () => {
       expect(ui, '不得再把成因写成"老客户端"').not.toContain('老客户端')
       expect(doc, 'API 参考必须写明客户端出站头尚未接线').toContain('归因通道尚未接线')
     } else {
-      expect(ui).not.toContain('尚未接线')
-      expect(doc).not.toContain('归因通道尚未接线')
+      // 已接线：不得再说"尚未接线"；且必须写明真实链路（会话 id 的 app: 前缀）。
+      expect(ui, '归因已接线，面板不得再说"尚未接线"').not.toContain('尚未接线')
+      expect(ui, '面板必须写明归因来自会话链路（app: 前缀）').toContain(ATTRIBUTION_SESSION_PREFIX)
+      expect(ui).not.toContain('老客户端')
+      expect(doc, 'API 参考不得再说"归因通道尚未接线"').not.toContain('归因通道尚未接线')
+      expect(doc, 'API 参考必须写明归因来自会话链路（app: 前缀）').toContain(ATTRIBUTION_SESSION_PREFIX)
     }
   })
 })

@@ -897,6 +897,12 @@ export function checkWorkflowText(name, text, options = {}) {
   //      分开的两个流、退出码、恰好一行）—— 没有这一条，把断言块删掉/改弱没有任何静态反应。
   failures.push(...checkInstallIntegrityPrecedence(name, document, notes, options))
   failures.push(...checkVerdictAssertionBlocks(name, document, notes, options))
+  // 策略 10c（第十三轮红队 R13-D-02，P0）：**判据步的启动器必须冻结** ——
+  // 载荷只往 `$GITHUB_PATH` 追加一个假 `node` 目录（那行写在 `.sh` 里 ⇒ 上面两条静态判据
+  // 都看不见）就能把探针 / 编排器 / 凭据检查器三次 `node` 调用全换掉，假 node 自己回显凭据。
+  failures.push(...checkFrozenLaunchers(name, document, notes, options))
+  // 策略 10d（第十三轮 C 泳道 C-05，P3）：**永不跳过的守卫 job 的权限面**逐字登记。
+  failures.push(...checkPinnedJobPermissions(name, document, notes, options))
   // 策略 13(2026-09-25 第九轮审计 D 泳道 P1;2026-09-24 第十轮审计 C-01/C-02/C-03/D-03 加强):
   // 被钉步骤/守卫 job 的**进程环境层** —— 白名单式的四层 `env:` + 前序步骤的 `$GITHUB_ENV`
   // 写入 + 被钉步骤自己步骤体里的 `export`/前缀赋值 + 被钉单元里的 `uses:` 委派目标。
@@ -1178,7 +1184,182 @@ const ROOT_GATE_WEAKENING_FLAGS = ['--no-guards', '--only', '--changed', '--list
  * 形态等价（root `package.json` 的 `check` 脚本就是 `node scripts/check-workspaces.mjs`），
  * 所以两条入口是同一件事的两种写法。
  */
-const ROOT_GATE_DIRECT_INVOCATION = /(?:^|[;&|(\n]|\$\()\s*node\s+scripts\/check-workspaces\.mjs(?![\w:.-])((?:[ \t]+[^\s;&|>()]+)*)/gu
+// ---- [SK-20] 的常量（放在这里是因为 `ROOT_GATE_DIRECT_INVOCATION` 等判据正则要用它们）----
+/** 冻结步的 `id`（契约：被钉步骤用 `steps.<id>.outputs.*` 引用它）。 */
+const FROZEN_LAUNCHER_STEP_ID = 'frozen-launchers'
+/** 必须使用冻结启动器的 job（跑判据的那两个）。 */
+const FROZEN_LAUNCHER_JOBS = ['gate-guards', 'gate']
+/** 必须**真的跑**行为探针的 job（"永不跳过"的那一个；其余 job 不必各跑一遍）。 */
+const FROZEN_LAUNCHER_PROBE_JOBS = ['gate-guards']
+/** 行为探针脚本（必须真的被某个被钉 job 执行）。 */
+const FROZEN_LAUNCHER_PROBE = 'scripts/check-frozen-launchers.mjs'
+/** 冻结步必须写出的输出键。 */
+const FROZEN_LAUNCHER_OUTPUT_KEYS = ['node', 'interp', 'git', 'path']
+/** 冻结步体里必须逐字出现的形态（绝对路径 + 步骤输出通道）。 */
+const FROZEN_LAUNCHER_FREEZE_FRAGMENTS = [
+  'command -v node',
+  'command -v bash',
+  'command -v git',
+  '>> "$GITHUB_OUTPUT"',
+]
+/** `export PATH="${{ steps.<id>.outputs.path }}"`（SK-17 body-assignment 的**唯一** PATH 例外）。 */
+const FROZEN_LAUNCHER_PATH_EXPORT = /export\s+PATH="\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.path\s*\}\}"/u
+/** 冻结启动器的 node 调用形态（runner 侧展开的绝对路径）。 */
+const FROZEN_LAUNCHER_NODE_EXPRESSION = 'steps.frozen-launchers.outputs.node'
+/** 冻结的 `git`（取判据执行体来源的那条链）。 */
+const FROZEN_LAUNCHER_GIT_EXPRESSION = 'steps.frozen-launchers.outputs.git'
+/**
+ * 冻结的解释器（执行仓内脚本的那条链）。
+ *
+ * 输出键叫 `interp` 而不是它的常见名字：静态判据 `[SK-7c]` 把 `sh`/`ba*sh` 这类**词**当成
+ * "把命令交给另一个 shell"，冻结步里出现那个词会被它判红（`command -v <词>` 与带引号的
+ * 写法都在内，实测）。判据的形态学不该被绕过，但也不该为了一个名字把收口写变形 ——
+ * 键名换掉、语义不变。
+ */
+const FROZEN_LAUNCHER_BASH_EXPRESSION = 'steps.frozen-launchers.outputs.interp'
+/**
+ * shell **函数定义**形态（`f() { … }` / `function f { … }` / `function f() { … }`）。
+ * 见 [SK-14⑩]：承载凭据的步骤里出现定义即红（同名函数会遮蔽断言用的命令）。
+ */
+const SHELL_FUNCTION_DEFINITION = /(?:^|[\n;&|(])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/gu
+const VERDICT_ASSERTION_STEPS = [
+  {
+    job: 'gate-guards',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '"${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      // [SK-20] / R13-D-01：凭据必须把**平台锚**一起回显（`github-sha=` 由判据自己写出，
+      // 值是它读到的 `$GITHUB_SHA`）—— 于是「HEAD == 平台值」这件事进凭据、进汇总，
+      // 可被这一步逐字断言（判据侧不等就退出码 2，凭据根本打印不出来）。
+      '--expect github-sha "$GITHUB_SHA"',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate',
+    name: 'Judge execution bodies are pristine (runs before any yarn command)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '"${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD"',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
+      '--min judge-bodies 1',
+      // [SK-20] / R13-D-01：凭据必须把**平台锚**一起回显（`github-sha=` 由判据自己写出，
+      // 值是它读到的 `$GITHUB_SHA`）—— 于是「HEAD == 平台值」这件事进凭据、进汇总，
+      // 可被这一步逐字断言（判据侧不等就退出码 2，凭据根本打印不出来）。
+      '--expect github-sha "$GITHUB_SHA"',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/', '|& tee'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Root guards (every PR shape)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-root-guards: VERDICT PASS guards=[1-9][0-9]*'",
+      '--min guards 1',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate-guards',
+    name: 'Guard parser integrity (strict worktree↔HEAD anchor)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      'check-guard-parser-integrity.mjs --require-clean',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本'",
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/root-guards.log'],
+  },
+  {
+    job: 'gate',
+    name: 'Full gate (packages + all root guards)',
+    required: [
+      '"${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs',
+      '--root "$PWD" --restore',
+      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
+      'mkdir -m 700 "$verdict_dir"',
+      'openssl rand -hex 16 > "$verdict_dir/nonce"',
+      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
+      '"${{ steps.frozen-launchers.outputs.node }}" scripts/check-workspaces.mjs',
+      'scripts/check-verdict-credential.mjs',
+      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
+      "'^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+'",
+      '--min planned 1 --equal planned executed',
+      'picoaide-verdict: PASS nonce=',
+      '[ "$verdict_lines" -ne 1 ]',
+      'exit 1',
+    ],
+    forbidden: ['/tmp/gate.log', '|& tee'],
+  },
+]
+
+// ===== SK-20:被钉步骤的**启动器**必须冻结（第十三轮 R13-D-02，P0） =====
+//
+// 现场（第十三轮 D 泳道实测）：载荷**不碰 git、不改任何被跟踪文件**，只把假 `node` 目录写进
+// `$GITHUB_PATH`（那行写在某个 `.sh` 里 ⇒ 读 YAML 的静态判据看不见）⇒ 探针 / 编排器 /
+// **凭据检查器**三次 `node` 调用全被替换；假 `node` 按 `--nonce-file` 把凭据自己回显回去，
+// 于是 `EXIT=0`、工作树干净、日志里凭据"齐全"，而一条判据都没跑。
+//
+// 收口形态（本规则钉住的形态）：
+//   ① 每个跑判据的 job 有且只有一个**冻结步**：`id: frozen-launchers`，且它之前没有执行仓内
+//      代码的步骤 —— 它把 `command -v node/bash/git` 的绝对路径与当时的 `$PATH` 写进 `$GITHUB_OUTPUT`；
+//   ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用 `"${{ steps.frozen-launchers.outputs.node }}"`
+//      （runner 侧展开的绝对路径；步骤输出在步骤结束时被 runner 读走，后续仓内进程改不到）；
+//   ③ 用了冻结 node 的步骤体必须 `export PATH="${{ steps.frozen-launchers.outputs.path }}"`
+//      （让 `git`/`openssl`/`bash` 也回到冻结那一刻的解析面）；
+//   ④ 该 job 里必须有一个步骤**真的跑**行为探针 `scripts/check-frozen-launchers.mjs`
+//      （静态判据只能证明"文本形态对"，跑一遍才能证明"PATH 注入换不掉启动器"，
+//      探针内部自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针恒绿）。
+//
+// 诚实边界：收口的是 `$PATH` 注入这条**低成本**通道；GitHub 托管 runner 上 runner 用户有
+// 免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径 —— 见行为探针的末尾输出。
+const ROOT_GATE_FROZEN_NODE_TOKEN = String.raw`"\$\{\{\s*steps\.${FROZEN_LAUNCHER_STEP_ID}\.outputs\.node\s*\}\}"`
+const ROOT_GATE_DIRECT_INVOCATION = new RegExp(
+  `(?:^|[;&|(\\n]|\\$\\()\\s*(?:node|${ROOT_GATE_FROZEN_NODE_TOKEN})\\s+scripts/check-workspaces[.]mjs`
+  + `(?![\\w:.-])((?:[ \\t]+[^\\s;&|>()]+)*)`,
+  'gu',
+)
 /**
  * 根门禁调用的**全部形态**（`yarn check` / `corepack yarn check` / `node scripts/check-workspaces.mjs`）。
  * @param script - 去注释后的可执行文本。
@@ -1219,7 +1400,11 @@ const INSTALL_INTEGRITY_PRECEDENCE_JOBS = ['gate-guards', 'gate']
  */
 function executesInstallPrecheck(script) {
   if (commandPositionArgvs(script, INSTALL_INTEGRITY_PRECHECK).length > 0) return true
-  return String(script).includes(`git show HEAD:${INSTALL_INTEGRITY_PRECHECK}`)
+  // 判据是 `git show HEAD:<路径>` 这个**动作**在场。命令词可能是冻结的 git 表达式
+  // （`"${{ steps.frozen-launchers.outputs.git }}" show HEAD:…`）⇒ 按"命令词 + show HEAD:"
+  // 判，而不是按整串字面量（[SK-20] 之后字面量形态不再出现）。
+  const escaped = INSTALL_INTEGRITY_PRECHECK.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  return new RegExp(`show\\s+HEAD:${escaped}`, 'u').test(String(script))
 }
 /**
  * [SK-14⑩] **通过凭据的断言块**的登记表（第十二轮红队 R12-D-03 / C-P1-2 的唯一真源）。
@@ -1231,113 +1416,246 @@ function executesInstallPrecheck(script) {
 /** 承载"通过凭据断言块"的那份 workflow（登记表里的 job/step 名都属于它）。 */
 const VERDICT_WORKFLOW_FILE = 'ci.yml'
 /**
- * shell **函数定义**形态（`f() { … }` / `function f { … }` / `function f() { … }`）。
- * 见 [SK-14⑩]：承载凭据的步骤里出现定义即红（同名函数会遮蔽断言用的命令）。
+ * 这段步骤体是不是"从冻结输出复位 PATH"的那一行（SK-17 的 PATH 例外）。
+ * @param segment - `shellEnvironmentAssignments()` 报出的原始片段。
+ * @returns 是否放行。
  */
-const SHELL_FUNCTION_DEFINITION = /(?:^|[\n;&|(])\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:\(\s*\))?\s*\{/gu
-const VERDICT_ASSERTION_STEPS = [
+function isFrozenLauncherPathExport(segment) {
+  const match = FROZEN_LAUNCHER_PATH_EXPORT.exec(String(segment))
+  return match !== null && match[1] === FROZEN_LAUNCHER_STEP_ID
+}
+
+/**
+ * [SK-20] 冻结启动器的静态判据（现场说明见上面常量区）。
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @param options - `{ scannedFile }`（只对真实的那份 workflow 判）。
+ * @returns 失败项列表。
+ */
+function checkFrozenLaunchers(file, document, notes, options = {}) {
+  const failures = []
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const jobId of FROZEN_LAUNCHER_JOBS) {
+    const job = jobs[jobId]
+    if (job === undefined || job === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] 登记的 job \`${jobId}\` 不在本 workflow 里 —— \`FROZEN_LAUNCHER_JOBS\` 的每一条`
+          + '都是"这个 job 跑判据、所以它的启动器必须冻结"的登记，job 被删/改名必须同步这张表。',
+      })
+      continue
+    }
+    const steps = Array.isArray(job?.steps) ? job.steps : []
+    const scripts = steps.map(step => (typeof step?.run === 'string' ? executableScript(step.run) : ''))
+    const jobFailures = []
+    const freezeIndex = steps.findIndex(step => typeof step?.id === 'string' && step.id.trim() === FROZEN_LAUNCHER_STEP_ID)
+    if (freezeIndex < 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有 \`id: ${FROZEN_LAUNCHER_STEP_ID}\` 的**冻结步** ——\n`
+          + '  ⇒ 后续判据步里的 `node` 会按 `$PATH` 解析，而同 job 里任何一个更早的步骤都可以把假'
+          + '`node` 目录追加进 `$GITHUB_PATH`（第十三轮 R13-D-02：探针 / 编排器 / 凭据检查器三次调用'
+          + '全被替换，假 node 自己回显凭据 ⇒ EXIT=0、工作树干净、判据一条没跑）。',
+      })
+      continue
+    }
+    const freezeScript = scripts[freezeIndex] ?? ''
+    for (const fragment of FROZEN_LAUNCHER_FREEZE_FRAGMENTS) {
+      if (!freezeScript.includes(fragment)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] job \`${jobId}\` 的冻结步里缺少 \`${fragment}\` —— 冻结步必须把`
+            + ' `command -v node/bash/git` 的**绝对路径**与当时的 `$PATH` 写进 `$GITHUB_OUTPUT`'
+            + '（步骤输出由 runner 读走，后续仓内进程改不到）。',
+        })
+      }
+    }
+    for (const key of FROZEN_LAUNCHER_OUTPUT_KEYS) {
+      if (!new RegExp(`(?:^|[^A-Za-z0-9_-])${key}=`, 'u').test(freezeScript)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] 冻结步没有写出 \`${key}=\` 输出 —— 被钉步骤要按 `
+            + `\`steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.${key}\` 引用它。`,
+        })
+      }
+    }
+    // 冻结步之前不得有**执行仓内代码**的步骤（`echo`/`exit` 这类纯 shell 不算）。
+    const earlier = []
+    for (let index = 0; index < freezeIndex; index += 1) {
+      const script = scripts[index]
+      if (script === '') continue
+      const runsRepoCode = ['node', 'yarn', 'corepack', 'bash'].some(command => commandPositionArgvs(script, command).length > 0)
+        || /(?:^|[\s;&|])"?\.?\/?(?:scripts|packages)\//u.test(script)
+      if (runsRepoCode) earlier.push(`第 ${index + 1} 步「${stepName(steps[index], index)}」`)
+    }
+    if (earlier.length > 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 的冻结步排在第 ${freezeIndex + 1} 步，但它之前还有执行仓内`
+          + `代码的步骤：${earlier.join('；')}\n  ⇒ 冻结必须在**任何仓内执行点之前**（在那之前跑过的`
+          + '东西都可以改写 `$PATH`/`$GITHUB_ENV`，冻结出来的就是被污染的值）。',
+      })
+    }
+    // ② 该 job 里**任何**在命令位调用 `node` 的步骤都必须用冻结的绝对路径。
+    //    同时：取判据执行体来源的 `git show HEAD:` 与仓内 `bash <脚本>` 也必须走冻结值 ——
+    //    它们与 `node` 同属"启动器"（假 `git`/假 `bash` 一样能把探针来源/脚本换成攻击者的）。
+    //    **不**在这里复位 PATH：`yarn`/`corepack` 仍按活的 PATH 解析（corepack 的 yarn shim
+    //    自己会 exec `node`），复位会让 job 里后面的工具链解析到冻结那一刻的旧 PATH
+    //    —— 那是"用一个坏掉的构建换一个看起来安全的形态"，写进诚实边界而不是偷偷做掉。
+    let frozenCalls = 0
+    steps.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      // 冻结步自己**豁免**：它跑在任何冻结值存在之前，`command -v node` 在这里是
+      // "解析路径"而不是"启动判据"（冻结之后每一步都必须走冻结值）。
+      if (index === freezeIndex) return
+      const script = scripts[index]
+      const label = `job \`${jobId}\` 的第 ${index + 1} 步「${stepName(step, index)}」`
+      const nodeHits = rawCommandPositionArgvs(script, 'node')
+      const usesFrozenNode = step.run.includes(FROZEN_LAUNCHER_NODE_EXPRESSION)
+      if (nodeHits.length > 0) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 在**命令位**调用裸 \`node\`（${nodeHits.length} 处）—— 它的解析面是`
+            + '步骤自己的 `$PATH`，而 `$GITHUB_PATH` 注入的目录会前置到它前面（R13-D-02 的载荷形态：'
+            + '假 `node` 按 `--nonce-file` 把凭据自己回显回去）。'
+            + "\n  ⇒ 判据步必须用 `\"${{ " + FROZEN_LAUNCHER_NODE_EXPRESSION + " }}\"`"
+            + '（runner 侧展开的冻结绝对路径：步骤输出在步骤结束时被 runner 读走，后续仓内进程改不到）。',
+        })
+      }
+      if (usesFrozenNode) frozenCalls += 1
+      // `git show HEAD:<path>`：判据执行体的**来源**。假 `git` 可以让它吐出攻击者的字节。
+      const gitHits = rawCommandPositionArgvs(script, 'git')
+      const frozenGitGit = step.run.includes(FROZEN_LAUNCHER_GIT_EXPRESSION)
+      if (gitHits.length > 0 && !frozenGitGit) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 在**命令位**调用裸 \`git\`（${gitHits.length} 处）——`
+            + '`git show HEAD:<判据执行体>` 是"探针来源"的取字节动作，假 `git`（PATH 注入）可以让'
+            + '它吐出攻击者的字节，于是从 git 对象取执行体这条免疫整体失效。'
+            + "\n  ⇒ 用 `\"${{ " + FROZEN_LAUNCHER_GIT_EXPRESSION + " }}\"`"
+            + '（冻结的绝对路径）。',
+        })
+      }
+      // `bash <仓内脚本>`：仓内脚本的解释器同样是"启动器"。
+      const bashHits = rawCommandPositionArgvs(script, 'bash').filter(hit => /(?:^|\/)(?:scripts|packages)\/\S+/u.test(hit.join(' ')))
+      if (bashHits.length > 0 && !step.run.includes(FROZEN_LAUNCHER_BASH_EXPRESSION)) {
+        jobFailures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-20] ${label} 用裸 \`bash\` 执行仓内脚本（${bashHits.length} 处）——`
+            + '假 `bash`（PATH 注入）可以在这条链上换掉脚本行为。'
+            + "\n  ⇒ 用 `\"${{ " + FROZEN_LAUNCHER_BASH_EXPRESSION + " }}\"`。",
+        })
+      }
+    })
+    if (frozenCalls === 0) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有任何步骤使用冻结的 node 启动器`
+          + `（\`${FROZEN_LAUNCHER_NODE_EXPRESSION}\`）—— 冻结步存在但没被用上等于没有收口。`,
+      })
+    }
+    // ③ 行为探针必须真的被**永不跳过**的那个 job 执行（`gate-guards`：docs-only 的 PR 也跑它；
+    //    要求每个 job 各跑一遍只是把同一件事做两次，成本换不来新的证据）。
+    const probeSteps = steps
+      .filter(step => typeof step?.run === 'string'
+        && commandPositionArgvs(executableScript(step.run), FROZEN_LAUNCHER_PROBE).length > 0)
+    if (probeSteps.length === 0 && FROZEN_LAUNCHER_PROBE_JOBS.includes(jobId)) {
+      jobFailures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-20] job \`${jobId}\` 里没有步骤在**命令位**执行行为探针 \`${FROZEN_LAUNCHER_PROBE}\` ——`
+          + '静态判据只能证明"文本形态对"；跑一遍才能证明"PATH 注入换不掉启动器"'
+          + '（探针内部自带正控：拆掉冻结点后同一个载荷必须能把判据换掉，否则探针自己就是恒绿）。',
+      })
+    }
+    failures.push(...jobFailures)
+    if (jobFailures.length === 0) {
+      notes.push(`[SK-20] job \`${jobId}\` 的启动器已冻结:冻结步在第 ${freezeIndex + 1} 步(输出 `
+        + `${FROZEN_LAUNCHER_OUTPUT_KEYS.join('/')} · 冻结调用 ${frozenCalls} 处 · 裸 node 0 处)`
+        + ` · 行为探针 ${probeSteps.length} 处`)
+    }
+  }
+  return failures
+}
+
+// ===== SK-21:"永不跳过"的守卫 job 的**权限面**必须逐字登记（第十三轮 C-05，P3） =====
+//
+// 现场（第十三轮 C 泳道）：给 `gate-guards` 加 `permissions: contents: write`，
+// `check-workflows` EXIT=0（绿）—— 那个 job 是"永不跳过"的守卫 job，却可以带着写权限跑，
+// 而权限面此前只继承 workflow 顶层的 `contents: read`，没有任何静态判据盯它。
+// 同族的 `strategy` / `timeout-minutes` 取值面也是同样的"未被管"，但它们的失败方向是
+// fail-safe（矩阵任一腿红则 job 红、超时只会更容易失败），所以只登记**权限**这一条
+// （能改变"这一步能做什么"的那一条）。
+/**
+ * 「永不跳过的守卫 job」的权限面登记表（逐字相等；缺省/多键/取值不同都红）。
+ * 加一条 = 显式的、可评审的决定（并写清那个 job 为什么需要它）。
+ */
+const PINNED_JOB_PERMISSIONS_REGISTRY = [
   {
     job: 'gate-guards',
-    name: 'Judge execution bodies are pristine (runs before any yarn command)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      'node "$probe" --root "$PWD"',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
-      '--min judge-bodies 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/', '|& tee'],
-  },
-  {
-    job: 'gate',
-    name: 'Judge execution bodies are pristine (runs before any yarn command)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      'node "$probe" --root "$PWD"',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+'",
-      '--min judge-bodies 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/', '|& tee'],
-  },
-  {
-    job: 'gate-guards',
-    name: 'Root guards (every PR shape)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-root-guards: VERDICT PASS guards=[1-9][0-9]*'",
-      '--min guards 1',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/root-guards.log'],
-  },
-  {
-    job: 'gate-guards',
-    name: 'Guard parser integrity (strict worktree↔HEAD anchor)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'check-guard-parser-integrity.mjs --require-clean',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本'",
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/root-guards.log'],
-  },
-  {
-    job: 'gate',
-    name: 'Full gate (packages + all root guards)',
-    required: [
-      'git show HEAD:scripts/check-install-integrity.mjs',
-      '--root "$PWD" --restore',
-      'verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"',
-      'mkdir -m 700 "$verdict_dir"',
-      'openssl rand -hex 16 > "$verdict_dir/nonce"',
-      '> "$verdict_dir/stdout" 2> "$verdict_dir/stderr"',
-      'node scripts/check-workspaces.mjs',
-      'scripts/check-verdict-credential.mjs',
-      '--dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status"',
-      "'^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+'",
-      '--min planned 1 --equal planned executed',
-      'picoaide-verdict: PASS nonce=',
-      '[ "$verdict_lines" -ne 1 ]',
-      'exit 1',
-    ],
-    forbidden: ['/tmp/gate.log', '|& tee'],
+    // 只读：它取仓、跑根守卫、跑两个 install 期锚与行为探针 —— 没有任何一步需要写仓库。
+    permissions: { contents: 'read' },
+    why: '永不跳过的守卫 job：它只读仓（检出 + 判据），写权限对它没有任何用途；'
+      + '给它 `contents: write` 等于让"永不跳过"的那条链带上仓库写面（第三轮 C-05 实测 EXIT=0）。',
   },
 ]
+
+/**
+ * [SK-21] 「永不跳过的守卫 job」的权限面判据。
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @param options - `{ scannedFile }`（只对真实的那份 workflow 判）。
+ * @returns 失败项列表。
+ */
+function checkPinnedJobPermissions(file, document, notes, options = {}) {
+  const failures = []
+  if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  for (const entry of PINNED_JOB_PERMISSIONS_REGISTRY) {
+    const job = jobs[entry.job]
+    if (job === undefined || job === null) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-21] 登记的 job \`${entry.job}\` 不在本 workflow 里 —— `
+          + '`PINNED_JOB_PERMISSIONS_REGISTRY` 的每一条都是"这个 job 的权限面被钉死"的登记。',
+      })
+      continue
+    }
+    const actual = job.permissions
+    const expected = entry.permissions
+    const normalize = value => (typeof value === 'object' && value !== null
+      ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, String(item)]).sort())
+      : value ?? null)
+    const same = JSON.stringify(normalize(actual)) === JSON.stringify(normalize(expected))
+    if (!same) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-21] job \`${entry.job}\` 的 \`permissions\` 与登记值不一致：\n`
+          + `      登记：${JSON.stringify(expected)}\n      实际：${JSON.stringify(actual ?? null)}\n`
+          + `  ⇒ ${entry.why}\n`
+          + '  ⇒ 要改权限面必须同步改 `PINNED_JOB_PERMISSIONS_REGISTRY`（进 diff、可评审）。',
+      })
+    } else {
+      notes.push(`[SK-21] job \`${entry.job}\` 的权限面逐字等于登记值（${JSON.stringify(expected)}）`)
+    }
+  }
+  return failures
+}
+
 /**
  * [SK-17]（第十二轮红队 C-P0-1）**`defaults.run.shell`** 的登记表（**空表 = 禁止声明**）。
  *
@@ -1547,6 +1865,15 @@ const PINNED_STEP_POLICIES = [
     label: 'WASM 协议探针(`verify-wasm-client-only.sh`)',
     match: script => script.includes('verify-wasm-client-only.sh'),
     ifPolicy: 'fail-safe-docs-only',
+  },
+  {
+    // [SK-20]（第十三轮红队 R13-D-02，P0）：**冻结启动器的行为探针**。
+    // 它是"PATH 注入换不掉判据启动器"这条承诺的**唯一**运行级证据（静态面只能证明文本形态）；
+    // 与 `guard-parser-integrity` 同族：`if: false` / 删掉调用都能让它静默，而静态面全绿。
+    id: 'frozen-launcher-probe',
+    label: `冻结启动器行为探针(\`${FROZEN_LAUNCHER_PROBE}\`)`,
+    match: script => commandPositionArgvs(script, FROZEN_LAUNCHER_PROBE).length > 0,
+    ifPolicy: 'never',
   },
 ]
 /**
@@ -2474,6 +2801,9 @@ function checkCompositeActionTree(actionsRoot, notes, rootDir = root, options = 
       const script = executableScript(step.run)
       // 步骤体那一层:`export`/前缀赋值（写入）+ `unset`/`env -u`（清除，J1 的 N2）。
       for (const assignment of shellEnvironmentAssignments(step.run)) {
+        // [SK-20] 的**唯一** PATH 例外：`export PATH="${{ steps.frozen-launchers.outputs.path }}"`
+        // 把 PATH **复位**到冻结值（方向与攻击相反 —— 攻击要往 PATH 前面塞假 bin）。
+        if (assignment.name === 'PATH' && isFrozenLauncherPathExport(assignment.segment)) continue
         const name = assignment.unparsable === true
           ? null
           : (assignment.kind === 'unset' ? pinnedUnsetKeyProblem(assignment.name) : pinnedEnvKeyProblem(assignment.name))
@@ -6572,9 +6902,25 @@ function stripShellRedirections(text) {
   return chars.join('')
 }
 
-/** `./x` → `x`(只去"当前目录"前缀;带目录的形态原样保留)。 */
+/**
+ * 冻结启动器表达式的**命令名等价**（[SK-20]）。
+ *
+ * `"${{ steps.frozen-launchers.outputs.node }}" <脚本>` 里的命令词在 `splitShellWords` 之后是
+ * 那个表达式本身 —— 判据面必须知道它**就是** `node`/`bash`/`git`，否则收口会把下面这些
+ * 既有判据全部打死（实测：加冻结前缀后 [SK-14] 覆盖率 8→3、`PINNED_USES_REGISTRY` 冒出
+ * 8 条假死条目）：`guardRunnerCommandProblem` / `executesInstallPrecheck` /
+ * `rootGateInvocations` / `wasmGate*` / `PINNED_STEP_POLICIES` 的每一条 match。
+ */
+const FROZEN_LAUNCHER_TARGET_ALIASES = new Map([
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.node }}`, 'node'],
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.interp }}`, 'bash'],
+  [`\${{ steps.${FROZEN_LAUNCHER_STEP_ID}.outputs.git }}`, 'git'],
+])
+
+/** `./x` → `x`(只去"当前目录"前缀;带目录的形态原样保留)；冻结启动器表达式 → 它等价的那个命令名。 */
 function normalizeScriptTarget(word) {
-  return word.replace(/^\.\//u, '')
+  const normalized = word.replace(/^\.\//u, '')
+  return FROZEN_LAUNCHER_TARGET_ALIASES.get(normalized.trim()) ?? normalized
 }
 
 /** 解释器名比较用:取路径最后一段(`/usr/bin/node` 与 `node` 等价)。 */
@@ -6658,7 +7004,38 @@ function commandPositionArgvs(script, target) {
       hits.push(entry.argv)
       continue
     }
-    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(entry.command))) continue
+    // [SK-20]：解释器判定必须先过 `normalizeScriptTarget` —— 冻结启动器的命令词是
+    // `${{ steps.frozen-launchers.outputs.node }}` 这种表达式，`commandHead` 认不出它是 `node`。
+    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(normalizeScriptTarget(entry.command)))) continue
+    if (normalizeScriptTarget(entry.argv[0] ?? '') !== wanted) continue
+    hits.push(entry.argv.slice(1))
+  }
+  return hits
+}
+
+/**
+ * 与 {@link commandPositionArgvs} 同源，但**不**把冻结启动器表达式算作目标命令。
+ *
+ * 为什么需要它（[SK-20]）：`normalizeScriptTarget` 把
+ * `"${{ steps.frozen-launchers.outputs.node }}"` 归一成 `node`（否则 `guardRunnerCommandProblem` /
+ * `rootGateInvocations` / `PINNED_STEP_POLICIES` 的每一条 match 都会被冻结前缀打死），
+ * 于是"这一步有没有调用裸 `node`"这个问题不能再问 `commandPositionArgvs` —— 它会把
+ * 我们**要的**那个形态也数进去。这里按"命令词的原文是不是冻结表达式"过滤。
+ * @param script - 去注释后的可执行文本。
+ * @param target - 目标命令名（`node` / `bash` / `git`）。
+ * @returns 每个命中调用点的 argv；空数组 = 没有**裸**调用。
+ */
+function rawCommandPositionArgvs(script, target) {
+  const wanted = normalizeScriptTarget(target)
+  const hits = []
+  for (const entry of executedCommands(script)) {
+    const raw = entry.command.trim()
+    if (FROZEN_LAUNCHER_TARGET_ALIASES.has(raw)) continue
+    if (normalizeScriptTarget(entry.command) === wanted) {
+      hits.push(entry.argv)
+      continue
+    }
+    if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(normalizeScriptTarget(entry.command)))) continue
     if (normalizeScriptTarget(entry.argv[0] ?? '') !== wanted) continue
     hits.push(entry.argv.slice(1))
   }
@@ -7968,6 +8345,8 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
     const assignments = shellEnvironmentAssignments(unit.step.run)
     markLayer('step-body-assignment', assignments.length)
     for (const assignment of assignments) {
+      // [SK-20] 的**唯一** PATH 例外（理由见上面那条同名判断）。
+      if (assignment.name === 'PATH' && isFrozenLauncherPathExport(assignment.segment)) continue
       const hit = assignment.unparsable === true
         ? {
           raw: '（读不懂的片段）',
@@ -11070,6 +11449,11 @@ function main() {
     + '    docs-only 不得跳过根守卫 / 分类器规则钉死 / 发布面语义判据 / WASM 门禁接线)\n'
     + '    + SK-13/SK-14 策略(触发面业务契约 / 被钉住的判据步骤必须可执行:命令位 · 整串 `shell:` · '
     + '步骤体退出语义)\n'
+    + '    + SK-20 策略(被钉步骤的**启动器必须冻结**:`command -v node/bash/git` 的绝对路径写进步骤输出、'
+    + '后续判据步只用冻结值 —— `$GITHUB_PATH` 注入换不掉启动器;运行级证据是行为探针'
+    + ' `scripts/check-frozen-launchers.mjs`,它自带正控)\\n'
+    + '    + SK-21 策略(「永不跳过的守卫 job」的 `permissions` 逐字登记:该 job 只读仓)'
+    + '\\n'
     + '    + SK-17 策略(被钉步骤/根守卫 job 的**进程环境层**:四层 `env:` 的**白名单登记表** + '
     + '`$GITHUB_ENV` 键名注入 + 被钉步骤体内的 `export`/前缀赋值 + `uses:` 委派目标的'
     + '本地可解析/登记制 + `.github/actions/**` 的内容判据)\n'

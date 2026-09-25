@@ -7,7 +7,6 @@ import { fmtY } from '../usage/common'
 import { RefreshCw, Sparkles } from 'lucide-react'
 import {
   AI_ATTRIBUTION_NOTE,
-  AI_ATTRIBUTION_WIRING,
   AI_USAGE_WINDOW_DAYS,
   aiUsagePath,
   aiUsageTokens,
@@ -36,10 +35,12 @@ import {
  * `opens-contract-parity.spec.ts` 读 Go 源码逐键对拍。
  *
  * 四条必须守住的语义：
- *   ① **账单归使用者账号，应用维度靠归因**：客户端 LLM 出站带 `X-Pico-App-Id`，
- *      服务端只在该请求确属客户端会话链路时记录（伪造头忽略并 warn）。**但平台侧
- *      归因通道尚未接线**（全仓无发送方，见 `opens-contract.ts` 的
- *      `ATTRIBUTION_HEADER_WRITERS`）⇒ 文案不得把成因推给客户端版本或客户环境；
+ *   ① **账单归使用者账号，应用维度靠归因**：归因来自**会话链路** —— 隐藏会话 id 的
+ *      `app:<app_id>` 前缀由上游出站头 `x-deepseek-harness-session-id` 带上，网关按前缀
+ *      派生 `app_id`（§21.7⑤ 的替代路径；自报头 `X-Pico-App-Id` 发不出来，网关只识别并
+ *      忽略）。链路已接线（`AI_ATTRIBUTION_WIRING === 'wired'`，三段锚点由
+ *      `opens-contract-parity.spec.ts` 机械对拍）⇒ `attribution_available=false` 只表示
+ *      "该窗口内没有带归因的调用"，**不得**再把成因推给客户端版本或客户环境；
  *   ② **"统计未上线" ≠ "零调用"**（§5.1c B / §21.4）：`attribution_available=false`
  *      ⇒ 渲染"统计尚未上线/无归因"；`true` 且全零 ⇒ 渲染"确实零调用"。
  *      两者数字都是 0、含义相反，合并渲染即违反 §21.4；
@@ -132,17 +133,19 @@ export function AppAiUsageSection({ appId, canRead }: { appId: string; canRead: 
           没有取到 AI 用量数据（既不是错误也不是 0 次调用）；请刷新重试。
         </p>
       ) : view === 'no_attribution' ? (
-        /* 归因**尚未上线**（§5.1c B / §21.4）：服务端明确回报 attribution_available=false。
+        /* 归因**无记录**（§5.1c B / §21.4）：服务端明确回报 attribution_available=false。
            这里绝不能写成"0 次调用"—— 那是另一种含义（统计已上线、本应用确实没调过）。
-           成因**按 `AI_ATTRIBUTION_WIRING` 如实说**（R4-D-4）：通道未接线时不得把成因
-           推给客户端版本（全仓没有发送方，任何客户端版本都不产生归因）。 */
+           成因**按 `AI_ATTRIBUTION_WIRING` 如实说**（R4-D-4 / R13-GB）：链路已接线时，
+           这个 false 的唯一含义就是"该窗口内没有可归因的调用"；通道若再次断开，
+           对拍用例会先把常量改回 `not_wired`，文案随之改说"平台侧这条链路还没接上"
+           （`opens-contract-parity.spec.ts` 对这个说法做文本锚点双向断言）。 */
         <EmptyState
           icon={<Sparkles className="h-6 w-6" />}
-          title="统计尚未上线：暂无应用归因"
+          title="暂无应用归因记录"
           desc={
-            AI_ATTRIBUTION_WIRING === 'not_wired'
-              ? '服务端回报 attribution_available=false：平台侧的应用归因通道尚未接线（客户端与网关都还没有发送方，出站头 X-Pico-App-Id 目前无人写入），因此任何客户端版本都不会产生归因。这不是 0 次调用，也不是客户端版本问题。'
-              : '服务端回报 attribution_available=false：该窗口内平台还没有任何带应用归因的 AI 调用记录。这不是 0 次调用，而是「还没开始统计」。'
+            '服务端回报 attribution_available=false：该窗口内平台还没有任何带应用归因的 AI 调用记录'
+            + '（归因按隐藏会话 id 的 app: 前缀派生，链路已接线）。'
+            + '这不是 0 次调用，而是「这个应用在本窗口内还没有走过应用 AI」。'
           }
         />
       ) : view === 'zero_calls' ? (

@@ -216,7 +216,8 @@ const (
 
 // adminAppAIUsage 是 `GET /api/server/admin/wasm-apps/:app_id/ai-usage`（W5 C4）。
 //
-// 数据源 = §21.4 的 `usage.app_id` 维度（网关在 4 条计费路径上写 `X-Pico-App-Id`）。
+// 数据源 = §21.4 的 `usage.app_id` 维度（网关在 4 条计费路径上按**会话 id 的 `app:` 前缀**
+// 派生：`internal/llmgateway/app_session_id.go`，出站头由上游按 `options.sessionId` 带上）。
 // `attribution_available=false` 表示窗口内**平台还没有任何带归因的 usage 行** ⇒
 // 前端显示"暂无归因数据"；为 true 而本应用全零才是"确实没调用过模型"（两者都是 0，
 // 但含义相反，不得合并渲染）。

@@ -12,7 +12,22 @@
    logo_url 指向 /api/client/v2/channel/logo)
 7. 门户首页 200 且是门户页(含「客户端下载」一节)
 
-两处历史缺陷(2026-09-23 审计 W3-03/W3-04,均已修):
+## 判据纪律(2026-09-23 第十三轮审计 F-01,P0)
+
+上面 7 条契约落地为 `CRITERIA` 表的 **10 条判据** —— 这张表是**唯一真源**,运行期按 **id**
+经 `contractkit.Reporter.report()` 求值,`--self-test` / `--self-check` 逐条自证。
+为什么不能像 2026-09-23 之前那样把 `check(name, problems, detail)` 散在运行期代码里:
+
+    把 8/10 条运行期判据换成 check(name, [], '') ⇒ --self-test 仍是 29/29、
+    check-integration-tests 照打「2 个契约脚本判据自检通过」、REAL_GATE_EXIT=0
+
+即"判据的自我陈述比它实际判的东西宽"。现在同样的掏空会让**负例夹具**当场失败
+(每条判据都配了正例 + 负例;`scripts/check-integration-tests.mjs` 还会在**变异副本**上
+逐条复跑,要求它变红 —— 见那里的 `criteria-tautology` / `judge-tautology` /
+`count-side-zero` / `runtime-wrapper` 四个变异)。
+
+## 两处历史缺陷(2026-09-23 审计 W3-03/W3-04,均已修)
+
     · `:77-82` 断言的是 2026-09-10 已被渠道配置取代的旧 brand 契约
       (`"enabled":true` / `"Acme AI"`)⇒ `/channel` 响应里根本没有这两个键,
       该用例**必然**走 else 分支并判失败(不可达的 PASS)。
@@ -20,22 +35,51 @@
       ⇒ 恒 401 ⇒ `st != 200` 恒真:验证的是"伪造会话被拒",不是"auditor 无写权限",
       且真出现 RBAC fall-open(200/400)时也测不出。现在用真会话 + 真 CSRF 断言 403。
 
-环境缺失时**显式 SKIP**(退出码 77),绝不打印 PASS:
+## 环境缺失时**显式 SKIP**
+
+退出码 77,绝不打印 PASS:
     · /healthz 不可达;· /api/server/admin/auth/methods 显示 ldap 未配置
 退出码:0 = PASS;1 = FAIL(契约不满足);2 = 用法错误;77 = SKIP(未验证任何东西)。
 
 用法:
     python3 ldap-rbac-brand-test.py [server_base]
-    python3 ldap-rbac-brand-test.py --self-test     # 判据自检,不需要服务端/容器
+    python3 ldap-rbac-brand-test.py --self-test        # 判据本体自证
+    python3 ldap-rbac-brand-test.py --self-check       # 判定通道自证
+    python3 ldap-rbac-brand-test.py --dump-criteria    # 判据表登记值(JSON)
 数据(integration-tests/README.md):LDAP alice/alice123;admin/admin123456;audit01/audit12345。
 未覆盖(显式记账,不是静默跳过):§1.2 的「测试连接」端点需要 admin 会话 + 真实 LDAP bind,
 本脚本不写配置,留待人工/webadmin 用例。
 """
 import http.cookiejar
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
+
+# 契约判据通道(判定 + 计数 + 自检)在两个 .py 与门禁之间**只允许一份实现**。
+# 关掉 .pyc 落地:本目录不在 .gitignore 的 __pycache__ 白名单里,导入本地模块
+# 会在工作树里留下未跟踪目录(门禁每跑一次就多一份噪声)。
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from contractkit import (  # noqa: E402 - 路径必须先插入,导入位置由设计决定
+        EXIT_FAIL,
+        EXIT_PASS,
+        EXIT_SKIP,
+        EXIT_USAGE,
+        CriteriaError,
+        Reporter,
+        criteria_dump,
+        observation_of,
+        report_self_check_result,
+        report_self_test_result,
+        run_criteria_self_test,
+        run_reporter_self_check,
+    )
+except ImportError as exc:  # pragma: no cover - 只在文件布局被破坏时触发
+    print(f'ldap-rbac-brand-test: 无法加载契约判据通道 contractkit({exc})', file=sys.stderr)
+    raise SystemExit(1)
 
 DEFAULT_BASE = 'http://127.0.0.1:8091'
 LDAP_USER, LDAP_PASSWORD = 'alice', 'alice123'
@@ -43,8 +87,6 @@ ADMIN_USER, ADMIN_PASSWORD = 'admin', 'admin123456'
 AUDITOR_USER, AUDITOR_PASSWORD = 'audit01', 'audit12345'
 READONLY_PERMS = {'audit:read', 'usage:read', 'user:read'}
 LOGO_PATH = '/api/client/v2/channel/logo'
-
-EXIT_PASS, EXIT_FAIL, EXIT_USAGE, EXIT_SKIP = 0, 1, 2, 77
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +142,7 @@ def error_code(raw):
 
 
 # ---------------------------------------------------------------------------
-# 判据(纯函数,便于 --self-test 用合成夹具证明"有判别力")
+# 判据本体的辅助纯函数(只被 CRITERIA 的 evaluate 调用,便于逐条夹具取证)
 # ---------------------------------------------------------------------------
 def employee_login_problems(status, raw, expected_user, expected_role='user'):
     """员工面登录成功判据:200 + token + 身份/角色匹配。"""
@@ -118,6 +160,20 @@ def employee_login_problems(status, raw, expected_user, expected_role='user'):
     if expected_role and str(user.get('role') or '') != expected_role:
         problems.append(f'role 是 {user.get("role")!r},不是 {expected_role!r}')
     return problems
+
+
+def admin_login_problems(status, raw, label='admin', require_csrf=True):
+    """后台登录成功判据:200(可选:响应里必须有非空 csrf_token)。"""
+    if status != 200:
+        return [f'{label} 后台登录 st={status} body={raw[:120]}']
+    if not require_csrf:
+        return []
+    obj, problems = json_body(raw)
+    if problems:
+        return [f'{label} 后台登录{problems[0]}']
+    if not str((obj or {}).get('csrf_token') or ''):
+        return [f'{label} 后台登录响应缺 csrf_token: {raw[:120]}']
+    return []
 
 
 def auditor_employee_login_problems(status, raw):
@@ -194,9 +250,9 @@ def channel_contract_problems(status, raw):
     # 素材字段是**相对路径**(唯一真源 internal/router 的 /api/client/v2/channel/*):
     # 给了就必须指向本站端点,否则客户端会拿到破图/外链。
     assets = (
-        ('login.logo_url', login.get('logo_url'), '/api/client/v2/channel/logo'),
+        ('login.logo_url', login.get('logo_url'), LOGO_PATH),
         ('client.logo_url', (obj.get('client') or {}).get('logo_url') if isinstance(obj.get('client'), dict) else None,
-         '/api/client/v2/channel/logo'),
+         LOGO_PATH),
         ('favicon_url', obj.get('favicon_url'), '/api/client/v2/channel/favicon'),
     )
     for name, value, want in assets:
@@ -223,7 +279,120 @@ def portal_problems(status, headers, body):
 
 
 # ---------------------------------------------------------------------------
-# 用例自检:每条判据都要**拒绝**它的负例(只有正例过 = 恒真)
+# 判据表(**唯一真源**)
+#
+# ⚠️ 每条 `evaluate` 的**第一句**必须是 `obs = observation_of(obs, '<id>')`:
+#    它既是观测形状校验,也是门禁端到端变异的**注入锚点**
+#    (锚点消失时门禁判失败而不是静默跳过 —— 见 scripts/check-integration-tests.mjs)。
+# ⚠️ 改这张表(增删判据 / 改 id / 改名字)**必须**同步门禁里的
+#    `LDAP_EXPECTED_CRITERIA` 与夹具条数下限(登记值进 diff 才会被评审看见)。
+# ---------------------------------------------------------------------------
+def _eval_employee_login(obs):
+    obs = observation_of(obs, 'employee-login')
+    return employee_login_problems(obs.get('status'), obs.get('body', ''), obs.get('expected_user', ''))
+
+
+def _eval_admin_login(obs):
+    obs = observation_of(obs, 'admin-login')
+    return admin_login_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_auditor_employee_rejected(obs):
+    obs = observation_of(obs, 'auditor-employee-rejected')
+    return auditor_employee_login_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_auditor_admin_login(obs):
+    obs = observation_of(obs, 'auditor-admin-login')
+    return admin_login_problems(obs.get('status'), obs.get('body', ''), label='auditor', require_csrf=False)
+
+
+def _eval_auditor_permissions(obs):
+    obs = observation_of(obs, 'auditor-permissions')
+    return permissions_problems(obs.get('body', ''))
+
+
+def _eval_auditor_read(obs):
+    obs = observation_of(obs, 'auditor-read')
+    return auditor_read_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_auditor_write_forbidden(obs):
+    obs = observation_of(obs, 'auditor-write-forbidden')
+    return auditor_write_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_anonymous_write_control(obs):
+    obs = observation_of(obs, 'anonymous-write-control')
+    return anonymous_write_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_channel_contract(obs):
+    obs = observation_of(obs, 'channel-contract')
+    return channel_contract_problems(obs.get('status'), obs.get('body', ''))
+
+
+def _eval_portal_download_section(obs):
+    obs = observation_of(obs, 'portal-download-section')
+    return portal_problems(obs.get('status'), obs.get('headers', {}), obs.get('body', ''))
+
+
+CRITERIA = [
+    {
+        'id': 'employee-login',
+        'name': 'LDAP 员工登录成功且 role=user',
+        'evaluate': _eval_employee_login,
+    },
+    {
+        'id': 'admin-login',
+        'name': 'admin 后台登录成功(带 csrf_token)',
+        'evaluate': _eval_admin_login,
+    },
+    {
+        'id': 'auditor-employee-rejected',
+        'name': 'auditor 员工面被拒(401 AUDITOR_NOT_ALLOWED)',
+        'evaluate': _eval_auditor_employee_rejected,
+    },
+    {
+        'id': 'auditor-admin-login',
+        'name': 'auditor 后台登录成功',
+        'evaluate': _eval_auditor_admin_login,
+    },
+    {
+        'id': 'auditor-permissions',
+        'name': 'auditor 权限=三只读',
+        'evaluate': _eval_auditor_permissions,
+    },
+    {
+        'id': 'auditor-read',
+        'name': 'auditor 读端点可用(200,audit:read)',
+        'evaluate': _eval_auditor_read,
+    },
+    {
+        'id': 'auditor-write-forbidden',
+        'name': 'auditor 写端点被 RBAC 拒(403 FORBIDDEN)',
+        'evaluate': _eval_auditor_write_forbidden,
+    },
+    {
+        'id': 'anonymous-write-control',
+        'name': '对照:无管理会话时同一写端点 401',
+        'evaluate': _eval_anonymous_write_control,
+    },
+    {
+        'id': 'channel-contract',
+        'name': 'GET /api/client/v2/channel 满足渠道契约',
+        'evaluate': _eval_channel_contract,
+    },
+    {
+        'id': 'portal-download-section',
+        'name': '门户首页是门户页(含「客户端下载」)',
+        'evaluate': _eval_portal_download_section,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# 自检夹具:**每条判据都必须有正例与负例**(纯合成数据,不需要服务端/容器)
 # ---------------------------------------------------------------------------
 GOOD_CHANNEL = json.dumps({
     'channel_id': 'official',
@@ -232,75 +401,233 @@ GOOD_CHANNEL = json.dumps({
     'client': {'display_name': 'Example', 'logo_url': LOGO_PATH},
 }, ensure_ascii=False)
 
+SELF_TEST_FIXTURES = [
+    # ---- employee-login ----
+    {
+        'id': 'employee-login', 'expect': True,
+        'why': '正常:alice / role=user / 有 token',
+        'observation': {'status': 200, 'body': '{"token":"t","user":{"username":"alice","role":"user"}}',
+                        'expected_user': 'alice'},
+    },
+    {
+        'id': 'employee-login', 'expect': False,
+        'why': '负例:别的人',
+        'observation': {'status': 200, 'body': '{"token":"t","user":{"username":"bob","role":"user"}}',
+                        'expected_user': 'alice'},
+    },
+    {
+        'id': 'employee-login', 'expect': False,
+        'why': '负例:没有 token',
+        'observation': {'status': 200, 'body': '{"user":{"username":"alice","role":"user"}}',
+                        'expected_user': 'alice'},
+    },
+    {
+        'id': 'employee-login', 'expect': False,
+        'why': '负例:401',
+        'observation': {'status': 401, 'body': '{}', 'expected_user': 'alice'},
+    },
 
-def self_test():
-    cases = []
+    # ---- admin-login ----
+    {
+        'id': 'admin-login', 'expect': True,
+        'why': '正常:200 + 非空 csrf_token',
+        'observation': {'status': 200, 'body': '{"csrf_token":"csrf-admin","user":{"username":"admin"}}'},
+    },
+    {
+        'id': 'admin-login', 'expect': False,
+        'why': '负例:401',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_FAILED"}}'},
+    },
+    {
+        'id': 'admin-login', 'expect': False,
+        'why': '负例:200 但没有 csrf_token(写面会全被 CSRF 拒)',
+        'observation': {'status': 200, 'body': '{"user":{"username":"admin"}}'},
+    },
+    {
+        'id': 'admin-login', 'expect': False,
+        'why': '负例:200 但不是 JSON',
+        'observation': {'status': 200, 'body': '<html>login</html>'},
+    },
 
-    def expect(label, problems, want_empty):
-        cases.append((label, (not problems) == want_empty, problems))
+    # ---- auditor-employee-rejected ----
+    {
+        'id': 'auditor-employee-rejected', 'expect': True,
+        'why': '正常:401 + AUDITOR_NOT_ALLOWED',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUDITOR_NOT_ALLOWED"}}'},
+    },
+    {
+        'id': 'auditor-employee-rejected', 'expect': False,
+        'why': '负例:被放进来',
+        'observation': {'status': 200, 'body': '{"token":"t"}'},
+    },
+    {
+        'id': 'auditor-employee-rejected', 'expect': False,
+        'why': '负例:是别的 401',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_FAILED"}}'},
+    },
 
-    expect('员工登录/正例', employee_login_problems(200, '{"token":"t","user":{"username":"alice","role":"user"}}', 'alice'), True)
-    expect('员工登录/负例:别的人', employee_login_problems(200, '{"token":"t","user":{"username":"bob","role":"user"}}', 'alice'), False)
-    expect('员工登录/负例:没有 token', employee_login_problems(200, '{"user":{"username":"alice","role":"user"}}', 'alice'), False)
-    expect('员工登录/负例:401', employee_login_problems(401, '{}', 'alice'), False)
+    # ---- auditor-admin-login ----
+    {
+        'id': 'auditor-admin-login', 'expect': True,
+        'why': '正常:200',
+        'observation': {'status': 200, 'body': '{"csrf_token":"csrf-auditor","user":{"username":"audit01"}}'},
+    },
+    {
+        'id': 'auditor-admin-login', 'expect': False,
+        'why': '负例:401(后端会话没建起来)',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_FAILED"}}'},
+    },
 
-    expect('auditor 员工面/正例', auditor_employee_login_problems(401, '{"error":{"code":"AUDITOR_NOT_ALLOWED"}}'), True)
-    expect('auditor 员工面/负例:被放进来', auditor_employee_login_problems(200, '{"token":"t"}'), False)
-    expect('auditor 员工面/负例:是别的 401',
-           auditor_employee_login_problems(401, '{"error":{"code":"AUTH_FAILED"}}'), False)
+    # ---- auditor-permissions ----
+    {
+        'id': 'auditor-permissions', 'expect': True,
+        'why': '正常:恰好三只读',
+        'observation': {'body': '{"user":{"permissions":["audit:read","usage:read","user:read"]}}'},
+    },
+    {
+        'id': 'auditor-permissions', 'expect': False,
+        'why': '负例:多了写权限',
+        'observation': {'body': '{"user":{"permissions":["audit:read","usage:read","user:read","user:write"]}}'},
+    },
+    {
+        'id': 'auditor-permissions', 'expect': False,
+        'why': '负例:缺字段',
+        'observation': {'body': '{"user":{}}'},
+    },
 
-    expect('auditor 权限/正例', permissions_problems('{"user":{"permissions":["audit:read","usage:read","user:read"]}}'), True)
-    expect('auditor 权限/负例:多了写权限',
-           permissions_problems('{"user":{"permissions":["audit:read","usage:read","user:read","user:write"]}}'), False)
-    expect('auditor 权限/负例:缺字段', permissions_problems('{"user":{}}'), False)
+    # ---- auditor-read ----
+    {
+        'id': 'auditor-read', 'expect': True,
+        'why': '正常:200',
+        'observation': {'status': 200, 'body': '{"items":[]}'},
+    },
+    {
+        'id': 'auditor-read', 'expect': False,
+        'why': '负例:403',
+        'observation': {'status': 403, 'body': '{"error":{"code":"FORBIDDEN"}}'},
+    },
 
-    expect('auditor 写/正例:403 FORBIDDEN', auditor_write_problems(403, '{"error":{"code":"FORBIDDEN"}}'), True)
-    expect('auditor 写/负例:401(伪造/无会话那种恒真形态)', auditor_write_problems(401, '{"error":{"code":"AUTH_REQUIRED"}}'), False)
-    expect('auditor 写/负例:CSRF 没过', auditor_write_problems(403, '{"error":{"code":"CSRF_EXPIRED"}}'), False)
-    expect('auditor 写/负例:fall-open 200', auditor_write_problems(200, '{"user":{}}'), False)
-    expect('auditor 写/负例:fall-open 400 落到 handler', auditor_write_problems(400, '{"error":{"code":"VALIDATION"}}'), False)
+    # ---- auditor-write-forbidden ----
+    {
+        'id': 'auditor-write-forbidden', 'expect': True,
+        'why': '正常:403 FORBIDDEN',
+        'observation': {'status': 403, 'body': '{"error":{"code":"FORBIDDEN"}}'},
+    },
+    {
+        'id': 'auditor-write-forbidden', 'expect': False,
+        'why': '负例:401(伪造/无会话那种恒真形态)',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_REQUIRED"}}'},
+    },
+    {
+        'id': 'auditor-write-forbidden', 'expect': False,
+        'why': '负例:CSRF 没过',
+        'observation': {'status': 403, 'body': '{"error":{"code":"CSRF_EXPIRED"}}'},
+    },
+    {
+        'id': 'auditor-write-forbidden', 'expect': False,
+        'why': '负例:fall-open 200',
+        'observation': {'status': 200, 'body': '{"user":{}}'},
+    },
+    {
+        'id': 'auditor-write-forbidden', 'expect': False,
+        'why': '负例:fall-open 400 落到 handler',
+        'observation': {'status': 400, 'body': '{"error":{"code":"VALIDATION"}}'},
+    },
 
-    expect('无会话对照/正例:401', anonymous_write_problems(401, '{"error":{"code":"AUTH_REQUIRED"}}'), True)
-    expect('无会话对照/负例:403', anonymous_write_problems(403, '{"error":{"code":"FORBIDDEN"}}'), False)
+    # ---- anonymous-write-control ----
+    {
+        'id': 'anonymous-write-control', 'expect': True,
+        'why': '正常:401',
+        'observation': {'status': 401, 'body': '{"error":{"code":"AUTH_REQUIRED"}}'},
+    },
+    {
+        'id': 'anonymous-write-control', 'expect': False,
+        'why': '负例:403',
+        'observation': {'status': 403, 'body': '{"error":{"code":"FORBIDDEN"}}'},
+    },
 
-    expect('auditor 读/正例:200', auditor_read_problems(200, '{"items":[]}'), True)
-    expect('auditor 读/负例:403', auditor_read_problems(403, '{"error":{"code":"FORBIDDEN"}}'), False)
+    # ---- channel-contract ----
+    {
+        'id': 'channel-contract', 'expect': True,
+        'why': '正常:真契约',
+        'observation': {'status': 200, 'body': GOOD_CHANNEL},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:旧 brand 契约(enabled=false)',
+        'observation': {'status': 200, 'body': '{"enabled":false}'},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:旧 brand 契约(enabled=true + Acme AI)',
+        'observation': {'status': 200, 'body': '{"enabled":true,"name":"Acme AI"}'},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:channel_id 为空',
+        'observation': {'status': 200, 'body': json.dumps({'channel_id': '', 'title': 'x',
+                                                           'login': {'display_name': 'y'}})},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:login.display_name 缺失',
+        'observation': {'status': 200, 'body': json.dumps({'channel_id': 'a', 'title': 'x', 'login': {}})},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:logo_url 不是渠道端点',
+        'observation': {'status': 200, 'body': json.dumps({'channel_id': 'a', 'title': 'x',
+                                                           'login': {'display_name': 'y',
+                                                                     'logo_url': '/logo.svg'}})},
+    },
+    {
+        'id': 'channel-contract', 'expect': False,
+        'why': '负例:500',
+        'observation': {'status': 500, 'body': 'boom'},
+    },
 
-    expect('channel/正例', channel_contract_problems(200, GOOD_CHANNEL), True)
-    expect('channel/负例:旧 brand 契约(enabled=false)',
-           channel_contract_problems(200, '{"enabled":false}'), False)
-    expect('channel/负例:旧 brand 契约(enabled=true + Acme AI)',
-           channel_contract_problems(200, '{"enabled":true,"name":"Acme AI"}'), False)
-    expect('channel/负例:channel_id 为空',
-           channel_contract_problems(200, json.dumps({'channel_id': '', 'title': 'x', 'login': {'display_name': 'y'}})), False)
-    expect('channel/负例:login.display_name 缺失',
-           channel_contract_problems(200, json.dumps({'channel_id': 'a', 'title': 'x', 'login': {}})), False)
-    expect('channel/负例:logo_url 不是渠道端点',
-           channel_contract_problems(200, json.dumps({'channel_id': 'a', 'title': 'x',
-                                                      'login': {'display_name': 'y', 'logo_url': '/logo.svg'}})), False)
-    expect('channel/负例:500', channel_contract_problems(500, 'boom'), False)
+    # ---- portal-download-section ----
+    {
+        'id': 'portal-download-section', 'expect': True,
+        'why': '正常:门户页含下载节',
+        'observation': {'status': 200, 'headers': {'Content-Type': 'text/html; charset=utf-8'},
+                        'body': '<html><h2>客户端下载</h2></html>'},
+    },
+    {
+        'id': 'portal-download-section', 'expect': False,
+        'why': '负例:不是门户页',
+        'observation': {'status': 200, 'headers': {'Content-Type': 'text/html'}, 'body': '<html>hello</html>'},
+    },
+    {
+        'id': 'portal-download-section', 'expect': False,
+        'why': '负例:JSON 错误页',
+        'observation': {'status': 404, 'headers': {'Content-Type': 'application/json'}, 'body': '{}'},
+    },
+]
 
-    expect('门户/正例', portal_problems(200, {'Content-Type': 'text/html; charset=utf-8'},
-                                     '<html><h2>客户端下载</h2></html>'), True)
-    expect('门户/负例:不是门户页', portal_problems(200, {'Content-Type': 'text/html'}, '<html>hello</html>'), False)
-    expect('门户/负例:JSON 错误页', portal_problems(404, {'Content-Type': 'application/json'}, '{}'), False)
+# 夹具条数下限(棘轮):删夹具必须同时改这个常量与门禁里的登记值并写明理由。
+LDAP_MIN_FIXTURES = 35
 
-    bad = [label for label, ok, _ in cases if not ok]
-    for label, ok, detail in cases:
-        print(f'  {"ok  " if ok else "FAIL"} {label}{"" if ok else "  " + str(detail)}')
-    print(f'self-test: {len(cases) - len(bad)}/{len(cases)} 条判据夹具符合预期')
-    if bad:
-        print(f'self-test: FAIL —— 有判别力的判据不足: {bad}')
-        return EXIT_FAIL
-    return EXIT_PASS
+
+def _new_reporter():
+    """运行期的判定通道(`--self-check` 与真实跑**共用同一个构造点**)。
+
+    门禁的 `runtime-wrapper` 变异就注入在这里 —— 把通道换成恒真包装之后
+    `--self-check` 必须非零(自检消费的就是运行期这条通道)。
+    """
+    return Reporter(CRITERIA)
 
 
 # ---------------------------------------------------------------------------
 def parse_args(argv):
-    server, want_self_test, positional = DEFAULT_BASE, False, []
+    server, want_self_test, want_self_check, want_dump, positional = DEFAULT_BASE, False, False, False, []
     for item in argv:
         if item == '--self-test':
             want_self_test = True
+        elif item == '--self-check':
+            want_self_check = True
+        elif item == '--dump-criteria':
+            want_dump = True
         elif item in ('-h', '--help'):
             print(__doc__)
             raise SystemExit(EXIT_PASS)
@@ -314,23 +641,52 @@ def parse_args(argv):
         raise SystemExit(EXIT_USAGE)
     if positional:
         server = positional[0].rstrip('/')
-    return server, want_self_test
+    modes = [want_self_test, want_self_check, want_dump].count(True)
+    if modes > 1:
+        print('ldap-rbac-brand-test: --self-test / --self-check / --dump-criteria 只能给一个', file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
+    return server, want_self_test, want_self_check, want_dump
+
+
+def self_test():
+    """判据本体自证:每条判据的正/负例夹具都必须给出期望结论。"""
+    result = run_criteria_self_test(CRITERIA, SELF_TEST_FIXTURES)
+    status = report_self_test_result(result)
+    if result['total'] < LDAP_MIN_FIXTURES:
+        print(f'self-test: 夹具只剩 {result["total"]} 条(下限 {LDAP_MIN_FIXTURES})'
+              ' —— 夹具被删到没有判别力;确实要下调请同时改 LDAP_MIN_FIXTURES 与门禁登记值')
+        return EXIT_FAIL
+    return status
+
+
+def self_check():
+    """判定通道自证:全部夹具经**运行期那条 report()** 求值。"""
+    reporter = _new_reporter()
+    try:
+        result = run_reporter_self_check(reporter, CRITERIA, SELF_TEST_FIXTURES)
+    except CriteriaError as exc:
+        print(f'  FAIL {exc}')
+        print('reporter self-check: 0/0 条夹具经 report() 求值符合预期')
+        return EXIT_FAIL
+    return report_self_check_result(result)
 
 
 def main(argv):
-    server, want_self_test = parse_args(argv)
+    server, want_self_test, want_self_check, want_dump = parse_args(argv)
     if want_self_test:
         return self_test()
+    if want_self_check:
+        return self_check()
+    if want_dump:
+        print(json.dumps(criteria_dump(CRITERIA, SELF_TEST_FIXTURES), ensure_ascii=False, indent=2))
+        return EXIT_PASS
 
-    results = []
+    reporter = _new_reporter()
 
-    def check(name, problems, detail=''):
-        ok = not problems
-        results.append(ok)
-        print(f'{"✓" if ok else "✗"} {name}{("  " + detail) if detail else ""}')
-        for problem in problems:
-            print(f'    - {problem}')
-        return ok
+    def finish():
+        ok = reporter.failures() == 0
+        print('RESULT:', 'PASS' if ok else 'FAIL')
+        return EXIT_PASS if ok else EXIT_FAIL
 
     print(f'== LDAP + RBAC + 渠道集成测试(server={server}) ==')
 
@@ -355,29 +711,25 @@ def main(argv):
     employee = Session()
     status, body, _ = employee.post(server + '/api/client/v2/auth/login',
                                     {'username': LDAP_USER, 'password': LDAP_PASSWORD})
-    check('LDAP 员工登录成功且 role=user',
-          employee_login_problems(status, body, LDAP_USER), f'st={status}')
+    reporter.report('employee-login', {'status': status, 'body': body, 'expected_user': LDAP_USER})
 
     # 2. admin 后台登录。
     admin = Session()
     status, body, _ = admin.post(server + '/api/server/admin/login',
                                  {'username': ADMIN_USER, 'password': ADMIN_PASSWORD})
-    admin_problems = [] if status == 200 and 'csrf_token' in body else [f'st={status} body={body[:120]}']
-    check('admin 后台登录成功(带 csrf_token)', admin_problems, f'st={status}')
+    reporter.report('admin-login', {'status': status, 'body': body})
 
     # 3. auditor 员工面被拒。
     status, body, _ = employee.post(server + '/api/client/v2/auth/login',
                                     {'username': AUDITOR_USER, 'password': AUDITOR_PASSWORD})
-    check('auditor 员工面被拒(401 AUDITOR_NOT_ALLOWED)',
-          auditor_employee_login_problems(status, body), f'st={status}')
+    reporter.report('auditor-employee-rejected', {'status': status, 'body': body})
 
     # 4. auditor 后台登录 + 权限集合。
     auditor = Session()
     status, body, _ = auditor.post(server + '/api/server/admin/login',
                                    {'username': AUDITOR_USER, 'password': AUDITOR_PASSWORD})
-    auditor_problems = [] if status == 200 else [f'auditor 后台登录 st={status} body={body[:120]}']
-    check('auditor 后台登录成功', auditor_problems, f'st={status}')
-    check('auditor 权限=三只读', permissions_problems(body))
+    reporter.report('auditor-admin-login', {'status': status, 'body': body})
+    reporter.report('auditor-permissions', {'body': body})
 
     # 5. RBAC:读 200 / 写 403(真会话 + 真 CSRF),再加"无会话 → 401"的对照。
     csrf = ''
@@ -386,28 +738,26 @@ def main(argv):
     except ValueError:
         pass
     status, body, _ = auditor.get(server + '/api/server/admin/audit')
-    check('auditor 读端点可用(200,audit:read)', auditor_read_problems(status, body), f'st={status}')
+    reporter.report('auditor-read', {'status': status, 'body': body})
     # 写探针用 POST /users(perm=user:write,auditor 没有):**请求体故意不合法**,
     # 这样即使 RBAC 真 fall-open,handler 也只会 400 校验失败、不会改动任何数据 ——
     # 而 400 恰是我们判 FAIL 的形态(见 auditor_write_problems),不会假绿。
     status, body, _ = auditor.post(server + '/api/server/admin/users', {},
                                    {'X-CSRF-Token': csrf})
-    check('auditor 写端点被 RBAC 拒(403 FORBIDDEN)', auditor_write_problems(status, body), f'st={status}')
+    reporter.report('auditor-write-forbidden', {'status': status, 'body': body})
     status, body, _ = employee.post(server + '/api/server/admin/users', {})
-    check('对照:无管理会话时同一写端点 401', anonymous_write_problems(status, body), f'st={status}')
+    reporter.report('anonymous-write-control', {'status': status, 'body': body})
 
     # 6. 渠道内容契约(取代旧 brand 契约)。
     status, body, _ = probe.get(server + '/api/client/v2/channel')
-    check('GET /api/client/v2/channel 满足渠道契约', channel_contract_problems(status, body), f'st={status}')
+    reporter.report('channel-contract', {'status': status, 'body': body})
 
     # 7. 门户首页。
     status, body, headers = probe.get(server + '/')
-    check('门户首页是门户页(含「客户端下载」)', portal_problems(status, headers, body), f'st={status}')
+    reporter.report('portal-download-section', {'status': status, 'headers': headers, 'body': body})
 
     print('  ·  未覆盖(显式记账):§1.2「测试连接」端点需 admin 会话 + 真实 LDAP bind,留待 webadmin 用例')
-    ok = all(results)
-    print('RESULT:', 'PASS' if ok else 'FAIL')
-    return EXIT_PASS if ok else EXIT_FAIL
+    return finish()
 
 
 if __name__ == '__main__':

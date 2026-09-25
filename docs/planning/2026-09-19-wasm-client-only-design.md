@@ -791,6 +791,20 @@ desktop 组装期把 `deepLinkScheme` 与 `appOriginScheme` 注入新包（profi
 
 ⑤ **`X-Pico-App-Id` 出站头做不出来（§21.4 的实现路径需改判）**：chat 出站头的**唯一构造点**在上游 `deepseek-harness/packages/**/llm-deepseek/src/adapter.ts:539-551`，而 `GenerateOptions`/`LlmCallConfig`/`llm/stream`（对 loop 请求深冻结）**都没有 header 通道** ⇒ 在不改上游 submodule 的前提下加不上这个头。
 **替代路径（主控 2026-09-20 裁定，待实施）**：隐藏会话 id 本身就是 `app:<app_id>`，而出站头 `x-deepseek-harness-session-id` **天然带应用身份** ⇒ 服务端应**按会话 id 前缀派生归因**（`app:` ⇒ `app_id`），**不需要新头**。现状 = 服务端 `internal/llmgateway/app_attribution.go:36-65` 仍只读 `X-Pico-App-Id`、且**不校验该请求是否属会话链路** ⇒ §21.6 判据 8 的后半（伪造头的非会话请求被忽略并 warn）**在服务端未实现**。**本版如实认账：应用维度用量在真实环境里不会有数据**（面板按「统计尚未上线/无归因」显示，不显示 0）。
+
+> **2026-09-24 实施补记（R13-GB，替代路径已落地，且 id 形态按"账号作用域"加固）**：
+> 隐藏会话 id 由 `app:<app_id>` 改为 **`app:<app_id>#<账号作用域>`**（作用域 =
+> `<编码用户名>[@<服务端哈希>]`）—— 原形态只有应用维度，**同一台机器上换账号会续用上
+> 一个账号的对话**（真 agent-loop 实测：第二轮的模型请求里带着第一个账号的 user 消息
+> 与 assistant 回复；两路独立审计 B-P0-1 / R13-E-04 命中同一缺陷）。`app_id` 仍然**紧贴
+> 前缀**（服务端取第一个 `#` 之前的那段），所以 §21.4 的"按前缀派生归因"一字未改：
+> 服务端 `internal/llmgateway/app_session_id.go`（形状真源 `app-session-id.json`）+ 网关
+> 只认这条链路、自报头 `X-Pico-App-Id` 只识别并记 warn（§21.6 判据 8 的后半从此**已实现**）。
+> 旧形态 `app:<app_id>` 继续归因（历史会话与未升级客户端不失效）。客户端两半：id 构造在
+> `packages/host/wasm-apps-host/src/ai-chat.ts`，换账号释放活体会话在
+> `packages/host/desktop/src/app-ai-runner.ts`（订阅 `pico/session-changed`，实现收口在叶子包
+> `@picoaide/dsh-host-locale/session-events`）。因此 §21.6 判据 5 的"元数据含 `app_id`"
+> 仍按⑥那样读作"会话 id 可判定"，判据 8 的两半（正确归因 + 伪造头被忽略）现在都有用例。
 ⑥ **隐藏会话"元数据含 `app_id`"做不到**：`SessionHeader` 字段集封闭 + jsonl 头白名单会拒掉额外键（file:line 见该报告）⇒ `app_id` 目前只能从**会话 id** 与**出站会话头**推得。§21.6 判据 5 的"元数据含 `app_id`"应改为"**会话 id 前缀可判定**"。
 ⑦ **客户端 UI 侧的应用 AI 面板到不了协议 handler**：`AppAiPanel` 渲染在客户端 UI（loopback 源），它 `fetch('/__picoaide/ai/chat')` 走的是 loopback 服务端，而该路径**全仓只有协议 handler 一处**（应用窗口内才是协议源）⇒ 面板的聊天链路**当前不通**（本轮只补齐了它的授权路由与宿主侧记录/撤销）。修法二选一（待拍板）：①给面板走一条**宿主本机 HTTP 路由**（与 `/api/pico/wasm-apps/open` 同族）；②面板不再承担聊天，只做"授权/用量/说明"，聊天由应用页自己调保留路径。**本版认账：面板聊天不可用。**
 ⑧ **R2-L2-2 只做了一半**：`open` 响应 404/410 ⇒ 关窗 + 清缓存的触发源已实现（并修掉它的前置阻塞：此前**所有** 404 都被当"端点不存在"）；"客户端按目录对比"这一触发源**未做**。

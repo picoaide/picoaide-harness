@@ -15,10 +15,22 @@
  * 首个事件经常在消费方订阅之前发完 —— 裸订阅会漏掉它，表现是"要等下次登录
  * 才生效"（本仓已记录两次同根因 bug）。
  *
+ * 2026-09-24（R13）：那段顺序的实现已收口到零依赖叶子包
+ * `@picoaide/dsh-host-locale/session-events` 的 `subscribeSessionChanges`（本包在
+ * 构建图上游，不可能 import enterprise）。本模块只剩"会话归一化"这一半
+ * （`readAppSession`：缺 serverURL/token 的持久化会话按未登录处理）。
+ *
  * @module @picoaide/dsh-wasm-apps-host/session
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { subscribeSessionChanges } from '@picoaide/dsh-host-locale/session-events'
+
+/**
+ * 员工会话变化事件（唯一实现在叶子包 `@picoaide/dsh-host-locale/session-events`；
+ * 这里 re-export 供本包既有调用点使用，值与 enterprise `session-service.ts` 逐字相同）。
+ */
+export { SESSION_CHANGED_EVENT } from '@picoaide/dsh-host-locale/session-events'
 
 /** 员工会话（本插件只消费这三项；其余字段由 enterprise 负责）。 */
 export interface AppSession {
@@ -38,9 +50,6 @@ export interface PicoSessionLike {
   isLoggedIn?: () => boolean
   clear?: () => void
 }
-
-/** 员工会话变化事件（与 enterprise `session-service.ts` 同名同义）。 */
-export const SESSION_CHANGED_EVENT = 'pico/session-changed'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -78,6 +87,10 @@ export function readAppSession(service: PicoSessionLike | undefined): AppSession
 
 /**
  * 订阅会话变化，并补发启动时那一次（见模块头注释）。
+ *
+ * 实现委托给叶子包 `subscribeSessionChanges`（唯一实现）：这里只把事件带来的会话过一遍
+ * {@link readAppSession} 的归一化，并把 `probe` 交给调用方（本包的调用点用
+ * `ctx.get('picoSession')`；测试可注入替身）。
  * @param ctx - Host 上下文（只需 `on`/`get`）。
  * @param resolve - 每次事件时探测当前 `picoSession`（launcher 可能晚装配）。
  * @param listener - 收到可用会话（或 null=未登录）时回调。
@@ -88,12 +101,9 @@ export function subscribePicoSession(
   resolve: () => PicoSessionLike | undefined,
   listener: (session: AppSession | null) => void,
 ): () => void {
-  const read = (): void => { listener(readAppSession(resolve())) }
-  const off = ctx.on(SESSION_CHANGED_EVENT, read)
-  // `isRestored()` 在 restore 的 finally 里置位，而事件在那之前 emit：
-  // false ⇒ 那次 emit 还没发生（后续必然收到）；true ⇒ 已经错过，这里补一次。
-  // 服务缺席（没有 enterprise 面）时也补一次 —— "未登录"同样是要处理的状态。
-  const service = resolve()
-  if (service?.isRestored === undefined || service.isRestored()) read()
-  return off
+  return subscribeSessionChanges<unknown>(
+    ctx,
+    () => { listener(readAppSession(resolve())) },
+    () => resolve(),
+  )
 }

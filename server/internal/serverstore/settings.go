@@ -67,9 +67,16 @@ var settingsCache = newTTLCache(settingsTTL)
 func InvalidateSettings() { settingsCache.invalidateAll() }
 
 // SetSetting upserts a settings key/value.
+//
+// R13-GE（V2-2）：settings 属族内关系 ⇒ 池上写入口同样经唯一实现
+// `withUsageSearchPath` 钉住 search_path（否则 shadow 在场时配置写进 shadow，
+// 而判据硬钉 public ⇒ "保存成功但配置不生效"且 `err=nil`）。
 func SetSetting(db *sql.DB, key, value string) error {
-	_, err := db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+		return err
+	})
 	if err == nil {
 		settingsCache.invalidateAll()
 	}
@@ -92,35 +99,67 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 // 恰恰是**先删后读**（下一次启动重新解析优先级）。设置缓存是全局单例（settingsCache），
 // 所以这里与 SetSetting 用同一把失效口径。
 func DeleteSetting(db *sql.DB, key string) (bool, error) {
-	res, err := db.Exec(`DELETE FROM settings WHERE key = ?`, key)
+	var (
+		affected int64
+		unknown  bool
+	)
+	err := withUsageSearchPath(db, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM settings WHERE key = ?`, key)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			// 删除本身已经成功；行数拿不到不影响语义（调用方只关心"删掉了吗"）。
+			unknown = true
+			return nil
+		}
+		affected = n
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
 	settingsCache.invalidateAll()
-	n, err := res.RowsAffected()
-	if err != nil {
-		// 删除本身已经成功；行数拿不到不影响语义（调用方只关心"删掉了吗"）。
-		return true, nil
-	}
-	return n > 0, nil
+	return unknown || affected > 0, nil
 }
 
 // GetSetting returns the value and whether it exists.
+//
+// R13-GE（V2-2 读面收口）：settings 是**族内关系**之一 —— 峰谷窗口
+// （`usage.peak_windows`）与保留期（`usage.retention_months`）直接决定金额与账本
+// 生死，shadow schema 在场时裸 `db.QueryRow` 会读到 shadow 的配置值而判据/动作
+// 落在 public。所以池上读入口同样走已钉 search_path 的只读事务（唯一实现
+// usageReadConn）；缓存命中时不产生任何数据库往返（TTL 30s）。
 func GetSetting(db *sql.DB, key string) (string, bool, error) {
 	if v := settingsCache.get(db, "s:"+key); v != nil {
 		e := v.(cacheEntryVal)
 		return e.value, e.ok, nil
 	}
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return "", false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	return getSettingQ(rd, db, key)
+}
+
+// getSettingQ 是 GetSetting 的语句实现（唯一一份；q 为已钉事务的语句入口）。
+func getSettingQ(q rowQuerier, scope *sql.DB, key string) (string, bool, error) {
+	if v := settingsCache.get(scope, "s:"+key); v != nil {
+		e := v.(cacheEntryVal)
+		return e.value, e.ok, nil
+	}
 	var v string
-	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&v)
+	err := q.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&v)
 	if err == sql.ErrNoRows {
-		settingsCache.set(db, "s:"+key, cacheEntryVal{ok: false})
+		settingsCache.set(scope, "s:"+key, cacheEntryVal{ok: false})
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, err
 	}
-	settingsCache.set(db, "s:"+key, cacheEntryVal{value: v, ok: true})
+	settingsCache.set(scope, "s:"+key, cacheEntryVal{value: v, ok: true})
 	return v, true, nil
 }
 
@@ -132,7 +171,12 @@ type cacheEntryVal struct {
 
 // GetAllSettings returns a flattened key/value map.
 func GetAllSettings(db *sql.DB) (map[string]string, error) {
-	rows, err := db.Query("SELECT key, value FROM settings")
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
+	rows, err := rd.Query("SELECT key, value FROM settings")
 	if err != nil {
 		return nil, err
 	}

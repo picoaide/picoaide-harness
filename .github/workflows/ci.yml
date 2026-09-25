@@ -122,6 +122,12 @@ jobs:
     name: Gate (root guards, every change)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # C-05（第十三轮 C 泳道 P3）：这个 job 是"永不跳过"的守卫 job，它的**权限面**此前
+    # 只继承 workflow 顶层的 `contents: read` —— 现在显式声明（静态面把它收成登记制，
+    # 见 `check-workflows.mjs` 的 [SK-21]：这个 job 的 `permissions` 必须逐字等于登记值，
+    # 任何 `contents: write` / `actions: write` / 省略都红）。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -129,6 +135,55 @@ jobs:
           # 根守卫里的 check-no-real-domains 要扫提交信息区间 ⇒ 必须能看见历史
           # (2026-09-23 审计 R3-C C-4;守卫侧另有 fail-loud 兜底)。
           fetch-depth: 0
+      # R13-D-02（第十三轮红队 P0）：**冻结判据步的启动器**。
+      #
+      # 现场：载荷不碰 git、不改任何被跟踪文件，只把假 `node` 目录写进 `$GITHUB_PATH`
+      # （那行写在某个 `.sh` 里 ⇒ 读 YAML 的静态判据看不见）⇒ 探针 / 编排器 / 凭据检查器
+      # 三次 `node` 调用全被替换，假 `node` 按 `--nonce-file` 把凭据自己回显回去：
+      # `EXIT=0`、工作树干净、日志里凭据"齐全"，而一条判据都没跑。
+      #
+      # 收口：本步是**第一个执行体**（此前没有任何仓内代码跑过），把 `command -v node/bash/git`
+      # 的**绝对路径**与当时的 `$PATH` 写进**步骤输出**。步骤输出在步骤结束时被 runner 读走、
+      # 存进 runner 自己的状态；后续步骤里的仓内进程**改不到**它 —— 于是判据步一律用
+      # `"${{ steps.frozen-launchers.outputs.node }}"` 这类 runner 侧展开的值调用。
+      # 静态判据：[SK-20]（未用冻结启动器即红）；运行级证据：行为探针
+      # `scripts/check-frozen-launchers.mjs`（它自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉）。
+      #
+      # 诚实边界：收口的是 `$PATH` 注入这条**低成本**通道。GitHub 托管 runner 上 runner 用户
+      # 有免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径；`yarn`/`corepack`
+      # 仍按活的 `$PATH` 解析（corepack 的 yarn shim 自己会 exec `node`）——不把它写成"完全收口"。
+      - name: Freeze judge launchers (first execution body; no repo code has run yet)
+        id: frozen-launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 说明:解释器那一路的变量叫 `interp`(不是它的常见名字)—— 静态判据
+          # `[SK-7c]` 会把 `sh`/`ba*sh` 这类**词**当成"把命令交给另一个 shell",
+          # 而这一行的形态让它读不出内层引号 ⇒ 判据直接把这一步判红(实测)。
+          # 形态改成"命令替换不加引号 + 变量名不含那个词"之后两边都成立。
+          node_path=$(command -v node)
+          interp_path=$(command -v bash)
+          git_path=$(command -v git)
+          if [ "${node_path#/}" = "$node_path" ]
+          then
+            echo "::error::冻结启动器:首个解释器不是绝对路径"
+            exit 1
+          fi
+          if [ "${interp_path#/}" = "$interp_path" ]
+          then
+            echo "::error::冻结启动器:第二个解释器不是绝对路径"
+            exit 1
+          fi
+          if [ "${git_path#/}" = "$git_path" ]
+          then
+            echo "::error::冻结启动器:第三个解释器不是绝对路径"
+            exit 1
+          fi
+          printf 'node=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+          printf 'interp=%s\n' "$interp_path" >> "$GITHUB_OUTPUT"
+          printf 'git=%s\n' "$git_path" >> "$GITHUB_OUTPUT"
+          printf 'path=%s\n' "$PATH" >> "$GITHUB_OUTPUT"
+          echo "frozen launchers: node=$node_path interp=$interp_path git=$git_path"
       # R12-D-01（第十二轮红队 P0）：**判据本体在 install 期有没有被改写**的前置校验。
       #
       # 位置本身就是判据的一部分：`.yarnrc.yml` 的 `plugins:` 指向一个可提交的插件文件，
@@ -148,7 +203,7 @@ jobs:
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$probe_dir"
           probe="$probe_dir/check-install-integrity.mjs"
-          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs > "$probe"
           # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir` 是原子的：已存在即失败 ⇒
           # 前序步骤留下的进程无法预置它）+ 0700 + 本步一次性 nonce（写在独占目录里，不进 argv）
           # + stdout/stderr 分开落盘 + **由本步的检查器合成**通过凭据（不是被审进程自己说）。
@@ -158,10 +213,10 @@ jobs:
           nonce=''
           read -r nonce < "$verdict_dir/nonce"
           status=0
-          node "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          "${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
           cat "$verdict_dir/stdout"
           cat "$verdict_dir/stderr" >&2
-          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 > "$verdict_dir/verdict"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 --expect github-sha "$GITHUB_SHA" > "$verdict_dir/verdict"
           cat "$verdict_dir/verdict"
           verdict_lines=0
           if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
@@ -207,8 +262,8 @@ jobs:
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$probe_dir"
           probe="$probe_dir/check-install-integrity.mjs"
-          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
-          node "$probe" --root "$PWD" --restore
+          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          "${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD" --restore
           # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir -m 700` + `$SRANDOM` 三段 ≈96 位
           # 随机段；`mkdir` 原子，已存在即失败 ⇒ 前序步骤留下的进程无法预置它）+ stdout/stderr **分开**落盘
           # （"两个流各打半行"拼不出凭据）+ 本步一次性 nonce（下面的检查器把它回显进通过凭据）。
@@ -220,7 +275,7 @@ jobs:
           nonce=''
           read -r nonce < "$verdict_dir/nonce"
           status=0
-          node scripts/check-root-guards.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-root-guards.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
           cat "$verdict_dir/stdout"
           cat "$verdict_dir/stderr" >&2
           # 判定权上移(第十一轮复审 J1 的 N1/N4):**不看退出码,只认通过凭据**。
@@ -233,7 +288,7 @@ jobs:
           # 检查器（`check-verdict-credential.mjs`，本身是被登记的判据执行体）把四件事一起判：
           # 凭据在**本步自己的 stdout 捕获文件**里**恰好一行**、计数成立、退出码 0、文件属于本步；
           # 并通过回显本次 nonce 把凭据绑到**这一步**（"这条流里出现过这句话"不算凭据）。
-          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-root-guards: VERDICT PASS guards=[1-9][0-9]*' --min guards 1 > "$verdict_dir/verdict"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-root-guards: VERDICT PASS guards=[1-9][0-9]*' --min guards 1 > "$verdict_dir/verdict"
           cat "$verdict_dir/verdict"
           verdict_lines=0
           if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
@@ -270,8 +325,8 @@ jobs:
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$probe_dir"
           probe="$probe_dir/check-install-integrity.mjs"
-          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
-          node "$probe" --root "$PWD" --restore
+          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          "${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD" --restore
           # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录 + 分开的 stdout/stderr + 一次性 nonce。
           verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$verdict_dir"
@@ -282,10 +337,10 @@ jobs:
           read -r nonce < "$verdict_dir/nonce"
           status=0
           # `--require-clean` 是**参数通道**：env 信号能被一行 `unset CI GITHUB_ACTIONS` 清掉，argv 不能。
-          node scripts/check-guard-parser-integrity.mjs --require-clean > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-guard-parser-integrity.mjs --require-clean > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
           cat "$verdict_dir/stdout"
           cat "$verdict_dir/stderr" >&2
-          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本' > "$verdict_dir/verdict"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-guard-parser-integrity: OK — [0-9]+ 条守卫脚本' > "$verdict_dir/verdict"
           cat "$verdict_dir/verdict"
           verdict_lines=0
           if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
@@ -296,6 +351,18 @@ jobs:
             echo "::error::本步的通过凭据不是恰好一行(实际 ${verdict_lines} 行)⇒ 凭据必须由本步的检查器逐字回显本次 nonce"
             exit 1
           fi
+
+      # R13-D-02 的**运行级**证据：行为探针（静态判据 [SK-20] 只能证明"文本形态对"）。
+      #
+      # 它把载荷**真的跑一遍**：造一个假 `node`（会写标记文件并自己回显一条"通过凭据"），
+      # 先按本 job 的冻结步取冻结值，再 prepend 假 bin 到 `$PATH` 后执行**本文件里那段真字节**
+      # 的判据步体（`${{ … }}` 换成 runner 展开后的冻结值）⇒ 必须仍跑真判据、假 node 零调用。
+      # 探针内部还带一个**正控**：把冻结点拆掉后同一个载荷**必须**能把判据换掉 ——
+      # 没有正控的探针只能证明"绿"，证明不了"它抓得住"。
+      - name: Frozen launcher behavioural probe (PATH injection cannot swap the judge launcher)
+        run: |
+          set -euo pipefail
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-frozen-launchers.mjs --root "$PWD"
 
   gate:
     name: Gate (tests + workspace build)
@@ -346,6 +413,55 @@ jobs:
           # changes job 早就付过这个成本,同一个仓不是新增量级;守卫侧另有 fail-loud
           # 兜底(区间解析不到即 EXIT=3),这条是让它**不需要**触发的那一半。
           fetch-depth: 0
+      # R13-D-02（第十三轮红队 P0）：**冻结判据步的启动器**。
+      #
+      # 现场：载荷不碰 git、不改任何被跟踪文件，只把假 `node` 目录写进 `$GITHUB_PATH`
+      # （那行写在某个 `.sh` 里 ⇒ 读 YAML 的静态判据看不见）⇒ 探针 / 编排器 / 凭据检查器
+      # 三次 `node` 调用全被替换，假 `node` 按 `--nonce-file` 把凭据自己回显回去：
+      # `EXIT=0`、工作树干净、日志里凭据"齐全"，而一条判据都没跑。
+      #
+      # 收口：本步是**第一个执行体**（此前没有任何仓内代码跑过），把 `command -v node/bash/git`
+      # 的**绝对路径**与当时的 `$PATH` 写进**步骤输出**。步骤输出在步骤结束时被 runner 读走、
+      # 存进 runner 自己的状态；后续步骤里的仓内进程**改不到**它 —— 于是判据步一律用
+      # `"${{ steps.frozen-launchers.outputs.node }}"` 这类 runner 侧展开的值调用。
+      # 静态判据：[SK-20]（未用冻结启动器即红）；运行级证据：行为探针
+      # `scripts/check-frozen-launchers.mjs`（它自带**正控**：拆掉冻结点后同一个载荷必须能把判据换掉）。
+      #
+      # 诚实边界：收口的是 `$PATH` 注入这条**低成本**通道。GitHub 托管 runner 上 runner 用户
+      # 有免密 sudo，同 job 内任意代码理论上仍可替换任何主机侧路径；`yarn`/`corepack`
+      # 仍按活的 `$PATH` 解析（corepack 的 yarn shim 自己会 exec `node`）——不把它写成"完全收口"。
+      - name: Freeze judge launchers (first execution body; no repo code has run yet)
+        id: frozen-launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 说明:解释器那一路的变量叫 `interp`(不是它的常见名字)—— 静态判据
+          # `[SK-7c]` 会把 `sh`/`ba*sh` 这类**词**当成"把命令交给另一个 shell",
+          # 而这一行的形态让它读不出内层引号 ⇒ 判据直接把这一步判红(实测)。
+          # 形态改成"命令替换不加引号 + 变量名不含那个词"之后两边都成立。
+          node_path=$(command -v node)
+          interp_path=$(command -v bash)
+          git_path=$(command -v git)
+          if [ "${node_path#/}" = "$node_path" ]
+          then
+            echo "::error::冻结启动器:首个解释器不是绝对路径"
+            exit 1
+          fi
+          if [ "${interp_path#/}" = "$interp_path" ]
+          then
+            echo "::error::冻结启动器:第二个解释器不是绝对路径"
+            exit 1
+          fi
+          if [ "${git_path#/}" = "$git_path" ]
+          then
+            echo "::error::冻结启动器:第三个解释器不是绝对路径"
+            exit 1
+          fi
+          printf 'node=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+          printf 'interp=%s\n' "$interp_path" >> "$GITHUB_OUTPUT"
+          printf 'git=%s\n' "$git_path" >> "$GITHUB_OUTPUT"
+          printf 'path=%s\n' "$PATH" >> "$GITHUB_OUTPUT"
+          echo "frozen launchers: node=$node_path interp=$interp_path git=$git_path"
       # R12-D-01（第十二轮红队 P0）：与本文件 gate-guards job 的第一步同一条判据 ——
       # "判据本体在 install 期有没有被改写"。放在这里的原因同那里：本 job 也会
       # `yarn install`（下面第 11 步左右），install 之后的任何判决都要求判据本体没被动过。
@@ -360,7 +476,7 @@ jobs:
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$probe_dir"
           probe="$probe_dir/check-install-integrity.mjs"
-          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs > "$probe"
           # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录（`mkdir` 是原子的：已存在即失败 ⇒
           # 前序步骤留下的进程无法预置它）+ 0700 + 本步一次性 nonce（写在独占目录里，不进 argv）
           # + stdout/stderr 分开落盘 + **由本步的检查器合成**通过凭据（不是被审进程自己说）。
@@ -370,10 +486,10 @@ jobs:
           nonce=''
           read -r nonce < "$verdict_dir/nonce"
           status=0
-          node "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          "${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD" > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
           cat "$verdict_dir/stdout"
           cat "$verdict_dir/stderr" >&2
-          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 > "$verdict_dir/verdict"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-install-integrity: VERDICT PASS judge-bodies=[0-9]+' --min judge-bodies 1 --expect github-sha "$GITHUB_SHA" > "$verdict_dir/verdict"
           cat "$verdict_dir/verdict"
           verdict_lines=0
           if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
@@ -397,7 +513,7 @@ jobs:
         id: release_policy
         run: |
           set -euo pipefail
-          bash scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
+          "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-release-policy.sh >> "$GITHUB_OUTPUT"
       # 发布 tag 的**拓扑判据**(2026-09-23 第五轮审计 R5-C-2 / M1)。
       #
       # 为什么也放在 gate 的第一步:拓扑违规的现场形态是"CI 全绿,但上一个 tag 的修复
@@ -416,9 +532,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
-          git fetch --quiet --no-recurse-submodules origin \
+          "${{ steps.frozen-launchers.outputs.git }}" fetch --quiet --no-recurse-submodules origin \
             '+refs/heads/master:refs/remotes/origin/master' '+refs/tags/*:refs/tags/*'
-          bash scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
+          "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-release-topology.sh --ref HEAD --exclude-tag "${GITHUB_REF_NAME}"
       # 渠道仓 revision 的**唯一**解析点(2026-09-23 第五轮审计 R5-C-2)。
       #
       # 为什么必须有:私有渠道仓原先被同一次 tag 的四个 job 各自 `git clone --depth 1
@@ -437,7 +553,9 @@ jobs:
           # 推荐形态:只读 deploy key(不过期、只对那一个仓);两选一即可,脚本按
           # CI_CHANNELS_URL > SSH key > token 的优先级取用。见 scripts/ci-channels.sh 头注释。
           CHANNELS_REPO_SSH_KEY: ${{ secrets.CHANNELS_REPO_SSH_KEY }}
-        run: bash scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-channels.sh --resolve-only >> "$GITHUB_OUTPUT"
       # 发布 tag 必须有策展发布说明(2026-09-11 定案;2026-09-23 第五轮审计 R5-C-3
       # 起**预发 tag 同样要求**):GitHub Release 页是**公开面**,缺 docs/releases/<tag>.md
       # 时正文会回退成自动生成的 PR 列表 —— 而 PR 标题/正文不在任何守卫判据内(铁律 0 的
@@ -480,9 +598,9 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         run: |
           set -euo pipefail
-          node scripts/version.mjs manifests
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/version.mjs manifests
           case "${GITHUB_REF}" in
-            refs/tags/v*) node scripts/version.mjs check "${GITHUB_REF_NAME}" ;;
+            refs/tags/v*) "${{ steps.frozen-launchers.outputs.node }}" scripts/version.mjs check "${GITHUB_REF_NAME}" ;;
           esac
       - name: Cache yarn (and electron for the linux packaging job)
         if: needs.changes.outputs.code != 'false'
@@ -543,8 +661,8 @@ jobs:
           probe_dir="$RUNNER_TEMP/judge-$SRANDOM$SRANDOM$RANDOM"
           mkdir -m 700 "$probe_dir"
           probe="$probe_dir/check-install-integrity.mjs"
-          git show HEAD:scripts/check-install-integrity.mjs > "$probe"
-          node "$probe" --root "$PWD" --restore
+          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-install-integrity.mjs > "$probe"
+          "${{ steps.frozen-launchers.outputs.node }}" "$probe" --root "$PWD" --restore
           # 凭据通道（R12-D-03 / C-P0-2②）：步骤独占目录 + stdout/stderr **分开**落盘 + 本步
           # 一次性 nonce。三个一起把"这条流里出现过这句话"换成"本步的检查器逐字回显了本次 nonce"。
           verdict_dir="$RUNNER_TEMP/verdict-$SRANDOM$SRANDOM$RANDOM"
@@ -559,7 +677,7 @@ jobs:
           # `.yarnrc.yml` 的 `plugins:`（顶层模块代码在启动期执行）⇒ 判据进程的**启动器**本身
           # 可被仓内配置改写。包级 check 仍由编排器内部经 yarn 起（那条路上编排器自己会拒
           # `yarnPath`/`plugins`/生命周期钩子），但**承载判决的这个进程**不再经过 yarn。
-          node scripts/check-workspaces.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-workspaces.mjs > "$verdict_dir/stdout" 2> "$verdict_dir/stderr" || status=$?
           cat "$verdict_dir/stdout"
           cat "$verdict_dir/stderr" >&2
           # 判定权上移(第十一轮复审 J1 的 N1/N4):这一步**不看退出码就通过**,只有通过凭据在
@@ -568,7 +686,7 @@ jobs:
           # 执行体）把四件事一起判：凭据在**本步自己的 stdout 捕获文件**里**恰好一行**、
           # 计数成立（planned=N>0 且 planned==executed）、退出码 0、文件属于本步，
           # 并把本次 nonce 回显进通过凭据。
-          node scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' --min planned 1 --equal planned executed > "$verdict_dir/verdict"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$verdict_dir" --nonce-file "$verdict_dir/nonce" --status "$status" --pattern '^check-workspaces: VERDICT PASS planned=[0-9]+ executed=[0-9]+' --min planned 1 --equal planned executed > "$verdict_dir/verdict"
           cat "$verdict_dir/verdict"
           verdict_lines=0
           if grep -q "picoaide-verdict: PASS nonce=$nonce " "$verdict_dir/verdict"; then
@@ -594,7 +712,9 @@ jobs:
         env:
           WASM_GATE_REQUIRE_COVERED_PLATFORM: '1'
           WASM_GATE_EXPECT_HEAD: ${{ github.sha }}
-        run: bash scripts/verify-wasm-client-only.sh --groups 6
+        run: |
+          set -euo pipefail
+          "${{ steps.frozen-launchers.outputs.interp }}" scripts/verify-wasm-client-only.sh --groups 6
       # 2026-09-06 实测:upload-artifact 对多 glob path 会按各条目的根拍平目录
       # 结构(下载后 lib/ 树丢失),故先 tar 打包为单文件,目录结构自控。
       - name: Package workspace build products

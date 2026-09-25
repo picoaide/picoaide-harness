@@ -27,7 +27,10 @@ import (
 // repoSkillDir 是本仓真实的内置技能目录（打包资产的源头）。
 // 测试直接打真资产：换成构造样本的话，「内置资产能不能过服务端校验」这条
 // 最该被钉住的断言就变成自说自话。
-const repoSkillDir = "../../../../server/skills/app-builder"
+//
+// 目录名从 repoSkillsRoot（builtin_skills_test.go）拼出来：**技能集合**本身由那张登记表
+// 与三方对账判据守着（R13-F-05），这里只钉 app-builder 这一条真资产的细节。
+const repoSkillDir = repoSkillsRoot + "/app-builder"
 
 // seededSkillVersion 是真资产 SKILL.md 里的 version。
 //

@@ -420,12 +420,20 @@ func BalanceLedgerPage(db *sql.DB, userID int64, kind string, page, size int) ([
 		where += " AND kind = ?"
 		args = append(args, kind)
 	}
+	// R13-GE（V2-2 读面收口）：余额流水是族内读面（balance_ledger），池上入口走
+	// 已钉 search_path 的只读事务（唯一实现 usageReadConn）—— 计数与分页两条语句
+	// 在同一个已钉事务里读，避免两个数字来自两个库。
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var total int64
-	if err := db.QueryRow(`SELECT COUNT(*) FROM balance_ledger WHERE `+where, args...).Scan(&total); err != nil {
+	if err := rd.QueryRow(`SELECT COUNT(*) FROM balance_ledger WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := db.Query(`SELECT id, user_id, kind, amount, balance_after, reason, actor, usage_id, month, created_at
+	rows, err := rd.Query(`SELECT id, user_id, kind, amount, balance_after, reason, actor, usage_id, month, created_at
 FROM balance_ledger WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, 0, err
@@ -451,8 +459,13 @@ FROM balance_ledger WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, args...)
 
 // BalanceLedgerSum 返回某用户流水合计(对账用:应等于 users.balance_money)。
 func BalanceLedgerSum(db *sql.DB, userID int64) (float64, error) {
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return 0, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚
 	var sum float64
-	err := db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM balance_ledger WHERE user_id = ?`, userID).Scan(&sum)
+	err = rd.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM balance_ledger WHERE user_id = ?`, userID).Scan(&sum)
 	return sum, err
 }
 

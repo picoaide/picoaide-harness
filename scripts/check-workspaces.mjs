@@ -332,7 +332,10 @@ const PACKAGES = [
   // 2026-09-19 起它经 **browser 包导出的 surface seam**（`@picoaide/dsh-browser/surface`）
   // 取得视图/分区/CDP 能力（设计总纲 §16.1 的 surface 抽象：工具实现只写一份、按 surface
   // 分派）⇒ 构建期依赖 browser 的 lib/types，必须先于它产出。
-  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser'] },
+  // 2026-09-24（R13）：`src/session.ts` 的会话订阅收口到零依赖叶子包
+  // `@picoaide/dsh-host-locale/session-events` ⇒ 真实构建边多一条（叶子包无出边，
+  // 不会引入新的环；`temp/wasm-client-only/cycle-check.mjs` 会逐条对拍）。
+  { name: '@picoaide/dsh-wasm-apps-host', dir: 'packages/host/wasm-apps-host', needs: ['@picoaide/dsh-browser', '@picoaide/dsh-host-locale'] },
   // 2026-09-16:vendored 第三方插件(随三平台安装包分发)的测试此前**不在任何门禁
   // 链里**(verify-inventories 的 CHECK_CHAIN_EXEMPTIONS 显式豁免),本地加固
   // (同源守卫/符号链接写落点断言/失败软着陆)只有"手工跑"这一条保证 —— 升级

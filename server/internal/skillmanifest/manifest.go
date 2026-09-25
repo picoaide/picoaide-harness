@@ -682,7 +682,16 @@ func optionalTags(data map[string]any) ([]string, error) {
 }
 
 // checkInvocation rejects what upstream parseInvocationPolicy would throw on:
-// 旧 camelCase 键与非布尔值都会让上游忽略整个技能。
+// 旧 camelCase 键、非布尔字面量、以及「键存在但取值为空」都会让上游忽略整个技能。
+//
+// R13-B P1-1:此前 `!ok || raw == nil` 把 YAML 空值(`user-invocable:` / `null` /
+// `~`)当成「没声明」放过 —— 而上游 `frontmatterBoolean` 对它**直接 throw**,
+// 调用方 catch 后把整份技能丢弃 ⇒ 上传 201、审核通过、客户端装得上、模型永远
+// 看不到,全链路零报错。现在只有「键不存在」才是"没声明"。
+//
+// 字面量集合刻意**不在这里维护**:`booleanLiterals` 的取值由
+// `upstream_invocation_parity_test.go` 从 pinned 上游实现派生后逐项对拍
+// (两端各钉自己的字面量集合正是本条缺陷的形态)。
 func checkInvocation(data map[string]any) error {
 	for legacy, canonical := range legacyInvocationKeys {
 		if _, ok := data[legacy]; ok {
@@ -692,16 +701,23 @@ func checkInvocation(data map[string]any) error {
 	}
 	for _, key := range []string{"disable-model-invocation", "user-invocable"} {
 		raw, ok := data[key]
-		if !ok || raw == nil {
+		if !ok {
 			continue
 		}
 		if _, isBool := raw.(bool); isBool {
 			continue
 		}
-		s, isScalar := scalarString(raw)
-		if !isScalar || !booleanLiterals[strings.ToLower(strings.TrimSpace(s))] {
+		if raw == nil {
 			return newErr(CodeInvocationInvalid, key,
-				"字段 %s 必须是布尔值(true/false)", key)
+				"frontmatter 字段 %s 存在但取值为空(YAML 空值/null/~):运行时会因此丢弃整份技能;"+
+					"请写 true/false(或 yes/no、on/off、1/0),或整行删掉", key)
+		}
+		// 与上游一致:**不 trim** —— `' true '` 上游同样抛错,trim 会让「装得上、
+		// 加载不到」在这一格复现。
+		s, isScalar := scalarString(raw)
+		if !isScalar || !booleanLiterals[strings.ToLower(s)] {
+			return newErr(CodeInvocationInvalid, key,
+				"字段 %s 必须是布尔字面量(true/false、yes/no、on/off、1/0):其他取值会让运行时丢弃整份技能", key)
 		}
 	}
 	return nil
