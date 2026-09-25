@@ -24,7 +24,7 @@ import {
   validateSkillName,
   type SkillInstallLog,
 } from './skill-install.ts'
-import { runtimeSkillRoots, workspaceProjectRoots, type RuntimeSkillRoot } from './skill-runtime-roots.ts'
+import { runtimeSkillRoots, selectLiveWorkspacePaths, workspaceProjectRoots, type RuntimeSkillRoot } from './skill-runtime-roots.ts'
 import { MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { createWasmAppsRoute } from './wasm-apps.ts'
 import { registerWasmAppTools } from './wasm-app-tools.ts'
@@ -1137,7 +1137,7 @@ export function archiveTooLargeError(locale: HostLocale): string {
 }
 
 /**
- * 本机已登记的工作区目录（R18B-01）。
+ * 本机**仍在使用**的工作区目录（R18B-01；R19A-S2-05/06/07 收窄 + 可诊断）。
  *
  * 来源是**宿主侧权威** `ctx.workspaceRegistry`（上游 workspace 包的服务，会话 cwd 的
  * 唯一登记处）—— 与 `wasm-apps.ts` 的 `readRoots` 同款做法：**结构类型 + 请求期解析**，
@@ -1147,23 +1147,57 @@ export function archiveTooLargeError(locale: HostLocale): string {
  * 按**每个会话的 cwd** 决定 project 根 ⇒ 要判"装/卸是否真的生效"，就必须看到本机
  * 所有会话可能用到的项目根。客户端下发的 cwd 不作数（那是安全判据的输入，不能由
  * 被判定方提供）。
+ *
+ * R19A-S2-05/06：登记表本身**不等于**"运行时真的会扫描的项目根"（注册表是持久记录，
+ * 目录删了也留着；一个从来没有会话的工作区谁也不会带 cwd 去访问它）。判据收口到
+ * `skill-runtime-roots.ts` 的 `selectLiveWorkspacePaths`（目录仍在 + 有会话背书），
+ * 这里只负责把**被跳过的登记项**与**宿主契约漂移**如实记进宿主日志：
+ *   - 目录已不存在的登记项会经 `.git` 上溯把**祖先**当项目根（422 点名一个用户没
+ *     打开过的项目路径）—— 现在跳过并留下一条可检索日志；
+ *   - 注册表整个抛错时**零日志 + 判据静默消失**（项目根全部不见了，正是 R18B-01 修前
+ *     的世界）—— 现在 fail-loud 记一条，说明"本次安装/卸载没有扫项目根"。
  * @param ctx - Host 上下文。
- * @returns 已登记工作区的目录（过滤掉空/非字符串取值；注册表未就绪时为空数组）。
+ * @returns 仍在使用的工作区目录（过滤掉空/非字符串取值；注册表未就绪/不可读时为空数组）。
  */
 function registeredWorkspacePaths(ctx: Context): string[] {
   const registry = (ctx as unknown as {
     get?: (name: string) => unknown
-  }).get?.('workspaceRegistry') as { list?: () => Array<{ path?: unknown }> } | undefined
-  const paths: string[] = []
+  }).get?.('workspaceRegistry') as { list?: () => Array<{ path?: unknown, sessionIds?: unknown }> } | undefined
+  let entries: Array<{ path?: unknown, sessionIds?: unknown }>
   try {
-    for (const item of registry?.list?.() ?? []) {
-      const path = item?.path
-      if (typeof path === 'string' && path.trim() !== '') paths.push(path)
-    }
-  } catch {
-    // 注册表尚未就绪（启动早期/最小组合）：只按 env 派生的根表，不放行任何项目根。
+    entries = registry?.list?.() ?? []
+  } catch (cause) {
+    // 注册表把顺序与表的一致性校验做在 list() 里 ⇒ 它抛错通常意味着**库/记录不一致**，
+    // 而不是"没有工作区"。旧实现把两者合并成"没有项目根"且**一条日志都不打**：
+    // 判据静默退化成 R18B-01 修前的世界（项目里的同名技能把落点盖住也不会有人知道）。
+    const message = cause instanceof Error ? cause.message : String(cause)
+    ctx.logger?.warn?.(
+      `[skill-install] the workspace registry could not be listed (${message}); this install/uninstall was checked `
+      + 'WITHOUT project skill roots (a same-named skill in a project directory would go unreported)',
+    )
+    return []
   }
-  return paths
+  const selection = selectLiveWorkspacePaths(entries)
+  if (selection.sessionFieldAbsent) {
+    ctx.logger?.warn?.(
+      '[skill-install] the workspace registry entries carry no sessionIds field (host contract drift): project skill '
+      + 'roots were NOT scanned for this install/uninstall — check the pinned upstream workspace service',
+    )
+  }
+  // 每个被跳过的登记项一条日志（上限 5 条 + 一条汇总，避免陈旧记录刷爆日志）：
+  // 排障要能看到"为什么这个项目的技能没有参与判定"。
+  for (const skipped of selection.skipped.slice(0, 5)) {
+    ctx.logger?.warn?.(
+      `[skill-install] skipped the registered workspace ${skipped.path}: `
+      + (skipped.reason === 'missing-dir'
+        ? 'the directory no longer exists (a stale registration)'
+        : 'no session is attached to it, so no session can use it as its working directory'),
+    )
+  }
+  if (selection.skipped.length > 5) {
+    ctx.logger?.warn?.(`[skill-install] skipped ${selection.skipped.length - 5} further registered workspace(s) on the same grounds`)
+  }
+  return [...selection.live]
 }
 
 /**
@@ -2459,7 +2493,8 @@ export function apply(ctx: Context, config: Config): void {
             if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
               // 与技能同口径（审计 A3/N2）：本机自制内容没有 `?overwrite=1` 一律拒收。
-              await uninstallPreset(presetsDir, name, { overwrite })
+              // R19A-S2-04：来源判据同样带"当前会话的服务端"（缺地址 ⇒ 保守）。
+              await uninstallPreset(presetsDir, name, { overwrite, serverURL: s.serverURL })
               json(res, 200, { ok: true, name })
             } catch (cause) {
               const failure = describeArchiveFailure(cause)

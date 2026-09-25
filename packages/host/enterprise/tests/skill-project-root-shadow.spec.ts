@@ -28,13 +28,14 @@
  *   - 去掉 `listOutrankingSkillResidues` 里的 rank 过滤 ⇒ 反向对照（agent 根不得误报）变红。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
-import { ArchiveInstallRefusal, installSkillArchive, uninstallSkill } from '../src/skill-install.ts'
+import { ArchiveInstallRefusal, installSkillArchive, uninstallSkill, writeProvenance } from '../src/skill-install.ts'
 import { resolveWorkspaceProjectRoot, runtimeSkillRoots, workspaceProjectRoots } from '../src/skill-runtime-roots.ts'
 import type { Session } from '../src/server-connector/config.ts'
 import { listRuntimeSkills } from './helpers/upstream-skill-registry.ts'
@@ -295,8 +296,31 @@ interface Harness {
   gateway: string[]
 }
 
-/** 装一个 auth-gate：`workspaceRegistry` 只登记给定的工作区目录（宿主侧权威的形状）。 */
-function harness(session: Session | null, workspaces: readonly string[]): Harness {
+/**
+ * 一条**工作区登记项**（上游 `Workspace` 的最小形状：路径 + 挂账会话）。
+ *
+ * R19A-S2-05/06 的夹具前提修正（2026-09-26）：判据现在要求"目录仍在 + 有会话背书"
+ * （`selectLiveWorkspacePaths`），所以夹具必须像真注册表一样带 `sessionIds` ——
+ * 旧夹具只给 `{ path }`，那是**任何真实注册表都不会有的形状**（上游 `Workspace`
+ * 的 `sessionIds` 是启动/实时校验过的挂账会话，bootstrap 出来的工作区至少有一个）。
+ * 语义没变松：本文件 ③ 的两条用例（带会话背书）照样必须报 422。
+ */
+interface WorkspaceFixture {
+  readonly path: string
+  /** 挂账会话（缺省一个）；传 `[]` = 没有任何会话的工作区。 */
+  readonly sessionIds?: readonly string[]
+}
+
+/**
+ * 装一个 auth-gate：`workspaceRegistry` 只登记给定的工作区目录（宿主侧权威的形状）。
+ * `options.registryThrows` = `list()` 抛错（R19A-S2-07 的异常路径；共享装具
+ * `tests/helpers/auth-gate-harness.ts` 有同一开关）。
+ */
+function harness(
+  session: Session | null,
+  workspaces: readonly (string | WorkspaceFixture)[],
+  options: { registryThrows?: boolean } = {},
+): Harness {
   const routes: Route[] = []
   const gateway: string[] = []
   const loggerWarn = vi.fn()
@@ -304,11 +328,24 @@ function harness(session: Session | null, workspaces: readonly string[]): Harnes
     requestRejection: (request: { headers: Record<string, unknown> }) =>
       request.headers['cookie'] === undefined ? (401 as const) : undefined,
   }
+  const entries = workspaces.map((item) => {
+    const fixture: WorkspaceFixture = typeof item === 'string' ? { path: item } : item
+    return { path: fixture.path, sessionIds: fixture.sessionIds ?? ['session-fixture-1'] }
+  })
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
     get: (name: string) => (name === 'connection'
       ? fence
-      : name === 'workspaceRegistry' ? { list: () => workspaces.map(path => ({ path })) } : undefined),
+      : name === 'workspaceRegistry'
+        ? {
+            list: () => {
+              if (options.registryThrows === true) {
+                throw new Error('workspace registry order references missing workspace')
+              }
+              return entries
+            },
+          }
+        : undefined),
     logger: { info: vi.fn(), warn: loggerWarn, error: vi.fn() },
     picoSession: {
       isRestored: () => true,
@@ -434,5 +471,118 @@ describe('R18B-01 ③：本机路由端到端（安装/卸载都不再返回裸�
     console.log('[③/反向] uninstall =', uninstall.read().code, JSON.stringify(uninstall.read().body))
     expect(uninstall.read().code).toBe(200)
     await expect(stat(join(world.skillsDir, 'alpha'))).rejects.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R19A-S2-05/06/07（第十九轮审计 A 泳道）：**根表来源**的三个形态
+// ---------------------------------------------------------------------------
+
+describe('R19A-S2-05/06/07：项目根只来自"仍在使用的工作区"', () => {
+  it('R19A-S2-05 陈旧登记项（目录已删）不得经 `.git` 上溯贡献**祖先**当项目根', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'r19v-stale-ws-'))
+    try {
+      const outer = join(base, 'outer')
+      await mkdir(join(outer, '.git'), { recursive: true })
+      const gone = join(outer, 'gone-workspace')
+      await mkdir(gone, { recursive: true })
+      // 祖先目录里放一个同名技能：修前它会经 `.git` 上溯变成"项目根"，把安装 422 挡下。
+      await seed(join(outer, '.dsh', 'skills'), 'delta', 'delta', 'FROM-OUTER')
+      await rm(gone, { recursive: true, force: true }) // 登记之后目录被删
+
+      const h = harness(SESSION, [gone])
+      stubGateway(h, await skillArchive('delta', 'FROM-HUB'))
+      const { res, read } = fakeRes()
+      await h.handler('/api/pico/skills')(fakeReq('POST', '/api/pico/skills/delta/install'), res)
+      console.log('[S2-05] HTTP =', read().code, '| logger.warn =', JSON.stringify(h.logger.warn.mock.calls.map(c => String(c[0]))))
+      expect(read().code, '陈旧登记项不得贡献项目根').toBe(200)
+      expect(existsSync(join(world.skillsDir, 'delta', 'SKILL.md'))).toBe(true)
+      // 可诊断：被跳过的登记项必须留下一条点名"目录已不存在"的日志。
+      const logs = h.logger.warn.mock.calls.map(c => String(c[0])).join('\n')
+      expect(logs).toMatch(/skipped the registered workspace/su)
+      expect(logs).toContain(gone)
+    } finally {
+      await rm(base, { recursive: true, force: true })
+    }
+  })
+
+  it('R19A-S2-06 与当前会话无关（没有任何会话挂账）的工作区不得把安装 422 挡下', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'r19v-nosession-ws-'))
+    try {
+      const projA = join(base, 'projA')
+      const projB = join(base, 'projB')
+      await mkdir(join(projA, '.git'), { recursive: true })
+      await mkdir(join(projB, '.git'), { recursive: true })
+      await seed(join(projB, '.dsh', 'skills'), 'gamma', 'gamma', 'FROM-PROJB')
+
+      const h = harness(SESSION, [{ path: projA }, { path: projB, sessionIds: [] }])
+      stubGateway(h, await skillArchive('gamma', 'FROM-HUB'))
+      const { res, read } = fakeRes()
+      await h.handler('/api/pico/skills')(fakeReq('POST', '/api/pico/skills/gamma/install'), res)
+      console.log('[S2-06] HTTP =', read().code, '| logger.warn =', JSON.stringify(h.logger.warn.mock.calls.map(c => String(c[0]))))
+      expect(read().code, '没有会话的工作区不可能成为任何会话的 cwd ⇒ 不参与判定').toBe(200)
+      expect(existsSync(join(world.skillsDir, 'gamma', 'SKILL.md'))).toBe(true)
+
+      // **反向对照**：同一条 projB 一旦有会话挂账（= 真的可能被扫描），就必须照旧报 422。
+      await rm(join(world.skillsDir, 'gamma'), { recursive: true, force: true })
+      const live = harness(SESSION, [{ path: projB, sessionIds: ['session-1'] }])
+      stubGateway(live, await skillArchive('gamma', 'FROM-HUB'))
+      const liveRes = fakeRes()
+      await live.handler('/api/pico/skills')(fakeReq('POST', '/api/pico/skills/gamma/install'), liveRes.res)
+      console.log('[S2-06/反向] HTTP =', liveRes.read().code, JSON.stringify(liveRes.read().body).slice(0, 200))
+      expect(liveRes.read().code).toBe(422)
+      expect(String(liveRes.read().body.error)).toContain(projB)
+    } finally {
+      await rm(base, { recursive: true, force: true })
+    }
+  })
+
+  it('R19A-S2-07 根表来源抛错：不再"零日志"（fail-open 方向如实登记）', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'r19v-throw-ws-'))
+    try {
+      const projB = join(base, 'projB')
+      await mkdir(join(projB, '.git'), { recursive: true })
+      await seed(join(projB, '.dsh', 'skills'), 'gamma', 'gamma', 'FROM-PROJB')
+
+      const h = harness(SESSION, [projB], { registryThrows: true })
+      stubGateway(h, await skillArchive('theta', 'FROM-HUB'))
+      const { res, read } = fakeRes()
+      await h.handler('/api/pico/skills')(fakeReq('POST', '/api/pico/skills/theta/install'), res)
+      console.log('[S2-07] HTTP =', read().code, '| logger.warn =', JSON.stringify(h.logger.warn.mock.calls.map(c => String(c[0]))))
+      // 方向仍是"放行"（注册表读不出来时不能把整个安装面卡死），但**必须留痕**：
+      // 修前 logger.warn 零调用 ⇒ 判据静默退化成 R18B-01 修前的世界。
+      expect(read().code).toBe(200)
+      const logs = h.logger.warn.mock.calls.map(c => String(c[0])).join('\n')
+      expect(logs, '异常路径必须 fail-loud 记日志').toMatch(/workspace registry could not be listed/su)
+      expect(logs).toMatch(/WITHOUT project skill roots/su)
+    } finally {
+      await rm(base, { recursive: true, force: true })
+    }
+  })
+
+  it('R19A-S2-09 跨根残留：判据前移到删除之前 ⇒ 拒绝时落点一字未动', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'r19v-preflight-'))
+    try {
+      vi.stubEnv('DSH_AGENTS_HOME', join(base, 'agents'))
+      await seed(join(base, 'agents', 'skills'), 'epsilon', 'epsilon', 'FROM-AGENTS')
+      const target = join(world.skillsDir, 'epsilon')
+      await mkdir(target, { recursive: true })
+      await writeFile(join(target, 'SKILL.md'), skillMd('epsilon', 'FROM-HUB'))
+      await writeProvenance(target, {
+        appId: 'epsilon', version: '1.0.0', channel: 'builtin', server: SESSION.serverURL, installedAt: '2026-01-01T00:00:00Z',
+      })
+
+      const h = harness(SESSION, [])
+      const { res, read } = fakeRes()
+      await h.handler('/api/pico/skills')(fakeReq('POST', '/api/pico/skills/builtin/epsilon/uninstall'), res)
+      console.log('[S2-09] HTTP =', read().code, JSON.stringify(read().body).slice(0, 200))
+      expect(read().code).toBe(422)
+      expect(read().body.code).toBe('RESIDUE')
+      expect(String(read().body.error)).toMatch(/not uninstalled/su)
+      expect(String(read().body.error)).toMatch(/nothing was removed/su)
+      expect(existsSync(target), '拒绝时落点必须原样保留（修前是"报失败但已删掉"）').toBe(true)
+    } finally {
+      await rm(base, { recursive: true, force: true })
+    }
   })
 })

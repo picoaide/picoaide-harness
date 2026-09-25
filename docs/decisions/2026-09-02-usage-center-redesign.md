@@ -211,7 +211,8 @@
 1. **迁移测试**：现有 `Usage.test.tsx`（多处断言旧页面 DOM：stat-cards/quota-list 等）需按新页面拆分重写；`make check` 的 87 个 webadmin 测试要全绿。
 2. **路由集中**：新端点必须经 `internal/router.Register` 声明（`PermUsageRead`），走 `AdminRoute`，勿在业务包自挂路由（fall-open 防护）。
 3. **group=dept 聚合性能**：部门树归并在内存做（组树不大），SQL 只按 `user_id IN (…)` 聚合；超大部门用户数 >1000 时退化为分布式聚合（本期不做，监控即可）。
-4. **口径说明位**：每页页眉放一行口径说明（费用=按模型定价折算、含 embedding、未定价模型计 0；与配额 enforcement 同口径），把现在散落的注释收敛为可见文案。
+4. **口径说明位**：每页页眉放一行口径说明（费用=按模型定价折算、含 embedding；与配额 enforcement 同口径），把现在散落的注释收敛为可见文案。
+   - **2026-09-25 勘误（R19B-04）**：原文写作"未定价模型计 0"。该口径**已作废** —— 网关缺省策略是**拒绝**未定价模型（429 `MODEL_NOT_PRICED`，见 `server/internal/llmgateway/balance_gate.go` 的 ③ 层），因为"成本恒为 0"会让余额闸门的三层判据同时失效（结算永不失败 ⇒ 学到的下限永不置位、余额一分不减）；只有显式把 `gateway.unpriced_model_policy` 设为 `allow`（免费/内部模型）时才按 0 计。另：`输入价 0/极低 + 输出价正常`的模型**照常可用**（按输出侧计费），不得判成未定价（R19A-S1-03）。
 5. **导出**：每页导出 = 当前页数据集的 CSV（BOM + 公式注入转义沿用现有 `csvCell`）；请求日志页导出走服务端分页全量（循环拉取拼 CSV）。
 6. **配额配置迁移的测试影响**：`Gateway.test.tsx` 断言含 `monthly-quota` / `monthly-quota-money` 输入框的用例需随字段下架调整；`Usage.test.tsx` 中"默认配额文案（跟随网关全局设置）"断言迁到新配额页。
 7. **员工侧**（后续）：账户卡渲染 `dept_budgets`（现有死字段）→ 员工点开"部门预算"详情；部门领导视图复用 API-1 `group=dept` + `dept` 过滤，客户端加"我的部门"入口。本设计不含员工侧 UI，只保证数据面就绪。

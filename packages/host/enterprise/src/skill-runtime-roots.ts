@@ -25,9 +25,15 @@
  * 从来不给 ⇒ `<项目>/.dsh/skills`（rank 100，**排在被管的 400 之前**）里的同名技能
  * 让"安装成功 / 卸载成功"两个方向都变成界面上的说法，而模型读的是项目里那一份；
  * 更糟的是那个目录在工作区里（= 沙箱可写根），随仓库克隆或 agent 自己写下都能形成
- * 持久的系统提示词注入面。现在调用方拿**已登记工作区**（`workspaceRegistry`）经
- * {@link workspaceProjectRoots} 折成项目根传进来（`projectRoots`），install/uninstall
- * 两侧因此都能如实报 `RESIDUE`。
+ * 持久的系统提示词注入面。现在调用方拿**仍在使用的工作区**（`workspaceRegistry`）
+ * 经 {@link selectLiveWorkspacePaths} 过滤、再由 {@link workspaceProjectRoots}
+ * 折成项目根传进来（`projectRoots`），install/uninstall 两侧因此都能如实报 `RESIDUE`。
+ *
+ * R19A-S2-05/06（第十九轮审计 A 泳道）：上一条的**来源面**此前是"机器上所有已登记
+ * 工作区"，两个方向都打穿过 —— 已删的登记项经 `.git` 上溯把**祖先**目录当项目根
+ * （422 点名一个用户没打开、甚至已不存在的项目）；与当前会话无关的工作区里一个同名
+ * 技能把本机安装 422 挡下。现在只收"目录仍在 + 有会话背书"的登记项
+ * （判据与快照见 {@link selectLiveWorkspacePaths}）。
  *
  * 本模块只放"根表 + 路径推导"（纯数据/纯函数，不 import 安装器，避免循环依赖）；
  * 逐根扫描与合并留在 `skill-install.ts` 的 `discoverRuntimeSkills` /
@@ -38,7 +44,7 @@
  * 与本表**逐项相等**（含反向对照：不在表里的目录必须**不**被上游加载）。上游增删
  * 根 ⇒ 该用例红 ⇒ 本表必须跟着改。
  */
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -99,13 +105,15 @@ export interface RuntimeSkillRootsOptions {
    */
   readonly projectRoot?: string | undefined
   /**
-   * 多个项目根（R18B-01）：调用方拿到的是**会话工作区目录**时，先用
-   * {@link workspaceProjectRoots} 折成项目根（判据与上游 `findProjectRoot` 同一份），
-   * 再传进来。每个项目根贡献 project-dsh(100) 与 project-agents(200) 两条。
+   * 多个项目根（R18B-01 / R19A-S2-05/06）：调用方拿到的是**仍在使用的工作区目录**
+   * 时，先用 {@link selectLiveWorkspacePaths} 收掉"目录已不存在"与"没有任何会话"
+   * 的登记项，再由 {@link workspaceProjectRoots} 折成项目根（判据与上游
+   * `findProjectRoot` 同一份），最后传进来。每个项目根贡献 project-dsh(100) 与
+   * project-agents(200) 两条。
    *
    * 为什么需要多根：能力中心的技能库是**机器作用域**的（一个根服务全部会话），
    * 而运行时按**每个会话的 cwd** 决定 project 根 ⇒ "装好了 == 运行时加载的是刚装的
-   * 那一份"这条不变量必须对**本机已登记的每一个工作区**成立，否则某个工作区里的
+   * 那一份"这条不变量必须对**本机仍在使用的每一个工作区**成立，否则某个工作区里的
    * 同名技能会把能力中心那一份整个盖住（模型读的是仓库里那一份）。
    */
   readonly projectRoots?: readonly string[] | undefined
@@ -162,7 +170,12 @@ export function resolveWorkspaceProjectRoot(
  * 去重按 {@link skillRootPathKey}（同目录的不同拼写只算一个根）；空串/纯空白跳过
  * （注册表里出现过占位取值时不要把它当根）。
  *
- * @param workspacePaths - 已登记工作区的目录。
+ * ⚠️ 输入的目录**必须先是"活的工作区"**（见 {@link selectLiveWorkspacePaths}）：
+ * 本函数逐条镜像上游 `findProjectRoot`，而它（与上游一样）**会从一个已不存在的目录
+ * 继续向上找 `.git`** —— 直接把陈旧的登记项喂进来，就会把**祖先**目录当成项目根
+ * （R19A-S2-05 实测：登记的是 `outer/gone-workspace`，根表里凭空多出
+ * `outer/.dsh/skills`，422 点名一个用户没打开、甚至已不存在的项目路径）。
+ * @param workspacePaths - 已登记**且仍然存在**的工作区目录。
  * @param hasGitMarker - 见 {@link resolveWorkspaceProjectRoot}。
  * @returns 项目根（已 resolve、已去重）。
  */
@@ -181,6 +194,99 @@ export function workspaceProjectRoots(
     roots.push(projectRoot)
   }
   return roots
+}
+
+/**
+ * 一条工作区登记项里判据真正需要的字段（结构类型：宿主注册表与测试夹具共用，
+ * 不为它增加 import —— 与 `wasm-apps.ts` 的 `readRoots` 同款做法）。
+ */
+export interface WorkspaceRegistrationFacts {
+  /** 目录路径（上游 `Workspace.path`，`fs.realpath` 过的规范路径）。 */
+  readonly path?: unknown
+  /**
+   * 该工作区挂账的会话 id（上游 `Workspace.sessionIds`，**启动/实时校验过**：
+   * 只有 header 的规范 cwd 等于该工作区路径的会话才在里面）。
+   */
+  readonly sessionIds?: unknown
+}
+
+/** 一条被跳过的登记项与原因（调用方据此打**可诊断**日志）。 */
+export interface SkippedWorkspace {
+  /** 登记路径（缺失目录时就是那个已经不在的目录）。 */
+  readonly path: string
+  /** `missing-dir` = 目录已不存在/不是目录；`no-session` = 没有任何会话挂在这个工作区上。 */
+  readonly reason: 'missing-dir' | 'no-session'
+}
+
+/** {@link selectLiveWorkspacePaths} 的结果。 */
+export interface LiveWorkspaceSelection {
+  /** 目录仍在、且有会话背书的登记路径（顺序 = 输入顺序）。 */
+  readonly live: readonly string[]
+  /** 被跳过的登记项（含原因；调用方负责记日志）。 */
+  readonly skipped: readonly SkippedWorkspace[]
+  /**
+   * 注册表给了条目，但**没有任何一条**暴露 `sessionIds` ⇒ 这是宿主契约漂移
+   * （上游 `Workspace` 的字段集变了）。此时项目根判据会静默失效 —— 调用方必须
+   * **fail-loud 记日志**，绝不能让它悄悄退化成 R18B-01 修前的世界。
+   */
+  readonly sessionFieldAbsent: boolean
+}
+
+/** 目录存在性判据的缺省实现（与注册表 `status()` 同一语义：不是目录就算 missing-dir）。 */
+function defaultIsDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 从工作区登记项里选出**当前真的会产生项目根**的那些（R19A-S2-05/06 的唯一实现）。
+ *
+ * 判据两条（缺一条就会把运行时**根本不会扫描**的目录塞进根表）：
+ *  1. **目录仍然存在**（是目录）。上游 `roots(cwd)` 只在某场会话给出 cwd 时才产出
+ *     project 根，而那个 cwd 必然是一个真实目录；陈旧的登记项（目录已删/被移走）
+ *     只会在 `.git` 上溯里把**祖先**目录贡献成项目根 —— 那是凭空的根；
+ *  2. **有会话挂在这个工作区上**（`sessionIds` 非空，且是启动/实时校验过的）。
+ *     没有会话 ⇒ 没有任何 cwd 指向它 ⇒ 运行时永远不扫它的 project 根 ⇒ 把它算进
+ *     "谁盖住了安装落点"只会造成误报（R19A-S2-06 实测：与当前会话无关的 projB 里
+ *     一个同名技能，把本机安装 422 挡下）。
+ *
+ * **收窄的边界（如实登记）**：这不是"当前会话"作用域 —— 主机侧拿不到"这是哪个会话
+ * 的请求"（本机路由不带会话身份，而客户端下发的 cwd 属安全判据的输入、不可采信）。
+ * 因此同机**多个**都有会话的活跃工作区仍会一起参与判定（方向是"宁可拦"，且文案
+ * 点名路径 + 给出出路）。拿不到 `sessionIds` 字段时按"没有会话背书"处理（方向同上：
+ * 不误伤），并由 `sessionFieldAbsent` 让调用方 fail-loud。
+ * @param entries - 注册表 `list()` 的条目（结构类型，见 {@link WorkspaceRegistrationFacts}）。
+ * @param isDirectory - 目录存在性判据（测试 seam；缺省本机 `statSync`）。
+ * @returns 选中的路径 + 被跳过的登记 + 契约漂移信号。
+ */
+export function selectLiveWorkspacePaths(
+  entries: readonly WorkspaceRegistrationFacts[],
+  isDirectory: (path: string) => boolean = defaultIsDirectory,
+): LiveWorkspaceSelection {
+  const live: string[] = []
+  const skipped: SkippedWorkspace[] = []
+  let sawAnyEntry = false
+  let sawSessionField = false
+  for (const entry of entries ?? []) {
+    const path = entry?.path
+    if (typeof path !== 'string' || path.trim() === '') continue
+    sawAnyEntry = true
+    const sessions = entry.sessionIds
+    if (Array.isArray(sessions)) sawSessionField = true
+    if (!isDirectory(path)) {
+      skipped.push({ path, reason: 'missing-dir' })
+      continue
+    }
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      skipped.push({ path, reason: 'no-session' })
+      continue
+    }
+    live.push(path)
+  }
+  return { live, skipped, sessionFieldAbsent: sawAnyEntry && !sawSessionField }
 }
 
 /**

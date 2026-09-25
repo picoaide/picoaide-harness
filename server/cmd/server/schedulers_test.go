@@ -276,11 +276,9 @@ func TestSchedulerStatusLogLineIsGrepAble(t *testing.T) {
 // TestStartupCallsReportsAndBalanceSchedulers 是源码级判据：整行删掉/挪进不执行
 // 的分支时，执行级用例可能仍然绿（构造点还在），这一条兜住。
 func TestStartupCallsReportsAndBalanceSchedulers(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(src)
+	// 判据只看**代码**（注释里出现接缝名不算、把调用注释掉也不算存在）——
+	// mainGoCodeOnly 在 background_sync_test.go（同包，R19B-05 的判据文件）。
+	text := mainGoCodeOnly(t)
 	ctxIdx := strings.Index(text, "ctx, stop := signal.NotifyContext(")
 	if ctxIdx < 0 {
 		t.Fatal("main() 里找不到 signal ctx 的定义（判据锚点漂移）")

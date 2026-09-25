@@ -221,7 +221,12 @@ func (a *API) handleEmbeddings(c *gin.Context) {
 	}
 	// R16C-02 + R17A-06：钱闸门（含"未定价模型"）唯一出口 —— 命中即写响应并返回，
 	// 被拒请求绝不转发上游。
-	if a.rejectBalanceAdmission(c, user, req.Model, raw, "embeddings", "openai") {
+	// ⚠️ R19A-S1-01（审计 2026-09-25，P1）：embeddings 的准入估量必须用 **input 文本** ——
+	// 出站体由服务端自建 `{model,input}`，客户端 body 从不转发，用 body 字节当 prompt 量
+	// 会让闸门看到的量比结算（estimateEmbeddingPromptTokens）大一整个 JSON 外壳 ⇒
+	// 账本必然落 0 微元的请求被放行（实测 20/20 交付、零扣费、可无限重复）。
+	// inputs 在上一段已解析出来，这里用的就是结算将使用的同一个函数。
+	if a.rejectBalanceAdmission(c, user, req.Model, admissionTokensFromEmbeddingInputs(inputs), "embeddings", "openai") {
 		return
 	}
 	ups, err := MatchModelsByProtocol(a.DB, req.Model, "openai")

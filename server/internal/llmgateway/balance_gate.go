@@ -122,32 +122,77 @@ type admissionPricing struct {
 	// candidates 是本端点协议下可路由的 provider 数（0 = 该名字在本端点不可路由，
 	// 调用方会 404，不产生上游调用 ⇒ ③④ 都不需要参与）。
 	candidates int
-	// unpriced = **任一**候选的生效输入价 <= 0（取价失败也按 unpriced 处理：fail-closed，
-	// 与"取价失败曾经等于 0 价"的既有方向一致）。
-	//
-	// 为什么是"任一"而不是"第一个"：路由在候选集合内**故障转移**（handler 的
-	// `for i := range ups`），任何一家都可能真的服务这次请求；只要有一家未定价，
-	// 落到它上面的那次调用就是 cost=0（R18C-01 实测的备用 provider 形态）。
-	unpriced bool
-	// inputPer1M 是各候选的生效输入价，**顺序与路由候选一致**（[0] = 正常路径的那一家）。
-	inputPer1M []float64
+	// unpriced 是"取价/路由面读失败"（fail-closed：按未定价处置，与"取价失败曾经
+	// 等于 0 价"的既有方向一致）。**"某一家的价算不算未定价"不在这里判** ——
+	// 它与端点的计费面有关（有无补全侧），见 unpricedFor。
+	lookupFailed bool
+	// inputPer1M / outputPer1M 是各候选的生效（输入/输出）价，**顺序与路由候选一致**
+	// （[0] = 正常路径的那一家）。
+	inputPer1M  []float64
+	outputPer1M []float64
+}
+
+// ⚠️ 判定记录（R19A-S1-04，审计 2026-09-25，P2）：`unpriced_model_policy=allow` 是
+// **全局**逃生门，它在放行"整体未定价的免费/内部模型"的同时，也放行了"同名模型挂多
+// provider、其中一家未定价"的混合候选集合（故障转移到那家即 cost=0）。本轮**保留**该
+// 语义：它是上一轮 R18C-01 的显式产品决策，并由既有判据
+// `TestBalanceAdmissionUnpricedPolicyAllowKeepsMultiProviderEscape` 钉住
+//（"显式声明的免费模型不得被拦"）。若要让 allow 只覆盖"整体无价"的模型，需要把策略
+// 改成**按模型**的名单（新 settings 形状 + 迁移），属产品决策，不在本轮。
+// 本轮的处置是**披露**：webadmin 的策略说明与该策略的作用范围写清楚（见
+// Gateway.tsx 的「未定价模型策略」说明），并在审计报告里登记为"判定保留"。
+
+// unpricedFor 判断"**任一**候选在本端点口径下完全无法计费"（③ 层判据）。
+//
+// 为什么是"任一"而不是"第一个"：路由在候选集合内**故障转移**（handler 的
+// `for i := range ups`），任何一家都可能真的服务这次请求；只要有一家完全无法计费，
+// 落到它上面的那次调用就是 cost=0（R18C-01 实测的备用 provider 形态）。
+//
+// 为什么必须**分端点口径**（R19A-S1-03，审计 2026-09-25，P2 回归）：
+//   - 有补全侧的端点（chat/completions/responses/messages）：计费 = 输入侧 + 输出侧，
+//     只有**两侧都无价**才是真的"成本恒为 0"。修前只判输入价 ⇒ "输入价 0/极低 +
+//     输出价正常"的合法模型（很多模型靠输出侧赚钱）每一笔都被 429 MODEL_NOT_PRICED，
+//     而基线是 200 + 真计费（实测输入 0.01/输出 8 元/1M：基线 cost≈2.4e-5，第十八轮之后 429）；
+//   - embeddings：没有补全侧 ⇒ 输入价 <= 0 就是无法计费。
+func (p admissionPricing) unpricedFor(hasOutput bool) bool {
+	if p.lookupFailed {
+		return true
+	}
+	for i, in := range p.inputPer1M {
+		out := 0.0
+		if i < len(p.outputPer1M) {
+			out = p.outputPer1M[i]
+		}
+		if in <= 0 && (!hasOutput || out <= 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // unbillableCandidate 返回"按结算口径这次请求在它上面应付 0 微元"的候选下标
 // （-1 = 每一家都能计费）。R18A-05（审计 2026-09-25，P1）：
 //
-// 价 > 0 但小到 `roundMicro(估算 tokens × 单价) == 0` 时，结算记的是 0 微元
-// （账本按微元四舍五入落账）⇒ 余额一分不减、下限永不置位 —— 与"未定价"逐字同形，
-// 只是入口从 NULL 价换成了极小非零价（0.001 元/1M 实测 20/20 交付、20 次上游命中）。
-// 所以判据必须是"**这次请求**的最小应付额 > 0 微元"，而不是"单价 > 0"。
+// 价 > 0 但小到 `roundMicro(cost) == 0` 时，结算记的是 0 微元（账本按微元四舍五入
+// 落账）⇒ 余额一分不减、下限永不置位 —— 与"未定价"逐字同形，只是入口从 NULL 价换成
+// 了极小非零价（0.001 元/1M 实测 20/20 交付、20 次上游命中）。所以判据必须是
+// "**这次请求**的最小应付额 > 0 微元"，而不是"单价 > 0"。
+//
+// cost 的两侧都算（R19A-S1-03）：有补全侧的端点按 1 个输出 token 的下界计入输出价，
+// 否则"输入价 0/极低 + 输出价正常"的模型会被整体判死（见 unpricedFor）。embeddings
+// 没有补全侧，只算输入侧。
 //
 // 与 ③ 的未定价判据同样取"任一候选"：故障转移到哪一家都可能发生。
-func (p admissionPricing) unbillableCandidate(tokens int64) int {
-	if tokens <= 0 {
+func (p admissionPricing) unbillableCandidate(promptTokens int64, hasOutput bool) int {
+	if promptTokens <= 0 {
 		return -1 // 估不出 prompt ⇒ 判不了"这次请求的最小应付额"，本层不参与
 	}
 	for i, in := range p.inputPer1M {
-		if _, ok := billableMicro(tokens, in); !ok {
+		out := 0.0
+		if i < len(p.outputPer1M) {
+			out = p.outputPer1M[i]
+		}
+		if _, ok := billableMicroFor(promptTokens, in, hasOutput, out); !ok {
 			return i
 		}
 	}
@@ -170,7 +215,7 @@ func (a *API) admissionPricingFor(model, protocol string) admissionPricing {
 	ups, err := MatchModelsByProtocol(a.DB, model, protocol)
 	if err != nil {
 		// 路由面读不出来 ⇒ 无法证明"每个候选都已定价"，fail-closed。
-		return admissionPricing{unpriced: true}
+		return admissionPricing{lookupFailed: true}
 	}
 	if len(ups) == 0 {
 		return admissionPricing{}
@@ -181,15 +226,17 @@ func (a *API) admissionPricingFor(model, protocol string) admissionPricing {
 	}
 	prices, err := serverstore.ModelPricesForProviders(a.DB, ids, model)
 	if err != nil {
-		return admissionPricing{candidates: len(ids), unpriced: true}
+		return admissionPricing{candidates: len(ids), lookupFailed: true}
 	}
-	p := admissionPricing{candidates: len(ids), inputPer1M: make([]float64, 0, len(ids))}
+	p := admissionPricing{
+		candidates:  len(ids),
+		inputPer1M:  make([]float64, 0, len(ids)),
+		outputPer1M: make([]float64, 0, len(ids)),
+	}
 	for _, id := range ids {
-		in := prices[id][0]
-		p.inputPer1M = append(p.inputPer1M, in)
-		if in <= 0 {
-			p.unpriced = true // 任一候选未定价 ⇒ 整次请求按未定价处置（③ 层判据）
-		}
+		// prices[id] = [输入价, 输出价, 缓存价]（与结算 `modelPricesForProviderQ` 同一份）。
+		p.inputPer1M = append(p.inputPer1M, prices[id][0])
+		p.outputPer1M = append(p.outputPer1M, prices[id][1])
 	}
 	return p
 }
@@ -209,10 +256,43 @@ func (a *API) admissionPricingFor(model, protocol string) admissionPricing {
 // 返回 ok=false 表示"这次请求在这家候选上不可能被计费"（估不出 tokens / 价 <= 0 /
 // 折到微元为 0）——调用方按"未定价"处置（策略 allow 时放行，见 ③ 层）。
 func billableMicro(tokens int64, inputPer1M float64) (int64, bool) {
-	if tokens <= 0 || inputPer1M <= 0 {
+	// 只算输入侧（④"最小计费额"用的就是这个下界：输出侧 ≥ 0 ⇒ 它永远是成本下界）。
+	return billableMicroFor(tokens, inputPer1M, false, 0)
+}
+
+// billableMicroFor 是"按结算口径这次请求**至少**会被记多少微元"的唯一实现
+// （R18A-05 + R19A-S1-03）：
+//
+//	cost(元) = promptTokens/1e6×输入价 + minOutputTokens/1e6×输出价
+//	落账     = roundMicro(cost)   （账本口径 = serverstore.MoneyToMicro）
+//
+// minOutputTokens：有补全侧的端点取 **1**（任何非空补全至少 1 个输出 token —— 取它
+// 而不是 0，才不会把"输入价 0/极低、输出价正常"的合法模型判成不可计费）；
+// embeddings（无补全侧）取 0。
+//
+// 返回 ok=false = "这次请求在这家候选上不可能被计费"（估不出 tokens / 两侧都无价 /
+// 折到微元为 0）。**它必须与结算同源**：修前 embeddings 的闸门用客户端原始 body 的
+// 字节数（含 JSON 外壳与任意客户端字段），而结算用 input 文本 —— 闸门看到的量更大
+// ⇒ 价格落在 [0.5/est, 0.5/real) 时放行、账本落 0 微元（R19A-S1-01 实测 20/20 交付、
+// 20 次真实上游命中、余额与账本一分未动）。所以 promptTokens 必须由调用方用**该端点
+// 结算所用的同一个估算函数**给出（见 admissionTokensFromBody /
+// admissionTokensFromEmbeddingInputs）。
+func billableMicroFor(promptTokens int64, inputPer1M float64, hasOutput bool, outputPer1M float64) (int64, bool) {
+	if promptTokens <= 0 {
 		return 0, false
 	}
-	micro := serverstore.MoneyToMicro(float64(tokens) / 1e6 * inputPer1M)
+	in := 0.0
+	if inputPer1M > 0 {
+		in = float64(promptTokens) / 1e6 * inputPer1M
+	}
+	out := 0.0
+	if hasOutput && outputPer1M > 0 {
+		out = 1 / 1e6 * outputPer1M // 输出侧下界 = 1 token
+	}
+	if in <= 0 && out <= 0 {
+		return 0, false
+	}
+	micro := serverstore.MoneyToMicro(in + out)
 	if micro <= 0 {
 		return 0, false
 	}
@@ -269,8 +349,17 @@ type balanceAdmissionRefusal struct {
 
 // balanceAdmissionBlocked 是网关准入侧的钱闸门（唯一实现，五个端点共用）。
 //
-// 参数 body 必须是**客户端原始请求体**（计量侧估算用的同一份字节）；where 是端点标签
-// （chat / completions / embeddings / responses / messages），只进日志与计数；
+// 参数 promptTokens 是**这次请求的输入侧估量**，且必须与**结算将要使用的估算同一个
+// 函数**（R19A-S1-01，审计 2026-09-25，P1）：
+//   - chat/completions/responses/messages ⇒ `admissionTokensFromBody(客户端原始 body)`
+//     （结算兜底 `estimatePromptFallback` 走的就是 `estimatePromptTokensFromBody`）；
+//   - embeddings ⇒ `admissionTokensFromEmbeddingInputs(inputs)`
+//     （结算走的是 `estimateEmbeddingPromptTokens(inputs)` —— embeddings 的出站体由
+//     服务端自建 `{model,input}`，客户端 body **从不转发**，用 body 字节当 prompt 量
+//     会让闸门看到的量比结算大一个 JSON 外壳，从而放行"账本必然落 0 微元"的请求）。
+//
+// where 是端点标签（chat / completions / embeddings / responses / messages），进日志与
+// 计数，并决定**计费面的形状**（embeddings 没有补全侧 ⇒ ③③b 只看输入价）；
 // protocol 是**本端点的路由协议**（openai / anthropic），必须与同一 handler 里
 // `MatchModelsByProtocol(..., protocol)` 那一次调用逐字一致 —— 判据面 = 候选 provider
 // 集合，而候选集合正是由它定义的（R18C-01）。
@@ -278,7 +367,7 @@ type balanceAdmissionRefusal struct {
 // 与 `serverstore.BalanceBlocked` 的关系：那条"分位余额 <= 0 → 拒绝"的规则**逐字保留**
 // （含未开通不拦、管理员豁免、读设置失败 fail-closed），本函数在它之后追加三条更严的
 // 判据。旧函数仍被别的路径使用（如 bootstrap/账户卡读面），故不删除。
-func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body []byte, where, protocol string) (balanceAdmissionRefusal, bool) {
+func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, promptTokens int64, where, protocol string) (balanceAdmissionRefusal, bool) {
 	if user == nil {
 		return balanceAdmissionRefusal{}, false
 	}
@@ -314,16 +403,18 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 	// （R18A-05：③b 与 ④ 都要"这次请求"的量级）。放在 ①② 之后：那两条不需要任何
 	// 取价（顺序与历史一致），且 policy=allow 时 ③ 不参与而 ④ 仍需要价。
 	pricing := a.admissionPricingFor(model, protocol)
-	tokens, _ := estimatePromptTokensFromBody(body)
+	tokens := promptTokens
+	// 计费面的形状由端点决定：embeddings 没有补全侧（③③b 只看输入价）。
+	hasOutput := where != "embeddings"
 	// ③ 未定价模型:成本侧恒为 0 ⇒ ①② 与"余额 <= 0"同时失效（见文件头注释）。
 	// 默认策略 reject ⇒ 直接拒绝；allow 是显式逃生门（免费/内部模型）。
 	if serverstore.UnpricedModelPolicy(a.DB) != serverstore.UnpricedModelPolicyAllow {
-		unpriced := pricing.unpriced
+		unpriced := pricing.unpricedFor(hasOutput)
 		if pricing.candidates == 0 {
 			// 该名字在本端点不可路由（handler 随后 404、不产生上游调用）⇒ 没有"候选价"
 			// 可判，保留历史判据（按名字取一行）与它的状态码，不用 404 顶替 429。
-			in, _, _ := serverstore.ModelPrices(a.DB, model)
-			unpriced = in <= 0
+			in, out, _ := serverstore.ModelPrices(a.DB, model)
+			unpriced = in <= 0 && (!hasOutput || out <= 0)
 		}
 		if unpriced {
 			return balanceAdmissionRefusal{
@@ -336,7 +427,7 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 		// ③b 极小非零价（R18A-05，审计 2026-09-25，P1）：单价 > 0 但"这次请求"的最小
 		// 应付额四舍五入到 **0 微元**（账本口径）⇒ 结算落 0、余额一分不减 —— 与未定价
 		// 逐字同形。判据是"这次请求应付 > 0 微元"，不是"单价 > 0"。
-		if idx := pricing.unbillableCandidate(tokens); idx >= 0 {
+		if idx := pricing.unbillableCandidate(tokens, hasOutput); idx >= 0 {
 			return balanceAdmissionRefusal{
 				code: "MODEL_NOT_PRICED",
 				message: "该模型价格过低,单次调用计费不足最小单位,暂不可用" +
@@ -362,8 +453,8 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 // 为什么把"写响应"也收在这里：五个端点原先各自写 `429 BALANCE_EXHAUSTED`，
 // 新增"未定价模型"这条判据时若逐点改，很容易漏掉一处 —— 漏掉的那处就会用
 // BALANCE_EXHAUSTED 报告一个与余额无关的原因（R17A-06 的修复面）。
-func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, model string, body []byte, where, protocol string) bool {
-	refusal, blocked := a.balanceAdmissionBlocked(user, model, body, where, protocol)
+func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, model string, promptTokens int64, where, protocol string) bool {
+	refusal, blocked := a.balanceAdmissionBlocked(user, model, promptTokens, where, protocol)
 	if !blocked {
 		return false
 	}
@@ -371,6 +462,26 @@ func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, mod
 	// 状态码沿用 429（五个端点与客户端对"钱闸门拒绝"的既有约定）；区分靠 error.code。
 	serverauth.WriteError(c, http.StatusTooManyRequests, refusal.code, refusal.message)
 	return true
+}
+
+// admissionTokensFromBody 是 chat/completions/responses/messages 四个端点的准入估量：
+// 与结算兜底 `estimatePromptFallback` 用的是**同一个函数**（estimatePromptTokensFromBody，
+// 含内联二进制封顶），所以"闸门看到的量"不会超过"结算会算的量"（R19A-S1-01 的判据面
+// 同源要求）。传客户端原始请求体。
+func admissionTokensFromBody(body []byte) int64 {
+	tokens, _ := estimatePromptTokensFromBody(body)
+	return tokens
+}
+
+// admissionTokensFromEmbeddingInputs 是 embeddings 端点的准入估量：与结算用的
+// `estimateEmbeddingPromptTokens(inputs)` **同一个函数**（R19A-S1-01）。
+//
+// 为什么不能用客户端 body：embeddings 的出站体由服务端自建 `{model,input}`，客户端
+// body 从不转发 ⇒ body 字节数（JSON 外壳 + 任意客户端字段）根本不是这次调用要付钱的
+// 文本量。用它会让闸门判"应付 ≥1 微元"而账本 roundMicro 落 0（实测 0.1 元/1M、
+// input=["hi"]：闸门 est=8、结算基准=1，20/20 交付、20 次真实上游命中、零扣费）。
+func admissionTokensFromEmbeddingInputs(inputs []string) int64 {
+	return estimateEmbeddingPromptTokens(inputs)
 }
 
 // recordBalanceAdmissionRejection 记录一次准入拒绝：进程内计数/最近一条（serverstore）

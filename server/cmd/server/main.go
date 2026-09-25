@@ -137,19 +137,20 @@ func main() {
 	// 才 r.Use(...),导致 162 条 API 路由 panic 时不返回 JSON 信封(直接断连)
 	// 且零访问日志(违反 server/AGENTS.md §7.0)。
 	installAPIMiddleware(r)
-	// 可信代理(审计 2026-08-25 F-02):信任 loopback + 默认 compose
-	// 私有网段中的 Caddy(172.28.0.2),使 gin.ClientIP 解析 X-Forwarded-For
-	// 得到真实客户端 IP,登录限流键不再坍缩为单一代理 IP(否则 10 次错
-	// 密码即可锁死任意用户名——账号级 DoS)。仅从可信代理接受该头:
-	// 外部攻击者伪造的 XFF 不会生效,只会被计为 Caddy 本身(更严格)。
-	trusted := []string{"127.0.0.1", "::1"}
-	if v := os.Getenv("PICOAI_TRUSTED_PROXIES"); v != "" {
-		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				trusted = append(trusted, p)
-			}
-		}
+	// 可信代理(审计 2026-08-25 F-02;R15C-03,审计 2026-09-25):信任 loopback +
+	// 前端 Caddy 的地址,使 gin.ClientIP 解析 X-Forwarded-For 得到真实客户端 IP,
+	// 登录限流键不再坍缩为单一代理 IP(否则 10 次错密码即可锁死任意用户名——账号级 DoS)。
+	// 仅从可信代理接受该头:外部攻击者伪造的 XFF 不会生效,只会被计为 Caddy 本身(更严格)。
+	//
+	// 地址来源的**唯一真源**是 trustedProxies(trusted_proxies.go):
+	// PICOAI_TRUSTED_PROXIES 显式值优先,未配置则从 compose 的 CADDY_IP 派生 ——
+	// 修前这里只读 env,而 compose 把 CADDY_IP 做成可配、信任列表的缺省却硬编码
+	// 172.28.0.2 ⇒ 改网段部署静默失去 XFF(限流桶坍缩成全组织共桶)。
+	trusted, trustedSource := trustedProxies(os.Getenv)
+	if w := trustedProxyMismatchWarning(os.Getenv); w != "" {
+		log.Printf("WARNING %s", w)
 	}
+	log.Printf("trusted proxies: source=%s list=%s", trustedSource, strings.Join(trusted, ","))
 	if err := r.SetTrustedProxies(trusted); err != nil {
 		log.Fatalf("trusted proxies: %v", err)
 	}
@@ -249,12 +250,10 @@ func main() {
 	// 的实例只在启动那一刻按保留期清理(`audit.retention_days` 形同虚设)。执行者改由
 	// 周期调度器 auditretention 承担(见下方 Start;启动先跑一轮,覆盖停机期间到期的条目,
 	// 之后每 6 小时一次)。管理员保存配置时仍会额外主动触发一次(立即生效)。
-	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
-	// 并顺带清理过期的 pending usage 行 — 审计 C-9)
-	go llmgateway.SyncLoop(db, time.Hour, nil)
-	// LDAP 目录全量同步(固定间隔 1 小时;用户/组自动对账;配置保存时
-	// 已触发一轮,此处兜底周期同步——新员工入职/离职/组变化在 1h 内反映)
-	go serverauth.SyncDirectoryLoop(db, serverauth.LDAPSyncInterval, nil)
+	//
+	// R19B-05(审计 2026-09-25,P2):两条后台循环（渠道模型同步 / LDAP 目录同步）原先就是
+	// 在这里**裸起 goroutine**、不看 ctx、也不进调度器状态表（见 background_sync.go 的文件头）。
+	// 现在它们与其它七条调度器同构，调用点下移到 signal ctx 之后的调度器装配区。
 
 	dist, _ := fs.Sub(webadmin.FS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
@@ -311,6 +310,21 @@ func main() {
 	// `balance.enabled=true` 的部署里余额只减不增、员工最终全部 429
 	// BALANCE_EXHAUSTED,而此前没有任何判据或观测出口能指出"发放循环是死的"。
 	startBalanceScheduler(ctx, db, balanceSchedulerTick)
+	// 渠道模型自动同步(固定间隔 1 小时;拉取上游 /models 自动上架/下架,
+	// 并顺带清理过期的 pending usage 行 — 审计 C-9)。
+	//
+	// ⚠️ 这条循环同时是 serverstore.CleanupPendingUsage 的**唯一周期执行者**
+	// (中断流的 0-token pending 行只有它回收),所以它"死没死"必须可判、可观测。
+	// 经 startModelSyncScheduler(background_sync.go 的装配接缝)调用 —— R19B-05
+	// (审计 2026-09-25,P2):修前它是裸 `go llmgateway.SyncLoop(...)`,没有 ctx、
+	// 没有运行状态、也没进 scheduler_status.go,删掉那一行时 cmd/server 整包仍绿。
+	startModelSyncScheduler(ctx, db, modelSyncTick)
+	// LDAP 目录全量同步(固定间隔 1 小时;用户/组自动对账;配置保存时已触发一轮,
+	// 此处兜底周期同步——新员工入职/离职/组变化在 1h 内反映)。
+	//
+	// 经 startDirectorySyncScheduler(同一接缝文件)调用 —— 与模型同步同一条 R19B-05
+	// 判据:死掉时"离职账号不自动停用"与"目录里没人变动"同形。
+	startDirectorySyncScheduler(ctx, db, directorySyncTick)
 	// 审计日志保留策略的周期执行者(R4-D-4):启动先跑一轮(替代原先的一次性启动清理),
 	// 之后每 6 小时按 settings audit.retention_days 清理过期条目;随 ctx 退出。
 	//

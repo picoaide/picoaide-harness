@@ -91,11 +91,17 @@ services:
       # (release.picoaide.com/<channel>/latest.json),不是"关闭检查"。
       # 要关闭更新检查请显式写 off / none / - / disabled。
       PICOAI_UPDATE_ENDPOINT: ${PICOAI_UPDATE_ENDPOINT:-}
-      # 可信反向代理(审计 2026-08-25 F-02):Caddy 固定 IP 默认 172.28.0.2,
-      # 使登录限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS。
-      # 宿主机已有别的反代(共享 Caddy/nginx)时,改成它连过来的地址(通常是
-      # docker 网桥网关,如 172.20.0.1)。
-      PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-172.28.0.2}
+      # 可信反向代理(审计 2026-08-25 F-02;R15C-03,审计 2026-09-25):使登录/MFA/
+      # OIDC 的限流键从 X-Forwarded-For 解析真实客户端 IP,防账号级 DoS。
+      # **留空 = 从 CADDY_IP 派生**(见下一条) —— 网段与信任列表因此不可能漂移。
+      # 宿主机已有别的反代(共享 Caddy/nginx)时才显式写:改成它连过来的地址
+      # (通常是 docker 网桥网关,如 172.20.0.1);写了却与 CADDY_IP 不一致时
+      # 启动日志会打一行 WARNING(改网段只改一个 = XFF 静默失效)。
+      PICOAI_TRUSTED_PROXIES: ${PICOAI_TRUSTED_PROXIES:-}
+      # 前端 Caddy 在本私有网段里的固定 IP:与 services.caddy 的 ipv4_address
+      # **同一个变量、同一份缺省**。服务端用它派生可信代理(上一条留空时),
+      # 所以改网段只需改 CADDY_IP 一处(NETWORK_SUBNET 冲突时的既有做法)。
+      CADDY_IP: ${CADDY_IP:-172.28.0.2}
       # 本服务端对外可达地址(如 https://ai.example.com)。**配了就是唯一权威**;
       # 留空则按请求推导(X-Forwarded-Proto: https → TLS → 回环 http)。
       # 为什么要配:客户端更新清单里的下载地址必须是**绝对 https**,而客户端会

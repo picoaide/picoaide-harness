@@ -13,7 +13,11 @@
  *   must match it or installation is refused;
  * - the staged tree is moved into place with a same-filesystem rename after
  *   the SKILL.md check, and an existing target directory is replaced only
- *   after the new tree is fully verified.
+ *   after the new tree is fully verified;
+ * - 库内路径操作**不再直接拿字符串路径作用于库根**：逐段锚定（真实目录 / 非链接与
+ *   junction / 非挂载点 / 同设备）+ 每次 syscall 前后各复检一次逐段身份
+ *   （R19A-S2-01/02/03，见 `anchorLibraryPath` / `removeAnchoredLibraryEntry` /
+ *   `ensureLibraryTempRoot`）。
  */
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -29,6 +33,7 @@ import {
   isSameSkillRoot,
   RUNTIME_SKILL_ROOT_RANKS,
   runtimeSkillRoots,
+  skillRootPathKey,
   type RuntimeSkillRoot,
 } from './skill-runtime-roots.ts'
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
@@ -664,7 +669,11 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
         'LOCAL_CONTENT',
         describeOverwriteRefusal(name, existingOrigin, existingChannel, channel, existingDirty, {
           verdict,
-          ...verdict === 'foreign' ? { server: existingProv?.server } : {},
+          // `foreign` 与 `unknown-current`（R19A-S2-04）都点名"标记里那台服务端" ——
+          // 只说"不是能力中心装的"会让用户以为是自己手写的。
+          ...verdict === 'foreign' || verdict === 'unknown-current' ? { server: existingProv?.server } : {},
+          // 除服务端维度外是否仍像"能力中心装的"（见该参数的文档）。
+          storeShape: existingProv !== undefined && isStoreChannel(existingProv.channel) && existingProv.appId === name,
         }),
       )
     }
@@ -672,11 +681,24 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
 
   // Stage under the skill root so the final rename stays on one filesystem.
   await mkdir(skillsDir, { recursive: true, mode: 0o700 })
-  const tempRoot = join(skillsDir, SKILL_TEMP_DIR)
-  await mkdir(tempRoot, { recursive: true, mode: 0o700 })
+  // R19A-S2-02：临时区**必须过闸**。旧实现直接 `mkdir(join(skillsDir, '.skill-tmp'))`
+  // 再 `mkdtemp(join(tempRoot, 'install-'))`：`.skill-tmp` 是库外链接 / junction /
+  // 挂载点时，staging 与解包内容（每份最多 64MiB）落在**库外**，而安装器还以为自己
+  // 在库里 —— 与"库内预置链接 ⇒ 越界删/搬"同族，本批此前只收了删/搬两条路径。
+  const tempRoot = await ensureLibraryTempRoot(skillsDir)
   const staging = await mkdtemp(join(tempRoot, 'install-'))
 
   try {
+    // 事后复检：`mkdtemp` 与刚才那次锚定之间若被替换，建的目录就在库外 —— 此时
+    // **一个字节都不解包**，直接拒收（staging 由 finally 清掉）。
+    const stagedReal = await realpath(staging).catch(() => undefined)
+    if (stagedReal === undefined || !isSameSkillRoot(stagedReal, staging)) {
+      throw new ArchiveInstallRefusal(
+        'LIBRARY_TEMP_UNSAFE',
+        `the installer staging directory was created outside the skill library (${SKILL_TEMP_DIR} was replaced `
+        + 'while the install was starting); refused, because unpacking there would write outside the skill library',
+      )
+    }
     const format = archiveFormat(archive)
     if (format === null) throw new ArchiveInstallRefusal('ARCHIVE_UNSUPPORTED', 'unsupported archive format')
 
@@ -918,36 +940,56 @@ export async function sweepStaleSkillTemps(
   // 的反面对照，所以区别只在"嵌套路径"）。因此当前布局一律经
   // {@link realDirectoryUnderLibrary} 锚定：`.skill-tmp` 不是真实目录就整块跳过（留痕），
   // 条目的锚定路径才是删除目标。
-  const tempRoot = await realDirectoryUnderLibrary(skillsDir, SKILL_TEMP_DIR)
+  //
+  // R19A-S2-03：锚定的判据现在含"链接/junction/挂载点/跨设备"四条（挂载点在 `lstat`
+  // 下就是真实目录，只有 `/proc/self/mountinfo` 与 `st_dev` 认得出来）；删除本身经
+  // {@link removeAnchoredLibraryEntry}：syscall 前复检一次（断言与操作之间的窗口），
+  // 删完复检父链（窗口内被换掉 ⇒ 这次删除可能落在库外，如实留痕）。
+  let tempRootRefusal: LibraryAnchorRefusal | undefined
+  const tempRoot = await realDirectoryUnderLibrary(skillsDir, SKILL_TEMP_DIR, reason => { tempRootRefusal = reason })
   if (tempRoot === undefined) {
     const shape = await lstat(join(skillsDir, SKILL_TEMP_DIR)).catch(() => undefined)
     if (shape !== undefined) {
       sink.warn(
-        `[skill-install] skipped the stale-staging sweep under ${SKILL_TEMP_DIR}: it is not a real directory `
-        + 'inside the skill library (a symbolic link or a non-directory is in the way) — nothing was removed',
+        `[skill-install] skipped the stale-staging sweep under ${SKILL_TEMP_DIR}: `
+        + `${tempRootRefusal === undefined ? 'it is not a real directory inside the skill library' : describeAnchorRefusal(tempRootRefusal)} `
+        + '— nothing was removed',
       )
     }
   }
   for (const entry of tempRoot === undefined ? [] : await readdir(tempRoot, { withFileTypes: true }).catch(() => [])) {
     if (!entry.name.startsWith('install-')) continue
-    const path = await realDirectoryUnderLibrary(skillsDir, `${SKILL_TEMP_DIR}/${entry.name}`)
-    if (path === undefined) {
+    let entryRefusal: LibraryAnchorRefusal | undefined
+    const anchor = await anchorLibraryPath(
+      skillsDir,
+      `${SKILL_TEMP_DIR}/${entry.name}`,
+      reason => { entryRefusal = reason },
+    )
+    if (anchor === undefined) {
       sink.warn(
-        `[skill-install] refused to sweep "${entry.name}": it is not a real directory inside the skill library `
-        + '(a symbolic link or a non-directory is in the way) — nothing was removed',
+        `[skill-install] refused to sweep "${entry.name}": `
+        + `${entryRefusal === undefined ? 'it is not a real directory inside the skill library' : describeAnchorRefusal(entryRefusal)} `
+        + '— nothing was removed',
       )
       continue
     }
-    const age = await staleAge(path)
+    const age = await staleAge(anchor.path)
     if (age === undefined) continue
-    await drop(path, {
-      path,
+    const record: SkillCleanupRecord = {
+      path: anchor.path,
       entryName: entry.name,
       layout: 'stale-temp',
       ageMs: age,
       thresholdMs: maxAgeMs,
       reason: `stale install staging under ${SKILL_TEMP_DIR}/, age ${hours(age)}h >= ${hours(maxAgeMs)}h`,
-    })
+    }
+    const before = removed
+    if (await removeAnchoredLibraryEntry(skillsDir, anchor, sink, 'the stale staging directory')) {
+      // 与 `drop` 同一份记账：日志 + 结构化记录（拒绝时一条都不记）。
+      removed = before + 1
+      sink.warn(`[skill-install] removed "${record.entryName}" (${record.reason})`)
+      onRemoved?.(record)
+    }
   }
   // 旧布局(≤2.8.1)：staging/备份直接建在技能库根，名字形如 `.install-<name>-XXXXXX`
   // 与 `.<name>.backup-<pid>-<ts>`。旧备份的**根上就有 SKILL.md**，运行时会把整份
@@ -1006,32 +1048,266 @@ export interface RecoveredSkillSwap {
  * 库外唯一副本被删、库外兄弟文件被搬走，两个真入口 `err=undefined` 静默成功）。
  * 本仓 R17B-01 的不变量是"链接只 unlink、库外一字不动"，自愈面此前违背了它。
  *
- * 判据（三条，全部 `lstat`，**绝不 `existsSync`** —— 它跟随链接）：
+ * 判据（五条；`lstat` 为主，**绝不 `existsSync`** —— 它跟随链接）：
  *  1. `skillsDir` 的 **realpath** 是锚（库根本身是链接是既有合法布局）；
  *  2. `relPath` 的**每一段**必须是**真实目录**（符号链接/文件/设备/断链一律拒）；
- *  3. 返回 `realRoot/<relPath>`（锚 + 段拼出来的绝对路径）。调用方**只用这个返回值**
+ *  3. 每一段的 `realpath` 必须**就是它自己** —— 这一条挡的是 `lstat` 看不出间接层的
+ *     形态：Windows **junction**（`mklink /J`）在 `lstat` 下可能是"目录"，
+ *     而 `realpath`（`GetFinalPathNameByHandle`）会解析到真正的目标；
+ *  4. 每一段不能是**挂载点**：Linux 读 `/proc/self/mountinfo` 逐一比对（**同设备**
+ *     的 `mount --bind` 也能骗过 `st_dev`，只有挂载表能认出来）；跨设备（`st_dev`
+ *     与库根不同）在任何平台上都拒 —— 挂载点上的路径操作落到的是库外的目录树；
+ *  5. 返回 `realRoot/<relPath>`（锚 + 段拼出来的绝对路径）。调用方**只用这个返回值**
  *     做 rm/rename —— 原字符串路径可能经链接指向库外。
  *
  * **这是结构绊线而不是 TOCTOU 的完全闭合**（断言与操作之间仍有窗口，Node 没有
- * `openat`/`O_NOFOLLOW` 级的目录句柄原语）。它挡住的是本仓实测的整类形态
- * （"库内预置链接 ⇒ 越界删/搬"）：判定不通过时调用方**一个字都不动**并如实记日志。
+ * `openat`/`renameat` 级的目录句柄原语）。它挡住的是本仓实测的整类形态
+ * （"库内预置链接 / junction / 挂载点 ⇒ 越界删/搬"）：判定不通过时调用方
+ * **一个字都不动**并如实记日志。窗口本身用**逐段身份（`dev:ino`）在 syscall 前后
+ * 各复检一次**收窄并在命中时留痕，见 {@link anchoredLibraryPathStillHolds} 与
+ * {@link removeAnchoredLibraryEntry}。
  * @param skillsDir - 技能库根。
  * @param relPath - 相对库根的路径（`/` 分隔，不得含 `.`/`..`/空段）。
- * @returns 锚定后的绝对路径；任一段不是真实目录时为 `undefined`（fail-loud 放弃）。
+ * @returns 锚定后的绝对路径；任一段不满足上述判据时为 `undefined`（fail-loud 放弃）。
  */
-async function realDirectoryUnderLibrary(skillsDir: string, relPath: string): Promise<string | undefined> {
+async function realDirectoryUnderLibrary(
+  skillsDir: string,
+  relPath: string,
+  onRefusal?: (reason: LibraryAnchorRefusal) => void,
+): Promise<string | undefined> {
+  return (await anchorLibraryPath(skillsDir, relPath, onRefusal))?.path
+}
+
+/** 锚定失败的原因（只用于**如实记日志**；任何一档的处置都是"什么都不做"）。 */
+export type LibraryAnchorRefusal =
+  /** 相对路径本身不合法（空段 / `.` / `..`）。 */
+  | 'relpath-invalid'
+  /** 库根不可读（不存在 / 权限 / 不是目录）。 */
+  | 'library-unreadable'
+  /** 某一段不是真实目录（符号链接 / 普通文件 / 断链 / 设备）。 */
+  | 'not-a-directory'
+  /** 某一段是链接/junction 之类的间接层（`realpath` 指向别处）。 */
+  | 'indirect'
+  /** 某一段是挂载点（Linux `/proc/self/mountinfo`；同设备 bind mount 也能认出来）。 */
+  | 'mount-point'
+  /** 某一段落在与库根不同的设备上（`st_dev` 不同 ⇒ 一定是挂载进来的目录树）。 */
+  | 'cross-device'
+
+/** 一次锚定的产物：绝对路径 + 逐段身份（供 syscall 前后复检）。 */
+export interface AnchoredLibraryPath {
+  /** 相对库根的路径（复检时按它原样再锚一次）。 */
+  readonly relative: string
+  /** 锚定后的绝对路径（库根 realpath + 段拼出）。 */
+  readonly path: string
+  /** 逐段身份（`dev:ino`，含库根与最终段，顺序与路径一致）。 */
+  readonly chain: readonly string[]
+}
+
+/** 目录身份（`dev:ino`）：逐段"还是不是同一个目录"的判据。 */
+function directoryIdentity(info: { dev: number, ino: number }): string {
+  return `${info.dev}:${info.ino}`
+}
+
+/**
+ * Linux 的挂载点集合（`/proc/self/mountinfo` 第 5 列）。
+ *
+ * 为什么必须有它：`mount --bind` 一个**同设备**的目录时，`lstat` 报真实目录、
+ * `realpath` 原样返回、`st_dev` 与父目录相同 —— 三条静态判据全都不成立
+ * （本仓 R19A-S2-03 用真实 `mount --bind` 实证）。挂载表是唯一能认出它的判据。
+ * 非 Linux（没有该文件）返回 `undefined` = 这一档判据缺席，由 `st_dev` 与
+ * `realpath` 两条兜底（Windows 的 junction 由 `realpath` 判据覆盖）。
+ * @returns 规范化后的挂载点路径键集合；不可用时 `undefined`。
+ */
+async function linuxMountPointKeys(): Promise<Set<string> | undefined> {
+  if (process.platform !== 'linux') return undefined
+  const raw = await readFile('/proc/self/mountinfo', 'utf8').catch(() => undefined)
+  if (raw === undefined) return undefined
+  const keys = new Set<string>()
+  for (const line of raw.split('\n')) {
+    // 字段：id parent major:minor root mountpoint options… ⇒ 挂载点是第 5 列。
+    const field = line.split(' ')[4]
+    if (field === undefined || field === '') continue
+    keys.add(skillRootPathKey(unescapeMountInfoField(field)))
+  }
+  return keys
+}
+
+/** `/proc/self/mountinfo` 的八进制转义（空格 `\040`、制表 `\011`、反斜杠 `\134`…）。 */
+function unescapeMountInfoField(value: string): string {
+  return value.replace(/\\([0-7]{3})/gu, (_match, octal: string) => String.fromCharCode(Number.parseInt(octal, 8)))
+}
+
+/**
+ * 逐段断言并**锚定**一个库内路径（{@link realDirectoryUnderLibrary} 的判据实现）。
+ *
+ * 与"返回一个字符串"的区别只有一点，但很关键：这里把**逐段身份**一起带出来
+ * （{@link AnchoredLibraryPath.chain}），调用方因此能在真正 `rm`/`rename` 之前
+ * **立刻**复检一次（{@link anchoredLibraryPathStillHolds}），把"断言与操作之间"的
+ * 窗口从"若干次 IO"压到"一次 syscall 之前的最后一次 stat"。
+ * @param skillsDir - 技能库根。
+ * @param relPath - 相对库根的路径。
+ * @param onRefusal - 可选的拒绝原因回调（调用方据此打可检索日志）。
+ * @returns 锚定结果；被拒时 `undefined`。
+ */
+async function anchorLibraryPath(
+  skillsDir: string,
+  relPath: string,
+  onRefusal?: (reason: LibraryAnchorRefusal) => void,
+): Promise<AnchoredLibraryPath | undefined> {
+  const refuse = (reason: LibraryAnchorRefusal): undefined => {
+    onRefusal?.(reason)
+    return undefined
+  }
   const segments = relPath.split('/').filter(segment => segment !== '')
-  if (segments.length === 0 || segments.some(segment => segment === '.' || segment === '..')) return undefined
+  if (segments.length === 0 || segments.some(segment => segment === '.' || segment === '..')) {
+    return refuse('relpath-invalid')
+  }
   const realRoot = await realpath(skillsDir).catch(() => undefined)
-  if (realRoot === undefined) return undefined
+  if (realRoot === undefined) return refuse('library-unreadable')
+  const rootShape = await lstat(realRoot).catch(() => undefined)
+  if (rootShape === undefined || !rootShape.isDirectory()) return refuse('library-unreadable')
+  const mountPoints = await linuxMountPointKeys()
+  const chain: string[] = [directoryIdentity(rootShape)]
   let current = realRoot
   for (const segment of segments) {
     current = join(current, segment)
     // `lstat`（不是 `stat`）：符号链接按"不是目录"处理 ⇒ 拒收，绝不跟随。
     const shape = await lstat(current).catch(() => undefined)
-    if (shape === undefined || !shape.isDirectory()) return undefined
+    if (shape === undefined || !shape.isDirectory()) return refuse('not-a-directory')
+    // 间接层：`lstat` 说"目录"也可能是 junction / 挂载进来的目录树。
+    const resolved = await realpath(current).catch(() => undefined)
+    if (resolved === undefined || skillRootPathKey(resolved) !== skillRootPathKey(current)) return refuse('indirect')
+    if (shape.dev !== rootShape.dev) return refuse('cross-device')
+    if (mountPoints?.has(skillRootPathKey(current)) === true) return refuse('mount-point')
+    chain.push(directoryIdentity(shape))
   }
-  return current
+  return { relative: segments.join('/'), path: current, chain }
+}
+
+/** {@link LibraryAnchorRefusal} 的可读文案（进日志；不含任何库外路径）。 */
+function describeAnchorRefusal(reason: LibraryAnchorRefusal): string {
+  switch (reason) {
+    case 'relpath-invalid': return 'the relative path is not a plain library-relative path'
+    case 'library-unreadable': return 'the skill library root is not a readable directory'
+    case 'not-a-directory': return 'a symbolic link, plain file or broken link is in the way'
+    case 'indirect': return 'a link, junction or other indirection resolves that path somewhere else'
+    case 'mount-point': return 'the path is a mount point (a directory tree mounted into the skill library)'
+    case 'cross-device': return 'the path lives on a different device than the skill library root'
+  }
+}
+
+/**
+ * 复检一份锚定结果：**同一段路径现在还是同一批目录吗**。
+ *
+ * 为什么需要：`rm`/`rename` 只有字符串路径可用（Node 没有 `openat`/`renameat`），
+ * 断言与 syscall 之间的窗口无法结构性消除。这里把"最后一次校验"移到 syscall
+ * **紧邻之前**（`scope: 'full'` = 含目标自身；`scope: 'parent'` = 只比父链，用于
+ * "目标本该消失"的删除后复检），并在 syscall 之后复检一次：窗口内命中时如实报告，
+ * 而不是让一次越界删/搬静默成功。
+ * @param skillsDir - 技能库根。
+ * @param anchor - {@link anchorLibraryPath} 的产物。
+ * @param scope - `full` 比整条链；`parent` 只比父链（去掉最后一段）。
+ * @returns 仍与锚定时同一批目录为 true。
+ */
+async function anchoredLibraryPathStillHolds(
+  skillsDir: string,
+  anchor: AnchoredLibraryPath,
+  scope: 'full' | 'parent' = 'full',
+): Promise<boolean> {
+  const expected = scope === 'full' ? anchor.chain : anchor.chain.slice(0, -1)
+  // `parent` 档**按父路径重新锚**（而不是把整条路径锚完再切掉末段）：删除之后末段
+  // 已经不存在，整条锚定必然失败 —— 那会把"删成功了"误报成"父目录被换掉了"。
+  const parentRelative = anchor.relative.split('/').slice(0, -1).join('/')
+  if (scope === 'parent' && parentRelative === '') {
+    const root = await realpath(skillsDir).catch(() => undefined)
+    const shape = root === undefined ? undefined : await lstat(root).catch(() => undefined)
+    return shape !== undefined && shape.isDirectory() && directoryIdentity(shape) === expected[0]
+  }
+  const again = await anchorLibraryPath(skillsDir, scope === 'parent' ? parentRelative : anchor.relative)
+  if (again === undefined) return false
+  return expected.length === again.chain.length && expected.every((identity, index) => identity === again.chain[index])
+}
+
+/**
+ * 复检失败时的**原因文案**（再锚一次取原因；只用于日志）。
+ * @param skillsDir - 技能库根。
+ * @param anchor - 原来的锚定结果。
+ * @returns 一句可进日志的原因。
+ */
+async function describeAnchorRecheck(skillsDir: string, anchor: AnchoredLibraryPath): Promise<string> {
+  let refusal: LibraryAnchorRefusal | undefined
+  await anchorLibraryPath(skillsDir, anchor.relative, reason => { refusal = reason })
+  return refusal === undefined
+    ? 'the path no longer matches the directory that was anchored'
+    : describeAnchorRefusal(refusal)
+}
+
+/**
+ * 删除一个**已锚定**的库内条目：syscall 之前复检（把断言与操作的窗口收到最小），
+ * 之后复检**父链**（父链在窗口里被换掉 ⇒ 这次删除可能落在库外，必须留痕）。
+ *
+ * 删除面没有"事后回滚"，所以这里只承诺两件事：**能拒就拒**（复检不过 ⇒ 一个字
+ * 都不动），**拒不了就如实报告**（事后复检不过 ⇒ 一条可检索日志）。
+ * @param skillsDir - 技能库根。
+ * @param anchor - 目标条目的锚定结果。
+ * @param sink - 日志出口。
+ * @param what - 日志里点名的用途（`the stale staging directory` 之类）。
+ * @returns 真的删掉了为 true；被拒/失败为 false。
+ */
+async function removeAnchoredLibraryEntry(
+  skillsDir: string,
+  anchor: AnchoredLibraryPath,
+  sink: SkillInstallLog,
+  what: string,
+): Promise<boolean> {
+  if (!await anchoredLibraryPathStillHolds(skillsDir, anchor)) {
+    sink.warn(
+      `[skill-install] refused to remove ${what} "${anchor.relative}": the path was replaced while it was being `
+      + 'checked (a link, junction or mount point appeared in it, or its parent directory changed) — nothing was removed',
+    )
+    return false
+  }
+  const removed = await rm(anchor.path, { recursive: true, force: true }).then(() => true).catch(() => false)
+  if (removed && !await anchoredLibraryPathStillHolds(skillsDir, anchor, 'parent')) {
+    sink.warn(
+      `[skill-install] removed ${what} "${anchor.relative}", but its parent directory was replaced during the `
+      + 'operation — part of that removal may have landed outside the skill library; inspect the library and the '
+      + 'linked target by hand',
+    )
+  }
+  return removed
+}
+
+/**
+ * 安装器的私有临时区（`<skills>/.skill-tmp`）—— **必须过闸**（R19A-S2-02）。
+ *
+ * 旧实现直接 `mkdir(join(skillsDir, '.skill-tmp'))` + `mkdtemp(join(tempRoot, 'install-'))`：
+ * `.skill-tmp` 是**库外链接**时（预置链接、junction、挂载点），staging 与解包内容
+ * （每份最多 64MiB）落在**库外**，而安装器还以为自己在库里 —— 与"库内预置链接
+ * ⇒ 越界删/搬"是同一族形态，本批此前只收了删/搬两条路径。
+ *
+ * 现在的口径：先锚定（{@link anchorLibraryPath} 的五条判据），拿到**由库根 realpath
+ * 拼出来的绝对路径**再建 staging；临时区不是库内真实目录时**拒绝安装**
+ * （`LIBRARY_TEMP_UNSAFE`，422 + 点名真实原因），绝不把内容写到库外。
+ * @param skillsDir - 技能库根。
+ * @returns 锚定后的临时区绝对路径。
+ * @throws ArchiveInstallRefusal `LIBRARY_TEMP_UNSAFE`（不是库内真实目录）。
+ */
+async function ensureLibraryTempRoot(skillsDir: string): Promise<string> {
+  const candidate = join(skillsDir, SKILL_TEMP_DIR)
+  const created = await mkdir(candidate, { recursive: true, mode: 0o700 }).then(() => undefined).catch((cause: unknown) => cause)
+  let refusal: LibraryAnchorRefusal | undefined
+  const anchored = await anchorLibraryPath(skillsDir, SKILL_TEMP_DIR, reason => { refusal = reason })
+  if (anchored === undefined) {
+    const why = refusal === undefined ? 'it could not be anchored' : describeAnchorRefusal(refusal)
+    const mkdirNote = created === undefined ? '' : ` (it could not be created either: ${created instanceof Error ? created.message : String(created)})`
+    throw new ArchiveInstallRefusal(
+      'LIBRARY_TEMP_UNSAFE',
+      `the installer staging area ${SKILL_TEMP_DIR} is not a real directory inside the skill library — ${why}${mkdirNote}; `
+      + 'refused, because unpacking there would write outside the skill library',
+    )
+  }
+  return anchored.path
 }
 
 /**
@@ -1109,40 +1385,49 @@ export async function recoverInterruptedSkillSwaps(
     return Date.now() - info.mtimeMs >= minAgeMs
   }
   /**
-   * 取一个条目的**锚定路径**（逐段真实目录断言）。
+   * 取一个条目的**锚定结果**（逐段真实目录断言 + 逐段身份）。
    *
-   * 不通过时**什么都不做**并留痕：那是"库里有链接"的形态，任何删/搬都可能落到库外。
+   * 不通过时**什么都不做**并留痕：那是"库里有链接/挂载点"的形态，任何删/搬都可能
+   * 落到库外。日志点名**真实原因**（是链接？是 junction？是挂载点？是跨设备？）——
+   * R19A-S2-03 的排障成本全在"只说'不是真实目录'"这一句上。
    * @param relPath - 相对库根的路径。
    * @param why - 日志里点名的用途（备份/孤儿/staging）。
-   * @returns 锚定绝对路径；被拒时 undefined。
+   * @returns 锚定结果；被拒时 undefined。
    */
-  const anchored = async (relPath: string, why: string): Promise<string | undefined> => {
-    const path = await realDirectoryUnderLibrary(skillsDir, relPath)
-    if (path === undefined) {
+  const anchored = async (relPath: string, why: string): Promise<AnchoredLibraryPath | undefined> => {
+    let refusal: LibraryAnchorRefusal | undefined
+    const anchor = await anchorLibraryPath(skillsDir, relPath, reason => { refusal = reason })
+    if (anchor === undefined) {
       sink.warn(
-        `[skill-install] refused to touch ${why} "${relPath}" under ${SKILL_TEMP_DIR}: the path is not a real `
-        + `directory inside the skill library (a symbolic link or a non-directory is in the way) — nothing was removed or moved`,
+        `[skill-install] refused to touch ${why} "${relPath}" under ${SKILL_TEMP_DIR}: `
+        + `${refusal === undefined ? 'it is not a real directory inside the skill library' : describeAnchorRefusal(refusal)} `
+        + '— nothing was removed or moved',
       )
     }
-    return path
+    return anchor
   }
   /**
    * 把一份副本放回落点（或如实作废）。**只在真的动过（restored/discarded）时返回 true** ——
    * 调用方据此决定要不要销毁 staging 残骸：拒绝/失败时那一份必须留着（R18A-SK-02 的
    * 静默数据丢失就是"报成功但没搬成、staging 又被删"造成的）。
+   *
+   * R19A-S2-01：`rename`/`rm` 之前**再复检一次**源路径（断言与 syscall 之间的窗口），
+   * `rename` 之后再比对**落点里那一份的 inode 是不是刚校验过的那一个**（窗口内被换掉
+   * 时，库外的目录会被搬进来 —— 那种情况下"恢复成功"是谎话）。窗口仍然存在（Node
+   * 没有 `renameat`），但命中会留痕，且确定性插桩的替换一定被拒。
    * @param name - 技能名（frontmatter/目录名里的那一个）。
-   * @param sourcePath - **已锚定**的副本目录绝对路径。
+   * @param source - **已锚定**的副本目录。
    * @param targetDir - **已锚定**的落点绝对路径。
    * @returns 真的动过为 true。
    */
-  const settle = async (name: string, sourcePath: string, targetDir: string): Promise<boolean> => {
+  const settle = async (name: string, source: AnchoredLibraryPath, targetDir: string): Promise<boolean> => {
     if (!isLoadableSkillName(name)) return false
     // 副本必须是**真实目录**：是符号链接时旧实现会把链接本身提升为落点
     // （库里出现指向库外的技能），是文件时技能静默消失（R18A-SK-05）。
-    const sourceShape = await lstat(sourcePath).catch(() => undefined)
+    const sourceShape = await lstat(source.path).catch(() => undefined)
     if (sourceShape === undefined || !sourceShape.isDirectory()) {
       sink.warn(
-        `[skill-install] refused the interrupted-swap copy of "${name}" (${basename(sourcePath)} is not a real `
+        `[skill-install] refused the interrupted-swap copy of "${name}" (${basename(source.path)} is not a real `
         + 'directory: symlink, file or already gone) — nothing was removed or moved',
       )
       return false
@@ -1151,14 +1436,35 @@ export async function recoverInterruptedSkillSwaps(
     // 末段 ⇒ ENOTDIR 被吞掉后仍报"已恢复"，旧内容的最后一份副本随 staging 一起被销毁）。
     const landing = await lstat(targetDir).catch(() => undefined)
     if (landing === undefined) {
+      // 紧邻 syscall 的复检（R19A-S2-01）：源路径在"取落点形态"这几步里被换成链接/
+      // 挂载点时，`rename` 会把**库外**目录搬进技能库 —— 这里直接拒收，一个字都不动。
+      if (!await anchoredLibraryPathStillHolds(skillsDir, source)) {
+        sink.warn(
+          `[skill-install] refused to restore "${name}": ${source.relative} was replaced while it was being checked `
+          + `(${await describeAnchorRecheck(skillsDir, source)}) — nothing was removed or moved, `
+          + `the copy stays in ${SKILL_TEMP_DIR}/${basename(source.path)}`,
+        )
+        return false
+      }
       let moved = false
-      await rename(sourcePath, targetDir).then(() => {
+      await rename(source.path, targetDir).then(() => {
         moved = true
-        out.push({ name, action: 'restored', sourcePath, targetDir })
+        out.push({ name, action: 'restored', sourcePath: source.path, targetDir })
         sink.warn(`[skill-install] restored "${name}" from an interrupted skill swap (previous content was the only copy left)`)
       }).catch((cause: unknown) => {
-        sink.warn(`[skill-install] could not restore "${name}" from ${basename(sourcePath)}: ${cause instanceof Error ? cause.message : String(cause)}`)
+        sink.warn(`[skill-install] could not restore "${name}" from ${basename(source.path)}: ${cause instanceof Error ? cause.message : String(cause)}`)
       })
+      if (moved) {
+        // 事后复检：落点里那一份**是不是刚校验过的那一个目录**（同一个 inode）。
+        // 不一致 ⇒ 窗口里源路径被换过，搬进来的东西不是我们要恢复的那一份。
+        const placed = await lstat(targetDir).catch(() => undefined)
+        if (placed === undefined || directoryIdentity(placed) !== directoryIdentity(sourceShape)) {
+          sink.warn(
+            `[skill-install] the copy restored as "${name}" is NOT the directory that was verified (the skill library `
+            + 'was modified concurrently): inspect it by hand — it may have come from outside the library',
+          )
+        }
+      }
       return moved
     }
     // 落点存在：只有"真实目录 + **真实** SKILL.md"才算"换入其实已完成"⇒ 副本作废。
@@ -1170,18 +1476,17 @@ export async function recoverInterruptedSkillSwaps(
       sink.warn(
         `[skill-install] kept the interrupted-swap copy of "${name}": the install location exists but is not a `
         + 'populated skill directory (symlink, broken link, plain file or no real SKILL.md) — resolve it by hand, '
-        + `the copy stays in ${SKILL_TEMP_DIR}/${basename(sourcePath)}`,
+        + `the copy stays in ${SKILL_TEMP_DIR}/${basename(source.path)}`,
       )
       return false
     }
     let dropped = false
-    await rm(sourcePath, { recursive: true, force: true }).then(() => {
-      dropped = true
-      out.push({ name, action: 'discarded', sourcePath, targetDir })
-      sink.warn(`[skill-install] discarded the interrupted-swap copy of "${name}" (the install location is populated again)`)
-    }).catch((cause: unknown) => {
-      sink.warn(`[skill-install] could not discard the interrupted-swap copy of "${name}": ${cause instanceof Error ? cause.message : String(cause)}`)
-    })
+    if (!await removeAnchoredLibraryEntry(skillsDir, source, sink, `the interrupted-swap copy of "${name}"`)) {
+      return false
+    }
+    dropped = true
+    out.push({ name, action: 'discarded', sourcePath: source.path, targetDir })
+    sink.warn(`[skill-install] discarded the interrupted-swap copy of "${name}" (the install location is populated again)`)
     return dropped
   }
   // R18A-SK-04：同名的多份备份按**名字里的时间戳新的优先**处理（旧实现按 readdir 顺序，
@@ -1217,18 +1522,32 @@ export async function recoverInterruptedSkillSwaps(
     if (!entry.name.startsWith('install-')) continue
     const staged = await anchored(relPath, 'the staging directory')
     if (staged === undefined) continue
-    const legacyBackup = await realDirectoryUnderLibrary(skillsDir, `${relPath}/backup`)
-    if (legacyBackup === undefined) continue
-    const meta = await readRuntimeSkillMetadata(join(legacyBackup, 'SKILL.md'))
+    // `backup/` **不存在是常态**（绝大多数 `install-*` 都是被中断的普通 staging）⇒
+    // 这一档先静默探测，只有"子条目真的在、却不是一个可锚定的目录"时才留痕。
+    const legacyBackup = await anchorLibraryPath(skillsDir, `${relPath}/backup`)
+    if (legacyBackup === undefined) {
+      if (await lstat(join(staged.path, 'backup')).catch(() => undefined) !== undefined) {
+        let refusal: LibraryAnchorRefusal | undefined
+        await anchorLibraryPath(skillsDir, `${relPath}/backup`, reason => { refusal = reason })
+        sink.warn(
+          `[skill-install] refused to touch the legacy backup under "${relPath}": `
+          + `${refusal === undefined ? 'it is not a real directory inside the skill library' : describeAnchorRefusal(refusal)} `
+          + '— nothing was removed or moved',
+        )
+      }
+      continue
+    }
+    const meta = await readRuntimeSkillMetadata(join(legacyBackup.path, 'SKILL.md'))
     if (meta === undefined) continue
     if (onlyName !== undefined && meta.name !== onlyName) continue
-    if (!await oldEnough(staged)) continue
+    if (!await oldEnough(staged.path)) continue
     if (!await settle(meta.name, legacyBackup, join(anchorRoot, meta.name))) continue
     // 抢救/作废之后，这一份 staging 残骸一并清掉：里面只剩安装器自己的构件
     // （`unpacked/`、`archive.tar.gz`），而 `rename` 会刷新**父目录** mtime ⇒
     // 不清它就还得再等一个 24h 阈值才被清扫器看到（年龄闸门已保证没有在跑的安装）。
     // **只在 settle 真的动过时才删**（拒绝/失败时那一份是旧内容的可能唯一副本）。
-    await rm(staged, { recursive: true, force: true }).catch(() => { /* 清不掉就留给清扫器 */ })
+    // 删除仍走锚定 + 前后复检（R19A-S2-03：这一条路径正是 bind mount 形态的落点）。
+    await removeAnchoredLibraryEntry(skillsDir, staged, sink, 'the stale staging directory')
   }
   return out
 }
@@ -1303,7 +1622,8 @@ export function isStoreProvenance(
  * 改不了，但"这一次比较"是代码里能收口的那一半。
  *
  * 三档语义（**判定的唯一实现**，下游只消费它，不再各自比一次字符串）：
- *  - `not-compared`：调用方没给当前服务端（老调用点/离线）⇒ 不做服务端维度判定；
+ *  - `not-compared`：**没有溯源标记可比**（`prov === undefined`）。R19A-S2-04 之前，
+ *    "调用方没给当前服务端"也落这一档 —— 那是 fail-open（见 `unknown-current`）；
  *  - `bundled`：随包（`plugin`）标记 —— 它是本机随包内容，没有"来源服务端"这个概念；
  *  - `unknown`：**商店渠道但标记里没有 `server`**（2026-09-01 之前的老客户端写的，
  *    或写入时没拿到会话地址）⇒ **来源未知**。R18A-SK-03：这一档此前与"同一台服务端"
@@ -1311,35 +1631,47 @@ export function isStoreProvenance(
  *    —— R17B-04 对存量标记等于没修。现在按最保守的一档处理（见
  *    {@link isForeignServerProvenance}），文案也点名真实原因（"没有记录来源服务端"），
  *    不再说成"你自己的文件"；
+ *  - `unknown-current`（R19A-S2-04）：标记里**有**来源服务端，但**这台机器的当前会话
+ *    没有服务端地址**（`session.json` 缺 `serverURL` 的畸形/被改写形态，或老调用点）。
+ *    旧实现与"调用方明确说不要比较"共用 `not-compared` ⇒ 别台服务端装的内容被判成
+ *    "本机商店内容" ⇒ **200 零确认删除**（本仓实测：同一目录在正常会话下是 409）。
+ *    缺字段**必须走保守分支**，所以这一档与 `unknown` 同等对待（要求确认），文案点名
+ *    "这次会话没有服务端地址"这一真实成因；
  *  - `same` / `foreign`：两侧都有服务端，归一化后相同/不同。
  */
-export type ProvenanceServerVerdict = 'not-compared' | 'bundled' | 'unknown' | 'same' | 'foreign'
+export type ProvenanceServerVerdict = 'not-compared' | 'bundled' | 'unknown' | 'unknown-current' | 'same' | 'foreign'
 
 /**
  * 判一个溯源标记与当前会话服务端的关系（见 {@link ProvenanceServerVerdict}）。
  * @param prov - the provenance marker.
- * @param currentServer - 当前会话的服务端地址；省略 = 不比较。
+ * @param currentServer - 当前会话的服务端地址；**缺席/空串 = 未知来源**（保守档，
+ *   R19A-S2-04 之前是"不比较"= 放行）。
  * @returns 关系档位。
  */
 export function provenanceServerVerdict(
   prov: SkillProvenance | undefined,
   currentServer?: string | undefined,
 ): ProvenanceServerVerdict {
-  if (prov === undefined || currentServer === undefined) return 'not-compared'
+  if (prov === undefined) return 'not-compared'
   if (prov.channel === 'plugin') return 'bundled'
   const origin = prov.server?.trim() ?? ''
+  const current = currentServer?.trim() ?? ''
+  if (current === '') return origin === '' ? 'unknown' : 'unknown-current'
   if (origin === '') return 'unknown'
-  return normalizeServerURL(origin) === normalizeServerURL(currentServer) ? 'same' : 'foreign'
+  return normalizeServerURL(origin) === normalizeServerURL(current) ? 'same' : 'foreign'
 }
 
 /**
- * 这份内容是否**不能算作"当前服务端的商店内容"**（`foreign` 或 `unknown`）。
+ * 这份内容是否**不能算作"当前服务端的商店内容"**（`foreign` / `unknown` / `unknown-current`）。
  *
  * 为什么 `unknown` 也算：存量标记（没有 `server` 字段）无法证明它来自当前这台服务端，
  * 而按"算作本机内容"处理会让覆盖/删除**零确认**（R18A-SK-03 实测的三层 fail-open）。
  * 方向与 {@link isStoreProvenance} 的既有口径一致 —— **宁可多问一次，不可静默覆盖/删除**。
+ *
+ * R19A-S2-04：`unknown-current`（标记有来源、但**这次会话**没有服务端地址）同理 ——
+ * "不知道对面是谁"与"知道对面是别人"在**能不能零确认删**这件事上没有区别。
  * @param prov - the provenance marker.
- * @param currentServer - 当前会话的服务端地址。
+ * @param currentServer - 当前会话的服务端地址（缺席 = 未知来源 ⇒ 保守）。
  * @returns 来源不同**或无法证明相同**为 true。
  */
 export function isForeignServerProvenance(
@@ -1347,7 +1679,7 @@ export function isForeignServerProvenance(
   currentServer?: string | undefined,
 ): boolean {
   const verdict = provenanceServerVerdict(prov, currentServer)
-  return verdict === 'foreign' || verdict === 'unknown'
+  return verdict === 'foreign' || verdict === 'unknown' || verdict === 'unknown-current'
 }
 
 /**
@@ -1478,7 +1810,19 @@ function describeOverwriteRefusal(
   existingChannel: string | undefined,
   incomingChannel: SkillProvenanceChannel,
   existingDirty: boolean,
-  provenance?: { verdict: ProvenanceServerVerdict, server?: string | undefined } | undefined,
+  provenance?: {
+    verdict: ProvenanceServerVerdict
+    server?: string | undefined
+    /**
+     * "除了服务端维度以外都成立"（渠道是商店来源 **且** `appId` 与目录名一致）。
+     *
+     * 为什么需要它：`unknown` / `unknown-current` 两档的文案是在解释"这份内容**看着像**
+     * 能力中心装的、只是无法证明属于本机"。若 `appId` 对不上或渠道压根不是商店来源，
+     * 那它本来就按**用户自制**处理（`isStoreProvenance` 的第一条判据），把成因说成
+     * "来源服务端无法证明"会把用户引到不存在的排障方向上。
+     */
+    storeShape?: boolean | undefined
+  } | undefined,
 ): string {
   if (existingDirty && existingOrigin === 'store' && existingChannel === incomingChannel) {
     // R4-B-3：这一条必须点明"你改过的东西会丢" —— 用户看到的徽章是「已本地修改」，
@@ -1497,11 +1841,19 @@ function describeOverwriteRefusal(
     }
     // R18A-SK-03：老标记（没有 server 字段）≠ 用户自制内容。文案必须说清是**来源不明**，
     // 否则用户会去翻自己不存在的笔记，而真凶是"上一台服务端装的那一份 + 换服务端"。
-    if (provenance?.verdict === 'unknown') {
+    if (provenance?.verdict === 'unknown' && provenance.storeShape === true) {
       return `the skill "${name}" is marked as installed by the Capability Hub ("${String(existingChannel)}" `
         + 'channel) but its provenance does not record which server it came from (a marker written by an '
         + `older client), so it cannot be proven to belong to this server; installing the ${JSON.stringify(incomingChannel)} `
         + 'version replaces that copy — confirm the overwrite to continue'
+    }
+    // R19A-S2-04：标记**有**来源服务端，但**这次会话**没有服务端地址（畸形/被改写的
+    // session.json）⇒ 同样无法证明它属于本机，不能静默整树替换。
+    if (provenance?.verdict === 'unknown-current' && provenance.storeShape === true && provenance.server !== undefined) {
+      return `the skill "${name}" was installed from a server (${provenance.server}, "${String(existingChannel)}" `
+        + 'channel), but this client session does not carry a server address, so that copy cannot be proven to '
+        + `belong to this server; installing the ${JSON.stringify(incomingChannel)} version replaces it `
+        + '— confirm the overwrite to continue'
     }
     return `a skill named "${name}" already exists locally but was not installed by the Capability Hub; `
       + 'installing would replace it (including your own files) — confirm the overwrite to continue'
@@ -2074,6 +2426,13 @@ export async function listOutrankingSkillResidues(
  * R13-GH3（H2 跨根）：成功语义扩到**跨根**——不是"本根删掉了"，而是"**运行时再列一次
  * 看不到它**"（上游发现面是多根合并，见 {@link runtimeSkillRoots}）。别的根里还有
  * 同名技能 ⇒ 抛 `RESIDUE`，不返回成功。
+ *
+ * R19A-S2-09（第十九轮审计 A 泳道）：`RESIDUE` 此前是**部分成功** —— 落点已经删掉，
+ * 卸载才报失败（面板显示"卸载失败"而库里那一份没了；用户既没得到技能、也没得到
+ * "已卸载"）。现在两条 `RESIDUE` 判据都**前移到删除之前**（同根用户自建影子 +
+ * 跨根残留；安装器自己的影子仍由清扫器处理）：判出残留 ⇒ **一个字都不动**并如实
+ * 报出"什么都没删"。删除之后的复核保留为兜底（同一份实现，见
+ * {@link listShadowingSkills} / {@link listCrossRootSkillResidues}）。
  * @param skillsDir - the user skill root (e.g. `<dshHome>/skills`).
  * @param name - the skill directory name (single safe segment).
  * @param options - `overwrite: true` = 用户已确认删除本机内容；`runtimeRoots` 覆盖运行时
@@ -2122,6 +2481,9 @@ export async function uninstallSkill(
       // 说成"你自己的文件"会让用户去翻自己不存在的笔记，说成"上一台服务端"又是编造事实。
       const verdict = provenanceServerVerdict(prov, options.serverURL)
       const foreignServer = verdict === 'foreign' ? prov?.server : undefined
+      // "除服务端维度外仍像能力中心装的"（同上：appId 对不上/非商店渠道时，成因应说
+      // "不是能力中心装的"，而不是"来源服务端无法证明"）。
+      const storeShape = prov !== undefined && isStoreChannel(prov.channel) && prov.appId === name
       throw new ArchiveInstallRefusal(
         'LOCAL_CONTENT',
         foreignServer !== undefined
@@ -2132,13 +2494,30 @@ export async function uninstallSkill(
               + 'but its provenance does not record which server it came from (a marker written by an older client), '
               + 'so it cannot be proven to belong to this server; deleting it removes that copy '
               + '— confirm the deletion to continue'
-            : origin === 'local'
-              ? `the skill directory "${name}" was not installed by the Capability Hub; `
-                + 'deleting it removes your own files — confirm the deletion to continue'
-              : `the skill "${name}" has local modifications; deleting it discards your changes `
-                + '— confirm the deletion to continue',
+            : verdict === 'unknown-current' && storeShape
+              // R19A-S2-04：标记里有来源服务端，但**这次会话**没有服务端地址。
+              // 成因与文案分开写（不要让用户去找一台不存在的"上一台服务端"）。
+              ? `the skill "${name}" was installed from a server (${String(prov?.server)}, `
+                + `"${String(prov?.channel)}" channel), but this client session does not carry a server address, `
+                + 'so that copy cannot be proven to belong to this server; deleting it removes that copy '
+                + '— confirm the deletion to continue'
+              : origin === 'local'
+                ? `the skill directory "${name}" was not installed by the Capability Hub; `
+                  + 'deleting it removes your own files — confirm the deletion to continue'
+                : `the skill "${name}" has local modifications; deleting it discards your changes `
+                  + '— confirm the deletion to continue',
       )
     }
+    // R19A-S2-09：两条 `RESIDUE` 判据**前移到删除之前** —— 旧实现先 `rm` 再复核，
+    // 于是"卸载失败"的同时库里那一份已经没了（部分成功：用户既没得到技能，也没得到
+    // "已卸载"）。安装器自己的影子不算（下一步的清扫器就是为它们准备的），用户自建的
+    // 同根影子与任何跨根同名条目都算：判出来 ⇒ **一个字都不动**。
+    const roots = options.runtimeRoots ?? runtimeSkillRoots({ skillsDir, env: options.env })
+    const userShadowPreflight = (await listShadowingSkills(skillsDir, name)).filter(row => !row.installerOwned)
+    if (userShadowPreflight.length > 0) throw uninstallResidueRefusal(name, { kind: 'same-root', shadows: userShadowPreflight })
+    const foreignPreflight = await listCrossRootSkillResidues(roots, skillsDir, name)
+    if (foreignPreflight.length > 0) throw uninstallResidueRefusal(name, { kind: 'cross-root', foreign: foreignPreflight })
+
     await rm(target, { recursive: true, force: true })
     // 只有**随包**（plugin）技能需要墓碑：它是唯一会在下次开机被同步装回来的来源
     // （market/org/builtin 没有自动重装路径 —— 给它们也写墓碑只会留下永久的陈旧
@@ -2152,18 +2531,11 @@ export async function uninstallSkill(
     //  2. 再复核运行时集合。**用户自建**的同名条目（目录名非 kebab 的自建目录、
     //     根上散落的 `<name>.md`…）一律不删（那是用户内容），而是如实报成残留 ——
     //     绝不返回成功却不生效。
+    // R19A-S2-09：这两步现在是**兜底**（上面已经前移判过一次）：只有在"判过之后盘上
+    // 又出现了新条目"时才会命中（并发写者/自带锁的第三方），文案会如实说明这一点。
     await sweepInstallerOwnedShadowSkills(skillsDir, name, undefined, log)
     const residue = await listShadowingSkills(skillsDir, name)
-    if (residue.length > 0) {
-      throw new ArchiveInstallRefusal(
-        'RESIDUE',
-        `skill "${name}" was removed from its install location, but ${residue.length} other copy/copies `
-        + `in the skill root still make the runtime load "${name}": `
-        + `${residue.map(row => `"${row.entryName}"`).join(', ')} — `
-        + 'rename or delete them (they are your own files, so the Capability Hub will not touch them) '
-        + `and the skill will really be gone`,
-      )
-    }
+    if (residue.length > 0) throw uninstallResidueRefusal(name, { kind: 'same-root', shadows: residue, afterRemoval: true })
 
     // R13-GH3（H2 跨根）：运行时发现面是**多根合并**（上游 `skill-filesystem` 的
     // `roots()`：project → custom → `<dshHome>/skills` → `<agentsHome>/skills` →
@@ -2177,23 +2549,50 @@ export async function uninstallSkill(
     // 不属于自己能管的根 ⇒ 抛 `RESIDUE`（列条目名 + 根 + 指引），**绝不返回成功**。
     // 根表是单一真源（`skill-runtime-roots.ts`，由 pinned 上游 `roots()` 派生，
     // 行为探针 `tests/skill-runtime-roots.spec.ts` 守住漂移）。
-    const roots = options.runtimeRoots ?? runtimeSkillRoots({ skillsDir, env: options.env })
     const foreign = await listCrossRootSkillResidues(roots, skillsDir, name)
-    if (foreign.length > 0) {
-      const where = foreign
-        .map(row => `"${row.skill.entryName}" in ${row.root.path} (${row.root.source})`)
-        .join(', ')
-      throw new ArchiveInstallRefusal(
-        'RESIDUE',
-        `skill "${name}" was removed from the Capability Hub skill root, but the runtime still loads it `
-        + `from ${foreign.length} other discovery root(s): ${where} — `
-        + 'those roots are not managed by the Capability Hub (they belong to the agent/project/bundled '
-        + `skill roots), so the skill is NOT uninstalled: rename or delete that copy there `
-        + `(or point $DSH_AGENTS_HOME elsewhere) and it will really be gone`,
-      )
-    }
+    if (foreign.length > 0) throw uninstallResidueRefusal(name, { kind: 'cross-root', foreign, afterRemoval: true })
     return target
   })
+}
+
+/**
+ * 卸载面的 `RESIDUE` 拒绝（R13-GH3 的跨根 + R13-B 的同根影子）—— **一个构造点**。
+ *
+ * 两种形态（同根用户自建影子 / 跨根同名条目）与两种时机（删除**之前**的前置判据 /
+ * 删除之后的兜底）共用这里的文案构造：文案必须说清"**这次删除动了什么**"，否则
+ * 用户面对"卸载失败"而库里那份已经没了（R19A-S2-09 的原始症状）。
+ * @param name - 技能名。
+ * @param detail - 判据形态与时机。
+ * @returns 供 `throw` 的拒绝对象（`RESIDUE` ⇒ 422）。
+ */
+function uninstallResidueRefusal(
+  name: string,
+  detail: { kind: 'same-root', shadows: readonly DiscoveredSkill[], afterRemoval?: boolean }
+    | { kind: 'cross-root', foreign: readonly RuntimeSkillResidue[], afterRemoval?: boolean },
+): ArchiveInstallRefusal {
+  const when = detail.afterRemoval === true
+    ? 'the install location was already removed before this residual copy appeared'
+    : 'nothing was removed'
+  const tail = 'rename or delete that copy (it is your own file, so the Capability Hub never touches it) '
+    + `and uninstall "${name}" again`
+  if (detail.kind === 'same-root') {
+    return new ArchiveInstallRefusal(
+      'RESIDUE',
+      `skill "${name}" is still loaded by the runtime from the skill root itself: `
+      + `${detail.shadows.map(row => `"${row.entryName}"`).join(', ')} — ${when}; `
+      + `${tail}`,
+    )
+  }
+  const where = detail.foreign
+    .map(row => `"${row.skill.entryName}" in ${row.root.path} (${row.root.source})`)
+    .join(', ')
+  return new ArchiveInstallRefusal(
+    'RESIDUE',
+    `skill "${name}" is not uninstalled: the runtime still loads it from ${detail.foreign.length} other `
+    + `discovery root(s): ${where} — those roots are not managed by the Capability Hub (they belong to the `
+    + `agent/project/bundled skill roots); ${when}; rename or delete that copy there `
+    + '(or point $DSH_AGENTS_HOME elsewhere) and uninstall it again',
+  )
 }
 
 /**

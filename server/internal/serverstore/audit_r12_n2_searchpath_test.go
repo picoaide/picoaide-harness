@@ -373,7 +373,8 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"ListExpiredGatewayFiles":              r13gePinned,    // gateway_files.go
 	"ListGatewayFileIDs":                   r13gePinned,    // gateway_files.go
 	"ListGatewayFiles":                     r13gePinned,    // gateway_files.go
-	"ListGatewayFilesForPurge":             r13gePinned,    // gateway_files.go
+	"ListGatewayFilesForPurge":             r13geViaCaller, // gateway_files.go —— R19A-S1-05：薄包装，SQL 在 ListGatewayFilePurgeCandidates
+	"ListGatewayFilePurgeCandidates":       r13gePinned,    // gateway_files.go —— R19A-S1-05：带世代号的清理快照（newUsageReadConn）
 	"ListGatewayProviders":                 r13gePinned,    // gateway.go
 	"ListUsageRequests":                    r13gePinned,    // requests.go
 	"ModelHasUsage":                        r13gePinned,    // gateway.go
@@ -462,6 +463,7 @@ var r13geViaCallerOwners = map[string]string{
 	"verifyAuditChainOn":          "VerifyAuditChain（withUsageSearchPathRead）",
 	"ClaimExpiredGatewayFile":     "claimGatewayFile（R18C-02：认领协议的唯一实现，内部 usageWriteTx 已钉）",
 	"ClaimGatewayFileForDeletion": "claimGatewayFile（R18C-02：删除路径与回收器共用同一认领实现）",
+	"ListGatewayFilesForPurge":    "ListGatewayFilePurgeCandidates（R19A-S1-05：带世代号的快照是唯一实现，池上入口经 newUsageReadConn 钉住）",
 	"GetGatewayProviderTx":        "GetGatewayProvider（已钉只读事务）",
 	"GetModelTx":                  "GetModel（已钉只读事务）",
 	"SetSettingTx":                "调用方事务（llmgateway/admin.go 等，均在事务首句业务语句前钉）",

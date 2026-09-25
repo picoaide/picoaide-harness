@@ -16,6 +16,9 @@ import {
 } from '../src/agent-preset-install.ts'
 import { ArchiveInstallRefusal, readProvenance } from '../src/skill-install.ts'
 
+/** R19A-S2-04：来源判据两侧（标记/当前会话）都要有地址才算"同一台服务端"。 */
+const PRESET_SERVER = 'https://harness.example'
+
 const COMPOSITION = `- id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -281,12 +284,14 @@ describe('installPresetArchive', () => {
     const dir = await newPresetsDir()
     try {
       const v1 = await makeArchive({ 'agent.cordis.yml': COMPOSITION, 'preset.yml': 'name: v1\n' })
-      await installPresetArchive({ name: 'dup', archive: v1, presetsDir: dir, version: '1.0.0' })
+      // R19A-S2-04（2026-09-26）：判据现在要求"来源服务端"两侧都有才算同一台
+      // （缺当前会话地址 ⇒ 保守档）。生产路由恒传 `s.serverURL`，夹具照此建模。
+      await installPresetArchive({ name: 'dup', archive: v1, presetsDir: dir, version: '1.0.0', server: PRESET_SERVER })
       // 第一次安装写下的 provenance（channel 缺省 org + appId == name）⇒ 商店来源。
       expect((await readProvenance(join(dir, 'dup')))?.channel).toBe('org')
 
       const v2 = await makeArchive({ 'agent.cordis.yml': COMPOSITION, 'preset.yml': 'name: v2\n' })
-      const updated = await installPresetArchive({ name: 'dup', archive: v2, presetsDir: dir, version: '2.0.0' })
+      const updated = await installPresetArchive({ name: 'dup', archive: v2, presetsDir: dir, version: '2.0.0', server: PRESET_SERVER })
       expect(updated.targetDir).toBe(join(dir, 'dup'))
       expect(await readFile(join(dir, 'dup', 'preset.yml'), 'utf8')).toBe('name: v2\n')
       expect((await readProvenance(join(dir, 'dup')))?.version).toBe('2.0.0')
@@ -370,8 +375,8 @@ describe('uninstallPreset', () => {
     const dir = await newPresetsDir()
     try {
       const archive = await makeArchive({ 'agent.cordis.yml': COMPOSITION })
-      await installPresetArchive({ name: 'gone', archive, presetsDir: dir })
-      expect(await uninstallPreset(dir, 'gone')).toBe(join(dir, 'gone'))
+      await installPresetArchive({ name: 'gone', archive, presetsDir: dir, server: PRESET_SERVER })
+      expect(await uninstallPreset(dir, 'gone', { serverURL: PRESET_SERVER })).toBe(join(dir, 'gone'))
       await expect(uninstallPreset(dir, 'gone')).rejects.toThrow(/not installed/u)
     } finally {
       await rm(dir, { recursive: true, force: true })

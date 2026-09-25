@@ -286,18 +286,28 @@ async function library(): Promise<string> {
   return skills
 }
 
-describe('R18A-SK-03：老标记（没有 server）按"来源未知"处理，不再 fail-open', () => {
-  it('① 判据矩阵：unknown / foreign / same / not-compared / bundled 五档', () => {
+describe('R18A-SK-03 + R19A-S2-04：来源判定（老标记 = 来源未知；会话没有服务端地址 = 同样保守）', () => {
+  it('① 判据矩阵：unknown / unknown-current / foreign / same / not-compared / bundled 六档', () => {
     expect(provenanceServerVerdict(marker(), SERVER_B), '老标记 = 来源未知').toBe('unknown')
     expect(provenanceServerVerdict(marker({ server: '' }), SERVER_B), '空串 = 来源未知').toBe('unknown')
     expect(provenanceServerVerdict(marker({ server: `  ${SERVER_A}  ` }), SERVER_A), '空白与尾斜杠归一').toBe('same')
     expect(provenanceServerVerdict(marker({ server: SERVER_A }), SERVER_B)).toBe('foreign')
-    expect(provenanceServerVerdict(marker({ server: SERVER_A }), undefined), '未传当前服务端 = 不比较').toBe('not-compared')
+    // R19A-S2-04（2026-09-26，第十九轮审计 A 泳道）：标记里**有**来源、但当前会话没有服务端
+    // 地址（`session.json` 缺 `serverURL` 的畸形/被改写形态）时，旧实现与"调用方明确说不要
+    // 比较"共用 `not-compared` ⇒ 别台服务端装的内容被判成"本机商店内容" ⇒ **200 零确认删除**
+    // （同一目录在正常会话下是 409）。缺字段必须走保守分支，所以现在是独立的一档。
+    expect(provenanceServerVerdict(marker({ server: SERVER_A }), undefined), '会话没有服务端地址 = 保守档').toBe('unknown-current')
+    expect(provenanceServerVerdict(marker({ server: SERVER_A }), '   '), '空白地址同保守档').toBe('unknown-current')
+    expect(provenanceServerVerdict(marker(), undefined), '两边都没有地址 = 来源未知').toBe('unknown')
+    expect(provenanceServerVerdict(undefined, undefined), '没有标记 = 不比较').toBe('not-compared')
     expect(provenanceServerVerdict(marker({ channel: 'plugin' }), SERVER_B), '随包标记没有来源服务端概念').toBe('bundled')
 
-    // 消费面：unknown 不再算"当前服务端的商店内容"，但 plugin 标记不受影响（不误伤随包技能）。
+    // 消费面：unknown / unknown-current 都不再算"当前服务端的商店内容"，但 plugin 标记不受
+    // 影响（不误伤随包技能）。
     expect(isStoreProvenance(marker(), 'victim', SERVER_B)).toBe(false)
     expect(isForeignServerProvenance(marker(), SERVER_B)).toBe(true)
+    expect(isStoreProvenance(marker({ server: SERVER_A }), 'victim', undefined), '会话没有地址 ⇒ 不放行').toBe(false)
+    expect(isForeignServerProvenance(marker({ server: SERVER_A }), undefined)).toBe(true)
     expect(isStoreProvenance(marker({ channel: 'plugin' }), 'victim', SERVER_B)).toBe(true)
     expect(isStoreProvenance(marker({ server: SERVER_A }), 'victim', SERVER_A)).toBe(true)
   })
