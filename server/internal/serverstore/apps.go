@@ -7,6 +7,7 @@
 package serverstore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -119,6 +120,9 @@ func scanRelease(row interface{ Scan(...any) error }, withArchive bool) (*Releas
 
 // UpsertApp 建立或更新一个 App 身份(幂等)。渠道一经确定不再变更——跨渠道
 // 迁移属于人工决策,不应由一次发布静默改写。
+//
+// 冲突分支带**官方归属守卫**(`official=1 ⇒ owner=”`,R15C-G-04):与 wasm 面的
+// UpsertWasmApp 逐字同形,理由见 upsertApp 的注释。
 func UpsertApp(db *sql.DB, a *App) error {
 	return upsertApp(db, a)
 }
@@ -146,9 +150,36 @@ func UpsertApp(db *sql.DB, a *App) error {
 //
 // **幂等且最小写入**:值没变就不写(updated_at 不跳),因此重复调用能自愈脏行、
 // 且第二次调用零副作用。
+//
+// 2026-09-25(R15C-G-02):整个"读最高 approved 版本 → 写投影"必须收在**同一个事务 +
+// apps 行锁**里。旧实现是 autocommit 下的两条语句,两个管理员并发审批两个待审版本
+// 时会丢更新:后写者用自己那一刻读到的**陈旧快照**覆盖先写者,终态是
+// `app_releases` 里最高 approved 已是 v3、而 `apps.title/description` 停在 v1 ——
+// 目录、详情、导出都读 apps 行,于是**全组织看到的标题属于一个已经过期的版本**,
+// 而且此后没有任何路径会修回来(发布内核的 pending 分支刻意"投影一字不动",
+// 只有下一次 approve/reject 才会再走到这里)。
+//
+// 为什么是"先锁 apps 行、再读版本",而不是把判定推进 UPDATE 的子查询:后者只保证
+// 写入值与**该语句的**快照一致,返回值(调用方要的"生效版本号")仍来自另一条
+// 陈旧读;而行锁把"读版本快照"与"写投影"绑成一个串行单元 —— 与 serverstore 既有
+// 的读-改-写范式一致(见 users.go 的 FOR UPDATE 与 gateway.go 的同款注释)。
+// 锁粒度选 apps 行:投影的唯一写入口就是这里,而它写的正是这一行;锁 release 行
+// 既锁不住"另一个版本被 approve",又会与发布路径(apps 行 → app_releases)反序死锁。
 func RecomputeAppProjection(db *sql.DB, kind, appID string) (string, error) {
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback() //nolint:errcheck // Commit 之后是 no-op
+	// 行不存在时 `FOR UPDATE` 锁不到东西(也不报错):此时下面的 UPDATE 同样是 0 行,
+	// 与旧实现"没有 apps 行"的语义逐字一致(返回值仍按版本表算)。
+	var locked int
+	if err := tx.QueryRow(`SELECT 1 FROM apps WHERE kind = ? AND app_id = ? FOR UPDATE`,
+		kind, appID).Scan(&locked); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
 	var version, title, description string
-	err := db.QueryRow(`SELECT version, title, description FROM app_releases
+	err = tx.QueryRow(`SELECT version, title, description FROM app_releases
 		WHERE kind = ? AND app_id = ? AND status = ? AND deleted_at IS NULL
 		ORDER BY id DESC LIMIT 1`, kind, appID, ReleaseStatusApproved).
 		Scan(&version, &title, &description)
@@ -158,15 +189,30 @@ func RecomputeAppProjection(db *sql.DB, kind, appID string) (string, error) {
 	case err != nil:
 		return "", err
 	}
-	if _, err := db.Exec(`UPDATE apps SET title = ?, description = ?, updated_at = `+NowExpr()+`
+	if _, err := tx.Exec(`UPDATE apps SET title = ?, description = ?, updated_at = `+NowExpr()+`
 		WHERE kind = ? AND app_id = ? AND (title <> ? OR description <> ?)`,
 		title, description, kind, appID, title, description); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return version, nil
 }
 
 // upsertApp 是 UpsertApp 的 executor 版本(可传入 *sql.Tx,供原子发布复用)。
+//
+// **官方归属守卫**(R15C-G-04,与 UpsertWasmApp 的 R3-A A-9 逐字同形):
+// `official=1 ⇒ owner=”` 是迁移 0059/P2-21 的不变量,`SetAppOfficial` 对
+// "official=1 ∧ owner≠”"直接返回 ErrValidation。而本函数的 COALESCE 分支恰好能
+// 造出那个禁止状态:官方行的 owner 本来就是空串,于是
+// `COALESCE(NULLIF(”,”), excluded.owner)` 把归属填成发布者、official 仍是 1 ——
+// 聚合面随后把这条官方内容当成"某人的应用"(is_owner 为真而发布仍被拒)。
+//
+// 两个孪生 upsert 曾经只有 wasm 那一侧有守卫,技能/智能体这一侧没有 ——
+// 与 A-9 同一条纪律:**不变量必须在唯一写入口成立,与调用点无关**
+// (调用点今天恰好传了现值不构成防线;`marketplace/agent_api.go` 的
+// createAgentAdmin 就是先查后 upsert 的冲突分支)。
 func upsertApp(ex queryer, a *App) error {
 	if a.Kind != AppKindSkill && a.Kind != AppKindAgent {
 		return errors.New("invalid app kind")
@@ -178,7 +224,8 @@ func upsertApp(ex queryer, a *App) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (kind, app_id) DO UPDATE SET
 			title = excluded.title, description = excluded.description,
-			owner = COALESCE(NULLIF(apps.owner, ''), excluded.owner),
+			owner = CASE WHEN apps.official = 1 THEN ''
+				ELSE COALESCE(NULLIF(apps.owner, ''), excluded.owner) END,
 			updated_at = `+NowExpr(),
 		a.Kind, a.AppID, a.Title, a.Description, a.Owner, a.Channel, a.Enabled)
 	return err

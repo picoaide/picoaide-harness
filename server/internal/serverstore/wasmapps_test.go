@@ -271,6 +271,15 @@ func TestWasmReleaseVersionUniqueAndOccupied(t *testing.T) {
 	}); !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("重复版本 err = %v, want ErrDuplicate", err)
 	}
+	// 制品字节随 GetWasmRelease 读回(复用 archive 列)。在**软删之前**读:
+	// 软删会释放字节(R15C-G-03,2026-09-25),见本用例末尾那一段。
+	rel, err := GetWasmRelease(ctx, db, "expense-note", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rel.Wasm) != "wasm-v1" || rel.Size != int64(len("wasm-v1")) {
+		t.Fatalf("制品读回 wasm=%q size=%d", rel.Wasm, rel.Size)
+	}
 	// 软删后版本号仍然占位(防止"删了再发"覆盖外部契约)。
 	if err := SoftDeleteWasmRelease(ctx, db, id); err != nil {
 		t.Fatal(err)
@@ -295,13 +304,24 @@ func TestWasmReleaseVersionUniqueAndOccupied(t *testing.T) {
 	if err != nil || len(all) != 1 {
 		t.Fatalf("含软删清单 = %d 条 err=%v, want 1", len(all), err)
 	}
-	// 制品字节随 GetWasmRelease 读回(复用 archive 列)。
-	rel, err := GetWasmRelease(ctx, db, "expense-note", "1.0.0")
+	// 软删之后:版本号仍占位、行还在(上面两段),但**制品字节随即释放**
+	// (R15C-G-03,2026-09-25)。语义 = 与"审核拒绝即释放归档"(N-4)同一口径:
+	// 版本一旦对所有人不可见、且没有任何 restore 路径(全仓没有把 deleted_at
+	// 置回 NULL 的写入),字节就是纯死重;而配额闸门把这种不可达字节算进去会造成
+	// "发布失败 ⇒ 永久吃配额 ⇒ 再也发不出任何东西"的自锁。
+	//
+	// ⚠️ 本条原先在此处断言"软删后仍能读回字节"——那是平台的初版形态(提交
+	// a24be47933),与本轮刻意改变的语义冲突,故拆成"活版本读回字节"(上面)
+	// + "软删即释放"(这里)两段。
+	released, err := GetWasmRelease(ctx, db, "expense-note", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(rel.Wasm) != "wasm-v1" || rel.Size != int64(len("wasm-v1")) {
-		t.Fatalf("制品读回 wasm=%q size=%d", rel.Wasm, rel.Size)
+	if len(released.Wasm) != 0 || released.Size != 0 {
+		t.Fatalf("软删应释放制品字节:wasm=%d 字节 size=%d", len(released.Wasm), released.Size)
+	}
+	if released.DeletedAt == nil {
+		t.Fatalf("软删之后 DeletedAt 必须非空(判重视图与审计靠它)")
 	}
 }
 

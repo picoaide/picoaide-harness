@@ -218,14 +218,16 @@ func (h *Handlers) deleteApp(c *gin.Context) {
 		return
 	}
 	h.auditApp(appID, u.Username, "wasm_app_delete",
-		auditDetail(appID, auditTitleOf(app), fmt.Sprintf("软删（标识与版本号永久占位；制品与应用库保留 %d 天待真删）",
+		auditDetail(appID, auditTitleOf(app), fmt.Sprintf("软删（标识与版本号永久占位；制品字节已释放，版本元数据与应用库保留 %d 天待真删）",
 			limits.RetirementSnapshotRetentionDays)))
 	// 删除（软删）即释放进程内驻留：模块与库句柄都没有再留着的理由。
 	h.evictApp(appID)
 	c.JSON(http.StatusOK, gin.H{"app": gin.H{
 		"app_id": appID, "deleted": true, "frozen_at": app.FrozenAt, "deleted_at": h.now().UTC(),
 	}, "retention_days": limits.RetirementSnapshotRetentionDays,
-		"note": "R37 的\"真删\"由后台任务执行（当前未实现）：在此之前版本制品与应用库都会保留"})
+		// 2026-09-25(R15C-G-03)：文案与实现对齐 —— 软删**已释放**制品字节
+		// （不再计入配额），保留下来的是版本元数据行与应用库（R37 真删未实现）。
+		"note": "R37 的\"真删\"由后台任务执行（当前未实现）：版本元数据行与应用库会保留；制品字节已在软删时释放（不再计入配额）"})
 }
 
 // ---------------------------------------------------------------------------
