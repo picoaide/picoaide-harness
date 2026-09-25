@@ -42,6 +42,7 @@ import {
   ATTRIBUTION_SESSION_PREFIX,
   OPENS_DETAIL_RETENTION_DAYS,
 } from './opens-contract'
+import { UPSTREAM_SESSION_HEADER_LINE } from './upstream-anchor-freeze'
 
 // ---------------------------------------------------------------------------
 // 定位两侧真源（路径不写死：从 cwd 向上找服务端标记，与 Audit.test.tsx 同款）
@@ -464,12 +465,31 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4 / R13-GB）', () => 
       ['服务端解析实现', ATTRIBUTION_CHAIN_ANCHORS.reader, /func AppIDFromSessionID\(sessionID string\) string/u],
     ] as const
     const missing: string[] = []
+    const sources: string[] = []
     for (const [label, rel, pattern] of anchors) {
       const path = join(REPO_ROOT, rel)
-      if (!existsSync(path)) { missing.push(`${label}: 文件不存在 ${rel}`); continue }
+      if (!existsSync(path)) {
+        // 只有**锚点②**（上游出站头名）会走到这里：`Go server` job 不检 submodule。
+        // 用冻结件判（见 upstream-anchor-freeze.ts 的头注释），**不静默 skip**。
+        if (label !== '上游出站头名') { missing.push(`${label}: 文件不存在 ${rel}`); continue }
+        if (!pattern.test(UPSTREAM_SESSION_HEADER_LINE)) {
+          missing.push(`${label}: 冻结件本身不含锚点（upstream-anchor-freeze.ts 与锚点模式不一致）`)
+          continue
+        }
+        sources.push(`${label}: submodule 缺席 ⇒ 按冻结件判定（Go server job 不检 submodule）`)
+        continue
+      }
       const text = readFileSync(path, 'utf8')
       if (!pattern.test(text)) missing.push(`${label}: ${rel} 里找不到锚点`)
+      // submodule 在场 ⇒ 多判一半：活上游必须逐字包含冻结行（上游漂移必须同步冻结件）。
+      if (label === '上游出站头名' && !text.includes(UPSTREAM_SESSION_HEADER_LINE)) {
+        missing.push(`${label}: 活上游与冻结件**不一致**（pin/适配器变了？请同步 `
+          + '`upstream-anchor-freeze.ts` 的 `UPSTREAM_SESSION_HEADER_LINE`）')
+      }
+      sources.push(`${label}: 活文件`)
     }
+    // 来源必须可见（否则"用了冻结件"这件事会变成静默降级）。
+    expect(sources.length, `每条锚点都要记录判定来源：${sources.join('；')}`).toBe(anchors.length)
     expect(
       missing,
       `归因链路的三段锚点必须齐备（缺一段 ⇒ 归因不会产生，面板文案必须改回"尚未接线"）：${missing.join('；')}`,
