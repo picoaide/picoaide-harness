@@ -20,6 +20,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/agentshare"
 	"github.com/picoaide/picoaide/internal/appstore"
+	"github.com/picoaide/picoaide/internal/auditchain"
 	"github.com/picoaide/picoaide/internal/auditretention"
 	"github.com/picoaide/picoaide/internal/bootstrap"
 	"github.com/picoaide/picoaide/internal/capabilities"
@@ -331,6 +332,13 @@ func main() {
 	// (token_retention.go 的装配接缝)调用 —— 那一行被摘掉时 cmd/server 的装配级
 	// 用例会红(与审计/usage 保留调度器同款判据)。
 	startTokenRetentionScheduler(ctx, db, tokenretention.DefaultTick)
+	// R16C-03(审计 2026-09-25,P2):审计哈希链校验的**周期执行者**。修前
+	// VerifyAuditChain 在生产代码里只有"启动校验"一个调用者,而 /server-info 把
+	// 那份缓存当**当前**状态长期对外 —— 篡改审计行后不重启时 chain_intact 仍是
+	// true、chain_checked_at 停在启动时刻、日志零告警(长跑容器几个月不重启是常态)。
+	// 经 startAuditChainScheduler(audit_chain.go 的装配接缝)调用 —— 那一行被摘掉时
+	// cmd/server 的装配级用例会红(与审计/usage/token 保留调度器同款判据)。
+	startAuditChainScheduler(ctx, db, auditchain.DefaultTick)
 	// R6-A-2(审计 2026-09-23,P1):调度器可观测出口 —— 全部后台调度器装配完后
 	// 打一行/台 `scheduler status (startup): name=… started=… runs=… last_error=…`
 	// (scheduler_status.go)。两个此前裸调的调度器(reports/balance)死掉时不再

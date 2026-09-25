@@ -1148,19 +1148,40 @@ func addModel(insert insertFunc, m *Model) (int64, error) {
 	return m.ID, nil
 }
 
-// UpdateModel updates a model row.
+// UpdateModel updates a model row(自己的事务 + 提交后失效缓存)。
+//
+// 需要与别的写(审计)同事务时用 UpdateModelTx —— 缓存失效只能在**提交后**做,
+// 所以 Tx 变体不失效,由调用方在 commit 之后调用 InvalidateModelConfig /
+// InvalidateModelsChanged(与 AddModelTx 同一约定)。
 func UpdateModel(db *sql.DB, m *Model) error {
-	modalitiesJSON, _ := json.Marshal(NormalizeInputModalities(m.InputModalities))
 	tx, err := usageWriteTx(db) // R13-GE（V2-2）：族内写事务唯一实现
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := UpdateModelTx(tx, m); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	InvalidateModelConfig()
+	InvalidateModelsChanged()
+	return nil
+}
+
+// UpdateModelTx 在**调用方事务**内更新模型行(含改名时 provider JSON 的双向维护)。
+//
+// R16C-01(审计 2026-09-25,P1):模型价格是"改配置即改钱"的路径(usage 的每一分钱
+// 都由这行价格算出来),它的审计必须与业务写同事务 —— 否则"改了价、审计 0 行"
+// 可以静默发生。形态与 DeleteModelTx(已有)一致。
+func UpdateModelTx(tx *sql.Tx, m *Model) error {
+	modalitiesJSON, _ := json.Marshal(NormalizeInputModalities(m.InputModalities))
 	// 2026-09-08(P1-8 同类):改名时把旧名从 provider JSON 移除、新名加入,
 	// 否则旧名仍可路由而 models 表无价 → cost=0。
 	var oldName string
 	var oldProvider int64
-	err = tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", m.ID).Scan(&oldName, &oldProvider)
+	err := tx.QueryRow("SELECT name, provider_id FROM models WHERE id = ?", m.ID).Scan(&oldName, &oldProvider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -1188,11 +1209,6 @@ func UpdateModel(db *sql.DB, m *Model) error {
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	InvalidateModelConfig()
-	InvalidateModelsChanged()
 	return nil
 }
 
@@ -1237,6 +1253,20 @@ func ModelHasUsage(db *sql.DB, name string) (bool, error) {
 	var n int
 	err = rd.QueryRow(`SELECT COUNT(*) FROM usage WHERE model = ?`, name).Scan(&n)
 	return n > 0, err
+}
+
+// ModelHasUsageTx 是 ModelHasUsage 的**调用方事务**形态（R16C-01）。
+//
+// 为什么需要它：`updateModel` 现在"行锁基线读 + 改价 + 审计"同事务，而改名防护要读
+// `usage`。在已开事务里再调池上入口（`ModelHasUsage(db,…)`）等于向连接池要**第二条**
+// 连接 —— 池上限 = 并发数时两边互等，且 `BeginTx(context.Background())` 没有 deadline
+// ⇒ 池不可恢复（R14-K 的 AST 守卫当场点出这条 hold-and-wait，本函数就是它的修法）。
+func ModelHasUsageTx(tx *sql.Tx, name string) (bool, error) {
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM usage WHERE model = ?`, name).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // DeleteModel removes a model;若被删模型是 gateway.default_model,重置为空串

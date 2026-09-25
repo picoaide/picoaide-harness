@@ -2113,14 +2113,25 @@ func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
 	}
 	actor := currentAdminUsername(c)
 	old := serverstore.QuantizeMoney(u.BalanceMoney)
+	// R16C-01 同族(审计 2026-09-25,P1 全仓扫描出的第三处):这是**直接动钱**的路径,
+	// 而审计此前是事务外的 `_ = AuditLog(...)` —— 审计写失败时余额已改、流水已写、
+	// 审计 0 行。现在「调整 + 审计」收进**同一个事务**(与 models/providers 同形态):
+	// 审计写不进去就整体回滚 + 500,绝不出现"钱动了、没人知道是谁动的"。
+	tx, err := serverstore.UsageWriteTx(a.DB)
+	if err != nil {
+		log.Printf("balance adjust: 开启事务失败 user=%d: %v", id, err)
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "余额调整失败")
+		return
+	}
+	defer tx.Rollback() // 提交后为 no-op
 	var next float64
 	switch mode {
 	case "add":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, amount, req.Reason, actor)
+		next, err = serverstore.AdjustUserBalanceTx(tx, id, amount, req.Reason, actor)
 	case "deduct":
-		next, err = serverstore.AdjustUserBalance(a.DB, id, -amount, req.Reason, actor)
+		next, err = serverstore.AdjustUserBalanceTx(tx, id, -amount, req.Reason, actor)
 	case "set", "clear":
-		next, err = serverstore.SetUserBalance(a.DB, id, amount, req.Reason, actor)
+		next, err = serverstore.SetUserBalanceTx(tx, id, amount, req.Reason, actor)
 	}
 	if errors.Is(err, serverstore.ErrValidation) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "扣减金额超过当前余额(如需归零请用「清零」)")
@@ -2139,7 +2150,16 @@ func (a *AdminAPI) adjustUserBalance(c *gin.Context) {
 	if req.Reason != "" {
 		detail += " reason=" + req.Reason
 	}
-	_ = serverstore.AuditLog(a.DB, actor, "balance_adjust", detail)
+	if err := serverstore.AuditLogTx(tx, actor, "balance_adjust", detail); err != nil {
+		log.Printf("balance adjust: 审计写入失败,已回滚本次调整 user=%d: %v", id, err)
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "余额调整失败")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("balance adjust: 提交失败 user=%d: %v", id, err)
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "余额调整失败")
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "user_id": id, "balance_money": next})
 }
 

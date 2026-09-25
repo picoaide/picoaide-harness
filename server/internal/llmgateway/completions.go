@@ -62,7 +62,7 @@ func (a *API) handleCompletions(c *gin.Context) {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "RATE_LIMITED", "请求过于频繁,请稍后再试")
 		return
 	}
-	if blocked, msg := a.quotaBlocked(user); blocked {
+	if blocked, msg := a.balanceAdmissionBlocked(user, req.Model, raw, "completions"); blocked {
 		serverauth.WriteError(c, http.StatusTooManyRequests, "BALANCE_EXHAUSTED", msg)
 		return
 	}

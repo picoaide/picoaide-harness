@@ -347,6 +347,13 @@ export default function Connectors() {
   const [rows, setRows] = useState<ConnectorRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  /**
+   * **列表读取**失败（R16A-18，审计 2026-09-25，P3）：与 `error`（**动作**失败：
+   * toggleEnabled / remove 的 catch）分开。合用时一次写失败就把整张表换成
+   * 「连接器列表未读取成功 / 读取失败时不渲染任何行」—— 而列表读从未失败。
+   * 口径与 R15C-W-04 的 Departments/Apps/Balance/Audit 一致。
+   */
+  const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState('')
   const [editing, setEditing] = useState<ConnectorRow | 'new' | null>(null)
   const [form, setForm] = useState<ConnectorForm>(emptyForm)
@@ -369,7 +376,9 @@ export default function Connectors() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    setError('')
+    // R16A-18：只清"读取失败"；动作失败（`error`）的横幅不动 —— 自动重拉不该抹掉
+    // 管理员刚看到的"删除失败：…"。
+    setLoadError('')
     try {
       const data = await request<{ connectors: ConnectorRow[] }>(`${ADMIN_API}/connectors`)
       setRows(data.connectors ?? [])
@@ -378,7 +387,7 @@ export default function Connectors() {
       // 「下发」开关 / 编辑 / 删除都会继续对**过期快照**发写请求（另一位管理员可能
       // 刚改过状态或已删除该行）。与 Apps.tsx「失败即清空列表」同口径。
       setRows([])
-      setError(err.message)
+      setLoadError(err.message)
     } finally {
       setLoading(false)
     }
@@ -539,11 +548,14 @@ export default function Connectors() {
         }
       />
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {/* 横幅：**读取失败与动作失败都显示原文**（否则读取失败的具体原因只剩
+          「…未读取成功」一句，运维拿不到 500 里的细节）。与 Departments.tsx 同口径。 */}
+      {(loadError || error) && <p className="text-sm text-destructive">{loadError || error}</p>}
 
       {loading ? (
         <EmptyState icon={<Plug className="h-6 w-6" />} title="加载中…" desc="请稍候" />
-      ) : error ? (
+      ) : loadError ? (
+        // 判据必须是 **loadError**（列表读失败），不是 error（动作失败）——见 state 注释。
         <EmptyState icon={<Plug className="h-6 w-6" />} title="连接器列表未读取成功"
           desc="读取失败时不渲染任何行（行内开关/编辑/删除都会作用在过期快照上）；请点右上角「刷新」重试" />
       ) : rows.length === 0 ? (

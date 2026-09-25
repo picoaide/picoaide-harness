@@ -42,7 +42,31 @@ var (
 	auditDroppedEntries atomic.Int64
 	// auditRetries 累计重试次数(可观测重试是否真的在发生)。
 	auditRetries atomic.Int64
+	// auditLastFailure 是**最近一次**失败的结构化形状(R16C-05 的出口)。
+	//
+	// 为什么要它:`AuditLog` 把底层错误经 `r.done` 交回调用方,而全仓 90+ 个
+	// 调用点写的是 `_ = serverstore.AuditLog(...)` —— 错误在**每一个**调用点被
+	// 丢掉。只把原因打进日志仍然要求运维去 grep 日志;这里再给一个进程内出口,
+	// 让"最近一次失败长什么样"能直接从 `/server-info` 的 audit 字段读到
+	// (原因类别 / 原始 cause / 哪条 action / 何时)。进程内、不落库 —— 与三个
+	// 计数器同一口径(避免"审计写失败时还要再写一次审计"的循环依赖)。
+	auditLastFailure atomic.Pointer[AuditFailureInfo]
 )
+
+// AuditFailureInfo 是最近一次审计写入失败的结构化快照(只读出口,不含 detail)。
+type AuditFailureInfo struct {
+	// Reason 是本进程给的失败原因(如 "entry dropped after retries")。
+	Reason string `json:"reason"`
+	// Action / Username 是被丢弃的条目身份(username 已过转义,不会带控制字符)。
+	Action   string `json:"action"`
+	Username string `json:"username"`
+	// Cause 是底层错误原文(已过 util.EscapeControlLimit 截断+转义)。
+	Cause string `json:"cause"`
+	// CauseClass 是机器可读的原因类别:`sqlstate:<码>`(驱动能给出码时)或空串。
+	CauseClass string `json:"cause_class"`
+	// At 是记录时刻(RFC3339,UTC)。
+	At string `json:"at"`
+}
 
 // AuditWriteStats 返回进程内审计写入失败计数(FIX-12 可观测性)。
 // failures = 失败事件数,dropped = 彻底丢失的条目数,retries = 重试次数。
@@ -50,16 +74,63 @@ func AuditWriteStats() (failures, dropped, retries int64) {
 	return auditWriteFailures.Load(), auditDroppedEntries.Load(), auditRetries.Load()
 }
 
-// auditWriteFailure 记录一次审计写入失败:ERROR 日志 + 计数。
-// 只记 action/username 与计数,detail 一律不进日志。
-func auditWriteFailure(reason, username, action string, dropped int64) {
+// AuditWriteLastFailure 返回最近一次审计写入失败的结构化形状(R16C-05)。
+// ok=false 表示本进程还没有失败过。
+func AuditWriteLastFailure() (AuditFailureInfo, bool) {
+	if p := auditLastFailure.Load(); p != nil {
+		return *p, true
+	}
+	return AuditFailureInfo{}, false
+}
+
+// auditFailureClass 把底层错误归类成机器可读的类别(R16C-05):
+// 驱动能给出 SQLSTATE 时是 `sqlstate:<码>`,否则留空 —— **不做**字符串猜测:
+// 判据要的是"能不能定位",而不是"能不能猜对"。
+func auditFailureClass(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	if code, ok := pgErrorCode(cause); ok {
+		return "sqlstate:" + code
+	}
+	return ""
+}
+
+// auditWriteFailure 记录一次审计写入失败:ERROR 日志(含**原因**) + 计数 + 最近失败快照。
+//
+// R16C-05(审计 2026-09-25,P2):修前这里只有 reason/action/username 与计数,
+// 底层错误(errs[i])只经 `r.done` 交回调用方,而调用点全是 `_ =`(丢弃)⇒
+// 运维只能看到"丢了几条",看不到"为什么丢"(权限? 约束? 磁盘? 编码?)。
+// 现在 cause 一并进日志(`cause=%q`)并进进程内快照,`grep SQLSTATE` 能直接命中。
+// detail 仍然一律不进日志(只记 action/username 与计数)。
+func auditWriteFailure(reason, username, action string, dropped int64, cause error) {
 	failures := auditWriteFailures.Add(1)
 	if dropped > 0 {
 		auditDroppedEntries.Add(dropped)
 	}
-	log.Printf("ERROR audit: %s action=%q username=%q dropped_entries=%d total_failures=%d total_dropped=%d",
-		reason, action, username, dropped, failures, auditDroppedEntries.Load())
+	class := auditFailureClass(cause)
+	// 错误原文可能带控制字符(例如 PG 把含 NUL 的入参回显在消息里),
+	// 进日志前与 detail 同口径转义并截断 —— 日志面同样不允许伪造行结构。
+	causeText := ""
+	if cause != nil {
+		causeText = util.EscapeControlLimit(cause.Error(), auditFailureCauseMaxBytes)
+	}
+	if cause != nil {
+		auditLastFailure.Store(&AuditFailureInfo{
+			Reason:     reason,
+			Action:     action,
+			Username:   username,
+			Cause:      causeText,
+			CauseClass: class,
+			At:         time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	log.Printf("ERROR audit: %s action=%q username=%q dropped_entries=%d total_failures=%d total_dropped=%d cause_class=%q cause=%q",
+		reason, action, username, dropped, failures, auditDroppedEntries.Load(), class, causeText)
 }
+
+// auditFailureCauseMaxBytes 是进日志/快照的错误原文上限(PG 的错误串通常几百字节)。
+const auditFailureCauseMaxBytes = 512
 
 // ---- FIX-12:VerifyAuditChain 的执行者(启动校验 + 结果缓存) ----
 //
@@ -74,30 +145,137 @@ var (
 	auditChainBroken  int64
 	auditChainAt      string
 	auditChainErr     string
+	// R16C-03(审计 2026-09-25,P2):结论的**新鲜度**与执行者信息。
+	//
+	// 修前这里只有"最近一次结论",而唯一的执行者是启动路径 ⇒ 长跑实例
+	// (容器几个月不重启)的 `/server-info` 把启动那一刻的 true 当**当前**状态
+	// 长期对外:篡改 2 行后不重启,`chain_intact` 仍是 true、时间戳停在启动时刻、
+	// 日志零告警。周期执行者(internal/auditchain)出现后,这里必须能回答
+	// "这条结论是谁、什么时候、扫了多少行得出的"。
+	auditChainSource string
+	auditChainRows   int64
+	auditChainDurMS  int64
+	auditChainChecks int64
 )
+
+// auditChainClock 是链校验结果缓存用的时钟（**仅测试**替换，生产恒为 time.Now）。
+//
+// 为什么需要它：新鲜度（Stale）是"读的时候相对 CheckedAt 算出来的"，要构造
+// "结论已经过期"的场景，用 sleep 只能写成 flaky 的慢用例；注入时钟后是确定性的。
+var auditChainClock = time.Now
+
+// AuditChainStaleAfter 是链校验结论的**保质期**:超过它,`/server-info` 的
+// `audit.chain_stale` 变 true —— 过期结论不得看起来像实时结论。
+//
+// 取值依据:周期执行者的间隔是 1 小时(`internal/auditchain.DefaultTick`),
+// 这里取 2 倍(容忍一次跳拍 / GC 停顿 / DB 慢查询)。两者的一致性由 auditchain
+// 包的用例对拍(它反向 import 本包会成环,故用断言而不是引用)。
+const AuditChainStaleAfter = 2 * time.Hour
+
+// auditChainSourceStartup / auditChainSourcePeriodic 是执行者标识的字面量落点。
+const (
+	auditChainSourceStartup  = "startup"
+	auditChainSourcePeriodic = "periodic"
+)
+
+// AuditChainCheck 是一次链校验的完整形状(R16C-03):结论 + 新鲜度 + 执行者。
+type AuditChainCheck struct {
+	Checked  bool  `json:"checked"`
+	Intact   bool  `json:"intact"`
+	BrokenID int64 `json:"broken_id"`
+	// CheckedAt 是最近一次校验的时刻(RFC3339)。
+	CheckedAt string `json:"checked_at"`
+	// Err 是校验的失败原因。注意 `VerifyAuditChain` 的既有契约：**链断了也会带 error**
+	// （"audit hash mismatch" / "audit chain broken at entry"），所以
+	// "BrokenID != 0" 才是"断在哪一行"，而 Err 非空也可能是"读不出来"（两者都不得当成链是好的）。
+	Err string `json:"error,omitempty"`
+	// Source 是执行者标识(startup | periodic)。空 = 未校验过。
+	Source string `json:"source,omitempty"`
+	// Rows / DurationMS 是最近一次扫描的规模与耗时(开销可见:全表扫描不是免费的)。
+	Rows       int64 `json:"rows"`
+	DurationMS int64 `json:"duration_ms"`
+	// Checks 是本进程累计校验次数(周期执行者真的在跑吗?)。
+	Checks int64 `json:"checks"`
+	// AgeSeconds / Stale 是结论的新鲜度(AgeSeconds<0 表示未校验过)。
+	AgeSeconds int64 `json:"age_seconds"`
+	Stale      bool  `json:"stale"`
+}
 
 // RecordAuditChainCheck 记录一次链校验结果(由启动路径调用;重复调用覆盖为
 // 最新结果)。
 func RecordAuditChainCheck(brokenID int64, err error) {
+	recordAuditChainCheck(AuditChainCheck{BrokenID: brokenID, Err: errText(err), Source: auditChainSourceStartup})
+}
+
+// RecordPeriodicAuditChainCheck 记录一次**周期**校验结果(R16C-03)。
+// rows/duration 由调用方从 VerifyAuditChainWithStats 取(规模是开销证据)。
+func RecordPeriodicAuditChainCheck(brokenID, rows int64, d time.Duration, err error) {
+	recordAuditChainCheck(AuditChainCheck{
+		BrokenID: brokenID, Rows: rows, DurationMS: d.Milliseconds(),
+		Err: errText(err), Source: auditChainSourcePeriodic,
+	})
+}
+
+// recordAuditChainCheck 是结果缓存的**唯一写入口**(启动与周期两条路径共用):
+// 覆盖结论、累计次数、记录执行者与规模。新鲜度不在这里冻结 —— 它是**读**的时候
+// 相对于 CheckedAt 算的(见 AuditChainStatusDetail)。
+func recordAuditChainCheck(res AuditChainCheck) {
 	auditChainMu.Lock()
 	defer auditChainMu.Unlock()
 	auditChainChecked = true
-	auditChainBroken = brokenID
-	auditChainAt = time.Now().UTC().Format(time.RFC3339)
-	if err != nil {
-		auditChainErr = err.Error()
-	} else {
-		auditChainErr = ""
-	}
+	auditChainBroken = res.BrokenID
+	auditChainAt = auditChainClock().UTC().Format(time.RFC3339)
+	auditChainErr = res.Err
+	auditChainSource = res.Source
+	auditChainRows = res.Rows
+	auditChainDurMS = res.DurationMS
+	auditChainChecks++
 }
 
-// AuditChainStatus 返回最近一次链校验的结果。checked=false 表示本进程还没
-// 校验过(例如测试直接构造 handler,或启动路径提前退出)。
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// AuditChainStatus 返回最近一次链校验的结果(旧签名,逐字保留给既有调用点)。
+// checked=false 表示本进程还没校验过(例如测试直接构造 handler,或启动路径提前退出)。
 func AuditChainStatus() (checked bool, intact bool, brokenID int64, checkedAt, errMsg string) {
+	d := AuditChainStatusDetail()
+	return d.Checked, d.Intact, d.BrokenID, d.CheckedAt, d.Err
+}
+
+// AuditChainStatusDetail 返回最近一次链校验的完整形状(结论 + 新鲜度 + 执行者)。
+// R16C-03:新鲜度是**唯一实现** —— `/server-info` 只做字段投影,不在展示层二次计算。
+func AuditChainStatusDetail() AuditChainCheck {
 	auditChainMu.Lock()
 	defer auditChainMu.Unlock()
-	intact = auditChainChecked && auditChainBroken == 0 && auditChainErr == ""
-	return auditChainChecked, intact, auditChainBroken, auditChainAt, auditChainErr
+	out := AuditChainCheck{
+		Checked:    auditChainChecked,
+		Intact:     auditChainChecked && auditChainBroken == 0 && auditChainErr == "",
+		BrokenID:   auditChainBroken,
+		CheckedAt:  auditChainAt,
+		Err:        auditChainErr,
+		Source:     auditChainSource,
+		Rows:       auditChainRows,
+		DurationMS: auditChainDurMS,
+		Checks:     auditChainChecks,
+		AgeSeconds: -1,
+	}
+	if auditChainChecked && auditChainAt != "" {
+		if at, perr := time.Parse(time.RFC3339, auditChainAt); perr == nil {
+			age := auditChainClock().Sub(at)
+			out.AgeSeconds = int64(age.Seconds())
+			out.Stale = age > AuditChainStaleAfter
+		} else {
+			// 时间戳解析不了 ⇒ 新鲜度未知:按"过期"处理(不知道就别声称是新的)。
+			out.Stale = true
+		}
+	} else {
+		out.Stale = true
+	}
+	return out
 }
 
 // RunAndRecordAuditChainCheck 执行一次链校验并记录结果(FIX-12 启动执行者)。
@@ -105,6 +283,16 @@ func AuditChainStatus() (checked bool, intact bool, brokenID int64, checkedAt, e
 func RunAndRecordAuditChainCheck(db *sql.DB) (int64, error) {
 	brokenID, err := VerifyAuditChain(db)
 	RecordAuditChainCheck(brokenID, err)
+	return brokenID, err
+}
+
+// RunAndRecordPeriodicAuditChainCheck 执行一次**周期**链校验并记录结果(R16C-03)。
+// 与启动路径共用同一个校验器与同一个结果缓存,只把执行者与规模一并记下
+// (Rows/DurationMS),让"周期校验真的在跑、跑得多贵"可读。
+func RunAndRecordPeriodicAuditChainCheck(db *sql.DB) (int64, error) {
+	start := time.Now()
+	brokenID, rows, err := VerifyAuditChainWithStats(db)
+	RecordPeriodicAuditChainCheck(brokenID, rows, time.Since(start), err)
 	return brokenID, err
 }
 
@@ -172,6 +360,9 @@ func AuditLogTx(tx *sql.Tx, username, action, detail string) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	detail = util.EscapeControl(detail)
+	// R16C-04:与 auditLog 同一口径(两条写路径的"落库内容 == 计算哈希的输入"
+	// 必须一致,否则 VerifyAuditChain 会报断链)。
+	username = util.EscapeControl(username)
 	sum := sha256.Sum256([]byte(auditHashPayload(prevHash, username, action, detail, now)))
 	_, err := tx.Exec("INSERT INTO audit_logs (username, action, detail, prev_hash, hash, created_at, app_id, hash_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		username, action, detail, prevHash, hex.EncodeToString(sum[:]), now, nil, auditHashVersionLegacy)
@@ -209,7 +400,18 @@ func auditLog(db *sql.DB, appID, username, action, detail string) error {
 	// 伪造记录（例如伪造一条管理员操作）。入口处统一转义 CR/LF/控制字符：
 	// 内容不丢、行结构不可伪造（判据 = 落库 detail 的换行数为 0）。
 	// 实现与日志侧同一份（util.EscapeControl），避免两处对"哪些字符算控制字符"漂移。
-	req := auditRequest{appID: appID, username: username, action: action, detail: util.EscapeControl(detail), done: make(chan error, 1)}
+	// R16C-04(审计 2026-09-25,P2):**username 与 detail 同等对待**。
+	//
+	// username 承载**未认证**输入(登录失败把请求体里的用户名原样写进这一列,
+	// 见 serverauth/handler.go 的 login_fail 两处),而在本行之前它不过任何转义:
+	//   - 带 `\n` 的用户名在库里造出"第二行"(psql / \copy / SIEM / 导出脚本按
+	//     "一条审计 = 一行"读 ⇒ 凭空多出一条形如管理员操作的记录);
+	//   - 带 NUL 的用户名让这条审计**永远写不进库**(PG 的 text 不接受 0x00),
+	//     3 次重试后丢弃 ⇒ 攻击者可以自己抹掉"登录失败"这条合规留痕。
+	// 转义形态与 detail 完全同一份实现(util.EscapeControl):干净的用户名走快速
+	// 路径**逐字节不变**(存储形态不变),脏名字变成可见的 `\n` / `\x00` 序列
+	// 并照常落库(留痕不再可被自己抹掉)。
+	req := auditRequest{appID: appID, username: util.EscapeControl(username), action: action, detail: util.EscapeControl(detail), done: make(chan error, 1)}
 	enqueue := func(worker *auditWorker) bool {
 		select {
 		case worker.ch <- req:
@@ -221,8 +423,9 @@ func auditLog(db *sql.DB, appID, username, action, detail string) error {
 	if !enqueue(w) {
 		// worker 可能恰在空闲退出;重取(必要时新建)后重试一次。
 		if !enqueue(auditWorkerFor(db)) {
-			auditWriteFailure("queue timeout", username, action, 1)
-			return errors.New("audit queue timeout")
+			err := errors.New("audit queue timeout")
+			auditWriteFailure("queue timeout", username, action, 1, err)
+			return err
 		}
 	}
 	select {
@@ -235,8 +438,9 @@ func auditLog(db *sql.DB, appID, username, action, detail string) error {
 		// worker 还没回话:这一条的结果未知(可能稍后写成功)。按"失败事件"
 		// 计数但**不**计入 dropped —— 宁可少报丢失,也不能虚报(虚报会掩盖
 		// 真实的丢失)。
-		auditWriteFailure("write timeout (outcome unknown)", username, action, 0)
-		return errors.New("audit write timeout")
+		err := errors.New("audit write timeout")
+		auditWriteFailure("write timeout (outcome unknown)", username, action, 0, err)
+		return err
 	}
 }
 
@@ -294,7 +498,7 @@ func (w *auditWorker) run() {
 				if err[i] != nil {
 					// 权威的"丢失"打点在这里:worker 是唯一知道"重试过、
 					// 仍然失败"的地方,所以 dropped 计数只在这里 +1。
-					auditWriteFailure("entry dropped after retries", r.username, r.action, 1)
+					auditWriteFailure("entry dropped after retries", r.username, r.action, 1, err[i])
 				}
 				r.done <- err[i]
 			}
@@ -496,27 +700,36 @@ func auditHashPayloadV2(prevHash, username, action, detail, createdAt, appID str
 // "审计为 0 条"却看起来像"没发生过"。现在本函数只在**已钉 search_path 的只读
 // 事务**里读（唯一实现 withUsageSearchPathRead）。
 func VerifyAuditChain(db *sql.DB) (int64, error) {
-	var brokenID int64
+	brokenID, _, err := VerifyAuditChainWithStats(db)
+	return brokenID, err
+}
+
+// VerifyAuditChainWithStats 与 VerifyAuditChain 同语义,额外返回**扫描到的链上
+// 行数**(R16C-03):周期校验必须能回答"这一轮扫了多少行、花了多久" —— 全表扫描
+// 是有代价的,代价不可见就没法判断"该不该把间隔调长"。
+func VerifyAuditChainWithStats(db *sql.DB) (brokenID, rows int64, err error) {
 	var brokenErr error
 	if err := withUsageSearchPathRead(db, func(tx *sql.Tx) error {
-		brokenID, brokenErr = verifyAuditChainOn(tx)
+		brokenID, rows, brokenErr = verifyAuditChainOn(tx)
 		return nil // 查询失败经 brokenErr 上报（与旧实现的返回语义逐字一致）
 	}); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return brokenID, brokenErr
+	return brokenID, rows, brokenErr
 }
 
 // verifyAuditChainOn 是 VerifyAuditChain 的**已钉事务**形态（函数自己开不出事务）。
-func verifyAuditChainOn(tx *sql.Tx) (int64, error) {
-	rows, err := tx.Query("SELECT id, username, action, detail, prev_hash, hash, created_at, hash_version, app_id FROM audit_logs ORDER BY id ASC")
+// rows 是链上**有效**行数(跳过的 pre-0048 无哈希行不计)。
+func verifyAuditChainOn(tx *sql.Tx) (int64, int64, error) {
+	res, err := tx.Query("SELECT id, username, action, detail, prev_hash, hash, created_at, hash_version, app_id FROM audit_logs ORDER BY id ASC")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	defer rows.Close()
+	defer res.Close()
+	var scanned int64 // 链上有效行数(含首行;pre-0048 无哈希行不计)
 	prevHash := ""
 	first := true
-	for rows.Next() {
+	for res.Next() {
 		var id int64
 		var username, action, detail, rowPrev, rowHash, created string
 		created = ""
@@ -524,8 +737,8 @@ func verifyAuditChainOn(tx *sql.Tx) (int64, error) {
 		// hash_version/app_id 由 0069 加入:老行是 1/NULL,v2 行带 app_id。
 		var version int16
 		var appID sql.NullString
-		if err := rows.Scan(&id, &username, &action, &detail, &rowPrev, &rowHash, &createdAny, &version, &appID); err != nil {
-			return 0, err
+		if err := res.Scan(&id, &username, &action, &detail, &rowPrev, &rowHash, &createdAny, &version, &appID); err != nil {
+			return 0, 0, err
 		}
 		if s, ok := createdAny.(string); ok {
 			created = s
@@ -537,10 +750,11 @@ func verifyAuditChainOn(tx *sql.Tx) (int64, error) {
 		if rowHash == "" {
 			continue
 		}
+		scanned++
 		if first {
 			first = false // 链起点(可能是清理后的锚):只校验自身哈希
 		} else if rowPrev != prevHash {
-			return id, errors.New("audit chain broken at entry")
+			return id, scanned, errors.New("audit chain broken at entry")
 		}
 		// 按行的链接口径版本选算法(0069):不认识的高版本必须报错而不是
 		// 静默按 v1 算 —— 后者会把"无法校验"伪装成"链完好"。
@@ -551,15 +765,15 @@ func verifyAuditChainOn(tx *sql.Tx) (int64, error) {
 		case auditHashVersionLegacy:
 			payload = auditHashPayload(rowPrev, username, action, detail, created)
 		default:
-			return id, fmt.Errorf("unsupported audit hash version %d", version)
+			return id, scanned, fmt.Errorf("unsupported audit hash version %d", version)
 		}
 		sum := sha256.Sum256([]byte(payload))
 		if hex.EncodeToString(sum[:]) != rowHash {
-			return id, errors.New("audit hash mismatch")
+			return id, scanned, errors.New("audit hash mismatch")
 		}
 		prevHash = rowHash
 	}
-	return 0, rows.Err()
+	return 0, scanned, res.Err()
 }
 
 // ListAuditLogsPagedFiltered returns one page of audit entries (newest

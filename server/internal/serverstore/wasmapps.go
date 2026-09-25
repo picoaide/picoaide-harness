@@ -396,8 +396,25 @@ func SoftDeleteWasmApp(ctx context.Context, db *sql.DB, appID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	// R16A-17(审计 2026-09-25,P2):清字节时**必须同时置 deleted_at**。
+	//
+	// 缺陷形态:`SetReleaseStatusForReview` 的 approve 谓词是
+	// `deleted_at IS NULL AND (archive IS NOT NULL OR status <> 'rejected')`,
+	// 第二个析取项对 **pending** 行恒真 ⇒ 只清字节不置 deleted_at 时,审核通过会
+	// **成功返回**并产出 `approved + archive IS NULL` 的坏行 —— 而 apps.go 里那句
+	// "任何交错都产不出 `approved + archive IS NULL` 的坏行"正是 N-4(P0 级)修复的
+	// 判据本体(今天潜伏:应用行已退役、全仓无 restore;一旦出现"恢复应用"或任何以
+	// status='approved' 为判据的读面,坏行立刻变成"当前生效版本没有字节")。
+	//
+	// 为什么选"补 deleted_at"而不是"给 approve 谓词加'应用未退役'":
+	//   ① 与**孪生路径**一致 —— `SoftDeleteWasmRelease`(版本级软删)本来就是
+	//      `SET deleted_at = now(), archive = NULL, size = 0`,应用级退役漏了这一列;
+	//   ② "字节被清 ⇒ 该行不可能再被服务"这条语义本来就等于软删,放在写入侧收口比
+	//      在每个读/写谓词里各加一次更靠近不变式的唯一写点;
+	//   ③ 改谓词要跨表 EXISTS(apps.deleted_at IS NULL),会连带改"0 行 ⇒ 哪个 sentinel"
+	//      的错误分类,而查询与更新不在同一个快照里时还会引入新的竞态面。
 	if _, err := tx.ExecContext(ctx, `UPDATE app_releases
-		SET archive = NULL, size = 0, updated_at = now()
+		SET deleted_at = now(), archive = NULL, size = 0, updated_at = now()
 		WHERE kind = $1 AND app_id = $2 AND archive IS NOT NULL`,
 		AppKindWasmApp, id); err != nil {
 		return err

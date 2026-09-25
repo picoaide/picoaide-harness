@@ -42,8 +42,13 @@ import (
 // 结算错误的 fail-closed)不变。
 
 // seedExpensiveModel 把模型单价抬到「一次调用必然超过余额」。
-// 上游固定回 usage{prompt:8, completion:3}:输入 2e5 元/1M → 1.60 元,
-// 输出 2e5 元/1M → 0.60 元,合计 2.20 元。
+//
+// R16C-02（审计 2026-09-25）起价位必须**两侧一起看**：准入侧新增的"最小计费额"
+// = prompt 估算 token × **输入价**，输入价非 0 时这三条用例会**在准入处**就被拒
+// （它们要测的是**结算**路径，前置条件会因此不成立 —— 实测确实红了三条）。
+// 所以"贵"全部放在**输出侧**：输入价 0 ⇒ 最小计费额不参与判定（算不出下界时不拦），
+// 而输出 4e5 元/1M 让"一次调用必然超过余额且超过 1 元"这条前置条件照旧成立。
+// 上游固定回 usage{prompt:8, completion:3} ⇒ 合计 3×4e5/1e6 = 1.20 元。
 //
 // 余额必须能过**两**道口径(这是踩过的坑,别再改小):
 //   - SetUserBalance 经 roundMoney 取整到**分**,0.0001 会被取整成 0
@@ -63,7 +68,7 @@ const smallBalance = 0.01
 
 func seedExpensiveModel(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 200000, output_price_per_1m = 200000 WHERE name = 'deepseek-chat'`); err != nil {
+	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 0, output_price_per_1m = 400000 WHERE name = 'deepseek-chat'`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -137,14 +142,15 @@ func TestBalanceSettlementOverdraftChargesStream(t *testing.T) {
 	if strings.Contains(out, "BALANCE_EXHAUSTED") {
 		t.Fatalf("流式结算已允许透支欠款,不应再报余额不足: %q", out)
 	}
-	// 欠款如实落账:上游上报 pt=10 / ct=5 @ 2e5 元/1M → 3.00 元。
+	// 欠款如实落账:上游上报 pt=10 / ct=5 @ 0 / 4e5 元/1M → 2.00 元（输入价 0 见
+	// seedExpensiveModel 的注释:R16C-02 起"贵"必须放在输出侧才不会在准入处被拒）。
 	var pt, ct int64
 	var cost float64
 	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens, cost FROM usage`).Scan(&pt, &ct, &cost); err != nil {
 		t.Fatalf("已交付的流式请求没有落账(零落账): %v", err)
 	}
-	if pt != 10 || ct != 5 || math.Abs(cost-3.0) > 1e-9 {
-		t.Fatalf("落账数据不符: pt=%d ct=%d cost=%.9f, want 10/5/3.0", pt, ct, cost)
+	if pt != 10 || ct != 5 || math.Abs(cost-2.0) > 1e-9 {
+		t.Fatalf("落账数据不符: pt=%d ct=%d cost=%.9f, want 10/5/2.0", pt, ct, cost)
 	}
 	var balance, ledgerSum float64
 	if err := db.QueryRow(`SELECT balance_money FROM users WHERE id = 1`).Scan(&balance); err != nil {
