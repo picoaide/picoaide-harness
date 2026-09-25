@@ -580,6 +580,20 @@ const PASS_LINE_SUFFIX = ' —— 全部与真源一致 ✅'
  * 收敛后不得再出现（出现即红）。
  */
 const RETIRED_PASS_CLAIM = '文档数字与真源一致'
+/**
+ * **"像通过行"的断言语气**（第十五轮 R15A-01 的收口）—— 通过行探测的**识别面**。
+ *
+ * 修前这里只认两个字面量（{@link PASS_LINE_PREFIX} 与 {@link RETIRED_PASS_CLAIM}），
+ * 于是"换一套措辞写同样宽的结论"就不是嫌疑行。实测（`temp/r15/A/probe/mut-battery3.py`
+ * 的 C1/C4）：在**真通过行之前**多打一行
+ * `check-doc-claims: 全部文档、脚本、CI 配置与渠道包均与真源一致（含 12 类未登记 claim）✅`
+ * —— 层②（子进程 stdout）与层③（本进程 stdout）都放过，EXIT=0。
+ *
+ * 收紧后的口径是**断言语气**而不是某一句措辞：只要一行里出现"通过/一致的自我陈述"的
+ * 三个记号之一，它就是嫌疑行，必须**恰好 1 行**、且必须就是真行。这是一张白名单式
+ * 的网（判据自己打印的那一行也必须落在里面），不是"再多认两个词"。
+ */
+const VERDICT_CLAIM_TOKENS = ['✅', PASS_LINE_PREFIX.trim(), '与真源一致']
 
 /** 生成通过行（`covered` = 本轮**真正产出过断言**的项，按登记顺序）。 */
 function passLineFor(covered) {
@@ -624,8 +638,12 @@ function printedVerdictProblems(stdout, covered) {
     return problems
   }
   // 「打出去的那一行」还必须**唯一**：先打真行再补一句更宽的自述，读者拿到的仍是宽于事实的结论。
-  const suspects = verdictLines(stdout).filter(candidate => candidate.includes(PASS_LINE_PREFIX)
-    || candidate.includes(RETIRED_PASS_CLAIM))
+  //
+  // 识别面 = {@link VERDICT_CLAIM_TOKENS}（断言语气），**不是**某一套具体措辞 ——
+  // "宽自述打在真行之前"（R15A-01 的 C1/C4）就是靠这条收口的：任何含 ✅ / `已覆盖 ` /
+  // `与真源一致` 的行都是嫌疑行，出现两行即红（无论谁在前谁在后）。
+  const suspects = verdictLines(stdout).filter(candidate =>
+    VERDICT_CLAIM_TOKENS.some(token => candidate.includes(token)))
   if (suspects.length !== 1) {
     problems.push(`通过行探测：真实 stdout 里有 ${suspects.length} 行"像通过行"的文字（必须恰好 1 行）：`
       + suspects.map(candidate => JSON.stringify(candidate.trim().slice(0, 160))).join(' | '))
@@ -706,7 +724,14 @@ function selfTest() {
     + '  intervalMs: z.number().step(1).max(X).default(6 * 60 * 60 * 1000),'
   const cadence = updateCadenceFrom(cadenceSample)
   const coveredSample = COVERAGE_ITEMS.slice(0, 2)
-  /** 下面几条锚判据直接用规则本体（改 id / 删规则 ⇒ 这些用例当场红）。 */
+  /**
+   * 下面几条锚判据直接用规则本体（改 id / 删规则 ⇒ 这些用例当场红）。
+   *
+   * `?? {}` 是**故意的**：判据表被拆掉一条规则时，这些用例必须**具名报红**（"判据表里必须有
+   * client-platforms…"），而不是在 `rule.anchor` 上抛 TypeError —— 崩溃也是非零，但
+   * `verify-check-workspaces` 的独立自证要求"副本红了**且**被这条判据咬住"（具名），
+   * 抛异常会让那条对账变成"红了但咬不住"（第十五轮 R15A-02 的接线口径）。
+   */
   const platformRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'client-platforms')
   const integrationLayersRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'integration-covered-layers')
   const cases = [
@@ -744,13 +769,13 @@ function selfTest() {
     // ---- 上下文锚的**判别力**（第十四轮 E-04 的回归判据）----------------------
     // 断言的是"锚能不能区分"，不是"当前这份文档恰好是绿的"：删掉 `client-platforms`
     // 的 anchor ⇒ 下面第一条立刻红。
-    [anchorAccepts(platformRule, ['镜像里已含三平台客户端安装包。'], 0),
+    [anchorAccepts(platformRule ?? {}, ['镜像里已含三平台客户端安装包。'], 0),
       'selftest: 「三平台安装包」必须落在 client-platforms 的上下文锚内'],
-    [!anchorAccepts(platformRule, ['客户端在**同一平台**上运行。'], 0),
+    [!anchorAccepts(platformRule ?? {}, ['客户端在**同一平台**上运行。'], 0),
       'selftest: 无关的同形句「同一平台」必须被 client-platforms 的锚排除（E-04 的假红现场）'],
-    [!anchorAccepts(platformRule, ['上一行提到安装包与下载入口', '客户端在**同一平台**上运行。'], 1),
+    [!anchorAccepts(platformRule ?? {}, ['上一行提到安装包与下载入口', '客户端在**同一平台**上运行。'], 1),
       'selftest: 锚必须在**同一行**（window 0）—— 邻行的「安装包」不得为这一行的无关「N 平台」背书'],
-    [!anchorAccepts(platformRule, ['单平台、单次运行的实测'], 0),
+    [!anchorAccepts(platformRule ?? {}, ['单平台、单次运行的实测'], 0),
       'selftest: 「单平台实测」这类不同源的句子必须被锚排除'],
     // ---- 集成守卫层数的真源解析（E-05 的回归判据）----------------------------
     [integrationCoveredLayersFrom('const EXPECTED_COVERED_LAYERS = 14\n') === 14,
@@ -759,9 +784,9 @@ function selfTest() {
       'selftest: EXPECTED_COVERED_LAYERS 赋值不唯一必须 fail-loud（返回 undefined）'],
     [integrationCoveredLayersFrom('const EXPECTED = 14') === undefined,
       'selftest: 形态变了（改名/改成别的写法）必须返回 undefined'],
-    [anchorAccepts(integrationLayersRule, ['> · 守卫不得声称端到端被覆盖（通过行逐项枚举它真的判了的 14 层）；'], 0),
+    [anchorAccepts(integrationLayersRule ?? {}, ['> · 守卫不得声称端到端被覆盖（通过行逐项枚举它真的判了的 14 层）；'], 0),
       'selftest: 「通过行逐项枚举…N 层」必须落在集成层数规则的锚内'],
-    [!anchorAccepts(integrationLayersRule, ['三层覆盖：单测、verify 脚本、E2E 自动化'], 0),
+    [!anchorAccepts(integrationLayersRule ?? {}, ['三层覆盖：单测、verify 脚本、E2E 自动化'], 0),
       'selftest: COVERAGE-MATRIX 的「三层覆盖」是另一件事，必须被锚排除'],
     // 通过行反解断言（自我陈述与覆盖面必须一致）
     [passLineProblems(passLineFor(coveredSample), coveredSample).length === 0, 'selftest: 生成的通过行必须自洽'],
@@ -782,6 +807,16 @@ function selfTest() {
       'selftest: 打印路径声称的项数与实际不符必须被拒'],
     [printedVerdictProblems(`${passLineFor(coveredSample)}\ncheck-doc-claims: 文档数字与真源一致 ✅\n`, coveredSample).length > 0,
       'selftest: 真行之后再补一句更宽的自述（"像通过行"的行必须恰好 1 行）必须被拒'],
+    // ---- 宽自述的位置矩阵（R15A-01 的 C1/C4/C5：修前这三种全 EXIT=0）----------------
+    [printedVerdictProblems('check-doc-claims: 全部文档、脚本、CI 配置与渠道包均与真源一致（含 12 类未登记 claim）✅\n'
+      + `${passLineFor(coveredSample)}\n`, coveredSample).length > 0,
+      'selftest: 宽自述（另措辞、含 ✅）打在真行**之前**必须被拒（R15A-01 的 C4）'],
+    [printedVerdictProblems('check-doc-claims: 已覆盖 99 项：上游 pin、平台模块表 ✅\n'
+      + `${passLineFor(coveredSample)}\n`, coveredSample).length > 0,
+      'selftest: 含 `已覆盖 ` 前缀的伪通过行打在真行**之前**必须被拒（R15A-01 的 C5）'],
+    [printedVerdictProblems('check-doc-claims: 文档数字与真源一致（覆盖 2 项）✅\n'
+      + `${passLineFor(coveredSample)}\n`, coveredSample).length > 0,
+      'selftest: 无边界的旧措辞打在真行**之前**必须被拒（R15A-01 的 C1 在主入口的同一形态）'],
     [printedVerdictProblems('诊断行\n', coveredSample).length > 0,
       'selftest: 没有任何通过凭据被打印出去时必须被拒'],
     // 探测开关的**载体**（2026-09-25）：只看 argv，且**不看环境** —— 环境里出现那个
@@ -1059,9 +1094,11 @@ function printVerdict() {
 
   // ③ 打印，并把"打出去的那一段字节"抓回来再反解一次 —— 断言与打印必须是同一个字符串。
   const original = process.stdout.write
-  let emitted = null
+  // **累积全部 stdout 字节**（R15A-01）：修前只留"最后一次 write"，于是在真行**之前**
+  // 多打的任何一行都看不见 —— 连含 `PASS_LINE_PREFIX` 的伪通过行也照旧 EXIT=0（C5）。
+  let emitted = ''
   process.stdout.write = (chunk, ...rest) => {
-    emitted = String(chunk)
+    emitted += String(chunk)
     return original.call(process.stdout, chunk, ...rest)
   }
   try {
@@ -1069,7 +1106,7 @@ function printVerdict() {
   } finally {
     process.stdout.write = original
   }
-  const emittedProblems = printedVerdictProblems(emitted ?? '', coveredItems)
+  const emittedProblems = printedVerdictProblems(emitted, coveredItems)
   if (emittedProblems.length > 0) {
     for (const message of emittedProblems) console.error(`  [PASS-LINE] ${message}`)
     console.error('check-doc-claims: 本进程**实际写出去**的通过行过不了断言 —— 拒绝以"一致 ✅"收尾')

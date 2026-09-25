@@ -639,6 +639,12 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'w39-expression-dash-arithmetic', policy: '[SK-22]' },
   { id: 'w40-expression-dash-green-forms', policy: null },
   { id: 'w41-yaml-comment-expression-green', policy: null },
+  // 第十五轮 R15A-07 的**反证格子**：那条 finding 说"`-` 收窄把合法表达式判红、二元算术
+  // 整类不可用"，而 GitHub 的表达式语法**根本没有算术算子**（官方算子表只有
+  // `( ) [ ] . ! < <= > >= == != && ||`），actionlint 1.7.7 逐例复跑同判。这两格把
+  // "整类算术算子都必须红 + 合法的负号形态必须绿"钉成**显式判据**，而不是顺带成立。
+  { id: 'w42-expression-arithmetic-class-red', policy: '[SK-22]' },
+  { id: 'w43-expression-negative-number-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -2282,6 +2288,30 @@ const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!
  *     绿（actionlint 把它词法成一个属性名 `frozen-launchers`；`github.run_number-1` 同理）。
  * 其余位置（`${{ a - 1 }}` / `${{ a[0] - 1 }}`）与 actionlint 一样判红：
  * `got unexpected character ' ' while lexing integer part of number, expecting '0'..'9'`。
+ *
+ * ## 第十五轮 R15A-07 的**反证**（2026-09-25，别把这条"收窄"再放宽回去）
+ *
+ * 那条 finding 说"`-` 的收窄把**合法**表达式 `${{ github.run_number - 1 > 0 }}` 判红、
+ * 二元算术整类不可用"，并建议改成"减号在两侧都有操作数时合法"。**这条 finding 不成立**：
+ * GitHub 的表达式语法**没有算术算子** —— 官方《Evaluate expressions》的算子表只有
+ * `( ) [ ] . ! < <= > >= == != && ||`（`-9.2` / `-2.99e-2` 是**字面量**，不是减法）。
+ * 逐例对拍（actionlint 1.7.7，本机实跑，与判据的五个格子一一对应）：
+ *
+ *   | 表达式 | actionlint | 本判据 |
+ *   |---|---|---|
+ *   | `-1 < 0` | GREEN | 绿 |
+ *   | `(-1) < 0` | GREEN | 绿 |
+ *   | `github.run_number == -1` | GREEN（只报语义层） | 绿 |
+ *   | `-2.99e-2 < 0` | GREEN | 绿（内部 `-` 走"标识符内部"规则） |
+ *   | `steps.frozen-launchers.outputs.git` | 仅"属性未定义" | 绿 |
+ *   | `github.run_number - 1 > 0` | `got unexpected character ' ' while lexing integer part of number` | 红 |
+ *   | `github.run_number + 1 > 0` | `got unexpected character '+'` | 红 |
+ *   | `github.run_number / 2 > 0` | `got unexpected character '/'` | 红 |
+ *   | `github.run_number * 2 > 0` | 词法通过、**解析期** `parser did not reach end of input` | 绿（词法面的认账边界） |
+ *
+ * 所以"把 `-` 在两侧都有操作数时放行"会让本地绿、GitHub 解析期失败 ⇒ **0 job** ——
+ * 那正是 [SK-22] 存在的那个 P0 类。要写"递减/算术"，出路是 `fromJSON`、上一步的 `outputs`，
+ * 或改用 `github.run_attempt` 这类现成字段；**不要**放宽这条判据。
  */
 const EXPRESSION_DASH_BEFORE = new Set(['(', '[', ',', '!', '<', '>', '=', '&', '|', '*'])
 /** 空白字符(表达式可以跨行:`${{ github.event_name\n  == 'push' }}`)。 */
@@ -2594,8 +2624,14 @@ function checkExpressionCharacterSet(file, text, notes) {
           + '(含 `#` 注释行、heredoc、字符串内部)都会开始一个表达式,且必须在**解析期**合法。\n'
           + '     这个字符让**整个 workflow 解析失败** —— run 起来是 0 秒 / 0 个 job(startup_failure),'
           + '`pull_request` 事件下连 run 都不会创建,PR 永远等不到检查(第十四轮现场)。\n'
-          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白;'
+          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * ,` 与空白,`-` 另按'
+          + '"一元负号 / 标识符内部"**逐位**判定(表达式语法里**没有算术算子**);'
           + "单引号字面量(`'…'`,`''` 表示一个字面单引号)内部的字符不参与词法。\n"
+          + (entry.character === '-' || entry.character === '+'
+            ? '  ⇒ 这一位是**二元算术**:GitHub 表达式没有 `+ - * /`(官方算子表只有 '
+              + '`( ) [ ] . ! < <= > >= == != && ||`)⇒ 它不是"本判据额外加的限制"。'
+              + '出路:`fromJSON` / 上一步的 `outputs` / 现成字段(如 `github.run_attempt`)。\n'
+            : '')
           + '  ⇒ 修法:把该字符移进单引号字面量,或改成 ASCII 写法(例如 `...` 代替 `…`)。',
       })
     })
@@ -11887,6 +11923,34 @@ export function selfTestPolicies() {
     '          echo "${{ steps.frozen-launchers.outputs.git }}"',
     '          echo "${{ github.run_number == -1 }}"',
   ])
+  // 红样本⑩(R15A-07 的反证):**二元算术算子整类**都是词法错 —— 官方表达式语法里没有
+  // `+ - * /`(算子表只有 `( ) [ ] . ! < <= > >= == != && ||`),actionlint 1.7.7 实测:
+  //   `a + 1`  → got unexpected character '+'
+  //   `a - 1`  → got unexpected character ' ' while lexing integer part of number
+  //   `a / 2`  → got unexpected character '/'
+  //   `a * 2`  → 词法**通过**、解析期报 "parser did not reach end of input"(本判据是词法面,
+  //              `*` 在 actionlint 的期望字符集里 ⇒ 这一格由"语法错误类"认账,见 SK-22 头注释)
+  // 所以"把 `-` 在两侧都有操作数时放行"会让本地绿、GitHub 解析期失败 ⇒ 0 job —— 那正是
+  // SK-22 存在的那个 P0 类,不能做。这里把整类点成判据(此前只有 w39 一个 `-` 的格子)。
+  expectRed('w42-expression-arithmetic-class-red', '[SK-22]', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ github.run_number + 1 > 0 }}"',
+    '          echo "${{ github.run_number - 1 > 0 }}"',
+    '          echo "${{ github.run_number / 2 > 0 }}"',
+  ])
+  // 绿样本⑪(R15A-07 的另一半):**合法**的 `-` 形态一个都不能少 —— 一元负号、`==` 右侧的
+  // 负数、负指数(`-2.99e-2` 是官方文档里的字面量示例,内部那个 `-` 走"标识符内部"规则)、
+  // 标识符内部。actionlint 1.7.7 对四者都只报语义层(属性/变量未定义),不报词法错。
+  expectGreen('w43-expression-negative-number-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ -1 < 0 }}"',
+    '          echo "${{ (-1) < 0 }}"',
+    '          echo "${{ github.run_number == -1 }}"',
+    '          echo "${{ -2.99e-2 < 0 }}"',
+    '          echo "${{ steps.frozen-launchers.outputs.git }}"',
+  ])
   // 绿样本⑩(VA-01-F1 的收口):`${{ … }}` 落在 **YAML 层注释**里 —— YAML 解析器整行丢弃,
   // GitHub 的模板展开看不到它。**注意与 w31 的分界**:w31 是 `run:` 标量**内部**的 shell
   // 注释,那是标量内容,必须继续判红(把这一格当成"注释都放行"就会把 R14-01 的现场放回去)。
@@ -12550,7 +12614,10 @@ function main() {
     + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
     + `    + SK-22 策略(表达式**词法字符集**:全文 ${expressionBodyCount} 处 \`\${{ … }}\` —— 含 `
     + '`run:` 的 `#` 注释行 / heredoc(模板解析不看上下文);剥掉 `\'…\'` 单引号字面量后剩字符必须落在 '
-    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白里;未闭合 / 空表达式 / 未闭合字面量同样红)\n'
+    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * ,` 与空白里,`-` 另按"一元负号 / 标识符内部"'
+    + '**逐位**判定(表达式语法**没有算术算子** ⇒ `a - 1` / `a + 1` / `a / 2` 全部判红,'
+    + '依据是官方算子表与 actionlint 1.7.7 的逐例对拍,见 `[SK-22]` 常量区);'
+    + '未闭合 / 空表达式 / 未闭合字面量同样红)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }

@@ -144,12 +144,20 @@ const SELF_CHECKS = [
   { id: 'selfcheck-path-e2e', label: '自检失败路径端到端可达(注入自检失败 ⇒ 副本 EXIT=1)' },
   { id: 'registry-reconciled', label: '自检登记表双向对拍(跑到的 == 登记的)' },
   { id: 'domain-root-anchor', label: '域名守卫的扫描根断言可被 --selftest 打坏(R4-A N4)' },
+  { id: 'doc-claims-selftest-wired', label: '文档数字守卫的 --selftest 有调用方且可被打坏(R15A-02)' },
   { id: 'channel-events', label: '检测通道与计票通道一致(数组长度 == 事件计数)' },
   { id: 'exit-channel', label: '任一通道有失败事件 ⇒ 退出码必须为 1(检测 ≠ 退出)' },
   { id: 'verdict-witness-independent', label: 'VERDICT_LINE 形态的见证来自独立文件(第十三轮 V1 §4.2)' },
 ]
 /** 自检条数下限（棘轮:删登记项必须同时改这个常量并进 diff）。 */
 const SELFTEST_MIN_SELF_CHECKS = SELF_CHECKS.length
+/**
+ * `check-doc-claims.mjs --selftest` 的**断言条数下限**（棘轮，R15A-02 的接线）。
+ *
+ * 为什么是"下限"而不是"等于"：加样本是好事（只允许被越过），删样本必须同时改这里并进 diff
+ * —— 否则"把 47 条掏成 1 条"之后，那条守卫照旧打 `自检 1/1 项通过 ✅` 而没人看得出来。
+ */
+const DOC_CLAIMS_SELFTEST_FLOOR = 47
 /** 红色副本的子进程标记：副本只做"必假断言"这一件事，不再递归生成副本。 */
 const RED_PROBE_CHILD_ARG = '--selfcheck-red-probe-child'
 /** 注入给红色副本的恒假断言文本（探针按它断言"具名失败"确实到达 stderr）。 */
@@ -2121,6 +2129,77 @@ if (!redProbeChild && !selfCheckProbeChild) {
       }
     } catch (error) {
       selfCheckFail('domain-root-anchor', `根断言独立自证无法开展（写/跑副本失败：${error?.message ?? String(error)}）`)
+    } finally {
+      try {
+        rmSync(probeFile, { force: true })
+      } catch {
+        // 清理失败不影响结论
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 独立来源：`check-doc-claims.mjs --selftest` 必须**真的被跑**（第十五轮 R15A-02，P2）
+//
+// 现场：那条守卫自己带了 44 条自检（判据表正反例 / 打印路径 / 探测入口形态 / 上下文锚…），
+// 但全仓**没有任何调用方**传 `--selftest` —— 唯二会传它的地方是域名守卫与几个预览脚本，
+// 都不是它。实测（`temp/r15/A/probe/e1-rule-delete.py`）：整条 `client-platforms` 规则
+// （36 条断言）被删掉之后，**主入口照旧 EXIT=0**，通过行"诚实地"从 7 项缩成 6 项
+// （自洽 ⇒ 通过行反解断言也放过），唯一会红的判据恰好是那条没人跑的自检。
+//
+// 接线（与上面的域名守卫**同形**，三条一起才有判别力）：
+//   ① 真跑一次 `--selftest`：必须 exit 0；
+//   ② 输出里的 `自检 N/N 项通过` 必须**打印**且 N ≥ 登记下限 —— "把样本表掏空"是最省事的
+//      假绿（掏空后仍然打 `N/N 通过`），下限是这条的棘轮；
+//   ③ 在副本上把 `client-platforms` 规则从判据表里摘掉：副本的 `--selftest` 必须**非零**，
+//      且必须**具名**点出 `client-platforms`（红了但不具名 ⇒ 不是这条判据咬住的）。
+// ---------------------------------------------------------------------------
+
+if (!redProbeChild && !selfCheckProbeChild) {
+  const docClaimsPath = join(root, 'scripts', 'check-doc-claims.mjs')
+  const docClaimsSource = readFileSync(docClaimsPath, 'utf8')
+  const baseline = spawnSync(process.execPath, [docClaimsPath, '--selftest'], { cwd: root, encoding: 'utf8' })
+  const baselineOut = `${baseline.stdout ?? ''}${baseline.stderr ?? ''}`
+  check(baseline.status === 0,
+    `文档数字守卫 --selftest 必须 exit 0（实际 ${baseline.status}）：${baselineOut.trim().slice(-300)}`)
+  const summary = /自检 (\d+)\/(\d+) 项通过/u.exec(baselineOut)
+  check(summary !== null,
+    '文档数字守卫 --selftest 必须打印「自检 N/N 项通过」—— 没有这一行就无法判断样本表'
+      + `是否被掏空（掏空后照样 exit 0）：${JSON.stringify(baselineOut.trim().slice(-200))}`)
+  if (summary !== null) {
+    check(summary[1] === summary[2],
+      `文档数字守卫 --selftest 的自检条数不自洽：通过 ${summary[1]} / 总数 ${summary[2]}`)
+    check(Number(summary[1]) >= DOC_CLAIMS_SELFTEST_FLOOR,
+      `文档数字守卫 --selftest 只剩 ${summary[1]} 条（下限 ${DOC_CLAIMS_SELFTEST_FLOOR}）——`
+        + ' 样本表被掏空/判据被删时它仍然是绿的，所以这条下限是"自证网还在不在"的棘轮。')
+  }
+  const ruleNeedle = 'const COVERAGE_ITEMS = ['
+  const ruleSplice = `const __docClaimsSelftestProofIndex = NUMBER_CLAIM_RULES.findIndex(rule => rule.id === 'client-platforms')
+if (__docClaimsSelftestProofIndex >= 0) NUMBER_CLAIM_RULES.splice(__docClaimsSelftestProofIndex, 1)
+${ruleNeedle}`
+  if (!docClaimsSource.includes(ruleNeedle)) {
+    selfCheckFail('doc-claims-selftest-wired', '文档数字守卫的 `COVERAGE_ITEMS` 登记表锚点失效'
+      + ' —— 这条独立自证无法开展，请同步本文件的锚点，不要直接删掉它')
+  } else {
+    const probeDir = join(root, 'temp')
+    const probeFile = join(probeDir, `check-doc-claims-rulesplice-${process.pid}-${randomUUID().slice(0, 8)}.mjs`)
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(probeFile, docClaimsSource.replace(ruleNeedle, ruleSplice))
+      const mutated = spawnSync(process.execPath, [probeFile, '--selftest'], { cwd: root, encoding: 'utf8' })
+      const mutatedOut = `${mutated.stdout ?? ''}${mutated.stderr ?? ''}`
+      if (mutated.status === 0) {
+        selfCheckFail('doc-claims-selftest-wired', '把 `client-platforms` 规则从判据表里摘掉之后，'
+          + '`--selftest` 仍然 EXIT=0 ⇒ 那 47 条自检覆盖不到判据表本身（R15A-02）')
+      } else if (!mutatedOut.includes('client-platforms')) {
+        selfCheckFail('doc-claims-selftest-wired', '判据表副本确实红了，但不是被"判据表缺规则"这条样本'
+          + `咬住的（输出里没有 client-platforms）：${JSON.stringify(mutatedOut.trim().slice(-200))}`)
+      } else {
+        selfCheckPass('doc-claims-selftest-wired')
+      }
+    } catch (error) {
+      selfCheckFail('doc-claims-selftest-wired', `判据表独立自证无法开展（写/跑副本失败：${error?.message ?? String(error)}）`)
     } finally {
       try {
         rmSync(probeFile, { force: true })
