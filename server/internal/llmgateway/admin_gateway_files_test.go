@@ -748,7 +748,9 @@ func TestAdminGatewayFilesDeleteUpstreamFailureLeavesRow(t *testing.T) {
 	}
 	// 部分成功的审计仍然只有 1 条，且计数如实。
 	last := gwfAudit(t, e.db, "gateway_file_purge")
-	if len(last) != 1 || !strings.Contains(last[0], "删除 1 失败 1 命中 2") {
-		t.Fatalf("部分成功审计 detail=%v, want 含「删除 1 失败 1 命中 2」", last)
+	// R18C-02（2026-09-25）起审计 detail 增加"跳过"计数（拿不到删除权的条数）；
+	// 本用例的两个候选里有一个上游 5xx ⇒ 删除 1 / 跳过 0 / 失败 1 / 命中 2。
+	if len(last) != 1 || !strings.Contains(last[0], "删除 1 跳过 0 失败 1 命中 2") {
+		t.Fatalf("部分成功审计 detail=%v, want 含「删除 1 跳过 0 失败 1 命中 2」", last)
 	}
 }

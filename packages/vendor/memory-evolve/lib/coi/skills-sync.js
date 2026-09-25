@@ -648,11 +648,16 @@ function isSkillLockStale(lockPath) {
  * 返回的 `release()` 只删**自己创建的那个 inode**（`removeCreatedFile` 按 dev/ino
  * 比对），祖先目录被换走时不会误删库外同名文件。
  *
+ * **导出面（2026-09-25，R18B-03）**：模型面工具 `lib/skills.js` 的
+ * `skill_manage create/patch` 与 `approvePendingSkill` 写的是**同一个落点**
+ * （`<技能库>/<name>/SKILL.md` 与 `<技能库>/<name>/` 整目录），因此必须取**同一把**
+ * 锁。协议实现只有这一份 —— 那边从本文件 import，不再复制常量与判据
+ * （本包内部的跨文件 import 是允许的；"不能 import"只针对企业包 ⇄ vendored 包之间）。
  * @param {string} userSkillsDir - 技能库根。
  * @param {string} name - 技能名。
  * @returns {{ok:true, release:()=>void}|{ok:false, message:string}}
  */
-function acquireSkillDirLock(userSkillsDir, name) {
+export function acquireSkillDirLock(userSkillsDir, name) {
   const lockDir = join(userSkillsDir, SKILL_LOCK_DIR)
   const lockPath = join(lockDir, `${name}${SKILL_LOCK_SUFFIX}`)
   try {

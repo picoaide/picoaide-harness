@@ -126,7 +126,7 @@ export default function UsageReports() {
     <div className="space-y-6">
       <PageHeader
         title="报表订阅"
-        desc="每月自动生成上月用量汇总(总费用/请求数/模型TOP/用户TOP/部门汇总)并推送到企业 webhook(钉钉/企微/飞书机器人等);补跑规则:上月未推送则次月 1 日后自动补发"
+        desc="每月自动生成上月用量汇总(总费用/请求数/模型TOP/用户TOP/部门汇总)并推送到企业 webhook(钉钉/企微/飞书机器人等);补跑规则:推送失败不记为已推送,小时级自动重试同一期直到成功(停机跨月后按最新一期补发)"
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {resultMsg && <div className="text-sm text-emerald-600">{resultMsg}</div>}
@@ -191,7 +191,7 @@ export default function UsageReports() {
           )}
           <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
             <RefreshCw className="h-3 w-3" />
-            每月 1 日起自动生成上月报表并推送;失败会在下月补跑时重试(每订阅独立记录最近错误)
+            每月 1 日起自动生成上月报表并推送;推送失败会计入「最近错误」并按小时自动重试同一期(成功才更新「上次推送」)
           </div>
         </CardContent>
       </Card>

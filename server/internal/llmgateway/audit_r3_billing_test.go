@@ -554,6 +554,14 @@ func TestAnthropicUsageSaturatesInsteadOfWrapping(t *testing.T) {
 		// 1e-6 元/1M:饱和后的 9.223372e18 token ≈ 9.223e6 元,余额 1e7 元可覆盖 ⇒
 		// 走完整结算(而非余额/范围错误分支),直接暴露"是否真的计费"。
 		r, db, uid, token := newAuditR3Gateway(t, u, 1e7, 1e-6, 1e-6, 1e-6)
+		// R18A-05（2026-09-25）：单价 1e-6 元/1M 在**这次请求**（估算 8 token）上折到 0 微元，
+		// 默认策略 reject ⇒ 准入处 429 MODEL_NOT_PRICED（那是正确行为：这种价位的普通请求
+		// 一分钱都收不到）。本用例要测的是**用量饱和后的结算**，所以显式把该模型声明为
+		// 免费/内部模型 —— allow 只关掉准入判据，结算照旧按真实 token 计费。
+		if err := serverstore.SetSetting(db, serverstore.UnpricedModelPolicySetting, serverstore.UnpricedModelPolicyAllow); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(serverstore.InvalidateSettings)
 		w := doPost(t, r, "/v1/messages", `{"model":"r3-model","messages":[]}`, token, nil)
 		s := auditR3Snapshot(t, db, uid)
 		t.Logf("G5a 运行时 status=%d usage_rows=%d tokens=%d cost=%.6f balance=%.6f (起始 1e7)", w.Code, s.usageRows, s.tokens, s.cost, s.balance)

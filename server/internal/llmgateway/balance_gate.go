@@ -27,6 +27,13 @@ package llmgateway
 //	   UnpricedModelPolicyReject 注释：为什么默认必须是 reject、以及"兜底价"为什么
 //	   闭合不了这个洞）。
 //
+// R18C-01（审计 2026-09-25，P1）把 ③④ 的取价从**模型名**改到**候选 provider 维度**：
+// 名字口径（`ModelPrices` = ORDER BY provider_id LIMIT 1）与结算口径
+// （`ModelPricesForProvider(实际命中的 provider, name)`）在两个 provider 挂同名模型、
+// 而实际服务的那家未定价时分叉 —— 闸门看到"别人的价"而放行，结算按 NULL 价算出
+// cost=0。候选集合由 `MatchModelsByProtocol(model, protocol)` 定义（与路由/故障转移
+// 同一份），见 `admissionPricing` 的注释。
+//
 // 三层判据的**顺序**是有意的：先判 0/未开通（最便宜、与历史行为逐字一致），再判
 // 学到的下限（无需任何额外查询），再判"未定价"（一次 settings 读），最后才做需要
 // 读模型定价的"最小计费额"。
@@ -42,7 +49,6 @@ package llmgateway
 import (
 	"database/sql"
 	"log"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -101,6 +107,118 @@ func resetBalanceRejectionLogForTest() {
 	balanceRejectionLogMu.Unlock()
 }
 
+// admissionPricing 是准入闸门在"**候选 provider** 维度"上需要的取价结果（R18C-01，
+// 审计 2026-09-25，P1）。
+//
+// 为什么判据面必须与结算的取值面同形：结算按**实际命中的 provider** 取价
+// （serverstore.ModelPricesForProvider），而"可能被命中"的集合 = 路由候选集合
+// （`MatchModelsByProtocol`，handler 紧接着调用的就是它，同一份 LoadUpstreams 缓存 +
+// 同一个 enabled/provider-JSON 口径，故障转移也只在这个集合内挑下一个）。
+// 按**模型名**取一行（`ModelPrices` = `ORDER BY provider_id LIMIT 1`）会在
+// "同名模型挂多个 provider、实际服务的那家未定价（渠道同步建 NULL 价行的常规路径）"
+// 时给出**别人的价** ⇒ ③ 层以为已定价而放行，而结算对同一请求算出 cost = 0
+// ⇒ 余额一分不减、学到的下限永不置位（R17A-06 要闭合的洞被"名字口径"重新打开）。
+type admissionPricing struct {
+	// candidates 是本端点协议下可路由的 provider 数（0 = 该名字在本端点不可路由，
+	// 调用方会 404，不产生上游调用 ⇒ ③④ 都不需要参与）。
+	candidates int
+	// unpriced = **任一**候选的生效输入价 <= 0（取价失败也按 unpriced 处理：fail-closed，
+	// 与"取价失败曾经等于 0 价"的既有方向一致）。
+	//
+	// 为什么是"任一"而不是"第一个"：路由在候选集合内**故障转移**（handler 的
+	// `for i := range ups`），任何一家都可能真的服务这次请求；只要有一家未定价，
+	// 落到它上面的那次调用就是 cost=0（R18C-01 实测的备用 provider 形态）。
+	unpriced bool
+	// inputPer1M 是各候选的生效输入价，**顺序与路由候选一致**（[0] = 正常路径的那一家）。
+	inputPer1M []float64
+}
+
+// unbillableCandidate 返回"按结算口径这次请求在它上面应付 0 微元"的候选下标
+// （-1 = 每一家都能计费）。R18A-05（审计 2026-09-25，P1）：
+//
+// 价 > 0 但小到 `roundMicro(估算 tokens × 单价) == 0` 时，结算记的是 0 微元
+// （账本按微元四舍五入落账）⇒ 余额一分不减、下限永不置位 —— 与"未定价"逐字同形，
+// 只是入口从 NULL 价换成了极小非零价（0.001 元/1M 实测 20/20 交付、20 次上游命中）。
+// 所以判据必须是"**这次请求**的最小应付额 > 0 微元"，而不是"单价 > 0"。
+//
+// 与 ③ 的未定价判据同样取"任一候选"：故障转移到哪一家都可能发生。
+func (p admissionPricing) unbillableCandidate(tokens int64) int {
+	if tokens <= 0 {
+		return -1 // 估不出 prompt ⇒ 判不了"这次请求的最小应付额"，本层不参与
+	}
+	for i, in := range p.inputPer1M {
+		if _, ok := billableMicro(tokens, in); !ok {
+			return i
+		}
+	}
+	return -1
+}
+
+// servingInputPer1M 是"将被路由到的那一家"（候选集合第一个）的生效输入价。
+func (p admissionPricing) servingInputPer1M() float64 {
+	if len(p.inputPer1M) == 0 {
+		return 0
+	}
+	return p.inputPer1M[0]
+}
+
+// admissionPricingFor 读"这次请求可能被路由到的 provider 各自的生效价"。
+//
+// 逐项走 `serverstore.ModelPricesForProviders`（内部就是结算用的
+// `modelPricesForProviderQ`，含"该 provider 下无此行 ⇒ 回落 name 口径"的语义）。
+func (a *API) admissionPricingFor(model, protocol string) admissionPricing {
+	ups, err := MatchModelsByProtocol(a.DB, model, protocol)
+	if err != nil {
+		// 路由面读不出来 ⇒ 无法证明"每个候选都已定价"，fail-closed。
+		return admissionPricing{unpriced: true}
+	}
+	if len(ups) == 0 {
+		return admissionPricing{}
+	}
+	ids := make([]int64, 0, len(ups))
+	for _, u := range ups {
+		ids = append(ids, u.ID)
+	}
+	prices, err := serverstore.ModelPricesForProviders(a.DB, ids, model)
+	if err != nil {
+		return admissionPricing{candidates: len(ids), unpriced: true}
+	}
+	p := admissionPricing{candidates: len(ids), inputPer1M: make([]float64, 0, len(ids))}
+	for _, id := range ids {
+		in := prices[id][0]
+		p.inputPer1M = append(p.inputPer1M, in)
+		if in <= 0 {
+			p.unpriced = true // 任一候选未定价 ⇒ 整次请求按未定价处置（③ 层判据）
+		}
+	}
+	return p
+}
+
+// billableMicro 是"按结算口径这次请求**至少**会被记多少微元"的唯一实现（R18A-05）。
+//
+// 与结算同一条实现链：
+//
+//	cost(元) = tokens/1e6 × 输入价        （completion = 0、不乘峰谷折扣 ⇒ 下界）
+//	落账     = roundMicro(cost)           （账本按 moneyMicroScale = 1e6 折到微元）
+//
+// 这里直接复用 `serverstore.MoneyToMicro`（= `round(cost × 1e6)`，与账本的
+// `roundMicro` 同一尺度与同一舍入），避免"闸门用 ceil、账本用 round"这种口径分叉
+// ——旧实现用 `math.Ceil`，于是 tokens×单价 ∈ (0, 0.5) 微元时闸门以为"至少要付 1 微元"、
+// 账本却落 0 微元（R18A-05 实测：0.001 元/1M × 15 token = 0.015 微元）。
+//
+// 返回 ok=false 表示"这次请求在这家候选上不可能被计费"（估不出 tokens / 价 <= 0 /
+// 折到微元为 0）——调用方按"未定价"处置（策略 allow 时放行，见 ③ 层）。
+func billableMicro(tokens int64, inputPer1M float64) (int64, bool) {
+	if tokens <= 0 || inputPer1M <= 0 {
+		return 0, false
+	}
+	micro := serverstore.MoneyToMicro(float64(tokens) / 1e6 * inputPer1M)
+	if micro <= 0 {
+		return 0, false
+	}
+	return micro, true
+}
+
 // minBillableMicro 是"本次请求的最小计费额"（微元）的唯一实现：
 //
 //	最小计费额 = prompt 估算 token × 输入价（元/1M token）
@@ -110,32 +228,34 @@ func resetBalanceRejectionLogForTest() {
 // （估算按 4 字节/token 的保守下限），completion ≥ 0 ⇒ 实际 ≥ 本值。
 //
 // 口径细节（都取保守侧）：用**输入价**而不是缓存价（缓存命中更便宜，用输入价是
-// 高估）；**不乘**峰谷折扣（低谷期会打折，不打折是高估）。
+// 高估）；**不乘**峰谷折扣（低谷期会打折，不打折是高估）；输入价取**将被路由到的
+// 那一家候选**（`admissionPricing.servingInputPer1M`，正常路径 = 候选集合的第一个），
+// 而不是按模型名取一行（那是 R18C-01 的分叉点）；金额经 `billableMicro`
+// （= 账本的 `roundMicro` 口径）折到微元，不再用 `math.Ceil` 虚高 1 微元
+// （那是 R18A-05 的分叉点：闸门说"至少 1 微元"、账本落 0）。
 //
-// 返回 ok=false 表示"算不出下界"（模型未定价 / 输入价 <= 0 / 估算为 0）——
+// 返回 ok=false 表示"算不出下界"（模型未定价 / 输入价 <= 0 / 估算为 0 / 折到微元为 0）——
 // 此时本层不参与准入判定（宁可不拦，也不用一个假的下界误伤）。
 //
-// R17A-06 起"未定价"这条**不再靠本函数兜底**：算不出下界时准入侧的上一条判据
-// （balanceAdmissionBlocked 的第 ③ 层）已经按 `gateway.unpriced_model_policy`
-// 决定拒绝还是放行；本函数只在"策略=allow"或输入价 > 0 时才可能被问到。
-func minBillableMicro(db *sql.DB, model string, body []byte) (int64, bool) {
-	if db == nil || strings.TrimSpace(model) == "" || len(body) == 0 {
+// R17A-06/R18A-05 起"未定价 / 这次请求应付 0 微元"这两条**不再靠本函数兜底**：
+// 算不出下界时准入侧的上一条判据（balanceAdmissionBlocked 的第 ③ 层）已经按
+// `gateway.unpriced_model_policy` 决定拒绝还是放行；本函数只在"策略=allow"或
+// 应付额 > 0 时才可能被问到。
+func minBillableMicro(db *sql.DB, model string, pricing admissionPricing, tokens int64) (int64, bool) {
+	if db == nil || strings.TrimSpace(model) == "" {
 		return 0, false
 	}
-	inputPer1M, _, _ := serverstore.ModelPrices(db, model)
-	if inputPer1M <= 0 {
+	inputPer1M := pricing.servingInputPer1M()
+	if pricing.candidates == 0 {
+		// 不可路由的名字（随后 404）：没有候选可谈"最低价"，保留历史判据（按名字取一行），
+		// 不改变这条路径上的状态码与文案。
+		inputPer1M, _, _ = serverstore.ModelPrices(db, model)
+	}
+	need, ok := billableMicro(tokens, inputPer1M)
+	if !ok {
 		return 0, false
 	}
-	tokens, _ := estimatePromptTokensFromBody(body)
-	if tokens <= 0 {
-		return 0, false
-	}
-	// 元 → 微元：cost(元) = tokens×price/1e6 ⇒ cost(微元) = tokens×price。
-	micro := math.Ceil(float64(tokens) * inputPer1M)
-	if micro <= 0 || math.IsInf(micro, 0) || math.IsNaN(micro) {
-		return 0, false
-	}
-	return int64(micro), true
+	return need, true
 }
 
 // balanceAdmissionRefusal 是一条准入拒绝的对外形状：给客户端的错误码/文案 + 内部
@@ -150,12 +270,15 @@ type balanceAdmissionRefusal struct {
 // balanceAdmissionBlocked 是网关准入侧的钱闸门（唯一实现，五个端点共用）。
 //
 // 参数 body 必须是**客户端原始请求体**（计量侧估算用的同一份字节）；where 是端点标签
-// （chat / completions / embeddings / responses / messages），只进日志与计数。
+// （chat / completions / embeddings / responses / messages），只进日志与计数；
+// protocol 是**本端点的路由协议**（openai / anthropic），必须与同一 handler 里
+// `MatchModelsByProtocol(..., protocol)` 那一次调用逐字一致 —— 判据面 = 候选 provider
+// 集合，而候选集合正是由它定义的（R18C-01）。
 //
 // 与 `serverstore.BalanceBlocked` 的关系：那条"分位余额 <= 0 → 拒绝"的规则**逐字保留**
 // （含未开通不拦、管理员豁免、读设置失败 fail-closed），本函数在它之后追加三条更严的
 // 判据。旧函数仍被别的路径使用（如 bootstrap/账户卡读面），故不删除。
-func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body []byte, where string) (balanceAdmissionRefusal, bool) {
+func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body []byte, where, protocol string) (balanceAdmissionRefusal, bool) {
 	if user == nil {
 		return balanceAdmissionRefusal{}, false
 	}
@@ -187,10 +310,22 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 			reason: "learned_floor", requiredMicro: floor,
 		}, true
 	}
+	// ③④ 共用一次"候选 provider 维度"的取价（R18C-01）与一次 prompt 估算
+	// （R18A-05：③b 与 ④ 都要"这次请求"的量级）。放在 ①② 之后：那两条不需要任何
+	// 取价（顺序与历史一致），且 policy=allow 时 ③ 不参与而 ④ 仍需要价。
+	pricing := a.admissionPricingFor(model, protocol)
+	tokens, _ := estimatePromptTokensFromBody(body)
 	// ③ 未定价模型:成本侧恒为 0 ⇒ ①② 与"余额 <= 0"同时失效（见文件头注释）。
 	// 默认策略 reject ⇒ 直接拒绝；allow 是显式逃生门（免费/内部模型）。
 	if serverstore.UnpricedModelPolicy(a.DB) != serverstore.UnpricedModelPolicyAllow {
-		if in, _, _ := serverstore.ModelPrices(a.DB, model); in <= 0 {
+		unpriced := pricing.unpriced
+		if pricing.candidates == 0 {
+			// 该名字在本端点不可路由（handler 随后 404、不产生上游调用）⇒ 没有"候选价"
+			// 可判，保留历史判据（按名字取一行）与它的状态码，不用 404 顶替 429。
+			in, _, _ := serverstore.ModelPrices(a.DB, model)
+			unpriced = in <= 0
+		}
+		if unpriced {
 			return balanceAdmissionRefusal{
 				code: "MODEL_NOT_PRICED",
 				// 文案对员工可读、对管理员可执行（唯一的修法是给模型定价）。
@@ -198,9 +333,20 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 				reason:  "unpriced_model",
 			}, true
 		}
+		// ③b 极小非零价（R18A-05，审计 2026-09-25，P1）：单价 > 0 但"这次请求"的最小
+		// 应付额四舍五入到 **0 微元**（账本口径）⇒ 结算落 0、余额一分不减 —— 与未定价
+		// 逐字同形。判据是"这次请求应付 > 0 微元"，不是"单价 > 0"。
+		if idx := pricing.unbillableCandidate(tokens); idx >= 0 {
+			return balanceAdmissionRefusal{
+				code: "MODEL_NOT_PRICED",
+				message: "该模型价格过低,单次调用计费不足最小单位,暂不可用" +
+					"(请联系管理员调整模型价格;若它确实是免费/内部模型,请在网关配置里把未定价模型策略设为 allow)",
+				reason: "unbillable_price",
+			}, true
+		}
 	}
 	// ④ 最小计费额:连这次请求的成本下界都盖不住 ⇒ 转发必然是白烧上游额度。
-	if need, ok := minBillableMicro(a.DB, model, body); ok && balanceMicro < need {
+	if need, ok := minBillableMicro(a.DB, model, pricing, tokens); ok && balanceMicro < need {
 		return balanceAdmissionRefusal{
 			code: "BALANCE_EXHAUSTED", message: "账户余额不足以支付本次请求,请充值后重试",
 			reason: "min_billable", requiredMicro: need,
@@ -216,8 +362,8 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body
 // 为什么把"写响应"也收在这里：五个端点原先各自写 `429 BALANCE_EXHAUSTED`，
 // 新增"未定价模型"这条判据时若逐点改，很容易漏掉一处 —— 漏掉的那处就会用
 // BALANCE_EXHAUSTED 报告一个与余额无关的原因（R17A-06 的修复面）。
-func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, model string, body []byte, where string) bool {
-	refusal, blocked := a.balanceAdmissionBlocked(user, model, body, where)
+func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, model string, body []byte, where, protocol string) bool {
+	refusal, blocked := a.balanceAdmissionBlocked(user, model, body, where, protocol)
 	if !blocked {
 		return false
 	}

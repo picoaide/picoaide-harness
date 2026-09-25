@@ -25,19 +25,32 @@ const pgTimeFmt = "2006-01-02 15:04:05"
 //	 {"start":"14:00","end":"18:00","weekdays":[1,2,3,4,5]}]
 //
 // 语义:时段按北京时间(UTC+8,无 DST)判定,半开区间 [start, end);
-// weekdays 为适用星期(1=周一…7=周日,省略 = 每天)。
+// weekdays 为适用星期(1=周一…7=周日,**键缺省** = 每天;显式给出则**只在这些天生效**)。
 // 高峰窗口内费用按标准价,窗口外(空闲时段)按模型 offpeak_discount 打折。
 // 空串 / 缺省 / 非法 = 无峰谷价(全天标准价)。
 // DeepSeek 官方当前政策(2026-08 起):高峰 = 北京时间**周一至周五**
 // 09:00-12:00、14:00-18:00(其余 = 空闲,含周末),空闲价 = 高峰价 × 50%。
+//
+// R18C-04(审计 2026-09-25,P2):`weekdays` 的**显式空数组 / 全非法**过去与"键缺省"被
+// 合并成同一个效果(每天),而字面语义是"一天都不选" —— 管理员把 7 个星期全部取消
+// (或直接 PUT `weekdays:[]` / `[0,8]`)会把空闲折扣整体反转成"每天都是高峰",无任何提示。
+// 现在:写入侧(`ValidatePeakWindows` + 管理端 PUT)对这两种形态**400 响亮拒绝**,
+// 读取侧按字面语义解析(该时段**不匹配任何天**),不再静默反转。
 const PeakWindowsSetting = "usage.peak_windows"
 
 // PeakWindow 一个高峰时段(北京时间 "HH:MM",半开 [start,end))。
-// Weekdays: 适用星期(1=周一…7=周日);空/缺省 = 每天。
+//
+// Weekdays: 显式给出的适用星期(1=周一…7=周日),该档**只在这些天生效**;
+// 空切片且 WeekdaysAll=false ⇒ 该档不匹配任何天(显式空数组/全非法的字面语义,
+// 见 PeakWindowsSetting 注释里的 R18C-04)。
+// WeekdaysAll: `weekdays` 键**缺省或 null** 时置位 ⇒ 每天(老数据兼容)。
 type PeakWindow struct {
 	Start    string `json:"start"`
 	End      string `json:"end"`
 	Weekdays []int  `json:"weekdays,omitempty"`
+	// WeekdaysAll = weekdays 键缺省/null ⇒ 每天。必须与"显式空数组"分开
+	// (Weekdays 为空 + 本字段 false ⇒ 一天都不生效)—— 合并这两态就是 R18C-04 的缺陷。
+	WeekdaysAll bool `json:"-"`
 	// 内部解析后的分钟数(自午夜 0 点起)
 	StartMin int `json:"-"`
 	EndMin   int `json:"-"`
@@ -64,15 +77,65 @@ func parseHHMM(s string) (int, bool) {
 	return hh*60 + mm, true
 }
 
-// ParsePeakWindows 解析 settings 值;非法或空 → nil(无峰谷价)。
+// peakWeekdays 是 `weekdays` 字段的解析结果（三态，R18C-04）。
+type peakWeekdays struct {
+	all      bool  // 键缺省 / null ⇒ 每天（老数据兼容）
+	days     []int // 显式列出的合法星期（1..7，保留输入序、去重）
+	explicit bool  // 键存在且是数组
+	invalid  bool  // 数组里出现非 1..7 的整数（或元素不是整数）
+}
+
+// parsePeakWeekdays 解析单档的 `weekdays` 原始字段。
+//
+// 三态必须分开（合并即 R18C-04）：键缺省/null = 每天；显式 `[]` = 一天都不生效；
+// 显式含非法值 = 非法（读取侧保留合法项，写入侧由 ValidatePeakWindows 拒绝）。
+func parsePeakWeekdays(raw json.RawMessage) peakWeekdays {
+	var p peakWeekdays
+	// 键缺省（RawMessage 为空）与显式 `null` 都 = 未给出适用星期（老数据/显式"不限制"）。
+	// 注意必须**在 Unmarshal 之前**判 null：`json.Unmarshal([]byte("null"), &[]int)` 是
+	// 合法的 no-op（留下 nil 切片），会被下面的"显式数组"分支误判成空数组。
+	if trimmed := strings.TrimSpace(string(raw)); trimmed == "" || trimmed == "null" {
+		p.all = true
+		return p
+	}
+	var vals []int
+	if err := json.Unmarshal(raw, &vals); err != nil {
+		p.explicit = true
+		p.invalid = true
+		return p
+	}
+	p.explicit = true
+	seen := map[int]bool{}
+	for _, d := range vals {
+		if d < 1 || d > 7 {
+			p.invalid = true
+			continue
+		}
+		if !seen[d] {
+			p.days = append(p.days, d)
+			seen[d] = true
+		}
+	}
+	return p
+}
+
+// ParsePeakWindows 解析 settings 值;空串/结构性非法 → nil(无峰谷价)。
+//
+// R18C-04 后的 `weekdays` 口径(与写入侧的 ValidatePeakWindows 成对):
+//   - 键缺省 / null ⇒ WeekdaysAll=true(每天,兼容老数据);
+//   - 显式数组 ⇒ 只保留 1..7;空数组或全非法 ⇒ 该档**不匹配任何天**(字面语义,
+//     不再被反转成"每天");部分非法 ⇒ 保留合法项。
+//
+// 结构性非法(JSON 坏、时间格式坏、跨午夜、start>=end、weekdays 不是整数数组)
+// 仍然整份返回 nil —— 与历史上"整体非法即视为未配置"同一口径。
 func ParsePeakWindows(v string) []PeakWindow {
 	if v == "" {
 		return nil
 	}
 	var raw []struct {
-		Start    string `json:"start"`
-		End      string `json:"end"`
-		Weekdays []int  `json:"weekdays"`
+		Start    string          `json:"start"`
+		End      string          `json:"end"`
+		Weekdays json.RawMessage `json:"weekdays"`
 	}
 	if err := json.Unmarshal([]byte(v), &raw); err != nil {
 		return nil
@@ -84,20 +147,64 @@ func ParsePeakWindows(v string) []PeakWindow {
 		if !sok || !eok || sm >= em {
 			return nil // 整体非法即视为未配置,避免部分生效导致计费口径混乱
 		}
-		w := PeakWindow{Start: r.Start, End: r.End, StartMin: sm, EndMin: em}
-		// weekdays 校验:仅保留 1-7 的整数,去重;空/非法 = 每天(兼容旧数据)。
-		if len(r.Weekdays) > 0 {
-			seen := map[int]bool{}
-			for _, d := range r.Weekdays {
-				if d >= 1 && d <= 7 && !seen[d] {
-					w.Weekdays = append(w.Weekdays, d)
-					seen[d] = true
-				}
-			}
+		wd := parsePeakWeekdays(r.Weekdays)
+		if wd.invalid && len(wd.days) == 0 && !wd.all {
+			// 显式给了一份"一个合法星期都没有"的列表：按字面语义 = 该档不生效。
+			// 写入侧会 400 拒掉这种配置；这里只管已存在的历史数据。
 		}
-		out = append(out, w)
+		out = append(out, PeakWindow{
+			Start: r.Start, End: r.End, StartMin: sm, EndMin: em,
+			Weekdays: wd.days, WeekdaysAll: wd.all,
+		})
 	}
 	return out
+}
+
+// ValidatePeakWindows 校验管理端提交的 `peak_windows` 字符串，返回给管理员看的
+// 错误文案（"" = 合法）。R18C-04：显式空数组 / 全非法 / 混入非法值一律拒绝。
+//
+// 为什么必须在**服务端**也拦（前端校验只是体验）：任何客户端都能直接 PUT，
+// 而这两种形态的字面语义（"一天都不选"）与过去实现的效果（"每天"）**相反** ——
+// 静默存下来就是一次按倍的计费口径反转（空闲折扣整体丢失）。
+//
+// 合法形态：
+//   - `""`（空串）= 清空峰谷配置（无峰谷价，全天标准价），与历史行为逐字一致；
+//   - `[]` = 没有任何高峰窗口（等同于清空，但保留了一次显式提交的痕迹）；
+//   - 每一档：start/end 是合法 "HH:MM" 且 start < end（跨午夜不支持）；
+//     weekdays 缺省/null = 每天；显式给出则必须是**非空**且每个元素 ∈ 1..7。
+func ValidatePeakWindows(v string) string {
+	if v == "" {
+		return ""
+	}
+	general := `peak_windows 必须是合法高峰时段 JSON,如 [{"start":"09:00","end":"12:00","weekdays":[1,2,3,4,5]}]`
+	var raw []struct {
+		Start    string          `json:"start"`
+		End      string          `json:"end"`
+		Weekdays json.RawMessage `json:"weekdays"`
+	}
+	if err := json.Unmarshal([]byte(v), &raw); err != nil {
+		return general
+	}
+	for _, r := range raw {
+		sm, sok := parseHHMM(r.Start)
+		em, eok := parseHHMM(r.End)
+		if !sok || !eok || sm >= em {
+			return general + "（开始时间必须早于结束时间,且不支持跨午夜）"
+		}
+		wd := parsePeakWeekdays(r.Weekdays)
+		if wd.all {
+			continue // 键缺省/null = 每天（老数据与显式"每天"共用这一形态）
+		}
+		if wd.invalid {
+			return "peak_windows 的 weekdays 只能是 1~7 的整数(1=周一…7=周日);" +
+				"不选任何星期请删除该时段行,要清空全部峰谷配置请提交空字符串"
+		}
+		if len(wd.days) == 0 {
+			return "peak_windows 的 weekdays 不能是空数组(那会让这一档一天都不生效);" +
+				"请至少选择一个星期,或在不需要该档时删除该行"
+		}
+	}
+	return ""
 }
 
 // loadPeakWindows 从 settings 读高峰窗口(每次记录时调用,单行查询开销可忽略)。
@@ -136,12 +243,14 @@ func beijingWeekday(now time.Time) int {
 }
 
 // inPeakWindow 判断 now(任意时区)是否处于任一高峰窗口(按北京时间)。
-// 窗口的 weekdays 为空(缺省)或包含当前北京星期时匹配;否则不匹配(如周末空闲)。
+//
+// 星期判据(R18C-04):`WeekdaysAll`(键缺省/null = 每天)或显式列表包含当前北京星期
+// 时匹配;显式空数组/全非法 ⇒ 该档不匹配任何天(字面语义,不再被当成"每天")。
 func inPeakWindow(now time.Time, windows []PeakWindow) bool {
 	mins := beijingMinutes(now)
 	wd := beijingWeekday(now)
 	for _, w := range windows {
-		if mins >= w.StartMin && mins < w.EndMin && (len(w.Weekdays) == 0 || containsDay(w.Weekdays, wd)) {
+		if mins >= w.StartMin && mins < w.EndMin && (w.WeekdaysAll || containsDay(w.Weekdays, wd)) {
 			return true
 		}
 	}

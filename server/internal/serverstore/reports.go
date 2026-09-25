@@ -128,10 +128,24 @@ func DeleteReportSubscription(db *sql.DB, id int64) error {
 	return nil
 }
 
-// MarkReportRun 记录一次推送结果(成功=last_run_at + 清空 last_error)。
-// P2-4:失败同样写 last_run_at——ShouldRunMonthly 只看 last_run_at 的月份,
-// 失败只写 last_error 会让调度器每小时重算整月报表并重发(设计语义:
-// 同一月份只跑一次,失败下月再试,见 reports.ShouldRunMonthly 注释)。
+// MarkReportRun 记录一次推送结果：**成功**才推进 `last_run_at` 并清空 last_error；
+// **失败**只写 last_error（`last_run_at` 保持"上一次成功"的时刻）。
+//
+// R18C-03（审计 2026-09-25，P2）修正了旧实现：失败同样写 `last_run_at = now()`，
+// 于是 `ShouldRunMonthly` 在本北京月内恒为 false ⇒ 月内零重试；而下一次真正运行在
+// **下月**，那一轮生成的是"刚结束的那个月" ⇒ **失败的那一期永不投递**，与 webadmin
+// 的两句承诺（"上月未推送则次月 1 日后自动补发"/"失败会在下月补跑时重试"）相反。
+//
+// 改后语义：
+//   - `last_run_at` = **最近一次成功**投递的时刻（列表页"上次推送"列因此是真话）；
+//   - 失败后该订阅在本北京月内**仍然待补跑**（`ShouldRunMonthly` 为 true），调度器
+//     每小时那一轮会重新生成同一期（`GenerateMonthlyReport(now)` 取的仍是"上月"）
+//     并重投，直到成功；
+//   - 同月内成功一次即不再重复投递（`last_run_at` 落进本月 ⇒ ShouldRunMonthly false）。
+//
+// 残留（诚实边界，与 reports 包内同名说明一致）：若失败持续**跨过月界**（整整一个月都
+// 没投出去），下一轮生成的是"最新的一期"，被跨过去的那一期不再补投 —— 单靠
+// `last_run_at` 一个时间戳无法表达"待补的期号"，要闭合得加一列存期号（本轮不引入迁移）。
 //
 // 审计 2026-09-12 P1-4:errMsg 经 SanitizeReportError 去掉目标地址,
 // 不再原样存 err.Error() 全文——net/http 的错误串会回显目标 URL
@@ -142,7 +156,8 @@ func MarkReportRun(db *sql.DB, id int64, ok bool, errMsg string) error {
 		_, err := db.Exec(`UPDATE report_subscriptions SET last_run_at = now(), last_error = '', updated_at = now() WHERE id = ?`, id)
 		return err
 	}
-	_, err := db.Exec(`UPDATE report_subscriptions SET last_run_at = now(), last_error = ?, updated_at = now() WHERE id = ?`,
+	// 只记错误与 updated_at：last_run_at **不动**（它记的是最后一次成功）。
+	_, err := db.Exec(`UPDATE report_subscriptions SET last_error = ?, updated_at = now() WHERE id = ?`,
 		SanitizeReportError(errMsg), id)
 	return err
 }

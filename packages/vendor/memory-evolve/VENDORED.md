@@ -224,6 +224,38 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 的命中数应为 0），且 `lib/coi/dynamics.js` 不应重新出现（`ls lib/coi/dynamics.js` 报不存在）；
 任何一条复活都说明 `cp -a` 把上游版本带了回来，按本表再删一次即可。
 
+### J. per-name 锁的第三个写者收口（2026-09-25，R18B-03；**合并上游后必须逐项复核**）
+
+**缺陷**：`lib/skills.js` 的三条**活落点**写入此前完全不参与 per-name 锁协议
+（`<技能库>/.skill-locks/<name>.lock`；参与者只有能力中心安装器与 `lib/coi/skills-sync.js`
+的随包同步）：`skill_manage action=create` 的直写分支、`action=patch`、以及
+`approvePendingSkill` 的整目录 `renameSync`/跨卷逐文件拷贝。探针实测
+（`temp/r18/probe/skill-lock-third-writer.spec.ts`）：外部真进程持锁时安装器如实
+`SkillLockedError`，而同一时刻 `skill_manage create` 返回 `{"ok":true}` 并写进同一落点。
+并发窗口落进安装器的两处 `rename` 之间时，活落点只剩模型写的那份 `SKILL.md`
+（不丢数据 —— 旧内容进 `.skill-tmp/orphan-*` —— 但不会自愈）。
+
+**改动**（3 个文件，全部保留上游语义，只加互斥）：
+
+| 文件 | 改动 |
+|---|---|
+| `lib/coi/skills-sync.js` | `acquireSkillDirLock` 由**私有**改为**导出**（协议实现仍只有这一份：常量、`O_CREAT\|O_EXCL`、按 fd 写、仅 `ESRCH` 算陈旧、按 dev/ino 释放） |
+| `lib/skills.js` | 新增 `withSkillDirLock(rootDir, name, run)`（零等待、fail-loud、`finally` 释放）；create 直写分支与 patch 走 `commitSkillWrite`（落点被拒仍返回可读结果，不抛穿 `execute`）；`approvePendingSkill` 拆出 `approvePendingSkillLocked`，临界区整体在锁内 |
+| `lib/i18n.js` | 新增 `skillmsg.locked`（zh/en 二元组，占位符只有 `{name}`；`i18n-dictionary-integrity` 的结构判据会自动覆盖它） |
+
+**语义边界（有意保留）**：`create` 的**待确认队列**分支（`<memoryDir>/pending-skills/`）
+不取锁 —— 那不是活落点，安装器/同步器都不会碰它；采纳（进活落点）才取锁。
+
+**回归**：`tests/skills-landing-lock.test.js`（4 例：create 持锁拒 + 释放后成功且**零锁残留**、
+patch 持锁拒且内容一字未改、`approvePendingSkill` 持锁拒且待确认队列原样 + 释放后采纳成功、
+拒绝文案点名锁落点）。**回退即红**：删掉 `withSkillDirLock` 的接线 ⇒ 前 3 例的 `ok:false` 断言变红。
+
+**合并上游后自查**：`grep -n "export function acquireSkillDirLock" lib/coi/skills-sync.js`
+（应为 1 处）、`grep -n "withSkillDirLock\|commitSkillWrite" lib/skills.js`（应命中定义与三处调用）、
+`grep -c "skillmsg.locked" lib/i18n.js lib/skills.js`（i18n 1 处、skills.js 2 处）。
+上游若把 `acquireSkillDirLock` 改名/挪位，按本节同步（企业侧的锁常量对拍在
+`packages/host/enterprise/tests/skill-channel-parity.spec.ts`，改协议常量那边会先红）。
+
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 
 | 上游提交 | 内容 | 落地文件 |

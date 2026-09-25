@@ -33,6 +33,7 @@ import {
   discoverRuntimeSkills,
   installSkillArchive,
   isForeignServerProvenance,
+  provenanceServerVerdict,
   isInstallerOwnedSkillEntry,
   isLoadableSkillName,
   isStoreProvenance,
@@ -409,10 +410,19 @@ describe('R17B-04：溯源的服务端维度（provenance.server 的唯一消费
     expect(isStoreProvenance(prov, 'ghost', 'https://a.example')).toBe(true)
     expect(isStoreProvenance(prov, 'ghost', 'https://b.example')).toBe(false)
     expect(isForeignServerProvenance(prov, 'https://b.example')).toBe(true)
-    // 老标记（没有 server）与未传 currentServer：fail-open，保持老行为
+    // R18A-SK-03（2026-09-25）：**老标记（没有 server）= 来源未知** ⇒ 不再算"当前服务端的
+    // 商店内容"（此前是 fail-open：换服务端后静默整树替换/静默删除/面板不要求确认，
+    // 对存量标记等于没修）。未传 currentServer 仍是"不比较"（老调用点/离线，保持老行为）。
     const legacy = { ...MARKER, installedAt: '' }
-    expect(isStoreProvenance(legacy, 'ghost', 'https://b.example')).toBe(true)
-    expect(isForeignServerProvenance(legacy, 'https://b.example')).toBe(false)
+    expect(isStoreProvenance(legacy, 'ghost', 'https://b.example')).toBe(false)
+    expect(isForeignServerProvenance(legacy, 'https://b.example')).toBe(true)
+    expect(provenanceServerVerdict(legacy, 'https://b.example')).toBe('unknown')
+    // 随包（plugin）标记是**本机内容**，从不带 server：不受这一档影响（既有行为不变）。
+    expect(provenanceServerVerdict({ ...MARKER, channel: 'plugin', installedAt: '' }, 'https://b.example')).toBe('bundled')
+    expect(isStoreProvenance({ ...MARKER, channel: 'plugin', installedAt: '' }, 'ghost', 'https://b.example')).toBe(true)
+    expect(provenanceServerVerdict(prov, 'https://a.example')).toBe('same')
+    expect(provenanceServerVerdict(prov, 'https://b.example')).toBe('foreign')
+    expect(provenanceServerVerdict(prov, undefined)).toBe('not-compared')
     expect(isStoreProvenance(prov, 'ghost')).toBe(true)
     // appId/渠道仍然是必要条件
     expect(isStoreProvenance({ ...prov, appId: 'other' }, 'ghost', 'https://a.example')).toBe(false)

@@ -85,6 +85,30 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
 const notes = []
 /**
+ * 覆盖层的**执行见证**（第十八轮 R18A-G-07 的收口件②）。
+ *
+ * 为什么需要它：`COVERED_LAYERS` 是**自己声明**的覆盖面，而"层数自洽"修前只对拍条数
+ * （`COVERED_LAYERS.length === EXPECTED_COVERED_LAYERS`）—— 把某一层的 `check(...)`
+ * 掏空、只留标签，条数不变、两条守卫全绿，而通过行照旧宣称"已覆盖 14 项"。
+ *
+ * 现在每条"静态标签"层都必须在**自己的实现里**写入一个见证值（见下面各处的 `+=` / `=`），
+ * 通过行把它们写进标签，收尾再断言"见证存在且形态正确"：
+ *   · 删掉该层的断言 ⇒ 见证保持初值 ⇒ **红**（不是"标签还在所以绿"）；
+ *   · 改标签/换层序 ⇒ {@link COVERED_LAYER_LABELS} 的逐条前缀对拍当场红。
+ */
+const coverageWitness = {
+  /** `--self-test` 实跑的判据夹具总数（层 8）。 */
+  contractSelfTestFixtures: 0,
+  /** `--self-check` 经运行期通道求值的夹具总数（层 9）。 */
+  contractSelfCheckFixtures: 0,
+  /** 真的跑过的"逐条判据掏成恒真"变异条数（层 10）。 */
+  contractMutations: 0,
+  /** electron-shots 判据表的判据条数（层 11）。 */
+  electronShotsAssertions: 0,
+  /** 聚合层"三项全 SKIP"实跑的退出码（层 13；必须是 77）。 */
+  aggregateSkipExit: undefined,
+}
+/**
  * 汇总行（`notes`）的**符号必须按结论选**（第十五轮 R15A-08，P3）。
  *
  * 现场：修前无论红绿一律 `…）✓`，于是同一轮输出里出现过
@@ -1236,6 +1260,7 @@ for (const file of mjsFiles) {
     check(ok === total, `形态⑤: assertions.mjs --self-test: ${ok}/${total} —— 有判据夹具不符合预期（判据被改成常量?）`)
     check(total === fixtures.length,
       `形态⑤: --self-test 实跑 ${total} 条夹具,而判据表登记 ${fixtures.length} 条 ⇒ 有夹具没被跑（自检被掏空）`)
+    coverageWitness.electronShotsAssertions = assertions.length
     note(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
   }
 
@@ -1459,6 +1484,7 @@ for (const file of mjsFiles) {
   })
   const output = `${aggregate.stdout ?? ''}${aggregate.stderr ?? ''}`
   const detail = output.trim().split('\n').slice(-4).join(' / ')
+  coverageWitness.aggregateSkipExit = aggregate.status
   check(aggregate.status === 77, `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
   check(output.includes('RESULT: SKIP'), `形态⑥: 聚合层必须打印 RESULT: SKIP，实际 ${detail}`)
   check(!output.includes('RESULT: PASS'), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS，实际 ${detail}`)
@@ -1554,6 +1580,7 @@ for (const test of CONTRACT_TESTS) {
   if (total < test.minCases) {
     fail(`${test.path} --self-test 只有 ${total} 条判据夹具（下限 ${test.minCases}）—— 判据被删到没有判别力`)
   }
+  coverageWitness.contractSelfTestFixtures += total
   note(`${test.id}: --self-test ${ok}/${total} 条夹具`)
 
   // ---- ① 登记值对账（--dump-criteria）--------------------------------------
@@ -1638,6 +1665,7 @@ for (const test of CONTRACT_TESTS) {
     check(checkTotal === total,
       `形态⑧: ${test.path} --self-check 实跑 ${checkTotal} 条夹具，而判据表登记 ${total} 条`
         + ' ⇒ 有夹具没经运行期通道求值')
+    coverageWitness.contractSelfCheckFixtures += checkTotal
     note(`${test.id}: 判定通道 --self-check ${checkOk}/${checkTotal} 条夹具经 report() 求值 ✓`)
   }
 
@@ -1652,6 +1680,7 @@ for (const test of CONTRACT_TESTS) {
       continue
     }
     writeFileSync(tree.script, target.replace(anchor, `${anchor}\n    return []`))
+    coverageWitness.contractMutations += 1
     const mutant = runContractScript(tree.script, ['--self-test'], tree.dir)
     check(mutant.status !== 0,
       `形态⑧: 变异 \`criteria-tautology:${test.id}:${id}\`（把判据 ${id} 的 evaluate 掏成 `
@@ -1925,6 +1954,11 @@ const CI_SURFACE_SCRIPT_PATTERN = new RegExp(
  * 同族旁路。两者的形态**逐字相同** ⇒ 只能靠登记制区分：新出现的一律红，已认账的留痕。
  *
  * 每条 = `{ file, word, why }`；`word` 是包装链尽头那一位的**首词**（含 `$`）。
+ *
+ * **R18A-01（2026-09-25）**：这张表同时承担 {@link shellScriptPositionShape} 那一族
+ * （`kind: 'shell-argument-unreadable'`，shell/`find -exec` 的**脚本位**读不懂）的登记 ——
+ * 两族的判据形态不同（命令位 / 脚本位），但纪律相同：**逐处登记 + 死条目双向对账**。
+ * 于是"解析不出名字就放过"依然没有分支，唯一的出口是**显式登记**（进 diff、可评审）。
  */
 const CI_SURFACE_VARIABLE_COMMAND_ACK = [
   {
@@ -2433,27 +2467,75 @@ function isUnreadableCommandShape(word) {
   return true
 }
 /**
- * shell 词的**脚本位读不懂**（R17-X，R17A-02 的同族）。
+ * shell 词的**脚本位读不懂**（R17-X 建立；**R18A-01 收口**）。
  *
- * `bash` / `sh` 之后的第一个非旗标实参是"要执行的脚本"。它有三种形态闭包判不了：
+ * `bash` / `sh` 之后的第一个非旗标实参是"要执行的脚本"。它有几类形态闭包判不了：
  *   · 通配（`bash *.sh` / `bash <目录>/*`）—— 到底哪个文件由运行期决定；
  *   · 含空白/引号残留的字面量（`bash 'make -C x y'`）—— 那不是路径，而是被 shell 当文件名
  *     用的**命令文本**（here-string / 进程替换在词法层的同族残留）；
- *   · 变量/命令替换（`bash "$SCRIPT"`）。
- * 路径形态（含 `/` 的字面路径）**不在这里判**：那是正常接线，由载体跟随负责跟不跟得上。
+ *   · **含间接层（`$` / 反引号）且常量传播解析不出字面量**（`bash "$SCRIPT"`、
+ *     `bash "$D/run-all.sh"`）—— 这是 R18A-01 的现场：修前这里有一句
+ *     `if (word.includes('/')) return false`（"路径形态交给载体跟随"），而载体跟随对
+ *     含 `$` 的词**同样**是 `continue` ⇒ `bash "$D/x.sh"`（`D="$(pwd)/scripts"`）**同时**
+ *     落在两张网之外：既不 fail-closed，也不被跟随，那份脚本正文从未被读，
+ *     于是 CI 真的执行端到端入口而守卫 EXIT=0、凭据行照旧写 `static-only`。
+ *     **收口口径：含 `/` 不再豁免** —— 解析不出字面量就是读不懂（路径形态也一样），
+ *     除非它是下面的**根变量形态**（`$GITHUB_WORKSPACE/…`，见 {@link stripRootVariablePrefix}）。
+ *   · 仓库外的绝对路径（`bash /tmp/x.sh`、`bash ~/x.sh`）：闭包结构上跟不了仓内载体 ⇒ 同判红。
+ * @param word - 脚本位那一位。
+ * @returns 读不懂的**形态名**（诊断里点名）；读得懂返回 `undefined`。
+ */
+function shellScriptPositionShape(word) {
+  if (word === undefined || word === '') return undefined
+  if (word.startsWith('-')) return undefined
+  if (SHELL_GLOB_PATTERN.test(word)) return '通配'
+  if (stripRootVariablePrefix(word) !== undefined) return undefined
+  if (SHELL_INDIRECTION_PATTERN.test(word)) {
+    return word.includes('/') ? '含 `/` 的变量/命令替换路径' : '变量/命令替换'
+  }
+  if (word.startsWith('/') || word.startsWith('~/')) return '仓库外的绝对路径'
+  if (word.includes('/')) return undefined
+  return /[\s;|&<>(){}'"]/u.test(word) ? '含空白/引号/括弧的字面量' : undefined
+}
+/**
  * @param word - 脚本位那一位。
  * @returns `true` = 读不懂。
  */
 function unreadableShellScriptArgument(word) {
-  if (word === undefined || word === '') return false
-  if (word.startsWith('-')) return false
-  // 路径形态（含 `/`）**不在这里判**：`bash "$DIR/run-all.sh"` 是既有口径下的正常写法
-  // （由正文文本网强制登记成 `data-reference`），载体跟随也会尽量跟上。
-  if (SHELL_GLOB_PATTERN.test(word)) return true
-  if (word.includes('/')) return false
-  if (SHELL_INDIRECTION_PATTERN.test(word)) return true
-  return /[\s;|&<>(){}'"]/u.test(word)
+  return shellScriptPositionShape(word) !== undefined
 }
+/**
+ * **根变量前缀**的脚本位（`$GITHUB_WORKSPACE/scripts/x.sh` / `${PWD}/x.mjs`）。
+ *
+ * 这两个变量是 GitHub Actions 运行器的**内置工作区变量**：取值就是 checkout 根
+ * （= 本判据的 `ROOT`，`working-directory:` 步骤下 `PWD` 则是那个子目录 —— 候选目录
+ * 里本来就同时试 `node.dir` / `working-directory` / 仓根，见 `workingDirsFor`）。
+ * 于是"变量前缀"在这里不构成间接层：后面那段仍然是**仓内相对路径**，按正常载体跟随
+ * 处理即可（跟得上就跟随、跟不上就按 `carrier-command-missing` 记红）。
+ *
+ * 这不是"放行分支"：`stripRootVariablePrefix` 只剥这一个已知前缀，其余任何间接层
+ * （`$D/…`、`${{ … }}`、`$( … )`）一律走 fail-closed。
+ * @param word - 脚本位那一位。
+ * @returns 剥掉根变量前缀后的仓内相对路径；不适用时返回 `undefined`。
+ */
+function stripRootVariablePrefix(word) {
+  if (word === undefined) return undefined
+  for (const name of SHELL_ROOT_VARIABLES) {
+    const forms = [`$${name}/`, `\${${name}}/`]
+    for (const form of forms) {
+      if (!word.startsWith(form)) continue
+      const rest = word.slice(form.length)
+      if (rest === '' || SHELL_INDIRECTION_PATTERN.test(rest) || SHELL_GLOB_PATTERN.test(rest)) return undefined
+      return rest
+    }
+  }
+  return undefined
+}
+/**
+ * **根变量**（GitHub Actions 的内置工作区变量，见 {@link stripRootVariablePrefix}）。
+ * 只登记"取值恒等于 checkout 根 / 步骤工作目录"的两个；其余变量不在这里"猜值"。
+ */
+const SHELL_ROOT_VARIABLES = ['GITHUB_WORKSPACE', 'PWD']
 /**
  * **容器运行器**（`docker|podman run|exec`）的参数解析：找**命令位**的下标。
  *
@@ -2863,22 +2945,31 @@ function unwrapCommandWordsUncached(words, strict = true) {
         acceptNested(`${head} <<<`, words[cursor + 1])
         return stop()
       }
-      // **脚本位读不懂**（`bash 'a b'` / `bash *.sh` / `bash "$CMD"`）：闭包判不了它跑什么 ⇒
-      // fail-closed。路径形态（含 `/` 的裸路径）不在这里判 —— 它由载体跟随负责
-      // （`bash integration-tests/run-all.sh` 是正常的接线形态）。
-      if (unreadableShellScriptArgument(words[cursor])) {
+      // **脚本位读不懂**（`bash 'a b'` / `bash *.sh` / `bash "$D/x.sh"` / `bash /tmp/x.sh`）：
+      // 闭包判不了它跑什么 ⇒ fail-closed（R18A-01：含 `/` **不再**豁免）。
+      // 唯一的"可读"路径形态是根变量前缀（`$GITHUB_WORKSPACE/scripts/x.sh`）：剥掉前缀后
+      // 按正常载体跟随处理（跟得上就跟随、跟不上按 `carrier-command-missing` 记红）。
+      const scriptWord = words[cursor]
+      const rootRelative = stripRootVariablePrefix(scriptWord)
+      const scriptShape = rootRelative === undefined ? shellScriptPositionShape(scriptWord) : undefined
+      if (scriptShape !== undefined) {
         problems.push({
           kind: 'shell-argument-unreadable',
-          word: words[cursor],
+          word: scriptWord ?? '',
           raw: words.slice(index).join(' '),
-          message: `\`${head}\` 的脚本位读不懂（${words.slice(index).join(' ')}）—— `
-            + '这一位是**通配/含空白的字面量/变量**时，闭包判不了它到底执行哪个文件或哪段文本'
-            + '（`bash <<< \'<命令>\'`、`bash <(…)`、`bash *.sh` 同族）。请把它写成仓内脚本的'
-            + '**字面路径**，或把这一处登记进 `CI_SURFACE_VARIABLE_COMMAND_ACK`。',
+          message: `\`${head}\` 的脚本位读不懂（${words.slice(index).join(' ')}）—— 形态：`
+            + `**${scriptShape}**。这一位闭包判不了它到底执行哪个文件或哪段文本`
+            + '（`bash <<< \'<命令>\'`、`bash <(…)`、`bash *.sh`、`bash "$D/x.sh"` 同族），'
+            + '所以按 fail-closed 记红，不再"解析不出名字就放过"（R18A-01 的现场正是'
+            + '`bash "$D/x.sh"` 既不被跟随也不记红）。请把它写成仓内脚本的**字面路径**'
+            + '（或 `$GITHUB_WORKSPACE/<仓内相对路径>`），或把这一处登记进 '
+            + '`CI_SURFACE_VARIABLE_COMMAND_ACK`。',
         })
         return stop()
       }
-      pushHead(words.slice(index))
+      pushHead(rootRelative === undefined
+        ? words.slice(index)
+        : [head, rootRelative, ...words.slice(cursor + 1)])
       return stop()
     }
     // ①b `find … -exec <命令> … {;|+}`：命令在**参数位**（R16A-07）。
@@ -2893,6 +2984,27 @@ function unwrapCommandWordsUncached(words, strict = true) {
         const argv = terminator >= 0 ? rest.slice(0, terminator) : rest
         if (argv.length > 0) {
           requireRegistered(argv[0], argv)
+          // **R18A-02**：`-exec <shell> <脚本位> …` 的脚本位与命令行上的脚本位**同义**
+          // （都是"要执行的文件"），所以同一套 fail-closed 必须罩到它。修前的现场：
+          // `find scripts -maxdepth 1 -name 'x.sh' -exec bash {} \;` 的 `{}` 既不解析、
+          // 也不跟随、也不判红（同族的 `xargs -I{} bash {}` 早就红了）⇒ 被 `-exec` 执行的
+          // 那份包装脚本整份不可见，而 CI 真的会跑它。
+          if (COMMAND_SHELL_WORDS.has(argv[0])) {
+            const scriptShape = shellScriptPositionShape(argv[1])
+            if (scriptShape !== undefined) {
+              problems.push({
+                kind: 'shell-argument-unreadable',
+                word: argv[1] ?? '',
+                raw: argv.join(' '),
+                message: `\`find … -exec ${argv.join(' ')}\` 的脚本位读不懂 —— 形态：`
+                  + `**${scriptShape}**。 \`-exec\` 的脚本位与命令行上的脚本位同义，`
+                  + '`{}` 是 find 的占位符（到底执行哪些文件由运行期决定），闭包读不到那份脚本文本 ⇒ '
+                  + '按 fail-closed 记红。请改成闭包能读到的字面路径（例如把循环写进一个仓内脚本），'
+                  + '或把这一处登记进 `CI_SURFACE_VARIABLE_COMMAND_ACK`。',
+              })
+              return stop()
+            }
+          }
           pushHead(argv)
         }
         cursor += 1
@@ -2970,6 +3082,13 @@ function unwrapCommandWordsUncached(words, strict = true) {
     if (spec.scriptPositional === true) {
       const rest = words.slice(index)
       if (rest.length > 0) {
+        // **根变量前缀**（`node "$GITHUB_WORKSPACE/scripts/x.mjs"`）：剥掉前缀就是仓内相对
+        // 路径，按正常载体跟随处理（与 shell 脚本位同一口径，见 {@link stripRootVariablePrefix}）。
+        const rootRelative = stripRootVariablePrefix(rest[0])
+        if (rootRelative !== undefined) {
+          pushHead([rootRelative, ...rest.slice(1)], { checkRegistry: false })
+          return stop()
+        }
         // 脚本位是**变量**（`node "$VERIFY_SCRIPT"`）：闭包判不了它跑什么 ⇒ 同一族 problem
         // （可逐处登记进 `CI_SURFACE_VARIABLE_COMMAND_ACK`）。
         if (rest[0].startsWith('$') || rest[0].includes('$(')) {
@@ -3049,20 +3168,342 @@ function shellCommandTokens(source) {
 }
 
 /**
- * JS/TS 正文 → `spawn|exec|fork` **实参窗口**里的字符串字面量（窗口长度见
- * {@link CI_SURFACE_ARG_WINDOW}）。
+ * JS/TS 源码 → **同文件内的常量绑定表**（`const|let|var NAME = <表达式>`）—— R18A-03 的收口件。
  *
- * 只看"执行调用的实参窗口"，**不**扫全文：全文扫描会把登记表/注释里的路径当成执行
- * （本守卫自己的 `INTEGRATION_ENTRIES` 就是反例），那样"触及"判据就退化成了文本判据。
+ * ## 现场
+ *
+ * 修前 JS/TS 的"跑什么"只由 {@link jsExecArgumentLiterals} 的**实参窗口里的引号字面量**回答
+ * （`E2E` 文本网对 `.mjs/.cjs/.js/.ts` 显式关闭，见 {@link CI_SURFACE_TEXT_NET_SCRIPT_EXTENSIONS}）。
+ * 于是 Node 里**最常规**的两种写法整族不可见 —— 路径先解析、再执行：
+ *
+ *   · `const T = 'integration-tests/run-all.sh'; spawnSync('bash', [T])`      ⇒ 修前 EXIT=0
+ *   · `const target = join(ROOT, 'integration-tests', 'run-all.sh')` + `[target]` ⇒ 修前 EXIT=0
+ *   · `const parts = ['integration','tests','run-all.sh']` + `parts[0]+'-'+…`  ⇒ 修前 EXIT=0
+ *
+ * （只有把字面量**直接写进调用实参**才红 —— 那正是"最不像真实代码"的写法。）
+ *
+ * ## 判据
+ *
+ * 收集同文件里的 `const|let|var` 绑定（模块级与函数级都收 —— 解析是**按需**的：
+ * 只有出现在执行调用实参里的标识符才会被展开），再把实参表达式解析成候选字面量：
+ * 字符串/模板字面量、标识符（递归展开）、`join|resolve|normalize` 拼接、数组字面量与下标、
+ * 对象字面量的成员访问（"常量表"形态）、`+` 拼接、`NAME.join('/')`。
+ * 候选字面量回到既有的 token 网 / `reached` 判据 ⇒ 命中端到端入口一样要登记。
+ *
+ * **诚实边界**：不做跨文件/跨函数（形参）传播 —— `spawnSync('bash', [script])` 里 `script`
+ * 是形参时不展开（本仓 `scripts/verify-ci-scripts.mjs` 大量如此，若一律 fail-closed 就是
+ * 误报工厂）。这一层覆盖的是"同文件常量 + 拼接"这一族；**没有**对 JS 实参做 blanket
+ * fail-closed，理由与 {@link jsExecArgumentLiterals} 头注释同：解析得出的候选回到
+ * token 网/`reached` 判据后，"被执行的包装脚本"也会被跟随并继续扫描，缺口面因此收敛到
+ * "整条链都靠运行期取值"这一族（那一族属闭包声明面之外，见 `ciExecutionSurface` 头注释）。
  * @param source - JS/TS 源码文本。
- * @returns 字面量列表。
+ * @returns `Map<名字, { expression, ambiguous }>`。
+ */
+function jsConstantBindings(source) {
+  const text = String(source)
+  const bindings = new Map()
+  const pattern = /(?:^|[\s;{}(])(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*/gu
+  for (const match of text.matchAll(pattern)) {
+    const name = match[1]
+    const expression = readJsExpressionAt(text, match.index + match[0].length)
+    if (expression === undefined || expression.trim() === '') continue
+    const previous = bindings.get(name)
+    // 同名多次赋值 ⇒ **歧义**（作用域不同/被改写）⇒ 不展开：宁可"看不见"也不猜错。
+    if (previous !== undefined) { bindings.set(name, { expression: previous.expression, ambiguous: true }); continue }
+    bindings.set(name, { expression: expression.trim(), ambiguous: false })
+  }
+  return bindings
+}
+/**
+ * 从 `start` 起读一个 JS 表达式（到语句结束：深度回到 0 时的换行 / `;` / `,`）。
+ * 字符串、模板字面量、注释都按字面跳过（不做解析，只要边界正确）。
+ * @param text - 源码。
+ * @param start - 表达式起点下标。
+ * @returns 表达式文本（未 trim）；读不到返回 `undefined`。
+ */
+function readJsExpressionAt(text, start) {
+  let depth = 0
+  let index = start
+  const limit = Math.min(text.length, start + 4000)
+  for (; index < limit; index += 1) {
+    const character = text[index]
+    if (character === '/' && text[index + 1] === '/') {
+      const end = text.indexOf('\n', index)
+      if (end < 0) break
+      index = end
+      continue
+    }
+    if (character === '/' && text[index + 1] === '*') {
+      const end = text.indexOf('*/', index + 2)
+      if (end < 0) break
+      index = end + 1
+      continue
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      index += 1
+      while (index < limit && text[index] !== character) {
+        if (text[index] === '\\') index += 1
+        index += 1
+      }
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') { depth += 1; continue }
+    if (character === ')' || character === ']' || character === '}') {
+      if (depth === 0) break
+      depth -= 1
+      continue
+    }
+    if (depth === 0 && (character === '\n' || character === ';')) break
+  }
+  const expression = text.slice(start, index)
+  return expression === '' ? undefined : expression
+}
+/**
+ * 在**顶层**（不在括号/字符串/模板里）按分隔符切分一段 JS 文本。
+ * @param text - 文本（调用实参表 / 数组 / 对象字面量的内部）。
+ * @param separators - 分隔符集合（如 `,` 或 `+`）。
+ * @returns 片段列表（已 trim、去掉空片段）。
+ */
+function splitJsTopLevel(text, separators) {
+  const parts = []
+  let depth = 0
+  let start = 0
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === "'" || character === '"' || character === '`') {
+      index += 1
+      while (index < text.length && text[index] !== character) {
+        if (text[index] === '\\') index += 1
+        index += 1
+      }
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') { depth += 1; continue }
+    if (character === ')' || character === ']' || character === '}') { depth -= 1; continue }
+    if (depth === 0 && separators.includes(character)) {
+      parts.push(text.slice(start, index))
+      start = index + 1
+    }
+  }
+  parts.push(text.slice(start))
+  return parts.map(part => part.trim()).filter(part => part !== '')
+}
+/** 字符串字面量的**内容**（只处理常见转义；反引号模板另行处理）。 */
+function jsStringLiteralValue(raw) {
+  const match = /^(['"])([\s\S]*)\1$/u.exec(raw.trim())
+  if (match === null) return undefined
+  return match[2].replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)/gu, (whole, escape) => {
+    switch (escape) {
+      case 'n': return '\n'
+      case 't': return '\t'
+      case 'r': return '\r'
+      case '0': return '\0'
+      case '\\': return '\\'
+      case "'": return "'"
+      case '"': return '"'
+      case '`': return '`'
+      default: return escape.startsWith('u') || escape.startsWith('x') ? whole : escape
+    }
+  })
+}
+/** `join|resolve|normalize` 一类的**路径拼接调用**的尾段名。 */
+const JS_PATH_JOIN_CALLEES = new Set(['join', 'resolve', 'normalize', 'relative'])
+/**
+ * JS 表达式 → 候选字面量（R18A-03 的解析器）。
+ *
+ * 返回 `{ exact, parts }`：`exact` = 全解析出来时的取值；`parts` = 解析到的**字面量片段**
+ * （含从绑定里展开出来的），供"拼接后才是路径"的形态（`join(ROOT,'a','b')`）使用。
+ * @param expression - 表达式文本。
+ * @param bindings - {@link jsConstantBindings} 的结果。
+ * @param depth - 递归深度（展开标识符时 +1）。
+ * @returns `{ exact, parts }`。
+ */
+function resolveJsExpression(expression, bindings, depth = 0) {
+  const empty = { exact: undefined, parts: [] }
+  if (expression === undefined || depth > 6) return empty
+  let expr = expression.trim()
+  while (expr.startsWith('(') && balancedJsClose(expr, 0) === expr.length - 1) expr = expr.slice(1, -1).trim()
+  if (expr === '') return empty
+  const literal = jsStringLiteralValue(expr)
+  if (literal !== undefined) return { exact: literal, parts: [literal] }
+  // 模板字面量：字面块 + `${…}`（各自递归解析）。
+  if (expr.startsWith('`') && expr.endsWith('`') && expr.length >= 2) {
+    const inner = expr.slice(1, -1)
+    const parts = []
+    let exact = ''
+    let known = true
+    let index = 0
+    while (index < inner.length) {
+      if (inner[index] === '\\') { exact += inner[index + 1] ?? ''; parts.push(inner[index + 1] ?? ''); index += 2; continue }
+      if (inner[index] === '$' && inner[index + 1] === '{') {
+        const end = balancedJsClose(inner, index + 1)
+        if (end < 0) return { exact: undefined, parts }
+        const nested = resolveJsExpression(inner.slice(index + 2, end), bindings, depth + 1)
+        if (nested.exact === undefined) known = false
+        else exact += nested.exact
+        parts.push(...nested.parts)
+        index = end + 1
+        continue
+      }
+      const next = inner.indexOf('${', index)
+      const end = next < 0 ? inner.length : next
+      const chunk = inner.slice(index, end)
+      exact += chunk
+      if (chunk !== '') parts.push(chunk)
+      index = end
+    }
+    return { exact: known ? exact : undefined, parts }
+  }
+  // `+` 拼接。
+  const addition = splitJsTopLevel(expr, '+')
+  if (addition.length > 1) {
+    const resolved = addition.map(part => resolveJsExpression(part, bindings, depth + 1))
+    const parts = resolved.flatMap(item => item.parts)
+    const known = resolved.every(item => item.exact !== undefined)
+    return { exact: known ? resolved.map(item => item.exact).join('') : undefined, parts }
+  }
+  // 数组字面量。
+  if (expr.startsWith('[') && balancedJsClose(expr, 0) === expr.length - 1) {
+    const items = splitJsTopLevel(expr.slice(1, -1), ',')
+    const resolved = items.map(item => resolveJsExpression(item, bindings, depth + 1))
+    return { exact: undefined, parts: resolved.flatMap(item => item.parts) }
+  }
+  // 调用表达式（`join(…)` / `resolve(…)` / `path.join(…)`）。
+  const call = /^([A-Za-z_$][A-Za-z0-9_$.]*)\s*\(/u.exec(expr)
+  if (call !== null && balancedJsClose(expr, call[0].length - 1) === expr.length - 1) {
+    const callee = call[1].split('.').pop()
+    const args = splitJsTopLevel(expr.slice(call[0].length, -1), ',')
+    const resolved = args.map(arg => resolveJsExpression(arg, bindings, depth + 1))
+    const parts = resolved.flatMap(item => item.parts)
+    if (JS_PATH_JOIN_CALLEES.has(callee)) {
+      const known = resolved.every(item => item.exact !== undefined)
+      return {
+        // 全部解析得出 ⇒ 按路径拼接口径给出精确值；有解析不出的实参（`ROOT`/`process.cwd()`）
+        // ⇒ 退化成"**字面量片段按 `/` 拼起来**"的候选（`join(ROOT,'integration-tests','run-all.sh')`
+        // ⇒ `integration-tests/run-all.sh`）。方向是 fail-closed：候选命中端到端入口同样要登记。
+        exact: known ? resolved.map(item => item.exact).join('/') : parts.join('/'),
+        parts,
+      }
+    }
+    // 其它调用（`String(x)` / `process.cwd()`…）：只交出实参里的字面量片段。
+    return { exact: undefined, parts }
+  }
+  // `NAME.join('/')`（字面量数组）与 `NAME[i]`（字面量数组下标）。
+  const joinCall = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*join\s*\((.*)\)$/u.exec(expr)
+  if (joinCall !== null) {
+    const arrayValue = resolveJsBindingValue(joinCall[1], bindings, depth)
+    if (arrayValue !== undefined && arrayValue.trim().startsWith('[')) {
+      const items = splitJsTopLevel(arrayValue.trim().slice(1, -1), ',').map(item => resolveJsExpression(item, bindings, depth + 1))
+      const separator = resolveJsExpression(joinCall[2], bindings, depth + 1)
+      const parts = items.flatMap(item => item.parts)
+      if (items.every(item => item.exact !== undefined) && separator.exact !== undefined) {
+        return { exact: items.map(item => item.exact).join(separator.exact), parts }
+      }
+      return { exact: undefined, parts }
+    }
+  }
+  const indexAccess = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*\[\s*(\d+)\s*\]$/u.exec(expr)
+  if (indexAccess !== null) {
+    const arrayValue = resolveJsBindingValue(indexAccess[1], bindings, depth)
+    if (arrayValue !== undefined && arrayValue.trim().startsWith('[')) {
+      const items = splitJsTopLevel(arrayValue.trim().slice(1, -1), ',')
+      const item = items[Number(indexAccess[2])]
+      if (item !== undefined) return resolveJsExpression(item, bindings, depth + 1)
+    }
+    return empty
+  }
+  // 对象字面量的成员访问（"常量表"形态：`const TARGETS = { e2e: 'integration-tests/run-all.sh' }`）。
+  const memberAccess = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)$/u.exec(expr)
+  if (memberAccess !== null) {
+    const objectValue = resolveJsBindingValue(memberAccess[1], bindings, depth)
+    if (objectValue !== undefined && objectValue.trim().startsWith('{')) {
+      for (const entry of splitJsTopLevel(objectValue.trim().slice(1, -1), ',')) {
+        const separator = entry.indexOf(':')
+        if (separator < 0) continue
+        const key = jsStringLiteralValue(entry.slice(0, separator).trim()) ?? entry.slice(0, separator).trim()
+        if (key !== memberAccess[2]) continue
+        return resolveJsExpression(entry.slice(separator + 1), bindings, depth + 1)
+      }
+    }
+    return empty
+  }
+  // 标识符 ⇒ 展开同文件常量。
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(expr)) {
+    const value = resolveJsBindingValue(expr, bindings, depth)
+    if (value === undefined) return empty
+    return resolveJsExpression(value, bindings, depth + 1)
+  }
+  return empty
+}
+/**
+ * 展开一个标识符的绑定取值（歧义/未绑定 ⇒ `undefined`）。
+ * @param name - 标识符。
+ * @param bindings - 绑定表。
+ * @param depth - 递归深度。
+ * @returns 绑定的表达式文本；不可用返回 `undefined`。
+ */
+function resolveJsBindingValue(name, bindings, depth) {
+  if (depth > 6) return undefined
+  const entry = bindings.get(name)
+  if (entry === undefined || entry.ambiguous) return undefined
+  return entry.expression
+}
+/**
+ * `balancedJsClose` 的括号配对（字符串/模板感知）。
+ * @param text - 文本。
+ * @param openIndex - 开括号下标。
+ * @returns 闭括号下标；不配对返回 `-1`。
+ */
+function balancedJsClose(text, openIndex) {
+  const pairs = { '(': ')', '[': ']', '{': '}' }
+  const closer = pairs[text[openIndex]]
+  if (closer === undefined) return -1
+  let depth = 0
+  for (let index = openIndex; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === "'" || character === '"' || character === '`') {
+      index += 1
+      while (index < text.length && text[index] !== character) {
+        if (text[index] === '\\') index += 1
+        index += 1
+      }
+      continue
+    }
+    if (character === '(' || character === '[' || character === '{') depth += 1
+    else if (character === ')' || character === ']' || character === '}') {
+      depth -= 1
+      if (depth === 0) return character === closer ? index : -1
+    }
+  }
+  return -1
+}
+/**
+ * JS/TS 正文 → `spawn|exec|fork` **实参表达式**里的候选字面量（R18A-03 加入常量传播）。
+ *
+ * 两半合起来才闭合：
+ *   · **窗口内的引号字面量**（第十四轮起的既有口径）—— 字面量直接写在调用实参里；
+ *   · **实参表达式的解析结果**（R18A-03）—— 标识符/`join`/模板/数组成员/对象常量表，
+ *     解析不出的实参不产出候选，但**脚本位**那一半由
+ *     {@link jsShellScriptPositionProblems} 兜（见其头注释）。
+ * @param source - JS/TS 源码文本。
+ * @returns 候选字面量列表。
  */
 function jsExecArgumentLiterals(source) {
   const text = String(source)
   const literals = []
+  const bindings = jsConstantBindings(text)
   for (const match of text.matchAll(CI_SURFACE_EXEC_CALL)) {
     const window = text.slice(match.index, match.index + CI_SURFACE_ARG_WINDOW)
     for (const literal of window.matchAll(/['"`]([^'"`\n]+)['"`]/gu)) literals.push(literal[1])
+    const open = window.indexOf('(')
+    if (open < 0) continue
+    const close = balancedJsClose(window, open)
+    if (close < 0) continue
+    for (const argument of splitJsTopLevel(window.slice(open + 1, close), ',')) {
+      const resolved = resolveJsExpression(argument, bindings)
+      if (resolved.exact !== undefined) literals.push(resolved.exact)
+      literals.push(...resolved.parts.filter(part => part.length >= 3))
+    }
   }
   return literals
 }
@@ -3933,6 +4374,8 @@ function ciExecutionSurface(options) {
   const variableCommands = []
   /** 命中的"命令位形态读不懂"（`{ file, word, raw, acked }`）—— 用于**死条目对账**。 */
   const commandShapes = []
+  /** 命中的"脚本位读不懂"（`{ file, word, raw, acked }`，R18A-01）—— 用于**死条目对账**。 */
+  const shellArguments = []
   const seenStructuredProblems = new Set()
   const nodes = []
   const seen = new Set()
@@ -3940,8 +4383,21 @@ function ciExecutionSurface(options) {
   /** 定义别名表的 manifest（当前只有根 manifest 一处；执行面的别名都从它解析）。 */
   const manifestOwner = options.rootManifestPath ?? 'package.json'
   const queue = []
+  /** 因**深度超限**被拒绝入队的节点（R18A-04）：与 `truncated` 同款 fail-loud，不静默丢弃。 */
+  const hopsExceeded = new Set()
   const enqueue = item => {
-    if (item.hops <= CI_SURFACE_MAX_HOPS) queue.push(item)
+    if (item.hops <= CI_SURFACE_MAX_HOPS) { queue.push(item); return }
+    // **R18A-04**：修前这里是 `if (item.hops <= CI_SURFACE_MAX_HOPS) queue.push(item)` ——
+    // 超限节点**直接消失**，而"9 层包装链"恰好因此在闭包外（守卫 EXIT=0 而 CI 真的执行）。
+    // 深度上限存在的意义是"闭包异常扩张时 fail-loud"，所以超限必须记红（与节点上限
+    // `truncated` 同一口径），并把**链**打出来（诊断要点名是哪一层超的）。
+    const key = `${item.key}\u0000${item.hops}`
+    if (hopsExceeded.has(key)) return
+    hopsExceeded.add(key)
+    problems.push(`${item.file}：载体/包装链的深度超过上限 ${CI_SURFACE_MAX_HOPS} 层`
+      + `（链：${item.via.join(' → ')}）—— 超过上限的节点**不静默丢弃**：`
+      + '越深的包装链正是"把端到端入口藏起来"最容易的形态（R18A-04：9 层链在修前完全在闭包外），'
+      + '所以按 fail-closed 记红。请把链缩短，或把这一处的跟随面写进登记表。')
   }
   for (const [file, text] of options.workflowTexts ?? []) {
     enqueue({ key: file, file, kind: 'yaml', text, dir: '', via: [file], hops: 0 })
@@ -4002,6 +4458,12 @@ function ciExecutionSurface(options) {
       if (problem.kind === 'variable-command') {
         const acked = CI_SURFACE_VARIABLE_COMMAND_ACK.some(entry => entry.file === node.file && entry.word === problem.word)
         variableCommands.push({ file: node.file, word: problem.word, raw: problem.raw, acked })
+        if (!acked) problems.push(`${node.file}：${problem.message}`)
+        return
+      }
+      if (problem.kind === 'shell-argument-unreadable') {
+        const acked = CI_SURFACE_VARIABLE_COMMAND_ACK.some(entry => entry.file === node.file && entry.word === problem.word)
+        shellArguments.push({ file: node.file, word: problem.word, raw: problem.raw, acked })
         if (!acked) problems.push(`${node.file}：${problem.message}`)
         return
       }
@@ -4513,7 +4975,9 @@ function ciExecutionSurface(options) {
       })
     }
   }
-  return { mentioning, reached, problems, nodes, truncated, variableCommands, commandShapes, commandWords }
+  return {
+    mentioning, reached, problems, nodes, truncated, variableCommands, commandShapes, shellArguments, commandWords,
+  }
 }
 
 /**
@@ -4735,11 +5199,33 @@ function ciExecutionSurfaceSelfTest() {
       'name: probe\nruns:\n  using: composite\n  steps:\n    - run: bash integration-tests/run-all.sh\n'],
     ['.github/workflows/wrapper.yml',
       'name: wrapper\njobs:\n  a:\n    steps:\n      - run: bash scripts/probe-wrapper.sh\n'],
-    ['scripts/probe-wrapper.sh', '#!/usr/bin/env bash\nnode scripts/probe-runner.mjs\nnode scripts/probe-dynamic.sh\n'],
+    ['scripts/probe-wrapper.sh',
+      '#!/usr/bin/env bash\nnode scripts/probe-runner.mjs\nnode scripts/probe-dynamic.sh\n'
+      + 'node scripts/probe-computed.mjs\nnode scripts/probe-consttable.mjs\n'],
     ['scripts/probe-runner.mjs', "spawnSync('bash', ['integration-tests/run-all.sh'], { cwd: ROOT })\n"],
+    // **R18A-03**：JS 包装脚本里"先解析、后执行"的两种常规写法（修前它们整族不可见：
+    // `.mjs` 不进文本网，而实参窗口只看得到写在调用里的字面量）：
+    //   · `const T = '<路径>'` + `spawnSync('bash', [T])`（同文件常量）；
+    //   · `const TARGETS = { e2e: join(ROOT, 'a', 'b') }` + `[TARGETS.e2e]`
+    //     （常量表 + `join` 拼接 + 成员访问）。
+    ['scripts/probe-consttable.mjs',
+      "import { spawnSync } from 'node:child_process'\n"
+      + "const T = 'integration-tests/run-all.sh'\nspawnSync('bash', [T], { stdio: 'inherit' })\n"],
+    ['scripts/probe-computed.mjs',
+      "import { spawnSync } from 'node:child_process'\nimport { join } from 'node:path'\n"
+      + "const TARGETS = { e2e: join(ROOT, 'integration-tests', 'run-all.sh') }\n"
+      + "spawnSync('bash', [TARGETS.e2e], { stdio: 'inherit' })\n"],
     // 只有**正文提到**、执行形态解析不出来的那一半：token 含 `$`（变量拼路径）⇒
     // 归 `mentioning ∖ reached`，必须登记成 `data-reference` 才算"看见并认账"。
-    ['scripts/probe-dynamic.sh', '#!/usr/bin/env bash\nDIR="$(cd "$(dirname "$0")" && pwd)"\nbash "$DIR/run-all.sh"\n'],
+    // **R18A-01 之后**这一条必须是"只说、不执行"的形态：修前它是
+    // `bash "$DIR/run-all.sh"`（变量拼路径）—— 那在 R18A-01 的收口里已经变成
+    // **fail-closed**（脚本位含 `/` 的间接层不再豁免），所以它不能再扮演
+    // "`mentioning ∖ reached` 的数据引用"这一半。现在它只在正文里**逐字提到**入口
+    // （注释/printf 数据），执行形态里没有它 ⇒ 仍归 `data-reference`。
+    ['scripts/probe-dynamic.sh',
+      '#!/usr/bin/env bash\n'
+      + '# 说明：integration-tests/run-all.sh 需要 Docker + 真实服务端，CI 内不跑（操作员手动执行）。\n'
+      + 'exit 0\n'],
     // `make` 目标间接（VA-05-F1）：闭包必须跟随到 `server/Makefile` 那个**目标体**里。
     ['.github/workflows/maketarget.yml',
       'name: maketarget\njobs:\n  a:\n    steps:\n      - run: make -C server probe-e2e\n'],
@@ -4815,6 +5301,8 @@ function ciExecutionSurfaceSelfTest() {
     ['package.json', '`package.json` 别名（E-02 的旁路形态）'],
     ['.github/actions/probe/action.yml', '本地复合 action'],
     ['scripts/probe-runner.mjs', '`.sh` 包装链尽头的 `.mjs` 里的 spawn 目标'],
+    ['scripts/probe-consttable.mjs', '`.mjs` 里**同文件常量**（`const T = …` + `spawnSync(\'bash\', [T])`）指向的端到端入口'],
+    ['scripts/probe-computed.mjs', '`.mjs` 里**常量表 + `join` 拼接**（`{ e2e: join(ROOT, …) }`）指向的端到端入口'],
     ['scripts/probe-dynamic.sh', '只有正文提到、执行形态解析不出来的 `.sh`（`data-reference` 那一半）'],
   ]) {
     check(seenFiles.has(file),
@@ -4873,6 +5361,44 @@ function ciExecutionSurfaceSelfTest() {
   check(ackProbe.variableCommands.length === 1 && ackProbe.variableCommands[0].acked === false,
     '形态⑨自证: 变量命令位必须被记进 `variableCommands` 且标成**未登记**（死条目对账的另一半）：'
       + ` 实际 ${JSON.stringify(ackProbe.variableCommands)}`)
+  // **R18A-01 的登记通道**：shell 脚本位那一族同样"fail-closed + 可逐处登记"。
+  // 两半都要自证：未登记 ⇒ problem（不给"解析不出名字就放过"留分支）；登记后 ⇒ 不再 problem。
+  {
+    const shellAckFixture = new Map([
+      ['.github/workflows/shell-arg.yml',
+        'name: shell-arg\njobs:\n  a:\n    steps:\n      - run: |\n'
+        + '          D="$(pwd)/scripts"\n          bash "$D/probe-inner.sh"\n'],
+      ['scripts/probe-inner.sh', '#!/usr/bin/env bash\nbash integration-tests/run-all.sh\n'],
+    ])
+    const shellSurface = () => ciExecutionSurface({
+      workflowTexts: [['.github/workflows/shell-arg.yml', shellAckFixture.get('.github/workflows/shell-arg.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => shellAckFixture.has(path), read: path => shellAckFixture.get(path) ?? '',
+    })
+    const unacked = shellSurface()
+    check(unacked.problems.some(message => message.includes('脚本位读不懂')),
+      '形态⑨自证: `bash "$D/x.sh"`（脚本位是含 `/` 的间接层）必须 fail-closed 记 problem ——'
+        + ' 修前它既不跟随也不判红（R18A-01 的现场）：'
+        + ` 实际 problems=${JSON.stringify(unacked.problems)}`)
+    check(unacked.shellArguments.length === 1 && unacked.shellArguments[0].acked === false,
+      '形态⑨自证: 脚本位读不懂必须被记进 `shellArguments` 且标成**未登记**（死条目对账的另一半）：'
+        + ` 实际 ${JSON.stringify(unacked.shellArguments)}`)
+    CI_SURFACE_VARIABLE_COMMAND_ACK.push({
+      file: '.github/workflows/shell-arg.yml', word: '$D/probe-inner.sh',
+      why: '自证：登记之后这一处必须放行（登记制而不是"一律放行"）',
+    })
+    try {
+      const acked = shellSurface()
+      check(acked.problems.length === 0,
+        '形态⑨自证: 逐处登记之后脚本位那一族必须放行（登记制：新出现的一律红、已认账的留痕）：'
+          + ` 实际 problems=${JSON.stringify(acked.problems)}`)
+      check(acked.shellArguments.length === 1 && acked.shellArguments[0].acked === true,
+        '形态⑨自证: 登记命中后 `shellArguments.acked` 必须是 true（死条目对账靠它）：'
+          + ` 实际 ${JSON.stringify(acked.shellArguments)}`)
+    } finally {
+      CI_SURFACE_VARIABLE_COMMAND_ACK.pop()
+    }
+  }
   // 深度上限：包装链超过 {@link CI_SURFACE_MAX_HOPS} 层（`timeout 1` 套 `timeout 1` …）⇒
   // fail-closed（记 problem），**不静默**。
   {
@@ -5167,6 +5693,48 @@ function ciExecutionSurfaceSelfTest() {
       + `实际命中 ${aliasTextHits} 处，自证夹具已被写坏`)
   note('CI 执行面闭包自证: 直接接线 / `package.json` 别名 / 复合 action / `.sh` 包装链 /'
     + ' `.mjs` spawn 目标 / 变量拼路径的 `.sh` 六种形态全部可区分 ✓')
+  // **R18A 的三条 fail-closed**（2026-09-25 第十八轮对抗审计的收口）：三条都必须
+  // 具名记 problem，且**不得**触达端到端入口（"没看见"不许当成"这一层没有端到端"）。
+  {
+    /** 逐层加深的载体链：第 0 层就是端到端入口，越往上越深（用来撞 `CI_SURFACE_MAX_HOPS`）。 */
+    const hopChain = new Map()
+    const depth = CI_SURFACE_MAX_HOPS + 2
+    for (let index = 0; index < depth; index += 1) {
+      hopChain.set(`scripts/probe-hop${index}.sh`,
+        '#!/usr/bin/env bash\n'
+        + (index === 0 ? 'bash integration-tests/run-all.sh\n' : `bash scripts/probe-hop${index - 1}.sh\n`))
+    }
+    const r18a = new Map([
+      ['.github/workflows/r18a.yml', 'name: r18a\njobs:\n  a:\n    steps:\n'
+        // ① 脚本位含 `/` 的间接层（R18A-01：修前既不跟随也不判红）
+        + '      - run: bash scripts/probe-varpath.sh\n'
+        // ② `find -exec` 的脚本位（R18A-02：`{}` 是占位符 ⇒ 读不到那份脚本文本）
+        + "      - run: find scripts -maxdepth 1 -name 'probe-varpath.sh' -exec bash {} \\;\n"
+        // ③ 超过深度上限的载体链（R18A-04：修前超限节点被静默丢弃）
+        + `      - run: bash scripts/probe-hop${depth - 1}.sh\n`],
+      ['scripts/probe-varpath.sh', '#!/usr/bin/env bash\nD="$(pwd)/scripts"\nbash "$D/probe-inner.sh"\n'],
+      ['scripts/probe-inner.sh', '#!/usr/bin/env bash\nbash integration-tests/run-all.sh\n'],
+      ...hopChain,
+    ])
+    const bad = ciExecutionSurface({
+      workflowTexts: [['.github/workflows/r18a.yml', r18a.get('.github/workflows/r18a.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => r18a.has(path), read: path => r18a.get(path) ?? '',
+    })
+    for (const [needle, label] of [
+      ['含 `/` 的变量/命令替换路径', '`bash "$D/x.sh"`（脚本位含 `/` 的间接层 ⇒ fail-closed，R18A-01）'],
+      ['`find … -exec', '`find … -exec bash {} \\;`（`-exec` 的脚本位读不到脚本文本 ⇒ fail-closed，R18A-02）'],
+      ['深度超过上限', `载体链超过 ${CI_SURFACE_MAX_HOPS} 层（超限节点不得静默丢弃 ⇒ fail-closed，R18A-04）`],
+    ]) {
+      check(bad.problems.some(message => message.includes(needle)),
+        `形态⑨自证: R18A 的收口形态「${label}」必须 fail-closed 且**具名**（诊断里出现 \`${needle}\`）——`
+          + ' 修前这三族都是"守卫 EXIT=0 而 CI 真的执行到端到端入口"。'
+          + ` 实际 problems=${JSON.stringify(bad.problems).slice(0, 400)}`)
+    }
+    check(bad.reached.size === 0,
+      '形态⑨自证: R18A 的收口形态不得触达端到端入口（fail-closed 的意义就在这里）：'
+        + ` 实际 reached=[${[...bad.reached.keys()].join(', ')}]`)
+  }
 }
 {
   const workflowsDir = join(ROOT, '.github', 'workflows')
@@ -5307,7 +5875,11 @@ function ciExecutionSurfaceSelfTest() {
       // 反向（**死条目双向对账**，与 E2E_CI_SURFACE_REGISTRY 同款纪律）：包装链尽头的变量
       // 命令位登记项必须**仍然真的命中** —— 变量被改名/那行被删掉之后，这条认账就成了
       // "说自己还在看着一个早就不存在的洞"，必须跟着删。
-      const hitVariableCommands = new Set(surface.variableCommands.map(item => `${item.file}\u0000${item.word}`))
+      const hitVariableCommands = new Set([
+        ...surface.variableCommands.map(item => `${item.file}\u0000${item.word}`),
+        // R18A-01：脚本位那一族共用同一张登记表（命令位 / 脚本位都是"读不懂的执行位"）。
+        ...surface.shellArguments.map(item => `${item.file}\u0000${item.word}`),
+      ])
       for (const entry of CI_SURFACE_VARIABLE_COMMAND_ACK) {
         check(hitVariableCommands.has(`${entry.file}\u0000${entry.word}`),
           `形态⑨: \`CI_SURFACE_VARIABLE_COMMAND_ACK\` 里的登记项 ${entry.file} 的 \`${entry.word}\` `
@@ -5381,6 +5953,40 @@ if (failures.length > 0) {
 // 措辞里刻意不出现"跳过/未覆盖"这类词：那会把这条**结论行**误收进 `check-workspaces` 的
 // `[DEGRADED]` 摘要（关键词判据），而它不是"某条判据没真的判"。
 // ---------------------------------------------------------------------------
+/**
+ * 覆盖层的**稳定标签**（按序，唯一真源）——第十八轮 R18A-G-07 的收口件①。
+ *
+ * ## 现场
+ *
+ * 修前"层数自洽"只绑**条数**（`COVERED_LAYERS.length === EXPECTED_COVERED_LAYERS`）：
+ * 把某一层的声明换成**无关散文**、或把某一层复制一份，条数都不变 ⇒
+ * `check-integration-tests` 与 `check-doc-claims` 全绿，而通过行照旧宣称"已覆盖 14 项"。
+ * 条数是"有几层"，不是"哪几层"—— 通过了条数对拍不等于这些层还在判东西。
+ *
+ * ## 判据
+ *
+ * 下面这张表是**层标签集合**（逐条、按序）；通过行的枚举必须**逐条以对应标签开头**，
+ * 且条数与登记值 {@link EXPECTED_COVERED_LAYERS} 一致。于是：
+ *   · 换标签、换层序、复制某一层、把某一层换成散文 ⇒ 逐条对拍当场红；
+ *   · 把某一层的 `check(...)` 掏空只留标签 ⇒ 该层的**执行见证**
+ *     （{@link coverageWitness}，由该层实现自己写入、写进标签）停在初值 ⇒ 红。
+ */
+const COVERED_LAYER_LABELS = [
+  '语法',
+  '登记制',
+  '引用面扩展名对账',
+  '聚合层接线',
+  '判别力下限',
+  '环境缺失的原因码登记制',
+  '契约判据表',
+  '契约判据本体自证',
+  '契约判定通道自证',
+  '契约端到端变异',
+  'electron-shots',
+  '假网关场景',
+  '聚合层三项全 SKIP ⇒ 77 且不报 PASS',
+  '端到端覆盖面 ↔ CI 执行面：',
+]
 const COVERED_LAYERS = [
   `语法（${pyFiles.length} 个 .py ast.parse / ${mjsFiles.length} 个 .mjs node --check）`,
   `登记制（${INTEGRATION_ENTRIES.length} 项：登记了不在 / 在却没登记 / 聚合层少调多调或换序 全红）`,
@@ -5390,12 +5996,12 @@ const COVERED_LAYERS = [
   `环境缺失的原因码登记制（闭集 ${SKIP_REASON_CODES.size} 个：源码声明 / 调用点 / 唯一出口 双向对账 + 真跑一次确认具名）`,
   `契约判据表（${CONTRACT_TESTS.map(test => `${test.id} ${(CONTRACT_CRITERIA.get(test.id) ?? []).length} 条`).join(' / ')}：`
     + '精确 id 集合 + 逐 id 正负例条数 + 运行期逐条引用 + 观测非空）',
-  `契约判据本体自证（--self-test，每条判据正/负例夹具）`,
-  `契约判定通道自证（--self-check，全部夹具经**运行期** report() 求值）`,
-  `契约端到端变异（逐条判据掏成恒真 / judge 恒真 / 只改计票侧 / 运行期通道换恒真包装 —— 全部必须变红）`,
-  'electron-shots（接线 + SKIP(77) 契约 + 判据表自检 + 判定通道自检 + 4 条判定通道变异）',
+  `契约判据本体自证（--self-test，${coverageWitness.contractSelfTestFixtures} 条夹具逐条正/负例）`,
+  `契约判定通道自证（--self-check，${coverageWitness.contractSelfCheckFixtures} 条夹具经**运行期** report() 求值）`,
+  `契约端到端变异（${coverageWitness.contractMutations} 条判据逐条掏成恒真、judge 恒真 / 只改计票侧 / 运行期通道换恒真包装 —— 全部必须变红）`,
+  `electron-shots（${coverageWitness.electronShotsAssertions} 条判据：接线 + SKIP(77) 契约 + 判据表自检 + 判定通道自检 + 4 条判定通道变异）`,
   `假网关场景（${SCENARIOS.length} 条：正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）`,
-  '聚合层三项全 SKIP ⇒ 77 且不报 PASS',
+  `聚合层三项全 SKIP ⇒ 77 且不报 PASS（实测 exit ${coverageWitness.aggregateSkipExit}）`,
   `端到端覆盖面 ↔ CI 执行面：文本面命中 ${E2E_CI_TEXT_HITS_DECLARED} 处、`
     + `执行面闭包（workflow \`run:\` 命令位 → 本地复合 action → manifest scripts 别名 → 仓内包装脚本/`
     + `\`spawn\`·\`exec\` 目标）真实接线 ${E2E_CI_REAL_SURFACE_FILES_DECLARED} 处（均为登记值，变了即红）；`
@@ -5415,6 +6021,39 @@ const EXPECTED_COVERED_LAYERS = 14
 if (COVERED_LAYERS.length !== EXPECTED_COVERED_LAYERS) {
   process.stderr.write(`\ncheck-integration-tests: 通过行的覆盖面枚举 ${COVERED_LAYERS.length} 项，`
     + `与登记值 ${EXPECTED_COVERED_LAYERS} 项不一致 —— 通过行的自我陈述必须与真实覆盖面一致\n`)
+  return 1
+}
+// **层标签集合**（R18A-G-07）：条数对上还不够 —— 逐条标签必须**按序**出现在通过行里。
+// 修前只绑条数，于是"把某一层换成无关散文 / 复制某一层"都能让守卫照旧宣称"已覆盖 14 项"。
+if (COVERED_LAYER_LABELS.length !== EXPECTED_COVERED_LAYERS
+  || COVERED_LAYERS.length !== COVERED_LAYER_LABELS.length) {
+  process.stderr.write(`\ncheck-integration-tests: 层标签登记表 ${COVERED_LAYER_LABELS.length} 项 / `
+    + `通过行枚举 ${COVERED_LAYERS.length} 项 / 登记值 ${EXPECTED_COVERED_LAYERS} 项 —— `
+    + '三者必须一致（层数是"有几层"，标签集合才是"哪几层"）\n')
+  return 1
+}
+for (const [index, label] of COVERED_LAYER_LABELS.entries()) {
+  if (String(COVERED_LAYERS[index]).startsWith(label)) continue
+  process.stderr.write(`\ncheck-integration-tests: 通过行第 ${index + 1} 层不是登记的层标签 ——\n`
+    + `  期望以 ${JSON.stringify(label)} 开头\n  实际 ${JSON.stringify(COVERED_LAYERS[index])}\n`
+    + '  ⇒ 覆盖层是**逐条登记**的：换标签、换层序、复制一层、把某一层换成散文，都会让'
+    + '"已覆盖 N 项"这句话与实际判过的层不一致（R18A-G-07 的现场）\n')
+  return 1
+}
+// **执行见证**（R18A-G-07 的第二半）：静态标签层必须由**自己的实现**写出见证明细 ——
+// 把某一层的 `check(...)` 掏空、只留标签时，这里的值会停在初值 ⇒ 红（不是"标签还在所以绿"）。
+for (const [id, expected, witness] of [
+  ['契约判据本体自证', '合同脚本 --self-test 实跑的夹具总数 > 0', coverageWitness.contractSelfTestFixtures > 0],
+  ['契约判定通道自证', '合同脚本 --self-check 经运行期通道求值的夹具总数 > 0', coverageWitness.contractSelfCheckFixtures > 0],
+  ['契约端到端变异', '真的跑过的逐条判据变异数 > 0', coverageWitness.contractMutations > 0],
+  ['electron-shots', '判据表的判据条数 ≥ 1', coverageWitness.electronShotsAssertions >= 1],
+  ['聚合层三项全 SKIP ⇒ 77 且不报 PASS', '聚合层实跑退出码 = 77', coverageWitness.aggregateSkipExit === 77],
+]) {
+  if (witness) continue
+  process.stderr.write(`\ncheck-integration-tests: 覆盖层「${id}」没有**执行见证**（${expected}）——\n`
+    + `  实际 ${JSON.stringify(coverageWitness)}\n`
+    + '  ⇒ 通过行可以宣称这一层，但它必须由该层的实现自己写出见证值：'
+    + '把 check(...) 掏空、只留标签的形态，靠"标签还在"是拦不住的（R18A-G-07）\n')
   return 1
 }
 /**
@@ -5442,7 +6081,7 @@ process.stdout.write(
   + ` \`.github/workflows/**\` 的**文本面**命中 ${E2E_CI_TEXT_HITS_DECLARED} 处（同为登记值）。`
   + ' 两张面都由本守卫对拍：经 `package.json` 别名 / 复合 action / 包装脚本接进来的接线同样会计入'
   + ' 执行面（0↔N 都会红），所以"这条绿覆盖到哪里"在 CI 列表上就是可见的。'
-  + '\n  **判据的语义（第十七轮 R17-X 之后的逐字口径）**：'
+  + '\n  **判据的语义（第十八轮 R18A 之后的逐字口径；R17-X 的语义保留）**：'
   + '① **命令位是登记制** —— CI **入口形态**（workflow `run:` 块、manifest 别名值、Makefile 目标体与'
   + ' `$(shell …)`、compose `command`/`entrypoint`、`eval`/`trap` 的**字符串取值**、'
   + ' `ssh <主机> <命令>` 与 `docker|podman run|exec` 的**参数位命令位**）的命令位上，每个不在'
@@ -5458,7 +6097,15 @@ process.stdout.write(
   + '③ **字符串参数执行面在网内**（R17A-02）—— `eval` 的取值（按入口形态递归）、'
   + '`trap` 的取值（按被跟随脚本的宽松面递归）、`bash <<< <文本>`（取值即脚本文本）、'
   + '进程替换 `<(...)`（**fail-closed**：被执行的是子进程的输出）、`bash <含空白>` / `bash *.sh`'
-  + '（脚本位读不懂 ⇒ fail-closed）。'
+  + '（脚本位读不懂 ⇒ fail-closed：**含 `/` 的间接层不再豁免** —— `bash "$D/x.sh"`、'
+  + ' `bash /tmp/x.sh` 与 `bash *.sh` 同判，R18A-01；`find … -exec <shell> <脚本位>` 的脚本位'
+  + ' 同网，R18A-02）。'
+  + '④b **JS/TS 包装脚本里的"先解析、后执行"在网内**（R18A-03）：`spawn|exec|fork` 的实参'
+  + ' 表达式按**同文件常量**展开（`const T = \'…\'`、`join|resolve` 拼接、模板字面量、'
+  + ' 数组/对象常量表 + 下标/成员、`+` 拼接）——解析出的候选回到 token 网/`reached` 判据，'
+  + ' 所以"路径先算出来再传给 spawn"不再隐形。'
+  + '④c **载体链深度超限 fail-loud**（R18A-04）：超过上限的节点不再静默丢弃，'
+  + ' 而是记红并打出链（越深的包装链正是"把端到端入口藏起来"最容易的形态）。'
   + '④ **跟随面是"仓内任何路径"** —— 命令位/参数位上的仓内文件（脚本 / `.mjs`·`.py` / `python -m` 模块 /'
   + ' `node -e` 源码 / compose 文件 / `.env`）都要么被跟随、要么被登记；带 `$`/`{{ }}` 拼出来的'
   + '**端到端路径**由文本面强制登记（`data-reference`）。'
