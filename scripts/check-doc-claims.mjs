@@ -53,7 +53,42 @@
  * "当时"的事实，要求它们跟着真源走等于篡改历史。
  *
  * 用法：node scripts/check-doc-claims.mjs [--root <dir>] [--json] [--selftest]
- * 退出码：0 = 全部一致；1 = 有漂移；2 = 用法错误 / **扫描面缩水（前置失败，见下）**。
+ * 退出码：0 = 全部一致；1 = 有漂移；2 = 用法错误 / **扫描面缩水（前置失败，见下）**
+ *      / **外部设置了已废除的测试缝**（见下节）。
+ *
+ * ## 通过行探测：argv 自调用，不是环境变量（2026-09-25，第十三轮 R14-F）
+ *
+ * **现场（CI run `36086661679` 的 `gate-guards` job，分支 `fix/round13-batch`）**：
+ * `check:doc-claims` 与 `check:check-workspaces` 双双失败，日志逐字为
+ *
+ * ```
+ * check-doc-claims: 通过行探测子进程 exit 2（同一份实现、同一棵树，本应同为通过）——
+ *   拒绝出结论：check-doc-claims: 测试缝 CHECK_DOC_CLAIMS_VERDICT_PROBE 在 CI 语境下不得设置（实际 "1"）
+ * ```
+ *
+ * **机制（自相矛盾）**：{@link printVerdict} 的第 ② 层判据要"跑一次真脚本、读真输出"，于是
+ * **自己**用 `spawnSync(process.execPath, [本文件, …], { env: { ...process.env, [探测开关]: '1' } })`
+ * 拉起子进程；子进程**继承 `CI=true`** ⇒ 撞上本文件那条"测试缝在 CI 语境下不得设置"的规则
+ * （exit 2）⇒ 父进程判"探测子进程 exit 2"⇒ 守卫必然失败。**判据的判据在另一个语境下判它
+ * 自己非法**：本地（`CI` 未设）全绿、CI 必红，PR 永远不可能绿。
+ *
+ * **修法（两条一起）**：
+ *   ① 父子判定改成 **argv 开关** `--verdict-probe`：父进程把它**追加到自己 argv 的副本**上
+ *      （`[本文件, ...process.argv.slice(2), VERDICT_PROBE_ARG]`），拉子进程时 `env` 不再注入
+ *      任何探测开关（`{ ...process.env }` 即可）。
+ *      **为什么这样是安全的**：外部载荷能改的是**环境**（`$GITHUB_ENV` / `env` / 父进程继承）
+ *      与**仓内文件**；前者**没有任何锚定**（一句环境变量就能把这条判据关掉），后者要先过
+ *      `scripts/check-install-integrity.mjs` 的执行体锚定 + `check-root-guards.mjs` 对每条守卫
+ *      argv 的登记校验（`argvTail: []`，`verify-check-workspaces.mjs` 的 C-06 二次对拍）。
+ *      父进程**自己构造的 argv** 不在那两条外部通道里。
+ *   ② {@link refuseRetiredTestSeam} 升级为更强的规则：`CHECK_DOC_CLAIMS_VERDICT_PROBE`
+ *      **任何语境**下被设置 ⇒ exit 2（修好后它没有合法来源；旧的"仅 CI 下拒绝"既放过了
+ *      本地攻击，又让判据在 CI 下自杀）。
+ *
+ * 同族排查（本轮一并做的）：`scripts/check-integration-tests.mjs` 的 `CHECK_IT_*_SCRIPT`、
+ * `check-patch-pin.mjs` / `check-theme-tokens.mjs` 的 `*_SKIP_*`、`verify-glitchtip-ops-check.mjs`
+ * 的 `CHECK_GLITCHTIP_SCRIPT` 都**没有**"自己也用该 env 拉子进程"的形态（见 REPORT.md 的逐条判定表），
+ * 所以不跟着改语义 —— 只把本条从"环境"迁到"argv"。
  *
  * ## 缩面判据（2026-09-23 第四轮审计 R4-A-4）
  *
@@ -75,11 +110,70 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 通过行探测的开关：**argv**，不是环境变量
+//（2026-09-25 修复「判据的判据在另一个语境下判它自己非法」；现场见文件头同名小节）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 通过行探测子进程的 argv 开关。
+ *
+ * 父进程把它**追加到自己 argv 的副本**上拉起子进程（见 {@link printVerdict} 的第 ② 层）；
+ * 子进程只负责把通过行真的打出去，父进程把**它打出去的字节**抓回来反解断言。
+ * **不要手写这个参数** —— 它是本进程对自身的一次受控自调用，不是给人用的 CLI 选项。
+ */
+const VERDICT_PROBE_ARG = '--verdict-probe'
+
+/**
+ * 已**废除**的环境变量开关（只留名字给"外部设置即攻击面"的判据用）。
+ *
+ * 修好之后**没有任何合法路径**会设置它：探测子进程走 argv，拉子进程时 `env` 里不再出现
+ * 这个名字。所以 {@link refuseRetiredTestSeam} 的规则比旧规则更强 —— **任何语境**下被设置
+ * 都 exit 2（旧的"仅 CI 语境下拒绝"既放过了本地攻击，又让判据在 CI 下自杀）。
+ */
+const VERDICT_PROBE_ENV = 'CHECK_DOC_CLAIMS_VERDICT_PROBE'
+
+/**
+ * 本进程是不是「通过行探测子进程」—— 只看 **argv**。
+ * @param argv - 参数数组（`process.argv.slice(2)`）。
+ * @returns 带 {@link VERDICT_PROBE_ARG} 时为 true。
+ */
+function verdictProbeFrom(argv) {
+  return argv.includes(VERDICT_PROBE_ARG)
+}
+
+/**
+ * **已废除的测试缝**：{@link VERDICT_PROBE_ENV} 在**任何语境**下被设置 ⇒ exit 2。
+ *
+ * 为什么与语境无关（而旧实现只在 CI 下拒绝）：修好之后这个环境变量**没有任何合法来源**，
+ * 于是"它被设上了"只剩一种解释 —— 有人想关掉"通过行必须钉在打印路径上"这条判据。
+ * 旧规则的两个漏洞正是 2026-09-25 那次 CI 必红的成因：本地设它**完全无声**（攻击面），
+ * CI 下它又杀死了判据**自己拉起的**子进程（自相矛盾）。诊断里保留固定短语
+ * `测试缝已废除` 便于检索。
+ */
+function refuseRetiredTestSeam() {
+  const value = process.env[VERDICT_PROBE_ENV]
+  if (value === undefined || value === '') return
+  console.error(`check-doc-claims: 测试缝已废除：环境变量 ${VERDICT_PROBE_ENV} **任何语境下都不得设置**`
+    + `（实际 ${JSON.stringify(value)}）—— 通过行探测已改由 argv 自调用`
+    + `（${VERDICT_PROBE_ARG}：父进程把开关追加到自己 argv 的副本上，env 里不再注入任何探测开关）。`
+    + '所以这个环境变量没有任何合法来源，外部设置它一律视为攻击面：'
+    + '它唯一的效果是把"通过行必须钉在打印路径上"这条判据整个关掉。'
+    + '环境（`$GITHUB_ENV` / `env` / 父进程继承）是外部可改的，父进程自己构造的 argv 不是 ——'
+    + '详见文件头「通过行探测」小节。')
+  process.exit(2)
+}
+
+refuseRetiredTestSeam()
+
 const args = process.argv.slice(2)
 let root = resolve(process.cwd())
 let json = false
 let selftest = false
+/** argv 开关在 {@link verdictProbeFrom} 里单独判定（它不参与常规参数解析，也不接受取值）。 */
+const verdictProbe = verdictProbeFrom(args)
 for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === VERDICT_PROBE_ARG) continue
   if (args[index] === '--root') {
     const value = args[index + 1]
     if (value === undefined) {
@@ -366,14 +460,9 @@ function passLineFor(covered) {
 }
 
 /**
- * 通过行探测的**子进程开关**（第十三轮 V13-C R-1）。
- *
- * 父进程用它把"真脚本真 stdout"那一次运行与"打印路径断言"分开：子进程只负责把通过行
- * 真的打出去，父进程把**它打出去的字节**抓回来反解断言。与 `check-integration-tests.mjs`
- * 的 `CHECK_IT_*_SCRIPT` 测试缝同一套纪律 —— **CI 语境下不得设置**（否则这条判据可以被
- * 一句环境变量关掉）。
+ * 通过行探测的**子进程开关**见文件头：`VERDICT_PROBE_ARG`（argv）/ `VERDICT_PROBE_ENV`（已废除）
+ * 都声明在文件顶部 —— 开关的语义、现场与"为什么 argv 安全"写在那里。
  */
-const VERDICT_PROBE_ENV = 'CHECK_DOC_CLAIMS_VERDICT_PROBE'
 
 /** 取 stdout 里的**非空行**（通过行探测用）。 */
 function verdictLines(stdout) {
@@ -509,6 +598,11 @@ function selfTest() {
       'selftest: 真行之后再补一句更宽的自述（"像通过行"的行必须恰好 1 行）必须被拒'],
     [printedVerdictProblems('诊断行\n', coveredSample).length > 0,
       'selftest: 没有任何通过凭据被打印出去时必须被拒'],
+    // 探测开关的**载体**（2026-09-25）：只看 argv，且**不看环境** —— 环境里出现那个
+    // 已废除的名字时本进程早已 exit 2（`refuseRetiredTestSeam`），绝不会被当成"我是子进程"。
+    [verdictProbeFrom(['--root', 'x', VERDICT_PROBE_ARG]), 'selftest: argv 里的探测开关应被认出'],
+    [verdictProbeFrom([]) === false && verdictProbeFrom(['--json']) === false, 'selftest: 没有 argv 开关时不得自称探测子进程'],
+    [VERDICT_PROBE_ARG !== VERDICT_PROBE_ENV && !VERDICT_PROBE_ARG.includes('='), 'selftest: 开关必须是 argv 形态（不是 env 赋值）'],
   ]
   const failed = cases.filter(([ok]) => !ok).map(([, name]) => name)
   if (failed.length > 0) {
@@ -522,18 +616,8 @@ function selfTest() {
 
 if (selftest) selfTest()
 
-// 测试缝的纪律（第十三轮 F-21 的同款口径）：`VERDICT_PROBE_ENV` 只给**本进程自己**拉起的
-// 通过行探测子进程用；它在 CI 语境下被外部设置 = 把"打印路径判据"一句话关掉 ⇒ 当场红。
-{
-  const ciContext = (process.env.CI !== undefined && process.env.CI !== '' && process.env.CI !== 'false')
-    || process.env.GITHUB_ACTIONS === 'true'
-  if (ciContext && process.env[VERDICT_PROBE_ENV] !== undefined && process.env[VERDICT_PROBE_ENV] !== '') {
-    console.error(`check-doc-claims: 测试缝 ${VERDICT_PROBE_ENV} 在 CI 语境下不得设置`
-      + `（实际 ${JSON.stringify(process.env[VERDICT_PROBE_ENV])}）—— 它会把"通过行必须钉在打印路径上"`
-      + '这条判据整个关掉（第十三轮 V13-C R-1 的收口件不允许有外部开关）。')
-    process.exit(2)
-  }
-}
+// 测试缝的判据在文件顶部（`refuseRetiredTestSeam()`，随 argv 开关一起迁走了）：
+// 这里刻意不留"CI 语境下不得设置"那类已失效的表述 —— 新规则与语境无关。
 
 const failures = []
 const hits = []
@@ -730,7 +814,8 @@ for (const message of passLineProblems(summaryLine, coveredItems)) {
  *
  * 三层，缺一不可：
  *   ① 进程内先按变量断言一遍（与覆盖率汇总处同一份 `passLineProblems`）；
- *   ② **跑一次真脚本、读真输出**：把自己当子进程再跑一遍（`VERDICT_PROBE_ENV=1`），
+ *   ② **跑一次真脚本、读真输出**：把自己当子进程再跑一遍（argv 里追加
+ *      {@link VERDICT_PROBE_ARG}，**不是**环境变量 —— 见文件头），
  *      把它 stdout 里**最后一行非空**抓回来 —— 那是"真实运行会打出去的通过行"。
  *      这是唯一能咬住"改打印不改断言"的层：断言钉的是子进程真正写出的字节，不是变量。
  *   ③ 本进程打出去的那一段字节同样被拦截并反解断言（打印与断言是同一个字符串）。
@@ -748,10 +833,15 @@ function printVerdict() {
   }
 
   // ② 真脚本、真 stdout：子进程这次运行**真的**打出去的是哪一行？
-  const probe = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+  //
+  // 开关走 **argv**（追加到本进程 argv 的**副本**上），`env` 里**不再注入任何探测开关**：
+  // 探测的判据不能被"环境"这种外部可改的输入面决定（2026-09-25 的 CI 自相矛盾现场 ——
+  // 子进程继承 `CI=true` 就被本文件自己的 CI 规则拒掉）。`env` 只原样继承，便于子进程
+  // 在同一棵树/同一语境下复算。
+  const probe = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2), VERDICT_PROBE_ARG], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, [VERDICT_PROBE_ENV]: '1' },
+    env: { ...process.env },
   })
   if (probe.error !== undefined) {
     console.error(`check-doc-claims: 无法跑通过行探测子进程（${probe.error.message}）`
@@ -759,8 +849,10 @@ function printVerdict() {
     process.exit(1)
   }
   if (probe.status !== 0) {
-    console.error(`check-doc-claims: 通过行探测子进程 exit ${probe.status}（同一份实现、同一棵树，'
-      + '本应同为通过）—— 拒绝出结论：${String(probe.stderr ?? '').trim().slice(-300)}`)
+    // ⚠️ 这里曾经是**坏的模板串拼接**（模板串没断，`'` + 换行 + `+ '` 被当成字面文本打进日志，
+    // 于是真实 stderr 被淹在乱码里）—— 报错文案本身不可读，正是本次 CI 排查的障碍之一。
+    console.error(`check-doc-claims: 通过行探测子进程 exit ${probe.status}（同一份实现、同一棵树，`
+      + `本应同为通过）—— 拒绝出结论：${String(probe.stderr ?? '').trim().slice(-300)}`)
     process.exit(1)
   }
   const captured = verdictLineFrom(probe.stdout ?? '')
@@ -914,9 +1006,10 @@ if (hits.length > 0 || moduleHits.length > 0 || failures.length > 0) {
 // 通过行由登记表生成、且刚刚被 `passLineProblems` 反解断言过（数量 + 逐条标签）——
 // 它只声称本轮**真的判过**的项。`--json` 模式只出 JSON（否则那份输出不是合法 JSON）。
 //
-// `VERDICT_PROBE_ENV` 是**通过行探测子进程**：它只把通过行真的打出去（父进程随后把这段
-// 字节抓回来反解断言）。父进程 `/ 子进程` 走的是同一份实现 —— 差别只有这一行。
+// `VERDICT_PROBE_ARG` 是**通过行探测子进程**：它只把通过行真的打出去（父进程随后把这段
+// 字节抓回来反解断言）。父进程 / 子进程 走的是同一份实现 —— 差别只有这一行。开关在 **argv**
+// 上（父进程自己构造），不在环境里：环境的任何取值都不该改变本判据的结论（2026-09-25 现场）。
 if (!json) {
-  if (process.env[VERDICT_PROBE_ENV] === '1') console.log(passLineFor(coveredItems))
+  if (verdictProbe) console.log(passLineFor(coveredItems))
   else printVerdict()
 }

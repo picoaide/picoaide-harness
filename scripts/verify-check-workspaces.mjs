@@ -615,6 +615,58 @@ for (const probe of ['.glitchtip-recon/c.txt', '.glitchtip-recon/nested/other.tx
   writeFileSync(join(tree, 'site', 'src', 'content', 'docs', 'faq.md'), '# FAQ\n\n没有 pin 断言。\n')
   const empty = spawnSync(process.execPath, [guard, '--root', tree], { cwd: root, encoding: 'utf8' })
   check(empty.status === 1, `文档数字守卫：零 pin 断言必须红而不是静默通过（实际 exit=${empty.status}）`)
+
+  // -------------------------------------------------------------------------
+  // 2026-09-25（第十三轮 R14-F）：CI 语境下的**自相矛盾**（PR #149 永远绿不了的那条）
+  //
+  // 现场（CI run 36086661679 的 gate-guards job，逐字）：
+  //   `check-doc-claims: 通过行探测子进程 exit 2（同一份实现、同一棵树，本应同为通过）`
+  // 机制：守卫第 ② 层判据**自己**用 `env: { ...process.env, CHECK_DOC_CLAIMS_VERDICT_PROBE: '1' }`
+  // 拉起探测子进程，子进程继承 `CI=true` ⇒ 撞上它自己那条"测试缝在 CI 语境下不得设置"
+  // ⇒ 判据的判据在另一个语境下判它自己非法。本地（无 CI）全绿、CI 必红。
+  //
+  // 修法：开关迁到 **argv**（父进程把 `--verdict-probe` 追加到自己 argv 的副本上），
+  // 那条 env 规则升级成"**任何语境**下设置即 exit 2"（修好后它没有合法来源）。
+  //
+  // 下面的判据就是"本地不带 CI 跑绿不算通过"的落地：**真仓 + `CI=true`** 必须绿且
+  // 真的打印通过行；不带 CI 也必须绿（两种语境都要，缺一半就还能再犯）。
+  // 用**真仓**而不是合成树：合成树上的绿证明不了 CI 里那棵树的行为（本次红就红在真仓）。
+  // -------------------------------------------------------------------------
+  /** 已废除的 env 开关（**刻意在本文件里重打一遍**，不 import 守卫 —— 两处同改才会静默）。 */
+  const VERDICT_SEAM_ENV = 'CHECK_DOC_CLAIMS_VERDICT_PROBE'
+  /** 通过行的可检索前缀（守卫里由登记表生成，这里只钉"真的打出来了"）。 */
+  const DOC_CLAIMS_PASS_LINE = 'check-doc-claims: 已覆盖 '
+  /** 干净语境：把 CI 的两种信号都摘掉（本文件自己可能就跑在 CI 里）。 */
+  const noCiEnv = { ...process.env }
+  delete noCiEnv.CI
+  delete noCiEnv.GITHUB_ACTIONS
+
+  const ciReal = spawnSync(process.execPath, [guard], { cwd: root, env: { ...process.env, CI: 'true' }, encoding: 'utf8' })
+  check(ciReal.status === 0,
+    `文档数字守卫：\`CI=true\` 下**真仓**必须绿（这就是 2026-09-25 CI 红的反面形态；`
+    + `实际 exit=${ciReal.status}：${ciReal.stderr.slice(0, 300)}）`)
+  check(ciReal.stdout.includes(DOC_CLAIMS_PASS_LINE) && ciReal.stdout.includes('✅'),
+    `文档数字守卫：\`CI=true\` 下真仓必须真的打印通过行（不是"退出码 0 但没出结论"）：`
+    + `${JSON.stringify(ciReal.stdout.slice(-200))}`)
+
+  const plainReal = spawnSync(process.execPath, [guard], { cwd: root, env: noCiEnv, encoding: 'utf8' })
+  check(plainReal.status === 0,
+    `文档数字守卫：不带 \`CI\` 时真仓同样必须绿（实际 exit=${plainReal.status}：${plainReal.stderr.slice(0, 300)}）`)
+
+  // 已废除的测试缝：**任何语境**下被外部设置都必须 exit 2（新语义；旧语义只在 CI 下拒绝，
+  // 既放过了本地攻击、又让判据在 CI 下自杀 —— 两个方向都要钉住）。
+  for (const [label, baseEnv] of [['CI=true', { ...process.env, CI: 'true' }], ['无 CI', noCiEnv]]) {
+    const seamSet = spawnSync(process.execPath, [guard], {
+      cwd: root,
+      env: { ...baseEnv, [VERDICT_SEAM_ENV]: '1' },
+      encoding: 'utf8',
+    })
+    check(seamSet.status === 2,
+      `文档数字守卫：外部设置已废除的测试缝 ${VERDICT_SEAM_ENV}（${label}）必须 exit 2，`
+      + `实际 exit=${seamSet.status}；stderr=${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
+    check(seamSet.stderr.includes('测试缝已废除') && seamSet.stderr.includes(VERDICT_SEAM_ENV),
+      `文档数字守卫：拒绝文案必须点名已废除的开关（${label}）：${JSON.stringify(seamSet.stderr.slice(0, 200))}`)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,7 +1121,7 @@ check(readSchedulerTables(readFileSync(subject, 'utf8')).entries.length >= 4,
     {
       task: 'check:check-workspaces',
       verdict: 'dropped',
-      line: 'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、迁移区间守卫与文档数字守卫的合成正/负例、调度/归属表自检 6 类注入（成环 / needs 打错 / PATH_OWNERS',
+      line: 'verify-check-workspaces: OK — --changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、迁移区间守卫与文档数字守卫的合成正/负例、文档数字守卫的 CI 语境真仓回归（CI=true 必须绿且打印通过行 / 已废除的 env 测试缝两种语境都必须 exit 2）、调度/归属表自检 6 类注入（成环 / needs 打错 / PATH_OWNERS',
     },
     {
       task: 'check:integration-tests',
@@ -2660,6 +2712,9 @@ process.stdout.write(
   + '--changed 算不出改动=exit 2、--only 未知/空/被 flag 吃掉=exit 2、'
   + '有效 --only 真的执行该包、.glitchtip-recon/ 已被忽略、变异体残留守卫的合成正/负例、'
   + '迁移区间守卫与文档数字守卫的合成正/负例、'
+  + '文档数字守卫的 **CI 语境**回归（`CI=true` 下真仓必须绿且真的打印通过行 —— '
+  + '2026-09-25「判据的判据在另一个语境下判它自己非法」的现场；该守卫的探测开关已从 env 迁到 argv，'
+  + '旧 env 开关**任何语境**下被外部设置都必须 exit 2，正反两个方向都钉住）、'
   + '调度/归属表自检 8 类注入（成环 / needs 打错 / PATH_OWNERS 前缀与包名打错 / 少条目 / '
   + '嵌套前缀且归属不同包（先声明者胜 ⇒ 死条目或归属按顺序翻转）/ DEPENDENTS 打错 / '
   + 'DEPENDENTS 少一条**反向边**（needs ↔ DEPENDENTS 双向一致））逐条必红、'

@@ -57,8 +57,12 @@
  * （版本 == pin 但文件仍是 pristine ⇒ 必红并点名锚点 / 补丁抽不出锚点 ⇒ 必红）。
  * 只测辅助函数证明不了 main() 真的判了。
  *
+ * 副本的"我是副本"标记走 **argv**（`--self-test-fence`，父进程自己构造），**不是**环境变量
+ * —— 2026-09-25 的同族收口：`CHECK_PATCH_PIN_SKIP_SELF_TEST` 这个环境变量可在**任何语境**
+ * （含 CI）关掉整段自证，且此前零判据拦它；现在它被废除，外部设置即 exit 2。
+ *
  * 用法：`node scripts/check-patch-pin.mjs [--skip-installed]`；
- * 退出码 0 通过、1 有断言失败。
+ * 退出码 0 通过、1 有断言失败、2 = 外部设置了已废除的测试缝。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -80,6 +84,40 @@ const PIN_BOUND = /^@deepseek-ai\/dsh-/
 
 /** `--skip-installed`：显式声明"这棵树没装依赖"，只查接线（判据 3 不跑）。 */
 const skipInstalled = process.argv.includes('--skip-installed')
+
+/**
+ * 自检子进程的 **argv** 开关（2026-09-25，第十三轮 R14-F 的同族收口）。
+ *
+ * `selfTest()` 把本脚本**复制**进合成树、用真实入口跑四例；副本必须不再派生子进程
+ * （否则无穷递归）—— 这个"我是副本"的标记原先走环境变量
+ * `CHECK_PATCH_PIN_SKIP_SELF_TEST`，而**环境是外部可改的输入面**：一句
+ * `CHECK_PATCH_PIN_SKIP_SELF_TEST=1`（`$GITHUB_ENV` / `env` / 继承）就能让本守卫在
+ * **任何语境**（含 CI）跳过整段合成树自证，且没有任何判据拦它。
+ * 现改为父进程把 {@link SELF_TEST_FENCE_ARG} **追加到自己 argv 的副本**上 ——
+ * 外部改不了父进程自己构造的 argv（改仓内文件则要先过 check-install-integrity 的
+ * 执行体锚定与 check-root-guards 的 argv 登记校验）。
+ */
+const SELF_TEST_FENCE_ARG = '--self-test-fence'
+
+/** 已**废除**的环境变量开关（只留名字给"外部设置即攻击面"的判据用）。 */
+const RETIRED_SELF_TEST_ENV = 'CHECK_PATCH_PIN_SKIP_SELF_TEST'
+
+/**
+ * {@link RETIRED_SELF_TEST_ENV} 在**任何语境**下被设置 ⇒ exit 2。
+ *
+ * 修好之后它没有任何合法来源（自检副本走 argv），所以"它被设上了"只剩一种解释：
+ * 有人想关掉本守卫的合成树自证。宁可红着停下，也不接受一句环境变量把判据摘掉。
+ */
+function refuseRetiredTestSeam() {
+  const value = process.env[RETIRED_SELF_TEST_ENV]
+  if (value === undefined || value === '') return
+  console.error(`check-patch-pin: 测试缝已废除：环境变量 ${RETIRED_SELF_TEST_ENV} **任何语境下都不得设置**`
+    + `（实际 ${JSON.stringify(value)}）—— 自检副本的标记已改由 argv 自调用（${SELF_TEST_FENCE_ARG}）传递，`
+    + '这个环境变量没有合法来源，外部设置它一律视为攻击面（唯一效果是跳过整段合成树自证）。')
+  process.exit(2)
+}
+
+refuseRetiredTestSeam()
 
 /**
  * 解析一条 patch resolution。
@@ -228,7 +266,8 @@ function anchorProblemsForCopy({ copy, copyLabel, patchPath, sections }) {
  * 树里放最小 `patches/` + `package.json`(resolutions) + `upstream.json`。
  */
 function selfTest() {
-  if (process.env.CHECK_PATCH_PIN_SKIP_SELF_TEST === '1') return
+  // 副本标记走 **argv**（父进程追加），不看环境 —— 见文件头"副本的'我是副本'标记"。
+  if (process.argv.includes(SELF_TEST_FENCE_ARG)) return
   const scratch = mkdtempSync(join(tmpdir(), 'check-patch-pin-'))
   const pin = JSON.parse(readFileSync(join(root, 'upstream.json'), 'utf8')).runtimePackageVersion
   const name = '@deepseek-ai/dsh-probe'
@@ -264,10 +303,11 @@ function selfTest() {
     }))
     mkdirSync(join(scratch, 'patches'))
     writeFileSync(join(scratch, 'patches', patchFile), fixturePatch)
-    const run = args => spawnSync(process.execPath, [join('scripts', 'check-patch-pin.mjs'), ...args], {
+    const run = args => spawnSync(process.execPath, [join('scripts', 'check-patch-pin.mjs'), ...args, SELF_TEST_FENCE_ARG], {
       cwd: scratch,
       encoding: 'utf8',
-      env: { ...process.env, CHECK_PATCH_PIN_SKIP_SELF_TEST: '1' },
+      // 不再注入任何自检开关：副本靠 **argv** 认出自己（环境是外部可改的输入面）。
+      env: { ...process.env },
     })
     const expect = (label, result, wantStatus, mustInclude) => {
       if (result.status !== wantStatus) {
