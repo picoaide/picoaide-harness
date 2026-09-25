@@ -602,6 +602,15 @@ func (a *AdminAPI) enableMyMFA(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "请求体格式错误")
 		return
 	}
+	// R15C-02(审计 2026-09-25,P1):已开启时**不得**再走"开启"流程 —— 那等于
+	// 只凭主密码就能替换第二因子,而移除/替换第二因子的正确闸门是
+	// disableMyMFA(主密码 + 当前动态码双验,决策 2026-09-04)。
+	// 更强的动作不能由更弱的闸门守着;要换验证器必须先关闭再开启。
+	if u.TotpEnabled {
+		writeError(c, http.StatusConflict, "MFA_ALREADY_ENABLED",
+			"双重验证已开启;如需更换验证器,请先关闭双重验证(需主密码与当前动态码)后重新开启")
+		return
+	}
 	if u.Source != "local" || u.PasswordHash == "" {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "主密码错误")
 		return
@@ -662,6 +671,13 @@ func (a *AdminAPI) verifyMyMFA(c *gin.Context) {
 		return
 	}
 	if err := serverstore.SetUserMFA(a.DB, u.ID, ch.Secret, true); err != nil {
+		// R15C-02(审计 2026-09-25,P1):挑战是"未开启"时签发的,而此刻账号已经
+		// 开启了 MFA(并发双开 / 陈旧 ticket)⇒ 写入侧守卫拒绝覆盖既有密钥。
+		if errors.Is(err, serverstore.ErrMFAAlreadyEnabled) {
+			writeError(c, http.StatusConflict, "MFA_ALREADY_ENABLED",
+				"双重验证已开启;如需更换验证器,请先关闭双重验证(需主密码与当前动态码)后重新开启")
+			return
+		}
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
@@ -1080,7 +1096,8 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 	}
 	// C-17: the last-admin guard runs inside the DeleteUser transaction;
 	// the pre-check was removed to close the count-then-delete TOCTOU.
-	if err := serverstore.DeleteUser(a.DB, id); err != nil {
+	erased, err := serverstore.DeleteUser(a.DB, id)
+	if err != nil {
 		if errors.Is(err, serverstore.ErrLastAdmin) {
 			writeError(c, http.StatusBadRequest, "VALIDATION", "不能删除最后一个管理员")
 			return
@@ -1090,7 +1107,12 @@ func (a *AdminAPI) deleteUser(c *gin.Context) {
 	}
 	// 删除用户连带清空其 api_tokens（FK/DAO 语义）⇒ 会话键整批失效（契约 §8.2）。
 	a.notifyUserSessionsRevoked(id)
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_delete", u.Username)
+	// R15C-01（审计 2026-09-25，P1）：删除会**抹除**该用户的用量记录（明细 + 日/月
+	// 汇总）与资金流水（balance_ledger + 发放锚）。抹掉了多少必须留在审计链里
+	// （0048 哈希链不可篡改），否则历史报表出现缺口时无从解释。
+	detail := fmt.Sprintf("%s（抹除用量 %.2f 元/%d 笔、余额流水 %.2f 元/%d 笔）",
+		u.Username, erased.UsageCost, erased.UsageRequests, erased.BalanceAmount, erased.BalanceRows)
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "user_delete", detail)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1117,7 +1139,11 @@ func (a *AdminAPI) listUserTokens(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
 	}
-	tokens, err := serverstore.ListTokensByUser(a.DB, id)
+	// R15C-R-01（审计 2026-09-25，P1）：列表**有界返回**（最近 TokenListMax 条）
+	// 并如实披露 total/truncated。此前 SQL 无 LIMIT、handler 全量 JSON、webadmin
+	// 整个数组进 state ⇒ 长期累积后单次加载实测 130 MiB 响应 / 在飞堆 +656 MB。
+	// 截断必须可见（truncated=true + total），绝不静默少给。
+	tokens, total, err := serverstore.ListTokensByUser(a.DB, id, serverstore.TokenListMax)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -1133,7 +1159,7 @@ func (a *AdminAPI) listUserTokens(c *gin.Context) {
 			ExpiresAt: tk.ExpiresAt.Format(time.RFC3339), LastUsedAt: lastUsed, Revoked: tk.Revoked,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"tokens": out})
+	c.JSON(http.StatusOK, gin.H{"tokens": out, "total": total, "truncated": total > int64(len(out))})
 }
 
 func (a *AdminAPI) revokeToken(c *gin.Context) {

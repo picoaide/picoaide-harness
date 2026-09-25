@@ -101,6 +101,12 @@ export default function Users() {
   const [deptNote, setDeptNote] = useState('')    // 多组/LDAP 归属提示(中4)
   const [tokensUser, setTokensUser] = useState<User | null>(null)
   const [tokens, setTokens] = useState<ApiToken[]>([])
+  /**
+   * 该用户令牌**总行数**(R15C-R-01,审计 2026-09-25,P1):服务端列表现在有界返回
+   * (最多 500 条,最近的在前)并给出 total ⇒ 超出部分必须在界面上如实说明,
+   * 不能让"最近 500 条"看起来像"全部"。
+   */
+  const [tokensTotal, setTokensTotal] = useState(0)
   const [deptUser, setDeptUser] = useState<User | null>(null)
   const [deptSelect, setDeptSelect] = useState<string[]>([])   // 多部门(2026-09)
   // 2026-09-23 审计 WEB-1(P0):「设置部门」对话框的写面闸门。部门树 GET 失败时
@@ -202,8 +208,9 @@ export default function Users() {
   async function remove(u: User) {
     if (busy) return // 双击守卫(审计2026-W9)
     if (!window.confirm(`确定删除用户 ${u.username}?`)) return
-    // 删除前再提示后果:服务端级联清理其令牌/用量/组归属,不可恢复
-    if (!window.confirm(`再确认:删除 ${u.username} 将同时清除其全部 API 令牌、用量记录与组归属,此操作不可恢复。确定继续?`)) return
+    // 删除前再提示后果:服务端级联**抹除**其令牌/用量(明细+日/月汇总)/余额流水/组归属,
+    // 不可恢复;被抹除的金额会记入审计日志(R15C-01)。
+    if (!window.confirm(`再确认:删除 ${u.username} 将同时抹除其全部 API 令牌、用量记录(明细与日/月汇总)与余额流水、组归属,此操作不可恢复(被抹除的金额会记入审计日志)。确定继续?`)) return
     setBusy(true)
     try {
       await request(`${ADMIN_API}/users/${u.id}`, { method: 'DELETE' })
@@ -221,12 +228,14 @@ export default function Users() {
     const current = ++tokensSeq.current // P1-8: 快速切换用户时只认最新响应
     setTokensUser(u)
     setTokens([])          // 中5:打开即清空,避免跨用户残留上一用户令牌
+    setTokensTotal(0)
     setTokenErr('')
     setTokensLoading(true)
     try {
       const data = await request(`${ADMIN_API}/users/${u.id}/tokens`)
       if (current !== tokensSeq.current) return // P1-8: 过期响应丢弃
       setTokens(data.tokens)
+      setTokensTotal(typeof data.total === 'number' ? data.total : (data.tokens ?? []).length)
     } catch (err: any) {
       if (current !== tokensSeq.current) return // P1-8: 过期响应不写错误
       setTokenErr(err.message) // 中5:错误显示在对话框内,不再误报「暂无令牌」
@@ -560,6 +569,12 @@ export default function Users() {
           ) : tokens.length === 0 ? (
             <div className="text-sm text-muted-foreground">该用户暂无令牌</div>
           ) : (
+            <>
+            {tokensTotal > tokens.length && (
+              <div className="mb-2 text-[11px] text-muted-foreground" data-testid="tokens-truncated-note">
+                仅显示最近 {tokens.length} 条(共 {tokensTotal} 条);更早的令牌若仍在有效期内,列表不再全部展开。
+              </div>
+            )}
             <Table>
               <TableHeader>
                 <TableRow>
@@ -591,6 +606,7 @@ export default function Users() {
                 })}
               </TableBody>
             </Table>
+            </>
           )}
         </DialogContent>
       </Dialog>

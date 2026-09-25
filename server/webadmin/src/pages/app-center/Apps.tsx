@@ -483,6 +483,8 @@ export default function Apps() {
   // 体验层能力判定:服务端 RequirePermission 才是护栏(见页面头注释)。
   const canRead = hasPermission(PERM_CAP_READ)
   const canWrite = hasPermission(PERM_CAP_WRITE)
+  /** 列表读取成功 = 「更新审批」开关的取值可信(R15C-W-08);失败/未读到 ⇒ 状态未知、开关禁用。 */
+  const reviewStateKnown = loaded && loadError === ''
 
   const listQuery = useMemo(() => {
     const params = new URLSearchParams()
@@ -905,16 +907,21 @@ export default function Apps() {
                 id="wasm-review-required"
                 aria-label="更新审批"
                 checked={reviewRequired}
-                disabled={!canWrite || busy === 'review'}
+                // R15C-W-08（审计 2026-09-25，P2）：取值来自列表 GET（review_required），
+                // **没读到就不能给确定结论** —— 此前首屏 GET 失败时开关仍按初值 false
+                // 渲染成「关闭:更新即生效」，管理员据此形成错误的状态认知（还会拿到问
+                // 「开启更新审批?」的确认框，而真实状态可能已是开启）。同理禁用开关：
+                // 在状态未知时点它会发出一个基于猜测的写请求。
+                disabled={!canWrite || busy === 'review' || !reviewStateKnown}
                 aria-describedby={!canWrite ? 'apps-readonly-note' : undefined}
-                title={canWrite ? undefined : '没有 capability:write 权限,仅可查看'}
+                title={!canWrite ? '没有 capability:write 权限,仅可查看' : (reviewStateKnown ? undefined : '列表未读取成功,状态未知,已禁用')}
                 onCheckedChange={(v) => { setReviewPrompt(v) }}
               />
               <Label htmlFor="wasm-review-required" className="text-xs">更新审批</Label>
               <span className="text-[11px] text-muted-foreground">
-                {reviewRequired ? '开启:新版本需审核' : '关闭:更新即生效'}
+                {!reviewStateKnown ? '状态未知:列表未读取成功' : (reviewRequired ? '开启:新版本需审核' : '关闭:更新即生效')}
               </span>
-              {pendingTotal > 0 && (
+              {reviewStateKnown && pendingTotal > 0 && (
                 <Badge variant="destructive" data-testid="org-pending-count" title="全组织待审版本数">
                   待审 {pendingTotal}
                 </Badge>

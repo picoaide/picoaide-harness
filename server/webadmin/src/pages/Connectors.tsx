@@ -374,6 +374,10 @@ export default function Connectors() {
       const data = await request<{ connectors: ConnectorRow[] }>(`${ADMIN_API}/connectors`)
       setRows(data.connectors ?? [])
     } catch (err: any) {
+      // R15C-W-03（审计 2026-09-25，P2）：刷新失败时旧表必须撤下 —— 否则行内
+      // 「下发」开关 / 编辑 / 删除都会继续对**过期快照**发写请求（另一位管理员可能
+      // 刚改过状态或已删除该行）。与 Apps.tsx「失败即清空列表」同口径。
+      setRows([])
       setError(err.message)
     } finally {
       setLoading(false)
@@ -539,6 +543,9 @@ export default function Connectors() {
 
       {loading ? (
         <EmptyState icon={<Plug className="h-6 w-6" />} title="加载中…" desc="请稍候" />
+      ) : error ? (
+        <EmptyState icon={<Plug className="h-6 w-6" />} title="连接器列表未读取成功"
+          desc="读取失败时不渲染任何行（行内开关/编辑/删除都会作用在过期快照上）；请点右上角「刷新」重试" />
       ) : rows.length === 0 ? (
         <EmptyState icon={<Plug className="h-6 w-6" />} title="暂无连接器" desc="创建第一个连接器后,客户端将自动同步" />
       ) : (

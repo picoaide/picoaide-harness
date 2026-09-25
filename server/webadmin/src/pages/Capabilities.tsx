@@ -133,6 +133,11 @@ export default function Capabilities() {
       setAllRows(data.approvals ?? [])
     } catch (err: any) {
       if (current !== loadSeq.current) return
+      // R15C-W-02（审计 2026-09-25，P2）：失败必须把**行**清掉。此前只 setError，
+      // 切 tab 后失败仍渲染上一个 tab 的行，而行内「删除/通过/拒绝/下架」全部可点
+      // —— 管理员点「已拒绝」本意是清理已拒绝的版本，屏幕上却是待审版本，删除还会
+      // 不可恢复地释放归档字节。与 Apps.tsx「列表读取失败 = 页面级的确定态」同口径。
+      setAllRows([])
       setError(err.message)
     } finally {
       if (current === loadSeq.current) setLoading(false)
@@ -274,6 +279,10 @@ export default function Capabilities() {
 
       {loading ? (
         <EmptyState icon={<Share2 className="h-6 w-6" />} title="加载中…" desc="请稍候" />
+      ) : error ? (
+        // 失败 ≠ 空态：说清"没读到"，并指回可用的重试入口（右上角刷新 / 切换 tab）。
+        <EmptyState icon={<Share2 className="h-6 w-6" />} title="审批列表未读取成功"
+          desc="为避免把上一页的数据当成当前结果，读取失败时不渲染任何行；请点右上角刷新重试" />
       ) : shown.length === 0 ? (
         <EmptyState icon={<Share2 className="h-6 w-6" />} title="暂无待处理能力" desc="员工上传的技能/Agent 将出现在这里" />
       ) : (

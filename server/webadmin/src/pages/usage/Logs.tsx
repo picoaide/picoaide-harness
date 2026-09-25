@@ -57,6 +57,11 @@ export default function UsageLogs() {
       setStats({ cost: s.cost, tokens: s.tokens, requests: s.requests })
     } catch (e: any) {
       if (current !== loadSeq.current) return // P2-46: 过期响应不写错误
+      // R15C-W-07（审计 2026-09-25，P2）：失败清空明细与总数(与 Audit 页同族)；
+      // 否则旧明细会继续冒充本次筛选结果，而「导出 CSV」按条件重取数也会读到
+      // 已经不可信的总数。
+      setRows([])
+      setTotal(0)
       setError(e.message || '查询失败')
     } finally {
       if (current === loadSeq.current) setLoading(false)
@@ -165,7 +170,8 @@ export default function UsageLogs() {
                       <TableCell className="text-right tabular-nums">{fmtY(r.cost)}</TableCell>
                     </TableRow>
                   ))}
-                  {rows.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>}
+                  {/* R15C-W-07：失败 ≠ 空态 —— error 在场时不渲染「暂无数据」(那是"已确认没有记录"的语义)。 */}
+                  {rows.length === 0 && !error && <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无数据</TableCell></TableRow>}
                 </TableBody>
               </Table>
               {/* 分页 */}

@@ -70,6 +70,11 @@ export const ACTION_LABEL: Record<string, string> = {
   user_delete: '删除用户',
   user_dept: '用户部门变更',
   user_tokens_revoked: '吊销令牌',
+  // 令牌签发配额（R15C-R-01 的配套加固，2026-09-25）：员工自助登录每次都会签发
+  // 一条 90 天令牌，同账号高频登录会把 api_tokens 撑成无界表；被**配额**挡住的那次
+  // 登录在服务端留痕（serverauth/token_quota.go），这里必须有中文标签 —— 否则行内
+  // 回落成裸 id、且进不了筛选下拉（`Audit.test.tsx` 的服务端写点双向对拍会直接红）。
+  token_issue_quota_exceeded: '令牌签发超限被拒',
   auth_config: '修改认证配置',
   // LDAP 目录同步（第五轮审计 R5-B-8，2026-09-23）：同步**只自动停用、永不自动
   // 启用**。两个动作各一条标签：`directory_enable_skipped` 是每轮一条的汇总
@@ -282,6 +287,12 @@ export default function Audit() {
       })
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
+      // R15C-W-06（审计 2026-09-25，P2）：失败必须清空行与总数。此前只 setError，
+      // 于是"上一次成功、与当前筛选条件不符"的那一页继续冒充本次筛选结果，而
+      // `exportCSV()` 直接吃内存里的 logs ⇒ 错误被导出**固化**成留档文件。
+      setLogs([])
+      setTotal(0)
+      setLogsLoaded(false)
       setError(err.message)
     }
   }, [])
@@ -320,6 +331,8 @@ export default function Audit() {
   // 用户名,服务端只限长度不校验字符集),导出后管理员在 Excel/LibreOffice
   // 打开会执行以 = + - @ 开头的单元格。改用与用量中心同一份 lib/csv.ts。
   const exportCSV = () => {
+    // R15C-W-06:只在"这一页确实读到了"时才允许导出(内存行的来源就是这次读取)。
+    if (!logsLoaded || logs.length === 0) return
     const header = ['id', 'username', 'action', 'detail', 'created_at']
     downloadCsv(
       `audit-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -357,7 +370,9 @@ export default function Audit() {
         desc="敏感操作记录(用户/部门/技能等)"
         actions={
           <>
-            <Button size="sm" variant="outline" onClick={exportCSV}>
+            {/* 导出的数据源就是这一页的内存行(R15C-W-06)⇒ 没读到行时必须禁用,
+                否则会把"旧筛选条件下的上一页"或空表固化成 CSV 留档。 */}
+            <Button size="sm" variant="outline" onClick={exportCSV} disabled={!logsLoaded || logs.length === 0}>
               <Download className="h-3.5 w-3.5" /> 导出 CSV
             </Button>
             <Button size="sm" variant="outline" onClick={() => load(page, appliedAction, appliedUser)}>
@@ -475,6 +490,17 @@ export default function Audit() {
               <TableCell className="font-mono text-xs text-muted-foreground">{fmtTime(l.created_at)}</TableCell>
             </TableRow>
           ))}
+          {!logsLoaded && error && (
+            <TableRow>
+              <TableCell colSpan={5} className="border-0 p-0">
+                <EmptyState
+                  icon={<ScrollText className="h-5 w-5 text-muted-foreground" />}
+                  title="审计记录未读取成功"
+                  desc="读取失败时不保留上一页的行（否则会冒充本次筛选结果）；请重试或调整筛选条件"
+                />
+              </TableCell>
+            </TableRow>
+          )}
           {logsLoaded && logs.length === 0 && (
             <TableRow>
               <TableCell colSpan={5} className="border-0 p-0">

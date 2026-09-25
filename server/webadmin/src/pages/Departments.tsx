@@ -32,6 +32,14 @@ export default function Departments() {
   // 2026-09-17 审计 F7：空态提示在加载完成前就渲染（“暂无部门”读起来像已确认没有）。
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
+  /**
+   * **列表读取**失败(R15C-W-04,审计 2026-09-25,P2):与 `error`(动作失败,如删除被
+   * 关联拒绝)分开。合用一个状态会让"删除失败"也把空态压掉,而这条规则要的是:
+   * 只有**成功读到且确实为空**才渲染「暂无部门」——失败永远不渲染空态(那是
+   * "已确认没有部门"的语义,会让人以为组织架构丢了、并把新建部门的上级候选退化成
+   * 只剩「无(顶层部门)」)。
+   */
+  const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState(false) // L10:提交/删除双击守卫
   const [deptDialog, setDeptDialog] = useState(false)
   const [deptForm, setDeptForm] = useState({ id: 0, name: '', parent_id: '0', leader_id: '0', description: '' })
@@ -47,11 +55,16 @@ export default function Departments() {
       if (current !== loadSeq.current) return // P1-8: 过期响应丢弃
       setDepts(d.departments ?? [])
       setError('') // 成功后清空错误(中3 同口径)
+      setLoadError('')
       setLoaded(true)
     } catch (err: any) {
       if (current !== loadSeq.current) return // P1-8: 过期响应不写错误
-      setError(err.message)
-      setLoaded(true) // 失败也解除闸门，避免永久“加载中”
+      setLoadError(err.message)
+      // R15C-W-04（审计 2026-09-25，P2）：失败**不是**"已确认没有部门"。此前这里
+      // setLoaded(true)，于是空态「暂无部门 / 点击「新建部门」开始搭建组织架构」被
+      // 渲染出来 —— 权限或后端故障被读成"组织架构丢了"，且此刻点「新建部门」的
+      // 上级候选只剩「无(顶层部门)」，很容易误建成顶层部门。加载闸门只在成功时解锁。
+      setLoaded(false)
     }
   }, [])
 
@@ -117,7 +130,7 @@ export default function Departments() {
         desc="金字塔架构:部门树(可嵌套)→ 部门主管 → 员工;授权给部门覆盖其子部门,主管自动继承部门及下级授权;「全员」为内置保留部门。员工可花的钱统一由「用量中心 → 余额」管理"
         actions={<Button onClick={() => openDeptEdit()}>新建部门</Button>}
       />
-      {error && <div className="text-sm text-destructive">{error}</div>}
+      {(loadError || error) && <div className="text-sm text-destructive">{loadError || error}</div>}
       <Card>
       <Table>
         <TableHeader>
@@ -157,7 +170,7 @@ export default function Departments() {
               </TableRow>
             )
           })}
-          {loaded && depts.length === 0 && (
+          {loaded && !loadError && depts.length === 0 && (
             <TableRow>
               <TableCell colSpan={7} className="border-0 p-0">
                 <EmptyState
