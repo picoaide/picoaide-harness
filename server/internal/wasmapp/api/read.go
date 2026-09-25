@@ -37,7 +37,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) diagnostics(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -206,7 +206,7 @@ type schemaCol struct {
 }
 
 func (h *Handlers) schema(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -509,7 +509,7 @@ func pragmaInt(ctx context.Context, db *sql.DB, name string) int64 {
 // 只回"被占用了"，不回是谁占的、叫什么、什么状态 —— 与 docs/07 的 NAME_TAKEN
 // 口径一致。存在性本身不是新增泄露：发布路径的 409 与目录都已经披露它。
 func (h *Handlers) availability(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -590,7 +590,7 @@ func (h *Handlers) availability(c *gin.Context) {
 
 // catalog 是应用中心目录（GET /apps/wasm/catalog）。
 func (h *Handlers) catalog(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -752,8 +752,12 @@ func (h *Handlers) catalog(c *gin.Context) {
 // 鉴权沿用 ownedApp（与 publish/unpublish/freeze/export/diagnostics 同一份判定）：
 // **非发布者一律 404「应用不存在」**，且与"应用真的不存在"逐字节同形（`notFoundApp`
 // 对两种情况给出同一个 details/hints）—— 不泄露应用是否存在（R38/§8 的既有纪律）。
-// 平台管理员（super_admin）照旧放行，与其余管理动作同口径。allowDeleted=true：
-// 退役（软删）应用的只读面与 export/diagnostics 一致，保留期内作者仍要能回看结论。
+// 平台管理员（super_admin）照旧放行，与其余管理动作同口径。**allowDeleted=false**：
+// 退役（软删）应用的只读面与 export/diagnostics 一致 —— 保留期内作者仍要能回看
+// 「当初为什么被拒」（R1-pm-3 的承诺不能在删除那一刻断掉）。退役**只清制品字节**，
+// 不把 release 行标成已删（见 serverstore.SoftDeleteWasmApp），所以缺省的
+// `deleted_at IS NULL` 读面照样看得见它们；显式传 true 会把作者自己删掉的版本
+// （SoftDeleteWasmRelease / GC）也一并列出来，那不是这个端点的语义。
 //
 // 返回每版 version / status / reason / created_at / current / checksum / size，
 // **不含制品字节**（ListWasmReleases 走清单投影，archive 从不进内存）。
@@ -761,7 +765,7 @@ func (h *Handlers) catalog(c *gin.Context) {
 // 不写审计：与 adminReleases 同口径 —— 这是"读自己的版本清单"，发布者每次打开面板
 // 都会调一次，逐次落审计只会把审计链淹掉；状态变更（发布/审批/上下架）仍然条条留痕。
 func (h *Handlers) myReleases(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -831,7 +835,7 @@ func exportTitleSource(app *serverstore.WasmApp) string {
 }
 
 func (h *Handlers) export(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}

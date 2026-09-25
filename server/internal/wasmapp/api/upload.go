@@ -48,7 +48,7 @@ import (
 // uploadState 是分片上传会话存储的**惰性单例**（Handlers 的字段，类型定义在本文件）。
 //
 // 为什么惰性：Store 需要 DataRoot（装配期才知道），而 NewHandlers 没有 error 通道；
-// 惰性构造让"未配置数据根"在第一次请求时以结构化错误暴露（与 requireReady 同口径）。
+// 惰性构造让"未配置数据根"在第一次请求时以结构化错误暴露（与 requirePlatform 同口径）。
 type uploadState struct {
 	once  sync.Once
 	store *upload.Store
@@ -106,7 +106,7 @@ type uploadCreateRequest struct {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadCreate(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -150,7 +150,7 @@ func (h *Handlers) uploadCreate(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadChunk(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -250,7 +250,7 @@ func lengthRequiredErr() *apperr.Error {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadStatus(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -282,7 +282,7 @@ func (h *Handlers) uploadStatus(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadComplete(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -466,7 +466,7 @@ func checkCompletePayload(p uploadPayload, sess *upload.Session) *apperr.Error {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadAbort(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}

@@ -43,12 +43,18 @@ import (
 
 // seedExpensiveModel 把模型单价抬到「一次调用必然超过余额」。
 //
-// R16C-02（审计 2026-09-25）起价位必须**两侧一起看**：准入侧新增的"最小计费额"
-// = prompt 估算 token × **输入价**，输入价非 0 时这三条用例会**在准入处**就被拒
-// （它们要测的是**结算**路径，前置条件会因此不成立 —— 实测确实红了三条）。
-// 所以"贵"全部放在**输出侧**：输入价 0 ⇒ 最小计费额不参与判定（算不出下界时不拦），
-// 而输出 4e5 元/1M 让"一次调用必然超过余额且超过 1 元"这条前置条件照旧成立。
-// 上游固定回 usage{prompt:8, completion:3} ⇒ 合计 3×4e5/1e6 = 1.20 元。
+// 价位必须**两侧一起看**：
+//   - **输出侧**放"贵"：4e5 元/1M × 3 completion token = 1.20 元 ⇒ 一次调用必然
+//     超过余额（0.01 元），这三条用例要测的**结算**路径才成立；
+//   - **输入侧必须 > 0 且足够小**：R16C-02 起准入侧有"最小计费额"（= prompt 估算
+//     token × 输入价），输入价 0 时它算不出下界、**不参与**判定；
+//     但 R17A-06（审计 2026-09-25，P1）起"输入价 <= 0 ⇒ 未定价模型 ⇒ 默认策略
+//     reject ⇒ 直接 429 MODEL_NOT_PRICED"——用例会在**准入处**就被拒，根本走不到
+//     结算路径（实测：改前这里写 0，R17A-06 修复后本文件两条用例立刻变红）。
+//     所以输入价取 100 元/1M：估算 ~17 token ⇒ 最小计费额 ~1700 微元 = 0.0017 元
+//     < 余额 0.01 元 ⇒ 过闸；而它同时让"输入价 > 0"成立 ⇒ 不再落进未定价策略。
+//     结算合计 = 8×100/1e6 + 3×4e5/1e6 ≈ 1.2008 元，照旧 > 1 元（下面那条
+//     pgx 整数截断的坑要求单次费用 > 1 元）。
 //
 // 余额必须能过**两**道口径(这是踩过的坑,别再改小):
 //   - SetUserBalance 经 roundMoney 取整到**分**,0.0001 会被取整成 0
@@ -68,7 +74,7 @@ const smallBalance = 0.01
 
 func seedExpensiveModel(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 0, output_price_per_1m = 400000 WHERE name = 'deepseek-chat'`); err != nil {
+	if _, err := db.Exec(`UPDATE models SET input_price_per_1m = 100, output_price_per_1m = 400000 WHERE name = 'deepseek-chat'`); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -142,15 +148,17 @@ func TestBalanceSettlementOverdraftChargesStream(t *testing.T) {
 	if strings.Contains(out, "BALANCE_EXHAUSTED") {
 		t.Fatalf("流式结算已允许透支欠款,不应再报余额不足: %q", out)
 	}
-	// 欠款如实落账:上游上报 pt=10 / ct=5 @ 0 / 4e5 元/1M → 2.00 元（输入价 0 见
-	// seedExpensiveModel 的注释:R16C-02 起"贵"必须放在输出侧才不会在准入处被拒）。
+	// 欠款如实落账:上游上报 pt=10 / ct=5 @ 100 / 4e5 元/1M → 0.001 + 2.0 = 2.001 元
+	// （输入价取 100 的理由见 seedExpensiveModel 的注释:R17A-06 起"输入价 0"等于
+	// 未定价模型,会在准入处被 429 MODEL_NOT_PRICED,根本走不到结算路径）。
 	var pt, ct int64
 	var cost float64
 	if err := db.QueryRow(`SELECT prompt_tokens, completion_tokens, cost FROM usage`).Scan(&pt, &ct, &cost); err != nil {
 		t.Fatalf("已交付的流式请求没有落账(零落账): %v", err)
 	}
-	if pt != 10 || ct != 5 || math.Abs(cost-2.0) > 1e-9 {
-		t.Fatalf("落账数据不符: pt=%d ct=%d cost=%.9f, want 10/5/2.0", pt, ct, cost)
+	// 2.001 = 10×100/1e6（输入）+ 5×4e5/1e6（输出）。
+	if pt != 10 || ct != 5 || math.Abs(cost-2.001) > 1e-9 {
+		t.Fatalf("落账数据不符: pt=%d ct=%d cost=%.9f, want 10/5/2.001", pt, ct, cost)
 	}
 	var balance, ledgerSum float64
 	if err := db.QueryRow(`SELECT balance_money FROM users WHERE id = 1`).Scan(&balance); err != nil {

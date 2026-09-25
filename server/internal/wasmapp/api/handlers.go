@@ -268,7 +268,7 @@ type Handlers struct {
 const SettingReviewRequired = "wasm.review_required"
 
 // NewHandlers 构造 handler 集合。opt 的零值字段按"未配置即 fail-closed"处理
-// （见 requireReady），不在这里 panic —— 装配错误应该在第一次请求时以结构化
+// （见 requirePlatform / requireCompiler），不在这里 panic —— 装配错误应该在第一次请求时以结构化
 // 错误暴露，而不是让整个进程起不来（router 只拿得到 *Handlers，没有 error 通道）。
 func NewHandlers(opt Options) *Handlers {
 	h := &Handlers{opt: opt}
@@ -390,14 +390,38 @@ func (h *Handlers) artifactUsed(ctx context.Context, username string) (int64, er
 	return serverstore.CountUserArtifactBytes(ctx, h.opt.DB, username)
 }
 
-// requireReady 检查装配完整性（fail-closed：缺依赖就报 INTERNAL，绝不静默跳过检查）。
-func (h *Handlers) requireReady() *apperr.Error {
+// requirePlatform 检查**平台装配完整性**（DB + DataRoot）。
+//
+// 这是**平台所有端点**（发现面 / 执行面 / 管理面 / 应急处置面）的准入自检，
+// fail-closed：缺依赖就报 INTERNAL，绝不静默跳过检查。
+//
+// R17C-01（审计 2026-09-25，P1）：此前这里**还**把 `h.opt.Compiler == nil` 判成
+// "平台未就绪"，于是编译器缺席（compose 缺省 `PICOAI_COMPILE_ISOLATION=auto` 下
+// bwrap 不可用、或镜像里少一个 picoaide-app-compile 二进制）时，**33 个调用点全体**
+// 500：员工的应用目录/可用性/自省，以及管理端的列表 / freeze / unpublish / delete /
+// review / limits 全部不可用 —— 降级态下管理员失去"下架一个行为异常应用"的处置能力，
+// 而同进程的执行面（open/request）与 `/readyz {ok:true, compile_available:false}`
+// 都表明平台本体健康，启动日志也写着"其余功能正常"。编译器只被发布面真正需要。
+func (h *Handlers) requirePlatform() *apperr.Error {
 	switch {
 	case h.opt.DB == nil:
 		return apperr.New(apperr.CodeInternal, "平台数据库未配置")
 	case strings.TrimSpace(h.opt.DataRoot) == "":
 		return apperr.New(apperr.CodeInternal, "平台数据根未配置")
-	case h.opt.Compiler == nil:
+	}
+	return nil
+}
+
+// requireCompiler 是**发布面专属**的准入自检：平台就绪 + 编译子系统在位。
+//
+// 只有真的会编译/校验/占用编译并发额度的端点走它（upload*/validate/publish）。
+// 其余端点一律走 requirePlatform —— 发布面不可用不该把发现面与管理面一起拖下水
+// （R17C-01）。返回的错误文案逐字保留，它是发布面 fail-closed 的对外契约。
+func (h *Handlers) requireCompiler() *apperr.Error {
+	if err := h.requirePlatform(); err != nil {
+		return err
+	}
+	if h.opt.Compiler == nil {
 		return apperr.New(apperr.CodeInternal, "编译子系统未配置").
 			WithHint("发布链路必须同步编译（§6.2）：没有编译器时不允许「只看静态校验」就发布")
 	}
@@ -406,7 +430,7 @@ func (h *Handlers) requireReady() *apperr.Error {
 
 // publishGate 是**发布面**的 fail-closed 水位闸门（§4.9：低于阈值拒绝发布）。
 //
-// 位置纪律：在 requireReady 之后、任何实际工作之前 —— 不读请求体（上传体 base64
+// 位置纪律：在 requireCompiler 之后、任何实际工作之前 —— 不读请求体（上传体 base64
 // 可达 44 MiB）、不占上传额度、不落盘、不写审计（与"限流/占位被拒不写审计"同口径：
 // 否则一个循环重试的客户端就能刷爆审计表）。平台可用性与身份无关，因此它排在
 // 身份判定之前：低水位平台不该先花力气去解析一次上传。

@@ -9,7 +9,7 @@ package llmgateway
 // （`defaultRateLimit = 0`）+ 只限并发 32 ⇒ 循环没有终点。实测：余额 0.01、
 // 单次成本 0.02 的账号连发 10 次 = **10 次上游命中**（修后 = 0）。
 //
-// 本闸门在原判据之外补两层（两层都在**转发之前**，所以被拒的请求不产生上游调用）：
+// 本闸门在原判据之外补三层（三层都在**转发之前**，所以被拒的请求不产生上游调用）：
 //
 //	① 最小计费额：`minBillableMicro` = 平台自己的 prompt 估算口径
 //	   （estimatePromptTokensFromBody，与计量兜底**同一实现**）× 该模型的输入价。
@@ -18,25 +18,39 @@ package llmgateway
 //	   余额不足失败，都会把该账号的准入下限抬到当时余额之上（失败整笔回滚 ⇒ 余额
 //	   不变 ⇒ 不会自我解除）。这一层是必需的：prompt 估算只是成本下界，输出侧长度
 //	   事前不可知，只有它才能把"可无限重复"收成"每次充值最多漏一次"。
+//	③ **未定价模型**（R17A-06，审计 2026-09-25，P1）：输入价 NULL 或 <= 0 的模型
+//	   上 ①② 与"分位余额 <= 0"**同时失效** —— 成本侧按同一份 0 价算 cost=0 ⇒
+//	   结算永不失败 ⇒ 下限永不置位、余额一分不减 ⇒ 分位余额永不 <= 0。实测余额
+//	   0.01 的账号在 NULL 定价 / 0 定价模型上 20/20、25/25 全部交付且全部命中上游。
+//	   因此默认策略（`reject`）对未定价模型**直接拒绝**（`MODEL_NOT_PRICED`），
+//	   逃生门是网关设置 `gateway.unpriced_model_policy=allow`（见 serverstore 的
+//	   UnpricedModelPolicyReject 注释：为什么默认必须是 reject、以及"兜底价"为什么
+//	   闭合不了这个洞）。
 //
 // 三层判据的**顺序**是有意的：先判 0/未开通（最便宜、与历史行为逐字一致），再判
-// 学到的下限（无需任何额外查询），最后才做需要读模型定价的"最小计费额"。
+// 学到的下限（无需任何额外查询），再判"未定价"（一次 settings 读），最后才做需要
+// 读模型定价的"最小计费额"。
 //
 // 拒绝的可观测痕迹有三处（证据可检索，且都不给攻击者开无界写入面）：
 //   - 进程内计数 + 最近一条形状（serverstore.BalanceAdmissionStats）⇒ `/server-info`；
 //   - 结构化日志（**按用户节流**，见 balanceRejectionLogInterval：拒绝是攻击者可无限
 //     触发的事件，逐条打日志等于给日志面开 DoS 面；节流线里带 suppressed 计数，
-//     信息不丢）；
+//     信息不丢）。**这是唯一的日志出口** —— serverstore 侧不再无条件打日志
+//     （R17A-07，见 RecordBalanceAdmissionRejection 的注释）；
 //   - 结算侧失败另有 `RecordBalanceSettlementFailure` 的一行 "floor raised" 日志。
 
 import (
 	"database/sql"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -99,7 +113,11 @@ func resetBalanceRejectionLogForTest() {
 // 高估）；**不乘**峰谷折扣（低谷期会打折，不打折是高估）。
 //
 // 返回 ok=false 表示"算不出下界"（模型未定价 / 输入价 <= 0 / 估算为 0）——
-// 此时不参与准入判定（宁可不拦，也不用一个假的下界误伤）。
+// 此时本层不参与准入判定（宁可不拦，也不用一个假的下界误伤）。
+//
+// R17A-06 起"未定价"这条**不再靠本函数兜底**：算不出下界时准入侧的上一条判据
+// （balanceAdmissionBlocked 的第 ③ 层）已经按 `gateway.unpriced_model_policy`
+// 决定拒绝还是放行；本函数只在"策略=allow"或输入价 > 0 时才可能被问到。
 func minBillableMicro(db *sql.DB, model string, body []byte) (int64, bool) {
 	if db == nil || strings.TrimSpace(model) == "" || len(body) == 0 {
 		return 0, false
@@ -120,56 +138,101 @@ func minBillableMicro(db *sql.DB, model string, body []byte) (int64, bool) {
 	return int64(micro), true
 }
 
+// balanceAdmissionRefusal 是一条准入拒绝的对外形状：给客户端的错误码/文案 + 内部
+// 记录用的 reason 与"要求金额"。
+type balanceAdmissionRefusal struct {
+	code          string // 对外 error.code
+	message       string // 对外 error.message
+	reason        string // 准入拒绝的判据标签（进计数/最近一条/日志）
+	requiredMicro int64  // 本次要求的下限（微元；non_positive/unpriced 时为 0）
+}
+
 // balanceAdmissionBlocked 是网关准入侧的钱闸门（唯一实现，五个端点共用）。
 //
 // 参数 body 必须是**客户端原始请求体**（计量侧估算用的同一份字节）；where 是端点标签
 // （chat / completions / embeddings / responses / messages），只进日志与计数。
 //
 // 与 `serverstore.BalanceBlocked` 的关系：那条"分位余额 <= 0 → 拒绝"的规则**逐字保留**
-// （含未开通不拦、管理员豁免、读设置失败 fail-closed），本函数在它之后追加两条更严的
+// （含未开通不拦、管理员豁免、读设置失败 fail-closed），本函数在它之后追加三条更严的
 // 判据。旧函数仍被别的路径使用（如 bootstrap/账户卡读面），故不删除。
-func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body []byte, where string) (bool, string) {
+func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, body []byte, where string) (balanceAdmissionRefusal, bool) {
 	if user == nil {
-		return false, ""
+		return balanceAdmissionRefusal{}, false
 	}
 	if user.IsAdmin {
-		return false, "" // 管理员豁免（与既有口径一致）
+		return balanceAdmissionRefusal{}, false // 管理员豁免（与既有口径一致）
 	}
 	s, err := serverstore.GetBalanceSettings(a.DB)
 	if err != nil {
-		return true, "余额校验暂不可用,请稍后再试" // fail-closed（与 BalanceBlocked 同口径）
+		// fail-closed（与 BalanceBlocked 同口径）
+		return balanceAdmissionRefusal{code: "BALANCE_EXHAUSTED", message: "余额校验暂不可用,请稍后再试", reason: "settings_unavailable"}, true
 	}
 	if !s.Enabled {
-		return false, ""
+		return balanceAdmissionRefusal{}, false
 	}
 	if user.BalanceActivatedAt.IsZero() {
-		return false, "" // 未开通余额账户:闸门不适用
+		return balanceAdmissionRefusal{}, false // 未开通余额账户:闸门不适用
 	}
 	balanceMicro := serverstore.MoneyToMicro(user.BalanceMoney)
 	// ① 历史判据:分位余额 <= 0。文案逐字不变。
 	if serverstore.QuantizeMoney(user.BalanceMoney) <= 0 {
-		a.recordBalanceAdmissionRejection(user, model, where, "non_positive", 0, balanceMicro)
-		return true, "账户余额不足,请联系管理员充值"
+		return balanceAdmissionRefusal{
+			code: "BALANCE_EXHAUSTED", message: "账户余额不足,请联系管理员充值", reason: "non_positive",
+		}, true
 	}
 	// ② 学到的下限:上次结算因余额不足失败,而余额一分没涨 ⇒ 直接拒绝,不转发。
 	if floor, ok := serverstore.BalanceAdmissionFloor(user.ID); ok && balanceMicro <= floor {
-		a.recordBalanceAdmissionRejection(user, model, where, "learned_floor", floor, balanceMicro)
-		return true, "账户余额不足以支付一次调用,请充值后重试"
+		return balanceAdmissionRefusal{
+			code: "BALANCE_EXHAUSTED", message: "账户余额不足以支付一次调用,请充值后重试",
+			reason: "learned_floor", requiredMicro: floor,
+		}, true
 	}
-	// ③ 最小计费额:连这次请求的成本下界都盖不住 ⇒ 转发必然是白烧上游额度。
+	// ③ 未定价模型:成本侧恒为 0 ⇒ ①② 与"余额 <= 0"同时失效（见文件头注释）。
+	// 默认策略 reject ⇒ 直接拒绝；allow 是显式逃生门（免费/内部模型）。
+	if serverstore.UnpricedModelPolicy(a.DB) != serverstore.UnpricedModelPolicyAllow {
+		if in, _, _ := serverstore.ModelPrices(a.DB, model); in <= 0 {
+			return balanceAdmissionRefusal{
+				code: "MODEL_NOT_PRICED",
+				// 文案对员工可读、对管理员可执行（唯一的修法是给模型定价）。
+				message: "该模型未配置价格,暂不可用(请联系管理员在网关的模型列表里为它填写价格)",
+				reason:  "unpriced_model",
+			}, true
+		}
+	}
+	// ④ 最小计费额:连这次请求的成本下界都盖不住 ⇒ 转发必然是白烧上游额度。
 	if need, ok := minBillableMicro(a.DB, model, body); ok && balanceMicro < need {
-		a.recordBalanceAdmissionRejection(user, model, where, "min_billable", need, balanceMicro)
-		return true, "账户余额不足以支付本次请求,请充值后重试"
+		return balanceAdmissionRefusal{
+			code: "BALANCE_EXHAUSTED", message: "账户余额不足以支付本次请求,请充值后重试",
+			reason: "min_billable", requiredMicro: need,
+		}, true
 	}
-	return false, ""
+	return balanceAdmissionRefusal{}, false
+}
+
+// rejectBalanceAdmission 是五个网关端点共用的准入闸门出口：命中即写错误响应
+// （429 + 该判据自己的 error.code）并返回 true，调用方**必须立即 return**
+// （被拒请求不得转发上游）。
+//
+// 为什么把"写响应"也收在这里：五个端点原先各自写 `429 BALANCE_EXHAUSTED`，
+// 新增"未定价模型"这条判据时若逐点改，很容易漏掉一处 —— 漏掉的那处就会用
+// BALANCE_EXHAUSTED 报告一个与余额无关的原因（R17A-06 的修复面）。
+func (a *API) rejectBalanceAdmission(c *gin.Context, user *serverstore.User, model string, body []byte, where string) bool {
+	refusal, blocked := a.balanceAdmissionBlocked(user, model, body, where)
+	if !blocked {
+		return false
+	}
+	a.recordBalanceAdmissionRejection(user, model, where, refusal.reason, refusal.requiredMicro, serverstore.MoneyToMicro(user.BalanceMoney))
+	// 状态码沿用 429（五个端点与客户端对"钱闸门拒绝"的既有约定）；区分靠 error.code。
+	serverauth.WriteError(c, http.StatusTooManyRequests, refusal.code, refusal.message)
+	return true
 }
 
 // recordBalanceAdmissionRejection 记录一次准入拒绝：进程内计数/最近一条（serverstore）
-// + **按用户节流**的结构化日志。
+// + **按用户节流**的结构化日志（唯一日志出口，见 serverstore.RecordBalanceAdmissionRejection）。
 func (a *API) recordBalanceAdmissionRejection(user *serverstore.User, model, where, reason string, requiredMicro, balanceMicro int64) {
 	ev := serverstore.BalanceAdmissionRejection{
 		UserID:   user.ID,
-		Username: util.EscapeControlLimit(user.Username, 128),
+		Username: util.EscapeControlLimit(user.Username, serverstore.MaxUsernameBytes),
 		Endpoint: where,
 		Model:    util.EscapeControlLimit(model, 128),
 		Reason:   reason,

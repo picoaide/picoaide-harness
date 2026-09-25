@@ -511,7 +511,7 @@ func clipForDetail(s string) string {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) validate(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -693,7 +693,7 @@ type publishInput struct {
 }
 
 func (h *Handlers) publish(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -745,7 +745,7 @@ func (h *Handlers) publish(c *gin.Context) {
 // publishFromBytes 是**发布的唯一实现**（§6.2 的同步链路），返回已序列化的 201 体。
 //
 // 顺序与本文件头部注释里的 A–H 逐条对应；调用方（publish / upload complete）已经
-// 完成的三件事：装配自检（requireReady）、发布水位闸门、上传频率闸门。
+// 完成的三件事：装配自检（requireCompiler）、发布水位闸门、上传频率闸门。
 //
 // 返回 `[]byte` 而不是直接写响应：分片路径要把这一份**逐字缓存**起来做幂等重放
 // （重复 complete 回放同一个 201 体），而"先序列化再写"与 gin 的 c.JSON 逐字节等价。

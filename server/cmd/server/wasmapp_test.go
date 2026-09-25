@@ -286,7 +286,7 @@ func TestUploadCleanupSchedulerIsWired(t *testing.T) {
 // ensureCompileChildNextToTestBinary 把编译子进程构建到**测试二进制同目录**。
 //
 // setupWasmPlatform 刻意不接 ChildBinary 注入（生产路径就是"server 与子进程同目录"），
-// 所以要让它真的装上编译器、让 api.requireReady 放行，只能把产物放在它找的位置。
+// 所以要让它真的装上编译器、让 api.requireCompiler 放行，只能把产物放在它找的位置。
 // 同包多次调用共享一份（已存在即跳过）。
 func ensureCompileChildNextToTestBinary(t *testing.T) {
 	t.Helper()
