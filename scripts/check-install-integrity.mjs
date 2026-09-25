@@ -32,7 +32,7 @@
  *      取并集（检出后才新建的文件也算问题）+ `.yarnrc.yml` + `.gitignore` + 根 `package.json`
  *      + **根与每一个 workspace 包的 `package.json`** + **每一个非 workspace 的 npm 项目
  *      `package.json`**（`server/webadmin` / `site` 这类：CI 的 `npm ci` 在它的目录里跑，
- *      就会执行它声明的 install 期钩子）；
+ *      就会执行它声明的 install 期钩子）+ **每一个 `Makefile`**；
  *   ② 根 `.yarnrc.yml` 里**禁键** `yarnPath` / `plugins` 缺席、`enableScripts: false` 与
  *      `nodeLinker: node-modules` 在位，且必须是常规文件（符号链接 = 内容来自仓外）；
  *      **解析面必须覆盖真 YAML 的等价写法**（BOM / 引号键 / 缩进的根映射 / 显式键 `? key`）——
@@ -58,7 +58,8 @@
  *      语法面、各包（含**非 yarn workspace 的 npm 项目**，见
  *      {@link NPM_PROJECT_MANIFEST_REGISTRY}）决定"哪些 spec / 哪些文件被类型检查 /
  *      哪些产物真的进判定"的 `vitest.config.ts` / `tsdown.config.ts` / `tsconfig*.json`
- *      一族（{@link PACKAGE_JUDGE_CONFIG_PATTERNS}）。
+ *      一族（{@link PACKAGE_JUDGE_CONFIG_PATTERNS}）、仓内每一个 `Makefile`
+ *      （{@link MAKEFILE_REGISTRY}：CI 的 `make build-server` 读的就是它，它决定构建真的跑什么）。
  *
  *      **为什么按"是否被执行"取**：目录形状是**代理指标**，它只在"执行体恰好都放在
  *      `scripts/` 一族目录里"时才等于真集合 —— V13-A §4.4 实测的五个同类物
@@ -95,7 +96,7 @@
  * **带 `verdict` / `ok` / `exitCode` / `problems`** —— 只有判定通过时才写"通过状"内容
  * （`digests` 封印），失败运行写的是**失败形态**：B-05 的现场是"EXIT=1 的那次留下的封印里
  * `headEqualsGithubSha:true`、`digests{…}`，没有任何'这次没通过'的痕迹"）、
- * `--print-execution-face`（打印四张登记表 + 执行点推导的合取结果，供把新的执行体粘回本文件）。
+ * `--print-execution-face`（打印五张登记表 + 执行点推导的合取结果，供把新的执行体粘回本文件）。
  * 退出码：0 = 全部通过；1 = 有未通过项；2 = 判据自身读不到输入（不在检出里 / HEAD 缺失 /
  * 必需的判据执行体不在 HEAD 里 / **HEAD ≠ `$GITHUB_SHA`** / 参数不合法）。
  *
@@ -446,6 +447,48 @@ export const NPM_PROJECT_MANIFEST_REGISTRY = [
   // 官网（Astro/Starlight）：本地与部署侧都按 npm 项目装依赖。
   'site/package.json',
 ]
+
+
+/**
+ * 仓内每一个 `Makefile` 的登记表（第十四轮 B-01 的"同一分界线还能有谁"的第三个答案）。
+ *
+ * ## 为什么它在执行面里
+ *
+ * CI 的 `server` job 用 `make build-server` 构建服务端（`server/Makefile` 决定那条构建
+ * 真的跑什么：`go build` 的包集合、产物路径、`-ldflags` 注入的版本）。它和
+ * `tsdown.config.ts`（决定包的构建入口表）是**同一类东西**，只是长在 Go 侧。
+ *
+ * ## 派生口径
+ *
+ * 派生 = **HEAD 路径里基名为 `Makefile` / `makefile` / `GNUmakefile` 的每一个文件**
+ * （见 {@link makefilePaths}），双向对拍在 `main()` 的 ②d 段：新增一个 Makefile 未登记即红、
+ * 删掉即死条目红。
+ *
+ * ## 为什么它**不**进"工作树侧的形状面"（这条是踩出来的）
+ *
+ * 通用做法是从执行点归纳出"父目录 + 同扩展名"的工作树形态 —— 对 `server/Makefile` 就是
+ * "`server/` 下所有**无扩展名**文件"。实测那条形态会把 `server/server`（57 MB 的
+ * **gitignored 构建产物**，`make build-server` 的产出）与 `server/Dockerfile` 一起枚举进来，
+ * 而它们不在 HEAD ⇒ 判据会**假红**。所以 `addFace()` 现在显式跳过"扩展名为空"的形态：
+ * Makefile 只由 **HEAD 侧**派生（`git ls-tree`，忽略文件根本不会列出），工作树侧只做
+ * 逐字节对拍与 `--restore`。**认账的边界**：检出之后**新建**一个 Makefile 不会被枚举到
+ * （它不是"被改写"，而且新文件要被执行还得有人改 CI 或 manifest，那两条都在面内）。
+ */
+export const MAKEFILE_REGISTRY = [
+  // CI `server` job 的 `make build-server`；`server/Makefile check` 也在本地门禁里跑。
+  'server/Makefile',
+]
+
+/**
+ * 从 HEAD 路径全集派生"仓内每一个 Makefile"（{@link MAKEFILE_REGISTRY} 的派生侧）。
+ * @param headPaths - HEAD 的路径集合（`Set` 或数组）。
+ * @returns 排序后的路径数组。
+ */
+export function makefilePaths(headPaths) {
+  const listed = headPaths instanceof Set ? headPaths : new Set(headPaths ?? [])
+  const names = new Set(['Makefile', 'makefile', 'GNUmakefile'])
+  return [...listed].filter(path => names.has(String(path).slice(String(path).lastIndexOf('/') + 1))).sort()
+}
 
 
 /**
@@ -1284,6 +1327,9 @@ export function deriveExecutionPoints(options = {}) {
   const seenFaces = new Set()
   const addFace = (directory, recursive, faceExtensions) => {
     if (directory === '' || faceExtensions.length === 0) return
+    // 无扩展名的执行点（`Makefile`）**不**归纳成工作树形态：那会退化成"这个目录下所有无
+    // 扩展名文件"，把 `server/server`（gitignored 构建产物）这类东西卷成假红（实测）。
+    if (faceExtensions.every(extension => extension === '')) return
     const key = `${recursive ? 'recursive' : 'direct'}:${directory}:${[...faceExtensions].sort().join(',')}`
     if (seenFaces.has(key)) return
     seenFaces.add(key)
@@ -1466,6 +1512,8 @@ function main(argv) {
   let ciReferenced = []
   // 非 yarn workspace 的 npm 项目 manifest（B-02）：从 **HEAD 路径全集**派生（不手抄名单）。
   let npmManifestPaths = []
+  // 仓内每一个 `Makefile`（CI 的 `make build-server` 读它）—— 同一分界线上的第三个答案。
+  let makefiles = []
   {
     // 输入全部取自 **HEAD 字节**（install 期能改写工作树，读工作树那份等于让载荷自己选判据面）。
     const headWorkflowTexts = []
@@ -1510,6 +1558,7 @@ function main(argv) {
     // 非 workspace 的 npm 项目（B-02）：派生 → 读 HEAD 字节 → 与 workspace 包同一套口径
     // （判据配置来源 (d) + install 期钩子扫描 + 逐字节对拍）。
     npmManifestPaths = npmProjectManifestPaths(headPaths, workspaceManifests)
+    makefiles = makefilePaths(headPaths)
     const npmManifestData = []
     for (const path of npmManifestPaths) {
       const bytes = readHeadBlob(root, path)
@@ -1549,6 +1598,7 @@ function main(argv) {
     print('EXECUTION_POINT_REGISTRY', outsideFamily)
     print('CI_REFERENCED_EXECUTION_REGISTRY', ciReferenced)
     print('NPM_PROJECT_MANIFEST_REGISTRY', npmManifestPaths)
+    print('MAKEFILE_REGISTRY', makefiles)
     process.stdout.write(`# 执行点推导合计 ${derivation.points.length} 条`
       + `（workflow 命令位 ${derivation.counts.workflow} · manifest scripts ${derivation.counts.manifest}`
       + ` · npm 项目 ${derivation.counts['npm-project']}`
@@ -1559,8 +1609,9 @@ function main(argv) {
     return 0
   }
 
-  // ②d **双向登记**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口 + V13-A §4.4 的执行点面）。
-  //     三张表各自与"自己的派生来源"双向对拍：派生却未登记 ⇒ 红、登记了却派生不出 ⇒ 红。
+  // ②d **双向登记**（第十三轮 D-03 / C-P1 / V1 三路独立复现的收口 + V13-A §4.4 的执行点面
+  //     + 第十四轮 B-01/B-02 的 tsconfig 族与 npm 项目 manifest）。
+  //     五张表各自与"自己的派生来源"双向对拍：派生却未登记 ⇒ 红、登记了却派生不出 ⇒ 红。
   {
     problems.push(...bidirectionalRegistryProblems(
       'EXECUTION_FACE_REGISTRY',
@@ -1589,6 +1640,13 @@ function main(argv) {
     // 每一条 `package.json` —— 未登记 = 新的 npm 项目（它的 install 期钩子与判据配置）悄悄
     // 进了判据面之外；死条目 = 那条 manifest 已经不在了。
     problems.push(...bidirectionalRegistryProblems(
+      'MAKEFILE_REGISTRY',
+      MAKEFILE_REGISTRY,
+      makefiles,
+      '仓内每一个 Makefile 都要登记（`--print-execution-face` 打印可粘贴表）—— CI 的'
+      + ' `make build-server`（以及 `make check`）读的就是它，改写它 = 改写那条构建真的跑什么。',
+    ))
+    problems.push(...bidirectionalRegistryProblems(
       'NPM_PROJECT_MANIFEST_REGISTRY',
       NPM_PROJECT_MANIFEST_REGISTRY,
       npmManifestPaths,
@@ -1601,7 +1659,7 @@ function main(argv) {
       + ` · manifest scripts ${derivation.counts.manifest}`
       + ` · npm 项目 ${derivation.counts['npm-project']}`
       + ` · integration-tests 守卫 ${derivation.counts['integration-guard']}`
-      + ` · 包内判据配置 ${derivation.counts['package-config']}），四张登记表双向对拍通过`)
+      + ` · 包内判据配置 ${derivation.counts['package-config']}），五张登记表双向对拍通过`)
   }
 
   const worktreeBodies = listWorktreeJudgeBodies(root, derivation.faces)
@@ -1613,6 +1671,8 @@ function main(argv) {
     ...workspaceManifests,
     // B-02：npm 侧 manifest 与执行体同一条纪律 —— 工作树那份必须与 HEAD 逐字节一致。
     ...npmManifestPaths,
+    // Makefile 族同理（工作树侧不枚举形态，但已在 HEAD 派生的那些照样逐字节对拍 + `--restore`）。
+    ...makefiles,
   ])].sort()
 
   // ③ 逐字节对拍（两侧都读 git 对象：工作树那份**可能已被 install 期改写**）。
@@ -1759,7 +1819,8 @@ function main(argv) {
     notes.push(`已按 HEAD 重写 ${restored.length} 条执行体：${restored.slice(0, 5).join('、')}${restored.length > 5 ? ' …' : ''}`)
   }
 
-  // ⑦ **封印（`--json`）必须与判定同形**（第十四轮 B-05 的收口）。
+  // **封印（`--json`）必须与判定同形**（第十四轮 B-05 的收口；编号不占前面的 ⑦，那条是
+  //  `main()` ④b 段的 yarn 入口族环境面）。
   //
   //    现场：写 json 的语句排在上面的 `if (problems.length > 0) … return 1` **之前**，写出的对象里
   //    没有 `verdict` / `exitCode` / `problems` 任何字段 ⇒ **EXIT=1 的那次运行**留下一枚
@@ -1828,7 +1889,7 @@ function main(argv) {
     + ` + 执行点推导 ${derivation.points.length}：workflow 命令位 / manifest scripts / npm 项目 /`
     + ` integration-tests 守卫 / 包内判据配置（vitest / tsdown / tsconfig*）`
     + ` + .yarnrc.yml + .gitignore + package.json + ${workspaceManifests.length} 个工作区 manifest`
-    + ` + ${npmManifestPaths.length} 个 npm 项目 manifest）`
+    + ` + ${npmManifestPaths.length} 个 npm 项目 manifest + ${makefiles.length} 个 Makefile）`
     + `与 HEAD(${head.slice(0, 12)}) **逐字节一致**；${notes.join('；')}\n`)
   return 0
 }
