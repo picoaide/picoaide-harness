@@ -343,6 +343,23 @@ describe('R17B-03：换入崩溃窗口（旧内容副本移出清扫面 + 自愈
     expect(existsSync(orphan2)).toBe(true)
   })
 
+  it('崩溃后**马上**重试同一个技能：per-name 路径不等年龄闸门就自愈（旧内容回来 ⇒ 覆盖要走确认）', async () => {
+    // 这条钉住的是"持 per-name 锁的那条恢复路径"（不带年龄闸门）：用户刚撞上崩溃、
+    // 立刻重试安装时，旧内容必须已经回到落点 —— 于是这次覆盖要用户确认（而不是
+    // 静默换入、把唯一副本留给 24h 后的清扫器）。
+    // 变异验证：删掉安装入口的 `recoverInterruptedSkillSwaps(skillsDir, { onlyName })`
+    // ⇒ 落点空着、安装直接成功 ⇒ 这条红。
+    const backup = join(skillsDir, '.skill-tmp', `backup-notes-${Date.now()}`)
+    await mkdir(backup, { recursive: true })
+    await writeFile(join(backup, 'SKILL.md'), skillMd('notes', 'ONLY-COPY'))
+    await writeFile(join(backup, 'precious.txt'), 'IRREPLACEABLE')
+    await age(backup, 1 / 60) // 1 分钟：低于全量扫描的 10 分钟闸门
+
+    await expect(installSkillArchive({ name: 'notes', archive: zipOf('notes', 'RETRY'), skillsDir, channel: 'market' }))
+      .rejects.toThrow(/not installed by the Capability Hub|confirm the overwrite/su)
+    expect(await readFile(join(skillsDir, 'notes', 'precious.txt'), 'utf8'), '旧内容已经回到落点').toBe('IRREPLACEABLE')
+  })
+
   it('位置契约（源码判据）：备份落在 `.skill-tmp/backup-<name>-<ts>`，**不在** staging 之内', () => {
     // 为什么这条读源码：备份只在盘上存在几毫秒（两处 rename 之间），行为用例观测不到
     // "崩溃瞬间它在哪"；而**在哪**正是这一条 finding 的全部内容 —— 放在 `<staging>/backup`
