@@ -136,6 +136,11 @@ type AdminHandlers struct {
 }
 
 // AdminHandlers 返回服务端管理面 handler 集合(供 router 包集中声明路由)。
+//
+// R15C-R-01 ②(审计 2026-09-25,P1):ListUserTokens 绑的是**分页**实现
+// (token_page.go;缺省 50/最大 200/越界 400)。旧的无分页实现(admin.go 的
+// listUserTokens,单请求 130 MiB)仅供 serverauth 包内测试镜像树使用 ——
+// 它的 DAO 也已改成有界(serverstore.ListTokensByUser 带 LIMIT)。
 func (a *AdminAPI) Handlers() *AdminHandlers {
 	return &AdminHandlers{
 		Login:             a.handleLogin,
@@ -159,7 +164,7 @@ func (a *AdminAPI) Handlers() *AdminHandlers {
 		CreateDept:        a.createDepartment,
 		UpdateDept:        a.updateDepartment,
 		DeleteDept:        a.deleteDepartment,
-		ListUserTokens:    a.listUserTokens,
+		ListUserTokens:    a.listUserTokensPaged,
 		RevokeToken:       a.revokeToken,
 		AdjustBalance:     a.adjustUserBalance,
 		UserBalanceLedger: a.userBalanceLedger,

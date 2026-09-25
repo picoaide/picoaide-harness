@@ -196,6 +196,11 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 	clientGone := false
 	// stopReason 只用于收尾结算的日志(上游 EOF / 空闲超时 / 客户端断开)。
 	stopReason := "upstream_eof"
+	// sawTerminal = 是否见过 Anthropic 的**收尾标记** `event: message_stop`
+	// （R15C-R-02，审计 2026-09-25，P2）。这条泵此前的 EOF 分支与 chat 那条
+	// 完全同源：上游在 message_stop 之前断连时静默 break ⇒ 客户端拿到 200 +
+	// 半截正文、无 error 事件、服务端零日志，无法与"正常结束"区分。
+	sawTerminal := false
 	// pt/ct/cache 是上游**回报过的**用量(Anthropic 的 usage 分散在
 	// message_start=输入、message_delta=输出(累积),按行"非零覆盖"合并)。
 	// 三者全 0 = 上游从未回报任何 usage(G12 的形态)⇒ 收尾必须走字节估算兜底。
@@ -256,6 +261,11 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				deliveredContentChunks++
 				deliveredContentBytes += n
 			}
+			// R15C-R-02：Anthropic 的收尾标记是 `event: message_stop`
+			// （**不能**用 `[DONE]` 判 —— 那会把每一条正常 anthropic 流打成异常）。
+			if !sawTerminal && streamTerminalMarkerSeen(line) {
+				sawTerminal = true
+			}
 			if _, werr := c.Writer.WriteString(line); werr != nil {
 				clientGone = true
 				stopReason = "client_write_failed"
@@ -271,6 +281,21 @@ func (a *API) serveAnthropicStream(c *gin.Context, resp *http.Response, usageID 
 				stopReason = "idle_timeout"
 				log.Printf("gateway: anthropic stream idle timeout after %v, terminating", streamIdleTimeout)
 				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游响应空闲超时"}}`)
+				if fl != nil {
+					touchSSEWriteDeadline(c)
+					fl.Flush()
+				}
+			} else if !sawTerminal && !clientGone {
+				// R15C-R-02：上游在 message_stop 之前断连 —— 与 idle / 单行过大
+				// 两条异常出口同形地显式收尾（in-band error 事件 + 可检索日志），
+				// 否则调用方无法区分"答完了"与"上游挂了"。客户端已断开时不做
+				// （写不回响应，且那种"截断"是客户端自己造成的）。
+				stopReason = "upstream_truncated"
+				log.Printf("gateway: anthropic upstream stream closed before message_stop "+
+					"(forwarded=%d bytes, delivered_content=%d bytes, chunks=%d): "+
+					"treating as truncated and closing with an error event",
+					forwardedBytes, deliveredContentBytes, deliveredContentChunks)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", `{"error":{"code":"UPSTREAM","message":"上游流在完成标记之前中断"}}`)
 				if fl != nil {
 					touchSSEWriteDeadline(c)
 					fl.Flush()
