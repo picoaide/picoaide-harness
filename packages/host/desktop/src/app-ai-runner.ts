@@ -254,6 +254,34 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
    */
   const live = new Map<string, Promise<AgentHandle>>()
 
+  /**
+   * 每个会话 id 上「上一个活体正在收尾」的 promise —— **释放窗口的闸门**（R14 C-02）。
+   *
+   * 为什么必须有它：`dropAgent`/`releaseAll` 都是"先从 `live` 里摘掉，再 `await dispose()`"，
+   * 而 `dispose()` 要等被放弃那一轮的模型流真正收尾（真机上是一段可观测的时间：释放窗口
+   * 实测 1.5 s 量级）。窗口里同一个隐藏会话 id 的新一轮会因为 `live` 已空而走
+   * `openAgentUncached` ⇒ 上一个写句柄还没释放 ⇒ 持久化平面直接拒绝：
+   *
+   *	SessionAlreadyOwnedError: session "app:demo#alice@…" is already owned by an active write handle
+   *
+   * （没有持久化平面的宿主同形：`session "…" already exists`。窗口之外重试就成功 ——
+   * 这正是"偶发失败、重试即好"的形态，应用侧只看到一张错误卡片。）
+   *
+   * 记账口径：登记发生在**任何 await 之前**（`dropAgent`/`releaseAll` 同步段），所以新一轮
+   * 只要进 `openAgent` 就一定看得到它；收尾完成即从表里摘掉（不留长期引用）。
+   */
+  const releasing = new Map<string, Promise<void>>()
+
+  /** 记账一次"某会话正在收尾"（同 id 多次收尾按顺序串起来，后一次不会先于前一次完成）。 */
+  const trackReleasing = (sessionId: string, disposal: Promise<void>): void => {
+    const previous = releasing.get(sessionId) ?? Promise.resolve()
+    const chained = previous.then(() => disposal, () => disposal).catch(() => undefined)
+    releasing.set(sessionId, chained)
+    void chained.then(() => {
+      if (releasing.get(sessionId) === chained) releasing.delete(sessionId)
+    })
+  }
+
   const openAgent = async (sessionId: string): Promise<AgentHandle> => {
     const cached = live.get(sessionId)
     if (cached !== undefined) {
@@ -264,6 +292,13 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
       }
       live.delete(sessionId)
     }
+    // 释放窗口闸门（R14 C-02）：同一个会话 id 的上一个活体必须**真的收尾**（写句柄已
+    // 释放）之后才允许开下一个。没有这道闸门时，`releaseAll` 的窗口里到达的新一轮会
+    // 撞上还没释放的写句柄 —— 真 jsonl 持久化实测
+    // `SessionAlreadyOwnedError: session "…" is already owned by an active write handle`
+    // （无持久化平面同形：`session "…" already exists`），窗口外重试才成功。
+    const settling = releasing.get(sessionId)
+    if (settling !== undefined) await settling
     const pending = openAgentUncached(sessionId)
     live.set(sessionId, pending)
     try {
@@ -307,12 +342,18 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
     const cached = live.get(sessionId)
     live.delete(sessionId)
     if (cached === undefined) return
-    try {
-      const handle = await cached
-      await handle.dispose()
-    } catch (cause) {
-      warn(`dsh-plugin-desktop: disposing the application AI session failed (${cause instanceof Error ? cause.message : String(cause)})`)
-    }
+    const disposal = (async (): Promise<void> => {
+      try {
+        const handle = await cached
+        await handle.dispose()
+      } catch (cause) {
+        warn(`dsh-plugin-desktop: disposing the application AI session failed (${cause instanceof Error ? cause.message : String(cause)})`)
+      }
+    })()
+    // 登记在**任何 await 之前**（R14 C-02）：`cancel()` 是 fire-and-forget 调用本函数的，
+    // 紧接着到来的新一轮必须看得见"这个会话还在收尾"。
+    trackReleasing(sessionId, disposal)
+    await disposal
   }
 
   /** 该会话当前的活体 agent（可能已经不在注册表里）。 */
@@ -329,6 +370,10 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
    * **磁盘上的隐藏会话一律不删**：那是那个账号自己的对话本体（同账号重登仍要续用它的
    * 多轮上下文），而"换账号"在新 id 形态下已经天然指向另一个会话文件（账号作用域）。
    * 删它才是错的：既毁掉历史，又会在同一账号重登时把上下文清空。
+   *
+   * **收尾窗口有闸门**（R14 C-02）：`live`/`queues` 是同步清空的，而 `dispose()` 要等被
+   * 放弃那一轮的模型流收尾。窗口里到达的**同一个隐藏会话 id** 的新一轮会在 `openAgent`
+   * 里等本次收尾落地（{@link trackReleasing}），而不是撞上还没释放的写句柄。
    */
   const releaseAll = async (reason: string): Promise<void> => {
     generation += 1
@@ -343,14 +388,21 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
         warn(`dsh-plugin-desktop: cancelling the application AI turn failed after ${reason} (${cause instanceof Error ? cause.message : String(cause)})`)
       }
     }
-    await Promise.all(released.map(async ([, cached]) => {
+    const disposals = released.map(async ([, cached]): Promise<void> => {
       try {
         const handle = await cached
         await handle.dispose()
       } catch (cause) {
         warn(`dsh-plugin-desktop: releasing the application AI session failed after ${reason} (${cause instanceof Error ? cause.message : String(cause)})`)
       }
-    }))
+    })
+    // 登记在**任何 await 之前**（上面 `live.clear()` 到这里的同步段）：窗口里到来的新一轮
+    // 必须看得见"这些会话还在收尾"。
+    released.forEach(([sessionId], index) => {
+      const disposal = disposals[index]
+      if (disposal !== undefined) trackReleasing(sessionId, disposal)
+    })
+    await Promise.all(disposals)
   }
 
   /** 一轮对话（已在会话串行队列里）。 */
@@ -363,6 +415,12 @@ export function createAppAiRunner(ctx: Context, options: AppAiRunnerOptions): Ap
   ): Promise<AiChatTurnResult> => {
     if (signal.aborted) throw aborted()
     const handle = await openAgent(sessionId)
+    // 等上一个活体收尾期间又换代（再次换账号/登出）⇒ 这一轮已不属于任何人：
+    // 丢弃刚开的会话并按取消收场（`openAgent` 的等待是有时长的，代次检查必须复检）。
+    if (startedAt !== generation) {
+      await dropAgent(sessionId)
+      throw aborted()
+    }
     const agent = handle.agent
     const disposeStream = agent.ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
       if (subject !== agent) return

@@ -545,6 +545,12 @@ async function start(): Promise<void> {
           // 文件面，这个路径只落在会话头上）。用 userData 而不是任何工作区 ——
           // 隐藏会话不隶属任何用户项目目录。
           cwd: app.getPath('userData'),
+          // R14 C-04：诊断出口必须真的接上。`AppAiRunnerOptions.warn` 的缺省是 **no-op**，
+          // 不传它 ⇒ 释放失败（`releasing the application AI session failed after
+          // session-changed`）与"应用改写了隐藏对话"这两类告警在生产**全部被丢弃**
+          // （只剩"没坏"的观感，排障时没有任何证据）。口径与上面的应用窗口载体一致：
+          // 走桌面宿主的主进程日志（`electronLogger` → `<userData>/logs/`）。
+          warn: message => { electronLogger.error(message) },
         })
         await hostCtx.plugin(DesktopPluginsService, {
           profileName: activeProfileName,

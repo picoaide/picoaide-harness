@@ -18,7 +18,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
-import { basename, join, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
@@ -1172,6 +1172,35 @@ export async function listShadowingSkills(skillsDir: string, name: string): Prom
 }
 
 /**
+ * 删除**一个**「安装器所有」的影子条目的**唯一删除点**（R14 C-01 根守卫）。
+ *
+ * 为什么不能直接 `rm(shadow.dir, {recursive: true})`：{@link discoverRuntimeSkills} 忠实
+ * 镜像上游 `discoverRoot` —— 技能库**根上散落的 `*.md` 文件**也是候选技能，而它的
+ * `dir` 就是**技能库根本身**（那里正是它的 SKILL.md 所在）。{@link isInstallerOwnedSkillEntry}
+ * 只看名字前缀，于是名为 `.install-*.md` 的散落文件会让 `rm(dir)` 变成
+ * `rm -rf <skillsDir>`：**静默删掉整个技能库**（正在卸载的那个技能、刚装好的那个、
+ * 以及用户自建的每一份都不见了），而 `uninstallSkill()` 还返回成功。
+ *
+ * 删除面因此收敛成一条可判定的规则（三种形态，只有中间一种允许递归删除）：
+ *  - `dir` 严格等于技能库根 ⇒ 散落文件形态：**只删那个文件**，绝不碰根；
+ *  - `dir` 是技能库根的直接子目录 ⇒ 旧 staging / 旧备份就是这个形态：允许递归删除；
+ *  - 其它（更深的路径、根之外的路径）⇒ 不是本函数认识的形态：**不删**（宁可留下，
+ *    也不让一个来历不明的路径成为 `rm -rf` 的目标）。
+ * @param skillsDir - the user skill root.
+ * @param shadow - 一个 `installerOwned === true` 的影子条目。
+ * @returns 真的删掉了返回 `true`（删的是文件或那个直接子目录）。
+ */
+async function removeInstallerOwnedShadow(skillsDir: string, shadow: DiscoveredSkill): Promise<boolean> {
+  const root = resolve(skillsDir)
+  const dir = resolve(shadow.dir)
+  if (dir === root) {
+    return await rm(shadow.skillMdPath, { force: true }).then(() => true).catch(() => false)
+  }
+  if (dirname(dir) !== root) return false
+  return await rm(dir, { recursive: true, force: true }).then(() => true).catch(() => false)
+}
+
+/**
  * 清掉同名影子里**属于安装器**的那些（旧备份 / 旧暂存）。
  *
  * 运行时的同名先到先得按 `localeCompare` 排序，而 `.` 开头的备份恰好排在同名真
@@ -1180,6 +1209,9 @@ export async function listShadowingSkills(skillsDir: string, name: string): Prom
  *
  * **用户自建的同名条目一律不动**（那是用户内容，删除要显式确认）——调用方用
  * {@link listShadowingSkills} 如实报告残留。
+ *
+ * **删除一律经 {@link removeInstallerOwnedShadow} 的根守卫**（R14 C-01）：根上散落的
+ * `.install-*.md` 文件其 `dir` 就是技能库根，直接递归删除会连库一起删。
  * @param skillsDir - the user skill root.
  * @param name - the skill name.
  * @returns 删掉的 SKILL.md 路径（诊断/测试用）。
@@ -1188,8 +1220,7 @@ export async function sweepInstallerOwnedShadowSkills(skillsDir: string, name: s
   const removed: string[] = []
   for (const shadow of await listShadowingSkills(skillsDir, name)) {
     if (!shadow.installerOwned) continue
-    const ok = await rm(shadow.dir, { recursive: true, force: true }).then(() => true).catch(() => false)
-    if (ok) removed.push(shadow.skillMdPath)
+    if (await removeInstallerOwnedShadow(skillsDir, shadow)) removed.push(shadow.skillMdPath)
   }
   return removed
 }

@@ -36,6 +36,18 @@
  * `server/internal/llmgateway/app-session-id.json`，两端由
  * `app-session-id-contract.spec.ts` 用同一份语料对拍。
  *
+ * ## 文件名预算（2026-09-25，R14 C-03）
+ *
+ * 会话落盘的**目录名**是上游 `encodeSegment(sessionId)`，而它把内联段 `~XXXX~` 里的 `~`
+ * **再转义一次**（`~` → `~007E`）⇒ 账号名里每个非 `[A-Za-z0-9._-]` 字符占 **14 字节**
+ * 文件名；`50 + |app_id| + 14n > 255` 就是 `ENAMETOOLONG`，而该错误**浮不出来**：`run`
+ * 照常 resolve、磁盘上零文件（真机实测 app_id=20 时 13 个中文字符落得下、14 个落不下）。
+ * 所以 {@link hiddenSessionId} 在构造时算一次 {@link encodedSessionIdBytes}：
+ * **内联形态超 255 字节就换成定长摘要段**（{@link hiddenSessionScopeDigest}，形如
+ * `#:u32:<32 hex>`，78 字节量级）——功能照常、按 (账号 × 服务端) 分域，只是文件名里
+ * 不再有账号名。**只有本来就落不下盘的账号会换形态**（它们没有任何可续的历史），
+ * 其余账号的 id 逐字不变。
+ *
  * **历史形态** `app:<app_id>`（无账号维度）不再被本模块构造，但磁盘上可能已存在：
  * 按"**读得到、不复用**"处理 —— 新 id 永远不等于旧 id，所以旧会话不会被任何账号
  * `resume`（它反而**不能**迁移：那份日志里已经混进了多个账号的对话，迁移到任何一个
@@ -44,6 +56,7 @@
  * @module @picoaide/dsh-wasm-apps-host/ai-chat
  */
 
+import { createHash } from 'node:crypto'
 import { encodePartitionSegment, serverPartitionHash } from './partition.ts'
 
 /** 保留路径（§21.2 冻结；协议 handler 本地处理，绝不外发）。 */
@@ -126,15 +139,88 @@ export function hiddenSessionScope(scope: AiChatScope): string {
 }
 
 /**
+ * 隐藏会话 id 变成**文件名**之后的字节预算（R14 C-03）。
+ *
+ * 会话落盘的目录名是上游 `session-persistence-jsonl` 的 `encodeSegment(sessionId)`
+ * （`format.ts:198`）。多数文件系统（ext4/APFS/NTFS）单个名字段的上限是 **255 字节**，
+ * 超了就 `ENAMETOOLONG` —— 而该错误**不会**浮到调用方：`run` 照常 resolve、磁盘上一个
+ * 文件都没有（隐藏会话的多轮上下文重启即失、诊断包里也看不到它）。真机实测
+ * （app_id=20 + 14 个中文字符的账号名）：`files under root: 0` 且 `run => resolved`。
+ */
+export const AI_HIDDEN_SESSION_ID_MAX_BYTES = 255
+
+/**
+ * 超预算时账号段换用的**定长摘要**标签。
+ *
+ * `:` 不可能出现在内联编码段里（`encodePartitionSegment` 只原样保留 `A-Za-z0-9_-`，
+ * 其余一律 `~<HEX>~`）⇒ 两种形态永不互相冒充：摘要形态的 id 既稳定（同一账号 + 同一
+ * 服务端永远算出同一个 id），也不会与任何内联形态撞成同一个会话。
+ */
+export const AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG = ':u32:'
+
+/**
+ * `sessionId` 经上游 `encodeSegment` 之后的**字节长度**（只算长度，不复制那份实现）。
+ *
+ * 上游的规则（`session-persistence-jsonl/src/format.ts:198`）：`-`/`.`/`_` 与
+ * `[A-Za-z0-9]` 原样 1 字节，**其余每个 UTF-16 码元**写成 `~` + 4 位大写十六进制
+ * （固定 5 字节）。所以"编码后长度 = 原长 + 4 × 非安全码元数"——而隐藏会话 id 里的
+ * 非安全字符**只可能**是 `:`（前缀）、`#`（分隔符）、`@`（服务端哈希分隔符）与内联账号段
+ * 里的 `~`（转义标记本身）。这正是 C-03 的算术：账号名里每个非 `[A-Za-z0-9._-]` 字符
+ * 在内联段里先变成 `~<HEX>~`（6 字符），编码时两个 `~` 各自再涨 4 字节
+ * ⇒ **每个字符占 14 字节文件名**（真机实测 13 个中文字符 = 252B 落得下、14 个 = 266B 落不下）。
+ *
+ * 与上游的**逐码元**口径一致（`charCodeAt` 而不是码点）：星光平面字符会被算成两个码元、
+ * 各 5 字节 —— 我们要的是"上界成立"，不是"再实现一遍编码器"。
+ * @param sessionId - 隐藏会话 id。
+ * @returns `encodeSegment(sessionId)` 的字节长度。
+ */
+export function encodedSessionIdBytes(sessionId: string): number {
+  let bytes = 0
+  for (let index = 0; index < sessionId.length; index += 1) {
+    const char = sessionId[index] as string
+    bytes += char !== '~' && /^[A-Za-z0-9._-]$/u.test(char) ? 1 : 5
+  }
+  return bytes
+}
+
+/**
+ * 账号作用域的**定长摘要**形态（内联形态超过文件名预算时使用）。
+ *
+ * 为什么是"摘要"而不是"直接报错"：报错会让这些账号的**应用 AI 整体不可用**（应用页只
+ * 拿到一张错误卡片），而摘要形态让功能照常工作、id 照样按 (账号 × 服务端) 分域 —— 换来的
+ * 只是会话文件名里看不到账号名（隐藏会话本来也不给用户看，只在诊断包里出现）。
+ * 为什么不是"一律用摘要"：那会改掉**所有**账号的隐藏会话 id ⇒ 已有用户的隐藏会话上下文
+ * 全部读不到；混合形态下只有"以前根本落不下盘"的那些账号会换形态（它们本来就没有可续的
+ * 历史），其余账号逐字不变。
+ *
+ * 摘要的输入必须与内联段**同一份归一化**（`trim` + `serverPartitionHash` 的"去尾斜杠"）：
+ * 否则 `https://a.example` 与 `https://a.example/` 会算出两个隐藏会话（同一台客户端只要
+ * 有一次把地址写成带斜杠，上下文就断成两半）—— 契约语料第 4 条钉的正是内联形态的这条性质。
+ * @param scope - 当前账号 + 服务端地址。
+ * @returns 定长（`AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG` + 32 位 hex）的账号作用域段。
+ */
+export function hiddenSessionScopeDigest(scope: AiChatScope): string {
+  const server = serverPartitionHash(scope.serverURL ?? undefined) ?? ''
+  const material = `${scope.userId.trim()}\u0000${server}`
+  const digest = createHash('sha256').update(material, 'utf8').digest('hex').slice(0, 32)
+  return `${AI_HIDDEN_SESSION_SCOPE_DIGEST_TAG}${digest}`
+}
+
+/**
  * 隐藏会话 id（**唯一实现**）：`app:<app_id>#<账号作用域>`。
  *
- * 两个 fail-loud 的入参校验都指向同一个后果：**id 一旦不可归因/可共享，就不该被构造**。
- * 非法 app_id 会让服务端派生不出归因（用量静默丢失），空账号会让两个账号落进同一个
- * 作用域（正是本函数要杜绝的缺陷）——所以这里抛错，而不是悄悄产出一个"看起来能用"的 id。
+ * 三个 fail-loud 的入参校验都指向同一个后果：**id 一旦不可归因/可共享/落不下盘，就不该被
+ * 构造**。非法 app_id 会让服务端派生不出归因（用量静默丢失），空账号会让两个账号落进同一个
+ * 作用域（正是本函数要杜绝的缺陷），超长 id 会让持久化**静默不落盘**（R14 C-03）——所以这
+ * 里抛错或换形态，而不是悄悄产出一个"看起来能用"的 id。
+ *
+ * 长度预算（R14 C-03）：先按内联形态算 `encodeSegment` 后的字节数，超
+ * {@link AI_HIDDEN_SESSION_ID_MAX_BYTES} 就换成定长摘要段；换完再超（结构上不可达：
+ * 最大 app_id 63 + 定长 37 = 105）则**抛错**，绝不放一个落不下盘的 id 出去。
  * @param scope - 当前账号 + 服务端地址。
  * @param appId - 已校验的 app_id（平台域名标签形态）。
- * @returns 会话 id。
- * @throws app_id 不是平台 app_id、或账号为空时。
+ * @returns 会话 id（可用作会话键与服务端归因）。
+ * @throws app_id 不是平台 app_id、账号为空、或（理论上不可达）连摘要形态都超预算时。
  */
 export function hiddenSessionId(scope: AiChatScope, appId: string): string {
   if (appId.length > AI_APP_ID_MAX_LENGTH || !AI_APP_ID_PATTERN.test(appId)) {
@@ -143,7 +229,18 @@ export function hiddenSessionId(scope: AiChatScope, appId: string): string {
   if (scope.userId.trim() === '') {
     throw new Error('the hidden session id needs an account scope (empty user id); a shared scope would leak one account\'s conversation into another')
   }
-  return `${AI_HIDDEN_SESSION_PREFIX}${appId}${AI_HIDDEN_SESSION_SCOPE_SEPARATOR}${hiddenSessionScope(scope)}`
+  const head = `${AI_HIDDEN_SESSION_PREFIX}${appId}${AI_HIDDEN_SESSION_SCOPE_SEPARATOR}`
+  const inline = `${head}${hiddenSessionScope(scope)}`
+  const id = encodedSessionIdBytes(inline) <= AI_HIDDEN_SESSION_ID_MAX_BYTES
+    ? inline
+    : `${head}${hiddenSessionScopeDigest(scope)}`
+  if (encodedSessionIdBytes(id) > AI_HIDDEN_SESSION_ID_MAX_BYTES) {
+    throw new Error(
+      `the hidden session id would not fit a filesystem name (${String(encodedSessionIdBytes(id))} > `
+      + `${String(AI_HIDDEN_SESSION_ID_MAX_BYTES)} bytes); refusing to build an id whose session could never be persisted`,
+    )
+  }
+  return id
 }
 
 /**
