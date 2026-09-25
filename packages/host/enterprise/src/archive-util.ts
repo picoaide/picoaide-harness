@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
 import * as tar from 'tar'
+import { reservedDeviceNameInArchivePath } from './skill-name-rules.ts'
 
 /** Upper bound on a raw archive (bytes). */
 export const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
@@ -87,6 +88,7 @@ function assertSafeZipEntry(entry: AdmZip.IZipEntry): string {
   if (normalized === '') throw new Error(`empty path in archive: ${raw}`)
   if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${raw}`)
   if (zipEntryIsSymlink(entry)) throw new Error(`link entry refused in archive: ${normalized}`)
+  assertNoReservedDeviceName(normalized, raw)
   return normalized
 }
 
@@ -104,6 +106,7 @@ function assertSafeEntryPath(rawPath: string): string {
   const normalized = posixNormalize(rawPath)
   if (normalized === '') return ''
   if (normalized.split('/').includes('..')) throw new Error(`parent traversal in archive: ${rawPath}`)
+  assertNoReservedDeviceName(normalized, rawPath)
   return normalized
 }
 
@@ -132,6 +135,22 @@ function assertNoDuplicateEntry(seen: Set<string>, path: string, raw: string): v
   const key = path.toLowerCase()
   if (seen.has(key)) throw new Error(`duplicate entry in archive: ${raw}`)
   seen.add(key)
+}
+
+/**
+ * 拒绝归档条目名里的 Windows 保留设备名（R17B-05，两条通道共用）。
+ *
+ * 技能包在 Linux/macOS 上打得出来、也装得上，但条目名是 `aux.txt` / `nul` /
+ * `con/…` 时，Windows 上解包会失败（Win32 设备名语义）—— 而失败文案是系统级的，
+ * 用户看不出病根。合法技能包里不会出现这些名字 ⇒ 硬拒绝、零误杀。
+ * @param path - 已 normalize 的 posix 相对路径。
+ * @param raw - 原始条目名（错误文案用）。
+ */
+function assertNoReservedDeviceName(path: string, raw: string): void {
+  const segment = reservedDeviceNameInArchivePath(path)
+  if (segment !== undefined) {
+    throw new Error(`reserved device name in archive entry "${segment}" (${raw}): unpacking fails on Windows`)
+  }
 }
 
 /** Scan a zip buffer: size bounds, path safety, link refusal, duplicate paths. */

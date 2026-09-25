@@ -709,8 +709,15 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     // 正是 p13 探针实测出"卸载后技能仍然可用"的根因。位置契约在这里钉死。
     const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
     expect(source).toContain("const staging = await mkdtemp(join(tempRoot, 'install-'))")
-    expect(source).toContain("const backupDir = join(staging, 'backup')")
     expect(source).toContain('const tempRoot = join(skillsDir, SKILL_TEMP_DIR)')
+    // R17B-03 更新了这一条位置契约（方向不变、更严）：备份仍在 `.skill-tmp` 的第二层
+    // （运行时看不见），但**不再放在 staging 之内** —— 旧形态 `<staging>/backup` 的
+    // 祖先是 `install-*`，进程死在两处 `rename` 之间时"旧内容的唯一副本"落在 24h
+    // 清扫面内被无日志删除。现在落点是 `.skill-tmp/backup-<name>-<ts>`：清扫器只删
+    // `install-*`，它天然免疫，由 recoverInterruptedSkillSwaps 放回落点（行为判据见
+    // `audit-r17z-skill-library.spec.ts` 的崩溃自愈用例）。
+    expect(source).toContain('`${BACKUP_PREFIX}${name}-${Date.now()}`')
+    expect(source).not.toContain("const backupDir = join(staging, 'backup')")
     // 旧形态（备份是技能库直接子目录、名字以技能名开头）不得回来。
     expect(source).not.toMatch(/join\(skillsDir, `?\.\$\{name\}\.backup-/u)
   })
