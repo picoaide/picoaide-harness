@@ -48,6 +48,18 @@ export interface CronRouteOptions {
   fence?: () => ConnectionTrustFence | undefined
   /** 证明拒绝的插件日志。 */
   warn?: (message: string) => void
+  /**
+   * 这批路由的**生命周期信号**（R16B-13）。abort ⇒ 所有仍然打开的 SSE 流被
+   * `end()` 收尾。
+   *
+   * 为什么必须由调用方给：`ctx.webServer.register()` 返回的 disposer 只把路径从
+   * 路由表里删掉，**对已经建立的连接一无所知** —— 而 `/api/cron/events` 是一条
+   * 长连接：插件卸载（HMR / 组合变更 / 退出）之后它仍在每 15s 收 `: ping` 且永不
+   * `end()`。对端是 `EventSource`：**收不到 onerror 就不会回落到轮询**，界面于是
+   * 静默冻结（任务列表停在上一次推送的样子，看起来像"没有新任务"）。
+   * 缺席时保持旧行为（不主动收尾）——但生产装配必须传（`src/index.ts` 的 effect）。
+   */
+  lifecycle?: AbortSignal
 }
 
 export function makeCronRoutes(service: HostCronService, options: CronRouteOptions = {}): WebRoute[] {
@@ -126,12 +138,26 @@ export function makeCronRoutes(service: HostCronService, options: CronRouteOptio
       }
       const unsubscribe = service.subscribe(push)
       const heartbeat = setInterval(() => { res.write(': ping\n\n') }, HEARTBEAT_MS)
-      const close = (): void => {
+      let closed = false
+      /**
+       * 收尾（幂等）。`endStream` = 这是一次**宿主主动收尾**，必须让对端看见流结束
+       * （R16B-13）；对端自己断开时（req/res 的 close）不需要再 end 一次，而且那时
+       * `end()` 可能抛（socket 已销毁）—— 所以两条路径分开。
+       */
+      const close = (endStream: boolean): void => {
+        if (closed) return
+        closed = true
         clearInterval(heartbeat)
         unsubscribe()
+        options.lifecycle?.removeEventListener('abort', onLifecycleAbort)
+        if (endStream) {
+          try { res.end() } catch { /* 对端已经没了：无需再收尾 */ }
+        }
       }
-      req.once('close', close)
-      res.once('close', close)
+      const onLifecycleAbort = (): void => { close(true) }
+      options.lifecycle?.addEventListener('abort', onLifecycleAbort, { once: true })
+      req.once('close', () => close(false))
+      res.once('close', () => close(false))
       push()
     },
   }

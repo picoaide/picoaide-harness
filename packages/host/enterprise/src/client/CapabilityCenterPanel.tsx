@@ -1239,8 +1239,20 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       if (seq !== loadSeqRef.current) return
       setItems(prev => applySectionRows(prev, key, rows))
       setSection(key, { status: 'ok' })
-    } catch {
+    } catch (cause) {
       if (seq !== loadSeqRef.current) return
+      // R16B-26（2026-09-25，与 R16B-08 同族）：catch 把 cause **整个丢掉** ⇒ 用户
+      // 只看到「加载失败」+ 重试，401/403/404/5xx/形状漂移一律不可区分，而且**零日志**
+      // （打包版没有可见控制台，连支持都拿不到线索）。两个 fetcher 抛的都是
+      // `HTTP <status>`（服务端业务信封原文优先），带上它：可见文案走带占位符的那条
+      // 字典键（用户仍读到本地化的"加载失败"，机器可读的部分跟在后面），同时打一条
+      // 可检索的 warn 供诊断包取用。
+      const detail = cause instanceof Error ? cause.message : ''
+      if (detail !== '') {
+        console.warn(`[capability] loading the ${key} section failed: ${detail}`)
+        setSection(key, { status: 'error', error: t('capability.loadErrorDetail', { error: detail }) })
+        return
+      }
       setSection(key, { status: 'error', error: t('capability.loadError') })
     }
   }

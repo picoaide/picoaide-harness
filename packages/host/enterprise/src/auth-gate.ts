@@ -1492,21 +1492,40 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * 二进制/归档代理的网关失败分支（R15B-02）。
+   * 二进制/归档代理的网关失败分支（R15B-02 / R16B-08）。
    *
    * 这些路径直接用 `gatewayFetch` 拿 `Response`，不经过 `fetchJSON`，所以它们的
-   * `!upstream.ok` 分支**没有**任何错误对象可判 —— 此前一律回 `{error:'gateway error'}`。
-   * 这里读一次错误信封（`clone()` 不消费原响应体，与改动前的行为一致）：命中
-   * "先改密"就与 `gatewayError` 走同一条出口，其余情况逐字保持原样。
+   * `!upstream.ok` 分支**没有**任何错误对象可判 —— 曾经一律回 `{error:'gateway error'}`。
+   * 这里读一次错误信封（`clone()` 不消费原响应体）：
+   *  - 命中"先改密"就与 `gatewayError` 走同一条出口；
+   *  - **有信封就逐字透传**（状态 + 服务端原文 + 稳定码）；
+   *  - 非 JSON / 空 body 才退回原兜底文案。
+   *
+   * R16B-08（2026-09-25）：修 R15B-02 时把"解析出来的信封只在改密那一支用、其余
+   * 一律丢回 `'gateway error'`"当成"行为不变"，实际是把**已经拿到手的诊断信息丢掉**：
+   * 能力中心那 6 条归档路径的失败于是只剩面板上那句「操作失败:gateway error」——
+   * 状态码、稳定码、服务端原文全部消失，用户与支持都无法区分"令牌过期 / 没有权限 /
+   * 版本不存在 / 服务端 500"。本仓既有口径是**业务信封原样透传**（`wasm-apps.ts` 的
+   * `forwardAuthAware` 连字节都不重新序列化），这里照同一口径补上：`error` 放服务端
+   * 原文（渲染层读的就是这个字符串字段），`code` 单列供分档。
    * @param res - 本地响应对象。
    * @param upstream - 网关响应。
    * @returns 已写出应答（调用方直接 return）。
    */
   const archiveUpstreamError = async (res: ServerResponse, upstream: Response): Promise<void> => {
     const envelope = await upstream.clone().json().catch(() => null) as { error?: { code?: string, message?: string } } | null
-    if (envelope?.error?.code === PASSWORD_CHANGE_REQUIRED_CODE) {
-      return passwordChangeRequired(res, envelope.error.message ?? hostCopy(hostLocale(), '请先修改密码', 'Change your password first'))
+    const failure = envelope?.error
+    if (failure?.code === PASSWORD_CHANGE_REQUIRED_CODE) {
+      return passwordChangeRequired(res, failure.message ?? hostCopy(hostLocale(), '请先修改密码', 'Change your password first'))
     }
+    if (typeof failure?.message === 'string' && failure.message.trim() !== '') {
+      return json(res, upstream.status, {
+        error: failure.message,
+        ...(typeof failure.code === 'string' && failure.code !== '' ? { code: failure.code } : {}),
+      })
+    }
+    // 非 JSON body（网关 HTML 错误页 / 空 body）：没有信封可透传，逐字保持原行为
+    // —— 这一段正是既有回归里那条"非 JSON 对照"钉住的形态。
     json(res, upstream.status, { error: 'gateway error' })
   }
 

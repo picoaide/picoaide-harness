@@ -59,7 +59,7 @@ import {
   type CatalogFilter,
 } from './catalog-filter.ts'
 import { dismissOnboarding, isOnboardingDismissed, type OnboardingStore } from './onboarding.ts'
-import { OPEN_INTENT_TTL_MS, clearOpenIntent, readOpenIntent, saveOpenIntent, type OpenIntentStore } from './open-intent.ts'
+import { OPEN_INTENT_TTL_MS, claimOpenIntent, clearOpenIntent, readOpenIntent, saveOpenIntent, type OpenIntentStore } from './open-intent.ts'
 import { t, tCount, type AppCenterKey } from './locales.ts'
 
 /**
@@ -874,12 +874,17 @@ export function AppCenterPanel({
    *
    * 记在存储里（不是 state）的原因见 `open-intent.ts`：客户端登录会重载页面，
    * 组件 state 活不过那一跳。这里只在"确实已登录"时才发起，失败就清掉意图（不循环）。
-   * @param appId - 待继续的 app_id。
+   *
+   * **认领而不是直接清**（`claimOpenIntent`）：页面加载级的消费者
+   * （`open-intent-resume.ts`，R16B-03）可能已经先一步拿走这条意图 ⇒ 认领失败就
+   * **不再开窗**。两个消费者各自"读到再清"是不够的 —— 那样同一个意图会开两次窗。
+   * 认领的返回值（而不是调用方读到的那份快照）才是要打开的 app_id。
    */
-  const continuePendingOpen = useCallback(async (appId: string): Promise<void> => {
-    clearOpenIntent(intentStore === undefined ? {} : { store: intentStore })
+  const continuePendingOpen = useCallback(async (): Promise<void> => {
+    const claimed = claimOpenIntent(intentStore === undefined ? {} : { store: intentStore })
     setPendingOpen(null)
-    const result = await openAppEntry(appId)
+    if (claimed === null) return
+    const result = await openAppEntry(claimed.appId)
     if (!result.ok) {
       // 静默是缺陷（2026-09-21 审计）：登录后自动继续若失败（应用已删/被冻结/协议未就绪），
       // 用户只会看到"提示没了、窗也没开"。复用既有的错误块信封如实渲染。
@@ -887,10 +892,10 @@ export function AppCenterPanel({
       return
     }
     setPendingOpenFailure(null)
-    if (result.window !== undefined) setOpenFeedback(previous => ({ ...previous, [appId]: result.window! }))
+    if (result.window !== undefined) setOpenFeedback(previous => ({ ...previous, [claimed.appId]: result.window! }))
     if (result.counts !== undefined) {
       const counts = result.counts
-      setOpenCounts(previous => ({ ...previous, [appId]: counts }))
+      setOpenCounts(previous => ({ ...previous, [claimed.appId]: counts }))
     }
   }, [intentStore])
 
@@ -905,7 +910,7 @@ export function AppCenterPanel({
     let cancelled = false
     void loadLoginState().then((loggedIn) => {
       if (cancelled) return
-      if (loggedIn) { void continuePendingOpen(intent.appId); return }
+      if (loggedIn) { void continuePendingOpen(); return }
       setPendingOpen({ appId: intent.appId, at: intent.at })
     }).catch(() => { if (!cancelled) setPendingOpen({ appId: intent.appId, at: intent.at }) })
     return () => { cancelled = true }
@@ -916,7 +921,6 @@ export function AppCenterPanel({
   // 未登录期间轮询登录态；一旦登录完成就自动继续（§19 Q4）。轮询只在有 pending 时存在。
   useEffect(() => {
     if (pendingOpen === null) return
-    const appId = pendingOpen.appId
     const at = pendingOpen.at
     let cancelled = false
     const timer = setInterval(() => {
@@ -930,7 +934,7 @@ export function AppCenterPanel({
       }
       void loadLoginState().then((loggedIn) => {
         if (cancelled || !loggedIn) return
-        void continuePendingOpen(appId)
+        void continuePendingOpen()
       }).catch(() => { /* 下一次轮询再试 */ })
     }, loginPollMs ?? LOGIN_POLL_MS)
     return () => { cancelled = true; clearInterval(timer) }

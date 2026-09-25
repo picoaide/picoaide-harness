@@ -11,6 +11,12 @@ interface AuthState {
   loggedIn: boolean
   username?: string
   serverURL?: string
+  /**
+   * 会话身份的稳定串（`serverURL + username`，R15B-04 起下发；唯一实现在
+   * enterprise 的 `session-identity.ts`）。账户卡用它给"这一份余额属于谁"建判据：
+   * 身份与余额取数时不一致 ⇒ 这份数字不得渲染（R16B-01）。
+   */
+  identity?: string
 }
 
 /** `/api/pico/account/usage` body (this plugin's host route).
@@ -22,10 +28,22 @@ interface UsageResponse {
   error: string | null
   /** 审计 2026-09-12 P1-5:令牌失效(路由层 401)。 */
   authExpired?: boolean
+  /**
+   * R16B-01：这份快照属于哪个会话身份（宿主用 `session-identity.ts` 的唯一实现
+   * 盖的章）。渲染判据 = 它必须与 `/api/pico/auth/state` 的 `identity` 相等。
+   * 旧宿主不盖这个字段 ⇒ 退化成"取数时观察到的身份"（见下面的 `readUsage`）。
+   */
+  identity?: string
 }
 
 /** Row container: the sidebar foot area (below the Settings seat). */
 const FOOT_AREA_SELECTOR = '[class$="_footArea"]'
+
+/** 会话身份（未登录/未下发 ⇒ 空串）。判据与 auth-gate 的 `identity` 字段同源，
+ *  这里只做读取，不再拼第二份口径。 */
+function identityOf(auth: AuthState | null): string {
+  return typeof auth?.identity === 'string' ? auth.identity : ''
+}
 
 /** Client polling cadence; the host refreshes the cache after every agent loop. */
 const POLL_MS = 10_000
@@ -413,6 +431,8 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null)
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [usage, setUsage] = useState<UsageResponse | null>(null)
+  /** 当前 `usage` 是在**哪个会话身份**下取到的（空串 = 未知/未登录）。 */
+  const [usageIdentity, setUsageIdentity] = useState('')
   const [loggingOut, setLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -446,38 +466,70 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
 
   // Poll auth state + cached usage; the host refreshes the usage cache after
   // every completed agent loop, so the card converges within one poll window.
+  //
+  // 2026-09-25（R16B-01 / R16B-09）：**轮询与手动「刷新」共用这一条读路径**。
+  // 两条路径此前各写各的：轮询处理 401（渲染"余额不可用"），手动刷新只有
+  // `if (res.ok)`、非 2xx 静默（而路由**故意**会回三种 401），口径不一致。
+  //
+  // 更重要的是身份判据（R16B-01）：同服务端换号（A→B）后，宿主路由会在去抖窗口内
+  // 拒绝交付旧账号的余额，但客户端**不能只依赖对端**——`/api/pico/auth/state` 与
+  // `/api/pico/account/usage` 是两次独立请求，可能落在切换点的两侧。因此：
+  //   ① 两份响应一起读，观察到的身份与上一轮不同（非空 → 另一个非空）时，
+  //      **这一发 usage 一律不采纳**（宁可留白，下一轮 10s 后在新身份下重取）；
+  //   ② 采纳时把身份记进 `usageIdentity`，渲染期再比一次（`identityMismatch`）。
+  const lastIdentityRef = useRef('')
+  const readUsage = useCallback(async (force: boolean, isCancelled: () => boolean): Promise<void> => {
+    try {
+      const [authRes, usageRes] = await Promise.all([
+        fetch('/api/pico/auth/state'),
+        fetch(force ? '/api/pico/account/usage?refresh=1' : '/api/pico/account/usage'),
+      ])
+      const [authBody, usageBody] = await Promise.all([
+        authRes.json(),
+        usageRes.json().catch(() => null),
+      ])
+      if (isCancelled()) return
+      const state = authBody as AuthState
+      const identity = identityOf(state)
+      // "换号" = 上一轮观察到的身份非空、且与这一轮不同。首次取数与"从未登录变成
+      // 已登录"都不算换号（前者没有可交付的旧数字，后者由整文档导航兜住）。
+      const switched = identity !== '' && lastIdentityRef.current !== '' && lastIdentityRef.current !== identity
+      if (identity !== '') lastIdentityRef.current = identity
+      setAuth(state)
+      if (usageRes.status === 401) {
+        // 审计 2026-09-12 P1-5:令牌失效 / 换号窗口 —— 服务端不会再给余额,卡片必须
+        // 立刻转"余额不可用",而不是继续显示上一次成功取的金额。
+        setUsage({ data: null, fetchedAt: 0, state: 'error', error: 'auth expired', authExpired: true })
+        setUsageIdentity(identity)
+        return
+      }
+      if (switched) {
+        setUsage(null)
+        setUsageIdentity(identity)
+        return
+      }
+      if (usageBody !== null) {
+        const body = usageBody as UsageResponse
+        setUsage(body)
+        // 盖在快照上的身份优先（宿主自证这一份属于谁）；旧宿主没有该字段时退回
+        // "这一批 auth/state 观察到的身份" —— 那时它是唯一的证据。
+        setUsageIdentity(typeof body.identity === 'string' && body.identity !== '' ? body.identity : identity)
+      }
+    } catch {
+      /* keep the last known state on transient failures */
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
-    const poll = async (): Promise<void> => {
-      try {
-        const [authRes, usageRes] = await Promise.all([
-          fetch('/api/pico/auth/state'),
-          fetch('/api/pico/account/usage'),
-        ])
-        const [authBody, usageBody] = await Promise.all([
-          authRes.json(),
-          usageRes.json().catch(() => null),
-        ])
-        if (cancelled) return
-        setAuth(authBody as AuthState)
-        if (usageRes.status === 401) {
-          // 审计 2026-09-12 P1-5:令牌失效 —— 服务端不会再给余额,卡片必须
-          // 立刻转"余额不可用",而不是继续显示上一次成功取的金额。
-          setUsage({ data: null, fetchedAt: 0, state: 'error', error: 'auth expired', authExpired: true })
-        } else if (usageBody !== null) {
-          setUsage(usageBody as UsageResponse)
-        }
-      } catch {
-        /* keep the last known state on transient failures */
-      }
-    }
-    void poll()
-    const timer = window.setInterval(() => { void poll() }, POLL_MS)
+    const isCancelled = (): boolean => cancelled
+    void readUsage(false, isCancelled)
+    const timer = window.setInterval(() => { void readUsage(false, isCancelled) }, POLL_MS)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [readUsage])
 
   // Outside pointerdown (row and popover both count as inside) closes it.
   useOutsidePointerDismissal(rowRef, open, setOpen, popoverRef)
@@ -568,11 +620,9 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
     refreshingRef.current = true
     setRefreshing(true)
     try {
-      const res = await fetch('/api/pico/account/usage?refresh=1')
-      if (res.ok) {
-        const body = (await res.json()) as UsageResponse
-        setUsage(body)
-      }
+      // 与轮询同一条读路径（含 401 处理与身份判据）—— 手动刷新的 `?refresh=1`
+      // 只是让宿主立刻往返一次网关，其余语义一致（R16B-09：此前非 2xx 静默）。
+      await readUsage(true, () => false)
     } finally {
       refreshingRef.current = false
       setRefreshing(false)
@@ -591,7 +641,12 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   // authExpired(路由层 401,旧数据已被丢弃)再兜一层。
   // 取舍:网络抖动期间也不再显示上一次的金额(改为"余额获取失败"占位),
   // 下一次成功轮询即恢复 —— 余额属于计费口径,宁可短暂留白不可展示错数。
-  const stale = usage !== null && (usage.state === 'error' || usage.authExpired === true)
+  //
+  // R16B-01（2026-09-25）：再加一条**渲染期**判据 —— 这一份余额取数时的会话身份
+  // 与此刻 `/api/pico/auth/state` 的身份不一致 ⇒ 无论它的 `state` 是什么都不可信
+  // （换号就是把上一个账号的数字渲染到新账号名下的那条路径）。
+  const identityMismatch = identityOf(auth) !== '' && usageIdentity !== '' && identityOf(auth) !== usageIdentity
+  const stale = identityMismatch || (usage !== null && (usage.state === 'error' || usage.authExpired === true))
 
   // 余额解析(2026-09-11 收敛:员工唯一可花的钱 = 账户余额)。
   //  /auth/usage 的形状已由 usage-contract.parseUsagePayload 校验过,这里只需
@@ -602,10 +657,13 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
   const activated = data !== null && data.balance_activated === true
   const balanceMoney = activated && isMoney(data!.balance_money) ? data!.balance_money : null
   const monthly = data !== null && isMoney(data.balance_monthly) ? data.balance_monthly : 0
-  const low = balanceMoney !== null && balanceMoney <= 0
+  // R16B-01：`low` 决定行上的红色余额与警示圆点 —— 不能由**不可信**的快照点亮。
+  const low = !stale && balanceMoney !== null && balanceMoney <= 0
 
   const metaParts: string[] = []
-  if (data !== null) {
+  // R16B-01：用量与余额同属一份快照。身份不符/取数失败时**整行一起作废** ——
+  // 只作废金额而留着「本月已用 ¥X」等于把上一个账号的用量交给新账号。
+  if (data !== null && !stale) {
     // 审计修复: 字段缺省/非法时跳过,不再进入 formatMoney(undefined)
     if (isMoney(data.monthly_cost)) metaParts.push(`${t('account.usedThisMonth')} ${formatMoney(data.monthly_cost)}`)
     if (isMoney(data.today_cost)) metaParts.push(`${t('account.today')} ${formatMoney(data.today_cost)}`)
@@ -713,7 +771,10 @@ export function AccountCard({ wide }: PropsRuntime<'sidebar.footer.action'>) {
             <button
               type="button"
               style={REFRESH}
-              disabled={refreshing}
+              // R16B-01：身份与这份余额不一致期间不许刷新 —— 刷新按钮此刻没有
+              // 可刷的对象（屏幕上的数字不属于当前账号），点它只会把一发生过期的
+              // 读路径再跑一遍。退出登录仍然可用：任何情况下都不能把用户困住。
+              disabled={refreshing || identityMismatch}
               onClick={() => { void refreshNow() }}
             >
               {refreshing ? '…' : `↻ ${t('account.refresh')}`}

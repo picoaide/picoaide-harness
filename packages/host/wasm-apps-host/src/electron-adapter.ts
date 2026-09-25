@@ -25,13 +25,17 @@ import type { ClientRequest, Session as ElectronSession } from 'electron'
 // 共用）；本包通过 workspace 依赖使用它，不再自己写第二份。
 import { ensureSessionGuard, installAppSchemeRequestGate, type NativeSession as NativeGuardSession, type NativeWebRequestSession } from '@picoaide/dsh-browser/guard'
 import { DEFAULT_APP_SCHEME, isValidAppScheme } from './app-protocol.ts'
+import { appWindowFailureCopy } from './app-window-copy.ts'
+import { createAppWindowRecovery, type AppWindowRecovery } from './app-window-recovery.ts'
+import { DEFAULT_HOST_LOCALE, type HostLocale } from './locale.ts'
 // 窗口几何/生命周期/状态文件的**纯逻辑**在 `windows.ts`（无 Electron 依赖，单测覆盖）；
 // 本模块只实现它的原生动作面。类型从那里**再导出**（不复制第二份声明：两份声明
 // 会在"给契约加一个成员"时静默漂移，而漂移的方向是`webContentsId` 之类的闸门判据
 // 在真实适配器上缺席）。
-import { classifyAppWindowNavigation, type AppWindowHandle, type WasmAppsWindowAdapter } from './windows.ts'
+import { classifyAppWindowNavigation, type AppWindowHandle, type AppWindowHealth, type WasmAppsWindowAdapter } from './windows.ts'
 
-export type { AppWindowHandle, WasmAppsWindowAdapter } from './windows.ts'
+export type { AppWindowFailure, AppWindowFailureKind } from './app-window-recovery.ts'
+export type { AppWindowHandle, AppWindowHealth, WasmAppsWindowAdapter } from './windows.ts'
 
 /** 协议 handler 的形状（Electron `protocol.handle` 的回调）。 */
 export type AppSchemeRequestHandler = (request: Request) => Promise<Response> | Response
@@ -415,6 +419,16 @@ export interface RealAppWindowAdapterOptions {
   appScheme: string
   /** 诊断出口（拒绝导航 / 加载失败）。缺省丢弃。 */
   warn?: ((message: string) => void) | undefined
+  /**
+   * 宿主语言（**函数**，按调用求值）。
+   *
+   * 为什么是 thunk 而不是值：失败页文案要跟随应用内语言切换，而适配器是**启动期**
+   * 构造的（那时用户还没法改语言）。任何把首次解析结果钉进闭包常量的写法都会让
+   * "切了语言但失败页还是旧语言"（本仓已记录两次同根因 bug）。
+   *
+   * 缺席 ⇒ 产品缺省语言（`DEFAULT_HOST_LOCALE`）。
+   */
+  locale?: (() => HostLocale) | undefined
 }
 
 /**
@@ -438,7 +452,14 @@ export interface RealAppWindowAdapterOptions {
  *  - **存活判据**（`isAlive`）：用户手动关窗后窗口管理器必须**重新建窗**，而不是
  *    聚焦一个已销毁的句柄（否则第二次 `open` 会回 `focused` 而**屏幕上一个窗口都
  *    没有**——正是本模块要消灭的那类"契约对、现象空"的缺陷）。
- * @param options - 应用源 scheme 与诊断出口。
+ *  - **崩溃 / 加载失败恢复**（R16B-19）：`render-process-gone` 与顶层 `did-fail-load`
+ *    经 `app-window-recovery.ts` 的**单飞状态机**处理 —— 至多自动重载一次，之后显示
+ *    带「重试」按钮的失败页（形态与 shell 窗口的 `reloadOrShowCrashFallback` 一致）。
+ *  - **原生生命周期订阅**（R16B-20）：`win 'closed'` 与健康状态变化经
+ *    {@link WasmAppsWindowAdapter.onAppWindowClosed} /
+ *    {@link WasmAppsWindowAdapter.onAppWindowHealth} 即时通知窗口管理器；没有它，
+ *    用户自己关掉的窗口只能靠 `isAlive()` 被"问一次"才发现。
+ * @param options - 应用源 scheme、诊断出口与宿主语言。
  * @returns 交给桌面壳 `provide('wasmAppsWindowAdapter', …)` 的适配器实例。
  * @throws 当 `appScheme` 不是合法应用源 scheme 时。
  */
@@ -448,8 +469,60 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
     throw new Error(`createRealElectronWindowAdapter: ${JSON.stringify(appScheme)} is not a valid application origin scheme`)
   }
   const warn = options.warn ?? ((): void => {})
+  const locale = options.locale ?? ((): HostLocale => DEFAULT_HOST_LOCALE)
   /** 句柄 → 原生窗口。用注册表而不是 `instanceof`：单测的替身也是合法句柄。 */
   const handles = new WeakMap<object, BrowserWindow>()
+
+  /**
+   * 每个原生窗口的**恢复记账 + 诊断订阅**（R16B-19 / R16B-20）。
+   *
+   * 为什么挂在原生窗口对象上（WeakMap）而不是句柄上：句柄就是 `BrowserWindow` 本身
+   * （见 {@link remember}），两者同生命周期；用 WeakMap 是为了不在窗口销毁后留下
+   * 强引用。
+   */
+  interface AppWindowBookkeeping {
+    /** 这台窗口的崩溃恢复状态机（单飞 + 至多自动重载一次 + 失败页）。 */
+    recovery: AppWindowRecovery
+    /**
+     * **最近一次请求加载的应用 URL**（失败页的重试目标）。
+     *
+     * 为什么必须自己记：失败页显示期间 `webContents.getURL()` 是 `data:` 文档，
+     * 拿它当重试目标会让第二次失败页的按钮变成禁用的（用户再无出路）。
+     */
+    desiredUrl: string
+    /** 宿主的健康订阅（模型面 `crashed` 的消费者）。 */
+    health: Set<(snapshot: AppWindowHealth) => void>
+    /** 宿主的销毁订阅（R16B-20：用户点窗口自己的关闭按钮）。 */
+    closed: Set<() => void>
+    /**
+     * 最近一次加载请求的序号（健康状态的**排序判据**）。
+     *
+     * 为什么必须有它：`loadURL` 的 promise 是按微任务结算的，而崩溃事件可能先到 ——
+     * "崩溃前发出的那次加载成功了"于是会在崩溃之后把 `crashed` 抹回 false（用户与
+     * 模型看到的是"窗口好好的"，而它其实已经崩了）。规则：加载结果只在它**仍是
+     * 最新一次请求**时才作数；崩溃事件前移序号，作废所有在飞结果。
+     */
+    loadSeq: number
+  }
+
+  const books = new WeakMap<BrowserWindow, AppWindowBookkeeping>()
+
+  /**
+   * 一个 URL 是否是**本安装的应用文档**（`<scheme>://…`）。
+   *
+   * 用途只有一个：区分"应用真的加载好了"与"我们自己塞进去的失败页也加载完了"——
+   * 后者是 `data:` 文档，绝不能把 `crashed` 抹回 false。
+   * @param rawUrl - `webContents.getURL()` 的取值。
+   * @returns 是否是应用文档 URL。
+   */
+  const isAppDocumentUrl = (rawUrl: unknown): rawUrl is string => {
+    if (typeof rawUrl !== 'string' || rawUrl === '') return false
+    try {
+      return new URL(rawUrl).protocol === `${appScheme}:`
+    } catch {
+      return false
+    }
+  }
 
   /**
    * 解析应用窗口要落地的 session（**分区必填**）。
@@ -483,6 +556,7 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
     if (record.code === 'ERR_ABORTED' || record.errno === -3) return true
     return typeof record.message === 'string' && record.message.includes('ERR_ABORTED')
   }
+
   /** 统一的加载失败出口（被顶掉的不记）。 */
   const reportLoadFailure = (url: string, cause: unknown): void => {
     if (supersededLoad(cause)) return
@@ -496,6 +570,131 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
   const remember = (win: BrowserWindow): AppWindowHandle => {
     handles.set(win, win)
     return win
+  }
+
+  /**
+   * 在一个应用窗口里加载**应用 URL**（建窗与聚焦导航的唯一入口）。
+   *
+   * 加载结果同时决定健康状态（R16B-19）：成功 ⇒ `loaded()`（窗口真的好了）、失败 ⇒
+   * `fail()`（进恢复路径）。**失败页不经过这里** —— 它由恢复状态机直接
+   * `win.loadURL('data:text/html…')`，因此既不改 `desiredUrl`、也不算"应用加载成功"。
+   * @param win - 原生窗口。
+   * @param url - 应用 URL。
+   * @returns 加载完成（失败已内部消化，调用方 `void` 掉即可）。
+   */
+  const loadAppUrl = async (win: BrowserWindow, url: string): Promise<void> => {
+    const book = books.get(win)
+    if (book === undefined) {
+      try {
+        await win.loadURL(url)
+      } catch (cause) {
+        reportLoadFailure(url, cause)
+      }
+      return
+    }
+    book.desiredUrl = url
+    book.loadSeq += 1
+    const seq = book.loadSeq
+    try {
+      await win.loadURL(url)
+      // 只有"仍是最新一次请求"的加载成功才算窗口好了（见 `loadSeq` 的注释）。
+      if (book.loadSeq === seq) book.recovery.loaded()
+    } catch (cause) {
+      if (supersededLoad(cause)) return
+      reportLoadFailure(url, cause)
+      // 事件源之一：`loadURL` 的 rejection 比 `did-fail-load` 更早、也更可靠地
+      // 覆盖"平台不可达"这类失败（两者都到达时由状态机的单飞合并）。
+      if (book.loadSeq === seq) void book.recovery.fail({ kind: 'did-fail-load', reason: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }
+
+  /**
+   * 建窗时挂上**故障 / 销毁 / 健康**三类原生订阅（R16B-19 / R16B-20）。
+   *
+   * 这是本模块与 `windows.ts` 之间唯一的生命周期缝：宿主（窗口管理器）订阅的是
+   * "这个窗口坏了/没了"，而不是自己去轮询 `isAlive()` —— 后者只在被问到时才发现，
+   * 于是用户自己关掉的窗口会以幽灵 surface 的形式继续留在模型面上。
+   * @param win - 刚建好的原生窗口。
+   * @param appId - 应用 id（诊断文案用）。
+   * @returns 该窗口的记账对象。
+   */
+  const watchAppWindow = (win: BrowserWindow, appId: string): AppWindowBookkeeping => {
+    const book: AppWindowBookkeeping = {
+      desiredUrl: '',
+      health: new Set(),
+      closed: new Set(),
+      loadSeq: 0,
+      // 先占位、马上覆盖：`createAppWindowRecovery` 的 `onCrashStateChange` 需要
+      // 引用 `book`，而 `book` 又需要 recovery —— 用两层赋值打破这个环。
+      recovery: undefined as unknown as AppWindowRecovery,
+    }
+    books.set(win, book)
+    book.recovery = createAppWindowRecovery({
+      host: {
+        isDestroyed: () => win.isDestroyed(),
+        currentUrl: () => {
+          if (win.isDestroyed()) return ''
+          const current = win.webContents.getURL()
+          // 当前文档是失败页（`data:`）时回落到"最近一次请求的应用 URL"。
+          return isAppDocumentUrl(current) ? current : book.desiredUrl
+        },
+        load: async (url) => { await win.loadURL(url) },
+      },
+      copy: () => appWindowFailureCopy(locale()),
+      warn,
+      onCrashStateChange: (crashed) => {
+        for (const listener of book.health) listener({ crashed })
+      },
+    })
+
+    // 故障源 1：渲染进程消失（崩溃/OOM/被杀）。`clean-exit`/`killed` 是正常收尾，
+    // 不是故障 —— 把它们也当崩溃会让"关闭窗口时进程正常退出"弹出一张失败页。
+    win.webContents.on('render-process-gone', (_event, details) => {
+      const reason = typeof details?.reason === 'string' ? details.reason : 'unknown'
+      warn(`pico-wasm-apps-host: the renderer process of an application window is gone (app=${appId}, reason=${reason}, exitCode=${String(details?.exitCode ?? '')})`)
+      if (reason === 'clean-exit' || reason === 'killed') return
+      // 崩溃前发出的那次加载即使"成功"也不能算窗口好了（见 `loadSeq`）。
+      book.loadSeq += 1
+      void book.recovery.fail({ kind: 'render-process-gone', reason })
+    })
+
+    // 故障源 2：顶层文档加载失败。
+    //
+    // 第 5 参 `isMainFrame` 才是"顶层文档"的判据（Electron 的签名是
+    // `(event, errorCode, errorDescription, validatedURL, isMainFrame, …)`）。子框架
+    // 失败**只记一行**：应用页里一个 `<iframe>` 挂掉就重载整窗（第二次再换成失败页）
+    // 会把用户的草稿与视图状态掀掉 —— shell 窗口那边为同一件事写过长注释（B-01）。
+    // 防御性判空（只认严格 `true`）：旧/新 Electron 少给参数时宁可少一次自动恢复。
+    //
+    // `errorCode === -3`（ERR_ABORTED）是"被后续导航顶掉"，不是故障。
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      const target = typeof validatedURL === 'string' ? validatedURL : ''
+      if (isMainFrame !== true) {
+        warn(`pico-wasm-apps-host: a subframe failed to load in an application window (${String(errorCode)}: ${String(errorDescription)}) ${target}`)
+        return
+      }
+      if (errorCode === -3) return
+      warn(`pico-wasm-apps-host: the main frame of an application window failed to load (${String(errorCode)}: ${String(errorDescription)}) ${target}`)
+      // 同上：这次失败作废所有在飞的加载结果（否则"导航失败但上一次加载成功"
+      // 的结算顺序会把状态抹回健康）。
+      book.loadSeq += 1
+      void book.recovery.fail({ kind: 'did-fail-load', reason: `${String(errorCode)}: ${String(errorDescription)}` })
+    })
+
+    // 恢复的唯一判据："**应用文档**加载完成"。失败页自己也是 `did-finish-load`，
+    // 但它是 `data:` 文档 ⇒ 不算（否则失败页一渲染出来就把 crashed 抹成 false，
+    // 模型会以为窗口恢复了）。用户点失败页上的「重试」成功时走的就是这一条。
+    win.webContents.on('did-finish-load', () => {
+      if (win.isDestroyed()) return
+      if (isAppDocumentUrl(win.webContents.getURL())) book.recovery.loaded()
+    })
+
+    // R16B-20：用户点窗口自己的关闭按钮 ⇒ Electron 销毁窗口并派发 `closed`；
+    // 宿主此前收不到任何回调（只能靠 `isAlive()` 被动发现）。
+    win.on('closed', () => {
+      for (const listener of book.closed) listener()
+    })
+    return book
   }
 
   return {
@@ -535,8 +734,10 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
       // 标题恒为宿主给的 `<应用名> · <产品名>`：应用 HTML 的 `<title>` 不得改写它
       // （否则应用可以伪装成"设置""登录"等宿主界面）。
       win.on('page-title-updated', (event) => { event.preventDefault() })
+      // 订阅必须在**第一次加载之前**挂好：崩溃可以发生在首帧（正是"首次加载失败"）。
+      watchAppWindow(win, geometry.appId)
       const handle = remember(win)
-      void win.loadURL(geometry.url).catch((cause: unknown) => { reportLoadFailure(geometry.url, cause) })
+      void loadAppUrl(win, geometry.url)
       win.focus()
       return handle
     },
@@ -545,12 +746,32 @@ export function createRealElectronWindowAdapter(options: RealAppWindowAdapterOpt
       if (win === undefined || win.isDestroyed()) return
       const current = win.webContents.getURL()
       if (current !== url) {
-        void win.loadURL(url).catch((cause: unknown) => { reportLoadFailure(url, cause) })
+        void loadAppUrl(win, url)
       }
       // 最小化/隐藏状态下"聚焦"必须先把窗口带回来，否则用户点了打开却什么都没发生。
       if (win.isMinimized()) win.restore()
       if (!win.isVisible()) win.show()
       win.focus()
+    },
+    onAppWindowHealth(handle, listener) {
+      const win = windowOf(handle)
+      if (win === undefined) return
+      const book = books.get(win)
+      if (book === undefined) return
+      book.health.add(listener)
+      // 订阅即回报当前状态：崩溃可以发生在宿主订阅之前（建窗与订阅不是同一个调用），
+      // 只报"变化"会让那一次崩溃永久不可见。
+      listener({ crashed: book.recovery.crashed() })
+    },
+    onAppWindowClosed(handle, listener) {
+      const win = windowOf(handle)
+      if (win === undefined) return
+      const book = books.get(win)
+      if (book === undefined) return
+      book.closed.add(listener)
+      // 已经销毁的窗口（订阅晚于关窗）必须**立刻**回报，否则宿主要等到下一次
+      // `isAlive()` 才发现 —— 那正是"幽灵 surface"的窗口期。
+      if (win.isDestroyed()) listener()
     },
     closeAppWindow(handle) {
       const win = windowOf(handle)

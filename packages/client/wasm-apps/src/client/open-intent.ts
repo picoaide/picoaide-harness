@@ -6,8 +6,10 @@
  * §19 Q4 冻结的交互是"面板层拦截 → 弹客户端登录 → **登录成功后自动继续**"。而客户端
  * 登录走的是**页面重载**（`auth-gate.ts` 的会话 tripwire：`loggedIn:false` ⇒
  * `location.reload()` 进登录页，登录后整棵树重建）⇒ 组件 state 活不过这一跳。
- * 所以意图必须写进**存储**：登录页回来后，面板挂载时读到它并自动继续 —— 用户不需要
- * 再点一次「打开」。
+ * 所以意图必须写进**存储**：登录页回来后，**下一个文档加载**读到它并自动继续 —— 用户
+ * 不需要再点一次「打开」。读它的那一跳是**页面加载级**的（`open-intent-resume.ts`，
+ * 由 `mountAppCenterPanel()` 在插件 apply 时调用），不是面板挂载时 —— 面板只在激活时
+ * 才渲染，而登录成功是整文档导航，那一刻面板并不存在（R16B-03）。
  *
  * ## 与 L2 深链队列的分工
  *
@@ -87,13 +89,23 @@ export function saveOpenIntent(
   }
 }
 
+/** {@link readOpenIntent} / {@link claimOpenIntent} 的可注入依赖。 */
+export interface OpenIntentReadOptions {
+  /** 存储（缺省 {@link defaultOpenIntentStore}）。 */
+  store?: OpenIntentStore | null
+  /** 当前时间（TTL 判定；缺省 `Date.now`）。 */
+  now?: number
+  /** 存活上限（缺省 {@link OPEN_INTENT_TTL_MS}）。 */
+  ttlMs?: number
+}
+
 /**
  * 读回待继续的打开（**过期即丢弃**：§7.6「过期项直接丢弃并记一条 warn（不弹错误）」）。
  * @param options - 存储、当前时间与 TTL（测试注入）。
  * @returns 仍有效的意图；没有 / 过期 / 形态不对 ⇒ `null`（过期的会被顺手清掉）。
  */
 export function readOpenIntent(
-  options: { store?: OpenIntentStore | null, now?: number, ttlMs?: number } = {},
+  options: OpenIntentReadOptions = {},
 ): OpenIntent | null {
   const store = options.store === undefined ? defaultOpenIntentStore() : options.store
   if (store === null) return null
@@ -142,4 +154,28 @@ export function clearOpenIntent(options: { store?: OpenIntentStore | null } = {}
   try {
     store.removeItem(OPEN_INTENT_STORAGE_KEY)
   } catch { /* 清不掉不是错误：TTL 会让它自己过期 */ }
+}
+
+/**
+ * **原子认领**一条待继续的打开：读 + 删在同一次同步调用里完成（中间没有 `await`）。
+ *
+ * ## 为什么不能"读一次、稍后再 clear"
+ *
+ * 这条意图的消费者不止一个：页面加载级的 `resumeOpenIntent`（见
+ * `open-intent-resume.ts`）与面板激活后的 `AppCenterPanel.continuePendingOpen` 兜底。
+ * 两者都可能先**读到**同一条意图、再各自去开窗 ⇒ 同一个意图开两次窗。JS 单线程，
+ * 所以"读 + 删"之间只要没有 `await` 就是一个原子步骤：**认领到的那一个**才是唯一的
+ * 开窗者，后到的读到 `null`（"先清后开"本身不够 —— 清只保证下次读不到，不保证
+ * 两个已读到的消费者只有一个开窗）。
+ *
+ * 约定：任何要在开窗前清掉意图的路径都必须走这里（唯一先行清理点），认领失败即
+ * **不发请求**。
+ * @param options - 存储、当前时间与 TTL（测试注入）。
+ * @returns 被认领的意图；没有 / 过期 / 已被别的消费者认领 ⇒ `null`。
+ */
+export function claimOpenIntent(options: OpenIntentReadOptions = {}): OpenIntent | null {
+  const intent = readOpenIntent(options)
+  if (intent === null) return null
+  clearOpenIntent(options.store === undefined ? {} : { store: options.store })
+  return intent
 }

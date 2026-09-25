@@ -168,6 +168,10 @@ const zh = {
   'flow.fenceUnavailable': '{serverName}: streamable-http 出站重定向栅栏不可用，拒绝连接（{error}）',
   'flow.refreshUnsupported': '该连接器不支持令牌刷新',
   'flow.serverNameTaken': '本地 MCP 名「{serverName}」已被连接器「{by}」接管（服务端要求 serverName 唯一），本连接器的 MCP 注册已停止',
+  // R16B-04 凭据作用域闸门（src/index.ts 的 credentialScopeSwitching()）：
+  // 换号窗口内拒绝 connect 的文案。必须让用户知道"不是坏了，是还没换完"。
+  'flow.scopeSwitching': '正在切换账号：这个连接器的凭据目录还没换过来，暂时无法连接。请稍后重试',
+  'flow.scopeSwitchingHint': '登录/退出/换人进行中，新的凭据目录要等这一步走完才生效；稍等片刻再点一次「连接」即可',
 } as const
 
 /** English mirror — every key of {@link zh}, same parameter names. */
@@ -283,6 +287,8 @@ const en: Record<keyof typeof zh, string> = {
   'flow.fenceUnavailable': '{serverName}: the streamable-http outbound redirect fence is unavailable; connection refused ({error})',
   'flow.refreshUnsupported': 'This connector does not support token refresh',
   'flow.serverNameTaken': 'The local MCP name "{serverName}" was taken over by connector "{by}" (serverName must be unique); this connector\'s MCP registration has stopped',
+  'flow.scopeSwitching': 'Switching accounts: this connector\'s credential directory has not moved over yet, so it cannot be connected right now. Please retry in a moment',
+  'flow.scopeSwitchingHint': 'A login/logout/account switch is in progress; the new credential directory only takes effect once that step finishes. Wait a moment and press "Connect" again.',
 }
 
 /** Every host copy key of this package. */

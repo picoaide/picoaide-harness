@@ -627,3 +627,204 @@ describe('application windows register as browser surfaces (§16.1)', () => {
     expect(surfaces.registered).toHaveLength(1)
   })
 })
+
+/**
+ * R16B-20（第十六轮审计泳道 B，P2，实跑复现）：用户用**窗口自己的关闭按钮**关掉
+ * 应用窗口后，宿主必须立刻遗忘它。
+ *
+ * 修前形态：`isAlive()` 是唯一能发现"用户自己关窗"的途径，而它只在
+ * `has()/open()/openApps()/registerOpenWindows()` 里被问一次 ⇒ `windows` 映射、
+ * `windowPartitions`、**`webContentsIds` 白名单**与 browser runtime 的 surface
+ * 注册表都继续留着那个死窗口：`browser_list_tabs` 列出不存在的窗口、
+ * `browser_navigate{app_id}` 对已销毁的 webContents 调 `loadURL`、用户接管过的还
+ * continue 出现在 `userHeldSurfaces()`。
+ *
+ * 修后形态：适配器订阅原生 `win 'closed'` / `webContents 'destroyed'` 直接通知
+ * 管理器（{@link WasmAppsWindowAdapter.onAppWindowClosed}），管理器按**同一句柄**
+ * 收口（{@link WasmAppsWindowAdapter.onAppWindowHealth} 那一半同理）。
+ *
+ * 变异验证：去掉 `installWindowWatchers` 里的 `onAppWindowClosed` 接线 ⇒ ①②红；
+ * 把 `forget` 的句柄同一性守卫删掉 ⇒ ③红；把 `crashedApps` 的写入去掉 ⇒ ④红。
+ */
+describe('原生关窗/崩溃事件即时收口（R16B-20 / R16B-19）', () => {
+  const urlFor = (appId: string, path: string): string => `picoaide-app://${appId}${path}`
+  const workArea = (): { x: number, y: number, width: number, height: number } => ({ x: 0, y: 0, width: 1920, height: 1080 })
+
+  /** surface 注册表替身：多记一个 `crashed` 写入面（R16B-19 的模型面判据）。 */
+  function fakeSurfaces(): {
+    registered: Array<{ id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string, crashed?: boolean }>
+    unregistered: number[]
+    crashes: Array<{ id: number, crashed: boolean }>
+    registry: {
+      registerApp(input: { id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string, crashed?: boolean }): { id: number }
+      unregister(id: number): void
+      markAppCrashed?(id: number, crashed: boolean): void
+    }
+  } {
+    const registered: Array<{ id: number, appId: string, appScheme: string, webContents?: unknown, scope?: string, crashed?: boolean }> = []
+    const unregistered: number[] = []
+    const crashes: Array<{ id: number, crashed: boolean }> = []
+    return {
+      registered,
+      unregistered,
+      crashes,
+      registry: {
+        registerApp(input) {
+          registered.push(input)
+          return { id: input.id }
+        },
+        unregister(id) { unregistered.push(id) },
+        markAppCrashed(id, crashed) { crashes.push({ id, crashed }) },
+      },
+    }
+  }
+
+  /** 句柄 → webContents id 的固定偏移（白名单判据用可读的整数）。 */
+  const WC_ID_BASE = 100
+
+  /**
+   * 一个**能发原生事件**的替身适配器：把 `closed` / 健康回调攥在手里，由用例按句柄
+   * 触发（真机上这两个回调来自 Electron 的 `win.on('closed')` 与
+   * `webContents.on('render-process-gone' | 'did-fail-load')`）。
+   */
+  function eventfulAdapter(): {
+    adapter: WasmAppsWindowAdapter
+    handles: Map<string, { id: number }>
+    /** 用户点了窗口自己的关闭按钮：Electron 销毁窗口并派发 `closed`。 */
+    closeNativeWindow(handleId: number): void
+    /** 原生故障/恢复回调（`{crashed}` 快照）。 */
+    emitHealth(handleId: number, crashed: boolean): void
+  } {
+    const closedListeners = new Map<number, Array<() => void>>()
+    const healthListeners = new Map<number, Array<(snapshot: { crashed: boolean }) => void>>()
+    const handles = new Map<string, { id: number }>()
+    const destroyed = new Set<number>()
+    /** 单调递增（**不复用**）：句柄 id 复用会让"旧句柄的迟到回调"这条用例假红。 */
+    let nextHandleId = 0
+    const adapter: WasmAppsWindowAdapter = {
+      createAppWindow(options) {
+        nextHandleId += 1
+        const handle = { id: nextHandleId }
+        handles.set(options.appId, handle)
+        return handle
+      },
+      focusAppWindow: () => {},
+      closeAppWindow: () => {},
+      setAspectRatio: () => {},
+      // 真实适配器在窗口销毁后**不再**报 id（`electron-adapter.ts` 的
+      // `win.isDestroyed()` 分支返回 undefined）—— 这正是"建窗时必须自己把 id 记下来"
+      // 的原因：现问一次的写法会把死 id 永远留在分区闸门白名单里（R16B-20）。
+      webContentsId: handle => (destroyed.has((handle as { id: number }).id) ? undefined : (handle as { id: number }).id + WC_ID_BASE),
+      webContents: handle => ({ wc: (handle as { id: number }).id }),
+      isAlive: handle => !destroyed.has((handle as { id: number }).id),
+      onAppWindowHealth(handle, listener) {
+        const key = (handle as { id: number }).id
+        healthListeners.set(key, [...(healthListeners.get(key) ?? []), listener])
+      },
+      onAppWindowClosed(handle, listener) {
+        const key = (handle as { id: number }).id
+        closedListeners.set(key, [...(closedListeners.get(key) ?? []), listener])
+      },
+    }
+    return {
+      adapter,
+      handles,
+      closeNativeWindow(handleId) {
+        destroyed.add(handleId)
+        for (const [appId, handle] of handles) if (handle.id === handleId) handles.delete(appId)
+        for (const listener of closedListeners.get(handleId) ?? []) listener()
+      },
+      emitHealth(handleId, crashed) {
+        for (const listener of healthListeners.get(handleId) ?? []) listener({ crashed })
+      },
+    }
+  }
+
+  /** 一份标准的窗口管理器装配（各用例只差在断言上）。 */
+  async function harness(surfaces: ReturnType<typeof fakeSurfaces>, registry: () => ReturnType<typeof fakeSurfaces>['registry'] | undefined) {
+    const dir = await tempDir()
+    const native = eventfulAdapter()
+    const windows = createWasmAppsWindows({
+      adapter: native.adapter,
+      appScheme: 'picoaide-app',
+      productName: 'Acme',
+      userDataDir: dir,
+      partition: () => TEST_PARTITION,
+      surfaces: registry === undefined ? () => surfaces.registry : registry,
+      urlFor,
+      workArea,
+    })
+    return { windows, native }
+  }
+
+  it('①原生 `closed` 一到就 forget：surface 注销、webContents 白名单不再认它（不需要有人先调 has()）', async () => {
+    const surfaces = fakeSurfaces()
+    const { windows, native } = await harness(surfaces, () => surfaces.registry)
+    await windows.open('my-notes')
+    const surfaceId = surfaces.registered[0]!.id
+    const handleId = native.handles.get('my-notes')!.id
+    expect(windows.isAppSurfaceWebContents(handleId + WC_ID_BASE)).toBe(true)
+
+    native.closeNativeWindow(handleId)
+
+    // ③"不需要有人先调 has()"：下面两条断言在**任何**查询动作之前。
+    expect(surfaces.unregistered).toEqual([surfaceId])
+    expect(windows.isAppSurfaceWebContents(handleId + WC_ID_BASE)).toBe(false)
+    // 映射也空了（`openApps()` 只是把结论读出来）。
+    expect(windows.openApps()).toEqual([])
+  })
+
+  it('②关窗后重新打开 = 新建窗口；旧句柄的迟到回调不得把新窗口删掉或标成崩溃', async () => {
+    const surfaces = fakeSurfaces()
+    const { windows, native } = await harness(surfaces, () => surfaces.registry)
+    await windows.open('my-notes')
+    const firstHandle = native.handles.get('my-notes')!.id
+    native.closeNativeWindow(firstHandle)
+    // 关窗事件一到就注销（任何查询动作之前）。
+    expect(surfaces.unregistered).toEqual([surfaces.registered[0]!.id])
+    expect(windows.openApps()).toEqual([])
+
+    await windows.open('my-notes')
+    expect(surfaces.registered).toHaveLength(2)
+
+    // 迟到的旧句柄事件（Electron 的事件派发是异步的，可能排在 open 之后到达）：
+    // 没有句柄同一性守卫时，它们会把**新**窗口删掉/标成崩溃。
+    surfaces.crashes.length = 0
+    native.emitHealth(firstHandle, true)
+    native.closeNativeWindow(firstHandle)
+    expect(windows.openApps()).toEqual(['my-notes'])
+    expect(surfaces.crashes.filter(entry => entry.crashed)).toEqual([])
+    expect(surfaces.unregistered).toEqual([surfaces.registered[0]!.id])
+  })
+
+  it('④崩溃状态如实流到 surface 注册表（模型面 crashed 的唯一来源），重建窗口即复位', async () => {
+    const surfaces = fakeSurfaces()
+    const { windows, native } = await harness(surfaces, () => surfaces.registry)
+    await windows.open('my-notes')
+    const firstHandle = native.handles.get('my-notes')!.id
+    const surfaceId = surfaces.registered[0]!.id
+
+    native.emitHealth(firstHandle, true)
+    expect(surfaces.crashes).toEqual([{ id: surfaceId, crashed: true }])
+
+    native.emitHealth(firstHandle, false)
+    expect(surfaces.crashes.at(-1)).toEqual({ id: surfaceId, crashed: false })
+
+    // 用户关窗后重开：新窗口的初始状态必须是"健康"，不继承上一个窗口的崩溃态。
+    native.emitHealth(firstHandle, true)
+    native.closeNativeWindow(firstHandle)
+    await windows.open('my-notes')
+    expect(surfaces.registered.at(-1)?.crashed).toBe(false)
+  })
+
+  it('⑤崩溃时注册表还没到（browser 行晚加载）⇒ 补注册时带上当时的崩溃态', async () => {
+    const surfaces = fakeSurfaces()
+    let registry: ReturnType<typeof fakeSurfaces>['registry'] | undefined
+    const { windows, native } = await harness(surfaces, () => registry)
+    await windows.open('my-notes')
+    native.emitHealth(native.handles.get('my-notes')!.id, true)
+    registry = surfaces.registry
+    windows.registerOpenWindows()
+    expect(surfaces.registered[0]?.crashed).toBe(true)
+  })
+})

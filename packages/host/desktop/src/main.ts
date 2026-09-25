@@ -523,6 +523,10 @@ async function start(): Promise<void> {
             // 窗口诊断（拒绝导航/window.open、加载失败）走桌面日志：这类事件在
             // 真机上只有日志能看见（渲染进程看不到宿主侧的原生拒绝）。
             warn: message => { electronLogger.error(message) },
+            // 崩溃 / 加载失败页的语言（R16B-19）：那是 `data:text/html` 独立文档，
+            // 拿不到客户端字典，只能由宿主按**当时**的语言渲染 —— 所以传 thunk 而
+            // 不是值（用户在应用内切语言后，失败页也必须跟着换）。
+            locale: () => runtime.locale,
           }),
         )
         // 安装密钥仓库（§23.1）：私钥进 OS 钥匙串（`safeStorage`），无钥匙串时

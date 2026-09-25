@@ -136,6 +136,12 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.effect(() => {
     const disposers: Array<() => void> = [serviceDisposer]
+    // R16B-13：`ctx.webServer.register()` 的 disposer 只删路由表条目，**管不到**已经
+    // 建立的 SSE 连接。`/api/cron/events` 是长连接 ⇒ 插件卸载（HMR / 组合变更 / 退出）
+    // 之后对端仍在收 `: ping` 且永不 `end()`：`EventSource` 收不到 onerror 就不会回落
+    // 轮询，任务列表静默冻结（看起来像"没有新任务"）。这里给这批路由一份本 effect 的
+    // AbortSignal，卸载时**先** abort（把还开着的流收尾）再按原顺序 dispose。
+    const streams = new AbortController()
     try {
       // R4-RV3a：写面（`POST /api/cron/action`）的持有性证明来自上游 `connection`
       // 服务（BrowserAuth cookie，只能由本进程服务的页面持有）。与 browser/
@@ -144,15 +150,18 @@ export function apply(ctx: Context, config: Config): void {
       for (const route of makeCronRoutes(host, {
         permissions: permissionNames,
         fence,
+        lifecycle: streams.signal,
         warn: (message: string) => { ctx.logger?.warn?.(message) },
       })) disposers.push(ctx.webServer.register(route))
       disposers.push(registerCronTools(ctx, host, { permissions: permissionNames }))
     } catch (error) {
+      streams.abort()
       for (const dispose of disposers) dispose()
       host.dispose()
       throw error
     }
     return () => {
+      streams.abort()
       for (const dispose of disposers) dispose()
       host.dispose()
     }

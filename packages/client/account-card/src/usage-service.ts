@@ -82,6 +82,15 @@ export class UsageService {
   private controller: AbortController | null = null
   private epoch = 0
   private debounceTimer: NodeJS.Timeout | null = null
+  /**
+   * 当前快照**属于哪个账号**（`sessionKey()`）。`null` = 还没有任何账号的快照。
+   *
+   * R16B-01（2026-09-25）：快照此前不带账号维度 —— 换号（同服务端 A→B）只排一次
+   * 300ms 去抖的 `refresh()`，而 `refreshNow()` 只把 `state` 置 `loading` 却**保留
+   * `data`**，于是去抖窗口内本机路由照样 `200` 交付 A 的余额，账户卡把它渲染在 B 的
+   * 名字下（跨账号金额交付）。键一旦变化必须**立刻**丢数据，不能等去抖到期。
+   */
+  private snapshotKey: string | null = null
   private readonly debounceMs: number
   private fetch: UsageFetcher
 
@@ -96,14 +105,63 @@ export class UsageService {
   }
 
   /**
+   * 这份快照（若已有）是否属于 `session`。
+   *
+   * 路由层据此**拒绝交付**：一份带数据的快照只能交给取它的那个账号。没有快照
+   * （`snapshotKey === null`）不算"别人的" —— 那是"还没取到"，交空态是安全的。
+   * @param session - 当前会话。
+   * @returns true 表示可以交付这份快照。
+   */
+  owns(session: Session): boolean {
+    return this.snapshotKey === null || this.snapshotKey === sessionKey(session)
+  }
+
+  /**
+   * 撤回在途请求并作废它的写回资格（epoch 自增 ⇒ 迟到的结果写不进来）。
+   * 判定与清账共用同一个键构造点：`snapshotKey` 与 `inflightKey` 都出自 `sessionKey()`。
+   */
+  private cancelInflight(): void {
+    this.epoch++
+    this.controller?.abort()
+    this.controller = null
+    this.inflight = null
+    this.inflightKey = null
+  }
+
+  /**
+   * 把快照的归属切到 `session` 的账号；**换了账号就立刻丢数据 + 撤回在途请求**。
+   *
+   * 同一个账号、同一枚令牌重复调用是 no-op。令牌换了（续期/重登）算新键 ⇒ 同样丢数据：
+   * 新令牌下"旧令牌取到的余额"没有可验证的归属，留着才是缺陷。代价只是一次去抖 +
+   * 一次往返期间显示空态（`…`），换掉的却是一个无法证伪的数字。
+   * @param session - 本次刷新的账号。
+   */
+  private adopt(session: Session): void {
+    const key = sessionKey(session)
+    if (this.snapshotKey === key) return
+    this.cancelInflight()
+    this.snapshotKey = key
+    // 回到空快照（`state:'idle'` + `data:null`）：这是"这个账号还没有取到余额"的
+    // 既有契约（`index.spec.ts` 钉住它），渲染层据此显示 `…`。关键是 **`data` 立刻
+    // 变 null** —— 去抖窗口内绝不留着上一个账号的金额。
+    this.snapshot = EMPTY_SNAPSHOT
+  }
+
+  /**
    * Debounced refresh: safe to call on every agent-loop-complete notification
    * or session change. No-op when logged out.
    */
   refresh(session: Session | null): void {
     if (session === null) return
+    // 先切归属再排队：换号后的数据丢弃**不经过去抖**（这是 R16B-01 的窗口）。
+    this.adopt(session)
+    const key = sessionKey(session)
     if (this.debounceTimer !== null) clearTimeout(this.debounceTimer)
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null
+      // 排队期间又换了账号 ⇒ 这一发属于上一个账号，直接作废（否则会把刚切走的
+      // 账号的键再 adopt 回来）。
+      if (this.snapshotKey !== key) return
       void this.refreshNow(session)
     }, this.debounceMs)
   }
@@ -115,11 +173,8 @@ export class UsageService {
       clearTimeout(this.debounceTimer)
       this.debounceTimer = null
     }
-    this.epoch++
-    this.controller?.abort()
-    this.controller = null
-    this.inflight = null
-    this.inflightKey = null
+    this.cancelInflight()
+    this.snapshotKey = null
     this.snapshot = EMPTY_SNAPSHOT
   }
 
@@ -129,6 +184,8 @@ export class UsageService {
    */
   async refreshNow(session: Session | null): Promise<UsageSnapshot> {
     if (session === null) return this.snapshot
+    // 换号即作废旧快照与在途请求（`owns()` 与本行是同一个归属判据的两端）。
+    this.adopt(session)
     const key = sessionKey(session)
     if (this.inflight !== null) {
       // Same account: share the in-flight request (single flight).

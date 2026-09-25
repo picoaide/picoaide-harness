@@ -26,7 +26,11 @@ export default defineConfig([
       'session-service': 'src/session-service.ts',
       // Shared subpath exports consumed by sibling plugins (dsh-account-card):
       // the gateway fetch helper + auth error taxonomy, the loopback trust
-      // fence, and the persisted session/config types.
+      // fence, the persisted session/config types, and the ONE session-identity
+      // criterion (`session-identity.ts`) — account-card stamps its usage
+      // snapshot with it so a balance can never be rendered under a different
+      // account than the one it was fetched for (R16B-01).
+      'session-identity': 'src/session-identity.ts',
       'server-connector/auth': 'src/server-connector/auth.ts',
       loopback: 'src/loopback.ts',
       'server-connector/config': 'src/server-connector/config.ts',

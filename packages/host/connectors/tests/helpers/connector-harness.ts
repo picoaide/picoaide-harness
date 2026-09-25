@@ -63,7 +63,16 @@ export interface Harness {
    */
   readonly warns: string[]
   readonly errors: string[]
-  readonly emitSession: (session: { username?: string; serverURL?: string } | null) => void
+  /**
+   * Fire a session change.
+   *
+   * `token` is optional and only needed by cases that model the plugin's
+   * bootstrap catalogue sync: `syncServerDefs()` reads the session's token and
+   * returns WITHOUT any request when it is missing, which would silently turn
+   * "the switch is waiting for a network round trip" into "the switch is
+   * instant". A real session always carries one.
+   */
+  readonly emitSession: (session: { username?: string; serverURL?: string; token?: string } | null) => void
   /** Fire a host event (the plugin's own listeners run synchronously). */
   readonly emit: (event: string, ...args: unknown[]) => void
   readonly dispose: () => void
@@ -119,6 +128,8 @@ export function createHarness(
   const liveServerNames = new Set<string>()
   const effectDisposers: Array<() => void> = []
   let username: string | null = 'user-a'
+  /** Bootstrap credential of the fake session (see `emitSession`). */
+  let sessionToken: string | null = null
   /**
    * The server the fake session points at.
    *
@@ -150,7 +161,7 @@ export function createHarness(
     get: (name: string) => {
       if (name === 'picoSession') {
         return {
-          getSession: () => (username === null ? null : { username, ...(serverURL === null ? {} : { serverURL }) }),
+          getSession: () => (username === null ? null : { username, ...(serverURL === null ? {} : { serverURL }), ...(sessionToken === null ? {} : { token: sessionToken }) }),
         }
       }
       if (name === 'connection') return fence
@@ -225,6 +236,7 @@ export function createHarness(
     emitSession: (session) => {
       username = session?.username ?? null
       serverURL = session?.serverURL ?? null
+      sessionToken = session?.token ?? null
       for (const handler of [...sessionHandlers]) handler(session)
     },
     emit: (event: string, ...args: unknown[]) => {

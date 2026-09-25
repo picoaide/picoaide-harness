@@ -15,6 +15,10 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only: declares the `picoSession` service and `pico/session-changed`.
 import type {} from '@picoaide/dsh-enterprise/session-service'
 import type { Session } from '@picoaide/dsh-enterprise/server-connector/config'
+// R16B-01：会话身份的**唯一实现**（serverURL + username）。交付给渲染层的每一份
+// 快照都带上它属于谁 —— 客户端只有在这一串与 `/api/pico/auth/state` 的 `identity`
+// 相等时才许把金额画出来（同服务端换号后不得把上一个账号的余额渲染在新账号名下）。
+import { sessionIdentity } from '@picoaide/dsh-enterprise/session-identity'
 import {
   browserSameOriginMarker,
   isLoopbackRequest,
@@ -90,6 +94,14 @@ export function apply(ctx: Context): void {
       if (current === null || current.username !== s.username || current.serverURL !== s.serverURL) {
         return json(res, 401, { error: 'session changed' })
       }
+      // R16B-01（2026-09-25）：同服务端**换号**（A→B，不经登出）只排一次 300ms
+      // 去抖的 `service.refresh(B)`。上面那条守卫比较的是"请求开始时"与"刷新后"
+      // 的会话 —— 换号后**两边都已经是 B**，它抓不到"快照还是 A 取的"。
+      // 归属判据只有一处：`UsageService.owns()`（键 = serverURL + username + token）。
+      // 快照不属于当前账号就**宁可回空**（401 + 保留会话），绝不交付上一个账号的金额。
+      if (!service.owns(s)) {
+        return json(res, 401, { error: 'session changed' })
+      }
       const snapshot = service.get()
       // 审计 2026-09-12 P1-5:令牌已失效时**不再 200 交付旧余额**。
       // usage-service 承诺过"the route layer maps it to a 401"但该映射
@@ -105,6 +117,10 @@ export function apply(ctx: Context): void {
         fetchedAt: snapshot.fetchedAt,
         state: snapshot.state,
         error: snapshot.error,
+        // R16B-01：这一份快照属于**哪个会话身份**。`s` 就是取这份快照的会话
+        // （上面 `owns(s)` 已经确认），所以这里盖的是真归属而不是"当前是谁"。
+        // 客户端拿它与 `/api/pico/auth/state` 的 `identity` 比 —— 不等就整份作废。
+        identity: sessionIdentity(s),
       })
     },
   }), 'account-card usage route')

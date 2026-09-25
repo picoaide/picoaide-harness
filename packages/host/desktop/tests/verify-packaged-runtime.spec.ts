@@ -129,6 +129,8 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/index.js',
   'node_modules/@picoaide/dsh-enterprise/lib/loopback.js',
   'node_modules/@picoaide/dsh-enterprise/lib/server-connector/auth.js',
+  // R16B-01：account-card 的余额快照要盖会话身份章（身份口径唯一实现在 enterprise）。
+  'node_modules/@picoaide/dsh-enterprise/lib/session-identity.js',
   'node_modules/@picoaide/dsh-enterprise/package.json',
   'node_modules/@picoaide/dsh-connectors/lib/index.js',
   'node_modules/@picoaide/dsh-connectors/lib/invariant.js',
