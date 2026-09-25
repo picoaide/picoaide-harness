@@ -367,11 +367,42 @@ func FreezeWasmApp(ctx context.Context, db *sql.DB, appID string, at time.Time) 
 
 // SoftDeleteWasmApp 软删(退役):行仍在、名字与版本号永久占位(§4.1 防抢占),
 // 同时下架(下架与删除是两件事,但"已删仍上架"没有意义)。
+//
+// 2026-09-25(R15C-G-03):退役必须**同时释放该应用名下全部版本的制品字节** ——
+// 这是配额闸门在用户可见面上唯一的恢复路径(见 SoftDeleteWasmRelease 的注释:
+// 闸门在发布最前面、GC 只在发布成功之后跑,所以"配额用尽"等于"再也发不出东西",
+// 用户必须有一个自己能按的动作把占用降下来;DELETE /apps/wasm/:app_id 就是它)。
+// 之前退役一字节不减 ⇒ 用户把应用删光了配额仍然是满的。
+//
+// 两件事在**同一个事务**里完成(与其它"多表一起改"的 DAO 同范式):只软删应用而
+// 没有释放字节,或反过来,都会留下"应用已退役但配额仍被它占着"的分叉。
+// 覆盖**全部**版本行(含此前已软删、但字节还没被回收的历史行):退役之后它们都
+// 不可能再被服务,留着只是占库占配额。元数据行一字不删(R37 冻结期的导出快照
+// 只读 title/status/size 这些列,读不到字节;size 归零与"字节已释放"同义)。
 func SoftDeleteWasmApp(ctx context.Context, db *sql.DB, appID string) error {
-	return wasmAppRowsAffected(db.ExecContext(ctx, `UPDATE apps
+	id := normalizeWasmAppID(appID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // Commit 之后是 no-op
+	res, err := tx.ExecContext(ctx, `UPDATE apps
 		SET deleted_at = now(), enabled = 0, updated_at = now()
 		WHERE kind = $1 AND app_id = $2 AND deleted_at IS NULL`,
-		AppKindWasmApp, normalizeWasmAppID(appID)))
+		AppKindWasmApp, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE app_releases
+		SET archive = NULL, size = 0, updated_at = now()
+		WHERE kind = $1 AND app_id = $2 AND archive IS NOT NULL`,
+		AppKindWasmApp, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetWasmAppConfig 写入**当前生效**的应用配置(§4.2 的 picoaide.app.json 投影)。
@@ -572,36 +603,61 @@ func PendingWasmReleases(ctx context.Context, db *sql.DB) (map[string][]string, 
 	return out, rows.Err()
 }
 
-// SoftDeleteWasmRelease 软删一个版本(按 id)。版本号仍永久占位;释放字节是
-// PruneWasmReleases 的职责(GC 与"删一个版本"是两件事)。
+// SoftDeleteWasmRelease 软删一个版本(按 id)。版本号仍永久占位(行保留),
+// **制品字节同步释放**。
+//
+// 2026-09-25(R15C-G-03):本函数此前只置 deleted_at,字节留给 PruneWasmReleases ——
+// 而 GC 的候选集是 `status='approved' AND deleted_at IS NULL`,**永远拿不到软删行**。
+// 于是"发布失败后的补偿软删"(wasmapp/api 的 compensate 闭包)会把最多 32 MiB 的
+// 制品永久计入用户配额,且没有任何解除路径(没有版本级删除端点、退役不释放、
+// 真删任务未实现)⇒ 配额用尽 ⇒ 发布永远在闸门处失败 ⇒ 唯一会释放字节的 GC
+// (只在发布成功之后跑)永远不运行 —— 一道**无恢复路径的 fail-closed 闸门**
+// (与第四轮现场 P0「编译缓存超限 ⇒ 发布面永久 503」同形)。
+//
+// 现在与"审核拒绝"同一口径(SetReleaseStatusForReview 的 reject 分支一直是
+// `archive = NULL, size = 0`):**版本一旦对所有人不可见,字节就没有任何消费者**
+// —— 没有任何路径会把 deleted_at 置回 NULL(全仓无 restore;版本号也永久占位,
+// 不可能重发)。因此软删即释放:配额口径 = "已发布(可见)版本的字节"。
+// 行仍保留 ⇒ my_releases / 导出(R37 冻结期快照)的元数据一字不少。
 func SoftDeleteWasmRelease(ctx context.Context, db *sql.DB, id int64) error {
 	return wasmAppRowsAffected(db.ExecContext(ctx, `UPDATE app_releases
-		SET deleted_at = now(), updated_at = now()
+		SET deleted_at = now(), archive = NULL, size = 0, updated_at = now()
 		WHERE id = $1 AND kind = $2 AND deleted_at IS NULL`, id, AppKindWasmApp))
 }
 
 // CountUserArtifactBytes 统计某发布者的 wasm 制品总量(§5.3 每用户 1 GiB 配额,
-// PG BYTEA 口径、含全部版本)。软删但未 GC 的版本仍占配额(字节还在库里);
-// PruneWasmReleases 置空 archive 后立即释放。
+// PG BYTEA 口径)。
+//
+// 2026-09-25(R15C-G-03):口径 = **未软删(即仍在版本清单里可见)的版本**。
+// 之前统计全部版本,包括已软删的行 —— 那些行的字节既不会被 GC 回收(候选集排除
+// 软删),也没有任何可见性,却一直占着配额(历史遗留的补偿软删行就是这样把用户
+// 永久锁死的)。软删行今天已由 SoftDeleteWasmRelease / SoftDeleteWasmApp 置空
+// archive,这里再按可见性收口一次:口径本身就不该依赖"字节有没有被清"。
 func CountUserArtifactBytes(ctx context.Context, db *sql.DB, username string) (int64, error) {
 	var n int64
 	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(octet_length(archive)), 0)
-		FROM app_releases WHERE kind = $1 AND publisher = $2`,
+		FROM app_releases WHERE kind = $1 AND publisher = $2 AND deleted_at IS NULL`,
 		AppKindWasmApp, username).Scan(&n)
 	return n, err
 }
 
 // PruneWasmReleases 版本 GC(§5.3 / §11 第 16 项):**保留最近 keep 个曾生效
-// (approved)版本**,更早的软删并置空制品字节;返回被软删的 release id。
+// (approved)版本**,更早的软删并置空制品字节;返回被回收的 release id。
 //
 // 不变量:
-//   - 只动 approved(曾生效)版本 —— pending 还在等审核、rejected 的字节已由
-//     审核路径释放,GC 不该碰它们;
+//   - 保留窗口只作用于 approved(曾生效)版本 —— pending 还在等审核、rejected 的
+//     字节已由审核路径释放,GC 不该碰它们;
 //   - **绝不软删 apps.current_release_id 指向的版本**:回滚会让"当前生效"
 //     早于最近 3 个版本,若一并回收就等于把线上版本删掉;
 //   - 软删不删行 ⇒ 版本号永久占位(§4.1),size 归零与 archive 置空同步,
 //     保持"size == 字节长度"这条 createRelease 建立的不变量;
 //   - 幂等:重复调用返回空切片(没有可回收的行)。
+//
+// 2026-09-25(R15C-G-03):候选集增加**"已软删但仍占字节"**的行(第二个 UNION 分支)。
+// 这类行不可能再被服务(没有任何 restore 路径),此前却因为"候选集排除软删行"而
+// 永远留在库里占字节 —— 补偿软删留下的行就是这样。今天软删已经自己清字节,
+// 这个分支是给**历史遗留行**兜底(修复上线前写入的行不会自己消失),同时让
+// "GC 回收一切不可达字节"这句话在 SQL 层成立,而不是靠调用点自觉。
 //
 // keep ≤ 0 直接报错而不是"全部回收":一次传错 0 就抹掉全部制品字节,代价不可逆。
 func PruneWasmReleases(ctx context.Context, db *sql.DB, appID string, keep int) ([]int64, error) {
@@ -614,12 +670,16 @@ func PruneWasmReleases(ctx context.Context, db *sql.DB, appID string, keep int) 
 	}
 	rows, err := db.QueryContext(ctx, `
 		WITH doomed AS (
-			SELECT r.id FROM app_releases r
-			WHERE r.kind = $1 AND r.app_id = $2
-			  AND r.status = $3 AND r.deleted_at IS NULL
-			  AND r.id <> COALESCE((SELECT a.current_release_id FROM apps a
-			                        WHERE a.kind = $1 AND a.app_id = $2), 0)
-			ORDER BY r.id DESC OFFSET $4
+			(SELECT r.id FROM app_releases r
+			 WHERE r.kind = $1 AND r.app_id = $2
+			   AND r.status = $3 AND r.deleted_at IS NULL
+			   AND r.id <> COALESCE((SELECT a.current_release_id FROM apps a
+			                         WHERE a.kind = $1 AND a.app_id = $2), 0)
+			 ORDER BY r.id DESC OFFSET $4)
+			UNION
+			(SELECT r.id FROM app_releases r
+			 WHERE r.kind = $1 AND r.app_id = $2
+			   AND r.deleted_at IS NOT NULL AND r.archive IS NOT NULL)
 		)
 		UPDATE app_releases
 		SET deleted_at = now(), archive = NULL, size = 0, updated_at = now()

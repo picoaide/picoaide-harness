@@ -528,6 +528,15 @@ func SyncProviderModelsTx(tx *sql.Tx, providerID int64, names []string) ([]strin
 	}
 	// ② 剪枝:只删不在清单里的行(含此前被标记 catalog_missing 的行 —— 管理员
 	//    重新给出清单就是最终口径)。
+	//
+	// 2026-09-25(R15C-G-01):删行之后**必须**同步清 `gateway.default_model`。
+	// 四条会删 models 行的路径里,另外三条(DeleteGatewayProvider /
+	// RemoveMissingProviderModels / DeleteModelTx)都调 clearDefaultModelIf,只有
+	// 这里没有 —— 于是"管理员在网关页改一次模型清单"就能留下一个跨表自相矛盾的
+	// 终态:settings 指向一行已被 DELETE 的模型,bootstrap 会把这个名字下发给
+	// 客户端当默认模型,而 /v1/models 目录(按 models 表生成)里没有它,且没有任何
+	// 路径会自愈(唯一的校验在另一个端点 setGatewayConfig 里,管理员不打开那个页面
+	// 就永远不跑)。四条路径现在共用同一个守卫实现,不再各写一份。
 	rows, err := providerModelRowsTx(tx, providerID)
 	if err != nil {
 		return nil, err
@@ -538,6 +547,9 @@ func SyncProviderModelsTx(tx *sql.Tx, providerID int64, names []string) ([]strin
 			continue
 		}
 		if _, err := tx.Exec("DELETE FROM models WHERE id = ?", r.ID); err != nil {
+			return nil, err
+		}
+		if err := clearDefaultModelIf(tx, r.Name); err != nil {
 			return nil, err
 		}
 		if r.HasOperatorConfig {
@@ -674,7 +686,6 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 		doomed = append(doomed, r)
 	}
 
-	deletedDefault := false
 	var disabledPriced []string
 	for _, r := range doomed {
 		if r.HasOperatorConfig {
@@ -690,13 +701,11 @@ func RemoveMissingProviderModels(db *sql.DB, providerID int64, keep []string) (i
 		if err := removeProviderModelName(tx, providerID, r.Name); err != nil {
 			return 0, err
 		}
-		var dm string
-		if err := tx.QueryRow("SELECT value FROM settings WHERE key = 'gateway.default_model'").Scan(&dm); err == nil && dm == r.Name {
-			deletedDefault = true
-		}
-	}
-	if deletedDefault {
-		if _, err := tx.Exec("UPDATE settings SET value = '' WHERE key = 'gateway.default_model'"); err != nil {
+		// 2026-09-25(R15C-G-01):本处原有一份**内联复制**的"清 default_model"逻辑
+		// (与 clearDefaultModelIf 逐字同义),现收敛到唯一实现 —— 四条删/停用模型的
+		// 路径共用一个口径,新增路径时不必再复述这条跨表不变量。
+		// 被"停用"(catalog_missing)的行也要清:它同样从路由与客户端目录里消失。
+		if err := clearDefaultModelIf(tx, r.Name); err != nil {
 			return 0, err
 		}
 	}

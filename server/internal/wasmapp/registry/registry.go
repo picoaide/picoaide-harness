@@ -159,6 +159,14 @@ func ValidateChangelog(changelog string, isFirstRelease bool) *apperr.Error {
 // CheckArtifactQuota 校验每用户制品总量（§5.3：1 GiB，PG BYTEA 口径，含全部版本）。
 //
 // usedBytes 是**已占用**字节；incomingBytes 是本次要新增的字节。
+//
+// 2026-09-25(R15C-G-03):hint 必须与**实现里真实存在的出路**一致 —— 旧文案承诺
+// "请删除不再使用的版本或联系平台管理员扩容"，而平台既没有版本级删除端点、
+// 也没有制品配额的可配项（applimits 的字段表里没有这一项）。今天真实可用的恢复
+// 路径只有两条：删除不再使用的应用（DELETE /api/client/v2/apps/wasm/:app_id，
+// 软删即释放它名下全部版本的字节）、由平台管理员代为清理（super_admin 可删任意
+// 应用）。文案只写这两条 —— fail-closed 闸门给不出出路就等于自锁（第四轮现场 P0
+// 定下的口径）。
 func CheckArtifactQuota(usedBytes, incomingBytes int64) *apperr.Error {
 	if incomingBytes < 0 {
 		incomingBytes = 0
@@ -170,7 +178,7 @@ func CheckArtifactQuota(usedBytes, incomingBytes int64) *apperr.Error {
 		WithDetail("quota_bytes", int64(limits.ArtifactQuotaPerUserBytes)).
 		WithDetail("used_bytes", usedBytes).
 		WithDetail("incoming_bytes", incomingBytes).
-		WithHint("每用户全部应用的全部版本合计上限 1 GiB；请删除不再使用的版本或联系平台管理员扩容")
+		WithHint("每用户全部应用的全部版本合计上限 1 GiB；删除不再使用的应用会立即释放它名下全部版本的制品字节；也可联系平台管理员协助清理")
 }
 
 // NormalizeAppID 把用户输入的 app_id 归一到入库形态（小写、去空白）。
