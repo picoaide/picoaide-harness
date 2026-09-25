@@ -88,6 +88,12 @@ server/webadmin/tsconfig.tsbuildinfo
 temp/
 .agents/skills/
 
+# Normify 架构结构库（normify-gen 技能产物：1541 个结构文件 + 渲染数据 + 单文件架构图）
+# 有意留在项目根目录供随项目查阅，但属派生产物、体量与 diff 都大，故不入库。
+# 若要改为版本化：删掉本行后 `git add normify-picoaide`（公开仓提交前先跑
+# `node scripts/check-no-real-domains.mjs` 确认零命中）。
+normify-picoaide/
+
 # local writable DSH home mirror (this sandbox root fs is read-only)
 .dsh-home/
 
