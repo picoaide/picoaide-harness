@@ -38,6 +38,14 @@ import { isolateRuntimeSkillRoots } from './helpers/runtime-skill-roots.ts'
 // 隔离实现与实测形态见 tests/helpers/runtime-skill-roots.ts。
 beforeEach(isolateRuntimeSkillRoots)
 
+/**
+ * R19A-S2-04（2026-09-26）：**缺服务端地址不再等于"不比较"** —— 溯源标记里有来源、
+ * 而这一次调用没有当前会话地址时，来源判据走保守档（`unknown-current` ⇒ 与
+ * `unknown` 同样要求确认）。因此凡是要建模"这台服务端的商店内容"的用例，都必须
+ * 像真路由那样把服务端地址一起给出（生产路由恒传 `s.serverURL`）。
+ */
+const STORE_SERVER = 'https://harness.example'
+
 /** Pack a directory into a gzipped tar buffer (relative paths, portable). */
 async function packDir(dir: string): Promise<Buffer> {
   const chunks: Buffer[] = []
@@ -220,10 +228,10 @@ describe('installSkillArchive', () => {
     const skillsDir = await mkdtemp(join(tmpdir(), 'pico-skill-skills-'))
     try {
       const v1 = await makeArchive({ 'SKILL.md': '# v1\n' })
-      await installSkillArchive({ name: 'demo', archive: v1, skillsDir })
+      await installSkillArchive({ name: 'demo', archive: v1, skillsDir, server: STORE_SERVER })
       expect(await readFile(join(skillsDir, 'demo', 'SKILL.md'), 'utf8')).toContain('v1')
       const v2 = await makeArchive({ 'SKILL.md': '# v2\n', 'extra.txt': 'x' })
-      await installSkillArchive({ name: 'demo', archive: v2, skillsDir })
+      await installSkillArchive({ name: 'demo', archive: v2, skillsDir, server: STORE_SERVER })
       expect(await readFile(join(skillsDir, 'demo', 'SKILL.md'), 'utf8')).toContain('v2')
       expect(await readFile(join(skillsDir, 'demo', 'extra.txt'), 'utf8')).toContain('x')
     } finally {
@@ -340,9 +348,9 @@ describe('uninstallSkill', () => {
       await writeFile(join(root, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: demo\n---\n# a\n')
       // 带能力中心写的溯源 ⇒ 直接删(不带 overwrite 也允许)。
       await writeProvenance(join(root, 'alpha'), {
-        appId: 'alpha', version: '1.0.0', channel: 'market', installedAt: new Date().toISOString(),
+        appId: 'alpha', version: '1.0.0', channel: 'market', server: STORE_SERVER, installedAt: new Date().toISOString(),
       })
-      await expect(uninstallSkill(root, 'alpha')).resolves.toBe(join(root, 'alpha'))
+      await expect(uninstallSkill(root, 'alpha', { serverURL: STORE_SERVER })).resolves.toBe(join(root, 'alpha'))
       await expect(readFile(join(root, 'alpha', 'SKILL.md'), 'utf8')).rejects.toThrow()
       expect(await listInstalledSkills(root)).toEqual([])
     } finally {
@@ -509,7 +517,7 @@ async function makeStoreSkill(root: string, name: string, channel: 'market' | 'o
   const dir = join(root, name)
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'SKILL.md'), skillMdWith(name, 'version: 1.0.0\n'))
-  await writeProvenance(dir, { appId: name, version: '1.0.0', channel, installedAt: new Date().toISOString() })
+  await writeProvenance(dir, { appId: name, version: '1.0.0', channel, server: STORE_SERVER, installedAt: new Date().toISOString() })
   return dir
 }
 
@@ -595,7 +603,7 @@ describe('A2/A3 覆盖与删除按 provenance 判定（本机自制内容必须�
 
   it('同名但 provenance.appId 对不上（目录被改名/被占用）⇒ 同样按自制内容处理', async () => {
     const dir = await makeStoreSkill(root, 'squatter')
-    await writeProvenance(dir, { appId: 'someone-else', version: '1.0.0', channel: 'market', installedAt: '' })
+    await writeProvenance(dir, { appId: 'someone-else', version: '1.0.0', channel: 'market', server: STORE_SERVER, installedAt: '' })
     const archive = await makeArchive({ 'SKILL.md': skillMdWith('squatter', 'version: 2.0.0\n') })
     await expect(installSkillArchive({ name: 'squatter', archive, skillsDir: root })).rejects.toThrow(/not installed by the Capability Hub/u)
   })
@@ -605,10 +613,10 @@ describe('A2/A3 覆盖与删除按 provenance 判定（本机自制内容必须�
       await makeStoreSkill(root, `store-${channel}`, channel)
       const archive = await makeArchive({ 'SKILL.md': skillMdWith(`store-${channel}`, 'version: 2.0.0\n') })
       await expect(
-        installSkillArchive({ name: `store-${channel}`, archive, skillsDir: root, version: '2.0.0', channel }),
+        installSkillArchive({ name: `store-${channel}`, archive, skillsDir: root, version: '2.0.0', channel, server: STORE_SERVER }),
         channel,
       ).resolves.toMatchObject({ name: `store-${channel}` })
-      await expect(uninstallSkill(root, `store-${channel}`), channel).resolves.toBe(join(root, `store-${channel}`))
+      await expect(uninstallSkill(root, `store-${channel}`, { serverURL: STORE_SERVER }), channel).resolves.toBe(join(root, `store-${channel}`))
     }
     expect(await listInstalledSkills(root)).toEqual([])
   })
@@ -654,7 +662,7 @@ describe('A2/A3 覆盖与删除按 provenance 判定（本机自制内容必须�
     const dir = await makeStoreSkill(root, 'from-builtin', 'builtin')
     const same = await makeArchive({ 'SKILL.md': skillMdWith('from-builtin', 'version: 2.0.0\n') })
     await expect(
-      installSkillArchive({ name: 'from-builtin', archive: same, skillsDir: root, version: '2.0.0', channel: 'builtin' }),
+      installSkillArchive({ name: 'from-builtin', archive: same, skillsDir: root, version: '2.0.0', channel: 'builtin', server: STORE_SERVER }),
     ).resolves.toMatchObject({ name: 'from-builtin' })
     expect((await readProvenance(dir))?.channel).toBe('builtin')
   })
@@ -709,7 +717,11 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     // 正是 p13 探针实测出"卸载后技能仍然可用"的根因。位置契约在这里钉死。
     const source = readFileSync(fileURLToPath(new URL('../src/skill-install.ts', import.meta.url)), 'utf8')
     expect(source).toContain("const staging = await mkdtemp(join(tempRoot, 'install-'))")
-    expect(source).toContain('const tempRoot = join(skillsDir, SKILL_TEMP_DIR)')
+    // R19A-S2-02（2026-09-26）：临时区不再直接用字符串路径拼（`.skill-tmp` 是库外链接/
+    // junction/挂载点时 staging 会被建到**库外**），而是走**过闸**的唯一入口 —— 位置契约
+    // 的方向不变（仍是 `.skill-tmp` 的第二层），只是"从哪拿 tempRoot"收口到一处。
+    expect(source).toContain('const tempRoot = await ensureLibraryTempRoot(skillsDir)')
+    expect(source).toContain('anchorLibraryPath(skillsDir, SKILL_TEMP_DIR')
     // R17B-03 更新了这一条位置契约（方向不变、更严）：备份仍在 `.skill-tmp` 的第二层
     // （运行时看不见），但**不再放在 staging 之内** —— 旧形态 `<staging>/backup` 的
     // 祖先是 `install-*`，进程死在两处 `rename` 之间时"旧内容的唯一副本"落在 24h
@@ -727,7 +739,7 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     // 卸载期间留下的备份残留（同名、含真 frontmatter）。
     await mkdir(join(root, '.skill-tmp', 'install-x', 'backup'), { recursive: true })
     await writeFile(join(root, '.skill-tmp', 'install-x', 'backup', 'SKILL.md'), skillMdWith('zeta-skill'))
-    await uninstallSkill(root, 'zeta-skill')
+    await uninstallSkill(root, 'zeta-skill', { serverURL: STORE_SERVER })
     expect(await listInstalledSkills(root)).toEqual([])
     // 备份残留仍在磁盘上（由清扫器按年龄处理），但**任何**列表/发现都不得把它算成技能。
     expect(await listLocalSkills(root)).toEqual([])
@@ -737,8 +749,8 @@ describe('A7 并发与残留目录（备份目录不再污染技能库）', () =
     const archive = await makeArchive({ 'SKILL.md': skillMdWith('race-skill', 'version: 2.0.0\n') })
     await makeStoreSkill(root, 'race-skill')
     const [installed, uninstalled] = await Promise.all([
-      installSkillArchive({ name: 'race-skill', archive, skillsDir: root, version: '2.0.0' }),
-      uninstallSkill(root, 'race-skill'),
+      installSkillArchive({ name: 'race-skill', archive, skillsDir: root, version: '2.0.0', server: STORE_SERVER }),
+      uninstallSkill(root, 'race-skill', { serverURL: STORE_SERVER }),
     ])
     expect(installed.name).toBe('race-skill')
     expect(uninstalled).toBe(join(root, 'race-skill'))

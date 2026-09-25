@@ -149,9 +149,14 @@ describe('R17B-01：符号链接条目（运行时加载 / 企业侧镜像必须
     // 修复前：`listShadowingSkills` 看不见链接 ⇒ 残留为空 ⇒ 返回成功
     const residue = await listShadowingSkills(skillsDir, 'ghost')
     expect(residue.map(row => row.entryName), '链接影子必须被如实列出').toEqual(['alink'])
-    // 卸载：删掉落点之后运行时会加载 alink 指向的那一份 ⇒ 必须报 RESIDUE，绝不返回成功
+    // 卸载：用户自建的链接影子还让运行时加载得到 ⇒ 必须报 RESIDUE，绝不返回成功。
+    // R19A-S2-09（2026-09-26）：判据前移到**删除之前** ⇒ 文案说"nothing was removed"，
+    // 且落点必须真的还在（旧实现是"报失败但库里那份已经没了"的部分成功）。
     await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS }))
-      .rejects.toThrow(/still make the runtime load "ghost".*"alink"/su)
+      .rejects.toThrow(/still loaded by the runtime from the skill root itself.*"alink"/su)
+    await expect(uninstallSkill(skillsDir, 'ghost', { overwrite: true, runtimeRoots: NO_FOREIGN_ROOTS }))
+      .rejects.toThrow(/nothing was removed/su)
+    expect(existsSync(join(skillsDir, 'ghost', 'SKILL.md')), '拒绝时一个字节都不动').toBe(true)
     // 用户的链接与库外内容一字未动
     expect(existsSync(join(skillsDir, 'alink'))).toBe(true)
     expect(existsSync(join(outside, 'ghost-skill', 'SKILL.md'))).toBe(true)
@@ -412,7 +417,7 @@ describe('R17B-04：溯源的服务端维度（provenance.server 的唯一消费
     expect(isForeignServerProvenance(prov, 'https://b.example')).toBe(true)
     // R18A-SK-03（2026-09-25）：**老标记（没有 server）= 来源未知** ⇒ 不再算"当前服务端的
     // 商店内容"（此前是 fail-open：换服务端后静默整树替换/静默删除/面板不要求确认，
-    // 对存量标记等于没修）。未传 currentServer 仍是"不比较"（老调用点/离线，保持老行为）。
+    // 对存量标记等于没修）。
     const legacy = { ...MARKER, installedAt: '' }
     expect(isStoreProvenance(legacy, 'ghost', 'https://b.example')).toBe(false)
     expect(isForeignServerProvenance(legacy, 'https://b.example')).toBe(true)
@@ -422,8 +427,13 @@ describe('R17B-04：溯源的服务端维度（provenance.server 的唯一消费
     expect(isStoreProvenance({ ...MARKER, channel: 'plugin', installedAt: '' }, 'ghost', 'https://b.example')).toBe(true)
     expect(provenanceServerVerdict(prov, 'https://a.example')).toBe('same')
     expect(provenanceServerVerdict(prov, 'https://b.example')).toBe('foreign')
-    expect(provenanceServerVerdict(prov, undefined)).toBe('not-compared')
-    expect(isStoreProvenance(prov, 'ghost')).toBe(true)
+    // R19A-S2-04（2026-09-26，第十九轮审计 A 泳道）：未传当前服务端**不再是"不比较"** ——
+    // 标记里有来源、而这次会话没有地址的形态（`session.json` 缺 `serverURL`）此前走
+    // fail-open（别台服务端的内容被判成"本机商店内容" ⇒ 200 零确认删除）。现在是
+    // `unknown-current` ⇒ 与 `unknown` 同等保守。
+    expect(provenanceServerVerdict(prov, undefined)).toBe('unknown-current')
+    expect(isStoreProvenance(prov, 'ghost'), '没有地址 ⇒ 不放行').toBe(false)
+    expect(isForeignServerProvenance(prov, undefined)).toBe(true)
     // appId/渠道仍然是必要条件
     expect(isStoreProvenance({ ...prov, appId: 'other' }, 'ghost', 'https://a.example')).toBe(false)
     expect(isStoreProvenance({ ...prov, channel: 'user-made' as never }, 'ghost', 'https://a.example')).toBe(false)

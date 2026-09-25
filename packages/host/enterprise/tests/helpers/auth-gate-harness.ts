@@ -4,7 +4,9 @@
  * 形状与 `auth-gate-local-write-proof.spec.ts` 里的同款装具一致：装一个真的 auth-gate
  * （`apply(ctx, config)`），按 prefix 取出路由 handler，然后用伪造的回环请求打进去。
  * 差别只有两点，都是本批判据需要的能力：
- *   - `workspaceRegistry` 可注入（宿主侧权威的**已登记工作区**，R18B-01 的项目根来源）；
+ *   - `workspaceRegistry` 可注入（宿主侧权威的**已登记工作区**，R18B-01 的项目根来源），
+ *     并且能建模 R19A-S2-05/06/07 的三种形态：目录已删、没有会话挂账、以及 `list()`
+ *     整个抛错；缺省按**真注册表的形状**（每条都带非空 `sessionIds`）建模；
  *   - `ctx.logger.warn` 是**可观测**的 mock（R18B-04：安装器的清理/自愈记录必须经
  *     logger 出口，而不是 `console.warn`）。
  *
@@ -35,15 +37,31 @@ export interface AuthGateHarness {
 }
 
 /**
+ * 一条工作区登记项（上游 `Workspace` 的最小形状）。
+ * `sessionIds` 缺省为非空 —— 真注册表 bootstrap 出来的工作区至少有一个会话
+ * （R19A-S2-05/06：判据要求"目录仍在 + 有会话背书"，夹具必须照此建模）。
+ */
+export interface WorkspaceFixture {
+  readonly path: string
+  /** 挂账会话（缺省 `['session-fixture-1']`；传 `[]` = 没有任何会话的工作区）。 */
+  readonly sessionIds?: readonly string[]
+}
+
+/**
  * 装一个 auth-gate。
  * @param session - 当前会话（null = 未登录）。
- * @param options - `workspaces` = 已登记工作区目录（`workspaceRegistry.list()` 的形状）；
- *   `withConnection` = 是否提供 `connection` 服务（缺省提供：持有性证明可用）。
+ * @param options - `workspaces` = 已登记工作区（`workspaceRegistry.list()` 的形状）；
+ *   `withConnection` = 是否提供 `connection` 服务（缺省提供：持有性证明可用）；
+ *   `registryThrows` = `list()` 抛错（R19A-S2-07 的异常路径）。
  * @returns 装具。
  */
 export function harness(
   session: Session | null,
-  options: { workspaces?: readonly string[], withConnection?: boolean } = {},
+  options: {
+    workspaces?: readonly (string | WorkspaceFixture)[]
+    withConnection?: boolean
+    registryThrows?: boolean
+  } = {},
 ): AuthGateHarness {
   const routes: RegisteredRoute[] = []
   const gateway: string[] = []
@@ -58,7 +76,17 @@ export function harness(
     get: (name: string) => {
       if (name === 'connection') return options.withConnection === false ? undefined : fence
       if (name === 'workspaceRegistry') {
-        return { list: () => (options.workspaces ?? []).map(path => ({ path })) }
+        return {
+          list: () => {
+            if (options.registryThrows === true) {
+              throw new Error('workspace registry order references missing workspace')
+            }
+            return (options.workspaces ?? []).map((item) => {
+              const fixture: WorkspaceFixture = typeof item === 'string' ? { path: item } : item
+              return { path: fixture.path, sessionIds: fixture.sessionIds ?? ['session-fixture-1'] }
+            })
+          },
+        }
       }
       return undefined
     },
