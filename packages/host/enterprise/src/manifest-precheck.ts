@@ -30,6 +30,8 @@ export const PrecheckCode = {
   BodyEmpty: 'BODY_EMPTY',
   InvocationInvalid: 'INVOCATION_INVALID',
   ProvenanceForbidden: 'PROVENANCE_FORBIDDEN',
+  /** 输入规模闸（R15B-03）：服务端 `checkManifestSize` 的 `INPUT_TOO_LARGE`。 */
+  InputTooLarge: 'INPUT_TOO_LARGE',
 } as const
 
 /** 一条预检失败。 */
@@ -39,8 +41,20 @@ export interface PrecheckIssue {
   message: string
 }
 
-/** 与服务端一致的上限(server/internal/skillmanifest/manifest.go)。 */
-const LIMITS = {
+/**
+ * 与服务端一致的上限与解析预算（`server/internal/skillmanifest/manifest.go`）。
+ *
+ * **这份表不允许手抄**：`tests/audit-r15b-manifest-parity.spec.ts` 用 `node:fs`
+ * 读 Go 源码逐值对拍（读不到真源即 fail-loud），并断言每个键都真的被规则体用到
+ * （"声明了却没用的死常量"正是 R15B-03 的一半）。改数值必须改 Go。
+ *
+ * 键名 → Go 常量的映射写在那个对拍用例里（两边命名惯例不同，逐条登记才能避免
+ * "看起来一致"）。
+ *
+ * 导出只给对拍用例读：生产代码请用包内引用（`LIMITS.maxTitle` 之类），
+ * 不要在别处再抄一份。
+ */
+export const LIMITS = {
   minAppId: 2,
   maxAppId: 64,
   maxTitle: 100,
@@ -52,7 +66,30 @@ const LIMITS = {
   maxTags: 30,
   maxTagRunes: 32,
   minBody: 50,
+  // R15B-03：服务端的三层解析闸门 + 列表项上限（Go 侧常量名：
+  // MaxSkillMDBytes / MaxFrontmatterDepth / MaxFrontmatterCollections /
+  // MaxFrontmatterIndicators / MaxFrontmatterReferences —— 数值在这里**不复述**，
+  // 真值由 tests/audit-r15b-manifest-parity.spec.ts 读 Go 源码逐值对拍）。
+  //
+  // 它们此前在预检里**完全不存在** ⇒ 一份 >128 KiB 的 SKILL.md 或嵌套 40 层的
+  // frontmatter 能显示"预检通过"、上传后被服务端 422 拒 —— 正是预检要消灭的
+  // 那类"上传才知道"的失败。
+  maxSkillMdBytes: 128 * 1024,
+  maxFrontmatterDepth: 32,
+  maxFrontmatterCollections: 256,
+  maxFrontmatterIndicators: 256,
+  maxFrontmatterReferences: 1024,
 } as const
+
+/**
+ * 客户端支持的 YAML merge key（`<<`）拒绝口径，与服务端 `reMergeKey` 逐字同形。
+ *
+ * 服务端拒它是因为 goccy 的解码器会对 merge 引用做逐键映射合并（嵌套时按
+ * fanout^k 膨胀，2732 字节可烧 86~143 秒 CPU）。技能元数据是扁平键值清单，
+ * 合法包含 0 个 merge key ⇒ 零误杀的硬拒绝。对拍用例把 Go 的 `regexp.MustCompile`
+ * 字面量读出来在同一份语料上比对判定（不是两边各写一个"看起来一样"的正则）。
+ */
+export const MERGE_KEY_PATTERN = /<<[ ]*:/u
 
 /** 与上游 `@deepseek-ai/dsh-skill` 的 SKILL_NAME 逐字一致。 */
 const APP_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
@@ -103,6 +140,69 @@ const runes = (s: string): number => [...s].length
 const issue = (code: string, message: string, field?: string): PrecheckIssue =>
   field === undefined ? { code, message } : { code, field, message }
 
+/** frontmatter 的结构预算（与服务端 `frontmatterBudget` 逐字段同形）。 */
+export interface FrontmatterBudget {
+  /** `[` / `{` / `]` / `}` 的出现次数。 */
+  collections: number
+  /** 块序列指示符（`- `/`-\t`/`-\n`/末尾 `-`）的出现次数。 */
+  indicators: number
+  /** 锚点/别名/标签（`&` / `*` / `!`）的出现次数。 */
+  references: number
+  /** 观测到的最大嵌套深度（启发式，只可能高估）。 */
+  maxDepth: number
+}
+
+/**
+ * 单遍扫描 frontmatter，统计交给 YAML 解析器之前的结构预算。
+ *
+ * **逐字符镜像**服务端 `scanFrontmatterComplexity`（`manifest.go`）：同样的开/闭
+ * 括号计数、同样的块序列指示符判定（`-` 后跟空格/制表符/换行或位于末尾才算）、
+ * 同样把引号内的括号一起计数（偏保守是故意的：低估会放过炸弹）。三个计数器是
+ * **原始字符计数**，不依赖任何状态，所以骗不过引号或注释。
+ *
+ * 深度是启发式（遇到 `[`/`{`/块序列指示符 +1，遇到闭括号或行尾 -1）。
+ * @param front - SKILL.md 的 frontmatter 原文（不含首尾 `---` 分隔行）。
+ * @returns 四个计数。
+ */
+export function scanFrontmatterComplexity(front: string): FrontmatterBudget {
+  let collections = 0
+  let indicators = 0
+  let references = 0
+  let maxDepth = 0
+  let depth = 0
+  const bump = (): void => {
+    depth += 1
+    if (depth > maxDepth) maxDepth = depth
+  }
+  for (let i = 0; i < front.length; i++) {
+    const ch = front[i]
+    if (ch === '[' || ch === '{') {
+      collections += 1
+      bump()
+    } else if (ch === ']' || ch === '}') {
+      // 闭合括号同样进 collections：服务端实测单行 `]`×51200 也能让解析器多分配
+      // 40 MiB。合法 frontmatter 的开/闭括号一一对应且总数 ≤ 2。
+      collections += 1
+      if (depth > 0) depth -= 1
+    } else if (ch === '&' || ch === '*' || ch === '!') {
+      references += 1
+    } else if (ch === '-') {
+      // 纯 `-`（kebab-case 的连字符、`---`）不计数：必须后跟空格/制表符/换行，
+      // 或者就位于文本末尾。
+      if (i + 1 === front.length) {
+        indicators += 1
+        bump()
+      } else if (front[i + 1] === ' ' || front[i + 1] === '\t' || front[i + 1] === '\n') {
+        indicators += 1
+        bump()
+      }
+    } else if (ch === '\n') {
+      depth = 0
+    }
+  }
+  return { collections, indicators, references, maxDepth }
+}
+
 /**
  * Fill `{name}` placeholders in ONE pass.
  *
@@ -141,6 +241,12 @@ interface PrecheckMessages {
   legacyInvocation: (legacy: string, canonical: string) => string
   invocationNotBoolean: (key: string) => string
   invocationEmpty: (key: string) => string
+  inputTooLarge: (what: string, bytes: number, max: number) => string
+  frontmatterDepth: (depth: number, max: number) => string
+  frontmatterCollections: (count: number, max: number) => string
+  frontmatterIndicators: (count: number, max: number) => string
+  frontmatterReferences: (count: number, max: number) => string
+  mergeKeyForbidden: (what: string) => string
   provenanceForbidden: string
   provenanceDirForbidden: string
 }
@@ -216,11 +322,34 @@ function precheckMessages(locale: HostLocale): PrecheckMessages {
       c('字段 {key} 存在但取值为空:运行时会因此丢弃**整份技能**(装上了也永远加载不到)。请写 true/false(或 yes/no、on/off、1/0),或整行删掉', 'Field {key} is present but has an empty value, which makes the runtime discard the whole skill (installed but never loaded). Write true/false (or yes/no, on/off, 1/0), or remove the line'),
       { key },
     ),
+    inputTooLarge: (what, bytes, max) => fill(
+      c('{what} 过大({bytes} 字节,上限 {max} 字节):技能元数据应当只有几十行 frontmatter', '{what} is too large ({bytes} bytes, max {max} bytes): skill metadata should be a few dozen lines of frontmatter'),
+      { what, bytes, max },
+    ),
+    frontmatterDepth: (depth, max) => fill(
+      c('frontmatter 嵌套过深(深度 {depth},上限 {max}):技能元数据必须是扁平映射', 'frontmatter is nested too deeply (depth {depth}, max {max}): skill metadata must be a flat mapping'),
+      { depth, max },
+    ),
+    frontmatterCollections: (count, max) => fill(
+      c('frontmatter 的流式集合过多([ { ] } 共 {count} 个,上限 {max})', 'frontmatter has too many flow collections ([ { ] } × {count}, max {max})'),
+      { count, max },
+    ),
+    frontmatterIndicators: (count, max) => fill(
+      c('frontmatter 的列表项过多(- 共 {count} 个,上限 {max})', 'frontmatter has too many sequence indicators (- × {count}, max {max})'),
+      { count, max },
+    ),
+    frontmatterReferences: (count, max) => fill(
+      c('frontmatter 的锚点/别名/标签过多(& * ! 共 {count} 个,上限 {max})', 'frontmatter has too many anchors/aliases/tags (& * ! × {count}, max {max})'),
+      { count, max },
+    ),
+    mergeKeyForbidden: (what) => fill(
+      c('{what} 不允许 YAML merge key(<<):它会在解码期对映射做逐键合并,是最容易被滥用的指数构造;技能元数据必须是扁平键值清单,请把被合并的字段直接写全', '{what} must not use the YAML merge key (<<): it merges mappings key by key at decode time and is the most abusable exponential construct; skill metadata must be a flat key/value list, so write the merged fields out in full'),
+      { what },
+    ),
     provenanceForbidden: c(
       'frontmatter 不得包含 metadata.picoaide:它由安装器写入,用于标记技能来源',
       'frontmatter must not contain metadata.picoaide: the installer writes it to record the skill origin',
-    ),
-    provenanceDirForbidden: c(
+    ),    provenanceDirForbidden: c(
       '归档不得包含 .picoaide/ 目录:它由安装器写入,用于标记技能来源',
       'The archive must not contain a .picoaide/ directory: the installer writes it to record the skill origin',
     ),
@@ -263,18 +392,50 @@ function requireField(
 }
 
 /**
+ * 可选字段的长度校验（与服务端 `optionalString` 同口径）。
+ *
+ * 与服务端一样：**缺失与 null 都算没声明**（返回 null），非单值类型报
+ * INVALID_TYPE，取值 trim 后超限报 FIELD_TOO_LONG。空串不是错误（可选字段没有
+ * 下限）。
+ * @param data - frontmatter 映射。
+ * @param field - 字段名。
+ * @param maxRunes - 上限（按码点计）。
+ * @param m - 该语言的文案表。
+ * @returns 取值 / 一条问题 / null（未声明）。
+ */
+function optionalField(
+  data: Record<string, unknown>, field: string, maxRunes: number, m: PrecheckMessages,
+): { value: string } | { issue: PrecheckIssue } | null {
+  const raw = data[field]
+  if (raw === undefined || raw === null) return null
+  const text = scalar(raw)
+  if (text === undefined) return { issue: issue(PrecheckCode.InvalidType, m.invalidType(field), field) }
+  const trimmed = text.trim()
+  if (runes(trimmed) > maxRunes) {
+    return { issue: issue(PrecheckCode.FieldTooLong, m.fieldTooLong(field, maxRunes), field) }
+  }
+  return { value: trimmed }
+}
+
+/**
  * 预检一个技能包。
  * @param skillMd - SKILL.md 原始内容（**不要预先剥 BOM**，检测依赖它）。
  * @param appId - 目标应用 ID（技能目录名）。
  * @param entries - 归档内的条目路径（用于溯源禁止项检查）。
  * @param locale - 宿主语言（调用方按请求解析后传入；缺省中文，与历史行为一致）。
- * @returns 全部问题；空数组 = 通过前 7 步校验。
+ * @returns 全部问题；空数组 = 通过预检覆盖的全部规则。
  */
 export function precheckSkillPackage(
   skillMd: string, appId: string, entries: readonly string[] = [], locale: HostLocale = DEFAULT_HOST_LOCALE,
 ): PrecheckIssue[] {
   const m = precheckMessages(locale)
   const out: PrecheckIssue[] = []
+  // 规模闸放在最前（与服务端 Parse 的顺序一致，也是最便宜的一层 O(1)）：
+  // 先按**字节**判，与 Go 的 `len(raw)` 同口径（不是码点数）。
+  const bytes = Buffer.byteLength(skillMd, 'utf8')
+  if (bytes > LIMITS.maxSkillMdBytes) {
+    return [issue(PrecheckCode.InputTooLarge, m.inputTooLarge('SKILL.md', bytes, LIMITS.maxSkillMdBytes))]
+  }
   if (skillMd.startsWith('\ufeff')) {
     return [issue(PrecheckCode.BomDetected, m.bom)]
   }
@@ -287,9 +448,29 @@ export function precheckSkillPackage(
   if (end < 0) {
     return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterEnd)]
   }
+  const front = rest.slice(0, end)
+  // 解析前的结构闸门（服务端 parseManifestYAML 的第 2、3 层）：深度炸弹与
+  // merge key 必须在**把文本交给 YAML 解析器之前**拒掉 —— 那两者能烧掉几十秒
+  // CPU 或几百 MiB 内存，等解析完再报错就已经付过代价了。
+  const budget = scanFrontmatterComplexity(front)
+  if (budget.maxDepth > LIMITS.maxFrontmatterDepth) {
+    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterDepth(budget.maxDepth, LIMITS.maxFrontmatterDepth))]
+  }
+  if (budget.collections > LIMITS.maxFrontmatterCollections) {
+    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterCollections(budget.collections, LIMITS.maxFrontmatterCollections))]
+  }
+  if (budget.indicators > LIMITS.maxFrontmatterIndicators) {
+    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterIndicators(budget.indicators, LIMITS.maxFrontmatterIndicators))]
+  }
+  if (budget.references > LIMITS.maxFrontmatterReferences) {
+    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterReferences(budget.references, LIMITS.maxFrontmatterReferences))]
+  }
+  if (front.includes('<<') && MERGE_KEY_PATTERN.test(front)) {
+    return [issue(PrecheckCode.FrontmatterInvalid, m.mergeKeyForbidden('SKILL.md 的 frontmatter'))]
+  }
   let data: Record<string, unknown>
   try {
-    const parsed = parseYaml(rest.slice(0, end)) as unknown
+    const parsed = parseYaml(front) as unknown
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterNotMapping)]
     }
@@ -327,6 +508,12 @@ export function precheckSkillPackage(
   if ('issue' in author) out.push(author.issue)
   const category = requireField(data, 'category', LIMITS.maxCategory, m)
   if ('issue' in category) out.push(category.issue)
+
+  // R15B-03：`changelog` 此前是**声明了却从没被用到**的死常量 —— 服务端
+  // `optionalString(data, "changelog", MaxChangelogRunes)` 会 422 拒掉 600 字的
+  // changelog，而客户端预检一路放行。现在两边同一条规则。
+  const changelog = optionalField(data, 'changelog', LIMITS.maxChangelog, m)
+  if (changelog !== null && 'issue' in changelog) out.push(changelog.issue)
 
   const tags = data.tags
   if (tags !== undefined && tags !== null) {

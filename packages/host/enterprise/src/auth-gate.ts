@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { ApiError, AuthError, assertServerURLAllowed, changePassword, fetchJSON, gatewayFetch, login, normalizeServerURL } from './server-connector/auth.ts'
+import { ApiError, AuthError, assertServerURLAllowed, changePassword, fetchJSON, gatewayFetch, isPasswordChangeRequired, login, normalizeServerURL, PASSWORD_CHANGE_REQUIRED_ACTION, PASSWORD_CHANGE_REQUIRED_CODE } from './server-connector/auth.ts'
 import { applyPinnedFingerprintsFromEnv, defaultTlsStorePath, installCertificateVerification } from './server-connector/tls.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { clearBrowserLoginPending, noteBrowserLoginStarted, noteLoginPageWired, pendingBrowserLoginServer } from './deep-link.ts'
@@ -30,6 +30,7 @@ import { brandMarkSvg } from './channel-geometry.ts'
 import { hostCopy, hostLocaleFrom, tryNormalizeHostLocale, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { LOCALE_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-client-locale'
 import { absolutizeChannelAssets, asChannelPayload, brandChannel, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
+import { sessionIdentity, sessionIdentityChanged } from './session-identity.ts'
 import type { Session } from './server-connector/config.ts'
 
 // 品牌文案类型定义在 channel-content.ts（纯数据模块，客户端面也能值导入），
@@ -1451,22 +1452,91 @@ export function apply(ctx: Context, config: Config): void {
 
   const gatewayError = (res: ServerResponse, cause: unknown): void => {
     const message = cause instanceof Error ? cause.message : String(cause)
+    // R15B-02（2026-09-25）：服务端"先改密"的 403 有稳定码，代理层**不许**把它
+    // 压成一句 502 文本 —— 压平之后码丢失，面板既无法把用户送回改密页，也无法
+    // 与"网络错误/权限不足"区分开。按码原样回 403 + 可操作路径。
+    if (isPasswordChangeRequired(cause)) return passwordChangeRequired(res, message)
     json(res, 502, { error: `gateway error: ${message}` })
   }
 
   /**
-   * Session-lost tripwire injected into the DSH app page: polls the local
-   * auth state and reloads into the login page when the session is cleared
-   * server-side (token revoked/expired/disabled). 5s cadence keeps the
-   * window short without long-lived connections.
+   * 服务端要求先改密时的统一本地应答（R15B-02）。
+   *
+   * 三件事一起做，缺一条用户就被卡住：
+   *  1. **保留稳定码**（`code`）+ 明确动作（`action: 'change-password'`，界面据此
+   *     给出直达入口，而不是把服务端中文原文当唯一线索）；
+   *  2. **不清会话**：403 的语义是"凭据有效、但这一步被策略拒绝"，清会话会把用户
+   *     丢回登录页、再撞同一堵墙（令牌并未失效）；
+   *  3. **把标记落回会话**（`mustChangePassword`）：索引渲染本来就按这个标记进强制
+   *     改密页，于是下一次文档重载就是那条可操作路径 —— 注入页面的看门狗看到
+   *     `/api/pico/auth/state` 的 `must_change_password` 后重载（见 sessionWatchScript）。
+   * @param res - 本地响应对象。
+   * @param message - 服务端原文（用户可见，原样透出）。
    */
-  const SESSION_LOST_SCRIPT = `<script>
+  const passwordChangeRequired = (res: ServerResponse, message: string): void => {
+    const current = session()
+    if (current !== null && current.mustChangePassword !== true) {
+      ctx.picoSession.setSession({ ...current, mustChangePassword: true })
+      ctx.logger?.warn?.('pico: the gateway requires a password change for this session; routing the app page to /change-password on the next reload')
+    }
+    json(res, 403, {
+      error: message,
+      code: PASSWORD_CHANGE_REQUIRED_CODE,
+      action: PASSWORD_CHANGE_REQUIRED_ACTION,
+      hint: hostCopy(
+        hostLocale(),
+        '请先修改密码（设置 → 账号，或 /change-password 页面）后再重试',
+        'Change your password first (Settings → Account, or the /change-password page), then retry',
+      ),
+    })
+  }
+
+  /**
+   * 二进制/归档代理的网关失败分支（R15B-02）。
+   *
+   * 这些路径直接用 `gatewayFetch` 拿 `Response`，不经过 `fetchJSON`，所以它们的
+   * `!upstream.ok` 分支**没有**任何错误对象可判 —— 此前一律回 `{error:'gateway error'}`。
+   * 这里读一次错误信封（`clone()` 不消费原响应体，与改动前的行为一致）：命中
+   * "先改密"就与 `gatewayError` 走同一条出口，其余情况逐字保持原样。
+   * @param res - 本地响应对象。
+   * @param upstream - 网关响应。
+   * @returns 已写出应答（调用方直接 return）。
+   */
+  const archiveUpstreamError = async (res: ServerResponse, upstream: Response): Promise<void> => {
+    const envelope = await upstream.clone().json().catch(() => null) as { error?: { code?: string, message?: string } } | null
+    if (envelope?.error?.code === PASSWORD_CHANGE_REQUIRED_CODE) {
+      return passwordChangeRequired(res, envelope.error.message ?? hostCopy(hostLocale(), '请先修改密码', 'Change your password first'))
+    }
+    json(res, upstream.status, { error: 'gateway error' })
+  }
+
+  /**
+   * Session watchdog injected into the DSH app page: polls the local auth state
+   * and reloads when **the document's view of the session is no longer true**.
+   * 5s cadence keeps the window short without long-lived connections.
+   *
+   * 三个重载判据（R15B-02 / R15B-04，2026-09-25）：
+   *  1. `loggedIn === false` —— 会话在服务端被清（原判据，行为不变）；
+   *  2. `identity` 与**本文档渲染时**的身份不同 —— 同一个服务端上换了账号。旧判据
+   *     只有 `loggedIn === false`，而换账号时它仍为 true ⇒ 永不重载，已加载的应用页
+   *     继续以**上一个账号的渲染状态**跑在新账号的令牌下（四个整页面板 + 账号卡都
+   *     还显示旧账号的行）。身份口径见 `session-identity.ts`（唯一实现）。
+   *  3. `must_change_password === true` —— 服务端要求先改密（R15B-02）。索引渲染
+   *     本来就按这个标记进强制改密页，所以重载就是那条可操作路径。
+   *
+   * 身份由**服务端在渲染时注入**（而不是让脚本"第一次轮询时自己记基线"）：基线
+   * 必须是"这份文档是谁渲染出来的"，第一次轮询时身份可能已经变了。
+   * @param identity - 本文档渲染时的会话身份（{@link sessionIdentity}）。
+   * @returns 注入用的 `<script>` 片段。
+   */
+  const sessionWatchScript = (identity: string): string => `<script>
 (function () {
-  var known = true
+  var known = ${JSON.stringify(identity)}
   setInterval(function () {
     fetch('/api/pico/auth/state').then(function (r) { return r.json() }).then(function (d) {
-      if (known && d.loggedIn === false) location.reload()
-      known = d.loggedIn === true
+      if (d.loggedIn === false) { location.reload(); return }
+      if (d.must_change_password === true) { location.reload(); return }
+      if (String(d.identity || '') !== known) { location.reload() }
     }).catch(function () {})
   }, 5000)
 })()
@@ -1541,7 +1611,7 @@ export function apply(ctx: Context, config: Config): void {
         armPendingBrowserLoginFromLoginPage()
         return loginPage(locale)
       }
-      return html.replace('</head>',() => (SESSION_LOST_SCRIPT + '</head>'))
+      return html.replace('</head>',() => (sessionWatchScript(sessionIdentity(restored)) + '</head>'))
       }),
 
       ctx.webServer.register({
@@ -1592,6 +1662,13 @@ export function apply(ctx: Context, config: Config): void {
           }
           try {
             const sess = await login(body.server, body.username, body.password, hostLocale(req))
+            // R15B-04：同服务端换账号是**有意放行**的（改密/换人是合法动作，见
+            // loginServerSwitchConflict 的说明），但"换了人"必须留下信号：注入页面的
+            // 看门狗按同一身份口径把已加载的应用页重载掉（否则四个整页面板与账号卡
+            // 会继续以旧账号的渲染状态跑在新账号的令牌下）。这里只记录，不改判定。
+            if (sessionIdentityChanged(existing, sess)) {
+              ctx.logger?.warn?.('pico: session identity changed on this server; the loaded app page will reload (the previous account render state must not survive)')
+            }
             ctx.picoSession.setSession(sess)
             // 0057: 强制改密标记 → 登录页跳转强制改密页(而非直接进应用)。
             json(res, 200, { ok: true, must_change_password: sess.mustChangePassword === true })
@@ -1668,6 +1745,9 @@ export function apply(ctx: Context, config: Config): void {
                 source: current.source ?? '',
                 password_changeable: current.passwordChangeable === true,
                 must_change_password: current.mustChangePassword === true,
+                // R15B-04：会话身份的唯一口径（与注入脚本、login/deep-link 的
+                // "换了人"判定同一份实现）。任何客户端消费方要比就比这个值。
+                identity: sessionIdentity(current),
               })
         },
       }),
@@ -1898,7 +1978,7 @@ export function apply(ctx: Context, config: Config): void {
                 `${normalizeServerURL(s.serverURL)}/api/client/v2/skills/builtin/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
-              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              if (!upstream.ok) return await archiveUpstreamError(res, upstream)
               const length = Number(upstream.headers.get('content-length') ?? '0')
               if (length > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: 'archive too large' })
@@ -1986,7 +2066,7 @@ export function apply(ctx: Context, config: Config): void {
                 `${normalizeServerURL(s.serverURL)}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
-              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              if (!upstream.ok) return await archiveUpstreamError(res, upstream)
               const length = Number(upstream.headers.get('content-length') ?? '0')
               if (length > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: 'archive too large' })
@@ -2071,7 +2151,7 @@ export function apply(ctx: Context, config: Config): void {
               `${normalizeServerURL(s.serverURL)}/api/client/v2/marketplace/skills/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
-            if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            if (!upstream.ok) return await archiveUpstreamError(res, upstream)
             // P1-12: bound the download like the install path — a huge or
             // anomalous archive must not be buffered into memory wholesale.
             const declared = upstream.headers.get('content-length')
@@ -2228,7 +2308,7 @@ export function apply(ctx: Context, config: Config): void {
                 `${normalizeServerURL(s.serverURL)}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
-              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              if (!upstream.ok) return await archiveUpstreamError(res, upstream)
               const declared = upstream.headers.get('content-length')
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
@@ -2303,7 +2383,7 @@ export function apply(ctx: Context, config: Config): void {
               `${normalizeServerURL(s.serverURL)}/api/client/v2/agent-presets/${encodeURIComponent(name)}/archive`,
               { headers: { Authorization: `Bearer ${s.token}` } },
             )
-            if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+            if (!upstream.ok) return await archiveUpstreamError(res, upstream)
             const declared = upstream.headers.get('content-length')
             if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
               return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
@@ -2449,7 +2529,7 @@ export function apply(ctx: Context, config: Config): void {
                 `${normalizeServerURL(s.serverURL)}/api/client/v2/shared-skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}/archive`,
                 { headers: { Authorization: `Bearer ${s.token}` } },
               )
-              if (!upstream.ok) return json(res, upstream.status, { error: 'gateway error' })
+              if (!upstream.ok) return await archiveUpstreamError(res, upstream)
               const declared = upstream.headers.get('content-length')
               if (declared !== null && Number(declared) > MAX_ARCHIVE_BYTES) {
                 return json(res, 413, { error: archiveTooLarge(hostLocale(req)) })
