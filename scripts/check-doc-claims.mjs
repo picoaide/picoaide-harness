@@ -191,14 +191,18 @@ for (let index = 0; index < args.length; index += 1) {
 }
 
 /** 扫描面（与 check-migration-range.mjs 同形：文档 + 官网 wiki + 包内 README）。 */
-const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'packages', 'README.md', 'README.en.md']
+const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'packages', 'README.md', 'README.en.md', 'integration-tests']
 /**
  * 缩面判据①（登记值）：`SCAN_PATHS` 必须**全覆盖**这份登记清单 —— 删掉任一项
  * （例如把 `site/src/content/docs` 去掉）都让"官方文档数字都有判据"变成假话，
  * 而"根不存在/扫描面为 0"这类存在性判据抓不到这种删法（目录还在，只是没人扫）。
  * 改扫描面必须同时改这里（进 diff、可评审），不是悄悄少扫一片。
+ *
+ * `integration-tests` 是 2026-09-25 第十四轮 lane E 的 E-05 补进来的：`integration-tests/README.md`
+ * 的正文里写着"通过行逐项枚举它真的覆盖的 N 层"，而那个 N **当时就已经漂移**（README 写 10、
+ * 代码登记值 13），且该目录此前**不在任何文档判据的扫描面内**（那片散文数字没人看）。
  */
-const REQUIRED_SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'packages', 'README.md', 'README.en.md']
+const REQUIRED_SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'packages', 'README.md', 'README.en.md', 'integration-tests']
 /**
  * 缩面判据③（树派生，与①②互相独立）：仓库里**存在**的用户可见文档真源必须在扫描面内。
  * 夹具树没有这个目录 ⇒ 天然放行；真仓删掉它却把 SCAN_PATHS 也删了 ⇒ 当场红。
@@ -332,12 +336,24 @@ function numberFromToken(token) {
 }
 
 /**
+ * 集成守卫通过行层数的**代码真源**（E-05）：
+ * `check-integration-tests.mjs` 里 `COVERED_LAYERS.length === EXPECTED_COVERED_LAYERS`
+ * 是运行期断言；本规则把文档侧的自述绑到同一个登记值上。
+ */
+const INTEGRATION_COVERAGE_SOURCE = 'scripts/check-integration-tests.mjs'
+
+/**
  * 硬数字判据表（每条 = **一份代码真源** + 一组文档形态 + 一个下限）。
  *
  * `truth` 由 {@link resolveNumericRules} 从真源解析后填入；`forms[].pattern` 的第 1 个
  * 捕获组就是数字 token；`anchor` 是可选上下文锚（在该行 ±`window` 行内匹配，用于把
  * 同形但不同源的句子排除掉）；`min` 是**真仓形态**下必须命中的条数下限（素材被摘空
  * ⇒ EXIT=2，不是静默通过）。
+ *
+ * `required` 是**claim 定位点**（2026-09-25 第十四轮 lane E 的 E-04 收口）：这条规则必须
+ * 在列出的文件里**至少命中一条**（锚内），否则 EXIT=2。没有它时，`min` 只是一句"这类短语
+ * 还剩 N 条"的空保证 —— 把真正该判的那句话删掉/改写，余下的同形句子照样满足下限
+ * （= 真声明可以静默消失，claim 不可定位）。
  */
 const NUMBER_CLAIM_RULES = [
   {
@@ -383,14 +399,69 @@ const NUMBER_CLAIM_RULES = [
     label: '客户端平台数',
     source: DESKTOP_MANIFEST_SOURCE,
     read: source => installerPlatformsFrom(source)?.length,
-    min: 20,
+    // 下限 = 锚后实测条数（2026-09-25：36 条）再留 6 条余量给措辞改写；**定位**由下面的
+    // `required` 负责（canonical 文档里那句被删 ⇒ EXIT=2）。
+    min: 30,
+    // 上下文锚（E-04）：这条规则的真源是"桌面打包配置里声明了产物名的平台段数"，
+    // 只有**安装包/下载/门户/镜像**语境的「N 平台」才是它的 claim。同形但不同源的句子
+    // （"客户端在同**一平台**上运行"、"单平台实测"、"三平台窗口选项"）被排除；被排除的条数
+    // 照样打印（不静默吞）。
+    //
+    // `window: 0` 是**刻意**的：锚必须在**同一行**。留 ±1 行时，邻行出现"安装包"就会为
+    // 这一行的无关「N 平台」背书 —— 第十四轮 lane E 的假红现场正是把一句无关的话追加到
+    // 文档末尾（前一行恰好是安装包段落的一部分）。
+    anchor: /安装包|下载|门户|镜像|installers?\b|downloads?\b|portal\b/iu,
+    window: 0,
+    required: [
+      { file: 'site/src/content/docs/deployment/client-delivery.md', note: '客户端交付面（中文）' },
+      { file: 'site/src/content/docs/en/deployment/client-delivery.md', note: '客户端交付面（英文）' },
+      { file: 'site/src/content/docs/deployment.md', note: '部署总览：镜像里带三平台客户端安装包' },
+      { file: 'site/src/content/docs/en/deployment.md', note: '部署总览（英文）' },
+      { file: 'site/src/content/docs/getting-started.md', note: '快速开始：门户列出三平台下载入口' },
+      { file: 'site/src/content/docs/en/getting-started.md', note: '快速开始（英文）' },
+    ],
     forms: [
       // `(?<![\d.])`：排除「2.3 平台」这种被版本号尾巴带出来的假命中。
       { pattern: /(?<![\d.])([0-9]+|[一二三四五六七八九十两]+)\s*平台/gu },
       { pattern: /\b([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)\s+platforms\b/giu },
     ],
   },
+  {
+    id: 'integration-covered-layers',
+    label: '集成守卫通过行的覆盖面层数',
+    // 真源 = 守卫里那两条**互钉**的量：`COVERED_LAYERS` 数组长度必须等于
+    // `EXPECTED_COVERED_LAYERS`（由 `check-integration-tests.mjs` 自己在运行期断言）。
+    // 这里读登记值那一行 —— 它进 diff、可评审。
+    source: INTEGRATION_COVERAGE_SOURCE,
+    read: source => integrationCoveredLayersFrom(source),
+    min: 2,
+    // 上下文锚（同 E-04 的纪律）：只有"**通过行**逐项枚举/覆盖的 N 层"才是这条 claim。
+    // 同形的「三层覆盖：单测 / verify 脚本 / E2E 自动化」（`COVERAGE-MATRIX.md`，讲的是
+    // 另一件事）必须被排除 —— 它讲的层数与集成守卫无关。
+    anchor: /通过行|逐项枚举/u,
+    window: 0,
+    required: [
+      { file: 'integration-tests/README.md', note: '集成测试 README 的覆盖面自述（E-05 的现场）' },
+    ],
+    forms: [
+      { pattern: /([0-9]+|[一二三四五六七八九十两]+)\s*层/gu },
+    ],
+  },
 ]
+
+/**
+ * 从集成守卫源码抽"通过行的覆盖面层数"登记值（`const EXPECTED_COVERED_LAYERS = 14`）。
+ *
+ * 赋值必须**唯一**：0 处（被改名/改成别的形态）或 >1 处（有歧义）都返回 undefined，
+ * 由调用方 fail-loud —— 与 `keepVersionsFrom` 同一套口径。
+ * @param source - `scripts/check-integration-tests.mjs` 的源码。
+ * @returns 层数；解析失败返回 undefined。
+ */
+function integrationCoveredLayersFrom(source) {
+  const matches = [...String(source).matchAll(/^const EXPECTED_COVERED_LAYERS = (\d+)$/gmu)]
+  if (matches.length !== 1) return undefined
+  return Number(matches[0][1])
+}
 
 /**
  * 从 `scripts/platform-modules.mjs` 抽出 `NAME = [ ... ]` 里的字符串字面量。
@@ -538,6 +609,38 @@ function passLineProblems(line, covered) {
   return problems
 }
 
+/**
+ * **上下文锚判定（唯一实现）**：规则带 `anchor` 时，锚必须在该行 ±`window` 行内命中
+ * （`window` 缺省 0 = **同一行**；见 `client-platforms` 的注释：留 ±1 行会让邻行的
+ * "安装包"为无关的「N 平台」背书 —— 第十四轮 E-04 的假红现场）。
+ *
+ * 抽成函数是为了让自检能直接断言"锚的判别力"，而不是断言"当前这份文档恰好解析对了"。
+ * `anchor` **不得**带 `g` 旗标（带 `g` 的 `test()` 有 lastIndex 状态，跨行判定会抖动）。
+ * @param rule - 规则（读 `anchor` / `window`）。
+ * @param lines - 全文按行切分。
+ * @param index - 当前行下标。
+ * @returns 该行是否落在锚内（没有 `anchor` 时恒真）。
+ */
+function anchorAccepts(rule, lines, index) {
+  if (rule.anchor === undefined) return true
+  const span = rule.window ?? 0
+  const context = lines.slice(Math.max(0, index - span), index + span + 1).join('\n')
+  return rule.anchor.test(context)
+}
+
+/**
+ * 取该规则在某个文件里的**锚内**命中条数（`hitsByFile` 由扫描循环填充）。
+ *
+ * `required`（claim 定位点）靠它判：某个 canonical 文档里一条锚内命中都没有 ⇒ 那条 claim
+ * 已经不可定位（被删 / 被改写成别的语境）。
+ * @param rule - 扫描后的规则状态。
+ * @param file - 仓库相对路径。
+ * @returns 命中条数（缺省 0）。
+ */
+function ruleHitsInFile(rule, file) {
+  return rule.hitsByFile instanceof Map ? (rule.hitsByFile.get(file) ?? 0) : 0
+}
+
 /** 自检：解析器与判据本身的正反用例（防"扫描器悄悄失效 ⇒ 恒绿"）。 */
 function selfTest() {
   const good = '平台模块表（`PLATFORM_MODULES`，共 2 项：`react`、`react-dom`）与 `scripts/platform-modules.mjs`'
@@ -547,7 +650,12 @@ function selfTest() {
     + '  intervalMs: z.number().step(1).max(X).default(6 * 60 * 60 * 1000),'
   const cadence = updateCadenceFrom(cadenceSample)
   const coveredSample = COVERAGE_ITEMS.slice(0, 2)
+  /** 下面几条锚判据直接用规则本体（改 id / 删规则 ⇒ 这些用例当场红）。 */
+  const platformRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'client-platforms')
+  const integrationLayersRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'integration-covered-layers')
   const cases = [
+    [platformRule !== undefined && integrationLayersRule !== undefined,
+      'selftest: 判据表里必须有 client-platforms 与 integration-covered-layers 两条规则'],
     [modulesFromDocLine(good).modules?.join(',') === 'react,react-dom', 'selftest: 正常列表应解析出 2 项'],
     [modulesFromDocLine(good).declaredCount === 2, 'selftest: 应解析出声明项数 2'],
     [modulesFromDocLine(bad).declaredCount === 3, 'selftest: 应解析出声明项数 3'],
@@ -577,6 +685,28 @@ function selfTest() {
       'selftest: 「2.3 平台」不应被当成平台数 claim'],
     [/(?<![\d.])([0-9]+|[一二三四五六七八九十两]+)\s*平台/u.exec('列出三平台下载入口')?.[1] === '三',
       'selftest: 中文数字平台数应命中'],
+    // ---- 上下文锚的**判别力**（第十四轮 E-04 的回归判据）----------------------
+    // 断言的是"锚能不能区分"，不是"当前这份文档恰好是绿的"：删掉 `client-platforms`
+    // 的 anchor ⇒ 下面第一条立刻红。
+    [anchorAccepts(platformRule, ['镜像里已含三平台客户端安装包。'], 0),
+      'selftest: 「三平台安装包」必须落在 client-platforms 的上下文锚内'],
+    [!anchorAccepts(platformRule, ['客户端在**同一平台**上运行。'], 0),
+      'selftest: 无关的同形句「同一平台」必须被 client-platforms 的锚排除（E-04 的假红现场）'],
+    [!anchorAccepts(platformRule, ['上一行提到安装包与下载入口', '客户端在**同一平台**上运行。'], 1),
+      'selftest: 锚必须在**同一行**（window 0）—— 邻行的「安装包」不得为这一行的无关「N 平台」背书'],
+    [!anchorAccepts(platformRule, ['单平台、单次运行的实测'], 0),
+      'selftest: 「单平台实测」这类不同源的句子必须被锚排除'],
+    // ---- 集成守卫层数的真源解析（E-05 的回归判据）----------------------------
+    [integrationCoveredLayersFrom('const EXPECTED_COVERED_LAYERS = 14\n') === 14,
+      'selftest: 应解析出 EXPECTED_COVERED_LAYERS = 14'],
+    [integrationCoveredLayersFrom('const EXPECTED_COVERED_LAYERS = 13\nconst EXPECTED_COVERED_LAYERS = 14\n') === undefined,
+      'selftest: EXPECTED_COVERED_LAYERS 赋值不唯一必须 fail-loud（返回 undefined）'],
+    [integrationCoveredLayersFrom('const EXPECTED = 14') === undefined,
+      'selftest: 形态变了（改名/改成别的写法）必须返回 undefined'],
+    [anchorAccepts(integrationLayersRule, ['> · 守卫不得声称端到端被覆盖（通过行逐项枚举它真的判了的 14 层）；'], 0),
+      'selftest: 「通过行逐项枚举…N 层」必须落在集成层数规则的锚内'],
+    [!anchorAccepts(integrationLayersRule, ['三层覆盖：单测、verify 脚本、E2E 自动化'], 0),
+      'selftest: COVERAGE-MATRIX 的「三层覆盖」是另一件事，必须被锚排除'],
     // 通过行反解断言（自我陈述与覆盖面必须一致）
     [passLineProblems(passLineFor(coveredSample), coveredSample).length === 0, 'selftest: 生成的通过行必须自洽'],
     [passLineProblems('check-doc-claims: 已覆盖 9 项：上游 pin、平台模块表 —— 全部与真源一致 ✅', coveredSample).length > 0,
@@ -655,7 +785,9 @@ if (expectedModules === undefined || expectedModules.length === 0) {
 }
 
 // ---- 真源 3/4/5：硬数字（R13-GF）。真源是**代码里的量**，不是守卫里的副本 ----
-const numericRules = NUMBER_CLAIM_RULES.map(rule => ({ ...rule, truth: undefined, hits: 0, excluded: 0 }))
+const numericRules = NUMBER_CLAIM_RULES.map(rule => ({
+  ...rule, truth: undefined, hits: 0, excluded: 0, hitsByFile: new Map(),
+}))
 for (const rule of numericRules) {
   const path = join(root, rule.source)
   if (!existsSync(path)) {
@@ -705,18 +837,15 @@ for (const target of SCAN_PATHS) {
       for (const rule of numericRules) {
         if (rule.truth === undefined) continue
         for (const form of rule.forms) {
-          if (rule.anchor !== undefined) {
-            const span = rule.window ?? 0
-            const context = lines.slice(Math.max(0, index - span), index + span + 1).join('\n')
-            if (!rule.anchor.test(context)) {
-              // 同形但**不同源**的句子（例如保留策略调度器也写「每 6 小时一次」）：
-              // 排除，但把条数记下来照实打印，不做静默吞掉。
-              rule.excluded += [...line.matchAll(form.pattern)].length
-              continue
-            }
+          if (!anchorAccepts(rule, lines, index)) {
+            // 同形但**不同源**的句子（例如保留策略调度器也写「每 6 小时一次」、或
+            // "客户端在同一平台上运行"）：排除，但把条数记下来照实打印，不做静默吞掉。
+            rule.excluded += [...line.matchAll(form.pattern)].length
+            continue
           }
           for (const match of line.matchAll(form.pattern)) {
             rule.hits += 1
+            rule.hitsByFile.set(file, (rule.hitsByFile.get(file) ?? 0) + 1)
             const got = numberFromToken(match[1])
             if (got !== rule.truth) {
               hits.push({
@@ -947,6 +1076,16 @@ if (strictSurface) {
     if (rule.hits < rule.min) {
       surfaceProblems.push(`${rule.label}：全仓只命中 ${rule.hits} 条断言（下限 ${rule.min}）——`
         + ' 判据素材被摘掉/规则正则失效，这条"已覆盖"是空话')
+    }
+    // claim **定位点**（E-04）：`min` 只保证"这类短语还剩 N 条"，定位不了"该判的那句话"。
+    // 列进 `required` 的文件必须至少有 1 条**锚内**命中 —— 删掉/改写成别的语境 ⇒ 红。
+    for (const required of rule.required ?? []) {
+      if (ruleHitsInFile(rule, required.file) === 0) {
+        surfaceProblems.push(`${rule.label}：${required.file}（${required.note}）里一条锚内声明都没有 ——`
+          + ' 这条 claim 已经**不可定位**（被删 / 被改写成别的语境 / 锚不再命中）。'
+          + ` 该文件必须仍然明写这条数字（真源 ${rule.source}），或者把 \`required\` 定位点改到`
+          + '新的落点并说明理由（改定位点要进 diff）。')
+      }
     }
   }
   if (coveredItems.length !== COVERAGE_ITEMS.length) {

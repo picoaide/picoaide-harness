@@ -354,6 +354,94 @@ const GROUP_MIN_JUDGMENTS = DEX_EXPECTED_CRITERIA.length
 const INTEGRATION_SCANNED_EXTENSIONS = ['.py', '.mjs', '.sh', '.yaml', '.yml']
 
 /**
+ * 本守卫**引用的** `integration-tests/**` 路径里，扩展名不在
+ * {@link INTEGRATION_SCANNED_EXTENSIONS} 内、但**明确不是判据面**的登记项（B-04 修法）。
+ *
+ * 现场（第十四轮 lane B 的 B-04，已实跑复现）：`scripts/check-install-integrity.mjs` 从
+ * **本守卫的文本**抽"它 `spawn`/枚举的目标"（`integrationReferencedPaths(guardText)`），
+ * 再用 `extensions.includes(extensionOf(path))` 过滤 —— 扩展名集合正是上面这份
+ * `INTEGRATION_SCANNED_EXTENSIONS`。于是**引用面被悄悄收窄**：在本守卫里引用
+ * `integration-tests/extra-probe.ts`（并让该文件真的存在）之后，
+ * `check-install-integrity` 照打 `VERDICT PASS`（EXIT=0），那个文件既不在语法面、也不在
+ * 执行体全集里 —— "派生集合的取值面被收窄而登记表看不出来"。
+ *
+ * 收口：本守卫自己判"我引用的每个 `integration-tests/**` 路径，要么扩展名在扫描面内
+ * （于是它进 `INTEGRATION_ENTRIES` 登记制 + 语法闸门 + 执行体全集），要么**逐条登记在这张
+ * 表里**并说明为什么它不是判据面"（例如纯图片/二进制夹具）。未登记即红 —— 口径与实现
+ * 于是在**同一个文件**里对齐，`extensions.includes()` 的过滤不再是静默的。
+ */
+const INTEGRATION_REFERENCE_SCOPE_REGISTRY = []
+
+/**
+ * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态
+ * 与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与 `check-install-integrity.mjs` 的
+ * 同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
+ * @param source - 源码文本。
+ * @returns 归一化后的路径列表（去重、排序）。
+ */
+function integrationReferencedPathsIn(source) {
+  const text = String(source)
+  const found = new Set()
+  for (const match of text.matchAll(/['"]([A-Za-z0-9_.@/-]*integration-tests\/[A-Za-z0-9_.@/-]+)['"]/gu)) {
+    found.add(match[1].replace(/^\.\//u, ''))
+  }
+  for (const match of text.matchAll(/join\(\s*ROOT\s*,\s*((?:'[^']*'|"[^"]*")(?:\s*,\s*(?:'[^']*'|"[^"]*"))*)\s*\)/gu)) {
+    const parts = [...match[1].matchAll(/'([^']*)'|"([^"]*)"/gu)].map(quote => quote[1] ?? quote[2])
+    if (parts.length > 0 && parts[0] === 'integration-tests') found.add(parts.join('/'))
+  }
+  return [...found].sort()
+}
+
+/**
+ * 引用面与判据面的**扩展名对账**（纯函数，供自证与真跑共用）。
+ * @param source - 本守卫自己的源码文本。
+ * @param options - `{ exists, registry }`：`exists(path)` 判"该路径是否真的落盘"、
+ *   `registry` = {@link INTEGRATION_REFERENCE_SCOPE_REGISTRY} 形态的登记表。
+ * @returns `{ referenced, outOfScope, unregistered, deadEntries }`；`unregistered` 非空即红。
+ */
+function integrationReferenceScope(source, options) {
+  const registry = options.registry ?? []
+  const registered = new Set(registry.map(entry => entry.path))
+  const referenced = integrationReferencedPathsIn(source)
+  // 只有**真的落在磁盘上**的引用才有"看不见的执行体"这回事：尚未创建的目标
+  // （自证夹具里的 `__probe__` 路径、未来才加的文件）不构成缺口。
+  // 目录本身（`join(ROOT, 'integration-tests')`，没有文件名段）不是执行体，跳过。
+  const present = referenced.filter(path => path !== 'integration-tests' && options.exists(path))
+  const outOfScope = present.filter(path => !INTEGRATION_SCANNED_EXTENSIONS.some(ext => path.endsWith(ext)))
+  const unregistered = outOfScope.filter(path => !registered.has(path))
+  const deadEntries = [...registered].filter(path => !present.includes(path))
+  return { referenced, present, outOfScope, unregistered, deadEntries }
+}
+
+/**
+ * 引用面对账的**能力自证**：扫描面外的引用（未登记）必须被抓到，登记后必须放行，
+ * 扫描面内的引用不得误报，未落盘的目标不得误报。
+ */
+function integrationReferenceScopeSelfTest() {
+  const extension = '.ts'
+  const probe = `const EXTRA_TARGET = 'integration-tests/__probe__/extra-probe${extension}'`
+  const exists = path => path === `integration-tests/__probe__/extra-probe${extension}`
+  const bare = integrationReferenceScope(probe, { exists, registry: [] })
+  check(bare.unregistered.length === 1 && bare.unregistered[0] === `integration-tests/__probe__/extra-probe${extension}`,
+    '形态⑩自证: 引用了扩展名在扫描面外的 `integration-tests/**` 路径却没登记时必须红 ——'
+      + `实际 unregistered=[${bare.unregistered.join(', ')}]（B-04 的现场形态）`)
+  const registered = integrationReferenceScope(probe, {
+    exists, registry: [{ path: `integration-tests/__probe__/extra-probe${extension}`, why: '自证' }],
+  })
+  check(registered.unregistered.length === 0,
+    `形态⑩自证: 登记之后必须放行 —— 实际 unregistered=[${registered.unregistered.join(', ')}]`)
+  const absent = integrationReferenceScope(probe, { exists: () => false, registry: [] })
+  check(absent.unregistered.length === 0 && absent.deadEntries.length === 0,
+    '形态⑩自证: 没落盘的目标不算缺口（只有真的存在、却看不见的执行体才是缺口）')
+  const inScope = `const P = 'integration-tests/__probe__/in-scope.mjs'`
+  const ok = integrationReferenceScope(inScope, { exists: () => true, registry: [] })
+  check(ok.unregistered.length === 0 && ok.present.length === 1,
+    '形态⑩自证: 扫描面扩展名内的引用不得误报 ——'
+      + `实际 unregistered=[${ok.unregistered.join(', ')}] present=[${ok.present.join(', ')}]`)
+  notes.push('integration-tests 引用面扩展名对账自证: 面外未登记必红 / 登记后放行 / 面内不误报 / 未落盘不算缺口 ✓')
+}
+
+/**
  * 判据被掏成恒真的**注入锚点**：每条 `evaluate` 的第一句。
  *
  * 锚点是**契约**而不是巧合：`contractkit.observation_of()` 的文档里写明了门禁靠它做
@@ -701,6 +789,36 @@ async function main() {
   check(staleEntries.length === 0,
     `形态⑦: 登记表里这些条目不在扫描面内（扩展名不在 ${INTEGRATION_SCANNED_EXTENSIONS.join('/')} 里？）: `
       + `${staleEntries.join(', ')}`)
+
+  // ②b **引用面 ↔ 判据面的扩展名对账**（第十四轮 lane B 的 B-04，P2）。
+  //
+  // `check-install-integrity.mjs` 从**本守卫的文本**抽"它 spawn/枚举的目标"，再用
+  // `INTEGRATION_SCANNED_EXTENSIONS` 过滤 ⇒ 在本守卫里引用一个扩展名在面外的路径
+  // （`integration-tests/x.ts` 并让它真的存在）时，那个文件既不进语法面、也不进执行体全集，
+  // 而 `check-install-integrity` 照旧 `VERDICT PASS`。收口：本守卫自己判"我引用的每个
+  // 落盘路径，要么扩展名在扫描面内，要么逐条登记为非判据面（见
+  // {@link INTEGRATION_REFERENCE_SCOPE_REGISTRY}）"。
+  integrationReferenceScopeSelfTest()
+  {
+    const scope = integrationReferenceScope(readFileSync(fileURLToPath(import.meta.url), 'utf8'), {
+      exists: path => existsSync(join(ROOT, path)),
+      registry: INTEGRATION_REFERENCE_SCOPE_REGISTRY,
+    })
+    check(scope.unregistered.length === 0,
+      `形态⑩: 本守卫引用了这些 \`integration-tests/**\` 路径，它们的扩展名不在扫描面 `
+        + `（${INTEGRATION_SCANNED_EXTENSIONS.join('/')}）内、也没有在 `
+        + `INTEGRATION_REFERENCE_SCOPE_REGISTRY 里登记：${scope.unregistered.join(', ')}`
+        + '\n  ⇒ 这类路径既不在语法闸门里、也不在 `check-install-integrity` 的执行体全集里'
+        + '（它的派生面就是按这份扩展名集合过滤的）—— "引用了却没人判"的静默缺口。'
+        + '\n     两条出路：① 把该扩展名纳入扫描面（同时进 INTEGRATION_ENTRIES 登记制与语法闸门）；'
+        + '\n     ② 在本表登记它是**非判据面**的引用（纯资源/图片夹具），并写明理由。')
+    check(scope.deadEntries.length === 0,
+      `形态⑩: 这些登记项在本守卫的正文里已经不再被引用（死条目）：${scope.deadEntries.join(', ')}`
+        + ' —— 登记表比实际引用面宽，同样是"自述与事实不一致"')
+    notes.push(`integration-tests 引用面: 落盘引用 ${scope.present.length} 条、`
+      + `面外登记 ${INTEGRATION_REFERENCE_SCOPE_REGISTRY.length} 条、`
+      + `扩展名全部落在判据面（${INTEGRATION_SCANNED_EXTENSIONS.join('/')}）或已登记 ✓`)
+  }
 
   // ③ 聚合层双向对账：`run-all.sh` 的 `run "<名>" <runner> <路径>` 行 ↔ 登记表里
   //    带 aggregateName 的条目（顺序也钉住 —— 顺序变了同样是"聚合层被改过"）。
@@ -1661,49 +1779,545 @@ for (const item of SCENARIOS) {
 }
 
 // ---------------------------------------------------------------------------
-// 端到端覆盖面 **↔ CI 的真实命中数**（第十三轮 V13-C 附加结论的收口）。
+// **CI 执行面闭包** —— 端到端覆盖面的判据从"workflow 文本"换成"CI 会不会真的跑它"。
 //
-// 现场：`grep -rn -i "integration" .github/workflows/` **0 命中** ⇒ 本目录的真机端到端
-// （Docker + 真实服务端 + 显示器）在 CI 内 **0 执行**。这件事此前只在通过行的**末尾**用散文
-// 声明（"文本上诚实，但作为保证不够"）—— 没有任何机制会因为端到端继续腐烂而失败：
-// OIDC 授权码流、LDAP 登录/RBAC、渠道契约、深链 handoff 这些**产品行为**在 CI 里 0 次验证，
-// 而 `check-integration-tests: OK` 这个名字照旧会被读成"集成测试 OK"。
+// 现场（第十四轮 lane E 的 E-02，P1，已实跑复现）：旧判据只数 `.github/workflows/**` 里
+// `integration-tests|run-all\.sh|dex-sso|ldap-rbac` 的**字面量命中数**，并在凭据行上写
+// "命中 0 处 ⇒ 在 CI 内 0 执行"。于是只要不把这 4 个 token 写进 workflow 文本，端到端就能
+// 整条接进 CI 而**凭据行照旧说谎**：
 //
-// 收口（最小改动、语义不变）：
-//   ① 通过行改成 `… OK — VERDICT PASS static-only …`，把"这条绿只覆盖静态面"提到**凭据行**上；
-//   ② 命中数变成**判据**：`.github/workflows/**` 对 `integration-tests` / `run-all.sh` /
-//      `dex-sso` / `ldap-rbac` 的命中数必须**等于**登记值 `E2E_CI_HITS_DECLARED`。从 0 变 1
-//      （有人接了真机 job）或从 1 变 0（真机 job 被摘线）都**当场红**，逼下一个人显式决定：
-//      要么把登记值与 static-only 声明一起改掉（改口径要进 diff），要么恢复原状。
-//      —— 这与本仓"一个词就能改门禁语义"的登记制同一套纪律。
+//   package.json:  "e2e:integration": "bash integration-tests/run-all.sh"
+//   ci.yml:        - run: yarn e2e:integration          ← 文本里 0 个 token
+//
+//   ⇒ 本守卫 EXIT=0 且打 `VERDICT PASS static-only`，`check-workflows` /
+//     `check-install-integrity` 也全绿 —— 真机端到端真的在 CI 里跑，凭据说不跑。
+// 同族旁路：`.github/actions/**` 复合 action、`scripts/*.sh` 包装链、`yarn workspace` 别名。
+//
+// 修法：判据的**输入面**改成 **CI 执行面闭包** —— 从 workflow 的 `run:` 命令位出发，沿
+// 四种**执行形态**扩张到不动点（纯函数 {@link ciExecutionSurface}，带自证）：
+//   ① 本地复合 action（`uses: ./.github/actions/<x>` → 它的 `run:` 步骤与嵌套 `uses:`）；
+//   ② manifest scripts 别名（`yarn <名>` / `yarn workspace <包> <名>`；以及编排器"按名字
+//      解析守卫"的形态 —— 可达脚本正文里引号包裹的 manifest 脚本键）；
+//   ③ 仓内包装脚本（命令位上的 `scripts/**` → `.sh` 按命令行、`.mjs|.ts` 按
+//      `spawn|exec|fork` 实参窗口里的字符串字面量继续扩张）；
+//   ④ 递归（深度上限 {@link CI_SURFACE_MAX_HOPS}、节点上限 {@link CI_SURFACE_MAX_NODES}，
+//      超限 fail-loud，不静默截断）。
+// 闭包里**任何**触及端到端入口的文件都必须登记在 {@link E2E_CI_SURFACE_REGISTRY}：别名旁路
+// 会把 `package.json`（别名表）带进来、复合 action 会把 `action.yml` 带进来、包装链会把
+// `scripts/*.sh` 带进来 —— 三种同类物一起收口。本守卫自己的**合成 SKIP 探针**（跑一次
+// `run-all.sh` 断言 77、不启动 Docker/真实服务端/Xvfb）单列登记为 `synthetic-probe`。
+//
+// **诚实边界（认账）**：闭包只跟随上面四种**执行形态** —— 不做 JS 语义分析、不跟随 `import`
+// 边、不解析变量拼接出来的路径（`bash "$SOMEWHERE/run-all.sh"`、`spawn(cmd)` 看不见）。
+// 它比"workflow 文本字面量"宽得多（别名/复合 action/包装链都在面内），但不是"任意可执行
+// 路径"的完全覆盖；"文本面"（{@link E2E_CI_REFERENCE_PATTERN}）作为**独立第二张网**保留：
+// 它形态无关（只要文本里出现就红），与执行面互补。
 // ---------------------------------------------------------------------------
 const E2E_CI_REFERENCE_PATTERN = /integration-tests|run-all\.sh|dex-sso|ldap-rbac/iu
-/** 登记值：CI 内引用 integration-tests 的行数（0 = 真机端到端在 CI 内 0 执行）。 */
-const E2E_CI_HITS_DECLARED = 0
+/** 登记值①（**文本面**，与执行面互相独立）：`.github/workflows/**` 里出现上述 token 的**行数**。 */
+const E2E_CI_TEXT_HITS_DECLARED = 0
+/** 登记值②（**执行面**）：CI 执行面里"真实前置"触达端到端入口的**来源文件数**。 */
+const E2E_CI_REAL_SURFACE_FILES_DECLARED = 0
+/** 本守卫自己的仓库内相对路径（合成探针登记项必须逐字等于它）。 */
+const GUARD_RELATIVE_PATH = 'scripts/check-integration-tests.mjs'
+/**
+ * CI 执行面里**允许**触及端到端入口的文件（登记制 + 理由）。三种 `mode`：
+ *
+ *   · `real`            —— 真的能在 CI 里跑起端到端（含别名/复合 action/包装链触达）。
+ *                          必须同时上调 {@link E2E_CI_REAL_SURFACE_FILES_DECLARED} 并改掉通过行的
+ *                          `static-only` / "CI 内 0 执行"措辞（口径进 diff 才可评审）；
+ *   · `synthetic-probe` —— 只跑合成 SKIP 探针（不启动 Docker/真实服务端/Xvfb），
+ *                          **只允许登记本守卫自己**，且必须真的出现在"执行形态"抽取里；
+ *   · `data-reference`  —— 文件正文里**提到**这些路径，但"执行形态"抽取里没有它们
+ *                          （例如把这三条路径当**数据**登记在执行体全集里）。
+ *                          这条 mode 会被机械复核：一旦它变成真的执行形态，判据当场红。
+ */
+const E2E_CI_SURFACE_REGISTRY = [
+  {
+    file: GUARD_RELATIVE_PATH,
+    mode: 'synthetic-probe',
+    why: '本守卫的合成 SKIP 探针（§1d）：跑一次 `run-all.sh` 的"三项全 SKIP"输入并断言 exit 77'
+      + ' —— 不启动 Docker / 真实服务端 / Xvfb，不构成端到端覆盖',
+  },
+  {
+    file: 'scripts/check-install-integrity.mjs',
+    mode: 'data-reference',
+    why: '`EXECUTION_POINT_REGISTRY` 把 `integration-tests/run-all.sh` / 两个 `.py` 当**数据**登记'
+      + '（"判据执行体全集"的成员），本文件不执行它们 —— 机械判据：它的执行形态抽取里没有端到端入口',
+  },
+]
+/** 端到端**执行入口**：命中即"CI 能真的把它跑起来"的候选。 */
+const E2E_END_TO_END_PATTERN = /integration-tests\/(?:run-all\.sh|dex\/|openldap\/|electron-shots\/)|(?:^|[^\w.-])(?:dex-sso|ldap-rbac|run-all\.sh)(?![\w.-])/iu
+/** 闭包可跟随的仓内脚本路径形态（命令位/实参窗口里的裸路径）。 */
+const CI_SURFACE_SCRIPT_PATTERN = /^(?:\.\/)?(?:scripts|integration-tests|packages|server|community)\/[A-Za-z0-9_./@+-]+\.(?:sh|bash|mjs|cjs|js|ts)$/u
+/** 闭包深度上限与节点上限（超限 fail-loud）。 */
+const CI_SURFACE_MAX_HOPS = 8
+const CI_SURFACE_MAX_NODES = 400
+/** JS 正文里"执行调用"的实参窗口长度 / 调用名。 */
+const CI_SURFACE_ARG_WINDOW = 400
+const CI_SURFACE_EXEC_CALL = /\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/gu
+
+/**
+ * shell 文本 → "命令位 token"（近似提取，只用于闭包扩张，不做语义分析）。
+ *
+ * 丢掉的形态：`VAR=值`（环境赋值）、以 `-` 开头的旗标、含 `$` 的 token（变量拼接出来的
+ * 路径解析不了 —— 这正是本判据认账的边界）。token 两端只保留"路径/键名会用到"的字符
+ * （字母数字与 `@ . / : _ -`，`$` 也保留到自检之后）—— 于是
+ * `'integration-tests/run-all.sh',` 与 `["integration-tests/run-all.sh"]` 都能归一成同一条路径。
+ * @param source - shell 文本（workflow `run:` 块 / `.sh` 正体 / manifest 脚本值）。
+ * @returns token 列表（按出现顺序）。
+ */
+function shellCommandTokens(source) {
+  const tokens = []
+  for (const rawLine of String(source).split('\n')) {
+    const line = rawLine.replace(/(?:^|\s)#.*$/u, '').trim()
+    if (line === '') continue
+    for (const raw of line.split(/[\s|&;()<>]+/u)) {
+      // `$` 保留在字符集里：变量拼出来的路径（`"$DIR/run-all.sh"`）必须能被**判成解析不了**
+      // 并跳过，而不是把 `$` 连同前缀一起剥掉之后当成一条真路径记进 `reached`。
+      const token = raw.replace(/^[^A-Za-z0-9_$@./:-]+/u, '').replace(/[^A-Za-z0-9_$@./:-]+$/u, '')
+      if (token === '' || token.startsWith('-') || token.includes('$')) continue
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)) continue
+      tokens.push(token)
+    }
+  }
+  return tokens
+}
+
+/**
+ * JS/TS 正文 → `spawn|exec|fork` **实参窗口**里的字符串字面量（窗口长度见
+ * {@link CI_SURFACE_ARG_WINDOW}）。
+ *
+ * 只看"执行调用的实参窗口"，**不**扫全文：全文扫描会把登记表/注释里的路径当成执行
+ * （本守卫自己的 `INTEGRATION_ENTRIES` 就是反例），那样"触及"判据就退化成了文本判据。
+ * @param source - JS/TS 源码文本。
+ * @returns 字面量列表。
+ */
+function jsExecArgumentLiterals(source) {
+  const text = String(source)
+  const literals = []
+  for (const match of text.matchAll(CI_SURFACE_EXEC_CALL)) {
+    const window = text.slice(match.index, match.index + CI_SURFACE_ARG_WINDOW)
+    for (const literal of window.matchAll(/['"`]([^'"`\n]+)['"`]/gu)) literals.push(literal[1])
+  }
+  return literals
+}
+
+/**
+ * JS/TS 正文 → 引号包裹的 **manifest 脚本键**（编排器"按名字解析守卫"的形态：
+ * `{ name: 'check:integration-tests', args: ['run', 'check:integration-tests'] }`）。
+ *
+ * 这是**唯一**被当作"执行"的 JS 字符串形态（其余字符串是数据/夹具，见
+ * {@link ciExecutionSurface} 的 `mentioning` 口径）。
+ * @param source - JS/TS 源码文本。
+ * @param keys - manifest `scripts` 的键集合。
+ * @returns 命中的键列表。
+ */
+function jsManifestKeyLiterals(source, keys) {
+  const literals = []
+  for (const match of String(source).matchAll(/['"`]([A-Za-z0-9_:@/-]+)['"`]/gu)) {
+    if (keys.has(match[1])) literals.push(match[1])
+  }
+  return literals
+}
+
+/**
+ * **CI 执行面闭包**（纯函数：只吃文本与存在性/读取谓词，不碰文件系统、不跑 git）。
+ *
+ * @param options - `{ workflowTexts, rootManifest, rootManifestText, workspaceManifests, exists, read }`。
+ *   `workflowTexts` 是 `[路径, 文本]`；`workspaceManifests` 是 `[{ dir, manifest, text }]`；
+ *   `exists(path)` / `read(path)` 以**仓库根相对路径**为准。
+ * @returns `{ mentioning, reached, nodes, truncated }`，两张**互补**的表（都以"来源文件"为键）：
+ *   · `reached`   —— **执行形态**里真的取到端到端入口：命令位 token / `spawn|exec|fork` 实参
+ *     字面量 / manifest 别名的脚本值（别名值归属到**拥有它的 manifest**，所以 E-02 的
+ *     `package.json` 旁路会落在这里）；
+ *   · `mentioning` —— 只在**正文**里出现（`.sh` / workflow·action YAML / manifest 的正文字符串），
+ *     而执行形态解析不出来（`bash "$DIR/run-all.sh"` 这类）。JS/TS 正体的字符串**不算**
+ *     "提到"：JS 里字符串常量通常是数据表/夹具（本守卫自己的 `INTEGRATION_ENTRIES`
+ *     就是反例），把它算进来会让判据退化成文本判据。
+ *   两者都必须在 `E2E_CI_SURFACE_REGISTRY` 里登记（`reached` → `real`/`synthetic-probe`，
+ *   `mentioning ∖ reached` → `data-reference`）。
+ */
+function ciExecutionSurface(options) {
+  const rootManifest = options.rootManifest ?? {}
+  const scriptKeys = new Set(Object.keys(rootManifest.scripts ?? {}))
+  const workspaceByName = new Map()
+  for (const entry of options.workspaceManifests ?? []) {
+    if (typeof entry?.manifest?.name === 'string') workspaceByName.set(entry.manifest.name, entry)
+  }
+  const resolveScript = (token, dir) => {
+    const candidates = typeof dir === 'string' && dir !== '' ? [`${dir}/${token}`, token] : [token]
+    for (const candidate of candidates) {
+      const normalized = candidate.replace(/^\.\//u, '')
+      if (CI_SURFACE_SCRIPT_PATTERN.test(normalized) && options.exists(normalized)) return normalized
+    }
+    return undefined
+  }
+  const mentioning = new Map()
+  const reached = new Map()
+  const nodes = []
+  const seen = new Set()
+  let truncated = false
+  /** 定义别名表的 manifest（当前只有根 manifest 一处；执行面的别名都从它解析）。 */
+  const manifestOwner = options.rootManifestPath ?? 'package.json'
+  const queue = []
+  const enqueue = item => {
+    if (item.hops <= CI_SURFACE_MAX_HOPS) queue.push(item)
+  }
+  for (const [file, text] of options.workflowTexts ?? []) {
+    enqueue({ key: file, file, kind: 'yaml', text, dir: '', via: [file], hops: 0 })
+  }
+  enqueue({
+    key: 'package.json', file: 'package.json', kind: 'manifest', text: String(options.rootManifestText ?? ''),
+    dir: '', via: ['package.json'], hops: 0,
+  })
+  while (queue.length > 0) {
+    const node = queue.shift()
+    if (seen.has(node.key)) continue
+    seen.add(node.key)
+    nodes.push(node.key)
+    if (nodes.length > CI_SURFACE_MAX_NODES) { truncated = true; break }
+    const text = String(node.text ?? '')
+    // "正文提到"面：只对 shell 与 YAML/manifest 生效（JS/TS 正体里的字符串是数据，不算执行）。
+    const textNetApplies = node.kind !== 'script' || /\.(?:sh|bash)$/u.test(node.file)
+    if (textNetApplies && E2E_END_TO_END_PATTERN.test(text)) mentioning.set(node.file, node.via)
+    /** 把"命令位 token / 实参字面量"继续扩张成节点；命中端到端入口的记进 `reached`。 */
+    const expandTokens = (tokens, dir) => {
+      for (const token of tokens) {
+        if (E2E_END_TO_END_PATTERN.test(token)) reached.set(node.file, node.via)
+        const script = resolveScript(token, dir)
+        if (script !== undefined) {
+          enqueue({
+            key: script, file: script, kind: 'script', text: options.read(script), dir: '',
+            via: [...node.via, script], hops: node.hops + 1,
+          })
+          continue
+        }
+        if (!scriptKeys.has(token)) continue
+        const value = String(rootManifest.scripts?.[token] ?? '')
+        const nested = shellCommandTokens(value)
+        const workspaceIndex = nested.indexOf('workspace')
+        if (workspaceIndex !== -1 && nested.length > workspaceIndex + 2) {
+          const workspace = workspaceByName.get(nested[workspaceIndex + 1])
+          if (workspace !== undefined) {
+            enqueue({
+              key: `${workspace.dir}/package.json`, file: `${workspace.dir}/package.json`, kind: 'manifest',
+              text: String(workspace.text ?? ''), dir: workspace.dir,
+              via: [...node.via, token, `${workspace.dir}/package.json`], hops: node.hops + 1,
+            })
+            continue
+          }
+        }
+        // 别名值：`file` 归属到**定义这条别名的 manifest**（`options.rootManifestPath`），
+        // `key` 才是这条值本身 —— 于是"经 package.json 别名把 run-all.sh 接进 CI"会被记在
+        // package.json 头上（而不是记在"恰好用了这个别名的那个 workflow"头上）。
+        enqueue({
+          key: `manifest-script:${manifestOwner}:${token}`, file: manifestOwner, kind: 'shell-value', text: value,
+          dir: node.dir, via: [...node.via, `${manifestOwner} scripts["${token}"]`], hops: node.hops + 1,
+        })
+      }
+    }
+    if (node.kind === 'yaml') {
+      for (const uses of text.matchAll(/^[^\S\n]*(?:-[^\S\n]+)?uses:[^\S\n]*(\S+)[^\S\n]*$/gmu)) {
+        if (!uses[1].startsWith('./')) continue
+        const target = uses[1].replace(/^\.\//u, '')
+        for (const candidate of [`${target}/action.yml`, `${target}/action.yaml`, target]) {
+          if (!options.exists(candidate)) continue
+          enqueue({
+            key: candidate, file: candidate, kind: 'yaml', text: options.read(candidate), dir: target,
+            via: [...node.via, candidate], hops: node.hops + 1,
+          })
+          break
+        }
+      }
+      expandTokens(shellCommandTokens(text), node.dir)
+    } else if (node.kind === 'manifest' || node.kind === 'shell-value') {
+      expandTokens(shellCommandTokens(text), node.dir)
+    } else if (node.kind === 'script') {
+      const literals = /\.(?:sh|bash)$/u.test(node.file)
+        ? shellCommandTokens(text)
+        // JS/TS：只看**执行调用的实参窗口**（`spawn('bash', ['scripts/x.sh'])`）与
+        // 编排器"按名字解析守卫"的形态（引号包裹的 manifest 脚本键）。
+        : [...jsExecArgumentLiterals(text), ...jsManifestKeyLiterals(text, scriptKeys)]
+      expandTokens(literals, node.dir)
+    }
+  }
+  return { mentioning, reached, nodes, truncated }
+}
+
+/**
+ * 把闭包结果按登记表分类（纯函数，供自证与真跑共用）。
+ *
+ * 三种 `mode` 的机械判据（见 {@link E2E_CI_SURFACE_REGISTRY}）：
+ *   · 执行形态取到端到端入口（`reached`）的文件 **不得**登记成 `data-reference`；
+ *   · `synthetic-probe` 只能落在本守卫自己身上，且它必须真的在 `reached` 里；
+ *   · `data-reference` 必须真的在 `mentioning` 里（只在正文里被提到）；
+ *   · 其余真实接线计入 `real`（登记值 {@link E2E_CI_REAL_SURFACE_FILES_DECLARED}）。
+ * @param mentioning - 正文里提到端到端入口的来源文件 → 链。
+ * @param reached - 执行形态里真的取到端到端入口的来源文件 → 链。
+ * @param registry - {@link E2E_CI_SURFACE_REGISTRY} 形态的登记表。
+ * @param guardPath - 本守卫自己的相对路径。
+ * @returns `{ unregistered, real, synthetic, mislabelled, guardMismatch }`。
+ */
+function classifyCiSurface(mentioning, reached, registry, guardPath) {
+  const byFile = new Map(registry.map(entry => [entry.file, entry]))
+  const unregistered = []
+  const real = []
+  const synthetic = []
+  const mislabelled = []
+  const guardMismatch = []
+  const files = new Map([...mentioning, ...reached])
+  for (const [file, via] of files) {
+    const entry = byFile.get(file)
+    if (entry === undefined) { unregistered.push({ file, via }); continue }
+    const reachedInExecutionForm = reached.has(file)
+    const mentionedInText = mentioning.has(file)
+    if (entry.mode === 'data-reference' && reachedInExecutionForm) {
+      mislabelled.push({ file, via })
+      continue
+    }
+    if (entry.mode === 'data-reference' && !mentionedInText) {
+      mislabelled.push({ file, via })
+      continue
+    }
+    if (entry.mode === 'synthetic-probe') {
+      synthetic.push({ file, via })
+      if (file !== guardPath || !reachedInExecutionForm) guardMismatch.push({ file, via })
+      continue
+    }
+    if (entry.mode === 'real' || reachedInExecutionForm) real.push({ file, via })
+  }
+  return { unregistered, real, synthetic, mislabelled, guardMismatch }
+}
+
+/**
+ * 闭包判据的**能力自证**：四种执行形态（直接接线 / 别名 / 复合 action / 包装脚本链）都必须
+ * 被认出来，且**文本面**对别名形态必须命中 0 —— 后者正是 E-02 的现场（凭据行说谎的原因）。
+ *
+ * 没有这一条时，"有人把别名展开删掉"这件事在真仓上不可见（真仓当前 0 条真实接线，
+ * 删掉能力也照旧绿）—— 所以断言的是**判据的能力**，不是"当前这棵树恰好是绿的"。
+ */
+function ciExecutionSurfaceSelfTest() {
+  const fixture = new Map([
+    ['.github/workflows/alias.yml',
+      'name: alias\njobs:\n  a:\n    steps:\n      - run: yarn e2e:integration\n'],
+    ['.github/workflows/direct.yml',
+      'name: direct\njobs:\n  a:\n    steps:\n      - run: bash integration-tests/run-all.sh\n'],
+    ['.github/workflows/composite.yml',
+      'name: composite\njobs:\n  a:\n    steps:\n      - uses: ./.github/actions/probe\n'],
+    ['.github/actions/probe/action.yml',
+      'name: probe\nruns:\n  using: composite\n  steps:\n    - run: bash integration-tests/run-all.sh\n'],
+    ['.github/workflows/wrapper.yml',
+      'name: wrapper\njobs:\n  a:\n    steps:\n      - run: bash scripts/probe-wrapper.sh\n'],
+    ['scripts/probe-wrapper.sh', '#!/usr/bin/env bash\nnode scripts/probe-runner.mjs\nnode scripts/probe-dynamic.sh\n'],
+    ['scripts/probe-runner.mjs', "spawnSync('bash', ['integration-tests/run-all.sh'], { cwd: ROOT })\n"],
+    // 只有**正文提到**、执行形态解析不出来的那一半：token 含 `$`（变量拼路径）⇒
+    // 归 `mentioning ∖ reached`，必须登记成 `data-reference` 才算"看见并认账"。
+    ['scripts/probe-dynamic.sh', '#!/usr/bin/env bash\nDIR="$(cd "$(dirname "$0")" && pwd)"\nbash "$DIR/run-all.sh"\n'],
+    ['.github/workflows/orchestrator.yml',
+      'name: orchestrator\njobs:\n  a:\n    steps:\n      - run: yarn check\n'],
+    ['scripts/orchestrator.mjs',
+      "const GUARDS = [{ name: 'check:integration-tests', args: ['run', 'check:integration-tests'] }]\n"],
+    [GUARD_RELATIVE_PATH,
+      "spawnSync('bash', ['integration-tests/run-all.sh'], { env: { SERVER_BASE: serverDown } })\n"],
+    ['package.json', JSON.stringify({
+      scripts: {
+        check: 'node scripts/orchestrator.mjs',
+        'check:integration-tests': `node ${GUARD_RELATIVE_PATH}`,
+        'e2e:integration': 'bash integration-tests/run-all.sh',
+      },
+    }, null, 2)],
+  ])
+  const workflowTexts = [...fixture.keys()]
+    .filter(file => file.startsWith('.github/workflows/'))
+    .map(file => [file, fixture.get(file)])
+  const surface = ciExecutionSurface({
+    workflowTexts,
+    rootManifest: JSON.parse(fixture.get('package.json')),
+    rootManifestText: fixture.get('package.json'),
+    workspaceManifests: [],
+    exists: path => fixture.has(path),
+    read: path => fixture.get(path) ?? '',
+  })
+  const classified = classifyCiSurface(surface.mentioning, surface.reached, E2E_CI_SURFACE_REGISTRY, GUARD_RELATIVE_PATH)
+  const seenFiles = new Set([...surface.mentioning.keys(), ...surface.reached.keys()])
+  // `package.json` 被"看到"有**两条**独立的路：① 别名值被展开（执行形态，记进 `reached`，
+  // chain 里会出现 `scripts["e2e:integration"]`）；② manifest 正文里就写着那个路径（`mentioning`）。
+  // 只断言 ①是不够的会被 ②兜住 —— 所以这条**专门钉别名展开**：拆掉展开（M1a 变异）时，
+  // `reached` 里那条 chain 会消失，这条当场红（否则"别名旁路"的判据能力就没有判据）。
+  check((surface.reached.get('package.json') ?? []).some(step => step.includes('scripts["e2e:integration"]')),
+    '形态⑨自证: `yarn <别名>` 必须**展开**到 manifest 的脚本值并认出端到端入口'
+      + '（只靠"正文里提到过"不算 —— 别名展开是独立的一条判据能力）：'
+      + `实际 reached[package.json]=[${(surface.reached.get('package.json') ?? []).join(' → ')}]`)
+  for (const [file, label] of [
+    ['.github/workflows/direct.yml', 'workflow 里的直接接线'],
+    ['package.json', '`package.json` 别名（E-02 的旁路形态）'],
+    ['.github/actions/probe/action.yml', '本地复合 action'],
+    ['scripts/probe-runner.mjs', '`.sh` 包装链尽头的 `.mjs` 里的 spawn 目标'],
+    ['scripts/probe-dynamic.sh', '只有正文提到、执行形态解析不出来的 `.sh`（`data-reference` 那一半）'],
+  ]) {
+    check(seenFiles.has(file),
+      `形态⑨自证: CI 执行面闭包没认出${label}（${file}）—— 判据的输入面又退回了"workflow 文本"，`
+        + `别名/复合 action/包装链这些同类物会再次隐形。实际触及：${[...seenFiles].join(', ')}`)
+  }
+  check(surface.nodes.includes('scripts/probe-wrapper.sh') && surface.nodes.includes('scripts/probe-dynamic.sh'),
+    '形态⑨自证: 命令位上的 `.sh` 包装脚本必须被**跟随**（否则包装链把端到端藏起来就看不见）：'
+      + `闭包节点 ${surface.nodes.join(', ')}`)
+  check(surface.reached.has('scripts/probe-runner.mjs')
+    && !surface.reached.has('scripts/probe-dynamic.sh')
+    && surface.mentioning.has('scripts/probe-dynamic.sh')
+    && !surface.mentioning.has('scripts/probe-runner.mjs'),
+    '形态⑨自证: "执行形态取到"与"只在正文里被提到"必须可区分（且 `.mjs` 正体里的字符串'
+      + '**不算**"提到"—— 那是数据/夹具）：'
+      + `实际 reached=[${[...surface.reached.keys()].join(', ')}] mentioning=[${[...surface.mentioning.keys()].join(', ')}]`)
+  check(classified.unregistered.length >= 5,
+    `形态⑨自证: 未登记的"真实接线"来源应至少 5 个（直接 / 别名 / 复合 action / 包装链 / 数据引用），`
+      + `实际 ${classified.unregistered.length} 个：${classified.unregistered.map(item => item.file).join(', ')}`)
+  check(classified.synthetic.length === 1 && classified.synthetic[0].file === GUARD_RELATIVE_PATH,
+    '形态⑨自证: 经编排器 → 本守卫自己的合成 SKIP 探针必须被认成**合成**（恰好 1 条）：'
+      + `实际 ${classified.synthetic.map(item => item.file).join(', ') || '(无)'}`)
+  check(classified.guardMismatch.length === 0,
+    '形态⑨自证: `synthetic-probe` 登记项只能落在本守卫自己身上：'
+      + classified.guardMismatch.map(item => item.file).join(', '))
+  // `data-reference` 是**机械复核**的：登记成数据引用的文件一旦出现在执行形态里（或反过来
+  // 根本没在正文里出现），都必须红。
+  const mislabelled = classifyCiSurface(
+    surface.mentioning, surface.reached,
+    [
+      { file: GUARD_RELATIVE_PATH, mode: 'synthetic-probe', why: '自证' },
+      { file: 'scripts/probe-dynamic.sh', mode: 'data-reference', why: '自证：这条**应当**被判为贴错标签' },
+      { file: 'scripts/probe-runner.mjs', mode: 'data-reference', why: '自证：这条**应当**被判为贴错标签' },
+    ],
+    GUARD_RELATIVE_PATH,
+  )
+  check(mislabelled.mislabelled.length === 1
+    && mislabelled.mislabelled[0].file === 'scripts/probe-runner.mjs',
+    '形态⑨自证: "执行形态里真的取到端到端入口"的文件被登记成 `data-reference` 时必须红，'
+      + '而"只在正文里被提到"的那个（`probe-dynamic.sh`）必须放行 ——'
+      + `实际 mislabelled=[${mislabelled.mislabelled.map(item => item.file).join(', ')}]`)
+  const aliasText = workflowTexts.find(([file]) => file.endsWith('alias.yml'))?.[1] ?? ''
+  const aliasTextHits = aliasText.split('\n').filter(line => E2E_CI_REFERENCE_PATTERN.test(line)).length
+  check(aliasTextHits === 0,
+    '形态⑨自证: 别名形态的 workflow **文本**里本就不该有那 4 个 token（这正是旧判据说谎的原因）——'
+      + `实际命中 ${aliasTextHits} 处，自证夹具已被写坏`)
+  notes.push('CI 执行面闭包自证: 直接接线 / `package.json` 别名 / 复合 action / `.sh` 包装链 /'
+    + ' `.mjs` spawn 目标 / 变量拼路径的 `.sh` 六种形态全部可区分 ✓')
+}
 {
   const workflowsDir = join(ROOT, '.github', 'workflows')
   const workflowHits = []
+  /** `[路径, 文本]` —— 文本面判据与执行面闭包共用同一份读入（同一棵树上的一次快照）。 */
+  const workflowTexts = []
   if (!existsSync(workflowsDir)) {
     fail('形态⑨: 找不到 .github/workflows/ —— 端到端覆盖面声明必须与 CI 的真实命中数对拍，'
       + '目录不存在时不得把"读不到"当成"0 命中"')
   } else {
     for (const name of readdirSync(workflowsDir).filter(file => /\.ya?ml$/u.test(file)).sort()) {
-      const lines = readFileSync(join(workflowsDir, name), 'utf8').split('\n')
-      lines.forEach((line, index) => {
+      const text = readFileSync(join(workflowsDir, name), 'utf8')
+      workflowTexts.push([`.github/workflows/${name}`, text])
+      text.split('\n').forEach((line, index) => {
         if (E2E_CI_REFERENCE_PATTERN.test(line)) workflowHits.push(`.github/workflows/${name}:${index + 1}`)
       })
     }
-    check(workflowHits.length === E2E_CI_HITS_DECLARED,
-      `形态⑨: \`.github/workflows/**\` 对 \`${E2E_CI_REFERENCE_PATTERN.source}\` 的命中 ${workflowHits.length} 处，`
-        + `而登记值（E2E_CI_HITS_DECLARED）是 ${E2E_CI_HITS_DECLARED} 处`
+    check(workflowHits.length === E2E_CI_TEXT_HITS_DECLARED,
+      `形态⑨: \`.github/workflows/**\` 对 \`${E2E_CI_REFERENCE_PATTERN.source}\` 的**文本命中** `
+        + `${workflowHits.length} 处，而登记值（E2E_CI_TEXT_HITS_DECLARED）是 ${E2E_CI_TEXT_HITS_DECLARED} 处`
         + `\n  命中:${workflowHits.join(', ') || '(无)'}`
         + '\n  ⇒ 本守卫的绿只覆盖**静态面**。命中数变了就必须显式做决定：'
-        + '\n     · 接了真机 job（0 → 1）：把 E2E_CI_HITS_DECLARED 改成实际命中数，'
+        + '\n     · 接了真机 job（0 → 1）：把 E2E_CI_TEXT_HITS_DECLARED 改成实际命中数，'
         + '并把通过行的 `static-only` 与"CI 内 0 执行"的措辞一起改掉（口径要进 diff 才可评审）；'
         + '\n     · 真机 job 被摘线（1 → 0）：同上反向改回，或恢复那条接线。'
         + '\n     不允许"命中数悄悄变了、通过行照旧写 static-only"。')
-    notes.push(`端到端覆盖面: CI 引用命中 ${workflowHits.length} 处（登记 ${E2E_CI_HITS_DECLARED}）—— `
-      + '通过行据此声明 static-only ✓')
+    notes.push(`端到端覆盖面（文本面）: \`.github/workflows/**\` 命中 ${workflowHits.length} 处`
+      + `（登记 ${E2E_CI_TEXT_HITS_DECLARED}）✓`)
+  }
+
+  // ---- 执行面闭包 ---------------------------------------------------------
+  // 判据的能力先自证（四/五种执行形态必须被认出来），再在真树上跑。
+  ciExecutionSurfaceSelfTest()
+  const rootManifestPath = join(ROOT, 'package.json')
+  if (!existsSync(rootManifestPath)) {
+    fail('形态⑨: 找不到根 package.json —— 别名展开是执行面闭包的一条来源，'
+      + '读不到别名表时不得把"解析不了"当成"0 条真实接线"')
+  } else {
+    const rootManifestText = readFileSync(rootManifestPath, 'utf8')
+    let rootManifest = null
+    try {
+      rootManifest = JSON.parse(rootManifestText)
+    } catch (err) {
+      fail(`形态⑨: 根 package.json 解析失败（${err?.message ?? err}）—— 别名表读不出来时不得当作"没有别名"`)
+    }
+    // 工作区 manifest：`yarn workspace <名> <别名>` 也是执行面的一条来源（按名解析）。
+    const workspaceManifests = []
+    for (const scope of ['packages', 'community']) {
+      const scopeDir = join(ROOT, scope)
+      if (!existsSync(scopeDir)) continue
+      for (const group of readdirSync(scopeDir)) {
+        const groupDir = join(scopeDir, group)
+        if (!statSync(groupDir).isDirectory()) continue
+        for (const pkg of readdirSync(groupDir)) {
+          const dir = `${scope}/${group}/${pkg}`
+          const manifestPath = join(ROOT, dir, 'package.json')
+          if (!existsSync(manifestPath)) continue
+          const text = readFileSync(manifestPath, 'utf8')
+          try {
+            workspaceManifests.push({ dir, text, manifest: JSON.parse(text) })
+          } catch {
+            // 工作区 manifest 坏了由别的判据负责报；这里不把它当成"没有这条别名"，
+            // 也不因它中断闭包 —— 记一条 note，让"读不出来"在输出里可见。
+            notes.push(`CI 执行面闭包: ${dir}/package.json 解析失败（非 JSON）—— 该工作区的别名未纳入闭包`)
+          }
+        }
+      }
+    }
+    if (rootManifest !== null) {
+      const surface = ciExecutionSurface({
+        workflowTexts,
+        rootManifest,
+        rootManifestText,
+        workspaceManifests,
+        exists: path => existsSync(join(ROOT, path)),
+        read: path => readFileSync(join(ROOT, path), 'utf8'),
+      })
+      check(!surface.truncated,
+        `形态⑨: CI 执行面闭包的节点数超过上限 ${CI_SURFACE_MAX_NODES} —— 闭包异常扩张时`
+          + ' fail-loud，不静默截断（截断会让"没扫到"看起来像"0 条真实接线"）')
+      const classified = classifyCiSurface(surface.mentioning, surface.reached, E2E_CI_SURFACE_REGISTRY, GUARD_RELATIVE_PATH)
+      const describe = items => items
+        .map(item => `${item.file}（链：${item.via.join(' → ')}）`).join('\n    ')
+      check(classified.unregistered.length === 0,
+        `形态⑨: CI 执行面闭包触达端到端入口，但来源文件**没有登记**（${classified.unregistered.length} 个）：`
+          + `\n    ${describe(classified.unregistered)}`
+          + '\n  ⇒ 把 `run-all.sh` 经 `package.json` 别名 / 本地复合 action / 包装脚本接进 CI 时，'
+          + ' workflow 文本里可以**一个 token 都没有**（第十四轮 lane E 的 E-02 旁路），'
+          + '所以判据必须落在这里：真接了真机端到端就同时改 '
+          + 'E2E_CI_SURFACE_REGISTRY（mode: real）+ E2E_CI_REAL_SURFACE_FILES_DECLARED，'
+          + '并把通过行的 `static-only` 与"CI 内 0 执行"措辞一起改掉；否则恢复原状。')
+      check(classified.mislabelled.length === 0,
+        `形态⑨: 这些文件的**执行形态**里真的取到了端到端入口，却登记成 \`data-reference\``
+          + `（${classified.mislabelled.length} 个）：\n    ${describe(classified.mislabelled)}`
+          + '\n  ⇒ `data-reference` 的机械判据是"执行形态抽取里没有端到端入口"；它一旦成真，'
+          + ' 就必须改成 `mode: real` 并上调登记值。')
+      check(classified.guardMismatch.length === 0,
+        '形态⑨: `synthetic-probe` 只允许登记本守卫自己、且必须真的出现在执行形态里 ——'
+          + ` 别的文件不得自称"合成探针"：\n    ${describe(classified.guardMismatch)}`)
+      check(classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED,
+        `形态⑨: CI 执行面里"真实前置"触达端到端入口的来源 ${classified.real.length} 个，`
+          + `而登记值（E2E_CI_REAL_SURFACE_FILES_DECLARED）是 ${E2E_CI_REAL_SURFACE_FILES_DECLARED} 个`
+          + `\n    ${describe(classified.real) || '(无)'}`
+          + '\n  ⇒ 真机端到端一旦接进 CI，凭据行不得再声明 `static-only`/“CI 内 0 执行”。')
+      // 反向：登记项必须仍然**真的**触及端到端入口（死条目 ⇒ 红）。
+      for (const entry of E2E_CI_SURFACE_REGISTRY) {
+        const entryPath = join(ROOT, entry.file)
+        const stillMentions = existsSync(entryPath) && E2E_END_TO_END_PATTERN.test(readFileSync(entryPath, 'utf8'))
+        check(stillMentions,
+          `形态⑨: 登记项 ${entry.file}（mode: ${entry.mode}）已经不再触及端到端入口 ——`
+            + ' 死条目会让登记表看起来比实际宽，请在改掉那条探针/引用时同步删掉这条登记')
+      }
+      notes.push(`CI 执行面闭包: ${surface.nodes.length} 个节点、`
+        + `触达端到端入口的来源 ${new Set([...surface.mentioning.keys(), ...surface.reached.keys()]).size} 个（真实 ${classified.real.length} / `
+        + `合成 SKIP 探针 ${classified.synthetic.length} / 未登记 ${classified.unregistered.length}）✓`)
+    }
   }
 
   // ---- step 名/描述也要说出边界 ------------------------------------------
@@ -1749,13 +2363,17 @@ if (failures.length > 0) {
 // 层，并**断言枚举条数等于登记项数**（断言通过行本身，而不是断言它存在）。
 //
 // 第十三轮 V13-C 的附加结论之后，凭据行还必须说出**这条绿的边界**：`static-only`
-// （真机端到端需要 Docker + 真实服务端 + 显示器，CI 内 0 执行 —— 上面那条命中数判据钉住）。
+// （真机端到端需要 Docker + 真实服务端 + 显示器，CI 内 0 执行 —— 上面那条判据钉住）。
+// 第十四轮 lane E 的 E-02 之后，"钉住它的判据"从 **workflow 文本命中数**换成了
+// **CI 执行面闭包**（别名/复合 action/包装链都在面内），凭据行的措辞也随之一字不差地
+// 说出它判的是哪张面（见下）。
 // 措辞里刻意不出现"跳过/未覆盖"这类词：那会把这条**结论行**误收进 `check-workspaces` 的
 // `[DEGRADED]` 摘要（关键词判据），而它不是"某条判据没真的判"。
 // ---------------------------------------------------------------------------
 const COVERED_LAYERS = [
   `语法（${pyFiles.length} 个 .py ast.parse / ${mjsFiles.length} 个 .mjs node --check）`,
   `登记制（${INTEGRATION_ENTRIES.length} 项：登记了不在 / 在却没登记 / 聚合层少调多调或换序 全红）`,
+  `引用面扩展名对账（本守卫引用的 ${INTEGRATION_SCANNED_EXTENSIONS.join('/')} 之外的落盘路径必须逐条登记，否则红）`,
   `聚合层接线（${INTEGRATION_ENTRIES.filter(entry => entry.aggregateName !== undefined).length} 条逐字对拍）`,
   `判别力下限（聚合层 ${GROUP_MIN_JUDGMENTS} 条判定：接进聚合层的腿必须给出机器可读判定清单，零判定的条目红）`,
   `环境缺失的原因码登记制（闭集 ${SKIP_REASON_CODES.size} 个：源码声明 / 调用点 / 唯一出口 双向对账 + 真跑一次确认具名）`,
@@ -1767,10 +2385,14 @@ const COVERED_LAYERS = [
   'electron-shots（接线 + SKIP(77) 契约 + 判据表自检 + 判定通道自检 + 4 条判定通道变异）',
   `假网关场景（${SCENARIOS.length} 条：正例必须绿 / 变异必须红 / 环境缺失必须 SKIP 且不得报 PASS）`,
   '聚合层三项全 SKIP ⇒ 77 且不报 PASS',
-  `端到端覆盖面 ↔ CI 命中数（\`.github/workflows/**\` 命中 ${E2E_CI_HITS_DECLARED} 处 = 登记值；变了即红）`,
+  `端到端覆盖面 ↔ CI 执行面：文本面命中 ${E2E_CI_TEXT_HITS_DECLARED} 处、`
+    + `执行面闭包（workflow \`run:\` 命令位 → 本地复合 action → manifest scripts 别名 → 仓内包装脚本/`
+    + `\`spawn\`·\`exec\` 目标）真实接线 ${E2E_CI_REAL_SURFACE_FILES_DECLARED} 处（均为登记值，变了即红）`,
 ]
 // 通过行自己也要被钉住：枚举条数必须等于登记项数（改一个而漏改另一个 ⇒ 红）。
-const EXPECTED_COVERED_LAYERS = 13
+// ⚠️ 这个数字同时被 `check:doc-claims` 的 `integration-covered-layers` 规则读走，
+// 用来对拍 `integration-tests/README.md` 里"通过行逐项枚举的 N 层"（E-05 的收口）。
+const EXPECTED_COVERED_LAYERS = 14
 if (COVERED_LAYERS.length !== EXPECTED_COVERED_LAYERS) {
   process.stderr.write(`\ncheck-integration-tests: 通过行的覆盖面枚举 ${COVERED_LAYERS.length} 项，`
     + `与登记值 ${EXPECTED_COVERED_LAYERS} 项不一致 —— 通过行的自我陈述必须与真实覆盖面一致\n`)
@@ -1793,8 +2415,14 @@ process.stdout.write(
   `${verdictCredentialLine}\n`
   + COVERED_LAYERS.map(layer => `  · ${layer}\n`).join('')
   + `  （**本绿只覆盖静态面（static-only）**：integration-tests 的真机端到端需要 Docker + 真实服务端`
-  + ` + 显示器，\`.github/workflows/**\` 对它的引用命中 ${E2E_CI_HITS_DECLARED} 处 ⇒ 在 CI 内 0 执行；`
-  + '命中数由本守卫对拍（0↔1 都会红），所以"这条绿覆盖到哪里"在 CI 列表上就是可见的。'
+  + ` + 显示器；判据的输入面是 **CI 执行面闭包**（workflow \`run:\` 命令位 → 本地复合 action →`
+  + ` manifest scripts 别名 → 仓内包装脚本 / \`spawn\`·\`exec\` 目标，闭包到不动点）——`
+  + ` 它对端到端入口的"真实前置"接线命中 ${E2E_CI_REAL_SURFACE_FILES_DECLARED} 处（登记值），`
+  + ` 另有 ${E2E_CI_SURFACE_REGISTRY.filter(entry => entry.mode === 'synthetic-probe').length} 条经本守卫`
+  + ` 自己的**合成 SKIP 探针**（不启动 Docker/服务端/Xvfb）；`
+  + ` \`.github/workflows/**\` 的**文本面**命中 ${E2E_CI_TEXT_HITS_DECLARED} 处（同为登记值）。`
+  + ' 两张面都由本守卫对拍：经 `package.json` 别名 / 复合 action / 包装脚本接进来的接线同样会计入'
+  + ' 执行面（0↔N 都会红），所以"这条绿覆盖到哪里"在 CI 列表上就是可见的。'
   + '本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',
 )
 return 0

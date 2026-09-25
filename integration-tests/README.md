@@ -78,12 +78,23 @@ provider 未配置必须 SKIP 且不得报 PASS；
 与其 **SKIP 契约**（`--app <不存在>` ⇒ 77 且不打印 PASS）；
 ⑧ 跑 `electron-shots/assertions.mjs --self-test` 并把**判据表**三层钉住：判据 id 集合与登记
 值精确相等、每条判据都有正例 + 负例夹具且夹具总数不低于下限、运行期脚本逐条引用每个 id；
-⑨ 跑一次聚合层 `run-all.sh`（三项全 SKIP 的输入）断言 `77` + `RESULT: SKIP`。
+⑨ 跑一次聚合层 `run-all.sh`（三项全 SKIP 的输入）断言 `77` + `RESULT: SKIP`；
+⑩ **引用面扩展名对账**（第十四轮 B-04）：本守卫引用的每个**落盘**的 `integration-tests/**`
+路径，扩展名必须落在扫描面（`.py`/`.mjs`/`.sh`/`.yaml`/`.yml`）内、或在
+`INTEGRATION_REFERENCE_SCOPE_REGISTRY` 里逐条登记为非判据面 —— 否则红。
+（`check-install-integrity` 的"执行体全集"就是按同一份扩展名集合从本守卫的文本里派生目标的，
+引用面静默宽于扫描面时，那个文件会**两边都看不见**。）
+⑪ **CI 执行面闭包**（第十四轮 E-02）：从 `.github/workflows/**` 的 `run:` 命令位出发，
+沿**本地复合 action → manifest scripts 别名 → 仓内包装脚本 / `spawn`·`exec` 目标**闭包到
+不动点，任何"真实前置"触达端到端入口的来源文件都必须登记（未登记即红；本守卫自己的
+合成 SKIP 探针单列登记，不计入）；`.github/workflows/**` 的**文本面**命中数作为独立的
+第二张网保留。⇒ 把 `run-all.sh` 经 `package.json` 别名 / 复合 action / 包装脚本接进 CI
+（workflow 文本里一个 token 都没有）同样当场红。
 它不需要 Docker/PG/显示器，秒级完成。
 
 > **本守卫不覆盖什么（写清楚，别把"没测"读成"通过"）**：真机端到端（Docker + 真实服务端 +
-> Xvfb）在 CI 语境下 **0 执行**；本守卫只判"可静态执行的那部分"，通过行里逐项枚举了它真的
-> 覆盖的 10 层，并显式声明端到端不在覆盖面内。
+> Xvfb）在 CI 语境下 **0 执行**；本守卫只判"可静态执行的那部分"——**通过行**逐项枚举它真的判了的 14 层，
+> 并显式声明端到端不在覆盖面内。
 
 ## 前置
 
@@ -115,12 +126,15 @@ node electron-shots/electron-shots.mjs --app packages/host/desktop/dist/linux-un
 
 ### 真机端到端怎么接（当前**未**接进 CI，留可执行入口）
 
-> **CI 覆盖面声明（2026-09-23 第十三轮审计 F-03，**需拍板**）**：`.github/workflows/ci.yml`
-> 对 `integration-tests` / `dex` / `openldap` 的**命中数为 0** ⇒ 这个端到端面在 CI 语境下
-> **0 执行**。处置**不是**往 CI 里塞一个跑不起来的 job（缺 Docker 服务与 Xvfb 时它只会
+> **CI 覆盖面声明（2026-09-23 第十三轮审计 F-03，2026-09-25 第十四轮 E-02 收紧口径）**：
+> `check-integration-tests` 判的是**CI 执行面闭包**（workflow `run:` 命令位 → 本地复合
+> action → manifest scripts 别名 → 仓内包装脚本 / `spawn`·`exec` 目标），闭包对端到端入口的
+> **真实前置接线**命中 **0** 处 ⇒ 这个端到端面在 CI 语境下 **0 执行**；`.github/workflows/**`
+> 的文本面命中同样是 0（两张面都由该守卫对拍，任一面变成非 0 都当场红 —— 包括"经
+> `package.json` 别名接进来、workflow 文本里没有任何 token"这种形态）。处置**不是**往 CI 里塞一个跑不起来的 job（缺 Docker 服务与 Xvfb 时它只会
 > 长期红或长期 SKIP，两者都比没有更糟）；建议是**显式声明为非 CI 覆盖面**：
 > · 本 README 与守卫的通过行都明写"端到端不在门禁覆盖面内"（已落）；
-> · 守卫**不得**以任何措辞声称端到端被门禁覆盖（通过行逐项枚举它真的判了的 10 层）；
+> · 守卫**不得**以任何措辞声称端到端被门禁覆盖（**通过行**逐项枚举它真的判了的 14 层）；
 > · 若要真接，按下面三步加一个 `workflow_dispatch` / 定时触发的 job，并把 `run-all.sh`
 >   的三档退出码分开处置（0 通过 / 1 契约坏了要阻塞 / 77 环境没起来只告警）。
 > 该拍板项已登记在修复报告里，等待定夺。
