@@ -129,12 +129,15 @@ func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, 
 	// 窗口上限：明细只保留 90 天。capped=true 让调用方（与前端）知道"你要的窗口
 	// 比数据活得更久"，而不是以为"那么久以前没人用"。
 	capped := false
-	if maxStart := LocalDay(now).AddDate(0, 0, -(WasmAppOpensRetentionDays - 1)); start.Before(maxStart) {
+	// 窗口左端按**日历日**回退（`AddLocalDays` 而不是 `AddDate`）：缺口日的墙钟加天数会
+	// 落到前一天 23:00，保留期边界因此会漂一天（R20A-S-01 同族；见 `local_day.go`）。
+	if maxStart := AddLocalDays(now, -(WasmAppOpensRetentionDays - 1)); start.Before(maxStart) {
 		start, capped = maxStart, true
 	}
-	startAt, endAt := start.UTC(), end.AddDate(0, 0, 1).UTC()
+	// 区间右端一律用 `NextLocalDay`：它等于"本日的结束边界"，在 23/25 小时的日子里也精确。
+	startAt, endAt := start.UTC(), NextLocalDay(end).UTC()
 	todayAt := LocalDay(now).UTC()
-	todayEnd := LocalDay(now).AddDate(0, 0, 1).UTC()
+	todayEnd := NextLocalDay(LocalDay(now)).UTC()
 
 	out := &WasmAppOpensSummary{
 		Apps:   []WasmAppOpenSummaryRow{},
@@ -219,7 +222,7 @@ func SummarizeWasmAppOpens(ctx context.Context, db *sql.DB, from, to time.Time, 
 	// 漏掉今天。没有数据的天不出现（稀疏序列是有意保留的既有形状，见审计观察项 1）。
 	dayKeys := make([]string, 0, 32)
 	dayStarts := make([]int64, 0, 32)
-	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
+	for day := start; !day.After(end); day = NextLocalDay(day) {
 		dayKeys = append(dayKeys, LocalDayString(day))
 		dayStarts = append(dayStarts, day.Unix())
 	}
@@ -338,7 +341,7 @@ func QueryWasmAppAIUsage(ctx context.Context, db *sql.DB, appID string, from, to
 		Days:  []WasmAppAIUsageDay{},
 	}
 	startAt := LocalDay(from).UTC()
-	endAt := LocalDay(to).AddDate(0, 0, 1).UTC()
+	endAt := NextLocalDay(LocalDay(to)).UTC()
 
 	// R13-GE（V2-2 读面收口）：应用 AI 用量读的是族内关系 usage ⇒ 池上读入口走
 	// 已钉 search_path 的只读事务（唯一实现 usageReadConn，带 ctx 形态）；归因探针
@@ -406,22 +409,35 @@ func QueryWasmAppAIUsage(ctx context.Context, db *sql.DB, appID string, from, to
 // （回落与 Go 侧一致：POSIX/非法 TZ 时 Go 的 `time.Local` 本身就是 UTC）。绝不把
 // 路径、POSIX 串或任意字符串当"时区名"递给 PG —— 那会让 C4 端点 500（C1/C2 正常，
 // 因为它们走纯 Go 的 LocalDay）。
+//
+// ⚠️ 这个"回落 UTC + warn"只适用于**读面**（分组显示）。**写面**（离线修复重建日汇总，
+// 见 `OpensDailyRebuildPlan`）必须用严格版 {@link resolveLocalZoneName} 并 fail-closed：
+// 在 UTC 与真实本地日不一致的部署上写出 day 键错误的汇总行，比不修更糟。
 func localZoneName() string {
+	name, err := resolveLocalZoneName()
+	if err != nil {
+		log.Printf("wasm_app_opens: %v ⇒ 按日分组回落 UTC；要按本地日分组请把 TZ 设为 IANA 名（如 Asia/Shanghai）", err)
+		return "UTC"
+	}
+	return name
+}
+
+// resolveLocalZoneName 是"部署 TZ → PG 认识的 IANA 名"的**严格**版本：解不出就报错，
+// 绝不回落（写面专用，见 localZoneName 的注释）。
+func resolveLocalZoneName() (string, error) {
 	name := time.Local.String()
 	if zone, ok := zoneNameForSQL(name); ok {
-		return zone
+		return zone, nil
 	}
 	// "Local" = 未设 TZ：Go 从 /etc/localtime 拿到了**真实偏移**但把名字置成 "Local"。
 	// 能从符号链接反解出 IANA 名就用它 —— 否则 SQL 按 UTC 分日而 Go 侧 LocalDay 用
 	// 真实偏移，同一份数据会出现两套"本地日"（两处口径必须同源）。
 	if name == "" || name == "Local" {
 		if zone, ok := zoneNameFromLocaltime("/etc/localtime"); ok {
-			return zone
+			return zone, nil
 		}
 	}
-	log.Printf("wasm_app_opens: 本地时区名 %q 不能作为 PG 时区（AT TIME ZONE 只认 IANA 名）"+
-		"⇒ 按日分组回落 UTC；要按本地日分组请把 TZ 设为 IANA 名（如 Asia/Shanghai）", name)
-	return "UTC"
+	return "", fmt.Errorf("本地时区名 %q 不能作为 PG 时区（AT TIME ZONE 只认 IANA 名）", name)
 }
 
 // zoneNameForSQL 把 `time.Local.String()` 的形态规范成 PG 认识的时区名。

@@ -28,7 +28,9 @@ func (h *Handlers) adminAppOpens(c *gin.Context) {
 		return
 	}
 	now := h.now()
-	from, aerr := parseDayParam(c.Query("from"), now.AddDate(0, 0, -6))
+	// 缺省窗口按**日历日**回退（`serverstore.AddLocalDays`）：`AddDate` 在"本地零点不存在"
+	// 的 DST 缺口日会落到前一天 23:00，窗口边界因此漂一天（R20A-S-01 同族）。
+	from, aerr := parseDayParam(c.Query("from"), serverstore.AddLocalDays(now, -6))
 	if aerr != nil {
 		writeErr(c, aerr.WithDetail("field", "from"))
 		return
@@ -147,7 +149,7 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	if top > opensSummaryMaxTop {
 		top = opensSummaryMaxTop
 	}
-	from := now.AddDate(0, 0, -(days - 1))
+	from := serverstore.AddLocalDays(now, -(days - 1))
 
 	sum, err := serverstore.SummarizeWasmAppOpens(c.Request.Context(), h.opt.DB, from, now, now)
 	if err != nil {
@@ -234,10 +236,10 @@ func (h *Handlers) adminAppAIUsage(c *gin.Context) {
 	//
 	// 为什么要支持它：一个"文档里有、实现里被静默忽略"的参数，与 R2-L6-3 的
 	// "静默窗口"是同一类缺陷（调用方以为窗口变了，数字其实没变）。
-	defFrom := now.AddDate(0, 0, -6)
+	defFrom := serverstore.AddLocalDays(now, -6)
 	if strings.TrimSpace(c.Query("from")) == "" {
 		if days := atoiDefault(c.Query("days"), 0); days > 0 {
-			defFrom = now.AddDate(0, 0, -(days - 1))
+			defFrom = serverstore.AddLocalDays(now, -(days - 1))
 		}
 	}
 	from, aerr := parseDayParam(c.Query("from"), defFrom)

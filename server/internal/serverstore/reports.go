@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 )
@@ -64,28 +65,70 @@ func MaskHookURL(raw string) string {
 	return MaskedHookURL
 }
 
+// reportSubscriptionColumns 是订阅行的列集（列表与单条共用，避免两份 SELECT 漂移）。
+const reportSubscriptionColumns = `id, name, enabled, hook_url, last_run_at, last_error,
+	pending_period, fail_streak, next_attempt_at, created_at, updated_at`
+
+// scanReportSubscription 是订阅行的**唯一**扫描实现。
+func scanReportSubscription(scan func(dest ...any) error) (ReportSubscription, error) {
+	var r ReportSubscription
+	var last, next sql.NullTime
+	if err := scan(&r.ID, &r.Name, &r.Enabled, &r.HookURL, &last, &r.LastError,
+		&r.PendingPeriod, &r.FailStreak, &next, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		return ReportSubscription{}, err
+	}
+	if last.Valid {
+		r.LastRunAt = &last.Time
+	}
+	if next.Valid {
+		r.NextAttemptAt = &next.Time
+	}
+	return r, nil
+}
+
+// reportSubscriptionReader 是 GetReportSubscriptionOn 需要的读面（`*sql.DB` 与
+// `*sql.Conn` 都满足）。
+//
+// 为什么必须是 **ctx** 形态、而且必须能落在 `*sql.Conn` 上：月报投递要在**认领连接**
+// 上做"锁内新读"（见 internal/reports 的 DispatchAll，R20A-S-04）。换成 `*sql.DB`
+// 就是"持着一条连接再向池里要第二条" —— 池上限可被配成 1（PICOAI_DB_MAX_OPEN_CONNS），
+// 那时构成 hold-and-wait 且不可恢复（R14-K）。
+type reportSubscriptionReader interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// GetReportSubscriptionOn 按 id 读一条订阅，在**调用方给定的读面**上执行。
+//
+// 存在性判定与 GetAppOn 同形：查不到 ⇒ `ErrNotFound`（调用方据此区分"这一轮没数据"
+// 与"读失败"，后者才计失败）。传 `*sql.Conn` 时读到的就是该会话当前已提交的状态 ——
+// 这正是"锁内新读"要的语义。
+func GetReportSubscriptionOn(ctx context.Context, q reportSubscriptionReader, id int64) (ReportSubscription, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+reportSubscriptionColumns+`
+		FROM report_subscriptions WHERE id = $1`, id)
+	sub, err := scanReportSubscription(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ReportSubscription{}, ErrNotFound
+	}
+	return sub, err
+}
+
+// GetReportSubscription 按 id 读一条订阅（连接池版本；锁内新读请用 GetReportSubscriptionOn）。
+func GetReportSubscription(db *sql.DB, id int64) (ReportSubscription, error) {
+	return GetReportSubscriptionOn(context.Background(), db, id)
+}
+
 // ListReportSubscriptions 全量列表(按 id)。
 func ListReportSubscriptions(db *sql.DB) ([]ReportSubscription, error) {
-	rows, err := db.Query(`SELECT id, name, enabled, hook_url, last_run_at, last_error,
-			pending_period, fail_streak, next_attempt_at, created_at, updated_at
-		FROM report_subscriptions ORDER BY id`)
+	rows, err := db.Query(`SELECT ` + reportSubscriptionColumns + ` FROM report_subscriptions ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []ReportSubscription{}
 	for rows.Next() {
-		var r ReportSubscription
-		var last, next sql.NullTime
-		if err := rows.Scan(&r.ID, &r.Name, &r.Enabled, &r.HookURL, &last, &r.LastError,
-			&r.PendingPeriod, &r.FailStreak, &next, &r.CreatedAt, &r.UpdatedAt); err != nil {
-			return nil, err
-		}
-		if last.Valid {
-			r.LastRunAt = &last.Time
-		}
-		if next.Valid {
-			r.NextAttemptAt = &next.Time
+		r, serr := scanReportSubscription(rows.Scan)
+		if serr != nil {
+			return nil, serr
 		}
 		out = append(out, r)
 	}

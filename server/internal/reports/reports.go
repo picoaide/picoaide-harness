@@ -373,6 +373,30 @@ func PushWebhook(ctx context.Context, hookURL string, body *ReportBody) error {
 //	③ **投递认领**（R19A-S1-06 ②）：每个订阅推之前先取 PG advisory lock（按订阅 id），
 //	   取不到 = 另一个实例正在投它 ⇒ 跳过（不计数、记一行日志）。修前两个实例同时 tick
 //	   会把同一期投两遍。
+//	④ **判定 / 生成 / 认领在同一临界区内**（R20A-S-04，审计 2026-09-25，**P1**）：
+//	   ③ 的锁只罩住"投递那一瞬"是不够的 —— 判定用的是 `ListReportSubscriptions` 的
+//	   **旧快照**、生成（秒级）插在判定与认领之间 ⇒ 两个实例只要 tick 相差 δ
+//	   （多副本 / 滚动重叠发布 / 双活）就会各自拿"对方落账之前"的快照判定欠投、
+//	   各自生成、各自认领（对方早已 release）⇒ **同一期被投两遍**。真双进程实测：
+//	   同一期 `2026-08` 被投 101 次（A=41 + B=60），且认领**从未被拒**。
+//
+//	   修后每个候选订阅走**两阶段**，正确性来源 = **锁内新读 + 立刻重判**（锁只做互斥，
+//	   不做正确性来源 —— 快照永远可能过期）：
+//
+//	    阶段一（持锁，只判定）：取该订阅的会话级 advisory lock → 在**同一条连接**上
+//	      新读订阅行（GetReportSubscriptionOn）→ `SubscriptionDuePeriod` 重判；
+//	      不欠投就立刻放锁走人。
+//	    生成（**刻意不持锁**）：生成走 `*sql.DB`，而池上限可被配成 1 —— 持着认领连接
+//	      再向池里要第二条连接就是 R14-K 的 hold-and-wait（池会自锁且不可恢复）。
+//	      白生成一次报表的代价（秒级、纯读）换掉这一类死锁。
+//	    阶段二（持锁，判定 + 投递 + 落账一体）：重新取锁 → 同一条连接上**再新读一次**
+//	      → 仍然欠投、且期号与已生成的报表一致 → 才推 → 用认领连接落账
+//	      （MarkReportAttemptOn，同一把锁内）→ 放锁。
+//
+//	   为什么两阶段仍然互斥：投递与落账都紧跟在"锁内新读 + 重判"之后，两个实例不可能
+//	   同时通过阶段二的判定；阶段二读出来"不欠投"（对方已投成功 / 已进退避窗口）就跳过。
+//	   期间期号若被别的实例改成另一期（补投成功 + 跨月），本轮放弃 —— 下一 tick 会按新
+//	   期号重来，不丢期也不会错投。
 //
 // 失败退避（S1-06 ①）由 `MarkReportAttempt` 落 `fail_streak`/`next_attempt_at` 承担：
 // 永久坏的 webhook 不再每 tick 被重投。
@@ -381,57 +405,122 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 	if err != nil {
 		return 0, 0, err
 	}
-	type job struct {
-		sub    serverstore.ReportSubscription
-		period string
-	}
-	pending := make([]job, 0, len(list))
+	// 粗筛只用来"少抢锁"：判据用的是快照，过期只会让候选**偏多**（真正欠不欠投由
+	// 下面两次锁内新读决定）。
+	candidates := make([]int64, 0, len(list))
 	for _, sub := range list {
-		period, due := SubscriptionDuePeriod(month, sub)
-		if !due {
-			continue // 已投递 / 退避窗口内 / 已禁用 ⇒ 不欠投，绝不重推
+		if _, due := SubscriptionDuePeriod(month, sub); due {
+			candidates = append(candidates, sub.ID)
 		}
-		pending = append(pending, job{sub: sub, period: period})
 	}
-	if len(pending) == 0 {
+	if len(candidates) == 0 {
 		return 0, 0, nil
 	}
 	bodies := map[string]*ReportBody{}
-	for _, j := range pending {
-		body, cached := bodies[j.period]
+	for _, id := range candidates {
+		// —— 阶段一：锁内新读 + 重判（只判定，不生成、不投递）——
+		period, due, derr := inspectDueUnderLock(ctx, db, id, month)
+		if derr != nil {
+			// 认领面/读面出不来 ⇒ 不投（fail-closed：宁可下一轮再投，也不要两个实例同时投）。
+			log.Printf("reports: inspect subscription %d: %v", id, derr)
+			failed++
+			continue
+		}
+		if !due {
+			continue // 已投递 / 退避窗口内 / 已禁用 ⇒ 这一轮没事做
+		}
+		body, cached := bodies[period]
 		if !cached {
-			body, err = GenerateMonthlyReportForPeriod(db, j.period)
+			body, err = GenerateMonthlyReportForPeriod(db, period)
 			if err != nil {
 				return ok, failed, err
 			}
-			bodies[j.period] = body
+			bodies[period] = body
 		}
-		conn, claimed, cerr := claimReportDelivery(ctx, db, j.sub.ID)
+		// —— 阶段二：重新取锁 → 再新读 → 仍欠投才推 + 落账（同一把锁内）——
+		conn, claimed, cerr := claimReportDelivery(ctx, db, id)
 		if cerr != nil {
-			// 认领面读不出来 ⇒ 不投（fail-closed：宁可下一轮再投，也不要两个实例同时投）。
-			log.Printf("reports: claim subscription %d: %v", j.sub.ID, cerr)
+			log.Printf("reports: claim subscription %d: %v", id, cerr)
 			failed++
 			continue
 		}
 		if !claimed {
 			// 另一个实例正在投这一条 —— 这一轮跳过，而且**不是失败**（对方会落账）。
-			log.Printf("reports: subscription %d is being delivered by another instance; skipped this round", j.sub.ID)
+			log.Printf("reports: subscription %d is being delivered by another instance; skipped this round", id)
+			continue
+		}
+		sub, serr := serverstore.GetReportSubscriptionOn(ctx, conn, id)
+		if serr != nil {
+			log.Printf("reports: re-read subscription %d under lock: %v", id, serr)
+			failed++
+			releaseReportDelivery(ctx, conn, id)
+			continue
+		}
+		freshPeriod, stillDue := SubscriptionDuePeriod(month, sub)
+		if !stillDue {
+			// 对方（另一个实例）在我们生成这段时间里已经投成功 / 进了退避窗口。
+			log.Printf("reports: subscription %d no longer due after acquiring the claim; skipped this round", id)
+			releaseReportDelivery(ctx, conn, id)
+			continue
+		}
+		if freshPeriod != period {
+			// 期号在两次读之间变了（对方补投成功 + 跨月）⇒ 本轮不投这一期，下一轮按新期号走。
+			log.Printf("reports: subscription %d period changed %s → %s; skipped this round",
+				id, period, freshPeriod)
+			releaseReportDelivery(ctx, conn, id)
 			continue
 		}
 		// 落账走**认领那一条连接**（MarkReportAttemptOn）：认领连接在整个投递期间被持有，
 		// 再回池里要第二条就是 hold-and-wait（R14-K：池上限 = 并发数时自锁且不可恢复）。
-		perr := PushWebhook(ctx, j.sub.HookURL, body)
+		// 投递用的 hook_url 取**锁内新读**的那一份（管理员刚改过地址也能立刻生效）。
+		perr := PushWebhook(ctx, sub.HookURL, body)
 		if perr != nil {
 			failed++
-			_ = serverstore.MarkReportAttemptOn(ctx, conn, j.sub.ID, j.period, false, perr.Error(),
-				ptrTime(nextAttemptAfterFailure(month, j.sub.FailStreak+1)))
+			// 落账失败**必须留痕**：投递已经发出去了，而"这一期已投"没落库 ⇒ 下一轮会**再投一次**
+			// （R20A-S-04 的另一条入口：去重靠的就是这次落账）。修前这里与成功分支一样是 `_ =`，
+			// 唯一的迹象是接收方又收到一遍。
+			if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, false, perr.Error(),
+				ptrTime(nextAttemptAfterFailure(month, sub.FailStreak+1))); merr != nil {
+				log.Printf("reports: subscription %d: recording the failed attempt did not land (%v) — "+
+					"the next round may deliver the same period again", id, merr)
+			}
 		} else {
 			ok++
-			_ = serverstore.MarkReportAttemptOn(ctx, conn, j.sub.ID, j.period, true, "", nil)
+			if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, true, "", nil); merr != nil {
+				log.Printf("reports: subscription %d: the delivery succeeded but recording it did not land (%v) — "+
+					"the next round may deliver the same period again", id, merr)
+			}
 		}
-		releaseReportDelivery(ctx, conn, j.sub.ID)
+		releaseReportDelivery(ctx, conn, id)
 	}
 	return ok, failed, nil
+}
+
+// inspectDueUnderLock 在**该订阅的 advisory lock 内**新读订阅行并重判"是否欠投"。
+//
+// 读与判定都落在**认领那一条连接**上（GetReportSubscriptionOn(ctx, conn, …)）：
+//   - 语义上：锁内新读才是"当前真实状态"，快照（ListReportSubscriptions）永远可能过期；
+//   - 工程上：用 `*sql.DB` 读会向池里再要一条连接 —— 池上限 = 1 时持锁 + 要连接就是
+//     R14-K 的 hold-and-wait（自锁且不可恢复）。
+//
+// 返回 (期号, 是否欠投, 错误)；锁一定被释放（包括读失败的分支）。
+func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.Time) (string, bool, error) {
+	conn, claimed, err := claimReportDelivery(ctx, db, id)
+	if err != nil {
+		return "", false, err
+	}
+	if !claimed {
+		// 另一个实例正在处理这一条 —— 这是正常并发，不是错误（对方会给出结论）。
+		log.Printf("reports: subscription %d is being inspected by another instance; skipped this round", id)
+		return "", false, nil
+	}
+	defer releaseReportDelivery(ctx, conn, id)
+	sub, rerr := serverstore.GetReportSubscriptionOn(ctx, conn, id)
+	if rerr != nil {
+		return "", false, rerr
+	}
+	period, due := SubscriptionDuePeriod(month, sub)
+	return period, due, nil
 }
 
 // ptrTime 取 time.Time 的地址（MarkReportAttempt 的"退避到何时"参数）。

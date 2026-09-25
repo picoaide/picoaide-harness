@@ -56,11 +56,28 @@ func main() {
 	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required, e.g. postgres://user:pass@host:5432/db)")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
 	resetMFA := flag.String("reset-mfa", "", "clear MFA for an admin username and revoke all their sessions (operation mode, no server started)")
+	opensRepair := flag.String("opens-rollup-repair-plan", "",
+		"print the offline SQL plan that rebuilds wasm_app_opens_daily from the details table, using this deployment's timezone (R20A-S-02); FROM,TO as YYYY-MM-DD, TO exclusive (operation mode, no DB and no server started)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+
+	// --opens-rollup-repair-plan: 纯计算（不连库、不起服务）—— 历史坏行的修复计划。
+	// 之所以要有这个出口：R19 报告里那段修复 SQL 把时区硬编码成 Asia/Shanghai，
+	// 部署 TZ 不同时照抄会写出 day 键错位的汇总行（不可逆）。这个模式把口径钉在
+	// serverstore.BuildOpensDailyRebuildPlan 上（时区来自部署 TZ 的唯一真源）。
+	if *opensRepair != "" {
+		from, to, perr := parseOpensRepairRange(*opensRepair, time.Now())
+		if perr != nil {
+			log.Fatalf("opens-rollup-repair-plan: %v", perr)
+		}
+		if perr := printOpensRollupRepairPlan(os.Stdout, from, to); perr != nil {
+			log.Fatalf("opens-rollup-repair-plan: %v", perr)
+		}
 		return
 	}
 
