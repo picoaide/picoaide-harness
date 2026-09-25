@@ -204,6 +204,10 @@ beforeEach(async () => {
   // 由 builtin-skills.spec.ts 的专项用例钉住，这里只测持有性证明这一层。
   await writeProvenance(join(skillsDir, 'codeql'), {
     appId: 'codeql', version: '1.0.0', channel: 'market', installedAt: new Date().toISOString(),
+    // R18A-SK-03：夹具的意思是"这一份是**当前这台服务端**装进来的"，那就必须如实写
+    // `server` —— 老标记（没有 server）现在按"来源未知"处理，卸载/覆盖会要求确认（409），
+    // 与本文件要测的"持有性证明"那一层无关（会变成假红）。
+    server: SESSION.serverURL,
   })
   vi.stubEnv('DSH_HOME', home)
 })

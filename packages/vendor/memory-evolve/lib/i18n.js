@@ -817,6 +817,10 @@ export const SKILL_MSG_DICT = {
     '技能库中的落点 "{name}" 被拒绝（符号链接 / 越出技能库 / 同名处不是目录），未写入任何文件',
     'Skill landing "{name}" refused (symlink / escapes the skill library / a non-directory is in the way); nothing was written',
   ],
+  'skillmsg.locked': [
+    '技能 "{name}" 的写入落点正被另一个写者占用（能力中心正在装/卸同名技能，或另一次同步在跑），本次未写入，请稍后重试',
+    'Another writer holds the "{name}" landing spot right now (the Capability Hub is installing/uninstalling that skill, or another sync is running); nothing was written this time — retry shortly',
+  ],
   'skillmsg.alreadyInLib': [
     '技能 "{name}" 已存在于技能库，请先处理再采纳',
     'Skill "{name}" already exists in the library; resolve it before adopting',
