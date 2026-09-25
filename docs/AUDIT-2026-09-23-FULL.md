@@ -1279,3 +1279,43 @@ tag `v2.8.2-beta.1` 的 Release job 在「上传版本资产」失败：`aws: [E
 #### 第十四轮结论
 
 **首发 3 P0 / 6 P1 / 12 P2 ⇒ 仍未达成"连续两轮零新增 P0/P1"（第十四轮反而是**P0 最多的一轮**）。逐轮计数追加：第十二轮 2+7、第十三轮 5+9、**第十四轮 3+6**。**第十四轮的结构性意义**：审计面第一次转向**上一轮的修复批本身**，结论是修复批**引入了 3 条 P0** —— 两条门禁（workflow 解析失败；守卫在 CI 下自杀）与一条服务端（池 hold-and-wait 自锁），且**三条在本地都是绿的**（前两条只在 CI 语境/CI 解析器下暴露，第三条只在"池上限 = 并发数"这一姿态下暴露）。这为收敛判据补上一条必要条件：**"修复批必须被当作一等审计对象"**，并给出一个可复用的判据模板 —— 每个修复动作都要问"它新增了哪些执行点/判据，这些新增物由谁覆盖"。
+
+#### 第十四轮的独立复审（V14-A/B/C，三路只读 + 隔离副本）
+
+三路复审全部在 `git clone --local --shared` 的隔离副本里做破坏实验（主仓零改动）。**结论：修复批的骨架打不坏，但判据面又被打出 4 条 P1** —— 也就是说"第十四轮首发 3 P0 / 6 P1"之外，**复审追加 4 P1 / 若干 P2/P3**。
+
+**判为"打不坏"的（各带实跑攻击）**
+
+- **`[SK-22]` 表达式字符集判据**（V14-A）：12 种非 ASCII（`…`/中文标点/全角括号/弯引号/`→`/NBSP/emoji）× 6 种位置（`run:` 的 `#` 注释、heredoc、`if:`、`env:`、`with:`、普通行）**全红且逐条点名 U+XXXX**，actionlint 同 12 例全红；真事故原字节（`80abca33e9^:ci.yml`）双 EXIT=1；四种合法形态全绿。
+- **C-01 技能库根守卫**（V14-B）：18 形态攻击（散落 `.md`/无扩展名/真 staging 目录/目录内软链/根上三种软链/同名用户技能/硬链接/库根自身名叫 `.install-*`/`..`+尾斜杠）全过且**删除范围恰好**；同一矩阵跑在修复前代码上 **5 场景红、整个技能库被 `rm -rf`**。
+- **C-02 闸门本体**（V14-B）：真 Cordis + 真 agent loop + 真 jsonl 持久化的 A–E 六段全 PASS（等待期间连来两次 release 的代次复检、`dispose` 抛错、跨账号键隔离）；删掉 `await settling` 变异 ⇒ 红且形态逐字 `SessionAlreadyOwnedError`。
+- **C-03 的算术与碰撞与升级路径**（V14-B）：与生产 bundle 里的真 `encodeSegment` 逐码元对拍（`0x0000–0xFFFF` 全覆盖 + 20k 随机串 + 96 格矩阵）**零不一致**；39/39 id 唯一；能落盘的账号磁盘目录名逐字等于修复前的 legacy 内联名。
+- **D-01 池自锁修复**（V14-C）：独立复跑得修前 `HANG 20.014s` / 修后 `OK 9ms`；并用 `P=1 / C=1 / 冷缓存` → `OK 11ms maxInUse=1 waitCount=0` 把"连接需求恒为 1"钉死（若还需第 2 条连接，这个组合必自锁）；修后 12 组 `(P,C,O)` 关系全 OK（含 `C=8, P=2` → 8/8 完成、`waitCount=12` 纯排队）；V14-C 自己的 AST 尺子与 lane K 的 4 处清单一致（修后 0 处）。
+- **判据面扩容**（V14-A）：179 执行体 / 93 执行点 / 19 manifest / 面内 185 条计数复现；四个面内对照（`server/Makefile`、`webadmin/vite.config.ts`、`site/package.json`、`webadmin/tsconfig.json`）掏空后全 EXIT=1；`--restore` 真覆盖新纳入类。
+
+**复审打出的新 P1（4 条）**
+
+| 编号 | 位置 | 现场 | 复现 |
+|---|---|---|---|
+| **VA-02-F2** | `scripts/check-doc-claims.mjs` | 通过行探测从 env 迁到 **argv** 后，**argv 仍是外部输入面**：`NODE_OPTIONS="--import=<载荷>"`（**纯环境通道**，正是这次声明"已废除"的那条）能把 `--verdict-probe` 塞进 `process.argv`；d6 变异下朴素跑 EXIT=1、伪造跑 **EXIT=0** ⇒ 第 ② 层要保护的判据被从红翻绿。（"替换 `node`"已排除：守卫用 `spawnSync(process.execPath)`，假 node 调用 0 次） | `NODE_OPTIONS="--import=$PWD/../forge-probe-argv.mjs" node scripts/check-doc-claims.mjs` ⇒ 0 |
+| **VA-05-F1** | CI 执行面闭包 | 闭包**不跟随 `make`**：`ci.yml` 加 `- run: make -C server e2e-integration` + 在**已跟踪且在面内**的 `server/Makefile` 追加该目标跑 `run-all.sh` ⇒ **提交态**下 `check-integration-tests`/`check-workflows`/`check-install-integrity` **三条全 EXIT=0**、workflow 文本 token **0**（与 E-02 现场同类，多一层 `make`） | 见 V14-A 报告 §5.3 |
+| **VA-05-F2** | CI 执行面闭包 | 闭包只跟 shell/mjs/ts 扩展名，**漏 `.py` 包装**：`- run: python3 scripts/wrap-e2e.py`（脚本内 `subprocess.run(['bash','integration-tests/run-all.sh'])`）⇒ 三守卫全绿、0 token；而 `check-install-integrity` **显式**登记了 `integration-tests/*.py` ⇒ **两个守卫的扩展名集合不一致** | 同上 §5.4 |
+| **VC-F1** | `server/internal/serverauth`（D-02 修复的"pin"那一半） | "每条读经已钉只读事务"**零判据**：把 `collectDBStats` 的 `NewUsageReadConn` 换回**裸池**（字面量 SQL 一字不动）⇒ 全部判据仍绿；而真 PG 探针证明同一句字面量在敌对 `search_path` 下 **裸池读 3（shadow）/ 已钉读 57（public）** | `bash temp/r14/v14C/judge-attack.sh J7 J8`（两行 GREEN）；`go run ./temp/v14c/shadowread` |
+
+**复审打出的 P2/P3（认账 + 已派修）**：**VA-01-F1** `[SK-22]` 对 **YAML 层注释**里的非 ASCII `${{ }}` 报红 / actionlint 绿（**假阳性** —— YAML 解析器丢弃注释，GitHub 看不到；注意必须与"`run:` 块里的 shell 注释"区分，后者**必须**继续扫，那正是 R14-01 现场）；**VA-01-F2** `-` 被整体放行 ⇒ `${{ a - 1 }}` SK-22 绿 / actionlint 红（假阴性）；**VA-03-F1** `[SK-20]` 的 `FROZEN_TOOLCHAIN_ALLOWLIST_ARM` 只有 `includes()` 判据 ⇒ 对"保留登记取值 + 另加 `/*)` 通配接受臂"**静态 EXIT=0**（行为探针接住），而代码注释与派工书都声称"静态也覆盖"（**注释过度声明**）；**VA-04-F1/F2** `server/webadmin/tailwind.config.js`、`postcss.config.js` 与**已在面内**的 `vite.config.ts` 是同一条构建管线，掏空后仍 EXIT=0；**VB-N1** 隐藏会话 id 的有效文件名预算是 **244 不是 255**（上游 `findLog` 会 `open(encodeSegment(id)+'.jsonl.zstd')`，多 11 字节 ⇒ 245..255 的内联 id 只要会话根里有项目目录就**每一轮** ENAMETOOLONG；lane G 的 e2e"新 root + 单轮"正好绕过，其单元判据还把 252B 钉成"应保持内联"）；**VB-N2** 闸门不栅栏"被放弃那一轮的 `finally`"（`dropAgent` 无条件 `live.get(id)` ⇒ 旧轮收尾晚于"闸门放行+新轮发布句柄"时会 dispose **新轮的**句柄；窄窗口 12/12 未命中、加宽一个 macrotask 后 6/6 命中、流式中途 3/3 失败）；**VB-N3** 闸门等待无上限且不看 signal ⇒ 该会话 id **永久楔死**到进程重启（lane G"最坏是这一轮很慢"不成立）；**VC-F2** lane K 的机械守卫有 3 条未登记盲区（逐行匹配 / 开事务入口**按名字枚举**（`appstore.beginPublishTx` 今天就不在枚举里）/ 规则二**按参数名**豁免），V14-C **三条都构造出了"守卫绿 + 真 PG 自锁"的真形态**；**VC-F3** 动态名尺子漏 4 个函数（其中 `createRangePartition` 两把尺子都漏，值域封闭、事务已钉，无行为风险）；**VC-F4** `audit_r14k_balance_shadow_test.go:117` 的"反向自证"是**恒假断言**（诱饵合计 `6166.00`，断言比的是 `9999.00`）。
+
+**两条口径更正（复审对修复方自述的订正）**：① lane K 报告 §1.4 的修前自锁条件应为 **`C + O ≥ P`**（不是 `2C + O ≥ P`；反例 `P=3,C=2,O=0` 实测 `OK 17ms`）—— 这解释了为什么 lane D 当初在 pool=2 上"恰好"复现而更宽的组合会漏；② lane G 的提交信息说 `tsconfig.tests.json` 的 `rootDir` 放宽是"覆盖面只增不减"，V14-B 用 `--listFiles` 实测两种 `rootDir` 的程序文件集 **1123 == 1123 完全相同** ⇒ 正确口径是"**覆盖面不变**"。
+
+**复审的诚实边界**：三路都没有真 runner（SK-22 的"0 job"语义以 actionlint 为口径；`NODE_OPTIONS` 经 `$GITHUB_ENV` 的真实可达性未在真 CI 取证）；V14-B 无 Windows/macOS 真机、未验非 255 的 `NAME_MAX` 与生产账号名分布；V14-C 未在池规模 400 上实跑（上界 `C=8/P=5`，400 的结论是解析的：修前死锁 ⟺ `C+O ≥ P`）。
+
+#### 复审后的修复批（V14-A/B/C 打出的 4 P1 + 若干 P2/P3）
+
+| 泳道 | 提交 | 覆盖 | 自证要点（修前 → 修后） |
+|---|---|---|---|
+| M（判据面） | `f0fc639afd`（9 文件，全 `scripts/**`） | VA-02-F2 / VA-05-F1 / VA-05-F2 + VA-01-F1/F2 / VA-03-F1 / VA-04-F1/F2 + P3 | 探测子进程拆**独立入口**（`doc-claims-passline-child.mjs`，不接受任何开关；`--verdict-probe` 变未知参数 exit 2）⇒ d6 变异下"朴素 / `--verdict-probe` / `NODE_OPTIONS=--import` 伪造"三种调用**全 ≠0**（修前是 1 / **0** / **0**）；闭包跟随 `make [-C/-f]` 目标（前置/`.PHONY`/多目标/`include`/`$(MAKE)`/`cd &&`，读不懂 fail-closed）⇒ `make -C server e2e-integration` 由 **EXIT=0 假绿**变 **EXIT=1 并点名 `server/Makefile` 链**；跟随集从扫描面派生（含 `.py`）+ Python `subprocess` 抽取器 + 跨守卫扩展名对账 ⇒ `.py` 包装由 0 变 1 并点名 `scripts/wrap-e2e.py`；SK-22 跳过 **YAML 层**注释（`run:` 标量内 shell 注释继续扫）修掉假阳性、`-` 收窄到负数字面量起始位修掉假阴性；`[SK-20]` 的 `case` 臂集合改**逐字相等**（M-J6：静态 0 → 1）；install 面加同族配置派生（tailwind/postcss/astro/content 掏空 0 → 1，`--restore` 逐字还回） |
+| N（客户端） | `31809eaa60`（5 文件，全 `packages/**`） | VB-N1 / VB-N2 / VB-N3 + 一条口径更正 | 预算改 `255 − len('.jsonl.zstd')` = **244**；与 V14-B 副本里那份**修复前真实实现**对拍 705 账号矩阵：内联名 ≤244 的 516 条**逐字不变**、245..255 带的 189 条全部换摘要（并用文件系统 oracle 证明那一段本来写不出去）；错判据（"252B 应保持内联"）更正为"12 字内联 / 13 字换摘要"并补"项目目录已存在 + 连续三轮"端到端；`dropAgent(id, owner?)` 只在 `live.get(id) === owner` 时才摘除+dispose ⇒ V14-B 加宽探针 **6/6 → 0/6**；等待改**有界（15s，可注入）+ 看 signal（abort 0ms）+ 超预算抛 `app_ai_session_release_pending`** ⇒ 撞写句柄的风险是"被消除"而非"被重新引入"（超预算不放行第二个写句柄，故永不出现 `SessionAlreadyOwnedError`；代价是有界失败 + 明确错误，上游一收尾即自动放行） |
+| O（服务端） | `146ba123b7`（7 文件，+1789/−263） | VC-F1(P1) / VC-F2 / VC-F3 / VC-F4 / VC-F5 | VC-F1 先**更正 V14-C 的证据链**：其 `judge-attack.sh` 用 `${spec##*|}` 拆四段式 spec 只剩末段 ⇒ 唯一会咬住该变异的 `TestAuditR13GH3…` **从未跑**（删掉 pin 调用其实会被它咬住）；真·假绿形态是"**保留 pin 记号、读经别名池句柄**"（`poolDB := db; poolDB.QueryRow(...)`）⇒ 修前全绿、真 PG 上读 shadow；新判据 = 真 PG + 真 shadow + 断言 `collectDBStats` **返回值**（13 表逐表 + TotalRows + `handleServerInfo` 响应面），内置真能失败的反向自证（`public users=2 / 裸池读=5（shadow 诱饵） / 已钉读=2`）；修后 **4/4 形态必红**（删 pin / pin 拿掉 / 走 `db.QueryRow` / **走别名 `poolDB`**）；VC-F2 把文本尺子改写为 **`go/ast`+`go/types` 尺子**（开事务点按返回类型推导、池句柄按类型识别含别名与 `a.DB`、区域用语句序列+分支终止推进、命中按类型+任意实参位置、认账表 2 条双向）⇒ M1–M6 与 V14-C 的三条盲区全红，并自我踩到多态槽位转发与字段接收者两条缝后补齐；VC-F4 把恒假自证改成对裸池可观测读数断言（旧形态 + 诱饵改错仍绿 = 缺陷复现，新形态红）；VC-F3 四函数登记 known-uncovered 并双向核对；VC-F5 `C + O ≥ P` 更正在仓库零命中（只在 lane K 的 temp 报告里） |
+
+**复审对复审的两条更正（本轮的价值恰在于此）**：① V14-C 的 `judge-attack.sh` 有量具 bug（spec 拆分截断）⇒ 它"拆掉被测物仍绿"的结论对**其中一条**不成立，lane O 实跑纠正并把真形态（别名池句柄）补成判据；② V14-C 把 `setAuthConfig` 记成"池守卫的战果"是口径串线 —— 该处事务里没有池调用，它是由 `[R13GH3]` 咬住的（池守卫**正确地不报**）。
+
+**本轮修复批的门禁**：`node scripts/check-root-guards.mjs` **17/17 EXIT=0**；`corepack yarn check`（见下表）；`check-doc-claims` 不带 `CI` 与 `CI=true` 都 EXIT=0 且打印通过行；`check-no-real-domains` 零命中（含 18 条提交信息）；`check-no-leftover-mutants` 零残留。**一条本地红是外来的**：`check-install-integrity` 判"工作树 == HEAD"，而共享工作树里**另一会话暂存了 `.gitignore`**（`normify-picoaide/` 忽略行，未提交）⇒ 本地 EXIT=1、其余 184 条执行体与 19 个 manifest 逐字节通过；CI 的干净检出不受影响（master 上该 job 已绿）。
