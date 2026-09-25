@@ -1350,9 +1350,14 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	}
 	// 高峰时段:显式空串 = 清空(无峰谷价);非空必须合法,非法 JSON 直接拒绝,
 	// 宁可保持现状也不写坏计费口径。
+	//
+	// R18C-04（审计 2026-09-25，P2）：校验换成 `ValidatePeakWindows` —— 旧的
+	// `ParsePeakWindows(...) == nil` 会**放行** `weekdays:[]` 与全非法列表
+	// （解析结果是"一档都不匹配任何天"，但旧读取实现把它当"每天"）⇒ 存下来就是静默的
+	// 计费口径反转（空闲折扣整体丢失）。现在这两种形态一律 400 响亮拒绝。
 	if req.PeakWindows != nil && *req.PeakWindows != "" {
-		if serverstore.ParsePeakWindows(*req.PeakWindows) == nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "peak_windows 必须是合法高峰时段 JSON,如 [{\"start\":\"09:00\",\"end\":\"12:00\"}]")
+		if msg := serverstore.ValidatePeakWindows(*req.PeakWindows); msg != "" {
+			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", msg)
 			return
 		}
 	}
@@ -1908,17 +1913,27 @@ func deleteGatewayFileAdmin(c *gin.Context, api *API, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "没有可用的文件上游")
 		return
 	}
-	if err := deleteUpstreamFile(api.filesHTTPClient(), up, fileID); err != nil {
-		log.Printf("gateway: admin delete file: upstream delete failed: %v", err)
+	// R18C-02（审计 2026-09-25，P1）：删除走"认领 → 复检 → 上游 DELETE → 世代收尾"，
+	// 与回收器同一套 fence。修前这里是"上游 DELETE → 无条件删行"，窗口内该行被转手
+	// （过期行转手是既定语义）时会把**新归属人**的上游对象与台账行一起删掉。
+	switch api.deleteGatewayFileFenced(fileID, up) {
+	case gatewayFileDeleteDone:
+		_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_delete", "file_id="+fileID)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 1})
+	case gatewayFileDeleteMissing:
+		writeFileNotFound(c, fileID)
+	case gatewayFileDeleteBusy:
+		// 删除权被回收器（或另一个删除者）持有 / 本世代已失去删除权：**没有调用上游**，
+		// 对象与行都原样保留。如实 409，不谎报 deleted=1，也不静默删行。
+		serverauth.WriteError(c, http.StatusConflict, "FILE_BUSY",
+			"该文件正在被回收或已被重新登记,本次未执行删除;请刷新列表后重试")
+	case gatewayFileDeleteAbandoned:
+		serverauth.WriteError(c, http.StatusConflict, "FILE_RECLAIMED",
+			"上游对象已删除,但台账行在删除期间归了新的上传者,已保留该行")
+	default:
+		log.Printf("gateway: admin delete file: fenced delete failed (id=%s)", fileID)
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游删除失败，请稍后重试")
-		return
 	}
-	if err := serverstore.DeleteGatewayFileRow(db, fileID); err != nil {
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除台账行失败")
-		return
-	}
-	_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_delete", "file_id="+fileID)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": 1})
 }
 
 // purgeGatewayFilesAdmin 按条件批量清理（上游删除 + 台账删行）。
@@ -2027,22 +2042,24 @@ func purgeGatewayFilesAdmin(c *gin.Context, api *API, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "没有可用的文件上游")
 		return
 	}
-	client := api.filesHTTPClient()
-	deleted, failed := 0, 0
+	// 逐条走带世代围栏的删除（R18C-02）：拿不到删除权 / 世代在窗口内变了 ⇒ **不删上游、
+	// 不删行**，计入 skipped 如实回报（批量清理是 500 条串行循环，窗口本来就长）。
+	deleted, failed, skipped := 0, 0, 0
 	for _, id := range ids {
-		if err := deleteUpstreamFile(client, up, id); err != nil {
-			log.Printf("gateway: admin purge file: upstream delete failed: %v", err)
+		switch api.deleteGatewayFileFenced(id, up) {
+		case gatewayFileDeleteDone:
+			deleted++
+		case gatewayFileDeleteBusy, gatewayFileDeleteAbandoned:
+			skipped++
+		case gatewayFileDeleteMissing:
+			// 列表与删除之间被别的路径收敛掉了：既不是我们的删除，也不是失败。
+			skipped++
+		default:
+			log.Printf("gateway: admin purge file: fenced delete failed (id=%s)", id)
 			failed++
-			continue
 		}
-		if err := serverstore.DeleteGatewayFileRow(db, id); err != nil {
-			log.Printf("gateway: admin purge file: delete ledger row failed: %v", err)
-			failed++
-			continue
-		}
-		deleted++
 	}
 	_ = serverstore.AuditLog(db, auditActor(c), "gateway_file_purge",
-		fmt.Sprintf("%s 删除 %d 失败 %d 命中 %d", target, deleted, failed, len(ids)))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": deleted, "failed": failed, "matched": len(ids)})
+		fmt.Sprintf("%s 删除 %d 跳过 %d 失败 %d 命中 %d", target, deleted, skipped, failed, len(ids)))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": deleted, "skipped": skipped, "failed": failed, "matched": len(ids)})
 }

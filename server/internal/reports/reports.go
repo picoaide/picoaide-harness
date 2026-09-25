@@ -380,12 +380,22 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 	return ok, failed, nil
 }
 
-// ShouldRunMonthly 判断是否应补跑上月报表:
-// lastRunAt 为空,或 lastRunAt 所在**北京月**早于 now 所在北京月(停机跨月/
-// 新部署补跑)。与 GenerateMonthlyReport 同一套月口径(见 serverstore.BeijingMonth);
-// 旧实现比较两个 time.Time 的 Year()/Month() 分量 —— 那是**各自 Location 的**
-// 本地月,UTC 容器在北京每月 1 日 00:00-08:00 会把两个月算成同一个月 → 漏跑。
-// 幂等:同一月份只会跑一次(成功或失败都记 last_run_at/last_error;失败下月再试)。
+// ShouldRunMonthly 判断该订阅这一轮要不要投递月报：
+// lastRunAt 为空（从未成功投递），或 lastRunAt 所在**北京月**早于 now 所在北京月
+// （停机跨月 / 新部署补跑）。与 GenerateMonthlyReport 同一套月口径（见
+// serverstore.BeijingMonth）；旧实现比较两个 time.Time 的 Year()/Month() 分量 ——
+// 那是**各自 Location 的**本地月，UTC 容器在北京每月 1 日 00:00-08:00 会把两个月
+// 算成同一个月 → 漏跑。
+//
+// 语义（R18C-03，审计 2026-09-25，P2 修正后）：`lastRunAt` 是**最近一次成功**投递的
+// 时刻（失败只写 last_error，见 serverstore.MarkReportRun）。因此：
+//   - 投递成功一次 ⇒ 本月内不再重复投（幂等锚）；
+//   - 投递失败 ⇒ 该订阅本月内**仍然待补跑**，调度器每小时那一轮会重新生成**同一期**
+//     （GenerateMonthlyReport 取的是"上月"，在本月内不变）并重投 —— 这正是 webadmin
+//     对管理员的承诺"失败会自动重试"。
+//
+// 残留：失败若持续跨过月界，下一轮生成的是最新一期，被跨过的那一期不再补投
+// （单靠一个时间戳表达不了"待补期号"，闭合需要加列，本轮不引入迁移）。
 func ShouldRunMonthly(now time.Time, lastRunAt *time.Time) bool {
 	if lastRunAt == nil {
 		return true

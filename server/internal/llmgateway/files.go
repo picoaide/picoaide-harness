@@ -122,6 +122,102 @@ func validGatewayFileID(id string) bool {
 	return true
 }
 
+// ---------------------------------------------------------------------------
+// 带世代围栏的删除（R18C-02，审计 2026-09-25，P1）
+// ---------------------------------------------------------------------------
+
+// gatewayFileDeleteResult 是一次"带世代围栏的外部删除"的结果。
+type gatewayFileDeleteResult int
+
+const (
+	// gatewayFileDeleteDone：上游对象已删 + 本世代台账行已删。
+	gatewayFileDeleteDone gatewayFileDeleteResult = iota
+	// gatewayFileDeleteBusy：删除权被别的路径持有（标记在租约内），或复检发现本世代
+	// 已失去删除权 ⇒ **一次上游调用都没发**，行与对象都原样保留。
+	gatewayFileDeleteBusy
+	// gatewayFileDeleteMissing：台账里没有这一行（行已收敛/已被删）。
+	gatewayFileDeleteMissing
+	// gatewayFileDeleteAbandoned：上游对象已删，但世代在窗口内变了 ⇒ 台账行留给新一代
+	// （如实回报，绝不能谎称"删掉了一行"）。
+	gatewayFileDeleteAbandoned
+	// gatewayFileDeleteFailed：认领/复检/上游删除/收尾任一步失败（认领已按世代释放，可重试）。
+	gatewayFileDeleteFailed
+)
+
+// deleteGatewayFileFenced 按回收器的认领协议做一次"删上游对象 + 收敛台账行"：
+//
+//	认领（世代 +1 + 回收标记）→ 复检删除权 → 上游 DELETE（外部副作用）→ FinishReapedGatewayFile(gen)
+//
+// 关键是**外部 DELETE 之前必须先取得认领**：窗口内该行被转手（过期行转手是
+// `RecordGatewayFileSize` 的既定语义，世代 +1）或已被回收器认领时，登记路径会拒绝转手，
+// 而本函数在复检失败时直接放弃且**不碰上游对象**。修前三条路径（管理端按 id 删除 /
+// 管理端批量清理 / 用户侧删除）都是"读台账 → 上游 DELETE → 无条件删行"，会把**新归属人**
+// 的上游对象与台账行一起删掉（迁移 0081 的 `reap_gen` 只有回收器在用）。
+//
+// 认领是**行级标记 + 世代号**：即使本函数中途崩溃，行仍在（下一轮可重新认领/重删），
+// 不会留下"再无凭据"的孤儿上游对象。
+func (a *API) deleteGatewayFileFenced(fileID string, up Upstream) gatewayFileDeleteResult {
+	if a == nil || a.DB == nil {
+		return gatewayFileDeleteFailed
+	}
+	gen, claimed, err := serverstore.ClaimGatewayFileForDeletion(a.DB, fileID)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			return gatewayFileDeleteMissing
+		}
+		log.Printf("gateway: file delete: claim ledger row failed (id=%s): %v", fileID, err)
+		return gatewayFileDeleteFailed
+	}
+	if !claimed {
+		// 别的删除权（另一个管理员/回收器）正持有这一行：放弃，且**不调用上游**
+		// —— 上游对象此刻正被那一方删除，我们再删一次只会删到新一代的对象。
+		log.Printf("gateway: file delete: file %s already has an active reap claim; upstream object left untouched", fileID)
+		return gatewayFileDeleteBusy
+	}
+	// DELETE 之前的复检（与回收器同一套判据：世代未变 + 标记仍在租约内）。
+	held, err := serverstore.GatewayFileReapClaimHeld(a.DB, fileID, gen)
+	if err != nil {
+		log.Printf("gateway: file delete: recheck reap claim failed (id=%s gen=%d): %v", fileID, gen, err)
+		a.releaseGatewayFileClaim(fileID, gen)
+		return gatewayFileDeleteFailed
+	}
+	if !held {
+		log.Printf("gateway: file delete: file %s gen=%d: reap claim no longer held (re-registered, re-claimed or lease expired); upstream object kept", fileID, gen)
+		a.releaseGatewayFileClaim(fileID, gen)
+		return gatewayFileDeleteBusy
+	}
+	if err := deleteUpstreamFile(a.filesHTTPClient(), up, fileID); err != nil {
+		log.Printf("gateway: file delete: delete upstream file failed (id=%s gen=%d): %v", fileID, gen, err)
+		a.releaseGatewayFileClaim(fileID, gen) // 行保留 = 下一次可以重试
+		return gatewayFileDeleteFailed
+	}
+	// DELETE 返回之后的第二次世代校验（收尾删行自带谓词）。
+	finished, err := serverstore.FinishReapedGatewayFile(a.DB, fileID, gen)
+	if err != nil {
+		log.Printf("gateway: file delete: finish ledger row failed (id=%s gen=%d): %v", fileID, gen, err)
+		return gatewayFileDeleteFailed
+	}
+	if !finished {
+		log.Printf("gateway: file delete: file %s gen=%d changed generation while the upstream delete was in flight; "+
+			"upstream object deleted, ledger row left to the newer generation (abandoned delete)", fileID, gen)
+		return gatewayFileDeleteAbandoned
+	}
+	return gatewayFileDeleteDone
+}
+
+// releaseGatewayFileClaim 放弃**属于本世代**的认领（`ReleaseReapClaim` 带世代谓词，
+// 绝不清掉新一代正在使用的标记）。
+func (a *API) releaseGatewayFileClaim(fileID string, gen int64) {
+	released, err := serverstore.ReleaseReapClaim(a.DB, fileID, gen)
+	if err != nil {
+		log.Printf("gateway: file delete: release reap claim failed (id=%s gen=%d): %v", fileID, gen, err)
+		return
+	}
+	if !released {
+		log.Printf("gateway: file delete: reap claim of %s gen=%d no longer belongs to this generation; left in place", fileID, gen)
+	}
+}
+
 // filesTarget 完成 /files 四个入口共用的前置：认证 → 限流 → 选上游 → 拼 URL。
 // 返回 ok=false 时响应已写好，调用方直接 return。
 func (a *API) filesTarget(c *gin.Context, suffix string) (*Upstream, string, int64, bool) {
@@ -718,7 +814,10 @@ func (a *API) handleFilesRetrieve(c *gin.Context) {
 		writeFileNotFound(c, fileID)
 		return
 	}
-	owned, err := serverstore.GatewayFileOwnedBy(a.DB, fileID, userID)
+	// 归属 + **读那一刻的行世代**（R18C-02）：下面这次上游往返之后要删的是台账行，
+	// 而窗口内该行可能被转手（过期行转手 = 既定语义，世代 +1）—— 只按 file_id 删行
+	// 会把**新归属人**刚写的行删掉（对象还在、本地却 404）。
+	gen, owned, err := serverstore.GatewayFileOwnedByGeneration(a.DB, fileID, userID)
 	if err != nil {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件归属失败")
 		return
@@ -733,9 +832,15 @@ func (a *API) handleFilesRetrieve(c *gin.Context) {
 	}
 	// 上游说这个 id 已经不存在（过期/被上游清掉）⇒ 顺手收敛台账，别让悬垂行
 	// 一直占着"归属"（否则该 id 会永远被判为自己的、却每次都在上游 404）。
+	// 带世代谓词（R18C-02）：世代变了就说明这一行已归新一代，放弃收敛并如实记日志。
 	if resp.StatusCode == http.StatusNotFound {
-		if err := serverstore.DeleteGatewayFileRow(a.DB, fileID); err != nil {
+		removed, err := serverstore.DeleteGatewayFileRowIfGeneration(a.DB, fileID, gen)
+		switch {
+		case err != nil:
 			log.Printf("gateway: files: drop stale ownership row %s failed: %v", fileID, err)
+		case !removed:
+			log.Printf("gateway: files: stale ownership row %s gen=%d changed while the upstream lookup was in flight; "+
+				"row left to the newer owner", fileID, gen)
 		}
 	}
 	relayFilesBody(c, resp, up.APIKey, body)
@@ -761,15 +866,41 @@ func (a *API) handleFilesDelete(c *gin.Context) {
 		writeFileNotFound(c, fileID)
 		return
 	}
+	// R18C-02：上游 DELETE 是**外部副作用**，收敛台账行之前必须先取得这一行的删除权
+	// （世代 +1 + 回收标记）。拿到认领后窗口内的转手会被登记路径拒绝
+	// （ErrGatewayFileReapClaimed），所以"我们删的"一定是"我们认领的那一代"。
+	gen, claimed, err := serverstore.ClaimGatewayFileForDeletion(a.DB, fileID)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			writeFileNotFound(c, fileID)
+			return
+		}
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "读取文件台账失败")
+		return
+	}
+	if !claimed {
+		// 行正被回收器/另一个删除者处理（标记在租约内）：放弃删除，**绝不碰上游对象**。
+		serverauth.WriteError(c, http.StatusConflict, "FILE_BUSY",
+			"该文件正在被清理,请稍后重试")
+		return
+	}
 	resp, body, ok := a.doFilesMeta(c, up, http.MethodDelete, target)
 	if !ok {
+		a.releaseGatewayFileClaim(fileID, gen) // 上游请求没发出去/读响应失败：行保留可重试
 		return
 	}
 	// 上游确认删除成功、或上游说这个 id 已经不存在（过期/被上游清掉）时收敛台账。
 	if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusNotFound {
-		if err := serverstore.DeleteGatewayFileRow(a.DB, fileID); err != nil {
-			log.Printf("gateway: files: delete ownership row %s failed: %v", fileID, err)
+		finished, ferr := serverstore.FinishReapedGatewayFile(a.DB, fileID, gen)
+		if ferr != nil {
+			log.Printf("gateway: files: delete ownership row %s failed: %v", fileID, ferr)
+		} else if !finished {
+			log.Printf("gateway: files: ownership row %s gen=%d changed while the upstream delete was in flight; "+
+				"row left to the newer owner", fileID, gen)
 		}
+	} else {
+		// 上游明确拒绝（4xx/5xx）：什么都没删掉 ⇒ 按世代释放认领，让行恢复可用。
+		a.releaseGatewayFileClaim(fileID, gen)
 	}
 	relayFilesBody(c, resp, up.APIKey, body)
 }

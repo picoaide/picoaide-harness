@@ -248,12 +248,16 @@ export default function GatewayFiles() {
     setError('')
     setOkMsg('')
     try {
-      // 逐字对齐服务端契约：`{state, user?}`。
+      // 逐字对齐服务端契约：`{state, user?}`。响应里的 `skipped`（R18C-02 起）=
+      // 拿不到删除权 / 删除期间世代已变的条数（**没有调用上游、行原样保留**）——
+      // 必须显示出来，否则"命中 10 删除 3"看起来像静默失败。
       const body: Record<string, unknown> = { state }
       if (name) body.user = name
-      const d = await request<{ deleted: number; failed: number; matched: number }>(
+      const d = await request<{ deleted: number; failed: number; matched: number; skipped?: number }>(
         `${ADMIN_API}/gateway/files/purge`, { method: 'POST', body: JSON.stringify(body) })
-      setOkMsg(`清理完成：命中 ${d.matched}，删除 ${d.deleted}，失败 ${d.failed}`)
+      const skipped = d.skipped ?? 0
+      setOkMsg(`清理完成：命中 ${d.matched}，删除 ${d.deleted}，失败 ${d.failed}` +
+        (skipped > 0 ? `，跳过 ${skipped}（正在被回收或已被重新登记，请刷新后重试）` : ''))
       setPage(1)
       await load(1)
     } catch (e: any) {
