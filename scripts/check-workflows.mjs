@@ -59,6 +59,14 @@
  *           子串匹配让 R2 上传步 `echo` 化后照样"命中登记"。三者改成命令位/整串判据。
  *           同批收掉第八轮新引入的三条**假红**(子 shell 收尾 / 重定向当参数 / env 说明文本)。
  *
+ * 2026-09-25 第十四轮现场再补一条(判据与现场说明见 [SK-22] 的常量区):
+ *   [SK-22] **表达式的词法字符集** —— 一个 `run: |` 块的 **shell 注释**里写了
+ *           `${{ …outputs.interp }}`(U+2026 省略号):YAML 合法、`bash -n` 合法(那行就是注释)、
+ *           本文件此前所有判据都看不见它,而推上 GitHub 后**整条 CI 零 job**
+ *           (run 0 秒 / 0 job 的 startup_failure,`pull_request` 下连 run 都不创建)。
+ *           判据按**全文**(含 `#` 注释行、heredoc、字符串)扫 `${{ … }}`,剥掉 `'…'`
+ *           单引号字面量后剩字符必须落在表达式词法器允许的集合里;未闭合 / 空表达式同样红。
+ *
  * 用法:node scripts/check-workflows.mjs
  * 退出码:0 = 全部通过;1 = 有块解析失败、策略违规或扫描器退化。
  */
@@ -471,7 +479,7 @@ const GATE_SELFTEST_RUNS_ON = 'ubuntu-24.04'
 const SELFTEST_RUNS_ON_REGISTRY = {
   jobRunsOn: [{ job: 'verify', runsOn: GATE_SELFTEST_RUNS_ON, why: '自检合成样本:`selftestWorkflow()` 造的 job 名' }],
 }
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-22', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -616,6 +624,17 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'x13-guard-runner-redirect-null-green', policy: null },
   { id: 'x14-workflow-env-lookalike-green', policy: null },
   { id: 'x15-workflow-env-other-flag-green', policy: null },
+  // ---- [SK-22] 表达式词法字符集(2026-09-25 第十四轮现场:整条 workflow 解析失败 ⇒ 0 job)----
+  // 现场原形是"`run:` 的 **shell 注释**里的表达式带 U+2026";四条红样本 + 四条绿样本逐条点名
+  // (尤其绿样本钉的是"必须剥掉单引号字面量 / 取体必须字符串感知"这两件容易做错的半件事)。
+  { id: 'w31-run-comment-expression-ellipsis', policy: '[SK-22]' },
+  { id: 'w32-expression-non-ascii-outside-literals', policy: '[SK-22]' },
+  { id: 'w33-unterminated-expression', policy: '[SK-22]' },
+  { id: 'w34-expression-disallowed-ascii-operator', policy: '[SK-22]' },
+  { id: 'w35-expression-charset-green', policy: null },
+  { id: 'w36-expression-literal-non-ascii-green', policy: null },
+  { id: 'w37-expression-literal-braces-green', policy: null },
+  { id: 'w38-expression-brace-in-literal-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -669,6 +688,7 @@ function workflowResult(failures, {
   pinnedEnvLayers = [],
   pinnedUses = [],
   usesWith = [],
+  expressionBodies = 0,
 } = {}) {
   return {
     failures,
@@ -680,6 +700,7 @@ function workflowResult(failures, {
     pinnedEnvLayers,
     pinnedUses,
     usesWith,
+    expressionBodies,
   }
 }
 
@@ -692,6 +713,9 @@ function workflowResult(failures, {
  */
 export function checkWorkflowText(name, text, options = {}) {
   const failures = []
+  // 提示收集器（"策略真的跑过了"的证据）。声明在这里而不是 SK-7 那一段之后：判定顺序最前的
+  // [SK-22]（表达式词法字符集）就要往里面写通过证据，而它必须跑在 YAML 解析之前。
+  const notes = []
   // SK-15 的登记表(默认 = 仓库真实登记值;自检用合成表注入,见 REGISTRY_DEFAULT)。
   const registries = options.registries ?? REGISTRY_DEFAULT
   // 本地 action 的解析根(第十轮审计 C-03):默认 = 仓库根;自检用临时树注入,
@@ -702,6 +726,14 @@ export function checkWorkflowText(name, text, options = {}) {
   if (/^\t|:\s*\t|\s\t/u.test(text)) {
     failures.push({ name, line: 0, detail: 'YAML 缩进中不允许出现 tab 字符' })
   }
+
+  // 策略 14（[SK-22]，2026-09-25 第十四轮现场）：**表达式的词法字符集**。
+  // 放在 YAML 解析**之前**，理由有两条：
+  //   ① 它是"GitHub 能不能解析这个文件"的另一条独立失败面 —— 现场那份 ci.yml 的 YAML
+  //      完全合法、`bash -n` 完全合法（非法字符就在一行 shell 注释里），只有模板解析器看得见；
+  //   ② 放在最早 ⇒ YAML 也坏时两条诊断都在（本文件反复强调"门禁自己不能吞诊断"）。
+  const expressionLexis = checkExpressionCharacterSet(name, text, notes)
+  failures.push(...expressionLexis.failures)
 
   // 结构解析(2026-09-10 补):bash -n 只看得见 shell 语法,看不见 YAML 语义。
   // 实测踩过一次:`- name: ... (fork PR: no channel access)` 里的 `: ` 让 YAML
@@ -859,7 +891,7 @@ export function checkWorkflowText(name, text, options = {}) {
   }
 
   // ===== SK-7 三条静态策略(2026-09-19 第三批:吞码 / 超时序 / 单行退出码)=====
-  const notes = []
+  // （`notes` 已在函数开头声明：判定顺序更早的 [SK-22] 要往里面写通过证据。）
   const allowlist = new AllowlistUse()
   // 策略 1 先跑:它报过的语句不再被策略 3 重复报(同一句话两个毛病只报一次)。
   const reported = new Set()
@@ -955,6 +987,8 @@ export function checkWorkflowText(name, text, options = {}) {
     pinnedEnvLayers: pinnedEnv.layers,
     pinnedUses: pinnedEnv.uses,
     usesWith: pinnedEnv.usesWith,
+    // [SK-22]：全文扫到的表达式处数（main() 用它做"扫描器退化"对账：全仓一处都扫不到即红）。
+    expressionBodies: expressionLexis.expressions,
   })
 }
 
@@ -1901,6 +1935,264 @@ function checkPinnedJobPermissions(file, document, notes, options = {}) {
     }
   }
   return failures
+}
+
+// ===== SK-22:表达式的**词法字符集**（2026-09-25 第十四轮现场：整个 workflow 解析失败 ⇒ 0 job）=====
+//
+// 现场:`.github/workflows/ci.yml` 里一个 `run: |` 块的 **shell 注释**中写了
+// `# … "${{ …outputs.interp }}" scripts/<x>.sh 只冻结了解释器 …`,其中 `…` 是 U+2026。
+// YAML 完全合法;`bash -n` 完全合法(那只是一行注释);本文件此前所有判据都看不见它。
+// 推上 GitHub 后**整条 CI 一个 job 都没起来**:run 是 0 秒 / 0 job 的 startup_failure,
+// `pull_request` 事件下连 run 都没创建(同提交的 CodeQL 照常跑),PR 因此永远等不到检查。
+//
+// 判据层的关键事实(这条判据存在的全部理由):**GitHub 的模板/表达式解析不理会 shell 注释**
+// —— `${{` 出现在 `run:` 标量的**任何位置**(含 `#` 注释行、heredoc、字符串字面量内部)
+// 都会开始一个表达式,并且必须在**解析期**合法。所以"它只是注释 / 只是字符串"不是豁免理由。
+// 反过来,`'…'` 单引号字面量是**表达式自己的**语法(`''` 是"一个字面单引号"的转义写法),
+// 字面量内部的字符不参与词法 —— 中文标签、`'refs/tags/v'` 里的 `/`、`format('{0}')` 里的
+// 花括号都因此必须放行(下面的 `w36`/`w37` 就是钉这两格的绿样本)。
+//
+// 字符集来源:GitHub 表达式词法器允许的字符。对拍物 = 本机 actionlint 的报错原文
+// (`got unexpected character '…' while lexing expression, expecting 'a'..'z', 'A'..'Z',
+// '_', '0'..'9', ''', '}', '(', ')', '[', ']', '.', '!', '<', '>', '=', '&', '|', '*',
+// ',', ' '`)。本判据把 `'''` 单独处理(字面量剥离),再补一个 `-`(负数字面量:
+// `${{ -1 < 0 }}` 实测 actionlint EXIT=0)。
+//
+// **这是近似,不是复刻**(诚实的边界,写在这里免得被当成"等价于真实解析器"):
+//   · `-` 只在负数字面量里合法 —— 实测 `${{ github.run_number - 1 }}` 被 actionlint 拒
+//     ("while lexing integer part of number, expecting '0'..'9'"),而本判据整体放行 `-`;
+//   · 判据是"表达式可解析"的**必要条件**而非充分条件:`${{ 1 2 }}` 这类**语法**错误
+//     (字符全合法)漏判;`${{ github.ref }} }}` 这种多余 `}` 会被判红(单 `}` 不在集合里);
+//   · 表达式之外的解析期拒绝面(重复键 / 别名循环 / `on:` 形态)不在这里,见 [SK-19] 等。
+// 结论性证据仍然是"真实 push 之后 run 真的起来"—— 本判据只能把这一类**字符级**的
+// 解析期失败拦在本地,拦不到的形态必须在别处有判据(报告里逐条认账)。
+/**
+ * 表达式体里允许出现的 ASCII 标点。
+ *
+ * 与 actionlint 的期望集合逐字对齐(见上面的注释),`'` 由 {@link checkExpressionCharacterSet}
+ * 在扫描时单独处理(字面量剥离),`-` 是本判据有意补的一项(负数字面量)。
+ */
+const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!', '<', '>', '=', '&', '|', '*', ',', '-'])
+/** 空白字符(表达式可以跨行:`${{ github.event_name\n  == 'push' }}`)。 */
+const EXPRESSION_WHITESPACE = new Set([' ', '\t', '\n', '\r'])
+/**
+ * 一个文件最多逐条打印几处非法字符。超出的部分用一条汇总失败项接着报 ——
+ * 既不静默吞掉(数量与首个位置still可见),也不让一个被写坏的文件刷出几千行。
+ */
+const EXPRESSION_OFFENDER_REPORT_LIMIT = 8
+
+/**
+ * 单个字符是否落在表达式词法器允许的集合里。
+ * @param character - 单个 code point(调用方已保证不是 `'`,字面量在扫描时整体跳过)。
+ * @returns 允许 = true。
+ */
+function isAllowedExpressionCharacter(character) {
+  if (EXPRESSION_WHITESPACE.has(character)) return true
+  if (EXPRESSION_ALLOWED_PUNCTUATION.has(character)) return true
+  const code = character.codePointAt(0)
+  if (code >= 0x30 && code <= 0x39) return true // 0-9
+  if (code >= 0x41 && code <= 0x5a) return true // A-Z
+  if (code >= 0x61 && code <= 0x7a) return true // a-z
+  return false
+}
+
+/**
+ * 把文本里的每个字符映射成 `{line, column}`(1 起,按 GitHub/Actions 日志的习惯列号从 1 开始)。
+ * 只对**要报出来的位置**调用(非法字符数被 {@link EXPRESSION_OFFENDER_REPORT_LIMIT} 限住)。
+ * @param text - workflow 全文。
+ * @param offsets - 升序的字符下标。
+ * @returns 与 offsets 等长的位置数组。
+ */
+function positionsAt(text, offsets) {
+  const starts = [0]
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '\n') starts.push(index + 1)
+  }
+  return offsets.map(offset => {
+    let low = 0
+    let high = starts.length - 1
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2)
+      if (starts[mid] <= offset) low = mid
+      else high = mid - 1
+    }
+    return { line: low + 1, column: offset - starts[low] + 1 }
+  })
+}
+
+/** 码点转 `U+XXXX`(超出 BMP 的用 5-6 位,与 Unicode 的写法一致)。 */
+function codePointLabel(character) {
+  return `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`
+}
+
+/** 把一段文本压成单行、截断(诊断里回显表达式片段用)。 */
+function truncateForDiagnostic(text, limit = 120) {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`
+}
+
+/**
+ * [SK-22] 表达式词法字符集判据(现场与边界见上面的常量区注释)。
+ *
+ * 扫描面 = **workflow 全文**(不只是"代码行"):`run:` 的 `#` 注释、heredoc、YAML 字符串
+ * 里的 `${{` 一样会被 GitHub 展开,一样必须在解析期合法。判定顺序:
+ *   ① 找 `${{`,再找它后面**第一个** `}}`(与模板读取器的"字面终止符"语义一致);
+ *      找不到 ⇒ 未闭合,**fail-closed 判红**(不猜意图,也不静默放行);
+ *   ② 表达式体为空 ⇒ 判红(actionlint 对 `${{ }}` 报
+ *      `unexpected end of input while parsing …`,实测 EXIT=1);
+ *   ③ 在体内扫描:遇到 `'` 就整体跳过一个字符串字面量(`''` = 转义),字面量没闭合也判红;
+ * 扫描面 = **workflow 全文**(不只是"代码行"):`run:` 的 `#` 注释、heredoc、YAML 字符串
+ * 里的 `${{` 一样会被 GitHub 展开,一样必须在解析期合法。判定顺序:
+ *   ① 从 `${{` 起**单趟**走:遇到 `'` 就进入字符串字面量(`''` = 一个转义的字面单引号),
+ *      字面量**内部**的 `}}` 不算终止符 —— 与真实解析器同形(`${{ format('{0}}}', x) }}`
+ *      实测 actionlint EXIT=0,即字符串感知的取体);不在字面量里的第一个 `}}` = 表达式结束;
+ *   ② 走到文件结尾都没有结束标记 ⇒ **fail-closed 判红**,并且按"停在哪"给更准的诊断:
+ *      停在字面量里 = 字面量没闭合(它把后面的 `}}` 一起吞了),否则 = 表达式未闭合;
+ *   ③ 表达式体为空 ⇒ 判红(actionlint 对 `${{ }}` 报
+ *      `unexpected end of input while parsing …`,实测有错);
+ *   ④ 其余每个字符必须落在 {@link isAllowedExpressionCharacter} 的集合里。
+ *
+ * @param file - workflow 文件名。
+ * @param text - workflow 全文。
+ * @param notes - 提示收集器。
+ * @returns `{failures, expressions, literals}`(`expressions` 供 main() 做"扫描器退化"对账)。
+ */
+function checkExpressionCharacterSet(file, text, notes) {
+  const failures = []
+  const offenders = []
+  let expressions = 0
+  let literals = 0
+  let cursor = 0
+  let unterminated = null
+  for (;;) {
+    const open = text.indexOf('${{', cursor)
+    if (open < 0) break
+    // 单趟:取结束标记 + 逐字符判字符集 + 数字面量。
+    const pending = []
+    let index = open + 3
+    let inLiteral = false
+    let literalStart = -1
+    let close = -1
+    while (index < text.length) {
+      const character = text[index]
+      if (inLiteral) {
+        if (character !== "'") {
+          index += 1
+          continue
+        }
+        if (text[index + 1] === "'") {
+          index += 2
+          continue
+        }
+        inLiteral = false
+        literals += 1
+        index += 1
+        continue
+      }
+      if (character === "'") {
+        inLiteral = true
+        literalStart = index
+        index += 1
+        continue
+      }
+      if (character === '}' && text[index + 1] === '}') {
+        close = index
+        break
+      }
+      if (!isAllowedExpressionCharacter(character)) {
+        pending.push({ kind: 'character', index, character })
+      }
+      index += 1
+    }
+    if (close < 0) {
+      // 未闭合:它之后**还剩几处** `${{` 一起报出来(同一个坏文件里往往不止一处)。
+      // 这一段的字符不逐条报(表达式本该在哪里结束已经无从判断,报出来只会是噪音)。
+      unterminated = {
+        open,
+        literalStart: inLiteral ? literalStart : -1,
+        remaining: text.slice(open + 3).split('${{').length - 1,
+      }
+      break
+    }
+    expressions += 1
+    const body = text.slice(open + 3, close)
+    // 空表达式(`${{ }}` / `${{   }}`):没有字符可判,但它本身不是合法表达式。
+    if (body.trim() === '') pending.push({ kind: 'empty', index: open + 3 })
+    for (const entry of pending) offenders.push({ ...entry, snippet: body })
+    cursor = close + 2
+  }
+
+  if (unterminated !== null) {
+    const [where] = positionsAt(text, [unterminated.open])
+    if (unterminated.literalStart >= 0) {
+      const [literalWhere] = positionsAt(text, [unterminated.literalStart])
+      failures.push({
+        name: file,
+        line: literalWhere.line,
+        detail: `[SK-22] 表达式里的单引号字面量没有闭合,位置 ${file}:${literalWhere.line}:${literalWhere.column}`
+          + `(该 \`\${{ \` 在 ${file}:${where.line}:${where.column};其后还有 ${unterminated.remaining} 处 \`\${{ \`)\n`
+          + '  ⇒ 表达式里表示一个**字面单引号**要写两个(`\'\'`);单个 `\'` 会一直吃到文件结尾,'
+          + '连它后面的 `}}` 也被吞掉(字符串感知的取体是这样,真实解析器同样报'
+          + ' "unexpected EOF while lexing end of string literal")⇒ 整个 workflow 解析失败。\n'
+          + '  ⇒ 与未闭合表达式同一口径:**fail-closed**,不放行。',
+      })
+    } else {
+      failures.push({
+        name: file,
+        line: where.line,
+        detail: `[SK-22] \`\${{ \` 没有配对的 \`}}\`(未闭合表达式),位置 ${file}:${where.line}:${where.column}`
+          + `(其后还有 ${unterminated.remaining} 处 \`\${{ \`)\n`
+          + '  ⇒ GitHub 的模板读取器以字面 `}}` 作为表达式结束标记:找不到就是"这份 workflow 无法解析"'
+          + ' —— 与非法字符同一类后果(整个文件 0 job,PR 上连 run 都不创建)。\n'
+          + '  ⇒ 这里按 **fail-closed** 判:没有终止符的 `\${{ ` 之后的任何形态都不放行'
+          + '(不猜"它是不是只想当字面量"—— 模板展开不看上下文)。',
+      })
+    }
+  }
+  if (offenders.length > 0) {
+    const reported = offenders.slice(0, EXPRESSION_OFFENDER_REPORT_LIMIT)
+    const positions = positionsAt(text, reported.map(entry => entry.index))
+    reported.forEach((entry, order) => {
+      const { line, column } = positions[order]
+      const at = `${file}:${line}:${column}`
+      if (entry.kind === 'empty') {
+        failures.push({
+          name: file,
+          line,
+          detail: `[SK-22] 表达式体为空:\`\${{ }}\`,位置 ${at}\n`
+            + '  ⇒ 空表达式不是合法表达式(actionlint 实测报 "unexpected end of input while parsing '
+            + 'variable access, function call, null, bool, int, float or string")⇒ 整个 workflow 解析失败。',
+        })
+        return
+      }
+      failures.push({
+        name: file,
+        line,
+        detail: `[SK-22] 表达式体里有词法非法字符 \`${entry.character}\`(${codePointLabel(entry.character)}),位置 ${at}\n`
+          + `      该表达式:\`\${{ ${truncateForDiagnostic(entry.snippet ?? '')} }}\`\n`
+          + '  ⇒ GitHub 的模板/表达式解析**不理会 shell 注释**:`\${{ ` 出现在 `run:` 标量里的任何位置'
+          + '(含 `#` 注释行、heredoc、字符串内部)都会开始一个表达式,且必须在**解析期**合法。\n'
+          + '     这个字符让**整个 workflow 解析失败** —— run 起来是 0 秒 / 0 个 job(startup_failure),'
+          + '`pull_request` 事件下连 run 都不会创建,PR 永远等不到检查(第十四轮现场)。\n'
+          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白;'
+          + "单引号字面量(`'…'`,`''` 表示一个字面单引号)内部的字符不参与词法。\n"
+          + '  ⇒ 修法:把该字符移进单引号字面量,或改成 ASCII 写法(例如 `...` 代替 `…`)。',
+      })
+    })
+    if (offenders.length > reported.length) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-22] 本文件还有 ${offenders.length - reported.length} 处非法字符未逐条打印`
+          + `(上面只列了前 ${reported.length} 处)—— 判据同样把它们算作失败。`,
+      })
+    }
+  } else {
+    notes.push(`[SK-22] 表达式词法字符集:全文扫描到 ${expressions} 处 \`\${{ … }}\``
+      + `(含 \`run:\` 的 \`#\` 注释行 / heredoc,注释不是豁免理由),剥掉 ${literals} 处单引号字面量后`
+      + '剩余字符全部落在表达式词法器允许的集合里')
+  }
+  return { failures, expressions, literals }
 }
 
 /**
@@ -11078,6 +11370,59 @@ export function selfTestPolicies() {
       '          "${GH_CREATE[@]}" "${TAG}" --title "${TAG}" ${NOTES_FLAG}',
     ],
   })
+  // ---- 策略 14([SK-22]):表达式的**词法字符集**(2026-09-25 第十四轮现场) ----
+  //
+  // 现场:一个 `run: |` 块的 **shell 注释**里写了 `${{ …outputs.interp }}`(U+2026)——
+  // YAML 合法、`bash -n` 合法(那一行就是注释)、本文件此前所有判据都看不见它,而推上
+  // GitHub 之后**整条 CI 零 job**(run 0 秒 / 0 job 的 startup_failure,`pull_request`
+  // 事件下连 run 都不创建)。样本按"判据面 × 正反"逐格点名(`SELFTEST_REQUIRED_SAMPLES`
+  // 逐条登记:删掉任一格,对应形态就回到"没人看着"的状态):
+  //   红:①`run:` 注释里的表达式(现场原形) ②表达式里的非 ASCII(不在注释里)
+  //       ③未闭合的 `${{` ④表达式体里的非法 ASCII 标点(`+` —— actionlint 实测词法报错)
+  //   绿:⑤普通表达式 + 单引号字面量 `'refs/tags/v'`(里面的 `/` 只有被剥掉才不误伤)
+  //       ⑥字面量里的非 ASCII(`'标签/中文'`) ⑦字面量里的花括号(`format('{0}-{1}', …)`)
+  //       ⑧字面量**内部**的 `}}`(`format('{0}}}', …)` —— 取体必须字符串感知)
+  expectRed('w31-run-comment-expression-ellipsis', '[SK-22]', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          # 承重行:`"${{ …outputs.interp }}" scripts/x.sh` 只冻结了**解释器**',
+    '          echo done',
+  ])
+  expectRed('w32-expression-non-ascii-outside-literals', '[SK-22]', [
+    '      - name: judge ${{ github.event_name — github.ref }}',
+    '        run: echo ok',
+  ])
+  expectRed('w33-unterminated-expression', '[SK-22]', [
+    '      - name: judge ${{ github.ref',
+    '        run: echo ok',
+  ])
+  expectRed('w34-expression-disallowed-ascii-operator', '[SK-22]', [
+    '      - run: echo ok',
+    "        if: ${{ github.run_number + 1 > 0 }}",
+  ])
+  expectGreen('w35-expression-charset-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ steps.x.outputs.y }}"',
+    "          echo \"${{ startsWith(github.ref, 'refs/tags/v') }}\"",
+  ])
+  expectGreen('w36-expression-literal-non-ascii-green', [
+    '      - run: echo ok',
+    "        if: ${{ contains('标签/中文', github.ref_name) }}",
+  ])
+  expectGreen('w37-expression-literal-braces-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    "          echo \"${{ format('{0}-{1}', github.ref, github.sha) }}\"",
+  ])
+  // 绿样本⑧:字面量**内部**的 `}}` 不是结束标记(取体是字符串感知的 —— actionlint 对
+  // `format('{0}}}', …)` 整条表达式 EXIT=0)。没有这一格,把取体改回 `indexOf('}}')`
+  // 会静默切掉合法写法,而红样本一条都不会响。
+  expectGreen('w38-expression-brace-in-literal-green', [
+    '      - run: echo ok',
+    "        if: ${{ format('{0}}}', github.ref) == 'x' }}",
+  ])
+
   // 自检自身的对账放在独立函数里(F3-4:看守守门人)——
   // 不能内联在 selfTestPolicies 体内:那样"把 selfTestPolicies 整条掏空"会连带
   // 把对账一起掏空(第三轮审计 m8 的形态)。这里只做数据收集,断言在
@@ -11532,6 +11877,9 @@ function main() {
   const notes = []
   const allowlistHits = []
   let goTestTimeoutHits = 0
+  // [SK-22] 的扫描器退化对账（与 `goTestTimeoutHits` 同一手法）：全仓一处表达式都扫不到，
+  // 要么是扫描器坏了，要么是 CI 里一个 `${{ … }}` 都不剩 —— 两种都必须说清，不能静默"通过"。
+  let expressionBodyCount = 0
   const pinnedStepPolicies = []
   const pinnedEnvLayerIds = new Set()
   const pinnedUses = new Set()
@@ -11545,6 +11893,7 @@ function main() {
     notes.push(...(result.notes ?? []))
     allowlistHits.push(...(result.allowlistHits ?? []))
     goTestTimeoutHits += result.goTestTimeoutHits ?? 0
+    expressionBodyCount += result.expressionBodies ?? 0
     pinnedStepPolicies.push(...(result.pinnedStepPolicies ?? []))
     for (const layer of result.pinnedEnvLayers ?? []) pinnedEnvLayerIds.add(layer.id)
     for (const uses of result.pinnedUses ?? []) pinnedUses.add(uses)
@@ -11659,6 +12008,24 @@ function main() {
       + '  「全仓至少一处单包预算」这条存在性对账本次**未生效**,不能当作该策略已通过。\n')
   }
 
+  // [SK-22] 的扫描器退化对账(与上面 `go test` 同口径):全文扫描器一旦失效(正则/循环被改坏),
+  // 它会**永远绿** —— 这正是本判据存在的理由的反面。全仓 0 处表达式 ⇒ 红(默认目录);
+  // 临时目录(--workflows-dir 的变异验证)只如实 WARNING,不制造假红。
+  if (expressionBodyCount === 0) {
+    if (isDefaultDirectory) {
+      failures.push({
+        name: '[SK-22]',
+        line: 0,
+        detail: '全文扫描在**所有** workflow 里一处 `${{ … }}` 都没找到 —— 要么扫描器退化了'
+          + '(判据静默变绿),要么 CI 里真的一个表达式都不剩(那样的 workflow 不可能是本仓的 CI 形态)。\n'
+          + '  ⇒ 与"解析出 0 个 run 块即失败"同一纪律:扫描器失效必须响,而不是放行。',
+      })
+    } else {
+      process.stderr.write('check-workflows: WARNING — 本次是对临时目录跑变异验证且没有扫到任何 '
+        + '`${{ … }}`;\n  [SK-22] 的"全仓至少一处表达式"存在性对账本次**未生效**,不能当作该策略已通过。\n')
+    }
+  }
+
   // `--workflows-dir` 的显式降级声明(F3-3):带参数 ⇒ 这不是全仓门禁。
   if (!isDefaultDirectory) {
     process.stderr.write(`check-workflows: WARNING — 正在检查**非默认目录**(${workflowDirectory}),这不是全仓门禁:\n`)
@@ -11709,6 +12076,9 @@ function main() {
     + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
     + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
     + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
+    + `    + SK-22 策略(表达式**词法字符集**:全文 ${expressionBodyCount} 处 \`\${{ … }}\` —— 含 `
+    + '`run:` 的 `#` 注释行 / heredoc(模板解析不看上下文);剥掉 `\'…\'` 单引号字面量后剩字符必须落在 '
+    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * , -` 与空白里;未闭合 / 空表达式 / 未闭合字面量同样红)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
 }
