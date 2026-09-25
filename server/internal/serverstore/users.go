@@ -185,7 +185,17 @@ func resolveRole(role string, isAdmin bool) string {
 	return RoleUser
 }
 
-// CreateUser inserts a user row and returns its id.
+// MaxUsernameBytes 是用户名的**唯一**长度上限（字节）。
+//
+// 两个消费端必须同源（R17A-09，审计 2026-09-25，P3）：
+//   - 写入侧：CreateUser 拒绝超长用户名（ErrUsernameTooLong）；
+//   - 登录侧：serverauth 的凭据长度闸（超过即 400，防线从未变过）。
+//
+// 另外它是审计可追溯性的前提：审计行里的 username 走
+// `util.EscapeControlLimit(name, 128)`，上限内逐字原样、超限**静默截断** ——
+// 只有"库里的用户名永远不超过它"，审计行的 username 才与 users.username 逐字相等。
+const MaxUsernameBytes = 128
+
 // CreateUser inserts a user row and returns its id.
 // 用户名大小写不敏感唯一(F9):先按 lower(username) 查重(干净库另有唯一索引
 // 兜底并发),LDAP/本地同名异大小写不再产生影子账号。
@@ -193,6 +203,12 @@ func CreateUser(db *sql.DB, u *User) (int64, error) {
 	username := strings.TrimSpace(u.Username)
 	if username == "" {
 		return 0, ErrValidation
+	}
+	// R17A-09:与登录路径同一上限（见 MaxUsernameBytes）。放在 DAO 的唯一写入口
+	// 是为了覆盖**全部**建号路径（管理端建号 / LDAP-OIDC 首次登录 provision /
+	// bootstrap-admin / 内部工具），而不是只堵管理端那一处。
+	if len(username) > MaxUsernameBytes {
+		return 0, ErrUsernameTooLong
 	}
 	var exists int
 	if err := db.QueryRow(`SELECT 1 FROM users WHERE lower(username) = lower(?) LIMIT 1`, username).Scan(&exists); err == nil {

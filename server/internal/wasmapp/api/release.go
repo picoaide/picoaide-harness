@@ -36,7 +36,7 @@ import (
 // 判定顺序：路径后缀 → 请求体 enabled → 缺省上架。路径后缀是**权威**（与 §8 的
 // 端点表一致）；请求体只用于"挂载点不含后缀"的场景（例如测试自建路由树）。
 func (h *Handlers) setPublished(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -118,7 +118,7 @@ func (h *Handlers) publishTarget(c *gin.Context) (bool, *apperr.Error) {
 
 // freeze 处理 POST .../wasm/:app_id/freeze（R37 第一步；body 可带 {"frozen":false} 解冻）。
 func (h *Handlers) freeze(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -189,7 +189,7 @@ func (h *Handlers) freeze(c *gin.Context) {
 
 // deleteApp 处理 DELETE .../wasm/:app_id（R37：软删 + 审计；"真删"由后台任务负责）。
 func (h *Handlers) deleteApp(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}

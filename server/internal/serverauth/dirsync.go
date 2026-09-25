@@ -144,6 +144,9 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	groupSeen := make(map[string]bool)
 	// skipped:目录里存在、但账号已停用的用户名(本轮跳过自动启用的人员)。
 	skipped := []string{}
+	// skippedLong:R17A-09 —— 目录里用户名超过 MaxUsernameBytes 的条目(本轮跳过,
+	// 不建"永远登不进来"的账号,也不中止整轮同步)。
+	skippedLong := []string{}
 	// deactivated:因目录中消失而被停用的用户名(逐人写审计)。
 	deactivated := []string{}
 	for _, e := range entries {
@@ -170,6 +173,16 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 				Status:      1,
 			})
 			if err != nil {
+				// R17A-09（审计 2026-09-25，P3）：目录里存在超过上限的用户名时
+				// **跳过该条目**（记日志 + 计入 skipped），而不是中止整轮同步 ——
+				// 一个畸形目录条目不该让全组织的目录对账停摆；也绝不建一个
+				// "永远登不进来"的账号（登录侧的同一道闸会拒绝它）。
+				if errors.Is(err, serverstore.ErrUsernameTooLong) {
+					log.Printf("ldap directory sync: username exceeds %d bytes, entry skipped: len=%d",
+						serverstore.MaxUsernameBytes, len(username))
+					skippedLong = append(skippedLong, username)
+					continue
+				}
 				if !errors.Is(err, serverstore.ErrDuplicate) {
 					return res, err
 				}
@@ -225,6 +238,13 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 	}
 	res.Groups = len(groupSeen)
 	res.SkippedDisabled = len(skipped)
+	// R17A-09:超过用户名上限的目录条目（本轮已逐条打日志；这里再汇总一行，
+	// 让"目录里有账号没被同步"这件事在服务端日志里一眼可见 —— 审计表不加新动作码，
+	// 因为它不是一次"管理员动作"，而是配置/数据问题）。
+	if len(skippedLong) > 0 {
+		log.Printf("ldap directory sync: %d entr(ies) skipped for exceeding the %d-byte username limit",
+			len(skippedLong), serverstore.MaxUsernameBytes)
+	}
 	// 审计①:本轮被跳过的已停用账号(每轮最多一条,点名到上限;不写会让
 	// "管理员禁用被同步无视"这件事在审计里彻底不可见,而它恰恰是安全事件
 	// 的处置动作)。

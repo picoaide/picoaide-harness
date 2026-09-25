@@ -58,6 +58,11 @@ func TestBalanceGateUsesCentQuantizedValue(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, db, token := newGateway(t, f)
 	enableBalanceGate(t, db, true)
+	// R17A-06（审计 2026-09-25，P1）起"未定价模型"默认在准入处就被拒
+	// （429 MODEL_NOT_PRICED）—— 本用例测的是**分位余额的判定边界**（0.004 → 429 /
+	// 0.006 → 200），必须让模型有价才走得到那条判据。取 1 元/1M：请求体是
+	// `messages:[]`（估算 token = 0 ⇒ 最小计费额那一层不参与），不会改变边界口径。
+	setModelPrices(t, db, 1, 1)
 	if _, err := serverstore.SetUserBalance(db, 1, 1, "", "tester"); err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +147,10 @@ func TestMonthlyGrantReachesActivatedBalance(t *testing.T) {
 	f := newFakeUpstream(t)
 	r, db, token := newGateway(t, f)
 	enableBalanceGate(t, db, true)
+	// 同 TestBalanceGateUsesCentQuantizedValue：R17A-06 起未定价模型会被准入拒，
+	// 本用例要断言的是"发放后能真的用起来"，所以给模型定价（1 元/1M；请求体
+	// `messages:[]` ⇒ 估算 token = 0 ⇒ 最小计费额不参与）。
+	setModelPrices(t, db, 1, 1)
 	run, err := serverstore.GrantMonthlyBalance(db, serverstore.BalanceModeAdd, 5, "tester", time.Now(), 0)
 	if err != nil {
 		t.Fatal(err)

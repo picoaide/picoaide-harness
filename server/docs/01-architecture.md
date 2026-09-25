@@ -39,6 +39,7 @@
 - **费用**:`usage.cost` = 输入×input_price/1e6 + 输出×output_price/1e6;高峰窗口(settings `usage.peak_windows`,北京时间)外 × 模型 `offpeak_discount`。改价/改窗口只影响之后产生的费用(记录时定价)。
 - **额度闸门(唯一一条,2026-09-11 收敛)**:`settings balance.enabled=true` 且该员工**已开通余额账户**
   且分位口径余额 ≤ 0 ⇒ 网关 429 `BALANCE_EXHAUSTED`(admin 豁免;余额查询失败 fail-closed)。
+  2026-09-25 起准入侧追加三层更严的判据(全部在**转发之前**,见 `internal/llmgateway/balance_gate.go`):学到的下限(结算失败 ⇒ 余额增长前拒绝)、未定价模型(输入价 NULL/≤0 ⇒ 429 `MODEL_NOT_PRICED`,缺省策略 `reject`)、最小计费额(prompt 估算 token × 输入价 > 余额 ⇒ 拒绝)。
   未开通(从未入账)的账号既不扣余额也不被闸门拦。
 - **已下线的三套旧额度**(别再把它们当现役闸门):
   员工 token 配额(`users.quota_tokens`)、员工金额配额(`users.quota_money`)、部门预算

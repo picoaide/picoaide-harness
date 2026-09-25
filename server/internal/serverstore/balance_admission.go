@@ -32,12 +32,63 @@ package serverstore
 // "被拒请求有可检索证据"。
 
 import (
+	"database/sql"
 	"log"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// UnpricedModelPolicySetting 是「未定价模型」的准入策略 settings 键
+// （R17A-06，审计 2026-09-25，P1）。
+//
+// 取值只有两个（见下面的常量）；**缺失/空/任何其它取值都回落 reject**。
+const UnpricedModelPolicySetting = "gateway.unpriced_model_policy"
+
+const (
+	// UnpricedModelPolicyReject（**默认**）：输入价 NULL 或 <= 0 的模型对
+	// "余额闸门适用"的账号一律在准入处拒绝（llmgateway 侧给
+	// `MODEL_NOT_PRICED`），请求不转发上游。
+	//
+	// 为什么默认是它（而不是放行）：未定价模型的成本侧恒为 0 ⇒ 结算永远不会因
+	// 余额不足失败 ⇒ R16C-02 的第 ② 层（学到的下限）永不置位、余额一分不减、
+	// 第 ① 层（分位余额 <= 0）永不成立。也就是说三层钱闸门在未定价模型上**同时
+	// 失效**，账号可以无限次真实调用上游（组织按平台的 key 付费）而平台零计费、
+	// 零扣款、零痕迹。实测：余额 0.01 的账号在 NULL 定价与 0 定价模型上分别
+	// 20/20、25/25 全部交付且全部命中上游。
+	//
+	// 为什么不是"按保守默认价算一个兜底最小计费额"：最小计费额 = prompt token ×
+	// 单价，而余额可以是任意小的正数 —— 任何按 token 计的单价乘一个短 prompt 都
+	// 远小于 0.01 元，闸门照样放行，而成本恒为 0 ⇒ 循环依旧无界。兜底价只能抬高
+	// 放行门槛，闭合不了"余额永不减少"这个洞。
+	UnpricedModelPolicyReject = "reject"
+	// UnpricedModelPolicyAllow 是**显式逃生门**：本组织确实有免费/内部（自建、
+	// 不计费）模型时，管理员把策略改成 allow，逐字回到历史行为（未定价模型照常
+	// 放行、上游被真实调用、成本记 0）。
+	//
+	// 误伤面与代价都写在这里，改默认值前先读：allow 等于承认"这些模型的上游成本
+	// 不进平台的账"，因此**只对确实不花钱的模型开**；开了之后余额闸门对这些模型
+	// 没有任何下界，被滥用的唯一可见证据是上游账单与 usage 里 cost=0 的行数与
+	// token 数（准入拒绝计数不会增长）。
+	UnpricedModelPolicyAllow = "allow"
+)
+
+// UnpricedModelPolicy 读取未定价模型策略；缺失/非法取值一律回落 reject
+// （fail-closed 方向：不允许一个错字把闸门关掉）。
+func UnpricedModelPolicy(db *sql.DB) string {
+	if db == nil {
+		return UnpricedModelPolicyReject
+	}
+	v, ok, err := GetSetting(db, UnpricedModelPolicySetting)
+	if err != nil || !ok {
+		return UnpricedModelPolicyReject
+	}
+	if v == UnpricedModelPolicyAllow {
+		return UnpricedModelPolicyAllow
+	}
+	return UnpricedModelPolicyReject
+}
 
 // MoneyToMicro 把元金额折算成**记账微元**（int64，四舍五入）。
 // 与 roundMicro 同一精度口径（1e-6 元），是"分位余额"与"最小计费额"比较的唯一桥。
@@ -84,9 +135,16 @@ var (
 	balanceAdmissionFloor sync.Map // int64 -> int64（微元）
 )
 
-// RecordBalanceAdmissionRejection 记录一次准入拒绝（计数 + 最近一条 + 一行可 grep 的
-// 结构化日志）。返回累计拒绝次数。（日志的**按用户节流**在 llmgateway 侧 —— 那里
-// 才知道端点与节流窗口；这里每次都记，保证计数与"最近一条"不丢。）
+// RecordBalanceAdmissionRejection 记录一次准入拒绝（计数 + 最近一条）。返回累计
+// 拒绝次数。
+//
+// **这里故意不打日志**（R17A-07，审计 2026-09-25，P2）：旧实现在这里无条件
+// `log.Printf`，而拒绝是**攻击者可无限触发**的事件（拒绝路径不转发、默认不限速）
+// ⇒ 一个余额耗尽的账号可以以任意速率让服务端写日志，把"按用户节流"的声称面
+// （llmgateway 的 shouldLogBalanceRejection，1 分钟/用户）整体作废。实测 30 次
+// 拒绝 = 30 行。现在日志只有一个出口：llmgateway 的**节流**日志（带 suppressed
+// 累计计数，信息不丢），本函数只负责计数与"最近一条"投影，两者都不产生无界
+// 写入面。
 func RecordBalanceAdmissionRejection(ev BalanceAdmissionRejection) int64 {
 	if ev.At == "" {
 		ev.At = time.Now().UTC().Format(time.RFC3339)
@@ -96,8 +154,6 @@ func RecordBalanceAdmissionRejection(ev BalanceAdmissionRejection) int64 {
 	balanceAdmissionLast = ev
 	balanceAdmissionHaveLast = true
 	balanceAdmissionMu.Unlock()
-	log.Printf("gateway: balance admission rejected user=%d endpoint=%s model=%q reason=%s required_money=%.6f balance_money=%.6f total_rejections=%d",
-		ev.UserID, ev.Endpoint, ev.Model, ev.Reason, ev.RequiredMoney, ev.BalanceMoney, n)
 	return n
 }
 

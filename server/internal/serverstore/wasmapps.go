@@ -396,25 +396,33 @@ func SoftDeleteWasmApp(ctx context.Context, db *sql.DB, appID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	// R16A-17(审计 2026-09-25,P2):清字节时**必须同时置 deleted_at**。
+	// R16A-17(审计 2026-09-25,P2) + 本次修正:**只清字节,不置 deleted_at**。
 	//
 	// 缺陷形态:`SetReleaseStatusForReview` 的 approve 谓词是
 	// `deleted_at IS NULL AND (archive IS NOT NULL OR status <> 'rejected')`,
-	// 第二个析取项对 **pending** 行恒真 ⇒ 只清字节不置 deleted_at 时,审核通过会
-	// **成功返回**并产出 `approved + archive IS NULL` 的坏行 —— 而 apps.go 里那句
-	// "任何交错都产不出 `approved + archive IS NULL` 的坏行"正是 N-4(P0 级)修复的
-	// 判据本体(今天潜伏:应用行已退役、全仓无 restore;一旦出现"恢复应用"或任何以
-	// status='approved' 为判据的读面,坏行立刻变成"当前生效版本没有字节")。
+	// 第二个析取项对 **pending** 行恒真 ⇒ 只清字节时,审核通过会**成功返回**并产出
+	// `approved + archive IS NULL` 的坏行 —— 而 apps.go 里那句"任何交错都产不出
+	// `approved + archive IS NULL` 的坏行"正是 N-4(P0 级)修复的判据本体。
 	//
-	// 为什么选"补 deleted_at"而不是"给 approve 谓词加'应用未退役'":
-	//   ① 与**孪生路径**一致 —— `SoftDeleteWasmRelease`(版本级软删)本来就是
-	//      `SET deleted_at = now(), archive = NULL, size = 0`,应用级退役漏了这一列;
-	//   ② "字节被清 ⇒ 该行不可能再被服务"这条语义本来就等于软删,放在写入侧收口比
-	//      在每个读/写谓词里各加一次更靠近不变式的唯一写点;
-	//   ③ 改谓词要跨表 EXISTS(apps.deleted_at IS NULL),会连带改"0 行 ⇒ 哪个 sentinel"
-	//      的错误分类,而查询与更新不在同一个快照里时还会引入新的竞态面。
+	// R16A-17 的第一版修法是"清字节时同时置 deleted_at"。**但它把退役做成了
+	// 版本级删除**,与退役自己的产品契约冲突:退役后的**保留期内**,作者与管理员
+	// 仍要能读版本清单(`GET …/:app_id/releases`、管理端同名端点、导出快照)——
+	// 那是"作者能拿到被拒理由"这条承诺(R1-pm-3)在删除之后的唯一落点,也正是
+	// `TestMyReleasesSurvivesRetirement` 逐字钉住的语义。置了 deleted_at 之后,
+	// 一切 `deleted_at IS NULL` 的读面(作者面 **与管理面**)都看不见这些行 ⇒
+	// 退役 = 版本历史凭空消失。
+	//
+	// 所以坏行改由**谓词**收口(见 `SetReleaseStatusForReview` 的 approve 分支:
+	// 加"应用未退役"条件),这里只清字节 —— `deleted_at` 于是回到它本来的语义:
+	// "这个版本被显式删掉了"(版本级软删 / GC),而不是"它的应用退役了"。
+	//
+	// 为什么这不会重新打开 R16A-17:清字节的路径只有三条,各自都被谓词覆盖 ——
+	//   ① 应用退役:apps.deleted_at 非空 ⇒ 新增的 EXISTS 条件挡下;
+	//   ② 版本级软删(SoftDeleteWasmRelease / GC):本行 deleted_at 非空 ⇒ 挡下;
+	//   ③ 审核拒绝:status='rejected' ⇒ 第二个析取项挡下。
+	// 三条之外不存在把 archive 清空的写点(全仓 grep `archive = NULL`)。
 	if _, err := tx.ExecContext(ctx, `UPDATE app_releases
-		SET deleted_at = now(), archive = NULL, size = 0, updated_at = now()
+		SET archive = NULL, size = 0, updated_at = now()
 		WHERE kind = $1 AND app_id = $2 AND archive IS NOT NULL`,
 		AppKindWasmApp, id); err != nil {
 		return err

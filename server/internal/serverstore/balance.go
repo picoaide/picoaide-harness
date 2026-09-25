@@ -105,6 +105,26 @@ func GetBalanceSettings(db *sql.DB) (BalanceSettings, error) {
 
 // SaveBalanceSettings 持久化三键(逐键 upsert;单键失败返回错误由调用方回滚语义处理)。
 func SaveBalanceSettings(db *sql.DB, s BalanceSettings) error {
+	return saveBalanceSettingsQ(func(key, value string) error { return SetSetting(db, key, value) }, s)
+}
+
+// SaveBalanceSettingsTx 在**调用方事务**内持久化三键(R17C-02 同族,审计 2026-09-25)。
+//
+// 为什么需要它:月度额度(`balance.monthly_amount`)与闸门开关(`balance.enabled`)
+// 是**改钱**的配置 —— 它决定每个员工每月自动到账多少钱、以及余额耗尽时拦不拦。
+// 管理端 PUT /api/server/admin/balance 原先的形态是"设置独立事务提交 → 审计
+// fire-and-forget(`_ = AuditLog`)"⇒ 审计写不进去时额度照改、零痕迹。现在配置与
+// 审计在同一个事务里(与 models/providers/balance_adjust 同形)。
+//
+// 不失效缓存:与 SetSettingTx 同一约定 —— 缓存失效只能在**提交后**做,由调用方
+// 在 Commit 之后调用 InvalidateSettings()。
+func SaveBalanceSettingsTx(tx *sql.Tx, s BalanceSettings) error {
+	return saveBalanceSettingsQ(func(key, value string) error { return SetSettingTx(tx, key, value) }, s)
+}
+
+// saveBalanceSettingsQ 是两条入口(池上 / 事务内)的**唯一**实现:键、取值归一与
+// 校验只写一次,避免"池上版本改了、事务版本忘了改"的口径分叉。
+func saveBalanceSettingsQ(set func(key, value string) error, s BalanceSettings) error {
 	if s.MonthlyAmount < 0 {
 		return ErrValidation
 	}
@@ -112,13 +132,13 @@ func SaveBalanceSettings(db *sql.DB, s BalanceSettings) error {
 	if s.MonthlyMode == BalanceModeCover {
 		mode = BalanceModeCover
 	}
-	if err := SetSetting(db, BalanceEnabledSetting, strconv.FormatBool(s.Enabled)); err != nil {
+	if err := set(BalanceEnabledSetting, strconv.FormatBool(s.Enabled)); err != nil {
 		return err
 	}
-	if err := SetSetting(db, BalanceMonthlyAmount, formatMoney(s.MonthlyAmount)); err != nil {
+	if err := set(BalanceMonthlyAmount, formatMoney(s.MonthlyAmount)); err != nil {
 		return err
 	}
-	return SetSetting(db, BalanceMonthlyMode, mode)
+	return set(BalanceMonthlyMode, mode)
 }
 
 // ---------------------------------------------------------------------------

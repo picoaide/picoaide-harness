@@ -151,7 +151,7 @@ export default function Gateway() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
-  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128', file_expiry_days: '7' })
+  const [cfg, setCfg] = useState({ default_model: '', rate_limit: '0', peak_windows: '', retention_months: '6', default_thinking_level: 'max', server_base_url: '', max_file_refs: '600', body_parse_budget_mb: '128', file_expiry_days: '7', unpriced_model_policy: 'reject' })
   const [peakList, setPeakList] = useState<PeakWindowRow[]>([])
   // 审计 2026-09-12 P1-2:服务端存的 peak_windows 无法解析时为 true →
   // 禁止把空列表当成「清空」写回去(那是静默破坏计费口径)。管理员显式
@@ -225,6 +225,7 @@ export default function Gateway() {
         max_file_refs: String(g.max_file_refs ?? '600'),
         body_parse_budget_mb: String(g.body_parse_budget_mb ?? '128'),
         file_expiry_days: String(g.file_expiry_days ?? '7'),
+        unpriced_model_policy: String(g.unpriced_model_policy ?? 'reject'),
       })
       const peak = parsePeakWindows(g.peak_windows ?? '')
       if (peak.ok) {
@@ -309,6 +310,7 @@ export default function Gateway() {
         max_file_refs: cfg.max_file_refs,
         body_parse_budget_mb: cfg.body_parse_budget_mb,
         file_expiry_days: cfg.file_expiry_days,
+        unpriced_model_policy: cfg.unpriced_model_policy,
         peak_windows: peaked.length ? JSON.stringify(peaked) : '',
       }
       const res = await request(`${ADMIN_API}/gateway`, { method: 'PUT', body: JSON.stringify(body) })
@@ -916,6 +918,22 @@ export default function Gateway() {
                 <Input id="file-expiry-days" type="number" min={1} max={30} value={cfg.file_expiry_days}
                   onChange={(e) => setCfg({ ...cfg, file_expiry_days: e.target.value })} />
                 <p className="text-xs text-muted-foreground">员工上传的文件最长保留天数(1~30);客户端没带过期时间或要得更久都按该值收敛,超期由服务端在上游删除</p>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="unpriced-model-policy">未定价模型</Label>
+                <Select value={cfg.unpriced_model_policy}
+                  onValueChange={(v) => setCfg({ ...cfg, unpriced_model_policy: v })}>
+                  <SelectTrigger id="unpriced-model-policy"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="reject">拒绝请求(推荐)</SelectItem>
+                    <SelectItem value="allow">允许使用(免费/内部模型)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  没填价格(或填 0)的模型在余额闸门开启时怎么处理。**拒绝**是缺省:未定价模型的费用按 0 记,
+                  结算永远不会因余额不足失败 ⇒ 余额不减少、闸门三层同时失效,账号可以无限次真实调用上游
+                  (组织付上游的钱、平台零计费零痕迹)。本组织确实有自建/免费模型时选「允许使用」。
+                </p>
               </div>
               <div className="space-y-1">
                 <Label htmlFor="body-parse-budget">请求体加工内存预算(MiB)</Label>

@@ -937,6 +937,14 @@ func (a *AdminAPI) createUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "VALIDATION", "用户名不能为空")
 		return
 	}
+	// R17A-09（审计 2026-09-25，P3）：与登录路径同一上限。超长用户名建出来的
+	// 账号**永远登不进来**（登录侧一直有 128 字节闸），而且它的审计行会被
+	// EscapeControlLimit 静默截断 ⇒ 审计与 users.username 不再逐字相等。
+	if errors.Is(err, serverstore.ErrUsernameTooLong) {
+		writeError(c, http.StatusBadRequest, "VALIDATION",
+			fmt.Sprintf("用户名过长（最多 %d 字节）", serverstore.MaxUsernameBytes))
+		return
+	}
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
@@ -2294,13 +2302,39 @@ func (a *AdminAPI) putBalance(c *gin.Context) {
 		return
 	}
 	s2 := serverstore.BalanceSettings{Enabled: req.Enabled, MonthlyAmount: req.MonthlyAmount, MonthlyMode: req.MonthlyMode}
-	if err := serverstore.SaveBalanceSettings(a.DB, s2); err != nil {
+	actor := currentAdminUsername(c)
+	// R17C-02 同族(审计 2026-09-25 的全仓扫描):月度额度与闸门开关是**改钱**的
+	// 配置(决定每个员工每月自动到账多少钱、余额耗尽拦不拦),而审计此前是事务外的
+	// `_ = AuditLog(...)` —— 审计写失败时额度照改、闸门照开/关、审计 0 行。
+	// 现在"设置三键 + 审计"在**同一个事务**里(与 models/providers/balance_adjust
+	// 同形):审计写不进去就整体回滚 + 500。
+	//
+	// 注意随后的 GrantMonthlyBalance 仍是**独立事务**(按人发放,自身的幂等锚与
+	// 流水保证"钱动了必有账"):那次失败不回滚本次设置 —— 管理员看到的
+	// `run:null`/`auto_grant:false` 就是"设置已保存、发放没跑成"的如实信号
+	// (R17C-03 认账的时序,不在本次修复面内)。
+	tx, err := serverstore.UsageWriteTx(a.DB)
+	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 		return
 	}
-	actor := currentAdminUsername(c)
-	_ = serverstore.AuditLog(a.DB, actor, "balance_settings",
-		fmt.Sprintf("enabled=%v amount=%.2f mode=%s", req.Enabled, req.MonthlyAmount, req.MonthlyMode))
+	defer tx.Rollback() //nolint:errcheck // 提交后为 no-op
+	if err := serverstore.SaveBalanceSettingsTx(tx, s2); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	if err := serverstore.AuditLogTx(tx, actor, "balance_settings",
+		fmt.Sprintf("enabled=%v amount=%.2f mode=%s", req.Enabled, req.MonthlyAmount, req.MonthlyMode)); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
+		return
+	}
+	// 提交后失效缓存:SetSettingTx 不失效缓存(事务可能回滚),提交成功必须让
+	// 运行期(月度发放调度器/闸门读取)立刻看到新值。
+	serverstore.InvalidateSettings()
 	var run *serverstore.GrantRun
 	if req.MonthlyAmount > 0 {
 		g, gerr := serverstore.GrantMonthlyBalance(a.DB, req.MonthlyMode, req.MonthlyAmount, actor, time.Now(), 0)

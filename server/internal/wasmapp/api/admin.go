@@ -72,7 +72,7 @@ const (
 // 查询串：q（app_id/标题/负责人的大小写不敏感子串）、status（见上）、
 // limit/offset、include_deleted、owner。
 func (h *Handlers) adminList(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -336,7 +336,7 @@ func auditText(s string, max int) string {
 // （status=rejected 时正是"最近被拒的版本 + 理由"），发布者侧的同源出口是
 // 员工面的 GET …/apps/wasm/:app_id/releases（MyReleases）。
 func (h *Handlers) adminReleases(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -436,7 +436,7 @@ func (h *Handlers) adminRejectRelease(c *gin.Context) {
 
 // reviewRelease 是 approve/reject 的共用实现（两条路径的差异只有目标状态与理由）。
 func (h *Handlers) reviewRelease(c *gin.Context, approve bool) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -738,7 +738,7 @@ func (h *Handlers) currentVersionOf(ctx context.Context, appID string, app *serv
 
 // AdminUnpublish 管理员下架（R23：管理员可处置任意应用）。
 func (h *Handlers) adminUnpublish(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -789,7 +789,7 @@ func (h *Handlers) adminUnpublish(c *gin.Context) {
 // 为什么管理面必须有上架：下架是管理员的处置动作，处置完要能恢复；只给下架
 // 等于让管理员把应用"关掉就再也打不开"（客户端面的上架只有发布者能调）。
 func (h *Handlers) adminPublish(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -927,7 +927,7 @@ func limitsSourceLabel(source, profile string) string {
 
 // AdminLimitsGet 读当前平台限制项 + 四笔账预览。
 func (h *Handlers) adminLimitsGet(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1005,7 +1005,7 @@ func validateLimitsEnvelope(envelope map[string]json.RawMessage) *apperr.Error {
 // 于是"存的值恰好等于档位值、但控制台行被清掉"这次运维动作（来源 setting → profile）
 // 不留任何审计 —— 而它恰恰是"我到底还有没有一条钉死的设置"这个问题的答案。
 func (h *Handlers) adminLimitsPut(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1063,7 +1063,7 @@ func (h *Handlers) adminLimitsPut(c *gin.Context) {
 // 归属只约束"谁能续传新版本"；转移后旧归属者的发布请求即 404，新归属者获得续传权。
 // 审计明细复用 appstore.TransferOwnerAuditDetail —— 同一个动作在审计页里必须长得一样。
 func (h *Handlers) adminTransferOwner(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1132,7 +1132,7 @@ func (h *Handlers) adminTransferOwner(c *gin.Context) {
 
 // AdminFreeze 管理员冻结/解冻（R37）。
 func (h *Handlers) adminFreeze(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1204,7 +1204,7 @@ func (h *Handlers) adminFreeze(c *gin.Context) {
 // 只有这一个端点在管理面写 settings：开关变更**必须**写审计（§8 原话），
 // 而"谁在什么时候把全组织的发布策略从免审改成必审"是必须答得出的问题。
 func (h *Handlers) adminReview(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1289,7 +1289,7 @@ func (h *Handlers) loadAdminApp(c *gin.Context, appID string, allowDeleted bool)
 
 // AdminDiagnostics 是管理面诊断（只读）：近期失败码/计数/hints/保留期。
 func (h *Handlers) adminDiagnostics(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}
@@ -1345,7 +1345,7 @@ func runtimeUnavailable() []gin.H {
 
 // AdminRuntime 是平台级运行时水位（只读）：编译/执行/事件/磁盘 + 缺口清单。
 func (h *Handlers) adminRuntime(c *gin.Context) {
-	if err := h.requireReady(); err != nil {
+	if err := h.requirePlatform(); err != nil {
 		writeErr(c, err)
 		return
 	}

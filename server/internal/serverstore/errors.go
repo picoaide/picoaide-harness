@@ -8,6 +8,14 @@ var (
 	ErrIdentityConflict = errors.New("username is bound to another identity provider subject")
 	ErrNotFound         = errors.New("not found")
 	ErrDuplicate        = errors.New("duplicate")
+	// ErrUsernameTooLong 表示用户名超过 MaxUsernameBytes（R17A-09，审计
+	// 2026-09-25，P3）。限长不是新规矩：登录路径一直用 128 字节挡住超长输入
+	// （serverauth.handler），因此 >128 字节的账号**本来就登不进来**；而写入侧
+	// 没有同一道闸时库里会存在这种账号，且审计行里的 username 走
+	// `util.EscapeControlLimit(name, 128)` 会被**静默截断** ⇒ 审计行与
+	// `users.username` 不再逐字相等（按用户名筛选/对账会漏）。现在由 DAO 的
+	// 唯一写入口拒绝，两端上限同源。
+	ErrUsernameTooLong = errors.New("username too long")
 	// ErrConflict is returned when a resource name collides across the
 	// marketplace skills and the shared-skill store (决策 2026-08-25:
 	// 市场与组织合并为「市场」后，同名技能跨源互斥，上传/上架/approve 阻断)。
