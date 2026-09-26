@@ -2207,3 +2207,84 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
 - **仍未闭环（需 mac runner）**：在真实 mac runner 上打一次未签名冒烟产物，
   验证 ①`codesign --verify` 通过 ②产物真的能启动。**这条只能在下个 macOS desktop job 上做**——
   已写入发布交接项。
+
+---
+
+### §7.65 第二十七轮 AA3（客户端与宿主插件新面清扫）：**1 P1 + 主控自己的闭合声明被证伪**
+
+**VERDICT: 新发现 P0 0 / P1 1 / P2 3 / P3 1**。基线 = `ab7ea07f3d`（涉及代码与 `2f3f125044` 逐字节相同）。
+全部结论有真跑 + 变异双向证据；变异后逐文件 sha256 与主树比对还原。
+
+#### §7.65.1 【P1】`updates.ts` 的会话派生异步投影没有代际守卫（Z2-03 原样未修）
+
+- `packages/host/desktop/src/updates.ts`：`:835 await adapter.downloadUpdate` →
+  `:845 await rememberDownload`（把 `downloadedVersion` 写进 `state.json`，**跨重启存活**）→
+  `:850-851 readyVersion/readyPath` → `:855 announceReady`（系统通知 + 托盘「安装…并重启」）；
+  检查路径 `:680 await pending` → `observeResult` → `:749 availableVersion`。
+  **完成路径上只有 `disposed`，没有任何会话身份/代际判定。**
+- **后果比 Z2 当时登记的更重**：`installReady()` **不复检归属**，直接把 `readyPath` 交给
+  `adapter.installUpdate`，而 `electron-runtime.ts:699-716` 在 macOS 走 `shell.openPath`
+  ⇒ **上一个租户/上一个渠道下载的安装包会被平台安装器真的拉起**（渠道间 `desktop.home_dir` 不同，
+  正是历史上"所有对话消失"那一类事故的形态）。唯一做清单 + sha256 复检的 `reuseDownloadedInstaller`
+  只在重启/换源时跑。
+- **判据**（确定性、**带对照组自校准**）：对照组绿（证明夹具能观察到那次落盘）、缺陷组红 3/3；
+  结果 `{downloadedVersion:'2.1.0', announcedReady:['2.1.0'], announceUpdateReadyCalls:1}`
+  而当前会话是**另一台服务端**。变异：加 5 行 `sourceEpoch` ⇒ 两个探针全绿；还原后 sha256 与主树一致。
+
+#### §7.65.2 【P2】登记 Z2-03 的那条判据**本身会假绿**（本轮最该记住的一条）
+
+`temp/r26/Z2-client/probe/desktop/zz-z2-probe-updates-race.spec.ts:1240-1266` 在假定时器下
+只推进固定步数就取 `publishedStates.at(-1)`；迟到续体没跑完时"最后一次发布"**恰好是会话切换的清零发布**
+⇒ **缺陷仍在时断言通过**。实测（同一棵树、同一分钟）：单跑该用例 **5/5 红**；同文件整跑 **3/3 该用例绿**。
+⇒ **CI 是整包跑，这条判据永远不会替 Z2-03 报警。**
+修法：改用"单调断言（任何一次发布命中即算）+ 正信号 + 对照组"，不要取 `at(-1)`。
+
+#### §7.65.3 其余三条与一条结构性提示
+
+- **【P2】`browser/src/index.ts:421-434`（订阅点 `:652`）`runSessionSwitch` 无并发守卫**：
+  第一步 `await steps.closeAll()`（真实 = 销毁全部 `WebContentsView`）**之后**才 `applyUserScope()`，
+  而订阅者不串行化 ⇒ A→B 与 B→C 交错时，**先发起、后完成**的那次用自己捕获的 (user, serverHash)
+  再 apply 一次 ⇒ **作用域退回上一代账号**（持久分区 / per-user store / 分区权限守卫全指向 B）。
+  加 1 个代际号（`await closeAll` 后比对）即绿；`prewarm()` 前也应再比对一次。
+- **【P2】`loop-notify-route.ts:31-34`：状态变更型 GET 没有持有性证明。**
+  真实 `WebServer` + 真实 socket 探针（含对照腿）：裸 GET（无 Origin、无 cookie）⇒ **200** +
+  待跳转 `sessionId`、`consumesAfterFirstGet:1`、**`fenceCallsForExactRoute:0`**
+  —— `connection` 的 Host/Origin+cookie 围栏只装在 `/api` **prefix** 通道，而 exact 路由优先
+  （`webserver/src/index.ts:317-320`）；对照腿证明同一 webserver 的 `/api` prefix 路径确实 401。
+  后果：本机任意进程把待跳转会话**取走并清空**，持证明的渲染层轮询再也拿不到（`sessionId:null`）
+  = 用户报的"点了没反应"，并顺带泄露会话 id。同包其余 exact 路由三段齐全，**它是唯一例外**
+  （`grep -c acceptWriteProof loop-notify-route.ts` = 0）。
+- **【P3】`browser/src/index.ts:416` 的 JSDoc 与实现相反**（注释"先切身份，再做清理"，
+  实测顺序 `['closeAll','applyUserScope','clearOps','prewarm']`）—— 安全相关顺序的文档漂移，
+  照注释改回去会重演 2026-09-15"静默删掉新账号已保存标签页"的回归。
+
+#### §7.65.4 **主控自己的闭合声明被证伪（认账）**
+
+AA3 逐条核了 `git log 2f3f125044..HEAD -- packages/host/desktop/src/updates.ts`（**为空**）与
+`--stat`（只含 4 个 enterprise src + 1 新模块）⇒ **§7.63 把 FIX-30 记为"Z2-01 已闭合"是对的，
+但同一轮的 Z2-03（`updates.ts`）是 P2 兄弟项，我从未派给任何泳道，§7.63 的"四条泳道全部收工"
+读起来像是这一族已经收口** —— 实际没有。**这是我的漏派，不是泳道的问题**：
+Z2 报告把 Z2-01 列为 P1、把 Z2-03/04/05 列在 B.3【P2】"同族（三条，均为实跑）"，
+我按 P1 优先派工后**没有回头把 P2 同族也派掉**，也没有在台账里显式登记"这三条仍未派"。
+**新纪律**：审计报告里凡是带"同族"字样的条目，派工时必须**要么派掉、要么在台账里显式登记为未派**，
+不得让"P1 已修"隐含地把整个同族读成已闭合。
+
+第二条证伪：Z2 §C 的「`write-proof.ts` … GET 读面由各路由自己的方法闸处理」这条**前提**已有反例
+（§7.65.3 的 `loop-notify-route.ts`），属"判据的定义域"问题 —— 与 §0.3 第 3 条教训同型
+（**判据的取值域必须等于被守护方的真实解析面**），这是该教训的**第三次**实例。
+
+#### §7.65.5 结构性提示（本轮最有长期价值的一条）
+
+`packages/host/enterprise/tests/session-epoch-wiring.spec.ts` 的 `GUARDED_FILES`
+把作用域**写死成那 4 个文件名** ⇒ 它的"新增未守卫接入口即红"**对别的包结构上不可能报警**。
+这正是 §7.65.4 那条漏派的**判据侧镜像**：判据的**扫描根**决定了它能看见什么。
+要真收口，扫描根必须是**仓库级**（或按 `subscribeSession*` / `pico/session-changed` 反查全仓调用点）。
+AA3 的全仓普查表已在报告里：`packages/host/**` 另有两条同族（本节 AA3-01、AA3-03）
++ 两条未实跑观察（`wasm-apps-host/src/index.ts:683/694` 的 `void closeAll/clearAll` 无代际；
+`skill-telemetry.ts:176/187` 在 await 之后才读会话）。**已核干净**：app-ai-runner（generation 守卫）、
+connectors（`beginCredentialScopeSwitch` + `transitionEpoch` + lifecycle 串行）、cron（纯同步）、
+account-card（`adopt`/`cancelInflight`/`owns`）、host-locale、memory-evolve 的 ScopeStore。
+
+**另（有意设计，未判为缺陷）**：memory-evolve 的本地 HTTP 面（`lib/http-guard.js`）口径是
+"GET/HEAD 只读放行、不要求持有性证明" ⇒ 本机任意进程可读全部记忆/待办/书签/广播消息。
+模块头写明是有意设计；建议把"只读面是否也应加持有性证明"单独立项（属产品决策）。
