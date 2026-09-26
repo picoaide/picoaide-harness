@@ -177,7 +177,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '5806cb67bc82d2940ad1bed3a5efdba116ff212bac4edf63368f59754feb9969' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '8cf8ccd107ad4a6fd479fe8dcc827ffc06eadf8c78c93361944bbd4c9731abcf' }],
 ])
 
 /**
