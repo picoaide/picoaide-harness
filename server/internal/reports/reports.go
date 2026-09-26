@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/picoaide/picoaide/internal/serverstore"
 )
 
@@ -472,11 +474,21 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 				// 单条订阅的期号生成失败**不得**终止整批（R22-V3-B1）：修前这里是
 				// `return ok, failed, err`，于是一条坏行（或一次库故障）让其余订阅这一轮
 				// 全部不投，而下一轮又在同一条上再次失败 ⇒ 全量停投且不自愈。
-				// 现在降级成"这一条本轮失败"：failed++ → last_error 留痕（锁内落账、
-				// 带退避）→ continue 处理其余订阅。
+				// 现在降级成"这一条本轮失败"：failed++ → last_error 留痕（锁内落账）→
+				// continue 处理其余订阅。
+				//
+				// 留痕分两档（R23-V3-B1）：**期号不可用**类（解析失败 / `SQLSTATE 22xxx`
+				// 的日期越界）与"不可信游标"同一处置 —— 不设退避、不钉游标，人工改回合法值
+				// 后**下一轮**就恢复（否则 22008 会先设下 1 小时/24 小时的退避窗口，
+				// 与形态非法档明确写下的"改好即自愈"承诺相反）。其余（库故障 / 网络）
+				// 才是可恢复失败，照常退避。
 				failed++
 				log.Printf("reports: subscription %d: generate report for period %s: %v", id, period, gerr)
-				recordReportGenerateFailure(ctx, db, id, period, month, gerr)
+				if periodUnusableError(gerr) {
+					recordReportFailure(ctx, db, id, "", month, gerr.Error(), false)
+				} else {
+					recordReportFailure(ctx, db, id, period, month, gerr.Error(), true)
+				}
 				continue
 			}
 			body, bodies[period] = genBody, genBody
@@ -589,9 +601,41 @@ func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.T
 	return period, due, anomaly, nil
 }
 
-// recordReportGenerateFailure 在**该订阅的锁内**记录"这一期生成失败"（R22-V3-B1 的
-// 另一半）：`last_error` + `fail_streak` + 退避窗口，与投递失败**同一套**退避策略
-// （`reportRetryDelay`：首次 1 小时、之后按天）。
+// errPeriodUnusable 标记"这一期号不可用"（形态非法 / 超出报表数据模型可表示的区间）——
+// 与"库故障/网络"这类**可恢复**失败分开处置的依据（R23-V3-B1）。
+var errPeriodUnusable = errors.New("报表期号不可用")
+
+// periodUnusableError 报告"这一次生成失败"是否属于**期号不可用**类。
+//
+// 两来源：
+//
+//   - `GenerateMonthlyReportForPeriod` 的解析失败（`errPeriodUnusable` 包裹）；
+//   - PostgreSQL 的日期越界族 —— 实测 `pending_period='0000-01'` 时聚合 SQL 报
+//     `date/time field value out of range: "0000-01-01" (SQLSTATE 22008)`。
+//     `22007`（invalid_datetime_format）/`22003`（numeric_value_out_of_range）同属
+//     "喂进去的日期/数值本身越界"，一并按本档处理（口径 = **改库值即可恢复**）。
+//
+// 用 `errors.As` 取 `*pgconn.PgError` 判码，不做错误串匹配（错误串的形状由驱动决定，
+// 且本仓已有"对错误串判 SQLSTATE"会静默永不命中的教训）。
+func periodUnusableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errPeriodUnusable) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "22007", "22008", "22003":
+			return true
+		}
+	}
+	return false
+}
+
+// recordReportFailure 在**该订阅的锁内**记录"这一条本轮失败"（R22-V3-B1 的
+// 另一半；R23-V3-B1 把"是否退避"变成显式参数）。
 //
 // 为什么必须持锁再写（而不是直接 `db.Exec`）：投递路径的记账纪律是"认领连接上落账"
 // （R14-K hold-and-wait 守则），这里写的是**同一行**，必须与认领互斥，否则会与另一个
@@ -599,6 +643,15 @@ func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.T
 //
 // `period` 非空 ⇒ 若该订阅的 `pending_period` 还是空，这一期会被钉成欠投游标
 // （`MarkReportAttemptOn` 的 CASE 谓词）⇒ 下一轮继续补投它，不丢期。
+// **不可信期号档必须传空**：那一格本身不可信，拿它去钉游标等于把坏值洗成"待投期"。
+//
+// `retry` 决定要不要设退避窗口：
+//
+//	true —— 可恢复失败（库故障 / 网络 / webhook 类）：`fail_streak+1` 对应的
+//	        `reportRetryDelay`（首次 1 小时、之后按天）；
+//	false —— **期号不可用**档：`next_attempt_at` 置 NULL，人工把库值改回合法期号后
+//	        下一轮就恢复（不需要重启、也不该等一个退避窗口）。它同时**清掉**此前
+//	        可能已设下的退避 —— 恢复路径的承诺必须对"先失败过几次"同样成立。
 //
 // 落账失败只记日志：这是"失败之上的失败"，绝不能再把异常抛回调用方（那会把一条订阅的
 // 问题重新升级成整轮中止 —— 正是本条要消除的形态）。
@@ -606,10 +659,10 @@ func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.T
 // `now` 用调用方传进来的**调度时钟**（与投递失败路径的 `nextAttemptAfterFailure(month, …)`
 // 同一个基准），不在这里另取 `time.Now()`：判据用注入时钟推进月份，混用真实时钟会让
 // 退避窗口与调度时钟错位。
-func recordReportGenerateFailure(ctx context.Context, db *sql.DB, id int64, period string, now time.Time, genErr error) {
+func recordReportFailure(ctx context.Context, db *sql.DB, id int64, period string, now time.Time, reason string, retry bool) {
 	conn, claimed, cerr := claimReportDelivery(ctx, db, id)
 	if cerr != nil {
-		log.Printf("reports: subscription %d: claim to record the generation failure: %v", id, cerr)
+		log.Printf("reports: subscription %d: claim to record the failure: %v", id, cerr)
 		return
 	}
 	if !claimed {
@@ -618,13 +671,15 @@ func recordReportGenerateFailure(ctx context.Context, db *sql.DB, id int64, peri
 	defer releaseReportDelivery(ctx, conn, id)
 	sub, serr := serverstore.GetReportSubscriptionOn(ctx, conn, id)
 	if serr != nil {
-		log.Printf("reports: subscription %d: re-read to record the generation failure: %v", id, serr)
+		log.Printf("reports: subscription %d: re-read to record the failure: %v", id, serr)
 		return
 	}
-	next := nextAttemptAfterFailure(now, sub.FailStreak+1)
-	if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, false,
-		genErr.Error(), ptrTime(next)); merr != nil {
-		log.Printf("reports: subscription %d: recording the generation failure did not land (%v) — "+
+	var next *time.Time
+	if retry {
+		next = ptrTime(nextAttemptAfterFailure(now, sub.FailStreak+1))
+	}
+	if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, false, reason, next); merr != nil {
+		log.Printf("reports: subscription %d: recording the failure did not land (%v) — "+
 			"the next round will try the same period again", id, merr)
 	}
 }
@@ -647,7 +702,7 @@ func ptrTime(t time.Time) *time.Time { return &t }
 func GenerateMonthlyReportForPeriod(db *sql.DB, period string) (*ReportBody, error) {
 	month, err := parseBeijingPeriod(period)
 	if err != nil {
-		return nil, fmt.Errorf("报表期号不合法（want YYYY-MM）: %q", period)
+		return nil, fmt.Errorf("%w（want YYYY-MM）: %q", errPeriodUnusable, period)
 	}
 	// 期号 = month 所在北京月；把它当"下一月的 1 日"喂给 GenerateMonthlyReport，
 	// 后者取 prev = month 所在月 ⇒ 期号与内容都对齐。月算术在**北京日期值**空间做

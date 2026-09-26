@@ -186,4 +186,89 @@ describe('ServerInfo · 余额闸门与审计健康的可视化出口(F-03)', ()
     // 整页不得出现 `undefined`（缺失字段一律走"未知"档）。
     expect(document.body.textContent).not.toContain('undefined')
   })
+
+  // -------------------------------------------------------------------------
+  // R23-V3-B8（复审 2026-09-27，P3）：上面两条只覆盖"**单个**字段缺失"。三态档的整条
+  // 前提是"部分字段的载荷可达"，所以判据必须细到**渲染每条结论所必需的每一个子字段**
+  // —— 修前 `chain_intact=false` 且 `chain_broken_id` 缺失时会画出
+  // `断链于 id=undefined`（渲染级实测）。
+  //
+  // 本用例是**组合矩阵**：每条结论的每个必需子字段各缺一次，断言
+  //   ① 该行落到它的"未知/位置未知"档；② 整页**零 `undefined`**。
+  // 变异（必须变红）：把 `chainVerdictText` 退回
+  // `audit.chain_intact ? '完整' : \`断链于 id=${audit.chain_broken_id}\``
+  // ⇒ 「断链但位置缺失」那一格红（DOM 里出现 `id=undefined`）。
+  // -------------------------------------------------------------------------
+
+  it('链校验结论：chain_intact=false 但 chain_broken_id 缺失 ⇒ 不渲染 undefined', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) return { checked_at: '2026-09-26T02:00:00Z', models: [] }
+      return {
+        ...baseInfo,
+        audit: {
+          chain_checked: true,
+          chain_intact: false,
+          // ★ 只缺 `chain_broken_id`（旧服务端 / 中间层裁剪 / 手写夹具的形状）。
+          chain_checked_at: '2026-09-23T00:00:00Z',
+          chain_age_seconds: 30, chain_stale: false, chain_source: 'startup',
+          chain_checks: 3, chain_rows: 5150, chain_duration_ms: 42,
+          write_failures: 0, dropped_entries: 0, retries: 0,
+        },
+      }
+    })
+    render(<ServerInfo />)
+
+    expect(await screen.findByText('审计健康')).toBeInTheDocument()
+    const row = screen.getByText('链校验结论').closest('div') as HTMLElement
+    expect(row.textContent).toContain('断链')
+    expect(row.textContent).toContain('位置未知')
+    expect(row.textContent).not.toContain('undefined')
+    expect(document.body.textContent).not.toContain('undefined')
+  })
+
+  it('链校验结论：子字段逐个缺失的矩阵（每一格都不得画出 undefined）', async () => {
+    const matrix: Array<{ name: string; audit: Record<string, unknown>; want: string; notWant?: string }> = [
+      {
+        name: 'chain_checked 缺失',
+        audit: { chain_intact: true, chain_broken_id: 0 },
+        want: '尚未校验',
+      },
+      {
+        name: 'chain_intact 缺失',
+        audit: { chain_checked: true, chain_broken_id: 0 },
+        want: '—',
+        notWant: '断链',
+      },
+      {
+        name: 'chain_intact=false 且 chain_broken_id 非数字',
+        audit: { chain_checked: true, chain_intact: false, chain_broken_id: '7' },
+        want: '断链（位置未知）',
+      },
+      {
+        name: 'chain_intact=true（完整档不需要任何子字段）',
+        audit: { chain_checked: true, chain_intact: true },
+        want: '完整',
+      },
+      {
+        name: 'chain_intact=false 且位置齐备（原语义不放宽）',
+        audit: { chain_checked: true, chain_intact: false, chain_broken_id: 4242 },
+        want: '断链于 id=4242',
+      },
+    ]
+    for (const c of matrix) {
+      mockRequest.mockImplementation(async (path: string) => {
+        if (path.endsWith('/concurrency')) return { checked_at: '2026-09-26T02:00:00Z', models: [] }
+        return { ...baseInfo, audit: c.audit }
+      })
+      const view = render(<ServerInfo />)
+      expect(await screen.findByText('审计健康'), c.name).toBeInTheDocument()
+      const row = screen.getByText('链校验结论').closest('div') as HTMLElement
+      expect(row.textContent, `${c.name}: 结论行 = ${row.textContent}`).toContain(c.want)
+      if (c.notWant) {
+        expect(row.textContent, `${c.name}: 不得出现 ${c.notWant}`).not.toContain(c.notWant)
+      }
+      expect(document.body.textContent, `${c.name}: DOM 里出现 undefined`).not.toContain('undefined')
+      view.unmount()
+    }
+  })
 })

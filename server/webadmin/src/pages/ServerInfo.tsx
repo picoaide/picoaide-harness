@@ -168,12 +168,33 @@ function rawCountOrDash(v: number | undefined | null): string {
   return typeof v === 'number' && Number.isFinite(v) ? String(v) : '—'
 }
 
-/** 链校验结论三态：真/假/未知（未知 = `chain_intact` 缺失，不再画成"断链于 id=undefined"）。 */
+/**
+ * 链校验结论三态：真 / 假 / 未知。
+ *
+ * 判定必须细到**渲染该结论所必需的每一个子字段**（R23-V3-B8，复审 2026-09-27，P3）：
+ *
+ *	`chain_checked` 缺失/非 true  ⇒ 尚未校验
+ *	`chain_intact` 缺失/非布尔    ⇒ `—`（未知 —— 不画成"断链"，也不画成"完整"）
+ *	`chain_intact === true`      ⇒ 完整（不需要任何子字段）
+ *	`chain_intact === false`     ⇒ 需要 `chain_broken_id` **是数字**才画 `断链于 id=N`；
+ *	                                缺它 / 非数字 ⇒ `断链（位置未知）`
+ *
+ * 修前只判到"`chain_intact` 自己缺不缺"这一层，于是 `chain_intact=false` 且
+ * `chain_broken_id` 缺失时会渲染出 **`断链于 id=undefined`**（复审 W3 渲染级实测；
+ * 与同文件 `numOrDash` 自述的"绝不把 `undefined` 渲染进 DOM"不一致）。
+ * 该形态的前提是**部分字段的载荷**（旧服务端 / 中间层裁剪 / 手写夹具）—— 与"三态档"
+ * 本身的整条前提同类，所以同族内必须一致：方向仍是 fail-closed 的"断链"，只是不说
+ * 出一个它并不知道的位置。
+ */
 function chainVerdictText(audit: SysInfo['audit']): string {
   if (!audit) return '—'
   if (!audit.chain_checked) return '尚未校验'
   if (typeof audit.chain_intact !== 'boolean') return '—'
-  return audit.chain_intact ? '完整' : `断链于 id=${audit.chain_broken_id}`
+  if (audit.chain_intact) return '完整'
+  if (typeof audit.chain_broken_id !== 'number' || !Number.isFinite(audit.chain_broken_id)) {
+    return '断链（位置未知）'
+  }
+  return `断链于 id=${audit.chain_broken_id}`
 }
 
 /** 结论新鲜度三态：真/假/未知（未知 = `chain_stale` 缺失 ⇒ `—`，**不是**"有效"）。 */

@@ -88,7 +88,29 @@ func newReportLedgerServer(t *testing.T) (*httptest.Server, *deliveryLedger) {
 	return srv, led
 }
 
+// pinSubscriptionCreatedAt 把订阅的 `created_at` 钉到指定时刻。
+//
+// 为什么用例必须做这一步（R23-V3-B1 新增的游标下界带来的**夹具约束**）：
+// `pending_period` 的下界是 `CurrentPeriod(created_at)`（见 delivery_policy.go 的
+// `pendingPeriodFloor`）。用例用**注入时钟**把"部署时间"拨到过去，而
+// `CreateReportSubscription` 写的是**真实墙钟**的 created_at（2026-09-26）⇒ 产品在注入
+// 时钟下写出的合法游标（如 2026-06）反而"早于订阅创建"，那是**夹具的人造偏差**：
+// 真实部署里订阅不可能在未来创建却欠着过去的期。与 `alignLastRunToClock` 同一处置
+// （让库里的时间与注入时钟一致），不是对产品行为的放宽。
+func pinSubscriptionCreatedAt(t *testing.T, db *sql.DB, id int64, at any) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE report_subscriptions SET created_at=$1 WHERE id=$2`, at, id); err != nil {
+		t.Fatalf("对齐订阅 %d 的 created_at: %v", id, err)
+	}
+}
+
 // setPendingAndReset 把订阅置成"启用 + 欠 period 这一期 + 从未成功投递 + 无退避"。
+//
+// 同时把 `created_at` 钉到**该期的下一月**（下界 == period，闭区间的最紧合法夹具）：
+// 种子游标只可能由"订阅已存在"的那一期写出，所以这不放宽任何判据，只是把夹具摆成
+// 一个物理上可能的部署（细节见 pinSubscriptionCreatedAt）。
+// 形态非法的种子值（`2026-99`）算不出"下一月" ⇒ 钉到一个远早的固定时刻，
+// 让那一档继续按**形态**判死（判定顺序里形态在最前，与下界无关）。
 func setPendingAndReset(t *testing.T, db *sql.DB, id int64, period string) {
 	t.Helper()
 	if _, err := db.Exec(`UPDATE report_subscriptions
@@ -96,6 +118,11 @@ func setPendingAndReset(t *testing.T, db *sql.DB, id int64, period string) {
 		WHERE id=$2`, period, id); err != nil {
 		t.Fatalf("设置订阅 %d 的游标 %q: %v", id, period, err)
 	}
+	seedCreatedAt := any(time.Date(2000, 1, 15, 0, 0, 0, 0, time.UTC))
+	if month, err := parseBeijingPeriod(periodAfter(period)); err == nil {
+		seedCreatedAt = month.AddDate(0, 0, 14) // 下一月的 15 日 ⇒ 下界恰好 == period
+	}
+	pinSubscriptionCreatedAt(t, db, id, seedCreatedAt)
 }
 
 // alignLastRunToClock 把"最后一次成功时刻"对齐到注入时钟。

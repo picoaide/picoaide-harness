@@ -73,6 +73,12 @@ func TestMultiMonthBacklogIsCatchUpPeriodByPeriod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 夹具时间自洽（R23-V3-B1）：本用例用**注入时钟**从 2026-07 起跑，而
+	// `CreateReportSubscription` 写的是真实墙钟的 created_at。游标下界是
+	// `CurrentPeriod(created_at)`（delivery_policy.go 的 pendingPeriodFloor）⇒ 不对齐的话
+	// 产品在注入时钟下钉住的合法游标（2026-06）会被判成"早于订阅创建"。
+	// 把 created_at 钉到第一次 tick 的那一刻（下界 == 2026-06，正是本用例涉及的边界）。
+	pinSubscriptionCreatedAt(t, db, id, bjAt(2026, 7, 15, 10))
 
 	// tick 驱动生产投递入口 DispatchAll（调度器只是它的门卫，见 scheduler.tryRun），
 	// 并把 `last_run_at` 对齐到注入时钟。

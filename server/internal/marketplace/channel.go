@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -61,10 +62,86 @@ func requireMarketAgent(c *gin.Context, db *sql.DB, name string) bool {
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
 			return false
 		}
+		logMarketDependencyFailure(c, err)
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return false
 	}
 	return true
+}
+
+// requireMarketAdminApp 是**管理面**"只服务市场渠道"的守卫 + 分类出口
+// （R23-V3-B3，复审 2026-09-27，**P2**）。返回 nil 表示响应已写，调用方直接 `return`。
+//
+// 分类口径（管理面四处路由共用这一份，技能对与智能体对不得各写一份）：
+//
+//	不存在（`ErrNotFound`）    ⇒ 404 `notFoundMsg`；
+//	跨渠道（org 行）           ⇒ **同样** 404 `notFoundMsg`（与"不存在"逐字节同形，
+//	                             不泄露资源存在性 —— 审计 2026-L13 / marketplace-8）；
+//	其余（依赖故障 / PG 抖动） ⇒ **500 + 日志**。
+//
+// 缺陷形态（修前 `deleteAgentAdmin` / `enableAgentAdmin` 与
+// `deleteSkillAdmin` / `enableSkillAdmin` 四处各写一份）：
+//
+//	if err != nil || a.Channel != serverstore.AppChannelMarket {
+//	    serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+//	    return
+//	}
+//
+// 一次 PG 抖动（`apps` 表不可读）在管理面表现为「这个技能/智能体不存在」：管理员把它
+// 读成**终态**（删掉重传 / 换个名字），而**同一台服务端**在同一次故障下员工面回 500
+// —— 口径分裂，且该分支此前**零日志**。复审 W3 实测：把 `apps` 表改名后
+// 4/4 条管理面路由全部 404、日志为零。
+func requireMarketAdminApp(c *gin.Context, db *sql.DB, kind, name, notFoundMsg string) *serverstore.App {
+	a, err := serverstore.GetApp(db, kind, name)
+	if err != nil {
+		if errors.Is(err, serverstore.ErrNotFound) {
+			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", notFoundMsg)
+			return nil
+		}
+		logMarketDependencyFailure(c, err)
+		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+		return nil
+	}
+	if a.Channel != serverstore.AppChannelMarket {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", notFoundMsg)
+		return nil
+	}
+	return a
+}
+
+// writeMarketAppWriteFailure 把**上下架写失败**按分类写响应
+// （R23-V3-B2，复审 2026-09-27，**P2**）。
+//
+// 缺陷形态（修前 `deleteAgentAdmin` / `enableAgentAdmin`）：
+//
+//	if _, err := marketAgentApp(db, name); err == nil {
+//	    _ = serverstore.SetAppEnabled(db, storeKind, name, false) // ← 错误被丢
+//	    _ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
+//	    c.JSON(http.StatusOK, gin.H{"ok": true})                  // ← 无条件成功
+//	    return
+//	}
+//
+// 真 PG + `BEFORE UPDATE` 触发器实测（UPDATE 被拒，SQLSTATE P0001）：处理器仍回
+// `200 {"ok":true}` ⇒ **管理动作静默失效** —— 管理员点「下架」看到成功，而
+// `apps.enabled` 一字未改（`enabled=0` 才是下架判据），员工侧仍可继续安装。技能侧的
+// 兄弟函数（`deleteSkillAdmin` / `enableSkillAdmin`）对同一错误回 500 ⇒ 同族口径分裂。
+//
+// 分类与守卫同口径：`ErrNotFound`（行在两条语句之间被删）⇒ 404；其余 ⇒ 500 + 日志。
+func writeMarketAppWriteFailure(c *gin.Context, err error, notFoundMsg, failureMsg string) {
+	if errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", notFoundMsg)
+		return
+	}
+	logMarketDependencyFailure(c, err)
+	serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", failureMsg)
+}
+
+// logMarketDependencyFailure 记录"依赖故障"（唯一实现）。
+//
+// 文案刻意与 `writeAuthzQueryFailure` 同一形状（含 `dependency, not a rejection`），
+// 便于按一个关键词捞出该服务端所有"把依赖故障当成拒绝"的路径是否都已分类。
+func logMarketDependencyFailure(c *gin.Context, err error) {
+	log.Printf("marketplace: dependency failure at %s (dependency, not a rejection): %v", c.FullPath(), err)
 }
 
 // marketAgentChannelPolicy 是市场命名空间里一条智能体管理路由的渠道口径。

@@ -265,27 +265,36 @@ func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 }
 
 // deleteAgentAdmin 下架(保留数据,可重新上架)。
+//
+// 写失败必须分类返回（R23-V3-B2，复审 2026-09-27，P2）：修前这里 `_ = SetAppEnabled(...)`
+// 之后**无条件**回 `200 {"ok":true}` —— 真 PG + BEFORE UPDATE 触发器实测（UPDATE 被拒，
+// SQLSTATE P0001）仍回 200 ⇒ 管理员看到"下架成功"而 `apps.enabled` 一字未改，员工侧仍可
+// 继续安装（`enabled=0` 才是下架判据）。分类口径见 writeMarketAppWriteFailure。
 func deleteAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := marketAgentApp(db, name); err == nil {
-		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, false)
-		_ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	if requireMarketAdminApp(c, db, serverstore.AppKindAgent, name, "智能体不存在") == nil {
 		return
 	}
-	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, false); err != nil {
+		writeMarketAppWriteFailure(c, err, "智能体不存在", "下架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// enableAgentAdmin 重新上架。
+// enableAgentAdmin 重新上架（写失败分类同上）。
 func enableAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := marketAgentApp(db, name); err == nil {
-		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, true)
-		_ = serverstore.AuditLog(db, adminUsername(c), "agent_enable", name)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	if requireMarketAdminApp(c, db, serverstore.AppKindAgent, name, "智能体不存在") == nil {
 		return
 	}
-	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, true); err != nil {
+		writeMarketAppWriteFailure(c, err, "智能体不存在", "上架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "agent_enable", name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // previewAgentAdmin 返回展示版本归档的文件清单与主文件内容。

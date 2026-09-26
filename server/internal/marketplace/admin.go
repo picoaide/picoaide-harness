@@ -413,17 +413,16 @@ func deleteSkillAdmin(c *gin.Context, db *sql.DB) {
 	// marketplace-8:市场端点只上下架市场渠道技能。org 渠道行此前被这里
 	// 置成 enabled=0(200),而智能体侧同请求是 404 —— 越渠道写 + 审计
 	// 记成 skill_disable。先断言渠道,再动 enabled。
-	if a, err := serverstore.GetApp(db, serverstore.AppKindSkill, name); err != nil || a.Channel != serverstore.AppChannelMarket {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+	//
+	// R23-V3-B3（复审 2026-09-27，P2）：这里的 `err != nil || a.Channel != market` 曾把
+	// **依赖故障**（`apps` 表不可读）也塌成 404「技能不存在」，且零日志 —— 管理员把一次
+	// PG 抖动读成终态。分类出口统一走 requireMarketAdminApp（与智能体对同一份实现）。
+	if requireMarketAdminApp(c, db, serverstore.AppKindSkill, name, "技能不存在") == nil {
 		return
 	}
 	// 下架 = 置 enabled=0(不删行,bootstrap 建议清单过滤)
 	if _, err := serverstore.SetSkillEnabled(db, name, false); err != nil {
-		if errors.Is(err, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
-			return
-		}
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "下架失败")
+		writeMarketAppWriteFailure(c, err, "技能不存在", "下架失败")
 		return
 	}
 	// 审计 A5-M8: 技能下架必须留痕(可见性变更必审计)
@@ -435,16 +434,12 @@ func deleteSkillAdmin(c *gin.Context, db *sql.DB) {
 func enableSkillAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
 	// marketplace-8:同上,重新上架同样只作用于市场渠道行。
-	if a, err := serverstore.GetApp(db, serverstore.AppKindSkill, name); err != nil || a.Channel != serverstore.AppChannelMarket {
-		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
+	// R23-V3-B3:分类出口同上（依赖故障 ⇒ 500 + 日志，不是 404）。
+	if requireMarketAdminApp(c, db, serverstore.AppKindSkill, name, "技能不存在") == nil {
 		return
 	}
 	if _, err := serverstore.SetSkillEnabled(db, name, true); err != nil {
-		if errors.Is(err, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
-			return
-		}
-		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "上架失败")
+		writeMarketAppWriteFailure(c, err, "技能不存在", "上架失败")
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_enable", name)

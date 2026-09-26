@@ -24,22 +24,39 @@ package main
 //   - 藏在**没有被装配到任何接缝上的**函数字面量里（不是赋值右侧、也不是立即调用）。
 //
 // 常量判定走 `go/constant`（支持 `false`/`true`、字面量、括号、`!`/一元负号、
-// `&&`/`||`/比较/四则），**并且解析命名常量**（`const v3X = false` 之后的 `if v3X { … }`）
-// —— 只钉字面量 `false` 的判据等于只挡一个字符串（R22-V3-B3 实测：命名常量形态曾 exit=0）。
+// `&&`/`||`/比较/四则/移位/按位、内建 `len` 作用于常量字符串），**并且解析命名常量**
+// （`const v3X = false` 之后的 `if v3X { … }`）—— 只钉字面量 `false` 的判据等于只挡一个
+// 字符串（R22-V3-B3 实测：命名常量形态曾 exit=0）。
+//
+// ## 匹配必须先"看得见真调用点"（R23-V3-B4）
+//
+// 命中的判据不是"打印文本包含 match"，而是"**字符串字面量之外**的打印文本包含 match"
+// （`printNodeWithoutStringLiterals`）：修前删掉真调用、改写
+// `_ = "serverauth.SetBuildVersion(version)"`（同文本的字符串字面量）就能让判据照样
+// `found=true`，而那一行什么都不会执行 —— 这正是 R21C-04 想消除的"存在性文本匹配"形状。
+// 现在这类诱饵被判 `found=false`（= 装配行缺失 ⇒ 红）。
 //
 // ## 边界（诚实声明，不假装完备）
 //
 // `select` 的 case 体、`return` 之后的语句、`goto`、带 tag 的 `switch`（需要值流分析）、
+// **包级 `var`**（可能被同包其它文件赋值，本判据只解析 main.go ⇒ 一律按运行期值处理）、
 // 以及**调用方看不到的运行期条件**（`if os.Getenv("X") != ""`）都不在本判据的判别力内。
 // 要挡这些形态需要真正的可达性分析（`go/types` + CFG），代价远超收益；本判据的目标是
 // 审计登记的那一类"整行删掉/包进不执行分支仍绿"。
 //
-// 实测对照（temp/r21/fix-16/REPORT.md，漏杀形态逐条落盘 exit 码）：
+// 实测对照（temp/r21/fix-16/REPORT.md 与 temp/r21/fix-21/REPORT.md，漏杀形态逐条落盘 exit 码）：
 //
-//	`const v3X = false; if v3X { … }`   ⇒ **挡住**（collectConsts 解析命名常量）
-//	`switch { case 1 > 2: … }`          ⇒ **挡住**（无 tag switch 的恒假 case 体）
-//	`if os.Getenv("…") != "" { … }`     ⇒ 挡不住（运行期条件；判据按"可达"处理，**不误杀**）
-//	`switch <tag> { case …: … }`        ⇒ 挡不住（值流分析）—— 通过行**不得**声称它被挡住
+//	`const v3X = false; if v3X { … }`        ⇒ **挡住**（解析命名常量）
+//	`var x = false; if x { … }`（main 内）   ⇒ **挡住**（局部 var：初值可折且从未被写）
+//	`const x = len("abc") == 0; if x { … }`  ⇒ **挡住**（内建 len 折叠，R23-V3-B6）
+//	`const x = (1 << 62) < 0; if x { … }`    ⇒ **挡住**（移位/溢出语义走 go/constant）
+//	`for range "" { … }` / `for range []int(nil) { … }` ⇒ **挡住**（R23-V3-B6）
+//	同文本字符串字面量诱饵                        ⇒ **挡住**（诱饵不算命中，R23-V3-B4）
+//	`switch { case 1 > 2: … }`               ⇒ **挡住**（无 tag switch 的恒假 case 体）
+//	`if os.Getenv("…") != "" { … }`          ⇒ 挡不住（运行期条件；判据按"可达"处理，**不误杀**）
+//	`switch <tag> { case …: … }`             ⇒ 挡不住（值流分析）
+//	包级 `var x = false; if x { … }`          ⇒ 挡不住（跨文件赋值不可见）—— 见 escape matrix 里
+//	                                            那条**如实登记为逃逸**的用例，通过行不得声称它被挡住
 
 import (
 	"go/ast"
@@ -77,14 +94,28 @@ type assemblySite struct {
 //   - **任何**把同名标识符当变量声明的形态（`x := …` / `var x …` / range 变量 / 形参）
 //     一律把该名字从表里摘掉 —— 变量不是编译期常量，绝不能因为"包级有个同名常量"
 //     就把活代码判死；
+//   - **局部** `var x = <可折初值>` 在"该名字在 main() 里从未被写过、也没被取过地址"
+//     时按常量处理（R23-V3-B5：`var x = false; if x { … }` 是命名常量的一 token 变体，
+//     修前实跑 exit=0）；**包级 var 一律不折**（可能被同包其它文件赋值，本判据只解析
+//     main.go ⇒ 如实登记为逃逸边界，见 escape matrix）；
 //   - 同名不同值（真歧义）时整个名字失效（同样为了不误杀）。
 type constEnv struct {
 	values    map[string]constant.Value
 	invisible map[string]bool
+	// varFolds 是"待定"的 var 折叠（局部 var，初值可折）：只有在确认名字**从未被写**之后
+	// 才提升进 values —— 否则 `var x = false; …; x = compute(); if x { … }` 会被误杀。
+	varFolds map[string]constant.Value
+	// written 是"被写过"的名字（`=` 赋值 / `++`·`--` / `&x` 取址 / range 赋值目标）。
+	written map[string]bool
 }
 
 func newConstEnv(f *ast.File, body *ast.BlockStmt) constEnv {
-	env := constEnv{values: map[string]constant.Value{}, invisible: map[string]bool{}}
+	env := constEnv{
+		values:    map[string]constant.Value{},
+		invisible: map[string]bool{},
+		varFolds:  map[string]constant.Value{},
+		written:   map[string]bool{},
+	}
 	env.collectFileConsts(f)
 	if body != nil {
 		env.collectMainScoped(body)
@@ -119,7 +150,15 @@ func (e constEnv) collectConstSpecs(gd *ast.GenDecl) {
 	}
 }
 
-// collectMainScoped 走一遍 main() 体：局部 const 入表，变量声明把名字摘掉。
+// collectMainScoped 走两遍 main() 体：
+//
+//	第一遍：局部 const 入表；变量声明（`var` / `:=` / range 变量 / 形参）把名字摘掉，
+//	        同时把"初值可折的局部 var"记进 varFolds 待定表；
+//	第二遍：收集"被写过"的名字，再把从未被写的待定 var 提升为常量。
+//
+// 两遍是必需的：`var x = false; …; x = compute()` 与 `var x = false; if x {…}` 只在
+// "有没有第二遍的写入检查"上不同（R23-V3-B5 的形态正是前者被当成后者的反面 ——
+// 修前一律 `hide`，于是**后者也逃逸**）。
 func (e constEnv) collectMainScoped(body *ast.BlockStmt) {
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch x := n.(type) {
@@ -133,10 +172,18 @@ func (e constEnv) collectMainScoped(body *ast.BlockStmt) {
 				e.collectConstSpecs(gd)
 			case token.VAR:
 				for _, spec := range gd.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, name := range vs.Names {
-							e.hide(name.Name)
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range vs.Names {
+						if i < len(vs.Values) {
+							if v := constValue(vs.Values[i], e); v != nil {
+								e.varFolds[name.Name] = v
+								continue
+							}
 						}
+						e.hide(name.Name)
 					}
 				}
 			}
@@ -163,6 +210,58 @@ func (e constEnv) collectMainScoped(body *ast.BlockStmt) {
 		}
 		return true
 	})
+	e.collectWrites(body)
+	e.promoteVarFolds()
+}
+
+// collectWrites 收集 main() 里**被写过**的名字：`=` 赋值（含 range 的赋值形式）、
+// `++`/`--`、以及 `&name` 取址（地址一旦外流，本判据就不再声称知道它的值）。
+//
+// 闭包内对捕获变量的赋值同样会被 `ast.Inspect` 走到（它下潜 FuncLit）⇒
+// `x := false; f := func(){ x = true }; f(); if x {…}` 不会被误折。
+func (e constEnv) collectWrites(body *ast.BlockStmt) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			if x.Tok == token.DEFINE {
+				return true // 声明不是写入（同名遮蔽由上一步的 hide 处理）
+			}
+			for _, lhs := range x.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					e.written[id.Name] = true
+				}
+			}
+		case *ast.IncDecStmt:
+			if id, ok := x.X.(*ast.Ident); ok {
+				e.written[id.Name] = true
+			}
+		case *ast.UnaryExpr:
+			if x.Op == token.AND {
+				if id, ok := x.X.(*ast.Ident); ok {
+					e.written[id.Name] = true
+				}
+			}
+		case *ast.RangeStmt:
+			if x.Tok == token.ASSIGN {
+				for _, id := range []ast.Expr{x.Key, x.Value} {
+					if ident, ok := id.(*ast.Ident); ok {
+						e.written[ident.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+// promoteVarFolds 把"初值可折 + 从未被写 + 未被遮蔽"的局部 var 提升为常量。
+func (e constEnv) promoteVarFolds() {
+	for name, v := range e.varFolds {
+		if e.written[name] || e.invisible[name] {
+			continue
+		}
+		e.values[name] = v
+	}
 }
 
 func (e constEnv) hideFields(fl *ast.FieldList) {
@@ -234,7 +333,7 @@ func findMainAssemblySite(src []byte, match string) (assemblySite, error) {
 		stack = append(stack, n)
 		switch n.(type) {
 		case *ast.CallExpr, *ast.AssignStmt:
-			text := printNode(fset, n)
+			text := printNodeWithoutStringLiterals(fset, n)
 			if !strings.Contains(text, match) {
 				return true
 			}
@@ -267,6 +366,40 @@ func printNode(fset *token.FileSet, n ast.Node) string {
 		return ""
 	}
 	return b.String()
+}
+
+// printNodeWithoutStringLiterals 同 printNode，但把节点内的**字符串字面量**替换成 `"…"`。
+//
+// 为什么匹配必须先把字面量挖掉（R23-V3-B4，复审 2026-09-27，P3）：命中原先只看
+// "打印文本包含 match"，于是删掉真调用、写一行同文本的字面量即可骗过判据 ——
+// 真 `main.go` 实测：
+//
+//	_ = "serverauth.SetBuildVersion(version)"   ⇒ found=true dead=false（判据照样绿）
+//
+// 那一行什么都不会执行。挖掉字面量之后这类诱饵**不再算命中**（= 装配行缺失 ⇒ 红），
+// 而正常的调用/赋值（含带字符串实参的调用）逐字不变。
+//
+// 实现是"打印后按字面量文本替换"而不是自写打印器：`printer` 对 BasicLit 原样输出
+// `lit.Value`（含引号），所以逐个 ReplaceAll 即可精确挖掉它们；这比手写一份
+// printer 更不容易与 gofmt 形状漂移。
+func printNodeWithoutStringLiterals(fset *token.FileSet, n ast.Node) string {
+	printed := printNode(fset, n)
+	if printed == "" {
+		return ""
+	}
+	lits := map[string]bool{}
+	ast.Inspect(n, func(inner ast.Node) bool {
+		lit, ok := inner.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING || lit.Value == "" {
+			return true
+		}
+		lits[lit.Value] = true
+		return true
+	})
+	for lit := range lits {
+		printed = strings.ReplaceAll(printed, lit, `"…"`)
+	}
+	return printed
 }
 
 // requireAssemblyOnMainPath 断言 `main()` 里存在 match 对应的调用/赋值，且它不在
@@ -403,7 +536,12 @@ func seamFuncLitParent(parent ast.Node) bool {
 	return false
 }
 
-// rangeOverEmpty 报告 range 的对象是不是编译期已知为空（nil / 空复合字面量）。
+// rangeOverEmpty 报告 range 的对象是不是编译期已知为空。
+//
+// 覆盖面（R23-V3-B6 补后两条）：裸 `nil`、空复合字面量、`make([]T, 0)`、
+// **空字符串字面量**（`for range "" { … }`）、整数常量 0（Go 1.22 起可 range int）、
+// 以及**类型化 nil 转换**（`for range []int(nil) { … }`）。
+// 判不了的形态一律返回 false（保守：宁可漏杀，不可误杀活代码）。
 func rangeOverEmpty(x ast.Expr, env constEnv) bool {
 	switch v := x.(type) {
 	case *ast.Ident:
@@ -412,13 +550,42 @@ func rangeOverEmpty(x ast.Expr, env constEnv) bool {
 		return len(v.Elts) == 0
 	case *ast.ParenExpr:
 		return rangeOverEmpty(v.X, env)
+	case *ast.BasicLit:
+		switch v.Kind {
+		case token.STRING:
+			return v.Value == `""` || v.Value == "``"
+		case token.INT:
+			if n, ok := constInt(v, env); ok {
+				return n == 0
+			}
+		}
+		return false
 	case *ast.CallExpr:
-		// `make([]T, 0)` / `[]T{}` 之外的形态判不了 ⇒ 保守认为非空。
+		// `make([]T, 0)`：长度实参折成 0 ⇒ 空。
 		if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "make" && len(v.Args) >= 2 {
 			if n, ok := constInt(v.Args[1], env); ok && n == 0 {
 				return true
 			}
 		}
+		// `[]int(nil)` / `map[string]int(nil)` 之类的**类型转换**：Fun 是类型表达式
+		// （不是标识符形状的调用），且唯一实参折成 nil / 空字面量 ⇒ 空。
+		if len(v.Args) == 1 && isTypeExpr(v.Fun) {
+			return rangeOverEmpty(v.Args[0], env)
+		}
+		return false
+	}
+	return false
+}
+
+// isTypeExpr 报告一个表达式是不是**类型**（而不是函数/方法调用）—— 只认无歧义的类型
+// 语法形状：`[]T` / `[N]T` / `map[K]V` / `chan T` / `*T` / `func(...)` / `interface{}`。
+//
+// 刻意**不**认 `Ident`（`T(nil)` 无法与"函数调用 f(nil)"区分；保守方向是漏杀）。
+func isTypeExpr(e ast.Expr) bool {
+	switch e.(type) {
+	case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.StarExpr,
+		*ast.FuncType, *ast.InterfaceType, *ast.StructType:
+		return true
 	}
 	return false
 }
@@ -447,6 +614,9 @@ func constInt(e ast.Expr, env constEnv) (int64, bool) {
 // 判据宁可漏杀一个畸形写法，也不能因为一个解析不了的表达式把整包测试打红。
 //
 // `env` 提供**命名常量**的取值（`const v3X = false` ⇒ `if v3X { … }` 判死）。
+//
+// R23-V3-B6 补的三类（修前实测都逃逸）：内建 `len` 作用于常量字符串（`len("abc") == 0`）、
+// 移位（`(1 << 62) < 0`，含溢出语义 —— 交给 `go/constant` 的任意精度整数）、按位运算。
 func constValue(e ast.Expr, env constEnv) (out constant.Value) {
 	defer func() {
 		if recover() != nil {
@@ -470,6 +640,15 @@ func constValue(e ast.Expr, env constEnv) (out constant.Value) {
 		return nil
 	case *ast.ParenExpr:
 		return constValue(x.X, env)
+	case *ast.CallExpr:
+		// 内建 `len(<常量字符串>)`。只认这一个内建、一个实参、String 常量 ——
+		// 其余（cap / 自定义函数 / 多实参）判不了 ⇒ nil（保守）。
+		if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "len" && len(x.Args) == 1 {
+			if v := constValue(x.Args[0], env); v != nil && v.Kind() == constant.String {
+				return constant.MakeInt64(int64(len(constant.StringVal(v))))
+			}
+		}
+		return nil
 	case *ast.UnaryExpr:
 		v := constValue(x.X, env)
 		if v == nil {
@@ -503,11 +682,21 @@ func constValue(e ast.Expr, env constEnv) (out constant.Value) {
 				return constant.MakeBool(constant.Compare(a, x.Op, b))
 			}
 			return nil
-		case token.ADD, token.SUB, token.MUL, token.QUO, token.REM:
+		case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
+			token.AND, token.OR, token.XOR, token.AND_NOT:
 			if a.Kind() != constant.Int || b.Kind() != constant.Int {
 				return nil
 			}
 			return constant.BinaryOp(a, x.Op, b)
+		case token.SHL, token.SHR:
+			if a.Kind() != constant.Int || b.Kind() != constant.Int {
+				return nil
+			}
+			shift, ok := constant.Uint64Val(constant.ToInt(b))
+			if !ok {
+				return nil // 负移位/超界 ⇒ 判不了（真代码也编译不过）
+			}
+			return constant.Shift(a, x.Op, uint(shift))
 		}
 		return nil
 	}
@@ -734,6 +923,135 @@ func main() {
 `
 	const match = "startThing(ctx, nil)"
 
+	// —— R23-V3-B4/B5/B6 的逃逸形态（修前逐条实测 exit=0）——
+	const stringDecoyOnly = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	_ = "startThing(ctx, nil)"
+}
+`
+	const stringDecoyBesideRealCall = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	_ = "startThing(ctx, nil)"
+	startThing(ctx, nil)
+}
+`
+	const localVarFalse = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	var w3Disabled = false
+	if w3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const localVarReassigned = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	var w3Disabled = false
+	w3Disabled = compute()
+	if w3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const localVarAddressTaken = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	var w3Disabled = false
+	wire(&w3Disabled)
+	if w3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const pkgVarFalse = `package main
+
+import "context"
+
+var w3Disabled = false
+
+func main() {
+	ctx := context.Background()
+	if w3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const constLenFold = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	const empty = len("abc") == 0
+	if empty {
+		startThing(ctx, nil)
+	}
+}
+`
+	const constShiftFold = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	const overflowed = (1 << 62) < 0
+	if overflowed {
+		startThing(ctx, nil)
+	}
+}
+`
+	const rangeEmptyString = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	for range "" {
+		startThing(ctx, nil)
+	}
+}
+`
+	const rangeTypedNil = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	for range []int(nil) {
+		startThing(ctx, nil)
+	}
+}
+`
+	const rangeNonEmptyString = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	for range "x" {
+		startThing(ctx, nil)
+	}
+}
+`
+
 	cases := []struct {
 		name    string
 		src     string
@@ -759,6 +1077,24 @@ func main() {
 		{"命名常量被同名局部变量遮蔽", shadowedByLocalVar, true, false, "同名局部变量不是常量 ⇒ 必须按可达处理（不误杀）"},
 		{"switch 的 case 是运行期条件", switchCaseLive, true, false, "运行期条件的 case 体不得误杀"},
 		{"带 tag 的 switch 不在判别力内", switchWithTagNotJudged, true, false, "值流分析范围外 —— 边界如实记在文件头，不假装挡住"},
+		// —— R23-V3-B4/B5/B6：修前实测 exit=0 的逃逸形态（现在必须挡住，或如实登记为边界）。——
+		{"同文本字符串字面量诱饵（真调用已删）", stringDecoyOnly, false, false,
+			"★ B4：诱饵不算命中 ⇒ 判「装配行缺失」；修前这里是 found=true dead=false（假绿）"},
+		{"诱饵 + 真调用并存", stringDecoyBesideRealCall, true, false,
+			"诱饵不得让真调用被漏掉（两个节点各自匹配，命中的是调用那一个）"},
+		{"局部 var 假条件", localVarFalse, true, true,
+			"★ B5：`var x = false; if x { … }` 是命名常量的一 token 变体（初值可折 + 从未被写）"},
+		{"局部 var 被重新赋值", localVarReassigned, true, false,
+			"被写过的 var 不是常量 ⇒ 必须按可达处理（不误杀）"},
+		{"局部 var 被取地址", localVarAddressTaken, true, false,
+			"`&x` 后地址外流 ⇒ 不再声称知道它的值（不误杀）"},
+		{"包级 var 假条件（已认账边界）", pkgVarFalse, true, false,
+			"★ 如实登记：包级 var 可能被同包其它文件赋值，本判据只解析 main.go ⇒ 按可达处理，通过行不得声称挡住"},
+		{"const 折叠 len(常量字符串)", constLenFold, true, true, "★ B6：内建 len 作用于常量字符串（go/constant 已支持）"},
+		{"const 折叠移位溢出", constShiftFold, true, true, "★ B6：`(1 << 62) < 0` 走常量任意精度整数语义"},
+		{"range 空字符串", rangeEmptyString, true, true, "★ B6：`for range \"\"` 的循环体不可达"},
+		{"range 类型化 nil", rangeTypedNil, true, true, "★ B6：`for range []int(nil)` 的循环体不可达"},
+		{"range 非空字符串", rangeNonEmptyString, true, false, "非空字符串必须按可达处理（不误杀）"},
 	}
 	for _, c := range cases {
 		got, err := findMainAssemblySite([]byte(c.src), match)
@@ -788,6 +1124,57 @@ func TestMainAssemblyCriterionIsNotVacuousOnRealMainGo(t *testing.T) {
 	}
 	if site.Found {
 		t.Fatalf("不存在的装配字面量被判为存在（%q）—— 判据工具恒真", site.Matched)
+	}
+}
+
+// TestMainAssemblyCriterionBitesOnRealMainGoDecoys 用**真 main.go** 证明 R23-V3-B4/B5
+// 的两条逃逸形态已收口（修前实测：两条都 exit=0）。
+//
+// 做法与复审 W3 同形：在内存里改源码（不落盘），跑**同一个**判定函数：
+//
+//	① 诱饵：把 `serverauth.SetBuildVersion(version)` 换成同文本的字符串字面量
+//	   ⇒ 必须 `Found=false`（= 判据报"装配行缺失"，红）；修前这里是 found=true（假绿）。
+//	② var 包裹：把它包进 `var r23Disabled = false; if r23Disabled { … }`
+//	   ⇒ 必须 `Found=true, Dead=true`；修前这里 dead=false（逃逸）。
+func TestMainAssemblyCriterionBitesOnRealMainGoDecoys(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const call = "serverauth.SetBuildVersion(version)"
+	const match = "serverauth.SetBuildVersion(version)"
+	if !strings.Contains(string(src), "\t"+call+"\n") {
+		t.Fatalf("夹具前提不成立：main.go 里没有独立一行的 %q（装配行形状变了就更新本用例）", call)
+	}
+
+	decoy := strings.Replace(string(src), "\t"+call+"\n", "\t_ = \""+call+"\"\n", 1)
+	if decoy == string(src) {
+		t.Fatal("诱饵变异没有生效（夹具坏了）")
+	}
+	site, err := findMainAssemblySite([]byte(decoy), match)
+	if err != nil {
+		t.Fatalf("解析诱饵源码: %v", err)
+	}
+	if site.Found {
+		t.Fatalf("同文本字符串字面量诱饵被判成真装配点（matched=%q）—— "+
+			"判据仍是「文本包含」形状（R23-V3-B4）", site.Matched)
+	}
+
+	wrapped := strings.Replace(string(src), "\t"+call+"\n",
+		"\tvar r23Disabled = false\n\tif r23Disabled {\n\t\t"+call+"\n\t}\n", 1)
+	if wrapped == string(src) {
+		t.Fatal("var 包裹变异没有生效（夹具坏了）")
+	}
+	site, err = findMainAssemblySite([]byte(wrapped), match)
+	if err != nil {
+		t.Fatalf("解析 var 包裹源码: %v", err)
+	}
+	if !site.Found {
+		t.Fatalf("var 包裹后的装配点被判成缺失（Found=false）—— 判定器把真调用看丢了")
+	}
+	if !site.Dead {
+		t.Fatalf("`var r23Disabled = false; if r23Disabled { … }` 没被判死（why=%q）—— "+
+			"R23-V3-B5 的逃逸形态仍在（修前实测 exit=0）", site.Why)
 	}
 }
 
