@@ -83,11 +83,39 @@ interface RouteEntry {
   handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
 }
 
+/** 本机路由的 authority。 */
+const AUTHORITY = 'localhost:43120'
+
+/** 上游 `browser-auth` 的 cookie 名（`dsh-auth-<authority>`）。 */
+function proofCookie(authority = AUTHORITY): string {
+  return `dsh-auth-${authority}=v1.signature`
+}
+
+/** 上游 `connection.requestRejection()` 的行为替身（见 `../src/index.spec.ts` 的同形桩）。 */
+function browserFence(): { requestRejection: (r: { headers: Record<string, unknown> }) => 401 | 403 | undefined } {
+  return {
+    requestRejection: (r) => {
+      const headers = r.headers
+      const host = headers['host']
+      if (typeof host !== 'string' || !/^(?:127\.0\.0\.1|localhost):\d+$/.test(host)) return 403
+      if (headers['sec-fetch-site'] === 'cross-site') return 403
+      const origin = headers['origin']
+      if (typeof origin === 'string' && new URL(origin).host !== host) return 403
+      return headers['cookie'] === proofCookie(host) ? undefined : 401
+    },
+  }
+}
+
 function request(): IncomingMessage {
   return {
     method: 'GET',
     url: '/api/pico/account/usage?refresh=1',
-    headers: { host: 'localhost:43120', origin: 'http://localhost:43120' },
+    headers: {
+      host: AUTHORITY,
+      origin: `http://${AUTHORITY}`,
+      // FIX-42②：`?refresh=1` 是消费型 GET ⇒ 这一发必须持持有性证明。
+      cookie: proofCookie(),
+    },
     socket: { remoteAddress: '127.0.0.1' },
   } as unknown as IncomingMessage
 }
@@ -97,6 +125,7 @@ function response(): ServerResponse & { body: string } {
     body: '',
     statusCode: 200,
     writeHead: vi.fn((code: number) => { res.statusCode = code }),
+    setHeader: vi.fn(),
     end: vi.fn((body?: string) => { res.body = body ?? '' }),
   }
   return res as unknown as ServerResponse & typeof res
@@ -109,6 +138,8 @@ describe('account-card route binds the response to the requesting session (P2-22
     let registered: RouteEntry | undefined
     const ctx = {
       picoSession: { getSession: () => current },
+      get: (name: string) => (name === 'connection' ? browserFence() : undefined),
+      logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
       on: vi.fn(() => () => {}),
       effect: vi.fn((fn: () => void | (() => void)) => { fn(); return () => {} }),
       webServer: { register: vi.fn((route: RouteEntry) => { registered = route }) },

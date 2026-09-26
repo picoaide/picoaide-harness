@@ -59,11 +59,41 @@ interface RouteEntry {
 
 const dirs: string[] = []
 
+const AUTHORITY = '127.0.0.1:43120'
+
+/** 上游 `browser-auth` 的 cookie 名（`dsh-auth-<authority>`）。 */
+function proofCookie(authority = AUTHORITY): string {
+  return `dsh-auth-${authority}=v1.signature`
+}
+
+/**
+ * 上游 `connection.requestRejection()` 的行为替身（Host/Origin 围栏 + cookie 验签）。
+ * FIX-42②：`?refresh=1` 是消费型 GET ⇒ 本文件的两条腿都必须持证明。
+ */
+function browserFence(): { requestRejection: (r: { headers: Record<string, unknown> }) => 401 | 403 | undefined } {
+  return {
+    requestRejection: (r) => {
+      const headers = r.headers
+      const host = headers['host']
+      if (typeof host !== 'string' || !/^(?:127\.0\.0\.1|localhost):\d+$/.test(host)) return 403
+      if (headers['sec-fetch-site'] === 'cross-site') return 403
+      const origin = headers['origin']
+      if (typeof origin === 'string' && new URL(origin).host !== host) return 403
+      return headers['cookie'] === proofCookie(host) ? undefined : 401
+    },
+  }
+}
+
 function request(url: string): IncomingMessage {
   return {
     method: 'GET',
     url,
-    headers: { host: '127.0.0.1:43120', origin: 'http://127.0.0.1:43120', 'sec-fetch-site': 'same-origin' },
+    headers: {
+      host: AUTHORITY,
+      origin: `http://${AUTHORITY}`,
+      'sec-fetch-site': 'same-origin',
+      cookie: proofCookie(),
+    },
     socket: { remoteAddress: '127.0.0.1' },
   } as unknown as IncomingMessage
 }
@@ -73,6 +103,7 @@ function response(): ServerResponse & { body: string } {
     body: '',
     statusCode: 200,
     writeHead: vi.fn((code: number) => { res.statusCode = code }),
+    setHeader: vi.fn(),
     end: vi.fn((body?: string) => { res.body = body ?? '' }),
   }
   return res as unknown as ServerResponse & typeof res
@@ -97,7 +128,8 @@ async function harness(): Promise<{ service: SessionService, tokenFile: string, 
   const ctx = {
     emit: () => { /* 不派发：见模块头（去抖刷新与本缺陷无关） */ },
     effect: (fn: () => unknown) => { fn() },
-    get: () => undefined,
+    // FIX-42②：消费型 GET 的持有性证明来源。
+    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     reflect: { provide: vi.fn() },
     on: vi.fn(() => () => {}),

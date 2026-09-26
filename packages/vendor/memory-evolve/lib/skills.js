@@ -518,19 +518,57 @@ export function skillManageTool(ctx, config) {
   const dir = config.skillDir
   const pendingDir = join(config.memoryDir, 'pending-skills')
 
-  /** Check the shared runtime registry for a disabled shadow. */
+  /**
+   * 检查共享运行时注册表里有没有**禁用影子**。
+   *
+   * AB2-04（FIX-42③）：从前这里 `catch { return undefined }` —— 把**读错误降级成
+   * "没禁用"**，于是 `create`/`patch` 照常落盘并返回 `ok:true`：一次瞬时 IO 失败
+   * （EACCES/EMFILE、插件卸载中、注册表实现变化）被写路径**固化**成一次"成功"的
+   * 写入。这是本仓已登记的高频形态（"读错误被降级成空状态、再由写路径固化"）在本
+   * 插件里剩下的最后一处；同包正确先例是 `refusedResult` 与
+   * `skills-manager.js` 的"成功才解锁"。
+   *
+   * 现在返回**可判别的**结果（不是 `string | undefined` 的二分）：
+   *  - `{kind:'ok'}`：明确的"没有禁用影子" —— 注册表读到了且该技能不是影子、
+   *    注册表里没有它、**或运行时压根没有 `skills` 服务**（没有注册表 ⇒ 不可能有
+   *    影子，这是**结论**不是"猜"，旧快照 / TUI 面的降级语义原样保留）；
+   *  - `{kind:'disabled', message}`：明确的禁用影子 ⇒ 拒写（与从前语义一致）；
+   *  - `{kind:'unknown', message}`：**注册表存在但这次查询失败**（抛错 / 返回值不是
+   *    数组）⇒ 调用方**必须拒写**并如实说明。**只有明确的"没有该技能/没有影子"
+   *    才放行**。
+   *
+   * `catch` 一并收窄：只有能证明"注册表里没有这一条"的 `ENOENT` 才按"没有影子"
+   * 处理，其余 errno 一律 `unknown`（宁可拒写一次，也不把 IO 失败固化成写入）。
+   * @param {string} name - 技能名。
+   * @returns {Promise<{kind: 'ok'}
+   *   | {kind: 'disabled', message: string}
+   *   | {kind: 'unknown', message: string}>} 判定结果。
+   */
   const disabledReason = async (name) => {
     const skills = ctx.get('skills')
-    if (!skills || typeof skills.list !== 'function') return undefined
+    // 没有注册表 = 不可能有禁用影子（**结论**，不是"读不到"）。AB2-04 修的是
+    // "读**错误**被降级成空状态"，不是这条既有降级 —— 后者是旧快照/TUI 面的契约。
+    if (!skills || typeof skills.list !== 'function') return { kind: 'ok' }
+    let list
     try {
-      const list = await skills.list({})
-      const skill = list.find((entry) => entry.name === name)
-      return skill?.invocation?.modelInvocable === false
-        ? skt('skill.disabledShadow', { name })
-        : undefined
-    } catch {
-      return undefined
+      list = await skills.list({})
+    } catch (error) {
+      // 只有"注册表里没有这一条"是可证明的、可以按"没有影子"放行的 errno。
+      if (error?.code !== 'ENOENT') {
+        return {
+          kind: 'unknown',
+          message: skt('skill.registryQueryFailed', { name, reason: String(error?.message ?? error) }),
+        }
+      }
+      return { kind: 'ok' }
     }
+    if (!Array.isArray(list)) {
+      return { kind: 'unknown', message: skt('skill.registryQueryFailed', { name, reason: 'list() did not return an array' }) }
+    }
+    const skill = list.find((entry) => entry.name === name)
+    return skill?.invocation?.modelInvocable === false
+      ? { kind: 'disabled', message: skt('skill.disabledShadow', { name }) }
+      : { kind: 'ok' }
   }
 
   /** 落点被拒 → fail-loud 的工具结果（A4：绝不把"没写成"报成 ok:true）。 */
@@ -670,8 +708,10 @@ export function skillManageTool(ctx, config) {
         case 'create': {
           const checked = validateBody(name, args.description, args.body)
           if (!checked.ok) return checked
+          // AB2-04（FIX-42③）：`unknown`（注册表读不到）与 `disabled` 一样**拒写**
+          // —— 只有明确的"没有该技能/没有影子"（`ok`）才放行。
           const disabled = await disabledReason(name)
-          if (disabled) return { ok: false, message: disabled }
+          if (disabled.kind !== 'ok') return { ok: false, message: disabled.message }
           if (readSkill(dir, name) !== undefined) {
             return { ok: false, message: smt('skillmsg.existsUsePatch', { name }) }
           }
@@ -704,8 +744,10 @@ export function skillManageTool(ctx, config) {
         case 'patch': {
           const checked = validateBody(name, undefined, args.body)
           if (!checked.ok) return checked
+          // AB2-04（FIX-42③）：`unknown`（注册表读不到）与 `disabled` 一样**拒写**
+          // —— 只有明确的"没有该技能/没有影子"（`ok`）才放行。
           const disabled = await disabledReason(name)
-          if (disabled) return { ok: false, message: disabled }
+          if (disabled.kind !== 'ok') return { ok: false, message: disabled.message }
           if (readSkill(dir, name) === undefined) {
             return { ok: false, message: smt('skillmsg.missingUseCreate', { name }) }
           }

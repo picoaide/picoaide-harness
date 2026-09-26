@@ -26,26 +26,55 @@
  *    models/baseURL，凭据却已是新会话的）。规则 E 把"延迟落地"的取值域从"await 节点"
  *    扩到 **`then/catch/finally/new Promise/queueMicrotask` 的函数实参**。
  *
+ * ## 第二十八轮（FIX-42①）的取值域修正：**九种真实语法形态**
+ *
+ * AB1-03 在副本里造真文件 + 跑判据本体验证：6 条正控红、**9 条缺口绿**（其中 F2
+ * 最危险：`switch case` 里的写 + switch 之后的守卫 ⇒ 判据被满足、`findings=0`，
+ * 函数**读起来有守卫**）。三条根因，全部是"**取值域 ≠ 被守护面**"，逐条修掉：
+ *
+ * - **①语句容器只认 `Block`**：未加花括号的 `switch case` 里，await 所在语句的父节点是
+ *   `CaseClause`（不是 `Block`）⇒ `enclosingStatement` 一路走到整个 `SwitchStatement`，
+ *   判据比的是"switch **之后**那条语句"，**同一个 case 里紧跟 await 的写根本不在面内**。
+ *   现在 `enclosingStatement` 在 `Block` **或** `CaseClause`/`DefaultClause` 处停，
+ *   `afterStatement` 沿执行序继续：case 内后继 → 落穿到下一个子句 → switch 之后。
+ * - **②`terminal` 把 `break`/`continue` 当终点**：`await` 后紧跟 `break` 退出循环、
+ *   循环之后再落地（F8）完全不可见。现在 `break`/`continue` **不是终点**，而是解析到
+ *   真实跳转目标（`break` ⇒ 最近的循环/`switch` 之后；带标签 ⇒ 标签语句之后），
+ *   只有 `return`（与不可达）才是终点。
+ * - **③延迟面硬编码 5 个名字 + `for await` 不是 `AwaitExpression`**：
+ *   `setImmediate`/`setTimeout`/`setInterval`/`process.nextTick`/`emitter.on(...)` 现在都在
+ *   回调面内；`for await` 是 `ForOfStatement.awaitModifier`、AST 里**没有**
+ *   `AwaitExpression` 节点 ⇒ 现在按"await 点"处理（其后继 = 循环体首句），规则 A/C
+ *   因此对它成立。
+ * - **④新增规则 F：`try` 的续段是迟到面**（F3）。`finally` 在守卫 `return` 的路径上
+ *   **照样执行** ⇒ 块内的落地不是"被守卫之后的代码"，必须自带比对。判据：`try` 块内含
+ *   await 面时，`catch`/`finally` 块内的"直接落地"必须在该块内自带代际比对或登记豁免。
+ *
  * ## 规则
  *
- * - **A**：被守卫的函数里，每个 `await` 之后（按执行序、跨内层 block）必须紧跟一次
- *   代际比对 `if (!<guard>.isCurrent(<epoch>)) return` / `if (!<predicate>()) return`；
+ * - **A**：被守卫的函数里，每个 **await 面**（`await` 表达式与 `for await`）之后
+ *   （按执行序、跨内层 block、含 `try` 续段与 `switch` 落穿、解析 `break`/`continue`
+ *   跳转）必须紧跟一次代际比对 `if (!<guard>.isCurrent(<epoch>)) return` /
+ *   `if (!<predicate>()) return`；
  * - **B（仓库级）**：**每一个会话入口**（`subscribeSession(s)(…)` /
  *   `subscribePicoSession(…)` / `ctx.on(SESSION_CHANGED_EVENT|'pico/session-changed'|
  *   'session/event', cb)`）都必须抵达一个被守卫的函数；做不到就得登记 ——
  *   `ENTRY_EXEMPTIONS`（有别的判据，写明理由）或 `KNOWN_UNGUARDED_ENTRIES`
  *   （**已知未收口**，写明缺陷编号）。**两张表都双向陈旧检测**：登记项必须仍然存在、
  *   仍然"未守卫"；一旦它被收口，登记项本身变红（不许把豁免表养成免检区）；
- * - **C**：用了代际守卫的文件里，每个 `await` 都必须住在被守卫的函数里 ——
+ * - **C**：用了代际守卫的文件里，每个 await 面都必须住在被守卫的函数里 ——
  *   新增的未守卫 sync 入口因此当场变红；豁免必须显式登记（`AWAIT_EXEMPTIONS`）；
  * - **D**：被 await 的 `initSentry` 必须收到**第 5 个实参**（代际谓词）——它在自己的
  *   await 之后改模块级 `sentry`/`status`，只在调用点外面补一句比对拦不住；
- * - **E**：用了代际守卫的文件里，`then/catch/finally/new Promise/queueMicrotask` 的
- *   **函数实参**若体内有调用/赋值（= 延迟落地），必须自己带守卫或登记豁免。
+ * - **E**：用了代际守卫的文件里，`then/catch/finally/new Promise/queueMicrotask/
+ *   setTimeout/setImmediate/setInterval/process.nextTick/on/once/addListener(...)` 的
+ *   **函数实参**若体内有"非观察型成员调用"（= 延迟落地），必须自己带守卫或登记豁免；
+ * - **F**：`try` 块内出现过 await 面时，该 `try` 的 `catch`/`finally` 块内的"直接落地"
+ *   必须在该块内自带代际比对或登记豁免（`finally` 走守卫的 `return` 路径照样执行）。
  *
  * 判据自身有**自检**（`analyze()` 对合成源码的判定），并且把 AA1 §证伪-1 的三条
- * 绕过形态（M-A 新文件 / M-B 块尾空后继 / M-C3 `.then()` 投影）都做成合成正例 ——
- * "分析器恒真"与"分析器恒红"两个方向都不成立才算过。
+ * 绕过形态（M-A 新文件 / M-B 块尾空后继 / M-C3 `.then()` 投影）**以及 AB1-03 的九种
+ * 取值域缺口形态**都做成合成正例 —— "分析器恒真"与"分析器恒红"两个方向都不成立才算过。
  */
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
@@ -153,9 +182,9 @@ const KNOWN_UNGUARDED_ENTRIES: Readonly<Record<string, string>> = {
   'packages/host/browser/src/index.ts':
     'AA3-03（P2，未收口）：`runSessionSwitch` 的第一步 `await steps.closeAll()` 之后才 `applyUserScope()`，而订阅者不串行化 ⇒ A→B 与 B→C 交错时先发起后完成的那次会把作用域退回上一代账号。收口后请删掉本条。',
   'packages/host/wasm-apps-host/src/index.ts':
-    'AA3 观察（未实跑，未收口）：`scopeKey()` 是同步作用域判定且 `invalidate/clear` 同步，但 `void windows?.closeAll()` / `void cache?.clearAll()` 是**无代际**的异步清理 ⇒ 交错时可能关掉新作用域刚开的窗口 / 清掉新账号的缓存。收口后请删掉本条。',
+    'AA3 观察（第二十八轮 FIX-40 ③ **已收口**，登记保留的理由见末尾）：① 窗口侧的"迟到完成"**实测不可达** —— `windows.closeAll()` 体内没有 await，调用点返回时窗口与 surface 映射已同步拆干净（`src/audit-0923-user-scope.spec.ts` 的"不 await 也已经关完"用例钉住）；② 缓存侧是**真异步**（`rm -rf` 整个缓存根 + 重建），修前 `void cache?.clearAll()` 与新作用域的第一个动作并发 ⇒ 新账号刚写下的条目会被上一代的 rm 删掉。修法 = **排序**而不是代际：新增 `src/scope-reset.ts` 的清理链，换代时 `scopeReset.begin(previous)`（关窗同步、清缓存串行），新作用域的动作（消费待打开队列、本机路由的 open）一律 `await scopeReset.settled()`；判据 `src/scope-reset.spec.ts`（8 例，含"接线改回即发即忘"的负向对照 + 5 条变异全红）。**登记保留**：规则 B 只认"代际协议"这一种形态 —— 实测给本文件装上 `createSessionEpoch` 会让它进入 C/E 适用面并立刻产生 **11 条 `await-outside-guard`**（`requestOpen` 的 6 个 await + 两个路由 handler + ai-chat 包装），豁免它们必须新增 `AWAIT_EXEMPTIONS` 行，而本泳道对该文件的改动权限只有"删除登记项"。',
   'packages/host/enterprise/src/skill-telemetry.ts':
-    'AA3 观察（未实跑，未收口，P3）：`installedVersion(name).then(…)` 在 **await 之后**才读会话 ⇒ 换账号窗口里会把上一账号的技能调用记到新账号名下（后果限于遥测归属）。收口后请删掉本条。',
+    'AA3 观察（P3，第二十八轮 FIX-40 ③ **已按"作用域取自调用时刻"收口**）：两个观察点现在都在**第一个 await 之前**同步取 `ctx.picoSession.getSession()`（修前在 `installedVersion` 的续体里才读 ⇒ 读版本文件期间换账号会把上一账号的技能调用记到新账号名下，作用域与令牌全指向新账号）。判据 `tests/skill-telemetry-session-capture.spec.ts`（3 例：两个观察点各一条 + 修前形状的负向对照；靠可控的 `readFile` 做成确定性，同一份 spec 跑在修前源码上红 2 条）。**这里不用代际**是语义决定的：上报是**事件归属**而不是"当前会话的投影"，代际守卫会把换代窗口里的真实调用整份丢掉，而"取调用时刻的会话"既不错记也不丢（同族先例：`account-card` 的 `owns(s)`）。**登记保留**的理由同 index.ts：装上代际会让规则 C 对 `installedVersion`/`reportSkillCall` 的两个 await 报红（实测 2 条 `await-outside-guard`），而豁免行不在本泳道的改动权限内。',
 }
 
 /**
@@ -196,16 +225,28 @@ const AWAIT_EXEMPTIONS: Readonly<Record<string, string>> = {
 }
 
 /**
- * `DEFERRED_CALLBACK_EXEMPTIONS`：promise 回调里**允许**延迟落地的白名单
+ * `DEFERRED_CALLBACK_EXEMPTIONS`：**迟到面**里允许延迟落地的白名单
  * （键 = `<相对路径>#<函数名>`）。
  *
- * 与 `AWAIT_EXEMPTIONS` 同口径：登记项必须真的存在、真的仍然被判据抓到（陈旧即红）。
- * 当前为空是**有意**的 —— 规则 E 的取值域收得足够窄（只认回调体内直接出现的
- * "非观察型成员调用"），4 个 enterprise 投影文件与 `updates.ts` 里没有需要登记的
- * 延迟落地；将来若出现合理的延迟落地（例如"只写本地缓存、与会话无关"），
- * 就在这里逐条写明理由。
+ * 迟到面 = 规则 E 的回调实参（promise 续段 / 定时器 / 事件订阅）**与**规则 F 的
+ * `try` 续段（`catch`/`finally` 块）—— 两者是同一件事（"现在还没发生、以后才落地"），
+ * 所以共用一张表。
+ *
+ * 与 `AWAIT_EXEMPTIONS` 同口径：登记项必须真的存在、真的仍然被判据抓到（陈旧即红，
+ * 见 `it('DEFERRED_CALLBACK_EXEMPTIONS 不得陈旧…')`）。
+ *
+ * 第二十八轮 FIX-42① 把延迟面从 5 个硬编码名字扩到"定时器 + 事件订阅 + try 续段"
+ * 之后，判据第一次在真实代码上取到了 6 处 —— 其中 5 处是**结构上不可能**是状态投影的
+ * 形状（`controller.abort()`、`Date.now()`、`runBackgroundCheck().finally(…)`、
+ * `handle.close()`、`sync(session).catch(→ logger)`），已由 `NON_LANDING_METHODS` /
+ * `NON_LANDING_RECEIVERS` 这两个**精度旋钮**排除（旋钮写在判据里、有理由，比给它们
+ * 逐条开豁免更好：豁免是**函数粒度**的，会连带豁免该回调将来真正的落地）。
+ * 剩下这一条是真豁免。
  */
-const DEFERRED_CALLBACK_EXEMPTIONS: Readonly<Record<string, string>> = {}
+const DEFERRED_CALLBACK_EXEMPTIONS: Readonly<Record<string, string>> = {
+  'packages/host/enterprise/src/error-reporting.ts#reportErrorReportingStatus':
+    '上报失败分支的 `pendingStatusKeys.delete(key)` 摘的是**在飞键**，而该键 = 服务端地址 + `sessionIdentity(session)` + state/reason/dsn_host/level（`statusReportKey` 逐字）—— **自带去重身份**，不投影到"当前会话"。与同函数在 `AWAIT_EXEMPTIONS` 里的登记同源（那里记的是同一个"已报集合"）。',
+}
 
 /** 一条判据违规。 */
 interface Finding {
@@ -214,6 +255,9 @@ interface Finding {
     | 'await-outside-guard'
     | 'entry-not-guarded'
     | 'initSentry-without-predicate'
+    // **迟到面**上的未守卫落地：规则 E（延迟回调实参）与规则 F（`try` 的
+    // catch/finally 续段）共用这一个 kind —— 两者是同一件事（"现在还没发生、
+    // 以后才落地"），detail 里写明是哪一种。
     | 'deferred-callback-unguarded'
   readonly detail: string
 }
@@ -385,11 +429,30 @@ function guardCheckOf(
     || (ts.isBlock(then) && then.statements.length === 1 && ts.isReturnStatement(then.statements[0]!))
 }
 
-/** await 所在的、直接挂在 Block 下的那条语句。 */
+/**
+ * 语句直接所属的**语句容器**：块，或 `switch` 的 `case`/`default` 子句。
+ *
+ * 为什么必须把子句也算容器（AB1-03 根因①）：未加花括号的 `case` 里，语句的父节点是
+ * `CaseClause` **不是** `Block`；只认 `Block` 时 `enclosingStatement` 会一路走到整个
+ * `SwitchStatement`，于是判据比的是"switch **之后**那条语句"——同一个 case 里紧跟
+ * await 的写根本不在取值域内（F2：switch 之后恰好是守卫 ⇒ 判据被满足、findings=0，
+ * 而函数**读起来有守卫**）。
+ */
+type StatementContainer = ts.Block | ts.CaseClause | ts.DefaultClause
+
+/** `statement` 直接挂着的容器（块或 case/default 子句）。 */
+function containerOf(statement: ts.Statement): StatementContainer | undefined {
+  const parent: ts.Node | undefined = statement.parent
+  if (parent === undefined) return undefined
+  if (ts.isBlock(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) return parent
+  return undefined
+}
+
+/** await 面所在的、直接挂在**块或 case/default 子句**下的那条语句。 */
 function enclosingStatement(node: ts.Node): ts.Statement | undefined {
   let current: ts.Node | undefined = node
   while (current !== undefined) {
-    if (ts.isStatement(current) && current.parent !== undefined && ts.isBlock(current.parent)) return current
+    if (ts.isStatement(current) && containerOf(current) !== undefined) return current
     current = current.parent
   }
   return undefined
@@ -405,32 +468,251 @@ function enclosingFunction(node: ts.Node): ts.FunctionLikeDeclaration | undefine
   return undefined
 }
 
+/** `statement` 正常执行完之后，**同容器内**的下一条语句。 */
+function nextInContainer(statement: ts.Statement): ts.Statement | undefined {
+  const container = containerOf(statement)
+  if (container === undefined) return undefined
+  return container.statements[container.statements.indexOf(statement) + 1]
+}
+
+/** `break`（不带标签）跳出的最近一层循环 / `switch`。 */
+function nearestBreakable(statement: ts.Statement): ts.Statement | undefined {
+  let current: ts.Node | undefined = statement.parent
+  while (current !== undefined) {
+    if (ts.isIterationStatement(current, false) || ts.isSwitchStatement(current)) return current
+    current = current.parent
+  }
+  return undefined
+}
+
+/** 本函数体里的 `label: <语句>`（带标签的 `break`/`continue` 的落点）。 */
+function labelledTarget(
+  fn: ts.FunctionLikeDeclaration,
+  label: string,
+): ts.LabeledStatement | undefined {
+  let found: ts.LabeledStatement | undefined
+  const visit = (node: ts.Node): void => {
+    if (found !== undefined) return
+    if (node !== fn && ts.isFunctionLike(node)) return
+    if (ts.isLabeledStatement(node) && node.label.text === label) {
+      found = node
+      return
+    }
+    ts.forEachChild(node, visit)
+  }
+  if (fn.body !== undefined) visit(fn.body)
+  return found
+}
+
 /**
- * `await` **执行序上**的下一条语句。
+ * 一条语句**正常执行完之后**会执行到的下一条语句：沿容器向外、含 `try` 的续段
+ * （`try` 块 ⇒ `catch`/`finally`；`catch` 块 ⇒ `finally`）与 `case` 的落穿。
  *
- * 与原实现的关键差别：原实现只看 await 所在 block 的**紧邻后继**，于是"await 是内层
- * block（`try { … }`）最后一条"时 `rest` 是空数组、`every(...)` 空洞为真 ⇒ 判据认定
- * "后面没有可落地的语句"（AA1 M-B：把守卫整段删掉仍然全绿）。现在沿执行序**向外层
- * block** 继续找，只在到达**所在函数体**时才停。
- * @param node - await 表达式。
+ * 刻意**不**解析 `break`/`continue`/`return` —— 那三种由 {@link afterStatement} 处理，
+ * 这样"跳转语句不是终点"这条口径只有一处定义。
+ * @param statement - 起点语句。
+ * @param fn - 它所在的函数（不许走出函数体，否则会把"下游语句"当成本次续体的后继）。
+ * @returns 下一条语句（没有则 undefined）。
+ */
+function afterNormal(
+  statement: ts.Statement,
+  fn: ts.FunctionLikeDeclaration,
+): ts.Statement | undefined {
+  let current: ts.Statement | undefined = statement
+  for (let hops = 0; hops < 64 && current !== undefined; hops += 1) {
+    const inContainer = nextInContainer(current)
+    if (inContainer !== undefined) return inContainer
+    const container = containerOf(current)
+    if (container === undefined) return undefined
+    if (ts.isCaseClause(container) || ts.isDefaultClause(container)) {
+      const last = container.statements[container.statements.length - 1]
+      const terminates = last !== undefined
+        && (ts.isBreakStatement(last) || ts.isContinueStatement(last)
+          || ts.isReturnStatement(last) || ts.isThrowStatement(last))
+      // 子句末尾是终结语句 ⇒ 不会落穿，交给跳转解析（`break` ⇒ switch 之后）。
+      if (terminates) return afterStatement(last!, fn)
+      const clauses = container.parent.clauses
+      const next = clauses[clauses.indexOf(container as ts.CaseClause) + 1]
+      current = next !== undefined && next.statements.length > 0 ? next.statements[0] : (next ?? container.parent.parent)
+      continue
+    }
+    if (fn.body === undefined || !ts.isBlock(fn.body)) return undefined
+    if (container === fn.body) return undefined
+    const owner = enclosingStatement(container)
+    if (owner === undefined) return undefined
+    if (owner.getStart() < fn.body.getStart() || owner.getEnd() > fn.body.getEnd()) return undefined
+    if (ts.isTryStatement(owner)) {
+      // 正常完成路径**只有** finally：`catch` 是抛出路径，由规则 F 单独覆盖
+      // （把 catch 也算成"正常后继"会让 `try { await install() } catch { lastError = … }`
+      // 这类形状在 await 之后凭空多出一条"没有代际比对"的误报）。
+      const continuation = container === owner.tryBlock
+        ? owner.finallyBlock
+        : (container === owner.catchClause?.block ? owner.finallyBlock : undefined)
+      if (continuation !== undefined) {
+        if (continuation.statements.length > 0) return continuation.statements[0]
+        current = continuation
+        continue
+      }
+    }
+    current = owner
+  }
+  return undefined
+}
+
+/**
+ * `statement` 执行完之后**按执行序**会执行到的下一条语句（解析 `break`/`continue`）。
+ *
+ * 与原实现的关键差别（AB1-03 根因②）：原实现把 `break`/`continue` 也算"之后无可落地
+ * 语句"，于是「await 后紧跟 `break` 退出循环，循环之后再写状态」（F8）完全不可见。
+ * 现在它们解析到**真实跳转目标**：`break` ⇒ 最近的循环/`switch` 之后（带标签 ⇒ 标签
+ * 语句之后），`continue` ⇒ 所在循环之后（循环体的再入由循环体自己的 await 覆盖）。
+ * @param statement - 起点语句。
+ * @param fn - 它所在的函数。
+ * @returns 下一条会执行的语句（没有则 undefined）。
+ */
+function afterStatement(
+  statement: ts.Statement,
+  fn: ts.FunctionLikeDeclaration,
+): ts.Statement | undefined {
+  if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)) return undefined
+  if (ts.isBreakStatement(statement) || ts.isContinueStatement(statement)) {
+    const label = statement.label?.text
+    const target = label === undefined ? nearestBreakable(statement) : labelledTarget(fn, label)
+    return target === undefined ? undefined : afterStatement(target, fn)
+  }
+  return afterNormal(statement, fn)
+}
+
+/**
+ * await 面（`await` 表达式 / `for await`）**执行序上**的下一条语句。
+ *
+ * `for await` 在 AST 里**没有** `AwaitExpression` 节点（它挂在 `ForOfStatement.awaitModifier`
+ * 上），所以它的"后继"是**循环体首句**（每一轮迭代完成后都会回到这里落地）。
+ * @param node - await 表达式或 `for await` 语句。
  * @param fn - 它所在的函数。
  * @returns 下一条会执行的语句（没有则 undefined）。
  */
 function successorOf(node: ts.Node, fn: ts.FunctionLikeDeclaration): ts.Statement | undefined {
-  let statement = enclosingStatement(node)
-  while (statement !== undefined) {
-    const block = statement.parent
-    if (!ts.isBlock(block) || fn.body === undefined || !ts.isBlock(fn.body)) return undefined
-    const rest = block.statements.slice(block.statements.indexOf(statement) + 1)
-    if (rest.length > 0) return rest[0]
-    if (block === fn.body) return undefined
-    const owner = enclosingStatement(block)
-    if (owner === undefined) return undefined
-    // 不许走出本函数（否则会把"下游语句"当成这条续体的后继）。
-    if (owner.getStart() < fn.body.getStart() || owner.getEnd() > fn.body.getEnd()) return undefined
-    statement = owner
+  if (ts.isForOfStatement(node) && node.awaitModifier !== undefined) {
+    return ts.isBlock(node.statement) ? node.statement.statements[0] : node.statement
   }
-  return undefined
+  const statement = enclosingStatement(node)
+  if (statement === undefined) return undefined
+  let next = afterNormal(statement, fn)
+  // 后继恰好是一条跳转语句时继续解析（`break`/`continue` 不是终点）。
+  for (let hops = 0; hops < 32 && next !== undefined; hops += 1) {
+    if (!ts.isBreakStatement(next) && !ts.isContinueStatement(next)) break
+    next = afterStatement(next, fn)
+  }
+  return next
+}
+
+/** 一棵（不跨嵌套函数的）子树里有没有 await 面（`await` 或 `for await`）。 */
+function containsAwaitSurface(node: ts.Node): boolean {
+  let found = false
+  const visit = (inner: ts.Node): void => {
+    if (found) return
+    if (inner !== node && ts.isFunctionLike(inner)) return
+    if (ts.isAwaitExpression(inner) || (ts.isForOfStatement(inner) && inner.awaitModifier !== undefined)) {
+      found = true
+      return
+    }
+    ts.forEachChild(inner, visit)
+  }
+  visit(node)
+  return found
+}
+
+/** 观察型调用（日志）：不算"落地"。 */
+const OBSERVER_CALLS = new Set(['error', 'warn', 'info', 'debug', 'log', 'trace'])
+
+/**
+ * 「落地」的**精度旋钮**：这些方法名结构上**不是**状态投影的写，因此在延迟面里出现
+ * 不算"延迟落地"。
+ *
+ * 为什么需要它（第二十八轮 FIX-42① 实测）：把延迟面从 5 个名字扩到"定时器 + 事件订阅
+ * + promise 续段"之后，若"任何非观察型成员调用"都算落地，判据会在真实代码里对
+ * `controller.abort()`、`runBackgroundCheck().finally(…)`、`handle.close()` 这类
+ * **与"把上一代的数据写进当前代"毫无关系**的形状报红（实测 6 处，全部是这类）。
+ * 逐条塞进豁免表不是好出路：豁免按**函数**粒度给，会连带豁免该回调将来真正的落地
+ * —— "登记表变成免检区"正是本仓已登记的反面模式。
+ *
+ * 刻意**保持小**，只列"结构上不可能是状态投影"的三类：观察/日志（日志不是状态）、
+ * promise 组合子（回调的返回值不是状态）、资源收尾与取消（关掉/中止一个东西不是
+ * 写状态）。宁可漏报一个恰好叫 `close` 的写方法，也不要把判据埋进噪音 ——
+ * 兜底仍是规则 A（await 面）与豁免表。
+ */
+const NON_LANDING_METHODS = new Set([
+  ...OBSERVER_CALLS,
+  'then', 'catch', 'finally',
+  'abort', 'close', 'destroy', 'dispose', 'unref', 'cancel', 'clearTimeout', 'clearInterval',
+])
+
+/** 内置全局：这些接收者上的调用不是"会话派生状态"的写（`Date.now()`、`Math.max()`…）。 */
+const NON_LANDING_RECEIVERS = new Set([
+  'Date', 'Math', 'JSON', 'Object', 'Array', 'Number', 'String', 'Boolean',
+  'Promise', 'console', 'performance', 'Reflect', 'Symbol', 'RegExp', 'Error',
+])
+
+/**
+ * 一棵（不跨嵌套函数的）子树里**直接出现**的"会落地状态"的成员调用
+ * （`x.settings.update(…)`、`x.emit(…)` 这类形状）。
+ *
+ * 刻意不把赋值、标识符调用与日志调用算进来：它们要么只是本文件自己的簿记
+ * （`inFlight = undefined`），要么是纯观察（`ctx.logger.error`）—— 把它们算进来只会
+ * 逼出一张巨大的豁免表，而"登记表变成免检区"正是本仓已登记的反面模式。真正的兜底是
+ * 规则 A（await 面）+ 规则 F + 豁免表。
+ * @param node - 待扫描的子树（调用方传函数体/续段块）。
+ * @returns 第一处落地调用（没有则 undefined）。
+ */
+function landingCallIn(node: ts.Node): ts.CallExpression | undefined {
+  let found: ts.CallExpression | undefined
+  const scan = (inner: ts.Node): void => {
+    if (found !== undefined) return
+    if (inner !== node && ts.isFunctionLike(inner)) return
+    if (ts.isCallExpression(inner) && ts.isPropertyAccessExpression(inner.expression)) {
+      const receiver = inner.expression.expression
+      const root = ts.isIdentifier(receiver)
+        ? receiver.text
+        : (ts.isPropertyAccessExpression(receiver) && ts.isIdentifier(receiver.expression) ? receiver.expression.text : undefined)
+      const landable = !NON_LANDING_METHODS.has(inner.expression.name.text)
+        && (root === undefined || !NON_LANDING_RECEIVERS.has(root))
+      if (landable) {
+        found = inner
+        return
+      }
+    }
+    ts.forEachChild(inner, scan)
+  }
+  scan(node)
+  return found
+}
+
+/** 一段（不跨嵌套函数的）代码里有没有"代际比对"（`<guard>.isCurrent(…)` 或谓词调用）。 */
+function hasGuardCheckIn(
+  node: ts.Node,
+  guards: ReadonlySet<string>,
+  predicates: ReadonlySet<string>,
+): boolean {
+  let found = false
+  const visit = (inner: ts.Node): void => {
+    if (found) return
+    if (inner !== node && ts.isFunctionLike(inner)) return
+    if (ts.isCallExpression(inner)) {
+      const callee = inner.expression
+      if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'isCurrent' && guards.has(callee.expression.getText())) {
+        found = true
+        return
+      }
+      if (ts.isIdentifier(callee) && predicates.has(callee.text)) {
+        found = true
+        return
+      }
+    }
+    ts.forEachChild(inner, visit)
+  }
+  visit(node)
+  return found
 }
 
 /** 收集 `subscribeSession*` / `subscribePicoSession` / `ctx.on(<会话事件>, cb)` 的回调。 */
@@ -507,7 +789,9 @@ function analyze(
     scope.exemptions[`${file}#${labels.get(fn) ?? '<unknown>'}`]
 
   const visitAwait = (node: ts.Node): void => {
-    if (ts.isAwaitExpression(node)) {
+    // await 面 = `await` 表达式 **或** `for await`（AST 里没有 AwaitExpression 节点）。
+    const isForAwait = ts.isForOfStatement(node) && node.awaitModifier !== undefined
+    if (ts.isAwaitExpression(node) || isForAwait) {
       const fn = enclosingFunction(node)
       const guards = fn === undefined ? new Set<string>() : guardReceivers(fn)
       const predicates = fn === undefined ? new Set<string>() : predicateNames(fn)
@@ -516,16 +800,14 @@ function analyze(
       const exempt = fn !== undefined && exempted(fn) !== undefined
 
       if (epochGuardedFile && !guarded && !exempt) {
-        // C：用了守卫的文件里，await 必须住在被守卫的函数里。
+        // C：用了守卫的文件里，await 面必须住在被守卫的函数里。
         findings.push({ kind: 'await-outside-guard', detail: `${label} 里的 await 没有代际守卫：${where(source, node)}` })
       }
       if (guarded && !exempt) {
-        // A：await 之后（按执行序）必须紧跟一次比对。
+        // A：await 面之后（按执行序、解析跳转与落穿）必须紧跟一次比对。
         const next = fn === undefined ? undefined : successorOf(node, fn)
-        const terminal = next === undefined
-          || (ts.isReturnStatement(next) && next.expression === undefined)
-          || ts.isBreakStatement(next)
-          || ts.isContinueStatement(next)
+        // `break`/`continue` 已在 successorOf 里解析成真实后继 ⇒ 这里只剩 `return` 是终点。
+        const terminal = next === undefined || (ts.isReturnStatement(next) && next.expression === undefined)
         if (!terminal && !guardCheckOf(next!, guards, predicates)) {
           findings.push({
             kind: 'await-without-check',
@@ -571,15 +853,28 @@ function analyze(
   }
   visitInit(source)
 
-  // E：promise 回调里的延迟落地（M-C3 的形态）。
+  // E：延迟回调里的延迟落地（M-C3 的形态）。
+  //
+  // 取值域**不再硬编码 5 个名字**（AB1-03 根因③）：`setImmediate`/`setTimeout`/
+  // `setInterval`/`process.nextTick` 与事件订阅（`on`/`once`/`addListener`/
+  // `prependListener`）同样是"现在注册、以后才跑"的回调面。刻意**不**收 `.map`/
+  // `.forEach`/`.filter` 这类同步回调 —— 它们在当前同步轮次内执行，不是迟到面，
+  // 收进来只会逼出一张巨大的豁免表。
   if (epochGuardedFile) {
-    const deferredNames = new Set(['then', 'catch', 'finally', 'queueMicrotask'])
+    const deferredProperties = new Set([
+      'then', 'catch', 'finally', 'queueMicrotask',
+      'setTimeout', 'setImmediate', 'setInterval', 'nextTick',
+      'on', 'once', 'addListener', 'prependListener',
+    ])
+    const deferredIdentifiers = new Set([
+      'queueMicrotask', 'Promise', 'setTimeout', 'setImmediate', 'setInterval',
+    ])
     const visitDeferred = (node: ts.Node): void => {
       const callbacks: ts.Expression[] = []
       if (ts.isCallExpression(node)) {
         const callee = node.expression
-        const isDeferred = (ts.isPropertyAccessExpression(callee) && deferredNames.has(callee.name.text))
-          || (ts.isIdentifier(callee) && (callee.text === 'queueMicrotask' || callee.text === 'Promise'))
+        const isDeferred = (ts.isPropertyAccessExpression(callee) && deferredProperties.has(callee.name.text))
+          || (ts.isIdentifier(callee) && deferredIdentifiers.has(callee.text))
         if (isDeferred) callbacks.push(...node.arguments)
         if (ts.isNewExpression(node) && node.expression.getText() === 'Promise') callbacks.push(...node.arguments)
       }
@@ -589,26 +884,8 @@ function analyze(
         const guards = guardReceivers(fn)
         const predicates = predicateNames(fn)
         if (guards.size > 0 || predicates.size > 0) continue
-        // 取值域 = 回调体内**直接出现**的"非观察型成员调用"（`x.settings.update(…)`、
-        // `x.emit(…)` 这类会落地状态的形状）。刻意不把赋值、标识符调用与日志调用算进来：
-        // 它们要么只是本文件自己的簿记（`inFlight = undefined`），要么是纯观察
-        // （`ctx.logger.error`）—— 把它们算进来只会逼出一张巨大的豁免表，而"登记表
-        // 变成免检区"正是本仓已登记的反面模式。真正的兜底是规则 A（await 面）+ 豁免表。
-        const OBSERVER_CALLS = new Set(['error', 'warn', 'info', 'debug', 'log', 'trace'])
-        let lands = false
-        const scan = (inner: ts.Node): void => {
-          if (inner !== fn && ts.isFunctionLike(inner)) return
-          if (
-            ts.isCallExpression(inner)
-            && ts.isPropertyAccessExpression(inner.expression)
-            && !OBSERVER_CALLS.has(inner.expression.name.text)
-          ) {
-            lands = true
-          }
-          ts.forEachChild(inner, scan)
-        }
-        if (fn.body !== undefined) scan(fn.body)
-        if (!lands) continue
+        if (fn.body === undefined) continue
+        if (landingCallIn(fn.body) === undefined) continue
         const label = `${file}#${labels.get(fn) ?? '<anonymous>'}`
         if (scope.deferredExemptions[label] !== undefined) continue
         findings.push({
@@ -619,6 +896,36 @@ function analyze(
       ts.forEachChild(node, visitDeferred)
     }
     visitDeferred(source)
+  }
+
+  // F：`try` 的续段是**迟到面**（AB1-03 的 F3）。
+  //
+  // `finally` 在守卫 `return` 的路径上**照样执行** ⇒ 块内的落地不是"被守卫之后的
+  // 代码"：`try { const d = await load(); if (!epochs.isCurrent(epoch)) return; apply(d) }
+  // finally { ctx.settings.update('late', lastSeen) }` 里那个 `return` 根本挡不住
+  // finally 的写。判据：try 块内出现过 await 面时，catch/finally 块内的"直接落地"
+  // 必须在该块内自带代际比对，或登记豁免（与规则 E 共用同一张表）。
+  if (epochGuardedFile) {
+    const visitTry = (node: ts.Node): void => {
+      if (ts.isTryStatement(node) && containsAwaitSurface(node.tryBlock)) {
+        const fn = enclosingFunction(node)
+        const guards = fn === undefined ? new Set<string>() : guardReceivers(fn)
+        const predicates = fn === undefined ? new Set<string>() : predicateNames(fn)
+        for (const continuation of [node.catchClause?.block, node.finallyBlock]) {
+          if (continuation === undefined) continue
+          if (landingCallIn(continuation) === undefined) continue
+          if (hasGuardCheckIn(continuation, guards, predicates)) continue
+          const label = `${file}#${fn === undefined ? '<top>' : labels.get(fn) ?? '<anonymous>'}`
+          if (scope.deferredExemptions[label] !== undefined) continue
+          findings.push({
+            kind: 'deferred-callback-unguarded',
+            detail: `${label} 的 try 续段（catch/finally）是 await 之后的迟到落地，却没有代际守卫：${where(source, continuation)}`,
+          })
+        }
+      }
+      ts.forEachChild(node, visitTry)
+    }
+    visitTry(source)
   }
 
   return findings
@@ -761,6 +1068,43 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     }
   })
 
+  /**
+   * 一张迟到面登记表是不是**仍然被需要**：把该条从表里临时摘掉之后，判据必须重新抓到
+   * 同一个函数。这是"不得陈旧"的双向判据 —— 站点的落地一旦被收口（或整个回调消失），
+   * 登记项立刻变红并要求删除（豁免表因此不会慢慢变成免检区）。
+   * @param key - `<仓库相对路径>#<函数名>`。
+   * @returns 摘掉登记后仍被判为"迟到面未守卫落地"时为 true。
+   */
+  function deferredStillNeedsRegistration(key: string): boolean {
+    const hash = key.indexOf('#')
+    const file = key.slice(0, hash)
+    const scope: Scope = {
+      ...DEFAULT_SCOPE,
+      deferredExemptions: Object.fromEntries(
+        Object.entries(DEFAULT_SCOPE.deferredExemptions).filter(([entry]) => entry !== key),
+      ),
+    }
+    return analyze(readSource(file), file, scope).some(f => f.kind === 'deferred-callback-unguarded')
+  }
+
+  it('DEFERRED_CALLBACK_EXEMPTIONS 不得陈旧（函数消失 / 已收口 / 空理由三向都红）', () => {
+    for (const [key, reason] of Object.entries(DEFERRED_CALLBACK_EXEMPTIONS)) {
+      const hash = key.indexOf('#')
+      expect(hash > 0, `${key} 的键必须写成 <相对路径>#<函数名>`).toBe(true)
+      const file = key.slice(0, hash)
+      const fnName = key.slice(hash + 1)
+      const text = readSource(file)
+      const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
+      const fn = [...functionLabels(source)].find(([, label]) => label === fnName)?.[0]
+      expect(fn, `豁免表里的 ${key} 已经不存在了（陈旧登记 = 免检区）`).toBeDefined()
+      expect(
+        deferredStillNeedsRegistration(key),
+        `${key} 已经收口了 —— 请把它从 DEFERRED_CALLBACK_EXEMPTIONS 里删掉（豁免要真的被需要）`,
+      ).toBe(true)
+      expect(reason.length, `${key} 必须写明豁免理由`).toBeGreaterThan(40)
+    }
+  })
+
   it('判据自检：未守卫的 await / 未守卫的新入口 / 漏传谓词 / 三种 AA1 绕过形态都能被抓到', () => {
     const empty: Scope = { exemptions: {}, entryExemptions: {}, deferredExemptions: {} }
     // ① await 之后没有比对 ⇒ await-without-check。
@@ -885,5 +1229,170 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
       analyze(mutationC, 'packages/host/enterprise/src/gateway-model.ts', empty).map(f => f.kind),
       'M-C3：`.then()` 回调里的延迟投影没有被抓到',
     ).toContain('deferred-callback-unguarded')
+  })
+
+  /**
+   * AB1-03 的**九种取值域缺口形态**，每一种都在这里有一条合成正例（第二十八轮 FIX-42①）。
+   *
+   * 这些形态都是"判据读起来成立、其实看不见"的真实语法：取证方式是在副本里造**真文件**
+   * 并跑判据本体（`temp/r21/fix-42/probe/run-forms.mjs`）。修前 9 条全绿，修后 9 条全红。
+   * 配套的正控（C1–C6）证明夹具不是恒绿。
+   */
+  it('判据自检：AB1-03 的九种取值域缺口形态逐个都能被抓到', () => {
+    const empty: Scope = { exemptions: {}, entryExemptions: {}, deferredExemptions: {} }
+    const preamble = `
+      const epochs = createSessionEpoch()
+      const markerEpoch = epochs.begin()
+      export function scopeMarker(): boolean { return epochs.isCurrent(markerEpoch) }
+    `
+    // [形态名, 函数体, 期望的 finding kind, 为什么这条形态以前是绿的]
+    const forms: readonly (readonly [string, string, string, string])[] = [
+      [
+        'F1c 未加花括号的 case（switch 是函数尾）',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          switch (session.mode) {
+            case 'remote':
+              var data = await load(session)
+              ctx.settings.update('late', data)
+              break
+            default:
+              break
+          }
+          void epoch
+        }`,
+        'await-without-check',
+        'enclosingStatement 只沿 Block 上溯 ⇒ 走到整个 SwitchStatement，case 内的写不在面内',
+      ],
+      [
+        'F2 未加花括号的 case + switch 之后放守卫（最重：函数读起来有守卫）',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          switch (session.mode) {
+            case 'remote':
+              var data = await load(session)
+              ctx.settings.update('late', data)
+              break
+          }
+          if (!epochs.isCurrent(epoch)) return
+          apply()
+        }`,
+        'await-without-check',
+        '同上；且 switch 之后恰好是守卫 ⇒ 判据被满足、findings=0，写落在守卫之前',
+      ],
+      [
+        'F3 await 之后的 finally 里落地',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          try {
+            const data = await load(session)
+            if (!epochs.isCurrent(epoch)) return
+            apply(data)
+          } finally {
+            ctx.settings.update('late', lastSeen)
+          }
+        }`,
+        'deferred-callback-unguarded',
+        '规则 A 只看 await 的直落后继（这里是守卫）；finally 在守卫 return 的路径上照样执行 ⇒ 无人看',
+      ],
+      [
+        'F4 for await 循环体（AST 里没有 AwaitExpression 节点）',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          for await (const chunk of stream(session)) {
+            ctx.settings.update('late', chunk)
+          }
+          void epoch
+        }`,
+        'await-without-check',
+        'for await 挂在 ForOfStatement.awaitModifier 上，A/C/E 三条同时看不见它',
+      ],
+      [
+        'F5 setImmediate 回调',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          const data = await load(session)
+          if (!epochs.isCurrent(epoch)) return
+          setImmediate(() => { ctx.settings.update('late', data) })
+        }`,
+        'deferred-callback-unguarded',
+        '规则 E 的延迟面硬编码 then/catch/finally/queueMicrotask/Promise，setImmediate 不在面内',
+      ],
+      [
+        'F6 setTimeout 回调',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          const data = await load(session)
+          if (!epochs.isCurrent(epoch)) return
+          setTimeout(() => { ctx.settings.update('late', data) }, 0)
+        }`,
+        'deferred-callback-unguarded',
+        '同 F5',
+      ],
+      [
+        'F7 emitter.on 回调',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          const data = await load(session)
+          if (!epochs.isCurrent(epoch)) return
+          bus.on('ready', () => { ctx.settings.update('late', data) })
+        }`,
+        'deferred-callback-unguarded',
+        '同 F5（事件订阅同样不在面内）',
+      ],
+      [
+        'F8 await 后 break 退出循环、循环之后再写',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          while (true) {
+            var data = await load(session)
+            break
+          }
+          ctx.settings.update('late', data)
+          void epoch
+        }`,
+        'await-without-check',
+        'terminal 把 break/continue 也算"之后无可落地语句" ⇒ 循环之后的写完全不可见',
+      ],
+      [
+        'F9 守卫之后的 for await 循环体',
+        `export async function probe(session: any, ctx: any): Promise<void> {
+          const epoch = epochs.begin()
+          const stream = await open(session)
+          if (!epochs.isCurrent(epoch)) return
+          for await (const chunk of stream) { ctx.settings.update('late', chunk) }
+        }`,
+        'await-without-check',
+        '守卫只挡到 for await 开始之前；每一轮迭代之后落地仍属迟到面，而 AST 里没有 AwaitExpression',
+      ],
+    ]
+
+    for (const [name, body, kind, why] of forms) {
+      const findings = analyze(`${preamble}${body}`, 'synthetic.ts', empty)
+      expect(
+        findings.map(f => f.kind),
+        `${name}：这条形态以前是绿的（${why}），现在必须被咬住`,
+      ).toContain(kind)
+    }
+
+    // 正控：同样的夹具在**有守卫**时不报（分析器不是恒红 —— 否则上面九条就是空断言）。
+    const guarded = `
+      const epochs = createSessionEpoch()
+      const markerEpoch = epochs.begin()
+      export function scopeMarker(): boolean { return epochs.isCurrent(markerEpoch) }
+      export async function probe(session: any, ctx: any): Promise<void> {
+        const epoch = epochs.begin()
+        switch (session.mode) {
+          case 'remote':
+            var data = await load(session)
+            if (!epochs.isCurrent(epoch)) return
+            ctx.settings.update('late', data)
+            break
+        }
+        if (!epochs.isCurrent(epoch)) return
+        apply()
+      }
+    `
+    expect(analyze(guarded, 'synthetic.ts', empty), '加了比对就该零违规（否则九条正例可能是空断言）').toEqual([])
   })
 })
