@@ -13,6 +13,7 @@ package clientrelease
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -177,24 +178,37 @@ func manifest(c *gin.Context, serverVersion, channel string) {
 // (.dmg/.exe/.appimage/.deb/.zip/.tar.gz/.msi/.pkg),没有任何一种需要浏览器内联
 // 渲染;inline 的收益是零,代价是一个**同源渲染面**。文件名经 mime.FormatMediaType
 // 编码(RFC 6266/5987),所以含非 ASCII 的文件名也不会拼出畸形头。
+//
+// # 只下发**普通文件**（第二十七轮 AA2-01）
+//
+// 本路由**未认证**（客户端装机时还没有登录态），而资产目录由 CI 产物注入、
+// 升级路径还会用 `docker cp`（不 dereference）刷新 —— 与渠道素材完全同类的
+// 不可信输入。旧写法 `os.Stat`（跟随符号链接）+ `http.ServeFile`（**按路径
+// 二次解析**并再次跟随）意味着资产目录里一个符号链接就等于把容器内任意可读
+// 文件挂到了这个未认证端点上。
+//
+// 现在判据与下发绑成同一个对象：`openAsset` 的 Lstat + os.SameFile 复验收口
+// "是不是目录内的普通文件"，下发用 `http.ServeContent` 读**同一个 fd**。
+// 与 `internal/channel` 的 assetRegular/openAsset 同源（那一族只差本包没收口）。
 func file(c *gin.Context) {
 	// 错误面同样不该由嗅探决定类型(nosniff 对 JSON 404 无害,所以放在最前面)。
 	c.Header("X-Content-Type-Options", "nosniff")
 	name := strings.TrimPrefix(c.Param("file"), "/")
-	if name == "" || strings.ContainsAny(name, `/\`) ||
-		strings.Contains(name, "..") || !allowedAssetName(name) {
+	if !assetNameOK(name) || !allowedAssetName(name) {
 		writeNotFound(c)
 		return
 	}
-	full := filepath.Join(Dir, name)
-	st, err := os.Stat(full)
-	if err != nil || !st.Mode().IsRegular() {
+	// 判据与打开是同一个对象（见 openAsset）：这里的 err 已经覆盖
+	// "不存在"、"是目录/符号链接/FIFO/设备"、"打开时被换成了另一个对象"。
+	f, st, err := openAsset(name)
+	if err != nil {
 		writeNotFound(c)
 		return
 	}
-	// 文件名含版本号 → 内容固定,可长缓存;ServeFile 自带 Range/断点续传。
+	defer func() { _ = f.Close() }()
+	// 文件名含版本号 → 内容固定,可长缓存;ServeContent 自带 Range/断点续传。
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
-	// 显式类型 + 附件下载：必须在 ServeFile **之前**设好（serveContent 只在
+	// 显式类型 + 附件下载：必须在 ServeContent **之前**设好（它只在
 	// Content-Type 为空时才去推导/嗅探）。Range/206 走的是同一份响应头。
 	c.Header("Content-Type", assetContentType(name))
 	c.Header("Content-Disposition", contentDispositionAttachment(name))
@@ -203,7 +217,92 @@ func file(c *gin.Context) {
 	// (SetWriteDeadline 返回 ErrNotSupported)保持原语义,不新增失败面。
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(
 		time.Now().Add(downloadWriteDeadline(st.Size())))
-	http.ServeFile(c.Writer, c.Request, full)
+	// 用 ServeContent（读上面那个**已校验的 fd**）而不是 ServeFile：后者会
+	// 自己再解析一次路径并重新打开，把 openAsset 的 Lstat/SameFile 整体绕开
+	// （这正是修前形态的第二半）。
+	http.ServeContent(c.Writer, c.Request, name, st.ModTime(), f)
+}
+
+// errAssetNotRegular 资产不是普通文件（目录/符号链接/设备/FIFO 等）。
+var errAssetNotRegular = errors.New("clientrelease: asset is not a regular file")
+
+// assetNameOK 判定下载面接受的**名字形状**：非空、单段（不含路径分隔符）、不含 `..`。
+//
+// 唯一实现：端点用它挡请求参数（`c.Param("file")`），openAsset 用它挡"将来可能
+// 出现的第二个调用方"—— 两处各自写一份就是本仓反复记录过的漂移源。
+// 扩展名白名单是另一件事（allowedAssetName），只在端点用：它是**对外面**的
+// 取舍，不是"目录内的东西能不能被打开"的判据。
+func assetNameOK(name string) bool {
+	return name != "" && !strings.ContainsAny(name, `/\`) && !strings.Contains(name, "..")
+}
+
+// assetOpen 是 os.Open 的**测试注入点**（生产恒为 os.Open；包外不可见，无任何
+// 运行期赋值）。唯一用途是在测试里构造"Lstat 之后、open 之前路径被换掉"的 TOCTOU
+// 窗口 —— 那个窗口在真实文件系统上无法确定性复现，没有它就只能靠概率性竞态或
+// 纯结构断言（见 download_regular_file_test.go 的 TOCTOU 用例）。
+var assetOpen = os.Open
+
+// openAsset 打开资产目录内的安装包，只接受**普通文件**；返回已打开的 fd 与它的
+// 文件信息。
+//
+// 与 `internal/channel` 的 `openAsset`/`assetRegular` **同源**（同一件事只允许一份
+// 形态；跨包不能复用是因为两边的 `Dir` 与名字来源不同，且本包不允许反向依赖
+// channel）。为什么不是"先按路径判存在、再按路径打开"（旧写法 = os.Stat +
+// http.ServeFile）：两次解析路径之间文件可以被换掉。这里把判据与打开绑成**同一个
+// 对象**：
+//
+//  1. Lstat —— 不跟随符号链接，拒一切非普通文件（目录/链接/设备/FIFO）；
+//  2. os.Open 拿 fd；
+//  3. f.Stat + os.SameFile —— 关掉"第 1 步之后、第 2 步之前被换成另一个 inode
+//     （含换成符号链接）"这个窗口。
+//
+// 调用方此后只读这个 fd（下发用 http.ServeContent），不再解析路径一次。
+//
+// 残留（如实记下，不假装没有）：第 1 步是普通文件、第 2 步之前被换成 **FIFO** 时，
+// os.Open 会阻塞到有写者。该形态要求攻击者已经能在运行中的容器里写资产目录
+// （即已经拿到服务端账户），且旧实现在同一位置暴露得更宽（任何一次请求都跟随
+// 链接），因此不引入平台相关的 O_NONBLOCK 去换一个更窄的洞。
+func openAsset(name string) (*os.File, os.FileInfo, error) {
+	if !assetNameOK(name) {
+		return nil, nil, errAssetNotRegular
+	}
+	return openRegularAsset(filepath.Join(Dir, name))
+}
+
+// openRegularAsset 是"判据与打开必须是同一个对象"这条不变式的**唯一实现**。
+// 收一个已经由调用方解析好的路径（openAsset 负责名字形状），因此也可以直接对
+// 任意路径判类型 —— 测试用 `os.DevNull` 钉"设备文件不算资产"时走的就是这里。
+func openRegularAsset(full string) (*os.File, os.FileInfo, error) {
+	lst, err := os.Lstat(full)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !lst.Mode().IsRegular() {
+		return nil, nil, errAssetNotRegular
+	}
+	f, err := assetOpen(full)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !assetIdentityMatches(lst, st) {
+		_ = f.Close()
+		return nil, nil, errAssetNotRegular
+	}
+	return f, st, nil
+}
+
+// assetIdentityMatches 报告"按路径看到的东西"（Lstat，不跟随链接）与"fd 打开的东西"
+// 是不是**同一个普通文件** —— 与 channel.assetIdentityMatches 同源。
+//
+// 为什么单拎成一个谓词：那个窗口在真实文件系统上没法确定性复现，但谓词本身可以
+// 直接喂真实 FileInfo 判真假（符号链接与其目标是**不同**对象，这正是要拒的形态）。
+func assetIdentityMatches(byPath, byFD os.FileInfo) bool {
+	return byFD.Mode().IsRegular() && os.SameFile(byPath, byFD)
 }
 
 // assetContentTypes 把白名单里的扩展名映射到**平台声明**的媒体类型。
@@ -363,12 +462,44 @@ func configuredBaseURL() string {
 
 // originInput 是来源判定所需的请求事实(与 gin 解耦,便于表驱动测试)。
 type originInput struct {
-	// ForwardedProto 反代声明的协议(X-Forwarded-Proto)。
+	// ForwardedProto 反代声明的协议(X-Forwarded-Proto)。判定必须走
+	// ForwardedProtoIsHTTPS —— 这个字段只负责把**原始头**带进来。
 	ForwardedProto string
 	// TLS 是否 TLS 直连。
 	TLS bool
 	// Host 请求 Host(含端口)。
 	Host string
+}
+
+// ForwardedProtoIsHTTPS 判定 `X-Forwarded-Proto` 是否声明了 https —— 这条判定在
+// **全仓只允许这一份实现**（本包的来源判定与 `serverauth.secureCookieFor` 共用）。
+//
+// 为什么必须共用（第二十七轮 AA2-02 的病根）：同一个头在本仓曾有三处三种口径 ——
+// 这里全等比较 `== "https"`、`serverauth` 用 `EqualFold`（不认列表/空白）、
+// `wasmapp/appproof` 只判非空。三种口径的取值域都小于**真实解析面**，于是
+// `HTTPS` / `https ` / `https, http` 这类代理常态形态下：清单 HTTP 200 但
+// `client.assets.*.url` 全空（门户下载卡静默消失，只有一行进程级 warn），
+// 而管理会话 cookie 同时丢掉 `Secure`。判定是同一个事实，分成几份就必然分叉。
+//
+// 为什么落在 clientrelease 而不是 serverauth：`serverauth` 已经依赖本包
+// （`oidc.go` 用 `PublicBaseURLEnv` 构造深链回跳地址），反过来放会产生 import
+// 环；本包是这两个消费点里更靠下的一层。
+//
+// 语义（保守正确，宁可不给也不给错）：
+//   - **大小写不敏感**：HTTP 的 scheme 是大小写不敏感的 token；
+//   - **忽略首尾空白**：代理拼接列表时常带空格；
+//   - **逗号列表取最左段**：多跳链路里代理把"自己收到的协议"追加在右侧，最左段
+//     才是**客户端侧**那一跳（与 `wasmapp/appproof.ServerURL` 同口径，也是
+//     XFF/XFP 的通行约定）；本仓信任模型不按 `PICOAI_TRUSTED_PROXIES` 过滤这个头
+//     （gin 的可信代理只作用于 XFF/ClientIP），所以"取最左"必须与"伪造只会更严"
+//     一起成立：伪造 `http, https` 只会**降级**，不会凭空造出 https；
+//   - **无法判定为 https 一律 false（fail-closed）**：空串、未知 scheme（`wss`/`on`）、
+//     最左段为空（形如 `", https"` 的畸形形态）都当作非 https —— 不乐观假设。
+//     注意 `http, https` 因此判 false：客户端到第一跳是明文，给 https 下载地址
+//     或给 cookie 打 `Secure` 都会让那条链路直接不可用。
+func ForwardedProtoIsHTTPS(raw string) bool {
+	first, _, _ := strings.Cut(raw, ",")
+	return strings.EqualFold(strings.TrimSpace(first), "https")
 }
 
 // resolveOrigin 判定客户端可达来源。
@@ -393,7 +524,9 @@ func resolveOrigin(in originInput) Origin {
 	if in.Host == "" {
 		return Origin{Reason: originUnavailableReason}
 	}
-	if in.ForwardedProto == "https" || in.TLS {
+	// XFP 的判定只有一份实现(见 ForwardedProtoIsHTTPS):此前这里的字面量全等
+	// 比较把 `HTTPS`/`https ` /`https, http` 判成"非 https"⇒ urls=0。
+	if ForwardedProtoIsHTTPS(in.ForwardedProto) || in.TLS {
 		return Origin{Base: "https://" + in.Host}
 	}
 	if isLoopbackHost(in.Host) {

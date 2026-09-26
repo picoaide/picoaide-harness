@@ -49,12 +49,27 @@ func auditActor(c *gin.Context) string {
 // = 并发数时自锁且不可恢复）。审计明细的读取目标没变（同一个 settings 表、同一个
 // pin），只是不再借用第二条连接。
 func auditSetSettingTx(tx *sql.Tx, db *sql.DB, key, label, value string, changes *[]string) error {
+	return auditSetSettingFormattedTx(tx, db, key, label, value, orEmpty, changes)
+}
+
+// auditSetSettingFormattedTx 是 auditSetSettingTx 的**唯一实现**，多一个把取值
+// 折叠成"可以进审计 detail 的形状"的格式化器。
+//
+// 为什么要参数化（第二十七轮 AA2-03）：`detail` 参与哈希链
+// （serverstore.auditHashPayload），写下之后**不可改写** —— 凭据本体一旦进去，
+// 只能靠读时折叠去救，而读时折叠覆盖不了 CSV 导出与库备份。因此凭据型设置必须
+// 在**写入侧省略**，与 reports 的 hook_url 同一口径（见 reports/handlers.go 的
+// auditDetail 与 internal/serverauth/audit_redact.go 文件头那段历史）。
+//
+// 注意**变更判定仍用原值**（old != value）：只改密钥/口令的轮换也必须留下一条
+// 审计，只是落进 detail 的取值被折叠 —— 先折叠再比较会让这种轮换静默消失。
+func auditSetSettingFormattedTx(tx *sql.Tx, db *sql.DB, key, label, value string, format func(string) string, changes *[]string) error {
 	old, _, err := serverstore.GetSettingTx(tx, db, key)
 	if err != nil {
 		old = ""
 	}
 	if old != value {
-		*changes = append(*changes, fmt.Sprintf("%s:%s→%s", label, orEmpty(old), orEmpty(value)))
+		*changes = append(*changes, fmt.Sprintf("%s:%s→%s", label, format(old), format(value)))
 	}
 	return serverstore.SetSettingTx(tx, key, value)
 }
@@ -64,6 +79,32 @@ func orEmpty(v string) string {
 		return "(空)"
 	}
 	return v
+}
+
+// redactDSNForAudit 把错误上报 DSN 折叠成**可进审计 detail** 的形状。
+//
+// 与 orEmpty 的取值形态对齐（空仍是 `(空)`），并保留排查需要的两件事：**配没配**
+// 与**指向哪台收集器**；userinfo（公钥，开启"允许私钥"的项目里还带私钥）、项目 ID
+// 与整串 URL 一律不进 detail —— `https://<publicKey>:<privateKey>@host/<project>`
+// 里的 userinfo 就是凭据本体，而审计行不可改写、默认保留 180 天、还会经
+// `/api/server/admin/audit`（audit:read）下发。
+//
+// 粒度是产品取舍：host 足以回答"换收集器了吗 / 环境配错了没有"，而"换的是哪个
+// 项目"要靠错误监控页自己看（那里有正规的读面与权限）。**不要**在读侧补折叠来
+// 代替这里 —— 读侧覆盖不了 CSV 导出与库备份。
+func redactDSNForAudit(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return "(空)"
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Host == "" {
+		// 准入校验（InspectErrorReportingDSN）不会让这种值落库；真出现了也不原样透出。
+		return "（已设置，地址不可用）"
+	}
+	// u.Host 本身不含 userinfo（userinfo 在 u.User，被这里整段丢弃），
+	// 也丢掉 path/query/fragment（项目 ID 在其中）。
+	return u.Scheme + "://" + u.Host + "/…（已脱敏）"
 }
 
 // RegisterAdminRoutes mounts /api/server/admin/providers, /api/server/admin/models
@@ -1608,7 +1649,12 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 	if req.ErrorReportingDSN != nil {
 		// 准入校验已在**任何写库之前**完成(见本函数上方 dsnInspection);
 		// 这里只负责写入与透出告警。
-		if err := auditSetSettingTx(tx, db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, &changes); err != nil {
+		//
+		// 写入侧省略凭据本体(第二十七轮 AA2-03):DSN 的 userinfo 是公钥(开
+		// "允许私钥"的项目里还带私钥),而 detail 进不可变哈希链、保留 180 天、
+		// 经 audit:read 下发 —— 与 reports.hook_url 的修法同口径(见
+		// auditSetSettingFormattedTx 与 redactDSNForAudit 的注释)。
+		if err := auditSetSettingFormattedTx(tx, db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, redactDSNForAudit, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

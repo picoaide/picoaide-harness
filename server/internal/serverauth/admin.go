@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/updatecheck"
 	"github.com/picoaide/picoaide/internal/util"
@@ -33,6 +34,16 @@ const adminMaxBodyBytes = 1 << 20 // 1MB
 // secureCookieFor reports whether the session cookie should carry Secure.
 // Order: explicit server.secure_cookies setting → X-Forwarded-Proto: https
 // (behind Caddy) → direct TLS. Never trusts a downgrade header.
+//
+// XFP 的判定**必须**走 clientrelease.ForwardedProtoIsHTTPS（全仓唯一实现，
+// 第二十七轮 AA2-02）：此前这里是 `strings.EqualFold(..., "https")`，取值域
+// 小于真实解析面 —— `https `（带空白）与 `https, http`（多跳列表）都判不出
+// https，管理会话 cookie 因此静默丢掉 `Secure`（而服务端自身代码里没有任何
+// `Strict-Transport-Security` 响应头可兜底），同一时刻下载清单的
+// assets url 也为 0：同一个事实被两处各判一次就必然分叉。
+// 共享实现的语义（最左段 / 大小写不敏感 / 忽略空白 / 无法判定即非 https）与
+// "为什么不能各写各的"见该函数自身的注释。fail-closed 取向与
+// `server.secure_cookies` 的优先级都不变：判定不出来就不打 Secure，不乐观假设。
 func secureCookieFor(c *gin.Context, db *sql.DB) bool {
 	if v, ok, err := serverstore.GetSetting(db, "server.secure_cookies"); err == nil && ok {
 		return strings.TrimSpace(v) == "1"
@@ -40,9 +51,9 @@ func secureCookieFor(c *gin.Context, db *sql.DB) bool {
 	if c.Request.TLS != nil {
 		return true
 	}
-	// 反代标志:仅信任 "https",不信任任何显式 "0"/"off"(攻击者伪造只会
+	// 反代标志:仅信任 https 形态,不信任任何显式 "0"/"off"(攻击者伪造只会
 	// 增强而非削弱 cookie 安全)。
-	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+	return clientrelease.ForwardedProtoIsHTTPS(c.GetHeader("X-Forwarded-Proto"))
 }
 
 // adminLoginLimiter bounds admin login attempts (ip+username) so the
