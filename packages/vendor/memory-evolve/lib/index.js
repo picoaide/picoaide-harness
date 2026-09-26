@@ -422,7 +422,8 @@ export function validateRuntimePatch(key, value) {
  * @param {string} stateFile - 状态文件路径。
  * @param {object} [deps] - 可选注入（测试用）。
  * @param {(message: string, meta?: object) => void} [deps.onCorrupt] - 损坏回调（默认 console.warn）。
- * @returns {object} 解析出的覆盖项；缺失/损坏时为 `{}`。
+ * @returns {{values: object, loadError: string|null}} `values` = 解析出的覆盖项（缺失/损坏时 `{}`）；
+ *   `loadError` = **读失败**的拒写理由（`null` = 基线可读或已按声明留档重置）。见 FIX-47①。
  */
 function loadState(stateFile, deps = {}) {
   // NF-A6（2026-09-16 对抗复核）：第二参对象不会被 console.warn 插值，实打印成
@@ -434,11 +435,25 @@ function loadState(stateFile, deps = {}) {
   try {
     text = readFileSync(stateFile, 'utf8')
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      // 权限 / IO / 目录占位（EISDIR）等：按空状态继续，不阻断插件装载。
-      warn(`plugin-state.json 不可读（${error.code}），本次按空状态启动`, { stateFile })
+    if (error.code === 'ENOENT') return { values: {}, loadError: null }
+    // 权限 / IO / 目录占位（EISDIR）等：按空状态继续，不阻断插件装载。
+    //
+    // FIX-47①（第三十一轮 AD1 Q1d 真跑）：这里原先**只 warn**就 `return {}`，
+    // 而下面的解析失败分支会留档 —— 这个不对称本身就是线索：读失败时
+    // `updateRuntime()` 写的 `{...state, ...patch}` 以**空对象**为基线，
+    // 一次面板保存（`POST /memory-evolve/api/config` 回 **200**）就把用户
+    // 其余全部覆盖项整文件换掉（实测 seed 的 advisorEnabled/reviewEnabled/
+    // skillReviewEnabled 静默消失，只剩下 patch 的那一个键），且**原文件字节
+    // 当场被覆盖、不可恢复**。
+    // 现与解析失败路径**对齐**：先留档（原字节改名保存，另写用户可见的
+    // `.quarantined.json` 标记），再把本次运行标成**不可写**（写前闸门）——
+    // 留档保证字节可找回，拒写保证"未知基线"不会被静默固化。
+    warn(`plugin-state.json 不可读（${error.code}），已留档并按空状态启动`, { stateFile })
+    const archived = quarantineState(stateFile, warn)
+    return {
+      values: {},
+      loadError: `不可读（${error.code}）${archived ? '，原文件已留档' : '，且留档失败'}`,
     }
-    return {}
   }
   let parsed
   try {
@@ -446,14 +461,14 @@ function loadState(stateFile, deps = {}) {
   } catch (error) {
     warn(`plugin-state.json 解析失败（${error.message}），已留档并按空状态启动`, { stateFile })
     quarantineState(stateFile, warn)
-    return {}
+    return { values: {}, loadError: null }
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     warn('plugin-state.json 顶层不是对象，已留档并按空状态启动', { stateFile })
     quarantineState(stateFile, warn)
-    return {}
+    return { values: {}, loadError: null }
   }
-  return parsed
+  return { values: parsed, loadError: null }
 }
 
 /**
@@ -509,6 +524,8 @@ function consumeQuarantineNotice() {
  * user's bytes stay recoverable. Never throws（P1-A：装载路径必须 fail-soft）。
  * @param {string} stateFile - 损坏的状态文件。
  * @param {(message: string, meta?: object) => void} warn - 告警回调。
+ * @returns {boolean} 原字节是否**确实**已改名留档（FIX-47①：读失败路径据此决定
+ *   能不能把"未知基线"当成"已声明的新基线"；留档失败时调用方必须拒写）。
  */
 function quarantineState(stateFile, warn) {
   const backup = `${stateFile}.corrupt-${Date.now()}.bak`
@@ -533,6 +550,7 @@ function quarantineState(stateFile, warn) {
     }, null, 2)}\n`)
   } catch { /* 标记写不进去也不影响装载（只读 home / 落点被拒） */ }
   pruneQuarantineBackups(stateFile)
+  return archived
 }
 
 /**
@@ -1827,7 +1845,10 @@ export function apply(ctx, rawConfig = {}) {
     } catch { /* 日志失败绝不影响装载 */ }
     console.warn(`[dsh-memory-evolve] ${line}`)
   }
-  const state = loadState(stateFile, { onCorrupt: stateWarn })
+  const loadedState = loadState(stateFile, { onCorrupt: stateWarn })
+  const state = loadedState.values
+  /** FIX-47①：状态文件**读失败**的拒写理由（`null` = 基线可读/已留档重置）。 */
+  const stateLoadError = loadedState.loadError
   // 上次启动是否发生过状态留档（用户可感知：运行时开关与界面设置被重置）。
   // 读一次、注入快照一次即删——避免模型反复拿陈旧信息打扰用户。
   quarantineNotice = readQuarantineNotice(stateFile)
@@ -1854,6 +1875,16 @@ export function apply(ctx, rawConfig = {}) {
   const updateRuntime = (patch) => {
     const entries = Object.entries(patch)
     for (const [key, value] of entries) validateRuntimePatch(key, value)
+    // FIX-47① 写前闸门（与 FIX-45③ 的 `assertBaselineWritable` 同一形态）：
+    // 装载期**读失败**（EACCES/EIO/EISDIR…）时 `state` 是空对象而不是用户那份
+    // 覆盖项 ⇒ 一旦落盘就是"以空基线整文件回写"，用户其余开关静默消失。
+    // 抛错 ⇒ `applyRuntimePatch` 整批回滚 + HTTP 400（api.js 的外层 catch），
+    // 绝不把"没落盘"当成成功。留档成功也不会解除本闸门：本次运行从未看到过
+    // 旧基线，重启后（文件已不存在 = ENOENT）才会回到可写。
+    if (stateLoadError !== null) {
+      throw new Error(`dsh-memory-evolve: 运行时状态基线不可读（${stateFile}）—— 已拒绝写入：${stateLoadError}`
+        + '（以空基线回写会整文件换掉其它已持久化的开关；请恢复该文件的可读性后重启）')
+    }
     const nextState = { ...state, ...patch }
     const nextRuntime = { ...runtime, ...patch }
     saveState(stateFile, nextState)
