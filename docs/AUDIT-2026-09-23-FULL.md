@@ -2038,3 +2038,42 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
 - **方法学坑（进流程）**：`@electron/asar` 的 `createPackage` 是 **async**，夹具漏 `await` + 随后同步复原 staging
   ⇒ "篡改夹具"实际打的是合法包，**真门禁被假夹具骗成全绿**（第一版三份全绿，修正后 1 绿 2 红）。
   ⇒ **夹具本身也要有"它真的构造出了缺陷"的前置断言。**
+
+---
+
+### §7.63 第二十六轮修复批（FIX-30/31/32/33 + Z1 复核）—— 交付记录
+
+四条修复泳道全部收工，逐条都有"能杀死回退的判据 + 实跑变异"。汇总：
+
+| 泳道 | 覆盖 | VERDICT | 关键证据 |
+|---|---|---|---|
+| FIX-30 | Z2-01 会话代际守卫（4 处投影）+ Z2-02 调试开关单横线 | FIXED 2 / DEFERRED 1（转 FIX-33） | 新增 `enterprise/src/session-epoch.ts` 作**唯一实现**（含 `clearIfCurrent` 互指）；四探针搬进正式 spec + **AST 接线判据**（每 await 后有比对 / 每个会话入口必抵达被守卫函数 / **新增未守卫入口即红** / 豁免表不得陈旧）；enterprise 1107 passed、desktop 1383 passed；5 条变异各自承重且**每条同时让接线判据红** |
+| FIX-31 | cron 跨账号泄漏 + connectors 生命周期抢占 + 凭据读失败 | FIXED 3 / DEFERRED 0 | 可见性收成唯一判据（`jobVisibleTo` / `jobScopes()` / `visibleScheduler()`）被 state/action/SSE **三出口共用**；`runLifecycle` 拆 `transition`/`background`；`readCredential` 只 ENOENT 返 null；cron 251 + connectors 484 用例全绿；10/10 变异红；**零 mock 真 errno 证据**（`setpriv` 降权读 0600 root 凭据 ⇒ 读写都 fail-closed、文件 sha256 不变） |
+| FIX-32 | Z3 四条 P1 | FIXED 4 / DEFERRED 0 / **HANDOFF 2** | `probe/all.sh` 绿 6 条 + **变异 8/8 KILLED**；三平台清单**唯一真源** `CLIENT_PLATFORM_ASSETS`（被中转/镜像/CI 三处对拍）；③ **两层都落**（输入侧 `ci-channels.sh` + 打包侧 `brand-prepare`），并**改写了把缺陷钉成预期的 spec 用例**；真仓 4/4 渠道实证 |
+| FIX-33 | **打包版 `--inspect*` 主进程 RCE**（Z1 + FIX-30 双份独立发现） | FIXED 6 / DEFERRED 1 | 打包期翻 fuse `EnableNodeCliInspectArguments=false`（`RunAsNode` **保持 enable**、`OnlyLoadAppFromAsar` enable）；**真 electron-builder 产物 + A/B**：同一产物只把该 fuse 翻回 ENABLE ⇒ attach 落在主脚本之前、`execSync('id -un')` = **root**、拒绝文案出现在 RCE **之后** ⇒ **因果就是那一颗 bit**；顺序**实测查证**而非假设（`app-builder-lib` `doPack()`：afterPack → sanityCheck → electronFuses → 签名） |
+
+**两条方法学收获（值得固化）**：
+
+1. **"钉调用点"必要但不充分** —— 第二十五轮的教训是"判据只钉函数、不钉调用点"，于是 FIX-28 把判据写成了
+   AST 级调用点断言（写得对）。但 Z2-02 证明**取值域错了照样失效**：判据把"什么算调试开关"钉在
+   `DEBUG_SWITCHES` 的 `--` 形态上，而被守护方（Chromium）的解析面更宽。
+   ⇒ **新规则：闸门的"开关集合"必须按被守护方的真实解析面定义，不能按自己的字面量表定义。**
+2. **"只钉判定不钉能力"第三次复发**（前两次见 §7.5x）。FIX-28 的 27 条判据全是纯函数/AST，
+   真机三态只测了"是否拒绝=1"，**没有一条能力判据** ⇒ `--inspect-brk` 那条整段失效却全绿。
+   ⇒ FIX-33 起这类安全判据一律要求**能力级**证据（真产物 + inspector 连不上 + `id -un` 拿不到 root）。
+
+**新登记的两条待办（本轮暴露、尚未处置）**：
+
+- **读失败语义变更的跨包收口（低风险）**：FIX-31 让 `ConnectorStore.readCredential` 对非 ENOENT
+  **抛错**，于是 `packages/host/browser/src/index.ts:176` 的 `resolveCredentials`（**无 try/catch**，
+  其 `.list`/`.originOf` 两个兄弟有）会让 `runtime.ts:3628` 的 `browser_fill_credentials` 抛出
+  **非 `browserError` 类型**的原始错误。已核实**不泄露路径**（`credentialReadMessage` 只用
+  connectorId + errno code）且消息可操作，因此不是 P1；但建议补一条"转成带 `not-found` 分类的
+  工具错误"（顺带让 `browser_credentials_list` 在读到故障时不要静默变空）。**主控已独立读源码确认。**
+- **`audit_r25_serving_appid_callsite_test.go` 的完整性判据过窄**（Z1 的 P3-①）：只认直接调用两个方法名
+  ⇒ 新增服务侧 handler 若调 `h.validateRawAppID`（间接写侧入口）**全绿不红**（M2b 实跑 0 FAIL），
+  与注释里"全包不得出现第四种形态"不符。
+
+**运维交接（HANDOFF）**：①若产品决定给 CI 加 `workflow_dispatch`，FIX-32 已给出精确 diff + 3 条配套
+（不建议顺手做）；②本次改动**之前**已结束的 run 留下的 `_transfer/<run>-<attempt>-<token>/`
+无代码路径可枚举，需按 REPORT 命令人工清理，长期建议给桶加 `_transfer/` 生命周期规则。
