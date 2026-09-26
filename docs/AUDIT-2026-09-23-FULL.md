@@ -1601,3 +1601,178 @@ R16-A 用 **18 种新形态**证明 R15A-03 的修法方向不闭合：四条静
   组成部分，所以真仓直接红）；第二级 = 连对应用例一起移除 ⇒ 攻击夹具**回到 EXIT=0（不再被发现）**，
   而对照夹具（`js-named` / `js-default` 等）仍红 ⇒ 修复是承重的。逐条日志见 `temp/r20/fix-B/logs/mut-*.txt`。
 
+
+---
+
+### 7.56 第二十一轮审计（2026-09-26，八路独立）：用户点名区的两条 P1 与"修复批自述"的可证伪性
+
+**本轮 = 8 路独立只读审计**（技能库宿主侧 / 技能库服务端+UI / 桌面宿主 / 客户端插件包 /
+服务端核心 / 服务端平台 / 判据面 / 设计缺陷），隔离在 `temp/r21/<泳道>/repo`（`git archive HEAD`
+深拷贝 + 只读软链，主仓零改动）。结论：**0 P0 / 2 P1 / 16 P2 / 17 P3** ⇒ 仍未达成"连续两轮零新增 P0/P1"。
+逐轮计数追加：第十八轮 0+8、第十九轮 0+2、第二十轮 0+2、**第二十一轮 0+2**。
+
+#### 两条 P1
+
+| 编号 | 位置 | 现场 | 证据 |
+|---|---|---|---|
+| **R21A1-01** | `packages/host/enterprise/src/skill-install.ts:2202`（宽松解析器 `readSkillFrontmatter` :3239）、服务端 `skillmanifest/manifest.go:507`、`normalize.go:55` | SKILL.md 的**结束分隔符**只要不是整行 `---`（如 `--- ` 尾随空格）即：客户端预检 **0 问题** → 服务端放行 → 安装 **200/`ok:true`**、文件落盘 → pinned 上游运行时（`skill-filesystem/src/index.ts:931` 要求整行）**不加载** → 企业侧 `listInstalledSkills` 也**列不出** ⇒ 面板永远"未安装"，用户反复点安装每次都被回成功，**零报错** | 真跑 pinned 上游注册表：`[A] 客户端预检问题数 = 0 [] \| 安装结果 = 成功 \| 上游运行时 = [] \| 企业侧 = []` |
+| **R21C-01** | `server/internal/reports/delivery_policy.go:68`（`SubscriptionDuePeriod` 只读单个 `pending_period`）、`serverstore/reports.go:252-263`（成功后清游标 + `last_run_at=now()`） | 月报跨月补投**只补"最早一期"**：webhook 连续失败跨过 ≥1 个北京月界时，期间到期的期号既不进游标也不留痕；补投成功那次把 `last_run_at` 推到当月 ⇒ **中间各期永久不投**，且**无恢复路径**（唯一补发入口只生成上一个北京月）；而 webadmin `Reports.tsx:194` 明文承诺"失败跨月也不跳期" | 真 PG + 真 webhook：`delivered = [2026-06 2026-10]`、`never-delivered = [2026-07 2026-08 2026-09]` |
+
+其余按面：**技**能库（3 P2 + 1 P3：旧调用键只漏安装器第三关、`.skill-removed`/`.skill-locks` 未逐段锚定
+⇒ 静默写/删库外文件、64 字符写侧上限进了删除面 ⇒"列得出、删不掉"）；**客**户端插件（授权键缺服务端段、
+两份授权存储把读失败当"没有授权"、`parseToolGroups([])` 与未知组名都回落全开）；**服**务端（认证依赖故障被
+误分类成 401 ⇒ 客户端清会话并删磁盘令牌、组织面空校验和无兜底、`main.go` 7 行装配零判据且其中一行删掉即
+全组织 SSO 恒 404）；**判**据面（生成物脚本位裸文件名隐形、见证计数与判决可分离、删 CI 步骤静默）；
+**设**计缺陷（宿主 locale 两份实现零对拍、浏览器"企业策略"零生产者且 fail-open、`server-info` 健康面零消费方）。
+
+#### 修复批（10 条泳道，45 项 FIXED / 14 项 DEFERRED，5 个提交）
+
+| 提交 | 覆盖 | 关键点 |
+|---|---|---|
+| `bb234cc313` | 客户端技能库面 | 严格 frontmatter 唯一实现（安装/发现/预检三面共用）+ 读 pinned 上游源码与真注册表两级判据；旧调用键闸门补进安装器；墓碑/锁逐段锚定；删除面改用运行时名字规则；读失败三态；401 分类；客户端面板"已问过"记忆补服务端段 |
+| `a7d7dfa62d` | 桌面宿主判据面 | asar `link` 条目判别联合；`CFBundleIdentifier` 断言（三处调用点）；`refuseForeignNavigation` 三事件共用闭包；代理强制块抽成可注入函数；`NO_PROXY_SWITCH` 取值写死 |
+| `280b3fc249` | 客户端插件作用域 | 授权键三段（v1→v2）；"只有 ENOENT 算首次运行"；`[]` = 全关；locale 手抄镜像删除改 re-export |
+| `55de3b17c9` | 服务端 | 月报游标**逐期推进**（复用 0082，无需新迁移）；期号只取字面年月再锚北京月；认证 401/500 分类；空校验和唯一实现；装配接缝 + AST 可达性判据；日参数 `ParseLocalDay`；归档保留设备名；`migrations-checksums.json` + 守卫；`06-database.md` 认账补齐 |
+| `c9b2d42384` | 判据面 | 生成物脚本位/命令位统一判据；见证绑判决；CI 步骤双向对账；迁移内容登记 |
+
+**门禁**：`corepack yarn check` **32/32、0 失败、0 跳过（265.7s）**。
+
+---
+
+### 7.57 第二十二轮审计（2026-09-26，七路独立复审）：**上一轮修复自身引入一条 P0**
+
+**本轮 = 7 路对抗复审**（对第二十一轮修复批逐条证伪 + 同面新扫）。结论：**1 P0 / 0 P1 / 11 P2 / 25 P3** ⇒ 不是干净轮。
+
+**唯一的 P0 是修复自己修出来的**：上一轮把 `parseToolGroups([])` 从"回落全开"改成"全关"，
+但 `packages/host/browser/src/index.ts:223` 的 `toolGroups: z.array(z.string())` **没有 `.default()`**，
+而 Schemastery 会把**缺键的数组物化成 `[]`**（同一 schema 的标量字段缺键仍是 `undefined`，只有数组中招）；
+生产装配只注入 `{ appOriginScheme }` ⇒ `parseToolGroups([])` = 空集 ⇒ **31 个浏览器工具一个都不注册**，
+而 system prompt 的 section 仍在宣称 `tool:browser`。真跑（真 cordis）读数：
+`Config({appOriginScheme}) → toolGroups = []`、`生产形态注册工具 = 0 []`。
+**判据完全不承重**：browser 全量 50 文件/727 用例全绿 —— 修复自带的用例只调 `parseToolGroups(undefined)`
+与显式 `Config({toolGroups: []})`，**从不调 `Config({})`**。
+
+其余按面（均为 P2/P3，且多数是"同一族只收口了一条"）：技能库（安装器第三关用 trim 而 pinned 上游
+`stringField` 不 trim ⇒ 与第一轮那条 P1 **逐字同一签名**；墓碑 `writeFile` 与锁 `open('wx')` 没有紧邻
+复检；迟到 401 仍清掉新登录）；服务端（`X-Preset-Checksum` 空头、`AdminAuth` 仍"任何 error⇒401"、
+市场面把授权查询的 DB 故障塌成 404）；判据面（生成物判据是逐 `run:` 块判的 ⇒ 跨 step 可绕过；
+迁移反向断言参照 HEAD ⇒ **已提交形态下改名即绕过**）；设计面（`eval` 出口"关键词+纯字母不透明串"
+仍明文出窗、URL userinfo 明文出窗、`k=v; k2=v2` 普通正文被整串抹成 `****`）。
+
+#### 修复批（7 条泳道，提交 `26c98aaaf0` / `f8a5604336` / `38b9608af0` / `9a6a73d8cb` / `346824070f` / `40120ac11d`）
+
+- **P0**：`toolGroups` 补 `.default([...DEFAULT_GROUPS])`，并把判据升到**生产形态**（真 cordis 装配链断言注册 31 个工具；显式 `[]` ⇒ 0 个）。
+- 脱敏家族三处（声明即敏感 / URL userinfo / 过度掩码）、授权存储三档判定（current/legacy/**corrupt**）、
+  技能库取值语义与上游逐字等价（`runtimeString`，51 形态 × 4 路真跑）、写窗口与锁的紧邻复检、
+  `clearIfCurrent`、月报坏行不拖垮全批 + 未来期号按不可信输入处置、装配判据四种漏杀、
+  迁移判据反向遍历与两条小口径、桌面四类判据（缺省 deps / 探针判别力 / 身份注入 / 链接图）。
+
+**门禁**：`corepack yarn check` 首跑**红**（`dsh-plugin-desktop` 的 `wait-budget-contract` 跨包静态扫描命中
+修复新增用例的 4 处等待点没有逐处理由注释）⇒ 补齐后 **32/32 绿**。**这是门禁按设计抓到"修复批自身"的形态。**
+
+---
+
+### 7.58 第二十三轮审计（2026-09-26，五路独立）：新面掉出一条 P1，判据面继续被同族绕过
+
+**本轮 = 4 路复审（对第二十二轮修复批）+ 1 路新面审计**。结论：**0 P0 / 1 P1 / 14 P2 / 18 P3** ⇒ 不是干净轮。
+
+**P1（新面）**：渠道素材若是**符号链接**，**未认证**的素材端点会跟随链接下发容器内任意可读文件。
+四处都不检查"是不是普通文件"：服务端 `channel.go:333-339` 用 `os.Stat`（跟随链接，只排目录）+
+`handlers.go:45-63` 直接 `http.ServeFile`，三个素材路由未认证（`router.go:330-339`）；
+`ci-channels.sh:881/884` 的校验只有 `existsSync`/`readFileSync`（`cp -a` 还会**保留**链接）；
+`Dockerfile` 的 `COPY` 不 dereference ⇒ 链接进镜像。四步实测：handler 探针（三端点全 200 且 body =
+目录外内容）、真 `ci-channels.sh`（EXIT=0）、真 `docker build`（容器内仍是链接）、同族对照
+（`skillseed`/`archiveutil`/`appdb`/`cachetrust` **全都拒符号链接** —— 只有渠道素材这条没有）。
+
+其余要点：月报 `pending_period` 可信度**只有上界没有下界**（`0001-01` ⇒ 连投公元 1 年空报表、
+真实欠投期一期不投）；`marketplace/agent_api.go:268/280` 吞掉写错误（下架静默失效）；
+"DB 故障塌成 404"同族比登记的宽；E-01 是**逐 run 块**判的 ⇒ 跨 step"写 + 执行"可绕过；
+迁移"不可变"在**已提交形态**下不成立（反向断言参照 HEAD，而 PR 的变异就是 HEAD）；
+桌面 `argCount === 2` 可被**同名局部函数遮蔽**绕过。
+
+#### 修复批（5 条泳道，提交 `08f1201e5e` / `4b3aa112ca` / `ecb37ef45c` / `1570b29403` / `1db9841aa9` / `72c10b24eb`）
+
+- **P1**：`assetRegular`（`os.Lstat` + `IsRegular`）+ `openAsset`（Lstat→open→`SameFile` 复验）+
+  `serveAsset` 用 **fd 内容检查 + `http.ServeContent`**（顺带关闭真实存在的 TOCTOU 窗口）；
+  CI 侧 `lstatSync().isFile()`、`channel.json` 由 `[ -f ]` 加严为 `[ -f ] || [ -L ]`；
+  素材 `Cache-Control` 由 `max-age=86400` 改 `no-cache`（**行为变更**）。
+- 其余：eval 脱敏三处同族；技能库**解码层**闸门与运行时同源（`readWholeText` 的 NUL/非法 UTF-8 语义，
+  并把判据面的 `ctx.fs` 注册补上 —— 此前双向对拍正因不注册 `ctx.fs` 而失明）；锁 `rm` 的 dev/ino 守卫；
+  `account-card` 最后一处无条件 `clear()`（判据扫描面同时从 `enterprise/src` 扩到 `packages/client/<pkg>/src`）；
+  服务端月报下界 + 管理端写错误 + 404 折叠同族；判据面跨 step / 尾随重定向 / 迁移**已发布基线 tag** /
+  见证归一化 / 桌面作用域绑定。
+
+**门禁**：`corepack yarn check` 首跑**红**两处（新增用例用了 TS 的 `CaseBlock.statements`——实际只有
+`clauses`，vitest 不做类型检查所以泳道自测全绿；以及守卫自身的内容摘要未同步）⇒ 收口后 **32/32 绿**。
+
+---
+
+### 7.59 第二十四轮审计（2026-09-26，四路）：新面掉出 4 条 P1；**修复批自己引入一条存量回归**
+
+**本轮 = 3 路复审（对第二十三轮修复批）+ 1 路新面审计**。结论：**0 P0 / 4 P1 / 20 P2 / 21 P3** ⇒ 不是干净轮。
+四条 P1 **全部来自"新面"泳道**（前几轮未覆盖的认证配置 / vendored 插件 / 用量账本分区面）：
+
+| 编号 | 位置 | 现场 |
+|---|---|---|
+| **R24-X4-1** | `server/internal/ldap/ldap.go:368-386`（实现落在 `serverauth/`） | LDAP **未配 `group_filter`**（webadmin 标"可选"）时 `GroupsPresent` 恒 `true` 而 `Groups=nil` ⇒ 每次登录 `SyncUserGroups(nil)` **清空该用户全部组归属**（含管理员手工分配的部门）；`dirsync.go:206-221` 有守卫、注释还写"与登录行为一致" ⇒ 登录路径缺同一条守卫，**不自愈**（静默降权） |
+| **R24-X4-2** | `serverauth/oidc/config.go:72-78` + `handler.go:153-177` + `admin.go:1599-1606/1670-1673` | 保存认证配置时 IdP discovery 失败 ⇒ provider 被**静默摘除**（零日志）、`/auth/methods` 仍报 `configured=true`、保存回 200 ⇒ 登录页 SSO 按钮点到 **404**；`hide_local=true` 时员工端无路可进 |
+| **R24-X4-3** | `packages/vendor/memory-evolve/lib/http-guard.js:97` | HTTP 同源守卫**只判 `Origin == Host`**（两端可被攻击者填成同一值）⇒ **DNS rebinding** 下可读记忆全文、可删/归档并落盘；同文件 `:231` 的 `localTrustFence`（Host 必须 loopback/trustedHosts）只有一处使用 |
+| **R24-X4-4** | `serverstore/usage_ledger.go:622/3476/3497-3510` | `usageMonthRelationOf` 严格只认 `usage_<YYYYMM>` ⇒ 季度/整年分区覆盖的月份在聚合里**回落永久账本**、报表静默少计（真 PG 实测 8 月 `10.0000` vs 明细真值 `17.0000`）；而该布局被 `partitions.go:831` 明确判为合法 |
+
+其余 P2 要点：**路由遮蔽**（`app_id` 与 WASM 路由静态段同名 ⇒ 应用"建完即废且永久占位"，`api_sweep_test.go` 把 `:app_id` 固定成 `"1"` 结构上看不见）；`/v1/files` multipart 的同一份字节被内存闸门**收两次** ⇒ 声明 64MiB、实际上限 24MiB 且回**可重试**的 503；员工面"列表按调用者、下载按路由级常量"⇒ 管理员"看得到装不上"；管理面三条技能授权写路由把依赖故障塌成 400 + 零日志；`eval` 出口认证头方案名白名单法（`SSWS` 等仍明文）；上一轮把 URL 脱敏接到内容出口**引入过度掩码**（`?keyword=` 等普通查询值被抹）；判据面 E-01 仍是逐 run 块 + 只认 shell 写形态、E-02 可同时绕过两条新子判据、迁移"已发布基线"由**本仓 tag 自证**。
+
+#### 修复批（4 条泳道，提交 `f63655e7bf` / `8d9c0bc1dc` / `30d7611756` / `3a2a43aa8c` / `0bd1b8f8a1`）
+
+- 四条 P1 全部收口；`/v1/files` 计费与超限分类、`sharedskills` 可见性唯一判据、管理端 401/500 分类、
+  路由静态段从**真实路由表**派生并在写侧 fail-loud、E-01/E-02/迁移基线/桌面判据各自收口。
+- **修复批自己引入一条存量回归（主控当场发现并收口）**：写侧路由保留字被**服务侧共用** ⇒ 名字落在
+  新集合里的存量应用（如 `rows`）升级后会直接 404。拆出同源的 `ValidateAppIDForServing`（只差
+  `routeStatic` 开关）。**但这次拆分只接到 1/8 个调用点 —— 下一轮（§7.60）把它判成 P1。**
+
+**门禁**：`corepack yarn check` 首跑绿（32/32）。
+
+---
+
+### 7.60 第二十五轮审计（2026-09-26，四路）：主控自己的回归修复**不完整**；打包版调试开关 = 主进程 RCE
+
+**本轮 = 3 路复审（对第二十四轮修复批）+ 1 路新面终扫**。结论：**0 P0 / 4 P1 / 5 P2 / 10 P3** ⇒ 不是干净轮。
+
+| 编号 | 位置 | 现场 |
+|---|---|---|
+| **R25-Y3-1** | `wasmapp/api/{open,clientreq,proof,release,admin,admin_opens}.go` 共 7 处 | 主控的 `ValidateAppIDForServing` 拆分**只接了 `appserver/serve.go` 一处调用点**（全仓唯一）⇒ 存量应用（名字 ∈ 路由静态段集合）在客户端面/管理面被 `400 INVALID_APP_ID/route_static_segment` 拒掉，而同一条链上 serveApp 放行。**判据不承重**：把 `serve.go` 改回写侧变体，包级测试仍全绿（原判据只钉 registry 两个函数、不钉调用点） |
+| **R25-Y1-1** | `serverstore/usage_ledger.go:667-693` | `scanUsageMonthTables` 用**名字**（严格六位数字）过滤 ⇒ `usage_2026q3`/`usage_2026` 这类**异名叶子分区永不被保留期回收**（不进 Partitions/Orphans/Shapes，也不进任何计数），而上一轮刚把读路径改成**只看边界不看名字**、自带用例还把这两种命名判为合法 ⇒ 它们成了报表真源却永远清不掉。真 PG：`retention_months=1` 下 `usage_2020q1` 原样留存、`/readyz` 全绿 |
+| **R25-Y4-1** | `packages/host/desktop/src/main.ts`（零净化） | **打包版客户端接受 `--inspect` / `--remote-debugging-port`**：前者 CDP 直通主进程 V8（`process.getBuiltinModule('node:fs'|'node:child_process')` 可用、`app.asar` 可读）⇒ 主进程 RCE；后者 `Network.getAllCookies` 读出 `dsh-auth-*`（httpOnly+Strict）⇒ 拿它伪造请求即可把 `403 browser session proof required` 变成 `202 {"accepted":true}`，**整体击穿写面持有性证明**。前提＝同机同用户任意进程，**正是写面围栏自己的威胁模型**；全仓 `removeSwitch`/`hasSwitch`/`getSwitchValue` 零命中 |
+| **R25-Y4-2** | `.github/workflows/ci.yml:1106/1258` ↔ `scripts/ci-package-clients.sh:145-149` | CI 传 `--verify-app-dir dist/linux-unpacked` 被按 `$REPO_ROOT` 解析（真实布局在 `packages/host/desktop/dist/…`）⇒ `[ -d ]` 不成立即**静默丢弃**该参数 ⇒ `verify-channel-package.ts` 的整组 app.asar 白标断言（包内 channel_id / 图标逐字节 / 官方包不得残留渠道配置）**在 CI 里从未执行**；文档仍称其生效 |
+
+其余 P2 要点：内容出口（`browser_get_text`/`get_snapshot`）与 `eval` 出口**两套掩码**（`runtime.ts:2738`
+的漏斗只做 URL 面，`eval-policy.ts:1007` 另有四趟）⇒ 24/24 认证头语料在文本出口**逐字节原样**；
+内容出口 `?oauth_verifier=`/`?my_key=`/`?token_value=` 覆盖损失且与落盘面分叉；`?sig=` 全仓不掩码；
+E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subprocess.run(['cp'])`/`python3 - <<PY`/
+`ruby -e` 全绿）；E-02 见证计数只认**字面量 id**（计算式诱饵即补满）；桌面判据只钉说明符 basename。
+
+**修复批（FIX-27/28，进行中）**：① 服务侧解析收口成唯一入口并把 7 处改过去 + **调用点级**判据；
+② `scanUsageMonthTables` 改成"只排除 `usage_daily_*`"、月份归属由边界事实推导；③ `main.ts` 模块作用域
+（早于 `whenReady`）在打包态对调试类开关 **fail-loud**；④ `--verify-app-dir` 按真实布局解析且
+**路径不存在即失败**（绝不静默丢弃）+ 门禁回归。
+
+#### 逐轮计数总表（第十三轮起）
+
+| 轮 | P0 | P1 | P2 | P3 | 干净? |
+|---|---|---|---|---|---|
+| 第十七轮 | 0 | 7 | — | — | 否 |
+| 第十八轮 | 0 | 8 | — | — | 否 |
+| 第十九轮 | 0 | 2 | 3+8 | — | 否 |
+| 第二十轮 | 0 | 2 | 6 | 4 | 否 |
+| 第二十一轮 | 0 | 2 | 16 | 17 | 否 |
+| 第二十二轮 | **1** | 0 | 11 | 25 | 否（P0 是上一轮修复自身） |
+| 第二十三轮 | 0 | 1 | 14 | 18 | 否 |
+| 第二十四轮 | 0 | 4 | 20 | 21 | 否（4 条 P1 全在新面） |
+| 第二十五轮 | 0 | 4 | 5 | 10 | 否（含主控自己的不完整修复） |
+
+**诚实结论**：**"连续两轮零新增 P0/P1"这一收敛条件截至目前仍未达成**。收敛趋势是真实的
+（P0 只在第二十二轮出现过一次、P1 的**前提越来越窄**、每轮 P1 都在被当轮修掉），但每轮新覆盖
+一片面就会掉出新的 P1 —— 第二十四/二十五轮的 P1 全部来自"新面"（认证配置、vendored 插件、
+用量分区、打包版进程面、CI 门禁参数），说明**覆盖面仍在扩张期**而非"同一处反复漏"。
+要真正收敛，需要：① 把剩余未覆盖面（`packages/host/desktop/src` 运行时面、`packages/client/**`、
+`scripts/**` 非门禁脚本与 `.github` 未覆盖面）扫完并清空；② 每轮修复批都要有**调用点级**判据
+（第二十五轮那条 P1 的根因就是"判据只钉函数、不钉调用点"）。
