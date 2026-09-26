@@ -1791,21 +1791,31 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
 **门禁**：`corepack yarn check` **32/32、0 失败、0 跳过**（首跑因守卫自身摘要登记值未同步而红，按
 `--print-digests` 收口后转绿 —— 与第二十二/二十三轮同一形态，已在本节固化）。
 
-#### 第二十五轮的一处**撤回**（诚实记录）
+#### 第二十五轮 ② 的"撤回 → 重做 → 复绿"（诚实记录，含主控一次误判）
 
-`bc0973cd84` 的 serverstore 部分（异名叶子分区纳入保留期回收）在收口复跑时被判定**引入回归**：
-`go test ./internal/serverstore/ -run 'TestUsageRetention'` 下三个**既有**用例
-（`DetachedPartitionedParentBackfillsLedgerAndSkipsDrop` / `WiderPartitionLedgersEveryCoveredMonth` /
-`MultilevelGrandchildKeepsLivePartitionAndAmount`）全红，报错落在"分区形态判定"那条 ——
-`usage_2026` 这类整年父分区的**期望窗口与边界文本渲染时区不同**（`+08` vs `+00`）被判不等 ⇒
-走人工处置分支。
+`bc0973cd84` 的 serverstore 部分（异名叶子分区纳入保留期回收）首版**引入了 4 条既有回归**
+（`TestUsageRetentionDetachedPartitionedParentBackfillsLedgerAndSkipsDrop` /
+`…WiderPartitionLedgersEveryCoveredMonth` / `…MultilevelGrandchildKeepsLivePartitionAndAmount` /
+全包才现形的 `TestR8Fix5UsageRetentionStatusObservable`）。
 
-- **已撤回**（提交 `676aa2bddd`，保留 `bc0973cd84` 的 `wasmapp/api` 部分）。撤回后既有保留期回归
-  `ok 24.119s` 全绿。
-- **该 P1 因此仍是未修项**：修它必须同时把"期望窗口 vs 实际边界"的比较改成**绝对瞬时**归一
-  （否则真实部署会在保留期清理上走人工处置分支，比"异名分区不回收"更早被运维观察到）。
-- **流程教训**：FIX-27 只跑了"自己新增的用例 + 全包（25 分钟超时未完成）"，**没有跑既有回归面**；
-  主控的收口复跑抓住了它。以后每个修复泳道的验收命令必须包含**受影响的既有回归包**（不能只跑新增用例）。
+- 主控当场把它撤回（`676aa2bddd`）并在本节写下"真因是窗口比较的时区渲染分叉、需独立课题"——
+  **该诊断是错的**：FIX-27 复跑后定位到真因是**候选面放得太宽**，三条限定缺一不可：
+  ① 非 `usage` 后代（`usage_<月>_p1` 是**另一棵树**的分区，孤儿路径会 DROP 表）；
+  ② 非叶子（`usage_2026` 是整年**父表**，DROP 会连带删掉孙辈叶子，违 R7-A）；
+  ③ 边界未整月对齐（没有名字锚点就领不回相邻月）。
+  修法 = 新增 `candidateForRetention`（名字合法 **或** 叶子后代 ∧ 整月对齐），名字合法的关系
+  **逐字节保持存量口径**（名字即锚点），只有新增那一类取区间末月。**不需要**做窗口比较归一。
+- 同批还修掉一条**自伤回归**：首版把边界读成 `pg_get_expr(relpartbound, c.oid)`，而该形式会
+  **打开关系**（ACCESS SHARE）—— 它是清理轮第一步、没有等锁预算 ⇒ 持 ACCESS EXCLUSIVE 的会话
+  会让整轮**无界挂住**（全包 25 分钟超时卡在该 SELECT）。改传 `relid = 0`（实测输出逐字节相同、
+  不取任何关系锁），并加判据 `TestAuditR25ScanUsageMonthTablesIsLockFree`。
+- **验收（主控复跑，本项目要求的命令）**：`go test ./internal/serverstore/ -count=1 -p 1 -timeout 25m`
+  ⇒ **ok 534.914s / EXIT=0**（FIX-27 自跑 476.904s 同结论）；`internal/wasmapp/api` ok 156.4s。
+  入库提交 `21fd4ca33f`（取代 `676aa2bddd` 的撤回）。
+- **流程教训（两条，都要固化）**：① 每个修复泳道的验收命令**必须包含受影响的既有回归包**
+  （FIX-27 首轮只跑了自己的新用例 + 一次 25 分钟超时的全包，因此漏掉 4 条既有回归，由主控复跑抓住）；
+  ② **主控的"撤回诊断"同样可能错** —— 撤回是对的（先恢复绿），但"真因"必须等修复方复跑后再写进台账，
+  否则会把错误归因固化成交付文档（本轮已当场改正）。
 
 #### 交付状态（截至第二十五轮修复批）
 
@@ -1813,8 +1823,8 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
   判据 + 变异证据"；整仓门禁绿；审计记录（§7.56–§7.60）与行为变更登记（`docs/releases/v2.8.2-beta.1.md` §十二）落库。
 - **未达成**：**"连续两轮零新增 P0/P1"这一收敛条件**。当前已知未闭环项（按价值）：
   ① 本机同用户攻击者经 CDP 的 cookie 窃取（需结构性修法，非本批范围）；
-  ② **非 `usage_<YYYYMM>` 命名的叶子分区不被保留期回收**（第二十五轮的修复因引入既有回归已撤回；
-  下一次必须连带修"窗口比较的时区渲染分叉"那条阻塞项）；
+  ② 名字落在**路径首段**的保留字（`uploads`/`validate`/`catalog`）的**存量**行仍打不开
+  （gin 静态优先遮蔽，校验层改不动；需 `internal/router` 加别名路由）；
   ③ `agentshare` 孪生的可见性分叉（HANDOFF 已给精确改法）；
   ④ 结构性残留：`integration-tests/README.md` 参数同步、仓内 5 张历史 PNG、
   `run-all.sh` 无 per-runner timeout、登录页 step2 的 1/6 瞬时失败（有界轮询）；
