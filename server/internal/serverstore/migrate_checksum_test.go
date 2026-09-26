@@ -22,8 +22,10 @@ package serverstore
 //     首启回填，回填值必须是随包文件的摘要，第二次启动稳定。
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -208,5 +210,125 @@ func TestLegacyDatabaseWithoutChecksumsStillStarts(t *testing.T) {
 	}
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("老库第三次启动: %v", err)
+	}
+}
+
+// TestChecksumBackfillConvergesOnEmptyStringRows 是 R28-FIX41 ② 的承重判据。
+//
+// 被审形态（R28 审计 AB1-05 = P3，真 PG 连跑三次复现）：
+//
+//	`checksum = ''`（**空串**，不是 NULL）被读侧当成"未登记"（读侧注释与实现：NULL / 空串
+//	都落成 ""），写侧却只回填 `WHERE checksum IS NULL` ⇒ 那一行**永远**改不到，于是
+//	每次启动都打印 "backfilled content checksums for 1 migration(s)"（日志是假的、回填不收敛），
+//	且该行永远落在"未登记"分支 ⇒ **"已应用迁移被就地改写必须 fail-loud"这条不变式对它永久不成立**。
+//	FIX-39 自己的用例把整列 DROP（只有 NULL 这一种形态），**结构上测不到空串**。
+//
+// 本条同时钉三件事（缺一件修复就不算成立）：
+//  1. 三形态各一行（空串 / NULL / 合法值）⇒ 前两种必须在**一次**启动后全部登记；
+//  2. 收敛：第二次启动**不再**打印 "backfilled"（并且不报错、不改写合法值那一行）；
+//  3. 能力级：该行此后真的参与内容对账 —— 把 0001 的正文改掉 ⇒ 启动期 fail-loud。
+func TestChecksumBackfillConvergesOnEmptyStringRows(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	// 先跑一次：补齐列与已登记摘要（模板库可能是 checksum 列出现之前建的）。
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("准备（补齐账本）: %v", err)
+	}
+
+	const (
+		emptyVersion = 1 // 空串：被审形态
+		nullVersion  = 2 // NULL：FIX-39 已经覆盖的形态
+		legalVersion = 3 // 合法值：对照组（任何一次启动都不该动它）
+	)
+	legalBefore := embeddedMigrationChecksum(t, legalVersion)
+	mustExec(t, db, `UPDATE schema_migrations SET checksum = '' WHERE version = ?`, emptyVersion)
+	mustExec(t, db, `UPDATE schema_migrations SET checksum = NULL WHERE version = ?`, nullVersion)
+	mustExec(t, db, `UPDATE schema_migrations SET checksum = ? WHERE version = ?`, legalBefore, legalVersion)
+
+	// 三形态的种子必须真的写进去了（夹具漏 await 的同族形态：夹具没构造出缺陷 ⇒ 假绿）。
+	var emptyCount, nullCount int
+	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = ? AND checksum = ''`, emptyVersion).Scan(&emptyCount); err != nil {
+		t.Fatalf("读空串种子: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = ? AND checksum IS NULL`, nullVersion).Scan(&nullCount); err != nil {
+		t.Fatalf("读 NULL 种子: %v", err)
+	}
+	if emptyCount != 1 || nullCount != 1 {
+		t.Fatalf("夹具没构造出三形态：空串=%d NULL=%d（want 1/1）", emptyCount, nullCount)
+	}
+
+	runOnce := func() (string, error) {
+		var buf bytes.Buffer
+		prevOut := log.Writer()
+		log.SetOutput(&buf)
+		err := ApplyMigrations(db)
+		log.SetOutput(prevOut)
+		return buf.String(), err
+	}
+
+	// —— 第 1 次启动：两种"未登记"形态都必须被回填。
+	logged1, err := runOnce()
+	if err != nil {
+		t.Fatalf("第一次启动（回填）: %v", err)
+	}
+	if !strings.Contains(logged1, "backfilled content checksums for 2 migration(s)") {
+		t.Fatalf("第一次启动必须回填 2 条（空串 + NULL）；实际日志:\n%s", logged1)
+	}
+	for _, v := range []int{emptyVersion, nullVersion, legalVersion} {
+		var got string
+		if err := db.QueryRow(`SELECT checksum FROM schema_migrations WHERE version = ?`, v).Scan(&got); err != nil {
+			t.Fatalf("读 %d 的 checksum: %v", v, err)
+		}
+		if want := embeddedMigrationChecksum(t, v); got != want {
+			t.Fatalf("回填后 version=%d 的 checksum=%q，want %q", v, got, want)
+		}
+	}
+
+	// —— 第 2 次启动：必须**零回填**（收敛），且合法值那一行逐字不动。
+	logged2, err := runOnce()
+	if err != nil {
+		t.Fatalf("第二次启动: %v", err)
+	}
+	if strings.Contains(logged2, "backfilled") {
+		t.Fatalf("回填不收敛：第二次启动仍然打印 backfilled（空串行改不到 = 该行的内容对账永久关闭）；日志:\n%s", logged2)
+	}
+	var legalAfter string
+	if err := db.QueryRow(`SELECT checksum FROM schema_migrations WHERE version = ?`, legalVersion).Scan(&legalAfter); err != nil {
+		t.Fatalf("读合法值行: %v", err)
+	}
+	if legalAfter != legalBefore {
+		t.Fatalf("合法值那一行不该被改写: got=%s want=%s", legalAfter, legalBefore)
+	}
+
+	// —— 能力级：这一行现在真的参与内容对账（AB1-05 的危害正是"永久不参与"）。
+	real := migrationsFor()
+	drifted := make([]migration, 0, len(real))
+	for _, m := range real {
+		if m.version == emptyVersion {
+			m.sql += "\nCREATE TABLE r28_fix41_backfill_probe (id INT);\n"
+		}
+		drifted = append(drifted, m)
+	}
+	prevLoader := migrationLoader
+	migrationLoader = func() ([]migration, error) { return drifted, nil }
+	defer func() { migrationLoader = prevLoader }()
+
+	err = ApplyMigrations(db)
+	if err == nil {
+		t.Fatal("空串行被回填之后，同一版本号的内容漂移必须 fail-loud（修复前该行永远落在「未登记」分支 ⇒ 永不参与对账）")
+	}
+	var csErr *MigrationChecksumError
+	if !errors.As(err, &csErr) {
+		t.Fatalf("必须是可判别的 MigrationChecksumError，实际 %T: %v", err, err)
+	}
+	if csErr.Version != emptyVersion {
+		t.Fatalf("必须点名冲突的迁移号 %d，实际 %d", emptyVersion, csErr.Version)
+	}
+	var exists bool
+	if err := db.QueryRow(`SELECT to_regclass('public.r28_fix41_backfill_probe') IS NOT NULL`).Scan(&exists); err != nil {
+		t.Fatalf("探针表查询: %v", err)
+	}
+	if exists {
+		t.Fatal("内容不一致时**不得**执行该迁移的正文")
 	}
 }

@@ -39,6 +39,21 @@ func (m migration) checksum() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// checksumUnregisteredPredicate 是"这一行的内容摘要尚未登记"的**唯一判据**：读侧
+// （`SELECT … , <本谓词> AS unregistered`）与写侧（回填 `UPDATE … WHERE … AND <本谓词>`）
+// 必须使用**同一段 SQL**，否则两边会分叉。
+//
+// 分叉的形态（R28 审计 AB1-05 = P3，真 PG 连跑三次复现）：读侧把 `NULL` 与空串都当
+// "未登记"、写侧只认 `checksum IS NULL` ⇒ 空串那一行**永远**改不到，于是
+//   - 每次启动都打印 "backfilled content checksums for 1 migration(s)"（日志是假的，回填不收敛）；
+//   - 该行永远落在"未登记"分支 ⇒ **"已应用迁移被就地改写必须 fail-loud"这条不变式对它永久不成立**
+//     （文件改了也没人比）。
+//
+// ⚠️ 只改一边（或把两边的条件各写一遍）就会复发；判据是
+// `TestChecksumBackfillConvergesOnEmptyStringRows`（真 PG：空串 / NULL / 合法值三形态 +
+// 连跑两次第二次零回填）。
+const checksumUnregisteredPredicate = `(checksum IS NULL OR checksum = '')`
+
 // testMigrationHook, when non-nil (tests only), overrides the migration set
 // so failure paths can be exercised without a real broken embed.
 var testMigrationHook func() []migration
@@ -332,6 +347,43 @@ func migrationDurationEnv(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// withLockBudget 在 conn（**专用会话**）上施加有界等锁预算后执行 fn，执行完立刻复原会话。
+//
+// 为什么需要它（R27-FIX39 ① 的**取值域**缺口，R28 审计 AB1-02 = P1）：FIX-39 把预算加在
+// 「每条迁移事务」与「advisory lock 等待」两处，但执行器**自有**的账本动作
+// （`CREATE TABLE IF NOT EXISTS schema_migrations` / `ALTER TABLE … ADD COLUMN
+// IF NOT EXISTS checksum` / 读已应用版本 / 回填 checksum）跑在**池连接**上，而且发生在
+// 迁移循环**之前** —— 它们不受任何预算约束。真 PG 实测：另一会话对 schema_migrations 持
+// `ACCESS SHARE` 时，预算设 2s 仍然 **20s+ 不返回**，`ALTER` 的 NOTICE 比 `CREATE` 晚
+// 20s（**即使列已存在、动作是 no-op，PG 仍先取 ACCESS EXCLUSIVE**）⇒ 每次启动都可能
+// 无界静默挂死，与 FIX-39 要消灭的形态逐条相同，只是多了一行 `migration lock acquired`。
+//
+// 会话级 SET 用后必须 RESET：这条连接会归还池，泄漏的 `lock_timeout` 会跟着后续业务查询
+// 走。复原失败同样响亮（否则"下次启动的怪现象"没有任何线索）。
+//
+// ⚠️ 纪律：**任何会取锁的语句都必须落在某个预算会话内**（本函数的闭包、或
+// applyOneMigration 里已 `SET LOCAL` 的事务）。migrate.go 里 DB 调用点的完整性由同包判据
+// `TestMigrationLockTakingStatementsAreAllBudgeted` 静态钉住 —— 新增取锁语句却忘了预算，
+// 那条判据会红。**不要只给"当下被点名的那条"加预算**：那正是 FIX-39 漏掉本函数的病根。
+func withLockBudget(ctx context.Context, conn *sql.Conn, budget time.Duration, what string, fn func(context.Context) error) error {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET lock_timeout = '%dms'", budget.Milliseconds())); err != nil {
+		return fmt.Errorf("%s: set wait budget (%s): %w", what, budget, err)
+	}
+	runErr := fn(ctx)
+	if _, rerr := conn.ExecContext(context.Background(), "RESET lock_timeout"); rerr != nil {
+		return fmt.Errorf("%s: reset session lock_timeout: %w", what, rerr)
+	}
+	if runErr == nil {
+		return nil
+	}
+	if code, ok := pgErrorCode(runErr); ok && code == pgSQLStateLockNotAvailable {
+		return fmt.Errorf("%s: 等锁超时（SQLSTATE %s，预算 %s）—— 有会话对目标表持冲突锁"+
+			"（备份/长查询/idle in transaction 都可能），且这次等待发生在迁移循环**之前**；"+
+			"停掉阻塞者后重试，或用 %s 调整预算: %w", what, code, budget, migrationDDLLockBudgetEnv, runErr)
+	}
+	return runErr
 }
 
 // migrationObservation 是**单条迁移**的可观测事实（R27-FIX39 ②）。
@@ -738,20 +790,17 @@ func applyMigrations(db *sql.DB, sink migrationObservationSink) error {
 	defer conn.Close()
 
 	// R27-FIX39 ①：advisory lock 的等待也要有界（实测 30.02s 零输出）。
-	// 预算**只**作用在这一次 advisory 等待上，拿到锁（或失败）后立刻复原这条会话 ——
+	// 预算**只**作用在这一次等待上（withLockBudget 用完立刻 RESET 这条会话）——
 	// 会话级 SET 会随连接归还池而泄漏给后续业务查询，而且这条会话不是执行 DDL 的
 	// 那条（DDL 的预算由每个迁移事务自己 SET LOCAL，见 applyOneMigration）。
 	advisoryBudget := migrationDurationEnv(migrationAdvisoryLockBudgetEnv, migrationAdvisoryLockBudgetDefault)
 	lockStart := time.Now()
 	log.Printf("migrate: acquiring migration lock (advisory key=%d, budget=%s) — another instance may be migrating",
 		migrationLockKey, advisoryBudget)
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET lock_timeout = '%dms'", advisoryBudget.Milliseconds())); err != nil {
-		return fmt.Errorf("migration lock: set wait budget: %w", err)
-	}
-	_, lockErr := conn.ExecContext(ctx, "SELECT pg_advisory_lock(?)", migrationLockKey)
-	if _, rerr := conn.ExecContext(context.Background(), "RESET lock_timeout"); rerr != nil {
-		return fmt.Errorf("migration lock: reset session lock_timeout: %w", rerr)
-	}
+	lockErr := withLockBudget(ctx, conn, advisoryBudget, "migration lock", func(ctx context.Context) error {
+		_, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock(?)", migrationLockKey)
+		return err
+	})
 	if lockErr != nil {
 		if code, ok := pgErrorCode(lockErr); ok && code == pgSQLStateLockNotAvailable {
 			return fmt.Errorf("migration lock: 等待迁移互斥锁超时（预算 %s 内没拿到 pg_advisory_lock(%d)，SQLSTATE %s）—— "+
@@ -771,34 +820,50 @@ func applyMigrations(db *sql.DB, sink migrationObservationSink) error {
 	// ——0083 会是最末一条，而它之前的每一条迁移都要写 checksum 列。因此这里不用
 	// 新增迁移文件：迁移区间行的上限仍然是 0082，`migrations-checksums.json`
 	// 与已发布迁移的字节一个都不动。
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY,
-		applied_at ` + TimestampType() + ` DEFAULT (` + NowExpr() + `),
-		checksum TEXT
-	)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-	// 老库（checksum 列出现之前建的 schema_migrations）补列：IF NOT EXISTS 幂等。
-	if _, err := db.Exec(`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT`); err != nil {
-		return fmt.Errorf("add schema_migrations.checksum: %w", err)
-	}
+	//
+	// R28-FIX41 ①：这四条语句（建表 / 补列 / 读已应用版本 / 见下的回填 UPDATE）**都会
+	// 取表锁**，必须在预算会话内执行 —— 此前它们跑在池连接上，真 PG 实测在另一会话持
+	// ACCESS SHARE 时 20s+ 不返回（见 withLockBudget 的注释）。
+	ledgerBudget := migrationDurationEnv(migrationDDLLockBudgetEnv, migrationDDLLockBudgetDefault)
 	applied := map[int64]bool{}
 	checksums := map[int64]string{}
-	rows, err := db.Query("SELECT version, checksum FROM schema_migrations")
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var v int64
-		var cs sql.NullString
-		if err := rows.Scan(&v, &cs); err != nil {
-			rows.Close()
+	if err := withLockBudget(ctx, conn, ledgerBudget, "schema_migrations ledger", func(ctx context.Context) error {
+		if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at `+TimestampType()+` DEFAULT (`+NowExpr()+`),
+		checksum TEXT
+	)`); err != nil {
+			return fmt.Errorf("create schema_migrations: %w", err)
+		}
+		// 老库（checksum 列出现之前建的 schema_migrations）补列：IF NOT EXISTS 幂等。
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT`); err != nil {
+			return fmt.Errorf("add schema_migrations.checksum: %w", err)
+		}
+		// 读侧用**同一段**"未登记"谓词（checksumUnregisteredPredicate）—— 读侧认空串、
+		// 写侧只认 NULL 的分叉正是 R28 AB1-05。
+		rows, err := conn.QueryContext(ctx,
+			"SELECT version, checksum, "+checksumUnregisteredPredicate+" AS unregistered FROM schema_migrations")
+		if err != nil {
 			return err
 		}
-		applied[v] = true
-		checksums[v] = cs.String // NULL / 空串都落成 ""（= 未登记）
+		defer rows.Close()
+		for rows.Next() {
+			var v int64
+			var cs sql.NullString
+			var unregistered bool
+			if err := rows.Scan(&v, &cs, &unregistered); err != nil {
+				return err
+			}
+			applied[v] = true
+			// 未登记（NULL 或空串）一律归一成 ""（= 未登记），回填分支据此判定。
+			if !unregistered {
+				checksums[v] = cs.String
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
 	}
-	rows.Close()
 
 	// R13-GE（R13A-03）：**反向对账** —— 库里存在、而当前文件集合里没有对应迁移的
 	// 版本必须 fail-loud（旧实现只做"文件 → DB"单向遍历，DB 里多出来的版本
@@ -853,12 +918,22 @@ func applyMigrations(db *sql.DB, sink migrationObservationSink) error {
 			}
 		}
 		if len(backfill) > 0 {
-			for _, v := range backfill {
-				m := byVersion[v]
-				if _, err := db.Exec("UPDATE schema_migrations SET checksum = ? WHERE version = ? AND checksum IS NULL",
-					m.checksum(), v); err != nil {
-					return fmt.Errorf("backfill schema_migrations.checksum for %04d: %w", v, err)
+			// R28-FIX41 ②：回填的 WHERE 与读侧共用**同一段**谓词，且回填必须**收敛**
+			// （第二次启动不再打印"backfilled"）。修前的形态：读侧把空串当"未登记"、
+			// 写侧只认 `IS NULL` ⇒ 每次启动都谎报"回填了 1 条"而该行**永远是空串**
+			// ⇒ 那一行的内容对账（已应用迁移被就地改写必须 fail-loud）被永久关闭。
+			if err := withLockBudget(ctx, conn, ledgerBudget, "schema_migrations.checksum backfill", func(ctx context.Context) error {
+				for _, v := range backfill {
+					m := byVersion[v]
+					if _, err := conn.ExecContext(ctx,
+						"UPDATE schema_migrations SET checksum = ? WHERE version = ? AND "+checksumUnregisteredPredicate,
+						m.checksum(), v); err != nil {
+						return fmt.Errorf("backfill schema_migrations.checksum for %04d: %w", v, err)
+					}
 				}
+				return nil
+			}); err != nil {
+				return err
 			}
 			log.Printf("migrate: backfilled content checksums for %d migration(s) applied before checksums existed "+
 				"(low=%04d high=%04d); any later in-place edit of those files will now fail loud at startup",

@@ -18,7 +18,7 @@ import (
 // 同族已经定过口径：reports 的 `hook_url` 因"凭据本体进了不可变历史行"改成了
 // **写入侧省略**（`internal/reports/handlers.go` 的 auditDetail +
 // `internal/serverauth/audit_redact.go` 文件头那段历史）。修法照同一口径：
-// `auditSetSettingFormattedTx` + `redactDSNForAudit`（见 admin.go 的注释）。
+// `auditSetSettingFormattedTx` + `redactURLCredentialForAudit`（见 admin.go 的注释）。
 //
 // # 判据为什么必须直读 audit_logs 行
 //
@@ -143,7 +143,7 @@ func TestGatewayConfigAuditKeepsNonSecretFieldsVerbatim(t *testing.T) {
 	}
 }
 
-// redactDSNForAudit 的取值域（含畸形输入：绝不原样透出）。
+// redactURLCredentialForAudit 的取值域（含畸形输入：绝不原样透出）。
 func TestRedactDSNForAuditTable(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -159,11 +159,11 @@ func TestRedactDSNForAuditTable(t *testing.T) {
 		{"https://", "（已设置，地址不可用）"},
 	}
 	for _, tc := range cases {
-		if got := redactDSNForAudit(tc.in); got != tc.want {
-			t.Errorf("redactDSNForAudit(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := redactURLCredentialForAudit(tc.in); got != tc.want {
+			t.Errorf("redactURLCredentialForAudit(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-		if strings.ContainsAny(tc.in, "@") && strings.Contains(redactDSNForAudit(tc.in), "@") {
-			t.Errorf("redactDSNForAudit(%q) 仍含 userinfo 分隔符", tc.in)
+		if strings.ContainsAny(tc.in, "@") && strings.Contains(redactURLCredentialForAudit(tc.in), "@") {
+			t.Errorf("redactURLCredentialForAudit(%q) 仍含 userinfo 分隔符", tc.in)
 		}
 	}
 }

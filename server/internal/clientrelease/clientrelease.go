@@ -414,6 +414,10 @@ var (
 	logWarn      = log.Printf
 	originWarnMu sync.Mutex
 	originWarned bool
+	// 配置了对外地址、但它对本产品无效时的一次性告警闸（与上面的"来源不可用"闸**分开**：
+	// 两者会在同一次请求里先后触发，共用闸会让其中一条永远打不出来）。
+	configuredBaseWarnMu sync.Mutex
+	configuredBaseWarned bool
 )
 
 // warnOriginUnavailable 每个进程只告警一次(来源不安全是部署配置问题,
@@ -426,6 +430,23 @@ func warnOriginUnavailable(reason string) {
 	}
 	originWarned = true
 	logWarn("clientrelease: %s", reason)
+}
+
+// warnConfiguredBaseURLIgnored 每个进程只告警一次：配置的对外地址被忽略。
+//
+// ⚠️ 绝不打印原始取值 —— 被拒的形态里就有"带凭据的 URL"（`https://user:pass@host`），
+// 告警本身不能成为第二条泄漏路径（与审计行脱敏同一条纪律）。
+func warnConfiguredBaseURLIgnored() {
+	configuredBaseWarnMu.Lock()
+	defer configuredBaseWarnMu.Unlock()
+	if configuredBaseWarned {
+		return
+	}
+	configuredBaseWarned = true
+	logWarn("clientrelease: the configured public base URL (settings server.base_url / %s) is ignored: "+
+		"it must be an absolute http(s) URL without query, fragment or userinfo "+
+		"(download URLs are handed to **unauthenticated** clients, so a base URL must never carry credentials)",
+		PublicBaseURLEnv)
 }
 
 // RequestOrigin 解析本请求下客户端可达的绝对来源。
@@ -445,6 +466,11 @@ func RequestOrigin(c *gin.Context) Origin {
 var PublicBaseResolver func() string
 
 // configuredBaseURL 读取显式配置的对外地址(只接受 https/回环 http)。
+//
+// 取值非法时**明确告警一次**（而不是静默回落）——被拒的形态里就有"带凭据的 URL"
+// （R28 审计 AB1-01）：静默忽略会让管理员以为配置生效了，失败点被推迟到员工机器上的
+// 401/无法下载，而那里没有任何线索指回配置。告警文案**不含原始取值**（见
+// warnConfiguredBaseURLIgnored）。
 func configuredBaseURL() string {
 	if PublicBaseResolver == nil {
 		return ""
@@ -455,6 +481,7 @@ func configuredBaseURL() string {
 	}
 	base, ok := normalizeBaseURL(raw)
 	if !ok || !isSecureBase(base) {
+		warnConfiguredBaseURLIgnored()
 		return ""
 	}
 	return base
@@ -488,15 +515,28 @@ type originInput struct {
 // 语义（保守正确，宁可不给也不给错）：
 //   - **大小写不敏感**：HTTP 的 scheme 是大小写不敏感的 token；
 //   - **忽略首尾空白**：代理拼接列表时常带空格；
-//   - **逗号列表取最左段**：多跳链路里代理把"自己收到的协议"追加在右侧，最左段
-//     才是**客户端侧**那一跳（与 `wasmapp/appproof.ServerURL` 同口径，也是
-//     XFF/XFP 的通行约定）；本仓信任模型不按 `PICOAI_TRUSTED_PROXIES` 过滤这个头
-//     （gin 的可信代理只作用于 XFF/ClientIP），所以"取最左"必须与"伪造只会更严"
-//     一起成立：伪造 `http, https` 只会**降级**，不会凭空造出 https；
+//   - **逗号列表取最左段**：多跳链路里代理把"自己收到的协议"**追加**在右侧，最左段才是
+//     客户端侧那一跳（与 `wasmapp/appproof.ServerURL` 同口径，也是 XFF/XFP 的通行约定）；
 //   - **无法判定为 https 一律 false（fail-closed）**：空串、未知 scheme（`wss`/`on`）、
 //     最左段为空（形如 `", https"` 的畸形形态）都当作非 https —— 不乐观假设。
 //     注意 `http, https` 因此判 false：客户端到第一跳是明文，给 https 下载地址
 //     或给 cookie 打 `Secure` 都会让那条链路直接不可用。
+//
+// ⚠️ 关于"取最左"的**事实**（R28 审计 AB1-07 纠正了本注释此前给出的理由，理由不成立
+// 但行为不变）：取最左只在代理**覆写**该头（`X-Forwarded-Proto: <自己收到的协议>`）时
+// 才等价于"客户端侧那一跳"。**追加型**代理（`$http_x_forwarded_proto, $scheme`）下，
+// 客户端自带的 `https` 前缀会**留在最左段** ⇒ 真跑 `https, http` 判 `true`（是**升级**，
+// 不是降级）。此前注释把正当性建立在"伪造只会更严（`http, https` 只会降级）"上，那只
+// 覆盖了攻击者把整个头写成 `http, https` 的方向。
+//
+// 因此本函数**不是信任边界**：它只是"尽力判定 + 判不出就 false"的 fail-closed 判定。
+// 与之对照，同一个对端发来的 `X-Forwarded-For` 要经 `SetTrustedProxies`
+// （`cmd/server/main.go`）才被采信，而本头是**无条件采信**的 —— 同一对端的两个转发头
+// 用了两套信任模型。直接对外暴露（无受信代理）的部署里，调用方可以用这个头自行决定
+// "cookie 要不要 `Secure`"与"清单下发 http 还是 https URL"；两条后果都只落在**它自己**
+// 那一次请求的响应上（`/api/client/v2/updates/manifest` 是 no-store，不构成缓存投毒，
+// 也够不到别的用户），所以严重度是"信任模型不一致 + 文档漂移"，而不是边界击穿。
+// 是否把它纳入与 XFF 同一套可信代理校验，见 R28 报告 ④ 的建议（本轮不实施）。
 func ForwardedProtoIsHTTPS(raw string) bool {
 	first, _, _ := strings.Cut(raw, ",")
 	return strings.EqualFold(strings.TrimSpace(first), "https")
@@ -510,7 +550,7 @@ func resolveOrigin(in originInput) Origin {
 	if raw := strings.TrimSpace(os.Getenv(PublicBaseURLEnv)); raw != "" {
 		base, ok := normalizeBaseURL(raw)
 		if !ok {
-			return Origin{Reason: PublicBaseURLEnv + " is invalid: expect an absolute http(s) URL without query or fragment"}
+			return Origin{Reason: PublicBaseURLEnv + " is invalid: expect an absolute http(s) URL without query, fragment or userinfo"}
 		}
 		if !isSecureBase(base) {
 			return Origin{Reason: PublicBaseURLEnv + " must be https (the client rejects non-https download URLs)"}
@@ -536,13 +576,40 @@ func resolveOrigin(in originInput) Origin {
 }
 
 // normalizeBaseURL 规范化显式配置的对外地址:去掉尾斜杠(允许子路径),
-// 拒绝 query/fragment、相对地址与非 http(s) scheme。
+// 拒绝 query/fragment、相对地址、非 http(s) scheme **以及 userinfo(凭据)**。
+//
+// 为什么必须在这里拒绝 userinfo（R28 审计 AB1-01 = P2，真跑复现）：本函数是"对外地址"
+// （`PICOAI_PUBLIC_BASE_URL` 环境变量 / settings `server.base_url`）的**唯一**规范化实现，
+// 它的返回值会被拼进**公开未认证**端点 `/api/client/v2/updates/manifest` 的下载 URL
+// （以及门户页的下载地址）。修前它只查 scheme/host，然后返回 `strings.TrimRight(raw,"/")`
+// **原串** ⇒ 管理员按"对外地址要经基础认证"的最自然写法配 `https://user:pass@host` 时：
+//
+//	asset url = "https://user:pass@host/updates/client/Setup.exe"
+//
+// 任何未登录调用者都能直接读到凭据（真跑输出见 temp/r28/AB1/REPORT.md 的 AB1-01）。
+//
+// 为什么选**拒绝**而不是"静默剔除 userinfo"（这是取舍，理由必须写在纸面上）：
+//  1. 静默剔除会让管理员以为凭据生效了：失败点从"保存配置那一刻"推迟到员工机器上的
+//     401/无法下载 —— 那时没有任何一条日志指回这里（本包此前连"配置被忽略"都不告警，
+//     见 configuredBaseURL 的 warnConfiguredBaseURLIgnored）；
+//  2. 拒绝是 fail-closed 且**可诊断**：调用方拿到明确 Reason，`configuredBaseURL()` 回空
+//     ⇒ 来源判定退回"请求头推导"（P3-5 之前的行为），配置正常的部署照常工作、不会因为
+//     一条畸形配置就断掉下载面；
+//  3. 语义上它本来就不该承载凭据："对外地址"是**给未认证客户端**用的下载基地址。
+//
+// 管理端写入侧的拒绝（保存 `server.base_url` 时就报错）是 llmgateway 配置校验面的事，
+// 不在本包；本包保证**无论谁把它写进来，凭据都不会被带出去**（两条暴露路径各自收口，
+// 见 R28 报告 ③）。
 func normalizeBaseURL(raw string) (string, bool) {
 	if strings.ContainsAny(raw, "?#") {
 		return "", false
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", false
+	}
+	// userinfo（`https://user:pass@host`，含空 userinfo 的畸形形态 `https://@host`）一律拒绝。
+	if u.User != nil {
 		return "", false
 	}
 	return strings.TrimRight(raw, "/"), true

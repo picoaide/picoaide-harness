@@ -162,6 +162,18 @@ services:
       # 它同时是"篡改可见性窗口"与"每轮一次 audit_logs 全表只读扫描"的取舍旋钮。
       # 非法值会打 WARNING 并回落默认,不静默。
       PICOAI_AUDIT_CHAIN_INTERVAL: ${PICOAI_AUDIT_CHAIN_INTERVAL:-}
+      # ---- 启动期迁移执行器（R27-FIX39；R28 审计 AB2-B-01 补接线）----
+      # 两条**有界等锁预算**与一条慢迁移告警阈值（毫秒；缺省 5min / 5min / 5s）。
+      # 语义：预算打满即 fail-loud（点名迁移号与 SQLSTATE）—— 容器退出、旧实例继续
+      # 服务（"受得了失败、受不了挂住"：挂住 = 容器永远停在 starting，运维拿不到线索）。
+      # 非法/非正的值一律回落缺省并告警 —— 不许用一条 env 把预算变成"无预算"。
+      # 运维口径（谁该调、怎么读慢迁移告警、checksum 列怎么回填）见 docs/06-database.md。
+      # ⚠️ 这三个键此前**只**写在 server/AGENTS.md 与 migrate.go 里，部署模板没接线
+      # ⇒ 运维写进 .env 后重启，静默不生效、零回显（判据：cmd/server/compose_env_test.go
+      # 的 TestEveryServerPICOAIEnvNameIsWiredOrExempt；漏接一个新旋钮即红）。
+      PICOAI_MIGRATION_LOCK_TIMEOUT_MS: ${PICOAI_MIGRATION_LOCK_TIMEOUT_MS:-}
+      PICOAI_MIGRATION_ADVISORY_TIMEOUT_MS: ${PICOAI_MIGRATION_ADVISORY_TIMEOUT_MS:-}
+      PICOAI_MIGRATION_SLOW_MS: ${PICOAI_MIGRATION_SLOW_MS:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./picoaide-data:/data

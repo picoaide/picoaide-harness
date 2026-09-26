@@ -31,7 +31,12 @@
 
 ### 迁移框架的已知边界:`schema_migrations` 没有校验和 + 已发布迁移被就地改写(认账,2026-09-23;事实补记与门禁判据 2026-09-26)
 
-- **事实**:`schema_migrations` 只有 `(version, applied_at)` 两列(`internal/serverstore/migrate.go` 的
+> **勘误(2026-09-27,R28 审计 AB2-B-01)**:本节标题与第一条"事实"、以及下面「未来触发条件」①
+> 里"运行期仍无校验和"的说法**已过时** —— R27-FIX39 已给 `schema_migrations` 加 `checksum` 列
+> 并在每次启动逐条对账(见下「迁移执行器的运维口径」)。本节其余内容作为**当时**的取舍与事故
+> 记录保留原文(改写记录等于改写事实)。
+
+- **事实(2026-09-23 当时)**:`schema_migrations` 只有 `(version, applied_at)` 两列(`internal/serverstore/migrate.go` 的
   `CREATE TABLE IF NOT EXISTS`)。runner 逐条查"版本号是否已应用",已应用的直接跳过 ⇒
   **已应用迁移文件的原地修改不会被任何机制发现**(文件内容从不参与判定)。
 - **取舍**:加校验和要动迁移框架本身(建表语句 + 存量行回填口径 + 与"迁移需可重复执行"的现有
@@ -236,12 +241,50 @@ SELECT s.name AS app_id, 'skill' AS kind, count(*) AS org_rows
   **已有条目** `sha256` 的改动都必须按"改写历史迁移"处理(第 ⑥ 条只能挡到提交之前)。
   登记表的 `howToUpdate` 字段把"只在新增迁移时更新"写成硬纪律,就是为了让这条评审口径有出处。
 
+#### 迁移执行器的运维口径(2026-09-27 补记,R28 审计 AB2-B-01)
+
+> 本节补上"代码里已可配、部署模板与文档里查不到"的那一半。**上面「已知边界」与
+> 「未来触发条件」两节里"`schema_migrations` 没有校验和""运行期校验和仍未实现"的说法
+> 已过时** —— 保留原文是因为它们是当时的事故记录;运行期校验和已随 R27-FIX39 落地,
+> 以本节为准。
+
+**① `schema_migrations.checksum` 列(运行期内容对账)**
+
+| 项 | 口径 |
+|----|------|
+| 建列 | 启动期 `ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT`(幂等,不需要新迁移文件) |
+| 写入 | 每条迁移在**它自己的事务里**与版本行一起写(该迁移文件的 sha256 小写 hex) |
+| 读取/比对 | 每次启动把"库里已登记"与"随包文件"逐条对账;不一致 ⇒ `MigrationChecksumError` **拒绝启动**,点名 version / file / 两边 checksum 与两条可行动作 |
+| 老库(checksum 列出现之前) | 首启用**随包文件**回填一次(NULL **或空串**都算"未登记"),**不拒绝启动**;此后冻结绑定 |
+| 已知缺口 | 库里已应用、但当前文件集合里没有对应迁移的版本仍会照常报出来(反向对账),不会被静默跳过 |
+| 显式承认当前二进制 | 确认两边 schema 真等价后才用 `UPDATE schema_migrations SET checksum='<随包文件 sha256>' WHERE version=<NNNN>`;**不要**删版本行逼它重放(存量库上重放整条迁移不是幂等的) |
+| 与门禁侧判据的分工 | `scripts/check-migration-range.mjs` + `migrations-checksums.json` 管"**构建期**文件字节有没有被动过";本列管"**某个具体的库**当初跑的是哪一版正文" |
+
+**② 三个迁移预算旋钮(毫秒;缺省 5min / 5min / 5s)**
+
+| env | 作用 | 什么时候调 |
+|-----|------|-----------|
+| `PICOAI_MIGRATION_LOCK_TIMEOUT_MS` | 每条迁移**自己的 DDL** 的等锁预算(`SET LOCAL lock_timeout`,施加在真正执行 DDL 的那条会话上) | 启动日志报等锁超时、且确认是 pg_dump / 长查询 / `idle in transaction` 这类**运维侧**长事务暂时占着表 ⇒ 可临时放宽 |
+| `PICOAI_MIGRATION_ADVISORY_TIMEOUT_MS` | 迁移互斥锁(`pg_advisory_lock`)的等待预算 —— 滚动升级时另一个实例可能正在迁移 | 同上;超时说明"另一个实例卡住了",继续等通常不如 fail-loud |
+| `PICOAI_MIGRATION_SLOW_MS` | "慢迁移"告警阈值:超过它单独打一条可检索的 `migrate: SLOW migration` WARN(含被 `ACCESS EXCLUSIVE` 锁住的表与时长) | 想让"这次升级锁了多久"更早暴露 ⇒ 调小 |
+
+- **单位是毫秒**(与 `PICOAI_AUDIT_CHAIN_INTERVAL` 那种 Go duration 不是同一种写法)。
+- **非法/非正值一律回落缺省并告警** —— 不许用一条 env(写 `0` 或写错)把预算变成"无预算",
+  那正是这条修复要消灭的形态。
+- **预算打满 = fail-loud**,不是无限等待:迁移受得了失败、受不了挂住。
+- 部署侧接线(`.env` 里写这三个键真的会进容器)在 `server/docker-compose.yml` 的
+  `server.environment` 与 `server/.env.example`;接线漏一个会被
+  `server/cmd/server/compose_env_test.go` 的 `TestEveryServerPICOAIEnvNameIsWiredOrExempt`
+  当场打红(服务端源码里出现的每个 `PICOAI_*` 名字都必须"已接线"或"在豁免清单里且写明理由")。
+
 #### 未来触发条件
 
 - ① **已满足**(2026-09-24 的 `e1e3b0155b` 一批)。本次落地的是**门禁侧**冻结(上面那两件:
-  登记表 + 守卫);**运行期**的 `schema_migrations` 校验和**仍未实现**(2026-09-23 的
-  "不改框架"取舍没有变),所以"某个库到底跑过哪一版正文"依然只能靠 `applied_at` 与发布
+  登记表 + 守卫);**运行期**的 `schema_migrations` 校验和**当时仍未实现**(2026-09-23 的
+  "不改框架"取舍没有变),所以"某个库到底跑过哪一版正文"**当时**只能靠 `applied_at` 与发布
   时间对照推断,不能靠库自查。
+  > **勘误(2026-09-27)**:运行期校验和已由 R27-FIX39 落地(`schema_migrations.checksum` 列),
+  > 本条只描述 2026-09-26 那一刻;现行口径见上「迁移执行器的运维口径」。
 - ② 贡献者/并行分支继续增长到 review 覆盖不住历史文件(判据 = 出现过一次 review 未发现的
   文件改动);③ 需要"只在预期库形态上跑"的前置校验。实现口径:`schema_migrations`
   加 `checksum` 列,存量行以**升级时读到的文件内容**回填(不回溯校验历史),此后启动逐文件比对,

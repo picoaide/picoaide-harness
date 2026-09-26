@@ -28,8 +28,10 @@ import (
 //
 // 期望值一律按**保守正确**定：
 //   - 大小写不敏感、忽略首尾空白；
-//   - 多跳列表取**最左**段（代理把"自己收到的协议"追加在右侧，最左段才是客户端
-//     侧那一跳；与 wasmapp/appproof.ServerURL 同口径）；
+//   - 多跳列表取**最左**段（R28 审计 AB1-07 纠正了此前的理由：取最左只在代理**覆写**
+//     该头时才等于"客户端侧那一跳"；**追加型**代理下客户端自带的 `https` 前缀会留在最左
+//     段 ⇒ `https, http` 判 true 是**升级**面，不是降级面。本函数因此**不是信任边界**，
+//     只是 fail-closed 的尽力判定 —— 详见 `ForwardedProtoIsHTTPS` 的注释）；
 //   - 判不出来就是 false（fail-closed）—— 空值、未知 scheme、最左段为空的畸形
 //     形态都不乐观假设成 https。
 var xfpShapes = []struct {
@@ -42,9 +44,9 @@ var xfpShapes = []struct {
 	{"Https", true, "混合大小写"},
 	{"https ", true, "尾随空白"},
 	{" https", true, "前导空白"},
-	{"https, http", true, "多跳：最左 = 客户端侧 https"},
+	{"https, http", true, "多跳：判 true —— 追加型代理下最左段可被客户端预设，这是本实现的**升级**面（AB1-07）"},
 	{"HTTPS , HTTP", true, "多跳 + 大小写 + 空白"},
-	{"http, https", false, "多跳：最左 = 客户端侧 http ⇒ 不给 https 地址、不打 Secure"},
+	{"http, https", false, "多跳：最左 = http ⇒ 不给 https 地址、不打 Secure（这条方向是降级）"},
 	{"http", false, "明文"},
 	{"", false, "无头（fail-closed）"},
 	{"wss", false, "未知 scheme"},

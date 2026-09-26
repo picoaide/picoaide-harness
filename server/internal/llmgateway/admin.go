@@ -81,18 +81,28 @@ func orEmpty(v string) string {
 	return v
 }
 
-// redactDSNForAudit 把错误上报 DSN 折叠成**可进审计 detail** 的形状。
+// redactURLCredentialForAudit 把**URL/凭据型的取值**折叠成可进审计 detail 的形状。
 //
 // 与 orEmpty 的取值形态对齐（空仍是 `(空)`），并保留排查需要的两件事：**配没配**
-// 与**指向哪台收集器**；userinfo（公钥，开启"允许私钥"的项目里还带私钥）、项目 ID
-// 与整串 URL 一律不进 detail —— `https://<publicKey>:<privateKey>@host/<project>`
-// 里的 userinfo 就是凭据本体，而审计行不可改写、默认保留 180 天、还会经
-// `/api/server/admin/audit`（audit:read）下发。
+// 与**指向哪台主机**；userinfo（DSN 的公钥，开启"允许私钥"的项目里还带私钥；任何被
+// 粘贴进来的 `https://user:pass@host` 同理）、路径与查询串（项目 ID、`?token=…`）
+// 与整串 URL 一律不进 detail —— 审计行参与哈希链、**写下之后不可改写**、默认保留
+// 180 天，还会进 CSV 导出与库备份、经 `/api/server/admin/audit`（audit:read）下发。
+//
+// 为什么必须"写入侧省略"而不是"读侧折叠"：读侧（`RedactAuditDetailForViewer`，按
+// 查看者权限）覆盖不了 CSV 导出与库备份，也覆盖不了"换个人读库"。口径与 reports 的
+// `hook_url` 一致（见 reports/handlers.go 的 auditDetail 与
+// internal/serverauth/audit_redact.go 文件头那段历史）。
+//
+// **消费点（完整清单的真源 = `audit_set_setting_inventory_test.go` 的登记表，
+// 新增 URL/凭据型写点必须在那里登记）**：
+//   - `web.error_reporting_dsn`（第二十七轮 AA2-03）；
+//   - `web.glitchtip_base_url` 与 `server.base_url`（第二十八轮 FIX-40 ②：两个都是
+//     **零校验**的 URL 写入点，实测都能存进 `https://user:pass@host` 并原样进 detail）。
 //
 // 粒度是产品取舍：host 足以回答"换收集器了吗 / 环境配错了没有"，而"换的是哪个
-// 项目"要靠错误监控页自己看（那里有正规的读面与权限）。**不要**在读侧补折叠来
-// 代替这里 —— 读侧覆盖不了 CSV 导出与库备份。
-func redactDSNForAudit(v string) string {
+// 项目/路径"要靠对应页面自己看（那里有正规的读面与权限）。
+func redactURLCredentialForAudit(v string) string {
 	trimmed := strings.TrimSpace(v)
 	if trimmed == "" {
 		return "(空)"
@@ -103,7 +113,7 @@ func redactDSNForAudit(v string) string {
 		return "（已设置，地址不可用）"
 	}
 	// u.Host 本身不含 userinfo（userinfo 在 u.User，被这里整段丢弃），
-	// 也丢掉 path/query/fragment（项目 ID 在其中）。
+	// 也丢掉 path/query/fragment（项目 ID 与凭据型查询串都在其中）。
 	return u.Scheme + "://" + u.Host + "/…（已脱敏）"
 }
 
@@ -1653,8 +1663,8 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		// 写入侧省略凭据本体(第二十七轮 AA2-03):DSN 的 userinfo 是公钥(开
 		// "允许私钥"的项目里还带私钥),而 detail 进不可变哈希链、保留 180 天、
 		// 经 audit:read 下发 —— 与 reports.hook_url 的修法同口径(见
-		// auditSetSettingFormattedTx 与 redactDSNForAudit 的注释)。
-		if err := auditSetSettingFormattedTx(tx, db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, redactDSNForAudit, &changes); err != nil {
+		// auditSetSettingFormattedTx 与 redactURLCredentialForAudit 的注释)。
+		if err := auditSetSettingFormattedTx(tx, db, "web.error_reporting_dsn", "错误上报DSN", *req.ErrorReportingDSN, redactURLCredentialForAudit, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -1681,7 +1691,11 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.GlitchTipBaseURL != nil {
-		if err := auditSetSettingTx(tx, db, "web.glitchtip_base_url", "GlitchTip地址", *req.GlitchTipBaseURL, &changes); err != nil {
+		// 写入侧省略凭据本体（第二十八轮 FIX-40 ②，与 DSN 同一实现同一口径）：这个键
+		// **没有任何准入校验**（实测 `https://user:pass@glitchtip.example.com` 能存进库），
+		// 而 detail 进不可变哈希链、保留 180 天、还会进 CSV 导出与库备份 ⇒ 折叠只能发生
+		// 在写入侧。变更判定仍用原值（见 auditSetSettingFormattedTx 的注释）。
+		if err := auditSetSettingFormattedTx(tx, db, "web.glitchtip_base_url", "GlitchTip地址", *req.GlitchTipBaseURL, redactURLCredentialForAudit, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}
@@ -1700,7 +1714,10 @@ func setGatewayConfig(c *gin.Context, db *sql.DB) {
 		}
 	}
 	if req.ServerBaseURL != nil {
-		if err := auditSetSettingTx(tx, db, "server.base_url", "对外地址", *req.ServerBaseURL, &changes); err != nil {
+		// 写入侧省略凭据本体（第二十八轮 FIX-40 ②）：这个键同样**零校验**，实测
+		// `https://user:pass@harness.example.com` 原样入库并原样进 detail —— 与
+		// glitchtip_base_url 同一条路径、同一个修法（同一个折叠实现）。
+		if err := auditSetSettingFormattedTx(tx, db, "server.base_url", "对外地址", *req.ServerBaseURL, redactURLCredentialForAudit, &changes); err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "保存失败")
 			return
 		}

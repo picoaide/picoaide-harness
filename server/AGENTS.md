@@ -125,6 +125,9 @@ go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证�
 #   `migrate: SLOW migration` 告警,可 grep 出"哪张表被锁了多久");
 #   ③ schema_migrations 有 checksum 列:已应用迁移与随包文件不一致 ⇒ 启动 fail-loud
 #   (老库首启用随包文件回填一次,不拒绝启动)。**不要**就地改写已发布的迁移文件。
+#   **部署侧口径**(R28 审计 AB2-B-01):三个预算键已接进 docker-compose.yml 的
+#   server.environment 与 .env.example(单位毫秒,留空 = 缺省 5min/5min/5s),
+#   运维口径(含 checksum 列的回填/拒绝启动语义)见 docs/06-database.md。
 ```
 
 ## 9. 文档与实施
