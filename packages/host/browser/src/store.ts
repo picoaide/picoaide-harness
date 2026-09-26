@@ -370,31 +370,55 @@ function scanKeyValueText(raw: string, vocabulary: 'url' | 'text'): string {
   return parts.join('')
 }
 
-/** URL embedded in free text (a title, an op-log summary). Trailing sentence
- * punctuation is peeled off by {@link stripSensitiveText} and re-appended. */
+/** URL embedded in free text (a title, an op-log summary, a page's text).
+ * Trailing sentence punctuation is peeled off by {@link maskCredentialUrlsInText}
+ * and re-appended. */
 const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
 
-/** Mask credential-shaped URLs **inside arbitrary text** (FIX-06, 2026-09-12;
- * generalized by R-4, 2026-09-13).
+/**
+ * 文本里**内嵌的** URL 的凭据脱敏（`TEXT_URL_RE` 那一趟，唯一实现）。
  *
- * `stripSensitiveUrl` only handles a string that *is* a URL. Titles and
- * summaries routinely embed one (`download: https://…`) or *are* a URL that no
- * longer parses as a whole (`getTitle() || tab.url`), and those fields were
- * persisted in cleartext while the sibling `url` field read `****` — the same
- * value, two columns, one redacted. This is the single text-level redactor:
- * the store write path (`addHistory`/`addBookmark`) and the runtime op-log
- * (`runtime.maskBrowserSummary`) both call it, so no second copy can drift.
+ * `stripSensitiveUrl` 只处理"整个字符串就是一个 URL"的形态；标题、摘要、op log
+ * 摘要与页面正文都是**内嵌** URL（`download: https://…`），或者是一段已经无法整体
+ * 解析成 URL 的旧文本（`getTitle() || tab.url`）。这些字段曾以明文落盘而兄弟字段
+ * `url` 已经是 `****` —— 同一份数据、两列、只擦了一列（FIX-06, 2026-09-12）。
+ *
+ * 用 URL 解析器（`stripSensitiveUrl`）而不是文本级规则，是因为只有它能看见
+ * **userinfo** 与 fragment 结构，也只有它会剥掉句子尾部的标点
+ * （`…?token=T.` → `…?token=****.`，句号是散文不是取值）。不需要脱敏的文本
+ * **逐字节返回**。
+ *
+ * R23 N2（2026-09-26）：内容出口（`browser_eval` 的 `maskString`、
+ * `browser_get_text` / `browser_get_snapshot` 共用的值级漏斗）与标题/摘要面
+ * 复用**这同一份**实现 —— userinfo 不能被一个出口擦、另一个出口原样交给模型。
+ * 调用方不需要自己写第二份 URL 正则。
+ */
+export function maskCredentialUrlsInText(raw: string): string {
+  if (raw === '' || !raw.includes('://')) return raw
+  return raw.replace(TEXT_URL_RE, (match) => {
+    let end = match.length
+    while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
+      end -= 1
+    }
+    return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
+  })
+}
+
+/** Mask credential-shaped text: `key=value` pairs anywhere plus the embedded
+ * URLs of {@link maskCredentialUrlsInText}.
  *
  * Two passes, in this order:
- * 1. absolute URLs, through the URL parser (`stripSensitiveUrl`), which is the
- *    only pass that can see userinfo and fragment structure and that knows to
- *    peel a sentence's trailing punctuation off the URL tail
- *    (`…?token=T.` → `…?token=****.`, the full stop is prose, not the value);
+ * 1. absolute URLs, through the URL parser (`stripSensitiveUrl`) — see
+ *    {@link maskCredentialUrlsInText};
  * 2. `key=value` pairs anywhere ({@link maskSensitiveFreeText}) — this is
  *    what makes a bare `token=T12` title, a `%2573id=` double-encoded key and a
  *    `;`-separated pair maskable; the old `://`-only early return let all three
  *    through in cleartext (R-4, real-device evidence `bm-v3-result.json`).
  * A text with nothing to mask is returned byte-identical.
+ *
+ * This is the single text-level redactor for the store write path
+ * (`addHistory`/`addBookmark`), the runtime op-log (`runtime.maskBrowserSummary`),
+ * tab titles and the ledger, so no second copy can drift.
  *
  * 2026-09-15 审计 P2：第二遍改用 {@link maskSensitiveFreeText}——散文段只对强凭据键
  * 打码。此前的全强度词表把标题 `搜索 “key=value” 的含义` 写成
@@ -402,16 +426,7 @@ const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
  * 与文本里的 URL/查询串段仍按原强度处理，安全侧的 URL 面兜底没有被削弱。 */
 export function stripSensitiveText(raw: string): string {
   if (raw === '') return raw
-  const urls = raw.includes('://')
-    ? raw.replace(TEXT_URL_RE, (match) => {
-      let end = match.length
-      while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
-        end -= 1
-      }
-      return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
-    })
-    : raw
-  return maskSensitiveFreeText(urls)
+  return maskSensitiveFreeText(maskCredentialUrlsInText(raw))
 }
 
 /** Percent-decode once for comparison purposes; a malformed escape returns the

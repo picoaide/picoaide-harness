@@ -45,7 +45,7 @@ import acorn from './vendor/acorn.cjs'
 import { browserError } from './errors.ts'
 import { SECRET_VALUE } from './sensitive.ts'
 // EV-1：片段级 `key=value` 打码复用 store 的唯一实现（词表与 URL/摘要面同源）。
-import { maskSensitiveKeyValueText } from './store.ts'
+import { maskCredentialUrlsInText, maskSensitiveKeyValueText } from './store.ts'
 
 /** Max expression length (host-side bound, far below page cost). */
 export const MAX_EVAL_EXPRESSION = 8192
@@ -745,7 +745,10 @@ export function maskEvalResult(value: unknown, depth = 0, project?: EvalValuePro
       // (F-5): a page-chosen key longer than the serialized cap used to be
       // truncated by `serializeEvalResult` with the credential still in it.
       const safeKey = project === undefined ? key : project(key)
-      out[safeKey] = SECRET_VALUE.test(key) ? MASK : maskEvalResult(inner, depth + 1, project)
+      // R23 N3：`cookie` / `Set-Cookie` 是**取值容器**键（`{cookie: 'a=1; b=2'}`），
+      // 与 `SECRET_VALUE`（值形态词表）同一口径：键名本身就是"值整体是凭据材料"
+      // 的声明。`code`/`session` 这类普通词不在此列，所以 `{code: 'token'}` 不动。
+      out[safeKey] = SECRET_VALUE.test(key) || COOKIE_JAR_KEY.test(key) ? MASK : maskEvalResult(inner, depth + 1, project)
     }
     return out
   }
@@ -761,22 +764,39 @@ const MASK = '****'
 const COOKIE_PAIR = /([A-Za-z0-9_.#$%&*+\-^|~]{1,64})=(?:"[^"]*"|[^;\s]*)/gu
 /** Cookie names that carry a session/CSRF credential on their own. */
 const SESSION_COOKIE_NAME = /^(?:sid|s|session|sessionid|jsessionid|phpsessid|connect\.sid|csrftoken|xsrf-token|xsrf|_csrf|_session_id|auth|authorization)$/iu
+/** Cookie **flag** attributes（`HttpOnly`/`Secure`/`Partitioned`，都是无值形态；带 `=`
+ *  的 `secure=` 是普通配置键，不算信号）与取值属性（`SameSite=`/`Expires=`/`Max-Age=`）。
+ *  `Path=`/`Domain=` 刻意**不**在这里：它们是 CSS/配置里常见的普通键（`path=/api`）。 */
+const COOKIE_ATTRIBUTE = /(?:^|[;\s])(?:httponly|secure|partitioned)\b(?!\s*=)|(?:^|[;\s])(?:expires|max-age|samesite)\s*=/iu
+/** A KEY whose value is a whole cookie jar (`{cookie: 'a=1; b=2'}`, `Set-Cookie`). */
+const COOKIE_JAR_KEY = /^(?:set-)?cookie$/iu
 
 /**
- * Detect a cookie/`Set-Cookie` header shape: `k=v; k2=v2` (two or more
- * `;`-separated pairs), or a single session/CSRF cookie pair (`sid=…`).
- * Cookie values are opaque credentials and cookie names are not secret-shaped,
- * so keyword matching alone never fired (P1-18) — the whole string is masked
- * rather than one fragment.
+ * Detect a cookie/`Set-Cookie` **jar** shape: a session/CSRF cookie name is
+ * present (`sid=…`, `jsessionid=…`) or a cookie flag/attribute is present
+ * (`…; HttpOnly`, `…; SameSite=Lax`). Cookie values are opaque credentials and
+ * cookie names are not secret-shaped, so keyword matching alone never fired
+ * (P1-18) — such a string is masked whole rather than one fragment.
+ *
+ * `Cookie:`/`Set-Cookie:` **头**形态不在这里判：那条路由
+ * {@link COOKIE_HEADER_VALUE} 按头名擦掉取值（`Cookie: a=b` → `Cookie: ****`，
+ * 键名保留），整串打码只留给"裸的 jar"（P1-18 的回归面）。
+ *
+ * R23 N3（2026-09-26）：判据以前是"**≥2 个 `k=v` 且串里有 `;`**"，于是任何分号
+ * 分隔的普通正文（CSS 内联样式 `width=100; height=200`、配置片段、日志行）都被
+ * 整串抹成 `****`，连键名一起消失 —— 那正是 EV-1 要修的形态，而同一段文本经
+ * `browser_get_text` 逐字可读。现在只有**真的 cookie jar**才整串打码（两条信号，
+ * 与 {@link COOKIE_HEADER_VALUE} 的"按头名判定"同一精神）；普通 `k=v; k2=v2`
+ * 交给片段级规则 —— 敏感键的值照样被擦（`password=hunter2xyz` → `password=****`），
+ * 普通键值对逐字保留。
  */
 function looksLikeCookieString(value: string): boolean {
   const trimmed = value.trim()
   if (trimmed.length < 3) return false
   const pairs = trimmed.match(COOKIE_PAIR)
   if (pairs === null || pairs.length === 0) return false
-  if (pairs.length >= 2 && trimmed.includes(';')) return true
-  const first = pairs[0]!
-  return SESSION_COOKIE_NAME.test(first.slice(0, first.indexOf('=')))
+  if (pairs.some((pair) => SESSION_COOKIE_NAME.test(pair.slice(0, pair.indexOf('='))))) return true
+  return pairs.length >= 2 && trimmed.includes(';') && COOKIE_ATTRIBUTE.test(trimmed)
 }
 
 /**
@@ -792,10 +812,12 @@ function looksLikeCookieString(value: string): boolean {
  * 认账边界（EV-1 的取舍）：**裸的、不带前缀也不含数字的不透明串**不再整串打码
  * （`dXNlcjpwYXNz` 这类 base64 凭据）。旧实现也不打码（`SECRET_VALUE` 只认关键词），
  * 所以这不是覆盖度回退；而放宽整串规则换来的是"普通正文不再被抹成 ****"。真正
- * 需要兜住的两条仍在：①注入凭据走 `project`（值级精确脱敏）；②`Authorization: Basic …`
+ * 需要兜住的三条仍在：①注入凭据走 `project`（值级精确脱敏）；②`Authorization: Basic …`
  * 这类形态由 {@link AUTH_HEADER_VALUE} **整段**擦掉取值（2026-09-26 R22 V6 F2 之前这里
  * 写的是"由 `key=value`/`key: value` 片段规则擦掉值"—— 实测那句话是**假的**：那条规则
- * 在第一个空格处收尾，擦掉的是方案名、凭据留明文）。
+ * 在第一个空格处收尾，擦掉的是方案名、凭据留明文）；③**有声明**的裸串（`token <纯字母
+ * 不透明串>`）由 {@link KEYWORD_SPAN} + {@link isDeclaredCredentialSpan} 擦掉 ——
+ * 声明在场时不再要求"含数字"，所以这条边界只覆盖"既无前缀也无关键词"的形态。
  */
 const CREDENTIAL_VALUE_SHAPES: readonly RegExp[] = [
   /^bearer\s+[A-Za-z0-9._~+/=-]{8,}$/iu,
@@ -806,20 +828,63 @@ const CREDENTIAL_VALUE_SHAPES: readonly RegExp[] = [
 /**
  * 敏感关键词后紧跟的 opaque 片段（`token abc123def456` / `Bearer eyJ…`）：
  * 只擦**这个片段**，不是整串（EV-1）。
+ *
+ * R23 N1（2026-09-26）：关键词命中本身就是"这是凭据声明"，片段是否打码由
+ * {@link isDeclaredCredentialSpan} 判定 —— 不再要求片段"同时含数字与字母"
+ * （`token ABCDEFGHIJKLMNOPQRSTUVWX` 这类**纯字母**不透明串曾原样出窗）。
+ *
+ * 片段**不得以分隔符开头**（`(?![=:])`）：`=`/`:` 也在片段的字符集里（base64
+ * padding 用到 `=`），没有这条时 `api_key=example`（值只有 7 位）会让分隔符被
+ * 回溯进片段、连 `=` 一起被掩码成 `api_key****`；这种形态本该交给 `key=value`
+ * 规则，输出 `api_key=****`（键与分隔符保留）。
  */
-const KEYWORD_SPAN = /(\b(?:token|secret|password|passwd|pwd|authorization|api[_-]?key|apikey|session[_-]?id|access[_-]?key|refresh[_-]?token|private[_-]?key|bearer|credential)\b\s*(?:[:=]\s*)?["']?)([A-Za-z0-9_+/.=-]{8,})/giu
+const KEYWORD_SPAN = /(\b(?:token|secret|password|passwd|pwd|authorization|api[_-]?key|apikey|session[_-]?id|access[_-]?key|refresh[_-]?token|private[_-]?key|bearer|credential)\b\s*(?:[:=]\s*)?["']?)((?![=:])[A-Za-z0-9_+/.=-]{8,})/giu
 
 /**
- * 一个片段是否"不透明到不可能是英文词"（EV-1 的形态判据）。
- *
- * `authentication`（14 个字母、无数字）不算；`abc123def456`、`sk-1234567890abcdef`
- * 算。长度下限 12 是刻意的：`token budgets`（7 个字母）、`password reset`、
- * `the secret garden` 这些散文都不许命中 —— 那正是 EV-1 报的缺陷形态。
+ * 单个英文单词的形态（首字母任意大小写、其余小写）：`authentication`、
+ * `Rotation`、`expiration`。这是声明门限下**唯一**被排除的形状。
  */
-function isCredentialSpan(span: string): boolean {
+const PROSE_WORD_SHAPE = /^[A-Za-z][a-z]+$/u
+
+/**
+ * 纯字母"单词"超过这个长度就不像英文词了：英文词极少有 ≥16 个字母的，而
+ * 无数字的纯字母句柄（`deadbeefcafebabe`）正好落在这条线之上。
+ */
+const PROSE_WORD_MAX_LENGTH = 16
+
+/** 片段是否只是散文里的一个英文词（`token authentication` 不许被当成凭据）。 */
+function isProseLikeSpan(span: string): boolean {
+  return span.length < PROSE_WORD_MAX_LENGTH && PROSE_WORD_SHAPE.test(span)
+}
+
+/**
+ * **声明之后**的片段是否按凭据打码 —— `KEYWORD_SPAN` 与 `AUTH_HEADER_VALUE`
+ * 共用的同一份判据（R23 N1，与 R22 V6 F2 的"方案名即声明"同源）。
+ *
+ * 判据的**声明**部分由调用方给出（关键词命中 / 认证方案名在场），这里只判片段：
+ *
+ *  - 命中 {@link CREDENTIAL_VALUE_SHAPES} 的形状（`Bearer x` / JWT / 带公认前缀的
+ *    key）⇒ 是凭据；
+ *  - 否则只要**不像散文里的一个英文词**（见 {@link isProseLikeSpan}）就算凭据：
+ *    `ABCDEFGHIJKLMNOPQRSTUVWX`（纯大写）、`aBcDeFgHiJkL`（混合大小写）、
+ *    `deadbeefcafebabe`（16 个纯小写字母）都命中，`authentication`（14 个纯小写
+ *    字母）、`Rotation` 不命中。
+ *
+ * 为什么不再要求"同时含数字与字母"：那是**按长度/字符集**判定，等于把
+ * `token <纯字母不透明串>` 这一族（base64 长度 ≥12 时无数字的概率约 8.5%）留在
+ * 明文里 —— 同一份实现里 `Authorization: Basic <无数字 b64>` 早就靠"方案名"擦掉了，
+ * 关键词分支没有理由用更弱的判据。
+ *
+ * 认账边界：**纯小写或首字母大写的 8–15 位纯字母串**（`token abcdefghij`）与英文词
+ * 在形状上不可分，仍按散文保留（随机 base64 命中该形状的概率 ≈ (26/64)^12 ≈ 0.024%）。
+ *
+ * 代价（认账，方向与 {@link maskSensitiveKeyValueText} 的"fail-closed"一致）：
+ * **全大写**的英文短语（`PASSWORD EXPIRATION`）会被当成不透明串打码 —— 全大写散文与
+ * 全大写句柄在形状上不可分，而掩码可恢复、明文泄漏不可恢复。
+ */
+function isDeclaredCredentialSpan(span: string): boolean {
   if (CREDENTIAL_VALUE_SHAPES.some((shape) => shape.test(span))) return true
-  if (span.length < 12) return false
-  return /[0-9]/u.test(span) && /[A-Za-z]/u.test(span)
+  return !isProseLikeSpan(span)
 }
 
 /**
@@ -834,10 +899,13 @@ function isCredentialSpan(span: string): boolean {
  *
  * 两道门限，避免把散文改坏：
  *  - 只有**公认的认证方案**才算"这是凭据"的声明（`Authorization: none required` 这类
- *    普通取值不命中）；
- *  - 没有方案名时仍可整体掩码，但片段要过 {@link isCredentialSpan}（形状/长度）。
+ *    普通取值不命中；`saml` 于 R23 N1 补入，与 `oauth2?` 同族）；
+ *  - 没有方案名时仍可整体掩码，但片段要过 {@link isDeclaredCredentialSpan}（形状/长度）。
+ *    方案名在场时是**无条件**声明（不再过形状门限）：`Authorization: Bearer abcdefghij`
+ *    这类无数字、纯小写的句柄必须仍被擦掉 —— 关键词分支的"反散文"豁免在这里不适用，
+ *    因为头名 + 认证方案已经把它标记成凭据位。
  */
-const AUTH_HEADER_VALUE = /(\b(?:proxy-)?authorization\b\s*[:=]\s*["']?)(?:(?:bearer|basic|digest|token|apikey|api[_-]?key|negotiate|ntlm|oauth2?)\s+)?([A-Za-z0-9_+/.=~-]{8,})/giu
+const AUTH_HEADER_VALUE = /(\b(?:proxy-)?authorization\b\s*[:=]\s*["']?)(?:(?:bearer|basic|digest|token|apikey|api[_-]?key|negotiate|ntlm|oauth2?|saml)\s+)?([A-Za-z0-9_+/.=~-]{8,})/giu
 
 /**
  * `Cookie` / `Set-Cookie` 头的取值（cookie 对 `k=v`，可 `; ` 分隔多条）。
@@ -863,30 +931,39 @@ const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\
  * 自相矛盾。
  *
  * 现在的口径（与 `browser_get_text`/op log 同族：先形态、再片段）：
- *  1. 整串是 cookie 串或凭据形态 ⇒ 整串打码（**不变**：cookie 值本身无键可依，
- *     键名匹配永远指不到它，这条是 P1-18 的回归面）；
- *  2. 否则只擦片段，**三趟顺序固定为：认证/cookie 头取值 → 关键词 + opaque 片段 →
- *     `key=value`/`key: value` 的敏感值**（复用 store 的唯一实现
+ *  1. 整串**就是** cookie 头/会话 cookie/带 cookie 属性（{@link looksLikeCookieString}）
+ *     或是凭据形态 ⇒ 整串打码（cookie 值本身无键可依，键名匹配永远指不到它，
+ *     这条是 P1-18 的回归面）—— R23 N3 起"≥2 个 `k=v` 且含 `;`"不再算 cookie 串，
+ *     普通键值列表交给片段级规则；
+ *  2. 否则只擦片段，**四趟顺序固定为：内嵌 URL（{@link maskCredentialUrlsInText}）
+ *     → 认证/cookie 头取值 → 关键词 + opaque 片段 → `key=value`/`key: value`
+ *     的敏感值**（最后一趟复用 store 的唯一实现
  *     {@link maskSensitiveKeyValueText}，与 URL/摘要面同一张词表）；
  *  3. 其余正文原样保留。
  *
- * **为什么是这个顺序**（2026-09-26 R22 V6 F2）：`key: value` 规则在第一个空格处收尾，
- * 所以它跑在前面时会把"方案名 / 第二个关键词"先擦成 `****`，后面的关键词片段规则就
- * 再也认不出 `<keyword> <credential>` 形态 ⇒ 真正的凭据留明文（`Authorization: Bearer
- * <jwt>` → `Authorization: **** <jwt>`）。三趟都只**增加**掩码、从不还原，所以"先片段
- * 后键值"只会比旧顺序更严，不会漏；认证头与 cookie 头还要在片段级之前**整段**擦掉
- * 取值（见 {@link AUTH_HEADER_VALUE} / {@link COOKIE_HEADER_VALUE}）。
+ * **为什么是这个顺序**（2026-09-26 R22 V6 F2 / R23 N2）：`key: value` 规则在第一个
+ * 空格处收尾，所以它跑在前面时会把"方案名 / 第二个关键词"先擦成 `****`，后面的关键词
+ * 片段规则就再也认不出 `<keyword> <credential>` 形态 ⇒ 真正的凭据留明文
+ * （`Authorization: Bearer <jwt>` → `Authorization: **** <jwt>`）。URL 那一趟跑在
+ * 最前面则是因为 userinfo **没有键**，只有 URL 结构能看见它。四趟都只**增加**掩码、
+ * 从不还原，所以顺序只会比旧顺序更严，不会漏；认证头与 cookie 头还要在片段级之前
+ * **整段**擦掉取值（见 {@link AUTH_HEADER_VALUE} / {@link COOKIE_HEADER_VALUE}）。
  *
  * 顺序不变（F-5）：**先掩码后截断**，`project` 仍然在 4 KB 上限之前跑 —— 跨截断点
  * 的凭据只会以 `****` 的形式出现。
  */
 function maskCredentialFragments(value: string): string {
-  const headers = value
+  // R23 N2: 内嵌 URL 的 userinfo/查询串先擦（与标题/摘要面同一份实现
+  // `store.maskCredentialUrlsInText`）。userinfo 没有键、也不含关键词，只有 URL
+  // 结构能看见它；跑在最前面是因为 URL 是最具体的结构，之后的片段级规则只会
+  // 在此基础上继续**增加**掩码。
+  const urls = maskCredentialUrlsInText(value)
+  const headers = urls
     .replace(AUTH_HEADER_VALUE, (match, key: string, scheme: string | undefined, span: string) =>
-      (scheme !== undefined || isCredentialSpan(span)) ? `${key}${MASK}` : match)
+      (scheme !== undefined || isDeclaredCredentialSpan(span)) ? `${key}${MASK}` : match)
     .replace(COOKIE_HEADER_VALUE, (_match: string, key: string) => `${key}${MASK}`)
   const spans = headers.replace(KEYWORD_SPAN, (match, prefix: string, span: string) =>
-    isCredentialSpan(span) ? `${prefix}${MASK}` : match)
+    isDeclaredCredentialSpan(span) ? `${prefix}${MASK}` : match)
   return maskSensitiveKeyValueText(spans)
 }
 

@@ -32,9 +32,10 @@ const BASIC_B64 = 'dXNlcjpwYXNzd29yZA=='
 /**
  * base64("aaaaaaaa")：**不含数字**的合法 base64。
  *
- * 这一类是"密钥是 base64、但恰好没有数字"的真实形态：片段级 `isCredentialSpan` 对
- * ≥12 但无数字的串判 false（EV-1 的散文保护），所以认证头规则必须靠**方案名**这个
- * 声明来判定，不能只靠片段形状。
+ * 这一类是"密钥是 base64、但恰好没有数字"的真实形态：片段级判据对 ≥12 但无数字的
+ * 串判 false（EV-1 的散文保护），所以认证头规则必须靠**方案名**这个声明来判定，
+ * 不能只靠片段形状。（R23 N1 起同一个"声明即敏感"的判据也被推广到关键词分支，见
+ * `tests/audit-r23-eval-mask-family.spec.ts`；这条论证本身仍然成立。）
  */
 const BASIC_B64_NO_DIGIT = 'YWFhYWFhYWE='
 /** `sk-` 前缀的 API key。 */

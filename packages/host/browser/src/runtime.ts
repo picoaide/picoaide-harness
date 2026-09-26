@@ -17,7 +17,7 @@ import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMe
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { appSurfaceAllowsUrl, asSurfaceWebContents, surfaceLabel, type BrowserSurface, type SurfaceControlOwner, type SurfaceRegistry, type SurfaceWebContents } from './surface.ts'
 import { TabPool, gateRefusal, type TabReservation } from './pool.ts'
-import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
+import { BrowserStore, maskCredentialUrlsInText, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
 import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
@@ -4754,10 +4754,17 @@ function truncatedHeadLength(text: string, secret: string): number {
 
 /** Secrets-array core of {@link redactFilledSecretsText}: also usable for exits
  * with no single owning tab (a download is a session event, so its redaction set
- * is the union of the live tabs' sets). */
+ * is the union of the live tabs' sets).
+ *
+ * R23 N2（2026-09-26）：这条漏斗同时是**内容出口**（`browser_get_text` 的页面正文、
+ * `browser_get_snapshot` 的元素文本、`browser_eval` 的值级投影）的唯一共用点，所以
+ * 结构脱敏（内嵌 URL 的 userinfo / 敏感查询串 / fragment，实现仍是 store 的
+ * `maskCredentialUrlsInText`）挂在这里、并**先于** `secrets.length === 0` 的早退 ——
+ * 注入凭据窗口之外 `filledSecrets` 为空，如果放在早退之后，URL 结构脱敏就只在
+ * "本 tab 注入过凭据"时生效，同一段页面文本在 eval 与 get_text 两个出口又会分叉。 */
 function redactSecretsText(secrets: readonly string[], text: string, options: RedactOptions = {}): string {
-  if (secrets.length === 0) return text
-  let out = text
+  let out = maskCredentialUrlsInText(text)
+  if (secrets.length === 0) return out
   for (const secret of secrets) {
     if (secret === '') continue
     if (out === secret) { out = MASK; continue }
