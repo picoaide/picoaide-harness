@@ -299,6 +299,14 @@ const KEEP_SOURCE = 'scripts/ci-publish-update-server.sh'
 const UPDATE_CADENCE_SOURCE = 'packages/host/desktop/src/updates.ts'
 /** 真源 5：客户端平台数（桌面打包配置里声明了安装包产物名的平台段）。 */
 const DESKTOP_MANIFEST_SOURCE = 'packages/host/desktop/package.json'
+/**
+ * `yarn prebuild` 构建的 workspace 包数真源（第三十轮 FIX-45 ⑤，2026-09-29）。
+ *
+ * 现场：`AGENTS.md:47` 写「`yarn prebuild` 一键构建全部 8 个 workspace 包」，真值 13；
+ * 变异 `8 → 999` 时本守卫**两个方向都无感**（EXIT=0 且照打「全部与真源一致 ✅」）——
+ * 这道守卫此前只覆盖它自己登记过的那几类硬数字。
+ */
+const PREBUILD_DEPS_SOURCE = 'packages/host/desktop/scripts/prebuild-workspace-deps.ts'
 
 /**
  * 解析 `KEEP=3` 形态的保留版本数。
@@ -503,6 +511,27 @@ const NUMBER_CLAIM_RULES = [
       { pattern: /([0-9]+|[一二三四五六七八九十两]+)\s*层/gu },
     ],
   },
+  {
+    id: 'prebuild-workspace-packages',
+    label: '`yarn prebuild` 构建的 workspace 包数',
+    // 真源 = `prebuild-workspace-deps.ts` 的 `WORKSPACE_PACKAGES` 数组条数（进 diff、可评审）。
+    source: PREBUILD_DEPS_SOURCE,
+    read: source => workspacePackagesFrom(source),
+    min: 1,
+    // 上下文锚（同 E-04 的纪律）：只有"`yarn prebuild` 构建的包数"才是这条 claim。
+    // 同形的「N 个 workspace 包」若讲的是别的口径（例如验收判据行 `planned=32` 里的
+    // "15 个包 + 17 条守卫"，那里刻意不写"workspace 包"以免与这条同源混淆）会被排除；
+    // 被排除的条数照样打印（不静默吞）。
+    anchor: /prebuild|WORKSPACE_PACKAGES/u,
+    window: 0,
+    required: [
+      { file: 'AGENTS.md', note: '门禁自述：`yarn prebuild` 一键构建的 workspace 包数（FIX-45 ⑤ 的现场）' },
+    ],
+    forms: [
+      // markdown 着重号（`**13 个** workspace 包`）不算差异。
+      { pattern: /\*{0,2}([0-9]+)\s*个\*{0,2}\s*workspace\s*包/gu },
+    ],
+  },
 ]
 
 /**
@@ -517,6 +546,41 @@ function integrationCoveredLayersFrom(source) {
   const matches = [...String(source).matchAll(/^const EXPECTED_COVERED_LAYERS = (\d+)$/gmu)]
   if (matches.length !== 1) return undefined
   return Number(matches[0][1])
+}
+
+/**
+ * 从 `prebuild-workspace-deps.ts` 抽 `WORKSPACE_PACKAGES` 的**条数**（FIX-45 ⑤ 的真源）。
+ *
+ * fail-loud 口径与 {@link keepVersionsFrom} / {@link integrationCoveredLayersFrom} 同源：
+ * 找不到数组、括号不闭合、剥不出元素都返回 `undefined`，由调用方判红 ——
+ * 拒绝把"解析失败"当通过。
+ * @param source - `packages/host/desktop/scripts/prebuild-workspace-deps.ts` 源码。
+ * @returns 包数；解析失败返回 undefined。
+ */
+function workspacePackagesFrom(source) {
+  const start = String(source).indexOf('export const WORKSPACE_PACKAGES')
+  if (start < 0) return undefined
+  // ⚠️ 先跳掉**类型标注**里的 `[`（`readonly WorkspacePackage[]`）——直接找第一个 `[`
+  // 会命中类型方括号，剥出来是个空体（实测：解析出 0 条）。
+  const assign = String(source).indexOf('=', start)
+  if (assign < 0) return undefined
+  const open = String(source).indexOf('[', assign)
+  if (open < 0) return undefined
+  let depth = 0
+  let end = -1
+  for (let i = open; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '[') depth += 1
+    else if (ch === ']') {
+      depth -= 1
+      if (depth === 0) { end = i; break }
+    }
+  }
+  if (end < 0) return undefined
+  // 条目是**单行对象**（`{ workspace: '…', dir: '…', deps: [] },`）⇒ `dir:` 不在行首，
+  // 不能用 `^\s*dir:`（实测只数到 6/13）。按出现次数计。
+  const count = [...String(source).slice(open, end).matchAll(/\bdir:\s*'[^']+'/gu)].length
+  return count > 0 ? count : undefined
 }
 
 /**

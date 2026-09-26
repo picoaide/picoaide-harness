@@ -15,9 +15,13 @@ permissions:
 #
 # ⚠️ **这里只实现"同 ref 互斥",不是"两 tag 互斥"**（R28 审计 AB2-A-01 更正旧注释）:
 # group 只含 `github.ref`,所以 vA 与 vB 两个**不同 tag** 的 push 会并发跑各自的 release
-# job。真正兜住"更新指针被写回更旧的版本"的是**写入侧的单调守卫**
-# （`scripts/ci-publish-update-server.sh` 写 `<channel>/latest.json` 前读回现有指针,
-# 版本倒退即拒绝写 + 告警）—— 那是"无论谁来写都不会倒退"的根本保证,组名只降低概率。
+# job。两个 tag 并发时"更新指针不被写回更旧的版本"由**写入侧的条件写(CAS)**兜住
+# （`scripts/ci-publish-update-server.sh` 用 3b 读回的 ETag 做
+# `put-object --if-match <ETag>`;首发用 `--if-none-match '*'`;被存储侧拒成 412 就
+# 重读-重判-有界重试)—— 串行下的"读回比较"只是**快路径**,不是保证。
+# 组名只降低并发概率;**条件写才是"无论谁来写都不会倒退"的那一条**
+# （R29 审计 AC1-01:改之前那一步是无条件 `copy-object`,AC1 用两个真发布进程实测
+#  barrier 4/12、silent 5/5 轮指针被写回更旧的版本,其中 5/5 两个进程都 exit 0 且零 `::warning::`）。
 # 代价与残留(如实登记):组名不改是**有意**的 —— 把 tag 并进同一个 group 会让一条 40 分钟
 # 的 tag 流水线排队,而且 GitHub 的并发组语义是"1 个运行 + 1 个 pending,新 pending 取消旧
 # pending" ⇒ 三连 tag 时**中间那条会被静默取消**(连 GitHub Release 都不会创建),比"指针倒退"
@@ -25,8 +29,10 @@ permissions:
 #   group: ${{ github.ref_type == 'tag' && 'ci-release' || format('ci-{0}', github.ref) }}
 #   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 # 两个并发 run 的**保留策略**仍可能交错(需要 ≥4 个 tag 同时发布,才可能删到对方刚发的版本)。
-# 判据:`scripts/verify-ci-scripts.mjs` 第 6g 节(先写 vX.Y.Z+1 的指针,再让 vX.Y.Z 的发布
-# 尝试写 ⇒ 必须被拒且**不改动**已有对象)。
+# 判据:`scripts/verify-ci-scripts.mjs` 第 6g 节 —— ①**串行**:先写 vX.Y.Z+1 的指针,再让
+# vX.Y.Z 的发布尝试写 ⇒ 必须被拒且**不改动**已有对象;②**并发**(两个真发布进程 + 读屏障 +
+# 写闸门,确定性构造):旧进程必然拿着过期判定去写 ⇒ 指针不得倒退、退让方必须留下
+# `::warning::`,并要求假 aws 真的记录到"条件写被 412 拒绝"那一跳(否则用例是空转的假绿)。
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

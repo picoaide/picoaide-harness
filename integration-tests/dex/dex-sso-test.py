@@ -29,9 +29,28 @@
     urllib **无法跟随自定义 scheme**(`picoaide://…`):它抛 HTTPError,而旧 `fetch()` 的
     异常分支返回的是**传入的 url**(=回调地址)⇒ `'picoaide://' in url` 恒假、else 分支
     必然执行 —— 即使 SSO 全流程正常,用例也永远 `RESULT: FAIL`(深链断言结构上不可达)。
-    本脚本改为手动跟随 http(s) 重定向、一遇到非 http(s) 的 Location 就停下并把它当深链
-    读出来(见 `follow()`)。**负向对照**:把深链换成 http 目标时 `follow()` 会继续跟随到
-    终点 ⇒ "有没有拿到深链"是有判别力的,不是恒真/恒假。
+    本脚本改为手动跟随 http(s) 重定向、遇到**桌面深链**就停下并把它读出来(见 `follow()`)。
+    **负向对照**:把深链换成 http 目标时 `follow()` 会继续跟随到终点 ⇒ "有没有拿到深链"
+    是有判别力的,不是恒真/恒假。
+
+## 相对 Location ≠ 桌面深链(2026-09-29 第三十轮审计 F-01,P1)
+
+`follow()` 的形态判定**必须先归一化、后判 scheme**,两步不能合并:
+
+    ① `Location` 先按**当前 URL** 解析(RFC 7231 §7.1.2:相对 Location 就是同源重定向,
+       浏览器与 urllib 都这么解析)—— 见 `resolve_location()`;
+    ② 归一化之后**仍然**不是 http(s) 的,才是桌面深链(自定义 scheme,形如
+       `<scheme>://auth?token=…`)。
+
+真 Dex 的 `/auth` 正是 **302 + 相对 Location**(`/auth/local?…`)跳到自己的登录页。修前
+`follow()` 直接 `if not is_http(location)` 就把这一步当成深链提前停下 ⇒ 判据 [2] 拿到的是
+`<a href="/auth/local…">Found</a>.` 中间页 ⇒ **这条腿在配置完全正确的真实环境里结构上
+不可能 PASS**(假红),而门禁的假网关一律返回**绝对** Location ⇒ 门禁永远绿(判据自洽型假绿)。
+
+判据面两条腿(见 `scripts/check-integration-tests.mjs` 的 `SCENARIOS`):`good` 走**绝对**
+Location、`dex-relative-location` 走**相对** Location,两条都必须绿;再叠一条**纯单元级**
+判据 `--probe-redirect-forms`(不碰网络,桩 opener 驱动 `follow()` 覆盖
+相对 / 绝对 / 深链三种形态)。
 
 ## 环境缺失时**显式 SKIP**
 
@@ -45,6 +64,7 @@
     python3 dex-sso-test.py --self-test        # 判据本体自证(每条判据的正/负例夹具)
     python3 dex-sso-test.py --self-check       # 判定通道自证(夹具经运行期 report() 求值)
     python3 dex-sso-test.py --dump-criteria    # 判据表登记值(JSON,供门禁对账)
+    python3 dex-sso-test.py --probe-redirect-forms  # 纯单元级自证:follow() 对相对/绝对/深链三形态的解析
 环境变量:DEX_BASE(可选)断言 IdP 落在该 origin;DEX_DEEP_LINK_SCHEME(可选)断言深链 scheme;
         DEX_EXPECTED_USER 覆盖期望账号。
 数据(integration-tests/dex/config.yaml):admin@example.com / admin123。
@@ -133,12 +153,36 @@ def is_http(url):
     return url.lower().startswith(('http://', 'https://'))
 
 
+def resolve_location(current, location):
+    """把 Location 头按**当前 URL** 归一化(RFC 7231 §7.1.2)。
+
+    这是形态判定的分水岭 —— **相对 Location 与桌面深链是两件事**:
+
+    · 相对 Location(`/auth/local?req=…`、`?code=…`、`#frag`)是**同源重定向**,
+      浏览器与 urllib 都按当前 URL 解析成绝对地址;
+    · 桌面深链(`picoaide://auth?token=…`)是**自定义 scheme**,`urljoin` 会原样返回它
+      (带 scheme 的引用是绝对引用),所以归一化之后仍然不是 http(s)。
+
+    真 Dex 的 `/auth` 就是 302 + 相对 Location 跳到自己的登录页;不归一化就把它误判成
+    深链 ⇒ 判据 [2] 只能拿到 `Found` 中间页 ⇒ 真实环境里结构上不可能 PASS。
+    """
+    return urllib.parse.urljoin(current, location)
+
+
 def follow(op, url, data=None, headers=None, max_hops=10):
-    """手动跟随 http(s) 重定向。
+    """手动跟随重定向。
 
     返回 (status, final_url, body, headers, deep_link, hops):
-    遇到**非 http(s)** 的 Location(即桌面深链)时立刻停下,把它放在 deep_link 里;
-    其它情况 deep_link 为空串。hops = [(status, url), …] 供诊断与"经过回调"断言。
+    遇到**桌面深链**(自定义 scheme,形如 `<scheme>://auth?token=…`)时立刻停下,
+    把它放在 deep_link 里;其它情况 deep_link 为空串。hops = [(status, url), …]
+    供诊断与"经过回调"断言。
+
+    形态判定**先归一化、后判 scheme**,两步不能合并(见 `resolve_location`):
+      ① `resolve_location(current, location)` 把相对 Location 解析成绝对地址;
+      ② 归一化后**仍**非 http(s) 的才是桌面深链。
+    省掉 ①(直接 `if not is_http(location)`)会把真 Dex 的 `/auth` → `/auth/local`
+    这一步当成深链提前停下 —— 那是 [2] 假红的根因,也是门禁假网关只发绝对 Location
+    时看不见的那一格。
     """
     current, payload, req_headers = url, data, headers
     hops = []
@@ -147,10 +191,13 @@ def follow(op, url, data=None, headers=None, max_hops=10):
         status, location, body, resp_headers = request(op, current, data=payload, headers=req_headers)
         hops.append((status, current))
         if status in (301, 302, 303, 307, 308) and location:
-            if not is_http(location):
+            # ① 相对 Location 先按当前 URL 归一化(同源重定向);
+            # ② 归一化后仍非 http(s) ⇒ 自定义 scheme = 桌面深链,停下并读出来。
+            target = resolve_location(current, location)
+            if not is_http(target):
                 return status, current, body, resp_headers, location, hops
             # 303/302 → 后续按 GET 走(丢弃 POST 体),与浏览器语义一致。
-            current, payload, req_headers = location, None, None
+            current, payload, req_headers = target, None, None
             continue
         break
     return status, current, body, resp_headers, '', hops
@@ -551,7 +598,7 @@ def _new_reporter():
 # ---------------------------------------------------------------------------
 def parse_args(argv):
     server, user, password = DEFAULT_BASE, DEFAULT_USER, DEFAULT_PASSWORD
-    want_self_test, want_self_check, want_dump = False, False, False
+    want_self_test, want_self_check, want_dump, want_probe = False, False, False, False
     positional = []
     rest = list(argv)
     while rest:
@@ -562,6 +609,8 @@ def parse_args(argv):
             want_self_check = True
         elif item == '--dump-criteria':
             want_dump = True
+        elif item == '--probe-redirect-forms':
+            want_probe = True
         elif item == '--user' and rest:
             user = rest.pop(0)
         elif item == '--password' and rest:
@@ -579,11 +628,12 @@ def parse_args(argv):
         raise SystemExit(EXIT_USAGE)
     if positional:
         server = positional[0].rstrip('/')
-    modes = [want_self_test, want_self_check, want_dump].count(True)
+    modes = [want_self_test, want_self_check, want_dump, want_probe].count(True)
     if modes > 1:
-        print('dex-sso-test: --self-test / --self-check / --dump-criteria 只能给一个', file=sys.stderr)
+        print('dex-sso-test: --self-test / --self-check / --dump-criteria / --probe-redirect-forms '
+              '只能给一个', file=sys.stderr)
         raise SystemExit(EXIT_USAGE)
-    return server, user, password, want_self_test, want_self_check, want_dump
+    return server, user, password, want_self_test, want_self_check, want_dump, want_probe
 
 
 def self_test():
@@ -609,8 +659,122 @@ def self_check():
     return report_self_check_result(result)
 
 
+# ---------------------------------------------------------------------------
+# 纯单元级自证:**不碰网络**,用桩 opener 驱动 `follow()`,覆盖 Location 的三种形态。
+#
+# 为什么需要它(而不是只靠假网关):假网关是一条**端到端**腿,它只能证明"这条路径当前是绿的";
+# 而形态判定是三选一(相对 / 绝对 / 深链),只跑得到其中一两种时,第三种回归就静默。
+# 这里把三种形态逐条摆在同一个不变量上:**先归一化、后判 scheme**。
+# 判别力来自相对形态 —— 去掉 `resolve_location()` 的那一步,第 1 例立刻红(它会把相对
+# Location 当成深链提前停下,`deep_link` 变成 `/dex/auth/local?req=…` 而 requests 只有一跳)。
+# ---------------------------------------------------------------------------
+IDP_STUB = 'http://127.0.0.1:5556'
+
+
+class _StubResponse:
+    """`request()` 需要的最小响应面:`status` / `headers.get('Location')` / `read()`。"""
+
+    def __init__(self, status, location='', body=''):
+        self.status = status
+        self.headers = {'Location': location} if location else {}
+        self._body = body
+
+    def read(self):
+        return self._body.encode('utf-8')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _StubOpener:
+    """按 URL 前缀给固定应答的桩 opener;记录**真的被请求到的**绝对地址。"""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.requests = []
+
+    def open(self, req, timeout=None):
+        url = req.full_url
+        self.requests.append(url)
+        for prefix, status, location, body in self.routes:
+            if url.startswith(prefix):
+                return _StubResponse(status, location, body)
+        raise AssertionError(f'桩 opener 收到未登记的地址: {url}')
+
+
+REDIRECT_FORM_CASES = [
+    {
+        'why': '相对 Location(真 Dex 的 /auth → /auth/local):必须归一化后**继续跟随**,不是深链',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/login', 302,
+             '/dex/auth/local?req=r1', ''),
+            ('http://127.0.0.1:8091/dex/auth/local?req=r1', 200, '', '<form>登录</form>'),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+                            'http://127.0.0.1:8091/dex/auth/local?req=r1'],
+        'expect_final': 'http://127.0.0.1:8091/dex/auth/local?req=r1',
+        'expect_deep_link': '',
+    },
+    {
+        'why': '绝对 Location(跨 origin 到 IdP):同样必须继续跟随',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/login', 302,
+             IDP_STUB + '/dex/auth/local?req=r2', ''),
+            (IDP_STUB + '/dex/auth/local?req=r2', 200, '', '<form>登录</form>'),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+                            IDP_STUB + '/dex/auth/local?req=r2'],
+        'expect_final': IDP_STUB + '/dex/auth/local?req=r2',
+        'expect_deep_link': '',
+    },
+    {
+        'why': '桌面深链(自定义 scheme):必须**立刻停下**并原样读出来,不得再发第二次请求',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/callback', 302,
+             GOOD_DEEP_LINK, ''),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1'],
+        'expect_final': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1',
+        'expect_deep_link': GOOD_DEEP_LINK,
+    },
+]
+
+
+def probe_redirect_forms():
+    """逐例复算 `follow()` 的形态判定;任一条不符即 FAIL(非零退出)。"""
+    problems = []
+    for case in REDIRECT_FORM_CASES:
+        op = _StubOpener(case['routes'])
+        try:
+            _status, final, _body, _headers, deep_link, _hops = follow(op, case['start'])
+        except AssertionError as exc:  # 桩报"未登记的地址"= resolve 出来的地址不对
+            problems.append(f"{case['why']} —— {exc}")
+            continue
+        if op.requests != case['expect_requests']:
+            problems.append(f"{case['why']} —— 请求序列 {op.requests} != 期望 {case['expect_requests']}")
+        if final != case['expect_final']:
+            problems.append(f"{case['why']} —— 终止地址 {final!r} != 期望 {case['expect_final']!r}")
+        if deep_link != case['expect_deep_link']:
+            problems.append(f"{case['why']} —— deep_link 读到 {deep_link!r} != 期望 "
+                            f"{case['expect_deep_link']!r}")
+    total = len(REDIRECT_FORM_CASES)
+    for problem in problems:
+        print(f'  FAIL {problem}')
+    print(f'redirect-form probe: {total - len(problems)}/{total} 种 Location 形态符合预期'
+          '(相对 / 绝对 / 深链)')
+    return EXIT_FAIL if problems else EXIT_PASS
+
+
 def main(argv):
-    server, login, password, want_self_test, want_self_check, want_dump = parse_args(argv)
+    server, login, password, want_self_test, want_self_check, want_dump, want_probe = parse_args(argv)
+    if want_probe:
+        return probe_redirect_forms()
     if want_self_test:
         return self_test()
     if want_self_check:

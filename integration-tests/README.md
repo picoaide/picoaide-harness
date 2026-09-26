@@ -65,19 +65,25 @@
 ③ 跑两个契约脚本的 `--self-test`（判据本体自证）与 `--self-check`（判定通道自证），
 并用 `--dump-criteria` 做**判据 id 精确集合 + 逐 id 正/负例条数**对账；
 ④ 静态判据：每条判据 id 都必须有"以该 id 字面量为首参"的调用点、被调方逐字是
-`reporter.report`、观测非空（`{}` = 没把观测传进来）；每条判据的 `evaluate` 必须保留
-变异注入锚点；
+`reporter.report`、观测非空（`{}` = 没把观测传进来）；**且该调用点在运行期必须可达**
+（2026-09-29 第三十轮 FIX-45 ②：`if False:` / `while False:` / 恒假块头 / 空迭代域 /
+早退死代码 / 同一行恒假条件 / 悬空运算符 一律红 —— "字面量在场"≠"运行期求值过"，
+`electron-shots` 同族同判）；每条判据的 `evaluate` 必须保留变异注入锚点；
+**行为级**另有一条：`dex-wrong-identity` 场景（深链 token 有效但 `/auth/me` 回别人）必须 FAIL；
 ⑤ **契约端到端变异**（在临时副本里真跑，全部必须变红）：
 · 逐条判据 `evaluate` 掏成 `return []` ⇒ `--self-test` 非零且**具名**咬住该判据（dex 7 条 + ldap 10 条）；
 · `contractkit.judge()` 恒真 ⇒ `--self-check` 非零（而 `--self-test` 照旧绿 —— 证明两层互补）；
 · 只改计票侧（`failures += 0`）⇒ `--self-check` 非零；
 · 运行期通道换成恒真包装（id 引用一字未改）⇒ `--self-check` 非零；
 ⑥ 用**进程内假网关**（按真契约应答）驱动两个脚本：正例必须绿、破坏契约必须红、
-provider 未配置必须 SKIP 且不得报 PASS；
+provider 未配置必须 SKIP 且不得报 PASS；**Location 的两种形态各有一条腿**（2026-09-29
+第三十轮 FIX-45 ①：`good` 走绝对 Location、`dex-relative-location` 走相对 Location ——
+真 Dex 的 `/auth` 就是 302 + `/auth/local?…`），且每腿的形态是登记值、跨腿必须同时覆盖
+`http-absolute` 与 `relative`（事实来源是**运行期真的发出去的 Location 头**，不是表长）；
 ⑦ 断言 `electron-shots` 的**接线**（`run-all.sh` 真的调用它、脚本里保留截图/判定/退出码判据）
 与其 **SKIP 契约**（`--app <不存在>` ⇒ 77 且不打印 PASS）；
 ⑧ 跑 `electron-shots/assertions.mjs --self-test` 并把**判据表**三层钉住：判据 id 集合与登记
-值精确相等、每条判据都有正例 + 负例夹具且夹具总数不低于下限、运行期脚本逐条引用每个 id；
+值精确相等、每条判据都有正例 + 负例夹具且夹具总数不低于下限、运行期脚本逐条**可达**地引用每个 id；
 ⑨ 跑一次聚合层 `run-all.sh`（三项全 SKIP 的输入）断言 `77` + `RESULT: SKIP`；
 ⑩ **引用面扩展名对账**（第十四轮 B-04）：本守卫引用的每个**落盘**的 `integration-tests/**`
 路径，扩展名必须落在扫描面（`.py`/`.mjs`/`.sh`/`.yaml`/`.yml`）内、或在
@@ -118,6 +124,7 @@ python3 dex/dex-sso-test.py       # 单项；`--help` 看参数
 python3 dex/dex-sso-test.py --self-test        # 只跑判据本体自检（每条的 正例 + 负例）
 python3 dex/dex-sso-test.py --self-check       # 只跑判定通道自检（夹具经运行期 report() 求值）
 python3 dex/dex-sso-test.py --dump-criteria    # 判据表登记值（JSON；门禁据此对账）
+python3 dex/dex-sso-test.py --probe-redirect-forms   # 纯单元级：follow() 对相对/绝对/深链三形态的解析（桩 opener，不碰网络）
 python3 openldap/ldap-rbac-brand-test.py --self-test   # 同上（另一个契约脚本）
 node electron-shots/assertions.mjs --self-test         # 只跑判据表的夹具自检（门禁跑的路径）
 node electron-shots/assertions.mjs --list              # 判据清单 + 条数

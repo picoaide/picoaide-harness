@@ -27,7 +27,7 @@
  * 退出码:0 全部通过;1 有断言失败。
  */
 
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -84,6 +84,17 @@ process.on('uncaughtException', error => {
  * `s3api put-object` / `s3api head-object`(2026-09-23 审计 K-01 起,上传走单请求
  * PUT + 存储侧校验和 —— 假 aws 必须同形,否则"上传成功但对象损坏"这类场景在本地
  * 根本构造不出来)。
+ *
+ * **条件写(compare-and-swap)也必须同形**（R29-AC1-01）:发布脚本写 `<channel>/latest.json`
+ * 用的是 `put-object --if-match <现有 ETag>`(首发 `--if-none-match '*'`),它是"两个 tag
+ * 并发时指针不倒退"的**唯一**成立方式。假 aws 因此实现了:
+ *   · `head-object --query ETag --output text` ⇒ 带双引号的 MD5 十六进制(单请求 PUT 的
+ *     ETag 语义,与真 S3/R2 一致);
+ *   · `put-object --if-match` / `--if-none-match '*'` ⇒ 不满足前置条件时回
+ *     `(PreconditionFailed) when calling the PutObject operation` + 退出码 254 且
+ *     **不创建/不覆盖**对象,并在日志里记一行 `precondition-failed <条件> <键>`
+ *     (6g 的并发用例靠它证明"条件写真的被拒过" —— 没有这条,用例可能是空转的假绿)。
+ *   · `copy-object` 走同一份内容 ⇒ ETag 由内容派生,不需要额外维护。
  *
  * `--body` 的**契约**同样必须与真 CLI 同形(2026-09-24 发布链阻断事故):只接受纯
  * 路径,`file://` / `fileb://` 前缀与"路径不存在"都报同一条 ParamValidation 并非零
@@ -160,6 +171,11 @@ inject_scope() {
   [ -z "\${2:-}" ] && return 0
   case "$1" in *"\${2}"*) return 0 ;; *) return 1 ;; esac
 }
+
+# 对象的 ETag:与真 S3/R2 同形 —— 单请求 PUT(非多段)的 ETag = 内容的 MD5 十六进制,
+# head-object 的 --query ETag --output text 回**带双引号**的形态。条件写
+# (--if-match)的基准就是它(R29-AC1-01)。
+etag_of() { md5sum "$1" | cut -d' ' -f1; }
 
 # ---- 参数校验层:与真 CLI 2.37.1 同形(2026-09-24 审计 C-20)----
 #
@@ -354,6 +370,33 @@ case "$cmd" in
     record "\${args[*]}"
     dest="$store/$key"
     mkdir -p "$(dirname "$dest")"
+    # ---- 条件写(compare-and-swap)的前置条件:与真 S3/R2 **同形** ----
+    #
+    # 发布脚本用 --if-match <现有 ETag>(或首发 --if-none-match '*')把"判据"与
+    # "写入"绑进同一次请求 —— 这是 R29-AC1-01 的修法。假 aws 必须真的实现它,否则
+    # "两个 tag 并发时指针不倒退"这条断言在本地根本咬不到东西(mock 掩盖契约)。
+    #
+    # 真 CLI 2.37.1 的形态(实测,全文见本节用例的断言文案):不满足前置条件 ⇒
+    #   An error occurred (PreconditionFailed) when calling the PutObject operation:
+    #   At least one of the pre-conditions you specified did not hold
+    # 加退出码 254,且**对象不被创建/覆盖**。
+    if [ -n "\${SCAN_FLAG_VALUE[--if-match]+given}" ]; then
+      if [ ! -f "$dest" ] || [ "$(etag_of "$dest")" != "\$(printf '%s' "\${SCAN_FLAG_VALUE[--if-match]}" | tr -d '"')" ]; then
+        record "precondition-failed if-match $key"
+        echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+        exit 254
+      fi
+    fi
+    if [ -n "\${SCAN_FLAG_VALUE[--if-none-match]+given}" ]; then
+      case "\${SCAN_FLAG_VALUE[--if-none-match]}" in
+        '*')
+          if [ -f "$dest" ]; then
+            record "precondition-failed if-none-match $key"
+            echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+            exit 254
+          fi ;;
+      esac
+    fi
     if [ -z "\${SCAN_FLAG_VALUE[--body]+given}" ]; then
       : > "$dest"
     elif [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
@@ -364,7 +407,6 @@ case "$cmd" in
     printf '%s' "$sum" > "$dest.checksum"
     ;;
   "s3api copy-object")
-    declare -A SCAN_FLAG_VALUE=()
     scan_flags "$COPY_OBJECT_VALUE_FLAGS" "$COPY_OBJECT_BOOL_FLAGS"
     unknown="$(join_unknown ", ")"
     [ -z "$unknown" ] || usage_error "$unknown"
@@ -443,6 +485,9 @@ case "$cmd" in
       else
         stat -c%s "$target"
       fi
+    elif [ "$query" = "ETag" ]; then
+      # 条件写的基准(带引号 —— 真 CLI 的 --output text 就是带引号的形态)。
+      printf '"%s"\\n' "$(etag_of "$target")"
     else
       if [ -n "\${FAKE_AWS_SHA:-}" ] && inject_scope "$key" "\${FAKE_AWS_SHA_KEY:-}"; then
         echo "\${FAKE_AWS_SHA}"
@@ -3966,20 +4011,24 @@ console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
       check(cacheOf(key) === 'public, max-age=31536000, immutable',
         `${channel} 的${label}必须带 immutable 长缓存(逐对象断言,不看"别的对象对不对"),实际 ${String(cacheOf(key))}`)
     }
-    // latest.json 现在**不再直接 PUT**:先写临时键(校验大小+SHA256),再用服务端
-    // `copy-object` 原子替换正式键(第十一轮审计 C2-B-01)⇒ 缓存头断言必须打在
-    // **替换那一行**上(临时键的 no-cache 另有一条断言)。
-    const copies = awsLog.split('\n').filter(line => line.startsWith(`copy-object ${channel}/latest.json `))
-    check(copies.length === 1,
-      `${channel} 的 latest.json 必须恰好由一次 copy-object 替换(实际 ${copies.length} 次)`
-        + ':直接 PUT 正式键会让"校验失败"留下损坏的指针,覆盖上一版可用指针')
-    check(copies[0]?.includes('cache=no-cache'),
-      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${String(copies[0])}`)
-    check(copies[0]?.includes('directive=REPLACE'),
-      `${channel} 的 latest.json 替换必须用 --metadata-directive REPLACE **显式重述**缓存头`
-        + `(COPY 会让正式指针"继承"临时对象的元数据 ⇒ 缓存头不再在写它的那一行上可判),实际 ${String(copies[0])}`)
-    check(copies[0]?.includes(`<== test-bucket/${channel}/.latest-next-`),
-      `${channel} 的 latest.json 必须由**本次的临时键**替换而来(源对象可追溯),实际 ${String(copies[0])}`)
+    // latest.json 现在**不再直接 PUT 临时键后就完事**:先写临时键(校验大小+SHA256),
+    // 再用**条件写(CAS)**把同样的字节写进正式键(R29-AC1-01:第十一轮 C2-B-01 之后是
+    // 无条件 `copy-object`,而 copy-object 的条件参数作用在**源对象**上 ⇒ 目标键没有
+    // 任何前置条件,两个 tag 并发时后写者赢、指针可以倒退)。
+    // ⇒ 缓存头断言打在**写正式键那一行**上(临时键的 no-cache 另有一条断言),
+    //   并要求那一行带条件参数(否则"判据 + 写入"又分散成两次请求)。
+    const formalPointerPuts = putObjects.filter(entry => entry.key === `${channel}/latest.json`)
+    check(formalPointerPuts.length === 1,
+      `${channel} 的 latest.json 必须恰好由一次 put-object 写入(实际 ${formalPointerPuts.length} 次)`)
+    const formalPointerLine = awsLog.split('\n')
+      .find(line => line.startsWith('s3api put-object ') && parsePut(line).key === `${channel}/latest.json`) ?? ''
+    check(formalPointerLine.includes('--cache-control no-cache'),
+      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${formalPointerLine}`)
+    check(formalPointerLine.includes('--if-match ') || formalPointerLine.includes('--if-none-match '),
+      `${channel} 的 latest.json 必须是**条件写**(--if-match <现有 ETag> / 首发 --if-none-match '*');`
+        + `无条件 PUT 会把"读-判-写"退回 check-then-act(R29-AC1-01),实际 ${formalPointerLine}`)
+    check(formalPointerLine.includes('--checksum-sha256 '),
+      `${channel} 的 latest.json 条件写必须带 --checksum-sha256(内容被截断时存储侧直接拒绝)`)
     const tmpCache = putObjects
       .filter(entry => entry.key.startsWith(`${channel}/.latest-next-`))
       .map(entry => entry.cacheControl)
@@ -5035,6 +5084,137 @@ console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
   check(`${garbled.stderr ?? ''}`.includes('解析不出'), '失败信息应说明"解析不出可比的版本号"')
   check(readFileSync(pointerPath, 'utf8') === '<html>not our manifest</html>\n',
     'fail-loud 路径同样不得改动现有指针')
+
+  // ⑥ **并发**：两个不同 tag 的发布进程同时跑，指针**不得**倒退（R29-AC1-01 = P1）。
+  //
+  // 上面 ①–⑤ 全是**串行**的 —— 而线上是并发（`concurrency.group` 只按 `github.ref` 分组，
+  // 两个不同 tag 的 push 会各跑一条 release）。AC1 用两个真发布进程实测：无条件写时
+  // natural 3/8、barrier 4/12 轮指针被写回更旧的版本，其中 2 轮**两个进程都 exit 0 且
+  // 零告警**（silent 模式 5/5）⇒ 光有串行判据时这棵树是"绿着倒退"。
+  //
+  // 确定性构造（不靠赢竞态、不靠 sleep 运气）：
+  //   · **读屏障**：两个进程都必须先读到**同一个旧指针**，才允许任一方继续；
+  //   · **写闸门**：发布**旧版本**的那个进程在"写正式键"那一跳被扣住，直到发布新版本的
+  //     进程**完全退出**才放行 ⇒ 旧进程必然拿着**过期**的判定去写。
+  // CAS 生效 ⇒ 它拿 412、重读、发现更新的版本 ⇒ `::warning::` + 不写（响亮地退让）；
+  // CAS 被拆回无条件写 ⇒ 指针倒退且两个进程都 exit 0、零告警 ⇒ 本用例红。
+  {
+    const conc = join(work, 'conc')
+    const concStore = join(conc, 'store')
+    const concWork = join(conc, 'work')
+    const gate = join(conc, 'gate')
+    mkdirSync(concWork, { recursive: true })
+    mkdirSync(gate, { recursive: true })
+    const concLog = join(concWork, 'aws.log')
+    writeFileSync(concLog, '')
+    const concFakeAws = join(concWork, 'aws-real')
+    writeFileSync(concFakeAws, fakeAwsScript({ store: concStore, log: concLog }))
+    execFileSync('chmod', ['+x', concFakeAws])
+    // 包装器：`CONC_ROLE` 为空时（种子那一步）完全透传，不引入任何时序改写。
+    const concAws = join(concWork, 'aws')
+    writeFileSync(concAws, `#!/usr/bin/env bash
+set -uo pipefail
+role="\${CONC_ROLE:-}"
+if [ -z "$role" ]; then exec "${concFakeAws}" "$@"; fi
+joined=" $* "
+if [[ "$joined" == *"s3 cp s3://test-bucket/official/latest.json -"* ]]; then
+  : > "${gate}/read-$$"
+  for _ in $(seq 1 600); do
+    n=$(ls "${gate}" 2>/dev/null | grep -c '^read-' || true)
+    [ "$n" -ge 2 ] && break
+    sleep 0.05
+  done
+fi
+if [ "$role" = "old" ] && [[ "$joined" == *"s3api put-object"* || "$joined" == *"s3api copy-object"* ]] \\
+  && [[ "$joined" == *"--key official/latest.json"* ]]; then
+  for _ in $(seq 1 1200); do
+    [ -f "${gate}/release" ] && break
+    sleep 0.05
+  done
+fi
+exec "${concFakeAws}" "$@"
+`)
+    execFileSync('chmod', ['+x', concAws])
+
+    const concList = join(concWork, 'channels.list')
+    writeFileSync(concList, 'official\n')
+    /** 每个进程一份**自己的** bundle 目录（它们同时在跑，不能共用）。 */
+    const stageInto = (dir, version) => {
+      rmSync(dir, { recursive: true, force: true })
+      mkdirSync(join(dir, 'official'), { recursive: true })
+      const content = `zip-official-${version}`
+      writeFileSync(join(dir, 'official', `picoaide-server-${version}-amd64.zip`), content)
+      const digest = createHash('sha256').update(content).digest('hex')
+      writeFileSync(join(dir, 'official', 'SHA256SUMS'), `${digest}  picoaide-server-${version}-amd64.zip\n`)
+    }
+    const spawnPublish = (version, role) => spawn('bash', [publishScript, '--list', concList, '--bundle', join(conc, `bundle-${version}`)], {
+      cwd: concWork,
+      env: {
+        PATH: `${concWork}:${process.env.PATH ?? ''}`,
+        HOME: process.env.HOME ?? '',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_BUCKET: 'test-bucket',
+        VERSION: `v${version}`,
+        CONC_ROLE: role,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const waitFor = (child, timeoutMs) => new Promise(resolve => {
+      let out = ''
+      let err = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.stderr.on('data', chunk => { err += chunk })
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve({ status: 'timeout', out, err }) }, timeoutMs)
+      child.on('close', code => { clearTimeout(timer); resolve({ status: code, out, err }) })
+    })
+
+    // 先把指针落到 2.8.0（串行、无栅栏）。
+    stageInto(join(conc, 'bundle-2.8.0'), '2.8.0')
+    const seed = spawnSync('bash', [publishScript, '--list', concList, '--bundle', join(conc, 'bundle-2.8.0')], {
+      cwd: concWork,
+      encoding: 'utf8',
+      env: {
+        PATH: `${concWork}:${process.env.PATH ?? ''}`,
+        HOME: process.env.HOME ?? '',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_BUCKET: 'test-bucket',
+        VERSION: 'v2.8.0',
+      },
+    })
+    check(seed.status === 0, `并发用例的种子发布(v2.8.0)应成功，实际 ${String(seed.status)}: ${seed.stderr ?? ''}`)
+    check(safeJson(readFileSync(join(concStore, 'official', 'latest.json'), 'utf8'))?.server?.version === '2.8.0',
+      '并发用例的种子指针应为 2.8.0（否则后面两个进程读到的不是同一个旧指针）')
+
+    stageInto(join(conc, 'bundle-2.8.2'), '2.8.2')
+    stageInto(join(conc, 'bundle-2.8.1'), '2.8.1')
+    const newer = spawnPublish('2.8.2', 'new')
+    const older = spawnPublish('2.8.1', 'old')
+    const newerResult = await waitFor(newer, 180000)
+    // 新版本那个进程已经退出（它的指针写与校验都完成了）⇒ 放行旧进程去写。
+    writeFileSync(join(gate, 'release'), '')
+    const olderResult = await waitFor(older, 180000)
+
+    check(newerResult.status === 0,
+      `并发用例里**新版本**的发布应成功，实际 ${String(newerResult.status)}: ${newerResult.err}`)
+    check(olderResult.status === 0,
+      `并发用例里**旧版本**的发布不应整体失败（只应拒绝写指针），实际 ${String(olderResult.status)}: ${olderResult.err}`)
+    const pointerFinal = readFileSync(join(concStore, 'official', 'latest.json'), 'utf8')
+    check(safeJson(pointerFinal)?.server?.version === '2.8.2',
+      '两个 tag 并发时指针**不得倒退**：最终必须指向更新的那个版本（2.8.2），'
+        + `实际 ${String(safeJson(pointerFinal)?.server?.version)}`
+        + '（无条件写 = check-then-act：旧进程拿着过期判定照样能写，且两个进程都 exit 0）')
+    // "响亮"这一半：退让的那一方必须留下可检索的告警（否则运维看不到"为什么没更新"）。
+    const olderOutput = `${olderResult.out}${olderResult.err}`
+    check(olderOutput.includes('::warning::') && olderOutput.includes('2.8.2'),
+      '被并发抢先的那个进程必须给出可检索的 ::warning::（点名抢先的版本号），实际输出里没有')
+    // 正向前置：这次"不倒退"必须真的来自条件写被拒 —— 而不是"旧进程压根没尝试写"。
+    // （没有这条，用例在"旧进程提前退出/跳过指针"时也会绿：《假绿》形态。）
+    const concAwsLog = readFileSync(concLog, 'utf8')
+    check(concAwsLog.includes('precondition-failed if-match official/latest.json'),
+      '并发用例必须真的走到"条件写被 412 拒绝"那一跳（否则本用例可能是空转的假绿）')
+    check(existsSync(join(concStore, 'official', 'releases', '2.8.1', 'picoaide-server-2.8.1-amd64.zip')),
+      '被拒的只是指针：旧版本本次的版本化资产仍必须照发')
+  }
 }
 
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----

@@ -734,6 +734,14 @@ function cookies(req) {
  */
 function startGateway(scenario) {
   const providerConfigured = scenario !== 'skip'
+  // **Location 的两种形态都要有一条腿**（第三十轮 FIX-45 ①）：
+  //   · 默认（`good` 等）⇒ **绝对** Location（`http://host/dex/approval?…`），历史上唯一的形态；
+  //   · `dex-relative-location` ⇒ IdP **自己内部**的跳转用**相对** Location，与真 Dex 逐字同形
+  //     （真 Dex 的 `/auth` 用 302 + `/auth/local?…` 跳自己的登录页）。
+  // 只留绝对形态正是"判据自洽型假绿"的来源：`follow()` 把相对 Location 当桌面深链也永远绿。
+  const relativeRedirects = scenario === 'dex-relative-location'
+  /** 这个网关**真的发出去过**的 Location（形态覆盖判据的原始事实，不是常量表）。 */
+  const emittedLocations = []
   const server = createServer(async (req, res) => {
     const origin = `http://${req.headers.host}`
     const url = new URL(req.url, origin)
@@ -747,9 +755,12 @@ function startGateway(scenario) {
       res.end(body)
     }
     const redirect = (status, location, headers = {}) => {
+      emittedLocations.push(location)
       res.writeHead(status, { Location: location, ...headers })
       res.end()
     }
+    /** 同源目标按场景决定写绝对还是相对（跨 origin 的那一跳必须绝对）。 */
+    const sameOrigin = target => (relativeRedirects ? target : `${origin}${target}`)
     const cookie = cookies(req)
     const body = await readBody(req)
 
@@ -836,12 +847,14 @@ function startGateway(scenario) {
     if (path === '/dex/auth/local' && req.method === 'GET') return html(200, LOGIN_FORM_HTML)
     if (path === '/dex/auth/local' && req.method === 'POST') {
       const state = url.searchParams.get('state') ?? url.searchParams.get('req') ?? ''
-      return redirect(303, `${origin}/dex/approval?req=${state}&state=${state}`)
+      // 真 Dex 在这一跳用的是**相对** Location（`/auth/local` → `/dex/approval`）；
+      // `dex-relative-location` 场景复刻它，`good` 场景维持历史形态（绝对）。
+      return redirect(303, sameOrigin(`/dex/approval?req=${state}&state=${state}`))
     }
     if (path === '/dex/approval' && req.method === 'GET') return html(200, APPROVAL_HTML)
     if (path === '/dex/approval' && req.method === 'POST') {
       const state = url.searchParams.get('state') ?? ''
-      return redirect(303, `${origin}/api/client/v2/auth/oidc/callback?code=code-42&state=${state}`)
+      return redirect(303, sameOrigin(`/api/client/v2/auth/oidc/callback?code=code-42&state=${state}`))
     }
     if (path === '/api/client/v2/auth/oidc/callback' && req.method === 'GET') {
       const state = url.searchParams.get('state') ?? ''
@@ -860,6 +873,12 @@ function startGateway(scenario) {
       if (bearer !== `Bearer ${DEEP_LINK_TOKEN}`) {
         return json(401, { error: { code: 'AUTH_REQUIRED', message: '未认证' } })
       }
+      // **行为级判据的夹具**（第三十轮 FIX-45 ②）：`dex-wrong-identity` 让深链 token 是**有效**的、
+      // 但 `/auth/me` 回的是**别人** ⇒ "深链身份必须是本次登录账号"这条契约被破坏，dex 必须
+      // FAIL。把该调用点变成不可达（`if False:` / 早退）时这条腿会从 FAIL 变成 PASS ⇒ 当场红。
+      if (scenario === 'dex-wrong-identity') {
+        return json(200, { user: { username: 'intruder', email: 'intruder@example.invalid', role: 'user' } })
+      }
       return json(200, { user: { username: 'admin', email: 'admin@example.com', role: 'user' } })
     }
 
@@ -871,6 +890,8 @@ function startGateway(scenario) {
       const { port } = server.address()
       resolvePromise({
         base: `http://127.0.0.1:${port}`,
+        // 收尾判"两种 Location 形态都真的被发出去过"用的**原始事实**（每个场景各自一份）。
+        emittedLocations,
         close: () => new Promise(done => server.close(() => done())),
       })
     })
@@ -1473,11 +1494,21 @@ for (const file of mjsFiles) {
     note(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
   }
 
-  // 接线:运行期脚本必须逐条引用表里的 id,且不得自带常量真判据。
+  // 接线:运行期脚本必须逐条引用表里的 id，且不得自带常量真判据。
+  //
+  // 第三十轮 FIX-45 ②：`shotsSource.includes(id)` 证明的是"**文本在场**"—— 把
+  // `report('deep-link-identity', …)` 包进 `if (false) { … }`（字面量一字不改）⇒ 本守卫
+  // EXIT=0（第二十九轮 AC2 的 F-04，M6 变异实测）。改成**可达性**判据（形态与
+  // {@link judgmentNeedleStatementProblem} 同源）。
   const shotsSource = existsSync(shotsPath) ? readFileSync(shotsPath, 'utf8') : ''
   for (const id of ids) {
-    check(typeof id === 'string' && shotsSource.includes(id),
-      `形态⑤: electron-shots.mjs 没有引用判据 ${JSON.stringify(id)} ⇒ 表里声明了但运行期不判(掏空的另一种写法)`)
+    const reachability = typeof id === 'string'
+      ? callSiteReachabilityProblem(shotsSource, id, 'js', 'report')
+      : '判据 id 不是字符串'
+    check(reachability === undefined,
+      `形态⑤: electron-shots.mjs 的判据 ${JSON.stringify(id)} 在运行期**不可达** —— ${reachability}`
+        + '\n  ⇒ 表里声明了但运行期真的不判（"文本在场"≠"运行期求值过"；'
+        + '`if (false) { report(…) }` 保留字面量的形态在第三十轮 FIX-45 前是 EXIT=0）')
   }
   const constantJudge = /(?:check|report)\(\s*(?:'[^']*'|"[^"]*"|[A-Za-z_$][\w$]*)\s*,\s*(?:true|false)\b/u.exec(shotsSource)
   check(constantJudge === null,
@@ -1805,6 +1836,31 @@ for (const test of CONTRACT_TESTS) {
   })
   note(`${test.id}: --self-test ${ok}/${total} 条夹具`)
 
+  // ---- ③b 纯单元级：`follow()` 对 Location **三种形态**的解析（FIX-45 ①③）--------
+  //
+  // 假网关是**端到端**腿，一轮只跑得到一种 Location 形态；而 `follow()` 的形态判定是三选一
+  // （相对 / 绝对 / 深链）—— 只跑一两种时第三种回归就静默（这正是 F-01 的成因：真 Dex 用
+  // 相对 Location，而夹具只发绝对 Location）。这个入口**不碰网络**：桩 opener 驱动**真实的**
+  // `follow()`，三种形态各自钉一遍。去掉 `resolve_location()` 里的 `urljoin` ⇒ 相对那一例当场红
+  // （实测：`redirect-form probe: 0/3`、exit 1）。
+  if (test.id === 'dex') {
+    const probe = runContractScript(scriptPathFor(test), ['--probe-redirect-forms'], ROOT)
+    const probeSummary = /redirect-form probe: (\d+)\/(\d+) 种 Location 形态符合预期/u.exec(probe.output)
+    const probeOk = probe.status === 0 && probeSummary !== null
+      && probeSummary[1] === probeSummary[2] && Number(probeSummary[2]) >= 3
+    check(probeOk,
+      `${test.path} --probe-redirect-forms 必须 exit 0 且**三种** Location 形态（相对/绝对/深链）`
+        + `逐条符合预期（实际 exit=${probe.status}）：${probe.output.trim().slice(-400)}`)
+    recordLayerVerdict('契约判据本体自证', {
+      check: 'redirect-forms', id: test.id, status: probe.status,
+      formsJudged: probeSummary === null ? 0 : Number(probeSummary[2]),
+      formsPassed: probeSummary === null ? -1 : Number(probeSummary[1]),
+    })
+    if (probeOk) {
+      note(`${test.id}: --probe-redirect-forms ${probeSummary[1]}/${probeSummary[2]} 种 Location 形态 ✓`)
+    }
+  }
+
   // ---- ① 登记值对账（--dump-criteria）--------------------------------------
   const dumpRun = runContractScript(scriptPathFor(test), ['--dump-criteria'], ROOT)
   let dumped = null
@@ -1845,7 +1901,14 @@ for (const test of CONTRACT_TESTS) {
     note(`${test.id}: 判据表 ${criteria.length} 条 / 逐 id 正负例条数对账 ✓`)
   }
 
-  // ---- ② 运行期逐条引用 ----------------------------------------------------
+  // ---- ② 运行期逐条引用（**可达性**，不是文本存在性）------------------------
+  //
+  // 第三十轮 FIX-45 ②：原判据只证明"以该 id 为首参的调用点在**文本**里"，证明不了
+  // "这条判据在**运行期**真的被求值"。现场（第二十九轮 AC2 的 F-04，P1，两处实跑）：
+  //   `reporter.report('deep-link-identity', …)` 的字面量保留、只包进 `if False:` ⇒ 本守卫
+  //   **EXIT=0**；而同一条腿对**错误身份**的 SSO 报 `RESULT: PASS`（6 ✓ 而非 7 ✓），
+  //   原件对同一网关正确 FAIL。⇒ 文本面照旧逐个报红，可达性面由
+  //   {@link callSiteReachabilityProblem} 判；**行为面**由 `dex-wrong-identity` 场景判。
   const callSites = [...source.matchAll(
     /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(['"])([^'"]+)\2\s*,/gu,
   )].filter(match => expectedIds.includes(match[3]))
@@ -1854,6 +1917,11 @@ for (const test of CONTRACT_TESTS) {
     check(citedIds.has(id),
       `形态⑧: ${test.path} 没有引用判据 ${JSON.stringify(id)}`
         + ' ⇒ 表里声明了但运行期不判（掏空的另一种写法）')
+    const reachability = callSiteReachabilityProblem(source, id, 'py', 'reporter.report')
+    check(reachability === undefined,
+      `形态⑧: ${test.path} 的判据 ${JSON.stringify(id)} 在运行期**不可达** —— ${reachability}`
+        + '\n  ⇒ "字面量在场"不等于"运行期求值过"（第三十轮 FIX-45 ②：`if False:` 包住调用点，'
+        + '保留字面量，守卫曾 EXIT=0 且该条腿对错误身份报 PASS）')
   }
   const foreignCallees = [...new Set(callSites
     .filter(match => match[1] !== 'reporter.report')
@@ -1983,16 +2051,110 @@ for (const test of CONTRACT_TESTS) {
   }
 }
 
+/**
+ * 一个 `Location` 头的**形态**（第三十轮 FIX-45 ①③ 的取值域）。
+ *
+ * 三档，与 `follow()` 的形态判定一一对应：
+ *   · `http-absolute` —— 带 `http(s)://` scheme（跨 origin 那一跳只能是它）；
+ *   · `deep-link`     —— **自定义 scheme**（`picoaide://auth?token=…`）= 桌面深链；
+ *   · `relative`      —— 路径 / 查询 / 片段（`/dex/approval?…`）⇒ **必须按当前 URL 归一化**，
+ *                        它不是深链（真 Dex 的 `/auth` → `/auth/local` 就是这一档）。
+ * @param location - `Location` 头的原值。
+ * @returns 形态名。
+ */
+function locationFormOf(location) {
+  const text = String(location ?? '')
+  if (/^https?:\/\//iu.test(text)) return 'http-absolute'
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(text)) return 'deep-link'
+  return 'relative'
+}
+
 /** 把可能很长的子进程输出压成一行（诊断用，不参与判据）。 */
 function selfTestOutputFree(output) {
   return JSON.stringify(String(output).trim().slice(-200))
 }
 
 // ---------------------------------------------------------------------------
+// 2b. **可达性判据的自证**（第三十轮 FIX-45 ②）
+//
+// 真仓里的调用点**全部可达**（否则门禁本来就是红的）⇒ "判据退化成 `return undefined`"
+// 这种掏空在真仓上**不可见**（与 `constantBlockHeaderProbeProblem` 同一处境）。这里把该红/
+// 该绿的形态做成合成样本，逐条喂给**生产路径上的同一个函数**：
+//   · 该红：`if False:` / `while False:` / 早退死代码 / `for _ in []:` / `if (false) {`
+//     / `for (const _ of []) {` / `if (false) report(…)` / `cond && report(…)`；
+//   · 该绿（**误红会让判据无法使用**）：`if not reporter.report(…)`（调用点就是条件）、
+//     `if approval_required:` / `if (twoStep) {`（自由变量求不出常量）、`} else {` 分支里的
+//     调用点（真仓 `electron-shots.mjs:712` 就在 else 里）、顶层语句。
+// ---------------------------------------------------------------------------
+{
+  const py = body => `def main():\n${body}\n`
+  const js = body => `function f() {\n${body}\n}\n`
+  const cases = [
+    ['py · if False: 包住调用点', py("    if False:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · while False: 包住调用点', py("    while False:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · 无条件早退之后的死代码', py("    return finish()\n    reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · for _ in []: 包住调用点', py("    for _ in []:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · 正当：`if not reporter.report(…)`（调用点就是条件）',
+      py("    if not reporter.report('probe', {'x': 1}):\n        return finish()"),
+      'py', 'reporter.report', 'probe', false],
+    ['py · 正当：自由变量的条件分支',
+      py("    if approval_required:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', false],
+    ['py · 正当：顶层语句', py("    reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', false],
+    ['js · if (false) { 包住调用点', js("  if (false) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', true],
+    ['js · for (const _ of []) { 包住调用点', js("  for (const _ of []) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', true],
+    ['js · 同一行恒假条件（`if (false) report(…)`）', js("  if (false) report('probe', { x: 1 })"),
+      'js', 'report', 'probe', true],
+    ['js · 悬空运算符（`cond && report(…)`）', js("  cond &&\n    report('probe', { x: 1 })"),
+      'js', 'report', 'probe', true],
+    ['js · 正当：`} else {` 分支里的调用点（真仓 electron-shots.mjs:712 就是这个形态）',
+      js("  if (step1) {\n    report('other', { x: 1 })\n  } else {\n    report('probe', { x: 2 })\n  }"),
+      'js', 'report', 'probe', false],
+    ['js · 正当：自由变量的条件块', js("  if (twoStep) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', false],
+    ['js · 正当：顶层语句', js("  report('probe', { x: 1 })"),
+      'js', 'report', 'probe', false],
+  ]
+  const wrong = []
+  for (const [why, text, language, callee, id, expectProblem] of cases) {
+    const problem = callSiteReachabilityProblem(text, id, language, callee)
+    if ((problem !== undefined) !== expectProblem) {
+      wrong.push(`${why} ⇒ ${problem === undefined ? '放行（漏）' : `判红（误红）：${problem}`}`)
+    }
+  }
+  check(wrong.length === 0,
+    'FIX-45 ② 可达性判据自证不成立（该红的没红 / 正当的误红）：\n    ' + wrong.join('\n    '))
+  if (wrong.length === 0) {
+    note(`可达性判据自证: ${cases.length} 条合成样本（恒假块头 / 空迭代域 / 早退死代码 / 行内恒假 / `
+      + '悬空运算符 必红；`if not report(…)` / else 分支 / 自由变量条件 / 顶层 必绿）✓')
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. 假网关：按真契约应答（不需要 Docker / PG / IdP）
 // ---------------------------------------------------------------------------
 const SCENARIOS = [
-  { scenario: 'good', test: CONTRACT_TESTS[0], expect: 0, label: '按真契约应答 ⇒ dex 必须通过' },
+  {
+    scenario: 'good', test: CONTRACT_TESTS[0], expect: 0,
+    // **Location 形态的登记值**（第三十轮 FIX-45 ①③）：这一腿的假网关必须在运行期**真的**
+    // 发出过该形态的 Location，否则判红 —— 只写"我声明了"等于把覆盖面的自我陈述当判据。
+    locationForm: 'http-absolute',
+    label: '按真契约应答（IdP 内部跳转用**绝对** Location）⇒ dex 必须通过',
+  },
+  {
+    scenario: 'dex-relative-location', test: CONTRACT_TESTS[0], expect: 0,
+    locationForm: 'relative',
+    must: /✓ \[2\]/u,
+    label: '真 Dex 形态：IdP 内部跳转用**相对** Location ⇒ dex 必须通过'
+      + '（`follow()` 少了 `urljoin` 就把它当桌面深链，这条腿当场红）',
+  },
   { scenario: 'good', test: CONTRACT_TESTS[1], expect: 0, label: '按真契约应答 ⇒ ldap 必须通过' },
   {
     scenario: 'skip', test: CONTRACT_TESTS[0], expect: 77,
@@ -2008,6 +2170,17 @@ const SCENARIOS = [
   {
     scenario: 'dex-http-deeplink', test: CONTRACT_TESTS[0], expect: 1,
     must: /深链|Location/u, label: '回调未下发深链 ⇒ dex 必须失败（旧脚本咬不到的那条契约）',
+  },
+  {
+    // **行为级判据**（第三十轮 FIX-45 ②）：`deep-link-identity` 是 dex 里唯一一条
+    // **安全相关**的判据（深链 token 必须能登录**且身份必须是本次登录账号**）。这条场景让
+    // token **有效**、`/auth/me` 回**别人** ⇒ 判据必须 FAIL。把该调用点变成不可达
+    // （`if False:` / 早退 / 条件化）时，这条腿会从 FAIL 变成 PASS ⇒ 当场红。
+    // 判据面（可达性）与行为面互为补充：前者判"文本形态"，后者判"结论真的变了"。
+    scenario: 'dex-wrong-identity', test: CONTRACT_TESTS[0], expect: 1,
+    must: /身份/u, locationForm: 'http-absolute',
+    label: '深链 token 有效但 /auth/me 回的是**别人** ⇒ dex 必须失败'
+      + '（把 deep-link-identity 弄成不可达时这条腿会变 PASS —— 行为级判据）',
   },
   {
     scenario: 'ldap-legacy-channel', test: CONTRACT_TESTS[1], expect: 1,
@@ -2028,14 +2201,25 @@ const SCENARIOS = [
  * @param item - {@link SCENARIOS} 的一项。
  * @param status - 契约脚本的真实退出码。
  * @param output - 契约脚本的完整输出。
+ * @param emittedForms - 这一轮假网关**真的发出去过**的 Location 形态（第三十轮 FIX-45 ①；
+ *   不传 = 不判该格，负例自证的合成观测就是这么调的）。
  * @returns 违规原因列表（空 = 通过）。
  */
-function scenarioViolations(item, status, output) {
+function scenarioViolations(item, status, output, emittedForms) {
   const detail = String(output).trim().split('\n').slice(-6).join(' / ')
   const violations = []
   if (status !== item.expect) {
     violations.push(`期望 exit ${item.expect}，实际 ${status}：${detail}`)
     return violations
+  }
+  if (item.locationForm !== undefined && emittedForms !== undefined) {
+    const forms = Array.isArray(emittedForms) ? emittedForms : []
+    if (!forms.includes(item.locationForm)) {
+      violations.push(`这一腿声明的 Location 形态是 \`${item.locationForm}\`，而假网关这一轮`
+        + `**一次都没发出过**该形态（实际 ${forms.length > 0 ? forms.join(', ') : '没有任何重定向'}）`
+        + ' ⇒ 夹具被改成单一形态后，"两种形态都被覆盖"就只剩一句自我陈述')
+      return violations
+    }
   }
   if (item.must !== undefined && !item.must.test(output)) {
     violations.push(`输出里没有 ${item.must}：${detail}`)
@@ -2069,6 +2253,12 @@ recordLayerVerdict('假网关场景', {
   status: SCENARIOS[0].expect === 0 ? 1 : 0, expect: SCENARIOS[0].expect,
   violations: scenarioViolations(SCENARIOS[0], SCENARIOS[0].expect === 0 ? 1 : 0, ''),
 })
+/**
+ * dex 各腿**运行期真的发出去过**的 Location 形态（第三十轮 FIX-45 ①③ 的事实来源）。
+ * 注意它记的是 Location 头本身，不是 `SCENARIOS` 的表长。
+ * @type {Set<string>}
+ */
+const observedDexLocationForms = new Set()
 for (const item of SCENARIOS) {
   let gateway
   try {
@@ -2079,7 +2269,12 @@ for (const item of SCENARIOS) {
   }
   try {
     const { status, output } = await runTest(scriptPathFor(item.test), gateway.base)
-    const violations = scenarioViolations(item, status, output)
+    // 形态覆盖的**原始事实**：这一轮这个假网关真的发出去过哪些形态的 Location。
+    const emittedForms = (gateway.emittedLocations ?? []).map(locationFormOf)
+    if (item.test === CONTRACT_TESTS[0]) {
+      for (const form of emittedForms) observedDexLocationForms.add(form)
+    }
+    const violations = scenarioViolations(item, status, output, emittedForms)
     recordLayerVerdict('假网关场景', {
       check: 'scenario', scenario: item.scenario, test: item.test.id, status, expect: item.expect, violations,
     })
@@ -2090,6 +2285,38 @@ for (const item of SCENARIOS) {
     note(`[${item.scenario}] ${item.test.id}: exit ${status} ✓`)
   } finally {
     await gateway.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3b. **Location 的两种形态都被覆盖**（第三十轮 FIX-45 ①③）
+//
+// 现场（第二十九轮 AC2 的 F-01，P1）：真 Dex 的 `/auth` 用 **302 + 相对 Location**
+// （`/auth/local?…`），而 `follow()` 把"非 http(s) 的 Location"一律当桌面深链 ⇒ 判据 [2]
+// 拿到 `Found` 中间页、`RESULT: FAIL`；**而守卫的假网关一律返回绝对 Location ⇒ 门禁永远绿**
+// （判据自洽型假绿：夹具与判据出自同一份假设）。
+//
+// 判据三条腿，缺一不可：
+//   ① 每条腿的形态是**登记值**（`SCENARIOS[].locationForm`），且该腿的假网关必须在运行期
+//      **真的发出过**该形态 —— 已经并进 {@link scenarioViolations}（与退出码同一套判决）；
+//   ② 跨腿：dex 的腿合起来必须同时覆盖 `http-absolute` 与 `relative`（下面这一格）；
+//   ③ 纯单元级：`dex-sso-test.py --probe-redirect-forms` 用桩 opener 驱动**真实的**
+//      `follow()`，把相对 / 绝对 / 深链三种形态各自钉一遍（不碰网络）。
+// 注意 ② 的事实来源是**运行期发出的 Location 头**，不是 `SCENARIOS` 表长 —— 删掉相对那条腿，
+// 集合里少了 `relative`（而不是"表短了一条"）。
+// ---------------------------------------------------------------------------
+{
+  const required = ['http-absolute', 'relative']
+  const missing = required.filter(form => !observedDexLocationForms.has(form))
+  const violations = missing.length === 0
+    ? []
+    : [`dex 假网关这一轮**没有覆盖**这些 Location 形态：${missing.join(', ')}`
+      + `（实际发出过 ${[...observedDexLocationForms].join(', ') || '(无)'}）`]
+  recordLayerVerdict('假网关场景', { check: 'location-forms', forms: [...observedDexLocationForms], violations })
+  if (violations.length === 0) {
+    note(`Location 形态覆盖: ${[...observedDexLocationForms].sort().join(' / ')}（绝对 + 相对各一条腿）✓`)
+  } else {
+    for (const violation of violations) fail(`[Location 形态覆盖] ${violation}`)
   }
 }
 
@@ -8528,7 +8755,13 @@ const LAYER_VERDICT_RULES = new Map([
   }],
   ['契约判据本体自证', {
     min: () => CONTRACT_TESTS.length,
-    judge: o => o.status === 0 && o.ok === o.total && o.total >= o.minCases,
+    judge: o => {
+      // FIX-45 ①③：`follow()` 对 Location 三形态（相对/绝对/深链）的**纯单元级**自证。
+      if (o.check === 'redirect-forms') {
+        return o.status === 0 && o.formsJudged >= 3 && o.formsPassed === o.formsJudged
+      }
+      return o.status === 0 && o.ok === o.total && o.total >= o.minCases
+    },
   }],
   ['契约判定通道自证', {
     min: () => CONTRACT_TESTS.length,
@@ -9442,6 +9675,296 @@ function judgmentNeedleStatementProblem(source, needle) {
     break
   }
   return undefined
+}
+
+/**
+ * **运行期逐条引用的「可达性」判据**（第三十轮 FIX-45 ②；形态与
+ * {@link judgmentNeedleStatementProblem} / {@link constantBlockHeaderProblem} 同源，
+ * 常量求值复用 {@link evaluateConstantExpression}，不另起一套）。
+ *
+ * ## 现场（第二十九轮 AC2 的 F-04，P1，两处实跑）
+ *
+ * `reporter.report('deep-link-identity', …)` 的**字面量保留**、只把它包进 `if False:` ⇒
+ * 本守卫 **EXIT=0**；而同一条腿对**错误身份**的 SSO 报 `RESULT: PASS`（6 ✓ 而非 7 ✓），
+ * 原件对同一网关正确 FAIL。`electron-shots` 同族同样漏（`M6` 变异也是 EXIT=0）。
+ * 即：原来的 `citedIds.has(id)` / `shotsSource.includes(id)` 证明的是"**文本在场**"，
+ * 不是"**运行期求值过**"。
+ *
+ * ## 判据（AC2 点名的那几档）
+ *
+ *   · **恒假块头**：调用点的**外层块头**（Python 按缩进、JS 按 `{`）条件不得是常量假 ——
+ *     `if False:` / `if (false) {` / `while (false) {` / `if (true === false) {`；
+ *     常量求值求不出就**放行**（`if (twoStep) {` / `if approval_required:` 这类正当分支
+ *     不得误红）；
+ *   · **空迭代域**：`for _ in []:` / `for (const _ of []) {`（复用
+ *     {@link provenEmptyIterationDomain} 的 Python 版）；
+ *   · **同一行条件化**：`if (false) report(…)`（JS 前缀里带 `(…)` 的条件直接求值）；
+ *   · **悬空运算符**：`cond && report(…)` / `… and report(…)`（调用点不是独立语句）；
+ *   · **早退之后的死代码**：紧邻的**同层**上一非空行是**无条件** `return` / `raise` /
+ *     `throw` / `break` / `continue` / `sys.exit(`。
+ *
+ * ## 边界（认账，勿夸大）
+ *
+ * 这**不是**完整的控制流分析：条件表达式（`report(…) if False else None`）、把常量藏进函数
+ * 返回值、跨函数跳转这一格看不见。它们由**行为级判据**兜 —— `SCENARIOS` 的
+ * `dex-wrong-identity`（对**错误身份**的 SSO 必须 FAIL）：把调用点弄成不可达，那条腿的结论
+ * 必然从 FAIL 变成 PASS，当场红。两层互补，缺一不可。
+ * @param source - 运行期脚本正文（`.py` / `.mjs`）。
+ * @param id - 判据 id。
+ * @param language - `'py'` 或 `'js'`（只影响注释前缀 / 块头 / 早退词 / 悬空运算符的形态）。
+ * @param callee - 调用方（`'reporter.report'` / `'report'`）。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function callSiteReachabilityProblem(source, id, language, callee) {
+  const text = String(source)
+  const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const calleePattern = String(callee).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const sites = [...text.matchAll(new RegExp(`${calleePattern}\\(\\s*(['"])${escaped}\\1\\s*,`, 'gu'))]
+  if (sites.length === 0) {
+    return `找不到以判据 id 为首参的调用点（\`${callee}(<id>, …)\`）`
+  }
+  const py = language === 'py'
+  const comment = py ? '#' : '//'
+  const controlFlow = py ? /^(?:if|elif|while|for)\b/u : /^(?:if|while|for|switch)\b/u
+  const earlyExit = py
+    ? /^(?:return|raise|break|continue)\b|^sys\.exit\(/u
+    : /^(?:return|throw|break|continue)\b/u
+  const dangling = py
+    ? /(?:[,=([{+\-*/%&|^]|\b(?:and|or|not|is|in))\s*$/u
+    : /(?:[,=([?&|+\-*/%^.]|\b(?:await|typeof|instanceof))\s*$/u
+  const problems = []
+  for (const site of sites) {
+    const at = site.index
+    const lineStart = text.lastIndexOf('\n', at) + 1
+    const leading = text.slice(lineStart, at)
+    const prefix = leading.trim()
+    if (prefix !== '' && !(py && controlFlow.test(prefix))) {
+      // 同一行前缀。两种语言的**合法**条件化写法不同：
+      //   · Python：`if not reporter.report(…)` —— 调用点就是条件本身；"恒假条件里带调用点"
+      //     在这门语言里写不出来（`if False: report(…)` 是语法错误）；
+      //   · JS：`if (false) report(…)` 是完全合法的语句 —— 条件必须**真的求值**。
+      const condition = jsInlineCondition(prefix)
+      const value = condition === undefined ? undefined : evaluateConstantExpression(condition, text)
+      if (value === false || value === 0 || value === '' || value === null) {
+        problems.push(`调用点被同一行的**恒假条件**条件化（${JSON.stringify(prefix.slice(0, 60))}）`)
+        continue
+      }
+      if (condition === undefined && dangling.test(prefix)) {
+        problems.push('调用点不是独立语句（同一行前缀以悬空运算符结尾：'
+          + `${JSON.stringify(prefix.slice(-24))}）`)
+        continue
+      }
+    }
+    const container = py
+      ? pythonUnreachableContainerProblem(text, at)
+      : jsUnreachableContainerProblem(text, at)
+    if (container !== undefined) {
+      problems.push(container)
+      continue
+    }
+    const sibling = previousSameLevelStatement(text, lineStart, leading.length, py)
+    if (sibling !== undefined && earlyExit.test(sibling)) {
+      problems.push('调用点的上一条同层语句是**无条件早退**'
+        + `（${JSON.stringify(sibling.slice(0, 60))}）⇒ 死代码`)
+      continue
+    }
+    const danglingLine = danglingPreviousLineProblem(text, lineStart, language)
+    if (danglingLine !== undefined) problems.push(danglingLine)
+  }
+  return problems.length === 0 ? undefined : problems.join('；')
+}
+
+/**
+ * 调用点的**上一非空行**是不是以悬挂运算符结尾（`cond &&` / `x =` / `… +`）。
+ *
+ * 形态与 {@link judgmentNeedleStatementProblem} 的最后一格同源（那边判的是守卫自己的判决句）。
+ * 这里只需要"上一条语句把调用点挂住了"这一个事实 —— 判不出来就放行，误红会让判据不可用。
+ * @param source - 运行期脚本正文。
+ * @param lineStart - 调用点所在行的起始下标。
+ * @param language - `'py'` / `'js'`。
+ * @returns 不合规的原因；正常返回 `undefined`。
+ */
+function danglingPreviousLineProblem(source, lineStart, language) {
+  const py = language === 'py'
+  const comment = py ? '#' : '//'
+  const dangling = py
+    ? /(?:[,=([{+\-*/%&|^]|\b(?:and|or|not|is|in))\s*$/u
+    : /(?:[,=([?&|+\-*/%^.]|\b(?:await|typeof|instanceof))\s*$/u
+  const lines = String(source).slice(0, lineStart).split('\n')
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith(comment)
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (dangling.test(trimmed)) {
+      return `上一非空行以**悬挂运算符**结尾（${JSON.stringify(trimmed.slice(-24))}）——`
+        + ' 调用点不是一个独立语句（`cond &&` / `x =` 会把下一条语句挂住，运行期不保证求值）'
+    }
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * JS：调用点是否被**条件恒假 / 迭代域为空**的块包着。
+ *
+ * 形态与 {@link enclosingBlockHeaderProblem} 同源（同一套"回溯找容器"的写法与同一份常量
+ * 求值 {@link evaluateConstantExpression}），两处**有意的差别**：
+ *   · 这里要**逐层往外看**（`if (false) { if (x) { 调用 } }` 的内层容器条件求不出，
+ *     但外层恒假 —— 只看最内层会漏）；
+ *   · `} else {` / `try {` / 裸块在这里是**可达边界**（真实存在正当调用点落在 `else` 分支，
+ *     例如 `electron-shots.mjs:712` 的 `report('two-step-login-page', { phaseOk: false })`），
+ *     所以继续往外走而**不**判红 —— 与 {@link enclosingBlockHeaderProblem} 的取向相反是
+ *     因为两者的被守护面不同：那边守的是"守卫自己的顶层判决句"，这边守的是"运行期脚本的
+ *     每一条判据调用"。
+ * @param source - 运行期脚本正文。
+ * @param at - 调用点在正文里的下标。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function jsUnreachableContainerProblem(source, at) {
+  const lines = String(source).slice(0, at).split('\n')
+  let pending = 0
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith('//')
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (trimmed.endsWith('}')) { pending += 1; continue }
+    const header = /^(.*?)\{\s*$/u.exec(trimmed)
+    if (header === null) continue
+    if (pending > 0) { pending -= 1; continue }
+    const container = header[1].trim()
+    // 裸块 / `try` / 条件分支的另一半：透明边界，继续往外找真正的控制流容器。
+    if (container === '' || /^try\b/u.test(container)
+      || /^(?:\}\s*)?(?:else|catch|finally)\b/u.test(container)) continue
+    const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(container)
+    if (keyword === null) break  // 函数体 / 类体 / 对象字面量 ⇒ 出了语句作用域
+    const open = container.indexOf('(')
+    const close = container.lastIndexOf(')')
+    if (open < 0 || close < open) {
+      return `调用点所在语句的外层容器读不出条件（${JSON.stringify(container.slice(0, 50))}）`
+        + ' ⇒ 按 fail-closed 处理'
+    }
+    const condition = container.slice(open + 1, close)
+    const value = evaluateConstantExpression(condition, source)
+    const empty = (keyword[1] === 'for' || keyword[1] === 'while')
+      ? provenEmptyIterationDomain(condition, source)
+      : false
+    const constantFalse = value === false || value === 0 || value === '' || value === null
+    if (constantFalse || empty) {
+      return `调用点被**恒不执行**的块包着（${JSON.stringify(container.slice(0, 60))}）——`
+        + ' 条件恒假 / 循环体一次都不进 ⇒ 该判据在运行期不会被求值'
+    }
+  }
+  return undefined
+}
+
+/**
+ * Python：调用点是否被**条件恒假 / 迭代域为空**的块包着（按缩进找容器，逐层往外）。
+ * @param source - 运行期脚本正文。
+ * @param at - 调用点在正文里的下标。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function pythonUnreachableContainerProblem(source, at) {
+  const lineStart = source.lastIndexOf('\n', at) + 1
+  const callIndent = /^[ \t]*/u.exec(source.slice(lineStart, at))[0].length
+  const lines = source.slice(0, lineStart).split('\n')
+  let level = callIndent
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const raw = lines[index]
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith('#')
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    const lineIndent = /^[ \t]*/u.exec(raw)[0].length
+    if (lineIndent > level) continue          // 续行 / 更深块：不属于本层
+    if (lineIndent === level) continue        // 同层兄弟语句：不改变容器
+    const header = /^(.*?):\s*$/u.exec(trimmed)
+    if (header === null) break
+    const headerText = header[1].trim()
+    if (!/^(?:if|elif|while|for)\b/u.test(headerText)) break  // def/class/with/try → 出作用域
+    const problem = pythonBlockHeaderProblem(headerText, source)
+    if (problem !== undefined) return problem
+    level = lineIndent
+  }
+  return undefined
+}
+
+/**
+ * 调用点往上第一条**同层**语句（跳过更深缩进的续行/子块与空行、注释）。
+ *
+ * 只用来判"死代码"那一格（`return finish()` 直接写在调用点上一行）。判不出来没关系 ——
+ * 那一格由行为级判据（`dex-wrong-identity`）兜，不必为它做完整的 CFG。
+ * @param source - 运行期脚本正文。
+ * @param lineStart - 调用点所在行的起始下标。
+ * @param callIndent - 调用点的缩进宽度。
+ * @param py - 是否 Python（只影响注释前缀）。
+ * @returns 那条语句的原文；找不到返回 `undefined`。
+ */
+function previousSameLevelStatement(source, lineStart, callIndent, py) {
+  const comment = py ? '#' : '//'
+  const lines = String(source).slice(0, lineStart).split('\n')
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const raw = lines[index]
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith(comment)
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    const lineIndent = /^[ \t]*/u.exec(raw)[0].length
+    if (lineIndent > callIndent) continue
+    return lineIndent === callIndent ? trimmed : undefined
+  }
+  return undefined
+}
+
+/**
+ * 同一行前缀里的 JS 条件（`if (false) ` / `while (0) `）—— 抽取括号内原文。
+ *
+ * 只在**前缀整体就是一个条件块头**时返回条件；否则 `undefined`（= 调用点不是被前缀里的
+ * 条件条件化的，交给悬空运算符那一档判）。
+ * @param prefix - 调用点之前的同一行文本（已 trim）。
+ * @returns 条件原文；形态不符返回 `undefined`。
+ */
+function jsInlineCondition(prefix) {
+  const match = /^(?:\}\s*)?(?:if|while|switch)\s*\(([\s\S]*)\)\s*$/u.exec(String(prefix).trim())
+  return match === null ? undefined : match[1]
+}
+
+/**
+ * Python 块头（`if False:` / `while False:` / `for x in []:`）的**恒不执行**判据。
+ *
+ * 与 {@link constantBlockHeaderProblem} 同形，只把方言差异收在这里：条件里的
+ * `True` / `False` / `None` 先归一成 JS 字面量（`evaluateConstantExpression` 只认后者），
+ * 空迭代域按 `for <目标> in <域>` 剥出来。`else:` / `try:` / `with:` / `def:` / `class:`
+ * 一律放行（它们不构成"条件恒假"）。
+ * @param headerText - 去掉尾部 `:` 的块头原文。
+ * @param source - 运行期脚本正文（常量求值用）。
+ * @returns 不合规的原因；正常块头返回 `undefined`。
+ */
+function pythonBlockHeaderProblem(headerText, source) {
+  if (headerText === '') return undefined
+  const keyword = /^(?:if|elif|while|for)\b/u.exec(headerText)
+  if (keyword === null) return undefined
+  let condition = headerText.slice(keyword[0].length).trim().replace(/^\(([\s\S]*)\)$/u, '$1').trim()
+  condition = condition.replace(/\b(True|False|None)\b/gu, word =>
+    ({ True: 'true', False: 'false', None: 'null' })[word])
+  const value = evaluateConstantExpression(condition, source)
+  const empty = pythonEmptyIterationDomain(keyword[0], condition, source)
+  if (value === undefined) return empty ? EMPTY_BLOCK_HEADER_PROBLEM(headerText) : undefined
+  if (value !== false && value !== 0 && value !== '' && value !== null && !empty) return undefined
+  return EMPTY_BLOCK_HEADER_PROBLEM(headerText)
+}
+
+/**
+ * Python 的 `for <目标> in <域>:` 里迭代域**可证为空**吗（{@link provenEmptyIterationDomain}
+ * 的方言版：JS 是 `const x of []`，Python 是 `x in []`）。
+ * @param keyword - 块头关键字（`for` / `while` / …）。
+ * @param condition - 去掉关键字后的条件原文。
+ * @param source - 运行期脚本正文（常量求值用）。
+ * @returns `true` = 迭代域可证为空。
+ */
+function pythonEmptyIterationDomain(keyword, condition, source) {
+  if (keyword !== 'for' && keyword !== 'while') return false
+  const stripped = String(condition).replace(/^[^:]*?\bin\b\s*/u, '')
+  if (stripped === String(condition)) return false
+  const value = evaluateConstantExpression(stripped, source)
+  return Array.isArray(value) && value.length === 0
 }
 {
   // ---- 第一段：**判决句逐字在场**（R19A-03 ②）--------------------------------------
