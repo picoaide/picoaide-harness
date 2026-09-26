@@ -2603,3 +2603,37 @@ FIX-39（迁移执行器）VERDICT **FIXED 3 / DEFERRED 2**，并核实主控的
 
 **FIX-39 交回的另一条约束（给未来泳道）**：若将来做"迁移事务按语句拆分"（缩短 AE 窗口），
 **必须同时**把 checksum 语义扩展到"子步骤/段号"——否则第一次合法拆分就会被内容对账判成漂移而拒绝启动。
+
+#### §7.69.7 【P1，订正 §7.69 的计数】HEAD 上 Go 测试就是红的 —— 冻结判定缺了 Go 侧
+
+**先订正计数**：§7.69 写的"AB2 = 0 P0/0 P1/0 P2/4 P3"取自 AB2 的**中期**回报；
+其**最终**回报把子审计 AB2-A/AB2-B 并进来后是 **0 P0 / 1 P1 / 4 P2 / 11 P3**。
+⇒ **第二十八轮合计 ≥ 0 P0 / 2 P1**（AB1-02 与 AB2-B-01）。以本节为准。
+
+**AB2-B-01【P1】FIX-39 的三个新 env 让一个既有守卫当场变红**：
+`server/cmd/server/compose_env_test.go:133-188` 的 `TestEveryServerPICOAIEnvNameIsWiredOrExempt`
+在**干净的 `git archive HEAD server` 副本**里复跑 ⇒
+```
+--- FAIL: TestEveryServerPICOAIEnvNameIsWiredOrExempt (0.01s)
+    compose_env_test.go:185: 这些 PICOAI_* 名字既不在 ../../docker-compose.yml 的
+    server.environment 里、也没有豁免理由：写进 .env 会静默不生效
+          PICOAI_MIGRATION_{ADVISORY_TIMEOUT,LOCK_TIMEOUT,SLOW}_MS
+FAIL	github.com/picoaide/picoaide/cmd/server	0.126s
+```
+旁证三段：`grep -n PICOAI_MIGRATION server/docker-compose.yml` **零命中**；
+`server/AGENTS.md:120-123` 把它们写成"运维可调"；`internal/serverstore/migrate.go:318-320` 真读、
+`:693/:759` 的错误文案还叫运维去调。溯源：FIX-39 的提交 `dc632d5c91` 只动了 `AGENTS.md` + `migrate.go`
+（`git show --name-only` 里 `docker-compose.yml` **零命中**）。
+⇒ **CI 的 Go server job 现在不可能绿**，而这红了一整轮无人看见 —— 因为 **§7.68 的"冻结态验收"只跑了 `yarn check`**。
+
+**这是 §7.66 的同一元问题第二次发作，必须一次性收口**：
+- §7.66 发现：本地 `yarn check` **不执行 install**，而 CI 的第一步是 `yarn install --immutable`；
+- 本轮发现：本地 `yarn check` **不含 Go 测试**，而 CI 有独立的 `server` job（gofmt + go vet + `go test -p 1`）。
+⇒ **冻结态验收的判据修订为三件套**（写入 §0.35 与 `temp/r27/BRIEF.md`）：
+① `corepack yarn check`（判定通过的唯一凭据行：`planned=32 executed=32`）
+② `corepack yarn install --immutable`（EXIT=0）
+③ **`cd server && gofmt -l . && go vet ./... && go test ./cmd/server ./internal/... -count=1 -p 1`（EXIT=0）**
+   —— 第 ③ 条正是本轮 P1 的唯一发现途径。
+
+**方法论**：`yarn check` 的绿**从来不代表 CI 会绿**。两次实证（install 步、Go server job）都说明
+"本地门禁 ⊂ CI 判据面"，而缺口只在**改动落在缺口那侧**时暴露（第一次是改 `package.json`，第二次是加 env）。
