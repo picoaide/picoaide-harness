@@ -442,6 +442,10 @@ async function start(): Promise<void> {
     // tests/network-policy.spec.ts）—— 内联在这里时"这段真的会跑"只有文本位置判据，
     // 掏成 `if (false && …)` 后门禁 18/18 全绿、真机探针也不经过这段控制流
     // （2026-09-25 审计 B1-03）。
+    // **实参个数也是判据**（2026-09-26 复审 B-1）：deps 是测试接缝，在生产调用表达式里
+    // 多喂一个 no-op 第三实参会让强制块静默空转（三个代理环境变量一个没删、dispatcher
+    // 没换、启动日志一行不打），而注入 deps 的单测全部照旧通过 —— 所以这里只传两个实参，
+    // 由 AST 判据钉住（`argCount === 2`）。
     const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)
     if (enforcement.transport === 'swapped') {
       electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)

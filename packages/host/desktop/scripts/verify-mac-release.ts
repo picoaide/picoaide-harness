@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
-import { assertMacBundleConsistency } from './mac-bundle-consistency.ts'
+import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId, packagedProductName } from './channel-build.ts'
 import { isDirectInvocation } from './direct-invocation.mjs'
 
@@ -16,6 +16,14 @@ export interface MacReleaseVerificationOptions {
   readonly distDir: string
   /** Installed application name inside the mounted image. */
   readonly productName: string
+  /**
+   * 期望的 `CFBundleIdentifier` = "本次构建声明的身份"（与 `productName` 同形，**必填**）。
+   *
+   * 见 `verify-mac-smoke.ts` 的同名字段（2026-09-26 复审 B-3）：内联 `packagedAppId()` 时
+   * 这条判据不可注入，单测只能读工作树里那份 gitignored 的 `build/channel.json`，
+   * 工作树残留一次渠道构建就让 mac 单测红，且被说成"产物声称了另一个身份"。
+   */
+  readonly expectedIdentifier: string
   /** True (default) when the app is notarized and stapled — spctl/stapler
    * checks apply. Pre-release sign-only builds pass false so verification
    * checks codesign/deep/strict only (a signed-but-unnotarized app is
@@ -60,6 +68,9 @@ function defaultOptions(): MacReleaseVerificationOptions {
       ? join(packageRoot, 'dist', 'mac-release')
       : resolve(process.argv[2]),
     productName,
+    // 身份与产品名同源（都在随包 build/channel.json 里）；生产路径在这里读一次，
+    // 单测显式注入自己的期望值（B-3）。
+    expectedIdentifier: packagedAppId(),
     notarized: !process.argv.includes('--unnotarized'),
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-')),
@@ -115,7 +126,12 @@ export function verifyMacRelease(
     // （见 mac-bundle-consistency.ts）。
     // 只在挂载点真的存在时判（真实发布一定成立；单测用注入替身 + 伪路径驱动命令边界）。
     if (existsSync(appPath)) {
-      assertMacBundleConsistency(appPath, undefined, { expectedIdentifier: packagedAppId() })
+      const bundle = assertMacBundleConsistency(appPath, undefined, {
+        expectedIdentifier: options.expectedIdentifier,
+      })
+      // 归档布局摘要进日志（B-5）：`linkEntries` 存在的理由正是让"归档里有链接、
+      // 判据没有建模它的字节账"在日志里可见，而这里此前丢弃了返回值。
+      if (bundle.asar !== undefined) console.log(asarLayoutLogLine(`${appPath}/Contents/Resources/app.asar`, bundle.asar))
     }
   } catch (cause) {
     failure = cause

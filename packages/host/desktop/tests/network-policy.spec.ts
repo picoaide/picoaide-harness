@@ -7,12 +7,17 @@
  *
  * 本文件守住三件事：
  *  1. 纯策略逻辑（判定顺序、真值、环境清理、dispatcher 替换）；
- *  2. **强制执行块**（`enforceDirectTransport`）真的产生副作用 —— 以注入 deps 的行为判据
- *     钉住"换 dispatcher + 清环境"两件事（2026-09-25 审计 B1-03：内联在 `start()` 里时
- *     只有文本位置判据，掏成 `if (false && …)` 后 18/18 全绿）；
- *  3. **接线**（`main.ts` 必须在 `app.whenReady()` 之前 append 开关、必须**无条件**调用强制块）
- *     —— 接线断了不会有任何运行时症状，只会静默回到"跟随宿主机代理"。接线判据走
- *     **TypeScript AST**（注释掉 = 调用不存在、换行改写不误伤），见 B1-03 / B1-05。
+ *  2. **强制执行块**（`enforceDirectTransport`）真的产生副作用 —— 两条互补的判据：
+ *     · **注入 deps** 的行为判据钉"换 dispatcher + 清环境"两件事与它们的顺序；
+ *     · **不注入 deps** 的缺省路径判据钉"缺省值就是真实现"（2026-09-26 复审 B-1：
+ *       只有前者时，把 `??` 右侧换成 no-op 一样全绿，而生产行为是静默空转 —— 三个代理
+ *       环境变量一个没删、dispatcher 没换、启动日志一行不打）。
+ *     （2026-09-25 审计 B1-03：内联在 `start()` 里时只有文本位置判据，掏成
+ *     `if (false && …)` 后 18/18 全绿。）
+ *  3. **接线**（`main.ts` 必须在 `app.whenReady()` 之前 append 开关、必须**无条件**调用强制块、
+ *     且**不得**在那个调用表达式上喂第三个实参）—— 接线断了不会有任何运行时症状，只会静默
+ *     回到"跟随宿主机代理"。接线判据走 **TypeScript AST**（注释掉 = 调用不存在、换行改写
+ *     不误伤、实参个数可数），见 B1-03 / B1-05 / B-1。
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -257,6 +262,52 @@ describe('强制执行块（可注入 deps，B1-03）', () => {
     // 删除顺序 = PROXY_ENV_NAMES 的顺序（HTTP_PROXY 在前），随后才是 NODE_USE_ENV_PROXY。
     expect(result.cleared).toEqual(['HTTP_PROXY', NODE_ENV_PROXY_FLAG])
   })
+
+  // ── 缺省路径（**不注入 deps**）──────────────────────────────────────────────
+  // 2026-09-26 复审 B-1：上面每条判据都注入 deps，于是"缺省值是不是真实现"在单测里
+  // **完全不可见**。两条最小反例当时都是 23/23 全绿、而生产静默空转：
+  //   ① `main.ts` 的调用点多喂一个 no-op deps 第三实参；
+  //   ② `network-policy.ts` 两个 `??` 的右侧换成 no-op。
+  // ① 由下面的接线判据（AST 实参个数 == 2）钉住；② 由本用例钉住 —— 它**一个 deps 都
+  // 不传**，因此走的就是生产路径上那两行缺省值，并且断言**副作用真的发生**：
+  //   · `enforceNodeTransport` 的缺省是 `enforceDirectNodeTransport` ⇒ 真的 `import('undici')`
+  //     并换掉全局 dispatcher（用 `getGlobalDispatcher()` 的**对象身份**判，而不是只看返回值：
+  //     `async () => 'swapped'` 这种"只报结论不做事的替身"必须同样变红）；
+  //   · `stripEnvironment` 的缺省是 `stripProxyEnvironment` ⇒ 真的删掉那些名字。
+  // 判据刻意用**真 undici**（它是本包的显式依赖）：打包缺件时探针 `probe:proxy` 与这条
+  // 用例会一起红，这正是想要的信号，不要改成"注入一个假 undici 工厂"。
+  it('不注入 deps 时走真缺省实现：dispatcher 真的被换掉、代理环境变量真的被删掉（B-1）', async () => {
+    const undici = await import('undici')
+    const beforeDispatcher = undici.getGlobalDispatcher()
+    const env: NodeJS.ProcessEnv = {
+      HTTP_PROXY: 'http://proxy.example.com:8080',
+      [NODE_ENV_PROXY_FLAG]: '1',
+      PATH: '/usr/bin',
+    }
+    const result = await enforceDirectTransport(env, { allow: false, source: 'default' })
+
+    expect(result.enforced).toBe(true)
+    // 缺省的 enforceNodeTransport 必须是 enforceDirectNodeTransport：有 NODE_USE_ENV_PROXY
+    // 时它只会给 'swapped'（undici 在场）或 'unavailable'（缺件）—— no-op 替身会报
+    // 'not-requested'，`async () => 'unavailable'` / `async () => 'swapped'` 由下一行判死。
+    expect(result.transport, 'NODE_USE_ENV_PROXY 存在时缺省实现绝不能报 not-requested').toBe('swapped')
+    expect(undici.getGlobalDispatcher(), '缺省实现必须真的换掉全局 dispatcher').not.toBe(beforeDispatcher)
+    // 缺省的 stripEnvironment 必须是 stripProxyEnvironment。
+    expect(result.cleared).toEqual(['HTTP_PROXY', NODE_ENV_PROXY_FLAG])
+    expect(env.HTTP_PROXY).toBeUndefined()
+    expect(env[NODE_ENV_PROXY_FLAG]).toBeUndefined()
+    expect(env.PATH).toBe('/usr/bin')
+  })
+
+  it('缺省路径对"宿主机没要求 Node 走代理"如实报 not-requested，且不碰环境变量', async () => {
+    // 反向对照：让上一条的 'swapped' 断言不能靠"缺省实现永远报 swapped"满足。
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://proxy.example.com:8080', HTTPS_PROXY: 'http://proxy.example.com:8080' }
+    const result = await enforceDirectTransport(env, { allow: false, source: 'default' })
+    expect(result.transport).toBe('not-requested')
+    // 没有 NODE_USE_ENV_PROXY ⇒ 只删代理名，行为与旧版一致。
+    expect(result.cleared).toEqual(['HTTP_PROXY', 'HTTPS_PROXY'])
+    expect(env.HTTP_PROXY).toBeUndefined()
+  })
 })
 
 describe('环境分层里的排障开关（.env 太晚，必须留痕而不是静默无效）', () => {
@@ -311,6 +362,11 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
     expect(calls[0]?.conditional, '强制块不得被 if/三元包住 —— 关掉时与"不强制执行"完全等价').toBe(false)
     expect(calls[0]?.env, '第一个实参必须是 process.env（否则清的不是真环境）').toBe('process.env')
     expect(calls[0]?.policy, '第二个实参必须是模块作用域算出的 SYSTEM_PROXY_POLICY').toBe('SYSTEM_PROXY_POLICY')
+    // 2026-09-26 复审 B-1：实参个数也是判据。多喂一个 no-op deps 第三实参时，注入 deps 的
+    // 行为判据全部照旧通过（它们不经过这个调用点），而生产变成**静默空转**：三个代理环境
+    // 变量一个没删、dispatcher 没换、启动日志一行不打。deps 是**测试接缝**，生产调用点
+    // 结构上不许出现在这个实参位上。
+    expect(calls[0]?.argCount, '生产调用点不得传第三个实参（deps 是测试接缝，不是生产参数）').toBe(2)
 
     const lines = callLines(main, ['loadLayeredEnv', 'enforceDirectTransport', 'boot'])
     const envLoad = lines.get('loadLayeredEnv')?.[0]
@@ -325,8 +381,14 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
     // 自检：判据本身要能抓住两种"掏空"形态，且不误伤换行改写。
     const canonical = "const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)\n"
     expect(findEnforcementCalls(canonical)).toEqual([
-      { conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY' },
+      { conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY', argCount: 2 },
     ])
+    // 第三实参 no-op：B-1 的最小反例，必须被计到实参个数上。
+    const withDeps = "const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY, { enforceNodeTransport: async () => 'not-requested', stripEnvironment: () => [] })\n"
+    expect(findEnforcementCalls(withDeps)[0]?.argCount).toBe(3)
+    expect(findEnforcementCalls(withDeps)[0]?.argCount, 'three-argument call must not satisfy the two-argument criterion').not.toBe(2)
+    // 显式 `undefined` 也占一个实参位（同一条禁止：接缝不许出现在生产调用表达式里）。
+    expect(findEnforcementCalls("await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY, undefined)\n")[0]?.argCount).toBe(3)
     expect(findEnforcementCalls(`if (false && !SYSTEM_PROXY_POLICY.allow) {\n  ${canonical}}\n`)[0]?.conditional)
       .toBe(true)
     expect(findEnforcementCalls(`if (false) {\n  ${canonical}}\n`)[0]?.conditional).toBe(true)
@@ -339,6 +401,60 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
     // 换个"更好的"策略字面量也必须被抓（那正是把强制块绕开的另一种写法）。
     expect(findEnforcementCalls("await enforceDirectTransport(process.env, { allow: true, source: 'default' })\n")[0]?.policy)
       .toBeUndefined()
+  })
+})
+
+/**
+ * 真机探针（`yarn probe:proxy`）的两条 `resolveProxy === 'DIRECT'` 判据必须读**请求之后**
+ * 的读数（2026-09-26 复审 B-2）。
+ *
+ * 探针本身不进 `yarn check`（要显示器），所以把"读数位置"这一条做成源码级判据：
+ * 请求前的读数是 Chromium 代理配置解析**之前**的初始化值（恒 DIRECT），把开关改名成
+ * Chromium 不认的 `no-proxy-servers` 之后那条断言**照旧 ok**（"只有另外 4 条红"）——
+ * 也就是说 B1-05 报告里"探针会断言 resolveProxy 为 DIRECT"这条覆盖声明是虚的。
+ * 判据不依赖文本顺序（用 AST 的字符位置），改名/换行都不会误伤。
+ */
+describe('真机探针的判据位置（B-2）', () => {
+  const probeApp = read('packages/host/desktop/scripts/proxy-policy-probe-app.mjs')
+  const probe = read('packages/host/desktop/scripts/proxy-policy-probe.mjs')
+
+  it('两条 resolveProxy 判据读数都排在第一次真实请求之后', () => {
+    const file = ts.createSourceFile(
+      'proxy-policy-probe-app.mjs', probeApp, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS,
+    )
+    const resolveAt: number[] = []
+    const fetchAt: number[] = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+        if (node.expression.name.text === 'resolveProxy') resolveAt.push(node.getStart(file))
+        if (node.expression.name.text === 'fetch') fetchAt.push(node.getStart(file))
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    expect(resolveAt.length, '探针必须读 resolveProxy（defaultSession + partition）').toBeGreaterThanOrEqual(2)
+    expect(fetchAt.length, '探针必须真的发请求（否则"直连"没有证据）').toBeGreaterThan(0)
+    const firstRequest = Math.min(...fetchAt)
+    const afterRequest = resolveAt.filter(at => at > firstRequest)
+    // 回退到"请求前读"（= 把读数搬回 fetch 循环之上、删掉请求后的那两次）⇒ 这里是 0 ⇒ 红。
+    expect(afterRequest.length, '判据读数必须在至少一次真实请求之后（请求前恒为 DIRECT）')
+      .toBeGreaterThanOrEqual(2)
+  })
+
+  it('探针的 check 只消费请求后的字段，请求前的读数仅作诊断', () => {
+    // 正向两条判据必须读 `appliedResult.resolveDefault`（请求后），不是 `…Before`。
+    expect(probe).toMatch(
+      /check\('resolveProxy\(defaultSession\) === DIRECT[^']*', appliedResult\.resolveDefault === 'DIRECT'/u,
+    )
+    expect(probe).toMatch(
+      /check\('resolveProxy\(partition\) === DIRECT[^']*', appliedResult\.resolvePartition === 'DIRECT'/u,
+    )
+    const judgedBefore = probe.split('\n')
+      .filter(line => line.includes('check(') && line.includes('resolveDefaultBefore'))
+    expect(judgedBefore, '请求前的读数只能进诊断文案，不能进 check 判据').toEqual([])
+    // 对照侧的自校准：对照已经证明请求到了代理，读数若仍 DIRECT 就判探针无判别力。
+    expect(probe).toContain('对照请求真的到了代理')
+    expect(probe).toMatch(/check\('对照 resolveProxy 是 PROXY[^']*',\s*\n?\s*controlResult\.resolveDefault !== 'DIRECT'/u)
   })
 })
 
@@ -356,13 +472,15 @@ interface EnforcementCall {
   readonly env: string | undefined
   /** 第二个实参的标识符（传字面量/别的对象时为 undefined）。 */
   readonly policy: string | undefined
+  /** 实参个数（生产调用点必须是 2：deps 是测试接缝，不许出现在这个实参位上）。 */
+  readonly argCount: number
 }
 
 /**
  * 找 `enforceDirectTransport(<env>, <policy>)` 调用点。
  * @param source - TypeScript 源码。
  * @param fileName - 诊断与 ScriptKind 判定用。
- * @returns 每个调用点。
+ * @returns 每个调用点（含实参个数）。
  */
 function findEnforcementCalls(source: string, fileName = 'main.ts'): EnforcementCall[] {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
@@ -378,6 +496,7 @@ function findEnforcementCalls(source: string, fileName = 'main.ts'): Enforcement
             ? `${env.expression.text}.${env.name.text}`
             : env.getText(file),
         policy: policy !== undefined && ts.isIdentifier(policy) ? policy.text : undefined,
+        argCount: node.arguments.length,
       })
     }
     ts.forEachChild(node, visit)

@@ -7,7 +7,7 @@ import {
   type MacSmokeVerificationOptions,
 } from '../scripts/verify-mac-smoke.ts'
 import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
-import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
+import { MAC_BUNDLE_FIXTURE_IDENTIFIER, minimalAsar, writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 
 const temporaryRoots: string[] = []
 
@@ -55,6 +55,10 @@ function options(
   const value: MacSmokeVerificationOptions = {
     distDir: '/release/dist',
     productName: 'PicoAide Harness',
+    // 期望身份**显式注入**（B-3）：不注入时缺省会去读工作树里那份 gitignored 的
+    // `build/channel.json`，一次渠道构建残留就让本文件红一片，且被说成"产物声称了另一个
+    // 身份"。取值就是夹具写入的缺省身份，所以正向用例仍然自洽。
+    expectedIdentifier: MAC_BUNDLE_FIXTURE_IDENTIFIER,
     listDmgs: () => ['/release/dist/PicoAide Harness-2.0.1.dmg'],
     makeMountPoint: () => '/private/tmp/dsh-desktop-dmg-smoke-test',
     run: (command, args) => { calls.push({ command, args: [...args] }) },
@@ -185,12 +189,75 @@ describe('macOS DMG smoke artifact verification', () => {
   })
 
   it('rejects a bundle whose CFBundleIdentifier is not the identity this build declares', () => {
-    // 产物身份（B1-02）：冒烟判据自己必须把 `packagedAppId()` 传进包内一致性判据。
-    // 变异：调用点退回 `assertMacBundleConsistency(appPath)` ⇒ 本用例红（错身份的包被放过）。
+    // 产物身份（B1-02/B-3）：冒烟判据把**注入的**期望身份传进包内一致性判据。
+    // 变异：调用点退回 `assertMacBundleConsistency(appPath)`、或退回内联
+    // `packagedAppId()`（= 忽略注入项、去读工作树）⇒ 本用例红。
     const value = fixture({ identifier: 'com.example-vendor.other' })
     const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
 
     expectSmokeFailure(harness, 'but this build declares')
     expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
   })
+
+  it('期望身份是注入项：注入"本次构建声明的身份"以外的值必须红（可注入性判据）', () => {
+    // 反向：夹具写的是官方身份，而注入项说本次构建声明的是另一个 ⇒ 必须红。
+    // 这条同时钉住"注入项真的被用上了"，而不是被函数体里的 `packagedAppId()` 覆盖。
+    const value = fixture()
+    const harness = options({
+      makeMountPoint: () => value.root,
+      expectedIdentifier: 'com.example-vendor.harness',
+    }, value.modeOverrides)
+
+    expectSmokeFailure(harness, 'but this build declares com.example-vendor.harness')
+  })
+
+  it('把 asar 布局摘要写进日志，链接条目数在其中可见（B-5）', () => {
+    // `linkEntries` 的存在理由是"这份归档里有链接、判据没有建模它的字节账"**在日志里可见**，
+    // 而三处调用点此前都丢弃了返回值（只在测试里可见）。这里在真实调用点上断言那行日志。
+    // 变异：删掉调用点的 console.log ⇒ 本用例红。
+    const value = fixtureWithLinkedAsar()
+    const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      verifyMacSmoke(harness.value)
+      const lines = logged.mock.calls.map(call => String(call[0]))
+      const layout = lines.filter(line => line.includes('mac bundle asar layout'))
+      expect(layout, '冒烟验证必须把 asar 布局摘要打进日志').toHaveLength(1)
+      expect(layout[0]).toContain('1 link')
+      expect(layout[0]).toContain(value.appAsar)
+    } finally {
+      logged.mockRestore()
+    }
+  })
 })
+
+/** 带一条**可解**符号链接（`link → package.json`）的 `.app` 夹具。 */
+function fixtureWithLinkedAsar(): AppFixture {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-mac-smoke-linked-'))
+  temporaryRoots.push(root)
+  const appPath = join(root, 'PicoAide Harness.app')
+  writeValidMacBundle(appPath, 'PicoAide Harness', {
+    asar: minimalAsar(Buffer.from('{}'), { links: [['link', 'package.json']] }),
+  })
+  const contents = join(appPath, 'Contents')
+  const executable = join(contents, 'MacOS', 'PicoAide Harness')
+  const appAsar = join(contents, 'Resources', 'app.asar')
+  const modeOverrides = new Map<string, number>()
+  modeOverrides.set(executable, 0o755)
+  for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
+    const path = join(`${appAsar}.unpacked`, entry.path)
+    mkdirSync(join(path, '..'), { recursive: true })
+    writeFileSync(path, 'native')
+    if (entry.path.endsWith('/spawn-helper')) {
+      chmodSync(path, 0o755)
+      modeOverrides.set(path, 0o755)
+    }
+  }
+  return {
+    root,
+    infoPlist: join(contents, 'Info.plist'),
+    executable,
+    appAsar,
+    modeOverrides,
+  }
+}

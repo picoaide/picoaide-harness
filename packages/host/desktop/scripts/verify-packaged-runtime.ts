@@ -18,7 +18,7 @@ import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
-import { assertMacBundleConsistency } from './mac-bundle-consistency.ts'
+import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedAppId } from './channel-build.ts'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
@@ -38,6 +38,14 @@ export interface PackagedRuntimeContext {
   readonly packager: {
     readonly appInfo: {
       readonly productFilename: string
+      /**
+       * Electron Builder 实际收到的 `appId`（`AppInfo.get id()`）。
+       *
+       * 平台无关的产物身份判据读它（2026-09-26 复审 B-6）：mac 那一条读的是**产物**
+       * （`Info.plist` 的 `CFBundleIdentifier`），而 Windows 的 AppUserModelId /
+       * Linux 的安装标识此前**零判据**；这条读的是**配置**，两边合起来才覆盖三个平台。
+       */
+      readonly id: string
     }
     /** Launcher file name LinuxPackager pins (`dsh-plugin-desktop`); mac/win use `productFilename`. */
     readonly executableName?: string
@@ -798,7 +806,7 @@ function contextForUnpackedRoot(unpackedRoot: string): PackagedRuntimeContext {
     appOutDir = dirname(resources)
     electronPlatformName = 'linux'
   }
-  return { appOutDir, electronPlatformName, packager: { appInfo: { productFilename: '' } } }
+  return { appOutDir, electronPlatformName, packager: { appInfo: { productFilename: '', id: packagedAppId() } } }
 }
 
 /** Exercise the physical Worker emitted beside app.asar with a minimal archive. */
@@ -1733,6 +1741,20 @@ export function verifyPackagedRuntime(
   exists: FileProbe = existsSync,
   readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
+  // 平台无关的产物身份判据（2026-09-26 复审 B-6）：electron-builder 实际收到的 `appId`
+  // 必须逐字等于**本次构建声明的身份**（随包 channel.json 的 `desktop.app_id`，公共渠道
+  // 回落官方默认值）。mac 侧另有一条读**产物** `Info.plist` 的判据，而 Windows 的
+  // AppUserModelId / Linux 的安装标识此前零判据 —— 这条读**配置**，三平台都跑。
+  // 放在最前面：身份错配时先报身份，而不是让"归档里缺某个条目"掩盖真正的病根。
+  const declaredAppId = packagedAppId()
+  if (context.packager.appInfo.id !== declaredAppId) {
+    throw new Error(
+      `dsh-plugin-desktop: afterPack received appId ${JSON.stringify(context.packager.appInfo.id)} `
+      + `but this build declares ${JSON.stringify(declaredAppId)} — the packaged application would claim another `
+      + 'identity (Windows AppUserModelId / macOS LaunchServices / Linux install id); the build did not go through '
+      + 'prepareChannelPackaging() (or build/channel.json drifted from the electron-builder configuration)',
+    )
+  }
   const asarPath = resolvePackagedAsarPath(context)
   if (packagedRuntimeLayoutIsPhysical()) {
     // Explicit opt-in (`asar: false` build): the runtime is a real file tree.
@@ -1875,12 +1897,16 @@ export function verifyPackagedRuntime(
   // （macOS 上 Electron 用后者做嵌入式完整性校验，asar 被改写而 plist 未同步 = 启动即被拒）；
   // `CFBundleIdentifier` 必须逐字等于本次构建声明的应用 id（`packagedAppId()`：随包
   // channel.json 的 `desktop.app_id`，官方/公共渠道回落官方默认值）—— 身份错配的包
-  // 装上去才发现（与官方版抢 LaunchServices 身份/SSO 回调/安装覆盖）。
+  // 装上去才发现（与官方版抢 LaunchServices 身份/SSO 回调/安装覆盖）。同一条声明在
+  // **配置侧**还有一条平台无关的判据（本函数开头读 `packager.appInfo.id`，B-6）。
   // 真实 afterPack 的 appOutDir 一定存在于磁盘；单测用注入探针 + 伪路径，因此不受影响。
   if (context.electronPlatformName === 'darwin') {
     const bundleRoot = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
     if (existsSync(bundleRoot)) {
-      assertMacBundleConsistency(bundleRoot, undefined, { expectedIdentifier: packagedAppId() })
+      const bundle = assertMacBundleConsistency(bundleRoot, undefined, { expectedIdentifier: packagedAppId() })
+      // 归档布局摘要进日志（B-5）：`linkEntries` 的存在理由就是让"这份归档里有链接、
+      // 判据没有建模它的字节账"**在日志里可见**，而这里此前丢弃了返回值。
+      if (bundle.asar !== undefined) console.log(asarLayoutLogLine(asarPath, bundle.asar))
     }
   }
   verifyUnpackedPackageResolution(asarPath, asarEntries)

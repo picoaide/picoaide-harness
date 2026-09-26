@@ -35,6 +35,16 @@
  * 被引到打包中断）。**当前真实产物 0 条**，所以那时不触发；形态一旦出现（某个依赖带进
  * 符号链接）就会同时红掉 afterPack / DMG 冒烟 / DMG 发布三条路径。
  *
+ * **链接图必须可解**（2026-09-26 复审 B-4）：只把 `link` 排除出字节账并不等于判据收口 ——
+ * `@electron/asar#createPackage` **自己就能产出**自指（`x → x`）与成环（`a → b → a`）的
+ * 归档，而库的读侧 `getFile(path, followLinks: true)` 会递归解引用 ⇒ `RangeError: Maximum
+ * call stack size exceeded`；绝对路径/越界目标的符号链接会被 asar 的 `resolveLink`
+ * （`path.join(parentPath, symlink)` 再 `path.relative(src, …)`）**静默改写成包内不存在的
+ * 相对目标**。这两类形态在当时的判据下**全绿**。现在 {@link assertAsarLayout} 会按
+ * {@link AsarLinkEntry.link}（**归档根相对**路径）验证：目标不得为绝对路径/不得越出归档、
+ * 必须命中归档内真实存在的条目或目录、且链接图不得有自指或环 —— 失败一律归类为
+ * "**归档链接图不可解**"，而不是笼统的"归档损坏"。
+ *
  * @module dsh-plugin-desktop/mac-bundle-consistency
  */
 
@@ -274,7 +284,14 @@ export interface AsarLinkEntry {
   readonly path: string
   /** 条目形态判别。 */
   readonly kind: 'link'
-  /** 链接目标（包内相对路径）。 */
+  /**
+   * 链接目标 —— **归档根相对**路径（不是相对链接所在目录）。
+   *
+   * `@electron/asar` 的 `resolveLink()` 用 `path.relative(src, path.join(parentPath, symlink))`
+   * 算它，读侧 `getFile(info.link, followLinks)` / `getNode(path.join(node.link, name))`
+   * 也按归档根解析。绝对目标会被 `path.join` 静默"接"到链接所在目录之下，于是链接指向一个
+   * 包内不存在的路径（{@link assertAsarLayout} 的链接图判据会拦下这种形态）。
+   */
   readonly link: string
   /** 是否被解包到 `app.asar.unpacked`（链接指向包外时也置位）。 */
   readonly unpacked: boolean
@@ -353,7 +370,7 @@ export function parseAsarHeader(archive: Buffer, where: string): AsarHeaderLayou
       }
       // 符号链接条目：与 `unpacked` 同级的"不参与铺满等式"形态（见模块头注释）。
       // 只在这里分类，**不**给它编造 size/offset —— 编造出来的 NaN 会把合法归档
-      // 报成"size 非法"（B1-01）。
+      // 报成"size 非法"（B1-01）。目标的可解性/无环性由 `assertAsarLinkGraph` 判（B-4）。
       const rawLink = record['link']
       if (rawLink !== undefined) {
         if (typeof rawLink !== 'string') {
@@ -399,7 +416,15 @@ export function asarHeaderDigest(archive: Buffer, where: string): string {
   return createHash('sha256').update(parseAsarHeader(archive, where).json).digest('hex')
 }
 
-/** asar 布局自检结论。 */
+/**
+ * 符号链接条目数（合法形态，**不参与**铺满等式：它没有 size/offset）。
+ *
+ * 单独计数的理由是让"这份归档里有链接、判据没有建模它的**字节账**"在日志里可见，
+ * 而不是让它静默消失或变成一句"size 非法"。图面（目标存在性 / 自指 / 成环 / 越界）由
+ * {@link assertAsarLayout} 的链接图判据负责，字节账仍然不建模 —— 三个调用点用
+ * {@link asarLayoutLogLine} 把这一行打进日志（2026-09-26 复审 B-5：此前三个调用点
+ * 都丢弃返回值，这条承诺只在测试里兑现）。
+ */
 export interface AsarLayoutSummary {
   /** 归档字节数。 */
   readonly archiveBytes: number
@@ -409,13 +434,104 @@ export interface AsarLayoutSummary {
   readonly packedEntries: number
   /** 打包进归档的字节合计。 */
   readonly packedBytes: number
-  /**
-   * 符号链接条目数（合法形态，**不参与**铺满等式：它没有 size/offset）。
-   *
-   * 单独计数是为了让"这份归档里有链接、判据没有建模它的字节账"在日志里可见，
-   * 而不是让它静默消失或变成一句"size 非法"。
-   */
+  /** 符号链接条目数（见接口说明）。 */
   readonly linkEntries: number
+}
+
+/**
+ * 把一个链接目标解析成规范的归档根相对路径。
+ *
+ * asar 的 `link` 已经是归档根相对路径，这里只做规范化与越界判定：
+ *   * 绝对路径（`/…`）⇒ 不可解：`@electron/asar` 的 `resolveLink()` 会把它 `path.join`
+ *     到链接所在目录之下再取相对，于是头部里留下的是一个**永远不会被写出来**的目标；
+ *   * `..` 走到根之上 ⇒ 不可解（库在写入期就拒收 `..`，但头部可以是手写/被改写的）；
+ *   * 空目标 / 只剩 `.` ⇒ 不可解。
+ * @param target - 头部里的 `link` 原文。
+ * @returns 规范路径，或 undefined（不可解）。
+ */
+function resolveAsarLinkTarget(target: string): string | undefined {
+  if (target === '' || target.startsWith('/') || target.startsWith('\\')) return undefined
+  const segments: string[] = []
+  for (const part of target.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (segments.length === 0) return undefined
+      segments.pop()
+      continue
+    }
+    segments.push(part)
+  }
+  return segments.length === 0 ? undefined : segments.join('/')
+}
+
+/**
+ * 断言归档的**链接图**可解：目标在包内、命中真实条目或目录、且没有自指/环。
+ *
+ * 为什么必须单独判（2026-09-26 复审 B-4）：`@electron/asar#createPackage` 自己就能产出
+ * 自指与成环的归档，而库的读侧 `getFile(path, followLinks: true)` 是递归解引用 ⇒
+ * `RangeError: Maximum call stack size exceeded`；绝对/越界目标则被静默改写成包内不存在的
+ * 相对路径。三类形态当时在布局判据下**全绿**。这里的失败文案一律点名"链接图不可解"
+ * （不是"归档损坏"）—— 排障方向完全不同：前者是打包树的符号链接形态问题，后者是归档字节问题。
+ * @param entries - 已展开的条目表。
+ * @param where - 诊断用的来源描述。
+ * @throws 目标不可解 / 悬空 / 自指 / 成环时抛错。
+ */
+function assertAsarLinkGraph(entries: readonly AsarEntry[], where: string): void {
+  const present = new Set<string>()
+  const links = new Map<string, string>()
+  for (const entry of entries) {
+    if (entry.kind === 'link') links.set(entry.path, entry.link)
+    else present.add(entry.path)
+    // 目录也算"存在"：链接可以指向目录（读侧 `getNode` 会拼上子名再解析）。
+    for (let at = entry.path.indexOf('/'); at !== -1; at = entry.path.indexOf('/', at + 1)) {
+      present.add(entry.path.slice(0, at))
+    }
+  }
+  // 失败分类 = "归档链接图不可解"（不是"归档损坏"）：失败文案由这一处构造，避免四处漂移。
+  const unresolvable = (path: string, detail: string): Error => new Error(
+    `mac-bundle-consistency: ${where} entry ${path} ${detail} — the archive link graph is unresolvable `
+    + '(asar writes such links as an in-package path that does not exist, and follows self-referential or '
+    + 'cyclic links recursively until the reader overflows its stack)',
+  )
+  const resolved = new Map<string, string>()
+  for (const [path, raw] of links) {
+    const target = resolveAsarLinkTarget(raw)
+    if (target === undefined) {
+      throw unresolvable(path, `links to ${JSON.stringify(raw)}, which is absolute or escapes the archive root`)
+    }
+    if (target === path) throw unresolvable(path, `links to itself (${JSON.stringify(raw)})`)
+    if (!present.has(target) && !links.has(target)) {
+      throw unresolvable(path, `links to ${JSON.stringify(raw)} (= ${target}), which does not exist inside the archive`)
+    }
+    resolved.set(path, target)
+  }
+  for (const start of links.keys()) {
+    const seen = new Set<string>([start])
+    let cursor = resolved.get(start)
+    while (cursor !== undefined) {
+      if (cursor === start) throw unresolvable(start, `participates in a link cycle (${[...seen, cursor].join(' → ')})`)
+      if (seen.has(cursor)) break
+      seen.add(cursor)
+      cursor = resolved.get(cursor)
+    }
+  }
+}
+
+/**
+ * 把一次 asar 布局自检的结论写成一行可检索的日志。
+ *
+ * `linkEntries` 单独计数的理由就是让"这份归档里有链接、判据没有建模它的**字节账**"在
+ * **日志里可见**；三个调用点（DMG 冒烟 / DMG 发布 / afterPack）此前都丢弃了
+ * `assertMacBundleConsistency` 的返回值，于是那条承诺只在测试里兑现（2026-09-26 复审 B-5）。
+ * 现在三处都把这行打出来，唯一实现留在这里（两处各写一份拼接就会漂移）。
+ * @param where - 被检查的归档路径。
+ * @param summary - {@link assertAsarLayout} 的结论。
+ * @returns 单行正文（不含换行）。
+ */
+export function asarLayoutLogLine(where: string, summary: AsarLayoutSummary): string {
+  return `mac bundle asar layout ${where}: ${String(summary.entries)} entries, `
+    + `${String(summary.packedEntries)} packed (${String(summary.packedBytes)} B tiled), `
+    + `${String(summary.linkEntries)} link, ${String(summary.archiveBytes)} B total`
 }
 
 /**
@@ -426,10 +542,11 @@ export interface AsarLayoutSummary {
  *
  * **符号链接条目（`kind === 'link'`）与 `unpacked` 条目都不进这三条等式**（前者的字节
  * 不在数据区里，后者在 `app.asar.unpacked` 里）—— 但它们仍然进 `entries` 总数，
- * 并由 {@link AsarLayoutSummary.linkEntries} 如实报出。
+ * 并由 {@link AsarLayoutSummary.linkEntries} 如实报出；链接条目的**图面**（目标存在性、
+ * 自指、成环、绝对/越界目标）另由 {@link assertAsarLinkGraph} 判（B-4）。
  * @param archive - 整个 `app.asar` 的字节。
  * @param where - 诊断用的来源描述。
- * @returns 布局统计（供调用方打日志）。
+ * @returns 布局统计（供调用方用 {@link asarLayoutLogLine} 打日志）。
  */
 export function assertAsarLayout(archive: Buffer, where: string): AsarLayoutSummary {
   const { entries, dataStart } = parseAsarHeader(archive, where)
@@ -478,6 +595,8 @@ export function assertAsarLayout(archive: Buffer, where: string): AsarLayoutSumm
       `mac-bundle-consistency: ${where} does not tile its data region: header ends at ${String(dataStart)} + ${String(packedBytes)} B of entries = ${String(tiled)}, archive is ${String(archive.length)} B (delta ${String(archive.length - tiled)})`,
     )
   }
+  // 布局自洽之后再看链接图：目标必须在包内命中、且不得自指/成环（B-4）。
+  assertAsarLinkGraph(entries, where)
   return { archiveBytes: archive.length, entries: entries.length, packedEntries, packedBytes, linkEntries }
 }
 

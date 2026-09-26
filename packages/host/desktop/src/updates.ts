@@ -72,6 +72,22 @@ const DEFAULT_CHECK_RETRY_DELAYS_MS: number[] = [2_000, 8_000, 20_000]
  */
 const DEFAULT_TRANSFER_RETRY_DELAYS_MS: number[] = [2_000, 8_000, 20_000, 30_000, 30_000]
 
+/**
+ * 缺省重试表的**导出视图**（判据用；值即上面两个常量）。
+ *
+ * 为什么要单独导出（2026-09-26，⑦）：这两个表是"缺键 ⇒ 有重试"这条语义的**唯一**
+ * 载体 —— `.default()` 一旦丢失，Schemastery 会把缺键数组物化成 `[]`，而消费者用
+ * `.length + 1` 当尝试次数 ⇒ 生产变成 `maxAttempts = 1`（**完全没有重试**）且全程
+ * 静默。判据必须能对"生产装配形态下重试几次"这件事断言，而不是只调函数，
+ * 所以把表本身暴露出来给判据对拍。
+ */
+export const DEFAULT_UPDATE_RETRY_DELAYS_MS = {
+  /** 清单检查的缺省退避表。 */
+  check: Object.freeze([...DEFAULT_CHECK_RETRY_DELAYS_MS]) as readonly number[],
+  /** 安装包传输的缺省退避表。 */
+  transfer: Object.freeze([...DEFAULT_TRANSFER_RETRY_DELAYS_MS]) as readonly number[],
+} as const
+
 /** 退避抖动比例的缺省值:确定性抖动,只用于避免所有客户端同一毫秒重试。 */
 const DEFAULT_RETRY_JITTER_RATIO = 0.25
 
@@ -111,9 +127,19 @@ export interface Config {
    * Backoff before each manifest-check retry, in milliseconds (index 0 = after the
    * first failure). The list length also sets the attempt budget: one initial
    * attempt plus one retry per entry.
+   *
+   * **缺键 ⇒ 缺省表**（`.default(DEFAULT_UPDATE_RETRY_DELAYS_MS.check)`）；
+   * **显式 `[]` ⇒ 不重试**（`maxAttempts = 0 + 1 = 1`），这是有意保留的正当配置
+   * （排障/受控环境里"快速失败"），由 `tests/update-retry-defaults.spec.ts` 钉住。
+   * 两者的区别是 2026-09-26 ⑦ 的关键：Schemastery 把**缺键的数组物化成 `[]`**，
+   * 所以少了 `.default()` 就会被静默读成"显式关闭重试"。
    */
   checkRetryDelaysMs: number[]
-  /** Backoff before each installer-transfer retry; the list length is the retry budget. */
+  /**
+   * Backoff before each installer-transfer retry; the list length is the retry budget。
+   *
+   * 与 {@link checkRetryDelaysMs} 同口径（缺键 ⇒ 缺省表；显式 `[]` ⇒ 不重试）。
+   */
   transferRetryDelaysMs: number[]
   /**
    * 安装包传输"无字节进展"多久算停滞（毫秒，B-08，2026-09-23 审计 P1）。
@@ -193,6 +219,35 @@ function isRetriableDownloadFailure(cause: unknown): boolean {
 }
 
 /**
+ * 从**已校验**的 Config 算出两条重试策略（清单检查 / 安装包传输）。
+ *
+ * 为什么抽出来（2026-09-26，⑦）：`maxAttempts = 表长 + 1` 这条换算以前只有 `apply()`
+ * 内部一处**不可达**的实现，判据只能自己重写同一个公式（"两侧各写一份字面量"＝判据
+ * 与实现可以各自漂移）。现在 `apply()` 与判据共用这一个换算点，于是
+ * "生产装配形态（`desktop-updates` 行没有 `config`）下重试几次"可以被直接断言。
+ * @param config - `Config(...)` 归一化之后的策略值。
+ * @returns 两条 `UpdateRetryPolicy`。
+ */
+export function retryPoliciesFromConfig(config: Config): {
+  readonly check: UpdateRetryPolicy
+  readonly transfer: UpdateRetryPolicy
+} {
+  // 重试预算 = 首次尝试 + 每个延迟项一次重试(见 Config 的字段说明)。
+  return {
+    check: {
+      maxAttempts: config.checkRetryDelaysMs.length + 1,
+      delaysMs: config.checkRetryDelaysMs,
+      jitterRatio: config.retryJitterRatio,
+    },
+    transfer: {
+      maxAttempts: config.transferRetryDelaysMs.length + 1,
+      delaysMs: config.transferRetryDelaysMs,
+      jitterRatio: config.retryJitterRatio,
+    },
+  }
+}
+
+/**
  * Register effect-scoped update polling and its dynamic tray command.
  *
  * 流程(2026-09-12 定案):检查 → **后台静默下载** → 下载完成后才提示安装。
@@ -204,17 +259,7 @@ function isRetriableDownloadFailure(cause: unknown): boolean {
  */
 export function apply(ctx: Context, config: Config): void {
   const adapter = ctx.desktopRuntime.updates
-  // 重试预算 = 首次尝试 + 每个延迟项一次重试(见 Config 的字段说明)。
-  const checkRetry: UpdateRetryPolicy = {
-    maxAttempts: config.checkRetryDelaysMs.length + 1,
-    delaysMs: config.checkRetryDelaysMs,
-    jitterRatio: config.retryJitterRatio,
-  }
-  const transferRetry: UpdateRetryPolicy = {
-    maxAttempts: config.transferRetryDelaysMs.length + 1,
-    delaysMs: config.transferRetryDelaysMs,
-    jitterRatio: config.retryJitterRatio,
-  }
+  const { check: checkRetry, transfer: transferRetry } = retryPoliciesFromConfig(config)
   ctx.effect(() => {
     let disposed = false
     let checking = false

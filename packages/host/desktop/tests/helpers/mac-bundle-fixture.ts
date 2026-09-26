@@ -24,13 +24,31 @@ export interface MinimalAsar {
   readonly digest: string
 }
 
+/** 夹具**缺省写入**的 bundle id（= 官方身份，与 `packagedAppId()` 的缺省回落同值）。 */
+export const MAC_BUNDLE_FIXTURE_IDENTIFIER = 'ai.deepseek.dsh.desktop'
+
+/** `minimalAsar` 的可选项。 */
+export interface MinimalAsarOptions {
+  /**
+   * 额外的**符号链接条目**（`[路径, 归档根相对目标]`）。
+   *
+   * 存在的理由（2026-09-26 复审 B-4/B-5）：自指 / 成环 / 悬空目标三类链接形态必须能被
+   * 判据咬到，而 `@electron/asar#createPackage` 真能产出前两类 —— 夹具要能造出这三种头部。
+   * 链接不占数据区（`insertLink` 不写 size/offset），所以铺满等式不受影响。
+   */
+  readonly links?: ReadonlyArray<readonly [string, string]>
+}
+
 /**
- * 造一份布局自洽的最小 asar（单个 `package.json` 条目）。
+ * 造一份布局自洽的最小 asar（单个 `package.json` 条目，可选若干符号链接）。
  * @param data - 归档内唯一文件的字节（缺省 `{}`）。
+ * @param options - 额外的链接条目。
  * @returns 归档字节与头部摘要。
  */
-export function minimalAsar(data: Buffer = Buffer.from('{}')): MinimalAsar {
-  const json = Buffer.from(JSON.stringify({ files: { 'package.json': { size: data.length, offset: '0' } } }), 'utf8')
+export function minimalAsar(data: Buffer = Buffer.from('{}'), options: MinimalAsarOptions = {}): MinimalAsar {
+  const files: Record<string, unknown> = { 'package.json': { size: data.length, offset: '0' } }
+  for (const [path, target] of options.links ?? []) files[path] = { link: target }
+  const json = Buffer.from(JSON.stringify({ files }), 'utf8')
   const padded = Buffer.alloc(Math.ceil(json.length / 4) * 4)
   json.copy(padded)
   const nested = 4 + padded.length
@@ -103,7 +121,7 @@ export function writeValidMacBundle(
     // DOCTYPE 省略 SYSTEM 标识：判据只需要能跳过 DOCTYPE，而 Apple 的 DTD URL 属未登记域名。
     '<?xml version="1.0" encoding="UTF-8"?>\n'
     + '<plist version="1.0">\n<dict>\n'
-    + `\t<key>CFBundleIdentifier</key>\n\t<string>${options.identifier ?? 'ai.deepseek.dsh.desktop'}</string>\n`
+    + `\t<key>CFBundleIdentifier</key>\n\t<string>${options.identifier ?? MAC_BUNDLE_FIXTURE_IDENTIFIER}</string>\n`
     + `\t<key>CFBundleExecutable</key>\n\t<string>${executable}</string>\n`
     + `\t<key>CFBundleIconFile</key>\n\t<string>${iconFile}</string>\n`
     + `\t<key>CFBundleName</key>\n\t<string>${productName}</string>\n`

@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +22,7 @@ import { createPackageWithOptions, getRawHeader } from '@electron/asar'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  asarLayoutLogLine,
   assertAsarLayout,
   assertMacBundleConsistency,
   asarHeaderDigest,
@@ -242,6 +243,82 @@ describe('assertAsarLayout', () => {
     const archive = syntheticAsar({ files: { 'a.txt': entry(10, 0), link: { link: 7 } } }, data)
     expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/malformed link target/u)
   })
+
+  // ── 链接图（B-4）──────────────────────────────────────────────────────────────
+  // 只把 link 排除出字节账并不等于判据收口：`@electron/asar#createPackage` **自己就能产出**
+  // 自指（x→x）与成环（a→b→a）的归档，而库的读侧 `getFile(path, followLinks: true)` 是
+  // 递归解引用 ⇒ `RangeError: Maximum call stack size exceeded`；绝对/越界目标会被
+  // `resolveLink()`（`path.join(parentPath, symlink)` 再 `path.relative(src, …)`）静默改写成
+  // 包内不存在的相对目标。三类形态当时在布局判据下**全绿**。
+  // 失败分类必须是"归档链接图不可解"（打包树里的符号链接形态问题），不是"归档损坏"。
+  it('接受可解的链接链（link → file、link → link → file）', () => {
+    const data = Buffer.alloc(4, 7)
+    const chain = syntheticAsar(
+      { files: { 'a.txt': entry(4, 0), one: { link: 'a.txt' }, two: { link: 'one' } } },
+      data,
+    )
+    expect(assertAsarLayout(chain, 'fixture')).toMatchObject({ packedEntries: 1, linkEntries: 2 })
+    // 指向**目录**也合法（读侧 `getNode` 会拼上子名再解析）。
+    const toDirectory = syntheticAsar(
+      { files: { dir: { files: { 'a.txt': entry(4, 0) } }, link: { link: 'dir' } } },
+      data,
+    )
+    expect(assertAsarLayout(toDirectory, 'fixture').linkEntries).toBe(1)
+  })
+
+  it('自指链接（x → x）判为链接图不可解', () => {
+    const data = Buffer.alloc(4, 7)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(4, 0), x: { link: 'x' } } }, data)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/links to itself/u)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/link graph is unresolvable/u)
+  })
+
+  it('成环链接（a → b → a）判为链接图不可解', () => {
+    const data = Buffer.alloc(4, 7)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(4, 0), a: { link: 'b' }, b: { link: 'a' } } }, data)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/link cycle/u)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/link graph is unresolvable/u)
+  })
+
+  it('绝对目标与越界（`..`）目标判为链接图不可解', () => {
+    const data = Buffer.alloc(4, 7)
+    const absolute = syntheticAsar({ files: { 'a.txt': entry(4, 0), x: { link: '/etc/hostname' } } }, data)
+    expect(() => assertAsarLayout(absolute, 'fixture')).toThrow(/absolute or escapes the archive root/u)
+    const escaping = syntheticAsar({ files: { 'a.txt': entry(4, 0), x: { link: '../outside' } } }, data)
+    expect(() => assertAsarLayout(escaping, 'fixture')).toThrow(/absolute or escapes the archive root/u)
+  })
+
+  it('目标在包内不存在时判为链接图不可解（asar 对绝对目标的实际改写形态）', () => {
+    // 真机形态：源树里的 `/etc/hostname` 被 `resolveLink()` 改写成 `etc/hostname` 之类
+    // **包内不存在**的相对目标 —— 头部看起来完全合法（不是绝对路径、不越界），读侧却永远
+    // 找不到目标。这是 B-4 里"绝对路径指向包外、判据也绿"的那一条。
+    const data = Buffer.alloc(4, 7)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(4, 0), x: { link: 'etc/hostname' } } }, data)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/does not exist inside the archive/u)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/link graph is unresolvable/u)
+  })
+
+  it('真 asar 打包器产出的自指/成环归档被拦下（判据与现实形态一致）', async () => {
+    // 关键前提（V5 实测）：`createPackageWithOptions` **真的**能产出这两种归档，
+    // 所以"不可能出现"不是不建模的理由。
+    const root = temporaryRoot();
+    for (const [name, links] of [['self', ['x']], ['cycle', ['a', 'b']]] as const) {
+      const source = join(root, name)
+      mkdirSync(source, { recursive: true })
+      writeFileSync(join(source, 'a.txt'), 'a')
+      if (links.length === 1) symlinkSync('x', join(source, 'x'))
+      else {
+        symlinkSync('b', join(source, 'a'))
+        symlinkSync('a', join(source, 'b'))
+      }
+      const asarPath = join(root, `${name}.asar`)
+      await createPackageWithOptions(source, asarPath, {})
+      const archive = readFileSync(asarPath)
+      // 打包成功（形态确实存在），而判据必须红。
+      expect(() => assertAsarLayout(archive, asarPath)).toThrow(/link graph is unresolvable/u)
+      expect(parseAsarHeader(archive, asarPath).entries.some(entry => entry.kind === 'link')).toBe(true)
+    }
+  })
 })
 
 describe('assertMacBundleConsistency', () => {
@@ -377,20 +454,42 @@ describe('assertMacBundleConsistency', () => {
   it('三处调用点都必须把本次构建声明的身份传进判据（注释掉/换字面量即红）', () => {
     // 为什么是 AST 而不是 `toContain`：文本判据对"注释掉调用"与"换个字面量"两个方向都失效
     // （本仓 tests/profile-context-wiring.spec.ts 的模块头记录过同形事故）。这里直接找
-    // `assertMacBundleConsistency(...)` 调用节点，并要求第 3 个实参是
-    // `{ expectedIdentifier: packagedAppId() }`。
+    // `assertMacBundleConsistency(...)` 调用节点，并要求第 3 个实参里的 `expectedIdentifier`
+    // 取到**本次构建声明的身份**。
+    //
+    // 2026-09-26 复审 B-3 修订：两条 mac 验证脚本的取值从内联 `packagedAppId()` 改成
+    // **注入项** `options.expectedIdentifier`（缺省仍由 `defaultOptions()` 喂
+    // `packagedAppId()`）—— 内联时这条判据不可注入，单测只能去读工作树里那份 gitignored 的
+    // `build/channel.json`，一次渠道构建残留就让 mac 单测红 4 条且被说成"产物声称了另一个
+    // 身份"。afterPack 那一处没有"单测注入"的问题（它的 context 由 electron-builder 给），
+    // 继续直读 `packagedAppId()`。
     const here = dirname(fileURLToPath(import.meta.url))
-    for (const name of ['verify-mac-smoke.ts', 'verify-mac-release.ts', 'verify-packaged-runtime.ts']) {
+    const expectedPerFile: Record<string, string> = {
+      'verify-mac-smoke.ts': 'options.expectedIdentifier',
+      'verify-mac-release.ts': 'options.expectedIdentifier',
+      'verify-packaged-runtime.ts': 'packagedAppId()',
+    }
+    for (const [name, expression] of Object.entries(expectedPerFile)) {
       const source = readFileSync(join(here, '..', 'scripts', name), 'utf8')
       const expected = findExpectedIdentifierCalls(source, name)
       expect(expected, `${name} 必须恰好有一处 assertMacBundleConsistency 调用`).toHaveLength(1)
-      expect(expected[0]?.factory, `${name} 必须传 { expectedIdentifier: packagedAppId() } —— 否则产物身份零判据（B1-02）`)
-        .toBe('packagedAppId')
+      expect(expected[0]?.factory, `${name} 必须传 { expectedIdentifier: ${expression} } —— 否则产物身份零判据（B1-02/B-3）`)
+        .toBe(expression)
+    }
+    // 两条 mac 脚本的**缺省值**仍必须走 `packagedAppId()`（生产行为逐字不变）。
+    for (const name of ['verify-mac-smoke.ts', 'verify-mac-release.ts']) {
+      const source = readFileSync(join(here, '..', 'scripts', name), 'utf8')
+      expect(source, `${name} 的缺省身份必须来自 packagedAppId()`).toContain('expectedIdentifier: packagedAppId(),')
     }
 
     // 自检：判据本身要能区分"注释掉"与"语义等价的换行"。
     const canonical = "assertMacBundleConsistency(appPath, undefined, { expectedIdentifier: packagedAppId() })\n"
     expect(findExpectedIdentifierCalls(canonical, 'x.ts')).toHaveLength(1)
+    expect(findExpectedIdentifierCalls(canonical, 'x.ts')[0]?.factory).toBe('packagedAppId()')
+    expect(findExpectedIdentifierCalls(
+      "assertMacBundleConsistency(appPath, undefined, { expectedIdentifier: options.expectedIdentifier })\n",
+      'x.ts',
+    )[0]?.factory).toBe('options.expectedIdentifier')
     expect(findExpectedIdentifierCalls(`// ${canonical}`, 'x.ts')).toEqual([])
     expect(findExpectedIdentifierCalls("assertMacBundleConsistency(appPath)\n", 'x.ts'))
       .toEqual([{ factory: undefined }])
@@ -398,6 +497,24 @@ describe('assertMacBundleConsistency', () => {
       "assertMacBundleConsistency(\n  appPath,\n  undefined,\n  { expectedIdentifier: packagedAppId() },\n)\n",
       'x.ts',
     )).toHaveLength(1)
+  })
+
+  it('把 asar 布局摘要写成一行（链接条目数在日志里可见的理由，B-5）', () => {
+    // `linkEntries` 单独计数的**唯一**理由是让"这份归档里有链接、判据没有建模它的字节账"
+    // 在日志里可见；三个调用点曾经都丢弃返回值 ⇒ 那条承诺只在测试里兑现。
+    // 这里钉住那行日志的内容（三个调用点各自"真的打了这行"由各自的 spec 断言）。
+    const data = Buffer.alloc(4, 7)
+    const archive = syntheticAsar(
+      { files: { 'a.txt': entry(4, 0), link: { link: 'a.txt' } } },
+      data,
+    )
+    const summary = assertAsarLayout(archive, '/tmp/app.asar')
+    const line = asarLayoutLogLine('/tmp/app.asar', summary)
+    expect(line).toContain('/tmp/app.asar')
+    expect(line).toContain('2 entries')
+    expect(line).toContain('1 packed')
+    expect(line).toContain('1 link')
+    expect(line.split('\n')).toHaveLength(1)
   })
 })
 
@@ -412,7 +529,7 @@ function headerDigest(header: object): string {
  * 在语法树上找（注释不是节点 ⇒ 注释掉的调用"不存在"；换行/折行不改变 AST ⇒ 等价改写仍能找到）。
  * @param source - TypeScript 源码。
  * @param fileName - 诊断与 ScriptKind 判定用。
- * @returns 每个调用点的取值表达式标识符（没传/传了别的形态时为 undefined）。
+ * @returns 每个调用点的取值表达式文本（没传/传了别的形态时为 undefined）。
  */
 function findExpectedIdentifierCalls(source: string, fileName: string): Array<{ factory: string | undefined }> {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
@@ -425,8 +542,13 @@ function findExpectedIdentifierCalls(source: string, fileName: string): Array<{ 
         for (const property of argument.properties) {
           if (!ts.isPropertyAssignment(property)) continue
           if (!ts.isIdentifier(property.name) || property.name.text !== 'expectedIdentifier') continue
-          if (ts.isCallExpression(property.initializer) && ts.isIdentifier(property.initializer.expression)) {
-            factory = property.initializer.expression.text
+          // 取值形态两种：调用（`packagedAppId()`）与点号访问（`options.expectedIdentifier`）。
+          // 两者都用**源码文本**回报（注入项的引入见 B-3），字面量仍然回报 undefined。
+          const initializer = property.initializer
+          if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression)) {
+            factory = `${initializer.expression.text}()`
+          } else if (ts.isPropertyAccessExpression(initializer) && ts.isIdentifier(initializer.expression)) {
+            factory = `${initializer.expression.text}.${initializer.name.text}`
           }
         }
       }

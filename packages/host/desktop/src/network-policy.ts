@@ -212,7 +212,10 @@ async function loadUndici(): Promise<NodeDispatcherModule> {
   return await import('undici') as unknown as NodeDispatcherModule
 }
 
-/** {@link enforceDirectTransport} 的注入接缝（生产用缺省实现，测试注入替身）。 */
+/**
+ * {@link enforceDirectTransport} 的注入接缝（**只给测试用**；生产调用点必须省略它，
+ * 由 AST 判据要求实参个数恰好为 2）。
+ */
 export interface DirectTransportEnforcementDeps {
   /** 撤销 Node 的 env-proxy dispatcher（缺省 {@link enforceDirectNodeTransport}）。 */
   readonly enforceNodeTransport?: (env: NodeJS.ProcessEnv) => Promise<NodeTransportOutcome>
@@ -241,6 +244,14 @@ export interface DirectTransportEnforcement {
  * 后 18/18 全绿、真机探针也不经过这段控制流 ⇒ Node 栈与子进程侧的代理剥离可以静默失效。
  * 抽成可调用函数后，"执行过一次 ⇒ 副作用真的发生"变成注入假 deps 就能断言的行为判据。
  *
+ * `deps` 是**测试接缝**，不是生产参数（2026-09-26 复审 B-1）：判据全部注入 deps 时，
+ * "缺省值是不是真实现"在单测里完全不可见 —— 把两个 `??` 的右侧换成 no-op、或在
+ * `main.ts` 的调用点上多喂一个 no-op 第三实参，都会让生产**静默空转**（三个代理环境
+ * 变量一个没删、dispatcher 没换、启动日志一行不打）而门禁全绿。现在的两道闸：
+ *   * 缺省路径本身有一条**不注入 deps** 的行为判据（`tests/network-policy.spec.ts`
+ *     直接断言 dispatcher 的对象身份变了、环境变量真被删了）；
+ *   * 生产调用点的 AST 判据要求**实参个数恰好为 2**。
+ *
  * 顺序有语义（每一步都依赖**删除前**的环境）：
  *  1. {@link enforceDirectNodeTransport}：Node 在**启动时**按 `NODE_USE_ENV_PROXY` 装好了
  *     走代理的全局 dispatcher，只能是换掉它（旧行为的判据也要在这个变量被删之前读）；
@@ -250,7 +261,7 @@ export interface DirectTransportEnforcement {
  *     `scrubbedParentEnv()` 从 `process.env` 派生，删掉代理名它们才真正直连。
  * @param env - 通常是 `process.env`（第 3 步**原地修改**它）。
  * @param policy - {@link resolveSystemProxyPolicy} 的结果。
- * @param deps - 注入接缝（测试替身）。
+ * @param deps - 注入接缝（**只给测试用**；生产调用点不得传第三个实参，见函数头）。
  * @returns 执行结论；**策略允许代理时一个副作用都不产生**（`enforced: false`）。
  */
 export async function enforceDirectTransport(

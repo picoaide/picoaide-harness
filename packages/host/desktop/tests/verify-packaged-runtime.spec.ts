@@ -66,7 +66,11 @@ import {
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
+import { packagedAppId } from '../scripts/channel-build.ts'
 
+// 上下文里的 `appInfo.id` 一律取自 `packagedAppId()`（= 本次构建声明的身份）：afterPack
+// 现在有一条**平台无关**的身份判据读它（2026-09-26 复审 B-6）。两侧同源 ⇒ 本文件不依赖
+// 工作树里有没有渠道构建残留（有残留时两边一起变，断言仍然成立）。
 function context(
   appOutDir: string,
   electronPlatformName: string,
@@ -76,7 +80,7 @@ function context(
     appOutDir,
     electronPlatformName,
     ...(arch === undefined ? {} : { arch }),
-    packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+    packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
   }
 }
 
@@ -198,6 +202,40 @@ function verifyWithBrandStub(
 ): void {
   verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG)
 }
+
+describe('平台无关的产物身份判据（B-6）', () => {
+  // 2026-09-26 复审 B-6：产物身份此前只落在 mac（读产物 Info.plist）。Windows 的
+  // appId 会进 AppUserModelId（任务栏分组/通知归属/快捷方式身份），Linux 上至少是配置面，
+  // 两边都零判据。这条判据读 **electron-builder 实际收到的配置**（`packager.appInfo.id`），
+  // 三个平台都跑；与 mac 产物侧那条（声明/配置/产物三面）互为补集。
+  it('appInfo.id 与本构建声明的身份不一致时立刻拒包（三平台同判）', () => {
+    for (const electronPlatformName of ['linux', 'win32', 'darwin']) {
+      const runtimeContext: PackagedRuntimeContext = {
+        appOutDir: '/build',
+        electronPlatformName,
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: 'com.example-vendor.harness' } },
+      }
+      expect(
+        () => verifyPackagedRuntime(runtimeContext, () => [], () => false, () => BRAND_SVG),
+        `${electronPlatformName} 上的身份错配必须拒包`,
+      ).toThrow(/received appId "com\.example-vendor\.harness" but this build declares/u)
+    }
+  })
+
+  it('身份一致时不因这条判据拒包（否则它会把所有平台都判红）', () => {
+    // 反向对照：用同一份上下文、只把 id 换成正确值 —— 仍然会因为归档不存在而抛错，
+    // 但**不能**是身份那条错。判据本身要有区分度，不能"恒红"。
+    const runtimeContext = context('/build', 'linux')
+    let caught: unknown
+    try {
+      verifyPackagedRuntime(runtimeContext, () => [], () => false, () => BRAND_SVG)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).not.toContain('would claim another identity')
+  })
+})
 
 describe('归档里每个 lib/*.js 的相对 import 都必须在包里（2026-09-22 补）', () => {
   // 为什么要有它：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是人维护的清单，2026-09-22 审计
@@ -1839,7 +1877,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         electronPlatformName,
         arch: 1,
         packager: {
-          appInfo: { productFilename: 'PicoAide Harness' },
+          appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
           executableName: 'dsh-plugin-desktop',
         },
       }
@@ -1858,17 +1896,17 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'linux',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' }, executableName: 'dsh-plugin-desktop' },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() }, executableName: 'dsh-plugin-desktop' },
       })).toEqual([join('/build', 'dsh-plugin-desktop'), join('/build', 'PicoAide Harness')])
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'darwin',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' }, executableName: 'dsh-plugin-desktop' },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() }, executableName: 'dsh-plugin-desktop' },
       })).toEqual([join('/build', 'PicoAide Harness.app', 'Contents', 'MacOS', 'PicoAide Harness')])
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'win32',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })).toEqual([join('/build', 'PicoAide Harness.exe')])
     })
 
@@ -1882,7 +1920,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       const candidates = resolvePackagedLauncherCandidates({
         appOutDir,
         electronPlatformName: 'darwin',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })
       expect(candidates).toContain(join(macosDir, 'White Label Harness'))
 
@@ -1893,7 +1931,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(resolvePackagedLauncherCandidates({
         appOutDir: linuxDir,
         electronPlatformName: 'linux',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })).toContain(join(linuxDir, 'renamed-launcher'))
     })
 
@@ -2031,7 +2069,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         electronPlatformName,
         arch: 1,
         packager: {
-          appInfo: { productFilename: 'PicoAide Harness' },
+          appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
           executableName: 'dsh-plugin-desktop',
         },
       }
@@ -2152,7 +2190,7 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
       electronPlatformName,
       arch: 1,
       packager: {
-        appInfo: { productFilename: 'PicoAide Harness' },
+        appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
         executableName: 'dsh-plugin-desktop',
       },
     }
