@@ -1948,3 +1948,27 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
 其**实质内容已在本台账 §7.56–§7.60 逐条记录**（每条含文件:行、判据命令与输出、变异结论），
 代码修复本身已入库，因此不影响交付结论；但"按泳道回看原始报告"的可复现性在本机**不再成立**
 （需从提交信息与本节重建）。后续轮次请优先清理 `gocache` 与副本、保留 `REPORT.md` 与 `probe/`。
+
+#### §7.61.6 主控独立复核（不依赖泳道自述的三条）
+
+审计纪律要求"子代理自述不得作为唯一证据"。以下三条由主控**亲自读源码行/跑命令**确认，与泳道结论独立：
+
+1. **Z2-01 成立，且仓库里已存在"只修了一半"的先例** —— 读 `packages/host/enterprise/src/bootstrap.ts`：
+   `sync()` 在 `await getBootstrap(session)` 之后连续做 3 次 `ctx.settings.update/replace`
+   （`LLM_DEEPSEEK_NS` / `AGENT_DEFAULT_MODEL_NS` / `WEB_SEARCH_DEEPSEEK_NS`，后者写入
+   `${session.serverURL}/v1`），**全程没有任何"还是不是同一位"的判定**。
+   而**同一个函数**的 catch 分支里已经写着第二十二轮的收口注释：
+   「R22-V1-N3（同族收口）：`session` 是**订阅那一刻**的那一份，而 `sync` 里有 await ——
+   期间用户可能已经重新登录。无条件 `clear()` 会把新登录一起清掉 ⇒ 由会话服务判定'还是不是同一位'」
+   并调用 `ctx.picoSession.clearIfCurrent(session.token)`。
+   ⇒ **上一轮的正确推理只应用到了错误路径，成功路径原样保留**。这使修复方向无歧义：
+   把 `clearIfCurrent` 的同一位判定提升为**每个 await 之后**的通用守卫，四条投影共用一份实现。
+2. **Z2-02 成立（源码行级）** —— `packages/host/desktop/src/debug-switches.ts:123`：
+   `if (!argument.startsWith('--')) return undefined`。单横线形态在**第一行**就被判成"不是开关"。
+   Z2 另给了真机对照（无开关 0 个 DevTools 监听 / `-remote-debugging-port=9339` ⇒
+   `DevTools listening on ws://127.0.0.1:9339/…`）。
+   ⇒ 本条是**第二十五轮 FIX-28 的覆盖面缺口**，不是新缺陷类型。
+3. **Z3-4 成立（逐字对拍）** —— `.github/workflows/ci.yml:3-5` 的 `on:` 只有 `pull_request` 与 `push`；
+   而 `site/src/content/docs/deployment/channels.md:58` 与
+   `site/src/content/docs/en/deployment/channels.md:62` 两张表格都把 `workflow_dispatch`
+   写成"预发 tag 想提前拿品牌渠道包"的**唯一**途径。文档与实现漂移，零实现。
