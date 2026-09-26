@@ -391,8 +391,9 @@ func ParseRetentionMonths(v string) (int, error) {
 // 修法：**枚举实际存在的关系**（事实），不按名字猜连续性（假设）。
 type usageMonthTables struct {
 	// Partitions 是挂在 usage 下（**传递地**：直接分区、二级/多级子分区都算）的
-	// **叶子**月分区（relispartition=true 且 relkind='r'），按关系名升序 ——
-	// 升序即时间升序（YYYYMM）。
+	// **叶子**月分区（relispartition=true 且 relkind='r'）。**名字形态不参与判据**
+	// （R25-F27：季度 `usage_2026q3`、整年 `usage_2026` 等异名叶子同样在这里，
+	// 归属由声明边界推导 —— 见 reclaimMonths）；为兼容既有调用点仍按关系名升序。
 	//
 	// R7-A（P1）：判据从"直接父是 usage"改成**传递根是 usage**。多级布局
 	// `usage → usage_<YYYY> → usage_<YYYYMM>` 里的孙辈叶子同样是 usage 明细的
@@ -409,10 +410,13 @@ type usageMonthTables struct {
 	// usage` 会读到子分区里的行），所以清理必须与叶子分区走**同一条**路径
 	// （先补账再 DETACH+DROP，见 CleanupUsageRetention）。
 	AttachedNonLeaf []string
-	// Orphans 是名为 usage_<YYYYMM> 但**不**是 usage 后代的关系（F11 的 DETACH
+	// Orphans 是名为 `usage_*` 但**不**是 usage 后代的关系（F11 的 DETACH
 	// 残留、被手工换成 VIEW 的异常形态、独立的二级分区父表…）。它们没有分区
 	// 身份，但同样占着名字：留着会让该月的新写入撞同名关系而失败，所以清理
 	// 必须一并处理。
+	//
+	// 名字形态同样不参与判据（R25-F27）：异名孤儿照常进桶，归属由边界推导；
+	// 边界读不懂时回落到名字，两者都不成立（例如 `usage_monthly`）才不参与保留期。
 	//
 	// 这一定义是**金额安全**的前提：孤儿补账走 `usage ∪ 孤儿` 的 UNION ALL，
 	// 只有"该关系不在 usage 之下"时两边才**不相交**（否则同一行算两遍、账本
@@ -464,6 +468,14 @@ type usageRelationShape struct {
 	// 临界区的**输入**，所以随形态一起传（零值 ⇒ 按关系名的名义月，见
 	// reclaimUsagePartitionAtomically 的兼容分支）。
 	ReclaimWindow retentionWindow
+	// Bound 是声明边界原文（`pg_get_expr(c.relpartbound, c.oid)`；非分区关系为空串）。
+	//
+	// R25-F27（第二十五轮审计 P1）：月份归属的**事实**来源 —— 保留期回收此前只认
+	// "关系名是六位数字月"，异名叶子（usage_2026q3 / usage_2026）永远不被枚举，
+	// 于是永不被回收。现在归属先看边界（reclaimMonths → usageBoundMonths），
+	// 名字只在边界读不懂时兜底。与 probeUsagePartition 读的是**同一个表达式**，
+	// 两处不会分叉。
+	Bound string
 }
 
 // attachedToUsage 报告该关系是不是 usage 的**后代分区**（传递祖先：直接分区、
@@ -619,6 +631,11 @@ ORDER BY a.attnum`, rel)
 // usageMonthRelationOf 解析关系名 usage_<YYYYMM>，返回该月（UTC 月首）与是否合法。
 // 严格六位数字 + 合法月号：名字像 usage_2026（年）+ 后缀、或 usage_daily_2026
 // 这类兄弟关系一律不参与月分区判定。
+//
+// R25-F27（第二十五轮审计 P1）之后它只是**名字回退**，不再是保留期归属的唯一判据：
+// 月份归属首先取**边界事实**（usageRelationShape.reclaimMonths → usageBoundMonths），
+// 只有在边界读不懂（普通表 / DEFAULT / MINVALUE..MAXVALUE / 非 RANGE）时才回落到
+// 这里。异名叶子（usage_2026q3 / usage_2026）在边界可读时**不再**需要过这个名字判据。
 func usageMonthRelationOf(rel string) (time.Time, bool) {
 	const prefix = "usage_"
 	if !strings.HasPrefix(rel, prefix) {
@@ -648,28 +665,68 @@ func usageMonthRelationOf(rel string) (time.Time, bool) {
 	return time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC), true
 }
 
-// scanUsageMonthTables 枚举 public 模式下全部名为 usage_<YYYYMM> 的关系，分成
+// usageLedgerRelation 报告该关系是不是**永久账本**（`usage_daily[_<YYYY>]` /
+// `usage_monthly`）：它们是扫描的**排除项**，不是候选。
+//
+// 保留期（settings usage.retention_months）按定义只作用于**明细**月分区：账本是
+// "明细被删之后仍然要能出报表"的那一份，全仓不存在任何回收路径（见 scanUsageMonthTables
+// 的既有裁决）。这条判据与"边界读不懂 ⇒ 不回收"（usageRelationShape.reclaimMonths）
+// 是两道**互不替代**的闸门：前者按关系身份排除，后者按"没有事实就不动手"兜底。
+func usageLedgerRelation(rel string) bool {
+	if rel == "usage_daily" || rel == "usage_monthly" {
+		return true
+	}
+	return strings.HasPrefix(rel, "usage_daily_")
+}
+
+// scanUsageMonthTables 枚举 public 模式下全部名为 `usage_*` 的关系，分成
 // 「真分区」与「孤儿」两桶（见 usageMonthTables 的说明）。
 //
-// **有意排除 usage_daily_***（R11A-06，P3，**有意不回收，不是漏做**）：永久账本
-// `usage_daily` / `usage_monthly` **没有任何回收路径**，全仓不存在
-// `DELETE FROM usage_daily` / `DROP TABLE …usage_daily…`。保留期（settings
-// `usage.retention_months`）按定义只作用于**明细**月分区 —— 账本是"明细被删之后
-// 仍然要能出报表"的那一份（见 rebuildUsageLedgerRowsFrom 的注释）。
+// **有意排除永久账本**（`usage_daily` / `usage_daily_<YYYY>` / `usage_monthly`，
+// 见 usageLedgerRelation）：永久账本 `usage_daily` / `usage_monthly` **没有任何
+// 回收路径**，全仓不存在 `DELETE FROM usage_daily` / `DROP TABLE …usage_daily…`。
+// 保留期（settings `usage.retention_months`）按定义只作用于**明细**月分区 ——
+// 账本是"明细被删之后仍然要能出报表"的那一份（见 rebuildUsageLedgerRowsFrom 的注释）。
 // 后果如实认账：账本行数按 (user, model, day) 无界增长（年分区**个数**有界，行数
 // 无界），磁盘随"用户数 × 模型数 × 天数"单调增长。
 // 为什么不在本次修：给它加保留期是**产品决策**（"报表能回溯多久"），不是缺陷修复
 // —— 顺手加一条回收会让历史报表静默变短，正是本仓反复登记的"静默少计"形态。
 // 已登记在 temp/r11/fix-I4/REPORT.md 的"需主控决策"一节。
 //
+// R25-F27（第二十五轮审计 P1，**修复的是过滤口径本身**）：此前的过滤是"关系名必须
+// 是六位数字月"（`usageMonthRelationOf`），于是 DBA 预建的**异名叶子**分区
+// （`usage_2026q3` / `usage_2026` —— 仓库自带用例
+// `audit_r24_wide_partition_read_test.go` 把这两种命名逐字判为**合法且必须支持**）
+// 被 `continue` 丢出全部三个桶 ⇒ 既不 DETACH/DROP、也不进 unreclaimed / skip_reasons /
+// 失败计数：保留期到了也不删，而 `/readyz` 全绿（真 PG 最小反例：`usage_2020q1` +
+// retention_months=1 + CleanupUsageRetention ⇒ 明细行留在盘上、`failed_rounds=0`、
+// `unreclaimed=[]`，而同轮规范命名 `usage_202001` 被正常 DROP）。
+// 现在过滤只排除**永久账本**（该过滤的唯一立意就是它），月份归属改由**边界事实**
+// 推导（usageRelationShape.Bound + reclaimMonths，复用 partitions.go 的同一份
+// 边界解析，不新写第二份名字解析）。
+//
 // 只读一次 catalog（pg_class + pg_inherits）：比旧实现逐月一条查询更省往返，
 // 且判据是**事实**（枚举）而不是**假设**（名字连续）—— R4-C-8 的根因正是后者。
+//
+// ⚠️ **本查询必须对任何关系锁都立刻返回**（R25-F27 实测踩到并修掉）：
+// `pg_get_expr(c.relpartbound, c.oid)` 会**打开关系**（ACCESS SHARE）——
+// 与 probeUsagePartitionBudget 注释里 R10-D-02 记录的是同一个危害。本函数是清理轮的
+// **第一步**，没有任何等锁预算，而 `PUT /api/server/admin/…` 是**同步**调用
+// `CleanupUsageRetention` ⇒ 只要有一个会话对任一月分区持 ACCESS EXCLUSIVE
+// （`TestAuditR12N2SingleContentionDoesNotStall` 的现场），整轮会**无界**挂住
+// （真 PG 实测：25 分钟超时，query 就停在这条 SELECT）。
+// 因此这里传 **relid = 0**：实测（TZ=UTC/Asia-Shanghai 两种会话 × 月/季度/整年/
+// 错界/DEFAULT/LIST/多列 七种边界）`pg_get_expr(bound, 0)` 与 `…, c.oid)` 的输出
+// **逐字节相同**，且**不取任何关系锁**。文本本身随会话 TimeZone 渲染（`+00` / `+08`），
+// 但 parsePartitionBoundLiteral 按**绝对瞬时**解析，两种渲染等价；
+// DateStyle 非 ISO 的部署会让解析失败 ⇒ 回落到名字（保守，不会误删）。
 func scanUsageMonthTables(db *sql.DB) (usageMonthTables, error) {
 	rows, err := db.Query(`SELECT c.relname, COALESCE(p.relname, ''), c.relispartition, c.relkind,
        (SELECT count(*) FROM pg_inherits ch WHERE ch.inhparent = c.oid),
        CASE WHEN c.relispartition THEN COALESCE(root.relname, '') ELSE '' END,
        COALESCE(c.relispartition AND pg_partition_root(c.oid) = to_regclass('public.usage'), false),
-       COALESCE(p.oid = to_regclass('public.usage'), false)
+       COALESCE(p.oid = to_regclass('public.usage'), false),
+       CASE WHEN c.relispartition THEN COALESCE(pg_get_expr(c.relpartbound, 0), '') ELSE '' END
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
@@ -683,14 +740,14 @@ ORDER BY c.relname`)
 	defer rows.Close()
 	out := usageMonthTables{Shapes: map[string]usageRelationShape{}}
 	for rows.Next() {
-		var rel, parent, kind, root string
+		var rel, parent, kind, root, bound string
 		var isPartition, attached, directParent sql.NullBool
 		var children int
-		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root, &attached, &directParent); err != nil {
+		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root, &attached, &directParent, &bound); err != nil {
 			return usageMonthTables{}, err
 		}
-		if _, ok := usageMonthRelationOf(rel); !ok {
-			continue // usage_daily_2026 之类的兄弟关系
+		if usageLedgerRelation(rel) {
+			continue // 永久账本（usage_daily* / usage_monthly）：不在保留期的对象之内
 		}
 		shape := usageRelationShape{
 			Kind:      kind,
@@ -703,6 +760,13 @@ ORDER BY c.relname`)
 			// R10-A-07:直接父同样按 **oid** 比较（与上面同源同事实）。
 			DirectParentUsage: directParent.Valid && directParent.Bool,
 			Children:          children,
+			// R25-F27:声明边界原文（非分区关系为空串）。月份归属的**事实**来源，
+			// 与 probeUsagePartition 读的是**同一个表达式**（relid=0 的 pg_get_expr，
+			// 见函数头注释：`…, c.oid)` 会打开关系、让整轮无界等锁）。
+			Bound: bound,
+		}
+		if !shape.candidateForRetention(rel) {
+			continue // 不属于保留期的对象面（见 candidateForRetention 的两条入选路径）
 		}
 		out.Shapes[rel] = shape
 		if shape.attachedToUsage() {
@@ -716,6 +780,116 @@ ORDER BY c.relname`)
 		out.Orphans = append(out.Orphans, rel)
 	}
 	return out, rows.Err()
+}
+
+// usageBoundMonths 把分区边界的**声明区间**投影成"被覆盖的北京月"闭区间
+// [first, last]（R25-F27）。
+//
+// 复用 partitions.go 的边界解析（splitRangeBound + parsePartitionBoundLiteral），
+// 不新写第二份名字/边界解析 —— 与"覆盖判据只有一份实现"
+// （descendantLeafCoversWindow）同一条纪律。
+//
+// 读不懂（非 RANGE 字面量 / DEFAULT / MINVALUE..MAXVALUE / 非分区关系）⇒ ok=false：
+// 判据不允许建立在对边界的猜测上（调用方回落到名字解析）。
+//
+// 口径：上界是开区间，退 1ns 落到最后一个被覆盖的瞬时，再取它所在的北京月。于是
+// 恰为整月的分区得到 [m, m]（与名字口径一致），季度/整年分区得到 [首月, 末月]。
+func usageBoundMonths(bound string) (first, last time.Time, ok bool) {
+	from, to, okRange := splitRangeBound(bound)
+	if !okRange {
+		return time.Time{}, time.Time{}, false
+	}
+	_, atFrom, okF := parsePartitionBoundLiteral(from)
+	_, atTo, okT := parsePartitionBoundLiteral(to)
+	if !okF || !okT {
+		return time.Time{}, time.Time{}, false
+	}
+	first = BeijingMonth(atFrom)
+	last = BeijingMonth(atTo.Add(-time.Nanosecond))
+	if last.Before(first) {
+		return time.Time{}, time.Time{}, false
+	}
+	return first, last, true
+}
+
+// usageBoundAlignedToBeijingMonths 报告分区边界是否**恰好落在北京月界**上
+// （起止都等于某个月首的北京瞬时）。
+//
+// 这类关系持有的行必然整月落在 [first,last] 里（PG 强制分区约束），所以
+// 「相邻月并入」（foldAdjacentMonthsIntoUsage）对它没有对象；而错界/UTC 自然月
+// 边界的分区仍然需要那一步（R6-A-1 复审 §1.5-B 的实测：7 月聚合 11.00 → 1.00）。
+func usageBoundAlignedToBeijingMonths(bound string) bool {
+	from, to, ok := splitRangeBound(bound)
+	if !ok {
+		return false
+	}
+	_, atFrom, okF := parsePartitionBoundLiteral(from)
+	_, atTo, okT := parsePartitionBoundLiteral(to)
+	if !okF || !okT {
+		return false
+	}
+	return atFrom.Equal(BeijingDayInstant(dayKey(BeijingMonth(atFrom)))) &&
+		atTo.Equal(BeijingDayInstant(dayKey(BeijingMonth(atTo))))
+}
+
+// candidateForRetention 报告该关系是否进入保留期的**候选面**（R25-F27）。
+//
+// 两条入选路径（并集）：
+//  1. 名字就是我们的月分区名（`usage_<YYYYMM>`）—— **存量口径，一字未改**；
+//  2. **整月对齐 + usage 的叶子后代分区** —— R25-F27 新增的这一类：DBA 预建的
+//     季度（`usage_2026q3`）/ 整年（`usage_2026`）**叶子**分区，名字不是六位数字月，
+//     却确实是 usage 明细的来源（R24-X4 B4 之后读路径按**边界**认它们），保留期
+//     必须管它们，否则它们永不回收（本条的缺陷本体）。
+//
+// 三个限定缺一不可（本文件顶部的 R6-A-1 / R7-A / R8-A-4 族既有判据逐条钉住 ——
+// 第一版没有这三个限定，`go test ./internal/serverstore/` 有 4 条既有用例变红，
+// 已被主控 676aa2bddd 撤回；本版按这三个限定重做）：
+//   - **usage 的后代**（传递根 = public.usage）：不是后代却带可读分区边界的关系，
+//     只能是**另一棵树的分区** —— 真 DETACH 残留的 relpartbound 会被 PG 清成 NULL
+//     （实测：DETACH 后 relispartition=false / relpartbound IS NULL）。那种关系属于
+//     别人，而孤儿路径**会 DROP 表**，放它进来就是删别人的对象
+//     （既有判据：TestUsageRetentionDetachedPartitionedParentBackfillsLedgerAndSkipsDrop
+//     里那个 `usage_<月>_p1`）；
+//   - **叶子**（relkind='r' 且无子关系）：整年**父表**（`usage_2026`）放进来会被当成
+//     "整块到期的子树"回收，DROP TABLE 连带删掉孙辈叶子 —— 而 R7-A 明确要求深层
+//     后代"只补账、不 DETACH"（既有判据：
+//     TestUsageRetentionMultilevelGrandchildKeepsLivePartitionAndAmount /
+//     TestR8Fix5UsageRetentionStatusObservable）；
+//   - **整月对齐**：边界落在北京月中间的异名分区持有相邻月的行，而没有名字锚点时
+//     无法用 fold-adjacent 把它们领回（那一支按**名字月**算窗口）⇒ 不动它。
+func (s usageRelationShape) candidateForRetention(rel string) bool {
+	if _, ok := usageMonthRelationOf(rel); ok {
+		return true
+	}
+	return s.attachedToUsage() && s.leafTable() && usageBoundAlignedToBeijingMonths(s.Bound)
+}
+
+// reclaimMonths 返回该关系"被保留期管辖的北京月区间" [first, last]（R25-F27）。
+//
+// 顺序即优先级：
+//  1. **整月对齐**的分区边界 ⇒ 边界即事实，与名字形态无关。这一支让"季度/整年"
+//     等异名叶子第一次进入回收面（此前它们被名字过滤挡在外面，永远不被枚举）；
+//  2. 边界可读但**不对齐**（错界 / UTC 自然月边界）⇒ 仍按边界给出区间，但调用方
+//     只把它当"预筛"用：真正动手前有 fold-adjacent（把区间外的行并回 usage 的
+//     对应月份分区）与持锁复检两道闸门 —— 这也是存量语义；
+//  3. 边界读不懂（普通表 / DEFAULT / MINVALUE..MAXVALUE / 非 RANGE）⇒ 回落到**名字**
+//     解析的存量语义：名字恰是六位数字月 ⇒ 该月；否则该关系不参与保留期管辖
+//     （`usage_monthly` 这类永久账本、人工建的非分区同名对象都走这一支）。
+func (s usageRelationShape) reclaimMonths(rel string) (first, last time.Time, ok bool) {
+	if m, okName := usageMonthRelationOf(rel); okName {
+		// 存量口径**一字未改**：名字就是锚点。错界分区由 fold-adjacent 兜底；
+		// "更宽但名字取首月"的分区按名字月判定（R6-A-1 复审 §1.5-B 的既有判据
+		// 钉住这个行为：它必须被回收，且被它覆盖的每个月的金额都要补进账本）。
+		return m, m, true
+	}
+	// 只有候选判据的第二条入选路径会走到这里。区间 = 声明边界覆盖的北京月；
+	// 判据月由调用方取**区间末月**（整块到期才动手，见 CleanupUsageRetention）。
+	if s.leafTable() {
+		if first, last, okBound := usageBoundMonths(s.Bound); okBound {
+			return first, last, true
+		}
+	}
+	return time.Time{}, time.Time{}, false
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1806,13 @@ func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) retentionWindow 
 	// R11A-01：声明边界窗口先记下来（它是"补账窗口的上界"，账本关系按它预建）。
 	// 与下面"窗口 = 该月 ∪ 声明边界"的扩窗**不是**同一件事：那一步只在形态不
 	// 就绪时发生，而这一步无论形态是否就绪都要有值。
+	//
+	// R25-F27：更宽分区（季度/整年）上"形态就绪"判据（partitionReadyErr →
+	// verifyPartitionBound）是**覆盖**语义、对它通过，所以这里记下来的
+	// boundFrom/boundTo 是**整块分区**的窗口 —— 临界区按它备 usage_daily 年分区
+	// （reclaimUsagePartitionAtomically 的第二处 ensureRetentionLedgerRelations），
+	// 结算段再按 rel 的**实际行**重算补账窗口（usageReclaimWindowUnderLock）。
+	// 两者合起来保证"整块 DROP 之前每个月都被补过账"。
 	if boundFrom, boundTo, ok := splitRangeBound(probe.Bound); ok {
 		if _, at, okF := parsePartitionBoundLiteral(boundFrom); okF {
 			win.boundFrom = BeijingDay(at)
@@ -1641,12 +1822,19 @@ func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) retentionWindow 
 			win.boundTo = BeijingDay(at.Add(-time.Nanosecond))
 		}
 	}
-	// exact 只在**叶子分区**且边界恰等于名义北京月时为真：二级分区（relkind='p'）
-	// 的覆盖范围无法由父分区的边界一次证明 —— PG 允许子分区的区间超出父分区
-	// （实测：`CREATE TABLE child PARTITION OF parent FOR VALUES FROM (…) TO (…)`
-	// 不校验包含关系），所以"父分区边界正确"推不出"子树里没有别的月的行"。
-	// 这类关系必须按**行**核对（与孤儿同一口径）。
-	win.exact = probe.RelKind == 'r' && partitionBoundIsExactMonth(probe.Bound, m)
+	// exact 只在**叶子分区**且边界**恰好落在北京月界**上时为真（R25-F27：判据从
+	// "恰好等于名义月"放宽到"整月对齐的任意跨度"）。
+	//
+	// 为什么放宽：`!exact` 那一支的动作是「相邻月并入」（把区间外的行搬回 usage 的
+	// 对应月份分区）—— 它的前提是"该关系可能持有区间外的行"。整月对齐的边界不可能
+	// 违反这个前提（PG 强制分区约束 ⇒ 行必然整月落在 [first,last] 里）；反倒是不
+	// 对齐的边界**必须**保留那一支：下界落在北京月中间的错界分区持有"上一个月末尾
+	// 那几小时"的行，而 `win.boundFrom` 只能取到**日**粒度（BeijingDay），少掉的那
+	// 一段要靠 detailMonthsOutside + fold 领回（R6-A-1 复审 §1.5-B 的实测：不并入
+	// 就是"7 月聚合 11.00 → 1.00"）。
+	// 二级分区（relkind='p'）**仍然** exact=false：PG 允许子分区区间超出父分区，
+	// "父分区边界对齐"推不出"子树里没有别的月的行"。
+	win.exact = probe.RelKind == 'r' && usageBoundAlignedToBeijingMonths(probe.Bound)
 	if serr := partitionReadyErr(usageMonthPartitionSpec(m), probe); serr == nil {
 		return win
 	} else {
@@ -1671,6 +1859,10 @@ func retentionLedgerWindow(db *sql.DB, rel string, m time.Time) retentionWindow 
 // partitionBoundIsExactMonth 报告分区边界原文是否**恰好**是某个北京月窗口
 // （可解析 + 逐值相等）。读不懂 / DEFAULT / MINVALUE..MAXVALUE 一律 false ——
 // 判据不建立在对边界的猜测上，"不是确切的北京月"就要按行核对相邻月明细。
+//
+// R25-F27：判据的**实现**搬到了 usageBoundAlignedToBeijingMonths（放宽到"整月对齐的
+// 任意跨度"，因为"窗口恰为一个月"从来不是必要条件，"行不可能落在覆盖区间之外"才是），
+// 本函数保留为"恰为该月"的窄判据供需要精确月份的调用点使用。
 func partitionBoundIsExactMonth(bound string, m time.Time) bool {
 	from, to, ok := splitRangeBound(bound)
 	if !ok {
@@ -1921,9 +2113,20 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		noteFailure(rel, op, err)
 	}
 	for _, rel := range tables.Orphans {
-		m, ok := usageMonthRelationOf(rel)
+		shape := tables.Shapes[rel]
+		// R25-F27：月份归属按**事实**推导（边界优先、名字兜底）。名字不合六位数字月
+		// 但边界可读的孤儿（DETACH 下来的季度/整年分区）此前在这里被静默丢掉 ⇒
+		// 永远不回收。判据月与 attached 路径同源（见 reclaimMonths 的说明）。
+		first, last, ok := shape.reclaimMonths(rel)
 		if !ok {
 			continue
+		}
+		// 判据月（R25-F27）：名字合法的关系 first==last（= 名字月，存量口径）；
+		// 异名整月对齐的叶子取**区间末月** —— 它只有整块都已到期才能 DROP
+		// （candidateForRetention 保证它是叶子，且它的行必然整月落在 [first,last] 里）。
+		m := first
+		if last.After(first) {
+			m = last
 		}
 		if !m.Before(cutoffMonth) {
 			// R9-D R9D-07(P2):保留期内的同名孤儿**不能删**(它的明细还在保留期内),
@@ -1939,7 +2142,6 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 					"(见 /readyz 的 write_blocked_*)")
 			continue
 		}
-		shape := tables.Shapes[rel]
 		// R7-A（P1）双保险：**落进 Orphans 桶的每一条关系**在动手之前都按 catalog
 		// 事实复检一次"它不是 usage 的后代"。孤儿补账走 `usage ∪ 孤儿` 的 UNION
 		// ALL，只有两边**不相交**时"同一行算两遍"才不成立；判据一旦回归（例如
@@ -2109,37 +2311,63 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	// 这条观测就仍然成立。所以"仍然存在的月关系" = attached ∪ orphans − 本轮删掉的。
 	// gaps 日志仍用**只看 attached** 的 `existing`（它问的是"有没有该月的**明细分区**"，
 	// 孤儿不是明细分区），两张集合因此显式分开、不互相污染语义。
+	//
+	// R25-F27：两张集合的月份改由**边界事实**推导（shape.reclaimMonths）——
+	// 一个覆盖 [2020-01, 2020-04) 的季度叶子让 1/2/3 三个月都算"有明细关系"
+	// （它确实覆盖它们；`SELECT … FROM usage` 读得到那三个月的行），而不是只记
+	// 它的名字月或末月。少记会让 clearResolvedUsageWriteState 提前清掉"该月写不进去"
+	// 的观测（假阴性），多记只会保守保留。
 	existing := make(map[string]bool, len(attached))
 	existingRelations := make(map[string]bool, len(attached)+len(tables.Orphans))
 	var oldest time.Time
 	for _, rel := range attached {
-		m, ok := usageMonthRelationOf(rel)
+		first, last, ok := tables.Shapes[rel].reclaimMonths(rel)
 		if !ok {
 			continue
 		}
-		existing[monthKey(m)] = true
-		existingRelations[monthKey(m)] = true
-		if oldest.IsZero() || m.Before(oldest) {
-			oldest = m
+		for mm := first; !mm.After(last); mm = mm.AddDate(0, 1, 0) {
+			existing[monthKey(mm)] = true
+			existingRelations[monthKey(mm)] = true
+		}
+		if oldest.IsZero() || first.Before(oldest) {
+			oldest = first
 		}
 	}
 	// 孤儿桶也进"关系仍然存在"的集合（R12-N2 P2-02）：它们名字合法、此刻确实
 	// 占着 `usage_<YYYYMM>`，只是不在 usage 分区树下 —— 写入路径正是被它们挡住的。
 	for _, rel := range tables.Orphans {
-		if m, ok := usageMonthRelationOf(rel); ok {
-			existingRelations[monthKey(m)] = true
+		first, last, ok := tables.Shapes[rel].reclaimMonths(rel)
+		if !ok {
+			continue
+		}
+		for mm := first; !mm.After(last); mm = mm.AddDate(0, 1, 0) {
+			existingRelations[monthKey(mm)] = true
 		}
 	}
 	dropped := 0
 	for _, rel := range attached {
-		m, ok := usageMonthRelationOf(rel)
+		shape := tables.Shapes[rel]
+		// R25-F27：归属按事实推导。**回收判据月**（m）的取法：
+		//   - 整月对齐的**叶子**分区（含异名的季度/整年分区）⇒ 取区间末月：只有
+		//     整块都已到期才能 DETACH+DROP —— 它不可能持有区间外的行（PG 强制边界），
+		//     所以末月到期即"全部分区行都早于保留期"；
+		//   - 其余（错界分区 / 非叶子 / 边界读不懂）⇒ 取区间首月（含名字兜底），
+		//     沿用存量口径：先过到期预筛，再由 fold-adjacent 与 subtree-retained
+		//     两个既有闸门处理"区间里还有保留期月份"的情形。
+		first, last, ok := shape.reclaimMonths(rel)
 		if !ok {
 			continue
 		}
-		if !m.Before(cutoffMonth) {
-			continue // 保留期内(名字合法但没到期)
+		// 判据月（R25-F27）：名字合法的关系 first==last（= 名字月，存量口径）；
+		// 异名整月对齐的叶子取**区间末月** —— 它只有整块都已到期才能 DROP
+		// （candidateForRetention 保证它是叶子，且它的行必然整月落在 [first,last] 里）。
+		m := first
+		if last.After(first) {
+			m = last
 		}
-		shape := tables.Shapes[rel]
+		if !m.Before(cutoffMonth) {
+			continue // 保留期内（该关系覆盖的月份都还没到期）
+		}
 		var foldErr error
 		// R5-A-9(审计 2026-09-23,P1):补账**不得要求"该月分区形态就绪"**。
 		// 旧实现在 DROP 前调 RebuildUsageLedger(内部无条件 ensureUsagePartition),
