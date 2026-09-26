@@ -2731,3 +2731,73 @@ FAIL	github.com/picoaide/picoaide/cmd/server	0.126s
    读到只读的 `/root/.cache` 报假错）；`go test ... | grep | tail -40` 把 `FAIL <pkg>` 行截掉，
    导致"39 ok / 1 FAIL 但说不出是哪一包"。**正确写法：全量日志落文件，再从文件里读判定行与退出码。**
 2. **`go vet ./...` 必须显式继承 `GOCACHE`/`GOMODCACHE`**（`/root/.cache/go-build` 只读）。
+
+---
+
+### §7.70 第二十九轮 AC2（剩余未覆盖面收尾）：**0 P0 / 3 P1 / 9 P2 / 8 P3** ⇒ 本轮不干净
+
+报告 `temp/r29/AC2/REPORT.md`（41KB）+ 三路子报告（`sub-memory` / `sub-skills` / `sub-integration`）。
+主树被跟踪文件零写入；变异全在 `git archive HEAD` 副本内做并 sha256 还原。
+**未跑**全量三件套与 `go test`（工作树非冻结 —— 同期有 FIX-44 在改 enterprise / wasm-apps-host / llmgateway），
+结论只绑 HEAD。
+
+#### §7.70.1 三条 P1
+
+1. **`integration-tests` 的 dex 腿在正确环境里结构上不可能 PASS**（判据自洽型假绿）：
+   真 Dex `/auth` 用 **302 + 相对 Location**，而 `integration-tests/dex/dex-sso-test.py:149-151`
+   把「非 http(s) 的 Location」一律当**桌面深链**直接返回 ⇒ 判据 [2] 拿到 `Found` 页、`RESULT: FAIL`。
+   补一行 `urljoin(current, location)` 后 [1][2][3] **由红转绿**（真跑日志在报告里）。
+   **而守卫用的假网关一律返回绝对 Location ⇒ 门禁永远绿。**
+2. **守卫的「运行期逐条引用」是文本存在性断言**：把 `reporter.report('deep-link-identity', …)`
+   包进 `if False:`（字面量保留）⇒ 守卫 **EXIT=0**，而同一条腿对**错误身份**的 SSO 报 `RESULT: PASS`
+   （6✓ 而非 7✓），原件对同一网关正确 FAIL。`electron-shots` 同族同样漏。
+3. **`lib/advisor/` 三处「读错误被降级成空状态、再由写路径固化」**：注入 reader 把读失败与"不存在"
+   压成同一个值（裸 `catch`），read-modify-write 以空基线回写 ⇒ 一次瞬时 EACCES 静默抹掉
+   **别的项目**的约束文本 / 评审员整段历史 / 全部待处理指令，HTTP 还回 200 `ok:true`。
+   真跑用**真实 `installAdvisor` + `setpriv` 到 nobody 造真 EACCES** 复现。
+   **同族只收口了一条**：`skills.js`（AB2-04）与 `lib/coi/` 四处都已是 ENOENT-only + throw，
+   **只有 advisor 三处没跟进**。（这是本仓第 7 次记录该形态。）
+
+#### §7.70.2 其中一条 P2 的判据面证明特别干净（值得当模板）
+
+**webadmin 权限点四向对拍的扫描根只是一个文件**：`pages/Audit.tsx:24` 就地声明
+`PERM_AUDIT_RETENTION_WRITE`（**不在 `lib/rbac.ts` 的 15 条里**），而 `nav.test.ts:153` 只解析 `rbac.ts`
+⇒ 对它零覆盖；唯一的"super_admin 不误伤"用例用的是 `{ permissions: undefined }`，
+而 `hasPermission` 非数组时**无条件放行** ⇒ 该断言**取值无关**。
+**变异实跑**：常量打错一个字符 ⇒ **整套 webadmin `50 files / 721 tests` 全绿、EXIT=0**，
+而保留策略保存按钮对**所有人（含超管）永久禁用**。
+**反向对照**：把常量搬进 `rbac.ts` 后**同一个错字** ⇒ `nav.test.ts` 当场红。
+⇒ **同一判据、同一错字，全看常量住在哪** —— 这是「判据取值域 ≠ 被守护面」最干净的一次证明
+（可当模板：**变异 + 反向对照只动"位置"这一个变量**）。
+
+#### §7.70.3 三条 P3
+
+- **`AGENTS.md:47` 的门禁自述整段过时**：写「阶段 1 跑 `dsh-plugin-desktop check` + **三个根守卫**」、
+  「`yarn prebuild` 一键构建**全部 8 个** workspace 包」。真跑：`WORKSPACE_PACKAGES.length = 13`、
+  `check-workspaces.mjs --list` = **15 个包 + 17 条 guard**，且 **15 + 17 = 32** 正好等于验收判据行的
+  `planned=32`（**两条独立口径互相对上** ⇒ 15/17 是当前真值）。
+  **变异**：把 `8` 改成 `999`，`check-doc-claims.mjs` 仍 **EXIT=0 并打印"全部与真源一致 ✅"**
+  ⇒ 该守卫对这类硬数字**两个方向都无感**。同族第二处：e2e 断言数 `AGENTS.md` 写「25」、
+  `docs/ci-and-branch-plan.md:102` 写「13 项」，而真源 `e2e-client.mjs` 有 **36 处** `reportStep(`
+  且在面板循环里 ⇒ 运行期条数不是静态常量（真实条数**未实跑**，需打包产物 + Xvfb）。
+- **连接器种子 id `example-org` 全仓代码零命中**：`server/docs/06-database.md:398` 与
+  `server/docs/03-api-reference.md:320` 仍是中性化改名前的旧 id；真种子是 `example-mcp`（迁移 0042）。
+- （另见 §7.70.2 的 P2。）
+
+#### §7.70.4 本轮"已核查为干净"（**勿重复投入**）
+
+webadmin 写面闸门「成功才解锁」**逐页扫完、无新漏收口**（Auth / Gateway / ErrorMonitoring / Balance /
+Users / Apps / Limits / Audit / Connectors / GatewayFiles / MFA / grant-dialog）；
+`npm ci --ignore-scripts` + `check-install-integrity.mjs` 覆盖安装期钩子；
+`site/` **内部链接零失效**（34 文件 / 69 路由全扫）；
+**文档端点 vs 真路由表** —— 在 HEAD 副本里真跑生产装配 `buildRouter` dump 出 **233 条真路由**
+与 220 条文档声明对拍，**17 条未命中全是解析假象或宿主插件本机路由**；
+`routes/nav/ActionLabel` 三条对拍判据本体设计良好；`dsh-memory-evolve` 在门禁里是以
+`script:'test'` **显式登记**的（非静默跳过）；`README.i18n.yaml` 双语哈希与守卫一致。
+
+#### §7.70.5 AC2 交回的"仍未覆盖的面"（19 条 / 6 组）
+
+最值得再开轮的三块：① **`hasPermission` 默认放行的"不误伤"用例是一整族** —— AC2 只证了 `Audit` 一处，
+把 webadmin 全部 `permissions: undefined` fixture 列出来逐条判"是否真在验归属"，成本极低；
+② **`electron-shots` 真机主流程 + 守卫「CI 执行面闭包」的 4 条深水区线索**（它自己点名、未逐条实跑）；
+③ **`docs/` 表格正文的描述与行为承诺**（`check-doc-claims` 结构上判不到的那一半），另附 `site/` 的 `astro build` 未跑。
