@@ -2479,3 +2479,103 @@ AA2 0 / **1** / 5 / 3；AA3 0 / **1** / 3 / 1 ⇒ **第二十七轮合计 ≥ 0 
 **FIX-35 交回的三条已知未收口**（已进 `KNOWN_UNGUARDED_ENTRIES`，双向陈旧检测 ⇒ 收口后判据会自动要求删除登记项）：
 `wasm-apps-host/src/index.ts`（异步清理无代际）、`skill-telemetry.ts`（await 后读会话）、
 `browser/src/index.ts` 的 `runSessionSwitch` 并发守卫（AA3-03，P2）。
+
+---
+
+### §7.69 第二十八轮（AB1 证伪第二十七轮批 + AB2 剩余未覆盖面）
+
+**计数**：AB1 = 修复成立 4/6，新发现 **0 P0 / 1 P1 / 3 P2 / 3 P3**；
+AB2 = **0 P0 / 0 P1 / 0 P2 / 4 P3**（**27 轮来第一条 P0/P1 干净的审计泳道**，另含两条子审计 AB2-A 的 P2，见下）。
+⇒ **第二十八轮合计 ≥ 0 P0 / 1 P1** ⇒ **不干净，收敛仍未达成**。
+AB1 锚 `bc08719a0e`（副本逐文件 sha256 与 `git show HEAD:<path>` 对拍），主树零写入。
+
+#### §7.69.1 【P1】FIX-39① 没闭合：等锁预算的**取值域缺一条语句**
+
+`server/internal/serverstore/migrate.go:770-780` 的
+`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum` **每次启动都跑**，
+却跑在**池连接**上、且在任何 `SET LOCAL lock_timeout` **之前**。
+真 PG 实测：另一会话持 `LOCK TABLE schema_migrations IN ACCESS SHARE MODE` 时，
+**预算设 2s 仍 20s+ 不返回**，`ALTER` 的 NOTICE 比 `CREATE` 晚 20s 出现
+⇒ 即使列已存在（no-op），PG 仍先取 `ACCESS EXCLUSIVE`。
+**FIX-39 自己的判据只锁 `models`，本缺陷存在时全绿** ——
+又一次"判据的取值域 ≠ 被守护面"（本轮第 4、5 次实例，见 §7.69.3）。
+修法：把这两条账本 DDL 纳入同一预算机制（与 advisory 分支同形）。
+
+#### §7.69.2 三条 P2
+
+1. **FIX-38③ 的取值域 = 一个键，而非"凭据型取值"** —— 同族第三键 `server.base_url`（"对外地址"，零校验）
+   有**两条**独立暴露路径，都真跑：
+   ① 审计行 `detail="对外地址:(空)→https://AB1USER:AB1SECRET@harness.example.com/path"`；
+   ② **更重且此前未登记**：`clientrelease.normalizeBaseURL` 返回 `strings.TrimRight(raw,"/")` **原串**
+   （只查 scheme/host，**不查 `u.User`**）⇒ userinfo 被拼进**公开未认证**端点
+   `/api/client/v2/updates/manifest` 的下载 URL：
+   `asset url = "https://AB1USER:AB1SECRET@harness.example.com/updates/client/Setup.exe"`。
+   （截稿时 `llmgateway/admin.go` 的审计面那一半已由 FIX-40 在飞；`clientrelease` 那一半仍干净 ⇒ 已派 FIX-41。）
+2. **FIX-35③ 的判据对 9 种真实语法形态不红**（副本里造真文件 + 跑判据本体；6 条正控红、9 条缺口绿）。
+   三条根因：① `successorOf` 只沿 `Block` 上溯 ⇒ **未加花括号的 `switch case`** 里，
+   await 所在语句的父节点是 `CaseClause`，判据比的是"switch **之后**那条语句"；
+   ② `terminal` 把 `break`/`continue`/裸 `return` 都算"之后无可落地语句"；
+   ③ 延迟回调白名单硬编码 5 个（`then/catch/finally/queueMicrotask/Promise`），
+   `setImmediate`/`setTimeout`/`emitter.on` 不在面内，`for await` 在 AST 里**没有 `AwaitExpression` 节点**。
+   **最危险的是 `switch` 那条**：case 内先写、switch 之后放代际比对 ⇒ 判据被满足、`findings=0`，
+   函数**读起来有守卫**。现网 4 个投影文件 + `updates.ts` 里未找到这 9 种形态的实例
+   ⇒ 属"下一次回归会静默通过"（故判 P2 而非 P1）。已派 FIX-42。
+3. **FIX-36 的同族未派**：`packages/client/account-card/src/index.ts` 的 exact 路由
+   `GET /api/pico/account/usage?refresh=1` 是状态变更 GET（立刻往返网关），
+   防护只有 `browserSameOriginMarker && isLoopbackRequest`，而 `loopback.ts` 自己写着
+   "a curl with a forged Origin passes this too"。真跑（真 apply + 真路由）：
+   伪造 Origin 的**裸 GET（无 cookie）** ⇒ `status=200 gatewayCalls=1`，**连发 5 次 = 5 次网关往返**
+   （single-flight 只挡并发不挡速率）；对照腿（无 Origin / `Sec-Fetch-Site`）403 且 0 次。
+   结构性原因：`EXACT_ROUTE_POLICY` 只从 **desktop 的 `apply()`** 收路由 ⇒ 取值域 = 一个包，
+   而 exact-vs-prefix 绕过链是**全仓形态**（cron/connectors/auth-gate/account-card 都注册 exact）。已派 FIX-41。
+
+#### §7.69.3 三条 P3 与一条结构性提示
+
+- **FIX-39③ 的回填不收敛**：`checksum=''`（空串）被读侧当"未登记"、写侧却 `WHERE checksum IS NULL`
+  ⇒ 连跑三次每次都打印 "backfilled … 1 migration(s)" 而该行**永远是空串**
+  ⇒ **该行的内容对账永久关闭**（文件被改写也不会 fail-loud）。FIX-39 的用例把整列 DROP（只有 NULL），
+  结构上测不到空串。
+- **FIX-35 的 `KNOWN_UNGUARDED_ENTRIES` "双向"只对代际协议成立**：用 FIX-34 报告自己建议的最小形态
+  （串行化 `switchChain = switchChain.then(...)`，`tsc` EXIT=0）收口 AA3-03 后，判据**仍 7/7 绿**，
+  不会要求删除登记项 —— 而 `generation`/`owns(` 这类等价机制本仓是**认可**的。
+- **FIX-38-02 的设计理由不成立**：注释把"取最左"建立在"伪造只会更严（`http, https` 只会降级）"上，
+  但**追加型代理**下客户端自带的 `https` 前缀就是最左段 ⇒ 真跑 `https, http` ⇒ `IsHTTPS=true`（**升级**）。
+  另：XFF 经 `SetTrustedProxies` 才采信、XFP **无条件采信** —— 同一对端的两个转发头用了两套信任模型。
+  未实跑边界：两层代理的真实部署没搭，后果只做到功能级 ⇒ P3。
+- **结构性提示（本仓"判据扫描根"教训的又一次实例，第 4 次）**：
+  `scripts/verify-ci-scripts.mjs` 的 `workflow_dispatch` 守卫把 `docFiles` **硬编码成两份 site 文件**，
+  而 §7.61.2-4 的原始发现面含**第三处**（`docs/decisions/2026-09-20-dsh-0.1.6-upgrade.md:293`）
+  且守卫 EXIT=0。同一句 payload 只换文件：写进受守卫文件 ⇒ EXIT=1 点名；写进 `docs/**` ⇒ EXIT=0。
+
+#### §7.69.4 AB1 证伪失败 / 已核查成立（不要再派）
+
+FIX-34 判据 15/15；**FIX-36 本体成立**（`acceptConsumingProof` 的"非 GET 方法视图"不引入语义差 ——
+`write-proof.ts:62-92` 只读 `method` 与 `headers`，签名/nonce/缓存键/方法名一概不参与；等价腿 11/11 绿）；
+**FIX-37 两项全成立** —— 真打包复刻件上 `NODE_OPTIONS` 仍被 Electron **整串拒绝**
+（`node_bindings.cc:492`，`--require` marker 一次没跑，连 `--max-old-space-size` 也被拒），
+`legacy_prefix_sweep` 首行即 `[ "$MODE" = clean ] || return 0` ⇒ push/pull 结构上到不了；
+**FIX-38-01 下载面单入口**（GET/HEAD 同一 handler，全仓 `ServeFile|ServeContent` 只剩 `clientrelease.go:223` 一处）；
+**FIX-39 的 JS↔Go 对拍是真对拍**（两侧同一目录，`check-migration-range.mjs` EXIT=0，74 个 `.sql` 逐条一致）。
+
+#### §7.69.5 AB2 的四条 P3 与子审计 AB2-A 的两条 P2
+
+AB2 主审（`temp/r28/AB2/REPORT.md`）：
+- **P3** webadmin `MemberDetail.tsx:55` 路由参数切换**不重取数**，且把上一个成员的数挂在另一个成员名下
+  （本仓"资源切换必须渲染期同步归零"规则的同族第四条）；
+- **P3** `integration-tests` 的 `SERVER_BASE` **无唯一定义**（py 腿 `rstrip`+拼接 vs node 腿
+  `new URL('/healthz',…)` 丢 path ⇒ 同一字符串一个 SKIP 一个 200）；
+- **P3** `memory-evolve/lib/skills-manager.js:320,1124` 是**同一插件里唯一没跟进"库根锚定"**的两处技能写入
+  （`grep anchorDir`：`skills.js`/`coi/skills-sync.js` 共 6 处命中，`skills-manager.js` **0 处**）；
+  探针证明第 2 档在"父目录是符号链接"时判定恒真、**真写到库外**；补锚定后全量测试仍 1140/0。
+  模块头把口径写成了散文 —— **散文不是判据**；
+- **P3** `lib/skills.js:521-534` 的 `disabledReason` 用 `catch { return undefined }` 把**读错误降级成"没禁用"**
+  ⇒ `create`/`patch` 照常落盘并返回 `ok:true`（本仓"读错误被降级成空状态、再由写路径固化"在本插件里剩下的最后一处）。
+  AB2 的降级理由（两条都**核过可达性**才判 P3）值得记：`:1124` 的 `file` 来自 `resolveInside()`（已 realpath），
+  `:320` 的父目录是真实目录（`collectRoots`/`addCustomDir` 均 realpath，且 `Dirent.isDirectory()` 对目录符号链接返回 false）。
+
+AB2-A 子审计（`.github/workflows/ci.yml`，两条 P2，详见 `temp/r28/AB2/REPORT.md` §2.1）：
+- **P2** `concurrency.group = ci-${{ github.ref }}` 只实现"同 ref 互斥"⇒ **两个不同 tag 会并发跑 `release`**，
+  而 `<channel-id>/latest.json` 跨版本共享且发布脚本**从不读回旧指针做版本比较**（最后写者赢）
+  ⇒ 慢的那个 tag 把更新指针写回**更旧**版本；注释声称"两 tag 互斥"与实现不符且零判据。
+- **P2** `pr-summary` 的 `if` 是 `always() && …`（门禁红也跑），正文却**无条件**写"全部门禁通过、可下载产物"，
+  且 `needs` 不含 `gate` ⇒ 红 PR 上机器人发**假绿评论**并列出不存在的 artifact。
