@@ -4761,9 +4761,15 @@ function truncatedHeadLength(text: string, secret: string): number {
  * 结构脱敏（内嵌 URL 的 userinfo / 敏感查询串 / fragment，实现仍是 store 的
  * `maskCredentialUrlsInText`）挂在这里、并**先于** `secrets.length === 0` 的早退 ——
  * 注入凭据窗口之外 `filledSecrets` 为空，如果放在早退之后，URL 结构脱敏就只在
- * "本 tab 注入过凭据"时生效，同一段页面文本在 eval 与 get_text 两个出口又会分叉。 */
+ * "本 tab 注入过凭据"时生效，同一段页面文本在 eval 与 get_text 两个出口又会分叉。
+ *
+ * R24 N2（2026-09-26）：这一趟走 store 的 `content` 档（**整键判定**）。默认的 `url`
+ * 档用 URL 面的**子串**词表（含 `key`/`code`/`sid`/`auth`），接进内容出口后把页面正文
+ * 里的普通查询值抹掉（`?keyword=`/`?zipcode=`/`?barcode=`/`?monkey=`/`?country_code=`/
+ * `?key=` → `****`）—— 与 R23 N3 刚修掉的"普通正文被改坏"是同一种损失，只是换了位置。
+ * 落盘面（`stripSensitiveText`/`stripSensitiveUrl`）仍用 `url` 档，逐字节不变。 */
 function redactSecretsText(secrets: readonly string[], text: string, options: RedactOptions = {}): string {
-  let out = maskCredentialUrlsInText(text)
+  let out = maskCredentialUrlsInText(text, 'content')
   if (secrets.length === 0) return out
   for (const secret of secrets) {
     if (secret === '') continue

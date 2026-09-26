@@ -33,7 +33,8 @@ export function installBroadcastApi(ctx, svc) {
   const base = '/memory-evolve/api/broadcast'
   const handler = async (req, res) => {
     // FIX-04：统一前置守卫。此前跨站页面能 POST /dissolve、/kick 操作广播房间。
-    if (await applyRequestGuard(req, res, 256 * 1024)) return
+    // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+    if (await applyRequestGuard(req, res, 256 * 1024, ctx)) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     try {

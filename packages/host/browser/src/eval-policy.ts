@@ -45,7 +45,9 @@ import acorn from './vendor/acorn.cjs'
 import { browserError } from './errors.ts'
 import { SECRET_VALUE } from './sensitive.ts'
 // EV-1：片段级 `key=value` 打码复用 store 的唯一实现（词表与 URL/摘要面同源）。
-import { maskCredentialUrlsInText, maskSensitiveKeyValueText } from './store.ts'
+// R24 N2：内容出口走 `content` 档（整键判定），否则页面正文里 `?keyword=` 会被
+// URL 面的子串词表抹掉。
+import { maskCredentialUrlsInText, maskSensitiveContentText } from './store.ts'
 
 /** Max expression length (host-side bound, far below page cost). */
 export const MAX_EVAL_EXPRESSION = 8192
@@ -888,24 +890,74 @@ function isDeclaredCredentialSpan(span: string): boolean {
 }
 
 /**
- * `Authorization` / `Proxy-Authorization` 头的**取值**（`<scheme> <credential>`）。
+ * `Authorization` / `Proxy-Authorization` 头的**整个取值**（`<scheme> <credential>`）。
  *
  * 这类键的值有两段（方案名 + 凭据），而 `maskSensitiveKeyValueText` 的 `key: value`
  * 规则在**第一个空格**处收尾 ⇒ 它擦掉的是**方案名**、真正的凭据反而落单；第二趟
  * `KEYWORD_SPAN` 这时又看不到方案名（而且 `basic` 本来就不在它的关键词表里），于是
  * `Authorization: Bearer <jwt>` 出窗时是 `Authorization: **** <jwt>` —— 凭据明文进
- * 模型上下文（2026-09-26 R22 V6 F2）。这条规则跑在片段级两趟**之前**，把整个取值
- * （含方案名）换成掩码。
+ * 模型上下文（2026-09-26 R22 V6 F2）。这条规则跑在片段级两趟**之前**，把取值整段擦掉。
  *
- * 两道门限，避免把散文改坏：
- *  - 只有**公认的认证方案**才算"这是凭据"的声明（`Authorization: none required` 这类
- *    普通取值不命中；`saml` 于 R23 N1 补入，与 `oauth2?` 同族）；
- *  - 没有方案名时仍可整体掩码，但片段要过 {@link isDeclaredCredentialSpan}（形状/长度）。
- *    方案名在场时是**无条件**声明（不再过形状门限）：`Authorization: Bearer abcdefghij`
- *    这类无数字、纯小写的句柄必须仍被擦掉 —— 关键词分支的"反散文"豁免在这里不适用，
- *    因为头名 + 认证方案已经把它标记成凭据位。
+ * R24 N1（2026-09-26）：判据从"枚举认证方案名"改为**结构判据**。R22 的实现要求取值里
+ * 出现白名单里的方案名（`bearer|basic|…|saml`）才整段擦，而没有方案名时退回"片段形状"
+ * 门限；于是**任何不在白名单里的方案名**都让凭据原样出窗：
+ *
+ *   `Authorization: SSWS AQAAANCMND8BFdERjHoAwE`   → `Authorization: **** AQAAANCMND8BFdERjHoAwE`
+ *   `Authorization: SNOWFLAKE_JWT <jwt>`           → 同上（`SNOWFLAKE_JWT` 长 13，被片段规则当成"方案名"擦掉）
+ *   `Proxy-Authorization: SSWS <token>` / 小写 `authorization: ssws <token>` → 同上
+ *
+ * 加名字不可能收敛：RFC 7235 的 auth-scheme 是任意 token，白名单永远落后一步（R23 N1
+ * 补 `saml` 就是同一修法方向的又一次补丁）。现在的判据是**头名即声明**：头名命中
+ * （大小写不敏感）就把取值整段换成 {@link MASK}，取值是不是凭据由
+ * {@link isNonCredentialAuthValue} 反向排除（占位符 / 纯散文）。
+ *
+ * 反向排除不会漏：AUTH_HEADER_VALUE 之后还有 `KEYWORD_SPAN` 与最后那一趟
+ * `key: value` 扫描，被放过的取值里紧邻头名的第一个词仍会被擦
+ * （`Authorization: Bearer <your-token>` → `Authorization: **** <your-token>`）。
  */
-const AUTH_HEADER_VALUE = /(\b(?:proxy-)?authorization\b\s*[:=]\s*["']?)(?:(?:bearer|basic|digest|token|apikey|api[_-]?key|negotiate|ntlm|oauth2?|saml)\s+)?([A-Za-z0-9_+/.=~-]{8,})/giu
+const AUTH_HEADER_VALUE = /(\b(?:proxy-)?authorization\b["']?\s*[:=]\s*["']?)([^\r\n]*)/giu
+
+/** 认证头取值尾部允许被"还原"的标点（JSON 收尾引号/括号、句子句号）。 */
+const AUTH_VALUE_TRAILERS = new Set(['"', "'", '}', ')', ']', ',', ';', '.', '`'])
+
+/**
+ * 认证头的取值是不是**明确的非凭据形态**（只有这两种才保留原样）。
+ *
+ *  - **占位符**：`<your-token>` / `<token>`（`Authorization: Bearer <your-token>`）；
+ *  - **纯散文**：去掉可能的首词（方案名）之后，剩下的每个词都是单个英文单词形状
+ *    （`none required`、`Bearer of good news`）。判定与 {@link isProseLikeSpan}
+ *    同源（`[A-Za-z][a-z]+` 且长度 < {@link PROSE_WORD_MAX_LENGTH}），所以
+ *    `hunter2`（含数字）、`AKIAIOSFODNN7EXAMPLE`（全大写）都不是散文。
+ *
+ * 其余一律按凭据整段擦（fail-closed）。取值里的首词无论保留与否都会被后续的
+ * `key: value` 扫描擦掉，所以这里放行散文不会留下"看起来已掩码、其实没擦"的形态。
+ */
+function isNonCredentialAuthValue(value: string): boolean {
+  const trimmed = value.trim()
+  if (trimmed === '') return true
+  if (isPlaceholderWord(trimmed)) return true
+  const words = trimmed.split(/\s+/u)
+  // 首个词可能是方案名（`Bearer`/`SSWS`/…）：方案名自身不是凭据材料，判定落在
+  // 它之后的取值上。
+  const rest = words.length > 1 ? words.slice(1) : words
+  return rest.length > 0 && rest.every((word) => isPlaceholderWord(word) || isProseLikeSpan(word))
+}
+
+/** 文档占位符形态（`<your-token>`/`<token>`）：不是凭据，出窗时必须逐字保留。 */
+function isPlaceholderWord(word: string): boolean {
+  return /^<[^<>\s]*>$/u.test(word)
+}
+
+/** 按 {@link isNonCredentialAuthValue} 决定整段掩码还是原样保留（保留尾部标点）。 */
+function maskAuthHeaderValue(value: string): string {
+  let end = value.length
+  while (end > 0 && AUTH_VALUE_TRAILERS.has(value[end - 1]!)) end -= 1
+  const body = value.slice(0, end)
+  const trimmed = body.trim()
+  if (trimmed === '' || isNonCredentialAuthValue(trimmed)) return value
+  const lead = body.slice(0, body.length - body.trimStart().length)
+  return `${lead}${MASK}${value.slice(end)}`
+}
 
 /**
  * `Cookie` / `Set-Cookie` 头的取值（cookie 对 `k=v`，可 `; ` 分隔多条）。
@@ -938,7 +990,7 @@ const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\
  *  2. 否则只擦片段，**四趟顺序固定为：内嵌 URL（{@link maskCredentialUrlsInText}）
  *     → 认证/cookie 头取值 → 关键词 + opaque 片段 → `key=value`/`key: value`
  *     的敏感值**（最后一趟复用 store 的唯一实现
- *     {@link maskSensitiveKeyValueText}，与 URL/摘要面同一张词表）；
+ *     {@link maskSensitiveContentText}，R24 N2 起走 `content` 档 = 整键判定）；
  *  3. 其余正文原样保留。
  *
  * **为什么是这个顺序**（2026-09-26 R22 V6 F2 / R23 N2）：`key: value` 规则在第一个
@@ -956,15 +1008,15 @@ function maskCredentialFragments(value: string): string {
   // R23 N2: 内嵌 URL 的 userinfo/查询串先擦（与标题/摘要面同一份实现
   // `store.maskCredentialUrlsInText`）。userinfo 没有键、也不含关键词，只有 URL
   // 结构能看见它；跑在最前面是因为 URL 是最具体的结构，之后的片段级规则只会
-  // 在此基础上继续**增加**掩码。
-  const urls = maskCredentialUrlsInText(value)
+  // 在此基础上继续**增加**掩码。R24 N2：这一趟走 `content` 档（整键判定），
+  // 普通查询键（`?keyword=`）在页面正文里逐字节保留。
+  const urls = maskCredentialUrlsInText(value, 'content')
   const headers = urls
-    .replace(AUTH_HEADER_VALUE, (match, key: string, scheme: string | undefined, span: string) =>
-      (scheme !== undefined || isDeclaredCredentialSpan(span)) ? `${key}${MASK}` : match)
+    .replace(AUTH_HEADER_VALUE, (_match: string, key: string, rest: string) => `${key}${maskAuthHeaderValue(rest)}`)
     .replace(COOKIE_HEADER_VALUE, (_match: string, key: string) => `${key}${MASK}`)
   const spans = headers.replace(KEYWORD_SPAN, (match, prefix: string, span: string) =>
     isDeclaredCredentialSpan(span) ? `${prefix}${MASK}` : match)
-  return maskSensitiveKeyValueText(spans)
+  return maskSensitiveContentText(spans)
 }
 
 function maskString(value: string, project?: EvalValueProjection): string {

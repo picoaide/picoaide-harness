@@ -87,6 +87,16 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
   `lib/advisor/api.js`、`lib/memory-tab.js`、`lib/notify-web.js`、`lib/coi/broadcast-api.js`、
   `lib/skills-manager.js` 等全部本地 HTTP 面挂上「只读放行、写操作要求同源 + JSON 体」的前置
   守卫（加固前 28+ 端点无同源校验）。
+- **Host 信任栅栏（2026-09-26，R24 X4-B3，`lib/http-guard.js` 的 `hostTrustFence`）**：
+  上面那条同源守卫**只**判 `Origin == Host`，而两者都可被攻击者填成同一值（DNS rebinding：
+  `Host`+`Origin` 同为 `attacker.example`、socket 是 loopback）⇒ 实跑可读全文、可删/归档记忆。
+  现在 `hostTrustFence(req, webCtx)` 是**全部 11 个注册点**（读 + 写，不只是写侧）的**第一条**
+  判据：Host 必须是 loopback 三形态或 `webRuntime.trustedHosts`（缺省 `[]`），Host 自称 loopback
+  时 socket 也须 loopback，**缺 Host 即拒**（fail-closed，403 `untrusted-host`）；
+  `localTrustFence` 复用同一份实现。**下次三方合并必须保留这一层**（它是本地新增的判据，
+  上游没有对应实现，`--theirs` 整文件取上游会把它吞掉）。同一批还改了：`lib/*` 10 个注册点
+  透传 web ctx、`lib/skills-manager.js` 走同一谓词。行为变更：局域网用**主机名**访问会 403
+  （IP 字面量照常），出路是 `--trusted-host`。回归 `tests/audit-r24-host-fence.test.js`（11 点矩阵）。
 - **写落点断言（符号链接写穿 / TOCTOU）**：`lib/sync/filesets.js` 的自锚定原子写原语
   （临时落点断言 + `O_EXCL` 按 fd 写 + rename 前后复检 + 受管仓库根基准）；同步写回（含
   runSync 三路合并路径）、归档/备份/状态文件/advisor records/固定名侧车文件全部改走它。

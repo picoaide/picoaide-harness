@@ -25,6 +25,7 @@ import { mkdirSync, readFileSync, writeFileSync, appendFileSync, renameSync, sta
 import { join } from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import {
+  isContentUrlSensitiveKey,
   isExactProseSensitiveKey,
   isExactSensitiveKey,
   isExactUrlShapedTextKey,
@@ -104,13 +105,34 @@ const DEFAULTS = {
   historyWindowMs: 90 * 24 * 60 * 60 * 1000,
 } as const
 
+/**
+ * URL 键的词表档位（2026-09-26 R24 N2）。
+ *
+ * - `url`：**落盘面**（`url` 字段、历史/书签/账本）的既有契约 ——
+ *   {@link SENSITIVE_KEY_PATTERN} 的子串语义，逐字节冻结（`?keyword=` 也命中，
+ *   因为查询串里 `key` 确实是凭据位；写入即不可逆，宁可多擦）。
+ * - `content`：**内容出口**（页面正文、快照元素文本、eval 值）—— 整键判定
+ *   （{@link isContentUrlSensitiveKey}）。这一面读的是页面正文，把
+ *   `?keyword=`/`?zipcode=`/`?barcode=`/`?monkey=`/`?country_code=`/`?key=` 的
+ *   普通取值抹掉就是"把事实改坏"。
+ *
+ * 两档共用同一个 URL 解析器、同一份文本级扫描器与同一个片段扫描器，只有键判定
+ * 不同 —— 与 `PAIR_VOCABULARY` 的三档同源，避免第二份实现漂移。
+ */
+export type UrlKeyGrade = 'url' | 'content'
+
+/** 按档位判定 URL 键是否敏感（唯一分档点）。 */
+function isSensitiveUrlKey(name: string, grade: UrlKeyGrade): boolean {
+  return grade === 'content' ? isContentUrlSensitiveKey(name) : SENSITIVE_KEY_PATTERN.test(name)
+}
+
 /** Mask secret-shaped `k=v` pairs inside a URL fragment. OAuth implicit flows
  * carry `#access_token=…`/`#code=…` there, and a query-only scrub left them in
  * cleartext on disk. Non-sensitive pairs and plain route fragments are kept
  * byte-identical (the `?`/`/` prefixes are not part of the key pattern).
  * Exported so the runtime op-log mask (`runtime.ts maskBrowserSummary`) reuses
  * this single implementation instead of keeping a second one (P1-5). */
-function maskSensitiveFragment(fragment: string): string {
+function maskSensitiveFragment(fragment: string, grade: UrlKeyGrade): string {
   const body = fragment.startsWith('#') ? fragment.slice(1) : fragment
   if (body === '' || !body.includes('=')) return fragment
   // 线性扫描替换(CodeQL js/polynomial-redos):原正则 /([^&#=?]+)=([^&]*)/gu
@@ -128,7 +150,7 @@ function maskSensitiveFragment(fragment: string): string {
     if (rawKey === '') return part
     let key = rawKey
     try { key = decodeURIComponent(rawKey) } catch { /* keep the raw key */ }
-    if (!SENSITIVE_KEY_PATTERN.test(key)) return part
+    if (!isSensitiveUrlKey(key, grade)) return part
     changed = true
     return `${part.slice(0, keyStart)}${rawKey}=****`
   })
@@ -149,8 +171,13 @@ function maskSensitiveFragment(fragment: string): string {
  * the structurally masked result. The URL parser only knows `&`/`?` pairs and
  * decodes a key ONCE, so `?%2573id=T` (double-encoded `sid`) and
  * `?a=1;token=T` (semicolon-separated) survived it; the text-level `key=value`
- * scanner sees both. A clean URL is untouched by either pass. */
-export function stripSensitiveUrl(raw: string): string {
+ * scanner sees both. A clean URL is untouched by either pass.
+ *
+ * `grade` (2026-09-26 R24 N2) picks the key vocabulary: the default `url` is the
+ * frozen persistence contract described above; `content` is the page-text exit
+ * (see {@link UrlKeyGrade}). The second pass follows the same grade.
+ */
+export function stripSensitiveUrl(raw: string, grade: UrlKeyGrade = 'url'): string {
   let structurally = raw
   try {
     const url = new URL(raw)
@@ -158,17 +185,17 @@ export function stripSensitiveUrl(raw: string): string {
     if (url.username !== '') { url.username = '****'; changed = true }
     if (url.password !== '') { url.password = '****'; changed = true }
     for (const name of [...url.searchParams.keys()]) {
-      if (SENSITIVE_KEY_PATTERN.test(name)) { url.searchParams.set(name, '****'); changed = true }
+      if (isSensitiveUrlKey(name, grade)) { url.searchParams.set(name, '****'); changed = true }
     }
     if (url.hash !== '') {
-      const masked = maskSensitiveFragment(url.hash)
+      const masked = maskSensitiveFragment(url.hash, grade)
       if (masked !== url.hash) { url.hash = masked; changed = true }
     }
     if (changed) structurally = url.href
   } catch {
     // Not a URL: the text-level scanner below still gets a chance.
   }
-  return maskSensitiveKeyValueText(structurally)
+  return scanKeyValueText(structurally, grade === 'content' ? 'content' : 'url')
 }
 
 /** Key characters of a `key=value` pair: URL/JSON-ish token characters plus
@@ -236,14 +263,23 @@ function isUrlShapedRun(text: string, from: number, to: number): boolean {
  * （`搜索 “key=value” 的含义`，被改坏即不可逆），也可能是查询串形态
  * （`Login failed: code=T14&state=x`，`code` 在这里就是凭据位）。按"串"分流让
  * 两者各用各的尺子，比按"字段"一刀切更保守——URL 形态的段一点强度都不降。
+ *
+ * 第四档 `content`（2026-09-26 R24 N2）：内容出口（页面正文 / 快照元素文本 /
+ * eval 值）用**整键判定**（{@link isContentUrlSensitiveKey}），因为那一面读的是
+ * 页面正文，`?keyword=`/`?zipcode=`/`?barcode=`/`?monkey=`/`?country_code=`/
+ * `?key=` 这些普通键被抹掉就是"把事实改坏"。与 `url` 档共用同一个扫描器，只有
+ * 键判定不同。
  */
 const PAIR_VOCABULARY = {
   /** URL 面（`maskSensitiveKeyValueText` 直接调用 / `stripSensitiveUrl` 二次扫描）：逐字节不动。 */
-  url: { pattern: SENSITIVE_KEY_PATTERN, isExact: isExactSensitiveKey },
+  url: { match: (key: string) => SENSITIVE_KEY_PATTERN.test(key), isExact: isExactSensitiveKey },
   /** 自由文本里的 URL/查询串段（含 JSON 引号键）：键名表 ∪ 散文表，覆盖度只增不减。 */
-  urlShaped: { pattern: URL_SHAPED_TEXT_KEY_PATTERN, isExact: isExactUrlShapedTextKey },
+  urlShaped: { match: (key: string) => URL_SHAPED_TEXT_KEY_PATTERN.test(key), isExact: isExactUrlShapedTextKey },
   /** 自由文本里的散文段：只认强凭据键，`key`/`code`/`sid` 不再改写。 */
-  prose: { pattern: PROSE_SENSITIVE_KEY_PATTERN, isExact: isExactProseSensitiveKey },
+  prose: { match: (key: string) => PROSE_SENSITIVE_KEY_PATTERN.test(key), isExact: isExactProseSensitiveKey },
+  /** 内容出口的 URL/查询串段：整键判定（R24 N2）。`isExact` 恒真——整键判定已经
+   *  排除了 `encoded:`/`decoder:` 这类散文键，冒号形态（`password: x`）必须照擦。 */
+  content: { match: (key: string) => isContentUrlSensitiveKey(key), isExact: () => true },
 } as const
 
 /** Decode a key repeatedly so `%2573id` → `%73id` → `sid` matches the
@@ -312,7 +348,20 @@ function maskSensitiveFreeText(raw: string): string {
   return scanKeyValueText(raw, 'text')
 }
 
-function scanKeyValueText(raw: string, vocabulary: 'url' | 'text'): string {
+/**
+ * 内容出口（页面正文 / 快照元素文本 / eval 值）的 `key=value` 扫描
+ * （2026-09-26 R24 N2）。
+ *
+ * 与 {@link maskSensitiveKeyValueText} 共用同一个扫描器，只有词表档位不同：
+ * `content` 档按**整键**判定（{@link isContentUrlSensitiveKey}），于是
+ * `?keyword=`/`?key=` 这类普通键不再被改写，而 `token`/`api_key`/`code`/`sid`/
+ * `signature` 等真凭据键照旧打码。
+ */
+export function maskSensitiveContentText(raw: string): string {
+  return scanKeyValueText(raw, 'content')
+}
+
+function scanKeyValueText(raw: string, vocabulary: 'url' | 'text' | 'content'): string {
   if (raw === '') return raw
   if (!raw.includes('=') && !raw.includes('＝') && !raw.includes(':') && !raw.includes('&')) return raw
   const parts: string[] = []
@@ -337,13 +386,20 @@ function scanKeyValueText(raw: string, vocabulary: 'url' | 'text'): string {
     // JSON 形态（`"code": "T14"`，R-5 的覆盖）与 URL/查询串形态的串走 urlShaped，
     // 其余散文走 prose。注意 `"key=value"` 这种**引号 + 等号**的散文仍算散文：
     // 引号只在冒号形态下才是"结构化数据"的信号。
+    //
+    // R24 N2：内容出口（`vocabulary === 'content'`）**整趟**用 content 档 —— 页面
+    // 正文里 URL 形态的段（`https://h/?keyword=hello`）正是要放行的形态，按串分流
+    // 会把它判成 urlShaped（子串词表）而重新抹掉。散文段同样用整键判定
+    // （`password=x` 照擦，`key=value` 放行）。
     const grade = vocabulary === 'url'
       ? 'url'
-      : (quoted && colon) || isUrlShapedRun(raw, start, index + spelling.length)
-        ? 'urlShaped'
-        : 'prose'
+      : vocabulary === 'content'
+        ? 'content'
+        : (quoted && colon) || isUrlShapedRun(raw, start, index + spelling.length)
+          ? 'urlShaped'
+          : 'prose'
     const terms = PAIR_VOCABULARY[grade]
-    if (!terms.pattern.test(key)) { index += spelling.length; continue }
+    if (!terms.match(key)) { index += spelling.length; continue }
     // A colon is only a credential separator in the JSON shape (quoted key) or
     // when the key IS a credential term — `key`/`code`/`sid` are ordinary
     // English words as substrings of prose keys (`encoded:`, `decoder:`).
@@ -392,15 +448,19 @@ const TEXT_URL_RE = /(?:https?:\/\/[^\s<>"')]+)(?:[),.;]*)?/giu
  * `browser_get_text` / `browser_get_snapshot` 共用的值级漏斗）与标题/摘要面
  * 复用**这同一份**实现 —— userinfo 不能被一个出口擦、另一个出口原样交给模型。
  * 调用方不需要自己写第二份 URL 正则。
+ *
+ * R24 N2（2026-09-26）：`grade` 透传给 {@link stripSensitiveUrl}。落盘面（标题/
+ * 摘要/账本）保持默认 `url` 档；内容出口传 `content`，否则 `?keyword=` 这类普通
+ * 查询键在页面正文里被抹成 `****`（上一轮把这一趟接进内容出口时引入的过度掩码）。
  */
-export function maskCredentialUrlsInText(raw: string): string {
+export function maskCredentialUrlsInText(raw: string, grade: UrlKeyGrade = 'url'): string {
   if (raw === '' || !raw.includes('://')) return raw
   return raw.replace(TEXT_URL_RE, (match) => {
     let end = match.length
     while (end > 0 && (match[end - 1] === ')' || match[end - 1] === ',' || match[end - 1] === '.' || match[end - 1] === ';')) {
       end -= 1
     }
-    return `${stripSensitiveUrl(match.slice(0, end))}${match.slice(end)}`
+    return `${stripSensitiveUrl(match.slice(0, end), grade)}${match.slice(end)}`
   })
 }
 

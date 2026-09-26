@@ -630,7 +630,9 @@ export function installBookmarks(ctx, config) {
       handler: async (req, res) => {
         // FIX-04：统一前置守卫（只读放行、写操作要求同源 + JSON 体）。
         // 跨站简单请求（Origin: evil + text/plain，无预检）曾能直接写书签。
-        if (await applyRequestGuard(req, res)) return
+        // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置，webCtx 用于读
+        // webRuntime.trustedHosts。
+        if (await applyRequestGuard(req, res, 64 * 1024, webCtx)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         try {

@@ -925,7 +925,8 @@ export function installCanvas(ctx, config, resolveCwd, resolveSessionName) {
       handler: async (req, res) => {
         // FIX-04：统一前置守卫。此前跨站页面能 POST /open、/open-dir
         // 让系统默认程序打开本地文件、POST /migrate 改写画板数据。
-        if (await applyRequestGuard(req, res, 256 * 1024)) return
+        // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+        if (await applyRequestGuard(req, res, 256 * 1024, webCtx)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         try {

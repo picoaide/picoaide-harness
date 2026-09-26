@@ -295,8 +295,8 @@ export function installNotifyWebApi(ctx, deps) {
       path: '/memory-evolve/api/notifications',
       handler: async (req, res) => {
         // FIX-04：统一前置守卫。此前跨站页面能 POST /read、/readAll、DELETE
-        // 任意改写站内通知的已读水位。
-        if (await applyRequestGuard(req, res, 256 * 1024)) return
+        // 任意改写站内通知的已读水位。R24 B3：Host 栅栏是读写的共同前置。
+        if (await applyRequestGuard(req, res, 256 * 1024, webCtx)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         const path = url.pathname
         const base = '/memory-evolve/api/notifications'
