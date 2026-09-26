@@ -367,6 +367,12 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
     // 变量一个没删、dispatcher 没换、启动日志一行不打。deps 是**测试接缝**，生产调用点
     // 结构上不许出现在这个实参位上。
     expect(calls[0]?.argCount, '生产调用点不得传第三个实参（deps 是测试接缝，不是生产参数）').toBe(2)
+    // 2026-09-26 复审 W4-08：**实参个数不足以说明"调的是真实现"**。在 `start()` 里加一行
+    // 同名 `const` 遮蔽（`const enforceDirectTransport = (env, policy) => 真实现(env, policy, {…})`）
+    // 时，被判据统计的那个调用点仍然"实参 2 个"，而生产被喂 no-op deps。
+    // 判据因此升级为"被调用的标识符必须解析到模块顶层的那个 import"。
+    expect(calls[0]?.shadowed, '被调用的 enforceDirectTransport 必须解析到模块顶层的 import —— '
+      + '同名局部声明会遮蔽它，让调用点看着正常而实际喂进去的是 no-op deps').toBe(false)
 
     const lines = callLines(main, ['loadLayeredEnv', 'enforceDirectTransport', 'boot'])
     const envLoad = lines.get('loadLayeredEnv')?.[0]
@@ -381,7 +387,7 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
     // 自检：判据本身要能抓住两种"掏空"形态，且不误伤换行改写。
     const canonical = "const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)\n"
     expect(findEnforcementCalls(canonical)).toEqual([
-      { conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY', argCount: 2 },
+      { shadowed: false, conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY', argCount: 2 },
     ])
     // 第三实参 no-op：B-1 的最小反例，必须被计到实参个数上。
     const withDeps = "const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY, { enforceNodeTransport: async () => 'not-requested', stripEnvironment: () => [] })\n"
@@ -398,6 +404,43 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
       .toHaveLength(1)
     // 注释掉 = 调用不存在（文本包含会假绿）。
     expect(findEnforcementCalls(`// ${canonical}`)).toEqual([])
+
+    // ---- W4-08 的两个最小反例（**同名遮蔽**）------------------------------------
+    // 形态①：模块作用域先存真实现引用，`start()` 内同名 `const` 遮蔽（W4 实测 27/27 全绿）。
+    const shadowInFunction = [
+      "import { enforceDirectTransport } from '../src/network-policy.ts'",
+      'const realOne = enforceDirectTransport',
+      'async function start() {',
+      "  const enforceDirectTransport = async (env: unknown, policy: unknown) => realOne(env, policy, { noop: true })",
+      '  const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '}',
+      '',
+    ].join('\n')
+    const shadowedCall = findEnforcementCalls(shadowInFunction)[0]
+    expect(shadowedCall?.argCount, '遮蔽形态在实参个数上照样是 2（这正是 W4-08 能绕过 argCount 的原因）').toBe(2)
+    expect(shadowedCall?.shadowed, '同名局部声明必须被识别为遮蔽（W4-08：argCount 看不见它）').toBe(true)
+    // 形态②：模块作用域直接重声明（连函数体都不用）。
+    const shadowAtModuleScope = [
+      "import { enforceDirectTransport } from '../src/network-policy.ts'",
+      "const enforceDirectTransport = (env: unknown, policy: unknown) => realOne(env, policy, {})",
+      'const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '',
+    ].join('\n')
+    expect(findEnforcementCalls(shadowAtModuleScope)[0]?.shadowed, '模块作用域重声明同样是遮蔽').toBe(true)
+    // 形态③：形参同名（`(enforceDirectTransport) => …` 里调用它）。
+    const shadowByParameter = [
+      "import { enforceDirectTransport } from '../src/network-policy.ts'",
+      'function run(enforceDirectTransport: unknown) {',
+      '  const enforcement = enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '}',
+      '',
+    ].join('\n')
+    expect(findEnforcementCalls(shadowByParameter)[0]?.shadowed, '形参同名也必须算遮蔽').toBe(true)
+    // 反向：只有那个 import 时不得误报（正式 main.ts 与本次自检的其它样本都属于这一支）。
+    expect(findEnforcementCalls(`import { enforceDirectTransport } from '../src/network-policy.ts'\n${canonical}`))
+      .toEqual([{
+        shadowed: false, conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY', argCount: 2,
+      }])
     // 换个"更好的"策略字面量也必须被抓（那正是把强制块绕开的另一种写法）。
     expect(findEnforcementCalls("await enforceDirectTransport(process.env, { allow: true, source: 'default' })\n")[0]?.policy)
       .toBeUndefined()
@@ -474,6 +517,16 @@ interface EnforcementCall {
   readonly policy: string | undefined
   /** 实参个数（生产调用点必须是 2：deps 是测试接缝，不许出现在这个实参位上）。 */
   readonly argCount: number
+  /**
+   * 被调用的 `enforceDirectTransport` 是否被**同名局部声明遮蔽**（2026-09-26 复审 W4-08）。
+   *
+   * `argCount` 只看调用表达式本身：`start()` 里写一行
+   * `const enforceDirectTransport = (env, policy) => 真实现(env, policy, {…no-op deps})`
+   * 就能让**被判据统计的那个调用点**仍然"实参 2 个"（其真实入参是 no-op deps：三个代理
+   * 环境变量一个不删、dispatcher 不换、启动日志一行不打），而 27 条用例全绿。
+   * 判据改成"被调用的标识符必须**解析到模块顶层的那个 import**"。
+   */
+  readonly shadowed: boolean
 }
 
 /**
@@ -489,6 +542,7 @@ function findEnforcementCalls(source: string, fileName = 'main.ts'): Enforcement
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'enforceDirectTransport') {
       const [env, policy] = node.arguments
       found.push({
+        shadowed: hasShadowingDeclaration(node, 'enforceDirectTransport'),
         conditional: hasConditionalAncestor(node),
         env: env === undefined
           ? undefined
@@ -503,6 +557,81 @@ function findEnforcementCalls(source: string, fileName = 'main.ts'): Enforcement
   }
   visit(file)
   return found
+}
+
+/**
+ * **这个名字在调用点处解析到哪里**（2026-09-26 复审 W4-08 的唯一实现）。
+ *
+ * 从调用点向外逐层看**作用域**：每个块/模块/函数的语句与形参里若绑定了同名标识符，
+ * 那个绑定就是这个调用真正解析到的目标 —— 只有最外层 `SourceFile` 上的 `import` 才是
+ * 模块顶层的那个真实现。于是"在 `start()` 里加一行同名 `const`"这种遮蔽**当场可见**，
+ * 而 `argCount` / `conditional` 两条判据都看不出来（它们只看调用表达式本身）。
+ *
+ * 覆盖的绑定形态：`const`/`let`/`var` 声明、函数/类声明、import 子句、函数形参、
+ * 解构与非解构（只取名，不改写）。目标名之外的任何东西都不影响判定。
+ *
+ * @param node - 调用表达式节点。
+ * @param name - 被调用的标识符名。
+ * @returns `true` = 这个调用解析到的**不是**模块顶层 import（被遮蔽）。
+ */
+function hasShadowingDeclaration(node: ts.Node, name: string): boolean {
+  /** 一个绑定名节点是否就是目标名。 */
+  const bindsName = (binding: ts.BindingName | undefined): boolean => {
+    if (binding === undefined) return false
+    if (ts.isIdentifier(binding)) return binding.text === name
+    return binding.elements.some(element => !ts.isOmittedExpression(element) && bindsName(element.name))
+  }
+  /** 一条语句是否绑定了目标名（返回值 = 是不是 `import`）。 */
+  const statementBinding = (statement: ts.Statement): 'import' | 'other' | undefined => {
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause
+      if (clause === undefined) return undefined
+      if (clause.name !== undefined && clause.name.text === name) return 'import'
+      const bindings = clause.namedBindings
+      if (bindings !== undefined && ts.isNamespaceImport(bindings) && bindings.name.text === name) return 'import'
+      if (bindings !== undefined && ts.isNamedImports(bindings)) {
+        return bindings.elements.some(element => (element.name ?? element.propertyName)?.text === name)
+          ? 'import'
+          : undefined
+      }
+      return undefined
+    }
+    if (ts.isVariableStatement(statement)) {
+      return statement.declarationList.declarations.some(declaration => bindsName(declaration.name))
+        ? 'other'
+        : undefined
+    }
+    if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
+      && statement.name !== undefined && statement.name.text === name) return 'other'
+    return undefined
+  }
+  for (let current: ts.Node | undefined = node.parent; current !== undefined; current = current.parent) {
+    if (ts.isBlock(current) || ts.isSourceFile(current) || ts.isModuleBlock(current) || ts.isCaseBlock(current)) {
+      // 同一层里**逐条**看：只要有一条非 import 的同名绑定，这个作用域就遮蔽了目标名
+      // （`import X …` 与 `const X = …` 同层 = 重声明；只认"第一条绑定"会漏掉后者）。
+      let sawImport = false
+      for (const statement of current.statements) {
+        const binding = statementBinding(statement)
+        if (binding === 'other') return true
+        if (binding === 'import') sawImport = true
+      }
+      // 顶层 `import` 就是那个真实现 ⇒ 解析成功，停止外扩。
+      if (sawImport && ts.isSourceFile(current)) return false
+      if (ts.isSourceFile(current)) return false
+      continue
+    }
+    // 形参同名也会遮蔽（`(enforceDirectTransport) => …`）。
+    if (ts.isFunctionLike(current)) {
+      const parameters = ts.isFunctionDeclaration(current) || ts.isFunctionExpression(current)
+        || ts.isArrowFunction(current) || ts.isMethodDeclaration(current)
+        || ts.isConstructorDeclaration(current) || ts.isGetAccessorDeclaration(current)
+        || ts.isSetAccessorDeclaration(current)
+        ? current.parameters
+        : undefined
+      if (parameters?.some(parameter => bindsName(parameter.name)) === true) return true
+    }
+  }
+  return false
 }
 
 /** 调用是否可能被跳过（祖先里有 `if`、三元，或短路逻辑的右操作数）。 */

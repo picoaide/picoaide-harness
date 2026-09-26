@@ -178,16 +178,48 @@ if (!existsSync(migrationPath)) {
   console.error(`check-migration-range: 找不到迁移目录 ${MIGRATION_DIR}（root=${root}）—— 拒绝把"扫不到"当通过`)
   process.exit(1)
 }
+/**
+ * `readdirSync` 出来的目录项**是不是普通文件**（R23 FIX-22 / W4-09 的唯一实现）。
+ *
+ * 修前这里直接 `statSync(...).isFile()`：**悬空符号链接**会让 `statSync` 抛 `ENOENT`，
+ * 守卫以**未捕获堆栈**退出（`Error: ENOENT: no such file or directory, stat '…/0080_…sql'`，
+ * `EXIT=1`）—— fail-closed 方向是对的，但诊断指向 `stat` 内部而不是"迁移文件不可用"这一类
+ * 可操作结论，而且它与"扫描面缺失"共用 exit 1，读者分不清是"内容被改写"还是"根本扫不动"。
+ * 现在：坏条目逐个**具名**收集，随后以 **EXIT=2（扫描面前置失败）** 报出。
+ * @param name - `migrations-pg/` 下的目录项名。
+ * @returns `true` = 可以按普通文件读。
+ */
+function migrationEntryIsFile(name) {
+  try {
+    return statSync(join(migrationPath, name)).isFile()
+  } catch (error) {
+    brokenMigrationEntries.push({ name, code: error?.code ?? 'UNKNOWN', message: error?.message ?? String(error) })
+    return false
+  }
+}
+/** 读不动的目录项（悬空符号链接 / 权限 / 其它 ENOENT 形态）——见 {@link migrationEntryIsFile}。 */
+const brokenMigrationEntries = []
 const numbers = readdirSync(migrationPath)
   // **R22 FIX-14**：与下面的 `sqlFiles` 同一口径 —— 必须过 `isFile()`。修前只按**文件名**
   // 取数，于是一个名叫 `0090_x.sql` 的**目录**会把"实际 MAX"顶到 0090（迫使改多处文档区间），
   // 而同一份输出里还能同时出现"75 个"（按名字数）与"74 个 .sql"（`sqlFiles` 过了 `isFile()`）
   // —— 计数口径不一致本身就是可诊断性缺陷（V4 泳道 N3）。
-  .filter(name => statSync(join(migrationPath, name)).isFile())
+  .filter(name => migrationEntryIsFile(name))
   .map(name => /^(\d{4})_.*\.sql$/u.exec(name)?.[1])
   .filter(value => value !== undefined)
   .map(Number)
   .sort((a, b) => a - b)
+// **R23 FIX-22 / W4-09**：扫不动的目录项是**扫描面前置失败**（EXIT=2），先于任何内容判据报出。
+if (brokenMigrationEntries.length > 0) {
+  for (const entry of brokenMigrationEntries) {
+    console.error(`  [SURFACE] ${MIGRATION_DIR}/${entry.name} 读不动（${entry.code}）：${entry.message}`)
+  }
+  console.error(`\ncheck-migration-range: ${MIGRATION_DIR} 里有 ${brokenMigrationEntries.length} 个目录项读不动 ——`
+    + ' 悬空符号链接 / 权限 / 权限以外的 ENOENT 都会让"内容不可变"这一层根本扫不动。'
+    + '修法：把该路径恢复成**普通文件**（迁移只能是仓内文件，`//go:embed migrations-pg/*.sql` 读的就是它），'
+    + '或删掉这个悬空链接。\n')
+  process.exit(2)
+}
 if (numbers.length === 0) {
   console.error(`check-migration-range: ${MIGRATION_DIR} 里没解析出任何 00NN_*.sql —— 拒绝把空集当通过`)
   process.exit(1)
@@ -200,7 +232,7 @@ const pad = value => String(value).padStart(4, '0')
 /** `migrations-pg/` 下**每一个** `.sql`（不只 `00NN_*.sql`：名字不合规的也要进对拍面）。 */
 const sqlFiles = readdirSync(migrationPath)
   .filter(name => name.endsWith('.sql'))
-  .filter(name => statSync(join(migrationPath, name)).isFile())
+  .filter(name => migrationEntryIsFile(name))
   .sort()
 /** 一段字节的 sha256（小写 hex）。 */
 const sha256 = data => createHash('sha256').update(data).digest('hex')
@@ -274,6 +306,78 @@ const contentNotices = []
  * 只影响**通过行的措辞**：没参与就不得宣称"与提交态一致"。
  */
 let headLayerRan = false
+/**
+ * **"基线 tag 字节 vs 磁盘"这一层这次是否真的参与**（R23 FIX-22 / W4-03）—— 只影响通过行措辞。
+ */
+let baselineLayerRan = false
+
+/**
+ * **已发布基线 tag** 的选择（R23 FIX-22 / W4-03 的唯一实现）。
+ *
+ * ## 为什么参照物不能是 `HEAD`
+ *
+ * 修前反向断言的参照物是 `HEAD`，而 PR 的变异**就是** HEAD：改完提交之后 HEAD 与磁盘自洽，
+ * `git ls-tree -r HEAD` 的集合包含关系恒成立、登记表与 HEAD 的逐文件对拍同样自洽。实测
+ * （第二十三轮 W4，真 git 仓）：`git mv 0080_x.sql 0080_x_r.sql` + 改正文 + 重新生成登记表
+ * + `git commit` ⇒ `EXIT=0`，而通过行照旧印"74 个迁移文件的 sha256 与 …逐条一致 ✅"；
+ * 只改正文 + 同步登记值 + commit、删文件 + 同步登记表 + commit 同样绿。
+ *
+ * ## 选择规则（写死在代码里；改它必须进 diff，改完要同步本文件的注释与报告）
+ *
+ *   1. 候选 = `git tag --list 'v*'` 里**是 HEAD 祖先**、且**不指向 HEAD 自身**的 tag
+ *      —— 后者排除掉"tag 构建"（HEAD 就是那个 tag）时的自证同义反复；
+ *   2. 取**版本最高**的一个：`v<主>.<次>.<修订>[-预发]` 逐字段数值比较，
+ *      同版本号时**预发 < 正式**（semver 口径），预发之间按后缀字符串倒序（beta.2 > beta.1）；
+ *   3. 一个都没有 / git 不可用 / tag 里没有迁移目录 ⇒ **响亮降级**（{@link contentNotices}
+ *      的 `[CONTENT-SKIP]` + 通过行不得宣称"逐条一致"，见 `baselineLayerClause`）。
+ *      绝不静默绿：这条判据的全部价值就在"基线不受本 PR 影响"。
+ *
+ * ## 判据
+ *
+ * 基线 tag 里出现过的**每一个**迁移路径，今天都必须在磁盘上、且**字节逐字不变**
+ * （`git show <tag>:<路径>` 的 sha256 vs 磁盘 sha256）。**新增文件允许** —— 这正是
+ * "迁移只能新增"这句承诺的机械形态。
+ * @returns `{ tag, version }`；取不到基线时返回 `null`。
+ */
+function publishedMigrationBaselineTag() {
+  const listed = spawnSync('git', ['-C', root, 'tag', '--list', 'v*'], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  })
+  if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== 'string') return null
+  const parse = tag => {
+    const match = /^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/u.exec(tag)
+    return match === null ? null : {
+      tag, major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]),
+      pre: match[4] ?? null,
+    }
+  }
+  const candidates = []
+  for (const tag of listed.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')) {
+    const parsed = parse(tag)
+    if (parsed === null) continue
+    // 是 HEAD 的祖先、且不指向 HEAD 自身（`git merge-base --is-ancestor` 的退出码语义）。
+    const ancestor = spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', tag, 'HEAD'], { encoding: 'utf8' })
+    if (ancestor.status !== 0) continue
+    const pointsAtHead = spawnSync('git', ['-C', root, 'rev-parse', `${tag}^{commit}`], { encoding: 'utf8' })
+    const head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD^{commit}'], { encoding: 'utf8' })
+    if (pointsAtHead.status === 0 && head.status === 0
+      && String(pointsAtHead.stdout).trim() === String(head.stdout).trim()) continue
+    candidates.push(parsed)
+  }
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => (a.major - b.major) || (a.minor - b.minor) || (a.patch - b.patch)
+    || ((a.pre === null ? 1 : 0) - (b.pre === null ? 1 : 0))
+    || String(a.pre ?? '').localeCompare(String(b.pre ?? '')))
+  const best = candidates.at(-1)
+  // tag 里必须有迁移目录（否则基线取错了 ⇒ 按"取不到"降级，而不是当成"没有要保的路径"）。
+  const probe = spawnSync('git', ['-C', root, 'ls-tree', '-r', '--name-only', best.tag, '--', MIGRATION_DIR], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  })
+  if (probe.error !== undefined || probe.status !== 0) return null
+  const paths = String(probe.stdout ?? '').split('\n').map(line => line.trim()).filter(line => line !== '')
+  if (paths.length === 0) return null
+  return { tag: best.tag, version: `v${best.major}.${best.minor}.${best.patch}${best.pre === null ? '' : `-${best.pre}`}`, paths }
+}
 
 /** 登记表条目形状校验；任何一处不成立都返回问题（fail-closed）。 */
 function checksumEntryProblems(entries) {
@@ -450,6 +554,51 @@ if (contentInScope) {
                 + `          HEAD 里该文件 sha256 ${committedSha}\n`
                 + '          —— 文件与登记值被**一起**改过（否则上面那条"已登记迁移被就地修改"就已经红了）。'
                 + '改写历史迁移没有"顺手更新校验和"这条出路：要改数据请加新迁移。')
+            }
+            // ── 已发布基线（**R23 FIX-22 / W4-03**）──────────────────────────────
+            //
+            // HEAD 只能回答"未提交的改动"，**不能**回答"这次提交有没有改写历史迁移"——
+            // PR 的变异就是 HEAD。基线必须取一个**不受本 PR 影响**的参照物：最近的
+            // 已发布 `v*` tag（选择规则见 `publishedMigrationBaselineTag()`）。
+            const baseline = publishedMigrationBaselineTag()
+            if (baseline === null) {
+              contentNotices.push(`root=${root} 里取不到**已发布基线**（"是 HEAD 祖先且不指向 HEAD"的`
+                + ' `v*` tag 一个都没有，或 git 读不出 tag 列表 / tag 里没有迁移目录）⇒'
+                + ' "迁移路径与字节 vs **已发布基线**"这一层**未参与**（其余判据照常）。'
+                + ' 别把这次 EXIT=0 读成"历史迁移没被改写"——要判这一层请在带 `v*` tag 的 git 工作树上跑'
+                + "（`git tag --list 'v*'` 自查）。")
+            } else {
+              baselineLayerRan = true
+              for (const path of baseline.paths) {
+                const name = path.startsWith(`${MIGRATION_DIR}/`) ? path.slice(MIGRATION_DIR.length + 1) : path
+                if (!onDisk.has(name)) {
+                  contentProblems.push(`已发布基线（${baseline.tag}）里的迁移文件在磁盘上不存在`
+                    + `（改名 / 删除 / 移出索引）：${name}\n`
+                    + `          ${baseline.tag} 里有 \`${path}\`，而 ${MIGRATION_DIR} 下没有它`
+                    + '（登记表可能被"顺手同步"过了）—— 迁移**只能新增**：删/改名同样是"改写历史"，'
+                    + '已部署库按版本号记录过它，路径变了不会让任何库重跑，只会让新库与旧库分叉。\n'
+                    + `          ⇒ 请把文件恢复成 ${baseline.tag} 里的原名与内容；确属误提交才用 \`git rm\` 走评审。`)
+                  continue
+                }
+                const committed = spawnSync('git', ['-C', root, 'show', `${baseline.tag}:${path}`], {
+                  encoding: 'buffer', maxBuffer: 64 * 1024 * 1024,
+                })
+                if (committed.error !== undefined || committed.status !== 0 || !Buffer.isBuffer(committed.stdout)) {
+                  baselineLayerRan = false
+                  contentNotices.push(`root=${root} 的基线 tag ${baseline.tag} 读不出 \`${path}\` 的字节 ⇒`
+                    + ' "迁移字节 vs 已发布基线"这一层**未参与**（其余判据照常）。')
+                  break
+                }
+                const baselineSha = sha256(committed.stdout)
+                const diskSha = sha256(readFileSync(join(migrationPath, name)))
+                if (baselineSha === diskSha) continue
+                contentProblems.push(`已发布基线（${baseline.tag}）里的迁移被改写（版本 ${name.slice(0, 4)}）：${name}\n`
+                  + `          ${baseline.tag} 里该文件 sha256 ${baselineSha}\n`
+                  + `          磁盘上实际 sha256 ${diskSha}\n`
+                  + '          —— 已应用迁移永不原地修改（`ApplyMigrations` 按版本号跳过，改正文对'
+                  + '已部署库完全不可见），要改数据请**加新迁移**。\n'
+                  + '          （把登记表里的 sha256 一起改掉也绕不过这一条：基线 tag 不受本 PR 影响。）')
+              }
             }
             if (!gitUsable) {
               contentNotices.push(`root=${root} 是 git 工作树，但 git 读取 HEAD 失败 ⇒`
@@ -656,11 +805,18 @@ if (!json) {
   // 通过行**只说做过的判据**：合成夹具根上不宣称"迁移内容没被改过"（那件事本次没判）。
   // **R22 FIX-14**：通过行只说**做过的判据** —— 第⑥层（登记值 vs 已提交字节 / HEAD 侧路径
   // 集合 ⊆ 磁盘）没跑时必须在同一行里写明，否则读者会把"登记表与磁盘一致"读成"与提交态一致"。
+  // **R23 FIX-22 / W4-03**：通过行必须同时说出**两层**参照物各自有没有参与 ——
+  // "登记值 vs 已提交字节（HEAD）"与"路径/字节 vs **已发布基线 tag**"是两件事，
+  // 只跑了前者时**不得**让读者以为历史迁移没被改写（修前正是这句话导致 W4 判它假绿）。
   const headLayerClause = contentInScope && headLayerRan
     ? ''
     : '（**但"登记值 vs 已提交字节"这一层未参与**：见 [CONTENT-SKIP]）'
+  const baselineLayerClause = contentInScope && baselineLayerRan
+    ? ''
+    : '（**但"路径/字节 vs 已发布基线 tag"这一层未参与**：见 [CONTENT-SKIP]）'
   const contentClause = contentInScope
-    ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致${headLayerClause}`
+    ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致`
+      + `${headLayerClause}${baselineLayerClause}`
     : '（迁移内容不可变判据**未参与**：root 不是仓库形态，见 [CONTENT-SKIP]）'
   console.log(`check-migration-range: 文档区间与实际一致（${pad(MIN)}–${pad(MAX)}），`
     + `且 server/AGENTS.md 的迁移号都存在${contentClause} ✅`)

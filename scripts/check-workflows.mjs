@@ -5542,6 +5542,67 @@ function quoteCloseIndex(line, openIndex, quote) {
   }
   return -1
 }
+/**
+ * 找一个 `(` 的配对 `)`（字符串感知：反斜杠转义跳过）。找不到返回 -1。
+ * @param line - 语句。
+ * @param openIndex - `(` 的下标。
+ * @returns 配对 `)` 的下标；不配对返回 -1。
+ */
+function balancedParenCloseIndex(line, openIndex) {
+  let depth = 0
+  for (let index = openIndex; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '\\') { index += 1; continue }
+    if (char === '(') depth += 1
+    else if (char === ')') { depth -= 1; if (depth === 0) return index }
+  }
+  return -1
+}
+
+/**
+ * **含命令替换的双引号串的配对闭引号**（R23 FIX-22 / W4-05 的唯一实现）。
+ *
+ * `quoteCloseIndex` 对"双引号里含 `$(`/反引号"**按设计**返回 -1（那一段是代码，不是文本，
+ * 调用方要保留内容）—— 但**配对关系仍然存在**，不把它找出来就会出大问题：
+ * `maskQuotedRegions` 会把这个双引号当成"未配对、只掩自己一个字符"，于是同一段的**收尾引号**
+ * 在下一轮被当成**新的开引号**，一直吞到下一个 `"` 为止 —— 引号配对从此整体错位。
+ *
+ * 现场（第二十三轮 W4-05，`gofmt check` 步骤体）：
+ * ```bash
+ * FILES="$(gofmt -l cmd internal demoapps webadmin scripts)"   # 第一个"未配对"的双引号
+ * if [ -n "$FILES" ]; then echo "$FILES"; exit 1; fi           # 它的"值"与这一段的引号被吞掉
+ * export NODE_OPTIONS="$(echo --require=/tmp/v7.js)"           # ← 整行落进被吞掉的区间
+ * ```
+ * 于是 `[SK-17]` 在 `FILES=` **之后**看不见任何 `export`（实测 `shellEnvironmentAssignments`
+ * 返回 `[]`），而把同一行放到 `FILES=` **之前**、或把值改成普通字面量都会红
+ * —— 同一形态因"邻居不同"走三条不同分支，这正是一条判据不该有的性质。
+ *
+ * 语义：引号内部的 `$( … )` / 反引号按**配对**整体跳过（它们的内部引号不影响外层配对），
+ * 于是能返回真正的收尾引号下标。
+ * @param line - 语句。
+ * @param openIndex - 开双引号下标。
+ * @returns 收尾双引号下标；找不到（真的未闭合）返回 -1。
+ */
+function doubleQuoteCloseIndex(line, openIndex) {
+  for (let index = openIndex + 1; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '\\') { index += 1; continue }
+    if (char === '$' && line[index + 1] === '(') {
+      const close = balancedParenCloseIndex(line, index + 1)
+      if (close < 0) return -1
+      index = close
+      continue
+    }
+    if (char === '`') {
+      const close = line.indexOf('`', index + 1)
+      if (close < 0) return -1
+      index = close
+      continue
+    }
+    if (char === '"') return index
+  }
+  return -1
+}
 
 /**
  * 去掉一行的**行内注释**(`#` 到行尾),引号内的 `#` 不算注释。
@@ -8436,7 +8497,16 @@ function maskQuotedRegions(line) {
     }
     const close = quoteCloseIndex(line, index, char)
     if (close < 0) {
-      // 双引号里有命令替换(或引号不配对):只屏蔽引号本身,内容按代码处理。
+      // **R23 FIX-22 / W4-05**：双引号里有命令替换（或引号不配对）时只屏蔽引号本身、
+      // 内容按代码处理 —— 但**先把配对找出来**（`doubleQuoteCloseIndex`），否则这一段的
+      // 收尾引号会被当成新的开引号，把后面整段吞掉（W4-05 的 `FILES=` / `export` 现场）。
+      const paired = char === '"' ? doubleQuoteCloseIndex(line, index) : -1
+      if (paired > index) {
+        chars[index] = '\u0000'
+        chars[paired] = '\u0000'
+        index = paired + 1
+        continue
+      }
       chars[index] = '\u0000'
       index += 1
       continue

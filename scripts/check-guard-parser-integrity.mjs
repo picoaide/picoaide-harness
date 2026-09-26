@@ -469,7 +469,7 @@ export function guardJudgeBodyProblems() {
  */
 const REGISTERED_YARN_CONFIGURATION = {
   path: '.yarnrc.yml',
-  sha256: 'f417a262d92a7e584ce9efa48702ad63b617162f4847c02de486d565b1d3a5f9',
+  sha256: '8b8cd9c282631b28b7005dd55f919586e914e85acacdbdecaa810fb610babe77',
   /** 允许出现的**顶级键**（登记制：每条带理由）。出现未登记的键 ⇒ 红。 */
   allowedKeys: [
     ['enableScripts', '依赖的构建脚本开关 —— 必须保持 false（本仓"依赖不在 install 期跑代码"的唯一开关）'],
