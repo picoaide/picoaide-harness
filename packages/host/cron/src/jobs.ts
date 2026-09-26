@@ -206,8 +206,19 @@ export function createJob(id: string, input: NewJobInput, now: number, owner?: s
   }
 }
 
-/** Whether a job is visible to (and executable by) the given account. */
-export function jobVisibleTo(job: JobRecord, username: string | null | undefined): boolean {
+/**
+ * Whether a job is visible to (and executable by) the given account.
+ *
+ * Takes only the owner field, so the SAME judgement also covers a record that
+ * carries no job but does carry the owner of one — the scheduler's skip records,
+ * whose `name` is a user-authored string that must never reach another account
+ * (2026-09-26 FIX-31). A caller that resolves the owner by job id can satisfy
+ * the parameter without cloning a whole record.
+ * @param job - the record itself, or just its owner field.
+ * @param username - the account asking (`null` = logged out).
+ * @returns true when the record may be shown to that account.
+ */
+export function jobVisibleTo(job: Pick<JobRecord, 'owner'>, username: string | null | undefined): boolean {
   // Legacy records (no owner) stay visible to every session; owner-scoped
   // records are visible only to their creating account. The comparison runs on
   // the canonical key (CR-7), so a record stamped with `Alice` still matches

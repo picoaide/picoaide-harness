@@ -7,7 +7,7 @@ import { HostCronLedger } from './host-ledger.ts'
 import { HostCronExecutor, type CronExecutorDeps } from './host-executor.ts'
 import { HostCronScheduler } from './host-scheduler.ts'
 import { jobVisibleTo, type JobRecord } from './jobs.ts'
-import { CRON_SCHEMA_VERSION, type CronEventPayload, type CronSnapshot, type CronAction } from './protocol.ts'
+import { CRON_SCHEMA_VERSION, type CronEventPayload, type CronSchedulerSnapshot, type CronSnapshot, type CronAction } from './protocol.ts'
 import type { CronJobRegistration, PicoCronService } from './service.ts'
 
 export interface HostCronServiceOptions {
@@ -85,14 +85,46 @@ export class HostCronService implements PicoCronService {
       // Owner filter applied on read: a logged-out session sees only legacy
       // records; a logged-in session sees legacy + its own.
       jobs: state.jobs.filter(job => jobVisibleTo(job, this.username)),
-      scheduler: state.scheduler,
+      scheduler: this.visibleScheduler(state.scheduler),
     }
   }
 
   /** SSE frame payload; deliberately skips the jobs deep-clone of {@link snapshot}. */
   eventPayload(): CronEventPayload {
     const { revision, scheduler } = this.ledger.summary()
-    return { revision, scheduler }
+    return { revision, scheduler: this.visibleScheduler(scheduler) }
+  }
+
+  /**
+   * The account-visibility judgement for the scheduler block — the same one
+   * {@link snapshot}'s `jobs[]` uses, applied to the records inside it
+   * (2026-09-26 FIX-31).
+   *
+   * `skippedOccurrences[]` carries `jobId` **and the job's `name`**, a
+   * user-authored string. Filtering only `jobs[]` therefore published the first
+   * account's job names to a second (or logged-out) session on all three exits
+   * at once — `GET /api/cron/state`, the action response (both through
+   * {@link snapshot}) and every SSE frame (through {@link eventPayload}) — and
+   * the panel renders the name in a visible banner.
+   *
+   * A skip record does not record its own owner, so visibility is resolved
+   * against the stored job with the SAME `jobVisibleTo` predicate (one
+   * judgement, no second copy of the owner rule). A record whose job no longer
+   * exists resolves to no owner and is dropped: nothing can vouch for it, and a
+   * name must not leak because its record outlived the job.
+   */
+  private visibleScheduler(scheduler: CronSchedulerSnapshot): CronSchedulerSnapshot {
+    const skipped = scheduler.skippedOccurrences
+    if (skipped === undefined || skipped.length === 0) return { ...scheduler }
+    const scopes = new Map(this.ledger.jobScopes().map(scope => [scope.id, scope]))
+    const visible = skipped.filter((entry) => {
+      const job = scopes.get(entry.jobId)
+      return job !== undefined && jobVisibleTo(job, this.username)
+    })
+    // No record was hidden: hand back the plain summary (same shape and cost as
+    // before the filter existed).
+    if (visible.length === skipped.length) return { ...scheduler }
+    return { ...scheduler, skippedOccurrences: visible.map(entry => ({ ...entry })) }
   }
 
   subscribe(listener: () => void): () => void {
