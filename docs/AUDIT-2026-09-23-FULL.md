@@ -2444,3 +2444,38 @@ auditor 面零凭据（9 个假凭据 + super_admin 控制组）、审计链篡�
 
 AA1（复核第二十六轮批）4/4 成立 + 0 P0 / 0 P1 / 1 P2 / 2 P3（含两条对既有修复的证伪）；
 AA2 0 / **1** / 5 / 3；AA3 0 / **1** / 3 / 1 ⇒ **第二十七轮合计 ≥ 0 P0 / 2 P1** ⇒ **不干净，收敛仍未达成**。
+
+---
+
+### §7.68 第二十七轮修复批（FIX-34…FIX-39）交付记录
+
+| 泳道 | 覆盖 | VERDICT | 最值得记的一点 |
+|---|---|---|---|
+| FIX-34 | AA1 判级的跨包面（P2+P3）+ 第二十六轮登记的判据过窄（P3） | FIXED 2 / DEFERRED 0 | 判据从"两个方法名字面量"泛化为**包内调用图的反向可达闭包**；**同一个变异体**：旧判据 PASS（复现 Z1 的假绿）→ 新判据 FAIL |
+| FIX-35 | AA3-01（P1）+ AA1 §证伪-1（P2，判据取值域） | FIXED 3 / DEFERRED 1 | 代际原语**下沉到已有零依赖叶子包**而非新建包（新建要同步 7 处手续文件，其中 `scripts/**`/`.github/**` 不在所有权内）；判据扫描根改仓库级，并**真造出**"在别的包新增无守卫入口"证明能咬 |
+| FIX-36 | AA3-04（P2） | FIXED 1 / DEFERRED 0 | 证明"exact 路由绕过 `/api` prefix 围栏"这一形态确实存在，并把 9 条 exact 路由做成**双向对账**（纯读路由不硬挂证明，新路由未登记即红） |
+| FIX-37 | AA1 §证伪-2/§证伪-3（两条 P3） | FIXED 2 / DEFERRED 0 | `--inspect-brk-node` 是 Node **隐藏别名**（出处逐行给出）；措辞纠正后不再可读成"六类开关都被拒绝" |
+| FIX-38 | AA2-01（**P1**）+ AA2-02/03（P2） | FIXED 3 / DEFERRED 0 | TOCTOU 用**标注清楚的注入点**确定性构造；`ServeFile` 的二次解析窗口够不到 ⇒ 用 `go/parser` 取函数体原文的**调用点结构判据**钉住（M3 实测：换回 `ServeFile` 时黑盒全绿、只有它红 —— 正是 AA2-05 的教训） |
+| FIX-39 | AA2-07（**P1**，主控裁定）+ AA2-08/09（P2） | FIXED 3 / DEFERRED 2 | 证伪了"把 `lock_timeout` 加在 advisory-lock 连接上"这个**看起来对**的改法（DDL 在池里另一条会话）；拆分 AE 窗口与内容对账的**相互放大**约束已写进未做项 |
+
+**冻结态验收**：`corepack yarn check` ⇒ **`check-workspaces: VERDICT PASS planned=32 executed=32` / `GATE_EXIT=0`**；
+`corepack yarn install --immutable` ⇒ **EXIT=0**（§7.66 新增的强制步骤）。
+
+**本批两条方法学增量**
+
+1. **「判据结论不可复现」= 本仓第 9 类已登记假绿**（FIX-35 复现并升级了 AA3-02 的描述）：
+   原登记说法是"整跑绿 / 单跑红"，实测更重 —— **同一命令前后两批结论相反**（`-t` 单跑 3 绿 vs 3 红），
+   因为取值交给"迟到续体有没有在固定推进步数里跑完"，由真实 fs 写盘耗时与机器负载决定。
+   正确形态 = **单调断言（对全部发布 filter）+ 正交正信号 + 对照组自校准**，不取 `at(-1)`。
+2. **修复方主动登记"这条变异不承重"**（FIX-35 的 MU3b 无红）—— 比谎称每条变异都承重更可信；
+   本仓纪律应鼓励这种如实登记（冗余纵深是有价值的，但**不能被记成"每条判据都单独承重"**）。
+
+**FIX-38 交回的两条同族（已带实跑证据，待派工）**：
+① `server/internal/wasmapp/appproof/service.go:319` 是**第二份** `X-Forwarded-Proto` 实现
+（语义同结论，但违反"一件事一份实现"）；
+② `llmgateway/admin.go:1684` 的 `web.glitchtip_base_url` 走**同一条明文审计路径**且无 userinfo 校验 ——
+探针实得 `detail="GlitchTip地址:(空)→https://SIBLINGUSER:SIBLINGSECRET@glitchtip.example.com"`，修法同 DSN（1 行 + 1 用例）。
+
+**FIX-35 交回的三条已知未收口**（已进 `KNOWN_UNGUARDED_ENTRIES`，双向陈旧检测 ⇒ 收口后判据会自动要求删除登记项）：
+`wasm-apps-host/src/index.ts`（异步清理无代际）、`skill-telemetry.ts`（await 后读会话）、
+`browser/src/index.ts` 的 `runSessionSwitch` 并发守卫（AA3-03，P2）。
