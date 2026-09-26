@@ -398,6 +398,16 @@ func PushWebhook(ctx context.Context, hookURL string, body *ReportBody) error {
 //	   期间期号若被别的实例改成另一期（对方补投成功并把游标推进到下一期），本轮放弃 ——
 //	   下一 tick 会按新期号重来，不丢期也不会错投。
 //
+//	⑤ **单条订阅的失败不拖垮整批**（R22-V3-B1，复审 2026-09-26，**P2**）：修前"期号
+//	   生成失败"是 `return ok, failed, err` —— **跳出整个候选循环**。一条被外部写坏的
+//	   `pending_period`（`2026-99`）就是一次必然失败的生成，于是每一轮都停在这一条上，
+//	   其余**健康订阅一期都投不出去**（真 PG 实测连续 5 轮 0 笔、健康订阅
+//	   `fail_streak=0`、`last_error=''`：从未被尝试），且不修库就不自愈。
+//	   修后生成失败降级为"**该订阅本轮**失败"：failed++ → `last_error` 留痕（锁内落账，
+//	   带与投递失败同一套退避）→ `continue` 处理其余订阅。
+//	   同一处还必须挡住"按不可信期号生成"本身：`SubscriptionDuePeriod` 的第三个返回值
+//	   把不可信的 `pending_period` 上抛，本函数据此**不投那一条**并落 `last_error`。
+//
 //	   阶段二的两条判据**各自承重**（R21C-05，审计 2026-09-26，P3 的复核结论）：
 //	   `!stillDue` 抓的是"对方已经投完最后一期"（游标清空 + last_run_at 落到本月 ⇒
 //	   整条不再欠投），`freshPeriod != period` 抓的是"对方投完一期但**还欠下一期**"
@@ -416,10 +426,12 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 		return 0, 0, err
 	}
 	// 粗筛只用来"少抢锁"：判据用的是快照，过期只会让候选**偏多**（真正欠不欠投由
-	// 下面两次锁内新读决定）。
+	// 下面两次锁内新读决定）。**异常候选也要进来**（`anomaly != ""`）：形态非法的
+	// `pending_period` 会让 `due=false`，若在这里就被滤掉，锁内那次"记 last_error"
+	// 永远不会发生 ⇒ 坏行既投不出去、也不留任何可诊断痕迹（R22-V3-B1）。
 	candidates := make([]int64, 0, len(list))
 	for _, sub := range list {
-		if _, due := SubscriptionDuePeriod(month, sub); due {
+		if _, due, anomaly := SubscriptionDuePeriod(month, sub); due || anomaly != "" {
 			candidates = append(candidates, sub.ID)
 		}
 	}
@@ -429,23 +441,45 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 	bodies := map[string]*ReportBody{}
 	for _, id := range candidates {
 		// —— 阶段一：锁内新读 + 重判（只判定，不生成、不投递）——
-		period, due, derr := inspectDueUnderLock(ctx, db, id, month)
+		period, due, anomaly, derr := inspectDueUnderLock(ctx, db, id, month)
 		if derr != nil {
 			// 认领面/读面出不来 ⇒ 不投（fail-closed：宁可下一轮再投，也不要两个实例同时投）。
 			log.Printf("reports: inspect subscription %d: %v", id, derr)
 			failed++
 			continue
 		}
+		if anomaly != "" {
+			// `pending_period` 不可信（形态非法 / 未来期号）。**留痕**（last_error + fail_streak，
+			// **不设退避**；同一条值只写一次）已经在锁内落盘，这里只补日志与计数 ——
+			// 原因文案见 classifyPendingPeriod（含恢复路径）。
+			log.Printf("reports: subscription %d: %s", id, anomaly)
+			if !due {
+				// 形态非法：这一条本轮不投（等人工修库），其余订阅照常投 —— 这正是本条的修复点。
+				failed++
+				continue
+			}
+			// 未来期号：period 已由正常路径算出（= 当前应投期）⇒ 继续往下投，
+			// 欠投期不因外部写坏的那一格被丢下。那一格**不被静默改写**（落账只在
+			// "投出的正是游标那一期"时动它）—— 时钟走到它时自然收口（判据③ 钉住收敛）。
+		}
 		if !due {
 			continue // 已投递 / 退避窗口内 / 已禁用 ⇒ 这一轮没事做
 		}
 		body, cached := bodies[period]
 		if !cached {
-			body, err = GenerateMonthlyReportForPeriod(db, period)
-			if err != nil {
-				return ok, failed, err
+			genBody, gerr := GenerateMonthlyReportForPeriod(db, period)
+			if gerr != nil {
+				// 单条订阅的期号生成失败**不得**终止整批（R22-V3-B1）：修前这里是
+				// `return ok, failed, err`，于是一条坏行（或一次库故障）让其余订阅这一轮
+				// 全部不投，而下一轮又在同一条上再次失败 ⇒ 全量停投且不自愈。
+				// 现在降级成"这一条本轮失败"：failed++ → last_error 留痕（锁内落账、
+				// 带退避）→ continue 处理其余订阅。
+				failed++
+				log.Printf("reports: subscription %d: generate report for period %s: %v", id, period, gerr)
+				recordReportGenerateFailure(ctx, db, id, period, month, gerr)
+				continue
 			}
-			bodies[period] = body
+			body, bodies[period] = genBody, genBody
 		}
 		// —— 阶段二：重新取锁 → 再新读 → 仍欠投才推 + 落账（同一把锁内）——
 		conn, claimed, cerr := claimReportDelivery(ctx, db, id)
@@ -466,7 +500,7 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 			releaseReportDelivery(ctx, conn, id)
 			continue
 		}
-		freshPeriod, stillDue := SubscriptionDuePeriod(month, sub)
+		freshPeriod, stillDue, _ := SubscriptionDuePeriod(month, sub)
 		if !stillDue {
 			// 对方（另一个实例）在我们生成这段时间里已经投成功 / 进了退避窗口。
 			log.Printf("reports: subscription %d no longer due after acquiring the claim; skipped this round", id)
@@ -518,24 +552,81 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 //   - 工程上：用 `*sql.DB` 读会向池里再要一条连接 —— 池上限 = 1 时持锁 + 要连接就是
 //     R14-K 的 hold-and-wait（自锁且不可恢复）。
 //
-// 返回 (期号, 是否欠投, 错误)；锁一定被释放（包括读失败的分支）。
-func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.Time) (string, bool, error) {
+// 返回 (期号, 是否欠投, 不可信原因, 错误)；锁一定被释放（包括读失败的分支）。
+//
+// 第三个返回值非空 = `pending_period` 不可信（见 classifyPendingPeriod）。**判定与
+// 记账在同一个临界区里做完**：持锁时把原因写进 `last_error`（`MarkReportAttemptOn`），
+// 否则两个实例/两轮之间会互相覆盖（与投递落账同一纪律）。
+// `nextAttemptAt` 传 nil ⇒ **不设退避**：这是可诊断的"外部写坏"状态，修好库值后
+// **下一轮**就该恢复投递，不需要重启、也不该等一个退避窗口。
+// `period` 传空 ⇒ `MarkReportAttemptOn` 的 CASE 谓词保证**不动** `pending_period`
+// （不可信的值原样留着等人工修；未来期号那一格由随后的正常投递推进/清空）。
+func inspectDueUnderLock(ctx context.Context, db *sql.DB, id int64, month time.Time) (string, bool, string, error) {
 	conn, claimed, err := claimReportDelivery(ctx, db, id)
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
 	if !claimed {
 		// 另一个实例正在处理这一条 —— 这是正常并发，不是错误（对方会给出结论）。
 		log.Printf("reports: subscription %d is being inspected by another instance; skipped this round", id)
-		return "", false, nil
+		return "", false, "", nil
 	}
 	defer releaseReportDelivery(ctx, conn, id)
 	sub, rerr := serverstore.GetReportSubscriptionOn(ctx, conn, id)
 	if rerr != nil {
-		return "", false, rerr
+		return "", false, "", rerr
 	}
-	period, due := SubscriptionDuePeriod(month, sub)
-	return period, due, nil
+	period, due, anomaly := SubscriptionDuePeriod(month, sub)
+	if anomaly != "" && sub.LastError != serverstore.SanitizeReportError(anomaly) {
+		// 同一条不可信值已经留在 `last_error` 里 ⇒ **不重复写**：一个永久坏值否则会每 tick
+		// 改写同一行并把 `fail_streak` 无限推高（`failed` 计数与日志仍然每轮都有，
+		// 可观测性不受影响）。值被改成另一个坏值时文案不同 ⇒ 照常重新留痕。
+		if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, "", false, anomaly, nil); merr != nil {
+			log.Printf("reports: subscription %d: recording the pending_period anomaly did not land (%v) — "+
+				"the bad cursor stays undiagnosed in last_error", id, merr)
+		}
+	}
+	return period, due, anomaly, nil
+}
+
+// recordReportGenerateFailure 在**该订阅的锁内**记录"这一期生成失败"（R22-V3-B1 的
+// 另一半）：`last_error` + `fail_streak` + 退避窗口，与投递失败**同一套**退避策略
+// （`reportRetryDelay`：首次 1 小时、之后按天）。
+//
+// 为什么必须持锁再写（而不是直接 `db.Exec`）：投递路径的记账纪律是"认领连接上落账"
+// （R14-K hold-and-wait 守则），这里写的是**同一行**，必须与认领互斥，否则会与另一个
+// 实例的成功落账互相覆盖。
+//
+// `period` 非空 ⇒ 若该订阅的 `pending_period` 还是空，这一期会被钉成欠投游标
+// （`MarkReportAttemptOn` 的 CASE 谓词）⇒ 下一轮继续补投它，不丢期。
+//
+// 落账失败只记日志：这是"失败之上的失败"，绝不能再把异常抛回调用方（那会把一条订阅的
+// 问题重新升级成整轮中止 —— 正是本条要消除的形态）。
+//
+// `now` 用调用方传进来的**调度时钟**（与投递失败路径的 `nextAttemptAfterFailure(month, …)`
+// 同一个基准），不在这里另取 `time.Now()`：判据用注入时钟推进月份，混用真实时钟会让
+// 退避窗口与调度时钟错位。
+func recordReportGenerateFailure(ctx context.Context, db *sql.DB, id int64, period string, now time.Time, genErr error) {
+	conn, claimed, cerr := claimReportDelivery(ctx, db, id)
+	if cerr != nil {
+		log.Printf("reports: subscription %d: claim to record the generation failure: %v", id, cerr)
+		return
+	}
+	if !claimed {
+		return // 另一个实例正持有这一条：它会给出结论，本轮不重复记账
+	}
+	defer releaseReportDelivery(ctx, conn, id)
+	sub, serr := serverstore.GetReportSubscriptionOn(ctx, conn, id)
+	if serr != nil {
+		log.Printf("reports: subscription %d: re-read to record the generation failure: %v", id, serr)
+		return
+	}
+	next := nextAttemptAfterFailure(now, sub.FailStreak+1)
+	if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, false,
+		genErr.Error(), ptrTime(next)); merr != nil {
+		log.Printf("reports: subscription %d: recording the generation failure did not land (%v) — "+
+			"the next round will try the same period again", id, merr)
+	}
 }
 
 // ptrTime 取 time.Time 的地址（MarkReportAttempt 的"退避到何时"参数）。

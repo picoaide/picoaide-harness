@@ -1151,7 +1151,19 @@ func serveArchive(c *gin.Context, db *sql.DB, cacheDir string, p *serverstore.Ag
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 	c.Header("X-Preset-Version", p.Version)
-	c.Header("X-Preset-Checksum", p.Checksum)
+	// 完整性头走**唯一实现** `sharedskills.ArchiveChecksum`（第二十二轮复审 V2-B1，
+	// P2，A2-02 的兄弟面）：`app_releases.checksum` 是 schema 的默认可达态为空
+	// （`migrations-pg/0054_apps_backfill.sql` 按 `p.checksum` 原值回填），直发
+	// `p.Checksum` 会发出**空头**；而客户端对"头存在但为空"是 fail-closed
+	// （`packages/host/enterprise/src/auth-gate.ts` 的 `?? undefined` 把空头变成 `''`，
+	// `agent-preset-install.ts` 的 `if (checksum !== undefined)` 于是进入比较分支 ⇒
+	// `archive checksum mismatch; refused`）⇒ 那些行对**所有**员工永久装不上，
+	// 与 A2-02 修前的技能组织面逐字同形。
+	//
+	// 「与市场面 `marketplace.downloadAgentArchiveAdmin` 共用同一份实现」这件事由
+	// `internal/marketplace/agent_checksum_parity_test.go` 钉住（两头非空、彼此相等、
+	// 且都等于归档字节的 sha256）。
+	c.Header("X-Preset-Checksum", sharedskills.ArchiveChecksum(p.Checksum, payload))
 	c.Data(http.StatusOK, contentType, payload)
 }
 

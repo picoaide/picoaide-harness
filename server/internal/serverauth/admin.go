@@ -273,6 +273,18 @@ func AdminAuth(db *sql.DB) gin.HandlerFunc {
 func AdminUser(c *gin.Context) *serverstore.User { return currentAdmin(c) }
 
 // adminAuth validates session cookie and CSRF token for state-changing methods.
+//
+// V2-B2（第二十二轮复审，P2）：`ValidateAdminSession` 的错误必须**分类**，不能再
+// 一律 401 —— 与同包的 `BearerAuth` 同一套哨兵（`ErrAuthRejected` / `IsAuthRejection`）：
+//
+//   - **会话被拒**（不存在 / 已过期 / 空闲超时 / 用户无管理权限或已停用）⇒ 401 `AUTH_FAILED`（语义不变）；
+//   - **依赖不可用**（缺表 / 缺列 / 驱动错误 / 连接被拒 / 滑动窗口 UPDATE 失败）⇒ **500 `INTERNAL`**。
+//
+// 为什么分类是必须的：webadmin（`src/api.ts`）对**任何** 401 都调 `unauthorizedHandler`
+// ⇒ 管理员已登录期间一次 PG 抖动（重启 / 迁移半途缺表 / 连接池耗尽）就让管理控制台
+// 原地切到未登录态。与员工侧不同，cookie 不会被删、恢复后刷新即回，所以不是不可逆
+// 损失 —— 但它在排障时是**误导性**的（把"服务端不可用"显示成"你没登录"），而 500
+// 会让页面如实报错并保留会话。方向仍是 fail-closed（不会放行任何未验证的会话）。
 func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cookie, err := c.Cookie(sessionCookieName)
@@ -282,7 +294,12 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 		}
 		u, err := ValidateAdminSession(a.DB, cookie)
 		if err != nil {
-			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "会话无效或已过期")
+			if IsAuthRejection(err) {
+				writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "会话无效或已过期")
+				return
+			}
+			log.Printf("auth: validate admin session failed (dependency, not a rejection): %v", err)
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "认证服务暂时不可用，请稍后重试")
 			return
 		}
 		c.Set("admin_user", u)
@@ -290,6 +307,13 @@ func (a *AdminAPI) adminAuth() gin.HandlerFunc {
 		if c.Request.Method != "GET" && c.Request.Method != "HEAD" {
 			sess, err := GetAdminSession(a.DB, cookie)
 			token := c.GetHeader("X-CSRF-Token")
+			if err != nil && !errors.Is(err, serverstore.ErrNotFound) {
+				// 同一条纪律：会话行**读不出来**（缺表/缺列/驱动故障）不是 CSRF 结论，
+				// 不得伪装成 403「CSRF 校验失败」让前端去刷新 token 重试。
+				log.Printf("auth: admin session reload failed (dependency, not a rejection): %v", err)
+				writeError(c, http.StatusInternalServerError, "INTERNAL", "认证服务暂时不可用，请稍后重试")
+				return
+			}
 			if err != nil || !(VerifySessionCSRF(sess.CSRFKey, cookie, token) || VerifyCSRF(sess.CSRFKey, token, time.Now())) {
 				// F1: 独立错误码让 webadmin 自动刷新 token 并重试一次,
 				// 而不是把 CSRF 过期伪装成「没有权限」。

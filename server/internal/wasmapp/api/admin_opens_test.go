@@ -509,6 +509,136 @@ func TestAdminAppOpensExplicitWindowIsLocalDayUnderNegativeOffset(t *testing.T) 
 	}
 }
 
+// TestAdminAppAIUsageExplicitWindowIsLocalDayUnderNegativeOffset 是 D-01 在
+// **`/ai-usage` 端点**上的判据（与 `/opens` 那条同形、同一夹具纪律）。
+//
+// 为什么必须补（R22-V3-B5，复审 2026-09-26，P3）：`/ai-usage` 仓内原有三条判据里，
+// 唯一涉及窗口的是 `TestAdminAppAIUsageDaysWindow` ② 的"回显 == 请求值"——那是字符串，
+// 且**只在负偏移时区下才咬得住**；CI 与 Makefile 都不设 TZ（缺省 UTC）⇒ 把**两个端点
+// 共用的** `parseDayParam` 退回 `time.Parse`（R21-D-01 的形态）时，`/opens` 那条红、
+// `/ai-usage` 这三条**全绿**。若该形态将来只落在 `/ai-usage` 的调用点上（两份 handler
+// 各写一次解析），仓内就零判据能咬到。
+//
+// 强度不来自回显字符串，而来自**窗口边界真的决定了返回哪些天**：库里预置
+// 2026-01-04..2026-01-10 每一天的归因 usage 行（每天 10×日号 token，两侧留诱饵），
+// 请求 from=2026-01-05&to=2026-01-09 ⇒ 返回的 day 集合必须**恰好**是 01-05..01-09，
+// 且逐日归属与窗口合计都要对。旧实现（UTC 解析 + 本地日归一）在 America/Santiago 下
+// 把窗口算成 01-04..01-08 ⇒ 集合不等。
+//
+// 变异验证：`parseDayParam` 退回 `time.Parse("2006-01-02", raw)` ⇒ 本用例红（实测）。
+func TestAdminAppAIUsageExplicitWindowIsLocalDayUnderNegativeOffset(t *testing.T) {
+	e := newTestEnv(t)
+	seedApp(t, e, "notes", "备忘工具", "alice", true)
+
+	loc := mustLoadLocation(t, "America/Santiago")
+	withLocalZone(t, loc)
+
+	uid := e.ids["alice"]
+	// 明细：01-04..01-10 每个本地日的本地 12:00 各一行归因 usage（比窗口宽 3 天，两侧都有诱饵）。
+	// created_at 由 SQL now() 写入 ⇒ 落库后再改写成目标本地时刻（与 V3 探针同一姿势）。
+	for d := 4; d <= 10; d++ {
+		id, err := serverstore.RecordUsageKind(e.db, uid, "demo-model", int64(10*d), 0, "chat")
+		if err != nil {
+			t.Fatalf("落 usage(2026-01-%02d): %v", d, err)
+		}
+		if err := serverstore.SetUsageAppID(e.db, id, "notes"); err != nil {
+			t.Fatalf("归因(2026-01-%02d): %v", d, err)
+		}
+		at := time.Date(2026, 1, d, 12, 0, 0, 0, loc)
+		if _, err := e.db.Exec(`UPDATE usage SET created_at = $1 WHERE id = $2`, at.UTC(), id); err != nil {
+			t.Fatalf("改 created_at(2026-01-%02d): %v", d, err)
+		}
+	}
+
+	w := e.req(http.MethodGet,
+		"/api/server/admin/wasm-apps/notes/ai-usage?from=2026-01-05&to=2026-01-09", e.tokens["boss"], nil)
+	var out serverstore.WasmAppAIUsage
+	e.decodeJSON(w, http.StatusOK, &out)
+
+	if out.From != "2026-01-05" || out.To != "2026-01-09" {
+		t.Fatalf("回显窗口 = %s~%s, want 2026-01-05~2026-01-09（入参是本地日历日）", out.From, out.To)
+	}
+	var got []string
+	for _, d := range out.Days {
+		got = append(got, d.Day)
+	}
+	want := "2026-01-05,2026-01-06,2026-01-07,2026-01-08,2026-01-09"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("窗口内的日集合 = [%s], want [%s] —— 窗口边界差一天就会多/少一天"+
+			"（UTC 解析在负偏移时区下正是这样左移一天；两侧诱饵 01-04/01-10 必须被排除）",
+			strings.Join(got, ","), want)
+	}
+	// 逐日归属：d 日那一行是 10*d token（日集合相等还不够 —— 归属错位同样要红）。
+	for i, d := range out.Days {
+		if wantTok := int64(10 * (5 + i)); d.PromptTokens != wantTok {
+			t.Fatalf("日 %s 的 prompt_tokens = %d, want %d（窗口边界错位会把邻日的量算进来）",
+				d.Day, d.PromptTokens, wantTok)
+		}
+	}
+	if out.Total.Requests != 5 || out.Total.PromptTokens != 10*(5+6+7+8+9) {
+		t.Fatalf("窗口合计 = %+v, want requests=5 / prompt_tokens=%d（两侧诱饵不得计入）",
+			out.Total, 10*(5+6+7+8+9))
+	}
+}
+
+// TestAdminAppAIUsageWindowOnDSTGapDayIsSingleLocalDay 把窗口端点落在**DST 缺口日**
+// （该本地日没有 00:00）上：Go 侧的窗口边界（`LocalDay`/`NextLocalDay`）与 SQL 侧的
+// 分组（`created_at AT TIME ZONE <本地时区名>`）必须给出**同一个日**。
+//
+// 为什么这条与上面那条不重复：上面那条钉的是"UTC 解析在负偏移下左移一天"（解析器形态），
+// 这条钉的是"窗口边界与分桶**同源**"—— 缺口日上两者只要有一侧按 UTC 或按 `time.Date`
+// 归一化，跨日的两行就会归错桶或落在窗口外（`America/Santiago` 2026-09-06 的本地零点
+// 不存在是实测形态，本机 tzdata 缺失/无缺口时如实 skip）。
+//
+// 变异验证：把窗口边界退回 `from.AddDate(0,0,1)` 之类的时刻算术（而非本地日推进），
+// 或把 SQL 分组换成不带时区的 `created_at::date` ⇒ 本用例红。
+func TestAdminAppAIUsageWindowOnDSTGapDayIsSingleLocalDay(t *testing.T) {
+	e := newTestEnv(t)
+	seedApp(t, e, "gap", "缺口日应用", "alice", true)
+	loc := mustLoadLocation(t, "America/Santiago")
+	withLocalZone(t, loc)
+	// 自校准：本机 tzdata 里 2026-09-06 的本地零点确实不存在（否则判据咬不到，如实 skip）。
+	if time.Date(2026, 9, 6, 0, 0, 0, 0, loc).Format("2006-01-02") == "2026-09-06" {
+		t.Skip("本机 tzdata 的 America/Santiago 2026-09-06 无缺口 —— 判据不可咬")
+	}
+
+	uid := e.ids["alice"]
+	// 缺口日当地 01:30（跳变后第一个小时）、次日 00:30（另一侧）、前一日 23:30（诱饵）。
+	for i, at := range []time.Time{
+		time.Date(2026, 9, 6, 1, 30, 0, 0, loc),
+		time.Date(2026, 9, 7, 0, 30, 0, 0, loc),
+		time.Date(2026, 9, 5, 23, 30, 0, 0, loc),
+	} {
+		id, err := serverstore.RecordUsageKind(e.db, uid, "demo-model", int64(100+i), 0, "chat")
+		if err != nil {
+			t.Fatalf("落 usage(%v): %v", at, err)
+		}
+		if err := serverstore.SetUsageAppID(e.db, id, "gap"); err != nil {
+			t.Fatalf("归因(%v): %v", at, err)
+		}
+		if _, err := e.db.Exec(`UPDATE usage SET created_at = $1 WHERE id = $2`, at.UTC(), id); err != nil {
+			t.Fatalf("改 created_at(%v): %v", at, err)
+		}
+	}
+
+	w := e.req(http.MethodGet,
+		"/api/server/admin/wasm-apps/gap/ai-usage?from=2026-09-06&to=2026-09-06", e.tokens["boss"], nil)
+	var out serverstore.WasmAppAIUsage
+	e.decodeJSON(w, http.StatusOK, &out)
+	var got []string
+	for _, d := range out.Days {
+		got = append(got, d.Day)
+	}
+	if strings.Join(got, ",") != "2026-09-06" {
+		t.Fatalf("缺口日窗口的日集合 = [%s], want [2026-09-06] —— Go 侧窗口边界与 SQL 侧"+
+			"`AT TIME ZONE` 分组不同源（或窗口被归一化到前一天）", strings.Join(got, ","))
+	}
+	if out.Total.Requests != 1 || out.Total.PromptTokens != 100 {
+		t.Fatalf("缺口日窗口的归属 = %+v, want requests=1 / prompt_tokens=100（只含缺口日内那一行）",
+			out.Total)
+	}
+}
+
 // TestAdminOpensSummaryTrendUVNotSumOfApps 复现并钉住 P1-1（2026-09-20 本机全功能
 // 实测）：`GET /opens/summary` 的 `trend[].uv` 曾经是
 // `SELECT day, SUM(pv), SUM(uv) FROM wasm_app_opens_daily GROUP BY day` —— 把日汇总里

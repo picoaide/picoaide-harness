@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"log"
 	"strconv"
 	"time"
 
@@ -99,29 +101,60 @@ func DeleteAdminSession(db *sql.DB, cookieSecret string) error {
 // ValidateAdminSession checks expiry (hard TTL + idle timeout) and that the
 // user has management access (super_admin or auditor; plain user is rejected).
 // 入参是 **cookie 值**(内部按哈希定位,P2-2)。
+//
+// 返回的错误分两类（调用方用 `IsAuthRejection` 区分；两类的 HTTP 语义见
+// `ErrAuthRejected` 的注释）—— 第二十二轮复审 V2-B2（P2），与 `VerifyToken` 同一套口径：
+//
+//   - `ErrAuthRejected`（包装）—— **会话被拒**（不存在 / 已过期 / 空闲超时 /
+//     用户已无管理权限或已停用）⇒ 401 `AUTH_FAILED`；
+//   - 其余（驱动错误 / 表缺失 / 语句超时，原样返回）—— **依赖不可用** ⇒ 500 `INTERNAL`。
+//
+// 唯一的例外是末尾的"滑动窗口"UPDATE：它是**尽力而为的簿记**（失败只记日志，
+// 不影响返回值），与员工侧 `VerifyToken` 的 `TouchTokenLastUsed` 同口径 ——
+// 见那里的注释。
+//
+// 为什么必须分类：`adminAuth` 修前是"任何 error ⇒ 401"，而 webadmin
+// （`src/api.ts`）对**任何** 401 都调 `unauthorizedHandler` ⇒ 一次 PG 抖动
+// （重启 / 缺表 / 连接池耗尽）就让管理控制台原地切到未登录态。方向仍是 fail-closed
+// （不会放行任何未验证的会话），错的是分类与它的破坏性副作用。
 func ValidateAdminSession(db *sql.DB, id string) (*serverstore.User, error) {
 	s, err := GetAdminSession(db, id)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		return nil, fmt.Errorf("%w: admin session not found", ErrAuthRejected)
+	}
 	if err != nil {
+		// 存储层故障：**不**包装成 ErrAuthRejected（分类错会把一次 PG 抖动
+		// 变成"管理会话失效"）。
 		return nil, err
 	}
 	if time.Now().After(s.ExpiresAt) {
-		return nil, errors.New("session expired")
+		return nil, fmt.Errorf("%w: session expired", ErrAuthRejected)
 	}
 	// Idle timeout: a session untouched for AdminIdleTimeout is expired.
 	if time.Since(s.LastUsedAt) > AdminIdleTimeout {
-		return nil, errors.New("session idle expired")
+		return nil, fmt.Errorf("%w: session idle expired", ErrAuthRejected)
 	}
 	u, err := serverstore.GetUserByID(db, s.UserID)
+	if errors.Is(err, serverstore.ErrNotFound) {
+		return nil, fmt.Errorf("%w: admin user not found", ErrAuthRejected)
+	}
 	if err != nil {
 		return nil, err
 	}
 	if !u.HasManagementAccess() || u.Status != 1 {
-		return nil, errors.New("not an active admin")
+		return nil, fmt.Errorf("%w: not an active admin", ErrAuthRejected)
 	}
 	// Sliding idle window: refresh last_used_at on each validated use.
-	if _, err := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE secret_hash = ?",
-		time.Now().UTC().Format(time.RFC3339), sessionSecretHash(id)); err != nil {
-		return nil, err
+	//
+	// **尽力而为的簿记，不是判定**（第二十二轮复审 V2-B2）：与员工侧
+	// `VerifyToken` 的 `TouchTokenLastUsed` **逐字同口径**（那里也是 `_ =` 忽略错误，
+	// 所以 `BearerAuth` 在只读 PG 上照常 200）。失败只意味着空闲窗口不前进
+	// （会话仍按上一次成功刷新的时刻计空闲超时，方向仍 fail-closed），而把它当
+	// 依赖故障回 500 会让只读副本 / 写路径抖动期间**管理员连读取都做不到** ——
+	// 比"窗口不前进"严重得多。出错必须留痕，不得静默。
+	if _, uerr := db.Exec("UPDATE admin_sessions SET last_used_at = ? WHERE secret_hash = ?",
+		time.Now().UTC().Format(time.RFC3339), sessionSecretHash(id)); uerr != nil {
+		log.Printf("auth: admin session idle-window refresh failed (non-fatal bookkeeping): %v", uerr)
 	}
 	return u, nil
 }

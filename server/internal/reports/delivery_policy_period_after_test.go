@@ -22,8 +22,9 @@ package reports
 //
 // ## 判据（三条，缺一条都测不到"游标只推进字面年月"）
 //
-//	① **严格晚一期**：六个时区（含缺陷本体的 `America/Asuncion`）× 五个期号
-//	   （含跨年）上，`periodAfter(p)` 必须**严格晚于** p 且恰为下一月；
+//	① **严格晚一期**：六个时区（含缺陷本体的 `America/Asuncion`）× 若干期号
+//	   （含跨年、含"**自身月首零点不存在**"的期号）上，`periodAfter(p)` 必须**严格
+//	   晚于** p 且恰为下一月；
 //	② **缺口形态**：`time.Local = America/Asuncion` 时，那几个"1 日零点不存在"的
 //	   月份仍必须推进一期（**自校准**：先证明本机 tzdata 下旧实现真的会卡住，
 //	   否则 `t.Skipf` 说明"判据在本环境咬不到"，不假红）；
@@ -43,9 +44,14 @@ package reports
 //     `AddDate(0,1,0)` ⇒ ② 红（Asunción 形态），① 在其余五个时区仍绿 ——
 //     这正是修前判据面缺失的原因；
 //   - 只把解析换成 `time.Parse` 但仍做**本地**月算术 ⇒ ② 红（同样的归一化）；
-//   - `periodAfter` 恒返回入参（游标不推进）⇒ ①②③ 全红。
+//   - `periodAfter` 恒返回入参（游标不推进）⇒ ①②③ 全红；
+//   - **只**把 `parseBeijingPeriod` 的解析换成 `ParseInLocation(…, time.Local)`
+//     （月算术不动 —— R21F-05 的"另一半"）⇒ ①（`2017-10` 语料）与 ②④ 红
+//     （R22-V3-B4，复审 2026-09-26：修前仓内 4 条判据在这个变异下**全绿**，
+//     因为语料里只有"缺口在期号**下一月**"的形态，没有"缺口就在**本月**"的形态）。
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -53,8 +59,15 @@ import (
 // periodAfterCases 覆盖缺陷形态（2017-09 / 2023-09，Asunción 的缺口月前一月）、
 // 普通月与跨年（年末 +1 月进到次年）。
 var periodAfterCases = []struct{ in, want string }{
-	{"2017-09", "2017-10"}, // 缺口月的前一月（缺陷本体）
-	{"2023-09", "2023-10"}, // 缺口月的前一月（第二组实测形态）
+	{"2017-09", "2017-10"}, // 缺口在期号的**下一月**（AddDate 归一化把月首吞回本月）
+	{"2023-09", "2023-10"}, // 同上（第二组实测形态）
+	// R22-V3-B4：缺口就在**期号自己的那个月**（`2017-10-01 00:00` 本地不存在 ⇒
+	// `ParseInLocation` 把日期值推到 09-30，`+1 月` 之后仍是同一期）。这两条把
+	// "只把解析换回 time.Local"这半个变异钉死 —— 修前语料里一条都没有。
+	{"2017-10", "2017-11"},
+	{"2023-10", "2023-11"},
+	{"2000-10", "2000-11"}, // 同一形态的更早一组（扫描实测命中）
+	{"2001-03", "2001-04"}, // America/Havana（另一族 DST 形态，扫描实测命中）
 	{"2016-03", "2016-04"}, // Asia/Amman 的缺口月（归一化只挪小时、date 不变 ⇒ 无害，作对照）
 	{"2026-01", "2026-02"},
 	{"2026-02", "2026-03"},
@@ -116,7 +129,9 @@ func TestPeriodAfterDoesNotStallOnDSTGapAtMonthStart(t *testing.T) {
 	if err != nil {
 		t.Skipf("本机没有时区数据 America/Asuncion: %v", err)
 	}
-	// (期号, 缺口所在月) —— 缺口月 = 期号的下一月。
+	// (期号, 缺口所在月, 期望的下一期) —— 缺口月可以是期号的**下一月**（AddDate 把月首
+	// 归一化回本月），也可以是期号**自己那一个月**（ParseInLocation 就已经把日期值推到
+	// 上月最后一天）。R22-V3-B4 补的是后者：修前语料只有前者 ⇒ "只换解析"的变异全绿。
 	cases := []struct {
 		period     string
 		gapYear    int
@@ -125,6 +140,8 @@ func TestPeriodAfterDoesNotStallOnDSTGapAtMonthStart(t *testing.T) {
 	}{
 		{"2017-09", 2017, time.October, "2017-10"},
 		{"2023-09", 2023, time.October, "2023-10"},
+		{"2017-10", 2017, time.October, "2017-11"}, // 缺口在期号自身那一月
+		{"2023-10", 2023, time.October, "2023-11"}, // 同上
 	}
 	for _, c := range cases {
 		// 自校准 ①：本地月首零点必须真的不存在（`time.Date` 把它归一化掉了）。
@@ -148,6 +165,65 @@ func TestPeriodAfterDoesNotStallOnDSTGapAtMonthStart(t *testing.T) {
 				"欠投游标原地不动（补投链断在原地）", loc, c.period, got, c.wantPeriod)
 		}
 	}
+}
+
+// periodAfterScanZones 是④扫描的时区空间：两处"月首零点不存在"的**真形态**
+// （America/Asuncion、America/Havana，本机 tzdata 扫描命中）+ 东于 UTC+8 的回归面
+// （R21F-01）+ 两个有 DST 的对照。
+var periodAfterScanZones = []string{
+	"UTC", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney",
+	"America/Asuncion", "America/Havana", "Asia/Amman",
+	"Pacific/Apia", "America/Santiago",
+}
+
+// TestPeriodAfterAdvancesAcrossOwnMonthStartGap 是④：**自己找**"哪一组 (时区, 期号)
+// 真的会卡"，而不是靠人眼挑年份。
+//
+// 为什么需要它（R22-V3-B4，复审 2026-09-26，P3）：V3 用 487 时区 × 21 年的扫描发现，
+// 只把 `parseBeijingPeriod` 的解析换回 `ParseInLocation(…, time.Local)`（月算术不动）
+// 时，仓内 4 条判据**全绿**，而 `America/Asuncion` 的 2017-10 / 2023-10 真的卡住 ——
+// 因为语料里只有"缺口在期号**下一月**"的形态。现在语料（①②）已补上该形态，本用例再把
+// "还可能有哪些形态"交给自校准扫描，避免下一次只补一个年份。
+//
+// 自校准（本仓对 tzdata 类判据的纪律）：卡住的形态由**旧实现自己**产生
+// （`legacyPeriodAfterForTest(p, loc) == p`）；一个都扫不到就 `t.Skipf` 如实说明
+// "本环境咬不到"（tzdata 缺失/被裁剪），既不假红也不假绿。
+func TestPeriodAfterAdvancesAcrossOwnMonthStartGap(t *testing.T) {
+	scanned, stalls := 0, 0
+	for _, tz := range periodAfterScanZones {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			t.Skipf("本机没有时区数据 %s: %v", tz, err)
+		}
+		withProcessLocal(t, loc)
+		for y := 2000; y <= 2040; y++ {
+			for m := 1; m <= 12; m++ {
+				period := fmt.Sprintf("%04d-%02d", y, m)
+				scanned++
+				if legacyPeriodAfterForTest(period, loc) != period {
+					continue // 本环境这个 (时区, 期号) 不是缺陷形态 ⇒ 无需断言
+				}
+				stalls++
+				want := time.Date(y, time.Month(m), 1, 0, 0, 0, 0, time.UTC).
+					AddDate(0, 1, 0).Format("2006-01")
+				got := periodAfter(period)
+				if got == period {
+					t.Fatalf("TZ=%s periodAfter(%q) = %q —— 游标原地不动：该月首零点在本地不存在时，"+
+						"解析与月算术都不得经过 time.Local（旧实现正好卡在这里，自校准已证明）",
+						tz, period, got)
+				}
+				if got != want {
+					t.Fatalf("TZ=%s periodAfter(%q) = %q, want %q", tz, period, got, want)
+				}
+			}
+		}
+	}
+	if stalls == 0 {
+		t.Skipf("扫描了 %d 个 (时区 × 期号) 都没命中「自身月首零点不存在」的形态 ⇒ "+
+			"判据在本环境咬不到（tzdata 缺失或被裁剪），不假绿", scanned)
+	}
+	t.Logf("扫描 %d 个 (时区 × 期号)，自校准命中 %d 个旧实现会卡住的形态，全部严格推进恰好一个月",
+		scanned, stalls)
 }
 
 // TestNextPendingAfterDeliveryAlwaysAdvances 是③：把判据钉在**真实后果**上 ——

@@ -137,6 +137,53 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// 健康面的"读不到 ⇒ 未知"档（审计 2026-09-26 F-03 的复核项，第二十二轮复审 V2-B4）。
+//
+// 缺陷形态（修前）：
+//   - `chain_stale` **缺失**时 `info.audit.chain_stale` 是 `undefined` ⇒ 三元落到
+//     else 分支 ⇒ 渲染「有效（999999 秒前）」—— **fail-open**：读不到的结论被画成
+//     "有效"，而兄弟字段 `chain_intact` 缺失时走的是"断链"（fail-closed）⇒ 同一张卡
+//     两个方向；Go 侧 `AuditChainStatusDetail` 自己是 fail-closed 的（未校验/时间戳
+//     解析失败 ⇒ `Stale=true`），所以这里只是渲染层缺了"未知"这一档。
+//   - `balance` 块在、但 `admission_rejections` 缺失 ⇒ `undefined.toLocaleString()`
+//     ⇒ **整页 TypeError**（健康面缺一个字段把整个管理页打成错误页）。
+//
+// 规则：**缺失一律渲染"未知"**（本页对"读不到"的既有约定是短横 `—`，与
+// `链校验结论`／`累计拒绝次数` 的整块缺失档一致），既不说"有效"也不说"已过期"，
+// 更不崩。显式的 `false`／数字照旧按原语义渲染（语义不放宽）。
+// ---------------------------------------------------------------------------
+
+/** 数字字段缺失/类型不对 ⇒ `—`（绝不把 `undefined` 渲染进 DOM，也不显示 0）。 */
+function numOrDash(v: number | undefined | null): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString() : '—'
+}
+
+/**
+ * 审计计数沿用**修前的原样渲染**（无千分位）—— 本函数只加"缺失 ⇒ `—`"这一档，
+ * 不改既有数字的显示形态（`chain_checks` / `chain_rows` / 写入缺口那一行的
+ * 断言逐字依赖它）。
+ */
+function rawCountOrDash(v: number | undefined | null): string {
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : '—'
+}
+
+/** 链校验结论三态：真/假/未知（未知 = `chain_intact` 缺失，不再画成"断链于 id=undefined"）。 */
+function chainVerdictText(audit: SysInfo['audit']): string {
+  if (!audit) return '—'
+  if (!audit.chain_checked) return '尚未校验'
+  if (typeof audit.chain_intact !== 'boolean') return '—'
+  return audit.chain_intact ? '完整' : `断链于 id=${audit.chain_broken_id}`
+}
+
+/** 结论新鲜度三态：真/假/未知（未知 = `chain_stale` 缺失 ⇒ `—`，**不是**"有效"）。 */
+function chainFreshnessText(audit: SysInfo['audit']): string {
+  if (!audit) return '—'
+  if (typeof audit.chain_stale !== 'boolean') return '—'
+  const age = typeof audit.chain_age_seconds === 'number' ? `${audit.chain_age_seconds} 秒前` : '未知时间'
+  return audit.chain_stale ? `已过期（${age}）` : `有效（${age}）`
+}
+
 export default function ServerInfo() {
   const [info, setInfo] = useState<SysInfo | null>(null)
   const [conc, setConc] = useState<ConcurrencyStatus | null>(null)
@@ -274,7 +321,7 @@ export default function ServerInfo() {
               <CardContent>
                 <InfoRow
                   label="累计拒绝次数"
-                  value={info.balance ? info.balance.admission_rejections.toLocaleString() : '—'}
+                  value={numOrDash(info.balance?.admission_rejections)}
                 />
                 {info.balance?.last_rejection ? (
                   <>
@@ -310,24 +357,16 @@ export default function ServerInfo() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <InfoRow label="链校验结论" value={
-                  !info.audit ? '—' : !info.audit.chain_checked ? '尚未校验' :
-                    info.audit.chain_intact ? '完整' :
-                      `断链于 id=${info.audit.chain_broken_id}`
-                } />
-                <InfoRow label="结论新鲜度" value={
-                  !info.audit ? '—' : info.audit.chain_stale
-                    ? `已过期（${info.audit.chain_age_seconds} 秒前）`
-                    : `有效（${info.audit.chain_age_seconds} 秒前）`
-                } />
+                <InfoRow label="链校验结论" value={chainVerdictText(info.audit)} />
+                <InfoRow label="结论新鲜度" value={chainFreshnessText(info.audit)} />
                 <InfoRow label="校验执行者 / 次数" value={
                   !info.audit ? '—' :
-                    `${info.audit.chain_source || '—'} · ${info.audit.chain_checks} 次 · 扫描 ${info.audit.chain_rows} 行`
+                    `${info.audit.chain_source || '—'} · ${rawCountOrDash(info.audit.chain_checks)} 次 · 扫描 ${rawCountOrDash(info.audit.chain_rows)} 行`
                 } />
                 <InfoRow label="写入失败 / 丢弃条目" value={
                   !info.audit ? '—' : (
                     <span className={info.audit.dropped_entries > 0 || info.audit.write_failures > 0 ? 'font-semibold text-destructive' : ''}>
-                      {info.audit.write_failures} / {info.audit.dropped_entries}（重试 {info.audit.retries}）
+                      {rawCountOrDash(info.audit.write_failures)} / {rawCountOrDash(info.audit.dropped_entries)}（重试 {rawCountOrDash(info.audit.retries)}）
                     </span>
                   )
                 } />

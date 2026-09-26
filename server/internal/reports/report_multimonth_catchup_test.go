@@ -230,7 +230,7 @@ func TestPhaseTwoCriteriaAreNotRedundantUnderCursorSemantics(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		freshPeriod, stillDue := SubscriptionDuePeriod(month, c.sub)
+		freshPeriod, stillDue, _ := SubscriptionDuePeriod(month, c.sub)
 		if stillDue != c.wantStillDue {
 			t.Fatalf("%s: stillDue=%v, want %v（%s）", c.name, stillDue, c.wantStillDue, c.why)
 		}

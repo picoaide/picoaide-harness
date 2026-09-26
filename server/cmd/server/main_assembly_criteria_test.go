@@ -69,15 +69,27 @@ func (s *stubBrowserProvider) HandleCallback(code, state string) (serverauth.Use
 }
 func (s *stubBrowserProvider) Configure(map[string]string) error { return nil }
 
-// TestAssembleAuthAPIRegistersBrowserRoutes 是 `assembleAuthAPI` 那一行的**行为级**判据：
-// 注册过的浏览器登录方式必须真的出现在生产路由树上、不再是 404。
+// TestAssembleAuthAPIRegistersEveryConfiguredBrowserRoute 是 `assembleAuthAPI` 那一行的
+// **行为级**判据：**每一个**配置过的浏览器登录方式都必须真的出现在生产路由树上、不再是 404。
 //
-// 变异（必须变红）：把 `assembleAuthAPI` 的循环掏空（= 删掉 main() 里那一行的后果）
-// ⇒ 第一条断言红（404「该登录方式未配置或已禁用」），而对照断言仍然绿。
-func TestAssembleAuthAPIRegistersBrowserRoutes(t *testing.T) {
+// ## 为什么必须喂两个 provider（R22-V3-B3，复审 2026-09-26，P3）
+//
+// 只喂一个的话，`assembleAuthAPI` 被改成"只登记 `cfg.Browsers[0]`"（半实现）也**永远绿**
+// —— 而 oidc + openid 同时启用正是 `NewConfiguredAPI` 支持的形态（webadmin 的认证页就是
+// 两套独立配置）。判据因此改成：两个 provider 都配置时，`/auth/oidc/login` 与
+// `/auth/openid/login` **都**必须进入真实流程。
+//
+// ## 变异（必须变红，实跑对照见 temp/r21/fix-16/REPORT.md）
+//
+//   - 把 `assembleAuthAPI` 的循环掏空（= 删掉 main() 里那一行的后果）⇒ 第一条断言红
+//     （404「该登录方式未配置或已禁用」），而对照断言仍然绿；
+//   - 把循环改成只登记 `cfg.Browsers[0]`（**半实现**）⇒ 第二条断言里 openid 那一次红。
+func TestAssembleAuthAPIRegistersEveryConfiguredBrowserRoute(t *testing.T) {
 	db := requireRealDB(t)
 
-	browserLoginStatus := func(t *testing.T, browsers []serverauth.BrowserProvider) (int, string) {
+	// browserLoginStatus 复刻 `main()` 的装配链路：assembleAuthAPI(...) → Handlers() →
+	// registerProductionRoutes（生产路由真源），再请求某一条浏览器登录入口。
+	browserLoginStatus := func(t *testing.T, browsers []serverauth.BrowserProvider, name string) (int, string) {
 		t.Helper()
 		api := assembleAuthAPI(&serverauth.ConfiguredAPI{API: serverauth.New(db), Browsers: browsers})
 		deps := testProductionDeps(t, db)
@@ -87,27 +99,38 @@ func TestAssembleAuthAPIRegistersBrowserRoutes(t *testing.T) {
 		registerProductionRoutes(r, deps) // 生产路由真源（与 main() 同一段装配）
 
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/client/v2/auth/oidc/login", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/client/v2/auth/"+name+"/login", nil)
 		r.ServeHTTP(w, req)
 		return w.Code, w.Body.String()
 	}
 
-	// 对照：没有 browser provider ⇒ 动态解析拿到 nil ⇒ 404 + 明确文案。
-	code, body := browserLoginStatus(t, nil)
-	if code != http.StatusNotFound || !strings.Contains(body, "该登录方式未配置或已禁用") {
-		t.Fatalf("对照不成立：未注册 provider 时 /auth/oidc/login = %d %s, want 404「该登录方式未配置或已禁用」"+
-			"（对照不成立说明本用例测的不是这条路径）", code, body)
+	// 对照：没有 browser provider ⇒ 两条入口都必须 404 + 明确文案（动态解析拿到 nil）。
+	for _, name := range []string{"oidc", "openid"} {
+		code, body := browserLoginStatus(t, nil, name)
+		if code != http.StatusNotFound || !strings.Contains(body, "该登录方式未配置或已禁用") {
+			t.Fatalf("对照不成立：未注册 provider 时 /auth/%s/login = %d %s, want 404"+
+				"「该登录方式未配置或已禁用」（对照不成立说明本用例测的不是这条路径）", name, code, body)
+		}
 	}
 
-	// 判据：装配接缝注册过 ⇒ 请求进入真实的 OIDC 登录流程（不是 404）。
-	code, body = browserLoginStatus(t, []serverauth.BrowserProvider{&stubBrowserProvider{name: "oidc"}})
-	if code == http.StatusNotFound || strings.Contains(body, "该登录方式未配置或已禁用") {
-		t.Fatalf("注册过 provider 的 OIDC 登录仍然 404（%d %s）—— "+
-			"说明 main() 的 assembleAuthAPI(authCfg) 那一行没起作用（删掉它就是这个后果：全组织 SSO 恒 404）",
-			code, body)
+	// 判据：**两个** provider 都配置 ⇒ 两条入口都必须进入真实的 OIDC 登录流程（不是 404）。
+	browsers := []serverauth.BrowserProvider{
+		&stubBrowserProvider{name: "oidc"},
+		&stubBrowserProvider{name: "openid"},
 	}
-	if code != http.StatusFound && code != http.StatusOK {
-		t.Fatalf("OIDC 登录入口 = %d %s, want 302（重定向到 IdP）或 200", code, body)
+	if api := assembleAuthAPI(&serverauth.ConfiguredAPI{API: serverauth.New(db), Browsers: browsers}); !handlersHaveBrowser(api, "oidc") || !handlersHaveBrowser(api, "openid") {
+		t.Fatal("装配接缝没有把**全部** browser provider 注册进 API（Handlers().OIDC 缺项）")
+	}
+	for _, name := range []string{"oidc", "openid"} {
+		code, body := browserLoginStatus(t, browsers, name)
+		if code == http.StatusNotFound || strings.Contains(body, "该登录方式未配置或已禁用") {
+			t.Fatalf("配置过 provider 的 %s 登录入口仍然 404（%d %s）—— "+
+				"说明 main() 的 assembleAuthAPI(authCfg) 那一行没有把**每一个** provider 注册进去"+
+				"（删掉它、或只登记 Browsers[0] 的半实现，就是这个后果）", name, code, body)
+		}
+		if code != http.StatusFound && code != http.StatusOK {
+			t.Fatalf("%s 登录入口 = %d %s, want 302（重定向到 IdP）或 200", name, code, body)
+		}
 	}
 }
 

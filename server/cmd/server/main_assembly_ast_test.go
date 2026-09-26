@@ -19,19 +19,27 @@ package main
 //   - `if <编译期常量假> { … }` 的 then 分支；
 //   - `if <编译期常量真> { … } else { … }` 的 else 分支；
 //   - 条件为编译期常量假的 `for`；
+//   - 无 tag 的 `switch { case <编译期常量假>: … }` 的 case 体；
 //   - range 一个空集合（`nil` / 空复合字面量）；
 //   - 藏在**没有被装配到任何接缝上的**函数字面量里（不是赋值右侧、也不是立即调用）。
 //
 // 常量判定走 `go/constant`（支持 `false`/`true`、字面量、括号、`!`/一元负号、
-// `&&`/`||`/比较/四则），所以 `if 1 > 2 { … }` 这类"换个写法"的一样挡得住 ——
-// 只钉字面量 `false` 的判据等于只挡一个字符串。
+// `&&`/`||`/比较/四则），**并且解析命名常量**（`const v3X = false` 之后的 `if v3X { … }`）
+// —— 只钉字面量 `false` 的判据等于只挡一个字符串（R22-V3-B3 实测：命名常量形态曾 exit=0）。
 //
 // ## 边界（诚实声明，不假装完备）
 //
-// `switch` / `select` 的 case 体、`return` 之后的语句、`goto`、以及**调用方看不到
-// 的运行期条件**（`if os.Getenv("X") != ""`）都不在本判据的判别力内。要挡这些形态
-// 需要真正的可达性分析（`go/types` + CFG），代价远超收益；本判据的目标是审计登记
-// 的那一类"整行删掉/包进不执行分支仍绿"。
+// `select` 的 case 体、`return` 之后的语句、`goto`、带 tag 的 `switch`（需要值流分析）、
+// 以及**调用方看不到的运行期条件**（`if os.Getenv("X") != ""`）都不在本判据的判别力内。
+// 要挡这些形态需要真正的可达性分析（`go/types` + CFG），代价远超收益；本判据的目标是
+// 审计登记的那一类"整行删掉/包进不执行分支仍绿"。
+//
+// 实测对照（temp/r21/fix-16/REPORT.md，漏杀形态逐条落盘 exit 码）：
+//
+//	`const v3X = false; if v3X { … }`   ⇒ **挡住**（collectConsts 解析命名常量）
+//	`switch { case 1 > 2: … }`          ⇒ **挡住**（无 tag switch 的恒假 case 体）
+//	`if os.Getenv("…") != "" { … }`     ⇒ 挡不住（运行期条件；判据按"可达"处理，**不误杀**）
+//	`switch <tag> { case …: … }`        ⇒ 挡不住（值流分析）—— 通过行**不得**声称它被挡住
 
 import (
 	"go/ast"
@@ -56,6 +64,146 @@ type assemblySite struct {
 	Why string
 }
 
+// constEnv 是判据用的**编译期常量环境**：名字 → 值。
+//
+// 为什么需要它（R22-V3-B3，复审 2026-09-26，P3）：修前的 `constValue` 只认字面量，
+// 于是 `const v3AuthBrowsersDisabled = false; if v3AuthBrowsersDisabled { … }` 这种
+// **同一个编译期常量、换个写法**的形态实跑 exit=0 —— 而文件头自称"换个写法的一样
+// 挡得住"。那正是本判据自己要守的那 7 行装配。
+//
+// 收集规则（保守优先：宁可漏杀，不可误杀活代码）：
+//   - 顶层 `const` 声明块逐条折值入表（同块内前向引用可解析，`const ( a = false; b = a )`）；
+//   - `main()` 体内的 `const` 声明同样入表（更内层的作用域）；
+//   - **任何**把同名标识符当变量声明的形态（`x := …` / `var x …` / range 变量 / 形参）
+//     一律把该名字从表里摘掉 —— 变量不是编译期常量，绝不能因为"包级有个同名常量"
+//     就把活代码判死；
+//   - 同名不同值（真歧义）时整个名字失效（同样为了不误杀）。
+type constEnv struct {
+	values    map[string]constant.Value
+	invisible map[string]bool
+}
+
+func newConstEnv(f *ast.File, body *ast.BlockStmt) constEnv {
+	env := constEnv{values: map[string]constant.Value{}, invisible: map[string]bool{}}
+	env.collectFileConsts(f)
+	if body != nil {
+		env.collectMainScoped(body)
+	}
+	return env
+}
+
+// collectFileConsts 收集**包级** `const` 声明。
+func (e constEnv) collectFileConsts(f *ast.File) {
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		e.collectConstSpecs(gd)
+	}
+}
+
+// collectConstSpecs 逐条折值（`i >= len(Values)` = 继承上一行表达式，折不动 ⇒ 跳过）。
+func (e constEnv) collectConstSpecs(gd *ast.GenDecl) {
+	for _, spec := range gd.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range vs.Names {
+			if i >= len(vs.Values) {
+				continue
+			}
+			e.put(name.Name, constValue(vs.Values[i], e))
+		}
+	}
+}
+
+// collectMainScoped 走一遍 main() 体：局部 const 入表，变量声明把名字摘掉。
+func (e constEnv) collectMainScoped(body *ast.BlockStmt) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.DeclStmt:
+			gd, ok := x.Decl.(*ast.GenDecl)
+			if !ok {
+				return true
+			}
+			switch gd.Tok {
+			case token.CONST:
+				e.collectConstSpecs(gd)
+			case token.VAR:
+				for _, spec := range gd.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, name := range vs.Names {
+							e.hide(name.Name)
+						}
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if x.Tok == token.DEFINE {
+				for _, lhs := range x.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						e.hide(id.Name)
+					}
+				}
+			}
+		case *ast.RangeStmt:
+			if x.Tok == token.DEFINE {
+				for _, id := range []ast.Expr{x.Key, x.Value} {
+					if ident, ok := id.(*ast.Ident); ok {
+						e.hide(ident.Name)
+					}
+				}
+			}
+		case *ast.FuncLit:
+			e.hideFields(x.Type.Params)
+		case *ast.FuncDecl:
+			e.hideFields(x.Type.Params)
+		}
+		return true
+	})
+}
+
+func (e constEnv) hideFields(fl *ast.FieldList) {
+	if fl == nil {
+		return
+	}
+	for _, f := range fl.List {
+		for _, name := range f.Names {
+			e.hide(name.Name)
+		}
+	}
+}
+
+// put 写一条（同名不同值 ⇒ 判为歧义，整个名字失效）。
+func (e constEnv) put(name string, v constant.Value) {
+	if v == nil || e.invisible[name] {
+		return
+	}
+	if prev, ok := e.values[name]; ok {
+		if prev.Kind() != v.Kind() || prev.String() != v.String() {
+			e.hide(name)
+		}
+		return
+	}
+	e.values[name] = v
+}
+
+// hide 把名字从常量表里摘掉（此后按"运行期值"处理 ⇒ 判为可达）。
+func (e constEnv) hide(name string) {
+	delete(e.values, name)
+	e.invisible[name] = true
+}
+
+// lookup 查一个标识符的编译期值（未知 = nil = 当作运行期值）。
+func (e constEnv) lookup(name string) constant.Value {
+	if e.invisible[name] {
+		return nil
+	}
+	return e.values[name]
+}
+
 // findMainAssemblySite 在 src 的 `func main()` 函数体里查找装配点并判定可达性。
 func findMainAssemblySite(src []byte, match string) (assemblySite, error) {
 	fset := token.NewFileSet()
@@ -73,6 +221,7 @@ func findMainAssemblySite(src []byte, match string) (assemblySite, error) {
 	if body == nil {
 		return assemblySite{}, nil // 没有 main()：Found=false（判据会红）
 	}
+	env := newConstEnv(f, body)
 
 	var stack []ast.Node
 	var found *assemblySite
@@ -98,7 +247,7 @@ func findMainAssemblySite(src []byte, match string) (assemblySite, error) {
 			}
 			bestDepth = len(stack)
 			site := assemblySite{Found: true, Matched: text}
-			if why := staticDeadReason(stack[:len(stack)-1], n); why != "" {
+			if why := staticDeadReason(stack[:len(stack)-1], n, env); why != "" {
 				site.Dead, site.Why = true, why
 			}
 			found = &site
@@ -143,28 +292,56 @@ func requireAssemblyOnMainPath(t *testing.T, match, why string) {
 
 // staticDeadReason 沿祖先链判定 node 是否落在静态不可执行的构造里；返回原因
 // （空串 = 可达）。node 必须是 ancestors 末元素的直接后代。
-func staticDeadReason(ancestors []ast.Node, node ast.Node) string {
+func staticDeadReason(ancestors []ast.Node, node ast.Node, env constEnv) string {
 	for i := len(ancestors) - 1; i >= 0; i-- {
 		switch a := ancestors[i].(type) {
 		case *ast.IfStmt:
 			if inSubtree(a.Body, node) {
-				if v, ok := constBool(a.Cond); ok && !v {
+				if v, ok := constBool(a.Cond, env); ok && !v {
 					return "条件在编译期恒假（`if false { … }` 形态）"
 				}
 			}
 			if a.Else != nil && inSubtree(a.Else, node) {
-				if v, ok := constBool(a.Cond); ok && v {
+				if v, ok := constBool(a.Cond, env); ok && v {
 					return "落在编译期恒真的 if 的 else 分支（永不执行）"
 				}
 			}
 		case *ast.ForStmt:
 			if a.Cond != nil && inSubtree(a.Body, node) {
-				if v, ok := constBool(a.Cond); ok && !v {
+				if v, ok := constBool(a.Cond, env); ok && !v {
 					return "条件在编译期恒假的 for 循环体"
 				}
 			}
+		case *ast.CaseClause:
+			// 无 tag 的 `switch { case <编译期常量假>: … }`：case 体不可达。
+			// 只认**无 tag** 形态（有 tag 的 `switch x { case … }` 需要值流分析，不在
+			// 判别力内 —— 那种形态按可达处理，**不误杀**）；`select` 的 case 是通信操作，
+			// 同样不在判别力内（TypeSwitchStmt 的 CaseClause 父节点不是 SwitchStmt）。
+			// 向上找**本 case 所属的** switch：case 的父节点是 switch 的 Body 块，
+			// 所以跳过 BlockStmt 再取第一个非块祖先（TypeSwitchStmt 不在判别力内）。
+			var sw *ast.SwitchStmt
+			for j := i - 1; j >= 0; j-- {
+				if _, isBlock := ancestors[j].(*ast.BlockStmt); isBlock {
+					continue
+				}
+				sw, _ = ancestors[j].(*ast.SwitchStmt)
+				break
+			}
+			if sw == nil || sw.Tag != nil || len(a.List) == 0 || !inAnySubtree(a.Body, node) {
+				continue
+			}
+			allFalse := true
+			for _, cond := range a.List {
+				if v, ok := constBool(cond, env); !ok || v {
+					allFalse = false
+					break
+				}
+			}
+			if allFalse {
+				return "无 tag 的 switch 里条件在编译期恒假的 case 体"
+			}
 		case *ast.RangeStmt:
-			if inSubtree(a.Body, node) && rangeOverEmpty(a.X) {
+			if inSubtree(a.Body, node) && rangeOverEmpty(a.X, env) {
 				return "range 一个编译期为空的集合"
 			}
 		case *ast.FuncLit:
@@ -189,6 +366,17 @@ func inSubtree(outer, node ast.Node) bool {
 		return false
 	}
 	return outer.Pos() <= node.Pos() && node.End() <= outer.End()
+}
+
+// inAnySubtree 报告 node 是否落在 stmts 中某一条语句之内（case 体的判定用它，
+// 避免把 case **条件表达式**里的节点也算进	case 体）。
+func inAnySubtree(stmts []ast.Stmt, node ast.Node) bool {
+	for _, st := range stmts {
+		if inSubtree(st, node) {
+			return true
+		}
+	}
+	return false
 }
 
 // seamFuncLitParent 报告函数字面量的直接父节点是不是"**装配**"形态。
@@ -216,18 +404,18 @@ func seamFuncLitParent(parent ast.Node) bool {
 }
 
 // rangeOverEmpty 报告 range 的对象是不是编译期已知为空（nil / 空复合字面量）。
-func rangeOverEmpty(x ast.Expr) bool {
+func rangeOverEmpty(x ast.Expr, env constEnv) bool {
 	switch v := x.(type) {
 	case *ast.Ident:
 		return v.Name == "nil"
 	case *ast.CompositeLit:
 		return len(v.Elts) == 0
 	case *ast.ParenExpr:
-		return rangeOverEmpty(v.X)
+		return rangeOverEmpty(v.X, env)
 	case *ast.CallExpr:
 		// `make([]T, 0)` / `[]T{}` 之外的形态判不了 ⇒ 保守认为非空。
 		if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "make" && len(v.Args) >= 2 {
-			if n, ok := constInt(v.Args[1]); ok && n == 0 {
+			if n, ok := constInt(v.Args[1], env); ok && n == 0 {
 				return true
 			}
 		}
@@ -236,8 +424,8 @@ func rangeOverEmpty(x ast.Expr) bool {
 }
 
 // constBool 求表达式的编译期布尔值；非常量表达式返回 ok=false。
-func constBool(e ast.Expr) (value bool, ok bool) {
-	v := constValue(e)
+func constBool(e ast.Expr, env constEnv) (value bool, ok bool) {
+	v := constValue(e, env)
 	if v == nil || v.Kind() != constant.Bool {
 		return false, false
 	}
@@ -245,8 +433,8 @@ func constBool(e ast.Expr) (value bool, ok bool) {
 }
 
 // constInt 求表达式的编译期整数常量值。
-func constInt(e ast.Expr) (int64, bool) {
-	v := constValue(e)
+func constInt(e ast.Expr, env constEnv) (int64, bool) {
+	v := constValue(e, env)
 	if v == nil || v.Kind() != constant.Int {
 		return 0, false
 	}
@@ -257,7 +445,9 @@ func constInt(e ast.Expr) (int64, bool) {
 // constValue 是**受控的**常量折叠：只处理"判据需要挡住的写法"，任何不确定的
 // 形态一律返回 nil（= 当作运行期条件，判为可达）。折半途 panic 也吞掉转 nil ——
 // 判据宁可漏杀一个畸形写法，也不能因为一个解析不了的表达式把整包测试打红。
-func constValue(e ast.Expr) (out constant.Value) {
+//
+// `env` 提供**命名常量**的取值（`const v3X = false` ⇒ `if v3X { … }` 判死）。
+func constValue(e ast.Expr, env constEnv) (out constant.Value) {
 	defer func() {
 		if recover() != nil {
 			out = nil
@@ -271,7 +461,7 @@ func constValue(e ast.Expr) (out constant.Value) {
 		case "false":
 			return constant.MakeBool(false)
 		}
-		return nil
+		return env.lookup(x.Name)
 	case *ast.BasicLit:
 		switch x.Kind {
 		case token.INT, token.FLOAT, token.IMAG, token.CHAR, token.STRING:
@@ -279,9 +469,9 @@ func constValue(e ast.Expr) (out constant.Value) {
 		}
 		return nil
 	case *ast.ParenExpr:
-		return constValue(x.X)
+		return constValue(x.X, env)
 	case *ast.UnaryExpr:
-		v := constValue(x.X)
+		v := constValue(x.X, env)
 		if v == nil {
 			return nil
 		}
@@ -291,7 +481,7 @@ func constValue(e ast.Expr) (out constant.Value) {
 		}
 		return nil
 	case *ast.BinaryExpr:
-		a, b := constValue(x.X), constValue(x.Y)
+		a, b := constValue(x.X, env), constValue(x.Y, env)
 		if a == nil || b == nil {
 			return nil
 		}
@@ -447,6 +637,101 @@ func main() {
 }
 `
 
+	const namedConstFalse = `package main
+
+import "context"
+
+const v3AuthBrowsersDisabled = false
+
+func main() {
+	ctx := context.Background()
+	if v3AuthBrowsersDisabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const namedConstTrueElse = `package main
+
+import "context"
+
+const v3Always = true
+
+func main() {
+	ctx := context.Background()
+	if v3Always {
+		_ = ctx
+	} else {
+		startThing(ctx, nil)
+	}
+}
+`
+	const namedConstDerived = `package main
+
+import "context"
+
+const (
+	v3Base     = false
+	v3Disabled = v3Base || false
+)
+
+func main() {
+	ctx := context.Background()
+	if v3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const shadowedByLocalVar = `package main
+
+import "context"
+
+const v3Disabled = false
+
+func main() {
+	ctx := context.Background()
+	v3Disabled := compute()
+	if v3Disabled {
+		startThing(ctx, nil)
+	}
+}
+`
+	const wrappedSwitchCaseFalse = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	switch {
+	case 1 > 2:
+		startThing(ctx, nil)
+	}
+}
+`
+	const switchCaseLive = `package main
+
+import "context"
+import "os"
+
+func main() {
+	ctx := context.Background()
+	switch {
+	case os.Getenv("V3") != "":
+		startThing(ctx, nil)
+	}
+}
+`
+	const switchWithTagNotJudged = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	switch ctx {
+	case nil:
+		startThing(ctx, nil)
+	}
+}
+`
 	const match = "startThing(ctx, nil)"
 
 	cases := []struct {
@@ -466,6 +751,14 @@ func main() {
 		{"局部变量里的闭包", wrappedLocalClosure, true, true, "局部闭包可能没人调用（不是接缝）"},
 		{"插到接缝字段上的闭包", seamAssign, true, false, "接缝形态（schedulers.go / auth_assembly.go 家族）必须放行"},
 		{"条件分支但条件非常量", conditionalButLive, true, false, "运行期条件不得误杀（如 RebuildUsageLedger 的 err == nil）"},
+		// R22-V3-B3：修前实测 exit=0 的四条形态（前两条现在必须挡住，后两条如实保留为边界）。
+		{"包进命名常量假条件", namedConstFalse, true, true, "`const x = false; if x { … }` —— 换个写法的同一个编译期常量"},
+		{"命名常量真条件的 else 分支", namedConstTrueElse, true, true, "命名常量同样要能判 else 分支"},
+		{"命名常量派生自另一个常量", namedConstDerived, true, true, "同块内的常量表达式（`b = a || false`）也要折出来"},
+		{"包进无 tag switch 的恒假 case", wrappedSwitchCaseFalse, true, true, "`switch { case 1 > 2: … }`（V3 的 m5）"},
+		{"命名常量被同名局部变量遮蔽", shadowedByLocalVar, true, false, "同名局部变量不是常量 ⇒ 必须按可达处理（不误杀）"},
+		{"switch 的 case 是运行期条件", switchCaseLive, true, false, "运行期条件的 case 体不得误杀"},
+		{"带 tag 的 switch 不在判别力内", switchWithTagNotJudged, true, false, "值流分析范围外 —— 边界如实记在文件头，不假装挡住"},
 	}
 	for _, c := range cases {
 		got, err := findMainAssemblySite([]byte(c.src), match)

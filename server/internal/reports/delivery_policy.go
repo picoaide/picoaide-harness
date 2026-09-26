@@ -14,12 +14,18 @@ package reports
 //	③ **谁来投**：`claimReportDelivery` —— 跨实例互斥（PG advisory lock，按订阅 id）。
 //	   修前两个实例同时 tick 会把同一期投两遍（R19A-S1-06 实测 2 次）。
 //
+// 另有一条**可信度**判定（R22-V3-B1/B2，复审 2026-09-26）：`pending_period` 是库里
+// 的值，外部可以写坏。`classifyPendingPeriod` 是它的唯一判定点 —— 形态非法 ⇒ 本轮
+// 不投 + 记原因（fail-closed）；未来期号 ⇒ 忽略该格、走正常路径（不投幽灵空报表、
+// 不丢欠投期）。判定结果经 `SubscriptionDuePeriod` 的第三个返回值上抛给编排层。
+//
 // 为什么退避与期号要落库（迁移 0082）：内存态在多实例/重启后消失，而"这一期还没投出去"
 // 是必须跨重启存活的**事实**。
 
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
@@ -58,31 +64,124 @@ func reportRetryDelay(failStreak int) time.Duration {
 	return reportRetryMaxDelay
 }
 
-// SubscriptionDuePeriod 返回该订阅这一轮应投递的期号与"是否欠投"（判据直接调用它）。
+// SubscriptionDuePeriod 返回该订阅这一轮应投递的期号、是否欠投，以及
+// `pending_period` 不可信时的**可诊断原因**（空串 = 游标可信）—— 判据直接调用它。
 //
 // 判定顺序（顺序本身就是语义）：
 //  1. 订阅已禁用 ⇒ 不欠投；
 //  2. 退避窗口内（next_attempt_at > now）⇒ 不欠投（S1-06 ①：失败必须有退避）；
-//  3. `pending_period` 非空 ⇒ 补投**那一期**（S1-07：跨月不跳期；R21C-01 起它是
-//     "最早未投递期号"的**游标**，每成功投出一期由 `nextPendingAfterDelivery` 推进
-//     一格 ⇒ 被它挡住的中间各期不会再被永久跳过）；
+//  3. `pending_period` 非空 ⇒ 先过 `classifyPendingPeriod`（**唯一判定点**）：
+//     可信 ⇒ 补投那一期；形态非法 ⇒ fail-closed，本轮不投 + 给原因；未来期号 ⇒
+//     忽略这一格、落到第 4 条走正常路径（理由见 classifyPendingPeriod 的注释）；
 //  4. 否则"本月内还没成功投递过" ⇒ 投当前北京月的上一期（原语义）。
 //
-// 凡不欠投，返回的 period 都为空串（调用方不得据此生成报表）。
-func SubscriptionDuePeriod(now time.Time, sub serverstore.ReportSubscription) (period string, due bool) {
+// 凡不欠投，返回的 period 都为空串（调用方不得据此生成报表）。anomaly 非空**且
+// due=false** 时调用方要把它当成"这一条本轮失败"（failed++ + 落 last_error），
+// 但不能据此生成任何报表 —— 那正是 R22-V3-B1/B2 要挡的形态。
+func SubscriptionDuePeriod(now time.Time, sub serverstore.ReportSubscription) (period string, due bool, anomaly string) {
 	if !sub.Enabled {
-		return "", false
+		return "", false, ""
 	}
 	if sub.NextAttemptAt != nil && sub.NextAttemptAt.After(now) {
-		return "", false
+		return "", false, ""
 	}
 	if p := sub.PendingPeriod; p != "" {
-		return p, true
+		switch class, reason := classifyPendingPeriod(now, p); class {
+		case pendingMalformed:
+			// 形态非法 ⇒ 无法知道欠投到哪一期 ⇒ **本轮不投**（fail-closed），
+			// 绝不把这一格当合法期号去生成（修前它会让整批订阅停投）。
+			return "", false, reason
+		case pendingFuture:
+			// 未来期号 ⇒ 不可信输入，**忽略这一格**走正常路径：欠投期照常补投，
+			// 投出的正是当前应投期，`nextPendingAfterDelivery` 随后把这一格清空（自愈）。
+			if !ShouldRunMonthly(now, sub.LastRunAt) {
+				return "", false, reason
+			}
+			return CurrentPeriod(now), true, reason
+		}
+		return p, true, ""
 	}
 	if !ShouldRunMonthly(now, sub.LastRunAt) {
-		return "", false
+		return "", false, ""
 	}
-	return CurrentPeriod(now), true
+	return CurrentPeriod(now), true, ""
+}
+
+// pendingPeriodClass 是 `pending_period` 这一格的可信度分类。
+type pendingPeriodClass int
+
+const (
+	// pendingTrusted：形态合法且不晚于"当前应投期" ⇒ 可以据此生成报表。
+	pendingTrusted pendingPeriodClass = iota
+	// pendingMalformed：形态不是 `YYYY-MM`（外部 SQL 手改 / 半份备份恢复 / 旧格式遗留）。
+	pendingMalformed
+	// pendingFuture：形态合法但**晚于**"当前应投期" ⇒ 外部写入的未来期号。
+	pendingFuture
+)
+
+// classifyPendingPeriod 判定 `pending_period` 这一格的可信度（返回分类 + 可诊断原因）。
+//
+// ## 为什么外部写坏的值要当一等输入处理（R22-V3-B1/B2，复审 2026-09-26，P2/P3）
+//
+// `pending_period` 产品自身只写 `CurrentPeriod` 与它的后继，但它**存在库里** ⇒ 外部
+// （SQL 手改、半份备份恢复、改过格式的旧版本）可以写进任意字符串，而它是投递路径的
+// 唯一游标。两类形态各有独立的坏后果，且都在真 PG 上实测复现过：
+//
+//   - **形态非法**（`2026-99`）：`GenerateMonthlyReportForPeriod` 解析失败，而修前那
+//     一行的失败是**整轮中止**（`return ok, failed, err`）⇒ 一条坏行让**全部订阅**停投，
+//     且每轮都停在同一条上 ⇒ 不自愈（实测：健康订阅连续 5 轮 0 笔、从未被尝试）。
+//   - **未来期号**（形态合法但晚于当前应投期）：修前被当成合法期号**真的投出去**一份
+//     未来月的空报表，随后 `nextPendingAfterDelivery` 对"比当前应投期新"的期号一律
+//     清空游标 ⇒ 真正欠投的那几期被永久跳过。
+//
+// ## 两类输入的处置为什么不同（可用信息不同，不是随意选择）
+//
+//   - 形态非法 ⇒ 连"欠投到哪一期"都算不出来 ⇒ **本轮不投**（fail-closed）+ 记原因，
+//     等人工修库；**不设退避**，修好后下一轮自动恢复。
+//   - 未来期号 ⇒ 欠投期仍可算（正常路径给出的 `CurrentPeriod`），只是那一格游标不可信
+//     ⇒ **忽略它**继续补投（丢掉的是"外部写坏的那一格"，不是欠投期）。
+//
+// 严格性与 `parseBeijingPeriod` 逐字一致：`2026-6` / `2026-13` / `2026-02 ` / `2026-02-01`
+// 全部落 `pendingMalformed`（首尾空白**不** Trim —— 期号是定长零填充的标签，容忍空白
+// 就等于容忍"同一个月有两种字符串表示"）。
+func classifyPendingPeriod(now time.Time, pending string) (pendingPeriodClass, string) {
+	if pending == "" {
+		return pendingTrusted, ""
+	}
+	if _, err := parseBeijingPeriod(pending); err != nil {
+		return pendingMalformed, clipDiagnostic(fmt.Sprintf(
+			"pending_period 形态非法（want YYYY-MM）: %q —— 已 fail-closed 拒绝按它生成报表；"+
+				"人工修好该列后下一轮自动恢复（无需重启）", pending))
+	}
+	if cur := CurrentPeriod(now); pending > cur {
+		return pendingFuture, clipDiagnostic(fmt.Sprintf(
+			"pending_period 是未来期号（%q 晚于当前应投期 %q）—— 视为不可信输入并忽略该游标，"+
+				"本轮改走正常路径补投 %q", pending, cur, cur))
+	}
+	return pendingTrusted, ""
+}
+
+// clipDiagnostic 把诊断文案裁到 **190 字节以内**（< `serverstore.SanitizeReportError`
+// 的 200 字节截断线），且**只按 rune 边界裁**。
+//
+// 为什么必须有上界（R22-V3-B1 的收尾细节）：文案里回显的 `pending_period` 是**外部
+// 可控的任意字符串**，而 `SanitizeReportError` 超长时做的是 `msg[:200]` —— 直接切字节
+// 会切断多字节字符，PG 的 text 列会以 `invalid byte sequence for encoding "UTF8"`
+// **拒绝整条 UPDATE** ⇒ 该落库的诊断原因静默丢失（只剩日志）。裁到 190 字节以内还保证
+// `SanitizeReportError` 原样返回它，于是"重复值只写一次"的去重比较是逐字节可判的。
+func clipDiagnostic(s string) string {
+	const maxBytes = 190
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := 0
+	for i := range s { // range string 按 rune 边界给下标
+		if i > maxBytes-3 { // 留出省略号的 3 字节
+			break
+		}
+		cut = i
+	}
+	return s[:cut] + "…"
 }
 
 // CurrentPeriod 返回 now 所在北京月的**上一期**期号（`YYYY-MM`）—— 月报期号口径的唯一实现
@@ -107,6 +206,11 @@ func CurrentPeriod(now time.Time) string {
 //   - 投出的正是当前应投期（或期号为空/不合法）⇒ 清空游标（欠投已补完）。
 //
 // `YYYY-MM` 是定长零填充 ⇒ 字典序 = 时间序，可以直接比大小。
+//
+// ⚠️ `period >= CurrentPeriod(now)` 这条"清空游标"的分支只对**已经合法投出的**期号成立。
+// 外部写进来的**未来期号**根本不是"投出的期号"，它现在在 `SubscriptionDuePeriod` /
+// `classifyPendingPeriod` 那一层就被拦掉（不生成、不投递）⇒ 不会再出现"投出一份未来
+// 空报表再把游标清空、欠投期永久跳过"的形态（R22-V3-B2，复审 2026-09-26）。
 func nextPendingAfterDelivery(now time.Time, period string) string {
 	if period == "" {
 		// 兼容入口（MarkReportRun 不带期号）无从判断游标该推进到哪 ⇒ 维持旧语义。

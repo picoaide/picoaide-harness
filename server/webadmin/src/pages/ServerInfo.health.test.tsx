@@ -117,4 +117,73 @@ describe('ServerInfo · 余额闸门与审计健康的可视化出口(F-03)', ()
     expect(row.textContent).toContain('—')
     expect(screen.getByText('链校验结论')).toBeInTheDocument()
   })
+
+  // -------------------------------------------------------------------------
+  // 第二十二轮复审 V2-B4（P3）：上面第三条只删**整块**，咬不到"块在、个别字段缺"
+  // 这两种形态 —— 而它们各自是一个真实缺陷：
+  //   ① `chain_stale` 缺 ⇒ 修前渲染「有效（999999 秒前）」（fail-open：读不到的结论
+  //      被画成"有效"，而兄弟字段 `chain_intact` 缺时走的是"断链" fail-closed）；
+  //   ② `balance` 块在但 `admission_rejections` 缺 ⇒ 修前 `undefined.toLocaleString()`
+  //      ⇒ **整页 TypeError**。
+  // 修后统一按"未知"渲染（本页约定 = `—`），既不说"有效"也不崩。
+  // 变异（必须变红）：把 `chainFreshnessText` 退回 `audit.chain_stale ? … : '有效（…）'`
+  // ⇒ ①红；把 `numOrDash(info.balance?.admission_rejections)` 退回
+  // `info.balance ? info.balance.admission_rejections.toLocaleString() : '—'` ⇒ ②红。
+  // -------------------------------------------------------------------------
+
+  it('chain_stale 缺失 ⇒ 新鲜度渲染"未知"，绝不画成"有效"', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) return { checked_at: '2026-09-26T02:00:00Z', models: [] }
+      return {
+        ...baseInfo,
+        audit: {
+          // 块在、结论也在，**只缺** `chain_stale`（字段改名 / 老服务端 / 部分部署）。
+          chain_checked: true, chain_intact: true, chain_broken_id: 0,
+          chain_age_seconds: 999999, chain_source: 'periodic',
+          chain_checks: 3, chain_rows: 5150, chain_duration_ms: 42,
+          write_failures: 0, dropped_entries: 0, retries: 0,
+        },
+      }
+    })
+    render(<ServerInfo />)
+
+    expect(await screen.findByText('审计健康')).toBeInTheDocument()
+    // 兄弟字段仍然照旧渲染（证明这是"部分缺失"而不是整块缺失）。
+    expect(screen.getByText('完整')).toBeInTheDocument()
+    const row = screen.getByText('结论新鲜度').closest('div') as HTMLElement
+    expect(row.textContent).toContain('—')
+    expect(row.textContent).not.toContain('有效')
+    expect(row.textContent).not.toContain('已过期')
+  })
+
+  it('balance 块在但 admission_rejections 缺失 ⇒ 不崩、渲染"未知"', async () => {
+    mockRequest.mockImplementation(async (path: string) => {
+      if (path.endsWith('/concurrency')) return { checked_at: '2026-09-26T02:00:00Z', models: [] }
+      return {
+        ...baseInfo,
+        balance: {
+          // 缺 `admission_rejections`；`last_rejection` 在（证明是部分缺失）。
+          last_rejection: {
+            user_id: 7, username: 'zhangsan-哨兵', endpoint: 'chat', model: 'model-x',
+            reason: 'min_billable', required_money: 0.03, balance_money: 0.01,
+            at: '2026-09-26T01:02:03Z',
+          },
+        },
+        audit: {
+          chain_checked: true, chain_intact: true, chain_broken_id: 0,
+          chain_age_seconds: 12, chain_stale: false, chain_source: 'startup',
+          // 审计计数同样缺失：不得把 `undefined` 渲染进 DOM。
+        },
+      }
+    })
+    render(<ServerInfo />)
+
+    expect(await screen.findByText('余额闸门准入')).toBeInTheDocument()
+    // 页面没有崩（能渲染出块内其它内容）。
+    expect(screen.getByText('zhangsan-哨兵')).toBeInTheDocument()
+    const row = screen.getByText('累计拒绝次数').closest('div') as HTMLElement
+    expect(row.textContent).toContain('—')
+    // 整页不得出现 `undefined`（缺失字段一律走"未知"档）。
+    expect(document.body.textContent).not.toContain('undefined')
+  })
 })

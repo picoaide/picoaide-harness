@@ -15,6 +15,7 @@ import (
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -372,7 +373,11 @@ func downloadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 	c.Header("X-Preset-Version", r.Version)
-	c.Header("X-Preset-Checksum", r.Checksum)
+	// 与组织面 `agentshare.serveArchive` 共用 `sharedskills.ArchiveChecksum`（唯一实现，
+	// 第二十二轮复审 V2-B1）：空 `checksum` 必须**现算**归档字节的 sha256，
+	// 直发 `r.Checksum` 会下发空头 ⇒ 客户端 fail-closed（`checksum mismatch; refused`）
+	// ⇒ 存量行永久装不上。跨面同一性判据见 `agent_checksum_parity_test.go`。
+	c.Header("X-Preset-Checksum", sharedskills.ArchiveChecksum(r.Checksum, r.Archive))
 	_, _ = serverstore.IncrementAgentPresetDownload(db, name, r.Version)
 	c.Data(http.StatusOK, contentType, r.Archive)
 }

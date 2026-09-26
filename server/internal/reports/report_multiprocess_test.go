@@ -278,7 +278,7 @@ func TestMonthlyDispatchWorkerProcess(t *testing.T) {
 	}
 	dueBefore := 0
 	for _, sub := range pre {
-		if _, due := SubscriptionDuePeriod(month, sub); due {
+		if _, due, _ := SubscriptionDuePeriod(month, sub); due {
 			dueBefore++
 		}
 	}

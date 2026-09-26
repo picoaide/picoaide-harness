@@ -3,6 +3,7 @@ package marketplace
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -115,8 +116,12 @@ func (a *API) getSkill(c *gin.Context) {
 	// 授权检查先于下架检查(审计2026-L13):未授权用户对"存在但下架"与"不存在"
 	// 必须得到同一 404,不得用消息区分资源状态
 	if !u.IsAdmin {
-		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
-		if err != nil || !containsName(names, s.Name) {
+		names, aerr := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if aerr != nil {
+			writeAuthzQueryFailure(c, aerr)
+			return
+		}
+		if !containsName(names, s.Name) {
 			// 未授权与不存在同响应:不泄露资源存在性
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
@@ -139,6 +144,28 @@ func containsName(names []string, want string) bool {
 	return false
 }
 
+// writeAuthzQueryFailure 把**授权查询的依赖故障**写成一个分类正确的响应
+// （第二十二轮复审 V2-B3，P2）。
+//
+// 缺陷形态（修前，`getSkill` 与 `downloadArchive` 各一份）：
+//
+//	if err != nil || !containsName(names, s.Name) { 404 "技能不存在" }
+//
+// `AccessibleSkillNames` 的**依赖故障**与"确实未授权"被合并成同一个 404 ⇒
+// 一次 PG 抖动（授权表不可读）在员工侧表现为「这个技能没了」：客户端把它当**终态**
+// 展示，不会退避重试；而**同一台服务端**在同一次故障下，组织面
+// （`sharedskills.download` 的同类查询）回 **500** —— 口径分裂，且这一分支此前
+// **零日志**，排障时不可见。
+//
+// 分类口径与 `serverauth.WriteViewerError` 完全一致（组查询失败 ⇒ 500 INTERNAL，
+// 文案也取自那一处）；**未授权仍必须是 404**，不得用消息区分资源状态
+// （不泄露存在性，审计 2026-L13）。
+func writeAuthzQueryFailure(c *gin.Context, err error) {
+	log.Printf("marketplace: accessible skill names lookup failed (dependency, not a rejection) at %s: %v",
+		c.FullPath(), err)
+	serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权查询失败，请稍后重试")
+}
+
 func (a *API) downloadArchive(c *gin.Context) {
 	u, groups, verr := a.viewer(c)
 	if serverauth.WriteViewerError(c, u, verr) {
@@ -155,8 +182,12 @@ func (a *API) downloadArchive(c *gin.Context) {
 	}
 	// 授权先于下架(审计2026-L13)
 	if !u.IsAdmin {
-		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
-		if err != nil || !containsName(names, s.Name) {
+		names, aerr := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if aerr != nil {
+			writeAuthzQueryFailure(c, aerr)
+			return
+		}
+		if !containsName(names, s.Name) {
 			// 未授权与不存在/下架同响应:不泄露资源存在性
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return

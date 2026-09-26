@@ -264,7 +264,13 @@ func TestCrossMonthFailureKeepsPendingPeriod(t *testing.T) {
 	}
 }
 
-// TestSubscriptionDuePeriodPolicy 单元级判据：三条判定的顺序与语义。
+// TestSubscriptionDuePeriodPolicy 单元级判据：判定的顺序与语义，外加 `pending_period`
+// **不可信**（形态非法 / 未来期号）时的两类处置（R22-V3-B1/B2，复审 2026-09-26）。
+//
+// 变异（必须变红）：
+//   - `pending_period` 非空即欠投（修前形态）⇒ "形态非法"那条红（它会按 `2026-99` 生成）；
+//   - 未来期号退回"当合法期号投" ⇒ "未来期号"那条红（want 2026-08 = 正常路径的当前应投期）；
+//   - 未来期号直接判不欠投（本轮不投）⇒ 同上红（欠投期被外部写坏的那一格挡住）。
 func TestSubscriptionDuePeriodPolicy(t *testing.T) {
 	now := bjAt(2026, 9, 15, 10) // 本月 = 2026-09 ⇒ 上一期 = 2026-08
 	next := now.Add(time.Hour)
@@ -274,17 +280,37 @@ func TestSubscriptionDuePeriodPolicy(t *testing.T) {
 		sub  serverstore.ReportSubscription
 		want string
 		due  bool
+		// anomalyWant 是第三个返回值的期望形态："none" = 必须为空串；
+		// "any" = 必须非空（具体文案由 classifyPendingPeriod 给，含恢复路径）。
+		anomalyWant string
 	}{
-		{"禁用不投", serverstore.ReportSubscription{Enabled: false}, "", false},
-		{"退避窗口内不投", serverstore.ReportSubscription{Enabled: true, NextAttemptAt: &next, PendingPeriod: "2026-08"}, "", false},
-		{"有待补期号 ⇒ 补那一期（跨月也一样）", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-07"}, "2026-07", true},
-		{"从未投递 ⇒ 投上一期", serverstore.ReportSubscription{Enabled: true}, "2026-08", true},
-		{"本月已投递 ⇒ 不投", serverstore.ReportSubscription{Enabled: true, LastRunAt: &now}, "", false},
+		{"禁用不投", serverstore.ReportSubscription{Enabled: false}, "", false, "none"},
+		{"退避窗口内不投", serverstore.ReportSubscription{Enabled: true, NextAttemptAt: &next, PendingPeriod: "2026-08"}, "", false, "none"},
+		{"有待补期号 ⇒ 补那一期（跨月也一样）", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-07"}, "2026-07", true, "none"},
+		{"从未投递 ⇒ 投上一期", serverstore.ReportSubscription{Enabled: true}, "2026-08", true, "none"},
+		{"本月已投递 ⇒ 不投", serverstore.ReportSubscription{Enabled: true, LastRunAt: &now}, "", false, "none"},
+		// ① 形态非法：fail-closed（不生成、不投），但必须给出可诊断原因。
+		{"pending 形态非法 ⇒ 本轮不投 + 给原因", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-99"}, "", false, "any"},
+		{"pending 带空白 ⇒ 同上（期号严格定长）", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-08 "}, "", false, "any"},
+		// ② 未来期号：忽略不可信的那一格，走正常路径补投当前应投期（不投未来空报表）。
+		{"pending 是未来期号 ⇒ 忽略它、补当前应投期", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-11"}, "2026-08", true, "any"},
+		{"pending 恰为当前应投期 ⇒ 合法（不是未来）", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-08"}, "2026-08", true, "none"},
+		{"未来期号 + 本月已投过 ⇒ 不投但留原因", serverstore.ReportSubscription{Enabled: true, PendingPeriod: "2026-11", LastRunAt: &now}, "", false, "any"},
 	}
 	for _, c := range cases {
-		got, due := SubscriptionDuePeriod(now, c.sub)
+		got, due, anomaly := SubscriptionDuePeriod(now, c.sub)
 		if got != c.want || due != c.due {
-			t.Fatalf("%s: SubscriptionDuePeriod = (%q,%v), want (%q,%v)", c.name, got, due, c.want, c.due)
+			t.Fatalf("%s: SubscriptionDuePeriod = (%q,%v,%q), want (%q,%v)", c.name, got, due, anomaly, c.want, c.due)
+		}
+		switch c.anomalyWant {
+		case "none":
+			if anomaly != "" {
+				t.Fatalf("%s: anomaly = %q, want 空（可信的 pending_period 不得被误判）", c.name, anomaly)
+			}
+		case "any":
+			if anomaly == "" {
+				t.Fatalf("%s: anomaly 为空 —— 不可信的 pending_period 必须给出可诊断原因", c.name)
+			}
 		}
 	}
 }
