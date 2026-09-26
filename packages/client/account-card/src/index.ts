@@ -106,10 +106,18 @@ export function apply(ctx: Context): void {
       // 审计 2026-09-12 P1-5:令牌已失效时**不再 200 交付旧余额**。
       // usage-service 承诺过"the route layer maps it to a 401"但该映射
       // 从未实现 —— 结果令牌过期后账号卡继续静默展示过期金额。这里补上:
-      // 401 + 清会话(与 bootstrap.ts:108-110 / auth-gate.ts:1727-1730 同款),
-      // 让渲染层隐藏卡片并回登录页。
+      // 401 + 清会话,让渲染层隐藏卡片并回登录页。
+      //
+      // 审计 2026-09-26 R23-W2-03:**清会话必须走 `clearIfCurrent(那次请求用的令牌)`**,
+      // 不能无条件 `clear()`。`?refresh=1` 这一次请求在网关往返期间,用户可能以**同一
+      // 账号同一服务端**重新登录(新令牌):三个既有守卫全部放行(`username`/`serverURL`
+      // 相同;`owns(s)` 因 300ms 去抖尚未换快照而仍为真)⇒ 无条件 `clear()` 会把**刚建立
+      // 的新会话**连同刚写下的新令牌一起删掉,用户"刚登录又被弹回登录页"、反复重登无效,
+      // 且 `$DSH_HOME/session.json` 被删。同族三处数据面(`bootstrap.ts:113`、
+      // `wasm-apps.ts:555/1249`)与 auth-gate 的 13 处在这之前已改成本形态,这一处是漏网
+      // 的最后一处。反向语义不变:当前令牌**就是**那次请求用的令牌 ⇒ 真失效照样三件一起清。
       if (snapshot.authExpired) {
-        ctx.picoSession.clear()
+        ctx.picoSession.clearIfCurrent(s.token)
         return json(res, 401, { error: 'auth expired' })
       }
       json(res, 200, {

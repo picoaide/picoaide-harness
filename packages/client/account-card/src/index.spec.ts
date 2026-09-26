@@ -42,10 +42,17 @@ function response(): ServerResponse & { body: string } {
 function ctxFixture(session: { username: string; token: string; serverURL: string } | null) {
   const events = new Map<string, Set<(payload: unknown) => void>>()
   let registered: RouteEntry | undefined
-  const clear = vi.fn()
+  const clear = vi.fn(() => { session = null })
+  // 真 `SessionService.clearIfCurrent` 的语义（R23-W2-03）：令牌是唯一可用于判断
+  // "这一次失败属于哪一代会话"的身份 —— 当前会话的令牌与请求令牌不同就**什么都不做**。
+  const clearIfCurrent = vi.fn((token?: string) => {
+    if (token === undefined || session === null || session.token !== token) return false
+    clear()
+    return true
+  })
   return {
     ctx: {
-      picoSession: { getSession: () => session, clear },
+      picoSession: { getSession: () => session, clear, clearIfCurrent },
       on: vi.fn((event: string, listener: (payload: unknown) => void) => {
         if (!events.has(event)) events.set(event, new Set())
         events.get(event)!.add(listener)
@@ -64,6 +71,7 @@ function ctxFixture(session: { username: string; token: string; serverURL: strin
     getRoute: () => registered!,
     emit: (event: string, payload: unknown) => { for (const l of [...(events.get(event) ?? [])]) l(payload) },
     sessionCleared: clear,
+    clearIfCurrent,
   }
 }
 
@@ -131,7 +139,7 @@ describe('account-card host apply', () => {
     ))
     vi.stubGlobal('fetch', fetchMock)
     try {
-      const { ctx, getRoute, sessionCleared } = ctxFixture({ username: 'u', token: 'expired', serverURL: 'https://gw.example' })
+      const { ctx, getRoute, sessionCleared, clearIfCurrent } = ctxFixture({ username: 'u', token: 'expired', serverURL: 'https://gw.example' })
       apply(ctx)
       const res = response()
       await getRoute().handler(
@@ -141,6 +149,8 @@ describe('account-card host apply', () => {
       expect(fetchMock).toHaveBeenCalled()
       expect(res.statusCode).toBe(401)
       expect(JSON.parse(res.body)).toEqual({ error: 'auth expired' })
+      // R23-W2-03：清会话必须**带上这次请求用的令牌**（当前令牌就是它 ⇒ 真失效照样清）。
+      expect(clearIfCurrent, '真失效方向不得退化，且判据必须是带令牌的那一个').toHaveBeenCalledWith('expired')
       expect(sessionCleared).toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
