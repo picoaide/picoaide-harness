@@ -3464,6 +3464,23 @@ type usageAggregateSegment struct {
 // (传递根 = usage),明细在哪、聚合就读哪。相邻同源合并让常规布局(近 N 月 +
 // 更早全无分区)只产生 2 段 —— 与旧实现同样数量的查询;只有中间真有洞时才会
 // 多出几段。
+//
+// R24-X4 B4(审计 2026-09-26,P1):**"明细分区"不止"与月同名的关系"这一种形态**。
+// DBA 预建的更宽分区(季度/整年)名字是它的**名义月**,它覆盖的兄弟月不在
+// `present` 里 —— 旧判据把它们判成"没有明细分区"而回落永久账本,而账本只在
+// **启动补算**与**过期回收**两个时刻重建 ⇒ 上次重启之后写入的用量在这些月的
+// 报表里静默消失(真 PG 实测:8 月聚合 10.0000 vs 明细真值 17.0000;影响用量
+// 中心「今天」、管理端与月报外发)。该布局被仓库明确判为合法:`ensureRangePartition`
+// 的覆盖分支对它逐字记 `reusing it`(partitions.go),R7b/R7 两族回归把它钉成
+// "必须支持"。
+//
+// 修法:判据补一份**与写路径同源**的覆盖扫描(usagePartitionCoverage —— 同一份
+// usageMonthPartitionSpec 期望窗口 + 同一个 descendantLeafCoversWindow 比较器),
+// 于是"明细在哪、聚合就读哪"对**任何被接受的布局**成立(月/季度/整年/多级/
+// DEFAULT…)。覆盖命中后再补一次**可比事实**判断(usageMonthDetailAhead):明细
+// 比账本知道得多才读明细 —— 同一覆盖形态也可能是"该月一部分明细已被折进账本"
+// 的回收残留,两种状态在 catalog 里同形,只有"哪一侧知道得更多"可判。
+// 常规按月布局零额外查询(覆盖扫描与可比事实判断都是惰性的)。
 func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSegment, error) {
 	tables, err := scanUsageMonthTables(db)
 	if err != nil {
@@ -3477,6 +3494,18 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 			present[monthKey(m)] = true
 		}
 	}
+	// 覆盖扫描惰性加载:窗口内每个月都有自己的同名月分区时不查(常规布局零成本)。
+	var coverage usagePartitionCoverage
+	for cur := from; !cur.After(to); cur = dayKey(cur).AddDate(0, 1, 0) {
+		if present[monthKey(dayKey(cur))] {
+			continue
+		}
+		coverage, err = loadUsagePartitionCoverage(db)
+		if err != nil {
+			return nil, err
+		}
+		break
+	}
 	segments := make([]usageAggregateSegment, 0, 2)
 	for cur := from; !cur.After(to); {
 		monthStart := dayKey(cur)
@@ -3486,6 +3515,30 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 			segEnd = to
 		}
 		detail := present[monthKey(monthStart)]
+		if !detail {
+			// 更宽分区(季度/整年)覆盖该月 ⇒ 明细就在这里(R24-X4 B4)。
+			//
+			// 这就是 R5-A-10 纵深防御的**反方向**那一半:形态判据说"没有与月同名的
+			// 分区"时,不能直接断言"该月没有明细" —— 明细行只能落在**某个覆盖该月的
+			// 叶子分区**里,所以"该月明细在哪"的正确问法是"该月窗口被哪个叶子分区
+			// 覆盖"(与写路径同一个判据),而不是"有没有一个叫这个名字的关系"。
+			// 两处一旦分叉,就会出现"写得进去、报表读不到"的读写不对称。
+			//
+			// 但覆盖判据只给出"明细**可能**在这里"(catalog 形态),不能给出"这里的
+			// 明细**是完整的**" —— 同一形态也可能是回收残留(该月一部分明细已被折进
+			// 账本)。两种状态同形,所以再补一次**可比事实**的判断:明细比账本知道得
+			// 多(账本还没跟上)才按明细读,否则按账本读(与回收后的既有语义一致,
+			// 见 usageMonthDetailAhead 的说明与 TestUsageRetentionOrphanAndUsageSameDaySumInOneAggregate)。
+			//
+			// 覆盖命中后的"分区在但为空"仍走下面的 R5-A-10 分支回落账本。
+			if coverage.coversMonth(monthStart) {
+				ahead, aerr := usageMonthDetailAhead(db, monthStart)
+				if aerr != nil {
+					return nil, aerr
+				}
+				detail = ahead
+			}
+		}
 		// R5-A-10 的纵深防御(审计 2026-09-23,P1):"分区存在" ≠ "该月有明细"。
 		// 历史缺陷(或人工 DDL/旧版本遗留)建出的**空**分区与"仍有明细的分区"在
 		// `present` 判据下同形 ⇒ 明细段读出 0,而永久账本里明明有金额(报告静默
@@ -3517,6 +3570,58 @@ func usageAggregateSegments(db *sql.DB, from, to time.Time) ([]usageAggregateSeg
 		cur = nextMonth
 	}
 	return segments, nil
+}
+
+// usageMonthDetailAhead 报告该月**明细侧是否知道得比永久账本多**
+// （R24-X4 B4 收口的配套判据，审计 2026-09-26，P1）。
+//
+// 只服务于"该月被**更宽**分区覆盖（没有与月同名的分区）"这一形态。该形态在
+// catalog 里有两种来源，而且**同形**（都没有同名月分区、都被更宽叶子覆盖）：
+//
+//	① 正常：该月的明细整份就在这个更宽分区里，账本只是还没跟上（启动补算之后
+//	   写入的新用量）⇒ **明细领先**，必须读明细（否则报表静默少计 —— B4 本体）；
+//	② 回收残留：该月**另一部分**明细（到期被 DETACH 的关系）已在回收时折进永久
+//	   账本并 DROP，而覆盖它的更宽分区因名字月仍在保留期内而存活 ⇒ **账本领先**，
+//	   必须读账本（否则读到的是残缺明细）。判据护栏：
+//	   TestUsageRetentionOrphanAndUsageSameDaySumInOneAggregate。
+//
+// 两者在 catalog 事实层面无法区分，因此判据取**可比的那个事实**：按
+// (user_id, model, 北京日) 逐键比较"明细合计"与"账本行"，只要有一键的明细更大，
+// 就说明账本仍是旧的（明细领先）。账本侧处处相等或更大 ⇒ 账本至少不落后 ⇒ 读账本
+// （与回收后的既有语义一致）。
+//
+// 成本：一个月一次 `EXISTS` 查询（走 idx_usage_time 的区间扫描 + 日账主键），
+// 且**只在"更宽分区覆盖"的月份上调用** —— 常规按月布局（同名月分区）零额外查询。
+func usageMonthDetailAhead(db *sql.DB, month time.Time) (bool, error) {
+	start := dayKey(BeijingMonth(month))
+	end := start.AddDate(0, 1, 0)
+	var ahead bool
+	rd, err := newUsageReadConn(db)
+	if err != nil {
+		return false, err
+	}
+	defer rd.Close() //nolint:errcheck // 只读事务回滚（R13-GE：族内读面唯一实现）
+	// cost 是 float8 求和：明细与账本对同一批行的求和顺序可能不同（浮点不满足
+	// 结合律），因此给金额比较留 1e-9（纳元）容差，避免"账本已同步"被误判成
+	// "明细领先"而让读源在两侧之间抖动。token 计数是 BIGINT，精确比较。
+	err = rd.QueryRow(`SELECT EXISTS (
+    SELECT 1 FROM (
+        SELECT user_id, model, `+bjWallExpr("created_at")+`::date AS day,
+               SUM(prompt_tokens) AS pt, SUM(completion_tokens) AS ct, SUM(cost) AS cost
+        FROM usage
+        WHERE created_at >= ?::timestamptz AND created_at < ?::timestamptz
+        GROUP BY 1, 2, 3
+    ) u
+    LEFT JOIN usage_daily d ON d.user_id = u.user_id AND d.model = u.model AND d.day = u.day
+    WHERE u.pt > COALESCE(d.prompt_tokens, 0)
+       OR u.ct > COALESCE(d.completion_tokens, 0)
+       OR u.cost > COALESCE(d.cost, 0) + 1e-9
+)`,
+		pgInstantArg(BeijingDayInstant(start)), pgInstantArg(BeijingDayInstant(end))).Scan(&ahead)
+	if err != nil {
+		return false, err
+	}
+	return ahead, nil
 }
 
 // ledgerMonthHasRows 报告该北京月在永久日账 usage_daily 里**是否至少有一行**

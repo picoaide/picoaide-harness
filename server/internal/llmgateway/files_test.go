@@ -567,7 +567,10 @@ func TestFilesUploadChunkedOverLimitReturns413(t *testing.T) {
 	w := doFilesReq(t, gw.r, http.MethodPost, "/v1/files", struct{ io.Reader }{bytes.NewReader(body)}, gw.tokenA, ct)
 
 	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d (%s), want 413 请求体过大", w.Code, w.Body.String())
+		t.Fatalf("status = %d (%s), want 413 上传文件超过上限", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "上传文件超过上限") {
+		t.Fatalf("超限文案未指向真实原因（R24-X4-2：413 不可重试 + 说明是「文件超过上限」）：%s", w.Body.String())
 	}
 }
 

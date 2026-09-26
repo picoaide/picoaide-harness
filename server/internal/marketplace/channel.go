@@ -109,6 +109,34 @@ func requireMarketAdminApp(c *gin.Context, db *sql.DB, kind, name, notFoundMsg s
 	return a
 }
 
+// writeMarketGrantWriteFailure 把**授权写失败**按分类写响应（唯一实现，
+// R24-X1-01，复审 2026-09-27，**P2**）。
+//
+// 缺陷形态（修前 `applyGrant` 的两条路由 + `replaceSkillGrants`）：
+//
+//	if err := grantFn(subject, t); err != nil {
+//	    serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法") // ← 任何错误
+//	    return
+//	}
+//
+// 真 PG 实测（注入 = `ALTER TABLE app_grants RENAME TO …`）：技能侧三条授权写路由
+// 全部回 `400 {"code":"VALIDATION","message":"授权对象不合法"}`、日志 **0** 条；而
+// **同一次故障**下智能体侧同形路由回 `500 INTERNAL`（agent_api.go 的
+// `ErrValidation/ErrNotFound ⇒ 400，其余 ⇒ 500`），组织侧（sharedskills / agentshare）
+// 也只把 `ErrValidation` 当 400 ⇒ 同一管理面四份实现、两种口径。管理员把依赖故障
+// 读成"我填的部门名不对"，去改输入；期间授权既不生效也无痕迹。
+//
+// 分类与守卫同口径：`ErrValidation`/`ErrNotFound`（名字确实不合法）⇒ 400；
+// 其余（依赖故障）⇒ `logMarketDependencyFailure` + 500。
+func writeMarketGrantWriteFailure(c *gin.Context, err error, validationMsg string) {
+	if errors.Is(err, serverstore.ErrValidation) || errors.Is(err, serverstore.ErrNotFound) {
+		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", validationMsg)
+		return
+	}
+	logMarketDependencyFailure(c, err)
+	serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "操作失败")
+}
+
 // writeMarketAppWriteFailure 把**上下架写失败**按分类写响应
 // （R23-V3-B2，复审 2026-09-27，**P2**）。
 //

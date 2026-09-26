@@ -134,6 +134,72 @@ func viewer(c *gin.Context, db *sql.DB) (*serverstore.User, []string, error) {
 	return serverauth.ViewerGroups(c, db)
 }
 
+// skillAudience 是"这次请求的调用者是谁"的**唯一**归集点：可见性判据的全部输入。
+//
+// 为什么要有这个类型（R24-X4 B18，审计 2026-09-26，P2）：此前的分裂不在判据的
+// 内容，而在判据的**输入** —— 列表侧用调用者的 `u.IsAdmin`，下载侧用**路由级**
+// 常量（员工面路由恒以 admin=false 构造）。两者对同一份数据给出相反结论：管理员
+// 在员工面看得到组织共享技能、用同一个 Bearer 安装/下载必 404「技能不存在」。
+// 同类形态在 S11-2（下架维度）已经修过一次，这次把**身份维度**一并收口。
+type skillAudience struct {
+	// user 是调用者（BearerAuth 之后恒非 nil；保留 nil 判定作纵深防御）。
+	user *serverstore.User
+	// granted 是"授权表命中"的集合（仅非管理员解析；nil = 未解析/非管理员不可用）。
+	granted map[string]bool
+}
+
+// newSkillAudience 解析调用者的可见性输入：管理员不看授权表（admin 恒全量，
+// 与 serverstore.ListVisibleSharedSkills 的既有口径一致），员工解析一次授权名集
+// （列表/下载共用同一个集合，不再逐出口各查一次）。
+func newSkillAudience(db *sql.DB, u *serverstore.User, groups []string) (skillAudience, error) {
+	aud := skillAudience{user: u}
+	if u == nil || u.IsAdmin {
+		return aud, nil
+	}
+	names, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
+	if err != nil {
+		return skillAudience{}, err
+	}
+	aud.granted = make(map[string]bool, len(names))
+	for _, n := range names {
+		aud.granted[n] = true
+	}
+	return aud, nil
+}
+
+// visibleTo 是组织共享技能在**分发面**（列表 / 详情 / 下载 / 安装）可见性与可取性
+// 的**唯一判据**：`true` ⇔ 列表里出现 ⇔ 同一个 Bearer 能下载安装。
+//
+// 语义（两条闸门，对所有身份一致）：
+//   - 分发前提：`status == approved` **且** 未下架（`Distribution.Delivered()`）。
+//     审核通过是分发面的定义（决策 2026-08-25：作者自己的 pending/rejected 由
+//     能力中心「我的」分区表达 —— `sharedskills.ListOwnedSharedSkills` /
+//     capabilities 的 own 分支 —— 不混进来源分区）；下架与不存在同语义。
+//     作者自己的行不作例外：那正是"列表放行、下载拒绝"的来源（见下）。
+//   - 身份：**管理员按调用者判定**（不是路由常量）不看授权表；员工须授权表命中
+//     **或**自己是归属人（`apps.owner` —— 发布权的同一判据，见
+//     `serverstore.AppOwnedByOwner`：归属转移后旧上传者立刻失去豁免）。
+//
+// 与 `marketplace/skill_api.go` 的口径同精神（那里用 `!u.IsAdmin` 判**调用者**）：
+// 管理员的"恒全量"是身份属性，与它从哪个路由进来无关。
+//
+// 历史（R24-X4 B18，审计 2026-09-26，P2）：列表侧用调用者的 `u.IsAdmin`、下载侧用
+// **路由级**常量（员工面路由恒以 admin=false 构造）⇒ 管理员在员工面看得到组织共享
+// 技能、用同一个 Bearer 安装必 404「技能不存在」。同族缺陷在 S11-2（下架维度）已
+// 修过一次；这次把身份维度与"作者自己的非通过版本"维度一起收口到本函数。
+func (a skillAudience) visibleTo(s serverstore.SharedSkill, dist serverstore.Distribution) bool {
+	if s.Status != serverstore.SharedSkillApproved || !dist.Delivered() {
+		return false
+	}
+	if a.user == nil {
+		return false // 未认证：BearerAuth 已拦在前面（纵深防御）
+	}
+	if a.user.IsAdmin {
+		return true
+	}
+	return a.granted[s.Name] || dist.OwnedBy(a.user.Username)
+}
+
 func listVisible(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u, groups, verr := viewer(c, db)
@@ -150,42 +216,34 @@ func listVisible(db *sql.DB) gin.HandlerFunc {
 		// 的语义权威)。本端点是**分发面**(客户端安装通路的清单):下架行一律
 		// 不列,作者也不例外(作者态由能力中心「我的」分区表达,见
 		// capabilities 的 own 分支)。
+		//
+		// 2026-09-26(R24-X4 B18):本分支此前按**调用者** IsAdmin 放行,而下载侧
+		// 用的是**路由级**常量 ⇒ 管理员在员工面看得到组织共享技能、用同一个
+		// Bearer 安装必 404。现在列表与下载共用 `visibleTo` 这一个判据
+		// (见该函数的说明),两面对同一份数据不可能再给出相反结论。
 		dists, err := serverstore.DistributionStates(db, serverstore.AppKindSkill)
 		if err != nil {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
+		aud, err := newSkillAudience(db, u, groups)
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
+		// 候选集取全量组织行再由**同一判据**逐行过滤(不再让 DAO 的粗筛与下载侧
+		// 的细判各写一份规则):`ListSharedSkills` 与旧分支用的
+		// `ListVisibleSharedSkills` 走的是同一次 orgSkillReleases 取数,成本不变。
+		all, err := serverstore.ListSharedSkills(db, "")
+		if err != nil {
+			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+			return
+		}
 		var list []serverstore.SharedSkill
-		if u.IsAdmin {
-			// Admins see everything already approved (admin 恒全量,不落授权表).
-			// 下架行例外:与不存在同语义(对齐 agentshare.listVisible 的 `&& enabled[...]`)。
-			all, err := serverstore.ListSharedSkills(db, "")
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			for _, s := range all {
-				if s.Status == serverstore.SharedSkillApproved && dists.Of(s.Name).Delivered() {
-					list = append(list, s)
-				}
-			}
-		} else {
-			granted, err := serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			visible, err := serverstore.ListVisibleSharedSkills(db, u.Username, granted)
-			if err != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			// DAO 现在同时返回「归属人自己的行(任意状态)」——本面是分发面,
-			// 再按 Delivered() 过滤一次,语义与 2026-09-15 之前完全一致。
-			for _, s := range visible {
-				if dists.Of(s.Name).Delivered() {
-					list = append(list, s)
-				}
+		for _, s := range all {
+			dist := dists.Of(s.Name)
+			if aud.visibleTo(s, dist) {
+				list = append(list, s)
 			}
 		}
 		// enabled 字段保留(客户端不消费,审计 2026-09-15 S11-2):列出的行都已按
@@ -690,6 +748,12 @@ func setEnabled(db *sql.DB) gin.HandlerFunc {
 // 员工面三重闸门(与 agentshare.serveArchive 同口径,技能侧 2026-09-15 补齐):
 // 审核状态 / App 级上下架 / 授权,任一不过都与"不存在"同 404(不泄露存在性)。
 // 管理面(admin=true)只读归档,便于审核与排查已下架内容。
+//
+// 2026-09-26(R24-X4 B18):员工面的三重闸门改成**同一个判据**
+// `skillAudience.visibleTo`（与列表共用），不再各写一份 —— 此前的实现里管理员的
+// "恒全量"只在列表侧按调用者判，下载侧用的是**路由级** admin 常量，于是管理员在
+// 员工面看得到、装不上（同形缺陷见 agentshare 的孪生路径）。管理面(admin=true)
+// 仍不看这些闸门（管理员本就能看全部内容，与 DownloadAdmin 的既有语义一致）。
 func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		name, version := c.Param("name"), c.Param("version")
@@ -711,62 +775,31 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 			serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 			return
 		}
-		if !admin && s.Status != serverstore.SharedSkillApproved {
-			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
-			return
-		}
-		// P2-1(2026-09-13 智能体面 / 2026-09-15 技能面):apps.enabled=0(下架)
-		// 即不可下载——此前只查审核状态与授权,下架后员工仍能按名字取下归档。
-		// 判据唯一实现在 serverstore.Distribution.Delivered()(见
-		// serverstore/distribution.go 的语义权威);单个 App 一次查询,不引入
-		// 逐行 N+1(同一次查询里的 Owner 供下面的归属豁免使用)。
-		dist := serverstore.Distribution{}
 		if !admin {
-			var derr error
-			dist, derr = serverstore.AppDistribution(db, serverstore.AppKindSkill, name)
-			if derr != nil {
-				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-				return
-			}
-			if !dist.Delivered() {
-				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
-				return
-			}
-		}
-		// 授权检查:非 admin 下载须已授权(**或为归属人本人**)。
-		//
-		// 豁免判据是 apps.owner,不是 app_releases.publisher(第五轮审计
-		// R5-B-2):归属转移后旧上传者已无任何权利,而新归属人——唯一有权续传
-		// 的人——若还要靠授权才能取到自己的内容,「转移出来的发布权」就是空
-		// 的。两面同源见 serverstore.AppOwnedByOwner。
-		if !admin {
+			// 判据唯一实现在 visibleTo（列表 / 下载 / 安装共用）：分发前提
+			// （approved ∧ 未下架）+ 身份（管理员按**调用者**、员工按授权或归属）。
 			u := serverauth.CurrentUser(c)
 			if u == nil {
 				serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
 				return
 			}
-			isOwner := dist.OwnedBy(u.Username)
-			granted := false
-			if !isOwner {
-				groups, err := serverstore.UserEffectiveGroups(db, u.ID)
-				if err != nil {
-					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-					return
-				}
-				var names []string
-				names, err = serverstore.AccessibleSharedResourceNames(db, serverstore.SharedSkillGrantTable, u.Username, groups)
-				if err != nil {
-					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-					return
-				}
-				for _, n := range names {
-					if n == s.Name {
-						granted = true
-						break
-					}
-				}
+			groups, gerr := serverstore.UserEffectiveGroups(db, u.ID)
+			if gerr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
 			}
-			if !isOwner && !granted {
+			dist, derr := serverstore.AppDistribution(db, serverstore.AppKindSkill, name)
+			if derr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			aud, aerr := newSkillAudience(db, u, groups)
+			if aerr != nil {
+				serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+				return
+			}
+			if !aud.visibleTo(*s, dist) {
+				// 未授权 / 未审核 / 已下架 一律与"不存在"同形(不泄露存在性)。
 				serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 				return
 			}

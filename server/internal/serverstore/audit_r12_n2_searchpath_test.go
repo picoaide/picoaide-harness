@@ -415,6 +415,7 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"recordUsageKindAtCached":              r13gePinned,    // usage.go
 	"updateUsageTokensAtCached":            r13gePinned,    // usage.go
 	"usageMonthHasDetail":                  r13gePinned,    // usage_ledger.go
+	"usageMonthDetailAhead":                r13gePinned,    // usage_ledger.go —— R24-X4 B4：可比事实上界探测（newUsageReadConn）
 	"usageTreeDescendants":                 r13gePinned,    // partitions.go
 	// —— 由调用方事务钉住（每个都必须在 r13geViaCallerOwners 里有点名）——
 	"AddExcludedModelTx":                r13geViaCaller, // gateway.go

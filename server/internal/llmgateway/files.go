@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -46,8 +47,13 @@ import (
 //     不是自己的按 **404** 处理（与"不存在"同形，不泄露存在性）；`GET /files`
 //     只回自己的文件（官方客户端在配额不足时会删"最旧的 dsh- 文件"，不隔离就会
 //     误删他人仍在引用的图片）。
-//   - **流式转发**：上限 **64MiB**（官方 Files API 文档：单文件 ≤64 MiB，且上传须在
-//     10 分钟内完成），上传体边读边转发，不整段进内存。
+//   - **上传体上限 64MiB**（官方 Files API 文档：单文件 ≤64 MiB，且上传须在
+//     10 分钟内完成）。上限由 MaxBytesReader 强制（声明长度先拒后转、chunked 边读
+//     边判），超限一律 **413 VALIDATION「上传文件超过上限」**（不可重试、文案指真因）。
+//     实现上**不是**流式转发：体先读进内存、再重写 multipart 的过期字段
+//     （rewriteUploadExpiry），峰值内存 ≈ 原文 + 重写体 ≈ 2×；进程级内存闸门
+//     按**该请求的体字节**记一次（每份字节只记一次，与聊天路径同一单位），
+//     占满 ⇒ 503 SERVER「网关繁忙」（可重试）。
 //   - **仅限流**：不计 token、不落 usage（官方也不按 token 计费文件）；仍走每用户
 //     限流（rateLimitPerMinute）与路由组上的 InFlightGuard。
 //   - 上游非 2xx 时保留状态码并收敛成 `{"error":{...}}` 信封，客户端据此回落 base64
@@ -329,12 +335,14 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	if c.Request.ContentLength > maxFilesUploadBody {
 		log.Printf("gateway: files upload rejected before forwarding: content-length=%d limit=%d",
 			c.Request.ContentLength, maxFilesUploadBody)
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+		writeFilesTooLarge(c, c.Request.ContentLength)
 		return
 	}
 	// 上传体读进内存后**重写 multipart**（把过期时间收进平台上限；见
-	// rewriteUploadExpiry）。因此这里不再流式转发：峰值内存 = 原文 + 重写体 ≈ 2×，
-	// 由内存闸门按 2× 计费；超限/超预算分别 413 / 503（都在调用上游之前）。
+	// rewriteUploadExpiry）。因此这里不再流式转发：峰值内存 = 原文 + 重写体 ≈ 2×
+	// （**诊断口径**，不是闸门口径）；内存闸门按 R24-X4-2 改后的**在飞请求体字节**
+	// 记账（每份字节只记一次，与聊天路径同一单位），超限/超预算分别 413 / 503
+	// （都在调用上游之前）。
 	//
 	// 本请求的配置**只取一次快照**（lim）：出站体收敛用的上限、内存额度、台账记账
 	// 用的上限必须同源，否则管理员在请求进行中改配置会让三者分叉。
@@ -346,7 +354,11 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 	// 复审实测：另一请求持有 40MiB 时上传后闸门在飞 40MiB → 23MiB，超发可复现）。
 	defer releaseUpload()
 	if !ok {
-		writeFilesTransportError(c, trackerErr)
+		// 闸门拒绝时响应**已经写过**（helper 契约）：再走一次错误分类器会在同一响应
+		// 上追加第二个信封（旧实现实测的 503+502 拼接非 JSON）。
+		if !errors.Is(trackerErr, errUploadBodyGateResponded) {
+			writeFilesTransportError(c, trackerErr)
+		}
 		return
 	}
 	outBody, contentType := a.rewriteUploadExpiry(c, rawBody, lim)
@@ -399,9 +411,23 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 // readUploadBodyBudgeted 是"申请内存额度 + 读上传体"的**唯一**实现。
 //
 // 申请时机由本函数内部处理，调用方不必知道：
-//   - Content-Length 已知：**读之前**按 2× 申请（原文 + 重写体同时在内存），闸门占满
-//     则 503、一个字节都不读（旧实现先读后申请，闸门占满时仍会吃下整个体）；
-//   - chunked（长度未知）：读完按 2× 补记，约束后续重写与并发叠加。
+//   - Content-Length 已知：**读之前**按**该请求的体字节**申请（闸门占满则 503、
+//     一个字节都不读；旧实现先读后申请，闸门占满时仍会吃下整个体）；
+//   - chunked（长度未知）：读完按实际读到的字节补记。
+//
+// 额度口径（R24-X4-2，审计 2026-09-26，P2）：闸门的记账单位是**在飞客户端请求体
+// 字节**（与聊天路径 `rewriteJSONObjectBody` 的 `acquire(budget, len(raw))` 同一
+// 口径，见 body_memory.go 的 `DefaultBodyParseBudgetMB` 注释），**不是峰值 RSS**。
+// 旧实现这里记 2×、`rewriteUploadExpiry` 又记 2× ⇒ 同一份字节被收 4 次：缺省
+// 128MiB 预算下大体池只有 96MiB，「声明 64MiB」的单文件上传实际上限被压到
+// `96/4 = 24MiB`（真 PG/真 handler 实测边界恰为 24MiB+0 通过、+1 字节 503），
+// 且超出时回的是**可重试**的 503「网关繁忙」⇒ 客户端按重试策略死循环、文案还
+// 指错方向（真实原因是"文件超过上限"）。
+//
+// 现在每份字节**只记一次**：本函数记，`rewriteUploadExpiry` 不重复记（它与本
+// 函数同属一个请求的生命周期，同一份体）。于是声明的 64MiB 上限真的可达
+// （64MiB ≤ 96MiB 大体池），而预算仍如实约束并发（两个 64MiB 上传 ⇒ 128MiB >
+// 96MiB，第二个 503）。
 //
 // 返回的 release **恒非 nil**（未申请/失败时是 no-op）且与申请严格一一对应：
 // 调用方只 `defer release()` 一次即可。把释放收敛到这里是刻意的 —— 旧实现把申请留在
@@ -409,16 +435,21 @@ func (a *API) handleFilesUpload(c *gin.Context) {
 // 同一份额度被归还两遍，把别的在飞请求的额度一起放掉（审计 2026-09-22 复审：40MiB
 // 在飞时一次小上传后掉到 23MiB，且能在真实占用超预算时放行新额度）。
 //
-// 失败时（ok=false）响应已写好，且额度已由本函数还清。
+// 失败时（ok=false）响应已写好，且额度已由本函数还清。**内存闸门拒绝**这一支
+// 返回哨兵 `errUploadBodyGateResponded`：调用方必须据此跳过
+// `writeFilesTransportError`，否则会在同一个响应上追加第二个信封（旧实现实测
+// `{"error":{"code":"SERVER","message":"网关繁忙…"}}{"error":{"code":"UPSTREAM",
+// "message":"上游请求失败"}}` —— 拼出来的 body 不是合法 JSON，且把闸门拒绝误报成
+// 上游故障；写超时/体积超限那两支返回真实错误，分类不变）。
 func readUploadBodyBudgeted(c *gin.Context, budget int64) ([]byte, error, func(), bool) {
 	noop := func() {}
 	var release func()
 	if cl := c.Request.ContentLength; cl > 0 {
-		rel, ok := globalBodyParseGate.acquire(budget, cl*2)
+		rel, ok := globalBodyParseGate.acquire(budget, cl)
 		if !ok {
 			log.Printf("gateway: files upload rejected by memory gate before reading: content-length=%d", cl)
 			writeBodyParseBusy(c)
-			return nil, nil, noop, false
+			return nil, errUploadBodyGateResponded, noop, false
 		}
 		release = rel
 	}
@@ -441,16 +472,20 @@ func readUploadBodyBudgeted(c *gin.Context, budget int64) ([]byte, error, func()
 	}
 	renewWriteDeadline(c)
 	if release == nil {
-		rel, ok := globalBodyParseGate.acquire(budget, int64(len(raw))*2)
+		rel, ok := globalBodyParseGate.acquire(budget, int64(len(raw)))
 		if !ok {
 			log.Printf("gateway: files upload rejected by memory gate after reading: bytes=%d", len(raw))
 			writeBodyParseBusy(c)
-			return nil, nil, noop, false
+			return nil, errUploadBodyGateResponded, noop, false
 		}
 		release = rel
 	}
 	return raw, nil, release, true
 }
+
+// errUploadBodyGateResponded：内存闸门已在 helper 内写过响应（503「网关繁忙」），
+// 调用方**不得**再写第二个信封（见 readUploadBodyBudgeted 的说明）。
+var errUploadBodyGateResponded = errors.New("files upload body rejected by the memory gate (response already written)")
 
 // maxUploadBody 是上传体上限（测试可注入，见 maxFilesUploadBody 的说明）。
 func maxUploadBody() int64 { return maxFilesUploadBody }
@@ -535,22 +570,20 @@ func (a *API) rewriteUploadExpiry(c *gin.Context, raw []byte, lim gatewayLimits)
 	_, params, err := mime.ParseMediaType(origCT)
 	boundary := params["boundary"]
 	if err != nil || boundary == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(origCT)), "multipart/") {
-		// 非 multipart：原样转发（不新增失败面）。**额度已由读体路径计过**
-		// （Content-Length 已知时读前申请 2×；chunked 时读后补记 2×）—— 这里不再重复
-		// 申请，避免同一份体被计两次而让闸门提前打满。
+		// 非 multipart：原样转发（不新增失败面）。额度已由读体路径计过。
 		log.Printf("gateway: files upload: not multipart (content-type=%q); forwarded unchanged", origCT)
 		return raw, origCT
 	}
 	capSeconds := int64(lim.fileExpiry / time.Second)
 
-	// 内存闸门：重写期间原文 + 新体同时在内存里 ⇒ 按 2× 计费。
-	release, ok := globalBodyParseGate.acquire(lim.budgetBytes, int64(len(raw))*2)
-	if !ok {
-		log.Printf("gateway: files upload rejected by memory gate: bytes=%d", len(raw))
-		writeBodyParseBusy(c)
-		return nil, ""
-	}
-	defer release()
+	// 内存闸门：**这里不再申请额度**（R24-X4-2，审计 2026-09-26，P2）。
+	//
+	// 这个函数与 `readUploadBodyBudgeted` 同属**一个请求**、同一份体：读体路径已经
+	// 按"该请求的体字节"记过一次（与聊天路径 `rewriteJSONObjectBody` 同一单位），
+	// 这里再记一次就是同一份字节被收两次 —— 缺省 128MiB 预算下大体池只有 96MiB，
+	// 旧实现（读体 2× + 这里 2×）把声明的 64MiB 单文件上限压到 24MiB，且超出时回
+	// **可重试**的 503「网关繁忙」⇒ 客户端重试死循环且文案指错方向。
+	// 峰值内存（原文 + 新体 ≈ 2×）是**诊断口径**，不是闸门的记账单位。
 
 	// 第一遍：读全意图（并检出结构性损坏/超长整对象 ⇒ 原样转发）。
 	plan, perr := scanUploadExpiry(raw, boundary, capSeconds)
@@ -965,6 +998,27 @@ func readFilesResponseBody(c *gin.Context, resp *http.Response) ([]byte, bool) {
 	return body, true
 }
 
+// writeFilesTooLarge 是"上传体超过平台上限"的**唯一**响应（R24-X4-2，审计
+// 2026-09-26，P2）。
+//
+// 分类与文案都要指向**真实原因**：
+//   - 413 VALIDATION —— 客户端的重试策略不认它（不可重试、终局），不会死循环；
+//   - 文案直接说"上传文件超过上限（单文件最大 N MiB）"，而不是泛泛的"请求体过大"
+//     或（更早的实现）503 SERVER「网关繁忙…请稍后重试」—— 后者把"文件太大"说成
+//     "网关忙"，既指错方向又会被客户端无限重试。
+//
+// 上限取 `maxFilesUploadBody`（测试可注入），因此这里动态生成而不是写死文案。
+func writeFilesTooLarge(c *gin.Context, size int64) {
+	limit := maxFilesUploadBody
+	limitText := fmt.Sprintf("%dMiB", limit>>20)
+	if limit < 1<<20 {
+		limitText = fmt.Sprintf("%dB", limit)
+	}
+	log.Printf("gateway: files upload over limit: bytes=%d limit=%d", size, limit)
+	serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION",
+		"上传文件超过上限（单文件最大 "+limitText+"）")
+}
+
 // writeFilesTransportError 把 Files 转发失败分成可判定形态。
 //
 // readErr = **客户端请求体读取**错误（由 filesBodyTracker 捕获），只有它才允许映射成
@@ -980,8 +1034,7 @@ func writeFilesTransportError(c *gin.Context, readErr error) {
 		log.Printf("gateway: files upstream request failed: %s", c.Request.URL.Path)
 		serverauth.WriteError(c, http.StatusBadGateway, "UPSTREAM", "上游请求失败")
 	case errors.As(readErr, &maxErr):
-		log.Printf("gateway: files upload over limit (%d): %v", maxFilesUploadBody, readErr)
-		serverauth.WriteError(c, http.StatusRequestEntityTooLarge, "VALIDATION", "请求体过大")
+		writeFilesTooLarge(c, maxErr.Limit)
 	case bodyReadTimeout(readErr):
 		log.Printf("gateway: files upload read timed out: %s err=%v", c.Request.URL.Path, readErr)
 		serverauth.WriteError(c, http.StatusServiceUnavailable, "SERVER", "读取请求体超时（客户端上传过慢），请稍后重试")

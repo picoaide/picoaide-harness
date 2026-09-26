@@ -163,13 +163,13 @@ func applyGrant(c *gin.Context, db *sql.DB, grant bool, subjectLabel string,
 	}
 	if grant {
 		if err := grantFn(subject, t); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			writeMarketGrantWriteFailure(c, err, "授权对象不合法")
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), grantAudit, subjectLabel+" "+string(t)+":"+subject)
 	} else {
 		if err := revokeFn(subject, t); err != nil {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+			writeMarketGrantWriteFailure(c, err, "授权对象不合法")
 			return
 		}
 		_ = serverstore.AuditLog(db, adminUsername(c), revokeAudit, subjectLabel+" "+string(t)+":"+subject)
@@ -463,11 +463,7 @@ func replaceSkillGrants(c *gin.Context, db *sql.DB) {
 		return
 	}
 	if err := serverstore.ReplaceSkillGroupGrants(db, name, req.Groups); err != nil {
-		if errors.Is(err, serverstore.ErrNotFound) {
-			serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "存在不认识的部门名称")
-			return
-		}
-		serverauth.WriteError(c, http.StatusBadRequest, "VALIDATION", "授权对象不合法")
+		writeMarketGrantWriteFailure(c, err, "存在不认识的部门名称")
 		return
 	}
 	_ = serverstore.AuditLog(db, adminUsername(c), "skill_grants_replace", name+" "+strings.Join(req.Groups, ","))

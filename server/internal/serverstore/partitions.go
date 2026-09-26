@@ -949,15 +949,19 @@ func scanUsagePartitions(db *sql.DB, spec partitionSpec) (usagePartitionScan, er
 		if d.Rel == spec.relation() {
 			continue // 同名关系由 probeUsagePartition 判(错误分类更精确)
 		}
+		if descendantLeafCoversWindow(spec, idx, d) {
+			// 叶子完整覆盖期望窗口 ⇒ 直接复用(不得再建月/年分区)。
+			out.Covering = d.Rel
+			break
+		}
+		if d.Kind == "r" {
+			continue // 叶子但不覆盖本窗口:没有"挂载点"语义
+		}
 		// rc3-4:最宽的两类覆盖在这里先认 —— DEFAULT / MINVALUE..MAXVALUE 没有
 		// 可解析的字面量,但对**异名**分区来说它们完整覆盖一切(写入经 PG 路由
-		// 正确落进该分区),必须命中 Covering 而跳过 CREATE(否则该布局下每月
+		// 正确落进该分区),必须命中覆盖而跳过 CREATE(否则该布局下每月
 		// 首写都要 CREATE 并吃 23514/42P17)。
 		if partitionBoundCoversEverything(d.Bound) {
-			if d.Kind == "r" {
-				out.Covering = d.Rel
-				break
-			}
 			out.Attach, targetParent = d.Rel, d.Rel
 			continue
 		}
@@ -966,10 +970,6 @@ func scanUsagePartitions(db *sql.DB, spec partitionSpec) (usagePartitionScan, er
 			continue // 读不懂的边界(自己或祖先)不参与判定(交给同名探测/人工)
 		}
 		if covered {
-			if d.Kind == "r" {
-				out.Covering = d.Rel
-				break
-			}
 			// desc 按深度升序:后到的覆盖者更深、窗口更窄、更贴月粒度。
 			out.Attach, targetParent = d.Rel, d.Rel
 		}
@@ -988,6 +988,65 @@ func scanUsagePartitions(db *sql.DB, spec partitionSpec) (usagePartitionScan, er
 		}
 	}
 	return out, nil
+}
+
+// descendantLeafCoversWindow 判定后代 d **作为叶子分区**是否完整覆盖 spec 的
+// 期望窗口 —— "是否存在覆盖该窗口的明细分区"的**唯一判据实现**。
+//
+// 两个调用方（写路径 scanUsagePartitions、读路径 usagePartitionCoverage）必须
+// 共用它：写路径用它决定"是否复用更宽分区、跳过 CREATE"，读路径用它决定
+// "该月该读明细还是读账本"。两处一旦分叉，就会出现"写得进去、报表读不到"
+// 的读写不对称（R24-X4 B4：季度/整年预建布局下兄弟月被误判成"没有明细分区"
+// 而回落永久账本 ⇒ 报表静默少计）。
+//
+// 三条子判据（都不新写命名解析，全部复用既有比较器）：
+//   - 只认叶子('r')：中间父表('p')的边界覆盖窗口推不出"它自己的子分区也覆盖
+//     窗口"（与 partitionReadyErr 同判据）；仓库允许的更宽命名形态（usage_<YYYY>、
+//     季度分区名字取其名义月等）都由**边界**判定，不看名字；
+//   - DEFAULT / MINVALUE..MAXVALUE：异名分区的标准 DBA 布局，完整覆盖一切
+//     （rc3-4 的既有判据）；
+//   - 其余按**有效边界**（声明边界 ∩ 全部祖先边界，R9C-1）比较，读不懂即不算覆盖
+//     （判据不建立在对边界的猜测上）。
+func descendantLeafCoversWindow(spec partitionSpec, idx map[string]partitionDescendant, d partitionDescendant) bool {
+	if d.Kind != "r" {
+		return false
+	}
+	if partitionBoundCoversEverything(d.Bound) {
+		return true
+	}
+	covered, readable := descendantEffectiveCoverage(spec, idx, d)
+	return readable && covered
+}
+
+// usagePartitionCoverage 是 usage 分区树的一次只读快照，回答"某个北京月的期望
+// 窗口是否已被某个叶子分区完整覆盖"（任意深度、任意命名形态）。
+//
+// 它是**读路径**（usageAggregateSegments 的切读源判据）与写路径同源的落点：
+// 同一份 usageMonthPartitionSpec 期望窗口、同一份 usageTreeDescendants 枚举、
+// 同一个 descendantLeafCoversWindow 比较器 —— 不新写第二份命名/覆盖解析。
+type usagePartitionCoverage struct {
+	desc []partitionDescendant
+	idx  map[string]partitionDescendant
+}
+
+// loadUsagePartitionCoverage 枚举 public.usage 子树（一次递归 CTE）。
+func loadUsagePartitionCoverage(db *sql.DB) (usagePartitionCoverage, error) {
+	desc, err := usageTreeDescendants(db, "usage")
+	if err != nil {
+		return usagePartitionCoverage{}, err
+	}
+	return usagePartitionCoverage{desc: desc, idx: usageTreeParentIndex(desc)}, nil
+}
+
+// coversMonth 报告北京月 month 的期望窗口是否被某个叶子分区完整覆盖。
+func (c usagePartitionCoverage) coversMonth(month time.Time) bool {
+	spec := usageMonthPartitionSpec(month)
+	for _, d := range c.desc {
+		if descendantLeafCoversWindow(spec, c.idx, d) {
+			return true
+		}
+	}
+	return false
 }
 
 // usageTreeParentIndex 建"关系名 → 该关系的后代条目"索引（向上走祖先链用）。

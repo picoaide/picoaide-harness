@@ -46,12 +46,37 @@ func TestSharedSkillRejectedVersionCannotBeApprovedWithoutArchive(t *testing.T) 
 	if row.Status != serverstore.SharedSkillRejected {
 		t.Fatalf("status = %s, want rejected", row.Status)
 	}
-	// 未授权的员工看不到它;作者本人看到的状态仍是 rejected。
+	// 未授权的员工看不到它;作者本人在**作者面**（「我的」分区，
+	// ListOwnedSharedSkills）看到的状态仍是 rejected。
+	//
+	// 出口从分发面改到作者面是 R24-X4 B18 的收口结果：分发面（本端点与能力中心的
+	// 组织分区）只列 approved（决策 2026-08-25），列表与下载共用同一个 visibleTo
+	// 判据 —— 不再出现"作者在组织分区看得到自己 pending/rejected 的行、点安装必
+	// 404"的分裂。作者对自己行的观测出口始终是作者面（capabilities 的 own 分支）。
 	if code, body := skUserDo(t, r, otherHdr, "GET", "/api/client/v2/shared-skills", ""); code != http.StatusOK || strings.Contains(body, "reapprove-guard") {
 		t.Fatalf("other employee list = %d %s, want 200 without the broken version", code, body)
 	}
-	if code, body := skUserDo(t, r, userHdr, "GET", "/api/client/v2/shared-skills", ""); code != http.StatusOK || !strings.Contains(body, "\"status\":\"rejected\"") {
-		t.Fatalf("author list = %d %s, want the row still reported as rejected", code, body)
+	if code, body := skUserDo(t, r, userHdr, "GET", "/api/client/v2/shared-skills", ""); code != http.StatusOK {
+		t.Fatalf("author distribution list = %d %s", code, body)
+	} else if strings.Contains(body, "reapprove-guard") {
+		t.Fatalf("作者的分发面清单里出现了未通过审核的行(点安装必 404 的分裂形态): %s", body)
+	}
+	owned, err := serverstore.ListOwnedSharedSkills(db, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range owned {
+		if s.Name != "reapprove-guard" || s.Version != "1.0.0" {
+			continue
+		}
+		found = true
+		if s.Status != serverstore.SharedSkillRejected {
+			t.Fatalf("作者面状态 = %s, want rejected", s.Status)
+		}
+	}
+	if !found {
+		t.Fatalf("作者面看不到自己的行(误拒后作者必须仍能看到 rejected 状态): %+v", owned)
 	}
 }
 
