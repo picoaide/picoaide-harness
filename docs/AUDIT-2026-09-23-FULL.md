@@ -1833,3 +1833,118 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
 - **建议的下一轮范围**：① 复审 FIX-27/28/29（尤其 `debug-switches` 的接线判据与 electron-shots 的
   归属证明边界）；② 继续扫未覆盖面（`packages/host/desktop/src` 运行时面、`packages/client/**`、
   `scripts/**` 非门禁脚本、`.github` 未覆盖面）。
+
+---
+
+### §7.61 第二十六轮（新面：客户端运行时 / 连接器与 cron 非已修面 / 构建发布脚本 / CI 工作流）
+
+- **形态**：与第二十五轮同构 —— 1 条**验证泳道**（Z1，复核第二十五轮修复批 FIX-27/28/29）
+  + 2 条**新面泳道**（Z2 客户端包与桌面运行时未覆盖面、Z3 构建发布脚本与 CI 工作流未覆盖面）。
+  Z2/Z3 各带 2–3 个独立子审计（`probe/{cron,connectors,client}`、`probe/{workflows,pkgscripts,site}`）。
+- **基线**：`a803f7dbb3`（审计期间主树前进到 `3f106e956b`，`git diff --stat` = `AGENTS.md | 2 +-`
+  ⇒ 两条泳道的行号对两棵树都成立）。隔离副本 + 只读主树 + 变异只在深拷贝副本内做。
+
+#### 计数
+
+| 泳道 | 面 | P0 | P1 | P2 | P3 | 汇聚判定 |
+|---|---|---|---|---|---|---|
+| Z2 | 客户端包与桌面运行时未覆盖面 | 0 | 5 | 15 | 8 | NOT CONVERGED |
+| Z3 | 构建发布脚本与 CI 工作流未覆盖面 | 0 | 4 | 7 | 16 | NOT CONVERGED |
+| Z1 | 复核第二十五轮修复批 | 见 §7.61.3 | | | | |
+
+**第二十六轮合计 ≥ 0 P0 / 9 P1** ⇒ **本轮不干净，收敛条件仍未达成**（R21–R26 六轮全部产出 P0/P1）。
+
+#### §7.61.1 Z2 的 5 条 P1
+
+**① Z2-01【最重】会话派生的异步投影全部没有"代际守卫"**（`packages/host/enterprise/src/`）。
+
+- 四处同族、同一根因：`bootstrap.ts:62-104`、`error-reporting.ts:523-588`、`gateway-model.ts:36-48`、
+  `channel-sync.ts:79-95` —— 每个 `sync()` 在 `await fetchJSON(session)`（缺省 15s 超时）之后
+  **没有任何代际/会话身份判定**，迟到的旧会话响应直接写 settings/DSN/品牌/网关段。
+- 最重后果（实跑）：构造「服务端 A 的 bootstrap 慢 → 登出并登录服务端 B → B 先回、A 后回」⇒ 当前会话
+  （B）的 `llm-deepseek.models` / `agent-default-model` / `web-search-deepseek.baseURL` 被改写成 A 的，
+  而 `gateway-model.ts:42` 已把 `PICOAI_GATEWAY_TOKEN` 写成 **B 的令牌** ⇒ 上游 `web-search-deepseek`
+  在同一次请求里用这份 URL+key ⇒ **B 的 90 天 bearer 被 POST 到 A 的 `/v1/messages`**（跨租户凭据外泄）。
+- 同族表现：error-reporting 迟到 bootstrap 把 Sentry DSN 改回旧服务端（错误/堆栈/URL 上报到**上一个租户的
+  采集端**），且登出后 status 由 `disabled` 变回 `ready`；gateway-model 的登出 `sync(null)` 续体落在重新登录
+  之后 ⇒ 把新会话的 `llm-deepseek` 段整段清空；channel-sync 品牌停在上一台服务端。
+- **探针 + 变异双向证明**：`probe/…` 四条探针在修前红（报告 §B.1 抄录了 4 条失败断言原文），
+  在深拷贝副本里加上代际守卫后转绿；去掉任一处守卫对应探针复红。
+- **修复方向**：每个 sync 入口取一次代际，**每个 await 之后**比对，不等即丢弃（不写盘、不发事件、不改状态）；
+  优先复用同仓既有先例（`session-service.ts` 的 `persistEpoch`、`bootstrap.ts` 错误分支的 `clearIfCurrent`），
+  抽成**同一份**实现而不是四处各写一遍。判据必须**调用点级**（第二十五轮教训）。
+
+**② Z2-02 FIX-28 的调试开关闸门被单横线绕过** —— 这是**对第二十五轮修复覆盖面的证伪**。
+
+- `packages/host/desktop/src/debug-switches.ts:122` 的 `matchDebugSwitch` 只认 `--` 前缀，而 pinned
+  Electron 44.4.3 的 **Chromium 接受单横线** `-remote-debugging-port=<port>`。真机对照实跑（报告 §B.2）：
+  无开关 ⇒ 0 个 DevTools 监听；`-remote-debugging-port=9339` ⇒ `DevTools listening on ws://127.0.0.1:9339/…`。
+  生产模块直判：`-remote-debugging-port=9333` / `-inspect=9337` / `-js-flags=--x` 全部 `refused=false`。
+- ⇒ 去一个连字符即可重放「CDP 读 HttpOnly `dsh-auth-*` ⇒ 击穿全部写面持有性证明」（即 Y4-01 那条 P1）。
+- **注意：判据面本身是正确的**（`tests/debug-switches.spec.ts:377-425` 用 AST 源码级断言 `main.ts` 恰好一处
+  `applyDebugSwitchGate`、在模块作用域、早于 `run()` —— 这是第二十五轮"钉调用点"教训后的正确形态）。
+  **被推翻的是覆盖面**：判据把"什么算调试开关"钉在 `DEBUG_SWITCHES` 的 `--` 形态上，而 Chromium 的解析面更宽。
+  **教训固化**：闸门的"开关集合"必须按**被守护方的真实解析面**定义，不能按自己的字面量表定义。
+
+**③④⑤ 三条由子审计提供、主控独立核对代码行**：
+- **cron `skippedOccurrences` 跨账号泄漏**（`packages/host/cron/src/host-service.ts:87-96` +
+  `host-ledger.ts:1121-1176` + `client/CronJobTab.tsx:199-210`）：`snapshot()` 只过滤 `jobs[]`，
+  `scheduler` 段与 `eventPayload()` 原样透传；bob 的 `jobs=[]` 但 `skippedOccurrences` 里是 **alice 的任务名**，
+  三条出口（`GET /api/cron/state`、action 响应、SSE 帧）都带。**修复方向**：把"任务可见性"抽成唯一判据
+  （owner 过滤），列表/summary/skip 记录/事件载荷**三条出口共用**。
+- **connectors 后台任务顶掉会话切换 ⇒ 凭据作用域闸门永久 409 且无自愈**
+  （`packages/host/connectors/src/index.ts:1345-1356` 的 `runLifecycle` 只保留最后入队任务，而 `:3227` 扫掠 /
+  `:3295` credentials-changed 是后台任务）：会话任务停在 await 时被顶掉 ⇒ `:1391` 唯一的 `reconfigureUser()`
+  被跳过、`:437-455` 闸门恒真 ⇒ connect/disconnect/approve/refresh **全 409**，旧账号 MCP 工具仍活着。
+- **connectors 凭据读失败被当"没有凭据" ⇒ `updateCredential` 静默抹写**（`store.ts:265-296` 一个 catch 吞掉
+  **所有**异常 → `null`，含瞬时 EACCES/EMFILE 与 >64KiB 分支；`:323-340` 随即 `?? {updatedAt:0}` **整份覆盖写**）：
+  accessToken/refreshToken/clientId/clientSecret 全丢且**无日志**（与 CR-1 同形态：读错误被降级成空状态、
+  再由写路径固化）。**修复方向**：只有 ENOENT 算"没有凭据"，其它 fail-closed。
+
+#### §7.61.2 Z3 的 4 条 P1（全部在"发布链与白标交付物"这一片此前未被深扫的面上）
+
+共同形态：**判据是自洽的 / 判据只看了一个充分条件** —— 不是判据没写，而是判据结构上咬不到。
+
+1. **R2 中转前缀把 `GITHUB_RUN_ATTEMPT` 编进名字**（`scripts/ci-channel-transfer.sh:117,124`）：
+   ① 失败/重跑 attempt 的品牌渠道安装包**永久**留在公开读桶的 `_transfer/` 下（无代码路径、无生命周期规则
+   会删，而文档承诺"取回后立即销毁"）；② `gh run rerun --failed` **不重跑已成功的 job** ⇒ attempt 2 的前缀里
+   只有失败平台的产物，而 `pull` 的判据只是"目录非空" ⇒ **全绿（半套交付）**。回归夹具把 attempt 钉死为 `'1'`
+   （`verify-ci-scripts.mjs:4814`）⇒ 结构上看不见。
+   最小反例：`bash temp/r26/Z3-scripts/probe/transfer-attempt/run2.sh` ⇒ 同一 run 两次 attempt 得到两个不同前缀。
+2. **`ci-build-channel-images.sh:98-108` 逐平台静默跳过**（`add()` = `[ -f … ] || return 0`）：唯一"缺客户端"
+   判据是 `:68-75` 的"目录非空"，镜像内 `verify_image` 只 `ls | grep -q .` ⇒ 少平台的 `CLIENT-RELEASE.json`
+   **零告警**出厂，`/api/client/v2/updates/manifest` 与门户静默少一个平台。
+3. **渠道素材逐文件静默回落官方**（`brand-prepare.mjs:36,47-53,87,104,120` 用**字面量 `logo.svg`**；
+   `ci-channels.sh:673` 的 `missing[]` **不含** `assets.logo`/`app-icon.png`；而 `channel-build.ts:538,553-562`
+   的 `inlineChannelAssets` 却用 `assets.logo`）：① 品牌渠道漏提供 `app-icon.png` ⇒ 安装器/Dock/任务栏 =
+   **厂商图标**；② `assets.logo` 指向非 `logo.svg` ⇒ 托盘与 `/favicon.svg` 是厂商品牌而登录页是客户品牌。
+   **白标门禁是自洽判据**（`verify-channel-package.ts:44-49,180-193` 用**同一个** `prepareBrandAssets()`
+   重派生比对）⇒ 结构上咬不到。
+4. **公开文档承诺的 `workflow_dispatch` 零实现**（`site/src/content/docs/deployment/channels.md:58` 中英两份 +
+   `docs/decisions/2026-09-20-dsh-0.1.6-upgrade.md:293` 把它写成"提前出品牌渠道包"的唯一途径，
+   而 `.github/workflows/ci.yml:3-5` 只有 `pull_request`/`push`）。
+
+#### §7.61.3 待补：Z1 对第二十五轮修复批的复核
+
+Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论将在 §7.62 补录。
+已知 Z1 之外的两条直接证伪：Z2-02（FIX-28 单横线绕过，见上）。
+
+#### §7.61.4 处置
+
+- 派 **FIX-30**（Z2-01 代际守卫 ×4 + Z2-02 单横线矩阵）、**FIX-31**（cron 跨账号 + connectors 两条 P1）、
+  **FIX-32**（Z3 四条：中转前缀/平台完整性/白标回落/dispatch 承诺）。
+- 本轮再次印证**最高价值入口 = 上一轮的修复批**：Z2-02 是 FIX-28 的覆盖面缺口，
+  且其判据本身写得对（AST 钉调用点）—— 说明**"钉调用点"必要但不充分**，还要问"判据的取值域是否等于
+  被守护方的真实解析面"。
+
+#### §7.61.5 记录面维护说明（第二十六轮，磁盘压力处置）
+
+第二十六轮开工时 `/data` 可用空间降到 12G（六轮审计的隔离副本 + `gocache` 累计约 17G），
+为让本轮三条修复泳道与 Z1 有空间落盘，清掉了**已完成轮次的可重建副本**：
+`temp/r2{0,3,4,5}/*/{repo,repo-*,mut,mut-*,gocache,gocache-*,full-*}` 与 `temp/r21/{gocache,fix-{6,9,14,18,22,26,27,28,29}}`
+⇒ 释放 13.9G（可用 12G → 25.5G）。
+
+**认账**：被删的 `temp/r21/fix-N/REPORT.md` 是第二十一至二十五轮修复批的**第一手证据件**。
+其**实质内容已在本台账 §7.56–§7.60 逐条记录**（每条含文件:行、判据命令与输出、变异结论），
+代码修复本身已入库，因此不影响交付结论；但"按泳道回看原始报告"的可复现性在本机**不再成立**
+（需从提交信息与本节重建）。后续轮次请优先清理 `gocache` 与副本、保留 `REPORT.md` 与 `probe/`。
