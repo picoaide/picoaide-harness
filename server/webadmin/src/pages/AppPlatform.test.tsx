@@ -920,4 +920,28 @@ describe('应用中心 · 限制项 · 无障碍(R1-uxw-14)', () => {
       expect(btn.getAttribute('aria-describedby')).toBe('limits-readonly-note')
     }
   })
+
+  // 第三十二轮 FIX-47 子泳道 B：上一条是**负例**（只读 ⇒ 按钮禁用）。负例对
+  // "权限点写错"不敏感 —— `hasPermission` 在实参匹配不上任何权限点时对**所有角色**
+  // 恒 false，只读账号看到的界面与"权限点写错"时**一模一样**，所以那一条照样绿。
+  // 这一条是它的另一半：显式授予 `capability:write` 时保存/档位按钮必须真的解锁
+  // （只读说明整块不存在）。实参写错 ⇒ 本用例当场红。
+  it('持有 capability:write 时保存与档位按钮解锁(正向夹具)', async () => {
+    setCurrentAdmin({ role: 'super_admin', permissions: ['capability:read', 'capability:write'] })
+    render(<Limits />)
+    await screen.findByTestId('lim-max_instances')
+
+    expect(screen.queryByTestId('limits-readonly-note')).toBeNull()
+    const save = screen.getByTestId('save-limits') as HTMLButtonElement
+    const reset = screen.getByTestId('reset-limits') as HTMLButtonElement
+    // 未编辑 ⇒ 保存仍因 !dirty 禁用（那是业务规则，不是权限），但**不得**再挂只读说明。
+    expect(save.getAttribute('aria-describedby')).toBeNull()
+    expect(reset.disabled).toBe(false)
+    for (const btn of screen.getAllByRole('button', { name: /^套用/ }) as HTMLButtonElement[]) {
+      expect(btn.disabled).toBe(false)
+    }
+    // 改一格 ⇒ 保存解锁（证明确实是权限通过、而不是"什么都点不动"）。
+    fireEvent.change(screen.getByTestId('lim-max_instances'), { target: { value: '8' } })
+    expect((screen.getByTestId('save-limits') as HTMLButtonElement).disabled).toBe(false)
+  })
 })

@@ -1,0 +1,371 @@
+---
+import { Image } from 'astro:assets'
+import Layout from '../../layouts/Layout.astro'
+import Header from '../../components/Header.astro'
+import Footer from '../../components/Footer.astro'
+import logo from '../../../../brands/official/logo.svg'
+import mainShot from '../../assets/screenshots/desktop-main.png'
+
+// 英文站落地页（第三十二轮 FIX-47 ④e）。
+//
+// 为什么必须有这个文件：`astro.config.mjs` 声明了 `en` locale，Starlight 给**每一页**
+// 渲染的页头站点标题 logo 都链到 `/<locale>/`；中文首页来自自定义 `src/pages/index.astro`，
+// 而 `src/pages/en/` 此前不存在、Starlight 也不会替它生成 ⇒ `/en/` 404，
+// 英文站 17 页**全部**带一条生成型死链（源码面看不出来，只有产物面扫得出来）。
+// 本页是**真实可用的英文落地页**（不是占位页）：Hero + 功能卡片 + 英文文档入口 + 页脚。
+//
+// 站内链接**一律绝对路径 + 结尾斜杠**（本仓硬约定；相对链接不会被 Astro 重写）。
+// 视觉语言沿用中文首页（同一套 global.css 变量与 .container/.section/.btn/.feature 类）。
+// 品牌素材只用 `brands/official/logo.svg`（几何真源），产品截图复用既有 assets。
+
+const features = [
+  {
+    title: 'Desktop client',
+    body: 'A native window with tray, terminal and automatic updates. Chat, Capability Hub, connectors, scheduled jobs and the built-in browser in one place — no Node.js required on employee machines.',
+    href: '/en/desktop/',
+    link: 'Desktop client guide',
+  },
+  {
+    title: 'Local agent engine',
+    body: 'Starts, stops and recovers the local Harness service automatically, so sessions and files stay on the machine. The upstream DeepSeek Harness runs unmodified at a pinned version.',
+    href: '/en/architecture/',
+    link: 'System architecture',
+  },
+  {
+    title: 'Enterprise server and admin console',
+    body: 'Accounts, departments, authentication, model gateway, usage and audit in one console, with per-user and per-model metering, balance limits and peak-hour pricing.',
+    href: '/en/admin/',
+    link: 'Admin console',
+  },
+  {
+    title: 'Private deployment in one image',
+    body: 'Server, built-in PostgreSQL, reverse proxy and the installers for all supported platforms ship inside a single image. Choose self-signed, automatic or enterprise certificates with one variable.',
+    href: '/en/deployment/',
+    link: 'Deployment guide',
+  },
+  {
+    title: 'Client delivery and channel white-label',
+    body: 'Clients are published by the server they log in to, so a client can never drift from its server. Name, tagline, logo and accent colour come from the channel content shipped with the image.',
+    href: '/en/deployment/channels/',
+    link: 'Channels and white-label',
+  },
+  {
+    title: 'Extensible by design',
+    body: 'The core agent, web UI, desktop shell, connectors, scheduled jobs, browser and memory are all composed through the official Cordis plugin mechanism — replaceable and versioned.',
+    href: '/en/plugin-development/',
+    link: 'Plugin development',
+  },
+]
+
+const docs = [
+  { title: 'Welcome', body: 'What the platform is and how to read this Wiki.', href: '/en/welcome/' },
+  { title: 'Quick start', body: 'From an empty machine to a working client.', href: '/en/getting-started/' },
+  { title: 'Product philosophy', body: 'Why the product is built this way.', href: '/en/philosophy/' },
+  { title: 'Container deployment', body: 'Bring up server, database and proxy.', href: '/en/deployment/compose/' },
+  { title: 'Upgrade, backup and rollback', body: 'Move versions without losing data.', href: '/en/deployment/upgrade/' },
+  { title: 'Client delivery and updates', body: 'How employees install and update.', href: '/en/deployment/client-delivery/' },
+  { title: 'API reference', body: 'Management and client-side endpoints.', href: '/en/api-reference/' },
+  { title: 'FAQ', body: 'Common questions about deployment and data.', href: '/en/faq/' },
+]
+
+const steps = [
+  { title: 'Fetch the image', body: 'Download the image archive and checksums from your channel, verify them and load the image. No registry is involved.' },
+  { title: 'Export the stack files', body: 'One command writes the compose file, the certificate variants and the client installers to your deployment directory.' },
+  { title: 'Start and self-check', body: 'Bring up the proxy, server and built-in database, then confirm the health probe and the client manifest.' },
+  { title: 'Deliver to everyone', body: 'Employees download the client from the server portal and sign in. Upgrading the server upgrades every client.' },
+]
+---
+
+<Layout
+  lang="en"
+  title="PicoAide Harness — enterprise AI platform, privately deployed"
+  description="PicoAide Harness combines a desktop client, a local agent engine and an enterprise server. Deploy one image on your own network; clients ship with the server and employees stay off the public internet."
+>
+  <Header />
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container hero__inner">
+      <div class="hero__brand">
+        <Image src={logo} alt="PicoAide Harness" width={56} height={56} class="hero__logo" />
+        <span class="hero__brandname">PicoAide Harness</span>
+      </div>
+      <h1 class="hero__title">An AI operations assistant<br />for every employee</h1>
+      <p class="hero__sub">
+        PicoAide Harness brings a desktop client, a local agent engine and an enterprise server
+        together into one platform. The deliverable is a single container image — server, built-in
+        PostgreSQL, reverse proxy and the client installers are all inside it, so employee machines
+        never need access to the public internet.
+      </p>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href="/en/deployment/">Private deployment guide</a>
+        <a class="btn btn--ghost" href="/en/getting-started/">Quick start</a>
+        <a class="btn btn--ghost" href="/en/welcome/">Browse the Wiki</a>
+      </div>
+      <Image class="hero__shot" src={mainShot} alt="PicoAide Harness desktop client" width={1120} height={711} format="webp" quality={80} />
+    </div>
+  </section>
+
+  <!-- Feature cards -->
+  <section class="section section--soft" id="features">
+    <div class="container">
+      <h2 class="section__title">One platform, three layers</h2>
+      <p class="section__sub">
+        Desktop client, local service and enterprise control plane work together out of the box.
+        Every area below links to the English documentation for that surface.
+      </p>
+      <div class="features">
+        {features.map(item => (
+          <div class="feature">
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+            <a class="feature__link" href={item.href}>{item.link} →</a>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- Deployment in four steps -->
+  <section class="section" id="deployment">
+    <div class="container">
+      <h2 class="section__title">Private deployment: one image, one guide</h2>
+      <p class="section__sub">
+        No install scripts, no registry mirror and no Git checkout on the deployment machine.
+        The image carries everything needed for a first deployment, an upgrade and a rollback.
+      </p>
+      <div class="steps">
+        {steps.map((item, index) => (
+          <div class="step">
+            <span class="step__num">{index + 1}</span>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </div>
+        ))}
+      </div>
+      <p class="section__more">
+        <a href="/en/deployment/">Deployment overview</a>
+        <span>·</span>
+        <a href="/en/deployment/compose/">Container deployment</a>
+        <span>·</span>
+        <a href="/en/deployment/offline/">Air-gapped deployment</a>
+        <span>·</span>
+        <a href="/en/deployment/operations/">Operations and troubleshooting</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Documentation entry points -->
+  <section class="section section--soft" id="docs">
+    <div class="container">
+      <h2 class="section__title">Explore the documentation</h2>
+      <p class="section__sub">The Wiki is available in English and Simplified Chinese; each page has a language switcher.</p>
+      <div class="docs">
+        {docs.map(item => (
+          <a class="doc" href={item.href}>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <Footer />
+
+  <style>
+    .hero {
+      padding: 72px 0 0;
+      text-align: center;
+      background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+    }
+
+    .hero__brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .hero__logo {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero__brandname {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+    }
+
+    .hero__title {
+      font-size: clamp(2.2rem, 6vw, 3.6rem);
+      margin: 0 0 18px;
+      font-weight: 800;
+    }
+
+    .hero__sub {
+      color: var(--ink-soft);
+      max-width: 680px;
+      margin: 0 auto 32px;
+      font-size: 1.12rem;
+    }
+
+    .hero__actions {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-bottom: 56px;
+    }
+
+    .hero__shot {
+      width: 100%;
+      max-width: 1040px;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      border: 1px solid var(--line);
+      margin-bottom: -1px;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .feature {
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 28px 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .feature h3 {
+      margin: 0 0 10px;
+      font-size: 1.12rem;
+    }
+
+    .feature p {
+      margin: 0 0 14px;
+      color: var(--ink-soft);
+      font-size: 0.96rem;
+      flex: 1;
+    }
+
+    .feature__link {
+      font-weight: 600;
+      font-size: 0.94rem;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+    }
+
+    .step {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 26px 22px;
+      text-align: center;
+    }
+
+    .step__num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--brand);
+      color: #fff;
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    .step h3 {
+      margin: 0 0 8px;
+      font-size: 1.05rem;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.94rem;
+    }
+
+    .section__more {
+      text-align: center;
+      color: var(--ink-soft);
+      margin: 36px 0 0;
+      font-size: 0.98rem;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .section__more span {
+      color: var(--ink-faint);
+    }
+
+    .docs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+    }
+
+    .doc {
+      display: block;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 20px 22px;
+      color: var(--ink);
+      text-decoration: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .doc:hover {
+      border-color: var(--brand);
+      box-shadow: var(--shadow);
+    }
+
+    .doc h3 {
+      margin: 0 0 6px;
+      font-size: 1.02rem;
+    }
+
+    .doc p {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 960px) {
+      .features,
+      .docs {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .steps {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .features,
+      .docs,
+      .steps {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</Layout>
