@@ -1968,6 +1968,19 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
    Z2 另给了真机对照（无开关 0 个 DevTools 监听 / `-remote-debugging-port=9339` ⇒
    `DevTools listening on ws://127.0.0.1:9339/…`）。
    ⇒ 本条是**第二十五轮 FIX-28 的覆盖面缺口**，不是新缺陷类型。
+4. **Z3-1 成立（源码行级）** —— `scripts/ci-channel-transfer.sh:117`
+   `RUN="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"`，`:124`
+   `BASE="s3://${R2_BUCKET}/_transfer/${RUN}-${TOKEN}"`，而 `TOKEN` 又是 `HMAC(R2_SECRET_ACCESS_KEY, RUN)`
+   的前 16 位 —— **attempt 同时进入前缀与 token**。`clean` 是独立子命令、只处理它自己算得出来的那一个前缀
+   （`:157`），因此上一个 attempt 的对象既无代码路径删除、也无生命周期规则覆盖，
+   而桶是**公开读**的（`:14-16` 注释自述"只有持有 R2 凭据的…"才是隐私边界）。
+   Z3 另有可复跑反例：同一 run 的两次 attempt 得到两个不同前缀，缺平台时 `pull` 仍全绿。
+5. **Z3-2 成立（源码行级）** —— `scripts/ci-build-channel-images.sh` 的 `add()` 是
+   `[ -f "client-assets/client/$2" ] || return 0`；而**唯一**的完整性判据是
+   `if [ -z "$(ls -A client-assets/client)" ]`（目录非空）。⇒ 某渠道只产出 macOS 资产时，
+   `CLIENT-RELEASE.json` 只含 `mac-universal`、**零告警**出厂，
+   `/api/client/v2/updates/manifest` 与门户静默少两个平台。
+
 3. **Z3-4 成立（逐字对拍）** —— `.github/workflows/ci.yml:3-5` 的 `on:` 只有 `pull_request` 与 `push`；
    而 `site/src/content/docs/deployment/channels.md:58` 与
    `site/src/content/docs/en/deployment/channels.md:62` 两张表格都把 `workflow_dispatch`
