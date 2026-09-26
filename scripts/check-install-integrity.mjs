@@ -296,6 +296,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs',
   'packages/host/desktop/scripts/generate-mac-app-icon.mjs',
   'packages/host/desktop/scripts/generate-tray-icons.mjs',
+  'packages/host/desktop/scripts/mac-bundle-consistency.ts',
   'packages/host/desktop/scripts/mac-runtime.ts',
   'packages/host/desktop/scripts/notarize-mac.ts',
   'packages/host/desktop/scripts/pack-app-root.mjs',
