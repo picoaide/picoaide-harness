@@ -72,7 +72,7 @@ if (!ATTACH && SERVER === '') {
 let child
 if (!ATTACH) {
   child = spawn(APP, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(PORT)}`], {
-    env: { ...process.env, HOME: HOME_DIR, DSH_HOME: HOME_DIR, XDG_CONFIG_HOME: join(OUT, 'cfg'), XDG_CACHE_HOME: join(OUT, 'cache'), DISPLAY },
+    env: { ...process.env, PICOAI_ALLOW_DEBUG_SWITCHES: '1', HOME: HOME_DIR, DSH_HOME: HOME_DIR, XDG_CONFIG_HOME: join(OUT, 'cfg'), XDG_CACHE_HOME: join(OUT, 'cache'), DISPLAY },
     stdio: 'ignore',
     detached: true,
   })

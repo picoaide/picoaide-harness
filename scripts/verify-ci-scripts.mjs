@@ -3421,6 +3421,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   check(existsSync(join(stage, 'example-brand', 'App-example-brand.deb')), '渠道产物应归集到自己的目录')
   check((ok.stdout ?? '').includes('verify stub: official'), '官方渠道必须跑白标门禁')
   check(!(ok.stdout ?? '').includes('verify stub: example-brand'), '渠道的白标门禁输出也必须被抑制')
+  // 没给 `--verify-app-dir` 时（mac 冒烟没有这种布局），通过行必须**如实说明**
+  // app.asar 那组断言没有参与 —— "门禁看起来在跑其实没跑"正是 2026-09-26 审计
+  // Y4-02 的形态，所以这一句本身也是判据。
+  check((ok.stdout ?? '').includes('app.asar assertions skipped'),
+    '未传 --verify-app-dir 时通过行必须如实说明 app.asar 断言被跳过')
 
   // 白标门禁失败 → 报中性信息(不回显渠道名/门禁输出),且不许把产物当成功归集
   const verifyFail = join(runDir, 'verify-fail.mjs')
@@ -3480,6 +3485,149 @@ echo x > "${distDir}/App.AppImage"
 
   // 三个打包用例都不许动仓库里真实的 dist/（哨兵法：被 `rm -rf "$DIST"` 连目录一起删掉）。
   check(existsSync(sentinel), '打包脚本用例不得删除仓库里真实的 packages/host/desktop/dist（漏传 --dist）')
+  rmSync(sentinel, { force: true })
+}
+
+// ---- 5b. 白标门禁的 `--verify-app-dir`:按真实布局解析 + 缺目录 fail-loud + 断言真的跑 ----
+//
+// 2026-09-26 第二十五轮审计 Y4-02:CI 的两处调用点写 `--verify-app-dir dist/linux-unpacked`
+// (真实布局是 `packages/host/desktop/dist/linux-unpacked`),而被测脚本只按**仓库根**解析
+// ⇒ `[ -d ]` 不成立就把参数静默丢掉 ⇒ `verify-channel-package.ts:195-234` 的整组 app.asar
+// 断言(包内 `channel_id` / 图标逐字节一致 / 官方包不得残留渠道配置)**在 CI 里从未执行过**,
+// 而文档与通过行都在宣称它生效。本节把三件事变成红灯:
+//   ① CI 的逐字调用形态必须被解析到(相对 `--dist` 的父目录 = 打包产物真实布局);
+//   ② 解析不到必须失败(不许降级成"跑了一半的门禁");
+//   ③ 通过行必须如实说明这组断言本轮跑没跑,且**断言本身**真的在跑(篡改夹具必须红)。
+{
+  const runDir = tempDir('ci-package-appdir-')
+  const list = join(runDir, 'ch.list')
+  const distDir = join(runDir, 'dist')
+  const unpackedDir = join(distDir, 'linux-unpacked')
+  // 真实布局:`<桌面包根>/dist/<platform>-unpacked/resources/app.asar`。这里的 `--dist`
+  // 就是那个 `dist/`,所以下面的 `--verify-app-dir dist/linux-unpacked` 与 CI 逐字同形。
+  mkdirSync(join(unpackedDir, 'resources'), { recursive: true })
+  writeFileSync(list, 'official\nexample-brand\n')
+
+  // 哨兵法(与上一节同策):下面的每一轮都必须带 `--dist` 指到这个临时目录,否则被测脚本
+  // 会 `rm -rf` **仓库里真实的** packages/host/desktop/dist。
+  const sentinel = join(root, 'packages', 'host', 'desktop', 'dist', '.verify-ci-scripts-appdir-sentinel')
+  mkdirSync(dirname(sentinel), { recursive: true })
+  writeFileSync(sentinel, 'keep')
+
+  const desktopPackageJson = join(root, 'packages', 'host', 'desktop', 'package.json')
+
+  // 假打包器:产出**真 asar**(包内 `build/channel.json` 带本渠道 id)+ 一个安装包。
+  // `PACK_STUB_TAMPER=<渠道>` 把那一轮的包内 channel_id 写成别的值 —— 用来证明
+  // "app.asar 断言真的在跑"(而不是只证明参数被传下去了)。
+  const packStub = join(runDir, 'pack-stub.mjs')
+  writeFileSync(packStub, `import { createRequire } from 'node:module'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const require = createRequire(${JSON.stringify(desktopPackageJson)})
+const { createPackage } = require('@electron/asar')
+const dist = ${JSON.stringify(distDir)}
+const channel = process.env.DSH_BUILD_CHANNEL
+const packedChannel = process.env.PACK_STUB_TAMPER === channel ? 'tampered-channel' : channel
+const staging = join(dist, '..', 'staging-' + channel)
+rmSync(staging, { recursive: true, force: true })
+mkdirSync(join(staging, 'build'), { recursive: true })
+writeFileSync(join(staging, 'build', 'channel.json'), JSON.stringify({ channel_id: packedChannel }))
+writeFileSync(join(staging, 'build', 'app-icon.png'), 'icon-' + channel)
+writeFileSync(join(staging, 'build', 'tray-icon-blue.png'), 'tray-' + channel)
+mkdirSync(join(dist, 'linux-unpacked', 'resources'), { recursive: true })
+createPackage(staging, join(dist, 'linux-unpacked', 'resources', 'app.asar'))
+writeFileSync(join(dist, 'App-' + channel + '.AppImage'), 'x')
+`)
+
+  // 假白标门禁:契约与真脚本的 app-dir 分支同形(@electron/asar 读包内 build/ 条目;
+  // 归档内路径走 `scripts/asar-entry-path.ts` 的**同一个**适配实现)。
+  const verifyStub = join(runDir, 'verify-appdir.mjs')
+  writeFileSync(verifyStub, `import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const require = createRequire(${JSON.stringify(desktopPackageJson)})
+const { listPackage, extractFile } = require('@electron/asar')
+const { toAsarEntryPath, normalizeAsarEntry } = await import(
+  pathToFileURL(${JSON.stringify(join(root, 'packages', 'host', 'desktop', 'scripts', 'asar-entry-path.ts'))}).href)
+const args = process.argv.slice(2)
+const at = args.indexOf('--app-dir')
+if (at === -1) {
+  console.log('VERIFY-ARGV=(none)')
+  process.exit(3)
+}
+const appDir = args[at + 1]
+console.log('VERIFY-ARGV=(--app-dir ' + appDir + ')')
+const asarPath = join(appDir, 'resources', 'app.asar')
+// 与真脚本同形:先看文件在不在(真脚本这里是 existsSync 断言),再读包内条目。
+if (!existsSync(asarPath)) {
+  console.log('VERIFY-MISSING resources/app.asar at ' + asarPath)
+  process.exit(4)
+}
+const listed = new Set(listPackage(asarPath, { isPack: false }).map(normalizeAsarEntry))
+if (!listed.has('build/channel.json')) {
+  console.log('VERIFY-MISSING build/channel.json in ' + asarPath)
+  process.exit(4)
+}
+const packed = JSON.parse(extractFile(asarPath, toAsarEntryPath('build/channel.json')).toString('utf8'))
+if (packed.channel_id !== process.env.DSH_BUILD_CHANNEL) {
+  console.log('VERIFY-MISMATCH asar=' + String(packed.channel_id))
+  process.exit(5)
+}
+if (!listed.has('build/app-icon.png')) {
+  console.log('VERIFY-MISSING build/app-icon.png')
+  process.exit(6)
+}
+console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
+`)
+
+  /** 跑一轮;`extra` 覆盖 env(故障注入用)。 */
+  const runPackage = (stage, verifyAppDir, extra = {}) => spawnSync('bash', [
+    packageScript, '--list', list, '--stage-dir', stage, '--dist', distDir,
+    '--patterns', '*.AppImage', '--verify-app-dir', verifyAppDir,
+    '--', process.execPath, packStub,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyStub, ...extra },
+  })
+
+  // ① CI 的逐字形态:`--verify-app-dir dist/linux-unpacked` + `--dist <桌面包根>/dist`。
+  const okRun = runPackage(join(runDir, 'stage-ok'), 'dist/linux-unpacked')
+  check(okRun.status === 0, `--verify-app-dir 指向真实解包目录时应成功,实际退出 ${String(okRun.status)}:${okRun.stderr ?? ''}`)
+  const okOut = okRun.stdout ?? ''
+  check(okOut.includes(`VERIFY-ARGV=(--app-dir ${unpackedDir})`),
+    '`dist/linux-unpacked` 必须按 dist 的父目录解析到打包产物真实布局(修前这里解析成 <repoRoot>/dist/… 并被静默丢弃)')
+  check(!okOut.includes('VERIFY-ARGV=(none)'), 'app-dir 绝不允许被静默丢弃')
+  check(okOut.includes('white-label gate: app.asar assertions included'),
+    '传了 --verify-app-dir 时通过行必须说明 app.asar 断言已参与')
+  check(existsSync(join(runDir, 'stage-ok', 'official', 'App-official.AppImage')), '正常轮的产物应照常归集')
+
+  // ② 断言真的在跑:把官方轮的包内 channel_id 写成别的值 ⇒ 必须红在"包内 channel_id"上。
+  //    (修前参数被丢弃时,同一夹具是**绿**的 —— 这正是"门禁看起来在跑其实没跑"。)
+  const tampered = runPackage(join(runDir, 'stage-tampered'), 'dist/linux-unpacked', { PACK_STUB_TAMPER: 'official' })
+  check(tampered.status !== 0, '包内 channel_id 与构建渠道不一致时必须失败(证明 app-dir 断言真的在跑)')
+  check((tampered.stdout ?? '').includes('VERIFY-MISMATCH'),
+    '失败必须来自"包内 channel_id 比对"这一条,而不是打包/归集等别的环节')
+  check((tampered.stderr ?? '').includes('官方渠道的白标门禁未通过'), '该失败应报成白标门禁失败')
+
+  // ③ 解析不到 ⇒ fail-loud(绝不降级),且**不得**再调白标门禁装作跑过。
+  const missing = runPackage(join(runDir, 'stage-missing'), 'dist/does-not-exist')
+  check(missing.status !== 0, '--verify-app-dir 指向不存在的目录时必须失败')
+  const missingOut = `${missing.stdout ?? ''}${missing.stderr ?? ''}`
+  check(missingOut.includes('--verify-app-dir 指向的目录不存在'), '失败信息必须点名 --verify-app-dir')
+  check(!(missing.stdout ?? '').includes('VERIFY-ARGV'), '解析不到时不得调用白标门禁(那又会变成"看起来在跑")')
+
+  // ④ 历史语义仍在:仓库根相对路径照样解析(用 `scripts/` 这个存在但没有 app.asar 的目录)。
+  //    它必须由**门禁自己**报"缺 resources/app.asar",而不是被脚本静默跳过。
+  const rootRelative = runPackage(join(runDir, 'stage-rootrelative'), 'scripts')
+  check(rootRelative.status !== 0, '仓库根基线解析到没有 app.asar 的目录时也必须失败')
+  check((rootRelative.stdout ?? '').includes(`VERIFY-ARGV=(--app-dir ${join(root, 'scripts')})`),
+    '仓库根相对路径(历史语义)必须仍然生效')
+  check((rootRelative.stdout ?? '').includes('VERIFY-MISSING'),
+    '缺 resources/app.asar 必须由门禁自己报出来(而不是脚本替它跳过)')
+
+  check(existsSync(sentinel), 'app-dir 用例不得删除仓库里真实的 packages/host/desktop/dist(漏传 --dist)')
   rmSync(sentinel, { force: true })
 }
 
@@ -5124,7 +5272,7 @@ if (failures.length > 0) {
 process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
   + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
   + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
-  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
+  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁(app-dir 按真实布局解析 + 缺目录 fail-loud + 断言真跑)/产物归集/'
   + '渠道仓 revision 解析的 stdout/stderr 分流(SSH deploy key 形态 + 失败分类 + 脱敏 + 唯一 EXIT trap)/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫/'

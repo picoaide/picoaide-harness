@@ -344,6 +344,7 @@ async function main() {
     child = spawn(appBinary, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(cdpPort)}`], {
       env: {
         ...process.env,
+        PICOAI_ALLOW_DEBUG_SWITCHES: '1',
         HOME: HOME_DIR,
         DSH_HOME: HOME_DIR,
         XDG_CONFIG_HOME: join(workDir, 'cfg'),

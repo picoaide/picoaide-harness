@@ -179,13 +179,19 @@ describe('published package surface', () => {
     const exitCoordinator = main.indexOf('createDesktopExitCoordinator(')
     const ready = main.indexOf('await app.whenReady()')
     const markClean = main.indexOf('desktopRun?.markClean()')
-    const nativeExit = main.indexOf('app.exit(code)')
+    // 锚点必须**从 `createDesktopExitCoordinator(` 之后**取：main.ts 里还有一处
+    // 模块作用域的 `app.exit(code)` —— 调试开关闸门的退出实现（2026-09-26 第二十五轮
+    // 审计 Y4-01）。拿"文件里第一次出现"当"退出协调器自带 exit 回调"的代理会让这条
+    // 判据指向别的东西（本次实测：`expected 6979 to be greater than 13884`）。
+    // 顺带把代理收紧成"真的在 coordinator 的 exit 回调里"。
+    const nativeExit = main.indexOf('app.exit(code)', exitCoordinator)
 
     expect(startCrashReporter).toBeGreaterThanOrEqual(0)
     expect(beginRun).toBeGreaterThan(startCrashReporter)
     expect(childLogging).toBeGreaterThan(beginRun)
     expect(exitCoordinator).toBeGreaterThan(childLogging)
-    expect(nativeExit).toBeGreaterThan(exitCoordinator)
+    expect(main.slice(exitCoordinator, nativeExit), 'coordinator 必须自带 exit 回调（在它之后、markClean 之前）')
+      .toContain('exit: code =>')
     expect(markClean).toBeGreaterThan(nativeExit)
     expect(ready).toBeGreaterThan(markClean)
   })

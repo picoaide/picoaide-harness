@@ -24,6 +24,15 @@ import {
   enforceDirectTransport,
   resolveSystemProxyPolicy,
 } from './network-policy.ts'
+// 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01）：打包版带 `--inspect*` /
+// `--remote-debugging-*` / `--js-flags` 启动时必须**拒绝启动**。判定是纯函数、
+// 接线也必须在模块作用域 —— 理由见下面 `DEBUG_SWITCH_GATE` 的注释与模块头。
+import {
+  applyDebugSwitchGate,
+  debugSwitchEscapeLogLine,
+  detectDebugSwitches,
+  writeStderrSync,
+} from './debug-switches.ts'
 // 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
 // Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
 // 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
@@ -143,6 +152,40 @@ const APP_ORIGIN_SCHEME = CHANNEL_PROFILE?.appOriginScheme ?? DEFAULT_APP_ORIGIN
 const SYSTEM_PROXY_POLICY = resolveSystemProxyPolicy(process.env, CHANNEL_PROFILE)
 applySystemProxyPolicy(app.commandLine, SYSTEM_PROXY_POLICY)
 
+/**
+ * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1）：打包版**拒绝**带
+ * `--inspect` / `--inspect-brk` / `--inspect-port` / `--remote-debugging-port` /
+ * `--remote-debugging-pipe` / `--js-flags` 启动。
+ *
+ * **也必须在模块作用域**，而且理由比代理开关更硬：`--inspect` 的 V8 inspector 监听
+ * 在 JS 跑之前就已经建好、`--remote-debugging-port` 由 Chromium 在浏览器进程初始化时
+ * 读取 —— 在 JS 里做任何"净化"（`removeSwitch` / 关 `devTools`）都晚了一步，
+ * 唯一可靠的处置是**拒绝启动**（实跑证据：`temp/r25/Y4-fresh/probe/`；`--inspect`
+ * 直通主进程 RCE，`--remote-debugging-port` 可经 CDP 读出 HttpOnly 的
+ * `dsh-auth-*` 持有性证明 cookie 并重放通过全部写面闸门）。
+ *
+ * 判定顺序、文案与副作用都在 `debug-switches.ts`（纯函数 + 可注入接缝，行为判据见
+ * `tests/debug-switches.spec.ts`）：开发态（`!app.isPackaged`）一律放行；
+ * 打包态可经真实进程环境里的 `PICOAI_ALLOW_DEBUG_SWITCHES=1` 显式放行**一次**
+ * （E2E/真机探针靠它驱动打包产物），放行会写进启动日志（下面 `start()` 里那行）。
+ */
+const DEBUG_SWITCH_GATE = detectDebugSwitches({
+  argv: process.argv,
+  execArgv: process.execArgv,
+  packaged: app.isPackaged,
+  env: process.env,
+})
+applyDebugSwitchGate(DEBUG_SWITCH_GATE, {
+  write: writeStderrSync,
+  showErrorBox: (title, content) => { dialog.showErrorBox(title, content) },
+  // `process.exit` 是 fail-closed 的双保险：`app.exit()` 在真机上由平台收尾
+  // （可能异步），而这条闸门的语义是"绝不允许带着调试开关继续启动"。
+  exit: code => {
+    app.exit(code)
+    process.exit(code)
+  },
+})
+
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
   runtime: ElectronDesktopRuntime,
@@ -260,13 +303,18 @@ async function start(): Promise<void> {
     })
     logSink.enforceDirectoryCap()
     logSink.purgeOlderThan(7)
-    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} proxy ${SYSTEM_PROXY_POLICY.allow ? 'system' : 'direct'}/${SYSTEM_PROXY_POLICY.source} run ${Date.now()} ---`)
+    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} proxy ${SYSTEM_PROXY_POLICY.allow ? 'system' : 'direct'}/${SYSTEM_PROXY_POLICY.source} debugSwitches ${DEBUG_SWITCH_GATE.escaped ? 'allowed-by-env' : 'guarded'} run ${Date.now()} ---`)
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause)
     process.stderr.write(`${BIN_NAME}: file logging unavailable: ${maskSecrets(detail)}\n`)
     logSink = undefined
   }
   const electronLogger = new ElectronStderrLogger(logSink)
+  // 逃生门留痕（2026-09-26 第二十五轮审计 Y4-01）：`PICOAI_ALLOW_DEBUG_SWITCHES`
+  // 放行的是"任何本机同用户进程都能控制本应用并读它的本地 API cookie"这件事，
+  // 静默放行等于保护不存在 —— 每次靠它启动都在启动日志里写明。
+  const debugSwitchEscape = debugSwitchEscapeLogLine(DEBUG_SWITCH_GATE)
+  if (debugSwitchEscape !== undefined) electronLogger.error(`${BIN_NAME}: ${debugSwitchEscape}`)
   try {
     startDesktopCrashReporting(crashReporter, {
       productName: PRODUCT_NAME,

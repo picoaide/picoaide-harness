@@ -16,7 +16,12 @@
 #
 # 参数:
 #   --verify-app-dir <dir>  每个渠道打包后拆开 <dir>/resources/app.asar 做端到端
-#                           白标校验(linux/win 的解包目录;mac 无此布局则省略)
+#                           白标校验(linux/win 的解包目录;mac 无此布局则省略)。
+#                           相对路径先按 `--dist` 的父目录解析(打包产物的真实布局:
+#                           `<桌面包根>/dist/<platform>-unpacked`),再按仓库根(历史语义);
+#                           两种基线都解析不到即**失败**,绝不静默把该参数丢掉
+#                           —— 静默丢弃会让 app.asar 那组断言看起来在跑其实没跑
+#                           (2026-09-26 第二十五轮审计 Y4-02)。
 #
 # 环境:
 #   DSH_BUILD_CHANNEL  由本脚本按渠道注入(不要外部预设)
@@ -139,15 +144,41 @@ for channel in "${CHANNELS[@]}"; do
   # 白标门禁:本渠道的包必须**自带渠道配置**且图标是**按本渠道派生**的
   # (见 packages/host/desktop/scripts/verify-channel-package.ts)。官方与渠道走
   # 同一条门禁:官方构建的 build/ 里不该残留上一次渠道构建的 channel.json。
-  # 有 --verify-app-dir(linux/win 的解包目录)时再拆开 app.asar 做端到端确认。
-  verify_args=()
+  #
+  # `--verify-app-dir`(linux/win 的解包目录)**存在时**,再拆开 `resources/app.asar`
+  # 做端到端确认(`verify-channel-package.ts:195-234`:包内 `build/channel.json` 的存在性、
+  # 包内 `channel_id` 等于本次渠道、包内图标与 `build/` 逐字节一致、官方包不得残留渠道
+  # 配置)。**这个参数绝不允许被静默丢弃**——2026-09-26 第二十五轮审计 Y4-02 实测:CI 的
+  # 两处调用点写的是 `--verify-app-dir dist/linux-unpacked`,而本脚本只按**仓库根**解析成
+  # `<repoRoot>/dist/linux-unpacked`(真实布局在 `packages/host/desktop/dist/…`),
+  # `[ -d ]` 不成立就把参数吞掉 ⇒ 上面整组断言**在 CI 里从未执行过一次**,而文档与通过行
+  # 都在宣称它生效。"门禁看起来在跑其实没跑"正是必须 fail-loud 的形态,所以:
+  #   ① 相对路径两种基线都认(先 `$DIST` 的父目录=打包产物真实布局,再仓库根=历史语义);
+  #   ② 解析后仍不存在 ⇒ 当场失败,绝不降级;
+  #   ③ 通过行如实说明这一组断言本轮**是否**参与(见下面的 white-label gate 行)。
+  verify_app=""
   if [ -n "$VERIFY_APP_DIR" ]; then
     case "$VERIFY_APP_DIR" in
       /*) verify_app="$VERIFY_APP_DIR" ;;
-      *) verify_app="$REPO_ROOT/$VERIFY_APP_DIR" ;;
+      *)
+        if [ -d "$(dirname "$DIST")/$VERIFY_APP_DIR" ]; then
+          # 打包产物的真实布局(`<桌面包根>/dist/<platform>-unpacked`);`--dist` 覆盖时
+          # 同样按覆盖值的父目录解析,与缺省布局保持同一口径。
+          verify_app="$(dirname "$DIST")/$VERIFY_APP_DIR"
+        else
+          verify_app="$REPO_ROOT/$VERIFY_APP_DIR"
+        fi
+        ;;
     esac
-    [ -d "$verify_app" ] && verify_args+=(--app-dir "$verify_app")
+    if [ ! -d "$verify_app" ]; then
+      echo "::error::--verify-app-dir 指向的目录不存在:$verify_app" >&2
+      echo "::error::存在该参数时 app.asar 端到端断言是本门禁的一部分,解析不到就是门禁残缺,因此这里直接失败" >&2
+      echo "::error::相对路径按 dist 的父目录(打包产物真实布局)或仓库根解析;确实没有解包目录(mac 冒烟)请省略该参数" >&2
+      exit 1
+    fi
   fi
+  verify_args=()
+  [ -n "$verify_app" ] && verify_args+=(--app-dir "$verify_app")
   if [ "$channel" = "official" ]; then
     if ! (cd "$REPO_ROOT" && DSH_BUILD_CHANNEL="$channel" \
       node "$VERIFY_SCRIPT" "${verify_args[@]+"${verify_args[@]}"}"); then
@@ -160,6 +191,13 @@ for channel in "${CHANNELS[@]}"; do
     echo "::error::渠道 ${INDEX}/${TOTAL} 的白标门禁未通过(随包渠道配置/图标与所选渠道不自洽)。" >&2
     echo "::error::渠道构建与官方构建走同一套门禁;请用官方构建复现排障" >&2
     exit 1
+  fi
+  # 通过行如实说明 app.asar 断言这一轮到底跑没跑(2026-09-26 审计 Y4-02 的第③条):
+  # 路径是构建布局,不含渠道身份,可以进公开日志。
+  if [ -n "$verify_app" ]; then
+    echo "  white-label gate: app.asar assertions included ($verify_app)"
+  else
+    echo "  white-label gate: app.asar assertions skipped (no --verify-app-dir; build/ 侧断言照常执行)"
   fi
 
   # 归集产物到 client-assets/<channel>/;一个都没有 = 打包其实没产出,必须失败。
