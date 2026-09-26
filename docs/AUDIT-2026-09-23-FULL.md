@@ -2077,3 +2077,33 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
 **运维交接（HANDOFF）**：①若产品决定给 CI 加 `workflow_dispatch`，FIX-32 已给出精确 diff + 3 条配套
 （不建议顺手做）；②本次改动**之前**已结束的 run 留下的 `_transfer/<run>-<attempt>-<token>/`
 无代码路径可枚举，需按 REPORT 命令人工清理，长期建议给桶加 `_transfer/` 生命周期规则。
+
+#### §7.63.1 入库提交映射与一处认账
+
+| 提交 | 内容 | 说明 |
+|---|---|---|
+| `3668cebc50` | `fix(enterprise): 会话派生的异步投影补代际守卫` | 4 投影 + 新 `session-epoch.ts` + 5 个 spec |
+| `0a1edd7780` | `fix(desktop): 调试开关拦截面按真实解析面收口 + inspect 族改用打包期 fuse` | `debug-switches.ts` 及其 spec、`verify-packaged-runtime.ts`（fuse）、`packaged-inspect-fuse.spec.ts`、`package.json`、`AGENTS.md` |
+| `546fa21887` | `fix(cron,connectors): 跨账号任务名泄漏 + 生命周期抢占 + 凭据读失败 fail-closed` | 5 个 src + 3 个新 spec |
+| `7786503b5e` | `fix(scripts,site,desktop): 发布链四条 P1` | 6 个 `scripts/**` + 2 个站点文档 |
+| `2f3f125044` | `docs(audit,release): 第二十六轮修复批交付记录 + 行为变更登记` | 本台账 §7.63 + 发布说明 §十三 |
+
+**认账（提交粒度）**：`0a1edd7780` 的提交信息只描述了调试开关与 fuse 两项，但该提交用
+`git add -A -- packages/host/desktop` 落盘，**同时带进了 FIX-32 的三个 desktop 文件**
+（`scripts/brand-prepare.mjs`、`scripts/channel-build.ts`、`tests/channel-prepare.spec.ts`、
+`tests/verify-channel-package.spec.ts`）—— 这几个文件的**行为**已在 `7786503b5e` 的信息里描述，
+但**文件不在那个提交里**。审查者按提交信息定位白标素材改动时请到 `0a1edd7780`。
+未做历史重写：本工作目录有多个会话并发编辑，rebase/amend 会动到索引、风险大于收益；
+内容本身正确、门禁 32/32 绿、且本台账与发布说明已完整描述该批改动。
+**教训**：按包整体 `git add` 会把同一包里属于**别的泳道**的改动一起带走 ——
+多泳道并行时 `git add` 的路径粒度应细到**文件**，或至少在提交后核对
+`git show --name-status` 的文件清单是否恰好等于本泳道声明改过的文件。
+
+#### §7.63.2 第二十七轮已派出（进行中）
+
+三条泳道（基线 `2f3f125044`，共用纪律 `temp/r27/BRIEF.md`）：
+- **AA1** 复核第二十六轮修复批（重点做**证伪**：`.then()`/`Promise.all` 是否绕过 AST 接线判据、
+  单横线之外 Chromium 还认哪些形态、`OnlyLoadAppFromAsar=true` 会不会破坏
+  `ELECTRON_RUN_AS_NODE=1 <binary> <外部脚本>` 这种我们自己探针与 subprocess-local 都在用的用法）；
+- **AA2** 服务端（Go）新面清扫（Z2/Z3 完全没覆盖 `server/**`）；
+- **AA3** 客户端与宿主插件新面清扫（含"全仓普查异步投影是否还有同族"）。
