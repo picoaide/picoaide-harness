@@ -179,6 +179,11 @@ if (!existsSync(migrationPath)) {
   process.exit(1)
 }
 const numbers = readdirSync(migrationPath)
+  // **R22 FIX-14**：与下面的 `sqlFiles` 同一口径 —— 必须过 `isFile()`。修前只按**文件名**
+  // 取数，于是一个名叫 `0090_x.sql` 的**目录**会把"实际 MAX"顶到 0090（迫使改多处文档区间），
+  // 而同一份输出里还能同时出现"75 个"（按名字数）与"74 个 .sql"（`sqlFiles` 过了 `isFile()`）
+  // —— 计数口径不一致本身就是可诊断性缺陷（V4 泳道 N3）。
+  .filter(name => statSync(join(migrationPath, name)).isFile())
   .map(name => /^(\d{4})_.*\.sql$/u.exec(name)?.[1])
   .filter(value => value !== undefined)
   .map(Number)
@@ -206,6 +211,18 @@ const sha256 = data => createHash('sha256').update(data).digest('hex')
  * @returns 可直接落盘/进 diff 的 JSON 文本（含尾换行）。
  */
 function renderChecksums() {
+  // **R22 FIX-14**：生成与校验**必须同源** —— 登记表的 schema 只收 `00NN_名字.sql`
+  // （见 `checksumEntryProblems`），而修前 `--print-checksums` 会把 `foo.sql` 一起写进表里，
+  // 于是守卫给的"重新生成"指引**不可执行**：照着做一次，登记表立刻因为条目不合规而红
+  // （两段文案互相矛盾，V4 泳道 N3 实测）。正确出路是**改名/删掉那个文件**，不是把它登记进去。
+  const invalid = sqlFiles.filter(name => !SQL_NAME.test(name))
+  if (invalid.length > 0) {
+    console.error(`check-migration-range: 拒绝为**不合规文件名**生成登记表：${invalid.join('、')}`
+      + ` —— 登记表只登记 \`00NN_名字.sql\`（${MIGRATION_DIR} 下的迁移文件名是运行期契约：`
+      + '`//go:embed migrations-pg/*.sql` 与 runner 都按这个形态认版本号）。'
+      + '请把文件改名成规范形态（或删掉它），**不要**把它写进登记表。')
+    process.exit(2)
+  }
   const entries = sqlFiles.map((name) => {
     const bytes = readFileSync(join(migrationPath, name))
     return {
@@ -252,6 +269,11 @@ const contentInScope = existsSync(CHECKSUMS_PATH) || rootIsRepoShaped
 const contentProblems = []
 /** 如实降级/提示（不判红，但必须打印出来，不许静默）。 */
 const contentNotices = []
+/**
+ * "登记值 vs 已提交字节"（第⑥层）**这次是否真的参与**（R22 FIX-14）。
+ * 只影响**通过行的措辞**：没参与就不得宣称"与提交态一致"。
+ */
+let headLayerRan = false
 
 /** 登记表条目形状校验；任何一处不成立都返回问题（fail-closed）。 */
 function checksumEntryProblems(entries) {
@@ -351,10 +373,17 @@ if (contentInScope) {
           }
           for (const name of sqlFiles) {
             if (registered.has(name)) continue
-            const hint = SQL_NAME.test(name)
-              ? ''
-              : `（文件名不符合 \`00NN_名字.sql\`，runner 也认不出它）`
-            contentProblems.push(`新增迁移未登记：${name}${hint} —— ${REGENERATE_HINT}`
+            if (!SQL_NAME.test(name)) {
+              // **R22 FIX-14**：非规范名**不能**靠"登记进表"变绿（表 schema 拒收它）——
+              // 修前这里给的 REGENERATE_HINT 是不可执行的指引（照做一次仍然红，两段文案
+              // 互相矛盾）。诊断必须指向真正可行的修法。
+              contentProblems.push(`新增迁移文件名不合规：${name}（版本号前缀取不出）—— `
+                + `${MIGRATION_DIR} 下的文件名是运行期契约（\`00NN_名字.sql\`），`
+                + 'runner 也认不出它。请把它**改名**成规范形态（或删掉），不要试图登记进登记表 —— '
+                + `\`--print-checksums\` 会拒绝为不合规文件名生成登记表。`)
+              continue
+            }
+            contentProblems.push(`新增迁移未登记：${name} —— ${REGENERATE_HINT}`
               + '，让"新增迁移"这一步必须进 diff 被评审')
           }
           // 追加一层：**"把文件与登记值一起改"这条最省事的绕过**也要红。
@@ -364,8 +393,40 @@ if (contentInScope) {
           // 登记值的改动必须进 diff（那正是本判据要的可见性）。
           // 取不到 git 输出（环境问题）时**不判红**、只如实打印降级 —— 判据的可靠性不该
           // 依赖"git 一定可用"，但"取不到"绝不等同于"对上了"。
-          if (existsSync(join(root, '.git'))) {
+          // **R22 FIX-14（V4 N1）**：第⑥层修前是**以登记表为驱动的一向遍历** ——
+          // `if (typeProbe.status !== 0) continue // HEAD 里还没有它 ⇒ 新增迁移` 把"该路径在
+          // HEAD 里不存在"一律当成"新增"，而**没有任何反向判据**（"HEAD 里有的迁移路径，
+          // 今天还在不在、字节还一样不一样"）。于是一次 `git mv 0055_x.sql 0055_y.sql`
+          // + 改正文 + 重新生成登记表 ⇒ 真 git 仓里 **EXIT=0**，通过行照旧印
+          // "74 个迁移文件的 sha256 与 …逐条一致 ✅"（V4 最小反例 `mut/final-minimal`）。
+          // 迁移**只能新增**：删/改名/移出索引都要红。
+          const headLayerAvailable = existsSync(join(root, '.git'))
+          if (headLayerAvailable) {
             let gitUsable = true
+            headLayerRan = true
+            // ⑥a **反向遍历**：HEAD 里的迁移路径集合必须 ⊆ 磁盘（少一个即红）。用
+            // `git ls-tree -r --name-only HEAD -- <目录>`（**树证据**，不看提交图，
+          // 也不受任何历史改写影响）。
+            const listed = spawnSync('git', ['-C', root, 'ls-tree', '-r', '--name-only', 'HEAD', '--', MIGRATION_DIR], {
+              encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+            })
+            if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== 'string') {
+              gitUsable = false
+            } else {
+              const headPaths = listed.stdout.split('\n')
+                .map(line => line.trim())
+                .filter(line => line !== '')
+              const onDiskPaths = new Set(sqlFiles.map(name => `${MIGRATION_DIR}/${name}`))
+              for (const path of headPaths) {
+                if (onDiskPaths.has(path)) continue
+                const name = path.startsWith(`${MIGRATION_DIR}/`) ? path.slice(MIGRATION_DIR.length + 1) : path
+                contentProblems.push(`已提交的迁移文件在磁盘上不存在（改名 / 删除 / 移出索引）：${name}\n`
+                  + `          HEAD 里有 \`${path}\`，而 ${MIGRATION_DIR} 下没有它`
+                  + '（登记表可能被"顺手同步"过了）—— 迁移**只能新增**：删/改名同样是"改写历史"，'
+                  + '已部署库按版本号记录过它，路径变了不会让任何库重跑，只会让新库与旧库分叉。\n'
+                  + '          ⇒ 请把文件恢复成 HEAD 里的原名与内容；确属误提交才用 `git rm` 走评审。')
+              }
+            }
             for (const entry of parsed.entries) {
               if (!onDisk.has(entry.file)) continue
               const relativePath = `${MIGRATION_DIR}/${entry.file}`
@@ -392,8 +453,18 @@ if (contentInScope) {
             }
             if (!gitUsable) {
               contentNotices.push(`root=${root} 是 git 工作树，但 git 读取 HEAD 失败 ⇒`
-                + ' "登记值 vs 已提交字节"这一层**未参与**（其余判据照常）。别把这次通过读成"登记值与提交态一致"。')
+                + ' "登记值 vs 已提交字节"与"HEAD 侧路径集合 ⊆ 磁盘"这一层**未参与**（其余判据照常）。'
+                + '别把这次通过读成"登记值与提交态一致"。')
             }
+          } else {
+            // **R22 FIX-14（V4 N2/④）**：修前这条提示在 `if (existsSync(join(root, '.git')))`
+            // 的**内层**（只有"`.git` 在场但 git 读不出"才打印），于是"仓库形态但没有 `.git`"
+            // 的根（`git archive HEAD | tar -x` 深拷贝、源码 tarball、Docker 构建上下文、
+            // `--root <导出树>`）上第⑥层**静默跳过**、一条提示都不打，而通过行照旧宣称
+            // "逐条一致 ✅"。降级必须在两种形态下**同口径**披露。
+            contentNotices.push(`root=${root} 是仓库形态但**没有 \`.git\`**（不是 git 工作树）⇒`
+              + ' "登记值 vs 已提交字节"与"HEAD 侧路径集合 ⊆ 磁盘"这一层**未参与**（其余判据照常）。'
+              + ' 别把这次 EXIT=0 读成"登记值与提交态一致"——要判这一层请在 git 工作树里跑。')
           }
         }
       }
@@ -583,8 +654,13 @@ if (scanned === 0 || !agentsScanned) {
 
 if (!json) {
   // 通过行**只说做过的判据**：合成夹具根上不宣称"迁移内容没被改过"（那件事本次没判）。
+  // **R22 FIX-14**：通过行只说**做过的判据** —— 第⑥层（登记值 vs 已提交字节 / HEAD 侧路径
+  // 集合 ⊆ 磁盘）没跑时必须在同一行里写明，否则读者会把"登记表与磁盘一致"读成"与提交态一致"。
+  const headLayerClause = contentInScope && headLayerRan
+    ? ''
+    : '（**但"登记值 vs 已提交字节"这一层未参与**：见 [CONTENT-SKIP]）'
   const contentClause = contentInScope
-    ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致`
+    ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致${headLayerClause}`
     : '（迁移内容不可变判据**未参与**：root 不是仓库形态，见 [CONTENT-SKIP]）'
   console.log(`check-migration-range: 文档区间与实际一致（${pad(MIN)}–${pad(MAX)}），`
     + `且 server/AGENTS.md 的迁移号都存在${contentClause} ✅`)

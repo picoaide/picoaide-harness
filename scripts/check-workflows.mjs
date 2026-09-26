@@ -658,7 +658,7 @@ const SELFTEST_FATAL_PATH_ASSERTIONS = 6
 /** `selfTestWorkflowFileRegistry()` 至少执行的断言条数(4 个正反样本 + 1 条具名性)。 */
 const SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS = 5
 /** `selfTestPinnedStepCoverage()` 至少执行的断言条数(1 条全命中 + 每条策略 1 条缺口)。 */
-const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 5
+const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 8
 /** `selfTestRequiredCiSteps()` 至少执行的断言条数(R21 fix-6 / E-03:6 条正反样本 + 词表对拍)。 */
 const SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS = 7
 /** `selfTestPinnedEnvLayers()` 至少执行的断言条数(正向集合相等 + 反向未登记层 + 变异打坏)。 */
@@ -2883,6 +2883,64 @@ const PINNED_STEP_POLICIES = [
     match: script => commandPositionArgvs(script, FROZEN_LAUNCHER_PROBE).length > 0,
     ifPolicy: 'never',
   },
+  // ---- R22 FIX-14（E-03 的另一半）：**新登记的三条判据步骤也必须进"可执行性"表** ----
+  //
+  // 现场（第二十二轮 V7 泳道）：`REQUIRED_CI_STEPS` 当时只做了**存在性**双向对账，于是
+  // `gofmt check` / `go vet ./...` / `npm test` 三步里任一条加 `if: false`（或 `if: ${{ false }}`）
+  // ⇒ `check-workflows` 与 `verify-ci-scripts` **都 EXIT=0**（对照：`go test` 那一步因为在
+  // 本表里而被 `[SK-14]` 具名红）。把 `go vet ./...` 弱化成 `go vet ./cmd` 同样两条守卫全绿，
+  // 而运行期照旧通过 ⇒ **静默**丢掉 `internal/**`、`demoapps/**`、`webadmin/**`、`scripts/**`
+  // 的静态分析面。
+  //
+  // 收口：`REQUIRED_CI_STEPS` 的每条带 `pinnedId` 指到本表（`selfTestRequiredCiSteps` 对拍
+  // "每条登记项都指到一条真实策略"），于是 `if:` / `continue-on-error` / `shell` /
+  // `working-directory` / 所在 job 的常量假 `if:` 全部套用既有策略；另加 `payload`
+  // （命令**载荷**判据）——"命令位还在"不等于"判据面还在"。
+  {
+    id: 'ci-gofmt-check',
+    label: '`gofmt -l <GO_DIRS>`（Go 格式判据步）',
+    // 识别口径 = **server job 里命令位真的执行 `gofmt`**（与 `REQUIRED_CI_STEPS` 的 `job: 'server'`
+    // 同源；`[SK-23]` 的合成样本用的是别的 job 名 ⇒ 不会被这条策略连带判红）。
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'gofmt'),
+    ifPolicy: 'never',
+    // 载荷 = 扫描面必须覆盖 Go module 的全部目录（与 `server/Makefile` 的 `GO_DIRS` 同源；
+    // `verify-ci-scripts.mjs` 另有一条同面判据 —— 两条独立守卫都咬这一格）。
+    payload: script => {
+      const missing = CI_GOFMT_FACE.filter(dir => !new RegExp(`gofmt[^\\n]*\\b${dir}\\b`, 'u').test(script))
+      return missing.length === 0 ? null : `它的扫描面少了 ${missing.join('、')}`
+        + '（`gofmt -l <目录…>` 的面必须与 `server/Makefile` 的 `GO_DIRS` 同源：'
+        + '缩到子集 = 被缩掉的那些目录的格式违规在 CI 全绿）'
+    },
+  },
+  {
+    id: 'ci-go-vet',
+    label: '`go vet ./...`（Go 静态分析步）',
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'go' && (entry.argv[0] ?? '') === 'vet'),
+    ifPolicy: 'never',
+    // 载荷 = 包面必须逐字 `./...`：`go vet ./cmd` 仍然"运行期通过"，但把 `internal/**`、
+    // `demoapps/**`、`webadmin/**`、`scripts/**` 整片静态分析面静默丢掉（E-03 实测两守卫 EXIT=0）。
+    payload: script => {
+      const vet = executedCommands(script).find(entry => entry.command === 'go' && (entry.argv[0] ?? '') === 'vet')
+      if (vet === undefined) return '命令位上找不到 `go vet`'
+      const face = vet.argv[1] ?? ''
+      return face === './...' ? null : `它的包面是 \`${face === '' ? '(缺)' : face}\` 而不是逐字 \`./...\``
+        + '（缩到子集 = 被缩掉的包整片失去静态分析，而 CI 照旧通过）'
+    },
+  },
+  {
+    id: 'ci-webadmin-npm-test',
+    label: '`npm test`（webadmin 测试步）',
+    match: (script, item) => item?.jobId === 'server'
+      && executedCommands(script).some(entry => entry.command === 'npm' && (entry.argv[0] ?? '') === 'test'),
+    ifPolicy: 'never',
+    // 载荷 = 必须在 `server/webadmin` 里跑（`webadmin` 的 600+ 用例不在根 `yarn check` 的
+    // workspace 枚举里；换目录 = 这一步跑的不是同一批用例 —— 与 [SK-18] 的 cwd 判据同一取向）。
+    payload: (script, item) => (item?.step?.['working-directory'] === 'server/webadmin' ? null
+      : `它的 \`working-directory\` 是 \`${item?.step?.['working-directory'] ?? '(缺)'}\` 而不是 `
+        + '\`server/webadmin\`（`webadmin` 的用例只在那个目录里跑：换 cwd 就等于换了一批用例）'),
+  },
 ]
 /**
  * `if:` 允许形态的**登记值**。
@@ -2893,6 +2951,12 @@ const PINNED_STEP_POLICIES = [
  *     `JOB_IF_POLICIES.exact` 同一范式)。**不接受子串匹配** —— "表达式里出现过
  *     `needs.<job>.result`"这个判据可以被任何合取项绕过(R6-C-2 的现场)。
  */
+/**
+ * `gofmt -l` 的**扫描面**（`server/Makefile` 的 `GO_DIRS` 同源登记值；R22 FIX-14 / E-03）。
+ * 改这里就要同时改 `server/Makefile` 与 CI 的 `gofmt check` 步 —— `verify-ci-scripts.mjs`
+ * 的"gofmt 扫描面必须与 Makefile 同源"判据会先红。
+ */
+const CI_GOFMT_FACE = ['cmd', 'internal', 'demoapps', 'webadmin', 'scripts']
 const PINNED_STEP_IF_POLICIES = {
   never: {
     check: () => false,
@@ -2964,6 +3028,8 @@ const REQUIRED_CI_STEPS = [
     file: 'ci.yml',
     job: 'server',
     argv: ['gofmt'],
+    // R22 FIX-14 / E-03：接进 `PINNED_STEP_POLICIES`（存在性**不等于**可执行性/判据面）。
+    pinnedId: 'ci-gofmt-check',
     label: '`gofmt -l cmd internal demoapps webadmin scripts`（格式判据）',
     why: '第三轮审计 W-6：`go vet` / `go test` 都不查格式，这一步是 `server/demoapps/**` 格式违规'
       + '的唯一拦截点；删掉它 ⇒ 格式违规静默进镜像',
@@ -2972,6 +3038,7 @@ const REQUIRED_CI_STEPS = [
     file: 'ci.yml',
     job: 'server',
     argv: ['go', 'vet'],
+    pinnedId: 'ci-go-vet',
     label: '`go vet ./...`（Go 静态判据）',
     why: '删掉这一步后 `check-workflows` 与 `check-integration-tests` 都 EXIT=0（E-03 的现场）——'
       + '而它是 server 侧唯一的静态分析判据',
@@ -2980,6 +3047,7 @@ const REQUIRED_CI_STEPS = [
     file: 'ci.yml',
     job: 'server',
     argv: ['go', 'test'],
+    pinnedId: 'wasm-case-gate',
     label: '`go test ./... -p 1 -timeout 15m -json` + 用例级判定（Go 全量测试）',
     why: '与 `wasm-case-gate` 同一步：`-json` 报告 + `check-go-test-json.mjs` 的"用例级 0 skip /'
       + '三条关键用例确实 pass"全靠这一步产出；删掉它，Go 侧一条测试都不跑而别的检查仍绿',
@@ -2988,6 +3056,7 @@ const REQUIRED_CI_STEPS = [
     file: 'ci.yml',
     job: 'server',
     argv: ['npm', 'test'],
+    pinnedId: 'ci-webadmin-npm-test',
     label: '`npm test`（webadmin 测试，`working-directory: server/webadmin`）',
     why: 'webadmin 的 600+ 用例只在 CI 的这一步跑（根 `yarn check` 的 workspace 枚举不含它）；'
       + '删掉它后全仓门禁照旧绿（E-03 的现场之一）',
@@ -3110,6 +3179,11 @@ const PINNED_ENV_ALLOWED_KEYS = [
   { key: 'PG_DSN_TEST', why: 'server job 的测试数据库 DSN' },
   { key: 'VERSION', why: '打包/发布步骤的版本号(由 tag 派生)' },
   { key: 'DSH_TELEMETRY_DISABLED', why: 'workflow 顶层:构建期关掉遥测' },
+  // ---- R22 FIX-14 / E-03：go 格式判据步里的**局部 shell 变量** ----
+  { key: 'FILES', why: '`gofmt check` 步骤体里的局部变量(`FILES="$(gofmt -l …)"`，**没有 `export`**，'
+    + '子进程看不到它)：这一步自 R22 起被 `[SK-14]` 的 `ci-gofmt-check` 钉住，步骤体扫描因此会'
+    + '碰到它。它不是解释器行为键(这条策略要拦的是 `NODE_OPTIONS`/`PATH`/`BASH_ENV` 那一类)，'
+    + '登记它只是为了让"gofmt 判据步必须真的能跑"这条策略落在实处。' },
 ]
 
 /**
@@ -3215,7 +3289,20 @@ const PINNED_JOB_WORKING_DIRECTORY_REGISTRY = [
  * 与 job 级同族：步骤级 `working-directory` 只影响这一步，但"这一步"恰恰是判据步骤时，
  * 效果与 job 级完全一样（命令在别处解析）。空表是 fail-closed 的默认形态。
  */
-const PINNED_STEP_WORKING_DIRECTORY_REGISTRY = []
+const PINNED_STEP_WORKING_DIRECTORY_REGISTRY = [
+  {
+    job: 'server',
+    // 按**命令文本**登记（这一步没有 `name:`，label 是 `run#<下标>`；按下标登记会随 ci.yml
+    // 的任何插入/删除而漂移 —— 见判据里 `scriptIncludes` 的口径）。
+    scriptIncludes: 'npm test',
+    workingDirectory: 'server/webadmin',
+    why: 'R22 FIX-14 / E-03：`npm test` 这一步是 webadmin 的判据步骤（不在根 `yarn check` 的'
+      + ' workspace 枚举里），必须在 `server/webadmin` 里跑 —— job 级 `defaults` 是 `server`，'
+      + '所以这一步的 cwd 是判据的一部分（换 cwd 等于换了一批用例）。它与"给判据步骤换执行体"'
+      + '无关（命令位与 `package.json` 都在仓内），所以按登记制放行；策略侧的 `payload` 也会'
+      + '对同一个值做正反判据（两侧独立）。',
+  },
+]
 
 /**
  * [SK-18] **workflow 级** `defaults.run.working-directory` 的登记表（当前为空 = 未登记即红）。
@@ -3510,7 +3597,22 @@ function shellEnvironmentAssignments(script) {
       // `unset` / `env -u|-i|--unset` 与 `export`/`declare`/`typeset` 同族（第十一轮复审 J1 的 N2）
       // —— 读不懂的"清除环境"比读不懂的"写出环境"更危险：它只会让判据**降级**。
       if (/(?:^|[\s;&|(){}])(?:export|declare|typeset|unset)\b|\benv\s+(?:-u\b|-i\b|--unset\b|--ignore-environment\b)|\b[A-Za-z_][A-Za-z0-9_]*=/u.test(cleaned)) {
-        results.push({ unparsable: true, segment: cleaned, form: '无法分词的赋值片段' })
+        // **R22 FIX-14**：读不懂**不等于**一定是违规 —— 这条判据要拦的是"**未登记的 env 键**"，
+        // 所以把这一句里**能抽出的每一个键**抽出来逐个过白名单：全部登记过才放行
+        // （任一未登记、或**一个键名都抽不出**，仍按"未登记"记红 —— fail-closed 语义不变）。
+        // 现场：`gofmt check` 判据步的 `FILES="$(gofmt -l …)"`（`maskQuotedRegions` 对 `"$(…)"`
+        // 的掩码让这一句分不了词），而 `FILES` 只是这一步的**局部变量**（没有 `export`，
+        // 子进程看不到它）—— 修前它会把"gofmt 判据步必须真的能跑"这条策略整条堵死。
+        const written = [...cleaned.matchAll(
+          /(?:^|[\s;&|(){}])(?:export\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=/gu,
+        )].map(match => match[1])
+        const cleared = [...cleaned.matchAll(
+          /(?:^|[\s;&|(){}])(?:unset\s+(?:-\w+\s+)*|env\s+(?:-u\s+|--unset[=\s]+))([A-Za-z_][A-Za-z0-9_]*)/gu,
+        )].map(match => match[1])
+        const allRegistered = written.length + cleared.length > 0
+          && written.every(key => pinnedEnvKeyProblem(key) === null)
+          && cleared.every(key => pinnedUnsetKeyProblem(key) === null)
+        if (!allRegistered) results.push({ unparsable: true, segment: cleaned, form: '无法分词的赋值片段' })
       }
       continue
     }
@@ -5083,6 +5185,21 @@ export function selfTestRequiredCiSteps() {
     if (found.length !== 0) failures.push('[required-ci-steps-selftest] 重复的判据命令不得判红（集合对账的认账边界）')
   }
   assertions += 1
+  // **R22 FIX-14 / E-03**：每条登记项必须指到一条真实策略 —— 存在性对账（本函数前六条样本）
+  // 证明不了"这一步真的能跑"，`pinnedId` 才是把它接进 `[SK-14]`（`if:` / `continue-on-error` /
+  // `shell` / `working-directory` / 命令载荷）的那根线。指错/漏指都当场红。
+  for (const entry of REQUIRED_CI_STEPS) {
+    if (typeof entry.pinnedId !== 'string' || entry.pinnedId === '') {
+      failures.push(`[required-ci-steps-selftest] \`REQUIRED_CI_STEPS\` 的 \`${entry.argv.join(' ')}\` `
+        + '没有 `pinnedId` —— 它只被"存在性"对账盯着（删/挪会红），而 `if: false` 与命令载荷'
+        + '弱化都不会红（E-03 的现场）。请指到 `PINNED_STEP_POLICIES` 里的一条策略。')
+      continue
+    }
+    if (!PINNED_STEP_POLICIES.some(policy => policy.id === entry.pinnedId)) {
+      failures.push(`[required-ci-steps-selftest] \`${entry.argv.join(' ')}\` 的 \`pinnedId\`=`
+        + `\`${entry.pinnedId}\` 在 \`PINNED_STEP_POLICIES\` 里不存在 —— 这根线断了。`)
+    }
+  }
   for (const entry of REQUIRED_CI_STEPS) {
     if (CI_JUDGEMENT_ARGV_PREFIXES.some(prefix => prefix.join('\u0000') === entry.argv.join('\u0000'))) continue
     failures.push(`[required-ci-steps-selftest] \`REQUIRED_CI_STEPS\` 的 \`${entry.argv.join(' ')}\` `
@@ -9025,6 +9142,23 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes, 
           })
         }
       }
+      // ⑦b **命令载荷**（R22 FIX-14 / E-03）：命令位/argv 一字未改、但**判据面被缩窄**
+      //     （`go vet ./...` → `go vet ./cmd`、`gofmt -l <GO_DIRS>` → `gofmt -l scripts`、
+      //     `npm test` 换 cwd）时运行期照旧通过，而覆盖静默变小。`payload` 是逐策略登记的谓词
+      //     （与 `ifPolicy` / `PINNED_STEP_ARGV_POLICIES` 同一套"要放行就登记"的纪律）。
+      if (typeof policy.payload === 'function') {
+        const payloadProblem = policy.payload(script, item)
+        if (payloadProblem !== null && payloadProblem !== undefined) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-14] ${label} 是「${policy.label}」,但**命令载荷被弱化**:${payloadProblem}`
+              + '\n  ⇒ 存在性对账("步骤还在")回答不了"它还在判什么":E-03 的现场就是'
+              + ' `go vet ./...` 弱化成 `go vet ./cmd` 后 `check-workflows` 与 `verify-ci-scripts`'
+              + ' 都 EXIT=0。要改判据面请显式改 `REQUIRED_CI_STEPS` / 本策略的 `payload` 并写明理由。',
+          })
+        }
+      }
       // ④ `run` 被吞码 —— 谓词与白名单整份复用 [SK-7a](不另发明一套语法)。
       if (NON_POSIX_SHELLS.test(item.shell)) continue
       const lines = step.run.split('\n').map(stripLineComment)
@@ -9610,8 +9744,14 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
     if (unit.step === null || typeof unit.step !== 'object') continue
     if (!Object.hasOwn(unit.step, 'working-directory')) continue
     const value = unit.step['working-directory']
+    // **R22 FIX-14**：登记项除了逐字 `step`（= `unit.label`）外，也允许按**命令文本**登记
+    // （`scriptIncludes`）—— 没有 `name:` 的步骤其 label 是 `run#<下标>`，按下标登记会随
+    // `ci.yml` 的任何插入/删除而漂移，而漂移的表现是"登记项静默失效 + 判据变红"。
+    const scriptText = typeof unit.step.run === 'string' ? executableScript(unit.step.run) : ''
     const registered = PINNED_STEP_WORKING_DIRECTORY_REGISTRY
-      .some(entry => entry.job === unit.jobId && entry.step === unit.label && entry.workingDirectory === value)
+      .some(entry => entry.job === unit.jobId && entry.workingDirectory === value
+        && (entry.step === unit.label
+          || (typeof entry.scriptIncludes === 'string' && scriptText.includes(entry.scriptIncludes))))
     if (registered) continue
     reportOnce(`cwd:${unit.jobId}#${unit.index}`, `[SK-18] ${unitLabel(unit)} 是${unit.reason}，`
       + `而这一步声明了 \`working-directory: ${JSON.stringify(value ?? null)}\`。`
@@ -12910,7 +13050,12 @@ function main() {
     + `${REQUIRED_CI_STEPS.length} 条判据步骤(${REQUIRED_CI_STEPS.map(entry => entry.argv.join(' ')).join(' / ')})`
     + '**必须真的在** —— 删步骤 / 把步骤挪到别的 job 当场红(修前删 `go vet`、删 `npm test` 两个守卫都 EXIT=0);'
     + `命令位命中判据词表(${CI_JUDGEMENT_ARGV_PREFIXES.length} 条)却**未登记**的新判据步骤同样红,`
-    + '所以这条通过行说的"判据步骤都在"覆盖到哪里是明示的)\n')
+    + '所以这条通过行说的"判据步骤都在"覆盖到哪里是明示的;'
+    + '**R22 FIX-14 起再加一层"可执行性与载荷"**:每条登记项都带 `pinnedId` 接进 `[SK-14]` 的 '
+    + '`PINNED_STEP_POLICIES`(本表 ' + `${PINNED_STEP_POLICIES.length} 条策略` + '),`if:` / `continue-on-error` / '
+    + '`shell` / `working-directory` / 所在 job 的常量假 `if:` 与**命令载荷**(`go vet ./...` 的包面、'
+    + '`gofmt -l` 的目录面、`npm test` 的 cwd)逐条判 —— 修前这三步只在"存在性"表里,给它们加 '
+    + '`if: false` 或把 `go vet ./...` 弱化成 `go vet ./cmd` 两条守卫都 EXIT=0(第二十二轮 V7 泳道)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {

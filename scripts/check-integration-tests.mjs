@@ -1166,6 +1166,22 @@ async function main() {
     `形态⑥: 聚合层的判定条数下限合计 ${groupJudgments} 条 < 登记下限 ${GROUP_MIN_JUDGMENTS} 条`
       + ' —— 判据被删/被换成恒 SKIP（棘轮只允许被"变多"越过；真要下调必须同时改 '
       + 'GROUP_MIN_JUDGMENTS 并写明理由）')
+  // **R22 FIX-14 / E-02 常量折叠**：上面那条判据的分量全在 `GROUP_MIN_JUDGMENTS` 上 ——
+  // 判决句一字不动、只把常量改成 0，`groupJudgments >= 0` 就恒真（第二十二轮 V7 泳道实测
+  // `EXIT=0`）。判据：常量必须**等于登记表逐条算出的下限**且为正数（判定/记账同源），
+  // 于是"改成恒真值"与"只改一侧"都当场红。
+  const declaredGroupFloor = INTEGRATION_ENTRIES
+    .filter(entry => typeof entry.aggregateName === 'string' && Number.isInteger(entry.minJudgments))
+    .reduce((sum, entry) => sum + entry.minJudgments, 0)
+  recordLayerVerdict('判别力下限', {
+    check: 'group-floor-definition', floor: GROUP_MIN_JUDGMENTS, declared: declaredGroupFloor,
+  })
+  check(witnessed('group-floor-definition',
+    GROUP_MIN_JUDGMENTS === declaredGroupFloor && GROUP_MIN_JUDGMENTS > 0),
+    `形态⑥: 组级下限常量 GROUP_MIN_JUDGMENTS=${GROUP_MIN_JUDGMENTS} 与登记表逐条算出的 `
+      + `${declaredGroupFloor} 不一致（或不是正数）—— 判决句原文在场不等于判据还在：`
+      + '把常量改成 0/恒真值等于把这条判据掏空（R22 FIX-14 / E-02 的常量折叠形态）。'
+      + '真要与登记表脱钩，必须同时改**常量定义**与这里的口径并写明理由。')
 
   // ---- ⑥e 角色 ↔ 门禁的判据面（不许"新登记一条腿就绕开门禁"）----------
   const contractEntries = INTEGRATION_ENTRIES.filter(entry => entry.role === 'contract-test')
@@ -3089,9 +3105,44 @@ function containerRunnerCommandIndex(words, start, spec) {
   for (let taken = 0; taken < (subSpec.positional ?? 0) && words[index] !== undefined; taken += 1) index += 1
   return { subcommand, commandIndex: index, entrypoint }
 }
+/**
+ * 一个词归一后的**仓内相对路径形态**（R22 FIX-14 / E-01 形态 B 的唯一实现）。
+ *
+ * ## 现场（第二十二轮 V7 泳道，形态 B）
+ *
+ * `printf … > gen.sh; chmod +x gen.sh; ./gen.sh` 在 CI 里真实执行了端到端入口，而
+ * `check-integration-tests.mjs` **EXIT=0** 且凭据行照旧写 `static-only / 真实接线 0 处`。
+ * 根因是同一格判据的**入口条件**：
+ *   · 跟随面（`scanCarrierPaths` ①，命令位）要求 `isRepoRelativePathWord(command)`，
+ *     而它的字符类首字符是 `[A-Za-z0-9_]`（`.` 不在其中）⇒ `./gen.sh` 整条分支被跳过；
+ *   · 落到登记制（{@link isRegisteredCommandWord}）又被 `word.includes('/')` 短路放行。
+ * 于是 `./x` 既不被跟随、也不进登记制、也不进"仓内不存在 ⇒ 生成物"那一格 ——
+ * 同一个目标只多写一个 `bash`（`bash ./gen.sh`）就 EXIT=1，说明判据本体是对的。
+ *
+ * ## 归一口径
+ *
+ * 只归一**前导 `./`**（`./x`、`.//x`）：`./x` 与 `x` 在命令位/脚本位上是同一个语义。
+ * `.` 与 `..` 本身**不是**载体路径（`.` 还是 `source` 的别名）；`../x` 的解析依赖这条
+ * 命令的工作目录，交给既有的 `resolveCarrierPath()` / `expandTokens()` 口径，不在这里猜。
+ * @param word - 命令位/脚本位上的词。
+ * @returns 归一后的仓内相对路径；形态不是仓内相对路径时返回 `undefined`。
+ */
+function normalizeRepoRelativeWord(word) {
+  if (typeof word !== 'string' || word === '') return undefined
+  if (word.startsWith('/') || word.startsWith('~') || word.startsWith('-')) return undefined
+  const cleaned = word.replace(/^(?:\.?\/)+/u, '')
+  if (cleaned === '' || cleaned === '.' || cleaned === '..') return undefined
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/u.test(cleaned)) return undefined
+  return cleaned
+}
 function isRegisteredCommandWord(word) {
   if (word === undefined || word === '') return true
-  if (word.includes('/')) return true
+  // **R22 FIX-14（E-01 形态 B）**：含 `/` 一律算"已登记"是**命令位**的放行口径
+  // （"路径形态交给载体跟随/文本面"）—— 它没错，错的是"一个词到底算不算仓内相对路径"
+  // 用的是另一套（不含 `.`）的字符类。现在两侧共用 {@link normalizeRepoRelativeWord}：
+  // 仓内相对路径形态 ⇒ **不在登记制里放行**（返回 `false`，由跟随面/生成物判据回答
+  // "跟不跟得上"）；其余含 `/` 的词（绝对路径 / 变量 / 通配 / 仓外）维持原口径。
+  if (word.includes('/')) return normalizeRepoRelativeWord(word) === undefined
   if (word === MAKE_RECURSIVE_WORD) return true
   if (SHELL_RESERVED_WORDS.has(word)) return true
   const candidate = executableNameCandidate(word)
@@ -3253,6 +3304,14 @@ function unwrapCommandWordsUncached(words, strict = true) {
     const candidate = executableNameCandidate(word)
     if (strict && candidate !== undefined && !SHELL_RESERVED_WORDS.has(candidate)) commandWords.push(candidate)
     if (isRegisteredCommandWord(word)) return
+    // **R22 FIX-14（E-01 形态 B）**：仓内相对路径形态（`./x.sh` / `gen.sh` / `scripts/x.sh`）
+    // 不是"可执行名"，它是**载体路径** —— 判据在跟随面：存在 ⇒ 跟随；不存在 ⇒
+    // `missing-script-carrier`；同一段文本里被写过 ⇒ 同样记红（见 `runtimeWrittenCarriers`）。
+    // 在这里记 `unregistered-command` 会与跟随面**重复计红**，也会把"检查期不存在的生成物"
+    // 误诊成"未登记的可执行名"（两者要的修法完全不同：一个要登记，一个要改写成仓内脚本）。
+    // 条件与跟随面①的入口**逐字相同**（`/` 或 `.` + 仓内相对路径形态）：没有这两个字符的
+    // 裸词（`r16a-unknown-runner`）仍然是"可执行名"，照旧走登记制（R16-W 的自证样本）。
+    if (/[/.]/u.test(word) && normalizeRepoRelativeWord(word) !== undefined) return
     if (!strict) return
     // **读不懂的形态**（含 `$`/反引号且常量传播解析不出字面量）与**未登记的可执行名**是
     // 两种不同的红：前者要"写成字面量或逐处登记进 `CI_SURFACE_COMMAND_SHAPE_ACK`"，
@@ -3817,6 +3876,86 @@ function shellCommandTokens(source) {
     for (const { resolved } of shellCommandAnalysis(source).substitutions) pushToken(resolved)
   }
   return tokens
+}
+
+/**
+ * **here-doc 的正文不是命令、终止词不是路径** —— 命令位扫描前先把它们收进
+ * `-c '<正文>'`（R22 FIX-14 / V7-06 的误红面）。
+ *
+ * ## 现场
+ *
+ * CI 里完全良性的两种写法（本仓当前没有，但都是标准 shell）：
+ *
+ * ```yaml
+ * - run: |
+ *     python3 - <<'PY'
+ *     import json
+ *     print(json.dumps({}))
+ *     PY
+ *     bash -s <<'EOF'
+ *     echo hello
+ *     EOF
+ * ```
+ *
+ * 修前 `check-integration-tests.mjs` 在这一段上打出 **8 条**诊断：正文里的 `import` /
+ * `print` / `json.dumps` 被读成"命令位上未登记的可执行名"，终止词 `PY` / `EOF` 被读成命令名、
+ * 又被读成"**脚本位指向仓内不存在的路径** `PY`（python3 PY）"。**正文是数据、终止词是流标记，
+ * 都不是仓库里的路径** —— 这一格修前也是红的（不是绿/红翻转），但诊断是错的：它把"判据读不懂
+ * 这个形态"说成了"仓里少了一个脚本"，会把人引向完全错误的修法（去建一个叫 `PY` 的文件）。
+ *
+ * ## 口径
+ *
+ * 行级重写（只用于**命令位扫描**；文本网/token 网仍读原文 —— 那是"提到过就算"的方向）：
+ *   · 认出 `<<` / `<<-` 后面的终止词，吃掉正文与终止词行；
+ *   · 命令词是 **shell / python 解释器**时，把正文交回去当**程序文本**：
+ *     `bash -s <<'EOF' …` → `bash -c '<正文>'`、`python3 - <<'PY' …` → `python3 -c '<正文>'`
+ *     （两者在闭包里都有既有的"内层文本/源码"通道，正文里的执行调用照常被跟随、照常判）；
+ *   · 其它命令（`cat > x <<EOF`）：正文只是数据，去掉即可（写目标由重定向那一路照常记录）。
+ * `cat <<'EOF' | bash` 这类"正文经管道喂给 shell"的形态**不在**这里的识别面内 —— 去掉正文后
+ * 命令行上是"`bash` 没有脚本位"，仍按既有口径 fail-closed（那是"stdin 里是什么判不了"，
+ * 与"路径不存在"是两回事，诊断也不再指向一个不存在的文件）。
+ *
+ * 边界（认账）：行级扫描器 —— 命令词取该行第一个词（`if bash -s <<EOF` 这种带语法构件的写法
+ * 按"其它命令"处理：正文被去掉、命令行上留下"脚本位缺失"的 fail-closed）；一行多个 here-doc
+ * 时只有第一个正文被内联（其余按数据去掉）；引号里出现的 `<<` 若后面恰好跟标识符也会被当作
+ * here-doc（宁可少读一段命令文本，也不把正文读成命令）。
+ * @param source - 一段 shell 文本。
+ * @returns 重写后的文本（here-doc 正文不再出现在命令行上）。
+ */
+function inlineHeredocs(source) {
+  const lines = String(source).split('\n')
+  const out = []
+  let cursor = 0
+  while (cursor < lines.length) {
+    const line = lines[cursor]
+    const operators = [...line.matchAll(HEREDOC_OPERATOR)]
+    if (operators.length === 0) {
+      out.push(line)
+      cursor += 1
+      continue
+    }
+    let stripped = line
+    let body = null
+    let scan = cursor + 1
+    for (const [at, match] of operators.entries()) {
+      const collected = []
+      while (scan < lines.length && lines[scan].trim() !== match[2]) {
+        if (at === 0) collected.push(match[1] === '-' ? lines[scan].replace(/^\t+/u, '') : lines[scan])
+        scan += 1
+      }
+      if (scan < lines.length) scan += 1 // 终止词那一行
+      if (at === 0) body = collected.join('\n')
+      stripped = stripped.replace(match[0], '')
+    }
+    const command = stripped.trim().split(/\s+/u)[0] ?? ''
+    if (body !== null && body !== '' && HEREDOC_PROGRAM_WORDS.has(command)) {
+      out.push(`${stripped.trimEnd()} -c ${shellSingleQuote(body)}`)
+    } else {
+      out.push(stripped)
+    }
+    cursor = scan
+  }
+  return out.join('\n')
 }
 
 /**
@@ -4545,6 +4684,35 @@ const SHELL_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/su
 const SHELL_INDIRECTION_PATTERN = /[$`]/u
 /** 词里出现通配元字符 = 路径模式（`case` 分支 / glob），不是可执行名。 */
 const SHELL_GLOB_PATTERN = /[*?[\]]/u
+/**
+ * **"这段文本写过哪些文件"**的识别形态（R22 FIX-14 / E-01 形态 A）。
+ *
+ * · {@link WRITE_REDIRECT_TARGET}：重定向的**目标词**（`> x` / `>> x` / `2> x` / `&> x` / `>| x`）。
+ *   `2>&1`（后面是 `&`）与 `<<`（here-doc，另由 `inlineHeredocs` 处理）都不命中。
+ * · {@link WRITE_COMMAND_WORDS}：把目标放在**最后一个非旗标实参**上的写命令。
+ * 两者都只产出"候选词"，是不是仓内路径由 `resolveCarrierPath()` 回答 ——
+ * 所以 `/dev/null`、`$GITHUB_ENV`、仓外路径天然不进集合。
+ */
+const WRITE_REDIRECT_TARGET = /(?:^|[\s;&|(])(?:\d*>>?|&>|>\|)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)/gu
+/** 写命令词（目标是最后一个非旗标实参）；要扩面就加这里，并在 FIX-14 报告里写明边界。 */
+const WRITE_COMMAND_WORDS = new Set(['tee', 'cp', 'mv', 'install', 'rsync', 'ln'])
+/**
+ * here-doc 操作符 + 终止词（`<<EOF` / `<<-'EOF'` / `<< "EOF"`）。
+ * 两侧的 `(?<!<)`/`(?!<)` 是必须的：`<<<` 是 **here-string**（`bash <<< '<脚本文本>'`），
+ * 它有自己的一条判据（{@link SHELL_HERESTRING_MARKER}）—— 少了这两个断言，`<<< 'make x'`
+ * 会被读成 here-doc 起始（从第二个 `<` 起匹配）并把脚本正文搅进命令行。
+ */
+const HEREDOC_OPERATOR = /(?<!<)<<(?!<)(-?)[ \t]*(?:['"]?)([A-Za-z_][A-Za-z0-9_]*)(?:['"]?)/gu
+/**
+ * "正文就是**要执行的程序**"的解释器词（`bash -s <<EOF` / `python3 - <<PY`）——
+ * 其余命令的 here-doc 正文是数据（见 {@link inlineHeredocs}）。
+ * `COMMAND_PYTHON_WORDS` 在文件后面才声明，但本表只在运行期求值，不存在 TDZ。
+ */
+const HEREDOC_PROGRAM_WORDS = new Set([...COMMAND_SHELL_WORDS, ...COMMAND_PYTHON_WORDS])
+/** 一段文本 → 单引号 shell 字面量（内部单引号按 `'\''` 断开，与 shell 语义一致）。 */
+function shellSingleQuote(text) {
+  return `'${String(text).split("'").join("'\\''")}'`
+}
 
 /**
  * 文本 → **命令**（每条 = 词数组）。**逐字符**切分（不是按行近似）：
@@ -5637,7 +5805,11 @@ function ciExecutionSurface(options) {
     const isRepoRelativePathWord = word => {
       if (word === undefined || word === '') return false
       if (word.startsWith('/') || word.startsWith('~') || word.startsWith('-')) return false
-      return /^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/u.test(word)
+      // **R22 FIX-14（E-01 形态 B）**：与 {@link normalizeRepoRelativeWord} 共用同一份形态口径
+      // —— 修前这里是 `^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$`，`.` 不在首字符类里，于是
+      // `./gen.sh` 让整条"命令位是路径形态"的分支被跳过（既不被跟随、也不判生成物）。
+      // 归一后 `./x` 与 `x` 同判；`. `/`..`/`../x` 的形态语义不变（见该函数头注释）。
+      return normalizeRepoRelativeWord(word) !== undefined
     }
     const readCarrierCache = new Map()
     const readCarrier = path => {
@@ -6020,6 +6192,82 @@ function ciExecutionSurface(options) {
           + '（写明由谁生成、哪一步生成 —— "先构建再执行"只能逐处认账，登记项死了也红）。'
           + '**裸文件名（`gen.sh`）与带目录的写法（`scripts/gen.sh`）同判**（R21 fix-6 / E-01）。',
       })
+      /**
+       * **同一段文本里被写过的仓内路径**（R22 FIX-14 / E-01 形态 A 的唯一实现）。
+       *
+       * ## 现场
+       *
+       * 上一格判据的**唯一事实前提**是"该路径在检查期是否存在"，于是"先让目标路径在检查期
+       * 就存在（良性内容），运行期用不透明载荷覆写再执行"整类绕过它，而且**不需要新增文件、
+       * 不需要新增登记项**：
+       *
+       * ```yaml
+       * - run: |
+       *     P='<base64 的 "bash integration-tests/run-all.sh">'
+       *     printf "%s" "$P" | base64 -d > scripts/ci-brand-mask.sh   # 覆写**仓内已跟踪**脚本
+       *     bash scripts/ci-brand-mask.sh                            # 闭包跟随到的是仓里那份良性文本
+       * ```
+       *
+       * 实测（第二十二轮 V7 泳道）：`EXIT=0`，凭据行照旧 `VERDICT PASS static-only` /
+       * `触达端到端入口的来源 … 真实 0`，而 tripwire 证明运行期真的执行了端到端入口。
+       * 三种落点同样绿：新增良性载体文件、覆写仓内已跟踪脚本、`$GITHUB_WORKSPACE/…` 形态。
+       *
+       * ## 判据
+       *
+       * 判据不能只问"检查期在不在"，还要问"**它在这一步之前是否被写过**"。这里把同一段文本里
+       * 的写目标（重定向 `>`/`>>`/`>|`/`&>`、`tee`、`cp`/`mv`/`install`/`rsync`/`ln` 的最后一个
+       * 非旗标实参）解析成**仓内相对路径**；命令位/脚本位解析到这些路径时另记一条红
+       * （{@link reportRuntimeWrittenScript}，与"路径不存在"共用
+       * `CI_SURFACE_GENERATED_SCRIPT_ACK` 登记表与死条目对账）。
+       *
+       * 边界（认账）：只覆盖**同一段文本内**的写操作（跨 step 的值要经 `$GITHUB_ENV`，那条路
+       * 已经因为"命令位是变量"而 fail-closed）；`sed -i` / `git checkout <ref> -- <路径>` /
+       * `dd of=<路径>` 这类等价改写面未纳入 —— 它们与这里拦的是同一族（"先写后执行"），
+       * 要扩面就把命令词加进 {@link WRITE_COMMAND_WORDS}。
+       * @param source - 一段 shell 文本（已去 here-doc 正文）。
+       * @returns 被写过的仓内相对路径集合。
+       */
+      const runtimeWrittenCarriers = source => {
+        const written = new Set()
+        const note = word => {
+          if (typeof word !== 'string' || word === '') return
+          const unquoted = word.replace(/^["']|["']$/gu, '')
+          if (unquoted === '' || unquoted.includes('{{')) return
+          // 根变量前缀（`$GITHUB_WORKSPACE/…` / `${PWD}/…`）剥掉后仍是仓内相对路径 ——
+          // 与脚本位判据（`stripRootVariablePrefix`）同一口径，否则 `> $GITHUB_WORKSPACE/x.sh`
+          // 与 `> x.sh` 会被当成两种东西（V7 的 `$GITHUB_WORKSPACE/…` 形态）。
+          const cleaned = stripRootVariablePrefix(unquoted) ?? unquoted
+          if (cleaned === '' || cleaned.includes('$')) return
+          const resolved = resolveCarrierPath(cleaned, dirs) ?? resolveCarrierPath(cleaned, [''])
+          if (resolved !== undefined) written.add(resolved)
+        }
+        for (const match of String(source).matchAll(WRITE_REDIRECT_TARGET)) note(match[1])
+        for (const words of shellCommandWordListsFor(String(source), context)) {
+          for (const head of unwrapCommandWords(words, strict).heads) {
+            if (!WRITE_COMMAND_WORDS.has(head[0] ?? '')) continue
+            // 写目标是"最后一个非旗标、非赋值词"（`cp 载荷 gen.sh` / `tee -a gen.sh` /
+            // `install -m 755 x gen.sh`）；取不出就不猜（宁可漏一处，也不制造误红）。
+            const target = [...head].reverse().find(word => word !== ''
+              && !word.startsWith('-') && !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))
+            if (target !== undefined) note(target)
+          }
+        }
+        return written
+      }
+      /** 命令位 / 脚本位解析到"**同一段脚本里被写过**"的路径时的唯一诊断（E-01 形态 A）。 */
+      const reportRuntimeWrittenScript = (word, rawCommand, where) => reportClosureProblem({
+        kind: 'missing-script-carrier', word, raw: rawCommand,
+        message: `${where}指向**同一段脚本里被写过**的仓内路径 \`${word}\`（${rawCommand}）—— `
+          + '**检查期存在**不等于**运行期是这份内容**：这一位之前已经有 `>`/`>>`/`tee`/`cp` … 把它'
+          + '改写成了运行期载荷，而闭包跟随到的是仓库里那一份（通常完全良性）。'
+          + '修前这条判据只问"该路径在检查期是否存在"（R21 fix-6 / E-01），于是'
+          + '`base64 -d > <仓内已存在路径>; bash <该路径>` 这一族两张网全绿 ——'
+          + '**不需要新增文件、不需要新增登记项**（第二十二轮 V7 泳道实测，'
+          + '运行期真的执行了端到端入口）。'
+          + '要么把它写成仓内**真实存在且不被这段脚本改写**的脚本，要么把这一处逐字登记进'
+          + ' `CI_SURFACE_GENERATED_SCRIPT_ACK`（写明由谁生成、哪一步生成 —— 死条目也红）。',
+      })
+      const writtenCarriers = runtimeWrittenCarriers(raw)
       for (const words of shellCommandWordListsFor(raw, context)) {
         const chain = unwrapCommandWords(words, strict)
         for (const word of chain.commandWords) commandWords.add(word)
@@ -6085,7 +6333,19 @@ function ciExecutionSurface(options) {
             // 载荷 base64 不透明 ⇒ 两张网全漏，而 tripwire 证明运行期真的执行了端到端入口）。
             // 这里与 ②b（`bash gen.sh` / `source gen.sh`）共用同一个判据
             // `reportGeneratedScript`（登记表同一张，死条目对账同一份）。
-            if (followCarrierToken(command, dirs)) continue
+            //
+            // **R22 FIX-14 / E-01 形态 A**：跟得上**不等于**运行期执行的就是仓里那一份 ——
+            // 同一段文本前文写过它时另记一条红（`reportRuntimeWrittenScript`），
+            // 判定顺序与前两格一致：写过 ⇒ 红；存在 ⇒ 跟随；不存在 ⇒ 生成物红。
+            const resolved = resolveCarrierPath(command, dirs)
+            if (resolved !== undefined) {
+              if (writtenCarriers.has(resolved)) {
+                reportRuntimeWrittenScript(command, command, '命令位')
+                continue
+              }
+              followCarrierToken(command, dirs)
+              continue
+            }
             if (isLiteralRepoRelativeScript(command)) reportGeneratedScript(command, command, '命令位')
             continue
           }
@@ -6102,6 +6362,15 @@ function ciExecutionSurface(options) {
             : null
           if (sourceTarget !== null && sourceTarget.commandText === null && sourceTarget.scriptIndex >= 0) {
             const sourcedWord = head[sourceTarget.scriptIndex]
+            // **R22 FIX-14 / E-01 形态 A**：`source` 的目标**跟得上**并不代表运行期读到的就是仓里
+            // 那一份 —— 同一段文本前文写过它时，这里先判"被写过"（与命令位/脚本位同一判据）。
+            // 修前这一支只看"跟不跟得上"，于是 `printf … > scripts/x.sh; source scripts/x.sh`
+            // 与"覆写后 `bash`"是同一族却分属两格（前者全绿）。
+            const sourcedResolved = resolveCarrierPath(sourcedWord, dirs)
+            if (sourcedResolved !== undefined && writtenCarriers.has(sourcedResolved)) {
+              reportRuntimeWrittenScript(sourcedWord, `source ${sourcedWord}`, '`source` 的脚本位')
+              continue
+            }
             // **R21 fix-6 / E-01**：这一支修前只 `followCarrierToken` 然后 `continue` ——
             // 跟不出仓内文件时**静默**（`source gen.sh` 实测 EXIT=0，而运行期真的执行了
             // 生成物里的端到端入口）。`source` 的脚本位与解释器的脚本位同义，判据同一份。
@@ -6133,16 +6402,27 @@ function ciExecutionSurface(options) {
           const scriptWord = scriptHost === null || scriptHost.commandText !== null || scriptHost.scriptIndex < 0
             ? undefined
             : head[scriptHost.scriptIndex]
-          if (scriptWord !== undefined
-            && isLiteralRepoRelativeScript(scriptWord)
-            && resolveCarrierPath(scriptWord, dirs) === undefined
-            && !resolveCarrierPath(scriptWord, [''])) {
-            reportGeneratedScript(
-              scriptWord,
-              head.slice(0, scriptHost.scriptIndex + 1).join(' '),
-              '脚本位',
-            )
-            continue
+          if (scriptWord !== undefined && isLiteralRepoRelativeScript(scriptWord)) {
+            // **R22 FIX-14 / E-01 形态 A**：路径在检查期存在，但**同一段文本前文写过它**
+            // ⇒ 运行期执行的是被写进去的内容（闭包跟随到的是仓里那份良性文本）。
+            const scriptResolved = resolveCarrierPath(scriptWord, dirs) ?? resolveCarrierPath(scriptWord, [''])
+            if (scriptResolved !== undefined) {
+              if (writtenCarriers.has(scriptResolved)) {
+                reportRuntimeWrittenScript(
+                  scriptWord,
+                  head.slice(0, scriptHost.scriptIndex + 1).join(' '),
+                  '脚本位',
+                )
+                continue
+              }
+            } else {
+              reportGeneratedScript(
+                scriptWord,
+                head.slice(0, scriptHost.scriptIndex + 1).join(' '),
+                '脚本位',
+              )
+              continue
+            }
           }
           for (let cursor = 1; cursor < head.length; cursor += 1) {
             const word = head[cursor]
@@ -6213,9 +6493,14 @@ function ciExecutionSurface(options) {
       // 步骤名、`name:`、注释里的 `make`、`with:` 里的 JSON 都是散文/数据，不是命令。
       for (const block of workflowRunBlocks(text)) {
         const dirs = workingDirsFor(text)
-        expandMakeCalls(block, dirs, true, selfContext)
-        expandComposeCalls(block, dirs, true, selfContext)
-        scanCarrierPaths(block, dirs, true, selfContext)
+        // **R22 FIX-14 / V7-06**：here-doc 的**正文是数据**、终止词是流标记 —— 拿命令词法去读
+        // 它们会把 `import json` / `print(...)` 读成"未登记的可执行名"、把终止词 `PY` 读成
+        // "脚本位指向仓内不存在的路径"（实测 8 条误红）。命令位扫描读去正文的版本；
+        // 文本网/token 网（`expandTokens`，在下面按**原文**跑）不受影响。
+        const script = inlineHeredocs(block)
+        expandMakeCalls(script, dirs, true, selfContext)
+        expandComposeCalls(script, dirs, true, selfContext)
+        scanCarrierPaths(script, dirs, true, selfContext)
       }
     } else if (node.kind === 'shell-value') {
       // 别名值 / compose 的 `command:` —— 都是**shell 文本**。
@@ -7473,6 +7758,8 @@ const LAYER_VERDICT_RULES = new Map([
     min: () => 1,
     judge: o => {
       if (o.check === 'group-floor') return o.judgments >= o.floor
+      // R22 FIX-14 / E-02：常量必须与登记表逐条算出的下限同源且为正（收尾重新判决一份）。
+      if (o.check === 'group-floor-definition') return o.floor === o.declared && o.floor > 0
       if (o.check === 'contract-rows') return o.minJudgments === o.rows
       return o.check === 'judged-runner-rows' && o.rows !== null && o.minJudgments === o.rows
     },
@@ -7961,6 +8248,7 @@ const REQUIRED_JUDGMENT_SITES = [
   { layer: '引用面扩展名对账', id: 'scope-unregistered', needle: "check(witnessed('scope-unregistered', scope.unregistered.length === 0)," },
   { layer: '聚合层接线', id: 'aggregate-wiring', needle: "check(witnessed('aggregate-wiring', aggregateLines.length === expectedAggregate.length)," },
   { layer: '判别力下限', id: 'group-floor', needle: "check(witnessed('group-floor', groupJudgments >= GROUP_MIN_JUDGMENTS)," },
+  { layer: '判别力下限', id: 'group-floor-definition', needle: "check(witnessed('group-floor-definition',\n    GROUP_MIN_JUDGMENTS === declaredGroupFloor && GROUP_MIN_JUDGMENTS > 0)," },
   { layer: '环境缺失的原因码登记制', id: 'skip-outlet', needle: "check(witnessed('skip-outlet', outlets.length === 1)," },
   { layer: '契约判据表', id: 'criteria-ids', needle: "check(witnessed('criteria-ids', observedIds.join(',') === expectedIds.join(','))," },
   { layer: '契约判据本体自证', id: 'self-test-total', needle: "if (!witnessed('self-test-total', ok === total)) fail(`${test.path} --self-test: ${ok}/${total}" },
@@ -7971,6 +8259,114 @@ const REQUIRED_JUDGMENT_SITES = [
   { layer: '聚合层三项全 SKIP ⇒ 77 且不报 PASS', id: 'aggregate-77', needle: "check(witnessed('aggregate-77', aggregate.status === 77)," },
   { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'real-surface', needle: "check(witnessed('real-surface', classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED)," },
 ]
+/**
+ * **块头是不是"恒不执行"的**（R22 FIX-14 / E-02 的块形态收口）。
+ *
+ * ## 现场
+ *
+ * 上一格判据把 `{` 当成"正常的语句边界"（对 `for (…) {` / 函数体是对的），于是
+ * `if (false) { <判决句原字节> }` + 一行 `witnessed('<id>', true)` 诱饵三条子判据全不命中：
+ * 同行前缀没有、上一行是 `if (false) {`（末字符 `{` 被放行）、needle 仍恰好 1 次、
+ * 见证确实被调用过 ⇒ `EXIT=0`（实测 3 个站点，含修复自检点名的 `criteria-tautology`）。
+ *
+ * ## 判据
+ *
+ * 块头（`{` 之前那段）带条件时，条件必须是**求不出常量**的表达式：
+ *   · `if (false) {` / `while (0) {` / `if (true === false) {` ⇒ 常量假 ⇒ 红；
+ *   · `for (const _ of []) {` ⇒ 迭代域是空数组字面量 ⇒ 红（"循环体一次都不进"）；
+ *   · `else {` ⇒ 条件分支的另一半 ⇒ 红；
+ *   · `for (const entry of INTEGRATION_ENTRIES) {` / `if (dumped !== null) {` ⇒ 自由变量求不出
+ *     ⇒ 放行（这正是本文件里 15 个登记点的**真实**上下文，误红会让判据无法使用）。
+ * 常量求值只在**字面量 + 本文件里的字面量常量绑定**范围内做（`const X = false` 这类），
+ * 求不出就放行 —— 宁可漏"把常量藏进函数返回值"这种更费劲的形态，也不误红正当的层。
+ * @param headerText - `{` 之前的那段文本（同一行）。
+ * @param source - 守卫自己的正文（用于解析本文件内的字面量常量绑定）。
+ * @returns 不合规的原因；正常块头返回 `undefined`。
+ */
+function constantBlockHeaderProblem(headerText, source) {
+  if (headerText === '') return undefined
+  if (/^\}\s*else\b/u.test(headerText)) {
+    return `上一非空行是 \`} else {\`（判决句被挂在条件分支的另一半上）`
+  }
+  const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(headerText)
+  if (keyword === null) return undefined
+  const open = headerText.indexOf('(')
+  const close = headerText.lastIndexOf(')')
+  if (open < 0 || close < open) return undefined
+  const condition = headerText.slice(open + 1, close)
+  const value = evaluateConstantExpression(condition, source)
+  if (value === undefined) return undefined
+  const empty = (keyword[1] === 'for' || keyword[1] === 'while')
+    ? (Array.isArray(value) && value.length === 0)
+    : false
+  if (value !== false && value !== 0 && value !== '' && value !== null && !empty) return undefined
+  return `上一非空行是**恒不执行**的块头（${JSON.stringify(headerText.slice(0, 60))}）——`
+    + ' 判决句被包在"条件恒假/循环体一次都不进"的块里（`if (false) { <判决句> }` + 一行'
+    + ` 诱饵 \`witnessed('<id>', true)\` 是第二十二轮 V7 泳道实测的掏空形态）`
+}
+
+/**
+ * **常量表达式求值**（{@link constantBlockHeaderProblem} 用）：只在"字面量 + 本文件里的
+ * 字面量 `const` 绑定"范围内做，求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+ *
+ * 为什么不做完整求值：判据的目的是"恒不执行的块"，不是"实现一个 JS 解释器"。
+ * `dumped !== null` / `INTEGRATION_ENTRIES` 这类自由变量求不出 ⇒ 放行；把常量藏进函数
+ * 返回值、`process.env` 之类的形态这一格看不见（认账边界，与"任意死代码形态"同一取向 ——
+ * 它们由执行计数、见证返回契约与 `scripts/check-root-guards.mjs` 的字节登记值兜）。
+ * @param expression - 条件原文。
+ * @param source - 守卫自己的正文（取字面量常量绑定）。
+ * @returns 求出的常量值；求不出返回 `undefined`。
+ */
+function evaluateConstantExpression(expression, source) {
+  /**
+   * 只做**字面量 + 四则比较**范围内的折叠（不 eval、不用 `Function`）：
+   * 判据要回答的是"这个条件是不是恒定不成立"，不是"实现一个 JS 解释器"。
+   * @param text - 表达式原文。
+   * @param depth - 常量绑定递归深度（防自指）。
+   * @returns 常量值；求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+   */
+  const evaluate = (text, depth) => {
+    const trimmed = String(text ?? '').trim().replace(/^\s*\(([\s\S]*)\)\s*$/u, '$1').trim()
+    if (trimmed === '') return undefined
+    if (depth > 4) return undefined
+    if (trimmed === 'true') return true
+    if (trimmed === 'false') return false
+    if (trimmed === 'null') return null
+    if (trimmed === 'undefined') return undefined
+    if (/^-?\d+(?:\.\d+)?$/u.test(trimmed)) return Number(trimmed)
+    if (/^'[^']*'$/u.test(trimmed) || /^"[^"]*"$/u.test(trimmed)) return trimmed.slice(1, -1)
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) {
+      const inner = trimmed.slice(1, -1).trim()
+      return inner === '' ? [] : inner.split(',')
+    }
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) return []
+    if (trimmed.startsWith('!')) {
+      const inner = evaluate(trimmed.slice(1), depth)
+      return inner === undefined ? undefined : !inner
+    }
+    // `A === B` / `A !== B` / `A == B` / `A != B`：两边都能折叠才折叠。
+    for (const operator of ['===', '!==', '==', '!=']) {
+      const at = trimmed.indexOf(operator)
+      if (at <= 0) continue
+      const left = evaluate(trimmed.slice(0, at), depth)
+      const right = evaluate(trimmed.slice(at + operator.length), depth)
+      if (left === undefined || right === undefined) return undefined
+      if (operator === '===') return left === right
+      if (operator === '!==') return left !== right
+      if (operator === '==') return left === right
+      return left !== right
+    }
+    // 标识符 ⇒ 本文件里"名字 = 字面量"的绑定（`const X = false`）。
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(trimmed)) {
+      const pattern = new RegExp(`(?:^|[\\s;{}])(?:const|let|var)\\s+${trimmed}\\s*=\\s*([^\\n;]+)`, 'u')
+      const match = pattern.exec(source)
+      return match === null ? undefined : evaluate(match[1], depth + 1)
+    }
+    return undefined
+  }
+  return evaluate(expression, 0)
+}
+
 /**
  * `needle` 在正文里是不是**判决位**（R21 fix-6 / E-02 的第二段b）。
  *
@@ -8016,7 +8412,17 @@ function judgmentNeedleStatementProblem(source, needle) {
       return `上一非空行是**悬挂的条件**（${JSON.stringify(trimmed.slice(0, 60))}）—— 判决句会被它条件化`
     }
     if (/^(?:\}\s*)?else\s*$/u.test(trimmed)) return '上一非空行是 `else`（判决句被条件化）'
-    // `{` 是**块起始**（正常的语句边界，不是悬挂），其余结尾字符都会把下一条语句挂住。
+    // **R22 FIX-14 / E-02 块形态**：`{` 是正常的语句边界（`for (…) {` / 函数体 / `try {`），
+    // 但"**条件恒假**的块"不是 —— `if (false) { <判决句原字节> }` + 一行
+    // `witnessed('<id>', true)` 诱饵实测 EXIT=0（三个站点，第二十二轮 V7 泳道）。
+    // 判据：块头带条件时，条件不许是**常量假**（`false` / `0` / `''` / `true === false` /
+    // 本文件里被字面量常量绑定的名字）；`else {` 一律拒（它是条件分支的另一半）。
+    const header = /^(.*?)\{\s*$/u.exec(trimmed)
+    if (header !== null) {
+      const problem = constantBlockHeaderProblem(header[1].trim(), source)
+      if (problem !== undefined) return problem
+    }
+    // 其余结尾字符都会把下一条语句挂住。
     if (/[&|?,=([\]]$/u.test(trimmed)) {
       return `上一非空行以悬挂运算符结尾（${JSON.stringify(trimmed.slice(-24))}）—— 判决句不是一个独立语句`
     }
@@ -8037,6 +8443,13 @@ function judgmentNeedleStatementProblem(source, needle) {
   const labelsWithoutSites = COVERED_LAYER_LABELS.filter(label =>
     !REQUIRED_JUDGMENT_SITES.some(site => site.layer === label))
   const sitesSeen = []
+  // **只数代码行**：本表自己的 JSDoc 里出现过 `witnessed('criteria-tautology', …)` 这类片段，
+  // 把注释算进来会让"见证调用点唯一"这条判据自伤（与 `judgmentNeedleStatementProblem` 的
+  // 注释跳过同一口径）。
+  const guardCodeLines = guardCode.split('\n').filter(line => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
+  })
   for (const site of REQUIRED_JUDGMENT_SITES) {
     // **判决本体里恰好一次**：掏空真判决（`check(mutant.status !== 0,` → `check(true,`）⇒ 归零 ⇒ 红。
     const occurrences = guardCode.split(site.needle).length - 1
@@ -8045,6 +8458,19 @@ function judgmentNeedleStatementProblem(source, needle) {
       //
       // 只看"needle 是不是子串"会让 `if (false) check(witnessed(…))` 全身而过（前缀不影响
       // 子串匹配），而它正是 E 泳道实测的掏空形态（配一行 `witnessed('<id>', true)` 诱饵）。
+      // **R22 FIX-14 / E-02 块形态的另一半**：`if (false) { <判决句原字节> }` 必须再补一行
+      // 诱饵 `witnessed('<id>', true)` 才能把"执行计数 ≥ 1"骗过去（判决句被包进恒假块之后
+      // 它自己不会执行）—— 所以"**同一 id 的见证调用点唯一**"正是那一族的收口：多一个调用点
+      // 就红，且它与块头判据、执行计数、返回契约三格互相独立（实测三个站点全被咬住）。
+      const witnessCall = `witnessed('${site.id}',`
+      const witnessCalls = guardCodeLines.filter(line => line.includes(witnessCall)).length
+      if (witnessCalls !== 1) {
+        sitesSeen.push(`「${site.layer}」的判决点 ${site.id} 的**见证调用点**在判决本体里出现 `
+          + `${witnessCalls} 次（必须恰好 1 次）—— \`if (false) { <判决句原字节> }\` 这类`
+          + '"文本保留、判决不再执行"的编辑要靠一行诱饵 '
+          + `\`witnessed('${site.id}', true)\` 才能骗过执行计数，而诱饵就是一个**多出来的调用点**。`
+          + '（R22 FIX-14 / E-02 块形态；注释行不计入）')
+      }
       const statementProblem = judgmentNeedleStatementProblem(guardCode, site.needle)
       if (statementProblem === undefined) continue
       sitesSeen.push(`「${site.layer}」的判决点 ${site.id} **不在判决位上**：${statementProblem}`
