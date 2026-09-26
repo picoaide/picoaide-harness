@@ -196,7 +196,6 @@ const REQUIRED_JUDGE_BODIES = [
   'scripts/check-install-integrity.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-root-guards.mjs',
-  'scripts/check-site-links.mjs',
   'scripts/check-workspaces.mjs',
   'scripts/check-workflows.mjs',
 ]
@@ -346,6 +345,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/check-no-real-domains.mjs',
   'scripts/check-patch-pin.mjs',
   'scripts/check-root-guards.mjs',
+  'scripts/check-site-links.mjs',
   'scripts/check-theme-tokens.mjs',
   'scripts/check-verdict-credential.mjs',
   'scripts/check-workflows.mjs',
@@ -546,6 +546,7 @@ export const EXECUTION_POINT_REGISTRY = [
   'integration-tests/dex/dex-sso-test.py',
   'integration-tests/electron-shots/assertions.mjs',
   'integration-tests/electron-shots/electron-shots.mjs',
+  'integration-tests/electron-shots/mock-gateway.mjs',
   'integration-tests/electron-shots/report.mjs',
   'integration-tests/openldap/ldap-rbac-brand-test.py',
   'integration-tests/run-all.sh',
