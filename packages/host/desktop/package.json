@@ -322,6 +322,7 @@
     "@deepseek-ai/dsh-client-connection": "0.1.6-alpha.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.1.6-alpha.2",
     "@electron/asar": "3.4.1",
+    "@electron/fuses": "^1.8.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18",

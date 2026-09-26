@@ -1,9 +1,12 @@
 /**
- * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1）的判据。
+ * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1；单横线覆盖 = 第二十六轮 Z2-02）的判据。
  *
  * 三层，互补：
- *  1. **行为**（纯函数）：6 类开关 × 打包/开发 × 逃生门开/关 —— 打包态逐个拒绝、
- *     开发态一个都不拦、逃生门只影响"放行"这一支。
+ *  1. **行为**（纯函数）：6 类开关 × {单横线, 双横线} × {裸, `=`, `:`} × 打包/开发 × 逃生门开/关
+ *     —— 打包态逐个拒绝、开发态一个都不拦、逃生门只影响"放行"这一支。
+ *     Z2-02 的教训：判据与实现**共享同一个误解**（"只认 `--`"）时，两层都锚在错的假设上，
+ *     所以这一层现在按 **argv 解析面**（真机对照矩阵
+ *     `temp/r21/fix-30/probe/chromium-argv/matrix.out`）而不是按"我们以为的写法"来钉。
  *  2. **副作用**（可注入 IO）：拒绝时必须 write + showErrorBox + exit(1)；原生错误面
  *     或 stderr 抛异常时**仍然**退出（fail-closed 不是"尽力而为"）；放行时零副作用。
  *  3. **接线**（`main.ts` 源码，AST 级）：闸门必须**在模块作用域**、必须早于
@@ -72,26 +75,50 @@ function fakeIO(options: { throwOnErrorBox?: boolean; throwOnWrite?: boolean } =
   }
 }
 
-describe('开关识别：只认 `--<name>` 与 `--<name>=<value>`', () => {
-  it('6 类受管开关的两种写法都命中，且回报的名字取自受管清单', () => {
+describe('开关识别：单横线与双横线 × 6 类开关的全矩阵', () => {
+  it('受管清单逐字固定（闸门面 = 这份清单 × 两种横线前缀）', () => {
     expect(DEBUG_SWITCHES).toEqual([
       'inspect', 'inspect-brk', 'inspect-port', 'remote-debugging-port', 'remote-debugging-pipe', 'js-flags',
     ])
+  })
+
+  it('6 类开关 × {单横线, 双横线} × {裸, =值, :值} 全矩阵逐条命中', () => {
+    // Z2-02：Chromium 接受单横线（真机对照 `-remote-debugging-port=9451` 真的开了
+    // `DevTools listening on ws://127.0.0.1:9451/...`），所以"只认 `--`"等于闸门不存在。
+    // 这里逐个形态断言，不做抽样。
     for (const name of DEBUG_SWITCHES) {
-      expect(matchDebugSwitch(`--${name}`), `--${name} 必须命中`).toBe(name)
-      expect(matchDebugSwitch(`--${name}=value`), `--${name}=value 必须命中`).toBe(name)
+      for (const dashes of ['-', '--']) {
+        expect(matchDebugSwitch(`${dashes}${name}`), `${dashes}${name} 必须命中`).toBe(name)
+        expect(matchDebugSwitch(`${dashes}${name}=9337`), `${dashes}${name}=9337 必须命中`).toBe(name)
+        expect(matchDebugSwitch(`${dashes}${name}:9337`), `${dashes}${name}:9337 必须命中`).toBe(name)
+      }
     }
   })
 
-  it('同一前缀的兄弟开关不会互相吃掉（`--inspect-brk` 不能被 `inspect` 命中）', () => {
+  it('inspect-brk 的四种形态单独钉死（Z1 真机在试的主进程 RCE 路径）', () => {
+    expect(matchDebugSwitch('--inspect-brk')).toBe('inspect-brk')
+    expect(matchDebugSwitch('-inspect-brk')).toBe('inspect-brk')
+    expect(matchDebugSwitch('--inspect-brk=9337')).toBe('inspect-brk')
+    expect(matchDebugSwitch('-inspect-brk=9337')).toBe('inspect-brk')
+    // 兄弟开关不得互相吃掉（`inspect-brk` 不能被 `inspect` 命中）。
     expect(matchDebugSwitch('--inspect-brk=9229')).toBe('inspect-brk')
     expect(matchDebugSwitch('--inspect-port=9300')).toBe('inspect-port')
   })
 
-  it('近似名字一律不命中（误判的代价是"打包版起不来"）', () => {
+  it('大小写变体也命中 —— 有意的过拦（真机对照里大写形态不生效，但过拦只花一次拒绝）', () => {
+    expect(matchDebugSwitch('-REMOTE-DEBUGGING-PORT=9456')).toBe('remote-debugging-port')
+    expect(matchDebugSwitch('--Remote-Debugging-Port=9333')).toBe('remote-debugging-port')
+    expect(matchDebugSwitch('-INSPECT')).toBe('inspect')
+  })
+
+  it('近似名字与三根横线一律不命中（误判的代价是"打包版起不来"）', () => {
     for (const argument of [
       '--no-inspect', '--inspection', '--inspecto', '--remote-debugging-portx', '--js-flags-extra',
-      'inspect=9337', '--', '-inspect', '--lang=zh-CN', '--no-sandbox', '--proxy-server=http://x',
+      'inspect=9337', '--', '-',
+      // 三根横线不是"更宽的同一种形态"：真机对照 `---remote-debugging-port=9453`
+      // **没有**开监听（Chromium 只吃一或两根），Node 侧同样不认。
+      '---inspect=9337', '---remote-debugging-port=9453', '----inspect',
+      '--lang=zh-CN', '--no-sandbox', '--proxy-server=http://x', 'picoaide://x',
     ]) {
       expect(matchDebugSwitch(argument), `${argument} 不得命中`).toBeUndefined()
     }
@@ -102,13 +129,16 @@ describe('开关识别：只认 `--<name>` 与 `--<name>=<value>`', () => {
       { name: 'inspect', raw: '--inspect=9337', source: 'argv' },
       { name: 'js-flags', raw: '--js-flags=--x', source: 'execArgv' },
     ])
+    expect(collectDebugSwitches(['-remote-debugging-port=9339'], [])).toEqual([
+      { name: 'remote-debugging-port', raw: '-remote-debugging-port=9339', source: 'argv' },
+    ])
   })
 })
 
-describe('判定：打包态逐个拒绝，开发态一个都不拦', () => {
-  it('每个受管开关在打包态都必须被拒绝（逐个断言，不是抽样）', () => {
+describe('判定：打包态逐个拒绝（单/双横线同等），开发态一个都不拦', () => {
+  it('全矩阵在打包态都必须被拒绝（逐个断言，不是抽样）', () => {
     for (const name of DEBUG_SWITCHES) {
-      for (const raw of [`--${name}`, `--${name}=1`]) {
+      for (const raw of [`--${name}`, `--${name}=1`, `-${name}`, `-${name}=1`, `-${name}:1`]) {
         const gate = detect({ argv: ['--no-sandbox', raw] })
         expect(gate.refused, `${raw} 在打包态必须 refused`).toBe(true)
         expect(gate.matches.map(match => match.raw)).toEqual([raw])
@@ -118,14 +148,15 @@ describe('判定：打包态逐个拒绝，开发态一个都不拦', () => {
 
   it('execArgv 里的开关同样拒绝（V8 是 Node/Electron 的另一条入口）', () => {
     expect(detect({ execArgv: ['--inspect-brk'] }).refused).toBe(true)
+    expect(detect({ execArgv: ['-inspect-brk'] }).refused).toBe(true)
   })
 
   it('开发态（!app.isPackaged）不得被误伤 —— 调试开关是正常手段', () => {
-    const gate = detect({ packaged: false, argv: ['--inspect=9337', '--remote-debugging-port=9334'] })
+    const gate = detect({ packaged: false, argv: ['--inspect=9337', '--remote-debugging-port=9334', '-inspect-brk=9337', '-remote-debugging-port=9339'] })
     expect(gate.refused).toBe(false)
     expect(gate.escaped).toBe(false)
     // 仍然如实收集（供日志/排障），只是不拦。
-    expect(gate.matches).toHaveLength(2)
+    expect(gate.matches).toHaveLength(4)
   })
 
   it('正常启动（无调试开关）在打包态照旧放行', () => {

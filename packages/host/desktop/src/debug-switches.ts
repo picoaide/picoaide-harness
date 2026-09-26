@@ -21,6 +21,15 @@
  * 前提只有"同机同用户能起一个进程 + 能按自己的 argv 启动本应用"
  * —— 与本仓写面围栏自己的威胁模型同级，无需提权、无需读写 `$DSH_HOME`。
  *
+ * ## 横线数量（2026-09-26 第二十六轮审计 Z2-02，P1）
+ *
+ * 第一版闸门只认 `--` 前缀，而 **Chromium 的 `base::CommandLine` 同时接受单横线**：
+ * 打包产物 + Xvfb 实跑，`-remote-debugging-port=9339` ⇒
+ * `DevTools listening on ws://127.0.0.1:9339/...`（无开关时 0 个监听）。
+ * 也就是说"去掉一个连字符"就能把上面那条 P1 原样重放 —— 只认 `--` 的匹配面
+ * **比真实解析面窄**，闸门等于不存在。所以 {@link matchDebugSwitch} 现在同时接受
+ * 单横线与双横线（另见该函数的注释：哪一半是 Chromium 面、哪一半是 Node 面）。
+ *
  * ## 为什么必须"拒绝启动"，而不是 `removeSwitch` / 关 devTools
  *
  *  `--inspect` 的监听在 **JS 跑之前**就已经建好（V8 inspector 是运行时启动参数），
@@ -65,13 +74,23 @@ import { isEnabledFlag } from './network-policy.ts'
 export const ALLOW_DEBUG_SWITCHES_ENV = 'PICOAI_ALLOW_DEBUG_SWITCHES'
 
 /**
- * 受管开关名（**唯一字面量出处**，不含前导 `--`）。
+ * 受管开关名（**唯一字面量出处**，不含前导横线）。
  *
  * 两个族，危害不同但都必须拦：
  *  - 主进程 / V8 控制面：`inspect`、`inspect-brk`、`inspect-port`、`js-flags`
  *    ⇒ 任意代码执行（那里有企业会话 bearer 与 safeStorage 解密能力）；
  *  - 渲染进程 CDP：`remote-debugging-port`、`remote-debugging-pipe`
  *    ⇒ 读出 HttpOnly 的持有性证明 cookie，把"只有真页面能证明自己"这一前提推翻。
+ *
+ * **哪一半吃单横线**（决定 {@link matchDebugSwitch} 为什么不能只认 `--`）：
+ *  - `remote-debugging-port` / `remote-debugging-pipe`：**Chromium 侧**开关，
+ *    由 `base::CommandLine` 解析 —— 单横线**真的生效**（本文件头部的真机对照）；
+ *  - `js-flags`：两侧同名 —— Node 侧给 V8 传启动参数，Chromium 侧给渲染进程 V8
+ *    传参数，所以它也吃单横线；
+ *  - `inspect` / `inspect-brk` / `inspect-port`：**只有 Node 侧**认，而 Node 的
+ *    命令行解析只接受 `--`（真机对照：`-inspect=9337` 不开监听）。对这三个多拦
+ *    一个单横线形态是**有意的过拦**：代价是拒绝一次本就不会生效的异常启动，
+ *    收益是"哪天 Electron/Chromium 把单横线也认到这一族时闸门不会静默失效"。
  *
  * `inspect-brk` / `inspect-port` 必须单列：按 `名字=` 前缀匹配时
  * `--inspect-brk=9229` 不会命中 `inspect`（`inspect` 后面紧跟的是 `-`）。
@@ -110,19 +129,50 @@ export interface DebugSwitchGate {
 }
 
 /**
+ * 取走开关的前导横线（**恰好一或两根**）。
+ *
+ * 为什么是一或两根而不是"任意根"：`base::CommandLine` 的解析面就是这么宽 ——
+ * 探针矩阵（`temp/r21/fix-30/probe/chromium-argv/matrix.out`，pinned Electron 44.4.3
+ * + Xvfb，观测 stderr 的 `DevTools listening on ws://127.0.0.1:<port>/...`）：
+ * `-remote-debugging-port=9451` 与 `--remote-debugging-port=9452` **都真的开了监听**，
+ * 而 `---remote-debugging-port=9453` **没有**。三根横线因此不是"更宽的同一种形态"，
+ * 而是另一个（谁都不认的）参数。
+ * @param argument - 单个 argv 元素。
+ * @returns 去掉前导横线后的正文，或 undefined（压根不是横线开关）。
+ */
+function switchBody(argument: string): string | undefined {
+  if (argument.startsWith('--')) return argument.slice(2)
+  if (argument.startsWith('-')) return argument.slice(1)
+  return undefined
+}
+
+/**
  * 判一个 argv 元素是不是受管调试开关。
  *
- * 只认两种形状：`--<name>` 与 `--<name>=<value>`（Node 与 Chromium 的取值写法）。
- * 因此 `--inspection-mode`、`--no-inspect`、`--remote-debugging-portx` 都**不**命中
- * —— 闸门宁可漏判一个我们没见过的开关名，也不能把正常启动参数误判成调试开关
- * （误判的代价是"打包版直接起不来"）。
+ * **匹配面必须与真实解析面同宽**（Z2-02 的教训：只认 `--` 时"去掉一个连字符"
+ * 就能把闸门整个绕过）。规则三条：
+ *
+ *  1. **前导横线一或两根**（见 {@link switchBody}；三根以上不认，真机对照已证）；
+ *  2. **名字精确相等，或后接取值分隔符** —— 分隔符取 `=` 与 `:`（见下面的过拦说明）。
+ *     因此 `--inspection-mode`、`--no-inspect`、`--remote-debugging-portx` 都**不**命中；
+ *  3. **大小写不敏感**：`-REMOTE-DEBUGGING-PORT=9456` 与 `--REMOTE-DEBUGGING-PORT=9461`
+ *     在真机对照里**都不生效**（不监听），Node 侧同样是敏感的 —— 所以这条是**有意的
+ *     过拦**：Chromium 的开关表在若干入口按 `ToLowerASCII` 查表，而多拦一个大小写
+ *     变体的代价只是拒绝一次异常启动，漏拦的代价是整条闸门失效。`:` 同理：真机对照
+ *     `-remote-debugging-port:9454` / `--remote-debugging-port:9455` 都不监听，
+ *     仍然匹配它只是"宁可多拦"（`:1` 在 Node 侧也不是合法形态）。
+ *
+ * 过拦的边界是明确的：它只影响"以调试开关命名的异常启动"，不会碰到正常启动参数
+ * （`--no-sandbox`/`--lang=zh-CN`/`--proxy-server=…` 与 `<scheme>://…` 都不命中）。
  * @param argument - 单个 argv 元素。
  * @returns 命中的开关名，或 undefined。
  */
 export function matchDebugSwitch(argument: string): string | undefined {
-  if (!argument.startsWith('--')) return undefined
-  const body = argument.slice(2)
-  return DEBUG_SWITCHES.find(name => body === name || body.startsWith(`${name}=`))
+  const body = switchBody(argument)
+  if (body === undefined || body === '') return undefined
+  const separator = body.search(/[=:]/u)
+  const name = (separator === -1 ? body : body.slice(0, separator)).toLowerCase()
+  return DEBUG_SWITCHES.find(candidate => candidate === name)
 }
 
 /**
@@ -202,6 +252,8 @@ export function debugSwitchRefusalMessage(gate: DebugSwitchGate): string {
     '  --remote-debugging-port / --remote-debugging-pipe ⇒ 渲染进程的 cookie，',
     '    含本地写面闸门所信任的 HttpOnly 持有性证明 cookie。',
     '请从启动方式（快捷方式/脚本/IDE 配置）里去掉这个开关；需要在开发态调试请用 `yarn dev`。',
+    '（单横线与双横线同等对待：`-inspect` 与 `--inspect`、`-remote-debugging-port=…` 与',
+    '  `--remote-debugging-port=…` 都会被拒绝 —— Chromium 两样都认。）',
     `确需放行一次：在真实进程环境里设 ${ALLOW_DEBUG_SWITCHES_ENV}=1，`,
     '应用会在启动日志里写明本次运行的这层保护已关闭。',
     '',

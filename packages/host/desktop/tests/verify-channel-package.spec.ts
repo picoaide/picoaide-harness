@@ -42,6 +42,10 @@ async function channelRepo(): Promise<string> {
     schema: 1,
     channel_id: CHANNEL,
     identity: { display_name: 'Example Brand', short_name: 'Example' },
+    // 品牌渠道必须声明 assets.logo（2026-09-26 审计 Z3-3）：它是随包内联 logo
+    // 与打包期派生（托盘位图/随包 favicon）共同的取值来源 —— 夹具缺它就会先被
+    // brand-prepare 的输入侧判据拦下，后续白标断言测的就不是它声称的东西。
+    assets: { logo: 'logo.svg' },
     desktop: {
       product_name: 'Example Brand',
       slug: 'Example-Brand',

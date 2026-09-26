@@ -66,12 +66,20 @@ async function channelRepo(options: {
   return root
 }
 
-/** 一个字段齐全的品牌渠道配置。 */
+/**
+ * 一个字段齐全的品牌渠道配置。
+ *
+ * `assets.logo` 是**品牌渠道必填**（2026-09-26 审计 Z3-3）：随包内联
+ * （channel-build.ts 的 inlineChannelAssets）与打包期派生（托盘位图 / 随包 favicon）
+ * 都以它为准，不声明时包里没有 logo_inline ⇒ 服务端不可达时登录页回落厂商 mark。
+ * `logo.svg` 也必须是这个名字 —— 打包侧只按 `CHANNEL_ASSET_FILES.logo` 取素材。
+ */
 function brandChannel(channelId: string): Record<string, unknown> {
   return {
     schema: 1,
     channel_id: channelId,
     identity: { display_name: 'Example Brand', short_name: 'Example' },
+    assets: { logo: 'logo.svg' },
     desktop: {
       product_name: 'Example Brand',
       slug: 'Example-Brand',
@@ -79,6 +87,16 @@ function brandChannel(channelId: string): Record<string, unknown> {
       deep_link_scheme: 'examplebrand',
       app_origin_scheme: 'examplebrand-app',
     },
+  }
+}
+
+/** 一个公共渠道（beta）配置：品牌就是厂商自己的，素材回落官方是**正当**的。 */
+function publicChannel(channelId: string): Record<string, unknown> {
+  return {
+    schema: 1,
+    channel_id: channelId,
+    identity: { display_name: 'PicoAide Harness', short_name: 'PicoAide' },
+    desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' },
   }
 }
 
@@ -165,17 +183,69 @@ describe('prepareChannelPackaging', () => {
     ).rejects.toThrow(/JSON/u)
   })
 
-  it('渠道缺 logo.svg 时图标回落 brands/official（不是构建失败）', async () => {
+  // 2026-09-26 审计 Z3-3：**这一条原本是缺陷编码**。旧预期是「品牌渠道缺 logo.svg
+  // ⇒ 图标回落 brands/official（不是构建失败）」，而"静默回落官方"正是那次审计的
+  // P1：交付物（安装器/Dock/任务栏图标、服务端不可达时的登录页 mark）带**厂商品牌**，
+  // 而白标门禁（verify-channel-package.ts）用同一个 prepareBrandAssets 重派生再比对
+  // ⇒ 两边都回落官方 ⇒ 恒等 ⇒ 结构性咬不到。现在品牌渠道缺素材一律抛错。
+  it('品牌渠道缺 logo.svg 时 fail-loud（不得静默回落官方素材）', async () => {
     const repo = await channelRepo({ channelId: 'example-brand', channel: brandChannel('example-brand'), withAssets: false })
-    // 只补 app-icon，logo 留给回落逻辑。
+    // 只补 app-icon，logo 留给回落逻辑 —— 旧实现会在这里静默用官方 logo。
     copyFileSync(officialIcon, join(repo, 'channels', 'example-brand', 'app-icon.png'))
     const appDir = tempDir('dsh-app-')
 
-    await prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'example-brand' }, repoRoot: repo, appDir })
+    await expect(
+      prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'example-brand' }, repoRoot: repo, appDir }),
+    ).rejects.toThrow(/logo\.svg/u)
+    // 失败必须发生在写出任何素材之前：半成品 build/ 会被后续打包当成"已派生"。
+    expect(existsSync(join(appDir, 'app-icon.png'))).toBe(false)
+    expect(existsSync(join(appDir, 'tray-icon-blue.png'))).toBe(false)
+  })
+
+  it('品牌渠道缺 app-icon.png 时 fail-loud（否则安装器/Dock/任务栏是厂商图标）', async () => {
+    const repo = await channelRepo({ channelId: 'example-brand', channel: brandChannel('example-brand'), withAssets: false })
+    // 只补 logo，app-icon 留给回落逻辑。
+    copyFileSync(officialLogo, join(repo, 'channels', 'example-brand', 'logo.svg'))
+    const appDir = tempDir('dsh-app-')
+
+    await expect(
+      prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'example-brand' }, repoRoot: repo, appDir }),
+    ).rejects.toThrow(/app-icon\.png/u)
+    expect(existsSync(join(appDir, 'tray-icon-blue.png'))).toBe(false)
+  })
+
+  it('品牌渠道没声明 assets.logo 时 fail-loud（否则包里没有 logo_inline，登录页回落厂商 mark）', async () => {
+    const repo = await channelRepo({
+      channelId: 'example-brand',
+      channel: { ...brandChannel('example-brand'), assets: {} },
+    })
+    const appDir = tempDir('dsh-app-')
+
+    await expect(
+      prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'example-brand' }, repoRoot: repo, appDir }),
+    ).rejects.toThrow(/assets\.logo/u)
+  })
+
+  it('公共渠道（beta）缺素材仍然回落 brands/official，且回落被显式登记（不是静默）', async () => {
+    // 反向对照：判据按**渠道来源**分档，不是"文件在不在" —— beta 是厂商自己的
+    // 预发布渠道（真实渠道仓里的 channels/beta 也没有 app-icon.png），回落官方
+    // 是预期行为，必须继续绿，但要走一条可检索的登记日志。
+    const repo = await channelRepo({ channelId: 'beta', channel: publicChannel('beta'), withAssets: false })
+    const appDir = tempDir('dsh-app-')
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    try {
+      await prepareChannelPackaging({ env: { DSH_BUILD_CHANNEL: 'beta' }, repoRoot: repo, appDir })
+    } finally {
+      console.warn = originalWarn
+    }
 
     const official = tempDir('dsh-official-tray-')
     await generateTrayIcons({ source: officialLogo, buildRoot: official })
     expect(sha256(join(appDir, 'tray-icon-blue.png'))).toBe(sha256(join(official, 'tray-icon-blue.png')))
+    expect(sha256(join(appDir, 'app-icon.png'))).toBe(sha256(officialIcon))
+    expect(warnings.join('\n')).toMatch(/回落官方.*已登记/u)
   })
 })
 
