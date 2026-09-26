@@ -2337,3 +2337,88 @@ yarn 步骤（`.github/workflows/ci.yml` 共 5 处）；锁文件不一致 ⇒ *
 出现 `tests/app-ai-release-gate.spec.ts` 两条失败。**恢复 `node_modules` 后该 spec 单跑 6/6 绿**
 ⇒ 那次门禁红是**环境性**，不是 FIX-35 的回归。教训：**`node_modules` 被并发 install 撕开的窗口内，
 任何测试结论都不算数**；且**门禁不得在 lane 正在改树时跑**（我这次犯了，白跑 614s）。
+
+---
+
+### §7.67 第二十七轮 AA2（服务端 Go 新面清扫，Z2/Z3 完全未覆盖的面）
+
+**VERDICT: 新发现 P0 0 / P1 1 / P2 5 / P3 3**。基线 `2f3f125044`，`git diff --stat -- server/` 为空
+（结论对当前 HEAD 成立）；主树零写入，全部在 `git archive HEAD server` 副本里做，变异后逐条对
+`git show HEAD:<path>` 复核 sha256。**本泳道不依赖 `node_modules`**（不受本轮环境事故影响）。
+基线 `go test ./internal/{reports,channel,clientrelease,portal,appstore,router,auditchain,…}/ -p 2` = 12/12 ok。
+
+#### §7.67.1 【P1】未认证的客户端资产端点**跟随符号链接** ⇒ 任意可读文件下发
+
+`server/internal/clientrelease/clientrelease.go:190`（`os.Stat`，**跟随链接**）+
+`:206`（`http.ServeFile`，**二次解析路径**）：`/updates/client/*file` **无需认证**即可访问，
+于是资产目录里放一个 `evil.dmg → /etc/passwd`（或任何可读文件）就能把它下发出去。
+真跑：`go test ./internal/clientrelease/ -run AA2Probe -v` ⇒
+`GET /updates/client/evil.dmg => 200 body="OUTSIDE-SECRET-AA2"`；
+另有用例：**登记过的正常文件在运行期被换成链接** ⇒ 同样 200。
+
+**这是"同族只收口了一条"的典型**：`channel.assetRegular`（Lstat + `IsRegular`）、`skillseed`、
+`archiveutil`、`appdb` **全都已拒链接**（channel 那条正是 R23 W5-01 修的），**只有 clientrelease 漏网**。
+变异：把 `os.Stat` 改成 `os.Lstat` ⇒ 两条用例都翻 404（还原后 sha 与 HEAD 相等）。
+修法直接抄 channel 的 `openAsset`（`Lstat` → open fd → `SameFile`）+ `ServeContent`。
+
+#### §7.67.2 五条 P2
+
+1. **`X-Forwarded-Proto` 被钉成字面量 `"https"`（两处，同一根因）** ——
+   `clientrelease.go:396`：`HTTPS` / `Https` / `"https "` / `"https, http"` / `"http, https"`
+   **五种形态全部 `urls=0`**（清单 200 但**零下载 URL**，门户下载卡同刻消失，全文只有一行 warn）；
+   `serverauth/admin.go:45`：`EqualFold` 但不认列表/空白 ⇒ 真跑 `"https, http"` / `"https "` 时
+   **管理会话 cookie 失去 `Secure`**（而应用侧**无 HSTS**：`grep Strict-Transport-Security server/**/*.go` = 0）。
+   仓内**同一个头三处三种处理**（clientrelease 全等 / serverauth EqualFold / appproof 非空），
+   且**无任何判据覆盖这四种形态**。
+2. **错误上报 DSN 原文写进不可变哈希链审计行** —— `llmgateway/admin.go:1611`（写）+
+   `:51-59`（无脱敏拼接）。真跑 ⇒ `detail="错误上报DSN:(空)→https://PUBKEY…:PRIVATEKEY…@errors.example.com/42"`。
+   读侧只对**不持 `report:read`** 者折叠；同族 `reports.hook_url` 早已按"写入侧省略"修掉，**DSN 未跟进**。
+   今天只有 super_admin 同时持 `gateway:*` 与 `report:read` ⇒ 尚无越权，但属 **durable 泄漏面**
+   （180 天保留 + CSV 导出 + 库备份）。（脱敏判据的键挂在 `report:read` 而 DSN 属 `gateway:*` —— 键挂错了面。）
+3. **迁移等锁无预算/无超时/无日志 ⇒ 启动期无界静默挂死** —— `serverstore/migrate.go`。
+   真跑（独立复现）：持 `LOCK TABLE models IN ACCESS SHARE` 后 `timeout 60 go run ./cmd/aa2probe`
+   ⇒ **EXIT=124，60s 只有一行 NOTICE**；`pg_locks` 显示迁移自己的 `AccessExclusiveLock granted=f`。
+   S1 支线另证：advisory lock 等 30.02s 零输出、真二进制启动 20.01s 零输出。
+   **关键坑（已证）**：`SET lock_timeout` 加在 **advisory-lock 那条连接**上**无效**
+   —— DDL 跑在池里**另一条会话**；改成 `conn.BeginTx` 后 **6s 响亮失败**
+   （`migrate: migration 0080 … lock timeout (SQLSTATE 55P03)`）。仓内已有做法（`partitions.go:184` 的
+   `SET LOCAL lock_timeout`）。既有唯一相关判据是 `strings.Contains(sql,"lock_timeout")`
+   —— 把 0073 的预算改成 `'0'` 用例**仍 ok**（**假绿**，S1 实跑）。
+   **主控裁定严重度 = P1**：满足 rubric 里"明确但常见的前提（一次并发长事务/备份）× **不可自愈的卡死** ×
+   静默无日志"三条同时成立；S1 判 P1、AA2 判 P2 的分歧按此收口。
+4. **迁移的 `ACCESS EXCLUSIVE` 窗口 = 整个迁移文件**，而非那一条 ALTER（`migrate.go:294-312` 整文件一个事务）：
+   0059 + 150k 行夹具实测迁移 19.45s、`apps` 的 AE **19.17s**（447/500 采样），
+   并发 SELECT 21.1s / INSERT 18.6s / UPDATE 18.8s；**9 个迁移属此形态**（0069 最长：AE on `apps` 跨 18 条语句）。
+   无任何判据。
+5. **运行时只信版本行**（`schema_migrations` 无 checksum 列；`:294` 是唯一判据）：三形态全部 `err=<nil>` + EXIT=0 ——
+   手工删列（运行期 42703）、**同版本号改内容 ⇒ 同一二进制在新库/升级库得到两套 schema**、
+   以及**严格按 0082 文件头推荐的手工 `INSERT schema_migrations` 前滚**（DDL 未跑 ⇒ reports 运行期 42703）。
+   缓解事实如实登记：`scripts/check-migration-range.mjs` 有内容登记表，但 **Go 侧零引用**（grep=0）。
+
+#### §7.67.3 三条 P3
+
+- 渠道素材端点路径在 `NewHandlers()` 期**冻结**、而 `/channel` **每请求重算** ⇒ 真跑
+  `启动后补文件：/channel 宣告 login.logo_url="/api/client/v2/channel/logo"，而 GET /channel/logo => 404`
+  （**破图且不自愈**）。
+- **channel 的 TOCTOU 身份复验只有谓词级判据**：短路 `channel.go:411` 的 `assetIdentityMatches` 调用点后
+  `./internal/channel` 与 `./internal/... ./cmd/... -run 'Asset|Channel|Symlink'` **全绿**
+  —— 与 R25-Y3-1 **同一签名**（`wasmapp/api` 已有成熟的 AST 判据可抄）。
+- `serverauth/admin.go:442` 的 `mfa-ip:` 桶键**缺 `dbLimiterScope`**（同表其余 5 键都带）⇒ 跨 DB 串味
+  （库 A 打满后库 B 第 1 次即 429；带 scope 的 `ip:` 桶有对照不串味）。
+
+#### §7.67.4 承重性变异（既有修复，4 红 + 1 绿）
+
+sharedskills 可见性退回路由级常量→红；`wasmapp/api/open.go` 退回写侧 `validateAppID`→AST 判据点名红；
+channel `os.Lstat→os.Stat`→红；`/v1/files` 记账改 2×→3 条 R24 用例红；
+**channel 身份复验短路→绿（即 §7.67.3 第二条）**。
+
+**已核查为干净（勿重复排查）**：对外下发 24 种路径形态全 404 JSON、渠道素材链接/FIFO/目录零泄露、
+`router.Register` 唯一调用点、154 条管理路由全申报（`WRITE_WITH_READ_PERM=0`）、
+auditor 面零凭据（9 个假凭据 + super_admin 控制组）、审计链篡改/清理/新锚全部正确、限流 5 桶打满、
+迁移幂等（两进程并发时 PG 日志证明迁移体只执行 1 次）与 0082 两步回滚（哨兵值逐字未变）。
+**未实跑三项（如实登记）**：真实容器里投毒符号链接、Caddy 之外代理的 XFP 真形态、CSV 导出泄漏面。
+
+#### §7.67.5 第二十七轮计数（收口）
+
+AA1（复核第二十六轮批）4/4 成立 + 0 P0 / 0 P1 / 1 P2 / 2 P3（含两条对既有修复的证伪）；
+AA2 0 / **1** / 5 / 3；AA3 0 / **1** / 3 / 1 ⇒ **第二十七轮合计 ≥ 0 P0 / 2 P1** ⇒ **不干净，收敛仍未达成**。
