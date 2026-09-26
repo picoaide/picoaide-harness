@@ -163,6 +163,10 @@ interface Harness {
   routes: Route[]
   outbound: Outbound[]
   cleared: number
+  /** 当前会话（可在请求在途时换掉，用来复现"迟到的 401"，R22-V1-N3）。 */
+  current: Session | null
+  /** 直接换掉当前会话（等价于"用户在请求在途时重新登录"）。 */
+  setCurrent: (session: Session | null) => void
   /** 经 `ctx.tools.register` 登记的宿主工具（真实装配路径，见 auth-gate 的 effect）。 */
   tools: Array<{ name: string, timeoutMs?: number }>
   call: (url: string, method?: Method, body?: string, headers?: Record<string, string | null>) => Promise<Captured>
@@ -184,7 +188,7 @@ function harness(
   const routes: Route[] = []
   const outbound: Outbound[] = []
   const tools: Array<{ name: string, timeoutMs?: number }> = []
-  const state = { cleared: 0 }
+  const state = { cleared: 0, current: session as Session | null }
   const ctx = {
     effect: (fn: () => unknown) => { fn() },
     get: (name: string) => (name === 'connection' ? browserFence() : undefined),
@@ -196,10 +200,18 @@ function harness(
     },
     picoSession: {
       isRestored: () => true,
-      isLoggedIn: () => session !== null,
-      getSession: () => session,
-      setSession: vi.fn(),
-      clear: () => { state.cleared += 1 },
+      isLoggedIn: () => state.current !== null,
+      getSession: () => state.current,
+      setSession: (next: Session) => { state.current = next },
+      clear: () => { state.cleared += 1; state.current = null },
+      // R22-V1-N3：401 走 `clearIfCurrent(本次请求用的令牌)`。替身按真实现语义实现
+      // （只清"当前仍是那一位"），否则"迟到 401 不动新会话"这条判据在测试里恒真/恒假。
+      clearIfCurrent: (token: string | undefined) => {
+        if (state.current === null || token === undefined || state.current.token !== token) return false
+        state.cleared += 1
+        state.current = null
+        return true
+      },
     },
     webServer: {
       tapIndex: () => () => {},
@@ -237,6 +249,8 @@ function harness(
     outbound,
     tools,
     get cleared() { return state.cleared },
+    get current() { return state.current },
+    setCurrent: (next: Session | null) => { state.current = next },
     call: async (url: string, method: Method = 'GET', body?: string, headers?: Record<string, string | null>) => {
       const { res, read } = fakeRes()
       await route.handler(fakeReq(url, method, body, headers), res)
@@ -542,6 +556,24 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
     const res = await h.call(WASM_APPS_PREFIX)
     expect(res.code).toBe(401)
     expect(h.cleared).toBe(1)
+  })
+
+  it('R22-V1-N3 迟到的 401：请求在途时换了会话 ⇒ 不得清掉新登录', async () => {
+    // 旧令牌的请求挂住 → 期间"重新登录" → 再放行那个属于旧令牌的 401。
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const h = harness(async () => {
+      await gate
+      return json(401, { error: { code: 'AUTH_FAILED', message: 'token expired' } })
+    })
+    const inFlight = h.call(WASM_APPS_PREFIX)
+    await vi.waitFor(() => { expect(h.outbound.length).toBeGreaterThan(0) }, { timeout: 10_000 })
+    h.setCurrent({ ...SESSION, token: 'NEW-TOKEN' })
+    release?.()
+    const res = await inFlight
+    expect(res.code, '401 仍要如实透传给这次请求').toBe(401)
+    expect(h.cleared, '旧令牌的 401 不得清掉刚建立的新会话').toBe(0)
+    expect(h.current, '新会话必须原样在内存里').toMatchObject({ token: 'NEW-TOKEN' })
   })
 
   it('生命周期与只读代理保留 method / body / 路径', async () => {

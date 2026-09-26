@@ -162,9 +162,10 @@ export default class SessionService extends Service {
    * 现在只有**确实在清一个会话**（`this.session !== null`）时才删；没有会话可清
    * ⇒ 盘上那一份要么属于另一次登录、要么根本不存在，都不该由这里删。
    *
-   * 认账残留（本轮 DEFERRED）：正常路径上的"迟到 401"仍会清掉**当前**会话 —— 彻底
-   * 修需要按请求携带的令牌做身份校验（`clearIfCurrent(token)`），涉及 auth-gate 的
-   * 13 处 `ctx.picoSession.clear()` 调用点，超出本泳道文件所有权（只允许改技能相关行）。
+   * 调用面纪律（R22-V1-N3）：**"这个会话还是不是发起那次请求的那一个"只有调用方
+   * 知道** —— 凡是由"某次请求收到 401 / 被服务端拒绝"触发的清空，都必须走
+   * {@link clearIfCurrent}（带上那次请求用的令牌）；`clear()` 只留给**语义上就是
+   * 登出**的三类动作：用户主动登出、改密（服务端已吊销全部令牌）、切换账号/重置。
    */
   clear(): void {
     const hadSession = this.session !== null
@@ -174,6 +175,34 @@ export default class SessionService extends Service {
       try { unlinkSync(this.tokenFile) } catch { /* absent is fine */ }
     }
     this.ctx.emit(SESSION_CHANGED_EVENT, null)
+  }
+
+  /**
+   * 只在"当前会话仍然是发起这次请求时的那一个"时才清（R22-V1-N3）。
+   *
+   * 要解决的是**迟到 401**：旧令牌的在途请求在用户重新登录之后才收到 401
+   * `auth_expired`，此时无条件 `clear()` 会把**刚建立的新会话**连同刚写下的新令牌
+   * 一起删掉 —— 用户"刚登录又被登出"、反复重登无效，且没有任何解释。令牌是这里
+   * 唯一可用于判断"这一次失败属于哪一代会话"的身份，所以比对它。
+   *
+   * 三个必须保持的语义：
+   *  - **真失效必须清**：当前令牌就是那次请求用的令牌（`current.token === token`）
+   *    ⇒ 走 {@link clear}，内存会话与磁盘令牌一起清掉（这是"401 弹回登录页"那条链，
+   *    也是 `session-service.spec.ts` 钉住的行为）；
+   *  - **迟到 401 必须不动**：当前令牌与请求令牌不同（已重登 / 已换号）⇒ 返回 false，
+   *    而且**连 `pico/session-changed` 都不发** —— 发 `null` 会让渲染层 tripwire
+   *    误判"已登出"而刷新回登录页，那是把"该登出没登出"换成"不该登出却登出"，
+   *    两个方向都错；
+   *  - **无会话可清**：`session` 为 null、或没有令牌可比 ⇒ 什么都不做（与
+   *    {@link clear} 的 R21-A2-01 口径一致：没有会话时盘上那份不属于这里）。
+   * @param token - 发起那次请求时用的令牌（调用点传 `session.token`）。
+   * @returns 真的清掉了为 true。
+   */
+  clearIfCurrent(token: string | undefined): boolean {
+    const current = this.session
+    if (token === undefined || current === null || current.token !== token) return false
+    this.clear()
+    return true
   }
 
   private async restore(): Promise<void> {

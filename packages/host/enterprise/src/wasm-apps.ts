@@ -538,15 +538,21 @@ async function upstreamResponse(upstream: Response): Promise<WasmResponse> {
 /**
  * 透传上游响应，并在 401 时清掉本地会话（渲染层的 tripwire 会回登录页）。
  *
- * `ctx.picoSession.clear()` 放在这里而不是调用方：**每一条**出站路径都要这一条
+ * 清会话这件事放在这里而不是调用方：**每一条**出站路径都要这一条
  * （直传/分片/续传/代理），分开放迟早漏一条 —— 而漏掉的表现是"令牌过期后界面
  * 一直停在错误页"，很难与业务错误区分。
+ *
+ * R22-V1-N3（同族收口）：401 必须走 `clearIfCurrent(本次请求用的令牌)` ——
+ * 一次**迟到**的 401（旧令牌的在途请求在用户重新登录之后才失败）不得把刚建立的
+ * 新会话与刚写下的新令牌一起清掉。`session` 因此是**必填**参数（就是发起这次请求
+ * 的那一份），漏传在类型上不成立。
  * @param ctx - Host 上下文（只用到 `picoSession`）。
  * @param upstream - 上游响应。
+ * @param session - 发起这次请求用的会话（令牌 = "这次失败属于哪一代"的唯一身份）。
  * @returns 信封。
  */
-async function forwardAuthAware(ctx: Context, upstream: Response): Promise<WasmResponse> {
-  if (upstream.status === 401) ctx.picoSession.clear()
+async function forwardAuthAware(ctx: Context, upstream: Response, session: Session): Promise<WasmResponse> {
+  if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
   return await upstreamResponse(upstream)
 }
 
@@ -1068,7 +1074,7 @@ async function publishInline(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 /** 从上游错误响应里取出可读文本（分片失败时用于回给调用方）。 */
@@ -1177,7 +1183,7 @@ async function publishChunked(
     }
     if (!upstream.ok) {
       // 会话过期/被回收：把服务端的原话回给调用方（它可能带 RETRY 类 hints）。
-      return { kind: 'response', response: await forwardAuthAware(ctx, upstream) }
+      return { kind: 'response', response: await forwardAuthAware(ctx, upstream, session) }
     }
     received = parseReceived(await upstream.json().catch(() => null))
     return { kind: 'ok' }
@@ -1203,7 +1209,7 @@ async function publishChunked(
     } catch (cause) {
       return gatewayFailure(cause)
     }
-    if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+    if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
     const opened = (await upstream.json().catch(() => null)) as Record<string, unknown> | null
     const id = opened?.upload_id ?? opened?.id
     if (typeof id !== 'string' || id.trim() === '') {
@@ -1240,7 +1246,7 @@ async function publishChunked(
     }
     if (upstream.ok || upstream.status === 204) return null
     const detail = await readUpstreamError(upstream)
-    if (upstream.status === 401) ctx.picoSession.clear()
+    if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
     return { kind: 'upstream', status: detail.status, text: detail.text }
   }
 
@@ -1351,7 +1357,7 @@ async function publishChunked(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 /**
@@ -1440,7 +1446,7 @@ export async function validateApp(ctx: Context, session: Session, input: Validat
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,7 +1473,7 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   // 原样透传（含 content-type）：解析再序列化只对"改写字段"有意义，而现在没有任何
   // 改写 —— 透传还顺带保住了服务端返回的非 JSON 字节（门户 HTML / 代理劫持）与其
   // 真实 content-type，让上层看见的就是上游的字节。
@@ -1501,7 +1507,7 @@ export async function readAppSchema(ctx: Context, session: Session, appId: strin
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1536,7 +1542,7 @@ export async function readAppDiagnostics(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1575,7 +1581,7 @@ export async function readAppRows(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1622,7 +1628,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 // ---------------------------------------------------------------------------

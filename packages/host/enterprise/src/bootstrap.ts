@@ -105,8 +105,12 @@ export function apply(ctx: Context): void {
     } catch (cause) {
       // M2: a revoked/expired/disabled session must not linger. Clear it so
       // the auth-gate tripwire reloads the window into the login page.
+      //
+      // R22-V1-N3（同族收口）：`session` 是**订阅那一刻**的那一份，而 `sync` 里有
+      // await —— 期间用户可能已经重新登录。无条件 `clear()` 会把新登录一起清掉
+      // （与 auth-gate 的迟到 401 同一签名）⇒ 由会话服务判定"还是不是同一位"。
       if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-        ctx.picoSession.clear()
+        ctx.picoSession.clearIfCurrent(session.token)
         return
       }
       ctx.logger.error('pico bootstrap sync failed')

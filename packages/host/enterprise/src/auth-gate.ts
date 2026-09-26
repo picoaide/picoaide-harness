@@ -2063,7 +2063,8 @@ export function apply(ctx: Context, config: Config): void {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
                 // The session is no longer valid: clear it so the injected
                 // tripwire reloads into the login page (M2).
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               gatewayError(res, cause)
@@ -2082,7 +2083,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ...data, installed })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               // 旧版服务端没有这条端点（404）：让面板把内置技能区整块隐藏，
@@ -2148,7 +2150,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               // 分类 + 脱敏 + 状态码的唯一实现（审计 A12/A13）：拒绝 422、
@@ -2246,7 +2249,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, name: result.name, version: result.version })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               // 分类 + 脱敏 + 状态码的唯一实现（拒绝 422 / 需确认 409 / 系统级 502）。
@@ -2338,7 +2342,8 @@ export function apply(ctx: Context, config: Config): void {
             res.end(content)
           } catch (cause) {
             if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-              ctx.picoSession.clear()
+              // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+              ctx.picoSession.clearIfCurrent(s.token)
               return json(res, 401, { error: 'auth expired' })
             }
             gatewayError(res, cause)
@@ -2384,7 +2389,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ...data, installed, local })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               gatewayError(res, cause)
@@ -2421,7 +2427,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, preset: gateway.preset })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               if (cause instanceof ApiError) {
@@ -2489,7 +2496,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, name })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               // 分类 + 脱敏 + 状态码走**唯一实现**（审计 2026-09-23 A12：这里此前
@@ -2567,7 +2575,8 @@ export function apply(ctx: Context, config: Config): void {
             res.end(content)
           } catch (cause) {
             if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-              ctx.picoSession.clear()
+              // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+              ctx.picoSession.clearIfCurrent(s.token)
               return json(res, 401, { error: 'auth expired' })
             }
             gatewayError(res, cause)
@@ -2605,7 +2614,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ...data, installed, local })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               gatewayError(res, cause)
@@ -2643,7 +2653,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, skill: gateway.skill })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               if (cause instanceof ApiError) {
@@ -2721,7 +2732,8 @@ export function apply(ctx: Context, config: Config): void {
               json(res, 200, { ok: true, name, version: result.version ?? ver })
             } catch (cause) {
               if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-                ctx.picoSession.clear()
+                // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+                ctx.picoSession.clearIfCurrent(s.token)
                 return json(res, 401, { error: 'auth expired' })
               }
               const failure = describeArchiveFailure(cause)
@@ -3053,7 +3065,8 @@ export function apply(ctx: Context, config: Config): void {
             json(res, 200, { items: enriched })
           } catch (cause) {
             if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-              ctx.picoSession.clear()
+              // R22-V1-N3：只清"发起这次请求时的那一个会话"（迟到 401 不得清掉新登录）。
+              ctx.picoSession.clearIfCurrent(s.token)
               return json(res, 401, { error: 'auth expired' })
             }
             gatewayError(res, cause)

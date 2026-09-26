@@ -7,6 +7,9 @@
  *  - **首次授权闸门**（§21.1 第 9 条）：没授权就不渲染输入框，只给一次性说明卡
  *    （"允许" / "不允许"）；授权按 **用户×服务端×应用** 记（与宿主闸门逐段同源，
  *    换服务端后必须重新问一次），面板上给「撤销授权」这个出口。
+ *    审计 R22-V1-N5：`scope` 是**动态** prop（父组件的 identity 异步到位），
+ *    "有没有问过"因此必须**在渲染期随作用域重算** —— 用 `useState` 初始化器只算
+ *    一次会让"换服务端跳过说明卡"（用户发首条消息才吃 403）复活。
  *    ⚠️ 这里是**唯一**的撤销入口（2026-09-20 核对：设置页里没有这个入口，此前注释
  *    与技能文档都写成"设置页也能撤"，与实现不符）；
  *  - **流式渲染**（§21.2）：`onDelta` 的累计正文直接渲染（不缓冲到结束再显示）；
@@ -103,6 +106,31 @@ export function AppAiPanel({ appId, scope, store, deps }: {
   const [consented, setConsented] = useState(() => hasAppAiConsent(scope, appId, storage))
   const [denied, setDenied] = useState(false)
   const [revoked, setRevoked] = useState(false)
+  /**
+   * "已问过"记忆的**作用域身份** —— 授权按 用户×服务端×应用 记，所以 `scope` /
+   * `appId` / 存储任一变化都意味着"问过的是另一件事"，必须**在渲染期同步重算**。
+   *
+   * 审计 R22-V1-N5：`useState` 的初始化器**只跑一次**，于是同一次挂载内：
+   *  - `null → 已授权`（`AppCenterPanel` 的 identity 是异步加载的，必然经历这一步）
+   *    会**再问一次**（fail-safe，只是烦）；
+   *  - `已授权 A → 换 B`（另一台服务端）会**跳过说明卡直接给输入框**，用户发出
+   *    第一条消息才吃 403 —— 正是首次授权闸门要消灭的形态。
+   *
+   * 为什么不用 `useEffect`：effect 在**绘制之后**才跑，会留下一帧"上一份作用域的
+   * 授权"可点；本仓对"资源切换"的既有纪律是**渲染期同步归零**（见
+   * `docs/decisions` 里共享对话框那一类）。React 官方认可的写法就是在渲染期比较
+   * 上一次的输入并 setState（会立刻重渲染，不把陈旧状态画出来）。
+   */
+  const [consentInput, setConsentInput] = useState<{ scope: AppAiScope | null, appId: string, store: AppAiConsentStore | null }>(
+    () => ({ scope, appId, store: storage }),
+  )
+  if (consentInput.scope !== scope || consentInput.appId !== appId || consentInput.store !== storage) {
+    setConsentInput({ scope, appId, store: storage })
+    setConsented(hasAppAiConsent(scope, appId, storage))
+    // 「不允许 / 已撤销」也是**属于上一个作用域**的事实：换了服务端就该重新问。
+    setDenied(false)
+    setRevoked(false)
+  }
   /**
    * 写宿主失败的方向（**不是**一句话）：三个方向各有各的真实后果与文案。
    *
