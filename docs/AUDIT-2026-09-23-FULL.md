@@ -2579,3 +2579,27 @@ AB2-A 子审计（`.github/workflows/ci.yml`，两条 P2，详见 `temp/r28/AB2/
   ⇒ 慢的那个 tag 把更新指针写回**更旧**版本；注释声称"两 tag 互斥"与实现不符且零判据。
 - **P2** `pr-summary` 的 `if` 是 `always() && …`（门禁红也跑），正文却**无条件**写"全部门禁通过、可下载产物"，
   且 `needs` 不含 `gate` ⇒ 红 PR 上机器人发**假绿评论**并列出不存在的 artifact。
+
+#### §7.69.6 FIX-39 收工回报与一条**新登记的配置面漂移**（待派工）
+
+FIX-39（迁移执行器）VERDICT **FIXED 3 / DEFERRED 2**，并核实主控的提交 `dc632d5c91` 与其工作树逐字节一致（无丢失）。
+值得记的三点：
+- **假绿在同一变异体上复现**（这是我要求的承重证明）：把 0073 的 `'5s'` 改成 `'0'` + 旧的
+  `strings.Contains(sql,"lock_timeout")` 判据 ⇒ **`ok`**（即第二十七轮之前那条假绿）；**同一变异体**上新的
+  "取值域"判据 ⇒ **红**。另五条变异（预算=0 / 预算挪到 advisory 连接即 AA2 证伪过的错改法 / 关采样器 /
+  删内容校验）全部红。
+- **AE 窗口真的被测到**（不是推断）：迁移期间在 advisory 那条**闲置**连接上 250ms 采样 `pg_locks`/`pg_stat_activity`
+  （不额外占池位），夹具持 AE 1.2s ⇒ 断言 `AEWindow≥400ms` 且表名 = `apps`；关采样器 ⇒ 红。
+  未观测到如实写 `not-observed`（不写 0s）。
+- **整包验收**：`go test ./internal/serverstore/ -count=1 -p 1 -timeout 25m` ⇒ **EXIT=0 / 709.175s**（`--- FAIL` 计数 0）。
+
+**新登记（U3，越界项，需派工）**：FIX-39 新增的三个预算相关 env（缺省 5min/5min/5s）
+**未登记进 `server/docker-compose.yml` 与 `.env.example`**，`server/docs/06-database.md` 也**未补**
+`checksum` 列与预算的说明 —— 它只在 `server/AGENTS.md §8` 记了约定。
+**这是本仓"声明面 vs 实际面"漂移的又一实例**：代码里可配、部署模板与运维文档里查不到，
+运维只能读源码才能发现"这次升级多了三个旋钮"。**处置**：派一条泳道把这批 env 与 `checksum` 的运维口径
+同步进 compose / `.env.example` / `docs/06-database.md`，并补一条"新 env 必须同时出现在部署模板与文档"
+的判据（本仓已有 `.env.example` 与 compose 对拍类守卫，照它加）。
+
+**FIX-39 交回的另一条约束（给未来泳道）**：若将来做"迁移事务按语句拆分"（缩短 AE 窗口），
+**必须同时**把 checksum 语义扩展到"子步骤/段号"——否则第一次合法拆分就会被内容对账判成漂移而拒绝启动。
