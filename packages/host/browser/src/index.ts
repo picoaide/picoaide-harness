@@ -24,11 +24,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createRequire } from 'node:module'
+import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { credentialSiteOrigin } from './credential-site.ts'
+import { browserError, type BrowserError } from './errors.ts'
 import { browserPartitionFor, createRealElectronAdapter } from './electron-adapter.ts'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
 import { BrowserRuntime } from './runtime.ts'
@@ -138,6 +140,71 @@ export interface Config {
 }
 
 /**
+ * 凭据读失败的**浏览器侧分类**（2026-09-27 FIX-34，唯一实现）。
+ *
+ * 第二十六轮 FIX-31 把 `@picoaide/dsh-connectors` 的 `readCredential` 语义改成
+ * 「只有 ENOENT 返回 `null`，其余读失败抛 `CredentialReadError`」—— 本包因此必须把
+ * "读不出来"和"没有凭据"**分开**（旧行为把前者降级成后者：`fill_credentials` 拿到
+ * 裸错、`credentials_list` 说"没有凭据"、站点闸门说"这条记录没有站点 URL"）。
+ *
+ * 本包**不 import** connectors 的错误类（跨包耦合）：判定面就是那份契约本身 ——
+ * `instanceof Error` + `name` + `fault.kind`（+ 可选 `cause.code`）。三种分类给三条
+ * 不同的处理建议；认不出来（例如 store 目录本身坏了）给一条通用建议。
+ *
+ * 文案只含分类与（短）errno 码，**绝不含路径**、绝不含凭据字节。
+ */
+function credentialReadReason(error: unknown): string {
+  const fault = error instanceof Error && error.name === 'CredentialReadError'
+    ? (error as Error & { fault?: { kind?: unknown; cause?: unknown } }).fault
+    : undefined
+  const kind = typeof fault?.kind === 'string' ? fault.kind : undefined
+  // `CredentialReadError` 把底层 errno 放在 `fault.cause`；目录枚举那条路径抛的是
+  // Node 自己的 errno 错误（code 在顶层）。两者都只取**短码**，绝不回显路径。
+  const code = (fault?.cause as NodeJS.ErrnoException | undefined)?.code
+    ?? (error as NodeJS.ErrnoException | undefined)?.code
+  const errno = typeof code === 'string' && /^[A-Z0-9]{2,16}$/u.test(code) ? code : undefined
+  if (kind === 'too-large') return 'the stored credential document is larger than the size this build reads'
+  if (kind === 'malformed') return 'the stored credential document is not a valid credential document'
+  if (kind === 'unreadable' || (kind === undefined && errno !== undefined)) {
+    return `the filesystem refused the read${errno !== undefined ? ` (${errno})` : ''}`
+  }
+  return 'the credential store failed'
+}
+
+/**
+ * 读失败 → **工具面**错误（工具层只认 `browserError`）。
+ *
+ * 与 ENOENT 严格分开：ENOENT 走原来那句 `not-found`（"没有存储的凭据"），读失败说的是
+ * "读不出来 + 下一步怎么办"。码沿用 `not-found`（浏览器错误码表里没有 I/O 类，且模型
+ * 的下一步与"没有凭据"相同：改用 `browser_type`、请用户修好），区分靠文案。
+ * @param subject - 主语（"某连接器的凭据" / "凭据列表"），不含路径。
+ * @param error - store 抛出的原始错误（只用于分类，文案不复制它的 message）。
+ */
+function credentialReadError(subject: string, error: unknown): BrowserError {
+  return browserError('not-found', `browser: ${subject} could not be read (${credentialReadReason(error)}), so nothing was filled or listed from it — do not treat this as "no credentials": enter the value with browser_type instead, and ask the user to repair that credential record or re-authorize the connector`)
+}
+
+/**
+ * 空列表的**存在性复核**（2026-09-27 FIX-34）：`ENOENT` = 真的没有凭据；其余读失败
+ * 抛 {@link credentialReadError}。
+ *
+ * 存在的原因：`ConnectorStore.credentialIds()` 内部的 `listCredentialIds` 把 readdir
+ * 的**任何** errno 都吞成 `[]`（那是 connectors 包自己的语义，本包不改它）。于是
+ * "目录读不出来"和"没有凭据"在枚举结果上无法区分 —— 而列表工具的输出是给模型读的
+ * 事实陈述。这里只补存在性判定：**复用 store 解析出的目录**（`store.dir`），不自己
+ * 拼布局路径，所以"第二处枚举点会弄错作用域"那条老账不成立。
+ * @param dir - `store.dir`（作用域目录本身，不是某个凭据文件）。
+ */
+async function assertScopeListable(dir: string): Promise<void> {
+  try {
+    await readdir(dir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw credentialReadError('the stored credential list', error)
+  }
+}
+
+/**
  * 构造 `browser_fill_credentials` 用的凭据解析器（导出以便单测：站点绑定基准
  * 必须与工具侧闸门同源，2026-09-15 审计 BUG-03）。
  *
@@ -173,9 +240,20 @@ export function createCredentialResolver(options: {
     /** 与连接器插件逐字相同的作用域解析（username + 服务端地址）。 */
     const scopeStore = (): InstanceType<typeof ConnectorStore> =>
       new ConnectorStore({ username: options.currentUser(), serverURL: options.currentServer?.() ?? null })
-    const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
+    /**
+     * 读一份凭据：ENOENT → `null`（**真的没有**）；其余读失败 → 带分类的工具面错误
+     * （2026-09-27 FIX-34：这是三处解析面共用的**唯一**读点，也是唯一的收口点）。
+     */
+    const readCredential = async (connectorId: string): Promise<Awaited<ReturnType<InstanceType<typeof ConnectorStore>['readCredential']>>> => {
       const store = scopeStore()
-      const credential = await store.readCredential(connectorId)
+      try {
+        return await store.readCredential(connectorId)
+      } catch (error) {
+        throw credentialReadError(`the stored credentials for connector ${JSON.stringify(connectorId)}`, error)
+      }
+    }
+    const resolveCredentials = async (connectorId: string): Promise<{ username?: string; password?: string } | null> => {
+      const credential = await readCredential(connectorId)
       if (credential === null) return null
       const fields = credential.fields ?? {}
       const username = typeof fields.username === 'string' ? fields.username : undefined
@@ -186,33 +264,52 @@ export function createCredentialResolver(options: {
       }
     }
     resolveCredentials.list = async (): Promise<Array<{ id: string; username?: string }>> => {
-      try {
-        // 目录枚举交给 store（`credentialIds()`）：布局加服务端维度后，第二处
-        // 自己拼路径的枚举点就是第二个会把作用域弄错的地方。
-        const store = scopeStore()
-        const out: Array<{ id: string; username?: string }> = []
-        for (const id of await store.credentialIds()) {
-          const credential = await store.readCredential(id)
-          const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
-          out.push({ id, ...username !== undefined ? { username } : {} })
+      // 逐条读（`credentialIds()` 给枚举，读失败不再被 catch 成空列表）。
+      //
+      // 为什么必须如实报错而不是"跳过坏的那条"：`browser_credentials_list` 的输出是
+      // 一句**事实陈述**（"有哪些凭据"）。读故障下它无论返回空列表还是短列表都是
+      // 假话 —— 模型会据此告诉用户"你没有凭据"，而凭据其实在盘上（正是本仓反复出现
+      // 的"读错误被降级成空状态"形态，2026-09-27 FIX-34）。
+      const store = scopeStore()
+      // 目录枚举交给 store（`credentialIds()`）：布局加服务端维度后，第二处
+      // 自己拼路径的枚举点就是第二个会把作用域弄错的地方。
+      const ids = await store.credentialIds()
+      // ……但 `credentialIds()` 把**枚举阶段**的 errno 一律吞成 `[]`（connectors 包
+      // 的既有语义，见其 `listCredentialIds`）。空列表因此必须再验一次：
+      // 目录真的不存在 = 没有凭据；目录存在却读不出来 = 读失败（否则列表会在读
+      // 故障下说"没有凭据"，正是本条要收口的形态）。
+      if (ids.length === 0) await assertScopeListable(store.dir)
+      const out: Array<{ id: string; username?: string }> = []
+      const unreadable: string[] = []
+      let firstFault: unknown
+      for (const id of ids) {
+        let credential: Awaited<ReturnType<typeof store.readCredential>>
+        try {
+          credential = await store.readCredential(id)
+        } catch (error) {
+          unreadable.push(id)
+          firstFault ??= error
+          continue
         }
-        return out
-      } catch {
-        return []
+        const username = typeof credential?.fields?.username === 'string' ? credential.fields.username : undefined
+        out.push({ id, ...username !== undefined ? { username } : {} })
       }
+      if (unreadable.length > 0) {
+        throw browserError('not-found', `browser: ${String(unreadable.length)} stored credential record(s) could not be read (${unreadable.map((id) => JSON.stringify(id)).join(', ')}: ${credentialReadReason(firstFault)}), so this list would be incomplete and was refused — do not read it as "no credentials": ask the user to repair those credential records or re-authorize the connectors`)
+      }
+      return out
     }
     /**
      * 站点绑定基准：显式配置优先，其次凭据字段里的地址；都没有返回 null，
      * 工具侧拒绝注入（fail-closed）。派生规则见 credential-site.ts。
+     *
+     * **这里没有 `catch { return null }`**（2026-09-27 FIX-34）：读失败不是"这条记录
+     * 没有站点 URL"，把它降级成 null 会让工具报一个与事实无关的原因（而且会连部署
+     * 显式声明的站点一起丢掉）。读失败沿 `readCredential` 收口成工具面错误。
      */
     resolveCredentials.originOf = async (connectorId: string): Promise<string | null> => {
-      try {
-        const store = scopeStore()
-        const credential = await store.readCredential(connectorId)
-        return credentialSiteOrigin(credential?.fields, options.credentialSites?.[connectorId])
-      } catch {
-        return null
-      }
+      const credential = await readCredential(connectorId)
+      return credentialSiteOrigin(credential?.fields, options.credentialSites?.[connectorId])
     }
     return resolveCredentials
   } catch {
@@ -320,9 +417,15 @@ export interface SessionSwitchSteps {
 /**
  * 执行一次用户切换（2026-09-15 审计 F2 的修复形态）。
  *
- * 顺序：**先切身份，再做清理**。旧实现把 `closeAll` 放在链首，它一旦抛错
- * （窗口/视图销毁竞态）就被 catch 吞掉后面的全部步骤：界面已换账号、浏览器却
- * 还在旧账号的分区与书签/历史上，交接也不重来。
+ * 顺序：**先关掉上一个账号的标签页，再切身份 → 清 op log → 重建隐藏窗口**
+ * （`['closeAll','applyUserScope','clearOps','prewarm']`，由
+ * `tests/plugin-user-scope.spec.ts` 钉住）。F2 的实质是"**一步失败不得吃掉后面
+ * 的步骤**"——所以 `closeAll` 的异常被单独 catch 成一条告警；它**不是**"把清理挪到
+ * 身份切换之后"（本注释在 2026-09-27 FIX-34 前与实现相反，见下）。
+ *
+ * 为什么清理必须排在最前（2026-09-15 回归）：`applyUserScope()` 会把**新账号**的
+ * 账本恢复进池子；此时再 `closeAll()`，关标签页产生的事件会把一份**空账本**经新
+ * store 落盘 —— 新账号已保存的标签页会在 `prewarm` 恢复它们之前被静默删掉。
  * @param steps - 四个步骤 + 告警出口。
  */
 export async function runSessionSwitch(steps: SessionSwitchSteps): Promise<void> {
@@ -332,6 +435,9 @@ export async function runSessionSwitch(steps: SessionSwitchSteps): Promise<void>
   // and its tab events persist an EMPTY ledger back through the new store —
   // silently deleting the new account's saved tabs before prewarm can restore
   // them (2026-09-15 audit regression).
+  //
+  // 本函数**没有**并发守卫：两个 `pico/session-changed` 事件背靠背到达时两次切换会
+  // 交错（已在 2026-09-27 FIX-34 报告里登记为交接项，不属本次修复面）。
   try {
     await steps.closeAll()
   } catch (cause) {
