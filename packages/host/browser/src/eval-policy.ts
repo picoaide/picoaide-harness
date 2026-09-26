@@ -793,7 +793,9 @@ function looksLikeCookieString(value: string): boolean {
  * （`dXNlcjpwYXNz` 这类 base64 凭据）。旧实现也不打码（`SECRET_VALUE` 只认关键词），
  * 所以这不是覆盖度回退；而放宽整串规则换来的是"普通正文不再被抹成 ****"。真正
  * 需要兜住的两条仍在：①注入凭据走 `project`（值级精确脱敏）；②`Authorization: Basic …`
- * 这类形态由下面的 `key=value`/`key: value` 片段规则擦掉值。
+ * 这类形态由 {@link AUTH_HEADER_VALUE} **整段**擦掉取值（2026-09-26 R22 V6 F2 之前这里
+ * 写的是"由 `key=value`/`key: value` 片段规则擦掉值"—— 实测那句话是**假的**：那条规则
+ * 在第一个空格处收尾，擦掉的是方案名、凭据留明文）。
  */
 const CREDENTIAL_VALUE_SHAPES: readonly RegExp[] = [
   /^bearer\s+[A-Za-z0-9._~+/=-]{8,}$/iu,
@@ -821,6 +823,36 @@ function isCredentialSpan(span: string): boolean {
 }
 
 /**
+ * `Authorization` / `Proxy-Authorization` 头的**取值**（`<scheme> <credential>`）。
+ *
+ * 这类键的值有两段（方案名 + 凭据），而 `maskSensitiveKeyValueText` 的 `key: value`
+ * 规则在**第一个空格**处收尾 ⇒ 它擦掉的是**方案名**、真正的凭据反而落单；第二趟
+ * `KEYWORD_SPAN` 这时又看不到方案名（而且 `basic` 本来就不在它的关键词表里），于是
+ * `Authorization: Bearer <jwt>` 出窗时是 `Authorization: **** <jwt>` —— 凭据明文进
+ * 模型上下文（2026-09-26 R22 V6 F2）。这条规则跑在片段级两趟**之前**，把整个取值
+ * （含方案名）换成掩码。
+ *
+ * 两道门限，避免把散文改坏：
+ *  - 只有**公认的认证方案**才算"这是凭据"的声明（`Authorization: none required` 这类
+ *    普通取值不命中）；
+ *  - 没有方案名时仍可整体掩码，但片段要过 {@link isCredentialSpan}（形状/长度）。
+ */
+const AUTH_HEADER_VALUE = /(\b(?:proxy-)?authorization\b\s*[:=]\s*["']?)(?:(?:bearer|basic|digest|token|apikey|api[_-]?key|negotiate|ntlm|oauth2?)\s+)?([A-Za-z0-9_+/.=~-]{8,})/giu
+
+/**
+ * `Cookie` / `Set-Cookie` 头的取值（cookie 对 `k=v`，可 `; ` 分隔多条）。
+ *
+ * 会话 cookie 名在 {@link SESSION_COOKIE_NAME} 里，所以"整个字符串就是 cookie 串"的
+ * 形态早就在 `maskString` 的整串分支被打码（P1-18 的回归面）。落单的是**单条、且
+ * cookie 名不在名单里**的形态（`Cookie: a=b`）：`cookie` 有意不在
+ * `SENSITIVE_KEY_PATTERN` 的词表里（URL 面的 `?cookie=` 逐字节不动），于是它既不命中
+ * 整串形状、也不命中 `key: value` ⇒ 值原样出窗（2026-09-26 R22 V6 F2 的判据形态）。
+ * cookie 头的取值整体是凭据材料，这里按"值必须真的是 cookie 对"的形状门限擦掉它 ——
+ * 散文（`Cookie: the browser sends cookies`）没有 `k=v` 形态，不命中。
+ */
+const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\-^|~]{1,64}=[^\s;,]+(?:\s*;\s*[A-Za-z0-9_.#$%&*+\-^|~]{1,64}=[^\s;,]+)*)/giu
+
+/**
  * 片段级凭据打码（2026-09-23 审计 EV-1）。
  *
  * 旧实现：`SECRET_VALUE.test(value) && value.length >= 6` ⇒ **整串** `****`。
@@ -833,18 +865,29 @@ function isCredentialSpan(span: string): boolean {
  * 现在的口径（与 `browser_get_text`/op log 同族：先形态、再片段）：
  *  1. 整串是 cookie 串或凭据形态 ⇒ 整串打码（**不变**：cookie 值本身无键可依，
  *     键名匹配永远指不到它，这条是 P1-18 的回归面）；
- *  2. 否则只擦片段：`key=value`/`key: value` 里的敏感值（复用 store 的唯一实现
- *     {@link maskSensitiveKeyValueText}，与 URL/摘要面同一张词表）＋ 敏感关键词后
- *     紧跟的 opaque 片段；
+ *  2. 否则只擦片段，**三趟顺序固定为：认证/cookie 头取值 → 关键词 + opaque 片段 →
+ *     `key=value`/`key: value` 的敏感值**（复用 store 的唯一实现
+ *     {@link maskSensitiveKeyValueText}，与 URL/摘要面同一张词表）；
  *  3. 其余正文原样保留。
+ *
+ * **为什么是这个顺序**（2026-09-26 R22 V6 F2）：`key: value` 规则在第一个空格处收尾，
+ * 所以它跑在前面时会把"方案名 / 第二个关键词"先擦成 `****`，后面的关键词片段规则就
+ * 再也认不出 `<keyword> <credential>` 形态 ⇒ 真正的凭据留明文（`Authorization: Bearer
+ * <jwt>` → `Authorization: **** <jwt>`）。三趟都只**增加**掩码、从不还原，所以"先片段
+ * 后键值"只会比旧顺序更严，不会漏；认证头与 cookie 头还要在片段级之前**整段**擦掉
+ * 取值（见 {@link AUTH_HEADER_VALUE} / {@link COOKIE_HEADER_VALUE}）。
  *
  * 顺序不变（F-5）：**先掩码后截断**，`project` 仍然在 4 KB 上限之前跑 —— 跨截断点
  * 的凭据只会以 `****` 的形式出现。
  */
 function maskCredentialFragments(value: string): string {
-  const pairs = maskSensitiveKeyValueText(value)
-  return pairs.replace(KEYWORD_SPAN, (match, prefix: string, span: string) =>
+  const headers = value
+    .replace(AUTH_HEADER_VALUE, (match, key: string, scheme: string | undefined, span: string) =>
+      (scheme !== undefined || isCredentialSpan(span)) ? `${key}${MASK}` : match)
+    .replace(COOKIE_HEADER_VALUE, (_match: string, key: string) => `${key}${MASK}`)
+  const spans = headers.replace(KEYWORD_SPAN, (match, prefix: string, span: string) =>
     isCredentialSpan(span) ? `${prefix}${MASK}` : match)
+  return maskSensitiveKeyValueText(spans)
 }
 
 function maskString(value: string, project?: EvalValueProjection): string {

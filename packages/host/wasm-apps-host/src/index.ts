@@ -895,8 +895,9 @@ export function apply(ctx: Context, config: Config = {}): void {
                 return
               }
               // 写失败**必须**让用户看到：静默成功会让下一次调用仍然 403（"点了允许
-              // 还是不行"），而那看起来像 AI 坏了。读不动的记录文件（非 ENOENT）也
-              // 走这一支 —— 覆盖它会静默销毁其它账号/应用的授权。
+              // 还是不行"），而那看起来像 AI 坏了。读不动（非 ENOENT）或**内容不可信**
+              // （坏 JSON / 顶层非对象 / 版本或条目形状不符）的记录文件也走这一支 ——
+              // 覆盖它们会静默销毁其它账号/应用的授权（FIX-17）。
               warn(`pico-wasm-apps-host: persisting the app AI consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
               json(reply, 500, {
                 error: {

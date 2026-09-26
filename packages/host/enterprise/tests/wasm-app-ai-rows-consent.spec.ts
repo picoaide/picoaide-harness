@@ -12,7 +12,9 @@
  *     "走本机路由授权 ⇒ 工具立刻放行"就是这条接线唯一可被打坏的地方。
  *  3. **落盘与 fail-closed**：状态落在 `$DSH_HOME/wasm-apps-ai-rows-consent.json`
  *     （0600，原子写），重启仍在；文件坏掉/版本不对（含 v1 旧形状）⇒ **全未授权**
- *     （不是"全放行"）。
+ *     （不是"全放行"）。**损坏 ≠ 合法旧版本**（FIX-17 / V6 F3）：坏文件连写都拒绝
+ *     （500 `AI_ROWS_CONSENT_NOT_PERSISTED` + 原文件一字不动），只有可识别的 v1 才允许
+ *     就地升级 —— 深判据在 `tests/wasm-app-ai-rows-consent-corrupt-vs-legacy.spec.ts`。
  *
  * 授权维度（`user ⊕ server ⊕ app`）与"换账号 / 换服务端不得继承"另有专属判据：
  * `tests/wasm-app-ai-rows-consent-scope.spec.ts`（第十九轮审计 R19B-03）。
@@ -365,6 +367,21 @@ describe('授权文件不可信 ⇒ 全未授权（fail-closed，不是全放行
     }), { mode: 0o600 })
     const h = harness()
     expect((await readConsent(h, 'shared-notes')).body).toEqual({ app_id: 'shared-notes', enabled: false })
+  })
+
+  it('一条坏条目 ⇒ 授权路由回 500 并拒绝覆盖，原文件一字不动（FIX-17 / V6 F3）', async () => {
+    // 修前：这一次授权会以"空集合 + 本次一条"整份 rename 覆盖（别人的记录静默消失），
+    // 而本机路由回 200 —— 面板显示"已允许"，同一个文件里其它账号的开关却没了。
+    const damaged = JSON.stringify({
+      version: AI_ROWS_CONSENT_FORMAT_VERSION,
+      grants: [{ user: 'someone-else', server: SESSION.serverURL, app: 'shared-notes' }, 42],
+    })
+    await writeFile(consentFile(), damaged, { mode: 0o600 })
+    const h = harness()
+    const response = await authorize(h, 'shared-notes')
+    expect(response.code).toBe(500)
+    expect(response.body).toMatchObject({ error: { code: 'AI_ROWS_CONSENT_NOT_PERSISTED' } })
+    expect(await readFile(consentFile(), 'utf8')).toBe(damaged)
   })
 
   it('v1（机器级 `{version:1, apps:[…]}`）整份判为未授权，绝不猜读成"已授权"', async () => {

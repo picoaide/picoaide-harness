@@ -1622,6 +1622,14 @@ export const DEFAULT_GROUPS: ReadonlySet<string> = new Set(['navigate', 'interac
  *     全部浏览器工具时最自然的写法）**反而把七组全部打开**，是 fail-open 的反直觉形态。
  *     写错名字（`['naviagte']`）同样落到空集 = 全关：策略键写错必须关门，不能开门。
  *
+ * **装配面上的"键缺席"不由本函数兜**（2026-09-26 R22 V6 F1）：cordis 在 `apply` 之前按
+ * `Config` schema 归一化 config，而 Schemastery 会把**缺键的数组**物化成 `[]`（同一 schema
+ * 的标量字段缺键仍是 `undefined`）⇒ 生产装配（`profile.ts` 只注入 `appOriginScheme`）
+ * 走到这里时值是 `[]`，`value === undefined` 这条分支**在生产里不可达**。所以缺省必须写在
+ * schema 上（`index.ts` 的 `.default([...DEFAULT_GROUPS])`）；本函数保留 `undefined` 分支
+ * 只服务直接调用者（单测、内部构造）。改这里之前先看
+ * `tests/audit-r22-tool-groups-production.spec.ts`（生产形态的**注册面**判据）。
+ *
  * 注意 `browser_eval` 归 `write` 组 —— 它在用户**已登录**的分区里执行 AI 编写的 JS，
  * 所以"少写了 `write`"与"少写了 `read`"的后果不同，改这里的映射要一起看。
  * @param value - 配置里的 `toolGroups`（`undefined` = 键缺席）。

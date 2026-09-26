@@ -4,7 +4,7 @@
  * 这一层刻意不 import electron —— 上面的 import 本身就在证明"插件主体可在纯
  * Node 下加载"（profile 冒烟与单测都走这条路）。
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1097,6 +1097,26 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     const served = await chat(second, { messages: [{ role: 'user', content: 'hi' }], stream: false })
     expect(served.status).toBe(200)
     expect(calls).toHaveLength(1)
+  })
+
+  it('记录文件损坏 ⇒ 授权路由回 500 CONSENT_NOT_PERSISTED，且原文件一字不动（FIX-17）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-corrupt-'))
+    const file = join(dir, AI_CONSENT_FILE_NAME)
+    // 一条合法记录 + 一条坏记录：修前这一次 grant 会以"空集合 + 本次一条"整份覆盖，
+    // 把 alice 的那条静默销毁，而路由回 200（面板显示"已允许"）。
+    const damaged = JSON.stringify({
+      version: 2,
+      grants: [{ user: 'alice', server: ALICE.serverURL, app: 'demo' }, 42],
+    })
+    writeFileSync(file, damaged, { mode: 0o600 })
+
+    const h = fakeContext({ session: ALICE, aiRunner: runnerOf().runner })
+    apply(h.ctx, { userDataDir: dir })
+    const response = await consent(h, await proofHeaderOf(h), { app_id: 'demo', granted: true })
+
+    expect(response.status).toBe(500)
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'CONSENT_NOT_PERSISTED' } })
+    expect(readFileSync(file, 'utf8')).toBe(damaged)
   })
 
   it('授权按用户维度隔离：另一个用户名下的授权不生效', async () => {

@@ -38,20 +38,33 @@
  *    可能正好撞上它。
  *  - 落盘形状升 **`version: 2`**（`grants: [{user, server, app}]`）。**未知版本一律当作
  *    全未授权**：v1 的 `{version: 1, apps: [...]}` 是机器级记录，把它的内容读成"已授权"
- *    正是本条要修的方向。升级后第一次授权会把文件就地改写为 v2（v1 记录就此作废）。
+ *    正是本条要修的方向。**可识别的 v1 文件**在升级后第一次授权时被就地改写为 v2
+ *    （v1 记录就此作废）；**不可信的内容**（坏 JSON / 形状不符）则连写都拒绝（见下节）。
  *  - 授权/撤销只影响**当前这一段作用域**：A 的记录留在文件里（A 回来仍在），B 看不到它。
+ *
+ * ## 损坏 ≠ 合法旧版本（2026-09-26，第二十二轮复审 FIX-17 / V6 F3）
+ *
+ * `version: 1 → 2` 的升级路径要求"读到内容但版本不是 2"时**允许就地改写**（否则 v1
+ * 用户永远无法重新授权）。但这条路径**不得**把"文件坏了"一起收进去：截断 JSON /
+ * 顶层非对象 / 某一条记录不是对象 / `version` 字段类型不对，都不是"旧版本"，而是
+ * **内容不可信**。把后者也当升级路径 = 读面回 false、下一次 `setEnabled` 以"空集合 +
+ * 本次一条"整份 rename 覆盖 —— **同一份文件里其它账号/应用的记录静默消失**（本机路由
+ * 还收到成功，面板显示"已允许"而别人的开关没了）。{@link classifyAiRowsConsent} 把
+ * 这两档分开，`load()` 据此决定 `writable`：只有**可识别的旧版本**（`version: 1` 且
+ * v1 形状完整）才允许就地改写。
  *
  * ## 三条纪律（与 `wasm-apps-host/src/ai-authorization.ts` 同款）
  *
  *  1. **fail-closed**：文件读不出来 / 形状不符 / 作用域拿不到 ⇒ 一律当作**没有任何应用
  *     被授权**。反过来（读失败当成已授权）等于"把磁盘故障变成静默放行"。
  *  2. **写失败要报**：`setEnabled` 写不进去时抛给调用方 —— 静默吞掉会让用户看到
- *     "已允许"而闸门仍然拒绝。**读失败（除 ENOENT）同样归入这一条**（R21 B2-R21-02）：
- *     记录文件读不动（另一个 uid 拥有 / EIO / 杀软锁住）而它所在的**目录仍可写**时，
- *     `rename(2)` 只需要目录写权限 ⇒ 一次授权就会把文件里其余账号/应用的记录**整份
- *     覆盖掉**，而本机路由收到的是成功（面板显示"已允许"，别人的开关静默消失）。
- *     只有 `ENOENT`（从来没人授权过）算首次运行、才允许建文件；其余 errno 一律拒绝写
- *     并抛 {@link AiRowsConsentReadError}（路由据此回 500 `AI_ROWS_CONSENT_NOT_PERSISTED`）。
+ *     "已允许"而闸门仍然拒绝。**读不动或内容不可信**（除 ENOENT）同样归入这一条
+ *     （R21 B2-R21-02 + FIX-17）：记录文件读不动（另一个 uid 拥有 / EIO / 杀软锁住）
+ *     或**根本不是一份可识别的记录**，而它所在的**目录仍可写**时，`rename(2)` 只需要
+ *     目录写权限 ⇒ 一次授权就会把文件里其余账号/应用的记录**整份覆盖掉**，而本机路由
+ *     收到的是成功（面板显示"已允许"，别人的开关静默消失）。只有 `ENOENT`（从来没人
+ *     授权过）算首次运行、才允许建文件；其余一律拒绝写并抛
+ *     {@link AiRowsConsentReadError}（路由据此回 500 `AI_ROWS_CONSENT_NOT_PERSISTED`）。
  *  3. **每次调用都重新读文件、重新解析作用域**：这是"用户点授权 → 下一次工具调用立刻
  *     生效"与"换了账号立刻失效"这两条判据的唯一实现（缓存会让撤销/换账号延迟到重启）。
  *     文件很小（一条 ≈ 80 字节）。
@@ -68,6 +81,7 @@
  * @module @picoaide/dsh-enterprise/wasm-apps-ai-rows-consent
  */
 
+import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
@@ -162,13 +176,19 @@ export function isAiRowsConsentScopeError(cause: unknown): cause is AiRowsConsen
 }
 
 /**
- * 授权文件**读不动**（存在、但不是 ENOENT 的读失败）时的写面拒绝（R21 B2-R21-02）。
+ * 授权文件**读不动或内容不可信**时的写面拒绝（R21 B2-R21-02 + FIX-17）。
+ *
+ * 两档共用这一个类型（不是两套错误：调用方对它们的处置完全一致 —— 拒绝覆盖 + 回 500）：
+ *  - **读不动**：文件存在、但不是 ENOENT 的读失败；
+ *  - **内容不可信**：读到了内容，但形状不是任何已知格式（解析失败 / 顶层非对象 /
+ *    版本字段非整数 / 不认识的版本 / 记录条目坏）。与"可识别的旧版本"的差别见
+ *    {@link classifyAiRowsConsent}。
  *
  * 为什么必须单独存在：`load()` 的 fail-closed 是"读不出来 ⇒ 当作未授权"，但**写面**
  * 不能沿用这个空集合 —— 记录文件可能被另一个 uid 拥有 / EIO / 杀软锁住，而它所在的
  * **目录仍可写**（`rename(2)` 只需要目录写权限）。此时一次 `setEnabled` 就会把文件里
  * 其余账号/应用的授权**整份覆盖掉**，而本机路由收到的是成功。只有 `ENOENT`（从来没人
- * 授权过）才允许建文件；其余 errno 一律拒绝写并如实报错（路由 → 500
+ * 授权过）才允许建文件；其余一律拒绝写并如实报错（路由 → 500
  * `AI_ROWS_CONSENT_NOT_PERSISTED`）。
  * @param message - 诊断文案（面向上游日志，不是用户文案）。
  */
@@ -201,37 +221,130 @@ export function defaultAiRowsConsentPath(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
+ * 一次解析的结局：**当前版本** / **可就地升级的旧版本** / **内容不可信**。
+ *
+ * 为什么必须三档而不是"键集合或 null"：`null` 一个值同时表示"JSON 坏了"与"这是 v1
+ * 旧形状"，而写面对两者要做**相反**的事 —— 前者拒绝写（绝不整份覆盖），后者允许就地
+ * 改写成当前版本（升级路径）。合并成一档就是 FIX-17 / V6 F3：任何损坏都变成"整份作废 +
+ * 下一次写整份覆盖"，把文件里其余账号/应用的记录静默销毁。
+ *
+ * 判定规则（{@link classifyAiRowsConsent} 是唯一实现）：
+ *  - `current`：`version` 逐字等于 {@link AI_ROWS_CONSENT_FORMAT_VERSION} 且每条记录合法；
+ *  - `legacy`：`version` 是**已知旧版本号**（见 {@link AI_ROWS_CONSENT_LEGACY_VERSIONS}）
+ *    且该版本的形状可识别 —— 这是有意的升级路径，允许就地改写；
+ *  - `corrupt`：其余全部（JSON 解析失败 / 顶层非对象 / 版本字段缺失或非整数 /
+ *    不认识的版本号 / 记录条目坏 / 字段类型错 / 空段）。
+ */
+export type AiRowsConsentVerdict =
+  | { readonly kind: 'current', readonly keys: Set<string> }
+  | { readonly kind: 'legacy', readonly version: number }
+  | { readonly kind: 'corrupt', readonly reason: string }
+
+/**
+ * 认识的**旧**版本号（只有它们才有"就地升级"这条路）。
+ *
+ * 没有登记在这里的版本号一律按 {@link AiRowsConsentVerdict} 的 `corrupt` 处理：更新版本
+ * 写的文件被旧客户端覆盖会销毁更新的记录，而本模块**不认识**那个形状（不能假装读得懂）。
+ * 运维出路是删除该文件（代价 = 重新授权一次），方向安全。
+ */
+export const AI_ROWS_CONSENT_LEGACY_VERSIONS: ReadonlySet<number> = new Set([1])
+
+/**
+ * v1 形状是否可识别（`{version: 1, apps: [app_id]}`）。
+ *
+ * v1 是**机器级**记录，因此它的内容永远不会被读成"已授权"（那正是 R19B-03 要修的方向）；
+ * 这里只判断"能不能认出这是一份完整的 v1 记录"。认不出来（例如 `apps` 不是数组、某一条
+ * 不是字符串）就不是"旧版本"，而是坏文件 ⇒ 拒绝写。
+ * @param apps - 候选 `apps` 字段。
+ * @returns true = 形状可识别的 v1 记录。
+ */
+function isRecognizableV1Apps(apps: unknown): boolean {
+  if (!Array.isArray(apps)) return false
+  for (const entry of apps) {
+    if (typeof entry !== 'string') return false
+    if (entry.trim() === '' || hasNul(entry)) return false
+  }
+  return true
+}
+
+/**
+ * 当前版本的形状校验（失败给出**诊断原因**而不是 `null`：调用方要区分"坏"与"旧"）。
+ * @param grants - 候选 `grants` 字段。
+ * @returns 键集合，或不可信的原因（面向上游日志，不含记录内容）。
+ */
+function readCurrentGrants(grants: unknown): { readonly keys: Set<string> } | { readonly reason: string } {
+  if (!Array.isArray(grants)) return { reason: 'the grants field is not an array' }
+  const keys = new Set<string>()
+  for (const [index, entry] of grants.entries()) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { reason: `grants[${String(index)}] is not an object` }
+    }
+    const candidate = entry as { user?: unknown, server?: unknown, app?: unknown }
+    if (typeof candidate.user !== 'string' || typeof candidate.server !== 'string' || typeof candidate.app !== 'string') {
+      return { reason: `grants[${String(index)}] does not carry string user/server/app fields` }
+    }
+    const key = aiRowsConsentKey({ user: candidate.user, server: candidate.server }, candidate.app)
+    // 空段 / 纯空白段 / 含 NUL 的段 ⇒ 整份作废（与"任一段缺失即不匹配"同一条口径）。
+    if (key === null) return { reason: `grants[${String(index)}] has an empty or separator-bearing field` }
+    keys.add(key)
+  }
+  return { keys }
+}
+
+/**
+ * 判定文件内容属于**当前版本 / 可升级的旧版本 / 内容不可信**（唯一实现）。
+ *
+ * 顺序即语义：先排除"根本不是这份文件的形状"（解析失败、顶层非对象、版本字段非整数），
+ * 再按版本号分派。**当前版本但某一条坏掉**同样进 `corrupt` —— 静默跳过坏条目会让一条
+ * 被篡改的记录变成"其余授权仍然有效"的假象。
+ * @param text - 文件原文。
+ * @returns 三档判定（`corrupt` 附带不含记录内容的诊断原因）。
+ */
+export function classifyAiRowsConsent(text: string): AiRowsConsentVerdict {
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    return { kind: 'corrupt', reason: 'the file is not valid JSON' }
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { kind: 'corrupt', reason: 'the top level is not a JSON object' }
+  }
+  const row = payload as { version?: unknown, grants?: unknown, apps?: unknown }
+  // 版本字段必须是整数：缺失 / 字符串 / null / 小数都**不是**"旧版本"，而是不可信内容。
+  if (typeof row.version !== 'number' || !Number.isInteger(row.version)) {
+    return { kind: 'corrupt', reason: 'the version field is missing or not an integer' }
+  }
+  if (row.version === AI_ROWS_CONSENT_FORMAT_VERSION) {
+    const current = readCurrentGrants(row.grants)
+    return 'keys' in current ? { kind: 'current', keys: current.keys } : { kind: 'corrupt', reason: current.reason }
+  }
+  if (AI_ROWS_CONSENT_LEGACY_VERSIONS.has(row.version)) {
+    // 版本号认识但**形状认不出来**（半写、被改坏）⇒ 同样是不可信内容，不是升级路径。
+    if (row.version === 1 && !isRecognizableV1Apps(row.apps)) {
+      return { kind: 'corrupt', reason: 'a version 1 record does not carry a recognizable apps array' }
+    }
+    return { kind: 'legacy', version: row.version }
+  }
+  return { kind: 'corrupt', reason: `version ${String(row.version)} is not a known record format` }
+}
+
+/**
  * 解析授权文件（**严格**：任何一条不符即整份作废）。
  *
  * 为什么整份作废而不是跳过坏条目：这份文件是"AI 能读哪些应用的数据"的白名单，
  * 静默跳过会让一条被篡改/损坏的记录变成"其余授权仍然有效"的假象；整份作废的代价是
  * 重新授权一次，方向安全。
+ *
+ * 本函数是 {@link classifyAiRowsConsent} 的**当前版本视图**（只有 `current` 才有键集合，
+ * `legacy` 与 `corrupt` 都回 `null`）。**写面不要用它**：它抹掉了"旧版本"与"坏文件"的
+ * 差别，而写面对这两者要做相反的事（见 {@link AiRowsConsentVerdict}）。
  * @param text - 文件原文。
  * @returns 已授权的记录键集合（{@link aiRowsConsentKey} 构造）；形状不符 ⇒ `null`。
  */
 export function parseAiRowsConsent(text: string): Set<string> | null {
-  let payload: unknown
-  try {
-    payload = JSON.parse(text)
-  } catch {
-    return null
-  }
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null
-  const row = payload as { version?: unknown, grants?: unknown }
-  // 版本必须**逐字**等于当前版本：v1（机器级）以及任何未来的形状都当作"全未授权"。
-  if (row.version !== AI_ROWS_CONSENT_FORMAT_VERSION) return null
-  if (!Array.isArray(row.grants)) return null
-  const keys = new Set<string>()
-  for (const entry of row.grants) {
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return null
-    const candidate = entry as { user?: unknown, server?: unknown, app?: unknown }
-    if (typeof candidate.user !== 'string' || typeof candidate.server !== 'string' || typeof candidate.app !== 'string') return null
-    const key = aiRowsConsentKey({ user: candidate.user, server: candidate.server }, candidate.app)
-    // 空段 / 纯空白段 ⇒ 整份作废（与"任一段缺失即不匹配"同一条口径）。
-    if (key === null) return null
-    keys.add(key)
-  }
-  return keys
+  const verdict = classifyAiRowsConsent(text)
+  return verdict.kind === 'current' ? verdict.keys : null
 }
 
 /**
@@ -277,8 +390,9 @@ export interface AiRowsConsentStore {
    *
    * 拿不到作用域（未登录 / 缺用户名 / 缺服务端地址 / 段内含 NUL）⇒ 拒绝并抛
    * {@link AiRowsConsentScopeError}（调用方据此回 401，绝不落一条陌生记录）；
-   * 记录文件读不动（非 ENOENT）⇒ 拒绝并抛 {@link AiRowsConsentReadError}
-   * （**绝不**把读不出来的文件整份覆盖掉，调用方据此回 500）。
+   * 记录文件读不动（非 ENOENT）或**内容不可信**（形状不是任何已知格式，见
+   * {@link classifyAiRowsConsent}）⇒ 拒绝并抛 {@link AiRowsConsentReadError}
+   * （**绝不**把这样的文件整份覆盖掉，调用方据此回 500）。
    * @param appId - 应用标识。
    * @param enabled - true = 允许，false = 撤销。
    */
@@ -288,16 +402,16 @@ export interface AiRowsConsentStore {
 /**
  * 一次 `load()` 的结局。
  *
- * `writable === false` = 文件存在但**读不动**（非 ENOENT）⇒ 读面按未授权处理，写面
- * 必须拒绝（{@link AiRowsConsentReadError}）——**读到内容但形状/版本不符**不在此列：
- * 那是可以就地改写的旧格式/坏文件（v1 → v2 的升级路径就靠它）。
+ * `writable === false` = 内容**不可信**（文件读不动，或读到内容但形状不是任何已知格式）
+ * ⇒ 读面按未授权处理，写面必须拒绝（{@link AiRowsConsentReadError}）。
+ *
+ * **可识别的旧格式（v1）不在此列**：它的内容同样不被当成授权，但它是有意的升级路径，
+ * 下一次写就地改写成当前版本，所以 `writable === true`（见 {@link classifyAiRowsConsent}）。
  */
-interface ConsentLoad {
-  /** 解析出的键集合（读失败/形状不符 ⇒ 空集合）。 */
-  readonly keys: Set<string>
-  /** 是否可以把这次的结果写回去（只有"读不动"为 false）。 */
-  readonly writable: boolean
-}
+type ConsentLoad =
+  | { readonly keys: Set<string>, readonly writable: true }
+  /** `blocked` = 进 {@link AiRowsConsentReadError} 的完整诊断（构造点只有 {@link load}）。 */
+  | { readonly keys: Set<string>, readonly writable: false, readonly blocked: string }
 
 /** {@link createAiRowsConsentStore} 的构造参数。 */
 export interface AiRowsConsentStoreOptions {
@@ -322,9 +436,16 @@ export interface AiRowsConsentStoreOptions {
 /**
  * 构造授权记录。
  *
- * 并发写安全：读-改-写整段串行化（两次并发 `setEnabled` 不得互相覆盖），
+ * 并发写安全（**本实例内**）：读-改-写整段串行化（两次并发 `setEnabled` 不得互相覆盖），
  * 落盘走"同目录临时文件 + rename"（半个文件被读到不会变成一份**有效**记录 ——
  * 它要么是旧内容，要么是新内容，要么解析失败 ⇒ fail-closed 到"全未授权"）。
+ * 临时文件名带随机后缀，因此**同进程的另一个 store 实例**不会踩到同一份临时文件。
+ *
+ * **认账的缺口（FIX-17②，DEFERRED）**：互斥只覆盖本实例的 `tail` 链。**两个 store
+ * 实例**（同进程两份 / 两个进程 / 两个渠道客户端共享同一数据根）各自读到旧快照再整份
+ * 覆盖时，仍会**丢更新**（后写者赢，先写者的记录消失）。上游 `@deepseek-ai/dsh-atomic-write`
+ * 的 `withFileLock` 正是为这一档提供的；本包尚未接入（理由与前提见
+ * `temp/r21/fix-17/REPORT.md` 的 ② 节）。
  * @param options - 记录文件、作用域来源与诊断出口。
  * @returns 授权记录实现。
  */
@@ -332,10 +453,8 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
   const warn = options.warn ?? ((): void => {})
   /** 内存形态的当前集合（`file === undefined` 时是真源；有文件时只是写序列化缓冲）。 */
   let memory = new Set<string>()
-  /** 写串行化：并发 setEnabled 不得互相覆盖（读-改-写必须原子成一段）。 */
+  /** 写串行化：**本实例内**并发 setEnabled 不得互相覆盖（读-改-写必须原子成一段）。 */
   let tail: Promise<void> = Promise.resolve()
-  /** 临时文件名去重（同进程内两次写不能撞名）。 */
-  let writes = 0
 
   /**
    * 当前作用域（唯一解析点）：provider 抛错 = 拿不到（fail-closed + 留痕）。
@@ -371,23 +490,44 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
       // 与"没人授权"长得一样。**同时把写面也关掉**：读不动的文件不得被整份覆盖
       // （见 {@link AiRowsConsentReadError}）。
       warn(`pico-wasm-apps: reading the AI rows consent file failed (${cause instanceof Error ? cause.message : String(cause)}); treating every app as unauthorized and refusing writes`)
-      return { keys: new Set(), writable: false }
+      return {
+        keys: new Set(),
+        writable: false,
+        blocked: `pico-wasm-apps: the AI rows consent file at ${String(options.file)} could not be read; refusing to overwrite it`,
+      }
     }
-    const parsed = parseAiRowsConsent(text)
-    if (parsed === null) {
-      // 文件**读到了**（只是形状不符 / 版本不符）⇒ 允许就地改写成当前版本，否则 v1
-      // 用户升级后永远无法重新授权。方向安全：这一份内容本来就不被当成任何授权。
-      warn(`pico-wasm-apps: the AI rows consent file at ${options.file} is not a version ${String(AI_ROWS_CONSENT_FORMAT_VERSION)} record; treating every app as unauthorized`)
+    const verdict = classifyAiRowsConsent(text)
+    if (verdict.kind === 'corrupt') {
+      // 内容**不可信**（解析失败 / 顶层非对象 / 版本字段非整数 / 不认识的版本 / 条目坏）。
+      // 与"读不动"同等对待：读面 fail-closed，写面拒绝。**绝不能走升级路径** ——
+      // 那会让下一次 setEnabled 以"空集合 + 本次一条"整份覆盖，把文件里其它账号/应用的
+      // 记录静默销毁（FIX-17 / V6 F3）；这一份内容本来也不被当成任何授权。
+      warn(`pico-wasm-apps: the AI rows consent file at ${options.file} is not a usable record (${verdict.reason}); treating every app as unauthorized and refusing writes`)
+      return {
+        keys: new Set(),
+        writable: false,
+        blocked: `pico-wasm-apps: the AI rows consent file at ${String(options.file)} is not a usable record (${verdict.reason}); refusing to overwrite it`,
+      }
+    }
+    if (verdict.kind === 'legacy') {
+      // **可识别的旧格式**（v1 机器级）⇒ 允许就地改写成当前版本，否则 v1 用户升级后
+      // 永远无法重新授权。方向安全：这一份内容本来就不被当成任何授权。
+      warn(`pico-wasm-apps: the AI rows consent file at ${options.file} is a version ${String(verdict.version)} record; treating every app as unauthorized (the next write rewrites it as version ${String(AI_ROWS_CONSENT_FORMAT_VERSION)})`)
       return { keys: new Set(), writable: true }
     }
-    return { keys: parsed, writable: true }
+    return { keys: verdict.keys, writable: true }
   }
 
   const persist = async (keys: Set<string>): Promise<void> => {
     memory = keys
     if (options.file === undefined) return
     const target = options.file
-    const temporary = `${target}.${String(process.pid)}.${String((writes += 1))}.tmp`
+    // 临时名必须**每次调用唯一**：此前是 `${target}.${pid}.${本实例的写计数}.tmp`，而计数
+    // 是**实例级**的 ⇒ 同一个进程里两个 store 实例的第一次写会拼出**逐字相同**的路径，
+    // 于是互相截断/抢 rename：一条写 ENOENT 失败、另一条可能把**半份内容**发布成正式
+    // 记录（实测：四个并发写全部报错，文件停在坏 JSON）。随机后缀与上游
+    // `writeFileAtomic` 同款（FIX-17②b）。
+    const temporary = `${target}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`
     await mkdir(dirname(target), { recursive: true, mode: 0o700 })
     try {
       await writeFile(temporary, serializeAiRowsConsent(keys), { mode: 0o600 })
@@ -404,10 +544,8 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
     const task = tail.then(async () => {
       const loaded = await load()
       if (!loaded.writable) {
-        // 读不动的文件 + 可写的目录 = 下一次 rename 会静默销毁其它账号/应用的记录。
-        throw new AiRowsConsentReadError(
-          `pico-wasm-apps: the AI rows consent file at ${String(options.file)} could not be read; refusing to overwrite it`,
-        )
+        // 读不动或内容不可信的文件 + 可写的目录 = 下一次 rename 会静默销毁其它账号/应用的记录。
+        throw new AiRowsConsentReadError(loaded.blocked)
       }
       change(loaded.keys)
       await persist(loaded.keys)

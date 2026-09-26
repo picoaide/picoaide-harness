@@ -7,8 +7,12 @@
  *  - 三段**任一段缺失或含 NUL** ⇒ 读面 false、写面拒绝，且一个字都不落盘；
  *  - 落盘后**重新构造**一个记录实例仍然记得（重启不重问）；
  *  - 撤销 ⇒ 立刻不再授权（同进程、无需重启）；
- *  - 旧格式（v1，没有服务端段）/损坏 ⇒ 整份作废（**不**猜读成"已授权"），但
+ *  - 旧格式（v1，没有服务端段）⇒ 整份作废（**不**猜读成"已授权"），但
  *    允许就地改写（否则 v1 用户永远无法重新授权）；
+ *  - **损坏 ≠ 合法旧版本**（FIX-17 / V6 F3）：截断 JSON / 顶层非对象 / 单条坏记录 /
+ *    `version` 字段类型错 / 不认识的版本 / 认不出的 v1 形状 ⇒ **拒绝写**（抛
+ *    `AiConsentReadError`，路由回 500 `CONSENT_NOT_PERSISTED`）且**原文件字节不变**，
+ *    只有"可识别的旧版本"才允许就地改写（否则第一次写就把别的账号的记录静默销毁）；
  *  - 读失败/损坏 ⇒ fail-closed（当成未授权）且**留一条 warn**（"磁盘坏了"不能长得像
  *    "没人用过"）；
  *  - **读不动（非 ENOENT）的文件不得被下一次写整份覆盖**（R21 B2-R21-02 / B2-R21-05）：
@@ -22,8 +26,14 @@
  *    目标被替换且 grant 正常 resolve）；
  *  - `serializeAiConsent` 回到"静默丢弃解析不出的键" ⇒ 含 NUL 那组红；
  *  - `parseAiConsent` 容忍 v1 ⇒「v1 = 未授权」红；
+ *  - `classifyAiConsent` 把 `corrupt` 折回 `legacy`（= 退回 FIX-17 修前的"任何形状
+ *    不符都当升级路径"）⇒「损坏 ⇒ 拒绝写 + 原文件字节不变」整组红（grant 会 resolve、
+ *    文件被整份覆盖）；
+ *  - `classifyAiConsent` 把 `legacy` 折进 `corrupt`（= 把升级路径一并禁掉）⇒
+ *    「v1 就地升级」那两条红（grant 抛 AiConsentReadError）；
  *  - `load()` 在读失败时不 warn ⇒ warn 用例红。
  */
+import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -35,6 +45,7 @@ import {
   AiConsentReadError,
   AiConsentScopeError,
   aiConsentKey,
+  classifyAiConsent,
   createAiChatAuthorization,
   isAiConsentReadError,
   isAiConsentScopeError,
@@ -195,7 +206,8 @@ describe('授权记录（文件形态）', () => {
     writeFileSync(file, '{ this is not json', 'utf8')
     const store = createAiChatAuthorization({ file, warn: message => warnings.push(message) })
     expect(await store.isGranted('alice', 'my-notes', SERVER)).toBe(false)
-    expect(warnings.join('\n')).toMatch(/not a version 2 record/u)
+    expect(warnings.join('\n')).toMatch(/not a usable record \(the file is not valid JSON\)/u)
+    expect(warnings.join('\n')).toMatch(/refusing writes/u)
   })
 
   it('并发 grant 不互相覆盖（读-改-写串行化）', async () => {
@@ -318,5 +330,147 @@ describe('读不动的记录文件：读面 fail-closed，写面拒绝覆盖', (
     const after = createAiChatAuthorization({ file })
     expect(await after.isGranted('alice', 'keep-me', SERVER)).toBe(true)
     expect(await after.isGranted('bob', 'keep-me-too', SERVER)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX-17 / V6 F3：损坏 ≠ 合法旧版本
+//
+// 修前：`parseAiConsent` 只回 "键集合 or null"，而 `load()` 把 `null` 一律当作
+// "旧格式 ⇒ 可写" ⇒ 截断 JSON / 单条坏记录 / 顶层非对象 / version 类型错 都会让下一次
+// `grant` 以"空集合 + 本次一条"整份 rename 覆盖：**同一文件里其它账号/应用的合法记录
+// 静默消失**，而调用方收到成功。
+//
+// 修后：只有"可识别的旧版本"（version: 1 且 v1 形状完整）才允许就地改写；其余一律
+// `AiConsentReadError`（路由 500 CONSENT_NOT_PERSISTED）+ **原文件字节不变**。
+// ---------------------------------------------------------------------------
+
+/** 内容摘要（判"原文件一字未动"用 sha256，不用 mtime/size 这类弱判据）。 */
+const digestOf = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex')
+
+describe('损坏 ≠ 合法旧版本（FIX-17 / V6 F3）', () => {
+  /** 一份**合法 v2 记录**的落盘文本（alice + bob 两条，代表"别人的记录"）。 */
+  const seededText = (): string => serializeAiConsent(new Set([key('alice', 'my-notes'), key('bob', 'my-notes')]))
+
+  /** 四种"形状不符"的形态（判据逐条要求：拒绝写 + 原文件字节不变）。 */
+  const corruptShapes: Array<[label: string, text: string]> = [
+    ['截断 JSON', '{"version":2,"grants":[{"user":"alice"'],
+    ['顶层非对象', '[]'],
+    [
+      '单条坏记录',
+      JSON.stringify({
+        version: AI_CONSENT_FORMAT_VERSION,
+        grants: [{ user: 'alice', server: SERVER, app: 'my-notes' }, 42],
+      }),
+    ],
+    ['version 字段类型错', JSON.stringify({ version: String(AI_CONSENT_FORMAT_VERSION), grants: [] })],
+  ]
+
+  it.each(corruptShapes)('%s ⇒ 拒绝写 + 原文件字节不变 + 读面可判因（不是静默 false）', async (label, text) => {
+    const file = temporaryFile()
+    writeFileSync(file, text, { mode: 0o600 })
+    const before = digestOf(file)
+    const warnings: string[] = []
+    const store = createAiChatAuthorization({ file, warn: message => warnings.push(message) })
+
+    // 读面：fail-closed（不是"已授权"）。
+    expect(await store.isGranted('alice', 'my-notes', SERVER), label).toBe(false)
+
+    // 写面：拒绝，且是**可判因**的类型（本机路由据此回 500 CONSENT_NOT_PERSISTED）。
+    const rejection = await store.grant('carol', 'my-notes', SERVER).then(() => null, (cause: unknown) => cause)
+    expect(isAiConsentReadError(rejection), label).toBe(true)
+    expect(rejection).toBeInstanceOf(AiConsentReadError)
+    // 撤销走的是同一条读-改-写 ⇒ 同样不得覆盖。
+    await expect(store.revoke('alice', 'my-notes', SERVER), label).rejects.toBeInstanceOf(AiConsentReadError)
+
+    // **原文件一字未动**（sha256 相同）：其它账号/应用的记录不可能被静默销毁。
+    expect(digestOf(file), label).toBe(before)
+    // 读面不是"静默 false"：留了一条可诊断的 warn，并点明"同时拒绝写"。
+    expect(warnings.join('\n'), label).toMatch(/not a usable record/u)
+    expect(warnings.join('\n'), label).toMatch(/refusing writes/u)
+  })
+
+  it('一份 v2 记录里有一条坏条目 ⇒ 拒绝写，同一文件里其它账号的**合法记录不消失**', async () => {
+    const file = temporaryFile()
+    // alice / carol 两条是**合法**记录，只有中间那条被改坏（人手编辑 / 半写 / 磁盘错误）。
+    const text = JSON.stringify({
+      version: AI_CONSENT_FORMAT_VERSION,
+      grants: [
+        { user: 'alice', server: SERVER, app: 'my-notes' },
+        { user: 'bob', server: SERVER, app: 42 },
+        { user: 'carol', server: SERVER, app: 'my-notes' },
+      ],
+    }, null, 2)
+    writeFileSync(file, text, { mode: 0o600 })
+    const store = createAiChatAuthorization({ file })
+    await expect(store.grant('dave', 'my-notes', SERVER)).rejects.toBeInstanceOf(AiConsentReadError)
+    // 字节级证据：carol 的合法记录还在（修前这里会被整份覆盖成 134B 的单条记录）。
+    expect(readFileSync(file, 'utf8')).toBe(text)
+    expect(readFileSync(file, 'utf8')).toContain('"carol"')
+  })
+
+  it('不认识的版本号（更高/更低）与"认不出的 v1 形状"都不是升级路径 ⇒ 拒绝写', async () => {
+    const shapes = [
+      JSON.stringify({ version: AI_CONSENT_FORMAT_VERSION + 1, grants: [] }),
+      JSON.stringify({ version: AI_CONSENT_FORMAT_VERSION - 2, grants: [] }),
+      // version = 1 但形状认不出来（缺 app 字段）⇒ 坏文件，不是"旧版本"。
+      JSON.stringify({ version: 1, grants: [{ user: 'alice' }] }),
+    ]
+    for (const text of shapes) {
+      const file = temporaryFile()
+      writeFileSync(file, text, { mode: 0o600 })
+      const before = digestOf(file)
+      const store = createAiChatAuthorization({ file })
+      await expect(store.grant('alice', 'my-notes', SERVER), text).rejects.toBeInstanceOf(AiConsentReadError)
+      expect(digestOf(file), text).toBe(before)
+    }
+  })
+
+  it('正：真实 v1 文件仍**就地升级**成 v2（升级路径没被误伤）', async () => {
+    const file = temporaryFile()
+    // 上一版真实写出的形状（v1 没有服务端段）——注意结尾换行与缩进都与历史产出同形。
+    const v1 = `${JSON.stringify({ version: 1, grants: [{ user: 'alice', app: 'my-notes' }] }, null, 2)}\n`
+    writeFileSync(file, v1, { mode: 0o600 })
+    const warnings: string[] = []
+    const store = createAiChatAuthorization({ file, warn: message => warnings.push(message) })
+
+    // 读面：v1 内容**不得**被读成"已授权"（没有服务端段）。
+    expect(await store.isGranted('alice', 'my-notes', SERVER)).toBe(false)
+    // 写面：可写（这就是"升级路径"），不抛错。
+    await store.grant('alice', 'my-notes', SERVER)
+    expect(await store.isGranted('alice', 'my-notes', SERVER)).toBe(true)
+
+    const document = JSON.parse(readFileSync(file, 'utf8')) as { version: number, grants: unknown[] }
+    expect(document.version).toBe(AI_CONSENT_FORMAT_VERSION)
+    expect(document.grants).toEqual([{ user: 'alice', server: SERVER, app: 'my-notes' }])
+    // 与"损坏"一侧的 warn **可区分**（运维据此判"这是升级"还是"文件坏了"）。
+    expect(warnings.join('\n')).toMatch(/is a version 1 record/u)
+    expect(warnings.join('\n')).not.toMatch(/refusing writes/u)
+  })
+
+  it('正：合法 v2 记录正常授权时，其它账号的记录一条不少（正常路径不丢数据）', async () => {
+    const file = temporaryFile()
+    writeFileSync(file, seededText(), { mode: 0o600 })
+    const store = createAiChatAuthorization({ file })
+    await store.grant('carol', 'other-app', SERVER)
+    const document = JSON.parse(readFileSync(file, 'utf8')) as { version: number, grants: Array<{ user: string }> }
+    expect(document.version).toBe(AI_CONSENT_FORMAT_VERSION)
+    expect(document.grants.map(grant => grant.user).sort()).toEqual(['alice', 'bob', 'carol'])
+  })
+
+  it('classifyAiConsent 是三档判定的唯一实现（parseAiConsent 只是它的当前版本视图）', () => {
+    const current = serializeAiConsent(new Set([key('alice', 'my-notes')]))
+    expect(classifyAiConsent(current).kind).toBe('current')
+    expect(classifyAiConsent(JSON.stringify({ version: 1, grants: [{ user: 'alice', app: 'my-notes' }] })).kind).toBe('legacy')
+    for (const text of ['nope', '[]', 'null', JSON.stringify({ grants: [] }), JSON.stringify({ version: 3, grants: [] })]) {
+      expect(classifyAiConsent(text).kind, text).toBe('corrupt')
+    }
+    // 两函数必须**同源**：current ⇒ 键集合，legacy/corrupt ⇒ null。
+    for (const text of [current, JSON.stringify({ version: 1, grants: [] }), 'nope']) {
+      const verdict = classifyAiConsent(text)
+      const parsed = parseAiConsent(text)
+      if (verdict.kind === 'current') expect(parsed).toEqual(verdict.keys)
+      else expect(parsed, text).toBeNull()
+    }
   })
 })

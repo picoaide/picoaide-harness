@@ -8,15 +8,18 @@
  * `41 passed / EXIT=0`——也就是说那组判据既不能证明修好了，也不能证明没修。
  * 本文件把三条失败面各钉一条：
  *
- *  1. **留痕**（B2-R21-03）：作用域解析抛错 / 读失败 / 版本不符三处 `warn` 都必须真的发；
- *  2. **读不动的文件不得被下一次写整份覆盖**（B2-R21-02 / B2-R21-05）：记录被吞 +
- *     写面如实报错 + 原文件一字未改（`ENOENT` 才允许建文件）；
+ *  1. **留痕**（B2-R21-03）：作用域解析抛错 / 读失败 / **旧版本** / **内容不可信**四处
+ *     `warn` 都必须真的发（FIX-17 起"旧版本"与"坏文件"必须可区分：前者可写、后者拒绝写）；
+ *  2. **读不动或内容不可信的文件不得被下一次写整份覆盖**（B2-R21-02 / B2-R21-05 / FIX-17）：
+ *     记录被吞 + 写面如实报错 + 原文件一字未改（`ENOENT` 才允许建文件）；
  *  3. **段内含 NUL ⇒ 写面拒绝，不能"报成功而落盘零记录"**（B2-R21-04）。
  *
  * ---- 变异验证（拆掉哪一处，哪条用例必红）----
- *   - 三处 `warn(...)` 任一删掉 ⇒ 第 1 组对应用例红；
+ *   - 四处 `warn(...)` 任一删掉 ⇒ 第 1 组对应用例红；
  *   - `load()` 把非 ENOENT 的读失败也当"空记录"并允许写 ⇒「链接/原文件被替换」与
  *     「写面如实报错」红（那正是 M10 的形态）；
+ *   - `classifyAiRowsConsent` 把 `corrupt` 折回 `legacy`（= 退回修前的"任何形状不符都
+ *     能就地改写"）⇒ 第 1 组的"内容不可信"与 `…-corrupt-vs-legacy.spec.ts` 整组红；
  *   - `serializeAiRowsConsent` 回到 `continue`（静默丢弃）⇒ 第 3 组红（`setEnabled` 会 resolve）；
  *   - `aiRowsConsentKey` 去掉 NUL 检查 ⇒ 第 3 组的"构造期拒绝"与"落盘零记录"红。
  */
@@ -34,6 +37,7 @@ import {
   createAiRowsConsentStore,
   isAiRowsConsentReadError,
   isAiRowsConsentScopeError,
+  parseAiRowsConsent,
   serializeAiRowsConsent,
 } from '../src/wasm-apps-ai-rows-consent.ts'
 import type { AiRowsConsentScope } from '../src/wasm-apps-ai-rows-consent.ts'
@@ -102,7 +106,23 @@ describe('失败留痕：三处 warn 各有一条断言（不是"存在性断言
     const sink = warnings()
     const store = createAiRowsConsentStore({ file, scope: () => SCOPE, warn: sink.warn })
     expect(await store.isEnabled('notes')).toBe(false)
-    expect(sink.messages.join('\n')).toMatch(new RegExp(`not a version ${String(AI_ROWS_CONSENT_FORMAT_VERSION)} record`, 'u'))
+    // FIX-17：**可识别的旧版本**与**坏文件**的 warn 必须可区分 —— 前者是升级路径
+    // （写得进去），后者拒绝写。"形状不符 ⇒ 一条 warn"这种笼统断言两种都放行。
+    expect(sink.messages.join('\n')).toMatch(/is a version 1 record/u)
+    expect(sink.messages.join('\n')).not.toMatch(/refusing writes/u)
+  })
+
+  it('内容不可信（坏文件）⇒ 留痕并点明"同时拒绝写"（FIX-17 / V6 F3）', async () => {
+    const file = temporaryFile()
+    writeFileSync(file, JSON.stringify({
+      version: AI_ROWS_CONSENT_FORMAT_VERSION,
+      grants: [{ user: 'alice', server: SCOPE.server, app: 'notes' }, 42],
+    }), { mode: 0o600 })
+    const sink = warnings()
+    const store = createAiRowsConsentStore({ file, scope: () => SCOPE, warn: sink.warn })
+    expect(await store.isEnabled('notes')).toBe(false)
+    expect(sink.messages.join('\n')).toMatch(/not a usable record/u)
+    expect(sink.messages.join('\n')).toMatch(/refusing writes/u)
   })
 
   it('一切正常时不留痕（防止"warn 恒发"这种假绿）', async () => {
@@ -234,5 +254,46 @@ describe('段内含 NUL：构造期就拒绝（此前写面 resolve、落盘零�
     const store = createAiRowsConsentStore({ file, scope: () => scope })
     await store.setEnabled('notes', true)
     expect(await store.isEnabled('notes')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. FIX-17②b：并发写者的**临时文件**不得互踩（与 F4 的"丢更新"是两件事）
+//
+// 修前临时名 = `${target}.${pid}.${本实例写计数}.tmp`，而计数是**实例级**的 ⇒ 同一个
+// 进程里两个 store 实例的第一次写会拼出逐字相同的路径：互相截断、抢 rename。实测形态
+// （temp/r21/fix-17/probe/f4-ent.spec.ts）：四个并发写**全部报错**，文件停在坏 JSON
+// （ENOENT + 三条"not a usable record"），四条授权一条都没落下。
+//
+// 修后：随机后缀（与上游 `writeFileAtomic` 同款）⇒ 并发写者各写各的临时文件。
+// **注意**：这一组不修 F4 本身（跨实例的读-改-写仍没有互斥 ⇒ 后写者赢），见报告 ②。
+// ---------------------------------------------------------------------------
+
+describe('并发写者的临时文件不得互踩（FIX-17②b）', () => {
+  it('把"可预测的临时路径"占住也不影响：两个实例的第一次写不撞名（修前 EISDIR）', async () => {
+    const file = temporaryFile()
+    // 修前两个实例的第一次写都用 `${file}.${pid}.1.tmp`。把它占成**同名目录**：
+    // 修前 `writeFile` 直接 EISDIR（用户看到"授权未能保存"500），修后随机后缀根本不碰它。
+    mkdirSync(`${file}.${String(process.pid)}.1.tmp`, { recursive: true })
+    const a = createAiRowsConsentStore({ file, scope: () => SCOPE })
+    const b = createAiRowsConsentStore({ file, scope: () => ({ user: 'bob', server: SCOPE.server }) })
+    await a.setEnabled('notes', true)
+    await b.setEnabled('notes', true)
+    expect(await a.isEnabled('notes')).toBe(true)
+    expect(await b.isEnabled('notes')).toBe(true)
+  })
+
+  it('两个实例并发写：不得有人报错，文件不得停在坏内容', async () => {
+    const file = temporaryFile()
+    const a = createAiRowsConsentStore({ file, scope: () => SCOPE })
+    const b = createAiRowsConsentStore({ file, scope: () => ({ user: 'bob', server: SCOPE.server }) })
+    const settled = await Promise.allSettled(
+      Array.from({ length: 8 }, (_, index) => (index % 2 === 0
+        ? a.setEnabled(`app-${String(index)}`, true)
+        : b.setEnabled(`app-${String(index)}`, true))),
+    )
+    expect(settled.filter(entry => entry.status === 'rejected').map(entry => String(entry.reason))).toEqual([])
+    // 文件必须是一份**可解析**的记录（修前这里会停在坏 JSON：临时文件被另一个写者截断）。
+    expect(parseAiRowsConsent(readFileSync(file, 'utf8'))).not.toBeNull()
   })
 })

@@ -35,7 +35,7 @@ import { BrowserRuntime } from './runtime.ts'
 import { BROWSER_SURFACE_SERVICE, createSurfaceRegistry, encodePartitionSegment, serverPartitionHash } from './surface.ts'
 import { TabPool } from './pool.ts'
 import { BrowserStore } from './store.ts'
-import { applyBrowserTools, parseToolGroups } from './tools.ts'
+import { DEFAULT_GROUPS, applyBrowserTools, parseToolGroups } from './tools.ts'
 import { browserOverlayHtml, browserShellHtml } from './shell-pages.ts'
 import { hostLocaleFrom, type HostLocale } from '@picoaide/dsh-host-locale'
 import type { CredentialResolver } from './types.ts'
@@ -105,8 +105,19 @@ export interface Config {
   /**
    * 启用的工具组白名单（**键缺席 = 七组全开**）。
    *
-   * **当前没有生产者**（同 {@link Config.evalEnabled}）。语义见 `tools.ts` 的
-   * `parseToolGroups`：只有键缺席才是全开，**显式空数组 = 全关**。
+   * **当前没有生产者**（同 {@link Config.evalEnabled}）：全仓唯一的装配点
+   * `packages/host/desktop/src/profile.ts` 给 `pico-browser` 行注入的 config **只**有
+   * `appOriginScheme`，而 patch 的 `config` 是整键替换 ⇒ 本键在生产形态里**一律缺席**。
+   * 语义见 `tools.ts` 的 `parseToolGroups`：键缺席 ⇒ 七组全开；**显式空数组 = 全关**。
+   *
+   * **schema 必须自己带缺省**（下面 `Config` schema 的 `.default([...DEFAULT_GROUPS])`）。
+   * Schemastery 会把**缺键的数组**物化成 `[]`（同一 schema 的标量字段缺键仍是
+   * `undefined`，只有数组/字典中招）—— 2026-09-26 R22 V6 复审的 P0 回归正是这样发生的：
+   * 缺 `.default()` 时生产配置落到 `[]` ⇒ `parseToolGroups` 判"全关" ⇒ 内置浏览器的
+   * **31 个工具一个都不注册**，而 system prompt 的 `tool:browser` 指引照旧宣称它们存在。
+   * 缺省**不能**改由调用点 `?? DEFAULT_GROUPS` 兜：那样"显式 `[]`"与"键缺席"又会被
+   * 混成一件事。判据 = `tests/audit-r22-tool-groups-production.spec.ts`（走真 schema /
+   * 真 cordis 的生产形态，不是只调 `parseToolGroups(undefined)`）。
    */
   toolGroups?: string[]
   /**
@@ -220,7 +231,10 @@ export const Config: z<Config> = z.object({
   screenshotQuality: z.number(),
   waitTimeoutMs: z.number(),
   downloadDir: z.string(),
-  toolGroups: z.array(z.string()),
+  // `.default(...)` 不是装饰：Schemastery 把**缺键的数组**物化成 `[]`（标量字段缺键
+  // 才是 `undefined`），而生产装配注入的 config 里根本没有这个键（见字段注释）。少了
+  // 它就等于"生产形态 = 全关"（2026-09-26 R22 V6 F1 的 P0 回归）。
+  toolGroups: z.array(z.string()).default([...DEFAULT_GROUPS]),
   credentialSites: z.dict(z.string()),
   appOriginScheme: z.string(),
 })
