@@ -4708,9 +4708,171 @@ const SHELL_GLOB_PATTERN = /[*?[\]]/u
  * 常量传播），标记词后紧跟的那一位就是目标。正则那一路保留，只作**文本面**兜底
  * （tokenizer 覆盖不到的正文，例如命令替换内部）。
  */
-const WRITE_REDIRECT_TARGET = /(?:^|[\s;&|(])(?:\d*>>?|&>|>\|)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)/gu
+const WRITE_REDIRECT_TARGET = /(?:^|[\s;&|(])(?:\d*>>?|\d*<>|&>|>\|)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)/gu
 /** 写命令词（目标是最后一个非旗标实参）；要扩面就加这里，并在 FIX-14/FIX-22 报告里写明边界。 */
 const WRITE_COMMAND_WORDS = new Set(['tee', 'cp', 'mv', 'install', 'rsync', 'ln'])
+/**
+ * **解释器内联脚本里的写操作**（R24 FIX-26 / X3-01① 的唯一实现）。
+ *
+ * ## 现场（第二十四轮 X3 泳道）
+ *
+ * `runtimeWrittenCarriers` 的两条取词路径都是 **shell 语法**（`>`/`>>` 重定向 +
+ * `tee`/`cp`/`mv`… 命令词），于是"写"换一种**同等常规**的写法就整族隐形：
+ *
+ * ```yaml
+ * - run: python3 -c "import base64,pathlib;
+ *          pathlib.Path('scripts/ci-brand-mask.sh').write_bytes(base64.b64decode('…'))"
+ * - run: bash scripts/ci-brand-mask.sh        # 执行的是被写进去的内容
+ * ```
+ *
+ * `check-integration-tests` 照印 `VERDICT PASS … 真实接线 0 处`、`check-workflows EXIT=0`，
+ * 而 tripwire 证明运行期真的执行了端到端入口。三种解释器形态（`python3 -c` / `node -e` /
+ * 变量间接）实测全绿。
+ *
+ * ## 判据（**可判定子集**：写目标是字面量）
+ *
+ * 只认"**第一实参是字面量字符串**"的写调用 —— 路径由变量拼出来的、经 `join()` 计算的、
+ * 或载荷本身不透明的，这里认不出来（那属于"运行期生成 + 不透明编码"的固有边界，
+ * 由脚本位那一格与 `CI_SURFACE_GENERATED_SCRIPT_ACK` 登记制兜）。认出**之后**仍然要过
+ * `resolveCarrierPath()`：`/tmp/x`、仓外路径、`$GITHUB_ENV` 天然不进集合。
+ *
+ * 覆盖面（每条对应一种实测/等价写法）：
+ *   · Python：`Path('X').write_text/write_bytes/open/touch`、`open('X','w…')`、
+ *     `shutil.copy*` / `shutil.move(_, 'X')`、`os.replace/rename(_, 'X')`；
+ *   · JS 家族：`writeFileSync/writeFile/appendFileSync/appendFile/createWriteStream/
+ *     truncateSync('X', …)`；
+ *   · Perl：`open(FH, '>', 'X')` / `open(FH, ">X")`。
+ *
+ * 不按语言分派（内联文本的语言标签只区分 shell/py/js，`perl -e` 落在 js 上）——
+ * 这些调用名足够特异，混用不会互相误伤。
+ * @type {Array<{ re: RegExp, group: number }>}
+ */
+const INLINE_SCRIPT_WRITE_PATTERNS = [
+  // JS 家族：第一实参是字面量的写调用。
+  {
+    re: /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|truncateSync)\s*\(\s*(['"`])([^'"`\n]+)\1/gu,
+    group: 2,
+  },
+  // Python pathlib：路径在被调方法的**宿主**上。
+  {
+    re: /\bPath\s*\(\s*(['"`])([^'"`\n]+)\1\s*\)\s*\.\s*(?:write_text|write_bytes|open|touch|unlink)\s*\(/gu,
+    group: 2,
+  },
+  // Python 内建 open：mode 必须以写标志开头（`o`pen 第三参 / 关键字参数不在此列，
+  // 宁漏不误 —— 只读 `open('X')` 绝不能算写）。
+  {
+    re: /\bopen\s*\(\s*(['"`])([^'"`\n]+)\1\s*,\s*(['"`])([wax+][^'"`\n]*)\3/gu,
+    group: 2,
+  },
+  // Python shutil / os：目标在**第二**实参。
+  {
+    re: /\b(?:shutil\s*\.\s*(?:copy|copy2|copyfile|move)|os\s*\.\s*(?:replace|rename))\s*\(\s*[^,()\n]+,\s*(['"`])([^'"`\n]+)\1/gu,
+    group: 2,
+  },
+  // Perl：`open(FH, '>', 'X')`（目标在第三实参）。
+  {
+    re: /\bopen\s*\(\s*[^,)\n]+,\s*(['"])(?:>>?|\+>?)\1\s*,\s*(['"])([^'"]+)\2/gu,
+    group: 3,
+  },
+  // Perl：`open(FH, '>X')`（模式与路径同一个串）。
+  {
+    re: /\bopen\s*\(\s*[^,)\n]+,\s*(['"])(?:>>?|\+>?)([^'"]+)\1/gu,
+    group: 2,
+  },
+]
+/**
+ * 一段**内联语言源码** → 它写过的字面量路径（去重，保持出现顺序）。
+ *
+ * @param source - `python3 -c '<源码>'` / `node -e '<源码>'` 的源码文本。
+ * @returns 字面量写目标（**未**做仓内归属判定 —— 那由 `resolveCarrierPath()` 负责）。
+ */
+function inlineScriptWriteTargets(source) {
+  const text = String(source ?? '')
+  if (text === '') return []
+  const found = new Set()
+  for (const { re, group } of INLINE_SCRIPT_WRITE_PATTERNS) {
+    // 正则带 `g` 且是**共享常量**：`matchAll` 内部会克隆，不会污染 `lastIndex`。
+    for (const match of text.matchAll(re)) {
+      const target = match[group]
+      if (typeof target === 'string' && target !== '') found.add(target)
+    }
+  }
+  return [...found]
+}
+/**
+ * **`$GITHUB_ENV` / `$GITHUB_OUTPUT` 导出的名字 → 值**（R24 FIX-26 / X3-01② 的唯一实现）。
+ *
+ * ## 现场
+ *
+ * `note()` 一遇 `$` 就 `return`（常量传播只覆盖**同一段文本内**），于是把写目标经
+ * `$GITHUB_ENV` 递给下一步就整条不可见：
+ *
+ * ```yaml
+ * - run: echo "V7T=scripts/ci-brand-mask.sh" >> "$GITHUB_ENV"
+ * - run: printf '%s' "$PAYLOAD" | base64 -d > "$V7T"   # 写目标不可见
+ * - run: bash scripts/ci-brand-mask.sh                 # ⇒ 判据看不见"被写过"
+ * ```
+ *
+ * ## 判据
+ *
+ * 逐行找"**真的在写 `$GITHUB_ENV`/`$GITHUB_OUTPUT`**"的行（出现关键字 ∧ 有 `>`/`>>`/`tee`），
+ * 把行内的 `NAME=VALUE` 字面量收进 job 作用域 —— **语义与 GitHub 一致：只影响后续 step**
+ * （调用方在扫完当前块之后才调用它，所以同一步里"先 export 再用"不会被当成已生效）。
+ * @param source - 一段 `run:` 块（已去 here-doc 正文）。
+ * @param into - 目标 `Map<名字, 值>`（就地更新）。
+ */
+function collectExportedEnvAssignments(source, into) {
+  if (!(into instanceof Map)) return
+  for (const line of String(source).split('\n')) {
+    if (!/GITHUB_(?:ENV|OUTPUT)/u.test(line)) continue
+    if (!/(?:>>?|\|\s*tee\b)/u.test(line)) continue
+    for (const match of line.matchAll(/(?:^|[\s"'])([A-Za-z_][A-Za-z0-9_]*)=([^\s"']+)/gu)) {
+      into.set(match[1], match[2])
+    }
+  }
+}
+/**
+ * 把 `$GITHUB_ENV` 传过来的名字代进一个词（{@link collectExportedEnvAssignments} 的取用侧）。
+ *
+ * 只在词**含 `$`** 时介入：不含则原样返回（保持既有语义）；含而查不到值 / 展开后仍残留 `$`
+ * 一律返回 `undefined`（= "读不懂"，调用方按原来的 fail-closed 处理，**不是**放行）。
+ * @param word - 一个词（可能带引号，调用方已去引号）。
+ * @param env - job 作用域的导出名字表。
+ * @returns 展开后的词；读不懂返回 `undefined`。
+ */
+function expandExportedEnvWord(word, env) {
+  const text = String(word)
+  if (!text.includes('$')) return text
+  if (!(env instanceof Map) || env.size === 0) return undefined
+  let unresolved = false
+  const expanded = text.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/gu,
+    (match, braced, bare) => {
+      const value = env.get(braced ?? bare)
+      if (value === undefined) { unresolved = true; return match }
+      return value
+    })
+  if (unresolved || expanded.includes('$')) return undefined
+  return expanded
+}
+/** 载体写面**闭包跟随**的深度上限（`bash scripts/a.sh` 里再 `bash scripts/b.sh` …）。 */
+const WRITE_CARRIER_FOLLOW_MAX_HOPS = 4
+/**
+ * 一段 yaml/shell 文本 → 它**本地复合 action** 的目录（`uses: ./x` → `x`，去重）。
+ *
+ * 与闭包节点那一支（`scanClosure` 的 `uses:` 分支）同口径：只认 `./` 开头的本地 action
+ * （远端 `uses: actions/checkout@v4` 的正文不在本仓，跟随不了也不该管）。
+ * @param text - yaml / shell 文本。
+ * @returns 去重后的目录名（保持出现顺序）。
+ */
+function localCompositeActionDirs(text) {
+  const found = new Set()
+  for (const uses of String(text).matchAll(/^[^\S\n]*(?:-[^\S\n]+)?uses:[^\S\n]*(\S+)[^\S\n]*$/gmu)) {
+    if (!uses[1].startsWith('./')) continue
+    found.add(uses[1].replace(/^\.\//u, ''))
+  }
+  return [...found]
+}
 /**
  * 写重定向的**标记词**（{@link tagWriteRedirections} 用）。
  *
@@ -4725,8 +4887,16 @@ const WRITE_COMMAND_WORDS = new Set(['tee', 'cp', 'mv', 'install', 'rsync', 'ln'
 const WRITE_REDIRECT_SENTINEL = '__picoaide_write_redirect_target__'
 /** fd 复制（`2>&1` / `>&2`）：**没有文件目标**，取词前整段删掉（否则 `2` 会被当成目标词）。 */
 const WRITE_FD_DUPLICATION = /(?:^|[\s;&|(])\d*>&\d*/gu
-/** 写重定向操作符 + 它后面的目标词（`> x` / `>> x` / `>| x` / `&> x` / `N> x`，目标可缺省）。 */
-const WRITE_REDIRECTION = /(^|[\s;&|(])(\d*&>>|\d*&>|\d*>>\||\d*>>|\d*>\||\d*>)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)?/gu
+/**
+ * 写重定向操作符 + 它后面的目标词（`> x` / `>> x` / `>| x` / `&> x` / `N> x` / `N<> x`，
+ * 目标可缺省）。
+ *
+ * **R24 FIX-26 / X3-01⑦**：`N<>`（以读写方式打开，`exec 3<>file` 的形态）此前不在操作符
+ * 集合里 ⇒ `exec 3<>scripts/x; printf … >&3; exec 3>&-; bash scripts/x` 整条不可见
+ * （第二十四轮 X3 泳道实测 `EXIT=0`）。`<<`（here-doc）与 `<<<`（here-string）不会命中
+ * 这条：`\d*<>` 要求 `<` 紧跟 `>`。
+ */
+const WRITE_REDIRECTION = /(^|[\s;&|(])(\d*&>>|\d*&>|\d*>>\||\d*<>|\d*>>|\d*>\||\d*>)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)?/gu
 /**
  * 一段 shell 文本 → **剥掉写重定向（连同目标词）**的文本（R23 FIX-22 / W4-02 的唯一实现）。
  * @param source - 一段 shell 文本。
@@ -5131,6 +5301,18 @@ function workflowRunBlocks(text) {
  * @returns `{ job, blocks }` 数组（按文件顺序）。
  */
 function workflowJobRunBlocks(text) {
+  return workflowJobSections(text).map(section => ({
+    job: section.job,
+    blocks: workflowRunBlocks(section.text),
+  }))
+}
+/**
+ * workflow 文本 → **按 job 分组的 job 正文**（{@link workflowJobRunBlocks} 的取段实现，
+ * 抽出来是为了让 {@link workflowJobSteps} 复用同一份分组口径 —— 两处各写一份必然漂移）。
+ * @param text - workflow 全文。
+ * @returns `{ job, text }` 数组（按文件顺序）；取不到 `jobs:` 时退化成单组 `(未知)`。
+ */
+function workflowJobSections(text) {
   const lines = String(text).split('\n')
   let jobsIndent = null
   let jobsLine = -1
@@ -5138,7 +5320,7 @@ function workflowJobRunBlocks(text) {
     const match = /^([ \t]*)jobs:[ \t]*$/u.exec(lines[index])
     if (match !== null) { jobsIndent = match[1].length; jobsLine = index; break }
   }
-  const fallback = [{ job: '(未知)', blocks: workflowRunBlocks(text) }]
+  const fallback = [{ job: '(未知)', text: String(text) }]
   if (jobsLine < 0) return fallback
   let jobIndent = null
   for (let index = jobsLine + 1; index < lines.length; index += 1) {
@@ -5170,7 +5352,85 @@ function workflowJobRunBlocks(text) {
     if (current !== null) current.lines.push(line)
   }
   if (groups.length === 0) return fallback
-  return groups.map(group => ({ job: group.job, blocks: workflowRunBlocks(group.lines.join('\n')) }))
+  return groups.map(group => ({ job: group.job, text: group.lines.join('\n') }))
+}
+/**
+ * 一个 job 的正文 → **按 step 顺序切开的单元**（R24 FIX-26 / X3-01③ 的唯一实现）。
+ *
+ * ## 为什么需要"按 step 顺序"
+ *
+ * R23 FIX-22 把写面作用域从"一段 `run:` 块"扩到了"整个 job"，但 job 里的载体**不止 `run:`
+ * 块**：本地复合 action（`uses: ./.github/actions/x`）的 `steps[].run` 同样跑在**同一个工作树**
+ * 上。`workflowRunBlocks` 只抽 `run:` ⇒ `uses:` 那一步在结构上不存在，写也就无从归属
+ * （第二十四轮 X3 泳道实测：`uses` + 后续 `bash` 执行 ⇒ `EXIT=0`）。
+ *
+ * 切分口径：`steps:` 之下**与首个列表项同缩进**的 `- ` 行开启一个新 step；`steps:` 之前/之外
+ * 的行不属于任何 step（`runs-on:` / `env:` 等不是 step，它们不产生"被执行"的动作）。
+ * 取不到 `steps:` 时退化成"整个 job 一个单元"（与 {@link workflowJobRunBlocks} 同形，
+ * 绝不静默丢块）。
+ *
+ * **对账**：调用方（真树那一节）逐 workflow 断言
+ * `扁平化(workflowJobSteps(x).steps[].runs) === workflowJobRunBlocks(x)[].blocks` ——
+ * 切分器与久经考验的抽取器一旦分叉就红，不允许"两套解析各说各话"。
+ * @param text - workflow 全文。
+ * @returns `{ job, steps }` 数组；每个 step 是 `{ text, runs, uses }`。
+ */
+function workflowJobSteps(text) {
+  return workflowJobSections(text).map(section => ({
+    job: section.job,
+    steps: splitWorkflowSteps(section.text),
+  }))
+}
+/**
+ * 一个 job 正文 → step 单元数组（{@link workflowJobSteps} 的切分实现）。
+ * @param jobText - job 正文（含 `steps:`）。
+ * @returns `{ text, runs, uses }` 数组。
+ */
+function splitWorkflowSteps(jobText) {
+  const whole = String(jobText)
+  const lines = whole.split('\n')
+  let stepsIndent = null
+  let listIndent = null
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^([ \t]*)steps:[ \t]*$/u.exec(lines[index])
+    if (match === null) continue
+    stepsIndent = match[1].length
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor]
+      if (line.trim() === '' || /^[ \t]*#/u.test(line)) continue
+      if (line.length - line.trimStart().length <= stepsIndent) break
+      const item = /^([ \t]*)-[ \t]/u.exec(line)
+      if (item !== null) listIndent = item[1].length
+      break
+    }
+    break
+  }
+  if (listIndent === null) {
+    return [{ text: whole, runs: workflowRunBlocks(whole), uses: localCompositeActionDirs(whole) }]
+  }
+  const chunks = []
+  let current = null
+  const header = []
+  for (const line of lines) {
+    const item = /^([ \t]*)-[ \t]/u.exec(line)
+    if (item !== null && item[1].length === listIndent) {
+      current = [line]
+      chunks.push(current)
+      continue
+    }
+    if (current !== null) current.push(line)
+    else header.push(line)
+  }
+  // `steps:` 之前的行也要成一块：那里可能有 `defaults: { run: … }` 这类**同名键**
+  // （`workflowRunBlocks` 会把它当成一个 `run:` 块读出来）。把它并进同一串，
+  // 切分器才与久经考验的抽取器**逐字同形**（对账判据因此可以严格到"逐字节相同"）。
+  // 它**不**贡献 `uses`：job 级 `uses:` 是复用工作流，不是 step。
+  const units = [{ text: header.join('\n'), runs: workflowRunBlocks(header.join('\n')), uses: [] }]
+  for (const chunk of chunks) {
+    const text_ = chunk.join('\n')
+    units.push({ text: text_, runs: workflowRunBlocks(text_), uses: localCompositeActionDirs(text_) })
+  }
+  return units
 }
 
 /**
@@ -6271,16 +6531,28 @@ function ciExecutionSurface(options) {
      * ③ **W4-01（跨 step）**：作用域由调用方给（{@link workflowJobRunBlocks} 按 job 累积），
      *    本函数只回答"**这一段文本**写过哪些路径"。
      *
-     * 边界（认账，未变）：`sed -i` / `git checkout <ref> -- <路径>` / `dd of=<路径>` 这类等价
+     * ## 第二十四轮 X3 泳道的三处收口（R24 FIX-26 / X3-01）
+     *
+     * ① **解释器内联脚本**（`python3 -c` / `node -e` / `perl -e`）：两条取词路径都是 shell 语法 ⇒
+     *    `Path('scripts/x.sh').write_bytes(…)` 整族隐形。现在内层语言源码也过一遍
+     *    {@link inlineScriptWriteTargets}（只认"第一实参是字面量"的写调用）。
+     * ② **`$GITHUB_ENV` 传过来的写目标**：`note()` 一遇 `$` 就 `return` ⇒ 跨 step 的
+     *    `echo "V7T=scripts/x.sh" >> "$GITHUB_ENV"` + `> "$V7T"` 整条不可见。现在 `note()`
+     *    先过 {@link expandExportedEnvWord}（作用域由调用方经 `scope.carriedEnv` 给）。
+     * ④ **`N<>` 读写打开**（`exec 3<>scripts/x`）：见 {@link WRITE_REDIRECTION}。
+     *
+     * 边界（认账）：`sed -i` / `git checkout <ref> -- <路径>` / `dd of=<路径>` 这类等价
      * 改写面仍未建模（要扩面就把命令词加进 {@link WRITE_COMMAND_WORDS}，或再补一条形态判据）；
+     * 解释器写面只覆盖**字面量**目标（路径拼出来的仍看不见）；
      * 运行期生成 + 不透明编码仍是固有边界（见通过行的 ⑥）。
      * @param source - 一段 shell 文本（已去 here-doc 正文）。
      * @param dirs - 这条命令可能的工作目录。
      * @param context - 自指脚本位的扫描上下文（`undefined` = 不开）。
      * @param strict - 是否开逐词登记（影响 `unwrapCommandWords` 的包装链展开）。
+     * @param env - **job 作用域的 `$GITHUB_ENV`/`$GITHUB_OUTPUT` 导出表**（`Map<名字, 值>`，可省）。
      * @returns 被写过的仓内相对路径集合。
      */
-    const runtimeWrittenCarriers = (source, dirs, context, strict = true) => {
+    const runtimeWrittenCarriers = (source, dirs, context, strict = true, env = undefined) => {
       const written = new Set()
       const note = word => {
         if (typeof word !== 'string' || word === '') return
@@ -6289,7 +6561,11 @@ function ciExecutionSurface(options) {
         // 根变量前缀（`$GITHUB_WORKSPACE/…` / `${PWD}/…`）剥掉后仍是仓内相对路径 ——
         // 与脚本位判据（`stripRootVariablePrefix`）同一口径，否则 `> $GITHUB_WORKSPACE/x.sh`
         // 与 `> x.sh` 会被当成两种东西（V7 的 `$GITHUB_WORKSPACE/…` 形态）。
-        const cleaned = stripRootVariablePrefix(unquoted) ?? unquoted
+        // **R24 FIX-26 / X3-01②**：`$` 先由 job 作用域的导出表展开一次（修前一律 return ⇒
+        // `$GITHUB_ENV` 递过来的写目标整条不可见）；展开不出仍按原样 fail-closed（return）。
+        const preExpanded = expandExportedEnvWord(unquoted, env)
+        if (preExpanded === undefined) return
+        const cleaned = stripRootVariablePrefix(preExpanded) ?? preExpanded
         if (cleaned === '' || cleaned.includes('$')) return
         const resolved = resolveCarrierPath(cleaned, dirs) ?? resolveCarrierPath(cleaned, [''])
         if (resolved !== undefined) written.add(resolved)
@@ -6313,8 +6589,15 @@ function ciExecutionSurface(options) {
       for (const match of text.matchAll(WRITE_REDIRECT_TARGET)) note(match[1])
       // ② 写命令词：**在剥掉重定向的文本上**取"最后一个非旗标、非赋值词"
       //    （`cp 载荷 gen.sh` / `tee -a gen.sh` / `install -m 755 x gen.sh`）；取不出就不猜。
+      //    **R24 FIX-26 / X3-01①**：同一次取词里把**内层语言源码**（`python3 -c` / `node -e`）
+      //    的写操作也读出来 —— 修前这一支只把字面量当 token 跟随，不认"写"。
       for (const words of shellCommandWordListsFor(stripWriteRedirections(text), context)) {
-        for (const head of unwrapCommandWords(words, strict).heads) {
+        const chain = unwrapCommandWords(words, strict)
+        for (const nested of chain.nestedTexts) {
+          if (nested.language === 'shell') continue
+          for (const target of inlineScriptWriteTargets(nested.text)) note(target)
+        }
+        for (const head of chain.heads) {
           if (!WRITE_COMMAND_WORDS.has(head[0] ?? '')) continue
           const target = [...head].reverse().find(word => word !== ''
             && !word.startsWith('-') && !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))
@@ -6323,8 +6606,137 @@ function ciExecutionSurface(options) {
       }
       return written
     }
+    /**
+     * 一段 shell 文本 → 它**调用的仓内脚本载体**（`bash x.sh` / `source x.sh` / `node x.mjs` /
+     * `python3 x.py` 的脚本位，能解析成仓内相对路径的那些）。去重，保持出现顺序。
+     *
+     * 与 `scanCarrierPaths` 的脚本位取词**同一份实现**（`shellScriptWordIndex` + 同一个
+     * `COMMAND_WRAPPER_SPECS.scriptPositional` 判据）—— 两处各写一份必然漂移。
+     * @param text - 一段 shell 文本。
+     * @param dirs - 这条命令可能的工作目录。
+     * @returns 仓内相对路径（去重）。
+     */
+    const carrierScriptTargets = (text, dirs) => {
+      const found = new Set()
+      for (const words of shellCommandWordListsFor(text, undefined)) {
+        for (const head of unwrapCommandWords(words, true).heads) {
+          const command = head[0] ?? ''
+          const isShellHost = COMMAND_SHELL_WORDS.has(command) || command === 'source' || command === '.'
+          const isInterpreterHost = COMMAND_WRAPPER_SPECS.get(command)?.scriptPositional === true
+          if (!isShellHost && !isInterpreterHost) continue
+          const host = shellScriptWordIndex(head, 0)
+          if (host === null || host.commandText !== null || host.scriptIndex < 0) continue
+          const word = head[host.scriptIndex]
+          if (word === undefined || word.includes('$') || word.includes('{{')) continue
+          const resolved = resolveCarrierPath(word, dirs) ?? resolveCarrierPath(word, [''])
+          if (resolved !== undefined) found.add(resolved)
+        }
+      }
+      return [...found]
+    }
+    /**
+     * **这一段文本（连同它调用的仓内载体）写过哪些仓内路径**（R24 FIX-26 / X3-01③）。
+     *
+     * ## 现场
+     *
+     * `carriedWrites` 只在**当前 yaml 节点**的 job 分组内累积（R23 FIX-22 把作用域从
+     * "一段 `run:` 块"扩到了"整个 job"），但**被跟随的脚本与本地复合 action 是别的节点** ——
+     * 在那里面发生的写不会回灌到 job 作用域。于是"把写藏进一层包装"就整族隐形：
+     *
+     * ```yaml
+     * - run: bash scripts/v7write.sh          # v7write.sh 里写 scripts/ci-brand-mask.sh
+     * - run: bash scripts/ci-brand-mask.sh    # ⇒ 判据看不见"被写过"
+     * ```
+     *
+     * 同一形态还有本地复合 action（`uses: ./.github/actions/x`）——它的 `steps[].run` 块
+     * 跑在**同一个工作树**上，写同样生效。
+     *
+     * ## 判据
+     *
+     * 在 {@link runtimeWrittenCarriers} 之外再**急切**跟随一层：命令位/脚本位指向的**仓内**
+     * 载体（shell 脚本 / 解释器脚本）读它的正文并把里面的写并进来；`uses: ./x` 读
+     * `x/action.yml` 的 `run:` 块同理。深度上限 {@link WRITE_CARRIER_FOLLOW_MAX_HOPS} +
+     * `seen` 去重（自引用脚本不会无限递归）。读不到 / 仓内不存在 / 变量拼出来的路径一律
+     * **不猜**（那些形态由 `scanCarrierPaths` 的载体跟随与 fail-closed 判据负责）。
+     * @param text - 一段 shell / yaml 文本。
+     * @param dirs - 这条命令可能的工作目录。
+     * @param context - 自指脚本位的扫描上下文（`undefined` = 不开）。
+     * @param depth - 当前跟随深度（调用方省略）。
+     * @param seen - 已经读过的载体路径（防环，调用方省略）。
+     * @param env - job 作用域的 `$GITHUB_ENV` 导出表（可省）。
+     * @returns 被写过的仓内相对路径集合。
+     */
+    const eagerWrittenCarriers = (text, dirs, context, depth = 0, seen = new Set(), env = undefined) => {
+      const out = new Set(runtimeWrittenCarriers(text, dirs, context, true, env))
+      if (depth >= WRITE_CARRIER_FOLLOW_MAX_HOPS) return out
+      /** 读一份仓内载体（读不到 ⇒ `undefined`，绝不猜）。 */
+      const readCarrier = path => {
+        try {
+          if (!options.exists(path)) return undefined
+          const body = options.read(path)
+          return typeof body === 'string' ? body : undefined
+        } catch {
+          return undefined
+        }
+      }
+      for (const carrier of carrierScriptTargets(text, dirs)) {
+        if (seen.has(carrier)) continue
+        seen.add(carrier)
+        const body = readCarrier(carrier)
+        if (body === undefined) continue
+        const nestedDirs = [carrier.includes('/') ? carrier.slice(0, carrier.lastIndexOf('/')) : '']
+        for (const written of eagerWrittenCarriers(body, nestedDirs, undefined, depth + 1, seen, env)) {
+          out.add(written)
+        }
+      }
+      for (const target of localCompositeActionDirs(text)) {
+        for (const candidate of [`${target}/action.yml`, `${target}/action.yaml`]) {
+          if (seen.has(candidate)) break
+          const body = readCarrier(candidate)
+          if (body === undefined) continue
+          seen.add(candidate)
+          for (const block of workflowRunBlocks(body)) {
+            for (const written of eagerWrittenCarriers(block, [target], undefined, depth + 1, seen, env)) {
+              out.add(written)
+            }
+          }
+          break
+        }
+      }
+      return out
+    }
     // R23 FIX-22 / W4-06：把当前实现挂给收尾的判决级见证（见 `writeTargetsImpl` 的注释）。
-    writeTargetsImpl = source => runtimeWrittenCarriers(source, [''], undefined, true)
+    writeTargetsImpl = (source, env) => runtimeWrittenCarriers(source, [''], undefined, true, env)
+    /**
+     * 一个**本地复合 action**（`uses: ./.github/actions/x` → 目录 `x`）写过的仓内路径
+     * （R24 FIX-26 / X3-01③）。
+     *
+     * 读 `action.yml` / `action.yaml` 的每个 `run:` 块，交给 {@link eagerWrittenCarriers}
+     * （它继续跟随块里调用的包装脚本 / 嵌套复合 action）。文件不存在或读不出来 ⇒ 空集合
+     * ——"读不到"不是判据面（本地 action 不存在时 `uses:` 本身由别的判据负责），这里不猜。
+     * @param target - action 目录（仓内相对，已去 `./`）。
+     * @param env - job 作用域的 `$GITHUB_ENV` 导出表。
+     * @returns 仓内相对路径集合。
+     */
+    const compositeActionWrittenCarriers = (target, env) => {
+      const out = new Set()
+      for (const candidate of [`${target}/action.yml`, `${target}/action.yaml`]) {
+        let body
+        try {
+          body = options.exists(candidate) ? options.read(candidate) : undefined
+        } catch {
+          body = undefined
+        }
+        if (typeof body !== 'string') continue
+        for (const block of workflowRunBlocks(body)) {
+          for (const written of eagerWrittenCarriers(block, [target], undefined, 1, new Set(), env)) {
+            out.add(written)
+          }
+        }
+        break
+      }
+      return out
+    }
     /**
      * **命令位 + 参数位的载体跟随**（R16-W 语义反转里"跟随"的那一半）。
      *
@@ -6342,13 +6754,16 @@ function ciExecutionSurface(options) {
      * @param raw - 一段 shell 文本。
      * @param dirs - 这条命令可能的工作目录。
      * @param strict - 是否开逐词登记（入口形态开、被跟随的脚本正文关）。
-     * @param scope - **跨 step 的写面作用域**（`{ carriedWrites, carriedJob }`）：同一 job 的
-     *   step 顺序共享同一个 `carriedWrites`（`Map<路径, job>`），见 {@link workflowJobRunBlocks}
+     * @param scope - **跨 step 的写面作用域**（`{ carriedWrites, carriedJob, carriedEnv }`）：同一 job
+     *   的 step 顺序共享同一个 `carriedWrites`（`Map<路径, job>`）与 `carriedEnv`
+     *   （`Map<名字, 值>`，来自 `$GITHUB_ENV`/`$GITHUB_OUTPUT`），见 {@link workflowJobRunBlocks}
      *   与 {@link runtimeWrittenCarriers}。
      */
     const scanCarrierPaths = (raw, dirs, strict = true, scope = undefined) => {
       const carriedWrites = scope?.carriedWrites instanceof Map ? scope.carriedWrites : undefined
       const carriedJob = scope?.carriedJob
+      /** **job 作用域的 `$GITHUB_ENV` 导出表**（R24 FIX-26 / X3-01②）。 */
+      const carriedEnv = scope?.carriedEnv instanceof Map ? scope.carriedEnv : undefined
       // **自指脚本位**（`bash "$(dirname "$0")/x.sh"`，R19A-04）：被跟随的仓内 shell 脚本
       // 正文里，`$0`/`${BASH_SOURCE[0]}` 的取值就是**本节点自己**（`node.file`），
       // 于是 `$(dirname …)` 可以在闭包里求值 —— 词法阶段把它换成**仓内候选路径**，
@@ -6428,7 +6843,11 @@ function ciExecutionSurface(options) {
       // 同一个 job 的所有 step 跑在**同一个工作树**上（step① 写、step② 执行是 CI 里最普通的
       // 写法），所以"被写过的路径"必须按 job 内 step 顺序累积；`$GITHUB_ENV` 那条 fail-closed
       // 只覆盖**值**，不覆盖**文件写**（`bash scripts/x.sh` 的脚本位是字面路径，不需要任何变量）。
-      const localWrites = runtimeWrittenCarriers(raw, dirs, context, strict)
+      //
+      // **R24 FIX-26 / X3-01①③**：改用 {@link eagerWrittenCarriers} —— 它在本段文本之外**急切**
+      // 跟随本段调用的仓内载体（包装脚本 / 本地复合 action），把那里的写也并进来。修前
+      // "把写藏进一层包装"整族隐形（`bash scripts/v7write.sh` + `bash scripts/ci-brand-mask.sh`）。
+      const localWrites = eagerWrittenCarriers(raw, dirs, context, 0, new Set(), carriedEnv)
       const writtenCarriers = carriedWrites === undefined
         ? localWrites
         : new Set([...carriedWrites.keys(), ...localWrites])
@@ -6666,18 +7085,34 @@ function ciExecutionSurface(options) {
       // 步骤名、`name:`、注释里的 `make`、`with:` 里的 JSON 都是散文/数据，不是命令。
       // **R23 FIX-22 / W4-01**：命令词法按 **job** 分组跑，同一 job 的 step 顺序共享一份
       // "被写过的仓内路径"（`carriedWrites`）—— 跨 step 的"先写后执行"因此与同块形态同判。
-      for (const { job, blocks } of workflowJobRunBlocks(text)) {
+      //
+      // **R24 FIX-26 / X3-01②③**：作用域再补两样（都按 **step 顺序**）——
+      //   · `carriedEnv`：`$GITHUB_ENV`/`$GITHUB_OUTPUT` 导出的名字 → 值（同 step 语义一致：
+      //     扫完本块才收集，所以"同一步里先 export 再用"不会被当成已生效）；
+      //   · 本地复合 action（`uses: ./.github/actions/x`）：它的 `steps[].run` 写**同一个
+      //     工作树**，所以它在**那一步**把写并进 job 作用域（修前 `uses:` 那一步在结构上
+      //     不存在 ⇒ "复合 action 里写、下一步执行"整族隐形）。
+      for (const { job, steps } of workflowJobSteps(text)) {
         const dirs = workingDirsFor(text)
         const carriedWrites = new Map()
-        for (const block of blocks) {
-          // **R22 FIX-14 / V7-06**：here-doc 的**正文是数据**、终止词是流标记 —— 拿命令词法去读
-          // 它们会把 `import json` / `print(...)` 读成"未登记的可执行名"、把终止词 `PY` 读成
-          // "脚本位指向仓内不存在的路径"（实测 8 条误红）。命令位扫描读去正文的版本；
-          // 文本网/token 网（`expandTokens`，在下面按**原文**跑）不受影响。
-          const script = inlineHeredocs(block)
-          expandMakeCalls(script, dirs, true, selfContext)
-          expandComposeCalls(script, dirs, true, selfContext)
-          scanCarrierPaths(script, dirs, true, { carriedWrites, carriedJob: job })
+        const carriedEnv = new Map()
+        for (const step of steps) {
+          for (const target of step.uses) {
+            for (const carrier of compositeActionWrittenCarriers(target, carriedEnv)) {
+              if (!carriedWrites.has(carrier)) carriedWrites.set(carrier, job)
+            }
+          }
+          for (const block of step.runs) {
+            // **R22 FIX-14 / V7-06**：here-doc 的**正文是数据**、终止词是流标记 —— 拿命令词法去读
+            // 它们会把 `import json` / `print(...)` 读成"未登记的可执行名"、把终止词 `PY` 读成
+            // "脚本位指向仓内不存在的路径"（实测 8 条误红）。命令位扫描读去正文的版本；
+            // 文本网/token 网（`expandTokens`，在下面按**原文**跑）不受影响。
+            const script = inlineHeredocs(block)
+            expandMakeCalls(script, dirs, true, selfContext)
+            expandComposeCalls(script, dirs, true, selfContext)
+            scanCarrierPaths(script, dirs, true, { carriedWrites, carriedJob: job, carriedEnv })
+            collectExportedEnvAssignments(script, carriedEnv)
+          }
         }
       }
     } else if (node.kind === 'shell-value') {
@@ -6744,7 +7179,7 @@ function ciExecutionSurface(options) {
     // 判决级见证（`runtimeWriteDetectorProblem`）在合成样本上自证 —— 修前这一层没有任何
     // 观测量反映它，`runtimeWrittenCarriers` 首行一行早退（`return written`）就能让整层失效
     // 而守卫仍 `EXIT=0`（W4-06 实测，连 V7 的 a1 夹具也一起变绿）。
-    writeTargets: source => writeTargetsImpl?.(source) ?? new Set(),
+    writeTargets: (source, env) => writeTargetsImpl?.(source, env) ?? new Set(),
   }
 }
 
@@ -6952,9 +7387,14 @@ function classifyCiSurface(mentioning, reached, registry, guardPath) {
  * E-01「写过哪些仓内路径」识别器的**合成样本**（R23 FIX-22 / W4-06 的判决级见证）。
  *
  * 每条的 `want` 必须被识别出来；`want: []` 的那条反过来要求**不得**凭空认出写目标
- * （防止"把一切都当成写过"这种廉价通过）。样本逐条对应第二十三轮 W4 实测的一个绕过形态：
- * `tee -a X >/dev/null`（W4-02）、`cp src dst > /dev/null`（W4-02）、`T=…; > "$T"`（W4-09）。
- * @type {Array<{ source: string, want: string[] }>}
+ * （防止"把一切都当成写过"这种廉价通过）。样本逐条对应实测过的一个绕过形态：
+ *   · 第二十三轮 W4：`tee -a X >/dev/null`（W4-02）、`cp src dst > /dev/null`（W4-02）、
+ *     `T=…; > "$T"`（W4-09）；
+ *   · **第二十四轮 X3（R24 FIX-26 / X3-01）**：`python3 -c` 里 `Path(X).write_bytes`、
+ *     `node -e` 里 `fs.writeFileSync(X)`、`exec 3<>X`、经 `$GITHUB_ENV` 递过来的 `> "$V7T"`
+ *     —— 修前这四族都不进任何一张网（`EXIT=0` 而 tripwire 证明运行期真的执行了端到端入口）。
+ * `env` 是这一条样本需要的 `$GITHUB_ENV` 导出表（省略 = 空）。
+ * @type {Array<{ source: string, want: string[], env?: Map<string, string> }>}
  */
 const RUNTIME_WRITE_DETECTOR_PROBES = [
   {
@@ -6965,6 +7405,28 @@ const RUNTIME_WRITE_DETECTOR_PROBES = [
   { source: 'T=scripts/ci-brand-mask.sh\nprintf "%s" "$P" | base64 -d > "$T"', want: ['scripts/ci-brand-mask.sh'] },
   { source: 'printf "%s" x > scripts/ci-brand-mask.sh\nbash scripts/ci-brand-mask.sh', want: ['scripts/ci-brand-mask.sh'] },
   { source: 'bash scripts/ci-brand-mask.sh', want: [] },
+  // ---- R24 FIX-26 / X3-01 的四族（各对应一个实测夹具）--------------------------------
+  {
+    source: "python3 -c \"import base64,pathlib;pathlib.Path('scripts/ci-brand-mask.sh')"
+      + ".write_bytes(base64.b64decode('eA=='))\"",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    source: "node -e \"require('node:fs').writeFileSync('scripts/ci-brand-mask.sh','x')\"",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    source: "exec 3<>scripts/ci-brand-mask.sh\nprintf '%s' \"$P\" >&3\nexec 3>&-\nbash scripts/ci-brand-mask.sh",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    // 写目标由**上一步**经 `$GITHUB_ENV` 递过来（同一步内的赋值走既有常量传播，不在此列）。
+    source: 'printf "%s" "$P" | base64 -d > "$V7T"',
+    want: ['scripts/ci-brand-mask.sh'],
+    env: new Map([['V7T', 'scripts/ci-brand-mask.sh']]),
+  },
+  // 反向：只读的 `open('X')`（没有写标志）绝不能被算成写（否则判据变成误报工厂）。
+  { source: "python3 -c \"print(open('scripts/ci-brand-mask.sh').read())\"", want: [] },
 ]
 /**
  * E-01 识别器的**判决级见证**（R23 FIX-22 / W4-06）：合成样本必须逐条认对。
@@ -6979,7 +7441,7 @@ const RUNTIME_WRITE_DETECTOR_PROBES = [
 function runtimeWriteDetectorProblem(detect) {
   if (typeof detect !== 'function') return 'E-01 的写目标识别器没有交出来（`writeTargets` 缺失）'
   for (const probe of RUNTIME_WRITE_DETECTOR_PROBES) {
-    const found = detect(probe.source)
+    const found = detect(probe.source, probe.env)
     if (!(found instanceof Set)) {
       return `E-01 的写目标识别器对样本 ${JSON.stringify(probe.source.slice(0, 60))} 返回的不是集合`
     }
@@ -7788,6 +8250,36 @@ function ciExecutionSurfaceSelfTest() {
   // ---- 执行面闭包 ---------------------------------------------------------
   // 判据的能力先自证（四/五种执行形态必须被认出来），再在真树上跑。
   ciExecutionSurfaceSelfTest()
+  // **R24 FIX-26 / X3-01③**：`workflowJobSteps`（按 **step** 切开 job —— 复合 action 的
+  // `uses:` 那一步在 `workflowRunBlocks` 里结构上不存在）与久经考验的 `workflowJobRunBlocks`
+  // **逐 workflow 对拍**：两者抽出的 `run:` 块序列必须**逐字节相同**。
+  // 切分器是新的（它决定"写在哪一步生效"），一旦与抽取器分叉就必须当场红 ——
+  // 不允许"两套解析各说各话"（漂移的后果是写面静默漏判，正是本条缺陷的形态）。
+  {
+    const drifted = []
+    for (const [file, text] of workflowTexts) {
+      const legacy = workflowJobRunBlocks(text)
+      const stepped = workflowJobSteps(text)
+      if (legacy.length !== stepped.length) {
+        drifted.push(`${file}: job 数 ${legacy.length} ≠ ${stepped.length}`)
+        continue
+      }
+      legacy.forEach((group, index) => {
+        const flat = stepped[index].steps.flatMap(step => step.runs)
+        if (group.blocks.join('\u0000') !== flat.join('\u0000')) {
+          drifted.push(`${file} job \`${group.job}\`: run 块序列 ${JSON.stringify(group.blocks.map(b => b.slice(0, 24)))}`
+            + ` ≠ ${JSON.stringify(flat.map(b => b.slice(0, 24)))}`)
+        }
+      })
+    }
+    check(drifted.length === 0,
+      `形态⑨: \`workflowJobSteps\`（按 step 切分，写面作用域用它定"哪一步生效"）与 `
+        + `\`workflowJobRunBlocks\`（久经考验的抽取器）在 ${drifted.length} 处对不上：\n    `
+        + drifted.join('\n    ')
+        + '\n  ⇒ 两套解析必须给出同一串 run 块；分叉意味着写面按错的 step 归属判"先写后执行"'
+        + '（漏判方向正是 R24 FIX-26 / X3-01 的现场）。')
+    note(`写面作用域: workflowJobSteps ↔ workflowJobRunBlocks 对拍 ${workflowTexts.length} 个 workflow 逐字一致 ✓`)
+  }
   // **R23 FIX-22 / W4-06**：E-01「写过哪些仓内路径」那一层的**判决级见证** ——
   // 用一份最小的合成 surface（只认样本里出现的路径）跑一遍识别器。
   // 修前这一层没有观测量，`runtimeWrittenCarriers` 首行一行早退即可整层失效（W4-06）。
@@ -8741,7 +9233,17 @@ function enclosingBlockHeaderProblem(source, at) {
     // 这一行就是**真正包住判决句的那个块头**（回溯期间经过的普通语句不影响容器识别 ——
     // 这正是旧版"只看紧邻上一非空行"的漏洞：m6 只多插一句 `const v7unused = 1` 就绕过）。
     const container = header[1].trim()
-    if (container === '') return undefined
+    // **R24 FIX-26 / X3-02**：**裸块与 `try` 是"透明边界"，不是"顶层可达路径"的证据。**
+    //
+    // 现场（第二十四轮 X3 泳道，19 个登记点通用）：回溯只找**最内层**容器，而裸块 `{ … }`
+    // 被当成"不是条件块 ⇒ 放行"（旧版这里是 `if (container === '') return undefined`）。
+    // 于是把死容器里的判决句再包一层花括号（`if (false) { { 判决句 } }`）就能把"最内层容器"
+    // 洗成裸块 ⇒ 容器判据整层失效；再配一行诱饵 `witnessed('id', true)` 补回执行计数 ⇒
+    // `EXIT=0`。修法 = 裸块与 `try {` **继续向上回溯**，直到第一个真正的控制流容器
+    // （`if`/`for`/`while`/`switch`/`else`），或函数体/顶层（那两类的块头带非空、非控制流
+    // 关键字 ⇒ 落到下面的放行分支，仍是"可达路径"的边界）。
+    if (container === '') continue
+    if (/^try\b/u.test(container)) continue
     const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(container)
     const isElse = /^(?:\}\s*)?else\b/u.test(container)
     if (keyword === null && !isElse) return undefined
@@ -8787,15 +9289,21 @@ function enclosingBlockHeaderProblem(source, at) {
  *
  * ## 判据
  *
- * 计数前先**掩掉注释**、再把**所有空白折叠掉**，然后数归一化后的子串
- * `witnessed('<id>',`（同样先折叠空白）。折行在哪个位置都逃不掉；注释里的同一片段不算
- * （本表的 JSDoc 天然含同样的片段，不掩注释会自伤）。
+ * 计数前先**掩掉注释**、再把**所有空白折叠掉**，然后数归一化后的**调用点**。折行在哪个位置
+ * 都逃不掉；注释里的同一片段不算（本表的 JSDoc 天然含同样的片段，不掩注释会自伤）。
+ *
+ * **R24 FIX-26 / X3-02：第一实参的写法必须归一化。** 第二十三轮的归一化只覆盖"折行"，仍然
+ * 只认单引号字面量 ⇒ 诱饵换成**反引号**`witnessed(\`<id>\`, true)`、**双引号**
+ * `witnessed("<id>", true)`、或**先绑再传**（`const v7id='<id>'; witnessed(v7id, true)`）时
+ * 计数照旧是 1 ⇒ 诱饵隐形、判决死在花括号里而 19 个登记点全绿（第二十四轮 X3 泳道实测）。
+ * 三种写法在运行期都是**同一个调用点**（`witnessed` 只认第一实参的取值），所以这里把它们
+ * 与单引号字面量合并计数：**"调用点唯一"这条语义不变**，只是不再按引号形态分岔。
  * @param id - 判决点 id。
  * @param code - 守卫的**判决本体**正文（已排除登记表那一段）。
  * @returns 归一化后的调用点个数。
  */
 function witnessCallSiteCount(id, code) {
-  const normalized = String(code)
+  const masked = String(code)
     .split('\n')
     // 整行注释**按行**滤掉（与第一段 b 的注释跳过同一口径）：折行诱饵不可能藏进被滤掉的行里，
     // 而"注释里恰好出现同样的片段"这一类假命中也不会被算进来（本表的 JSDoc 天然含同样的片段）。
@@ -8805,9 +9313,17 @@ function witnessCallSiteCount(id, code) {
         && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
     })
     .join('\n')
-    .replace(/\s+/gu, '')
-  const needle = `witnessed('${id}',`.replace(/\s+/gu, '')
-  return normalized.split(needle).length - 1
+  const normalized = masked.replace(/\s+/gu, '')
+  const countOf = spelling => normalized.split(`witnessed(${spelling},`).length - 1
+  // ① 字面量第一实参：单引号 / 双引号 / 模板字符串（反引号）三种写法同判。
+  let count = countOf(`'${id}'`) + countOf(`"${id}"`) + countOf(`\`${id}\``)
+  // ② 先绑再传的诱饵（`const v7id='<id>'; … witnessed(v7id, true)`）：标识符文法受
+  //    JS 限制（不含 `-`），所以按"本段正文里把 id 字面量绑给哪个标识符"反查。
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const binding = new RegExp(
+    `(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:'${escaped}'|"${escaped}"|\`${escaped}\`)`, 'gu')
+  for (const match of masked.matchAll(binding)) count += countOf(match[1])
+  return count
 }
 /**
  * {@link constantBlockHeaderProblem} 的**判决级见证**（R23 FIX-22 / W4-07）。
@@ -8871,12 +9387,23 @@ function witnessCallSiteProbeProblem() {
       id: 'probe-id', expect: 2,
     },
     { code: "// witnessed('probe-id', true)\ncheck(witnessed('probe-id', value))\n", id: 'probe-id', expect: 1 },
+    // **R24 FIX-26 / X3-02**：同一个调用点的三种"换皮"写法都必须计入 —— 反引号模板字符串、
+    // 双引号、以及"先把 id 绑给标识符再当第一实参"。修前它们各自让诱饵隐形（计数仍是 1）。
+    { code: 'check(witnessed(\'probe-id\', value))\nwitnessed(`probe-id`, true)\n', id: 'probe-id', expect: 2 },
+    { code: 'check(witnessed(\'probe-id\', value))\nwitnessed("probe-id", true)\n', id: 'probe-id', expect: 2 },
+    {
+      code: "const probeAlias = 'probe-id'\ncheck(witnessed('probe-id', value))\nwitnessed(probeAlias, true)\n",
+      id: 'probe-id', expect: 2,
+    },
+    // 反向：别的 id 的调用点不算在本 id 头上（否则"计数唯一"会变成"总数"）。
+    { code: "check(witnessed('probe-id', value))\nwitnessed(`probe-other`, true)\n", id: 'probe-id', expect: 1 },
   ]
   for (const probe of cases) {
     const count = witnessCallSiteCount(probe.id, probe.code)
     if (count !== probe.expect) {
       return `\`witnessCallSiteCount\` 对样本 ${JSON.stringify(probe.code.slice(0, 60))} 给出 ${count}`
-        + `（期望 ${probe.expect}）—— 折行诱饵必须算作**第二个调用点**（W4-04 的折行绕过）`
+        + `（期望 ${probe.expect}）—— 折行 / 反引号 / 双引号 / 先绑再传四种写法在运行期是**同一个`
+        + '调用点**，诱饵必须算作第二个（W4-04 的折行绕过；R24 FIX-26 / X3-02 的换皮绕过）'
     }
   }
   return undefined
@@ -9158,8 +9685,19 @@ process.stdout.write(
   + ' make/compose 扩张"覆盖 —— 因此"新增一个未登记的**工具**并只在某个脚本正文里调用它"这条判据'
   + '看不出来（它与"CI 是否执行端到端入口"无关）；而"把端到端入口藏进任何一层载体"是红的。'
   + '**常量传播只覆盖同一段文本内的简单赋值与字面量命令替换**：`$(cat <文件>)`、`$1`/`$@`、'
-  + '`${VAR:-默认}`、跨文件/跨 step 的变量、GitHub 表达式都解析不了 —— 命令位上遇到它们一律'
+  + '`${VAR:-默认}`、GitHub 表达式都解析不了 —— 命令位上遇到它们一律'
   + 'fail-closed（不是"没看见"），参数位上由文本面/载体跟随兜；'
+  + '**R24 FIX-26 / X3-01 起写面另加三条**（"先写后执行"那一格的覆盖面）：'
+  + '⑦ **解释器内联脚本里的写**（`python3 -c` / `node -e` / `perl -e` 的 `Path(X).write_bytes`、'
+  + '`writeFileSync(X)`、`open(FH, \'>\', X)` …）按 {@link INLINE_SCRIPT_WRITE_PATTERNS} 进网 ——'
+  + '只覆盖**第一实参是字面量**的写调用，路径拼出来的仍看不见；'
+  + '⑧ **`$GITHUB_ENV`/`$GITHUB_OUTPUT` 递过来的写目标**参与 job 作用域的常量传播'
+  + '（`echo "V7T=scripts/x.sh" >> "$GITHUB_ENV"` + `> "$V7T"` 同判），'
+  + '但**同一步里**先 export 再用不算（语义与 GitHub 一致）；'
+  + '⑨ **写面作用域跨闭包节点回灌**：被调用的仓内包装脚本与本地复合 action 里发生的写并进'
+  + '**同一个 job**（`bash scripts/write.sh` / `uses: ./.github/actions/x` 之后执行同一路径 ⇒ 红）——'
+  + '跟随深度上限 ' + `${WRITE_CARRIER_FOLLOW_MAX_HOPS} 层，读不到 / 变量拼出来的载体不猜（由别的格 fail-closed）。`
+  + '`sed -i` / `dd of=` / `git checkout <ref> -- <路径>` 这类等价改写面**仍未建模**（认账边界）。'
   + '**运行期生成 + 不透明编码是固有边界**（载荷里没有 token 可读）—— 那条路只能靠'
   + '"脚本位指向仓内不存在路径"那一格 + `CI_SURFACE_GENERATED_SCRIPT_ACK` 逐处认账（R20A-05）。'
   + '本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',

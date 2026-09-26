@@ -310,9 +310,20 @@ let headLayerRan = false
  * **"基线 tag 字节 vs 磁盘"这一层这次是否真的参与**（R23 FIX-22 / W4-03）—— 只影响通过行措辞。
  */
 let baselineLayerRan = false
+/**
+ * 取不到基线时的**具体原因**（R24 FIX-26 / X3-03）：降级必须说清"为什么取不到"，
+ * 否则读者会把"全部候选都被判为自证"读成"这棵树没有 tag"。
+ */
+let baselineSkipReason = ''
+/**
+ * 采信基线时用的**证据等级**（R24 FIX-26 / X3-03）：`upstream`（在上游默认分支上）>
+ * `remote`（远端有同名同对象的 ref）> `none`（**未获远端/上游校验**）。
+ * 通过行必须如实带出这一项 —— 修前那句"基线 tag 不受本 PR 影响"是假设而不是被验证的事实。
+ */
+let baselineEvidence = 'none'
 
 /**
- * **已发布基线 tag** 的选择（R23 FIX-22 / W4-03 的唯一实现）。
+ * **已发布基线 tag** 的选择（R23 FIX-22 / W4-03；**R24 FIX-26 / X3-03 收紧**）。
  *
  * ## 为什么参照物不能是 `HEAD`
  *
@@ -322,28 +333,47 @@ let baselineLayerRan = false
  * + `git commit` ⇒ `EXIT=0`，而通过行照旧印"74 个迁移文件的 sha256 与 …逐条一致 ✅"；
  * 只改正文 + 同步登记值 + commit、删文件 + 同步登记表 + commit 同样绿。
  *
- * ## 选择规则（写死在代码里；改它必须进 diff，改完要同步本文件的注释与报告）
+ * ## 第二十四轮 X3 泳道打穿的那一层：基线**由本仓 tag 自证**
  *
- *   1. 候选 = `git tag --list 'v*'` 里**是 HEAD 祖先**、且**不指向 HEAD 自身**的 tag
- *      —— 后者排除掉"tag 构建"（HEAD 就是那个 tag）时的自证同义反复；
- *   2. 取**版本最高**的一个：`v<主>.<次>.<修订>[-预发]` 逐字段数值比较，
- *      同版本号时**预发 < 正式**（semver 口径），预发之间按后缀字符串倒序（beta.2 > beta.1）；
- *   3. 一个都没有 / git 不可用 / tag 里没有迁移目录 ⇒ **响亮降级**（{@link contentNotices}
- *      的 `[CONTENT-SKIP]` + 通过行不得宣称"逐条一致"，见 `baselineLayerClause`）。
- *      绝不静默绿：这条判据的全部价值就在"基线不受本 PR 影响"。
+ * 修前的选择规则只看"是 HEAD 祖先、不指向 HEAD、版本最高"。于是**在改写提交上打一个
+ * `v99.0.0`、再补一个提交**（让 tag 不指向 HEAD）就能把基线换成攻击者自己的快照 ⇒
+ * `EXIT=0`，通过行照印"逐条一致 ✅"且**没有降级括注** —— 代码里那句"基线 tag 不受本 PR
+ * 影响"是**假设**，不是被验证的事实（实测 `mg-b-forged`）。
+ *
+ * ## 收紧后的判据（三条独立证据，缺一不采信）
+ *
+ * 候选 tag 必须同时满足：
+ *   1. 是 HEAD 的祖先、且**不指向 HEAD**（原有规则，排除 tag 构建时的自证同义反复）；
+ *   2. **不得正好打在"最后一次改动迁移目录的那个提交"上** —— 打在那里就等于"基线的内容
+ *      本身就是被审的那次改动"（最小伪造形态：改写提交 + 打在它上面的 tag）；
+ *   3. **上游/远端证据**：若本地有 `origin/HEAD|origin/master|origin/main`，tag 必须是它的
+ *      祖先（PR 分支上的伪造 tag 不是）；若 `git ls-remote --tags origin` 可用，tag 必须
+ *      在远端存在且 object sha 与本地一致。两种证据**都取不到**时如实降级：这一层照跑，
+ *      但通过行必须写明"基线**未经远端校验**"（见 `baselineEvidence`）。
+ * 三条都过之后取**版本最高**的一个（排序规则不变）。
  *
  * ## 判据
  *
  * 基线 tag 里出现过的**每一个**迁移路径，今天都必须在磁盘上、且**字节逐字不变**
  * （`git show <tag>:<路径>` 的 sha256 vs 磁盘 sha256）。**新增文件允许** —— 这正是
  * "迁移只能新增"这句承诺的机械形态。
- * @returns `{ tag, version }`；取不到基线时返回 `null`。
+ * @returns `{ tag, version, paths, evidence }`；取不到可用基线时返回 `null`
+ *   （原因写进 {@link baselineSkipReason}）。
  */
 function publishedMigrationBaselineTag() {
+  const gitText = args => {
+    const done = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30_000 })
+    return done.error === undefined && done.status === 0 && typeof done.stdout === 'string'
+      ? done.stdout.trim()
+      : null
+  }
   const listed = spawnSync('git', ['-C', root, 'tag', '--list', 'v*'], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
   })
-  if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== 'string') return null
+  if (listed.error !== undefined || listed.status !== 0 || typeof listed.stdout !== 'string') {
+    baselineSkipReason = 'git 读不出 tag 列表'
+    return null
+  }
   const parse = tag => {
     const match = /^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/u.exec(tag)
     return match === null ? null : {
@@ -351,32 +381,103 @@ function publishedMigrationBaselineTag() {
       pre: match[4] ?? null,
     }
   }
+  const head = gitText(['rev-parse', 'HEAD^{commit}'])
+  // **第 2 条证据**：最后一次改动迁移目录的提交 —— 基线不得正好打在它上面。
+  const lastMigrationCommit = gitText(['log', '-1', '--format=%H', 'HEAD', '--', MIGRATION_DIR])
+  // **第 3 条证据**：上游默认分支（`origin/HEAD` / `origin/master` / `origin/main`）。
+  let upstream = null
+  for (const ref of ['refs/remotes/origin/HEAD', 'refs/remotes/origin/master', 'refs/remotes/origin/main']) {
+    const resolved = gitText(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+    if (resolved !== null && resolved !== '') { upstream = resolved; break }
+  }
+  // **第 3 条证据（远端）**：`git ls-remote --tags origin` —— 无网络/无 origin 时返回 `null`。
+  //
+  // ⚠️ 带注解的 tag 在 ls-remote 里给的是 **tag 对象** sha，真正的 commit 在 `^{}` 那一行
+  // （peeled）。只按第一行取值会让"远端有同名同对象的 ref"这条判据**恒假** ——
+  // 结果是所有带注解的正式 tag 都被判成"本仓自造"（本次实测踩到：全部正式 tag 被拒、
+  // 基线掉到 v2.7.1，把 4 条历史遗留差异当成新红）。所以这里**优先取 peeled 值**。
+  let remoteTags = null
+  {
+    const done = spawnSync('git', ['-C', root, 'ls-remote', '--tags', 'origin'], {
+      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 20_000,
+    })
+    if (done.error === undefined && done.status === 0 && typeof done.stdout === 'string') {
+      remoteTags = new Map()
+      for (const line of done.stdout.split('\n')) {
+        const match = /^([0-9a-f]{40})\trefs\/tags\/([^\s^]+)(\^\{\})?$/u.exec(line.trim())
+        if (match === null) continue
+        // peeled（`^{}`）先写；轻量 tag 只有未 peel 那一行。两者都映射到 **commit** sha。
+        if (match[3] !== undefined) remoteTags.set(match[2], match[1])
+        else if (!remoteTags.has(match[2])) remoteTags.set(match[2], match[1])
+      }
+    }
+  }
+  // 基线**证据等级**（写进通过行）：`upstream` > `remote` > `none`（未获远端校验）。
+  const evidenceOf = tag => {
+    const commit = gitText(['rev-parse', `${tag}^{commit}`])
+    if (upstream !== null && commit !== null) {
+      const ancestor = spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', `${tag}^{commit}`, upstream], { encoding: 'utf8' })
+      if (ancestor.status !== 0) return null // 不在上游默认分支上 ⇒ 本次改动可以自证
+      if (remoteTags === null || remoteTags.get(tag) === commit) return 'upstream'
+    }
+    if (remoteTags !== null && commit !== null) {
+      if (remoteTags.get(tag) !== commit) return null // 远端没有（或指向别的对象）⇒ 本仓自造
+      return 'remote'
+    }
+    return 'none'
+  }
   const candidates = []
+  const rejected = []
   for (const tag of listed.stdout.split('\n').map(line => line.trim()).filter(line => line !== '')) {
     const parsed = parse(tag)
     if (parsed === null) continue
     // 是 HEAD 的祖先、且不指向 HEAD 自身（`git merge-base --is-ancestor` 的退出码语义）。
     const ancestor = spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', tag, 'HEAD'], { encoding: 'utf8' })
     if (ancestor.status !== 0) continue
-    const pointsAtHead = spawnSync('git', ['-C', root, 'rev-parse', `${tag}^{commit}`], { encoding: 'utf8' })
-    const head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD^{commit}'], { encoding: 'utf8' })
-    if (pointsAtHead.status === 0 && head.status === 0
-      && String(pointsAtHead.stdout).trim() === String(head.stdout).trim()) continue
-    candidates.push(parsed)
+    const tagCommit = gitText(['rev-parse', `${tag}^{commit}`])
+    if (tagCommit !== null && head !== null && tagCommit === head) continue
+    // 第 2 条：基线不得正好打在"最后一次改动迁移目录的那个提交"上 ——
+    // 打在那里意味着**基线的内容就是被审的那次改动**（最小伪造形态）。
+    if (tagCommit !== null && lastMigrationCommit !== null && tagCommit === lastMigrationCommit) {
+      rejected.push(`${tag}（打在最后一次改动 ${MIGRATION_DIR} 的提交上 ⇒ 基线内容=本次改动）`)
+      continue
+    }
+    const evidence = evidenceOf(tag)
+    if (evidence === null) {
+      rejected.push(`${tag}（不在上游默认分支上 / 远端没有同名同对象的 ref）`)
+      continue
+    }
+    candidates.push({ ...parsed, evidence })
   }
-  if (candidates.length === 0) return null
+  if (candidates.length === 0) {
+    baselineSkipReason = rejected.length === 0
+      ? '没有任何"是 HEAD 祖先且不指向 HEAD"的 v* tag'
+      : `全部候选都不是"不受本次改动影响"的参照物：${rejected.slice(0, 6).join('；')}`
+        + `${rejected.length > 6 ? `（共 ${rejected.length} 个）` : ''}`
+    return null
+  }
   candidates.sort((a, b) => (a.major - b.major) || (a.minor - b.minor) || (a.patch - b.patch)
     || ((a.pre === null ? 1 : 0) - (b.pre === null ? 1 : 0))
     || String(a.pre ?? '').localeCompare(String(b.pre ?? '')))
-  const best = candidates.at(-1)
-  // tag 里必须有迁移目录（否则基线取错了 ⇒ 按"取不到"降级，而不是当成"没有要保的路径"）。
-  const probe = spawnSync('git', ['-C', root, 'ls-tree', '-r', '--name-only', best.tag, '--', MIGRATION_DIR], {
-    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
-  })
-  if (probe.error !== undefined || probe.status !== 0) return null
-  const paths = String(probe.stdout ?? '').split('\n').map(line => line.trim()).filter(line => line !== '')
-  if (paths.length === 0) return null
-  return { tag: best.tag, version: `v${best.major}.${best.minor}.${best.patch}${best.pre === null ? '' : `-${best.pre}`}`, paths }
+  // 从高到低挑**第一个**能读出迁移目录的候选（读不出的高版本 tag 降级到下一个，
+  // 而不是把整层判成"取不到"）。
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const best = candidates[index]
+    const probe = spawnSync('git', ['-C', root, 'ls-tree', '-r', '--name-only', best.tag, '--', MIGRATION_DIR], {
+      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+    })
+    if (probe.error !== undefined || probe.status !== 0) continue
+    const paths = String(probe.stdout ?? '').split('\n').map(line => line.trim()).filter(line => line !== '')
+    if (paths.length === 0) continue
+    return {
+      tag: best.tag,
+      version: `v${best.major}.${best.minor}.${best.patch}${best.pre === null ? '' : `-${best.pre}`}`,
+      paths,
+      evidence: best.evidence,
+    }
+  }
+  baselineSkipReason = '候选 tag 里读不出迁移目录'
+  return null
 }
 
 /** 登记表条目形状校验；任何一处不成立都返回问题（fail-closed）。 */
@@ -559,16 +660,20 @@ if (contentInScope) {
             //
             // HEAD 只能回答"未提交的改动"，**不能**回答"这次提交有没有改写历史迁移"——
             // PR 的变异就是 HEAD。基线必须取一个**不受本 PR 影响**的参照物：最近的
-            // 已发布 `v*` tag（选择规则见 `publishedMigrationBaselineTag()`）。
+            // 已发布 `v*` tag（选择规则见 `publishedMigrationBaselineTag()`；**R24 FIX-26 /
+            // X3-03** 起还要求"不是打在最后一次改动迁移目录的提交上"+ 上游/远端证据）。
             const baseline = publishedMigrationBaselineTag()
             if (baseline === null) {
-              contentNotices.push(`root=${root} 里取不到**已发布基线**（"是 HEAD 祖先且不指向 HEAD"的`
-                + ' `v*` tag 一个都没有，或 git 读不出 tag 列表 / tag 里没有迁移目录）⇒'
+              contentNotices.push(`root=${root} 里取不到**已发布基线** ⇒`
                 + ' "迁移路径与字节 vs **已发布基线**"这一层**未参与**（其余判据照常）。'
-                + ' 别把这次 EXIT=0 读成"历史迁移没被改写"——要判这一层请在带 `v*` tag 的 git 工作树上跑'
-                + "（`git tag --list 'v*'` 自查）。")
+                + `\n            原因：${baselineSkipReason === '' ? '（未记录）' : baselineSkipReason}`
+                + '\n            别把这次 EXIT=0 读成"历史迁移没被改写"——要判这一层请在带'
+                + ' **不受本次改动影响**的 `v*` tag 的 git 工作树上跑'
+                + '（`git tag --list \'v*\'` 自查；tag 打在最后一次改动迁移目录的提交上、'
+                + '或不在上游默认分支/远端引用上，都不算基线）。')
             } else {
               baselineLayerRan = true
+              baselineEvidence = baseline.evidence
               for (const path of baseline.paths) {
                 const name = path.startsWith(`${MIGRATION_DIR}/`) ? path.slice(MIGRATION_DIR.length + 1) : path
                 if (!onDisk.has(name)) {
@@ -597,7 +702,11 @@ if (contentInScope) {
                   + `          磁盘上实际 sha256 ${diskSha}\n`
                   + '          —— 已应用迁移永不原地修改（`ApplyMigrations` 按版本号跳过，改正文对'
                   + '已部署库完全不可见），要改数据请**加新迁移**。\n'
-                  + '          （把登记表里的 sha256 一起改掉也绕不过这一条：基线 tag 不受本 PR 影响。）')
+                  + '          （把登记表里的 sha256 一起改掉也绕不过这一条：基线的取值有独立证据 ——'
+                  + `${baselineEvidence === 'none'
+                    ? '**本次未获远端/上游校验**（本地 tag 里挑出的最高版本；伪造方式是把改写提交'
+                      + '自己提名成基线，见 R24 FIX-26 / X3-03）'
+                    : `已确认它${baselineEvidence === 'upstream' ? '在上游默认分支上' : '在远端引用上且对象 sha 一致'}`}。）`)
               }
             }
             if (!gitUsable) {
@@ -808,12 +917,19 @@ if (!json) {
   // **R23 FIX-22 / W4-03**：通过行必须同时说出**两层**参照物各自有没有参与 ——
   // "登记值 vs 已提交字节（HEAD）"与"路径/字节 vs **已发布基线 tag**"是两件事，
   // 只跑了前者时**不得**让读者以为历史迁移没被改写（修前正是这句话导致 W4 判它假绿）。
+  //
+  // **R24 FIX-26 / X3-03**：基线那一层参与时**还要说出它的证据等级** ——
+  // 基线取自可写域（本地 tag）时，通过行不得宣称"不受本 PR 影响"（那是假设）。
+  // `upstream` / `remote` = 已获独立校验；`none` = **未经远端校验**，如实括注。
   const headLayerClause = contentInScope && headLayerRan
     ? ''
     : '（**但"登记值 vs 已提交字节"这一层未参与**：见 [CONTENT-SKIP]）'
-  const baselineLayerClause = contentInScope && baselineLayerRan
-    ? ''
-    : '（**但"路径/字节 vs 已发布基线 tag"这一层未参与**：见 [CONTENT-SKIP]）'
+  const baselineLayerClause = !contentInScope || !baselineLayerRan
+    ? '（**但"路径/字节 vs 已发布基线 tag"这一层未参与**：见 [CONTENT-SKIP]）'
+    : (baselineEvidence === 'none'
+      ? '（基线取自**本地 tag 且未经远端/上游校验** —— 这一层挡得住"改写历史迁移"，'
+        + '但挡不住"把改写提交自己提名成基线 tag"的伪造；要闭合请在有 `origin` 的克隆上跑）'
+      : `（基线已获独立校验：${baselineEvidence === 'upstream' ? '上游默认分支' : '远端引用'}）`)
   const contentClause = contentInScope
     ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致`
       + `${headLayerClause}${baselineLayerClause}`

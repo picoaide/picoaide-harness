@@ -3559,6 +3559,11 @@ function pinnedUnsetKeyProblem(key) {
  *     两者都按 `unparsable` fail-closed 处理。
  * 不认:普通赋值语句(`FOO=1` 单独一行,不导出 ⇒ 子进程看不见)、函数定义、`local`、
  * 以及命令词**之后**的 `NAME=…` 参数(`docker run -e FOO=bar` 那种不是本进程的环境)。
+ * **R24 FIX-26 / X3-05**：这条口径对"**分不了词**"的片段同样成立 —— 修前 fail-closed 只按
+ * "片段里有没有 `NAME=`"开，于是 `V7STAMP="$(date +%s)"`（分段器在 `(`/`)` 处切段 ⇒ 片段
+ * `V7STAMP="$` 分不了词）被当成未登记的 env 键而误红，同形的 `V7PLAIN=hello` 却是绿的。
+ * 现在两处**同一判据**：只有 `export`/`declare`/`typeset`/`unset`/`env -u|-i|--unset`
+ * 这些真的改子进程环境的写法才 fail-closed。
  *
  * 分词用与 [SK-14⑥]/[SK-15] 同一套原语(`joinShellContinuations` → `maskQuotedRegions`
  * 切段 → `stripShellRedirections` → `splitShellWords`),所以"引号里的 `export`"
@@ -3596,7 +3601,23 @@ function shellEnvironmentAssignments(script) {
       // (否则任意一段带引号的文本都会把一个正常的守卫步骤判红)。
       // `unset` / `env -u|-i|--unset` 与 `export`/`declare`/`typeset` 同族（第十一轮复审 J1 的 N2）
       // —— 读不懂的"清除环境"比读不懂的"写出环境"更危险：它只会让判据**降级**。
-      if (/(?:^|[\s;&|(){}])(?:export|declare|typeset|unset)\b|\benv\s+(?:-u\b|-i\b|--unset\b|--ignore-environment\b)|\b[A-Za-z_][A-Za-z0-9_]*=/u.test(cleaned)) {
+      //
+      // **R24 FIX-26 / X3-05**：fail-closed 只对"**写出/清除环境**"的形态开 ——
+      // 即必须是 `export`/`declare`/`typeset`/`unset`/`env -u|-i|--unset` 这些**真的会改子进程
+      // 环境**的写法。修前这里只要出现 `NAME=` 就 fail-closed，于是**不导出的局部赋值**在
+      // "分不了词"时被当成未登记的 env 键 ⇒ 误红。
+      //
+      // 现场（第二十四轮 X3 泳道）：`V7STAMP="$(date +%s)"; echo "$V7STAMP" >/dev/null`
+      // —— 分段器把 `(`/`)` 当命令分隔符（掩码对 `"$(…)"` 只掩两个引号字符，内容按代码处理，
+      // 这是 W4-05 有意保留的取向），于是第一段是 `V7STAMP="$`（分不了词）+ 命中 `NAME=`
+      // ⇒ `EXIT=1`。而同形的 `V7PLAIN=hello` 是绿的（它能分词，走"普通赋值 ⇒ 不认"那一支）。
+      // **同一种语义因"值里有没有命令替换"走两个相反判决**，这才是缺陷本身。
+      //
+      // 口径（与本函数文档逐字一致）：**不导出 ⇒ 子进程看不见 ⇒ 不认** ——
+      // 词能分出来时如此，分不出来时也必须如此，否则判据自相矛盾。
+      // `export` 与赋值被分隔符切开的形态不受影响：`export NODE_OPTIONS="$(` 的片段里
+      // 仍带 `export` 关键字（切点在 `(`，不在关键字之前），照旧 fail-closed。
+      if (/(?:^|[\s;&|(){}])(?:export|declare|typeset|unset)\b|\benv\s+(?:-u\b|-i\b|--unset\b|--ignore-environment\b)/u.test(cleaned)) {
         // **R22 FIX-14**：读不懂**不等于**一定是违规 —— 这条判据要拦的是"**未登记的 env 键**"，
         // 所以把这一句里**能抽出的每一个键**抽出来逐个过白名单：全部登记过才放行
         // （任一未登记、或**一个键名都抽不出**，仍按"未登记"记红 —— fail-closed 语义不变）。
@@ -8502,6 +8523,12 @@ function maskQuotedRegions(line) {
       // 收尾引号会被当成新的开引号，把后面整段吞掉（W4-05 的 `FILES=` / `export` 现场）。
       const paired = char === '"' ? doubleQuoteCloseIndex(line, index) : -1
       if (paired > index) {
+        // **R24 FIX-26 / X3-05（第一版尝试，已回退）**：这里曾额外屏蔽引号内 `$(` 的圆括号，
+        // 想借此让 `V7STAMP="$(date +%s)"` 不再被分段器切碎。实测**不可行**：同一份掩码
+        // 还喂给命令位判据，屏蔽圆括号后 `FILES="$(gofmt -l …)"` 里的 `gofmt` 不再是命令位
+        // ⇒ `[SK-14]`/`[SK-23]` 认不出那个被钉住的判据步骤（守卫自己红）。
+        // 收口改在**消费侧**：`shellEnvironmentAssignments()` 对"不导出的局部赋值"放行
+        //（与它自己的文档口径一致），见那里的注释。
         chars[index] = '\u0000'
         chars[paired] = '\u0000'
         index = paired + 1
@@ -9741,8 +9768,11 @@ function checkPinnedStepEnvironment(file, document, blocks, notes, context = {})
       const hit = assignment.unparsable === true
         ? {
           raw: '（读不懂的片段）',
-          why: '这段 shell 里出现了 `export`/`declare`/`unset`/赋值形态,但分词失败(引号不配对等)⇒ '
-            + '判据读不懂它到底写出了/抹掉了哪个键,按"未登记"处理',
+          why: '这段 shell 里出现了 `export`/`declare`/`typeset`/`unset`/`env -u|-i|--unset`'
+            + ' 这类**真的会改子进程环境**的写法,但分词失败(引号不配对等)⇒ '
+            + '判据读不懂它到底写出了/抹掉了哪个键,按"未登记"处理'
+            + '（**不导出的普通赋值不在其中** —— 它子进程看不见,分不分得出词都不判,'
+            + '见 `shellEnvironmentAssignments` 的口径；R24 FIX-26 / X3-05）',
         }
         : (assignment.kind === 'unset'
           ? pinnedUnsetKeyProblem(assignment.name)

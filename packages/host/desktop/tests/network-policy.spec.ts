@@ -441,6 +441,40 @@ describe('接线（源码级）：开关必须早于 app.whenReady()，清理必
       .toEqual([{
         shadowed: false, conditional: false, env: 'process.env', policy: 'SYSTEM_PROXY_POLICY', argCount: 2,
       }])
+    // ---- X3-04（第二十四轮）：**别名 import 顶替真实现** ----------------------------
+    //
+    // 现场：把 import 子句换成 `resolveSystemProxyPolicy as enforceDirectTransport`（**一行**）后，
+    // 该标识符在语法上仍是"一个 import 绑定"，运行期却是**另一个函数**（签名 `(env, channel)`
+    // 恰好接得住位置参数、`await` 非 Promise 也合法）⇒ 强制块静默空转而 spec 27/27 全绿。
+    // 判据必须钉**原始导出名 + 真实现模块**，不是"解析到任意 import 绑定"。
+    const aliasedImport = [
+      "import { resolveSystemProxyPolicy as enforceDirectTransport } from '../src/network-policy.ts'",
+      'const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '',
+    ].join('\n')
+    expect(findEnforcementCalls(aliasedImport)[0]?.shadowed,
+      '别名 import（`resolveSystemProxyPolicy as enforceDirectTransport`）解析到的是**别的导出**，'
+        + '必须算作"解析不到真实现"（X3-04：修前 27/27 全绿而生产强制块空转）').toBe(true)
+    // 同族：从**别的模块**导入同名符号同样不是那个真实现。
+    const wrongModuleImport = [
+      "import { enforceDirectTransport } from '../src/somewhere-else.ts'",
+      'const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '',
+    ].join('\n')
+    expect(findEnforcementCalls(wrongModuleImport)[0]?.shadowed,
+      '从别的模块导入的同名符号不是 `./network-policy.*` 的原导出，同样必须判红').toBe(true)
+    // 同族：default / namespace 绑定即便名字相同也不是原导出。
+    const namespaceImport = [
+      "import * as enforceDirectTransport from '../src/network-policy.ts'",
+      'const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)',
+      '',
+    ].join('\n')
+    expect(findEnforcementCalls(namespaceImport)[0]?.shadowed,
+      'namespace 绑定（`import * as enforceDirectTransport`）不是那个原导出').toBe(true)
+    // 反向（**不得误红**）：构建产物形态的模块说明符（`.js`）与"把真实现换个本地名"
+    // 都仍指向 `network-policy` 的 `enforceDirectTransport`。
+    expect(findEnforcementCalls(`import { enforceDirectTransport } from './network-policy.js'\n${canonical}`)[0]?.shadowed,
+      '`.js` 扩展名是同一份源码的构建产物写法，不得误红').toBe(false)
     // 换个"更好的"策略字面量也必须被抓（那正是把强制块绕开的另一种写法）。
     expect(findEnforcementCalls("await enforceDirectTransport(process.env, { allow: true, source: 'default' })\n")[0]?.policy)
       .toBeUndefined()
@@ -560,19 +594,46 @@ function findEnforcementCalls(source: string, fileName = 'main.ts'): Enforcement
 }
 
 /**
- * **这个名字在调用点处解析到哪里**（2026-09-26 复审 W4-08 的唯一实现）。
+ * `enforceDirectTransport` 的**原始导出名**与被调用标识符要钉住的**真实现模块**
+ * （R24 FIX-26 / X3-04）。
+ *
+ * 为什么"解析到某个 import 绑定"不够：`import { resolveSystemProxyPolicy as
+ * enforceDirectTransport }` 让那个标识符在语法上仍是"一个 import 绑定"，但运行期它是**另一个
+ * 函数**（`network-policy.ts:77`，签名 `(env, channel)` 恰好能接住位置参数，`await` 一个非
+ * Promise 也合法）⇒ 生产强制块变成静默空转，而判据全绿。
+ *
+ * 模块按 **basename** 判定：源码里是 `./network-policy.ts`，构建产物/测试夹具里可能是
+ * `./network-policy.js` —— 同一份源码的两种写法都要认（否则判据会误红正当写法）。
+ */
+const ENFORCEMENT_EXPORT_NAME = 'enforceDirectTransport'
+/**
+ * 模块说明符是否指向那个真实现模块（`./network-policy.ts` / `../src/network-policy.js` …）。
+ * @param specifier - `import … from` 的模块说明符原文。
+ * @returns `true` = basename 是 `network-policy` + 一个 TS/JS 扩展名。
+ */
+function isEnforcementSourceModule(specifier: string): boolean {
+  const base = specifier.split('/').pop() ?? ''
+  return /^network-policy\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/u.test(base)
+}
+
+/**
+ * **这个名字在调用点处解析到哪里**（2026-09-26 复审 W4-08 的唯一实现；
+ * **R24 FIX-26 / X3-04** 把"解析到某个 import 绑定"收紧成"解析到**指定模块的指定导出**"）。
  *
  * 从调用点向外逐层看**作用域**：每个块/模块/函数的语句与形参里若绑定了同名标识符，
- * 那个绑定就是这个调用真正解析到的目标 —— 只有最外层 `SourceFile` 上的 `import` 才是
- * 模块顶层的那个真实现。于是"在 `start()` 里加一行同名 `const`"这种遮蔽**当场可见**，
+ * 那个绑定就是这个调用真正解析到的目标 —— 只有最外层 `SourceFile` 上那条
+ * "**从 `./network-policy.*` 未改名导入 `enforceDirectTransport`**"的 `import` 才是那个真实现。
+ * 于是"在 `start()` 里加一行同名 `const`"（W4-08）与"**把 import 换成同名别名**"
+ * （`resolveSystemProxyPolicy as enforceDirectTransport`，X3-04）**都当场可见**，
  * 而 `argCount` / `conditional` 两条判据都看不出来（它们只看调用表达式本身）。
  *
- * 覆盖的绑定形态：`const`/`let`/`var` 声明、函数/类声明、import 子句、函数形参、
- * 解构与非解构（只取名，不改写）。目标名之外的任何东西都不影响判定。
+ * 覆盖的绑定形态：`const`/`let`/`var` 声明、函数/类声明、import 子句（default / namespace /
+ * 命名 / 别名）、函数形参、解构与非解构（只取名，不改写）。目标名之外的任何东西都不影响判定。
  *
  * @param node - 调用表达式节点。
  * @param name - 被调用的标识符名。
- * @returns `true` = 这个调用解析到的**不是**模块顶层 import（被遮蔽）。
+ * @returns `true` = 这个调用解析到的**不是** `./network-policy.*` 的
+ *   `enforceDirectTransport` 原导出（被遮蔽 / 被别名顶替 / 来自别的模块）。
  */
 function hasShadowingDeclaration(node: ts.Node, name: string): boolean {
   /** 一个绑定名节点是否就是目标名。 */
@@ -581,18 +642,30 @@ function hasShadowingDeclaration(node: ts.Node, name: string): boolean {
     if (ts.isIdentifier(binding)) return binding.text === name
     return binding.elements.some(element => !ts.isOmittedExpression(element) && bindsName(element.name))
   }
-  /** 一条语句是否绑定了目标名（返回值 = 是不是 `import`）。 */
+  /** 一条语句是否绑定了目标名（返回值 = 是不是"**未改名**地来自真实现模块的 import"）。 */
   const statementBinding = (statement: ts.Statement): 'import' | 'other' | undefined => {
     if (ts.isImportDeclaration(statement)) {
       const clause = statement.importClause
       if (clause === undefined) return undefined
-      if (clause.name !== undefined && clause.name.text === name) return 'import'
+      // **R24 FIX-26 / X3-04**：只有"从 `./network-policy.*` **未改名**导入
+      // `enforceDirectTransport`"才算解析到那个真实现。
+      //
+      // 现场（第二十四轮 X3 泳道）：修前的判据只回答"这个名字解析到**某个** import 绑定"，
+      // 于是把 import 子句换成 `resolveSystemProxyPolicy as enforceDirectTransport`（**一行**）
+      // ⇒ `main.ts` 的强制块静默空转（签名恰好对得上：`(env, channel)`；`await` 非 Promise 也合法），
+      // 而 `network-policy.spec.ts` 27/27 全绿。别名 import 在运行期就是**另一个函数**。
+      const fromSource = ts.isStringLiteral(statement.moduleSpecifier)
+        && isEnforcementSourceModule(statement.moduleSpecifier.text)
+      // default / namespace 绑定即便名字相同也不是那个原导出。
+      if (clause.name !== undefined && clause.name.text === name) return 'other'
       const bindings = clause.namedBindings
-      if (bindings !== undefined && ts.isNamespaceImport(bindings) && bindings.name.text === name) return 'import'
+      if (bindings !== undefined && ts.isNamespaceImport(bindings) && bindings.name.text === name) return 'other'
       if (bindings !== undefined && ts.isNamedImports(bindings)) {
-        return bindings.elements.some(element => (element.name ?? element.propertyName)?.text === name)
-          ? 'import'
-          : undefined
+        const matched = bindings.elements.find(element => (element.name ?? element.propertyName)?.text === name)
+        if (matched === undefined) return undefined
+        // `{ A as B }` 的 `propertyName` 是 A（原导出名）、`name` 是 B（本地名）。
+        const original = matched.propertyName?.text ?? matched.name.text
+        return original === ENFORCEMENT_EXPORT_NAME && fromSource ? 'import' : 'other'
       }
       return undefined
     }
