@@ -245,6 +245,8 @@ done
 #   · 只匹配 `_transfer/<run id>-` 开头的**一级前缀**(`-` 保证 run id 不会前缀匹配到别的
 #     run:run `424` 不会命中 `4242-…`);
 #   · 前缀里只有 run id 与 HMAC token,不含渠道身份 —— 即便如此,输出仍走脱敏包装;
+#   · **没有 GITHUB_RUN_ID 时整段跳过**并打印一行(见函数体:那时 RUN 是占位值 `local`,
+#     按它枚举会删掉别的本地调用留下的 `local-*` 前缀);clean 的其余部分不受影响;
 #   · 仍然是尽力而为:clean 的失败不阻断发布(它的语义是"取回后销毁",不是发布判据)。
 #
 # 说明(历史残留,要认账):**本次改动之前**那些已经结束的 run 留下的 attempt 前缀,
@@ -254,6 +256,25 @@ done
 #  `aws s3 ls s3://$R2_BUCKET/_transfer/` 找带第二段数字的旧前缀)。
 legacy_prefix_sweep() {
   [ "$MODE" = clean ] || return 0
+  # **缺 GITHUB_RUN_ID 就跳过**(2026-09-27 第二十七轮 FIX-37)。
+  #
+  # `RUN` 的回退值 `local` **不是一个 run**:它是"没有 run id 时也能算出稳定前缀"的占位,
+  # 让 push 与 pull 在本机自洽(两条都用同一个 RUN 派生 BASE,所以 `local-<token>` 只会是
+  # 同一份配置自己建的前缀)。但**清扫是按前缀枚举后删除**,唯一的锚就是 RUN —— 用 `local`
+  # 当锚等于把**所有** `local-*` 前缀(别的本地调用留下的)一起删掉,而它们没有任何证据
+  # 属于本次运行(2026-09-27 假 aws 真跑:预置 `local-1-old`/`local-2-old` 时被一并删除)。
+  #
+  # 处置取"显式跳过"而不是 fail-loud:clean 是**尽力而为的收尾步**(见上面 clean 分支与
+  # 本函数的注释),它的失败不该因为缺一个 CI 变量让整条发布链变红;但它**必须说出来** ——
+  # 静默跳过就等于"以为清干净了"。口径与本仓其它显式 SKIP 一致。
+  #
+  # 只改这一处:push/pull **不受影响**(它们的目标是 BASE 本身,`local` 回退在它们那里
+  # 是有意义的稳定前缀;把这里的修法套过去会平白让本机 push/pull 失效)。
+  if [ -z "${GITHUB_RUN_ID:-}" ]; then
+    echo "ci-channel-transfer: skipped: no GITHUB_RUN_ID —— 旧格式(<run>-<attempt>-<token>)中转前缀的清扫以 run id 为锚,"
+    echo "ci-channel-transfer:   缺它只能退化成删掉所有 local-* 前缀(没有证据属于本次运行)⇒ 本次不清扫;要清请从桶侧人工删。"
+    return 0
+  fi
   local listing prefix
   # `aws s3 ls <前缀>/` 的输出形如 `                           PRE <name>/`;
   # 输出先捕获(经脱敏)再过滤 —— 与其余外部命令同一纪律。

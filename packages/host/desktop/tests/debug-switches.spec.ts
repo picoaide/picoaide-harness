@@ -1,9 +1,10 @@
 /**
- * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1；单横线覆盖 = 第二十六轮 Z2-02）的判据。
+ * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1；单横线覆盖 = 第二十六轮 Z2-02；
+ * Node 隐藏别名 = 第二十七轮 FIX-37）的判据。
  *
- * 三层，互补：
- *  1. **行为**（纯函数）：6 类开关 × {单横线, 双横线} × {裸, `=`, `:`} × 打包/开发 × 逃生门开/关
- *     —— 打包态逐个拒绝、开发态一个都不拦、逃生门只影响"放行"这一支。
+ * 四层，互补：
+ *  1. **行为**（纯函数）：受管清单每一名 × {单横线, 双横线} × {裸, `=`, `:`} × 打包/开发
+ *     × 逃生门开/关 —— 打包态逐个拒绝、开发态一个都不拦、逃生门只影响"放行"这一支。
  *     Z2-02 的教训：判据与实现**共享同一个误解**（"只认 `--`"）时，两层都锚在错的假设上，
  *     所以这一层现在按 **argv 解析面**（真机对照矩阵
  *     `temp/r21/fix-30/probe/chromium-argv/matrix.out`）而不是按"我们以为的写法"来钉。
@@ -13,14 +14,23 @@
  *     `async function run()`（也就是早于 `await app.whenReady()`）、必须不被条件包住、
  *     必须调用 `./debug-switches.*` 的**原导出**（不是同名别名）、实参个数恰好 2，
  *     且检测入参四项齐全（`packaged: app.isPackaged` 被改成 `false` 即红）。
+ *  4. **上游锚**（pinned Electron 运行时里的字面量，FIX-37）：清单里的名字必须是
+ *     **上游真有的名字**，而不是本仓自己写顺手的写法 —— 隐藏别名（`--inspect-brk-node`）
+ *     不在 `--help` 里，唯一可复核的仓内出处就是运行时那份二进制/快照，所以判据直接
+ *     去那里找 `addReadOnlyProcessAlias('_breakNodeFirstLine', '--inspect-brk-node', false)`。
+ *     第 1 层对第 4 层的关系是"清单 ⊇ 上游锚"：删掉别名 ⇒ 第 1 层的字面量判据与第 4 层
+ *     的枚举判据同时红。（`DEBUG_SWITCHES` 是一份**显式清单**，不是"所有调试开关"；
+ *     清单外的别名仍不在闸门面内，`--inspect*` 家族整体由打包期 fuse 兜底。
+ *     详见 `src/debug-switches.ts` 的模块头与 `packaged-inspect-fuse.spec.ts`。）
  *
  * 为什么必须钉接线的**形状**（而不是只跑纯函数）：闸门被删掉/被掏空时纯函数判据
  * 全部照旧通过，而生产行为是"打包版照旧接受 `--inspect`" —— 本仓已登记过两次同形
  * 事故（`network-policy.spec.ts` 头部记录的 B1-03 与 X3-04）。AST 判据的**自检**
  * （`findGateCalls` 对合成样本的判定）也在本文件内，避免"判据自己恒真"。
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import {
@@ -75,14 +85,18 @@ function fakeIO(options: { throwOnErrorBox?: boolean; throwOnWrite?: boolean } =
   }
 }
 
-describe('开关识别：单横线与双横线 × 6 类开关的全矩阵', () => {
-  it('受管清单逐字固定（闸门面 = 这份清单 × 两种横线前缀）', () => {
+describe('开关识别：受管清单每一名 × 单横线/双横线的全矩阵', () => {
+  it('受管清单逐字固定（闸门面 = 这份清单 × 两种横线前缀；**不是**"所有调试开关"）', () => {
+    // 逐字写死（不从被测模块取常量）：删掉其中任一名字都必须在这里红。
+    // 位置顺序也是有意的：主进程/V8 控制面在前、渲染进程 CDP 在后（见 `DEBUG_SWITCHES` 注释）。
     expect(DEBUG_SWITCHES).toEqual([
-      'inspect', 'inspect-brk', 'inspect-port', 'remote-debugging-port', 'remote-debugging-pipe', 'js-flags',
+      'inspect', 'inspect-brk', 'inspect-brk-node', 'inspect-wait', 'inspect-port',
+      'debug-port', 'inspect-publish-uid', 'js-flags',
+      'remote-debugging-port', 'remote-debugging-pipe',
     ])
   })
 
-  it('6 类开关 × {单横线, 双横线} × {裸, =值, :值} 全矩阵逐条命中', () => {
+  it('清单每一名 × {单横线, 双横线} × {裸, =值, :值} 全矩阵逐条命中', () => {
     // Z2-02：Chromium 接受单横线（真机对照 `-remote-debugging-port=9451` 真的开了
     // `DevTools listening on ws://127.0.0.1:9451/...`），所以"只认 `--`"等于闸门不存在。
     // 这里逐个形态断言，不做抽样。
@@ -103,6 +117,11 @@ describe('开关识别：单横线与双横线 × 6 类开关的全矩阵', () =
     // 兄弟开关不得互相吃掉（`inspect-brk` 不能被 `inspect` 命中）。
     expect(matchDebugSwitch('--inspect-brk=9229')).toBe('inspect-brk')
     expect(matchDebugSwitch('--inspect-port=9300')).toBe('inspect-port')
+    // 隐藏别名同理：`--inspect-brk-node=9824` 既不能被 `inspect` 也不能被
+    // `inspect-brk` 吃掉（名字不同、且 `matchDebugSwitch` 是精确相等而非前缀）。
+    expect(matchDebugSwitch('--inspect-brk-node=9824')).toBe('inspect-brk-node')
+    expect(matchDebugSwitch('--inspect-brk-node')).toBe('inspect-brk-node')
+    expect(matchDebugSwitch('-inspect-brk-node=9824')).toBe('inspect-brk-node')
   })
 
   it('大小写变体也命中 —— 有意的过拦（真机对照里大写形态不生效，但过拦只花一次拒绝）', () => {
@@ -114,6 +133,11 @@ describe('开关识别：单横线与双横线 × 6 类开关的全矩阵', () =
   it('近似名字与三根横线一律不命中（误判的代价是"打包版起不来"）', () => {
     for (const argument of [
       '--no-inspect', '--inspection', '--inspecto', '--remote-debugging-portx', '--js-flags-extra',
+      // `--allow-inspector`（Node 24 权限模型下"允许使用 inspector"）**有意不在清单里**：
+      // 它自己不开监听（`node --help`：allow use of inspector when any permissions are set），
+      // 也不在 Node 自己的 `kInspectArgRegex = /--inspect(?:-brk|-port)?|--debug-port/` 里
+      // ⇒ 列它只会多出误拒。它是"清单一角"，不是"清单完备"的证据。
+      '--allow-inspector',
       'inspect=9337', '--', '-',
       // 三根横线不是"更宽的同一种形态"：真机对照 `---remote-debugging-port=9453`
       // **没有**开监听（Chromium 只吃一或两根），Node 侧同样不认。
@@ -134,6 +158,125 @@ describe('开关识别：单横线与双横线 × 6 类开关的全矩阵', () =
     ])
   })
 })
+
+describe('Node inspect 族：隐藏别名 + 上游锚（FIX-37）', () => {
+  /**
+   * inspect 族的逐个枚举（名字 → **出处**）。
+   *
+   * 这一列**故意在判据里再写一遍**、不从 `DEBUG_SWITCHES` 派生：判据要能咬住"清单里少了谁"，
+   * 而从被测对象派生期望值就是自指等式（本仓登记的假绿模式 3）。
+   * 出处栏是给下一次上游升级用的：名字变了/消失了，先回来核这一栏。
+   */
+  const INSPECT_FAMILY: readonly { readonly name: string; readonly basis: string }[] = [
+    { name: 'inspect', basis: 'ELECTRON_RUN_AS_NODE=1 <bin> --help（activate inspector on host:port）' },
+    { name: 'inspect-brk', basis: '--help（break at start of user script）+ node_options.cc Implies --inspect' },
+    {
+      name: 'inspect-brk-node',
+      basis: "隐藏别名（--help 不列）：pre_execution.js:313 addReadOnlyProcessAlias('_breakNodeFirstLine', '--inspect-brk-node', false)"
+        + ' + node_options.cc:477-479（AddOption + Implies --inspect + AddAlias --inspect-brk-node=）',
+    },
+    {
+      name: 'inspect-wait',
+      basis: '--help + node_options.cc:482-487（Implies --inspect）；真机对照在本宿主上 NO-LISTENER ⇒ 当前是过拦',
+    },
+    { name: 'inspect-port', basis: '--help（--debug-port, --inspect-port=[host:]port）' },
+    { name: 'debug-port', basis: 'node_options.cc:457 AddAlias("--debug-port", "--inspect-port") + 上游 kInspectArgRegex 一族' },
+    { name: 'inspect-publish-uid', basis: '--help（uid 目的地；单独不激活，与 inspect-port 同为过拦）' },
+  ]
+
+  it('枚举：inspect 族的每个名字都在受管清单里（含 --help 不列的隐藏别名）', () => {
+    for (const entry of INSPECT_FAMILY) {
+      expect(DEBUG_SWITCHES, `${entry.name} 必须受管 —— 出处：${entry.basis}`).toContain(entry.name)
+    }
+  })
+
+  it('隐藏别名 --inspect-brk-node 的四种形态：命中 + 打包态拒绝（真机上它真的开监听）', () => {
+    for (const raw of ['--inspect-brk-node', '--inspect-brk-node=9824', '-inspect-brk-node', '-inspect-brk-node=9824']) {
+      expect(matchDebugSwitch(raw), `${raw} 必须命中`).toBe('inspect-brk-node')
+      const gate = detect({ argv: ['--no-sandbox', raw] })
+      expect(gate.refused, `${raw} 在打包态必须 refused`).toBe(true)
+      expect(gate.matches.map(match => match.raw)).toEqual([raw])
+    }
+  })
+
+  it('上游锚：pinned Electron 运行时里真的有这条别名注册（不是我们编的名字）', () => {
+    const runtime = scanElectronRuntimeForInspectAlias()
+    // 先要强的那个形态（注册行）；只有它不在时才退回"名字在运行时里"这一较弱的证据，
+    // 并在断言消息里写明退化到哪一层 —— 判据不得因为"退化了"而变成假绿（消息即证据）。
+    expect(
+      runtime.registration ?? runtime.name,
+      `pinned Electron 运行时（${runtime.scanned}）里找不到 ${ALIAS_REGISTRATION}；`
+        + '若上游确实改了这行，先回来核 INSPECT_FAMILY 的出处栏，再决定清单怎么改',
+    ).toBeDefined()
+  })
+})
+
+/**
+ * Node 里那行**隐藏别名注册**（逐字取自上游 `lib/internal/process/pre_execution.js`）。
+ * 它在 pinned Electron 二进制里也能 `strings` 到 —— 这就是"清单里的名字是上游真有的名字"
+ * 的仓内可复核锚。
+ */
+const ALIAS_REGISTRATION = "addReadOnlyProcessAlias('_breakNodeFirstLine', '--inspect-brk-node', false)"
+
+/** 本仓安装的 Electron 可执行文件（`require('electron')` 在普通 Node 进程里返回二进制路径）。 */
+function resolveElectronBinary(): string {
+  const require = createRequire(import.meta.url)
+  const binary = require('electron') as unknown
+  if (typeof binary !== 'string' || !existsSync(binary)) {
+    // 与 `packaged-inspect-fuse.spec.ts` 同口径：缺二进制是**环境问题**（先 yarn install），
+    // 不是"跳过这一层"——跳过就等于把上游锚变成空转。
+    throw new Error(`electron binary not resolved (got ${JSON.stringify(binary)}); run yarn install first`)
+  }
+  return binary
+}
+
+/** 分块扫文件里有没有这段字节（运行时 250MB+，不能整份读进内存）。 */
+function fileContains(file: string, needle: string): boolean {
+  const target = Buffer.from(needle, 'utf8')
+  const size = statSync(file).size
+  if (size === 0) return false
+  const chunk = 4 << 20
+  const buffer = Buffer.allocUnsafe(chunk + target.length)
+  const fd = openSync(file, 'r')
+  try {
+    let carry = 0
+    let position = 0
+    while (position < size) {
+      const read = readSync(fd, buffer, carry, chunk, position)
+      if (read <= 0) break
+      position += read
+      const view = buffer.subarray(0, carry + read)
+      if (view.includes(target)) return true
+      // 跨块边界的命中：把尾部不到 needle 长度的字节挪到下一块头部，否则会漏（假绿）。
+      carry = Math.min(target.length - 1, view.length)
+      view.copy(buffer, 0, view.length - carry)
+    }
+    return false
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * 在 pinned Electron 运行时里找隐藏别名：可执行文件 + 同目录的 `*.bin` 快照
+ * （不同平台把内嵌 JS 放在哪一份里不保证，两份都扫）。
+ * @returns 命中文件（强证据 = 注册行，弱证据 = 仅名字）与扫描根。
+ */
+function scanElectronRuntimeForInspectAlias(): {
+  readonly registration: string | undefined
+  readonly name: string | undefined
+  readonly scanned: string
+} {
+  const binary = resolveElectronBinary()
+  const distDir = dirname(binary)
+  const files = [binary, ...readdirSync(distDir).filter(entry => entry.endsWith('.bin')).map(entry => join(distDir, entry))]
+  let name: string | undefined
+  for (const file of files) {
+    if (fileContains(file, ALIAS_REGISTRATION)) return { registration: file, name: name ?? file, scanned: distDir }
+    if (name === undefined && fileContains(file, '--inspect-brk-node')) name = file
+  }
+  return { registration: undefined, name, scanned: distDir }
+}
 
 describe('判定：打包态逐个拒绝（单/双横线同等），开发态一个都不拦', () => {
   it('全矩阵在打包态都必须被拒绝（逐个断言，不是抽样）', () => {

@@ -28,7 +28,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -5263,6 +5263,95 @@ esac
   // `<前缀>/ch-<index>/` 这棵子树 —— 真实 S3 里"前缀"本身不是对象，删完对象即空）。
   check(!existsSync(join(attemptStore, '_transfer', prefixesAfterFirst[0] ?? 'missing', 'ch-3')),
     'clean 仍必须删掉本 run 的当前前缀下的中转对象')
+
+  // ---- 7b-2. clean 的前缀清扫:缺 GITHUB_RUN_ID 时**不得**退化成"删掉所有 local-*" ----
+  //
+  // 2026-09-27 第二十七轮审计 AA1 §证伪-3(假 aws 真跑):`RUN` 的回退值 `local` **不是一个 run**
+  // (它只是"没有 run id 时也能算出稳定前缀"的占位,让本机 push/pull 自洽),而清扫唯一的锚就是
+  // `RUN` ⇒ 缺变量时 `clean` 会把**别的本地调用**留下的 `local-*` 前缀一起删掉。修法是"显式跳过
+  // 并打一行"(clean 是尽力而为的收尾步,不因缺一个 CI 变量让发布链变红,但不许静默)。
+  //
+  // 这一节把四件事一起钉死(逐条都是行为断言,不看脚本源码):
+  //   ① 别人的 `local-*` 与不在本 run 锚定面内的前缀:任何 run id 下都不得被删;
+  //   ② 缺 GITHUB_RUN_ID(未设 / 空串)⇒ 清扫不删 `local-*`,且**必须打印显式跳过**;
+  //   ③ 本 run 的当前前缀(`<run>-<HMAC 前 16 位>`)照常删 —— 证明 clean 仍在干活,
+  //      跳过只罩"按前缀枚举"的清扫,不罩 clean 本身;
+  //   ④ 前缀碰撞矩阵(run id 是别人前缀 / 别人是本 run 前缀 / 裸 run id)逐字不变。
+  const transferToken = run => createHmac('sha256', R2_CREDENTIALS.R2_SECRET_ACCESS_KEY)
+    .update(run).digest('hex').slice(0, 16)
+  const transferDir = prefix => join(attemptStore, '_transfer', prefix)
+  // `ch-<index>` 的 index = 渠道在 channels.list 里的**行号**:本夹具是 `official\nexample-brand`
+  // ⇒ 品牌渠道的产物落在 `ch-2/`(clean 的主循环只删自己那个 index,清扫才按前缀整片删)。
+  const seedPrefix = (prefix, channelIndex = 3) => {
+    mkdirSync(join(transferDir(prefix), `ch-${String(channelIndex)}`), { recursive: true })
+    writeFileSync(join(transferDir(prefix), `ch-${String(channelIndex)}`, 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  }
+  /** `clean` 只换环境里的 GITHUB_RUN_ID(其余与上面的 runTransfer 同形)。 */
+  const runClean = runId => {
+    const env = {
+      PATH: `${attemptWork}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ATTEMPT: '1',
+      ...R2_CREDENTIALS,
+    }
+    // `undefined` = 变量**不在环境里**;`''` = 在但为空(GitHub 上两种都会出现,`${VAR:-}` 都算缺)。
+    if (runId !== undefined) env.GITHUB_RUN_ID = runId
+    return spawnSync('bash', [transferScript, 'clean', '--list', attemptList], {
+      cwd: attemptWork, encoding: 'utf8', env,
+    })
+  }
+  const reseed = () => {
+    seedPrefix('777-1-deadbeefdeadbeef')                 // 本 run 的旧格式残留
+    seedPrefix(`777-${transferToken('777')}`, 2)         // 本 run 的当前前缀(产物在 ch-2)
+    seedPrefix(`local-${transferToken('local')}`, 2)     // 缺变量时的当前前缀(RUN 退化成 local)
+    seedPrefix('7770-cafe')                              // run id 是它的前缀
+    seedPrefix('77-1-aaaa')                              // 它是 run id 的前缀
+    seedPrefix('777')                                    // 裸 run id(无横线)
+    seedPrefix('local-1-old')                            // 别的本地调用留下的
+    seedPrefix('local-2-old')
+    seedPrefix('localother')                             // 连横线都没有
+  }
+
+  // ④+①(run id 已设):清扫照常删本 run 的,谁都不许多删。
+  reseed()
+  const runAnchored = runClean('777')
+  check(runAnchored.status === 0, `clean 应成功,实际退出 ${String(runAnchored.status)}`)
+  check(!existsSync(transferDir('777-1-deadbeefdeadbeef')),
+    'clean 必须删掉本 run 的旧格式(<run>-<attempt>-<token>)前缀')
+  check(!existsSync(join(transferDir(`777-${transferToken('777')}`), 'ch-2')),
+    'clean 必须删掉本 run 当前前缀下的对象')
+  for (const decoy of ['7770-cafe', '77-1-aaaa', '777', 'local-1-old', 'local-2-old', 'localother']) {
+    check(existsSync(transferDir(decoy)),
+      `clean 不得删 \`${decoy}\`:它不在"本 run 前缀"的锚定面内(\`<run>-\` 锚定)`)
+  }
+
+  // 前置(防假绿):显式把 GITHUB_RUN_ID 设成字面量 `local` 时,清扫**确实**按 `local-` 删。
+  // 没有这条,"缺变量 ⇒ 不删"可能只是因为夹具里清扫压根不工作 —— 那时下面几条全是假绿。
+  // 注意口径:这条钉的是**显式给了 run id** 时的既有锚定语义(prefix 匹配的固有含义),
+  // 修法针对的是**变量缺席**,不是把 `local` 这个名字特殊化。
+  seedPrefix('local-control-probe')
+  const literalLocal = runClean('local')
+  check(literalLocal.status === 0, `GITHUB_RUN_ID=local 时 clean 应成功,实际退出 ${String(literalLocal.status)}`)
+  check(!existsSync(transferDir('local-control-probe')),
+    '前置失效:GITHUB_RUN_ID 显式设为 local 时清扫应删除 local- 前缀(否则下面的用例咬不到东西)')
+
+  // ②+③(缺变量):清扫整段跳过 + clean 的其余部分照常。
+  for (const missing of [undefined, '']) {
+    reseed()
+    const label = missing === undefined ? '未设' : '空串'
+    const noRun = runClean(missing)
+    const output = `${noRun.stdout ?? ''}${noRun.stderr ?? ''}`
+    check(noRun.status === 0,
+      `GITHUB_RUN_ID ${label} 时 clean 仍应成功(尽力而为的收尾步:不因缺一个 CI 变量让发布链变红),实际退出 ${String(noRun.status)}`)
+    check(output.includes('skipped: no GITHUB_RUN_ID'),
+      `GITHUB_RUN_ID ${label} 时必须**显式**说清扫被跳过(静默跳过 == 以为清干净了),实际输出:${output.trim().slice(0, 200)}`)
+    for (const name of ['local-1-old', 'local-2-old', '7770-cafe', '77-1-aaaa', '777', 'localother']) {
+      check(existsSync(transferDir(name)),
+        `GITHUB_RUN_ID ${label} 时 clean 不得删 \`${name}\`:RUN 退化成占位值 \`local\` 后它会被误判成本 run 的前缀`)
+    }
+    check(!existsSync(join(transferDir(`local-${transferToken('local')}`), 'ch-2')),
+      `GITHUB_RUN_ID ${label} 时 clean 仍必须删掉当前前缀(local-<token>)下的对象 —— 跳过只罩前缀清扫,不罩 clean 本身`)
+  }
 }
 
 // ---- 7c. pull 的「三平台齐全」判据:少一个平台必须红且点名(独立夹具) ----
@@ -5830,4 +5919,5 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '探测对象生命周期(删除后必须 404,失败即 fail-loud;EXIT trap 保证校验失败路径也删除;'
   + '故障注入按**调用点**生效并被逐条断言:上传阶段读不回 / 删除后缺席检查读不回 各有用例;'
   + 'PROBE_PAYLOAD/PROBE_BYTES/注释三者一致)/'
-  + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期\n')
+  + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期/'
+  + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)\n')

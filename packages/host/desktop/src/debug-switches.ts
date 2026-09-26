@@ -30,6 +30,21 @@
  * **比真实解析面窄**，闸门等于不存在。所以 {@link matchDebugSwitch} 现在同时接受
  * 单横线与双横线（另见该函数的注释：哪一半是 Chromium 面、哪一半是 Node 面）。
  *
+ * ## 闸门面是一份**显式清单**，不是"所有调试开关"（2026-09-27 第二十七轮 FIX-37）
+ *
+ * {@link DEBUG_SWITCHES} 是**逐个枚举**的：Node / Chromium 里任何没被枚举到的名字
+ * 都不在闸门面内。这是本文件第三次踩到"取值域 ≠ 真实解析面"（前两次：只认 `--`、
+ * 只认本仓自己的字面量表），而**隐藏别名**正是"按自己的字面量表定义"最容易漏的一类
+ * —— 它们不出现在 `--help` 里，只能从上游源码或二进制枚举（`--inspect-brk-node` 即此类，
+ * 已补入，依据见 {@link DEBUG_SWITCHES}）。
+ *
+ * 所以**不要把这份清单读成"调试面已关闭"的安全结论**：闸门覆盖的是清单里那几名，
+ * 清单外的别名不在其内；`--inspect*` 家族**整体**由打包期 fuse
+ * `EnableNodeCliInspectArguments=false` 兜底（`afterPack` → `scripts/verify-packaged-runtime.ts`，
+ * 真机对照见 `tests/packaged-inspect-fuse.spec.ts`），那一层才是这一族的结构性收口。
+ * 本闸门是纵深防御：拦无意/遗留/被误导的开关（快捷方式、IDE 启动配置、排障指引）
+ * 与静默暴露，并把"本次真的绕过了保护"变成启动日志里的一行。
+ *
  * ## 为什么必须"拒绝启动"，而不是 `removeSwitch` / 关 devTools
  *
  *  `--inspect` 的监听在 **JS 跑之前**就已经建好（V8 inspector 是运行时启动参数），
@@ -76,8 +91,26 @@ export const ALLOW_DEBUG_SWITCHES_ENV = 'PICOAI_ALLOW_DEBUG_SWITCHES'
 /**
  * 受管开关名（**唯一字面量出处**，不含前导横线）。
  *
+ * **枚举依据**（2026-09-27 FIX-37 补齐；每一条都写下出处，别只抄别人表里的名字）：
+ *  - `ELECTRON_RUN_AS_NODE=1 <bin> --help` 的 inspect 段：`--inspect` / `--inspect-brk` /
+ *    `--debug-port, --inspect-port` / `--inspect-publish-uid` / `--inspect-wait`
+ *    （pinned Electron 44.4.3 内嵌 Node 24.21.0 实测，与本机 Node 24.16.0 逐字相同）；
+ *  - Node 源码 `src/node_options.cc:453-490`（v24.16.0）：`AddAlias("--debug-port", "--inspect-port")`
+ *    与 `Implies("--inspect-brk-node"|"--inspect-wait", "--inspect")` —— 后两条说明这两个
+ *    名字**会连带激活 inspector**，不是"只配参数"；
+ *  - **隐藏别名**（`--help` 不列）出自 Node 源码 `lib/internal/process/pre_execution.js:312-313`：
+ *    `addReadOnlyProcessAlias('_breakFirstLine', '--inspect-brk', false)` 与
+ *    `addReadOnlyProcessAlias('_breakNodeFirstLine', '--inspect-brk-node', false)`
+ *    —— 同一段里其余 11 个别名是 `--eval`/`--print`/`--check`/… 与调试无关，
+ *    所以 inspect 族的隐藏别名**只有 `--inspect-brk-node` 一个**。
+ *    该行在 pinned Electron 二进制里逐字可 `strings` 到；真机对照（temp/r27/AA1/inspect-family.txt）
+ *    在**未翻 fuse** 的复刻件上 `--inspect-brk-node=9824` 真的开了 `Debugger listening …`
+ *    且 `/json/list` 给出 node 目标 ⇒ 它比 `--inspect` 更危险（`_breakNodeFirstLine`
+ *    = 在主脚本之前断下）。FIX-33 的 fuse 会把它一起丢弃（同一份复刻件翻过 fuse 后
+ *    NO-LISTENER）⇒ **安全后果为 0，这是纵深防御缺口**。
+ *
  * 两个族，危害不同但都必须拦：
- *  - 主进程 / V8 控制面：`inspect`、`inspect-brk`、`inspect-port`、`js-flags`
+ *  - 主进程 / V8 控制面：`inspect*` 全族、`debug-port`、`js-flags`
  *    ⇒ 任意代码执行（那里有企业会话 bearer 与 safeStorage 解密能力）；
  *  - 渲染进程 CDP：`remote-debugging-port`、`remote-debugging-pipe`
  *    ⇒ 读出 HttpOnly 的持有性证明 cookie，把"只有真页面能证明自己"这一前提推翻。
@@ -87,21 +120,35 @@ export const ALLOW_DEBUG_SWITCHES_ENV = 'PICOAI_ALLOW_DEBUG_SWITCHES'
  *    由 `base::CommandLine` 解析 —— 单横线**真的生效**（本文件头部的真机对照）；
  *  - `js-flags`：两侧同名 —— Node 侧给 V8 传启动参数，Chromium 侧给渲染进程 V8
  *    传参数，所以它也吃单横线；
- *  - `inspect` / `inspect-brk` / `inspect-port`：**只有 Node 侧**认，而 Node 的
- *    命令行解析只接受 `--`（真机对照：`-inspect=9337` 不开监听）。对这三个多拦
- *    一个单横线形态是**有意的过拦**：代价是拒绝一次本就不会生效的异常启动，
- *    收益是"哪天 Electron/Chromium 把单横线也认到这一族时闸门不会静默失效"。
+ *  - `inspect` 族与 `debug-port`：**只有 Node 侧**认，而 Node 的命令行解析只接受 `--`
+ *    （真机对照：`-inspect=9337` 不开监听）。对这一族多拦一个单横线形态是**有意的过拦**：
+ *    代价是拒绝一次本就不会生效的异常启动，收益是"哪天 Electron/Chromium 把单横线也认到
+ *    这一族时闸门不会静默失效"。
  *
- * `inspect-brk` / `inspect-port` 必须单列：按 `名字=` 前缀匹配时
+ * 同族的**过拦**三项（单独用不开监听，但名字本身就在 inspect 族里，多拦一次的代价只是
+ * 拒绝一次异常启动）：`inspect-port`（只配端口）、`inspect-wait`（上游 `Implies --inspect`，
+ * 但真机对照在 pinned Electron 上 NO-LISTENER ⇒ **当前是过拦，等哪天宿主认了就变成真闸门**）、
+ * `inspect-publish-uid`（只配 uid 目的地）。**有意不列** `--allow-inspector`：它是 Node 24
+ * 权限模型下"允许使用 inspector"的开关（`node --help`：allow use of inspector when any
+ * permissions are set），自身不激活 inspector，也不在 Node 自己的
+ * `kInspectArgRegex = /--inspect(?:-brk|-port)?|--debug-port/` 里 —— 列它只会多出误拒。
+ *
+ * `inspect-brk` / `inspect-port` / `inspect-brk-node` 必须单列：按 `名字=` 前缀匹配时
  * `--inspect-brk=9229` 不会命中 `inspect`（`inspect` 后面紧跟的是 `-`）。
  */
 export const DEBUG_SWITCHES: readonly string[] = [
+  // 主进程 / V8 控制面。
   'inspect',
   'inspect-brk',
+  'inspect-brk-node',
+  'inspect-wait',
   'inspect-port',
+  'debug-port',
+  'inspect-publish-uid',
+  'js-flags',
+  // 渲染进程 CDP。
   'remote-debugging-port',
   'remote-debugging-pipe',
-  'js-flags',
 ]
 
 /** 一个被命中的调试开关。 */
@@ -247,8 +294,8 @@ export function debugSwitchRefusalMessage(gate: DebugSwitchGate): string {
   return [
     `拒绝启动：本次是以调试类命令行开关启动的打包版（${listed}）。`,
     '这类开关把本应用完整交给"任何以本用户身份运行的进程"：',
-    '  --inspect / --inspect-brk / --inspect-port / --js-flags ⇒ 主进程任意代码执行',
-    '    （企业会话令牌就在主进程内存里）；',
+    '  --inspect / --inspect-brk / --inspect-brk-node / --inspect-port / --js-flags',
+    '    ⇒ 主进程任意代码执行（企业会话令牌就在主进程内存里）；',
     '  --remote-debugging-port / --remote-debugging-pipe ⇒ 渲染进程的 cookie，',
     '    含本地写面闸门所信任的 HttpOnly 持有性证明 cookie。',
     '请从启动方式（快捷方式/脚本/IDE 配置）里去掉这个开关；需要在开发态调试请用 `yarn dev`。',
@@ -259,8 +306,9 @@ export function debugSwitchRefusalMessage(gate: DebugSwitchGate): string {
     '',
     `Refusing to start: this packaged build was launched with a debugging switch (${listed}).`,
     'Such switches hand any process running as this user full control of the application:',
-    '  --inspect / --inspect-brk / --inspect-port / --js-flags => arbitrary code execution in the',
-    '    Electron main process, where the enterprise session token lives;',
+    '  --inspect / --inspect-brk / --inspect-brk-node / --inspect-port / --js-flags =>',
+    '    arbitrary code execution in the Electron main process, where the enterprise session',
+    '    token lives;',
     '  --remote-debugging-port / --remote-debugging-pipe => the renderer cookies, including the',
     '    HttpOnly proof-of-possession cookie the local write routes trust.',
     'Remove the switch from the launcher/shortcut (or use a development build, e.g. yarn dev).',
