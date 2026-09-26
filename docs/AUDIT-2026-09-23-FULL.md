@@ -1776,3 +1776,32 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
 要真正收敛，需要：① 把剩余未覆盖面（`packages/host/desktop/src` 运行时面、`packages/client/**`、
 `scripts/**` 非门禁脚本与 `.github` 未覆盖面）扫完并清空；② 每轮修复批都要有**调用点级**判据
 （第二十五轮那条 P1 的根因就是"判据只钉函数、不钉调用点"）。
+
+#### 第二十五轮修复批（FIX-27/28/29，提交 `bc0973cd84` / `859ee2f1cc` / `7101af875a` / `a233a61a9c`）
+
+| 覆盖 | 关键点 |
+|---|---|
+| **R25-Y3-1（P1）** | 服务侧 app_id 解析收口成**唯一入口**，7 处客户端面/管理面调用点改过去（写侧两处仍是写侧）；判据升级为**调用点级**（AST 断言每个服务侧 handler 解析到 ForServing + 真 PG/真路由端到端矩阵）。**教训固化**：上一轮那条 P1 的根因就是"判据只钉 registry 两个函数、不钉调用点"——把 `serve.go` 改回写侧变体时包级测试仍全绿 |
+| **R25-Y1-1（P1）** | `scanUsageMonthTables` 改为只排除 `usage_daily_*`、月份归属由**边界事实**推导 ⇒ 季度/整年命名的叶子分区纳入保留期回收；判据含"三种命名都被正确回收 / 未超期不得误删 / `usage_daily_*` 仍跳过 / 既有保留期回归保持绿" |
+| **R25-Y4-1（P1）** | 新增 `debug-switches.ts`（6 类受管开关 × `argv`/`execArgv`，纯函数 + 可注入副作用），`main.ts` **模块作用域** fail-loud（早于 `whenReady`；`--inspect` 在 JS 之前已监听，`removeSwitch` 对它无效），逃生门 `PICOAI_ALLOW_DEBUG_SWITCHES=1`；6 个 CDP 驱动打包产物的 E2E/探针脚本补该 env（否则 CI e2e 会因 app 拒绝启动而红）。真机三态实跑（打包态拒绝 / 开发态放行 / 逃生门放行）。**认账**：同机同用户攻击者同时控制 argv 与环境，逃生门对他不构成障碍 —— 拦的是无意/遗留开关与静默暴露；cookie 那一半的真正闭合需结构性修法 |
+| **R25-Y4-2（P1）** | `--verify-app-dir` 两级解析（先分包根再仓库根）+ 解析不到即 fail-loud + 通过行如实写 `included/skipped`；`verify-ci-scripts` 补回归（真 asar 夹具证明"篡改 `channel_id` 必红"、缺目录必须失败） |
+| **R25-Y4-3（P1）** | `electron-shots` 的 CDP 归属：缺省 `--remote-debugging-port=0`、显式端口先探占用、端口必须来自**本次拉起的进程自己宣告**（stderr 横幅或 `DevToolsActivePort`，不一致即失败）、`/json/version` 必须 Electron 形状且主版本一致、page target 必须本 app 主窗口且同源；同批五条 P2（`send()` 超时 / `--display` 真被使用 / 截图目录不得写仓内 / 全新 HOME 与清理 / 未知参数 fail-loud）。**真机修后 13/13 PASS，修前在真 app 上本来就是红的**（旧实现抓的是内置浏览器页） |
+| 面板焦点 P2 | 整页面板打开后焦点不再被侧边栏行抢回（`surface.tsx` 焦点契约 + `FootMenuRow` 先交还锚点） |
+
+**门禁**：`corepack yarn check` **32/32、0 失败、0 跳过**（首跑因守卫自身摘要登记值未同步而红，按
+`--print-digests` 收口后转绿 —— 与第二十二/二十三轮同一形态，已在本节固化）。
+
+#### 交付状态（截至第二十五轮修复批）
+
+- **已完成**：5 轮审计（21–25，共 27 条审计泳道）+ 16 条修复泳道；所有 P0/P1 均有"修复 + 能杀死回退的
+  判据 + 变异证据"；整仓门禁绿；审计记录（§7.56–§7.60）与行为变更登记（`docs/releases/v2.8.2-beta.1.md` §十二）落库。
+- **未达成**：**"连续两轮零新增 P0/P1"这一收敛条件**。当前已知未闭环项（按价值）：
+  ① 本机同用户攻击者经 CDP 的 cookie 窃取（需结构性修法，非本批范围）；
+  ② `agentshare` 孪生的可见性分叉（HANDOFF 已给精确改法）；
+  ③ `chown`/结构性残留：`integration-tests/README.md` 参数同步、仓内 5 张历史 PNG、
+  `run-all.sh` 无 per-runner timeout、登录页 step2 的 1/6 瞬时失败（有界轮询）；
+  ④ 判据面已知边界：E-01 未覆盖 `sed -i`/`git checkout --`/`dd of=`，E-02 的"运行期条件"形态，
+  迁移基线的远端校验在无网络时降级。
+- **建议的下一轮范围**：① 复审 FIX-27/28/29（尤其 `debug-switches` 的接线判据与 electron-shots 的
+  归属证明边界）；② 继续扫未覆盖面（`packages/host/desktop/src` 运行时面、`packages/client/**`、
+  `scripts/**` 非门禁脚本、`.github` 未覆盖面）。
