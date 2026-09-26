@@ -610,7 +610,11 @@ function hasShadowingDeclaration(node: ts.Node, name: string): boolean {
       // 同一层里**逐条**看：只要有一条非 import 的同名绑定，这个作用域就遮蔽了目标名
       // （`import X …` 与 `const X = …` 同层 = 重声明；只认"第一条绑定"会漏掉后者）。
       let sawImport = false
-      for (const statement of current.statements) {
+      // `CaseBlock` 没有 `statements`，它的语句挂在各个 `clause` 上（TS 类型如实约束）。
+      const blockStatements: readonly ts.Statement[] = ts.isCaseBlock(current)
+        ? current.clauses.flatMap(clause => [...clause.statements])
+        : current.statements
+      for (const statement of blockStatements) {
         const binding = statementBinding(statement)
         if (binding === 'other') return true
         if (binding === 'import') sawImport = true
