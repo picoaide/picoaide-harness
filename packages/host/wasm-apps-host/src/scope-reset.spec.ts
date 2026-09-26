@@ -1,7 +1,8 @@
 /**
  * 会话作用域清理链的判据（第二十八轮 FIX-40 ③）。
  *
- * 被修的形态（`KNOWN_UNGUARDED_ENTRIES` 里那条）：会话作用域变化时 `index.ts` 是
+ * 被修的形态（原 `KNOWN_UNGUARDED_ENTRIES`、第二十九轮 FIX-44 ② 已迁到 `ENTRY_EXEMPTIONS`
+ * 的那条）：会话作用域变化时 `index.ts` 是
  * `void windows?.closeAll()` + `void cache?.clearAll()` —— **即发即忘**。`closeAll()` 内部
  * 没有 await（调用即同步关完），但 `clearAll()` 是真异步（`rm -rf` 整个缓存根 + 重建根），
  * 于是"上一代的 `rm` 落在新账号刚写下的缓存**之后**"是一条真实时序：新账号的应用页加载
@@ -22,7 +23,7 @@
  *    不可自愈的卡死"）；
  *  · 用例 6：把 `leaving === null` 的判据改成"永远清"⇒ 红（§7.6：未登录入队、登录后打开，
  *    未登录→登录不许清掉缓存）；
- *  · 用例 8：把 `index.ts` 的接线改回即发即忘 ⇒ 红。
+ *  · 用例 8：把 `index.ts` 的接线改回即发即忘 ⇒ 红（**负控实跑**见 temp/r21/fix-44/probe/logs/nc-a-scope-reset.log）。
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
@@ -176,7 +177,7 @@ describe('作用域清理链（FIX-40 ③）', () => {
     expect([...entries], '修前形状：新账号刚写下的条目被上一代的 rm 删掉了（判据必须能看见它）').toEqual([])
   })
 
-  it('用例8 接线：index.ts 必须经清理链调度（begin + settled），不得回到即发即忘', () => {
+  it('用例8 接线：index.ts 必须经清理链调度（start + settled），不得回到即发即忘', () => {
     const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
     // 会话回调里的换代必须经 `begin`（关窗 + 清缓存都在链里）。
     expect(source, 'index.ts 必须用 createScopeReset').toContain('createScopeReset({')

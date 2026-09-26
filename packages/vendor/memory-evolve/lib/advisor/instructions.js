@@ -37,6 +37,17 @@ export const PENDING_MAX = 20
 export class InstructionQueue {
   /** sessionId → 指令数组（{id, createdAt, text, state, reviewId?}）。 */
   queues = new Map()
+  /**
+   * **基线读失败**的会话集合（FIX-45③，2026-09-29）。
+   *
+   * 现场：`load()` 修前把读失败降级成"空队列 + 一行 warn"，随后 `add()`/`reserve()`/
+   * `clearPending()` 用这个空队列 `persist()` ⇒ **该会话全部待处理指令被整文件覆盖抹掉**，
+   * HTTP 还回 `200 ok:true`（一次瞬时 EACCES 就够）。同族收口形态见 `lib/skills.js`
+   * （AB2-04）与 `lib/coi/*`：**只有能证明"没有这一条"才放行，其余一律 fail-closed**。
+   * 命中集合的会话**拒绝持久化**（`persist()` 抛出可读原因）；读成功即清除（瞬时故障自愈）。
+   * @type {Set<string>}
+   */
+  loadFailed = new Set()
   writeFile
   fileFor
   now
@@ -48,36 +59,51 @@ export class InstructionQueue {
     this.now = options.now ?? (() => Date.now())
   }
 
-  /** 加载一个会话的持久化指令（启动/首次访问时；失败按空队列处理并告警）。 */
+  /**
+   * 加载一个会话的持久化指令（启动/首次访问时）。
+   *
+   * **只有"文件不存在"（注入 reader 已把 ENOENT 归一成 `''`）才算空队列**；
+   * 其余读失败 / 内容不可解析 ⇒ 记 {@link loadFailed}（**不缓存空队列** ⇒ 下次访问重试），
+   * 由 `persist()` 拒写。读面仍返回空（评审不被阻断），但写面 fail-closed。
+   */
   load(sessionId, logger = console) {
     if (this.queues.has(sessionId)) return
+    if (typeof this.readFile !== 'function') {
+      this.queues.set(sessionId, [])
+      return
+    }
     try {
-      const raw = this.fileFor(sessionId)
-      if (typeof this.readFile === 'function') {
-        const text = this.readFile(raw)
-        const parsed = text === '' ? [] : JSON.parse(text)
-        if (Array.isArray(parsed)) {
-          const items = parsed.filter((item) => item && typeof item.id === 'string')
-          // 复审中3（崩溃恢复）：旧进程遗留的 reserved 恢复为 pending——
-          // 旧 review 不可能继续完成，否则这些指令永久卡住（破坏
-          // at-least-once）；bound 是内存瞬态不持久化，天然清除。
-          let changed = false
-          for (const item of items) {
-            if (item.state === 'reserved') {
-              item.state = 'pending'
-              item.reviewId = undefined
-              delete item.bound
-              changed = true
-            }
-          }
-          this.queues.set(sessionId, items)
-          if (changed) this.persist(sessionId)
+      const text = this.readFile(this.fileFor(sessionId))
+      const parsed = text === '' ? [] : JSON.parse(text)
+      const items = Array.isArray(parsed)
+        ? parsed.filter((item) => item && typeof item.id === 'string')
+        : []
+      // 复审中3（崩溃恢复）：旧进程遗留的 reserved 恢复为 pending——
+      // 旧 review 不可能继续完成，否则这些指令永久卡住（破坏
+      // at-least-once）；bound 是内存瞬态不持久化，天然清除。
+      let changed = false
+      for (const item of items) {
+        if (item.state === 'reserved') {
+          item.state = 'pending'
+          item.reviewId = undefined
+          delete item.bound
+          changed = true
         }
       }
+      this.queues.set(sessionId, items)
+      this.loadFailed.delete(sessionId)
+      if (changed) this.persist(sessionId)
     } catch (error) {
-      logger.warn?.('advisor: instructions load failed — empty queue', { sessionId, error })
+      // **ENOENT 是"没有队列"**（注入的 reader 通常已归一成 `''`；这里再认一次是纵深，
+      // 换一个没归一化的 reader 也不能把"首次使用"误判成"读失败"）。
+      if (error?.code === 'ENOENT') {
+        this.queues.set(sessionId, [])
+        this.loadFailed.delete(sessionId)
+        return
+      }
+      this.loadFailed.add(sessionId)
+      logger.warn?.('advisor: instructions load failed — refuse to overwrite queue', { sessionId, error })
     }
-    if (!this.queues.has(sessionId)) this.queues.set(sessionId, [])
   }
 
   /** 追加一条指令（校验：非空文本、长度、pending 上限）。 */
@@ -88,13 +114,24 @@ export class InstructionQueue {
       throw new Error(`advisor: 指令超长（上限 ${INSTRUCTION_MAX_CHARS} 字符）`)
     }
     this.load(sessionId, logger)
-    const queue = this.queues.get(sessionId)
+    this.assertBaselineWritable(sessionId)
+    const queue = this.queues.get(sessionId) ?? []
     const pending = queue.filter((item) => item.state === 'pending').length
     if (pending >= PENDING_MAX) throw new Error(`advisor: 待处理指令已达上限（${PENDING_MAX} 条），请先清空或等待评审消费`)
     const item = { id: crypto.randomUUID(), createdAt: this.now(), text: trimmed, state: 'pending' }
     queue.push(item)
     this.persist(sessionId)
     return item
+  }
+
+  /**
+   * 写前闸门：该会话的基线最近一次读失败过 ⇒ **拒绝写入**（fail-closed）。
+   * @param {string} sessionId - 会话 id。
+   */
+  assertBaselineWritable(sessionId) {
+    if (!this.loadFailed.has(sessionId)) return
+    throw new Error('advisor: 指令队列基线不可读 —— 已拒绝写入'
+      + '（以空队列回写会抹掉该会话全部待处理指令；请先恢复该文件的可读性）')
   }
 
   /** 待处理（pending）指令列表。 */
@@ -212,9 +249,16 @@ export class InstructionQueue {
   /** 会话销毁：丢弃内存缓存（磁盘记录保留供追溯）。 */
   disposeSession(sessionId) {
     this.queues.delete(sessionId)
+    this.loadFailed.delete(sessionId)
   }
 
+  /**
+   * 持久化一个会话的队列。
+   *
+   * FIX-45③：基线读失败的会话**拒写**（抛错 ⇒ API/命令如实回错，而不是"清空后 200"）。
+   */
   persist(sessionId) {
+    this.assertBaselineWritable(sessionId)
     const queue = this.queues.get(sessionId) ?? []
     this.writeFile(this.fileFor(sessionId), JSON.stringify(queue))
   }

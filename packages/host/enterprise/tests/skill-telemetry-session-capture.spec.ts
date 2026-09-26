@@ -1,7 +1,8 @@
 /**
  * 技能用量上报的**会话归属取自调用时刻**（第二十八轮 FIX-40 ③）。
  *
- * 被修的形态（`KNOWN_UNGUARDED_ENTRIES` 里那条"await 之后才读会话"）：两个观察点都是
+ * 被修的形态（原 `KNOWN_UNGUARDED_ENTRIES`、第二十九轮 FIX-44 ② 已迁到 `ENTRY_EXEMPTIONS`
+ * 的那条"await 之后才读会话"）：两个观察点都是
  *
  *     void installedVersion(name).then(() => reportSkillCall(ctx.picoSession.getSession(), …))
  *

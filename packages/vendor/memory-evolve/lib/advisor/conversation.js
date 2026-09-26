@@ -47,6 +47,15 @@ export class AdvisorConversation {
     this.saveFn = options.save ?? null
     this.loaded = false
     this.loadWarned = false
+    /**
+     * **基线读失败**（FIX-45③，2026-09-29）。
+     *
+     * 现场：`load()` 修前把读失败降级成"空会话"（一行 warn 之后照常继续），紧接着任意一次
+     * `appendUser`/`reset` 就把 `{epoch:1,messages:[]}` **整文件回写** —— 评审员的整段历史
+     * 与 epoch 一起没了。现在读失败只影响**内存**（评审不阻断），写面**拒写**。
+     */
+    this.loadFailed = false
+    this.persistWarned = false
   }
 
   /** 当前消息条数。 */
@@ -55,7 +64,7 @@ export class AdvisorConversation {
     return this.messages.length
   }
 
-  /** 惰性加载持久化状态（首次访问时；失败按空处理，不阻断评审）。 */
+  /** 惰性加载持久化状态（首次访问时；**读失败只降级内存**，写面由 {@link persist} 拒写）。 */
   load() {
     if (this.loaded) return
     this.loaded = true
@@ -70,11 +79,13 @@ export class AdvisorConversation {
         }
         if (Number.isInteger(data.epoch) && data.epoch > 0) this.epoch = data.epoch
       }
+      this.loadFailed = false
     } catch (error) {
-      // 加载失败：按空会话继续（评审不阻断）
+      // 加载失败：内存按空会话继续（评审不阻断），但**禁止回写**（见 persist）。
+      this.loadFailed = true
       if (!this.loadWarned) {
         this.loadWarned = true
-        console.warn?.('advisor: conversation load failed — start empty', { error })
+        console.warn?.('advisor: conversation load failed — refuse to overwrite history', { error })
       }
     }
   }
@@ -129,6 +140,13 @@ export class AdvisorConversation {
    */
   reset() {
     this.load()
+    // FIX-45③：基线读失败时**拒绝**新建评审会话 —— 此时 `epoch` 是内存默认值 1，
+    // 回写会把磁盘上的真实代数和历史一起换掉（不可逆）。整文件覆盖是显式结果，
+    // 有基线不可读就必须抛给调用方（API 层映射成 400），而不是"静默重置 + 200"。
+    if (this.loadFailed) {
+      throw new Error('advisor: 评审会话基线不可读 —— 已拒绝新建评审会话'
+        + '（以空基线回写会抹掉评审员历史与 epoch；请先恢复该文件的可读性）')
+    }
     this.messages.length = 0
     this.epoch += 1
     this._clearScope = true
@@ -137,16 +155,35 @@ export class AdvisorConversation {
     return this.epoch
   }
 
-  /** 原子持久化（saveFn 由调用方注入；失败仅告警一次，不阻断评审）。 */
+  /**
+   * 原子持久化（saveFn 由调用方注入）。
+   *
+   * 三种结果现在分得开（FIX-45③）：
+   *   · 没有写通道（`saveFn === null`）⇒ 无操作，返回 `false`；
+   *   · **基线不可读** ⇒ **拒绝写入**（不落盘、可检索日志），返回 `false`
+   *     —— 修前这里照常写，把"读失败"固化成一次整文件覆盖；
+   *   · 写失败 ⇒ 仅告警一次（既有契约），返回 `false`。
+   * @returns {boolean} 是否真的写成功。
+   */
   persist() {
-    if (this.saveFn === null) return
+    if (this.saveFn === null) return false
+    if (this.loadFailed) {
+      if (!this.persistWarned) {
+        this.persistWarned = true
+        console.warn?.('advisor: conversation persist refused — baseline unreadable '
+          + '(refuse to overwrite history)', { epoch: this.epoch, messages: this.messages.length })
+      }
+      return false
+    }
     try {
       this.saveFn(this.epoch, this.messages, { clearScope: this._clearScope === true })
+      return true
     } catch (error) {
       if (!this.loadWarned) {
         this.loadWarned = true
         console.warn?.('advisor: conversation persist failed', { error })
       }
+      return false
     }
   }
 }

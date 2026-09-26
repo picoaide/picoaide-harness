@@ -325,36 +325,38 @@ function collectSources(): string[] {
 }
 
 /**
- * 仓库级发现器：每一个 `kind: 'exact'` 的对象字面量。
+ * 仓库级发现器：每一个 `kind: 'exact'` 的注册（**含简写属性与对象展开**）。
  *
- * 只认**字面量形式**（`{ kind: 'exact', path: …, handler: … }`）—— 这也是仓内
- * 全部 33 处的写法。刻意不做"变量间接"解析：那会引入一层可能与真实注册面脱节的
- * 推断，而"发现器看不见"正是这条判据要消灭的东西。
+ * R29-AC1-04 之前只认字面量形式（`{ kind: 'exact', path: …, handler: … }`），于是两种
+ * 写法**完全失明**（合成树里新包注册 3 条 exact 路由 ⇒ 发现 0 条）：
+ *   - 工厂函数 + 简写属性：`return { kind: 'exact', path, handler }`，路径只出现在调用点
+ *     （`exactRoute('/api/pico/x', handler)`）；
+ *   - 对象展开：`const base = { kind: 'exact', path: '/a', handler }; register({ ...base, path: '/b' })`。
+ * 现在两种都进面 —— "发现器看不见"正是这条判据要消灭的东西。
+ *
+ * 边界（如实登记）：展开对象只在**同一个文件内**解析（模块级 `const`）。跨文件 import
+ * 进来的 base 解析不出 `kind`，因此不会被当成 exact 路由 —— 这种写法的文件里通常仍有
+ * `exact` 这个词（`kind: EXACT` / `'exact'`），会被预筛收进来但没有可判定的 kind。真出现
+ * "跨文件 base + 只在这里写 path" 的注册形态时，这条注释与本函数要一起改。
+ *
  * @returns 按表键排序的发现结果。
  */
 function discoverExactRoutes(): DiscoveredRoute[] {
   const found: DiscoveredRoute[] = []
   for (const file of collectSources()) {
     const text = readFileSync(file, 'utf8')
-    if (!text.includes("'exact'")) continue
+    // 预筛只看 `exact` 这个词（**不再**只看带引号的 `'exact'`）：简写/展开形态里 kind
+    // 可能是标识符，带引号的字面量只出现在 base 那一处。
+    if (!/\bexact\b/iu.test(text)) continue
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    const vars = collectLiteralVars(source)
     const visit = (node: ts.Node): void => {
       if (ts.isObjectLiteralExpression(node)) {
-        const kind = node.properties.find(
-          (property): property is ts.PropertyAssignment =>
-            ts.isPropertyAssignment(property) && property.name.getText(source) === 'kind',
-        )
-        if (kind !== undefined && kind.initializer.getText(source).replace(/['"]/gu, '') === 'exact') {
-          const pathProperty = node.properties.find(
-            (property): property is ts.PropertyAssignment =>
-              ts.isPropertyAssignment(property) && property.name.getText(source) === 'path',
-          )
-          if (pathProperty !== undefined) {
-            found.push({
-              key: `${repoPath(file)}#${pathProperty.initializer.getText(source)}`,
-              line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
-              pathText: pathProperty.initializer.getText(source),
-            })
+        const shape = resolveExactLiteral(node, source, vars)
+        if (shape.kindExpr !== undefined && isExactKind(shape.kindExpr, source, vars) && shape.pathExpr !== undefined) {
+          const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1
+          for (const pathText of resolveRoutePaths(node, shape, source, vars)) {
+            found.push({ key: `${repoPath(file)}#${pathText}`, line, pathText })
           }
         }
       }
@@ -363,6 +365,178 @@ function discoverExactRoutes(): DiscoveredRoute[] {
     visit(source)
   }
   return found.sort((a, b) => a.key.localeCompare(b.key))
+}
+
+/** 一个对象字面量的 `kind` / `path` 解析结果（值保留 AST，便于继续解析标识符/展开）。 */
+interface ExactLiteralShape {
+  // 注意：三个字段都是**非可选 + 显式 `undefined`**（`exactOptionalPropertyTypes: true`
+  // 下可选属性不能直接赋 `undefined`；vitest 不做类型检查，只有 `yarn check` 会红）。
+  readonly kindExpr: ts.Expression | undefined
+  readonly pathExpr: ts.Expression | undefined
+  /** `path` 是**简写属性**（`{ kind: 'exact', path, handler }`）时为 true。 */
+  readonly pathIsShorthand: boolean
+}
+
+/** 收集文件里模块级 `const X = <表达式>` 的浅绑定（只用于解析展开与常量路径）。 */
+function collectLiteralVars(source: ts.SourceFile): Map<string, ts.Expression> {
+  const vars = new Map<string, ts.Expression>()
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.initializer !== undefined) {
+        vars.set(declaration.name.text, declaration.initializer)
+      }
+    }
+  }
+  return vars
+}
+
+/**
+ * 浅解析一个对象字面量的 `kind` / `path`：显式属性优先，其次从**同文件**的对象展开里取
+ * （可多层，带深度上限防环）。
+ */
+function resolveExactLiteral(
+  node: ts.ObjectLiteralExpression,
+  source: ts.SourceFile,
+  vars: Map<string, ts.Expression>,
+  depth = 0,
+): ExactLiteralShape {
+  let kindExpr: ts.Expression | undefined
+  let pathExpr: ts.Expression | undefined
+  let pathIsShorthand = false
+  for (const property of node.properties) {
+    if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) {
+      if (property.name.text === 'kind') kindExpr = property.initializer
+      if (property.name.text === 'path') {
+        pathExpr = property.initializer
+        pathIsShorthand = false
+      }
+      continue
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      if (property.name.text === 'kind') kindExpr = property.name
+      if (property.name.text === 'path') {
+        pathExpr = property.name
+        pathIsShorthand = true
+      }
+      continue
+    }
+    if (ts.isSpreadAssignment(property) && depth < 4) {
+      const base = spreadBaseLiteral(property.expression, vars)
+      if (base === undefined) continue
+      const inner = resolveExactLiteral(base, source, vars, depth + 1)
+      if (kindExpr === undefined) kindExpr = inner.kindExpr
+      if (pathExpr === undefined) {
+        pathExpr = inner.pathExpr
+        pathIsShorthand = inner.pathIsShorthand
+      }
+    }
+  }
+  return { kindExpr, pathExpr, pathIsShorthand }
+}
+
+/** 展开源（`...base`）解析成同文件里的对象字面量（解析不出返回 undefined）。 */
+function spreadBaseLiteral(expr: ts.Expression, vars: Map<string, ts.Expression>): ts.ObjectLiteralExpression | undefined {
+  if (ts.isParenthesizedExpression(expr)) return spreadBaseLiteral(expr.expression, vars)
+  if (ts.isObjectLiteralExpression(expr)) return expr
+  if (ts.isIdentifier(expr)) {
+    const bound = vars.get(expr.text)
+    if (bound !== undefined && ts.isObjectLiteralExpression(bound)) return bound
+  }
+  return undefined
+}
+
+/** `kind` 表达式的值是不是 `'exact'`（剥掉 `as const` / `satisfies` / 括号 / 同文件常量）。 */
+function isExactKind(expr: ts.Expression, source: ts.SourceFile, vars: Map<string, ts.Expression>, depth = 0): boolean {
+  if (depth > 4) return false
+  const unwrapped = unwrapKindExpression(expr)
+  if (unwrapped !== expr) return isExactKind(unwrapped, source, vars, depth + 1)
+  if (ts.isStringLiteralLike(expr)) return expr.text === 'exact'
+  if (ts.isIdentifier(expr)) {
+    if (expr.text === 'exact') return true
+    const bound = vars.get(expr.text)
+    return bound !== undefined ? isExactKind(bound, source, vars, depth + 1) : false
+  }
+  return false
+}
+
+/** 剥掉 `as const` / `satisfies T` / 括号 / 非空断言，拿到真正的取值表达式。 */
+function unwrapKindExpression(expr: ts.Expression): ts.Expression {
+  switch (expr.kind) {
+    case ts.SyntaxKind.AsExpression:
+    case ts.SyntaxKind.SatisfiesExpression:
+    case ts.SyntaxKind.ParenthesizedExpression:
+    case ts.SyntaxKind.NonNullExpression:
+      return unwrapKindExpression((expr as ts.AsExpression).expression)
+    default:
+      return expr
+  }
+}
+
+/**
+ * 把 `path` 解析成"这条注册实际会用的路径文本"（可能不止一条 —— 工厂函数的每个调用点）。
+ *
+ *   - 显式字面量 ⇒ 它自己的源码文本（与旧口径逐字一致，登记表的键不变）；
+ *   - 标识符（简写或 `path: SOME_CONST`）⇒ 优先同文件绑定；
+ *   - 简写且是**工厂函数的形参** ⇒ 该工厂在**本文件里**的调用点实参（R29-AC1-04 的形态 A：
+ *     路径只出现在调用点，函数体里只有一个形参名）。找不到调用点时退回标识符文本
+ *     （宁可键难看，也不能"看不见"）。
+ */
+function resolveRoutePaths(
+  node: ts.ObjectLiteralExpression,
+  shape: ExactLiteralShape,
+  source: ts.SourceFile,
+  vars: Map<string, ts.Expression>,
+): string[] {
+  const pathExpr = shape.pathExpr!
+  if (ts.isIdentifier(pathExpr)) {
+    const bound = vars.get(pathExpr.text)
+    if (bound !== undefined) return [bound.getText(source)]
+    if (shape.pathIsShorthand) {
+      const fromCalls = factoryCallSitePaths(node, pathExpr.text, source, vars)
+      if (fromCalls.length > 0) return fromCalls
+    }
+    return [pathExpr.text]
+  }
+  return [pathExpr.getText(source)]
+}
+
+/** 工厂函数形态：`path` 是该函数形参 ⇒ 返回它在**本文件**里各调用点上的实参文本。 */
+function factoryCallSitePaths(
+  node: ts.ObjectLiteralExpression,
+  paramName: string,
+  source: ts.SourceFile,
+  vars: Map<string, ts.Expression>,
+): string[] {
+  let enclosing: ts.FunctionDeclaration | undefined
+  for (let parent = node.parent; parent !== undefined; parent = parent.parent) {
+    if (ts.isFunctionDeclaration(parent)) {
+      enclosing = parent
+      break
+    }
+    if (ts.isFunctionExpression(parent) || ts.isArrowFunction(parent) || ts.isMethodDeclaration(parent)) return []
+  }
+  if (enclosing === undefined || enclosing.name === undefined) return []
+  const paramIndex = enclosing.parameters.findIndex(
+    parameter => ts.isIdentifier(parameter.name) && parameter.name.text === paramName,
+  )
+  if (paramIndex < 0) return []
+  const factoryName = enclosing.name.text
+  const paths: string[] = []
+  const walk = (current: ts.Node): void => {
+    if (ts.isCallExpression(current) && ts.isIdentifier(current.expression) && current.expression.text === factoryName) {
+      const argument = current.arguments[paramIndex]
+      if (argument !== undefined) {
+        const text = ts.isIdentifier(argument) && vars.get(argument.text) !== undefined
+          ? vars.get(argument.text)!.getText(source)
+          : argument.getText(source)
+        if (!paths.includes(text)) paths.push(text)
+      }
+    }
+    ts.forEachChild(current, walk)
+  }
+  walk(source)
+  return paths
 }
 
 /** 发现面 ↔ 登记表的**双向**对账（纯函数：自检直接喂合成输入）。 */

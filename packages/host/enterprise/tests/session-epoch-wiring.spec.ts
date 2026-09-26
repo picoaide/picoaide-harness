@@ -50,6 +50,29 @@
  *   **照样执行** ⇒ 块内的落地不是"被守卫之后的代码"，必须自带比对。判据：`try` 块内含
  *   await 面时，`catch`/`finally` 块内的"直接落地"必须在该块内自带代际比对或登记豁免。
  *
+ * ## 第二十九轮（FIX-44 ③）的取值域修正：**代际协议按符号来源识别，不按名字**
+ *
+ * 修前 `guardReceivers()` / `usesEpochProtocol()` 都是**名字式**的：任意 `x.begin()` /
+ * `x.isCurrent()` 都算守卫。后果不是"漏报"而是**两条规则自相矛盾**（§7.69.8-3）：
+ * `wasm-apps-host/src/scope-reset.ts` 的清理链（**不是**代际协议）一旦有个方法叫 `begin`，
+ * 它的宿主文件就被拖进适用面 —— 规则 B 认为该文件的会话入口"已经抵达一个带守卫的函数"
+ * （`begin()` 就算），而规则 C 的适用面第 2 条**正是由规则 B 这个结论推出来的** ⇒ 同一个
+ * 文件里每个 await 都要住在被守卫的函数里，实测 **11 条 `await-outside-guard`**。
+ * 唯一的出口是给无关 API 改名（`begin` → `start`；第二十九轮 FIX-44 ③ 把识别改成按
+ * 符号来源之后，改不改名都不再影响判据，见 `scope-reset.ts` 的 `start()` 注释）。
+ *
+ * 这正是"判据取值域"教训的**第 5 个变体**：判据不得靠**命名约定**认协议，要认**符号来源**。
+ * 现在：接收者必须绑定到 `@picoaide/dsh-host-locale/session-events`（或其 re-export
+ * `enterprise/src/session-epoch.ts`）导出的 `createSessionEpoch()` 返回值 / `SessionEpoch`
+ * 类型；识别链 = import 说明符 → 模块路径（相对导入按导入方解析 + re-export 传递）→
+ * 工厂返回值/类型标注绑定 → 该接收者上的 `begin()`/`isCurrent()`。因此：
+ *  - `fileScope` 的两条或关系合并成一条（"文件里有代际接收者"）—— 第 2 条被第 1 条吸收，
+ *    而 M-B（只删比对、留 `begin()`）的防护**更强**（新口径只看绑定，不看比对还在不在）；
+ *  - `guardReceivers` 沿**外层作用域**找接收者（本仓写法是守卫住在 `apply()`、投影是它的
+ *    内层函数 —— 只看函数自身子树会把每个真守卫判成"没有守卫"）。
+ * 合成负例与变异（把识别改回按名字 ⇒ 该用例红）见
+ * `it('判据自检：名字像但不是该模块导出的守卫不算守卫…')`。
+ *
  * ## 规则
  *
  * - **A**：被守卫的函数里，每个 **await 面**（`await` 表达式与 `for await`）之后
@@ -61,7 +84,10 @@
  *   'session/event', cb)`）都必须抵达一个被守卫的函数；做不到就得登记 ——
  *   `ENTRY_EXEMPTIONS`（有别的判据，写明理由）或 `KNOWN_UNGUARDED_ENTRIES`
  *   （**已知未收口**，写明缺陷编号）。**两张表都双向陈旧检测**：登记项必须仍然存在、
- *   仍然"未守卫"；一旦它被收口，登记项本身变红（不许把豁免表养成免检区）；
+ *   仍然"未守卫"；一旦它被收口，登记项本身变红（不许把豁免表养成免检区）。
+ *   这里的"被守卫"= 代际协议（按符号来源识别，见上节）或 `StillCurrent` 型谓词；
+ *   **等价机制**（`ENTRY_EXEMPTIONS` 的见证）走登记而不是判据 —— 不要为了让它"绿"
+ *   而给文件装一个用不上的代际；
  * - **C**：用了代际守卫的文件里，每个 await 面都必须住在被守卫的函数里 ——
  *   新增的未守卫 sync 入口因此当场变红；豁免必须显式登记（`AWAIT_EXEMPTIONS`）；
  * - **D**：被 await 的 `initSentry` 必须收到**第 5 个实参**（代际谓词）——它在自己的
@@ -76,8 +102,8 @@
  * 绕过形态（M-A 新文件 / M-B 块尾空后继 / M-C3 `.then()` 投影）**以及 AB1-03 的九种
  * 取值域缺口形态**都做成合成正例 —— "分析器恒真"与"分析器恒红"两个方向都不成立才算过。
  */
-import { readFileSync, readdirSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, relative, sep } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
@@ -145,7 +171,7 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
     witness: 'subscribeSessionChanges',
   },
   'packages/host/wasm-apps-host/src/session.ts': {
-    reason: '`subscribePicoSession(ctx, resolve, listener)` 是包内转发层（把调用方的 listener 包一层会话归一化），不投影状态；真正的入口在 `index.ts`（已登记为已知未收口）。',
+    reason: '`subscribePicoSession(ctx, resolve, listener)` 是包内转发层（把调用方的 listener 包一层会话归一化），不投影状态；真正的入口在 `index.ts`（同批已按"排序而非代际"登记豁免）。',
     witness: 'readAppSession',
   },
   'packages/host/cron/src/index.ts': {
@@ -168,6 +194,20 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
     reason: 'AA3 普查判定：会话作用域走 `ScopeStore`（`sessionOf/conversationOf` 按 sessionId 取目录），写的是 `writeConversation(dataDir, sessionId, …)` —— **按 sessionId 分目录**，不是"当前会话"的投影，所以不存在"上一代的响应写进当前代"。',
     witness: 'writeConversation',
   },
+  // ── 第二十九轮 FIX-44 ②：两条从 `KNOWN_UNGUARDED_ENTRIES` 迁来的登记。
+  //
+  // 为什么不装代际（FIX-44 ② 的结论，逐条判定表见 temp/r21/fix-44/REPORT.md §②）：
+  // 这两族要的分别是**排队**与**事件归属**，都不是"还算不算最新的一代"。为了"让规则 B
+  // 认出它"而装一个用不上的代际接收者，反而会把文件拖进规则 C 的适用面、逼出
+  // 11 + 2 = 13 条 `await-outside-guard` 豁免行 —— 那是拿假精度换假绿。
+  'packages/host/wasm-apps-host/src/index.ts': {
+    reason: 'FIX-40 ③ 收口、FIX-44 ② 复核为**等价机制**：这一族要的是**排序**而不是代际 —— 清理一旦开始 `rm -rf` 的后果无法撤回（代际只能"丢弃迟到结果"），而这里必须"让新作用域的动作排在上一代清理**落地之后**"。机制 = `scopeReset` 清理链：换代时 `scopeReset.start(previous)`（关窗同步、清缓存串行），新作用域的动作一律 `await scopeReset.settled()`（`requestOpen` 首句、`drainPendingLinks` 的 `.then`）。判据分两层：行为判据 `src/scope-reset.spec.ts` 用例 1–7（确定性闸门，不靠撞时序）、接线判据用例 8（**同时**要求 `scopeReset.start(previous)`、`await scopeReset.settled()`、`drainPendingLinks 排在 settled() 之后`，且禁止回到 `void windows?.closeAll()` / `void cache?.clearAll()`）。**负控**：把 `requestOpen` 的 `await scopeReset.settled()` 拆回即发即忘 ⇒ 用例 8 当场红（2026-09-23 实跑，日志 temp/r21/fix-44/probe/logs/nc-a-scope-reset.log）。**装代际是错的**：实测装上会让规则 C 报 11 条 `await-outside-guard`（`requestOpen` 7 + 本机路由 handler 3 + ai-chat 包装 1），逐条判定全是"作用域在写入点重取 / 缓存按 scope 分键 / 请求作用域自洽"的请求处理，没有一条把结果投影到"当前会话"；代际守卫会把换代窗口里**真实发生**的打开动作整份丢掉。',
+    witness: 'scopeReset.start(',
+  },
+  'packages/host/enterprise/src/skill-telemetry.ts': {
+    reason: 'FIX-40 ③ 收口、FIX-44 ② 复核为**等价机制**：上报是**事件归属**，不是"当前会话的投影" —— 事件发生在哪一代就记在哪一代名下，代际守卫会把换代窗口里的真实调用**整份丢掉**（既错记 vs 丢记，前者可修、后者不可观测）。机制 = **作用域在观察点、第一个 await 之前同步取**：两个观察点都先 `const session = ctx.picoSession.getSession()` 再 `void installedVersion(...)`，而 `reportSkillCall` 的去重键 `reportKey(session, …)` 自带账号 + 服务端地址 + 令牌 ⇒ 每条上报自带归属身份。判据 `tests/skill-telemetry-session-capture.spec.ts`（3 例；读文件由用例控闸，会话在读取期间从 ALICE 切到 BOB，断言这一笔仍记在 ALICE）。**负控**：把取用挪到 `installedVersion` 的续体里（修前形状）⇒ 同一份 spec 当场红（2026-09-23 实跑，日志 temp/r21/fix-44/probe/logs/nc-b-skill-telemetry.log）。**装代际是错的**：实测装上会让规则 C 对 `reportSkillCall`（`await fetchJSON`）与 `installedVersion`（`await readFile`）报红，而这两处 await 之后只返回值 / 只写"自带作用域身份的已报键集合"，没有跨代落地路径。',
+    witness: 'const session = ctx.picoSession.getSession()',
+  },
 }
 
 /**
@@ -177,14 +217,20 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
  * 只是本轮没有在本泳道的所有权内收口。登记它们是为了让判据**如实反映**当前面，
  * 而不是把它们静默塞进豁免表；同时**双向陈旧检测**保证：一旦收口，登记项立刻变红
  * 并要求删除（"已知未收口"不许变成永久免检区）。
+ *
+ * ⚠️ **这张表的"双向"只对代际协议成立**（AB1-06，P3）：`stillNeedsRegistration()` 的
+ * 全部内容是"摘掉登记后 `analyze()` 还会不会产出 `entry-not-guarded`"，而那条判定的
+ * 取值域是 `begin()`/`isCurrent()`/`StillCurrent` 谓词。**用等价机制收口的站点放进这张
+ * 表不会被自清理** —— 那正是 `wasm-apps-host/src/index.ts` 与
+ * `enterprise/src/skill-telemetry.ts` 卡在这里两轮的原因（FIX-40 ③ 已经收口，但机制是
+ * 排序链 / 调用时刻归属，登记项怎么都不会变红）。**等价机制的归宿是
+ * `ENTRY_EXEMPTIONS`**（`witness` 钉机制 + `reason` 写明由谁保证），见第二十九轮
+ * FIX-44 ②。把"应当有代际但没装"与"用别的机制收口了"混在一张表里，会让前者永远
+ * 不可自清理 —— 新增登记前先回答：这个站点的机制**是**代际吗？
  */
 const KNOWN_UNGUARDED_ENTRIES: Readonly<Record<string, string>> = {
   'packages/host/browser/src/index.ts':
     'AA3-03（P2，未收口）：`runSessionSwitch` 的第一步 `await steps.closeAll()` 之后才 `applyUserScope()`，而订阅者不串行化 ⇒ A→B 与 B→C 交错时先发起后完成的那次会把作用域退回上一代账号。收口后请删掉本条。',
-  'packages/host/wasm-apps-host/src/index.ts':
-    'AA3 观察（第二十八轮 FIX-40 ③ **已收口**，登记保留的理由见末尾）：① 窗口侧的"迟到完成"**实测不可达** —— `windows.closeAll()` 体内没有 await，调用点返回时窗口与 surface 映射已同步拆干净（`src/audit-0923-user-scope.spec.ts` 的"不 await 也已经关完"用例钉住）；② 缓存侧是**真异步**（`rm -rf` 整个缓存根 + 重建），修前 `void cache?.clearAll()` 与新作用域的第一个动作并发 ⇒ 新账号刚写下的条目会被上一代的 rm 删掉。修法 = **排序**而不是代际：新增 `src/scope-reset.ts` 的清理链，换代时 `scopeReset.begin(previous)`（关窗同步、清缓存串行），新作用域的动作（消费待打开队列、本机路由的 open）一律 `await scopeReset.settled()`；判据 `src/scope-reset.spec.ts`（8 例，含"接线改回即发即忘"的负向对照 + 5 条变异全红）。**登记保留**：规则 B 只认"代际协议"这一种形态 —— 实测给本文件装上 `createSessionEpoch` 会让它进入 C/E 适用面并立刻产生 **11 条 `await-outside-guard`**（`requestOpen` 的 6 个 await + 两个路由 handler + ai-chat 包装），豁免它们必须新增 `AWAIT_EXEMPTIONS` 行，而本泳道对该文件的改动权限只有"删除登记项"。',
-  'packages/host/enterprise/src/skill-telemetry.ts':
-    'AA3 观察（P3，第二十八轮 FIX-40 ③ **已按"作用域取自调用时刻"收口**）：两个观察点现在都在**第一个 await 之前**同步取 `ctx.picoSession.getSession()`（修前在 `installedVersion` 的续体里才读 ⇒ 读版本文件期间换账号会把上一账号的技能调用记到新账号名下，作用域与令牌全指向新账号）。判据 `tests/skill-telemetry-session-capture.spec.ts`（3 例：两个观察点各一条 + 修前形状的负向对照；靠可控的 `readFile` 做成确定性，同一份 spec 跑在修前源码上红 2 条）。**这里不用代际**是语义决定的：上报是**事件归属**而不是"当前会话的投影"，代际守卫会把换代窗口里的真实调用整份丢掉，而"取调用时刻的会话"既不错记也不丢（同族先例：`account-card` 的 `owns(s)`）。**登记保留**的理由同 index.ts：装上代际会让规则 C 对 `installedVersion`/`reportSkillCall` 的两个 await 报红（实测 2 条 `await-outside-guard`），而豁免行不在本泳道的改动权限内。',
 }
 
 /**
@@ -325,45 +371,239 @@ function functionLabels(source: ts.SourceFile): Map<ts.FunctionLikeDeclaration, 
   return labels
 }
 
+// ---------------------------------------------------------------------------
+// 代际协议的识别：**按符号来源**，不按名字（第二十九轮 FIX-44 ③）
+// ---------------------------------------------------------------------------
+//
+// 修前 `guardReceivers()` 把**任意** `x.begin()` / `x.isCurrent()` 都算成守卫。于是
+// `wasm-apps-host/src/scope-reset.ts` 的清理链（`scopeReset.begin(previous)`，**不是**
+// 代际协议 —— 它回答的是"上一代的清理做完没有"，见该模块头）会把
+// `wasm-apps-host/src/index.ts` 拖进适用面：**同一次运行里规则 B 认它"已守卫"、
+// 规则 C 报 11 条 `await-outside-guard`**，两条规则自相矛盾，唯一出口是给无关 API 改名
+// （现已改名 `start`）。这正是"判据取值域"教训的第 5 个变体：**判据不得靠命名约定认
+// 协议**，应认符号来源（import 关系）。
+//
+// 新口径：接收者必须**绑定到** `@picoaide/dsh-host-locale/session-events` 导出的
+// `createSessionEpoch()` 返回值（或标注为它导出的 `SessionEpoch` 类型）。识别链是：
+//   ① import 说明符 → 模块文件路径（`./session-epoch.ts` 相对**导入方**解析）；
+//   ② 该模块是不是代际协议模块 —— 是 `session-events.ts` 本身，**或**（可传递地）
+//      从它 re-export 的模块（enterprise 的 `session-epoch.ts` 就是这一层）；
+//   ③ 文件里绑定该工厂返回值 / 该类型的本地名 = 代际接收者；
+//   ④ 只有**代际接收者**上的 `begin()` / `isCurrent()` 才算守卫。
+// 远端包说明符（`@picoaide/dsh-host-locale/session-events`）按出口解析，不读 node_modules。
+//
+// **刻意不改** `predicateNames()`（`StillCurrent` 型谓词）：那是**另一条**机制 ——
+// "还算不算最新"作为**参数传进被调方**（`session-events.ts` 规则 3），接收者是谁在
+// 调用点就丢掉了，符号来源判不了；而它唯一的现役使用者（`desktop/src/updates.ts`）
+// 在同文件里自己声明 `type StillCurrent = () => boolean`，本来就不是 import 进来的。
+
+/** 代际协议的**符号真源**（唯一实现所在模块，仓库相对路径，`/` 分隔）。 */
+const EPOCH_PROTOCOL_MODULE = 'packages/host/host-locale/src/session-events.ts'
+
+/** 代际包的公开子路径（出口见 `packages/host/host-locale/package.json`）。 */
+const EPOCH_PACKAGE_SUBPATH = '@picoaide/dsh-host-locale/session-events'
+
+/** `import` 说明符 → 仓库相对模块路径（只认相对路径与代际包的公开子路径）。 */
+function resolveModulePath(specifier: string, fromFile: string): string | undefined {
+  if (specifier === EPOCH_PACKAGE_SUBPATH) return EPOCH_PROTOCOL_MODULE
+  if (!specifier.startsWith('.')) return undefined
+  const base = join(dirname(fromFile), specifier)
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, join(base, 'index.ts')]) {
+    const normalized = candidate.split(sep).join('/')
+    if (normalized === EPOCH_PROTOCOL_MODULE) return normalized
+    // 只认**存在**的文件：合成夹具（`synthetic.ts`）的相对导入一律解析不到 ⇒ 不被当成
+    // 代际模块（夹具必须写明包说明符，见 `SYNTHETIC_EPOCH_IMPORT`）。
+    if (existsSync(join(REPO_ROOT, normalized))) return normalized
+  }
+  return undefined
+}
+
 /**
- * 一个函数里出现的代际守卫名（`X.begin()` 或 `X.isCurrent(...)` 的 `X`）。
+ * 进程内记忆：某个模块是不是代际协议模块（真源本身，或可传递地从它 re-export）。
+ * 进入时先置 `false`（三色标记）—— re-export 图成环时该分支不成立，且不会死循环。
+ */
+const epochModuleMemo = new Map<string, boolean>()
+
+/** 模块是不是代际协议模块（见 {@link EPOCH_PROTOCOL_MODULE}）。 */
+function isEpochProtocolModule(modulePath: string): boolean {
+  if (modulePath === EPOCH_PROTOCOL_MODULE) return true
+  const memo = epochModuleMemo.get(modulePath)
+  if (memo !== undefined) return memo
+  epochModuleMemo.set(modulePath, false)
+  let result = false
+  try {
+    const text = readFileSync(join(REPO_ROOT, modulePath), 'utf8')
+    const source = ts.createSourceFile(modulePath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    for (const statement of source.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier === undefined) continue
+      if (!ts.isStringLiteral(statement.moduleSpecifier)) continue
+      const target = resolveModulePath(statement.moduleSpecifier.text, modulePath)
+      if (target !== undefined && isEpochProtocolModule(target)) {
+        result = true
+        break
+      }
+    }
+  } catch {
+    result = false
+  }
+  epochModuleMemo.set(modulePath, result)
+  return result
+}
+
+/** 一个文件从代际协议模块 import 进来的名字。 */
+interface EpochBindings {
+  /** 可直接调用的工厂（`import { createSessionEpoch }`，含别名）。 */
+  readonly factories: ReadonlySet<string>
+  /** 可作类型标注的名字（`SessionEpoch`，含别名）。 */
+  readonly types: ReadonlySet<string>
+  /** 命名空间导入（`import * as events from …`）。 */
+  readonly namespaces: ReadonlySet<string>
+}
+
+/** 收集一个文件的代际绑定（只认 import 来源，不认名字）。 */
+function epochBindings(source: ts.SourceFile, file: string): EpochBindings {
+  const factories = new Set<string>()
+  const types = new Set<string>()
+  const namespaces = new Set<string>()
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue
+    const target = resolveModulePath(statement.moduleSpecifier.text, file)
+    if (target === undefined || !isEpochProtocolModule(target)) continue
+    const clause = statement.importClause
+    if (clause === undefined) continue
+    const named = clause.namedBindings
+    if (named !== undefined && ts.isNamespaceImport(named)) {
+      namespaces.add(named.name.text)
+      continue
+    }
+    if (named === undefined || !ts.isNamedImports(named)) continue
+    for (const element of named.elements) {
+      const imported = (element.propertyName ?? element.name).text
+      const local = element.name.text
+      const typeOnly = clause.isTypeOnly || element.isTypeOnly
+      if (imported === 'SessionEpoch') types.add(local)
+      else if (imported === 'createSessionEpoch' && !typeOnly) factories.add(local)
+    }
+  }
+  return { factories, types, namespaces }
+}
+
+/** 类型标注是不是代际类型（`SessionEpoch` / `events.SessionEpoch`）。 */
+function isEpochTypeNode(type: ts.TypeNode | undefined, bindings: EpochBindings): boolean {
+  if (type === undefined || !ts.isTypeReferenceNode(type)) return false
+  const name = type.typeName
+  if (ts.isIdentifier(name)) return bindings.types.has(name.text)
+  return ts.isQualifiedName(name)
+    && ts.isIdentifier(name.left)
+    && bindings.namespaces.has(name.left.text)
+    && name.right.text === 'SessionEpoch'
+}
+
+/** 表达式是不是"造一个代际"（`createSessionEpoch()` / `events.createSessionEpoch()`）。 */
+function isEpochFactoryCall(expression: ts.Expression, bindings: EpochBindings): boolean {
+  if (!ts.isCallExpression(expression)) return false
+  const callee = expression.expression
+  if (ts.isIdentifier(callee)) return bindings.factories.has(callee.text)
+  return ts.isPropertyAccessExpression(callee)
+    && ts.isIdentifier(callee.expression)
+    && bindings.namespaces.has(callee.expression.text)
+    && callee.name.text === 'createSessionEpoch'
+}
+
+/**
+ * 一个作用域里**绑定到代际协议**的本地名（函数参数/局部量/重新赋值三种绑定形态）。
+ * @param root - 作用域根（一个函数，或整个源文件）。
+ * @param bindings - 该文件的代际 import 绑定。
+ * @param descend - 是否下探嵌套函数（函数作用域 **不下探**：守卫必须由本函数自己取，
+ *   `apply()` 里那个不属于 `sync`；文件作用域**下探**：只问"这个文件用不用协议"）。
+ * @returns 代际接收者的本地名集合。
+ */
+function epochReceiversIn(root: ts.Node, bindings: EpochBindings, descend: boolean): Set<string> {
+  const receivers = new Set<string>()
+  if (bindings.factories.size === 0 && bindings.types.size === 0 && bindings.namespaces.size === 0) {
+    return receivers
+  }
+  const visit = (node: ts.Node, isRoot: boolean): void => {
+    if (!isRoot && !descend && ts.isFunctionLike(node)) return
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && isEpochTypeNode(node.type, bindings)) {
+      receivers.add(node.name.text)
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      if (isEpochTypeNode(node.type, bindings)) receivers.add(node.name.text)
+      else if (node.initializer !== undefined && isEpochFactoryCall(node.initializer, bindings)) {
+        receivers.add(node.name.text)
+      }
+    }
+    if (
+      ts.isBinaryExpression(node)
+      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(node.left)
+      && isEpochFactoryCall(node.right, bindings)
+    ) {
+      receivers.add(node.left.text)
+    }
+    ts.forEachChild(node, child => { visit(child, false) })
+  }
+  visit(root, true)
+  return receivers
+}
+
+/** 一个文件的代际上下文（识别按符号来源所需的全部输入）。 */
+interface EpochContext {
+  readonly bindings: EpochBindings
+}
+
+/** 造一个文件的代际上下文。 */
+function epochContext(source: ts.SourceFile, file: string): EpochContext {
+  return { bindings: epochBindings(source, file) }
+}
+
+/**
+ * 一个函数**可见**的代际接收者：本函数内声明的 + **所有外层作用域**里的（闭包捕获）。
+ *
+ * 为什么必须沿外层作用域找：本仓的写法是"每个插件实例一个守卫，住在 `apply()` 作用域里"
+ * （`session-events.ts` 的规则 1）—— `const epochs = createSessionEpoch()` 在 `apply()`
+ * 体内，而真正的投影 `const sync = async (…) => { const epoch = epochs.begin() … }`
+ * 是它的**内层函数**。只看 `sync` 自己的子树会一个接收者都找不到，于是每个真守卫都被
+ * 判成"没有守卫"（识别收窄过头 = 假红方向）。
+ */
+function visibleEpochReceivers(fn: ts.FunctionLikeDeclaration, bindings: EpochBindings): Set<string> {
+  const receivers = epochReceiversIn(fn, bindings, false)
+  for (let node: ts.Node | undefined = fn.parent; node !== undefined; node = node.parent) {
+    if (!ts.isFunctionLike(node) && !ts.isSourceFile(node)) continue
+    for (const name of epochReceiversIn(node, bindings, false)) receivers.add(name)
+  }
+  return receivers
+}
+
+/**
+ * 一个函数里出现的**代际守卫**接收者（`X.begin()` 或 `X.isCurrent(...)` 的 `X`）。
  *
  * 取**并集**而不是交集：只 `begin()` 的那一类函数（会话变化的处理器本身）也是守卫
- * 的持有者。而"这个文件用不用代际"另有一条更严的判据（{@link usesEpochProtocol}），
- * 要求同一个接收者同时出现两个方法 —— 否则"别的包恰好也有个叫 begin 的游标"
- * （实测：memory-evolve 客户端视图里的 `tasksSeq.current.begin()`）会被误判成守卫。
+ * 的持有者。识别按符号来源（见本节头）—— 只有绑定到代际工厂返回值/代际类型的接收者
+ * 才在面内，`scopeReset.begin(previous)` 这类同名不同源的调用不算。
  */
-function guardReceivers(fn: ts.FunctionLikeDeclaration): Set<string> {
-  const begun = new Set<string>()
-  const compared = new Set<string>()
+function guardReceivers(fn: ts.FunctionLikeDeclaration, context: EpochContext): Set<string> {
+  const receivers = visibleEpochReceivers(fn, context.bindings)
+  if (receivers.size === 0) return new Set()
+  const used = new Set<string>()
   const visit = (node: ts.Node): void => {
     // 不进嵌套函数：守卫必须由本函数自己取（`apply()` 里那个不属于 `sync`）。
     if (node !== fn && ts.isFunctionLike(node)) return
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name.text
-      if (method === 'begin') begun.add(node.expression.expression.getText())
-      if (method === 'isCurrent') compared.add(node.expression.expression.getText())
+      const receiver = node.expression.expression.getText()
+      if ((method === 'begin' || method === 'isCurrent') && receivers.has(receiver)) used.add(receiver)
     }
     ts.forEachChild(node, visit)
   }
   if (fn.body !== undefined) visit(fn.body)
-  return new Set([...begun, ...compared])
+  return used
 }
 
-/** 这个文件用不用代际协议（同一个接收者既有 `begin()` 又有 `isCurrent()`）。 */
-function usesEpochProtocol(source: ts.SourceFile): boolean {
-  const begun = new Set<string>()
-  const compared = new Set<string>()
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const method = node.expression.name.text
-      if (method === 'begin') begun.add(node.expression.expression.getText())
-      if (method === 'isCurrent') compared.add(node.expression.expression.getText())
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return [...begun].some(name => compared.has(name))
+/** 这个文件用不用代际协议（文件里存在绑定到代际协议的接收者）。 */
+function usesEpochProtocol(source: ts.SourceFile, context: EpochContext): boolean {
+  return epochReceiversIn(source, context.bindings, true).size > 0
 }
 
 /** 函数里"代际谓词"的名字（`StillCurrent` 型的参数或局部量，见 `session-events.ts` 规则 3）。 */
@@ -746,9 +986,10 @@ function entryIsGuarded(
   entry: ts.Expression,
   named: ReadonlyMap<string, ts.FunctionLikeDeclaration>,
   labels: ReadonlyMap<ts.FunctionLikeDeclaration, string>,
+  context: EpochContext,
 ): boolean {
   const guarded = (fn: ts.FunctionLikeDeclaration): boolean =>
-    guardReceivers(fn).size > 0 || predicateNames(fn).size > 0
+    guardReceivers(fn, context).size > 0 || predicateNames(fn).size > 0
   if (ts.isFunctionLike(entry) && guarded(entry)) return true
   const referenced: string[] = []
   const collect = (node: ts.Node): void => {
@@ -783,7 +1024,10 @@ function analyze(
   for (const [fn, label] of labels) if (declaredName(fn) !== undefined) named.set(label, fn)
 
   // 该文件是不是"用了代际协议" ⇒ 决定 C/E 两条规则是否适用（见 `fileScope`）。
-  const epochGuardedFile = fileScope(source)
+  // 上下文按**符号来源**建（import 解析，见本节头）—— 夹具必须写明 import，
+  // 否则识别不到代际协议（合成夹具用 `SYNTHETIC_EPOCH_IMPORT`）。
+  const context = epochContext(source, file)
+  const epochGuardedFile = fileScope(source, context)
 
   const exempted = (fn: ts.FunctionLikeDeclaration): string | undefined =>
     scope.exemptions[`${file}#${labels.get(fn) ?? '<unknown>'}`]
@@ -793,7 +1037,7 @@ function analyze(
     const isForAwait = ts.isForOfStatement(node) && node.awaitModifier !== undefined
     if (ts.isAwaitExpression(node) || isForAwait) {
       const fn = enclosingFunction(node)
-      const guards = fn === undefined ? new Set<string>() : guardReceivers(fn)
+      const guards = fn === undefined ? new Set<string>() : guardReceivers(fn, context)
       const predicates = fn === undefined ? new Set<string>() : predicateNames(fn)
       const guarded = fn !== undefined && (guards.size > 0 || predicates.size > 0)
       const label = `${file}#${fn === undefined ? '<top>' : labels.get(fn) ?? '<anonymous>'}`
@@ -822,7 +1066,7 @@ function analyze(
 
   // B：每个会话入口都要抵达一个被守卫的函数（或按文件登记豁免/已知未收口）。
   for (const entry of sessionEntries(source)) {
-    if (entryIsGuarded(entry, named, labels)) continue
+    if (entryIsGuarded(entry, named, labels, context)) continue
     if (scope.entryExemptions[file] !== undefined) continue
     findings.push({
       kind: 'entry-not-guarded',
@@ -834,7 +1078,7 @@ function analyze(
   const visitInit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'initSentry') {
       const fn = enclosingFunction(node)
-      const guards = fn === undefined ? new Set<string>() : guardReceivers(fn)
+      const guards = fn === undefined ? new Set<string>() : guardReceivers(fn, context)
       const predicates = fn === undefined ? new Set<string>() : predicateNames(fn)
       if (guards.size > 0) {
         const fifth = node.arguments[4]
@@ -881,7 +1125,7 @@ function analyze(
       for (const callback of callbacks) {
         if (!ts.isFunctionLike(callback)) continue
         const fn = callback as ts.FunctionLikeDeclaration
-        const guards = guardReceivers(fn)
+        const guards = guardReceivers(fn, context)
         const predicates = predicateNames(fn)
         if (guards.size > 0 || predicates.size > 0) continue
         if (fn.body === undefined) continue
@@ -909,7 +1153,7 @@ function analyze(
     const visitTry = (node: ts.Node): void => {
       if (ts.isTryStatement(node) && containsAwaitSurface(node.tryBlock)) {
         const fn = enclosingFunction(node)
-        const guards = fn === undefined ? new Set<string>() : guardReceivers(fn)
+        const guards = fn === undefined ? new Set<string>() : guardReceivers(fn, context)
         const predicates = fn === undefined ? new Set<string>() : predicateNames(fn)
         for (const continuation of [node.catchClause?.block, node.finallyBlock]) {
           if (continuation === undefined) continue
@@ -934,32 +1178,42 @@ function analyze(
 /**
  * 一个源文件在不在代际判据的**适用面**里（C/E 两条规则的取值域）。
  *
- * 判据是两条**或**关系（2026-09-27 修，AA1 §证伪-1 的 M-B）：
- *  1. 文件里出现了代际协议（同一接收者既有 `begin()` 又有 `isCurrent()`）；
- *  2. **或者**文件里某个会话入口抵达了一个带守卫的函数（`begin()` 或 `isCurrent()`）。
+ * 判据只有一条：**文件里存在绑定到代际协议的接收者**（`const epochs = createSessionEpoch()`
+ * / `x: SessionEpoch`，识别按符号来源，见本节头）。
  *
- * 为什么必须有第 2 条：M-B 那种"把守卫的**比对**整段删掉、只留 `begin()`"的形态会让
- * 第 1 条不再成立（文件里再没有 `isCurrent`）⇒ 文件整个被判据跳过，而入口又因为
- * `begin()` 还在而"看起来被守卫" —— 两条规则**同时**放过它（旧判据 6/6 全绿）。
- * 反过来，只看 `begin()` 也不行：别的包恰好有个叫 `begin` 的游标（实测 memory-evolve
- * 客户端视图的 `tasksSeq.current.begin()`）会把无关文件拖进适用面。两条或起来才对。
+ * 修前是两条或关系（"同一接收者既有 `begin()` 又有 `isCurrent()`" 或 "某个会话入口抵达
+ * 一个带 `begin()`/`isCurrent()` 的函数"）。合并成一条**不是**放宽：
+ *
+ *  - 第 2 条被第 1 条**吸收** —— 入口抵达的那个"带守卫的函数"本身就有代际接收者，
+ *    第 1 条（下探嵌套函数地问"文件里有没有接收者"）必然也成立；
+ *  - M-B 的防护（"把比对整段删掉、只留 `begin()`"）反而更强：旧第 1 条要求
+ *    `isCurrent` 还在，删掉它文件就被跳过；新口径只看**接收者绑定**，删不删比对都在面内。
+ *
+ * 反过来，"别的包恰好也有个叫 begin 的游标"这类误判（实测 `scopeReset.begin(previous)`
+ * 把 `wasm-apps-host/src/index.ts` 拖进面内，于是规则 B 认它已守卫、规则 C 报 11 条违规）
+ * 由符号来源识别根除。
  * @param source - 已解析的源文件。
+ * @param context - 该文件的代际上下文（import 绑定）。
  * @returns 在适用面里为 true。
  */
-function fileScope(source: ts.SourceFile): boolean {
-  if (usesEpochProtocol(source)) return true
-  const labels = functionLabels(source)
-  const named = new Map<string, ts.FunctionLikeDeclaration>()
-  for (const [fn, label] of labels) if (declaredName(fn) !== undefined) named.set(label, fn)
-  return sessionEntries(source).some(entry => entryIsGuarded(entry, named, labels))
+function fileScope(source: ts.SourceFile, context: EpochContext): boolean {
+  return usesEpochProtocol(source, context)
 }
 
 /** 一个源文件里"用了代际协议"吗（见 {@link fileScope}）。 */
 function isEpochGuardedFile(text: string, file: string): boolean {
-  return fileScope(
-    ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TSX),
-  )
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TSX)
+  return fileScope(source, epochContext(source, file))
 }
+
+/**
+ * 合成夹具里的代际导入（FIX-44 ③ 起识别**按符号来源**）。
+ *
+ * 夹具是**字符串源码**、不在磁盘上，所以相对导入（`./session-epoch.ts`）解析不到 ——
+ * 必须写包说明符。凡是要被判据认成"用了代际协议"的合成都以此开头；**不写它的合成
+ * 就是"名字像但没有来源"的负例**（见 `it('代际协议按符号来源识别…')`）。
+ */
+const SYNTHETIC_EPOCH_IMPORT = `import { createSessionEpoch, type SessionEpoch } from '${EPOCH_PACKAGE_SUBPATH}'\n`
 
 /** 读一个源文件（判据失败时给出可定位的文件名）。 */
 function readSource(file: string): string {
@@ -977,6 +1231,103 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
       'packages/host/desktop/src/updates.ts',
       'packages/host/browser/src/index.ts',
     ]))
+  })
+
+  /**
+   * 识别面（FIX-44 ③）：**按符号来源**认代际协议。
+   *
+   * 正向：既有正确用法一条都不许掉出适用面（四个 enterprise 投影 + desktop 的
+   * `updates.ts`）。它们是仓库里全部 `createSessionEpoch()` 消费点。
+   *
+   * 反向：`wasm-apps-host` 的清理链（`scopeReset.start`）与它的宿主文件**不在**面内 ——
+   * 修前 `scopeReset.begin(previous)` 的名字式识别把宿主文件拖进来，规则 B 认它"已守卫"、
+   * 规则 C 同时报 11 条 `await-outside-guard`。名字已改（`start`），但判据的取值域现在
+   * 由**来源**决定：改不改名都不再误判。
+   */
+  it('代际协议按符号来源识别：既有五个消费点在面内，同名不同源的接收者不在面内', () => {
+    const expected = [
+      'packages/host/enterprise/src/bootstrap.ts',
+      'packages/host/enterprise/src/error-reporting.ts',
+      'packages/host/enterprise/src/gateway-model.ts',
+      'packages/host/enterprise/src/channel-sync.ts',
+      'packages/host/desktop/src/updates.ts',
+    ]
+    for (const file of expected) {
+      expect(isEpochGuardedFile(readSource(file), file), `${file} 掉出了代际适用面（识别收窄过头）`).toBe(true)
+    }
+    // 负向：清理链的实现与宿主文件都不是代际协议（`scope-reset.ts` 的模块头逐字论证过）。
+    for (const file of [
+      'packages/host/wasm-apps-host/src/scope-reset.ts',
+      'packages/host/wasm-apps-host/src/index.ts',
+    ]) {
+      expect(isEpochGuardedFile(readSource(file), file), `${file} 被同名不同源的接收者拖进了适用面`).toBe(false)
+    }
+    // 判据自证不空转：`session-events.ts` 是**真源模块**本身（import 解析必须落到它）。
+    expect(
+      epochContext(
+        ts.createSourceFile('packages/host/enterprise/src/bootstrap.ts', readSource('packages/host/enterprise/src/bootstrap.ts'), ts.ScriptTarget.Latest, true),
+        'packages/host/enterprise/src/bootstrap.ts',
+      ).bindings.factories.size,
+      'bootstrap.ts 的 `./session-epoch.ts` 没有被解析到真源模块（re-export 链断了）',
+    ).toBe(1)
+  })
+
+  /**
+   * 合成负例（FIX-44 ③ 的核心回归）：**名字像，但不是该模块导出的守卫**。
+   *
+   * 复现修前的自相矛盾。修前的名字式识别让 `scopeReset.begin(previous)` 这种同名不同源的
+   * 接收者同时触发两个相反结论：
+   *  ① 规则 B 认为"这个会话入口抵达了一个带守卫的函数"（`begin()` 就算守卫）⇒ 入口判据放过它；
+   *  ② 规则 C 的适用面第 2 条正是由 ① 推出来的 ⇒ 同一个文件里**每一个** await 都被要求
+   *     住在被守卫的函数里 ⇒ 报 `await-outside-guard`。
+   * 于是一个没有守卫的入口既"已守卫"又"违规"，出口只有给无关 API 改名（K-L 的实际处置）。
+   *
+   * 新口径下两者都不会出现：接收者不是代际接收者 ⇒ 入口如实报 `entry-not-guarded`，
+   * 而规则 C 的适用面根本没打开（不再有"文件里有守卫"这个假前提）。
+   * **变异**：把识别改回按名字（`x.begin()`/`x.isCurrent()` 即算守卫）⇒ 本用例红。
+   */
+  it('判据自检：名字像但不是该模块导出的守卫不算守卫（修前的自相矛盾不再出现）', () => {
+    const empty: Scope = { exemptions: {}, entryExemptions: {}, deferredExemptions: {} }
+    // 形状取自 `wasm-apps-host/src/index.ts`（入口 + 内层投影）与 `scope-reset.ts`
+    // （清理链的 `begin`）：回调里调 `scopeReset.begin(previous)`，另有一个带 await 的函数。
+    const lookalike = `
+      const scopeReset = createScopeReset()
+      const onSessionChanged = (previous) => { scopeReset.begin(previous) }
+      const project = async (session) => {
+        const data = await load(session)
+        ctx.settings.update('late' as SettingsNamespace, data)
+      }
+      subscribeSession(ctx, (session) => { onSessionChanged(session); void project(session) })
+    `
+    const kinds = analyze(lookalike, 'packages/host/wasm-apps-host/src/zz-lookalike.ts', empty).map(f => f.kind)
+    expect(
+      kinds,
+      '同名不同源的 begin()/isCurrent() 被当成了守卫 ⇒ 这个没有守卫的入口被静默放过',
+    ).toContain('entry-not-guarded')
+    expect(
+      kinds,
+      '同名不同源的接收者把文件拖进了规则 C 的适用面 ⇒ 与入口判据自相矛盾（修前的形态）',
+    ).not.toContain('await-outside-guard')
+
+    // 正控：同一形状换成**真的**代际接收者（从真源模块 import，且住在**外层**作用域 ——
+    // 本仓"每个插件实例一个守卫、住在 `apply()` 里"的写法）⇒ 入口被守卫、零违规。
+    const genuine = `
+      ${SYNTHETIC_EPOCH_IMPORT}
+      export function apply(ctx) {
+        const epochs = createSessionEpoch()
+        const project = async (session) => {
+          const epoch = epochs.begin()
+          const data = await load(session)
+          if (!epochs.isCurrent(epoch)) return
+          ctx.settings.update('late' as SettingsNamespace, data)
+        }
+        subscribeSession(ctx, (session) => { void project(session) })
+      }
+    `
+    expect(
+      analyze(genuine, 'synthetic.ts', empty),
+      '真代际守卫（闭包捕获的外层 `epochs`）应当零违规 —— 否则上面的负例是空断言',
+    ).toEqual([])
   })
 
   it('用了代际守卫的文件里，A/C/D/E 四条规则全部成立', () => {
@@ -1108,7 +1459,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
   it('判据自检：未守卫的 await / 未守卫的新入口 / 漏传谓词 / 三种 AA1 绕过形态都能被抓到', () => {
     const empty: Scope = { exemptions: {}, entryExemptions: {}, deferredExemptions: {} }
     // ① await 之后没有比对 ⇒ await-without-check。
-    const base = `
+    const base = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const sync = async (s) => {
         const epoch = epochs.begin()
@@ -1128,7 +1479,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     expect(findings2).toContain('entry-not-guarded')
 
     // ③ initSentry 漏传谓词 ⇒ initSentry-without-predicate。
-    const missingPredicate = `
+    const missingPredicate = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const sync = async (s) => {
         const epoch = epochs.begin()
@@ -1141,7 +1492,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     expect(analyze(missingPredicate, 'synthetic.ts', empty).map(f => f.kind)).toContain('initSentry-without-predicate')
 
     // ④ 完整形状（含谓词、含比对）⇒ 零违规（正面自检：分析器不是恒红）。
-    const sound = `
+    const sound = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const sync = async (s) => {
         const epoch = epochs.begin()
@@ -1171,7 +1522,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
 
     // M-A 的第二种形态：同一文件**确实用了**代际协议（规则 C 因此适用），但入口多出
     // 一条没有守卫的 async 投影 ⇒ await-outside-guard。
-    const mutationA2 = `
+    const mutationA2 = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const sync = async (s) => {
         const epoch = epochs.begin()
@@ -1188,7 +1539,8 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     ).toContain('await-outside-guard')
 
     // M-B：守卫**整段删掉**、await 落在 `try` 块尾（空后继）⇒ 规则 A 必须沿执行序向外找。
-    const mutationB = `
+    const mutationB = `${SYNTHETIC_EPOCH_IMPORT}
+      const epochs = createSessionEpoch()
       const sync = async (session) => {
         const epoch = epochs.begin()
         const builtIn = builtin()
@@ -1208,7 +1560,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     ).toContain('await-without-check')
 
     // M-C3：`.then()` 回调里的投影（回调内**没有 await 节点**）⇒ 规则 E 必须抓到。
-    const mutationC = `
+    const mutationC = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const sync = async (session) => {
         const epoch = epochs.begin()
@@ -1240,7 +1592,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
    */
   it('判据自检：AB1-03 的九种取值域缺口形态逐个都能被抓到', () => {
     const empty: Scope = { exemptions: {}, entryExemptions: {}, deferredExemptions: {} }
-    const preamble = `
+    const preamble = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const markerEpoch = epochs.begin()
       export function scopeMarker(): boolean { return epochs.isCurrent(markerEpoch) }
@@ -1376,7 +1728,7 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
     }
 
     // 正控：同样的夹具在**有守卫**时不报（分析器不是恒红 —— 否则上面九条就是空断言）。
-    const guarded = `
+    const guarded = `${SYNTHETIC_EPOCH_IMPORT}
       const epochs = createSessionEpoch()
       const markerEpoch = epochs.begin()
       export function scopeMarker(): boolean { return epochs.isCurrent(markerEpoch) }

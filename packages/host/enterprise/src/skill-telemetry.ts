@@ -173,8 +173,9 @@ async function installedVersion(name: string): Promise<string | undefined> {
  * - `session/event`:skill-invocation 用户消息(用户 `/name` 手势注入内容)
  *   → 上报。
  *
- * ⚠️ **会话必须在观察点同步取**（第二十八轮 FIX-40 ③，`KNOWN_UNGUARDED_ENTRIES` 里那条
- * "在 await 之后才读会话"）：修前两个观察点都是
+ * ⚠️ **会话必须在观察点同步取**（第二十八轮 FIX-40 ③ 收口；第二十九轮 FIX-44 ② 已从
+ * `KNOWN_UNGUARDED_ENTRIES` 迁到 `ENTRY_EXEMPTIONS` —— 它是**等价机制**而不是
+ * "没装代际"，见该表的登记理由）。被修的形态是"在 await 之后才读会话"：修前两个观察点都是
  * `void installedVersion(name).then(() => reportSkillCall(ctx.picoSession.getSession(), …))`
  * —— 会话是在 `installedVersion` 的 **await 续体里**才读的，于是"读版本文件期间用户换了
  * 账号/服务端"这条普通时序会把**上一账号**的技能调用记到**新账号**名下（作用域与令牌

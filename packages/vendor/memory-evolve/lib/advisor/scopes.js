@@ -45,6 +45,17 @@ export class ScopeStore {
   projectScopes = new Map()
   /** sessionId → 会话约束文本。 */
   sessionScopes = new Map()
+  /**
+   * 相对路径 → 最近一次**读失败**的原因（FIX-45③，2026-09-29）。
+   *
+   * 为什么需要它：本类全是 read-modify-write（`setProject` 合并整文件 map、
+   * `setConversation` 合并 conversation 文件）。读失败若被降级成"空基线"，
+   * 写路径就会以空基线**覆盖整文件** —— 抹掉别的项目的约束、评审员的整段历史。
+   * 所以：读失败 ⇒ 记一条标记；对应的 `set*` **fail-closed 拒写**并抛出可读原因。
+   * 标记在该路径**重新读成功**时清除（瞬时故障自愈，不留永久禁写）。
+   * @type {Map<string, string>}
+   */
+  loadErrors = new Map()
   writeFile
   readFile
   conversationFileOf
@@ -66,6 +77,59 @@ export class ScopeStore {
     return trimmed
   }
 
+  /**
+   * 读一个基线文件并解析（FIX-45③ 的唯一读入口）。
+   *
+   * 形态与 `lib/skills.js`（AB2-04）/`lib/coi/index.js` 的 `loadRuntime` 同源：
+   * **只有"文件不存在"才算没有基线**，其余一律抛错（调用方据此拒写）。
+   * 注入的 `readFile` 已经把 ENOENT 归一成 `''`（见 advisor/index.js 的注释），
+   * 所以这里 `''` = 不存在**或**该层被显式清空（`setGlobal`/`setSession` 清空时写 `''`）。
+   * @param {string} rel - 相对 dataDir 的路径。
+   * @returns {*} 解析后的基线；不存在返回 `undefined`。
+   */
+  readBaseline(rel) {
+    let raw
+    try {
+      raw = this.readFile(rel)
+    } catch (error) {
+      // 注入的 reader 通常已把 ENOENT 归一成 `''`；这里再认一次 ENOENT 是**纵深**：
+      // 换一个没归一化的 reader 也不能把"不存在"误判成"读失败"（否则首次使用会被拒写）。
+      if (error?.code === 'ENOENT') return undefined
+      throw new Error(`读失败 ${rel}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (raw === '') return undefined
+    try {
+      return JSON.parse(raw)
+    } catch (error) {
+      throw new Error(`内容不可解析 ${rel}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * 写前闸门：该路径最近一次读失败过就**拒绝写入**（fail-closed）。
+   * @param {string} rel - 相对 dataDir 的路径。
+   * @param {string} label - 人读的层名（如「项目约束」）。
+   */
+  assertBaselineWritable(rel, label) {
+    const reason = this.loadErrors.get(rel)
+    if (reason === undefined) return
+    throw new Error(`advisor: ${label}基线不可读（${rel}）—— 已拒绝写入：${reason}`
+      + '（以空基线回写会抹掉其它项目/会话的内容；请先恢复该文件的可读性）')
+  }
+
+  /**
+   * 记一次读失败（**不缓存**空值 ⇒ 下次访问重试；写路径按 {@link assertBaselineWritable} 拒写）。
+   * @param {string} rel - 相对 dataDir 的路径。
+   * @param {string} label - 人读的层名。
+   * @param {*} error - 原始错误。
+   * @param {object} logger - 日志（`warn`）。
+   * @param {object} detail - 附加字段（cwd / sessionId）。
+   */
+  noteLoadFailure(rel, label, error, logger, detail = {}) {
+    this.loadErrors.set(rel, error instanceof Error ? error.message : String(error))
+    logger.warn?.(`advisor: ${label} load failed — refuse to overwrite baseline`, { ...detail, rel, error })
+  }
+
   // ---- 全局约束（所有项目/会话共享，2026-08-12 用户拍板） ----
 
   /** 读取全局约束（惰性加载文件）。 */
@@ -73,15 +137,14 @@ export class ScopeStore {
     if (this.globalText === undefined) {
       let text = ''
       try {
-        const raw = this.readFile('global-scope.json')
-        if (raw !== '') {
-          const parsed = JSON.parse(raw)
-          if (parsed !== null && typeof parsed === 'object' && typeof parsed.text === 'string') {
-            text = parsed.text
-          }
+        const parsed = this.readBaseline('global-scope.json')
+        if (parsed !== null && typeof parsed === 'object' && typeof parsed.text === 'string') {
+          text = parsed.text
         }
+        this.loadErrors.delete('global-scope.json')
       } catch (error) {
-        logger.warn?.('advisor: global scope load failed', { error })
+        this.noteLoadFailure('global-scope.json', 'global scope', error, logger)
+        return ''
       }
       this.globalText = text
     }
@@ -92,6 +155,7 @@ export class ScopeStore {
   setGlobal(text, logger = console) {
     const normalized = ScopeStore.normalize(text)
     this.globalOf(logger) // 确保已加载
+    this.assertBaselineWritable('global-scope.json', '全局约束')
     this.globalText = normalized
     if (normalized === '') {
       this.writeFile('global-scope.json', '')
@@ -108,15 +172,24 @@ export class ScopeStore {
     if (!this.projectScopes.has(cwd)) {
       let text = ''
       try {
-        const raw = this.readFile('project-scopes.json')
-        if (raw !== '') {
-          const parsed = JSON.parse(raw)
-          if (parsed !== null && typeof parsed === 'object') {
-            text = typeof parsed[cwd] === 'string' ? parsed[cwd] : ''
+        const parsed = this.readBaseline('project-scopes.json')
+        if (parsed !== null && typeof parsed === 'object') {
+          // **FIX-45③b**（与 ③ 同一处 read-modify-write，独立于"读失败"那一格）：
+          // `setProject` 是「合并内存 map → 整文件回写」，而修前这里**只把当前 cwd 这一条
+          // 装进内存** ⇒ 只要在 A 里保存一次，B/C 的约束就被从盘上删掉（**正常读成功时也发生**）。
+          // 现在按文件语义一次性装载整张 map；已在内存里的条目不覆盖（内存可能更新）。
+          for (const [key, value] of Object.entries(parsed)) {
+            if (typeof value === 'string' && !this.projectScopes.has(key)) {
+              this.projectScopes.set(key, value)
+            }
           }
+          text = typeof parsed[cwd] === 'string' ? parsed[cwd] : ''
         }
+        this.loadErrors.delete('project-scopes.json')
       } catch (error) {
-        logger.warn?.('advisor: project scope load failed', { cwd, error })
+        // 不缓存空值：下次访问重试（瞬时 EACCES 自愈），写路径期间按标记拒写。
+        this.noteLoadFailure('project-scopes.json', 'project scope', error, logger, { cwd })
+        return ''
       }
       this.projectScopes.set(cwd, text)
     }
@@ -127,6 +200,7 @@ export class ScopeStore {
   setProject(cwd, text, logger = console) {
     const normalized = ScopeStore.normalize(text)
     this.projectOf(cwd, logger) // 确保已加载
+    this.assertBaselineWritable('project-scopes.json', '项目约束')
     this.projectScopes.set(cwd, normalized)
     // 合并写整文件（map 持久化）
     const merged = {}
@@ -142,17 +216,17 @@ export class ScopeStore {
   /** 读取会话约束（惰性加载文件）。 */
   sessionOf(sessionId, logger = console) {
     if (!this.sessionScopes.has(sessionId)) {
+      const rel = `session-scopes/${safeId(sessionId)}.json`
       let text = ''
       try {
-        const raw = this.readFile(`session-scopes/${safeId(sessionId)}.json`)
-        if (raw !== '') {
-          const parsed = JSON.parse(raw)
-          if (parsed !== null && typeof parsed === 'object' && typeof parsed.text === 'string') {
-            text = parsed.text
-          }
+        const parsed = this.readBaseline(rel)
+        if (parsed !== null && typeof parsed === 'object' && typeof parsed.text === 'string') {
+          text = parsed.text
         }
+        this.loadErrors.delete(rel)
       } catch (error) {
-        logger.warn?.('advisor: session scope load failed', { sessionId, error })
+        this.noteLoadFailure(rel, 'session scope', error, logger, { sessionId })
+        return ''
       }
       this.sessionScopes.set(sessionId, text)
     }
@@ -163,11 +237,13 @@ export class ScopeStore {
   setSession(sessionId, text, logger = console) {
     const normalized = ScopeStore.normalize(text)
     this.sessionOf(sessionId, logger) // 确保已加载
+    const rel = `session-scopes/${safeId(sessionId)}.json`
+    this.assertBaselineWritable(rel, '会话约束')
     this.sessionScopes.set(sessionId, normalized)
     if (normalized === '') {
-      this.writeFile(`session-scopes/${safeId(sessionId)}.json`, '')
+      this.writeFile(rel, '')
     } else {
-      this.writeFile(`session-scopes/${safeId(sessionId)}.json`, JSON.stringify({ text: normalized }))
+      this.writeFile(rel, JSON.stringify({ text: normalized }))
     }
     return normalized
   }
@@ -175,24 +251,26 @@ export class ScopeStore {
   /** 会话销毁：清理内存缓存（磁盘文件保留供追溯，可重写覆盖）。 */
   disposeSession(sessionId) {
     this.sessionScopes.delete(sessionId)
+    this.loadErrors.delete(`session-scopes/${safeId(sessionId)}.json`)
   }
 
   // ---- 评审会话约束（绑定 conversation 文件，新建评审会话即清空） ----
 
   /**
    * 读取评审会话约束（与 conversation 共用同一持久化文件——reset 时
-   * conversation.reset 会一并清空）。
+   * conversation.reset 会一并清空）。读取失败仍返回 ''（**读**面不阻断评审），
+   * 但记下标记 ⇒ `setConversation` 拒写。
    */
   conversationOf(sessionId, logger = console) {
+    const rel = this.conversationFileOf(sessionId)
     try {
-      const raw = this.readFile(this.conversationFileOf(sessionId))
-      if (raw === '') return ''
-      const parsed = JSON.parse(raw)
+      const parsed = this.readBaseline(rel)
+      this.loadErrors.delete(rel)
       return parsed !== null && typeof parsed === 'object' && typeof parsed.scopeText === 'string'
         ? parsed.scopeText
         : ''
     } catch (error) {
-      logger.warn?.('advisor: conversation scope load failed', { sessionId, error })
+      this.noteLoadFailure(rel, 'conversation scope', error, logger, { sessionId })
       return ''
     }
   }
@@ -200,13 +278,24 @@ export class ScopeStore {
   /** 保存评审会话约束（写入 conversation 文件——需保留 messages/epoch）。 */
   setConversation(sessionId, text, logger = console) {
     const normalized = ScopeStore.normalize(text)
+    const rel = this.conversationFileOf(sessionId)
+    // **基线读失败 ⇒ 拒写**（FIX-45③）：修前这里 readFile 被注入的 reader 吞成 ''，
+    // 于是 `{epoch:1,messages:[]}` 覆盖整文件 —— 评审员的历史消息与 epoch 一起没了。
+    // 写失败仍是"仅告警"（既有契约）；两种结果现在分得开。
+    let parsed
     try {
-      const raw = this.readFile(this.conversationFileOf(sessionId))
-      const parsed = raw === '' ? null : JSON.parse(raw)
-      const data = parsed !== null && typeof parsed === 'object'
-        ? { ...parsed, scopeText: normalized }
-        : { epoch: 1, messages: [], scopeText: normalized }
-      this.writeConversation(this.conversationFileOf(sessionId), JSON.stringify(data))
+      parsed = this.readBaseline(rel)
+      this.loadErrors.delete(rel)
+    } catch (error) {
+      this.noteLoadFailure(rel, 'conversation', error, logger, { sessionId })
+      this.assertBaselineWritable(rel, '评审会话') // 一定抛（标记刚写入）
+      return normalized // 不可达；仅为让静态读者看到"读失败不落盘"
+    }
+    const data = parsed !== null && typeof parsed === 'object'
+      ? { ...parsed, scopeText: normalized }
+      : { epoch: 1, messages: [], scopeText: normalized }
+    try {
+      this.writeConversation(rel, JSON.stringify(data))
     } catch (error) {
       logger.warn?.('advisor: conversation scope save failed', { sessionId, error })
     }

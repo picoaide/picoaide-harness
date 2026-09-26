@@ -153,11 +153,26 @@ function lazyDir(dir) {
  */
 const conversationFileOf = (dataDir, sessionId) => join(dataDir, 'conversations', `${safeId(sessionId)}.json`)
 const readConversation = (dataDir, sessionId) => {
+  let text
   try {
-    const text = readFileSync(conversationFileOf(dataDir, sessionId), 'utf8')
+    text = readFileSync(conversationFileOf(dataDir, sessionId), 'utf8')
+  } catch (error) {
+    // FIX-45③（第三十轮审计，2026-09-29）：**只有 ENOENT 才算"不存在"**（首次使用）。
+    //
+    // 现场：这里修前是 `catch { return null }` —— 把**读失败**（EACCES / EMFILE / EIO、
+    // Windows 上同步盘或杀软瞬时占用）与"文件不存在"压成同一个值，`AdvisorConversation`
+    // 于是以**空基线**继续，随后 persist() 把 `{epoch:1,messages:[]}` 整文件回写：
+    // 评审员的整段历史被抹掉、epoch 从 7 掉回 1，**且全程零告警**。
+    // 同族已收口的正确对照：`lib/skills.js`（AB2-04）与 `lib/coi/index.js` 的 loadRuntime
+    // 都是"ENOENT-only + throw"，这里跟进同一形态（不自创第三种）。
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+  try {
     return text === '' ? null : JSON.parse(text)
-  } catch {
-    return null // 不存在/损坏：按空会话
+  } catch (error) {
+    // 内容不可解析（半截写 / git 冲突标记）：同样**不是**"不存在"，抛给调用方 fail-closed。
+    throw new Error(`advisor: 评审会话文件不可解析（${conversationFileOf(dataDir, sessionId)}）: ${error.message}`)
   }
 }
 const writeConversation = (dataDir, sessionId, epoch, messages, scopeText = '') => {
@@ -206,8 +221,13 @@ export function installAdvisor(ctx, config, deps = {}) {
     readFile: (rel) => {
       try {
         return readFileSync(join(dataDir, rel), 'utf8')
-      } catch {
-        return ''
+      } catch (error) {
+        // FIX-45③：只有 ENOENT 算"不存在"（首次使用）⇒ 返回 ''；其余读失败**抛出去**，
+        // 由 `ScopeStore` 的 loadErrors 收口（读失败时**拒写**，见 scopes.js）。
+        // 修前 `catch { return '' }` ⇒ 一次瞬时 EACCES 就足以让 setProject 以空 map
+        // 回写 project-scopes.json，**抹掉其它所有项目**的约束文本。
+        if (error?.code === 'ENOENT') return ''
+        throw error
       }
     },
     conversationFileOf: (sessionId) => `conversations/${safeId(sessionId)}.json`,
@@ -254,8 +274,12 @@ export function installAdvisor(ctx, config, deps = {}) {
     readFile: (path) => {
       try {
         return readFileSync(path, 'utf8')
-      } catch {
-        return ''
+      } catch (error) {
+        // FIX-45③：同 ScopeStore.readFile —— ENOENT 才是"没有队列"，其余读失败抛出，
+        // 由 InstructionQueue 的 loadFailed 收口（**拒写**）。修前 `catch { return '' }`
+        // ⇒ `ctrl.tell` 以空队列回写，该会话**全部待处理指令**被抹掉且零告警。
+        if (error?.code === 'ENOENT') return ''
+        throw error
       }
     },
   })

@@ -59,14 +59,20 @@ export interface ScopeReset {
   /**
    * 开始一次换代清理，返回本次清理落地的 promise。
    *
-   * ⚠️ 方法名**刻意**不叫 `begin`（也不是 `isCurrent`）：本仓的接线判据
-   * （`packages/host/enterprise/tests/session-epoch-wiring.spec.ts`）按**名字**识别
-   * "代际协议" —— 一个文件里出现 `x.begin(` 就会被判成"用了代际守卫"，于是规则 C 要求
-   * 该文件里**每一个** await 都住在被守卫的函数里。实测：把本方法叫 `begin` 之后，
-   * `index.ts` 立刻报 **11 条 `await-outside-guard`**（`requestOpen` 的 6 个 await +
-   * 两个路由 handler + ai-chat 包装），而那 11 条只能靠新增 `AWAIT_EXEMPTIONS` 行豁免。
-   * 这条清理链**不是**代际协议（见模块头"为什么不复用 createSessionEpoch"），换个名字
-   * 既如实、又不会把无关文件拖进那个适用面。**不要改回 `begin`。**
+   * 方法名**刻意**不叫 `begin`（也不是 `isCurrent`）：这条清理链**不是**代际协议
+   * （见模块头"为什么不复用 createSessionEpoch"），名字如实反映语义（"开始一次清理"
+   * 而不是"取一个代际号"）。
+   *
+   * 历史（第二十八轮 FIX-40 ③ 的成因，**第二十九轮 FIX-44 ③ 已从判据侧根除**）：当时的
+   * 接线判据（`packages/host/enterprise/tests/session-epoch-wiring.spec.ts`）按**名字**识别
+   * 代际协议 —— 一个文件里出现 `x.begin(` 就算"用了代际守卫"，于是规则 C 要求该文件里
+   * **每一个** await 都住在被守卫的函数里。实测把本方法叫 `begin` 之后 `index.ts` 立刻报
+   * **11 条 `await-outside-guard`**（`requestOpen` 的 7 个 await + 本机路由 handler 3 +
+   * ai-chat 包装 1），而那 11 条只能靠新增 `AWAIT_EXEMPTIONS` 行豁免 —— 判据用"名字像"
+   * 冒充"是同一个协议"。现在判据改按**符号来源**识别（认从
+   * `@picoaide/dsh-host-locale/session-events` import 进来的
+   * `createSessionEpoch`/`SessionEpoch`），所以**改回 `begin` 也不会再被误判**。
+   * 保留这个名字是语义与可读性的选择，不再是判据的硬约束。
    * @param leaving - 离开的作用域标识（`null` = 之前是未登录 ⇒ 只关窗、不清缓存：
    *   §7.6 要求"未登录入队、登录后打开"，清缓存会把那条链路上的热缓存一起打掉）。
    * @returns 本次清理（含它之前所有未落地的清理）的 promise。
