@@ -3009,3 +3009,123 @@ path / 二次编码 / userinfo / 大小写+尾随点 / 端口 / AWS·GCS·Azure�
 
 **子泳道独立计数**：S1 `0/3 | P1 1 / P2 3 / P3 1`、S2 `6/7 | P3 4`、S3 `3/4 | P2 3 / P3 3`。
 主树零残留（AD1 碰过的 5 个文件 sha256 与 HEAD 逐个相同）。
+
+---
+
+### §7.72 第三十二轮（AE1 证伪 FIX-47 + **CI−本地判据面差集对账** + AE2 真机面续采）
+
+**AE1**：修复成立 **6/9** | 新发现 **0 P0 / 2 P1 / 7 P2 / 6 P3** | **CI−本地差集 7/60（+13 可补齐）**
+**AE2**：**0 P0 / 0 P1 / 2 P2 / 1 P3**（另独立确认两条 AD1 已登记未修项**仍开着**）
+⇒ **第三十二轮合计 ≥ 0 P0 / 2 P1** ⇒ **不干净（连续 31 轮）**。
+
+#### §7.72.1 【P1 ×2】判据面的"取值域"同族（第 9 次复发）
+
+1. **FIX-47①(b) 的仓库级判据 `readfail-writeback-scan.mjs` 不成立**：候选形态 **5 种写法全逃逸** ——
+   赋值空基线（`data = DEFAULTS`）、catch 里出现 `refuse` 字样、catch 里出现 `throw` 字样、
+   **跨模块读函数**、**`.mjs` 扩展名**（源码与正控逐字节相同）。正控（`return {}`）红。
+   **最刺眼的一格**：用本仓自己的 `writeFileAtomicSafeAt` + 赋值空基线 ⇒ 仓库级判据 **EXIT=0**
+   **且整包 `1183 tests / 1182 pass / 0 fail / 1 skipped` EXIT=0**（与不注入时逐字相同）。
+2. **同族第三处真实点位**：`packages/vendor/memory-evolve/lib/notify-web.js:81-113` 的
+   `NotificationStore#load` —— 真 EACCES（`setpriv --reuid=65534`）下 `add()` 回 **`{ok:true}`**
+   且**盘上其它会话的通知被静默抹掉**（A 格 `others_survived:false`，正向对照 B 格 `true`）；
+   **同一时刻仓库级判据 EXIT=0 4/4**。
+
+其余不成立的判据：**④a SKIP 出口调用点清单**的抽取是**逐行**的 ⇒ 跨行书写（prettier/black 风格）
+的新增调用点隐形；**④c 引用面常量折叠**只补了 `+` 一条通道 ⇒ 模板字符串 / `join(ROOT, 变量, '…')` /
+数组 join / 反引号整条**全 MISSED**（影子根唯一路径正控红、逃逸两格绿）。
+**成立 6 条**：①(a) 两处写入口、② hasPermission 守卫、③ method-picker、④b `RESULT:PASS`、
+④d 文档硬数字、④e site 英文首页 + 产物判据。
+
+**AE1 的方法学自纠（两条，如实入报告）**：① 本沙箱 `/tmp` 跨 bash 调用不共享 ⇒
+它的 `cd /tmp/...` 失败后 heredoc **写进了主树**（已 rm 并复核）——
+与第二十九轮那条"`/tmp` 是每条命令独立 tmpfs"同一坑，但这次是**写错地方**而不是读不到；
+② 影子根实验一度被"**注释里的散文路径也算引用**"污染（三格全红与注入形态无关），
+改用唯一路径重做正控后才成立 —— 顺带发现该抽取器**会把 JSDoc 里的路径当成引用（假阳性面）**。
+
+#### §7.72.2 **CI 判据面 − 本地三件套：差集对账（本轮立身之本）**
+
+口径：`.github/workflows/ci.yml` = **9 job / 104 step**（AE1 的第一版抽取器**只认 `- name:` 形式、
+漏掉 41 条 compact `- run:` 步骤**，把 `make build-server`/`npm ci`/`npm test` 都判成"不在 CI"
+—— 正是本仓已登记的漏抽陷阱，已重抽）。扣除纯基础设施后**语义步 60 条**：
+
+| 分类 | 步数 | 占比 |
+|---|---|---|
+| A 本地三件套**已**覆盖 | 7 | ≈12% |
+| B 可补齐且**本轮已实跑** | 13 | ≈22% |
+| C 可补齐但未实跑（重/需准备） | 7 | ≈12% |
+| D **结构性只能 CI** | ≈33 | ≈55% |
+
+**★ 真跑过的补齐命令**：`make build-server`（EXIT=0 / 76s，**必须显式给 `GOCACHE`/`GOMODCACHE`**
+—— 缺省 `/root/.cache/go-build` 只读会直接失败）、`cd server/webadmin && npm test`（733/733 EXIT=0）、
+CI 的 `tar -czf` 15 条路径自检（EXIT=0）、`docker compose config -q` + `bash -n entrypoint.sh`、
+`node scripts/version.mjs manifests`、`bash scripts/ci-release-policy.sh`、`check-install-integrity.mjs`、
+`check-guard-parser-integrity.mjs`（不带 `--require-clean`）、`check-frozen-launchers.mjs`、
+`PG_DSN_TEST=… go test ./internal/serverauth/`、以及**把 CI 的 docs-only 分类器逐字抽成脚本并在本机跑 12 格全对**。
+
+**结论：不能覆盖 ≥90%**，三件套 ≈12%、加 B 组 ≈34%，**即使把 C 组也全做也只 ≈46%**。
+**本地永远看不见的 ≈55%** 不是"没写命令"，而是需要 CI 才有的东西：Windows/macOS runner、
+Apple 签名 + 公证、R2/AWS/gh 凭据、私有渠道仓、tag-only 事件、GitHub PR 上下文、job 间 `needs`、
+制品上传下载面。**必须靠"提交后盯 CI"的部分（按风险排序）**：三平台打包 + 平台验证 + 签名公证
+＞ release 全链（含三对象大小 + SHA256 对拍）＞ `npm ci` 锁文件 ＞ `go test ./...` 全集 +
+`check-go-test-json.mjs` 用例级判据 ＞ `pr-summary` 文案。
+
+**"本地绿 CI 红"的镜像风险（新，P2）**：`scripts/verify-wasm-client-only.sh` **并发不安全**
+—— `temp/wasm-client-only/HEAD-binding.txt` 与 `gate-logs/` 证据文件是**固定路径**且被多入口共享
+（`yarn check` 的 `check:wasm-client-only` 根守卫 + 手跑）。受控复现：两个 `--groups 6` 并发 ⇒
+**A/B 双 EXIT=1**（"未选中的组却产出 1 行台账"、"台账 pass 之和与内存 PASS 计数不符"）；
+**清干净单跑 ⇒ EXIT=0 / PASS 6**。CI 每 job 干净 VM ⇒ 永不发作 ⇒ **本地红、CI 绿**。
+⇒ **补进本地收尾清单前必须先 run-id 化路径**，否则它只是随机噪声源。
+
+**子泳道 findings**（AE1 独立复跑了 webadmin 4 格）：**WA-F1（P2）** `hasPermission` 守卫扫点只认字面
+token `hasPermission(` ⇒ 新页面写 `rbac.hasPermission('dept:raed')` 或 `hasPermission?.('dept:raed')`
+**整类逃出取值域且不被要求登记夹具**，实测**整包 50 files / 733 tests 全绿**而该页 `dept:read` 能力
+对所有人（含超管）恒 false；**SL-F1（P3）** `check-site-links` 取值域只有 `href`/`src`
+（srcset/action/url()/window.open 逃逸且仍打印"通过 ✅"）；**SL-F3/SL-F4（P2）** locale 键被两处静默
+漏认、该判据**零执行点**且 `site/*` 属 docs-only ⇒ **官网产物面在 CI 里完全没有网**。
+
+#### §7.72.3 AE2 真机面续采
+
+- **【P2】渠道客户端真机主流程：2 条判据必红 + 5 条判据静默不评**。同一 harness、同一 mock 网关，
+  只差包里有没有 `defaults.server_url`：官方 → 13 条判据行 / `RESULT: PASS`；
+  **占位渠道包 → `[FAIL] Step1 登录页` + `[FAIL] 检测到两步式登录页` / `RESULT: FAIL(2)`**。
+  原因是渠道包 `autoConnect()` 直进 Step2（截图证明：无「修改服务器地址」退路）。
+  **更重的第二半**：`electron-shots.mjs:715-755` 把其余判据全放进 `if (step1)` ⇒ 渠道包**只求值 4 条**，
+  `server-filled` / `step2-brand` / `method-picker` / `step2-shot-differs-from-step1` / `left-login-page`
+  **一次都不判、也不报 SKIP**；而 `run-all.sh` 按 FAIL 阻塞 ⇒ **渠道客户端的真机覆盖今天 = 0**。
+  （同族的 AD2-02 method-picker 已修，这条没修。）
+- **【P2】`/auth/login` 401 仍整轮 PASS**：网关 `/healthz` 200、methods 正常、login 回真形状 401
+  ⇒ `electron-shots` **13/13 全绿、EXIT=0**。判别力对照：与"真登录成功"那次**判据结论行逐字相同**
+  （只差截图字节数；两张 `05-after-login.png` md5 不同 —— 一张应用外壳、一张登录表单 + 红字
+  「账号或密码错误」）。`left-login-page` 的谓词是 `!pageText.includes('连接服务端')`
+  ⇒ **这条腿判的是"离开了 Step1"，与登录成功无关**。
+- **【复核】AD1-02 `requestOpen` 顺序面：仍然开着**（`git log 9fa2d4e182..HEAD -- packages/host/wasm-apps-host/`
+  为空、`index.ts` sha256 与 AD1 基线逐字节相同）。AE2 自写探针（走**本机打开路由** + 持有性证明，
+  不复用 S3 的 vitest）复现三格：①旧账号迟到答复写进新账号版本表 ②旧账号的迟到 404
+  **关掉新账号刚开的窗口** ③反向对照（同代）关掉的是自己那一代的窗口。
+  ⇒ 修复要覆盖 **四个写入点**（`knownVersions` / `knownTitles` / `cache.clearApp` / `windows.close`），
+  不是一处。
+- **【复核】`sort -V` 版本序**：AE2 真发布脚本 + 自写假 aws 跑 12 序列 ⇒ AD1 四场景全部复现；
+  逐对拍 **23 对不一致 = 可达 10 对（恰好两类 5+5）+ latent 13 对**；
+  `+build` 与段数差异**确实判反但被 tag 白名单（`ci-release-policy.sh`）锁在 latent，不算可达缺陷**。
+- **【P3】本地打包路径与渠道包门禁不对称**：`package-dir.mjs` 能产出"装好打不开"的渠道包而 afterPack
+  全绿（占位渠道包漏 `desktop.app_origin_scheme` ⇒ `PACKAGE_EXIT=0`，启动即 `AppOriginSchemeError`、
+  主进程死、`/json/list` 为空）；CI 路径拦得住，**本地路径不跑 `verify-channel-package.ts`**。
+- **【F-02 真服务端端到端：跑完了 —— 只差一行字段】** 真服务端（HEAD 源码构建 + 127.0.0.1:8091）+
+  真 Dex 容器，OIDC 经管理端 API 配好。**仓库原样脚本**：`[1][2][3] ✓ → ✗ [4] 授权确认 POST 返回 500
+  → [5]×2 ✗、RESULT: FAIL`；**只把第 4 步换成真 Dex 字段**（从 approval 页 HTML 解析隐藏 `req` +
+  `approval=approve`，**零硬编码**）：**`[1]..[6]` 全绿、EXIT=0**（深链、`/auth/me` 200、
+  库里落 `source=external external_source=oidc`）。⇒ F-02 的修复就是这一处；不改它 `[5]/[6]`
+  **结构上不可达**。
+
+**三条新环境情报**：① `electron-shots` 的 RUN_DIR/app.log 在 `/tmp/electron-shots-XXXX`，
+**跨 bash 调用会消失** ⇒ 失败时看不到 app 报错，保诊断用 `temp/r32/AE2/probe/manual-launch.sh`；
+② 本沙箱**每次 bash 调用是独立 PID namespace**（`bwrap --unshare-pid`）⇒ 跨调用起的进程
+**既看不见也杀不掉**，长任务必须用后台 job，**别用 nohup/setsid**；
+③ 造渠道包须知：`GITHUB_REF_NAME` 单独设**不生效**（必须给带 `refs/tags/` 的 `GITHUB_REF`），
+合规占位包需要 `desktop.app_origin_scheme` 等 7 个字段。
+
+**AE1 给主控的下一步建议（按性价比）**：① 修 AE1-01 的扫描器 4 处一行级修复
+（`EMPTY_RETURN` 认赋值式、`GATE_MARKERS` 去裸词、`READ_CALLS` 加跨模块闭包、`listLibModules` 认
+`.mjs/.cjs`）—— **不修则这个已复发四次的族仍无前向网**；② 修 `NotificationStore#load` fail-closed + 拒写；
+③ 本地收尾清单加 7 条 <1 分钟的命令 + `webadmin npm test`（**否则 FIX-47② 的守卫根本不在本地门禁里**）
++ `make build-server`；④ **给 `verify-wasm-client-only.sh` 的路径 run-id 化**（否则上面的清单会变成随机红）。
