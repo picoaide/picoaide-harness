@@ -1599,12 +1599,22 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	serverstore.InvalidateSettings()
 	// F2: 让运行中的认证 API 立即按新配置重建 providers/browsers/enabled,
 	// 而不是等下一次重启(否则"启用 LDAP 不生效 / 禁用 LDAP 后仍可登录")。
+	//
+	// R24-X4-B2:**"保存成功"≠"新配置生效"**。构建失败的登录方式由
+	// ReloadProviders 保留旧实例并把错误返回(例如保存那一刻 IdP 的 discovery
+	// 不可达)⇒ 错误必须一路走到响应与审计,绝不能再静默吞掉:
+	// 旧实现只 `log.Printf` 后照旧回 200 `{"ok":true}`,于是"保存一次认证配置"
+	// 就能把全员 SSO 换成一颗点到 404 的按钮而界面上毫无异常。
+	var applyErr error
 	if a.ReloadAuth != nil {
 		if rerr := a.ReloadAuth(); rerr != nil {
-			log.Printf("auth config saved but provider reload failed: %v", rerr)
+			applyErr = rerr
+			log.Printf("auth config saved but not fully applied: %v", rerr)
 		}
 	}
 	// v3b 字段级审计(§2.5):记录本次变更的键集合(值脱敏, 不落密钥)。
+	// R24-X4-B2:新配置**未生效**时必须一并留痕(否则"保存了但 SSO 已死"
+	// 在审计链上完全看不见)。
 	var changed []string
 	for _, k := range []string{"auth.mode", "auth.enabled"} {
 		changed = append(changed, k)
@@ -1624,7 +1634,11 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 	if req.MinPasswordLength != nil {
 		changed = append(changed, "auth.min_password_length")
 	}
-	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", "changed:"+strings.Join(changed, ","))
+	auditDetail := "changed:" + strings.Join(changed, ",")
+	if applyErr != nil {
+		auditDetail += " apply_failed:" + applyErr.Error()
+	}
+	_ = serverstore.AuditLog(a.DB, currentAdminUsername(c), "auth_config", auditDetail)
 	// LDAP 配置生效后立即同步一轮目录(用户要求:配置后自动同步用户/组)。
 	// 异步执行:同步为网络 IO(LDAP bind+分页扫描),不应阻塞保存响应;
 	// 失败仅记日志,不影响保存结果。
@@ -1653,10 +1667,47 @@ func (a *AdminAPI) setAuthConfig(c *gin.Context) {
 			}
 		}()
 	}
+	// 设置已落库(同一事务已提交),但**新配置没有完全生效** ⇒ 如实报告失败。
+	//
+	// 为什么不选"200 + warnings":本仓 webadmin 的保存路径只看 HTTP 状态
+	// (server/webadmin/src/pages/Auth.tsx 的 `await request(...)` 后无条件提示
+	// "已保存"),200 带 warnings 在界面上与成功**逐字同形** —— 而这条缺陷的
+	// 全部危害正是"管理员以为保存成功了,而员工端已经进不去"。回 5xx 是唯一
+	// 能让现有前端把真实原因显示出来的形态;设置确实已保存(消息里写明),
+	// 管理员改回或等 IdP 恢复后再保存一次即可,不需要重放任何输入。
+	if applyErr != nil {
+		writeError(c, http.StatusInternalServerError, "INTERNAL",
+			"认证配置已保存,但新配置未生效: "+applyErr.Error())
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
+
+// getPublicAuthMethods 是**管理端**公开路由(/api/server/admin/auth/methods)的
+// 入口。判定逻辑与客户端面共用同一实现(publicAuthMethods);本结构体没有运行期
+// provider 注册表的句柄 ⇒ 传 nil(按 settings 判定)。生产路由树里两条 methods
+// 路由都指向客户端 API 的 handler(带运行期视图),见 internal/router 的
+// publicMethodsHandler(R24-X4-B2)。
 func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
-	s, err := serverstore.GetAllSettings(a.DB)
+	publicAuthMethods(c, a.DB, nil)
+}
+
+// publicAuthMethods 是登录方式发现的**唯一实现**(客户端登录页与管理端公开面
+// 共用;路由在 internal/router 声明)。
+//
+// 两个真源各司其职(R24-X4-B2):
+//   - **候选**来自 settings(auth.enabled / auth.mode 兼容推导)—— "启用了哪些";
+//   - **可用性**来自 available = 运行期 provider 注册表 —— "此刻哪个真的能用"。
+//
+// 为什么不能只看 settings:settings 描述"配置齐全",而 provider 是**构建**出来
+// 的(OIDC 要打 IdP 的 discovery、LDAP 要必填项)。构建失败时 settings 依旧齐全,
+// 旧实现于是回 `configured:true`,登录页渲染一颗点到 404 的 SSO 按钮
+// (hide_local=true 的部署里员工端只剩这一颗)。两者必须分开判。
+//
+// available == nil = 该装配没有运行期视图(仅测试自建的最小路由树):按 settings
+// 判定。这是**唯一**的 settings 回退点,生产装配永远有运行期视图。
+func publicAuthMethods(c *gin.Context, db *sql.DB, available func(name string) bool) {
+	s, err := serverstore.GetAllSettings(db)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
 		return
@@ -1664,10 +1715,11 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	// v3b 修复(2026-09):此前 configured 只判 oidc 三件套,LDAP 恒判
 	// 未配置 → 客户端登录页 LDAP 按钮永久灰(禁用)。LDAP 的可配置性 =
 	// server_url/bind_dn/base_dn 必填项齐全(与 webadmin REQUIRED 一致)。
+	// 这两个判据只在"没有运行期视图"时使用(见 available)。
 	ldapConfigured := func() bool {
 		return s["ldap.server_url"] != "" && s["ldap.base_dn"] != "" && s["ldap.bind_dn"] != ""
 	}
-	configured := func(prefix string) bool {
+	oidcConfigured := func(prefix string) bool {
 		// oidc/openid:browser 三件套齐全才可用
 		return s[prefix+".issuer"] != "" && s[prefix+".client_id"] != "" && s[prefix+".redirect_url"] != ""
 	}
@@ -1707,11 +1759,18 @@ func (a *AdminAPI) getPublicAuthMethods(c *gin.Context) {
 	hideLocal := s["auth.hide_local"] == "true"
 	for _, m := range methods {
 		isConfigured := m == "local"
-		switch m {
-		case "ldap":
-			isConfigured = ldapConfigured()
-		case "oidc", "openid":
-			isConfigured = configured(m)
+		if m != "local" {
+			if available != nil {
+				// 运行期注册表 = 权威判据(与登录路由解析 provider 的那张表同源)
+				isConfigured = available(m)
+			} else {
+				switch m {
+				case "ldap":
+					isConfigured = ldapConfigured()
+				case "oidc", "openid":
+					isConfigured = oidcConfigured(m)
+				}
+			}
 		}
 		out = append(out, gin.H{
 			"name":       m,

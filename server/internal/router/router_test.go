@@ -33,7 +33,18 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, Deps{
+	Register(r, testRouterDeps(t))
+	return r
+}
+
+// testRouterDeps 是测试路由树的 Deps 装配（与生产 main 一致）。
+//
+// 抽出来是为了让"需要在 Register **之前**挂中间件/NoRoute 的判据"
+// （wasm_appid_route_test.go 的路由可达性探针）拿到同一份装配，
+// 而不是各写一份再漂移。
+func testRouterDeps(t *testing.T) Deps {
+	t.Helper()
+	return Deps{
 		DB:            nil,
 		Auth:          serverauth.New(nil).Handlers(),
 		Admin:         (&serverauth.AdminAPI{}).Handlers(),
@@ -55,8 +66,7 @@ func buildTestRouter(t *testing.T) *gin.Engine {
 		Wasm: wasmapi.NewHandlers(wasmapi.Options{}),
 		// 内置技能下发面（随镜像发布）。资产目录用一次性空目录。
 		SkillSeed: skillseed.NewHandlers(skillseed.New(t.TempDir())),
-	})
-	return r
+	}
 }
 
 // TestNamespaces 验证: 全部路由只存在于 /api/client/v2 或 /api/server 下;

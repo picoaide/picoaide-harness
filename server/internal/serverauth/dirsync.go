@@ -96,9 +96,8 @@ func (s LDAPDirectorySync) Run(db *sql.DB) (*DirSyncResult, error) {
 	if !ldapEnabled(settings) {
 		return &DirSyncResult{}, nil
 	}
-	prov := ldapFromSettings(settings)
-	ld, ok := prov.(*LDAPProvider)
-	if !ok {
+	ld, err := ldapFromSettings(settings)
+	if err != nil {
 		return nil, errors.New("ldap: config incomplete")
 	}
 	if s.Dial != nil {
@@ -206,8 +205,11 @@ func SyncDirectoryRun(db *sql.DB, prov *LDAPProvider) (*DirSyncResult, error) {
 			continue
 		}
 		// 组同步(与登录路径一致:group_filter 按该用户 DN 查询)。
-		// group_filter 缺失时不清空已有组(与登录行为一致)。
-		if prov.GroupFilter != "" {
+		// "是否参与组同步"由**唯一谓词** prov.syncsGroups() 决定 —— 登录路径
+		// (LDAPProvider.Authenticate 的 GroupsPresent)调用的是同一个谓词,
+		// 所以"group_filter 缺失时不清空已有组"这条对两条路径同时成立
+		// (R24-X4-B1:旧实现只在同步侧判空,登录侧恒清空)。
+		if prov.syncsGroups() {
 			groups, gerr := prov.groupsOfEntry(conn, e.DN)
 			if gerr != nil {
 				return res, gerr

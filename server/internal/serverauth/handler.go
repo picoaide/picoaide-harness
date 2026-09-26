@@ -74,6 +74,13 @@ type API struct {
 	// ["ldap","local"] ⇒ 员工面重新接受本地密码)。SetEnabledProviders /
 	// ReloadProviders 一旦被调用即置位,之后空集按 fail-closed 处理(空顺序)。
 	providersConfigured bool
+	// runtimeReady 区分"运行期注册表为空"的两种含义(R24-X4-B2):
+	//   - false:本实例**从未装载过** provider 集合(`New()` 之后无人注册,仅测试
+	//     自建的最小装配)⇒ 没有运行期视图,登录方式发现只能按 settings 判定;
+	//   - true :装载过 ⇒ 注册表就是**权威**:某个方式不在表里 = 它此刻真的不可用
+	//     (构建失败且没有旧实例 / 被显式禁用),`/auth/methods` 必须如实回
+	//     `configured:false`,不能因为 settings 齐全就渲染一颗点到 404 的按钮。
+	runtimeReady bool
 
 	// OnSessionRevoked / OnUserSessionsRevoked 是**会话键失效**的回调
 	// （契约 §8.2 / R1-SRV-5，2026-09-19）。
@@ -150,11 +157,25 @@ func (a *API) SetEnabledProviders(names []string) {
 // ReloadProviders 用当前 settings 重建全部 provider/浏览器方式(F2)。
 // 管理端保存认证配置后调用;GetAllSettings 失败时**保留旧集合**(不能把
 // 一次 DB 抖动变成"所有登录方式消失")。
+//
+// R24-X4-B2:同一条口径必须覆盖**单个 provider 构建失败** —— 旧实现无条件用
+// 新 map 覆盖 `a.browsers`(与 providers),于是"保存配置那一刻 IdP 的 discovery
+// 不可达"会把正在工作的 SSO 实例**静默摘除**(settings 一字未动、保存回 200、
+// 零日志),登录页留一颗点到 404 的按钮。现在:
+//
+//   - 构建失败且**旧实例存在** ⇒ 保留旧实例(可用优于没有),并把该失败作为
+//     错误返回给保存接口(不静默);
+//   - 构建失败且没有旧实例 ⇒ 该方式**当前不可用**,同样作为错误返回;
+//   - 显式禁用(从 auth.enabled 里移除)仍然照旧摘除 —— 那是管理员的明确意图,
+//     不是构建失败(不会进入失败列表)。
+//
+// 返回值 nil 表示"新配置完整生效"。
 func (a *API) ReloadProviders(db *sql.DB) error {
-	if _, err := serverstore.GetAllSettings(db); err != nil {
+	settings, err := serverstore.GetAllSettings(db)
+	if err != nil {
 		return err
 	}
-	pwds, browsers := ConfigureProviders(db)
+	pwds, browsers, failures := configureProvidersFromSettings(settings, db)
 	providers := make(map[string]PasswordProvider, len(pwds))
 	for _, p := range pwds {
 		providers[p.Name()] = p
@@ -168,12 +189,38 @@ func (a *API) ReloadProviders(db *sql.DB) error {
 		enabled[n] = true
 	}
 	a.mu.Lock()
+	kept := make(map[string]bool, len(failures))
+	for _, f := range failures {
+		if f.Kind == kindBrowser {
+			if old := a.browsers[f.Name]; old != nil {
+				bs[f.Name] = old
+				kept[f.Name] = true
+			}
+			continue
+		}
+		if old := a.providers[f.Name]; old != nil {
+			providers[f.Name] = old
+			kept[f.Name] = true
+		}
+	}
 	a.providers = providers
 	a.browsers = bs
 	a.enabledProviders = enabled
-	a.providersConfigured = true
+	a.providersConfigured = true // 空集从此是"配置成空"而不是"没配置过"
+	a.runtimeReady = true        // provider 集合已装载过 ⇒ 运行期视图可用
 	a.mu.Unlock()
-	return nil
+	if len(failures) == 0 {
+		return nil
+	}
+	errs := make([]error, 0, len(failures))
+	for _, f := range failures {
+		if kept[f.Name] {
+			errs = append(errs, fmt.Errorf("登录方式 %s 未生效(已保留原配置的实例): %w", f.Name, f.Err))
+			continue
+		}
+		errs = append(errs, fmt.Errorf("登录方式 %s 未生效(当前不可用): %w", f.Name, f.Err))
+	}
+	return errors.Join(errs...)
 }
 
 // clientPasswordOrder returns the provider names the CLIENT surface may use.
@@ -210,6 +257,7 @@ func (a *API) RegisterProvider(p PasswordProvider) {
 		a.providers = map[string]PasswordProvider{}
 	}
 	a.providers[p.Name()] = p
+	a.runtimeReady = true // 运行期视图从这一刻起可用(R24-X4-B2)
 	a.mu.Unlock()
 }
 
@@ -223,7 +271,34 @@ func (a *API) RegisterBrowser(p BrowserProvider) {
 		a.browsers = map[string]BrowserProvider{}
 	}
 	a.browsers[p.Name()] = p
+	a.runtimeReady = true // 运行期视图从这一刻起可用(R24-X4-B2)
 	a.mu.Unlock()
+}
+
+// runtimeMethodCheck 返回"某登录方式此刻是否真的可用"的判据(R24-X4-B2)。
+//
+// 它是 `/auth/methods` 的 `configured` 的**运行期真源**,与登录路由自己解析
+// 的那张表同源(`browserProvider` / `passwordProvider`) ⇒ "按钮可点"与
+// "点下去真的能登录"不会再分叉。
+//
+// 返回 nil 表示本实例**没有运行期视图**(从未装载过 provider 集合,仅测试
+// 自建的最小装配):此时调用方按 settings 判定 —— 这是**唯一**的回退点。
+func (a *API) runtimeMethodCheck() func(name string) bool {
+	a.mu.RLock()
+	ready := a.runtimeReady
+	a.mu.RUnlock()
+	if !ready {
+		return nil
+	}
+	return func(name string) bool {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		if _, ok := a.browsers[name]; ok {
+			return true
+		}
+		_, ok := a.providers[name]
+		return ok
+	}
 }
 
 // browserProvider 返回指定名称的浏览器登录 provider(nil = 未配置)。
@@ -561,8 +636,13 @@ func (a *API) ldapProvider() PasswordProvider {
 	}
 	// 不缓存:每次按当前 settings 构建(配置被清空/写坏时立即返回 nil,
 	// 不会像缓存实例那样沿用旧配置)。对象本身很轻,真正的连接在
-	// Authenticate 时才建立。
-	return ldapFromSettings(settings)
+	// Authenticate 时才建立。构建失败(必填项缺失)同样返回 nil ——
+	// 该失败已在保存/热加载路径回报(R24-X4-B2),这里只是"用不了"。
+	p, berr := ldapFromSettings(settings)
+	if berr != nil {
+		return nil
+	}
+	return p
 }
 
 // resolvePasswordProvider returns the configured password provider.
