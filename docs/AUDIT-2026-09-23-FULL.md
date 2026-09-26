@@ -2850,3 +2850,92 @@ FIX-43 ④ `docs/releases/**` 豁免上限 5 够用（实际 **1** 行）；FIX-
 ⇒ **变异脚本必须先证明变异体存在**（与第二十六轮"夹具漏 await ⇒ 夹具根本没构造出缺陷"同族）。
 
 **第二十九轮收口计数**：AC2 `0/3/9/8` + AC1 `0/1/3/3` ⇒ **≥ 0 P0 / 4 P1** ⇒ **不干净，收敛仍未达成**。
+
+---
+
+### §7.71 第三十一轮（AD1 证伪第三十轮批 + AD2 真机面/待派项）
+
+**AD1**（中期，S2 在跑）：**修复成立 5/8 | 新发现 0 P0 / 1 P1 / 6 P2 / 3 P3**；
+**AD2**：**0 P0 / 0 P1 / 2 P2 / 5 P3**（真机面）。⇒ **第三十一轮合计 ≥ 0 P0 / 1 P1** ⇒ **不干净**。
+
+#### §7.71.1 【P1】FIX-45③ 的 fail-closed 只收了同一文件的三个入口，**同族另两处漏收** —— 其中一处**上一轮已逐字登记**
+
+1. **`lib/advisor/index.js:295-314` 的 `session-overrides.json`**：装载期是**裸 `catch {}`**
+   （EACCES 与"文件不存在"不可区分），`persistOverrides()` 整表回写。
+   真 EACCES 实测：seed `{"session-0":true,"session-9":true}` → 一次 `POST /toggle`（**HTTP 200 ok:true**）
+   后文件变 `{"session-1":true}`。写入口三个：`POST /toggle` / `ctrl.setSessionOverride` /
+   CLI `/advisor on|off|toggle`。
+   **关键（流程失败）**：`temp/r21/fix-44/REPORT.md:397-401` **已把它逐字登记为
+   "与 AC2 那三处同族的确证点位"**（原文："一次瞬时 EACCES 清空全部会话级开关"）；
+   而 `grep -c "session-overrides" temp/r21/fix-45/REPORT.md` = **0** ——
+   本轮改了**同一个 `index.js`**、既没修、也没列进"未做项"。
+   ⇒ **主控漏派**：登记项没有被带进下一轮的泳道范围。这与第二十七轮"同族只收口一条"是同一形态，
+   但这次的教训更深一层：**登记了却不在下一轮的题面里 = 等于没登记。**
+2. **`lib/index.js` 的 `plugin-state.json`**：`loadState` 读失败只 warn 就 `return {}`
+   （解析失败反而会 quarantine）。实测 `POST /memory-evolve/api/config` ⇒ 200，文件被换成
+   `{"advisorModel":"NEW-MODEL"}`，`advisorEnabled`/`reviewEnabled`/`skillReviewEnabled` 静默消失。
+
+#### §7.71.2 AD1 的三条判据面失效（P2，均真跑）
+
+- **FIX-45② 的可达性判据仍可绕过**：把真树里已登记的 `report('screenshot-nonempty', …)` 包进
+  `for (;false;) { … }`（字面量保留）⇒ `check-integration-tests.mjs` **EXIT=0**；
+  同位置用 `if (false) { … }` ⇒ EXIT=1（正控）。逐形态实测 **49 条里 17 条死代码形态不红**
+  （`&&`/`||`、比较运算符、`for(;false;)`、`try{return}catch{}` 之后、`process.exit()` 之后、
+  Python `NEVER=False; if NEVER`、`for _ in range(0)`、`not True`、`and/or`…），
+  另有 **1 条误红**：`switch (0) { case 0: … }` 运行期可达却判死。
+- **FIX-45① 的夹具与真 Dex 不同形**：真 Dex 的相对 Location 由 **IdP origin** 发出
+  （起点在产品服务端 origin），而新夹具（单元 probe + `dex-relative-location` 腿）都在**同一 origin**。
+  实测：把 `follow()` 改成"用流程起始 URL 做基准"（必然错的实现）⇒ `--probe-redirect-forms` 3/3 绿、
+  **整条门禁 EXIT=0**；只有补的"跨 origin 相对 Location"那条会红。
+  ⇒ **修夹具的方向对了，但夹具的"形态"仍是自洽的**。
+- **FIX-46① 本体成立**（守卫 3/3 绿、拆 CAS ⇒ EXIT=1；并发统计修后 0/12、拆回无条件写 ⇒ 7/12），
+  但共享的版本序比较式 **`sort -V` 把 `2.8.1-beta.5` 排在 `2.8.1` 之后**：
+  正式 tag 推不动"停在同版预发"的渠道指针，而更旧的预发 tag 重跑会**静默**把正式指针降级
+  （两条都已在假 aws 上真跑复现）。该缺陷在 `9fa2d4e182~3` 已存在、非本轮引入，
+  但 `ci.yml` 新注释把"无论谁来写都不会倒退"整条归给条件写 ⇒ 属应一并认账的取值域。
+
+#### §7.71.3 AD2 的真机面（**这一轮最有价值的部分**）
+
+1. **`electron-shots` 真机主流程真跑通两次**（真打包产物 `package-dir.mjs` + Xvfb + mock 网关）：
+   RUN A（服务端只下发 `local` 一种登录方式）→ 8 ok / 1 FAIL / **exit 1**；
+   RUN B（**同一产物、同一流程，只**把服务端方式数改成 2）→ 全绿 / **exit 0**。
+2. **同一产物跑 `e2e:client` EXIT=0**，`.e2e-report.md` 自述「**41/41** 通过」。
+3. **真 `dex-test` 容器 + 自写探针**独立复现 F-02：真表单字段 = `req` + `approval`（approve/rejected），
+   **没有** `grant_scope`；POST 真实字段 → **303**；脚本现在的 `{approve:'true', grant_scope:…}` → **500**。
+
+**两条 P2**：
+- **AD2-01**：`hasPermission('dept:raed')`（**行内字面量**）⇒ `npx vitest run src/pages/usage`
+  **28/28 全绿 EXIT=0**；反向对照只换成另一个**合法**权限点 ⇒ 红 2 条。
+  FIX-45④ 收的是「`PERM_*` **声明**必须在 `rbac.ts`」，而**行内字面量不是声明**、落在正则之外。
+  后果与 FIX-45④ 完全同形：该页能力对**所有人（含超管）**恒 false，界面反过来说
+  「当前账号没有组织架构读取权限」。⇒ **同一族第三次**（FIX-45④ → 本轮 AD2-01）。
+- **AD2-02**：`assertions.mjs` 的 `method-picker` 判据名为「方式选择器存在」，实际谓词是
+  `methodCount > 0`，而登录页在只有 1 种方式时**按设计不渲染** ⇒ 这条腿在
+  「刚装好、只配 local」的服务端上**结构上不可能 PASS**，且报 `FAIL` 而非 `SKIP`
+  （`run-all.sh` 按失败阻塞）。**本仓自己的 `e2e-fixture-gateway.mjs` 只回 `local`**
+  ⇒ 任何拿标准夹具网关跑它的尝试都会红。
+
+**五条 P3**：SKIP 对账只判原因码集合 + 唯一出口、不判**调用点**（新增 `skip()` 调用点 ⇒ EXIT=0）；
+「不得报 PASS」判的是**逐字带空格**的 `RESULT: PASS`（`RESULT:PASS` 隐形）；
+引用面抽取器只认字面量形态（变量拼接出的同一条引用隐形，而守卫**真的读了**那个文件）；
+`AGENTS.md:82`「25 assertions」vs 真值 **41**（`ci-and-branch-plan.md` 同文件内只收口了一条）；
+**`site/` 英文站没有首页**（`dist/en/index.html` 不存在）而 17/17 英文页的页头站点标题链到 `/en`
+⇒ 17 条死链，`astro build` **零报告**，源码面链接探针结构上看不见（**只有 build 后扫产物才看得见**）。
+
+#### §7.71.4 明确证伪 / 已核查为干净（勿重复投入）
+
+**leads-guard L1 被证伪**（`yarn workspace <包> <别名>` 的委托别名在网内，守卫会红并具名）；
+**FIX-45 的两条「有意保留」独立复核 ⇒ 两条都成立**（都是显式命名的回退分支且各有正例对照）；
+「不误伤」fixture 整族变异矩阵：除 AD2-01 的字面量形态外**全部有判据**；
+`server/webadmin` 723/723；`astro build` EXIT=0 / 43 页；审计保留策略承诺与代码一致。
+
+**两条方法学**：① AD2 自纠一次 —— `Departments.test.tsx` 单独跑 8/8 绿会误判成"无判据"，
+判据住在**邻文件**（`auditor-access.test.tsx` + `usage-center.test.tsx`）
+⇒ **变异必须跑该页面的全部消费者测试**；② `site/` 那条死链**只在 build 产物里可见**
+⇒ 源码面探针的"零失效"不等于站点可用。
+
+**环境情报（下一轮可直接省一整轮踩坑）**：`electron-builder 26` **不认 `ELECTRON_CACHE`**
+（走 `@electron/get` 的 `env-paths('electron').cache` ⇒ 沙箱里必然 `EROFS: /root/.cache/electron/…`）
+⇒ 正解 `XDG_CACHE_HOME=<工作区> ELECTRON_BUILDER_CACHE=<工作区>/eb` + 预置 zip；
+本沙箱 **`/tmp` 跨 bash 调用不共享** ⇒ Xvfb 必须与被驱动命令**在同一个 bash 调用里**起
+（`:99` 起不来，用 `:77`/`:78`）。启动器 `temp/r31/AD2/probe/run-shots.sh` 已写好。
