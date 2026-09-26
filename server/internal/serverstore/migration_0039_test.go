@@ -17,7 +17,8 @@ import (
 //
 // 病根（独立审计用真实载荷复现）：v2.4.0 的 `0004_usage.sql` 建的是**普通表**，
 // 该文件后来被**原地改写**成 `PARTITION BY RANGE` 版本（与 0039 同在提交
-// 8f8d09fe31），而 `schema_migrations` 只记版本号、**没有校验和** ⇒ 由旧 0004
+// 8f8d09fe31），而 `schema_migrations` 当时只记版本号、**没有校验和**
+// （R27-FIX39 起已加 `checksum` 列并在启动期对账，见 migrate.go）⇒ 由旧 0004
 // 建库的存量库上，0039 原来的 `CREATE TABLE IF NOT EXISTS usage` 静默跳过（表已
 // 存在）、紧接着的 `PARTITION OF usage` 直接报 `"usage" is not partitioned`：
 // 事务回滚、版本号不落库、`cmd/server/main.go` 的 log.Fatalf ⇒ **崩溃循环，

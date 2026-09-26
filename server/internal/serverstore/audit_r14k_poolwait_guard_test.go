@@ -98,8 +98,14 @@ var r14kPoolWaitAck = map[string]string{
 	// `db` 的池连接。产品池的下限是 2（db.go 的 `pgPoolMax` 把任何更小的配置夹到 2，
 	// 注释逐字："发布路径的最小可用池:同一时刻 1 条连接即可,但 2 是安全地板"），
 	// 迁移又跑在 serve 之前 ⇒ 持 1 条 + 取 1 条恒可满足，不存在"两边互等"。
-	// 重审条件：池下限被去掉、或迁移进入请求路径。
-	"internal/serverstore.ApplyMigrations": "advisory-lock 专用连接 + 产品池下限 2（pgPoolMax 夹取）+ 仅 serve 前执行 ⇒ 持 1 取 1 恒可满足",
+	//
+	// R27-FIX39：`ApplyMigrations` 拆成"薄包装 + applyMigrations(db, sink)"（sink 是
+	// 观测出口，生产恒走包装），池调用点随之下移到 applyMigrations / applyOneMigration
+	// —— 认账键跟着改到新的函数名上，**口子没有变大**：仍然是那 1 条 advisory 连接 +
+	// 同一条 `db` 的池语句，且新的锁窗口采样器**复用**那条已持有的连接
+	// （`*sql.Conn` 并发安全），不额外向池要连接。
+	// 重审条件：池下限被去掉、采样器改成自己 `db.Conn`、或迁移进入请求路径。
+	"internal/serverstore.applyMigrations": "advisory-lock 专用连接 + 产品池下限 2（pgPoolMax 夹取）+ 仅 serve 前执行 ⇒ 持 1 取 1 恒可满足；采样器复用同一连接，不额外占池位",
 	// 测试模板库夹具：`admin` 是 `requireTestPG` 用 `sql.Open` 直接开的**临时库管理
 	// 句柄**（只做 CREATE/DROP DATABASE + advisory lock，不共享产品池上限，生产路径
 	// 不可达 —— 仅 `NewTestDB` 调用）。
