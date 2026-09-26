@@ -2,7 +2,7 @@
  * 应用 AI 前端桥（§21）的传输与错误分层判据。
  *
  * 这一套全部在 **node 环境**跑（纯逻辑，无 DOM）：SSE 读法、增量顺序、`done` 收尾、
- * 错误分层、本地请求闸门、取消、以及"按 用户×应用 记一次授权"。
+ * 错误分层、本地请求闸门、取消、以及"按 用户×服务端×应用 记一次授权"。
  *
  * ---- 变异验证 ----
  *   - `readAppAiStream` 不检查 `done`（把截断当成功）⇒「没有 done 收尾 ⇒ 协议错误」红；
@@ -10,7 +10,9 @@
  *   - `failureFromEnvelope` 丢掉信封 code、只按状态码分流 ⇒「403 + 已知 code」红；
  *   - `validateAppAiRequest` 去掉 16 KiB 字节闸门（或按字符数判）⇒「超限本地拦下」红；
  *   - 取消分支被删（AbortError 当 transport）⇒「取消 ⇒ ai_cancelled」红；
- *   - `appAiConsentKey` 去掉 user 维度 ⇒「授权按用户隔离」红。
+ *   - `appAiConsentKey` 去掉 user 维度 ⇒「授权按用户隔离」红；
+ *   - `appAiConsentKey` 去掉 server 维度（回到两段）⇒「换服务端必须重新问」红；
+ *   - `loadAppAiIdentity` 在缺 `serverURL` 时仍返回作用域 ⇒ 它的 fail-closed 条红。
  */
 import { describe, expect, it } from 'vitest'
 import { HOST_PROOF_PATH, setHostProofToken } from './host-proof.ts'
@@ -34,7 +36,12 @@ import {
   validateAppAiRequest,
   type AppAiConsentStore,
   type AppAiMessage,
+  type AppAiScope,
 } from './app-ai.ts'
+
+/** 两台服务端（换租户场景：本仓测试/正式并存 + 同机第二栈是常态）。 */
+const SERVER_A = 'https://a.harness.example.com'
+const SERVER_B = 'https://b.harness.example.com'
 
 /** 一段 SSE 文本的字节流（按给定分块切开，用来验证跨块的帧边界处理）。 */
 function sseResponse(chunks: string[], status = 200): Response {
@@ -234,7 +241,7 @@ describe('帧解析的边界（纯函数）', () => {
   })
 })
 
-describe('首次授权：按 **用户×应用** 记一次，可撤销（§21.1 第 9 条）', () => {
+describe('首次授权：按 **用户×服务端×应用** 记一次，可撤销（§21.1 第 9 条 / R21 FIX-7 ①）', () => {
   /** 内存存储。 */
   function memory(): AppAiConsentStore & { values: Map<string, string> } {
     const values = new Map<string, string>()
@@ -246,33 +253,75 @@ describe('首次授权：按 **用户×应用** 记一次，可撤销（§21.1 �
     }
   }
 
+  /** 测试用作用域（与宿主闸门同一形状：用户 + 服务端）。 */
+  const onServer = (userId: string, serverURL = SERVER_A): AppAiScope => ({ userId, serverURL })
+
   it('未授权 ⇒ false；授权后 ⇒ true；撤销后 ⇒ false', () => {
     const store = memory()
-    expect(hasAppAiConsent('alice', 'roster', store)).toBe(false)
-    grantAppAiConsent('alice', 'roster', store)
-    expect(hasAppAiConsent('alice', 'roster', store)).toBe(true)
-    revokeAppAiConsent('alice', 'roster', store)
-    expect(hasAppAiConsent('alice', 'roster', store)).toBe(false)
+    expect(hasAppAiConsent(onServer('alice'), 'roster', store)).toBe(false)
+    grantAppAiConsent(onServer('alice'), 'roster', store)
+    expect(hasAppAiConsent(onServer('alice'), 'roster', store)).toBe(true)
+    revokeAppAiConsent(onServer('alice'), 'roster', store)
+    expect(hasAppAiConsent(onServer('alice'), 'roster', store)).toBe(false)
   })
 
-  it('两个维度都隔离：换用户、换应用都必须重新问', () => {
+  it('三个维度都隔离：换用户、换应用、**换服务端**都必须重新问', () => {
     const store = memory()
-    grantAppAiConsent('alice', 'roster', store)
-    expect(hasAppAiConsent('bob', 'roster', store)).toBe(false)
-    expect(hasAppAiConsent('alice', 'invoice', store)).toBe(false)
-    // 键里两个维度都在（用不同的顺序/拼接也不会撞：用 encodeURIComponent 分隔）。
-    expect(appAiConsentKey('a:b', 'c')).not.toBe(appAiConsentKey('a', 'b:c'))
+    grantAppAiConsent(onServer('alice'), 'roster', store)
+    expect(hasAppAiConsent(onServer('bob'), 'roster', store)).toBe(false)
+    expect(hasAppAiConsent(onServer('alice'), 'invoice', store)).toBe(false)
+    // 本条是 R21 FIX-7 ① 的核心：宿主闸门升成 (用户, 服务端, 应用) 之后，客户端这份
+    // "已经问过"的 UI 记忆必须同域 —— 否则换过服务端的面板会**跳过说明卡**，
+    // 用户发第一条消息才吃 403（静默失败）。
+    expect(hasAppAiConsent(onServer('alice', SERVER_B), 'roster', store)).toBe(false)
+    expect(appAiConsentKey(onServer('alice', SERVER_B), 'roster'))
+      .not.toBe(appAiConsentKey(onServer('alice', SERVER_A), 'roster'))
+    // 键里三个维度都在（不同顺序/拼接也不会撞：用 encodeURIComponent 分隔）。
+    expect(appAiConsentKey(onServer('a:b'), 'c')).not.toBe(appAiConsentKey(onServer('a'), 'b:c'))
   })
 
-  it('身份为空 / 存储不可用 ⇒ 一律"未授权"（fail-closed，不静默放行）', () => {
+  it('换服务端后重新授权**不会**动另一台服务端的记录（各段只影响自己那一段）', () => {
     const store = memory()
-    expect(hasAppAiConsent('', 'roster', store)).toBe(false)
-    expect(hasAppAiConsent('alice', '', store)).toBe(false)
-    grantAppAiConsent('', 'roster', store)
+    grantAppAiConsent(onServer('alice', SERVER_A), 'roster', store)
+    grantAppAiConsent(onServer('alice', SERVER_B), 'roster', store)
+    expect(hasAppAiConsent(onServer('alice', SERVER_A), 'roster', store)).toBe(true)
+    expect(hasAppAiConsent(onServer('alice', SERVER_B), 'roster', store)).toBe(true)
+    revokeAppAiConsent(onServer('alice', SERVER_B), 'roster', store)
+    expect(hasAppAiConsent(onServer('alice', SERVER_B), 'roster', store)).toBe(false)
+    expect(hasAppAiConsent(onServer('alice', SERVER_A), 'roster', store)).toBe(true)
+  })
+
+  it('作用域缺任一段 / 存储不可用 ⇒ 一律"未授权"且零写入（fail-closed，不静默放行）', () => {
+    const store = memory()
+    // 拿不到服务端地址 ⇒ 当成"没问过"（宁可多问一次），**不是**"无服务端"的两段作用域。
+    expect(hasAppAiConsent(onServer('alice', ''), 'roster', store)).toBe(false)
+    expect(hasAppAiConsent({ userId: 'alice', serverURL: '   ' }, 'roster', store)).toBe(false)
+    expect(hasAppAiConsent({ userId: '', serverURL: SERVER_A }, 'roster', store)).toBe(false)
+    expect(hasAppAiConsent({ userId: 'alice', serverURL: SERVER_A }, '', store)).toBe(false)
+    expect(hasAppAiConsent(null, 'roster', store)).toBe(false)
+    expect(hasAppAiConsent(undefined, 'roster', store)).toBe(false)
+    grantAppAiConsent(onServer('alice', ''), 'roster', store)
+    grantAppAiConsent({ userId: '', serverURL: SERVER_A }, 'roster', store)
+    grantAppAiConsent(null, 'roster', store)
     expect(store.values.size).toBe(0)
-    expect(hasAppAiConsent('alice', 'roster', null)).toBe(false)
-    expect(() => { grantAppAiConsent('alice', 'roster', null) }).not.toThrow()
-    expect(() => { revokeAppAiConsent('alice', 'roster', null) }).not.toThrow()
+    expect(hasAppAiConsent(onServer('alice'), 'roster', null)).toBe(false)
+    expect(() => { grantAppAiConsent(onServer('alice'), 'roster', null) }).not.toThrow()
+    expect(() => { revokeAppAiConsent(onServer('alice'), 'roster', null) }).not.toThrow()
+  })
+
+  it('段内含 NUL ⇒ 构键为 null（与宿主同一条判据；不许静默变成"问过了"）', () => {
+    const store = memory()
+    expect(appAiConsentKey({ userId: 'a\u0000b', serverURL: SERVER_A }, 'roster')).toBeNull()
+    expect(appAiConsentKey({ userId: 'alice', serverURL: `a\u0000b` }, 'roster')).toBeNull()
+    expect(appAiConsentKey(onServer('alice'), 'a\u0000b')).toBeNull()
+    grantAppAiConsent({ userId: 'a\u0000b', serverURL: SERVER_A }, 'roster', store)
+    expect(store.values.size).toBe(0)
+  })
+
+  it('各段先 trim 再用（与宿主同一份归一化；纯空白不算"有值"）', () => {
+    const store = memory()
+    grantAppAiConsent({ userId: '  alice  ', serverURL: `  ${SERVER_A}  ` }, ' roster ', store)
+    expect(hasAppAiConsent(onServer('alice'), 'roster', store)).toBe(true)
   })
 
   it('存储抛异常时不抛穿（按未授权处理）', () => {
@@ -281,9 +330,9 @@ describe('首次授权：按 **用户×应用** 记一次，可撤销（§21.1 �
       setItem: () => { throw new Error('SecurityError') },
       removeItem: () => { throw new Error('SecurityError') },
     }
-    expect(hasAppAiConsent('alice', 'roster', broken)).toBe(false)
-    expect(() => { grantAppAiConsent('alice', 'roster', broken) }).not.toThrow()
-    expect(() => { revokeAppAiConsent('alice', 'roster', broken) }).not.toThrow()
+    expect(hasAppAiConsent(onServer('alice'), 'roster', broken)).toBe(false)
+    expect(() => { grantAppAiConsent(onServer('alice'), 'roster', broken) }).not.toThrow()
+    expect(() => { revokeAppAiConsent(onServer('alice'), 'roster', broken) }).not.toThrow()
   })
 
   it('默认存储实现：node 环境没有 localStorage ⇒ null（不抛）', () => {
@@ -341,35 +390,56 @@ describe('授权同步：允许/撤销真的写到宿主（§21.1 第 9 条 / §
 })
 
 /**
- * 审计 C-25：授权作用域必须与**宿主闸门**同源。
+ * 授权作用域必须与**宿主闸门**同源（审计 C-25 的判据在 R21 FIX-7 ① 换了方向）。
  *
- * 宿主（`wasm-apps-host/src/ai-authorization.ts`）按 `aiConsentKey(user, app)` 记授权，
- * 其中 `user` 就是 `session.username`（`index.ts` 的 `const user = session.username ?? ''`）。
- * 客户端这边此前返回 `<username>@<serverURL>`：改过服务端地址（登录页支持的界面动作）
- * 或清过站点数据之后 key 就对不上 —— 面板重新弹卡、用户点「不允许」看到"不能使用 AI"，
- * 而宿主闸门仍然开着。修法＝align 到 `username`。
+ * 宿主（`wasm-apps-host/src/ai-authorization.ts`）现在按
+ * `aiConsentKey({userId, serverURL}, appId)` 记授权（用户 ⊕ 服务端 ⊕ 应用，落盘
+ * `version: 2`，第二十一轮 B2-R21-01 从两段升成三段）。客户端这份**只决定"还要不要
+ * 再弹一次说明卡"**的 UI 记忆若还停在 `(用户, 应用)`：换过服务端之后面板会**跳过**
+ * 说明卡，用户发第一条消息才吃 403 —— 静默失败。修法＝两段都取、逐段同源。
  *
- * 变异验证：把 `return username` 改回 `username@serverURL` ⇒ 本条红。
+ * 逐段/段序的对拍在 `consent-key-parity.spec.ts`（它读宿主源码）；本组钉行为：
+ * 身份解析的 fail-closed 方向 + 换服务端必须重新问。
+ *
+ * 变异验证：`loadAppAiIdentity` 在缺 `serverURL` 时仍返回作用域 ⇒ 本条红；
+ * `appAiConsentKey` 丢掉服务端段 ⇒「换服务端必须重新问」红。
  */
-describe('loadAppAiIdentity：授权作用域与宿主同源（审计 C-25）', () => {
-  const respond = (body: unknown): typeof fetch =>
-    (async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+describe('loadAppAiIdentity：授权作用域与宿主同源（R21 FIX-7 ①）', () => {
+  const respond = (body: unknown, status = 200): typeof fetch =>
+    (async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
 
-  it('返回裸 username（不带 serverURL），与宿主的 username\0app 作用域一致', async () => {
+  it('返回用户 + 服务端两段（与宿主闸门同一份会话快照）', async () => {
     const identity = await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: 'https://harness.example.com' }) })
-    expect(identity).toBe('alice')
+    expect(identity).toEqual({ userId: 'alice', serverURL: 'https://harness.example.com' })
   })
 
-  it('未登录 / 身份缺失 ⇒ 空串（fail-closed，绝不退化成"所有人都已授权"）', async () => {
-    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: false }) })).toBe('')
-    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: '   ' }) })).toBe('')
+  it('两端各自 trim（与宿主 `aiConsentKey` 的归一化一致）', async () => {
+    const identity = await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: '  alice  ', serverURL: '  https://harness.example.com  ' }) })
+    expect(identity).toEqual({ userId: 'alice', serverURL: 'https://harness.example.com' })
+  })
+
+  it('未登录 / 缺任一段 ⇒ null（fail-closed：宁可多问一次，也不静默跳过说明卡）', async () => {
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: false }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: '   ', serverURL: 'https://harness.example.com' }) })).toBeNull()
+    // 本条是"拿不到服务端地址 ⇒ 当成没问过"的判据（不得退化成两段作用域）。
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice' }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: '   ' }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: null }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: 'https://harness.example.com' }, 500) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: (async () => { throw new Error('offline') }) as unknown as typeof fetch })).toBeNull()
+  })
+
+  it('段内含 NUL ⇒ null（与宿主同判据）', async () => {
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'a\u0000b', serverURL: 'https://harness.example.com' }) })).toBeNull()
+    expect(await loadAppAiIdentity({ fetch: respond({ loggedIn: true, username: 'alice', serverURL: 'https://harness.example.com\u0000x' }) })).toBeNull()
   })
 
   it('读身份的路由是本机只读的 /api/pico/auth/state', async () => {
     let seen = ''
     const spy = (async (input: unknown) => {
       seen = String(input)
-      return new Response(JSON.stringify({ loggedIn: true, username: 'alice' }), { status: 200, headers: { 'content-type': 'application/json' } })
+      return new Response(JSON.stringify({ loggedIn: true, username: 'alice', serverURL: 'https://harness.example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
     }) as unknown as typeof fetch
     await loadAppAiIdentity({ fetch: spy })
     expect(seen).toBe(APP_AI_IDENTITY_PATH)

@@ -21,6 +21,7 @@ import {
   readProvenance,
   resolveSkillsDir,
   uninstallSkill,
+  validateRuntimeSkillName,
   validateSkillName,
   type SkillInstallLog,
 } from './skill-install.ts'
@@ -2171,7 +2172,7 @@ export function apply(ctx: Context, config: Config): void {
             const name = decodePathSegment(builtinUninstallMatch[1])
             if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
-              validateSkillName(name)
+              validateRuntimeSkillName(name)
             } catch (cause) {
               return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
             }
@@ -2264,7 +2265,7 @@ export function apply(ctx: Context, config: Config): void {
             const name = decodePathSegment(uninstallMatch[1])
             if (name === null) return json(res, 400, { error: 'invalid path encoding', code: 'INVALID_PATH' })
             try {
-              validateSkillName(name)
+              validateRuntimeSkillName(name)
             } catch (cause) {
               return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
             }
@@ -2742,12 +2743,15 @@ export function apply(ctx: Context, config: Config): void {
             // 名字先于安装器校验（R4-B-6）：另外三条写面
             // （`/api/pico/skills/:name/{install,uninstall}`、
             // `/api/pico/skills/builtin/:name/{install,uninstall}`）都在进安装器**之前**
-            // 调 `validateSkillName` 并回 400 —— 只有这一条把校验留给 `uninstallSkill`
+            // 校验名字并回 400 —— 只有这一条把校验留给 `uninstallSkill`
             // 内部抛，于是同一个客户端面板对同一类输入看到 422 + code（走
             // `describeArchiveFailure` 的 typed 分支）。非法名是**请求有问题**，
             // 不是"内容有问题"：与三条兄弟分支对齐到 400（状态码语义唯一）。
+            // R21-A1-04：三条**卸载**面的判据是 `validateRuntimeSkillName`
+            // （与运行时/发现面同一条：只判 kebab 正则、**不设**写侧 64 字符上限），
+            // 否则 >64 字符的技能"列得出、删不掉"。
             try {
-              validateSkillName(name)
+              validateRuntimeSkillName(name)
             } catch (cause) {
               return json(res, 400, { error: cause instanceof Error ? cause.message : 'invalid name' })
             }
@@ -2950,10 +2954,24 @@ export function apply(ctx: Context, config: Config): void {
               // 已安装商店行取自 market+org 目录(installed=true 的行),
               // originChannel/provenance 已在上游 enriched 计算。
               if (localRows.length > 0 || true) {
-                const [mkt, org] = await Promise.all([
-                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=market`, { token: s.token, locale: hostLocale(req) }).catch(() => ({ items: [] })),
-                  fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=org`, { token: s.token, locale: hostLocale(req) }).catch(() => ({ items: [] })),
-                ])
+                // 审计 R21-A2-04：这两发此前是 `.catch(() => ({ items: [] }))` ——
+                // 服务端读不到（5xx/网络/超时）时**静默丢掉**全部已装商店行与
+                // "更新到 vX"徽章，而分区状态仍是 ok（界面把"服务端读不到"说成
+                // "你没装过商店技能"）。现在只把**确定不存在**（404：旧版服务端/
+                // 该来源未启用）当成空集，其余原样抛给下面的 gatewayError
+                // （如实报错 + 面板可重试）。
+                const storeCatalog = async (source: 'market' | 'org'): Promise<unknown> => {
+                  try {
+                    return await fetchJSON(s.serverURL, `/api/client/v2/capabilities?source=${source}`, { token: s.token, locale: hostLocale(req) })
+                  } catch (cause) {
+                    if (cause instanceof ApiError && cause.status === 404) {
+                      ctx.logger?.warn(`[pico] capabilities source=${source} is not available on this server (404); treated as empty`)
+                      return { items: [] }
+                    }
+                    throw cause
+                  }
+                }
+                const [mkt, org] = await Promise.all([storeCatalog('market'), storeCatalog('org')])
                 const storeInstalled = [...(mkt as { items?: Array<Record<string, unknown>> }).items ?? [], ...(org as { items?: Array<Record<string, unknown>> }).items ?? []]
                   .filter((i) => {
                     const kind = (i as { kind?: string }).kind ?? ''

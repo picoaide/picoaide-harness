@@ -196,6 +196,51 @@ describe('能力中心聚合代理：本地上传行的状态匹配（技能链�
     expect(items.find(i => i.name === 'market-only')?.source).toBe('market')
   })
 
+  // -------------------------------------------------------------------------
+  // R21-A2-04：商店目录读**失败**不得被静默当成"空集合"
+  //
+  // 缺陷原形态：`source=local` 分支里的两发商店目录（market/org）此前是
+  // `.catch(() => ({ items: [] }))` —— 服务端 5xx/网络失败时「我的」分区**静默丢掉**
+  // 全部已装商店行与"更新到 vX"徽章，而分区状态仍是 ok（界面把"服务端读不到"说成
+  // "你没装过商店技能"）。现在只有 404（该来源在这台服务端上确实不存在）当空集，
+  // 其余原样抛给 gatewayError（502 + 文案，面板可重试）。
+  // -------------------------------------------------------------------------
+  it('商店目录 500 ⇒ 「我的」分区如实报错（502），不得静默丢掉已装商店行', async () => {
+    const h = harness(SESSION)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const href = String(url)
+      h.gateway.push(href)
+      if (href.includes('source=own')) {
+        return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      // market / org 目录：服务端存储故障（不是"没有这条路由"）。
+      return new Response(JSON.stringify({ error: { code: 'INTERNAL', message: 'catalog unavailable' } }), {
+        status: 500, headers: { 'content-type': 'application/json' },
+      })
+    }))
+    const res = await h.call('/api/pico/capabilities?source=local')
+    console.log('[R21-A2-04/500] HTTP =', res.code, JSON.stringify(res.body))
+    expect(res.code, '读失败必须如实报错（旧实现：200 + 少了全部已装商店行）').toBe(502)
+    expect(String(res.body.error)).toContain('gateway error')
+  })
+
+  it('反向对照：商店目录 404（该来源在这台服务端上不存在）仍按空集处理，「我的」照常返回本机行', async () => {
+    const h = harness(SESSION)
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      const href = String(url)
+      h.gateway.push(href)
+      if (href.includes('source=own')) {
+        return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'unknown source' } }), {
+        status: 404, headers: { 'content-type': 'application/json' },
+      })
+    }))
+    const res = await h.call('/api/pico/capabilities?source=local')
+    expect(res.code, '确定不存在（404）才允许按空集处理').toBe(200)
+    expect((res.body.items as Array<Record<string, unknown>>).some(i => i.source === 'local' && i.name === 'codeql')).toBe(true)
+  })
+
   it('非法 source 与未登录都会明确失败（不静默返回空目录）', async () => {
     const h = harness(SESSION)
     stubCatalog(h)

@@ -67,14 +67,15 @@ export type OpenIntentResumeOutcome =
   | { kind: 'failed', appId: string, failure: OpenFailure }
 
 /**
- * 缺省登录态取数：复用应用 AI 的身份解析（`/api/pico/auth/state`，非空用户名 = 已登录）。
+ * 缺省登录态取数：复用应用 AI 的身份解析（`/api/pico/auth/state`；作用域非 `null`
+ * = 已登录，且用户与服务端地址两段都拿到了）。
  *
  * 与 `AppCenterPanel.loadLoginState` 的缺省实现**逐字同口径** —— 两处必须一致，否则
  * "面板认为已登录、页面加载这一跳认为没有"会让同一个意图时而兑现时而不兑现。
  * @returns 是否已登录。
  */
 async function defaultLoginState(): Promise<boolean> {
-  return (await loadAppAiIdentity()) !== ''
+  return (await loadAppAiIdentity()) !== null
 }
 
 /**

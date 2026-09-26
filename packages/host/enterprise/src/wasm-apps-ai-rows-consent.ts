@@ -46,10 +46,24 @@
  *  1. **fail-closed**：文件读不出来 / 形状不符 / 作用域拿不到 ⇒ 一律当作**没有任何应用
  *     被授权**。反过来（读失败当成已授权）等于"把磁盘故障变成静默放行"。
  *  2. **写失败要报**：`setEnabled` 写不进去时抛给调用方 —— 静默吞掉会让用户看到
- *     "已允许"而闸门仍然拒绝。
+ *     "已允许"而闸门仍然拒绝。**读失败（除 ENOENT）同样归入这一条**（R21 B2-R21-02）：
+ *     记录文件读不动（另一个 uid 拥有 / EIO / 杀软锁住）而它所在的**目录仍可写**时，
+ *     `rename(2)` 只需要目录写权限 ⇒ 一次授权就会把文件里其余账号/应用的记录**整份
+ *     覆盖掉**，而本机路由收到的是成功（面板显示"已允许"，别人的开关静默消失）。
+ *     只有 `ENOENT`（从来没人授权过）算首次运行、才允许建文件；其余 errno 一律拒绝写
+ *     并抛 {@link AiRowsConsentReadError}（路由据此回 500 `AI_ROWS_CONSENT_NOT_PERSISTED`）。
  *  3. **每次调用都重新读文件、重新解析作用域**：这是"用户点授权 → 下一次工具调用立刻
  *     生效"与"换了账号立刻失效"这两条判据的唯一实现（缓存会让撤销/换账号延迟到重启）。
  *     文件很小（一条 ≈ 80 字节）。
+ *
+ * ## 段内不得出现分隔符（R21 B2-R21-04）
+ *
+ * 键用 NUL 分隔，所以**段内含 NUL** 会让一个键被切错：`serializeAiRowsConsent` 原先
+ * 把这类键**静默 continue 掉**，而 `setEnabled` 照常 resolve ⇒ 文件写成空记录、读面回
+ * `false`、本机路由把这一次 resolve 当成成功回 `{enabled:true}` —— **面板显示"允许"而
+ * 闸门仍拒绝**，正是模块头点名要避免的那种误诊。现在两处一起收口：
+ * {@link aiRowsConsentKey} 在**构造期**对含 NUL 的段回 `null`（= 写面拒绝、读面 false），
+ * {@link serializeAiRowsConsent} 遇到无法解析的键**抛错**而不是丢弃（序列化期兜底）。
  *
  * @module @picoaide/dsh-enterprise/wasm-apps-ai-rows-consent
  */
@@ -92,14 +106,25 @@ interface ConsentDocument {
 }
 
 /**
- * 授权键（**唯一实现**）：三段都必须参与，任一段缺失 ⇒ `null`（= 不匹配）。
+ * NUL 会不会出现在这一段里（{@link aiRowsConsentKey} 的分隔符）。
+ *
+ * 分隔符出现在**段内**会让一个键被切成更多段 ⇒ 序列化期要么失去这条记录（写面报成功、
+ * 读面 false：面板显示"已允许"而闸门仍拒绝），要么把它读成另一个 (user, server, app)
+ * 组合。两种都不能接受，所以在**构造期**就拒绝（fail-closed），不靠序列化期兜底。
+ * @param value - 候选段。
+ * @returns true = 含 NUL（该段不可用于键）。
+ */
+const hasNul = (value: string): boolean => value.includes('\u0000')
+
+/**
+ * 授权键（**唯一实现**）：三段都必须参与，任一段缺失/非法 ⇒ `null`（= 不匹配）。
  *
  * 用 NUL 分隔而不是可见字符：用户名/服务端地址/应用 id 都可能含可见分隔符，而 NUL
  * 不可能出现在任一维度的合法取值里（`isValidAppId` 只放行小写字母/数字/连字符，
  * 用户名与服务端地址来自平台）。三段各做一次 `trim()` 后判空 —— 纯空白不算"有值"。
  * @param scope - 当前作用域；`null`/`undefined` = 拿不到（未登录 / 会话缺字段）。
  * @param appId - 应用标识。
- * @returns 记录键；任一段缺失 ⇒ `null`。
+ * @returns 记录键；任一段缺失或含 NUL ⇒ `null`。
  */
 export function aiRowsConsentKey(scope: AiRowsConsentScope | null | undefined, appId: string): string | null {
   if (scope === null || scope === undefined) return null
@@ -107,6 +132,7 @@ export function aiRowsConsentKey(scope: AiRowsConsentScope | null | undefined, a
   const server = typeof scope.server === 'string' ? scope.server.trim() : ''
   const app = typeof appId === 'string' ? appId.trim() : ''
   if (user === '' || server === '' || app === '') return null
+  if (hasNul(user) || hasNul(server) || hasNul(app)) return null
   return `${user}\u0000${server}\u0000${app}`
 }
 
@@ -133,6 +159,33 @@ export class AiRowsConsentScopeError extends Error {
  */
 export function isAiRowsConsentScopeError(cause: unknown): cause is AiRowsConsentScopeError {
   return cause instanceof AiRowsConsentScopeError
+}
+
+/**
+ * 授权文件**读不动**（存在、但不是 ENOENT 的读失败）时的写面拒绝（R21 B2-R21-02）。
+ *
+ * 为什么必须单独存在：`load()` 的 fail-closed 是"读不出来 ⇒ 当作未授权"，但**写面**
+ * 不能沿用这个空集合 —— 记录文件可能被另一个 uid 拥有 / EIO / 杀软锁住，而它所在的
+ * **目录仍可写**（`rename(2)` 只需要目录写权限）。此时一次 `setEnabled` 就会把文件里
+ * 其余账号/应用的授权**整份覆盖掉**，而本机路由收到的是成功。只有 `ENOENT`（从来没人
+ * 授权过）才允许建文件；其余 errno 一律拒绝写并如实报错（路由 → 500
+ * `AI_ROWS_CONSENT_NOT_PERSISTED`）。
+ * @param message - 诊断文案（面向上游日志，不是用户文案）。
+ */
+export class AiRowsConsentReadError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AiRowsConsentReadError'
+  }
+}
+
+/**
+ * 这个错误是不是"授权文件读不动"（见 {@link AiRowsConsentReadError}）。
+ * @param cause - 任意捕获到的值。
+ * @returns true = 调用方应把它报成"授权未能保存"（500），而不是作用域拒绝。
+ */
+export function isAiRowsConsentReadError(cause: unknown): cause is AiRowsConsentReadError {
+  return cause instanceof AiRowsConsentReadError
 }
 
 /**
@@ -190,7 +243,11 @@ export function serializeAiRowsConsent(keys: ReadonlySet<string>): string {
   const grants: ConsentGrant[] = []
   for (const key of keys) {
     const [user, server, app, ...rest] = key.split('\u0000')
-    if (rest.length > 0 || user === undefined || server === undefined || app === undefined) continue
+    // 丢弃是**静默成功**：`setEnabled` 会照常 resolve，而文件里没有这条记录 ⇒
+    // 面板显示"已允许"、闸门仍拒绝。所以这里抛（写面据此报 500），不 continue。
+    if (rest.length > 0 || user === undefined || server === undefined || app === undefined) {
+      throw new Error('pico-wasm-apps: refusing to serialize an AI rows consent key that is not <user>\\0<server>\\0<app>')
+    }
     grants.push({ user, server, app })
   }
   grants.sort((left, right) => {
@@ -218,12 +275,28 @@ export interface AiRowsConsentStore {
   /**
    * 写入**当前作用域**下的授权（人在面板上点「允许」/「撤销」）。
    *
-   * 拿不到作用域（未登录 / 缺用户名 / 缺服务端地址）⇒ 拒绝并抛
-   * {@link AiRowsConsentScopeError}（调用方据此回 401，绝不落一条陌生记录）。
+   * 拿不到作用域（未登录 / 缺用户名 / 缺服务端地址 / 段内含 NUL）⇒ 拒绝并抛
+   * {@link AiRowsConsentScopeError}（调用方据此回 401，绝不落一条陌生记录）；
+   * 记录文件读不动（非 ENOENT）⇒ 拒绝并抛 {@link AiRowsConsentReadError}
+   * （**绝不**把读不出来的文件整份覆盖掉，调用方据此回 500）。
    * @param appId - 应用标识。
    * @param enabled - true = 允许，false = 撤销。
    */
   setEnabled(appId: string, enabled: boolean): Promise<void>
+}
+
+/**
+ * 一次 `load()` 的结局。
+ *
+ * `writable === false` = 文件存在但**读不动**（非 ENOENT）⇒ 读面按未授权处理，写面
+ * 必须拒绝（{@link AiRowsConsentReadError}）——**读到内容但形状/版本不符**不在此列：
+ * 那是可以就地改写的旧格式/坏文件（v1 → v2 的升级路径就靠它）。
+ */
+interface ConsentLoad {
+  /** 解析出的键集合（读失败/形状不符 ⇒ 空集合）。 */
+  readonly keys: Set<string>
+  /** 是否可以把这次的结果写回去（只有"读不动"为 false）。 */
+  readonly writable: boolean
 }
 
 /** {@link createAiRowsConsentStore} 的构造参数。 */
@@ -285,25 +358,29 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
    */
   const keyFor = (appId: string): string | null => aiRowsConsentKey(currentScope(), appId)
 
-  const load = async (): Promise<Set<string>> => {
-    if (options.file === undefined) return new Set(memory)
+  const load = async (): Promise<ConsentLoad> => {
+    if (options.file === undefined) return { keys: new Set(memory), writable: true }
     let text: string
     try {
       text = await readFile(options.file, 'utf8')
     } catch (cause) {
       // 文件不存在 = 从来没人授权过（**不是**错误，也不建文件：读路径不该有副作用）。
-      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return new Set()
+      // **只有它**算"首次运行"、也才允许后续建文件。
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return { keys: new Set(), writable: true }
       // 读失败（权限/EIO）⇒ fail-closed 到"无授权"，但必须留痕：静默会让"磁盘坏了"
-      // 与"没人授权"长得一样。
-      warn(`pico-wasm-apps: reading the AI rows consent file failed (${cause instanceof Error ? cause.message : String(cause)}); treating every app as unauthorized`)
-      return new Set()
+      // 与"没人授权"长得一样。**同时把写面也关掉**：读不动的文件不得被整份覆盖
+      // （见 {@link AiRowsConsentReadError}）。
+      warn(`pico-wasm-apps: reading the AI rows consent file failed (${cause instanceof Error ? cause.message : String(cause)}); treating every app as unauthorized and refusing writes`)
+      return { keys: new Set(), writable: false }
     }
     const parsed = parseAiRowsConsent(text)
     if (parsed === null) {
+      // 文件**读到了**（只是形状不符 / 版本不符）⇒ 允许就地改写成当前版本，否则 v1
+      // 用户升级后永远无法重新授权。方向安全：这一份内容本来就不被当成任何授权。
       warn(`pico-wasm-apps: the AI rows consent file at ${options.file} is not a version ${String(AI_ROWS_CONSENT_FORMAT_VERSION)} record; treating every app as unauthorized`)
-      return new Set()
+      return { keys: new Set(), writable: true }
     }
-    return parsed
+    return { keys: parsed, writable: true }
   }
 
   const persist = async (keys: Set<string>): Promise<void> => {
@@ -325,9 +402,15 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
   /** 读-改-写串行化（前一段失败不能让后一段永远挂在 rejected 链上）。 */
   const mutate = (change: (keys: Set<string>) => void): Promise<void> => {
     const task = tail.then(async () => {
-      const keys = await load()
-      change(keys)
-      await persist(keys)
+      const loaded = await load()
+      if (!loaded.writable) {
+        // 读不动的文件 + 可写的目录 = 下一次 rename 会静默销毁其它账号/应用的记录。
+        throw new AiRowsConsentReadError(
+          `pico-wasm-apps: the AI rows consent file at ${String(options.file)} could not be read; refusing to overwrite it`,
+        )
+      }
+      change(loaded.keys)
+      await persist(loaded.keys)
     })
     tail = task.catch(() => undefined)
     return task
@@ -338,8 +421,8 @@ export function createAiRowsConsentStore(options: AiRowsConsentStoreOptions = {}
       const key = keyFor(appId)
       // 作用域缺失 = 不匹配（不是"匹配空作用域"）：未登录 / 缺字段的用户看不到任何授权。
       if (key === null) return false
-      const keys = await load()
-      return keys.has(key)
+      const loaded = await load()
+      return loaded.keys.has(key)
     },
     setEnabled(appId: string, enabled: boolean): Promise<void> {
       const key = keyFor(appId)

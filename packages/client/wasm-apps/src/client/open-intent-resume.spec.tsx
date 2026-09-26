@@ -110,7 +110,7 @@ async function mountPanel(options: {
       loginStateLoader: options.loginStateLoader ?? (async () => true),
       now: () => Date.now(),
       channelLoader: async () => CHANNEL,
-      identityLoader: async () => 'alice@harness.example',
+      identityLoader: async () => ({ userId: 'alice', serverURL: 'https://harness.example.com' }),
     })
     // 装载器给 body 挂了 `MutationObserver`（中列晚于插件 apply 出现），它的回调是
     // 微任务 —— 让它落在同一个 act 里，否则 React 会在 act 之外报"更新未包在 act 中"。
@@ -226,7 +226,7 @@ describe('R16B-03 附加判据：两个消费者抢同一条意图时，只开�
         loginStateLoader,
         now: () => Date.now(),
         channelLoader: async () => CHANNEL,
-        identityLoader: async () => 'alice@harness.example',
+        identityLoader: async () => ({ userId: 'alice', serverURL: 'https://harness.example.com' }),
       })
       await Promise.resolve()
     })

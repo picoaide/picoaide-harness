@@ -13,6 +13,7 @@
  *   - 分享按钮不看渠道 scheme（恒渲染）⇒「未拿到渠道参数 ⇒ 不渲染分享入口」红；
  *   - `AppDetailView` 恒渲染 `counts`（或读别处的数字）⇒「没有计数就不渲染」红；
  *   - `AppAiPanel` 跳过授权闸门直接给输入框 ⇒ 授权两条红；
+ *   - 客户端授权键退回 `(用户, 应用)` 两段（丢掉服务端）⇒「换服务端后必须重新走说明卡」红；
  *   - 卸载不 abort ⇒「取消」红。
  */
 import { act } from 'react'
@@ -25,7 +26,7 @@ import { setAppChannel, type AppChannel } from './channel-seam.ts'
 import { APP_AI_CHAT_PATH, APP_AI_CONSENT_PATH } from './app-ai.ts'
 import type { OnboardingStore } from './onboarding.ts'
 import { setAppShareScheme } from './deep-link.ts'
-import type { AppAiConsentStore } from './app-ai.ts'
+import type { AppAiConsentStore, AppAiScope } from './app-ai.ts'
 import { OPEN_INTENT_STORAGE_KEY, type OpenIntentStore } from './open-intent.ts'
 import { HOST_PROOF_PATH, setHostProofToken } from './host-proof.ts'
 import { loadAppChannel } from './channel-seam.ts'
@@ -152,6 +153,8 @@ async function mount(options: {
   channel?: AppChannel | null
   onboarding?: OnboardingStore
   consent?: AppAiConsentStore
+  /** 登录身份作用域（用户 + 服务端）；缺省一台固定服务端。`null` = 未登录。 */
+  identity?: AppAiScope | null
   clipboard?: (text: string) => Promise<void>
   channelResult?: Awaited<ReturnType<typeof loadAppChannel>>
   intent?: OpenIntentStore
@@ -168,7 +171,9 @@ async function mount(options: {
         onClose={() => { closing += 1 }}
         onboardingStore={options.onboarding ?? null}
         channelLoader={async () => channel}
-        identityLoader={async () => 'alice@harness.example'}
+        identityLoader={async () => options.identity === undefined
+          ? { userId: 'alice', serverURL: 'https://harness.example.com' }
+          : options.identity}
         writeClipboard={options.clipboard ?? (async (text: string) => { copied.push(text) })}
         aiDeps={{ fetch: (async (input: unknown, init?: RequestInit) => await aiReply(input, init)) as unknown as typeof fetch }}
         aiConsentStore={options.consent ?? memoryConsent()}
@@ -207,6 +212,21 @@ async function settle(rounds = 3): Promise<void> {
 async function allowAi(): Promise<void> {
   await click('.pico-app-ai-allow')
   await settle()
+}
+
+/**
+ * 模拟**页面重载**（换服务端 = 重新登录 ⇒ 面板从零挂载；组件 state 不跨重载）。
+ *
+ * 为什么不复用同一个 root 再 `render()`：`AppAiPanel` 的 `consented` 是 `useState`
+ * 初值（只在挂载时算一次），同一实例重渲染读不到新的授权作用域 —— 那会变成一条
+ * 与真实行为不符的假判据。
+ */
+async function reload(): Promise<void> {
+  await act(async () => { root.unmount() })
+  container.remove()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
 }
 
 /** 点一个元素（真 DOM 事件）。 */
@@ -667,6 +687,41 @@ describe('详情页：信息 / 分享 / 应用 AI（§21）', () => {
     await allowAi()
     expect(container.querySelector('.pico-app-ai-input')).toBeNull()
     expect(container.querySelector('[data-role="ai-consent-failed"]')).not.toBeNull()
+  })
+
+  it('换服务端后**必须重新走说明卡**（授权按 用户×服务端×应用，与宿主闸门同域）', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    const consent = memoryConsent()
+    const serverA: AppAiScope = { userId: 'alice', serverURL: 'https://a.harness.example.com' }
+    const serverB: AppAiScope = { userId: 'alice', serverURL: 'https://b.harness.example.com' }
+    await mount({ consent, identity: serverA })
+    await click('.pico-app-center-detail')
+    await allowAi()
+    // 同一台服务端上"已经问过"⇒ 直进输入框（这份 UI 记忆的意义就在这里）。
+    expect(container.querySelector('.pico-app-ai-input')).not.toBeNull()
+    // **同一个用户、同一份 localStorage、同一台机器**，只把服务端换成同机第二栈：
+    // 宿主闸门按 (用户, 服务端, 应用) 判授权 ⇒ 面板必须重新问一次。回退到两段键
+    // （只有用户×应用）时这里会直进输入框，而用户发出第一条消息才吃 403 —— 静默失败。
+    await reload()
+    await mount({ consent, identity: serverB })
+    await click('.pico-app-center-detail')
+    expect(container.querySelector('[data-role="ai-consent"]')).not.toBeNull()
+    expect(container.querySelector('.pico-app-ai-input')).toBeNull()
+    // 换回 A：那条授权记忆还在（各段只影响自己那一段，不是"换服务端就清空"）。
+    await reload()
+    await mount({ consent, identity: serverA })
+    await click('.pico-app-center-detail')
+    expect(container.querySelector('.pico-app-ai-input')).not.toBeNull()
+  })
+
+  it('未登录（拿不到作用域）⇒ 说明卡在、「允许」禁用且不写宿主（fail-closed）', async () => {
+    stubCatalog(() => jsonResponse(200, CATALOG))
+    await mount({ consent: memoryConsent(), identity: null })
+    await click('.pico-app-center-detail')
+    expect(container.querySelector('[data-role="ai-consent"]')).not.toBeNull()
+    expect(container.querySelector('[data-role="ai-identity-pending"]')).not.toBeNull()
+    expect(container.querySelector<HTMLButtonElement>('.pico-app-ai-allow')!.disabled).toBe(true)
+    expect(consentCalls).toEqual([])
   })
 
   it('撤销授权 ⇒ 也写宿主（granted:false），界面回到说明卡', async () => {

@@ -15,6 +15,7 @@
  */
 import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-desktop/host-locale'
 import { parse as parseYaml } from 'yaml'
+import { splitSkillFrontmatter } from './skill-frontmatter.ts'
 import { isWindowsReservedDeviceNameSegment, reservedDeviceNameInArchivePath } from './skill-name-rules.ts'
 
 /** 与服务端 skillmanifest 相同的稳定错误码。 */
@@ -104,7 +105,18 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u/**
  */
 export const INVOCATION_BOOLEAN_LITERALS: readonly string[] = ['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']
 const BOOLEAN_LITERALS = new Set(INVOCATION_BOOLEAN_LITERALS)
-const LEGACY_INVOCATION: Record<string, string> = {
+
+/**
+ * **旧调用键 → 官方键**（R21-A1-02）。
+ *
+ * 上游 `parseInvocationPolicy` 的第一件事就是 `rejectLegacyInvocationKey`：命中任一
+ * 旧键即 **throw** ⇒ `parseSkillFile` 把**整份技能**丢弃（只在日志里 warn）。
+ * 这张表是**唯一真源**，三处共用：发布预检（本文件的规则体）、安装器的"可加载性
+ * 第三关"（`skill-install.ts` 的 `assertLoadableSkillMetadata`）、以及
+ * `tests/skill-invocation-upstream-parity.spec.ts`（**读上游源码**派生后对拍 ——
+ * 上游增删一个键或改名时用例变红；安装器此前**漏了这一关**，装成功而模型用不到）。
+ */
+export const LEGACY_INVOCATION: Record<string, string> = {
   disableModelInvocation: 'disable-model-invocation',
   modelInvocable: 'disable-model-invocation',
   userInvocable: 'user-invocable',
@@ -269,12 +281,18 @@ function precheckMessages(locale: HostLocale): PrecheckMessages {
       'SKILL.md contains a UTF-8 BOM, which makes the runtime ignore the skill; save it as "UTF-8 without BOM"',
     ),
     frontmatterHead: c(
-      'SKILL.md 缺少 YAML frontmatter:文件必须以 --- 开头',
-      'SKILL.md is missing its YAML frontmatter: the file must start with ---',
+      // R21-A1-01：首行也必须是**整行** `---`（`--- ` 不算）——文案点名这一点，
+      // 否则作者会去改一个其实已经"写了"的分隔符。
+      'SKILL.md 缺少 YAML frontmatter:文件必须以**单独一行** --- 开头(行尾不能有空格或其它字符,否则运行时忽略整份技能)',
+      'SKILL.md is missing its YAML frontmatter: the file must start with a line that is exactly --- '
+      + '(trailing spaces or any other character make the runtime ignore the whole skill)',
     ),
     frontmatterEnd: c(
-      'SKILL.md 的 frontmatter 没有结束分隔符 ---',
-      'SKILL.md frontmatter has no closing --- delimiter',
+      'SKILL.md 的 frontmatter 没有以**单独一行** --- 结束(行尾不能有空格、制表符或其它字符;'
+      + '运行时要求整行恰为 ---,否则忽略整份技能)',
+      'SKILL.md frontmatter does not end with a line that is exactly --- '
+      + '(no trailing spaces, tabs or other characters; the runtime requires the whole line to be ---, '
+      + 'and ignores the entire skill otherwise)',
     ),
     frontmatterNotMapping: c(
       'SKILL.md 的 frontmatter 不是合法 YAML 映射',
@@ -474,15 +492,20 @@ export function precheckSkillPackage(
     return [issue(PrecheckCode.BomDetected, m.bom)]
   }
   const normalized = skillMd.replace(/\r\n/gu, '\n')
-  if (!normalized.startsWith('---\n')) {
-    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterHead)]
+  // R21-A1-01：frontmatter 的切分**必须与运行时同一条判据** —— 收尾行要**恰为**
+  // 整行 `---`。旧实现按 `rest.indexOf('\n---')` 宽松切分，于是结束行写成 `--- `
+  // （尾随空格）时预检 0 问题 ⇒ 包能上传、每个客户端都"装成功"，而 pinned 上游
+  // 注册表整份丢弃它（`listInstalledSkills` 同样列不出）⇒ 面板永远显示"未安装"。
+  // 切分实现只有一处：`skill-frontmatter.ts`（安装面与发现面共用同一份）。
+  //
+  // **与 Go 服务端的差异（有意，fail-closed）**：这条规则客户端比服务端
+  // （`internal/skillmanifest/normalize.go`，由 FIX-2 泳道同步）先严 —— 宽松分隔符
+  // 的包在客户端就发不出去。方向是"只有更严"，不会出现"预检通过、服务端拒收"。
+  const split = splitSkillFrontmatter(normalized)
+  if (split === undefined) {
+    return [issue(PrecheckCode.FrontmatterInvalid, normalized.startsWith('---\n') ? m.frontmatterEnd : m.frontmatterHead)]
   }
-  const rest = normalized.slice(4)
-  const end = rest.indexOf('\n---')
-  if (end < 0) {
-    return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterEnd)]
-  }
-  const front = rest.slice(0, end)
+  const front = split.front
   // 解析前的结构闸门（服务端 parseManifestYAML 的第 2、3 层）：深度炸弹与
   // merge key 必须在**把文本交给 YAML 解析器之前**拒掉 —— 那两者能烧掉几十秒
   // CPU 或几百 MiB 内存，等解析完再报错就已经付过代价了。
@@ -512,7 +535,7 @@ export function precheckSkillPackage(
   } catch {
     return [issue(PrecheckCode.FrontmatterInvalid, m.frontmatterNotYaml)]
   }
-  const body = rest.slice(end + 4)
+  const body = split.body
 
   const name = requireField(data, 'name', LIMITS.maxAppId, m)
   if ('issue' in name) out.push(name.issue)

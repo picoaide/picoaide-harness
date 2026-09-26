@@ -34,6 +34,9 @@ export const zh = {
   // 内置技能区（随服务端镜像发布、客户端按需安装）
   'capability.builtinInstall': '安装',
   'capability.builtinRetry': '重试',
+  // R21 FIX-7 ②：内置技能**清单**读失败（5xx/网络）——此前 hook 进了错误态但面板不渲染，
+  // 界面上与"平台没有内置技能"同形。文案必须是字典键（本文件是唯一文案真源）。
+  'capability.builtinLoadFailed': '内置技能清单读取失败：{error}',
   'capability.builtinBadge': '平台内置',
   'capability.dirty': '已本地修改',
   'capability.originOtherServer': '来自另一台服务端',
@@ -181,6 +184,7 @@ export const en: Record<keyof typeof zh, string> = {
   'capability.officialLocked': 'Official content: updates by admin only',
   'capability.builtinInstall': 'Install',
   'capability.builtinRetry': 'Retry',
+  'capability.builtinLoadFailed': 'Failed to load the built-in skill list: {error}',
   'capability.builtinBadge': 'Built-in',
   'capability.dirty': 'Locally modified',
   'capability.originOtherServer': 'From another server',

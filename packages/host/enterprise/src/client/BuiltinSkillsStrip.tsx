@@ -137,16 +137,47 @@ export function builtinSkillsInstallOutcome(status: number, ok: boolean): 'ok' |
 }
 
 /**
+ * 一次内置技能清单请求的响应 → hook 该怎么处理（**纯函数**，R21-A2-04）。
+ *
+ * 抽出来的理由与 {@link builtinSkillsInstallOutcome} 相同：`useBuiltinSkills` 是
+ * React hook，本包没有 jsdom 渲染测试面；做成纯函数后
+ * `builtinSkillsLoadOutcome(500, false) === 'failed'` 可以被单测直接打坏，而
+ * "hook 真的用了它"由源码接线断言钉住（`tests/builtin-skills.spec.ts`）。
+ *
+ * 三态的理由：宿主（`auth-gate.ts` 的 `/api/pico/skills/builtin`）**刻意**按状态码
+ * 分流 —— 旧版服务端没有这条路由时回 404（面板把内置技能区整块隐藏），其余失败
+ * 原样透传（500/502…）。hook 此前 `if (!res.ok) return` 把两者与网络失败一起当成
+ * "没有内置技能"：服务端 500 时用户与运维都看不到任何痕迹（`skillseed.ListBuiltin`
+ * 目录读不了就是 500），与宿主那句"伪装成空清单会让运维永远查不出服务端少了这条
+ * 路由"的意图正好相反。
+ * @param status - HTTP 状态码。
+ * @param ok - `res.ok`。
+ * @returns `'ok'` 清单可用 / `'absent'` 这台服务端确实没有这条路由（404）/
+ *   `'failed'` 读失败（5xx / 其它状态 / 网络异常走同一条错误态）。
+ */
+export function builtinSkillsLoadOutcome(status: number, ok: boolean): 'ok' | 'absent' | 'failed' {
+  if (ok) return 'ok'
+  return status === 404 ? 'absent' : 'failed'
+}
+
+/**
  * 内置技能的数据与动作（面板把它渲染成普通卡片）。
  *
- * 拿不到清单（未登录 / 旧版服务端 / 网络失败）时返回空列表 —— 这不是错误面，
- * 能力中心自己的分区错误提示负责其它失败。
- * @returns 清单、已装目录、本地版本、忙碌/失败态与安装动作。
+ * 清单读**失败**（5xx / 网络 / 超时）时进 `error` 态并给出 `reload()` —— **不再**
+ * 伪装成"没有内置技能"（R21-A2-04）；只有 404（旧版服务端没有这条路由）才整块隐藏。
+ * @returns 清单、已装目录、本地版本、忙碌/失败态、清单级错误态/重试与安装动作。
  */
 export function useBuiltinSkills(onInstalled?: () => void) {
   const [rows, setRows] = useState<BuiltinSkill[]>([])
   const [installed, setInstalled] = useState<string[]>([])
   const [versions, setVersions] = useState<Record<string, string | undefined>>({})
+  /**
+   * 清单级错误态（R21-A2-04）：读失败时非 null。404（旧版服务端）走 `absent`，
+   * 不置错误 —— 那才是"确定不存在"。
+   */
+  const [error, setError] = useState<string | null>(null)
+  /** 重试计数：递增即重新拉一次清单（`useEffect` 的依赖）。 */
+  const [reloadKey, setReloadKey] = useState(0)
   const [busy, setBusy] = useState<string | null>(null)
   /**
    * 失败态**按行**记（技能名 + 文案）。
@@ -163,12 +194,23 @@ export function useBuiltinSkills(onInstalled?: () => void) {
     void (async () => {
       try {
         const res = await fetch('/api/pico/skills/builtin')
-        if (!res.ok) return
+        const outcome = builtinSkillsLoadOutcome(res.status, res.ok)
+        if (outcome !== 'ok') {
+          if (!alive) return
+          // 404 = 这台服务端确实没有这条路由（旧版服务端）⇒ 整块隐藏；
+          // 其余 = 读失败 ⇒ 如实进错误态（可重试），绝不说成"平台没有内置技能"。
+          setRows([])
+          setInstalled([])
+          setVersions({})
+          setError(outcome === 'absent' ? null : `HTTP ${res.status}`)
+          return
+        }
         const data = await res.json() as BuiltinSkillsPayload
         if (!alive) return
         const skills = data.skills ?? []
         setRows(skills)
         setInstalled(data.installed ?? [])
+        setError(null)
         // 已装版本取自能力中心聚合面（与「我的」列表同一个事实源）。
         const local = await fetch('/api/pico/capabilities?source=local')
         if (!local.ok || !alive) return
@@ -178,12 +220,14 @@ export function useBuiltinSkills(onInstalled?: () => void) {
           if (item.source === 'local' && typeof item.name === 'string') map[item.name] = item.version
         }
         if (alive) setVersions(map)
-      } catch {
-        // 静默：拿不到内置技能清单就当作"没有"（旧版服务端就是这条路）。
+      } catch (cause) {
+        // 网络异常/解析失败：同样是"读不到"⇒ 错误态（此前这里静默当成"没有"）。
+        if (!alive) return
+        setError(cause instanceof Error ? cause.message : String(cause))
       }
     })()
     return () => { alive = false }
-  }, [])
+  }, [reloadKey])
 
   /**
    * 安装 / **重装（更新）**一行。
@@ -233,7 +277,18 @@ export function useBuiltinSkills(onInstalled?: () => void) {
     }
   }
 
-  return { rows, installed, versions, busy, failed, install }
+  return {
+    rows,
+    installed,
+    versions,
+    busy,
+    failed,
+    /** 清单级读失败（非 null ⇒ 显示错误与重试，而不是"平台没有内置技能"）。 */
+    error,
+    /** 重新拉一次清单（错误态的重试入口）。 */
+    reload: () => { setReloadKey(key => key + 1) },
+    install,
+  }
 }
 
 /**

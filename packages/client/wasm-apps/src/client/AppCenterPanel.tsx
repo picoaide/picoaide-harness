@@ -48,7 +48,7 @@ import {
   type AppChannelResult,
 } from './channel-seam.ts'
 import { ensureHostProof } from './host-proof.ts'
-import { loadAppAiIdentity, type AppAiConsentStore, type AppAiDeps } from './app-ai.ts'
+import { loadAppAiIdentity, type AppAiConsentStore, type AppAiDeps, type AppAiScope } from './app-ai.ts'
 import { appShareLink } from './deep-link.ts'
 import {
   CATALOG_PAGE_SIZE,
@@ -659,8 +659,8 @@ const NOTICE: React.CSSProperties = {
  *  1. 目录（`GET /api/pico/apps/wasm`）——失败 ⇒ 错误/未登录态；
  *  2. 渠道参数（`GET /api/pico/wasm-apps/channel`，§16.1）——失败 ⇒ 分享入口**不渲染**
  *     （fail-closed，§19 Q6），打开链路会自己再补一次取数；
- *  3. 身份（`GET /api/pico/auth/state`）——只为应用 AI 的"按用户×应用授权"提供作用域，
- *     拿不到就按未登录处理（授权不被记住，fail-closed）。
+ *  3. 身份（`GET /api/pico/auth/state`）——只为应用 AI 的"按用户×服务端×应用授权"
+ *     提供作用域（与宿主闸门逐段同源），拿不到就按未登录处理（授权不被记住，fail-closed）。
  *
  * @param props - `onClose` 由触发按钮提供（关闭时卸载面板）；其余为可注入依赖（测试用）。
  */
@@ -675,8 +675,8 @@ export function AppCenterPanel({
   channelLoader?: () => Promise<AppChannel | null>
   /** 渠道取数的**分档结果**（测试注入失败原因；优先于 `channelLoader`）。 */
   channelResultLoader?: () => Promise<AppChannelResult>
-  /** 应用 AI 的身份取数（缺省 `/api/pico/auth/state`）。 */
-  identityLoader?: () => Promise<string>
+  /** 应用 AI 的身份取数（缺省 `/api/pico/auth/state`）；`null` = 未登录/缺段。 */
+  identityLoader?: () => Promise<AppAiScope | null>
   /** 写剪贴板（缺省 `navigator.clipboard.writeText`；测试注入 spy）。 */
   writeClipboard?: (text: string) => Promise<void>
   /** 应用 AI 的传输依赖（测试注入假 fetch）。 */
@@ -713,8 +713,9 @@ export function AppCenterPanel({
   const [openCounts, setOpenCounts] = useState<Record<string, AppOpenCounts>>({})
   // 一次性引导卡（§7.2）：关过就不再出现。
   const [onboarded, setOnboarded] = useState(() => isOnboardingDismissed(onboardingStore))
-  // 应用 AI 的授权作用域（用户×服务端；空串 = 未登录/拿不到 ⇒ 授权不记住）。
-  const [identity, setIdentity] = useState('')
+  // 应用 AI 的授权作用域（用户×服务端；`null` = 未登录/缺段 ⇒ 授权不记住，
+  // 面板把它当"没问过"，宁可多问一次也不静默跳过说明卡）。
+  const [identity, setIdentity] = useState<AppAiScope | null>(null)
   // 复制链接的即时反馈（哪个 app_id 刚复制成功）。
   const [copied, setCopied] = useState<string | null>(null)
   // 打开动作的反馈（§5.2 的 `window` 字段：新开 / 聚焦；没下发就什么都不说）。
@@ -816,13 +817,13 @@ export function AppCenterPanel({
     return () => { cancelled = true }
   }, [channelLoader, channelResultLoader])
 
-  // 应用 AI 的身份作用域（§21.1 第 9 条：授权按 **用户×应用** 记）。
+  // 应用 AI 的身份作用域（§21.1 第 9 条：授权按 **用户×服务端×应用** 记）。
   useEffect(() => {
     let cancelled = false
     const loader = identityLoader ?? (() => loadAppAiIdentity())
     void loader()
       .then((value) => { if (!cancelled) setIdentity(value) })
-      .catch(() => { if (!cancelled) setIdentity('') })
+      .catch(() => { if (!cancelled) setIdentity(null) })
     return () => { cancelled = true }
   }, [identityLoader])
 
@@ -860,12 +861,12 @@ export function AppCenterPanel({
   /**
    * 登录态取数（缺省读本机 `/api/pico/auth/state`）。
    *
-   * 复用 `app-ai.ts` 的身份解析：它返回空串表示"未登录/拿不到"，非空表示已登录
-   * （用户名 + 服务端地址）。身份取不到时按**未登录**处理 —— 对"自动继续"来说，
+   * 复用 `app-ai.ts` 的身份解析：它返回 `null` 表示"未登录/拿不到（缺用户名或服务端
+   * 地址）"，非空表示已登录。身份取不到时按**未登录**处理 —— 对"自动继续"来说，
    * 不确定就不动（宁可让用户再点一次，也不在一个不确定的会话上开窗）。
    */
   const loadLoginState = useCallback(
-    async (): Promise<boolean> => await (loginStateLoader ?? (async () => (await loadAppAiIdentity()) !== ''))(),
+    async (): Promise<boolean> => await (loginStateLoader ?? (async () => (await loadAppAiIdentity()) !== null))(),
     [loginStateLoader],
   )
 
@@ -1443,7 +1444,8 @@ export function OnboardingCard({ onDismiss }: { onDismiss: () => void }) {
  *  - **打开次数只显示服务端回传过的值**（`counts`；`undefined` ⇒ 这一行不渲染），
  *    并在旁边写出"平台记录打开次数用于运营"（§19 Q11）；
  *  - **分享入口只在拿到渠道 scheme 时渲染**（§19 Q6 的 fail-closed）；
- *  - **应用 AI** 挂在详情页（§21 的前端桥消费者），授权按用户×应用记。
+ *  - **应用 AI** 挂在详情页（§21 的前端桥消费者），授权按 用户×服务端×应用 记
+ *    （换服务端必须重新授权 —— 与宿主闸门逐段同源）。
  * @param props - 条目、渠道参数、计数、分享与 AI 的依赖与回调。
  */
 export function AppDetailView({
@@ -1458,8 +1460,8 @@ export function AppDetailView({
   windowOutcome?: OpenWindowOutcome
   /** 刚复制成功。 */
   copied?: boolean
-  /** 应用 AI 的授权作用域（用户×服务端）。 */
-  identity: string
+  /** 应用 AI 的授权作用域（用户 + 服务端）；`null` ⇒ 身份未就绪（每次都问）。 */
+  identity: AppAiScope | null
   aiDeps?: AppAiDeps
   /** 应用 AI 的授权存储（缺省 `localStorage`）。 */
   aiConsentStore?: AppAiConsentStore | null
@@ -1581,7 +1583,7 @@ export function AppDetailView({
 
       <AppAiPanel
         appId={item.appId}
-        userId={identity}
+        scope={identity}
         {...(aiDeps === undefined ? {} : { deps: aiDeps })}
         {...(aiConsentStore === undefined ? {} : { store: aiConsentStore })}
       />

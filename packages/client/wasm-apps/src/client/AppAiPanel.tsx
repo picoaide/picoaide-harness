@@ -5,7 +5,8 @@
  * 可在 node 环境单测），这边只做渲染与生命周期：
  *
  *  - **首次授权闸门**（§21.1 第 9 条）：没授权就不渲染输入框，只给一次性说明卡
- *    （"允许" / "不允许"）；授权按 **用户×应用** 记，面板上给「撤销授权」这个出口。
+ *    （"允许" / "不允许"）；授权按 **用户×服务端×应用** 记（与宿主闸门逐段同源，
+ *    换服务端后必须重新问一次），面板上给「撤销授权」这个出口。
  *    ⚠️ 这里是**唯一**的撤销入口（2026-09-20 核对：设置页里没有这个入口，此前注释
  *    与技能文档都写成"设置页也能撤"，与实现不符）；
  *  - **流式渲染**（§21.2）：`onDelta` 的累计正文直接渲染（不缓冲到结束再显示）；
@@ -27,6 +28,7 @@ import {
   syncAppAiConsent,
   type AppAiConsentStore,
   type AppAiDeps,
+  type AppAiScope,
   type AppAiFailure,
   type AppAiFailureCode,
   type AppAiMessage,
@@ -85,17 +87,20 @@ const ROLE: React.CSSProperties = { color: 'var(--dsw-alias-label-secondary)' }
  * 应用 AI 面板。
  * @param props - 应用标识、当前用户标识、可注入的存储与 fetch（测试用）。
  */
-export function AppAiPanel({ appId, userId, store, deps }: {
+export function AppAiPanel({ appId, scope, store, deps }: {
   appId: string
-  /** 当前登录用户标识（授权按 用户×应用 记；空串 ⇒ 每次都问）。 */
-  userId: string
+  /**
+   * 授权作用域（用户 + 服务端；与宿主闸门逐段同源）。`null` ⇒ 身份未就绪：
+   * 每次都问、且「允许」禁用 —— 绝不把它当成"无服务端"的两段作用域。
+   */
+  scope: AppAiScope | null
   /** 授权存储（缺省 `localStorage`）。 */
   store?: AppAiConsentStore | null
   /** 传输依赖（缺省全局 fetch）。 */
   deps?: AppAiDeps
 }) {
   const storage = useMemo(() => (store === undefined ? defaultAppAiConsentStore() : store), [store])
-  const [consented, setConsented] = useState(() => hasAppAiConsent(userId, appId, storage))
+  const [consented, setConsented] = useState(() => hasAppAiConsent(scope, appId, storage))
   const [denied, setDenied] = useState(false)
   const [revoked, setRevoked] = useState(false)
   /**
@@ -112,10 +117,11 @@ export function AppAiPanel({ appId, userId, store, deps }: {
   const [failure, setFailure] = useState<AppAiFailure | null>(null)
   const controller = useRef<AbortController | null>(null)
   /**
-   * 登录身份还没到（`userId` 为空串）：授权按 用户×应用 记，身份缺席时写入与读取都会
-   * 早退 —— 这时「允许」必须是**禁用 + 说明**，而不是点了没反应的按钮。
+   * 登录身份还没到（`scope === null` = 未登录 / 缺服务端地址）：授权按
+   * 用户×服务端×应用 记，身份缺席时写入与读取都会早退 —— 这时「允许」必须是
+   * **禁用 + 说明**，而不是点了没反应的按钮。
    */
-  const identityPending = userId === ''
+  const identityPending = scope === null
 
   // 仅前台（§21.1 第 15 条）：组件卸载（页面关闭/切走）⇒ 取消在跑的那一轮。
   useEffect(() => () => { controller.current?.abort() }, [])
@@ -136,12 +142,12 @@ export function AppAiPanel({ appId, userId, store, deps }: {
         return
       }
       setSyncFailure(null)
-      grantAppAiConsent(userId, appId, storage)
+      grantAppAiConsent(scope, appId, storage)
       setDenied(false)
       setRevoked(false)
-      setConsented(hasAppAiConsent(userId, appId, storage))
+      setConsented(hasAppAiConsent(scope, appId, storage))
     })()
-  }, [appId, deps, storage, userId])
+  }, [appId, deps, scope, storage])
 
   /**
    * 撤销授权（与「不允许」同一条写面路径）。
@@ -157,13 +163,13 @@ export function AppAiPanel({ appId, userId, store, deps }: {
         setSyncFailure('revoke')
         return
       }
-      revokeAppAiConsent(userId, appId, storage)
+      revokeAppAiConsent(scope, appId, storage)
       setSyncFailure(null)
       setConsented(false)
       setDenied(false)
       setRevoked(true)
     })()
-  }, [appId, deps, storage, userId])
+  }, [appId, deps, scope, storage])
 
   /**
    * 不允许（审计 C-25）：**必须真的关掉宿主闸门**。
@@ -181,13 +187,13 @@ export function AppAiPanel({ appId, userId, store, deps }: {
         setSyncFailure('deny')
         return
       }
-      revokeAppAiConsent(userId, appId, storage)
+      revokeAppAiConsent(scope, appId, storage)
       setSyncFailure(null)
       setConsented(false)
       setRevoked(false)
       setDenied(true)
     })()
-  }, [appId, deps, storage, userId])
+  }, [appId, deps, scope, storage])
 
   const send = useCallback(async (): Promise<void> => {
     const content = draft.trim()
@@ -220,7 +226,7 @@ export function AppAiPanel({ appId, userId, store, deps }: {
     }
     setStreaming('')
     setFailure(result.failure)
-  }, [appId, busy, deps, draft, messages, userId])
+  }, [appId, busy, deps, draft, messages])
 
   const stop = useCallback((): void => { controller.current?.abort() }, [])
 
@@ -249,10 +255,11 @@ export function AppAiPanel({ appId, userId, store, deps }: {
           {/* 「不允许」没能关掉闸门：不许宣称已拒绝（审计 C-25）。 */}
           {syncFailure === 'deny' && <div data-role="ai-deny-failed">{t('appCenter.ai.denyFailed')}</div>}
           {/*
-            身份未就绪时的「允许」是**静默 no-op**（2026-09-21 审计）：授权按 用户×应用 记，
-            `grantAppAiConsent`/`hasAppAiConsent` 在 userId 为空串时直接早退 ⇒ 点击后
-            `consented` 仍为 false，说明卡不动、没有任何提示（而宿主闸门其实已经打开）。
-            这里如实置灰并说明原因：身份到达后（父组件用新的 userId 重渲染）按钮自动可用。
+            身份未就绪时的「允许」是**静默 no-op**（2026-09-21 审计）：授权按
+            用户×服务端×应用 记，`grantAppAiConsent`/`hasAppAiConsent` 在作用域缺席
+            （未登录 / 缺服务端地址）时直接早退 ⇒ 点击后 `consented` 仍为 false，
+            说明卡不动、没有任何提示（而宿主闸门其实已经打开）。
+            这里如实置灰并说明原因：身份到达后（父组件用新的作用域重渲染）按钮自动可用。
           */}
           {identityPending && <div data-role="ai-identity-pending">{t('appCenter.ai.identityPending')}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>

@@ -150,10 +150,29 @@ export default class SessionService extends Service {
     this.ctx.emit(SESSION_CHANGED_EVENT, session)
   }
 
+  /**
+   * 清空会话（内存 + 持久化令牌）。
+   *
+   * R21-A2-01（客户端一半）：删盘上令牌这件事**不能无条件**做。此前无论有没有会话
+   * 都 `unlinkSync(tokenFile)`：
+   *  - 一个**迟到的 401**（旧的在途请求在新登录之后才失败）会把刚写下的新令牌
+   *    一起删掉 —— 用户"刚登录又被登出"，且没有任何解释；
+   *  - 登录页 / 重复登出这类"本来就没有会话"的路径，同样会顺手删掉**不属于自己**
+   *    的那份令牌。
+   * 现在只有**确实在清一个会话**（`this.session !== null`）时才删；没有会话可清
+   * ⇒ 盘上那一份要么属于另一次登录、要么根本不存在，都不该由这里删。
+   *
+   * 认账残留（本轮 DEFERRED）：正常路径上的"迟到 401"仍会清掉**当前**会话 —— 彻底
+   * 修需要按请求携带的令牌做身份校验（`clearIfCurrent(token)`），涉及 auth-gate 的
+   * 13 处 `ctx.picoSession.clear()` 调用点，超出本泳道文件所有权（只允许改技能相关行）。
+   */
   clear(): void {
+    const hadSession = this.session !== null
     this.session = null
     this.persistEpoch++ // F7: 使所有在途 persist 失效,不再复活旧 token
-    try { unlinkSync(this.tokenFile) } catch { /* absent is fine */ }
+    if (hadSession) {
+      try { unlinkSync(this.tokenFile) } catch { /* absent is fine */ }
+    }
     this.ctx.emit(SESSION_CHANGED_EVENT, null)
   }
 

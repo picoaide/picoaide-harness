@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { computeSkillContentHash } from '../src/skill-install.ts'
 // @ts-expect-error vendored plain JS (no types)
@@ -32,6 +32,8 @@ import { skillContentChecksum } from '../../../vendor/memory-evolve/lib/coi/skil
 import { toggleDisableFlag } from '../../../vendor/memory-evolve/lib/skill-manifest.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+/** 仓库根：从本文件（`packages/host/enterprise/tests/`）往上走四级（读 Go 真源用）。 */
+const REPO_ROOT = resolve(HERE, '..', '..', '..', '..')
 const ENTERPRISE_FILE = join(HERE, '..', 'src', 'skill-install.ts')
 const VENDOR_FILE = join(HERE, '..', '..', '..', 'vendor', 'memory-evolve', 'lib', 'coi', 'skills-sync.js')
 /** 禁用字段（N1b）的唯一实现：vendored 的 `lib/skill-manifest.js`。 */
@@ -181,8 +183,9 @@ describe('F4 跨端契约对拍（读对方源码文本，找不到即 throw）'
 //
 // 判据读**源码文本**（vendored 包与企业包之间禁止跨包 import），解析不到即 throw。
 // **已知差异（有意保留、登记在此）**：三份 vendored 副本没有长度上限（企业侧是 64），
-// 加长度检查属于 vendored 包的行为变更，需按三方合并流程单独评审 —— 本用例只在企业侧
-// 钉住 64，并保证四处**语法本体**逐字一致。
+// 加长度检查属于 vendored 包的行为变更，需按三方合并流程单独评审 —— 本用例保证四处
+// **语法本体**逐字一致，并把企业侧的长度上限与**服务端 Go 真源**（`MaxAppIDLen`）
+// 逐值对拍（R21-F-04：此前那条只钉自己的字面量 64，Go 改成 48 也全绿）。
 // ---------------------------------------------------------------------------
 
 describe('R4-D-8 技能名语法四处同源', () => {
@@ -236,11 +239,31 @@ describe('R4-D-8 技能名语法四处同源', () => {
     }
   })
 
-  it('企业侧长度上限仍是 64（vendored 三份**刻意**没有上限，属已登记差异）', () => {
+  it('企业侧长度上限与**服务端 Go 真源**逐值对拍（旧实现只钉自己的字面量 64）', () => {
+    // R21-F-04：此前这条只断言 `MAX_SKILL_NAME_LENGTH === '64'` —— 两个数字各钉自己
+    // 的字面量，实测把 Go 的 `MaxAppIDLen` 64→48 后本文件 14/14 全绿（契约漂移完全
+    // 不可观测）。现在照 `audit-r15b-manifest-parity.spec.ts` 的形状**读对方源码**：
+    // 真源读不到 / 常量解析不出即 fail-loud。
+    const goPath = join(REPO_ROOT, 'server', 'internal', 'skillmanifest', 'manifest.go')
+    let goSource: string
+    try {
+      goSource = readFileSync(goPath, 'utf8')
+    } catch (cause) {
+      throw new Error(`读不到服务端真源 ${goPath}（${cause instanceof Error ? cause.message : String(cause)}）—— 这条用例不允许 skip`)
+    }
+    const goMax = /^\s*MaxAppIDLen\s*=\s*(\d+)\s*$/mu.exec(goSource)?.[1]
+    if (goMax === undefined) {
+      throw new Error('服务端真源里找不到 `MaxAppIDLen = <数字>`：契约改名/改形态了，请重新对拍技能名长度上限')
+    }
+    const enterpriseMax = literal(enterpriseSrc, /MAX_SKILL_NAME_LENGTH = (\d+)/u, 'MAX_SKILL_NAME_LENGTH', ENTERPRISE_FILE)
     expect(
-      literal(enterpriseSrc, /MAX_SKILL_NAME_LENGTH = (\d+)/u, 'MAX_SKILL_NAME_LENGTH', ENTERPRISE_FILE),
-      '安装器目录段上限必须与 skillmanifest 的 64 保持一致',
-    ).toBe('64')
+      enterpriseMax,
+      `安装器目录段上限必须与 skillmanifest 的 MaxAppIDLen（当前 Go 源码 = ${goMax}）逐值一致`,
+    ).toBe(goMax)
+    // 反向锚：Go 的那个常量必须**真的**参与长度校验（不是"声明了没人用"的死常量）。
+    expect(goSource, 'MaxAppIDLen 必须在 Go 的长度判断里被引用').toMatch(/len\(s\)\s*>\s*MaxAppIDLen/u)
+    // 企业侧同理：常量必须真的进判据（`isLoadableSkillName`）。
+    expect(enterpriseSrc, 'MAX_SKILL_NAME_LENGTH 必须真的参与安装器判据').toMatch(/name\.length\s*<=\s*MAX_SKILL_NAME_LENGTH/u)
   })
 })
 

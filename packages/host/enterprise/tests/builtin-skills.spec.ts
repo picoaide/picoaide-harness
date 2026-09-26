@@ -22,13 +22,23 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
+import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, cp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as tar from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config } from '../src/auth-gate.ts'
-import { builtinAction, builtinInstallEndpoint, builtinRowState, planBuiltinCards, selectBuiltinCards, type BuiltinSkill } from '../src/client/BuiltinSkillsStrip.tsx'
+import {
+  builtinAction,
+  builtinInstallEndpoint,
+  builtinRowState,
+  builtinSkillsLoadOutcome,
+  planBuiltinCards,
+  selectBuiltinCards,
+  type BuiltinSkill,
+} from '../src/client/BuiltinSkillsStrip.tsx'
 import { APP_BUILDER_SKILL, builtinSkillInstallHint, isBuiltinSkillInstalled } from '../src/builtin-skills.ts'
 import { readProvenance, resolveSkillsDir, SKILL_LOCK_DIR } from '../src/skill-install.ts'
 import type { Session } from '../src/server-connector/config.ts'
@@ -775,5 +785,38 @@ describe('R1-pm-8 端到端：更新卡 → 同一安装端点 → 本机整树�
       query: '',
       kindFilter: 'all',
     })).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// R21-A2-04：清单读**失败**（5xx/网络）不得伪装成"平台没有内置技能"
+//
+// 缺陷原形态：`useBuiltinSkills` 的 `if (!res.ok) return` 把 404（旧版服务端没有这条
+// 路由 ⇒ 整块隐藏）与 5xx/网络失败（`skillseed.ListBuiltin` 目录读不了就是 500）走成
+// 同一条路，且 `catch {}` 完全静默 —— 用户与运维都看不到任何痕迹，而宿主
+// （`auth-gate.ts`）恰恰**刻意**按状态码分流（"伪装成空清单会让运维永远查不出服务端
+// 少了这条路由"）。本包没有 jsdom 渲染测试面，所以判据分两层：判定本身做成纯函数
+// 直接打坏，接线（hook 真的用了它、并进 error/reload 态）用源码断言钉住 —— 与
+// `builtinSkillsInstallOutcome` 的既有做法一致（见 `capability-center-panel.spec.ts`）。
+// ---------------------------------------------------------------------------
+describe('R21-A2-04 内置技能清单：读失败 ≠ 没有内置技能（404 才整块隐藏）', () => {
+  it('三态判定：200 ⇒ ok；404 ⇒ absent（旧版服务端）；其余（5xx/0/网络）⇒ failed', () => {
+    expect(builtinSkillsLoadOutcome(200, true)).toBe('ok')
+    expect(builtinSkillsLoadOutcome(404, false), '确定不存在（旧版服务端）才整块隐藏').toBe('absent')
+    expect(builtinSkillsLoadOutcome(500, false), '服务端读不了目录 ⇒ 必须如实报错').toBe('failed')
+    expect(builtinSkillsLoadOutcome(502, false)).toBe('failed')
+    expect(builtinSkillsLoadOutcome(401, false), '未登录/令牌失效同样是"读失败"，不是"没有"').toBe('failed')
+    // 网络失败没有状态码（hook 用 0 表达）—— 与 404 必须区分开。
+    expect(builtinSkillsLoadOutcome(0, false)).toBe('failed')
+  })
+
+  it('接线：hook 用 builtinSkillsLoadOutcome 分流，并把非 404 失败写进 error 态（可 reload）', () => {
+    const source = readFileSync(fileURLToPath(new URL('../src/client/BuiltinSkillsStrip.tsx', import.meta.url)), 'utf8')
+    expect(source, 'hook 必须用纯函数做三态判定').toContain('builtinSkillsLoadOutcome(res.status, res.ok)')
+    // 只钉**语句**形态（注释里引用旧写法不算）：整行以 `if (!res.ok) return` 开头即旧形态。
+    expect(source, '旧形态（把所有 !res.ok 当成"没有"）必须消失').not.toMatch(/^\s*if \(!res\.ok\) return/mu)
+    expect(source, '失败必须进 error 态').toContain('setError(')
+    expect(source, '错误态必须给出重试入口').toContain('reload: () => { setReloadKey(key => key + 1) }')
+    expect(source, 'catch 不得再静默吞掉读失败').not.toContain('静默：拿不到内置技能清单就当作"没有"')
   })
 })
