@@ -122,7 +122,10 @@ export interface BrowserToolOptions {
    * cooperative timeout while the page is already usable.
    */
   loadTimeoutMs?: number
-  /** Whether `browser_eval` is enabled (default true; enterprise can disable). */
+  /**
+   * Whether `browser_eval` is enabled (default **true**; no producer is wired yet —
+   * see `index.ts`'s `evalEnabled` field, R21 F-02).
+   */
   evalEnabled?: boolean
   /** Cap on snapshot entries per call (default 200). */
   snapshotLimit?: number

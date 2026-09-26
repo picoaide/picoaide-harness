@@ -252,7 +252,7 @@ Group
 | `group-quota` | 配额满，等待超时（默认 60s） | 稍后重试 / 关闭其他标签 |
 | `window-controlled` | 用户接管中 | 等待用户释放 |
 | `eval-policy` | eval 表达式未过只读校验（含赋值/副作用 API） | 改用只读辅助函数或 get_snapshot/get_text |
-| `policy` | 企业禁用了该工具（如 evalEnabled=false） | 无法自行恢复 |
+| `policy` | 宿主把该工具整体禁用了（`evalEnabled=false`）—— **注意：截至 2026-09-26 装配面无生产者**（见 §7.9），这一支只在手改 profile 时可达 | 无法自行恢复 |
 
 ---
 
@@ -308,7 +308,15 @@ Group
    - **frame 参数（已确认）**：整数序号，0 = 主 frame，与 get_snapshot 的 iframe 标注同源；负值/越界报 `not-found`；**允许 `document.cookie` 读取，结果脱敏**。
    - 结果：JSON 序列化，**上限 8KB / 深度 ≤ 6**；敏感值脱敏（token/session/cookie 模式）后才出工具与入审计。
    - 审计：expression 全文入 op log（代码非机密）；结果只存摘要 + 脱敏值。
-   - 企业策略：`evalEnabled` 可整体禁用（错误码 `policy`）；**本轮只做只读**，写入模式（若未来需要）另行 P2 评审。
+   - ~~企业策略：`evalEnabled` 可整体禁用（错误码 `policy`）~~ **承诺已撤回（2026-09-26，R21 F-02）**：
+     `evalEnabled` 与 `toolGroups` 两个键**至今没有任何生产者** —— 桌面装配面
+     （`packages/host/desktop/src/profile.ts` 的 `pico-browser` 行）只注入 `appOriginScheme`，
+     而 patch 的 `config` 是整键替换 ⇒ 其余键一律走插件缺省，两个"策略"在任何发行形态下
+     都不可达。当前口径是**宿主配置**（想关只能手改装配后的 profile），缺省方向 = `evalEnabled`
+     全开、`toolGroups` 七组全开；`[]` 表示"全关"（见 `tools.ts` 的 `parseToolGroups`）。
+     接上真实生产者（渠道包 `desktop` 段 → 行 config）是另一条尚未实施的路线。
+     错误码 `policy` 仍然存在（`evalEnabled=false` 时 `browser_eval` 抛它），只是今天没有
+     把它置为 false 的装配路径。**本轮只做只读**，写入模式（若未来需要）另行 P2 评审。
 
 ---
 

@@ -21,10 +21,11 @@
  * 隐藏会话 id = `app:<app_id>#<账号作用域>`，作用域 = `<编码用户名>[@<服务端哈希>]`。
  * 三条理由（缺一条都会复发同一个缺陷）：
  *
- *  ① 授权是 **(用户 × 应用)** 粒度的（`aiConsentKey`），而隐藏会话承载的是**某个账号的
- *     对话本体** —— 键里没有账号，同一台机器上换账号（共用工作站的常见形态）就会让
- *     第二个账号续用第一个账号的对话：实测第二个账号那一轮的模型请求里带着第一个账号
- *     的用户消息与 assistant 回复（R13-E-04 / B-P0-1，真 agent-loop 探针）；
+ *  ① 隐藏会话承载的是**某个账号的对话本体**，而授权只回答"许不许可"（两件事的维度
+ *     自 2026-09-26 起一致，见下）—— 会话键里没有账号维度时，同一台机器上换账号
+ *     （共用工作站的常见形态）就会让第二个账号续用第一个账号的对话：实测第二个账号
+ *     那一轮的模型请求里带着第一个账号的用户消息与 assistant 回复（R13-E-04 /
+ *     B-P0-1，真 agent-loop 探针）；
  *  ② 服务端哈希是**同一台机器上的多租户**维度：`persist:` / 数据根都在机器级，测试与
  *     正式服务端并存时同名用户名是两个人（与 `2026-09-21` 分区哈希 P1-10 同源）；
  *  ③ app_id **必须挨着前缀**（`app:<app_id>#…`）而不是 `app:<user>:<app_id>`：服务端归因
@@ -343,14 +344,21 @@ export interface AiChatTurnRunner {
   cancel?(sessionId: string): void
 }
 
-/** 用户 × 应用的授权记录（§21.1 Q9：首次调用授权一次，可在设置里撤销）。 */
+/**
+ * 用户 ⊕ 服务端 ⊕ 应用的授权记录（§21.1 Q9：首次调用授权一次，可在设置里撤销）。
+ *
+ * 三段作用域由调用方**显式**传入（R21 B2-R21-01）：服务端地址是**必填的判据**，
+ * 拿不到时 {@link aiConsentKey} 回 `null` ⇒ 读面 `false`、写面拒绝（fail-closed，
+ * 绝不把它当成"无服务端"）。第三个参数保持可选只是为了让既有实现（测试里的替身）
+ * 继续可赋值；**省略它等于放弃服务端维度**，生产接线必须逐个传。
+ */
 export interface AiChatAuthorization {
-  /** 是否已授权。 */
-  isGranted(userId: string, appId: string): Promise<boolean>
-  /** 记下授权（首次说明卡确认后调用）。 */
-  grant(userId: string, appId: string): Promise<void>
+  /** 这个作用域下是否已授权（任一段缺失 ⇒ false）。 */
+  isGranted(userId: string, appId: string, serverURL?: string | null): Promise<boolean>
+  /** 记下授权（首次说明卡确认后调用）；拿不到完整作用域 ⇒ 抛 `AiConsentScopeError`。 */
+  grant(userId: string, appId: string, serverURL?: string | null): Promise<void>
   /** 撤销（设置里的入口；撤销后再调 ⇒ 403）。 */
-  revoke(userId: string, appId: string): Promise<void>
+  revoke(userId: string, appId: string, serverURL?: string | null): Promise<void>
 }
 
 /** 授权闸结论。 */
@@ -364,16 +372,17 @@ export type AiChatGateResult =
  * 判据顺序是契约的一部分：**先**查授权，**再**碰任何模型调用 —— 反过来就会出现
  * "没授权也花了一次 token"。
  *
- * 授权是 (账号 × 应用) 粒度；隐藏会话是 (账号 × 服务端 × 应用) 粒度。两者**不共键**也
- * 不该共键：授权回答"许不许可"，作用域回答"这份对话属于谁" —— 用授权粒度当会话键正是
- * R13-E-04 的缺陷（换账号后被授权过 ≠ 该续用前一个账号的对话）。
+ * 授权与隐藏会话**各用各的键**（前者 `用户\0服务端\0应用`，后者 `app:<app_id>#<账号作用域>`）：
+ * 授权回答"许不许可"，会话键回答"这份对话属于谁" —— 用授权粒度当会话键正是 R13-E-04 的
+ * 缺陷（换账号后被授权过 ≠ 该续用前一个账号的对话）。两者的**维度**自 2026-09-26 起一致
+ * （都含服务端，且都取自**同一个** `scope` 快照），但键的形状仍然不同，不要合并。
  * @param authorization - 授权记录。
  * @param scope - 当前账号 + 服务端地址。
  * @param appId - 应用。
  * @returns 通过时给出该账号在该应用上的隐藏会话 id。
  */
 export async function gateAppAi(authorization: AiChatAuthorization, scope: AiChatScope, appId: string): Promise<AiChatGateResult> {
-  if (!await authorization.isGranted(scope.userId, appId)) return { ok: false, status: 403, code: 'app_ai_denied' }
+  if (!await authorization.isGranted(scope.userId, appId, scope.serverURL)) return { ok: false, status: 403, code: 'app_ai_denied' }
   return { ok: true, sessionId: hiddenSessionId(scope, appId) }
 }
 
@@ -437,9 +446,10 @@ export async function handleAiChat(
     return fail(503, 'app_ai_unavailable', 'the application AI bridge is not available in this client')
   }
   const scope = deps.scope()
-  if (scope === null || scope.userId.trim() === '') {
-    // 空账号**不是**"匿名作用域"：那会让所有未登录/半登录状态共用一个隐藏会话
-    // （跨账号复用的一条侧门）。宁可不服务。
+  if (scope === null || scope.userId.trim() === '' || (scope.serverURL ?? '').trim() === '') {
+    // 空账号 / 空服务端地址**不是**"匿名作用域"：那会让所有未登录/半登录状态共用一个
+    // 隐藏会话，也会让授权键退化成"没有服务端"的那一支（跨租户继承的一条侧门）。
+    // 宁可不服务（401 而不是 403：这不是"用户拒绝了"，是"拿不到身份"）。
     return fail(401, 'app_ai_unavailable', 'not signed in')
   }
   const gate = await gateAppAi(deps.authorization, scope, appId)

@@ -129,6 +129,34 @@ describe('authorization gate (§21.1 Q9 / §21.6)', () => {
     expect(outcome).toMatchObject({ kind: 'json', status: 503 })
     expect(JSON.stringify(outcome)).toContain('app_ai_unavailable')
   })
+
+  /**
+   * R21 B2-R21-01：拿不到**服务端地址**时不得当成"无服务端"——那等于把服务端维度
+   * 整个删掉（跨租户继承授权），所以 401 而不是"按匿名作用域跑一轮"。
+   *
+   * 这里刻意用**已授权**的替身：修前它会 200（授权键只有 user\0app，服务端缺席无所谓），
+   * 修后必须 401 且一次模型调用都不发生。
+   */
+  it('拿不到服务端地址 ⇒ 401 且零 token（不得退化成"无服务端"作用域）', async () => {
+    const runner = runnerOf()
+    const request = body({ messages: [{ role: 'user', content: 'hi' }], stream: false })
+    for (const scope of [
+      { userId: 'alice', serverURL: undefined },
+      { userId: 'alice', serverURL: null },
+      { userId: 'alice', serverURL: '' },
+      { userId: 'alice', serverURL: '   ' },
+    ] as AiChatScope[]) {
+      const outcome = await handleAiChat(
+        { authorization: authorizationOf(true), runner, scope: () => scope },
+        'my-notes',
+        request,
+        new AbortController().signal,
+      )
+      expect(outcome, JSON.stringify(scope)).toMatchObject({ kind: 'json', status: 401 })
+      expect(JSON.stringify(outcome), JSON.stringify(scope)).toContain('app_ai_unavailable')
+    }
+    expect(runner.calls).toBe(0)
+  })
 })
 
 describe('streaming and cancellation (§21.6)', () => {

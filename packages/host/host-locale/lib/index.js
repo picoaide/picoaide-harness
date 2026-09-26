@@ -33,6 +33,11 @@ function normalizeHostLocale(value) {
 *
 * The runtime wins over the header on purpose: it carries the user's explicit
 * in-app choice, which must beat anything the client advertises.
+*
+* `acceptLanguage` 收 `null` 与 `undefined` 两种"没有这个头"的写法：`IncomingMessage`
+* 的头是 `string | undefined`，而路由/探针里常写成 `?? null`。这一层**只做宽进**，
+* 语义不变（两种都落到 `undefined`）—— 2026-09-26 起 `wasm-apps-host` 的 `locale.ts`
+* 是本模块的 re-export，签名收窄会让原本可编译的调用点变成 TS 错误。
 * @param runtime - probed `desktopRuntime`, or `undefined` when absent.
 * @param acceptLanguage - raw `Accept-Language` request header, when there is a request.
 * @returns the locale to render host copy in.
@@ -52,7 +57,10 @@ function hostCopy(locale, zh, en) {
 * Parses the q-value order rather than trusting positional order, because
 * clients emit `*` and zero-quality entries that must not win. Unsupported
 * languages are skipped so a `ja,zh;q=0.8` client still gets Chinese.
-* @param header - raw header value, possibly absent or malformed.
+*
+* `header` 同样接受 `null`（与 {@link hostLocaleFrom} 同一条宽进口径：只做宽进，
+* 语义不变 —— 两种"没有这个头"的写法都落到 `undefined`）。
+* @param header - raw header value, possibly absent, null or malformed.
 * @returns a supported locale, or `undefined` when the header names none.
 */
 function preferredLocaleFromAcceptLanguage(header) {

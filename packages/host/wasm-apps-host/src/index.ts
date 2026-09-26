@@ -28,7 +28,7 @@ import z from '@deepseek-ai/schemastery'
 import { BROWSER_SURFACE_SERVICE } from '@picoaide/dsh-browser/surface'
 import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './app-protocol.ts'
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
-import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorization.ts'
+import { AI_CONSENT_FILE_NAME, createAiChatAuthorization, isAiConsentScopeError } from './ai-authorization.ts'
 import { createAppProofProvider, type InstallKeyStore } from './app-proof.ts'
 import { frozenAppHint, frozenAppTitle } from './app-window-copy.ts'
 import { WasmAppsCache, type CacheScope } from './cache.ts'
@@ -879,21 +879,24 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             const user = session.username ?? ''
-            if (user === '') {
-              // 授权维度是 **用户 × 应用**：拿不到用户名时写入一条"谁都不是"的记录
-              // 比拒绝更糟（下一次换账号可能撞上它）。fail-closed。
-              json(reply, 401, {
-                error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
-              })
-              return
-            }
             const appId = rawAppId.trim()
+            // 授权维度是 **用户 ⊕ 服务端 ⊕ 应用**（R21 B2-R21-01）：三段一起构键，
+            // 任一段拿不到 ⇒ 拒绝。写入一条"谁都不是"的记录比拒绝更糟（下一次换账号
+            // 或换服务端可能正好撞上它）。`readAppSession` 已保证 serverURL 非空，
+            // 这里仍然逐段判一次 —— 判据来自同一份会话快照，不靠上游的隐含保证。
             try {
-              if (row.granted) await aiAuthorization.grant(user, appId)
-              else await aiAuthorization.revoke(user, appId)
+              if (row.granted) await aiAuthorization.grant(user, appId, session.serverURL)
+              else await aiAuthorization.revoke(user, appId, session.serverURL)
             } catch (cause) {
+              if (isAiConsentScopeError(cause)) {
+                json(reply, 401, {
+                  error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
+                })
+                return
+              }
               // 写失败**必须**让用户看到：静默成功会让下一次调用仍然 403（"点了允许
-              // 还是不行"），而那看起来像 AI 坏了。
+              // 还是不行"），而那看起来像 AI 坏了。读不动的记录文件（非 ENOENT）也
+              // 走这一支 —— 覆盖它会静默销毁其它账号/应用的授权。
               warn(`pico-wasm-apps-host: persisting the app AI consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
               json(reply, 500, {
                 error: {

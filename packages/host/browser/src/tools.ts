@@ -1582,7 +1582,13 @@ function formatCredentials(value: unknown): string {
   return items.map((c) => `${c.id}${c.username !== undefined ? ` (${c.username})` : ''}`).join('\n')
 }
 
-/** Tool → group map used by the enterprise toolGroups policy (P2 §15). */
+/**
+ * Tool → group map used by the `toolGroups` policy (P2 §15).
+ *
+ * 名字里的 "enterprise" 是历史措辞：**装配面至今没有生产者**，见
+ * {@link parseToolGroups} 与 `index.ts` 的 `toolGroups` 字段注释（2026-09-26
+ * R21 F-02：先把"企业策略可禁用"这条承诺撤回，等渠道包真的接上生产者再恢复）。
+ */
 const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'memory' | 'artifacts' | 'control'> = {
   browser_open: 'navigate', browser_navigate: 'navigate', browser_reload: 'navigate',
   browser_go_back: 'navigate', browser_go_forward: 'navigate', browser_list_tabs: 'navigate',
@@ -1602,16 +1608,31 @@ const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'mem
   browser_clear_data: 'control', browser_credentials_list: 'control',
 }
 
-/** Default: every tool group enabled. */
+/** Default: every tool group enabled. Only the **absent** key means "default". */
 export const DEFAULT_GROUPS: ReadonlySet<string> = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
 
-/** Parse a toolGroups config value into a set (unknown values ignored). */
+/**
+ * Parse a `toolGroups` config value into a set of enabled groups.
+ *
+ * 两条语义（2026-09-26 R21 F-02 定案）：
+ *
+ *  1. **只有整个键缺席**（`undefined`）才是"缺省 = 全开"（{@link DEFAULT_GROUPS}）。
+ *  2. 显式给出数组时**按字面生效**：无法识别的名字被忽略，结果可以是**空集 = 全关**。
+ *     此前 `set.size === 0` 会回落到 `DEFAULT_GROUPS` ⇒ `toolGroups: []`（运维想关掉
+ *     全部浏览器工具时最自然的写法）**反而把七组全部打开**，是 fail-open 的反直觉形态。
+ *     写错名字（`['naviagte']`）同样落到空集 = 全关：策略键写错必须关门，不能开门。
+ *
+ * 注意 `browser_eval` 归 `write` 组 —— 它在用户**已登录**的分区里执行 AI 编写的 JS，
+ * 所以"少写了 `write`"与"少写了 `read`"的后果不同，改这里的映射要一起看。
+ * @param value - 配置里的 `toolGroups`（`undefined` = 键缺席）。
+ * @returns 启用的组集合；空集 = 一个浏览器工具都不注册。
+ */
 export function parseToolGroups(value: string[] | undefined): ReadonlySet<string> {
   if (value === undefined) return DEFAULT_GROUPS
   const allowed = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
   const set = new Set<string>()
   for (const item of value) if (allowed.has(item)) set.add(item)
-  return set.size === 0 ? DEFAULT_GROUPS : set
+  return set
 }
 
 export type { ToolResult }

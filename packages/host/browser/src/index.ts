@@ -84,6 +84,17 @@ export interface Config {
   maxTabs?: number
   timeoutMs?: number
   loadTimeoutMs?: number
+  /**
+   * 是否允许 `browser_eval`（**缺省 `true` = 允许**）。
+   *
+   * **当前没有生产者**（2026-09-26 R21 F-02 实测）：全仓唯一的装配点
+   * `packages/host/desktop/src/profile.ts` 给 `pico-browser` 行注入的 config **只**有
+   * `appOriginScheme`，而 patch 的 `config` 是整键替换 ⇒ 其余键一律走插件缺省。想关掉
+   * 只能手改装配后的 profile，或由渠道包接上生产者（那是一条尚未实施的路线）。
+   *
+   * 为什么值得写明：`browser_eval` 在用户**已登录**的浏览器分区里执行 AI 编写的 JS
+   * （`tools.ts` 把它归到 `write` 组），所以缺省方向是安全相关的 —— **今天的方向是开**。
+   */
   evalEnabled?: boolean
   snapshotLimit?: number
   textLimit?: number
@@ -91,6 +102,12 @@ export interface Config {
   screenshotQuality?: number
   waitTimeoutMs?: number
   downloadDir?: string
+  /**
+   * 启用的工具组白名单（**键缺席 = 七组全开**）。
+   *
+   * **当前没有生产者**（同 {@link Config.evalEnabled}）。语义见 `tools.ts` 的
+   * `parseToolGroups`：只有键缺席才是全开，**显式空数组 = 全关**。
+   */
   toolGroups?: string[]
   /**
    * 每个连接器自己的站点地址（origin 或完整 URL），用于 `browser_fill_credentials`

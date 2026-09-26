@@ -1148,6 +1148,55 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     expect(calls[2]?.sessionId).not.toBe(bobId)
   })
 
+  /**
+   * R21 B2-R21-01：授权（而不只是隐藏会话）也必须按服务端分域。
+   *
+   * 这是**A/B 对照**：同一个 `alice`、同一个应用，只把会话切到第二台服务端 ——
+   * 修前 `isGranted` 只看 `user\0app`，于是租户 B 上一次授权动作都没有就能继续花这个
+   * 账号的 token（403 变 200）；修后必须 403，且在 B 上重新授权后 A 的记录仍在。
+   */
+  it('授权按服务端分域（B2-R21-01）：同名账号换租户 ⇒ 403，重新授权后两条记录并存', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-scope-'))
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, { userDataDir: dir })
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    expect((await chat(h, { messages: [{ role: 'user', content: 'a' }], stream: false })).status).toBe(200)
+
+    // ① 同一台机器、同一个账号名，只换服务端（= 换租户）。
+    h.setSession({ serverURL: 'https://second.example.com', token: 'tok2', username: 'alice' })
+    h.fireSessionChanged()
+    const inherited = await chat(h, { messages: [{ role: 'user', content: 'b' }], stream: false })
+    expect(inherited.status).toBe(403)
+    expect(await inherited.json()).toMatchObject({ error: { code: 'app_ai_denied' } })
+    // 零 token：被拒的那一轮一次模型调用都没有。
+    expect(calls).toHaveLength(1)
+
+    // ② 在租户 B 上授权 ⇒ 记录并存（A 的那条不被抹掉）。
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    expect((await chat(h, { messages: [{ role: 'user', content: 'c' }], stream: false })).status).toBe(200)
+    const document = JSON.parse(readFileSync(join(dir, AI_CONSENT_FILE_NAME), 'utf8')) as { grants: unknown[] }
+    expect(document.grants).toHaveLength(2)
+
+    // ③ 回到租户 A：A 的授权仍在（换租户只影响自己那一段作用域）。
+    h.setSession({ serverURL: ALICE.serverURL, token: 'tok', username: 'alice' })
+    h.fireSessionChanged()
+    expect((await chat(h, { messages: [{ role: 'user', content: 'd' }], stream: false })).status).toBe(200)
+  })
+
+  it('写面拿不到用户名 ⇒ 401 AUTH_REQUIRED 且一个字都不落盘（fail-closed）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-nouser-'))
+    const h = fakeContext({ session: { serverURL: ALICE.serverURL, token: 'tok' } })
+    apply(h.ctx, { userDataDir: dir })
+    const proof = await proofHeaderOf(h)
+    const response = await consent(h, proof, { app_id: 'demo', granted: true })
+    expect(response.status).toBe(401)
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'AUTH_REQUIRED' } })
+    // 拒绝**不是**"写了一条空作用域的记录"。
+    expect(existsSync(join(dir, AI_CONSENT_FILE_NAME))).toBe(false)
+  })
+
   it('授权路由要求持有性证明 / 已登录 / 合法 app_id / 布尔 granted', async () => {
     const h = fakeContext({ session: ALICE })
     apply(h.ctx, {})
