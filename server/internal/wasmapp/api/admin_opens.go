@@ -23,7 +23,7 @@ import (
 // 响应里的 `detail_retention_days` 让调用方知道"多久以前的明细已经不在"。
 func (h *Handlers) adminAppOpens(c *gin.Context) {
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
@@ -234,7 +234,7 @@ const (
 // 但含义相反，不得合并渲染）。
 func (h *Handlers) adminAppAIUsage(c *gin.Context) {
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		writeErr(c, aerr)
 		return
 	}

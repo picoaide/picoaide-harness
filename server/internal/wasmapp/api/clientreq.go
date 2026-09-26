@@ -157,7 +157,7 @@ func (h *Handlers) clientRequest(c *gin.Context) {
 		return
 	}
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		h.admissionFailed(c, appID, user, aerr.Status(), aerr.Code, "request: app_id 非法")
 		writeErr(c, aerr)
 		return
@@ -194,7 +194,7 @@ func (h *Handlers) clientRequest(c *gin.Context) {
 
 // serveClientRequest 是入口的实现：校验信封 → 合成请求 → 共用管线 → 编码响应。
 //
-// appID 由调用方（clientRequest）传入：它已经过 validateAppID，并且是 proof 绑定的
+// appID 由调用方（clientRequest）传入：它已经过 validateAppIDServing，并且是 proof 绑定的
 // 输入 —— 两处各自从路由参数再解析一次会让"proof 校验用的 app_id"与"管线执行的
 // app_id"存在两套归一化路径（当前两者逐字节相同，但没有任何东西保证将来也是）。
 func (h *Handlers) serveClientRequest(c *gin.Context, appID string, user *serverstore.User) {
@@ -251,8 +251,9 @@ func (h *Handlers) serveClientRequest(c *gin.Context, appID string, user *server
 	})
 }
 
-// validateAppID 的规则真源是 registry（handlers.go 的 validateAppID），本文件直接
-// 复用它 —— 见 serveClientRequest。
+// app_id 的规则真源是 registry，本包只有一个服务侧入口（handlers.go 的
+// validateAppIDServing，服务侧 = 不套用"路由静态段"这条写侧保留字）与一个写侧入口
+// （validateRawAppID）；本文件的校验见 clientRequest，不再各写一份。
 
 // clientAppScheme / clientAppOrigin 是本包读取**渠道参数化 scheme** 的唯一入口。
 //

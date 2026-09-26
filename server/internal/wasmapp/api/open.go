@@ -40,7 +40,7 @@ func (h *Handlers) openApp(c *gin.Context) {
 		return
 	}
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		h.admissionFailed(c, appID, user, aerr.Status(), aerr.Code, "open: app_id 非法")
 		writeErr(c, aerr)
 		return
