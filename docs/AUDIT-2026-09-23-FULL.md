@@ -1791,16 +1791,34 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
 **门禁**：`corepack yarn check` **32/32、0 失败、0 跳过**（首跑因守卫自身摘要登记值未同步而红，按
 `--print-digests` 收口后转绿 —— 与第二十二/二十三轮同一形态，已在本节固化）。
 
+#### 第二十五轮的一处**撤回**（诚实记录）
+
+`bc0973cd84` 的 serverstore 部分（异名叶子分区纳入保留期回收）在收口复跑时被判定**引入回归**：
+`go test ./internal/serverstore/ -run 'TestUsageRetention'` 下三个**既有**用例
+（`DetachedPartitionedParentBackfillsLedgerAndSkipsDrop` / `WiderPartitionLedgersEveryCoveredMonth` /
+`MultilevelGrandchildKeepsLivePartitionAndAmount`）全红，报错落在"分区形态判定"那条 ——
+`usage_2026` 这类整年父分区的**期望窗口与边界文本渲染时区不同**（`+08` vs `+00`）被判不等 ⇒
+走人工处置分支。
+
+- **已撤回**（提交 `676aa2bddd`，保留 `bc0973cd84` 的 `wasmapp/api` 部分）。撤回后既有保留期回归
+  `ok 24.119s` 全绿。
+- **该 P1 因此仍是未修项**：修它必须同时把"期望窗口 vs 实际边界"的比较改成**绝对瞬时**归一
+  （否则真实部署会在保留期清理上走人工处置分支，比"异名分区不回收"更早被运维观察到）。
+- **流程教训**：FIX-27 只跑了"自己新增的用例 + 全包（25 分钟超时未完成）"，**没有跑既有回归面**；
+  主控的收口复跑抓住了它。以后每个修复泳道的验收命令必须包含**受影响的既有回归包**（不能只跑新增用例）。
+
 #### 交付状态（截至第二十五轮修复批）
 
 - **已完成**：5 轮审计（21–25，共 27 条审计泳道）+ 16 条修复泳道；所有 P0/P1 均有"修复 + 能杀死回退的
   判据 + 变异证据"；整仓门禁绿；审计记录（§7.56–§7.60）与行为变更登记（`docs/releases/v2.8.2-beta.1.md` §十二）落库。
 - **未达成**：**"连续两轮零新增 P0/P1"这一收敛条件**。当前已知未闭环项（按价值）：
   ① 本机同用户攻击者经 CDP 的 cookie 窃取（需结构性修法，非本批范围）；
-  ② `agentshare` 孪生的可见性分叉（HANDOFF 已给精确改法）；
-  ③ `chown`/结构性残留：`integration-tests/README.md` 参数同步、仓内 5 张历史 PNG、
+  ② **非 `usage_<YYYYMM>` 命名的叶子分区不被保留期回收**（第二十五轮的修复因引入既有回归已撤回；
+  下一次必须连带修"窗口比较的时区渲染分叉"那条阻塞项）；
+  ③ `agentshare` 孪生的可见性分叉（HANDOFF 已给精确改法）；
+  ④ 结构性残留：`integration-tests/README.md` 参数同步、仓内 5 张历史 PNG、
   `run-all.sh` 无 per-runner timeout、登录页 step2 的 1/6 瞬时失败（有界轮询）；
-  ④ 判据面已知边界：E-01 未覆盖 `sed -i`/`git checkout --`/`dd of=`，E-02 的"运行期条件"形态，
+  ⑤ 判据面已知边界：E-01 未覆盖 `sed -i`/`git checkout --`/`dd of=`，E-02 的"运行期条件"形态，
   迁移基线的远端校验在无网络时降级。
 - **建议的下一轮范围**：① 复审 FIX-27/28/29（尤其 `debug-switches` 的接线判据与 electron-shots 的
   归属证明边界）；② 继续扫未覆盖面（`packages/host/desktop/src` 运行时面、`packages/client/**`、
