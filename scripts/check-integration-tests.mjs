@@ -6025,12 +6025,15 @@ function ciExecutionSurface(options) {
           const scriptWord = scriptHost === null || scriptHost.commandText !== null || scriptHost.scriptIndex < 0
             ? undefined
             : head[scriptHost.scriptIndex]
+          // 只剥一个前导 `./`（那是无歧义的"当前目录"写法，`resolveCarrierPath` 侧本来也会归一它）；
+          // `../` 越出仓库根的同族形态与**命令位**的既有口径保持一致（既有的认账边界，不在这里扩大）。
+          const scriptLiteral = scriptWord === undefined ? '' : scriptWord.replace(/^\.\//u, '')
           if (scriptWord !== undefined
-            && isRepoRelativePathWord(scriptWord)
-            && scriptWord.includes('/')
-            && !scriptWord.includes('$') && !scriptWord.includes('{{')
-            && stripRootVariablePrefix(scriptWord) === undefined
-            && !SHELL_GLOB_PATTERN.test(scriptWord)
+            && isRepoRelativePathWord(scriptLiteral)
+            && scriptLiteral.includes('/')
+            && !scriptLiteral.includes('$') && !scriptLiteral.includes('{{')
+            && stripRootVariablePrefix(scriptLiteral) === undefined
+            && !SHELL_GLOB_PATTERN.test(scriptLiteral)
             && resolveCarrierPath(scriptWord, dirs) === undefined
             && !resolveCarrierPath(scriptWord, [''])) {
             reportClosureProblem({
@@ -6613,7 +6616,8 @@ function ciExecutionSurfaceSelfTest() {
       ['.github/workflows/generated.yml',
         'name: generated\njobs:\n  a:\n    steps:\n      - run: |\n'
         + '          base64 -d scripts/probe-payload.b64 > scripts/probe-generated.sh\n'
-        + '          bash scripts/probe-generated.sh\n'],
+        + '          bash scripts/probe-generated.sh\n'
+        + '          bash ./scripts/probe-generated.sh\n'],
       ['scripts/probe-payload.b64', 'YmFzaCBpbnRlZ3JhdGlvbi10ZXN0cy9ydW4tYWxsLnNoCg==\n'],
     ])
     const generatedSurface = () => ciExecutionSurface({
@@ -6633,7 +6637,10 @@ function ciExecutionSurfaceSelfTest() {
       '形态⑨自证: `bash scripts/probe-generated.sh`（脚本位指向**仓内不存在**的字面路径）必须'
         + ' fail-closed 记 problem —— 修前它是"跟不出载体 ⇒ 静默放过"（R20A-05 的现场：'
         + ` 生成物 + 不透明载荷 ⇒ 守卫 EXIT=0 而运行期真的执行了端到端入口）：实际 problems=${JSON.stringify(unacked.problems)}`)
-    check(unacked.generatedScripts.length === 1 && unacked.generatedScripts[0].acked === false,
+    check(unacked.generatedScripts.length === 2
+      && unacked.generatedScripts.every(item => item.acked === false)
+      && unacked.generatedScripts.some(item => item.word === 'scripts/probe-generated.sh')
+      && unacked.generatedScripts.some(item => item.word === './scripts/probe-generated.sh'),
       '形态⑨自证: "脚本位指向仓内不存在的路径"必须被记进 `generatedScripts` 且标成**未登记**'
         + `（死条目对账的另一半）：实际 ${JSON.stringify(unacked.generatedScripts)}`)
     CI_SURFACE_GENERATED_SCRIPT_ACK.push({
@@ -6641,15 +6648,21 @@ function ciExecutionSurfaceSelfTest() {
       why: '自证：登记之后这一处必须放行（"先构建/生成、再执行"的正当写法只能逐处认账）',
       approvedBy: 'R20A-05（本泳道）',
     })
+    CI_SURFACE_GENERATED_SCRIPT_ACK.push({
+      file: '.github/workflows/generated.yml', word: './scripts/probe-generated.sh',
+      why: '自证：`./` 前缀是同一条判据的另一种字面写法（必须与不带前缀的那条分别登记）',
+      approvedBy: 'R20A-05（本泳道）',
+    })
     try {
       const acked = generatedSurface()
       check(acked.problems.length === 0,
         '形态⑨自证: 逐处登记之后"生成物脚本位"必须放行（登记制：新出现的一律红、已认账的留痕）：'
           + ` 实际 problems=${JSON.stringify(acked.problems)}`)
-      check(acked.generatedScripts.length === 1 && acked.generatedScripts[0].acked === true,
+      check(acked.generatedScripts.length === 2 && acked.generatedScripts.every(item => item.acked === true),
         '形态⑨自证: 登记命中后 `generatedScripts.acked` 必须是 true（死条目对账靠它）：'
           + ` 实际 ${JSON.stringify(acked.generatedScripts)}`)
     } finally {
+      CI_SURFACE_GENERATED_SCRIPT_ACK.pop()
       CI_SURFACE_GENERATED_SCRIPT_ACK.pop()
     }
   }
