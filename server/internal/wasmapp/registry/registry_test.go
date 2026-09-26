@@ -95,6 +95,59 @@ func TestValidateAppIDExtraReserved(t *testing.T) {
 	}
 }
 
+// TestValidateAppIDRouteStaticSegment：与平台**路由静态段**同名必须拒（X4-1）。
+//
+// 现场（第二十四轮审计）：`uploads` 不在旧 host label 清单里 ⇒ 写侧放行、
+// 分片上传链路还能把它发布出去，但发布完之后 `/apps/wasm/uploads/open|request|
+// publish|rows|…` 全部 404（或被 `/uploads/:upload_id` 吃掉）⇒ 应用建完即废、
+// 归属与版本号永久占位。修法 = 路由静态段集合由 `internal/router` 从真实路由表
+// 派生后注入本包（`SetRouteReservedAppIDs`），写侧 fail-loud。
+//
+// 变异验证：把下面这次注入去掉（或把 `routeReserved` 判据删掉）⇒ 本用例必红；
+// 把集合设成空 ⇒ 必红（`uploads` 会漏过）。
+func TestValidateAppIDRouteStaticSegment(t *testing.T) {
+	// 基线：在本包的单测里没有 router 注入 ⇒ 路由段判据静默缺席是**已知**的，
+	// 所以这里显式注入（生产路径由 router.Register 注入；接线判据在
+	// internal/router/wasm_appid_route_test.go）。
+	segs := []string{"availability", "catalog", "open", "proof", "uploads", "validate"}
+	SetRouteReservedAppIDs(segs)
+	defer SetRouteReservedAppIDs(nil)
+
+	got := RouteReservedAppIDs()
+	if len(got) != len(segs) {
+		t.Fatalf("RouteReservedAppIDs 回读 %v，期望 %v（集合被丢了）", got, segs)
+	}
+	for _, seg := range segs {
+		aerr := ValidateAppID(seg, nil)
+		if aerr == nil {
+			t.Errorf("app_id=%q 与路由静态段同名，必须拒（放过去 = 应用建完即废且永久占名）", seg)
+			continue
+		}
+		if aerr.Code != apperr.CodeInvalidAppID {
+			t.Errorf("app_id=%q code=%s want INVALID_APP_ID", seg, aerr.Code)
+		}
+		// 理由必须点名"路由静态段"，否则运维查不到病根（会以为是 DNS 保留字）。
+		if aerr.Details["reason"] != "route_static_segment" {
+			t.Errorf("app_id=%q 的 detail.reason=%v，期望 route_static_segment", seg, aerr.Details["reason"])
+		}
+	}
+	// 大小写：app_id 本身必须全小写，路由段也不会以大写入表。
+	if err := ValidateAppID("Uploads", nil); err == nil {
+		t.Error("大写 Uploads 应因形状被拒")
+	}
+	// 合法名字不受影响。
+	for _, ok := range []string{"myapp", "expense-note", "app1"} {
+		if err := ValidateAppID(ok, nil); err != nil {
+			t.Errorf("合法 app_id %q 被误拒：%v", ok, err)
+		}
+	}
+	// 清空注入后回到"无路由段"语义（不残留状态污染其他用例）。
+	SetRouteReservedAppIDs(nil)
+	if err := ValidateAppID("uploads", nil); err != nil {
+		t.Errorf("清空注入后 uploads 不该再被路由段判据拒（fail-loud 的接线由 router 侧判据守）：%v", err)
+	}
+}
+
 func TestValidateVersion(t *testing.T) {
 	for _, v := range []string{"1.0.0", "0.0.1", "10.20.30", "1.0.0-beta.1", "2.3.1-rc.2"} {
 		if err := ValidateVersion(v); err != nil {
@@ -189,5 +242,44 @@ func TestArtifactQuota(t *testing.T) {
 func TestNormalizeAppID(t *testing.T) {
 	if got := NormalizeAppID("  Expense-Note "); got != "expense-note" {
 		t.Fatalf("NormalizeAppID=%q", got)
+	}
+}
+
+// TestR24X4ServeSideDoesNotApplyRouteStaticReserved 钉住"写侧规则不得套在存量行上"：
+//
+// 第二十四轮 X4-1 让 app_id 不能与平台路由静态段同名（写侧 fail-loud，防止新发布的应用
+// 建得成、打不开）。但服务侧若共用同一条判据，**存量库里已有的这类行**（例如 `rows`）会在
+// 升级后直接 404 —— 那是修复引入的回归。本用例是它的回归判据：
+//   - 写侧：静态段名必须被拒（路由遮蔽由写侧拦下）
+//   - 服务侧：静态段名必须放行（存量行照常服务；服务侧仍保留形态/平台保留字/企业主机名三条）
+func TestR24X4ServeSideDoesNotApplyRouteStaticReserved(t *testing.T) {
+	SetRouteReservedAppIDs([]string{"uploads", "rows", "releases"})
+	t.Cleanup(func() { SetRouteReservedAppIDs(nil) })
+
+	for _, id := range []string{"uploads", "rows", "releases"} {
+		if err := ValidateAppID(id, nil); err == nil {
+			t.Fatalf("写侧必须拒绝与路由静态段同名的 app_id：%q", id)
+		}
+		if err := ValidateAppIDForServing(id, nil); err != nil {
+			t.Fatalf("服务侧不得套用路由静态段规则（存量行会在升级后消失）：%q → %v", id, err)
+		}
+	}
+
+	// 服务侧仍保留既有三条语义（与写侧同源，只差 routeStatic 开关）。
+	if err := ValidateAppIDForServing("Bad_Name", nil); err == nil {
+		t.Fatal("服务侧仍必须校验形态")
+	}
+	if err := ValidateAppIDForServing("12345", nil); err == nil {
+		t.Fatal("服务侧仍必须拒绝纯数字")
+	}
+	if err := ValidateAppIDForServing("myapp", []string{"myapp"}); err == nil {
+		t.Fatal("服务侧仍必须拒绝企业既有主机名")
+	}
+	// 写侧与服务侧在"非路由保留字"的输入上必须逐条同结论（同源证据）。
+	for _, id := range []string{"myapp", "expense-note", "Bad_Name", "12345", "xn--fiq", ""} {
+		w, s := ValidateAppID(id, nil), ValidateAppIDForServing(id, nil)
+		if (w == nil) != (s == nil) {
+			t.Fatalf("写侧与服务侧在 %q 上分叉：写侧=%v 服务侧=%v", id, w, s)
+		}
 	}
 }
