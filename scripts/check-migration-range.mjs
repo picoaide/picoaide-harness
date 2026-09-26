@@ -20,8 +20,11 @@
  *       事实，要求它们跟着 MAX 走等于篡改历史；这条与 W5 文档判据的"记录面排除"同一原则）。
  *   5. 命中即红，输出「文件:行: 声称上限 X，实际 MAX Y」+ 修法提示。
  *
- * 用法：node scripts/check-migration-range.mjs [--root <dir>] [--json]
+ * 用法：node scripts/check-migration-range.mjs [--root <dir>] [--json] [--print-checksums]
  * 退出码：0 = 文档与实际一致；1 = 有漂移 / 扫描面为 0；2 = 用法错误 / **扫描面缩水**（见 §6）。
+ *   · 默认扫描根 = **脚本自己的仓库根**（`import.meta.url` 相对推导，与 cwd 无关）；
+ *   · `--print-checksums` 只把 `migrations-checksums.json` 的内容打到 stdout（不写盘），
+ *     供"新增迁移"时重新生成登记表。
  *
  * 6. **缩面判据**（2026-09-23 第四轮审计 R4-A-4）：`SCAN_PATHS` 是手写数组，旧实现只兜
  *    "扫描面为 0"（零点地板）与"`server/AGENTS.md` 存在"两条 ⇒ 把 `site/src/content/docs`
@@ -33,14 +36,41 @@
  *      ③ 树派生：仓库里存在的用户可见文档真源（`site/src/content/docs`）必须在扫描面内。
  *    另加只在真仓形态的根上强制的绝对下限（每根 md 数 / 全仓 md 数 / 每根被判定的区间
  *    表达式条数）—— 防"根还在、内容被搬走/排除规则吃空"。任一条不成立即退出码 2。
+ *
+ * 7. **内容不可变判据**（2026-09-26 第二十一轮 FIX-9）：本守卫同时判"迁移文件有没有被就地
+ *    改写"（判据与依据见下方 `内容不可变判据` 段）。要点：
+ *      · 登记表 = `server/internal/serverstore/migrations-checksums.json`（进 diff、可评审）；
+ *      · 双向：改写 / 新增未登记 / 死条目 / 登记表缺失或不合规 / 空表，**全部**红（EXIT=1）；
+ *      · 只做 sha256 与字节比较，**不做换行归一**（迁移正文是逐字节契约；跨平台一致由根
+ *        `.gitattributes` 的 `* text=auto eol=lf` 提供，见该段注释）；
+ *      · 判据作用域 = 仓库形态的根（有 `package.json`）或带登记表的根；合成夹具根上
+ *        **不出结论并如实打印 `[CONTENT-SKIP]`**，通过行同步说明"该判据未参与"；
+ *      · 真 git 工作树上再加一层：登记值必须等于 **HEAD 里那个文件的字节**，于是
+ *        "改文件 + 顺手改登记值"这条绕过在**提交之前**也红（取不到 git 时只如实降级，
+ *        不假装对上了）。
  */
 
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/**
+ * 脚本自身所在的**仓库根**（`import.meta.url` 相对推导）。
+ *
+ * 为什么不用 `process.cwd()`：默认扫描根曾经是 `resolve(process.cwd())`，于是"从别的目录
+ * 跑一次"就换了一棵树 —— 本仓历史上出现过"扫描根不是仓库根却 EXIT=0"的假绿
+ * （`docs/AUDIT-2026-09-23-FULL.md` 的 C-6：合成树/错 cwd 上照样宣称"一致 ✅"）。
+ * 现在默认根恒等于脚本自己的仓库根，与调用方的 cwd 无关。
+ */
+const SCRIPT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const args = process.argv.slice(2)
-let root = resolve(process.cwd())
+let root = SCRIPT_ROOT
 let json = false
+/** `--print-checksums`：把登记表内容打到 stdout（**只打印，不写盘**）；见 §内容不可变判据。 */
+let printChecksums = false
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--root') {
     const value = args[index + 1]
@@ -51,6 +81,7 @@ for (let index = 0; index < args.length; index += 1) {
     root = resolve(value)
     index += 1
   } else if (args[index] === '--json') json = true
+  else if (args[index] === '--print-checksums') printChecksums = true
   else {
     console.error(`check-migration-range: 未知参数 ${args[index]}`)
     process.exit(2)
@@ -103,6 +134,45 @@ const RECORD_SURFACES = [
 ]
 const ALLOW_MARKER = 'migration-range:allow'
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 内容不可变判据（2026-09-26 第二十一轮 FIX-9）：迁移文件的 sha256 逐条登记 + 双向对拍
+//
+// 起因（`temp/r21/fix-3/notes-4.md`，只读复核 441 行）：本仓至少 6 次**就地改写已应用迁移**
+// （`0004` 2026-08-27、`0039`/`0054`/`0055` 2026-09-24 `e1e3b0155b`、`0063` 2026-09-16、
+// `0042` 2026-09-20/09-21），而 `schema_migrations` 只有 `(version, applied_at)` 两列、
+// `ApplyMigrations` 对已记录版本 `continue` ⇒ 每一条这样的改写**只对尚未执行过该版本的库生效**，
+// 已部署库永远拿不到（`0054`/`0055` 那批修复对"从 v2.5.9 起升过级"的所有实例不可达）。
+// `server/docs/06-database.md` 早在 2026-09-23 就把纪律写成"已应用的迁移文件永不原地修改"，
+// 而写下它的**次日** `e1e3b0155b` 就违反了它 —— 原因是那条纪律**只有文字、没有判据**。
+//
+// 判据（与上面的区间判据**同一进程、同一 EXIT 语义**：1 = 有漂移，2 = 扫描面/前置缺失）：
+//   ① 已登记文件被修改 ⇒ 红（点名版本号 + 期望/实际 sha256）；
+//   ② 新增迁移未登记   ⇒ 红（点名文件 + 把 sha256 登记进登记表，让"新增迁移"这一步必须进 diff）；
+//   ③ 登记表里的死条目（登记了但文件不存在）⇒ 红；
+//   ④ 登记表缺失 / 解析不出 / 缺字段 / 空表 ⇒ 红（fail-closed，**绝不**静默当成空表）；
+//   ⑤ 双向：既不能放过改写，也不能因为"登记表是空的"而静默通过。
+//
+// 登记表 = `server/internal/serverstore/migrations-checksums.json`（**进 diff、可评审**；
+// 由 `--print-checksums` 生成，守卫本身只读、从不写盘）。判据真源 = **磁盘字节的 sha256**。
+//
+// 平台差异（CRLF）：**不做换行归一** —— 迁移正文是逐字节契约（`//go:embed migrations-pg/*.sql`
+// 把字节原样带进二进制，runner 把它们原样交给 PG）。跨平台一致由根 `.gitattributes` 的
+// `* text=auto eol=lf` 保证：`sql` 被判定为文本 ⇒ checkout 时强制 LF，Windows 上也是 LF 字节
+// （`git check-attr -a` 对迁移文件回报 `eol: lf`），所以单纯检出不会误红。若哪天真的出现
+// "只差 CRLF"的形态，守卫**照红**并额外提示这可能是检出配置（`.gitattributes` 被改）所致 ——
+// 宁可让人看一眼，也不把字节契约降级成"差不多就行"。
+// ─────────────────────────────────────────────────────────────────────────────
+const CHECKSUMS_POINTER = 'server/internal/serverstore/migrations-checksums.json'
+const CHECKSUMS_PATH = join(root, CHECKSUMS_POINTER)
+const CHECKSUMS_SCHEMA = 'picoaide-migration-checksums/1'
+/** 登记表表头里**必须**存在的字符串字段（谁生成 / 怎么更新 / 为什么）——删掉任何一个即红。 */
+const CHECKSUMS_HEADER_FIELDS = ['schema', 'algorithm', 'generatedBy', 'howToUpdate', 'why']
+const SQL_NAME = /^(\d{4})_.*\.sql$/u
+const SHA256_HEX = /^[0-9a-f]{64}$/u
+const REGENERATE_COMMAND = 'node scripts/check-migration-range.mjs --print-checksums'
+const REGENERATE_HINT = `把该文件的 sha256 登记进 ${CHECKSUMS_POINTER}`
+  + `（重新生成：\`${REGENERATE_COMMAND} > ${CHECKSUMS_POINTER}\`）`
+
 const migrationPath = join(root, MIGRATION_DIR)
 if (!existsSync(migrationPath)) {
   console.error(`check-migration-range: 找不到迁移目录 ${MIGRATION_DIR}（root=${root}）—— 拒绝把"扫不到"当通过`)
@@ -121,6 +191,219 @@ const MIN = numbers[0]
 const MAX = numbers.at(-1)
 const present = new Set(numbers.map(value => String(value).padStart(4, '0')))
 const pad = value => String(value).padStart(4, '0')
+
+/** `migrations-pg/` 下**每一个** `.sql`（不只 `00NN_*.sql`：名字不合规的也要进对拍面）。 */
+const sqlFiles = readdirSync(migrationPath)
+  .filter(name => name.endsWith('.sql'))
+  .filter(name => statSync(join(migrationPath, name)).isFile())
+  .sort()
+/** 一段字节的 sha256（小写 hex）。 */
+const sha256 = data => createHash('sha256').update(data).digest('hex')
+
+/**
+ * 登记表的**规范文本**（`--print-checksums` 与"重新生成"提示共用同一个实现，
+ * 所以"文档说的生成方式"与"实际生成物"不可能漂移）。
+ * @returns 可直接落盘/进 diff 的 JSON 文本（含尾换行）。
+ */
+function renderChecksums() {
+  const entries = sqlFiles.map((name) => {
+    const bytes = readFileSync(join(migrationPath, name))
+    return {
+      version: SQL_NAME.exec(name)?.[1] ?? name.replace(/\.sql$/u, ''),
+      file: name,
+      bytes: bytes.length,
+      sha256: sha256(bytes),
+    }
+  })
+  return `${JSON.stringify({
+    schema: CHECKSUMS_SCHEMA,
+    algorithm: 'sha256',
+    generatedBy: 'node scripts/check-migration-range.mjs --print-checksums',
+    why: '已应用的迁移会被 `ApplyMigrations` 按版本号跳过、正文不再参与判定'
+      + '（`schema_migrations` 只有 (version, applied_at) 两列），所以"文件被就地改写"'
+      + '在运行期完全不可见：旧的已部署库永远拿不到改写后的内容。本表把每个迁移文件的字节'
+      + '摘要冻结下来，让"改写历史迁移"这件事在任何一次门禁里都必须显式出现在 diff 中。',
+    howToUpdate: '只在**新增**迁移时更新：跑 `node scripts/check-migration-range.mjs --print-checksums`'
+      + ` 覆盖本文件，把新增行与迁移文件放在同一个 PR 里评审。**永不**为了让守卫变绿而改已有条目的 sha256`
+      + ' —— 那正是本判据要拦的事；要改数据请加新迁移。',
+    entries,
+  }, null, 2)}\n`
+}
+
+if (printChecksums) {
+  // 只打印、不写盘：写入必须经过人评审的 diff（与 `check-guard-parser-integrity --print-digests` 同纪律）。
+  process.stdout.write(renderChecksums())
+  process.exit(0)
+}
+
+/**
+ * 内容判据的**作用域**：登记表存在，或扫描根本身是仓库形态（有 `package.json`）。
+ *
+ * - 真仓（默认根 = `SCRIPT_ROOT`）：必然在作用域内 —— 登记表缺失即红。
+ * - 仓库形态副本（`git archive HEAD | tar -x` 的深拷贝，供变异/回归）：在作用域内 ⇒
+ *   对副本的改写照样能被判红（这正是"判据可被杀死"的前提）。
+ * - 合成夹具树（`verify-check-workspaces.mjs` 的 `--root <tree>`，只有 `server/**` 没有
+ *   `package.json`）：**不在**作用域内。此时守卫**不宣称**内容不可变（见通过行与
+ *   `[CONTENT-SKIP]` 提示），绝不打印一句它没检查过的"内容一致 ✅"。
+ */
+const rootIsRepoShaped = existsSync(join(root, 'package.json'))
+const contentInScope = existsSync(CHECKSUMS_PATH) || rootIsRepoShaped
+/** 红（与区间漂移同一桶 ⇒ EXIT=1）。 */
+const contentProblems = []
+/** 如实降级/提示（不判红，但必须打印出来，不许静默）。 */
+const contentNotices = []
+
+/** 登记表条目形状校验；任何一处不成立都返回问题（fail-closed）。 */
+function checksumEntryProblems(entries) {
+  const problems = []
+  if (!Array.isArray(entries)) return ['`entries` 必须是数组']
+  if (entries.length === 0) return ['`entries` 是空数组 —— 空表等于"没有任何迁移被冻结"，拒绝当成通过']
+  const byName = new Map()
+  const byVersion = new Map()
+  for (const [index, entry] of entries.entries()) {
+    const at = `entries[${index}]`
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      problems.push(`${at} 不是对象`)
+      continue
+    }
+    const { version, file, bytes, sha256: digest } = entry
+    if (typeof version !== 'string' || !/^\d{4}$/u.test(version)) problems.push(`${at}.version 必须是四位字符串（实际 ${JSON.stringify(version ?? null)}）`)
+    if (typeof file !== 'string' || !SQL_NAME.test(file)) problems.push(`${at}.file 必须是 00NN_*.sql（实际 ${JSON.stringify(file ?? null)}）`)
+    if (typeof digest !== 'string' || !SHA256_HEX.test(digest)) problems.push(`${at}.sha256 必须是 64 位小写 hex（实际 ${JSON.stringify(digest ?? null)}）`)
+    if (!Number.isSafeInteger(bytes) || bytes < 0) problems.push(`${at}.bytes 必须是非负整数（实际 ${JSON.stringify(bytes ?? null)}）`)
+    if (typeof file === 'string' && typeof version === 'string') {
+      const prefix = SQL_NAME.exec(file)?.[1]
+      if (prefix !== undefined && prefix !== version) problems.push(`${at} 的 version(${version}) 与文件名前缀(${prefix}) 不一致`)
+    }
+    if (typeof file === 'string') {
+      if (byName.has(file)) problems.push(`${at} 与 entries[${byName.get(file)}] 重复登记同一个文件 ${file}`)
+      else byName.set(file, index)
+    }
+    if (typeof version === 'string') {
+      if (byVersion.has(version)) problems.push(`${at} 与 entries[${byVersion.get(version)}] 重复登记同一个版本 ${version}`)
+      else byVersion.set(version, index)
+    }
+  }
+  return problems
+}
+
+if (contentInScope) {
+  if (!existsSync(CHECKSUMS_PATH)) {
+    contentProblems.push(`登记表缺失：${CHECKSUMS_POINTER}（root=${root} 是仓库形态）——`
+      + ` 没有它就**无法**判断"已应用迁移有没有被就地改写"，拒绝静默通过。生成：\`${REGENERATE_COMMAND} > ${CHECKSUMS_POINTER}\``)
+  } else {
+    let parsed = null
+    let rawText = null
+    try {
+      rawText = readFileSync(CHECKSUMS_PATH, 'utf8')
+    } catch (error) {
+      contentProblems.push(`登记表读不出：${CHECKSUMS_POINTER}（${error.message}）`)
+    }
+    if (rawText !== null) {
+      try {
+        parsed = JSON.parse(rawText)
+      } catch (error) {
+        contentProblems.push(`登记表不是合法 JSON：${CHECKSUMS_POINTER} —— ${error.message}`
+          + `（**不**当成空表；重新生成：\`${REGENERATE_COMMAND} > ${CHECKSUMS_POINTER}\`）`)
+      }
+    }
+    if (parsed !== null) {
+      if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+        contentProblems.push(`登记表顶层必须是对象：${CHECKSUMS_POINTER}`)
+      } else {
+        const missing = CHECKSUMS_HEADER_FIELDS.filter(field => typeof parsed[field] !== 'string' || parsed[field].trim() === '')
+        if (missing.length > 0) {
+          contentProblems.push(`登记表表头缺字段：${CHECKSUMS_POINTER} 缺 ${missing.join('、')}`
+            + '（表头写明"谁生成 / 怎么更新 / 为什么"，缺了就没人知道该不该动它）')
+        }
+        if (typeof parsed.schema === 'string' && parsed.schema !== CHECKSUMS_SCHEMA) {
+          contentProblems.push(`登记表 schema 不认识：${parsed.schema}（期望 ${CHECKSUMS_SCHEMA}）`)
+        }
+        if (typeof parsed.algorithm === 'string' && parsed.algorithm !== 'sha256') {
+          contentProblems.push(`登记表 algorithm 只支持 sha256（实际 ${parsed.algorithm}）`)
+        }
+        const entryProblems = checksumEntryProblems(parsed.entries)
+        for (const problem of entryProblems) contentProblems.push(`登记表条目不合规：${CHECKSUMS_POINTER} 的 ${problem}`)
+        if (entryProblems.length === 0) {
+          const registered = new Map(parsed.entries.map(entry => [entry.file, entry]))
+          const onDisk = new Set(sqlFiles)
+          for (const entry of parsed.entries) {
+            if (!onDisk.has(entry.file)) {
+              contentProblems.push(`登记表死条目：${entry.file}（版本 ${entry.version}，root=${root}）在`
+                + ` ${MIGRATION_DIR} 里不存在 —— 迁移**只能新增**，删/改名同样是"改写历史"，`
+                + `请把文件恢复；确属误登记才重新生成：\`${REGENERATE_COMMAND} > ${CHECKSUMS_POINTER}\``)
+              continue
+            }
+            const bytes = readFileSync(join(migrationPath, entry.file))
+            const actual = sha256(bytes)
+            if (actual === entry.sha256) continue
+            // 只在**真的**"只差 CRLF 且去掉 CRLF 后恰好等于登记值"时才提示检出配置，
+            // 避免把普通改写误诊成平台差异（判据仍是红：迁移正文是逐字节契约）。
+            const hasCrlf = bytes.includes(0x0d)
+            const crlfOnly = hasCrlf
+              && sha256(Buffer.from(bytes.toString('utf8').replace(/\r\n/gu, '\n'), 'utf8')) === entry.sha256
+              ? '（注意：去掉 CRLF 后**恰好**与登记值一致 ⇒ 先怀疑检出/`.gitattributes` 被改，不是内容被改）'
+              : ''
+            contentProblems.push(`已登记迁移被就地修改（版本 ${entry.version}）：${entry.file}\n`
+              + `          期望 sha256 ${entry.sha256}（${CHECKSUMS_POINTER} 登记值）\n`
+              + `          实际 sha256 ${actual}（磁盘 ${bytes.length} 字节；登记 ${entry.bytes} 字节）${crlfOnly}\n`
+              + '          —— 已应用迁移永不原地修改；要改数据请**加新迁移**（幂等 + 可重放）。')
+          }
+          for (const name of sqlFiles) {
+            if (registered.has(name)) continue
+            const hint = SQL_NAME.test(name)
+              ? ''
+              : `（文件名不符合 \`00NN_名字.sql\`，runner 也认不出它）`
+            contentProblems.push(`新增迁移未登记：${name}${hint} —— ${REGENERATE_HINT}`
+              + '，让"新增迁移"这一步必须进 diff 被评审')
+          }
+          // 追加一层：**"把文件与登记值一起改"这条最省事的绕过**也要红。
+          // 只在真 git 工作树里判（`git archive` 深拷贝与合成夹具没有 `.git` ⇒ 天然跳过），
+          // 判据 = HEAD 里那个 blob 的字节 sha256 必须等于登记值。于是"改历史迁移"这件事
+          // 无法在**提交之前**把门禁弄绿：要么登记值与 HEAD 不一致（本条命中），要么
+          // 登记值的改动必须进 diff（那正是本判据要的可见性）。
+          // 取不到 git 输出（环境问题）时**不判红**、只如实打印降级 —— 判据的可靠性不该
+          // 依赖"git 一定可用"，但"取不到"绝不等同于"对上了"。
+          if (existsSync(join(root, '.git'))) {
+            let gitUsable = true
+            for (const entry of parsed.entries) {
+              if (!onDisk.has(entry.file)) continue
+              const relativePath = `${MIGRATION_DIR}/${entry.file}`
+              const typeProbe = spawnSync('git', ['-C', root, 'cat-file', '-e', `HEAD:${relativePath}`], { encoding: 'utf8' })
+              if (typeProbe.error !== undefined || typeProbe.status === null) {
+                gitUsable = false
+                break
+              }
+              if (typeProbe.status !== 0) continue // HEAD 里还没有它 ⇒ 新增迁移，另一条判据管
+              const committed = spawnSync('git', ['-C', root, 'show', `HEAD:${relativePath}`], {
+                encoding: 'buffer', maxBuffer: 64 * 1024 * 1024,
+              })
+              if (committed.error !== undefined || committed.status !== 0 || !Buffer.isBuffer(committed.stdout)) {
+                gitUsable = false
+                break
+              }
+              const committedSha = sha256(committed.stdout)
+              if (committedSha === entry.sha256) continue
+              contentProblems.push(`登记值与**已提交字节**不一致（版本 ${entry.version}）：${entry.file}\n`
+                + `          ${CHECKSUMS_POINTER} 登记 sha256 ${entry.sha256}\n`
+                + `          HEAD 里该文件 sha256 ${committedSha}\n`
+                + '          —— 文件与登记值被**一起**改过（否则上面那条"已登记迁移被就地修改"就已经红了）。'
+                + '改写历史迁移没有"顺手更新校验和"这条出路：要改数据请加新迁移。')
+            }
+            if (!gitUsable) {
+              contentNotices.push(`root=${root} 是 git 工作树，但 git 读取 HEAD 失败 ⇒`
+                + ' "登记值 vs 已提交字节"这一层**未参与**（其余判据照常）。别把这次通过读成"登记值与提交态一致"。')
+            }
+          }
+        }
+      }
+    }
+  }
+} else {
+  contentNotices.push(`root=${root} 既不是仓库根（没有 package.json）也不是带登记表的仓库形态副本 ⇒`
+    + ` **迁移内容不可变判据本次未参与**（只在仓库根或 \`git archive HEAD\` 深拷贝上成立）。`
+    + ` 别把这次 EXIT=0 读成"迁移文件没被动过"。`)
+}
 
 function* walk(target) {
   const absolute = join(root, target)
@@ -247,13 +530,18 @@ if (json) {
   console.log(JSON.stringify({
     root, min: pad(MIN), max: pad(MAX), scanned,
     perScanPath: Object.fromEntries(perScanPath), hits, unknownIds, surfaceProblems,
+    contentInScope, contentProblems, contentNotices, migrationFiles: sqlFiles.length,
   }, null, 2))
 } else {
   console.log(`check-migration-range: 实际迁移 ${pad(MIN)}–${pad(MAX)}（${numbers.length} 个）；扫描 ${scanned} 个 md（root=${root}）`)
   console.log(`  扫描面：${SCAN_PATHS.map(target => `${target} ${perScanPath.get(target)?.files ?? 0}`
     + `(区间候选 ${perScanPath.get(target)?.rangeCandidates ?? 0})`).join(' / ')}${strictSurface ? '' : '（夹具树：只查非空，不查绝对下限）'}`)
+  console.log(contentInScope
+    ? `  迁移内容：${sqlFiles.length} 个 .sql 逐条对拍 ${CHECKSUMS_POINTER}`
+    : `  迁移内容：**未判**（root=${root} 不是仓库形态，见下方 [CONTENT-SKIP]）`)
 }
 
+for (const notice of contentNotices) console.error(`  [CONTENT-SKIP] ${notice}`)
 for (const hit of hits) {
   console.error(`  [RANGE] ${hit.file}:${hit.line}: ${hit.reason}`)
   console.error(`          ${hit.text}`)
@@ -261,6 +549,7 @@ for (const hit of hits) {
 for (const unknown of unknownIds) {
   console.error(`  [UNKNOWN-ID] ${unknown.file}:${unknown.line}: 迁移号 ${unknown.id} 在实际目录里不存在`)
 }
+for (const problem of contentProblems) console.error(`  [CONTENT] ${problem}`)
 
 // 扫描面缩水 = **前置失败**（退出码 2，与"有漂移"的 1 区分）：此时"一致 ✅"是一个
 // 没被检查过的结论。
@@ -272,10 +561,12 @@ if (surfaceProblems.length > 0) {
   process.exit(2)
 }
 
-if (hits.length > 0 || unknownIds.length > 0) {
-  console.error(`\n迁移区间漂移 ${hits.length} 处 / 不存在的迁移号 ${unknownIds.length} 处。`
-    + `修法：把区间上限改成 ${pad(MAX)}；若该行是**记录当时事实**的历史文档，`
-    + `请加行内标记 \`${ALLOW_MARKER}\`（不要改整条规则）。`)
+if (hits.length > 0 || unknownIds.length > 0 || contentProblems.length > 0) {
+  console.error(`\n迁移区间漂移 ${hits.length} 处 / 不存在的迁移号 ${unknownIds.length} 处 /`
+    + ` 迁移内容不可变 ${contentProblems.length} 处。`
+    + `修法：区间上限改成 ${pad(MAX)}（记录当时事实的历史文档加行内标记 \`${ALLOW_MARKER}\`）；`
+    + `迁移文件与登记表以**新增**方式保持一致（\`${REGENERATE_HINT}），`
+    + '**永不**为让守卫变绿而改已有条目的 sha256 —— 要改数据请加新迁移。')
   process.exit(1)
 }
 
@@ -290,4 +581,11 @@ if (scanned === 0 || !agentsScanned) {
   process.exit(1)
 }
 
-if (!json) console.log(`check-migration-range: 文档区间与实际一致（${pad(MIN)}–${pad(MAX)}），且 server/AGENTS.md 的迁移号都存在 ✅`)
+if (!json) {
+  // 通过行**只说做过的判据**：合成夹具根上不宣称"迁移内容没被改过"（那件事本次没判）。
+  const contentClause = contentInScope
+    ? `，且 ${sqlFiles.length} 个迁移文件的 sha256 与 ${CHECKSUMS_POINTER} 逐条一致`
+    : '（迁移内容不可变判据**未参与**：root 不是仓库形态，见 [CONTENT-SKIP]）'
+  console.log(`check-migration-range: 文档区间与实际一致（${pad(MIN)}–${pad(MAX)}），`
+    + `且 server/AGENTS.md 的迁移号都存在${contentClause} ✅`)
+}

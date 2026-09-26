@@ -478,6 +478,10 @@ const GATE_SELFTEST_RUNS_ON = 'ubuntu-24.04'
  */
 const SELFTEST_RUNS_ON_REGISTRY = {
   jobRunsOn: [{ job: 'verify', runsOn: GATE_SELFTEST_RUNS_ON, why: '自检合成样本:`selftestWorkflow()` 造的 job 名' }],
+  // [SK-23]（R21 fix-6 / E-03）：合成样本的 job/步骤名与真实 ci.yml 的判据步骤登记项无关
+  // ⇒ 这一层对合成树**显式关闭**（`false`），否则每个含 `go vet`/`npm test` 的吞码样本
+  // 都会被"存在却没登记"判红 —— 那是与样本意图无关的假红。
+  requiredSteps: false,
 }
 const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-22', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
@@ -655,6 +659,8 @@ const SELFTEST_FATAL_PATH_ASSERTIONS = 6
 const SELFTEST_WORKFLOW_FILE_REGISTRY_ASSERTIONS = 5
 /** `selfTestPinnedStepCoverage()` 至少执行的断言条数(1 条全命中 + 每条策略 1 条缺口)。 */
 const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 5
+/** `selfTestRequiredCiSteps()` 至少执行的断言条数(R21 fix-6 / E-03:6 条正反样本 + 词表对拍)。 */
+const SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS = 7
 /** `selfTestPinnedEnvLayers()` 至少执行的断言条数(正向集合相等 + 反向未登记层 + 变异打坏)。 */
 const SELFTEST_PINNED_ENV_LAYER_ASSERTIONS = 3
 /** `selfTestCompositeActions()` 至少执行的断言条数(5 类正反样本 + 接线 + 变异)。 */
@@ -728,6 +734,11 @@ export function checkWorkflowText(name, text, options = {}) {
   const notes = []
   // SK-15 的登记表(默认 = 仓库真实登记值;自检用合成表注入,见 REGISTRY_DEFAULT)。
   const registries = options.registries ?? REGISTRY_DEFAULT
+  // [SK-23] 判据步骤登记表走与 `containerImages` 同一个测试缝：`false` = 显式关闭该层
+  //（合成样本/合成树的判据步骤与真实 ci.yml 无关），数组 = 本次要对的账。
+  const requiredCiSteps = registries.requiredSteps === undefined
+    ? REQUIRED_CI_STEPS
+    : registries.requiredSteps
   // 本地 action 的解析根(第十轮审计 C-03):默认 = 仓库根;自检用临时树注入,
   // 这样 `uses: ./.github/actions/<name>` 的"能不能在仓内解析到"可以在合成树上判。
   const rootDir = options.rootDir ?? root
@@ -930,7 +941,7 @@ export function checkWorkflowText(name, text, options = {}) {
   failures.push(...checkTriggerSurface(name, document, text, notes))
   // 策略 10(R4-A-5):被钉住的判据步骤必须**可执行**(`if: false` 落在"存在性"与
   // "形态"两条判据之间:文本在、内容对,就是永不执行)。
-  const pinnedSteps = checkPinnedStepExecutability(name, document, blocks, allowlist, notes)
+  const pinnedSteps = checkPinnedStepExecutability(name, document, blocks, allowlist, notes, requiredCiSteps)
   failures.push(...pinnedSteps.failures)
   // 策略 10b（第十二轮红队 R12-D-01 / C-P1-2）：
   //   ⑨ **install 期完整性前置校验必须在任何 yarn/corepack 命令之前**（顺序即判据：
@@ -2898,6 +2909,90 @@ const PINNED_STEP_IF_POLICIES = {
     }（不接受合取项/取反/换写法的收窄 —— 那会让这一步永不执行而门禁仍绿）`,
   },
 }
+/**
+ * **[SK-23] 判据命令的封闭词表**（R21 fix-6 / E-03）——用于把"**存在却没登记**的判据步骤"枚举出来。
+ *
+ * 每条 = 一个**命令位 argv 前缀**。只有"本仓 CI 里用来判『代码有没有问题』的命令"才进这张表
+ * （构建 / 安装 / 打包不进来：`make build-server`、`npm ci`、`yarn install` 是产出不是判定）。
+ * 表是**封闭**的：新加一条必须显式改这里（与 `SWALLOW_ALLOWLIST` 同一套"改判据要进 diff"的纪律）。
+ */
+const CI_JUDGEMENT_ARGV_PREFIXES = [
+  ['gofmt'],
+  ['go', 'vet'],
+  ['go', 'test'],
+  ['npm', 'test'],
+  ['npm', 'run', 'test'],
+  ['yarn', 'test'],
+  ['pnpm', 'test'],
+  ['make', 'check'],
+  ['make', 'test'],
+]
+/**
+ * **[SK-23] 必须存在的判据步骤：登记表 + 双向对账**（R21 fix-6 / E-03）。
+ *
+ * ## 现场（第一轮 §3.6 四形态里唯一未闭的一条）
+ *
+ * [SK-14] 的 `PINNED_STEP_POLICIES` 是"对**识别到的**被钉步骤施加约束"——它证明了"这一步在的
+ * 时候不会被静默"，但**不证明它还在**。实测：删掉 `.github/workflows/ci.yml` 的
+ * `go vet` 步骤（或 server job 的 `npm test` 步骤）后，`check-workflows.mjs` 与
+ * `check-integration-tests.mjs` **都 EXIT=0**（同族的 `|| true` / `continue-on-error` /
+ * `-timeout 15m→120m` / 删整个 `release` job 四种形态早已闭合）。根因就是缺"步骤清单双向对账"：
+ * 那两步从未进任何表，删掉它们不产生任何观测差（[SK-7] 的"YAML 步骤数 = `bash -n` 块数"
+ * 是**抽取覆盖率**对账，两边同步减少仍自洽）。
+ *
+ * ## 判据（两个方向，都在**这一次扫描的那份文件**上判）
+ *
+ *   ① **登记了却不存在** ⇒ 红：`entry.file` 里、`entry.job` 下、命中 `entry.argv` 前缀的步骤
+ *      必须被枚举到 —— 删步骤、把步骤挪到别的 job、把命令换成等效的静默形态，全部当场红。
+ *   ② **存在却没登记** ⇒ 红：本次扫描里**任何**步骤的命令位命中 {@link CI_JUDGEMENT_ARGV_PREFIXES}
+ *      的词表、却没有对应的登记项 ⇒ 红（新加一条判据步骤必须同步登记，与 SK-15/SK-16 同一纪律）。
+ *      通过行会如实报出"登记的判据步骤 N 条 / 词表 M 条"（见 `main()` 的 note）。
+ *
+ * ## 边界（认账）
+ *
+ * ① 词表是**封闭**的：用表外的命令（`eslint` / 自写脚本…）新加判据步骤时，方向②看不见 ——
+ *    这是"枚举一个有限集"与"枚举无限集"的取舍（与 `CI_COMMAND_REGISTRY` 同一取向：宁可
+ *    少覆盖一种形态，也不假装自己覆盖了全部）；
+ * ② 只判**命令位**（与 [SK-14] 同一口径）：把判据写进一段 `.sh` 再 `bash <脚本>` 时，
+ *    这一层看不见它（那属于"命令位是仓内载体"的既有覆盖面）。
+ *
+ * 每条 = `{ file, job, argv, label, why }`；`argv` 必须是
+ * {@link CI_JUDGEMENT_ARGV_PREFIXES} 里逐字相同的一项（漂移即红，见自检）。
+ */
+const REQUIRED_CI_STEPS = [
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['gofmt'],
+    label: '`gofmt -l cmd internal demoapps webadmin scripts`（格式判据）',
+    why: '第三轮审计 W-6：`go vet` / `go test` 都不查格式，这一步是 `server/demoapps/**` 格式违规'
+      + '的唯一拦截点；删掉它 ⇒ 格式违规静默进镜像',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['go', 'vet'],
+    label: '`go vet ./...`（Go 静态判据）',
+    why: '删掉这一步后 `check-workflows` 与 `check-integration-tests` 都 EXIT=0（E-03 的现场）——'
+      + '而它是 server 侧唯一的静态分析判据',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['go', 'test'],
+    label: '`go test ./... -p 1 -timeout 15m -json` + 用例级判定（Go 全量测试）',
+    why: '与 `wasm-case-gate` 同一步：`-json` 报告 + `check-go-test-json.mjs` 的"用例级 0 skip /'
+      + '三条关键用例确实 pass"全靠这一步产出；删掉它，Go 侧一条测试都不跑而别的检查仍绿',
+  },
+  {
+    file: 'ci.yml',
+    job: 'server',
+    argv: ['npm', 'test'],
+    label: '`npm test`（webadmin 测试，`working-directory: server/webadmin`）',
+    why: 'webadmin 的 600+ 用例只在 CI 的这一步跑（根 `yarn check` 的 workspace 枚举不含它）；'
+      + '删掉它后全仓门禁照旧绿（E-03 的现场之一）',
+  },
+]
 
 // ===== SK-17:被钉住的判据步骤/作业的**进程环境层**(2026-09-25 第九轮审计 D 泳道 P1)=====
 //
@@ -4683,6 +4778,8 @@ const REGISTRY_DEFAULT = {
   steps: REGISTERED_RELEASE_STEPS,
   remoteWrites: REMOTE_WRITE_REGISTERED,
   containerImages: PINNED_JOB_CONTAINER_REGISTRY,
+  // [SK-23]（R21 fix-6 / E-03）：真实仓的"必须存在的判据步骤"登记表 —— 只给**真 ci.yml** 用。
+  requiredSteps: REQUIRED_CI_STEPS,
 }
 /**
  * **空登记表**:内置自检的合成样本默认用它 —— 否则每个合成了 `ci.yml` 形状的样本
@@ -4691,6 +4788,8 @@ const REGISTRY_DEFAULT = {
  */
 const REGISTRY_NONE = {
   files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [],
+  // [SK-23]：空登记表同样要**显式关闭**这一层（`[]` 与 `false` 在这里同义：没有要对的账）。
+  requiredSteps: false,
   // 自检合成样本的 `runs-on` 登记项(见 `SELFTEST_RUNS_ON_REGISTRY`):缺了它,凡是被钉单元
   // 出现在合成 job(`verify`)里的样本都会被 `runs-on` 判据判红 —— 那是与样本意图无关的假红。
   ...SELFTEST_RUNS_ON_REGISTRY,
@@ -4910,6 +5009,84 @@ export function selfTestPinnedStepCoverage() {
       failures.push(`[pinned-coverage-selftest] 少一条策略(\`${policy.id}\`)时必须**恰好一条**失败并点名它，`
         + `实得 ${found.length} 条（${found.map(item => item.detail.split('\n')[0]).join(' / ') || '无'}）`)
     }
+  }
+  return { failures, assertions }
+}
+
+/**
+ * [SK-23] 判据步骤登记表的**自检**（R21 fix-6 / E-03：判据本身要能被打坏）。
+ *
+ * 六条正反样本（合成登记表 + 合成 observed，不读真 ci.yml）：
+ *   ① 登记齐 + 都在 ⇒ 绿；② 删一个 ⇒ **恰好一条**失败且点名它；③ 少一个 job ⇒ 恰好一条；
+ *   ④ 未登记的判据步骤出现 ⇒ 红（方向②）；⑤ 该文件不在登记面内且没有判据步骤 ⇒ 绿（不误报）；
+ *   ⑥ 词表本身与登记项对拍（每条 `entry.argv` 必须是词表里逐字相同的一项 —— 表漂移即红）。
+ *
+ * 与 `selfTestPinnedStepCoverage()` 同一手法（含"具名性"断言），由 main() 单独调用 +
+ * 断言条数下限对账 —— 把本函数掏空成 `return []` 会被条数下限抓住。
+ *
+ * @returns `{failures, assertions}`。
+ */
+export function selfTestRequiredCiSteps() {
+  const failures = []
+  let assertions = 0
+  const registry = [
+    { file: 'x.yml', job: 'a', argv: ['go', 'vet'], label: '`go vet`', why: '样本' },
+    { file: 'x.yml', job: 'a', argv: ['npm', 'test'], label: '`npm test`', why: '样本' },
+  ]
+  const all = [
+    { job: 'a', argv: ['go', 'vet'] },
+    { job: 'a', argv: ['npm', 'test'] },
+  ]
+  assertions += 1
+  if (requiredCiStepProblems(registry, all, 'x.yml').length !== 0) {
+    failures.push('[required-ci-steps-selftest] 登记齐 + 都在时必须绿（假阳性会让门禁逼着人删判据）')
+  }
+  assertions += 1
+  {
+    const found = requiredCiStepProblems(registry, [{ job: 'a', argv: ['npm', 'test'] }], 'x.yml')
+    if (found.length !== 1 || !found[0].detail.includes('go vet')) {
+      failures.push('[required-ci-steps-selftest] 删掉一个步骤时必须**恰好一条**失败并点名 `go vet`，'
+        + `实得 ${found.length} 条（${found.map(item => item.detail.split('\n')[0]).join(' / ') || '无'}）`)
+    }
+  }
+  assertions += 1
+  {
+    // 整个 job 被删（observed 为空）⇒ 该 job 下**每一条**登记项都要报，且措辞是"连 job 都枚举不到"。
+    const found = requiredCiStepProblems(registry, [], 'x.yml')
+    if (found.length !== registry.length
+      || !found.every(item => item.detail.includes('go vet') || item.detail.includes('npm test'))
+      || !found.some(item => item.detail.includes('都枚举不到'))) {
+      failures.push('[required-ci-steps-selftest] 整个 job 被删时必须逐条报出该 job 的登记项'
+        + `（含"连 job 都枚举不到"的措辞），实得 ${found.length} 条`
+        + `（${found.map(item => item.detail.split('\n')[0]).join(' / ') || '无'}）`)
+    }
+  }
+  assertions += 1
+  {
+    const found = requiredCiStepProblems(registry, [...all, { job: 'a', argv: ['gofmt'] }], 'x.yml')
+    if (found.length !== 1 || !found[0].detail.includes('未登记')) {
+      failures.push('[required-ci-steps-selftest] 出现**未登记**的判据步骤时必须恰好一条"未登记"失败，'
+        + `实得 ${found.length} 条（${found.map(item => item.detail.split('\n')[0]).join(' / ') || '无'}）`)
+    }
+  }
+  assertions += 1
+  {
+    // 该文件不在登记面内、且没有任何判据步骤 ⇒ 不适用，不得造假红（合成树/自检样本的形状）。
+    const found = requiredCiStepProblems(registry, [{ job: 'a', argv: ['bash'] }], 'other.yml')
+    if (found.length !== 0) failures.push('[required-ci-steps-selftest] 登记面外的文件不得被误判红')
+  }
+  assertions += 1
+  {
+    // **认账边界**：对账按 (job, argv) 的**集合**做，不看条数 —— 同一条判据命令在两个步骤里
+    // 各写一遍不会红（多一条同样的判据不是"少一条判据"）；哪天要改成重数对账，这条样本会先红。
+    const found = requiredCiStepProblems(registry, [...all, { job: 'a', argv: ['go', 'vet'] }], 'x.yml')
+    if (found.length !== 0) failures.push('[required-ci-steps-selftest] 重复的判据命令不得判红（集合对账的认账边界）')
+  }
+  assertions += 1
+  for (const entry of REQUIRED_CI_STEPS) {
+    if (CI_JUDGEMENT_ARGV_PREFIXES.some(prefix => prefix.join('\u0000') === entry.argv.join('\u0000'))) continue
+    failures.push(`[required-ci-steps-selftest] \`REQUIRED_CI_STEPS\` 的 \`${entry.argv.join(' ')}\` `
+      + '不在 `CI_JUDGEMENT_ARGV_PREFIXES` 词表里 —— 两张表漂移会让方向②永远看不见它')
   }
   return { failures, assertions }
 }
@@ -8745,14 +8922,20 @@ function checkVerdictAssertionBlocks(file, document, notes, options = {}) {
  * @param notes - 提示收集器。
  * @returns 失败项列表。
  */
-function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) {
+function checkPinnedStepExecutability(file, document, blocks, allowlist, notes, requiredCiSteps = REQUIRED_CI_STEPS) {
   const failures = []
   /** 命中过哪些"被钉住"的类别(供收尾 note 打印证据,避免"存在性断言 = 假绿")。 */
   const observed = []
+  /** [SK-23] 本次枚举到的**判据步骤**（`{ job, argv }`）——只在命令位命中词表时记。 */
+  const judgementSteps = []
   for (const item of shellSteps(document, blocks)) {
     const step = item.step
     const label = stepLabel(item)
     const script = executableScript(step.run)
+    // [SK-23]（R21 fix-6 / E-03）：命令位命中判据词表的步骤逐条记下来，收尾做**双向对账**。
+    for (const prefix of judgementStepPrefixes(script)) {
+      judgementSteps.push({ job: item.jobId, argv: prefix, label })
+    }
     for (const policy of PINNED_STEP_POLICIES) {
       if (!policy.match(script, item)) continue
       observed.push(`${policy.id}@${item.jobId}#${item.label}`)
@@ -8898,9 +9081,15 @@ function checkPinnedStepExecutability(file, document, blocks, allowlist, notes) 
     }
   }
   if (observed.length > 0) notes.push(`[SK-14] 可执行性检查覆盖 ${observed.length} 个被钉住的判据步骤(${observed.join(', ')})`)
+  // [SK-23]（R21 fix-6 / E-03）：**判据步骤登记表的双向对账** —— "登记了却不存在"（删步骤）
+  // 与"存在却没登记"（偷偷加一条判据）两个方向都红。`requiredCiSteps === false` = 显式关闭
+  // （合成样本/合成树，判据步骤与真实 ci.yml 无关）。
+  if (requiredCiSteps !== false) {
+    failures.push(...requiredCiStepProblems(requiredCiSteps, judgementSteps, file))
+  }
   // 除了打印,还要把**命中的策略 id** 交出去:main() 用它做覆盖下限(第八轮审计
   // R8-C-1 ②—— 此前少识别一个被钉步骤是完全静默的)。
-  return { failures, policies: observed.map(entry => entry.split('@')[0]) }
+  return { failures, policies: observed.map(entry => entry.split('@')[0]), judgementSteps }
 }
 
 /**
@@ -9468,6 +9657,81 @@ function pinnedStepCoverageProblem(policies) {
       + '\n  ⇒ 要调整覆盖面请**显式**改 `PINNED_STEP_POLICIES` 并写明理由 —— '
       + '不允许"少识别一个"这种静默降级(第八轮审计 R8-C-1:覆盖 5→4 时门禁照样 EXIT=0)。',
   }]
+}
+
+/**
+ * 一个步骤的可执行文本里，命令位命中 {@link CI_JUDGEMENT_ARGV_PREFIXES} 的**全部 argv 前缀**。
+ *
+ * 用 `executedCommands()`（与 [SK-14] / `commandPositionArgvs` 同一份命令位抽取）而不是子串匹配：
+ * `echo "go vet ./..."` / 注释里的 `go vet` 不算（那正是 [SK-7] 反复踩过的"文本里出现即算在"）。
+ * @param script - 去注释后的可执行文本。
+ * @returns 命中的词表条目数组（按出现顺序，可能重复）。
+ */
+function judgementStepPrefixes(script) {
+  const hits = []
+  for (const entry of executedCommands(script)) {
+    const argv = [entry.command, ...entry.argv]
+    for (const prefix of CI_JUDGEMENT_ARGV_PREFIXES) {
+      if (prefix.every((word, at) => argv[at] === word)) hits.push(prefix)
+    }
+  }
+  return hits
+}
+
+/**
+ * **[SK-23] 判据步骤登记表的双向对账**（R21 fix-6 / E-03；现场与判据见 {@link REQUIRED_CI_STEPS}）。
+ *
+ * 只在"扫描到的那份文件"上判（`file`）：登记项自带 `file`，所以逐文件调用即可覆盖整仓 ——
+ * 合成树（`--workflows-dir` / 自检样本）里没有 `ci.yml` 时这一层自然不适用，不需要额外的
+ * "是不是默认目录"开关。
+ *
+ * @param entries - 登记表（`REQUIRED_CI_STEPS`；测试缝注入合成表或空表）。
+ * @param observed - 本次**这一个文件**里枚举到的判据步骤 `{ job, argv }[]`。
+ * @param file - 正在判的 workflow 文件名。
+ * @returns 失败项数组（空 = 双向一致或该文件不在登记面内）。
+ */
+function requiredCiStepProblems(entries, observed, file) {
+  const failures = []
+  const list = (Array.isArray(entries) ? entries : []).filter(entry => entry.file === file)
+  const seen = Array.isArray(observed) ? observed : []
+  // 该文件不在登记面内（合成树 / 自检样本）：这一层不适用，别造假红。
+  if (list.length === 0 && !seen.some(item => CI_JUDGEMENT_ARGV_PREFIXES.some(
+    prefix => prefix.every((word, at) => (item.argv ?? [])[at] === word)))) return failures
+  const key = item => `${item.job}\u0000${(item.argv ?? []).join(' ')}`
+  const registered = new Set(list.map(key))
+  const found = new Set(seen.map(key))
+  for (const entry of list) {
+    if (found.has(key(entry))) continue
+    const sameJob = seen.some(item => item.job === entry.job)
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-23] 登记在案的判据步骤**不存在了**:\`${entry.label}\`(job \`${entry.job}\`,`
+        + ` 命令位 \`${entry.argv.join(' ')}\`)。`
+        + (sameJob
+          ? `\n  job \`${entry.job}\` 还在、别的步骤也还在,只有这一步的命令位不再出现 —— `
+            + '最常见的形态就是**整步被删掉**(第一轮 §3.6 的"删步骤"格:E-03 实测删 `go vet` / 删 `npm test`'
+            + ' 时本守卫与 `check-integration-tests` 都 EXIT=0)。'
+          : `\n  连 job \`${entry.job}\` 都枚举不到 —— 整个作业被删/被改名。`)
+        + `\n  ⇒ 为什么必须红:${entry.why}。`
+        + '\n  ⇒ 这一步是"某件事真的被判定过"的唯一凭据,而 [SK-14] 只约束**已识别到**的被钉步骤 ——'
+        + ' "它还在不在"必须由本表双向对账回答。要调整判据面请显式改 `REQUIRED_CI_STEPS`'
+        + '(写明"这一步为什么可以不再存在"),不允许"少一步"这种静默降级。',
+    })
+  }
+  for (const item of seen) {
+    if (registered.has(key(item))) continue
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-23] job \`${item.job}\` 里出现了**未登记**的判据步骤:命令位 `
+        + `\`${(item.argv ?? []).join(' ')}\` 命中判据词表(${CI_JUDGEMENT_ARGV_PREFIXES
+          .map(prefix => prefix.join(' ')).join(' / ')}),但 \`REQUIRED_CI_STEPS\` 里没有它。`
+        + '\n  ⇒ 判据面扩大了却没人知道:新加一条"判定代码有没有问题"的步骤必须同步登记'
+        + '(写明它判什么、为什么删不得),否则下一个人删掉它不会有任何反应(与 SK-15/SK-16 同一纪律)。',
+    })
+  }
+  return failures
 }
 
 function checkReleaseSurface(file, document, text, notes) {
@@ -12367,6 +12631,28 @@ function main() {
       })
     }
   }
+  // [SK-23] 判据步骤登记表的自检（R21 fix-6 / E-03）：与覆盖下限同一手法。
+  const requiredCiStepsSelftest = selfTestRequiredCiSteps()
+  if (!Array.isArray(requiredCiStepsSelftest?.failures)
+    || typeof requiredCiStepsSelftest?.assertions !== 'number') {
+    failures.push({
+      name: '[required-ci-steps-selftest]',
+      line: 0,
+      detail: 'selfTestRequiredCiSteps() 的返回形状不对(需要 {failures, assertions}) —— 自检被改坏了',
+    })
+  } else {
+    for (const detail of requiredCiStepsSelftest.failures) {
+      failures.push({ name: '[required-ci-steps-selftest]', line: 0, detail })
+    }
+    if (requiredCiStepsSelftest.assertions < SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS) {
+      failures.push({
+        name: '[required-ci-steps-selftest]',
+        line: 0,
+        detail: `判据步骤登记表自检只执行了 ${requiredCiStepsSelftest.assertions} 条断言`
+          + `(期望 ≥ ${SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS}) ⇒ 自检被掏空。`,
+      })
+    }
+  }
   // 本地 composite action 判据的自证(C-03):输入是目录,不在 gateSample 的文本机制里。
   const compositeSelftest = selfTestCompositeActions()
   if (!Array.isArray(compositeSelftest?.failures) || typeof compositeSelftest?.assertions !== 'number') {
@@ -12619,7 +12905,12 @@ function main() {
     + '依据是官方算子表与 actionlint 1.7.7 的逐例对拍,见 `[SK-22]` 常量区);'
     + '未闭合 / 空表达式 / 未闭合字面量同样红)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
-    + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n')
+    + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n'
+    + `    + SK-23 策略(判据步骤的**存在性双向对账**,R21 fix-6 / E-03:登记在 \`REQUIRED_CI_STEPS\` 的 `
+    + `${REQUIRED_CI_STEPS.length} 条判据步骤(${REQUIRED_CI_STEPS.map(entry => entry.argv.join(' ')).join(' / ')})`
+    + '**必须真的在** —— 删步骤 / 把步骤挪到别的 job 当场红(修前删 `go vet`、删 `npm test` 两个守卫都 EXIT=0);'
+    + `命令位命中判据词表(${CI_JUDGEMENT_ARGV_PREFIXES.length} 条)却**未登记**的新判据步骤同样红,`
+    + '所以这条通过行说的"判据步骤都在"覆盖到哪里是明示的)\n')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(import.meta.filename)) {
