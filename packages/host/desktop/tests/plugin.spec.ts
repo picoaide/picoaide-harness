@@ -421,7 +421,9 @@ describe('desktop Host plugin', () => {
     }))
     const req = {
       method: 'GET',
-      headers: { origin: 'http://127.0.0.1:43120' },
+      // FIX-36：消费是写，走真实注册的处理器也要带 BrowserAuth 证明；
+      // 渲染层的同源轮询由 Chromium 自动带上这个 cookie。
+      headers: { origin: 'http://127.0.0.1:43120', cookie: PROOF_COOKIE },
     } as unknown as IncomingMessage
     let body = ''
     const res = {
@@ -449,7 +451,7 @@ describe('desktop Host plugin', () => {
     expect(JSON.parse(secondBody)).toEqual({ sessionId: null, requestedAt: 0 })
   })
 
-  it('rejects cross-origin session-open route requests', async () => {
+  it('rejects cross-origin and proof-less session-open route requests', async () => {
     const harness = createHarness()
     apply(harness.ctx, config)
     const route = harness.route(DESKTOP_LOOP_NOTIFY_SESSION_PATH)
@@ -466,5 +468,21 @@ describe('desktop Host plugin', () => {
     await route?.handler(req, res)
     expect(res.statusCode).toBe(403)
     expect(JSON.parse(body)).toEqual({ error: 'forbidden' })
+
+    // FIX-36：伪造同源头（Origin 就是渲染层 origin）但没有 BrowserAuth cookie
+    // ⇒ 消费被拒，且 404/403 的响应里没有待跳转会话。
+    const forged = {
+      method: 'GET',
+      headers: { origin: 'http://127.0.0.1:43120' },
+    } as unknown as IncomingMessage
+    let forgedBody = ''
+    const forgedRes = {
+      statusCode: 200,
+      setHeader: vi.fn(),
+      end: vi.fn((value?: string) => { forgedBody = value ?? '' }),
+    } as unknown as ServerResponse
+    await route?.handler(forged, forgedRes)
+    expect(forgedRes.statusCode).toBe(403)
+    expect(JSON.parse(forgedBody)).toEqual(expect.objectContaining({ error: 'browser session proof required' }))
   })
 })

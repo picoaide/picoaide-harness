@@ -10,7 +10,8 @@
  *
  * 修法与 browser/connectors 第三轮的 `proofOfPossession` / `requireWriteProof`
  * 同形：写面（非 GET）经 `connection.requestRejection()` 要一份 BrowserAuth cookie；
- * fence 缺席 ⇒ fail-closed 503；读面（更新徽章 / 循环通知跳转）维持原判据。
+ * fence 缺席 ⇒ fail-closed 503；纯读面（更新徽章 / 品牌资源）维持原判据 —— 循环
+ * 通知跳转的 GET **消费**待跳转会话（P2-24）＝写，FIX-36 起也要求证明。
  *
  * 本文件用**真实 `apply()` + 真实路由注册**跑（不是直接调 handler），fence 替身与
  * 上游 `rpc-host.ts:97-100` 同判据（Host/Origin 围栏 → 403，authority 绑定的 cookie
@@ -245,14 +246,22 @@ describe('R4-RV3a desktop:写动作要求持有性证明', () => {
     expect(JSON.parse(realPick.body)).toEqual({ path: '/tmp/picked' })
   })
 
-  it('keeps the read faces on their existing contract (badge and loop-notify stay readable)', async () => {
+  it('keeps the read faces on their existing contract (badge stays readable; the consuming jump GET needs proof)', async () => {
     const h = harness()
     const badge = await call(h.routes, 'GET', DESKTOP_UPDATE_PATH, { origin: null })
     expect(badge.code).toBe(200)
     expect(JSON.parse(badge.body).currentVersion).toBe('2.0.0')
 
-    const notify = await call(h.routes, 'GET', DESKTOP_LOOP_NOTIFY_SESSION_PATH, { origin: null })
-    expect(notify.code).toBe(200)
+    // FIX-36（第二十七轮）：循环通知跳转的 GET **消费**待跳转会话（P2-24）＝写，
+    // 所以它不再属于"GET 读面"；无证明 ⇒ 403（本文件原来在这里断言 200，等于把
+    // 缺陷写成了契约）。
+    const forged = await call(h.routes, 'GET', DESKTOP_LOOP_NOTIFY_SESSION_PATH, { origin: null })
+    expect(forged.code).toBe(403)
+    expect(JSON.parse(forged.body).error).toBe('browser session proof required')
+
+    // 持证明的正常轮询仍走原契约（渲染层形态）。
+    const real = await call(h.routes, 'GET', DESKTOP_LOOP_NOTIFY_SESSION_PATH, { origin: null, cookie: REAL_COOKIE })
+    expect(real.code).toBe(200)
   })
 
   it('fails closed when the connection service is absent (no proof mechanism, no write)', async () => {

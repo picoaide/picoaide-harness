@@ -214,8 +214,9 @@ export function apply(ctx: Context, config: Config): void {
   })
   /**
    * R4-RV3a：写面路由的 BrowserAuth 持有性证明依赖（由各写路由自己在方法/Origin
-   * 检查之后强制执行；服务缺席 ⇒ fail-closed 503）。GET 读面（更新徽章 / 循环
-   * 通知跳转 / 品牌资源）不消费它。
+   * 检查之后强制执行；服务缺席 ⇒ fail-closed 503）。**只读** GET 面（更新徽章 /
+   * 品牌资源）不消费它；循环通知跳转虽然是 GET，但它消费待跳转会话（P2-24）＝写，
+   * 因此也接这一份依赖（FIX-36，见 `loop-notify-route.ts` 的模块头）。
    */
   const proofDeps: WriteProofDeps = {
     fence: (): ConnectionTrustFence | undefined => ctx.get('connection') as ConnectionTrustFence | undefined,
@@ -232,12 +233,14 @@ export function apply(ctx: Context, config: Config): void {
         rendererOrigin,
         // GET consumes the request (P2-24): return the pending jump and clear
         // it, so the next poll (or a renderer reload) cannot re-open a session
-        // the user already visited.
+        // the user already visited. Consuming is a write, so it runs only after
+        // the BrowserAuth proof gate (FIX-36).
         () => {
           const pending = loopNotifySession
           loopNotifySession = emptyDesktopLoopNotifySession()
           return pending
         },
+        proofDeps,
       ),
     }),
     'dsh-plugin-desktop: loop-notify session jump route',
