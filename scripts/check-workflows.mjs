@@ -4706,7 +4706,11 @@ const REGISTERED_JOBS = [
     job: 'pr-summary',
     ifPolicy: 'exact',
     ifValue: "always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork",
-    why: 'PR 汇总评论:只在**非 fork 的 PR** 上运行是产品约定(信息面 job,不产交付物也不跑判据)',
+    why: 'PR 汇总评论:只在**非 fork 的 PR** 上运行是产品约定(信息面 job,不产交付物也不跑判据)。'
+      + '`always()` 是**有意保留**的(docs-only 的 PR 里上游 job 全部跳过,没有它就没有任何评论)'
+      + '—— 代价是"门禁红时本 job 照跑",所以**正文禁止无条件断言通过**:三态文案必须由 '
+      + '`needs.*.result` 派生(判据在 scripts/verify-ci-scripts.mjs 第 16 节:真跑那段 '
+      + 'github-script,断言"未全绿时不得出现「全部通过」、未成功 job 的 artifact 不得列出")',
   },
   {
     file: 'codeql.yml',

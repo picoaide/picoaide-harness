@@ -500,12 +500,88 @@ while IFS= read -r channel; do
   #    旧实现只断言 `aws s3 ls <键>` 有输出,截断的对象照样放行。
   verify_remote_object "$zip_key" "$zip" "版本资产(写指针前复检)"
 
+  # 3b) **单调守卫**(R28 审计 AB2-A-01):写指针前先读回现有指针的版本,倒退即拒绝写。
+  #
+  #     现场:`<channel>/latest.json` 是**跨版本共享、可变、最后写者赢**的对象,而本脚本
+  #     此前从不读回旧指针做比较 —— 两个 tag 的 run 并发跑 `release` 时(顶层
+  #     `concurrency.group` 只按 `github.ref` 分组,不同 tag 永不互斥),慢的那个发布完
+  #     就把指针写回**更旧**的版本。客户端更新链的**第一步**就是读这份清单 ⇒ 用户侧
+  #     表现为"检查更新永远说已是最新"(静默降级),而流水线全绿。
+  #
+  #     版本序**不在这里写第二份**:与上面保留策略用同一个真源(`sort -V`;GNU version
+  #     sort 的字面序里 `2.10.0` < `2.9.0`,所以不能按字符串比)。
+  #
+  #     读法分两步,理由都是"把不可靠的面缩到最小":①`head-object` 判"指针在不在"用
+  #     本脚本**已有判据**过的 404 谓词(verify_remote_object_absent 同一形态),而不是
+  #     去猜 `s3 cp` 对缺失对象的措辞;②真在才用 `aws s3 cp <s3 url> -` 读回正文
+  #     (真 CLI 支持 `-` = stdout)。**aws 的输出必须先捕获**(脚本头纪律:它的失败信息
+  #     自身会回显含渠道 id 的对象键),所以这里与 `s3 ls` 那处一样:捕获 + 只在失败时
+  #     `brand_sanitize` 后打印。
+  #
+  #     三种结局:①指针不存在(该渠道第一次发布)⇒ 照写;②现有版本不晚于本次 ⇒ 照写
+  #     (重发同一版本是允许的);③现有版本**更新** ⇒ **拒绝写 + `::warning::`**,但
+  #     不中止整个发布 —— 本次的版本目录与 GitHub Release 已经产出且互不影响,只有指针
+  #     保持不动(让"慢的那个 tag"退回不去,而不是让整条发布链变红)。
+  #     读不回 / 正文解析不出可比的版本 ⇒ **fail-loud**(无法证明不倒退就不能写:指针是
+  #     客户端唯一入口,宁可让运维看一眼,也不接受一次静默降级)。
+  pointer_key="${channel}/latest.json"
+  set +e
+  pointer_head="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$pointer_key" 2>&1)"
+  pointer_head_status=$?
+  set -e
+  pointer_regressed=0
+  if [ "$pointer_head_status" -ne 0 ]; then
+    if printf '%s\n' "$pointer_head" | grep -qE '\((404|NoSuchKey)\)[[:space:]]+when calling the HeadObject operation'; then
+      : # 该渠道还没有指针(第一次发布)⇒ 没有可比对象,照写。
+    else
+      printf '%s\n' "$pointer_head" | brand_sanitize >&2
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:无法确认现有版本指针的状态(head-object 既不是 404 也不是成功))—— 拒绝在无法证明「不会倒退」的情况下写指针;上方输出已脱敏" >&2
+      exit 1
+    fi
+  else
+    # stdout 与 stderr **分开**:这里要的是对象正文,若把 stderr 混进来(aws 的进度条在
+    # 非 TTY 下不打印,但错误信息会),sed 抽出的"版本号"就可能被别的文本污染 —— 那是
+    # 静默错判的方向。stderr 落临时文件,只在失败时脱敏后打印(脚本头纪律)。
+    pointer_err="$(mktemp)"
+    set +e
+    pointer_body="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_key}" - 2>"$pointer_err")"
+    pointer_body_status=$?
+    set -e
+    if [ "$pointer_body_status" -ne 0 ]; then
+      brand_sanitize < "$pointer_err" >&2
+      rm -f "$pointer_err"
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:读不回现有版本指针的正文)—— 拒绝在无法证明「不会倒退」的情况下写指针;上方输出已脱敏" >&2
+      exit 1
+    fi
+    rm -f "$pointer_err"
+    # 只认本脚本自己写出的清单形状(`server.version`;schema 1 起未变过)。解析不出
+    # 可比的版本 = 这个指针不是本流水线写的 ⇒ 同上 fail-loud,不猜。
+    pointer_ver="$(printf '%s\n' "$pointer_body" \
+      | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1)"
+    if ! printf '%s\n' "$pointer_ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:现有版本指针的正文里解析不出可比的版本号(形状不是本流水线写的 schema 1 清单))—— 拒绝写指针,请人工核对 ${pointer_key}" >&2
+      exit 1
+    fi
+    if [ "$pointer_ver" != "$VER" ] \
+      && [ "$(printf '%s\n%s\n' "$pointer_ver" "$VER" | sort -V | head -n1)" = "$VER" ]; then
+      pointer_regressed=1
+      echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:现有指针是 ${pointer_ver}、本次发布的是 ${VER} —— 写下去会把更新指针倒退;并发的另一个 tag 已经发过更新的版本)。本次的版本目录与 GitHub Release 不受影响,指针保持 ${pointer_ver} 不动。"
+    fi
+  fi
+
   # 4) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
   #
   #    指针本身也要证明字节完整(2026-09-23 第六轮审计 R6-C-3):客户端更新链路的第一步
   #    就是读这份清单 —— 它被截断/写坏时连版本号都读不到,而 `aws s3 cp` 的退出码同样
   #    只表示"请求成功"。所以这里与资产走**同一条**单请求 PUT + 存储侧校验和的路径,
   #    写完再由 verify_remote_object 对拍大小与 SHA256。
+  #
+  #    被 3b) 的单调守卫拒绝时**整段跳过**(指针一个字节都不动):`continue` 前先把本渠道
+  #    计进 TOTAL,保持收尾计数与其它渠道一致。
+  if [ "$pointer_regressed" = "1" ]; then
+    TOTAL=$((TOTAL + 1))
+    continue
+  fi
   manifest="$(mktemp)"
   cat > "$manifest" <<JSON
 {

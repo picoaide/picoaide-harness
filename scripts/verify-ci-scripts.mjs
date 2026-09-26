@@ -34,6 +34,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
 import { extractRunBlocks } from './check-workflows.mjs'
@@ -279,6 +280,24 @@ case "$cmd" in
     # 这种"参数写在路径前面"的形态 —— 按 args[2]/args[3] 取会把开关当成路径)。
     src="\${SCAN_POSITIONAL_ITEMS[0]}"; dst="\${SCAN_POSITIONAL_ITEMS[1]}"
     record "cp $src $dst"
+    # 目标 "-" = stdout(真 CLI 的 "aws s3 cp s3://bucket/key -",用于读回远端对象正文;
+    # R28 审计 AB2-A-01 的单调守卫就是这么读现有 latest.json 的)。**与真 CLI 同形**:
+    # 对象不存在时打 "download failed: … An error occurred (404) when calling the
+    # HeadObject operation: Not Found" 并退出 1;成功时把对象字节写到 stdout,不落盘。
+    # (本段是 JS 模板字符串的一部分:注释里不得出现反引号,美元加大括号必须转义。)
+    if [ "$dst" = "-" ]; then
+      case "$src" in
+        s3://*) ;;
+        *) param_error "Invalid argument type: only s3:// sources can be downloaded to stdout" ;;
+      esac
+      src_key="\${src#s3://*/}"
+      if [ ! -f "$store/$src_key" ]; then
+        echo "download failed: $src to - An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+        exit 1
+      fi
+      cat "$store/$src_key"
+      exit 0
+    fi
     extra=()
     i=2
     while [ "$i" -lt "\${#args[@]}" ]; do
@@ -512,6 +531,21 @@ function check(condition, message) {
 function tempDir(prefix) {  const dir = mkdtempSync(join(tmpdir(), prefix))
   scratch.push(dir)
   return dir
+}
+
+/**
+ * 解析 JSON,失败返回 `undefined`。
+ *
+ * 用途:断言里要报"实际的版本号是多少"时**不能**直接 `JSON.parse` —— 被测对象坏了
+ * (空文件/半截字节)时,断言会因为解析抛异常而崩掉,把"对象是坏的"这条信息换成一条
+ * 栈迹(而它恰恰是最需要看清楚的现场)。失败时如实返回 undefined,由断言自己报出来。
+ */
+function safeJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -4906,6 +4940,103 @@ console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
     '不得退回裸 `grep -q \'404\'`:aws 的失败信息会回显对象键,键里的 $RANDOM 数字出现 404 时会把"端点不可达"误判成"对象已消失"(约 1% 偶发红灯)')
 }
 
+// ---- 6g. 版本指针的单调守卫:绝不把 latest.json 写回更旧的版本（R28 审计 AB2-A-01）----
+//
+// 现场:`<channel>/latest.json` 跨版本共享、可变、最后写者赢,而发布脚本**从不读回旧指针
+// 做比较**;顶层 `concurrency.group = ci-${{ github.ref }}` 只实现"同 ref 互斥"⇒ 两个
+// **不同 tag** 的 run 会并发跑 release,慢的那个把指针写回**更旧**的版本。客户端更新链
+// 第一步就是读这份清单 ⇒ 用户侧表现为"检查更新永远说已是最新"(静默降级),流水线全绿。
+//
+// 判据 = **先写 vX.Y.Z+1 的指针,再让 vX.Y.Z 的发布尝试写**(真跑发布脚本 + 假 aws):
+//   ① 指针必须**逐字节未变**(拒绝写 = 一个字节都不动,不是"写坏了再回滚");
+//   ② 必须给出可检索的 `::warning::`(点名两个版本号);
+//   ③ 本次的**版本目录与 SHA256SUMS 仍然照发**(拒绝的只是指针 —— 让慢的 tag 退回不写,
+//      而不是让整条发布链变红);
+//   ④ 反向对照:更新的版本(vX.Y.Z+1)必须照常写指针,重发**同一版本**也允许
+//      —— 证明守卫不是"永不写指针"的恒真桩;
+//   ⑤ 读不回 / 解析不出可比的版本 ⇒ fail-loud(不能证明不倒退就不写)。
+{
+  const work = tempDir('ci-manifest-monotonic-')
+  const bundle = join(work, 'release-bundle')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  writeFileSync(list, 'official\n')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+
+  /** 造一份"已构建"的渠道产物(与第 6 节同一布局;SHA256SUMS 必须真的写着该包的 sha256)。 */
+  const stageBundle = version => {
+    rmSync(bundle, { recursive: true, force: true })
+    mkdirSync(join(bundle, 'official'), { recursive: true })
+    const content = `zip-official-${version}`
+    writeFileSync(join(bundle, 'official', `picoaide-server-${version}-amd64.zip`), content)
+    const digest = createHash('sha256').update(content).digest('hex')
+    writeFileSync(join(bundle, 'official', 'SHA256SUMS'), `${digest}  picoaide-server-${version}-amd64.zip\n`)
+  }
+  const publish = version => spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: `v${version}`,
+    },
+  })
+  const pointerPath = join(store, 'official', 'latest.json')
+
+  // 先落到 v2.8.2(模拟"另一个 tag 已经发完、写了指针")。
+  stageBundle('2.8.2')
+  const first = publish('2.8.2')
+  check(first.status === 0, `第一次发布(v2.8.2)应成功,实际退出 ${String(first.status)}: ${first.stderr ?? ''}`)
+  check(existsSync(pointerPath), '第一次发布后必须写出 official/latest.json（否则后面的对照没有基准）')
+  const pointerBefore = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(JSON.parse(pointerBefore).server.version === '2.8.2', '基准指针的 server.version 应为 2.8.2')
+
+  // ① 慢的那个 tag:同一渠道发一个**更旧**的版本 ⇒ 指针必须拒绝写且逐字节不变。
+  stageBundle('2.8.1')
+  const older = publish('2.8.1')
+  check(older.status === 0, `更旧版本的发布不应整体失败(只有指针要拒写),实际退出 ${String(older.status)}: ${older.stderr ?? ''}`)
+  const pointerAfterOlder = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(pointerAfterOlder === pointerBefore,
+    '版本倒退时 latest.json 必须**逐字节未变**(拒绝写 = 一个字节都不动);'
+    + `实际指针版本 ${String(safeJson(pointerAfterOlder)?.server?.version)}`)
+  const olderOutput = `${older.stdout ?? ''}${older.stderr ?? ''}`
+  check(olderOutput.includes('::warning::') && olderOutput.includes('2.8.2') && olderOutput.includes('2.8.1'),
+    '拒绝写指针时必须给出可检索的 ::warning:: 并点名两个版本号（静默跳过 = 下一次没人知道为什么没更新）')
+  // ③ 被拒的只是指针:本次的版本化资产照发(它是 immutable 的,且 GitHub Release 也引它)。
+  check(existsSync(join(store, 'official', 'releases', '2.8.1', 'picoaide-server-2.8.1-amd64.zip')),
+    '版本倒退时本次的版本目录仍必须照发（拒绝的只有指针）')
+  check(existsSync(join(store, 'official', 'releases', '2.8.1', 'SHA256SUMS')),
+    '版本倒退时本次的 SHA256SUMS 仍必须照发')
+
+  // ④ 反向对照(证明守卫不是"永不写指针"的恒真桩):
+  //    (a) 更新的版本照写;
+  stageBundle('2.8.3')
+  const newer = publish('2.8.3')
+  check(newer.status === 0, `更新的版本应成功发布,实际退出 ${String(newer.status)}: ${newer.stderr ?? ''}`)
+  const pointerAfterNewer = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(safeJson(pointerAfterNewer)?.server?.version === '2.8.3',
+    `更新的版本(2.8.3)必须照常写指针,实际 ${String(safeJson(pointerAfterNewer)?.server?.version)}`)
+  //    (b) 重发**同一版本**也允许(重跑同一个 tag 是常见动作)。
+  const again = publish('2.8.3')
+  check(again.status === 0, `重发同一版本应成功,实际退出 ${String(again.status)}: ${again.stderr ?? ''}`)
+  check(!`${again.stdout ?? ''}`.includes('::warning::'), '重发同一版本不应触发倒退告警')
+
+  // ⑤ 现有指针读不回 / 解析不出可比的版本 ⇒ fail-loud(不能证明不倒退就不写)。
+  writeFileSync(pointerPath, '<html>not our manifest</html>\n')
+  stageBundle('2.8.4')
+  const garbled = publish('2.8.4')
+  check(garbled.status !== 0, '现有指针的正文解析不出可比版本时必须 fail-loud（不猜、不写）')
+  check(`${garbled.stderr ?? ''}`.includes('解析不出'), '失败信息应说明"解析不出可比的版本号"')
+  check(readFileSync(pointerPath, 'utf8') === '<html>not our manifest</html>\n',
+    'fail-loud 路径同样不得改动现有指针')
+}
+
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
 {
   const work = tempDir('ci-transfer-')
@@ -5860,13 +5991,32 @@ exit 0
   }
 }
 
-// ---- 15. 文档承诺的触发方式必须与 ci.yml 的 `on:` 逐字对拍（2026-09-26 审计 Z3-4）----
+// ---- 15. 文档承诺的触发方式必须与 ci.yml 的 `on:` 逐字对拍（2026-09-26 审计 Z3-4；扫描根 2026-09-27 R28 AB2-A-04）----
 //
 // 2026-09-26 审计的 ④：`site/src/content/docs/{,en/}deployment/channels.md` 把
 // `workflow_dispatch` 写成"预发 tag 只出 beta 时提前出品牌渠道包"的**唯一**途径，
 // 而 ci.yml 的 `on:` 只有 `pull_request` / `push` —— 承诺了一个不存在的入口（读者按它
 // 操作会得到"工作流菜单里没有这一项"）。定案是**改承诺**（零风险且立刻可验证），
 // 这条守卫把"文档又漂回去"变成红灯。
+//
+// **R28 审计 AB2-A-04 证伪了第一版的覆盖面**：`docFiles` 是**两份 site 文件的硬编码
+// 白名单**，而 §7.61.2-4 的原始发现面含第三处（`docs/decisions/2026-09-20-dsh-0.1.6-upgrade.md`
+// 的一句"待做（推 tag 或 workflow_dispatch）"）—— 同一句 payload 只换落点：写进白名单
+// 里的文件 ⇒ EXIT=1 点名；写进 `docs/**` ⇒ EXIT=0。这正是本仓"**判据的扫描根决定它
+// 能看见什么**"的第 4 次实例，所以修法是**换扫描根**（目录扫描），不是"再补一个文件名"。
+//
+// 现在的扫描根 = `docs/**` + `site/**` 下**所有** `.md`（每次运行现场遍历，新增文件自动
+// 进面）。判据分两档，差别在**文档的职责**而不是文件名：
+//   · `site/**` = 对外发布/运维文档面（整篇在讲这条流水线）⇒ **裸提及就是承诺**：
+//     提到 workflow_dispatch 的每一行都必须是否定表述。
+//   · `docs/**` = 混杂着历史规划 / 决策记录 / 审计报告 / **别的工作流**的说明
+//     ⇒ 裸提及不等于承诺（现存 8 处这样的行逐条核过：它们描述的是已删除的
+//     `docker.yml`、`notary-probe.yml` 这类**别的** workflow，或当时的规划文本，
+//     改写它们等于改写历史）⇒ 只判**承诺形态**（`或/用/通过/只能` + workflow_dispatch，
+//     或 `workflow_dispatch (手工|手动)?触发`）。
+// 唯一豁免 = **已发布**的 `docs/releases/**`（公开的冻结记录：发布说明里"引用过去的
+// 错误说法"必须能原样引用，改写已发布正文等于改写当时告诉客户的事实）。豁免**不许
+// 静默**：命中它的行数进断言消息，且扫描面有文件数地板（下面两条 `_FLOOR`）。
 {
   const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
   // YAML 1.1 把 `on` 读成布尔真值，1.2（本仓用的 `yaml` 包）读成字符串 —— 两种都认，
@@ -5874,35 +6024,216 @@ exit 0
   const triggerTable = workflow?.on ?? workflow?.true
   const triggers = triggerTable !== null && typeof triggerTable === 'object' ? Object.keys(triggerTable) : []
   check(triggers.length > 0, `ci.yml 的 on: 必须能解析出触发键（实际 ${JSON.stringify(triggers)}）`)
-  const docFiles = [
+
+  /** 去掉 markdown 强调符后的逐行文本（判定"否定"不能被 `**`/反引号打断）。 */
+  const plainLines = text => text.split('\n').map(line => line.replace(/[*`]/gu, ''))
+  /** 递归收集目录下的 `.md`（跳过依赖/构建/隐藏目录；现场遍历 ⇒ 新文件自动进面）。 */
+  const collectDocs = dir => {
+    const found = []
+    const walk = current => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build') continue
+        if (entry.name.startsWith('.')) continue
+        const path = join(current, entry.name)
+        if (entry.isDirectory()) walk(path)
+        else if (entry.name.endsWith('.md')) found.push(path)
+      }
+    }
+    walk(dir)
+    return found
+  }
+  const NEGATED = /(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u
+  /** 承诺形态：把 workflow_dispatch 写成"做某件事的手段"（而不是在描述别的工作流）。 */
+  const PROMISE = /(或|用|通过|只能|可以)\s*workflow_dispatch|workflow_dispatch\s*(?:手工|手动)?触发/u
+  /**
+   * 已发布 release notes = 公开的冻结记录（`/releases/` 目录下的版本说明已经挂到
+   * GitHub Release 上）。豁免必须**可数**：命中行数会被记下来，不许静默吞掉漂移。
+   */
+  const RELEASE_NOTES = /^docs\/releases\//u
+  const SCAN_FILES_FLOOR = 150
+  const SCANNED_NON_RECORD_FLOOR = 40
+
+  const scanned = [...collectDocs(join(root, 'docs')), ...collectDocs(join(root, 'site'))]
+    .map(path => path.slice(root.length + 1))
+  check(scanned.length >= SCAN_FILES_FLOOR,
+    `文档扫描面只有 ${scanned.length} 个 .md（地板 ${SCAN_FILES_FLOOR}）—— 扫描根被搬空/被排除规则吃掉了，`
+    + '拒绝以"没扫到就没有承诺"的方式通过')
+  const guarded = scanned.filter(file => !RELEASE_NOTES.test(file))
+  check(guarded.length >= SCANNED_NON_RECORD_FLOOR,
+    `非记录面文档只有 ${guarded.length} 个（地板 ${SCANNED_NON_RECORD_FLOOR}）—— 扫描面静默缩水`)
+  // 两份 site 发布文档必须仍在面内（它们承载下面第 ② 条"必须如实说明没有该入口"）。
+  const siteReleaseDocs = [
     'site/src/content/docs/deployment/channels.md',
     'site/src/content/docs/en/deployment/channels.md',
   ]
-  /** 去掉 markdown 强调符后的逐行文本（判定"否定"不能被 `**`/反引号打断）。 */
-  const plainLines = text => text.split('\n').map(line => line.replace(/[*`]/gu, ''))
-  for (const file of docFiles) {
-    const text = readFileSync(join(root, file), 'utf8')
-    const plain = plainLines(text)
+  for (const file of siteReleaseDocs) {
+    check(scanned.includes(file), `${file} 必须落在文档扫描面内（发布面文档是这条判据的正向锚点）`)
+  }
+
+  let exemptHits = 0
+  for (const file of guarded) {
+    const plain = plainLines(readFileSync(join(root, file), 'utf8'))
     if (!triggers.includes('workflow_dispatch')) {
       // ① 文档不得**承诺**流水线没有的入口（当前 ci.yml 只有 pull_request / push）。
-      //    判据按**行**：提到 workflow_dispatch 的每一行都必须同时是否定表述
-      //    （"没有 …" / "no …"）—— 旧缺陷文本（"要提前出包只能用 workflow_dispatch"）
-      //    正是"提到但没有否定"的形态。
+      //    site 面按"裸提及即承诺"判；docs 面按"承诺形态"判（见文件头两档说明）。
+      const strict = file.startsWith('site/')
       const promises = plain.filter(line => line.includes('workflow_dispatch')
-        && !/(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u.test(line))
+        && !NEGATED.test(line) && (strict || PROMISE.test(line)))
       check(promises.length === 0,
         `${file} 把 workflow_dispatch 写成了可用入口，而 ci.yml 的 on: 只有 ${JSON.stringify(triggers)}`
         + ` —— 文档不得承诺不存在的发布入口。命中行：${JSON.stringify(promises.slice(0, 2))}`)
-      // ② 反向：既然没有手工入口，两条语言版本都必须**如实写明**这一点（防止只删掉
-      //    承诺、不留事实，读者仍以为可以手工触发）。
-      check(plain.some(line => /(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u.test(line)),
+    }
+  }
+  // 反向：既然没有手工入口，两条语言版本都必须**如实写明**这一点（防止只删掉承诺、
+  // 不留事实，读者仍以为可以手工触发）。
+  if (!triggers.includes('workflow_dispatch')) {
+    for (const file of siteReleaseDocs) {
+      const plain = plainLines(readFileSync(join(root, file), 'utf8'))
+      check(plain.some(line => NEGATED.test(line)),
         `${file} 必须如实说明发布工作流没有 workflow_dispatch（docs ↔ ci.yml 的 on: 逐字对拍）`)
     }
+  }
+  // 豁免面的**可数性**：命中 release notes 的承诺行必须能被看见（哪怕只打印进断言消息）。
+  for (const file of scanned.filter(name => RELEASE_NOTES.test(name))) {
+    const plain = plainLines(readFileSync(join(root, file), 'utf8'))
+    exemptHits += plain.filter(line => line.includes('workflow_dispatch') && !NEGATED.test(line)
+      && PROMISE.test(line)).length
+  }
+  // 这条不是"必须为 0"：它只要求**说得出来**豁免了多少行。发布说明引用旧说法是正当的，
+  // 数量变化（有人把新漂移写进 release notes）会在这里留下可读的数字。
+  check(exemptHits <= 5,
+    `docs/releases/** 被豁免的承诺行有 ${exemptHits} 行（上限 5）—— 发布说明里出现新的`
+    + `"workflow_dispatch 可用"式表述时，请连同这条上限一起复核（豁免不是垃圾桶）`)
+}
+
+// ---- 16. `pr-summary` 的 PR 评论必须由 `needs.*.result` 派生（R28 审计 AB2-A-02）----
+//
+// 现场：这个 job 的 `if` 含 `always()`（docs-only 的 PR 也要有评论，所以它**会**在
+// 上游失败时运行），正文却**无条件**写「本次提交的门禁（gate + server + 三平台打包）
+// 全部通过，可下载产物」—— 门禁红的 PR 上机器人发的是假绿评论，还列出根本不存在的
+// artifact；而 `needs` 里**没有 `gate`**，即便想按结果修正措辞也读不到那个结论。
+//
+// 判据 = **真跑**那段 github-script（不是文本对拍）：YAML 解析出 `script` 正文 →
+// 按伪造的 `needs` 渲染 `${{ … }}` → 在**只有 github/context/process/console** 的
+// 沙箱里执行 → 抓它真正 submit 的评论正文。文本对拍在这里必然假绿（"正文里出现过
+// needs." 与"正文按 needs 分叉"是两回事），所以必须真跑。
+//
+// 同时钉住一条**结构性**不变式：脚本读的每个 `needs.<job>.result` 都必须在
+// `needs:` 列表里 —— 否则表达式渲染成空串，`!== 'success'` 恒真，判据会以
+// 「列出 `gate` — ``」这种形状"通过"而语义错误。
+{
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const job = workflow?.jobs?.['pr-summary']
+  check(job !== null && typeof job === 'object', 'ci.yml 应有 pr-summary job（判据锚点）')
+  const needs = Array.isArray(job?.needs) ? job.needs : []
+  const step = (job?.steps ?? []).find(entry => String(entry?.uses ?? '').startsWith('actions/github-script'))
+  check(step !== undefined,
+    'pr-summary 应有 actions/github-script 步骤（判据锚点漂移必须响亮失败：没有判据对象时不许静默通过）')
+  const script = String(step?.with?.script ?? '')
+  check(script.includes('needs.'), 'pr-summary 的评论正文必须引用 needs.*（无条件断言的形态即本条的缺陷）')
+
+  // 渲染 `${{ … }}`：只认 needs.*（本 job 的输入面就是 needs 与事件名）。未知表达式
+  // 记一条失败并渲染成空串 —— 判据不许因为"多了个读不到的量"而崩掉或静默放过。
+  const render = (results, code) => script.replace(/\$\{\{\s*([^}]*?)\s*\}\}/gu, (_, expr) => {
+    if (expr === 'needs.changes.outputs.code') return code
+    const matched = /^needs\.([\w-]+)\.result$/u.exec(expr)
+    if (matched !== null) return results[matched[1]] ?? ''
+    check(false, `pr-summary 的 script 出现本判据不认识的表达式 <${expr}> —— `
+      + '请同步这条判据（否则它会以"渲染成空串"的方式给出错误结论）')
+    return ''
+  })
+
+  const runScript = async body => {
+    const posted = []
+    const github = {
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          deleteComment: async () => ({}),
+          createComment: async args => { posted.push(args.body); return {} },
+        },
+      },
+    }
+    // 沙箱只有这四个全局：github / context / process / console。**不注入**别的，
+    // 于是"正文依赖了别的上下文"会当场 ReferenceError（fail-loud，不是静默空值）。
+    const sandbox = {
+      github,
+      context: { repo: { owner: 'owner', repo: 'repo' }, issue: { number: 1 }, runId: 1 },
+      process: { env: { GITHUB_SERVER_URL: 'https://github.example' } },
+      console,
+    }
+    await vm.runInNewContext(`(async () => {\n${body}\n})()`, sandbox)
+    return posted
+  }
+
+  const ARTIFACTS = ['desktop-Linux', 'desktop-Windows-installer', 'desktop-macOS', 'picoaide-server-linux-amd64']
+  const GREEN = {
+    gate: 'success',
+    server: 'success',
+    'desktop-linux': 'success',
+    'desktop-windows': 'success',
+    'desktop-macos': 'success',
+  }
+  const commentOf = async (results, code) => {
+    const posted = await runScript(render(results, code))
+    check(posted.length === 1, `pr-summary 应恰好提交一条评论，实际 ${posted.length} 条`)
+    return posted[0] ?? ''
+  }
+
+  // ① 全绿：允许（也应当）说"全部通过"，且四个 artifact 名齐全。
+  const green = await commentOf(GREEN, 'true')
+  check(green.includes('全部通过'), '全绿时正文应如实说"全部通过"（三态里的"绿"这一态）')
+  for (const name of ARTIFACTS) check(green.includes(name), `全绿时正文应列出 ${name}`)
+
+  // ② 门禁红：**不得**出现"全部通过"，必须点名每个未成功的 job 与它的 result，
+  //    且**不得**列出未成功 job 的 artifact（那正是"列出不存在的产物"的现场）。
+  const redGate = await commentOf({ ...GREEN, gate: 'failure', 'desktop-windows': 'skipped' }, 'true')
+  check(!redGate.includes('全部通过'),
+    '有任何 job 的 result != success 时，正文**不得**出现"全部通过"（门禁红还发假绿评论正是本条的缺陷形态）')
+  check(/`gate`\s*—\s*`failure`/u.test(redGate), `正文必须点名失败的 job 与它的 result，实际：${JSON.stringify(redGate)}`)
+  check(/`desktop-windows`\s*—\s*`skipped`/u.test(redGate), '被跳过的 job 同样必须如实列出（skip 不是 success）')
+  check(!redGate.includes('desktop-Windows-installer'),
+    '未成功 job 的 artifact 不得出现在正文里（它根本不存在 —— 这正是"列出不存在的产物"）')
+  check(redGate.includes('desktop-Linux') && redGate.includes('picoaide-server-linux-amd64'),
+    '成功的 job 仍应列出它的 artifact（失败信息要完整：既说清什么没成，也说清什么能下载）')
+
+  // ③ 单个 job 被跳过（不是失败）也必须算作"未全绿"。
+  const redSkipped = await commentOf({ ...GREEN, server: 'skipped' }, 'true')
+  check(!redSkipped.includes('全部通过'), '任一 job 被跳过（skipped）时同样不得说"全部通过"')
+  check(/`server`\s*—\s*`skipped`/u.test(redSkipped), '被跳过的 job 必须被点名')
+
+  // ④ 全失败：不得崩（正文仍要给出运行页入口），且不能谎称有产物。
+  const allRed = await commentOf({
+    gate: 'failure',
+    server: 'failure',
+    'desktop-linux': 'failure',
+    'desktop-windows': 'failure',
+    'desktop-macos': 'failure',
+  }, 'true')
+  check(!allRed.includes('全部通过'), '全失败时不得说"全部通过"')
+  for (const name of ARTIFACTS) {
+    check(!allRed.includes(name), `全失败时不得列出 ${name}（没有 job 产出它）`)
+  }
+  check(allRed.includes('github.example'), '全失败时正文仍应给出 Actions 运行页入口（可诊断性）')
+
+  // ⑤ docs-only 分支不受影响（它不是三态的一部分：那些 job 本来就该被跳过）。
+  const docsOnly = await commentOf({}, 'false')
+  check(docsOnly.includes('本次只改文档'), 'docs-only 的 PR 仍要走"只改文档"那一段文案')
+
+  // ⑥ 结构性不变式：脚本读的每个 needs.<job>.result 都必须在 needs: 列表里。
+  const readJobs = [...new Set([...script.matchAll(/needs\.([\w-]+)\.result/gu)].map(m => m[1]))]
+  for (const name of readJobs) {
+    check(needs.includes(name),
+      `pr-summary 的正文读了 needs.${name}.result，但 needs: 列表里没有 ${name}`
+      + '（表达式会渲染成空串 ⇒ 判定恒真/恒假，判据以错误的形状"通过"）')
+  }
+  // 反向：三平台 + server + gate 都必须能读到（漏一个就等于"红 PR 的评论里看不到它"）。
+  for (const name of ['gate', 'server', 'desktop-linux', 'desktop-windows', 'desktop-macos']) {
+    check(needs.includes(name), `pr-summary 的 needs: 必须包含 ${name}（否则评论读不到它的结果）`)
   }
 }
 
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
-
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
@@ -5920,4 +6251,6 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '故障注入按**调用点**生效并被逐条断言:上传阶段读不回 / 删除后缺席检查读不回 各有用例;'
   + 'PROBE_PAYLOAD/PROBE_BYTES/注释三者一致)/'
   + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期/'
+  + 'pr-summary 的 PR 评论按 needs.*.result 派生(真跑 github-script 的三态:全绿/有 job 未成功/全失败;'
+  + '未成功 job 的 artifact 不得出现 + needs 列表与正文读取面双向对拍)/'
   + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)\n')
