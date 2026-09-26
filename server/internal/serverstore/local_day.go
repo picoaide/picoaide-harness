@@ -1,6 +1,10 @@
 package serverstore
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // 本地自然日（`wasm_app_opens.day` / `wasm_app_opens_daily.day` / `opens.today` / 保留期
 // 清理边界 / 看板趋势的日序）的**唯一边界实现**。
@@ -39,9 +43,44 @@ import "time"
 // ⚠️ 推论（改调用点时最容易踩的一条）：**本地日的"下一天"必须用 `NextLocalDay`，
 // 不能用 `day.AddDate(0, 0, 1)`** —— `AddDate` 加的是**墙钟**：从缺口日的边界
 // （墙钟 01:00）加一天得到的是次日 01:00，会把次日的一小时算进今天。
+//
+// ⚠️ 第二条推论：**外部输入的日历日字符串（`?from=2026-09-20`）必须用 `ParseLocalDay`
+// 解析**，既不能用 `time.Parse`（按 UTC 解释墙钟 ⇒ 负偏移部署上日键差一天），也不能
+// 只用 `time.ParseInLocation(…, time.Local)`（零点在缺口日不存在 ⇒ 同样差一天）。
 
 // localDayLayout 是 day 键的存储形态（与 `wasm_app_opens_daily.day` 的 `date` 列一致）。
 const localDayLayout = "2006-01-02"
+
+// ParseLocalDay 把 `YYYY-MM-DD` 按**部署本地日**解析成该日的第一个瞬时 —— 也就是
+// `LocalDay`/`LocalDayString` 的同一口径，供管理端 `from=`/`to=` 这类"外部输入的
+// 日历日"使用。
+//
+// 为什么不写成 `time.ParseInLocation(localDayLayout, raw, time.Local)`（实测两种错法）：
+//
+//	time.Parse("2006-01-02","2026-09-20")                     → 2026-09-20T00:00Z
+//	   在 TZ=America/Santiago 的本地日期是 **09-19** ⇒ 窗口整体左移一天（R21-D-01）；
+//	time.ParseInLocation(…, time.Local) 在**缺口日**上更隐蔽：
+//	   "2026-09-06" → 2026-09-05T23:00-04:00（本地零点不存在，Go 归一化到前一天）
+//	   ⇒ 日键 **09-05**，同样差一天。
+//
+// 所以先用 UTC（`00:00Z`）**只取字面年月日**（UTC 零点不受任何本地归一化影响），再用
+// **本地正午**把那个日历日锚回来 —— 与 `AddLocalDays` 同一个理由：正午在真实时区里
+// 从不缺口/重叠（跳变幅度 ≤2h 且都在夜里），所以正午所在本地日 == 字面日期。
+//
+// 唯一例外是"整个日历日被跳过"的时区（如 Pacific/Apia 2011-12-30，当地不存在这一天）：
+// 如实报错，**绝不静默偏一天** —— "静默差一天"正是本文件存在的理由。
+func ParseLocalDay(raw string) (time.Time, error) {
+	text := strings.TrimSpace(raw)
+	utc, err := time.ParseInLocation(localDayLayout, text, time.UTC)
+	if err != nil {
+		return time.Time{}, err
+	}
+	noon := time.Date(utc.Year(), utc.Month(), utc.Day(), 12, 0, 0, 0, time.Local)
+	if key := localDayKey(noon); key != text {
+		return time.Time{}, fmt.Errorf("时区 %s 没有本地日历日 %s（整日被跳过）", time.Local, text)
+	}
+	return LocalDay(noon), nil
+}
 
 // localDayKey 返回 t 的本地日期键（`YYYY-MM-DD`）。
 func localDayKey(t time.Time) string { return t.In(time.Local).Format(localDayLayout) }

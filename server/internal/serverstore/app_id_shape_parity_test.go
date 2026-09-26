@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -181,6 +182,11 @@ func TestAppIDShapeCopiesAreEquivalent(t *testing.T) {
 		"xn--fiq", "sec-ch-ua", "notes/../etc", "notes.db",
 		strings.Repeat("a", limits.MaxAppIDLen), strings.Repeat("a", limits.MaxAppIDLen+1),
 		"a-" + strings.Repeat("b", 30), "9", "999999",
+		// R21F-02(审计 2026-09-26):`skillmanifest.IsAppID` 在形态与长度之外**还**拒
+		// Windows 保留设备名(客户端在 Windows 上无法把该名字落盘 ⇒ 审核通过也装不上)。
+		// 语料必须含这些取值,否则"公式少了这一条"不会被发现(实测:只有形态+长度的
+		// 旧公式对保留名已不完整却仍然全绿)。
+		"con", "prn", "aux", "nul", "com1", "lpt1", "CON", "Con", "con.txt",
 	}
 	// 逐个字符位置上的禁则(不只抽样开头结尾)。
 	for _, bad := range []string{"_", ".", "A", " ", "/", "\\", ":", "é"} {
@@ -192,8 +198,12 @@ func TestAppIDShapeCopiesAreEquivalent(t *testing.T) {
 			t.Errorf("usageAppIDRe(%q) = %v, 真源 = %v(副本与真源分叉)", in, got, want)
 		}
 		// skillmanifest.IsAppID 走真源 + 自己的长度边界(技能名比 DNS 标签宽
-		// 一个字符:64 vs 63,见下面的显式断言)。
-		if got, wantSkill := skillmanifest.IsAppID(in), want && len(in) >= skillmanifest.MinAppIDLen && len(in) <= skillmanifest.MaxAppIDLen; got != wantSkill {
+		// 一个字符:64 vs 63,见下面的显式断言)+ **Windows 保留设备名禁则**
+		// (R21F-02:与归档条目同一份谓词 `archiveutil.IsWindowsReservedDeviceNameSegment`,
+		// 不是第二张手抄表)。
+		wantSkill := want && len(in) >= skillmanifest.MinAppIDLen && len(in) <= skillmanifest.MaxAppIDLen &&
+			!archiveutil.IsWindowsReservedDeviceNameSegment(in)
+		if got := skillmanifest.IsAppID(in); got != wantSkill {
 			t.Errorf("skillmanifest.IsAppID(%q) = %v, want %v", in, got, wantSkill)
 		}
 	}

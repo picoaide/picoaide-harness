@@ -200,18 +200,19 @@ func main() {
 
 	// 认证 provider 按 ConfigureProviders 注册:local 恒注册(admin 回退),
 	// ldap/oidc/openid 按配置启用;多套 browser(oidc/openid)独立路由
+	// R21C-02(审计 2026-09-26,P2):注册循环收进 auth_assembly.go 的具名接缝 ——
+	// `NewConfiguredAPI` 只把 browser provider 放进 ConfiguredAPI.Browsers,**不**自己
+	// 注册到 API 上,漏掉这一步 ⇒ 启动期 API.browsers 恒空 ⇒
+	// /api/client/v2/auth/{oidc,openid}/login|callback 恒 404(全组织 SSO 不可用)。
 	authCfg := serverauth.NewConfiguredAPI(db)
-	auth := authCfg.API
-	for _, b := range authCfg.Browsers {
-		auth.RegisterBrowser(b)
-	}
+	auth := assembleAuthAPI(authCfg)
 	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明——
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
 	// F2(审计 2026-09-11):认证配置保存后热重建运行中的 provider 集合
 	// (启用 LDAP 立即生效、禁用 LDAP 立即失效,无需重启)。
 	adminAPI := &serverauth.AdminAPI{DB: db}
-	adminAPI.ReloadAuth = func() error { return auth.ReloadProviders(db) }
+	wireAuthReload(adminAPI, auth)
 
 	// WASM 应用平台（设计基线 docs/planning/2026-09-17-wasm-app-platform.md）。
 	// 装配期自检失败一律 log.Fatalf（见 setupWasmPlatform 的注释：fail-closed

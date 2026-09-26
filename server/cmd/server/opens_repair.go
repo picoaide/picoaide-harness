@@ -51,18 +51,27 @@ func parseOpensRepairRange(spec string, now time.Time) (time.Time, time.Time, er
 
 // parseRepairDay 按**部署本地日**解析 `YYYY-MM-DD`。
 //
-// 为什么不用 `time.Parse`：它按 UTC 解释墙钟，而这里的日期是"本地日历日"——与
-// `serverstore.LocalDay`/`LocalDayString` 同一口径（部署 TZ 不同则差一天以上）。
+// 唯一实现是 `serverstore.ParseLocalDay`（与 `LocalDay`/`LocalDayString` 同一口径）：
+//
+//   - `time.Parse` 按 UTC 解释墙钟 ⇒ 负偏移部署上日键差一天；
+//   - `time.ParseInLocation(…, time.Local)` 在 **DST 缺口日**上同样差一天：本地零点
+//     不存在时 Go 会把 `time.Date(y,m,d,0,0,0,0,time.Local)` 归一化到**前一天
+//     23:00**（`America/Santiago` 2026-09-06 实测 → 本地日 09-05）。`TO` 是**右端
+//     开区间**（见 :28/:46），所以缺口日被点名为 `FROM`/`TO` 时整段修复窗口偏一天
+//     —— 而这段窗口决定哪些历史坏行的日汇总被重算（R21F-02，审计 2026-09-26）。
+//
+// 本函数只保留"空值"这一条本域文案；其余一律原样透出 `ParseLocalDay` 的错误
+// （它区分"形态不对"与"本部署时区整日被跳过"，后者是有价值的诊断，不能压成通用文案）。
 func parseRepairDay(raw string) (time.Time, error) {
 	text := strings.TrimSpace(raw)
 	if text == "" {
 		return time.Time{}, errors.New("缺少日期（YYYY-MM-DD）")
 	}
-	day, err := time.ParseInLocation("2006-01-02", text, time.Local)
+	day, err := serverstore.ParseLocalDay(text)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("日期 %q 形态不对（want YYYY-MM-DD）", raw)
+		return time.Time{}, fmt.Errorf("日期 %q 无法按部署本地日解析: %w", raw, err)
 	}
-	return serverstore.LocalDay(day), nil
+	return day, nil
 }
 
 // printOpensRollupRepairPlan 把修复计划打到 w（人可读的头 + 两段 SQL）。

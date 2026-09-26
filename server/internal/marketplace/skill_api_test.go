@@ -18,6 +18,7 @@ import (
 
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 )
 
 // newTestRouter builds a migrated DB with user alice, a registered token,
@@ -88,7 +89,7 @@ func TestSkillAPI(t *testing.T) {
 	demoArchive := skillArchiveBytes(t, "demo")
 	if _, err := serverstore.AddSkill(db, &serverstore.Skill{
 		Name: "demo", Version: "1.0.0", Description: "demo skill",
-		Author: "pico", Enabled: 1, Archive: demoArchive, Checksum: sha256Hex(demoArchive),
+		Author: "pico", Enabled: 1, Archive: demoArchive, Checksum: sharedskills.ArchiveChecksum("", demoArchive),
 	}); err != nil {
 		t.Fatal(err)
 	}

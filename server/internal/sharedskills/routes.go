@@ -124,24 +124,20 @@ func rowJSON(s serverstore.SharedSkill) gin.H {
 }
 
 // viewer resolves the calling user's effective groups (department tree) and
-// admin flag. Returns ok=false when unauthenticated.
-func viewer(c *gin.Context, db *sql.DB) (u *serverstore.User, groups []string, ok bool) {
-	u = serverauth.CurrentUser(c)
-	if u == nil {
-		return nil, nil, false
-	}
-	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
-	if err != nil {
-		return nil, nil, false
-	}
-	return u, groups, true
+// admin flag.
+//
+// 三态契约（A2-01，审计 2026-09-26，P2）—— 实现委托给唯一真源
+// `serverauth.ViewerGroups`：`u == nil` ⇒ 未认证（401）、`err != nil` ⇒ 依赖故障
+// （**500**，不得回 401：401 会让客户端清会话并删掉磁盘令牌，一次 PG 抖动就把
+// 全体在线员工登出）。
+func viewer(c *gin.Context, db *sql.DB) (*serverstore.User, []string, error) {
+	return serverauth.ViewerGroups(c, db)
 }
 
 func listVisible(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		u, groups, ok := viewer(c, db)
-		if !ok {
-			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		u, groups, verr := viewer(c, db)
+		if serverauth.WriteViewerError(c, u, verr) {
 			return
 		}
 		// 上下架状态(App 级,2026-09-15):客户端面下架与不存在同语义,所以必须
@@ -805,7 +801,10 @@ func download(db *sql.DB, cacheDir string, admin bool) gin.HandlerFunc {
 		c.Header("Content-Type", contentType)
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 		c.Header("X-Skill-Version", s.Version)
-		c.Header("X-Skill-Checksum", s.Checksum)
+		// 完整性头的空值兜底与市场面**共用一份实现**（ArchiveChecksum，A2-02）：
+		// 空 checksum 行必须现算，否则客户端 R18B-05 起的 fail-closed 会让这些行
+		// 对全体员工永久装不上（组织面发空头 / 市场面现算 = 同一台服务端两种口径）。
+		c.Header("X-Skill-Checksum", ArchiveChecksum(s.Checksum, payload))
 		_, _ = serverstore.IncrementSharedSkillDownload(db, s.Name, s.Version)
 		c.Data(http.StatusOK, contentType, payload)
 	}

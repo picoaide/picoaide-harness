@@ -395,8 +395,18 @@ func PushWebhook(ctx context.Context, hookURL string, body *ReportBody) error {
 //
 //	   为什么两阶段仍然互斥：投递与落账都紧跟在"锁内新读 + 重判"之后，两个实例不可能
 //	   同时通过阶段二的判定；阶段二读出来"不欠投"（对方已投成功 / 已进退避窗口）就跳过。
-//	   期间期号若被别的实例改成另一期（补投成功 + 跨月），本轮放弃 —— 下一 tick 会按新
-//	   期号重来，不丢期也不会错投。
+//	   期间期号若被别的实例改成另一期（对方补投成功并把游标推进到下一期），本轮放弃 ——
+//	   下一 tick 会按新期号重来，不丢期也不会错投。
+//
+//	   阶段二的两条判据**各自承重**（R21C-05，审计 2026-09-26，P3 的复核结论）：
+//	   `!stillDue` 抓的是"对方已经投完最后一期"（游标清空 + last_run_at 落到本月 ⇒
+//	   整条不再欠投），`freshPeriod != period` 抓的是"对方投完一期但**还欠下一期**"
+//	   （游标从 2026-06 推进到 2026-07 ⇒ 仍然 due，但本轮生成的报表已经不是该投的那一期）。
+//	   在 R21C-01 之前游标是单槽、成功即清空，"推进后仍 due"这一状态不可达 ⇒ 两条判据
+//	   确实互相冗余（删任一条都不红）；游标改成逐期推进之后这个状态成为常态，
+//	   删掉 `freshPeriod != period` 就会**多投一期**（把已经投出的那一期再投一遍）。
+//	   判据：`report_multimonth_catchup_test.go` 的
+//	   `TestPhaseTwoCriteriaAreNotRedundantUnderCursorSemantics`。
 //
 // 失败退避（S1-06 ①）由 `MarkReportAttempt` 落 `fail_streak`/`next_attempt_at` 承担：
 // 永久坏的 webhook 不再每 tick 被重投。
@@ -486,7 +496,12 @@ func DispatchAll(ctx context.Context, db *sql.DB, month time.Time) (ok, failed i
 			}
 		} else {
 			ok++
-			if merr := serverstore.MarkReportAttemptOn(ctx, conn, id, period, true, "", nil); merr != nil {
+			// 成功落账走 **MarkReportDeliveredOn**（而不是 MarkReportAttemptOn）：
+			// 投出的期号之后若还有已到期的期号，`pending_period` 游标必须**推进**
+			// 而不是清空 —— 否则跨月失败期间到期的中间各期永久丢失且无恢复路径
+			// （R21C-01，P1；完整机理见 nextPendingAfterDelivery 的注释）。
+			if merr := serverstore.MarkReportDeliveredOn(ctx, conn, id, period,
+				nextPendingAfterDelivery(month, period)); merr != nil {
 				log.Printf("reports: subscription %d: the delivery succeeded but recording it did not land (%v) — "+
 					"the next round may deliver the same period again", id, merr)
 			}
@@ -531,14 +546,42 @@ func ptrTime(t time.Time) *time.Time { return &t }
 // 期号是 `pending_period` 的存储形态，所以补投路径必须能按期号生成（R19A-S1-07）：
 // 修前只能传"现在"，于是 `GenerateMonthlyReport` 永远取"当前月的上一月"，跨月的
 // 那一期再也回不来。实现上一行不重复：期号 → 该期结束后的那个月 → 复用同一份生成器。
+//
+// 解析**绝不能经过 `time.Local`**（R21F-01，审计 2026-09-26，P2）：修前是
+// `time.ParseInLocation("2006-01", period, time.Local)`，得到的是**本地**月首零点，
+// 而 `GenerateMonthlyReport` 按**北京月**取上月。部署时区东于 UTC+8 时（`Asia/Tokyo`
+// / `Australia/Sydney`），本地月首零点在北京还停在**上个月最后一天 23:00**
+// ⇒ `BeijingMonth` 少算一个月，生成的期号比请求的期号再早一期（静默、无报错；
+// 真库实测：请求 `2026-02` 生成 `Period=2026-01`，请求 `2026-01` 生成 `2025-12`）。
 func GenerateMonthlyReportForPeriod(db *sql.DB, period string) (*ReportBody, error) {
-	start, err := time.ParseInLocation("2006-01", period, time.Local)
+	month, err := parseBeijingPeriod(period)
 	if err != nil {
 		return nil, fmt.Errorf("报表期号不合法（want YYYY-MM）: %q", period)
 	}
-	// 期号 = start 所在月；把它当"下一月的 1 日"喂给 GenerateMonthlyReport，
-	// 后者取 prev = start 所在月 ⇒ 期号与内容都对齐。
-	return GenerateMonthlyReport(db, start.AddDate(0, 1, 0))
+	// 期号 = month 所在北京月；把它当"下一月的 1 日"喂给 GenerateMonthlyReport，
+	// 后者取 prev = month 所在月 ⇒ 期号与内容都对齐。月算术在**北京日期值**空间做
+	// （Location=UTC 的 1 日：无 DST 缺口，且日=1 不会被 AddDate 归一化）。
+	return GenerateMonthlyReport(db, serverstore.BeijingMonthInstant(month.AddDate(0, 1, 0)))
+}
+
+// parseBeijingPeriod 把期号 `YYYY-MM` 解析成该**北京月**的月首「北京日期值」
+// （Location=UTC、年月日即北京日历月的 1 日 —— 与 `serverstore.BeijingMonth`
+// 的产物同一表示；表示约定见 serverstore/beijing.go 文件头的「两种时间表示」）。
+//
+// 期号是**标签**而不是时刻（它由 `delivery_policy.CurrentPeriod` 以
+// `BeijingMonth(now).AddDate(0,-1,0).Format("2006-01")` 生成），所以只能取字面年月：
+// `time.Parse` 的 UTC 结果与进程 TZ 无关，把它的 y/m 分量**重新锚**成北京月首即可
+// （与 `serverstore.ParseLocalDay` 的「字面日期 + 显式锚点」同范式，但锚点在北京月，
+// 两者语义不可混用 —— 一个期号绝不是"本地某个月的 1 日零点"）。
+//
+// 校验的严格性与修前逐字一致：layout `2006-01` 要求定长零填充，且不接受多余字符
+// （`2026-2` / `2026-13` / `2026-02-01` / `x` 全部报错）。
+func parseBeijingPeriod(period string) (time.Time, error) {
+	label, err := time.Parse("2006-01", period)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Date(label.Year(), label.Month(), 1, 0, 0, 0, 0, time.UTC), nil
 }
 
 // ShouldRunMonthly 判断该订阅这一轮要不要投递月报：
@@ -555,8 +598,10 @@ func GenerateMonthlyReportForPeriod(db *sql.DB, period string) (*ReportBody, err
 //     （GenerateMonthlyReport 取的是"上月"，在本月内不变）并重投 —— 这正是 webadmin
 //     对管理员的承诺"失败会自动重试"。
 //
-// 残留：失败若持续跨过月界，下一轮生成的是最新一期，被跨过的那一期不再补投
-// （单靠一个时间戳表达不了"待补期号"，闭合需要加列，本轮不引入迁移）。
+// 原先记在这里的残留（"失败若持续跨过月界，下一轮生成的是最新一期，被跨过的那一期
+// 不再补投，闭合需要加列"）已由 R21C-01 闭合：`pending_period` 是**最早未投递期号**
+// 的游标，成功投出一期之后由 `nextPendingAfterDelivery` 推进到下一期，逐 tick 按序
+// 补齐（不再有"被跨过的一期"）。本函数只回答"本北京月内是否已成功投过"。
 func ShouldRunMonthly(now time.Time, lastRunAt *time.Time) bool {
 	if lastRunAt == nil {
 		return true

@@ -1,0 +1,535 @@
+package main
+
+// R21C-04（审计 2026-09-26，P3）的判据工具：`main()` 装配行的**可达性**判定。
+//
+// ## 缺陷形态
+//
+// 本包原有的 9 条"源码级判据"（schedulers / background_sync / gateway_reaper /
+// audit_chain / audit_retention / token_retention / usage_retention / legacy_config）
+// 都是 `strings.Index(text, "<调用字面量>")` 的存在性判定。存在性 ≠ 可达性：
+// 把同一行包进 `if false { … }` 后字符串与位置**全部保持不变**，判据照样绿
+// （审计实测 `m_modelsync_deadbranch` ⇒ `go test ./cmd/server/` exit=0），
+// 而注释里却写着"挪进不执行的分支时这一条兜住"。
+//
+// ## 判据（AST 级"不在静态不可执行的构造里"）
+//
+// 解析 `main.go` 的 AST，在 `func main()` 的函数体里找**打印出来包含 match** 的
+// 调用表达式 / 赋值语句，然后沿祖先链判定它有没有落在静态不可执行的构造里：
+//
+//   - `if <编译期常量假> { … }` 的 then 分支；
+//   - `if <编译期常量真> { … } else { … }` 的 else 分支；
+//   - 条件为编译期常量假的 `for`；
+//   - range 一个空集合（`nil` / 空复合字面量）；
+//   - 藏在**没有被装配到任何接缝上的**函数字面量里（不是赋值右侧、也不是立即调用）。
+//
+// 常量判定走 `go/constant`（支持 `false`/`true`、字面量、括号、`!`/一元负号、
+// `&&`/`||`/比较/四则），所以 `if 1 > 2 { … }` 这类"换个写法"的一样挡得住 ——
+// 只钉字面量 `false` 的判据等于只挡一个字符串。
+//
+// ## 边界（诚实声明，不假装完备）
+//
+// `switch` / `select` 的 case 体、`return` 之后的语句、`goto`、以及**调用方看不到
+// 的运行期条件**（`if os.Getenv("X") != ""`）都不在本判据的判别力内。要挡这些形态
+// 需要真正的可达性分析（`go/types` + CFG），代价远超收益；本判据的目标是审计登记
+// 的那一类"整行删掉/包进不执行分支仍绿"。
+
+import (
+	"go/ast"
+	"go/constant"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"os"
+	"strings"
+	"testing"
+)
+
+// assemblySite 是 `main()` 里某个装配点的判定结果。
+type assemblySite struct {
+	// Found 表示 main() 里存在"打印文本包含 match"的调用/赋值语句。
+	Found bool
+	// Matched 是命中的那段的打印文本（诊断用；Found=false 时为空）。
+	Matched string
+	// Dead 表示命中的那段落在静态不可执行的构造里。
+	Dead bool
+	// Why 是 Dead 的原因（也是 Found=false 之外的诊断信息）。
+	Why string
+}
+
+// findMainAssemblySite 在 src 的 `func main()` 函数体里查找装配点并判定可达性。
+func findMainAssemblySite(src []byte, match string) (assemblySite, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", src, 0)
+	if err != nil {
+		return assemblySite{}, err
+	}
+	var body *ast.BlockStmt
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name != nil && fd.Name.Name == "main" && fd.Recv == nil {
+			body = fd.Body
+			break
+		}
+	}
+	if body == nil {
+		return assemblySite{}, nil // 没有 main()：Found=false（判据会红）
+	}
+
+	var stack []ast.Node
+	var found *assemblySite
+	bestDepth := -1
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		switch n.(type) {
+		case *ast.CallExpr, *ast.AssignStmt:
+			text := printNode(fset, n)
+			if !strings.Contains(text, match) {
+				return true
+			}
+			// **最深命中优先**：外层语句的打印文本天然包含内层节点（例如
+			// `_ = func(){ startThing() }` 这条赋值语句就包含内层调用），只取最外层
+			// 会把"藏在未装配闭包里"的形态误判成可达。取最内层命中，才能让判定
+			// 落在真正被匹配的那一段上。
+			if len(stack) <= bestDepth {
+				return true
+			}
+			bestDepth = len(stack)
+			site := assemblySite{Found: true, Matched: text}
+			if why := staticDeadReason(stack[:len(stack)-1], n); why != "" {
+				site.Dead, site.Why = true, why
+			}
+			found = &site
+		}
+		return true
+	})
+	if found == nil {
+		return assemblySite{}, nil
+	}
+	return *found, nil
+}
+
+// printNode 把 AST 节点打印成 gofmt 形状的源码（注释已在解析期丢弃）。
+func printNode(fset *token.FileSet, n ast.Node) string {
+	var b strings.Builder
+	if err := printer.Fprint(&b, fset, n); err != nil {
+		return ""
+	}
+	return b.String()
+}
+
+// requireAssemblyOnMainPath 断言 `main()` 里存在 match 对应的调用/赋值，且它不在
+// 静态不可执行的构造里。why 用于解释"缺了它会怎样"（失败信息要能指导修复）。
+func requireAssemblyOnMainPath(t *testing.T, match, why string) {
+	t.Helper()
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	site, err := findMainAssemblySite(src, match)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	if !site.Found {
+		t.Fatalf("main() 里找不到装配调用 %q —— %s", match, why)
+	}
+	if site.Dead {
+		t.Fatalf("main() 的装配调用 %q 落在静态不可执行的构造里（%s）—— %s\n"+
+			"命中的语句：%s", match, site.Why, why, site.Matched)
+	}
+}
+
+// staticDeadReason 沿祖先链判定 node 是否落在静态不可执行的构造里；返回原因
+// （空串 = 可达）。node 必须是 ancestors 末元素的直接后代。
+func staticDeadReason(ancestors []ast.Node, node ast.Node) string {
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		switch a := ancestors[i].(type) {
+		case *ast.IfStmt:
+			if inSubtree(a.Body, node) {
+				if v, ok := constBool(a.Cond); ok && !v {
+					return "条件在编译期恒假（`if false { … }` 形态）"
+				}
+			}
+			if a.Else != nil && inSubtree(a.Else, node) {
+				if v, ok := constBool(a.Cond); ok && v {
+					return "落在编译期恒真的 if 的 else 分支（永不执行）"
+				}
+			}
+		case *ast.ForStmt:
+			if a.Cond != nil && inSubtree(a.Body, node) {
+				if v, ok := constBool(a.Cond); ok && !v {
+					return "条件在编译期恒假的 for 循环体"
+				}
+			}
+		case *ast.RangeStmt:
+			if inSubtree(a.Body, node) && rangeOverEmpty(a.X) {
+				return "range 一个编译期为空的集合"
+			}
+		case *ast.FuncLit:
+			// 函数字面量只有两种"被装配"的形态：赋值右侧（接缝闭包）或立即调用。
+			// 其它形态（`var _ = func(){ … }`、塞进没人调用的容器）不会被启动路径执行。
+			var parent ast.Node
+			if i > 0 {
+				parent = ancestors[i-1]
+			}
+			if !seamFuncLitParent(parent) {
+				return "藏在未被装配的函数字面量里（既不是赋值右侧，也不是立即调用）"
+			}
+		}
+	}
+	return ""
+}
+
+// inSubtree 用位置区间判定 node 是否落在 outer 之内（Go 的 token 位置单调，足以
+// 区分同一分支内的节点与外层 Init/Cond）。
+func inSubtree(outer, node ast.Node) bool {
+	if outer == nil || node == nil {
+		return false
+	}
+	return outer.Pos() <= node.Pos() && node.End() <= outer.End()
+}
+
+// seamFuncLitParent 报告函数字面量的直接父节点是不是"**装配**"形态。
+//
+// 只放行两类（本仓既有的接缝形态）：
+//   - 插到某个**接缝对象字段**上的赋值（`adminAPI.ReloadAuth = func(){ … }`、
+//     `clientrelease.PublicBaseResolver = func(){ … }`）—— 字段本身就是被别人调用的入口；
+//   - 立即调用（`func(){ … }()`）或作为参数交给会调用它的构造函数。
+//
+// **不放行**局部变量赋值（`f := func(){ … }`）与空白标识符（`_ = func(){ … }`）：
+// 它们完全可能是"定义了却没人调用"，而"包装配进一个没人执行的闭包"正是本判据
+// 要挡的形态之一（只放行字面量赋值会让 `_ = func(){ startThing() }` 静默通过）。
+func seamFuncLitParent(parent ast.Node) bool {
+	switch p := parent.(type) {
+	case *ast.AssignStmt:
+		if len(p.Lhs) != 1 {
+			return false
+		}
+		sel, ok := p.Lhs[0].(*ast.SelectorExpr)
+		return ok && sel.Sel != nil // `x.Field = func(){ … }`（接缝对象）
+	case *ast.CallExpr:
+		return true // 立即调用 / 作为参数交给会调用它的构造函数
+	}
+	return false
+}
+
+// rangeOverEmpty 报告 range 的对象是不是编译期已知为空（nil / 空复合字面量）。
+func rangeOverEmpty(x ast.Expr) bool {
+	switch v := x.(type) {
+	case *ast.Ident:
+		return v.Name == "nil"
+	case *ast.CompositeLit:
+		return len(v.Elts) == 0
+	case *ast.ParenExpr:
+		return rangeOverEmpty(v.X)
+	case *ast.CallExpr:
+		// `make([]T, 0)` / `[]T{}` 之外的形态判不了 ⇒ 保守认为非空。
+		if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "make" && len(v.Args) >= 2 {
+			if n, ok := constInt(v.Args[1]); ok && n == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// constBool 求表达式的编译期布尔值；非常量表达式返回 ok=false。
+func constBool(e ast.Expr) (value bool, ok bool) {
+	v := constValue(e)
+	if v == nil || v.Kind() != constant.Bool {
+		return false, false
+	}
+	return constant.BoolVal(v), true
+}
+
+// constInt 求表达式的编译期整数常量值。
+func constInt(e ast.Expr) (int64, bool) {
+	v := constValue(e)
+	if v == nil || v.Kind() != constant.Int {
+		return 0, false
+	}
+	n, exact := constant.Int64Val(v)
+	return n, exact
+}
+
+// constValue 是**受控的**常量折叠：只处理"判据需要挡住的写法"，任何不确定的
+// 形态一律返回 nil（= 当作运行期条件，判为可达）。折半途 panic 也吞掉转 nil ——
+// 判据宁可漏杀一个畸形写法，也不能因为一个解析不了的表达式把整包测试打红。
+func constValue(e ast.Expr) (out constant.Value) {
+	defer func() {
+		if recover() != nil {
+			out = nil
+		}
+	}()
+	switch x := e.(type) {
+	case *ast.Ident:
+		switch x.Name {
+		case "true":
+			return constant.MakeBool(true)
+		case "false":
+			return constant.MakeBool(false)
+		}
+		return nil
+	case *ast.BasicLit:
+		switch x.Kind {
+		case token.INT, token.FLOAT, token.IMAG, token.CHAR, token.STRING:
+			return constant.MakeFromLiteral(x.Value, x.Kind, 0)
+		}
+		return nil
+	case *ast.ParenExpr:
+		return constValue(x.X)
+	case *ast.UnaryExpr:
+		v := constValue(x.X)
+		if v == nil {
+			return nil
+		}
+		switch x.Op {
+		case token.NOT, token.SUB, token.ADD, token.XOR:
+			return constant.UnaryOp(x.Op, v, 0)
+		}
+		return nil
+	case *ast.BinaryExpr:
+		a, b := constValue(x.X), constValue(x.Y)
+		if a == nil || b == nil {
+			return nil
+		}
+		switch x.Op {
+		case token.LAND, token.LOR:
+			if a.Kind() != constant.Bool || b.Kind() != constant.Bool {
+				return nil
+			}
+			return constant.BinaryOp(a, x.Op, b)
+		case token.EQL, token.NEQ, token.LSS, token.GTR, token.LEQ, token.GEQ:
+			if a.Kind() == constant.String && b.Kind() == constant.String {
+				return constant.MakeBool(constant.Compare(a, x.Op, b))
+			}
+			if a.Kind() == constant.Int && b.Kind() == constant.Int {
+				return constant.MakeBool(constant.Compare(a, x.Op, b))
+			}
+			if a.Kind() == constant.Bool && b.Kind() == constant.Bool &&
+				(x.Op == token.EQL || x.Op == token.NEQ) {
+				return constant.MakeBool(constant.Compare(a, x.Op, b))
+			}
+			return nil
+		case token.ADD, token.SUB, token.MUL, token.QUO, token.REM:
+			if a.Kind() != constant.Int || b.Kind() != constant.Int {
+				return nil
+			}
+			return constant.BinaryOp(a, x.Op, b)
+		}
+		return nil
+	}
+	return nil
+}
+
+// TestMainAssemblyCriterionBitesOnDeadWrapping 是本判据工具的**自证用例**：
+// 它在合成源码上跑同一个判定函数，证明"包进不执行分支"这一形态真的被判死，
+// 而合法的形态（顶层调用、if 初始化语句、条件分支里的装配）不被误杀。
+//
+// 没有这一条，`requireAssemblyOnMainPath` 只是个"看起来很严"的黑盒 ——
+// 它自己也需要能被打坏的证据（判据的判据）。
+func TestMainAssemblyCriterionBitesOnDeadWrapping(t *testing.T) {
+	const live = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	startThing(ctx, nil)
+}
+`
+	const deleted = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	_ = ctx
+}
+`
+	const wrappedIfFalse = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	if false {
+		startThing(ctx, nil)
+	}
+}
+`
+	const wrappedConstFold = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	if 1 > 2 {
+		startThing(ctx, nil)
+	}
+}
+`
+	const wrappedForFalse = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	for false {
+		startThing(ctx, nil)
+	}
+}
+`
+	const wrappedEmptyRange = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	for _, f := range []func(){ } {
+		_ = f
+	}
+	startThing(ctx, nil)
+}
+`
+	const wrappedLooseFuncLit = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	_ = func() {
+		startThing(ctx, nil)
+	}
+}
+`
+	const wrappedLocalClosure = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	f := func() {
+		startThing(ctx, nil)
+	}
+	_ = f
+}
+`
+	const seamAssign = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	holder.Seam = func() {
+		startThing(ctx, nil)
+	}
+}
+`
+	const conditionalButLive = `package main
+
+import (
+	"context"
+	"os"
+)
+
+func main() {
+	ctx := context.Background()
+	if v := os.Getenv("X"); v != "" {
+		startThing(ctx, nil)
+	}
+	if n, err := load(); err == nil {
+		startThing(ctx, nil)
+		_ = n
+	}
+}
+`
+
+	const match = "startThing(ctx, nil)"
+
+	cases := []struct {
+		name    string
+		src     string
+		found   bool
+		dead    bool
+		comment string
+	}{
+		{"顶层调用", live, true, false, "正常装配"},
+		{"整行删掉", deleted, false, false, "存在性判据也能咬到"},
+		{"包进 if false", wrappedIfFalse, true, true, "旧判据杀不死的那一类"},
+		{"包进 if 1 > 2", wrappedConstFold, true, true, "换个写法的常量假条件"},
+		{"包进 for false", wrappedForFalse, true, true, "恒假循环"},
+		{"range 空集合里的装配", wrappedEmptyRange, true, false, "range 的对象非空 ⇒ 循环体可达"},
+		{"空白标识符里的闭包", wrappedLooseFuncLit, true, true, "`_ = func(){ … }` 定义了却没人调用"},
+		{"局部变量里的闭包", wrappedLocalClosure, true, true, "局部闭包可能没人调用（不是接缝）"},
+		{"插到接缝字段上的闭包", seamAssign, true, false, "接缝形态（schedulers.go / auth_assembly.go 家族）必须放行"},
+		{"条件分支但条件非常量", conditionalButLive, true, false, "运行期条件不得误杀（如 RebuildUsageLedger 的 err == nil）"},
+	}
+	for _, c := range cases {
+		got, err := findMainAssemblySite([]byte(c.src), match)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", c.name, err)
+		}
+		if got.Found != c.found || got.Dead != c.dead {
+			t.Fatalf("%s（%s）: Found=%v Dead=%v（why=%q）, want Found=%v Dead=%v —— "+
+				"判据工具的判别力不成立", c.name, c.comment, got.Found, got.Dead, got.Why, c.found, c.dead)
+		}
+		if c.dead && got.Why == "" {
+			t.Fatalf("%s: 判死但没给原因", c.name)
+		}
+	}
+}
+
+// TestMainAssemblyCriterionIsNotVacuousOnRealMainGo 用**真实 main.go** 自证工具没有
+// 恒真/恒假：一个必然不存在的装配字面量必须判 Found=false。
+func TestMainAssemblyCriterionIsNotVacuousOnRealMainGo(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := findMainAssemblySite(src, "thisAssemblyCallDoesNotExistAnywhere(ctx, db)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if site.Found {
+		t.Fatalf("不存在的装配字面量被判为存在（%q）—— 判据工具恒真", site.Matched)
+	}
+}
+
+// TestOldIndexCriterionWasBlindToDeadWrapping 记录并复现 R21C-04 的**缺陷本体**：
+// 旧的 `strings.Index` 判据在"包进 `if false { … }`"这一形态下**照样通过**。
+//
+// 这不是"再补一条判据"，而是判据升级的**必要性证明**：如果旧形态本来就咬得住，
+// 那么 `requireAssemblyOnMainPath` 只是把同一件事写得更复杂（审计 R21C-04 的结论
+// 正是"旧判据杀不死这个 mutant"，实测 `m_modelsync_deadbranch` 在修前
+// `go test ./cmd/server/` exit=0）。
+func TestOldIndexCriterionWasBlindToDeadWrapping(t *testing.T) {
+	const deadSrc = `package main
+
+import "context"
+
+func main() {
+	ctx := context.Background()
+	if false {
+		startThing(ctx, nil)
+	}
+}
+`
+	const call = "startThing(ctx, nil)"
+
+	// 旧判据（存在性）：字面量还在 ⇒ 通过 —— 这正是缺陷本体。
+	if strings.Index(deadSrc, call) < 0 {
+		t.Fatal("旧判据在这个形态下本该通过（字面量仍在文件里）—— 说明本用例的前置不成立")
+	}
+	// 新判据（可达性）：必须判死。
+	site, err := findMainAssemblySite([]byte(deadSrc), call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !site.Found || !site.Dead {
+		t.Fatalf("新判据没能判死 `if false { %s }`（Found=%v Dead=%v）—— "+
+			"升级后的判据与旧判据一样没用", call, site.Found, site.Dead)
+	}
+}

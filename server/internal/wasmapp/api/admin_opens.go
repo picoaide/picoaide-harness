@@ -71,13 +71,22 @@ func (h *Handlers) adminAppOpens(c *gin.Context) {
 // 为什么**严格**只认这一种格式：看板与导出会把它当区间边界用，容忍
 // `2006-1-2`/`06-01-02` 这类变体意味着"同一天有两种字符串表示"，而排障时要靠
 // 肉眼比对 URL 与日志 —— 形状唯一才比得动。
+//
+// 为什么解析必须走 `serverstore.ParseLocalDay`（**不是** `time.Parse`，也不是裸的
+// `time.ParseInLocation(…, time.Local)`）：入参是"调用方眼里的日历日"，而 day 列与
+// `opens.today` 都按**服务端本地日**分桶。`time.Parse` 按 UTC 解释墙钟 ⇒ 负 UTC 偏移
+// 的部署（`America/*`、`Atlantic/*`）上 `2026-09-20` 的本地日期已经是 09-19，整个窗口
+// 左移一天、"今天"被挤出窗口，而同一响应里的 `today{}` 仍是真今天（R21-D-01）；
+// 裸的 `ParseInLocation` 在 DST 缺口日上同样差一天（见 ParseLocalDay 的注释）。
 func parseDayParam(raw string, def time.Time) (time.Time, *apperr.Error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return dayStart(def), nil
 	}
-	t, err := time.Parse("2006-01-02", raw)
+	t, err := serverstore.ParseLocalDay(raw)
 	if err != nil {
+		// 两种失败共用一条消息：形态不对（`2026-1-2`）与"本部署时区没有这一天"
+		// （整日被跳过的时区）。后者极端罕见，不值得为它单独造一个错误码。
 		return time.Time{}, apperr.New(apperr.CodeValidation, "日期格式应为 YYYY-MM-DD").
 			WithDetail("value", clip(raw)).
 			WithHint("例：from=2026-09-01&to=2026-09-19")

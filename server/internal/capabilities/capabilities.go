@@ -99,17 +99,14 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 // 员工侧聚合
 // ---------------------------------------------------------------------------
 
-// viewer resolves the calling user's effective groups and admin flag, or ok=false.
-func viewer(c *gin.Context, db *sql.DB) (u *serverstore.User, groups []string, ok bool) {
-	u = serverauth.CurrentUser(c)
-	if u == nil {
-		return nil, nil, false
-	}
-	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
-	if err != nil {
-		return nil, nil, false
-	}
-	return u, groups, true
+// viewer resolves the calling user's effective groups and admin flag.
+//
+// 三态契约（A2-01，审计 2026-09-26，P2）—— 实现委托给唯一真源
+// `serverauth.ViewerGroups`：`u == nil` ⇒ 未认证（401）、`err != nil` ⇒ 依赖故障
+// （**500**，不得回 401：401 会让客户端清会话并删掉磁盘令牌，一次 PG 抖动就把
+// 全体在线员工登出）。
+func viewer(c *gin.Context, db *sql.DB) (*serverstore.User, []string, error) {
+	return serverauth.ViewerGroups(c, db)
 }
 
 type typeFilter struct {
@@ -388,9 +385,8 @@ func appOwnerMap(db *sql.DB, kind, channel string) map[string]string {
 // 无 source 参数返回全量(向后兼容)。
 func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		u, groups, ok := viewer(c, db)
-		if !ok {
-			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		u, groups, verr := viewer(c, db)
+		if serverauth.WriteViewerError(c, u, verr) {
 			return
 		}
 		src := c.Query("source")

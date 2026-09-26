@@ -936,8 +936,41 @@ type UsageSummary struct {
 // UserUsageSummary 一次取齐员工用量概览(月度/今日/昨日/总计)。
 // 月度复用 UserMonthlyUsage/UserMonthlyCost(与配额判定同一口径);
 // 今日/昨日/总计各一条聚合 SQL,量级为 O(user 行数,走 idx_usage_user_time)。
+//
+// 字段集是**跨端契约**(客户端账号卡的"昨日用量"),只解释取值口径,**不许**改名/增删:
+// 契约对拍在 `server/internal/serverauth/usage_contract_test.go` ↔
+// `packages/client/account-card/src/usage-contract.ts`。
 func UserUsageSummary(db *sql.DB, userID int64) (*UsageSummary, error) {
-	now := time.Now()
+	return userUsageSummaryAt(db, userID, time.Now())
+}
+
+// userUsageSummaryAt 是 UserUsageSummary 的**可注入时刻**形态（判据要在指定时刻上跑：
+// 下面这处时区缺陷只在一年约 2 小时的窗口里出现，不可等待真实时钟）。
+//
+// 「昨日」口径（R21F-03，审计 2026-09-26，P2）：先归一到**北京日**再减一天。
+//
+// 为什么不能写 `now.AddDate(0,0,-1)`（修前形态）：`AddDate` 加/减的是 **time.Local 的
+// 墙钟**，跨本地 DST 切换那一步得到的是 23h/25h 而不是 24h。后果不止"取错一天"——
+// `UserDayUsageCost` 的区间是用**同一个值**推两端（`dayStartArg(d)` 与
+// `dayEndArgInclusive(d)` = d 的下一北京日），而墙钟位移后的值不是北京日期值，
+// 于是一并破坏了两端的关系（`America/Santiago` 真库实测）：
+//
+//	本地夏令时**开始**那一步（23h）：`BeijingDay(d) == BeijingDay(d.AddDate(0,0,1))`
+//	  ⇒ 半开区间塌成**空** ⇒ `yesterday_usage/yesterday_cost` 恒为 0
+//	  （客户端看到"昨天一点没用"）；
+//	本地夏令时**结束**那一步（25h）：两者相差 **2 天** ⇒ 窗口展成 **48h**
+//	  ⇒ 昨日量 = 昨日 + 今日（翻倍）。
+//
+// 触发前提要说清楚：需要**进程 TZ 是带 DST 的时区**且北京墙钟落在午夜前后 1h 内
+// （部署缺省 `TZ=Asia/Shanghai` 或 UTC 不触发）——但产品的日/月口径一律是**北京时间**
+// （`beijing.go` 文件头），所以这里与其它日算术调用点一样，必须在「北京日期值」空间里
+// 做日历算术（`BeijingDay` 的产物是 Location=UTC 的日期值，对它 AddDate 无 DST 缺口；
+// `UserDayUsageCost` 内部同样按北京日归一，两端一致）。
+//
+// 字段集不许因此改动（客户端账号卡的"昨日"是跨端契约，见函数注释）；判据
+// `usage_yesterday_tz_test.go` 在两个切换方向各构造一组输入，断言"正确的北京昨日"
+// 是唯一被算进来的那一桶。
+func userUsageSummaryAt(db *sql.DB, userID int64, now time.Time) (*UsageSummary, error) {
 	s := &UsageSummary{}
 	var err error
 	if s.MonthlyUsage, err = UserMonthlyUsage(db, userID); err != nil {
@@ -949,7 +982,8 @@ func UserUsageSummary(db *sql.DB, userID int64) (*UsageSummary, error) {
 	if s.TodayUsage, s.TodayCost, err = UserDayUsageCost(db, userID, now); err != nil {
 		return nil, err
 	}
-	if s.YesterdayUsage, s.YesterdayCost, err = UserDayUsageCost(db, userID, now.AddDate(0, 0, -1)); err != nil {
+	yesterday := BeijingDay(now).AddDate(0, 0, -1)
+	if s.YesterdayUsage, s.YesterdayCost, err = UserDayUsageCost(db, userID, yesterday); err != nil {
 		return nil, err
 	}
 	if s.TotalUsage, s.TotalCost, err = UserTotalUsageCost(db, userID); err != nil {

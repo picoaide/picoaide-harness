@@ -26,11 +26,11 @@ import (
 // 必须在 Validate 就暴露,而不是等员工安装。
 func TestValidateRejectsCorruptAuxiliaryEntry(t *testing.T) {
 	raw := makeZip(t, map[string][]byte{
-		"SKILL.md":           []byte("---\nname: demo\n---\n\nbody long enough to matter\n"),
-		"references/aux.md":  []byte("auxiliary payload that will be corrupted on purpose\n"),
-		"references/okay.md": []byte("this one stays intact\n"),
+		"SKILL.md":            []byte("---\nname: demo\n---\n\nbody long enough to matter\n"),
+		"references/extra.md": []byte("auxiliary payload that will be corrupted on purpose\n"),
+		"references/okay.md":  []byte("this one stays intact\n"),
 	}, false)
-	corrupt := corruptZipPayload(t, raw, "references/aux.md")
+	corrupt := corruptZipPayload(t, raw, "references/extra.md")
 
 	if _, err := Validate(corrupt, testLim); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("Validate(非必填条目 CRC 损坏) = %v, want ErrCorrupt(上传期就该拒,员工安装时才炸太晚)", err)
@@ -41,8 +41,8 @@ func TestValidateRejectsCorruptAuxiliaryEntry(t *testing.T) {
 	}
 	// tar.gz 侧同口径。
 	tarRaw := makeTarGz(t, map[string]string{
-		"SKILL.md":          "---\nname: demo\n---\n\nbody long enough to matter\n",
-		"references/aux.md": "auxiliary payload\n",
+		"SKILL.md":            "---\nname: demo\n---\n\nbody long enough to matter\n",
+		"references/extra.md": "auxiliary payload\n",
 	}, false)
 	if _, err := Validate(tarRaw, testLim); err != nil {
 		t.Fatalf("Validate(完好 tar.gz) = %v, want nil", err)

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -251,6 +252,18 @@ func writeError(c *gin.Context, status int, code, msg string) { WriteError(c, st
 // 0057: 强制改密守卫 —— password_must_change 用户仅可调用改密/me/logout,
 // 其余业务接口一律 403 PASSWORD_CHANGE_REQUIRED(客户端在完成改密前不得
 // 使用任何业务能力, 防止绕过强制改密拦截直接使用)。
+//
+// A2-01（审计 2026-09-26，P2）：`VerifyToken` 的错误必须**分类**，不能再一律 401 ——
+//
+//   - **凭证被拒**（不存在/吊销/过期/用户不存在或停用）⇒ 401 `AUTH_FAILED`（语义不变）；
+//   - **依赖不可用**（存储故障/连接池耗尽/语句超时/上下文取消）⇒ **500 `INTERNAL`**，
+//     文案显式说明是服务端暂时不可用。
+//
+// 为什么分类是必须的（不是"更精确"而是"更安全"）：客户端把任何 401 读作
+// `auth_expired`，而 `auth_expired` 的处理是**清会话 + 删掉磁盘上的令牌**
+// （`$DSH_HOME/session.json`）⇒ 一次 PG 抖动就让全体在线员工被登出、LDAP/OIDC 用户
+// 还要重走 IdP。5xx 对客户端是"保留令牌、稍后重试"。方向仍是 fail-closed
+// （不会放行任何未验证的请求），改的只是"谁该被登出"。
 func BearerAuth(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := bearerToken(c)
@@ -260,7 +273,12 @@ func BearerAuth(db *sql.DB) gin.HandlerFunc {
 		}
 		u, err := VerifyToken(db, raw)
 		if err != nil {
-			writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "令牌无效或已过期")
+			if IsAuthRejection(err) {
+				writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "令牌无效或已过期")
+				return
+			}
+			log.Printf("auth: verify token failed (dependency, not a rejection): %v", err)
+			writeError(c, http.StatusInternalServerError, "INTERNAL", "认证服务暂时不可用，请稍后重试")
 			return
 		}
 		if u.PasswordMustChange && !passwordChangeAllowed(c.Request) {
@@ -271,6 +289,49 @@ func BearerAuth(db *sql.DB) gin.HandlerFunc {
 		c.Set(CtxTokenKey, raw)
 		c.Next()
 	}
+}
+
+// ViewerGroups 解析"资源可见性 viewer"需要的两件东西：调用者与它的有效组
+// （部门树继承，见 serverstore.UserEffectiveGroups）。返回值是三态契约
+// （A2-01，审计 2026-09-26，P2）—— **唯一实现**：技能面三处（sharedskills /
+// marketplace / capabilities）的 viewer 都委托到这里，不得各写一份：
+//
+//	u == nil, err == nil —— 未认证（调用方回 401 AUTH_REQUIRED）；
+//	u != nil, err != nil —— 依赖故障（组查询失败；调用方回 **500**，不得回 401）；
+//	u != nil, err == nil —— 正常。
+//
+// 为什么"组查询失败"绝不能回 401：那会让客户端清会话 + 删磁盘令牌，一次 PG 抖动
+// 就把全体在线员工登出（完整机理见 ErrAuthRejected 的注释）。
+func ViewerGroups(c *gin.Context, db *sql.DB) (*serverstore.User, []string, error) {
+	u := CurrentUser(c)
+	if u == nil {
+		return nil, nil, nil
+	}
+	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
+	if err != nil {
+		return u, nil, err
+	}
+	return u, groups, nil
+}
+
+// WriteViewerError 把 ViewerGroups 的失败写成一个**分类正确**的响应，并报告是否已写出：
+//
+//	未认证          ⇒ 401 AUTH_REQUIRED
+//	组查询依赖故障  ⇒ 500 INTERNAL（**不是** 401 —— 见 ViewerGroups 的注释）
+//
+// 三个技能面（组织技能 / 市场技能 / 能力中心聚合）共用这一处出口，避免
+// "这一面 401、那一面 500"的口径分裂。
+func WriteViewerError(c *gin.Context, u *serverstore.User, err error) bool {
+	switch {
+	case err == nil && u != nil:
+		return false
+	case err != nil:
+		log.Printf("auth: viewer group lookup failed (dependency, not a rejection) at %s: %v", c.FullPath(), err)
+		WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权查询失败，请稍后重试")
+	default:
+		WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+	}
+	return true
 }
 
 // passwordChangeAllowed 是强制改密态的白名单: 仅改密本身/查看自身信息/登出。

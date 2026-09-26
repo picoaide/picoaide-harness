@@ -91,10 +91,11 @@ func TestStartupCallsAuditChainScheduler(t *testing.T) {
 	}
 	text := string(src)
 	call := "startAuditChainScheduler(ctx, db, auditchain.DefaultTick)"
+	// R21C-04（审计 2026-09-26，P3）：存在性 ≠ 可达性 —— 这一条按 AST 判"该调用落在
+	// main() 的静态可达路径上"（`strings.Index` 判据挡不住"整行包进 `if false { … }`"，
+	// 审计实测该形态下整包仍绿）。
+	requireAssemblyOnMainPath(t, call, "审计链在稳态下没有执行者（篡改不重启就不告警）")
 	idx := strings.Index(text, call)
-	if idx < 0 {
-		t.Fatalf("main() 未调用 %s —— 审计链在稳态下没有执行者（篡改不重启就不告警）", call)
-	}
 	ctxIdx := strings.Index(text, "ctx, stop := signal.NotifyContext(")
 	if ctxIdx < 0 {
 		t.Fatal("main() 里找不到 signal ctx 的定义（判据锚点漂移）")

@@ -234,8 +234,33 @@ func TestCrossMonthFailureKeepsPendingPeriod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if subs[0].PendingPeriod != "" || subs[0].LastError != "" {
-		t.Fatalf("补投成功后 pending_period/last_error 必须清空: %+v", subs[0])
+	if subs[0].LastError != "" {
+		t.Fatalf("补投成功后 last_error 必须清空: %+v", subs[0])
+	}
+	// R21C-01（审计 2026-09-26，P1）：补投一期成功**不等于**欠投补完 —— 10/1 这一刻
+	// 9 月那一期也到期了，游标必须推进到它。修前这里被清空 ⇒ 2026-09 永久不投
+	// （本用例当时把这句错误契约写成了断言）。
+	if subs[0].PendingPeriod != "2026-09" {
+		t.Fatalf("补投 2026-08 成功后 pending_period = %q, want %q —— "+
+			"游标必须推进到下一期，而不是投出一期就清空（清空 = 中间各期永久丢失）",
+			subs[0].PendingPeriod, "2026-09")
+	}
+	// 再跑一轮：把推进后的那一期投出去。投到"当前应投期"才是欠投补完 ⇒ 游标清空。
+	if err := NewScheduler(db, time.Hour, func() time.Time { return oct }).tryRun(); err != nil {
+		t.Fatalf("补齐推进后那一期的轮次不该失败: %v", err)
+	}
+	mu.Lock()
+	got = append([]string{}, periods...)
+	mu.Unlock()
+	if len(got) != 3 || got[2] != "2026-09" {
+		t.Fatalf("补齐后的投递期号 = %v, want [2026-08 2026-08 2026-09] —— "+
+			"游标推进之后必须真的把下一期投出去", got)
+	}
+	if subs, err = serverstore.ListReportSubscriptions(db); err != nil {
+		t.Fatal(err)
+	}
+	if subs[0].PendingPeriod != "" {
+		t.Fatalf("投到当前应投期之后 pending_period = %q, want 空（欠投已补完）", subs[0].PendingPeriod)
 	}
 }
 
