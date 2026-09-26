@@ -2288,3 +2288,52 @@ account-card（`adopt`/`cancelInflight`/`owns`）、host-locale、memory-evolve 
 **另（有意设计，未判为缺陷）**：memory-evolve 的本地 HTTP 面（`lib/http-guard.js`）口径是
 "GET/HEAD 只读放行、不要求持有性证明" ⇒ 本机任意进程可读全部记忆/待办/书签/广播消息。
 模块头写明是有意设计；建议把"只读面是否也应加持有性证明"单独立项（属产品决策）。
+
+---
+
+### §7.66 第二十七轮主控自查：**`yarn.lock` 与 `package.json` 脱同步 ⇒ CI 第一步就会红**（P1，已修）
+
+**发现方式**：主控在恢复被并发 `yarn install` 打断的环境时，跑 `corepack yarn install --immutable`
+得到 **YN0028**（`The lockfile would have been modified by this install, which is explicitly forbidden`），
+差异行正是：
+```
++    "@electron/fuses": "npm:^1.8.0"
+```
+即 **FIX-33 把 `@electron/fuses` 加进了 `packages/host/desktop/package.json` 的 devDependencies，
+却没有同步 `yarn.lock`**。FIX-33 的报告里写的是「yarn.lock 已有该描述符 ⇒ **无需改锁文件**」——
+**该判断是错的**：描述符作为**传递依赖**存在，与"某个 workspace 自己声明了它"是两件事，
+后者必须写进 yarn.lock 里该 workspace 的 `dependencies` 块。
+
+**后果（为什么是 P1 而不是 P3）**：CI 的每一个 job 都以 `yarn install --immutable` 作为**第一个**
+yarn 步骤（`.github/workflows/ci.yml` 共 5 处）；锁文件不一致 ⇒ **install 步直接失败**，
+后面 `yarn check`（32 任务）、Go server、三平台桌面构建、release **全部跑不到**。
+也就是说：`2f3f125044` 这个提交**在任何 CI 上都不可能通过**。
+
+**为什么两道路径都没拦住（这是本条最值得记的部分）**：
+
+1. **修复泳道自己没拦住**：FIX-33 的验收是 `vitest` + `tsc` + 若干守卫 —— 这些**都不读锁文件**，
+   也不重新 install。它把"锁文件里存在这个描述符"当成了"锁文件不需要改"。
+2. **主控的全量门禁没拦住**：`corepack yarn check`（= `scripts/check-workspaces.mjs` + 根守卫）
+   **不执行任何 install**，它假定 `node_modules` 已经就绪（这正确且是提速的关键）。
+   而 CI 是「先 `yarn install --immutable`，再 `yarn check`」两个**分离的步骤** ⇒
+   **install 期的失败在本地门禁里结构上不可见**。
+   这与仓库文档里"本地 `yarn check` 与 CI gate job 完全同义"的说法存在**口径缺口**。
+3. **已有的 `scripts/check-install-integrity.mjs` 不管这个**：它守的是 **install 期代码完整性**
+   （第十二轮 R12-D-01 的 yarn 插件/工作区生命周期钩子改写判据执行体那类 P0），
+   判据输入是 git 对象与 `.yarnrc.yml`/`package.json` 的**形状**，**不比对锁文件与声明的一致性**。
+
+**修法**：`corepack yarn install`（非 immutable）重生成锁文件 ⇒ 只增 1 行；随后
+`corepack yarn install --immutable` **EXIT=0**（自证一致）。已入库（见提交）。
+
+**新纪律（写进 §0.3 的话术里）**：**凡是改了任何 workspace `package.json` 的依赖声明，
+验收必须包含一次 `corepack yarn install --immutable`** ——
+它是唯一能在本地复现"CI 第一步"的判据，且比全量 `yarn check` 快得多（本例 ~7s）。
+**候选守卫（未实施，登记为待办）**：一条"锁文件与全部 workspace 依赖声明一致"的本地判据
+（等价于 `yarn install --immutable --mode=skip-build` 或 `yarn dedupe --check` 形态），
+接进根守卫，让这个口径缺口在本地闭合。属独立课题（要选形态、要评估耗时与离线可用性）。
+
+**同批的第二条认账（环境）**：本轮审计期间有**并发 `yarn install`** 把 `node_modules` 撕开，
+导致 ①AA1 的副本出现 `Cannot find package '@picoaide/…'` 假红、②主控在 lane 运行期跑的那次全量门禁
+出现 `tests/app-ai-release-gate.spec.ts` 两条失败。**恢复 `node_modules` 后该 spec 单跑 6/6 绿**
+⇒ 那次门禁红是**环境性**，不是 FIX-35 的回归。教训：**`node_modules` 被并发 install 撕开的窗口内，
+任何测试结论都不算数**；且**门禁不得在 lane 正在改树时跑**（我这次犯了，白跑 614s）。

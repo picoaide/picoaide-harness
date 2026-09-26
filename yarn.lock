@@ -8549,6 +8549,7 @@ __metadata:
     "@deepseek-ai/dsh-workspace": "npm:0.1.6-alpha.2"
     "@deepseek-ai/schemastery": "npm:^3.18.2"
     "@electron/asar": "npm:3.4.1"
+    "@electron/fuses": "npm:^1.8.0"
     "@modelcontextprotocol/sdk": "npm:^1.30.0"
     "@picoaide/dsh-account-card": "workspace:*"
     "@picoaide/dsh-browser": "workspace:*"
