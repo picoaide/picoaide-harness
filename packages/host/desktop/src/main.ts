@@ -21,10 +21,8 @@ import {
 // `app.whenReady()` 之前 append，所以在模块作用域接线（与 APP_ORIGIN_SCHEME 同理）。
 import {
   applySystemProxyPolicy,
-  enforceDirectNodeTransport,
-  lateAllowSystemProxyWarning,
+  enforceDirectTransport,
   resolveSystemProxyPolicy,
-  stripProxyEnvironment,
 } from './network-policy.ts'
 // 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
 // Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
@@ -439,26 +437,22 @@ async function start(): Promise<void> {
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
     // 出口策略的第二刀（第一刀是模块作用域的 no-proxy-server，只管 Chromium）：
-    //  · Node 栈：宿主机若显式设了 NODE_USE_ENV_PROXY，Node 在**启动时**就装好了
-    //    走代理的全局 dispatcher —— 事后删环境变量无效，只能换成直连 Agent；
-    //  · 子进程：agent 的 curl/git/MCP stdio 由 scrubbedParentEnv() 从 process.env
-    //    派生，删掉代理名它们才真正直连。放在 loadLayeredEnv 之后，连 home `.env`
-    //    注入的代理名一起清掉。
-    // 判定用**删除前**的环境（NODE_USE_ENV_PROXY 本身马上就要被删掉）。
-    if (!SYSTEM_PROXY_POLICY.allow) {
-      const transport = await enforceDirectNodeTransport(process.env)
-      if (transport === 'swapped') {
-        electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)
-      } else if (transport === 'unavailable') {
-        electronLogger.error(`${BIN_NAME}: NODE_USE_ENV_PROXY is set but undici is unavailable; Node-side requests may still use the environment proxy`)
-      }
-      const late = lateAllowSystemProxyWarning(process.env, SYSTEM_PROXY_POLICY)
-      if (late !== undefined) electronLogger.error(`${BIN_NAME}: ${late}`)
-      const cleared = stripProxyEnvironment(process.env)
-      if (cleared.length > 0) {
-        electronLogger.error(`${BIN_NAME}: cleared proxy environment for this run (${cleared.join(', ')})`)
-      }
-    } else {
+    // Node 栈换直连 dispatcher + 删掉子进程会继承的代理环境变量。**逻辑在
+    // `network-policy.ts` 的 `enforceDirectTransport()` 里**（可注入 deps 的行为判据在
+    // tests/network-policy.spec.ts）—— 内联在这里时"这段真的会跑"只有文本位置判据，
+    // 掏成 `if (false && …)` 后门禁 18/18 全绿、真机探针也不经过这段控制流
+    // （2026-09-25 审计 B1-03）。
+    const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)
+    if (enforcement.transport === 'swapped') {
+      electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)
+    } else if (enforcement.transport === 'unavailable') {
+      electronLogger.error(`${BIN_NAME}: NODE_USE_ENV_PROXY is set but undici is unavailable; Node-side requests may still use the environment proxy`)
+    }
+    if (enforcement.lateWarning !== undefined) electronLogger.error(`${BIN_NAME}: ${enforcement.lateWarning}`)
+    if (enforcement.cleared.length > 0) {
+      electronLogger.error(`${BIN_NAME}: cleared proxy environment for this run (${enforcement.cleared.join(', ')})`)
+    }
+    if (!enforcement.enforced) {
       electronLogger.error(`${BIN_NAME}: system proxy use is enabled by ${SYSTEM_PROXY_POLICY.source}; host proxy settings apply to every request`)
     }
     const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')

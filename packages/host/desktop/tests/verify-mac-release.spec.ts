@@ -138,4 +138,26 @@ describe('macOS release artifact verification', () => {
       .map(inner => (inner instanceof Error ? inner.message : String(inner)))
       .join('\n')).toContain('CFBundleIconFile=icon.icns')
   })
+
+  // 产物身份（B1-02）：签名/公证/Gatekeeper 全绿也不代表包声称的身份是本次构建声明的那个。
+  // 变异：发布路径的调用点退回 `assertMacBundleConsistency(appPath)` ⇒ 本用例红。
+  it('rejects a real bundle whose CFBundleIdentifier is not the identity this build declares', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness', {
+      identifier: 'com.example-vendor.other',
+    })
+    const harness = options({ makeMountPoint: () => root })
+
+    let caught: unknown
+    try {
+      verifyMacRelease(harness.value)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors
+      .map(inner => (inner instanceof Error ? inner.message : String(inner)))
+      .join('\n')).toContain('but this build declares')
+  })
 })

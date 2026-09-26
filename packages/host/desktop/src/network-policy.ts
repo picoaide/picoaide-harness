@@ -211,3 +211,60 @@ async function loadUndici(): Promise<NodeDispatcherModule> {
   // 动态 import：纯 Node 单测不加载它，且打包后按 node_modules 解析。
   return await import('undici') as unknown as NodeDispatcherModule
 }
+
+/** {@link enforceDirectTransport} 的注入接缝（生产用缺省实现，测试注入替身）。 */
+export interface DirectTransportEnforcementDeps {
+  /** 撤销 Node 的 env-proxy dispatcher（缺省 {@link enforceDirectNodeTransport}）。 */
+  readonly enforceNodeTransport?: (env: NodeJS.ProcessEnv) => Promise<NodeTransportOutcome>
+  /** 删除代理环境变量（缺省 {@link stripProxyEnvironment}）。 */
+  readonly stripEnvironment?: (env: NodeJS.ProcessEnv) => readonly string[]
+}
+
+/** {@link enforceDirectTransport} 的执行结论（调用方据此打启动日志）。 */
+export interface DirectTransportEnforcement {
+  /** 策略是否**禁止**代理。false 时没有任何副作用（调用方只记一行"允许代理"）。 */
+  readonly enforced: boolean
+  /** Node dispatcher 的处置结果（未强制执行时为 undefined）。 */
+  readonly transport: NodeTransportOutcome | undefined
+  /** 实际被删掉的代理环境变量名（按删除顺序）。 */
+  readonly cleared: readonly string[]
+  /** `.env` 分层里那个"太晚"的排障开关说明（没有这种情况时为 undefined）。 */
+  readonly lateWarning: string | undefined
+}
+
+/**
+ * **强制执行"默认禁止代理"**：把策略落到 Node 栈与子进程两侧。
+ *
+ * 这是 `main.ts` 的 `start()` 里那一段控制流的**唯一实现**（2026-09-25 审计 B1-03）：
+ * 早先它是内联在 `start()` 里的一个 `if (!SYSTEM_PROXY_POLICY.allow) { … }` 块，而"这段
+ * 真的会跑"当时只有**源码文本位置**判据（`indexOf` 比较），把它掏成 `if (false && …)`
+ * 后 18/18 全绿、真机探针也不经过这段控制流 ⇒ Node 栈与子进程侧的代理剥离可以静默失效。
+ * 抽成可调用函数后，"执行过一次 ⇒ 副作用真的发生"变成注入假 deps 就能断言的行为判据。
+ *
+ * 顺序有语义（每一步都依赖**删除前**的环境）：
+ *  1. {@link enforceDirectNodeTransport}：Node 在**启动时**按 `NODE_USE_ENV_PROXY` 装好了
+ *     走代理的全局 dispatcher，只能是换掉它（旧行为的判据也要在这个变量被删之前读）；
+ *  2. {@link lateAllowSystemProxyWarning}：看的是 `.env` 分层注入的排障开关（同样不能被
+ *     第 3 步影响）；
+ *  3. {@link stripProxyEnvironment}：子进程（agent 的 curl/git/MCP stdio）由
+ *     `scrubbedParentEnv()` 从 `process.env` 派生，删掉代理名它们才真正直连。
+ * @param env - 通常是 `process.env`（第 3 步**原地修改**它）。
+ * @param policy - {@link resolveSystemProxyPolicy} 的结果。
+ * @param deps - 注入接缝（测试替身）。
+ * @returns 执行结论；**策略允许代理时一个副作用都不产生**（`enforced: false`）。
+ */
+export async function enforceDirectTransport(
+  env: NodeJS.ProcessEnv,
+  policy: SystemProxyPolicy,
+  deps: DirectTransportEnforcementDeps = {},
+): Promise<DirectTransportEnforcement> {
+  if (policy.allow) {
+    return { enforced: false, transport: undefined, cleared: [], lateWarning: undefined }
+  }
+  const enforceNodeTransport = deps.enforceNodeTransport ?? (target => enforceDirectNodeTransport(target))
+  const stripEnvironment = deps.stripEnvironment ?? stripProxyEnvironment
+  const transport = await enforceNodeTransport(env)
+  const lateWarning = lateAllowSystemProxyWarning(env, policy)
+  const cleared = stripEnvironment(env)
+  return { enforced: true, transport, cleared, lateWarning }
+}

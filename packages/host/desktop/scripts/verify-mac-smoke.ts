@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
 import { assertMacBundleConsistency } from './mac-bundle-consistency.ts'
-import { packagedProductName } from './channel-build.ts'
+import { packagedAppId, packagedProductName } from './channel-build.ts'
 import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
@@ -158,10 +158,11 @@ export function verifyMacSmoke(
       options.run('lipo', [nativePath, '-verify_arch', entry.arch])
     }
 
-    // 包内一致性（图标键 ↔ .icns、可执行文件、asar 布局与 ElectronAsarIntegrity 指纹）：
-    // 结构检查全过也可能是一份"图标指不到文件 / asar offset 表错乱"的包，那种包双击
-    // 之后才暴露（图标变问号、`Invalid package config`），必须在 DMG 验证阶段拦住。
-    assertMacBundleConsistency(appPath)
+    // 包内一致性（图标键 ↔ .icns、可执行文件、asar 布局与 ElectronAsarIntegrity 指纹、
+    // **产物身份**）：结构检查全过也可能是一份"图标指不到文件 / asar offset 表错乱 /
+    // bundle id 回落别的身份"的包，那种包双击之后才暴露（图标变问号、
+    // `Invalid package config`、装上去与官方版互相覆盖），必须在 DMG 验证阶段拦住。
+    assertMacBundleConsistency(appPath, undefined, { expectedIdentifier: packagedAppId() })
   } catch (cause) {
     failure = cause
   }

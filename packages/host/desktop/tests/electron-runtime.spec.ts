@@ -1,3 +1,4 @@
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1491,3 +1492,181 @@ describe('崩溃回退：框架判据 + 串行化（B-01/B-03）', () => {
     await release()
   })
 })
+
+/**
+ * 主窗口导航闸门（B1-04）：`will-navigate` / `will-frame-navigate` / `will-redirect`
+ * 必须共用**同一个** origin 判据闭包。
+ *
+ * 2026-09-25 审计实测：删掉 `will-redirect` 那一行注册后本文件 44/44 全绿 —— 302 把窗口
+ * 换到外站/别的 origin 这类回归可以静默落地。应用窗口（`@picoaide/dsh-wasm-apps-host`）
+ * 的那一份有判据（`electron-adapter.spec.ts` 的「302 与 will-navigate 共用同一判据」），
+ * 主窗口是同一不变量的第二条路径，此前零判据。
+ *
+ * 三层判据：①纯函数行为；②挂载后**真注册进去的闭包**（同一引用 + 真的拒外源）；
+ * ③源码 AST 接线（注释掉任一注册即"调用不存在"，换行/折行不影响）。
+ */
+describe('主窗口导航闸门：三事件共用同一判据（B1-04）', () => {
+  const SHELL_ORIGIN = 'http://127.0.0.1:43120'
+  const NAVIGATION_EVENTS = ['will-navigate', 'will-frame-navigate', 'will-redirect'] as const
+
+  beforeEach(() => {
+    electron.browserWindows.length = 0
+    electron.browserWindowOptions.length = 0
+    electron.loadURL.mockClear()
+    vi.clearAllMocks()
+    electron.loadURL.mockResolvedValue(undefined)
+  })
+
+  /** 挂好窗口，返回释放函数与那个窗口的替身。 */
+  async function mountedShell(): Promise<{
+    release: () => Promise<void>
+    window: InstanceType<typeof electron.BrowserWindow>
+  }> {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const logger = { error: vi.fn(), errorCause: vi.fn() }
+    const runtime = new ElectronDesktopRuntime(async () => {}, undefined, logger)
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+    return { release, window: electron.browserWindows.at(-1)! }
+  }
+
+  it('行为：同源放行，外源/异端口/畸形 URL 一律拒（fail-closed）', async () => {
+    const { refuseForeignNavigation } = await import('../src/electron-runtime.ts')
+    const refuse = refuseForeignNavigation(SHELL_ORIGIN)
+    const attempt = (url: string) => ({ url, preventDefault: vi.fn() })
+
+    const same = attempt(`${SHELL_ORIGIN}/session/1?x=1`)
+    refuse(same)
+    expect(same.preventDefault, '同源的正常跳转必须放行').not.toHaveBeenCalled()
+
+    for (const url of ['https://example.com/', 'http://127.0.0.1:43121/', 'file:///etc/hostname', 'not a url']) {
+      const event = attempt(url)
+      refuse(event)
+      expect(event.preventDefault, `${url} 必须被拒（origin 判据含 scheme/主机/端口）`).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('行为：mount 后三个事件都注册了**同一个**闭包，且每个都真的拒外源放同源', async () => {
+    const { release, window } = await mountedShell()
+    const registrations = new Map<string, (...args: never[]) => void>()
+    for (const call of window.webContents.on.mock.calls as Array<[string, (...args: never[]) => void]>) {
+      if ((NAVIGATION_EVENTS as readonly string[]).includes(call[0])) registrations.set(call[0], call[1])
+    }
+
+    expect([...registrations.keys()].sort(), '三个导航事件都必须注册（缺任一 = 那条路径无人守）')
+      .toEqual([...NAVIGATION_EVENTS].sort())
+    const handlers = [...registrations.values()]
+    expect(new Set(handlers).size, '三个事件必须是同一个闭包（不是三份"看起来一样"的实现）').toBe(1)
+
+    for (const [event, handler] of registrations) {
+      const foreign = { url: 'https://example.com/', preventDefault: vi.fn() }
+      handler(foreign as never)
+      expect(foreign.preventDefault, `${event} 上的判据必须拒外源`).toHaveBeenCalledTimes(1)
+      const same = { url: `${SHELL_ORIGIN}/session/1`, preventDefault: vi.fn() }
+      handler(same as never)
+      expect(same.preventDefault, `${event} 上的判据必须放行同源`).not.toHaveBeenCalled()
+    }
+
+    await release()
+    const offEvents = (window.webContents.off.mock.calls as Array<[string, unknown]>)
+      .filter(([name]) => (NAVIGATION_EVENTS as readonly string[]).includes(name))
+    expect(offEvents.map(([name]) => name).sort(), '释放必须成对摘掉三个注册（否则重复 mount 会叠加判据）')
+      .toEqual([...NAVIGATION_EVENTS].sort())
+    for (const [, handler] of offEvents) expect(handler).toBe(handlers[0])
+  })
+
+  it('接线（AST）：闭包来自 refuseForeignNavigation(origin)，注释掉任一注册即红', () => {
+    const source = readFileSync(fileURLToPath(new URL('../src/electron-runtime.ts', import.meta.url)), 'utf8')
+    const wiring = findNavigationWiring(source, 'electron-runtime.ts')
+    expect(wiring.factory, '闭包必须来自 refuseForeignNavigation(origin)（唯一实现，不得就地重写）')
+      .toBe('refuseForeignNavigation')
+    expect(wiring.on.map(entry => entry.event).sort(), '三事件缺一即红').toEqual([...NAVIGATION_EVENTS].sort())
+    expect(new Set(wiring.on.map(entry => entry.handler)).size, '三事件必须共用同一个处理器标识符').toBe(1)
+    expect(wiring.on[0]?.handler).toBe(wiring.declared)
+    expect(wiring.off.map(entry => entry.event).sort(), '摘除必须成对').toEqual([...NAVIGATION_EVENTS].sort())
+    expect(new Set(wiring.off.map(entry => entry.handler)).size).toBe(1)
+    expect(wiring.off[0]?.handler).toBe(wiring.declared)
+
+    // 自检：判据本身必须能区分"注释掉"（假绿方向）与"换行改写"（误伤方向）。
+    const canonical = "const refuseNavigation = refuseForeignNavigation(origin)\n"
+      + "window.webContents.on('will-navigate', refuseNavigation)\n"
+      + "window.webContents.on('will-frame-navigate', refuseNavigation)\n"
+      + "window.webContents.on('will-redirect', refuseNavigation)\n"
+      + "window.webContents.off('will-redirect', refuseNavigation)\n"
+    expect(findNavigationWiring(canonical, 'x.ts').on).toHaveLength(3)
+    // 逐行注释（`// ` 只作用于一行 —— 单行前缀会把后三行留成真代码，判据自检先栽在这）。
+    const commented = canonical.split('\n').map(line => (line === '' ? line : `// ${line}`)).join('\n')
+    expect(findNavigationWiring(commented, 'x.ts').on).toEqual([])
+    expect(findNavigationWiring(canonical.replace("window.webContents.on('will-redirect', refuseNavigation)\n", ''), 'x.ts').on)
+      .toHaveLength(2)
+    const reformatted = "const refuseNavigation = refuseForeignNavigation(\n  origin,\n)\n"
+      + "window.webContents.on(\n  'will-redirect',\n  refuseNavigation,\n)\n"
+    expect(findNavigationWiring(reformatted, 'x.ts').on).toEqual([{ event: 'will-redirect', handler: 'refuseNavigation' }])
+  })
+})
+
+/** 一个导航事件注册点在语法树里的投影。 */
+interface NavigationRegistration {
+  readonly event: string
+  readonly handler: string | undefined
+}
+
+/**
+ * 找 `webContents.on/off('<will-…>', <handler>)` 与处理器闭包的来源。
+ *
+ * 在语法树上找：注释不是节点 ⇒ 注释掉注册 = "注册不存在"；空白与折行不改变 AST ⇒
+ * 语义等价的改写仍能找到（本仓 tests/profile-context-wiring.spec.ts 的模块头记录过
+ * 纯 `toContain` 在两个方向上同时失效的事故）。
+ * @param source - TypeScript 源码。
+ * @param fileName - 诊断与 ScriptKind 判定用。
+ * @returns `refuseForeignNavigation(…)` 的绑定名、`on`/`off` 注册点。
+ */
+function findNavigationWiring(source: string, fileName: string): {
+  readonly declared: string | undefined
+  readonly factory: string | undefined
+  readonly on: readonly NavigationRegistration[]
+  readonly off: readonly NavigationRegistration[]
+} {
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  let declared: string | undefined
+  let factory: string | undefined
+  const on: NavigationRegistration[] = []
+  const off: NavigationRegistration[] = []
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer !== undefined
+      && ts.isCallExpression(node.initializer)
+      && ts.isIdentifier(node.initializer.expression)
+      && node.initializer.expression.text === 'refuseForeignNavigation'
+    ) {
+      declared = node.name.text
+      factory = node.initializer.expression.text
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const method = node.expression.name.text
+      const receiver = node.expression.expression
+      const onWebContents = ts.isPropertyAccessExpression(receiver) && receiver.name.text === 'webContents'
+      const first = node.arguments[0]
+      const second = node.arguments[1]
+      if (
+        onWebContents
+        && (method === 'on' || method === 'off')
+        && first !== undefined
+        && ts.isStringLiteralLike(first)
+        && first.text.startsWith('will-')
+      ) {
+        const entry: NavigationRegistration = {
+          event: first.text,
+          handler: second !== undefined && ts.isIdentifier(second) ? second.text : undefined,
+        }
+        if (method === 'on') on.push(entry)
+        else off.push(entry)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return { declared, factory, on, off }
+}

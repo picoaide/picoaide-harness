@@ -19,7 +19,7 @@ interface AppFixture {
   readonly modeOverrides: Map<string, number>
 }
 
-function fixture(): AppFixture {
+function fixture(overrides: { readonly identifier?: string } = {}): AppFixture {
   const root = mkdtempSync(join(tmpdir(), 'dsh-mac-smoke-'))
   temporaryRoots.push(root)
   const contents = join(root, 'PicoAide Harness.app', 'Contents')
@@ -30,8 +30,9 @@ function fixture(): AppFixture {
   const appAsar = join(resources, 'app.asar')
   const modeOverrides = new Map<string, number>()
   // 包内一致性判据要求图标键指向真实 icns、且 ElectronAsarIntegrity 与 asar 头部一致，
-  // 所以夹具用共享的 mac-bundle-fixture 写一份自洽的最小包。
-  writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+  // 所以夹具用共享的 mac-bundle-fixture 写一份自洽的最小包。`identifier` 缺省 = 官方
+  // 身份（= 未做渠道构建时 `packagedAppId()` 的取值），传别的值用于身份判据的反向用例。
+  writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness', overrides)
   modeOverrides.set(executable, 0o755)
   for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
     const path = join(`${appAsar}.unpacked`, entry.path)
@@ -180,6 +181,16 @@ describe('macOS DMG smoke artifact verification', () => {
     const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
 
     expectSmokeFailure(harness, 'CFBundleIconFile=icon.icns')
+    expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
+  })
+
+  it('rejects a bundle whose CFBundleIdentifier is not the identity this build declares', () => {
+    // 产物身份（B1-02）：冒烟判据自己必须把 `packagedAppId()` 传进包内一致性判据。
+    // 变异：调用点退回 `assertMacBundleConsistency(appPath)` ⇒ 本用例红（错身份的包被放过）。
+    const value = fixture({ identifier: 'com.example-vendor.other' })
+    const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
+
+    expectSmokeFailure(harness, 'but this build declares')
     expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
   })
 })

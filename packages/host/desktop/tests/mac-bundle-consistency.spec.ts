@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPackageWithOptions, getRawHeader } from '@electron/asar'
+import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   assertAsarLayout,
@@ -27,6 +28,7 @@ import {
   parseAsarHeader,
   parseXmlPlist,
 } from '../scripts/mac-bundle-consistency.ts'
+import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 
 const temporaryRoots: string[] = []
 const PRODUCT = 'PicoAide Harness'
@@ -205,6 +207,41 @@ describe('assertAsarLayout', () => {
     const archive = syntheticAsar({ files: { 'a.txt': entry(10, 0), 'x.node': entry(64, undefined, true) } }, data)
     expect(assertAsarLayout(archive, 'fixture').packedEntries).toBe(1)
   })
+
+  // ── 符号链接条目（B1-01）───────────────────────────────────────────────────────
+  // `@electron/asar` 的 `Filesystem#insertLink` 只写 `{"link": "…"}`（可选 `unpacked`），
+  // **不写 `size`/`offset`**（`insertFile` 才写）。它们不在数据区里，所以既不进 ranges
+  // 也不进铺满等式 —— 与 unpacked 同级。早先版本把它们当普通条目走 size 校验，
+  // 于是合法归档被报成 `entry <path> has an invalid size NaN`（把"判据未建模"说成"归档损坏"）。
+  it('accepts a legal link entry and keeps it out of the tiling equation', () => {
+    const data = Buffer.alloc(10, 9)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(10, 0), link: { link: 'a.txt' } } }, data)
+    const summary = assertAsarLayout(archive, 'fixture')
+    expect(summary).toMatchObject({ entries: 2, packedEntries: 1, packedBytes: 10, linkEntries: 1 })
+  })
+
+  it('accepts a link entry that @electron/asar also marked unpacked', () => {
+    const data = Buffer.alloc(10, 9)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(10, 0), link: { link: 'a.txt', unpacked: true } } }, data)
+    expect(assertAsarLayout(archive, 'fixture').linkEntries).toBe(1)
+  })
+
+  it('still rejects a real corruption (declared size does not match the data region) next to a link', () => {
+    // 反向对照：同样的 link 条目在场，但普通条目的 size 与实体不符 ⇒ 必须仍红。
+    // 没有这条对照，"放过 link"可能变成"放过一切"。两个方向各一条：
+    //  · 声明比实体**小** ⇒ 数据区没被铺满（does not tile）；
+    //  · 声明比实体**大** ⇒ 条目越出归档（outside the archive）。
+    const small = syntheticAsar({ files: { 'a.txt': entry(9, 0), link: { link: 'a.txt' } } }, Buffer.alloc(10, 9))
+    expect(() => assertAsarLayout(small, 'fixture')).toThrow(/does not tile/u)
+    const large = syntheticAsar({ files: { 'a.txt': entry(11, 0), link: { link: 'a.txt' } } }, Buffer.alloc(10, 9))
+    expect(() => assertAsarLayout(large, 'fixture')).toThrow(/outside the/u)
+  })
+
+  it('rejects a malformed link target as corrupt (not as an unmodelled form)', () => {
+    const data = Buffer.alloc(10, 9)
+    const archive = syntheticAsar({ files: { 'a.txt': entry(10, 0), link: { link: 7 } } }, data)
+    expect(() => assertAsarLayout(archive, 'fixture')).toThrow(/malformed link target/u)
+  })
 })
 
 describe('assertMacBundleConsistency', () => {
@@ -292,6 +329,38 @@ describe('assertMacBundleConsistency', () => {
     expect(() => assertMacBundleConsistency(bundle.appPath)).toThrow(/outside the|does not tile/u)
   })
 
+  // ── 产物身份（B1-02）───────────────────────────────────────────────────────────
+  // macOS 上 bundle id 决定 LaunchServices 身份、SSO 回调注册与安装覆盖关系。此前这条判据
+  // 只把 `CFBundleIdentifier` 解析进摘要、从不断言 ⇒ 渠道包回落/错配官方身份（B-09 族）
+  // 在 mac 产物上零判据。
+  it('accepts the declared identity and rejects any other one', async () => {
+    const bundle = await buildBundle()
+
+    // 命中：同一份包，期望值取自"本次构建声明"。
+    expect(
+      assertMacBundleConsistency(bundle.appPath, undefined, { expectedIdentifier: 'ai.deepseek.dsh.desktop' }).identifier,
+    ).toBe('ai.deepseek.dsh.desktop')
+
+    // 不传期望值 = 不判身份（上线时行为，避免调用方漏传就变假红）。
+    expect(assertMacBundleConsistency(bundle.appPath).identifier).toBe('ai.deepseek.dsh.desktop')
+
+    // 不命中：包声称的身份与本次构建声明的身份不同 ⇒ 必须红，且文案点出两个值。
+    expect(() => assertMacBundleConsistency(bundle.appPath, undefined, {
+      expectedIdentifier: 'com.example-vendor.harness',
+    })).toThrow(
+      /declares CFBundleIdentifier=ai\.deepseek\.dsh\.desktop but this build declares com\.example-vendor\.harness/u,
+    )
+  })
+
+  it('含 link 条目的归档在 bundle 级通过（B1-01 的端到端形态）', () => {
+    const header = { files: { 'a.txt': { size: 4, offset: '0' }, link: { link: 'a.txt' } } }
+    const appPath = join(temporaryRoot(), 'Linked.app')
+    writeValidMacBundle(appPath, PRODUCT, {
+      asar: { bytes: syntheticAsar(header, Buffer.from('data')), digest: headerDigest(header) },
+    })
+    expect(assertMacBundleConsistency(appPath).asar).toMatchObject({ entries: 2, packedEntries: 1, linkEntries: 1 })
+  })
+
   it('requires the guard to be wired into the mac verification and afterPack paths', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const scripts = join(here, '..', 'scripts')
@@ -304,7 +373,70 @@ describe('assertMacBundleConsistency', () => {
       expect(readFileSync(path, 'utf8'), `${name} must call the mac bundle consistency guard`).toMatch(call)
     }
   })
+
+  it('三处调用点都必须把本次构建声明的身份传进判据（注释掉/换字面量即红）', () => {
+    // 为什么是 AST 而不是 `toContain`：文本判据对"注释掉调用"与"换个字面量"两个方向都失效
+    // （本仓 tests/profile-context-wiring.spec.ts 的模块头记录过同形事故）。这里直接找
+    // `assertMacBundleConsistency(...)` 调用节点，并要求第 3 个实参是
+    // `{ expectedIdentifier: packagedAppId() }`。
+    const here = dirname(fileURLToPath(import.meta.url))
+    for (const name of ['verify-mac-smoke.ts', 'verify-mac-release.ts', 'verify-packaged-runtime.ts']) {
+      const source = readFileSync(join(here, '..', 'scripts', name), 'utf8')
+      const expected = findExpectedIdentifierCalls(source, name)
+      expect(expected, `${name} 必须恰好有一处 assertMacBundleConsistency 调用`).toHaveLength(1)
+      expect(expected[0]?.factory, `${name} 必须传 { expectedIdentifier: packagedAppId() } —— 否则产物身份零判据（B1-02）`)
+        .toBe('packagedAppId')
+    }
+
+    // 自检：判据本身要能区分"注释掉"与"语义等价的换行"。
+    const canonical = "assertMacBundleConsistency(appPath, undefined, { expectedIdentifier: packagedAppId() })\n"
+    expect(findExpectedIdentifierCalls(canonical, 'x.ts')).toHaveLength(1)
+    expect(findExpectedIdentifierCalls(`// ${canonical}`, 'x.ts')).toEqual([])
+    expect(findExpectedIdentifierCalls("assertMacBundleConsistency(appPath)\n", 'x.ts'))
+      .toEqual([{ factory: undefined }])
+    expect(findExpectedIdentifierCalls(
+      "assertMacBundleConsistency(\n  appPath,\n  undefined,\n  { expectedIdentifier: packagedAppId() },\n)\n",
+      'x.ts',
+    )).toHaveLength(1)
+  })
 })
+
+/** 头部 JSON 的摘要（= 写进 `ElectronAsarIntegrity` 的值）。 */
+function headerDigest(header: object): string {
+  return createHash('sha256').update(JSON.stringify(header)).digest('hex')
+}
+
+/**
+ * 每个 `assertMacBundleConsistency(...)` 调用点里 `expectedIdentifier` 的**取值表达式**。
+ *
+ * 在语法树上找（注释不是节点 ⇒ 注释掉的调用"不存在"；换行/折行不改变 AST ⇒ 等价改写仍能找到）。
+ * @param source - TypeScript 源码。
+ * @param fileName - 诊断与 ScriptKind 判定用。
+ * @returns 每个调用点的取值表达式标识符（没传/传了别的形态时为 undefined）。
+ */
+function findExpectedIdentifierCalls(source: string, fileName: string): Array<{ factory: string | undefined }> {
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true)
+  const found: Array<{ factory: string | undefined }> = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'assertMacBundleConsistency') {
+      let factory: string | undefined
+      for (const argument of node.arguments) {
+        if (!ts.isObjectLiteralExpression(argument)) continue
+        for (const property of argument.properties) {
+          if (!ts.isPropertyAssignment(property)) continue
+          if (!ts.isIdentifier(property.name) || property.name.text !== 'expectedIdentifier') continue
+          if (ts.isCallExpression(property.initializer) && ts.isIdentifier(property.initializer.expression)) {
+            factory = property.initializer.expression.text
+          }
+        }
+      }
+      found.push({ factory })
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
 
 /** 取出现有 ElectronAsarIntegrity 的 hash 值（用于把它改坏）。 */
 function bundleHashPlaceholder(text: string): string {

@@ -11,6 +11,7 @@ import {
   defaultChannelBuilderConfigDir,
   defaultChannelBuildDir,
   CHANNEL_BUILDER_CONFIG_FILENAME,
+  packagedAppId,
   readChannelDesktopBranding,
   resolveBuildChannelId,
   resolveChannelBuildContext,
@@ -234,6 +235,36 @@ describe('deep link scheme', () => {
 
   it('rejects a malformed official default (template drift guard)', () => {
     expect(OFFICIAL_BUILD_DEFAULTS.deepLinkScheme).toBe('picoaide')
+  })
+})
+
+describe('packagedAppId：产物身份判据的真源（B1-02）', () => {
+  /** 造一个只有 build/channel.json 的随包目录。 */
+  function stagedDir(channel: unknown | undefined): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-packaged-app-id-'))
+    if (channel !== undefined) {
+      writeFileSync(join(dir, 'channel.json'), JSON.stringify(channel))
+    }
+    return dir
+  }
+
+  it('没有渠道包（官方/本地）时回落官方默认值 = package.json 的 build.appId', () => {
+    // 官方那条真源由本文件顶部的 drift guard 钉住（OFFICIAL_BUILD_DEFAULTS.appId === build.appId），
+    // 这里判"落点"。
+    expect(packagedAppId(stagedDir(undefined))).toBe(build.appId)
+  })
+
+  it('渠道包声明了 desktop.app_id 时取它，且与打包覆盖值**逐字相同**', () => {
+    const repo = channelRepo('acme', acmeChannel())
+    const dir = stagedDir(JSON.parse(readFileSync(join(repo, 'channels', 'acme', 'channel.json'), 'utf8')))
+    const expected = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: repo }).appId
+    expect(packagedAppId(dir)).toBe(expected)
+    expect(packagedAppId(dir)).toBe('com.acme.ai')
+  })
+
+  it('渠道包没写 app_id 时回落官方值（beta 这类公共渠道的设计，不判红）', () => {
+    const dir = stagedDir({ channel_id: 'beta', desktop: { home_dir: '.picoaide-harness' } })
+    expect(packagedAppId(dir)).toBe(build.appId)
   })
 })
 

@@ -18,7 +18,7 @@
  * mac 的 DMG 验证里。
  *
  * 不变量（在本机实测于真实产物 `dist/linux-unpacked/resources/app.asar`，
- * 111 927 459 B / 12 338 条目 / 14 个 unpacked 条目）：
+ * 111 927 459 B / 12 338 条目 / 14 个 unpacked 条目 / **0 个 link 条目**）：
  *
  * ```text
  * fileSize = dataStart + Σ(packed 条目 size)     // delta = 0，且 0 重叠、0 越界
@@ -26,6 +26,14 @@
  * header pickle = payload[0..4]=nested、payload[4..8]=jsonLen、json = payload[8..8+jsonLen]
  * sha256(json) === Info.plist 的 ElectronAsarIntegrity["Resources/app.asar"].hash
  * ```
+ *
+ * **符号链接条目（`{"link": "…"}`）不参与铺满等式**：`@electron/asar` 的
+ * `Filesystem#insertLink` 只写 `link`（不写 `size`/`offset`），所以它们既不是"打包内容"
+ * 也不是"损坏" —— 与 `unpacked` 同级，单独计数（{@link AsarLayoutSummary.linkEntries}）。
+ * 2026-09-25 审计 B1-01：早先版本把它们当普通条目走 size/offset 校验，于是合法归档被报成
+ * `entry <path> has an invalid size NaN`（把"判据未建模这种形态"说成"归档损坏"，排障方向
+ * 被引到打包中断）。**当前真实产物 0 条**，所以那时不触发；形态一旦出现（某个依赖带进
+ * 符号链接）就会同时红掉 afterPack / DMG 冒烟 / DMG 发布三条路径。
  *
  * @module dsh-plugin-desktop/mac-bundle-consistency
  */
@@ -234,15 +242,41 @@ export interface AsarHeaderLayout {
   readonly entries: readonly AsarEntry[]
 }
 
-/** 一个归档条目（目录已展开）。 */
-export interface AsarEntry {
+/**
+ * 一个归档条目（目录已展开）。
+ *
+ * 两种形态的字段集**不同**（用 `kind` 区分，而不是给 link 条目编一个假的 `size`）：
+ * 只有普通文件条目才参与 size/offset 铺满等式。
+ */
+export type AsarEntry = AsarFileEntry | AsarLinkEntry
+
+/** 打包进归档（或解包到 `app.asar.unpacked`）的普通文件条目。 */
+export interface AsarFileEntry {
   /** 归档内 POSIX 路径。 */
   readonly path: string
+  /** 条目形态判别。 */
+  readonly kind: 'file'
   /** 声明的字节数。 */
   readonly size: number
   /** 相对数据区的偏移（unpacked 条目没有）。 */
   readonly offset: number | undefined
   /** 是否被解包到 `app.asar.unpacked`。 */
+  readonly unpacked: boolean
+}
+
+/**
+ * 符号链接条目（`@electron/asar` 的 `Filesystem#insertLink` 只写 `link`）。
+ *
+ * 它没有 `size`/`offset`：链接目标以文本形式记在头部，数据区里没有它的字节。
+ */
+export interface AsarLinkEntry {
+  /** 归档内 POSIX 路径。 */
+  readonly path: string
+  /** 条目形态判别。 */
+  readonly kind: 'link'
+  /** 链接目标（包内相对路径）。 */
+  readonly link: string
+  /** 是否被解包到 `app.asar.unpacked`（链接指向包外时也置位）。 */
   readonly unpacked: boolean
 }
 
@@ -317,10 +351,30 @@ export function parseAsarHeader(archive: Buffer, where: string): AsarHeaderLayou
         walk(record, path)
         continue
       }
+      // 符号链接条目：与 `unpacked` 同级的"不参与铺满等式"形态（见模块头注释）。
+      // 只在这里分类，**不**给它编造 size/offset —— 编造出来的 NaN 会把合法归档
+      // 报成"size 非法"（B1-01）。
+      const rawLink = record['link']
+      if (rawLink !== undefined) {
+        if (typeof rawLink !== 'string') {
+          throw new Error(
+            `mac-bundle-consistency: ${where} entry ${path} has a malformed link target ${JSON.stringify(rawLink)}`
+            + '（`link` 必须是字符串；这不是"未建模的形态"，是头部损坏）',
+          )
+        }
+        entries.push({
+          path,
+          kind: 'link',
+          link: rawLink,
+          unpacked: record['unpacked'] === true,
+        })
+        continue
+      }
       const rawSize = record['size']
       const rawOffset = record['offset']
       entries.push({
         path,
+        kind: 'file',
         size: numericField(rawSize),
         offset: numericField(rawOffset),
         unpacked: record['unpacked'] === true,
@@ -355,6 +409,13 @@ export interface AsarLayoutSummary {
   readonly packedEntries: number
   /** 打包进归档的字节合计。 */
   readonly packedBytes: number
+  /**
+   * 符号链接条目数（合法形态，**不参与**铺满等式：它没有 size/offset）。
+   *
+   * 单独计数是为了让"这份归档里有链接、判据没有建模它的字节账"在日志里可见，
+   * 而不是让它静默消失或变成一句"size 非法"。
+   */
+  readonly linkEntries: number
 }
 
 /**
@@ -362,6 +423,10 @@ export interface AsarLayoutSummary {
  *
  * 这三条合起来把「offset 表指向错误位置」逼到无处可藏：任何平移都会造成重叠或空隙，
  * 任何截断都会越界，任何 size 与实体不符都会破坏铺满等式。
+ *
+ * **符号链接条目（`kind === 'link'`）与 `unpacked` 条目都不进这三条等式**（前者的字节
+ * 不在数据区里，后者在 `app.asar.unpacked` 里）—— 但它们仍然进 `entries` 总数，
+ * 并由 {@link AsarLayoutSummary.linkEntries} 如实报出。
  * @param archive - 整个 `app.asar` 的字节。
  * @param where - 诊断用的来源描述。
  * @returns 布局统计（供调用方打日志）。
@@ -370,8 +435,13 @@ export function assertAsarLayout(archive: Buffer, where: string): AsarLayoutSumm
   const { entries, dataStart } = parseAsarHeader(archive, where)
   let packedBytes = 0
   let packedEntries = 0
+  let linkEntries = 0
   const ranges: Array<{ readonly start: number, readonly end: number, readonly path: string }> = []
   for (const entry of entries) {
+    if (entry.kind === 'link') {
+      linkEntries += 1
+      continue
+    }
     if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
       throw new Error(`mac-bundle-consistency: ${where} entry ${entry.path} has an invalid size ${String(entry.size)}`)
     }
@@ -408,7 +478,7 @@ export function assertAsarLayout(archive: Buffer, where: string): AsarLayoutSumm
       `mac-bundle-consistency: ${where} does not tile its data region: header ends at ${String(dataStart)} + ${String(packedBytes)} B of entries = ${String(tiled)}, archive is ${String(archive.length)} B (delta ${String(archive.length - tiled)})`,
     )
   }
-  return { archiveBytes: archive.length, entries: entries.length, packedEntries, packedBytes }
+  return { archiveBytes: archive.length, entries: entries.length, packedEntries, packedBytes, linkEntries }
 }
 
 /** 一致性检查结论（供调用方打日志）。 */
@@ -425,6 +495,24 @@ export interface MacBundleSummary {
   readonly asar: AsarLayoutSummary | undefined
   /** `ElectronAsarIntegrity` 里记录的 app.asar 头部摘要（有 asar 时必有）。 */
   readonly asarIntegrity: string
+}
+
+/**
+ * 本次构建**声明**的产物身份（调用方从构建期真源算出来传进来）。
+ *
+ * 为什么必须由调用方传：本模块是纯读取判据，不该自己去猜"这次构建是哪个渠道"。
+ * mac 侧的真源是 `scripts/channel-build.ts` 的 `packagedAppId()`
+ * （随包 `build/channel.json` 的 `desktop.app_id`；官方构建回落官方默认值）。
+ */
+export interface MacBundleExpectations {
+  /**
+   * 期望的 `CFBundleIdentifier`（逐字相等）。
+   *
+   * 不传 = 不判身份（保持本判据上线时的行为）。传了就必须命中：macOS 上 bundle id 决定
+   * LaunchServices 身份、SSO 回调注册与安装覆盖关系 —— 渠道包回落官方身份是已登记的
+   * B-09 族出口（app origin / 数据根 / userData 都有判据，身份此前零判据）。
+   */
+  readonly expectedIdentifier?: string
 }
 
 function stringField(plist: Record<string, unknown>, key: string, where: string): string {
@@ -452,12 +540,14 @@ function nestedRecord(value: unknown, key: string, where: string): Record<string
  * 以及（存在时）`app.asar` 的布局与 `ElectronAsarIntegrity` 指纹。
  * @param appPath - `.app` 包目录的绝对路径。
  * @param io - 文件系统接缝（缺省 `node:fs`）。
+ * @param expectations - 本次构建声明的期望值（见 {@link MacBundleExpectations}）。
  * @returns 结论摘要。
  * @throws 任一条不一致时抛错（错误文案点名包内路径与判据）。
  */
 export function assertMacBundleConsistency(
   appPath: string,
   io: MacBundleFileSystem = NATIVE_FILE_SYSTEM,
+  expectations: MacBundleExpectations = {},
 ): MacBundleSummary {
   const contents = join(appPath, 'Contents')
   const resources = join(contents, 'Resources')
@@ -470,6 +560,18 @@ export function assertMacBundleConsistency(
   const identifier = stringField(plist, MAC_BUNDLE_IDENTIFIER_KEY, infoPlistPath)
   const iconName = stringField(plist, MAC_BUNDLE_ICON_KEY, infoPlistPath)
   const executableName = stringField(plist, MAC_BUNDLE_EXECUTABLE_KEY, infoPlistPath)
+
+  // 0) 产物身份：bundle id 必须逐字等于**本次构建声明的**应用 id。
+  //    不判它的后果是"包看起来是对的、装上去才发现身份不对"：macOS 用 bundle id 做
+  //    LaunchServices 身份、SSO 回调注册与安装覆盖，渠道包回落官方 id 就会与官方版
+  //    互相覆盖/抢回调（B-09 族的第四条出口）。
+  const expected = expectations.expectedIdentifier
+  if (expected !== undefined && identifier !== expected) {
+    throw new Error(
+      `mac-bundle-consistency: ${infoPlistPath} declares ${MAC_BUNDLE_IDENTIFIER_KEY}=${identifier} but this build declares ${expected}`
+      + ' — the packaged application would claim another identity (LaunchServices / SSO callback / install override)',
+    )
+  }
 
   // 1) 图标：键必须指向包内真实存在、非空、且以 icns 魔数开头的文件。
   //    缺这一条时 Finder/Dock 只能回落通用图标（「图标变成问号」的第一形态）。

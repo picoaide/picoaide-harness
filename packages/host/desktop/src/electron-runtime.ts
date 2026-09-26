@@ -118,6 +118,40 @@ function clampedZoomLevel(level: number): number {
   return Math.min(MAX_ZOOM_LEVEL, Math.max(MIN_ZOOM_LEVEL, level))
 }
 
+/** 导航闸门的输入面（`Electron.Event<{url}>` 的结构子集，便于纯 Node 单测）。 */
+export interface NavigationAttempt {
+  /** 这次导航的目标 URL（Electron 三种导航事件都带它）。 */
+  readonly url: string
+  /** 阻止这次导航。 */
+  preventDefault(): void
+}
+
+/**
+ * 主窗口的 origin 判据：只允许停留在本次 shell 自己的 origin（外源/畸形 URL 一律拒）。
+ *
+ * **一份闭包挂三个事件**（`will-navigate` / `will-frame-navigate` / `will-redirect`）：
+ * 这是本仓已冻结的安全不变量（应用窗口 `@picoaide/dsh-wasm-apps-host` 的
+ * `electron-adapter` 同款，且那边有判据）。只挂 `will-frame-navigate` 时，一次 302 就能
+ * 把窗口换到外站 —— 重定向是**独立事件**，不经过 `will-frame-navigate` 的语义保证。
+ * 2026-09-25 审计 B1-04：删掉主窗口的 `will-redirect` 注册后 `electron-runtime.spec.ts`
+ * 44/44 全绿（该注册当时零判据）。
+ * @param origin - 本次 shell 的 origin（`new URL(spec.url).origin`）。
+ * @returns 可直接挂到三个导航事件上的处理器。
+ */
+export function refuseForeignNavigation(origin: string): (event: NavigationAttempt) => void {
+  return (event) => {
+    let targetOrigin: string | undefined
+    try {
+      targetOrigin = new URL(event.url).origin
+    } catch {
+      // 畸形 URL（`javascript:` 之外的空串、无 scheme 的裸串…）拿不到 origin ⇒ 视为外源，
+      // fail-closed（与旧实现逐字一致）。
+      targetOrigin = undefined
+    }
+    if (targetOrigin !== origin) event.preventDefault()
+  }
+}
+
 function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefined {
   if (input.type !== 'keyDown' || input.alt || (!input.control && !input.meta)) return undefined
   if (input.key === '+' || input.key === '=') return 'in'
@@ -889,22 +923,18 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       const step = action === 'in' ? 1 : -1
       window.webContents.setZoomLevel(clampedZoomLevel(window.webContents.getZoomLevel() + step))
     }
-    const navigate = (event: Electron.Event<{ url: string }>): void => {
-      let targetOrigin: string | undefined
-      try {
-        targetOrigin = new URL(event.url).origin
-      } catch {
-        targetOrigin = undefined
-      }
-      if (targetOrigin !== origin) event.preventDefault()
-    }
+    // 导航闸门：**三个事件共用同一个闭包**（外层是 `refuseForeignNavigation(origin)` 的
+    // 唯一实现，判据在 tests/electron-runtime.spec.ts）。302 与直接导航同等对待 ——
+    // 只挂其中一个事件时，另一条路径可以把窗口换成外站。
+    const refuseNavigation = refuseForeignNavigation(origin)
 
     app.on('activate', show)
     window.on('close', close)
     window.on('page-title-updated', preserveBlankTitle)
     window.webContents.on('before-input-event', handleZoomShortcut)
-    window.webContents.on('will-frame-navigate', navigate)
-    window.webContents.on('will-redirect', navigate)
+    window.webContents.on('will-navigate', refuseNavigation)
+    window.webContents.on('will-frame-navigate', refuseNavigation)
+    window.webContents.on('will-redirect', refuseNavigation)
     window.webContents.on('render-process-gone', (_event, details) => {
       this.logError(`dsh-plugin-desktop: renderer process gone (reason: ${details.reason}, exitCode: ${formatDesktopExitCode(details.exitCode)})`)
       // P0-6/D8:渲染进程崩溃也要进错误上报(reason/exitCode 作为 tag)。
@@ -1008,8 +1038,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       window.off('close', close)
       window.off('page-title-updated', preserveBlankTitle)
       window.webContents.off('before-input-event', handleZoomShortcut)
-      window.webContents.off('will-frame-navigate', navigate)
-      window.webContents.off('will-redirect', navigate)
+      window.webContents.off('will-navigate', refuseNavigation)
+      window.webContents.off('will-frame-navigate', refuseNavigation)
+      window.webContents.off('will-redirect', refuseNavigation)
       mountedTray.off('click', show)
       mountedTray.destroy()
       if (!window.isDestroyed()) window.destroy()

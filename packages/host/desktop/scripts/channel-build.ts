@@ -406,6 +406,39 @@ export function packagedProductName(buildDir?: string): string {
 }
 
 /**
+ * 本次打包产物**声明**的应用 id（bundle id / AppUserModelId）—— 产物身份判据的唯一解析。
+ *
+ * 真源与 `resolveChannelBuildContext` 的 `appId` **逐字同源**（同一份 channel.json、同一套
+ * 回落链）：随包 `build/channel.json` 的 `desktop.app_id`，没写则官方默认值
+ * （= `package.json` 的 `build.appId`，由 `tests/channel-build.spec.ts` 对拍钉住）。
+ * electron-builder 的 `--config.appId`（{@link writeChannelBuilderConfig}）喂的就是这个值，
+ * 所以"产物里写下的身份"与"这次构建声明的身份"必须是同一个字符串。
+ *
+ * 回落链**故意**与打包上下文一致（不是"找不到就放过"）：公共渠道（beta）确实不声明
+ * app_id、按设计使用官方身份与官方数据根，把它判红会卡死每一条预发 tag 的 mac 验证。
+ * "品牌渠道漏配 app_id ⇒ 静默回落官方身份"这道闸在**配置期**：`scripts/ci-channels.sh`
+ * 对品牌渠道强制 `desktop.app_id`。本函数负责的是**产物 ↔ 声明**一致（B1-02，mac 侧此前零判据）。
+ *
+ * **为什么需要它**：macOS 上 bundle id 决定 LaunchServices 身份、SSO 回调注册与安装覆盖
+ * 关系，而此前全仓唯一读产物 `Info.plist` 的判据（`mac-bundle-consistency.ts`）把
+ * `CFBundleIdentifier` **只解析、不断言** ⇒ 产物身份零判据（B-09 族的第四条出口：
+ * app origin / 数据根 / userData 都有判据，身份没有）。2026-09-25 审计 B1-02。
+ * @param buildDir - `packages/host/desktop/build` 目录（默认仓库内该目录）。
+ * @returns 非空 bundle id。
+ * @throws 渠道包存在但不可解析（JSON 坏 / 超限）时抛错（验证期 fail-loud，不猜）。
+ */
+export function packagedAppId(buildDir?: string): string {
+  const dir = buildDir ?? join(defaultRepoRoot(), 'packages/host/desktop', 'build')
+  const file = join(dir, 'channel.json')
+  if (existsSync(file)) {
+    // 与 `resolveChannelBuildContext` 同源:同一个文件名、同一套解析。
+    const appId = readChannelDesktopBranding(dir).appId
+    if (appId !== undefined) return appId
+  }
+  return OFFICIAL_BUILD_DEFAULTS.appId
+}
+
+/**
  * 清掉"上一次渠道构建"在应用资源目录里留下的渠道化产物。
  *
  * 两样东西都必须清:随包渠道配置（`channel.json`，会决定客户端的品牌/默认域名）
