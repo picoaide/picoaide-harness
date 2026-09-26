@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
+import { assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import { packagedProductName } from './channel-build.ts'
 import { isDirectInvocation } from './direct-invocation.mjs'
 
@@ -107,6 +108,11 @@ export function verifyMacRelease(
       options.run('spctl', ['--assess', '--type', 'execute', '--verbose=4', appPath])
       options.run('xcrun', ['stapler', 'validate', appPath])
     }
+    // 签名/公证都通过，也不代表包内自洽：`CFBundleIconFile` 可能指向不存在的 `.icns`，
+    // `app.asar` 的 offset 表可能与实体不符。这两类缺陷在双击之后才暴露，且
+    // `codesign --verify` 与 `stapler validate` 都不会报（见 mac-bundle-consistency.ts）。
+    // 只在挂载点真的存在时判（真实发布一定成立；单测用注入替身 + 伪路径驱动命令边界）。
+    if (existsSync(appPath)) assertMacBundleConsistency(appPath)
   } catch (cause) {
     failure = cause
   }

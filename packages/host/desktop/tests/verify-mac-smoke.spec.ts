@@ -7,6 +7,7 @@ import {
   type MacSmokeVerificationOptions,
 } from '../scripts/verify-mac-smoke.ts'
 import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 
 const temporaryRoots: string[] = []
 
@@ -24,17 +25,14 @@ function fixture(): AppFixture {
   const contents = join(root, 'PicoAide Harness.app', 'Contents')
   const macos = join(contents, 'MacOS')
   const resources = join(contents, 'Resources')
-  mkdirSync(macos, { recursive: true })
-  mkdirSync(resources, { recursive: true })
   const infoPlist = join(contents, 'Info.plist')
   const executable = join(macos, 'PicoAide Harness')
   const appAsar = join(resources, 'app.asar')
   const modeOverrides = new Map<string, number>()
-  writeFileSync(infoPlist, '<?xml version="1.0" encoding="UTF-8"?>')
-  writeFileSync(executable, 'binary')
-  chmodSync(executable, 0o755)
+  // 包内一致性判据要求图标键指向真实 icns、且 ElectronAsarIntegrity 与 asar 头部一致，
+  // 所以夹具用共享的 mac-bundle-fixture 写一份自洽的最小包。
+  writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
   modeOverrides.set(executable, 0o755)
-  writeFileSync(appAsar, 'packed')
   for (const entry of MACOS_ARM64_NATIVE_ENTRIES) {
     const path = join(`${appAsar}.unpacked`, entry.path)
     mkdirSync(join(path, '..'), { recursive: true })
@@ -173,6 +171,15 @@ describe('macOS DMG smoke artifact verification', () => {
     const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
 
     expectSmokeFailure(harness, 'app.asar')
+    expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
+  })
+
+  it('rejects a bundle whose declared icon is not inside Resources', () => {
+    const value = fixture()
+    rmSync(join(value.infoPlist, '..', 'Resources', 'icon.icns'))
+    const harness = options({ makeMountPoint: () => value.root }, value.modeOverrides)
+
+    expectSmokeFailure(harness, 'CFBundleIconFile=icon.icns')
     expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
   })
 })

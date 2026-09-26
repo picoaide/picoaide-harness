@@ -18,6 +18,7 @@ import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
 import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
+import { assertMacBundleConsistency } from './mac-bundle-consistency.ts'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
   MACOS_ARM64_NATIVE_ENTRIES,
@@ -1866,6 +1867,15 @@ export function verifyPackagedRuntime(
         `dsh-plugin-desktop: universal macOS runtime at ${unpackedRoot} contains host-architecture build output: ${forbidden.join(', ')}`,
       )
     }
+  }
+  // macOS 包内一致性（2026-09-25，针对「图标变问号 + 打不开」的现场反馈）：
+  // `Info.plist` 的图标键必须指向包内真实的 `.icns`，主可执行文件必须在，
+  // `app.asar` 的 offset 表必须自洽、且与 `ElectronAsarIntegrity` 记录的头部摘要一致
+  // （macOS 上 Electron 用后者做嵌入式完整性校验，asar 被改写而 plist 未同步 = 启动即被拒）。
+  // 真实 afterPack 的 appOutDir 一定存在于磁盘；单测用注入探针 + 伪路径，因此不受影响。
+  if (context.electronPlatformName === 'darwin') {
+    const bundleRoot = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
+    if (existsSync(bundleRoot)) assertMacBundleConsistency(bundleRoot)
   }
   verifyUnpackedPackageResolution(asarPath, asarEntries)
   // 品牌静态素材:存在性由 REQUIRED_PACKAGED_RUNTIME_ENTRIES 保证,这里把内容读出来

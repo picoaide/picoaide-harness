@@ -1,10 +1,19 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   verifyMacRelease,
   type MacReleaseVerificationOptions,
 } from '../scripts/verify-mac-release.ts'
 import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
+
+const temporaryRoots: string[] = []
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
 
 function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const calls: Array<{ command: string; args: readonly string[] }> = []
@@ -99,5 +108,34 @@ describe('macOS release artifact verification', () => {
     expect(caught).toBeInstanceOf(AggregateError)
     expect((caught as AggregateError).errors).toEqual([verifyFailure, detachFailure])
     expect(harness.removeMountPoint).toHaveBeenCalledOnce()
+  })
+
+  // 签名/Gatekeeper/票据全过之后，包内一致性判据仍必须在**真实挂载点形态**下跑到
+  // （2026-09-25：macOS「图标变问号 + 打不开」的现场反馈里，前三条命令都可能全绿）。
+  it('accepts a real, self-consistent bundle on a real mount point', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+    const harness = options({ makeMountPoint: () => root })
+    expect(verifyMacRelease(harness.value).appPath).toBe(join(root, 'PicoAide Harness.app'))
+  })
+
+  it('rejects a real bundle whose declared icon is missing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+    rmSync(join(root, 'PicoAide Harness.app', 'Contents', 'Resources', 'icon.icns'))
+    const harness = options({ makeMountPoint: () => root })
+
+    let caught: unknown
+    try {
+      verifyMacRelease(harness.value)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors
+      .map(inner => (inner instanceof Error ? inner.message : String(inner)))
+      .join('\n')).toContain('CFBundleIconFile=icon.icns')
   })
 })

@@ -64,6 +64,7 @@ import {
   type SentrySmokeLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
 
 function context(
@@ -1122,6 +1123,11 @@ describe('packaged desktop runtime verification', () => {
       const runtimeContext = context(appOutDir, electronPlatformName, arch)
       const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
       mkdirSync(unpackedRoot, { recursive: true })
+      // darwin 分支会走包内一致性判据（图标键/asar 布局/ElectronAsarIntegrity），
+      // 真实目录形态的夹具必须给出一份自洽的 .app，否则那一条会先打红。
+      if (electronPlatformName === 'darwin') {
+        writeValidMacBundle(join(appOutDir, 'PicoAide Harness.app'), 'PicoAide Harness')
+      }
       // 至少一条必需原生条目存在,否则会先被"no native unpacked entries"拦下。
       // G-1（2026-09-23）：还要**除被测家族外全都齐** —— 家族适用性断言上线后，
       // 只写一条 pty.node 的"精简树"会被 @img/sharp-linux-x64 等家族当场打红，
@@ -1176,6 +1182,27 @@ describe('packaged desktop runtime verification', () => {
       ])
       expect(() => verifyWithBrandStub(missing, () => completeArchiveEntries()))
         .toThrow(/missing required native files.*node-addon-system-darwin-arm64\/bin\/system\.node/su)
+    })
+
+    // afterPack 的包内一致性判据必须在**真实目录形态**下真的跑到（2026-09-25 变异 m5
+    // 实测：只有 import 没有调用时，源码级"出现过这个名字"的断言是假绿）。
+    it('rejects a darwin bundle whose declared icon is missing (afterPack real tree)', () => {
+      const runtimeContext = fixture('darwin', 3, [
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      rmSync(join(runtimeContext.appOutDir, 'PicoAide Harness.app', 'Contents', 'Resources', 'icon.icns'))
+      expect(() => verifyWithBrandStub(runtimeContext, () => completeArchiveEntries()))
+        .toThrow(/CFBundleIconFile=icon\.icns/u)
+    })
+
+    it('rejects a darwin bundle whose app.asar was rewritten after the integrity table', () => {
+      const runtimeContext = fixture('darwin', 3, [
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      const infoPlist = join(runtimeContext.appOutDir, 'PicoAide Harness.app', 'Contents', 'Info.plist')
+      writeFileSync(infoPlist, readFileSync(infoPlist, 'utf8').replace(/(<key>hash<\/key>\n\t+<string>)([0-9a-f]{64})/u, (_m, head: string, hash: string) => `${head}${hash.startsWith('0') ? '1' : '0'}${hash.slice(1)}`))
+      expect(() => verifyWithBrandStub(runtimeContext, () => completeArchiveEntries()))
+        .toThrow(/does not match .*ElectronAsarIntegrity/u)
     })
   })
 
