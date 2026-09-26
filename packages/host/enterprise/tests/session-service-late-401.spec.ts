@@ -25,11 +25,23 @@
  *     两类（用户主动登出、改密后服务端已吊销全部令牌）。数量与相邻上下文都钉住，
  *     防止"只改了一处"或"又加回一处无条件清"。
  *
+ * ## R23-W2-03（2026-09-26）：扫描面从"enterprise/src"扩到**全部客户端插件包**
+ *
+ * 上一版第 3 组的"全仓再没有因 401 而清的无条件 clear"只扫了
+ * `packages/host/enterprise/src` —— 而**第五处**（`packages/client/account-card/src/index.ts`
+ * 的余额路由：`?refresh=1` 的迟到 401 ⇒ 无条件 `clear()`，把同账号刚重登的新会话与
+ * 新令牌一起清掉，且 `$DSH_HOME/session.json` 被删）就在扫描面之外。于是那条承诺在
+ * 它上面读作成立、实际不成立 —— 与 R23-W2-01 的 harness 盲区是同一类缺陷：
+ * **判据的扫描面 ≠ 声明的扫描面**。现在扫描面覆盖 `packages/client/<pkg>/src`
+ * （排除测试文件）并正面钉住 account-card 的 `clearIfCurrent(s.token)`。
+ *
  * ## 变异验证（拆掉修复必红）
  *
  *  - 13 处 `clearIfCurrent(s.token)` 全改回 `clear()` ⇒ 第 1 组红；
  *  - `clearIfCurrent` 的令牌比对掏空成恒清 ⇒ 第 1 组红（第 2 组仍绿，正是"该登出
- *    必须登出"那一半）。
+ *    必须登出"那一半）；
+ *  - account-card 的 `clearIfCurrent(s.token)` 改回 `clear()` ⇒ 第 3 组红
+ *    （扫描面命中 + 正面断言失败）。
  */
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -45,16 +57,42 @@ import type { Session } from '../src/server-connector/config.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SRC = join(HERE, '..', 'src')
 const AUTH_GATE_SRC = join(SRC, 'auth-gate.ts')
+const REPO_ROOT = join(HERE, '..', '..', '..', '..')
 
-/** 递归列出 `src/` 下的全部 `.ts`（判据失去输入必须红：一个都没有 ⇒ 抛）。 */
-function walkSources(dir: string): string[] {
+/** 递归列出 `dir` 下指定后缀的源码（判据失去输入必须红：一个都没有 ⇒ 抛）。 */
+function walkSources(dir: string, extensions: readonly string[] = ['.ts']): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry)
-    if (statSync(full).isDirectory()) out.push(...walkSources(full))
-    else if (entry.endsWith('.ts')) out.push(full)
+    if (statSync(full).isDirectory()) out.push(...walkSources(full, extensions))
+    else if (extensions.some(ext => entry.endsWith(ext))) out.push(full)
   }
   if (out.length === 0) throw new Error(`读不到任何源码（${dir}）—— 本用例不允许静默通过`)
+  return out
+}
+
+/**
+ * 与 enterprise 并列的**客户端插件生产源码**（`packages/client/<pkg>/src`，排除
+ * 测试文件：那里出现这个符号是断言，不是调用点）。
+ *
+ * R23-W2-03：上面那条全仓扫描此前只罩 `packages/host/enterprise/src` —— 而
+ * `packages/client/account-card/src/index.ts` 里有**同一签名的第五处**（`?refresh=1`
+ * 的迟到 401 ⇒ 无条件 `clear()` 清掉同账号刚重登的新会话），它就在扫描面之外，
+ * 于是"全仓再没有因 401 而清的无条件 clear"这条承诺读起来成立、实际不成立。
+ * 判据的扫描面必须覆盖**所有会话消费面**，不只是写它的那个包。
+ */
+function clientProductionSources(): string[] {
+  const root = join(REPO_ROOT, 'packages', 'client')
+  const out: string[] = []
+  for (const pkg of readdirSync(root)) {
+    const src = join(root, pkg, 'src')
+    if (!existsSync(src)) continue
+    for (const file of walkSources(src, ['.ts', '.tsx'])) {
+      if (/\.(spec|test)\.tsx?$/u.test(file)) continue
+      out.push(file)
+    }
+  }
+  if (out.length === 0) throw new Error('读不到任何客户端插件源码 —— 判据失去输入必须红')
   return out
 }
 
@@ -219,18 +257,27 @@ describe('R22-V1-N3 分流是结构性的：auth_expired 走 clearIfCurrent，�
     // 路径（`forwardAuthAware` + 分片上传）与 bootstrap 的设置同步上 —— 它们的请求
     // 也带一份**可能已经过期**的会话，也会在用户重登之后才拿到 401。判据因此扫**整个
     // `src/`**：无条件 `picoSession.clear()` 只允许出现在 auth-gate 的登出/改密两处。
+    //
+    // R23-W2-03：扫描面**同时覆盖客户端插件包**（`packages/client/<pkg>/src`）——
+    // 第五处（account-card 的 `?refresh=1` 迟到 401）就藏在 enterprise 之外，
+    // 上一版"全仓"承诺因此在它上面读作成立而实际不成立。
     const offenders: string[] = []
-    for (const file of walkSources(SRC)) {
-      const rel = relative(SRC, file)
-      if (rel === 'auth-gate.ts') continue // 上面那条逐点钉住了它的两处无条件清
+    const scan = (file: string, label: string): void => {
       const text = readFileSync(file, 'utf8')
       text.split('\n').forEach((line, index) => {
         // 只认**代码行**（注释里提到这个符号不算）。
         if (!line.includes('picoSession.clear()')) return
         if (line.trimStart().startsWith('*') || line.trimStart().startsWith('//')) return
-        offenders.push(`${rel}:${index + 1}`)
+        offenders.push(`${label}:${index + 1}`)
       })
     }
+    for (const file of walkSources(SRC)) {
+      const rel = relative(SRC, file)
+      if (rel === 'auth-gate.ts') continue // 上面那条逐点钉住了它的两处无条件清
+      scan(file, rel)
+    }
+    const clientRoot = join(REPO_ROOT, 'packages', 'client')
+    for (const file of clientProductionSources()) scan(file, relative(clientRoot, file))
     expect(offenders, '因 401/会话失效而清会话必须走 clearIfCurrent（带本次请求的令牌）').toEqual([])
 
     // 正面：三处同族调用面都真的换成了带令牌的判据。
@@ -238,5 +285,9 @@ describe('R22-V1-N3 分流是结构性的：auth_expired 走 clearIfCurrent，�
     expect(wasmApps, 'wasm 出站路径必须带令牌判定').toContain('ctx.picoSession.clearIfCurrent(session.token)')
     const bootstrap = readFileSync(join(SRC, 'bootstrap.ts'), 'utf8')
     expect(bootstrap, 'bootstrap 的会话同步必须带令牌判定').toContain('ctx.picoSession.clearIfCurrent(session.token)')
+    // R23-W2-03：客户端插件里的同族调用面（account-card 的余额路由）同样必须带令牌。
+    const accountCard = readFileSync(join(clientRoot, 'account-card', 'src', 'index.ts'), 'utf8')
+    expect(accountCard, 'account-card 的迟到 401 必须带令牌判定（否则清掉刚重登的新会话）')
+      .toContain('ctx.picoSession.clearIfCurrent(s.token)')
   })
 })

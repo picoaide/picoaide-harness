@@ -38,15 +38,24 @@
  *   出现），不过即 fail-loud（锁：抛；墓碑：拒收 + 记日志），绝不静默成功。纯 stat
  *   复检闭合不了"复检之后、syscall 之前"的最后一跳（Node 没有 `openat`），这是与
  *   删除面同口径的**已认账边界**；
- * - SKILL.md 的**可加载性判据与运行时同一条**（R21-A1-01/02、R22-V1-N1）：frontmatter
- *   的两条分隔线都必须是**整行** `---`、旧调用键（`disableModelInvocation` 一类）一律
- *   拒收、`name`/`description` 的**取值语义**也必须逐字同形（上游 `stringField` 是
- *   `length > 0`，**不 trim**）—— 任何一个维度放宽都会让"我们说已安装、运行时其实
- *   不加载"复活。切分实现只有一处（`skill-frontmatter.ts`，发现面/安装面/预检面共用）；
- *   取值判据只有一处（{@link runtimeString}，见 `assertLoadableSkillMetadata`）。
+ * - 私有目录路径上的**破坏性** syscall 不止创建面（R23-W2-02）：陈旧锁的抢占 `rm`
+ *   与"写锁失败后的收尾 `rm`"同样要过**锚定复检 + `dev/ino` 身份守卫**（"我要删的
+ *   就是我刚判定为陈旧的那一份"），不过则**一个字都不动**并记 `refused` 日志 ——
+ *   同文件里锁的**释放**闭包早就是这个口径，收口前只有这两条路径在窗口外；
+ * - SKILL.md 的**可加载性判据与运行时同一条**（R21-A1-01/02、R22-V1-N1、R23-W2-01）：
+ *   **解码**（运行时 `ctx.fs` → `readWholeText`：采样窗口里的 `NUL` 或整份非法 UTF-8
+ *   ⇒ 整份丢弃）、frontmatter 的两条分隔线都必须是**整行** `---`、旧调用键
+ *   （`disableModelInvocation` 一类）一律拒收、`name`/`description` 的**取值语义**
+ *   也必须逐字同形（上游 `stringField` 是 `length > 0`，**不 trim**）—— 任何一个维度
+ *   放宽都会让"我们说已安装、运行时其实不加载"复活。解码判据只有一处
+ *   （`skill-frontmatter.ts` 的 `decodeSkillTextBytes`）、切分实现只有一处（同文件，
+ *   发现面/安装面/预检面共用）、取值判据只有一处（{@link runtimeString}，见
+ *   `assertLoadableSkillMetadata`）。
  *   判据的**适用前提**：正常发布面被服务端 `internal/skillmanifest` 的
  *   `runtimeIdentityRule{strictType, exactTrim}` 挡住（带首尾空白的 name 报
- *   `INVALID_TYPE`），所以这条闸门服务的是**存量市场行 / 旁路归档 / 老服务端**。
+ *   `INVALID_TYPE`），所以这条闸门服务的是**存量市场行 / 旁路归档 / 老服务端**；
+ *   解码这一维服务端**完全不拦**（`ParseSkillMD` 只看 TrimSpace/分隔行/YAML/正文
+ *   rune 数），所以它必须由客户端三面自己收口。
  */
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -56,7 +65,7 @@ import AdmZip from 'adm-zip'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { assertArchiveSafe, archiveFormat, extractTar, extractZip, MAX_ARCHIVE_BYTES } from './archive-util.ts'
 import { invocationBooleanVerdict, LEGACY_INVOCATION, precheckSkillPackage } from './manifest-precheck.ts'
-import { readSkillFrontmatterStrict } from './skill-frontmatter.ts'
+import { decodeSkillTextBytes, readSkillFrontmatterStrict, readSkillTextStrict } from './skill-frontmatter.ts'
 import { isWindowsReservedDeviceNameSegment } from './skill-name-rules.ts'
 import { normalizeServerURL } from './server-connector/auth.ts'
 import {
@@ -429,6 +438,22 @@ async function readSmallRegularFile(file: string, maxBytes: number = MARKER_MAX_
 }
 
 /**
+ * 锁文件的身份（`dev`/`ino`）—— **破坏性删除前要比的就是它**。
+ *
+ * 与释放闭包（`acquireSkillDirLock` 返回的那个函数）同款口径：`rm` 只有字符串路径
+ * 可用，所以"我要删的就是我刚才判定为陈旧的那一份"只能靠身份比对来证明。
+ */
+interface SkillLockIdentity {
+  readonly dev: number | bigint
+  readonly ino: number | bigint
+}
+
+/** 从一次 `stat`/`lstat` 结果取锁身份（`undefined` = 拿不到 ⇒ 不许删）。 */
+function lockIdentity(stat: { dev: number | bigint, ino: number | bigint } | undefined): SkillLockIdentity | undefined {
+  return stat === undefined ? undefined : { dev: stat.dev, ino: stat.ino }
+}
+
+/**
  * 锁文件是否陈旧（{@link SKILL_LOCK_DIR} 的协议判据之一；与同步侧
  * `skills-sync.js` 的 `isSkillLockStale` 逐条同源）。
  *
@@ -436,12 +461,17 @@ async function readSmallRegularFile(file: string, maxBytes: number = MARKER_MAX_
  * 删除（fail-safe：预置链接的形态到这里就变成"等不到锁 ⇒ fail-loud"，而不是
  * "被我们删掉"或"无锁写入"）。
  *
+ * R23-W2-02：返回值从布尔改成**身份**（`dev`/`ino`），因为"陈旧"这个判断必须在
+ * 删除那一刻被重新证明一次（见 {@link removeGuardedSkillLock}）。身份取自**同一次**
+ * `lstat` —— 另起一次 stat 会得到"判定用的那份"与"删除前比对的那份"两个来源，
+ * 那就又回到"判据各自钉自己的一刻"。
+ *
  * @param lockPath - 锁文件绝对路径。
- * @returns 可抢占为 true。
+ * @returns 可抢占时给出该文件的身份；不陈旧/不是普通文件时为 `undefined`。
  */
-async function isSkillLockStale(lockPath: string): Promise<boolean> {
+async function readStaleSkillLock(lockPath: string): Promise<SkillLockIdentity | undefined> {
   const stat = await lstat(lockPath).catch(() => undefined)
-  if (stat === undefined || !stat.isFile()) return false
+  if (stat === undefined || !stat.isFile()) return undefined
   const raw = await readSmallRegularFile(lockPath)
   if (raw !== undefined) {
     let owner: { pid?: unknown } | undefined
@@ -453,14 +483,79 @@ async function isSkillLockStale(lockPath: string): Promise<boolean> {
     if (owner !== null && typeof owner === 'object' && Number.isInteger(owner.pid) && (owner.pid as number) > 0) {
       try {
         process.kill(owner.pid as number, 0) // 信号 0 = 只探测存活
-        return false
+        return undefined
       } catch (cause) {
         // 只有 ESRCH（进程确实不存在）算陈旧；EPERM 等"不可判定"保守视为仍持有。
-        return (cause as NodeJS.ErrnoException).code === 'ESRCH'
+        return (cause as NodeJS.ErrnoException).code === 'ESRCH' ? lockIdentity(stat) : undefined
       }
     }
   }
-  return Date.now() - stat.mtimeMs > SKILL_LOCK_STALE_MS
+  return Date.now() - stat.mtimeMs > SKILL_LOCK_STALE_MS ? lockIdentity(stat) : undefined
+}
+
+/**
+ * 删除一把锁文件 —— `rm` **紧邻之前**过两道守卫，任何一道不过就**一个字都不动**。
+ *
+ * R23-W2-02：`acquireSkillDirLock` 里三条按路径的 `rm(lockPath)` 中，只有**释放**
+ * 闭包自带 `dev/ino` 守卫（`:563-569` 的注释"祖先被换走/已被别人抢占时不误删"）；
+ * **陈旧抢占**（`isSkillLockStale` → `rm`）与**写锁失败后的收尾**（`handle.writeFile`
+ * 抛错 → `rm`）都在窗口之外 —— 前者与本轮新加的紧邻复检之间还隔着 `open` 与
+ * `isSkillLockStale` 两次 IO。确定性注入实测：库内 `.skill-locks` 被换成指向库外的
+ * 链接时，库外那份**只是看起来陈旧**的同名文件被我们删掉了（危害类别是"删了别人的
+ * 文件"，比"在库外写了自己的文件"更重）。
+ *
+ * 两道守卫的**顺序是刻意的**：
+ *   1. **身份复验**（先做，一次 `lstat`）——"要删的就是刚判定为陈旧的那一份"。
+ *      祖先被换走时这一步就会看见另一份文件（或看不见），当场拒删；
+ *   2. **锚定复检**（后做，是 `rm` 之前**最后一次** IO）——`.skill-locks` 必须仍是
+ *      库内真实目录（逐段身份 + 非链接/junction/挂载点 + 同设备）。
+ * 于是"复检之后、`rm` 之前"只剩与删除面同口径的**已认账最后一跳**（Node 没有
+ * `openat`），而不是之前那种跨两次 IO 的窗口。
+ *
+ * @param skillsDir - 技能库根。
+ * @param lockAnchor - {@link ensureLibraryLockRoot} 的锚定结果。
+ * @param lockPath - 锁文件绝对路径。
+ * @param expected - 判定为陈旧（或自己创建）时记下的身份；`undefined` ⇒ 直接拒删。
+ * @param sink - 日志出口（拒绝必须留痕，否则"锁抢不掉"读起来像随机失败）。
+ * @param what - 日志里点名的用途。
+ * @returns 真的删掉了为 true；被拒/失败为 false。
+ */
+async function removeGuardedSkillLock(
+  skillsDir: string,
+  lockAnchor: AnchoredLibraryPath,
+  lockPath: string,
+  expected: SkillLockIdentity | undefined,
+  sink: SkillInstallLog,
+  what: string,
+): Promise<boolean> {
+  const name = basename(lockPath)
+  if (expected === undefined) {
+    sink.warn(
+      `[skill-install] refused to remove ${what} "${SKILL_LOCK_DIR}/${name}": its identity could not be captured, `
+      + 'so the installer cannot prove that the file it would delete is the one it judged stale — nothing was removed',
+    )
+    return false
+  }
+  const now = await lstat(lockPath).catch(() => undefined)
+  if (now === undefined || now.dev !== expected.dev || now.ino !== expected.ino) {
+    sink.warn(
+      `[skill-install] refused to remove ${what} "${SKILL_LOCK_DIR}/${name}": it is no longer the same file that was `
+      + `judged stale (device/inode changed${now === undefined ? ', or it is gone' : ''}) — nothing was removed`,
+    )
+    return false
+  }
+  const verdict = await recheckAnchoredLibraryPath(skillsDir, lockAnchor)
+  if (!verdict.holds) {
+    sink.warn(
+      `[skill-install] refused to remove ${what} "${SKILL_LOCK_DIR}/${name}": the path could not be re-verified right `
+      + `before the removal — ${describeRecheckFailure(verdict.reason)} — nothing was removed`,
+    )
+    return false
+  }
+  return await rm(lockPath, { force: true }).then(() => true).catch(() => {
+    // 收不掉就留给陈旧判定：调用方按 `existsSync` 走等待/超时那条路。
+    return false
+  })
 }
 
 /**
@@ -518,14 +613,25 @@ async function ensureLibraryLockRoot(skillsDir: string): Promise<AnchoredLibrary
  * 纯 stat 复检无法闭合"复检之后、syscall 之前"的最后一跳（Node 没有 `openat`），
  * 这是与删除面同口径的已认账边界。
  *
+ * R23-W2-02：同一轮循环里还有两条**按路径的 `rm`**（陈旧抢占 + 写锁失败后的收尾），
+ * 它们与那次复检之间隔着 `open` 与 `readStaleSkillLock` 两次 IO —— 窗口更宽。现在
+ * 两条都过 {@link removeGuardedSkillLock}（锚定复检 + `dev/ino` 身份守卫），与
+ * **释放**闭包同一个口径；不过则一个字都不动并记 `refused` 日志（`sink`）。
+ * 释放闭包保持原样：它在热路径上，且 `dev/ino` 守卫已覆盖同一条威胁，再加一次
+ * `/proc/self/mountinfo` 重锚会在"证明不了身份"的文件系统上把锁**永久留在盘上**
+ * （比误删更难恢复），不划算。
+ *
  * @param skillsDir - the skill root.
  * @param name - the skill directory name.
  * @param waitMs - 拿不到锁时的等待上限（缺省 {@link SKILL_LOCK_WAIT_MS}）。
+ * @param sink - 日志出口（拒绝删除必须留痕，见 {@link removeGuardedSkillLock}）。
  * @returns 释放函数（只删自己创建的那个 inode）。
  * @throws SkillLockedError 在等待超时后；`ArchiveInstallRefusal` `LIBRARY_TEMP_UNSAFE`
  *   在 `.skill-locks` 不是库内真实目录（或紧邻 `open` 之前证明不了）时。
  */
-async function acquireSkillDirLock(skillsDir: string, name: string, waitMs: number): Promise<() => Promise<void>> {
+async function acquireSkillDirLock(
+  skillsDir: string, name: string, waitMs: number, sink: SkillInstallLog,
+): Promise<() => Promise<void>> {
   const lockAnchor = await ensureLibraryLockRoot(skillsDir)
   const lockPath = join(lockAnchor.path, `${name}${SKILL_LOCK_SUFFIX}`)
   const deadline = Date.now() + Math.max(0, waitMs)
@@ -556,7 +662,12 @@ async function acquireSkillDirLock(skillsDir: string, name: string, waitMs: numb
         await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }))
       } catch (cause) {
         await handle.close().catch(() => { /* 已关闭 */ })
-        await rm(lockPath, { force: true }).catch(() => { /* 收不掉就留给陈旧判定 */ })
+        // R23-W2-02：收尾这条 `rm` 也按路径删 —— 同一族里它同样要过锚定复检 +
+        // `dev/ino` 守卫。`handle.stat()` 自己就失败时拿不到身份 ⇒ **一个字都不动**
+        // （留给陈旧判定/超时），绝不因为"刚创建过"就假定路径还指着那一刻的 inode。
+        await removeGuardedSkillLock(
+          skillsDir, lockAnchor, lockPath, lockIdentity(stat), sink, 'the lock file this installer just created',
+        )
         throw cause
       }
       await handle.close().catch(() => { /* 已关闭 */ })
@@ -569,8 +680,11 @@ async function acquireSkillDirLock(skillsDir: string, name: string, waitMs: numb
       }
     }
     // 被占用：陈旧（持锁进程确定已死 / 无 pid 且 mtime 超时）⇒ 抢占一次。
-    if (await isSkillLockStale(lockPath)) {
-      await rm(lockPath, { force: true }).catch(() => { /* 抢不掉 ⇒ 走下面的等待/超时 */ })
+    // R23-W2-02：身份取自判定它的那一次 `lstat`，删除前再复验一次 + 复检锚定；
+    // 不过就**一个字都不动**（`rm` 抢不掉 ⇒ 走下面的等待/超时，而不是按路径盲删）。
+    const stale = await readStaleSkillLock(lockPath)
+    if (stale !== undefined) {
+      await removeGuardedSkillLock(skillsDir, lockAnchor, lockPath, stale, sink, 'the stale per-name lock')
       if (!existsSync(lockPath)) continue
     }
     if (Date.now() >= deadline) {
@@ -610,20 +724,24 @@ const skillLocks = new Map<string, Promise<void>>()
  * @param skillsDir - the skill root.
  * @param name - the skill directory name.
  * @param task - the critical section.
- * @param options - `waitMs`：文件锁的等待上限（测试用它把"拿不到锁"钉成毫秒级）。
+ * @param options - `waitMs`：文件锁的等待上限（测试用它把"拿不到锁"钉成毫秒级）；
+ *   `log`：日志出口（R23-W2-02：锁文件的**拒绝删除**必须留痕，否则"锁抢不掉"在
+ *   诊断包里读起来像随机失败）。
  * @returns whatever `task` resolves to.
  */
 export async function withSkillLock<T>(
   skillsDir: string,
   name: string,
   task: () => Promise<T>,
-  options: { waitMs?: number | undefined } = {},
+  options: { waitMs?: number | undefined, log?: SkillInstallLog | undefined } = {},
 ): Promise<T> {
   const key = `${skillsDir}\u0000${name}`
   const previous = skillLocks.get(key) ?? Promise.resolve()
   // 前一个持锁者失败也要放行（否则一次失败会把该名字永久锁死）。
   const run = previous.then(() => undefined, () => undefined).then(async () => {
-    const release = await acquireSkillDirLock(skillsDir, name, options.waitMs ?? SKILL_LOCK_WAIT_MS)
+    const release = await acquireSkillDirLock(
+      skillsDir, name, options.waitMs ?? SKILL_LOCK_WAIT_MS, skillLog(options.log),
+    )
     try {
       return await task()
     } finally {
@@ -746,7 +864,7 @@ export async function installSkillArchive(options: InstallSkillArchiveOptions): 
   assertInstallableSkillName(name)
   // per-name 文件锁（跨包协议，见 SKILL_LOCK_DIR）：随包插件的开机同步取的是**同一把**，
   // 两端因此互斥；拿不到就在 waitMs 之后 fail-loud，绝不无锁写入。
-  return await withSkillLock(skillsDir, name, () => runInstallSkillArchive(options), { waitMs: options.lockWaitMs })
+  return await withSkillLock(skillsDir, name, () => runInstallSkillArchive(options), { waitMs: options.lockWaitMs, log: options.log })
 }
 
 /** {@link installSkillArchive} 的临界区（调用方必须已持有 per-name 锁）。 */
@@ -2328,6 +2446,34 @@ function runtimeString(value: unknown): string | undefined {
 }
 
 /**
+ * 第三关的**解码层**（审计 R23-W2-01）：运行时读不出文本 ⇒ 整份技能被丢弃。
+ *
+ * 生产形态（桌面装配了 `ctx.fs`）下上游 `readSkillTextFromFileSystem` 走
+ * `fs.readText` → `readWholeText`，两条 `FS_NOT_TEXT` 后果一样：`logger.warn` +
+ * 整份丢弃。所以"我们接受集合 == 上游加载集合"这条不变量在**读文件这一步**上就
+ * 可能被打破，而 `readFile(…, 'utf8')` 看不出来（非法字节静默变 U+FFFD）。
+ *
+ * 判据**只有一份**：{@link decodeSkillTextBytes}（`skill-frontmatter.ts`，与
+ * `readWholeText` 逐条对齐）。这里只负责把成因翻成作者能改的文案。
+ * @param skillMdPath - 最终 SKILL.md 的路径。
+ * @throws ArchiveInstallRefusal `SKILL_MD_NOT_TEXT`（含原因与"运行时读不出文本"）。
+ */
+async function assertRuntimeReadableSkillText(skillMdPath: string): Promise<void> {
+  const read = await readSkillTextStrict(skillMdPath)
+  // 读不到文件（不存在 / 权限 / 是目录）不在这里判：那一条由紧接的 frontmatter
+  // 读取按"没有 frontmatter"处理，文案点名的成因本就包含"读不到文件"。
+  if (read.ok || read.failure === 'unreadable') return
+  throw new ArchiveInstallRefusal(
+    'SKILL_MD_NOT_TEXT',
+    read.failure === 'binary'
+      ? 'SKILL.md contains a NUL byte near the start, so the runtime reads it as a binary file and ignores the '
+        + 'whole skill (it would install but never load); write the file as plain UTF-8 text'
+      : 'SKILL.md is not valid UTF-8, so the runtime cannot decode it and ignores the whole skill '
+        + '(it would install but never load); re-save the file as UTF-8 text',
+  )
+}
+
+/**
  * 复核最终 SKILL.md 的 frontmatter 是否能被运行时加载（审计 A1）。
  *
  * 上游 `skill-filesystem` 的判据逐条对齐：frontmatter 的两条分隔线都必须是
@@ -2356,11 +2502,21 @@ function runtimeString(value: unknown): string | undefined {
  * {@link runtimeString}：**取值语义逐字等于上游**。双向由
  * `tests/skill-runtime-metadata-parity.spec.ts` 的 48 形态矩阵钉住（真跑 pinned
  * 上游注册表，"我们接受集合 == 上游加载集合"）。
+ *
+ * 审计 R23-W2-01（第三关的**解码**维度）：上面几条都在"文本已经读出来"之后才生效，
+ * 而生产形态下运行时**先过一关解码**（`ctx.fs` → `readWholeText`：采样窗口里的
+ * `NUL` 或整份非法 UTF-8 ⇒ `FS_NOT_TEXT` ⇒ 整份丢弃）。`readFile(…, 'utf8')` 永不
+ * 抛错 ⇒ 含 NUL 的 SKILL.md 曾一路走过预检与安装，模型侧却永远看不到。现在第三关
+ * 先要一份**文本**（{@link assertRuntimeReadableSkillText}），判据与
+ * `skill-frontmatter.ts` 的 {@link decodeSkillTextBytes} 同源。
  * @param dir - the unpacked skill directory.
  * @param name - the skill id being installed.
  * @throws ArchiveInstallRefusal with a user-readable reason.
  */
 export async function assertLoadableSkillMetadata(dir: string, name: string): Promise<void> {
+  // 解码层必须**先于**取值/切分判据：读不出文本时，"frontmatter 不合法"是一句
+  // 误导（frontmatter 可能完全合法，是文件本身运行时读不出来）。
+  await assertRuntimeReadableSkillText(join(dir, 'SKILL.md'))
   const meta = await readSkillFrontmatterStrict(join(dir, 'SKILL.md'))
   if (meta === undefined) {
     // 与上游 parseSkillFile 逐条对齐的三条成因（分隔行不严格 / 不是 YAML 映射 /
@@ -3051,7 +3207,7 @@ export async function uninstallSkill(
     const foreign = await listCrossRootSkillResidues(roots, skillsDir, name)
     if (foreign.length > 0) throw uninstallResidueRefusal(name, { kind: 'cross-root', foreign, afterRemoval: true }, locale)
     return target
-  })
+  }, { log: options.log })
 }
 
 /**
@@ -3548,6 +3704,10 @@ export interface SkillPackResult {
  * 版本号取自包内 `SKILL.md` 的 frontmatter `version`(决策 2026-09-01
  * 「包内即真相」)。此前这里的默认值 '1.0.0' 让每次上传都声称是 1.0.0——
  * 服务端因此永远看到同一个版本号,「本地与线上版本一致就拒绝」无从判断。
+ *
+ * R23-W2-01:发布预检的**解码层**也在这里 —— 预检拿的是文本,而
+ * `readFile(…, 'utf8')` 对非法字节永不抛错;先把**字节**过一遍与运行时同源的
+ * `readSkillTextStrict`,否则"预检 0 问题"的包在生产运行时会被整份丢弃。
  * @param skillsDir - the skill root (`<dshHome>/skills`).
  * @param name - the skill directory name.
  * @param version - 可选覆盖;缺省时用包内 frontmatter 的 version。
@@ -3589,7 +3749,30 @@ export async function packSkill(
   await assertArchiveSafe(archive)
   // 发布前本地预检(决策 §5.5):与服务端同一套规则的前 7 步,错误码一致。
   // 在这里失败就不发请求——用户不必等一次网络往返才知道包不合规。
-  const raw = await readFile(join(root, 'SKILL.md'), 'utf8')
+  //
+  // R23-W2-01（解码层）：预检的输入是**文本**，而 `readFile(…, 'utf8')` 会把非法
+  // 字节静默换成 U+FFFD ⇒ 同一个包在预检面读作"0 问题"、在生产运行时读作"整份
+  // 丢弃"（`ctx.fs` → `readWholeText` 的 `FS_NOT_TEXT`）。所以先把**字节**过一遍
+  // 与运行时同源的判据（{@link decodeSkillTextBytes}），别让一个永远加载不到的包
+  // 发出去。
+  const skillMdBytes = await readFile(join(root, 'SKILL.md'))
+  const skillMdRead = decodeSkillTextBytes(skillMdBytes)
+  if (!skillMdRead.ok) {
+    // 用户可见(经 auth-gate 的 { error } 回到能力中心面板), 故按宿主语言取。
+    throw new Error(hostCopy(
+      locale,
+      `技能 "${name}" 的 SKILL.md 不是运行时能读出来的文本`
+        + `（${skillMdRead.failure === 'binary' ? '开头附近有 NUL 字节' : '不是合法的 UTF-8'}）：`
+        + '装上去之后模型也永远看不到它,请把文件另存为 UTF-8 纯文本再上传',
+      `Skill "${name}" has a SKILL.md the runtime cannot read as text `
+        + `(${skillMdRead.failure === 'binary' ? 'a NUL byte near the start' : 'not valid UTF-8'}): it would install `
+        + 'but the model would never see it — re-save the file as UTF-8 text and upload again',
+    ))
+  }
+  // 预检的输入**逐字保持改动前那一份**（`Buffer#toString('utf8')` 与
+  // `readFile(…, 'utf8')` 同一条路径）：BOM 是预检面独立的发布质量规则
+  // （`PrecheckCode.BomDetected`），不能被解码层"`TextDecoder` 会剥掉 BOM"顺手吃掉。
+  const raw = skillMdBytes.toString('utf8')
   const entryNames = zip.getEntries().map((e) => e.entryName)
   const issues = precheckSkillPackage(raw, name, entryNames, locale)
   if (issues.length > 0) {
