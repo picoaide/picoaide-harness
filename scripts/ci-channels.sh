@@ -640,8 +640,12 @@ fi
 # 再发现就晚了。缺字段的报错刻意不回显渠道名(渠道 CI 不输出渠道信息)。
 for id in "${SELECTED[@]}"; do
   manifest="$DEST/$id/channel.json"
-  if [ ! -f "$manifest" ]; then
-    echo "::error::渠道仓里缺少该渠道的 channel.json(渠道目录或配置缺失)" >&2
+  # channel.json 与素材同一条规则(2026-09-26 审计 W5-01 的同族):必须是**普通
+  # 文件**。`-f`(以及 node 的 readFileSync)都**跟随**符号链接,而 `cp -a`/`COPY`
+  # 会把它原样带进镜像 —— 服务端随后按链接读到容器内别的文件当渠道配置,其字段
+  # 会经**未认证**的 /api/client/v2/channel 回显出去。报错照旧不回显渠道名。
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+    echo "::error::渠道仓里缺少该渠道的 channel.json(渠道目录或配置缺失;它必须是渠道目录内的普通文件,符号链接一律拒绝)" >&2
     exit 1
   fi
   # 用 node 解析而不是 grep:channel.json 允许任意缩进/键序,正则匹配字段名会在
@@ -878,7 +882,17 @@ for id in "${SELECTED[@]}"; do
         continue
       }
       if (name.includes("/") || name.includes("\\")) { invalid.push("assets." + key + "(必须是单段文件名)"); continue }
-      if (!fs.existsSync(path.join(dir, name))) { invalid.push("assets." + key + "(渠道目录里没有这个文件)"); continue }
+      // 素材必须是渠道目录内的**普通文件**（2026-09-26 审计 W5-01）。
+      // 为什么必须在这里拦:`stage_from` 用 `cp -a`、Dockerfile 用 `COPY` —— 两者
+      // 都**保留**符号链接、不 dereference,于是一个指向容器内任意可读文件的链接会
+      // 原样进镜像;而三个素材端点**未认证**（登录页在未登录时就要拿 logo）⇒ 那就是
+      // 一条未认证的任意文件读取。所以用 lstat（不跟随链接）并要求 isFile():
+      // 目录/符号链接/设备/FIFO 一律拒。服务端同判见 internal/channel 的 assetRegular。
+      const assetStat = fs.lstatSync(path.join(dir, name), { throwIfNoEntry: false })
+      if (assetStat === undefined || !assetStat.isFile()) {
+        invalid.push("assets." + key + "(素材必须是渠道目录内的普通文件(符号链接一律拒绝),当前不存在或不是普通文件)")
+        continue
+      }
       // 素材的脚本特征检查:先嗅探内容(不看扩展名),.svg 扩展名照旧必查。
       // 内容不进日志:只报字段名与特征种类(元素/属性名)。
       const assetBuf = fs.readFileSync(path.join(dir, name))
@@ -893,8 +907,13 @@ for id in "${SELECTED[@]}"; do
       }
     }
     // mac 图标管线要求:1024×1024、RGBA16、带 ICC(见 generate-mac-app-icon.mjs)。
+    // 与素材同一条规则(同一个理由,见上面 assets 循环):必须是**普通文件** ——
+    // 旧的 `fs.existsSync` 跟随符号链接,链接会随 `cp -a`/`COPY` 进镜像。
     const iconPath = path.join(dir, "app-icon.png")
-    if (fs.existsSync(iconPath)) {
+    const iconStat = fs.lstatSync(iconPath, { throwIfNoEntry: false })
+    if (iconStat !== undefined && !iconStat.isFile()) {
+      invalid.push("app-icon.png(素材必须是渠道目录内的普通文件(符号链接一律拒绝),当前不是普通文件)")
+    } else if (iconStat !== undefined) {
       const buf = fs.readFileSync(iconPath)
       const png = buf.length > 33 && buf.readUInt32BE(0) === 0x89504e47
       if (!png) invalid.push("app-icon.png(不是 PNG)")

@@ -14,6 +14,7 @@ package channel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -221,7 +222,16 @@ func Load() Config {
 // (见 AppOriginScheme 的注释)。解析失败按"不存在"处理 —— Load 的既有约定是
 // 坏配置回落中性值,这里不改变它。
 func loadPresent() (Config, bool) {
-	raw, err := os.ReadFile(filepath.Join(Dir, "channel.json"))
+	// channel.json 与素材同一条规则(见 assetRegular):必须是渠道目录内的**普通
+	// 文件**。渠道目录里的东西由 CI 从私有渠道仓注入,而 `cp -a` 与 `docker COPY`
+	// 都保留符号链接 ⇒ 跟随链接读配置,等于让渠道包指定"读容器内哪个文件当配置",
+	// 而配置字段会经**未认证**的 /api/client/v2/channel 回显出去(弱读取面)。
+	// 非普通文件按"没有配置"处理(与读不到同一语义:回落中性占位)。
+	manifest := filepath.Join(Dir, "channel.json")
+	if st, err := os.Lstat(manifest); err != nil || !st.Mode().IsRegular() {
+		return fallback(), false
+	}
+	raw, err := os.ReadFile(manifest)
 	if err != nil || len(raw) > maxConfigBytes {
 		return fallback(), false
 	}
@@ -329,13 +339,90 @@ func BuildResponse(cfg Config) Response {
 	return r
 }
 
-// assetExists 判断渠道目录里的素材文件是否存在且非目录。
-func assetExists(name string) bool {
-	if strings.ContainsAny(name, `/\`) || name == "" {
-		return false
+// errNotRegularAsset 素材不是普通文件(目录/符号链接/设备/FIFO 等)。
+var errNotRegularAsset = errors.New("channel: asset is not a regular file")
+
+// assetRegular 是"这个素材可用吗"的**唯一判据**:渠道目录内的**普通文件**才算素材。
+//
+// 必须 Lstat(不跟随符号链接)且要求 IsRegular —— 渠道目录由 CI 从私有渠道仓注入,
+// 属**不可信输入**;`os.Stat` 会跟随链接,把"渠道目录之外的任意可读文件"判成素材,
+// 而三个素材端点按产品设计**未认证**(见 internal/router:登录页在未登录时就要拿
+// logo)⇒ 一个符号链接就等于把容器内任意可读文件挂到了未认证端点上(2026-09-26
+// 审计 W5-01 实测:三个端点全 200 且 body 是渠道目录之外文件的内容)。
+//
+// 目录、符号链接、设备、FIFO 一律按"不存在"处理(404,与"未配置"同一个信封)。
+// 口径与本仓其它素材加载路径一致:wasmapp/skillseed、archiveutil、appdb、
+// cachetrust 全都拒符号链接;构建期同判在 scripts/ci-channels.sh(lstatSync().isFile(),
+// 因为 `cp -a` 与 `docker COPY` 都不 dereference —— 只在服务端拦是"只拦一半")。
+//
+// 名字形状(必须单段、非空)也在这里收口:渠道配置被写成 `../x` 时不得越出 Dir。
+func assetRegular(name string) (os.FileInfo, error) {
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return nil, errNotRegularAsset
 	}
-	st, err := os.Stat(filepath.Join(Dir, name))
-	return err == nil && !st.IsDir()
+	st, err := os.Lstat(filepath.Join(Dir, name))
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, errNotRegularAsset
+	}
+	return st, nil
+}
+
+// assetExists 判断渠道目录里有没有可下发的素材(= assetRegular 的布尔形态)。
+func assetExists(name string) bool {
+	_, err := assetRegular(name)
+	return err == nil
+}
+
+// openAsset 打开渠道目录内的素材文件,只接受**普通文件**;返回已打开的 fd 与它的
+// 文件信息。
+//
+// 为什么不是"先按路径判存在、再按路径打开"(旧写法 = os.Stat + http.ServeFile):
+// 两次解析路径之间文件可以被换掉。这里把判据与打开绑成**同一个对象**:
+//
+//  1. assetRegular 的 Lstat —— 不跟随符号链接,拒一切非普通文件;
+//  2. os.Open 拿 fd;
+//  3. f.Stat + os.SameFile —— 关掉"第 1 步之后、第 2 步之前被换成另一个 inode
+//     (含换成符号链接)"这个窗口。
+//
+// 调用方此后只读这个 fd(内容检查与下发都用它),不再解析路径一次 —— 这也是
+// handlers.go 用 http.ServeContent 而不是 http.ServeFile 的原因。
+//
+// 残留(如实记下,不假装没有):第 1 步是普通文件、第 2 步之前被换成 **FIFO** 时,
+// os.Open 会阻塞到有写者。该形态要求攻击者已经能在运行中的容器里写渠道目录
+// (即已经拿到服务端账户),且旧实现在同一位置暴露得更宽(任何一次请求都跟随链接),
+// 因此不引入平台相关的 O_NONBLOCK 去换一个更窄的洞。
+func openAsset(name string) (*os.File, os.FileInfo, error) {
+	lst, err := assetRegular(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := os.Open(filepath.Join(Dir, name))
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !assetIdentityMatches(lst, st) {
+		_ = f.Close()
+		return nil, nil, errNotRegularAsset
+	}
+	return f, st, nil
+}
+
+// assetIdentityMatches 报告"按路径看到的东西"(Lstat,不跟随链接)与"fd 打开的东西"
+// 是不是**同一个普通文件** —— "判据与打开是同一个对象"这条不变式由它收口。
+//
+// 为什么单拎成一个谓词:那个窗口(第 1 步之后、第 2 步之前被换成符号链接)在测试里
+// 没法确定性复现,但谓词本身可以直接喂真实 FileInfo 判真假 —— 符号链接与其目标是
+// **不同**对象(这正是要拒的形态),目录/设备/FIFO 即使"同一个"也不算素材。
+func assetIdentityMatches(byPath, byFD os.FileInfo) bool {
+	return byFD.Mode().IsRegular() && os.SameFile(byPath, byFD)
 }
 
 // LogoPath 返回要下发的 logo 文件的绝对路径(不存在则返回空)。
@@ -360,7 +447,9 @@ func LogoDarkPath() string { return assetPath(Load().Assets.LogoDark) }
 // FaviconPath 返回站点图标(favicon)的绝对路径;未配置或文件不存在时返回空。
 func FaviconPath() string { return assetPath(Load().Assets.Favicon) }
 
-// assetPath 把渠道目录内的素材名解析成绝对路径(不存在/非法名返回空)。
+// assetPath 把渠道目录内的素材名解析成绝对路径。
+// 不存在 / 非法名 / **不是普通文件**(目录、符号链接、FIFO…)一律返回空 ——
+// 见 assetRegular:这是"素材必须在本目录内"的唯一防线,而三个素材端点未认证。
 func assetPath(name string) string {
 	if !assetExists(name) {
 		return ""

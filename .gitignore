@@ -57,9 +57,10 @@ packages/host/cron/lib/
 packages/host/connectors/lib/
 packages/host/browser/lib/
 packages/host/wasm-apps-host/lib/
-# dsh-memory-evolve 是 git submodule(独立仓库 github:csyangwen/dsh-memory-evolve),
-# 其 lib/ 在子仓库内跟踪,主仓库只记录 submodule pin。
-community/market/lib/
+# dsh-memory-evolve 是 **vendored in-tree 源码**(packages/vendor/memory-evolve,全仓
+# 唯一的 submodule 是 deepseek-harness),上游独立仓库 github:csyangwen/dsh-memory-evolve
+# 只用来做升级时的三方合并 base。它的 lib/ **入库**(64 个文件),所以这里没有忽略规则 ——
+# 也不要跑它的 scripts/build.mjs:那会用 src 覆盖 lib 里的本地加固(见 VENDORED.md)。
 
 # server (Go)
 server/bin/
