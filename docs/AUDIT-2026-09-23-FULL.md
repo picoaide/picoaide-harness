@@ -2670,3 +2670,45 @@ FAIL	github.com/picoaide/picoaide/cmd/server	0.126s
 **一条行为变更需登记**（FIX-40①）：未知 `X-Forwarded-Proto` 取值（`wss`/`on`/畸形 `, https`）
 从"地址算不出来"变为 `http://<host>`。报告论证：真实代理只写 http/https ⇒ 部署上不可达，
 且 `ServerURL` 只有 proof 签发/校验两个消费点。
+
+#### §7.69.9 【P1 级 CI 红，已修】`internal/bootstrap` 的守卫自第二十一轮起就是红的，且只在 CI 上现形
+
+**发现途径**：我执行 §7.69.7 订正的**冻结验收三件套**时，第 ③ 条（Go 侧）报
+`internal/...` 39 包 ok、**1 包 FAIL**。定位到 `internal/bootstrap` 的
+`TestServerVersionIsInformationalOnly`：
+```
+--- FAIL: TestServerVersionIsInformationalOnly (0.49s)
+    bootstrap_test.go:467: 客户端源码里出现了 server_version 的消费方
+      [../../../packages/host/enterprise/src/server-connector/config.ts] —— 口径必须同步
+```
+
+**根因：判据的取值域是"出现过这个名字"，而不是"真的读了它"。**
+`scanClientSources()` 用的是裸 `bytes.Contains(raw, []byte("server_version"))`，
+而 `config.ts:32` 是**一行 JSDoc**（列举服务端下发的字段名）：
+`* \`default_model\` / \`models\` / \`skills\` / \`web\` / \`connectors\` / \`server_version\`，`
+—— 那个文件**从未读过该字段**（全仓 `packages/**` 只有这一处出现，且是注释）。
+
+**为什么红了两轮（乃至自 `bb234cc313` 起）没人看见**：
+本地 `yarn check` **不跑 Go 测试** —— 正是 §7.69.6 / §7.69.7 记的同一元问题第三次发作。
+这次是**我按新纪律跑三件套才把它逼出来的**，新纪律第一次就抓到了东西。
+
+**修法（把取值域收成"读取点"）**：新增 `serverVersionReadPoint(raw)`，**按行**判 ——
+整行注释（首个非空白字符是 `//`/`*`/`/*`）或匹配点位于该行首个 `//` 之后 ⇒ 不算读取点；
+其余一律算。刻意**不做**字符串字面量词法分析：剥离块注释需要迷你词法器，
+而 URL 里的 `//`（`https://…`）会被朴素剥离器误当行注释开头，反而制造**新的假阴性**。
+按行判的安全方向是明确的：它只放过注释形态，代码里的读取
+（`cfg.server_version`、`raw["server_version"]`、解构、字符串键后索引）全在面内。
+
+**判据（双向，均已实跑）**：
+- 修后 `go test ./internal/bootstrap -count=1` ⇒ **EXIT=0**（修前 FAIL）；
+- **变异**：往 `config.ts` 尾部加一行**真实读取**
+  （`(c as { server_version?: unknown }).server_version`）⇒ 守卫**当场 FAIL 并点名该文件** ⇒
+  收窄取值域**没有**把它变成恒绿（这条是最关键的：否则我只是把判据弄哑了）；
+- **回归保护是自动的**：那行 JSDoc 仍在 `config.ts` 里 ⇒ 任何人把实现退回 `bytes.Contains`，
+  本用例立刻复红，**不需要额外加测试**。
+
+**方法论（第 6 次"判据取值域"实例，且本次是主控自己踩的）**：
+判据与它要守护的事实之间隔着一层**表示**（"出现名字" vs "读取字段"、
+"文件里有没有这个词" vs "这条路径真的可达"）。每次我们只盯着自己的表示写判据，
+就会在表示比事实**宽**时假红（本次）、在比事实**窄**时假绿（AB1-03 的九种语法形态）。
+两边的修法都只有一句话：**把判据的取值域对齐被守护的那件事本身。**

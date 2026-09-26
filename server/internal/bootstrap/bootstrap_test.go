@@ -1,7 +1,6 @@
 package bootstrap
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -515,6 +514,50 @@ func fieldDocComment(t *testing.T, src, decl string) string {
 //     `packages/vendor/memory-evolve/VENDORED.md`），里面至少有
 //     {@link vendorLibFloor} 个源码文件必须被读到 —— 复审 F3 实测的盲区正是它：
 //     旧实现按目录名 skip（`lib`），把消费方放进该目录时用例**存活**。
+//
+// serverVersionReadPoint 判定一份源码里是否**真的读取**了 server_version / serverVersion。
+//
+// 判据的取值域必须是"读取点"，不是"出现过这个名字"（2026-09-27 第二十八轮修正）：
+// 旧实现是裸 `bytes.Contains`，于是 `packages/host/enterprise/src/server-connector/config.ts`
+// 里**一行 JSDoc**（列举服务端下发的字段名）就把本条判据打成红 —— 而那个文件从未读过该字段。
+// 那条红在本仓瞒了很久：本地 `yarn check` **不跑 Go 测试**（见 docs/AUDIT-2026-09-23-FULL.md
+// §7.69.7），所以它只在 CI 的 server job 上现形。
+//
+// 实现刻意**按行**判、不做字符串字面量词法分析：剥离块注释需要迷你词法器，而 URL 里的
+// `//`（如 `https://…`）会被朴素的剥离器误当行注释开头，反而制造新的假阴性。
+// 按行判的安全方向是"宁可不报"吗？不是 —— 它只放过**注释形态**的行：
+//
+//	· 整行是注释（首个非空白字符是 `//` 或 `*`）；
+//	· 或匹配点位于该行首个 `//` 之后（行尾注释）。
+//
+// 代码里的读取（`cfg.server_version`、`raw["server_version"]`、解构、字符串键后再索引）
+// 一律仍在面内 —— 那些行不会以注释开头，匹配点也在 `//` 之前。
+func serverVersionReadPoint(raw []byte) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		idx := -1
+		which := 0
+		if i := strings.Index(line, "server_version"); i >= 0 {
+			idx, which = i, 1
+		}
+		if i := strings.Index(line, "serverVersion"); i >= 0 && (idx < 0 || i < idx) {
+			idx, which = i, 2
+		}
+		if idx < 0 {
+			continue
+		}
+		trimmed := strings.TrimLeft(line, " \t\r")
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "/*") {
+			continue
+		}
+		if c := strings.Index(line, "//"); c >= 0 && c < idx {
+			continue
+		}
+		_ = which
+		return true
+	}
+	return false
+}
+
 func scanClientSources(t *testing.T) []string {
 	t.Helper()
 	root := filepath.Join("..", "..", "..", "packages")
@@ -555,7 +598,7 @@ func scanClientSources(t *testing.T) []string {
 		if strings.HasPrefix(rel, vendoredLibPrefix) {
 			vendoredLib++
 		}
-		if bytes.Contains(raw, []byte("server_version")) || bytes.Contains(raw, []byte("serverVersion")) {
+		if serverVersionReadPoint(raw) {
 			hits = append(hits, abs)
 		}
 		return nil
