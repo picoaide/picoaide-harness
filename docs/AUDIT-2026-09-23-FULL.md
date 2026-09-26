@@ -2637,3 +2637,36 @@ FAIL	github.com/picoaide/picoaide/cmd/server	0.126s
 
 **方法论**：`yarn check` 的绿**从来不代表 CI 会绿**。两次实证（install 步、Go server job）都说明
 "本地门禁 ⊂ CI 判据面"，而缺口只在**改动落在缺口那侧**时暴露（第一次是改 `package.json`，第二次是加 env）。
+
+#### §7.69.8 FIX-40 / FIX-41 收工回报（含三条需要主控决策的残留）
+
+**FIX-40 = FIXED 3 / DEFERRED 0**（`wasmapp/appproof` 第二份 XFP、`glitchtip_base_url` + **新发现的第三处**、两条会话入口）。
+
+- **它把"只修点名的那两条"这个病根直接做成了判据**：新增 `audit_set_setting_inventory_test.go`，
+  用 AST 把 `llmgateway/admin.go` 的**全部 settings 写点**与登记表**双向对账** ——
+  新增未登记写点 / 换折叠器 / 绕过 helper 三种形态全红。这是本仓"同族只收口一条"类缺陷的**结构性解**，
+  值得作为后续同类修复的模板。
+- **它实证证伪了自己登记理由的一半**：`windows.closeAll()` 体内**无 await** ⇒ 不 await 调用时窗口与映射已同步拆干净，
+  "迟到关掉新窗口"结构上不可达；真窗口只在缓存侧。**登记理由被重写为"已收口 + 收口形态 + 判据 + 为什么这条判据看不见它"**。
+- **它顺手发现了判据自身的缺陷（新登记）**：`session-epoch-wiring.spec.ts` 的 `guardReceivers()`
+  **按名字识别代际协议** —— 任意 `x.begin()`/`x.isCurrent()` 都算守卫。它的清理链最初叫
+  `scopeReset.begin(previous)`，就把 `index.ts` 拖进规则 C/E 的适用面，导致**同一次运行里规则 B 认它"已守卫"、
+  规则 C 报 11 条 `await-outside-guard`** —— 两条规则自相矛盾，唯一出口是给无关 API 改名。
+  ⇒ **"按名字识别协议"是"判据取值域"教训的第 5 个变体**：判据不该靠命名约定认协议，应认**符号来源**（import 关系）。
+
+**需要主控决策的三条残留（均已带实测命令）**：
+
+1. **provider 的凭据型查询串当下可达**（`llmgateway/admin.go` 的三个 provider 审计点）：
+   实测 `POST /providers {"base_url":"https://llm.example.com/v1?accessToken=QUERYSECRETTOKEN"}` ⇒ **200**，
+   随后 create/delete 的**不可变** `detail` 原样带上 token。两条候选修法都要取舍
+   （无条件折叠牺牲干净地址可读性；按参数名折叠要把 `serverauth` 的包私有 `auditSensitiveQueryParams` 导出 = 跨包公开面决定）。
+2. **`KNOWN_UNGUARDED_ENTRIES` 两条登记项未删**：给这两个文件装代际会触发规则 C 的 **11 条 / 2 条** `await-outside-guard`，
+   而新增 `AWAIT_EXEMPTIONS` 行不在该泳道授权内。**建议下一轮授权**（或在 §7.69.8-3 的判据缺陷修好后重估）。
+3. **判据缺陷**（上一条的根因）：`guardReceivers()` 的名字式识别，与规则 C 的文件级作用域**互相矛盾**。
+
+**FIX-41 = FIXED 4 / DEFERRED 0**（等锁预算取值域 P1 + 校验和回填 + clientrelease userinfo + XFP 设计理由）——
+详见 `temp/r21/fix-41/REPORT.md`；台账待其与 FIX-42/43 一并汇总。
+
+**一条行为变更需登记**（FIX-40①）：未知 `X-Forwarded-Proto` 取值（`wss`/`on`/畸形 `, https`）
+从"地址算不出来"变为 `http://<host>`。报告论证：真实代理只写 http/https ⇒ 部署上不可达，
+且 `ServerURL` 只有 proof 签发/校验两个消费点。
