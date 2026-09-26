@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createRequire } from 'node:module'
 import { subscribeSession } from './session-service.ts'
+import { createSessionEpoch } from './session-epoch.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
@@ -67,6 +68,14 @@ export type ErrorReportingState =
   | { state: 'config_unavailable'; reason: string }
 
 let status: ErrorReportingState = { state: 'idle' }
+
+/**
+ * `initSentry` 因会话换代而放弃本次初始化时返回的 reason（Z2-01）。
+ *
+ * 调用方（`sync`）在读到这个 reason 之前就已经按代际丢弃了本次同步，所以它不会
+ * 出现在状态上报或日志里；它存在是为了让"放弃"这件事在类型上可表达、在测试里可断言。
+ */
+export const STALE_SESSION_REASON = 'stale-session-generation'
 
 /** 只读当前状态(纯读,便于断言与状态上报)。 */
 export function getErrorReportingStatus(): ErrorReportingState {
@@ -211,7 +220,12 @@ export async function initSentry(
   release: string,
   level = 'error',
   heartbeat = false,
+  stillCurrent?: () => boolean,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // Z2-01：可选代际谓词（内部签名变更，既有调用点不受影响）。`sync` 传进来的是
+  // 「我还是不是最新那一代」—— 本函数内部有 await（close 最长 1.5s），而它落地的是
+  // 模块级 `sentry`/`status`，只在**外层** await 之后比对是拦不住这一步的。
+  const current = (): boolean => stillCurrent?.() !== false
   if (sentry !== null) {
     // 重新初始化前先关闭旧实例(登出/切换 DSN)。
     try {
@@ -220,6 +234,7 @@ export async function initSentry(
       // 又不会把退出路径拖长(宿主退出协调器另有超时)。
       await sentry.close(1500)
     } catch { /* ignore */ }
+    if (!current()) return { ok: false, reason: STALE_SESSION_REASON }
     sentry = null
   }
   const normalized = dsn.trim()
@@ -268,6 +283,8 @@ export async function initSentry(
       try {
         await (SentryNode as unknown as { close?: (t: number) => Promise<unknown> }).close?.(0)
       } catch { /* ignore */ }
+      // 关闭之后才写状态 —— 这中间又是一次 await（Z2-01）。
+      if (!current()) return { ok: false, reason: STALE_SESSION_REASON }
       status = { state: 'failed', reason: SDK_REJECTED_DSN_REASON, ...(dsnHost === undefined ? {} : { dsnHost }) }
       sentry = null
       return { ok: false, reason: SDK_REJECTED_DSN_REASON }
@@ -519,12 +536,21 @@ export function apply(ctx: Context): void {
   // release 用桌面客户端包版本(粗粒度够用;sourcemap 可按需细化)。
   // 编译期由 tsdown define 注入;缺省回退 "0.1.0"(与 enterprise package.json 一致)。
   const release = `picoaide-desktop@${DESKTOP_VERSION}`
+  // Z2-01：会话代际守卫（唯一实现见 session-epoch.ts）。本插件的 await 面最深
+  // （bootstrap 缺省 15s + initSentry 最长 1.5s 冲刷），而它落地的是"错误往哪台
+  // 采集端发"：迟到的旧响应会把 Sentry DSN 改回上一台服务端（栈/URL/用户名外泄），
+  // 登出之后还会把状态从 disabled 变回 ready。
+  const epochs = createSessionEpoch()
 
   const sync = async (session: Session | null): Promise<void> => {
+    const epoch = epochs.begin()
     ctx.logger?.debug('error-reporting: session-changed', session?.username ?? null)
     if (session === null) {
       // 登出是常态,保持 debug 不刷屏;状态回落 disabled。
-      await initSentry('', release)
+      // 迟到的登出续体不得关掉新会话已经建好的实例/把状态改回 disabled。
+      // 谓词必须传进去：initSentry 自己在 await 之后改模块级 sentry/status，
+      // 只在外层拦挡不住（见该函数与 session-epoch.ts 的规则 3）。
+      await initSentry('', release, undefined, false, () => epochs.isCurrent(epoch))
       return
     }
     try {
@@ -537,6 +563,7 @@ export function apply(ctx: Context): void {
       // default_model 没配上)会**原样保留** web 段 —— 据此关掉上报就等于复现
       // 本轮要消灭的缺陷(一个字节都不发)。所以按 `fallback` 种类判定。
       const { config, fallback } = await getBootstrap(session)
+      if (!epochs.isCurrent(epoch)) return
       const web = config.web
       if (fallback === 'empty') {
         status = { state: 'config_unavailable', reason: 'bootstrap 回退空配置(models 为空或形状不合)' }
@@ -567,7 +594,10 @@ export function apply(ctx: Context): void {
         release,
         web?.error_reporting_level ?? 'error',
         web?.error_reporting_heartbeat === true,
+        // 谓词必须传进去：initSentry 自己在 await 之后改模块级 sentry/status。
+        () => epochs.isCurrent(epoch),
       )
+      if (!epochs.isCurrent(epoch)) return
       if (result.ok) {
         // info 会落盘(桌面默认日志阈值 info),这是"链路活着"的第一手痕迹。
         ctx.logger?.info?.(
@@ -578,6 +608,9 @@ export function apply(ctx: Context): void {
       }
       void reportErrorReportingStatus(session, status)
     } catch (cause) {
+      // 迟到的 bootstrap 失败同样不能落地：否则一次早已作废的失败会把当前会话的
+      // 状态从 ready/disabled 改成 config_unavailable 并回传服务端（Z2-01）。
+      if (!epochs.isCurrent(epoch)) return
       // bootstrap 失败不阻断;但现在状态可查、日志会落盘。
       const reason = cause instanceof Error ? cause.message : String(cause)
       status = { state: 'config_unavailable', reason }

@@ -141,3 +141,68 @@ describe('gateway-model', () => {
     }
   })
 })
+
+describe('会话代际守卫（Z2-01）：登出的迟到续体不得清掉重新登录后的网关配置', () => {
+  const SESSION_A: Session = { serverURL: 'https://server-a.example.com', username: 'alice', token: 'tok-a' }
+  const SESSION_B: Session = { serverURL: 'https://server-b.example.com', username: 'bob', token: 'tok-b' }
+
+  const flush = async (n = 12): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+  }
+
+  it('登出续体落后于重新登录时，llm-deepseek 不得被清空', async () => {
+    // `credentials.unset` 慢一拍（真实实现要落盘/走 keyring）：登出那次 sync(null)
+    // 的续体落在"用户已经登录到另一台服务端"之后。没有守卫时它会 replace({}) ——
+    // 把新会话的 baseURL/apiKeyEnv/models 整段清掉，而凭据已经是新会话的令牌。
+    let releaseUnset: (() => void) | undefined
+    const set = vi.fn(async () => undefined)
+    const unset = vi.fn(() => new Promise<void>((resolve) => { releaseUnset = resolve }))
+    const listeners = new Set<(session: Session | null) => void>()
+    const writes: Array<{ ns: string; value: Record<string, unknown>; kind: 'update' | 'replace' }> = []
+    const ctx = {
+      logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+      on: (event: string, listener: (session: Session | null) => void) => {
+        expect(event).toBe(SESSION_CHANGED_EVENT)
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      credentials: { set, unset },
+      settings: {
+        update: vi.fn(async (ns: string, value: Record<string, unknown>) => { writes.push({ ns: String(ns), value, kind: 'update' }) }),
+        replace: vi.fn(async (ns: string, value: Record<string, unknown>) => { writes.push({ ns: String(ns), value, kind: 'replace' }) }),
+      },
+    } as unknown as Context
+    const emit = (session: Session | null): void => { for (const l of [...listeners]) l(session) }
+
+    apply(ctx)
+    emit(SESSION_A)
+    await flush()
+    emit(null) // 登出：unset 挂住
+    await flush()
+    emit(SESSION_B) // 用户立刻登录到另一台服务端
+    await flush()
+
+    const writesBeforeLateUnset = writes.length
+    const lastBefore = writes.at(-1)
+    expect(lastBefore?.value.baseURL).toBe('https://server-b.example.com/v1')
+    expect(set).toHaveBeenLastCalledWith(expect.anything(), 'tok-b')
+
+    releaseUnset?.() // 登出的续体现在才继续
+    await flush()
+
+    expect(
+      {
+        cleared: writes.some((w) => w.ns === 'llm-deepseek' && Object.keys(w.value).length === 0),
+        writes: writes.length,
+        before: writesBeforeLateUnset,
+        finalBaseURL: writes.filter((w) => w.ns === 'llm-deepseek').at(-1)?.value.baseURL,
+      },
+      '登出的迟到续体在当前会话（B）之后把 llm-deepseek 清空了',
+    ).toEqual({
+      cleared: false,
+      writes: writesBeforeLateUnset,
+      before: writesBeforeLateUnset,
+      finalBaseURL: 'https://server-b.example.com/v1',
+    })
+  })
+})

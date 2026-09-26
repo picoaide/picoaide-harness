@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { SESSION_CHANGED_EVENT } from './session-service.ts'
+import { createSessionEpoch } from './session-epoch.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** Credential reference under which the gateway token is stored and resolved. */
@@ -32,14 +33,24 @@ const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
  */
 export function apply(ctx: Context): void {
   const ref = credentialRef(TOKEN_ENV)
+  // Z2-01：会话代际守卫（唯一实现见 session-epoch.ts）。
+  //
+  // 这里没有网络往返，但 `credentials.unset/set` 与 `settings.replace/update` **之间**
+  // 有 await（凭据要落盘/走 keyring）。登出那次 `sync(null)` 的续体如果落在重新登录
+  // 之后，就会把新会话的 `llm-deepseek` 段整段清空 —— 凭据还是新会话的令牌，模型
+  // 链路却没了 baseURL/apiKeyEnv，直到下一次会话变化才恢复。
+  const epochs = createSessionEpoch()
 
   const sync = async (session: Session | null): Promise<void> => {
+    const epoch = epochs.begin()
     if (session === null) {
       await ctx.credentials.unset(ref)
+      if (!epochs.isCurrent(epoch)) return
       await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
       return
     }
     await ctx.credentials.set(ref, session.token)
+    if (!epochs.isCurrent(epoch)) return
     await ctx.settings.update(LLM_DEEPSEEK_NS, {
       protocol: 'chat-completions',
       baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,

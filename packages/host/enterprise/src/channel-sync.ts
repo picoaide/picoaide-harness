@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { absolutizeChannelAssets, brandChannel, DEFAULT_CHANNEL, mergeChannel, type BrandConfig, type ChannelConfig } from './channel-content.ts'
 import { subscribeSession } from './session-service.ts'
+import { createSessionEpoch } from './session-epoch.ts'
 import { fetchJSON } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 
@@ -75,20 +76,29 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 文案 —— 渠道客户于是看到厂商名。现在回落的是"本渠道"内容:官方构建下
   // brandChannel(undefined) 与 DEFAULT_CHANNEL 逐字段等值,行为不变。
   const builtIn = config.brand === undefined ? DEFAULT_CHANNEL : brandChannel(config.brand)
+  // Z2-01：会话代际守卫（唯一实现见 session-epoch.ts）。`fetchJSON` 的迟到响应/
+  // 迟到失败都会 emit，而 emit 是**立刻改界面**的出口：换服务端之后旧租户的品牌
+  // （名称/标语/logo/accent）会最后落地并一直显示到下一次会话变化。
+  const epochs = createSessionEpoch()
 
   const sync = async (session: Session | null): Promise<void> => {
+    const epoch = epochs.begin()
     if (session === null) {
       ctx.emit('pico/channel-changed', builtIn)
       return
     }
     try {
       const channel = await fetchJSON(session.serverURL, '/api/client/v2/channel', { token: session.token })
+      if (!epochs.isCurrent(epoch)) return
       // 服务端内容**叠在**随包品牌之上:服务端缺的字段由随包品牌补齐,消费方
       // 就不会回落到内置的厂商文案(渠道构建下那是白标事故)。
       ctx.emit('pico/channel-changed', (channel as ChannelConfig)
         ? mergeChannel(builtIn, absolutizeURLs(channel as ChannelConfig, session.serverURL))
         : builtIn)
     } catch {
+      // 失败路径同样要判代际：否则"上一台服务端的请求在新会话建立之后才失败"
+      // 会把当前会话的品牌重置成随包品牌（同样是跨租户串台，只是方向相反）。
+      if (!epochs.isCurrent(epoch)) return
       // Unreachable server: keep the packaged brand (never the vendor's).
       ctx.emit('pico/channel-changed', builtIn)
     }
