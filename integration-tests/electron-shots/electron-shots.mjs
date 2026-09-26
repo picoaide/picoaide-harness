@@ -52,6 +52,17 @@
  *      运行要么带着上次的登录态、要么被单实例锁顶掉)并在收尾清理 + 杀掉整棵进程组;
  *      单横线/位置参数 fail-loud(旧实现静默忽略 `-server <别处>` 并按缺省地址报 PASS)。
  *
+ * 2026-09-27(第三十二轮 FIX-47 / AD2-02)之后的结构性改动:
+ *   **「方式选择器」判据不再只看页面上有没有 `.method`**。旧判据名为「方式选择器存在」、
+ *   谓词是 `methodCount > 0` —— 它守的是"服务端恰好配了 ≥2 种登录方式"这个**环境属性**,
+ *   而登录页在只有 1 种方式时按设计不渲染选择器
+ *   (`packages/host/enterprise/src/auth-gate.ts:453-456` 的 `only` 分支),于是在"刚装好、
+ *   只配 local"的服务端(默认形态,例如本仓自己的 mock 网关)上这条腿**结构上不可能 PASS**,
+ *   且报 FAIL(1) 而不是 SKIP(77)。现在采集面会真读一次服务端
+ *   `GET /api/client/v2/auth/methods`(`fetchAuthMethods()`,与 `fetchChannel()` 同口径),
+ *   把条数作为 `serverMethodCount` 一起交给判据:≤1 种 ⇒ 页面必须**不**渲染;
+ *   ≥2 种 ⇒ 页面必须渲染同样多个;条数取不到 ⇒ FAIL(绝不静默判过)。
+ *
  * 退出码契约(2026-09-23, 与 python 用例脚本对齐 —— 见 ../README.md):
  *   0  = 真的跑过且全部断言通过;
  *   1  = 断言失败(契约不满足);
@@ -494,6 +505,34 @@ async function fetchChannel() {
 }
 
 /**
+ * 读服务端**启用的登录方式**(`GET /api/client/v2/auth/methods`)—— 「方式选择器」判据的基准。
+ *
+ * 为什么要真读服务端:登录页在**只有 1 种**方式时按设计不渲染选择器
+ * (`packages/host/enterprise/src/auth-gate.ts:453-456`),所以"页面上有没有 `.method`"
+ * 单独看没有判别力(它守的其实是环境属性)。判据拿服务端下发的条数当基准,见
+ * `assertions.mjs` 的 `method-picker`。
+ *
+ * 口径与 `fetchChannel()` 一致:同一个 `SERVER`、GET、5s 预算、不带鉴权头 —— 该端点对
+ * 未登录的登录页必须可达(服务端它是公开端,见 `auth-gate.ts:1915-1935` 的本地代理注释)。
+ * 计数口径与页面一致:**隐藏项不计**(页面 `showStep2` 先 `filter(m => !m.hidden)`,
+ * `auth-gate.ts:404`)。
+ * @returns 可渲染方式条数;服务端不可达 / 非 2xx / 形状不符(没有 `methods` 数组)返回 `null`
+ *   —— 判据据此 FAIL 并打印原因,**绝不编造一个数**把判据判过(`null` 也照样进 `detail`)。
+ */
+async function fetchAuthMethods() {
+  try {
+    const response = await fetch(new URL('/api/client/v2/auth/methods', SERVER), { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return null
+    const payload = await response.json()
+    const methods = payload?.methods
+    if (!Array.isArray(methods)) return null
+    return methods.filter(method => method?.hidden !== true).length
+  } catch {
+    return null
+  }
+}
+
+/**
  * 等**本次拉起的那个 app**自己宣告调试端点,并返回它宣告的端点。
  *
  * 这是 P1 的核心:端点归属的**唯一权威是子进程自己**(它的 stdout/stderr、它在本次
@@ -695,7 +734,9 @@ try {
     // 两张截图必须不同:随仓证据里曾出现 4/5 逐字节相同(唯一判据只有"字节数 > 1000")。
     report('step2-shot-differs-from-step1', { baseline: step1Shot, current: step2Shot })
     const meth = await evalJS(send, `document.querySelectorAll('.method').length`)
-    report('method-picker', { methodCount: meth })
+    // 判据跟**服务端真下发的条数**走:≤1 种 ⇒ 页面按设计不渲染(那是 PASS);≥2 种 ⇒ 必须全渲染;
+    // 服务端读不到 ⇒ `serverMethodCount: null` ⇒ 判据 FAIL 并打印原因(不编造)。
+    report('method-picker', { methodCount: meth, serverMethodCount: await fetchAuthMethods() })
     // 输入本地账号登录
     await evalJS(send, `(() => {
       const u = document.getElementById('username'); if (u) { u.value = 'admin'; u.dispatchEvent(new Event('input')) }

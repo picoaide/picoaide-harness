@@ -56,6 +56,7 @@ export const BASE_OBSERVATION = Object.freeze({
   serverValue: '页面 #server 输入框的当前值',
   pageText: 'document.body.innerText',
   methodCount: "document.querySelectorAll('.method').length",
+  serverMethodCount: '服务端 GET /api/client/v2/auth/methods 下发的**可渲染**方式条数(取不到/形状不符为 null)',
   expectedBrand: '服务端渠道内容算出的品牌显示名(见 expectedBrandName)',
   screenshot: '{ name, size } 当前截图',
   baseline: '{ name, bytes } Step1 的基准截图(字节)',
@@ -128,10 +129,33 @@ export const SHOTS_ASSERTIONS = [
   },
   {
     id: 'method-picker',
-    name: '方式选择器存在',
-    evaluate: observation => (typeof observation.methodCount === 'number' && observation.methodCount > 0
-      ? { ok: true, detail: `count=${observation.methodCount}` }
-      : { ok: false, detail: `count=${JSON.stringify(observation.methodCount)}` }),
+    // 2026-09-27(第三十二轮 FIX-47/AD2-02):旧判据名「方式选择器存在」,谓词却是
+    // `methodCount > 0` —— 它守的其实是"服务端恰好配了 ≥2 种登录方式"这个**环境属性**。
+    // 登录页在只有 1 种方式时**按设计不渲染**选择器
+    // (`packages/host/enterprise/src/auth-gate.ts:453-456` 的 `only` 分支:
+    //  `if (only) { methodsBox.innerHTML = ''; return }`),
+    // 所以在"刚装好、只配 local"的服务端(默认形态)上这条腿**结构上不可能 PASS**,
+    // 且报 FAIL(1) 而不是 SKIP(77)。现在判据跟着服务端真下发的条数走。
+    name: '方式选择器与服务端下发的方式数一致(≤1 种不渲染、≥2 种必须全部渲染)',
+    evaluate: observation => {
+      const serverCount = observation.serverMethodCount
+      const rendered = observation.methodCount
+      // 环境事实取不到 ⇒ 失败(不是"没有选择器 ⇒ 通过")。静默判过正是这条判据要消灭的形态。
+      if (typeof serverCount !== 'number' || !Number.isInteger(serverCount) || serverCount < 0) {
+        return { ok: false, detail: `服务端方式数不可读(${JSON.stringify(serverCount)})—— 没有环境事实时不得判过` }
+      }
+      if (typeof rendered !== 'number' || !Number.isInteger(rendered) || rendered < 0) {
+        return { ok: false, detail: `页面方式数不可读(${JSON.stringify(rendered)};服务端 ${serverCount} 种)` }
+      }
+      if (serverCount <= 1) {
+        return rendered === 0
+          ? { ok: true, detail: `服务端 ${serverCount} 种 ⇒ 按设计不渲染选择器(count=0)` }
+          : { ok: false, detail: `服务端只下发 ${serverCount} 种,页面却渲染了 ${rendered} 个选择器` }
+      }
+      return rendered === serverCount
+        ? { ok: true, detail: `服务端 ${serverCount} 种,页面渲染 ${rendered} 个` }
+        : { ok: false, detail: `服务端 ${serverCount} 种,页面只渲染 ${rendered} 个` }
+    },
   },
   {
     id: 'step2-shot-differs-from-step1',
@@ -171,6 +195,7 @@ function observation(overrides = {}) {
     serverValue: 'http://127.0.0.1:8091',
     pageText: `${STEP1_MARKER} 下一步`,
     methodCount: 2,
+    serverMethodCount: 2,
     expectedBrand: 'Example',
     screenshot: { name: '03-step2-brand.png', size: 17101 },
     baseline: { name: '01-login-step1.png', bytes: Uint8Array.from([1, 2, 3, 4]) },
@@ -232,9 +257,70 @@ export const SELF_TEST_FIXTURES = [
     observation: observation({ expectedBrand: 'Example', pageText: undefined }),
   },
 
-  { id: 'method-picker', expect: true, why: '正常:2 个方式', observation: observation({ methodCount: 2 }) },
-  { id: 'method-picker', expect: false, why: '负例:一个方式都没有', observation: observation({ methodCount: 0 }) },
-  { id: 'method-picker', expect: false, why: '负例:选择器缺失(undefined)', observation: observation({ methodCount: undefined }) },
+  // method-picker:判据跟**服务端下发的条数**走,两格都要有正例。
+  // 夹具基线是 server=2/count=2;下面每条显式覆盖它关心的那两个字段。
+  {
+    id: 'method-picker',
+    expect: true,
+    why: '正例 n<=1 格:服务端只配 local ⇒ 页面按设计**不渲染**选择器,这是 PASS 不是 FAIL',
+    observation: observation({ serverMethodCount: 1, methodCount: 0 }),
+  },
+  {
+    id: 'method-picker',
+    expect: true,
+    why: '正例 n<=1 格边界:服务端一种都没配(0)⇒ 同样不渲染',
+    observation: observation({ serverMethodCount: 0, methodCount: 0 }),
+  },
+  { id: 'method-picker', expect: true, why: '正例 n>=2 格:服务端 2 种、页面 2 个', observation: observation({ serverMethodCount: 2, methodCount: 2 }) },
+  { id: 'method-picker', expect: true, why: '正例 n>=2 格:服务端 3 种、页面 3 个', observation: observation({ serverMethodCount: 3, methodCount: 3 }) },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例(旧判据的形态):服务端只 1 种却**渲染了**选择器 ⇒ 页面多渲染,必须红',
+    observation: observation({ serverMethodCount: 1, methodCount: 1 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端 2 种、页面一个都没渲染(选择器缺失)',
+    observation: observation({ serverMethodCount: 2, methodCount: 0 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端 2 种、页面少渲染一个(反向对照:证明判据不是恒真)',
+    observation: observation({ serverMethodCount: 2, methodCount: 1 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端 3 种、页面只渲染 2 个',
+    observation: observation({ serverMethodCount: 3, methodCount: 2 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端方式数取不到(null)—— 不得静默判过',
+    observation: observation({ serverMethodCount: null, methodCount: 0 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端方式数不可读(undefined)',
+    observation: observation({ serverMethodCount: undefined, methodCount: 2 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:服务端方式数不是数字(形状不符)',
+    observation: observation({ serverMethodCount: '2', methodCount: 2 }),
+  },
+  {
+    id: 'method-picker',
+    expect: false,
+    why: '负例:页面方式数不可读(undefined),而服务端可读 ⇒ 仍必须红',
+    observation: observation({ serverMethodCount: 2, methodCount: undefined }),
+  },
 
   {
     id: 'step2-shot-differs-from-step1',

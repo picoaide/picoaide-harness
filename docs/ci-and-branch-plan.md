@@ -70,13 +70,13 @@ master（唯一常绿主干，合并即发布候选）
 └─────────────────────────────────────────────────────────────┘
 ┌─ server (ubuntu, 与 gate 并行) ─────────────────────────────┐
 │ PG18 容器(500 连接) → gofmt → go vet → go test ./... -p1    │
-│ → webadmin npm test(109) → make build-server(含 webadmin)   │
+│ → webadmin npm test(全量) → make build-server(含 webadmin)   │
 │ → 部署脚本语法检查 → 上传 picoaide-server-linux-amd64        │
 └─────────────────────────────────────────────────────────────┘
         needs: gate（构建产物已就绪，平台只管打包）
 ┌─ desktop-linux   ├─ desktop-windows   └─ desktop-macos ─────┐
 │ 恢复 workspace-build → 打包(+平台验证) → 上传安装包          │
-│ linux 额外: e2e:client（13 断言）→ e2e-report                │
+│ linux 额外: e2e:client → e2e-report（条数见报告首行）         │
 │ mac 正式 tag: 签名(--pack) + 公证(--notarize)；否则未签名冒烟│
 └─────────────────────────────────────────────────────────────┘
 ┌─ release (仅 tag) ── needs 四 job ──────────────────────────┐

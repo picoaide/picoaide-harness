@@ -243,6 +243,31 @@ function tempDir(prefix) {
   return dir
 }
 
+/**
+ * 「这份输出**声明了** `RESULT: PASS`」的判据（FIX-47④b）。
+ *
+ * ## 现场（第三十一轮 AD2-04，真跑）
+ *
+ * 判据原本是**逐字带空格**的 `output.includes('RESULT: PASS')`（`:1419`/`:1739`）与
+ * `/RESULT: PASS/u`（契约场景表）。于是"全 SKIP 路径**追加**一行 `RESULT:PASS`
+ * （无空格）"⇒ 守卫 `EXIT=0`（假绿）：`SKIP 绝不报 PASS` 这条契约的判据取值域比它守的
+ * 语义窄一格 —— **任何非规范拼写的 PASS 声明都看不见**。
+ *
+ * ## 口径
+ *
+ * **规范化后再判**：吃掉任意空白（含换行/制表）+ 忽略大小写，再找 `RESULT:PASS`。
+ * 反向对照（`RESULT: SKIP` 那半）**不在这里**，也**不许被削弱**：那半是
+ * `output.includes('RESULT: SKIP')` 的逐字要求 —— 它才是"全 SKIP 路径必须如实报 SKIP"
+ * 的真正咬人点（AD2-04 的对照实验里，把 SKIP 换成别的东西也会红，红的理由却不是
+ * "不得报 PASS"那条）。
+ */
+const RESULT_PASS_CLAIM = /RESULT\s*:\s*PASS/iu
+
+/** 规范化后判"这份输出有没有声明 PASS"（空白与大小写都不再是盲区）。 */
+function reportsResultPass(output) {
+  return RESULT_PASS_CLAIM.test(String(output ?? ''))
+}
+
 /** 契约用例脚本（带 --self-test 与真实断言的那两个）。 */
 const CONTRACT_TESTS = [
   { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 32 },
@@ -434,6 +459,11 @@ const INTEGRATION_ENTRIES = [
     minJudgments: DEX_EXPECTED_CRITERIA.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-server', 'missing-provider'],
+    // FIX-47④a：出口**调用点**清单（`<原因码> @ <归一化代码行>`），不是只有原因码集合。
+    skipCallSites: [
+      "missing-provider @ return skip('missing-provider',",
+      "missing-server @ return skip('missing-server',",
+    ],
   },
   {
     path: 'integration-tests/openldap/ldap-rbac-brand-test.py',
@@ -444,7 +474,14 @@ const INTEGRATION_ENTRIES = [
     minJudgments: LDAP_EXPECTED_CRITERIA.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-server', 'missing-provider'],
+    skipCallSites: [
+      "missing-provider @ return skip('missing-provider',",
+      "missing-server @ return skip('missing-server',",
+    ],
   },
+  // FIX-47③ 引入的可参数化 mock 网关（`--methods n`，让"方式选择器"判据在 n<=1 与
+  // n>=2 两格都能被测到）。它不接聚合层、不占判定数，属夹具面。
+  { path: 'integration-tests/electron-shots/mock-gateway.mjs', role: 'fixture', skipReasons: [] },
   { path: 'integration-tests/electron-shots/assertions.mjs', role: 'assertion-table', skipReasons: [] },
   { path: 'integration-tests/electron-shots/report.mjs', role: 'judge-channel', skipReasons: [] },
   {
@@ -456,6 +493,11 @@ const INTEGRATION_ENTRIES = [
     minJudgments: ELECTRON_SHOTS_EXPECTED_ASSERTIONS.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-app', 'missing-display', 'missing-server'],
+    skipCallSites: [
+      "missing-app @ skip('missing-app', `未找到打包产物: ${APP}`,",
+      "missing-display @ skip('missing-display', `没有可用的 X 显示（DISPLAY=${DISPLAY}，${socket ?? 'X socket'} 不是可连接的 unix socket）`,",
+      "missing-server @ skip('missing-server', `服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`,",
+    ],
   },
 ]
 
@@ -515,14 +557,117 @@ const INTEGRATION_SCANNED_EXTENSIONS = ['.py', '.mjs', '.sh', '.yaml', '.yml']
 const INTEGRATION_REFERENCE_SCOPE_REGISTRY = []
 
 /**
+ * **常量表达式求值**（{@link constantBlockHeaderProblem} 用）：只在"字面量 + 本文件里的
+ * 字面量 `const` 绑定"范围内做，求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+ *
+ * 为什么不做完整求值：判据的目的是"恒不执行的块"，不是"实现一个 JS 解释器"。
+ * `dumped !== null` / `INTEGRATION_ENTRIES` 这类自由变量求不出 ⇒ 放行；把常量藏进函数
+ * 返回值、`process.env` 之类的形态这一格看不见（认账边界，与"任意死代码形态"同一取向 ——
+ * 它们由执行计数、见证返回契约与 `scripts/check-root-guards.mjs` 的字节登记值兜）。
+ * @param expression - 条件原文。
+ * @param source - 守卫自己的正文（取字面量常量绑定）。
+ * @returns 求出的常量值；求不出返回 `undefined`。
+ */
+function evaluateConstantExpression(expression, source) {
+  /**
+   * 只做**字面量 + 四则比较**范围内的折叠（不 eval、不用 `Function`）：
+   * 判据要回答的是"这个条件是不是恒定不成立"，不是"实现一个 JS 解释器"。
+   * @param text - 表达式原文。
+   * @param depth - 常量绑定递归深度（防自指）。
+   * @returns 常量值；求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+   */
+  const evaluate = (text, depth) => {
+    const trimmed = String(text ?? '').trim().replace(/^\s*\(([\s\S]*)\)\s*$/u, '$1').trim()
+    if (trimmed === '') return undefined
+    if (depth > 4) return undefined
+    if (trimmed === 'true') return true
+    if (trimmed === 'false') return false
+    if (trimmed === 'null') return null
+    if (trimmed === 'undefined') return undefined
+    if (/^-?\d+(?:\.\d+)?$/u.test(trimmed)) return Number(trimmed)
+    if (/^'[^']*'$/u.test(trimmed) || /^"[^"]*"$/u.test(trimmed)) return trimmed.slice(1, -1)
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) {
+      const inner = trimmed.slice(1, -1).trim()
+      return inner === '' ? [] : inner.split(',')
+    }
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) return []
+    if (trimmed.startsWith('!')) {
+      const inner = evaluate(trimmed.slice(1), depth)
+      return inner === undefined ? undefined : !inner
+    }
+    // `A === B` / `A !== B` / `A == B` / `A != B`：两边都能折叠才折叠。
+    for (const operator of ['===', '!==', '==', '!=']) {
+      const at = trimmed.indexOf(operator)
+      if (at <= 0) continue
+      const left = evaluate(trimmed.slice(0, at), depth)
+      const right = evaluate(trimmed.slice(at + operator.length), depth)
+      if (left === undefined || right === undefined) return undefined
+      if (operator === '===') return left === right
+      if (operator === '!==') return left !== right
+      if (operator === '==') return left === right
+      return left !== right
+    }
+    // 标识符 ⇒ 本文件里"名字 = 字面量"的绑定（**只认 `const`**）。
+    // **R23 FIX-22**：修前这里把 `let`/`var` 也当常量折叠，于是 `let dumped = null`
+    // （随后在运行期被 `JSON.parse` 赋值）被判成"恒 null"，连带把
+    // `if (dumped !== null) {` 这个**正当**容器读成恒假 —— 那会把真仓里 3 个登记点误红。
+    // 可重新赋值的绑定不是常量，折叠它得到的结论一定是错的。
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(trimmed)) {
+      const pattern = new RegExp(`(?:^|[\\s;{}])const\\s+${trimmed}\\s*=\\s*([^\\n;]+)`, 'u')
+      const match = pattern.exec(source)
+      return match === null ? undefined : evaluate(match[1], depth + 1)
+    }
+    return undefined
+  }
+  return evaluate(expression, 0)
+}
+
+/**
+ * 把源码里的**常量字符串拼接**折成字面量（FIX-47④c），供
+ * {@link integrationReferencedPathsIn} 的路径抽取复用。
+ *
+ * ## 现场（第三十一轮 AD2-05，真跑）
+ *
+ * 抽取器只认两种形态：① 引号串里含 `integration-tests/`；②
+ * `join(ROOT, '全','字','面','量')`。把同一条引用写成
+ * `const A = 'integration-' + 'tests/extra-probe.ts'`（**同一个文件、同一次真的
+ * `readFileSync`**）之后 ⇒ 守卫 `EXIT=0`、落盘引用数与 baseline 完全一致 ——
+ * "面外登记 0 条"这句 `✓` 是在**没有看到那条引用**的前提下打出来的，而这条判据的
+ * 存在理由正是"派生集合的取值面被收窄而登记表看不出来"。
+ *
+ * ## 口径：复用本文件的常量求值，不另起一套解释器
+ *
+ * 只折 `+` 链，且要求**每个操作数都能被 {@link evaluateConstantExpression} 折成字符串**
+ * （字面量，或本文件里 `const X = '…'` 的绑定）。折不出（自由变量、函数返回值、
+ * 模板插值）就原样保留 ⇒ 与既有常量求值共享同一条"认账边界"。
+ * @param text - 源码文本。
+ * @returns 折过常量字符串拼接的文本。
+ */
+function foldConstantStringConcat(text) {
+  const source = String(text)
+  return source.replace(
+    /(?:'[^'\n]*'|"[^"\n]*"|[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\+\s*(?:'[^'\n]*'|"[^"\n]*"|[A-Za-z_$][A-Za-z0-9_$]*))+/gu,
+    (chain) => {
+      const parts = chain.split(/\s*\+\s*/u)
+      const values = parts.map(part => evaluateConstantExpression(part, source))
+      if (values.some(value => typeof value !== 'string')) return chain
+      return `'${values.join('')}'`
+    },
+  )
+}
+
+/**
  * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态
  * 与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与 `check-install-integrity.mjs` 的
  * 同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
+ *
+ * **FIX-47④c**：匹配前先做一次 {@link foldConstantStringConcat} —— 常量拼接出的同一条
+ * 引用（`'integration-' + 'tests/extra-probe.ts'`）必须与字面量写法**同判**。
  * @param source - 源码文本。
  * @returns 归一化后的路径列表（去重、排序）。
  */
 function integrationReferencedPathsIn(source) {
-  const text = String(source)
+  const text = foldConstantStringConcat(source)
   const found = new Set()
   for (const match of text.matchAll(/['"]([A-Za-z0-9_.@/-]*integration-tests\/[A-Za-z0-9_.@/-]+)['"]/gu)) {
     found.add(match[1].replace(/^\.\//u, ''))
@@ -575,6 +720,13 @@ function integrationReferenceScopeSelfTest() {
   const absent = integrationReferenceScope(probe, { exists: () => false, registry: [] })
   check(absent.unregistered.length === 0 && absent.deadEntries.length === 0,
     '形态⑩自证: 没落盘的目标不算缺口（只有真的存在、却看不见的执行体才是缺口）')
+  // FIX-47④c：**常量拼接**出的同一条引用必须与字面量写法同判（AD2-05 的现场形态）。
+  const concatenated = `const A = 'integration-' + 'tests/__probe__/extra-probe${extension}'`
+  const folded = integrationReferenceScope(concatenated, { exists, registry: [] })
+  check(folded.unregistered.length === 1 && folded.unregistered[0] === `integration-tests/__probe__/extra-probe${extension}`,
+    '形态⑩自证: `\'integration-\' + \'tests/…\'` 这种常量拼接出的引用必须与字面量写法同判（AD2-05 现场：'
+      + `拼接形态让"落盘引用数"与 baseline 完全一致、守卫照打 ✓）—— 实际 unregistered=[${folded.unregistered.join(', ')}]`
+      + '（若为空，先查顶层 evaluateConstantExpression 是否被搬回块内、或折叠正则失效）')
   const inScope = `const P = 'integration-tests/__probe__/in-scope.mjs'`
   const ok = integrationReferenceScope(inScope, { exists: () => true, registry: [] })
   check(ok.unregistered.length === 0 && ok.present.length === 1,
@@ -1151,7 +1303,8 @@ async function main() {
         + `${bareSkip.map(line => JSON.stringify(line.trim().slice(0, 120))).join(' | ')}`
         + '\n  ⇒ 未登记的原因（含"什么都不说"）不得成为免检牌；所有 SKIP 必须经唯一出口带上登记过的原因码')
     if (typeof outlet === 'string' && outlet !== '') {
-      const used = [...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*'([a-z][a-z-]*)'`, 'gu'))]
+      // 两种引号都认（与 {@link skipCallSitesFromSource} 同口径）。
+      const used = [...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'gu'))]
         .map(match => match[1])
       const usedSet = [...new Set(used)]
       const sorted = values => [...values].sort().join(',')
@@ -1162,13 +1315,34 @@ async function main() {
       check(guardLines.length >= 2,
         `形态⑥: ${label} 声明了 SKIP_REASONS 却只有 ${guardLines.length} 处代码引用它`
           + ' —— 出口必须拿它做校验（未登记的原因码要在运行期就被拒，而不是只写在注释里）')
+
+      // ---- ⑥d 出口**调用点清单**（FIX-47④a，双向多重集） --------------------
+      // 上面的原因码集合对账看不见"新增一个复用已登记原因码的调用点"（AD2-03 现场）。
+      // 这里把对账单位升级成调用点身份：`<原因码> @ <归一化代码行>`。
+      const declaredSites = Array.isArray(entry.skipCallSites) ? entry.skipCallSites : null
+      check(declaredSites !== null,
+        `形态⑥: ${label} 声明了 SKIP 原因码却缺 \`skipCallSites\`（出口调用点清单）`
+          + ' —— 只对账原因码集合时，新增一个复用已登记原因码的出口调用点是隐形的'
+          + '（那条腿就变成了"什么都不验"）')
+      if (declaredSites !== null) {
+        const liveSites = skipCallSitesFromSource(codeLines, outlet)
+        const declaredSorted = [...declaredSites].map(item => String(item)).sort()
+        const missing = liveSites.filter(site => !declaredSorted.includes(site))
+        const stale = declaredSorted.filter(site => !liveSites.includes(site))
+        check(missing.length === 0 && stale.length === 0,
+          `形态⑥: ${label} 的 SKIP 出口调用点清单与登记表不一致（双向多重集对账）`
+            + `\n  在却没登记:${missing.length === 0 ? '(无)' : `\n    ${missing.join('\n    ')}`}`
+            + `\n  登记了却不在:${stale.length === 0 ? '(无)' : `\n    ${stale.join('\n    ')}`}`
+            + '\n  当前活的调用点（可直接贴进 INTEGRATION_ENTRIES 的 skipCallSites）：'
+            + `${liveSites.length === 0 ? '(空)' : `\n    ${liveSites.map(item => JSON.stringify(item)).join(',\n    ')}`}`)
+      }
     }
     // **判决观测**（R19A-03）：原始事实 = 声明/调用点/唯一出口/裸 SKIP 的计数与集合。
     recordLayerVerdict('环境缺失的原因码登记制', {
       check: 'skip-reasons', path: entry.path,
       declared: [...declaredSkip].sort().join(','),
       used: typeof outlet === 'string' && outlet !== ''
-        ? [...new Set([...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*'([a-z][a-z-]*)'`, 'gu'))].map(match => match[1]))].sort().join(',')
+        ? [...new Set([...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'gu'))].map(match => match[1]))].sort().join(',')
         : '<无出口>',
       outlets: codeLines.filter(line => line.includes('SKIP[')).length,
       bare: codeLines.filter(line => /SKIP:(?!\])/u.test(line)).length,
@@ -1266,6 +1440,40 @@ function skipReasonsFromSource(source) {
   const match = /SKIP_REASONS\s*=\s*[[(]([^\])]*)[\])]/u.exec(source)
   if (match === null) return null
   return [...match[1].matchAll(/'([a-z][a-z-]*)'|"([a-z][a-z-]*)"/gu)].map(item => item[1] ?? item[2])
+}
+
+/**
+ * 一条腿的 **SKIP 出口调用点清单**（FIX-47④a）。
+ *
+ * ## 现场（第三十一轮 AD2-03，真跑）
+ *
+ * 原来的对账是**原因码集合**（`skipReasons` ↔ 源码 `SKIP_REASONS` ↔ 出口调用点的
+ * 原因码）＋"`SKIP[` 字面量恰好 1 处（唯一出口）"。于是给某条腿**新增一个
+ * `skip('missing-server', …)` 调用点**（复用已登记原因码、不新增 `SKIP[` 字面量）⇒
+ * 守卫照打 `✓`、`EXIT=0` —— 而那正是"把一条腿悄悄变成什么都不验"的形态
+ * （例如 `if os.environ.get('CI'): return skip(...)`），再与 F-07 串联就得到
+ * "未验证面被写成 PASS"。
+ *
+ * ## 口径
+ *
+ * 对账单位从"原因码集合"升级为"**调用点清单**"：每个调用点用
+ * `<原因码> @ <该行归一化后的代码>` 作身份（行号会漂，代码行不会），按**多重集**
+ * 双向对账 —— "登记了却不在"与"在却没登记"都红，重复的同一行调用点也会被计数抓到。
+ * @param lines - 该腿的源码行（已去注释）。
+ * @param outlet - 唯一出口的函数名（`skip`）。
+ * @returns 排序后的调用点身份列表（多重集）。
+ */
+function skipCallSitesFromSource(lines, outlet) {
+  // **两种引号都要认**：只认单引号时，`skip(\"missing-server\", …)`（等价写法）是盲区 ——
+  // 本仓 FIX-47④ 的变异 L4 第一版就是用双引号写的，旧口径当场假绿。
+  const pattern = new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'u')
+  const out = []
+  for (const line of lines) {
+    const match = pattern.exec(line)
+    if (match === null) continue
+    out.push(`${match[1]} @ ${line.trim().replace(/\s+/gu, ' ')}`)
+  }
+  return out.sort()
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,7 +1624,7 @@ for (const file of mjsFiles) {
   check(skipOutput.includes('SKIP[missing-app]:'),
     `形态⑧: 缺打包产物的 SKIP 必须带登记过的原因码 \`SKIP[missing-app]:\`（V13-C R-2：无记名的 `
       + `\`SKIP:\` 是免检牌），实际 ${JSON.stringify(skipOutput.split('\n').find(line => line.includes('SKIP'))?.slice(0, 200))}`)
-  check(!skipOutput.includes('RESULT: PASS'), `形态⑥: SKIP 时不得打印 RESULT: PASS，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
+  check(!reportsResultPass(skipOutput), `形态⑥: SKIP 时不得打印 RESULT: PASS（任何空白/大小写拼写），实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
 
   // 端到端：未知参数 ⇒ 用法错误 2（不要让它变成"静默用默认值跑下去"）。
   const usageRun = spawnSync(process.execPath, [shotsPath, '--definitely-unknown'], { cwd: ROOT, encoding: 'utf8' })
@@ -1732,12 +1940,53 @@ for (const file of mjsFiles) {
   // **判决观测**（R19A-03）：原始事实 = 实跑退出码 + 输出里有没有 RESULT: SKIP/PASS。
   recordLayerVerdict('聚合层三项全 SKIP ⇒ 77 且不报 PASS', {
     check: 'aggregate-skip', status: aggregate.status,
-    reportedSkip: output.includes('RESULT: SKIP'), reportedPass: output.includes('RESULT: PASS'),
+    reportedSkip: output.includes('RESULT: SKIP'), reportedPass: reportsResultPass(output),
   })
   check(witnessed('aggregate-77', aggregate.status === 77), `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
   check(output.includes('RESULT: SKIP'), `形态⑥: 聚合层必须打印 RESULT: SKIP，实际 ${detail}`)
-  check(!output.includes('RESULT: PASS'), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS，实际 ${detail}`)
+  check(!reportsResultPass(output), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS（任何空白/大小写拼写），实际 ${detail}`)
   note('聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓')
+
+  // ---- 形态⑥自证（FIX-47④b）：**非规范拼写**的 PASS 声明必须被咬住 ----------
+  // 为什么要在**副本**上再造一个聚合层：上一条 `!reportsResultPass(output)` 依赖
+  // "真仓的 run-all.sh 恰好没多打一行"。第三十一轮 AD2-04 的真跑是："保留
+  // RESULT: SKIP、追加一行 RESULT:PASS（**无空格**）" ⇒ 旧的逐字判据 EXIT=0（假绿）。
+  // 这里把那个变异固化下来：① 变异体必须真的落在副本里；② 规范化判据必须看见它；
+  // ③ 断言这条变异**恰好**是逐字判据的盲区（否则这条自证证明不了任何东西）。
+  {
+    const mutantRoot = tempDir('aggregate-nonspaced-pass-')
+    for (const dir of ['dex', 'openldap', 'electron-shots']) {
+      mkdirSync(join(mutantRoot, dir), { recursive: true })
+    }
+    writeFileSync(join(mutantRoot, 'dex', 'dex-sso-test.py'), 'import sys\nsys.exit(77)\n')
+    writeFileSync(join(mutantRoot, 'openldap', 'ldap-rbac-brand-test.py'), 'import sys\nsys.exit(77)\n')
+    writeFileSync(join(mutantRoot, 'electron-shots', 'electron-shots.mjs'), 'process.exit(77)\n')
+    const skipLine = '  echo "RESULT: SKIP(一项都没跑起来:${skipped} 项因环境缺失跳过)"'
+    const original = readFileSync(join(ROOT, 'integration-tests', 'run-all.sh'), 'utf8')
+    check(original.includes(skipLine),
+      '形态⑥自证: run-all.sh 里找不到"全 SKIP ⇒ RESULT: SKIP"那一行 —— 变异锚点漂了，'
+        + '请同步本自证（否则它会静默变成一条恒真断言）')
+    const mutant = original.replace(
+      skipLine,
+      `${skipLine}\n  echo "RESULT:PASS(一项都没跑起来:\${skipped} 项因环境缺失跳过)"`,
+    )
+    check(mutant !== original && mutant.includes('RESULT:PASS('),
+      '形态⑥自证: 变异体必须真的落在副本里（无空格的 RESULT:PASS 追加行）')
+    writeFileSync(join(mutantRoot, 'run-all.sh'), mutant)
+    const mutantRun = spawnSync('bash', ['run-all.sh'], { cwd: mutantRoot, encoding: 'utf8' })
+    const mutantOutput = `${mutantRun.stdout ?? ''}${mutantRun.stderr ?? ''}`
+    check(mutantRun.status === 77,
+      `形态⑥自证: 变异副本仍应 exit 77（只多打一行），实际 ${mutantRun.status}：${mutantOutput.slice(0, 200)}`)
+    check(mutantOutput.includes('RESULT: SKIP'),
+      '形态⑥自证: 变异副本必须**保留** RESULT: SKIP（这是反向对照：变异只做加法）')
+    check(!mutantOutput.includes('RESULT: PASS'),
+      `形态⑥自证: 这条变异必须恰好是**逐字判据的盲区**（输出里不得出现带空格的 RESULT: PASS），`
+        + `实际 ${JSON.stringify(mutantOutput.slice(-200))}`)
+    check(reportsResultPass(mutantOutput),
+      `形态⑥自证: 规范化判据必须看见无空格拼写的 PASS 声明（AD2-04 的假绿形态），`
+        + `实际 ${JSON.stringify(mutantOutput.slice(-200))}`)
+    note('形态⑥自证: 全 SKIP 路径追加 `RESULT:PASS`（无空格）⇒ 规范化判据必红 / 逐字判据看不见 ✓')
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2158,13 +2407,13 @@ const SCENARIOS = [
   { scenario: 'good', test: CONTRACT_TESTS[1], expect: 0, label: '按真契约应答 ⇒ ldap 必须通过' },
   {
     scenario: 'skip', test: CONTRACT_TESTS[0], expect: 77,
-    must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ dex 必须显式 SKIP(77) 且不得报 PASS',
+    must: /SKIP/u, mustNot: RESULT_PASS_CLAIM, label: 'provider 未配置 ⇒ dex 必须显式 SKIP(77) 且不得报 PASS',
     // SKIP 必须**具名**：登记过的原因码（V13-C R-2 的第二条修法 —— 无记名的 `SKIP:` 是免检牌）。
     mustCode: 'missing-provider',
   },
   {
     scenario: 'skip', test: CONTRACT_TESTS[1], expect: 77,
-    must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ ldap 必须显式 SKIP(77) 且不得报 PASS',
+    must: /SKIP/u, mustNot: RESULT_PASS_CLAIM, label: 'provider 未配置 ⇒ ldap 必须显式 SKIP(77) 且不得报 PASS',
     mustCode: 'missing-provider',
   },
   {
@@ -9326,71 +9575,7 @@ function constantBlockHeaderProblem(headerText, source) {
   return EMPTY_BLOCK_HEADER_PROBLEM(headerText)
 }
 
-/**
- * **常量表达式求值**（{@link constantBlockHeaderProblem} 用）：只在"字面量 + 本文件里的
- * 字面量 `const` 绑定"范围内做，求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
- *
- * 为什么不做完整求值：判据的目的是"恒不执行的块"，不是"实现一个 JS 解释器"。
- * `dumped !== null` / `INTEGRATION_ENTRIES` 这类自由变量求不出 ⇒ 放行；把常量藏进函数
- * 返回值、`process.env` 之类的形态这一格看不见（认账边界，与"任意死代码形态"同一取向 ——
- * 它们由执行计数、见证返回契约与 `scripts/check-root-guards.mjs` 的字节登记值兜）。
- * @param expression - 条件原文。
- * @param source - 守卫自己的正文（取字面量常量绑定）。
- * @returns 求出的常量值；求不出返回 `undefined`。
- */
-function evaluateConstantExpression(expression, source) {
-  /**
-   * 只做**字面量 + 四则比较**范围内的折叠（不 eval、不用 `Function`）：
-   * 判据要回答的是"这个条件是不是恒定不成立"，不是"实现一个 JS 解释器"。
-   * @param text - 表达式原文。
-   * @param depth - 常量绑定递归深度（防自指）。
-   * @returns 常量值；求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
-   */
-  const evaluate = (text, depth) => {
-    const trimmed = String(text ?? '').trim().replace(/^\s*\(([\s\S]*)\)\s*$/u, '$1').trim()
-    if (trimmed === '') return undefined
-    if (depth > 4) return undefined
-    if (trimmed === 'true') return true
-    if (trimmed === 'false') return false
-    if (trimmed === 'null') return null
-    if (trimmed === 'undefined') return undefined
-    if (/^-?\d+(?:\.\d+)?$/u.test(trimmed)) return Number(trimmed)
-    if (/^'[^']*'$/u.test(trimmed) || /^"[^"]*"$/u.test(trimmed)) return trimmed.slice(1, -1)
-    if (/^\[[\s\S]*\]$/u.test(trimmed)) {
-      const inner = trimmed.slice(1, -1).trim()
-      return inner === '' ? [] : inner.split(',')
-    }
-    if (/^\[[\s\S]*\]$/u.test(trimmed)) return []
-    if (trimmed.startsWith('!')) {
-      const inner = evaluate(trimmed.slice(1), depth)
-      return inner === undefined ? undefined : !inner
-    }
-    // `A === B` / `A !== B` / `A == B` / `A != B`：两边都能折叠才折叠。
-    for (const operator of ['===', '!==', '==', '!=']) {
-      const at = trimmed.indexOf(operator)
-      if (at <= 0) continue
-      const left = evaluate(trimmed.slice(0, at), depth)
-      const right = evaluate(trimmed.slice(at + operator.length), depth)
-      if (left === undefined || right === undefined) return undefined
-      if (operator === '===') return left === right
-      if (operator === '!==') return left !== right
-      if (operator === '==') return left === right
-      return left !== right
-    }
-    // 标识符 ⇒ 本文件里"名字 = 字面量"的绑定（**只认 `const`**）。
-    // **R23 FIX-22**：修前这里把 `let`/`var` 也当常量折叠，于是 `let dumped = null`
-    // （随后在运行期被 `JSON.parse` 赋值）被判成"恒 null"，连带把
-    // `if (dumped !== null) {` 这个**正当**容器读成恒假 —— 那会把真仓里 3 个登记点误红。
-    // 可重新赋值的绑定不是常量，折叠它得到的结论一定是错的。
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(trimmed)) {
-      const pattern = new RegExp(`(?:^|[\\s;{}])const\\s+${trimmed}\\s*=\\s*([^\\n;]+)`, 'u')
-      const match = pattern.exec(source)
-      return match === null ? undefined : evaluate(match[1], depth + 1)
-    }
-    return undefined
-  }
-  return evaluate(expression, 0)
-}
+
 
 /**
  * `needle` 在正文里是不是**判决位**（R21 fix-6 / E-02 的第二段b）。

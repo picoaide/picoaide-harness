@@ -196,6 +196,7 @@ const REQUIRED_JUDGE_BODIES = [
   'scripts/check-install-integrity.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-root-guards.mjs',
+  'scripts/check-site-links.mjs',
   'scripts/check-workspaces.mjs',
   'scripts/check-workflows.mjs',
 ]

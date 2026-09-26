@@ -131,6 +131,28 @@ node electron-shots/assertions.mjs --list              # 判据清单 + 条数
 node electron-shots/electron-shots.mjs --app packages/host/desktop/dist/linux-unpacked/dsh-plugin-desktop
 ```
 
+### `electron-shots` 的两格环境：可参数化 mock 网关
+
+`electron-shots/mock-gateway.mjs` 是**只服务这条腿**的 mock 网关（派生自
+`packages/host/desktop/scripts/e2e-fixture-gateway.mjs`），它存在的理由是那条
+「方式选择器」判据：
+
+```bash
+# n=1 格：服务端只配 local ⇒ 登录页**按设计不渲染**选择器（判据 PASS，不是 FAIL）
+node integration-tests/electron-shots/mock-gateway.mjs --port 34567 --methods 1 &
+node integration-tests/electron-shots/electron-shots.mjs --server http://127.0.0.1:34567 --display :77
+# n=2 格：服务端配 local + oidc ⇒ 页面必须渲染同样多个
+node integration-tests/electron-shots/mock-gateway.mjs --port 34568 --methods 2 &
+node integration-tests/electron-shots/electron-shots.mjs --server http://127.0.0.1:34568 --display :78
+```
+
+`--methods <n>`（env `MOCK_GATEWAY_METHODS`，缺省 2）拨动
+`GET /api/client/v2/auth/methods` 的条数，`--port <n>`（env `MOCK_GATEWAY_PORT`）拨动端口；
+`--help` 打参数表，未知参数/缺值 fail-loud。判据本体与两格的负例见
+`electron-shots/assertions.mjs` 的 `method-picker`：**≤1 种必须 count=0、≥2 种必须 count=n、
+服务端条数取不到即 FAIL**（`serverMethodCount` 由 `electron-shots.mjs` 的 `fetchAuthMethods()`
+真读一次该端点采集）。
+
 ### 真机端到端怎么接（当前**未**接进 CI，留可执行入口）
 
 > **CI 覆盖面声明（2026-09-23 第十三轮审计 F-03，2026-09-25 第十四轮 E-02 收紧口径）**：

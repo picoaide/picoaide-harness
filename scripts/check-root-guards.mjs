@@ -169,15 +169,15 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: '7db5a2078ca7bba40c5fb5cb9c3ccc7269342691b9fe0d08527a1a24591ceb9a' }],
   ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [], digest: 'c1a84c22a47bea2c1368bfba32f33b20feca66deb30abcbbc0eb40318f807285' }],
   ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: '8fa99a48c3439006545303cd5965c32768b450871eaaec71c50ca2d85693475e' }],
-  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '5aea906d7f5f5283751ecc40c99f6561188520b9a504c2e4765534cd9e04ca30' }],
+  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '7bf93bda612dc031504cbb3b62ad4e7fc61171978c130d5283f4b02f0ab27948' }],
   ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
   ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '00fd8c90848089613226c7dc8c5213eb016a37ce4586aeb2dcd5cfb63ef5e091' }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '87a7edd1074ebb8b727494455546af1f6a577d64113996201afb9a53f9951d9a' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '41470e66b1bd606cd6a4bed4cf786605af3103b7c9e0fff496fc76ce4f514f02' }],
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'e59d1a145ba6b6f8cc9dec4419d35466335ae4be1ff5ed0879ea2889c28d1bf0' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'a9a5643244cd6fa280fbd750560dcf94d155af7caab86e0a5fbfb334a5df7cae' }],
 ])
 
 /**
