@@ -2939,3 +2939,18 @@ FIX-43 ④ `docs/releases/**` 豁免上限 5 够用（实际 **1** 行）；FIX-
 ⇒ 正解 `XDG_CACHE_HOME=<工作区> ELECTRON_BUILDER_CACHE=<工作区>/eb` + 预置 zip；
 本沙箱 **`/tmp` 跨 bash 调用不共享** ⇒ Xvfb 必须与被驱动命令**在同一个 bash 调用里**起
 （`:99` 起不来，用 `:77`/`:78`）。启动器 `temp/r31/AD2/probe/run-shots.sh` 已写好。
+
+#### §7.71.5 冻结验收三件套在 `9fa2d4e182` 全绿（第二次完整通过）
+
+| # | 判据 | 结果 |
+|---|---|---|
+| ① | `corepack yarn check` | **EXIT=0**（`planned=32 executed=32`） |
+| ② | `corepack yarn install --immutable` | **EXIT=0** |
+| ③ | `gofmt -l .` / `go vet ./...` / `go test ./cmd/server ./internal/... -count=1 -p 1 -timeout 30m` | gofmt 空（唯一一行是**别的泳道 gitignored 的草稿** `temp/laneD/poolwait/main.go`） / vet 0 / **`GO_EXIT=0`：56 包 ok、0 FAIL** |
+
+全量日志落文件、判定行与退出码从文件读（未管进 `tail`/`head`）——
+这条纪律是第二十八轮自己踩过两次坑之后立的（`VET_EXIT` 抽到 `tail` 的退出码、
+`FAIL <pkg>` 行被 `tail -40` 截掉导致"39 ok / 1 FAIL 却定位不到"）。
+
+**第三十一轮的收口计数**：AD1 `0/1/6/7`（终稿；中期为 `0/1/6/3`）+ AD2 `0/0/2/5`
+⇒ **≥ 0 P0 / 1 P1** ⇒ **不干净，收敛仍未达成（连续 30 轮）**。
