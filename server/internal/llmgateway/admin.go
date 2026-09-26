@@ -94,14 +94,31 @@ func orEmpty(v string) string {
 // `hook_url` 一致（见 reports/handlers.go 的 auditDetail 与
 // internal/serverauth/audit_redact.go 文件头那段历史）。
 //
-// **消费点（完整清单的真源 = `audit_set_setting_inventory_test.go` 的登记表，
-// 新增 URL/凭据型写点必须在那里登记）**：
+// **消费点**：
 //   - `web.error_reporting_dsn`（第二十七轮 AA2-03）；
 //   - `web.glitchtip_base_url` 与 `server.base_url`（第二十八轮 FIX-40 ②：两个都是
-//     **零校验**的 URL 写入点，实测都能存进 `https://user:pass@host` 并原样进 detail）。
+//     **零校验**的 URL 写入点，实测都能存进 `https://user:pass@host` 并原样进 detail）；
+//   - `provider_create` / `provider_update` / `provider_delete` 三条审计明细里的
+//     `base_url`（第二十九轮 FIX-44 ①：`validateUpstreamBaseURL` 只拒 userinfo，
+//     `?accessToken=…` 这类**凭据型查询串**能正常入库并原样进不可变的 detail；
+//     这三条**不是 settings 写点**，所以不在 `audit_set_setting_inventory_test.go`
+//     的登记表里 —— 它们的判据是 `audit_url_credential_redact_test.go` 的
+//     `TestProviderAuditOmitsCredentialQueryString` 系列）。
+//
+// 上面两条 settings 写点清单的真源 = `audit_set_setting_inventory_test.go` 的登记表
+// （它的扫描根是 `admin.go` 里 `auditSetSetting*` 的调用点，**只覆盖 settings 写点**；
+// 新增 URL/凭据型 settings 写点必须在那里登记，其它形态的审计写点各自补判据）。
 //
 // 粒度是产品取舍：host 足以回答"换收集器了吗 / 环境配错了没有"，而"换的是哪个
 // 项目/路径"要靠对应页面自己看（那里有正规的读面与权限）。
+//
+// 为什么 provider 的三条也走**同一个**折叠器而不是"按参数名折叠"：写侧是**不可变、
+// 无权限门**的永久面，取值域必须比读侧宽 —— `auditSensitiveQueryParams`
+// （serverauth/audit_redact.go）是 webhook 导向的 30 个名字，缺云厂商预签名参数族
+// （`X-Amz-Signature`/`X-Amz-Credential`/`X-Amz-Security-Token`/`X-Goog-Signature`/
+// `SharedAccessSignature`…），且它的文件头自己认账三种不可覆盖形态；而这里已经有
+// 第二十七/二十八轮建立的"保留 scheme://host、其余整段折叠"这一**唯一实现**，
+// 再引入第二种粒度既少挡一类凭据、又多一份实现（详见 temp/r21/fix-44/REPORT.md ①）。
 func redactURLCredentialForAudit(v string) string {
 	trimmed := strings.TrimSpace(v)
 	if trimmed == "" {
@@ -403,9 +420,14 @@ func createProvider(c *gin.Context, db *sql.DB) {
 	}
 	// 审计与业务写同事务(2026-09-23,第三轮 §7.3 A):审计写不进去就整体回滚 ——
 	// "创建成功但零审计"不允许静默发生(与 PUT 路径同一纪律)。
+	//
+	// base_url 走 `redactURLCredentialForAudit`(第二十九轮 FIX-44 ①):`?accessToken=…`
+	// 这类**凭据型查询串**能过 `validateUpstreamBaseURL`(它只拒 userinfo),于是此前
+	// 原样落进不可变的 detail,而读侧折叠覆盖不了 CSV 导出与库备份 —— 与同一个文件里
+	// 三个 URL 型 settings 写点(FIX-40 ②)是同一个缺陷形态、同一个折叠器。
 	if err := serverstore.AuditLogTx(tx, auditActor(c), "provider_create",
 		fmt.Sprintf("%s base_url=%s channel=%s protocol=%s enabled=%v models=%d",
-			p.Name, p.BaseURL, p.Channel, p.Protocol, p.Enabled == 1, len(p.Models))); err != nil {
+			p.Name, redactURLCredentialForAudit(p.BaseURL), p.Channel, p.Protocol, p.Enabled == 1, len(p.Models))); err != nil {
 		log.Printf("gateway provider create: 审计写入失败,已回滚本次创建 name=%s: %v", p.Name, err)
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "创建失败")
 		return
@@ -614,8 +636,11 @@ func updateProvider(c *gin.Context, db *sql.DB) {
 	if p.Name != orig.Name {
 		ch = append(ch, "name:"+orig.Name+"→"+p.Name)
 	}
+	// 变更判定用**原值**、落进 detail 的取值走折叠器(FIX-44 ①,与
+	// `auditSetSettingFormattedTx` 同一口径):只换查询串里的凭据也必须留下一条审计,
+	// 先折叠再比较会让这种轮换静默消失。
 	if p.BaseURL != orig.BaseURL {
-		ch = append(ch, "base_url:"+orig.BaseURL+"→"+p.BaseURL)
+		ch = append(ch, "base_url:"+redactURLCredentialForAudit(orig.BaseURL)+"→"+redactURLCredentialForAudit(p.BaseURL))
 	}
 	if p.Channel != orig.Channel {
 		ch = append(ch, "channel:"+orEmpty(orig.Channel)+"→"+orEmpty(p.Channel))
@@ -823,7 +848,10 @@ func deleteProvider(c *gin.Context, db *sql.DB) {
 		serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "删除失败")
 		return
 	}
-	_ = serverstore.AuditLog(db, auditActor(c), "provider_delete", fmt.Sprintf("%s base_url=%s", p.Name, p.BaseURL))
+	// 值来自**库**(可能是 F10 校验上线前写入的 userinfo 形态,也可能是当下的凭据型
+	// 查询串)⇒ 同样必须折叠(FIX-44 ①)。
+	_ = serverstore.AuditLog(db, auditActor(c), "provider_delete",
+		fmt.Sprintf("%s base_url=%s", p.Name, redactURLCredentialForAudit(p.BaseURL)))
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

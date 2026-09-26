@@ -31,6 +31,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"log"
 	"net/url"
 	"strings"
@@ -372,57 +373,141 @@ func TestMigrationFullChainAppliesAndBudgetDoesNotLeakIntoPool(t *testing.T) {
 	}
 }
 
-// 两个"在预算内"的类别标签（供分类计数断言使用）。
+// 分类标签（供分类计数断言使用）。
 const (
 	budgetReasonLedgerClosure = "withLockBudget 闭包：会话级 lock_timeout 覆盖（账本建表/补列/读/回填）"
-	budgetReasonMigrationTx   = "迁移事务：函数开头已 SET LOCAL lock_timeout（DDL + 版本行 INSERT）"
+	budgetReasonMigrationTx   = "事务预算：同一接收者在本函数内先前已 SET LOCAL lock_timeout（该语句在其后）"
 	budgetReasonAdvisory      = "withLockBudget 闭包：advisory 锁等待的会话级预算"
+	budgetReasonAltBudget     = "另一份**已登记**的预算机制：同一函数内先前已调用（见 lockSiteExemptions）"
+	budgetReasonSetup         = "预算设置语句本身（SET LOCAL lock_timeout 不取表锁）"
 )
 
 // migrationDBAllowance 是一条"允许不落在预算会话内"的登记项。
 //
 // 每一条都必须带理由 —— "不加预算"本身是一个决定，必须写在纸面上；没登记的调用点
 // 一律判红。stmtFragment 非空时只匹配 SQL 里含该片段的调用点（区分同一函数里同一
-// 接收者的不同语句）。
+// 接收者的不同语句）。file 是**扫描根的一部分**：搬文件即陈旧（双向对账会红）。
 type migrationDBAllowance struct {
-	fn, recv, method string
-	stmtFragment     string
-	why              string
+	file, fn, recv, method string
+	stmtFragment           string
+	why                    string
 }
 
-// migrationDBAllowlist 是 migrate.go 里允许不落在预算会话内的 DB 调用点。
+// migrationDBAllowlist 是迁移执行器里允许不落在预算会话内的 DB 调用点。
 var migrationDBAllowlist = []migrationDBAllowance{
 	// 预算机制本身：SET/RESET lock_timeout 不取任何表锁。
-	{fn: "withLockBudget", recv: "conn", method: "*", why: "预算机制本身（SET/RESET lock_timeout 不取表锁）"},
+	{file: "migrate.go", fn: "withLockBudget", recv: "conn", method: "*", why: "预算机制本身（SET/RESET lock_timeout 不取表锁）"},
 	// 锁窗口采样：只读 pg_locks / pg_stat_activity，且自带 2s ctx 超时（见 sampleLockState）。
-	{fn: "sampleLockState", recv: "w.conn", method: "*", why: "锁窗口采样：只读 pg_catalog/pg_locks，自带 2s ctx 超时"},
-	// 开启事务不取表锁；事务内的三条语句全在 `SET LOCAL lock_timeout` 之后。
-	{fn: "applyOneMigration", recv: "db", method: "BeginTx", why: "开事务不取表锁；事务内语句由本函数开头的 SET LOCAL 覆盖"},
+	{file: "migrate.go", fn: "sampleLockState", recv: "w.conn", method: "*", why: "锁窗口采样：只读 pg_catalog/pg_locks，自带 2s ctx 超时"},
+	// 开启事务不取表锁；事务内的语句全在 `SET LOCAL lock_timeout` 之后（位置由判据自己比）。
+	{file: "migrate.go", fn: "applyOneMigration", recv: "db", method: "BeginTx", why: "开事务不取表锁；事务内语句由本函数开头的 SET LOCAL 覆盖（位置另判）"},
 	// 取一条池连接（`db.Conn` 不取表锁）：预算随后由 withLockBudget 施加在这条会话上。
-	{fn: "applyMigrations", recv: "db", method: "Conn", why: "取池连接（不取表锁）；预算由紧随其后的 withLockBudget 施加在这条会话上"},
+	{file: "migrate.go", fn: "applyMigrations", recv: "db", method: "Conn", why: "取池连接（不取表锁）；预算由紧随其后的 withLockBudget 施加在这条会话上"},
 	// 释放 advisory 锁：pg_advisory_unlock 不等待（没有"等锁"语义）。
-	{fn: "applyMigrations", recv: "conn", method: "ExecContext", stmtFragment: "pg_advisory_unlock",
+	{file: "migrate.go", fn: "applyMigrations", recv: "conn", method: "ExecContext", stmtFragment: "pg_advisory_unlock",
 		why: "释放 advisory 锁：pg_advisory_unlock 不等待、不取表锁"},
 }
 
-// TestMigrationLockTakingStatementsAreAllBudgeted 是条 3：**清单级**判据。
+// lockStatementClasses 是"会取表级锁、因此必须有界"的语句类别（只看 SQL 文本的粗判据）。
+//
+// 为什么**只收这些**、不收普通 DML 与 `SELECT … FOR UPDATE`（如实登记的边界）：本判据
+// 守护的是**启动期迁移执行器**的无界等待 —— 它跑在启动路径上、没有调用方 ctx 兜底，
+// 等锁就是"容器起不来"。运行期业务语句（分区维护 / 用量回收 / 余额行锁）各有请求级或
+// 调度级的预算与登记（见 lockSiteExemptions 的 altBudget 列）；把它们一起收进"必须
+// 登记"的面只会让判据退化成形式主义。
+//
+// 唯一例外：`schema_migrations`（迁移账本表）的**任何**语句都算取锁 —— 版本行 INSERT
+// 取 ROW EXCLUSIVE，与 SHARE 冲突（R28 条 2 真 PG 实测的形态），而账本表只有迁移执行器碰。
+var lockStatementClasses = []string{
+	"LOCK TABLE", "ALTER TABLE", "ALTER INDEX", "CREATE TABLE", "CREATE INDEX",
+	"CREATE UNIQUE INDEX", "DROP TABLE", "DROP INDEX", "TRUNCATE", "REINDEX", "CLUSTER",
+}
+
+// lockTakingClass 判定一段 SQL 属于哪一类取锁语句（空串 = 不算取锁语句）。
+func lockTakingClass(sql string) string {
+	upper := strings.ToUpper(sql)
+	for _, class := range lockStatementClasses {
+		if strings.Contains(upper, class) {
+			return class
+		}
+	}
+	if strings.Contains(upper, "SCHEMA_MIGRATIONS") {
+		return "schema_migrations（迁移账本表）"
+	}
+	return ""
+}
+
+// lockSiteExemption 是一条"取锁语句不落在预算会话内、但已经被回答过"的登记项。
+//
+// 两种口径，且**都必须可验证**（不是一句注释）：
+//   - altBudget 非空：同一函数里必须**真的调用过**这个替代预算机制，且位置在该语句
+//     之前（例：`applyUsageRetentionBudget` / `setUsageRetentionStatementBudget`）；
+//   - notOnStartupPath：该函数必须**不在**迁移入口的可达集里（判据自己算调用图）——
+//     这条取锁语句不在启动路径上；一旦有人把它接进迁移路径，判据立刻红。
+//
+// 两列都为空 = 不可验证的豁免 ⇒ 判据直接拒绝该登记项。
+type lockSiteExemption struct {
+	file, fn, method string
+	sqlFragment      string
+	altBudget        string
+	notOnStartupPath bool
+	why              string
+}
+
+// lockSiteExemptions 是整包里**允许**不落在 withLockBudget / 事务预算内的取锁语句。
+//
+// 这一张表是"扫描根改成整包"的代价，也是它的价值：整包口径下每一条运行期 DDL/锁
+// 都必须被显式回答过（而不是因为文件不在扫描根里就没人看见）。
+var lockSiteExemptions = []lockSiteExemption{
+	{
+		file: "usage_ledger.go", fn: "settleUsageReclaim", method: "Exec", sqlFragment: "LOCK TABLE ONLY",
+		altBudget: "applyUsageRetentionBudget",
+		why:       "用量回收的结算段：同函数先前已 applyUsageRetentionBudget(tx, …)（SET LOCAL lock_timeout + statement_timeout），整段另罩在 budgetMS 的 ctx deadline 里；不在启动迁移路径。",
+	},
+	{
+		file: "usage_ledger.go", fn: "reclaimUsagePartitionAtomically", method: "Exec", sqlFragment: "LOCK TABLE ONLY",
+		altBudget: "setUsageRetentionStatementBudget",
+		why:       "用量回收的冻结段：同函数先前已 setUsageRetentionStatementBudget(tx)，整段罩在 usageReclaimFreezeBudgetMS 的 ctx（含 COMMIT）里；不在启动迁移路径。",
+	},
+	{
+		file: "usage_ledger.go", fn: "reclaimUsagePartitionAtomically", method: "Exec", sqlFragment: "IN ACCESS EXCLUSIVE MODE",
+		altBudget: "setUsageRetentionStatementBudget",
+		why:       "同上（对 rel 子树的 ACCESS EXCLUSIVE）；锁级别按 relkind 分流见 usageReclaimTargetLock，预算来自同一份已登记机制。",
+	},
+	{
+		file: "usage_ledger.go", fn: "reclaimUsagePartitionAtomically", method: "Exec", sqlFragment: "DETACH PARTITION",
+		altBudget: "setUsageRetentionStatementBudget",
+		why:       "同上（冻结段的 DETACH，父表 AEX 随本事务结束释放）；预算来自同一份已登记机制。",
+	},
+	{
+		file: "partitions.go", fn: "adoptDetachedMonthPartition", method: "Exec", sqlFragment: "DETACH PARTITION",
+		notOnStartupPath: true,
+		why:              "运行期的「同名孤儿月分区领回」（写路径自愈）：不在启动迁移路径上（判据算调用图确认），因此不适用启动期等锁预算；**残留风险如实登记**：该事务自身没有 lock_timeout，属运行期既有形态，不在本轮判据面的修法范围内。",
+	},
+	{
+		file: "partitions.go", fn: "adoptDetachedMonthPartition", method: "Exec", sqlFragment: "ATTACH PARTITION",
+		notOnStartupPath: true,
+		why:              "同上（领回的第二条语句 ATTACH）；与 DETACH 同一个事务、同一条残留风险。",
+	},
+}
+
+// TestMigrationLockTakingStatementsAreAllBudgeted 是条 3：**清单级**判据（整包口径）。
 //
 // 病根（FIX-39）：只给"当下被点名的那条语句"加预算 ⇒ 同一个函数里另外四条取锁语句
-// 原样漏掉，而判据全绿。所以这里不钉某条语句，而是把 migrate.go 的**全部** DB 调用点
-// 枚举出来，逐条要求：要么落在预算会话内（withLockBudget 的闭包 / 已 SET LOCAL 的事务），
-// 要么在 migrationDBAllowlist 里带理由登记。新增取锁语句却忘了预算 ⇒ 本判据红。
+// 原样漏掉，而判据全绿。所以这里不钉某条语句，而是把整包的 DB 调用点枚举出来，逐条
+// 要求：要么落在预算会话内，要么在登记表里带理由。
 //
-// 三个必须防的假绿形态（本仓已复发三次的教训）：
-//   - 扫描根过窄：只扫 `applyMigrations` 会漏掉同文件其它函数 ⇒ 这里扫整个文件的所有函数；
-//   - 取值域过窄：只认 `db.` 前缀会漏掉 `conn.` / `tx.` / `w.conn.` ⇒ 这里按任意接收者枚举；
-//   - 恒真：一条都没扫到也"通过" ⇒ 末尾对扫描面下界做断言。
+// **R29-AC1-03 的三条取值域缺口**（本函数 2026-09-27 重写的原因，与下面三件事一一对应）：
+//   - 扫描根只有 `migrate.go` **一个文件** ⇒ 同包另一个文件里的取锁语句结构上看不见；
+//   - 只认 `*ast.SelectorExpr` 形态的调用 ⇒ `exec := db.ExecContext; exec(…)` 整条在面外；
+//   - 只问"函数体里**出现过** SET LOCAL lock_timeout" ⇒ 取锁语句排在预算设置**之前**也算已预算。
+//
+// 现在的取值域：**整包非测试 .go** × **(selector ∪ 方法值别名)** × **(语句类别 + 位置)**，
+// 外加一张**可验证**的豁免登记表（替代预算机制必须真的被调用；"不在启动路径"由判据自己
+// 算调用图）。三个方向都要防（本仓已复发三次的教训）：扫描根过窄 / 取值域过窄 / 恒真。
 func TestMigrationLockTakingStatementsAreAllBudgeted(t *testing.T) {
-	const src = "migrate.go"
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, src, nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("解析 %s: %v", src, err)
-	}
+	files := parseServerstorePackage(t, fset)
 
 	// 会走到数据库的方法（含取连接与开事务：它们不取表锁，但"要不要登记"必须是被
 	// 显式回答过的问题，而不是没人看见）。
@@ -433,87 +518,188 @@ func TestMigrationLockTakingStatementsAreAllBudgeted(t *testing.T) {
 		"Conn": true, "BeginTx": true,
 	}
 
-	type site struct {
-		pos       token.Position
-		key       string
-		reason    string // 非空 = 已判定为"在预算内"
-		missed    bool
-		missedWhy string
-		stmtArg   string
+	reachable := migrationReachable(files)
+	altSymbols := map[string]bool{}
+	for _, ex := range lockSiteExemptions {
+		if ex.altBudget != "" {
+			altSymbols[ex.altBudget] = true
+		}
 	}
-	var sites []site
 
-	var stack []ast.Node
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			stack = stack[:len(stack)-1]
-			return true
-		}
-		defer func() { stack = append(stack, n) }()
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !dbMethods[sel.Sel.Name] {
-			return true
-		}
-		recv := exprText(sel.X)
-		fn := enclosingFunc(stack)
-		method := sel.Sel.Name
-		s := site{pos: fset.Position(call.Pos()), key: fn + "|" + recv + "|" + method, stmtArg: firstStringLiteral(call)}
+	var sites []dbCallSite
 
-		inClosure, budgetRecv := lockBudgetClosure(stack)
-		switch {
-		case fn == "withLockBudget":
-			s.reason = migrationDBAllowlist[0].why
-		case inClosure && recv == budgetRecv:
-			if method == "ExecContext" && strings.Contains(s.stmtArg, "pg_advisory_lock") {
-				s.reason = budgetReasonAdvisory
-			} else {
-				s.reason = budgetReasonLedgerClosure
+	for name, file := range files {
+		// 每份文件三张**位置感知**的表（都不是按名字认协议，而是按源码事实）：
+		//   - setups：`SET LOCAL lock_timeout` 落在哪条接收者上、位置在哪；
+		//   - altBudgets：登记表点名的替代预算机制在哪个函数里被调用；
+		//   - aliases：`x := <recv>.<Method>` 方法值别名（R29-AC1-03 的 N4 形态）。
+		setups := map[string][]token.Pos{}
+		altBudgets := map[string][]token.Pos{}
+		var aliases []dbAlias
+		var pre []ast.Node
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				pre = pre[:len(pre)-1]
+				return true
 			}
-		case inClosure && recv != budgetRecv:
-			// **R28-FIX41 变异 A 抓出来的缺口**：预算施加在 `budgetRecv` 那条专用会话上，
-			// 闭包里改走池连接（`db.Exec`）时预算**完全无效** —— 而"语句在预算闭包里"这句
-			// 话仍然是成立的，所以只判"在不在闭包里"会假绿。这正是 FIX-39 的取值域病根
-			// （预算存在 ≠ 覆盖到这条语句），必须按**接收者**判。
-			s.missed = true
-			s.missedWhy = "这条语句在 withLockBudget 闭包内，但跑在 " + recv + " 上，而预算是施加在 " + budgetRecv +
-				" 这条会话上的 ⇒ 该语句**不受预算约束**（把账本 DDL 挪回池连接 = 复现 R28 AB1-02 的无界挂死）"
-		case fn == "applyOneMigration" && recv == "tx":
-			s.reason = budgetReasonMigrationTx
-		default:
-			for _, a := range migrationDBAllowlist {
-				if a.fn != fn || a.recv != recv {
-					continue
+			defer func() { pre = append(pre, n) }()
+			assign, ok := n.(*ast.AssignStmt)
+			if ok && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 {
+				if id, ok := assign.Lhs[0].(*ast.Ident); ok {
+					if sel, ok := assign.Rhs[0].(*ast.SelectorExpr); ok && dbMethods[sel.Sel.Name] && id.Name != "_" {
+						aliases = append(aliases, dbAlias{name: id.Name, recv: exprText(sel.X), method: sel.Sel.Name, pos: assign.Pos()})
+					}
 				}
-				if a.method != "*" && a.method != method {
-					continue
-				}
-				if a.stmtFragment != "" && !strings.Contains(s.stmtArg, a.stmtFragment) {
-					continue
-				}
-				s.reason = a.why
-				break
 			}
-			if s.reason == "" {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && altSymbols[id.Name] {
+				altBudgets[enclosingFunc(pre)] = append(altBudgets[enclosingFunc(pre)], call.Pos())
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && dbMethods[sel.Sel.Name] {
+				if strings.Contains(allStringLiterals(call), "SET LOCAL lock_timeout") {
+					key := enclosingFunc(pre) + "|" + exprText(sel.X)
+					setups[key] = append(setups[key], call.Pos())
+				}
+			}
+			return true
+		})
+
+		var stack []ast.Node
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			defer func() { stack = append(stack, n) }()
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			recv, method, ok := resolveDBReceiver(call, aliases, dbMethods)
+			if !ok {
+				return true
+			}
+			fn := enclosingFunc(stack)
+			sql := allStringLiterals(call)
+			s := dbCallSite{
+				file: name, fn: fn, recv: recv, method: method,
+				pos:       fset.Position(call.Pos()),
+				sql:       sql,
+				stmtArg:   firstStringLiteral(call),
+				lockClass: lockTakingClass(sql),
+			}
+
+			inClosure, budgetRecv := lockBudgetClosure(stack)
+			budgetSetup := strings.Contains(sql, "SET LOCAL lock_timeout")
+			switch {
+			case fn == "withLockBudget":
+				s.reason = migrationDBAllowlist[0].why
+			case budgetSetup:
+				// 预算设置语句**自己**：它不取任何表锁，而且位置判据必须把它排除，
+				// 否则"取锁语句必须在 SET LOCAL 之后"会把 SET LOCAL 本身判成违规。
+				s.reason = budgetReasonSetup
+			case inClosure && recv == budgetRecv:
+				if method == "ExecContext" && strings.Contains(s.stmtArg, "pg_advisory_lock") {
+					s.reason = budgetReasonAdvisory
+				} else {
+					s.reason = budgetReasonLedgerClosure
+				}
+			case inClosure && recv != budgetRecv:
+				// **R28-FIX41 变异 A 抓出来的缺口**：预算施加在 `budgetRecv` 那条专用会话上，
+				// 闭包里改走池连接（`db.Exec`）时预算**完全无效** —— 而"语句在预算闭包里"这句
+				// 话仍然成立，所以只判"在不在闭包里"会假绿。必须按**接收者**判。
 				s.missed = true
+				s.missedWhy = "这条语句在 withLockBudget 闭包内，但跑在 " + recv + " 上，而预算是施加在 " + budgetRecv +
+					" 这条会话上的 ⇒ 该语句**不受预算约束**（把账本 DDL 挪回池连接 = 复现 R28 AB1-02 的无界挂死）"
+			default:
+				// ① 事务预算：同一接收者在本函数里先前已 `SET LOCAL lock_timeout`。
+				//    位置判据（R29-AC1-03 的 N3 形态）：**取锁语句**排在预算设置之前不算已预算；
+				//    不取锁的语句（例如 `SET LOCAL DateStyle`）不受位置约束。
+				if positions := setups[fn+"|"+recv]; len(positions) > 0 {
+					before := false
+					for _, p := range positions {
+						if p < call.Pos() {
+							before = true
+						}
+					}
+					switch {
+					case before:
+						s.reason = budgetReasonMigrationTx
+					case s.lockClass == "":
+						// 非取锁语句：位置无关，交给下面的档位判（迁移路径上的仍要登记）。
+					default:
+						s.missed = true
+						s.missedWhy = "取锁语句排在 `SET LOCAL lock_timeout` **之前**（同一接收者 " + recv + "、函数 " + fn +
+							"）⇒ 这条语句不在预算内。预算必须**先设后用**（AC1-03 的 N3 形态：分类计数照样对、顺序错了）"
+					}
+				} else if ex, ok := matchLockExemption(s.file, fn, method, sql); ok && ex.altBudget != "" {
+					// ② 已登记的替代预算机制：必须真的在**同一函数**里、且在该语句之前被调用。
+					hasBefore := false
+					for _, p := range altBudgets[fn] {
+						if p < call.Pos() {
+							hasBefore = true
+						}
+					}
+					if hasBefore {
+						s.reason = budgetReasonAltBudget + "（" + ex.altBudget + "）"
+					} else {
+						s.missed = true
+						s.missedWhy = "登记项声称预算来自 " + ex.altBudget + "，但函数 " + fn + " 里找不到它（或在取锁语句之后才调用）—— 豁免必须可验证"
+					}
+				} else {
+					// ③ 逐条登记的"不加预算"（清单驱动；每条必须带理由）。
+					for _, a := range migrationDBAllowlist {
+						if a.file != s.file || a.fn != fn || a.recv != recv {
+							continue
+						}
+						if a.method != "*" && a.method != method {
+							continue
+						}
+						if a.stmtFragment != "" && !strings.Contains(s.stmtArg, a.stmtFragment) {
+							continue
+						}
+						s.reason = a.why
+						break
+					}
+					if s.reason == "" {
+						s.missed = true
+					}
+				}
 			}
-		}
-		sites = append(sites, s)
-		return true
-	})
+			sites = append(sites, s)
+			return true
+		})
+	}
 
-	// 扫描面下界：数量与"承重类别"都必须真的出现，否则判据可能是恒真。
-	if len(sites) < 12 {
-		t.Fatalf("只扫到 %d 个 DB 调用点（migrate.go 现有 15 个）—— 扫描根/取值域变窄了，判据正在退化成恒真", len(sites))
+	// 扫描面下界：文件数、调用点数、取锁类别与承重分类都必须真的出现，否则判据可能是恒真。
+	if len(files) < 30 {
+		t.Fatalf("只解析到 %d 个非测试 .go 文件（serverstore 现有 45 个）—— 扫描根变窄了，判据正在退化成恒真", len(files))
+	}
+	if len(sites) < 250 {
+		t.Fatalf("整包只扫到 %d 个 DB 调用点（现有 411 个）—— 取值域变窄了，判据正在退化成恒真", len(sites))
+	}
+	lockSites := 0
+	for _, s := range sites {
+		if s.lockClass != "" {
+			lockSites++
+		}
+	}
+	if lockSites < 6 {
+		t.Fatalf("整包只扫到 %d 条取锁语句（现有 8 条）—— 取锁类别判据失效", lockSites)
 	}
 	cats := map[string]int{}
 	for _, s := range sites {
-		cats[s.reason]++
+		if s.reason != "" {
+			cats[s.reason]++
+		}
 	}
-	for _, must := range []string{budgetReasonLedgerClosure, budgetReasonMigrationTx, budgetReasonAdvisory} {
+	for _, must := range []string{
+		budgetReasonLedgerClosure, budgetReasonMigrationTx, budgetReasonAdvisory,
+		budgetReasonAltBudget + "（applyUsageRetentionBudget）",
+	} {
 		if cats[must] == 0 {
 			t.Fatalf("没有任何调用点落在 %q 这一类 ⇒ 判据的分类失效（实际分类: %v）", must, cats)
 		}
@@ -522,23 +708,229 @@ func TestMigrationLockTakingStatementsAreAllBudgeted(t *testing.T) {
 	if cats[migrationDBAllowlist[0].why] < 2 {
 		t.Fatal("withLockBudget 内的 SET/RESET 没被扫到：预算机制被搬走或改名了")
 	}
-	// applyOneMigration 必须先 SET LOCAL 再执行任何 tx 语句（否则"tx 即已预算"的前提不成立）。
-	if !functionBodyContains(file, "applyOneMigration", "SET LOCAL lock_timeout") {
-		t.Fatal("applyOneMigration 里找不到 `SET LOCAL lock_timeout` —— 迁移事务的预算前提没了，" +
-			"此时本判据对 tx.* 的放行是假绿")
+
+	// 登记表**双向**对账：豁免项必须仍然命中真实语句（陈旧登记 = 免检区）。
+	for _, ex := range lockSiteExemptions {
+		if len([]rune(ex.why)) < 20 {
+			t.Errorf("豁免登记 %s|%s 的理由太短：必须写清取值形态与判定依据", ex.file, ex.fn)
+		}
+		if ex.altBudget == "" && !ex.notOnStartupPath {
+			t.Errorf("豁免登记 %s|%s 既没有替代预算机制、也没有声明不在启动路径 ⇒ 不可验证的豁免不许进表", ex.file, ex.fn)
+		}
+		if ex.notOnStartupPath && reachable[ex.fn] {
+			t.Errorf("豁免登记 %s|%s 声称「不在启动路径」，但它**在**迁移入口的可达集里 ⇒ 该取锁语句必须有预算", ex.file, ex.fn)
+		}
+		hit := false
+		for _, s := range sites {
+			if s.file == ex.file && s.fn == ex.fn && s.method == ex.method && strings.Contains(s.sql, ex.sqlFragment) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			t.Errorf("豁免登记 %s|%s|%q 已经匹配不到任何真实语句（改名/搬走/改写）—— 请删掉或改写这条登记（豁免表不许变成免检区）",
+				ex.file, ex.fn, ex.sqlFragment)
+		}
 	}
 
 	for _, s := range sites {
-		if s.missed {
-			if s.missedWhy != "" {
-				t.Errorf("%s: %s", s.pos, s.missedWhy)
+		if !s.missed {
+			continue
+		}
+		if s.missedWhy != "" {
+			t.Errorf("%s: %s", s.pos, s.missedWhy)
+			continue
+		}
+		// 未落预算的调用点分两档（口径与理由都写在判据的注释里）：
+		//   ① 取锁语句（DDL / LOCK / 账本表）：**整包**范围内必须有预算或登记理由；
+		//   ② 非取锁语句：只在**预算执行器文件**（调过 withLockBudget 的文件）里判。
+		//      运行期只读查询不在此列 —— 它们没有启动期无界挂死的语义，收进来只会把
+		//      判据变成"每行业务 SQL 都要登记"（`Open` → `SHOW max_connections` 就是例子）。
+		if s.lockClass != "" {
+			if _, ok := matchLockExemption(s.file, s.fn, s.method, s.sql); ok {
 				continue
 			}
-			t.Errorf("%s: %s 这条 DB 调用点不在任何预算会话内，也没有在 migrationDBAllowlist 里登记理由 "+
-				"—— 取锁语句必须有界（R28 AB1-02：账本 DDL 跑在池连接上 ⇒ 每次启动都可能无界静默挂死）", s.pos, s.key)
+			t.Errorf("%s: %s 是一条**取锁语句**（类别 %s），却不在任何预算会话内、也没有在 lockSiteExemptions 里登记理由 "+
+				"—— 取锁必须有界（R28 AB1-02 的账本 DDL 无界挂死；R29-AC1-03 的扫描根缺口）",
+				s.pos, s.file, s.lockClass)
+			continue
+		}
+		if budgetEnforcingFile(files[s.file]) {
+			t.Errorf("%s: %s 这条 DB 调用点不在任何预算会话内，也没有在 migrationDBAllowlist 里登记理由"+
+				"（它所在的文件承担预算职责）—— 新增取锁语句却忘了预算，判据必须红", s.pos, s.file)
 		}
 	}
-	t.Logf("扫描 %s：%d 个 DB 调用点，全部落在预算内或已登记；分类计数 %v", src, len(sites), cats)
+	t.Logf("扫描 %d 个文件：%d 个 DB 调用点（其中取锁语句 %d 条），全部落在预算内或已登记；分类计数 %v",
+		len(files), len(sites), lockSites, cats)
+}
+
+// dbCallSite 是一次 DB 调用点的静态事实（整包口径；file 是扫描根的一部分）。
+type dbCallSite struct {
+	file, fn, recv, method string
+	pos                    token.Position
+	sql                    string
+	stmtArg                string
+	lockClass              string
+	reason                 string
+	missed                 bool
+	missedWhy              string
+}
+
+// dbAlias 是一次方法值别名绑定（`exec := db.ExecContext`）。
+type dbAlias struct {
+	name, recv, method string
+	pos                token.Pos
+}
+
+// parseServerstorePackage 解析**整包**的非测试 .go 文件（键 = 文件名）。
+//
+// 扫描根 = 包目录（`migrate.go` 只是其中之一）。R29-AC1-03：把取值域钉在一个文件名上，
+// 就是"同包新增文件即静默"的经典形态。
+func parseServerstorePackage(t *testing.T, fset *token.FileSet) map[string]*ast.File {
+	t.Helper()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("解析 serverstore 包: %v", err)
+	}
+	out := map[string]*ast.File{}
+	for _, pkg := range pkgs {
+		for name, file := range pkg.Files {
+			out[name] = file
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("一个非测试 .go 都没解析到：扫描根失效（判据会恒真）")
+	}
+	return out
+}
+
+// migrationReachable 返回**迁移入口可达**的函数名集合（包内调用图）。
+//
+// 为什么需要它：整包扫描之后，"哪些调用点必须被回答"不能靠文件名。入口 =
+// `ApplyMigrations` / `EnsureMigrated`，边 = **裸标识符调用**（`foo(...)`）落在包内声明的
+// 函数名上。刻意**不**认 `x.Method(...)` 形态的边：按方法名连边会把全包所有同名方法
+// （`Exec` / `Query` / `Open` …）全拉进来，可达集瞬间变成"整个包"——那是假面，不是覆盖。
+// 方法体里的预算问题由 `budgetEnforcingFile` 那一档与取锁类别那一档兜住。
+func migrationReachable(files map[string]*ast.File) map[string]bool {
+	bodies := map[string][]*ast.FuncDecl{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Name == nil || fd.Body == nil {
+				continue
+			}
+			bodies[fd.Name.Name] = append(bodies[fd.Name.Name], fd)
+		}
+	}
+	seen := map[string]bool{}
+	queue := []string{"ApplyMigrations", "EnsureMigrated"}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		for _, fd := range bodies[name] {
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if len(bodies[id.Name]) > 0 && !seen[id.Name] {
+					queue = append(queue, id.Name)
+				}
+				return true
+			})
+		}
+	}
+	return seen
+}
+
+// budgetEnforcingFile 判定一份文件是不是"预算执行器"：文件里出现过 `withLockBudget(` 的调用。
+//
+// 这是"整包扫描"里那一半**强口径**的取值域来源：文件一旦承担预算职责，它里面**每一个**
+// DB 调用点都必须被回答（与 SQL 类别无关）。命名无关 —— 新文件照做预算就自动进面。
+func budgetEnforcingFile(file *ast.File) bool {
+	if file == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "withLockBudget" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// matchLockExemption 在豁免登记表里找一条命中项（文件 + 函数 + 方法 + SQL 片段）。
+func matchLockExemption(file, fn, method, sql string) (lockSiteExemption, bool) {
+	for _, ex := range lockSiteExemptions {
+		if ex.file != file || ex.fn != fn {
+			continue
+		}
+		if ex.method != "" && ex.method != method {
+			continue
+		}
+		if ex.sqlFragment != "" && !strings.Contains(sql, ex.sqlFragment) {
+			continue
+		}
+		return ex, true
+	}
+	return lockSiteExemption{}, false
+}
+
+// resolveDBReceiver 解析一个调用点的**接收者与方法**，含方法值别名（`exec := db.ExecContext`）。
+//
+// 别名按位置取"最近一次先于本调用点的赋值"（同名遮蔽时不会拿到更早的那个）。R29-AC1-03
+// 的 N4 形态（`call.Fun` 是 Ident 而不是 SelectorExpr）就在这里进面。
+func resolveDBReceiver(call *ast.CallExpr, aliases []dbAlias, dbMethods map[string]bool) (string, string, bool) {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && dbMethods[sel.Sel.Name] {
+		return exprText(sel.X), sel.Sel.Name, true
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return "", "", false
+	}
+	best := -1
+	for i := range aliases {
+		if aliases[i].name != id.Name || aliases[i].pos >= call.Pos() {
+			continue
+		}
+		if best < 0 || aliases[i].pos > aliases[best].pos {
+			best = i
+		}
+	}
+	if best < 0 {
+		return "", "", false
+	}
+	return aliases[best].recv, aliases[best].method, true
+}
+
+// allStringLiterals 把一个调用实参里的字符串字面量按出现顺序拼起来（SQL 文本的近似）。
+func allStringLiterals(call *ast.CallExpr) string {
+	var b strings.Builder
+	for _, a := range call.Args {
+		ast.Inspect(a, func(n ast.Node) bool {
+			if bl, ok := n.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+				b.WriteString(strings.Trim(bl.Value, "`\""))
+			}
+			return true
+		})
+	}
+	return b.String()
 }
 
 // lockBudgetClosure 判定当前调用点是否在 `withLockBudget(...)` 的函数实参里，并返回
@@ -691,23 +1083,4 @@ func firstStringLiteral(call *ast.CallExpr) string {
 		}
 	}
 	return ""
-}
-
-// functionBodyContains 判定函数体里是否出现过某段源码文本（用于"预算前提"这类结构性事实）。
-func functionBodyContains(file *ast.File, funcName, needle string) bool {
-	found := false
-	ast.Inspect(file, func(n ast.Node) bool {
-		fd, ok := n.(*ast.FuncDecl)
-		if !ok || fd.Name.Name != funcName || fd.Body == nil {
-			return true
-		}
-		ast.Inspect(fd.Body, func(inner ast.Node) bool {
-			if bl, ok := inner.(*ast.BasicLit); ok && bl.Kind == token.STRING && strings.Contains(bl.Value, needle) {
-				found = true
-			}
-			return true
-		})
-		return false
-	})
-	return found
 }

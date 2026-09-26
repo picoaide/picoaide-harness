@@ -2,6 +2,8 @@ package llmgateway
 
 import (
 	"database/sql"
+	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -169,4 +171,178 @@ func assertGatewayAuditRow(t *testing.T, db *sql.DB, want string, banned ...stri
 	if !strings.Contains(detail, want) {
 		t.Fatalf("审计 detail = %q，want 含 %q（保留 host 才可诊断）", detail, want)
 	}
+}
+
+// ===========================================================================
+// `provider_*` 的三条审计明细也必须写入侧省略凭据（第二十九轮 FIX-44 ①）
+// ===========================================================================
+//
+// 缺陷形态与上面两条**同族**，但**不是 settings 写点**（所以不在
+// `audit_set_setting_inventory_test.go` 的登记表扫描根里 —— 那张表的扫描面是
+// `admin.go` 的 `auditSetSetting*` 调用点）：
+//
+//	POST /api/server/admin/providers {"base_url":"https://llm.example.com/v1?accessToken=…"}
+//	⇒ 200（`validateUpstreamBaseURL` 只拒 userinfo / 云 metadata，**不拒凭据型查询串**）
+//	⇒ provider_create / provider_update / provider_delete 的 detail 原样带上它。
+//
+// 与 DSN/GlitchTip 同样的三条理由决定必须**写入侧**折叠：detail 参与哈希链、写下之后
+// 不可改写、默认保留 180 天，且会进 CSV 导出与库备份 —— 读侧按查看者权限折叠
+// （`RedactAuditDetailForViewer`）覆盖不了导出与备份。
+//
+// 折叠器复用**同一个** `redactURLCredentialForAudit`（唯一实现，第二十七/二十八轮建立），
+// 因此 provider 的 base_url 也只留 `scheme://host/…（已脱敏）`。这是**有意**的取舍：
+// 写侧是"不可变 + 无权限门"的永久面，取值域必须比读侧宽，所以干净的
+// `?api-version=2024-01-01` 也一并折叠 —— 那个**代价**由
+// `TestProviderAuditFoldsCleanQueryStringToo` 钉成判据，而不是留成注释。
+//
+// 为什么不用 `serverauth.auditSensitiveQueryParams` 做"按参数名折叠"（第二十九轮的另一
+// 候选方案）：它是一张 webhook 导向的 30 个名字的白名单，缺云厂商预签名参数族
+// （`X-Amz-Signature`/`X-Amz-Credential`/`X-Amz-Security-Token`/`X-Goog-Signature`/
+// `SharedAccessSignature`…），且其文件头自己认账三种不可覆盖形态；再引入第二种粒度
+// 既少挡一类凭据、又多一份实现。论证见 temp/r21/fix-44/REPORT.md。
+//
+// 判据全部**直读** `SELECT detail FROM audit_logs`（helper `gwfAudit`），不走 /audit 响应。
+// ===========================================================================
+
+const (
+	providerQueryToken = "QUERYSECRETTOKEN"
+	providerQueryURL   = "https://llm.example.com/v1?accessToken=" + providerQueryToken
+)
+
+// assertProviderAuditRow 直读 audit_logs 断言**最后一条**该动作的明细。
+func assertProviderAuditRow(t *testing.T, db *sql.DB, action, want string, banned ...string) string {
+	t.Helper()
+	rows := gwfAudit(t, db, action)
+	if len(rows) == 0 {
+		t.Fatalf("%s 审计缺失", action)
+	}
+	detail := rows[len(rows)-1]
+	for _, secret := range banned {
+		if strings.Contains(detail, secret) {
+			t.Errorf("%s 明细含凭据形态 %q：%q", action, secret, detail)
+		}
+	}
+	if !strings.Contains(detail, want) {
+		t.Fatalf("%s 明细 = %q，want 含 %q（保留 host 才可诊断）", action, detail, want)
+	}
+	return detail
+}
+
+// zzInsertProvider 走真实路由建一个 provider，返回它的 id。
+func zzInsertProvider(t *testing.T, r http.Handler, hdr map[string]string, name, baseURL string) int64 {
+	t.Helper()
+	w, out := adminReq(t, r, "POST", "/api/server/admin/providers",
+		`{"name":"`+name+`","base_url":"`+baseURL+`","api_key":"sk-test","models":["m1"]}`, hdr)
+	if w.Code != 200 {
+		t.Fatalf("创建 provider = %d %s", w.Code, w.Body.String())
+	}
+	provider, ok := out["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("创建响应里没有 provider：%s", w.Body.String())
+	}
+	id, ok := provider["id"].(float64)
+	if !ok {
+		t.Fatalf("创建响应里 provider.id 不是数字：%s", w.Body.String())
+	}
+	return int64(id)
+}
+
+// 凭据型**查询串**是当下可达的（不是存量行）：创建与删除两侧都不得把它写进 detail，
+// 而生效的 base_url 必须原样（折叠只影响审计，不许做成功能回归）。
+func TestProviderAuditOmitsCredentialQueryString(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	id := zzInsertProvider(t, r, hdr, "querycred", providerQueryURL)
+
+	var stored string
+	if err := db.QueryRow(`SELECT base_url FROM gateway_providers WHERE id = ?`, id).Scan(&stored); err != nil {
+		t.Fatalf("读回 base_url：%v", err)
+	}
+	if stored != providerQueryURL {
+		t.Fatalf("库里的 base_url = %q，want 原样 %q（折叠只针对审计明细）", stored, providerQueryURL)
+	}
+	assertProviderAuditRow(t, db, "provider_create",
+		"querycred base_url=https://llm.example.com/…（已脱敏）",
+		providerQueryToken, providerQueryURL, "accessToken")
+
+	// 删除路径的值来自**库** ⇒ 同一条折叠必须覆盖它。
+	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/providers/"+strconv.FormatInt(id, 10), ``, hdr); w.Code != 200 {
+		t.Fatalf("删除 provider = %d %s", w.Code, w.Body.String())
+	}
+	assertProviderAuditRow(t, db, "provider_delete",
+		"querycred base_url=https://llm.example.com/…（已脱敏）",
+		providerQueryToken, providerQueryURL, "accessToken")
+}
+
+// 代价如实钉住（方案取舍的另一半）：**干净**查询串也被折叠 —— 唯一实现是 host-only 粒度，
+// 与同族的两条 settings 写点（`server.base_url`）一致；库里的值仍是完整地址。
+func TestProviderAuditFoldsCleanQueryStringToo(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	const clean = "https://llm.example.com/v1?api-version=2024-01-01"
+	id := zzInsertProvider(t, r, hdr, "cleanquery", clean)
+
+	detail := assertProviderAuditRow(t, db, "provider_create",
+		"cleanquery base_url=https://llm.example.com/…（已脱敏）")
+	for _, banned := range []string{"api-version", "2024-01-01", "/v1"} {
+		if strings.Contains(detail, banned) {
+			t.Errorf("明细含 %q —— 与「host-only 唯一实现」的取舍不一致：%q", banned, detail)
+		}
+	}
+	var stored string
+	if err := db.QueryRow(`SELECT base_url FROM gateway_providers WHERE id = ?`, id).Scan(&stored); err != nil {
+		t.Fatalf("读回 base_url：%v", err)
+	}
+	if stored != clean {
+		t.Fatalf("库里的 base_url = %q，want %q", stored, clean)
+	}
+}
+
+// 更新路径：只换查询串里的凭据也必须**留痕**（变更判定用原值），而两侧取值都折叠。
+func TestProviderUpdateAuditOmitsCredentialQueryStringAndKeepsRotation(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	id := zzInsertProvider(t, r, hdr, "updcred", "https://llm.example.com/v1")
+	path := "/api/server/admin/providers/" + strconv.FormatInt(id, 10)
+	for _, token := range []string{"FIRSTROTATION", "SECONDROTATION"} {
+		body := `{"name":"updcred","base_url":"https://llm.example.com/v1?accessToken=` + token + `","models":["m1"]}`
+		if w, _ := adminReq(t, r, "PUT", path, body, hdr); w.Code != 200 {
+			t.Fatalf("更新到 %s = %d %s", token, w.Code, w.Body.String())
+		}
+	}
+	rows := gwfAudit(t, db, "provider_update")
+	if len(rows) != 2 {
+		t.Fatalf("provider_update 审计行 = %d，want 2（只换查询串里的凭据也必须留痕）：%v", len(rows), rows)
+	}
+	last := rows[len(rows)-1]
+	for _, banned := range []string{"FIRSTROTATION", "SECONDROTATION", "accessToken"} {
+		if strings.Contains(last, banned) {
+			t.Errorf("轮换明细含凭据形态 %q：%q", banned, last)
+		}
+	}
+	if !strings.Contains(last,
+		"base_url:https://llm.example.com/…（已脱敏）→https://llm.example.com/…（已脱敏）") {
+		t.Fatalf("轮换明细 = %q，want 两侧都是折叠形态且都非空", last)
+	}
+}
+
+// 存量行（F10 校验上线前写入的 userinfo 形态）：删除路径的值来自库 ⇒ 同一条折叠覆盖它。
+func TestProviderDeleteAuditOmitsLegacyUserinfoBaseURL(t *testing.T) {
+	r, db, hdr := adminTestSetup(t)
+	defer db.Close()
+
+	const legacy = "https://LEGACYUSER:LEGACYSECRET@legacy.example.com/v1"
+	id := zzInsertProvider(t, r, hdr, "legacyrow", "https://api.example.com/v1")
+	if _, err := db.Exec(`UPDATE gateway_providers SET base_url = ? WHERE id = ?`, legacy, id); err != nil {
+		t.Fatalf("造存量行失败：%v", err)
+	}
+	if w, _ := adminReq(t, r, "DELETE", "/api/server/admin/providers/"+strconv.FormatInt(id, 10), ``, hdr); w.Code != 200 {
+		t.Fatalf("删除 provider = %d %s", w.Code, w.Body.String())
+	}
+	assertProviderAuditRow(t, db, "provider_delete",
+		"legacyrow base_url=https://legacy.example.com/…（已脱敏）",
+		"LEGACYUSER", "LEGACYSECRET", legacy, "@")
 }

@@ -395,7 +395,7 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 `id, created_at, data`——每次 brand_update 保存前一版配置 JSON(保留最近 10 份),供「恢复上一版本」。
 
 ### connectors(0042)
-`id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-org/sales-easy(glitchtip 0045 下架,不再下发)。
+`id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-mcp/sales-easy(glitchtip 0045 下架,不再下发;2026-09-29 第三十轮 FIX-45 ⑤ 校正:此处曾写中性化改名前的旧 id `example-org`，真源是迁移 0042 的 `example-mcp`)。
 
 ### gateway_files(0077 + 0078,网关 Files API 归属台账与容量视图)
 `file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at, size_bytes(0078), reaping_at(0079), reap_gen(0081)`;索引按 `(user_id, created_at DESC)`、`(user_id, expires_at)`、`(expires_at)`、`(expires_at, created_at)`。

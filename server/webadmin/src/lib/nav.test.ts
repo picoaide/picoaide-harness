@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { NAV_ENTRIES, isNavVisible, landingPath, visibleNav, type NavEntry } from './nav'
 import type { MeUser } from './rbac'
@@ -71,7 +71,8 @@ function findRbacTs(): string {
 
 const RBAC_GO_PATH = findRbacGo()
 const RBAC_GO = readFileSync(RBAC_GO_PATH, 'utf8')
-const RBAC_TS = readFileSync(findRbacTs(), 'utf8')
+const RBAC_TS_PATH = findRbacTs()
+const RBAC_TS = readFileSync(RBAC_TS_PATH, 'utf8')
 
 /**
  * Go 权限点常量块：`PermXxx = "value"` ⇒ `{ PermXxx: 'value' }`。
@@ -152,6 +153,52 @@ const GO_ALL_PERMISSIONS = goPermSlice(RBAC_GO, 'AllPermissions', GO_PERM_CONSTA
 const GO_AUDITOR_PERMISSIONS = goPermSlice(RBAC_GO, 'AuditorPermissions', GO_PERM_CONSTANTS)
 const TS_PERM_CONSTANTS = tsPermConstants(RBAC_TS)
 
+/**
+ * **扫描根 = `src/**`（递归）**，不再只是 `lib/rbac.ts`（2026-09-29 第三十轮 FIX-45 ④）。
+ *
+ * 现场（第二十九轮 AC2-03，变异 + 反向对照只动"位置"这一个变量）：
+ *   `PERM_AUDIT_RETENTION_WRITE` 就地声明在 `pages/Audit.tsx:24`，而当时的扫描根只是
+ *   `lib/rbac.ts` ⇒ 对它**零覆盖**。把常量打错一个字符 ⇒ **整套 webadmin
+ *   `50 files / 721 tests` 全绿、EXIT=0**，而保留策略保存按钮对**所有人（含超管）
+ *   永久禁用**（`hasPermission` 拿一个永远匹配不上的字符串问权限）；把同一个常量
+ *   搬进 `rbac.ts` 后，同一个错字 ⇒ 本文件当场红。
+ *
+ * 所以这里有**两条**判据，缺一不可：
+ *   ① 扫描根扩到 `src/**` 的全部 `.ts/.tsx`（下面 `declaredPermConstants` 递归收集）；
+ *   ② **前向守卫**：`PERM_*` 常量**只允许在 `lib/rbac.ts` 里声明** —— 就地再写一份
+ *      （哪怕值与真源一致）也当场红，否则"扫描根之外的第二份手抄"会再次出现。
+ * @param dir - 起始目录（webadmin 的 `src`）。
+ * @returns 全 `src/**` 里 `PERM_*` 声明清单（`{ file, name, value }`）。
+ */
+function declaredPermConstants(dir: string): Array<{ file: string; name: string; value: string }> {
+  const out: Array<{ file: string; name: string; value: string }> = []
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!/\.(?:ts|tsx)$/u.test(entry.name)) continue
+      if (/\.test\.tsx?$/u.test(entry.name)) continue // 测试自己的夹具不算"声明一份权限常量"
+      const text = readFileSync(full, 'utf8')
+      for (const m of text.matchAll(
+        /^[ \t]*(?:export[ \t]+)?const[ \t]+(PERM_[A-Z0-9_]+)[ \t]*(?::[^=]+)?=[ \t]*'([^']+)'/gmu,
+      )) {
+        out.push({ file: full, name: m[1]!, value: m[2]! })
+      }
+    }
+  }
+  walk(dir)
+  if (out.length === 0) {
+    throw new Error(`src/** 里解析不到任何 PERM_* 声明（扫描根坏了？前向守卫必须 fail-loud）`)
+  }
+  return out
+}
+
+const SRC_ROOT = resolve(dirname(RBAC_TS_PATH), '..')
+const DECLARED_PERM_CONSTANTS = declaredPermConstants(SRC_ROOT)
+
 /** nav gate 用到的权限点并集（来自 NAV_ENTRIES 的声明，不是另抄一份清单）。 */
 const NAV_GATED_PERMISSIONS = [...new Set(NAV_ENTRIES.flatMap((n) => n.perms ?? []))]
 
@@ -207,6 +254,38 @@ describe('权限点真源对拍(R4-D-3 · 读 server/internal/serverauth/rbac.go
       .map(([name, value]) => `${name}=${value}`)
       .sort()
     expect(unknown, `前端权限常量在 Go 真源里不存在（用它判定的页面会静默不可达）：${unknown.join(', ')}`).toEqual([])
+  })
+
+  it('PERM_* 只允许在 lib/rbac.ts 声明（扫描根 src/** + 前向守卫，FIX-45 ④）', () => {
+    // ① **同一份真源只有一处**：`src/**` 里任何 `PERM_*` 声明都必须在 `lib/rbac.ts`。
+    //    就地声明一个（即使值与真源一致）⇒ 它落在四向对拍的扫描根之外 ⇒ 必须当场红。
+    const stray = DECLARED_PERM_CONSTANTS
+      .filter((entry) => entry.file !== RBAC_TS_PATH)
+      .map((entry) => `${entry.file.slice(SRC_ROOT.length + 1)}: ${entry.name}`)
+      .sort()
+    expect(
+      stray,
+      `这些 PERM_* 常量声明在 lib/rbac.ts 之外（就地手抄一份 ⇒ 四向对拍覆盖不到它）：${stray.join(', ')}`
+        + `\n  修法：把常量搬进 ${RBAC_TS_PATH} 并从这里 import（不要就地声明）。`,
+    ).toEqual([])
+    // ② **扫描根自证**：`src/**` 收集到的声明值集合必须与 `rbac.ts` 自己的完全一致
+    //    （递归遍历被改窄 / 正则退化 ⇒ 这里立刻红，而不是"零命中全绿"）。
+    const fromScan = [...new Set(DECLARED_PERM_CONSTANTS.map((entry) => entry.value))].sort()
+    const fromRbacTs = [...new Set(TS_PERM_CONSTANTS.values())].sort()
+    expect(fromScan, 'src/** 的 PERM_* 收集结果与 lib/rbac.ts 自己的解析结果不一致（扫描根坏了？）')
+      .toEqual(fromRbacTs)
+  })
+
+  it('src/** 收集到的每个 PERM_* 值都必须存在于 Go 全集（扫描根扩到全 src 后的第二道网）', () => {
+    // 与上一条的区别：上一条钉"哪份文件能声明"，这一条钉"**声明出来的值**对不对"。
+    // 只有 rbac.ts 能声明 ⇒ 这一条与 `TS_PERM_CONSTANTS` 同源；它防的是"把扫描根
+    // 又改回单文件"——那时 `DECLARED_PERM_CONSTANTS` 只剩一份，① 仍会绿，但这里
+    // 的对拍口径写的是"扫描根收集到什么就判什么"，改窄即与 rbac.ts 不一致 ⇒ 红。
+    const unknown = DECLARED_PERM_CONSTANTS
+      .filter((entry) => !GO_ALL_PERMISSIONS.includes(entry.value))
+      .map((entry) => `${entry.name}=${entry.value}`)
+      .sort()
+    expect(unknown, `前端权限常量在 Go 真源里不存在：${unknown.join(', ')}`).toEqual([])
   })
 
   it('Go 权限点必须显式决定管理端入口（新增/删除权限点的前向守卫）', () => {

@@ -169,7 +169,18 @@ describe('审计日志 CSV 导出(公式注入 + BOM)', () => {
 // 筛选(audit:read)保持可用;super_admin 不受影响(角色矩阵)。
 // ---------------------------------------------------------------------------
 const AUDITOR: MeUser = { role: 'auditor', permissions: ['audit:read', 'usage:read', 'user:read'] }
-const SUPER: MeUser = { role: 'super_admin', permissions: undefined }
+const SUPER: MeUser = {
+  // **显式权限集**，不是 `permissions: undefined`（2026-09-29 第三十轮 FIX-45 ④）。
+  //
+  // 修前这里是 `{ role: 'super_admin', permissions: undefined }`，而 `hasPermission` 在
+  // `permissions` 非数组时**无条件返回 true** ⇒ 以它为对手的"超管不受影响"断言
+  // **与权限常量取值无关**：把 `PERM_AUDIT_RETENTION_WRITE` 打错一个字符，整套 webadmin
+  // 用例（50 files / 721 tests）照样全绿，而保存按钮对**所有人（含超管）永久禁用**。
+  // 现在按服务端真源下发一份**含 `audit:retention:write` 的显式集合** —— 常量打错时
+  // 这条用例会当场红。
+  role: 'super_admin',
+  permissions: ['audit:read', 'audit:retention:write', 'usage:read', 'user:read'],
+}
 /** 只有 audit:read（连 usage:read 都没有）的部分权限集：同样是只读视图。 */
 const READONLY: MeUser = { role: 'user', permissions: ['audit:read'] }
 
