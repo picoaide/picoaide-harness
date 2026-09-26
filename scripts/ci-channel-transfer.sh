@@ -13,8 +13,10 @@
 #
 #   s3://$R2_BUCKET/_transfer/<RUN>-<TOKEN>/ch-<index>/…
 #
-# `<TOKEN>` = HMAC(R2_SECRET_ACCESS_KEY, RUN) 的前 16 位 —— 只有持有 R2 凭据的
-# job 能算出这个前缀,因此**无法按 run id 猜出对象地址**(桶本身是公开读的:
+# `<RUN>` = **只有 `GITHUB_RUN_ID`**(不含 `GITHUB_RUN_ATTEMPT`:同一个 run 的所有
+# attempt 必须共用前缀,理由见下面 `RUN` 那一段)。`<TOKEN>` =
+# HMAC(R2_SECRET_ACCESS_KEY, RUN) 的前 16 位 —— 只有持有 R2 凭据的 job 能算出这个
+# 前缀,因此**无法按 run id 猜出对象地址**(桶本身是公开读的:
 # release.picoaide.com 的 R2 自定义域)。`<index>` 是 channels.list 里的行号:
 # 中转路径不含渠道 id,渠道身份全程不出现在任何公开处。
 #
@@ -38,6 +40,7 @@ set -euo pipefail
 MODE="${1:-}"
 shift || true
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIST="channels.list"
 STAGE="client-assets"
 TO="release-artifacts"
@@ -114,7 +117,20 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-RUN="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+# 中转前缀的 run 段:**只有 GITHUB_RUN_ID,不含 GITHUB_RUN_ATTEMPT**(2026-09-26 审计
+# Z3-1 修复)。旧实现是 `${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`,两个后果都是静默的:
+#   ① **孤儿**:失败/重跑的 attempt 推到 `<run>-<attempt>-<token>/` 的客户安装包**永久**
+#      留在公开读的桶里 —— 销毁步(ci.yml 的 Destroy the R2 transfer prefix)只按
+#      **当前** attempt 计算前缀,没有任何代码路径、也没有桶生命周期规则会去删旧
+#      attempt 的前缀(文档承诺的"取回后立即销毁"对这一类不成立);
+#   ② **半套交付**:`gh run rerun --failed` **不重跑已成功的 job**(本仓的标准处置:
+#      2026-09-17 docs-only CI 与 2026-09-23 全量审计都写着靠它过关)⇒ attempt 2 的
+#      前缀里只有**失败那个平台**的产物,已成功平台的在 attempt 1 的前缀里,
+#      而 `pull` 的判据只是"目录非空" ⇒ 三平台缺两个也全绿出厂。
+# 同一个 run 的所有 attempt 共用前缀后,rerun 补推的产物与首次 attempt 的产物落在
+# 一起;`pull` 侧再逐平台判"齐全"(见下面 PLATFORM_TABLE),两条路一起收口。
+# 旧格式(`<run>-<attempt>-<token>`)的**历史残留**由 `clean` 的前缀清扫负责(见下)。
+RUN="${GITHUB_RUN_ID:-local}"
 # 前缀 token:HMAC(R2 密钥, RUN)。桶是公开读的,没有这个 token 就猜不到对象地址。
 TOKEN="$(K="$R2_SECRET_ACCESS_KEY" M="$RUN" node -e '
 const { createHmac } = require("node:crypto")
@@ -124,11 +140,50 @@ printf '::add-mask::%s\n' "$TOKEN"
 BASE="s3://${R2_BUCKET}/_transfer/${RUN}-${TOKEN}"
 aws_cmd() { aws --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" "$@"; }
 
+# 客户端三平台交付面(清单键 / 产物通配 / 人读标签)的**唯一来源**:
+# `packages/host/desktop/scripts/channel-build.ts` 的 `CLIENT_PLATFORM_ASSETS`。
+# 不在 shell 里再抄一份 —— 两处各写一遍就是两个口径,一边少一个平台就会静默少发
+# (`pull` 侧正是靠它判"三平台齐全")。清单键与运行期读清单的
+# `src/desktop-release.ts` 同源,通配与 ci.yml 三个平台 job 的 `--patterns` 同形。
+platform_table() {
+  node -e '
+    import(process.argv[1]).then((mod) => {
+      const assets = mod.CLIENT_PLATFORM_ASSETS
+      if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
+      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)
+    }).catch((error) => {
+      console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
+      process.exit(1)
+    })
+  ' "$REPO_ROOT/packages/host/desktop/scripts/channel-build.ts"
+}
+if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
+  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-build.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
+  echo "::error::中转的「三平台齐全」判据靠它派生,读不到就不能假装产物齐全" >&2
+  exit 1
+fi
+
 aws_checked() {  # 输出先捕获、经脱敏后再打印(公开日志里不得出现品牌)
   if ! brand_run_checked aws_cmd "$@"; then
     echo "::error::R2 中转 ${MODE} 失败(渠道 ${INDEX}/${TOTAL})" >&2
     exit 1
   fi
+}
+
+# 捕获一条外部命令的输出(**脱敏后**返回给调用方),失败也不抛。
+#
+# ci-brand-mask.sh 只有两个包装:成功静默/失败脱敏打印(`brand_run_checked`)与
+# 忽略失败的版本(`brand_run_best_effort`)—— 都不给调用方输出。前缀枚举需要先
+# **读**列表再过滤,所以就地实现这一条,纪律与共享库一致:先捕获、脱敏、再用,
+# 绝不把外部命令的输出直接透传(aws 的报文会回显对象键)。
+brand_run_capture() {
+  local output status
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  printf '%s' "$output" | brand_sanitize
+  return "$status"
 }
 
 INDEX=0
@@ -153,6 +208,27 @@ for id in "${CHANNELS[@]}"; do
       mkdir -p "$TO/$id"
       aws_checked s3 cp --recursive --only-show-errors "$BASE/ch-$INDEX/" "$TO/$id/" 
       [ -n "$(ls -A "$TO/$id" 2>/dev/null)" ] || { echo "::error::渠道 ${INDEX}/${TOTAL} 的中转产物为空(上传失败?)" >&2; exit 1; }
+      # 逐平台判"齐全"(2026-09-26 审计 Z3-1 的第 2 条):只判"目录非空"会让
+      # "少一个平台"以全绿出厂 —— CLIENT-RELEASE.json 少一个 assets 键、
+      # /api/client/v2/updates/manifest 少一个平台、门户少一个下载入口、
+      # /updates/client/<安装包名> 404,而流水线全绿。平台清单与镜像装配同源
+      # (见上面的 PLATFORM_TABLE),缺任一即 fail-loud 并点名平台。
+      # 报错只报平台标签与序号,不回显渠道 id / 文件名(公开日志纪律)。
+      missing_platforms=""
+      while IFS=$'\t' read -r key glob label; do
+        [ -n "$key" ] || continue
+        found=0
+        for candidate in "$TO/$id"/$glob; do
+          [ -f "$candidate" ] && found=1 && break
+        done
+        [ "$found" -eq 1 ] || missing_platforms="${missing_platforms}${missing_platforms:+, }${label}"
+      done <<< "$PLATFORM_TABLE"
+      if [ -n "$missing_platforms" ]; then
+        echo "::error::渠道 ${INDEX}/${TOTAL} 的中转产物缺少平台:${missing_platforms}" >&2
+        echo "::error::客户端交付面是三平台各一份安装包;少平台的包装到客户机上就是「没有对应平台的安装包」," >&2
+        echo "::error::而镜像清单/门户/更新清单只会静默少一个入口。请核对该渠道三平台 job 是否都产出了产物。" >&2
+        exit 1
+      fi
       ;;
     clean)
       # clean 是尽力而为:失败不阻断发布,但输出同样脱敏。
@@ -160,5 +236,36 @@ for id in "${CHANNELS[@]}"; do
       ;;
   esac
 done
+
+# 旧格式前缀的清扫(2026-09-26 审计 Z3-1 的第 3 条)。
+#
+# 2026-09-26 之前本脚本把 `GITHUB_RUN_ATTEMPT` 编进中转前缀(`<run>-<attempt>-<token>`),
+# 而销毁步只按**当前** attempt 计算 BASE ⇒ 早先 attempt 推上去的客户安装包没有任何人删。
+# 那些对象在本 run 内仍然可枚举,这里按前缀列出、一并删掉:
+#   · 只匹配 `_transfer/<run id>-` 开头的**一级前缀**(`-` 保证 run id 不会前缀匹配到别的
+#     run:run `424` 不会命中 `4242-…`);
+#   · 前缀里只有 run id 与 HMAC token,不含渠道身份 —— 即便如此,输出仍走脱敏包装;
+#   · 仍然是尽力而为:clean 的失败不阻断发布(它的语义是"取回后销毁",不是发布判据)。
+#
+# 说明(历史残留,要认账):**本次改动之前**那些已经结束的 run 留下的 attempt 前缀,
+# 没有任何代码路径会再枚举到它们(脚本只清理**本 run** 的前缀)。它们不可猜测、但桶是
+# 公开读的,处置只能靠运维从桶侧按 `_transfer/<run id>-<attempt>-` 形态人工清理
+# (R2 控制台按前缀列 + 删;或在部署机跑一次
+#  `aws s3 ls s3://$R2_BUCKET/_transfer/` 找带第二段数字的旧前缀)。
+legacy_prefix_sweep() {
+  [ "$MODE" = clean ] || return 0
+  local listing prefix
+  # `aws s3 ls <前缀>/` 的输出形如 `                           PRE <name>/`;
+  # 输出先捕获(经脱敏)再过滤 —— 与其余外部命令同一纪律。
+  listing="$(brand_run_capture aws_cmd s3 ls "s3://${R2_BUCKET}/_transfer/" || true)"
+  [ -n "$listing" ] || return 0
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    [ "${prefix#"${RUN}-"}" != "$prefix" ] || continue   # 不是本 run 的前缀
+    [ "$prefix" != "${RUN}-${TOKEN}" ] || continue       # 当前前缀已在循环里删过
+    brand_run_best_effort aws_cmd s3 rm --recursive --only-show-errors "s3://${R2_BUCKET}/_transfer/${prefix}/"
+  done < <(printf '%s\n' "$listing" | awk '$1 == "PRE" { sub(/\/$/, "", $2); print $2 }')
+}
+legacy_prefix_sweep
 
 echo "ci-channel-transfer: ${MODE} 完成(${PRIVATE_COUNT} 个品牌渠道经 R2 中转,渠道名与路径均未进入公开面)"

@@ -30,7 +30,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,6 +48,20 @@ const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
 const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
 const transferScript = join(root, 'scripts', 'ci-channel-transfer.sh')
 const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
+/**
+ * 中转/发布相关用例的**两组凭据**夹具：aws CLI 只认 `AWS_*`，`R2_*` 是端点/桶名/
+ * HMAC 种子（2026-09-11 v2.7.0 真实事故：夹具只给 R2_* 时脚本"本地全绿"，正式 tag 上
+ * 三个平台 job 全部以 aws 的 "Unable to locate credentials" 失败、品牌渠道零交付）。
+ */
+const R2_CREDENTIALS = {
+  R2_ACCOUNT_ID: 'acct',
+  R2_BUCKET: 'bucket',
+  R2_SECRET_ACCESS_KEY: 'secret',
+  AWS_ACCESS_KEY_ID: 'keyid',
+  AWS_SECRET_ACCESS_KEY: 'secret',
+  AWS_DEFAULT_REGION: 'auto',
+}
+
 const failures = []
 const scratch = []
 
@@ -620,6 +634,55 @@ function orderedChannelIds(root) {
 }
 
 /**
+ * 给渠道目录就位**打包管线要求的两件素材**（`logo.svg` + `app-icon.png`）。
+ *
+ * 为什么夹具必须带它们（2026-09-26 审计 Z3-3）：品牌渠道缺 `assets.logo` 或
+ * `app-icon.png` 时，构建期判据（`ci-channels.sh`）与打包期判据（`brand-prepare.mjs`）
+ * 都会 fail-loud —— 不补的话，那些"只想测某个字段"的用例会先被素材规则拦下，
+ * 断言看似通过、测到的东西却与它声称的无关（2026-09-12 的 home_dir 那次踩过同一个坑）。
+ *
+ * 素材内容用仓库里的官方文件：`logo.svg` 必须是能过脚本特征检查的图形 SVG，
+ * `app-icon.png` 必须是 1024×1024 / 16 位 RGBA / 内嵌 ICC 的真 PNG（判据逐条校验形状）。
+ * 渠道用官方几何是**合法**的（几何权威只有一份，见 AGENTS.md），所以这不会掩盖什么。
+ * @param root - 渠道仓根目录。
+ * @param id - 渠道 id。
+ */
+function writeChannelAssetFiles(channelRepoRoot, id) {
+  const dir = join(channelRepoRoot, 'channels', id)
+  mkdirSync(dir, { recursive: true })
+  // 注意：素材从**真实仓库**的 brands/official 复制（夹具的临时仓里没有 brands/），
+  // 而参数名刻意不叫 `root` —— 那会遮蔽模块级的仓库根常量（本文件的 `root`）。
+  copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(dir, 'logo.svg'))
+  copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(dir, 'app-icon.png'))
+}
+
+/**
+ * 就地补齐合成渠道仓里**品牌渠道**的素材必需集（`assets.logo` + 两件素材文件）。
+ *
+ * clone / pin 面的夹具是**真 git 仓**（内容取自提交，不是工作树），逐站手写素材既
+ * 啰嗦又容易漏 —— 漏了就让那组用例先被素材规则拦下（断言看似通过、测到的东西与它
+ * 声称的无关）。公共渠道（official/beta）不动：它们本来就不要求素材。
+ * @param repo - 渠道仓根目录。
+ */
+function completeChannelRepo(repo) {
+  const dir = join(repo, 'channels')
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const id = entry.name
+    if (id === 'official' || id === 'beta') continue
+    const manifest = join(dir, id, 'channel.json')
+    if (!existsSync(manifest)) continue
+    const config = JSON.parse(readFileSync(manifest, 'utf8'))
+    if (config?.assets?.logo === undefined) {
+      config.assets = { ...(config.assets ?? {}), logo: 'logo.svg' }
+      writeFileSync(manifest, JSON.stringify(config))
+    }
+    writeChannelAssetFiles(repo, id)
+  }
+}
+
+/**
  * 往渠道仓根目录补足到下限的"填充渠道"（中性名字、合法配置、scheme 互不相同）。
  *
  * 为什么每个"稳定 tag + 枚举渠道"的夹具都要补（R8-C-7）：真实渠道仓的目录数 ≥ 下限，
@@ -639,6 +702,8 @@ function padChannelRepo(root, min = channelFloor()) {
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      // 品牌渠道必填的 logo 声明（2026-09-26 审计 Z3-3）：缺它构建期中止。
+      assets: { logo: 'logo.svg' },
       desktop: {
         product_name: `${id} AI`,
         slug: `${id}-AI`,
@@ -648,6 +713,7 @@ function padChannelRepo(root, min = channelFloor()) {
         app_origin_scheme: `${id.replaceAll('-', '')}-app`,
       },
     }))
+    writeChannelAssetFiles(root, id)
     added.push(id)
   }
   return added
@@ -676,7 +742,11 @@ function fakeChannelRepo(ids, options = {}) {
       identity: { display_name: `${id} AI`, short_name: id },
       // 私有仓的渠道包里真实存在这样的注解字段:校验必须忽略 `_` 前缀的键,
       // 否则整条发布会被一条注释拦下(2026-09-10 CI 实测)。
-      assets: { _note: '注解:渠道素材说明,不是文件名/路径' },
+      // `logo` 是**品牌渠道必填**的素材声明(2026-09-26 审计 Z3-3):随包内联 logo 与
+      // 打包期派生(托盘位图/随包 favicon)都以它为准,缺了构建期中止。
+      assets: publicChannel
+        ? { _note: '注解:渠道素材说明,不是文件名/路径' }
+        : { _note: '注解:渠道素材说明,不是文件名/路径', logo: 'logo.svg' },
       ...(publicChannel
         ? // beta 必须显式声明**与官方正式版一致**的数据根（2026-09-12 用户定案）：
           // 预发版是正式版的前置验证，登录态/设置/会话要与正式版延续；写成自己的
@@ -695,6 +765,11 @@ function fakeChannelRepo(ids, options = {}) {
             },
           }),
     }))
+  }
+  // 品牌渠道的素材文件(logo.svg + app-icon.png):判据会逐条校验它们的存在与形状。
+  for (const id of ids) {
+    if (id === 'official' || id === 'beta') continue
+    writeChannelAssetFiles(dir, id)
   }
   for (const extra of options.extraDirectories ?? []) {
     mkdirSync(join(dir, 'channels', extra), { recursive: true })
@@ -1339,6 +1414,9 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      // 品牌渠道必填的素材声明(2026-09-26 审计 Z3-3):缺它逐渠道校验会中止构建,
+      // pin/克隆面这组用例就测不到它声称的东西了。
+      ...(publicChannel ? {} : { assets: { logo: 'logo.svg' } }),
       desktop: publicChannel
         ? { app_origin_scheme: 'picoaide-app', ...(id === 'beta' ? { home_dir: '.picoaide-harness' } : {}) }
         : {
@@ -1350,6 +1428,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             app_origin_scheme: `${id.replaceAll('-', '')}-app`,
           },
     }))
+    // 素材文件也要**进这个 git 仓**(clone 路径取的是提交内容,不是工作树)。
+    if (!publicChannel) {
+      copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(repo, 'channels', id, 'logo.svg'))
+      copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(repo, 'channels', id, 'app-icon.png'))
+    }
     fixtureCommit(repo, file, `add ${id}`, '2026-09-01T10:00:00+08:00')
   }
   const firstRevIds = []
@@ -2198,6 +2281,8 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             },
       }))
     }
+    completeChannelRepo(repo)
+    completeChannelRepo(repo)
     fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
     const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
     // 先删一个目录并提交，再 pin 到那个 revision（生产路径的实际形态：pin 指向的树里少一个渠道）
@@ -2249,6 +2334,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             },
       }))
     }
+    completeChannelRepo(moreRepo)
     fixtureCommit(moreRepo, 'channels/official/README.md', 'one more channel', '2026-09-01T10:00:00+08:00')
     const moreRev = fixtureMustGit(moreRepo, ['rev-parse', 'HEAD'])
     const moreRun = runChannels({
@@ -2380,6 +2466,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       }))
     }
     check(orderedChannelIds(repo).length === channelFloor(), '夹具前置：克隆用例的目录数应正好等于下限')
+    completeChannelRepo(repo)
     fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
     const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
     const url = `file://${repo}`
@@ -3112,6 +3199,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: 'example-brand',
       identity: { display_name: 'Example', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
       desktop: {
         slug: 'Example-AI',
         app_id: 'com.example.brand',
@@ -3120,6 +3208,9 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         ...(homeDirValue === undefined ? {} : { home_dir: homeDirValue }),
       },
     }))
+    // 素材给全：这一组用例只测 desktop.home_dir 一条规则（素材缺失会是**另一个**
+    // 失败原因，断言看似通过、测到的东西却与它声称的无关）。
+    writeChannelAssetFiles(root, 'example-brand')
     padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'p.list' })
   }
@@ -3158,6 +3249,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: 'example-brand',
       identity: { display_name: 'Example Brand', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
       desktop: {
         product_name: productName,
         slug: 'Example-AI',
@@ -3167,6 +3259,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         app_origin_scheme: 'examplebrand-app',
       },
     }))
+    writeChannelAssetFiles(root, 'example-brand') // 品牌素材必需集（见 writeChannelAssetFiles）
     padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'pn.list' })
   }
@@ -3228,6 +3321,95 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel(undefined))
   const betaMissingRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
   check(betaMissingRun.status !== 0, 'beta 缺 desktop.home_dir 必须失败（非 official 渠道一律必填）')
+
+  // ---- 品牌渠道的**素材必需集**（2026-09-26 审计 Z3-3）----
+  //
+  // 三个触发形态都实测过（旧代码全部 EXIT=0，且交付物带厂商品牌）：
+  //   ① 渠道目录没有 app-icon.png ⇒ 安装器/Dock/任务栏回落**厂商图标**；
+  //   ② channel.json 没有 assets.logo ⇒ 随包没有 logo_inline，服务端不可达时登录页
+  //      回落**厂商 mark**；
+  //   ③ assets.logo 指向别的文件名 ⇒ 登录页（按声明内联）与托盘位图/随包 favicon
+  //      （打包侧只按 logo.svg 派生）是**两套品牌**。
+  // 判据必须按**渠道来源**分档：official/beta 的品牌就是厂商自己的，缺素材回落官方
+  // 是预期行为（真实渠道仓的 channels/beta 就没有 app-icon.png），必须继续绿。
+  // 注意：局部变量**不叫 `root`** —— 那会遮蔽模块级的仓库根常量（本文件多处踩过；
+  // 素材要从**真实仓库**的 brands/official 复制，临时夹具仓里没有 brands/）。
+  const brandAssetRepo = ({ assets, logoFile, appIcon }) => {
+    const repoRoot = tempDir('ci-channels-assets-')
+    mkdirSync(join(repoRoot, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(repoRoot, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: { app_origin_scheme: 'picoaide-app' },
+    }))
+    const dir = join(repoRoot, 'channels', 'example-brand')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example', short_name: 'Example' },
+      ...(assets === undefined ? {} : { assets }),
+      desktop: {
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        home_dir: '.example-harness',
+        app_origin_scheme: 'examplebrand-app',
+      },
+    }))
+    // 素材**逐件**就位（不能用 writeChannelAssetFiles：那会把两件都写上，
+    // 于是"缺 app-icon.png"这条用例根本构造不出来）。内容取官方几何 —— 渠道用官方
+    // 几何是合法的（AGENTS.md：几何权威只有一份），不会掩盖任何东西。
+    if (logoFile !== undefined) {
+      copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(dir, logoFile))
+    }
+    if (appIcon) {
+      copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(dir, 'app-icon.png'))
+    }
+    padChannelRepo(repoRoot) // 下限补位（同所有稳定 tag 夹具）
+    return repoRoot
+  }
+  const runBrandAssets = options => runChannels({
+    source: brandAssetRepo(options), refName: 'v2.7.0', dest: 'channels', list: 'ba.list',
+  })
+
+  const noAppIcon = runBrandAssets({ assets: { logo: 'logo.svg' }, logoFile: 'logo.svg' })
+  check(noAppIcon.status !== 0, '品牌渠道缺 app-icon.png 时必须失败（否则安装器/Dock/任务栏是厂商图标）')
+  check(noAppIcon.stderr.includes('app-icon.png'), '失败信息应点名 app-icon.png')
+
+  const noLogoDecl = runBrandAssets({ assets: undefined, logoFile: 'logo.svg', appIcon: true })
+  check(noLogoDecl.status !== 0, '品牌渠道没声明 assets.logo 时必须失败（否则包里没有 logo_inline）')
+  check(noLogoDecl.stderr.includes('assets.logo'), '失败信息应点名 assets.logo')
+
+  const otherLogoName = runBrandAssets({ assets: { logo: 'acme-mark.svg' }, logoFile: 'acme-mark.svg', appIcon: true })
+  check(otherLogoName.status !== 0, '品牌渠道的 assets.logo 指向别的文件名时必须失败（同一个包会出现两套品牌）')
+  check(otherLogoName.stderr.includes('assets.logo'), '声明名不一致的失败信息应点名 assets.logo')
+  check(!`${otherLogoName.stdout}${otherLogoName.stderr}`.includes('acme-mark.svg'),
+    '声明名不一致的失败信息不得回显文件名取值（与其余字段同一条纪律）')
+
+  const completeAssets = runBrandAssets({ assets: { logo: 'logo.svg' }, logoFile: 'logo.svg', appIcon: true })
+  check(completeAssets.status === 0,
+    `素材齐全的品牌渠道必须通过,实际退出 ${String(completeAssets.status)}: ${completeAssets.stderr.slice(0, 200)}`)
+
+  // 公共渠道（official/beta）缺这两件素材 ⇒ **必须继续绿**：品牌即厂商，回落官方正当
+  // （真实渠道仓的 channels/beta 就没有 app-icon.png；把这条判成红会让预发布线整条发不出去）。
+  const publicNoAssets = (() => {
+    const root = tempDir('ci-channels-public-assets-')
+    for (const id of ['official', 'beta']) {
+      mkdirSync(join(root, 'channels', id), { recursive: true })
+      writeFileSync(join(root, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: { app_origin_scheme: 'picoaide-app', ...(id === 'beta' ? { home_dir: '.picoaide-harness' } : {}) },
+      }))
+    }
+    padChannelRepo(root)
+    return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'ba2.list' })
+  })()
+  check(publicNoAssets.status === 0,
+    `official/beta 缺这些素材必须继续通过（回落官方是预期行为），实际退出 ${String(publicNoAssets.status)}: ${publicNoAssets.stderr.slice(0, 300)}`)
 }
 
 // ---- 3b. desktop.app_origin_scheme:必填 / 形状 / 保留字 / 跨渠道唯一 ----
@@ -3262,8 +3444,12 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         schema: 1,
         channel_id: id,
         identity: { display_name: `${id} AI`, short_name: id },
+        // 品牌渠道必填的 logo 声明 + 素材文件（2026-09-26 审计 Z3-3）：不给的话
+        // 这一组"只想测 app_origin_scheme"的用例会先被素材规则拦下。
+        ...(publicChannel ? {} : { assets: { logo: 'logo.svg' } }),
         desktop: { ...base, ...desktop },
       }))
+      if (!publicChannel) writeChannelAssetFiles(dir, id)
     }
     padChannelRepo(dir) // 下限补位（同上）：负例只测被测的那条规则
     return dir
@@ -4799,6 +4985,19 @@ case "$cmd" in
     record "rm $prefix"
     rm -rf "$store/$key"
     ;;
+  "s3 ls")
+    # 前缀枚举形态:真实 aws 对 <前缀>/ 打印一行 PRE <名字>/。
+    # clean 的旧格式清扫靠它找 <run>-<attempt>-<token> 形态的残留(2026-09-26 审计 Z3-1)。
+    # 前缀以斜杠结尾 = 列它的子前缀:保留尾斜杠再拼通配,否则通配会匹配到 _transfer 自己。
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    record "ls $prefix"
+    case "$key" in
+      */) for entry in "$store/\${key}"*/; do
+            [ -d "$entry" ] || continue
+            printf '                           PRE %s\\n' "$(basename "$entry")"
+          done ;;
+    esac
+    ;;
 esac
 `)
   execFileSync('chmod', ['+x', fakeAws])
@@ -4815,25 +5014,26 @@ esac
       ...env,
     },
   })
-  // 两组凭据都要:aws CLI 只认 AWS_*(R2_* 是端点/桶名/HMAC 种子)。
-  // 2026-09-11 v2.7.0 真实事故:夹具只给 R2_* 时脚本"本地全绿",正式 tag 上
-  // 三个平台 job 全部以 aws 的 "Unable to locate credentials" 失败、品牌渠道零交付。
-  const r2 = {
-    R2_ACCOUNT_ID: 'acct',
-    R2_BUCKET: 'bucket',
-    R2_SECRET_ACCESS_KEY: 'secret',
-    AWS_ACCESS_KEY_ID: 'keyid',
-    AWS_SECRET_ACCESS_KEY: 'secret',
-    AWS_DEFAULT_REGION: 'auto',
-  }
 
   // 造三平台产物:官方/beta 留 artifact,品牌渠道必须被中转走并从暂存目录删除。
+  //
+  // **三平台**而不是一个文件(2026-09-26 审计 Z3-1):`pull` 侧现在逐平台判"齐全",
+  // 只放一个平台会让合法的 pull 变红 —— 夹具必须与判据一体。三个文件名由渠道包的
+  // slug 派生(与真实安装包同形:`<slug>-<ver>-mac.dmg` / `-x64-Setup.exe` / `-x86_64.AppImage`)。
+  const brandArtifacts = [
+    brandArtifact,                                  // win-x64(Setup.exe)
+    'Example-Brand-2.7.0-mac.dmg',                   // mac-universal
+    'Example-Brand-2.7.0-x86_64.AppImage',           // linux-x64
+  ]
   for (const id of ['official', 'beta', 'example-brand']) {
     mkdirSync(join(stage, id), { recursive: true })
-    // 品牌渠道的产物名由 slug 派生(与真实安装包一致:<slug>-2.7.0-x64-Setup.exe)。
-    writeFileSync(join(stage, id, id === 'example-brand' ? brandArtifact : `App-${id}.AppImage`), 'x')
+    if (id !== 'example-brand') {
+      writeFileSync(join(stage, id, `App-${id}.AppImage`), 'x')
+      continue
+    }
+    for (const name of brandArtifacts) writeFileSync(join(stage, id, name), 'x')
   }
-  const pushed = transfer('push', ['--stage', stage], r2)
+  const pushed = transfer('push', ['--stage', stage], R2_CREDENTIALS)
   check(pushed.status === 0, `品牌渠道中转 push 应成功,实际退出 ${String(pushed.status)}`)
   check(existsSync(join(stage, 'official')), '官方产物必须留在公开 artifact 暂存目录里')
   check(existsSync(join(stage, 'beta')), 'beta 产物必须留在公开 artifact 暂存目录里')
@@ -4849,8 +5049,12 @@ esac
   check(!transferLog.includes('/.'), '中转命令里不得出现 prefix/. 形态(真实 CLI 匹配不到对象)')
   const keys = readdirSync(join(store, '_transfer')).sort()
   check(keys.length === 1 && !keys[0].includes('example-brand'), '中转前缀不得含渠道 id')
-  check(keys[0].startsWith('4242-1-'), '中转前缀应按 run 派生')
-  const token = keys[0].replace(/^4242-1-/, '')
+  // 前缀 = `<run id>-<token>`，**不含 attempt**（2026-09-26 审计 Z3-1）：attempt 编进
+  // 前缀会让早先 attempt 的对象没人删（公开读桶里的永久残留），并让 `gh run rerun
+  // --failed` 之后的前缀里只有失败平台的产物（半套交付）。下面的用例直接跑两个
+  // attempt 比对前缀，这条只钉形态。
+  check(/^4242-[0-9a-f]{16}$/u.test(keys[0]), `中转前缀应是 <run id>-<token> 形态(不含 attempt)，实际 ${keys[0]}`)
+  const token = keys[0].replace(/^4242-/, '')
   check(token.length === 16 && /^[0-9a-f]{16}$/u.test(token), '前缀 token 应是 HMAC 派生(不可猜测)')
   check(
     existsSync(join(store, '_transfer', keys[0], 'ch-3', brandArtifact)),
@@ -4889,15 +5093,18 @@ esac
   check(publicRun.status === 0, '只有官方/beta 时不应要求 R2 凭据')
 
   // pull:release job 取回自己的品牌产物
-  const pulled = transfer('pull', ['--to', out], r2)
+  const pulled = transfer('pull', ['--to', out], R2_CREDENTIALS)
   check(pulled.status === 0, `品牌渠道中转 pull 应成功,实际退出 ${String(pulled.status)}`)
   check(existsSync(join(out, 'example-brand', brandArtifact)), 'pull 应把品牌产物还原到 release-artifacts/<channel>/')
+  for (const name of brandArtifacts) {
+    check(existsSync(join(out, 'example-brand', name)), `pull 应还原三平台产物之一:${name}`)
+  }
 
   // 失败输出脱敏(2026-09-11 v2.7.0 真实泄漏):aws 的失败信息会回显对象键,
   // 而文件名由 slug 派生 —— 只掩渠道 id 掩不到它,于是客户品牌进了公开日志。
   mkdirSync(join(stage, 'example-brand'), { recursive: true })
   writeFileSync(join(stage, 'example-brand', brandArtifact), 'x')
-  const failedPush = transfer('push', ['--stage', stage], { ...r2, FAKE_AWS_FAIL: '1' })
+  const failedPush = transfer('push', ['--stage', stage], { ...R2_CREDENTIALS, FAKE_AWS_FAIL: '1' })
   const failedRaw = `${failedPush.stdout ?? ''}${failedPush.stderr ?? ''}`
   // 只看**公开日志**部分:剔掉 ::add-mask:: 指令行(GitHub 不展示其取值,
   // 与上面"公开日志里不得出现渠道名"的既有口径一致)。
@@ -4913,9 +5120,219 @@ esac
   check(failedRaw.includes('add-mask::Example-Brand'), 'slug 也必须登记进 GitHub 掩码')
 
   // clean:取回后立即销毁中转对象
-  const cleaned = transfer('clean', [], r2)
+  const cleaned = transfer('clean', [], R2_CREDENTIALS)
   check(cleaned.status === 0, 'clean 应成功')
   check(!existsSync(join(store, '_transfer', keys[0], 'ch-3')), 'clean 必须删掉中转对象')
+}
+
+// ---- 7a. 同一个 run 的两次 attempt 必须共用前缀 + pull 的「三平台齐全」判据 ----
+//
+// 2026-09-26 审计 Z3-1 的两个后果都是静默的:
+//   ① 前缀含 attempt ⇒ 早先 attempt 的客户安装包**永久**留在公开读的桶里
+//      (销毁步只按**当前** attempt 计算前缀,没有任何代码路径或桶生命周期规则会删它);
+//   ② `gh run rerun --failed` **不重跑已成功的 job**(本仓的标准处置)⇒ attempt 2 的
+//      前缀里只有失败平台的产物,而 `pull` 的判据只是"目录非空" ⇒ 三平台缺两个也全绿。
+// 这一节把两件事都钉成红灯:attempt 1/2 的前缀必须**逐字相同**;pull 必须逐平台判齐。
+{
+  const attemptWork = tempDir('ci-transfer-attempt-')
+  const attemptStage = join(attemptWork, 'client-assets')
+  const attemptStore = join(attemptWork, 'store')
+  const attemptOut = join(attemptWork, 'release-artifacts')
+  const attemptList = join(attemptWork, 'channels.list')
+  writeFileSync(attemptList, 'official\nexample-brand\n')
+  mkdirSync(join(attemptWork, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(attemptWork, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+  // 假 aws:`s3 ls` 支持前缀枚举(clean 的旧格式清扫要用),其余与上一节同形。
+  const attemptAws = join(attemptWork, 'aws')
+  writeFileSync(attemptAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${attemptStore}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    if [[ "$src" == s3://* ]]; then
+      key="\${src#s3://*/}"; key="\${key%/}"
+      mkdir -p "$dst"; [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
+    else
+      key="\${dst#s3://*/}"; key="\${key%/}"
+      mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    fi
+    ;;
+  "s3 rm")
+    prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}"
+    ;;
+  "s3 ls")
+    # 前缀以斜杠结尾 = 列它的子前缀(真实 aws 语义):保留尾斜杠再拼通配,
+    # 否则通配会匹配到 _transfer 自己而不是它的孩子(2026-09-26 实现时踩过)。
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    case "$key" in
+      */) for entry in "$store/\${key}"*/; do
+            [ -d "$entry" ] || continue
+            printf '                           PRE %s\\n' "$(basename "$entry")"
+          done ;;
+    esac
+    ;;
+esac
+`)
+  execFileSync('chmod', ['+x', attemptAws])
+  const brandFiles = [
+    'Example-Brand-2.7.0-mac.dmg',
+    'Example-Brand-2.7.0-x64-Setup.exe',
+    'Example-Brand-2.7.0-x86_64.AppImage',
+  ]
+  const stageFiles = names => {
+    mkdirSync(join(attemptStage, 'example-brand'), { recursive: true })
+    for (const name of names) writeFileSync(join(attemptStage, 'example-brand', name), 'x')
+  }
+  const runTransfer = (mode, attempt, extra = []) => spawnSync('bash', [
+    transferScript, mode, '--list', attemptList, ...extra,
+  ], {
+    cwd: attemptWork,
+    encoding: 'utf8',
+    env: {
+      PATH: `${attemptWork}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ID: '777',
+      GITHUB_RUN_ATTEMPT: attempt,
+      ...R2_CREDENTIALS,
+    },
+  })
+  const transferPrefixes = () => existsSync(join(attemptStore, '_transfer'))
+    ? readdirSync(join(attemptStore, '_transfer')).sort()
+    : []
+
+  // attempt 1:三个平台都产出(正常成功的一次跑)。
+  stageFiles(brandFiles)
+  const firstAttempt = runTransfer('push', '1')
+  check(firstAttempt.status === 0, `attempt 1 的 push 应成功,实际退出 ${String(firstAttempt.status)}`)
+  const prefixesAfterFirst = transferPrefixes()
+  check(prefixesAfterFirst.length === 1,
+    `attempt 1 后应恰好有一个中转前缀,实际 ${JSON.stringify(prefixesAfterFirst)}`)
+  check(/^777-[0-9a-f]{16}$/u.test(prefixesAfterFirst[0] ?? ''),
+    `中转前缀不得含 attempt(应是 <run id>-<token>),实际 ${prefixesAfterFirst[0]}`)
+
+  // attempt 2:只有失败的那个平台重跑(`gh run rerun --failed` 的真实形态)——
+  // 它推的产物必须落在**同一个**前缀里,于是 attempt 1 的另外两个平台仍然可见。
+  stageFiles(['Example-Brand-2.7.0-mac.dmg'])
+  const secondAttempt = runTransfer('push', '2')
+  check(secondAttempt.status === 0, `attempt 2 的 push 应成功,实际退出 ${String(secondAttempt.status)}`)
+  const prefixesAfterSecond = transferPrefixes()
+  check(prefixesAfterSecond.length === 1,
+    `同一 run 的两次 attempt 必须共用前缀(否则 attempt 1 的产物永久留在公开读的桶里),实际 ${JSON.stringify(prefixesAfterSecond)}`)
+  check(prefixesAfterSecond[0] === prefixesAfterFirst[0], '两次 attempt 的中转前缀必须逐字相同')
+
+  // attempt 2 之后 pull:三个平台都必须取回(旧实现只有 attempt 2 推的那一个)。
+  const attemptPulled = runTransfer('pull', '2', ['--to', attemptOut])
+  check(attemptPulled.status === 0, `attempt 2 的 pull 应成功,实际退出 ${String(attemptPulled.status)}`)
+  for (const name of brandFiles) {
+    check(existsSync(join(attemptOut, 'example-brand', name)),
+      `attempt 2 的 pull 必须取回 attempt 1 推上去的产物:${name}(这正是 rerun --failed 的形态)`)
+  }
+
+  // ---- 7b. clean 必须清掉**旧格式**(`<run>-<attempt>-<token>`)的本 run 前缀 ----
+  //
+  // 2026-09-26 之前前缀含 attempt ⇒ 早先 attempt 的对象没有人删。新代码只认
+  // `<run>-<token>`,所以 clean 还要按 run id 前缀把旧格式残留一并删掉;同时
+  // **不得**碰别的 run 的前缀(前缀匹配是这条判据最容易错的地方:run `777` 不能
+  // 命中 `7770-...`)。
+  const legacyPrefix = join(attemptStore, '_transfer', '777-1-deadbeefdeadbeef')
+  const otherRunPrefix = join(attemptStore, '_transfer', '7770-1-deadbeefdeadbeef')
+  mkdirSync(join(legacyPrefix, 'ch-3'), { recursive: true })
+  writeFileSync(join(legacyPrefix, 'ch-3', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  mkdirSync(join(otherRunPrefix, 'ch-3'), { recursive: true })
+  writeFileSync(join(otherRunPrefix, 'ch-3', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  const swept = runTransfer('clean', '1')
+  check(swept.status === 0, `clean 应成功(尽力而为),实际退出 ${String(swept.status)}`)
+  check(!existsSync(legacyPrefix), 'clean 必须删掉本 run 的**旧格式**(<run>-<attempt>-<token>)残留前缀')
+  check(existsSync(otherRunPrefix), 'clean 不得碰别的 run 的前缀(run id 前缀必须按 `<run>-` 锚定)')
+  // 当前前缀下的对象也必须被删掉（假 aws 把 S3 前缀物化成目录，所以断言的是
+  // `<前缀>/ch-<index>/` 这棵子树 —— 真实 S3 里"前缀"本身不是对象，删完对象即空）。
+  check(!existsSync(join(attemptStore, '_transfer', prefixesAfterFirst[0] ?? 'missing', 'ch-3')),
+    'clean 仍必须删掉本 run 的当前前缀下的中转对象')
+}
+
+// ---- 7c. pull 的「三平台齐全」判据:少一个平台必须红且点名(独立夹具) ----
+//
+// 只判"目录非空"的形态会让"少平台"以全绿出厂 —— 清单少一个 assets 键、门户少一个
+// 下载入口、`/updates/client/<安装包名>` 404,而流水线全绿(2026-09-26 审计 Z3-1/Z3-2)。
+{
+  const work = tempDir('ci-transfer-partial-')
+  const stage = join(work, 'client-assets')
+  const store = join(work, 'store')
+  const list = join(work, 'channels.list')
+  writeFileSync(list, 'example-brand\n')
+  mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${store}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    if [[ "$src" == s3://* ]]; then
+      key="\${src#s3://*/}"; key="\${key%/}"
+      mkdir -p "$dst"; [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
+    else
+      key="\${dst#s3://*/}"; key="\${key%/}"
+      mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    fi
+    ;;
+  "s3 rm") prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}" ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+  // 只有 mac 的 dmg —— 另外两个平台的 job 没有产出(或产物没进中转前缀)。
+  mkdirSync(join(stage, 'example-brand'), { recursive: true })
+  writeFileSync(join(stage, 'example-brand', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  const env = {
+    PATH: `${work}:${process.env.PATH ?? ''}`,
+    HOME: process.env.HOME ?? '',
+    GITHUB_RUN_ID: '778',
+    GITHUB_RUN_ATTEMPT: '1',
+    ...R2_CREDENTIALS,
+  }
+  const pushed = spawnSync('bash', [transferScript, 'push', '--list', list, '--stage', stage], {
+    cwd: work, encoding: 'utf8', env,
+  })
+  check(pushed.status === 0, '只推一个平台时 push 本身应成功(各平台 job 只推自己的产物)')
+  const partialPull = spawnSync('bash', [
+    transferScript, 'pull', '--list', list, '--to', join(work, 'release-artifacts'),
+  ], { cwd: work, encoding: 'utf8', env })
+  check(partialPull.status !== 0, '中转产物少一个平台时 pull 必须失败(不得只判「目录非空」)')
+  check((partialPull.stderr ?? '').includes('缺少平台'), '失败信息应说明「缺少平台」')
+  check((partialPull.stderr ?? '').includes('Windows') && (partialPull.stderr ?? '').includes('Linux'),
+    `失败信息应点名缺的平台(已有 macOS,缺 Windows/Linux),实际:${(partialPull.stderr ?? '').trim().slice(0, 200)}`)
+  check(!(partialPull.stderr ?? '').includes('macOS('),
+    '失败信息不得把已取回的平台也算成缺失(点名必须精确)')
 }
 
 // ---- 8. 敏感路径不得入库(忽略规则是唯一防线,补一条硬守卫) ----
@@ -4957,9 +5374,11 @@ esac
     writeFileSync(join(work, 'channels', id, 'channel.json'), JSON.stringify({
       schema: 1, channel_id: id, identity: { display_name: `${id} AI`, short_name: id },
     }))
-    // 三平台安装包:Linux 侧刻意同时给 AppImage 与 deb(镜像只该带走前者)
+    // 三平台安装包:Linux 侧刻意同时给 AppImage 与 deb(镜像只该带走前者)。
+    // Windows 用真实产物名形态(`<slug>-<ver>-x64-Setup.exe`):清单的 win 通配与
+    // ci.yml 打包 job 的 `--patterns '*Setup*.exe'` 同源(2026-09-26 审计 Z3-2)。
     mkdirSync(join(artifacts, id), { recursive: true })
-    for (const name of ['App.AppImage', 'App.deb', 'App.dmg', 'App.exe']) {
+    for (const name of ['App.AppImage', 'App.deb', 'App.dmg', 'App-Setup.exe']) {
       writeFileSync(join(artifacts, id, name), 'x')
     }
   }
@@ -5001,10 +5420,19 @@ exit 0
   const clientDir = join(work, 'client-assets', 'client')
   check(existsSync(join(clientDir, 'App.AppImage')), '镜像应带 Linux AppImage')
   check(!existsSync(join(clientDir, 'App.deb')), 'Linux deb 不得进镜像(已定案:镜像只放 AppImage)')
-  const manifest = JSON.parse(readFileSync(join(work, 'client-assets', 'CLIENT-RELEASE.json'), 'utf8'))
-  check(manifest.client.assets['linux-x64'].file.endsWith('.AppImage'), '清单 linux-x64 必须指向 AppImage')
-  check(!JSON.stringify(manifest).includes('.deb'), '清单里不得出现 deb')
-  check(manifest.channel_id === 'beta' || manifest.channel_id === 'official', '清单须声明本渠道')
+  // 装配失败时这个文件是**半成品**（重定向先建文件、平台判据中途 exit）⇒ 解析要能容错，
+  // 否则一条断言失败会被一个 JSON 异常掩盖（诊断信息全丢）。
+  const manifestPath = join(work, 'client-assets', 'CLIENT-RELEASE.json')
+  const manifestRaw = existsSync(manifestPath) ? readFileSync(manifestPath, 'utf8') : ''
+  let manifest = null
+  try { manifest = JSON.parse(manifestRaw) } catch { manifest = null }
+  check(manifest !== null, `镜像清单必须是合法 JSON（装配失败时它是半成品）:${manifestRaw.slice(0, 160)}`)
+  const clientAssets = manifest?.client?.assets ?? {}
+  check(Object.keys(clientAssets).length === 3,
+    `清单必须逐平台齐全（mac-universal/win-x64/linux-x64），实际 ${JSON.stringify(Object.keys(clientAssets))}`)
+  check(clientAssets['linux-x64']?.file?.endsWith('.AppImage') === true, '清单 linux-x64 必须指向 AppImage')
+  check(!JSON.stringify(manifest ?? {}).includes('.deb'), '清单里不得出现 deb')
+  check(manifest?.channel_id === 'beta' || manifest?.channel_id === 'official', '清单须声明本渠道')
 
   const dockerLog = readFileSync(log, 'utf8')
   check(
@@ -5031,6 +5459,86 @@ exit 0
     )
   }
   check(existsSync(join(out, 'official', 'picoaide-server-9.9.9-amd64.zip')), '产物名应中性(不含渠道 id)')
+
+  // ---- 9a. 逐平台必需:少一个平台的产物必须 fail-loud 并点名（2026-09-26 审计 Z3-2）----
+  //
+  // 旧实现是 `[ -f … ] || return 0`：缺平台时清单**只是少一个键**，构建全绿 ——
+  // 更新清单少一个平台、门户少一个下载入口、`/updates/client/<安装包名>` 404。
+  // 判据的最小反例就是"少一个平台"，所以这里用独立夹具跑三个变体（缺 mac / 缺 win /
+  // 缺 linux），每个都必须非零退出且点名缺的那个平台标签。
+  {
+    const partialWork = tempDir('ci-images-partial-')
+    const partialList = join(partialWork, 'channels.list')
+    const partialArtifacts = join(partialWork, 'release-artifacts')
+    writeFileSync(partialList, 'official\n')
+    mkdirSync(join(partialWork, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(partialWork, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1, channel_id: 'official', identity: { display_name: 'Official', short_name: 'Official' },
+    }))
+    const fakeDocker = join(partialWork, 'docker')
+    writeFileSync(fakeDocker, '#!/usr/bin/env bash\nexit 0\n')
+    execFileSync('chmod', ['+x', fakeDocker])
+    const all = { 'mac-universal': 'App.dmg', 'win-x64': 'App-Setup.exe', 'linux-x64': 'App.AppImage' }
+    const runPartial = omit => {
+      rmSync(join(partialWork, 'client-assets'), { recursive: true, force: true })
+      rmSync(partialArtifacts, { recursive: true, force: true })
+      mkdirSync(join(partialArtifacts, 'official'), { recursive: true })
+      for (const [key, name] of Object.entries(all)) {
+        if (key === omit) continue
+        writeFileSync(join(partialArtifacts, 'official', name), 'x')
+      }
+      return spawnSync('bash', [
+        imagesScript, '--list', partialList, '--artifacts', partialArtifacts, '--out', join(partialWork, 'release-bundle'),
+      ], {
+        cwd: partialWork,
+        encoding: 'utf8',
+        env: {
+          PATH: `${partialWork}:${process.env.PATH ?? ''}`,
+          HOME: process.env.HOME ?? '',
+          CI_IMAGE_BUILD_ROOT: partialWork,
+          VERSION: 'v9.9.9',
+        },
+      })
+    }
+    for (const [key, label] of [['mac-universal', 'macOS'], ['win-x64', 'Windows'], ['linux-x64', 'Linux']]) {
+      const partial = runPartial(key)
+      check(partial.status !== 0, `缺 ${key} 的产物时镜像装配必须失败(旧实现只生成少一个键的清单并全绿)`)
+      check((partial.stderr ?? '').includes('缺少') && (partial.stderr ?? '').includes(label),
+        `缺 ${key} 的失败信息应点名平台 ${label},实际:${(partial.stderr ?? '').trim().slice(0, 200)}`)
+      // 半成品清单不得留在工作区被下游当成"已生成"。
+      const manifest = join(partialWork, 'client-assets', 'CLIENT-RELEASE.json')
+      if (existsSync(manifest)) {
+        let parsed = null
+        try { parsed = JSON.parse(readFileSync(manifest, 'utf8')) } catch { parsed = null }
+        check(parsed === null, `缺平台时不得产出**合法**的 CLIENT-RELEASE.json(它是半成品被下游当真的形态)`)
+      }
+    }
+  }
+
+  // ---- 9b. 三平台清单只有**一处真源**：与 ci.yml 三个打包 job 的 --patterns 对拍 ----
+  //
+  // 键名/通配抄成两份就会漂移：镜像清单与 R2 中转的"齐全"判据都从
+  // `CLIENT_PLATFORM_ASSETS` 派生，而**产物实际由 ci.yml 的三个 job 归集** ——
+  // 两边的通配必须逐字一致（2026-09-26 审计 Z3-2 的"与客户端交付面同源"）。
+  {
+    const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+    const patterns = [...workflowText.matchAll(/--patterns\s+'([^']+)'/gu)].map(match => match[1].trim())
+    check(patterns.length === 3, `ci.yml 应有三处 --patterns(三个平台 job),实际 ${patterns.length}: ${JSON.stringify(patterns)}`)
+    const platformAssets = await import(join(root, 'packages', 'host', 'desktop', 'scripts', 'channel-build.ts'))
+    const globs = platformAssets.CLIENT_PLATFORM_ASSETS.map(asset => asset.glob)
+    const keys = platformAssets.CLIENT_PLATFORM_ASSETS.map(asset => asset.key)
+    check(JSON.stringify([...patterns].sort()) === JSON.stringify([...globs].sort()),
+      `镜像清单的平台通配必须与 ci.yml 三个 job 的 --patterns 完全一致(各写一份必然漂移):`
+        + ` ci.yml=${JSON.stringify(patterns)} CLIENT_PLATFORM_ASSETS=${JSON.stringify(globs)}`)
+    check(JSON.stringify(keys) === JSON.stringify(['mac-universal', 'win-x64', 'linux-x64']),
+      `清单键必须与客户端读清单的契约(src/desktop-release.ts 的 PLATFORM_ASSET_KEYS)一致,实际 ${JSON.stringify(keys)}`)
+    // 客户端交付面的键名真源在 src/desktop-release.ts：读源码对拍（不是再抄一份字面量）。
+    const releaseSource = readFileSync(join(root, 'packages', 'host', 'desktop', 'src', 'desktop-release.ts'), 'utf8')
+    for (const key of keys) {
+      check(releaseSource.includes("'" + key + "'"),
+        `清单键 ${key} 必须出现在 src/desktop-release.ts(客户端读清单的唯一契约)`)
+    }
+  }
 }
 
 // ---- 10. 保留策略:本次刚发布的版本**永不**参与淘汰(2026-09-12 审计 P1-2) ----
@@ -5260,6 +5768,47 @@ exit 0
       header.includes(`--build-context ${name}=`),
       `server/Dockerfile 头部的构建示例必须带 --build-context ${name}=…(照抄示例的人会直接踩坑)`,
     )
+  }
+}
+
+// ---- 15. 文档承诺的触发方式必须与 ci.yml 的 `on:` 逐字对拍（2026-09-26 审计 Z3-4）----
+//
+// 2026-09-26 审计的 ④：`site/src/content/docs/{,en/}deployment/channels.md` 把
+// `workflow_dispatch` 写成"预发 tag 只出 beta 时提前出品牌渠道包"的**唯一**途径，
+// 而 ci.yml 的 `on:` 只有 `pull_request` / `push` —— 承诺了一个不存在的入口（读者按它
+// 操作会得到"工作流菜单里没有这一项"）。定案是**改承诺**（零风险且立刻可验证），
+// 这条守卫把"文档又漂回去"变成红灯。
+{
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  // YAML 1.1 把 `on` 读成布尔真值，1.2（本仓用的 `yaml` 包）读成字符串 —— 两种都认，
+  // 解析不出任何触发键即 fail-loud（不许静默变成"文档没有承诺"）。
+  const triggerTable = workflow?.on ?? workflow?.true
+  const triggers = triggerTable !== null && typeof triggerTable === 'object' ? Object.keys(triggerTable) : []
+  check(triggers.length > 0, `ci.yml 的 on: 必须能解析出触发键（实际 ${JSON.stringify(triggers)}）`)
+  const docFiles = [
+    'site/src/content/docs/deployment/channels.md',
+    'site/src/content/docs/en/deployment/channels.md',
+  ]
+  /** 去掉 markdown 强调符后的逐行文本（判定"否定"不能被 `**`/反引号打断）。 */
+  const plainLines = text => text.split('\n').map(line => line.replace(/[*`]/gu, ''))
+  for (const file of docFiles) {
+    const text = readFileSync(join(root, file), 'utf8')
+    const plain = plainLines(text)
+    if (!triggers.includes('workflow_dispatch')) {
+      // ① 文档不得**承诺**流水线没有的入口（当前 ci.yml 只有 pull_request / push）。
+      //    判据按**行**：提到 workflow_dispatch 的每一行都必须同时是否定表述
+      //    （"没有 …" / "no …"）—— 旧缺陷文本（"要提前出包只能用 workflow_dispatch"）
+      //    正是"提到但没有否定"的形态。
+      const promises = plain.filter(line => line.includes('workflow_dispatch')
+        && !/(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u.test(line))
+      check(promises.length === 0,
+        `${file} 把 workflow_dispatch 写成了可用入口，而 ci.yml 的 on: 只有 ${JSON.stringify(triggers)}`
+        + ` —— 文档不得承诺不存在的发布入口。命中行：${JSON.stringify(promises.slice(0, 2))}`)
+      // ② 反向：既然没有手工入口，两条语言版本都必须**如实写明**这一点（防止只删掉
+      //    承诺、不留事实，读者仍以为可以手工触发）。
+      check(plain.some(line => /(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u.test(line)),
+        `${file} 必须如实说明发布工作流没有 workflow_dispatch（docs ↔ ci.yml 的 on: 逐字对拍）`)
+    }
   }
 }
 

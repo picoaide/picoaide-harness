@@ -55,12 +55,31 @@ description: PicoAide Harness 的渠道机制：官方 / 预发布 / 企业定�
 
 | 触发 | 构建的渠道 | 说明 |
 |---|---|---|
-| 预发 tag（`vX.Y.Z-beta.N` / `-rc` / `-alpha`，含连字符） | **只构建 `beta`** | 品牌渠道的客户端**不会**在预发 tag 产出；要提前出包只能用 `workflow_dispatch` |
+| 预发 tag（`vX.Y.Z-beta.N` / `-rc` / `-alpha`，含连字符） | **只构建 `beta`** | 品牌渠道的客户端**不会**在预发 tag 产出 —— 要出品牌渠道包**只能等正式 tag**（工作流只有 `pull_request` 与 `push` 两个触发，**没有** `workflow_dispatch` 这种手工触发入口） |
 | 正式 tag（纯 `vX.Y.Z`） | **全部渠道**（official + beta + 各品牌渠道） | 品牌渠道的镜像与安装包只出现在该渠道自己的更新目录 |
 | 非 tag（PR / 分支推送） | 只构建 `official` | 用于门禁与冒烟，不作为交付物 |
 
 ⇒ **给品牌渠道加/改字段（如 `app_origin_scheme`）时**：必须在渠道仓改好并 **push**，然后等
 **正式 tag**（预发 tag 不会为品牌渠道出包）；否则客户拿到的仍是旧行为的包。
+
+> 发布工作流**没有** `workflow_dispatch`：`.github/workflows/ci.yml` 的 `on:` 只有
+> `pull_request` 与 `push`。手工触发不存在的入口只会得到"工作流不出现"或"分支版本不是最新"
+> 的空转，所以这里如实写"只能等正式 tag"，不写做不到的手工通道。
+
+## 品牌渠道的素材是**必需**的（不是可选回落）
+
+品牌渠道（`official` / `beta` 之外）目录里必须同时有这两件素材，且 `channel.json` 里的
+`assets.logo` 必须指向其中的 `logo.svg`：
+
+| 素材 | 用途 | 缺了会怎样 |
+|---|---|---|
+| `logo.svg` + `channel.json` 的 `assets.logo` | 托盘位图、随包 `web-brand/favicon.svg`、随包内联 logo（服务端不可达时的登录页） | 缺 `assets.logo` ⇒ 包里没有内联 logo，登录页回落**厂商 mark**；声明了别的文件名 ⇒ 登录页与托盘是**两套品牌** |
+| `app-icon.png`（1024×1024、16 位 RGBA、内嵌 ICC） | 安装器 / Dock / 任务栏 / 窗口图标 | 缺它 ⇒ 图标回落**厂商图标**（交付物上没有任何信号） |
+
+两种缺失都在**构建期**中止该渠道的构建（`scripts/ci-channels.sh` 的字段校验 + 打包期的
+`brand-prepare` 各拦一道），因为白标门禁是"用同一套规则重新派生再比对"，两边都回落官方时
+它恒等、结构上发现不了这件事。`official` / `beta` 不受此限：它们的品牌就是厂商自己的，
+素材缺失时回落官方是预期行为，并会打一条可检索的登记日志。
 
 ## 部署侧要保证的三个值自洽
 

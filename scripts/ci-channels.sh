@@ -638,6 +638,34 @@ fi
 # 客户端回落的是中性占位(Harness),交付出去就是"渠道客户看到中性名/厂商名"
 # 的观感事故。这类事故在构建期可拦,且**只能**在构建期拦:装到客户机器上之后
 # 再发现就晚了。缺字段的报错刻意不回显渠道名(渠道 CI 不输出渠道信息)。
+#
+# 打包管线**按文件名**消费的两件素材(渠道 logo 与安装器图标)的唯一来源是
+# `packages/host/desktop/scripts/channel-build.ts` 的 `CHANNEL_ASSET_FILES` ——
+# 这里读它而不是再写一份字面量:输入侧(本脚本)与打包侧(brand-prepare.mjs)必须
+# 同名,否则托盘位图与随包内联 logo 会取**两个**文件(同一个包里两套品牌,
+# 2026-09-26 审计 Z3-3 的第 3 个触发形态)。
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! CHANNEL_ASSET_FILES="$(node -e '
+  import(process.argv[1]).then((mod) => {
+    const files = mod.CHANNEL_ASSET_FILES
+    if (!files || typeof files.logo !== "string" || typeof files.appIcon !== "string") {
+      throw new Error("CHANNEL_ASSET_FILES 形态不对")
+    }
+    process.stdout.write(`${files.logo}\t${files.appIcon}`)
+  }).catch((error) => {
+    console.error(`channel-asset-files: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  })
+' "$REPO_ROOT/packages/host/desktop/scripts/channel-build.ts")"; then
+  echo "::error::读不到渠道素材文件名清单(packages/host/desktop/scripts/channel-build.ts 的 CHANNEL_ASSET_FILES)" >&2
+  exit 1
+fi
+LOGO_FILE_NAME="${CHANNEL_ASSET_FILES%%$'\t'*}"
+APP_ICON_FILE_NAME="${CHANNEL_ASSET_FILES##*$'\t'}"
+if [ -z "$LOGO_FILE_NAME" ] || [ -z "$APP_ICON_FILE_NAME" ] || [ "$LOGO_FILE_NAME" = "$APP_ICON_FILE_NAME" ]; then
+  echo "::error::渠道素材文件名清单为空/同值 —— 逐渠道的素材必需集判据靠它派生,不能猜测" >&2
+  exit 1
+fi
 for id in "${SELECTED[@]}"; do
   manifest="$DEST/$id/channel.json"
   # channel.json 与素材同一条规则(2026-09-26 审计 W5-01 的同族):必须是**普通
@@ -660,7 +688,7 @@ for id in "${SELECTED[@]}"; do
   #     的 protocols 以及服务端 OIDC 回调三处联动);
   #   - assets 里声明的素材文件必须真的存在,且 app-icon.png 必须符合 mac 图标
   #     管线要求(1024×1024 RGBA16 + ICC):这两个在打包时才炸,而打包要跑三平台。
-  if ! CHANNEL_ID="$id" node -e '
+  if ! CHANNEL_ID="$id" CHANNEL_LOGO_FILE="$LOGO_FILE_NAME" CHANNEL_APP_ICON_FILE="$APP_ICON_FILE_NAME" node -e '
     const fs = require("node:fs")
     const path = require("node:path")
     const dir = path.dirname(process.argv[1])
@@ -871,6 +899,27 @@ for id in "${SELECTED[@]}"; do
       return buf.toString("utf8")
     }
     const KNOWN_ASSET_KEYS = ["logo", "logo_dark", "favicon"]
+    // 打包管线消费的两件素材的文件名（唯一真源 = channel-build.ts 的 CHANNEL_ASSET_FILES，
+    // 由外层 shell 读出来传进来；读不到时脚本已经在上游 fail-loud）。
+    const LOGO_FILE_NAME = process.env.CHANNEL_LOGO_FILE
+    const APP_ICON_FILE_NAME = process.env.CHANNEL_APP_ICON_FILE
+    // 品牌渠道(official/beta 之外)的 logo 素材**必须声明**（2026-09-26 审计 Z3-3）：
+    // `assets.logo` 是随包内联（channel-build.ts 的 inlineChannelAssets）与打包期派生
+    // （brand-prepare.mjs 的托盘位图 / web-brand/favicon）共同的取值来源。不声明时
+    // 随包里没有 `logo_inline` —— 服务端不可达或服务端还是旧版时，登录页/侧边栏只能
+    // 回落**编译期内置的厂商花括号 mark**（2026-09-11 在客户线上实测过的形态）。
+    // 公共渠道不要求：它们的品牌就是厂商自己的，回落官方是正当的。
+    // 报错只报字段名，不回显取值（`assets.logo` 的取值是文件名，不含品牌，
+    // 但一律守这条纪律）。
+    const declaredLogo = str(cfg?.assets?.logo)
+    if (!publicChannel && declaredLogo === undefined) missing.push("assets.logo")
+    // 声明的名字与打包侧消费的文件名必须**一致**：托盘位图与随包 favicon 只按
+    // LOGO_FILE_NAME 派生，声明别的名字会让同一个包装上两套品牌（登录页是声明的
+    // 那个、托盘是另一个/官方几何）。这是把"两个解析口径"收成一个的判据。
+    if (declaredLogo !== undefined && LOGO_FILE_NAME && declaredLogo !== LOGO_FILE_NAME) {
+      invalid.push("assets.logo(必须是渠道目录里的 " + LOGO_FILE_NAME
+        + "：托盘位图与随包 favicon 只按这个文件名派生，声明别的名字会让同一个包装上两套品牌)")
+    }
     // 未知素材字段**只计数**（键名不回显，R8-D-14；理由见下面那条 warning）。
     let unknownAssetKeys = 0
     for (const [key, value] of Object.entries(cfg?.assets ?? {})) {
@@ -909,8 +958,13 @@ for id in "${SELECTED[@]}"; do
     // mac 图标管线要求:1024×1024、RGBA16、带 ICC(见 generate-mac-app-icon.mjs)。
     // 与素材同一条规则(同一个理由,见上面 assets 循环):必须是**普通文件** ——
     // 旧的 `fs.existsSync` 跟随符号链接,链接会随 `cp -a`/`COPY` 进镜像。
-    const iconPath = path.join(dir, "app-icon.png")
+    const iconPath = path.join(dir, APP_ICON_FILE_NAME || "app-icon.png")
     const iconStat = fs.lstatSync(iconPath, { throwIfNoEntry: false })
+    // 品牌渠道**必须**带安装器图标（2026-09-26 审计 Z3-3）：缺它时 electron-builder
+    // 用 buildResources 里上一轮/官方的那份 `app-icon.png` ⇒ 安装器、Dock、任务栏、
+    // 窗口图标全是**厂商图标**，而交付物上没有任何信号（2026-09-10 事故形态：
+    // "渠道包带着官方图标出厂"）。公共渠道（official/beta）不要求：品牌即厂商。
+    if (iconStat === undefined && !publicChannel) missing.push(APP_ICON_FILE_NAME || "app-icon.png")
     if (iconStat !== undefined && !iconStat.isFile()) {
       invalid.push("app-icon.png(素材必须是渠道目录内的普通文件(符号链接一律拒绝),当前不是普通文件)")
     } else if (iconStat !== undefined) {

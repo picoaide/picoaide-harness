@@ -59,13 +59,33 @@ the package and does not fall back to the vendor mark.
 
 | Trigger | Channels built | Notes |
 |---|---|---|
-| Prerelease tag (`vX.Y.Z-beta.N` / `-rc` / `-alpha`, contains a hyphen) | **`beta` only** | Branded channels' clients are **not** produced on prerelease tags; use `workflow_dispatch` if you need them earlier |
+| Prerelease tag (`vX.Y.Z-beta.N` / `-rc` / `-alpha`, contains a hyphen) | **`beta` only** | Branded channels' clients are **not** produced on prerelease tags — a branded package can only be produced by a **stable tag** (the workflow has just `pull_request` and `push`; there is **no** `workflow_dispatch` manual entry point) |
 | Stable tag (plain `vX.Y.Z`) | **All channels** (official + beta + every branded channel) | A branded channel's image and installers appear only in that channel's own update directory |
 | Non-tag (PR / branch push) | `official` only | For gates and smoke tests, not a deliverable |
 
 ⇒ **When adding or changing a field for a branded channel (e.g. `app_origin_scheme`)**: change it in the
 channels repo, **push**, then wait for a **stable tag** (prerelease tags do not build branded channels);
 otherwise customers keep receiving packages with the old behaviour.
+
+> The release workflow has **no** `workflow_dispatch`: the `on:` block of `.github/workflows/ci.yml` carries
+> only `pull_request` and `push`. Claiming a manual entry point that does not exist just leads to a workflow
+> that never appears (or runs the default branch), so this page states the fact — wait for a stable tag.
+
+## Branded channels' assets are **required** (not an optional fallback)
+
+A branded channel (anything other than `official` / `beta`) must ship both assets below, and `assets.logo` in
+`channel.json` must point at the `logo.svg` one:
+
+| Asset | Used for | What breaks without it |
+|---|---|---|
+| `logo.svg` + `assets.logo` in `channel.json` | Tray bitmaps, the bundled `web-brand/favicon.svg`, the in-package inline logo (login page while the server is unreachable) | Without `assets.logo` the package has no inline logo and the login page falls back to the **vendor mark**; declaring another file name gives the login page and the tray **two different brands** |
+| `app-icon.png` (1024×1024, 16-bit RGBA, embedded ICC) | Installer / Dock / taskbar / window icon | Without it the icons fall back to the **vendor icon** (with no signal on the deliverable) |
+
+Both are enforced **at build time** (the field checks in `scripts/ci-channels.sh` plus `brand-prepare` during
+packaging), because the white-label gate re-derives assets with the same rules and compares — when both sides
+fall back to the official assets it is comparing a value with itself and structurally cannot see this.
+`official` / `beta` are exempt: their brand *is* the vendor's, so falling back to the official assets is
+expected there and is recorded with a searchable log line.
 
 ## Three values the deployment side must keep consistent
 
