@@ -31,6 +31,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -285,6 +286,24 @@ describe('打包版 inspect fuse 收口（FIX-33）', () => {
       'afterPack 跑完产物里 inspect fuse 仍开着 ⇒ 生产接线没接上（--inspect* 家族照旧能进主进程）',
     ).toBe(FUSE_DISABLE)
     expect(wire[FuseV1Options.RunAsNode], 'RunAsNode 必须保持开启（subprocess-local 的 runner 依赖它）').toBe(FUSE_ENABLE)
+  })
+
+  it('翻转载荷必须带 macOS 的 ad-hoc 重签开关（否则未签名 arm64 冒烟产物打不开）', () => {
+    // 这条判据只能做到**源码级**：本机是 Linux、无法验证 macOS 的真实行为 ——
+    // 所以它防的不是"行为写错了"，而是"下一个人优化时把这行删掉而没人发现"。
+    //
+    // 为什么必须有：翻 fuse 改的是 Mach-O 字节 ⇒ 作废 Electron 自带的 ad-hoc 签名。
+    // 已签名路径没事（electron-builder 的签名步在 afterPack **之后**盖真签名）；
+    // 但 `scripts/package-mac.ts` 的冒烟构建是 `CSC_IDENTITY_AUTO_DISCOVERY=false`（不签名），
+    // 事后无人重签，而 arm64 上签名无效的二进制不会执行（"Killed: 9"），
+    // 偏偏 `verify-mac-smoke.ts` 明确不做签名检查 ⇒ **CI 看不见**。
+    const source = readFileSync(join(import.meta.dirname, '..', 'scripts', 'verify-packaged-runtime.ts'), 'utf8')
+    const call = source.slice(source.indexOf('flipFuses(target, {'))
+    const payload = call.slice(0, call.indexOf('})'))
+    expect(
+      payload,
+      'flipFuses 载荷缺 resetAdHocDarwinSignature ⇒ 未签名的 macOS 冒烟产物会失去可执行的 ad-hoc 签名（smoke 不查签名，所以不会红）',
+    ).toContain('resetAdHocDarwinSignature: true')
   })
 
   it('原生启动器在但不是 Electron 构建 ⇒ fail-loud（不静默放过被掉包的产物）', async () => {

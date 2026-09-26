@@ -2107,3 +2107,36 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
   `ELECTRON_RUN_AS_NODE=1 <binary> <外部脚本>` 这种我们自己探针与 subprocess-local 都在用的用法）；
 - **AA2** 服务端（Go）新面清扫（Z2/Z3 完全没覆盖 `server/**`）；
 - **AA3** 客户端与宿主插件新面清扫（含"全仓普查异步投影是否还有同族"）。
+
+---
+
+### §7.64 第二十七轮主控自查：FIX-33 自己引入的一处缺陷（macOS 未签名路径失去可执行签名）
+
+**发现方式**：主控在派工后自查 FIX-33 的 `flipFuses` 载荷，核对 `@electron/fuses` 的语义。
+**严重度**：P2（CI/开发产物降级，不影响交付给用户的**已签名**产物，无安全影响）——
+但它是**修复自己引入的**，属本仓反复出现的形态，故单独登记。
+
+- **机制**：翻 fuse 是**改写 Mach-O 字节** ⇒ 作废 Electron 官方二进制自带的 ad-hoc 签名。
+  `@electron/fuses` 为此提供**可选**开关 `resetAdHocDarwinSignature`（`dist/index.js:137`：
+  仅当该字段为真且 `pathToElectron.includes('.app')` 时，才用
+  `codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime --deep <app>`
+  补一次 ad-hoc 签名）。FIX-33 的载荷**没有传它**。
+- **为什么签名路径没事**：顺序已实测查证（`app-builder-lib` 的 `doPack()`：
+  afterPack → sanityCheck → electronFuses → **签名**）⇒ 正式/预发构建的真签名在本钩子之后盖上，
+  ad-hoc 状态被覆盖。
+- **为什么未签名路径有事**：`packages/host/desktop/scripts/package-mac.ts:180` 给冒烟构建设
+  `CSC_IDENTITY_AUTO_DISCOVERY=false`（**不签名**），事后没有任何东西重签；
+  而 **arm64 上签名无效/缺失的二进制不会执行**（表现 "Killed: 9"）。
+  更关键的是 `verify-mac-smoke.ts` **明确不做签名检查**（其头注释写"不需要签名材料"）
+  ⇒ **CI 看不见这个降级**，只是那份冒烟 DMG 从此双击打不开 —— 冒烟 job 的意义被削弱。
+- **修法**：载荷补 `resetAdHocDarwinSignature: true`。`@electron/fuses` 只在 darwin `.app` 上生效
+  ⇒ Linux/Windows 是 no-op；签名路径上也无副作用（真签名在后）。
+- **判据**：`tests/packaged-inspect-fuse.spec.ts` 新增一条**源码级**判据
+  （读 `verify-packaged-runtime.ts` 的 `flipFuses` 载荷断言含该开关）。
+  **证据等级如实标注**：本机是 Linux、**无法验证 macOS 的真实行为** ⇒ 这条判据防的是
+  "下一个人优化时把这行删掉而没人发现"，**不是**"行为已被验证正确"。
+  变异：删掉该行 ⇒ 该用例红（8 passed → 1 failed / 7 passed），`trap` 自动还原，
+  两个 tsc 与 `check-no-real-domains` 均 EXIT=0。
+- **仍未闭环（需 mac runner）**：在真实 mac runner 上打一次未签名冒烟产物，
+  验证 ①`codesign --verify` 通过 ②产物真的能启动。**这条只能在下个 macOS desktop job 上做**——
+  已写入发布交接项。

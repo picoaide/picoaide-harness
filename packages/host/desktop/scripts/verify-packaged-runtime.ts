@@ -2979,6 +2979,18 @@ export async function applyPackagedInspectFuseHardening(
       [FuseV1Options.RunAsNode]: true,
       [FuseV1Options.EnableNodeCliInspectArguments]: false,
       [FuseV1Options.OnlyLoadAppFromAsar]: true,
+      // macOS 必须补一次 ad-hoc 重签（2026-09-26 第二十七轮复核）：
+      // 翻 fuse 是**改 Mach-O 字节**，会作废 Electron 官方二进制自带的 ad-hoc 签名。
+      // 已签名路径无妨（electron-builder 的签名步在本钩子**之后**，会把真签名盖上去）；
+      // 但 **未签名路径**（`scripts/package-mac.ts` 的 `CSC_IDENTITY_AUTO_DISCOVERY=false`
+      // 冒烟构建）事后没有任何东西重签，而 **arm64 上签名无效/缺失的二进制不会执行**
+      // （表现为 "Killed: 9"），偏偏 `verify-mac-smoke.ts` 明确不做签名检查 ⇒ **CI 看不见**，
+      // 只是那份冒烟产物从此打不开。本机是 Linux、无法验证 macOS 行为 —— 这一条是
+      // 「按 fuse 的官方语义取最稳的写法」，**不是实测结论**。
+      // `@electron/fuses` 只在 `pathToElectron.includes('.app')` 时生效，且用
+      // `--preserve-metadata=entitlements,requirements,flags,runtime` 重签 ⇒
+      // Linux/Windows 上是 no-op，签名路径上也无副作用（签名步在后）。
+      resetAdHocDarwinSignature: true,
     })
   }
   const after = await getCurrentFuseWire(target) as unknown as Readonly<Record<number, number>>
