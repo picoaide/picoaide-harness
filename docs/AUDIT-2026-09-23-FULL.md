@@ -2801,3 +2801,52 @@ Users / Apps / Limits / Audit / Connectors / GatewayFiles / MFA / grant-dialog�
 把 webadmin 全部 `permissions: undefined` fixture 列出来逐条判"是否真在验归属"，成本极低；
 ② **`electron-shots` 真机主流程 + 守卫「CI 执行面闭包」的 4 条深水区线索**（它自己点名、未逐条实跑）；
 ③ **`docs/` 表格正文的描述与行为承诺**（`check-doc-claims` 结构上判不到的那一半），另附 `site/` 的 `astro build` 未跑。
+
+#### §7.70.6 第二十九轮 AC1（证伪第二十八轮批）：**0 P0 / 1 P1 / 3 P2 / 3 P3** ⇒ 本轮合计 ≥0 P0 / **4 P1**
+
+**修复本体全部成立**（被点名的缺陷确实修好了），**但 7 条修复里只有 3 条的判据面成立** ——
+这是一个新的、更精确的诊断：**"缺陷修好了"与"判据守得住"是两件事**。
+
+**AC1-01【P1，本轮最重】FIX-43 ③ 的 `latest.json` 单调守卫是 check-then-act，并发下照样倒退且可完全静默。**
+
+用仓库门禁里**逐字提取**的假 aws 起**两个真发布进程**（seed 2.8.0 → 并发发 2.8.2(新) 与 2.8.1(旧)）：
+| 模式 | 结果 |
+|---|---|
+| natural（无任何人为加宽） | **3/8 轮**指针被写回 2.8.1 |
+| barrier（两进程都读过才允许写） | **4/12**，其中 **2 轮两进程都 exit 0** |
+| silent（栅栏 + 旧进程写指针延迟 700ms，模拟 R2 往返抖动） | **5/5 全倒退、5/5 两进程 exit 0、输出里零 `::warning::`** |
+
+⇒ 与 AB2-A-01 的现场**逐字相同**。判据面缺口：**`ci.yml:22-23` 逐字写着该守卫是
+「无论谁来写都不会倒退的根本保证」—— 该句不成立**，它只是"**串行时**才不倒退"。
+仓库自己那条 6g 判据是**串行**的 ⇒ AC1 实跑 `node scripts/verify-ci-scripts.mjs`
+在**同一棵有缺陷的树**上 **EXIT=0**（日志 `temp/r29/AC1/probe/logs/verify-ci-scripts.log`）。
+修法：条件写 CAS（`head-object` 已拿到 ETag ⇒ `copy-object --copy-source-if-match` /
+`put-object --if-match`，412 即有界重试），**或**明确降级口径并补一条**并发**用例。
+
+**三条 P2 是同一个族 ——「判据取值域 < 被守护面」，且每条都有正控证明判据本身是活的**：
+- **AC1-02（FIX-40 ②）**：审计写点清单只 `ParseFile("admin.go")`。M1 把同形 URL 写点放进**同包另一文件** ⇒ 绿；
+  M2 走 `serverstore.SetSetting`（池上写、不叫 `SetSettingTx`）⇒ 绿；**M3 正控放进 `admin.go` ⇒ 红**
+  （⇒ 判据是活的，只是面窄）。
+- **AC1-03（FIX-41 ①）**：等锁预算判据只扫 `migrate.go` + 只认 `SelectorExpr` + **不判顺序**。
+  N1 正控 ⇒ 红；N2 同形语句放同包另一文件 ⇒ 绿；N3 取锁语句排在 `SET LOCAL lock_timeout` **之前**
+  （分类计数 4→5 被判成"已预算"）⇒ 绿；N4 `exec := db.ExecContext` 方法值别名 ⇒ 绿。
+- **AC1-04（FIX-42 ②）**：`exact-route-proof-inventory` 的发现器对"工厂函数 + 简写属性 `path`"
+  与 `{...base, path}` 展开式**完全失明** —— 合成树里新包注册 3 条 exact 路由 ⇒ **发现 0 条**
+  （真树 33 条基线被完整复现）。
+
+**P3**：AC1-05 compose env 判据取值域（前缀拼接 / 反引号原始字符串 / **compose 里把值写死**三种全绿；
+D/E 两个正控红 —— "取值必须透传"只罩两个具名键）；AC1-06 memory-evolve 的 `anchoredSkillWrite`
+锚点是 `dirname(dirname(file))` **词法**推出 ⇒ **锚点自身是符号链接时判定恒真**
+（真插件 + 真 HTTP：`<root>/shared -> OUTSIDE` 时 disable 返回 200 `ok=true` 且**库外 SKILL.md 被改写**；
+可达性有边界故判 P3）；AC1-07 同一请求上 `clientrelease.RequestOrigin` 保原样 Host 而
+`appproof.ServerURL` 归一化（135 语料里 19 行 host 口径不一致；**https 判定零分叉**）。
+
+**AC1 的未证伪清单（不要再派）**：FIX-40 ① 三消费点结论一致（135 语料 0 分叉，真跑三个真函数）；
+FIX-43 ④ `docs/releases/**` 豁免上限 5 够用（实际 **1** 行）；FIX-42 ② account-card 路由内
+**未找到**第三条改状态路径；FIX-41 ② 拒 userinfo 是有告警的可诊断降级（部署面未实跑）。
+
+**AC1 自己交回的一条方法学自查（值得进流程）**：它的 `mut-compose.sh` B 组因 `cleanup`
+提前删掉夹具目录而跑出 `EXIT=0` 的**假绿**，加 `test -f` 断言后重跑才拿到真值
+⇒ **变异脚本必须先证明变异体存在**（与第二十六轮"夹具漏 await ⇒ 夹具根本没构造出缺陷"同族）。
+
+**第二十九轮收口计数**：AC2 `0/3/9/8` + AC1 `0/1/3/3` ⇒ **≥ 0 P0 / 4 P1** ⇒ **不干净，收敛仍未达成**。
