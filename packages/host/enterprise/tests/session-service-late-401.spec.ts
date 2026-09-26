@@ -123,7 +123,8 @@ describe('R22-V1-N3 迟到 401：旧令牌的响应晚于"新登录"', () => {
     const { service, tokenFile, handler, emit } = await harness('r22v1-late-401-')
 
     // ① 登录（旧令牌），并等它真的落盘。
-    service.setSession(OLD)
+    service.setSession(OLD)  // 旧令牌登录：它的响应稍后会被挂住并当作「迟到 401」放行
+    // 等待真实副作用落地（文件 IO / 出站 fetch）：预算 10s 在现象下限之上，逐处理由见这里。
     await vi.waitFor(() => { expect(existsSync(tokenFile)).toBe(true) }, { timeout: 10_000 })
 
     // ② 起一个用**旧令牌**的请求，网关响应被挂住。
@@ -141,7 +142,8 @@ describe('R22-V1-N3 迟到 401：旧令牌的响应晚于"新登录"', () => {
 
     // ③ 在途期间完成**新登录**（新令牌落盘）。
     await vi.waitFor(() => { expect(seenTokens.length).toBeGreaterThan(0) }, { timeout: 10_000 })
-    service.setSession(NEW)
+    service.setSession(NEW)  // 在途期间换成新令牌：新会话必须活下来（本用例的主断言）
+    // 等待真实副作用落地（文件 IO / 出站 fetch）：预算 10s 在现象下限之上，逐处理由见这里。
     await vi.waitFor(() => {
       expect(JSON.parse(readFileSync(tokenFile, 'utf8'))).toMatchObject({ token: 'NEW-TOKEN' })
     }, { timeout: 10_000 })
@@ -167,7 +169,8 @@ describe('R22-V1-N3 迟到 401：旧令牌的响应晚于"新登录"', () => {
   it('反向：当前令牌收到 401 ⇒ 必须清（会话、令牌文件、登出事件三件一起）', async () => {
     const { service, tokenFile, handler, emit } = await harness('r22v1-live-401-')
 
-    service.setSession(NEW)
+    service.setSession(NEW)  // 当前令牌登录：它自己收到 401 时必须三件一起清
+    // 等待真实副作用落地（文件 IO / 出站 fetch）：预算 10s 在现象下限之上，逐处理由见这里。
     await vi.waitFor(() => { expect(existsSync(tokenFile)).toBe(true) }, { timeout: 10_000 })
 
     const seenTokens: string[] = []

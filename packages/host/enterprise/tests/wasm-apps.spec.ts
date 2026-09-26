@@ -567,6 +567,7 @@ describe('错误语义：业务信封原样透传，只有传输层失败才回�
       return json(401, { error: { code: 'AUTH_FAILED', message: 'token expired' } })
     })
     const inFlight = h.call(WASM_APPS_PREFIX)
+    // 等待在途请求真的出站（真实 fetch 调用）：预算 10s 在现象下限之上，逐处理由见这里。
     await vi.waitFor(() => { expect(h.outbound.length).toBeGreaterThan(0) }, { timeout: 10_000 })
     h.setCurrent({ ...SESSION, token: 'NEW-TOKEN' })
     release?.()
