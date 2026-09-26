@@ -1985,3 +1985,56 @@ Z1 泳道（复核 FIX-27/28/29）在撰写本节时**仍在运行**，其结论
    而 `site/src/content/docs/deployment/channels.md:58` 与
    `site/src/content/docs/en/deployment/channels.md:62` 两张表格都把 `workflow_dispatch`
    写成"预发 tag 想提前拿品牌渠道包"的**唯一**途径。文档与实现漂移，零实现。
+
+---
+
+### §7.62 Z1 复审（第二十六轮 · 复核第二十五轮修复批 FIX-27/28/29 + CI 白标门禁）
+
+- **基线**：副本 `a803f7dbb3`（与现 HEAD 只差 `AGENTS.md` 一行；5 个受审文件逐字节一致）。
+  **主树零写入**；变异全部深拷贝 + `trap` 还原 + sha256 复核（6 文件逐个回来，无残留）。
+- **VERDICT：修复成立 5/6 | 新发现 P0 0 / P1 1 / P2 0 / P3 2** ⇒ **本轮再次产出 P1，不收敛**。
+
+#### §7.62.1 成立 5 条（含"反向变异必红"与真环境复核）
+
+| 项 | 成立依据（Z1 自跑，不依赖修复方自述） |
+|---|---|
+| A1 服务侧 `app_id` 收口 | 7 处调用点全走 `validateAppIDServing`（另有 `appserver/serve.go:59` 独立第 8 处）；写侧两处仍拒保留字；**真 PG + 生产路由矩阵**对每个保留字逐个落存量行、7 个入口给业务态（无"名字非法"）；变异 M1（`adminAppAIUsage` 改回写侧）⇒ callsite + 真路由**双红**；M2a（新增未登记服务侧调用点）⇒ 红 |
+| A2 异名叶子回收 | 三条限定**各自承重**（拆 leaf / descendant / aligned 各红，descendant 那条还红既有回归）；`go test ./internal/serverstore/ -count=1 -p 1 -timeout 25m` ⇒ **ok 715.070s EXIT=0**；锁自由判据真咬得住（`relid` `0`→`c.oid` ⇒ 20.29s 红并点名） |
+| A4 CI 白标门禁 | CI 字面量形态（无 `--dist`）、绝对路径、仓库根相对**三种形态逐个真跑**；缺目录 fail-loud 且不再调门禁；并用**真** `verify-channel-package.ts` + **三份真 asar** 复核——合法官方包 exit 0（**不误红**）、包内多 `build/channel.json` ⇒ exit 1、图标被篡改 ⇒ exit 1（5b 是桩门禁，Z1 补了真门禁这一层）；反向变异 M6（回退解析）⇒ 守卫 9 项红 |
+| A5 electron-shots | bash 桩 + 假 CDP ⇒ FAIL 且假 CDP 账本空；伪造 Chromium 横幅的"谎话桩" ⇒ FAIL；端口占用 ⇒ spawn 前 fail-loud；未知/单横线/位置/缺值参数 ⇒ exit 2；`--shots` 写仓内 ⇒ exit 2；**真打包 app + Xvfb + mock 网关 ⇒ 13/13 PASS**（归属来源 = 子进程自宣告 `:43639`） |
+| A6 面板焦点 | panel-surface 17/17、foot-menu 51/51；变异 M8（恢复"无条件抢回焦点"）⇒ 3 条红 |
+
+#### §7.62.2 【P1 · 发版前必修】打包版调试闸门挡不住 `inspect` 族的主进程 RCE（FIX-28 只修了一半）
+
+**这是第二十五轮 FIX-28 的第二个覆盖面缺口**（第一个是 §7.61.1 ②的单横线；两者正交）。
+
+- **机制**：`src/debug-switches.ts` 的检测正确、`main.ts` 的模块作用域接线正确，但**落地形态对 `inspect` 族结构上无效** ——
+  `--inspect-brk=<port>` 让 V8 在**应用主脚本执行之前**挂起，闸门那行**永远跑不到**；
+  `--inspect=<port>` 的 inspector 先于 JS 就绪，而应用 ESM 模块图是**异步**装载的，存在可被赢下的窗口。
+- **真机反例（真 Electron 44.4.3 + 真 `lib/main.js` + 改名二进制复刻打包态，`app.isPackaged` 实测 `true`）**：
+  | 形态 | 结果 |
+  |---|---|
+  | `--inspect-brk` × 3 | **3/3** 在闸门之前执行 `execSync('id -un')` → **`"root"`** + 任意文件读，**之后**才打印「拒绝启动」exit 1 |
+  | `--inspect` × 3 | **3/3** 同样拿到 `"root"` |
+  | 确定性变体 | `Debugger.setInstrumentationBreakpoint('beforeScriptExecution')` + `evaluateOnCallFrame`（**不靠竞速**） |
+  | 真 electron-builder 产物 | `dist/linux-unpacked/dsh-plugin-desktop` + `--inspect-brk=9351` 同样卡住、attach 后主进程求值可用 |
+- **为什么 27 条判据没抓住**：全是纯函数 / AST 接线判据，真机三态只测了 `--inspect` 的"是否拒绝=1"，**没有一条能力判据**
+  —— 正是本仓反复登记过的"只钉判定不钉能力"假绿（**第三次同类**）。
+- **已排除的旁路（都不是问题，勿重复排查）**：`NODE_OPTIONS=--inspect`（打包态 Electron 把 `NODE_OPTIONS` 清成 `""`，实测 inspector 不监听）、
+  下划线拼法 `--remote_debugging_port`（Chromium 不认，端口从未监听）、`ELECTRON_RUN_AS_NODE=1`（应用 JS 不加载，非同一攻击）、
+  6 个 E2E/探针脚本的逃生门 env（无漏改）。
+- **修法（唯一能覆盖 inspect 族的层次）**：打包期翻 Electron fuse
+  `FuseV1Options.EnableNodeCliInspectArguments=false`（`@electron/fuses` 已在 `packages/host/desktop/node_modules`，**本仓目前零 fuse**；
+  钩子点 = `package.json:368` 的 `afterPack` → `scripts/verify-packaged-runtime.ts`）。它在 **argv 解析期（V8 启动前）**丢弃整个 `--inspect*` 家族；
+  对 `--remote-debugging-port` 无影响 ⇒ 六个 CDP 驱动脚本不受影响。代价 = 打包版不能再靠 `--inspect` 排障（开发态不受影响）。
+  **JS 闸门保留为纵深防御，但不得再把"六类开关都被拒绝"写成安全结论。**
+- **两条必须同时记住的约束**：①**绝不要关 `RunAsNode` fuse** —— upstream `dsh-subprocess-local` 补丁运行期注入
+  `ELECTRON_RUN_AS_NODE=1` 起 runner，关掉会让已修的 Windows/Linux 命令执行 P0 复发；②mac 上翻 fuse 改变二进制，
+  **必须早于签名**，否则签名失效、公证失败（顺序要实测，不许假设）。
+- **§7.62.3 两条 P3**：①`audit_r25_serving_appid_callsite_test.go:128-135/212-255` 的完整性判据只认直接调用两个方法名
+  ⇒ 新增服务侧 handler 若调 `h.validateRawAppID`（间接写侧入口）**全绿不红**（M2b 实跑 0 FAIL），与注释里
+  "全包不得出现第四种形态"不符；②electron-shots 归属的"自证"边界（自绑端口 + 伪造横幅 + 完整假 CDP 可过）——
+  修复方 D5 已认账，Z1 确认三种朴素伪造都失败，仅登记。
+- **方法学坑（进流程）**：`@electron/asar` 的 `createPackage` 是 **async**，夹具漏 `await` + 随后同步复原 staging
+  ⇒ "篡改夹具"实际打的是合法包，**真门禁被假夹具骗成全绿**（第一版三份全绿，修正后 1 绿 2 红）。
+  ⇒ **夹具本身也要有"它真的构造出了缺陷"的前置断言。**
