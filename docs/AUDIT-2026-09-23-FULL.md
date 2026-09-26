@@ -3129,3 +3129,31 @@ token `hasPermission(` ⇒ 新页面写 `rbac.hasPermission('dept:raed')` 或 `h
 `.mjs/.cjs`）—— **不修则这个已复发四次的族仍无前向网**；② 修 `NotificationStore#load` fail-closed + 拒写；
 ③ 本地收尾清单加 7 条 <1 分钟的命令 + `webadmin npm test`（**否则 FIX-47② 的守卫根本不在本地门禁里**）
 + `make build-server`；④ **给 `verify-wasm-client-only.sh` 的路径 run-id 化**（否则上面的清单会变成随机红）。
+
+#### §7.72.4 FIX-47 收工（FIXED 9/0）+ 三条新的方法论
+
+**验收（空载跑，全绿）**：`yarn check` EXIT=0（`planned=32 executed=32`）· `install --immutable` EXIT=0 ·
+`gofmt` 空 + `go vet` 0 + **`go test` 56 包全 ok / FAIL 0 / EXIT=0** ·
+memory-evolve **1183/1182/0/1** · webadmin **50 files / 733 tests** ·
+`check-root-guards` **PASS guards=17** · `check-install-integrity` **PASS judge-bodies=187** · 其余守卫全 EXIT=0。
+
+**三条新的方法论（比修复本身更可复用）**：
+
+1. **「A/B = HEAD vs 工作树」的探针会被"中途提交"静默毁掉**：FIX-47 实测 ——
+   它在取证期间主树被推了一个提交，于是那 6 条"HEAD vs 工作树"的判定**全部 FAIL**，
+   而真正的原因是**两侧都变成了同一份内容**（自己 vs 自己）。
+   ⇒ **纪律：A/B 探针必须钉具体 revision（sha），不能写"HEAD"**。
+   这与本会话已登记的两条同族：`check:wasm-client-only` 会自报"跑的过程中 HEAD 变了"、
+   `check-guard-parser-integrity` 的 `--print-digests` 打印的是 **HEAD 版本**的摘要（未提交时不能照抄）。
+   **"HEAD" 是一个会动的目标，而判据需要的是一个不动的基准。**
+2. **`site/` 的产物面判据接不进 `yarn check`**（认账）：`site/` 不是 root workspace ⇒
+   CI 的 gate job 没有 `site/node_modules` ⇒ 在那里跑 `astro build` 必红；
+   要修得动 `.github/**`（本轮未授权）。接进 `check-doc-claims` 的是**源码面那一半**（locale 落地页），
+   产物面脚本 `check-site-links.mjs` 目前**需单独调用** ⇒ 这正是 §7.72.2 差集表里"结构性只能 CI"
+   那一格的一个具体实例。
+3. **重负载会同时毁掉两侧的判据**：`go test` 并发跑撞 40 分钟超时、
+   `check:wasm-client-only` 组级台账缺行、`yarn check` 的构建竞态 ——
+   本会话共记录 **4 次**负载假红/假绿。**三件套必须空载串行跑**，否则结论只能记为"非判定性"。
+
+**FIX-47 认账的两条残留**：① 4 条同族点位本轮未修（`coi/stats.js:40`、`coi/ws-coord.js:116`、
+`skills-manager.js:83`、`skills.js:418`，清单里已逐条给精确改法）；② 产物面判据未接门禁（见上）。
