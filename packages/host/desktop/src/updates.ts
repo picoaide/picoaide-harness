@@ -1,9 +1,16 @@
 /** Cordis Host plugin for scheduled and interactive PicoAide Harness updates. */
 
 import { open } from 'node:fs/promises'
+import { resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import z from '@deepseek-ai/schemastery'
+// AA3-01（2026-09-27）：会话代际守卫。**唯一实现在零依赖叶子包**
+// `@picoaide/dsh-host-locale/session-events` —— 本包不可能 import enterprise 的
+// `session-epoch.ts`（enterprise 依赖 desktop，反向 import 会成环，见
+// docs/decisions/2026-09-20-host-leaf-packages-build-graph.md）。叶子包里的那份
+// 就是 enterprise 一直在用的同一份语义（那边现在改为 re-export）。
+import { createSessionEpoch } from '@picoaide/dsh-host-locale/session-events'
 import type { DesktopUpdateSource, UpdateDownloadProgressSnapshot } from './runtime.ts'
 import { desktopTrayLabel } from './tray-locale.ts'
 import {
@@ -200,6 +207,25 @@ type CheckOutcome =
   | { readonly kind: 'failed'; readonly error: DesktopUpdateErrorCategory }
   /** 清单拿到了但不合约定(版本号非法/结构不符):重试没有意义。 */
   | { readonly kind: 'invalid' }
+  /**
+   * 本次检查在返回时**已经不属于当前更新源**（期间换过服务端/账号，或本插件已销毁）。
+   *
+   * AA3-01：这是"整份丢弃"的显式形态 —— 与 `failed` 的区别是它**不是失败**：
+   * 不记 `lastError`、不发布状态、不重试。用独立的 kind 而不是复用 `failed`，
+   * 是因为一旦复用，紧接着的 `observeResult` 就会把上一台服务端的超时/失败
+   * 当成"当前源的网络故障"显示给用户（那正是本次要修掉的同一类串味）。
+   */
+  | { readonly kind: 'stale' }
+
+/**
+ * 「这次会话派生的投影还算不算最新」谓词。
+ *
+ * 与 `session-events.ts` 的规则 3 同源：**被 await 的被调方**如果自己也要在 await
+ * 之后落状态（`reinstateDownloaded` 要读盘校验并置 ready），就必须把「还算不算最新」
+ * 当谓词**传进去**，而不是只在外层补一句比对 —— 外层的比对发生在它返回之后，
+ * 拦不住它在自己内部落地。
+ */
+type StillCurrent = () => boolean
 
 /** 下载失败归类:精确类别优先,其余(含取消)读作网络故障。 */
 function downloadErrorCategory(cause: unknown): DesktopUpdateErrorCategory {
@@ -365,6 +391,23 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     /**
+     * **会话代际守卫**（AA3-01）：本插件所有"由会话派生的异步投影"共用这一个计数。
+     *
+     * 更新源是**会话派生**的（`serverURL` 变了 ⇒ 换了一台服务端/一个渠道），而这个
+     * 文件里两条最长的异步路径（清单检查、安装包下载）在**完成路径上只看 `disposed`**：
+     * 它只回答"插件还在不在"，不回答"这次同步还属不属于当前会话"。于是
+     * 「A 的下载还在飞 → 用户登出并登录 B → A 的下载才返回」会让 A 的安装包在 B 的
+     * 会话里进入"已下载待安装"（`state.json` 的 `downloadedVersion` **跨重启存活**），
+     * 而 `installReady()` 会把它交给平台安装器真的拉起 —— 渠道客户端的
+     * `desktop.home_dir` 不同，这正是"所有对话消失"那一类事故的形态。
+     *
+     * 用法即 `session-events.ts` 的规则 1/2：**同步入口**取一次代际（第一个 await
+     * 之前），**每个 await 之后**比对，不等即整份丢弃（不写盘、不发通知、不改
+     * `readyVersion`、不发布状态）。
+     */
+    const epochs = createSessionEpoch()
+
+    /**
      * 当前登录的服务端地址（`null` = 未登录）。
      *
      * 更新源随会话变化:登录/切换服务端/登出都必须让缓存失效，否则会把
@@ -394,7 +437,13 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    const stateReady = (async () => {
+    /**
+     * 读一次启动期的 `state.json`（缺省/损坏时回落空状态）。
+     *
+     * 具名而不是就地 IIFE：本文件的结构判据按**函数名**登记豁免（`session-epoch-wiring.spec.ts`），
+     * 匿名函数的标签只能靠序号，序号会随无关编辑漂移，豁免表就会变成噪音。
+     */
+    const loadState = async (): Promise<void> => {
       try {
         state = parseState(await readState(adapter.statePath))
       } catch (cause) {
@@ -402,7 +451,9 @@ export function apply(ctx: Context, config: Config): void {
         state = EMPTY_STATE
         if (!disposed) await persistState()
       }
-    })()
+    }
+
+    const stateReady = loadState()
 
     /**
      * 会话变化：重置更新状态并重新解析渠道。
@@ -416,8 +467,21 @@ export function apply(ctx: Context, config: Config): void {
       try {
         const next = serverURLOf(session)
         if (next === serverURL) return
+        // **代际 +1 必须在任何清理之前**：它才是"在飞的检查/下载从此作废"的那个
+        // 信号（各任务在每个 await 之后比对它）。放在这里而不是订阅回调的最前面，
+        // 是有意的：同一个更新源的重复广播（同地址重登、恢复型启动后的补发）不该
+        // 白白作废一次合法传输 —— 判定与 `if (next === serverURL) return` 同一个键。
+        epochs.begin()
         // 会话身份变了 ⇒ 之前"已下载好"的安装包同样作废(可能来自另一台服务端)。
         releaseReady()
+        // 在飞的那次传输也必须真的停下：留着它只会继续占带宽、继续往**已经换掉的**
+        // 展示面写进度（`onProgress` 回调不看会话）。中止后那条续体会在 catch 里
+        // 撞上代际比对并整份丢弃（不重试、不落盘、不通报）。
+        downloadController?.abort()
+        downloadingVersion = undefined
+        downloadProgress = undefined
+        retryAttempt = 0
+        endRetryWait()
         serverURL = next
         expectedChannel = undefined
         channelResolved = false
@@ -451,7 +515,8 @@ export function apply(ctx: Context, config: Config): void {
       const controller = new AbortController()
       // 探测自己计时:绝不占用清单请求的超时预算,也不抢走它的控制器。
       const endProbe = beginRequestTimer(controller)
-      void (async () => {
+      /** 取一条渠道内容（具名：结构判据按函数名登记豁免，见 `probeChannel` 的调用点注释）。 */
+      const probeChannel = async (): Promise<void> => {
         try {
           const response = await adapter.request(serverChannelURL(target), {
             method: 'GET',
@@ -464,7 +529,9 @@ export function apply(ctx: Context, config: Config): void {
           const payload: unknown = await response.json()
           if (typeof payload !== 'object' || payload === null) return
           const id = (payload as { channel_id?: unknown }).channel_id
-          // 取回期间会话可能已经切换:过期的结果必须丢弃。
+          // 取回期间会话可能已经切换:过期的结果必须丢弃（这里的会话身份判据是
+          // "服务端地址还是不是发起探测时那一台"，比代际号更贴切：探测结果只对
+          // 那一台服务端有意义）。
           if (typeof id === 'string' && CHANNEL_ID_PATTERN.test(id) && serverURL === target) {
             expectedChannel = id
           }
@@ -473,7 +540,8 @@ export function apply(ctx: Context, config: Config): void {
         } finally {
           endProbe()
         }
-      })()
+      }
+      void probeChannel()
     }
 
     /** 当前更新源;未登录时为 null（没有可问的服务端就没有更新源）。 */
@@ -527,23 +595,48 @@ export function apply(ctx: Context, config: Config): void {
     ctx.on('pico/session-changed', onSessionChanged)
 
     /** 记住"这一版已经提示过用户"（自动下载路径只提示一次）。 */
-    const rememberPrompt = async (version: string): Promise<void> => {
+    const rememberPrompt = async (version: string, stillCurrent: StillCurrent): Promise<void> => {
       await stateReady
+      if (!stillCurrent()) return
       state = { ...state, lastPromptedVersion: version }
       await persistState()
     }
 
-    /** 记住"这一版已经下载并通过校验",下次启动直接复用。 */
-    const rememberDownload = async (version: string, path: string): Promise<void> => {
+    /**
+     * 记住"这一版已经下载并通过校验",下次启动直接复用。
+     *
+     * AA3-01 第 4 条：**这一笔写盘必须自己带闸门**。它写的是 `state.json` 的
+     * `downloadedVersion` / `downloadedPath` —— 那是**跨重启存活**的复用判据，
+     * 写错了没有"下一次检查会纠正它"这条退路（重启后 `reuseDownloadedInstaller`
+     * 会先读到它）。所以调用方把「还算不算最新」当谓词传进来，在**真正写盘之前**
+     * 再比对一次；不等即整笔跳过（连内存里的 `state` 都不动）。
+     * @param version - canonical version that finished downloading.
+     * @param path - absolute path of the completed, verified installer.
+     * @param stillCurrent - 本次下载的代际谓词（见 `session-events.ts` 的规则 3）。
+     * @returns 真的写下去了为 true；代际已过期（整笔丢弃）为 false。
+     */
+    const rememberDownload = async (
+      version: string,
+      path: string,
+      stillCurrent: StillCurrent,
+    ): Promise<boolean> => {
       await stateReady
+      if (!stillCurrent()) return false
       state = { ...state, downloadedVersion: version, downloadedPath: path }
       await persistState()
+      // 写盘期间又换了源（`persistState` 自己也有 await）：这一笔已经落下去了，
+      // 但**绝不能**再被当成"当前源的可安装件"发布出去 ⇒ 返回 false 让调用方停手。
+      if (!stillCurrent()) return false
+      return true
     }
 
     /** 取一份清单用于复用校验;失败返回 null(复用是可选优化,不能因此报错)。 */
-    const fetchReusableManifest = async (): Promise<DesktopReleaseManifest | null> => {
+    const fetchReusableManifest = async (
+      stillCurrent: StillCurrent,
+    ): Promise<DesktopReleaseManifest | null> => {
       const source = currentSource()
       if (source === null) return null
+      if (!stillCurrent()) return null
       const controller = new AbortController()
       const endRequest = beginRequestTimer(controller)
       try {
@@ -553,6 +646,9 @@ export function apply(ctx: Context, config: Config): void {
           signal: controller.signal,
           ...(source.expectedChannel === undefined ? {} : { expectedChannel: source.expectedChannel }),
         })
+        // 换源之后拿到的清单是**上一台服务端**的：拿它去校验本地的安装包等于用
+        // 错的判据盖章（`reuseDownloadedInstaller` / `installReady` 都读它的返回值）。
+        if (!stillCurrent()) return null
         return outcome.kind === 'manifest' ? outcome.manifest : null
       } catch {
         return null
@@ -565,11 +661,14 @@ export function apply(ctx: Context, config: Config): void {
      * 校验一份已下载的安装包是否就是这一版,并把它接回"可安装"状态。
      * @param version - 记录里等待安装的版本。
      * @param manifest - 该版本最新的清单(调用方已取到)。
+     * @param stillCurrent - 本次投影的代际谓词（`session-events.ts` 的规则 3）：
+     *   下面那次读盘校验自己也有 await，只在外层补一句比对拦不住它落地。
      * @returns 校验通过并已置位 ready 状态时为 true。
      */
     const reinstateDownloaded = async (
       version: string,
       manifest: DesktopReleaseManifest,
+      stillCurrent: StillCurrent,
     ): Promise<boolean> => {
       const source = currentSource()
       if (source === null) return false
@@ -582,12 +681,14 @@ export function apply(ctx: Context, config: Config): void {
           manifest,
           manifestURL: source.manifestURL,
         })
+        if (!stillCurrent()) return false
         // 目录里没有通过校验的完成件:不置位 —— 记录可能是上次失败留下的。
         if (!installed.complete) return false
         if (state.downloadedPath !== installed.path) {
           state = { ...state, downloadedVersion: version, downloadedPath: installed.path }
           await persistState()
         }
+        if (!stillCurrent()) return false
         readyVersion = version
         readyPath = installed.path
         refreshTray()
@@ -602,16 +703,20 @@ export function apply(ctx: Context, config: Config): void {
     /**
      * 该版本已有下好并校验通过的安装包时,直接进入"可安装"。
      * @param version - 本次检查发现可用的版本。
+     * @param stillCurrent - 本次投影的代际谓词（见 {@link reinstateDownloaded}）。
      * @returns 已经置位 ready 时为 true(调用方不应再传输)。
      */
-    const reinstateRecordedVersion = async (version: string): Promise<boolean> => {
+    const reinstateRecordedVersion = async (
+      version: string,
+      stillCurrent: StillCurrent,
+    ): Promise<boolean> => {
       await stateReady
-      if (disposed) return true
+      if (disposed || !stillCurrent()) return false
       if (state.downloadedVersion === undefined) return false
       if (state.downloadedVersion.replace(/^v/u, '') !== version.replace(/^v/u, '')) return false
-      const manifest = await fetchReusableManifest()
-      if (disposed || manifest === null) return false
-      return await reinstateDownloaded(version, manifest)
+      const manifest = await fetchReusableManifest(stillCurrent)
+      if (disposed || manifest === null || !stillCurrent()) return false
+      return await reinstateDownloaded(version, manifest, stillCurrent)
     }
 
     /**
@@ -620,12 +725,18 @@ export function apply(ctx: Context, config: Config): void {
      * 覆盖两种情形:`state.json` 记着下载记录(重启),以及会话刚变化(可能在另
      * 一台服务端上下过)。复用前按清单的 SHA-256 与平台魔数验一遍 —— 只认
      * "清单说它是这一版"的文件。
+     *
+     * AA3-01：本函数也是一条会话派生的异步投影（取清单 + 读盘校验 + 置 ready），
+     * 所以同样带代际守卫 —— 否则"换源时启动的复用"可以在下一次会话变化之后才
+     * 落地，把上一台服务端上验过的安装包重新标成当前源的可安装件。
      */
     const reuseDownloadedInstaller = async (): Promise<void> => {
       if (disposed || !adapter.canDownload || serverURL === null) return
       if (downloadingVersion !== undefined || downloadTask !== undefined) return
+      const epoch = epochs.begin()
+      const stillCurrent: StillCurrent = () => epochs.isCurrent(epoch)
       await stateReady
-      if (disposed) return
+      if (disposed || !stillCurrent()) return
       const recorded = state.downloadedVersion
       if (recorded === undefined) return
       if (compareVersions(recorded, adapter.currentVersion) <= 0) {
@@ -636,12 +747,12 @@ export function apply(ctx: Context, config: Config): void {
         await persistState()
         return
       }
-      const manifest = await fetchReusableManifest()
-      if (disposed || manifest === null) return
+      const manifest = await fetchReusableManifest(stillCurrent)
+      if (disposed || manifest === null || !stillCurrent()) return
       if (manifest.clientVersion.replace(/^v/u, '') !== recorded.replace(/^v/u, '')) return
       availableVersion = recorded
       lastError = undefined
-      await reinstateDownloaded(recorded, manifest)
+      await reinstateDownloaded(recorded, manifest, stillCurrent)
     }
 
     /**
@@ -656,6 +767,9 @@ export function apply(ctx: Context, config: Config): void {
       refreshTray()
 
       const task = (async (): Promise<CheckOutcome> => {
+        // AA3-01：进门先取代际（第一个 await 之前）—— 本次检查只对"这一刻的更新源"
+        // 负责；期间换过源的话，它的结论（连"失败"都算）必须整份丢弃。
+        const epoch = epochs.begin()
         // 未登录 = 没有更新源。客户端只从它登录的那台服务端取更新
         // (2026-09-10 定案),所以这里不是失败而是"还没有可问的对象"。
         const source = currentSource()
@@ -678,6 +792,8 @@ export function apply(ctx: Context, config: Config): void {
             })
             startChannelProbe()
             const outcome = await pending
+            // 这一趟已经不属于当前会话 ⇒ 下一台服务端的版本提示绝不能用这一趟的答案。
+            if (!epochs.isCurrent(epoch)) return { kind: 'stale' }
             if (outcome.kind === 'manifest') {
               const compared = compareManifest(outcome.manifest)
               if (compared.kind !== 'failed' || compared.error !== 'network') return compared
@@ -698,9 +814,14 @@ export function apply(ctx: Context, config: Config): void {
           } finally {
             endRequest()
           }
+          // 失败路径同样要比对：换源之后那次失败不属于当前源 —— 既不记成它的网络
+          // 故障，也不该再按它的重试预算打扰它。
+          if (!epochs.isCurrent(epoch)) return { kind: 'stale' }
           if (!retryTransient || !retriable || attempt >= checkRetry.maxAttempts) break
           const delayMs = updateRetryDelayMs(checkRetry, attempt, 'check')
           if (!await waitBeforeRetry(delayMs)) break
+          // 退避期间换源：这一趟的余下重试已经没有必要了。
+          if (!epochs.isCurrent(epoch)) return { kind: 'stale' }
         }
         return { kind: 'failed', error: 'network' }
       })().finally(() => {
@@ -735,6 +856,9 @@ export function apply(ctx: Context, config: Config): void {
 
     const observeResult = (outcome: CheckOutcome): string | undefined => {
       if (disposed) return undefined
+      // AA3-01：**过期结论什么也不做** —— 不记 `lastError`、不动 `availableVersion`、
+      // 不发布状态。它连"失败"都不算（那是上一台服务端的事）。
+      if (outcome.kind === 'stale') return undefined
       if (outcome.kind !== 'ok') {
         // 检查失败(未登录/网络/超时/清单非法):保留此前可用版本,但记录错误供 UI 提示。
         if (availableVersion === undefined) {
@@ -762,12 +886,17 @@ export function apply(ctx: Context, config: Config): void {
      * @param automatic - 后台自动流程(同一版本只自动处理一次)。
      * @returns 可以继续下载时为 true。
      */
-    const admitDownload = async (version: string, automatic: boolean): Promise<boolean> => {
+    const admitDownload = async (
+      version: string,
+      automatic: boolean,
+      stillCurrent: StillCurrent,
+    ): Promise<boolean> => {
       if (disposed || !adapter.canDownload) return false
       await stateReady
-      if (disposed) return false
+      if (disposed || !stillCurrent()) return false
       if (automatic && state.lastPromptedVersion === version) return false
-      await rememberPrompt(version)
+      await rememberPrompt(version, stillCurrent)
+      if (!stillCurrent()) return false
       return !disposed
     }
 
@@ -782,16 +911,24 @@ export function apply(ctx: Context, config: Config): void {
       // 这一版已经在待安装位:什么都不用做(也不该再去问一次清单)。
       if (readyVersion !== undefined && readyVersion === version) return Promise.resolve()
       const task = (async () => {
+        // AA3-01：进门先取代际（第一个 await 之前）。下面每一次 await（清单复用校验、
+        // 去重记账、传输、落盘、通报）之后都要比对；不等即整份丢弃 —— 这是本文件里
+        // 最长的一条 await，而"下载完成"是**跨会话**最危险的落点：它会把上一台
+        // 服务端/上一个渠道的安装包固化成当前会话的"可安装"。
+        const epoch = epochs.begin()
+        const stillCurrent: StillCurrent = () => epochs.isCurrent(epoch)
         // 先看这一版是不是**已经下好了**:是(上次启动下完/上次重启前下完)就直接
         // 接回"可安装",连"自动流程只处理一次"的去重都不该拦住它 —— 去重是为了
         // 不重复打扰用户,不是为了把已经拿到的安装包藏起来。
-        if (await reinstateRecordedVersion(version)) return
-        if (!await admitDownload(version, automatic)) return
-        if (disposed) return
+        if (await reinstateRecordedVersion(version, stillCurrent)) return
+        if (!stillCurrent()) return
+        if (!await admitDownload(version, automatic, stillCurrent)) return
+        if (!stillCurrent() || disposed) return
 
         let lastFailure: unknown
         for (let attempt = 1; attempt <= transferRetry.maxAttempts; attempt += 1) {
           if (disposed) return
+          if (!stillCurrent()) return
           const source = currentSource()
           if (source === null) {
             lastError = 'not-signed-in'
@@ -840,9 +977,15 @@ export function apply(ctx: Context, config: Config): void {
               stallTimeoutMs: config.downloadStallTimeoutMs,
               totalTimeoutMs: config.downloadTotalTimeoutMs,
             })
+            // 传输期间换过源（`onSessionChanged` 会 abort 掉这次传输）⇒ 这份安装包
+            // 属于**上一台服务端**：不落盘、不置 ready、不通报。见 `CheckOutcome.stale`
+            // 的同一口径 —— "过期"不是失败，任何状态都不该为它改变。
+            if (!stillCurrent()) return
             if (disposed) return
-            // 下载完成 → 记住它(重启后直接复用)并提示一次。
-            await rememberDownload(version, path)
+            // 下载完成 → 记住它(重启后直接复用)并提示一次。**落盘之前**再比对一次：
+            // 这一笔是跨重启存活的复用判据，写错了没有下一次检查能纠正它。
+            if (!await rememberDownload(version, path, stillCurrent)) return
+            if (!stillCurrent()) return
             downloadingVersion = undefined
             downloadProgress = undefined
             retryAttempt = 0
@@ -855,6 +998,9 @@ export function apply(ctx: Context, config: Config): void {
             await announceReady(version, path)
             return
           } catch (cause) {
+            // 换源/销毁导致的失败同样整份丢弃：既不该记成当前源的网络故障，也不该
+            // 按当前源的重试预算继续打扰（`onSessionChanged` 已经 abort 了它）。
+            if (!stillCurrent()) return
             if (stalledByWatchdog) {
               // 看门狗中止的语义是"停滞"（可重试的网络类失败），不是用户取消：
               // 直接把 aborted 交出去会被 isRetriableDownloadFailure 判成不可重试，
@@ -881,6 +1027,8 @@ export function apply(ctx: Context, config: Config): void {
               endRetryWait()
               return
             }
+            // 退避期间换源：剩下的重试已经没有意义了（重试的也是上一台的包）。
+            if (!stillCurrent()) return
           } finally {
             clearInterval(watchdog)
             if (downloadController === controller) downloadController = undefined
@@ -914,11 +1062,74 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    /** 把已下载的安装包交给平台安装流程。 */
+    /**
+     * 复检「这份待安装的包确实由**当前**更新源发布」。
+     *
+     * AA3-01 第 3 条（纵深防御的最后一环）：前面每一道守卫都在**写**入 ready 状态的
+     * 时候生效，而这里是**把路径交给平台安装器**的那一刻 —— `electron-runtime.ts`
+     * 在 macOS 直接 `shell.openPath(installerPath)`、Windows 同族，**真的会把安装包
+     * 拉起来**。所以判据不能是"我们记得它是对的"，必须是"现在再验一遍它还对不对"。
+     *
+     * 判据与 `reuseDownloadedInstaller` 完全相同（当前源的清单 + 该版本的 SHA-256 +
+     * 平台容器魔数），区别只有一个：本函数**不改任何状态**，只回答能不能交付。
+     * @param version - 待安装版本。
+     * @param path - 待安装文件的绝对路径。
+     * @param epoch - 本次复检的代际号（复检自己也有 await，期间换源 ⇒ 结论作废）。
+     * @returns 属于当前源、且磁盘上那份文件就是它时为 true。
+     */
+    const readyArtifactOwnedByCurrentSource = async (
+      version: string,
+      path: string,
+      epoch: number,
+    ): Promise<boolean> => {
+      const source = currentSource()
+      if (source === null) return false
+      const manifest = await fetchReusableManifest(() => epochs.isCurrent(epoch))
+      if (manifest === null || !epochs.isCurrent(epoch)) return false
+      if (manifest.clientVersion.replace(/^v/u, '') !== version.replace(/^v/u, '')) return false
+      try {
+        const installed = await resolveUpdateInstaller({
+          platform: downloadPlatform(),
+          version,
+          userDataPath: adapter.userDataPath,
+          request: adapter.request,
+          manifest,
+          manifestURL: source.manifestURL,
+        })
+        if (!epochs.isCurrent(epoch)) return false
+        // `resolveUpdateInstaller` 的落点由 (userDataPath, version, 清单里的资产名)
+        // 唯一决定，与下载器返回的是同一个路径（`downloadDesktopUpdate` 直接返回
+        // `fetchUpdateInstaller().path`）⇒ 比对归一化后的路径就是"同一份文件"。
+        return installed.complete && resolvePath(installed.path) === resolvePath(path)
+      } catch {
+        // 复检失败一律**拒绝安装**（fail-closed）：宁可让用户再点一次"检查更新"，
+        // 也不把一份来路不明的二进制交给平台安装器。
+        return false
+      }
+    }
+
+    /**
+     * 把已下载的安装包交给平台安装流程。
+     *
+     * AA3-01：**交付之前必须先复检归属**（见 {@link readyArtifactOwnedByCurrentSource}）。
+     * 不复检的话，任何一条"上一台服务端/上一个渠道的包变成了 ready"的路径都会在这里
+     * 变成真实的进程启动（macOS `shell.openPath`）—— 渠道客户端的 `desktop.home_dir`
+     * 不同，那正是"所有对话消失"那一类事故的形态。
+     */
     const installReady = async (): Promise<void> => {
       const version = readyVersion
       const path = readyPath
       if (disposed || version === undefined || path === undefined) return
+      // 复检自己是一条会话派生的异步投影（取清单 + 读盘校验），同样要带代际。
+      const epoch = epochs.begin()
+      const owned = await readyArtifactOwnedByCurrentSource(version, path, epoch)
+      if (!epochs.isCurrent(epoch)) return
+      if (!owned) {
+        // 复检不过 ⇒ 这份"待安装"不属于当前源：撤掉它（渲染层/托盘的"安装"入口随之
+        // 消失），绝不把路径交给 `adapter.installUpdate`。什么都不装的失败比装错轻。
+        releaseReady()
+        return
+      }
       try {
         await adapter.installUpdate(version, path)
       } catch {
@@ -928,27 +1139,30 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
+    /** 手动检查的**任务体**（具名：结构判据按函数名登记豁免，见 `runManualCheck`）。 */
+    const runManualCheckTask = async (): Promise<void> => {
+      // 已经下载好了:用户点"检查更新"的实际意图就是把它装上。
+      if (readyVersion !== undefined) {
+        await installReady()
+        return
+      }
+      const outcome = await startCheck(false)
+      if (disposed) return
+      const version = observeResult(outcome)
+      if (version !== undefined) {
+        // 手动检查同样走静默下载(下载完再提示),失败按退避重试;
+        // 手动路径不做"同一版只处理一次"的去重 —— 用户点一次就该试一次。
+        await startDownload(version, false)
+        return
+      }
+      // 手动检查必须给出结论:失败(网络/未登录/服务端不可用)也要让用户看到。
+      await adapter.showManualCheckResult(
+        outcome.kind === 'ok' ? outcome.result : null,
+      ).catch(() => undefined)
+    }
+
     const runManualCheck = (): Promise<void> => {
-      manualTask ??= (async () => {
-        // 已经下载好了:用户点"检查更新"的实际意图就是把它装上。
-        if (readyVersion !== undefined) {
-          await installReady()
-          return
-        }
-        const outcome = await startCheck(false)
-        if (disposed) return
-        const version = observeResult(outcome)
-        if (version !== undefined) {
-          // 手动检查同样走静默下载(下载完再提示),失败按退避重试;
-          // 手动路径不做"同一版只处理一次"的去重 —— 用户点一次就该试一次。
-          await startDownload(version, false)
-          return
-        }
-        // 手动检查必须给出结论:失败(网络/未登录/服务端不可用)也要让用户看到。
-        await adapter.showManualCheckResult(
-          outcome.kind === 'ok' ? outcome.result : null,
-        ).catch(() => undefined)
-      })().catch(() => undefined).finally(() => { manualTask = undefined })
+      manualTask ??= runManualCheckTask().catch(() => undefined).finally(() => { manualTask = undefined })
       return manualTask
     }
 
@@ -1023,7 +1237,8 @@ export function apply(ctx: Context, config: Config): void {
 
     if (adapter.isPackaged && config.enabled) scheduleBackgroundCheck(config.initialDelayMs)
 
-    return async () => {
+    /** effect 的收尾（具名：结构判据按函数名登记豁免，见 `disposeUpdates` 的调用点）。 */
+    const disposeUpdates = async (): Promise<void> => {
       disposed = true
       if (pollTimer !== undefined) clearTimeout(pollTimer)
       if (retryTimer !== undefined) clearTimeout(retryTimer)
@@ -1045,6 +1260,8 @@ export function apply(ctx: Context, config: Config): void {
       if (downloadTask !== undefined) pending.push(downloadTask)
       await Promise.allSettled(pending)
     }
+
+    return disposeUpdates
   }, 'dsh-plugin-desktop: update polling, confirmation, and installer handoff')
 }
 

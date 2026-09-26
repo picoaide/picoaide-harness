@@ -515,23 +515,44 @@ describe('desktop update Host plugin', () => {
   })
 
   it('installs the downloaded installer on the next manual action instead of re-downloading', async () => {
-    const harness = await createHarness({
-      packaged: false,
-      request: async () => manifestResponse('2.1.0'),
-      downloadUpdate: async () => '/tmp/picoaide-installer',
-    })
+    // AA3-01（2026-09-27）：把路径交给平台安装器之前会按**当前源的清单**复检一次
+    // （清单版本 + 该版本的 SHA-256 + 平台容器魔数，见 `readyArtifactOwnedByCurrentSource`）
+    // ⇒ 夹具必须是"真的落在下载器算出的那个路径上、摘要与清单一致"的那一份，
+    // 而不是一个凭空的字符串路径。
+    const root = await mkdtemp(join(tmpdir(), 'dsh-updates-install-'))
+    try {
+      const bytes = installerArtifactFixture()
+      const installer = installerPathFor(root, '2.1.0')
+      const request = vi.fn(async (url: string) => {
+        if (url.endsWith('/api/client/v2/channel')) return channelResponse()
+        return manifestResponse('2.1.0', sha256Hex(bytes))
+      })
+      const harness = await createHarness({
+        packaged: false,
+        request,
+        userDataRoot: root,
+        downloadUpdate: async () => {
+          await mkdir(dirname(installer), { recursive: true })
+          await writeFile(installer, bytes)
+          return installer
+        },
+      })
 
-    await harness.tray.invoke()
-    // 现象：下载完成后托盘标签进入"可安装"。
-    await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
-    expect(harness.downloadUpdate).toHaveBeenCalledOnce()
+      await harness.tray.invoke()
+      // 现象：下载完成后托盘标签进入"可安装"。
+      await vi.waitFor(() => { expect(harness.tray.label()).toBe('PicoAide Harness 2.1.0 Ready to Install') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+      expect(harness.downloadUpdate).toHaveBeenCalledOnce()
 
-    // 第二个动作 = 安装(不是再下一次):已下载的文件被直接交给平台安装流程。
-    await harness.tray.invoke()
-    // 现象：第二次点击走安装交接（installUpdate 调用）。
-    await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', '/tmp/picoaide-installer') }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
-    expect(harness.downloadUpdate).toHaveBeenCalledOnce()
-    expect(harness.showManualCheckResult).not.toHaveBeenCalled()
+      // 第二个动作 = 安装(不是再下一次):已下载的文件**通过归属复检之后**被交给平台安装流程。
+      await harness.tray.invoke()
+      // 现象：第二次点击走安装交接（installUpdate 调用）。
+      await vi.waitFor(() => { expect(harness.installUpdate).toHaveBeenCalledWith('2.1.0', installer) }, { timeout: WAIT_BUDGETS.STATE_PROPAGATION_MS })
+      expect(harness.downloadUpdate).toHaveBeenCalledOnce()
+      expect(harness.showManualCheckResult).not.toHaveBeenCalled()
+      await harness.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('reuses a downloadable installer across a restart without transferring it again', async () => {

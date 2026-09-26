@@ -1,5 +1,5 @@
 /**
- * 「会话代际」判据的**唯一实现**（第二十六轮审计 Z2-01，P1）。
+ * 「会话代际」判据（第二十六轮审计 Z2-01，P1）—— **实现在叶子包里**。
  *
  * ## 它解决什么
  *
@@ -23,77 +23,28 @@
  *    `llm-deepseek` 段整段清空；
  *  - `channel-sync.ts`：界面品牌停在上一台服务端。
  *
- * ## 规则（每个 sync 都必须照此写）
+ * ## 为什么本文件只剩一行 re-export（2026-09-27 改动）
  *
- * 1. sync 入口**同步**取一次代际：`const epoch = epochs.begin()`（必须在第一个 await
- *    之前，否则"取代际"这一步自己就会被乱序）；
- * 2. **每个 `await` 之后**比对 `if (!epochs.isCurrent(epoch)) return` —— 不写盘、
- *    不发事件、不改状态；
- * 3. 被 await 的**被调方**如果自己也要在 await 之后改状态（`initSentry` 就是），
- *    就必须把「还算不算最新」当谓词**传进去**，而不是只在外层补一句比对。
+ * 第二十七轮 AA3-01 发现**同一族的第二个消费方在 desktop 包**：
+ * `packages/host/desktop/src/updates.ts` 的两条异步投影（清单检查、安装包下载）
+ * 在完成路径上只看 `disposed`、不看会话身份，于是上一台服务端/上一个渠道的安装包
+ * 会在当前会话里被标成"可安装"并被平台安装器拉起。
  *
- * 第 2、3 条不是靠自觉：`tests/session-epoch-wiring.spec.ts` 用 AST 逐条钉死
- * （未守卫的 await、未守卫的新 sync 入口、忘了传谓词的 `initSentry` 都会变红）。
+ * 而 desktop **不可能** import 本文件：构建图是
+ * `叶子包 → connectors → browser → wasm-apps-host → desktop → enterprise`（本包的
+ * `deps` 里有 `dsh-plugin-desktop`）⇒ 反向 import 会成环（见
+ * `docs/decisions/2026-09-20-host-leaf-packages-build-graph.md`）。正解是把**原语下沉到
+ * 零依赖叶子包**（与 2026-09-23 的 `loopback.ts` 四份合一、2026-09-24 的
+ * `session-events.ts` 三份合一同一手法），而不是在 desktop 里复制一份。
  *
- * ## 为什么是"代际计数器"而不是复用令牌比较
+ * 所以 `SessionEpoch` / `createSessionEpoch` 的**实现**落在
+ * `@picoaide/dsh-host-locale/session-events`（与本包同族、同一个构建图理由；
+ * 那里的 JSDoc 保留了完整的"规则 1/2/3"与"为什么用计数而不是令牌"两节）。本文件
+ * 继续作为本包的**语义入口**存在，导出面与语义**一字不改** —— `bootstrap.ts` /
+ * `error-reporting.ts` / `gateway-model.ts` / `channel-sync.ts` 四个调用点的
+ * `import { createSessionEpoch } from './session-epoch.ts'` 原样不动。
  *
- * 同仓已有两条同族先例，二者的**判据强度不同**，不能互相替代：
- *
- *  - `session-service.ts` 的 `persistEpoch`（F7）：写盘前比对"期间是否又发生过一次
- *    会话变化"——**计数**语义，与这里逐字同形；
- *  - `session-service.ts` 的 `clearIfCurrent(token)`（R22-V1-N3）：比对**令牌**，
- *    用于"这次 401 属于哪一代会话"。它的注释已经把同一条推理写完了
- *    （「`session` 是订阅那一刻的那一份，而 `sync` 里有 await —— 期间用户可能已经
- *    重新登录」）——**但那一轮只把它用在了错误路径**，成功路径（三次 settings 写入）
- *    原样未守卫，这就是 Z2-01。
- *
- * 令牌比较在这里**不够**：同一账号重新登录完全可能拿到同一个字符串（服务端不保证
- * 令牌每次不同），而"同一个令牌、不同代"恰恰是本族最危险的一种（bootstrap 的
- * models/baseURL 会被旧响应改写，凭据却"看起来没变"）。代际计数器对
- * 「登出再登录同一台服务端」「同一会话被重复广播」也一律成立，所以这里用它；
- * `clearIfCurrent` 继续负责"401 该不该清"那一问（两者在各自调用点并存，语义互指，
- * 见 `bootstrap.ts` 的 catch 分支注释）。
- *
- * 本模块**零依赖、零副作用**（不 import cordis、不读盘、不读环境），可以被任何
- * 宿主面安全引入。
  * @module @picoaide/dsh-enterprise/session-epoch
  */
 
-/** 会话代际守卫：一次同步的"我是不是最新"判定。 */
-export interface SessionEpoch {
-  /**
-   * 开始一次会话派生的同步，返回本次的代号（单调递增）。
-   *
-   * **必须在同步入口、第一个 `await` 之前调用**：晚一步就可能把"已经过期的自己"
-   * 当成最新的一代。
-   * @returns 本次同步的代际号（调用方可直接闭包持有）。
-   */
-  begin(): number
-  /**
-   * 本次同步是否仍是**最新**的那一次。
-   *
-   * 只在 `await` 之后调用：`false` ⇒ 期间已有更新的一次同步开始（登出、换服务端、
-   * 换账号、重登），本次结果必须整份丢弃。
-   * @param epoch - {@link begin} 返回的代际号。
-   * @returns 仍是最新一代为 true。
-   */
-  isCurrent(epoch: number): boolean
-}
-
-/**
- * 造一个代际守卫（每个插件实例一个，住在 `apply()` 作用域里）。
- *
- * 用闭包而不是模块级单例：模块级状态会跨插件实例/测试用例串味，而"谁是当前代"
- * 本来就是单个插件的订阅序列的属性。
- * @returns 代际守卫。
- */
-export function createSessionEpoch(): SessionEpoch {
-  let current = 0
-  return {
-    begin: () => {
-      current += 1
-      return current
-    },
-    isCurrent: (epoch: number) => epoch === current,
-  }
-}
+export { createSessionEpoch, type SessionEpoch } from '@picoaide/dsh-host-locale/session-events'
