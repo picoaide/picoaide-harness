@@ -2712,3 +2712,22 @@ FAIL	github.com/picoaide/picoaide/cmd/server	0.126s
 "文件里有没有这个词" vs "这条路径真的可达"）。每次我们只盯着自己的表示写判据，
 就会在表示比事实**宽**时假红（本次）、在比事实**窄**时假绿（AB1-03 的九种语法形态）。
 两边的修法都只有一句话：**把判据的取值域对齐被守护的那件事本身。**
+
+#### §7.69.10 第二十八轮冻结验收：三件套全绿（首次完整通过）
+
+| # | 判据 | 结果 |
+|---|---|---|
+| ① | `corepack yarn check`（唯一凭据行 `planned=32 executed=32`） | **EXIT=0** |
+| ② | `corepack yarn install --immutable` | **EXIT=0** |
+| ③ | `cd server && gofmt -l .` / `go vet ./...` / `go test ./cmd/server ./internal/... -count=1 -p 1 -timeout 30m` | **gofmt 空 / vet 0 / `GO_EXIT=0`：56 包 ok、0 FAIL** |
+
+**这是第二条判据面（Go 侧）第一次真正被验证**：本批共修了 3 条只在 CI 上会红的缺陷
+（§7.66 的 `yarn.lock`、§7.69.7 的三个 compose env、§7.69.9 的 bootstrap 判据取值域），
+其中两条是**靠这三件套才发现的**。
+
+**给下一轮的两条纪律补充**（写进 §0.35）：
+1. **验收命令不得把输出管进 `tail`/`head` 再取退出码** —— 本批我犯过两次：
+   `go vet ... | tail -5; echo $?` 抽的是 `tail` 的退出码（且 vet 没继承 `GOCACHE`，
+   读到只读的 `/root/.cache` 报假错）；`go test ... | grep | tail -40` 把 `FAIL <pkg>` 行截掉，
+   导致"39 ok / 1 FAIL 但说不出是哪一包"。**正确写法：全量日志落文件，再从文件里读判定行与退出码。**
+2. **`go vet ./...` 必须显式继承 `GOCACHE`/`GOMODCACHE`**（`/root/.cache/go-build` 只读）。
