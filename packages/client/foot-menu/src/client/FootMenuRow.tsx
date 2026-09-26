@@ -196,7 +196,19 @@ export function FootMenuRow(props: PropsRuntime<'sidebar.footer.action'>): JSX.E
 
   const closeMenu = useCallback((restoreFocus: boolean): void => {
     setOpen(false)
-    if (restoreFocus) anchorRef.current?.focus()
+    if (!restoreFocus) return
+    // **不许抢已经离开浮层的焦点**：条目的 `activate()` 可能自己把焦点移走 —— 打开整页
+    // 面板时装载器（`@picoaide/dsh-panel-surface`）会把焦点聚焦到面板容器上，此时再把
+    // 焦点拉回「更多」行，键盘用户就 Tab 不进面板了（2026-09-25 审计 FIX-29 P2 的组合
+    // 现场：浮层这一侧原本把错的行为写成了契约）。
+    // 只在"焦点还在浮层/锚点上、或已经没有落点"时才归还。
+    const active = document.activeElement
+    const panel = panelRef.current
+    const movedAway = active !== null && active !== document.body
+      && active !== anchorRef.current
+      && (panel === null || !panel.contains(active))
+    if (movedAway) return
+    anchorRef.current?.focus()
   }, [])
 
   /** 按锚点矩形重算浮层位置（向上展开：底边 = 视口高 - 锚点顶边 + 6）。 */
@@ -384,6 +396,14 @@ export function FootMenuRow(props: PropsRuntime<'sidebar.footer.action'>): JSX.E
                 title={waitingText}
                 style={{ ...ITEM, ...(waiting ? { color: WAITING_COLOR } : null) }}
                 onClick={() => {
+                  // 顺序是语义的一部分：**先把焦点交还锚点、再激活**。
+                  //   ① 装载器在 `activate()` 里记下"归还目标"——若此时焦点还在条目上，
+                  //      记下的就是随浮层关闭而消失的条目按钮（`display:none` 之后
+                  //      `focus()` 是空操作 ⇒ 面板关掉时焦点掉回 `<body>`）；锚点是常驻
+                  //      元素，「打开面板 → Esc 关闭 → 焦点回到『更多』行」这条回路才成立。
+                  //   ② 激活之后 `closeMenu(true)` 的"焦点已经离开浮层就不抢"判据，
+                  //      保证装载器把焦点移进面板时这里不会把它拉回来。
+                  anchorRef.current?.focus()
                   entry.activate()
                   closeMenu(true)
                 }}

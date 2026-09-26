@@ -20,6 +20,15 @@
  * 一致），又不会在同一个容器上反复 `createRoot` / `unmount`（那正是 React 会警告
  * "container already has a root" 的用法）。
  *
+ * ## 焦点契约（与 `close()` 配对，实现在 `activate()` 的注释里）
+ *
+ * `activate()` 把焦点**移进**面板容器（整页替换中列，键盘用户必须能直接 Tab 进去），
+ * 并在移入前记下当时的 `document.activeElement`；`close()` 在"焦点仍属于本面板"时把它
+ * **还回**那个元素（容器被隐藏后焦点会掉回 `<body>`，键盘用户的位置就丢了）。
+ * 两条边界：① 用户已经点到别处时**不抢**焦点；② 另一个面板接管时**不归还**（新面板
+ * 会聚焦自己的容器）。**触发方不得在 `activate()` 之后再 `focus()` 锚点** —— 那会把
+ * 焦点从刚打开的面板里抢走（2026-09-25 审计 FIX-29 P2 的现场）。
+ *
  * @module @picoaide/dsh-panel-surface/client/surface
  */
 
@@ -111,6 +120,8 @@ export function mountPanelSurface(options: PanelSurfaceOptions): PanelSurfaceHan
 
   let container: HTMLDivElement | undefined
   let root: Root | undefined
+  /** 激活时把焦点移进面板**之前**焦点在谁身上（关闭时归还的目标）。 */
+  let focusReturnTo: HTMLElement | null = null
 
   function ensureContainer(): HTMLDivElement | undefined {
     if (container !== undefined) return container
@@ -140,16 +151,54 @@ export function mountPanelSurface(options: PanelSurfaceOptions): PanelSurfaceHan
   observer.observe(document.body, { childList: true, subtree: true })
   sync()
 
-  function close(): void {
+  /** 焦点此刻是否仍在本面板里（或已经没有落点 —— 容器被隐藏后浏览器会把它丢回 body）。 */
+  function focusIsOurs(): boolean {
+    const active = document.activeElement
+    if (active === null || active === document.body) return true
+    return active instanceof HTMLElement && container !== undefined && container.contains(active)
+  }
+
+  /**
+   * 关闭本面板。
+   * @param restoreFocus - 是否把焦点归还给 `activate()` 之前那个元素（另一个面板接管时传 false）。
+   */
+  function closeAndMaybeRestoreFocus(restoreFocus: boolean): void {
     if (activePanelId(document) !== id) return
+    const target = restoreFocus && focusIsOurs() ? focusReturnTo : null
     document.documentElement.removeAttribute(PANEL_ACTIVE_ATTR)
     sync()
     onVisibilityChange?.(false)
+    // 容器被样式表隐藏（display:none）之后焦点会掉回 `<body>`，键盘用户的位置就丢了
+    // ⇒ 归还给触发它的那个元素（与账户浮层/设置面板"收起后焦点回到触发行"同形）。
+    if (target !== null && target.isConnected && typeof target.focus === 'function') {
+      target.focus({ preventScroll: true })
+    }
   }
 
+  function close(): void {
+    closeAndMaybeRestoreFocus(true)
+  }
+
+  /**
+   * 打开本面板并**把焦点移进面板**（整页替换中列 ⇒ 键盘用户要能直接 Tab 进去）。
+   *
+   * 焦点契约只有这一处实现（与 `close()` 配对，"谁移动焦点谁负责归还"）：
+   *   · `activate()` 先记下当时的 `document.activeElement`，再聚焦容器 `tabIndex=-1`；
+   *   · `close()` 在**焦点仍属于本面板**时把它还回那个元素，用户已经点到别处时不抢；
+   *   · **触发方不得在 `activate()` 之后自己 `focus()` 锚点** —— 那会把焦点从刚打开的
+   *     面板里抢走。2026-09-25 审计 FIX-29 P2 的现场正是这条：底部「更多」浮层的条目
+   *     `activate()` 之后 `closeMenu(true)` 把焦点抢回侧边栏行，键盘用户按 Tab 进不去
+   *     面板（浮层侧的修法见 `@picoaide/dsh-foot-menu` 的 `FootMenuRow`：先把焦点交还
+   *     锚点、再激活 ⇒ 这里记下的归还目标就是「更多」行本身，条目随浮层关闭消失，
+   *     不能当归还目标）；
+   *   · 另一个面板接管（`dsh-panel-activate` 广播）时**不归还** —— 否则会把焦点丢给
+   *     上一个面板的触发元素，还会被新面板记成自己的归还目标。
+   */
   function activate(): void {
     if (activePanelId(document) === id) return
     if (ensureContainer() === undefined) return
+    // 必须在 `container.focus()` **之前**记录：之后 `document.activeElement` 已经是容器。
+    focusReturnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     // **先广播、再写激活态**（顺序是语义的一部分，2026-09-21 真机审计）：
     // 旧面板的 `onOtherActivate → close()` 第一句是 `activePanelId(document) !== id 就返回`；
     // 若先写属性，旧面板看到的已经是新 id ⇒ close() 提前返回，既不清属性、也不渲染 null、
@@ -163,7 +212,8 @@ export function mountPanelSurface(options: PanelSurfaceOptions): PanelSurfaceHan
   }
 
   const onOtherActivate = (event: Event): void => {
-    if ((event as CustomEvent).detail !== id) close()
+    // 接管方会自己聚焦它的容器 ⇒ 这里不归还焦点（见 `activate()` 的契约注释）。
+    if ((event as CustomEvent).detail !== id) closeAndMaybeRestoreFocus(false)
   }
   const onClickSidebarRow = (event: MouseEvent): void => {
     if (activePanelId(document) !== id) return

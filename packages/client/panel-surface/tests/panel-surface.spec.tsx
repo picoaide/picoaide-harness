@@ -18,7 +18,14 @@
  *   - `hasInnerModal` 去掉 `[role="alertdialog"]` 分支（审计 C-01 的旧判据）⇒
  *     「alertdialog 同样成立」红（应用中心的确认框就是这个角色）；
  *   - `hasInnerModal` 不判 `aria-modal` ⇒ 「非模态 dialog 不吃 Esc」红；
- *   - `dispose()` 不摘 keydown 监听 ⇒ 「dispose 之后 Esc 不报错/不再改属性」红。
+ *   - `dispose()` 不摘 keydown 监听 ⇒ 「dispose 之后 Esc 不报错/不再改属性」红；
+ *   - `activate()` 不聚焦容器（2026-09-25 审计 FIX-29 P2 的现场：删掉这一行 14 例全绿）
+ *     ⇒ 「激活把焦点移进面板」红；
+ *   - `close()` 不归还焦点 / 不判"焦点是否还在面板里" ⇒ 对应两条红。
+ *
+ * 组合判据（真浮层 + 真装载器，含"打开面板后焦点进面板、Esc 后回到触发元素"的闭环）
+ * 在 `@picoaide/dsh-foot-menu` 的 `tests/panel-focus-handoff.spec.tsx` —— 单包用例
+ * 证明不了跨包交接。
  */
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -91,6 +98,68 @@ describe('中列整页装载器', () => {
     await act(async () => { handle.close() })
     expect(activePanelId(document)).toBeNull()
     expect(document.querySelector('[data-testid="body-cron"]')).toBeNull()
+  })
+
+  /**
+   * 焦点契约的**装载器这一半**（2026-09-25 审计 FIX-29 P2）。
+   *
+   * 现场：`activate()` 里的 `container?.focus({ preventScroll: true })` **没有任何判据**
+   * —— 整行删掉之后本包 14 例全绿。而它是"打开整页面板后键盘用户能 Tab 进去"的唯一实现，
+   * 也是浮层那条"点条目后焦点回到「更多」行"用例之所以把错的行为写死的另一半成因。
+   *
+   * 变异验证：删掉 `container?.focus(...)` ⇒ 本用例红。
+   */
+  it('激活把焦点移进面板容器（整页替换中列 ⇒ 键盘用户能直接 Tab 进去）', async () => {
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    await act(async () => { trigger.focus() })
+    const handle = mount('cron', '定时任务')
+    await act(async () => { handle.activate() })
+    const container = column.querySelector<HTMLElement>(`[${PANEL_SURFACE_ATTR}="cron"]`)
+    expect(container?.tabIndex).toBe(-1)
+    expect(document.activeElement, '焦点必须落在面板容器上').toBe(container)
+    trigger.remove()
+  })
+
+  /**
+   * 归还那一半：容器被样式表隐藏（display:none）后焦点会掉回 `<body>`，键盘用户的位置
+   * 就丢了 ⇒ `close()` 把焦点还给 `activate()` 之前那个元素（与账户浮层/设置面板同形）。
+   *
+   * 变异验证：`closeAndMaybeRestoreFocus` 去掉归还那两行 ⇒ 本用例红。
+   */
+  it('关闭把焦点归还给激活前的元素（触发它的那一行）', async () => {
+    const trigger = document.createElement('button')
+    trigger.textContent = '更多'
+    document.body.appendChild(trigger)
+    await act(async () => { trigger.focus() })
+    const handle = mount('cron', '定时任务')
+    await act(async () => { handle.activate() })
+    expect(document.activeElement).not.toBe(trigger)
+    await act(async () => { handle.close() })
+    expect(document.activeElement, '关闭后焦点必须回到触发元素').toBe(trigger)
+    trigger.remove()
+  })
+
+  /**
+   * 边界：焦点已经被用户移到别处（点了侧边栏另一行、另一个浮层）时，关闭面板**不许**
+   * 把焦点抢回旧触发元素 —— 那会让用户的下一个按键打到别的地方去。
+   *
+   * 变异验证：归还前不判 `focusIsOurs()`（无条件归还）⇒ 本用例红。
+   */
+  it('焦点已经不在面板里时不抢：关闭面板不改变当前焦点', async () => {
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    await act(async () => { trigger.focus() })
+    const handle = mount('cron', '定时任务')
+    await act(async () => { handle.activate() })
+
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    await act(async () => { elsewhere.focus() })
+    await act(async () => { handle.close() })
+    expect(document.activeElement, '焦点不在面板里 ⇒ 不得抢回旧触发元素').toBe(elsewhere)
+    trigger.remove()
+    elsewhere.remove()
   })
 
   it('两个面板互斥：打开 B 会把 A 挤下去', async () => {
