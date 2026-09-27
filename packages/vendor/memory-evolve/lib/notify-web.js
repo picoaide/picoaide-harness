@@ -77,17 +77,64 @@ export class NotificationStore {
     this.dir = join(memoryDir, 'notifications')
     this.file = join(this.dir, 'notifications.json')
     this.items = []
+    /** 读失败的拒写理由（`null`/无条目 = 基线可读或文件不存在）。FIX-48② 的写前闸门。 */
+    this.loadErrors = new Map()
     this.#load()
   }
 
-  /** 从文件加载（缺失/损坏按空表处理）。 */
+  /**
+   * 从文件加载。三档（FIX-48②，与 FIX-45③ / FIX-47① 的收口同形态）：
+   *
+   *  - `ENOENT`（首次使用 / 无通知）：**照常**当空表，写路径可写 —— 既有契约，不变；
+   *  - 内容不可解析（字节已读到）：空表复位 —— 既有契约，`tests/notify-web.test.js` 钉住；
+   *  - 其余读失败（EACCES / EIO / EISDIR…）：**字节从未被看到** ⇒ 记 {@link loadErrors}
+   *    + 一条可检索日志，写路径按 {@link assertWritable} 拒写。否则一次瞬时读失败，
+   *    下一次 `add()` 就以空表为基线整文件回写：第三十二轮 AE1-02 在真 EACCES
+   *    （`setpriv --reuid=65534`）下实测 `add()` 回 **`{ok:true}`** 而盘上其它会话的
+   *    通知被静默抹掉（`others_survived:false`），与 AD1 判 P1 的 `session-overrides.json`
+   *    逐条同形。
+   *
+   * 读面（`unreadCount` / `list` / `full` / `attachment`）刻意**不**抛：读失败降级成
+   * 空列表，只有写路径 fail-closed —— 与 FIX-45③ 的"读面可以降级、写路径必须被闸门拒掉"
+   * 同一口径。
+   */
   #load() {
+    let text
     try {
-      const parsed = JSON.parse(readFileSync(this.file, 'utf8'))
+      text = readFileSync(this.file, 'utf8')
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        this.loadErrors.delete(this.file)
+        this.items = []
+        return
+      }
+      this.loadErrors.set(this.file, error instanceof Error ? error.message : String(error))
+      console.warn(`[dsh-memory-evolve] notifications.json 不可读（${error?.code ?? 'unknown'}）—— refuse to overwrite baseline：${this.file}`)
+      this.items = []
+      return
+    }
+    // 读成功 ⇒ 解除闸门（下次读失败会重新置位；不做缓存，每次操作重读）。
+    this.loadErrors.delete(this.file)
+    try {
+      const parsed = JSON.parse(text)
       if (parsed && Array.isArray(parsed.items)) this.items = parsed.items
     } catch {
       this.items = []
     }
+  }
+
+  /**
+   * 写前闸门：本次运行的基线不可读时**拒绝任何落盘**（fail-closed）。
+   *
+   * 为什么在 `#save()` 与 `remove()` 两处都拦：`remove()` 会先删正文/附件文件再
+   * 落盘 —— 若只在 `#save()` 拦，闸门触发时那些文件已经删掉而通知仍在表里，
+   * 凭空造出"半删除"状态。
+   */
+  #assertWritable() {
+    const reason = this.loadErrors.get(this.file)
+    if (reason === undefined) return
+    throw new Error(`dsh-memory-evolve: 通知基线不可读（${this.file}）—— 已拒绝写入（refuse to overwrite baseline）：${reason}`
+      + '（以空基线回写会把盘上其它会话的通知整表抹掉；请恢复该文件的可读性后重试）')
   }
 
   /**
@@ -98,9 +145,12 @@ export class NotificationStore {
     // FIX-27（2026-09-13）：改走**自锚定安全原子写**（tmp 落点同样断言 +
     // O_EXCL 按 fd 写入 + rename 前后复检）——预置同名符号链接即写穿到目录外，
     // 曾被静默当成"写成功"。
+    // FIX-48②：读失败 ⇒ 基线未知 ⇒ 先过写前闸门（抛错由 add() 转成
+    // `{ok:false,message}`，由 API 层转成 500 JSON 信封），绝不"以空表回写"。
     // NF-3：落点被拒（悬空链接/越界/预置同名条目）时**同步抛**，由 add() 转成
     // `{ok:false,message}`；绝不让它在 async add() 里变成未处理的 Promise 拒绝
     // （通知链路的调用方只看 added.ok，穿透会成为无人处理的 rejection）。
+    this.#assertWritable()
     writeFileAtomicSafeAt(this.file, JSON.stringify({ items: this.items }, null, 2) + '\n')
   }
 
@@ -233,6 +283,8 @@ export class NotificationStore {
   /** 删除单条（连带正文文件与附件，不留孤儿）。 */
   remove(id) {
     this.#load()
+    // FIX-48②：先过闸门 —— 它会删正文/附件文件再落盘，读失败时半删除比拒删更糟。
+    this.#assertWritable()
     const at = this.items.findIndex((i) => i.id === id)
     if (at < 0) return { ok: false, message: nt2('notify.missing', { id }) }
     const m = this.items[at]
