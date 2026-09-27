@@ -200,10 +200,8 @@ const ENTRY_EXEMPTIONS: Readonly<Record<string, EntryExemption>> = {
   // 这两族要的分别是**排队**与**事件归属**，都不是"还算不算最新的一代"。为了"让规则 B
   // 认出它"而装一个用不上的代际接收者，反而会把文件拖进规则 C 的适用面、逼出
   // 11 + 2 = 13 条 `await-outside-guard` 豁免行 —— 那是拿假精度换假绿。
-  'packages/host/wasm-apps-host/src/index.ts': {
-    reason: 'FIX-40 ③ 收口、FIX-44 ② 复核为**等价机制**：这一族要的是**排序**而不是代际 —— 清理一旦开始 `rm -rf` 的后果无法撤回（代际只能"丢弃迟到结果"），而这里必须"让新作用域的动作排在上一代清理**落地之后**"。机制 = `scopeReset` 清理链：换代时 `scopeReset.start(previous)`（关窗同步、清缓存串行），新作用域的动作一律 `await scopeReset.settled()`（`requestOpen` 首句、`drainPendingLinks` 的 `.then`）。判据分两层：行为判据 `src/scope-reset.spec.ts` 用例 1–7（确定性闸门，不靠撞时序）、接线判据用例 8（**同时**要求 `scopeReset.start(previous)`、`await scopeReset.settled()`、`drainPendingLinks 排在 settled() 之后`，且禁止回到 `void windows?.closeAll()` / `void cache?.clearAll()`）。**负控**：把 `requestOpen` 的 `await scopeReset.settled()` 拆回即发即忘 ⇒ 用例 8 当场红（2026-09-23 实跑，日志 temp/r21/fix-44/probe/logs/nc-a-scope-reset.log）。**装代际是错的**：实测装上会让规则 C 报 11 条 `await-outside-guard`（`requestOpen` 7 + 本机路由 handler 3 + ai-chat 包装 1），逐条判定全是"作用域在写入点重取 / 缓存按 scope 分键 / 请求作用域自洽"的请求处理，没有一条把结果投影到"当前会话"；代际守卫会把换代窗口里**真实发生**的打开动作整份丢掉。',
-    witness: 'scopeReset.start(',
-  },
+  // ── 第三十三轮 FIX-49 ④：`wasm-apps-host/src/index.ts` **收口代际守卫**，于是
+  //    FIX-44 ② 那条"整文件豁免"按双向陈旧检测自行退场（见下面的 AWAIT_EXEMPTIONS）。
   'packages/host/enterprise/src/skill-telemetry.ts': {
     reason: 'FIX-40 ③ 收口、FIX-44 ② 复核为**等价机制**：上报是**事件归属**，不是"当前会话的投影" —— 事件发生在哪一代就记在哪一代名下，代际守卫会把换代窗口里的真实调用**整份丢掉**（既错记 vs 丢记，前者可修、后者不可观测）。机制 = **作用域在观察点、第一个 await 之前同步取**：两个观察点都先 `const session = ctx.picoSession.getSession()` 再 `void installedVersion(...)`，而 `reportSkillCall` 的去重键 `reportKey(session, …)` 自带账号 + 服务端地址 + 令牌 ⇒ 每条上报自带归属身份。判据 `tests/skill-telemetry-session-capture.spec.ts`（3 例；读文件由用例控闸，会话在读取期间从 ALICE 切到 BOB，断言这一笔仍记在 ALICE）。**负控**：把取用挪到 `installedVersion` 的续体里（修前形状）⇒ 同一份 spec 当场红（2026-09-23 实跑，日志 temp/r21/fix-44/probe/logs/nc-b-skill-telemetry.log）。**装代际是错的**：实测装上会让规则 C 对 `reportSkillCall`（`await fetchJSON`）与 `installedVersion`（`await readFile`）报红，而这两处 await 之后只返回值 / 只写"自带作用域身份的已报键集合"，没有跨代落地路径。',
     witness: 'const session = ctx.picoSession.getSession()',
@@ -242,6 +240,13 @@ const KNOWN_UNGUARDED_ENTRIES: Readonly<Record<string, string>> = {
 const AWAIT_EXEMPTIONS: Readonly<Record<string, string>> = {
   'packages/host/enterprise/src/error-reporting.ts#initSentry':
     '内部 await（close 冲刷/关闭空 client）之后确实会改模块级 sentry/status ⇒ 由调用方传入第 5 个实参（代际谓词）守卫，见判据 D。',
+  // ── 第三十三轮 FIX-49 ④：`wasm-apps-host/src/index.ts` 现在**自己带代际**（不再走
+  //    FIX-44 ② 的整文件豁免）。下面两条是"装了代际之后剩下的、确实不是会话投影"的 await
+  //    —— 与 FIX-44 ② 的逐条判定同源，只是范围从"整文件 11 条"缩到"3 条请求处理"：
+  'packages/host/wasm-apps-host/src/index.ts#apply$2':
+    '`appAiChat` 包装层：把 `handleAiChat(...)` 原样交出去，会话作用域由被调方内部的 `scope` thunk 在**写入点**解析（一次调用只解析一次，R13-E-04），本层 await 之后没有任何落地。',
+  'packages/host/wasm-apps-host/src/index.ts#handler':
+    '本机路由的两个 handler 是**同名属性** ⇒ 共用一条登记项（豁免是函数粒度的）：① `POST /open` 的 `await requestOpen(...)` 直通一个**自身带 6 个代际检查点**的被调方，await 之后只用返回值写 HTTP 应答；② AI 授权路由的 `grant/revoke` 是**事件归属** —— 会话在 handler 入口同步取一次，写进去的就是那一代的身份（与 `skill-telemetry` 的判定同源）。两处都不把结果投影到"当前会话"。',
   'packages/host/enterprise/src/error-reporting.ts#reportErrorReportingStatus':
     '状态回传的 POST（尽力而为）。调用点全部在 sync 内、且都在 `if (!epochs.isCurrent(epoch)) return` 之后；它自己的 await 之后只动"已报键"集合（带去重身份，不投影到当前会话）。',
   // ── desktop 的 `updates.ts`（AA3-01 收口时新增）：下面这些函数**不是**会话投影，
@@ -292,6 +297,9 @@ const AWAIT_EXEMPTIONS: Readonly<Record<string, string>> = {
 const DEFERRED_CALLBACK_EXEMPTIONS: Readonly<Record<string, string>> = {
   'packages/host/enterprise/src/error-reporting.ts#reportErrorReportingStatus':
     '上报失败分支的 `pendingStatusKeys.delete(key)` 摘的是**在飞键**，而该键 = 服务端地址 + `sessionIdentity(session)` + state/reason/dsn_host/level（`statusReportKey` 逐字）—— **自带去重身份**，不投影到"当前会话"。与同函数在 `AWAIT_EXEMPTIONS` 里的登记同源（那里记的是同一个"已报集合"）。',
+  // 第三十三轮 FIX-49 ④（`wasm-apps-host/src/index.ts` 装代际之后新增的唯一一条）：
+  'packages/host/wasm-apps-host/src/index.ts#apply$4':
+    '深链事件订阅回调（`ctx.on(\'pico/deep-link\', …)`）：它只做 scheme 归属判定并把打开动作交给 `requestOpen`（**自身带代际**），回调里唯一的"落地"是 `ctx.emit(WASM_APP_DEEP_LINK_FOREIGN_EVENT, …)`（异渠道提示，不带任何会话身份）。',
 }
 
 /** 一条判据违规。 */
@@ -1237,28 +1245,34 @@ describe('接线判据：会话代际守卫（AST，仓库级扫描根）', () =
    * 识别面（FIX-44 ③）：**按符号来源**认代际协议。
    *
    * 正向：既有正确用法一条都不许掉出适用面（四个 enterprise 投影 + desktop 的
-   * `updates.ts`）。它们是仓库里全部 `createSessionEpoch()` 消费点。
+   * `updates.ts` + 第三十三轮 FIX-49 ④ 收口的 `wasm-apps-host/src/index.ts`）。
    *
-   * 反向：`wasm-apps-host` 的清理链（`scopeReset.start`）与它的宿主文件**不在**面内 ——
+   * 反向：`wasm-apps-host` 的清理链（`scopeReset.start`）**不在**面内 ——
    * 修前 `scopeReset.begin(previous)` 的名字式识别把宿主文件拖进来，规则 B 认它"已守卫"、
    * 规则 C 同时报 11 条 `await-outside-guard`。名字已改（`start`），但判据的取值域现在
    * 由**来源**决定：改不改名都不再误判。
+   *
+   * ⚠️ 第三十三轮 FIX-49 ④ 的变更：宿主文件 `index.ts` 从**反向**清单移到**正向**清单 ——
+   * 它现在真的 import 了 `createSessionEpoch`（`requestOpen` 的 6 个换代检查点，
+   * AD1-02/AE2 的真机探针判据）。这个反向清单原本用"宿主文件不在面内"来证明"同名不同源
+   * 不误判"，那条性质由下面的**合成负例**（`zz-lookalike.ts`）继续钉着 —— 合成的形态
+   * 比"恰好今天这个文件没有代际"更抗漂移。
    */
-  it('代际协议按符号来源识别：既有五个消费点在面内，同名不同源的接收者不在面内', () => {
+  it('代际协议按符号来源识别：既有消费点在面内，同名不同源的接收者不在面内', () => {
     const expected = [
       'packages/host/enterprise/src/bootstrap.ts',
       'packages/host/enterprise/src/error-reporting.ts',
       'packages/host/enterprise/src/gateway-model.ts',
       'packages/host/enterprise/src/channel-sync.ts',
       'packages/host/desktop/src/updates.ts',
+      'packages/host/wasm-apps-host/src/index.ts',
     ]
     for (const file of expected) {
       expect(isEpochGuardedFile(readSource(file), file), `${file} 掉出了代际适用面（识别收窄过头）`).toBe(true)
     }
-    // 负向：清理链的实现与宿主文件都不是代际协议（`scope-reset.ts` 的模块头逐字论证过）。
+    // 负向：清理链的实现不是代际协议（`scope-reset.ts` 的模块头逐字论证过）。
     for (const file of [
       'packages/host/wasm-apps-host/src/scope-reset.ts',
-      'packages/host/wasm-apps-host/src/index.ts',
     ]) {
       expect(isEpochGuardedFile(readSource(file), file), `${file} 被同名不同源的接收者拖进了适用面`).toBe(false)
     }

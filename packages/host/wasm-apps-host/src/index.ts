@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { BROWSER_SURFACE_SERVICE } from '@picoaide/dsh-browser/surface'
+import { createSessionEpoch } from '@picoaide/dsh-host-locale/session-events'
 import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './app-protocol.ts'
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
 import { AI_CONSENT_FILE_NAME, createAiChatAuthorization, isAiConsentScopeError } from './ai-authorization.ts'
@@ -340,6 +341,33 @@ export function apply(ctx: Context, config: Config = {}): void {
     const session = currentSession()
     return session === null ? null : `${session.serverURL}\u0000${session.username ?? ''}`
   }
+  /**
+   * 会话**代际**（唯一实现 = `@picoaide/dsh-host-locale/session-events` 的
+   * `createSessionEpoch`；第二十六轮 Z2-01 / 第二十七轮 AA3-01 建立的收口口径）。
+   *
+   * 为什么需要它（第三十三轮 FIX-49 ④ / AD1-02 的 `requestOpen` 顺序面）：
+   * `requestOpen` 的形状是「入口读一次会话 → `await` 一次平台往返 → 落地」，
+   * 而 `openGate.check()` 的响应可能在**换代之后**才回来（A 的往返慢、用户已登出并
+   * 以 B 登录）。那时的落地全是**模块级**状态，于是旧账号的迟到答复：
+   *   ① 写进**新账号**的版本表（`knownVersions` / `knownTitles`）⇒ B 下次打开的
+   *      `current_version` 是 A 那一代的值；
+   *   ② `cache.clearApp()` 按**新账号**的作用域清（明明该清的是上一代）；
+   *   ③ `windows.close()` 关掉**新账号刚开的那个窗口**。
+   * 判据（AE2 三格真机探针，走本机打开路由 + 持有性证明）：修前 ①② 必现、③ 的反向
+   * 对照（同代）关的是自己那一代的窗口；修后 ①② 消失、③ 不变。
+   *
+   * **为什么 `begin()` 只在会话变化那一侧调**：`SessionEpoch` 的 `begin()` 会把"上一代"
+   * 作废，而**并发打开是合法动作**（待打开队列一次排空多条深链、用户连点两个应用）。
+   * 若 `requestOpen` 自己也 `begin()`，先发起的那次会被后发起的那次顶掉
+   * ⇒ 队列里除最后一条外全部打不开。所以代际号由订阅回调推进，`requestOpen`
+   * 只在入口**同步**读一次、在每个 `await` 之后用 `isCurrent()` 比对（读不推进）。
+   *
+   * 与 `scopeReset`（排序链）的分工不变：清理链管"新作用域的动作排在上一代 `rm -rf`
+   * 落地之后"，代际管"上一代的迟到结果整份丢弃"—— 两件事，缺一不可。
+   */
+  const sessionEpochs = createSessionEpoch()
+  /** 当前代际号（只由下面的会话订阅回调推进；`requestOpen` 读它，不推进）。 */
+  let sessionGeneration = sessionEpochs.begin()
 
   // ---- 应用 AI 桥（§21）：本地处理，绝不转发平台 ----
   const aiRunner = ctx.get(WASM_APPS_AI_RUNNER_SERVICE) as AiChatTurnRunner | undefined
@@ -563,9 +591,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     geometry?: DeclaredWindowGeometry | null,
     catalogWarm?: Promise<DeclaredWindowGeometry | undefined> | undefined,
   ): Promise<OpenRequestOutcome> => {
+    // 本次打开属于**哪一代会话**（必须在本函数第一个 `await` **之前**读，晚一步就可能
+    // 把"已经换代"的自己当成最新的一代）。比对读的是同一个代际号，不推进它。
+    const generation = sessionGeneration
     // 作用域清理链（`scope-reset.ts`）：打开会建窗并（经应用协议）写缓存，
     // 必须排在上一代那次 `rm -rf` 落地之后，否则新账号刚写下的条目会被它删掉。
     await scopeReset.settled()
+    // 换代检查点 ①（等清理链落地之后）：等到这里时如果已经换代，这次打开是**上一代
+    // 的动作** —— 建窗会落在新账号的分区/身份上，整份丢弃。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     const session = currentSession()
     if (session === null) {
       pendingLinks.enqueue(appId, path)
@@ -575,6 +609,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     // F16 硬/软闸门：新窗口 = 硬（拿不到版本就不打开）；聚焦已有窗口 = 软
     //（保留内容 + 提示，不把正常应用打成错误页）。§5.1b 冻结。
     const gate = await openGate.check(appId, knownVersions.get(appId) ?? '')
+    // 换代检查点 ②（**平台往返之后**，四个写入点之前）：`gate` 是上一代的答复 ⇒
+    // 它带来的每一处落地（版本表 / 内容缓存 / 关窗）都会作用到新账号身上。这是 AE2
+    // 探针 ①（版本表被旧值覆盖）与 ②（关掉新账号刚开的窗口）的**唯一**入口。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     if (gate.kind === 'denied') {
       // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
       // 平台说这个应用**没了**（404 未登记/软删/无可用版本，410 = 已下架）⇒
@@ -591,10 +629,18 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (!frozen && (gate.status === 404 || gate.status === 410)) {
         const scope = sessionScope()
         if (scope !== undefined) await cache?.clearApp(scope, appId)
+        // 换代检查点 ③（**清缓存之后、写版本表与关窗之前**）：`clearApp` 是异步的
+        // （真删目录），这段窗口里换的代会把剩下的 `knownVersions.delete` /
+        // `knownTitles.delete` / `windows.close` 全部落到新账号身上 —— AE2 探针 ②
+        // 打的就是这一处（关掉的是 B 刚打开的窗口）。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
         knownVersions.delete(appId)
         knownTitles.delete(appId)
         warn(`pico-wasm-apps-host: the platform reported ${appId} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
         await windows?.close(appId)
+        // 换代检查点 ③b（关窗之后）：`refused` 携带的是**上一代**平台答复的结论 ——
+        // 换代之后不能再把它当成当前会话的结论交回调用方。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
       } else if (frozen) {
         // 窗口与缓存一律保留（只读快照仍是可看的内容）；只记一条诊断。
         warn(`pico-wasm-apps-host: the platform reported ${appId} as frozen (HTTP ${String(gate.status)} ${gate.code}); keeping its window and cache`)
@@ -610,6 +656,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (gate.changed) {
         const scope = sessionScope()
         if (scope !== undefined) await cache?.clearApp(scope, appId)
+        // 换代检查点 ③（`clearApp` 之后写版本表之前；与 denied 分支同一处语义）：
+        // `gate.changed` 时旧值已被清掉，但**新值不能由上一代的答复写入**。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
         knownVersions.set(appId, gate.version)
       }
       if (gate.title !== undefined) knownTitles.set(appId, gate.title)
@@ -636,7 +685,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     const declared = geometry === undefined || geometry === null
       ? (alreadyOpen ? null : await (catalogWarm ?? windowCatalog.lookup(appId)) ?? null)
       : geometry
+    // 换代检查点 ④（**目录兜底往返之后、建窗之前**）：建窗是不可撤回的副作用
+    // （窗口落在 `currentPartition()`，而 partition 创建即固定）。在上一代的续体里建窗 =
+    // 新账号自己的窗口还没开、却先多出一个属于上一代的窗口。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     const result = await windows.open(appId, path, declared)
+    // 换代检查点 ⑤（建窗之后）：窗口已经建出来（不可撤回，且它落在**建窗当时**的分区
+    // 上），但这次打开的**结论**属于上一代 —— 不向当前会话广播事件、也不把它交回
+    // 上一代的调用方。认账残留：这里**不回滚**那个窗口 —— `windows.close(appId)` 按
+    // appId 关，而新账号可能已经合法地重建了同名窗口（`windows.ts` 的 WS-1 分支）。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
     return { kind: result.window, url: result.url, ...extras }
   }
@@ -692,6 +750,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   //
   let lastScope = scopeKey()
   ctx.effect(() => subscribePicoSession(ctx, service, () => {
+    // **代际推进点（唯一）**：会话一变就推进一代，`requestOpen` 里那些还在飞的
+    // `await` 续体因此会在下一个检查点整份丢弃（见 `sessionEpochs` 的注释）。
+    // 必须放在回调的第一句：晚于任何 await 的话，"这次换代"与"旧续体的检查点"
+    // 之间会有一个双方都自认为最新的窗口。
+    sessionGeneration = sessionEpochs.begin()
     syncPartitions()
     // 目录兜底按（服务端 + 令牌）缓存：会话一变就必须作废（切租户不得复用上一台的目录）。
     windowCatalog.invalidate()
