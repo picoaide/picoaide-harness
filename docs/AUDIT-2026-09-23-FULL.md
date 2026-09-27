@@ -3245,3 +3245,65 @@ R28 的 AB2 与 R31 的 AE2 是 32 轮里仅有的两条 **P0/P1 干净**的审�
   带表外参数名的行。**保守读法：读侧保持 P3。**
 - **运维交接**：改动前已结束的 run 在 R2 公开读桶里留下的 `_transfer/<run>-<attempt>-<token>/`
   需人工清理；给桶加 `_transfer/` 生命周期规则。
+
+### 8.6 FIX-49 收工（FIXED 4/0）—— 修正 §8.3 的在飞状态
+
+**① 渠道包主流程（P2）FIXED**：判据跟随**包内** `build/channel.json` 的 `defaults.server_url`
+（新增 `readPackageChannelProfile()`，经 `@electron/asar` 读 app.asar；三态：字符串 / `null` 官方 /
+`undefined` 拿不准 ⇒ **判红**）；`judge()`/`report()` 新增第三种结论 **`[SKIP]`**
+（不计失败、**必须逐条打出**、自检有三态夹具）。
+真跑：占位渠道包 ⇒ **`RESULT: PASS` / EXIT=0，判据行 12 条（含 `[SKIP]` 1 条）**，
+**5 条此前静默的判据全部有结论行**；官方产物**照旧 13 条 / PASS**（逐数字与 AE2 相同）。
+变异：修前 harness 指向**同一渠道产物** ⇒ 4 条判据行 / `FAIL(2)` / EXIT=1、5 条再次静默
+—— 与 AE2 §AE2-01 逐字同形。
+
+**并且它抓出一条被这次改动"暴露"的洞**：`step2-brand` 的期望值原先只算服务端那一侧，
+在渠道包上会算成 `PicoAide`（**该腿此前在渠道包上从未被求值，所以这个错一直没被发现**）
+⇒ 补 `expectedBrandName(channel, packageBrand)` 随包品牌回落。
+**这是"判据不覆盖 ⇒ 判据里的错也看不见"的又一实例**：不是判据写错了，是**它从未被执行过**。
+
+**② 401 假绿（P2）FIXED**：`left-login-page` 换成正向证据（登录表单消失 + `#root` 应用外壳已挂载 +
+`#err-step2` 无错误文案 + Step1 不再 active）；新增 `MOCK_LOGIN_STATUS` 负例夹具。
+真跑：401 网关 ⇒ **`FAIL(1)` / EXIT=1**（修前 13/13 全绿 EXIT=0）；真登录成功 ⇒ 照常 PASS。
+变异：只把谓词改回 `!includes('连接服务端')` ⇒ **401 那一轮红转绿**。
+
+**③ F-02（P2）FIXED**：新增 `parse_approval_req()`（从 approval 页解析隐藏 `req`，**零硬编码**）+
+前置判据（缺字段**点名判红**，不再降级成"下一跳 500"）+ 纯单元级入口 `--probe-approval-form`
+（真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段 5 形态）。
+真跑（AE2 留下的真服务端二进制 + 真 Dex 容器）：**`[1]..[6]` 全绿 / EXIT=0**；
+同一条真服务端上跑 `git show HEAD:` 的仓库原样脚本 ⇒ `[4] 500` ⇒ FAIL / EXIT=1。
+门禁侧把**假 IdP 也改成真 Dex 契约**（两段表单 + `req`，POST 侧强制校验）⇒ 脚本字段改回旧形态
+`[good] dex` 当场红。`--self-test` 32→33，`--probe-redirect-forms` 3/3 仍绿。
+
+**④ AD1-02 `requestOpen` 顺序面（P2，跨轮未处置）FIXED**：
+按题面指定的唯一实现 `SessionEpoch` 收口 —— 订阅回调推进代际、`requestOpen` 入口同步读一次、
+**6 个检查点覆盖四个写入点**（`knownVersions`/`knownTitles`/`cache.clearApp`/`windows.close`）。
+**`begin()` 只在会话变化那一侧调**（若 `requestOpen` 自己也 `begin`，连点两个应用/队列排空多条深链时
+除最后一条外全打不开 —— 该推理逐字写进代码注释）。
+AE2 三格探针判决化：修前 `FAIL(2)` → 修后 `PASS`，同代反向对照两轮都绿；
+变异删掉全部守卫 ⇒ `3 failed | 1 passed`（那 1 passed **就是**反向对照）。
+新增仓内确定性 spec `src/session-epoch-guard.spec.ts`（4 例，用例 2 用 `queueMicrotask`
+精确打在检查点③的窗口上）⇒ 整包 389→**393 passed**。
+登记面同步：删掉 `index.ts` 的 `ENTRY_EXEMPTIONS`（旧 witness 是 `text.includes` 子串在场断言 ——
+**按"钉机制不钉名字"整条退场，改由行为判据钉**）+ 新增 2 条 `AWAIT_EXEMPTIONS` +
+1 条 `DEFERRED_CALLBACK_EXEMPTIONS`（逐条写明"为什么不是会话投影"）。
+
+**验收（全量日志落文件）**：`install --immutable` EXIT=0 · `yarn check` **EXIT=0**
+（`planned=32 executed=32`，17/17 守卫 + 15/15 包）· `gofmt` 只列
+`server/temp/laneD/poolwait/main.go`（**另一条并发泳道**的临时文件；`server/**` 本轮零改动）·
+`go vet` 0 · `go test ./cmd/server ./internal/...` **EXIT=0 / 56 包全 ok** ·
+`wasm-apps-host` 整包 **393 passed** · `check-integration-tests` EXIT=0（digest 已联动 `ef2fe65c…`）。
+
+**两条交接**：
+1. **并发写者**：FIX-48 正在改 `scripts/check-integration-tests.mjs`（`blankComments`/`stringChunks` 等 hunk）
+   与 `package.json` / `scripts/check-ci-parity.mjs` / `scripts/check-install-integrity.mjs`。
+   FIX-49 在 07:36 那次 `yarn check` 撞到 3 条守卫红（`check:wasm-client-only` 的 digest 未同步），
+   它**按守卫自己的说明没有去改别人的登记值**（正确处置 —— 越权改别人的 digest 会掩盖对方的未完成状态），
+   对方随后自同步后全绿。**若 FIX-48 再次编辑该文件，`check:integration-tests` 的 digest 需再同步一次**
+   （当前登记值 `ef2fe65c42a0a580655aef57e23ee880d818a2115a38ddf835902f6df1844431`）。
+2. **收尾卫生**：`packages/host/desktop/dist/` 与 `build/` 已复位为**官方产物**（asar 内无
+   `build/channel.json` ✓）；渠道构建产物、`official-unpacked` 备份、`temp/electron-cache`、`temp/eb`、
+   `temp/r21/fix-49/gocache` 与 `channels/example-a` 占位包**已全部删除**（`temp/r21/fix-49` 现 3.2M）；
+   未执行任何 git 写操作。
+**未做（不在题面四条内）**：`sort -V` 版本序、真服务端 LDAP 腿、渠道产物的 `e2e:client`、
+`electron-shots` 其余腿的对抗性注入。
