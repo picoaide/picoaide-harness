@@ -3307,3 +3307,36 @@ AE2 三格探针判决化：修前 `FAIL(2)` → 修后 `PASS`，同代反向对
    未执行任何 git 写操作。
 **未做（不在题面四条内）**：`sort -V` 版本序、真服务端 LDAP 腿、渠道产物的 `e2e:client`、
 `electron-shots` 其余腿的对抗性注入。
+
+### 8.7 FIX-48 收工（FIXED 5/0，已在 `ed6285840b`）
+
+**它回答了我点名问的那一条 —— 而且答案验证了"修判据面"这条路本身**：
+
+> ①的扫描器改好后**当场把 ② 认出来了**：修 `notify-web` 之前，仓库级判据多出一行候选
+> `notify-web.js#load#assign-empty#file#1` 并 **EXIT=1**；修 ② 之后该 catch 里出现 `loadErrors.set(`
+> ⇒ 掉出候选集，总数回到 16（登记表未动）。
+
+⇒ **把判据的取值域修对，它就会自己找到此前看不见的真实点位。** 这不是"多写了一条判据"，
+而是"同一条判据终于能看见它本该看见的东西"。这条与 §7.72.1 的两条 P1 互为印证：
+**判据面不是文档工作，它直接决定能不能发现缺陷。**
+
+**它同时纠正了 AE1 的两处口径（校准，非指责）**：① 本地对等清单**不是**"7 条都 <1 分钟"
+—— 实测 4 条 <1s、2 条数十秒（`webadmin npm test` 73.6s、`make build-server` 30.0s），
+合计 **114.8s**，仍算快命令，但耗时照实报；② CI 的 `tar` 路径实为 **14** 条（AE1 报告写 15）。
+**两处都是"自述比实测乐观"的又一实例**，而这次是**下一轮泳道纠正上一轮泳道**。
+
+**登记链是连坐的（新知识，值得记）**：新增一个判据执行体 ⇒ `check-install-integrity.mjs` 的
+`EXECUTION_FACE_REGISTRY` ⇒ 它的摘要 ⇒ `check-guard-parser-integrity.mjs` ⇒ 它的摘要 ⇒
+`check-root-guards.mjs`。**一处新增，四级登记**。FIX-48 一次补齐，并在提交后的干净树上复跑
+`check-install-integrity` **EXIT=0 / VERDICT PASS（judge-bodies=189）** 自证完备。
+
+**又一例"HEAD 是会动的目标"**：`--print-digests` 在**脏树**里打印的是 **HEAD** 那份摘要，
+登记值必须取**工作树（= 提交后 HEAD）**那份 —— 照抄会得到"本地绿、CI 红"。
+（本会话第 4 次同族：A/B 探针写 HEAD、wasm gate 自报 HEAD 变了、`--print-digests` ×2。）
+
+**FIX-48 认账的 6 条未做项（含 4 条 defer 仍在）**：跨模块读的**命名空间导入/再导出转发**仍不在面内
+（要 AST）；四条 `defer`（`skills.js` / `skills-manager.js` / `coi/stats.js` / `coi/ws-coord.js`）
+**仍未修**，只保证"新写会被判红"；调用点身份对"等价改写"敏感（需重新登记，**有意**）；
+`docker compose` 不可用时该步会红（**是否降级未拍板**）。
+**核实**：`check-guard-parser-integrity --require-clean` 本地**必红**（严格面要求
+`HEAD == $GITHUB_SHA`，本机无该信号）⇒ 这正是本地清单用**不带该开关**形态的原因（正确的取舍）。
