@@ -332,6 +332,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/vendor/memory-evolve/scripts/run-tests.mjs',
   'packages/vendor/memory-evolve/scripts/sync-worker.mjs',
   'scripts/check-doc-claims.mjs',
+  // FIX-48⑤ 的两个新执行体（本地收尾清单 + 从 ci.yml 逐字抽出的 docs-only 分类器矩阵）：
+  // 它们自己也是"判据执行体"—— 改写 `ci-parity-classifier.mjs` 就等于改写分类器的判定矩阵。
+  'scripts/check-ci-parity.mjs',
+  'scripts/ci-parity-classifier.mjs',
   // 通过行探测的**独立子入口**（第十四轮 V14-A 的 VA-02-F2 收口）：它 import 主守卫、
   // 打印通过行，父进程把它的 stdout 抓回去反解断言 ⇒ 它进不了面（被改写）就等于
   // "探测子进程的输出没有任何锚定"。形状族（`scripts/*.mjs`）本来就会枚举到它。

@@ -172,12 +172,14 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '7bf93bda612dc031504cbb3b62ad4e7fc61171978c130d5283f4b02f0ab27948' }],
   ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
-  ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '00fd8c90848089613226c7dc8c5213eb016a37ce4586aeb2dcd5cfb63ef5e091' }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: '41470e66b1bd606cd6a4bed4cf786605af3103b7c9e0fff496fc76ce4f514f02' }],
+  // FIX-48③ 起：本脚本 run-id 化（证据目录 `temp/wasm-client-only/runs/<run-id>/`），
+  // 摘要在同一个 PR 里同步（可评审的 diff）。
+  ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '2ac17dcebf24a358bea66f7f9c3015610fb0b9ab8fcaaeeeec12007f704bd8a5' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: 'ef2fe65c42a0a580655aef57e23ee880d818a2115a38ddf835902f6df1844431' }],
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '6392cd179254012df46563424e2b3c9af395d35093d7a9c86ad97629d31996f5' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '4da3250f1b1f98a4a28661b0ebc012929a57fd5722954de355b6901c5518303e' }],
 ])
 
 /**

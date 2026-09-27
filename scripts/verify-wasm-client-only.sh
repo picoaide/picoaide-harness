@@ -70,7 +70,15 @@
 #   PROBE_TIMEOUT    单探针超时秒数（缺省 180）
 #   ELECTRON_BIN     Electron 可执行文件（缺省 packages/host/desktop/node_modules/.bin/electron）
 #   WASM_CHANNELS_REPO  真实私有渠道仓检出（可选；给了就跑正式 tag dry-run；不给则该步骤计入 SKIP）
-#   WASM_GATE_LOG_DIR   日志目录（缺省 temp/wasm-client-only/gate-logs）
+#   WASM_GATE_LOG_DIR   日志目录（缺省 `<run 目录>/gate-logs`；显式给出时按调用方给的走）
+#   WASM_GATE_RUN_ID    本次运行的 run id（目录名；缺省 UTC 时间戳+PID）。第三十三轮 FIX-48③：
+#                       绑定文件 / 组台账 / 探针日志 / 探针 HOME 全部落进
+#                       `temp/wasm-client-only/runs/<run-id>/`，好让同一工作树里**并发**跑
+#                       两次不再互踩（AE1 实测并发双红、单跑绿）；CI 可传
+#                       `${{ github.run_id }}-${{ github.job }}`。
+#                       `temp/wasm-client-only/HEAD-binding.txt` 成为指向**最近一次**运行的
+#                       符号链接（便利指针，判据不读它）；**绑定文件的内容语义不变**。
+#   WASM_GATE_BINDING   绑定文件的完整路径（缺省 `<run 目录>/HEAD-binding.txt`）。
 #   WASM_GATE_GO_ENV    repo（缺省，Go 缓存钉在仓内且离线）/ host（继承宿主 GOCACHE/GOMODCACHE/GOPROXY）
 #   WASM_GATE_REQUIRE_COVERED_PLATFORM=1  非 Linux 平台上探针按显式 SKIP（退出码 77）处理
 #   WASM_GATE_EXPECT_HEAD  跑前锁定的期望 HEAD（7–40 位小写十六进制，按**前缀**比较）。
@@ -99,8 +107,42 @@ cd "$ROOT"
 PG_DSN_TEST="${PG_DSN_TEST:-postgres://postgres:postgres@127.0.0.1:5432/picoaide_test}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-180}"
 ELECTRON_BIN="${ELECTRON_BIN:-$ROOT/packages/host/desktop/node_modules/.bin/electron}"
-LOG_DIR="${WASM_GATE_LOG_DIR:-$ROOT/temp/wasm-client-only/gate-logs}"
-PROBE_HOME="${PROBE_HOME:-${TMPDIR:-/tmp}/wasm-gate-home}"
+LOG_DIR="${WASM_GATE_LOG_DIR:-}"
+
+# ── run-id 化的证据目录（第三十三轮 FIX-48③）─────────────────────────────────
+# 现场（第三十二轮 AE1 受控复现）：`temp/wasm-client-only/HEAD-binding.txt` 与
+# `gate-logs/` 是**固定路径**且被多入口共享（`yarn check` 里的
+# `check:wasm-client-only` 根守卫 + 手跑 `--groups 6`）。组级台账是对**共享文件**做
+# "每组恰好一行 / 未选中的组不得产出台账"的对账 ⇒ 两个实例同时在跑时各自把行追加
+# 进对方的绑定文件，**两边都判红**（实测：两个 `--groups 6` 并发 ⇒ A/B 双 EXIT=1；
+# 清干净单跑 ⇒ EXIT=0 / PASS 6）。CI 每个 job 一台干净 VM ⇒ 永不发作
+# ⇒ 典型"**本地红、CI 绿**"。
+#
+# 收口：本次运行的**全部**中间证据（绑定文件、组台账、跳过理由、探针日志、残留报告、
+# 探针 HOME）落进 `runs/<run-id>/`；调用方可用 WASM_GATE_RUN_ID 指定 run id
+# （CI 可传 `${{ github.run_id }}-${{ github.job }}`，本地缺省=UTC 时间戳+PID）。
+# **HEAD-binding 的语义一字未改**：文件里仍然只有 HEAD / expect-head / branch /
+# dirty / groups / `group …` 台账行 —— 变的只是**路径**，不是内容（把 run id 写进
+# 内容会让"这份结论绑定到哪个 HEAD"这件事失去意义）。
+# `temp/wasm-client-only/HEAD-binding.txt` 保留为指向**最近一次**运行的符号链接：
+# 纯便利指针，**没有任何判据读它**（结论段打印本次运行的真实路径）。
+# WASM_GATE_LOG_DIR / WASM_GATE_BINDING 仍可显式覆盖（历史调用方式不变；此时
+# "共享目录"是调用方自己的选择，run 目录只用来放绑定文件）。
+if [ -n "${WASM_GATE_RUN_ID:-}" ]; then
+  RUN_ID="$WASM_GATE_RUN_ID"
+else
+  RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fi
+case "$RUN_ID" in
+  *[!A-Za-z0-9._-]*|'')
+    echo "verify-wasm-client-only: WASM_GATE_RUN_ID 形状非法（$RUN_ID）——" \
+      "只接受 [A-Za-z0-9._-]（它要当目录名；带 / 或空格会写到别处）" >&2
+    exit 2 ;;
+esac
+RUN_DIR="$ROOT/temp/wasm-client-only/runs/$RUN_ID"
+[ -n "$LOG_DIR" ] || LOG_DIR="$RUN_DIR/gate-logs"
+PROBE_HOME="${PROBE_HOME:-$RUN_DIR/probe-home}"
+BINDING="${WASM_GATE_BINDING:-$RUN_DIR/HEAD-binding.txt}"
 
 # Go 缓存缺省固定落在仓库内（判据要求）：不写 ~/.cache，且**离线**（GOPROXY=off）——
 # 门禁不允许在跑的中途去下载模块，那会让"同一 HEAD 两次结论不同"。
@@ -721,7 +763,8 @@ pg_reachable() {
 HEAD_START="$(git rev-parse HEAD)"
 BRANCH_START="$(git rev-parse --abbrev-ref HEAD)"
 DIRTY_START="$(git status --porcelain | wc -l | tr -d ' ')"
-BINDING="$ROOT/temp/wasm-client-only/HEAD-binding.txt"
+# FIX-48③：绑定文件落在**本次运行**的 run 目录（构造期已赋值；这里只确保目录存在）。
+mkdir -p "$(dirname -- "$BINDING")"
 
 EXPECT_HEAD_RAW="${WASM_GATE_EXPECT_HEAD:-}"
 EXPECT_HEAD=""
@@ -1219,6 +1262,30 @@ else
 fi
 
 note "PASS ${PASS_COUNT} ｜ FAIL ${FAIL} ｜ SKIP ${SKIP_COUNT} ｜ 绑定文件 ${BINDING#"$ROOT/"}"
+
+# FIX-48③ 收尾：把 `temp/wasm-client-only/HEAD-binding.txt` 指到**本次运行**的绑定文件
+# （符号链接，纯便利指针 —— 没有任何判据读它；判据只读上面那行打印的真实路径）。
+# 顺手清理**又老又超量**的 run 目录（>20 个且 mtime 超过 24h 才删；任何在跑或刚跑完的
+# 目录都不满足，所以并发实例不会被另一个实例删掉证据）。两步都是 best-effort：
+# 它们在只读/受限文件系统上失败不得影响结论。
+LATEST_LINK="$ROOT/temp/wasm-client-only/HEAD-binding.txt"
+if [ "$BINDING" != "$LATEST_LINK" ]; then
+  ln -sfn "$BINDING" "$LATEST_LINK" 2>/dev/null \
+    && note "最近一次绑定文件指针：${LATEST_LINK#"$ROOT/"} → ${BINDING#"$ROOT/"}（便利指针，判据不读它）" \
+    || note "WARN 无法更新最近一次绑定文件指针（${LATEST_LINK#"$ROOT/"}）—— 本次结论不受影响"
+fi
+if [ -z "${WASM_GATE_LOG_DIR:-}" ]; then
+  {
+    count=0
+    while IFS= read -r old; do
+      [ -n "$old" ] || continue
+      count=$((count + 1))
+      [ "$count" -le 20 ] && continue
+      [ "$old" = "$RUN_DIR" ] && continue
+      find "$old" -maxdepth 0 -mmin +1440 >/dev/null 2>&1 && rm -rf "$old"
+    done < <(ls -1dt "$ROOT/temp/wasm-client-only/runs"/*/ 2>/dev/null | sed 's:/$::')
+  } 2>/dev/null || true
+fi
 
 # 组级台账（R4-A-15 的可解析面）：逐组一行 `group <n> pass=… fail=… skip=…`，跳过逐条
 # `group-skip <n> <理由>`（都在绑定文件里，与上面的 SKIP 计数同源复算）。

@@ -78,6 +78,7 @@ if (OPTIONS.help) {
   console.log('  --port     监听端口(缺省 34567;env MOCK_GATEWAY_PORT / E2E_GATEWAY_PORT)')
   console.log('  --methods  /api/client/v2/auth/methods 下发的登录方式条数(缺省 2;env MOCK_GATEWAY_METHODS)')
   console.log('  /healthz 恒 200 —— electron-shots.mjs 的前置探测点,用它判 SKIP/PASS')
+  console.log('  env MOCK_LOGIN_STATUS=/auth/login 的状态码(缺省 200;401 = 登录被拒的负例夹具)')
   process.exit(0)
 }
 
@@ -92,6 +93,17 @@ const METHOD_CANDIDATES = [
 
 /** 本次运行下发的登录方式条数(clamp 到候选表长度 —— 越界不静默编造方式)。 */
 const METHOD_COUNT = Math.min(OPTIONS.methods, METHOD_CANDIDATES.length)
+
+/**
+ * `/api/client/v2/auth/login` 的状态码(缺省 200)。
+ *
+ * 非 2xx ⇒ 按真服务端的错误信封回绝(见下面的 login 分支)。这是**登录被拒**这条负例路径的
+ * 唯一开关(第三十三轮 FIX-49②):`MOCK_LOGIN_STATUS=401 node electron-shots.mjs …`。
+ */
+const LOGIN_STATUS = Number(process.env.MOCK_LOGIN_STATUS ?? 200)
+if (!Number.isInteger(LOGIN_STATUS) || LOGIN_STATUS < 100 || LOGIN_STATUS > 599) {
+  throw new Error(`MOCK_LOGIN_STATUS 不合法:${JSON.stringify(process.env.MOCK_LOGIN_STATUS)}(需要 100..599)`)
+}
 
 /** Sentry 摄取端点账本(进程内,`GET /__e2e/sentry-events` 暴露)。 */
 const sentry = {
@@ -243,6 +255,19 @@ const server = createServer((req, res) => {
   }
 
   if (url.pathname === '/api/client/v2/auth/login') {
+    // 负例夹具(第三十三轮 FIX-49②):`MOCK_LOGIN_STATUS`≠2xx 时按**真服务端的错误信封**
+    // 回绝(形状与 `server/internal/serverauth/handler.go` 的 `writeError(c, 401,
+    // "AUTH_FAILED", …)` 同源,客户端 `friendlyLoginError` 映射成同一句「账号或密码错误」)。
+    //
+    // 为什么需要它:登录被拒时客户端**停在 Step2**(错误写进 `#err-step2`、不跳转),而旧判据
+    // `left-login-page` 的谓词是"页面文本里没有 Step1 标记" ⇒ 那一次运行 13/13 全绿、EXIT=0,
+    // 与"真登录成功"那次的判据结论行**逐字相同**(AE2 真机实测)。这条夹具让那个形态在仓里
+    // 可复跑:`MOCK_LOGIN_STATUS=401 node electron-shots.mjs …` ⇒ 必须 `RESULT: FAIL`。
+    if (LOGIN_STATUS < 200 || LOGIN_STATUS >= 300) {
+      res.writeHead(LOGIN_STATUS, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { code: 'AUTH_FAILED', message: 'invalid credentials' } }))
+      return
+    }
     res.end(JSON.stringify({ token: 'mock-token-123', user: { username: 'admin' } }))
     return
   }

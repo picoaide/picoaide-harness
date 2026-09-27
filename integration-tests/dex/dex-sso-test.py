@@ -272,6 +272,66 @@ def approve_problems(status, url, body):
     return problems
 
 
+def parse_approval_req(html):
+    """从 IdP 授权确认页解析隐藏字段 `req`(第三十三轮 FIX-49 ③,真 Dex 的表单字段)。
+
+    真 Dex(v2.35+)的授权确认页有两份 POST 表单,**各自带一个每流一次性的** `req`:
+
+        <form method="post" action="/dex/approval">
+          <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+          <input type="hidden" name="approval" value="approve"/>
+          <button type="submit">Grant Access</button>
+        </form>
+        <form method="post" action="/dex/approval">
+          <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+          <input type="hidden" name="approval" value="rejected"/>
+          ...
+        </form>
+
+    POST **必须回传同一个** `req`(再加 `approval=approve`);只发旧字段
+    `{'approve': 'true'}` 会被 Dex 判成缺 `req` ⇒ **500**(2026-09-27 真 Dex 实测,
+    见 docs/AUDIT-2026-09-23-FULL.md §7.72.3)。`req` 每个授权流都不同 ⇒ 只能从**当前页**
+    的 HTML 解析,**不硬编码**。
+
+    解析口径(刻意宽松到"只看 input 标签自己"):
+      · 只认 `name="req"` / `name='req'` 的 `<input>`;**顺序无关**(真 Dex 里 `approval`
+        可能在 `req` 之前,别的版本也可能反)；
+      · `value` 的引号两种都认;**属性顺序无关**；
+      · `<form>` 的 `action` 是相对还是绝对与本函数无关(表单 POST 到"当前 url",
+        见下面步骤 4 的 `follow(op, url, data=form, …)`)—— 这两件事分开判,
+        所以各自的回归互不掩盖。
+    @param html - 授权确认页的正文。
+    @returns `req` 的值;页面上没有该字段时返回 `None`(**调用方必须如实判红**,不许静默提交空值)。
+    """
+    for tag in (html or '').split('<input')[1:]:
+        head = tag.split('>', 1)[0]
+        if 'name="req"' not in head and "name='req'" not in head:
+            continue
+        for quote in ('"', "'"):
+            marker = 'value=' + quote
+            start = head.find(marker)
+            if start < 0:
+                continue
+            start += len(marker)
+            end = head.find(quote, start)
+            if end > start:
+                return head[start:end]
+    return None
+
+
+def approval_form_problems(html):
+    """步骤 4 的**表单前置判据**:授权确认页必须能解析出隐藏字段 `req`。
+
+    为什么单独成一条(而不是"等 Dex 回 500 再说"):字段形态变了的时候,
+    提交一个空 `req` 会拿到一个**看起来像 IdP 故障**的 500 —— 判据只能报"授权确认 POST
+    返回 500",把"我们的表单契约过期了"误诊成"IdP 坏了"(2026-09-27 现场)。
+    这里把可判定的前置条件提前,失败原因直接点名。
+    """
+    if parse_approval_req(html) is None:
+        return ['approval 页里解析不出隐藏字段 req(IdP 表单形态变了;不能静默提交空值)']
+    return []
+
+
 def me_problems(status, body, expected_user, expected_email):
     """/auth/me 判据:200 + JSON + 身份就是本次登录的账号。"""
     problems = []
@@ -324,6 +384,10 @@ def _eval_approval_advance(obs):
     # 门禁的 `good` 假网关恒要求授权确认,所以这条判据在门禁里真的被求值)。
     if not obs.get('required'):
         return []
+    # 前置:approval 页必须解析得出隐藏 `req`(第三十三轮 FIX-49 ③)。取不到 ⇒ 明确判红,
+    # 不把它降级成"下一跳 500"那种看不出病根的形态。
+    if obs.get('req_resolved') is not True:
+        return approval_form_problems('')
     return approve_problems(obs.get('status'), obs.get('url', ''), obs.get('body', ''))
 
 
@@ -461,7 +525,7 @@ SELF_TEST_FIXTURES = [
     {
         'id': 'approval-advance', 'expect': True,
         'why': '正常:已离开 approval',
-        'observation': {'required': True, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
     },
     {
         'id': 'approval-advance', 'expect': True,
@@ -471,18 +535,25 @@ SELF_TEST_FIXTURES = [
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:仍停在 approval 页',
-        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/approval?req=x',
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/approval?req=x',
                         'body': '<form action="/approval"></form>'},
     },
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:回到登录表单',
-        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/auth/local', 'body': GOOD_LOGIN_PAGE},
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/auth/local', 'body': GOOD_LOGIN_PAGE},
     },
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:5xx',
-        'observation': {'required': True, 'status': 500, 'url': IDP_ORIGIN + '/dex/approval', 'body': 'boom'},
+        'observation': {'required': True, 'req_resolved': True, 'status': 500, 'url': IDP_ORIGIN + '/dex/approval', 'body': 'boom'},
+    },
+    {
+        'id': 'approval-advance', 'expect': False,
+        'why': '负例(第三十三轮 FIX-49 ③):approval 页解析不出隐藏 req ⇒ 必须**点名字段**判红,'
+               '而不是把它降级成"下一跳 500"',
+        'observation': {'required': True, 'req_resolved': False, 'status': 200,
+                        'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
     },
 
     # ---- callback-reached ----
@@ -599,6 +670,7 @@ def _new_reporter():
 def parse_args(argv):
     server, user, password = DEFAULT_BASE, DEFAULT_USER, DEFAULT_PASSWORD
     want_self_test, want_self_check, want_dump, want_probe = False, False, False, False
+    want_form_probe = False
     positional = []
     rest = list(argv)
     while rest:
@@ -611,6 +683,8 @@ def parse_args(argv):
             want_dump = True
         elif item == '--probe-redirect-forms':
             want_probe = True
+        elif item == '--probe-approval-form':
+            want_form_probe = True
         elif item == '--user' and rest:
             user = rest.pop(0)
         elif item == '--password' and rest:
@@ -628,12 +702,12 @@ def parse_args(argv):
         raise SystemExit(EXIT_USAGE)
     if positional:
         server = positional[0].rstrip('/')
-    modes = [want_self_test, want_self_check, want_dump, want_probe].count(True)
+    modes = [want_self_test, want_self_check, want_dump, want_probe, want_form_probe].count(True)
     if modes > 1:
-        print('dex-sso-test: --self-test / --self-check / --dump-criteria / --probe-redirect-forms '
-              '只能给一个', file=sys.stderr)
+        print('dex-sso-test: --self-test / --self-check / --dump-criteria / --probe-redirect-forms / '
+              '--probe-approval-form 只能给一个', file=sys.stderr)
         raise SystemExit(EXIT_USAGE)
-    return server, user, password, want_self_test, want_self_check, want_dump, want_probe
+    return server, user, password, want_self_test, want_self_check, want_dump, want_probe, want_form_probe
 
 
 def self_test():
@@ -771,10 +845,95 @@ def probe_redirect_forms():
     return EXIT_FAIL if problems else EXIT_PASS
 
 
+# ---------------------------------------------------------------------------
+# 纯单元级自证之二:**授权确认页的字段解析**(第三十三轮 FIX-49 ③ / F-02)。
+#
+# 为什么必须有它(而不是只靠真 Dex):真服务端 + 真 Dex 那条腿在 CI 上不一定跑得起来
+# (要容器与网络),而"approval 页长什么样、我们提交什么字段"是**唯一**决定 F-02 的
+# 契约点 —— 形态一变,端到端只会报一个看不出病根的 500。这里把四种页形态摆在同一个
+# 不变量上:**只从当前页解析 `req`、顺序无关、缺字段明确失败**。
+#
+# 判别力:去掉 `parse_approval_req()` 的 name 判定(改成"取第一个 input 的 value")
+# ⇒ 第 4 例(approval 在 req 之前)与第 5 例(缺 req)当场红。
+# ---------------------------------------------------------------------------
+DEX_APPROVAL_HTML = """<html><body>
+<form method="post" action="/dex/approval">
+  <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+  <input type="hidden" name="approval" value="approve"/>
+  <button type="submit">Grant Access</button>
+</form>
+<form method="post" action="/dex/approval">
+  <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+  <input type="hidden" name="approval" value="rejected"/>
+  <button type="submit">Cancel</button>
+</form>
+</body></html>"""
+
+APPROVAL_FORM_CASES = [
+    {
+        'why': '真 Dex 形态(两份表单,req 是每流一次性的隐藏字段)',
+        'html': DEX_APPROVAL_HTML,
+        'expect_req': 'yxzqpb4dlu424igxpsmarvoux',
+        'expect_problems': 0,
+    },
+    {
+        'why': '相对 action(真 Dex 就是相对):字段解析与 action 形态无关',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="req" value="r-relative"/></form>',
+        'expect_req': 'r-relative',
+        'expect_problems': 0,
+    },
+    {
+        'why': '绝对 action(自建 IdP / 反代形态):同样解析得出',
+        'html': '<form method="post" action="http://127.0.0.1:5556/dex/approval">'
+                '<input type="hidden" name="req" value="r-absolute"/></form>',
+        'expect_req': 'r-absolute',
+        'expect_problems': 0,
+    },
+    {
+        'why': '隐藏 input 顺序变化(approval 在 req 之前 + req 不是第一个 input)',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="approval" value="approve"/>'
+                '<input type="hidden" name="state" value="s1"/>'
+                "<input type='hidden' name='req' value='r-reordered'/>"
+                '</form>',
+        'expect_req': 'r-reordered',
+        'expect_problems': 0,
+    },
+    {
+        'why': '字段缺失 ⇒ 必须**明确失败**(返回 None + 一条点名 req 的问题),不许静默提交空值',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="approval" value="approve"/></form>',
+        'expect_req': None,
+        'expect_problems': 1,
+    },
+]
+
+
+def probe_approval_form():
+    """逐例复算授权确认页的字段解析;任一条不符即 FAIL(非零退出)。"""
+    problems = []
+    for case in APPROVAL_FORM_CASES:
+        got = parse_approval_req(case['html'])
+        if got != case['expect_req']:
+            problems.append(f"{case['why']} —— 解析出 {got!r} != 期望 {case['expect_req']!r}")
+        found = approval_form_problems(case['html'])
+        if len(found) != case['expect_problems']:
+            problems.append(f"{case['why']} —— 前置判据给出 {found!r},期望 {case['expect_problems']} 条")
+    total = len(APPROVAL_FORM_CASES)
+    for problem in problems:
+        print(f'  FAIL {problem}')
+    print(f'approval-form probe: {total - len(problems)}/{total} 种授权确认页形态符合预期'
+          '(真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段)')
+    return EXIT_FAIL if problems else EXIT_PASS
+
+
 def main(argv):
-    server, login, password, want_self_test, want_self_check, want_dump, want_probe = parse_args(argv)
+    server, login, password, want_self_test, want_self_check, want_dump, want_probe, want_form_probe = parse_args(argv)
     if want_probe:
         return probe_redirect_forms()
+    if want_form_probe:
+        return probe_approval_form()
     if want_self_test:
         return self_test()
     if want_self_check:
@@ -837,15 +996,25 @@ def main(argv):
 
     # 4. IdP 要求授权确认时继续提交(不能只是"看到 approval 就跳过")。
     approval_required = 'approval' in url
+    req_resolved = None
     if approval_required:
-        form = urllib.parse.urlencode({'approve': 'true', 'grant_scope': 'openid profile email'}).encode()
+        # **F-02 的唯一契约点**(第三十三轮 FIX-49 ③):真 Dex 的授权确认页字段是
+        # `req` + `approval=approve`,不是 {'approve':'true','grant_scope':…} ——
+        # 后者被 Dex 判成缺 `req` ⇒ 500(2026-09-27 真 Dex 实测)。
+        # `req` 是**每流一次性**的隐藏值,只能从**当前页**解析(不硬编码)。
+        req_value = parse_approval_req(body)
+        req_resolved = req_value is not None
+        for problem in approval_form_problems(body):
+            print(f'  ·  [4] {problem}')
+        form = urllib.parse.urlencode({'req': req_value or '', 'approval': 'approve'}).encode()
         status, url, body, _, deep_link, hops = follow(
             op, url, data=form,
             headers={'Content-Type': 'application/x-www-form-urlencoded', 'Referer': url})
     else:
         print('  ·  [4] IdP 未要求授权确认(直接回调),approve 提交未执行')
     reporter.report('approval-advance',
-                    {'required': approval_required, 'status': status, 'url': url, 'body': body})
+                    {'required': approval_required, 'req_resolved': req_resolved,
+                     'status': status, 'url': url, 'body': body})
 
     reporter.report('callback-reached', {'hops': hops})
 

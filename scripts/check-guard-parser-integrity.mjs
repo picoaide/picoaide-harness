@@ -359,7 +359,11 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
   {
     path: 'scripts/check-install-integrity.mjs',
     // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
-    sha256: 'c992b8fc3a595bff7c2e006127aff67a6362ee2d8846299c470b59ab2cd97b55',
+    // FIX-48⑤ 起：`EXECUTION_FACE_REGISTRY` 新增两个本地收尾清单执行体
+    // （`scripts/check-ci-parity.mjs` / `scripts/ci-parity-classifier.mjs`）⇒ 本件内容变了，
+    // 摘要同步进 diff。**注意 `--print-digests` 在有未提交改动时打印的是 HEAD 那份**，
+    // 登记值必须取**工作树**（= 提交后的 HEAD）那份：`sha256sum scripts/check-install-integrity.mjs`。
+    sha256: 'c85ef19f8617e3e866ed0294900e4d9bd6ab4c019e0ed558172823ae90e05f7b',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

@@ -270,7 +270,7 @@ function reportsResultPass(output) {
 
 /** 契约用例脚本（带 --self-test 与真实断言的那两个）。 */
 const CONTRACT_TESTS = [
-  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 32 },
+  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 33 },
   { id: 'ldap', path: 'integration-tests/openldap/ldap-rbac-brand-test.py', minCases: 35 },
 ]
 
@@ -290,7 +290,7 @@ const DEX_EXPECTED_CRITERIA = [
   { id: 'login-start', positive: 1, negative: 2 },
   { id: 'idp-login-page', positive: 1, negative: 2 },
   { id: 'submit-credentials', positive: 1, negative: 3 },
-  { id: 'approval-advance', positive: 2, negative: 3 },
+  { id: 'approval-advance', positive: 2, negative: 4 },
   { id: 'callback-reached', positive: 1, negative: 3 },
   { id: 'deep-link', positive: 2, negative: 6 },
   { id: 'deep-link-identity', positive: 2, negative: 3 },
@@ -335,14 +335,18 @@ const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
   'two-step-login-page',
 ]
 /**
- * 夹具总数下限（当前 29 条 = 正例 + 负例）。
+ * 夹具总数下限（当前 51 条 = 正例 + 负例 + `expect: 'skip'` 的按设计不适用格）。
  *
  * 与 `minCases` 同一口径的棘轮：删夹具必须同时改这个常量并进 diff。
+ * 第三十三轮 FIX-49 ①② 从 24 提到 51：登录页形态改成**包内渠道配置驱动**（内置地址 /
+ * 无内置 / 读不出来 三态）后，`step1-login-page` 与 `server-filled` 各自补了渠道包那一侧
+ * 的正负例，`left-login-page` 换成"登录成功的正向证据"后补了四条负例（含 401 现场形态）；
+ * `two-step-login-page` 新增一格 `expect: 'skip'` —— SKIP 是**第三种结论**，夹具必须钉住它。
  * **诚实边界**：单个**冗余**负例夹具被删（同一判据还有别的负例）本条拦不住 —— 那种
  * 删除不降低判别力（剩下的负例照样会拒掉恒真判据），所以不为此加精确夹具清单
  * （精确清单会让每次补夹具都要改两处，代价大于收益）。
  */
-const ELECTRON_SHOTS_MIN_FIXTURES = 24
+const ELECTRON_SHOTS_MIN_FIXTURES = 51
 /**
  * `electron-shots.mjs` 里"以判据 id 为首参的调用点"数量下限（当前 10 处）。
  *
@@ -461,8 +465,8 @@ const INTEGRATION_ENTRIES = [
     skipReasons: ['missing-server', 'missing-provider'],
     // FIX-47④a：出口**调用点**清单（`<原因码> @ <归一化代码行>`），不是只有原因码集合。
     skipCallSites: [
-      "missing-provider @ return skip('missing-provider',",
-      "missing-server @ return skip('missing-server',",
+      "missing-provider @ return skip('missing-provider', f'服务端未配置浏览器跳转登录(configured={sorted(names)}) —— ' '本用例验证的是 OIDC 授权码流')",
+      "missing-server @ return skip('missing-server', f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')",
     ],
   },
   {
@@ -475,8 +479,8 @@ const INTEGRATION_ENTRIES = [
     skipOutlet: 'skip',
     skipReasons: ['missing-server', 'missing-provider'],
     skipCallSites: [
-      "missing-provider @ return skip('missing-provider',",
-      "missing-server @ return skip('missing-server',",
+      "missing-provider @ return skip('missing-provider', f'服务端未启用 LDAP(configured={sorted(configured)}) —— ' '本用例验证的是 LDAP 登录/RBAC')",
+      "missing-server @ return skip('missing-server', f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')",
     ],
   },
   // FIX-47③ 引入的可参数化 mock 网关（`--methods n`，让"方式选择器"判据在 n<=1 与
@@ -494,9 +498,9 @@ const INTEGRATION_ENTRIES = [
     skipOutlet: 'skip',
     skipReasons: ['missing-app', 'missing-display', 'missing-server'],
     skipCallSites: [
-      "missing-app @ skip('missing-app', `未找到打包产物: ${APP}`,",
-      "missing-display @ skip('missing-display', `没有可用的 X 显示（DISPLAY=${DISPLAY}，${socket ?? 'X socket'} 不是可连接的 unix socket）`,",
-      "missing-server @ skip('missing-server', `服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`,",
+      "missing-app @ skip('missing-app', `未找到打包产物: ${APP}`, '先构建: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild（或用 --app / ELECTRON_SHOTS_APP 指向已有产物）')",
+      "missing-display @ skip('missing-display', `没有可用的 X 显示（DISPLAY=${DISPLAY}，${socket ?? 'X socket'} 不是可连接的 unix socket）`, '起一个: Xvfb :99 -screen 0 1440x900x24 &（或用 --display 指向已存在的显示）')",
+      "missing-server @ skip('missing-server', `服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`, '起服务端或用 --server 指向正确的地址')",
     ],
   },
 ]
@@ -623,55 +627,170 @@ function evaluateConstantExpression(expression, source) {
 }
 
 /**
- * 把源码里的**常量字符串拼接**折成字面量（FIX-47④c），供
+ * 去注释（保留换行与列位置）——引用面抽取前**必须**做这一步（FIX-48④c）。
+ *
+ * 现场（第三十二轮 AE1）：抽取器扫的是**整个源文件文本（含 JSDoc 与注释）**，于是
+ * "散文里提到的路径"也算引用 —— 用真函数跑本守卫全文抽出 14 条，其中 3 条
+ * （`integration-tests/extra-probe.ts` / `integration-tests/x.ts` / `integration-tests/x/y`）
+ * **只出现在注释里**。任何人**在注释里举一个 `.ts` 例子**，只要那个文件恰好存在，
+ * 就该判据而言必须登记；AE1 第一次影子根实验正是被它污染的（三格全红与注入形态无关）。
+ * @param text - 源码文本。
+ * @returns 注释字符换成空格（换行保留）之后的文本。
+ */
+function blankComments(text) {
+  return String(text)
+    .replace(/\/\*[\s\S]*?\*\//gu, match => match.replace(/[^\n]/gu, ' '))
+    // `://` 不能被当成行注释（脚本文本里有 URL）。
+    .replace(/(^|[^:])\/\/[^\n]*/gu, (match, prefix) => prefix + ' '.repeat(match.length - prefix.length))
+}
+
+/**
+ * 源文本里的全部**字符串/模板块**内容（三种引号；`\\.` 转义按两字符处理；模板可跨行）。
+ *
+ * 为什么要按**块**而不是按"整串等于路径"取：`` `${ROOT}/integration-tests/x.ts` ``
+ * 的路径**在块内**、且前面是 `/` 而不是引号 —— 只认"引号 + 整串"的旧实现整类看不见。
+ * @param text - 去注释后的文本。
+ * @returns 块内容数组。
+ */
+function stringChunks(text) {
+  const out = []
+  for (const match of text.matchAll(/'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/gu)) {
+    out.push(match[1] ?? match[2] ?? match[3] ?? '')
+  }
+  return out
+}
+
+/**
+ * 按**顶层逗号**切分实参表（引号与括号内的逗号不切）。
+ * @param text - 实参表原文。
+ * @returns 实参片段数组（丢弃空片段）。
+ */
+function splitTopLevelArgs(text) {
+  const out = []
+  let depth = 0
+  let current = ''
+  let quote = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote !== null) {
+      current += ch
+      if (ch === '\\') { current += text[i + 1] ?? ''; i += 1; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; current += ch; continue }
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+    if (ch === ',' && depth === 0) { out.push(current); current = ''; continue }
+    current += ch
+  }
+  out.push(current)
+  return out.filter(part => part.trim() !== '')
+}
+
+/**
+ * 把源码里的**常量拼接**折成字面量（FIX-47④c 建通道，FIX-48④c 补全四条形态），供
  * {@link integrationReferencedPathsIn} 的路径抽取复用。
  *
- * ## 现场（第三十一轮 AD2-05，真跑）
+ * ## 现场（第三十一轮 AD2-05 → 第三十二轮 AE1 复核）
  *
- * 抽取器只认两种形态：① 引号串里含 `integration-tests/`；②
- * `join(ROOT, '全','字','面','量')`。把同一条引用写成
- * `const A = 'integration-' + 'tests/extra-probe.ts'`（**同一个文件、同一次真的
- * `readFileSync`**）之后 ⇒ 守卫 `EXIT=0`、落盘引用数与 baseline 完全一致 ——
- * "面外登记 0 条"这句 `✓` 是在**没有看到那条引用**的前提下打出来的，而这条判据的
- * 存在理由正是"派生集合的取值面被收窄而登记表看不出来"。
+ * 第一版只补了 `'a' + 'b'` 一条通道；AE1 用**守卫自己导出的真函数**实测，四条现代写法
+ * 全部 `MISSED`：模板字符串（`` `${ROOT}/integration-tests/x.ts` ``）、
+ * `join(ROOT, 变量, '…')`、数组 join（`['integration-tests','x.ts'].join('/')`）、
+ * 反引号整条。影子根端到端两格仍然 `GREEN(!!)`（文件真的在盘上却"没被引用"）。
  *
  * ## 口径：复用本文件的常量求值，不另起一套解释器
  *
- * 只折 `+` 链，且要求**每个操作数都能被 {@link evaluateConstantExpression} 折成字符串**
- * （字面量，或本文件里 `const X = '…'` 的绑定）。折不出（自由变量、函数返回值、
- * 模板插值）就原样保留 ⇒ 与既有常量求值共享同一条"认账边界"。
- * @param text - 源码文本。
- * @returns 折过常量字符串拼接的文本。
+ * 四条通道都把"能不能折"交给 {@link evaluateConstantExpression}（字面量 + 本文件里
+ * `const X = …` 的绑定；求不出就**原样保留**）—— 认账边界与常量求值同一条。
+ * 折不动的模板（`integration-tests/${name}.ts`）不折，靠块内匹配兜。
+ * @param text - 源码文本（已去注释）。
+ * @param source - 常量绑定所在的正文（缺省 = `text`）。
+ * @returns 折过常量拼接的文本。
  */
-function foldConstantStringConcat(text) {
-  const source = String(text)
-  return source.replace(
-    /(?:'[^'\n]*'|"[^"\n]*"|[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\+\s*(?:'[^'\n]*'|"[^"\n]*"|[A-Za-z_$][A-Za-z0-9_$]*))+/gu,
+function foldConstantExpressions(text, source) {
+  const context = source ?? text
+  let out = String(text)
+  // ① 模板字符串：插值全是常量 ⇒ 折成单引号字面量。
+  out = out.replace(/`((?:[^`\\]|\\.)*)`/gu, (whole, body) => {
+    const pieces = []
+    let rest = body
+    for (;;) {
+      const at = rest.indexOf('${')
+      if (at < 0) { pieces.push({ literal: rest }); break }
+      const close = rest.indexOf('}', at)
+      if (close < 0) return whole
+      pieces.push({ literal: rest.slice(0, at) })
+      pieces.push({ expression: rest.slice(at + 2, close) })
+      rest = rest.slice(close + 1)
+    }
+    let value = ''
+    for (const piece of pieces) {
+      if (piece.literal !== undefined) { value += piece.literal; continue }
+      const folded = evaluateConstantExpression(piece.expression, context)
+      if (typeof folded !== 'string') return whole
+      value += folded
+    }
+    return `'${value}'`
+  })
+  // ② `join(A, B, C)`：首个实参折不出（`ROOT`）或折出来不含 `integration-tests` ⇒
+  //    当成"根"丢掉；其余实参全折成字符串才折。
+  out = out.replace(/\bjoin\(\s*([^()]*)\)/gu, (whole, args) => {
+    const parts = splitTopLevelArgs(args)
+    if (parts.length < 2) return whole
+    const values = parts.map(part => evaluateConstantExpression(part.trim(), context))
+    const head = values[0]
+    const tail = typeof head === 'string' && head.includes('integration-tests') ? values : values.slice(1)
+    if (tail.some(value => typeof value !== 'string')) return whole
+    const joined = tail.join('/')
+    return joined.includes('integration-tests/') ? `'${joined}'` : whole
+  })
+  // ③ 数组字面量 + `.join(sep)`：`['integration-tests', 'x.ts'].join('/')`。
+  out = out.replace(/\[([^[\]]*)\]\s*\.\s*join\(\s*'([^']*)'\s*\)/gu, (whole, items, separator) => {
+    const values = splitTopLevelArgs(items).map(item => evaluateConstantExpression(item.trim(), context))
+    if (values.some(value => typeof value !== 'string')) return whole
+    const joined = values.join(separator)
+    return joined.includes('integration-tests/') ? `'${joined}'` : whole
+  })
+  // ④ `+` 链（FIX-47④c 的原有通道）：每个操作数都能折成字符串才折。
+  out = out.replace(
+    /(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\+\s*(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|[A-Za-z_$][A-Za-z0-9_$]*))+/gu,
     (chain) => {
       const parts = chain.split(/\s*\+\s*/u)
-      const values = parts.map(part => evaluateConstantExpression(part, source))
+      const values = parts.map(part => evaluateConstantExpression(part, context))
       if (values.some(value => typeof value !== 'string')) return chain
       return `'${values.join('')}'`
     },
   )
+  return out
 }
 
 /**
- * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态
- * 与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与 `check-install-integrity.mjs` 的
- * 同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
+ * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态、
+ * 块内前缀插值形态、与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与
+ * `check-install-integrity.mjs` 的同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
  *
- * **FIX-47④c**：匹配前先做一次 {@link foldConstantStringConcat} —— 常量拼接出的同一条
- * 引用（`'integration-' + 'tests/extra-probe.ts'`）必须与字面量写法**同判**。
+ * **FIX-47④c / FIX-48④c**：匹配前先 {@link blankComments}（注释里的散文路径不是引用，
+ * AE1 实测的假阳性面）再 {@link foldConstantExpressions}（常量拼接出的同一条引用必须与
+ * 字面量写法**同判**）。
  * @param source - 源码文本。
  * @returns 归一化后的路径列表（去重、排序）。
  */
 function integrationReferencedPathsIn(source) {
-  const text = foldConstantStringConcat(source)
+  const raw = String(source)
+  const text = foldConstantExpressions(blankComments(raw), raw)
   const found = new Set()
-  for (const match of text.matchAll(/['"]([A-Za-z0-9_.@/-]*integration-tests\/[A-Za-z0-9_.@/-]+)['"]/gu)) {
-    found.add(match[1].replace(/^\.\//u, ''))
+  // ① 任何字符串/模板**块**里出现的 `integration-tests/…`：
+  //    · 整串就是路径（`'integration-tests/x.ts'`）—— 原有形态（块首即匹配）；
+  //    · 块里带前缀（`` `${ROOT}/integration-tests/x.ts` ``）—— 路径前面的字符限定为
+  //      `[/'"` + 反引号]` 或块首，**刻意不认空白**：散文串（`'见 integration-tests/x.ts'`）
+  //      不是引用，那种假阳性正是 AE1 记下的面。
+  for (const chunk of stringChunks(text)) {
+    for (const match of chunk.matchAll(/(?:^|[/'"`])(integration-tests\/[A-Za-z0-9_.@/-]+)/gu)) {
+      found.add(match[1].replace(/^\.\//u, ''))
+    }
   }
+  // ② `join(A, 'integration-tests', 'x', 'y')`（独立通道：折叠没命中时也要认）。
   for (const match of text.matchAll(/join\(\s*ROOT\s*,\s*((?:'[^']*'|"[^"]*")(?:\s*,\s*(?:'[^']*'|"[^"]*"))*)\s*\)/gu)) {
     const parts = [...match[1].matchAll(/'([^']*)'|"([^"]*)"/gu)].map(quote => quote[1] ?? quote[2])
     if (parts.length > 0 && parts[0] === 'integration-tests') found.add(parts.join('/'))
@@ -727,6 +846,27 @@ function integrationReferenceScopeSelfTest() {
     '形态⑩自证: `\'integration-\' + \'tests/…\'` 这种常量拼接出的引用必须与字面量写法同判（AD2-05 现场：'
       + `拼接形态让"落盘引用数"与 baseline 完全一致、守卫照打 ✓）—— 实际 unregistered=[${folded.unregistered.join(', ')}]`
       + '（若为空，先查顶层 evaluateConstantExpression 是否被搬回块内、或折叠正则失效）')
+  // FIX-48④c：四条**现代拼接**必须与字面量同判（AE1 用真函数实测四格全 MISSED）。
+  const modernShapes = [
+    ['模板字符串（前缀插值）', 'const P = `${ROOT}/integration-tests/__probe__/extra-probe.ts`'],
+    ['join(ROOT, 变量, 字面量)', "const DIR = 'integration-tests'\nconst P = join(ROOT, DIR, '__probe__/extra-probe.ts')"],
+    ['数组 join', "const P = ['integration-tests', '__probe__', 'extra-probe.ts'].join('/')"],
+    ['反引号整条', 'const P = `integration-tests/__probe__/extra-probe.ts`'],
+  ]
+  for (const [label, probeText] of modernShapes) {
+    const scoped = integrationReferenceScope(probeText, { exists, registry: [] })
+    check(scoped.unregistered.length === 1
+      && scoped.unregistered[0] === 'integration-tests/__probe__/extra-probe.ts',
+      `形态⑩自证: ${label} 拼出的引用必须与字面量写法同判（AE1 实测旧实现四格全 MISSED，`
+        + `影子根端到端仍是 GREEN(!!)）—— 实际 unregistered=[${scoped.unregistered.join(', ')}]`)
+  }
+  // FIX-48④c 反向：**注释里的散文路径不是引用**（AE1 的假阳性面 —— 谁在注释里举一个 `.ts`
+  // 例子，只要文件恰好存在，旧实现就要求登记）。
+  const commentOnly = '// 见 integration-tests/__probe__/extra-probe.ts\nconst X = 1'
+  const commented = integrationReferenceScope(commentOnly, { exists, registry: [] })
+  check(commented.unregistered.length === 0 && commented.present.length === 0,
+    '形态⑩自证: 只出现在注释里的 `integration-tests/**` 路径**不算引用**（AE1 记下的假阳性面）——'
+      + ` 实际 present=[${commented.present.join(', ')}] unregistered=[${commented.unregistered.join(', ')}]`)
   const inScope = `const P = 'integration-tests/__probe__/in-scope.mjs'`
   const ok = integrationReferenceScope(inScope, { exists: () => true, registry: [] })
   check(ok.unregistered.length === 0 && ok.present.length === 1,
@@ -857,8 +997,32 @@ const PORTAL_HTML = '<!doctype html><html><body><h1>PicoAide Harness</h1><h2>客
   + '<a class="dl" href="/updates/client/example.AppImage">下载</a></body></html>'
 const LOGIN_FORM_HTML = '<!doctype html><html><body><form method="post" action="/dex/auth/local?req=x">'
   + '<input type="text" name="login"><input type="password" name="password"></form></body></html>'
-const APPROVAL_HTML = '<!doctype html><html><body><form method="post" action="/dex/approval?req=x">'
-  + '<input type="hidden" name="approve" value="true"></form></body></html>'
+/**
+ * 假 IdP 的**授权确认页**（第三十三轮 FIX-49 ③：按**真 Dex** 的表单契约造）。
+ *
+ * 真 Dex(v2.35+)的 approval 页有两份 POST 表单，各自带一个**每流一次性**的隐藏 `req`：
+ *
+ *     <form method="post"><input type="hidden" name="req" value="…">
+ *       <input type="hidden" name="approval" value="approve"> …</form>
+ *     <form method="post"><input type="hidden" name="req" value="…">
+ *       <input type="hidden" name="approval" value="rejected"> …</form>
+ *
+ * 修前这里发的是 `<input name="approve" value="true">` —— 假 IdP **自己就在示范错的字段**，
+ * 于是"仓库脚本提交 `{'approve':'true'}`"在门禁里永远是绿的，而真 Dex 回 500
+ * （§7.72.3 的真服务端实测）。现在夹具与真形状逐字同构，且 POST 侧**强制校验**
+ * （见 `/dex/approval` 的 POST 分支）—— 脚本字段一改回旧形态，`good` 腿当场红。
+ * @param reqValue - 本次授权流的 `req`（假 IdP 用 state 充当，逐流不同）。
+ */
+const approvalFormHtml = reqValue => '<!doctype html><html><body>'
+  + `<form method="post" action="/dex/approval?req=${reqValue}&state=${reqValue}">`
+  + `<input type="hidden" name="req" value="${reqValue}">`
+  + '<input type="hidden" name="approval" value="approve">'
+  + '<button type="submit">Grant Access</button></form>'
+  + `<form method="post" action="/dex/approval?req=${reqValue}&state=${reqValue}">`
+  + `<input type="hidden" name="req" value="${reqValue}">`
+  + '<input type="hidden" name="approval" value="rejected">'
+  + '<button type="submit">Cancel</button></form>'
+  + '</body></html>'
 
 /** 读掉请求体（不读会让 keep-alive 请求挂住）。 */
 function readBody(req) {
@@ -1003,8 +1167,22 @@ function startGateway(scenario) {
       // `dex-relative-location` 场景复刻它，`good` 场景维持历史形态（绝对）。
       return redirect(303, sameOrigin(`/dex/approval?req=${state}&state=${state}`))
     }
-    if (path === '/dex/approval' && req.method === 'GET') return html(200, APPROVAL_HTML)
+    if (path === '/dex/approval' && req.method === 'GET') {
+      return html(200, approvalFormHtml(url.searchParams.get('req') ?? ''))
+    }
     if (path === '/dex/approval' && req.method === 'POST') {
+      // **真 Dex 的表单契约**（第三十三轮 FIX-49 ③）：POST 必须回传**同一个** `req`
+      // 加 `approval=approve`；缺 `req` / 值不匹配 / `approval` 不是 `approve` ⇒ **500**
+      // （与 2026-09-27 真 Dex 实测逐字同形）。随机字段、缺字段、顺序变化都必须被判红 ——
+      // 这正是端到端那条腿此前**零判别力**的地方：假 IdP 照单全收，真 IdP 回 500。
+      const expectedReq = url.searchParams.get('req') ?? ''
+      const form = new URLSearchParams(body)
+      if (expectedReq === '' || form.get('req') !== expectedReq || form.get('approval') !== 'approve') {
+        return json(500, {
+          error: 'invalid approval request',
+          detail: 'missing or mismatched "req" (dex requires the hidden req from the approval form)',
+        })
+      }
       const state = url.searchParams.get('state') ?? ''
       return redirect(303, sameOrigin(`/api/client/v2/auth/oidc/callback?code=code-42&state=${state}`))
     }
@@ -1122,6 +1300,7 @@ async function main() {
   // 落盘路径，要么扩展名在扫描面内，要么逐条登记为非判据面（见
   // {@link INTEGRATION_REFERENCE_SCOPE_REGISTRY}）"。
   integrationReferenceScopeSelfTest()
+  skipCallSiteShapeSelfTest()
   {
     const scope = integrationReferenceScope(readFileSync(fileURLToPath(import.meta.url), 'utf8'), {
       exists: path => existsSync(join(ROOT, path)),
@@ -1303,10 +1482,10 @@ async function main() {
         + `${bareSkip.map(line => JSON.stringify(line.trim().slice(0, 120))).join(' | ')}`
         + '\n  ⇒ 未登记的原因（含"什么都不说"）不得成为免检牌；所有 SKIP 必须经唯一出口带上登记过的原因码')
     if (typeof outlet === 'string' && outlet !== '') {
-      // 两种引号都认（与 {@link skipCallSitesFromSource} 同口径）。
-      const used = [...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'gu'))]
-        .map(match => match[1])
-      const usedSet = [...new Set(used)]
+      // FIX-48④a：原因码集合与调用点清单**共用同一个抽取器**（跨行 / 名字与 `(` 之间有空白
+      // 的写法两处必须同判 —— 旧实现一处逐行 exec、一处整串 matchAll，口径是分叉的）。
+      const codeSites = skipCallSitesFromSource(codeLines, outlet)
+      const usedSet = skipReasonCodesAtSites(codeSites)
       const sorted = values => [...values].sort().join(',')
       check(sorted(usedSet) === sorted(declaredSkip),
         `形态⑥: ${label} 的 SKIP 调用点原因码与登记表不一致（双向：声明了没用 / 用了没声明 都红）`
@@ -1342,7 +1521,7 @@ async function main() {
       check: 'skip-reasons', path: entry.path,
       declared: [...declaredSkip].sort().join(','),
       used: typeof outlet === 'string' && outlet !== ''
-        ? [...new Set([...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'gu'))].map(match => match[1]))].sort().join(',')
+        ? skipReasonCodesAtSites(skipCallSitesFromSource(codeLines, outlet)).sort().join(',')
         : '<无出口>',
       outlets: codeLines.filter(line => line.includes('SKIP[')).length,
       bare: codeLines.filter(line => /SKIP:(?!\])/u.test(line)).length,
@@ -1443,38 +1622,137 @@ function skipReasonsFromSource(source) {
 }
 
 /**
- * 一条腿的 **SKIP 出口调用点清单**（FIX-47④a）。
+ * 从 `(` 开始配对切出参数表（返回闭合括号的下标；找不到时返回文本末尾）。
+ * @param text - 文本。
+ * @param open - 左括号下标。
+ * @returns 右括号下标。
+ */
+function matchParenAt(text, open) {
+  let depth = 0
+  for (let k = open; k < text.length; k += 1) {
+    if (text[k] === '(') depth += 1
+    else if (text[k] === ')') { depth -= 1; if (depth === 0) return k }
+  }
+  return text.length - 1
+}
+
+/**
+ * 一条腿的 **SKIP 出口调用点清单**（FIX-47④a 建；FIX-48④a 改成不依赖行边界）。
  *
- * ## 现场（第三十一轮 AD2-03，真跑）
+ * ## 现场（第三十一轮 AD2-03 + 第三十二轮 AE1 复核）
  *
- * 原来的对账是**原因码集合**（`skipReasons` ↔ 源码 `SKIP_REASONS` ↔ 出口调用点的
- * 原因码）＋"`SKIP[` 字面量恰好 1 处（唯一出口）"。于是给某条腿**新增一个
- * `skip('missing-server', …)` 调用点**（复用已登记原因码、不新增 `SKIP[` 字面量）⇒
- * 守卫照打 `✓`、`EXIT=0` —— 而那正是"把一条腿悄悄变成什么都不验"的形态
- * （例如 `if os.environ.get('CI'): return skip(...)`），再与 F-07 串联就得到
- * "未验证面被写成 PASS"。
+ * 第一版对账单位从"原因码集合"升级成"调用点清单"，但抽取仍是**逐行** `exec`：
+ * 正则要求 `<出口>` 后**紧跟** `(`、且原因码必须出现在**同一行**。于是 AE1 实测三格
+ * 逃逸（期望红、实得 `GREEN(!!)`）：
  *
- * ## 口径
+ *   | 格 | 写法 | 结果 |
+ *   |---|---|---|
+ *   | L4Q | `return skip(\n "missing-server",\n "mutant",\n)`（跨行） | 绿 |
+ *   | L4c | 同上跨行 | 绿 |
+ *   | L4d | `return skip ("missing-server", "mutant")`（名字与 `(` 之间有空格） | 绿 |
  *
- * 对账单位从"原因码集合"升级为"**调用点清单**"：每个调用点用
- * `<原因码> @ <该行归一化后的代码>` 作身份（行号会漂，代码行不会），按**多重集**
- * 双向对账 —— "登记了却不在"与"在却没登记"都红，重复的同一行调用点也会被计数抓到。
- * @param lines - 该腿的源码行（已去注释）。
+ * 而**同一个函数**还被原因码集合对账复用（那一处走整串 `matchAll`，跨行能认）
+ * ⇒ 两处口径不一致：集合面看得见、调用点面看不见，双向对账于是永远"一致"。
+ *
+ * ## 口径（FIX-48④a）
+ *
+ * 在**去注释后的整段源码**上做括号配对扫描（不再逐行），并且：
+ *   · 名字与 `(` 之间允许空白/换行（`skip (` 与 `skip(` 同判）；
+ *   · 调用点身份 = `<原因码> @ <调用点所在语句归一化后的代码>`，其中"语句"= **调用起点
+ *     所在行首 → 闭合括号所在行行尾**（单行调用与旧口径**逐字相同**，登记表因此只在
+ *     多行调用上变长；多行调用的身份现在包含整条调用的实参，比"只有第一行"强）；
+ *   · 原因码与调用点清单**共用本函数**（`skipReasonCodesAtSites`），两处口径不再分叉。
+ * @param lines - 该腿的源码行（已去注释；数组或整串都接受）。
  * @param outlet - 唯一出口的函数名（`skip`）。
  * @returns 排序后的调用点身份列表（多重集）。
  */
 function skipCallSitesFromSource(lines, outlet) {
-  // **两种引号都要认**：只认单引号时，`skip(\"missing-server\", …)`（等价写法）是盲区 ——
+  const text = Array.isArray(lines) ? lines.join('\n') : String(lines)
+  // **两种引号都要认**：只认单引号时，`skip("missing-server", …)`（等价写法）是盲区 ——
   // 本仓 FIX-47④ 的变异 L4 第一版就是用双引号写的，旧口径当场假绿。
-  const pattern = new RegExp(`\\b${outlet}\\(\\s*['\"]([a-z][a-z-]*)['\"]`, 'u')
+  // 可选调用 `skip?.(…)` 与普通调用同判（正则不吃 `?.` 时它整类逃逸）。
+  const pattern = new RegExp(`\\b${outlet}\\s*(?:\\?\\.\\s*)?\\(`, 'gu')
   const out = []
-  for (const line of lines) {
-    const match = pattern.exec(line)
-    if (match === null) continue
-    out.push(`${match[1]} @ ${line.trim().replace(/\s+/gu, ' ')}`)
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const open = match.index + match[0].length - 1
+    const close = matchParenAt(text, open)
+    const code = /^\s*['"]([a-z][a-z-]*)['"]/u.exec(text.slice(open + 1, close))?.[1]
+    if (code === undefined) continue
+    const lineStart = text.lastIndexOf('\n', match.index) + 1
+    const lineEnd = text.indexOf('\n', close)
+    const statement = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd)
+    out.push(`${code} @ ${statement.replace(/\s+/gu, ' ').trim()}`)
   }
   return out.sort()
 }
+
+/**
+ * 调用点清单 → 原因码集合（与 {@link skipCallSitesFromSource} **同一抽取器**）。
+ * 身份形如 `<原因码> @ <语句>`，原因码是 `[a-z-]+`（不含 ` @ `），所以按下标切即可。
+ * @param sites - {@link skipCallSitesFromSource} 的结果。
+ * @returns 去重后的原因码数组。
+ */
+function skipReasonCodesAtSites(sites) {
+  return [...new Set(sites.map(site => site.slice(0, site.indexOf(' @ '))))]
+}
+
+/**
+ * SKIP 出口调用点抽取器的**形态自证**（FIX-48④a）。
+ *
+ * 为什么要有它：AE1 的三格逃逸（L4Q/L4c 跨行、L4d 名字与 `(` 之间有空白）都是**真跑**
+ * 才发现的 —— 抽取器自己的形态取值域必须有判据盯着，否则下一次"顺手换成 prettier 风格"
+ * 又会把调用点清单对账悄悄掏空（集合面看得见、调用点面看不见，双向对账于是永远"一致"）。
+ *
+ * 身份口径：`<原因码> @ <调用起点所在行首 → 闭合括号所在行行尾，空白折叠>`。
+ * **换行位置不进身份** ⇒ 同一条调用重排（单行↔跨行）不会让登记表漂。
+ */
+function skipCallSiteShapeSelfTest() {
+  const outlet = 'skip'
+  const cases = [
+    {
+      label: '单行（旧口径的基准）',
+      source: "    return skip('missing-server', 'x')",
+      expect: ["missing-server @ return skip('missing-server', 'x')"],
+    },
+    {
+      label: '跨行（AE1 的 L4Q/L4c：旧实现 GREEN(!!)）',
+      source: "    return skip(\n      'missing-server',\n      'mutant',\n    )",
+      expect: ["missing-server @ return skip( 'missing-server', 'mutant', )"],
+    },
+    {
+      label: '名字与 `(` 之间有空白（AE1 的 L4d：旧实现 GREEN(!!)）',
+      source: "    return skip ('missing-server', 'mutant')",
+      expect: ["missing-server @ return skip ('missing-server', 'mutant')"],
+    },
+    {
+      label: '可选调用 `skip?.(`',
+      source: "    return skip?.('missing-server', 'mutant')",
+      expect: ["missing-server @ return skip?.('missing-server', 'mutant')"],
+    },
+    {
+      label: '双引号（FIX-47④ 的 L4 第一版形态）',
+      source: '    return skip("missing-server", "mutant")',
+      expect: ['missing-server @ return skip("missing-server", "mutant")'],
+    },
+  ]
+  for (const item of cases) {
+    const sites = skipCallSitesFromSource(item.source.split('\n'), outlet)
+    check(JSON.stringify(sites) === JSON.stringify(item.expect),
+      `形态⑥d自证: ${item.label} 的出口调用点必须被抽到且身份稳定 ——`
+        + ` 期望 ${JSON.stringify(item.expect)}，实得 ${JSON.stringify(sites)}`)
+    const codes = skipReasonCodesAtSites(sites)
+    check(JSON.stringify(codes) === JSON.stringify(['missing-server']),
+      `形态⑥d自证: ${item.label} 的原因码集合必须与调用点清单**同源** —— 实得 ${JSON.stringify(codes)}`)
+  }
+  // 负例：原因码不是字面量（`skip(code, …)` 转发）时不得凭空造一个原因码出来。
+  const forwarded = skipCallSitesFromSource(['    return skip(code, reason)'], outlet)
+  check(forwarded.length === 0,
+    `形态⑥d自证: 原因码不是字面量的转发调用不得被当成调用点（否则身份会退化成 ${JSON.stringify(forwarded)}）`)
+  note('SKIP 出口调用点抽取自证: 单行/跨行/空白/可选调用/双引号 五形态同判、'
+    + '原因码集合与调用点清单同源、非字面量原因码不臆造 ✓')
+}
+
 
 // ---------------------------------------------------------------------------
 // 1. 语法闸门：integration-tests 下所有 .py 必须能解析
@@ -1841,8 +2119,10 @@ for (const file of mjsFiles) {
     {
       id: 'report-tautology',
       label: 'report() 恒真（N7 原形态）',
-      needle: '  const { name, ok, detail } = judge(id, observation)',
-      replacement: "  const { name, ok, detail } = { name: 'MUTATED', ok: true, detail: 'MUTATED' }",
+      // 第三十三轮 FIX-49① 起 `judge()` 还会透传 `skip`（按设计不适用 ⇒ `[SKIP]`）
+      // ⇒ 锚点与替换同步带上它：掏空之后 `expect: 'skip'` 的夹具会拿到 `true` ⇒ 自检非零。
+      needle: '  const { name, ok, detail, skip } = judge(id, observation)',
+      replacement: "  const { name, ok, detail, skip } = { name: 'MUTATED', ok: true, detail: 'MUTATED', skip: undefined }",
       expect: /实得 ok=true/u,
     },
     {
@@ -1856,18 +2136,18 @@ for (const file of mjsFiles) {
       id: 'runtime-wrapper-keyorder',
       label: '运行期包装换成一、键序变形（D-1 原形态）',
       file: 'electron-shots.mjs',
-      needle: 'const { report, failures, lines, exitCode } = reporter',
+      needle: 'const { report, failures, skips, lines, exitCode } = reporter',
       replacement: "const report = (id, observation) => ({ detail: 'MUTATED', ok: true })\n"
-        + 'const { failures, lines, exitCode } = reporter',
+        + 'const { failures, skips, lines, exitCode } = reporter',
       expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
     },
     {
       id: 'runtime-wrapper-early-return',
       label: '运行期包装换成二、early-return 恒真（D-1 变体）',
       file: 'electron-shots.mjs',
-      needle: 'const { report, failures, lines, exitCode } = reporter',
+      needle: 'const { report, failures, skips, lines, exitCode } = reporter',
       replacement: 'const report = (id) => { if (id) return { ok: true }; return { ok: false } }\n'
-        + 'const { failures, lines, exitCode } = reporter',
+        + 'const { failures, skips, lines, exitCode } = reporter',
       expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
     },
   ]
@@ -2107,6 +2387,31 @@ for (const test of CONTRACT_TESTS) {
     })
     if (probeOk) {
       note(`${test.id}: --probe-redirect-forms ${probeSummary[1]}/${probeSummary[2]} 种 Location 形态 ✓`)
+    }
+
+    // ---- ③c 纯单元级：授权确认页的**字段解析**（第三十三轮 FIX-49 ③ / F-02）------
+    //
+    // 为什么必须有它：真 Dex 的表单字段是 `req` + `approval=approve`（`req` 是每流一次性
+    // 的隐藏值），而仓库脚本此前提交 `{'approve':'true','grant_scope':…}` ⇒ 真 Dex 回
+    // **500**，`[5]/[6]` 两条判据结构上不可达（§7.72.3 的真服务端实测）。真服务端 + 真 Dex
+    // 那条腿在 CI 上不一定跑得起来，所以契约点必须有一条**不碰网络**的判据：五种页形态
+    // （真 Dex / 相对 action / 绝对 action / 隐藏 input 顺序变化 / 缺字段）各自钉一遍。
+    // 判别力：把 name 判定去掉（改成"取第一个 input 的 value"）⇒ 第 4、5 例当场红。
+    const formProbe = runContractScript(scriptPathFor(test), ['--probe-approval-form'], ROOT)
+    const formSummary = /approval-form probe: (\d+)\/(\d+) 种授权确认页形态符合预期/u.exec(formProbe.output)
+    const formProbeOk = formProbe.status === 0 && formSummary !== null
+      && formSummary[1] === formSummary[2] && Number(formSummary[2]) >= 5
+    check(formProbeOk,
+      `${test.path} --probe-approval-form 必须 exit 0 且**五种**授权确认页形态`
+        + `（真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段）逐条符合预期（实际 exit=${formProbe.status}）：`
+        + `${formProbe.output.trim().slice(-400)}`)
+    recordLayerVerdict('契约判据本体自证', {
+      check: 'approval-form', id: test.id, status: formProbe.status,
+      formsJudged: formSummary === null ? 0 : Number(formSummary[2]),
+      formsPassed: formSummary === null ? -1 : Number(formSummary[1]),
+    })
+    if (formProbeOk) {
+      note(`${test.id}: --probe-approval-form ${formSummary[1]}/${formSummary[2]} 种页形态 ✓`)
     }
   }
 
@@ -9008,6 +9313,11 @@ const LAYER_VERDICT_RULES = new Map([
       // FIX-45 ①③：`follow()` 对 Location 三形态（相对/绝对/深链）的**纯单元级**自证。
       if (o.check === 'redirect-forms') {
         return o.status === 0 && o.formsJudged >= 3 && o.formsPassed === o.formsJudged
+      }
+      // FIX-49 ③：授权确认页字段解析的五形态（真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段）
+      // 的**纯单元级**自证。
+      if (o.check === 'approval-form') {
+        return o.status === 0 && o.formsJudged >= 5 && o.formsPassed === o.formsJudged
       }
       return o.status === 0 && o.ok === o.total && o.total >= o.minCases
     },

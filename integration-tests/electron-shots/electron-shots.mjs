@@ -63,6 +63,26 @@
  *   把条数作为 `serverMethodCount` 一起交给判据:≤1 种 ⇒ 页面必须**不**渲染;
  *   ≥2 种 ⇒ 页面必须渲染同样多个;条数取不到 ⇒ FAIL(绝不静默判过)。
  *
+ * 2026-09-27(第三十三轮 FIX-49 ①②)之后的结构性改动 —— 这一段的主题是
+ * **「判据守的必须是产品契约,不是当前环境恰好长什么样」**:
+ *   ① **登录页形态跟随包内渠道配置**(FIX-49①)。旧实现用「页面文本里有没有 Step1 标记」
+ *      判两步式登录页,而那守的是"环境恰好是官方两步式"这个**环境属性**:带
+ *      `defaults.server_url` 的渠道包由 `autoConnect()` 直进 Step2
+ *      (`packages/host/enterprise/src/auth-gate.ts`),于是 AE2 真机实测同一 harness、
+ *      同一 mock 网关、只差包里有没有内置地址 ⇒ 官方 13 条判据行 / PASS,渠道包
+ *      `[FAIL] Step1 登录页` + `[FAIL] 检测到两步式登录页` / `FAIL(2)`。
+ *      **更重的第二半**:旧实现的其余五条判据全在 `if (step1) { … } else { … }` 的
+ *      Step1 分支里 ⇒ 渠道包**只求值 4 条**,另外五条一次都不判、也不报 SKIP。
+ *      现在判据按**包内 `build/channel.json` 的 `defaults.server_url`** 分档:内置 ⇒
+ *      "不得渲染 Step1 / 地址输入框不得可见 / 两步式按设计 SKIP";无内置 ⇒ 现行两步式判据。
+ *      五条判据在**两种形态下都产出结论行**(SKIP 是显式的一种结论,见 `report.mjs`)。
+ *   ② **登录成功要有正向证据**(FIX-49②)。旧判据 `left-login-page` 的谓词是
+ *      `!pageText.includes('连接服务端')` —— 它判的是"离开了 Step1":`/auth/login` 回 401 时
+ *      页面**停在 Step2**(`auth-gate.ts` 把错误写进 `#err2` 且不跳转)照样满足,于是
+ *      "真机主流程开箱不可登录"这种最严重的形态 13/13 全绿、EXIT=0(AE2 实测两次运行的
+ *      判据结论行**逐字相同**,只差截图字节数)。现在要的是"登录表单消失 + 应用外壳
+ *      (`#root`)已挂载 + 登录页无错误文案"。
+ *
  * 退出码契约(2026-09-23, 与 python 用例脚本对齐 —— 见 ../README.md):
  *   0  = 真的跑过且全部断言通过;
  *   1  = 断言失败(契约不满足);
@@ -75,9 +95,10 @@
  */
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { expectedBrandName } from './assertions.mjs'
 import { createReporter, runReporterSelfCheck } from './report.mjs'
 
@@ -90,8 +111,26 @@ const SCRIPT_DIR = import.meta.dirname
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..')
 const PACKAGE_ROOT = join(REPO_ROOT, 'packages', 'host', 'desktop')
 
-/** 单条 CDP 命令的**缺省**预算(协议层,与工具预算无关)。挂住 ⇒ 判失败,不无限等。 */
+/**
+ * 单条 CDP 命令的**缺省**预算(协议层,与工具预算无关)。挂住 ⇒ 判失败,不无限等。
+ */
 const CDP_COMMAND_TIMEOUT_MS = 15_000
+/**
+ * 登录页"舞台就位"的预算(第三十三轮 FIX-49①)。
+ *
+ * 渠道包(内置 `defaults.server_url`)按设计由 `autoConnect()` 直进 Step2,而那次自动连接
+ * 是**一次真的本机往返** ⇒ 2.5s 的固定等待在慢机器上会读到还没切换的 Step1。这里给它一个
+ * 有界预算,超时也不静默:判据照着手里的舞台状态判,红的时候点名看到的是什么。
+ */
+const STAGE_SETTLE_TIMEOUT_MS = 15_000
+/**
+ * 提交登录之后等"进入应用"的预算(第三十三轮 FIX-49②)。
+ *
+ * 成功路径会 `location.replace('/')` 换成应用外壳(SPA 挂载要一会儿),失败路径会**留在
+ * 登录页**并把错误写进 `#err-step2` —— 两种终态都在这里被显式等到,不再靠一个 3s 睡眠
+ * 之后"按页面文本里有没有 Step1 标记"猜。
+ */
+const LOGIN_SETTLE_TIMEOUT_MS = 20_000
 /**
  * 单条 CDP 命令的**生效**预算(`--cdp-timeout <ms>` > `ELECTRON_SHOTS_CDP_TIMEOUT_MS` > 缺省)。
  * 用 `let` 而不是再抄一份常量:标志/环境变量必须真的作用到 `send()` 上 ——
@@ -199,10 +238,10 @@ if (args.includes('--help')) {
  *     `report` 函数)与两条**针对本文件**的端到端变异(键序变形 / early-return)。
  */
 const reporter = createReporter()
-const { report, failures, lines, exitCode } = reporter
+const { report, failures, skips, lines, exitCode } = reporter
 
 if (args.includes('--self-check')) {
-  const selfCheck = runReporterSelfCheck({ report, failures, lines })
+  const selfCheck = runReporterSelfCheck({ report, failures, skips, lines })
   for (const failure of selfCheck.failures) console.error(`[FAIL] ${failure}`)
   console.log(`reporter self-check: ${selfCheck.passed}/${selfCheck.total} 条夹具经 report() 求值符合预期`)
   process.exit(selfCheck.failures.length === 0 ? EXIT_PASS : EXIT_FAIL)
@@ -491,6 +530,137 @@ async function evalJS(send, expr) {
 const pageTextOf = send => evalJS(send, 'document.body.innerText')
 
 /**
+ * 读登录页的**舞台**状态(#step1 / #step2 的 `active` 类 + 地址输入框的可见性)。
+ *
+ * 为什么不用页面文本判"现在在 Step1 还是 Step2":两步式登录页是**同一个** HTML 文档
+ * (`#step1` / `#step2` 两个 stage,靠 `active` 类切换),而 `document.body.innerText`
+ * **不含被 `display:none` 隐藏的部分** —— 文本判据因此把"渠道包直进 Step2"读成"没有 Step1"。
+ * 舞台状态是那件事的**直接观测**。
+ * @returns `{ step1Active, step2Active, serverValue, serverInputVisible }`(读不到为 undefined)。
+ */
+function readStage(send) {
+  return evalJS(send, `(() => {
+    const byId = id => document.getElementById(id)
+    const step1 = byId('step1')
+    const step2 = byId('step2')
+    const server = byId('server')
+    return {
+      step1Active: step1 === null ? undefined : step1.classList.contains('active'),
+      step2Active: step2 === null ? undefined : step2.classList.contains('active'),
+      serverValue: server === null ? undefined : server.value,
+      serverInputVisible: server === null ? undefined : server.offsetParent !== null,
+    }
+  })()`)
+}
+
+/**
+ * 读"登录之后"的**正向证据**(第三十三轮 FIX-49②)。
+ *
+ * 修前的判据是 `!pageText.includes('连接服务端')` —— 它判的是"离开了 Step1",而登录被拒时
+ * 页面停在 Step2(`auth-gate` 把错误写进 `#err-step2` 且**不跳转**),早已满足。现在读的是:
+ *   ① 登录表单还在不在(`#f2` / `#btn` / `#server`);② 应用外壳挂没挂(`#root` 有子节点);
+ *   ③ 登录页错误区文案(`#err-step2`;被应用外壳替换后为 null);④ Step1 舞台是否仍 active。
+ * @returns `{ loginFormPresent, appShellMounted, loginErrorText, step1Active }`。
+ */
+function readLoginEvidence(send) {
+  return evalJS(send, `(() => {
+    const byId = id => document.getElementById(id)
+    const root = byId('root')
+    const err = byId('err-step2')
+    const step1 = byId('step1')
+    return {
+      loginFormPresent: byId('f2') !== null || byId('btn') !== null || byId('server') !== null,
+      appShellMounted: root !== null && root.childElementCount > 0,
+      loginErrorText: err === null ? null : (err.textContent || ''),
+      step1Active: step1 === null ? undefined : step1.classList.contains('active'),
+    }
+  })()`)
+}
+
+/**
+ * 有界等某个舞台就位(见 {@link STAGE_SETTLE_TIMEOUT_MS})。
+ * @returns 最后读到的舞台状态(超时也返回,**不**在这里判失败 —— 判据在判据表里)。
+ */
+async function waitForStage(send, which, budgetMs) {
+  const key = which === 'step2' ? 'step2Active' : 'step1Active'
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    const stage = await readStage(send)
+    if (stage?.[key] === true) return stage
+    if (Date.now() >= deadline) return stage
+    await sleep(250)
+  }
+}
+
+/**
+ * 有界等"登录的终态":进应用(`#root` 挂载)或留在登录页并给出错误文案(见
+ * {@link LOGIN_SETTLE_TIMEOUT_MS})。两个方向都显式等到 —— 判据拿到的永远是终态观测,
+ * 而不是"睡 3 秒之后碰巧读到什么"。
+ * @returns 最后的证据观测(超时也返回)。
+ */
+async function waitForLoginOutcome(send, budgetMs) {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    const evidence = await readLoginEvidence(send)
+    if (evidence?.appShellMounted === true) return evidence
+    if (typeof evidence?.loginErrorText === 'string' && evidence.loginErrorText.trim() !== '') return evidence
+    if (Date.now() >= deadline) return evidence
+    await sleep(250)
+  }
+}
+
+/**
+ * 读**被测产物自己**的渠道配置:包内 `build/channel.json`。
+ *
+ * 为什么判据必须跟随**包内**的声明(第三十三轮 FIX-49①):登录页是两步式还是直接进 Step2,
+ * 由随包的 `defaults.server_url` 决定(`auth-gate` 的 `autoConnect()` 按 `data-default-server`
+ * 标记自动连接),而旧判据守的是"页面文本里有 Step1 标记" —— 那是**环境属性**:AE2 真机实测
+ * 同一 harness、同一网关,只差包里有没有内置地址,官方 PASS、渠道包 `[FAIL] Step1 登录页`。
+ *
+ * 三态(与 `assertions.mjs` 的 `builtInServerURL` 逐字对应):
+ *   · 对象 = 读到了包内渠道配置(`serverURL: null` = 里面**没有**内置地址,官方形态);
+ *   · `undefined` = **读不出来**(没有 app.asar / 归档读不了 / JSON 解析失败)⇒ 判据判失败,
+ *     绝不挑一种"看起来像"的形态。
+ *
+ * `brand` 是同一份配置里的随包品牌(`copy.login_display_name` → `identity.short_name`),
+ * 与服务端**没有**下发渠道内容时登录页渲染的那个名字同源(`auth-gate.ts:433` /
+ * `desktop-channel.ts:398`)。旧实现的品牌断言只算服务端那一侧,在渠道包上会把期望值算成
+ * `PicoAide` —— 而那条腿当时根本没被求值,所以这个洞一直没露出来。
+ * @returns `{ serverURL: string | null, brand: string | null } | undefined`。
+ */
+function readPackageChannelProfile() {
+  const candidates = [
+    join(dirname(APP), 'resources', 'app.asar'),
+    // macOS:Foo.app/Contents/MacOS/Foo ⇒ Foo.app/Contents/Resources/app.asar
+    join(dirname(APP), '..', 'Resources', 'app.asar'),
+  ]
+  const archive = candidates.find(candidate => existsSync(candidate))
+  if (archive === undefined) {
+    appendFileSync(APP_LOG, `[channel] 找不到 app.asar(候选: ${candidates.join(', ')})—— 包内渠道配置读不出来\n`)
+    return undefined
+  }
+  try {
+    // `@electron/asar` 只在桌面包的 devDependencies 里(它读 app.asar 是打包门禁的既有能力),
+    // 所以从那个包解析 —— 本目录的 bare import 解析不到它。
+    const asar = createRequire(join(PACKAGE_ROOT, 'package.json'))('@electron/asar')
+    const profile = JSON.parse(Buffer.from(asar.extractFile(archive, 'build/channel.json')).toString('utf8'))
+    const server = profile?.defaults?.server_url
+    const brand = profile?.copy?.login_display_name ?? profile?.identity?.short_name
+    return {
+      serverURL: typeof server === 'string' && server.trim() !== '' ? server.trim() : null,
+      brand: typeof brand === 'string' && brand.trim() !== '' ? brand.trim() : null,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    // 官方构建**本来就没有** `build/channel.json`(`prepareChannelPackaging()` 会删掉它)⇒
+    // "归档里没有这个条目"是**正常的官方形态**,不是"读不出来"。
+    if (/was not found in this archive|ENOENT/iu.test(message)) return { serverURL: null, brand: null }
+    appendFileSync(APP_LOG, `[channel] 读包内渠道配置失败: ${message}\n`)
+    return undefined
+  }
+}
+
+/**
  * 读服务端渠道内容(`GET /api/client/v2/channel`)—— Step2 的品牌断言以它为准。
  * 取不到时返回 undefined ⇒ 期望值回落随包品牌(`PicoAide`),而不是判据失效。
  */
@@ -707,51 +877,72 @@ try {
   void ws
   await send('Page.enable')
   await sleep(2500)
-  const step1Shot = await shot(send, '01-login-step1.png')
 
-  // 检查是否两步式登录页(Step1 有 '连接服务端')
+  // 判据分档的**唯一依据** = 包内 `build/channel.json`(FIX-49①)。
+  const packageProfile = readPackageChannelProfile()
+  const builtInServerURL = packageProfile === undefined ? undefined : packageProfile.serverURL
+  const packageBrand = packageProfile === undefined ? null : packageProfile.brand
+  const builtIn = typeof builtInServerURL === 'string' && builtInServerURL.trim() !== ''
+  // 渠道包按设计跳过 Step1(`autoConnect()` 直进 Step2)—— 给它一个有界预算等它就位。
+  if (builtIn) await waitForStage(send, 'step2', STAGE_SETTLE_TIMEOUT_MS)
+  const initialShot = await shot(send, '01-login-step1.png')
+
+  // 检查登录页形态(两步式 Step1 vs 渠道包直进 Step2):判据跟**包内**声明走。
   const step1Text = await pageTextOf(send)
-  const step1 = typeof step1Text === 'string' && step1Text.includes('连接服务端')
-  report('step1-login-page', { pageText: step1Text })
-  if (step1) {
-    report('two-step-login-page', { phaseOk: true })
-    // 输入服务端地址
+  const stage = await readStage(send)
+  const step1 = stage?.step1Active === true
+  report('step1-login-page', { pageText: step1Text, step1Active: stage?.step1Active, builtInServerURL })
+  report('two-step-login-page', { phaseOk: step1, builtInServerURL })
+  if (!builtIn) {
+    // 官方形态:两步式 —— 输入服务端地址 → 下一步。
     await evalJS(send, `(() => {
       const i = document.getElementById('server'); if (i) { i.value = '${SERVER}'; i.dispatchEvent(new Event('input')) }
     })()`)
     await sleep(300)
     const filled = await evalJS(send, `document.getElementById('server')?.value`)
-    report('server-filled', { server: SERVER, serverValue: filled })
+    report('server-filled', { server: SERVER, serverValue: filled, serverInputVisible: stage?.serverInputVisible, builtInServerURL })
     await shot(send, '02-step1-filled.png')
     // 点下一步
     await evalJS(send, `document.getElementById('next-btn')?.click()`)
-    await sleep(2000)
-    const step2Shot = await shot(send, '03-step2-brand.png')
-    // 品牌区 = 服务端渠道显示名(缺失回落随包品牌)⇒ 期望值从服务端读,不写死夹具名。
-    const channel = await fetchChannel()
-    const step2Text = await pageTextOf(send)
-    report('step2-brand', { pageText: step2Text, expectedBrand: expectedBrandName(channel) })
-    // 两张截图必须不同:随仓证据里曾出现 4/5 逐字节相同(唯一判据只有"字节数 > 1000")。
-    report('step2-shot-differs-from-step1', { baseline: step1Shot, current: step2Shot })
-    const meth = await evalJS(send, `document.querySelectorAll('.method').length`)
-    // 判据跟**服务端真下发的条数**走:≤1 种 ⇒ 页面按设计不渲染(那是 PASS);≥2 种 ⇒ 必须全渲染;
-    // 服务端读不到 ⇒ `serverMethodCount: null` ⇒ 判据 FAIL 并打印原因(不编造)。
-    report('method-picker', { methodCount: meth, serverMethodCount: await fetchAuthMethods() })
-    // 输入本地账号登录
-    await evalJS(send, `(() => {
-      const u = document.getElementById('username'); if (u) { u.value = 'admin'; u.dispatchEvent(new Event('input')) }
-      const p = document.getElementById('password'); if (p) { p.value = 'admin123456'; p.dispatchEvent(new Event('input')) }
-    })()`)
-    await sleep(200)
-    await shot(send, '04-step2-filled.png')
-    await evalJS(send, `document.getElementById('btn')?.click()`)
-    await sleep(3000)
-    await shot(send, '05-after-login.png')
-    // 登录后应离开登录页(P3 断言:原来只截图不断言)。
-    report('left-login-page', { pageText: await pageTextOf(send) })
+    await waitForStage(send, 'step2', STAGE_SETTLE_TIMEOUT_MS)
   } else {
-    report('two-step-login-page', { phaseOk: false })
+    // 渠道包:按设计**没有**"填地址"这一步 —— 判据换成"地址输入框不得可见"
+    // (2026-09-11 的产品约定:内置地址不留"修改服务端地址"退路)。仍然是判据,不是跳过。
+    report('server-filled', { server: SERVER, serverValue: stage?.serverValue, serverInputVisible: stage?.serverInputVisible, builtInServerURL })
   }
+  const step2Shot = await shot(send, '03-step2-brand.png')
+  // 品牌区 = 服务端渠道显示名(**服务端没给时回落随包品牌**)⇒ 期望值两边都从真源读,
+  // 不写死夹具名(FIX-49① 补第二段回落,见 `expectedBrandName`)。
+  const channel = await fetchChannel()
+  const step2Text = await pageTextOf(send)
+  report('step2-brand', { pageText: step2Text, expectedBrand: expectedBrandName(channel, packageBrand) })
+  const meth = await evalJS(send, `document.querySelectorAll('.method').length`)
+  // 判据跟**服务端真下发的条数**走:≤1 种 ⇒ 页面按设计不渲染(那是 PASS);≥2 种 ⇒ 必须全渲染;
+  // 服务端读不到 ⇒ `serverMethodCount: null` ⇒ 判据 FAIL 并打印原因(不编造)。
+  report('method-picker', { methodCount: meth, serverMethodCount: await fetchAuthMethods() })
+  // 输入本地账号登录
+  await evalJS(send, `(() => {
+    const u = document.getElementById('username'); if (u) { u.value = 'admin'; u.dispatchEvent(new Event('input')) }
+    const p = document.getElementById('password'); if (p) { p.value = 'admin123456'; p.dispatchEvent(new Event('input')) }
+  })()`)
+  await sleep(200)
+  const filledShot = await shot(send, '04-step2-filled.png')
+  // 两张截图必须不同:随仓证据里曾出现 4/5 逐字节相同(唯一判据只有"字节数 > 1000")。
+  // 官方形态比 **Step1(01) vs Step2(03)**(点"下一步"前后的两帧);渠道包没有 Step1 那一步
+  // ⇒ 比 **初始页(01) vs 填完凭据(04)** —— 同样是"流程真的前进 + 截图真的重抓"。
+  report('step2-shot-differs-from-step1', { baseline: initialShot, current: builtIn ? filledShot : step2Shot })
+  await evalJS(send, `document.getElementById('btn')?.click()`)
+  // 登录的**终态**:进应用(`#root` 挂载)或留在登录页 + 错误文案(见 `waitForLoginOutcome`)。
+  const afterLogin = await waitForLoginOutcome(send, LOGIN_SETTLE_TIMEOUT_MS)
+  await shot(send, '05-after-login.png')
+  // 登录成功的**正向证据**(FIX-49②):见 `assertions.mjs` 的 `left-login-page`。
+  report('left-login-page', {
+    pageText: await pageTextOf(send),
+    loginFormPresent: afterLogin?.loginFormPresent,
+    appShellMounted: afterLogin?.appShellMounted,
+    loginErrorText: afterLogin?.loginErrorText,
+    step1Active: afterLogin?.step1Active,
+  })
 } catch (err) {
   scriptError = err instanceof Error ? err.message : String(err)
 } finally {
