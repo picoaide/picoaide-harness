@@ -3340,3 +3340,31 @@ AE2 三格探针判决化：修前 `FAIL(2)` → 修后 `PASS`，同代反向对
 `docker compose` 不可用时该步会红（**是否降级未拍板**）。
 **核实**：`check-guard-parser-integrity --require-clean` 本地**必红**（严格面要求
 `HEAD == $GITHUB_SHA`，本机无该信号）⇒ 这正是本地清单用**不带该开关**形态的原因（正确的取舍）。
+
+### 8.8 第三十三轮批的完整冻结验收（空载，全绿）—— 并把"负载假红"从推测变成实测
+
+在提交后的干净树 `e7baf42f80` 上、**无并发写者、无并发重活**的条件下跑三件套：
+
+| # | 判据 | 结果 |
+|---|---|---|
+| ① | `corepack yarn check` | **EXIT=0**（`planned=32 executed=32`） |
+| ② | `corepack yarn install --immutable` | **EXIT=0** |
+| ③ | `gofmt -l .` / `go vet ./...` / `go test ./cmd/server ./internal/... -count=1 -p 1 -timeout 30m` | gofmt 唯一一行是**别的泳道 gitignored 的草稿** `server/temp/laneD/poolwait/main.go`（不在跟踪面内） / vet **0** / **`GO_EXIT=0`：56 包 ok、`^FAIL` 0 行** |
+
+**同一棵树的负载 vs 空载对照（本会话最有价值的一组证据）**：
+
+| 条件 | `yarn check` |
+|---|---|
+| 有泳道在改树 / 并发重活时 | **EXIT=1**（3 条失败：两条 tsdown 构建竞态 + `check:wasm-client-only` 组级台账缺行） |
+| 隔离复跑那两个失败包 | **EXIT=0**（connectors 65 files / 484 tests；wasm-apps 27 files / 456 tests） |
+| **空载跑全套** | **EXIT=0 / `planned=32 executed=32`** |
+
+⇒ "那三次红是负载假红"由此**从推测变成实测对照**；纪律「**三件套必须空载串行跑，否则结论只能记为非判定性**」
+有了自己的实验依据。本会话共记录 **4 次**负载假红/假绿（`yarn check` 构建竞态 ×3、
+`go test` 并发撞 40 分钟超时 ×2 次中的一次、`check:wasm-client-only` 台账缺行）。
+
+**三件套的完整历史（3 次完整通过）**：`9fa2d4e182`（R30 末）、`40a63a6c0f`+守卫提交（R31 批，
+Go 侧 56 包 ok）、`e7baf42f80`（R33 批，**首次空载 + 有对照**）。
+**本会话共修 3 条"只在 CI 上会红"的缺陷**（`yarn.lock` 脱同步 / 三个 compose env 未接线 /
+`bootstrap` 守卫自 R21 起就红），其中**两条是靠三件套发现的**——而这套纪律本身，
+是从"被咬一口补一条"里长出来的。
