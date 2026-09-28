@@ -646,7 +646,7 @@ fi
 # 2026-09-26 审计 Z3-3 的第 3 个触发形态)。
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if ! CHANNEL_ASSET_FILES="$(node -e '
-  import(process.argv[1]).then((mod) => {
+  import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
     const files = mod.CHANNEL_ASSET_FILES
     if (!files || typeof files.logo !== "string" || typeof files.appIcon !== "string") {
       throw new Error("CHANNEL_ASSET_FILES 形态不对")

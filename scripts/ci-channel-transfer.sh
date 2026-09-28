@@ -147,7 +147,7 @@ aws_cmd() { aws --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.co
 # `src/desktop-release.ts` 同源,通配与 ci.yml 三个平台 job 的 `--patterns` 同形。
 platform_table() {
   node -e '
-    import(process.argv[1]).then((mod) => {
+    import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
       const assets = mod.CLIENT_PLATFORM_ASSETS
       if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
       for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)

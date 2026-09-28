@@ -64,7 +64,7 @@ TOTAL="${#CHANNELS[@]}"
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 platform_table() {
   node -e '
-    import(process.argv[1]).then((mod) => {
+    import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
       const assets = mod.CLIENT_PLATFORM_ASSETS
       if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
       for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)

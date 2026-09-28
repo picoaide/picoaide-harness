@@ -3908,6 +3908,24 @@ console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
     const result = spawnSync('bash', ['-n', join(scriptDir, name)], { encoding: 'utf8' })
     check(result.status === 0, `scripts/${name} 未通过 bash -n: ${(result.stderr ?? '').trim()}`)
   }
+  // 动态 import 的实参必须是 **file:// URL**，不能是裸文件系统路径。
+  // 2026-09-28 实测（Windows CI 红）：`import(process.argv[1])` 在 POSIX 上能跑，
+  // 而 Windows 上 `C:\…\channel-build.ts` 被当成 scheme `c:` ⇒
+  // 「Only URLs with a scheme in: file, data, and node are supported by the default
+  // ESM loader. On Windows, absolute paths must be valid file:// URLs」⇒
+  // 渠道构建整条中止（三处脚本同形：ci-channels / ci-channel-transfer /
+  // ci-build-channel-images）。**这是"本地绿、Windows 红"的固定形态**，
+  // 所以判据在这里静态钉住：任何 `import(process.argv[…]` 都要被 pathToFileURL 包住。
+  for (const name of shells) {
+    const text = readFileSync(join(scriptDir, name), 'utf8')
+    const offenders = [...text.matchAll(/import\(\s*process\.argv\[\d+\]\s*\)/gu)]
+      .filter(match => !text.slice(Math.max(0, match.index - 40), match.index).includes('pathToFileURL'))
+    check(
+      offenders.length === 0,
+      `scripts/${name} 用裸路径做动态 import（Windows 上必然失败）—— 必须写成 `
+      + "import(require('node:url').pathToFileURL(process.argv[1]).href)",
+    )
+  }
 }
 
 // ---- 6. 更新服务器(R2)发布:布局 / 清单 / 保留策略 / 缓存头 ----
