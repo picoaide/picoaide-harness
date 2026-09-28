@@ -6454,7 +6454,11 @@ exit 0
   check(!existsSync(join(bare, 'node_modules')), '裸检出里不得有 node_modules（否则这一节测不到 release job 的真实条件）')
 
   // 抽 `node -e '<body>' "$REPO_ROOT/<relative .ts>"`（两个脚本用 REPO_ROOT/SCRIPT_ROOT）。
-  const invocation = /node -e '([\s\S]*?)'\s+"\$\{?(?:REPO_ROOT|SCRIPT_ROOT)\}?\/(packages\/[^"]+\.ts)"/gu
+  // body 用 `[^']*`：外壳的单引号字符串里本来就不可能出现裸单引号，而放宽成 `[\s\S]*?`
+  // 会让匹配**从更早的另一个 `node -e '` 开始**（本文件前面就有一个），把两段代码连起来当成
+  // 一段（首次实现正是这么错的：真跑时报 `SyntaxError: '; then`）。
+  // 读不懂 ⇒ `found.length === 0` ⇒ 本节当场红（fail-loud，不许静默缩小判据面）。
+  const invocation = /node -e '([^']*)'\s+"\$\{?(?:REPO_ROOT|SCRIPT_ROOT)\}?\/(packages\/[^"]+\.ts)"/gu
   const runBody = (body, target) => spawnSync('node', ['-e', body, target], { cwd: bare, encoding: 'utf8' })
   const probes = ['scripts/ci-channels.sh', 'scripts/ci-channel-transfer.sh', 'scripts/ci-build-channel-images.sh']
   let seen = 0
