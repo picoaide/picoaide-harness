@@ -1,0 +1,453 @@
+{
+  "schema": "picoaide-migration-checksums/1",
+  "algorithm": "sha256",
+  "generatedBy": "node scripts/check-migration-range.mjs --print-checksums",
+  "why": "已应用的迁移会被 `ApplyMigrations` 按版本号跳过、正文不再参与判定（`schema_migrations` 只有 (version, applied_at) 两列），所以\"文件被就地改写\"在运行期完全不可见：旧的已部署库永远拿不到改写后的内容。本表把每个迁移文件的字节摘要冻结下来，让\"改写历史迁移\"这件事在任何一次门禁里都必须显式出现在 diff 中。",
+  "howToUpdate": "只在**新增**迁移时更新：跑 `node scripts/check-migration-range.mjs --print-checksums` 覆盖本文件，把新增行与迁移文件放在同一个 PR 里评审。**永不**为了让守卫变绿而改已有条目的 sha256 —— 那正是本判据要拦的事；要改数据请加新迁移。",
+  "entries": [
+    {
+      "version": "0001",
+      "file": "0001_init.sql",
+      "bytes": 646,
+      "sha256": "caa7a36fd86ad38db9fc84944cbeaee474af0554cb74fdb701449bc667ef9ed1"
+    },
+    {
+      "version": "0002",
+      "file": "0002_tokens.sql",
+      "bytes": 374,
+      "sha256": "5cd8a05fef2b78c68107ce3c0a338f066cc98e0adee4f5e7d817dc03594f20c3"
+    },
+    {
+      "version": "0003",
+      "file": "0003_gateway.sql",
+      "bytes": 434,
+      "sha256": "92b42de360e2c4b7bbab191b502ac9d7c37adbb8e00299940a711be6f75902d1"
+    },
+    {
+      "version": "0004",
+      "file": "0004_usage.sql",
+      "bytes": 652,
+      "sha256": "4f24c475f0f833a27716c8d6ccb8fd2328bc0adc4beecdd531dde3cffff56929"
+    },
+    {
+      "version": "0005",
+      "file": "0005_skills.sql",
+      "bytes": 462,
+      "sha256": "bea9c416060a5b58bbc5674010cc66eccd5ee0e74e22ba0b223f9dc94385a16d"
+    },
+    {
+      "version": "0009",
+      "file": "0009_admin_session.sql",
+      "bytes": 165,
+      "sha256": "8c133483fe5c5360bbff9fb91b2a7ab258a9baab1a34090a4fc0f7c3467914ba"
+    },
+    {
+      "version": "0010",
+      "file": "0010_channel.sql",
+      "bytes": 75,
+      "sha256": "449137b6c5ff47871d585ef164b5cad8d3872d38775ddc1031b8c2dd84cc2b39"
+    },
+    {
+      "version": "0011",
+      "file": "0011_model_unique.sql",
+      "bytes": 413,
+      "sha256": "d38467915401b2ea1aab762e79408e18980bf1c6436b8749549a402e58e2fcb1"
+    },
+    {
+      "version": "0016",
+      "file": "0016_grants.sql",
+      "bytes": 559,
+      "sha256": "0243bb49b5d7d5ef87bc86756bb233fcd91591dad6e314852679cd8361994106"
+    },
+    {
+      "version": "0017",
+      "file": "0017_departments.sql",
+      "bytes": 560,
+      "sha256": "b2f945aeb7f68563d8f6cf1c6519029ac3c0002cbef3988105bcb6fea104a2e1"
+    },
+    {
+      "version": "0018",
+      "file": "0018_seed_everyone_group.sql",
+      "bytes": 506,
+      "sha256": "b0b97b7478f569a8dce1ad064d4fb9afd069b1e548b8d2928be94034eaa7a265"
+    },
+    {
+      "version": "0019",
+      "file": "0019_groups_nocase_unique.sql",
+      "bytes": 655,
+      "sha256": "2eca6905717584c19908899acde374bee1f54f5fd8a8eb29dab4430f156ae7b2"
+    },
+    {
+      "version": "0020",
+      "file": "0020_usage_kind.sql",
+      "bytes": 368,
+      "sha256": "80d0a97cf0327033d36b839119c81bf301cadf1e07d7c857e37d98fb4a24513d"
+    },
+    {
+      "version": "0021",
+      "file": "0021_user_quota.sql",
+      "bytes": 324,
+      "sha256": "7348c784fb4ee54d7ca38c8f7713f46c8c2e485bdd33fbb189d6832cf0c67f47"
+    },
+    {
+      "version": "0022",
+      "file": "0022_money_quota.sql",
+      "bytes": 1093,
+      "sha256": "64ad5466da1218bf82346c44749bacade9b7101bf8314ab4d507811ad6f808d0"
+    },
+    {
+      "version": "0023",
+      "file": "0023_offpeak_discount.sql",
+      "bytes": 702,
+      "sha256": "9ce06cb61c157bb7da62def5efe45d5919893c07b098e46d5e03ff7b9d6fa9ad"
+    },
+    {
+      "version": "0024",
+      "file": "0024_dept_budget.sql",
+      "bytes": 657,
+      "sha256": "4d55a37121db3901d7b372fb520006dfec01935d290426d9de4d0eb7b2ba2c5c"
+    },
+    {
+      "version": "0025",
+      "file": "0025_usage_created_at_index.sql",
+      "bytes": 445,
+      "sha256": "084d526b0e38405bac385d20bdea2705a49f689add068e8f695950145fd1963f"
+    },
+    {
+      "version": "0027",
+      "file": "0027_user_groups_group_index.sql",
+      "bytes": 306,
+      "sha256": "f70356e3d8ec492b8c47ee8089900b59bc48eabaf4ac0ae70e54ed98fdafe566"
+    },
+    {
+      "version": "0028",
+      "file": "0028_audit_cleanup.sql",
+      "bytes": 1635,
+      "sha256": "f3107c568c2e0521fe0f749b3471d3fdd07e2e0dcd67a2d1651c8ba25125d4e6"
+    },
+    {
+      "version": "0029",
+      "file": "0029_model_cache_price.sql",
+      "bytes": 342,
+      "sha256": "b05015c00c764b8d723a92779ae8e71266cf3c0fabc650278e8f1c12ff7c7b58"
+    },
+    {
+      "version": "0030",
+      "file": "0030_usage_cache_tokens.sql",
+      "bytes": 338,
+      "sha256": "1279174b05b7eba703c95adaa14bcced1cc58fef451d8624cd2732bf7cea320a"
+    },
+    {
+      "version": "0031",
+      "file": "0031_indexes.sql",
+      "bytes": 1046,
+      "sha256": "0c57e03b3276767d63066a5721a5f4acf5c1f224dd8c3f0d5123aa37befb8240"
+    },
+    {
+      "version": "0032",
+      "file": "0032_agent_presets.sql",
+      "bytes": 873,
+      "sha256": "8ecf453b7e88a3266039d6be5139560da96c00aeff6630dbebd15eb32c2306a5"
+    },
+    {
+      "version": "0033",
+      "file": "0033_agent_preset_reason.sql",
+      "bytes": 171,
+      "sha256": "6619ae65a20e708b5a7ecfe97e4164b0b96b1a284081a6dae6f2f1d198867fc2"
+    },
+    {
+      "version": "0034",
+      "file": "0034_shared_skills.sql",
+      "bytes": 968,
+      "sha256": "95aee07396a5c7b1541ab14fdfdae5e0644fb1dbcbab5b20b1810710992bc8e0"
+    },
+    {
+      "version": "0035",
+      "file": "0035_agent_preset_multi_version.sql",
+      "bytes": 1326,
+      "sha256": "351434d4cc43e65fa28297440b1906ce76f8d6a0224f939b97d394985b13c432"
+    },
+    {
+      "version": "0036",
+      "file": "0036_share_grants.sql",
+      "bytes": 711,
+      "sha256": "39c00d7c7daea9ee5ed3b4a899c633e9067971b719c20741b81390ae9dce2fbc"
+    },
+    {
+      "version": "0037",
+      "file": "0037_shared_quality.sql",
+      "bytes": 588,
+      "sha256": "65abbb667dbd6e60b5404db0b82d1ce575b0a08180b9ce6025ad6b9cf2cf7778"
+    },
+    {
+      "version": "0038",
+      "file": "0038_missing_indexes.sql",
+      "bytes": 1520,
+      "sha256": "f59fad9fa3844cbac12b7c36552eb77b29333d1361ff10224d093135d7977950"
+    },
+    {
+      "version": "0039",
+      "file": "0039_usage_partition_ledger.sql",
+      "bytes": 14798,
+      "sha256": "f8203da587831164371d05c2fc746372080433ce7125671bd9890bbae3177ce6"
+    },
+    {
+      "version": "0040",
+      "file": "0040_skill_archive_stats.sql",
+      "bytes": 1445,
+      "sha256": "896045f2c57b2f1d4fc121ab7c5afbce7710d9d33bf8c3d757e605f4884ad53b"
+    },
+    {
+      "version": "0041",
+      "file": "0041_agent_preset_archive.sql",
+      "bytes": 813,
+      "sha256": "c756e068bde617ed0f9b428e71e4934fd449834795e26fe705e4cf68a29a31f3"
+    },
+    {
+      "version": "0042",
+      "file": "0042_connectors.sql",
+      "bytes": 4569,
+      "sha256": "a63d71e34b06e5b0fe03eda0015d71e2bc0be8f881e96e0e6b64a49f144c68bf"
+    },
+    {
+      "version": "0043",
+      "file": "0043_provider_protocol.sql",
+      "bytes": 898,
+      "sha256": "b75dadc6790e4f54d176acdcb9cfc716bb981b8b9609a45cddb4da43ba429aaf"
+    },
+    {
+      "version": "0044",
+      "file": "0044_provider_protocol_both.sql",
+      "bytes": 1279,
+      "sha256": "ab86abe983631726b80f3307387cdc8ca10a535f86c00e59af6255a0adc235e5"
+    },
+    {
+      "version": "0045",
+      "file": "0045_connectors_glitchtip_disabled.sql",
+      "bytes": 714,
+      "sha256": "abd0c01ad9429367ff805312963b3e19cbee51eb545d9a6936f3cf18ae697bad"
+    },
+    {
+      "version": "0046",
+      "file": "0046_rbac_roles.sql",
+      "bytes": 876,
+      "sha256": "d86bcd946f54f096750ff5aef287f69f601987e2884023d3966854782531ee19"
+    },
+    {
+      "version": "0047",
+      "file": "0047_brand_snapshots.sql",
+      "bytes": 312,
+      "sha256": "ea3df9b948ebd30005aecf81d7f1df95462d7b9f3d8290ec80cc94ee64b7389b"
+    },
+    {
+      "version": "0048",
+      "file": "0048_audit_hash_chain.sql",
+      "bytes": 465,
+      "sha256": "05d2a8f4cbffb49c637d9010c44711afebe8284c96eb02e0ea9a045b7823c106"
+    },
+    {
+      "version": "0049",
+      "file": "0049_model_concurrency.sql",
+      "bytes": 1061,
+      "sha256": "a8b10f3c6c7ac9f3938ee398f9b5e4152a0c173540facccec915227e8070529d"
+    },
+    {
+      "version": "0050",
+      "file": "0050_capability_locks.sql",
+      "bytes": 928,
+      "sha256": "abd56b94dadefd3094e987e832670684a177550ee64d1041cf7242d17676e63c"
+    },
+    {
+      "version": "0051",
+      "file": "0051_skill_display_name.sql",
+      "bytes": 608,
+      "sha256": "eb44f77f696ff8eaea51a60e0b009a5ed2566ed7bdc6a419adc2c1d82ad94825"
+    },
+    {
+      "version": "0052",
+      "file": "0052_drop_skill_git_mode.sql",
+      "bytes": 683,
+      "sha256": "763a6733e03410e31f5e55a93556d1bb721ac4991d525c60b077f73aaf4cfc8b"
+    },
+    {
+      "version": "0053",
+      "file": "0053_apps.sql",
+      "bytes": 3254,
+      "sha256": "0400d375fa4375d4d3f2225a015a3e850e82acfce9ca39cfa43074bf8fc057aa"
+    },
+    {
+      "version": "0054",
+      "file": "0054_apps_backfill.sql",
+      "bytes": 7690,
+      "sha256": "1552f6bdfbce2b894b661f53a2b97797d075e58a439c4ed6d37727caae10c8c6"
+    },
+    {
+      "version": "0055",
+      "file": "0055_drop_legacy_capability_tables.sql",
+      "bytes": 12443,
+      "sha256": "c0f333629167a275f96331a201164ea64b085d80030c3e1e63645827559cede1"
+    },
+    {
+      "version": "0056",
+      "file": "0056_report_subscriptions.sql",
+      "bytes": 504,
+      "sha256": "2ed0fe6dfb2a65cd06564f9c80a7141c1fa9360cd6377a9817543d195b97a70b"
+    },
+    {
+      "version": "0057",
+      "file": "0057_admin_mfa.sql",
+      "bytes": 1731,
+      "sha256": "70dc9e41fae150127fd668d0ede473ef16c25b22fd2e44c23118bb08b1a9b856"
+    },
+    {
+      "version": "0058",
+      "file": "0058_model_input_modalities.sql",
+      "bytes": 659,
+      "sha256": "b3d2a13f2459e62164f51e82931b3802a8c8277e5f5200dc6328a235a96274da"
+    },
+    {
+      "version": "0059",
+      "file": "0059_app_official.sql",
+      "bytes": 987,
+      "sha256": "8d3873524c4ecd6c794f35c9aea1fa3f2342b3eb7a247660c5536105b1e3489e"
+    },
+    {
+      "version": "0060",
+      "file": "0060_ldap_synced_users.sql",
+      "bytes": 699,
+      "sha256": "a12afa3be6c77f8da40005c2c70fe3ccdd1870ad53e2f7c85ea5426e47bd0205"
+    },
+    {
+      "version": "0061",
+      "file": "0061_user_balance.sql",
+      "bytes": 1777,
+      "sha256": "184f871f842321b92b16d9a40ea03d169cf7376921f85e0e754fd8ecaa0d0144"
+    },
+    {
+      "version": "0062",
+      "file": "0062_balance_ledger.sql",
+      "bytes": 5080,
+      "sha256": "993a2fdd51fbb4234fe9699f7dfe9040fd62c3cf6b35cd4ce5184ea0acf22f0b"
+    },
+    {
+      "version": "0063",
+      "file": "0063_usage_estimated.sql",
+      "bytes": 1873,
+      "sha256": "20c6d0421b0c47e48d5d699ffa6ef16cab85ce2e413de56f9db1e0e3ea0b87bd"
+    },
+    {
+      "version": "0064",
+      "file": "0064_totp_replay.sql",
+      "bytes": 832,
+      "sha256": "d2b9fdd3478912b7fe8ae60542634c1c95fbbf8e4a575fe746cf589a9d34a84b"
+    },
+    {
+      "version": "0065",
+      "file": "0065_usage_provider_id.sql",
+      "bytes": 977,
+      "sha256": "c936d0e597ae64b10255e5e1741385446b9843a75f5c76218c4c12ea47b444f5"
+    },
+    {
+      "version": "0066",
+      "file": "0066_admin_session_secret_hash.sql",
+      "bytes": 793,
+      "sha256": "93eb89dbc92d2b40fdfab32b0466a394b3b5768772bacdc6e82b5bb83f52cace"
+    },
+    {
+      "version": "0067",
+      "file": "0067_users_external_identity.sql",
+      "bytes": 970,
+      "sha256": "af7e975da62a07c643f7a334bbf31dd320008a8c96917cf2660bbfe53993b19d"
+    },
+    {
+      "version": "0068",
+      "file": "0068_client_error_reporting_status.sql",
+      "bytes": 1956,
+      "sha256": "6a40a86d82f3c50110ce194999c0db73a18de360ffa16e38547a3c2a79948e26"
+    },
+    {
+      "version": "0069",
+      "file": "0069_wasm_apps.sql",
+      "bytes": 8257,
+      "sha256": "1e0aa26e7be453c490fb2086706bf924db87d77959a3d1277eb58537f3633262"
+    },
+    {
+      "version": "0070",
+      "file": "0070_employee_sessions.sql",
+      "bytes": 6015,
+      "sha256": "17b477c9126ee5b606488e959ae2f052cbc5d09eb2bbed366b48b7f5c35583f8"
+    },
+    {
+      "version": "0071",
+      "file": "0071_wasm_app_access.sql",
+      "bytes": 7744,
+      "sha256": "d6e7da4874f1f4def83cf5a8001bb9c20c9d48a7e6a6b39d495d0c7dfe0e1ae5"
+    },
+    {
+      "version": "0072",
+      "file": "0072_wasm_call_event_evidence.sql",
+      "bytes": 2601,
+      "sha256": "ec3550500610c3fb130cd1db909690cecb51190b0d2aacfc6c65e61f07e93d42"
+    },
+    {
+      "version": "0073",
+      "file": "0073_drop_wasm_sessions.sql",
+      "bytes": 2195,
+      "sha256": "43dfba72eb3ed2f9a596e40bc73521229b0ee051198b2fd889b7213a2633853e"
+    },
+    {
+      "version": "0074",
+      "file": "0074_wasm_access_public_to_login.sql",
+      "bytes": 6788,
+      "sha256": "3bc94d398b54b5002cc9320a0b4b1ab1bcf5b8c0398c564de428b8f5f62c15b9"
+    },
+    {
+      "version": "0075",
+      "file": "0075_wasm_app_opens.sql",
+      "bytes": 5982,
+      "sha256": "edd6343339959c6010d9fd1e78c7fc26c012633fcf319f94e1d75876df2994a2"
+    },
+    {
+      "version": "0076",
+      "file": "0076_usage_app_id.sql",
+      "bytes": 3257,
+      "sha256": "7eaa6d8c037b0540a382ac5eb8c2c03db7190b1a8a300d102baeabbfc73880a7"
+    },
+    {
+      "version": "0077",
+      "file": "0077_gateway_files.sql",
+      "bytes": 2128,
+      "sha256": "097d6199e5775c09fcebb43248c2f3da34fa30f50edbdbefcf2f5940783f52c2"
+    },
+    {
+      "version": "0078",
+      "file": "0078_gateway_files_size.sql",
+      "bytes": 1575,
+      "sha256": "52448e1f439199e856ec9725f61e77f349e97464c6757e1c5200270753966c81"
+    },
+    {
+      "version": "0079",
+      "file": "0079_gateway_files_reaping.sql",
+      "bytes": 1430,
+      "sha256": "9adc83c6e354769a3fd48372ebe3d6538aeaa436ceb901aaac93436fe27ee97d"
+    },
+    {
+      "version": "0080",
+      "file": "0080_models_catalog_missing.sql",
+      "bytes": 2814,
+      "sha256": "4a30d7dfca982ed9118a169b45bb62a5269562e3697851b2ab91c9a389f05230"
+    },
+    {
+      "version": "0081",
+      "file": "0081_gateway_files_reap_gen.sql",
+      "bytes": 2077,
+      "sha256": "45ad70ee36212393170a2964a39a0dc2f139120a4033c098154ea140e91ac3e3"
+    },
+    {
+      "version": "0082",
+      "file": "0082_report_subscription_retry.sql",
+      "bytes": 3042,
+      "sha256": "d7a1bad79545e283906dcf0fcb80a5ccb129220d86c29cfb88f42dae69f7fc2f"
+    }
+  ]
+}

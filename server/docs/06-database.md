@@ -29,14 +29,21 @@
 > (见下 `gateway_files`),0081 随第四轮审计 R4-C-1 的回收器 fencing 落地
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
-### 迁移框架的已知边界:`schema_migrations` 没有校验和(认账,2026-09-23)
+### 迁移框架的已知边界:`schema_migrations` 没有校验和 + 已发布迁移被就地改写(认账,2026-09-23;事实补记与门禁判据 2026-09-26)
 
-- **事实**:`schema_migrations` 只有 `(version, applied_at)` 两列(`internal/serverstore/migrate.go` 的
+> **勘误(2026-09-27,R28 审计 AB2-B-01)**:本节标题与第一条"事实"、以及下面「未来触发条件」①
+> 里"运行期仍无校验和"的说法**已过时** —— R27-FIX39 已给 `schema_migrations` 加 `checksum` 列
+> 并在每次启动逐条对账(见下「迁移执行器的运维口径」)。本节其余内容作为**当时**的取舍与事故
+> 记录保留原文(改写记录等于改写事实)。
+
+- **事实(2026-09-23 当时)**:`schema_migrations` 只有 `(version, applied_at)` 两列(`internal/serverstore/migrate.go` 的
   `CREATE TABLE IF NOT EXISTS`)。runner 逐条查"版本号是否已应用",已应用的直接跳过 ⇒
   **已应用迁移文件的原地修改不会被任何机制发现**(文件内容从不参与判定)。
 - **取舍**:加校验和要动迁移框架本身(建表语句 + 存量行回填口径 + 与"迁移需可重复执行"的现有
   约定交互),收益只是"能发现有人改了历史文件",成本落在每次启动的迁移路径上。
-  **2026-09-23 定案:本轮不改框架**——用纪律(下一条)+ 新迁移内的 fail-loud 自检覆盖同类风险。
+  **2026-09-23 定案:本轮不改框架**——用纪律(下一条)+ 新迁移内的 fail-loud 自检覆盖同类风险
+  (2026-09-26 起另加**门禁侧**的内容指纹判据:登记表 + 守卫,见下"新增判据"一节;
+  注意它是**构建期**判据,不改变"运行期仍无校验和"这个事实)。
 - **缓解纪律**:**已应用的迁移文件永不原地修改**。要改形状就新开一条迁移,并在**同一条迁移的
   同一个事务内**做"形状检测 → 就地转换 → 数据搬运 → 序列复位 → 列集校验",任一步失败整条回滚。
   范例 = `0039_usage_partition_ledger.sql` 的 §0(普通表 `usage` → 分区表:改名让位索引/序列、
@@ -46,12 +53,243 @@
   静默跳过(表已存在)、紧随的 `PARTITION OF usage` 报 `"usage" is not partitioned`,
   每次启动重跑同一条迁移、主进程 `log.Fatalf` ⇒ **崩溃循环且重试永不自愈**(2026-09-23 由
   0039 的 §0 修掉)。这条事故能潜伏这么久,正是因为"没有校验和"与"文档区间一致"都看不出来。
-- **未来触发条件(满足任一条就实现校验和)**:① 再出现一次"已应用迁移被原地修改"的事故
-  (无论是否造成停机);② 贡献者/并行分支继续增长到 review 覆盖不住历史文件(判据 = 出现过一次
-  review 未发现的文件改动);③ 需要"只在预期库形态上跑"的前置校验。实现口径:`schema_migrations`
+#### 已发生的事故清单(逐版本事实表,2026-09-26 复核补记)
+
+复核方法与逐条命令见 `temp/r21/fix-3/notes-4.md`(441 行,含逐版本 blob 对比与
+`REWRITE-OF-RELEASED` 判据:存在一个 creatordate 早于该次修改、树里已有该文件、
+且 blob 不同的 tag)。**下表事实取自该复核,不要凭记忆改**:
+
+**口径(2026-09-26 第二十二轮复核更正,"首发正式 tag"这一列的判据)**:
+判定"某个 tag 有没有发过某个迁移文件"**只能读 git 树证据** ——
+`git ls-tree --name-only <tag>:server/internal/serverstore/migrations-pg`(该 tag 的树里有没有它)
+与 `git rev-parse <tag>:…/<文件>`(同一份 blob 吗)。**不要**用
+`git tag --contains <改写前的 commit>`:2026-09-21 的历史改写让旧 commit hash 不再被任何
+tag 包含,那个口径会把首发 tag 判晚(下表 `0039`/`0042` 两行原来就是这么写错的),
+`0004` 行更因此把"唯一"写成了 `v2.4.0`。
+
+| 迁移 | 首发正式 tag | 就地改写 | 改动性质 | 哪些部署会漏 |
+|---|---|---|---|---|
+| `0004_usage.sql` | **v2.2.0**(2026-08-25);v2.2.0 / v2.2.1 / v2.3.0 / v2.4.0 四个正式 tag 发的是**同一份**普通表正文(blob `4631669ecb4f`) | 2026-08-27(`34ddf8f8b4`、`8f8d09fe31`) | 正文改写成 `PARTITION BY RANGE` 版;v2.4.1(2026-08-27)起发的就是分区版 | **由 v2.2.0–v2.4.0 建库的实例**都拿不到分区版正文(它就是下一段那个崩溃循环的根因;不只是 v2.4.0 一家);**修复可达** —— 见"已部署库的现状与出路" |
+| `0039_usage_partition_ledger.sql` | **v2.4.1**(2026-08-27;该 tag 的树里首次出现,同期 MAX 从 0037 变 0040) | 2026-09-24(`e1e3b0155b`,随 tag v2.8.2-beta.1) | 新增 §0 同事务"存量普通表 → 分区表"就地转换 + §4 三条 fail-loud 自检(+203/−2) | **不会漏**:需要 §0 的库恰好是"39 未记录"的库(升级时崩溃循环、版本不落库);已记录 39 的库其 `usage` 必然已是分区表 |
+| `0042_connectors.sql` | **v2.4.2**(2026-08-28;该 tag 的树里首次出现,同期 MAX 从 0040 变 0042) | 2026-09-20(`235870948d`)、2026-09-21(`83ccbd4b6f`) | 种子行的端点/`id`/名称/描述改为公开仓占位符(+4/−1、+9/−8) | 已记录 42 的库保留升级当时的种子值;只影响**新建库**的种子行,管理员可在连接器页改回,**无数据损失** |
+| `0054_apps_backfill.sql` | v2.5.9(2026-09-01) | 2026-09-24(`e1e3b0155b`) | 组织 Release 与三条授权的 `INSERT` 加"归属通道"谓词(`a.channel='org'`/`'market'`)+ 跨源同名 WARNING(+49/−3) | **从 v2.5.9 起升过级的所有实例都漏**:54 已记录 ⇒ 文件永不再被读;且它裸读的六张旧表已被 `0055` DROP ⇒ 连"重放这条迁移"都做不到(`42P01`) |
+| `0055_drop_legacy_capability_tables.sql` | v2.5.9(2026-09-01) | 2026-09-24(`e1e3b0155b`) | `DROP` 六张旧表**之前**新增逐表逐行的回填完整性 fail-loud 自检(+213/−0) | 同上:旧 `0055` 无条件 DROP 过源表 ⇒ 这批库**既没有自检、也没有源表**,`0054` 里"旧表原样保留、可恢复"的承诺对它们**不成立** |
+| `0063_usage_estimated.sql` | v2.7.2-beta.8(2026-09-13) | 2026-09-16(`918b835cbf`) | **仅注释**(写入方名单随死代码清理更新,+4/−3;DDL 与数据一字未动) | 已记录 63 的库读到的是旧注释;**无语义后果** |
+
+同一判据另命中两次(未单列):`0021_user_quota.sql`、`0030_usage_cache_tokens.sql` 在
+`34ddf8f8b4`(2026-08-27)各被改 1 行(同样早于它们所在 tag v2.5.0 的发布)。**未命中者**
+(改动时还没有任何 tag 含它):`0062`(2026-09-12 新增、当日改,v2.7.2 于 2026-09-13 才发)、
+`0082`(2026-09-25 新增、2026-09-26 改)、`0042` 的 2026-08-28 那次(v2.5.0 于 2026-08-31 才发)。
+
+这条纪律 **2026-09-23 写下,次日 `e1e3b0155b` 就违反了它**:那一批改动**随 tag v2.8.2-beta.1
+一起发布**,而该版本的发布说明对此**一字未提**。上面"代价已被真实事故验证"此前只记了 `0004`
+那一次 —— 09-24 的三起与 `0042`/`0063` 是 2026-09-26 这次复核才补上的。
+
+#### 已部署库的现状与出路(如实说明:**这部分不可自动恢复**)
+
+- **`0054`/`0055` 的修复对已升级库不可达,且不可自动恢复**。任何从 v2.5.9 起升过级的实例,
+  `schema_migrations` 里已经有 54/55 ⇒ `ApplyMigrations` 的 `if applied[…]{ continue }` 让它
+  永远不再读这两个文件;旧 `0055` 又把源表 DROP 了,所以"把新正文补上去"这件事既没有触发点、
+  也没有可比对的原始数据。**运维必须按下面的检测 SQL 自己评估影响面**,不要指望重启或升级自愈。
+- `0039` 与 `0004` 的修复**可达**:需要 `0039` §0 的库恰好是"39 未记录"的库(版本不落库),
+  升级到含新正文的版本时它会照常执行;`39` 已记录的库其 `usage` 必然已是分区表,不需要 §0。
+- **仓库里没有任何重放/修复通道**:CLI 只有 `-addr`/`-data`/`-db-driver`/`-pg-dsn`/
+  `-bootstrap-admin`/`-reset-mfa`/`-opens-rollup-repair-plan`/`-version`
+  (`-opens-rollup-repair-plan` 是**聚合表**历史坏行的离线修复计划,与迁移无关);
+  `internal/router` 零迁移端点。
+- **不要试图把 `0054` 当"一次性修复脚本"重放**:它裸读 `skills`/`shared_skills`/`agent_presets`
+  与三张旧授权表,而这些表在已迁移库上已被 `0055` DROP ⇒ 重放只会得到 `42P01`
+  (事务回滚、不丢数据,但会挡住启动)。
+
+##### 只读检测 SQL(在只读副本或从库上跑;逐条写明它判什么)
+
+**① 暴露面判定(确定性;这条决定要不要往下看)**
+
+```sql
+-- 判什么:54/55 有没有被记录、记录时间是否早于那批修复。
+--   两行都有且 applied_before_fix 为真 ⇒ 该库跑的是旧 0054/0055 正文,
+--   那批修复对它**永不生效**(不是"以后再补",是"没有触发点")。
+--   39 有记录 ⇒ 不需要 0039 的 §0(其 usage 必然已是分区表);39 无记录 ⇒ 升级即自动修复。
+-- 边界时刻取 `e1e3b0155b` 的提交时间(2026-09-24T03:55:48+08:00),即那批新正文诞生的时刻;
+-- 时区按部署会话时区自行折算。
+SELECT version,
+       applied_at,
+       applied_at < TIMESTAMPTZ '2026-09-24 03:55:48+08' AS applied_before_fix
+  FROM schema_migrations
+ WHERE version IN (39, 54, 55)
+ ORDER BY version;
+```
+
+**② `schema_migrations` 的列集合(判"运行期没有内容指纹"在该库成立)**
+
+```sql
+-- 判什么:列集合仍是 (version, applied_at) ⇒ 该库上"迁移文件被改"在运行期完全不可见
+--   (这正是本节的认账事实;门禁侧的内容指纹判据见下一小节)。
+SELECT ordinal_position, column_name, data_type
+  FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'schema_migrations'
+ ORDER BY ordinal_position;
+```
+
+**③ 六张旧表是否还在(判 `0055` 的自检对这批库还有没有机会生效)**
+
+```sql
+-- 判什么:全部 present=false ⇒ 旧 0055(无自检)已经无条件 DROP 过源表,"旧表原样保留、
+--   可恢复"对这批库不成立,回填完整性再也无法与源数据比对。
+--   只要还有一张在 ⇒ 该库卡在 0055 之前:升级到含新 0055 的版本时,自检会 fail-loud
+--   中止升级并点名冲突清单(旧表原样保留),按提示人工处置即可。
+SELECT t.relname, (c.oid IS NOT NULL) AS present
+  FROM (VALUES ('skills'), ('shared_skills'), ('agent_presets'),
+               ('skill_grants'), ('shared_skill_grants'), ('agent_preset_grants')) AS t(relname)
+  LEFT JOIN pg_class c
+         ON c.relname = t.relname AND c.relnamespace = 'public'::regnamespace
+ ORDER BY t.relname;
+```
+
+**④ `usage` 的形状(实证"39 已记录的库不需要 §0")**
+
+```sql
+-- 判什么:relkind='p' 且有分区 ⇒ usage 已是分区表(0039 的 §0 对它无事可做);
+--   relkind='r' ⇒ 该库还没跑过 0039 —— 这正是需要 §0 的形态,升级到含新 0039 的
+--   版本时会自动做同事务就地转换。
+SELECT c.relname, c.relkind,
+       (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid) AS partitions
+  FROM pg_class c
+ WHERE c.relname = 'usage' AND c.relnamespace = 'public'::regnamespace;
+```
+
+**⑤ 归属错配的可观察指纹(启发式,只作排查入口,不作结论)**
+
+```sql
+-- 判什么:修好的 0054 里,channel='market' 的 App 身份只由市场表建立、其 Release 的
+--   status 恒为 'approved'(市场由管理员上架);组织 Release 的 status 才原样保留。
+--   所以"市场通道 App 上挂着非 approved 的 Release"是**组织版本被挂到市场 App 上**的
+--   指纹(旧 0054 缺少 a.channel='org' 谓词时的形态)。
+--   **已知假阳性**:升级到新发布内核之后,管理员在市场 App 上重新发布/审核也会产生
+--   pending/rejected 行 ⇒ 命中只说明"值得人工看一眼",不能当结论。
+SELECT a.kind, a.app_id, a.channel, r.version, r.status, r.author, r.created_at
+  FROM apps a
+  JOIN app_releases r ON r.kind = a.kind AND r.app_id = a.app_id
+ WHERE a.channel = 'market' AND r.status <> 'approved'
+ ORDER BY a.kind, a.app_id, r.version;
+```
+
+**⑥ 唯一确定性的枚举:与升级前备份对拍**
+
+```sql
+-- 在**离线副本**(把升级前备份恢复出来的那个库)上跑:列出旧 0054 会挂错、
+-- 新 0054 会拒绝挂载的"跨源同名"名单(市场表与组织表同名 ⇒ 市场行占名,组织行不该并入)。
+-- 判什么:名单非空 ⇒ 这些名字的组织 Release/授权在旧 0054 下被挂到了市场 App 上。
+--   把名单带回本库核对是否真的错配(有行且 channel='market' ⇒ 错配成立):
+--     SELECT a.kind, a.app_id, a.channel, count(*) AS releases
+--       FROM app_releases r JOIN apps a ON a.kind = r.kind AND a.app_id = r.app_id
+--      WHERE a.app_id IN (<上面那份名单>)
+--      GROUP BY 1, 2, 3 ORDER BY 1, 2;
+SELECT s.name AS app_id, 'skill' AS kind, count(*) AS org_rows
+  FROM shared_skills s
+ WHERE EXISTS (SELECT 1 FROM skills m WHERE m.name = s.name)
+ GROUP BY s.name
+ ORDER BY s.name;
+```
+
+##### 发现受影响之后怎么做(不承诺自动修复)
+
+1. **停写并备份**:先 `pg_dump -Fc` 整库留档(与部署机既有 `deploy-backup/` 口径一致),
+   确认备份可恢复;评估期间不要让新旧二进制交替服务同一根。
+2. **用升级前备份在离线副本上枚举**:第 ⑥ 条只有在"源表还在"的库里才有分母 ——
+   升级前备份(或另一台尚未升级的实例)是唯一能给出确定性名单的地方。把名单带回本库核对。
+3. **修数据只能走新迁移**:把结论写成一条**新的**迁移(幂等 + 可重放),并在**同一条迁移的
+   同一个事务内**做"形状检测 → 就地转换 → 数据搬运 → 序列复位 → 列集校验",任一步失败整条回滚
+   (`0039` §0 就是范例)。**不要**改历史迁移文件,也不要手工 `UPDATE` 完就结束。
+4. **审计留痕**:受影响行的判定依据、判定时间、修数据的新迁移号与执行结果,写进部署留痕与
+   对应版本的发布说明;`audit_logs` 的哈希链不受本节影响,但运维动作本身要有可检索的记录。
+5. **明确写上结论**:若评估后决定不修(影响面为零、或数据已无业务意义),在留痕里写清
+   "评估过、结论是不需要修",而不是留白 —— 留白在下次审计里无法与"漏了"区分。
+
+#### 新增判据(2026-09-26):迁移内容指纹登记表 + 守卫
+
+上面那条纪律此前**只有文字、没有判据**,所以写下次日就被违反。现在有两件东西:
+
+- **登记表** = `server/internal/serverstore/migrations-checksums.json`(**进 diff、可评审**):
+  逐条登记 `migrations-pg/` 下**每一个** `.sql` 的版本号、字节数与 sha256;表头写明谁生成、
+  怎么更新、为什么(它是迁移文件字节的冻结值)。
+- **守卫** = `scripts/check-migration-range.mjs`(已在 `yarn check` 的根守卫
+  `check:migration-range` 内,与"文档区间"判据**同一进程、同一退出码语义**:1 = 有漂移,
+  2 = 扫描面/前置缺失)。判据六条:
+  ① 已登记文件被就地修改 ⇒ 红(点名版本号 + 期望/实际 sha256);
+  ② 新增迁移未登记 ⇒ 红(点名文件并给出登记命令 —— "新增迁移"这一步必须进 diff 被评审);
+  ③ 登记表里的死条目(登记了但文件不存在)⇒ 红(删/改名同样是改写历史);
+  ④ 登记表缺失 / 解析不出 / 缺表头字段 / 条目字段不合规 / **是空表** ⇒ 红(fail-closed,
+     绝不静默当成空表 —— 双向:既不放过改写,也不因"表是空的"而静默通过);
+  ⑤ 只做 sha256 与字节比较,**不做换行归一**(迁移正文是逐字节契约);
+  ⑥ 真 git 工作树上再加一层:**登记值必须等于 HEAD 里那个文件的字节** —— 于是
+     "改文件 + 顺手把登记值也改掉"这条绕过在提交之前也红(取不到 git 时只如实降级,不假装对上了)。
+- **新增迁移的合法流程**(三步,缺第二步就红):
+  ① 写 `migrations-pg/00NN_名字.sql` →
+  ② `node scripts/check-migration-range.mjs --print-checksums > server/internal/serverstore/migrations-checksums.json`
+  → ③ 文档里的迁移区间上限跟着改到新 MAX(守卫会点名每一处)。
+  **永不**为了让守卫变绿去改已有条目的 sha256 —— 那正是这条判据要拦的事;要改数据请加新迁移。
+- **作用域与降级(不许把"没判"说成"通过")**:内容判据只在**仓库形态的根**(有 `package.json`)
+  或带登记表的根上成立;合成夹具根(`verify-check-workspaces.mjs` 的 `--root <tree>`)上守卫
+  打印 `[CONTENT-SKIP]`、通过行同步写明"该判据未参与"。
+- **平台差异**:根 `.gitattributes` 是 `* text=auto eol=lf`,`.sql` 被判定为文本 ⇒ 每个平台的
+  checkout 都是 LF 字节(`git check-attr -a` 对迁移文件回报 `eol: lf`),所以正常检出不会误红;
+  真的出现"只差 CRLF"的形态时守卫**照红**并额外提示先怀疑检出/属性被改(不把字节契约降级成
+  "差不多就行")。
+- **这条判据拦不住什么(认账)**:登记表本身在 diff 里 —— 若有人改了迁移文件**并且**在同一
+  提交里改掉登记值,提交之后两侧自洽、门禁是绿的。那时唯一的防线是**评审**:任何对登记表
+  **已有条目** `sha256` 的改动都必须按"改写历史迁移"处理(第 ⑥ 条只能挡到提交之前)。
+  登记表的 `howToUpdate` 字段把"只在新增迁移时更新"写成硬纪律,就是为了让这条评审口径有出处。
+
+#### 迁移执行器的运维口径(2026-09-27 补记,R28 审计 AB2-B-01)
+
+> 本节补上"代码里已可配、部署模板与文档里查不到"的那一半。**上面「已知边界」与
+> 「未来触发条件」两节里"`schema_migrations` 没有校验和""运行期校验和仍未实现"的说法
+> 已过时** —— 保留原文是因为它们是当时的事故记录;运行期校验和已随 R27-FIX39 落地,
+> 以本节为准。
+
+**① `schema_migrations.checksum` 列(运行期内容对账)**
+
+| 项 | 口径 |
+|----|------|
+| 建列 | 启动期 `ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT`(幂等,不需要新迁移文件) |
+| 写入 | 每条迁移在**它自己的事务里**与版本行一起写(该迁移文件的 sha256 小写 hex) |
+| 读取/比对 | 每次启动把"库里已登记"与"随包文件"逐条对账;不一致 ⇒ `MigrationChecksumError` **拒绝启动**,点名 version / file / 两边 checksum 与两条可行动作 |
+| 老库(checksum 列出现之前) | 首启用**随包文件**回填一次(NULL **或空串**都算"未登记"),**不拒绝启动**;此后冻结绑定 |
+| 已知缺口 | 库里已应用、但当前文件集合里没有对应迁移的版本仍会照常报出来(反向对账),不会被静默跳过 |
+| 显式承认当前二进制 | 确认两边 schema 真等价后才用 `UPDATE schema_migrations SET checksum='<随包文件 sha256>' WHERE version=<NNNN>`;**不要**删版本行逼它重放(存量库上重放整条迁移不是幂等的) |
+| 与门禁侧判据的分工 | `scripts/check-migration-range.mjs` + `migrations-checksums.json` 管"**构建期**文件字节有没有被动过";本列管"**某个具体的库**当初跑的是哪一版正文" |
+
+**② 三个迁移预算旋钮(毫秒;缺省 5min / 5min / 5s)**
+
+| env | 作用 | 什么时候调 |
+|-----|------|-----------|
+| `PICOAI_MIGRATION_LOCK_TIMEOUT_MS` | 每条迁移**自己的 DDL** 的等锁预算(`SET LOCAL lock_timeout`,施加在真正执行 DDL 的那条会话上) | 启动日志报等锁超时、且确认是 pg_dump / 长查询 / `idle in transaction` 这类**运维侧**长事务暂时占着表 ⇒ 可临时放宽 |
+| `PICOAI_MIGRATION_ADVISORY_TIMEOUT_MS` | 迁移互斥锁(`pg_advisory_lock`)的等待预算 —— 滚动升级时另一个实例可能正在迁移 | 同上;超时说明"另一个实例卡住了",继续等通常不如 fail-loud |
+| `PICOAI_MIGRATION_SLOW_MS` | "慢迁移"告警阈值:超过它单独打一条可检索的 `migrate: SLOW migration` WARN(含被 `ACCESS EXCLUSIVE` 锁住的表与时长) | 想让"这次升级锁了多久"更早暴露 ⇒ 调小 |
+
+- **单位是毫秒**(与 `PICOAI_AUDIT_CHAIN_INTERVAL` 那种 Go duration 不是同一种写法)。
+- **非法/非正值一律回落缺省并告警** —— 不许用一条 env(写 `0` 或写错)把预算变成"无预算",
+  那正是这条修复要消灭的形态。
+- **预算打满 = fail-loud**,不是无限等待:迁移受得了失败、受不了挂住。
+- 部署侧接线(`.env` 里写这三个键真的会进容器)在 `server/docker-compose.yml` 的
+  `server.environment` 与 `server/.env.example`;接线漏一个会被
+  `server/cmd/server/compose_env_test.go` 的 `TestEveryServerPICOAIEnvNameIsWiredOrExempt`
+  当场打红(服务端源码里出现的每个 `PICOAI_*` 名字都必须"已接线"或"在豁免清单里且写明理由")。
+
+#### 未来触发条件
+
+- ① **已满足**(2026-09-24 的 `e1e3b0155b` 一批)。本次落地的是**门禁侧**冻结(上面那两件:
+  登记表 + 守卫);**运行期**的 `schema_migrations` 校验和**当时仍未实现**(2026-09-23 的
+  "不改框架"取舍没有变),所以"某个库到底跑过哪一版正文"**当时**只能靠 `applied_at` 与发布
+  时间对照推断,不能靠库自查。
+  > **勘误(2026-09-27)**:运行期校验和已由 R27-FIX39 落地(`schema_migrations.checksum` 列),
+  > 本条只描述 2026-09-26 那一刻;现行口径见上「迁移执行器的运维口径」。
+- ② 贡献者/并行分支继续增长到 review 覆盖不住历史文件(判据 = 出现过一次 review 未发现的
+  文件改动);③ 需要"只在预期库形态上跑"的前置校验。实现口径:`schema_migrations`
   加 `checksum` 列,存量行以**升级时读到的文件内容**回填(不回溯校验历史),此后启动逐文件比对,
   不一致 fail-loud 点名文件(与 `scripts/check-migration-range.mjs` 对文档区间的作用互补:
-  它管"文档说的上限对不对",校验和才管"文件内容被没被动过")。
+  它管"文档说的上限对不对",内容指纹判据才管"文件内容被没被动过")。
 
 ### users(0001, 0046 起 role 取代 is_admin)
 | 列 | 说明 |
@@ -157,7 +395,7 @@ idx_usage_user_cost`。写路径 `RecordUsage*` 先 ensure 当月分区。
 `id, created_at, data`——每次 brand_update 保存前一版配置 JSON(保留最近 10 份),供「恢复上一版本」。
 
 ### connectors(0042)
-`id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-org/sales-easy(glitchtip 0045 下架,不再下发)。
+`id, name, description, auth_mode(oauth|device|token|server-side), definition JSON, enabled, updated_at, created_at`——连接器唯一目录源,经 bootstrap `connectors[]` 下发;种子 example-mcp/sales-easy(glitchtip 0045 下架,不再下发;2026-09-29 第三十轮 FIX-45 ⑤ 校正:此处曾写中性化改名前的旧 id `example-org`，真源是迁移 0042 的 `example-mcp`)。
 
 ### gateway_files(0077 + 0078,网关 Files API 归属台账与容量视图)
 `file_id(PK), user_id→users(ON DELETE CASCADE), created_at, expires_at, size_bytes(0078), reaping_at(0079), reap_gen(0081)`;索引按 `(user_id, created_at DESC)`、`(user_id, expires_at)`、`(expires_at)`、`(expires_at, created_at)`。

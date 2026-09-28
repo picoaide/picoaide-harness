@@ -25,6 +25,69 @@ interface SysInfo {
     schema_migrations: number
   }
   version: string
+  /**
+   * F-03（审计 2026-09-26，P2）：**余额准入闸门的拒绝证据**。
+   *
+   * 服务端把 R16C-02 的准入闸门（余额不足时**不转发上游**）的计数与"最近一条被拒
+   * 的形状"挂在这里，注释写明是为了让"谁在被拒、依据是什么、差多少钱"可检索 ——
+   * 但修前 webadmin 既不声明也不渲染这两个字段（全仓 TS 侧
+   * `admission_rejections` 零命中），于是这条"可视化出口"实际上**零消费方**：
+   * 管理员在界面上永远看不到有人被余额闸门挡住，只能去翻日志/直连 API。
+   *
+   * 字段名与 `internal/serverstore.BalanceAdmissionRejection` 的 json tag 一一对应，
+   * 由 `server-info-health-contract.test.ts` 读 Go 源对拍（单边改名即红）。
+   */
+  balance?: {
+    /** 准入处被余额闸门拒绝的累计次数（进程内计数，重启归零；每次都不产生上游调用）。 */
+    admission_rejections: number
+    /** 最近一条拒绝的形状（用户 / 端点 / 模型 / 依据 / 要求金额 / 当时余额）。 */
+    last_rejection?: {
+      user_id: number
+      username: string
+      endpoint: string
+      model: string
+      reason: string
+      required_money: number
+      balance_money: number
+      at: string
+    } | null
+  }
+  /**
+   * F-03：**审计链与审计写入的健康状态**（FIX-12 / R16C-03 / R16C-05 的可视化出口）。
+   *
+   * `chain_stale` / `chain_source` / `chain_age_seconds` 是"长跑实例把过期的 true
+   * 当当前状态对外"这条 P1 的修复产物（R16C-03）：**必须显示出来**，否则一个启停
+   * 于三天前的实例与刚刚校验过的实例在界面上完全同形 —— 正是那条 P1 的形态。
+   */
+  audit?: {
+    chain_checked: boolean
+    chain_intact: boolean
+    chain_broken_id: number
+    chain_checked_at?: string
+    /** 最近一次校验距今秒数（-1 = 本进程还没校验过）。 */
+    chain_age_seconds: number
+    /** 结论是否已过期（超过服务端的新鲜度阈值）——过期结论不得看着像实时结论。 */
+    chain_stale: boolean
+    /** 执行者：startup | periodic。 */
+    chain_source?: string
+    /** 本进程累计校验次数（周期执行者真的在跑吗）。 */
+    chain_checks: number
+    chain_rows: number
+    chain_duration_ms: number
+    chain_error?: string
+    write_failures: number
+    /** 彻底丢失、从未落库的审计条目数 —— 非零即审计有缺口。 */
+    dropped_entries: number
+    retries: number
+    last_failure?: {
+      reason: string
+      action: string
+      username: string
+      cause: string
+      cause_class: string
+      at: string
+    } | null
+  }
   // 2026-09-10: 实时版本检查(服务端代理我方更新服务器 release.picoaide.com;
   // 失败为 null 静默降级)。更新源已从 GitHub Releases 迁到 R2 静态 manifest。
   update_check?: {
@@ -72,6 +135,74 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
       <span className="font-medium tabular-nums">{value}</span>
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// 健康面的"读不到 ⇒ 未知"档（审计 2026-09-26 F-03 的复核项，第二十二轮复审 V2-B4）。
+//
+// 缺陷形态（修前）：
+//   - `chain_stale` **缺失**时 `info.audit.chain_stale` 是 `undefined` ⇒ 三元落到
+//     else 分支 ⇒ 渲染「有效（999999 秒前）」—— **fail-open**：读不到的结论被画成
+//     "有效"，而兄弟字段 `chain_intact` 缺失时走的是"断链"（fail-closed）⇒ 同一张卡
+//     两个方向；Go 侧 `AuditChainStatusDetail` 自己是 fail-closed 的（未校验/时间戳
+//     解析失败 ⇒ `Stale=true`），所以这里只是渲染层缺了"未知"这一档。
+//   - `balance` 块在、但 `admission_rejections` 缺失 ⇒ `undefined.toLocaleString()`
+//     ⇒ **整页 TypeError**（健康面缺一个字段把整个管理页打成错误页）。
+//
+// 规则：**缺失一律渲染"未知"**（本页对"读不到"的既有约定是短横 `—`，与
+// `链校验结论`／`累计拒绝次数` 的整块缺失档一致），既不说"有效"也不说"已过期"，
+// 更不崩。显式的 `false`／数字照旧按原语义渲染（语义不放宽）。
+// ---------------------------------------------------------------------------
+
+/** 数字字段缺失/类型不对 ⇒ `—`（绝不把 `undefined` 渲染进 DOM，也不显示 0）。 */
+function numOrDash(v: number | undefined | null): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString() : '—'
+}
+
+/**
+ * 审计计数沿用**修前的原样渲染**（无千分位）—— 本函数只加"缺失 ⇒ `—`"这一档，
+ * 不改既有数字的显示形态（`chain_checks` / `chain_rows` / 写入缺口那一行的
+ * 断言逐字依赖它）。
+ */
+function rawCountOrDash(v: number | undefined | null): string {
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : '—'
+}
+
+/**
+ * 链校验结论三态：真 / 假 / 未知。
+ *
+ * 判定必须细到**渲染该结论所必需的每一个子字段**（R23-V3-B8，复审 2026-09-27，P3）：
+ *
+ *	`chain_checked` 缺失/非 true  ⇒ 尚未校验
+ *	`chain_intact` 缺失/非布尔    ⇒ `—`（未知 —— 不画成"断链"，也不画成"完整"）
+ *	`chain_intact === true`      ⇒ 完整（不需要任何子字段）
+ *	`chain_intact === false`     ⇒ 需要 `chain_broken_id` **是数字**才画 `断链于 id=N`；
+ *	                                缺它 / 非数字 ⇒ `断链（位置未知）`
+ *
+ * 修前只判到"`chain_intact` 自己缺不缺"这一层，于是 `chain_intact=false` 且
+ * `chain_broken_id` 缺失时会渲染出 **`断链于 id=undefined`**（复审 W3 渲染级实测；
+ * 与同文件 `numOrDash` 自述的"绝不把 `undefined` 渲染进 DOM"不一致）。
+ * 该形态的前提是**部分字段的载荷**（旧服务端 / 中间层裁剪 / 手写夹具）—— 与"三态档"
+ * 本身的整条前提同类，所以同族内必须一致：方向仍是 fail-closed 的"断链"，只是不说
+ * 出一个它并不知道的位置。
+ */
+function chainVerdictText(audit: SysInfo['audit']): string {
+  if (!audit) return '—'
+  if (!audit.chain_checked) return '尚未校验'
+  if (typeof audit.chain_intact !== 'boolean') return '—'
+  if (audit.chain_intact) return '完整'
+  if (typeof audit.chain_broken_id !== 'number' || !Number.isFinite(audit.chain_broken_id)) {
+    return '断链（位置未知）'
+  }
+  return `断链于 id=${audit.chain_broken_id}`
+}
+
+/** 结论新鲜度三态：真/假/未知（未知 = `chain_stale` 缺失 ⇒ `—`，**不是**"有效"）。 */
+function chainFreshnessText(audit: SysInfo['audit']): string {
+  if (!audit) return '—'
+  if (typeof audit.chain_stale !== 'boolean') return '—'
+  const age = typeof audit.chain_age_seconds === 'number' ? `${audit.chain_age_seconds} 秒前` : '未知时间'
+  return audit.chain_stale ? `已过期（${age}）` : `有效（${age}）`
 }
 
 export default function ServerInfo() {
@@ -190,6 +321,87 @@ export default function ServerInfo() {
                     ))}
                   </TableBody>
                 </Table>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* F-03(审计 2026-09-26,P2):余额闸门准入 + 审计健康。
+              这两块是服务端 R16C-02/R16C-03/C-05 三条修复**自己声明的可视化出口**
+              （sysinfo.go 的注释写着"让谁在被拒、依据是什么、差多少钱可检索"），
+              而修前 webadmin 既不声明也不渲染 ⇒ 承诺零消费方。 */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Gauge className="h-4 w-4 text-muted-foreground" /> 余额闸门准入
+                </CardTitle>
+                <CardDescription>
+                  余额不足的请求在**转发上游之前**被拒（不产生上游调用）；此处是本进程的拒绝证据
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <InfoRow
+                  label="累计拒绝次数"
+                  value={numOrDash(info.balance?.admission_rejections)}
+                />
+                {info.balance?.last_rejection ? (
+                  <>
+                    <InfoRow label="最近被拒账号" value={info.balance.last_rejection.username || '—'} />
+                    <InfoRow label="端点 / 模型" value={
+                      <span className="font-mono text-xs">
+                        {info.balance.last_rejection.endpoint || '—'} · {info.balance.last_rejection.model || '—'}
+                      </span>
+                    } />
+                    <InfoRow label="拒绝依据" value={
+                      <span className="font-mono text-xs">{info.balance.last_rejection.reason || '—'}</span>
+                    } />
+                    <InfoRow label="要求金额 / 当时余额" value={
+                      <span className="tabular-nums">
+                        {info.balance.last_rejection.required_money} / {info.balance.last_rejection.balance_money} 元
+                      </span>
+                    } />
+                    <InfoRow label="发生时刻" value={info.balance.last_rejection.at || '—'} />
+                  </>
+                ) : (
+                  <InfoRow label="最近被拒记录" value="—" />
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <ShieldCheck className="h-4 w-4 text-muted-foreground" /> 审计健康
+                </CardTitle>
+                <CardDescription>
+                  哈希链校验结论的**新鲜度**与审计写入缺口；写入失败以前完全不可见
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <InfoRow label="链校验结论" value={chainVerdictText(info.audit)} />
+                <InfoRow label="结论新鲜度" value={chainFreshnessText(info.audit)} />
+                <InfoRow label="校验执行者 / 次数" value={
+                  !info.audit ? '—' :
+                    `${info.audit.chain_source || '—'} · ${rawCountOrDash(info.audit.chain_checks)} 次 · 扫描 ${rawCountOrDash(info.audit.chain_rows)} 行`
+                } />
+                <InfoRow label="写入失败 / 丢弃条目" value={
+                  !info.audit ? '—' : (
+                    <span className={info.audit.dropped_entries > 0 || info.audit.write_failures > 0 ? 'font-semibold text-destructive' : ''}>
+                      {rawCountOrDash(info.audit.write_failures)} / {rawCountOrDash(info.audit.dropped_entries)}（重试 {rawCountOrDash(info.audit.retries)}）
+                    </span>
+                  )
+                } />
+                {info.audit?.last_failure && (
+                  <InfoRow label="最近写入失败" value={
+                    <span className="font-mono text-xs" title={info.audit.last_failure.cause}>
+                      {info.audit.last_failure.action || '—'}
+                      {info.audit.last_failure.cause_class ? ` · ${info.audit.last_failure.cause_class}` : ''}
+                    </span>
+                  } />
+                )}
+                {info.audit?.chain_error && (
+                  <InfoRow label="校验自身错误" value={<span className="text-xs text-destructive">{info.audit.chain_error}</span>} />
+                )}
               </CardContent>
             </Card>
           </div>

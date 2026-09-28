@@ -10,6 +10,7 @@ package capabilities
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -99,17 +100,14 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB, cacheDir string) {
 // 员工侧聚合
 // ---------------------------------------------------------------------------
 
-// viewer resolves the calling user's effective groups and admin flag, or ok=false.
-func viewer(c *gin.Context, db *sql.DB) (u *serverstore.User, groups []string, ok bool) {
-	u = serverauth.CurrentUser(c)
-	if u == nil {
-		return nil, nil, false
-	}
-	groups, err := serverstore.UserEffectiveGroups(db, u.ID)
-	if err != nil {
-		return nil, nil, false
-	}
-	return u, groups, true
+// viewer resolves the calling user's effective groups and admin flag.
+//
+// 三态契约（A2-01，审计 2026-09-26，P2）—— 实现委托给唯一真源
+// `serverauth.ViewerGroups`：`u == nil` ⇒ 未认证（401）、`err != nil` ⇒ 依赖故障
+// （**500**，不得回 401：401 会让客户端清会话并删掉磁盘令牌，一次 PG 抖动就把
+// 全体在线员工登出）。
+func viewer(c *gin.Context, db *sql.DB) (*serverstore.User, []string, error) {
+	return serverauth.ViewerGroups(c, db)
 }
 
 type typeFilter struct {
@@ -388,9 +386,8 @@ func appOwnerMap(db *sql.DB, kind, channel string) map[string]string {
 // 无 source 参数返回全量(向后兼容)。
 func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		u, groups, ok := viewer(c, db)
-		if !ok {
-			serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+		u, groups, verr := viewer(c, db)
+		if serverauth.WriteViewerError(c, u, verr) {
 			return
 		}
 		src := c.Query("source")
@@ -483,7 +480,23 @@ func listCapabilities(db *sql.DB, cacheDir string) gin.HandlerFunc {
 					continue
 				}
 				r, err := serverstore.CurrentMarketReleaseFor(db, serverstore.AppKindAgent, a.AppID, false)
-				if err != nil || r == nil {
+				if err != nil {
+					// R23-V3-B10（复审 2026-09-27，P3）：**依赖故障**不得塌成"这一条不存在"。
+					// 修前这里是 `if err != nil || r == nil { continue }` —— 一次 PG 抖动 /
+					// `app_releases` 不可读就让它**从清单里静默消失**：200 + 少一条、零日志，
+					// 员工看到"能力中心少了一项"，而它与"该项真的没有已审版本"不可区分。
+					// 同族口径（同文件 3b 分支与 /capabilities 的"我的"面）本来就是
+					// `rerr != nil ⇒ 500 + return`，这里补齐成同一份。
+					// 实测反例（真 PG，注入该应用的版本行读取失败）：
+					//   GET /api/client/v2/capabilities?source=market ⇒ 200 {"items":[]}
+					log.Printf("capabilities: market agent %q release lookup failed (dependency, not a rejection) at %s: %v",
+						a.AppID, c.FullPath(), err)
+					serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
+					return
+				}
+				if r == nil {
+					// 没有已审版本 ⇒ 本项目本就不该出现在**分发面**（正常状态，不是故障）；
+					// 归属人的「我的」面另有分支（见 3b）负责把它捞回来。
 					continue
 				}
 				releases[a.AppID] = *r

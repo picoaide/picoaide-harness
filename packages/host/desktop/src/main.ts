@@ -7,6 +7,7 @@ import {
   boot,
   installFailLoud,
   loadLayeredEnv,
+  PluginPackages,
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -21,11 +22,18 @@ import {
 // `app.whenReady()` 之前 append，所以在模块作用域接线（与 APP_ORIGIN_SCHEME 同理）。
 import {
   applySystemProxyPolicy,
-  enforceDirectNodeTransport,
-  lateAllowSystemProxyWarning,
+  enforceDirectTransport,
   resolveSystemProxyPolicy,
-  stripProxyEnvironment,
 } from './network-policy.ts'
+// 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01）：打包版带 `--inspect*` /
+// `--remote-debugging-*` / `--js-flags` 启动时必须**拒绝启动**。判定是纯函数、
+// 接线也必须在模块作用域 —— 理由见下面 `DEBUG_SWITCH_GATE` 的注释与模块头。
+import {
+  applyDebugSwitchGate,
+  debugSwitchEscapeLogLine,
+  detectDebugSwitches,
+  writeStderrSync,
+} from './debug-switches.ts'
 // 客户端专属 WASM 应用 origin：协议特权注册（whenReady 之前）+ 交给插件的
 // Electron 适配器。子路径 `electron-adapter` 是唯一静态 import electron 的模块，
 // 插件主体（`@picoaide/dsh-wasm-apps-host`）保持纯 Node 可加载。
@@ -57,7 +65,8 @@ import {
 } from './crash-evidence.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import { FileExporter } from './file-exporter.ts'
-import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
+import { DESKTOP_SETTINGS_ENTRY_ID, type DesktopLogLevel, type DesktopSettingsDocument } from './index.ts'
+import { readSettingsNamespace } from './settings-forms.ts'
 import { LogFileSink } from './log-files.ts'
 import { maskSecrets } from './mask-secrets.ts'
 import { reclaimOrphanedDocumentLocks, documentLockRecoveryLogLines } from './document-lock-recovery.ts'
@@ -69,7 +78,9 @@ import {
   DESKTOP_PROFILE_NAME,
   desktopInstallAnchor,
   desktopProfileContext,
+  legacyAgentPresetLogLine,
   prepareDesktopProfile,
+  type LegacyAgentPresetDiagnostic,
   type SkippedOptionalEntry,
 } from './profile.ts'
 import {
@@ -145,6 +156,40 @@ const APP_ORIGIN_SCHEME = CHANNEL_PROFILE?.appOriginScheme ?? DEFAULT_APP_ORIGIN
 const SYSTEM_PROXY_POLICY = resolveSystemProxyPolicy(process.env, CHANNEL_PROFILE)
 applySystemProxyPolicy(app.commandLine, SYSTEM_PROXY_POLICY)
 
+/**
+ * 调试开关闸门（2026-09-26 第二十五轮审计 Y4-01，P1）：打包版**拒绝**带
+ * `--inspect` / `--inspect-brk` / `--inspect-port` / `--remote-debugging-port` /
+ * `--remote-debugging-pipe` / `--js-flags` 启动。
+ *
+ * **也必须在模块作用域**，而且理由比代理开关更硬：`--inspect` 的 V8 inspector 监听
+ * 在 JS 跑之前就已经建好、`--remote-debugging-port` 由 Chromium 在浏览器进程初始化时
+ * 读取 —— 在 JS 里做任何"净化"（`removeSwitch` / 关 `devTools`）都晚了一步，
+ * 唯一可靠的处置是**拒绝启动**（实跑证据：`temp/r25/Y4-fresh/probe/`；`--inspect`
+ * 直通主进程 RCE，`--remote-debugging-port` 可经 CDP 读出 HttpOnly 的
+ * `dsh-auth-*` 持有性证明 cookie 并重放通过全部写面闸门）。
+ *
+ * 判定顺序、文案与副作用都在 `debug-switches.ts`（纯函数 + 可注入接缝，行为判据见
+ * `tests/debug-switches.spec.ts`）：开发态（`!app.isPackaged`）一律放行；
+ * 打包态可经真实进程环境里的 `PICOAI_ALLOW_DEBUG_SWITCHES=1` 显式放行**一次**
+ * （E2E/真机探针靠它驱动打包产物），放行会写进启动日志（下面 `start()` 里那行）。
+ */
+const DEBUG_SWITCH_GATE = detectDebugSwitches({
+  argv: process.argv,
+  execArgv: process.execArgv,
+  packaged: app.isPackaged,
+  env: process.env,
+})
+applyDebugSwitchGate(DEBUG_SWITCH_GATE, {
+  write: writeStderrSync,
+  showErrorBox: (title, content) => { dialog.showErrorBox(title, content) },
+  // `process.exit` 是 fail-closed 的双保险：`app.exit()` 在真机上由平台收尾
+  // （可能异步），而这条闸门的语义是"绝不允许带着调试开关继续启动"。
+  exit: code => {
+    app.exit(code)
+    process.exit(code)
+  },
+})
+
 /** Report optional user UI plugins skipped to keep startup recoverable. */
 function notifySkippedOptionalEntries(
   runtime: ElectronDesktopRuntime,
@@ -165,6 +210,47 @@ function notifySkippedOptionalEntries(
   } catch (cause) {
     logger.error(`${BIN_NAME}: failed to show skipped plugin notification: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
+}
+
+/**
+ * Log every profile bundle the loader skipped, and warn the user when any exist.
+ *
+ * Loading itself never prints (upstream keeps it quiet so the CLI can decide);
+ * the Electron launcher has no stderr its user will ever read, so this must go
+ * through the file/error logger and the native notification surface.
+ * @param skipped - bundles dropped during profile loading, with their reasons.
+ * @param logger - desktop logger writing to the user-data log directory.
+ */
+function reportSkippedProfileBundles(
+  skipped: readonly { packageName: string, reason: string }[],
+  logger: DesktopLogger,
+): void {
+  for (const entry of skipped) {
+    logger.error(`${BIN_NAME}: skipping profile bundle ${JSON.stringify(entry.packageName)}: ${entry.reason}`)
+  }
+}
+
+/**
+ * Report the outcome of materializing legacy shared-agent presets
+ * (`$DSH_HOME/.agent-presets/<id>/`) into `preset-<id>` rows.
+ *
+ * Upstream 0.1.7 stopped reading that directory ("Nothing reads that directory
+ * any more"), so `src/profile.ts` reads it during composition and injects the
+ * equivalent declaration rows. Diagnostics are produced only for abnormal
+ * shapes — a directory that cannot be read, a missing or unparsable
+ * `agent.cordis.yml`, or an id already declared by a shipped/edited preset —
+ * and **every one of them means a preset the user installed is not on the
+ * roster**. The composition path also writes them to stderr, which a packaged
+ * GUI may never show; routing them through the desktop logger puts them in the
+ * user-data log next to the rest of the startup record.
+ * @param diagnostics - one entry per legacy preset directory that needs telling.
+ * @param logger - desktop logger writing to the user-data log directory.
+ */
+function reportLegacyAgentPresetDiagnostics(
+  diagnostics: readonly LegacyAgentPresetDiagnostic[],
+  logger: DesktopLogger,
+): void {
+  for (const diagnostic of diagnostics) logger.error(`${BIN_NAME}: ${legacyAgentPresetLogLine(diagnostic)}`)
 }
 
 /** Surface path/volume risks that otherwise become obscure sandbox or pnpm failures later. */
@@ -262,13 +348,18 @@ async function start(): Promise<void> {
     })
     logSink.enforceDirectoryCap()
     logSink.purgeOlderThan(7)
-    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} proxy ${SYSTEM_PROXY_POLICY.allow ? 'system' : 'direct'}/${SYSTEM_PROXY_POLICY.source} run ${Date.now()} ---`)
+    logSink.writeHeader(`--- ${BIN_NAME} ${PRODUCT_NAME} ${desktopProductVersion()} ${process.platform} node ${process.version} proxy ${SYSTEM_PROXY_POLICY.allow ? 'system' : 'direct'}/${SYSTEM_PROXY_POLICY.source} debugSwitches ${DEBUG_SWITCH_GATE.escaped ? 'allowed-by-env' : 'guarded'} run ${Date.now()} ---`)
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause)
     process.stderr.write(`${BIN_NAME}: file logging unavailable: ${maskSecrets(detail)}\n`)
     logSink = undefined
   }
   const electronLogger = new ElectronStderrLogger(logSink)
+  // 逃生门留痕（2026-09-26 第二十五轮审计 Y4-01）：`PICOAI_ALLOW_DEBUG_SWITCHES`
+  // 放行的是"任何本机同用户进程都能控制本应用并读它的本地 API cookie"这件事，
+  // 静默放行等于保护不存在 —— 每次靠它启动都在启动日志里写明。
+  const debugSwitchEscape = debugSwitchEscapeLogLine(DEBUG_SWITCH_GATE)
+  if (debugSwitchEscape !== undefined) electronLogger.error(`${BIN_NAME}: ${debugSwitchEscape}`)
   try {
     startDesktopCrashReporting(crashReporter, {
       productName: PRODUCT_NAME,
@@ -439,26 +530,26 @@ async function start(): Promise<void> {
   try {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
     // 出口策略的第二刀（第一刀是模块作用域的 no-proxy-server，只管 Chromium）：
-    //  · Node 栈：宿主机若显式设了 NODE_USE_ENV_PROXY，Node 在**启动时**就装好了
-    //    走代理的全局 dispatcher —— 事后删环境变量无效，只能换成直连 Agent；
-    //  · 子进程：agent 的 curl/git/MCP stdio 由 scrubbedParentEnv() 从 process.env
-    //    派生，删掉代理名它们才真正直连。放在 loadLayeredEnv 之后，连 home `.env`
-    //    注入的代理名一起清掉。
-    // 判定用**删除前**的环境（NODE_USE_ENV_PROXY 本身马上就要被删掉）。
-    if (!SYSTEM_PROXY_POLICY.allow) {
-      const transport = await enforceDirectNodeTransport(process.env)
-      if (transport === 'swapped') {
-        electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)
-      } else if (transport === 'unavailable') {
-        electronLogger.error(`${BIN_NAME}: NODE_USE_ENV_PROXY is set but undici is unavailable; Node-side requests may still use the environment proxy`)
-      }
-      const late = lateAllowSystemProxyWarning(process.env, SYSTEM_PROXY_POLICY)
-      if (late !== undefined) electronLogger.error(`${BIN_NAME}: ${late}`)
-      const cleared = stripProxyEnvironment(process.env)
-      if (cleared.length > 0) {
-        electronLogger.error(`${BIN_NAME}: cleared proxy environment for this run (${cleared.join(', ')})`)
-      }
-    } else {
+    // Node 栈换直连 dispatcher + 删掉子进程会继承的代理环境变量。**逻辑在
+    // `network-policy.ts` 的 `enforceDirectTransport()` 里**（可注入 deps 的行为判据在
+    // tests/network-policy.spec.ts）—— 内联在这里时"这段真的会跑"只有文本位置判据，
+    // 掏成 `if (false && …)` 后门禁 18/18 全绿、真机探针也不经过这段控制流
+    // （2026-09-25 审计 B1-03）。
+    // **实参个数也是判据**（2026-09-26 复审 B-1）：deps 是测试接缝，在生产调用表达式里
+    // 多喂一个 no-op 第三实参会让强制块静默空转（三个代理环境变量一个没删、dispatcher
+    // 没换、启动日志一行不打），而注入 deps 的单测全部照旧通过 —— 所以这里只传两个实参，
+    // 由 AST 判据钉住（`argCount === 2`）。
+    const enforcement = await enforceDirectTransport(process.env, SYSTEM_PROXY_POLICY)
+    if (enforcement.transport === 'swapped') {
+      electronLogger.error(`${BIN_NAME}: replaced the environment proxy dispatcher with a direct one (NODE_USE_ENV_PROXY was set)`)
+    } else if (enforcement.transport === 'unavailable') {
+      electronLogger.error(`${BIN_NAME}: NODE_USE_ENV_PROXY is set but undici is unavailable; Node-side requests may still use the environment proxy`)
+    }
+    if (enforcement.lateWarning !== undefined) electronLogger.error(`${BIN_NAME}: ${enforcement.lateWarning}`)
+    if (enforcement.cleared.length > 0) {
+      electronLogger.error(`${BIN_NAME}: cleared proxy environment for this run (${enforcement.cleared.join(', ')})`)
+    }
+    if (!enforcement.enforced) {
       electronLogger.error(`${BIN_NAME}: system proxy use is enabled by ${SYSTEM_PROXY_POLICY.source}; host proxy settings apply to every request`)
     }
     const pluginManagementStatePath = join(app.getPath('userData'), 'plugin-management', 'state.json')
@@ -566,6 +657,13 @@ async function start(): Promise<void> {
           fileExporter = new FileExporter(logSink)
           hostCtx.logger.exporter(fileExporter)
         }
+        // Upstream 0.1.7 replaced the materialized `profiles/node_modules`
+        // closure with this in-process resolution. It MUST be plugged before any
+        // config-tree entry mounts (same position as the CLI's
+        // `apps/cli/src/profile-boot.ts`): without it the Loader cannot resolve
+        // a single bare specifier from the profile directory and every plugin
+        // fails to import.
+        await hostCtx.plugin(PluginPackages, { resolution: prepared.resolution })
         provideCmdline(hostCtx, {
           args: ['--host', '127.0.0.1', '--port', String(prepared.port)],
           exit: requestQuit,
@@ -581,13 +679,27 @@ async function start(): Promise<void> {
     // 只 warn（Windows GUI 无 stderr ⇒ 彻底静默）。这里补上我方必需行的激活断言，
     // 失败走桌面自己的致命路径。见 src/startup-rows.ts 的模块注释。
     assertRequiredRowsActive(ctx)
-    fileExporter?.setThreshold((ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopSettings | undefined)?.logLevel ?? 'info')
-    ctx.on('settings/updated', (namespace, next) => {
-      if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return
-      fileExporter?.setThreshold((next as DesktopSettings).logLevel)
+    // 0.1.7: the desktop's own settings live in this plugin's profile entry
+    // (`desktop-shell`) and are read through the settings form projection; the
+    // live-change signal is `settings/document-updated`.
+    const readLogLevel = (): DesktopLogLevel => {
+      const next = readSettingsNamespace<DesktopSettingsDocument>(ctx.settings, DESKTOP_SETTINGS_ENTRY_ID)
+      return next?.logLevel ?? 'info'
+    }
+    fileExporter?.setThreshold(readLogLevel())
+    ctx.on('settings/document-updated', (namespace) => {
+      if (namespace !== DESKTOP_SETTINGS_ENTRY_ID) return
+      fileExporter?.setThreshold(readLogLevel())
     })
     await runtime.mountScheduled()
     notifySkippedOptionalEntries(runtime, electronLogger, prepared.skippedOptionalEntries)
+    reportLegacyAgentPresetDiagnostics(prepared.presetDiagnostics, electronLogger)
+    // Upstream 0.1.7 reports a bundle whose manifest/patch cannot be loaded by
+    // **skipping** it (`profile.skippedBundles`) instead of aborting the whole
+    // generation. That is the right failure mode for one broken third-party
+    // bundle, but it is silent unless the launcher says so — and a skipped
+    // bundle can be a whole feature (or the channel overlay) disappearing.
+    reportSkippedProfileBundles(prepared.profile.skippedBundles, electronLogger)
     notifyWindowsVolumeConcerns(runtime, electronLogger, windowsVolumeConcerns)
   } catch (cause) {
     electronLogger.errorCause(cause)

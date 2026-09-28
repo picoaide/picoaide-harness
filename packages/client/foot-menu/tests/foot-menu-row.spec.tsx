@@ -11,7 +11,11 @@
  *   - 关闭时把浮层卸载（而不是 display:none）⇒「关闭后条目仍在树里」红；
  *   - 点条目后不关闭浮层 / 不还焦点 ⇒ 对应用例红；
  *   - Esc 不还焦点、外部 pointerdown 不关闭 ⇒ 对应用例红；
- *   - 激活态不看 `PANEL_ACTIVE_ATTR` ⇒「激活面板时行文案带面板名」红。
+ *   - 激活态不看 `PANEL_ACTIVE_ATTR` ⇒「激活面板时行文案带面板名」红；
+ *   - **点条目时在 `activate()` 之后无条件抢回锚点焦点**（2026-09-25 审计 FIX-29 P2 的
+ *     原形态）⇒「activate 把焦点移走时浮层不抢回」红；
+ *   - 点条目时不先把焦点交还锚点 ⇒ 组合用例
+ *     `panel-focus-handoff.spec.tsx` 的「Esc 收起后焦点回到『更多』行」红。
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -244,7 +248,10 @@ describe('浮层：打开、顺序、激活态', () => {
     expect(chevron().style.transform).toBe('')
   })
 
-  it('点条目：调用 activate 并关闭浮层，焦点回到「更多」行', async () => {
+  it('点条目：调用 activate 并关闭浮层；activate 不动焦点时焦点落在「更多」行', async () => {
+    // 替身 activate（不移动焦点）是**退化形态**：浮层收起后焦点不能丢在 `<body>`/被隐藏的
+    // 条目上 —— 这条仍然成立。真正的组合（activate 把焦点移进整页面板）见下一条与
+    // `panel-focus-handoff.spec.tsx`。
     add('cron', -10, { title: () => '定时任务' })
     await render(true)
     await open()
@@ -252,6 +259,35 @@ describe('浮层：打开、顺序、激活态', () => {
     expect(activated).toEqual(['cron'])
     expect(menu().style.display).toBe('none')
     expect(document.activeElement).toBe(row())
+  })
+
+  /**
+   * 2026-09-25 审计 FIX-29 P2 的**回归判据**。
+   *
+   * 现场：条目 `onClick` 是 `entry.activate(); closeMenu(true)`，而整页面板装载器在
+   * `activate()` 里会把焦点聚焦到面板容器上 ⇒ `closeMenu(true)` 紧接着把焦点拉回
+   * 侧边栏行，键盘用户按 Tab 进不去刚打开的面板。旧用例用**替身 activate**（不移动
+   * 焦点）把错的那一侧写成了契约。
+   *
+   * 变异验证：把 `closeMenu` 的"焦点已经离开浮层就不抢"判据删掉（回到无条件
+   * `anchorRef.current?.focus()`）⇒ 本用例红。
+   */
+  it('activate 把焦点移走时，浮层收起不得把焦点抢回来（整页面板的键盘入口）', async () => {
+    const panelHost = document.createElement('div')
+    panelHost.tabIndex = -1
+    document.body.appendChild(panelHost)
+    add('cron', -10, {
+      title: () => '定时任务',
+      // 真装载器的行为：把焦点移进面板容器（面板整页替换中列）。
+      activate: () => { activated.push('cron'); panelHost.focus() },
+    })
+    await render(true)
+    await open()
+    await act(async () => { items()[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(activated).toEqual(['cron'])
+    expect(menu().style.display).toBe('none')
+    expect(document.activeElement, '焦点必须留在刚打开的面板里，不能被浮层抢回侧边栏行').toBe(panelHost)
+    panelHost.remove()
   })
 })
 

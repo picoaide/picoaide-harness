@@ -308,9 +308,32 @@ func (p *LDAPProvider) loginUsername(e *ldap.Entry, dst string) string {
 	return strings.TrimSpace(dst)
 }
 
+// syncsGroups 是本部署"由目录接管组归属"的**唯一判据**(R24-X4-B1)。
+//
+// 为什么必须是唯一判据:`SyncUserGroups` 的语义是**全量替换**(先
+// `DELETE FROM user_groups` 再按名单重插,见 serverstore/groups.go),因此
+// "查询失败/未配置"与"目录说该用户不属于任何组"在写面上完全同形 —— 一旦
+// 后者被当成前者,一次登录就会清空用户**全部**组归属(含管理员手工分配的
+// 部门),且同步侧若也有守卫则永不自愈。旧实现的形态正相反:登录路径
+// `GroupsPresent` **恒 true**(即使根本没查组)⇒ 未配 group_filter 时每次
+// 登录都 `SyncUserGroups(nil)` 清空;而 dirsync 有自己的 `GroupFilter != ""`,
+// 两边各写一份、结论相反(注释还写着"与登录行为一致")。
+//
+// 语义(与既有认账口径一致):
+//   - group_filter 未配置 ⇒ 本次部署**不做组同步**(既不清空也不写入),
+//     员工的部门归属由管理员手工维护;
+//   - group_filter 已配置 ⇒ 目录是组的权威源,**空组即回收**(查询成功但
+//     结果为空 ⇒ 正常回收,不是"没查到")。
+//
+// 登录路径(Authenticate)与目录同步(dirsync)必须调用这**同一个**谓词,
+// 不得各写一份 `p.GroupFilter != ""`。
+func (p *LDAPProvider) syncsGroups() bool { return p.GroupFilter != "" }
+
 // groupsOfEntry 查询某用户/条目的全部组(复用 group_filter 单用户语义)。
+// 未配置 group_filter 时返回 (nil, nil) —— 调用方必须先过 syncsGroups(),
+// 不能把这里的 nil 当成"该用户没有组"。
 func (p *LDAPProvider) groupsOfEntry(conn ldapConn, dn string) ([]string, error) {
-	if p.GroupFilter == "" {
+	if !p.syncsGroups() {
 		return nil, nil
 	}
 	res, err := conn.Search(&ldap.SearchRequest{
@@ -365,6 +388,10 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 	// 用户名取目录 user_attr(默认 uid;可配 cn/sAMAccountName 等),缺失回退
 	// 用户输入——统一走 p.loginUsername(与 sync/探测同一规范化规则)。
 	canonical := p.loginUsername(entry, username)
+	// 组声明是否**参与同步**由唯一谓词决定(见 syncsGroups):未配 group_filter
+	// ⇒ GroupsPresent=false ⇒ provisionUser 不动 user_groups。旧实现这里恒
+	// true,而未配过滤器时 Groups 恒 nil ⇒ 每次登录清空该用户全部组归属。
+	syncGroups := p.syncsGroups()
 	ui := UserInfo{
 		Username:    canonical,
 		DisplayName: ldapDisplayName(entry),
@@ -373,11 +400,11 @@ func (p *LDAPProvider) Authenticate(username, password string) (UserInfo, error)
 		// P2-9:DN 是目录内的稳定主体标识(用户名可能被改名/复用)。
 		ExternalID:     entry.DN,
 		ExternalSource: "ldap",
-		// 目录是组的权威源:即使这次没查到任何组也要回收(空组即回收),
-		// 所以这里恒为 true。
-		GroupsPresent: true,
+		// 查询过组 ⇒ 目录是组的权威源(即使这次没查到任何组也要回收,
+		// 即"空组即回收");没查询过 ⇒ 本次认证没有组声明,不得回收。
+		GroupsPresent: syncGroups,
 	}
-	if p.GroupFilter != "" {
+	if syncGroups {
 		groups, err := p.groupsOfEntry(conn, entry.DN)
 		if err != nil {
 			return UserInfo{}, err

@@ -117,6 +117,17 @@ go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证�
 # 数据库: PostgreSQL 唯一。-db-driver 仅接受 pg(默认;pg-external 为历史兼容别名,部署层已不用),-pg-dsn 必填;
 #   迁移 DDL 见 internal/serverstore/migrations-pg/(迁移自动应用)。SQLite 与 migrate-sqlite-pg 已下线,
 #   老数据需先在历史版本完成迁移。
+#   迁移执行器(ApplyMigrations,R27-FIX39):① 每条迁移事务带**有界等锁预算**——启动期并发持锁
+#   (pg_dump/长查询/idle in transaction)时 fail-loud,不再无界静默挂死;预算可用
+#   PICOAI_MIGRATION_LOCK_TIMEOUT_MS 调(缺省 5 分钟;互斥锁等待用
+#   PICOAI_MIGRATION_ADVISORY_TIMEOUT_MS、慢迁移告警阈值用 PICOAI_MIGRATION_SLOW_MS);
+#   ② 每条迁移前后各一行 `migrate:` 日志 + AccessExclusiveLock 窗口采样(慢迁移单独一条
+#   `migrate: SLOW migration` 告警,可 grep 出"哪张表被锁了多久");
+#   ③ schema_migrations 有 checksum 列:已应用迁移与随包文件不一致 ⇒ 启动 fail-loud
+#   (老库首启用随包文件回填一次,不拒绝启动)。**不要**就地改写已发布的迁移文件。
+#   **部署侧口径**(R28 审计 AB2-B-01):三个预算键已接进 docker-compose.yml 的
+#   server.environment 与 .env.example(单位毫秒,留空 = 缺省 5min/5min/5s),
+#   运维口径(含 checksum 列的回填/拒绝启动语义)见 docs/06-database.md。
 ```
 
 ## 9. 文档与实施

@@ -59,7 +59,8 @@ export function installCoiApi(ctx, svc) {
   const handler = async (req, res) => {
     // FIX-04：统一前置守卫。此前本注册点零校验 → 任意网页可 POST /coi/tasks
     // 让本机 dispatch 一个外部 CLI agent 任务（无预检的简单请求）。
-    if (await applyRequestGuard(req, res, 256 * 1024)) return
+    // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+    if (await applyRequestGuard(req, res, 256 * 1024, ctx)) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     const segments = path.split('/').filter(Boolean) // [memory-evolve, api, coi, ...]

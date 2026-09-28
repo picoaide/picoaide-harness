@@ -9,7 +9,7 @@
  * 「Office 预览不可用。请在运行 DeepSeek Harness 的主机上启用文档预览服务。」
  * 一句在桌面端**无法执行**的指引。
  *
- * 补丁摘掉 `apply()` 末尾的 `apply$1(ctx, config.office)` 调用，于是没有任何渲染器
+ * 补丁摘掉 `apply()` 里那个**以 `config.office` 为实参**的调用，于是没有任何渲染器
  * 认领这些后缀，上游内置的空态接管（`ui-sidebar-documentpreview` 的
  * `TextPreview.tsx:210-226` 分支：`selected === undefined && unviewable`）——
  * 而 `document/unviewable.ts:10-28` 的 `UNVIEWABLE_BINARY_EXTENSIONS` 已含六个
@@ -21,7 +21,17 @@
  * 由 `verify-patch-resolutions` / `verify-patches` / `check-patch-pin` 覆盖，
  * 本用例只钉「这份产物里 Office 渲染器没有被接线」与「内置空态仍然在」。
  *
- * 变异验证：把 `apply$1(ctx, config.office);` 加回构建产物 ⇒ 第一条用例必须变红。
+ * 变异验证：把那个 `(ctx, config.office)` 调用加回构建产物 ⇒ 第一条用例必须变红。
+ *
+ * ⚠️ **判据不得按构建器的 helper 序号（`apply$N`）钉**（2026-09-28，0.1.7-rc.2 升级实测）。
+ * 打包器每个版本重新给这些内部函数编号，编号**随构建漂移**：同一个 `apply$1` 在 0.1.6
+ * 是 Office，在 0.1.7 却是**纯客户端的 Excel 读取**（`apply$1(ctx, config.excel)`，不依赖
+ * LibreOffice，是本产品**要保留**的功能）。本用例原先写
+ * `expect(bundle.match(/apply\$1\(/gu)).toHaveLength(1)`：0.1.7 产物里 `apply$1` 有
+ * "定义 + Excel 调用"两处，于是它变红；而更危险的方向是**假绿** —— 照旧按序号去摘
+ * `apply$1`，会把 Excel 预览一起摘掉，这条用例反而照样通过。
+ * 稳定判据只有一条：**不存在任何以 `config.office` 为实参的调用**；要数"函数只剩定义"，
+ * 也必须先按**函数体内容**（它注册的 documentPreview id）认出是哪个标识符，再数它。
  */
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -38,14 +48,51 @@ function clientBundlePath(): string {
 
 const bundle = readFileSync(clientBundlePath(), 'utf8')
 
+/** 本包注册的 Office / Excel 文档预览 id —— 识别"是哪个函数"的**内容**锚点。 */
+const OFFICE_PREVIEW_ID = '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/office'
+const EXCEL_PREVIEW_ID = '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/excel'
+
+/**
+ * 按函数体里注册的 documentPreview id 反解出那个 apply 函数的标识符。
+ *
+ * 这是"不按 `apply$N` 序号钉"的落地：序号是打包器产物、随版本漂移；注册的 preview id
+ * 是本包自己声明的常量，跟着语义走。
+ * @param previewId - 该渲染器注册的 documentPreview id。
+ * @returns 产物里那个 apply 函数的标识符（如 `apply$2`）。
+ */
+function applyIdentifierFor(previewId: string): string {
+  const escaped = previewId.replaceAll('/', '\\/')
+  const pattern = new RegExp(`function ([A-Za-z_$][\\w$]*)\\(ctx, [\\w$]+\\) \\{\\s*const id = "${escaped}";`, 'u')
+  const match = pattern.exec(bundle)
+  expect(
+    match,
+    `产物里找不到注册 ${previewId} 的 apply 函数 —— 上游改了形状，本守卫必须重写而不是静默放过`,
+  ).not.toBeNull()
+  return match![1]!
+}
+
+/** 数某个标识符在产物里出现几次「被调用/被定义」（`name(` 形态）。 */
+function callSites(identifier: string): number {
+  return bundle.match(new RegExp(`${identifier.replaceAll('$', '\\$')}\\(`, 'gu'))?.length ?? 0
+}
+
 describe('Office preview stays disabled in the desktop client (patch guard)', () => {
   it('does not register the Office renderer', () => {
     // 补丁是真的落在这份产物上（不是上游恰好改了形状）。
     expect(bundle).toContain('PicoAide: the desktop host ships no LibreOffice')
-    // 注册调用必须不存在……
-    expect(bundle).not.toContain('apply$1(ctx, config.office)')
-    // ……且该函数只剩定义（死代码）：任何重新接线都会让计数回到 2。
-    expect(bundle.match(/apply\$1\(/gu)).toHaveLength(1)
+    // ① 唯一稳定的判据：不存在任何以 config.office 为实参的调用。
+    expect(bundle).not.toMatch(/\(ctx, config\.office\)/u)
+    // ② 由内容锚点认出 Office 那个函数，再要求它只剩定义（死代码）：重新接线会让计数回到 2。
+    expect(callSites(applyIdentifierFor(OFFICE_PREVIEW_ID))).toBe(1)
+  })
+
+  it('keeps the Excel renderer wired（0.1.7 新增：纯客户端读取，不依赖 LibreOffice）', () => {
+    // 反向控制：这条同时钉住"补丁没有误伤 Excel"。0.1.7 起的产物才有这个渲染器，
+    // 更早的版本（产物里没有该 preview id）直接跳过。
+    if (!bundle.includes(EXCEL_PREVIEW_ID)) return
+    // 定义 + 调用 = 2 处；只摘 Office 的补丁必须保持这个数。
+    expect(callSites(applyIdentifierFor(EXCEL_PREVIEW_ID))).toBe(2)
+    expect(bundle).toMatch(/\(ctx, config\.excel\)/u)
   })
 
   it('keeps the built-in unsupported empty state that binary documents fall back to', () => {

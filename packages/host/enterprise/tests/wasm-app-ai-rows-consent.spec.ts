@@ -11,7 +11,13 @@
  *     `POST …/:app_id/ai-rows-consent`），闸门在**宿主工具**里。判据里那条
  *     "走本机路由授权 ⇒ 工具立刻放行"就是这条接线唯一可被打坏的地方。
  *  3. **落盘与 fail-closed**：状态落在 `$DSH_HOME/wasm-apps-ai-rows-consent.json`
- *     （0600，原子写），重启仍在；文件坏掉/版本不对 ⇒ **全未授权**（不是"全放行"）。
+ *     （0600，原子写），重启仍在；文件坏掉/版本不对（含 v1 旧形状）⇒ **全未授权**
+ *     （不是"全放行"）。**损坏 ≠ 合法旧版本**（FIX-17 / V6 F3）：坏文件连写都拒绝
+ *     （500 `AI_ROWS_CONSENT_NOT_PERSISTED` + 原文件一字不动），只有可识别的 v1 才允许
+ *     就地升级 —— 深判据在 `tests/wasm-app-ai-rows-consent-corrupt-vs-legacy.spec.ts`。
+ *
+ * 授权维度（`user ⊕ server ⊕ app`）与"换账号 / 换服务端不得继承"另有专属判据：
+ * `tests/wasm-app-ai-rows-consent-scope.spec.ts`（第十九轮审计 R19B-03）。
  *
  * 全部经 auth-gate 的**真实装配**（`apply()` 注册的真实路由 + 真实 guard/持有性证明/
  * 工具注册），只把出站 `fetch` 换成假网关。
@@ -22,10 +28,13 @@
  *   - 拒绝换成 `{rows:[]}` 之类的空结果 ⇒「不是静默空结果」红（`ok`/code 断言）；
  *   - 路由与工具各建一个 store（或工具用内存 store）⇒「路由授权 ⇒ 工具放行」与
  *     「重启后仍在」红；
- *   - `parseAiRowsConsent` 放宽（坏文件当成空记录而不是整份作废）⇒「坏文件 = 未授权」红；
+ *   - `parseAiRowsConsent` 放宽（坏文件当成空记录而不是整份作废，或容忍 v1）⇒
+ *     「坏文件 = 未授权」「v1 = 未授权」红；
+ *   - 键退回只按 `app_id`（或读面/写面各构造一份键）⇒ scope 专属 spec 红；
  *   - 路由去掉持有性证明 ⇒「裸请求被拒」红；
  *   - 授权写失败时静默成功 ⇒ 面板/工具状态不一致（由第 6 组的两条钉住）。
  */
+import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,8 +46,10 @@ import { AI_ROWS_NOT_AUTHORIZED } from '../src/wasm-app-tools.ts'
 import {
   AI_ROWS_CONSENT_FILE_NAME,
   AI_ROWS_CONSENT_FORMAT_VERSION,
+  aiRowsConsentKey,
   createAiRowsConsentStore,
   defaultAiRowsConsentPath,
+  isAiRowsConsentScopeError,
   parseAiRowsConsent,
   serializeAiRowsConsent,
 } from '../src/wasm-apps-ai-rows-consent.ts'
@@ -52,6 +63,9 @@ const SESSION: Session = {
 }
 
 const AUDITOR: Session = { ...SESSION, username: 'audit', role: 'auditor' }
+
+/** 本文件里各用例共用的作用域（= `SESSION` 的那一段）。 */
+const SCOPE = { user: SESSION.username, server: SESSION.serverURL } as const
 
 /** 工具定义（只看本文件用到的字段）。 */
 interface ToolDef {
@@ -312,16 +326,17 @@ describe('授权卡（本机路由）与宿主工具共用同一个真源', () =
     expect((await second.run('wasm_app_rows', ROWS_ARGS)).ok).toBe(true)
   })
 
-  it('落盘位置与权限：$DSH_HOME/wasm-apps-ai-rows-consent.json（0600）', async () => {
+  it('落盘位置与权限：$DSH_HOME/wasm-apps-ai-rows-consent.json（0600，v2 三段键）', async () => {
     const h = harness()
     await authorize(h, 'shared-notes')
     const info = await stat(consentFile())
     expect(info.isFile()).toBe(true)
     // 0600：这是"AI 能读哪些应用的数据"的开关，同机其它用户不得改写。
     expect(info.mode & 0o777).toBe(0o600)
-    const parsed = JSON.parse(await readFile(consentFile(), 'utf8')) as { version: number, apps: string[] }
+    const parsed = JSON.parse(await readFile(consentFile(), 'utf8')) as { version: number, grants: unknown[] }
     expect(parsed.version).toBe(AI_ROWS_CONSENT_FORMAT_VERSION)
-    expect(parsed.apps).toEqual(['shared-notes'])
+    // 形状本身就是判据：作用域（账号 + 服务端）**落盘**，不是"只有 app_id"。
+    expect(parsed.grants).toEqual([{ user: SESSION.username, server: SESSION.serverURL, app: 'shared-notes' }])
   })
 })
 
@@ -346,9 +361,37 @@ describe('授权文件不可信 ⇒ 全未授权（fail-closed，不是全放行
   })
 
   it('一条坏条目 ⇒ 整份作废（不静默跳过坏行）', async () => {
-    await writeFile(consentFile(), JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, apps: ['shared-notes', 42] }), { mode: 0o600 })
+    await writeFile(consentFile(), JSON.stringify({
+      version: AI_ROWS_CONSENT_FORMAT_VERSION,
+      grants: [{ user: SESSION.username, server: SESSION.serverURL, app: 'shared-notes' }, 42],
+    }), { mode: 0o600 })
     const h = harness()
     expect((await readConsent(h, 'shared-notes')).body).toEqual({ app_id: 'shared-notes', enabled: false })
+  })
+
+  it('一条坏条目 ⇒ 授权路由回 500 并拒绝覆盖，原文件一字不动（FIX-17 / V6 F3）', async () => {
+    // 修前：这一次授权会以"空集合 + 本次一条"整份 rename 覆盖（别人的记录静默消失），
+    // 而本机路由回 200 —— 面板显示"已允许"，同一个文件里其它账号的开关却没了。
+    const damaged = JSON.stringify({
+      version: AI_ROWS_CONSENT_FORMAT_VERSION,
+      grants: [{ user: 'someone-else', server: SESSION.serverURL, app: 'shared-notes' }, 42],
+    })
+    await writeFile(consentFile(), damaged, { mode: 0o600 })
+    const h = harness()
+    const response = await authorize(h, 'shared-notes')
+    expect(response.code).toBe(500)
+    expect(response.body).toMatchObject({ error: { code: 'AI_ROWS_CONSENT_NOT_PERSISTED' } })
+    expect(await readFile(consentFile(), 'utf8')).toBe(damaged)
+  })
+
+  it('v1（机器级 `{version:1, apps:[…]}`）整份判为未授权，绝不猜读成"已授权"', async () => {
+    // 旧版本记录的语义是"这台机器允许 AI 读这个应用的数据"，与现在的
+    // 「账号 ⊕ 服务端 ⊕ 应用」不是一回事 —— 把它的内容读成已授权正是 R19B-03 要修的方向。
+    await writeFile(consentFile(), JSON.stringify({ version: 1, apps: ['shared-notes'] }), { mode: 0o600 })
+    const h = harness()
+    expect((await readConsent(h, 'shared-notes')).body).toEqual({ app_id: 'shared-notes', enabled: false })
+    expect((await h.run('wasm_app_rows', ROWS_ARGS)).error.code).toBe(AI_ROWS_NOT_AUTHORIZED)
+    expect(h.outbound).toHaveLength(0)
   })
 
   it('文件不可读（权限 000）⇒ 拒绝而不是抛穿', async () => {
@@ -435,22 +478,49 @@ describe('授权路由的围栏与参数校验', () => {
 
 describe('授权文件格式（parse/serialize，唯一实现）', () => {
   it('往返一致且稳定排序（两份内容相同的记录逐字节相同）', () => {
-    const text = serializeAiRowsConsent(new Set(['b-app', 'a-app']))
-    expect(text).toBe(`${JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, apps: ['a-app', 'b-app'] }, null, 2)}\n`)
-    expect([...(parseAiRowsConsent(text) ?? [])]).toEqual(['a-app', 'b-app'])
+    const keys = new Set([
+      aiRowsConsentKey({ user: 'bob', server: 'https://b.example' }, 'b-app')!,
+      aiRowsConsentKey({ user: 'alice', server: 'https://a.example' }, 'a-app')!,
+    ])
+    const text = serializeAiRowsConsent(keys)
+    expect(text).toBe(`${JSON.stringify({
+      version: AI_ROWS_CONSENT_FORMAT_VERSION,
+      grants: [
+        { user: 'alice', server: 'https://a.example', app: 'a-app' },
+        { user: 'bob', server: 'https://b.example', app: 'b-app' },
+      ],
+    }, null, 2)}\n`)
+    expect([...(parseAiRowsConsent(text) ?? [])].sort()).toEqual([...keys].sort())
     expect(serializeAiRowsConsent(parseAiRowsConsent(text)!)).toBe(text)
   })
 
-  it('严格拒绝：非对象 / 版本不符 / apps 非数组 / 空串 / 非字符串条目', () => {
+  it('严格拒绝：非对象 / 版本不符 / grants 非数组 / 空段 / 非字符串条目 / v1 旧形状', () => {
     for (const text of [
       'null', '[]', '"x"', '{}',
-      JSON.stringify({ version: 2, apps: [] }),
-      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, apps: 'shared-notes' }),
-      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, apps: [''] }),
-      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, apps: [null] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION + 1, grants: [] }),
+      JSON.stringify({ version: 1, apps: ['shared-notes'] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: 'shared-notes' }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [{ user: 'a', server: 'https://s', app: '' }] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [{ user: 'a', server: '', app: 'x' }] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [{ user: '', server: 'https://s', app: 'x' }] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [{ user: '   ', server: 'https://s', app: 'x' }] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [{ user: 'a', server: 'https://s' }] }),
+      JSON.stringify({ version: AI_ROWS_CONSENT_FORMAT_VERSION, grants: [null] }),
     ]) {
       expect(parseAiRowsConsent(text), text).toBeNull()
     }
+  })
+
+  it('键构造是唯一实现：三段缺任一段 ⇒ null（= 不匹配，不是"匹配空段"）', () => {
+    expect(aiRowsConsentKey({ user: 'alice', server: 'https://s.example' }, 'app')).toBe('alice\u0000https://s.example\u0000app')
+    expect(aiRowsConsentKey(null, 'app')).toBeNull()
+    expect(aiRowsConsentKey(undefined, 'app')).toBeNull()
+    expect(aiRowsConsentKey({ user: '', server: 'https://s.example' }, 'app')).toBeNull()
+    expect(aiRowsConsentKey({ user: 'alice', server: '   ' }, 'app')).toBeNull()
+    expect(aiRowsConsentKey({ user: 'alice', server: 'https://s.example' }, '')).toBeNull()
+    // 换服务端 ⇒ 换键（同一个人在两台服务端上是两段作用域）。
+    expect(aiRowsConsentKey({ user: 'alice', server: 'https://s.example' }, 'app'))
+      .not.toBe(aiRowsConsentKey({ user: 'alice', server: 'https://other.example' }, 'app'))
   })
 
   it('默认路径 = $DSH_HOME/wasm-apps-ai-rows-consent.json（数据根随渠道）', () => {
@@ -458,7 +528,7 @@ describe('授权文件格式（parse/serialize，唯一实现）', () => {
   })
 
   it('内存形态（没有数据根）也 fail-closed：默认全未授权，写进去才放行', async () => {
-    const store = createAiRowsConsentStore()
+    const store = createAiRowsConsentStore({ scope: () => SCOPE })
     expect(await store.isEnabled('a')).toBe(false)
     await store.setEnabled('a', true)
     expect(await store.isEnabled('a')).toBe(true)
@@ -467,7 +537,7 @@ describe('授权文件格式（parse/serialize，唯一实现）', () => {
   })
 
   it('并发写不互相覆盖（读-改-写串行化）', async () => {
-    const store = createAiRowsConsentStore({ file: consentFile() })
+    const store = createAiRowsConsentStore({ file: consentFile(), scope: () => SCOPE })
     await Promise.all([
       store.setEnabled('a', true),
       store.setEnabled('b', true),
@@ -476,5 +546,14 @@ describe('授权文件格式（parse/serialize，唯一实现）', () => {
     expect(await store.isEnabled('a')).toBe(true)
     expect(await store.isEnabled('b')).toBe(true)
     expect(await store.isEnabled('c')).toBe(true)
+  })
+
+  it('没有作用域来源 ⇒ 读面 false、写面拒绝（fail-closed，且是可判因的类型）', async () => {
+    const store = createAiRowsConsentStore({ file: consentFile() })
+    expect(await store.isEnabled('a')).toBe(false)
+    const rejection = await store.setEnabled('a', true).then(() => null, (cause: unknown) => cause)
+    expect(isAiRowsConsentScopeError(rejection)).toBe(true)
+    // 一个字都没落盘："写了一条谁都不是的记录"比拒绝更糟。
+    expect(existsSync(consentFile())).toBe(false)
   })
 })

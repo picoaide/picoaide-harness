@@ -83,9 +83,13 @@ func (s *Scheduler) tryRun() error {
 	// 修前这里是 `ShouldRunMonthly`，而 DispatchAll 无条件重推（R19B-02）；R18C-03 之后
 	// 只要有一条订阅退避/待补跑，两者就会分叉。现在两侧共用一处策略：
 	// 退避窗口内的订阅不再触发整轮（也就不再刷"dispatch done (ok=0 failed=N)"日志）。
+	//
+	// 异常候选（`anomaly != ""` = `pending_period` 不可信）也要触发这一轮：形态非法时
+	// `due=false`，若这里不认它，锁内那次"记 last_error + failed++"永远不会发生 ⇒
+	// 坏行既投不出去、也不进任何可观测面（R22-V3-B1 的可诊断性要求）。
 	should := false
 	for _, sub := range list {
-		if _, due := SubscriptionDuePeriod(now, sub); due {
+		if _, due, anomaly := SubscriptionDuePeriod(now, sub); due || anomaly != "" {
 			should = true
 			break
 		}

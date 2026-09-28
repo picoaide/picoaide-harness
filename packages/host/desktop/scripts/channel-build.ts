@@ -59,6 +59,47 @@ export interface ChannelArtifactNames {
   readonly linux: string
 }
 
+/**
+ * 客户端**三平台交付面**（清单键 → 产物通配 → 人读标签）——唯一真源。
+ *
+ * 三个消费方必须从这一份派生（各写一遍就是三个口径，一边少一个平台就会**静默少发**）：
+ *   - `scripts/ci-build-channel-images.sh`：镜像内的 `CLIENT-RELEASE.json` 逐平台必需；
+ *   - `scripts/ci-channel-transfer.sh`：R2 中转取回后逐平台判「齐全」；
+ *   - `scripts/verify-ci-scripts.mjs`：与 `.github/workflows/ci.yml` 三个平台 job 的
+ *     `--patterns` 对拍（发布链与交付面必须同形）。
+ *
+ * 键名的权威源是运行期读清单的 `src/desktop-release.ts`（`PLATFORM_ASSET_KEYS`：
+ * `darwin/win32/linux → mac-universal/win-x64/linux-x64`）；通配逐字等于 CI 三个
+ * 平台 job 归集产物用的 `--patterns`（mac = `*.dmg`、win = `*Setup*.exe`、
+ * linux = `*.AppImage`）。2026-09-26 审计 Z3-2 的形态正是「少一个平台没有任何信号」：
+ * 旧实现逐个 `[ -f … ] || return 0`，缺平台时生成的清单只是少一个键。
+ */
+export const CLIENT_PLATFORM_ASSETS = [
+  { key: 'mac-universal', glob: '*.dmg', label: 'macOS(.dmg)' },
+  { key: 'win-x64', glob: '*Setup*.exe', label: 'Windows(Setup.exe)' },
+  { key: 'linux-x64', glob: '*.AppImage', label: 'Linux(AppImage)' },
+] as const
+
+/**
+ * 渠道目录里打包管线**按文件名**消费的两件素材 —— 唯一真源。
+ *
+ * 三个消费方必须同名：
+ *   - `brand-prepare.mjs`：托盘位图与随包 `web-brand/favicon.svg` 的输入；
+ *   - `scripts/ci-channels.sh`：品牌渠道的素材必需集（输入侧独立判一次）；
+ *   - `inlineChannelAssets()`：`assets.logo` 声明的名字必须与它一致，否则随包内联的
+ *     logo 与派生出的托盘位图是两个文件 ⇒ **同一个包里两套品牌**（登录页是声明的那个、
+ *     托盘与 favicon 是另一个；2026-09-26 审计 Z3-3 的第 3 个触发形态）。
+ *
+ * 安装器/Dock/任务栏图标由 `appIcon` 派生（mac 图标管线要求 1024² RGBA16 + ICC，
+ * 见 `generate-mac-app-icon.mjs`）。改这两个名字要同时改上面三个消费方。
+ */
+export const CHANNEL_ASSET_FILES = {
+  /** 品牌几何源（托盘位图 + 随包 favicon 的输入）。 */
+  logo: 'logo.svg',
+  /** 安装器 / Dock / 任务栏图标（mac 图标管线的输入）。 */
+  appIcon: 'app-icon.png',
+} as const
+
 function artifactNames(slug: string): ChannelArtifactNames {
   return {
     mac: `${slug}-\${version}-mac.\${ext}`,
@@ -406,6 +447,39 @@ export function packagedProductName(buildDir?: string): string {
 }
 
 /**
+ * 本次打包产物**声明**的应用 id（bundle id / AppUserModelId）—— 产物身份判据的唯一解析。
+ *
+ * 真源与 `resolveChannelBuildContext` 的 `appId` **逐字同源**（同一份 channel.json、同一套
+ * 回落链）：随包 `build/channel.json` 的 `desktop.app_id`，没写则官方默认值
+ * （= `package.json` 的 `build.appId`，由 `tests/channel-build.spec.ts` 对拍钉住）。
+ * electron-builder 的 `--config.appId`（{@link writeChannelBuilderConfig}）喂的就是这个值，
+ * 所以"产物里写下的身份"与"这次构建声明的身份"必须是同一个字符串。
+ *
+ * 回落链**故意**与打包上下文一致（不是"找不到就放过"）：公共渠道（beta）确实不声明
+ * app_id、按设计使用官方身份与官方数据根，把它判红会卡死每一条预发 tag 的 mac 验证。
+ * "品牌渠道漏配 app_id ⇒ 静默回落官方身份"这道闸在**配置期**：`scripts/ci-channels.sh`
+ * 对品牌渠道强制 `desktop.app_id`。本函数负责的是**产物 ↔ 声明**一致（B1-02，mac 侧此前零判据）。
+ *
+ * **为什么需要它**：macOS 上 bundle id 决定 LaunchServices 身份、SSO 回调注册与安装覆盖
+ * 关系，而此前全仓唯一读产物 `Info.plist` 的判据（`mac-bundle-consistency.ts`）把
+ * `CFBundleIdentifier` **只解析、不断言** ⇒ 产物身份零判据（B-09 族的第四条出口：
+ * app origin / 数据根 / userData 都有判据，身份没有）。2026-09-25 审计 B1-02。
+ * @param buildDir - `packages/host/desktop/build` 目录（默认仓库内该目录）。
+ * @returns 非空 bundle id。
+ * @throws 渠道包存在但不可解析（JSON 坏 / 超限）时抛错（验证期 fail-loud，不猜）。
+ */
+export function packagedAppId(buildDir?: string): string {
+  const dir = buildDir ?? join(defaultRepoRoot(), 'packages/host/desktop', 'build')
+  const file = join(dir, 'channel.json')
+  if (existsSync(file)) {
+    // 与 `resolveChannelBuildContext` 同源:同一个文件名、同一套解析。
+    const appId = readChannelDesktopBranding(dir).appId
+    if (appId !== undefined) return appId
+  }
+  return OFFICIAL_BUILD_DEFAULTS.appId
+}
+
+/**
  * 清掉"上一次渠道构建"在应用资源目录里留下的渠道化产物。
  *
  * 两样东西都必须清:随包渠道配置（`channel.json`，会决定客户端的品牌/默认域名）
@@ -505,6 +579,55 @@ export function stageChannelProfile(
 const INLINE_ASSETS = [['logo', 'logo_inline'], ['logo_dark', 'logo_dark_inline']] as const
 
 /**
+ * 渠道是**公共渠道**（official / beta）还是**品牌渠道**。
+ *
+ * 公共渠道的品牌就是厂商自己的：素材缺失时回落 `brands/official/` 是**正当**的
+ * （beta 是正式版的前置验证，本来就用官方几何），但回落必须显式登记/记日志。
+ * 品牌渠道（其余一切 id）缺素材就是「白的标交付出厂商品牌」，必须 fail-loud
+ * （2026-09-26 审计 Z3-3：逐文件静默回落官方 ⇒ 安装器/Dock/任务栏带厂商图标，
+ * 而白标门禁用同一个派生函数自证，结构上咬不到）。
+ * @param channelId - 渠道 id。
+ * @returns 是公共渠道时为 true。
+ */
+export function isPublicChannelId(channelId: string): boolean {
+  return channelId === 'official' || channelId === 'beta'
+}
+
+/**
+ * 读渠道包 `assets` 里声明的素材**文件名**（单段文件名；注解/非法值一律忽略）。
+ *
+ * 「logo 素材从哪来」只允许一份实现：随包内联（{@link inlineChannelAssets}）与
+ * 打包期派生（`brand-prepare.mjs` 的托盘位图/随包 favicon）必须给出**同一个**
+ * 文件名，否则同一个包里会出现两套品牌（登录页用声明的那个、托盘用另一个）。
+ * @param value - 已解析的渠道包内容。
+ * @param key - 素材键（如 `logo`）。
+ * @returns 声明的文件名；缺失或不是单段文件名时为 undefined。
+ */
+export function declaredAssetFileName(value: unknown, key: string): string | undefined {
+  const name = text(record(record(value).assets)[key])
+  if (name === undefined || name.includes('/') || name.includes('\\')) return undefined
+  return name
+}
+
+/**
+ * 读渠道目录里声明的素材文件名（{@link declaredAssetFileName} 的文件入口）。
+ * @param channelDir - `channels/<id>/` 目录（无 `channel.json` 时为 undefined）。
+ * @param key - 素材键（如 `logo`）。
+ * @returns 声明的文件名；渠道包不存在/不可解析/未声明时为 undefined。
+ */
+export function readDeclaredAssetFileName(channelDir: string, key: string): string | undefined {
+  const file = join(channelDir, 'channel.json')
+  if (!existsSync(file)) return undefined
+  try {
+    return declaredAssetFileName(JSON.parse(readFileSync(file, 'utf8')), key)
+  } catch {
+    // 解析失败不在这里报错：stageChannelProfile / readChannelDesktopBranding 已经
+    // 对它 fail-loud（同一次构建里更早、更明确），这里只负责"读不出名字"。
+    return undefined
+  }
+}
+
+/**
  * 把渠道目录里的 logo 素材读成 `data:` URI 塞进渠道包副本（只改副本，不动私有仓原文）。
  *
  * 单文件上限 32KB：logo 是矢量图，正常在 1–3KB；超限说明配错了（比如把 PNG 位图
@@ -518,8 +641,8 @@ function inlineChannelAssets(value: unknown, channelDir: string): Record<string,
   const assets = record(config.assets)
   const inline: Record<string, unknown> = { ...assets }
   for (const [fileKey, inlineKey] of INLINE_ASSETS) {
-    const name = text(assets[fileKey])
-    if (name === undefined || name.includes('/') || name.includes('\\')) continue
+    const name = declaredAssetFileName(value, fileKey)
+    if (name === undefined) continue
     const file = join(channelDir, name)
     if (!existsSync(file)) continue
     const content = readFileSync(file)

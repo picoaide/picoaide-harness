@@ -29,9 +29,28 @@
     urllib **无法跟随自定义 scheme**(`picoaide://…`):它抛 HTTPError,而旧 `fetch()` 的
     异常分支返回的是**传入的 url**(=回调地址)⇒ `'picoaide://' in url` 恒假、else 分支
     必然执行 —— 即使 SSO 全流程正常,用例也永远 `RESULT: FAIL`(深链断言结构上不可达)。
-    本脚本改为手动跟随 http(s) 重定向、一遇到非 http(s) 的 Location 就停下并把它当深链
-    读出来(见 `follow()`)。**负向对照**:把深链换成 http 目标时 `follow()` 会继续跟随到
-    终点 ⇒ "有没有拿到深链"是有判别力的,不是恒真/恒假。
+    本脚本改为手动跟随 http(s) 重定向、遇到**桌面深链**就停下并把它读出来(见 `follow()`)。
+    **负向对照**:把深链换成 http 目标时 `follow()` 会继续跟随到终点 ⇒ "有没有拿到深链"
+    是有判别力的,不是恒真/恒假。
+
+## 相对 Location ≠ 桌面深链(2026-09-29 第三十轮审计 F-01,P1)
+
+`follow()` 的形态判定**必须先归一化、后判 scheme**,两步不能合并:
+
+    ① `Location` 先按**当前 URL** 解析(RFC 7231 §7.1.2:相对 Location 就是同源重定向,
+       浏览器与 urllib 都这么解析)—— 见 `resolve_location()`;
+    ② 归一化之后**仍然**不是 http(s) 的,才是桌面深链(自定义 scheme,形如
+       `<scheme>://auth?token=…`)。
+
+真 Dex 的 `/auth` 正是 **302 + 相对 Location**(`/auth/local?…`)跳到自己的登录页。修前
+`follow()` 直接 `if not is_http(location)` 就把这一步当成深链提前停下 ⇒ 判据 [2] 拿到的是
+`<a href="/auth/local…">Found</a>.` 中间页 ⇒ **这条腿在配置完全正确的真实环境里结构上
+不可能 PASS**(假红),而门禁的假网关一律返回**绝对** Location ⇒ 门禁永远绿(判据自洽型假绿)。
+
+判据面两条腿(见 `scripts/check-integration-tests.mjs` 的 `SCENARIOS`):`good` 走**绝对**
+Location、`dex-relative-location` 走**相对** Location,两条都必须绿;再叠一条**纯单元级**
+判据 `--probe-redirect-forms`(不碰网络,桩 opener 驱动 `follow()` 覆盖
+相对 / 绝对 / 深链三种形态)。
 
 ## 环境缺失时**显式 SKIP**
 
@@ -45,6 +64,7 @@
     python3 dex-sso-test.py --self-test        # 判据本体自证(每条判据的正/负例夹具)
     python3 dex-sso-test.py --self-check       # 判定通道自证(夹具经运行期 report() 求值)
     python3 dex-sso-test.py --dump-criteria    # 判据表登记值(JSON,供门禁对账)
+    python3 dex-sso-test.py --probe-redirect-forms  # 纯单元级自证:follow() 对相对/绝对/深链三形态的解析
 环境变量:DEX_BASE(可选)断言 IdP 落在该 origin;DEX_DEEP_LINK_SCHEME(可选)断言深链 scheme;
         DEX_EXPECTED_USER 覆盖期望账号。
 数据(integration-tests/dex/config.yaml):admin@example.com / admin123。
@@ -133,12 +153,36 @@ def is_http(url):
     return url.lower().startswith(('http://', 'https://'))
 
 
+def resolve_location(current, location):
+    """把 Location 头按**当前 URL** 归一化(RFC 7231 §7.1.2)。
+
+    这是形态判定的分水岭 —— **相对 Location 与桌面深链是两件事**:
+
+    · 相对 Location(`/auth/local?req=…`、`?code=…`、`#frag`)是**同源重定向**,
+      浏览器与 urllib 都按当前 URL 解析成绝对地址;
+    · 桌面深链(`picoaide://auth?token=…`)是**自定义 scheme**,`urljoin` 会原样返回它
+      (带 scheme 的引用是绝对引用),所以归一化之后仍然不是 http(s)。
+
+    真 Dex 的 `/auth` 就是 302 + 相对 Location 跳到自己的登录页;不归一化就把它误判成
+    深链 ⇒ 判据 [2] 只能拿到 `Found` 中间页 ⇒ 真实环境里结构上不可能 PASS。
+    """
+    return urllib.parse.urljoin(current, location)
+
+
 def follow(op, url, data=None, headers=None, max_hops=10):
-    """手动跟随 http(s) 重定向。
+    """手动跟随重定向。
 
     返回 (status, final_url, body, headers, deep_link, hops):
-    遇到**非 http(s)** 的 Location(即桌面深链)时立刻停下,把它放在 deep_link 里;
-    其它情况 deep_link 为空串。hops = [(status, url), …] 供诊断与"经过回调"断言。
+    遇到**桌面深链**(自定义 scheme,形如 `<scheme>://auth?token=…`)时立刻停下,
+    把它放在 deep_link 里;其它情况 deep_link 为空串。hops = [(status, url), …]
+    供诊断与"经过回调"断言。
+
+    形态判定**先归一化、后判 scheme**,两步不能合并(见 `resolve_location`):
+      ① `resolve_location(current, location)` 把相对 Location 解析成绝对地址;
+      ② 归一化后**仍**非 http(s) 的才是桌面深链。
+    省掉 ①(直接 `if not is_http(location)`)会把真 Dex 的 `/auth` → `/auth/local`
+    这一步当成深链提前停下 —— 那是 [2] 假红的根因,也是门禁假网关只发绝对 Location
+    时看不见的那一格。
     """
     current, payload, req_headers = url, data, headers
     hops = []
@@ -147,10 +191,13 @@ def follow(op, url, data=None, headers=None, max_hops=10):
         status, location, body, resp_headers = request(op, current, data=payload, headers=req_headers)
         hops.append((status, current))
         if status in (301, 302, 303, 307, 308) and location:
-            if not is_http(location):
+            # ① 相对 Location 先按当前 URL 归一化(同源重定向);
+            # ② 归一化后仍非 http(s) ⇒ 自定义 scheme = 桌面深链,停下并读出来。
+            target = resolve_location(current, location)
+            if not is_http(target):
                 return status, current, body, resp_headers, location, hops
             # 303/302 → 后续按 GET 走(丢弃 POST 体),与浏览器语义一致。
-            current, payload, req_headers = location, None, None
+            current, payload, req_headers = target, None, None
             continue
         break
     return status, current, body, resp_headers, '', hops
@@ -225,6 +272,66 @@ def approve_problems(status, url, body):
     return problems
 
 
+def parse_approval_req(html):
+    """从 IdP 授权确认页解析隐藏字段 `req`(第三十三轮 FIX-49 ③,真 Dex 的表单字段)。
+
+    真 Dex(v2.35+)的授权确认页有两份 POST 表单,**各自带一个每流一次性的** `req`:
+
+        <form method="post" action="/dex/approval">
+          <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+          <input type="hidden" name="approval" value="approve"/>
+          <button type="submit">Grant Access</button>
+        </form>
+        <form method="post" action="/dex/approval">
+          <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+          <input type="hidden" name="approval" value="rejected"/>
+          ...
+        </form>
+
+    POST **必须回传同一个** `req`(再加 `approval=approve`);只发旧字段
+    `{'approve': 'true'}` 会被 Dex 判成缺 `req` ⇒ **500**(2026-09-27 真 Dex 实测,
+    见 docs/AUDIT-2026-09-23-FULL.md §7.72.3)。`req` 每个授权流都不同 ⇒ 只能从**当前页**
+    的 HTML 解析,**不硬编码**。
+
+    解析口径(刻意宽松到"只看 input 标签自己"):
+      · 只认 `name="req"` / `name='req'` 的 `<input>`;**顺序无关**(真 Dex 里 `approval`
+        可能在 `req` 之前,别的版本也可能反)；
+      · `value` 的引号两种都认;**属性顺序无关**；
+      · `<form>` 的 `action` 是相对还是绝对与本函数无关(表单 POST 到"当前 url",
+        见下面步骤 4 的 `follow(op, url, data=form, …)`)—— 这两件事分开判,
+        所以各自的回归互不掩盖。
+    @param html - 授权确认页的正文。
+    @returns `req` 的值;页面上没有该字段时返回 `None`(**调用方必须如实判红**,不许静默提交空值)。
+    """
+    for tag in (html or '').split('<input')[1:]:
+        head = tag.split('>', 1)[0]
+        if 'name="req"' not in head and "name='req'" not in head:
+            continue
+        for quote in ('"', "'"):
+            marker = 'value=' + quote
+            start = head.find(marker)
+            if start < 0:
+                continue
+            start += len(marker)
+            end = head.find(quote, start)
+            if end > start:
+                return head[start:end]
+    return None
+
+
+def approval_form_problems(html):
+    """步骤 4 的**表单前置判据**:授权确认页必须能解析出隐藏字段 `req`。
+
+    为什么单独成一条(而不是"等 Dex 回 500 再说"):字段形态变了的时候,
+    提交一个空 `req` 会拿到一个**看起来像 IdP 故障**的 500 —— 判据只能报"授权确认 POST
+    返回 500",把"我们的表单契约过期了"误诊成"IdP 坏了"(2026-09-27 现场)。
+    这里把可判定的前置条件提前,失败原因直接点名。
+    """
+    if parse_approval_req(html) is None:
+        return ['approval 页里解析不出隐藏字段 req(IdP 表单形态变了;不能静默提交空值)']
+    return []
+
+
 def me_problems(status, body, expected_user, expected_email):
     """/auth/me 判据:200 + JSON + 身份就是本次登录的账号。"""
     problems = []
@@ -277,6 +384,10 @@ def _eval_approval_advance(obs):
     # 门禁的 `good` 假网关恒要求授权确认,所以这条判据在门禁里真的被求值)。
     if not obs.get('required'):
         return []
+    # 前置:approval 页必须解析得出隐藏 `req`(第三十三轮 FIX-49 ③)。取不到 ⇒ 明确判红,
+    # 不把它降级成"下一跳 500"那种看不出病根的形态。
+    if obs.get('req_resolved') is not True:
+        return approval_form_problems('')
     return approve_problems(obs.get('status'), obs.get('url', ''), obs.get('body', ''))
 
 
@@ -414,7 +525,7 @@ SELF_TEST_FIXTURES = [
     {
         'id': 'approval-advance', 'expect': True,
         'why': '正常:已离开 approval',
-        'observation': {'required': True, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
     },
     {
         'id': 'approval-advance', 'expect': True,
@@ -424,18 +535,25 @@ SELF_TEST_FIXTURES = [
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:仍停在 approval 页',
-        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/approval?req=x',
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/approval?req=x',
                         'body': '<form action="/approval"></form>'},
     },
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:回到登录表单',
-        'observation': {'required': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/auth/local', 'body': GOOD_LOGIN_PAGE},
+        'observation': {'required': True, 'req_resolved': True, 'status': 200, 'url': IDP_ORIGIN + '/dex/auth/local', 'body': GOOD_LOGIN_PAGE},
     },
     {
         'id': 'approval-advance', 'expect': False,
         'why': '负例:5xx',
-        'observation': {'required': True, 'status': 500, 'url': IDP_ORIGIN + '/dex/approval', 'body': 'boom'},
+        'observation': {'required': True, 'req_resolved': True, 'status': 500, 'url': IDP_ORIGIN + '/dex/approval', 'body': 'boom'},
+    },
+    {
+        'id': 'approval-advance', 'expect': False,
+        'why': '负例(第三十三轮 FIX-49 ③):approval 页解析不出隐藏 req ⇒ 必须**点名字段**判红,'
+               '而不是把它降级成"下一跳 500"',
+        'observation': {'required': True, 'req_resolved': False, 'status': 200,
+                        'url': 'http://127.0.0.1:8091' + CALLBACK_PATH + '?code=x', 'body': ''},
     },
 
     # ---- callback-reached ----
@@ -551,7 +669,8 @@ def _new_reporter():
 # ---------------------------------------------------------------------------
 def parse_args(argv):
     server, user, password = DEFAULT_BASE, DEFAULT_USER, DEFAULT_PASSWORD
-    want_self_test, want_self_check, want_dump = False, False, False
+    want_self_test, want_self_check, want_dump, want_probe = False, False, False, False
+    want_form_probe = False
     positional = []
     rest = list(argv)
     while rest:
@@ -562,6 +681,10 @@ def parse_args(argv):
             want_self_check = True
         elif item == '--dump-criteria':
             want_dump = True
+        elif item == '--probe-redirect-forms':
+            want_probe = True
+        elif item == '--probe-approval-form':
+            want_form_probe = True
         elif item == '--user' and rest:
             user = rest.pop(0)
         elif item == '--password' and rest:
@@ -579,11 +702,12 @@ def parse_args(argv):
         raise SystemExit(EXIT_USAGE)
     if positional:
         server = positional[0].rstrip('/')
-    modes = [want_self_test, want_self_check, want_dump].count(True)
+    modes = [want_self_test, want_self_check, want_dump, want_probe, want_form_probe].count(True)
     if modes > 1:
-        print('dex-sso-test: --self-test / --self-check / --dump-criteria 只能给一个', file=sys.stderr)
+        print('dex-sso-test: --self-test / --self-check / --dump-criteria / --probe-redirect-forms / '
+              '--probe-approval-form 只能给一个', file=sys.stderr)
         raise SystemExit(EXIT_USAGE)
-    return server, user, password, want_self_test, want_self_check, want_dump
+    return server, user, password, want_self_test, want_self_check, want_dump, want_probe, want_form_probe
 
 
 def self_test():
@@ -609,8 +733,207 @@ def self_check():
     return report_self_check_result(result)
 
 
+# ---------------------------------------------------------------------------
+# 纯单元级自证:**不碰网络**,用桩 opener 驱动 `follow()`,覆盖 Location 的三种形态。
+#
+# 为什么需要它(而不是只靠假网关):假网关是一条**端到端**腿,它只能证明"这条路径当前是绿的";
+# 而形态判定是三选一(相对 / 绝对 / 深链),只跑得到其中一两种时,第三种回归就静默。
+# 这里把三种形态逐条摆在同一个不变量上:**先归一化、后判 scheme**。
+# 判别力来自相对形态 —— 去掉 `resolve_location()` 的那一步,第 1 例立刻红(它会把相对
+# Location 当成深链提前停下,`deep_link` 变成 `/dex/auth/local?req=…` 而 requests 只有一跳)。
+# ---------------------------------------------------------------------------
+IDP_STUB = 'http://127.0.0.1:5556'
+
+
+class _StubResponse:
+    """`request()` 需要的最小响应面:`status` / `headers.get('Location')` / `read()`。"""
+
+    def __init__(self, status, location='', body=''):
+        self.status = status
+        self.headers = {'Location': location} if location else {}
+        self._body = body
+
+    def read(self):
+        return self._body.encode('utf-8')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _StubOpener:
+    """按 URL 前缀给固定应答的桩 opener;记录**真的被请求到的**绝对地址。"""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.requests = []
+
+    def open(self, req, timeout=None):
+        url = req.full_url
+        self.requests.append(url)
+        for prefix, status, location, body in self.routes:
+            if url.startswith(prefix):
+                return _StubResponse(status, location, body)
+        raise AssertionError(f'桩 opener 收到未登记的地址: {url}')
+
+
+REDIRECT_FORM_CASES = [
+    {
+        'why': '相对 Location(真 Dex 的 /auth → /auth/local):必须归一化后**继续跟随**,不是深链',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/login', 302,
+             '/dex/auth/local?req=r1', ''),
+            ('http://127.0.0.1:8091/dex/auth/local?req=r1', 200, '', '<form>登录</form>'),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+                            'http://127.0.0.1:8091/dex/auth/local?req=r1'],
+        'expect_final': 'http://127.0.0.1:8091/dex/auth/local?req=r1',
+        'expect_deep_link': '',
+    },
+    {
+        'why': '绝对 Location(跨 origin 到 IdP):同样必须继续跟随',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/login', 302,
+             IDP_STUB + '/dex/auth/local?req=r2', ''),
+            (IDP_STUB + '/dex/auth/local?req=r2', 200, '', '<form>登录</form>'),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/login',
+                            IDP_STUB + '/dex/auth/local?req=r2'],
+        'expect_final': IDP_STUB + '/dex/auth/local?req=r2',
+        'expect_deep_link': '',
+    },
+    {
+        'why': '桌面深链(自定义 scheme):必须**立刻停下**并原样读出来,不得再发第二次请求',
+        'start': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1',
+        'routes': [
+            ('http://127.0.0.1:8091/api/client/v2/auth/oidc/callback', 302,
+             GOOD_DEEP_LINK, ''),
+        ],
+        'expect_requests': ['http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1'],
+        'expect_final': 'http://127.0.0.1:8091/api/client/v2/auth/oidc/callback?code=c1',
+        'expect_deep_link': GOOD_DEEP_LINK,
+    },
+]
+
+
+def probe_redirect_forms():
+    """逐例复算 `follow()` 的形态判定;任一条不符即 FAIL(非零退出)。"""
+    problems = []
+    for case in REDIRECT_FORM_CASES:
+        op = _StubOpener(case['routes'])
+        try:
+            _status, final, _body, _headers, deep_link, _hops = follow(op, case['start'])
+        except AssertionError as exc:  # 桩报"未登记的地址"= resolve 出来的地址不对
+            problems.append(f"{case['why']} —— {exc}")
+            continue
+        if op.requests != case['expect_requests']:
+            problems.append(f"{case['why']} —— 请求序列 {op.requests} != 期望 {case['expect_requests']}")
+        if final != case['expect_final']:
+            problems.append(f"{case['why']} —— 终止地址 {final!r} != 期望 {case['expect_final']!r}")
+        if deep_link != case['expect_deep_link']:
+            problems.append(f"{case['why']} —— deep_link 读到 {deep_link!r} != 期望 "
+                            f"{case['expect_deep_link']!r}")
+    total = len(REDIRECT_FORM_CASES)
+    for problem in problems:
+        print(f'  FAIL {problem}')
+    print(f'redirect-form probe: {total - len(problems)}/{total} 种 Location 形态符合预期'
+          '(相对 / 绝对 / 深链)')
+    return EXIT_FAIL if problems else EXIT_PASS
+
+
+# ---------------------------------------------------------------------------
+# 纯单元级自证之二:**授权确认页的字段解析**(第三十三轮 FIX-49 ③ / F-02)。
+#
+# 为什么必须有它(而不是只靠真 Dex):真服务端 + 真 Dex 那条腿在 CI 上不一定跑得起来
+# (要容器与网络),而"approval 页长什么样、我们提交什么字段"是**唯一**决定 F-02 的
+# 契约点 —— 形态一变,端到端只会报一个看不出病根的 500。这里把四种页形态摆在同一个
+# 不变量上:**只从当前页解析 `req`、顺序无关、缺字段明确失败**。
+#
+# 判别力:去掉 `parse_approval_req()` 的 name 判定(改成"取第一个 input 的 value")
+# ⇒ 第 4 例(approval 在 req 之前)与第 5 例(缺 req)当场红。
+# ---------------------------------------------------------------------------
+DEX_APPROVAL_HTML = """<html><body>
+<form method="post" action="/dex/approval">
+  <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+  <input type="hidden" name="approval" value="approve"/>
+  <button type="submit">Grant Access</button>
+</form>
+<form method="post" action="/dex/approval">
+  <input type="hidden" name="req" value="yxzqpb4dlu424igxpsmarvoux"/>
+  <input type="hidden" name="approval" value="rejected"/>
+  <button type="submit">Cancel</button>
+</form>
+</body></html>"""
+
+APPROVAL_FORM_CASES = [
+    {
+        'why': '真 Dex 形态(两份表单,req 是每流一次性的隐藏字段)',
+        'html': DEX_APPROVAL_HTML,
+        'expect_req': 'yxzqpb4dlu424igxpsmarvoux',
+        'expect_problems': 0,
+    },
+    {
+        'why': '相对 action(真 Dex 就是相对):字段解析与 action 形态无关',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="req" value="r-relative"/></form>',
+        'expect_req': 'r-relative',
+        'expect_problems': 0,
+    },
+    {
+        'why': '绝对 action(自建 IdP / 反代形态):同样解析得出',
+        'html': '<form method="post" action="http://127.0.0.1:5556/dex/approval">'
+                '<input type="hidden" name="req" value="r-absolute"/></form>',
+        'expect_req': 'r-absolute',
+        'expect_problems': 0,
+    },
+    {
+        'why': '隐藏 input 顺序变化(approval 在 req 之前 + req 不是第一个 input)',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="approval" value="approve"/>'
+                '<input type="hidden" name="state" value="s1"/>'
+                "<input type='hidden' name='req' value='r-reordered'/>"
+                '</form>',
+        'expect_req': 'r-reordered',
+        'expect_problems': 0,
+    },
+    {
+        'why': '字段缺失 ⇒ 必须**明确失败**(返回 None + 一条点名 req 的问题),不许静默提交空值',
+        'html': '<form method="post" action="/dex/approval">'
+                '<input type="hidden" name="approval" value="approve"/></form>',
+        'expect_req': None,
+        'expect_problems': 1,
+    },
+]
+
+
+def probe_approval_form():
+    """逐例复算授权确认页的字段解析;任一条不符即 FAIL(非零退出)。"""
+    problems = []
+    for case in APPROVAL_FORM_CASES:
+        got = parse_approval_req(case['html'])
+        if got != case['expect_req']:
+            problems.append(f"{case['why']} —— 解析出 {got!r} != 期望 {case['expect_req']!r}")
+        found = approval_form_problems(case['html'])
+        if len(found) != case['expect_problems']:
+            problems.append(f"{case['why']} —— 前置判据给出 {found!r},期望 {case['expect_problems']} 条")
+    total = len(APPROVAL_FORM_CASES)
+    for problem in problems:
+        print(f'  FAIL {problem}')
+    print(f'approval-form probe: {total - len(problems)}/{total} 种授权确认页形态符合预期'
+          '(真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段)')
+    return EXIT_FAIL if problems else EXIT_PASS
+
+
 def main(argv):
-    server, login, password, want_self_test, want_self_check, want_dump = parse_args(argv)
+    server, login, password, want_self_test, want_self_check, want_dump, want_probe, want_form_probe = parse_args(argv)
+    if want_probe:
+        return probe_redirect_forms()
+    if want_form_probe:
+        return probe_approval_form()
     if want_self_test:
         return self_test()
     if want_self_check:
@@ -673,15 +996,25 @@ def main(argv):
 
     # 4. IdP 要求授权确认时继续提交(不能只是"看到 approval 就跳过")。
     approval_required = 'approval' in url
+    req_resolved = None
     if approval_required:
-        form = urllib.parse.urlencode({'approve': 'true', 'grant_scope': 'openid profile email'}).encode()
+        # **F-02 的唯一契约点**(第三十三轮 FIX-49 ③):真 Dex 的授权确认页字段是
+        # `req` + `approval=approve`,不是 {'approve':'true','grant_scope':…} ——
+        # 后者被 Dex 判成缺 `req` ⇒ 500(2026-09-27 真 Dex 实测)。
+        # `req` 是**每流一次性**的隐藏值,只能从**当前页**解析(不硬编码)。
+        req_value = parse_approval_req(body)
+        req_resolved = req_value is not None
+        for problem in approval_form_problems(body):
+            print(f'  ·  [4] {problem}')
+        form = urllib.parse.urlencode({'req': req_value or '', 'approval': 'approve'}).encode()
         status, url, body, _, deep_link, hops = follow(
             op, url, data=form,
             headers={'Content-Type': 'application/x-www-form-urlencoded', 'Referer': url})
     else:
         print('  ·  [4] IdP 未要求授权确认(直接回调),approve 提交未执行')
     reporter.report('approval-advance',
-                    {'required': approval_required, 'status': status, 'url': url, 'body': body})
+                    {'required': approval_required, 'req_resolved': req_resolved,
+                     'status': status, 'url': url, 'body': body})
 
     reporter.report('callback-reached', {'hops': hops})
 

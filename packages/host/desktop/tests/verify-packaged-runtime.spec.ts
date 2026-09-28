@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -64,8 +64,14 @@ import {
   type SentrySmokeLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
+import { packagedAppId } from '../scripts/channel-build.ts'
+import { ensureDesktopProfile } from '../src/profile.ts'
 
+// 上下文里的 `appInfo.id` 一律取自 `packagedAppId()`（= 本次构建声明的身份）：afterPack
+// 现在有一条**平台无关**的身份判据读它（2026-09-26 复审 B-6）。两侧同源 ⇒ 本文件不依赖
+// 工作树里有没有渠道构建残留（有残留时两边一起变，断言仍然成立）。
 function context(
   appOutDir: string,
   electronPlatformName: string,
@@ -75,7 +81,7 @@ function context(
     appOutDir,
     electronPlatformName,
     ...(arch === undefined ? {} : { arch }),
-    packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+    packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
   }
 }
 
@@ -116,6 +122,10 @@ const REQUIRED_ASAR_EXPORT_PATHS = [
   'node_modules/@picoaide/dsh-enterprise/lib/session-service.js',
   'node_modules/@picoaide/dsh-enterprise/lib/auth-gate.js',
   'node_modules/@picoaide/dsh-enterprise/lib/gateway-model.js',
+  // DSH 0.1.7：网关 provider 由自研行注册（上游 llm-deepseek-api-key 只发 x-api-key，
+  // 对只认 Bearer 的网关必然 401）。掉出 asar ⇒ `picoaide-gateway-llm` 行加载失败、
+  // `deepseek-official` 没有适配器、模型面全灭。
+  'node_modules/@picoaide/dsh-enterprise/lib/gateway-llm.js',
   'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js',
   'node_modules/@picoaide/dsh-enterprise/lib/client.js',
   // P1-1(2026-09-16):error-reporting 静态 import @sentry/node,掉出 asar 时整个插件
@@ -197,6 +207,40 @@ function verifyWithBrandStub(
 ): void {
   verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG)
 }
+
+describe('平台无关的产物身份判据（B-6）', () => {
+  // 2026-09-26 复审 B-6：产物身份此前只落在 mac（读产物 Info.plist）。Windows 的
+  // appId 会进 AppUserModelId（任务栏分组/通知归属/快捷方式身份），Linux 上至少是配置面，
+  // 两边都零判据。这条判据读 **electron-builder 实际收到的配置**（`packager.appInfo.id`），
+  // 三个平台都跑；与 mac 产物侧那条（声明/配置/产物三面）互为补集。
+  it('appInfo.id 与本构建声明的身份不一致时立刻拒包（三平台同判）', () => {
+    for (const electronPlatformName of ['linux', 'win32', 'darwin']) {
+      const runtimeContext: PackagedRuntimeContext = {
+        appOutDir: '/build',
+        electronPlatformName,
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: 'com.example-vendor.harness' } },
+      }
+      expect(
+        () => verifyPackagedRuntime(runtimeContext, () => [], () => false, () => BRAND_SVG),
+        `${electronPlatformName} 上的身份错配必须拒包`,
+      ).toThrow(/received appId "com\.example-vendor\.harness" but this build declares/u)
+    }
+  })
+
+  it('身份一致时不因这条判据拒包（否则它会把所有平台都判红）', () => {
+    // 反向对照：用同一份上下文、只把 id 换成正确值 —— 仍然会因为归档不存在而抛错，
+    // 但**不能**是身份那条错。判据本身要有区分度，不能"恒红"。
+    const runtimeContext = context('/build', 'linux')
+    let caught: unknown
+    try {
+      verifyPackagedRuntime(runtimeContext, () => [], () => false, () => BRAND_SVG)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).not.toContain('would claim another identity')
+  })
+})
 
 describe('归档里每个 lib/*.js 的相对 import 都必须在包里（2026-09-22 补）', () => {
   // 为什么要有它：`REQUIRED_PACKAGED_RUNTIME_ENTRIES` 是人维护的清单，2026-09-22 审计
@@ -300,7 +344,11 @@ describe('上游补丁目标的静态 import 必须在打包必需清单里（G-
   // **子路径** import"与"打包必需清单"钉在一起；包根 import（`@deepseek-ai/dsh-tools`
   // 这类）不逐条登记 —— 清单是"缺了会静默/致命"的抽查oracle，不是完整打包清单。
   const PATCH_TARGETS = [
-    '@deepseek-ai/dsh-agent-presets',
+    // `@deepseek-ai/dsh-agent-presets` was dropped in 0.1.7: the package no longer
+    // exists upstream (split into agent-preset + agent-preset-registry) and its
+    // patch — a module-resolution fallback — has no subject left to patch. The
+    // replacement implementation resolves through real Cordis/Node resolution
+    // instead of a disk walk, so that failure mode cannot recur.
     '@deepseek-ai/dsh-client-ui-brand-official',
     '@deepseek-ai/dsh-mcp-client',
     '@deepseek-ai/dsh-plugin-package-inventory-deepseek',
@@ -1122,6 +1170,11 @@ describe('packaged desktop runtime verification', () => {
       const runtimeContext = context(appOutDir, electronPlatformName, arch)
       const unpackedRoot = resolvePackagedUnpackedRoot(runtimeContext)
       mkdirSync(unpackedRoot, { recursive: true })
+      // darwin 分支会走包内一致性判据（图标键/asar 布局/ElectronAsarIntegrity），
+      // 真实目录形态的夹具必须给出一份自洽的 .app，否则那一条会先打红。
+      if (electronPlatformName === 'darwin') {
+        writeValidMacBundle(join(appOutDir, 'PicoAide Harness.app'), 'PicoAide Harness')
+      }
       // 至少一条必需原生条目存在,否则会先被"no native unpacked entries"拦下。
       // G-1（2026-09-23）：还要**除被测家族外全都齐** —— 家族适用性断言上线后，
       // 只写一条 pty.node 的"精简树"会被 @img/sharp-linux-x64 等家族当场打红，
@@ -1176,6 +1229,27 @@ describe('packaged desktop runtime verification', () => {
       ])
       expect(() => verifyWithBrandStub(missing, () => completeArchiveEntries()))
         .toThrow(/missing required native files.*node-addon-system-darwin-arm64\/bin\/system\.node/su)
+    })
+
+    // afterPack 的包内一致性判据必须在**真实目录形态**下真的跑到（2026-09-25 变异 m5
+    // 实测：只有 import 没有调用时，源码级"出现过这个名字"的断言是假绿）。
+    it('rejects a darwin bundle whose declared icon is missing (afterPack real tree)', () => {
+      const runtimeContext = fixture('darwin', 3, [
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      rmSync(join(runtimeContext.appOutDir, 'PicoAide Harness.app', 'Contents', 'Resources', 'icon.icns'))
+      expect(() => verifyWithBrandStub(runtimeContext, () => completeArchiveEntries()))
+        .toThrow(/CFBundleIconFile=icon\.icns/u)
+    })
+
+    it('rejects a darwin bundle whose app.asar was rewritten after the integrity table', () => {
+      const runtimeContext = fixture('darwin', 3, [
+        'node_modules/@deepseek-ai/node-addon-system-darwin-arm64/bin/system.node',
+      ])
+      const infoPlist = join(runtimeContext.appOutDir, 'PicoAide Harness.app', 'Contents', 'Info.plist')
+      writeFileSync(infoPlist, readFileSync(infoPlist, 'utf8').replace(/(<key>hash<\/key>\n\t+<string>)([0-9a-f]{64})/u, (_m, head: string, hash: string) => `${head}${hash.startsWith('0') ? '1' : '0'}${hash.slice(1)}`))
+      expect(() => verifyWithBrandStub(runtimeContext, () => completeArchiveEntries()))
+        .toThrow(/does not match .*ElectronAsarIntegrity/u)
     })
   })
 
@@ -1812,7 +1886,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         electronPlatformName,
         arch: 1,
         packager: {
-          appInfo: { productFilename: 'PicoAide Harness' },
+          appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
           executableName: 'dsh-plugin-desktop',
         },
       }
@@ -1831,17 +1905,17 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'linux',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' }, executableName: 'dsh-plugin-desktop' },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() }, executableName: 'dsh-plugin-desktop' },
       })).toEqual([join('/build', 'dsh-plugin-desktop'), join('/build', 'PicoAide Harness')])
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'darwin',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' }, executableName: 'dsh-plugin-desktop' },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() }, executableName: 'dsh-plugin-desktop' },
       })).toEqual([join('/build', 'PicoAide Harness.app', 'Contents', 'MacOS', 'PicoAide Harness')])
       expect(resolvePackagedLauncherCandidates({
         appOutDir: '/build',
         electronPlatformName: 'win32',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })).toEqual([join('/build', 'PicoAide Harness.exe')])
     })
 
@@ -1855,7 +1929,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       const candidates = resolvePackagedLauncherCandidates({
         appOutDir,
         electronPlatformName: 'darwin',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })
       expect(candidates).toContain(join(macosDir, 'White Label Harness'))
 
@@ -1866,7 +1940,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
       expect(resolvePackagedLauncherCandidates({
         appOutDir: linuxDir,
         electronPlatformName: 'linux',
-        packager: { appInfo: { productFilename: 'PicoAide Harness' } },
+        packager: { appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() } },
       })).toContain(join(linuxDir, 'renamed-launcher'))
     })
 
@@ -2004,7 +2078,7 @@ describe('packaged desktop runtime verification (physical layout, asar: false)',
         electronPlatformName,
         arch: 1,
         packager: {
-          appInfo: { productFilename: 'PicoAide Harness' },
+          appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
           executableName: 'dsh-plugin-desktop',
         },
       }
@@ -2125,7 +2199,7 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
       electronPlatformName,
       arch: 1,
       packager: {
-        appInfo: { productFilename: 'PicoAide Harness' },
+        appInfo: { productFilename: 'PicoAide Harness', id: packagedAppId() },
         executableName: 'dsh-plugin-desktop',
       },
     }
@@ -2188,7 +2262,7 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
       `/${PACKAGED_CORDIS_SKILL_DIR}/alpha/SKILL.md`,
       `/${PACKAGED_CORDIS_SKILL_DIR}/beta`,
       `/${PACKAGED_CORDIS_SKILL_DIR}/README.md`,
-      '/node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
+      '/node_modules/@deepseek-ai/dsh-web-app/presets/cordis.patch.yml',
     ]
     expect(expectedCordisSkillListing(context(appOutDir, 'linux'), list, () => true)).toEqual({
       children: ['README.md', 'alpha', 'beta'],
@@ -2350,35 +2424,63 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
   )
 })
 
-  it('profile 锚点表与 src/profile.ts 的实际解析点逐条对拍（防新增插件漏登记）', () => {
-    // 判据来源：`src/profile.ts` 里每一处 `resolve('<pkg>/package.json')` 都会在
-    // **组装期**读该包目录下的东西。其中**带 `cordis.patch.yml` 的**是我们自己的
-    // 插件包（profile 拿它拼桌面组合）—— 这些必须在锚点表里。
-    //
-    // 上游两个包（`@deepseek-ai/dsh` 的 config/agent-presets、`dsh-agent-presets`
-    // 的 presets）解析的是 presets 目录、没有 patch，已由
-    // `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 逐条钉住，因此按"是否有 patch 文件"
-    // 分流，而不是按包名白名单。
-    const source = readFileSync(new URL('../src/profile.ts', import.meta.url), 'utf8')
-    const resolved = new Set<string>()
-    for (const m of source.matchAll(/resolve\('([^']+)\/package\.json'\)/gu)) {
-      const pkg = m[1]
-      if (pkg !== undefined) resolved.add(pkg)
+  it('profile 锚点表与真实的 bundle 层解析结果逐条对拍（防新增插件漏登记）', () => {
+    // 判据来源（2026-09-28 改口径）：十个自有组装补丁层**不再**由 `src/profile.ts` 逐个
+    // `resolve('<pkg>/package.json')` 手工解析 —— 它们现在是 profile 的 **bundle 层**
+    // （`REQUIRED_BUNDLES` 列出九个自有包，各自 `dsh.bundle.patch` 指向自己的
+    // `cordis.patch.yml`；桌面自己那一层由 `@picoaide/dsh-enterprise` 用相对路径携带）。
+    // 所以"哪些包目录必须在产物里"这条推导改为**读真实的 bundle 清单与各自的 patch 列表**：
+    // 每个自有 bundle 的 `package.json` 与它声明的每个补丁文件都必须在锚点表里
+    // （打包排除规则一旦把它们剔掉，客户端启动时整片行消失）。
+    const home = mkdtempSync(join(tmpdir(), 'dsh-profile-anchors-'))
+    try {
+      const dir = ensureDesktopProfile(home)
+      const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+        dsh: { profile: { bundles: string[] } }
+      }
+      const ours = manifest.dsh.profile.bundles
+        .filter(name => name.startsWith('@picoaide/') || name === 'dsh-memory-evolve')
+      // 前置断言：判据不能空转。
+      expect(ours.length).toBeGreaterThan(5)
+
+      const packageDirs = new Set<string>()
+      for (const name of ours) {
+        // 解析必须**镜像 `resolveBundleDir`**：它用 `resolve.paths()` + 字符串 `join`
+        // 得到的是 **node_modules 下的符号链接路径**（不 realpath）。dev 树里
+        // `node_modules/@picoaide/dsh-enterprise` 是指向 `packages/host/enterprise` 的
+        // 符号链接，而企业包的 `dsh.bundle.patch` 用 `../../../cordis.patch.yml` 指桌面层 ——
+        // 只有保留符号链接路径时它才落在 `packages/host/desktop/`（打包后两者同一形状）。
+        const searchPaths = createRequire(import.meta.url).resolve.paths(name) ?? []
+        const packageDir = searchPaths.map(searchPath => join(searchPath, name))
+          .find(candidate => existsSync(join(candidate, 'package.json')))
+        expect(packageDir, `无法按 resolveBundleDir 的方式解析 ${name}`).toBeDefined()
+        if (packageDir === undefined) continue
+        const packageJson = join(packageDir, 'package.json')
+        const declared = (JSON.parse(readFileSync(packageJson, 'utf8')) as {
+          dsh?: { bundle?: { patch?: string | string[] } }
+        }).dsh?.bundle?.patch
+        const patchFiles = typeof declared === 'string' ? [declared] : declared ?? []
+        expect(patchFiles.length, `${name} 没有声明 dsh.bundle.patch`).toBeGreaterThan(0)
+        for (const file of patchFiles) {
+          // 每个补丁文件都必须真的存在（相对路径也要能落地）。
+          expect(existsSync(join(packageDir, file)), `${name} 的 ${file} 不存在`).toBe(true)
+        }
+        // 上游两个包解析的是 presets 目录、没有 patch，已由
+        // `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 逐条钉住；这里只对**自有**包建锚点。
+        if (!packageDir.includes(`${sep}node_modules${sep}`)) continue
+        const relative = packageDir.slice(packageDir.lastIndexOf(`${sep}node_modules${sep}`) + 1)
+        packageDirs.add(relative.split(sep).join('/'))
+      }
+      expect(packageDirs.size).toBeGreaterThan(5)
+
+      const expected = [...packageDirs].flatMap(dir => [
+        `${dir}/package.json`,
+        `${dir}/cordis.patch.yml`,
+      ]).sort()
+      expect([...REQUIRED_PROFILE_PATCH_ANCHORS].sort()).toEqual(expected)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
     }
-    // 前置断言：判据不能空转。
-    expect(resolved.size).toBeGreaterThan(5)
-
-    const patchBearing = [...resolved]
-      .filter(pkg => existsSync(fileURLToPath(new URL(`../node_modules/${pkg}/cordis.patch.yml`, import.meta.url))))
-    // 前置断言：确实分流出了自有插件包。
-    expect(patchBearing.length).toBeGreaterThan(5)
-
-    const expected = patchBearing.flatMap(pkg => [
-      `node_modules/${pkg}/package.json`,
-      `node_modules/${pkg}/cordis.patch.yml`,
-    ]).sort()
-    const actual = [...REQUIRED_PROFILE_PATCH_ANCHORS].sort()
-    expect(actual).toEqual(expected)
   })
 
   it('profile 锚点判据在两套布局里都必须真的被调用（接线守卫）', () => {
@@ -2462,7 +2564,7 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
       'node_modules/debug/src/index.js',
       // 含 skills 的运行期内容必须留着（曾经被一条过宽的 *.md 排除误删）。
       'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
-      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
+      'node_modules/@deepseek-ai/dsh-agent-preset/skills/cordis-plugin-development/SKILL.md',
     ]
     expect(() => assertNoPackagedSourceLeaks(legitimate, '/x/app.asar')).not.toThrow()
   })
@@ -2488,7 +2590,7 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
     const withSkills = [
       'lib/main.js',
       'node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md',
-      'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
+      'node_modules/@deepseek-ai/dsh-agent-preset/skills/cordis-plugin-development/SKILL.md',
     ]
     expect(() => assertRuntimeAssetFamiliesSurvive(withSkills, '/x/app.asar')).not.toThrow()
     expect(() => assertNoPackagedSourceLeaks(withSkills, '/x/app.asar')).not.toThrow()
@@ -2503,7 +2605,7 @@ describe('发布包不得夹带自有源码 / sourcemap / 开发期产物（2026
     expect(() => assertRuntimeAssetFamiliesSurvive(
       ['node_modules/dsh-memory-evolve/skills/memory-consolidate/SKILL.md'],
       '/x/app.asar',
-    )).toThrow(/dsh-agent-presets/u)
+    )).toThrow(/dsh-agent-preset/u)
   })
 
   it('两个方向的判据都必须真的接进 afterPack 主流程（接线守卫）', () => {

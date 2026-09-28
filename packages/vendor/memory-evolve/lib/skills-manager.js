@@ -34,9 +34,10 @@
 import { realpath, readdir, readFile, stat } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, isAbsolute, sep, dirname } from 'node:path'
+import { join, isAbsolute, relative, sep, dirname } from 'node:path'
 import { localTrustFence } from './http-guard.js'
 import { hasDisableFlag, toggleDisableFlag } from './skill-manifest.js'
+import { resolveSkillLanding } from './skills.js'
 import { writeFileAtomicSafeAt } from './sync/filesets.js'
 
 /** Cap on a single readable text file (bytes). */
@@ -233,6 +234,19 @@ async function collectRoots(ctx, cwd, scope) {
  * @returns {Promise<string|null>} resolved path, or null when outside/absent.
  */
 async function resolveInside(roots, path, base) {
+  const hit = await resolveInsideWithRoot(roots, path, base)
+  return hit === null ? null : hit.resolved
+}
+
+/**
+ * `resolveInside` 的**带上命中的那个根**的形态（AB2-03 / FIX-42③）。
+ *
+ * 写面需要根：`writeFileAtomicSafeAt` 的 `anchorDir` 必须是**库根**而不是落点父
+ * 目录，否则"父目录是符号链接"那一档判定恒真（见 {@link anchoredSkillWrite}）。
+ * 从前这里只回 realpath、把根丢掉了，写面因此拿不到可用的锚。
+ * @returns {Promise<{resolved: string, root: string}|null>} realpath + 它落在哪个根里。
+ */
+async function resolveInsideWithRoot(roots, path, base) {
   const target = isAbsolute(path) ? path : join(base ?? '', path)
   let resolved
   try {
@@ -241,7 +255,7 @@ async function resolveInside(roots, path, base) {
     return null
   }
   for (const root of roots) {
-    if (isInsideRoot(root, resolved)) return resolved
+    if (isInsideRoot(root, resolved)) return { resolved, root }
   }
   return null
 }
@@ -309,15 +323,54 @@ function splitFrontmatter(text) {
 // 那里，`coi/skills-sync.js` 的换入保留逻辑同样 import 它），本文件只保留调用。
 
 /**
+ * 技能文件落点的**库根锚定**（AB2-03 / FIX-42③；与 `lib/skills.js` 的
+ * `writeSkill` / `copySkillTreeSafe` 同一份口径）。
+ *
+ * 为什么必须有：`writeFileAtomicSafeAt` 不带 `anchorDir` 时会退到"以**落点父目录**
+ * 为断言基准"的兜底档（`sync/filesets.js` 的 `resolveSelfAnchoredTarget` 第 2 档）
+ * —— `realRoot` 自己变成包含性根、`hasSymlinkComponent(dir, base)` 只从 `dir`
+ * **之下**开始 `lstat` ⇒ **父目录那一层的符号链接看不见**。`<库>/<name> -> 库外`
+ * （共享仓库的 `120000` 条目 / stow / chezmoi 布局）于是判定恒真，`SKILL.md`
+ * 真被写到库外还报成功（AB2 探针实测）。
+ *
+ * 本函数的库根取 `<技能目录>` 的父目录 —— 即 `skillFileOf()` 给出的
+ * `<库根>/<技能名>/SKILL.md` 里的那个库根（bundled / 项目技能根也是同一形状）。
+ * 先按库根过一遍 `resolveSkillLanding`（**唯一实现**，不新造判定），失败即拒写；
+ * 写盘时再把**同一个根**当 `anchorDir` 交给原子写，连"检查与写盘之间父目录被换掉"
+ * 也一并挡住（第 2 档另算一遍时看不见第一次已经解析掉的父目录链接）。
+ * @param {string} file - SKILL.md 绝对路径。
+ * @returns {{ok: true, anchorDir: string} | {ok: false, error: string}}
+ */
+function anchoredSkillWrite(file) {
+  const dir = dirname(file)
+  const anchorDir = dirname(dir)
+  if (anchorDir === '' || anchorDir === dir || anchorDir === file) {
+    return { ok: false, error: `skill file has no enclosing skill library: ${file}` }
+  }
+  // 相对路径一律 `/` 分隔（`resolveSkillLanding` 的语法要求，跨平台一致）。
+  const rel = relative(anchorDir, file).split(sep).join('/')
+  if (resolveSkillLanding(anchorDir, rel) === null) {
+    return {
+      ok: false,
+      error: `skill file landing refused (a path component is a symlink or escapes the skill library): ${file}`,
+    }
+  }
+  return { ok: true, anchorDir }
+}
+
+/**
  * 原子写入修改后的 SKILL.md（tmp + rename，与 saveState 同款）。
  * @param {string} file - SKILL.md 绝对路径。
  * @param {string} content - 新内容。
+ * @param {string} anchorDir - 库根（落点断言的基准；见 {@link anchoredSkillWrite}）。
  */
-function writeSkillFile(file, content) {
+function writeSkillFile(file, content, anchorDir) {
   // FIX-27（2026-09-13）：自锚定安全原子写（tmp 落点同样断言 + O_EXCL）。
   // NF-3 收敛后缺省会跟随「落点文件本身是符号链接」的合法布局；技能内容不是
   // 状态文件——预置链接一律拒收（保持第一轮的判据）。
-  writeFileAtomicSafeAt(file, content, { followFileSymlink: false })
+  // AB2-03（FIX-42③）：再加**库根锚定** —— 只写 `followFileSymlink:false` 时，
+  // "父目录是符号链接"那一档判定恒真（见 {@link anchoredSkillWrite}）。
+  writeFileAtomicSafeAt(file, content, { anchorDir, followFileSymlink: false })
 }
 
 /**
@@ -779,8 +832,11 @@ export function installSkillsManager(ctx, options = {}) {
         return { ok: false, error: `skill file has no canonical frontmatter: ${file}` }
       }
       if (next === text) return { ok: true }
+      // AB2-03（FIX-42③）：落点先过**库根锚定**断言，写盘时把同一个根当 anchorDir。
+      const anchored = anchoredSkillWrite(file)
+      if (!anchored.ok) return { ok: false, error: anchored.error }
       try {
-        writeSkillFile(file, next)
+        writeSkillFile(file, next, anchored.anchorDir)
       } catch (error) {
         return { ok: false, error: `failed to write skill file: ${error?.message ?? error}` }
       }
@@ -1104,11 +1160,12 @@ export function installSkillsManager(ctx, options = {}) {
           try {
             const { roots } = await collectRoots(webCtx, resolveCwdFor(query), await resolveScope())
             const target = decodeSeg(query.get('path') || '')
-            const file = await resolveInside(roots, target, undefined)
-            if (file === null) {
+            const hit = await resolveInsideWithRoot(roots, target, undefined)
+            if (hit === null) {
               sendJson(res, 404, { error: 'target file not found or outside skill roots' })
               return
             }
+            const file = hit.resolved
             const buffer = await readBody(req, MAX_WRITE_BYTES)
             if (!looksLikeText(buffer)) {
               sendJson(res, 415, { error: 'refusing to write non-text content' })
@@ -1121,7 +1178,17 @@ export function installSkillsManager(ctx, options = {}) {
             }
             // NF-1 同族：技能内容落点必须过断言（`followFileSymlink:false` =
             // 预置的 SKILL.md 符号链接一律拒收，绝不把用户内容写到链接目标）。
-            writeFileAtomicSafeAt(file, buffer, { followFileSymlink: false })
+            // AB2-03（FIX-42③）：锚必须是 `resolveInside()` **命中的那个根**
+            // （从前只回 realpath、把根丢掉了 —— 不带 anchorDir 时原子写退到
+            // "以落点父目录为基准"的第 2 档，检查与写盘之间父目录被换掉就写穿）。
+            // 这里 `file` 已是 realpath，所以 `resolveSkillLanding` 的包含性判定
+            // 必然通过；换根锚定的价值在**写盘那一刻**的 TOCTOU 复检。
+            const rel = relative(hit.root, file).split(sep).join('/')
+            if (resolveSkillLanding(hit.root, rel) === null) {
+              sendJson(res, 403, { error: 'refusing to write: the target path is a symlink or escapes the skill library' })
+              return
+            }
+            writeFileAtomicSafeAt(file, buffer, { anchorDir: hit.root, followFileSymlink: false })
             const after = await stat(file)
             sendJson(res, 200, { ok: true, path: file, size: after.size, mtime: after.mtimeMs })
           } catch (error) {

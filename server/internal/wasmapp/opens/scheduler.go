@@ -104,19 +104,28 @@ func (s *Scheduler) TryRun(ctx context.Context) {
 	// 且**没有任何报错**；历史已坏的行补不回来）。
 	//
 	// 两条口径（改这里时先读，缺一条就复发）：
-	//  ① `purgeBefore` = 保留期边界**那一天**的本地 00:00（唯一真源
-	//     serverstore.LocalDay）—— Purge 只删**严格早于**它的行 ⇒ 明细永远**整日
-	//     一起删**，不存在"某天被删掉一半"的中间态（那正是缩水的必要条件）；
+	//  ① `purgeBefore` = 保留期边界**那一天**的本地日边界（唯一真源
+	//     `serverstore.AddLocalDays` / `serverstore.LocalDay`）—— Purge 只删**严格早于**
+	//     它的行 ⇒ 明细永远**整日一起删**，不存在"某天被删掉一半"的中间态
+	//     （那正是缩水的必要条件）；
 	//  ② 汇总上界与它**同一个值**，且判据放宽到"最早明细落在边界日或更早"：
 	//     Aggregate 的日循环是**闭区间**（含 `LocalDay(toDay)`），所以
 	//     `Aggregate(oldest, purgeBefore)` 恰好把"边界日"也整日汇总进去 —— 那一天
 	//     正是下一个日界将要整日删除的。保留期语义因此是"整 90 天 + 不足 1 天"，
 	//     这是日粒度保留的固有形态（0075/0076 的用例用的就是日对齐 cutoff）。
 	//
-	// 不变量（判据：scheduler_test.go 的 TestSchedulerKeepsDailyRollupAcrossRetentionBoundary
-	// ＋ 复现探针）：**日汇总在维护过程中只能变大不能变小**；出现"被更小的值覆盖"
-	// 就意味着某一天曾被部分删除过。
-	purgeBefore := serverstore.LocalDay(now.AddDate(0, 0, -serverstore.WasmAppOpensRetentionDays))
+	// ⚠️ R20A-S-01（审计 2026-09-25，P1，**不可逆**）：日边界的"下一天 / 第 N 天前"
+	// **必须**走 `serverstore.NextLocalDay` / `AddLocalDays`，**不能**用 `AddDate`。
+	// `AddDate` 加的是**墙钟**：在"本地零点不存在"的时区（DST 缺口，实测
+	// `America/Santiago` 2026-09-06 的 00:00 → 01:00）里，`time.Date(y,m,d,0,…)` 会被
+	// Go 归一化到**前一天 23:00**，于是 `AddDate(0,0,1)` 回到同一天、相邻两桶的 day 键
+	// 撞车（后写覆盖前写）⇒ 边界日被永久算少，而 Purge 又用同一个阶梯当 cutoff
+	// ⇒ 明细同轮被硬删，少掉的计数在明细与日汇总里**都不存在**。
+	//
+	// 不变量（判据：scheduler_test.go 的 TestSchedulerKeepsDailyRollupAcrossRetentionBoundary、
+	// serverstore 的 local_day_test.go ＋ 复现探针）：**日汇总在维护过程中只能变大不能变小**，
+	// 且**终态合计守恒**（日汇总 PV 之和 == 保留期内明细总数 ⇒ 没有一行被漏算/算重）。
+	purgeBefore := serverstore.AddLocalDays(now, -serverstore.WasmAppOpensRetentionDays)
 
 	// ---- ① 先汇总 ----
 	// (a) **待删区间**：从明细里最早的一行到保留期边界**日**（含边界日）。这一段正是
@@ -134,7 +143,8 @@ func (s *Scheduler) TryRun(ctx context.Context) {
 	// 判据放宽到边界日"之内或更早"：边界日当天（oldest 尚未越过 purgeBefore）也必须
 	// 被整日汇总 —— 它是下一个日界整日删除的对象，而 Aggregate 的闭区间恰好覆盖它。
 	// 若 earliest 已在边界日之后（全新部署/无积压），整个区间无行可算，跳过以省查询。
-	if hasOld && oldest.Before(purgeBefore.AddDate(0, 0, 1)) {
+	// 右端用 `NextLocalDay`（= 边界日的结束边界），不用 `AddDate`：理由见上面的 ⚠️。
+	if hasOld && oldest.Before(serverstore.NextLocalDay(purgeBefore)) {
 		if _, err := serverstore.AggregateWasmAppOpens(ctx, s.db, oldest, purgeBefore); err != nil {
 			s.warnf("opens: 待删区间汇总失败，本轮不清理（先汇总后清理）: %v", err)
 			return
@@ -142,7 +152,7 @@ func (s *Scheduler) TryRun(ctx context.Context) {
 	}
 	// (b) 活动窗：今天（仍在写入）与昨天（跨零点写入的尾巴）——
 	//     这两天的数字随时在变，每轮都要重算（汇总本身是按天全量覆盖，幂等）。
-	if _, err := serverstore.AggregateWasmAppOpens(ctx, s.db, now.AddDate(0, 0, -2), now); err != nil {
+	if _, err := serverstore.AggregateWasmAppOpens(ctx, s.db, serverstore.AddLocalDays(now, -2), now); err != nil {
 		s.warnf("opens: 活动窗汇总失败，本轮不清理: %v", err)
 		return
 	}

@@ -6,12 +6,15 @@ interface Props {
   title: string
   description?: string
   ogImage?: string
+  /** 文档语言（`<html lang>`）。缺省简体中文 —— 英文落地页（`src/pages/en/index.astro`）传 `en`。 */
+  lang?: string
 }
 
 const {
   title,
   description = 'PicoAide Harness 企业级 AI 一体化平台：桌面客户端、本地智能体引擎与管理后台，支持私有化部署。',
   ogImage = '/og-default.png',
+  lang = 'zh-CN',
 } = Astro.props
 
 const siteName = 'PicoAide Harness'
@@ -19,7 +22,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site)
 ---
 
 <!doctype html>
-<html lang="zh-CN">
+<html lang={lang}>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />

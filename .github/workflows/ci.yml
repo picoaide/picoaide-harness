@@ -10,8 +10,29 @@ on:
 permissions:
   contents: read
 
-# 审计 2026-08-25 D-2:同 ref 并发触发(重推 tag/两 tag)互斥,release 不再
-# 并行争抢同一版本。
+# 审计 2026-08-25 D-2:同一 ref 的并发触发互斥(重推同一个 tag 时,新 run 取消旧 run),
+# release 不再并行争抢同一版本。
+#
+# ⚠️ **这里只实现"同 ref 互斥",不是"两 tag 互斥"**（R28 审计 AB2-A-01 更正旧注释）:
+# group 只含 `github.ref`,所以 vA 与 vB 两个**不同 tag** 的 push 会并发跑各自的 release
+# job。两个 tag 并发时"更新指针不被写回更旧的版本"由**写入侧的条件写(CAS)**兜住
+# （`scripts/ci-publish-update-server.sh` 用 3b 读回的 ETag 做
+# `put-object --if-match <ETag>`;首发用 `--if-none-match '*'`;被存储侧拒成 412 就
+# 重读-重判-有界重试)—— 串行下的"读回比较"只是**快路径**,不是保证。
+# 组名只降低并发概率;**条件写才是"无论谁来写都不会倒退"的那一条**
+# （R29 审计 AC1-01:改之前那一步是无条件 `copy-object`,AC1 用两个真发布进程实测
+#  barrier 4/12、silent 5/5 轮指针被写回更旧的版本,其中 5/5 两个进程都 exit 0 且零 `::warning::`）。
+# 代价与残留(如实登记):组名不改是**有意**的 —— 把 tag 并进同一个 group 会让一条 40 分钟
+# 的 tag 流水线排队,而且 GitHub 的并发组语义是"1 个运行 + 1 个 pending,新 pending 取消旧
+# pending" ⇒ 三连 tag 时**中间那条会被静默取消**(连 GitHub Release 都不会创建),比"指针倒退"
+# 更糟。真要改的形态(需产品确认可接受排队):
+#   group: ${{ github.ref_type == 'tag' && 'ci-release' || format('ci-{0}', github.ref) }}
+#   cancel-in-progress: ${{ github.ref_type != 'tag' }}
+# 两个并发 run 的**保留策略**仍可能交错(需要 ≥4 个 tag 同时发布,才可能删到对方刚发的版本)。
+# 判据:`scripts/verify-ci-scripts.mjs` 第 6g 节 —— ①**串行**:先写 vX.Y.Z+1 的指针,再让
+# vX.Y.Z 的发布尝试写 ⇒ 必须被拒且**不改动**已有对象;②**并发**(两个真发布进程 + 读屏障 +
+# 写闸门,确定性构造):旧进程必然拿着过期判定去写 ⇒ 指针不得倒退、退让方必须留下
+# `::warning::`,并要求假 aws 真的记录到"条件写被 412 拒绝"那一跳(否则用例是空转的假绿)。
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -1724,7 +1745,10 @@ jobs:
   pr-summary:
     name: PR build artifacts summary
     if: always() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
-    needs: [changes, desktop-linux, desktop-windows, desktop-macos, server]
+    # `gate` 必须在 needs 里(R28 审计 AB2-A-02):它的正文要按 `needs.*.result` 派生出
+    # 「全绿 / 有 job 未成功」两态,而 gate 此前**读不到**(needs 里没有它)⇒ 即便想按
+    # 结果修正措辞也拿不到数据。补上它不增加等待:三个 desktop job 本来就 `needs: gate`。
+    needs: [changes, gate, server, desktop-linux, desktop-windows, desktop-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1737,6 +1761,34 @@ jobs:
             const marker = '<!-- picoaide-ci-artifacts -->'
             const docsOnly = '${{ needs.changes.outputs.code }}' === 'false'
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            // ── 三态文案必须由 needs 派生(R28 审计 AB2-A-02)────────────────────
+            // 这个 job 的 `if` 含 `always()`(docs-only 的 PR 也要有评论),所以
+            // 「门禁全绿」这句话**只能**从 `needs.<job>.result` 读出来,绝不能无条件
+            // 断言:门禁红的 PR 上发「全部通过 + 可下载产物」= 把"可以合并"这个错误
+            // 信号交给评审人,并列出根本不存在的 artifact。
+            // 每个 job 的 artifact 名与它同源(artifact 只在那个 job 成功时才存在)。
+            const jobResults = {
+              gate: '${{ needs.gate.result }}',
+              server: '${{ needs.server.result }}',
+              'desktop-linux': '${{ needs.desktop-linux.result }}',
+              'desktop-windows': '${{ needs.desktop-windows.result }}',
+              'desktop-macos': '${{ needs.desktop-macos.result }}',
+            }
+            const artifacts = {
+              server: '`picoaide-server-linux-amd64` — Go 服务端二进制',
+              'desktop-linux': '`desktop-Linux` — AppImage（含 `e2e-report` 客户端 E2E 结果）',
+              'desktop-windows': '`desktop-Windows-installer` — NSIS Setup',
+              'desktop-macos': '`desktop-macOS` — DMG',
+            }
+            const platforms = {
+              server: 'Server',
+              'desktop-linux': 'Desktop (Linux)',
+              'desktop-windows': 'Desktop (Windows)',
+              'desktop-macos': 'Desktop (macOS)',
+            }
+            const notSuccess = Object.entries(jobResults).filter(([, result]) => result !== 'success')
+            const okArtifacts = Object.keys(artifacts).filter(job => jobResults[job] === 'success')
+            const artifactLines = okArtifacts.map(job => `- ${platforms[job]}: ${artifacts[job]}`)
             const body = docsOnly
               ? [
                   marker,
@@ -1746,18 +1798,31 @@ jobs:
                   '',
                   `规则见 \`.github/workflows/ci.yml\` 的 \`changes\` job；出现任何非文档文件即回到全量 CI。`,
                 ].join('\n')
+              : notSuccess.length === 0
+              ? [
+                  marker,
+                  '## CI 编译产物',
+                  '',
+                  '本次提交的门禁（gate + server + 三平台打包）全部通过，可下载产物：',
+                  '',
+                  ...artifactLines,
+                  '',
+                  `下载入口：[Actions 运行页 → Artifacts](${runUrl}#artifacts)`,
+                ].join('\n')
               : [
                   marker,
                   '## CI 编译产物',
-              '',
-              '本次提交的门禁（gate + server + 三平台打包）全部通过，可下载产物：',
-              '',
-              `- Desktop (Linux): \`desktop-Linux\` — AppImage（含 \`e2e-report\` 客户端 E2E 结果）`,
-              `- Desktop (Windows): \`desktop-Windows-installer\` — NSIS Setup`,
-              `- Desktop (macOS): \`desktop-macOS\` — DMG`,
-              `- Server: \`picoaide-server-linux-amd64\` — Go 服务端二进制`,
-              '',
-              `下载入口：[Actions 运行页 → Artifacts](${runUrl}#artifacts)`,
+                  '',
+                  '⚠️ **本次提交的 CI 未通过**，以下 job 的结果不是 `success`：',
+                  '',
+                  ...notSuccess.map(([job, result]) => `- \`${job}\` — \`${result}\``),
+                  '',
+                  okArtifacts.length > 0
+                    ? '可下载产物（**只列成功 job 的**；上表未列的 job 没有产物）：'
+                    : '本次没有成功产出产物的 job。',
+                  ...artifactLines,
+                  '',
+                  `下载入口：[Actions 运行页 → Artifacts](${runUrl}#artifacts)（失败 job 的诊断见运行页对应 job 的日志）`,
                 ].join('\n')
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,

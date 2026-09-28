@@ -280,6 +280,7 @@ export function isExecutionFacePath(path) {
 export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/asar-bigint-probe.mjs',
   'packages/host/desktop/scripts/asar-entry-path.ts',
+  'packages/host/desktop/scripts/boot-desktop-profile.mjs',
   'packages/host/desktop/scripts/brand-prepare.mjs',
   'packages/host/desktop/scripts/channel-build.ts',
   'packages/host/desktop/scripts/channel-prepare.ts',
@@ -296,6 +297,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs',
   'packages/host/desktop/scripts/generate-mac-app-icon.mjs',
   'packages/host/desktop/scripts/generate-tray-icons.mjs',
+  'packages/host/desktop/scripts/mac-bundle-consistency.ts',
   'packages/host/desktop/scripts/mac-runtime.ts',
   'packages/host/desktop/scripts/notarize-mac.ts',
   'packages/host/desktop/scripts/pack-app-root.mjs',
@@ -331,6 +333,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/vendor/memory-evolve/scripts/run-tests.mjs',
   'packages/vendor/memory-evolve/scripts/sync-worker.mjs',
   'scripts/check-doc-claims.mjs',
+  // FIX-48⑤ 的两个新执行体（本地收尾清单 + 从 ci.yml 逐字抽出的 docs-only 分类器矩阵）：
+  // 它们自己也是"判据执行体"—— 改写 `ci-parity-classifier.mjs` 就等于改写分类器的判定矩阵。
+  'scripts/check-ci-parity.mjs',
+  'scripts/ci-parity-classifier.mjs',
   // 通过行探测的**独立子入口**（第十四轮 V14-A 的 VA-02-F2 收口）：它 import 主守卫、
   // 打印通过行，父进程把它的 stdout 抓回去反解断言 ⇒ 它进不了面（被改写）就等于
   // "探测子进程的输出没有任何锚定"。形状族（`scripts/*.mjs`）本来就会枚举到它。
@@ -344,6 +350,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/check-no-real-domains.mjs',
   'scripts/check-patch-pin.mjs',
   'scripts/check-root-guards.mjs',
+  'scripts/check-site-links.mjs',
   'scripts/check-theme-tokens.mjs',
   'scripts/check-verdict-credential.mjs',
   'scripts/check-workflows.mjs',
@@ -361,6 +368,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/patch-targets.mjs',
   'scripts/platform-modules.mjs',
   'scripts/upgrade-upstream.mjs',
+  'scripts/upstream-package-checks.mjs',
   'scripts/verify-check-workspaces.mjs',
   'scripts/verify-ci-scripts.mjs',
   'scripts/verify-glitchtip-ops-check.mjs',
@@ -446,6 +454,7 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
 export const NPM_PROJECT_MANIFEST_REGISTRY = [
   // 桌面宿主服务的 smoke 夹具包（`yarn check` 之外的 afterPack/冒烟面）。
   'packages/host/desktop/tests/fixtures/desktop-host-services-smoke-plugin/package.json',
+  'packages/host/desktop/tests/fixtures/legacy-preset-probe-plugin/package.json',
   // CI `server` job 的 `npm ci` / `npm test` 就在这个目录里跑：webadmin 的 668 个用例。
   'server/webadmin/package.json',
   // 官网（Astro/Starlight）：本地与部署侧都按 npm 项目装依赖。
@@ -544,6 +553,7 @@ export const EXECUTION_POINT_REGISTRY = [
   'integration-tests/dex/dex-sso-test.py',
   'integration-tests/electron-shots/assertions.mjs',
   'integration-tests/electron-shots/electron-shots.mjs',
+  'integration-tests/electron-shots/mock-gateway.mjs',
   'integration-tests/electron-shots/report.mjs',
   'integration-tests/openldap/ldap-rbac-brand-test.py',
   'integration-tests/run-all.sh',

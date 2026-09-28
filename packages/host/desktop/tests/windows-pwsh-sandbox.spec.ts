@@ -1,4 +1,6 @@
 import type { ShellExecSpec } from '@deepseek-ai/dsh-shell'
+import { createVolatile } from '@deepseek-ai/cosmokit'
+import type { Config as PwshConfig } from '@deepseek-ai/dsh-pwsh-local'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   adaptWindowsAclExecution,
@@ -16,6 +18,7 @@ function shellSpec(env?: Record<string, string>): ShellExecSpec {
     timeoutMs: 60_000,
     stdoutMaxBytes: 64_000,
     sandboxPolicy: undefined,
+    onExpiry: 'kill',
     ...(env === undefined ? {} : { env }),
   }
 }
@@ -26,6 +29,27 @@ const adaptation: WindowsAclAdaptation = {
   execPath: 'C:\\Program Files\\PicoAide Harness\\PicoAide Harness.exe',
   upstreamRunner: 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\runner.js',
   trampoline: 'C:\\Program Files\\PicoAide Harness\\resources\\app.asar\\desktop-runner.js',
+}
+
+/**
+ * Resolved pwsh executor config.
+ *
+ * Upstream 0.1.7 made every field of this config a volatile reference, so the
+ * value the executor receives is a set of `Volatile`s rather than plain data.
+ * @param cwd - default working directory.
+ * @param pwshPath - explicit executable, when the case supplies one.
+ * @returns a resolved-looking config.
+ */
+function pwshConfig(cwd: string, pwshPath?: string): PwshConfig {
+  return {
+    cwd: createVolatile(cwd),
+    timeoutMs: createVolatile(60_000),
+    maxTimeoutMs: createVolatile(600_000),
+    maxOutputBytes: createVolatile(1_048_576),
+    maxSpillBytes: createVolatile(8_388_608),
+    graceMs: createVolatile(5_000),
+    pwshPath: createVolatile(pwshPath),
+  }
 }
 
 describe('Windows Electron PowerShell sandbox adaptation', () => {
@@ -49,24 +73,30 @@ describe('Windows Electron PowerShell sandbox adaptation', () => {
   })
 
   it('keeps explicit pwshPath config and non-Windows config unchanged', () => {
-    const explicit = { cwd: 'C:\\workspace', pwshPath: 'D:\\tools\\pwsh\\pwsh.exe' }
-    expect(desktopWindowsPwshConfig(explicit, {}, 'win32')).toBe(explicit)
+    const explicit = pwshConfig('C:\\workspace', 'D:\\tools\\pwsh\\pwsh.exe')
+    const explicitResult = desktopWindowsPwshConfig(explicit, {}, 'win32')
+    expect(explicitResult).toBe(explicit)
+    expect(explicitResult.pwshPath.get()).toBe('D:\\tools\\pwsh\\pwsh.exe')
 
-    const nonWindows = { cwd: '/workspace' }
+    const nonWindows = pwshConfig('/workspace')
     expect(desktopWindowsPwshConfig(nonWindows, {}, 'darwin')).toBe(nonWindows)
+    expect(nonWindows.pwshPath.get()).toBeUndefined()
   })
 
   it('defaults Windows sandbox config to a stable system PowerShell when available', () => {
-    const result = desktopWindowsPwshConfig({ cwd: 'C:\\workspace' }, {
+    const config = pwshConfig('C:\\workspace')
+    const result = desktopWindowsPwshConfig(config, {
       ProgramFiles: 'C:\\missing',
       SystemRoot: 'C:\\Windows',
       PATH: 'D:\\portable\\pwsh',
     }, 'win32', path => path === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
 
-    expect(result).toEqual({
-      cwd: 'C:\\workspace',
-      pwshPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    })
+    // The default is written **through** the loader-owned reference: preserving
+    // object identity is what keeps a later `pwshPath` saved in the settings
+    // form visible to the executor.
+    expect(result).toBe(config)
+    expect(result.cwd.get()).toBe('C:\\workspace')
+    expect(result.pwshPath.get()).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
   })
 
   it('adapts only the exact Electron-hosted win32 ACL runner argv', () => {

@@ -175,7 +175,7 @@ interface Ledger {
  * @param widenMs - 加宽的宏任务时长。
  * @returns 处置账本。
  */
-function instrument(ctx: Context, widenedSessionId: string | undefined, widenMs = 120): Ledger {
+function instrument(ctx: Context, widenedSessionId: string | undefined, widenMs = 120, widenCallIndex = 1): Ledger {
   const ledger: Ledger = { handles: [], wipeWindowOpen: false }
   let widened = false
   const wrap = (sessionId: string, handle: AgentHandle): AgentHandle => {
@@ -187,7 +187,18 @@ function instrument(ctx: Context, widenedSessionId: string | undefined, widenMs 
       let calls = 0
       handle.agent.whenIdle = async (): Promise<void> => {
         calls += 1
-        const widenedCall = calls === 1
+        // 只加宽**指定的那一次**调用（`widenCallIndex`）。
+        //
+        // 2026-09-28 修 CI-only 红：原先硬写"第 1 次"。`whenIdle` 有两个调用者
+        // （`runTurn` 的等待 = 要推迟的那一个；`dispose()` 内部的等待 = **不能**推迟，
+        // 推迟它等于把闸门一起推迟、窗口反而消失），而"第 1 次是谁"**在 CI 上不可靠**
+        // —— 实测 CI 上首次调用落在 `dispose()` 上，于是自校准判据响亮地报
+        // 「加宽打到了错误的 whenIdle 调用者」。本地第 1 次恰好命中 `runTurn`，所以一直是绿的。
+        //
+        // 修法不是放宽判据（那正是自校准要防的"判据空转"），而是**把序号变成参数、
+        // 由调用方逐个试**：见本文件里 `attempt()` 的 `for (const index of [1, 2, 3])` ——
+        // 任一次序打开了窗口就算命中，一次都没打开仍然是响亮的红。
+        const widenedCall = calls === widenCallIndex
         await realWhenIdle()
         if (!widenedCall) return
         await sleep(widenMs)
@@ -214,10 +225,30 @@ function instrument(ctx: Context, widenedSessionId: string | undefined, widenMs 
 }
 
 describe('R14 VB-N2：被放弃那一轮的 finally 不许 dispose 新轮的句柄', () => {
-  it('①闸门放行 + 新轮发布句柄之后，旧轮收尾不得动它（live/注册表/句柄账本三处都要干净）', async () => {
+  /**
+   * 跑一遍 VB-N2 场景，加宽打在 `widenCallIndex` 那次 `whenIdle` 调用上。
+   *
+   * 为什么要按序号重试：`whenIdle` 有两个调用者（`runTurn` = 要推迟的那一次；
+   * `dispose()` 内部 = 不能推迟），而"第 N 次是谁"**在 CI 与本地可以不同**
+   * （2026-09-28 实测：CI 首次落在 `dispose()` 上 ⇒ 原来硬写"第 1 次"的判据在 CI 报
+   * 「加宽打到了错误的 whenIdle 调用者」）。这里逐个序号试，**任一次序打开了窗口就算命中**；
+   * 一次都没打开仍然是响亮的红（判据强度不变，只是不再依赖调度顺序）。
+   * @param widenCallIndex - 要加宽第几次 `whenIdle` 调用。
+   * @returns 该次尝试的账本与结果。
+   */
+  async function attempt(widenCallIndex: number): Promise<{
+    ledger: Ledger
+    liveAfter: number
+    agentPresent: boolean
+    secondDisposed: boolean
+    secondResult: string
+    firstResult: string
+    collisions: string[]
+    liveFinal: number
+  }> {
     const adapter = new ProbeAdapter({ stallMs: 400 })
     const ctx = await plane(adapter)
-    const ledger = instrument(ctx, SESSION_ID)
+    const ledger = instrument(ctx, SESSION_ID, 120, widenCallIndex)
     const warnings: string[] = []
     const runner = createAppAiRunner(ctx, { cwd: '/tmp/app-ai', warn: (message) => warnings.push(message) })
     const run = async (content: string): Promise<unknown> =>
@@ -236,27 +267,68 @@ describe('R14 VB-N2：被放弃那一轮的 finally 不许 dispose 新轮的句�
     expect(await waitFor(() => ledger.handles.length === 2, 5000), '第二轮没能在闸门放行后开出自已的句柄').toBe(true)
     // 再加宽的窗口：给"旧轮的 finally"足够时间落地（加宽就打在旧轮的 whenIdle 上）。
     await sleep(240)
-    // 自校准前提：加宽的那一刻新一轮的句柄必须**已经**发布（否则本用例是空转的）。
-    expect(ledger.wipeWindowOpen, '加宽窗口没有打开（判据不再咬得住 VB-N2）：加宽打到了错误的 whenIdle 调用者').toBe(true)
-
     // 判据本体（修复前：`live` 被清空、agent 从注册表消失、第二轮的句柄被 dispose）。
-    expect(runner.liveSessions(), '旧轮的收尾把新轮从 live 里摘掉了（VB-N2）').toBe(1)
-    expect(ctx.agents.get(SESSION_ID as unknown as SessionIdType), '新轮的 agent 被旧轮 dispose 掉了（VB-N2）').toBeDefined()
-    expect(ledger.handles[1]?.disposedAt, '新轮的句柄被旧轮 dispose 掉了（VB-N2）').toBeUndefined()
+    const liveAfter = runner.liveSessions()
+    const agentPresent = ctx.agents.get(SESSION_ID as unknown as SessionIdType) !== undefined
+    const secondDisposed = ledger.handles[1]?.disposedAt !== undefined
 
     await release
-    expect(await settle(second, 8000), '第二轮必须正常跑完').toBe('resolved')
-    expect(await settle(first, 2000), '被放弃的那一轮必须收场（不挂住）').toMatch(/^rejected/u)
+    const secondResult = await settle(second, 8000)
+    const firstResult = await settle(first, 2000)
     // 修复前的症状之一：撞写句柄（`already owned by an active write handle`）。
-    expect(warnings.filter((message) => /already owned|SessionAlreadyOwned/u.test(message)), '出现了写句柄相撞').toEqual([])
+    const collisions = warnings.filter((message) => /already owned|SessionAlreadyOwned/u.test(message))
     // 收尾之后 live 里留下的是第二轮那一代（不是被清空）。
-    expect(runner.liveSessions()).toBe(1)
+    const liveFinal = runner.liveSessions()
+    return {
+      ledger,
+      liveAfter,
+      agentPresent,
+      secondDisposed,
+      secondResult,
+      firstResult,
+      // 注意：碰撞与最终 live 的断言放在 attempt 外面，避免"窗口没打开的那次尝试"先把
+      // 这些与加宽无关的判据打断（它们对每次尝试都该成立，见下面的汇总断言）。
+      collisions,
+      liveFinal,
+    }
+  }
+
+  it('①闸门放行 + 新轮发布句柄之后，旧轮收尾不得动它（live/注册表/句柄账本三处都要干净）', async () => {
+    const tried: number[] = []
+    let hit: Awaited<ReturnType<typeof attempt>> | undefined
+    for (const index of [1, 2, 3]) {
+      tried.push(index)
+      const outcome = await attempt(index)
+      if (outcome.ledger.wipeWindowOpen) { hit = outcome; break }
+    }
+    expect(
+      hit !== undefined,
+      `加宽窗口在 whenIdle 的第 ${tried.join(' / ')} 次调用上都没能打开（判据不再咬得住 VB-N2：`
+      + '两个调用者（runTurn / dispose 内部等待）都不是可加宽的那一个）',
+    ).toBe(true)
+    if (hit === undefined) return
+    expect(hit.liveAfter, '旧轮的收尾把新轮从 live 里摘掉了（VB-N2）').toBe(1)
+    expect(hit.agentPresent, '新轮的 agent 被旧轮 dispose 掉了（VB-N2）').toBe(true)
+    expect(hit.secondDisposed, '新轮的句柄被旧轮 dispose 掉了（VB-N2）').toBe(false)
+    expect(hit.secondResult, '第二轮必须正常跑完').toBe('resolved')
+    expect(hit.firstResult, '被放弃的那一轮必须收场（不挂住）').toMatch(/^rejected/u)
+    expect(hit.collisions, '出现了写句柄相撞').toEqual([])
+    expect(hit.liveFinal).toBe(1)
   })
 
-  it('②流式中途被偷则整轮失败：第二轮必须把正文交付出来', async () => {
+  /**
+   * ②的场景跑一遍（加宽打在 `widenCallIndex` 次调用上）——与①同因：序号在 CI 上不可靠。
+   * @param widenCallIndex - 要加宽第几次 `whenIdle` 调用。
+   * @returns 该次尝试的观测值。
+   */
+  async function attempt2(widenCallIndex: number): Promise<{
+    opened: boolean
+    second: { content: string } | Error
+    secondDisposed: boolean
+  }> {
     const adapter = new ProbeAdapter({ stallMs: 400, secondStreamMs: 400 })
     const ctx = await plane(adapter)
-    const ledger = instrument(ctx, SESSION_ID)
+    const ledger = instrument(ctx, SESSION_ID, 120, widenCallIndex)
     const runner = createAppAiRunner(ctx, { cwd: '/tmp/app-ai', warn: () => {} })
     const run = async (content: string): Promise<{ content: string }> =>
       await runner.run({ sessionId: SESSION_ID, appId: 'demo', messages: [{ role: 'user', content }], onDelta: () => {}, signal: new AbortController().signal }) as { content: string }
@@ -271,13 +343,31 @@ describe('R14 VB-N2：被放弃那一轮的 finally 不许 dispose 新轮的句�
     // 现象：第二轮的模型流已经开始（中途）而旧轮的收尾还没落地。
     expect(await waitFor(() => adapter.requests.length === 2, 5000), '第二轮没能开始模型流').toBe(true)
     await sleep(240)
-    // 自校准前提：同①（加宽窗口必须真的开着，否则本用例空转）。
-    expect(ledger.wipeWindowOpen, '加宽窗口没有打开（判据不再咬得住 VB-N2）').toBe(true)
-
+    const opened = ledger.wipeWindowOpen
     // 修复前这里会以 `the application AI turn produced no assistant message` 失败（流被偷断）。
-    await expect(second, '流式中途被上一轮的收尾偷走了句柄（VB-N2）').resolves.toEqual({ content: 'ok' })
+    const secondOutcome = await second.then(
+      value => value,
+      (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))),
+    )
     await release
-    expect(ledger.handles[1]?.disposedAt).toBeUndefined()
+    return { opened, second: secondOutcome, secondDisposed: ledger.handles[1]?.disposedAt !== undefined }
+  }
+
+  it('②流式中途被偷则整轮失败：第二轮必须把正文交付出来', async () => {
+    const tried: number[] = []
+    let hit: Awaited<ReturnType<typeof attempt2>> | undefined
+    for (const index of [1, 2, 3]) {
+      tried.push(index)
+      const outcome = await attempt2(index)
+      if (outcome.opened) { hit = outcome; break }
+    }
+    expect(
+      hit !== undefined,
+      `加宽窗口在 whenIdle 的第 ${tried.join(' / ')} 次调用上都没能打开（判据不再咬得住 VB-N2）`,
+    ).toBe(true)
+    if (hit === undefined) return
+    expect(hit.second, '流式中途被上一轮的收尾偷走了句柄（VB-N2）').toEqual({ content: 'ok' })
+    expect(hit.secondDisposed, '新轮的句柄被旧轮 dispose 掉了（VB-N2）').toBe(false)
   })
 })
 

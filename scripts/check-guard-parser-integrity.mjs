@@ -359,7 +359,11 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
   {
     path: 'scripts/check-install-integrity.mjs',
     // 由 `node scripts/check-guard-parser-integrity.mjs --print-digests` 打印（粘贴回本行）。
-    sha256: 'fc1b11e1c22fe4789755f2a9ffb84786bbdb942dedae704d552b8f5789d96242',
+    // FIX-48⑤ 起：`EXECUTION_FACE_REGISTRY` 新增两个本地收尾清单执行体
+    // （`scripts/check-ci-parity.mjs` / `scripts/ci-parity-classifier.mjs`）⇒ 本件内容变了，
+    // 摘要同步进 diff。**注意 `--print-digests` 在有未提交改动时打印的是 HEAD 那份**，
+    // 登记值必须取**工作树**（= 提交后的 HEAD）那份：`sha256sum scripts/check-install-integrity.mjs`。
+    sha256: '200829a3451fa371c1f88fc0194088ed6c654c44e982fcd6ad654b06e5cbd1b4',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',
@@ -469,7 +473,7 @@ export function guardJudgeBodyProblems() {
  */
 const REGISTERED_YARN_CONFIGURATION = {
   path: '.yarnrc.yml',
-  sha256: 'f417a262d92a7e584ce9efa48702ad63b617162f4847c02de486d565b1d3a5f9',
+  sha256: '8b8cd9c282631b28b7005dd55f919586e914e85acacdbdecaa810fb610babe77',
   /** 允许出现的**顶级键**（登记制：每条带理由）。出现未登记的键 ⇒ 红。 */
   allowedKeys: [
     ['enableScripts', '依赖的构建脚本开关 —— 必须保持 false（本仓"依赖不在 install 期跑代码"的唯一开关）'],

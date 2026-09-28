@@ -167,6 +167,72 @@ const check = (condition, message) => {
   return condition
 }
 
+/**
+ * **判决见证的计数表**（R20A-04 建立；键 = 判决点 id，值 = `{ runs, passed, failed }`）。
+ * 语义、收口与边界见 {@link witnessed}。
+ */
+const JUDGMENT_RUNS = new Map()
+/**
+ * 判决见证的**契约违约**（非布尔判决值）——收尾与 `judgmentSitesWithoutRuns` 一起判红。
+ * @type {string[]}
+ */
+const JUDGMENT_CONTRACT_VIOLATIONS = []
+/**
+ * **判决见证**（R20A-04 建立；**R21 fix-6 / E-02 收口**）——记的是**判决值**，不是"调用发生过"。
+ *
+ * ## 现场（E 泳道，15 个登记点逐个实跑）
+ *
+ * 修前这里只做 `JUDGMENT_RUNS.set(site, (… ?? 0) + 1)` 再 `return verdict`，收口断言是
+ * "该 id 的**调用计数** ≥ 1"。于是"判决表达式是否经过它"与"这个 id 是否被调用过一次"
+ * 并不等价：**保留判决句原文**、把它包进 `if (false) …`，再在**任何**会执行到的地方补一行
+ * `witnessed('<id>', true)`（诱饵：只计数、不判决）⇒ 两段判据同时满足、守卫 `EXIT=0`，
+ * 15 个点里 13 个静默失效（另 2 个是被 R19A-03 的收尾重新判决咬住的，不是见证层）。
+ * 同族第二个变体连诱饵都不需要：把本函数按 id 特判 `return true`（**一行**）⇒ `EXIT=0`。
+ *
+ * ## 收口（三层，缺一不可）
+ *
+ * ① **计数 + 判决值分开记**：`runs` / `passed` / `failed` 三个量都记 —— "跑过"与"判成什么"
+ *    不再可分离；`verdict` 不是布尔（少传参 / 传对象）当场记违约（那不是一个判决）。
+ * ② **判决位必须是"行首的独立语句"**（见收尾第一段的 `judgmentNeedleStatementProblem`）：
+ *    `if (false) check(witnessed(…))` 与"上一行悬挂 `if (…)`"两种掏空形态当场红。
+ * ③ **返回契约逐 id 自证**（见收尾第三段）：对**每一个**登记点探测
+ *    `witnessed(id, false) === false` 与 `witnessed(id, true) === true` ⇒ 按 id 特判
+ *    `return true` 的写法在这里露出来。
+ *
+ * ## 边界（认账，勿夸大）
+ *
+ * 这是**判据的判据**：攻击者对这个文件有完全控制权，任何"同一文件内的自证"都可以被
+ * 同步改掉（例如把 ③ 的探测循环一起掏空）。真正的兜底仍是 `scripts/check-root-guards.mjs`
+ * 对**本文件字节**的 sha256 登记值（任何改动都必须同步登记值、进 diff 才会被评审看见）。
+ * 本条能做到的是：**最自然的两种编辑（`if (false)` 掏空 + 一行诱饵、按 id 特判返回值）
+ * 当场红**，而不是"单文件不可伪造"。
+ * @param site - 判决点 id（必须与 {@link REQUIRED_JUDGMENT_SITES} 的 `id` 一致）。
+ * @param verdict - 判决结果（**必须是布尔**；原样交回 `check()` / `if (!…)`）。
+ * @returns `verdict`（原样）；非布尔返回 `false` 并记违约。
+ */
+const witnessed = (site, verdict) => {
+  if (typeof verdict !== 'boolean') {
+    JUDGMENT_CONTRACT_VIOLATIONS.push(`判决点 \`${site}\` 的见证收到**非布尔**判决值`
+      + `（${verdict === undefined ? '缺参数' : typeof verdict}）—— 见证必须绑**判决结果**，`
+      + '不是"调用发生过"（`witnessed(id)` 这种只计数的调用不是一个判决）')
+    return false
+  }
+  const record = JUDGMENT_RUNS.get(site) ?? { runs: 0, passed: 0, failed: 0 }
+  record.runs += 1
+  if (verdict) record.passed += 1
+  else record.failed += 1
+  JUDGMENT_RUNS.set(site, record)
+  return verdict
+}
+/**
+ * 登记的判决点里**一次都没执行过**的那些（R20A-04 的判据本体；纯函数，配了自检样本）。
+ * @param sites - `REQUIRED_JUDGMENT_SITES` 同形（至少要有 `id`）。
+ * @param runs - 执行计数表（生产路径传 {@link JUDGMENT_RUNS}）。
+ * @returns 未执行的判决点数组。
+ */
+const judgmentSitesWithoutRuns = (sites, runs) =>
+  sites.filter(site => (runs.get(site.id)?.runs ?? 0) < 1)
+
 /** 本守卫自己造的临时目录（进程退出时统一清理）。 */
 const scratchDirs = []
 
@@ -177,9 +243,34 @@ function tempDir(prefix) {
   return dir
 }
 
+/**
+ * 「这份输出**声明了** `RESULT: PASS`」的判据（FIX-47④b）。
+ *
+ * ## 现场（第三十一轮 AD2-04，真跑）
+ *
+ * 判据原本是**逐字带空格**的 `output.includes('RESULT: PASS')`（`:1419`/`:1739`）与
+ * `/RESULT: PASS/u`（契约场景表）。于是"全 SKIP 路径**追加**一行 `RESULT:PASS`
+ * （无空格）"⇒ 守卫 `EXIT=0`（假绿）：`SKIP 绝不报 PASS` 这条契约的判据取值域比它守的
+ * 语义窄一格 —— **任何非规范拼写的 PASS 声明都看不见**。
+ *
+ * ## 口径
+ *
+ * **规范化后再判**：吃掉任意空白（含换行/制表）+ 忽略大小写，再找 `RESULT:PASS`。
+ * 反向对照（`RESULT: SKIP` 那半）**不在这里**，也**不许被削弱**：那半是
+ * `output.includes('RESULT: SKIP')` 的逐字要求 —— 它才是"全 SKIP 路径必须如实报 SKIP"
+ * 的真正咬人点（AD2-04 的对照实验里，把 SKIP 换成别的东西也会红，红的理由却不是
+ * "不得报 PASS"那条）。
+ */
+const RESULT_PASS_CLAIM = /RESULT\s*:\s*PASS/iu
+
+/** 规范化后判"这份输出有没有声明 PASS"（空白与大小写都不再是盲区）。 */
+function reportsResultPass(output) {
+  return RESULT_PASS_CLAIM.test(String(output ?? ''))
+}
+
 /** 契约用例脚本（带 --self-test 与真实断言的那两个）。 */
 const CONTRACT_TESTS = [
-  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 32 },
+  { id: 'dex', path: 'integration-tests/dex/dex-sso-test.py', minCases: 33 },
   { id: 'ldap', path: 'integration-tests/openldap/ldap-rbac-brand-test.py', minCases: 35 },
 ]
 
@@ -199,7 +290,7 @@ const DEX_EXPECTED_CRITERIA = [
   { id: 'login-start', positive: 1, negative: 2 },
   { id: 'idp-login-page', positive: 1, negative: 2 },
   { id: 'submit-credentials', positive: 1, negative: 3 },
-  { id: 'approval-advance', positive: 2, negative: 3 },
+  { id: 'approval-advance', positive: 2, negative: 4 },
   { id: 'callback-reached', positive: 1, negative: 3 },
   { id: 'deep-link', positive: 2, negative: 6 },
   { id: 'deep-link-identity', positive: 2, negative: 3 },
@@ -244,14 +335,18 @@ const ELECTRON_SHOTS_EXPECTED_ASSERTIONS = [
   'two-step-login-page',
 ]
 /**
- * 夹具总数下限（当前 29 条 = 正例 + 负例）。
+ * 夹具总数下限（当前 51 条 = 正例 + 负例 + `expect: 'skip'` 的按设计不适用格）。
  *
  * 与 `minCases` 同一口径的棘轮：删夹具必须同时改这个常量并进 diff。
+ * 第三十三轮 FIX-49 ①② 从 24 提到 51：登录页形态改成**包内渠道配置驱动**（内置地址 /
+ * 无内置 / 读不出来 三态）后，`step1-login-page` 与 `server-filled` 各自补了渠道包那一侧
+ * 的正负例，`left-login-page` 换成"登录成功的正向证据"后补了四条负例（含 401 现场形态）；
+ * `two-step-login-page` 新增一格 `expect: 'skip'` —— SKIP 是**第三种结论**，夹具必须钉住它。
  * **诚实边界**：单个**冗余**负例夹具被删（同一判据还有别的负例）本条拦不住 —— 那种
  * 删除不降低判别力（剩下的负例照样会拒掉恒真判据），所以不为此加精确夹具清单
  * （精确清单会让每次补夹具都要改两处，代价大于收益）。
  */
-const ELECTRON_SHOTS_MIN_FIXTURES = 24
+const ELECTRON_SHOTS_MIN_FIXTURES = 51
 /**
  * `electron-shots.mjs` 里"以判据 id 为首参的调用点"数量下限（当前 10 处）。
  *
@@ -368,6 +463,11 @@ const INTEGRATION_ENTRIES = [
     minJudgments: DEX_EXPECTED_CRITERIA.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-server', 'missing-provider'],
+    // FIX-47④a：出口**调用点**清单（`<原因码> @ <归一化代码行>`），不是只有原因码集合。
+    skipCallSites: [
+      "missing-provider @ return skip('missing-provider', f'服务端未配置浏览器跳转登录(configured={sorted(names)}) —— ' '本用例验证的是 OIDC 授权码流')",
+      "missing-server @ return skip('missing-server', f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')",
+    ],
   },
   {
     path: 'integration-tests/openldap/ldap-rbac-brand-test.py',
@@ -378,7 +478,14 @@ const INTEGRATION_ENTRIES = [
     minJudgments: LDAP_EXPECTED_CRITERIA.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-server', 'missing-provider'],
+    skipCallSites: [
+      "missing-provider @ return skip('missing-provider', f'服务端未启用 LDAP(configured={sorted(configured)}) —— ' '本用例验证的是 LDAP 登录/RBAC')",
+      "missing-server @ return skip('missing-server', f'{server}/healthz 不可达/非 200(status={status}) —— 服务端没起来')",
+    ],
   },
+  // FIX-47③ 引入的可参数化 mock 网关（`--methods n`，让"方式选择器"判据在 n<=1 与
+  // n>=2 两格都能被测到）。它不接聚合层、不占判定数，属夹具面。
+  { path: 'integration-tests/electron-shots/mock-gateway.mjs', role: 'fixture', skipReasons: [] },
   { path: 'integration-tests/electron-shots/assertions.mjs', role: 'assertion-table', skipReasons: [] },
   { path: 'integration-tests/electron-shots/report.mjs', role: 'judge-channel', skipReasons: [] },
   {
@@ -390,6 +497,11 @@ const INTEGRATION_ENTRIES = [
     minJudgments: ELECTRON_SHOTS_EXPECTED_ASSERTIONS.length,
     skipOutlet: 'skip',
     skipReasons: ['missing-app', 'missing-display', 'missing-server'],
+    skipCallSites: [
+      "missing-app @ skip('missing-app', `未找到打包产物: ${APP}`, '先构建: yarn workspace dsh-plugin-desktop dist:linux --no-prebuild（或用 --app / ELECTRON_SHOTS_APP 指向已有产物）')",
+      "missing-display @ skip('missing-display', `没有可用的 X 显示（DISPLAY=${DISPLAY}，${socket ?? 'X socket'} 不是可连接的 unix socket）`, '起一个: Xvfb :99 -screen 0 1440x900x24 &（或用 --display 指向已存在的显示）')",
+      "missing-server @ skip('missing-server', `服务端 ${SERVER}/healthz 不可达/非 200（${detail}）`, '起服务端或用 --server 指向正确的地址')",
+    ],
   },
 ]
 
@@ -449,18 +561,236 @@ const INTEGRATION_SCANNED_EXTENSIONS = ['.py', '.mjs', '.sh', '.yaml', '.yml']
 const INTEGRATION_REFERENCE_SCOPE_REGISTRY = []
 
 /**
- * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态
- * 与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与 `check-install-integrity.mjs` 的
- * 同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
+ * **常量表达式求值**（{@link constantBlockHeaderProblem} 用）：只在"字面量 + 本文件里的
+ * 字面量 `const` 绑定"范围内做，求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+ *
+ * 为什么不做完整求值：判据的目的是"恒不执行的块"，不是"实现一个 JS 解释器"。
+ * `dumped !== null` / `INTEGRATION_ENTRIES` 这类自由变量求不出 ⇒ 放行；把常量藏进函数
+ * 返回值、`process.env` 之类的形态这一格看不见（认账边界，与"任意死代码形态"同一取向 ——
+ * 它们由执行计数、见证返回契约与 `scripts/check-root-guards.mjs` 的字节登记值兜）。
+ * @param expression - 条件原文。
+ * @param source - 守卫自己的正文（取字面量常量绑定）。
+ * @returns 求出的常量值；求不出返回 `undefined`。
+ */
+function evaluateConstantExpression(expression, source) {
+  /**
+   * 只做**字面量 + 四则比较**范围内的折叠（不 eval、不用 `Function`）：
+   * 判据要回答的是"这个条件是不是恒定不成立"，不是"实现一个 JS 解释器"。
+   * @param text - 表达式原文。
+   * @param depth - 常量绑定递归深度（防自指）。
+   * @returns 常量值；求不出返回 `undefined`（= 不是常量 ⇒ 不判红）。
+   */
+  const evaluate = (text, depth) => {
+    const trimmed = String(text ?? '').trim().replace(/^\s*\(([\s\S]*)\)\s*$/u, '$1').trim()
+    if (trimmed === '') return undefined
+    if (depth > 4) return undefined
+    if (trimmed === 'true') return true
+    if (trimmed === 'false') return false
+    if (trimmed === 'null') return null
+    if (trimmed === 'undefined') return undefined
+    if (/^-?\d+(?:\.\d+)?$/u.test(trimmed)) return Number(trimmed)
+    if (/^'[^']*'$/u.test(trimmed) || /^"[^"]*"$/u.test(trimmed)) return trimmed.slice(1, -1)
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) {
+      const inner = trimmed.slice(1, -1).trim()
+      return inner === '' ? [] : inner.split(',')
+    }
+    if (/^\[[\s\S]*\]$/u.test(trimmed)) return []
+    if (trimmed.startsWith('!')) {
+      const inner = evaluate(trimmed.slice(1), depth)
+      return inner === undefined ? undefined : !inner
+    }
+    // `A === B` / `A !== B` / `A == B` / `A != B`：两边都能折叠才折叠。
+    for (const operator of ['===', '!==', '==', '!=']) {
+      const at = trimmed.indexOf(operator)
+      if (at <= 0) continue
+      const left = evaluate(trimmed.slice(0, at), depth)
+      const right = evaluate(trimmed.slice(at + operator.length), depth)
+      if (left === undefined || right === undefined) return undefined
+      if (operator === '===') return left === right
+      if (operator === '!==') return left !== right
+      if (operator === '==') return left === right
+      return left !== right
+    }
+    // 标识符 ⇒ 本文件里"名字 = 字面量"的绑定（**只认 `const`**）。
+    // **R23 FIX-22**：修前这里把 `let`/`var` 也当常量折叠，于是 `let dumped = null`
+    // （随后在运行期被 `JSON.parse` 赋值）被判成"恒 null"，连带把
+    // `if (dumped !== null) {` 这个**正当**容器读成恒假 —— 那会把真仓里 3 个登记点误红。
+    // 可重新赋值的绑定不是常量，折叠它得到的结论一定是错的。
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(trimmed)) {
+      const pattern = new RegExp(`(?:^|[\\s;{}])const\\s+${trimmed}\\s*=\\s*([^\\n;]+)`, 'u')
+      const match = pattern.exec(source)
+      return match === null ? undefined : evaluate(match[1], depth + 1)
+    }
+    return undefined
+  }
+  return evaluate(expression, 0)
+}
+
+/**
+ * 去注释（保留换行与列位置）——引用面抽取前**必须**做这一步（FIX-48④c）。
+ *
+ * 现场（第三十二轮 AE1）：抽取器扫的是**整个源文件文本（含 JSDoc 与注释）**，于是
+ * "散文里提到的路径"也算引用 —— 用真函数跑本守卫全文抽出 14 条，其中 3 条
+ * （`integration-tests/extra-probe.ts` / `integration-tests/x.ts` / `integration-tests/x/y`）
+ * **只出现在注释里**。任何人**在注释里举一个 `.ts` 例子**，只要那个文件恰好存在，
+ * 就该判据而言必须登记；AE1 第一次影子根实验正是被它污染的（三格全红与注入形态无关）。
+ * @param text - 源码文本。
+ * @returns 注释字符换成空格（换行保留）之后的文本。
+ */
+function blankComments(text) {
+  return String(text)
+    .replace(/\/\*[\s\S]*?\*\//gu, match => match.replace(/[^\n]/gu, ' '))
+    // `://` 不能被当成行注释（脚本文本里有 URL）。
+    .replace(/(^|[^:])\/\/[^\n]*/gu, (match, prefix) => prefix + ' '.repeat(match.length - prefix.length))
+}
+
+/**
+ * 源文本里的全部**字符串/模板块**内容（三种引号；`\\.` 转义按两字符处理；模板可跨行）。
+ *
+ * 为什么要按**块**而不是按"整串等于路径"取：`` `${ROOT}/integration-tests/x.ts` ``
+ * 的路径**在块内**、且前面是 `/` 而不是引号 —— 只认"引号 + 整串"的旧实现整类看不见。
+ * @param text - 去注释后的文本。
+ * @returns 块内容数组。
+ */
+function stringChunks(text) {
+  const out = []
+  for (const match of text.matchAll(/'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/gu)) {
+    out.push(match[1] ?? match[2] ?? match[3] ?? '')
+  }
+  return out
+}
+
+/**
+ * 按**顶层逗号**切分实参表（引号与括号内的逗号不切）。
+ * @param text - 实参表原文。
+ * @returns 实参片段数组（丢弃空片段）。
+ */
+function splitTopLevelArgs(text) {
+  const out = []
+  let depth = 0
+  let current = ''
+  let quote = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote !== null) {
+      current += ch
+      if (ch === '\\') { current += text[i + 1] ?? ''; i += 1; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; current += ch; continue }
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1
+    if (ch === ',' && depth === 0) { out.push(current); current = ''; continue }
+    current += ch
+  }
+  out.push(current)
+  return out.filter(part => part.trim() !== '')
+}
+
+/**
+ * 把源码里的**常量拼接**折成字面量（FIX-47④c 建通道，FIX-48④c 补全四条形态），供
+ * {@link integrationReferencedPathsIn} 的路径抽取复用。
+ *
+ * ## 现场（第三十一轮 AD2-05 → 第三十二轮 AE1 复核）
+ *
+ * 第一版只补了 `'a' + 'b'` 一条通道；AE1 用**守卫自己导出的真函数**实测，四条现代写法
+ * 全部 `MISSED`：模板字符串（`` `${ROOT}/integration-tests/x.ts` ``）、
+ * `join(ROOT, 变量, '…')`、数组 join（`['integration-tests','x.ts'].join('/')`）、
+ * 反引号整条。影子根端到端两格仍然 `GREEN(!!)`（文件真的在盘上却"没被引用"）。
+ *
+ * ## 口径：复用本文件的常量求值，不另起一套解释器
+ *
+ * 四条通道都把"能不能折"交给 {@link evaluateConstantExpression}（字面量 + 本文件里
+ * `const X = …` 的绑定；求不出就**原样保留**）—— 认账边界与常量求值同一条。
+ * 折不动的模板（`integration-tests/${name}.ts`）不折，靠块内匹配兜。
+ * @param text - 源码文本（已去注释）。
+ * @param source - 常量绑定所在的正文（缺省 = `text`）。
+ * @returns 折过常量拼接的文本。
+ */
+function foldConstantExpressions(text, source) {
+  const context = source ?? text
+  let out = String(text)
+  // ① 模板字符串：插值全是常量 ⇒ 折成单引号字面量。
+  out = out.replace(/`((?:[^`\\]|\\.)*)`/gu, (whole, body) => {
+    const pieces = []
+    let rest = body
+    for (;;) {
+      const at = rest.indexOf('${')
+      if (at < 0) { pieces.push({ literal: rest }); break }
+      const close = rest.indexOf('}', at)
+      if (close < 0) return whole
+      pieces.push({ literal: rest.slice(0, at) })
+      pieces.push({ expression: rest.slice(at + 2, close) })
+      rest = rest.slice(close + 1)
+    }
+    let value = ''
+    for (const piece of pieces) {
+      if (piece.literal !== undefined) { value += piece.literal; continue }
+      const folded = evaluateConstantExpression(piece.expression, context)
+      if (typeof folded !== 'string') return whole
+      value += folded
+    }
+    return `'${value}'`
+  })
+  // ② `join(A, B, C)`：首个实参折不出（`ROOT`）或折出来不含 `integration-tests` ⇒
+  //    当成"根"丢掉；其余实参全折成字符串才折。
+  out = out.replace(/\bjoin\(\s*([^()]*)\)/gu, (whole, args) => {
+    const parts = splitTopLevelArgs(args)
+    if (parts.length < 2) return whole
+    const values = parts.map(part => evaluateConstantExpression(part.trim(), context))
+    const head = values[0]
+    const tail = typeof head === 'string' && head.includes('integration-tests') ? values : values.slice(1)
+    if (tail.some(value => typeof value !== 'string')) return whole
+    const joined = tail.join('/')
+    return joined.includes('integration-tests/') ? `'${joined}'` : whole
+  })
+  // ③ 数组字面量 + `.join(sep)`：`['integration-tests', 'x.ts'].join('/')`。
+  out = out.replace(/\[([^[\]]*)\]\s*\.\s*join\(\s*'([^']*)'\s*\)/gu, (whole, items, separator) => {
+    const values = splitTopLevelArgs(items).map(item => evaluateConstantExpression(item.trim(), context))
+    if (values.some(value => typeof value !== 'string')) return whole
+    const joined = values.join(separator)
+    return joined.includes('integration-tests/') ? `'${joined}'` : whole
+  })
+  // ④ `+` 链（FIX-47④c 的原有通道）：每个操作数都能折成字符串才折。
+  out = out.replace(
+    /(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*\+\s*(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`|[A-Za-z_$][A-Za-z0-9_$]*))+/gu,
+    (chain) => {
+      const parts = chain.split(/\s*\+\s*/u)
+      const values = parts.map(part => evaluateConstantExpression(part, context))
+      if (values.some(value => typeof value !== 'string')) return chain
+      return `'${values.join('')}'`
+    },
+  )
+  return out
+}
+
+/**
+ * 从一段源码文本抽"引用的仓内 `integration-tests/**` 路径"（`'integration-tests/x.ts'` 形态、
+ * 块内前缀插值形态、与 `join(ROOT, 'integration-tests', 'x', 'y')` 形态，与
+ * `check-install-integrity.mjs` 的同名抽取**同形**，但独立实现 —— 判据不能 import 被它判的东西）。
+ *
+ * **FIX-47④c / FIX-48④c**：匹配前先 {@link blankComments}（注释里的散文路径不是引用，
+ * AE1 实测的假阳性面）再 {@link foldConstantExpressions}（常量拼接出的同一条引用必须与
+ * 字面量写法**同判**）。
  * @param source - 源码文本。
  * @returns 归一化后的路径列表（去重、排序）。
  */
 function integrationReferencedPathsIn(source) {
-  const text = String(source)
+  const raw = String(source)
+  const text = foldConstantExpressions(blankComments(raw), raw)
   const found = new Set()
-  for (const match of text.matchAll(/['"]([A-Za-z0-9_.@/-]*integration-tests\/[A-Za-z0-9_.@/-]+)['"]/gu)) {
-    found.add(match[1].replace(/^\.\//u, ''))
+  // ① 任何字符串/模板**块**里出现的 `integration-tests/…`：
+  //    · 整串就是路径（`'integration-tests/x.ts'`）—— 原有形态（块首即匹配）；
+  //    · 块里带前缀（`` `${ROOT}/integration-tests/x.ts` ``）—— 路径前面的字符限定为
+  //      `[/'"` + 反引号]` 或块首，**刻意不认空白**：散文串（`'见 integration-tests/x.ts'`）
+  //      不是引用，那种假阳性正是 AE1 记下的面。
+  for (const chunk of stringChunks(text)) {
+    for (const match of chunk.matchAll(/(?:^|[/'"`])(integration-tests\/[A-Za-z0-9_.@/-]+)/gu)) {
+      found.add(match[1].replace(/^\.\//u, ''))
+    }
   }
+  // ② `join(A, 'integration-tests', 'x', 'y')`（独立通道：折叠没命中时也要认）。
   for (const match of text.matchAll(/join\(\s*ROOT\s*,\s*((?:'[^']*'|"[^"]*")(?:\s*,\s*(?:'[^']*'|"[^"]*"))*)\s*\)/gu)) {
     const parts = [...match[1].matchAll(/'([^']*)'|"([^"]*)"/gu)].map(quote => quote[1] ?? quote[2])
     if (parts.length > 0 && parts[0] === 'integration-tests') found.add(parts.join('/'))
@@ -509,6 +839,34 @@ function integrationReferenceScopeSelfTest() {
   const absent = integrationReferenceScope(probe, { exists: () => false, registry: [] })
   check(absent.unregistered.length === 0 && absent.deadEntries.length === 0,
     '形态⑩自证: 没落盘的目标不算缺口（只有真的存在、却看不见的执行体才是缺口）')
+  // FIX-47④c：**常量拼接**出的同一条引用必须与字面量写法同判（AD2-05 的现场形态）。
+  const concatenated = `const A = 'integration-' + 'tests/__probe__/extra-probe${extension}'`
+  const folded = integrationReferenceScope(concatenated, { exists, registry: [] })
+  check(folded.unregistered.length === 1 && folded.unregistered[0] === `integration-tests/__probe__/extra-probe${extension}`,
+    '形态⑩自证: `\'integration-\' + \'tests/…\'` 这种常量拼接出的引用必须与字面量写法同判（AD2-05 现场：'
+      + `拼接形态让"落盘引用数"与 baseline 完全一致、守卫照打 ✓）—— 实际 unregistered=[${folded.unregistered.join(', ')}]`
+      + '（若为空，先查顶层 evaluateConstantExpression 是否被搬回块内、或折叠正则失效）')
+  // FIX-48④c：四条**现代拼接**必须与字面量同判（AE1 用真函数实测四格全 MISSED）。
+  const modernShapes = [
+    ['模板字符串（前缀插值）', 'const P = `${ROOT}/integration-tests/__probe__/extra-probe.ts`'],
+    ['join(ROOT, 变量, 字面量)', "const DIR = 'integration-tests'\nconst P = join(ROOT, DIR, '__probe__/extra-probe.ts')"],
+    ['数组 join', "const P = ['integration-tests', '__probe__', 'extra-probe.ts'].join('/')"],
+    ['反引号整条', 'const P = `integration-tests/__probe__/extra-probe.ts`'],
+  ]
+  for (const [label, probeText] of modernShapes) {
+    const scoped = integrationReferenceScope(probeText, { exists, registry: [] })
+    check(scoped.unregistered.length === 1
+      && scoped.unregistered[0] === 'integration-tests/__probe__/extra-probe.ts',
+      `形态⑩自证: ${label} 拼出的引用必须与字面量写法同判（AE1 实测旧实现四格全 MISSED，`
+        + `影子根端到端仍是 GREEN(!!)）—— 实际 unregistered=[${scoped.unregistered.join(', ')}]`)
+  }
+  // FIX-48④c 反向：**注释里的散文路径不是引用**（AE1 的假阳性面 —— 谁在注释里举一个 `.ts`
+  // 例子，只要文件恰好存在，旧实现就要求登记）。
+  const commentOnly = '// 见 integration-tests/__probe__/extra-probe.ts\nconst X = 1'
+  const commented = integrationReferenceScope(commentOnly, { exists, registry: [] })
+  check(commented.unregistered.length === 0 && commented.present.length === 0,
+    '形态⑩自证: 只出现在注释里的 `integration-tests/**` 路径**不算引用**（AE1 记下的假阳性面）——'
+      + ` 实际 present=[${commented.present.join(', ')}] unregistered=[${commented.unregistered.join(', ')}]`)
   const inScope = `const P = 'integration-tests/__probe__/in-scope.mjs'`
   const ok = integrationReferenceScope(inScope, { exists: () => true, registry: [] })
   check(ok.unregistered.length === 0 && ok.present.length === 1,
@@ -639,8 +997,32 @@ const PORTAL_HTML = '<!doctype html><html><body><h1>PicoAide Harness</h1><h2>客
   + '<a class="dl" href="/updates/client/example.AppImage">下载</a></body></html>'
 const LOGIN_FORM_HTML = '<!doctype html><html><body><form method="post" action="/dex/auth/local?req=x">'
   + '<input type="text" name="login"><input type="password" name="password"></form></body></html>'
-const APPROVAL_HTML = '<!doctype html><html><body><form method="post" action="/dex/approval?req=x">'
-  + '<input type="hidden" name="approve" value="true"></form></body></html>'
+/**
+ * 假 IdP 的**授权确认页**（第三十三轮 FIX-49 ③：按**真 Dex** 的表单契约造）。
+ *
+ * 真 Dex(v2.35+)的 approval 页有两份 POST 表单，各自带一个**每流一次性**的隐藏 `req`：
+ *
+ *     <form method="post"><input type="hidden" name="req" value="…">
+ *       <input type="hidden" name="approval" value="approve"> …</form>
+ *     <form method="post"><input type="hidden" name="req" value="…">
+ *       <input type="hidden" name="approval" value="rejected"> …</form>
+ *
+ * 修前这里发的是 `<input name="approve" value="true">` —— 假 IdP **自己就在示范错的字段**，
+ * 于是"仓库脚本提交 `{'approve':'true'}`"在门禁里永远是绿的，而真 Dex 回 500
+ * （§7.72.3 的真服务端实测）。现在夹具与真形状逐字同构，且 POST 侧**强制校验**
+ * （见 `/dex/approval` 的 POST 分支）—— 脚本字段一改回旧形态，`good` 腿当场红。
+ * @param reqValue - 本次授权流的 `req`（假 IdP 用 state 充当，逐流不同）。
+ */
+const approvalFormHtml = reqValue => '<!doctype html><html><body>'
+  + `<form method="post" action="/dex/approval?req=${reqValue}&state=${reqValue}">`
+  + `<input type="hidden" name="req" value="${reqValue}">`
+  + '<input type="hidden" name="approval" value="approve">'
+  + '<button type="submit">Grant Access</button></form>'
+  + `<form method="post" action="/dex/approval?req=${reqValue}&state=${reqValue}">`
+  + `<input type="hidden" name="req" value="${reqValue}">`
+  + '<input type="hidden" name="approval" value="rejected">'
+  + '<button type="submit">Cancel</button></form>'
+  + '</body></html>'
 
 /** 读掉请求体（不读会让 keep-alive 请求挂住）。 */
 function readBody(req) {
@@ -668,6 +1050,14 @@ function cookies(req) {
  */
 function startGateway(scenario) {
   const providerConfigured = scenario !== 'skip'
+  // **Location 的两种形态都要有一条腿**（第三十轮 FIX-45 ①）：
+  //   · 默认（`good` 等）⇒ **绝对** Location（`http://host/dex/approval?…`），历史上唯一的形态；
+  //   · `dex-relative-location` ⇒ IdP **自己内部**的跳转用**相对** Location，与真 Dex 逐字同形
+  //     （真 Dex 的 `/auth` 用 302 + `/auth/local?…` 跳自己的登录页）。
+  // 只留绝对形态正是"判据自洽型假绿"的来源：`follow()` 把相对 Location 当桌面深链也永远绿。
+  const relativeRedirects = scenario === 'dex-relative-location'
+  /** 这个网关**真的发出去过**的 Location（形态覆盖判据的原始事实，不是常量表）。 */
+  const emittedLocations = []
   const server = createServer(async (req, res) => {
     const origin = `http://${req.headers.host}`
     const url = new URL(req.url, origin)
@@ -681,9 +1071,12 @@ function startGateway(scenario) {
       res.end(body)
     }
     const redirect = (status, location, headers = {}) => {
+      emittedLocations.push(location)
       res.writeHead(status, { Location: location, ...headers })
       res.end()
     }
+    /** 同源目标按场景决定写绝对还是相对（跨 origin 的那一跳必须绝对）。 */
+    const sameOrigin = target => (relativeRedirects ? target : `${origin}${target}`)
     const cookie = cookies(req)
     const body = await readBody(req)
 
@@ -770,12 +1163,28 @@ function startGateway(scenario) {
     if (path === '/dex/auth/local' && req.method === 'GET') return html(200, LOGIN_FORM_HTML)
     if (path === '/dex/auth/local' && req.method === 'POST') {
       const state = url.searchParams.get('state') ?? url.searchParams.get('req') ?? ''
-      return redirect(303, `${origin}/dex/approval?req=${state}&state=${state}`)
+      // 真 Dex 在这一跳用的是**相对** Location（`/auth/local` → `/dex/approval`）；
+      // `dex-relative-location` 场景复刻它，`good` 场景维持历史形态（绝对）。
+      return redirect(303, sameOrigin(`/dex/approval?req=${state}&state=${state}`))
     }
-    if (path === '/dex/approval' && req.method === 'GET') return html(200, APPROVAL_HTML)
+    if (path === '/dex/approval' && req.method === 'GET') {
+      return html(200, approvalFormHtml(url.searchParams.get('req') ?? ''))
+    }
     if (path === '/dex/approval' && req.method === 'POST') {
+      // **真 Dex 的表单契约**（第三十三轮 FIX-49 ③）：POST 必须回传**同一个** `req`
+      // 加 `approval=approve`；缺 `req` / 值不匹配 / `approval` 不是 `approve` ⇒ **500**
+      // （与 2026-09-27 真 Dex 实测逐字同形）。随机字段、缺字段、顺序变化都必须被判红 ——
+      // 这正是端到端那条腿此前**零判别力**的地方：假 IdP 照单全收，真 IdP 回 500。
+      const expectedReq = url.searchParams.get('req') ?? ''
+      const form = new URLSearchParams(body)
+      if (expectedReq === '' || form.get('req') !== expectedReq || form.get('approval') !== 'approve') {
+        return json(500, {
+          error: 'invalid approval request',
+          detail: 'missing or mismatched "req" (dex requires the hidden req from the approval form)',
+        })
+      }
       const state = url.searchParams.get('state') ?? ''
-      return redirect(303, `${origin}/api/client/v2/auth/oidc/callback?code=code-42&state=${state}`)
+      return redirect(303, sameOrigin(`/api/client/v2/auth/oidc/callback?code=code-42&state=${state}`))
     }
     if (path === '/api/client/v2/auth/oidc/callback' && req.method === 'GET') {
       const state = url.searchParams.get('state') ?? ''
@@ -794,6 +1203,12 @@ function startGateway(scenario) {
       if (bearer !== `Bearer ${DEEP_LINK_TOKEN}`) {
         return json(401, { error: { code: 'AUTH_REQUIRED', message: '未认证' } })
       }
+      // **行为级判据的夹具**（第三十轮 FIX-45 ②）：`dex-wrong-identity` 让深链 token 是**有效**的、
+      // 但 `/auth/me` 回的是**别人** ⇒ "深链身份必须是本次登录账号"这条契约被破坏，dex 必须
+      // FAIL。把该调用点变成不可达（`if False:` / 早退）时这条腿会从 FAIL 变成 PASS ⇒ 当场红。
+      if (scenario === 'dex-wrong-identity') {
+        return json(200, { user: { username: 'intruder', email: 'intruder@example.invalid', role: 'user' } })
+      }
       return json(200, { user: { username: 'admin', email: 'admin@example.com', role: 'user' } })
     }
 
@@ -805,6 +1220,8 @@ function startGateway(scenario) {
       const { port } = server.address()
       resolvePromise({
         base: `http://127.0.0.1:${port}`,
+        // 收尾判"两种 Location 形态都真的被发出去过"用的**原始事实**（每个场景各自一份）。
+        emittedLocations,
         close: () => new Promise(done => server.close(() => done())),
       })
     })
@@ -841,7 +1258,7 @@ async function main() {
     recordLayerVerdict('登记制', {
       check: 'registered-on-disk', path: entry.path, onDisk: existsSync(join(ROOT, entry.path)),
     })
-    check(existsSync(join(ROOT, entry.path)),
+    check(witnessed('registered-on-disk', existsSync(join(ROOT, entry.path))),
       `形态⑦: 登记表里的 ${entry.path}（角色 ${entry.role}）在磁盘上不存在 —— `
       + '登记了却不在 ⇒ 红（先删登记项，或把用例补回来）')
   }
@@ -883,12 +1300,13 @@ async function main() {
   // 落盘路径，要么扩展名在扫描面内，要么逐条登记为非判据面（见
   // {@link INTEGRATION_REFERENCE_SCOPE_REGISTRY}）"。
   integrationReferenceScopeSelfTest()
+  skipCallSiteShapeSelfTest()
   {
     const scope = integrationReferenceScope(readFileSync(fileURLToPath(import.meta.url), 'utf8'), {
       exists: path => existsSync(join(ROOT, path)),
       registry: INTEGRATION_REFERENCE_SCOPE_REGISTRY,
     })
-    check(scope.unregistered.length === 0,
+    check(witnessed('scope-unregistered', scope.unregistered.length === 0),
       `形态⑩: 本守卫引用了这些 \`integration-tests/**\` 路径，它们的扩展名不在扫描面 `
         + `（${INTEGRATION_SCANNED_EXTENSIONS.join('/')}）内、也没有在 `
         + `INTEGRATION_REFERENCE_SCOPE_REGISTRY 里登记：${scope.unregistered.join(', ')}`
@@ -920,7 +1338,7 @@ async function main() {
   const expectedAggregate = INTEGRATION_ENTRIES
     .filter(entry => typeof entry.aggregateName === 'string')
     .map(entry => ({ name: entry.aggregateName, runner: entry.runner, path: entry.aggregatePath }))
-  check(aggregateLines.length === expectedAggregate.length,
+  check(witnessed('aggregate-wiring', aggregateLines.length === expectedAggregate.length),
     `形态⑦: run-all.sh 里有 ${aggregateLines.length} 条 \`run "…"\` 调用，登记表要求 `
       + `${expectedAggregate.length} 条 —— 聚合层的接线数与登记值不一致`
       + `\n  实际:${aggregateLines.map(line => line.path).join(', ') || '(空)'}`
@@ -1055,7 +1473,7 @@ async function main() {
       `形态⑥: ${label} 声明了 SKIP 原因码却没有 \`skipOutlet\`（唯一出口的函数名）`
         + ' —— 没有唯一出口就无法保证"原因码必须登记"这件事在运行期成立')
     const outlets = codeLines.filter(line => line.includes('SKIP['))
-    check(outlets.length === 1,
+    check(witnessed('skip-outlet', outlets.length === 1),
       `形态⑥: ${label} 的代码里有 ${outlets.length} 处 \`SKIP[\` —— 必须恰好 1 处（唯一出口）`
         + `\n  实际:${outlets.map(line => line.trim().slice(0, 120)).join(' | ') || '(空)'}`)
     const bareSkip = codeLines.filter(line => /SKIP:(?!\])/u.test(line))
@@ -1064,9 +1482,10 @@ async function main() {
         + `${bareSkip.map(line => JSON.stringify(line.trim().slice(0, 120))).join(' | ')}`
         + '\n  ⇒ 未登记的原因（含"什么都不说"）不得成为免检牌；所有 SKIP 必须经唯一出口带上登记过的原因码')
     if (typeof outlet === 'string' && outlet !== '') {
-      const used = [...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*'([a-z][a-z-]*)'`, 'gu'))]
-        .map(match => match[1])
-      const usedSet = [...new Set(used)]
+      // FIX-48④a：原因码集合与调用点清单**共用同一个抽取器**（跨行 / 名字与 `(` 之间有空白
+      // 的写法两处必须同判 —— 旧实现一处逐行 exec、一处整串 matchAll，口径是分叉的）。
+      const codeSites = skipCallSitesFromSource(codeLines, outlet)
+      const usedSet = skipReasonCodesAtSites(codeSites)
       const sorted = values => [...values].sort().join(',')
       check(sorted(usedSet) === sorted(declaredSkip),
         `形态⑥: ${label} 的 SKIP 调用点原因码与登记表不一致（双向：声明了没用 / 用了没声明 都红）`
@@ -1075,13 +1494,34 @@ async function main() {
       check(guardLines.length >= 2,
         `形态⑥: ${label} 声明了 SKIP_REASONS 却只有 ${guardLines.length} 处代码引用它`
           + ' —— 出口必须拿它做校验（未登记的原因码要在运行期就被拒，而不是只写在注释里）')
+
+      // ---- ⑥d 出口**调用点清单**（FIX-47④a，双向多重集） --------------------
+      // 上面的原因码集合对账看不见"新增一个复用已登记原因码的调用点"（AD2-03 现场）。
+      // 这里把对账单位升级成调用点身份：`<原因码> @ <归一化代码行>`。
+      const declaredSites = Array.isArray(entry.skipCallSites) ? entry.skipCallSites : null
+      check(declaredSites !== null,
+        `形态⑥: ${label} 声明了 SKIP 原因码却缺 \`skipCallSites\`（出口调用点清单）`
+          + ' —— 只对账原因码集合时，新增一个复用已登记原因码的出口调用点是隐形的'
+          + '（那条腿就变成了"什么都不验"）')
+      if (declaredSites !== null) {
+        const liveSites = skipCallSitesFromSource(codeLines, outlet)
+        const declaredSorted = [...declaredSites].map(item => String(item)).sort()
+        const missing = liveSites.filter(site => !declaredSorted.includes(site))
+        const stale = declaredSorted.filter(site => !liveSites.includes(site))
+        check(missing.length === 0 && stale.length === 0,
+          `形态⑥: ${label} 的 SKIP 出口调用点清单与登记表不一致（双向多重集对账）`
+            + `\n  在却没登记:${missing.length === 0 ? '(无)' : `\n    ${missing.join('\n    ')}`}`
+            + `\n  登记了却不在:${stale.length === 0 ? '(无)' : `\n    ${stale.join('\n    ')}`}`
+            + '\n  当前活的调用点（可直接贴进 INTEGRATION_ENTRIES 的 skipCallSites）：'
+            + `${liveSites.length === 0 ? '(空)' : `\n    ${liveSites.map(item => JSON.stringify(item)).join(',\n    ')}`}`)
+      }
     }
     // **判决观测**（R19A-03）：原始事实 = 声明/调用点/唯一出口/裸 SKIP 的计数与集合。
     recordLayerVerdict('环境缺失的原因码登记制', {
       check: 'skip-reasons', path: entry.path,
       declared: [...declaredSkip].sort().join(','),
       used: typeof outlet === 'string' && outlet !== ''
-        ? [...new Set([...entrySource.matchAll(new RegExp(`\\b${outlet}\\(\\s*'([a-z][a-z-]*)'`, 'gu'))].map(match => match[1]))].sort().join(',')
+        ? skipReasonCodesAtSites(skipCallSitesFromSource(codeLines, outlet)).sort().join(',')
         : '<无出口>',
       outlets: codeLines.filter(line => line.includes('SKIP[')).length,
       bare: codeLines.filter(line => /SKIP:(?!\])/u.test(line)).length,
@@ -1096,10 +1536,26 @@ async function main() {
   recordLayerVerdict('判别力下限', {
     check: 'group-floor', judgments: groupJudgments, floor: GROUP_MIN_JUDGMENTS,
   })
-  check(groupJudgments >= GROUP_MIN_JUDGMENTS,
+  check(witnessed('group-floor', groupJudgments >= GROUP_MIN_JUDGMENTS),
     `形态⑥: 聚合层的判定条数下限合计 ${groupJudgments} 条 < 登记下限 ${GROUP_MIN_JUDGMENTS} 条`
       + ' —— 判据被删/被换成恒 SKIP（棘轮只允许被"变多"越过；真要下调必须同时改 '
       + 'GROUP_MIN_JUDGMENTS 并写明理由）')
+  // **R22 FIX-14 / E-02 常量折叠**：上面那条判据的分量全在 `GROUP_MIN_JUDGMENTS` 上 ——
+  // 判决句一字不动、只把常量改成 0，`groupJudgments >= 0` 就恒真（第二十二轮 V7 泳道实测
+  // `EXIT=0`）。判据：常量必须**等于登记表逐条算出的下限**且为正数（判定/记账同源），
+  // 于是"改成恒真值"与"只改一侧"都当场红。
+  const declaredGroupFloor = INTEGRATION_ENTRIES
+    .filter(entry => typeof entry.aggregateName === 'string' && Number.isInteger(entry.minJudgments))
+    .reduce((sum, entry) => sum + entry.minJudgments, 0)
+  recordLayerVerdict('判别力下限', {
+    check: 'group-floor-definition', floor: GROUP_MIN_JUDGMENTS, declared: declaredGroupFloor,
+  })
+  check(witnessed('group-floor-definition',
+    GROUP_MIN_JUDGMENTS === declaredGroupFloor && GROUP_MIN_JUDGMENTS > 0),
+    `形态⑥: 组级下限常量 GROUP_MIN_JUDGMENTS=${GROUP_MIN_JUDGMENTS} 与登记表逐条算出的 `
+      + `${declaredGroupFloor} 不一致（或不是正数）—— 判决句原文在场不等于判据还在：`
+      + '把常量改成 0/恒真值等于把这条判据掏空（R22 FIX-14 / E-02 的常量折叠形态）。'
+      + '真要与登记表脱钩，必须同时改**常量定义**与这里的口径并写明理由。')
 
   // ---- ⑥e 角色 ↔ 门禁的判据面（不许"新登记一条腿就绕开门禁"）----------
   const contractEntries = INTEGRATION_ENTRIES.filter(entry => entry.role === 'contract-test')
@@ -1165,6 +1621,139 @@ function skipReasonsFromSource(source) {
   return [...match[1].matchAll(/'([a-z][a-z-]*)'|"([a-z][a-z-]*)"/gu)].map(item => item[1] ?? item[2])
 }
 
+/**
+ * 从 `(` 开始配对切出参数表（返回闭合括号的下标；找不到时返回文本末尾）。
+ * @param text - 文本。
+ * @param open - 左括号下标。
+ * @returns 右括号下标。
+ */
+function matchParenAt(text, open) {
+  let depth = 0
+  for (let k = open; k < text.length; k += 1) {
+    if (text[k] === '(') depth += 1
+    else if (text[k] === ')') { depth -= 1; if (depth === 0) return k }
+  }
+  return text.length - 1
+}
+
+/**
+ * 一条腿的 **SKIP 出口调用点清单**（FIX-47④a 建；FIX-48④a 改成不依赖行边界）。
+ *
+ * ## 现场（第三十一轮 AD2-03 + 第三十二轮 AE1 复核）
+ *
+ * 第一版对账单位从"原因码集合"升级成"调用点清单"，但抽取仍是**逐行** `exec`：
+ * 正则要求 `<出口>` 后**紧跟** `(`、且原因码必须出现在**同一行**。于是 AE1 实测三格
+ * 逃逸（期望红、实得 `GREEN(!!)`）：
+ *
+ *   | 格 | 写法 | 结果 |
+ *   |---|---|---|
+ *   | L4Q | `return skip(\n "missing-server",\n "mutant",\n)`（跨行） | 绿 |
+ *   | L4c | 同上跨行 | 绿 |
+ *   | L4d | `return skip ("missing-server", "mutant")`（名字与 `(` 之间有空格） | 绿 |
+ *
+ * 而**同一个函数**还被原因码集合对账复用（那一处走整串 `matchAll`，跨行能认）
+ * ⇒ 两处口径不一致：集合面看得见、调用点面看不见，双向对账于是永远"一致"。
+ *
+ * ## 口径（FIX-48④a）
+ *
+ * 在**去注释后的整段源码**上做括号配对扫描（不再逐行），并且：
+ *   · 名字与 `(` 之间允许空白/换行（`skip (` 与 `skip(` 同判）；
+ *   · 调用点身份 = `<原因码> @ <调用点所在语句归一化后的代码>`，其中"语句"= **调用起点
+ *     所在行首 → 闭合括号所在行行尾**（单行调用与旧口径**逐字相同**，登记表因此只在
+ *     多行调用上变长；多行调用的身份现在包含整条调用的实参，比"只有第一行"强）；
+ *   · 原因码与调用点清单**共用本函数**（`skipReasonCodesAtSites`），两处口径不再分叉。
+ * @param lines - 该腿的源码行（已去注释；数组或整串都接受）。
+ * @param outlet - 唯一出口的函数名（`skip`）。
+ * @returns 排序后的调用点身份列表（多重集）。
+ */
+function skipCallSitesFromSource(lines, outlet) {
+  const text = Array.isArray(lines) ? lines.join('\n') : String(lines)
+  // **两种引号都要认**：只认单引号时，`skip("missing-server", …)`（等价写法）是盲区 ——
+  // 本仓 FIX-47④ 的变异 L4 第一版就是用双引号写的，旧口径当场假绿。
+  // 可选调用 `skip?.(…)` 与普通调用同判（正则不吃 `?.` 时它整类逃逸）。
+  const pattern = new RegExp(`\\b${outlet}\\s*(?:\\?\\.\\s*)?\\(`, 'gu')
+  const out = []
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const open = match.index + match[0].length - 1
+    const close = matchParenAt(text, open)
+    const code = /^\s*['"]([a-z][a-z-]*)['"]/u.exec(text.slice(open + 1, close))?.[1]
+    if (code === undefined) continue
+    const lineStart = text.lastIndexOf('\n', match.index) + 1
+    const lineEnd = text.indexOf('\n', close)
+    const statement = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd)
+    out.push(`${code} @ ${statement.replace(/\s+/gu, ' ').trim()}`)
+  }
+  return out.sort()
+}
+
+/**
+ * 调用点清单 → 原因码集合（与 {@link skipCallSitesFromSource} **同一抽取器**）。
+ * 身份形如 `<原因码> @ <语句>`，原因码是 `[a-z-]+`（不含 ` @ `），所以按下标切即可。
+ * @param sites - {@link skipCallSitesFromSource} 的结果。
+ * @returns 去重后的原因码数组。
+ */
+function skipReasonCodesAtSites(sites) {
+  return [...new Set(sites.map(site => site.slice(0, site.indexOf(' @ '))))]
+}
+
+/**
+ * SKIP 出口调用点抽取器的**形态自证**（FIX-48④a）。
+ *
+ * 为什么要有它：AE1 的三格逃逸（L4Q/L4c 跨行、L4d 名字与 `(` 之间有空白）都是**真跑**
+ * 才发现的 —— 抽取器自己的形态取值域必须有判据盯着，否则下一次"顺手换成 prettier 风格"
+ * 又会把调用点清单对账悄悄掏空（集合面看得见、调用点面看不见，双向对账于是永远"一致"）。
+ *
+ * 身份口径：`<原因码> @ <调用起点所在行首 → 闭合括号所在行行尾，空白折叠>`。
+ * **换行位置不进身份** ⇒ 同一条调用重排（单行↔跨行）不会让登记表漂。
+ */
+function skipCallSiteShapeSelfTest() {
+  const outlet = 'skip'
+  const cases = [
+    {
+      label: '单行（旧口径的基准）',
+      source: "    return skip('missing-server', 'x')",
+      expect: ["missing-server @ return skip('missing-server', 'x')"],
+    },
+    {
+      label: '跨行（AE1 的 L4Q/L4c：旧实现 GREEN(!!)）',
+      source: "    return skip(\n      'missing-server',\n      'mutant',\n    )",
+      expect: ["missing-server @ return skip( 'missing-server', 'mutant', )"],
+    },
+    {
+      label: '名字与 `(` 之间有空白（AE1 的 L4d：旧实现 GREEN(!!)）',
+      source: "    return skip ('missing-server', 'mutant')",
+      expect: ["missing-server @ return skip ('missing-server', 'mutant')"],
+    },
+    {
+      label: '可选调用 `skip?.(`',
+      source: "    return skip?.('missing-server', 'mutant')",
+      expect: ["missing-server @ return skip?.('missing-server', 'mutant')"],
+    },
+    {
+      label: '双引号（FIX-47④ 的 L4 第一版形态）',
+      source: '    return skip("missing-server", "mutant")',
+      expect: ['missing-server @ return skip("missing-server", "mutant")'],
+    },
+  ]
+  for (const item of cases) {
+    const sites = skipCallSitesFromSource(item.source.split('\n'), outlet)
+    check(JSON.stringify(sites) === JSON.stringify(item.expect),
+      `形态⑥d自证: ${item.label} 的出口调用点必须被抽到且身份稳定 ——`
+        + ` 期望 ${JSON.stringify(item.expect)}，实得 ${JSON.stringify(sites)}`)
+    const codes = skipReasonCodesAtSites(sites)
+    check(JSON.stringify(codes) === JSON.stringify(['missing-server']),
+      `形态⑥d自证: ${item.label} 的原因码集合必须与调用点清单**同源** —— 实得 ${JSON.stringify(codes)}`)
+  }
+  // 负例：原因码不是字面量（`skip(code, …)` 转发）时不得凭空造一个原因码出来。
+  const forwarded = skipCallSitesFromSource(['    return skip(code, reason)'], outlet)
+  check(forwarded.length === 0,
+    `形态⑥d自证: 原因码不是字面量的转发调用不得被当成调用点（否则身份会退化成 ${JSON.stringify(forwarded)}）`)
+  note('SKIP 出口调用点抽取自证: 单行/跨行/空白/可选调用/双引号 五形态同判、'
+    + '原因码集合与调用点清单同源、非字面量原因码不臆造 ✓')
+}
+
+
 // ---------------------------------------------------------------------------
 // 1. 语法闸门：integration-tests 下所有 .py 必须能解析
 // ---------------------------------------------------------------------------
@@ -1191,7 +1780,7 @@ function pythonSyntaxProblem(file) {
     'import ast,sys;ast.parse(open(sys.argv[1],encoding="utf-8").read(),filename=sys.argv[1])',
     file,
   ], { encoding: 'utf8' })
-  if (parsed.error !== undefined || parsed.status !== 0) {
+  if (!witnessed('py-ast-parse', parsed.error === undefined && parsed.status === 0)) {
     return `${file}: Python 语法解析失败（${parsed.error?.message ?? parsed.stderr?.trim().slice(0, 200)}）`
   }
   return undefined
@@ -1203,7 +1792,7 @@ function pythonSyntaxProblem(file) {
  */
 function moduleSyntaxProblem(file) {
   const parsed = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' })
-  if (parsed.status !== 0) {
+  if (!witnessed('node-check', parsed.status === 0)) {
     return `${file}: Node 语法解析失败（${(parsed.stderr ?? '').trim().split('\n').slice(0, 3).join(' / ')}）`
   }
   return undefined
@@ -1313,7 +1902,7 @@ for (const file of mjsFiles) {
   check(skipOutput.includes('SKIP[missing-app]:'),
     `形态⑧: 缺打包产物的 SKIP 必须带登记过的原因码 \`SKIP[missing-app]:\`（V13-C R-2：无记名的 `
       + `\`SKIP:\` 是免检牌），实际 ${JSON.stringify(skipOutput.split('\n').find(line => line.includes('SKIP'))?.slice(0, 200))}`)
-  check(!skipOutput.includes('RESULT: PASS'), `形态⑥: SKIP 时不得打印 RESULT: PASS，实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
+  check(!reportsResultPass(skipOutput), `形态⑥: SKIP 时不得打印 RESULT: PASS（任何空白/大小写拼写），实际 ${JSON.stringify(skipOutput.slice(0, 200))}`)
 
   // 端到端：未知参数 ⇒ 用法错误 2（不要让它变成"静默用默认值跑下去"）。
   const usageRun = spawnSync(process.execPath, [shotsPath, '--definitely-unknown'], { cwd: ROOT, encoding: 'utf8' })
@@ -1391,11 +1980,21 @@ for (const file of mjsFiles) {
     note(`electron-shots 判据表: --self-test ${ok}/${total} 条夹具、${assertions.length} 条判据`)
   }
 
-  // 接线:运行期脚本必须逐条引用表里的 id,且不得自带常量真判据。
+  // 接线:运行期脚本必须逐条引用表里的 id，且不得自带常量真判据。
+  //
+  // 第三十轮 FIX-45 ②：`shotsSource.includes(id)` 证明的是"**文本在场**"—— 把
+  // `report('deep-link-identity', …)` 包进 `if (false) { … }`（字面量一字不改）⇒ 本守卫
+  // EXIT=0（第二十九轮 AC2 的 F-04，M6 变异实测）。改成**可达性**判据（形态与
+  // {@link judgmentNeedleStatementProblem} 同源）。
   const shotsSource = existsSync(shotsPath) ? readFileSync(shotsPath, 'utf8') : ''
   for (const id of ids) {
-    check(typeof id === 'string' && shotsSource.includes(id),
-      `形态⑤: electron-shots.mjs 没有引用判据 ${JSON.stringify(id)} ⇒ 表里声明了但运行期不判(掏空的另一种写法)`)
+    const reachability = typeof id === 'string'
+      ? callSiteReachabilityProblem(shotsSource, id, 'js', 'report')
+      : '判据 id 不是字符串'
+    check(reachability === undefined,
+      `形态⑤: electron-shots.mjs 的判据 ${JSON.stringify(id)} 在运行期**不可达** —— ${reachability}`
+        + '\n  ⇒ 表里声明了但运行期真的不判（"文本在场"≠"运行期求值过"；'
+        + '`if (false) { report(…) }` 保留字面量的形态在第三十轮 FIX-45 前是 EXIT=0）')
   }
   const constantJudge = /(?:check|report)\(\s*(?:'[^']*'|"[^"]*"|[A-Za-z_$][\w$]*)\s*,\s*(?:true|false)\b/u.exec(shotsSource)
   check(constantJudge === null,
@@ -1520,8 +2119,10 @@ for (const file of mjsFiles) {
     {
       id: 'report-tautology',
       label: 'report() 恒真（N7 原形态）',
-      needle: '  const { name, ok, detail } = judge(id, observation)',
-      replacement: "  const { name, ok, detail } = { name: 'MUTATED', ok: true, detail: 'MUTATED' }",
+      // 第三十三轮 FIX-49① 起 `judge()` 还会透传 `skip`（按设计不适用 ⇒ `[SKIP]`）
+      // ⇒ 锚点与替换同步带上它：掏空之后 `expect: 'skip'` 的夹具会拿到 `true` ⇒ 自检非零。
+      needle: '  const { name, ok, detail, skip } = judge(id, observation)',
+      replacement: "  const { name, ok, detail, skip } = { name: 'MUTATED', ok: true, detail: 'MUTATED', skip: undefined }",
       expect: /实得 ok=true/u,
     },
     {
@@ -1535,18 +2136,18 @@ for (const file of mjsFiles) {
       id: 'runtime-wrapper-keyorder',
       label: '运行期包装换成一、键序变形（D-1 原形态）',
       file: 'electron-shots.mjs',
-      needle: 'const { report, failures, lines, exitCode } = reporter',
+      needle: 'const { report, failures, skips, lines, exitCode } = reporter',
       replacement: "const report = (id, observation) => ({ detail: 'MUTATED', ok: true })\n"
-        + 'const { failures, lines, exitCode } = reporter',
+        + 'const { failures, skips, lines, exitCode } = reporter',
       expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
     },
     {
       id: 'runtime-wrapper-early-return',
       label: '运行期包装换成二、early-return 恒真（D-1 变体）',
       file: 'electron-shots.mjs',
-      needle: 'const { report, failures, lines, exitCode } = reporter',
+      needle: 'const { report, failures, skips, lines, exitCode } = reporter',
       replacement: 'const report = (id) => { if (id) return { ok: true }; return { ok: false } }\n'
-        + 'const { failures, lines, exitCode } = reporter',
+        + 'const { failures, skips, lines, exitCode } = reporter',
       expect: /经 report\(\) 求值期望 ok=|判定通道只打了/u,
     },
   ]
@@ -1577,7 +2178,7 @@ for (const file of mjsFiles) {
     const mutantRun = spawnSync(process.execPath, [join(mutantDir, 'electron-shots.mjs'), '--self-check'],
       { cwd: ROOT, encoding: 'utf8' })
     const mutantOutput = `${mutantRun.stdout ?? ''}${mutantRun.stderr ?? ''}`
-    check(mutantRun.status !== 0,
+    check(witnessed('runtime-mutation', mutantRun.status !== 0),
       `形态⑤: 变异 \`${breakCase.id}\`（${breakCase.label}）之后 \`--self-check\` 仍然 exit 0 `
       + `⇒ 判定通道的判据是假绿：${mutantOutput.trim().slice(-200)}`)
     check(breakCase.expect.test(mutantOutput),
@@ -1619,12 +2220,53 @@ for (const file of mjsFiles) {
   // **判决观测**（R19A-03）：原始事实 = 实跑退出码 + 输出里有没有 RESULT: SKIP/PASS。
   recordLayerVerdict('聚合层三项全 SKIP ⇒ 77 且不报 PASS', {
     check: 'aggregate-skip', status: aggregate.status,
-    reportedSkip: output.includes('RESULT: SKIP'), reportedPass: output.includes('RESULT: PASS'),
+    reportedSkip: output.includes('RESULT: SKIP'), reportedPass: reportsResultPass(output),
   })
-  check(aggregate.status === 77, `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
+  check(witnessed('aggregate-77', aggregate.status === 77), `形态⑥: 三项全 SKIP 时 run-all.sh 必须 exit 77（实际 ${aggregate.status}）：${detail}`)
   check(output.includes('RESULT: SKIP'), `形态⑥: 聚合层必须打印 RESULT: SKIP，实际 ${detail}`)
-  check(!output.includes('RESULT: PASS'), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS，实际 ${detail}`)
+  check(!reportsResultPass(output), `形态⑥: 一项都没跑起来时不得打印 RESULT: PASS（任何空白/大小写拼写），实际 ${detail}`)
   note('聚合层：三项全 SKIP ⇒ exit 77 / RESULT: SKIP ✓')
+
+  // ---- 形态⑥自证（FIX-47④b）：**非规范拼写**的 PASS 声明必须被咬住 ----------
+  // 为什么要在**副本**上再造一个聚合层：上一条 `!reportsResultPass(output)` 依赖
+  // "真仓的 run-all.sh 恰好没多打一行"。第三十一轮 AD2-04 的真跑是："保留
+  // RESULT: SKIP、追加一行 RESULT:PASS（**无空格**）" ⇒ 旧的逐字判据 EXIT=0（假绿）。
+  // 这里把那个变异固化下来：① 变异体必须真的落在副本里；② 规范化判据必须看见它；
+  // ③ 断言这条变异**恰好**是逐字判据的盲区（否则这条自证证明不了任何东西）。
+  {
+    const mutantRoot = tempDir('aggregate-nonspaced-pass-')
+    for (const dir of ['dex', 'openldap', 'electron-shots']) {
+      mkdirSync(join(mutantRoot, dir), { recursive: true })
+    }
+    writeFileSync(join(mutantRoot, 'dex', 'dex-sso-test.py'), 'import sys\nsys.exit(77)\n')
+    writeFileSync(join(mutantRoot, 'openldap', 'ldap-rbac-brand-test.py'), 'import sys\nsys.exit(77)\n')
+    writeFileSync(join(mutantRoot, 'electron-shots', 'electron-shots.mjs'), 'process.exit(77)\n')
+    const skipLine = '  echo "RESULT: SKIP(一项都没跑起来:${skipped} 项因环境缺失跳过)"'
+    const original = readFileSync(join(ROOT, 'integration-tests', 'run-all.sh'), 'utf8')
+    check(original.includes(skipLine),
+      '形态⑥自证: run-all.sh 里找不到"全 SKIP ⇒ RESULT: SKIP"那一行 —— 变异锚点漂了，'
+        + '请同步本自证（否则它会静默变成一条恒真断言）')
+    const mutant = original.replace(
+      skipLine,
+      `${skipLine}\n  echo "RESULT:PASS(一项都没跑起来:\${skipped} 项因环境缺失跳过)"`,
+    )
+    check(mutant !== original && mutant.includes('RESULT:PASS('),
+      '形态⑥自证: 变异体必须真的落在副本里（无空格的 RESULT:PASS 追加行）')
+    writeFileSync(join(mutantRoot, 'run-all.sh'), mutant)
+    const mutantRun = spawnSync('bash', ['run-all.sh'], { cwd: mutantRoot, encoding: 'utf8' })
+    const mutantOutput = `${mutantRun.stdout ?? ''}${mutantRun.stderr ?? ''}`
+    check(mutantRun.status === 77,
+      `形态⑥自证: 变异副本仍应 exit 77（只多打一行），实际 ${mutantRun.status}：${mutantOutput.slice(0, 200)}`)
+    check(mutantOutput.includes('RESULT: SKIP'),
+      '形态⑥自证: 变异副本必须**保留** RESULT: SKIP（这是反向对照：变异只做加法）')
+    check(!mutantOutput.includes('RESULT: PASS'),
+      `形态⑥自证: 这条变异必须恰好是**逐字判据的盲区**（输出里不得出现带空格的 RESULT: PASS），`
+        + `实际 ${JSON.stringify(mutantOutput.slice(-200))}`)
+    check(reportsResultPass(mutantOutput),
+      `形态⑥自证: 规范化判据必须看见无空格拼写的 PASS 声明（AD2-04 的假绿形态），`
+        + `实际 ${JSON.stringify(mutantOutput.slice(-200))}`)
+    note('形态⑥自证: 全 SKIP 路径追加 `RESULT:PASS`（无空格）⇒ 规范化判据必红 / 逐字判据看不见 ✓')
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,7 +2354,7 @@ for (const test of CONTRACT_TESTS) {
     continue
   }
   const [, ok, total] = summary.map(Number)
-  if (ok !== total) fail(`${test.path} --self-test: ${ok}/${total} —— 有判据夹具不符合预期`)
+  if (!witnessed('self-test-total', ok === total)) fail(`${test.path} --self-test: ${ok}/${total} —— 有判据夹具不符合预期`)
   if (total < test.minCases) {
     fail(`${test.path} --self-test 只有 ${total} 条判据夹具（下限 ${test.minCases}）—— 判据被删到没有判别力`)
   }
@@ -1722,6 +2364,56 @@ for (const test of CONTRACT_TESTS) {
     check: 'self-test', id: test.id, status: selfTestRun.status, ok, total, minCases: test.minCases,
   })
   note(`${test.id}: --self-test ${ok}/${total} 条夹具`)
+
+  // ---- ③b 纯单元级：`follow()` 对 Location **三种形态**的解析（FIX-45 ①③）--------
+  //
+  // 假网关是**端到端**腿，一轮只跑得到一种 Location 形态；而 `follow()` 的形态判定是三选一
+  // （相对 / 绝对 / 深链）—— 只跑一两种时第三种回归就静默（这正是 F-01 的成因：真 Dex 用
+  // 相对 Location，而夹具只发绝对 Location）。这个入口**不碰网络**：桩 opener 驱动**真实的**
+  // `follow()`，三种形态各自钉一遍。去掉 `resolve_location()` 里的 `urljoin` ⇒ 相对那一例当场红
+  // （实测：`redirect-form probe: 0/3`、exit 1）。
+  if (test.id === 'dex') {
+    const probe = runContractScript(scriptPathFor(test), ['--probe-redirect-forms'], ROOT)
+    const probeSummary = /redirect-form probe: (\d+)\/(\d+) 种 Location 形态符合预期/u.exec(probe.output)
+    const probeOk = probe.status === 0 && probeSummary !== null
+      && probeSummary[1] === probeSummary[2] && Number(probeSummary[2]) >= 3
+    check(probeOk,
+      `${test.path} --probe-redirect-forms 必须 exit 0 且**三种** Location 形态（相对/绝对/深链）`
+        + `逐条符合预期（实际 exit=${probe.status}）：${probe.output.trim().slice(-400)}`)
+    recordLayerVerdict('契约判据本体自证', {
+      check: 'redirect-forms', id: test.id, status: probe.status,
+      formsJudged: probeSummary === null ? 0 : Number(probeSummary[2]),
+      formsPassed: probeSummary === null ? -1 : Number(probeSummary[1]),
+    })
+    if (probeOk) {
+      note(`${test.id}: --probe-redirect-forms ${probeSummary[1]}/${probeSummary[2]} 种 Location 形态 ✓`)
+    }
+
+    // ---- ③c 纯单元级：授权确认页的**字段解析**（第三十三轮 FIX-49 ③ / F-02）------
+    //
+    // 为什么必须有它：真 Dex 的表单字段是 `req` + `approval=approve`（`req` 是每流一次性
+    // 的隐藏值），而仓库脚本此前提交 `{'approve':'true','grant_scope':…}` ⇒ 真 Dex 回
+    // **500**，`[5]/[6]` 两条判据结构上不可达（§7.72.3 的真服务端实测）。真服务端 + 真 Dex
+    // 那条腿在 CI 上不一定跑得起来，所以契约点必须有一条**不碰网络**的判据：五种页形态
+    // （真 Dex / 相对 action / 绝对 action / 隐藏 input 顺序变化 / 缺字段）各自钉一遍。
+    // 判别力：把 name 判定去掉（改成"取第一个 input 的 value"）⇒ 第 4、5 例当场红。
+    const formProbe = runContractScript(scriptPathFor(test), ['--probe-approval-form'], ROOT)
+    const formSummary = /approval-form probe: (\d+)\/(\d+) 种授权确认页形态符合预期/u.exec(formProbe.output)
+    const formProbeOk = formProbe.status === 0 && formSummary !== null
+      && formSummary[1] === formSummary[2] && Number(formSummary[2]) >= 5
+    check(formProbeOk,
+      `${test.path} --probe-approval-form 必须 exit 0 且**五种**授权确认页形态`
+        + `（真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段）逐条符合预期（实际 exit=${formProbe.status}）：`
+        + `${formProbe.output.trim().slice(-400)}`)
+    recordLayerVerdict('契约判据本体自证', {
+      check: 'approval-form', id: test.id, status: formProbe.status,
+      formsJudged: formSummary === null ? 0 : Number(formSummary[2]),
+      formsPassed: formSummary === null ? -1 : Number(formSummary[1]),
+    })
+    if (formProbeOk) {
+      note(`${test.id}: --probe-approval-form ${formSummary[1]}/${formSummary[2]} 种页形态 ✓`)
+    }
+  }
 
   // ---- ① 登记值对账（--dump-criteria）--------------------------------------
   const dumpRun = runContractScript(scriptPathFor(test), ['--dump-criteria'], ROOT)
@@ -1735,7 +2427,7 @@ for (const test of CONTRACT_TESTS) {
   if (dumped !== null) {
     const criteria = Array.isArray(dumped.criteria) ? dumped.criteria : []
     const observedIds = criteria.map(entry => entry.id).sort()
-    check(observedIds.join(',') === expectedIds.join(','),
+    check(witnessed('criteria-ids', observedIds.join(',') === expectedIds.join(',')),
       `形态⑧: ${test.path} 的判据 id 集合与登记值不一致`
         + `\n  实际:${observedIds.join(', ') || '(空)'}`
         + `\n  登记:${expectedIds.join(', ') || '(空)'}`
@@ -1763,7 +2455,14 @@ for (const test of CONTRACT_TESTS) {
     note(`${test.id}: 判据表 ${criteria.length} 条 / 逐 id 正负例条数对账 ✓`)
   }
 
-  // ---- ② 运行期逐条引用 ----------------------------------------------------
+  // ---- ② 运行期逐条引用（**可达性**，不是文本存在性）------------------------
+  //
+  // 第三十轮 FIX-45 ②：原判据只证明"以该 id 为首参的调用点在**文本**里"，证明不了
+  // "这条判据在**运行期**真的被求值"。现场（第二十九轮 AC2 的 F-04，P1，两处实跑）：
+  //   `reporter.report('deep-link-identity', …)` 的字面量保留、只包进 `if False:` ⇒ 本守卫
+  //   **EXIT=0**；而同一条腿对**错误身份**的 SSO 报 `RESULT: PASS`（6 ✓ 而非 7 ✓），
+  //   原件对同一网关正确 FAIL。⇒ 文本面照旧逐个报红，可达性面由
+  //   {@link callSiteReachabilityProblem} 判；**行为面**由 `dex-wrong-identity` 场景判。
   const callSites = [...source.matchAll(
     /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(\s*(['"])([^'"]+)\2\s*,/gu,
   )].filter(match => expectedIds.includes(match[3]))
@@ -1772,6 +2471,11 @@ for (const test of CONTRACT_TESTS) {
     check(citedIds.has(id),
       `形态⑧: ${test.path} 没有引用判据 ${JSON.stringify(id)}`
         + ' ⇒ 表里声明了但运行期不判（掏空的另一种写法）')
+    const reachability = callSiteReachabilityProblem(source, id, 'py', 'reporter.report')
+    check(reachability === undefined,
+      `形态⑧: ${test.path} 的判据 ${JSON.stringify(id)} 在运行期**不可达** —— ${reachability}`
+        + '\n  ⇒ "字面量在场"不等于"运行期求值过"（第三十轮 FIX-45 ②：`if False:` 包住调用点，'
+        + '保留字面量，守卫曾 EXIT=0 且该条腿对错误身份报 PASS）')
   }
   const foreignCallees = [...new Set(callSites
     .filter(match => match[1] !== 'reporter.report')
@@ -1796,7 +2500,7 @@ for (const test of CONTRACT_TESTS) {
   // ---- ④ 判定通道自证（--self-check）--------------------------------------
   const selfCheckRun = runContractScript(scriptPathFor(test), ['--self-check'], ROOT)
   const selfCheckOutput = selfCheckRun.output
-  check(selfCheckRun.status === 0,
+  check(witnessed('self-check-status', selfCheckRun.status === 0),
     `形态⑧: ${test.path} --self-check 必须 exit 0（实际 ${selfCheckRun.status}）：`
       + selfCheckOutput.trim().slice(-400))
   const checkSummary = /reporter self-check: (\d+)\/(\d+) 条夹具经 report\(\) 求值符合预期/u.exec(selfCheckOutput)
@@ -1837,7 +2541,7 @@ for (const test of CONTRACT_TESTS) {
       check: 'criteria-tautology', case: `${test.id}:${id}`,
       status: mutant.status, named: new RegExp(id, 'u').test(mutant.output),
     })
-    check(mutant.status !== 0,
+    check(witnessed('criteria-tautology', mutant.status !== 0),
       `形态⑧: 变异 \`criteria-tautology:${test.id}:${id}\`（把判据 ${id} 的 evaluate 掏成 `
       + '`return []`）之后 `--self-test` 仍然 exit 0 ⇒ 判据是假绿（这正是 F-01 的现场形态）')
     check(new RegExp(id, 'u').test(mutant.output),
@@ -1901,31 +2605,136 @@ for (const test of CONTRACT_TESTS) {
   }
 }
 
+/**
+ * 一个 `Location` 头的**形态**（第三十轮 FIX-45 ①③ 的取值域）。
+ *
+ * 三档，与 `follow()` 的形态判定一一对应：
+ *   · `http-absolute` —— 带 `http(s)://` scheme（跨 origin 那一跳只能是它）；
+ *   · `deep-link`     —— **自定义 scheme**（`picoaide://auth?token=…`）= 桌面深链；
+ *   · `relative`      —— 路径 / 查询 / 片段（`/dex/approval?…`）⇒ **必须按当前 URL 归一化**，
+ *                        它不是深链（真 Dex 的 `/auth` → `/auth/local` 就是这一档）。
+ * @param location - `Location` 头的原值。
+ * @returns 形态名。
+ */
+function locationFormOf(location) {
+  const text = String(location ?? '')
+  if (/^https?:\/\//iu.test(text)) return 'http-absolute'
+  if (/^[a-z][a-z0-9+.-]*:/iu.test(text)) return 'deep-link'
+  return 'relative'
+}
+
 /** 把可能很长的子进程输出压成一行（诊断用，不参与判据）。 */
 function selfTestOutputFree(output) {
   return JSON.stringify(String(output).trim().slice(-200))
 }
 
 // ---------------------------------------------------------------------------
+// 2b. **可达性判据的自证**（第三十轮 FIX-45 ②）
+//
+// 真仓里的调用点**全部可达**（否则门禁本来就是红的）⇒ "判据退化成 `return undefined`"
+// 这种掏空在真仓上**不可见**（与 `constantBlockHeaderProbeProblem` 同一处境）。这里把该红/
+// 该绿的形态做成合成样本，逐条喂给**生产路径上的同一个函数**：
+//   · 该红：`if False:` / `while False:` / 早退死代码 / `for _ in []:` / `if (false) {`
+//     / `for (const _ of []) {` / `if (false) report(…)` / `cond && report(…)`；
+//   · 该绿（**误红会让判据无法使用**）：`if not reporter.report(…)`（调用点就是条件）、
+//     `if approval_required:` / `if (twoStep) {`（自由变量求不出常量）、`} else {` 分支里的
+//     调用点（真仓 `electron-shots.mjs:712` 就在 else 里）、顶层语句。
+// ---------------------------------------------------------------------------
+{
+  const py = body => `def main():\n${body}\n`
+  const js = body => `function f() {\n${body}\n}\n`
+  const cases = [
+    ['py · if False: 包住调用点', py("    if False:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · while False: 包住调用点', py("    while False:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · 无条件早退之后的死代码', py("    return finish()\n    reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · for _ in []: 包住调用点', py("    for _ in []:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', true],
+    ['py · 正当：`if not reporter.report(…)`（调用点就是条件）',
+      py("    if not reporter.report('probe', {'x': 1}):\n        return finish()"),
+      'py', 'reporter.report', 'probe', false],
+    ['py · 正当：自由变量的条件分支',
+      py("    if approval_required:\n        reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', false],
+    ['py · 正当：顶层语句', py("    reporter.report('probe', {'x': 1})"),
+      'py', 'reporter.report', 'probe', false],
+    ['js · if (false) { 包住调用点', js("  if (false) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', true],
+    ['js · for (const _ of []) { 包住调用点', js("  for (const _ of []) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', true],
+    ['js · 同一行恒假条件（`if (false) report(…)`）', js("  if (false) report('probe', { x: 1 })"),
+      'js', 'report', 'probe', true],
+    ['js · 悬空运算符（`cond && report(…)`）', js("  cond &&\n    report('probe', { x: 1 })"),
+      'js', 'report', 'probe', true],
+    ['js · 正当：`} else {` 分支里的调用点（真仓 electron-shots.mjs:712 就是这个形态）',
+      js("  if (step1) {\n    report('other', { x: 1 })\n  } else {\n    report('probe', { x: 2 })\n  }"),
+      'js', 'report', 'probe', false],
+    ['js · 正当：自由变量的条件块', js("  if (twoStep) {\n    report('probe', { x: 1 })\n  }"),
+      'js', 'report', 'probe', false],
+    ['js · 正当：顶层语句', js("  report('probe', { x: 1 })"),
+      'js', 'report', 'probe', false],
+  ]
+  const wrong = []
+  for (const [why, text, language, callee, id, expectProblem] of cases) {
+    const problem = callSiteReachabilityProblem(text, id, language, callee)
+    if ((problem !== undefined) !== expectProblem) {
+      wrong.push(`${why} ⇒ ${problem === undefined ? '放行（漏）' : `判红（误红）：${problem}`}`)
+    }
+  }
+  check(wrong.length === 0,
+    'FIX-45 ② 可达性判据自证不成立（该红的没红 / 正当的误红）：\n    ' + wrong.join('\n    '))
+  if (wrong.length === 0) {
+    note(`可达性判据自证: ${cases.length} 条合成样本（恒假块头 / 空迭代域 / 早退死代码 / 行内恒假 / `
+      + '悬空运算符 必红；`if not report(…)` / else 分支 / 自由变量条件 / 顶层 必绿）✓')
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. 假网关：按真契约应答（不需要 Docker / PG / IdP）
 // ---------------------------------------------------------------------------
 const SCENARIOS = [
-  { scenario: 'good', test: CONTRACT_TESTS[0], expect: 0, label: '按真契约应答 ⇒ dex 必须通过' },
+  {
+    scenario: 'good', test: CONTRACT_TESTS[0], expect: 0,
+    // **Location 形态的登记值**（第三十轮 FIX-45 ①③）：这一腿的假网关必须在运行期**真的**
+    // 发出过该形态的 Location，否则判红 —— 只写"我声明了"等于把覆盖面的自我陈述当判据。
+    locationForm: 'http-absolute',
+    label: '按真契约应答（IdP 内部跳转用**绝对** Location）⇒ dex 必须通过',
+  },
+  {
+    scenario: 'dex-relative-location', test: CONTRACT_TESTS[0], expect: 0,
+    locationForm: 'relative',
+    must: /✓ \[2\]/u,
+    label: '真 Dex 形态：IdP 内部跳转用**相对** Location ⇒ dex 必须通过'
+      + '（`follow()` 少了 `urljoin` 就把它当桌面深链，这条腿当场红）',
+  },
   { scenario: 'good', test: CONTRACT_TESTS[1], expect: 0, label: '按真契约应答 ⇒ ldap 必须通过' },
   {
     scenario: 'skip', test: CONTRACT_TESTS[0], expect: 77,
-    must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ dex 必须显式 SKIP(77) 且不得报 PASS',
+    must: /SKIP/u, mustNot: RESULT_PASS_CLAIM, label: 'provider 未配置 ⇒ dex 必须显式 SKIP(77) 且不得报 PASS',
     // SKIP 必须**具名**：登记过的原因码（V13-C R-2 的第二条修法 —— 无记名的 `SKIP:` 是免检牌）。
     mustCode: 'missing-provider',
   },
   {
     scenario: 'skip', test: CONTRACT_TESTS[1], expect: 77,
-    must: /SKIP/u, mustNot: /RESULT: PASS/u, label: 'provider 未配置 ⇒ ldap 必须显式 SKIP(77) 且不得报 PASS',
+    must: /SKIP/u, mustNot: RESULT_PASS_CLAIM, label: 'provider 未配置 ⇒ ldap 必须显式 SKIP(77) 且不得报 PASS',
     mustCode: 'missing-provider',
   },
   {
     scenario: 'dex-http-deeplink', test: CONTRACT_TESTS[0], expect: 1,
     must: /深链|Location/u, label: '回调未下发深链 ⇒ dex 必须失败（旧脚本咬不到的那条契约）',
+  },
+  {
+    // **行为级判据**（第三十轮 FIX-45 ②）：`deep-link-identity` 是 dex 里唯一一条
+    // **安全相关**的判据（深链 token 必须能登录**且身份必须是本次登录账号**）。这条场景让
+    // token **有效**、`/auth/me` 回**别人** ⇒ 判据必须 FAIL。把该调用点变成不可达
+    // （`if False:` / 早退 / 条件化）时，这条腿会从 FAIL 变成 PASS ⇒ 当场红。
+    // 判据面（可达性）与行为面互为补充：前者判"文本形态"，后者判"结论真的变了"。
+    scenario: 'dex-wrong-identity', test: CONTRACT_TESTS[0], expect: 1,
+    must: /身份/u, locationForm: 'http-absolute',
+    label: '深链 token 有效但 /auth/me 回的是**别人** ⇒ dex 必须失败'
+      + '（把 deep-link-identity 弄成不可达时这条腿会变 PASS —— 行为级判据）',
   },
   {
     scenario: 'ldap-legacy-channel', test: CONTRACT_TESTS[1], expect: 1,
@@ -1946,14 +2755,25 @@ const SCENARIOS = [
  * @param item - {@link SCENARIOS} 的一项。
  * @param status - 契约脚本的真实退出码。
  * @param output - 契约脚本的完整输出。
+ * @param emittedForms - 这一轮假网关**真的发出去过**的 Location 形态（第三十轮 FIX-45 ①；
+ *   不传 = 不判该格，负例自证的合成观测就是这么调的）。
  * @returns 违规原因列表（空 = 通过）。
  */
-function scenarioViolations(item, status, output) {
+function scenarioViolations(item, status, output, emittedForms) {
   const detail = String(output).trim().split('\n').slice(-6).join(' / ')
   const violations = []
   if (status !== item.expect) {
     violations.push(`期望 exit ${item.expect}，实际 ${status}：${detail}`)
     return violations
+  }
+  if (item.locationForm !== undefined && emittedForms !== undefined) {
+    const forms = Array.isArray(emittedForms) ? emittedForms : []
+    if (!forms.includes(item.locationForm)) {
+      violations.push(`这一腿声明的 Location 形态是 \`${item.locationForm}\`，而假网关这一轮`
+        + `**一次都没发出过**该形态（实际 ${forms.length > 0 ? forms.join(', ') : '没有任何重定向'}）`
+        + ' ⇒ 夹具被改成单一形态后，"两种形态都被覆盖"就只剩一句自我陈述')
+      return violations
+    }
   }
   if (item.must !== undefined && !item.must.test(output)) {
     violations.push(`输出里没有 ${item.must}：${detail}`)
@@ -1987,6 +2807,12 @@ recordLayerVerdict('假网关场景', {
   status: SCENARIOS[0].expect === 0 ? 1 : 0, expect: SCENARIOS[0].expect,
   violations: scenarioViolations(SCENARIOS[0], SCENARIOS[0].expect === 0 ? 1 : 0, ''),
 })
+/**
+ * dex 各腿**运行期真的发出去过**的 Location 形态（第三十轮 FIX-45 ①③ 的事实来源）。
+ * 注意它记的是 Location 头本身，不是 `SCENARIOS` 的表长。
+ * @type {Set<string>}
+ */
+const observedDexLocationForms = new Set()
 for (const item of SCENARIOS) {
   let gateway
   try {
@@ -1997,17 +2823,54 @@ for (const item of SCENARIOS) {
   }
   try {
     const { status, output } = await runTest(scriptPathFor(item.test), gateway.base)
-    const violations = scenarioViolations(item, status, output)
+    // 形态覆盖的**原始事实**：这一轮这个假网关真的发出去过哪些形态的 Location。
+    const emittedForms = (gateway.emittedLocations ?? []).map(locationFormOf)
+    if (item.test === CONTRACT_TESTS[0]) {
+      for (const form of emittedForms) observedDexLocationForms.add(form)
+    }
+    const violations = scenarioViolations(item, status, output, emittedForms)
     recordLayerVerdict('假网关场景', {
       check: 'scenario', scenario: item.scenario, test: item.test.id, status, expect: item.expect, violations,
     })
-    if (violations.length > 0) {
+    if (!witnessed('scenario-violations', violations.length === 0)) {
       for (const violation of violations) fail(`[${item.scenario}] ${item.label} —— ${violation}`)
       continue
     }
     note(`[${item.scenario}] ${item.test.id}: exit ${status} ✓`)
   } finally {
     await gateway.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3b. **Location 的两种形态都被覆盖**（第三十轮 FIX-45 ①③）
+//
+// 现场（第二十九轮 AC2 的 F-01，P1）：真 Dex 的 `/auth` 用 **302 + 相对 Location**
+// （`/auth/local?…`），而 `follow()` 把"非 http(s) 的 Location"一律当桌面深链 ⇒ 判据 [2]
+// 拿到 `Found` 中间页、`RESULT: FAIL`；**而守卫的假网关一律返回绝对 Location ⇒ 门禁永远绿**
+// （判据自洽型假绿：夹具与判据出自同一份假设）。
+//
+// 判据三条腿，缺一不可：
+//   ① 每条腿的形态是**登记值**（`SCENARIOS[].locationForm`），且该腿的假网关必须在运行期
+//      **真的发出过**该形态 —— 已经并进 {@link scenarioViolations}（与退出码同一套判决）；
+//   ② 跨腿：dex 的腿合起来必须同时覆盖 `http-absolute` 与 `relative`（下面这一格）；
+//   ③ 纯单元级：`dex-sso-test.py --probe-redirect-forms` 用桩 opener 驱动**真实的**
+//      `follow()`，把相对 / 绝对 / 深链三种形态各自钉一遍（不碰网络）。
+// 注意 ② 的事实来源是**运行期发出的 Location 头**，不是 `SCENARIOS` 表长 —— 删掉相对那条腿，
+// 集合里少了 `relative`（而不是"表短了一条"）。
+// ---------------------------------------------------------------------------
+{
+  const required = ['http-absolute', 'relative']
+  const missing = required.filter(form => !observedDexLocationForms.has(form))
+  const violations = missing.length === 0
+    ? []
+    : [`dex 假网关这一轮**没有覆盖**这些 Location 形态：${missing.join(', ')}`
+      + `（实际发出过 ${[...observedDexLocationForms].join(', ') || '(无)'}）`]
+  recordLayerVerdict('假网关场景', { check: 'location-forms', forms: [...observedDexLocationForms], violations })
+  if (violations.length === 0) {
+    note(`Location 形态覆盖: ${[...observedDexLocationForms].sort().join(' / ')}（绝对 + 相对各一条腿）✓`)
+  } else {
+    for (const violation of violations) fail(`[Location 形态覆盖] ${violation}`)
   }
 }
 
@@ -2170,6 +3033,37 @@ const CI_SURFACE_VARIABLE_COMMAND_ACK = [
       + '不接端到端入口（`integration-tests/run-all.sh` 不在这条链上）。',
   },
 ]
+/**
+ * **"先构建/生成、再执行"的脚本位登记表**（R20A-05）。
+ *
+ * ## 现场（R20A-05，P3 —— 静态判据 + 运行期生成的固有边界）
+ *
+ * ```bash
+ * base64 -d scripts/u20-payload.b64 > scripts/u20-generated.sh
+ * bash scripts/u20-generated.sh
+ * ```
+ *
+ * 生成物在**检查期不存在**（载体跟随跟不出仓内文件 ⇒ 不跟随），载荷是不透明数据
+ * （token 网里没有语义）⇒ 修前守卫 `EXIT=0`，而 tripwire 证明运行期真的执行了端到端入口。
+ *
+ * ## 判据（禁止"路径不存在就一律放过"）
+ *
+ * **命令位 / 脚本位**指向一个"字面、仓内相对、但**当前不存在**"的路径 ⇒ fail-closed 记红
+ * （`missing-script-carrier`）。这一位与"参数位上跟不出的数据文件"不同：它是
+ * "**要执行的程序**"，闭包读不到它就等于这一层看不见。
+ * **R21 fix-6 / E-01 起不再区分"路径里有没有 `/`"**：`bash gen.sh` / `source gen.sh` /
+ * `python3 gen.py`（生成物落在 CWD、按**裸文件名**执行）与 `bash scripts/gen.sh` **同判**
+ * —— 修前那两个站点各带一个 `includes('/')` 前置条件，于是裸文件名整族隐形（实测三种形态
+ * `EXIT=0`，而 tripwire 证明运行期真的执行了端到端入口）。
+ *
+ * 这一族**无法与"先构建再执行"区分**（`bash dist/x.sh` 是同样形态的正当写法），
+ * 所以出路是**逐处登记**这张表（写明"由谁生成 + 哪一步生成"）—— 与
+ * {@link CI_SURFACE_VARIABLE_COMMAND_ACK} 同款纪律：**死条目双向对账**（登记了却一次都没
+ * 命中 ⇒ 红），登记项不会变成"看起来管得很宽"的摆设。
+ *
+ * 每条 = `{ file, word, why, approvedBy }`；`word` 是脚本位那一位**逐字**。
+ */
+const CI_SURFACE_GENERATED_SCRIPT_ACK = []
 /**
  * **命令位"读不懂的形态"的登记表**（R17-X，R17A-01 的收口通道）。
  *
@@ -2654,6 +3548,90 @@ function isUnreadableCommandShape(word) {
   return true
 }
 /**
+ * **shell 解释器的"取值的旗标"表**（R20A-01）。
+ *
+ * ## 现场（R20A-01，P2）
+ *
+ * 修前的"旗标跳过循环"写的是 `while (cursor < words.length && words[cursor] !== '--'
+ * && words[cursor].startsWith('-'))`：它把**每一个以 `-` 开头的词**都当旗标跳过，于是
+ *   · `bash -- "$P"` 停在 `--` 上 —— `scriptWord === '--'`，而 {@link shellScriptPositionShape}
+ *     的第一条 `if (word.startsWith('-')) return undefined` 直接放行 ⇒ 整条 fail-closed 失效；
+ *   · `bash -O extglob "$P"` 停在取值位 `extglob` 上（`-O` 是**带取值**的旗标）⇒ 同族。
+ * 两处都让真正的脚本身份（`"$P"`）从不进入判据 —— 路径用普通常量拼出来就能让 CI 执行
+ * 端到端入口而守卫打印 `VERDICT PASS`（审计夹具 `d-param`/`d-oflag`/`wf-dashdash` 实测
+ * 修前全 `EXIT=0`）。
+ *
+ * ## 覆盖的形态（按 `bash --help` / `man bash` 的 OPTIONS 段）
+ *
+ *   · 短旗标簇里的 **`-c`**（命令文本）、**`-o`/`+o`**（set 选项名）、**`-O`/`+O`**
+ *     （shopt 选项名，bash）—— 这三个是 bash/dash/ksh/ash/zsh 共有的"带取值"短旗标；
+ *     附着形态（`-Oextglob`）与分离形态（`-O extglob`）都按元数吃词；
+ *   · bash 的长选项 **`--init-file <file>`** / **`--rcfile <file>`**（以及 `--rcfile=<file>`
+ *     这种自带 `=` 的形态）；
+ *   · **`--`** 是**选项结束标记**：消费掉它，后面一律按位置参数取词。
+ *
+ * ## 未覆盖的形态如何仍然 fail-closed
+ *
+ * 表里没有的旗标按"元数 0"处理 ⇒ 它**自己**被跳过，但它后面那一位会落进脚本位 ——
+ * 于是三种结果都不是"放行"：① 那一位是闭包能读的仓内字面路径 ⇒ 照常跟随；
+ * ② 是变量/通配/含空白 ⇒ {@link shellScriptPositionShape} 记红；③ 取不到（越界）⇒
+ * 调用方按"脚本位缺失"记红（见 {@link shellScriptWordIndex} 的 `missing`）。
+ * 换句话说：**猜错元数只会把脚本位取错位置，而取错位置的词几乎必然读不懂**（它要么是
+ * 旗标取值那样的普通词——那会落到"缺脚本位"或跟随面——要么是间接层），不存在
+ * "因为表不全所以放行"的通路。反过来，表里多登记一条"带取值的旗标"才是危险方向
+ * （会把真脚本位吃掉 ⇒ 变绿），所以这张表只收**手册里明写带取值**的形态。
+ */
+const SHELL_VALUE_SHORT_FLAGS = new Set(['c', 'o', 'O'])
+/** 见 {@link SHELL_VALUE_SHORT_FLAGS}：bash 长选项里**明写带取值**的两个。 */
+const SHELL_VALUE_LONG_FLAGS = new Set(['--init-file', '--rcfile'])
+/**
+ * shell 解释器的**旗标段**：从 `index`（解释器词）之后开始跳旗标，返回脚本位。
+ *
+ * 与 {@link shellScriptPositionShape} 的分工：这一个只回答"**哪一位**是脚本位"
+ * （纯位置，不看词的形态），那一个回答"这一位读不读得懂"。R20A-01 的根因正是
+ * "位置"有两份实现（解释器分支与 `find -exec` 分支各写一遍，口径不一致）——
+ * 现在两处、以及 `source`/`.` 与 {@link shellProcsubIsScriptPosition} 都用这一个。
+ * @param words - 一条命令的词数组（命令位起）。
+ * @param index - 解释器/宿主词的下标。
+ * @returns `{ scriptIndex, commandText, terminated }`：
+ *   · `scriptIndex` —— 脚本位下标；`-1` = 旗标段之后**没有**脚本位（越界）；
+ *   · `commandText` —— `-c` 那类"取值就是一段脚本文本"的旗标（`{ flag, text }`），没有则 `null`；
+ *   · `terminated` —— 是否遇到了 `--`（诊断用）。
+ */
+function shellScriptWordIndex(words, index) {
+  let cursor = index + 1
+  let commandText = null
+  let terminated = false
+  while (cursor < words.length) {
+    const word = words[cursor]
+    // **选项结束标记**：消费掉它，之后的词一律是位置参数（R20A-01 的现场就在这一条上）。
+    if (word === '--') { terminated = true; cursor += 1; break }
+    // 只把 `-`/`+` 开头的词当旗标：别的词就是脚本位（`bash script.sh`）。
+    if (!word.startsWith('-') && !word.startsWith('+')) break
+    const equals = word.indexOf('=')
+    if (word.startsWith('--')) {
+      const name = equals >= 0 ? word.slice(0, equals) : word
+      cursor += 1
+      if (equals < 0 && SHELL_VALUE_LONG_FLAGS.has(name)) cursor += 1
+      continue
+    }
+    // 短旗标簇：`-O extglob`（元数 1）/ `-Oextglob`（取值附着）/ `-eo pipefail`（簇末带取值）。
+    const cluster = word.slice(1)
+    let takesNextWord = false
+    for (let at = 0; at < cluster.length; at += 1) {
+      const flag = cluster[at]
+      if (!SHELL_VALUE_SHORT_FLAGS.has(flag)) continue
+      const attached = cluster.slice(at + 1)
+      if (flag === 'c') commandText = { flag: word, text: attached === '' ? words[cursor + 1] : attached }
+      if (attached === '') takesNextWord = true
+      break
+    }
+    cursor += 1
+    if (takesNextWord) cursor += 1
+  }
+  return { scriptIndex: cursor < words.length ? cursor : -1, commandText, terminated }
+}
+/**
  * shell 词的**脚本位读不懂**（R17-X 建立；**R18A-01 收口**）。
  *
  * `bash` / `sh` 之后的第一个非旗标实参是"要执行的脚本"。它有几类形态闭包判不了：
@@ -2674,7 +3652,11 @@ function isUnreadableCommandShape(word) {
  */
 function shellScriptPositionShape(word) {
   if (word === undefined || word === '') return undefined
-  if (word.startsWith('-')) return undefined
+  // **R20A-01**：脚本位由 {@link shellScriptWordIndex} 取（旗标段已被消费掉），所以走到这里
+  // 的 `-`/`+` 开头的词只可能是"`--` 之后的那一位"—— 那是被 shell 当**文件名**用的词，
+  // 闭包判不了它到底指哪个文件（`bash -- -e`）。修前这一条是 `return undefined`
+  // （"旗标 ⇒ 不是脚本位"的旧启发式），而旧启发式正是 `--` 掩蔽整条判据的入口 ⇒ 改成 fail-closed。
+  if (word.startsWith('-') || word.startsWith('+')) return '`--` 之后以 `-`/`+` 开头的词'
   if (SHELL_GLOB_PATTERN.test(word)) return '通配'
   if (stripRootVariablePrefix(word) !== undefined) return undefined
   if (SHELL_INDIRECTION_PATTERN.test(word)) {
@@ -2724,21 +3706,43 @@ function stripRootVariablePrefix(word) {
  */
 const SHELL_ROOT_VARIABLES = ['GITHUB_WORKSPACE', 'PWD']
 /**
- * shell 的**自指**写法片段（`$0` / `${BASH_SOURCE[0]}` / `$BASH_SOURCE`）—— R19A-04。
+ * shell 的**自指**写法片段（`$0` / `${BASH_SOURCE[0]}` / `$BASH_SOURCE`）—— R19A-04；
+ * **R20A-02 按"取值是否等于本文件"分成两族**。
  *
- * 这三种写法的取值是"**当前正在被执行的这个脚本**"，所以在**被跟随的仓内脚本正文**里它
- * 不是"读不懂的间接层"，而是**可以用闭包自己的上下文求值**的常量：脚本路径`node.file`
- * 就在手上，`$(dirname …)` 求值到它的目录，再与仓内路径比对。
+ * 这两种写法在 shell 里**不等价**，而 R19A-04 把它们当成同一族：
+ *   · `$0` —— **只在脚本被"执行"时**才是脚本自身；脚本被 `source`（`.`）时 `$0` 仍是**调用者**；
+ *   · `${BASH_SOURCE[0]}` / `$BASH_SOURCE` —— **被 source 时也是本文件**（这正是它存在的理由）。
+ * 所以：
+ *   · {@link SHELL_SELF_EXECUTED_PATTERN}（`$0` 族）只在"被执行"上下文中求值；
+ *   · {@link SHELL_SELF_SOURCE_SAFE_PATTERN}（`BASH_SOURCE` 族）在两种上下文都成立。
+ * 见 {@link selfReferentialScriptCandidates} 的现场说明。
  */
+const SHELL_SELF_EXECUTED_PATTERN = String.raw`\$(?:\{)?0(?:\})?`
+/** `BASH_SOURCE` 族：被 source 时仍指本文件 ⇒ 两种上下文都可求值。 */
+const SHELL_SELF_SOURCE_SAFE_PATTERN = String.raw`\$(?:\{)?BASH_SOURCE(?:\[0\])?(?:\})?`
+/** 两族的并集（诊断/文档用）。 */
 const SHELL_SELF_REFERENCE = String.raw`\$(?:\{)?(?:0|BASH_SOURCE(?:\[0\])?)(?:\})?`
 /** `$(dirname <自指>)/<尾段>` —— 仓内脚本位最常见的写法（`bash "$(dirname "$0")/x.sh"`）。 */
 const SHELL_SELF_DIRNAME_PATTERN = new RegExp(
-  String.raw`^\$\(\s*dirname\s+${SHELL_SELF_REFERENCE}\s*\)\/(.+)$`, 'u')
-/** `${BASH_SOURCE[0]%/*}/<尾段>` —— 免 fork 的同义写法。 */
+  String.raw`^\$\(\s*dirname\s+(${SHELL_SELF_REFERENCE})\s*\)\/(.+)$`, 'u')
+/**
+ * `${<自指>%/*}/<尾段>` —— 免 fork 的同义写法（`${BASH_SOURCE[0]%/*}/x.sh`）。
+ * 注意花括号**里面**那一份没有前导 `$`（`${0%/*}` / `${BASH_SOURCE[0]%/*}`）。
+ */
+const SHELL_SELF_BRACED_PATTERN = String.raw`(?:0|BASH_SOURCE(?:\[0\])?)`
 const SHELL_SELF_STRIP_PATTERN = new RegExp(
-  String.raw`^\$\{(?:0|BASH_SOURCE(?:\[0\])?|BASH_SOURCE)%\/\*\}\/(.+)$`, 'u')
+  String.raw`^\$\{(${SHELL_SELF_BRACED_PATTERN})%\/\*\}\/(.+)$`, 'u')
 /** **裸自指**（`bash $0` / `node ${BASH_SOURCE[0]}`）—— 指的是脚本自身。 */
-const SHELL_BARE_SELF_PATTERN = new RegExp(String.raw`^${SHELL_SELF_REFERENCE}$`, 'u')
+const SHELL_BARE_SELF_PATTERN = new RegExp(String.raw`^(${SHELL_SELF_REFERENCE})$`, 'u')
+/**
+ * 一段自指片段 → **变量名**（`$0` / `${0}` / `0` / `${BASH_SOURCE[0]}` / `$BASH_SOURCE` →
+ * `0` / `BASH_SOURCE`）—— 三种写法在三种 pattern 里捕获到的字面形状不同，判"是不是 `$0` 族"
+ * 之前先归一（见 {@link shellSelfReferenceNeedsExecution}）。
+ */
+const shellSelfReferenceVariable = reference =>
+  String(reference ?? '').replace(/\$/gu, '').replace(/^\{/u, '').replace(/\}$/u, '').replace(/\[0\]/u, '')
+/** 判一段自指片段是不是 `$0` 族（见 {@link SHELL_SELF_EXECUTED_PATTERN}）。 */
+const shellSelfReferenceNeedsExecution = reference => shellSelfReferenceVariable(reference) === '0'
 /**
  * 自指脚本位 → **仓内候选路径**（纯函数，不判存在性；存在性由调用方的载体解析判）。
  *
@@ -2749,18 +3753,37 @@ const SHELL_BARE_SELF_PATTERN = new RegExp(String.raw`^${SHELL_SELF_REFERENCE}$`
  * 变量/命令替换路径"整族 fail-closed 之后，这一族在脚本位就变成**误报**：闭包明明知道
  * 当前脚本是谁（`node.file`），却不拿这个信息去求值。
  *
+ * ## R20A-02：`$0` 只在"被执行"时成立（漏判方向）
+ *
+ * 自指求值假设 `$0` == 被跟随脚本。但**被 `source` 的脚本里 `$0` 仍是调用者**
+ * （`BASH_SOURCE[0]` 才是本文件）。审计现场：
+ *
+ * ```bash
+ * scripts/u20-outer.sh     : source scripts/u20-sub/inner.sh     # CI 步骤跑的就是它
+ * scripts/u20-sub/inner.sh : bash "$(dirname "$0")/decoy.sh"     # $0 = u20-outer.sh（被 source）
+ * scripts/u20-sub/decoy.sh : echo ok                             # ← 闭包跟随的"诱饵"（清白）
+ * scripts/decoy.sh         : bash integration-tests/run-all.sh   # ← 运行期真正执行的（从没被读）
+ * ```
+ *
+ * 修前：`inner.sh` 被 `source` 进来，闭包仍按"本文件目录"求值 ⇒ 跟随 `u20-sub/decoy.sh`
+ * （清白）⇒ 守卫 `EXIT=0`，而 tripwire 证明运行期执行了端到端入口。
+ *
  * ## 判据（不是"放行"）
  *
  * 求值出**仓内真实存在**的候选 ⇒ 按普通载体跟随（跟到的东西照旧进 token/文本网，
  * 命中端到端入口一样要登记）；求值不出 ⇒ **保持 fail-closed**（词一个字都不改）。
  * 于是"自指 + 指向仓内脚本"不再误报，而"自指 + 指向仓外/不存在的东西"仍然是红。
+ * `$0` 族在**被 source** 的上下文里**不求值**（候选为空 ⇒ 词原样保留 ⇒ 词法阶段按
+ * "变量/命令替换"记红）；`BASH_SOURCE` 族在两种上下文都求值（`legit-selfstrip` 保持绿）。
  * @param word - 脚本位那一位（词法器已剥引号）。
  * @param selfFile - 当前被跟随的仓内脚本路径（仓库相对）；不是仓内 shell 脚本时 `undefined`。
+ * @param options - `{ executed }`：这份正文是**被执行**（默认 `true`）还是**被 source**。
  * @returns 候选路径数组（仓库相对，按可信度排序）；不适用时返回 `[]`。
  */
-function selfReferentialScriptCandidates(word, selfFile) {
+function selfReferentialScriptCandidates(word, selfFile, options = {}) {
   if (word === undefined || word === '' || selfFile === undefined) return []
   if (!/\.(?:sh|bash)$/u.test(selfFile)) return []
+  const executed = options.executed !== false
   const selfDir = selfFile.includes('/') ? selfFile.slice(0, selfFile.lastIndexOf('/')) : ''
   /** 尾段 → 相对当前脚本目录的仓内候选（越出仓库根的 `..` 一律不求值）。 */
   const joined = tail => {
@@ -2773,10 +3796,15 @@ function selfReferentialScriptCandidates(word, selfFile) {
   for (const pattern of [SHELL_SELF_DIRNAME_PATTERN, SHELL_SELF_STRIP_PATTERN]) {
     const match = pattern.exec(word)
     if (match === null) continue
-    const path = joined(match[1])
+    // **R20A-02**：`$0` 族在被 source 的正文里不代表本文件 ⇒ 不求值（保持 fail-closed）。
+    if (!executed && shellSelfReferenceNeedsExecution(match[1])) continue
+    const path = joined(match[2])
     if (path !== undefined) candidates.push(path)
   }
-  if (SHELL_BARE_SELF_PATTERN.test(word)) candidates.push(selfFile)
+  if (SHELL_BARE_SELF_PATTERN.test(word)) {
+    const reference = SHELL_BARE_SELF_PATTERN.exec(word)[1]
+    if (executed || !shellSelfReferenceNeedsExecution(reference)) candidates.push(selfFile)
+  }
   return candidates
 }
 /**
@@ -2788,7 +3816,9 @@ function selfReferentialScriptCandidates(word, selfFile) {
  * 上下文只有闭包节点知道 ⇒ 三处必须看到**同一份**求值后的词数组，否则修了载体跟随、
  * make 扫描器照样把同一句判红（R19A-04 第一次修法实测就踩在这里）。
  * @param text - 正文。
- * @param context - `{ selfFile, resolve }`；`resolve` 把候选路径判成仓内路径或 `undefined`。
+ * @param context - `{ selfFile, resolve, executed }`；`resolve` 把候选路径判成仓内路径或
+ *   `undefined`；`executed === false` 表示这份正文是**被 `source`** 的（R20A-02：`$0` 族
+ *   不求值，`BASH_SOURCE` 族照旧求值）。
  * @returns 词数组的数组（已做常量传播）。
  */
 const SHELL_WORDS_FOR_CACHE = new Map()
@@ -2797,11 +3827,12 @@ function shellCommandWordListsFor(text, context = undefined) {
     return shellCommandWordLists(text)
   }
   // 记忆化：同一段正文会被 make / compose / 载体三个扫描器各问一次（性能，不是语义）。
-  const cacheKey = `${context.selfFile}\u0000${text}`
+  // 缓存键必须带 `executed`（同一个文件可能既被执行又被 source，两份词数组不等价）。
+  const cacheKey = `${context.selfFile}\u0000${context.executed === false ? 'sourced' : 'exec'}\u0000${text}`
   const cached = SHELL_WORDS_FOR_CACHE.get(cacheKey)
   if (cached !== undefined) return cached
   const rewritten = rawShellCommandWordLists(text).map(words => words.map(word => {
-    for (const candidate of selfReferentialScriptCandidates(word, context.selfFile)) {
+    for (const candidate of selfReferentialScriptCandidates(word, context.selfFile, { executed: context.executed !== false })) {
       const resolved = context.resolve(candidate)
       if (resolved !== undefined) return resolved
     }
@@ -2855,9 +3886,44 @@ function containerRunnerCommandIndex(words, start, spec) {
   for (let taken = 0; taken < (subSpec.positional ?? 0) && words[index] !== undefined; taken += 1) index += 1
   return { subcommand, commandIndex: index, entrypoint }
 }
+/**
+ * 一个词归一后的**仓内相对路径形态**（R22 FIX-14 / E-01 形态 B 的唯一实现）。
+ *
+ * ## 现场（第二十二轮 V7 泳道，形态 B）
+ *
+ * `printf … > gen.sh; chmod +x gen.sh; ./gen.sh` 在 CI 里真实执行了端到端入口，而
+ * `check-integration-tests.mjs` **EXIT=0** 且凭据行照旧写 `static-only / 真实接线 0 处`。
+ * 根因是同一格判据的**入口条件**：
+ *   · 跟随面（`scanCarrierPaths` ①，命令位）要求 `isRepoRelativePathWord(command)`，
+ *     而它的字符类首字符是 `[A-Za-z0-9_]`（`.` 不在其中）⇒ `./gen.sh` 整条分支被跳过；
+ *   · 落到登记制（{@link isRegisteredCommandWord}）又被 `word.includes('/')` 短路放行。
+ * 于是 `./x` 既不被跟随、也不进登记制、也不进"仓内不存在 ⇒ 生成物"那一格 ——
+ * 同一个目标只多写一个 `bash`（`bash ./gen.sh`）就 EXIT=1，说明判据本体是对的。
+ *
+ * ## 归一口径
+ *
+ * 只归一**前导 `./`**（`./x`、`.//x`）：`./x` 与 `x` 在命令位/脚本位上是同一个语义。
+ * `.` 与 `..` 本身**不是**载体路径（`.` 还是 `source` 的别名）；`../x` 的解析依赖这条
+ * 命令的工作目录，交给既有的 `resolveCarrierPath()` / `expandTokens()` 口径，不在这里猜。
+ * @param word - 命令位/脚本位上的词。
+ * @returns 归一后的仓内相对路径；形态不是仓内相对路径时返回 `undefined`。
+ */
+function normalizeRepoRelativeWord(word) {
+  if (typeof word !== 'string' || word === '') return undefined
+  if (word.startsWith('/') || word.startsWith('~') || word.startsWith('-')) return undefined
+  const cleaned = word.replace(/^(?:\.?\/)+/u, '')
+  if (cleaned === '' || cleaned === '.' || cleaned === '..') return undefined
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/u.test(cleaned)) return undefined
+  return cleaned
+}
 function isRegisteredCommandWord(word) {
   if (word === undefined || word === '') return true
-  if (word.includes('/')) return true
+  // **R22 FIX-14（E-01 形态 B）**：含 `/` 一律算"已登记"是**命令位**的放行口径
+  // （"路径形态交给载体跟随/文本面"）—— 它没错，错的是"一个词到底算不算仓内相对路径"
+  // 用的是另一套（不含 `.`）的字符类。现在两侧共用 {@link normalizeRepoRelativeWord}：
+  // 仓内相对路径形态 ⇒ **不在登记制里放行**（返回 `false`，由跟随面/生成物判据回答
+  // "跟不跟得上"）；其余含 `/` 的词（绝对路径 / 变量 / 通配 / 仓外）维持原口径。
+  if (word.includes('/')) return normalizeRepoRelativeWord(word) === undefined
   if (word === MAKE_RECURSIVE_WORD) return true
   if (SHELL_RESERVED_WORDS.has(word)) return true
   const candidate = executableNameCandidate(word)
@@ -3019,6 +4085,14 @@ function unwrapCommandWordsUncached(words, strict = true) {
     const candidate = executableNameCandidate(word)
     if (strict && candidate !== undefined && !SHELL_RESERVED_WORDS.has(candidate)) commandWords.push(candidate)
     if (isRegisteredCommandWord(word)) return
+    // **R22 FIX-14（E-01 形态 B）**：仓内相对路径形态（`./x.sh` / `gen.sh` / `scripts/x.sh`）
+    // 不是"可执行名"，它是**载体路径** —— 判据在跟随面：存在 ⇒ 跟随；不存在 ⇒
+    // `missing-script-carrier`；同一段文本里被写过 ⇒ 同样记红（见 `runtimeWrittenCarriers`）。
+    // 在这里记 `unregistered-command` 会与跟随面**重复计红**，也会把"检查期不存在的生成物"
+    // 误诊成"未登记的可执行名"（两者要的修法完全不同：一个要登记，一个要改写成仓内脚本）。
+    // 条件与跟随面①的入口**逐字相同**（`/` 或 `.` + 仓内相对路径形态）：没有这两个字符的
+    // 裸词（`r16a-unknown-runner`）仍然是"可执行名"，照旧走登记制（R16-W 的自证样本）。
+    if (/[/.]/u.test(word) && normalizeRepoRelativeWord(word) !== undefined) return
     if (!strict) return
     // **读不懂的形态**（含 `$`/反引号且常量传播解析不出字面量）与**未登记的可执行名**是
     // 两种不同的红：前者要"写成字面量或逐处登记进 `CI_SURFACE_COMMAND_SHAPE_ACK`"，
@@ -3231,10 +4305,26 @@ function unwrapCommandWordsUncached(words, strict = true) {
       if (runnerSpec !== undefined) {
         const probe = containerRunnerCommandIndex(words, index, runnerSpec)
         if (probe !== null) {
-          if (probe.entrypoint !== undefined) acceptNested(`${head} ${probe.subcommand} --entrypoint`, probe.entrypoint)
+          if (probe.entrypoint !== undefined) {
+            // **`--entrypoint <程序>` 的真实 argv**（R20A-01 的伴随修法）：docker/podman 的语义是
+            // "用 `<程序>` **替换**镜像的 ENTRYPOINT，镜像之后那些词作为它的**参数**"——
+            // 也就是 `docker run --entrypoint sh <镜像> -c '<文本>'` 真正执行的是
+            // `sh -c '<文本>'`。修前只把 `<程序>` 那一个词交给递归（`acceptNested(…, 'sh')`）：
+            //   · `sh` 单独成一条命令 ⇒ 被 R20A-01 的"解释器脚本位缺失"判红（真仓
+            //     `scripts/ci-build-channel-images.sh` 的 `--entrypoint sh … -c '…'` 实测撞上）；
+            //   · 而且 `-c` 的取值（真正被执行的那段文本）**从来没进过任何一张网**。
+            // 按真实 argv 拼接后，两条都收口：`-c` 的取值按内层 shell 文本递归（与解释器同口径）。
+            const argv = [probe.entrypoint, ...words.slice(probe.commandIndex)]
+            const inner = unwrapCommandWords(argv, strict)
+            heads.push(...inner.heads)
+            nestedTexts.push(...inner.nestedTexts)
+            modules.push(...inner.modules)
+            commandWords.push(...inner.commandWords)
+            problems.push(...inner.problems)
+            return stop()
+          }
           index = probe.commandIndex
           wrapped = true
-          if (probe.entrypoint !== undefined) return stop()
           continue
         }
       }
@@ -3243,43 +4333,60 @@ function unwrapCommandWordsUncached(words, strict = true) {
     //    `-c` 之前的长选项必须一起跳过（R16A-05：修前循环条件 `!startsWith('--')` 直接退出，
     //    于是 `bash --noprofile --norc -c '<cmd>'` 整条不再递归）。
     if (COMMAND_SHELL_WORDS.has(head)) {
-      let cursor = index + 1
-      let callFlag = null
-      while (cursor < words.length && words[cursor] !== '--' && words[cursor].startsWith('-')) {
-        if (/^-[A-Za-z]*c[A-Za-z]*$/u.test(words[cursor])) callFlag = words[cursor]
-        cursor += 1
-      }
-      if (callFlag !== null) {
-        acceptNested(`${head} ${callFlag}`, words[cursor])
+      // **R20A-01**：旗标段（含"带取值的旗标"与选项结束标记 `--`）的消费**只允许一份实现** ——
+      // 就是 {@link shellScriptWordIndex}。修前这里是手写循环：遇到 `--` 就停、也不认
+      // `-O extglob` 的取值位 ⇒ 脚本位被掩蔽（`bash -- "$P"` / `bash -O extglob "$P"` 实测 EXIT=0）。
+      const { scriptIndex, commandText } = shellScriptWordIndex(words, index)
+      if (commandText !== null) {
+        acceptNested(`${head} ${commandText.flag}`, commandText.text)
         return stop()
       }
+      const scriptWord = scriptIndex < 0 ? undefined : words[scriptIndex]
       // **here-string**（`bash <<< '<脚本文本>'`）：取值就是被执行的脚本文本（R17A-02）。
-      if (words[cursor] === SHELL_HERESTRING_MARKER) {
-        acceptNested(`${head} <<<`, words[cursor + 1])
+      if (scriptWord === SHELL_HERESTRING_MARKER) {
+        acceptNested(`${head} <<<`, words[scriptIndex + 1])
+        return stop()
+      }
+      // **脚本位缺失**（`bash` / `bash -e` / `bash --`）：读不到脚本位 ≠ 没有执行面 ——
+      // 不带脚本位的 shell 会**从 stdin 读命令**（`cat scripts/x.sh | bash`、`bash < x.sh`），
+      // CI 的 stdin 完全可以是仓内内容 ⇒ 与"脚本位读不懂"同一口径 fail-closed
+      // （R20A-01 的收口③："越界/只有旗标"不得静默当成"这一层没有端到端"）。
+      if (scriptWord === undefined) {
+        problems.push({
+          kind: 'shell-argument-unreadable',
+          word: '',
+          raw: words.slice(index).join(' '),
+          message: `\`${head}\` 的**脚本位缺失**（${words.slice(index).join(' ')}）—— 旗标段之后没有`
+            + '任何脚本位，而 shell 这时会**从 stdin 读命令**（`cat <文件> | bash` / `bash < <文件>`），'
+            + '闭包判不了 stdin 里是什么 ⇒ fail-closed 记红（修前这一格是"取不到脚本位就放行"，'
+            + 'R20A-01）。请把脚本写成**字面路径**（`bash <仓内相对路径>`），或把这一处登记进 '
+            + '`CI_SURFACE_VARIABLE_COMMAND_ACK`。',
+        })
         return stop()
       }
       // **脚本位读不懂**（`bash 'a b'` / `bash *.sh` / `bash "$D/x.sh"` / `bash /tmp/x.sh`）：
       // 闭包判不了它跑什么 ⇒ fail-closed（R18A-01：含 `/` **不再**豁免）。
       // 唯一的"可读"路径形态是根变量前缀（`$GITHUB_WORKSPACE/scripts/x.sh`）：剥掉前缀后
       // 按正常载体跟随处理（跟得上就跟随、跟不上按 `carrier-command-missing` 记红）。
-      const scriptWord = words[cursor]
       const rootRelative = stripRootVariablePrefix(scriptWord)
       const scriptShape = rootRelative === undefined ? shellScriptPositionShape(scriptWord) : undefined
       if (scriptShape !== undefined) {
         problems.push({
           kind: 'shell-argument-unreadable',
-          word: scriptWord ?? '',
+          word: scriptWord,
           raw: words.slice(index).join(' '),
           message: `\`${head}\` 的脚本位读不懂（${words.slice(index).join(' ')}）—— 形态：`
             + `**${scriptShape}**。这一位闭包判不了它到底执行哪个文件或哪段文本`
-            + '（`bash <<< \'<命令>\'`、`bash <(…)`、`bash *.sh`、`bash "$D/x.sh"` 同族），'
+            + '（`bash <<< \'<命令>\'`、`bash <(…)`、`bash *.sh`、`bash "$D/x.sh"`、'
+            + '`bash -- "$P"` 同族），'
             + '所以按 fail-closed 记红，不再"解析不出名字就放过"（R18A-01 的现场正是'
             + '`bash "$D/x.sh"` 既不被跟随也不记红）。请把它写成仓内脚本的**字面路径**'
             + '（或 `$GITHUB_WORKSPACE/<仓内相对路径>`），或把这一处登记进 '
             + '`CI_SURFACE_VARIABLE_COMMAND_ACK`。'
             + '\n  注：`$(dirname "$0")/<尾段>` / `${BASH_SOURCE[0]%/*}/<尾段>` / 裸 `$0` 这类'
             + '**自指脚本位**会在被跟随的仓内 shell 脚本正文里按"当前脚本所在目录"求值'
-            + '（R19A-04）：求值出**仓内存在**的路径就按普通载体跟随（不再记红）；'
+            + '（R19A-04；**R20A-02 收口**：`$0` 系只在脚本被**执行**时成立，被 `source` 时'
+            + '`$0` 仍是调用者 ⇒ 那里不求值、维持 fail-closed）；'
             + '这条仍然是红的，说明求值出的候选**不在仓内**（或越出了仓库根）——'
             + '请把尾段写成仓内真实存在的相对路径，或按上面两条出路处理。',
         })
@@ -3287,7 +4394,44 @@ function unwrapCommandWordsUncached(words, strict = true) {
       }
       pushHead(rootRelative === undefined
         ? words.slice(index)
-        : [head, rootRelative, ...words.slice(cursor + 1)])
+        : [head, rootRelative, ...words.slice(scriptIndex + 1)])
+      return stop()
+    }
+    // ①a2 `source <脚本>` / `. <脚本>`（**R20A-01 的同族站点**）：`source`/`.` 是标准词，
+    //     不走上面的解释器分支 —— 修前它们的脚本位**从来没被取过词**（`source -- "$P"` 的
+    //     `--` 落在参数位扫描里被当旗标跳过，脚本位读不懂也不记红；审计夹具 `d-param-src` 实测
+    //     EXIT=0，而 tripwire 证明运行期真的执行了端到端入口）。
+    //     取词与形态判据与解释器**同一份**（同一个 {@link shellScriptWordIndex}）。
+    if (head === 'source' || head === '.') {
+      const { scriptIndex, commandText } = shellScriptWordIndex(words, index)
+      // `source -c '<文本>'` 不是合法形态：脚本位取不到就是读不懂（fail-closed，不特判）。
+      const scriptWord = commandText === null && scriptIndex >= 0 ? words[scriptIndex] : undefined
+      if (scriptWord === SHELL_HERESTRING_MARKER) {
+        acceptNested(`${head} <<<`, words[scriptIndex + 1])
+        return stop()
+      }
+      const rootRelative = stripRootVariablePrefix(scriptWord)
+      const scriptShape = rootRelative === undefined ? shellScriptPositionShape(scriptWord) : undefined
+      if (scriptShape !== undefined) {
+        problems.push({
+          kind: 'shell-argument-unreadable',
+          word: scriptWord ?? '',
+          raw: words.slice(index).join(' '),
+          message: `\`${head}\` 的**被 source 的脚本位**读不懂（${words.slice(index).join(' ')}）—— 形态：`
+            + `**${scriptShape}**。 \`source <脚本>\`（\`.\` 同义）的脚本位与解释器的脚本位同义，`
+            + '都是"要执行的文件的文本"，只是执行发生在**当前 shell** 里；闭包读不懂它就读不到那份'
+            + '脚本文本 ⇒ 按 fail-closed 记红（R20A-01：修前 `source -- "$P"` 的脚本位被 `--` 掩蔽，'
+            + '整条判据失效）。请把它写成仓内脚本的**字面路径**'
+            + '（或 `$GITHUB_WORKSPACE/<仓内相对路径>`），或把这一处登记进 '
+            + '`CI_SURFACE_VARIABLE_COMMAND_ACK`。'
+            + '\n  注（R20A-02）：被 `source` 的脚本里 `$0` **仍是调用者**，所以'
+            + '`$(dirname "$0")/<尾段>` 在那里不求值（`${BASH_SOURCE[0]%/*}/<尾段>` 才是自指）。',
+        })
+        return stop()
+      }
+      pushHead(rootRelative === undefined
+        ? words.slice(index)
+        : [head, rootRelative, ...words.slice(scriptIndex + 1)])
       return stop()
     }
     // ①b `find … -exec <命令> … {;|+}`：命令在**参数位**（R16A-07）。
@@ -3307,12 +4451,26 @@ function unwrapCommandWordsUncached(words, strict = true) {
           // `find scripts -maxdepth 1 -name 'x.sh' -exec bash {} \;` 的 `{}` 既不解析、
           // 也不跟随、也不判红（同族的 `xargs -I{} bash {}` 早就红了）⇒ 被 `-exec` 执行的
           // 那份包装脚本整份不可见，而 CI 真的会跑它。
-          if (COMMAND_SHELL_WORDS.has(argv[0])) {
-            const scriptShape = shellScriptPositionShape(argv[1])
+          if (COMMAND_SHELL_WORDS.has(argv[0]) || argv[0] === 'source' || argv[0] === '.') {
+            // **R20A-01**：脚本位的**取词**与命令行上的解释器分支共用同一份实现
+            // （{@link shellScriptWordIndex}）—— 修前这里直接读 `argv[1]`，于是
+            // `find … -exec bash -- {} \;` 的 `argv[1]` 是 `--`（被 `startsWith('-')` 放行）、
+            // `find … -exec bash -O extglob {} \;` 的 `argv[1]` 是取值位 `extglob`
+            // ⇒ 与解释器分支口径不一致，正是本条的根因。
+            const { scriptIndex, commandText } = shellScriptWordIndex(argv, 0)
+            if (commandText !== null) {
+              // `find … -exec bash -c '<文本>' …`：与解释器分支同口径（取值是内层 shell 文本）。
+              acceptNested(`find … -exec ${argv[0]} ${commandText.flag}`, commandText.text)
+              cursor += 1
+              continue
+            }
+            const scriptWord = scriptIndex < 0 ? undefined : argv[scriptIndex]
+            const rootRelative = stripRootVariablePrefix(scriptWord)
+            const scriptShape = rootRelative === undefined ? shellScriptPositionShape(scriptWord) : undefined
             if (scriptShape !== undefined) {
               problems.push({
                 kind: 'shell-argument-unreadable',
-                word: argv[1] ?? '',
+                word: scriptWord ?? '',
                 raw: argv.join(' '),
                 message: `\`find … -exec ${argv.join(' ')}\` 的脚本位读不懂 —— 形态：`
                   + `**${scriptShape}**。 \`-exec\` 的脚本位与命令行上的脚本位同义，`
@@ -3321,6 +4479,11 @@ function unwrapCommandWordsUncached(words, strict = true) {
                   + '或把这一处登记进 `CI_SURFACE_VARIABLE_COMMAND_ACK`。',
               })
               return stop()
+            }
+            if (rootRelative !== undefined) {
+              pushHead([argv[0], rootRelative, ...argv.slice(scriptIndex + 1)])
+              cursor += 1
+              continue
             }
           }
           pushHead(argv)
@@ -3370,6 +4533,9 @@ function unwrapCommandWordsUncached(words, strict = true) {
     const label = head
     index += 1
     wrapped = true
+    // **R21 fix-6 / E-01**：`-m <模块>` 会把模块名推进 `modules`（那不是脚本位）——
+    // 记下 `skipFlags` 之前的条数，下面据此区分"脚本位"与"模块名"。
+    const modulesBefore = modules.length
     const { execTexts, codeTexts, lookup } = skipFlags(spec)
     for (const { flag, text } of execTexts) acceptNested(`${label} ${flag}`, text)
     for (const { flag, text } of codeTexts) acceptCode(`${label} ${flag}`, text)
@@ -3418,7 +4584,15 @@ function unwrapCommandWordsUncached(words, strict = true) {
           })
           return stop()
         }
-        pushHead(rest, { checkRegistry: false })
+        // **R21 fix-6 / E-01**：脚本**存在**时把解释器词一起入 head（`[node, <脚本>, …]`），
+        // 否则这一位只是一个"光秃秃的词"，下游只按 `isRepoRelativePathWord(command) &&
+        // (command.includes('/') || command.includes('.'))` 才认它是命令位 —— 于是
+        // **无扩展名的脚本**（`node gen` / `python3 gen`，生成物落在 CWD 的另一种写法）
+        // 整族隐形。带上解释器词之后，②b 的脚本位判据（与 `bash gen.sh` 同一份）照常生效。
+        // 只在"确实取到脚本位"时这么做：`python3 -m <模块>` 的 `rest[0]` 是模块**之后的参数**
+        // （不是脚本位），带上解释器词会让它被当成脚本位 ⇒ 假红（`python3 -m http.server 8000`）。
+        const scriptPosition = modules.length === modulesBefore
+        pushHead(scriptPosition ? [label, ...rest] : rest, { checkRegistry: false })
       }
       return stop()
     }
@@ -3483,6 +4657,86 @@ function shellCommandTokens(source) {
     for (const { resolved } of shellCommandAnalysis(source).substitutions) pushToken(resolved)
   }
   return tokens
+}
+
+/**
+ * **here-doc 的正文不是命令、终止词不是路径** —— 命令位扫描前先把它们收进
+ * `-c '<正文>'`（R22 FIX-14 / V7-06 的误红面）。
+ *
+ * ## 现场
+ *
+ * CI 里完全良性的两种写法（本仓当前没有，但都是标准 shell）：
+ *
+ * ```yaml
+ * - run: |
+ *     python3 - <<'PY'
+ *     import json
+ *     print(json.dumps({}))
+ *     PY
+ *     bash -s <<'EOF'
+ *     echo hello
+ *     EOF
+ * ```
+ *
+ * 修前 `check-integration-tests.mjs` 在这一段上打出 **8 条**诊断：正文里的 `import` /
+ * `print` / `json.dumps` 被读成"命令位上未登记的可执行名"，终止词 `PY` / `EOF` 被读成命令名、
+ * 又被读成"**脚本位指向仓内不存在的路径** `PY`（python3 PY）"。**正文是数据、终止词是流标记，
+ * 都不是仓库里的路径** —— 这一格修前也是红的（不是绿/红翻转），但诊断是错的：它把"判据读不懂
+ * 这个形态"说成了"仓里少了一个脚本"，会把人引向完全错误的修法（去建一个叫 `PY` 的文件）。
+ *
+ * ## 口径
+ *
+ * 行级重写（只用于**命令位扫描**；文本网/token 网仍读原文 —— 那是"提到过就算"的方向）：
+ *   · 认出 `<<` / `<<-` 后面的终止词，吃掉正文与终止词行；
+ *   · 命令词是 **shell / python 解释器**时，把正文交回去当**程序文本**：
+ *     `bash -s <<'EOF' …` → `bash -c '<正文>'`、`python3 - <<'PY' …` → `python3 -c '<正文>'`
+ *     （两者在闭包里都有既有的"内层文本/源码"通道，正文里的执行调用照常被跟随、照常判）；
+ *   · 其它命令（`cat > x <<EOF`）：正文只是数据，去掉即可（写目标由重定向那一路照常记录）。
+ * `cat <<'EOF' | bash` 这类"正文经管道喂给 shell"的形态**不在**这里的识别面内 —— 去掉正文后
+ * 命令行上是"`bash` 没有脚本位"，仍按既有口径 fail-closed（那是"stdin 里是什么判不了"，
+ * 与"路径不存在"是两回事，诊断也不再指向一个不存在的文件）。
+ *
+ * 边界（认账）：行级扫描器 —— 命令词取该行第一个词（`if bash -s <<EOF` 这种带语法构件的写法
+ * 按"其它命令"处理：正文被去掉、命令行上留下"脚本位缺失"的 fail-closed）；一行多个 here-doc
+ * 时只有第一个正文被内联（其余按数据去掉）；引号里出现的 `<<` 若后面恰好跟标识符也会被当作
+ * here-doc（宁可少读一段命令文本，也不把正文读成命令）。
+ * @param source - 一段 shell 文本。
+ * @returns 重写后的文本（here-doc 正文不再出现在命令行上）。
+ */
+function inlineHeredocs(source) {
+  const lines = String(source).split('\n')
+  const out = []
+  let cursor = 0
+  while (cursor < lines.length) {
+    const line = lines[cursor]
+    const operators = [...line.matchAll(HEREDOC_OPERATOR)]
+    if (operators.length === 0) {
+      out.push(line)
+      cursor += 1
+      continue
+    }
+    let stripped = line
+    let body = null
+    let scan = cursor + 1
+    for (const [at, match] of operators.entries()) {
+      const collected = []
+      while (scan < lines.length && lines[scan].trim() !== match[2]) {
+        if (at === 0) collected.push(match[1] === '-' ? lines[scan].replace(/^\t+/u, '') : lines[scan])
+        scan += 1
+      }
+      if (scan < lines.length) scan += 1 // 终止词那一行
+      if (at === 0) body = collected.join('\n')
+      stripped = stripped.replace(match[0], '')
+    }
+    const command = stripped.trim().split(/\s+/u)[0] ?? ''
+    if (body !== null && body !== '' && HEREDOC_PROGRAM_WORDS.has(command)) {
+      out.push(`${stripped.trimEnd()} -c ${shellSingleQuote(body)}`)
+    } else {
+      out.push(stripped)
+    }
+    cursor = scan
+  }
+  return out.join('\n')
 }
 
 /**
@@ -3568,21 +4822,81 @@ function jsConstantBindings(source) {
 function jsImportBindings(source, resolveImport = undefined, reportUnreadable = undefined) {
   const text = String(source)
   const local = jsConstantBindings(text)
-  /** `import { A, B as C } from '<spec>'` / `import DEF from '<spec>'`。 */
+  /** `import { A, B as C } from '<spec>'` / `import DEF from '<spec>'` / `import * as NS from '<spec>'`。 */
   const imports = new Map()
-  for (const match of text.matchAll(/(?:^|[\s;])import\s+([^;'"]*?)\s+from\s*(['"])([^'"]+)\2/gu)) {
-    const clause = match[1]
-    const specifier = match[3]
+  /**
+   * 记一条"取值在别的模块里"的名字（惰性求值，见返回值的 `get`）。
+   *
+   * 名字允许**一个点**：命名空间成员按复合键 `NS.成员` 登记（R20A-03 ①），
+   * 普通 import 名是一个标识符。多于一层的成员访问（`NS.a.b`）不登记 —— 那是二级取值，
+   * 闭包的常量表不建模（认账边界）。
+   */
+  const recordImport = (name, specifier, imported) => {
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?$/u.test(name)) return
+    imports.set(name, { specifier, imported })
+  }
+  /**
+   * **命名空间绑定**（`import * as NS` / `const NS = (await )?import('…')` /
+   * `const NS = require('…')`）—— R20A-03 ①。
+   *
+   * 命名空间对象本身不是路径（`spawnSync('bash', [NS])` 判不了），但它**静态可见的成员**
+   * （`NS.ENTRY` / `NS['ENTRY']`）等价于"从那个模块命名导入 ENTRY"。所以：把正文里所有
+   * `NS.<成员>` 的成员登记成**复合键** `NS.<成员>`（{@link resolveJsExpression} 的成员访问
+   * 分支按这个键查表），取值仍然惰性求值 —— 只有真的被用到才去读被 import 的仓内模块。
+   */
+  const recordNamespace = (name, specifier) => {
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name)) return
+    namespaces.set(name, specifier)
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    for (const match of text.matchAll(new RegExp(`\\b${escaped}\\s*\\.\\s*([A-Za-z_$][A-Za-z0-9_$]*)`, 'gu'))) {
+      recordImport(`${name}.${match[1]}`, specifier, match[1])
+    }
+    for (const match of text.matchAll(new RegExp(`\\b${escaped}\\s*\\[\\s*(['"])([A-Za-z_$][A-Za-z0-9_$]*)\\1\\s*\\]`, 'gu'))) {
+      recordImport(`${name}.${match[2]}`, specifier, match[2])
+    }
+  }
+  /** 被登记为"命名空间"的名字（这些名字本身不求值，见返回值的 `get`）。 */
+  const namespaces = new Map()
+  /** `import { A, B as C } from '<spec>'` 的**子句** → 逐名登记（`{ }` / 默认 / 命名空间三种）。 */
+  const recordImportClause = (clause, specifier) => {
     const named = /\{([^}]*)\}/u.exec(clause)
     if (named !== null) {
       for (const entry of named[1].split(',')) {
         const parts = entry.split(/\s+as\s+/u).map(part => part.trim()).filter(part => part !== '')
         if (parts.length === 0) continue
-        imports.set(parts[parts.length - 1], { specifier, imported: parts[0] })
+        recordImport(parts[parts.length - 1], specifier, parts[0])
       }
     }
+    const namespace = /^\s*\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*$/u.exec(clause.split(',')[0])
+    if (namespace !== null) {
+      recordNamespace(namespace[1], specifier)
+      return
+    }
     const defaultName = clause.split(',')[0].replace(/\{[^}]*\}/u, '').trim()
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(defaultName)) imports.set(defaultName, { specifier, imported: 'default' })
+    if (defaultName !== '') recordImport(defaultName, specifier, 'default')
+  }
+  for (const match of text.matchAll(/(?:^|[\s;])import\s+([^;'"]*?)\s+from\s*(['"])([^'"]+)\2/gu)) {
+    recordImportClause(match[1], match[3])
+  }
+  // **动态 `import('…')` 与 CJS `require('…')`**（R20A-03 ①的同族）：两者都是
+  // "取值在**另一个模块**里"，只是形态不同 ——
+  //   · `const mod = await import('./paths.mjs')` / `const mod = require('./paths.cjs')`
+  //     ⇒ 命名空间绑定（成员按复合键惰性求值）；
+  //   · `const { ENTRY } = await import('./paths.mjs')` / `const { ENTRY } = require('./paths.cjs')`
+  //     ⇒ 逐名绑定。
+  // 修前这两族整族隐形（连"模块存在"都不知道 ⇒ 从不被读、字面量从不进任何网）。
+  const dynamicImport = /(?:^|[\s;{}])(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:await\s+)?(?:import|require)\s*\(\s*(['"])([^'"]+)\2\s*\)/gu
+  for (const match of text.matchAll(dynamicImport)) {
+    const target = match[1]
+    if (target.startsWith('{')) {
+      for (const entry of target.slice(1, -1).split(',')) {
+        const parts = entry.split(/\s*:\s*/u).map(part => part.trim()).filter(part => part !== '')
+        if (parts.length === 0) continue
+        recordImport(parts[0], match[3], parts[parts.length - 1])
+      }
+      continue
+    }
+    recordNamespace(target, match[3])
   }
   const imported = new Map()
   return {
@@ -3590,6 +4904,10 @@ function jsImportBindings(source, resolveImport = undefined, reportUnreadable = 
     get(name) {
       const hit = local.get(name)
       if (hit !== undefined) return hit
+      // **命名空间对象本身**不是字面量（`spawnSync('bash', [NS])` 这一形态判不了它跑什么，
+      // 也**不记红**：那是形参/运行期取值同族的边界，见 {@link jsExecArgumentLiterals} 的
+      // 误报面）。它的成员走上面的复合键，仍按 fail-closed 口径处理。
+      if (namespaces.has(name)) return undefined
       const spec = imports.get(name)
       if (spec === undefined || resolveImport === undefined) return undefined
       if (imported.has(name)) return imported.get(name)
@@ -3815,6 +5133,14 @@ function resolveJsExpression(expression, bindings, depth = 0) {
   // 对象字面量的成员访问（"常量表"形态：`const TARGETS = { e2e: 'integration-tests/run-all.sh' }`）。
   const memberAccess = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)$/u.exec(expr)
   if (memberAccess !== null) {
+    // **命名空间 import 的成员**（R20A-03 ①）：`import * as PATHS from './paths.mjs'` /
+    // `const mod = require('./paths.cjs')` 之后，`PATHS.ENTRY` 等价于"从那个模块命名导入
+    // ENTRY"。这类绑定在 {@link jsImportBindings} 里按**复合键** `PATHS.ENTRY` 登记
+    // （惰性求值，只有真被用到才读被 import 的仓内模块）。
+    const namespaceMember = bindings.get(`${memberAccess[1]}.${memberAccess[2]}`)
+    if (namespaceMember !== undefined && !namespaceMember.ambiguous) {
+      return resolveJsExpression(namespaceMember.expression, bindings, depth + 1)
+    }
     const objectValue = resolveJsBindingValue(memberAccess[1], bindings, depth)
     if (objectValue !== undefined && objectValue.trim().startsWith('{')) {
       for (const entry of splitJsTopLevel(objectValue.trim().slice(1, -1), ',')) {
@@ -4096,9 +5422,12 @@ function shellProcsubIsScriptPosition(words, index) {
   const command = words[0]
   if (command === undefined || SHELL_RESERVED_WORDS.has(command)) return false
   if (!SHELL_PROCSUB_SCRIPT_HOSTS.has(command)) return false
-  let cursor = 1
-  while (cursor < words.length && words[cursor].startsWith('-')) cursor += 1
-  return cursor === index
+  // **R20A-01**：旗标段的消费与解释器分支共用同一份实现（含 `--` 与"带取值的旗标"）。
+  // `bash -c '<文本>' <(…)` 里的那一位是 `$0`（不是脚本位）—— `-c` 的取值就是命令文本，
+  // 所以 `commandText !== null` 时直接判"不是脚本位"。
+  const { scriptIndex, commandText } = shellScriptWordIndex(words, 0)
+  if (commandText !== null) return false
+  return scriptIndex === index
 }
 /**
  * **here-string** `<<<` 的标记词（R17-X）：它的取值是**另一段文本**
@@ -4136,6 +5465,259 @@ const SHELL_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/su
 const SHELL_INDIRECTION_PATTERN = /[$`]/u
 /** 词里出现通配元字符 = 路径模式（`case` 分支 / glob），不是可执行名。 */
 const SHELL_GLOB_PATTERN = /[*?[\]]/u
+/**
+ * **"这段文本写过哪些文件"**的识别形态（R22 FIX-14 / E-01 形态 A；**R23 FIX-22 收口形态 A-2**）。
+ *
+ * · {@link WRITE_REDIRECT_TARGET}：重定向的**目标词**（`> x` / `>> x` / `2> x` / `&> x` / `>| x`）。
+ *   `2>&1`（后面是 `&`）与 `<<`（here-doc，另由 `inlineHeredocs` 处理）都不命中。
+ * · {@link WRITE_COMMAND_WORDS}：把目标放在**最后一个非旗标实参**上的写命令。
+ * 两者都只产出"候选词"，是不是仓内路径由 `resolveCarrierPath()` 回答 ——
+ * 所以 `/dev/null`、`$GITHUB_ENV`、仓外路径天然不进集合。
+ *
+ * **R23 FIX-22 / W4-02**：`WRITE_COMMAND_WORDS` 那一支的取词必须在**剥掉重定向**的文本上做。
+ * 修前它在原文本上取"最后一个非旗标词"，于是
+ * `tee -a scripts/ci-brand-mask.sh >/dev/null` 取到的是 `/dev/null`、
+ * `cp /tmp/p.sh scripts/ci-brand-mask.sh > /dev/null` 同样取到 `/dev/null`
+ * ⇒ 目标整族不可见（`tee`/`cp` 就在这张词表里），而**去掉那个尾随重定向的同一条命令**判红
+ * （第二十三轮 W4 实测：`b5-tee-append` / `b2-cp-redirect` `EXIT=0`，`b1-tee-plain` / `a7-cp` `EXIT=1`）。
+ *
+ * **R23 FIX-22 / W4-09**：重定向目标也要吃**同一套常量传播**。修前重定向一侧走
+ * {@link WRITE_REDIRECT_TARGET} 正则，`note()` 一遇 `$` 就 `return`，于是
+ * `T=scripts/ci-brand-mask.sh; printf … > "$T"; bash "$T"` 里"能执行的路径"认得出来
+ * （脚本位有常量传播）、"被写过的路径"认不出来 ⇒ `EXIT=0`。现在重定向目标改由
+ * {@link tagWriteRedirections} 打标后走 `shellCommandWordListsFor()`（与命令位同一份
+ * 常量传播），标记词后紧跟的那一位就是目标。正则那一路保留，只作**文本面**兜底
+ * （tokenizer 覆盖不到的正文，例如命令替换内部）。
+ */
+const WRITE_REDIRECT_TARGET = /(?:^|[\s;&|(])(?:\d*>>?|\d*<>|&>|>\|)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)/gu
+/** 写命令词（目标是最后一个非旗标实参）；要扩面就加这里，并在 FIX-14/FIX-22 报告里写明边界。 */
+const WRITE_COMMAND_WORDS = new Set(['tee', 'cp', 'mv', 'install', 'rsync', 'ln'])
+/**
+ * **解释器内联脚本里的写操作**（R24 FIX-26 / X3-01① 的唯一实现）。
+ *
+ * ## 现场（第二十四轮 X3 泳道）
+ *
+ * `runtimeWrittenCarriers` 的两条取词路径都是 **shell 语法**（`>`/`>>` 重定向 +
+ * `tee`/`cp`/`mv`… 命令词），于是"写"换一种**同等常规**的写法就整族隐形：
+ *
+ * ```yaml
+ * - run: python3 -c "import base64,pathlib;
+ *          pathlib.Path('scripts/ci-brand-mask.sh').write_bytes(base64.b64decode('…'))"
+ * - run: bash scripts/ci-brand-mask.sh        # 执行的是被写进去的内容
+ * ```
+ *
+ * `check-integration-tests` 照印 `VERDICT PASS … 真实接线 0 处`、`check-workflows EXIT=0`，
+ * 而 tripwire 证明运行期真的执行了端到端入口。三种解释器形态（`python3 -c` / `node -e` /
+ * 变量间接）实测全绿。
+ *
+ * ## 判据（**可判定子集**：写目标是字面量）
+ *
+ * 只认"**第一实参是字面量字符串**"的写调用 —— 路径由变量拼出来的、经 `join()` 计算的、
+ * 或载荷本身不透明的，这里认不出来（那属于"运行期生成 + 不透明编码"的固有边界，
+ * 由脚本位那一格与 `CI_SURFACE_GENERATED_SCRIPT_ACK` 登记制兜）。认出**之后**仍然要过
+ * `resolveCarrierPath()`：`/tmp/x`、仓外路径、`$GITHUB_ENV` 天然不进集合。
+ *
+ * 覆盖面（每条对应一种实测/等价写法）：
+ *   · Python：`Path('X').write_text/write_bytes/open/touch`、`open('X','w…')`、
+ *     `shutil.copy*` / `shutil.move(_, 'X')`、`os.replace/rename(_, 'X')`；
+ *   · JS 家族：`writeFileSync/writeFile/appendFileSync/appendFile/createWriteStream/
+ *     truncateSync('X', …)`；
+ *   · Perl：`open(FH, '>', 'X')` / `open(FH, ">X")`。
+ *
+ * 不按语言分派（内联文本的语言标签只区分 shell/py/js，`perl -e` 落在 js 上）——
+ * 这些调用名足够特异，混用不会互相误伤。
+ * @type {Array<{ re: RegExp, group: number }>}
+ */
+const INLINE_SCRIPT_WRITE_PATTERNS = [
+  // JS 家族：第一实参是字面量的写调用。
+  {
+    re: /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|truncateSync)\s*\(\s*(['"`])([^'"`\n]+)\1/gu,
+    group: 2,
+  },
+  // Python pathlib：路径在被调方法的**宿主**上。
+  {
+    re: /\bPath\s*\(\s*(['"`])([^'"`\n]+)\1\s*\)\s*\.\s*(?:write_text|write_bytes|open|touch|unlink)\s*\(/gu,
+    group: 2,
+  },
+  // Python 内建 open：mode 必须以写标志开头（`o`pen 第三参 / 关键字参数不在此列，
+  // 宁漏不误 —— 只读 `open('X')` 绝不能算写）。
+  {
+    re: /\bopen\s*\(\s*(['"`])([^'"`\n]+)\1\s*,\s*(['"`])([wax+][^'"`\n]*)\3/gu,
+    group: 2,
+  },
+  // Python shutil / os：目标在**第二**实参。
+  {
+    re: /\b(?:shutil\s*\.\s*(?:copy|copy2|copyfile|move)|os\s*\.\s*(?:replace|rename))\s*\(\s*[^,()\n]+,\s*(['"`])([^'"`\n]+)\1/gu,
+    group: 2,
+  },
+  // Perl：`open(FH, '>', 'X')`（目标在第三实参）。
+  {
+    re: /\bopen\s*\(\s*[^,)\n]+,\s*(['"])(?:>>?|\+>?)\1\s*,\s*(['"])([^'"]+)\2/gu,
+    group: 3,
+  },
+  // Perl：`open(FH, '>X')`（模式与路径同一个串）。
+  {
+    re: /\bopen\s*\(\s*[^,)\n]+,\s*(['"])(?:>>?|\+>?)([^'"]+)\1/gu,
+    group: 2,
+  },
+]
+/**
+ * 一段**内联语言源码** → 它写过的字面量路径（去重，保持出现顺序）。
+ *
+ * @param source - `python3 -c '<源码>'` / `node -e '<源码>'` 的源码文本。
+ * @returns 字面量写目标（**未**做仓内归属判定 —— 那由 `resolveCarrierPath()` 负责）。
+ */
+function inlineScriptWriteTargets(source) {
+  const text = String(source ?? '')
+  if (text === '') return []
+  const found = new Set()
+  for (const { re, group } of INLINE_SCRIPT_WRITE_PATTERNS) {
+    // 正则带 `g` 且是**共享常量**：`matchAll` 内部会克隆，不会污染 `lastIndex`。
+    for (const match of text.matchAll(re)) {
+      const target = match[group]
+      if (typeof target === 'string' && target !== '') found.add(target)
+    }
+  }
+  return [...found]
+}
+/**
+ * **`$GITHUB_ENV` / `$GITHUB_OUTPUT` 导出的名字 → 值**（R24 FIX-26 / X3-01② 的唯一实现）。
+ *
+ * ## 现场
+ *
+ * `note()` 一遇 `$` 就 `return`（常量传播只覆盖**同一段文本内**），于是把写目标经
+ * `$GITHUB_ENV` 递给下一步就整条不可见：
+ *
+ * ```yaml
+ * - run: echo "V7T=scripts/ci-brand-mask.sh" >> "$GITHUB_ENV"
+ * - run: printf '%s' "$PAYLOAD" | base64 -d > "$V7T"   # 写目标不可见
+ * - run: bash scripts/ci-brand-mask.sh                 # ⇒ 判据看不见"被写过"
+ * ```
+ *
+ * ## 判据
+ *
+ * 逐行找"**真的在写 `$GITHUB_ENV`/`$GITHUB_OUTPUT`**"的行（出现关键字 ∧ 有 `>`/`>>`/`tee`），
+ * 把行内的 `NAME=VALUE` 字面量收进 job 作用域 —— **语义与 GitHub 一致：只影响后续 step**
+ * （调用方在扫完当前块之后才调用它，所以同一步里"先 export 再用"不会被当成已生效）。
+ * @param source - 一段 `run:` 块（已去 here-doc 正文）。
+ * @param into - 目标 `Map<名字, 值>`（就地更新）。
+ */
+function collectExportedEnvAssignments(source, into) {
+  if (!(into instanceof Map)) return
+  for (const line of String(source).split('\n')) {
+    if (!/GITHUB_(?:ENV|OUTPUT)/u.test(line)) continue
+    if (!/(?:>>?|\|\s*tee\b)/u.test(line)) continue
+    for (const match of line.matchAll(/(?:^|[\s"'])([A-Za-z_][A-Za-z0-9_]*)=([^\s"']+)/gu)) {
+      into.set(match[1], match[2])
+    }
+  }
+}
+/**
+ * 把 `$GITHUB_ENV` 传过来的名字代进一个词（{@link collectExportedEnvAssignments} 的取用侧）。
+ *
+ * 只在词**含 `$`** 时介入：不含则原样返回（保持既有语义）；含而查不到值 / 展开后仍残留 `$`
+ * 一律返回 `undefined`（= "读不懂"，调用方按原来的 fail-closed 处理，**不是**放行）。
+ * @param word - 一个词（可能带引号，调用方已去引号）。
+ * @param env - job 作用域的导出名字表。
+ * @returns 展开后的词；读不懂返回 `undefined`。
+ */
+function expandExportedEnvWord(word, env) {
+  const text = String(word)
+  if (!text.includes('$')) return text
+  if (!(env instanceof Map) || env.size === 0) return undefined
+  let unresolved = false
+  const expanded = text.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/gu,
+    (match, braced, bare) => {
+      const value = env.get(braced ?? bare)
+      if (value === undefined) { unresolved = true; return match }
+      return value
+    })
+  if (unresolved || expanded.includes('$')) return undefined
+  return expanded
+}
+/** 载体写面**闭包跟随**的深度上限（`bash scripts/a.sh` 里再 `bash scripts/b.sh` …）。 */
+const WRITE_CARRIER_FOLLOW_MAX_HOPS = 4
+/**
+ * 一段 yaml/shell 文本 → 它**本地复合 action** 的目录（`uses: ./x` → `x`，去重）。
+ *
+ * 与闭包节点那一支（`scanClosure` 的 `uses:` 分支）同口径：只认 `./` 开头的本地 action
+ * （远端 `uses: actions/checkout@v4` 的正文不在本仓，跟随不了也不该管）。
+ * @param text - yaml / shell 文本。
+ * @returns 去重后的目录名（保持出现顺序）。
+ */
+function localCompositeActionDirs(text) {
+  const found = new Set()
+  for (const uses of String(text).matchAll(/^[^\S\n]*(?:-[^\S\n]+)?uses:[^\S\n]*(\S+)[^\S\n]*$/gmu)) {
+    if (!uses[1].startsWith('./')) continue
+    found.add(uses[1].replace(/^\.\//u, ''))
+  }
+  return [...found]
+}
+/**
+ * 写重定向的**标记词**（{@link tagWriteRedirections} 用）。
+ *
+ * 词法器会把重定向操作符 `>` 当**命令分隔符**丢掉、只留下目标词
+ * （实测 `printf x > scripts/x.sh` → `["printf","x","scripts/x.sh"]`），于是"哪个词是重定向
+ * 目标"在词数组里不可见 —— `cp src dst` 与 `cp src dst >/dev/null` 给出同一个词数组。
+ * 修法是**在取词之前把标记词插在操作符前面**：`tee -a X >/dev/null`
+ * → `tee -a X __SENT__ >/dev/null` → 词数组 `["tee","-a","X","__SENT__","/dev/null"]`
+ * ⇒ 标记词的下一位就是目标，而且它已经过同一套常量传播（`> "$T"` → `scripts/x.sh`）。
+ * 标记词用下划线开头、不含 `=`，不会被词法器当成赋值或旗标。
+ */
+const WRITE_REDIRECT_SENTINEL = '__picoaide_write_redirect_target__'
+/** fd 复制（`2>&1` / `>&2`）：**没有文件目标**，取词前整段删掉（否则 `2` 会被当成目标词）。 */
+const WRITE_FD_DUPLICATION = /(?:^|[\s;&|(])\d*>&\d*/gu
+/**
+ * 写重定向操作符 + 它后面的目标词（`> x` / `>> x` / `>| x` / `&> x` / `N> x` / `N<> x`，
+ * 目标可缺省）。
+ *
+ * **R24 FIX-26 / X3-01⑦**：`N<>`（以读写方式打开，`exec 3<>file` 的形态）此前不在操作符
+ * 集合里 ⇒ `exec 3<>scripts/x; printf … >&3; exec 3>&-; bash scripts/x` 整条不可见
+ * （第二十四轮 X3 泳道实测 `EXIT=0`）。`<<`（here-doc）与 `<<<`（here-string）不会命中
+ * 这条：`\d*<>` 要求 `<` 紧跟 `>`。
+ */
+const WRITE_REDIRECTION = /(^|[\s;&|(])(\d*&>>|\d*&>|\d*>>\||\d*<>|\d*>>|\d*>\||\d*>)[ \t]*("[^"]*"|'[^']*'|[^\s;&|()<>]+)?/gu
+/**
+ * 一段 shell 文本 → **剥掉写重定向（连同目标词）**的文本（R23 FIX-22 / W4-02 的唯一实现）。
+ * @param source - 一段 shell 文本。
+ * @returns 去掉 `> x` / `>> x` / `>| x` / `&> x` / `2>&1` 之后的文本（其余逐字保留）。
+ */
+function stripWriteRedirections(source) {
+  return String(source)
+    .replace(WRITE_FD_DUPLICATION, ' ')
+    .replace(WRITE_REDIRECTION, '$1 ')
+}
+/**
+ * 一段 shell 文本 → **写重定向的操作符前面插入标记词**的文本（R23 FIX-22 / W4-09 的唯一实现）。
+ * @param source - 一段 shell 文本。
+ * @returns 每个写重定向前面都带 {@link WRITE_REDIRECT_SENTINEL} 的文本。
+ */
+function tagWriteRedirections(source) {
+  return String(source)
+    .replace(WRITE_FD_DUPLICATION, ' ')
+    // 目标词**必须留下**（`$3` 缺省时不能写成字面 `undefined`）—— 标记词只是插在操作符前面，
+    // 词法器随后丢掉操作符，于是"标记词的下一位"正好是目标词。
+    .replace(WRITE_REDIRECTION, (match, lead, operator, target) =>
+      `${lead} ${WRITE_REDIRECT_SENTINEL} ${operator}${target === undefined ? '' : ` ${target}`}`)
+}
+/**
+ * here-doc 操作符 + 终止词（`<<EOF` / `<<-'EOF'` / `<< "EOF"`）。
+ * 两侧的 `(?<!<)`/`(?!<)` 是必须的：`<<<` 是 **here-string**（`bash <<< '<脚本文本>'`），
+ * 它有自己的一条判据（{@link SHELL_HERESTRING_MARKER}）—— 少了这两个断言，`<<< 'make x'`
+ * 会被读成 here-doc 起始（从第二个 `<` 起匹配）并把脚本正文搅进命令行。
+ */
+const HEREDOC_OPERATOR = /(?<!<)<<(?!<)(-?)[ \t]*(?:['"]?)([A-Za-z_][A-Za-z0-9_]*)(?:['"]?)/gu
+/**
+ * "正文就是**要执行的程序**"的解释器词（`bash -s <<EOF` / `python3 - <<PY`）——
+ * 其余命令的 here-doc 正文是数据（见 {@link inlineHeredocs}）。
+ * `COMMAND_PYTHON_WORDS` 在文件后面才声明，但本表只在运行期求值，不存在 TDZ。
+ */
+const HEREDOC_PROGRAM_WORDS = new Set([...COMMAND_SHELL_WORDS, ...COMMAND_PYTHON_WORDS])
+/** 一段文本 → 单引号 shell 字面量（内部单引号按 `'\''` 断开，与 shell 语义一致）。 */
+function shellSingleQuote(text) {
+  return `'${String(text).split("'").join("'\\''")}'`
+}
 
 /**
  * 文本 → **命令**（每条 = 词数组）。**逐字符**切分（不是按行近似）：
@@ -4479,6 +6061,157 @@ function workflowRunBlocks(text) {
     index = cursor - 1
   }
   return blocks
+}
+/**
+ * workflow 文本 → **按 job 分组的 `run:` 块**（R23 FIX-22 / W4-01 的唯一实现）。
+ *
+ * 为什么不能只按文件顺序拿一串块：{@link workflowRunBlocks} 是**扁平**的，于是"写过该路径"
+ * 的判定只能落在"单个 `run:` 块内"。而同一个 job 的所有 step 跑在**同一个工作树**上
+ * （step① 写文件、step② 执行文件是 CI 里最普通的写法），所以跨 step 的"先写后执行"
+ * 必须按 **job 作用域**判。修前实测（第二十三轮 W4-01，`probe/logs/a2-two-steps.txt`）：
+ * 同一 job 相邻两个 step（step① 写、step② 执行）`EXIT=0` 且凭据行照旧
+ * `VERDICT PASS static-only`，而**把两段合并成一个块**就 `EXIT=1` —— 判据没错，作用域错了。
+ * 修复头注释里那句"跨 step 的值要经 `$GITHUB_ENV`、那条路已经 fail-closed"只覆盖**值**，
+ * 不覆盖**文件写**：`bash scripts/x.sh` 的脚本位是**字面路径**，不需要任何变量跨 step。
+ *
+ * 分组口径：`jobs:` 的**直接子键**（与 `jobs:` 的第一个非空子行同缩进层级的 `键:` 行）切分；
+ * 每个 job 的片段交给 {@link workflowRunBlocks} 抽块。job 名只用于诊断与"跨 job 不共享"
+ * 这条不变式（不同 job 可能跑在不同 runner 上，**不**共享工作树）。取不到 `jobs:` 或
+ * 取不到 job 子键时**退化成单组**（作用域仍然成立，只是标成 `(未知)`，绝不静默当成"没有写"）。
+ * @param text - workflow 全文。
+ * @returns `{ job, blocks }` 数组（按文件顺序）。
+ */
+function workflowJobRunBlocks(text) {
+  return workflowJobSections(text).map(section => ({
+    job: section.job,
+    blocks: workflowRunBlocks(section.text),
+  }))
+}
+/**
+ * workflow 文本 → **按 job 分组的 job 正文**（{@link workflowJobRunBlocks} 的取段实现，
+ * 抽出来是为了让 {@link workflowJobSteps} 复用同一份分组口径 —— 两处各写一份必然漂移）。
+ * @param text - workflow 全文。
+ * @returns `{ job, text }` 数组（按文件顺序）；取不到 `jobs:` 时退化成单组 `(未知)`。
+ */
+function workflowJobSections(text) {
+  const lines = String(text).split('\n')
+  let jobsIndent = null
+  let jobsLine = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^([ \t]*)jobs:[ \t]*$/u.exec(lines[index])
+    if (match !== null) { jobsIndent = match[1].length; jobsLine = index; break }
+  }
+  const fallback = [{ job: '(未知)', text: String(text) }]
+  if (jobsLine < 0) return fallback
+  let jobIndent = null
+  for (let index = jobsLine + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() === '' || /^[ \t]*#/u.test(line)) continue
+    const indent = line.length - line.trimStart().length
+    if (indent <= jobsIndent) break
+    jobIndent = indent
+    break
+  }
+  if (jobIndent === null) return fallback
+  const groups = []
+  let current = null
+  for (let index = jobsLine + 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() !== '' && !/^[ \t]*#/u.test(line)) {
+      const indent = line.length - line.trimStart().length
+      if (indent <= jobsIndent) break
+      if (indent === jobIndent) {
+        const header = /^[ \t]*([^\s:#][^:]*):/u.exec(line)
+        current = {
+          job: header === null ? `(job#${groups.length + 1})` : header[1].trim(),
+          lines: [line],
+        }
+        groups.push(current)
+        continue
+      }
+    }
+    if (current !== null) current.lines.push(line)
+  }
+  if (groups.length === 0) return fallback
+  return groups.map(group => ({ job: group.job, text: group.lines.join('\n') }))
+}
+/**
+ * 一个 job 的正文 → **按 step 顺序切开的单元**（R24 FIX-26 / X3-01③ 的唯一实现）。
+ *
+ * ## 为什么需要"按 step 顺序"
+ *
+ * R23 FIX-22 把写面作用域从"一段 `run:` 块"扩到了"整个 job"，但 job 里的载体**不止 `run:`
+ * 块**：本地复合 action（`uses: ./.github/actions/x`）的 `steps[].run` 同样跑在**同一个工作树**
+ * 上。`workflowRunBlocks` 只抽 `run:` ⇒ `uses:` 那一步在结构上不存在，写也就无从归属
+ * （第二十四轮 X3 泳道实测：`uses` + 后续 `bash` 执行 ⇒ `EXIT=0`）。
+ *
+ * 切分口径：`steps:` 之下**与首个列表项同缩进**的 `- ` 行开启一个新 step；`steps:` 之前/之外
+ * 的行不属于任何 step（`runs-on:` / `env:` 等不是 step，它们不产生"被执行"的动作）。
+ * 取不到 `steps:` 时退化成"整个 job 一个单元"（与 {@link workflowJobRunBlocks} 同形，
+ * 绝不静默丢块）。
+ *
+ * **对账**：调用方（真树那一节）逐 workflow 断言
+ * `扁平化(workflowJobSteps(x).steps[].runs) === workflowJobRunBlocks(x)[].blocks` ——
+ * 切分器与久经考验的抽取器一旦分叉就红，不允许"两套解析各说各话"。
+ * @param text - workflow 全文。
+ * @returns `{ job, steps }` 数组；每个 step 是 `{ text, runs, uses }`。
+ */
+function workflowJobSteps(text) {
+  return workflowJobSections(text).map(section => ({
+    job: section.job,
+    steps: splitWorkflowSteps(section.text),
+  }))
+}
+/**
+ * 一个 job 正文 → step 单元数组（{@link workflowJobSteps} 的切分实现）。
+ * @param jobText - job 正文（含 `steps:`）。
+ * @returns `{ text, runs, uses }` 数组。
+ */
+function splitWorkflowSteps(jobText) {
+  const whole = String(jobText)
+  const lines = whole.split('\n')
+  let stepsIndent = null
+  let listIndent = null
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^([ \t]*)steps:[ \t]*$/u.exec(lines[index])
+    if (match === null) continue
+    stepsIndent = match[1].length
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor]
+      if (line.trim() === '' || /^[ \t]*#/u.test(line)) continue
+      if (line.length - line.trimStart().length <= stepsIndent) break
+      const item = /^([ \t]*)-[ \t]/u.exec(line)
+      if (item !== null) listIndent = item[1].length
+      break
+    }
+    break
+  }
+  if (listIndent === null) {
+    return [{ text: whole, runs: workflowRunBlocks(whole), uses: localCompositeActionDirs(whole) }]
+  }
+  const chunks = []
+  let current = null
+  const header = []
+  for (const line of lines) {
+    const item = /^([ \t]*)-[ \t]/u.exec(line)
+    if (item !== null && item[1].length === listIndent) {
+      current = [line]
+      chunks.push(current)
+      continue
+    }
+    if (current !== null) current.push(line)
+    else header.push(line)
+  }
+  // `steps:` 之前的行也要成一块：那里可能有 `defaults: { run: … }` 这类**同名键**
+  // （`workflowRunBlocks` 会把它当成一个 `run:` 块读出来）。把它并进同一串，
+  // 切分器才与久经考验的抽取器**逐字同形**（对账判据因此可以严格到"逐字节相同"）。
+  // 它**不**贡献 `uses`：job 级 `uses:` 是复用工作流，不是 step。
+  const units = [{ text: header.join('\n'), runs: workflowRunBlocks(header.join('\n')), uses: [] }]
+  for (const chunk of chunks) {
+    const text_ = chunk.join('\n')
+    units.push({ text: text_, runs: workflowRunBlocks(text_), uses: localCompositeActionDirs(text_) })
+  }
+  return units
 }
 
 /**
@@ -4897,6 +6630,16 @@ function ciExecutionSurface(options) {
   }
   const mentioning = new Map()
   const reached = new Map()
+  /**
+   * **E-01 写目标识别器的最近一次实现**（R23 FIX-22 / W4-06）。
+   *
+   * `runtimeWrittenCarriers` 与 `scanCarrierPaths` 一样定义在节点处理循环体内（它依赖同一层
+   * 作用域里的 `resolveCarrierPath`），所以收尾的判决级见证拿不到它 —— 这里在每轮循环里把
+   * 当前实现挂出来，`writeTargets` 再转交给 `runtimeWriteDetectorProblem()` 在合成样本上自证。
+   * 掏空被指向的那份实现时这个引用仍然指向掏空版 ⇒ 见证必然失败（这正是要的语义）。
+   * @type {((source: string) => Set<string>) | null}
+   */
+  let writeTargetsImpl = null
   const problems = []
   /** 严格面上命令位**出现过**的可执行名集合（{@link CI_COMMAND_REGISTRY} 的死条目对账用）。 */
   const commandWords = new Set()
@@ -4906,6 +6649,8 @@ function ciExecutionSurface(options) {
   const commandShapes = []
   /** 命中的"脚本位读不懂"（`{ file, word, raw, acked }`，R18A-01）—— 用于**死条目对账**。 */
   const shellArguments = []
+  /** 命中的"脚本位指向**仓内不存在**的字面路径"（`{ file, word, raw, acked }`，R20A-05）。 */
+  const generatedScripts = []
   const seenStructuredProblems = new Set()
   const nodes = []
   const seen = new Set()
@@ -4994,6 +6739,12 @@ function ciExecutionSurface(options) {
       if (problem.kind === 'shell-argument-unreadable') {
         const acked = CI_SURFACE_VARIABLE_COMMAND_ACK.some(entry => entry.file === node.file && entry.word === problem.word)
         shellArguments.push({ file: node.file, word: problem.word, raw: problem.raw, acked })
+        if (!acked) problems.push(`${node.file}：${problem.message}`)
+        return
+      }
+      if (problem.kind === 'missing-script-carrier') {
+        const acked = CI_SURFACE_GENERATED_SCRIPT_ACK.some(entry => entry.file === node.file && entry.word === problem.word)
+        generatedScripts.push({ file: node.file, word: problem.word, raw: problem.raw, acked })
         if (!acked) problems.push(`${node.file}：${problem.message}`)
         return
       }
@@ -5220,7 +6971,11 @@ function ciExecutionSurface(options) {
     const isRepoRelativePathWord = word => {
       if (word === undefined || word === '') return false
       if (word.startsWith('/') || word.startsWith('~') || word.startsWith('-')) return false
-      return /^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$/u.test(word)
+      // **R22 FIX-14（E-01 形态 B）**：与 {@link normalizeRepoRelativeWord} 共用同一份形态口径
+      // —— 修前这里是 `^[A-Za-z0-9_][A-Za-z0-9_./@+-]*$`，`.` 不在首字符类里，于是
+      // `./gen.sh` 让整条"命令位是路径形态"的分支被跳过（既不被跟随、也不判生成物）。
+      // 归一后 `./x` 与 `x` 同判；`. `/`..`/`../x` 的形态语义不变（见该函数头注释）。
+      return normalizeRepoRelativeWord(word) !== undefined
     }
     const readCarrierCache = new Map()
     const readCarrier = path => {
@@ -5279,18 +7034,27 @@ function ciExecutionSurface(options) {
       return undefined
     }
     /**
-     * **自指脚本位**（R19A-04）的扫描上下文：`{ selfFile, resolve }`。
+     * **自指脚本位**（R19A-04）的扫描上下文：`{ selfFile, resolve, executed }`。
      *
      * `selfFile` 只在"当前节点是仓内 shell 脚本"时才给 —— `$0`/`${BASH_SOURCE[0]}` 的取值
      * 就是那个文件；workflow `run:` 块（`.yml`）里的 `$0` 是运行器的临时脚本，不是仓内文件，
      * 所以那里**不给**上下文，`bash "$(dirname "$0")/x.sh"` 维持 fail-closed。
      * `resolve` 复用载体解析（存在 + 可读才算仓内候选）。
+     *
+     * **R20A-02**：`executed` 回答"这份正文是**被执行**还是被 **`source`**"——
+     * 闭包节点自己知道它是怎么被到达的（`node.sourced`，由 {@link followCarrierToken}
+     * 在 `source`/`.` 的参数位上打标）。被 source 时 `$0` 仍是**调用者**，按本文件目录求值
+     * 会跟随诱饵文件（审计夹具 `s0-outer`：守卫绿而运行期真的执行了端到端入口）。
      * @param node - 闭包节点。
      * @returns 上下文；不适用时 `undefined`。
      */
     const selfScanContextFor = node => {
       if (typeof node.file !== 'string' || !/\.(?:sh|bash)$/u.test(node.file)) return undefined
-      return { selfFile: node.file, resolve: candidate => resolveCarrierPath(candidate, ['']) }
+      return {
+        selfFile: node.file,
+        resolve: candidate => resolveCarrierPath(candidate, ['']),
+        executed: node.sourced !== true,
+      }
     }
     /** **自指脚本位**的扫描上下文（R19A-04）：本节点是仓内 shell 脚本时才有。 */
     const selfContext = selfScanContextFor(node)
@@ -5399,6 +7163,32 @@ function ciExecutionSurface(options) {
           return resolveJsExpression(binding.expression, bindings)
         }
       }
+      // **CJS 导出形态**（R20A-03 ①的同族）：`exports.ENTRY = <表达式>` /
+      // `module.exports.ENTRY = <表达式>` / `module.exports = { ENTRY: <表达式> }`。
+      // 修前只认 ESM 的 `export` 形态 ⇒ `const { ENTRY } = require('./paths.cjs')` 里的
+      // 字面量从不进任何一张网（模块从不被读）。三种形态都按"读那个赋值右侧的表达式"处理，
+      // 求值口径与 ESM 分支**同一份**（{@link resolveJsExpression}）。
+      {
+        const assigned = new RegExp(`(?:^|[\\s;{}])(?:module\\.)?exports\\.${escaped}\\s*=`, 'u').exec(source)
+        if (assigned !== null) {
+          const expression = readJsExpressionAt(source, assigned.index + assigned[0].length)
+          if (expression !== undefined) return resolveJsExpression(expression, bindings)
+        }
+        const objectExport = /(?:^|[\s;{}])module\.exports\s*=\s*\{/u.exec(source)
+        if (objectExport !== null) {
+          const expression = readJsExpressionAt(source, objectExport.index + objectExport[0].length - 1)
+          const text = expression === undefined ? '' : expression.trim()
+          if (text.startsWith('{') && balancedJsClose(text, 0) === text.length - 1) {
+            for (const entry of splitJsTopLevel(text.slice(1, -1), ',')) {
+              const separator = entry.indexOf(':')
+              if (separator < 0) continue
+              const key = jsStringLiteralValue(entry.slice(0, separator).trim()) ?? entry.slice(0, separator).trim()
+              if (key !== name) continue
+              return resolveJsExpression(entry.slice(separator + 1), bindings)
+            }
+          }
+        }
+      }
       return undefined
     }
     /**
@@ -5426,9 +7216,24 @@ function ciExecutionSurface(options) {
         value = { unreadable: `仓内模块 ${path} 读不出来` }
       } else {
         const found = jsModuleConstantValue(path, imported, source, depth)
-        value = found === undefined
-          ? { unreadable: `${path} 里没有可静态求值的导出常量 \`${imported}\`` }
-          : { expression: found.expression ?? JSON.stringify(found.exact ?? found.parts) }
+        if (found === undefined) {
+          value = { unreadable: `${path} 里没有可静态求值的导出常量 \`${imported}\`` }
+        } else if (found.expression === undefined
+          && found.exact === undefined && (found.parts ?? []).length === 0) {
+          // **R20A-03 ②**：模块找到了、导出**也存在**，但取值静态上求不出来
+          // （典型：`export const ENTRY = process.env.CI ? 'integration-tests/run-all.sh'
+          // : 'scripts/noop.sh'` —— 条件表达式在常量传播里既不是精确值、也不产出任何片段）。
+          // 修前这里回填成 `JSON.stringify([])` = `'[]'` ⇒ 消费方**一个候选都拿不到，而且
+          // 既不判红也不跟随** —— 与文档口径（"同仓相对 import 读不懂即 fail-closed"）不符，
+          // 也与本守卫的既有教义（"读不懂 ≠ 这一层没有端到端"）不符。现在按读不懂记红。
+          value = {
+            unreadable: `${path} 的导出 \`${imported}\` **存在但取值求不出来**`
+              + `（既没有精确值、也没有任何字面量片段）—— 条件表达式 / 运行期取值不算静态常量；`
+              + '请把它写成字面量、模板字面量、`join|resolve` 拼接、`+` 拼接或对象常量表',
+          }
+        } else {
+          value = { expression: found.expression ?? JSON.stringify(found.exact ?? found.parts) }
+        }
       }
       jsImportCache.set(key, value)
       return value
@@ -5455,18 +7260,263 @@ function ciExecutionSurface(options) {
      * 跟随一条载体 token（命中即入队，节点类型由 `carrierKindOf` 决定）。
      * @param token - 命令位/参数位上的词。
      * @param dirs - 这条命令可能的工作目录。
+     * @param options - `{ sourced }`：这条载体是 `source`/`.` 的目标（**R20A-02**）——
+     *   被 source 的脚本文本里 `$0` 仍是调用者，节点必须记住这一点（`$0` 族不求值）。
      * @returns `true` = 真的跟随了一个仓内载体。
      */
-    const followCarrierToken = (token, dirs) => {
+    const followCarrierToken = (token, dirs, options = {}) => {
       const resolved = resolveCarrierPath(token, dirs)
       if (resolved === undefined) return false
       const kind = carrierKindOf(resolved)
+      const sourced = options.sourced === true
       enqueue({
-        key: resolved, file: resolved, kind, text: readCarrier(resolved),
+        // `source` 与"执行"是两种上下文（词数组求值不同）⇒ 同一个文件的两份节点必须分开
+        // （否则先入队的那个上下文会把另一个吃掉，R20A-02 的收口会被"enqueue 顺序"左右）。
+        key: sourced ? `${resolved}\u0000source` : resolved,
+        file: resolved, kind, text: readCarrier(resolved), sourced,
         dir: resolved.includes('/') ? resolved.slice(0, resolved.lastIndexOf('/')) : '',
-        via: [...node.via, resolved], hops: node.hops + 1,
+        via: [...node.via, sourced ? `source ${resolved}` : resolved], hops: node.hops + 1,
       })
       return true
+    }
+    /**
+     * **"这段文本写过哪些仓内路径"**（R22 FIX-14 / E-01 形态 A 的唯一实现；
+     * **R23 FIX-22** 收口形态 A-2 与残余写面）。
+     *
+     * ## 现场（第二十二轮 V7 泳道 + 第二十三轮 W4 泳道）
+     *
+     * 脚本位判据的**唯一事实前提**是"该路径在检查期是否存在"，于是"先让目标路径在检查期
+     * 就存在（良性内容），运行期用不透明载荷覆写再执行"整类绕过它，而且**不需要新增文件、
+     * 不需要新增登记项**：
+     *
+     * ```yaml
+     * - run: |
+     *     P='<base64 的 "bash integration-tests/run-all.sh">'
+     *     printf "%s" "$P" | base64 -d > scripts/ci-brand-mask.sh   # 覆写**仓内已跟踪**脚本
+     *     bash scripts/ci-brand-mask.sh                            # 闭包跟随到的是仓里那份良性文本
+     * ```
+     *
+     * 判据不能只问"检查期在不在"，还要问"**它在执行之前是否被写过**"。这里把写目标
+     * （重定向 `>`/`>>`/`>|`/`&>`、`tee`/`cp`/`mv`/`install`/`rsync`/`ln` 的最后一个非旗标实参）
+     * 解析成**仓内相对路径**；命令位/脚本位解析到这些路径时另记一条红
+     * （`reportRuntimeWrittenScript`，与"路径不存在"共用 `CI_SURFACE_GENERATED_SCRIPT_ACK`
+     * 登记表与死条目对账）。
+     *
+     * ## 三条收口（第二十三轮 W4 实测的三个绕过）
+     *
+     * ① **W4-02（尾随重定向）**：写命令词那一支在 {@link stripWriteRedirections} 之后的文本上
+     *    取词 —— 修前 `tee -a X >/dev/null` 取到 `/dev/null`。
+     * ② **W4-09（常量传播出来的写目标）**：重定向目标那一支走
+     *    {@link tagWriteRedirections} + `shellCommandWordListsFor()`（与命令位同一份常量传播）——
+     *    修前 `T=scripts/x.sh; … > "$T"` 一遇 `$` 就 `return`。
+     * ③ **W4-01（跨 step）**：作用域由调用方给（{@link workflowJobRunBlocks} 按 job 累积），
+     *    本函数只回答"**这一段文本**写过哪些路径"。
+     *
+     * ## 第二十四轮 X3 泳道的三处收口（R24 FIX-26 / X3-01）
+     *
+     * ① **解释器内联脚本**（`python3 -c` / `node -e` / `perl -e`）：两条取词路径都是 shell 语法 ⇒
+     *    `Path('scripts/x.sh').write_bytes(…)` 整族隐形。现在内层语言源码也过一遍
+     *    {@link inlineScriptWriteTargets}（只认"第一实参是字面量"的写调用）。
+     * ② **`$GITHUB_ENV` 传过来的写目标**：`note()` 一遇 `$` 就 `return` ⇒ 跨 step 的
+     *    `echo "V7T=scripts/x.sh" >> "$GITHUB_ENV"` + `> "$V7T"` 整条不可见。现在 `note()`
+     *    先过 {@link expandExportedEnvWord}（作用域由调用方经 `scope.carriedEnv` 给）。
+     * ④ **`N<>` 读写打开**（`exec 3<>scripts/x`）：见 {@link WRITE_REDIRECTION}。
+     *
+     * 边界（认账）：`sed -i` / `git checkout <ref> -- <路径>` / `dd of=<路径>` 这类等价
+     * 改写面仍未建模（要扩面就把命令词加进 {@link WRITE_COMMAND_WORDS}，或再补一条形态判据）；
+     * 解释器写面只覆盖**字面量**目标（路径拼出来的仍看不见）；
+     * 运行期生成 + 不透明编码仍是固有边界（见通过行的 ⑥）。
+     * @param source - 一段 shell 文本（已去 here-doc 正文）。
+     * @param dirs - 这条命令可能的工作目录。
+     * @param context - 自指脚本位的扫描上下文（`undefined` = 不开）。
+     * @param strict - 是否开逐词登记（影响 `unwrapCommandWords` 的包装链展开）。
+     * @param env - **job 作用域的 `$GITHUB_ENV`/`$GITHUB_OUTPUT` 导出表**（`Map<名字, 值>`，可省）。
+     * @returns 被写过的仓内相对路径集合。
+     */
+    const runtimeWrittenCarriers = (source, dirs, context, strict = true, env = undefined) => {
+      const written = new Set()
+      const note = word => {
+        if (typeof word !== 'string' || word === '') return
+        const unquoted = word.replace(/^["']|["']$/gu, '')
+        if (unquoted === '' || unquoted.includes('{{')) return
+        // 根变量前缀（`$GITHUB_WORKSPACE/…` / `${PWD}/…`）剥掉后仍是仓内相对路径 ——
+        // 与脚本位判据（`stripRootVariablePrefix`）同一口径，否则 `> $GITHUB_WORKSPACE/x.sh`
+        // 与 `> x.sh` 会被当成两种东西（V7 的 `$GITHUB_WORKSPACE/…` 形态）。
+        // **R24 FIX-26 / X3-01②**：`$` 先由 job 作用域的导出表展开一次（修前一律 return ⇒
+        // `$GITHUB_ENV` 递过来的写目标整条不可见）；展开不出仍按原样 fail-closed（return）。
+        const preExpanded = expandExportedEnvWord(unquoted, env)
+        if (preExpanded === undefined) return
+        const cleaned = stripRootVariablePrefix(preExpanded) ?? preExpanded
+        if (cleaned === '' || cleaned.includes('$')) return
+        const resolved = resolveCarrierPath(cleaned, dirs) ?? resolveCarrierPath(cleaned, [''])
+        if (resolved !== undefined) written.add(resolved)
+      }
+      const text = String(source)
+      // ① 重定向目标（**含常量传播出来的目标**，R23 FIX-22 / W4-09）。
+      const tagged = shellCommandWordListsFor(tagWriteRedirections(text), context)
+      for (let index = 0; index < tagged.length; index += 1) {
+        const words = tagged[index]
+        for (let cursor = 0; cursor < words.length; cursor += 1) {
+          if (words[cursor] !== WRITE_REDIRECT_SENTINEL) continue
+          const sameCommand = words[cursor + 1]
+          // `&>` 会被词法器切成两条命令（`&` 是分隔符）⇒ 标记词落在上一条的末尾时，
+          // 目标在**下一条**的首位。
+          note(sameCommand !== undefined && sameCommand !== WRITE_REDIRECT_SENTINEL
+            ? sameCommand
+            : tagged[index + 1]?.[0])
+        }
+      }
+      // 文本面兜底：词法器覆盖不到的正文（命令替换内部等）由正则那一路补。
+      for (const match of text.matchAll(WRITE_REDIRECT_TARGET)) note(match[1])
+      // ② 写命令词：**在剥掉重定向的文本上**取"最后一个非旗标、非赋值词"
+      //    （`cp 载荷 gen.sh` / `tee -a gen.sh` / `install -m 755 x gen.sh`）；取不出就不猜。
+      //    **R24 FIX-26 / X3-01①**：同一次取词里把**内层语言源码**（`python3 -c` / `node -e`）
+      //    的写操作也读出来 —— 修前这一支只把字面量当 token 跟随，不认"写"。
+      for (const words of shellCommandWordListsFor(stripWriteRedirections(text), context)) {
+        const chain = unwrapCommandWords(words, strict)
+        for (const nested of chain.nestedTexts) {
+          if (nested.language === 'shell') continue
+          for (const target of inlineScriptWriteTargets(nested.text)) note(target)
+        }
+        for (const head of chain.heads) {
+          if (!WRITE_COMMAND_WORDS.has(head[0] ?? '')) continue
+          const target = [...head].reverse().find(word => word !== ''
+            && !word.startsWith('-') && !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word))
+          if (target !== undefined) note(target)
+        }
+      }
+      return written
+    }
+    /**
+     * 一段 shell 文本 → 它**调用的仓内脚本载体**（`bash x.sh` / `source x.sh` / `node x.mjs` /
+     * `python3 x.py` 的脚本位，能解析成仓内相对路径的那些）。去重，保持出现顺序。
+     *
+     * 与 `scanCarrierPaths` 的脚本位取词**同一份实现**（`shellScriptWordIndex` + 同一个
+     * `COMMAND_WRAPPER_SPECS.scriptPositional` 判据）—— 两处各写一份必然漂移。
+     * @param text - 一段 shell 文本。
+     * @param dirs - 这条命令可能的工作目录。
+     * @returns 仓内相对路径（去重）。
+     */
+    const carrierScriptTargets = (text, dirs) => {
+      const found = new Set()
+      for (const words of shellCommandWordListsFor(text, undefined)) {
+        for (const head of unwrapCommandWords(words, true).heads) {
+          const command = head[0] ?? ''
+          const isShellHost = COMMAND_SHELL_WORDS.has(command) || command === 'source' || command === '.'
+          const isInterpreterHost = COMMAND_WRAPPER_SPECS.get(command)?.scriptPositional === true
+          if (!isShellHost && !isInterpreterHost) continue
+          const host = shellScriptWordIndex(head, 0)
+          if (host === null || host.commandText !== null || host.scriptIndex < 0) continue
+          const word = head[host.scriptIndex]
+          if (word === undefined || word.includes('$') || word.includes('{{')) continue
+          const resolved = resolveCarrierPath(word, dirs) ?? resolveCarrierPath(word, [''])
+          if (resolved !== undefined) found.add(resolved)
+        }
+      }
+      return [...found]
+    }
+    /**
+     * **这一段文本（连同它调用的仓内载体）写过哪些仓内路径**（R24 FIX-26 / X3-01③）。
+     *
+     * ## 现场
+     *
+     * `carriedWrites` 只在**当前 yaml 节点**的 job 分组内累积（R23 FIX-22 把作用域从
+     * "一段 `run:` 块"扩到了"整个 job"），但**被跟随的脚本与本地复合 action 是别的节点** ——
+     * 在那里面发生的写不会回灌到 job 作用域。于是"把写藏进一层包装"就整族隐形：
+     *
+     * ```yaml
+     * - run: bash scripts/v7write.sh          # v7write.sh 里写 scripts/ci-brand-mask.sh
+     * - run: bash scripts/ci-brand-mask.sh    # ⇒ 判据看不见"被写过"
+     * ```
+     *
+     * 同一形态还有本地复合 action（`uses: ./.github/actions/x`）——它的 `steps[].run` 块
+     * 跑在**同一个工作树**上，写同样生效。
+     *
+     * ## 判据
+     *
+     * 在 {@link runtimeWrittenCarriers} 之外再**急切**跟随一层：命令位/脚本位指向的**仓内**
+     * 载体（shell 脚本 / 解释器脚本）读它的正文并把里面的写并进来；`uses: ./x` 读
+     * `x/action.yml` 的 `run:` 块同理。深度上限 {@link WRITE_CARRIER_FOLLOW_MAX_HOPS} +
+     * `seen` 去重（自引用脚本不会无限递归）。读不到 / 仓内不存在 / 变量拼出来的路径一律
+     * **不猜**（那些形态由 `scanCarrierPaths` 的载体跟随与 fail-closed 判据负责）。
+     * @param text - 一段 shell / yaml 文本。
+     * @param dirs - 这条命令可能的工作目录。
+     * @param context - 自指脚本位的扫描上下文（`undefined` = 不开）。
+     * @param depth - 当前跟随深度（调用方省略）。
+     * @param seen - 已经读过的载体路径（防环，调用方省略）。
+     * @param env - job 作用域的 `$GITHUB_ENV` 导出表（可省）。
+     * @returns 被写过的仓内相对路径集合。
+     */
+    const eagerWrittenCarriers = (text, dirs, context, depth = 0, seen = new Set(), env = undefined) => {
+      const out = new Set(runtimeWrittenCarriers(text, dirs, context, true, env))
+      if (depth >= WRITE_CARRIER_FOLLOW_MAX_HOPS) return out
+      /** 读一份仓内载体（读不到 ⇒ `undefined`，绝不猜）。 */
+      const readCarrier = path => {
+        try {
+          if (!options.exists(path)) return undefined
+          const body = options.read(path)
+          return typeof body === 'string' ? body : undefined
+        } catch {
+          return undefined
+        }
+      }
+      for (const carrier of carrierScriptTargets(text, dirs)) {
+        if (seen.has(carrier)) continue
+        seen.add(carrier)
+        const body = readCarrier(carrier)
+        if (body === undefined) continue
+        const nestedDirs = [carrier.includes('/') ? carrier.slice(0, carrier.lastIndexOf('/')) : '']
+        for (const written of eagerWrittenCarriers(body, nestedDirs, undefined, depth + 1, seen, env)) {
+          out.add(written)
+        }
+      }
+      for (const target of localCompositeActionDirs(text)) {
+        for (const candidate of [`${target}/action.yml`, `${target}/action.yaml`]) {
+          if (seen.has(candidate)) break
+          const body = readCarrier(candidate)
+          if (body === undefined) continue
+          seen.add(candidate)
+          for (const block of workflowRunBlocks(body)) {
+            for (const written of eagerWrittenCarriers(block, [target], undefined, depth + 1, seen, env)) {
+              out.add(written)
+            }
+          }
+          break
+        }
+      }
+      return out
+    }
+    // R23 FIX-22 / W4-06：把当前实现挂给收尾的判决级见证（见 `writeTargetsImpl` 的注释）。
+    writeTargetsImpl = (source, env) => runtimeWrittenCarriers(source, [''], undefined, true, env)
+    /**
+     * 一个**本地复合 action**（`uses: ./.github/actions/x` → 目录 `x`）写过的仓内路径
+     * （R24 FIX-26 / X3-01③）。
+     *
+     * 读 `action.yml` / `action.yaml` 的每个 `run:` 块，交给 {@link eagerWrittenCarriers}
+     * （它继续跟随块里调用的包装脚本 / 嵌套复合 action）。文件不存在或读不出来 ⇒ 空集合
+     * ——"读不到"不是判据面（本地 action 不存在时 `uses:` 本身由别的判据负责），这里不猜。
+     * @param target - action 目录（仓内相对，已去 `./`）。
+     * @param env - job 作用域的 `$GITHUB_ENV` 导出表。
+     * @returns 仓内相对路径集合。
+     */
+    const compositeActionWrittenCarriers = (target, env) => {
+      const out = new Set()
+      for (const candidate of [`${target}/action.yml`, `${target}/action.yaml`]) {
+        let body
+        try {
+          body = options.exists(candidate) ? options.read(candidate) : undefined
+        } catch {
+          body = undefined
+        }
+        if (typeof body !== 'string') continue
+        for (const block of workflowRunBlocks(body)) {
+          for (const written of eagerWrittenCarriers(block, [target], undefined, 1, new Set(), env)) {
+            out.add(written)
+          }
+        }
+        break
+      }
+      return out
     }
     /**
      * **命令位 + 参数位的载体跟随**（R16-W 语义反转里"跟随"的那一半）。
@@ -5484,8 +7534,17 @@ function ciExecutionSurface(options) {
      * 执行调用的字面量再回到 ②（R16A-10：修前 `-e` 的取值根本不进任何一张网）。
      * @param raw - 一段 shell 文本。
      * @param dirs - 这条命令可能的工作目录。
+     * @param strict - 是否开逐词登记（入口形态开、被跟随的脚本正文关）。
+     * @param scope - **跨 step 的写面作用域**（`{ carriedWrites, carriedJob, carriedEnv }`）：同一 job
+     *   的 step 顺序共享同一个 `carriedWrites`（`Map<路径, job>`）与 `carriedEnv`
+     *   （`Map<名字, 值>`，来自 `$GITHUB_ENV`/`$GITHUB_OUTPUT`），见 {@link workflowJobRunBlocks}
+     *   与 {@link runtimeWrittenCarriers}。
      */
-    const scanCarrierPaths = (raw, dirs, strict = true) => {
+    const scanCarrierPaths = (raw, dirs, strict = true, scope = undefined) => {
+      const carriedWrites = scope?.carriedWrites instanceof Map ? scope.carriedWrites : undefined
+      const carriedJob = scope?.carriedJob
+      /** **job 作用域的 `$GITHUB_ENV` 导出表**（R24 FIX-26 / X3-01②）。 */
+      const carriedEnv = scope?.carriedEnv instanceof Map ? scope.carriedEnv : undefined
       // **自指脚本位**（`bash "$(dirname "$0")/x.sh"`，R19A-04）：被跟随的仓内 shell 脚本
       // 正文里，`$0`/`${BASH_SOURCE[0]}` 的取值就是**本节点自己**（`node.file`），
       // 于是 `$(dirname …)` 可以在闭包里求值 —— 词法阶段把它换成**仓内候选路径**，
@@ -5498,6 +7557,89 @@ function ciExecutionSurface(options) {
           + ' 闭包只跟随**仓内存在**的载体，或逐词登记过的可执行名；'
           + '请把它写成闭包能解析的字面量，或把这一处登记进 `CI_COMMAND_REGISTRY`。',
       })
+      /**
+       * 这一位是不是"**字面的仓内相对路径**"——只有它才允许按"仓内不存在 ⇒ 运行期生成物"判红。
+       *
+       * 变量 / GitHub 表达式 / 根变量前缀 / 通配 / 绝对路径都不在这里判：它们的 fail-closed
+       * 在词法阶段（`shell-argument-unreadable`）或命令位形态判据里，别在这里重复计红
+       * （重复计红会让同一条命令产生两条诊断，也会让登记表的死条目对账算不平）。
+       * @param word - 命令位/脚本位上的词（原样，可带一个前导 `./`）。
+       * @returns `true` = 字面、仓内相对、形态读得懂。
+       */
+      const isLiteralRepoRelativeScript = word => {
+        if (word === undefined) return false
+        const cleaned = word.replace(/^\.\//u, '')
+        if (cleaned === '' || cleaned.includes('$') || cleaned.includes('{{')) return false
+        if (!isRepoRelativePathWord(cleaned)) return false
+        if (stripRootVariablePrefix(cleaned) !== undefined) return false
+        if (SHELL_GLOB_PATTERN.test(cleaned)) return false
+        return true
+      }
+      /**
+       * **命令位 / 脚本位指向"检查期仓内不存在"的字面路径**的**唯一**判据（**R21 fix-6 / E-01**）。
+       *
+       * 三个站点共用它（命令位的裸命令与 `./x.sh`、解释器 / `source` 的脚本位）：
+       *   · 修前这条判据在**两个**站点上带 `includes('/')` 前置条件（① 命令位记红、
+       *     ②b 脚本位记红），而 `:6046` 的诊断文案点名要拦的反例正是
+       *     `base64 -d payload.b64 > gen.sh; bash gen.sh`（**不带** `/`）—— 代码与自述反例相反；
+       *   · 实测三种"裸文件名"形态（`bash gen.sh` / `source gen.sh` / `python3 gen.py`，
+       *     载荷 base64 不透明、零 token）修前**全部 EXIT=0**，而 tripwire 证明运行期真的
+       *     执行了 `integration-tests/run-all.sh`；同一夹具只把目标改成 `scripts/gen.sh`
+       *     就 EXIT=1（对照）。
+       *   ⇒ **裸文件名与带目录的写法是同一个语义**（命令位指向一个检查期不存在的程序），
+       *     判据不许按"路径里有没有 `/`"分叉；合法出路是逐处登记
+       *     `CI_SURFACE_GENERATED_SCRIPT_ACK`（写明由谁生成、哪一步生成；死条目也红）。
+       * @param word - 命令位/脚本位上的词（原样）。
+       * @param raw - 诊断里的那条命令原文。
+       * @param where - `命令位` / `脚本位` / `\`source\` 的脚本位`（诊断措辞）。
+       */
+      const reportGeneratedScript = (word, raw, where) => reportClosureProblem({
+        kind: 'missing-script-carrier', word, raw,
+        message: `${where}指向**仓内不存在的路径** \`${word}\`（${raw}）—— `
+          + '这一位是"要执行的程序"，闭包读不到它的正文就等于这一层看不见；'
+          + '而"检查期不存在"正是**运行期生成物**的形态'
+          + '（`base64 -d payload.b64 > gen.sh; bash gen.sh`：修前它既不跟随、也不判红，'
+          + '守卫 EXIT=0 且凭据行照旧写 `static-only`，R20A-05 的现场）。'
+          + '脚本位是字面路径 ⇒ 这里**不许**用"路径不存在就放过"：'
+          + '要么把它写成仓内**真实存在**的脚本（把生成物改成仓库里的包装脚本），'
+          + '要么把这一处逐字登记进 `CI_SURFACE_GENERATED_SCRIPT_ACK`'
+          + '（写明由谁生成、哪一步生成 —— "先构建再执行"只能逐处认账，登记项死了也红）。'
+          + '**裸文件名（`gen.sh`）与带目录的写法（`scripts/gen.sh`）同判**（R21 fix-6 / E-01）。',
+      })
+      /** 命令位 / 脚本位解析到"**运行期被改写过的**"路径时的唯一诊断（E-01 形态 A / A-2）。 */
+      const reportRuntimeWrittenScript = (word, rawCommand, where, writtenWhere) => reportClosureProblem({
+        kind: 'missing-script-carrier', word, raw: rawCommand,
+        message: `${where}指向**运行期被改写过的**仓内路径 \`${word}\`（${rawCommand}）—— `
+          + `这一位之前（${writtenWhere}）已经有 \`>\`/\`>>\`/\`tee\`/\`cp\` … 把它`
+          + '改写成了运行期载荷，而闭包跟随到的是仓库里那一份（通常完全良性）。'
+          + '**检查期存在**不等于**运行期是这份内容**。'
+          + '修前这条判据只问"该路径在检查期是否存在"（R21 fix-6 / E-01），于是'
+          + '`base64 -d > <仓内已存在路径>; bash <该路径>` 这一族两张网全绿 ——'
+          + '**不需要新增文件、不需要新增登记项**（第二十二轮 V7 泳道实测，'
+          + '运行期真的执行了端到端入口）。'
+          + '要么把它写成仓内**真实存在且不被这段脚本改写**的脚本，要么把这一处逐字登记进'
+          + ' `CI_SURFACE_GENERATED_SCRIPT_ACK`（写明由谁生成、哪一步生成 —— 死条目也红）。',
+      })
+      // **R23 FIX-22 / W4-01**：写目标的作用域是**整个 job**，不再是"这一段 `run:` 块"。
+      // 同一个 job 的所有 step 跑在**同一个工作树**上（step① 写、step② 执行是 CI 里最普通的
+      // 写法），所以"被写过的路径"必须按 job 内 step 顺序累积；`$GITHUB_ENV` 那条 fail-closed
+      // 只覆盖**值**，不覆盖**文件写**（`bash scripts/x.sh` 的脚本位是字面路径，不需要任何变量）。
+      //
+      // **R24 FIX-26 / X3-01①③**：改用 {@link eagerWrittenCarriers} —— 它在本段文本之外**急切**
+      // 跟随本段调用的仓内载体（包装脚本 / 本地复合 action），把那里的写也并进来。修前
+      // "把写藏进一层包装"整族隐形（`bash scripts/v7write.sh` + `bash scripts/ci-brand-mask.sh`）。
+      const localWrites = eagerWrittenCarriers(raw, dirs, context, 0, new Set(), carriedEnv)
+      const writtenCarriers = carriedWrites === undefined
+        ? localWrites
+        : new Set([...carriedWrites.keys(), ...localWrites])
+      const writtenWhere = resolved => (localWrites.has(resolved)
+        ? '同一段脚本里'
+        : `同一 job 的**更早步骤**里（job \`${carriedJob ?? '(未知)'}\`，step 顺序）`)
+      if (carriedWrites !== undefined) {
+        for (const carrier of localWrites) {
+          if (!carriedWrites.has(carrier)) carriedWrites.set(carrier, carriedJob)
+        }
+      }
       for (const words of shellCommandWordListsFor(raw, context)) {
         const chain = unwrapCommandWords(words, strict)
         for (const word of chain.commandWords) commandWords.add(word)
@@ -5557,13 +7699,104 @@ function ciExecutionSurface(options) {
           //    责任（`mentioning` 必须登记成 `data-reference`，未登记即红），两条网不重复计红。
           if (isRepoRelativePathWord(command) && (command.includes('/') || command.includes('.'))) {
             // 跟得上就跟随（解释器的脚本位：`node x.mjs` / `python3 x.py`）；
-            // 带 `/` 的仓内相对路径跟不上一律红；裸文件名（`x.mjs`）跟不出仓内文件时不红 ——
-            // 它可能是运行期产物，那属于"没跟随"，不是"读不懂"。
-            if (followCarrierToken(command, dirs)) continue
-            if (command.includes('/')) record('carrier-command-missing', command, '')
+            // **R21 fix-6 / E-01**：跟不上一律红 —— 修前这里写的是"带 `/` 的仓内相对路径
+            // 跟不上一律红；裸文件名（`x.mjs`）跟不出仓内文件时不红"，而审计反过来正是用
+            // **裸文件名**绕过的（`python3 gen.py`：解释器的脚本位作为 head[0] 落到这一位，
+            // 载荷 base64 不透明 ⇒ 两张网全漏，而 tripwire 证明运行期真的执行了端到端入口）。
+            // 这里与 ②b（`bash gen.sh` / `source gen.sh`）共用同一个判据
+            // `reportGeneratedScript`（登记表同一张，死条目对账同一份）。
+            //
+            // **R22 FIX-14 / E-01 形态 A**：跟得上**不等于**运行期执行的就是仓里那一份 ——
+            // 同一段文本前文写过它时另记一条红（`reportRuntimeWrittenScript`），
+            // 判定顺序与前两格一致：写过 ⇒ 红；存在 ⇒ 跟随；不存在 ⇒ 生成物红。
+            const resolved = resolveCarrierPath(command, dirs)
+            if (resolved !== undefined) {
+              if (writtenCarriers.has(resolved)) {
+                reportRuntimeWrittenScript(command, command, '命令位', writtenWhere(resolved))
+                continue
+              }
+              followCarrierToken(command, dirs)
+              continue
+            }
+            if (isLiteralRepoRelativeScript(command)) reportGeneratedScript(command, command, '命令位')
             continue
           }
           // ② 参数位上的仓内载体（`node x.mjs` / `bash y.sh` / `-f z.yml` / recipe 文件）。
+          //
+          // **R20A-02**：`source <脚本>` / `. <脚本>` 的目标不是"被执行"而是"被读进当前 shell"
+          // —— 这个区别只在自指脚本位（`$0`）上可见，但它决定闭包跟随的是哪个文件：
+          // 被 source 的正文里 `$(dirname "$0")` 求值到**调用者**的目录，而闭包若按本文件
+          // 目录求值就会跟随**诱饵**文件（审计夹具 `s0-outer`：守卫 EXIT=0，运行期真的执行
+          // 了端到端入口）。所以这两条命令的脚本位单独跟随、并打上 `sourced` 标记，
+          // 不再走下面那条通用的"参数位一律按 executed 跟随"。
+          const sourceTarget = command === 'source' || command === '.'
+            ? shellScriptWordIndex(head, 0)
+            : null
+          if (sourceTarget !== null && sourceTarget.commandText === null && sourceTarget.scriptIndex >= 0) {
+            const sourcedWord = head[sourceTarget.scriptIndex]
+            // **R22 FIX-14 / E-01 形态 A**：`source` 的目标**跟得上**并不代表运行期读到的就是仓里
+            // 那一份 —— 同一段文本前文写过它时，这里先判"被写过"（与命令位/脚本位同一判据）。
+            // 修前这一支只看"跟不跟得上"，于是 `printf … > scripts/x.sh; source scripts/x.sh`
+            // 与"覆写后 `bash`"是同一族却分属两格（前者全绿）。
+            const sourcedResolved = resolveCarrierPath(sourcedWord, dirs)
+            if (sourcedResolved !== undefined && writtenCarriers.has(sourcedResolved)) {
+              reportRuntimeWrittenScript(sourcedWord, `source ${sourcedWord}`, '`source` 的脚本位', writtenWhere(sourcedResolved))
+              continue
+            }
+            // **R21 fix-6 / E-01**：这一支修前只 `followCarrierToken` 然后 `continue` ——
+            // 跟不出仓内文件时**静默**（`source gen.sh` 实测 EXIT=0，而运行期真的执行了
+            // 生成物里的端到端入口）。`source` 的脚本位与解释器的脚本位同义，判据同一份。
+            if (!followCarrierToken(sourcedWord, dirs, { sourced: true })
+              && isLiteralRepoRelativeScript(sourcedWord)) {
+              reportGeneratedScript(sourcedWord, `source ${sourcedWord}`, '`source` 的脚本位')
+            }
+            continue
+          }
+          // ②b **脚本位指向"仓内不存在的字面路径"**（**R20A-05**）：解释器 / `source` 的脚本位
+          //     是"要执行的程序"，它跟不出仓内文件时**不再是静默的"没跟随"** ——
+          //     `base64 -d payload.b64 > gen.sh; bash gen.sh` 这一族（生成物在检查期不存在、
+          //     载荷是不透明数据）修前两张网全漏（审计夹具 `p-gen-runtime`：守卫 EXIT=0，
+          //     tripwire 证明运行期真的执行了端到端入口）。
+          //     判据咬"**字面、仓内相对**"的形态（**裸文件名也算** —— R21 fix-6 / E-01：
+          //     修前这里有一个 `scriptLiteral.includes('/')` 前置条件，而它自己的诊断文案
+          //     点名的反例正是**不带 `/`** 的 `bash gen.sh`）；变量/通配/绝对路径在词法阶段
+          //     已经 fail-closed（`shell-argument-unreadable`），别在这里重复计红。
+          //     与"先构建再执行 `bash dist/x.sh`"**无法静态区分** ⇒ 出路是逐处登记
+          //     `CI_SURFACE_GENERATED_SCRIPT_ACK`（写明由谁生成、哪一步生成），死条目也红。
+          // 脚本宿主 = shell 词 / `source`·`.` /**带脚本位的解释器**（`node` / `python3`，
+          // R21 fix-6 / E-01：它们的 head 由 `scriptPositional` 分支造成 `[解释器, 脚本, …]`）。
+          // 这些解释器在包装表里已经没有旗标可跳（旗标段在入队前就被 `skipFlags` 吃掉了），
+          // 所以与 shell 共用同一个取词函数不会取错位。
+          const scriptHost = (COMMAND_SHELL_WORDS.has(command) || command === 'source' || command === '.'
+            || COMMAND_WRAPPER_SPECS.get(command)?.scriptPositional === true)
+            ? shellScriptWordIndex(head, 0)
+            : null
+          const scriptWord = scriptHost === null || scriptHost.commandText !== null || scriptHost.scriptIndex < 0
+            ? undefined
+            : head[scriptHost.scriptIndex]
+          if (scriptWord !== undefined && isLiteralRepoRelativeScript(scriptWord)) {
+            // **R22 FIX-14 / E-01 形态 A**：路径在检查期存在，但**同一段文本前文写过它**
+            // ⇒ 运行期执行的是被写进去的内容（闭包跟随到的是仓里那份良性文本）。
+            const scriptResolved = resolveCarrierPath(scriptWord, dirs) ?? resolveCarrierPath(scriptWord, [''])
+            if (scriptResolved !== undefined) {
+              if (writtenCarriers.has(scriptResolved)) {
+                reportRuntimeWrittenScript(
+                  scriptWord,
+                  head.slice(0, scriptHost.scriptIndex + 1).join(' '),
+                  '脚本位',
+                  writtenWhere(scriptResolved),
+                )
+                continue
+              }
+            } else {
+              reportGeneratedScript(
+                scriptWord,
+                head.slice(0, scriptHost.scriptIndex + 1).join(' '),
+                '脚本位',
+              )
+              continue
+            }
+          }
           for (let cursor = 1; cursor < head.length; cursor += 1) {
             const word = head[cursor]
             if (word.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue
@@ -5631,11 +7864,37 @@ function ciExecutionSurface(options) {
       expandTokens(shellCommandTokens(text), node.dir)
       // 命令词法（`make` / compose / 登记制 / 参数位载体）**只在 `run:` 块**上跑：
       // 步骤名、`name:`、注释里的 `make`、`with:` 里的 JSON 都是散文/数据，不是命令。
-      for (const block of workflowRunBlocks(text)) {
+      // **R23 FIX-22 / W4-01**：命令词法按 **job** 分组跑，同一 job 的 step 顺序共享一份
+      // "被写过的仓内路径"（`carriedWrites`）—— 跨 step 的"先写后执行"因此与同块形态同判。
+      //
+      // **R24 FIX-26 / X3-01②③**：作用域再补两样（都按 **step 顺序**）——
+      //   · `carriedEnv`：`$GITHUB_ENV`/`$GITHUB_OUTPUT` 导出的名字 → 值（同 step 语义一致：
+      //     扫完本块才收集，所以"同一步里先 export 再用"不会被当成已生效）；
+      //   · 本地复合 action（`uses: ./.github/actions/x`）：它的 `steps[].run` 写**同一个
+      //     工作树**，所以它在**那一步**把写并进 job 作用域（修前 `uses:` 那一步在结构上
+      //     不存在 ⇒ "复合 action 里写、下一步执行"整族隐形）。
+      for (const { job, steps } of workflowJobSteps(text)) {
         const dirs = workingDirsFor(text)
-        expandMakeCalls(block, dirs, true, selfContext)
-        expandComposeCalls(block, dirs, true, selfContext)
-        scanCarrierPaths(block, dirs, true, selfContext)
+        const carriedWrites = new Map()
+        const carriedEnv = new Map()
+        for (const step of steps) {
+          for (const target of step.uses) {
+            for (const carrier of compositeActionWrittenCarriers(target, carriedEnv)) {
+              if (!carriedWrites.has(carrier)) carriedWrites.set(carrier, job)
+            }
+          }
+          for (const block of step.runs) {
+            // **R22 FIX-14 / V7-06**：here-doc 的**正文是数据**、终止词是流标记 —— 拿命令词法去读
+            // 它们会把 `import json` / `print(...)` 读成"未登记的可执行名"、把终止词 `PY` 读成
+            // "脚本位指向仓内不存在的路径"（实测 8 条误红）。命令位扫描读去正文的版本；
+            // 文本网/token 网（`expandTokens`，在下面按**原文**跑）不受影响。
+            const script = inlineHeredocs(block)
+            expandMakeCalls(script, dirs, true, selfContext)
+            expandComposeCalls(script, dirs, true, selfContext)
+            scanCarrierPaths(script, dirs, true, { carriedWrites, carriedJob: job, carriedEnv })
+            collectExportedEnvAssignments(script, carriedEnv)
+          }
+        }
       }
     } else if (node.kind === 'shell-value') {
       // 别名值 / compose 的 `command:` —— 都是**shell 文本**。
@@ -5695,7 +7954,13 @@ function ciExecutionSurface(options) {
     }
   }
   return {
-    mentioning, reached, problems, nodes, truncated, variableCommands, commandShapes, shellArguments, commandWords,
+    mentioning, reached, problems, nodes, truncated, variableCommands, commandShapes, shellArguments,
+    generatedScripts, commandWords,
+    // **R23 FIX-22 / W4-06**：把 E-01 的"写过哪些仓内路径"识别器**交出去**，供收尾的
+    // 判决级见证（`runtimeWriteDetectorProblem`）在合成样本上自证 —— 修前这一层没有任何
+    // 观测量反映它，`runtimeWrittenCarriers` 首行一行早退（`return written`）就能让整层失效
+    // 而守卫仍 `EXIT=0`（W4-06 实测，连 V7 的 a1 夹具也一起变绿）。
+    writeTargets: (source, env) => writeTargetsImpl?.(source, env) ?? new Set(),
   }
 }
 
@@ -5897,6 +8162,83 @@ function classifyCiSurface(mentioning, reached, registry, guardPath) {
     if (entry.mode === 'real' || reachedInExecutionForm) real.push({ file, via })
   }
   return { unregistered, real, synthetic, mislabelled, guardMismatch }
+}
+
+/**
+ * E-01「写过哪些仓内路径」识别器的**合成样本**（R23 FIX-22 / W4-06 的判决级见证）。
+ *
+ * 每条的 `want` 必须被识别出来；`want: []` 的那条反过来要求**不得**凭空认出写目标
+ * （防止"把一切都当成写过"这种廉价通过）。样本逐条对应实测过的一个绕过形态：
+ *   · 第二十三轮 W4：`tee -a X >/dev/null`（W4-02）、`cp src dst > /dev/null`（W4-02）、
+ *     `T=…; > "$T"`（W4-09）；
+ *   · **第二十四轮 X3（R24 FIX-26 / X3-01）**：`python3 -c` 里 `Path(X).write_bytes`、
+ *     `node -e` 里 `fs.writeFileSync(X)`、`exec 3<>X`、经 `$GITHUB_ENV` 递过来的 `> "$V7T"`
+ *     —— 修前这四族都不进任何一张网（`EXIT=0` 而 tripwire 证明运行期真的执行了端到端入口）。
+ * `env` 是这一条样本需要的 `$GITHUB_ENV` 导出表（省略 = 空）。
+ * @type {Array<{ source: string, want: string[], env?: Map<string, string> }>}
+ */
+const RUNTIME_WRITE_DETECTOR_PROBES = [
+  {
+    source: "P='x'\nprintf \"%s\" \"$P\" | base64 -d | tee -a scripts/ci-brand-mask.sh >/dev/null",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  { source: 'cp /tmp/payload.sh scripts/ci-brand-mask.sh > /dev/null', want: ['scripts/ci-brand-mask.sh'] },
+  { source: 'T=scripts/ci-brand-mask.sh\nprintf "%s" "$P" | base64 -d > "$T"', want: ['scripts/ci-brand-mask.sh'] },
+  { source: 'printf "%s" x > scripts/ci-brand-mask.sh\nbash scripts/ci-brand-mask.sh', want: ['scripts/ci-brand-mask.sh'] },
+  { source: 'bash scripts/ci-brand-mask.sh', want: [] },
+  // ---- R24 FIX-26 / X3-01 的四族（各对应一个实测夹具）--------------------------------
+  {
+    source: "python3 -c \"import base64,pathlib;pathlib.Path('scripts/ci-brand-mask.sh')"
+      + ".write_bytes(base64.b64decode('eA=='))\"",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    source: "node -e \"require('node:fs').writeFileSync('scripts/ci-brand-mask.sh','x')\"",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    source: "exec 3<>scripts/ci-brand-mask.sh\nprintf '%s' \"$P\" >&3\nexec 3>&-\nbash scripts/ci-brand-mask.sh",
+    want: ['scripts/ci-brand-mask.sh'],
+  },
+  {
+    // 写目标由**上一步**经 `$GITHUB_ENV` 递过来（同一步内的赋值走既有常量传播，不在此列）。
+    source: 'printf "%s" "$P" | base64 -d > "$V7T"',
+    want: ['scripts/ci-brand-mask.sh'],
+    env: new Map([['V7T', 'scripts/ci-brand-mask.sh']]),
+  },
+  // 反向：只读的 `open('X')`（没有写标志）绝不能被算成写（否则判据变成误报工厂）。
+  { source: "python3 -c \"print(open('scripts/ci-brand-mask.sh').read())\"", want: [] },
+]
+/**
+ * E-01 识别器的**判决级见证**（R23 FIX-22 / W4-06）：合成样本必须逐条认对。
+ *
+ * 修前这一层**没有任何判据级见证** —— `runtimeWrittenCarriers` 首行插一句
+ * `return written`（判据文本与 16 条判决句 needle 一字未动）⇒ 守卫 `EXIT=0`，
+ * 且在同一个掏空版守卫下**连 V7 的 `a1-single-block` 夹具也变绿**（W4-06 实测）。
+ * 现在 `writeTargets` 每次运行都要在合成样本上自证，"掏空该层"必然可见。
+ * @param detect - `source => Set<路径>`（生产路径传 `ciExecutionSurface(...).writeTargets`）。
+ * @returns 不合规的原因；全部通过返回 `undefined`。
+ */
+function runtimeWriteDetectorProblem(detect) {
+  if (typeof detect !== 'function') return 'E-01 的写目标识别器没有交出来（`writeTargets` 缺失）'
+  for (const probe of RUNTIME_WRITE_DETECTOR_PROBES) {
+    const found = detect(probe.source, probe.env)
+    if (!(found instanceof Set)) {
+      return `E-01 的写目标识别器对样本 ${JSON.stringify(probe.source.slice(0, 60))} 返回的不是集合`
+    }
+    for (const path of probe.want) {
+      if (!found.has(path)) {
+        return `E-01 的写目标识别器没有认出样本 ${JSON.stringify(probe.source.slice(0, 72))} 里的 `
+          + `\`${path}\`（实际 ${JSON.stringify([...found])}）—— 这一格对应第二十三轮 W4 实测的`
+          + '绕过形态（`tee -a X >/dev/null` / `cp src dst > /dev/null` / `T=…; > "$T"`）'
+      }
+    }
+    if (probe.want.length === 0 && found.size > 0) {
+      return `E-01 的写目标识别器在**没有写操作**的样本 `
+        + `${JSON.stringify(probe.source.slice(0, 72))} 上认出了 ${JSON.stringify([...found])}`
+    }
+  }
+  return undefined
 }
 
 /**
@@ -6117,6 +8459,205 @@ function ciExecutionSurfaceSelfTest() {
     } finally {
       CI_SURFACE_VARIABLE_COMMAND_ACK.pop()
     }
+  }
+  // **R20A-05 的登记通道**：脚本位指向"仓内不存在的字面路径"（运行期生成物）同样
+  // "fail-closed + 可逐处登记"。两半都要自证：未登记 ⇒ problem（不给"路径不存在就放过"留分支）；
+  // 登记后 ⇒ 不再 problem（这就是"先构建再执行 `bash dist/x.sh`"的正当出路）。
+  {
+    const generatedFixture = new Map([
+      ['.github/workflows/generated.yml',
+        'name: generated\njobs:\n  a:\n    steps:\n      - run: |\n'
+        + '          base64 -d scripts/probe-payload.b64 > scripts/probe-generated.sh\n'
+        + '          bash scripts/probe-generated.sh\n'
+        + '          bash ./scripts/probe-generated.sh\n'
+        // **R21 fix-6 / E-01**：裸文件名（生成物落在 CWD、按裸名执行）—— 修前这一族
+        // 整族隐形（`:6033` 的 `scriptLiteral.includes('/')` 与 ① 的 `command.includes('/')`）。
+        + '          bash probe-bare.sh\n'
+        // 解释器的脚本位：有扩展名时 head[0] 就是脚本（命令位判据），无扩展名时由
+        // `scriptPositional` 分支造成 `[解释器, 脚本, …]`（脚本位判据）—— 两条都要红。
+        + '          python3 probe-bare.py\n'
+        + '          node probe-extless\n'
+        + '          python3 probe-extless-py\n'
+        + '          source probe-sourced.sh\n'],
+      ['scripts/probe-payload.b64', 'YmFzaCBpbnRlZ3JhdGlvbi10ZXN0cy9ydW4tYWxsLnNoCg==\n'],
+    ])
+    const generatedSurface = () => ciExecutionSurface({
+      workflowTexts: [['.github/workflows/generated.yml', generatedFixture.get('.github/workflows/generated.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => generatedFixture.has(path),
+      // 真树的 `read` 是 `readFileSync`：**不存在的路径会抛**（读不出 ⇒ 不是载体）。
+      // 夹具必须同形，否则"空字符串 = 读到了"会让每个路径都被当成仓内载体（假绿）。
+      read: path => {
+        if (!generatedFixture.has(path)) throw new Error(`ENOENT: no such file or directory, open '${path}'`)
+        return generatedFixture.get(path)
+      },
+    })
+    const unacked = generatedSurface()
+    check(unacked.problems.some(message => message.includes('脚本位指向仓内不存在的路径')
+      || message.includes('不存在')),
+      '形态⑨自证: `bash scripts/probe-generated.sh`（脚本位指向**仓内不存在**的字面路径）必须'
+        + ' fail-closed 记 problem —— 修前它是"跟不出载体 ⇒ 静默放过"（R20A-05 的现场：'
+        + ` 生成物 + 不透明载荷 ⇒ 守卫 EXIT=0 而运行期真的执行了端到端入口）：实际 problems=${JSON.stringify(unacked.problems)}`)
+    // **R21 fix-6 / E-01 的三条裸文件名形态**：脚本位（`bash probe-bare.sh`）、命令位
+    // （`python3 probe-bare.py`）、`source` 的脚本位（`source probe-sourced.sh`）——
+    // 三种都必须与带 `/` 的写法**同判**（修前三种全 EXIT=0，而 tripwire 证明运行期真的执行）。
+    for (const [word, where] of [['probe-bare.sh', '脚本位'], ['probe-bare.py', '命令位'],
+      ['probe-extless', '解释器的**无扩展名**脚本位'], ['probe-extless-py', '解释器的**无扩展名**脚本位'],
+      ['probe-sourced.sh', '`source` 的脚本位']]) {
+      check(unacked.generatedScripts.some(item => item.word === word && item.acked === false),
+        `形态⑨自证（R21/E-01）: **裸文件名** ${where} \`${word}\` 必须与带 \`/\` 的写法**同判**`
+          + '（修前这一族整族隐形：`base64 -d … > gen.sh; bash gen.sh` 守卫 EXIT=0 而运行期真的'
+          + ` 执行了端到端入口）：实际 ${JSON.stringify(unacked.generatedScripts)}`)
+    }
+    check(unacked.generatedScripts.length === 7
+      && unacked.generatedScripts.every(item => item.acked === false)
+      && unacked.generatedScripts.some(item => item.word === 'scripts/probe-generated.sh')
+      && unacked.generatedScripts.some(item => item.word === './scripts/probe-generated.sh'),
+      '形态⑨自证: "脚本位指向仓内不存在的路径"必须被记进 `generatedScripts` 且标成**未登记**'
+        + `（死条目对账的另一半）：实际 ${JSON.stringify(unacked.generatedScripts)}`)
+    CI_SURFACE_GENERATED_SCRIPT_ACK.push({
+      file: '.github/workflows/generated.yml', word: 'scripts/probe-generated.sh',
+      why: '自证：登记之后这一处必须放行（"先构建/生成、再执行"的正当写法只能逐处认账）',
+      approvedBy: 'R20A-05（本泳道）',
+    })
+    CI_SURFACE_GENERATED_SCRIPT_ACK.push({
+      file: '.github/workflows/generated.yml', word: './scripts/probe-generated.sh',
+      why: '自证：`./` 前缀是同一条判据的另一种字面写法（必须与不带前缀的那条分别登记）',
+      approvedBy: 'R20A-05（本泳道）',
+    })
+    for (const [word, where] of [['probe-bare.sh', '脚本位'], ['probe-bare.py', '命令位'],
+      ['probe-extless', '解释器的**无扩展名**脚本位'], ['probe-extless-py', '解释器的**无扩展名**脚本位'],
+      ['probe-sourced.sh', '`source` 的脚本位']]) {
+      CI_SURFACE_GENERATED_SCRIPT_ACK.push({
+        file: '.github/workflows/generated.yml', word,
+        why: `自证（R21/E-01）：裸文件名的${where}与带 \`/\` 的写法共用同一张登记表`,
+        approvedBy: 'R21 fix-6（E-01）',
+      })
+    }
+    try {
+      const acked = generatedSurface()
+      check(acked.problems.length === 0,
+        '形态⑨自证: 逐处登记之后"生成物脚本位"必须放行（登记制：新出现的一律红、已认账的留痕）：'
+          + ` 实际 problems=${JSON.stringify(acked.problems)}`)
+      check(acked.generatedScripts.length === 7 && acked.generatedScripts.every(item => item.acked === true),
+        '形态⑨自证: 登记命中后 `generatedScripts.acked` 必须是 true（死条目对账靠它）：'
+          + ` 实际 ${JSON.stringify(acked.generatedScripts)}`)
+    } finally {
+      for (let popped = 0; popped < 7; popped += 1) CI_SURFACE_GENERATED_SCRIPT_ACK.pop()
+    }
+  }
+  // **R21/E-01 的误报面自证**：解释器的 `-m <模块>` / `-c <源码>` 不是脚本位 ——
+  // 无扩展名硬化（把解释器词一起入 head）若不分"脚本位 vs 模块之后的参数"，`python3 -m
+  // http.server 8000` 的 `8000` 会被当成脚本位 ⇒ 假红（真实写法里的 `-m pytest` 同族）。
+  {
+    const moduleFixture = new Map([
+      ['.github/workflows/interp.yml',
+        'name: interp\njobs:\n  a:\n    steps:\n      - run: |\n'
+        + '          python3 -m http.server 8000\n'
+        + '          python3 -m pytest --version\n'
+        + '          python3 -c "print(1)"\n'
+        + '          node -e "console.log(1)"\n'],
+    ])
+    const moduleSurface = ciExecutionSurface({
+      workflowTexts: [['.github/workflows/interp.yml', moduleFixture.get('.github/workflows/interp.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => moduleFixture.has(path),
+      read: path => {
+        if (!moduleFixture.has(path)) throw new Error(`ENOENT: no such file or directory, open '${path}'`)
+        return moduleFixture.get(path)
+      },
+    })
+    check(moduleSurface.generatedScripts.length === 0,
+      '形态⑨自证（R21/E-01 负例）: `python3 -m <模块>` / `python3 -c` / `node -e` 的实参**不是脚本位**'
+        + '（`-m` 的取值已经进了 `modules`），不得被"无扩展名脚本位"硬化误判成生成物：'
+        + ` 实际 ${JSON.stringify(moduleSurface.generatedScripts)}`)
+  }
+  // **R20A-02 的接线自证**（`source` 上下文一路传到词数组求值）：被 `source` 的脚本里
+  // `$(dirname "$0")` 求值到的是**调用者**的目录 —— 闭包若按"本文件目录"求值就会跟随诱饵文件
+  // （审计夹具 `s0-outer`：守卫 EXIT=0 而运行期真的执行了端到端入口）。正例（`$0` 族 ⇒ 红）
+  // 与负例（`BASH_SOURCE` 族 ⇒ 照常求值、不红）都要成立。
+  {
+    const sourcedFixture = new Map([
+      ['.github/workflows/sourced.yml',
+        'name: sourced\njobs:\n  a:\n    steps:\n      - run: bash scripts/probe-outer.sh\n'],
+      ['scripts/probe-outer.sh', '#!/usr/bin/env bash\nsource scripts/probe-inner.sh\nsource scripts/probe-inner-bs.sh\n'],
+      // `$0` 在被 source 的正文里仍是调用者 ⇒ 不求值 ⇒ 脚本位读不懂（fail-closed）。
+      ['scripts/probe-inner.sh', '#!/usr/bin/env bash\nbash "$(dirname "$0")/probe-decoy.sh"\n'],
+      // `BASH_SOURCE` 族在被 source 时仍指本文件 ⇒ 照常求值（负例：不得误报）。
+      ['scripts/probe-inner-bs.sh', '#!/usr/bin/env bash\nbash "${BASH_SOURCE[0]%/*}/probe-ok.sh"\n'],
+      ['scripts/probe-decoy.sh', '#!/usr/bin/env bash\necho decoy\n'],
+      ['scripts/probe-ok.sh', '#!/usr/bin/env bash\necho ok\n'],
+    ])
+    const sourcedSurface = ciExecutionSurface({
+      workflowTexts: [['.github/workflows/sourced.yml', sourcedFixture.get('.github/workflows/sourced.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => sourcedFixture.has(path),
+      read: path => {
+        if (!sourcedFixture.has(path)) throw new Error(`ENOENT: no such file or directory, open '${path}'`)
+        return sourcedFixture.get(path)
+      },
+    })
+    check(sourcedSurface.problems.some(message =>
+      message.includes('scripts/probe-inner.sh') && message.includes('脚本位读不懂')),
+      '形态⑨自证: 被 `source` 的脚本里 `$(dirname "$0")/<尾段>` 必须 fail-closed（`$0` 是**调用者**，'
+        + ' 不能按本文件目录求值 —— R20A-02 的现场就是"跟随了诱饵文件、真正被执行的那份从不被读"）：'
+        + ` 实际 problems=${JSON.stringify(sourcedSurface.problems)}`)
+    check(!sourcedSurface.problems.some(message => message.includes('probe-inner-bs.sh')),
+      '形态⑨自证（负例）: 被 `source` 的脚本里 `${BASH_SOURCE[0]%/*}/<尾段>` **仍然求值**'
+        + `（\`legit-selfstrip\` 那一族不得变成误报）：实际 problems=${JSON.stringify(sourcedSurface.problems)}`)
+  }
+  // **R20A-03 的三种"同等常规"跨文件写法 + "求值失败不得静默"**（自证）：
+  // 每个夹具都是一条"路径常量按模块拆分"的真实写法；修前 `import * as` / `await import()` /
+  // CJS `require` 三种整族隐形（模块从不被读），而"导出存在但值求不出"被静默当成没有候选。
+  {
+    const jsFixture = new Map([
+      ['.github/workflows/js-imports.yml',
+        'name: js-imports\njobs:\n  a:\n    steps:\n'
+        + '      - run: node scripts/probe-ns.mjs\n'
+        + '      - run: node scripts/probe-dyn.mjs\n'
+        + '      - run: node scripts/probe-cjs.cjs\n'
+        + '      - run: node scripts/probe-cond.mjs\n'],
+      ['scripts/probe-paths.mjs', "export const ENTRY = 'integration-tests/run-all.sh'\n"],
+      ['scripts/probe-paths.cjs', "exports.ENTRY = 'integration-tests/run-all.sh'\n"],
+      ['scripts/probe-ns.mjs',
+        "import { spawnSync } from 'node:child_process'\n"
+        + "import * as PATHS from './probe-paths.mjs'\n"
+        + "spawnSync('bash', [PATHS.ENTRY], { stdio: 'inherit' })\n"],
+      ['scripts/probe-dyn.mjs',
+        "import { spawnSync } from 'node:child_process'\n"
+        + "const mod = await import('./probe-paths.mjs')\n"
+        + "spawnSync('bash', [mod.ENTRY], { stdio: 'inherit' })\n"],
+      ['scripts/probe-cjs.cjs',
+        "const { spawnSync } = require('node:child_process')\n"
+        + "const { ENTRY } = require('./probe-paths.cjs')\n"
+        + "spawnSync('bash', [ENTRY], { stdio: 'inherit' })\n"],
+      ['scripts/probe-cond.mjs',
+        "import { spawnSync } from 'node:child_process'\n"
+        + "import { ENTRY } from './probe-conditional.mjs'\n"
+        + "spawnSync('bash', [ENTRY], { stdio: 'inherit' })\n"],
+      ['scripts/probe-conditional.mjs',
+        "export const ENTRY = process.env.CI ? 'integration-tests/run-all.sh' : 'scripts/probe-noop.sh'\n"],
+    ])
+    const jsSurface = ciExecutionSurface({
+      workflowTexts: [['.github/workflows/js-imports.yml', jsFixture.get('.github/workflows/js-imports.yml')]],
+      rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+      exists: path => jsFixture.has(path),
+      read: path => {
+        if (!jsFixture.has(path)) throw new Error(`ENOENT: no such file or directory, open '${path}'`)
+        return jsFixture.get(path)
+      },
+    })
+    for (const file of ['scripts/probe-ns.mjs', 'scripts/probe-dyn.mjs', 'scripts/probe-cjs.cjs']) {
+      check(jsSurface.reached.has(file),
+        `形态⑨自证: ${file} 里的跨文件常量（\`import * as\` / \`await import()\` / CJS \`require\`）`
+          + '解析出的端到端入口必须被记成 reached —— 修前这三种写法整族隐形（模块从不被读）：'
+          + ` 实际 reached=${[...jsSurface.reached.keys()].join(', ')}`)
+    }
+    check(jsSurface.problems.some(message => message.includes('probe-conditional.mjs')
+      && message.includes('求不出来')),
+      '形态⑨自证: "模块找到、导出存在、值求不出来"（条件表达式）必须 fail-closed 记 problem ——'
+        + ' 修前它被回填成 `[]` ⇒ 既不判红也不跟随（R20A-03 ②）：'
+        + ` 实际 problems=${JSON.stringify(jsSurface.problems)}`)
   }
   // 深度上限：包装链超过 {@link CI_SURFACE_MAX_HOPS} 层（`timeout 1` 套 `timeout 1` …）⇒
   // fail-closed（记 problem），**不静默**。
@@ -6490,6 +9031,65 @@ function ciExecutionSurfaceSelfTest() {
   // ---- 执行面闭包 ---------------------------------------------------------
   // 判据的能力先自证（四/五种执行形态必须被认出来），再在真树上跑。
   ciExecutionSurfaceSelfTest()
+  // **R24 FIX-26 / X3-01③**：`workflowJobSteps`（按 **step** 切开 job —— 复合 action 的
+  // `uses:` 那一步在 `workflowRunBlocks` 里结构上不存在）与久经考验的 `workflowJobRunBlocks`
+  // **逐 workflow 对拍**：两者抽出的 `run:` 块序列必须**逐字节相同**。
+  // 切分器是新的（它决定"写在哪一步生效"），一旦与抽取器分叉就必须当场红 ——
+  // 不允许"两套解析各说各话"（漂移的后果是写面静默漏判，正是本条缺陷的形态）。
+  {
+    const drifted = []
+    for (const [file, text] of workflowTexts) {
+      const legacy = workflowJobRunBlocks(text)
+      const stepped = workflowJobSteps(text)
+      if (legacy.length !== stepped.length) {
+        drifted.push(`${file}: job 数 ${legacy.length} ≠ ${stepped.length}`)
+        continue
+      }
+      legacy.forEach((group, index) => {
+        const flat = stepped[index].steps.flatMap(step => step.runs)
+        if (group.blocks.join('\u0000') !== flat.join('\u0000')) {
+          drifted.push(`${file} job \`${group.job}\`: run 块序列 ${JSON.stringify(group.blocks.map(b => b.slice(0, 24)))}`
+            + ` ≠ ${JSON.stringify(flat.map(b => b.slice(0, 24)))}`)
+        }
+      })
+    }
+    check(drifted.length === 0,
+      `形态⑨: \`workflowJobSteps\`（按 step 切分，写面作用域用它定"哪一步生效"）与 `
+        + `\`workflowJobRunBlocks\`（久经考验的抽取器）在 ${drifted.length} 处对不上：\n    `
+        + drifted.join('\n    ')
+        + '\n  ⇒ 两套解析必须给出同一串 run 块；分叉意味着写面按错的 step 归属判"先写后执行"'
+        + '（漏判方向正是 R24 FIX-26 / X3-01 的现场）。')
+    note(`写面作用域: workflowJobSteps ↔ workflowJobRunBlocks 对拍 ${workflowTexts.length} 个 workflow 逐字一致 ✓`)
+  }
+  // **R23 FIX-22 / W4-06**：E-01「写过哪些仓内路径」那一层的**判决级见证** ——
+  // 用一份最小的合成 surface（只认样本里出现的路径）跑一遍识别器。
+  // 修前这一层没有观测量，`runtimeWrittenCarriers` 首行一行早退即可整层失效（W4-06）。
+  const writeDetectorSurface = ciExecutionSurface({
+    workflowTexts: [], rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+    exists: path => RUNTIME_WRITE_DETECTOR_PROBES.some(probe => probe.want.includes(path)),
+    read: path => (RUNTIME_WRITE_DETECTOR_PROBES.some(probe => probe.want.includes(path))
+      ? '#!/usr/bin/env bash\n'
+      : undefined),
+  })
+  check(witnessed('runtime-write-detector',
+    runtimeWriteDetectorProblem(writeDetectorSurface.writeTargets) === undefined),
+  '形态⑨: E-01 的**写目标识别器**合成样本自证不成立 ——'
+    + ` ${runtimeWriteDetectorProblem(writeDetectorSurface.writeTargets)}`
+    + '\n  ⇒ 这一格是"先写后执行"那一族的唯一实现；把它掏空（首行 `return written` 之类）'
+    + '必须当场可见，而不是只靠 `scripts/check-root-guards.mjs` 的字节登记值兜'
+    + '（R23 FIX-22 / W4-06：修前掏空该层仍 `EXIT=0`）。')
+  // **R23 FIX-22 / W4-04 / W4-07**：E-02 两条新子判据的**判决级见证** —— 修前它们各自
+  // 一行早退（`return undefined` / `const witnessCalls = 1`）即可整层失效而 `EXIT=0`。
+  check(witnessed('constant-block-header', constantBlockHeaderProbeProblem() === undefined),
+    '形态⑨: E-02 的**块头常量折叠**判据合成样本自证不成立 ——'
+      + ` ${constantBlockHeaderProbeProblem()}`
+      + "\n  ⇒ 这一格必须能挡住 `if (false) {` / `if (process.env.X === 'never') {` /"
+      + ' `} else {` / `for (const x of []) {` 四种容器（R23 FIX-22 / W4-04）。')
+  check(witnessed('witness-callsite-counter', witnessCallSiteProbeProblem() === undefined),
+    '形态⑨: E-02 的**见证调用点计数**判据合成样本自证不成立 ——'
+      + ` ${witnessCallSiteProbeProblem()}`
+      + '\n  ⇒ 折行诱饵（把 `witnessed(` 与 id 折成两行）必须算作第二个调用点'
+      + '（R23 FIX-22 / W4-04）。')
   const rootManifestPath = join(ROOT, 'package.json')
   if (!existsSync(rootManifestPath)) {
     fail('形态⑨: 找不到根 package.json —— 别名展开是执行面闭包的一条来源，'
@@ -6586,7 +9186,7 @@ function ciExecutionSurfaceSelfTest() {
         declared: E2E_CI_REAL_SURFACE_FILES_DECLARED, reached: surface.reached.size,
         mentioning: surface.mentioning.size,
       })
-      check(classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED,
+      check(witnessed('real-surface', classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED),
         `形态⑨: CI 执行面里"真实前置"触达端到端入口的来源 ${classified.real.length} 个，`
           + `而登记值（E2E_CI_REAL_SURFACE_FILES_DECLARED）是 ${E2E_CI_REAL_SURFACE_FILES_DECLARED} 个`
           + `\n    ${describe(classified.real) || '(无)'}`
@@ -6606,12 +9206,21 @@ function ciExecutionSurfaceSelfTest() {
         ...surface.variableCommands.map(item => `${item.file}\u0000${item.word}`),
         // R18A-01：脚本位那一族共用同一张登记表（命令位 / 脚本位都是"读不懂的执行位"）。
         ...surface.shellArguments.map(item => `${item.file}\u0000${item.word}`),
+        // R20A-05：同一张表的第三个来源 —— "脚本位指向仓内不存在的字面路径"
+        // （登记表不同、命中集合并入这里，死条目对账的写法保持一份）。
+        ...surface.generatedScripts.map(item => `${item.file}\u0000${item.word}`),
       ])
       for (const entry of CI_SURFACE_VARIABLE_COMMAND_ACK) {
         check(hitVariableCommands.has(`${entry.file}\u0000${entry.word}`),
           `形态⑨: \`CI_SURFACE_VARIABLE_COMMAND_ACK\` 里的登记项 ${entry.file} 的 \`${entry.word}\` `
             + '已经不再命中（那一行被删/被改名/被写成字面量）—— 死条目会让认账表看起来比实际宽，'
             + '请在改掉那处写法时同步删掉这条登记。')
+      }
+      for (const entry of CI_SURFACE_GENERATED_SCRIPT_ACK) {
+        check(hitVariableCommands.has(`${entry.file}\u0000${entry.word}`),
+          `形态⑨: \`CI_SURFACE_GENERATED_SCRIPT_ACK\` 里的登记项 ${entry.file} 的 \`${entry.word}\` `
+            + '已经不再命中（那一行被删/被改名，或那个路径现在真的存在于仓里了）—— 死条目会让认账表'
+            + '看起来比实际宽，请在改掉那处写法时同步删掉这条登记。')
       }
       // 同上（R17-X）：**命令位形态读不懂**的登记项也要真的命中过。
       const hitCommandShapes = new Set(surface.commandShapes.map(item => `${item.file}\u0000${item.word}`))
@@ -6684,6 +9293,8 @@ const LAYER_VERDICT_RULES = new Map([
     min: () => 1,
     judge: o => {
       if (o.check === 'group-floor') return o.judgments >= o.floor
+      // R22 FIX-14 / E-02：常量必须与登记表逐条算出的下限同源且为正（收尾重新判决一份）。
+      if (o.check === 'group-floor-definition') return o.floor === o.declared && o.floor > 0
       if (o.check === 'contract-rows') return o.minJudgments === o.rows
       return o.check === 'judged-runner-rows' && o.rows !== null && o.minJudgments === o.rows
     },
@@ -6698,7 +9309,18 @@ const LAYER_VERDICT_RULES = new Map([
   }],
   ['契约判据本体自证', {
     min: () => CONTRACT_TESTS.length,
-    judge: o => o.status === 0 && o.ok === o.total && o.total >= o.minCases,
+    judge: o => {
+      // FIX-45 ①③：`follow()` 对 Location 三形态（相对/绝对/深链）的**纯单元级**自证。
+      if (o.check === 'redirect-forms') {
+        return o.status === 0 && o.formsJudged >= 3 && o.formsPassed === o.formsJudged
+      }
+      // FIX-49 ③：授权确认页字段解析的五形态（真 Dex / 相对 / 绝对 / 顺序变化 / 缺字段）
+      // 的**纯单元级**自证。
+      if (o.check === 'approval-form') {
+        return o.status === 0 && o.formsJudged >= 5 && o.formsPassed === o.formsJudged
+      }
+      return o.status === 0 && o.ok === o.total && o.total >= o.minCases
+    },
   }],
   ['契约判定通道自证', {
     min: () => CONTRACT_TESTS.length,
@@ -6732,6 +9354,10 @@ const LAYER_VERDICT_RULES = new Map([
 // **R19A 自检样本**（R19A-01/02/04 三处修法的回归判据 + R19A-03 的判决规则负例自证）：
 // 放在**失败判定之前**跑 —— 否则自检失败的 `fail()` 会落在已经打印过的失败清单之外。
 roundNineteenSelfTest()
+// **R20A 自检样本**（R20A-01 脚本位取词 / R20A-02 被 source 的 `$0` / R20A-04 判决见证）：
+// 同样放在失败判定之前。R20A-03 的集成面自证在 `ciExecutionSurfaceSelfTest` 里（那片夹具
+// 机制就在那里），R20A-05 也是。
+roundTwentySelfTest()
 
 // ---------------------------------------------------------------------------
 for (const dir of scratchDirs) {
@@ -6868,6 +9494,143 @@ for (const [id, expected, witness] of [
     + '  ⇒ 通过行可以宣称这一层，但它必须由该层的实现自己写出见证值：'
     + '把 check(...) 掏空、只留标签的形态，靠"标签还在"是拦不住的（R18A-G-07）\n')
   return 1
+}
+/**
+ * **第二十轮 R20A 三条收口的自检样本**（R20A-01 脚本位取词 / R20A-02 被 source 的 `$0` /
+ * R20A-04 判决见证）。
+ *
+ * 与 {@link roundNineteenSelfTest} 同款纪律：样本都喂给**生产路径上的同一个函数**，
+ * 任一格不成立即 `fail()` ⇒ 守卫红。每一族都配**正例 + 负例**：
+ *   · R20A-01：`--` / 带取值的旗标必须被消费掉（正例），而"不带取值的旗标"不得吃掉脚本位、
+ *     正当的 `bash scripts/x.sh` 不得记红（负例）；
+ *   · R20A-02：被 source 时 `$0` 族不求值（正例 = 红），`BASH_SOURCE` 族照旧求值（负例 = 绿）；
+ *   · R20A-04：`witnessed` 必须真的记一次执行并把判决原样交回。
+ */
+function roundTwentySelfTest() {
+  const cases = []
+  const procsub = text => `${SHELL_PROCSUB_MARKER}${text}`
+  // ---- R20A-01：脚本位取词（`--` 与"带取值的旗标"）------------------------------------
+  cases.push(['脚本位取词：`--` 是**选项结束标记**（必须消费掉再取脚本位）',
+    shellScriptWordIndex(['bash', '--', '$P'], 0).scriptIndex === 2
+    && shellScriptWordIndex(['bash', '--', '$P'], 0).terminated === true])
+  cases.push(['脚本位取词：**带取值的旗标**要连取值一起跳过'
+    + '（`-O extglob` / `-Oextglob` / `--rcfile 文件` / `--rcfile=文件` / `-o 选项`）',
+    shellScriptWordIndex(['bash', '-O', 'extglob', '$P'], 0).scriptIndex === 3
+    && shellScriptWordIndex(['bash', '-Oextglob', '$P'], 0).scriptIndex === 2
+    && shellScriptWordIndex(['bash', '--rcfile', '/x', '$P'], 0).scriptIndex === 3
+    && shellScriptWordIndex(['bash', '--rcfile=/x', '$P'], 0).scriptIndex === 2
+    && shellScriptWordIndex(['dash', '-o', 'posix', '$P'], 0).scriptIndex === 3])
+  cases.push(['脚本位取词：`-c` 的取值是**命令文本**（不是脚本位）',
+    shellScriptWordIndex(['bash', '-c', 'make x'], 0).commandText?.text === 'make x'
+    && shellScriptWordIndex(['bash', '-lc', 'make x'], 0).commandText?.text === 'make x'
+    && shellScriptWordIndex(['bash', '-c', 'make x'], 0).scriptIndex === -1])
+  cases.push(['脚本位取词（负例）：**不带取值**的旗标不得吃掉脚本位',
+    shellScriptWordIndex(['bash', '-e', 'scripts/x.sh'], 0).scriptIndex === 2
+    && shellScriptWordIndex(['bash', '--noprofile', '--norc', 'scripts/x.sh'], 0).scriptIndex === 3
+    && shellScriptWordIndex(['sh', '-eu', 'scripts/x.sh'], 0).scriptIndex === 2])
+  cases.push(['脚本位缺失（`bash` / `bash -e` / `bash --`）⇒ fail-closed 且具名',
+    ['bash', 'bash -e', 'bash --'].every(line =>
+      unwrapCommandWords(line.split(' '), false).problems
+        .some(problem => problem.kind === 'shell-argument-unreadable' && problem.message.includes('脚本位缺失')))])
+  cases.push(['脚本位被 `--` / 取值位掩蔽（`bash -- "$P"` / `bash -O extglob "$P"`）'
+    + '⇒ 解释器分支 fail-closed（R20A-01 的现场：修前两者都不进判据）',
+    unwrapCommandWords(['bash', '--', '$P'], false).problems.some(problem => problem.kind === 'shell-argument-unreadable')
+    && unwrapCommandWords(['bash', '-O', 'extglob', '$P'], false).problems.some(problem => problem.kind === 'shell-argument-unreadable')
+    && unwrapCommandWords(['bash', '-O', 'extglob', '$P'], false).problems
+      .some(problem => problem.message.includes('变量/命令替换'))])
+  cases.push(['`source` / `.` 的脚本位与解释器**同一份取词**：`source -- "$P"` 红、'
+    + '`source scripts/x.sh` 绿（负例：正当写法不得误报）',
+    unwrapCommandWords(['source', '--', '$P'], false).problems.some(problem => problem.kind === 'shell-argument-unreadable')
+    && unwrapCommandWords(['source', 'scripts/x.sh'], false).problems.length === 0
+    && unwrapCommandWords(['.', 'scripts/x.sh'], false).problems.length === 0])
+  cases.push(['`find … -exec <shell> <脚本位>` 与解释器**同一份取词**：'
+    + '`-exec bash -- {} \\;` 红、`-exec bash {} \\;` 红（`{}` 是占位符）、`-exec bash x.sh \\;` 绿',
+    unwrapCommandWords(['find', 'scripts', '-maxdepth', '1', '-exec', 'bash', '--', '{}', ';'], false)
+      .problems.some(problem => problem.kind === 'shell-argument-unreadable')
+    && unwrapCommandWords(['find', 'scripts', '-exec', 'bash', '{}', ';'], false)
+      .problems.some(problem => problem.kind === 'shell-argument-unreadable')
+    && unwrapCommandWords(['find', 'scripts', '-exec', 'bash', 'scripts/x.sh', ';'], false).problems.length === 0])
+  cases.push(['进程替换的脚本位判定复用同一份取词（`bash -c \'<文本>\' <(…)` 的那一位是 `$0`，'
+    + '不是脚本位；`bash -- <(…)` 是脚本位）',
+    shellProcsubIsScriptPosition(['bash', '-c', 'make x', procsub('<(cat f)')], 3) === false
+    && shellProcsubIsScriptPosition(['bash', '--', procsub('<(cat f)')], 2) === true])
+  // ---- R20A-02：`$0` 只在**被执行**时成立 ----------------------------------------------
+  cases.push(['自指脚本位：`$0` 族在**被 source** 的正文里不求值（`$0` 是调用者，R20A-02）',
+    selfReferentialScriptCandidates('$(dirname $0)/x.sh', 'a/b/w.sh', { executed: false }).length === 0
+    && selfReferentialScriptCandidates('$0', 'a/b/w.sh', { executed: false }).length === 0])
+  cases.push(['自指脚本位（负例）：`BASH_SOURCE` 族在**被 source** 时**仍然求值**'
+    + '（`legit-selfstrip` 必须保持绿）',
+    selfReferentialScriptCandidates('${BASH_SOURCE[0]%/*}/x.sh', 'a/b/w.sh', { executed: false }).join(',') === 'a/b/x.sh'
+    && selfReferentialScriptCandidates('$(dirname ${BASH_SOURCE[0]})/x.sh', 'a/b/w.sh', { executed: false }).join(',') === 'a/b/x.sh'])
+  cases.push(['自指脚本位（负例）：**被执行**时 `$0` 族照旧求值（`legit-dirname0` 必须保持绿）',
+    selfReferentialScriptCandidates('$(dirname $0)/x.sh', 'a/b/w.sh', { executed: true }).join(',') === 'a/b/x.sh'
+    && selfReferentialScriptCandidates('$(dirname $0)/x.sh', 'a/b/w.sh').join(',') === 'a/b/x.sh'])
+  cases.push(['词数组入口：被 source 的正文里 `$0` 族的词**原样保留**（⇒ 词法阶段 fail-closed），'
+    + '`BASH_SOURCE` 族被换成仓内候选',
+    (() => {
+      const context = executed => ({
+        selfFile: 'a/b/w.sh', executed,
+        resolve: path => (path === 'a/b/x.sh' ? path : undefined),
+      })
+      const dollar = shellCommandWordListsFor('bash "$(dirname "$0")/x.sh"', context(false))[0]
+      const source = shellCommandWordListsFor('bash "${BASH_SOURCE[0]%/*}/x.sh"', context(false))[0]
+      const executed = shellCommandWordListsFor('bash "$(dirname "$0")/x.sh"', context(true))[0]
+      return dollar.includes('$(dirname $0)/x.sh') && source.includes('a/b/x.sh') && executed.includes('a/b/x.sh')
+    })()])
+  // ---- R20A-04：判决见证（`witnessed`）--------------------------------------------------
+  {
+    const before = JUDGMENT_RUNS.get('self-test-witness-probe') ?? { runs: 0, passed: 0, failed: 0 }
+    const verdict = witnessed('self-test-witness-probe', true)
+    const after = JUDGMENT_RUNS.get('self-test-witness-probe') ?? { runs: 0, passed: 0, failed: 0 }
+    cases.push(['判决见证：`witnessed` 必须**记一次执行 + 记判决值**并把判决**原样交回**（R20A-04；'
+      + 'R21 fix-6 / E-02 把"只记次数"改成"`runs`/`passed`/`failed` 分开记"）',
+    verdict === true && after.runs === before.runs + 1 && after.passed === before.passed + 1
+      && witnessed('self-test-witness-probe', false) === false])
+    // **R21 fix-6 / E-02 的自证**：三条新收口各自的负例。
+    {
+      const failedBefore = JUDGMENT_RUNS.get('self-test-witness-probe')?.failed ?? 0
+      witnessed('self-test-witness-probe', false)
+      cases.push(['判决见证：`false` 判决必须记进 `failed`（"判成什么"与"跑过没有"分开记）',
+        (JUDGMENT_RUNS.get('self-test-witness-probe')?.failed ?? 0) === failedBefore + 1])
+    }
+    {
+      const violationsBefore = JUDGMENT_CONTRACT_VIOLATIONS.length
+      const nonBoolean = witnessed('self-test-witness-nonboolean', undefined)
+      cases.push(['判决见证（负例）：**非布尔判决值**必须当场记违约（`witnessed(id)` 这种只计数的'
+        + '调用不是一个判决）',
+      nonBoolean === false && JUDGMENT_CONTRACT_VIOLATIONS.length === violationsBefore + 1])
+      JUDGMENT_CONTRACT_VIOLATIONS.pop()
+    }
+    cases.push(['判决见证（负例）：**没执行过**的判决点必须被认出来（"文本在场、判决没跑"）',
+      judgmentSitesWithoutRuns([{ id: 'self-test-witness-probe' }], JUDGMENT_RUNS).length === 0
+      && judgmentSitesWithoutRuns([{ id: 'self-test-never-run' }], JUDGMENT_RUNS).length === 1])
+    // **判决位形态**（R21 fix-6 / E-02 的第二段b）：三种掏空形态逐条自证，
+    // 以及一条正例（行首的独立语句不得误报）。
+    {
+      const needle = "check(witnessed('x', ok),"
+      const legit = `{\n  // 注释\n  ${needle}\n    'why')\n}\n`
+      const sameLine = `{\n  if (false) ${needle}\n    'why')\n}\n`
+      const danglingIf = `{\n  if (false)\n  ${needle}\n    'why')\n}\n`
+      const danglingAnd = `{\n  ok &&\n  ${needle}\n    'why')\n}\n`
+      cases.push(['判决见证（R21/E-02）：判决句必须是**行首的独立语句** —— '
+        + '`if (false) check(witnessed(…))` / 上一行悬挂 `if (…)` / 上一行以 `&&` 结尾 三种掏空形态'
+        + '逐条判红，行首的正常写法不误报',
+      judgmentNeedleStatementProblem(legit, needle) === undefined
+        && judgmentNeedleStatementProblem(sameLine, needle) !== undefined
+        && judgmentNeedleStatementProblem(danglingIf, needle) !== undefined
+        && judgmentNeedleStatementProblem(danglingAnd, needle) !== undefined])
+    }
+  }
+  const broken = cases.filter(([, ok]) => !ok)
+  for (const [label, ok] of cases) {
+    if (!ok) fail(`R20A 自检样本不成立：${label}`)
+  }
+  check(cases.length >= 12, `R20A 自检样本只有 ${cases.length} 条（下限 12）—— 自检被删到没有判别力`)
+  if (broken.length === 0) {
+    note(`R20A 自检样本: ${cases.length} 条（R20A-01 脚本位取词 / R20A-02 被 source 的 \`$0\` / `
+      + 'R20A-04 判决见证 —— 含 **R21 fix-6 / E-02** 的三条新收口：判决值分开记、判决位必须是'
+      + '行首的独立语句、返回契约逐 id 自证）✓')
+  }
 }
 /**
  * 第十九轮 R19A 三条收口的**自检样本**（R19A-01 / R19A-02 / R19A-04）。
@@ -7009,26 +9772,697 @@ function roundNineteenSelfTest() {
  * 这是**判据的判据**：把整张表连同下面那段循环一起删掉，本层就重新失效 —— 那一层由
  * `scripts/check-root-guards.mjs` 对**本文件字节**的 sha256 登记值兜（任何改动都必须同步
  * 登记值，登记值进 diff 才会被评审看见）。这里做的是"最自然的编辑动作（掏空 check）当场红"。
+ *
  * 每条 = `{ layer, id, needle }`；`needle` 必须是**本文件里恰好出现一次**的判决句片段。
+ *
+ * **R20A-04 起**把 needle 从判决条件本身换成 {@link witnessed} 的调用点：判决表达式必须
+ * **经过见证函数**才成立（否则即便文本在场，执行计数也是 0 ⇒ 下面第二段判红）。
+ * 于是 `if (false) check(<原文>)` 这种"文本保留、判决不再执行"的编辑**只改这一个文件**
+ * 就会被发现（修前它要等 `scripts/check-root-guards.mjs` 的跨文件 sha256 登记值兜）。
+ *
+ * **R21 fix-6 / E-02 起再加两段**（E 泳道实测：只加"计数 ≥ 1"这一条时，15 个登记点里
+ * 13 个可以被"`if (false)` 掏空 + 一行 `witnessed('<id>', true)` 诱饵"静默掉）：
+ *   · 第二段b **判决位必须是行首的独立语句**（`judgmentNeedleStatementProblem`）——
+ *     `if (false) check(witnessed(…))` 与"上一行悬挂 `if (…)`"两种形态当场红；
+ *   · 第三段 **返回契约逐 id 自证** —— 对每个登记点探测 `witnessed(id, false) === false`
+ *     与 `witnessed(id, true) === true`，按 id 特判 `return true` 的写法在这里露出来。
  */
 const REQUIRED_JUDGMENT_SITES = [
-  { layer: '语法', id: 'py-ast-parse', needle: "if (parsed.error !== undefined || parsed.status !== 0) {\n    return `${file}: Python 语法解析失败" },
-  { layer: '语法', id: 'node-check', needle: 'if (parsed.status !== 0) {\n    return `${file}: Node 语法解析失败' },
-  { layer: '登记制', id: 'registered-on-disk', needle: 'check(existsSync(join(ROOT, entry.path)),' },
-  { layer: '引用面扩展名对账', id: 'scope-unregistered', needle: 'check(scope.unregistered.length === 0,' },
-  { layer: '聚合层接线', id: 'aggregate-wiring', needle: 'check(aggregateLines.length === expectedAggregate.length,' },
-  { layer: '判别力下限', id: 'group-floor', needle: 'check(groupJudgments >= GROUP_MIN_JUDGMENTS,' },
-  { layer: '环境缺失的原因码登记制', id: 'skip-outlet', needle: 'check(outlets.length === 1,' },
-  { layer: '契约判据表', id: 'criteria-ids', needle: "check(observedIds.join(',') === expectedIds.join(',')," },
-  { layer: '契约判据本体自证', id: 'self-test-total', needle: 'if (ok !== total) fail(`${test.path} --self-test: ${ok}/${total}' },
-  { layer: '契约判定通道自证', id: 'self-check-status', needle: 'check(selfCheckRun.status === 0,' },
-  { layer: '契约端到端变异', id: 'criteria-tautology', needle: 'check(mutant.status !== 0,\n      `形态⑧: 变异 \\`criteria-tautology' },
-  { layer: 'electron-shots', id: 'runtime-mutation', needle: 'check(mutantRun.status !== 0,' },
-  { layer: '假网关场景', id: 'scenario-violations', needle: 'if (violations.length > 0) {\n      for (const violation of violations) fail(' },
-  { layer: '聚合层三项全 SKIP ⇒ 77 且不报 PASS', id: 'aggregate-77', needle: 'check(aggregate.status === 77,' },
-  { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'real-surface', needle: 'check(classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED,' },
+  { layer: '语法', id: 'py-ast-parse', needle: "if (!witnessed('py-ast-parse', parsed.error === undefined && parsed.status === 0)) {" },
+  { layer: '语法', id: 'node-check', needle: "if (!witnessed('node-check', parsed.status === 0)) {" },
+  { layer: '登记制', id: 'registered-on-disk', needle: "check(witnessed('registered-on-disk', existsSync(join(ROOT, entry.path)))," },
+  { layer: '引用面扩展名对账', id: 'scope-unregistered', needle: "check(witnessed('scope-unregistered', scope.unregistered.length === 0)," },
+  { layer: '聚合层接线', id: 'aggregate-wiring', needle: "check(witnessed('aggregate-wiring', aggregateLines.length === expectedAggregate.length)," },
+  { layer: '判别力下限', id: 'group-floor', needle: "check(witnessed('group-floor', groupJudgments >= GROUP_MIN_JUDGMENTS)," },
+  { layer: '判别力下限', id: 'group-floor-definition', needle: "check(witnessed('group-floor-definition',\n    GROUP_MIN_JUDGMENTS === declaredGroupFloor && GROUP_MIN_JUDGMENTS > 0)," },
+  { layer: '环境缺失的原因码登记制', id: 'skip-outlet', needle: "check(witnessed('skip-outlet', outlets.length === 1)," },
+  { layer: '契约判据表', id: 'criteria-ids', needle: "check(witnessed('criteria-ids', observedIds.join(',') === expectedIds.join(','))," },
+  { layer: '契约判据本体自证', id: 'self-test-total', needle: "if (!witnessed('self-test-total', ok === total)) fail(`${test.path} --self-test: ${ok}/${total}" },
+  { layer: '契约判定通道自证', id: 'self-check-status', needle: "check(witnessed('self-check-status', selfCheckRun.status === 0)," },
+  { layer: '契约端到端变异', id: 'criteria-tautology', needle: "check(witnessed('criteria-tautology', mutant.status !== 0),\n      `形态⑧: 变异 \\`criteria-tautology" },
+  { layer: 'electron-shots', id: 'runtime-mutation', needle: "check(witnessed('runtime-mutation', mutantRun.status !== 0)," },
+  { layer: '假网关场景', id: 'scenario-violations', needle: "if (!witnessed('scenario-violations', violations.length === 0)) {\n      for (const violation of violations) fail(" },
+  { layer: '聚合层三项全 SKIP ⇒ 77 且不报 PASS', id: 'aggregate-77', needle: "check(witnessed('aggregate-77', aggregate.status === 77)," },
+  { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'real-surface', needle: "check(witnessed('real-surface', classified.real.length === E2E_CI_REAL_SURFACE_FILES_DECLARED)," },
+  // **R23 FIX-22**：三条新登记点 —— 每条都是「上一层判据自己的判据」（掏空它必然可见）。
+  { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'runtime-write-detector', needle: "  check(witnessed('runtime-write-detector'," },
+  { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'constant-block-header', needle: "  check(witnessed('constant-block-header', constantBlockHeaderProbeProblem() === undefined)," },
+  { layer: '端到端覆盖面 ↔ CI 执行面：', id: 'witness-callsite-counter', needle: "  check(witnessed('witness-callsite-counter', witnessCallSiteProbeProblem() === undefined)," },
 ]
+/**
+ * **块头是不是"恒不执行"的**（R22 FIX-14 / E-02 的块形态收口）。
+ *
+ * ## 现场
+ *
+ * 上一格判据把 `{` 当成"正常的语句边界"（对 `for (…) {` / 函数体是对的），于是
+ * `if (false) { <判决句原字节> }` + 一行 `witnessed('<id>', true)` 诱饵三条子判据全不命中：
+ * 同行前缀没有、上一行是 `if (false) {`（末字符 `{` 被放行）、needle 仍恰好 1 次、
+ * 见证确实被调用过 ⇒ `EXIT=0`（实测 3 个站点，含修复自检点名的 `criteria-tautology`）。
+ *
+ * ## 判据
+ *
+ * 块头（`{` 之前那段）带条件时，条件必须是**求不出常量**的表达式：
+ *   · `if (false) {` / `while (0) {` / `if (true === false) {` ⇒ 常量假 ⇒ 红；
+ *   · `for (const _ of []) {` ⇒ 迭代域是空数组字面量 ⇒ 红（"循环体一次都不进"）；
+ *   · `else {` ⇒ 条件分支的另一半 ⇒ 红；
+ *   · `for (const entry of INTEGRATION_ENTRIES) {` / `if (dumped !== null) {` ⇒ 自由变量求不出
+ *     ⇒ 放行（这正是本文件里 15 个登记点的**真实**上下文，误红会让判据无法使用）。
+ * 常量求值只在**字面量 + 本文件里的字面量常量绑定**范围内做（`const X = false` 这类），
+ * 求不出就放行 —— 宁可漏"把常量藏进函数返回值"这种更费劲的形态，也不误红正当的层。
+ * @param headerText - `{` 之前的那段文本（同一行）。
+ * @param source - 守卫自己的正文（用于解析本文件内的字面量常量绑定）。
+ * @returns 不合规的原因；正常块头返回 `undefined`。
+ */
+/**
+ * `for (const x of <域>)` 的**迭代域可证为空**吗（R23 FIX-22 补的**活**分支）。
+ *
+ * 修前 {@link constantBlockHeaderProblem} 里那段 `empty` 判断是**死代码**：它把整段
+ * `const x of []` 交给 {@link evaluateConstantExpression}，而后者不认识 `for` 的绑定形态 ⇒
+ * 永远返回 `undefined` ⇒ `Array.isArray(undefined)` 为假。也就是说"`for (const _ of []) {`
+ * 会被判红"这句只活在注释里（实测：`for (const probeItem of []` → `undefined`）。
+ * 这里把迭代域**剥出来**再求值，让那条承诺真的成立。
+ * @param condition - 循环头括号内的原文（`const x of []` / `x < 3` / `;;`）。
+ * @param source - 守卫自己的正文（取字面量常量绑定）。
+ * @returns `true` = 迭代域可证为空数组字面量。
+ */
+function provenEmptyIterationDomain(condition, source) {
+  const text = String(condition)
+  const stripped = text.replace(/^\s*(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s+(?:of|in)\s+/u, '')
+  if (stripped === text) return false
+  const value = evaluateConstantExpression(stripped, source)
+  return Array.isArray(value) && value.length === 0
+}
+/**
+ * 恒不执行块头的**统一诊断**（{@link constantBlockHeaderProblem} 的两个分支共用）。
+ * @param headerText - `{` 之前那段文本（同一行）。
+ * @returns 诊断文本。
+ */
+function EMPTY_BLOCK_HEADER_PROBLEM(headerText) {
+  return `上一非空行是**恒不执行**的块头（${JSON.stringify(headerText.slice(0, 60))}）——`
+    + ' 判决句被包在"条件恒假/循环体一次都不进"的块里（`if (false) { <判决句> }` + 一行'
+    + " 诱饵 \`witnessed('<id>', true)\` 是第二十二轮 V7 泳道实测的掏空形态）"
+}
+function constantBlockHeaderProblem(headerText, source) {
+  if (headerText === '') return undefined
+  if (/^\}\s*else\b/u.test(headerText)) {
+    return `上一非空行是 \`} else {\`（判决句被挂在条件分支的另一半上）`
+  }
+  const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(headerText)
+  if (keyword === null) return undefined
+  const open = headerText.indexOf('(')
+  const close = headerText.lastIndexOf(')')
+  if (open < 0 || close < open) return undefined
+  const condition = headerText.slice(open + 1, close)
+  const value = evaluateConstantExpression(condition, source)
+  // **R23 FIX-22**：`empty` 必须在"求不出就放行"**之前**算 —— 修前这一段的顺序让整条
+  // "迭代域为空"分支**不可达**（`const x of []` 求不出常量 ⇒ 提前 return），而注释里一直
+  // 写着"`for (const _ of []) {` ⇒ 红"。实测：`for (const probeItem of []` → `undefined`。
+  const empty = (keyword[1] === 'for' || keyword[1] === 'while')
+    ? provenEmptyIterationDomain(condition, source)
+    : false
+  if (value === undefined) return empty ? EMPTY_BLOCK_HEADER_PROBLEM(headerText) : undefined
+  if (value !== false && value !== 0 && value !== '' && value !== null && !empty) return undefined
+  return EMPTY_BLOCK_HEADER_PROBLEM(headerText)
+}
+
+
+
+/**
+ * `needle` 在正文里是不是**判决位**（R21 fix-6 / E-02 的第二段b）。
+ *
+ * ## 现场
+ *
+ * 判据只要求"needle 在判决本体里恰好出现一次"+"该 id 的见证计数 ≥ 1"。两条都是
+ * **子串级**的：`if (false) check(witnessed('criteria-tautology', …), …)` 里那个 needle
+ * 仍是原文的子串（前缀 `if (false) ` 不影响子串匹配），而诱饵行 `witnessed('<id>', true)`
+ * 让计数照旧 ≥ 1 ⇒ 判决被中和、守卫 `EXIT=0`（E 泳道 13/15 实测）。
+ *
+ * ## 判据（两条，都是"这一位是不是独立语句"）
+ *
+ *   ① needle 必须在**行首**（同一行前面只有缩进）—— `if (false) check(…)` 这种"挂在前面"
+ *      的形态当场红；
+ *   ② 上一**非空、非注释**行不得是"把下一条语句挂住"的构造（`if (…)` / `else` / 结尾的
+ *      `&&`、`||`、`(`、`,`、`=`、`?`、`[`、`{`）—— 把 `if (false)` 单独写成一行的变体
+ *      同样红。
+ *
+ * ## 边界（认账）
+ *
+ * 这是**语法形态**判据，不是语义判据：其它死代码形态（`if (0)`、把一个永不被调用的函数
+ * 包起来…）不在这里判 —— 它们由 {@link witnessed} 的返回契约自证（第三段）与
+ * `scripts/check-root-guards.mjs` 的文件字节 sha256 登记值兜。宁可写明边界，也不假装语法
+ * 判据能代替语义判据。
+ * @param source - 守卫自己的正文（已排除登记表那一段）。
+ * @param needle - `REQUIRED_JUDGMENT_SITES` 的 `needle`。
+ * @returns 不合规的**原因**（诊断里点名）；合规返回 `undefined`。
+ */
+/**
+ * **判决句所在语句的"直接容器"是不是条件块**（R23 FIX-22 / W4-04 的结构判据）。
+ *
+ * ## 现场（第二十三轮 W4 实测，6 条变异 `EXIT=0`）
+ *
+ * 上一格判据只看"**紧邻的上一非空行**"，于是四种改法各差一句就全身而过：
+ *   · `if (false) {` + **插一句普通语句**（`const v7unused = 1`）+ 判决句 + `}`；
+ *   · `if (process.env.V7_NEVER === 'never') {` + 判决句 + `}`（常量求值求不出 ⇒ 旧版放行）；
+ *   · `} else {` + 判决句 + `}`；以及 `function v7NeverCalled() {` + 判决句 + `}`（永不调用）。
+ * 这些都配一行**折行**的诱饵见证调用，于是两条子判据同时被绕过 ⇒ `EXIT=0`
+ * （`probe/logs/m1-procenv.txt`…`m8-criteria-tautology.txt`）。
+ *
+ * ## 判据（"顶层可达路径"的结构形态）
+ *
+ * 从判决句所在位置**向上回溯**，用"闭合花括号计数"找到**真正包住它的那个块头**：
+ * 先数到 N 个 `}`，再遇到第 N+1 个以 `{` 结尾的行就是容器（回溯期间遇到普通语句不影响
+ * 容器识别 —— 这正是"紧邻上一行"那一版的漏洞）。
+ *   · 容器是 `else` 分支 / `if (…)` / `switch (…)` ⇒ **红**，除非条件能**证为真**
+ *     （`evaluateConstantExpression` 返回 `true`）；
+ *   · 容器是 `for` / `while (…)` ⇒ 红，仅当迭代域是**可证为空**的常量（`for (const x of [])`）；
+ *   · 容器是函数体 / `try` / 裸块 / 顶层 ⇒ 放行（本仓 `REQUIRED_JUDGMENT_SITES` 里各登记点的
+ *     真实上下文；R23 FIX-22 起共 19 个点，其中 3 个是本次新增的『判据自己的判据』）。
+ *
+ * ## 边界（认账）
+ *
+ * 仍是**文本**判据：花括号按行首/行尾形态数，"把判决句塞进一个被调用的辅助函数、
+ * 而那个函数只在死分支里被调用"这种更绕的形态不在这里判（它由执行计数与见证返回契约兜）。
+ * 回溯只跳过**注释行**与空行，不做字符串掩码 —— 句法形态足够稳定，且误判方向是"多报"
+ * （宁可多报一条，也不放行一个恒假容器）。
+ * @param source - 守卫自己的正文（已排除登记表那一段）。
+ * @param at - 判决句在 `source` 里的下标。
+ * @returns 不合规的原因；容器不是条件块（或条件可证为真）时返回 `undefined`。
+ */
+function enclosingBlockHeaderProblem(source, at) {
+  const lines = String(source).slice(0, at).split('\n')
+  let pending = 0
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (trimmed.endsWith('}')) { pending += 1; continue }
+    const header = /^(.*?)\{\s*$/u.exec(trimmed)
+    if (header === null) continue
+    if (pending > 0) { pending -= 1; continue }
+    // 这一行就是**真正包住判决句的那个块头**（回溯期间经过的普通语句不影响容器识别 ——
+    // 这正是旧版"只看紧邻上一非空行"的漏洞：m6 只多插一句 `const v7unused = 1` 就绕过）。
+    const container = header[1].trim()
+    // **R24 FIX-26 / X3-02**：**裸块与 `try` 是"透明边界"，不是"顶层可达路径"的证据。**
+    //
+    // 现场（第二十四轮 X3 泳道，19 个登记点通用）：回溯只找**最内层**容器，而裸块 `{ … }`
+    // 被当成"不是条件块 ⇒ 放行"（旧版这里是 `if (container === '') return undefined`）。
+    // 于是把死容器里的判决句再包一层花括号（`if (false) { { 判决句 } }`）就能把"最内层容器"
+    // 洗成裸块 ⇒ 容器判据整层失效；再配一行诱饵 `witnessed('id', true)` 补回执行计数 ⇒
+    // `EXIT=0`。修法 = 裸块与 `try {` **继续向上回溯**，直到第一个真正的控制流容器
+    // （`if`/`for`/`while`/`switch`/`else`），或函数体/顶层（那两类的块头带非空、非控制流
+    // 关键字 ⇒ 落到下面的放行分支，仍是"可达路径"的边界）。
+    if (container === '') continue
+    if (/^try\b/u.test(container)) continue
+    const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(container)
+    const isElse = /^(?:\}\s*)?else\b/u.test(container)
+    if (keyword === null && !isElse) return undefined
+    if (isElse) {
+      return `判决句所在语句的**直接容器**是 \`else\` 分支（${JSON.stringify(container.slice(0, 50))}）——`
+        + ' 条件分支的另一半不属于"顶层可达路径"'
+    }
+    const open = container.indexOf('(')
+    const close = container.lastIndexOf(')')
+    if (open < 0 || close < open) {
+      return `判决句所在语句的直接容器是条件块（${JSON.stringify(container.slice(0, 50))}）——`
+        + ' 读不出它的条件，按 fail-closed 处理'
+    }
+    const condition = container.slice(open + 1, close)
+    const value = evaluateConstantExpression(condition, source)
+    const constantFalse = value === false || value === 0 || value === '' || value === null
+    if (keyword[1] === 'if' || keyword[1] === 'switch') {
+      if (constantFalse) {
+        return `判决句所在语句的**直接容器**是条件恒假的块（${JSON.stringify(container.slice(0, 60))}）——`
+          + ' 判决因此不在"顶层可达路径"上（第二十三轮 W4 的 m6 形态正是在这个块头与判决句之间'
+          + '多插了一句普通语句，从而骗过旧版"只看紧邻上一行"的实现）'
+      }
+      // 条件求不出的（`if (dumped !== null) {` / `if (wired) {`）放行 —— 本仓有登记点真的在
+      // 这类"只有采集到了才判"的容器里，一律判红会让判据无法使用（误红正当层的代价更高）。
+      return undefined
+    }
+    if (constantFalse || provenEmptyIterationDomain(condition, source)) {
+      return `判决句所在语句的直接容器是**循环体一次都不会进**的循环`
+        + `（${JSON.stringify(container.slice(0, 60))}）`
+    }
+    return undefined
+  }
+  return undefined
+}
+/**
+ * **判决见证调用点的唯一计数实现**（R23 FIX-22 / W4-04 的"归一化折行"）。
+ *
+ * ## 现场
+ *
+ * 上一格判据按**行**数 `witnessed('<id>',` 的出现次数，于是把诱饵写成
+ * `witnessed(\n  '<id>', true)`（折在 `(` 之后）时该行不含那个子串 ⇒ 计数仍是 1 ⇒ 诱饵隐形
+ * （第二十三轮 W4 的 6 条变异都带这一行折行诱饵，实测 `EXIT=0`）。
+ *
+ * ## 判据
+ *
+ * 计数前先**掩掉注释**、再把**所有空白折叠掉**，然后数归一化后的**调用点**。折行在哪个位置
+ * 都逃不掉；注释里的同一片段不算（本表的 JSDoc 天然含同样的片段，不掩注释会自伤）。
+ *
+ * **R24 FIX-26 / X3-02：第一实参的写法必须归一化。** 第二十三轮的归一化只覆盖"折行"，仍然
+ * 只认单引号字面量 ⇒ 诱饵换成**反引号**`witnessed(\`<id>\`, true)`、**双引号**
+ * `witnessed("<id>", true)`、或**先绑再传**（`const v7id='<id>'; witnessed(v7id, true)`）时
+ * 计数照旧是 1 ⇒ 诱饵隐形、判决死在花括号里而 19 个登记点全绿（第二十四轮 X3 泳道实测）。
+ * 三种写法在运行期都是**同一个调用点**（`witnessed` 只认第一实参的取值），所以这里把它们
+ * 与单引号字面量合并计数：**"调用点唯一"这条语义不变**，只是不再按引号形态分岔。
+ * @param id - 判决点 id。
+ * @param code - 守卫的**判决本体**正文（已排除登记表那一段）。
+ * @returns 归一化后的调用点个数。
+ */
+function witnessCallSiteCount(id, code) {
+  const masked = String(code)
+    .split('\n')
+    // 整行注释**按行**滤掉（与第一段 b 的注释跳过同一口径）：折行诱饵不可能藏进被滤掉的行里，
+    // 而"注释里恰好出现同样的片段"这一类假命中也不会被算进来（本表的 JSDoc 天然含同样的片段）。
+    .filter(line => {
+      const trimmed = line.trim()
+      return trimmed !== '' && !trimmed.startsWith('//')
+        && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
+    })
+    .join('\n')
+  const normalized = masked.replace(/\s+/gu, '')
+  const countOf = spelling => normalized.split(`witnessed(${spelling},`).length - 1
+  // ① 字面量第一实参：单引号 / 双引号 / 模板字符串（反引号）三种写法同判。
+  let count = countOf(`'${id}'`) + countOf(`"${id}"`) + countOf(`\`${id}\``)
+  // ② 先绑再传的诱饵（`const v7id='<id>'; … witnessed(v7id, true)`）：标识符文法受
+  //    JS 限制（不含 `-`），所以按"本段正文里把 id 字面量绑给哪个标识符"反查。
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const binding = new RegExp(
+    `(?:const|let|var)\\s+([A-Za-z_$][A-Za-z0-9_$]*)\\s*=\\s*(?:'${escaped}'|"${escaped}"|\`${escaped}\`)`, 'gu')
+  for (const match of masked.matchAll(binding)) count += countOf(match[1])
+  return count
+}
+/**
+ * {@link constantBlockHeaderProblem} 的**判决级见证**（R23 FIX-22 / W4-07）。
+ *
+ * 修前这条子判据**没有见证**：首行插一句 `return undefined` ⇒ 守卫 `EXIT=0`（判据文本与
+ * needle 一字未动）。这里在每次运行时用合成样本自证"该红的一定红、该绿的一定绿"。
+ * @returns 不合规的原因；全部通过返回 `undefined`。
+ */
+function constantBlockHeaderProbeProblem() {
+  const guardSource = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  /**
+   * 造一段"块头 + 判决句"的合成正文。
+   * @param header - 块头行（含 `{`）。
+   * @param insertStatement - 是否在块头与判决句之间多插一句普通语句（W4-04 的 m6 形态）。
+   * @returns 合成正文。
+   */
+  const synthetic = (header, insertStatement = false) => `${header}\n`
+    + (insertStatement ? '  const probeUnused = 1\n' : '')
+    + "  check(witnessed('probe-block', probeUnused))\n}\n"
+  // ---- 第一层：**常量折叠**（`constantBlockHeaderProblem`）单独自证 ----------------------
+  // 逐个直接问这一层：**不许**靠第二层兜（否则把这一层掏成 `return undefined` 时
+  // 第二层刚好也认得同一个块头 ⇒ 掏空不可见，W4-07 的形态就会复发）。
+  for (const header of ['if (false)', 'if (0 === 1)', '} else', 'for (const probeItem of [])']) {
+    if (constantBlockHeaderProblem(header, guardSource) === undefined) {
+      return `\`constantBlockHeaderProblem\` 自己放过了 ${JSON.stringify(header)} ——`
+        + ' 这一层是"块头条件恒假 / 迭代域为空 / else 分支"的唯一常量折叠实现（W4-04 的 m2/m5/m7 形态）'
+    }
+  }
+  // ---- 第二层：**结构容器**（`enclosingBlockHeaderProblem`）单独自证 --------------------
+  // 关键样本 = **块头与判决句之间还有一句普通语句**（旧版"只看紧邻上一行"在这里是绿的）。
+  // 注意分工（别把不属于这一层的形态算在它头上）：**条件求不出**的紧邻块头
+  // （`if (process.env.X === 'never') {`）这一层**故意放行** —— 它由"见证调用点归一化计数"
+  // 那一层兜（`witnessCallSiteProbeProblem` 覆盖折行诱饵），两层各证各的。
+  for (const header of ['if (false) {', 'for (const probeItem of []) {', '} else {']) {
+    const text = synthetic(header, true)
+    if (enclosingBlockHeaderProblem(text, text.indexOf('check(')) === undefined) {
+      return `\`enclosingBlockHeaderProblem\` 没有认出 ${JSON.stringify(header)}`
+        + ' 与判决句之间还夹着一句普通语句的容器 —— 这正是 W4-04 的 m6 形态'
+        + '（只多插一句 `const v7unused = 1` 就骗过旧版"只看紧邻上一行"的实现）'
+    }
+  }
+  // ---- 反向：正当块头两层都不得误红 ------------------------------------------------
+  for (const header of ['for (const entry of INTEGRATION_ENTRIES) {', 'if (dumped !== null) {']) {
+    const text = synthetic(header)
+    const problem = constantBlockHeaderProblem(header.replace(/\{$/u, '').trim(), guardSource)
+      ?? enclosingBlockHeaderProblem(text, text.indexOf('check('))
+    if (problem !== undefined) return `块形态判据误红了正当块头 ${JSON.stringify(header)}：${problem}`
+  }
+  const topLevel = synthetic('')
+  if (enclosingBlockHeaderProblem(topLevel, topLevel.indexOf('check(')) !== undefined) {
+    return '`enclosingBlockHeaderProblem` 误红了顶层（裸块）里的判决句'
+  }
+  return undefined
+}
+function witnessCallSiteProbeProblem() {
+  const cases = [
+    { code: "check(witnessed('probe-id', value), 'm')\n", id: 'probe-id', expect: 1 },
+    { code: "check(witnessed(\n  'probe-id', value), 'm')\n", id: 'probe-id', expect: 1 },
+    {
+      code: "if (false) { check(witnessed('probe-id', value), 'm') }\nwitnessed(\n  'probe-id', true)\n",
+      id: 'probe-id', expect: 2,
+    },
+    { code: "// witnessed('probe-id', true)\ncheck(witnessed('probe-id', value))\n", id: 'probe-id', expect: 1 },
+    // **R24 FIX-26 / X3-02**：同一个调用点的三种"换皮"写法都必须计入 —— 反引号模板字符串、
+    // 双引号、以及"先把 id 绑给标识符再当第一实参"。修前它们各自让诱饵隐形（计数仍是 1）。
+    { code: 'check(witnessed(\'probe-id\', value))\nwitnessed(`probe-id`, true)\n', id: 'probe-id', expect: 2 },
+    { code: 'check(witnessed(\'probe-id\', value))\nwitnessed("probe-id", true)\n', id: 'probe-id', expect: 2 },
+    {
+      code: "const probeAlias = 'probe-id'\ncheck(witnessed('probe-id', value))\nwitnessed(probeAlias, true)\n",
+      id: 'probe-id', expect: 2,
+    },
+    // 反向：别的 id 的调用点不算在本 id 头上（否则"计数唯一"会变成"总数"）。
+    { code: "check(witnessed('probe-id', value))\nwitnessed(`probe-other`, true)\n", id: 'probe-id', expect: 1 },
+  ]
+  for (const probe of cases) {
+    const count = witnessCallSiteCount(probe.id, probe.code)
+    if (count !== probe.expect) {
+      return `\`witnessCallSiteCount\` 对样本 ${JSON.stringify(probe.code.slice(0, 60))} 给出 ${count}`
+        + `（期望 ${probe.expect}）—— 折行 / 反引号 / 双引号 / 先绑再传四种写法在运行期是**同一个`
+        + '调用点**，诱饵必须算作第二个（W4-04 的折行绕过；R24 FIX-26 / X3-02 的换皮绕过）'
+    }
+  }
+  return undefined
+}
+function judgmentNeedleStatementProblem(source, needle) {
+  const at = source.indexOf(needle)
+  if (at < 0) return 'needle 不在判决本体里'
+  const lineStart = source.lastIndexOf('\n', at) + 1
+  const beforeOnLine = source.slice(lineStart, at)
+  if (beforeOnLine.trim() !== '') {
+    return `needle 不在**行首**（同一行前面还有代码：${JSON.stringify(beforeOnLine.trim().slice(0, 60))}）`
+      + ' —— 判决句被挂在了别的构造上（`if (false) check(witnessed(…))` 的同族）'
+  }
+  const lines = source.slice(0, lineStart).split('\n')
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (/^(?:\}\s*)?(?:if|for|while|switch)\b[^{;]*$/u.test(trimmed)) {
+      return `上一非空行是**悬挂的条件**（${JSON.stringify(trimmed.slice(0, 60))}）—— 判决句会被它条件化`
+    }
+    if (/^(?:\}\s*)?else\s*$/u.test(trimmed)) return '上一非空行是 `else`（判决句被条件化）'
+    // **R22 FIX-14 / E-02 块形态**：`{` 是正常的语句边界（`for (…) {` / 函数体 / `try {`），
+    // 但"**条件恒假**的块"不是 —— `if (false) { <判决句原字节> }` + 一行
+    // `witnessed('<id>', true)` 诱饵实测 EXIT=0（三个站点，第二十二轮 V7 泳道）。
+    // 判据：块头带条件时，条件不许是**常量假**（`false` / `0` / `''` / `true === false` /
+    // 本文件里被字面量常量绑定的名字）；`else {` 一律拒（它是条件分支的另一半）。
+    const header = /^(.*?)\{\s*$/u.exec(trimmed)
+    if (header !== null) {
+      const problem = constantBlockHeaderProblem(header[1].trim(), source)
+      if (problem !== undefined) return problem
+    }
+    // 其余结尾字符都会把下一条语句挂住。
+    if (/[&|?,=([\]]$/u.test(trimmed)) {
+      return `上一非空行以悬挂运算符结尾（${JSON.stringify(trimmed.slice(-24))}）—— 判决句不是一个独立语句`
+    }
+    break
+  }
+  return undefined
+}
+
+/**
+ * **运行期逐条引用的「可达性」判据**（第三十轮 FIX-45 ②；形态与
+ * {@link judgmentNeedleStatementProblem} / {@link constantBlockHeaderProblem} 同源，
+ * 常量求值复用 {@link evaluateConstantExpression}，不另起一套）。
+ *
+ * ## 现场（第二十九轮 AC2 的 F-04，P1，两处实跑）
+ *
+ * `reporter.report('deep-link-identity', …)` 的**字面量保留**、只把它包进 `if False:` ⇒
+ * 本守卫 **EXIT=0**；而同一条腿对**错误身份**的 SSO 报 `RESULT: PASS`（6 ✓ 而非 7 ✓），
+ * 原件对同一网关正确 FAIL。`electron-shots` 同族同样漏（`M6` 变异也是 EXIT=0）。
+ * 即：原来的 `citedIds.has(id)` / `shotsSource.includes(id)` 证明的是"**文本在场**"，
+ * 不是"**运行期求值过**"。
+ *
+ * ## 判据（AC2 点名的那几档）
+ *
+ *   · **恒假块头**：调用点的**外层块头**（Python 按缩进、JS 按 `{`）条件不得是常量假 ——
+ *     `if False:` / `if (false) {` / `while (false) {` / `if (true === false) {`；
+ *     常量求值求不出就**放行**（`if (twoStep) {` / `if approval_required:` 这类正当分支
+ *     不得误红）；
+ *   · **空迭代域**：`for _ in []:` / `for (const _ of []) {`（复用
+ *     {@link provenEmptyIterationDomain} 的 Python 版）；
+ *   · **同一行条件化**：`if (false) report(…)`（JS 前缀里带 `(…)` 的条件直接求值）；
+ *   · **悬空运算符**：`cond && report(…)` / `… and report(…)`（调用点不是独立语句）；
+ *   · **早退之后的死代码**：紧邻的**同层**上一非空行是**无条件** `return` / `raise` /
+ *     `throw` / `break` / `continue` / `sys.exit(`。
+ *
+ * ## 边界（认账，勿夸大）
+ *
+ * 这**不是**完整的控制流分析：条件表达式（`report(…) if False else None`）、把常量藏进函数
+ * 返回值、跨函数跳转这一格看不见。它们由**行为级判据**兜 —— `SCENARIOS` 的
+ * `dex-wrong-identity`（对**错误身份**的 SSO 必须 FAIL）：把调用点弄成不可达，那条腿的结论
+ * 必然从 FAIL 变成 PASS，当场红。两层互补，缺一不可。
+ * @param source - 运行期脚本正文（`.py` / `.mjs`）。
+ * @param id - 判据 id。
+ * @param language - `'py'` 或 `'js'`（只影响注释前缀 / 块头 / 早退词 / 悬空运算符的形态）。
+ * @param callee - 调用方（`'reporter.report'` / `'report'`）。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function callSiteReachabilityProblem(source, id, language, callee) {
+  const text = String(source)
+  const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const calleePattern = String(callee).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const sites = [...text.matchAll(new RegExp(`${calleePattern}\\(\\s*(['"])${escaped}\\1\\s*,`, 'gu'))]
+  if (sites.length === 0) {
+    return `找不到以判据 id 为首参的调用点（\`${callee}(<id>, …)\`）`
+  }
+  const py = language === 'py'
+  const comment = py ? '#' : '//'
+  const controlFlow = py ? /^(?:if|elif|while|for)\b/u : /^(?:if|while|for|switch)\b/u
+  const earlyExit = py
+    ? /^(?:return|raise|break|continue)\b|^sys\.exit\(/u
+    : /^(?:return|throw|break|continue)\b/u
+  const dangling = py
+    ? /(?:[,=([{+\-*/%&|^]|\b(?:and|or|not|is|in))\s*$/u
+    : /(?:[,=([?&|+\-*/%^.]|\b(?:await|typeof|instanceof))\s*$/u
+  const problems = []
+  for (const site of sites) {
+    const at = site.index
+    const lineStart = text.lastIndexOf('\n', at) + 1
+    const leading = text.slice(lineStart, at)
+    const prefix = leading.trim()
+    if (prefix !== '' && !(py && controlFlow.test(prefix))) {
+      // 同一行前缀。两种语言的**合法**条件化写法不同：
+      //   · Python：`if not reporter.report(…)` —— 调用点就是条件本身；"恒假条件里带调用点"
+      //     在这门语言里写不出来（`if False: report(…)` 是语法错误）；
+      //   · JS：`if (false) report(…)` 是完全合法的语句 —— 条件必须**真的求值**。
+      const condition = jsInlineCondition(prefix)
+      const value = condition === undefined ? undefined : evaluateConstantExpression(condition, text)
+      if (value === false || value === 0 || value === '' || value === null) {
+        problems.push(`调用点被同一行的**恒假条件**条件化（${JSON.stringify(prefix.slice(0, 60))}）`)
+        continue
+      }
+      if (condition === undefined && dangling.test(prefix)) {
+        problems.push('调用点不是独立语句（同一行前缀以悬空运算符结尾：'
+          + `${JSON.stringify(prefix.slice(-24))}）`)
+        continue
+      }
+    }
+    const container = py
+      ? pythonUnreachableContainerProblem(text, at)
+      : jsUnreachableContainerProblem(text, at)
+    if (container !== undefined) {
+      problems.push(container)
+      continue
+    }
+    const sibling = previousSameLevelStatement(text, lineStart, leading.length, py)
+    if (sibling !== undefined && earlyExit.test(sibling)) {
+      problems.push('调用点的上一条同层语句是**无条件早退**'
+        + `（${JSON.stringify(sibling.slice(0, 60))}）⇒ 死代码`)
+      continue
+    }
+    const danglingLine = danglingPreviousLineProblem(text, lineStart, language)
+    if (danglingLine !== undefined) problems.push(danglingLine)
+  }
+  return problems.length === 0 ? undefined : problems.join('；')
+}
+
+/**
+ * 调用点的**上一非空行**是不是以悬挂运算符结尾（`cond &&` / `x =` / `… +`）。
+ *
+ * 形态与 {@link judgmentNeedleStatementProblem} 的最后一格同源（那边判的是守卫自己的判决句）。
+ * 这里只需要"上一条语句把调用点挂住了"这一个事实 —— 判不出来就放行，误红会让判据不可用。
+ * @param source - 运行期脚本正文。
+ * @param lineStart - 调用点所在行的起始下标。
+ * @param language - `'py'` / `'js'`。
+ * @returns 不合规的原因；正常返回 `undefined`。
+ */
+function danglingPreviousLineProblem(source, lineStart, language) {
+  const py = language === 'py'
+  const comment = py ? '#' : '//'
+  const dangling = py
+    ? /(?:[,=([{+\-*/%&|^]|\b(?:and|or|not|is|in))\s*$/u
+    : /(?:[,=([?&|+\-*/%^.]|\b(?:await|typeof|instanceof))\s*$/u
+  const lines = String(source).slice(0, lineStart).split('\n')
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith(comment)
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (dangling.test(trimmed)) {
+      return `上一非空行以**悬挂运算符**结尾（${JSON.stringify(trimmed.slice(-24))}）——`
+        + ' 调用点不是一个独立语句（`cond &&` / `x =` 会把下一条语句挂住，运行期不保证求值）'
+    }
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * JS：调用点是否被**条件恒假 / 迭代域为空**的块包着。
+ *
+ * 形态与 {@link enclosingBlockHeaderProblem} 同源（同一套"回溯找容器"的写法与同一份常量
+ * 求值 {@link evaluateConstantExpression}），两处**有意的差别**：
+ *   · 这里要**逐层往外看**（`if (false) { if (x) { 调用 } }` 的内层容器条件求不出，
+ *     但外层恒假 —— 只看最内层会漏）；
+ *   · `} else {` / `try {` / 裸块在这里是**可达边界**（真实存在正当调用点落在 `else` 分支，
+ *     例如 `electron-shots.mjs:712` 的 `report('two-step-login-page', { phaseOk: false })`），
+ *     所以继续往外走而**不**判红 —— 与 {@link enclosingBlockHeaderProblem} 的取向相反是
+ *     因为两者的被守护面不同：那边守的是"守卫自己的顶层判决句"，这边守的是"运行期脚本的
+ *     每一条判据调用"。
+ * @param source - 运行期脚本正文。
+ * @param at - 调用点在正文里的下标。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function jsUnreachableContainerProblem(source, at) {
+  const lines = String(source).slice(0, at).split('\n')
+  let pending = 0
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed === '' || trimmed.startsWith('//')
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    if (trimmed.endsWith('}')) { pending += 1; continue }
+    const header = /^(.*?)\{\s*$/u.exec(trimmed)
+    if (header === null) continue
+    if (pending > 0) { pending -= 1; continue }
+    const container = header[1].trim()
+    // 裸块 / `try` / 条件分支的另一半：透明边界，继续往外找真正的控制流容器。
+    if (container === '' || /^try\b/u.test(container)
+      || /^(?:\}\s*)?(?:else|catch|finally)\b/u.test(container)) continue
+    const keyword = /^(?:\}\s*)?(if|while|for|switch)\b/u.exec(container)
+    if (keyword === null) break  // 函数体 / 类体 / 对象字面量 ⇒ 出了语句作用域
+    const open = container.indexOf('(')
+    const close = container.lastIndexOf(')')
+    if (open < 0 || close < open) {
+      return `调用点所在语句的外层容器读不出条件（${JSON.stringify(container.slice(0, 50))}）`
+        + ' ⇒ 按 fail-closed 处理'
+    }
+    const condition = container.slice(open + 1, close)
+    const value = evaluateConstantExpression(condition, source)
+    const empty = (keyword[1] === 'for' || keyword[1] === 'while')
+      ? provenEmptyIterationDomain(condition, source)
+      : false
+    const constantFalse = value === false || value === 0 || value === '' || value === null
+    if (constantFalse || empty) {
+      return `调用点被**恒不执行**的块包着（${JSON.stringify(container.slice(0, 60))}）——`
+        + ' 条件恒假 / 循环体一次都不进 ⇒ 该判据在运行期不会被求值'
+    }
+  }
+  return undefined
+}
+
+/**
+ * Python：调用点是否被**条件恒假 / 迭代域为空**的块包着（按缩进找容器，逐层往外）。
+ * @param source - 运行期脚本正文。
+ * @param at - 调用点在正文里的下标。
+ * @returns 不可达的原因；可达返回 `undefined`。
+ */
+function pythonUnreachableContainerProblem(source, at) {
+  const lineStart = source.lastIndexOf('\n', at) + 1
+  const callIndent = /^[ \t]*/u.exec(source.slice(lineStart, at))[0].length
+  const lines = source.slice(0, lineStart).split('\n')
+  let level = callIndent
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const raw = lines[index]
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith('#')
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    const lineIndent = /^[ \t]*/u.exec(raw)[0].length
+    if (lineIndent > level) continue          // 续行 / 更深块：不属于本层
+    if (lineIndent === level) continue        // 同层兄弟语句：不改变容器
+    const header = /^(.*?):\s*$/u.exec(trimmed)
+    if (header === null) break
+    const headerText = header[1].trim()
+    if (!/^(?:if|elif|while|for)\b/u.test(headerText)) break  // def/class/with/try → 出作用域
+    const problem = pythonBlockHeaderProblem(headerText, source)
+    if (problem !== undefined) return problem
+    level = lineIndent
+  }
+  return undefined
+}
+
+/**
+ * 调用点往上第一条**同层**语句（跳过更深缩进的续行/子块与空行、注释）。
+ *
+ * 只用来判"死代码"那一格（`return finish()` 直接写在调用点上一行）。判不出来没关系 ——
+ * 那一格由行为级判据（`dex-wrong-identity`）兜，不必为它做完整的 CFG。
+ * @param source - 运行期脚本正文。
+ * @param lineStart - 调用点所在行的起始下标。
+ * @param callIndent - 调用点的缩进宽度。
+ * @param py - 是否 Python（只影响注释前缀）。
+ * @returns 那条语句的原文；找不到返回 `undefined`。
+ */
+function previousSameLevelStatement(source, lineStart, callIndent, py) {
+  const comment = py ? '#' : '//'
+  const lines = String(source).slice(0, lineStart).split('\n')
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    const raw = lines[index]
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith(comment)
+      || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+    const lineIndent = /^[ \t]*/u.exec(raw)[0].length
+    if (lineIndent > callIndent) continue
+    return lineIndent === callIndent ? trimmed : undefined
+  }
+  return undefined
+}
+
+/**
+ * 同一行前缀里的 JS 条件（`if (false) ` / `while (0) `）—— 抽取括号内原文。
+ *
+ * 只在**前缀整体就是一个条件块头**时返回条件；否则 `undefined`（= 调用点不是被前缀里的
+ * 条件条件化的，交给悬空运算符那一档判）。
+ * @param prefix - 调用点之前的同一行文本（已 trim）。
+ * @returns 条件原文；形态不符返回 `undefined`。
+ */
+function jsInlineCondition(prefix) {
+  const match = /^(?:\}\s*)?(?:if|while|switch)\s*\(([\s\S]*)\)\s*$/u.exec(String(prefix).trim())
+  return match === null ? undefined : match[1]
+}
+
+/**
+ * Python 块头（`if False:` / `while False:` / `for x in []:`）的**恒不执行**判据。
+ *
+ * 与 {@link constantBlockHeaderProblem} 同形，只把方言差异收在这里：条件里的
+ * `True` / `False` / `None` 先归一成 JS 字面量（`evaluateConstantExpression` 只认后者），
+ * 空迭代域按 `for <目标> in <域>` 剥出来。`else:` / `try:` / `with:` / `def:` / `class:`
+ * 一律放行（它们不构成"条件恒假"）。
+ * @param headerText - 去掉尾部 `:` 的块头原文。
+ * @param source - 运行期脚本正文（常量求值用）。
+ * @returns 不合规的原因；正常块头返回 `undefined`。
+ */
+function pythonBlockHeaderProblem(headerText, source) {
+  if (headerText === '') return undefined
+  const keyword = /^(?:if|elif|while|for)\b/u.exec(headerText)
+  if (keyword === null) return undefined
+  let condition = headerText.slice(keyword[0].length).trim().replace(/^\(([\s\S]*)\)$/u, '$1').trim()
+  condition = condition.replace(/\b(True|False|None)\b/gu, word =>
+    ({ True: 'true', False: 'false', None: 'null' })[word])
+  const value = evaluateConstantExpression(condition, source)
+  const empty = pythonEmptyIterationDomain(keyword[0], condition, source)
+  if (value === undefined) return empty ? EMPTY_BLOCK_HEADER_PROBLEM(headerText) : undefined
+  if (value !== false && value !== 0 && value !== '' && value !== null && !empty) return undefined
+  return EMPTY_BLOCK_HEADER_PROBLEM(headerText)
+}
+
+/**
+ * Python 的 `for <目标> in <域>:` 里迭代域**可证为空**吗（{@link provenEmptyIterationDomain}
+ * 的方言版：JS 是 `const x of []`，Python 是 `x in []`）。
+ * @param keyword - 块头关键字（`for` / `while` / …）。
+ * @param condition - 去掉关键字后的条件原文。
+ * @param source - 运行期脚本正文（常量求值用）。
+ * @returns `true` = 迭代域可证为空。
+ */
+function pythonEmptyIterationDomain(keyword, condition, source) {
+  if (keyword !== 'for' && keyword !== 'while') return false
+  const stripped = String(condition).replace(/^[^:]*?\bin\b\s*/u, '')
+  if (stripped === String(condition)) return false
+  const value = evaluateConstantExpression(stripped, source)
+  return Array.isArray(value) && value.length === 0
+}
 {
+  // ---- 第一段：**判决句逐字在场**（R19A-03 ②）--------------------------------------
   const guardSource = readFileSync(fileURLToPath(import.meta.url), 'utf8')
   // 只扫**判决本体**那一段：本表自己的字面量天然包含同样的片段，不排除它就成了自证同义反复
   // （每个 needle 都能在表里"命中"自己）。
@@ -7040,21 +10474,129 @@ const REQUIRED_JUDGMENT_SITES = [
   const labelsWithoutSites = COVERED_LAYER_LABELS.filter(label =>
     !REQUIRED_JUDGMENT_SITES.some(site => site.layer === label))
   const sitesSeen = []
+  // **只数代码行**：本表自己的 JSDoc 里出现过 `witnessed('criteria-tautology', …)` 这类片段，
+  // 把注释算进来会让"见证调用点唯一"这条判据自伤（与 `judgmentNeedleStatementProblem` 的
+  // 注释跳过同一口径）。
+  const guardCodeLines = guardCode.split('\n').filter(line => {
+    const trimmed = line.trim()
+    return trimmed !== '' && !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*')
+  })
   for (const site of REQUIRED_JUDGMENT_SITES) {
     // **判决本体里恰好一次**：掏空真判决（`check(mutant.status !== 0,` → `check(true,`）⇒ 归零 ⇒ 红。
     const occurrences = guardCode.split(site.needle).length - 1
-    if (occurrences === 1) continue
+    if (occurrences === 1) {
+      // ---- 第一段b：**这一位必须是行首的独立语句**（R21 fix-6 / E-02）------------------
+      //
+      // 只看"needle 是不是子串"会让 `if (false) check(witnessed(…))` 全身而过（前缀不影响
+      // 子串匹配），而它正是 E 泳道实测的掏空形态（配一行 `witnessed('<id>', true)` 诱饵）。
+      // **R22 FIX-14 / E-02 块形态的另一半**：`if (false) { <判决句原字节> }` 必须再补一行
+      // 诱饵 `witnessed('<id>', true)` 才能把"执行计数 ≥ 1"骗过去（判决句被包进恒假块之后
+      // 它自己不会执行）—— 所以"**同一 id 的见证调用点唯一**"正是那一族的收口：多一个调用点
+      // 就红，且它与块头判据、执行计数、返回契约三格互相独立（实测三个站点全被咬住）。
+      // **R23 FIX-22 / W4-04**：调用点计数必须**归一化折行**（见 {@link witnessCallSiteCount}）——
+      // 修前按**行**数 `witnessed('<id>',`，把诱饵写成 `witnessed(` + 换行 + `'<id>', true)` 就隐形。
+      const witnessCalls = witnessCallSiteCount(site.id, guardCode)
+      if (witnessCalls !== 1) {
+        sitesSeen.push(`「${site.layer}」的判决点 ${site.id} 的**见证调用点**在判决本体里出现 `
+          + `${witnessCalls} 次（必须恰好 1 次）—— \`if (false) { <判决句原字节> }\` 这类`
+          + '"文本保留、判决不再执行"的编辑要靠一行诱饵 '
+          + `\`witnessed('${site.id}', true)\` 才能骗过执行计数，而诱饵就是一个**多出来的调用点**。`
+          + '（R22 FIX-14 / E-02 块形态；**R23 FIX-22 / W4-04**：计数已**掩掉注释并折叠空白**，'
+          + '把诱饵折成多行也照样算第二个调用点）')
+      }
+      // **R23 FIX-22 / W4-04**：结构判据 —— 判决句所在语句的**直接容器**不许是条件块
+      // （`if (…)` / `else` / `switch` / 迭代域可证为空的循环）。旧版只看"紧邻的上一非空行"，
+      // 块头与判决句之间插一句普通语句即可绕过（W4-04 的 m6）。
+      const containerProblem = enclosingBlockHeaderProblem(guardCode, guardCode.indexOf(site.needle))
+      if (containerProblem !== undefined) {
+        sitesSeen.push(`「${site.layer}」的判决点 ${site.id} **不在顶层可达路径上**：${containerProblem}`
+          + `\n      期望片段：${JSON.stringify(site.needle.slice(0, 90))}`
+          + '\n      ⇒ 判决句必须是**直属语句**（`check(witnessed(…))` / `if (!witnessed(…)) {`），'
+          + '不许被 `if`/`else`/循环容器条件化（R23 FIX-22 / W4-04）。')
+        continue
+      }
+      const statementProblem = judgmentNeedleStatementProblem(guardCode, site.needle)
+      if (statementProblem === undefined) continue
+      sitesSeen.push(`「${site.layer}」的判决点 ${site.id} **不在判决位上**：${statementProblem}`
+        + `\n      期望片段：${JSON.stringify(site.needle.slice(0, 90))}`
+        + '\n      ⇒ 判决句必须是**行首的独立语句**：`if (false) check(witnessed(…))` 这种"文本保留、'
+        + '判决被挂在别的构造上"的编辑与"把判决掏成恒真"同属一种（R21 fix-6 / E-02）。')
+      continue
+    }
     sitesSeen.push(`「${site.layer}」的判决句 ${site.id} 在判决本体里出现 ${occurrences} 次`
       + `（必须恰好 1 次）—— 期望片段：${JSON.stringify(site.needle.slice(0, 90))}`)
   }
   if (labelsWithoutSites.length > 0) {
     sitesSeen.push(`这些覆盖层没有登记任何判决句：${labelsWithoutSites.map(label => JSON.stringify(label)).join(', ')}`)
   }
+  // ---- 第二段：**判决真的执行过**（R20A-04）----------------------------------------
+  //
+  // 第一段只看文本：`if (false) check(<判决句原文>)` 能让 15 条 needle 全部在场、
+  // 原始观测照记、收尾重新判决照样成立 ⇒ 修前守卫自己 `EXIT=0`（审计 MUT-B 实测）。
+  // 见证计数写在判决的取值路径上（`witnessed(id, 判决表达式)`），所以"文本在、判决没跑"
+  // 与"判决跑了但没经过见证"两种编辑都会让计数缺失 ⇒ 当场红，且**只改这一个文件就能发现**。
+  for (const site of judgmentSitesWithoutRuns(REQUIRED_JUDGMENT_SITES, JUDGMENT_RUNS)) {
+    sitesSeen.push(`「${site.layer}」的判决点 ${site.id} **一次都没有执行过**（执行计数 0）——`
+      + ` 判决表达式必须经过 \`witnessed('${site.id}', …)\` 才成立：`
+      + ' 把判决包进 `if (false) …`（文本还在、意思没了）与把判决掏成恒真同属一种编辑，'
+      + '两条路都必须红（R20A-04：修前这一格只被另一个文件的 sha256 登记值兜）')
+  }
+  // ---- 第三段：**见证的返回契约**（R21 fix-6 / E-02）-------------------------------
+  //
+  // 现场：把 {@link witnessed} 改成"按 id 特判 `return true`"（**一行**）⇒ 每个登记点的判决
+  // 表达式照常求值，但 `check(witnessed(…))` 收到的永远是 `true` ⇒ 判决被中和，而 15 条
+  // needle、执行计数、原始观测全部照旧成立（E 泳道实测 `EXIT=0`）。修前 `roundTwentySelfTest`
+  // 只探测 `self-test-witness-probe` **一个** id，所以"按 id 特判"不会被它发现。
+  //
+  // 判据：**逐个登记点**探测 `witnessed(id, false) === false` 与 `witnessed(id, true) === true`
+  // （探测完回滚计数，不影响上面第二段的"执行过"对账）—— 任何按 id / 按层特判返回值的写法
+  // 都会在这里当场露出来。
+  {
+    const snapshot = new Map([...JUDGMENT_RUNS].map(([key, value]) => [key, { ...value }]))
+    const probed = []
+    for (const site of REQUIRED_JUDGMENT_SITES) {
+      probed.push(site.id)
+      const before = snapshot.get(site.id) ?? { runs: 0, passed: 0, failed: 0 }
+      if (witnessed(site.id, false) !== false) {
+        sitesSeen.push(`判决点 ${site.id} 的见证**返回契约**不成立：\`witnessed('${site.id}', false)\``
+          + ' 没有原样交回 `false` —— 判决表达式的结果被改写了（按 id 特判 `return true` 的同族）')
+      }
+      // **判决值必须真的落进计数**（否则"分开记 `passed`/`failed`"只是装饰）：
+      // 探测 `false` 之后 `failed`/`runs` 各 +1，探测 `true` 之后 `passed` +1 ——
+      // 把 `witnessed` 退回"只记次数"（`JUDGMENT_RUNS.set(site, n + 1)`）会让这两条当场红。
+      const afterFalse = JUDGMENT_RUNS.get(site.id) ?? { runs: 0, passed: 0, failed: 0 }
+      if (afterFalse.failed !== before.failed + 1 || afterFalse.runs !== before.runs + 1) {
+        sitesSeen.push(`判决点 ${site.id} 的**判决值没有记进 \`failed\`**（探测 \`false\` 后 `
+          + `failed ${before.failed}→${afterFalse.failed}、runs ${before.runs}→${afterFalse.runs}，`
+          + '期望各 +1）—— 见证必须记"判成什么"，不能只记"调用过几次"（R21 fix-6 / E-02）')
+      }
+      if (witnessed(site.id, true) !== true) {
+        sitesSeen.push(`判决点 ${site.id} 的见证**返回契约**不成立：\`witnessed('${site.id}', true)\``
+          + ' 没有原样交回 `true`')
+      }
+      const afterTrue = JUDGMENT_RUNS.get(site.id) ?? { runs: 0, passed: 0, failed: 0 }
+      if (afterTrue.passed !== before.passed + 1 || afterTrue.runs !== before.runs + 2) {
+        sitesSeen.push(`判决点 ${site.id} 的**判决值没有记进 \`passed\`**（探测 \`true\` 后 `
+          + `passed ${before.passed}→${afterTrue.passed}、runs ${before.runs}→${afterTrue.runs}，`
+          + '期望分别 +1 / +2）—— 同上')
+      }
+    }
+    JUDGMENT_RUNS.clear()
+    for (const [key, value] of snapshot) JUDGMENT_RUNS.set(key, value)
+    if (probed.length !== REQUIRED_JUDGMENT_SITES.length) {
+      sitesSeen.push(`见证返回契约只探测了 ${probed.length}/${REQUIRED_JUDGMENT_SITES.length} 个登记点`
+        + ' —— 探测循环被短路（"逐点自证"必须罩住整张表）')
+    }
+  }
+  for (const violation of JUDGMENT_CONTRACT_VIOLATIONS) sitesSeen.push(violation)
   if (sitesSeen.length > 0) {
-    process.stderr.write('\ncheck-integration-tests: **判决句登记表**不成立（R19A-03 ②）——\n'
+    process.stderr.write('\ncheck-integration-tests: **判决句登记表**不成立'
+      + '（R19A-03 ② / R20A-04 / R21 fix-6 E-02）——\n'
       + sitesSeen.map(item => `  · ${item}\n`).join('')
-      + '  ⇒ 保留尝试计数、把判决掏成 `check(true, …)` 时，仓里的事实一个字都没变 ——'
-      + ' 只有"判决句逐字在场"能发现这种编辑。改判决请**同步**这一行登记值（进 diff 才会被评审看见）。\n')
+      + '  ⇒ 保留尝试计数、把判决掏成 `check(true, …)`、包进 `if (false) …`、或用一行'
+      + ' `witnessed(\'<id>\', true)` 诱饵伪造计数时，仓里的事实一个字都没变 ——'
+      + ' 只有"判决句逐字在场"+"判决在行首的独立语句里真的执行过"+"见证原样交回判决值"'
+      + ' 三条一起，才能发现这些编辑。\n')
     return 1
   }
 }
@@ -7106,9 +10648,17 @@ process.stdout.write(
   + '`bash <含空白>` / `bash *.sh`'
   + '（脚本位读不懂 ⇒ fail-closed：**含 `/` 的间接层不再豁免** —— `bash "$D/x.sh"`、'
   + ' `bash /tmp/x.sh` 与 `bash *.sh` 同判，R18A-01；`find … -exec <shell> <脚本位>` 的脚本位'
-  + ' 同网，R18A-02）。**自指脚本位**（R19A-04）不是"读不懂"：在被跟随的仓内 shell 脚本正文里，'
+  + ' 同网，R18A-02）。**脚本位取词只有一份实现**（**R20A-01 收口**）：`--` 是**选项结束标记**'
+  + '（`bash -- "$P"` 的脚本位是 `"$P"`）、**带取值的旗标**连取值一起跳过（`-O extglob` / `-o 选项` /'
+  + ' `--rcfile 文件`），`source` / `.` 与 `find -exec` 走**同一个**取词函数；'
+  + '旗标段之后**没有脚本位**（`bash` / `bash -e` / `bash --`）也 fail-closed（shell 那时从 stdin'
+  + ' 读命令）；**脚本位指向仓内不存在的字面路径**（运行期生成物，R20A-05）同样记红，'
+  + ' "先构建再执行"只能逐处登记进 `CI_SURFACE_GENERATED_SCRIPT_ACK`（死条目也红）。'
+  + '**自指脚本位**（R19A-04；**R20A-02 收口**）不是"读不懂"：在被跟随的仓内 shell 脚本正文里，'
   + '`$(dirname "$0")/<尾段>` / `${BASH_SOURCE[0]%/*}/<尾段>` / 裸 `$0` 按**当前脚本所在目录**'
-  + '求值（求值出仓内存在的路径 ⇒ 照常跟随并继续扫描；求值不出 ⇒ 仍 fail-closed）。'
+  + '求值（求值出仓内存在的路径 ⇒ 照常跟随并继续扫描；求值不出 ⇒ 仍 fail-closed）——但 **`$0` 族'
+  + '只在脚本被"执行"时成立**：`source` / `.` 进来的正文里 `$0` 仍是**调用者**，那里不求值'
+  + '（`BASH_SOURCE` 族照旧求值），所以"跟随诱饵文件"这条旁路是红的。'
   + '④b **JS/TS 包装脚本里的"先解析、后执行"在网内**（R18A-03；**R19A-02 收口**）：'
   + '`spawn|exec|fork` 的实参表达式按常量展开（`const T = \'…\'`、`join|resolve` 拼接、'
   + '模板字面量、数组/对象常量表 + 下标/成员、`+` 拼接、**数组 `.slice()`/`.concat()`**、'
@@ -7117,7 +10667,11 @@ process.stdout.write(
   + '——解析出的候选回到 token 网/`reached` 判据，所以"路径先算出来再传给 spawn"不再隐形。'
   + '**误报面（不得变成误报工厂）**：形参 / 运行期取值不展开也不记红（本仓 33 处 '
   + '`spawnSync(\'bash\', …)` 的同族形态），`node:|` 外部包的 import 不判；'
-  + '**同仓相对 import 读不懂即 fail-closed**（模块读不到 / 没有那个导出常量 / 链过深）。'
+  + '**同仓相对 import 读不懂即 fail-closed**（模块读不到 / 没有那个导出常量 / 链过深 /'
+  + ' **导出存在但取值求不出来** —— 条件表达式那类"`process.env.X ? a : b`"不再被静默当成'
+  + '"没有候选"，R20A-03 ②）。**三种同等常规的跨文件写法同样在网内**（R20A-03 ①）：'
+  + '`import * as NS from \'./x.mjs\'`（成员按 `NS.成员` 惰性求值）、`await import(\'./x.mjs\')`、'
+  + 'CJS `const { ENTRY } = require(\'./x.cjs\')` / `exports.ENTRY = …`。'
   + '④c **载体链深度超限 fail-loud**（R18A-04）：超过上限的节点不再静默丢弃，'
   + ' 而是记红并打出链（越深的包装链正是"把端到端入口藏起来"最容易的形态）。'
   + '④ **跟随面是"仓内任何路径"** —— 命令位/参数位上的仓内文件（脚本 / `.mjs`·`.py` / `python -m` 模块 /'
@@ -7133,13 +10687,37 @@ process.stdout.write(
   + '收尾按逐层登记规则**重新判决**一遍 —— 把某一层整层掏空（`for (… of [])`）会让观测归零 ⇒ 红；'
   + '把循环体的判决掏成恒真（事实没变、只是守卫不再看它）则由**判决句登记表**兜：'
   + '每层真正咬人的那一句 `check(...)` 必须逐字在场（改判决必须同步登记值，进 diff 才会被评审看见）。'
+  + '**R20A-04 起再加一层**：判决表达式必须经过 `witnessed(<判决点 id>, …)` —— 收尾逐个断言'
+  + '"这个判决点**真的执行过**（执行计数 ≥ 1）"，于是"保留判决句原文、把它包进 `if (false) …`"'
+  + '这种编辑**只改这一个文件**就会被发现（修前它只被另一个文件的 sha256 登记值兜）。'
+  + `**R21 fix-6 / E-02 起这一层再收紧成三条**（${REQUIRED_JUDGMENT_SITES.length} 个登记点逐个判）：`
+  + '① 见证记的是**判决值**（`runs`/`passed`/`failed` 分开记，非布尔判决值当场记违约）而不只是'
+  + '"调用发生过"；② 判决句必须是**行首的独立语句** —— `if (false) check(witnessed(…))` 与'
+  + '"上一行悬挂 `if (…)`"两种掏空形态当场红（修前它配一行 `witnessed(\'<id>\', true)` 诱饵即可'
+  + '静默，15 点里 13 点实测失效）；③ **返回契约逐 id 自证** —— 对每个登记点探测'
+  + '`witnessed(id, false) === false` / `witnessed(id, true) === true`，按 id 特判 `return true`'
+  + '的写法在这里露出来。**无见证不是"静默通过"**：登记表里没有判决句的层、计数为 0 的点、'
+  + '返回契约不成立的点，三条中任意一条都当场红（`EXIT=1`），不会只写在散文里。'
   + '⑥ **覆盖边界（认账）**：登记制只罩**入口形态**的命令位；**被跟随的仓内脚本正文不逐词登记**'
   + '（那里的命令位含脚本自定义函数与 shell 语法构件），它们由"载体跟随 + token 网 + 文本网 +'
   + ' make/compose 扩张"覆盖 —— 因此"新增一个未登记的**工具**并只在某个脚本正文里调用它"这条判据'
   + '看不出来（它与"CI 是否执行端到端入口"无关）；而"把端到端入口藏进任何一层载体"是红的。'
   + '**常量传播只覆盖同一段文本内的简单赋值与字面量命令替换**：`$(cat <文件>)`、`$1`/`$@`、'
-  + '`${VAR:-默认}`、跨文件/跨 step 的变量、GitHub 表达式都解析不了 —— 命令位上遇到它们一律'
-  + 'fail-closed（不是"没看见"），参数位上由文本面/载体跟随兜。'
+  + '`${VAR:-默认}`、GitHub 表达式都解析不了 —— 命令位上遇到它们一律'
+  + 'fail-closed（不是"没看见"），参数位上由文本面/载体跟随兜；'
+  + '**R24 FIX-26 / X3-01 起写面另加三条**（"先写后执行"那一格的覆盖面）：'
+  + '⑦ **解释器内联脚本里的写**（`python3 -c` / `node -e` / `perl -e` 的 `Path(X).write_bytes`、'
+  + '`writeFileSync(X)`、`open(FH, \'>\', X)` …）按 {@link INLINE_SCRIPT_WRITE_PATTERNS} 进网 ——'
+  + '只覆盖**第一实参是字面量**的写调用，路径拼出来的仍看不见；'
+  + '⑧ **`$GITHUB_ENV`/`$GITHUB_OUTPUT` 递过来的写目标**参与 job 作用域的常量传播'
+  + '（`echo "V7T=scripts/x.sh" >> "$GITHUB_ENV"` + `> "$V7T"` 同判），'
+  + '但**同一步里**先 export 再用不算（语义与 GitHub 一致）；'
+  + '⑨ **写面作用域跨闭包节点回灌**：被调用的仓内包装脚本与本地复合 action 里发生的写并进'
+  + '**同一个 job**（`bash scripts/write.sh` / `uses: ./.github/actions/x` 之后执行同一路径 ⇒ 红）——'
+  + '跟随深度上限 ' + `${WRITE_CARRIER_FOLLOW_MAX_HOPS} 层，读不到 / 变量拼出来的载体不猜（由别的格 fail-closed）。`
+  + '`sed -i` / `dd of=` / `git checkout <ref> -- <路径>` 这类等价改写面**仍未建模**（认账边界）。'
+  + '**运行期生成 + 不透明编码是固有边界**（载荷里没有 token 可读）—— 那条路只能靠'
+  + '"脚本位指向仓内不存在路径"那一格 + `CI_SURFACE_GENERATED_SCRIPT_ACK` 逐处认账（R20A-05）。'
   + '本守卫只判"可静态执行的那部分"，不声称端到端被门禁覆盖）\n',
 )
 return 0

@@ -10,18 +10,14 @@ import { EmptyState } from '../components/empty-state'
 import { ArchivePreviewDialog, ArchivePreviewData } from '../components/archive-preview-dialog'
 import { Card } from '../components/ui/card'
 import { downloadCsv } from '../lib/csv'
-import { hasPermission } from '../lib/rbac'
+import { hasPermission, PERM_AUDIT_RETENTION_WRITE } from '../lib/rbac'
 import { ScrollText, RefreshCw, Download } from 'lucide-react'
 
-/**
- * 审计保留策略的写权限点(与服务端 `serverauth.PermAuditRetention` 对齐)。
- *
- * 刻意不在 `lib/rbac.ts` 的常量表里新增 export:本批次只拥有本文件,共享常量
- * 由 rbac.ts 的所有者统一加(已写入 cross_batch_needs)。这里用字面量 + 本注释
- * 钉住同一个字符串,值一旦漂移,服务端 RequirePermission 会 403 而测试用例
- * (`Audit.test.tsx` 的 auditor 控制项缺席断言)会同时暴露。
- */
-const PERM_AUDIT_RETENTION_WRITE = 'audit:retention:write'
+// 审计保留策略的写权限点 `audit:retention:write`（与服务端 `serverauth.PermAuditRetention`
+// 对齐）**唯一声明在 `lib/rbac.ts`**（2026-09-29 第三十轮 FIX-45 ④：此前这个常量就地声明在
+// 本文件第 24 行，落在四向对拍的**扫描根之外** —— 打错一个字符时整套 webadmin 用例全绿，
+// 而保留策略保存按钮对**所有人（含超管）永久禁用**）。`lib/nav.test.ts` 的前向守卫
+// `PERM_* 只允许在 lib/rbac.ts 声明` 会拒绝就地再写一份。
 
 interface LogRow {
   id: number

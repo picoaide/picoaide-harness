@@ -60,6 +60,7 @@ function guardDenialToContract(denied) {
       return [denied.status, denied.body.code, denied.body.error]
     case 'origin-missing':
     case 'origin-cross':
+    case 'host-untrusted': // R24 B3：Host 不是本机可信托管名（DNS rebinding 形态）
       return [403, 'FORBIDDEN', denied.body.error]
     case 'content-type':
       return [415, 'UNSUPPORTED_MEDIA_TYPE', denied.body.error]
@@ -102,11 +103,12 @@ export function installAdvisorApi(ctx, ctrl) {
       )
       if (!known) return sendError(res, 404, 'NOT_FOUND', `未知端点: ${req.method} ${path}`)
 
-      // 统一前置守卫（共享实现；FIX-27 / me-3）：读侧拒绝浏览器标注的跨站
-      // GET（Sec-Fetch-Site: cross-site → 403），写侧强制 Origin 同源 +
+      // 统一前置守卫（共享实现；FIX-27 / me-3）：Host 栅栏（本机可信托管名，
+      // R24 B3）是读写的共同前置；读侧拒绝浏览器标注的跨站 GET
+      // （Sec-Fetch-Site: cross-site → 403），写侧强制 Origin 同源 +
       // JSON content-type + JSON 对象体（含无体请求声明非 JSON 的规则）。
       // 拒绝结果按 advisor 自己的契约映射（见 guardDenialToContract）。
-      const denied = await guardRequestReasoned(req, BODY_MAX_BYTES)
+      const denied = await guardRequestReasoned(req, BODY_MAX_BYTES, ctx)
       if (denied !== null) {
         const [status, code, message] = guardDenialToContract(denied)
         return sendError(res, status, code, message)

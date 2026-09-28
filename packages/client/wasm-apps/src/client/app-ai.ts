@@ -8,7 +8,7 @@
  *   fetch('/__picoaide/ai/chat', {method:'POST', body:{messages, stream:true}})
  *         │  保留路径：本机协议 handler **本地**处理，绝不转发平台
  *         ▼
- *   ① 首次授权闸门（用户×应用；未授权 ⇒ 一次性说明卡；拒绝 ⇒ 403 app_ai_denied）
+ *   ① 首次授权闸门（用户×服务端×应用；未授权 ⇒ 一次性说明卡；拒绝 ⇒ 403 app_ai_denied）
  *   ② 该账号在该应用上的**隐藏会话**（"app:<app_id>#<账号作用域>"；多轮上下文，
  *      不出现在侧边栏 —— 作用域含账号与服务端，换账号不会续用上一个人的对话）
  *   ③ 仅本次 messages（不注入记忆、不注入用户会话历史、工具集为空）
@@ -24,7 +24,8 @@
  *    `ai_balance_insufficient` / `ai_rate_limited` / `ai_cancelled`）逐条可辨，
  *    另外两条客户端侧分类（`app_ai_transport` = 请求没到宿主、`app_ai_protocol` =
  *    响应/帧形状不符）用来避免"网络错"与"服务端说不行"混成一件事；
- *  - **首次授权**（§21.1 第 9 条，按 **用户×应用** 记）；撤销入口只有应用详情页的
+ *  - **首次授权**（§21.1 第 9 条，按 **用户×服务端×应用** 记；与宿主闸门逐段同源）；
+ *    撤销入口只有应用详情页的
  *    AI 面板（`AppAiPanel` 的「撤销授权」按钮，宿主写路由 = `/api/pico/wasm-apps/ai/consent`）；
  *  - **取消**（§21.1 第 15 条：仅前台，页面关闭即取消）：调用方用 `AbortSignal`
  *    取消，本模块把它报成 `ai_cancelled`（不是错误弹窗，是"你停了"）。
@@ -386,57 +387,86 @@ function isAbort(cause: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 首次授权（§21.1 第 9 条：按 **用户×应用** 记一次；撤销入口只有应用详情页的 AI 面板）
+// 首次授权（§21.1 第 9 条：按 **用户×服务端×应用** 记一次；撤销入口只有应用详情页的 AI 面板）
 // ---------------------------------------------------------------------------
 
-/** 授权键前缀（存储里 `…:<user>:<app>` = `'granted'`）。 */
-export const APP_AI_CONSENT_PREFIX = 'picoaide.wasm-apps.ai-consent.v1'
+/**
+ * 授权键前缀（存储里 `…:<user>:<server>:<app>` = `'granted'`）。
+ *
+ * **v1 → v2**（R21 FIX-7 ①）：v1 的键只有 `(用户, 应用)` 两段，而宿主闸门现在是
+ * `(用户, 服务端, 应用)` 三段（`ai-authorization.ts` 的落盘 `version: 2`）。
+ * 形状变了就换前缀：老键**永远不可能**被新键命中 —— 与宿主"v1 记录一律判未授权"同向，
+ * 绝不把一段没有服务端维度的 UI 记忆读成"已经问过"。
+ */
+export const APP_AI_CONSENT_PREFIX = 'picoaide.wasm-apps.ai-consent.v2'
 
 /**
- * 本机登录态路由（既有的客户端路由；只读，用来拿"授权作用域"里的用户维度）。
+ * 本机登录态路由（既有的客户端路由；只读，用来拿授权作用域的两个身份段）。
  *
- * 为什么需要它：§21.1 第 9 条要求授权按 **用户×应用** 记；客户端半边不持 bearer、
- * 也没有会话服务可注入，而这条路由返回的是宿主会话快照
- * （`{loggedIn, username, serverURL, …}`，见 `packages/host/enterprise/src/auth-gate.ts`）。
- * 取不到就返回空串 ⇒ 授权不被记住（每次都问一次），绝不退化成"所有人都已授权"。
+ * 为什么需要它：§21.1 第 9 条要求授权按 **用户×服务端×应用** 记；客户端半边不持
+ * bearer、也没有会话服务可注入，而这条路由返回的是宿主会话快照
+ * （`{loggedIn, username, serverURL, …}`，见 `packages/host/enterprise/src/auth-gate.ts`）
+ * —— 宿主闸门用的正是**同一份**快照（`wasm-apps-host/src/session.ts` 的
+ * `readAppSession` 也读 `getSession()`）。取不到就返回 `null` ⇒ 授权不被记住
+ * （每次都问一次），绝不退化成"所有人都已授权"。
  */
 export const APP_AI_IDENTITY_PATH = '/api/pico/auth/state'
 
 /**
- * 取当前登录身份（= **宿主闸门的作用域串**）。
+ * 授权作用域：**用户 × 服务端**（应用是第三个维度，由调用点单独传）。
  *
- * ## 为什么只取 `username`，不带服务端地址（审计 C-25）
- *
- * 真正的闸门在宿主：`wasm-apps-host` 的 `ai-authorization` 按 `session.username`
- * 记授权（`aiConsentKey(user, app)`），`handleAiChat` 先查它再碰模型。本函数返回的串
- * 只用于**渲染层的那份 UI 记忆**（决定"还要不要再弹一次说明卡"）。
- *
- * 此前这里返回 `<username>@<serverURL>`：只要用户改了服务端地址（登录页支持的界面
- * 动作）或清了站点数据，客户端 key 就与宿主不再匹配 ⇒ 面板重新弹卡、用户点
- * 「不允许」得到"这个应用不能使用 AI"，而**宿主闸门仍然开着**（应用照样花他的额度）。
- * 两端的授权作用域必须同源，而唯一能改的这一端就是这里 —— 所以 align 到宿主的
- * `username`。宿主那份记录本来就是同一台机器上的同一个文件（随安装，不随服务端），
- * 因此这不会引入比宿主更强的跨服务端继承。
- * @param deps - 可注入 fetch（测试用）。
- * @returns 作用域串；未登录 / 形状不符 / 网络失败 ⇒ `''`（fail-closed）。
+ * 这两段与宿主闸门的 `AiChatScope` 逐段同源：`userId` = 会话 `username`，
+ * `serverURL` = 会话 `serverURL`（同一份 `/api/pico/auth/state` 快照，宿主那份来自
+ * `getSession()`）。
  */
-export async function loadAppAiIdentity(deps: AppAiDeps = { fetch: (...args: Parameters<typeof fetch>) => fetch(...args) }): Promise<string> {
+export interface AppAiScope {
+  /** 当前登录用户标识（会话 `username`）。 */
+  readonly userId: string
+  /** 当前服务端地址（会话 `serverURL`）。 */
+  readonly serverURL: string
+}
+
+/**
+ * 取当前登录身份（= **宿主闸门的作用域**：用户 + 服务端）。
+ *
+ * ## 为什么带服务端段（R21 FIX-7 ①，取代审计 C-25 的旧口径）
+ *
+ * 真正的闸门在宿主：`wasm-apps-host/src/ai-authorization.ts` 的 `aiConsentKey` 按
+ * **用户 ⊕ 服务端 ⊕ 应用** 构键（第二十一轮 B2-R21-01 把闸门从两段升成三段，落盘
+ * `version: 2`），`handleAiChat` 先查它再碰模型。本函数返回的**只用于渲染层那份 UI
+ * 记忆**（决定"还要不要再弹一次说明卡"）。
+ *
+ * 审计 C-25 当时让这里对齐宿主的 `username`（丢掉 `serverURL`）是对的 —— 那时的闸门
+ * 就是两段。闸门升成三段之后，"面板记忆三段、宿主闸门两段"就反了过来：换过服务端
+ * 之后面板会跳过说明卡、用户发出第一条消息才吃 403（**静默失败**）。两端的授权作用域
+ * 必须**逐段同源**（同顺序、同归一化、同"拿不到就拒绝"方向），本函数与
+ * {@link appAiConsentKey} 因此与宿主那份构键点对齐；`consent-key-parity.spec.ts`
+ * 直接读宿主源码逐段对拍，两端各改各的会当场变红。
+ *
+ * **拿不到服务端地址 ⇒ `null`**（= 面板当成"没问过"，宁可多问一次）：绝不退化成
+ * "无服务端"的两段作用域 —— 那等于把服务端维度整个删掉，正是本条要修的形态。
+ * @param deps - 可注入 fetch（测试用）。
+ * @returns 作用域；未登录 / 缺任一段 / 形状不符 / 网络失败 ⇒ `null`（fail-closed）。
+ */
+export async function loadAppAiIdentity(deps: AppAiDeps = { fetch: (...args: Parameters<typeof fetch>) => fetch(...args) }): Promise<AppAiScope | null> {
   try {
     const response = await deps.fetch(APP_AI_IDENTITY_PATH, {
       method: 'GET',
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
     })
-    if (!response.ok) return ''
+    if (!response.ok) return null
     const payload = await response.json()
-    if (payload === null || typeof payload !== 'object') return ''
-    const row = payload as { loggedIn?: unknown, username?: unknown }
-    if (row.loggedIn !== true) return ''
-    const username = typeof row.username === 'string' ? row.username.trim() : ''
-    if (username === '') return ''
-    return username
+    if (payload === null || typeof payload !== 'object') return null
+    const row = payload as { loggedIn?: unknown, username?: unknown, serverURL?: unknown }
+    if (row.loggedIn !== true) return null
+    const userId = typeof row.username === 'string' ? row.username.trim() : ''
+    const serverURL = typeof row.serverURL === 'string' ? row.serverURL.trim() : ''
+    // 两段都由**同一份**归一化判据把关（缺任一段 ⇒ 面板当成"没问过"）。
+    const scope = { userId, serverURL }
+    return normalizeAppAiScope(scope) === null ? null : scope
   } catch {
-    return ''
+    return null
   }
 }
 
@@ -461,28 +491,70 @@ export function defaultAppAiConsentStore(): AppAiConsentStore | null {
 }
 
 /**
- * 授权键（用户×应用）。
+ * NUL 会不会出现在这一段里（授权键的分隔符；与宿主那份构键点同一条判据）。
  *
- * 两个维度都编码：换账号后**不得**继承上一个人的授权（与缓存/分区同一条纪律）。
- * @param userId - 当前登录用户标识（服务端 `user.id`）。
- * @param appId - 应用标识。
- * @returns 存储键。
+ * 分隔符出现在**段内**会让一个键被切成更多段。宿主侧因此直接拒绝该作用域
+ * （`aiConsentKey` 返回 `null` = 未授权）；客户端这半边若接受了它，UI 记忆就会认为
+ * "已经问过"而宿主闸门仍然拒绝 —— 正是本条要消灭的静默失败形态。所以同样
+ * **构造期拒绝**（fail-closed），不靠序列化期兜底。
+ * @param value - 候选段。
+ * @returns true = 含 NUL。
  */
-export function appAiConsentKey(userId: string, appId: string): string {
-  return `${APP_AI_CONSENT_PREFIX}:${encodeURIComponent(userId)}:${encodeURIComponent(appId)}`
+const hasNul = (value: string): boolean => value.includes('\u0000')
+
+/**
+ * 身份两段的归一化（**唯一实现**：读身份、构键都只走这里）。
+ *
+ * 三条与宿主 `aiConsentKey` 逐条同源（改这里必须同步改那边，反之亦然；
+ * `consent-key-parity.spec.ts` 读宿主源码对拍）：
+ *  1. **同归一化**：每段先 `trim()`，纯空白不算"有值"；
+ *  2. **同拒绝方向**：任一段拿不到 ⇒ `null`（读面 = 未授权、写面 = 拒绝）；
+ *  3. **同 NUL 口径**：段内含 NUL ⇒ `null`。
+ * @param scope - 用户 + 服务端；`null`/`undefined` = 拿不到。
+ * @returns 归一化后的两段；任一段缺失/含 NUL ⇒ `null`。
+ */
+function normalizeAppAiScope(scope: AppAiScope | null | undefined): AppAiScope | null {
+  if (scope === null || scope === undefined) return null
+  const user = typeof scope.userId === 'string' ? scope.userId.trim() : ''
+  const server = typeof scope.serverURL === 'string' ? scope.serverURL.trim() : ''
+  if (user === '' || server === '') return null
+  if (hasNul(user) || hasNul(server)) return null
+  return { userId: user, serverURL: server }
 }
 
 /**
- * 这个用户是否已授权这个应用使用 AI。
- * @param userId - 用户标识；空串 ⇒ `false`（拿不到身份就不给授权，fail-closed）。
+ * 授权键（**段序与宿主逐段同源**：用户 → 服务端 → 应用）。
+ *
+ * 三个维度都编码：换账号、换应用、**换服务端**都不得继承上一条授权
+ * （与缓存/分区同一条纪律 —— 宿主那份闸门就是这么分域的）。
+ * 分隔符与宿主不同（宿主的记录是 NUL 分隔的内部键，这边是 `localStorage` 的键名），
+ * 但**段数、段序、归一化与拒绝方向逐条一致**，由 `consent-key-parity.spec.ts` 读
+ * 宿主源码 `ai-authorization.ts` 的 `aiConsentKey` 对拍。
+ * @param scope - 用户 + 服务端；`null`/`undefined` = 拿不到 ⇒ `null`。
+ * @param appId - 应用标识。
+ * @returns 存储键；任一段缺失/含 NUL ⇒ `null`（= 不匹配、不写）。
+ */
+export function appAiConsentKey(scope: AppAiScope | null | undefined, appId: string): string | null {
+  const normalized = normalizeAppAiScope(scope)
+  if (normalized === null) return null
+  const app = typeof appId === 'string' ? appId.trim() : ''
+  if (app === '') return null
+  if (hasNul(app)) return null
+  return `${APP_AI_CONSENT_PREFIX}:${encodeURIComponent(normalized.userId)}:${encodeURIComponent(normalized.serverURL)}:${encodeURIComponent(app)}`
+}
+
+/**
+ * 这个用户在**这台服务端上**是否已授权这个应用使用 AI。
+ * @param scope - 用户 + 服务端；`null`/缺任一段 ⇒ `false`（拿不到身份就不给授权，fail-closed）。
  * @param appId - 应用标识。
  * @param store - 存储实现（缺省 {@link defaultAppAiConsentStore}）。
  * @returns true = 已授权（不再弹说明卡）。
  */
-export function hasAppAiConsent(userId: string, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): boolean {
-  if (store === null || userId === '' || appId === '') return false
+export function hasAppAiConsent(scope: AppAiScope | null | undefined, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): boolean {
+  const key = appAiConsentKey(scope, appId)
+  if (store === null || key === null) return false
   try {
-    return store.getItem(appAiConsentKey(userId, appId)) === 'granted'
+    return store.getItem(key) === 'granted'
   } catch {
     return false
   }
@@ -490,27 +562,29 @@ export function hasAppAiConsent(userId: string, appId: string, store: AppAiConse
 
 /**
  * 记下"允许这个应用使用 AI"（一次性说明卡的"允许"按钮）。
- * @param userId - 用户标识。
+ * @param scope - 用户 + 服务端（宿主闸门的作用域）。
  * @param appId - 应用标识。
  * @param store - 存储实现。
  */
-export function grantAppAiConsent(userId: string, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): void {
-  if (store === null || userId === '' || appId === '') return
+export function grantAppAiConsent(scope: AppAiScope | null | undefined, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): void {
+  const key = appAiConsentKey(scope, appId)
+  if (store === null || key === null) return
   try {
-    store.setItem(appAiConsentKey(userId, appId), 'granted')
+    store.setItem(key, 'granted')
   } catch { /* 写失败 = 下次再问一次：可接受 */ }
 }
 
 /**
  * 撤销授权（§21.1 第 9 条：撤销后再调 ⇒ 403；唯一入口是应用详情页的 AI 面板）。
- * @param userId - 用户标识。
+ * @param scope - 用户 + 服务端（宿主闸门的作用域）。
  * @param appId - 应用标识。
  * @param store - 存储实现。
  */
-export function revokeAppAiConsent(userId: string, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): void {
-  if (store === null || userId === '' || appId === '') return
+export function revokeAppAiConsent(scope: AppAiScope | null | undefined, appId: string, store: AppAiConsentStore | null = defaultAppAiConsentStore()): void {
+  const key = appAiConsentKey(scope, appId)
+  if (store === null || key === null) return
   try {
-    store.removeItem(appAiConsentKey(userId, appId))
+    store.removeItem(key)
   } catch { /* 同上 */ }
 }
 

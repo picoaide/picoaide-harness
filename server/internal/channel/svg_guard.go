@@ -75,7 +75,7 @@ var svgScriptSignatures = []svgSignature{
 // numericCharRef 匹配 XML 数字字符引用(`&#106;` / `&#x6A;`)。
 var numericCharRef = regexp.MustCompile(`&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));`)
 
-// checkAssetContent 是渠道素材内容检查的**唯一真源**。
+// checkAssetContent 是渠道素材内容检查的**唯一真源**(按路径读的入口)。
 //
 // 返回 "" 表示可以下发;非空表示拒绝原因(只用于排查与测试断言,不写进响应体 ——
 // 拒绝下发与"未配置"返回**同一个** 404 JSON 信封,不新增响应形态)。
@@ -93,13 +93,30 @@ var numericCharRef = regexp.MustCompile(`&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}
 //   - 若日后判定必须 fail-closed,把这里改成 `return "svg too large"` 即可,
 //     唯一真源保证只需改一处。
 func checkAssetContent(path string) string {
-	if !strings.EqualFold(filepath.Ext(path), ".svg") {
+	f, err := os.Open(path)
+	if err != nil {
+		// 读不到:交给调用方按既有语义处理(它自己会 404/403)。
 		return ""
 	}
-	raw, tooLarge, err := readCapped(path, maxCheckedSVGBytes)
+	defer func() { _ = f.Close() }()
+	return checkAssetContentReader(filepath.Base(path), f)
+}
+
+// checkAssetContentReader 与 checkAssetContent 是**同一份判据**,只是从**已打开的
+// 读者**读。
+//
+// 为什么需要这个入口:下发路径必须先拿到 fd(判据与下发同一个对象,见 channel.go
+// 的 openAsset 与 handlers.go 的 serveAsset)。若那里仍按路径调用 checkAssetContent,
+// 就会多出一次路径解析 —— 又一次"检查的是 A、下发的是 B"的窗口。签名匹配逻辑只有
+// 一份,两个入口共用它。
+func checkAssetContentReader(name string, r io.Reader) string {
+	if !strings.EqualFold(filepath.Ext(name), ".svg") {
+		return ""
+	}
+	raw, tooLarge, err := readCappedReader(r, maxCheckedSVGBytes)
 	if err != nil || tooLarge {
-		// 读不到:交给 ServeFile 按既有语义处理(它自己会 404/403)。
-		// 超限:见函数注释,CSP 兜底。
+		// 读不到:交给调用方按既有语义处理(它自己会 404/403)。
+		// 超限:见 checkAssetContent 注释,CSP 兜底。
 		return ""
 	}
 	// 先解码数字字符引用再匹配:属性值里的 `&#106;avascript:…` 会被 XML 解析器
@@ -142,8 +159,13 @@ func readCapped(path string, limit int64) (data []byte, tooLarge bool, err error
 		return nil, false, err
 	}
 	defer func() { _ = f.Close() }()
+	return readCappedReader(f, limit)
+}
 
-	data, err = io.ReadAll(io.LimitReader(f, limit+1))
+// readCappedReader 与 readCapped 同一份读取逻辑,从已打开的读者读(见
+// checkAssetContentReader:下发路径用的是已经为"判据与下发同一对象"打开的 fd)。
+func readCappedReader(r io.Reader, limit int64) (data []byte, tooLarge bool, err error) {
+	data, err = io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, false, err
 	}

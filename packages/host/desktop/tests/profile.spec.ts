@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { composeEntries, initProfile, PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 import {
@@ -13,8 +13,8 @@ import {
   ensureDesktopProfile,
   prepareDesktopProfile,
   readDesktopShellMode,
+  readDesktopStartupSettings,
   removeStaleAsarFallbackLinks,
-  shippedPresetRoot,
 } from '../src/profile.ts'
 
 const homes: string[] = []
@@ -63,72 +63,43 @@ afterEach(() => {
 describe('desktop profile composition', {
   timeout: process.platform === 'win32' ? 10_000 : 5_000,
 }, () => {
-  it('resolves the shipped preset root from the preset package, not the CLI package', () => {
-    const home = temporaryHome()
-    const lib = join(home, 'resources', 'app.asar', 'lib')
-    const modules = join(home, 'resources', 'app.asar', 'node_modules', '@deepseek-ai')
-    mkdirSync(lib, { recursive: true })
-    // Both packages are installed: the CLI package is what the retired anchor
-    // resolved, and its `config/agent-presets` decoy is what let a wrong path
-    // look right. The shipped compositions live in the preset package.
-    const cliDir = join(modules, 'dsh')
-    const decoy = join(cliDir, 'config', 'agent-presets', 'cordis', 'skills', 'cordis-plugin-development')
-    mkdirSync(decoy, { recursive: true })
-    writeFileSync(join(cliDir, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh',
-      exports: { './package.json': './package.json' },
-    }) + '\n')
-    writeFileSync(join(decoy, 'SKILL.md'), '# cli decoy\n')
-    const presetDir = join(modules, 'dsh-agent-presets')
-    mkdirSync(join(presetDir, 'presets', 'standard'), { recursive: true })
-    writeFileSync(join(presetDir, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh-agent-presets',
-      exports: { './package.json': './package.json' },
-    }) + '\n')
-    writeFileSync(join(presetDir, 'presets', 'standard', 'agent.cordis.yml'), '- id: fixture\n')
-
-    const moduleUrl = pathToFileURL(join(lib, 'profile.js')).href
-    const resolvedRoot = shippedPresetRoot(moduleUrl)
-
-    expect(resolvedRoot).toBe(join(presetDir, 'presets'))
-    expect(readFileSync(join(resolvedRoot, 'standard', 'agent.cordis.yml'), 'utf8')).toBe('- id: fixture\n')
-    // Preset root resolves through the module graph (physical in dev, inside
-    // app.asar when packaged) — never rewritten to the unpacked physical tree.
-    expect(resolvedRoot).not.toContain('app.asar.unpacked')
+  it('ships the preset declarations from the Web bundle, not the roster package', () => {
+    // 0.1.7 moved the shipped presets out of the (deleted) roster package into
+    // `@deepseek-ai/dsh-web-app`'s `presets/<id>.patch.yml` files, listed in
+    // that bundle's own `dsh.bundle.patch`. Two things must both hold: the
+    // declarations exist, and the bundle actually lists them — a bundle that
+    // still names only `./cordis.patch.yml` would compose without a single
+    // preset and every session would fail to mount.
+    const bundleDir = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-app/package.json'))
+    const manifest = JSON.parse(readFileSync(join(bundleDir, 'package.json'), 'utf8')) as {
+      dsh?: { bundle?: { patch?: string | string[] } }
+    }
+    const declared = manifest.dsh?.bundle?.patch
+    const patchFiles = typeof declared === 'string' ? [declared] : declared ?? []
+    for (const id of ['standard', 'ptc', 'minimal', 'cordis'] as const) {
+      expect(patchFiles).toContain(`./presets/${id}.patch.yml`)
+      expect(existsSync(join(bundleDir, 'presets', `${id}.patch.yml`))).toBe(true)
+    }
   })
 
-  it('pins the shipped preset root to a directory that really exists', () => {
-    const root = shippedPresetRoot()
-
-    expect(root).toBe(join(
-      dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-agent-presets/package.json')),
-      'presets',
-    ))
-    // The failure this guards: a root that composes without error but names a
-    // directory no install ever creates, leaving the roster to the upstream
-    // shipped root without anyone noticing.
-    expect(existsSync(root)).toBe(true)
-    expect(existsSync(join(root, 'standard', 'agent.cordis.yml'))).toBe(true)
+  it('ships the cordis preset skills from the preset plugin, not the roster package', () => {
+    // The `cordis` preset's skills moved to `@deepseek-ai/dsh-agent-preset`
+    // (`skills/`, wired through the preset's `customSkillDirs` expression).
+    const presetDir = dirname(createRequire(import.meta.url).resolve('@deepseek-ai/dsh-agent-preset/package.json'))
+    const skillsRoot = join(presetDir, 'skills')
+    expect(existsSync(skillsRoot)).toBe(true)
+    for (const skill of ['cordis-plugin-development', 'editing-cordis-compositions'] as const) {
+      expect(existsSync(join(skillsRoot, skill, 'SKILL.md'))).toBe(true)
+    }
   })
 
-  it('falls back to the historical CLI-relative anchor without the preset package', () => {
-    const home = temporaryHome()
-    const lib = join(home, 'resources', 'app.asar', 'lib')
-    const cliDir = join(home, 'resources', 'app.asar', 'node_modules', '@deepseek-ai', 'dsh')
-    mkdirSync(lib, { recursive: true })
-    mkdirSync(join(cliDir, 'config', 'agent-presets'), { recursive: true })
-    writeFileSync(join(cliDir, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh',
-      exports: { './package.json': './package.json' },
-    }) + '\n')
-
-    // Composition must not throw over a redundant root; the roster's own
-    // shipped root still lists the presets.
-    expect(shippedPresetRoot(pathToFileURL(join(lib, 'profile.js')).href))
-      .toBe(join(cliDir, 'config', 'agent-presets'))
-  })
-
-  it('adds the Web surface before third-party bundles and removes the launcher bundle duplicate', async () => {
+  it('puts the required layers first (Web surface, then the ten launcher-owned layers) and keeps third-party bundles', async () => {
+    // 2026-09-28：十个自有组装层（desktop 自己 + enterprise/account-card/wasm-apps/
+    // foot-menu/wasm-apps-host/connectors/browser/memory-evolve/cron）改由 **bundle 层**
+    // 承载（各自 `dsh.bundle.patch`），顺序就是下面这份清单 —— 它同时是
+    // 「`readProfilePatches` 复算得出真实装配」的前提（见 `src/profile.ts` 的
+    // `REQUIRED_BUNDLES` 注释）。历史 manifest 里的 `dsh-plugin-desktop` 条目仍然被丢弃
+    // （它无法把自己解析成 bundle，改由 `@picoaide/dsh-enterprise` 的 patch 列表携带桌面层）。
     expect(desktopBundleList([
       '@deepseek-ai/dsh-base',
       'third-party-one',
@@ -137,6 +108,15 @@ describe('desktop profile composition', {
     ])).toEqual([
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
+      '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-account-card',
+      '@picoaide/dsh-wasm-apps',
+      '@picoaide/dsh-foot-menu',
+      '@picoaide/dsh-wasm-apps-host',
+      '@picoaide/dsh-connectors',
+      '@picoaide/dsh-browser',
+      'dsh-memory-evolve',
+      '@picoaide/dsh-cron',
       'third-party-one',
       'third-party-two',
     ])
@@ -163,6 +143,15 @@ describe('desktop profile composition', {
     expect(repaired.dsh.profile.bundles).toEqual([
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
+      '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-account-card',
+      '@picoaide/dsh-wasm-apps',
+      '@picoaide/dsh-foot-menu',
+      '@picoaide/dsh-wasm-apps-host',
+      '@picoaide/dsh-connectors',
+      '@picoaide/dsh-browser',
+      'dsh-memory-evolve',
+      '@picoaide/dsh-cron',
       'third-party-plugin',
     ])
     expect(repaired.dependencies).toEqual({ 'third-party-plugin': '^1.2.3' })
@@ -194,6 +183,15 @@ describe('desktop profile composition', {
     expect(repaired.dsh.profile.bundles).toEqual([
       '@deepseek-ai/dsh-base',
       '@deepseek-ai/dsh-web-app',
+      '@picoaide/dsh-enterprise',
+      '@picoaide/dsh-account-card',
+      '@picoaide/dsh-wasm-apps',
+      '@picoaide/dsh-foot-menu',
+      '@picoaide/dsh-wasm-apps-host',
+      '@picoaide/dsh-connectors',
+      '@picoaide/dsh-browser',
+      'dsh-memory-evolve',
+      '@picoaide/dsh-cron',
     ])
   })
 
@@ -223,8 +221,12 @@ describe('desktop profile composition', {
       config: { host: '127.0.0.1', port: 0 },
     }))
     expect(patches).toContainEqual(expect.objectContaining({
-      id: 'agent-presets',
-      config: expect.objectContaining({ roots: [expect.objectContaining({ trust: 'system' })] }),
+      id: 'agent-preset-registry',
+      // 0.1.7: the registry takes no launcher config. It has no `roots` key at
+      // all any more — the shipped presets are rows contributed by the Web
+      // bundle's own patch list, so an injected `roots` would be stripped (or,
+      // worse, rejected) instead of pinning anything.
+      config: { default: 'standard' },
     }))
     expect(readFileSync(prepared.rootConfig, 'utf8')).toBe('[]\n')
     expect(prepared.homeDir).toBe(home)
@@ -260,10 +262,21 @@ describe('desktop profile composition', {
       id: 'sandbox',
       name: '@deepseek-ai/dsh-sandbox-local',
     })
-    expect(rows.find(row => row.id === 'agent-presets')).toEqual(expect.objectContaining({
-      name: '@deepseek-ai/dsh-agent-presets',
+    expect(rows.find(row => row.id === 'agent-preset-registry')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-agent-preset-registry',
     }))
-    expect(rows.map(row => row.id)).not.toContain('desktop-windows-agent-presets')
+    // The shipped presets are ordinary declarative rows, contributed by
+    // `@deepseek-ai/dsh-web-app`'s own `dsh.bundle.patch` list
+    // (`presets/<id>.patch.yml`). Their presence here is the judge for "the
+    // roster still reaches the composition" — a bundle whose patch list is read
+    // as a single file would silently drop all four.
+    for (const id of ['standard', 'ptc', 'minimal', 'cordis'] as const) {
+      expect(rows.find(row => row.id === `preset-${id}`)).toEqual(expect.objectContaining({
+        name: '@deepseek-ai/dsh-agent-preset',
+      }))
+    }
+    expect(rows.map(row => row.id)).not.toContain('agent-presets')
+    expect(rows.map(row => row.id)).not.toContain('desktop-windows-agent-preset-registry')
     expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-pwsh-sandbox',
     }))
@@ -335,9 +348,17 @@ describe('desktop profile composition', {
     }))
   })
 
-  it('projects YAML startup settings into the Host, Web server, and client Loader rows', async () => {
+  it('projects the composed desktop-shell port into the Host, Web server, and client Loader rows', async () => {
     const home = temporaryHome()
-    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop:\n  mode: advanced\n  port: 43189\n')
+    // 0.1.7: the desktop's settings **are** the `desktop-shell` row config in the
+    // profile patch (a profile entry id is the settings namespace), so the port a
+    // user saved through the settings form arrives here as a composed row value.
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- id: desktop-shell',
+      '  config:',
+      '    port: 43189',
+      '',
+    ].join('\n'))
 
     const prepared = await prepareDesktopProfile(undefined, home, 'darwin')
     const rows = composeEntries([prepared.patches])
@@ -351,20 +372,23 @@ describe('desktop profile composition', {
     expect(rows.find(row => row.id === 'webserver')).toEqual(expect.objectContaining({
       config: { host: '127.0.0.1', port: 43_189 },
     }))
+    // The launcher no longer injects any config into the settings row: the
+    // 0.1.7 settings service is a form projection whose persistence is the
+    // profile patch, and its document path comes from `profileContext`.
     expect(rows.find(row => row.id === 'settings')).toEqual(expect.objectContaining({
-      config: expect.objectContaining({ dshHome: home }),
+      name: '@deepseek-ai/dsh-settings',
     }))
+    expect(rows.find(row => row.id === 'settings')?.config).toBeUndefined()
     expect(rows.find(row => row.id === 'ui-layout')?.disabled).toBe(true)
     expect(rows.find(row => row.id === 'ui-sidebar')?.disabled).toBe(false)
     expect(rows.find(row => row.id === 'ui-conversation')?.disabled).toBe(false)
   })
 
-  it('reads JSON settings and defaults an absent desktop namespace to advanced', async () => {
+  it('defaults an absent desktop row to advanced and reads the composed port', async () => {
     const home = temporaryHome()
-    const path = join(home, 'desktop-settings.json')
-    writeFileSync(path, JSON.stringify({ 'dsh-desktop': { mode: 'advanced' } }))
 
-    expect(readDesktopShellMode({ path })).toBe('advanced')
+    expect(readDesktopShellMode({}, home)).toBe('advanced')
+    expect(readDesktopStartupSettings({ port: 43_189 }, home)).toEqual({ mode: 'advanced', port: 43_189 })
     expect(desktopStartupSettingsFromSettings({ 'dsh-desktop': { mode: 'advanced', port: 43_189 } })).toEqual({
       mode: 'advanced',
       port: 43_189,
@@ -388,10 +412,14 @@ describe('desktop profile composition', {
       )
     }
 
+    // The retired `settings.yaml` is still parsed as the one-time migration
+    // fallback, so a corrupt document stays fatal instead of silently
+    // defaulting a value the user wrote.
     const home = temporaryHome()
-    const path = join(home, 'invalid.yaml')
-    writeFileSync(path, 'dsh-desktop: [\n')
-    expect(() => readDesktopShellMode({ path })).toThrow('invalid settings document')
+    writeFileSync(join(home, 'settings.yaml'), 'dsh-desktop: [\n')
+    expect(() => readDesktopShellMode({}, home)).toThrow('invalid settings document')
+    // A composed row always wins over the legacy document.
+    expect(readDesktopShellMode({ port: 4242 }, home)).toBe('advanced')
   })
 
   it('keeps the Windows browse panel and desktop pwsh provider without replacing process boundaries', async () => {
@@ -430,12 +458,15 @@ describe('desktop profile composition', {
       id: 'sandbox',
       name: '@deepseek-ai/dsh-sandbox-local',
     })
-    expect(rows.find(row => row.id === 'agent-presets')).toEqual(expect.objectContaining({
-      name: '@deepseek-ai/dsh-agent-presets',
+    expect(rows.find(row => row.id === 'agent-preset-registry')).toEqual(expect.objectContaining({
+      name: '@deepseek-ai/dsh-agent-preset-registry',
       disabled: true,
     }))
-    expect(rows.find(row => row.id === 'desktop-windows-agent-presets')).toEqual(expect.objectContaining({
+    expect(rows.find(row => row.id === 'desktop-windows-agent-preset-registry')).toEqual(expect.objectContaining({
       name: 'dsh-plugin-desktop/windows-agent-presets',
+      // Same registry policy, replacement implementation: the shipped
+      // `preset-*` rows register into whatever provides `agentPresets`.
+      config: { default: 'standard' },
     }))
     expect(rows.find(row => row.id === 'pwsh-sandbox')).toEqual(expect.objectContaining({
       name: '@deepseek-ai/dsh-pwsh-sandbox',
@@ -610,21 +641,25 @@ describe('removeStaleAsarFallbackLinks', () => {
   })
 })
 
-describe('profile module fallback generation (P1-13)', () => {
-  it('materializes the installation closure into the shared profiles/node_modules', async () => {
+describe('profile package resolution (upstream 0.1.7 seam change)', () => {
+  it('composes without the retired shared profiles/node_modules closure', async () => {
     const home = temporaryHome()
-    await prepareDesktopProfile(undefined, home, 'linux')
-    const modulesDir = join(home, 'profiles', 'node_modules')
-    // 上游 0.1.6-alpha.2 给 `healProfilesModuleFallback` 加了 `materialize` 选项
-    // （默认 `true`）并新增"只计算不落盘"的 `createProfileResolutionGeneration`。
-    // 我们的打包版链路**依赖这里真的落盘**：`module-resolution.ts` 的 CJS 重试与
-    // `removeStaleAsarFallbackLinks` 都建立在"共享 fallback 里有一条指向安装树的
-    // 链接"这个事实上。默认值被翻成 false、或落盘形态换成别的（proxy 目录等），
-    // 打包版就会在 profile 解析阶段静默回落到宿主树。这条断言钉住"落盘 + 指向真身"。
-    for (const name of ['@deepseek-ai/dsh-base', '@picoaide/dsh-enterprise', '@picoaide/dsh-cron']) {
-      const link = join(modulesDir, ...name.split('/'))
-      expect(lstatSync(link).isSymbolicLink(), `${name} 未落盘为符号链接`).toBe(true)
-      expect(existsSync(join(link, 'package.json')), `${name} 的链接目标读不到 package.json`).toBe(true)
+    const prepared = await prepareDesktopProfile(undefined, home, 'linux')
+    // Upstream 0.1.7 removed `healProfilesModuleFallback` (and its `materialize`
+    // option) outright: `loadProfile` now only strips the profile's own
+    // `.dsh-module-fallback` projection and leaf resolution goes through the
+    // `PluginPackages` runtime-resolution service.
+    //
+    // 我们**不**依赖那套链接落盘：桌面自己的 `installProfilePackageResolver`
+    // （`src/module-resolution.ts`）先按 profile 基址解析、失败后回落到桌面应用树，而
+    // 后者在物理布局与 asar 布局里都成立 —— 那条共享目录只是它之外的一层冗余 belt。
+    // 因此这里断言的是"组合照常产出、bundle 层解析到了真身"，而不是某种目录形态：
+    // 判据若钉在 `profiles/node_modules` 上，只会把上游的一次机制替换误报成回归。
+    expect(prepared.profile.layers.map(layer => layer.packageName)).toContain('@deepseek-ai/dsh-web-app')
+    for (const layer of prepared.profile.layers) {
+      expect(existsSync(join(layer.packageDir, 'package.json')), `${layer.packageName} 的包目录读不到`).toBe(true)
     }
+    // 真判据在打包产物的 afterPack 冒烟与 `module-resolution.spec.ts`（真实 Node 解析），
+    // 不是这里；这条只保证"上游把链接机制换掉"不会让组合本身失败。
   })
 })

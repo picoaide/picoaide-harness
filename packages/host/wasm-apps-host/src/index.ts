@@ -26,9 +26,10 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { BROWSER_SURFACE_SERVICE } from '@picoaide/dsh-browser/surface'
+import { createSessionEpoch } from '@picoaide/dsh-host-locale/session-events'
 import { DEFAULT_APP_SCHEME, appOrigin, appSchemePrefix, isValidAppId } from './app-protocol.ts'
 import { AI_CHAT_PATH, handleAiChat, type AiChatAuthorization, type AiChatTurnRunner } from './ai-chat.ts'
-import { AI_CONSENT_FILE_NAME, createAiChatAuthorization } from './ai-authorization.ts'
+import { AI_CONSENT_FILE_NAME, createAiChatAuthorization, isAiConsentScopeError } from './ai-authorization.ts'
 import { createAppProofProvider, type InstallKeyStore } from './app-proof.ts'
 import { frozenAppHint, frozenAppTitle } from './app-window-copy.ts'
 import { WasmAppsCache, type CacheScope } from './cache.ts'
@@ -40,6 +41,7 @@ import { createAppSchemeHandler } from './handler.ts'
 import { createHostRequestSurface, type SurfaceReply } from './host-request.ts'
 import { hostCopy, hostLocaleFrom, type HostLocale } from './locale.ts'
 import { browserPartitionFor, serverPartitionHash } from './partition.ts'
+import { createScopeReset } from './scope-reset.ts'
 import { readAppSession, subscribePicoSession, type PicoSessionLike } from './session.ts'
 import { createWindowCatalog } from './window-catalog.ts'
 import {
@@ -275,6 +277,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     ? undefined
     : new WasmAppsCache({ root: `${config.userDataDir}/wasm-apps-cache`, warn })
   /**
+   * 会话作用域切换时的清理链（第二十八轮 FIX-40 ③；语义见 `scope-reset.ts` 模块头）。
+   *
+   * 为什么需要它：`cache.clearAll()` 是**真异步**（`rm -rf` 整个缓存根 + 重建），而
+   * 新作用域的第一个动作（消费待打开队列 / 本机路由的 open ⇒ 应用页加载 ⇒ `cache.put`）
+   * 就在会话事件之后立刻发生 —— 上一代的 `rm` 可能落在新账号刚写下的条目**之后**，
+   * 把它一起删掉。修法不是"代际比对"（`rm` 的后果撤不回来），而是**排序**：新作用域
+   * 的动作经 `settled()` 排到清理链之后。`windows.closeAll()` 没有这个窗口（内部无
+   * await，调用即同步关完），但它与清缓存走同一条链，保证"先关窗、后清缓存"的顺序。
+   */
+  const scopeReset = createScopeReset({
+    // 关窗**同步**（见 `ScopeResetTargets.closeWindows`）：`windows.closeAll()` 内部
+    // 无 await，调用即同步拆完，所以"登出即拆窗"这条既有语义不退化。
+    closeWindows: () => windows?.closeAll(),
+    clearCache: () => cache?.clearAll(),
+    warn,
+  })
+  /**
    * 窗口几何的目录兜底来源（F3/§6；见 `window-catalog.ts`）。
    *
    * 只在"本机打开路由的请求体没带 `window`"且"要新建窗口"时才发一次请求（每个会话
@@ -322,6 +341,33 @@ export function apply(ctx: Context, config: Config = {}): void {
     const session = currentSession()
     return session === null ? null : `${session.serverURL}\u0000${session.username ?? ''}`
   }
+  /**
+   * 会话**代际**（唯一实现 = `@picoaide/dsh-host-locale/session-events` 的
+   * `createSessionEpoch`；第二十六轮 Z2-01 / 第二十七轮 AA3-01 建立的收口口径）。
+   *
+   * 为什么需要它（第三十三轮 FIX-49 ④ / AD1-02 的 `requestOpen` 顺序面）：
+   * `requestOpen` 的形状是「入口读一次会话 → `await` 一次平台往返 → 落地」，
+   * 而 `openGate.check()` 的响应可能在**换代之后**才回来（A 的往返慢、用户已登出并
+   * 以 B 登录）。那时的落地全是**模块级**状态，于是旧账号的迟到答复：
+   *   ① 写进**新账号**的版本表（`knownVersions` / `knownTitles`）⇒ B 下次打开的
+   *      `current_version` 是 A 那一代的值；
+   *   ② `cache.clearApp()` 按**新账号**的作用域清（明明该清的是上一代）；
+   *   ③ `windows.close()` 关掉**新账号刚开的那个窗口**。
+   * 判据（AE2 三格真机探针，走本机打开路由 + 持有性证明）：修前 ①② 必现、③ 的反向
+   * 对照（同代）关的是自己那一代的窗口；修后 ①② 消失、③ 不变。
+   *
+   * **为什么 `begin()` 只在会话变化那一侧调**：`SessionEpoch` 的 `begin()` 会把"上一代"
+   * 作废，而**并发打开是合法动作**（待打开队列一次排空多条深链、用户连点两个应用）。
+   * 若 `requestOpen` 自己也 `begin()`，先发起的那次会被后发起的那次顶掉
+   * ⇒ 队列里除最后一条外全部打不开。所以代际号由订阅回调推进，`requestOpen`
+   * 只在入口**同步**读一次、在每个 `await` 之后用 `isCurrent()` 比对（读不推进）。
+   *
+   * 与 `scopeReset`（排序链）的分工不变：清理链管"新作用域的动作排在上一代 `rm -rf`
+   * 落地之后"，代际管"上一代的迟到结果整份丢弃"—— 两件事，缺一不可。
+   */
+  const sessionEpochs = createSessionEpoch()
+  /** 当前代际号（只由下面的会话订阅回调推进；`requestOpen` 读它，不推进）。 */
+  let sessionGeneration = sessionEpochs.begin()
 
   // ---- 应用 AI 桥（§21）：本地处理，绝不转发平台 ----
   const aiRunner = ctx.get(WASM_APPS_AI_RUNNER_SERVICE) as AiChatTurnRunner | undefined
@@ -545,6 +591,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     geometry?: DeclaredWindowGeometry | null,
     catalogWarm?: Promise<DeclaredWindowGeometry | undefined> | undefined,
   ): Promise<OpenRequestOutcome> => {
+    // 本次打开属于**哪一代会话**（必须在本函数第一个 `await` **之前**读，晚一步就可能
+    // 把"已经换代"的自己当成最新的一代）。比对读的是同一个代际号，不推进它。
+    const generation = sessionGeneration
+    // 作用域清理链（`scope-reset.ts`）：打开会建窗并（经应用协议）写缓存，
+    // 必须排在上一代那次 `rm -rf` 落地之后，否则新账号刚写下的条目会被它删掉。
+    await scopeReset.settled()
+    // 换代检查点 ①（等清理链落地之后）：等到这里时如果已经换代，这次打开是**上一代
+    // 的动作** —— 建窗会落在新账号的分区/身份上，整份丢弃。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     const session = currentSession()
     if (session === null) {
       pendingLinks.enqueue(appId, path)
@@ -554,6 +609,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     // F16 硬/软闸门：新窗口 = 硬（拿不到版本就不打开）；聚焦已有窗口 = 软
     //（保留内容 + 提示，不把正常应用打成错误页）。§5.1b 冻结。
     const gate = await openGate.check(appId, knownVersions.get(appId) ?? '')
+    // 换代检查点 ②（**平台往返之后**，四个写入点之前）：`gate` 是上一代的答复 ⇒
+    // 它带来的每一处落地（版本表 / 内容缓存 / 关窗）都会作用到新账号身上。这是 AE2
+    // 探针 ①（版本表被旧值覆盖）与 ②（关掉新账号刚开的窗口）的**唯一**入口。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     if (gate.kind === 'denied') {
       // 生命周期反应（§7.2 / §16.1「触发源 = open 端点响应」；R2-L2-2）：
       // 平台说这个应用**没了**（404 未登记/软删/无可用版本，410 = 已下架）⇒
@@ -570,10 +629,18 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (!frozen && (gate.status === 404 || gate.status === 410)) {
         const scope = sessionScope()
         if (scope !== undefined) await cache?.clearApp(scope, appId)
+        // 换代检查点 ③（**清缓存之后、写版本表与关窗之前**）：`clearApp` 是异步的
+        // （真删目录），这段窗口里换的代会把剩下的 `knownVersions.delete` /
+        // `knownTitles.delete` / `windows.close` 全部落到新账号身上 —— AE2 探针 ②
+        // 打的就是这一处（关掉的是 B 刚打开的窗口）。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
         knownVersions.delete(appId)
         knownTitles.delete(appId)
         warn(`pico-wasm-apps-host: the platform reported ${appId} as unavailable (HTTP ${String(gate.status)} ${gate.code}); closing its window and dropping its cache`)
         await windows?.close(appId)
+        // 换代检查点 ③b（关窗之后）：`refused` 携带的是**上一代**平台答复的结论 ——
+        // 换代之后不能再把它当成当前会话的结论交回调用方。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
       } else if (frozen) {
         // 窗口与缓存一律保留（只读快照仍是可看的内容）；只记一条诊断。
         warn(`pico-wasm-apps-host: the platform reported ${appId} as frozen (HTTP ${String(gate.status)} ${gate.code}); keeping its window and cache`)
@@ -589,6 +656,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       if (gate.changed) {
         const scope = sessionScope()
         if (scope !== undefined) await cache?.clearApp(scope, appId)
+        // 换代检查点 ③（`clearApp` 之后写版本表之前；与 denied 分支同一处语义）：
+        // `gate.changed` 时旧值已被清掉，但**新值不能由上一代的答复写入**。
+        if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
         knownVersions.set(appId, gate.version)
       }
       if (gate.title !== undefined) knownTitles.set(appId, gate.title)
@@ -615,7 +685,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     const declared = geometry === undefined || geometry === null
       ? (alreadyOpen ? null : await (catalogWarm ?? windowCatalog.lookup(appId)) ?? null)
       : geometry
+    // 换代检查点 ④（**目录兜底往返之后、建窗之前**）：建窗是不可撤回的副作用
+    // （窗口落在 `currentPartition()`，而 partition 创建即固定）。在上一代的续体里建窗 =
+    // 新账号自己的窗口还没开、却先多出一个属于上一代的窗口。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     const result = await windows.open(appId, path, declared)
+    // 换代检查点 ⑤（建窗之后）：窗口已经建出来（不可撤回，且它落在**建窗当时**的分区
+    // 上），但这次打开的**结论**属于上一代 —— 不向当前会话广播事件、也不把它交回
+    // 上一代的调用方。认账残留：这里**不回滚**那个窗口 —— `windows.close(appId)` 按
+    // appId 关，而新账号可能已经合法地重建了同名窗口（`windows.ts` 的 WS-1 分支）。
+    if (!sessionEpochs.isCurrent(generation)) return { kind: 'unavailable' }
     ctx.emit(WASM_APP_OPEN_EVENT, { app_id: appId, url: result.url })
     return { kind: result.window, url: result.url, ...extras }
   }
@@ -668,8 +747,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 于是：探针 probe-a-user-switch.mjs 实测 A→B 后 `closeAppWindow` 调用 0 次，B
   // `open()` 命中 A 的窗口走 `focusAppWindow`，B 就落在 **A 的分区**上（那份 jar 里是
   // A 在该应用里的 cookie/localStorage/IndexedDB）。
+  //
   let lastScope = scopeKey()
   ctx.effect(() => subscribePicoSession(ctx, service, () => {
+    // **代际推进点（唯一）**：会话一变就推进一代，`requestOpen` 里那些还在飞的
+    // `await` 续体因此会在下一个检查点整份丢弃（见 `sessionEpochs` 的注释）。
+    // 必须放在回调的第一句：晚于任何 await 的话，"这次换代"与"旧续体的检查点"
+    // 之间会有一个双方都自认为最新的窗口。
+    sessionGeneration = sessionEpochs.begin()
     syncPartitions()
     // 目录兜底按（服务端 + 令牌）缓存：会话一变就必须作废（切租户不得复用上一台的目录）。
     windowCatalog.invalidate()
@@ -680,23 +765,25 @@ export function apply(ctx: Context, config: Config = {}): void {
       // 窗口是**作用域资产**：webContents 与它的 session 分区创建即固定，留在映射里
       // 等于"新用户继续用上一个用户的身份"。关掉（`closeAll` 同时注销 surface 与
       // webContents 映射）之后，下一次 open 才会按当前分区新建。
-      void windows?.closeAll()
+      //
+      // 两次清理走同一条链（顺序：先关窗、后清缓存），返回的 promise 就是"这一代清理
+      // 落地"的信号 —— 新作用域的动作排在它后面，见下面的 `settled()`。
+      //
+      // 只在**离开一个已登录作用域**时清缓存（`previous === null` ⇒ 未登录→登录）：
+      // 待打开队列里的目标属于上一个用户；落盘内容也不该留着（`cache.ts` 的路径里另有
+      // session-scope 双保险）。未登录→登录 **不清**：§7.6 明确要求"未登录入队、登录后
+      // 打开"，清掉等于把用户点过的深链吞了；每次登录都 rm -rf 也会打掉热缓存。
+      if (previous !== null) pendingLinks.clear()
+      void scopeReset.start(previous)
       appProof?.invalidate()
       // 会话作用域内的目录缓存（版本/应用名）同样作废：它们是上一个账号的可见信息。
       knownVersions.clear()
       knownTitles.clear()
-      // 下面两件只在**离开一个已登录作用域**时做（登出/切账号）：待打开队列里的目标
-      // 属于上一个用户；落盘内容也不该留着（`cache.ts` 的路径里另有 session-scope
-      // 双保险）。未登录→登录 **不清**：§7.6 明确要求"未登录入队、登录后打开"，
-      // 清掉等于把用户点过的深链吞了；每次登录都 rm -rf 也会打掉热缓存。
-      if (previous !== null) {
-        pendingLinks.clear()
-        void cache?.clearAll()
-      }
     }
-    // 消费待打开队列必须放在**拆卸之后**：换号时的 `closeAll` 会把刚按新账号打开的
-    // 窗口一起关掉（深链在未登录时入队，登录后应立即打开一次）。
-    drainPendingLinks()
+    // 消费待打开队列必须放在**拆卸之后**（换号时的 `closeAll` 会把刚按新账号打开的
+    // 窗口一起关掉 —— 深链在未登录时入队，登录后应立即打开一次），也必须放在
+    // **清理落地之后**（否则新账号的应用页加载会写进正在被 `rm` 的缓存根）。
+    void scopeReset.settled().then(() => { drainPendingLinks() })
   }), 'pico wasm apps host: partition follow')
 
   // ---- 本机请求面（唯一 seam；§22.2 R1/R2） ----
@@ -879,21 +966,25 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             const user = session.username ?? ''
-            if (user === '') {
-              // 授权维度是 **用户 × 应用**：拿不到用户名时写入一条"谁都不是"的记录
-              // 比拒绝更糟（下一次换账号可能撞上它）。fail-closed。
-              json(reply, 401, {
-                error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
-              })
-              return
-            }
             const appId = rawAppId.trim()
+            // 授权维度是 **用户 ⊕ 服务端 ⊕ 应用**（R21 B2-R21-01）：三段一起构键，
+            // 任一段拿不到 ⇒ 拒绝。写入一条"谁都不是"的记录比拒绝更糟（下一次换账号
+            // 或换服务端可能正好撞上它）。`readAppSession` 已保证 serverURL 非空，
+            // 这里仍然逐段判一次 —— 判据来自同一份会话快照，不靠上游的隐含保证。
             try {
-              if (row.granted) await aiAuthorization.grant(user, appId)
-              else await aiAuthorization.revoke(user, appId)
+              if (row.granted) await aiAuthorization.grant(user, appId, session.serverURL)
+              else await aiAuthorization.revoke(user, appId, session.serverURL)
             } catch (cause) {
+              if (isAiConsentScopeError(cause)) {
+                json(reply, 401, {
+                  error: { code: 'AUTH_REQUIRED', message: hostCopy(locale, '未登录', 'not logged in') },
+                })
+                return
+              }
               // 写失败**必须**让用户看到：静默成功会让下一次调用仍然 403（"点了允许
-              // 还是不行"），而那看起来像 AI 坏了。
+              // 还是不行"），而那看起来像 AI 坏了。读不动（非 ENOENT）或**内容不可信**
+              // （坏 JSON / 顶层非对象 / 版本或条目形状不符）的记录文件也走这一支 ——
+              // 覆盖它们会静默销毁其它账号/应用的授权（FIX-17）。
               warn(`pico-wasm-apps-host: persisting the app AI consent failed (${cause instanceof Error ? cause.message : String(cause)})`)
               json(reply, 500, {
                 error: {

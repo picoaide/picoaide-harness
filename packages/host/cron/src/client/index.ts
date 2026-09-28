@@ -17,7 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForms } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the foot-lane registry contract (`ctx.picoFootMenu`) and its entry
@@ -68,10 +68,18 @@ import { en, setActiveLocale, t, zh } from './locales.ts'
 // this fiber pending forever with no error — taking the whole plugin (job
 // center + settings card + right-Sidebar tab) down with the entry. The entry is
 // registered from a child `ctx.inject` scope instead.
-export const inject = ['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions']
+export const inject = ['slots', 'configForms', 'locale', 'workspaces', 'connection', 'sessions']
 
 /** Settings namespace this card edits (the Host half registers it). */
-const CRON_NS = 'cron'
+/**
+ * Settings namespace the card edits.
+ *
+ * 0.1.7: the namespace is the **profile entry id** of the Host row that owns the
+ * config, so this must be the row id from `cordis.patch.yml` — not the retired
+ * free-form `'cron'` document section. Kept as a literal here because the client
+ * bundle must not import the Host half.
+ */
+const CRON_NS = 'pico-cron'
 
 /** Locale namespace this plugin owns. */
 const LOCALE_NS = 'cron'
@@ -142,9 +150,13 @@ export function apply(ctx: ClientContext): void {
   // The declaration precedes this row in every composed roster (the Web
   // bundle's rows come first, this package's insert last), so one probe at
   // apply time sees it whenever the row is enabled.
-  const settingsScope = ctx.get('settingsScope') as { bind<S>(spec: SettingsScopeSpec<S>): SettingsScope<S> } | undefined
-  if (settingsScope !== undefined && ctx.slots.spec('plugins.item') !== undefined) {
-    const scope = settingsScope.bind<CronSettings>({ namespace: CRON_NS })
+  // Upstream 0.1.7 replaced the client settings-scope seam (`ctx.settingsScope.bind`)
+  // with the profile-backed form registry: `ctx.configForms.get(entryId)` returns a
+  // per-namespace `ConfigForm` whose namespace **is the profile entry id** of the
+  // owning Host row (`pico-cron`, see the Host half's CRON_SETTINGS_ROW_ID).
+  const configForms = ctx.get('configForms') as ConfigForms | undefined
+  if (configForms !== undefined && ctx.slots.spec('plugins.item') !== undefined) {
+    const scope = configForms.get<CronSettings>(CRON_NS)
     const card = new CronSettingsCardController(scope)
     ctx.slots.inject('plugins.item', () => ctx.slots.register({
       name: 'plugins.item',

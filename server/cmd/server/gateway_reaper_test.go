@@ -96,10 +96,11 @@ func TestStartupCallsGatewayFileReaper(t *testing.T) {
 	s := string(src)
 
 	const call = "startGatewayFileReaper(ctx, db, llmgateway.FileReaperInterval)"
+	// R21C-04（审计 2026-09-26，P3）：存在性 ≠ 可达性 —— 这一条按 AST 判"该调用落在
+	// main() 的静态可达路径上"（`strings.Index` 判据挡不住"整行包进 `if false { … }`"，
+	// 审计实测该形态下整包仍绿）。
+	requireAssemblyOnMainPath(t, call, "回收器不会被启动（审计 M8）")
 	callAt := strings.Index(s, call)
-	if callAt < 0 {
-		t.Fatalf("main.go 里找不到装配调用 %q —— 回收器不会被启动（审计 M8）", call)
-	}
 	// ctx 必须先定义（NotifyContext 是启动期 ctx 的唯一来源）。
 	ctxAt := strings.Index(s, "ctx, stop := signal.NotifyContext(")
 	if ctxAt < 0 {

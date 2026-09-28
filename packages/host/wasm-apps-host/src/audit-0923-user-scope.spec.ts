@@ -246,6 +246,35 @@ describe('WS-1 直接换账号必须重建应用窗口（2026-09-23 审计）', 
   })
 })
 
+describe('WS-1 补充：closeAll 同步落地（"迟到完成"在窗口这条路径上不可达）', () => {
+  it('不 await 也已经关完并清空映射（所以窗口侧不需要代际/排队守卫）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wasm-ws1-sync-'))
+    const adapter = recordingWindowAdapter()
+    const windows = createWasmAppsWindows({
+      adapter,
+      appScheme: 'example-app',
+      productName: 'Example Harness',
+      userDataDir: dir,
+      partition: () => PROOF_PARTITION_ALICE,
+      urlFor: (appId, path) => `example-app://${appId}${path}`,
+      workArea: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
+    })
+    await windows.open('a')
+    await windows.open('b')
+    expect(adapter.created).toHaveLength(2)
+
+    // 故意**不 await**（= 修前 index.ts 的 `void windows?.closeAll()`）。
+    const pending = windows.closeAll()
+    // 判据：调用点返回时关窗已经全部发生、映射已经清空 —— 说明 `closeAll()` 体内没有
+    // await，"上一代的清理迟到落地、把新作用域刚开的窗口关掉"这条路径**结构上不存在**
+    // （第二十八轮 FIX-40 ③ 的实测结论；真正有窗口的是异步的 `cache.clearAll()`）。
+    expect(adapter.closed, '不 await 也已经关掉全部窗口').toHaveLength(2)
+    expect(windows.openApps(), '映射也必须同步清空').toEqual([])
+    await pending
+    expect(adapter.closed, 'await 之后不会再关一次（幂等）').toHaveLength(2)
+  })
+})
+
 describe('WS-1 兜底：分区不匹配时关掉旧窗口重建（windows.ts 层）', () => {
   it('作用域变了但映射没清（回调缺位）时，open 也必须落在当前分区', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wasm-ws1-fallback-'))

@@ -80,12 +80,18 @@ const (
 
 // pgSQLStateCodes 是 pgErrorCode 回落路径会去错误串里找的码集合。
 // 新增一种判定时在这里补一行常量与一项，别在各谓词里另写串匹配。
+//
+// 55P03/57014（lock_timeout / statement_timeout 到点）的常量声明在 usage_ledger.go
+// 的回收预算段（R10-A-03 起就在那里，本文件不重复声明）；R27-FIX39 把 55P03 登记进
+// 这张表 —— 迁移执行器的等锁预算要靠它做"超时 vs 真失败"的分类，而分类不能再退回
+// 各调用点自己写串匹配（本仓已有"对错误串判 SQLSTATE 会静默永不命中"的教训）。
 var pgSQLStateCodes = []string{
 	pgSQLStateDuplicateRelation,
 	pgSQLStateOverlapPartition,
 	pgSQLStateDefaultPartitionViolated,
 	pgSQLStateUniqueViolation,
 	pgSQLStateForeignKeyViolation,
+	pgSQLStateLockNotAvailable,
 }
 
 // pgErrorCode 抽出 err 携带的 PG SQLSTATE 码，两级判定：

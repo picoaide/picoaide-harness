@@ -169,10 +169,12 @@ func TestStartupCallsLegacyConfigCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx := strings.Index(string(src), "warnLegacyConfig(db)")
-	if idx < 0 {
-		t.Fatal("main() 未调用 warnLegacyConfig(db) —— 已废除配置在启动期又是静默的（R15C-R-03 复发）")
-	}
+	const call = "warnLegacyConfig(db)"
+	// R21C-04（审计 2026-09-26，P3）：存在性 ≠ 可达性 —— 这一条按 AST 判"该调用落在
+	// main() 的静态可达路径上"（`strings.Index` 判据挡不住"整行包进 `if false { … }`"，
+	// 审计实测该形态下整包仍绿）。
+	requireAssemblyOnMainPath(t, call, "已废除配置在启动期又是静默的（R15C-R-03 复发）")
+	idx := strings.Index(string(src), call)
 	// 必须排在迁移之后（否则 settings 表可能还不存在，检查会落到"读不到"分支）。
 	if mig := strings.Index(string(src), "ApplyMigrations"); mig >= 0 && idx < mig {
 		t.Fatal("warnLegacyConfig 排在 ApplyMigrations 之前（settings 表尚不存在）")

@@ -314,6 +314,9 @@ func TestAssetEndpointsWithoutDarkAndFavicon(t *testing.T) {
 
 // assetRouter 用渠道 handler 自建路由树(生产路径在 internal/router 声明,
 // 这里按同一模板挂,验证 handler 行为)。
+//
+// GET 与 HEAD **成对**注册,与 internal/router/router.go 的三个素材路由逐条对齐 ——
+// 只挂 GET 时 HEAD 请求会被 gin 以"方法未注册"404 掉,任何 HEAD 断言都会变成假绿。
 func assetRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	h := NewHandlers()
@@ -321,6 +324,9 @@ func assetRouter() *gin.Engine {
 	r.GET("/channel/logo", h.Logo)
 	r.GET("/channel/logo-dark", h.LogoDark)
 	r.GET("/channel/favicon", h.Favicon)
+	r.HEAD("/channel/logo", h.Logo)
+	r.HEAD("/channel/logo-dark", h.LogoDark)
+	r.HEAD("/channel/favicon", h.Favicon)
 	return r
 }
 

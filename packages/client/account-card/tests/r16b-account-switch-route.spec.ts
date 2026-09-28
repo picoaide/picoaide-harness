@@ -114,7 +114,8 @@ async function harness(): Promise<Harness> {
       return () => { listeners.delete(event) }
     },
     effect: (fn: () => unknown) => fn(),
-    get: () => undefined,
+    // FIX-42②：持有性证明的 fence 来源（上游 `connection.requestRejection` 的替身）。
+    get: (name: string) => (name === 'connection' ? browserFence() : undefined),
     picoSession: {
       getSession: () => state.session,
       clear: () => { state.session = null },
@@ -140,10 +141,35 @@ interface UsageAnswer {
   body: { data?: unknown, error?: string, identity?: string }
 }
 
-/** 打本机路由（真 socket；Host/Origin 都是 loopback 同源 ⇒ 过守卫）。 */
+/** 上游 `browser-auth` 的 cookie 名（`dsh-auth-<authority>`）。 */
+function proofCookieFor(authority: string): string {
+  return `dsh-auth-${authority}=v1.signature`
+}
+
+/**
+ * 上游 `connection.requestRejection()` 的行为替身：回环 Host + 同源 Origin +
+ * **本 authority 的 `dsh-auth-*` cookie**。FIX-42② 之后 `?refresh=1`（消费型 GET）
+ * 走这一关，所以正常路径的请求必须带证明 —— 与真渲染层一致（同源 fetch 自动带 cookie）。
+ */
+function browserFence(): { requestRejection: (r: { headers: Record<string, unknown> }) => 401 | 403 | undefined } {
+  return {
+    requestRejection: (r) => {
+      const headers = r.headers
+      const host = headers['host']
+      if (typeof host !== 'string' || !/^(?:127\.0\.0\.1|localhost):\d+$/.test(host)) return 403
+      if (headers['sec-fetch-site'] === 'cross-site') return 403
+      const origin = headers['origin']
+      if (typeof origin === 'string' && new URL(origin).host !== host) return 403
+      return headers['cookie'] === proofCookieFor(host) ? undefined : 401
+    },
+  }
+}
+
+/** 打本机路由（真 socket；Host/Origin 都是 loopback 同源 + 持有性证明 ⇒ 过两道守卫）。 */
 async function getUsage(base: string, force = false): Promise<UsageAnswer> {
+  const authority = base.replace(/^http:\/\//u, '')
   const response = await fetch(`${base}/api/pico/account/usage${force ? '?refresh=1' : ''}`, {
-    headers: { Origin: base, accept: 'application/json' },
+    headers: { Origin: base, accept: 'application/json', cookie: proofCookieFor(authority) },
   })
   const text = await response.text()
   let body: UsageAnswer['body']

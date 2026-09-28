@@ -19,7 +19,7 @@ node packages/host/desktop/scripts/e2e-client.mjs --app <binary> --port 9223 --n
 | --- | --- | --- |
 | 1 | 应用启动并暴露 CDP | — |
 | 2 | 登录成功（mock gateway） | 01-login-main.png |
-| 3 | 客户端插件图已装载（`__DSH_BOOT__` 非空，含 memory-evolve 升级后加载） | — |
+| 3 | 客户端插件图已装载（`__DSH_BOOT__` 非空**且含桌面自身 bundle** `dsh-plugin-desktop`；只判"非空"会放过 2026-09-28 那次静默丢条目 ⇒ 整页 Failed to load plugins） | — |
 | 4 | 主界面侧边栏导航完整（定时任务/技能/连接器/浏览器/设置） | — |
 | 4 | 连接器面板可打开且含预期内容 | 03-connectors.png |
 | 5 | 技能中心面板可打开（模态） | 04-skills.png |

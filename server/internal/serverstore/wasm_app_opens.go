@@ -90,24 +90,9 @@ type WasmOpenPoint struct {
 	UV     int64 `json:"uv"`
 }
 
-// LocalDay 返回 t 所在**本地自然日**的零点（本地时区）。
-//
-// 时区口径（§5.1b 第 3 条 / §8.9，**写死在这里，不要在别处再算一遍**）：
-// `wasm_app_opens_daily.day` 与 open 响应里的 `opens.today` 都按**服务端本地日**
-// （Go 的 `time.Local`，由部署的 TZ 决定）分桶，而**不是** UTC 日、也不是数据库会话
-// 的 TimeZone。为什么用 Go 而不是 SQL 的 `opened_at::date`：后者取的是 PG 会话时区，
-// 而"应用服务器"与"数据库"是两个容器（compose 里各自继承 TZ）—— 两边不一致时，
-// 同一天的明细会落进两个 day 值，且**没有任何报错**。在 Go 侧算好边界再传给 SQL，
-// 时区口径就只有一个来源。
-func LocalDay(t time.Time) time.Time {
-	y, m, d := t.In(time.Local).Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, time.Local)
-}
-
-// LocalDayString 返回本地自然日的 `YYYY-MM-DD`（与 day 列的存储形态一致）。
-func LocalDayString(t time.Time) string {
-	return t.In(time.Local).Format("2006-01-02")
-}
+// 日边界（`LocalDay` / `LocalDayString` / `NextLocalDay` / `AddLocalDays`）的唯一实现在
+// `local_day.go`：时区口径与"为什么本地零点要专门算"（DST 缺口日的归一化陷阱，
+// R20A-S-01）都写在那份文件头 —— 改这一族之前先读它。
 
 // AggregateWasmAppOpens 把明细**重算**进日汇总（幂等：同一区间重复跑结果相同）。
 //
@@ -123,15 +108,19 @@ func LocalDayString(t time.Time) string {
 // 入参 fromDay/toDay 是**任意时刻**：函数按本地自然日把它们归一到日边界，
 // 逐日聚合（区间通常只有 2–3 天；清理路径的区间可能更长，但一次性）。
 // 逐日而不是一条 `GROUP BY (opened_at AT TIME ZONE …)`：日边界由 LocalDay 给出，
-// 时区口径只有一个来源（见 LocalDay 的注释）。
+// 时区口径只有一个来源（见 `local_day.go` 的文件头）。
+//
+// ⚠️ 日阶梯用 `NextLocalDay` 而不是 `day.AddDate(0, 0, 1)`：后者加的是墙钟，在
+// DST 缺口日会把次日的一小时算进今天（甚至让相邻两桶的 day 键撞车 ⇒ 后写覆盖前写，
+// R20A-S-01）。用 `NextLocalDay` 时 `[day, next)` 恰好等于"day 键那一整天"。
 func AggregateWasmAppOpens(ctx context.Context, db *sql.DB, fromDay, toDay time.Time) (int64, error) {
 	start, end := LocalDay(fromDay), LocalDay(toDay)
 	if end.Before(start) {
 		return 0, nil
 	}
 	var total int64
-	for day := start; !day.After(end); day = day.AddDate(0, 0, 1) {
-		next := day.AddDate(0, 0, 1)
+	for day := start; !day.After(end); day = NextLocalDay(day) {
+		next := NextLocalDay(day)
 		res, err := db.ExecContext(ctx, `
 			INSERT INTO wasm_app_opens_daily (app_id, day, dept_id, pv, uv, updated_at)
 			SELECT app_id,
@@ -166,7 +155,7 @@ func AggregateWasmAppOpens(ctx context.Context, db *sql.DB, fromDay, toDay time.
 // 读失败 ⇒ 返回错误，调用方按契约把 `opens` 省略（**不得**回 0 冒充"今天没人打开"）。
 func WasmAppOpenToday(ctx context.Context, db *sql.DB, appID string, now time.Time) (pv, uv int64, err error) {
 	day := LocalDay(now)
-	next := day.AddDate(0, 0, 1)
+	next := NextLocalDay(day)
 	err = db.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT user_id) FROM wasm_app_opens
 		WHERE app_id = $1 AND opened_at >= $2 AND opened_at < $3`,
 		strings.ToLower(strings.TrimSpace(appID)), day.UTC(), next.UTC()).Scan(&pv, &uv)

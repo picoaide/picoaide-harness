@@ -1325,7 +1325,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_fill_credentials',
-    description: '[control] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. http(s) sites only: a non-http(s) document has no origin a stored credential can be bound to, so autofill is refused there (use browser_type for such pages). IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
+    description: '[control] Fill the login form of your tab with credentials stored for a connector (shown to the user; never submitted automatically). SITE-BOUND: the tab must be on the connector\'s own origin — a tab on any other site (or a connector record without a site URL) is refused, so navigate to the real login page first. http(s) sites only: a non-http(s) document has no origin a stored credential can be bound to, so autofill is refused there (use browser_type for such pages). A stored credential document that exists but cannot be read (unreadable, oversized, not a credential document) is refused as a READ failure — nothing is injected, and this is NOT the same as "no stored credentials": ask the user to repair that record or re-authorize the connector, or type the value with browser_type. IMPORTANT: this opens the tab\'s credential window — from now until that tab navigates, browser_eval and browser_screenshot are refused there (a value still in the page can be read back in ways no masking can undo). Read the page with browser_get_snapshot / browser_get_text, submit with browser_click, and eval/screenshots resume automatically on the next document. The injected value stays masked in every text exit of this tab for the rest of the tab\'s life (page text, titles, URLs, history, downloads) — VERBATIM occurrences only: a page that renders the value transformed (base64, reversed, character-split) is not covered by any value-level rule. Treat this as a bound on accidents, not on a hostile page.',
     parameters: {
       tab: { type: 'integer', description: 'Your tab id (defaults to your active tab).' },
       connectorId: { type: 'string', required: true, description: 'The connector id whose stored credentials to use.' },
@@ -1361,7 +1361,7 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
 
   register(defineTool({
     name: 'browser_credentials_list',
-    description: '[control] List available stored credentials (connector id + username only; never secrets).',
+    description: '[control] List available stored credentials (connector id + username only; never secrets). An EMPTY list means the user really has none: a stored credential document that cannot be read (unreadable, oversized, not a credential document) makes this call fail instead, so a read failure is never reported as "no credentials".',
     parameters: {},
     output: {
       schema: {
@@ -1582,7 +1582,13 @@ function formatCredentials(value: unknown): string {
   return items.map((c) => `${c.id}${c.username !== undefined ? ` (${c.username})` : ''}`).join('\n')
 }
 
-/** Tool → group map used by the enterprise toolGroups policy (P2 §15). */
+/**
+ * Tool → group map used by the `toolGroups` policy (P2 §15).
+ *
+ * 名字里的 "enterprise" 是历史措辞：**装配面至今没有生产者**，见
+ * {@link parseToolGroups} 与 `index.ts` 的 `toolGroups` 字段注释（2026-09-26
+ * R21 F-02：先把"企业策略可禁用"这条承诺撤回，等渠道包真的接上生产者再恢复）。
+ */
 const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'memory' | 'artifacts' | 'control'> = {
   browser_open: 'navigate', browser_navigate: 'navigate', browser_reload: 'navigate',
   browser_go_back: 'navigate', browser_go_forward: 'navigate', browser_list_tabs: 'navigate',
@@ -1602,16 +1608,39 @@ const GROUP_OF: Record<string, 'navigate' | 'interact' | 'read' | 'write' | 'mem
   browser_clear_data: 'control', browser_credentials_list: 'control',
 }
 
-/** Default: every tool group enabled. */
+/** Default: every tool group enabled. Only the **absent** key means "default". */
 export const DEFAULT_GROUPS: ReadonlySet<string> = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
 
-/** Parse a toolGroups config value into a set (unknown values ignored). */
+/**
+ * Parse a `toolGroups` config value into a set of enabled groups.
+ *
+ * 两条语义（2026-09-26 R21 F-02 定案）：
+ *
+ *  1. **只有整个键缺席**（`undefined`）才是"缺省 = 全开"（{@link DEFAULT_GROUPS}）。
+ *  2. 显式给出数组时**按字面生效**：无法识别的名字被忽略，结果可以是**空集 = 全关**。
+ *     此前 `set.size === 0` 会回落到 `DEFAULT_GROUPS` ⇒ `toolGroups: []`（运维想关掉
+ *     全部浏览器工具时最自然的写法）**反而把七组全部打开**，是 fail-open 的反直觉形态。
+ *     写错名字（`['naviagte']`）同样落到空集 = 全关：策略键写错必须关门，不能开门。
+ *
+ * **装配面上的"键缺席"不由本函数兜**（2026-09-26 R22 V6 F1）：cordis 在 `apply` 之前按
+ * `Config` schema 归一化 config，而 Schemastery 会把**缺键的数组**物化成 `[]`（同一 schema
+ * 的标量字段缺键仍是 `undefined`）⇒ 生产装配（`profile.ts` 只注入 `appOriginScheme`）
+ * 走到这里时值是 `[]`，`value === undefined` 这条分支**在生产里不可达**。所以缺省必须写在
+ * schema 上（`index.ts` 的 `.default([...DEFAULT_GROUPS])`）；本函数保留 `undefined` 分支
+ * 只服务直接调用者（单测、内部构造）。改这里之前先看
+ * `tests/audit-r22-tool-groups-production.spec.ts`（生产形态的**注册面**判据）。
+ *
+ * 注意 `browser_eval` 归 `write` 组 —— 它在用户**已登录**的分区里执行 AI 编写的 JS，
+ * 所以"少写了 `write`"与"少写了 `read`"的后果不同，改这里的映射要一起看。
+ * @param value - 配置里的 `toolGroups`（`undefined` = 键缺席）。
+ * @returns 启用的组集合；空集 = 一个浏览器工具都不注册。
+ */
 export function parseToolGroups(value: string[] | undefined): ReadonlySet<string> {
   if (value === undefined) return DEFAULT_GROUPS
   const allowed = new Set(['navigate', 'interact', 'read', 'write', 'memory', 'artifacts', 'control'])
   const set = new Set<string>()
   for (const item of value) if (allowed.has(item)) set.add(item)
-  return set.size === 0 ? DEFAULT_GROUPS : set
+  return set
 }
 
 export type { ToolResult }

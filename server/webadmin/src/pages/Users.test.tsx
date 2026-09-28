@@ -458,3 +458,26 @@ describe('审计员只读访问(R7 branding-3)', () => {
     expect(screen.getByRole('button', { name: '令牌' })).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 第三十二轮 FIX-47 子泳道 B：上面那条是**负例**（只读角色看不到写入口）。
+// 负例对"权限点写错"不敏感 —— `hasPermission` 在实参匹配不上任何权限点时对
+// **所有角色**恒 false，负例照样通过。这一条是它的另一半：**显式授予
+// user:write / dept:write** 时写入口必须真的在（两个调用点各一条判据：
+// `Users.tsx:412` 的 canWrite 管「新建用户/角色」，`:413` 的 canAssignDept
+// 只「部门」一颗按钮）。实参写错任何一处 ⇒ 本用例当场红。
+// ---------------------------------------------------------------------------
+describe('写权限正向夹具(FIX-47 子泳道 B)', () => {
+  afterEach(() => setCurrentAdmin(null))
+
+  it('持有 user:write/dept:write 时新建/角色/部门入口可见(正向夹具)', async () => {
+    setCurrentAdmin({ role: 'super_admin', permissions: ['user:read', 'user:write', 'dept:write'] })
+    render(<MemoryRouter future={ROUTER_FUTURE}><Users /></MemoryRouter>)
+
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建用户' })).toBeInTheDocument() // canWrite(user:write)
+    expect(screen.getAllByRole('button', { name: '角色' }).length).toBeGreaterThan(0) // canWrite
+    expect(screen.getAllByRole('button', { name: '部门' }).length).toBeGreaterThan(0) // canAssignDept(dept:write)
+    expect(screen.queryByText(/只读视图/)).toBeNull()
+  })
+})

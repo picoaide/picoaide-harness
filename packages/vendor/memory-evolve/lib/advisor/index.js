@@ -153,11 +153,26 @@ function lazyDir(dir) {
  */
 const conversationFileOf = (dataDir, sessionId) => join(dataDir, 'conversations', `${safeId(sessionId)}.json`)
 const readConversation = (dataDir, sessionId) => {
+  let text
   try {
-    const text = readFileSync(conversationFileOf(dataDir, sessionId), 'utf8')
+    text = readFileSync(conversationFileOf(dataDir, sessionId), 'utf8')
+  } catch (error) {
+    // FIX-45③（第三十轮审计，2026-09-29）：**只有 ENOENT 才算"不存在"**（首次使用）。
+    //
+    // 现场：这里修前是 `catch { return null }` —— 把**读失败**（EACCES / EMFILE / EIO、
+    // Windows 上同步盘或杀软瞬时占用）与"文件不存在"压成同一个值，`AdvisorConversation`
+    // 于是以**空基线**继续，随后 persist() 把 `{epoch:1,messages:[]}` 整文件回写：
+    // 评审员的整段历史被抹掉、epoch 从 7 掉回 1，**且全程零告警**。
+    // 同族已收口的正确对照：`lib/skills.js`（AB2-04）与 `lib/coi/index.js` 的 loadRuntime
+    // 都是"ENOENT-only + throw"，这里跟进同一形态（不自创第三种）。
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+  try {
     return text === '' ? null : JSON.parse(text)
-  } catch {
-    return null // 不存在/损坏：按空会话
+  } catch (error) {
+    // 内容不可解析（半截写 / git 冲突标记）：同样**不是**"不存在"，抛给调用方 fail-closed。
+    throw new Error(`advisor: 评审会话文件不可解析（${conversationFileOf(dataDir, sessionId)}）: ${error.message}`)
   }
 }
 const writeConversation = (dataDir, sessionId, epoch, messages, scopeText = '') => {
@@ -206,8 +221,13 @@ export function installAdvisor(ctx, config, deps = {}) {
     readFile: (rel) => {
       try {
         return readFileSync(join(dataDir, rel), 'utf8')
-      } catch {
-        return ''
+      } catch (error) {
+        // FIX-45③：只有 ENOENT 算"不存在"（首次使用）⇒ 返回 ''；其余读失败**抛出去**，
+        // 由 `ScopeStore` 的 loadErrors 收口（读失败时**拒写**，见 scopes.js）。
+        // 修前 `catch { return '' }` ⇒ 一次瞬时 EACCES 就足以让 setProject 以空 map
+        // 回写 project-scopes.json，**抹掉其它所有项目**的约束文本。
+        if (error?.code === 'ENOENT') return ''
+        throw error
       }
     },
     conversationFileOf: (sessionId) => `conversations/${safeId(sessionId)}.json`,
@@ -254,8 +274,12 @@ export function installAdvisor(ctx, config, deps = {}) {
     readFile: (path) => {
       try {
         return readFileSync(path, 'utf8')
-      } catch {
-        return ''
+      } catch (error) {
+        // FIX-45③：同 ScopeStore.readFile —— ENOENT 才是"没有队列"，其余读失败抛出，
+        // 由 InstructionQueue 的 loadFailed 收口（**拒写**）。修前 `catch { return '' }`
+        // ⇒ `ctrl.tell` 以空队列回写，该会话**全部待处理指令**被抹掉且零告警。
+        if (error?.code === 'ENOENT') return ''
+        throw error
       }
     },
   })
@@ -269,22 +293,90 @@ export function installAdvisor(ctx, config, deps = {}) {
   // setSessionOverride 时原子落盘；disposed 事件不再删除（agent 重建后
   // 由本 Map 直接恢复）。
   const overridesFile = join(dataDir, 'session-overrides.json')
-  try {
-    const raw = readFileSync(overridesFile, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      for (const [sessionId, value] of Object.entries(parsed)) {
-        if (typeof value === 'boolean') overrides.set(sessionId, value)
-      }
+  /**
+   * 读一次 `session-overrides.json` 基线（FIX-47①，与 FIX-45③ 的
+   * {@link ScopeStore#readBaseline} **同一形态**，不自创第三种口径）。
+   *
+   * 修前是**裸 `catch {}`**：EACCES/EIO/EISDIR 与"文件不存在"被压成同一个值，
+   * `overrides` 从空 Map 起步，而 `persistOverrides()` 是**整表回写** ⇒ 一次瞬时
+   * 读失败 + 一次会话级 toggle（`POST /toggle` 回 **HTTP 200 `ok:true`**）就把
+   * **其它所有会话**的开关从盘上抹掉。第三十一轮 AD1 用真 EACCES（nobody）实测：
+   * seed `{"session-0":true,"session-9":true}` → `{"session-1":true}`；
+   * 装载期可读的对照组里三条都还在。
+   *
+   * 口径：**只有 ENOENT（以及空文件）算"没有基线"**；其余读失败 / 内容不可解析 /
+   * 顶层不是对象一律抛出，由调用方记标记并在**写前闸门**拒写。
+   * @returns {object|undefined} 解析出的开关表；无基线时 `undefined`。
+   */
+  const readOverridesBaseline = () => {
+    let raw
+    try {
+      raw = readFileSync(overridesFile, 'utf8')
+    } catch (error) {
+      if (error?.code === 'ENOENT') return undefined
+      throw new Error(`读失败 ${overridesFile}: ${error instanceof Error ? error.message : String(error)}`)
     }
-  } catch {
-    // 首次运行或文件损坏：从空 Map 开始，不阻断模块安装
+    // 空文件 = 没有基线（原子写只会产出完整 JSON，空文件是外部截断的产物）。
+    if (raw.trim() === '') return undefined
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (error) {
+      throw new Error(`内容不可解析 ${overridesFile}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`内容不是对象 ${overridesFile}（以空基线回写会抹掉全部会话级开关）`)
+    }
+    return parsed
+  }
+  /** 装载期读失败原因（`null` = 基线可写）；不缓存空值 ⇒ 恢复可读后自愈。 */
+  let overridesLoadError = null
+  /** 把盘上基线并回内存（**不覆盖**本进程已显式设过的键）。 */
+  const adoptOverridesBaseline = () => {
+    const baseline = readOverridesBaseline()
+    if (baseline === undefined) return
+    for (const [sessionId, value] of Object.entries(baseline)) {
+      if (typeof value === 'boolean' && !overrides.has(sessionId)) overrides.set(sessionId, value)
+    }
+  }
+  /**
+   * 写前闸门（FIX-47① / FIX-45③ 同一形态）：基线不可读 ⇒ **拒写**（抛错 ⇒
+   * API 如实回 400、`/advisor` 命令如实回 error，而不是"清空后 200"）。
+   *
+   * 先重试一次读：恢复可读就**先把盘上基线并回内存再放行** —— 否则"自愈"的第一
+   * 次写仍会以空 Map 回写，等于把同一个缺陷推迟到下一次调用。
+   */
+  const assertOverridesWritable = () => {
+    if (overridesLoadError === null) return
+    try {
+      adoptOverridesBaseline()
+    } catch {
+      throw new Error('advisor: 会话级开关基线不可读 —— 已拒绝写入'
+        + `（${overridesFile}；以空基线回写会抹掉其它会话的开关，请先恢复该文件的可读性）`
+        + `：${overridesLoadError}`)
+    }
+    overridesLoadError = null
+  }
+  try {
+    adoptOverridesBaseline()
+  } catch (error) {
+    overridesLoadError = error instanceof Error ? error.message : String(error)
+    // 可检索的拒写理由（与 FIX-45③ 的 `refuse to overwrite …` 同族关键词）。
+    logger.warn?.('advisor: session overrides load failed — refuse to overwrite baseline', {
+      file: overridesFile, error,
+    })
   }
   const persistOverrides = () => {
+    // 写前闸门在 try **之外**：基线不可读必须如实抛给调用方（HTTP 400 / 命令 error）。
+    assertOverridesWritable()
     try {
       ensureDataDir()
       atomicWrite(overridesFile, JSON.stringify(Object.fromEntries(overrides)))
     } catch (error) {
+      // **有意保留**（与 FIX-27 之前一致）：落点被拒（预置符号链接 / 库外）只告警不抛，
+      // 由 `writeFileAtomicSafeAt` 自己的 NF-3 断言负责"没写进去"这件事 —— 那条路径有
+      // 独立用例（`advisor-records-landing-symlink.test.js`）钉住"库外零改动"。
+      // 本轮的闸门只针对"基线不可读"，不改变这一档的既有语义。
       logger.warn?.('advisor: persist session overrides failed', { error })
     }
   }
@@ -538,6 +630,10 @@ export function installAdvisor(ctx, config, deps = {}) {
       if (enabled && config.advisorEnabled !== true) {
         return ctrl.status(sessionId)
       }
+      // FIX-47①：闸门必须在**改内存之前**。否则拒写后 effectiveEnabled 已经翻转
+      // （界面显示"开了"、盘上没有），刷新即静默回退——与"读失败 ⇒ 静默丢状态"
+      // 同一个失效模式，只是方向相反。
+      assertOverridesWritable()
       overrides.set(sessionId, enabled === true)
       // 2026-08-13 持久化：会话级开关跨刷新/重启保留（原子落盘）
       persistOverrides()
@@ -796,7 +892,15 @@ function registerAdvisorCommands(commands, ctrl, observer, getSession) {
           return { kind: 'error', text: adt('adv.globalOff', { verb: 'toggle' }) }
         }
         const before = ctrl.status(sessionId)
-        return ctrl.setSessionOverride(sessionId, !before.effectiveEnabled).effectiveEnabled
+        let flipped
+        try {
+          // FIX-47①：基线不可读时 setSessionOverride 拒写并抛错——命令面如实回
+          // error（与 `tell` 同形），不把"没落盘"当成成功。
+          flipped = ctrl.setSessionOverride(sessionId, !before.effectiveEnabled).effectiveEnabled
+        } catch (error) {
+          return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+        }
+        return flipped
           ? { kind: 'success', text: 'Advisor on for this session.' }
           : { kind: 'success', text: 'Advisor off for this session.' }
       }
@@ -809,7 +913,12 @@ function registerAdvisorCommands(commands, ctrl, observer, getSession) {
         if (before.effectiveEnabled && before.runtimeStatus !== 'quota_exhausted' && before.runtimeStatus !== 'halted') {
           return { kind: 'success', text: 'Advisor is already on for this session.' }
         }
-        const s = ctrl.setSessionOverride(sessionId, true)
+        let s
+        try {
+          s = ctrl.setSessionOverride(sessionId, true)
+        } catch (error) {
+          return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+        }
         return {
           kind: 'success',
           text: s.disabledReason !== undefined
@@ -822,7 +931,11 @@ function registerAdvisorCommands(commands, ctrl, observer, getSession) {
         if (!before.effectiveEnabled && !before.override) {
           return { kind: 'success', text: 'Advisor is already off for this session.' }
         }
-        ctrl.setSessionOverride(sessionId, false)
+        try {
+          ctrl.setSessionOverride(sessionId, false)
+        } catch (error) {
+          return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+        }
         return { kind: 'success', text: 'Advisor off for this session.' }
       }
       case 'status':

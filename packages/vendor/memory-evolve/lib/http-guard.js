@@ -14,18 +14,26 @@
  * 分端口径——刻意**不是**"一刀切要求认证"（那会把设计上公开的端点打死，
  * 例如 GUI 匿名轮询的 badge / state 探测、mermaid vendor 静态资源）：
  *
- *   - GET/HEAD（只读，含设计上公开的端点）：放行。CSRF 侧只拒绝浏览器明确
- *     标注的跨站请求——`Sec-Fetch-Site: cross-site`。GET 可能没有 Origin
- *     （不能用 Origin 判定同源），而 `Sec-Fetch-Site` 是浏览器必然携带的
- *     Fetch Metadata 头；非浏览器客户端不发该头 ⇒ 放行（同机进程不在权限
- *     边界内）。
- *   - 其它方法（POST/PUT/PATCH/DELETE，全部是写操作）：Origin 必须存在且与
- *     Host 同源；有请求体时必须是 `application/json` 的 JSON 对象。跨站表单
- *     只能发 urlencoded/multipart/text-plain（被 content-type 判定拒绝），
+ *   - **读写共同的 Host 栅栏**（R24 B3，2026-09-26）：{@link hostTrustFence} 是
+ *     全部 11 个注册点的**第一条**判据 —— Host 必须是本机可信托管名（loopback
+ *     或 `webRuntime.trustedHosts` 中已声明的权威）。此前的写侧唯一判据是
+ *     `Origin == Host`，而两端都可被攻击者填成同一个值：`Host: attacker.example`
+ *     + `Origin: http://attacker.example` 的 DNS rebinding 页面（socket 落在
+ *     127.0.0.1）可以读全部记忆、删除/归档条目、派发 COI 本地 CLI 任务。
+ *     Host 是 rebinding **无法伪造**的头（浏览器按它以为的 URL 填写），所以这道
+ *     栅栏必须罩住读与写，且只有一份实现。
+ *   - GET/HEAD（只读，含设计上公开的端点）：过 Host 栅栏后放行。CSRF 侧只拒绝
+ *     浏览器明确标注的跨站请求——`Sec-Fetch-Site: cross-site`。GET 可能没有
+ *     Origin（不能用 Origin 判定同源），而 `Sec-Fetch-Site` 是浏览器必然携带的
+ *     Fetch Metadata 头；非浏览器客户端不发该头 ⇒ 放行。
+ *   - 其它方法（POST/PUT/PATCH/DELETE，全部是写操作）：过 Host 栅栏后，Origin
+ *     必须存在且与 Host 同源；有请求体时必须是 `application/json` 的 JSON 对象。
+ *     跨站表单只能发 urlencoded/multipart/text-plain（被 content-type 判定拒绝），
  *     跨站 fetch 带 JSON 头会先触发预检而本服务无 CORS 许可。
  *
  * 失败响应沿用 `lib/api.js` 的既有契约：400 + `{ok:false, code:'bad-request'}`，
- * 浏览器标注的跨站 GET 用 403 + `{ok:false, code:'cross-site'}`。
+ * 浏览器标注的跨站 GET 用 403 + `{ok:false, code:'cross-site'}`，Host 栅栏用
+ * 403 + `{ok:false, code:'untrusted-host'}`。
  *
  * 零运行时依赖（node:url only）。
  *
@@ -116,16 +124,19 @@ function guardDenial(status, reason, error) {
  * handler 的**统一前置守卫**（P1-11 + FIX-04）：在路由分发之前按方法分类
  * 处理，覆盖所有注册点，而不是只挂在某一个模块的某一个端点上。
  *
- * 语义见模块头注释：GET/HEAD 只拒绝 `Sec-Fetch-Site: cross-site`；其余方法
- * 必须 Origin 同源 + JSON 对象体。
+ * 语义见模块头注释：先过 {@link hostTrustFence}；GET/HEAD 只拒绝
+ * `Sec-Fetch-Site: cross-site`；其余方法必须 Origin 同源 + JSON 对象体。
  *
  * @param {object} req - node http 请求。
  * @param {number} [maxBytes] - 有体请求的解析上限（默认 64 KiB；调用方的
  *   路由若接受更大体积，必须传自己的上限，否则大体会在这里被 400）。
+ * @param {object} [webCtx] - 注册时的 web 侧 ctx（读 `webRuntime.trustedHosts`；
+ *   见 {@link hostTrustFence}）。缺省时 `trustedHosts` 按空表处理——只放行
+ *   loopback，绝不放宽到任意主机。
  * @returns {Promise<{status: number, body: object} | null>} null = 放行。
  */
-export async function guardRequest(req, maxBytes = 64 * 1024) {
-  const denied = await guardRequestReasoned(req, maxBytes)
+export async function guardRequest(req, maxBytes = 64 * 1024, webCtx = undefined) {
+  const denied = await guardRequestReasoned(req, maxBytes, webCtx)
   if (denied === null) return null
   return { status: denied.status, body: denied.body }
 }
@@ -134,8 +145,9 @@ export async function guardRequest(req, maxBytes = 64 * 1024) {
  * 带**失败分类**的守卫（FIX-27 / me-3，2026-09-13）。
  *
  * 语义与 {@link guardRequest} **完全同一份实现**，只是拒绝时多返回一个机器
- * 可读的 `reason`：`cross-site` / `content-type` / `origin-missing` /
- * `origin-cross` / `body-too-large` / `bad-json` / `body-not-object`。
+ * 可读的 `reason`：`host-untrusted` / `cross-site` / `content-type` /
+ * `origin-missing` / `origin-cross` / `body-too-large` / `bad-json` /
+ * `body-not-object`。
  *
  * 为什么需要它：`lib/advisor/api.js` 有自己的错误契约（按失败原因分
  * 400/403/413/415，MAJOR-8 复审口径）。此前它靠**本地第 10 份手写副本**维持
@@ -145,14 +157,23 @@ export async function guardRequest(req, maxBytes = 64 * 1024) {
  *
  * @param {object} req - node http 请求。
  * @param {number} [maxBytes] - 有体请求的解析上限（默认 64 KiB）。
+ * @param {object} [webCtx] - 注册时的 web 侧 ctx（见 {@link hostTrustFence}）。
  * @returns {Promise<{status: number, reason: string, body: object} | null>}
  *   null = 放行。
  */
-export async function guardRequestReasoned(req, maxBytes = 64 * 1024) {
+export async function guardRequestReasoned(req, maxBytes = 64 * 1024, webCtx = undefined) {
   // 守卫现在挂在每个注册点上，而 handler 可能由测试桩/非标准载体调用；
-  // 缺 headers 时按"全部缺省"处理（写请求会因缺少 Origin 被拒，GET 放行），
-  // 而不是抛 TypeError 变成 500。
+  // 缺 headers 时按"全部缺省"处理（Host 栅栏会拒绝，GET 也不例外——Host 是
+  // 唯一无法伪造的身份头，缺失即无可信证据），而不是抛 TypeError 变成 500。
   const headers = req.headers ?? {}
+  const hostDenied = hostTrustFence(req, webCtx)
+  if (hostDenied !== null) {
+    return {
+      status: hostDenied.status,
+      reason: hostDenied.reason,
+      body: { ok: false, code: 'untrusted-host', error: hostDenied.error },
+    }
+  }
   const method = String(req.method ?? 'GET').toUpperCase()
   if (method === 'GET' || method === 'HEAD') {
     const site = String(headers['sec-fetch-site'] ?? '').trim().toLowerCase()
@@ -196,7 +217,7 @@ export function sendGuardDenial(res, denied) {
  *
  * ```js
  * handler: async (req, res) => {
- *   if (await applyRequestGuard(req, res)) return
+ *   if (await applyRequestGuard(req, res, 256 * 1024, webCtx)) return
  *   ...
  * }
  * ```
@@ -204,18 +225,69 @@ export function sendGuardDenial(res, denied) {
  * @param {object} req - node http 请求。
  * @param {object} res - node http 响应。
  * @param {number} [maxBytes] - 有体请求的解析上限（见 {@link guardRequest}）。
+ * @param {object} [webCtx] - 注册时的 web 侧 ctx（见 {@link hostTrustFence}）。
  * @returns {Promise<boolean>} true = 已拒绝并写完响应，调用方必须立刻 return。
  */
-export async function applyRequestGuard(req, res, maxBytes = 64 * 1024) {
-  const denied = await guardRequest(req, maxBytes)
+export async function applyRequestGuard(req, res, maxBytes = 64 * 1024, webCtx = undefined) {
+  const denied = await guardRequest(req, maxBytes, webCtx)
   if (denied === null) return false
   sendGuardDenial(res, denied)
   return true
 }
 
 /**
+ * **Host 信任栅栏**（R24 B3，2026-09-26）——全部注册点（读+写）的共同前置，
+ * 唯一实现。
+ *
+ * 判据（三条，任一不成立即拒）：
+ *  1) Host 必须是 loopback 名（`127.0.0.0/8` / `localhost` / `[::1]`）或
+ *     `webRuntime.trustedHosts` 中已声明的权威。缺 Host 一律拒（真实 HTTP/1.1
+ *     请求必然带 Host，缺失只出现在非标准载体上，没有可判证据 ⇒ fail-closed）。
+ *  2) Host 自称 loopback 时，socket 也必须来自 loopback —— 服务绑在
+ *     `0.0.0.0` 时，局域网机器伪造 `Host: 127.0.0.1` 会被这条挡下。
+ *     载体**完全没有 socket** 时（测试桩 / 非 HTTP 调用）没有可判的远端地址，
+ *     只保留第 1 条；真实 node:http 请求一律有 socket，判定不变。
+ *  3) `trustedHosts` 的来源是上游 web-app 提供的 `webRuntime` 服务，缺省
+ *     `[]`（`packages/bundle/web-app/src/index.ts` 的 `resolveLanTrust`：只有
+ *     绑 `0.0.0.0` 时派生本机局域网字面量，外加命令行 `--trusted-host`）。
+ *     本模块**不**自行放宽：ctx 缺失或服务未提供时按空表处理。
+ *
+ * 为什么 Host 而不是 Origin：DNS rebinding 下浏览器把 `Host` 填成攻击者域名
+ * （它以为在跟那个域名说话），而 `Origin` 由页面自己决定 —— 攻击者页面完全
+ * 可以把两者写成同一个值。所以 `Origin == Host` 对 rebinding 是零判据。
+ *
+ * @param {object} req - node http 请求。
+ * @param {object} [webCtx] - 注册时的 web 侧 ctx（用于读 `webRuntime`）。
+ * @returns {{status: number, reason: string, error: string} | null} null = 放行。
+ */
+function hostTrustFence(req, webCtx) {
+  const remote = String(req.socket?.remoteAddress ?? '')
+  const loopbackRemote = remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote)
+  const hostHeader = req.headers?.host
+  const hostIsLoopback = typeof hostHeader === 'string' &&
+    /^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)
+  let trustedHosts = []
+  try {
+    const runtime = webCtx?.get?.('webRuntime')
+    if (runtime && Array.isArray(runtime.trustedHosts)) trustedHosts = runtime.trustedHosts
+  } catch { /* 非 web 载体没有 webRuntime 服务 */ }
+  const hostTrusted = typeof hostHeader === 'string' && trustedHosts.some((entry) => {
+    const value = String(entry)
+    return value === hostHeader || value === hostHeader.replace(/:\d+$/, '')
+  })
+  if (!hostIsLoopback && !hostTrusted) {
+    return { status: 403, reason: 'host-untrusted', error: 'Host 不是本机可信托管名，已拒绝' }
+  }
+  if (hostIsLoopback && req.socket !== undefined && !loopbackRemote) {
+    return { status: 403, reason: 'host-untrusted', error: 'Host 自称 loopback 但连接不来自 loopback，已拒绝' }
+  }
+  return null
+}
+
+/**
  * skills-manager 的本地信任栅栏（F6 审计 2026-09-11 口径，FIX-04 收敛到本
- * 模块，消除第 9 份手写副本）。与 {@link guardRequest} 的差别是**刻意的**：
+ * 模块，消除第 9 份手写副本；R24 B3 起 Host 判据与 {@link guardRequestReasoned}
+ * 共用 {@link hostTrustFence}）。与 {@link guardRequest} 的差别是**刻意的**：
  * 技能管理面混有 GET 读与文本写，且要放行无 Origin 的本机脚本/CLI，所以
  * 它不要求 JSON content-type、也不强制 Origin 存在；它挡的是
  *  1) Host 自称 loopback 时 socket 必须也是 loopback（伪造 Host 拒绝）；
@@ -229,22 +301,8 @@ export async function applyRequestGuard(req, res, maxBytes = 64 * 1024) {
  * @returns {{status: number, body: object} | null} null = 放行。
  */
 export function localTrustFence(req, webCtx) {
-  const remote = String(req.socket?.remoteAddress ?? '')
-  const loopbackRemote = remote === '::1' || remote === '::ffff:127.0.0.1' || /^127\./.test(remote)
-  const hostHeader = req.headers?.host
-  const hostIsLoopback = typeof hostHeader === 'string' &&
-    /^(127(\.\d{1,3}){3}|localhost|\[::1\])(:|$)/.test(hostHeader)
-  let trustedHosts = []
-  try {
-    const runtime = webCtx.get?.('webRuntime')
-    if (runtime && Array.isArray(runtime.trustedHosts)) trustedHosts = runtime.trustedHosts
-  } catch { /* 非 web 载体没有 webRuntime 服务 */ }
-  const hostTrusted = typeof hostHeader === 'string' && trustedHosts.some((entry) => {
-    const value = String(entry)
-    return value === hostHeader || value === hostHeader.replace(/:\d+$/, '')
-  })
-  if (!hostIsLoopback && !hostTrusted) return { status: 403, body: { error: 'forbidden' } }
-  if (hostIsLoopback && !loopbackRemote) return { status: 403, body: { error: 'forbidden' } }
+  const hostDenied = hostTrustFence(req, webCtx)
+  if (hostDenied !== null) return { status: hostDenied.status, body: { error: 'forbidden' } }
   if (String(req.headers?.['sec-fetch-site'] ?? '') === 'cross-site') {
     return { status: 403, body: { error: 'forbidden' } }
   }
@@ -252,7 +310,7 @@ export function localTrustFence(req, webCtx) {
   if (typeof originHeader === 'string') {
     let originHost = ''
     try { originHost = new URL(originHeader).host } catch { originHost = '' }
-    if (originHost !== hostHeader) return { status: 403, body: { error: 'forbidden' } }
+    if (originHost !== req.headers?.host) return { status: 403, body: { error: 'forbidden' } }
   }
   return null
 }

@@ -1,10 +1,9 @@
 package marketplace
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +11,7 @@ import (
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/util"
 )
 
@@ -40,18 +40,14 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 
 // viewer resolves the calling user's permission view: admins are implicitly
 // allowed everywhere; everyone else sees only granted resources (strict
-// default). Returns ok=false when unauthenticated.
-func (a *API) viewer(c *gin.Context) (u *serverstore.User, groups []string, ok bool) {
-	u = serverauth.CurrentUser(c)
-	if u == nil {
-		return nil, nil, false
-	}
-	// 有效组(部门树继承)
-	groups, err := serverstore.UserEffectiveGroups(a.DB, u.ID)
-	if err != nil {
-		return nil, nil, false
-	}
-	return u, groups, true
+// default).
+//
+// 三态契约（A2-01，审计 2026-09-26，P2）—— 实现委托给唯一真源
+// `serverauth.ViewerGroups`：`u == nil` ⇒ 未认证（401）、`err != nil` ⇒ 依赖故障
+// （**500**，不得回 401：401 会让客户端清会话并删掉磁盘令牌，一次 PG 抖动就把
+// 全体在线员工登出）。
+func (a *API) viewer(c *gin.Context) (*serverstore.User, []string, error) {
+	return serverauth.ViewerGroups(c, a.DB)
 }
 
 // accessibleSkills returns enabled skills the caller may use (admin: all).
@@ -87,9 +83,8 @@ func (a *API) AccessibleSkills(u *serverstore.User, groups []string) ([]serverst
 }
 
 func (a *API) listSkills(c *gin.Context) {
-	u, groups, ok := a.viewer(c)
-	if !ok {
-		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+	u, groups, verr := a.viewer(c)
+	if serverauth.WriteViewerError(c, u, verr) {
 		return
 	}
 	list, err := a.accessibleSkills(u, groups)
@@ -105,9 +100,8 @@ func (a *API) listSkills(c *gin.Context) {
 }
 
 func (a *API) getSkill(c *gin.Context) {
-	u, groups, ok := a.viewer(c)
-	if !ok {
-		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+	u, groups, verr := a.viewer(c)
+	if serverauth.WriteViewerError(c, u, verr) {
 		return
 	}
 	s, err := serverstore.GetSkill(a.DB, c.Param("name"))
@@ -122,8 +116,12 @@ func (a *API) getSkill(c *gin.Context) {
 	// 授权检查先于下架检查(审计2026-L13):未授权用户对"存在但下架"与"不存在"
 	// 必须得到同一 404,不得用消息区分资源状态
 	if !u.IsAdmin {
-		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
-		if err != nil || !containsName(names, s.Name) {
+		names, aerr := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if aerr != nil {
+			writeAuthzQueryFailure(c, aerr)
+			return
+		}
+		if !containsName(names, s.Name) {
 			// 未授权与不存在同响应:不泄露资源存在性
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
@@ -146,10 +144,31 @@ func containsName(names []string, want string) bool {
 	return false
 }
 
+// writeAuthzQueryFailure 把**授权查询的依赖故障**写成一个分类正确的响应
+// （第二十二轮复审 V2-B3，P2）。
+//
+// 缺陷形态（修前，`getSkill` 与 `downloadArchive` 各一份）：
+//
+//	if err != nil || !containsName(names, s.Name) { 404 "技能不存在" }
+//
+// `AccessibleSkillNames` 的**依赖故障**与"确实未授权"被合并成同一个 404 ⇒
+// 一次 PG 抖动（授权表不可读）在员工侧表现为「这个技能没了」：客户端把它当**终态**
+// 展示，不会退避重试；而**同一台服务端**在同一次故障下，组织面
+// （`sharedskills.download` 的同类查询）回 **500** —— 口径分裂，且这一分支此前
+// **零日志**，排障时不可见。
+//
+// 分类口径与 `serverauth.WriteViewerError` 完全一致（组查询失败 ⇒ 500 INTERNAL，
+// 文案也取自那一处）；**未授权仍必须是 404**，不得用消息区分资源状态
+// （不泄露存在性，审计 2026-L13）。
+func writeAuthzQueryFailure(c *gin.Context, err error) {
+	log.Printf("marketplace: accessible skill names lookup failed (dependency, not a rejection) at %s: %v",
+		c.FullPath(), err)
+	serverauth.WriteError(c, http.StatusInternalServerError, "INTERNAL", "授权查询失败，请稍后重试")
+}
+
 func (a *API) downloadArchive(c *gin.Context) {
-	u, groups, ok := a.viewer(c)
-	if !ok {
-		serverauth.WriteError(c, http.StatusUnauthorized, "AUTH_REQUIRED", "未认证")
+	u, groups, verr := a.viewer(c)
+	if serverauth.WriteViewerError(c, u, verr) {
 		return
 	}
 	s, err := serverstore.GetSkill(a.DB, c.Param("name"))
@@ -163,8 +182,12 @@ func (a *API) downloadArchive(c *gin.Context) {
 	}
 	// 授权先于下架(审计2026-L13)
 	if !u.IsAdmin {
-		names, err := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
-		if err != nil || !containsName(names, s.Name) {
+		names, aerr := serverstore.AccessibleSkillNames(a.DB, u.Username, groups)
+		if aerr != nil {
+			writeAuthzQueryFailure(c, aerr)
+			return
+		}
+		if !containsName(names, s.Name) {
 			// 未授权与不存在/下架同响应:不泄露资源存在性
 			serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能不存在")
 			return
@@ -202,10 +225,10 @@ func serveSkillArchive(c *gin.Context, db *sql.DB, s *serverstore.Skill) {
 		serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "技能尚未上传归档")
 		return
 	}
-	sum := s.Checksum
-	if sum == "" {
-		sum = sha256Hex(s.Archive)
-	}
+	// 空值兜底与组织面**共用一份实现**（sharedskills.ArchiveChecksum，A2-02）：
+	// 这两个端点是同一份"员工安装通路"契约的两面，口径必须逐字一致
+	// （判据：internal/marketplace 的跨面同一性用例）。
+	sum := sharedskills.ArchiveChecksum(s.Checksum, s.Archive)
 	// 按归档实际格式回响应(zip 推荐 / tar.gz 兼容)。
 	dispName := s.Name + "-" + s.Version + ".tar.gz"
 	contentType := "application/gzip"
@@ -219,11 +242,6 @@ func serveSkillArchive(c *gin.Context, db *sql.DB, s *serverstore.Skill) {
 	c.Header("X-Skill-Checksum", sum)
 	_, _ = serverstore.IncrementSkillDownload(db, s.Name)
 	c.Data(http.StatusOK, contentType, s.Archive)
-}
-
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 func skillJSON(s serverstore.Skill) gin.H {

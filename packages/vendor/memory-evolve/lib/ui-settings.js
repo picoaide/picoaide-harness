@@ -55,7 +55,8 @@ export function installUiSettings(ctx, deps) {
       handler: async (req, res) => {
         // FIX-04：统一前置守卫。本模块只有 GET（客户端探测/运行快照）⇒
         // 守卫只拒绝浏览器标注的跨站读取，公开探测语义不变。
-        if (await applyRequestGuard(req, res)) return
+        // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+        if (await applyRequestGuard(req, res, 64 * 1024, webCtx)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (req.method === 'GET' && url.pathname === '/memory-evolve/api/ui-settings/state') {
           sendJson(res, 200, { enabled: true })

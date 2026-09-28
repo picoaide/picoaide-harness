@@ -429,6 +429,18 @@ official/beta），所以直接切换；官方渠道目录不变，存量用户�
   逐字节比对、断言 `channel.json` 的 `channel_id`，给了 `--app-dir` 时再拆开
   `app.asar` 确认"随包分发"真的生效（官方构建则断言**没有**渠道包残留）。
   它同时进了 `yarn check`（`verify:channel`）。
+- **`--verify-app-dir` 的解析口径（2026-09-26 第二十五轮审计 Y4-02 修正）**：
+  CI 的 linux/win 两个调用点写的是 `--verify-app-dir dist/linux-unpacked` /
+  `dist/win-unpacked`（相对**桌面包根**，真实布局在
+  `packages/host/desktop/dist/…`）。在 2026-09-26 之前，本脚本只按**仓库根**解析，
+  `[ -d ]` 不成立就把该参数**静默丢弃** ⇒ 上面那组 `app.asar` 断言（包内
+  `channel_id` / 图标逐字节一致 / 官方包不得残留渠道配置）**在 CI 里从未执行过**，
+  而文档与本行都在宣称它生效。现在的口径：相对路径先按 `--dist` 的父目录解析
+  （打包产物真实布局），再按仓库根（历史语义）；两种基线都解析不到即**失败**
+  （绝不降级成"跑了一半的门禁"）；每个渠道的通过行如实说明这组断言本轮
+  **是否参与**（mac 冒烟没有这种解包布局，不传该参数 ⇒ 通过行会写 `skipped`）。
+  回归判据在 `scripts/verify-ci-scripts.mjs`：CI 的逐字调用形态必须被解析到、
+  篡改包内 `channel_id` 的夹具必须红、缺目录必须红、通过行必须如实。
 
 仍未渠道化：
 

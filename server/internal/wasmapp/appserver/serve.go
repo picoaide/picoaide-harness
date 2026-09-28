@@ -54,7 +54,9 @@ func (s *Server) serveApp(w http.ResponseWriter, r *http.Request, appLabel strin
 	// ===== ① 应用反查（§8.1 ①）=====
 	// 纵深防御：保留字与部署期注入的企业既有主机名**永不**作为应用服务
 	//（即使库里有行）。app_id 曾经就是域名标签，占名等于占用企业域名资产。
-	if aerr := registry.ValidateAppID(appID, s.opt.AppIDExtraReserved); aerr != nil {
+	// 用**服务侧**变体：写侧还多一条"与平台路由静态段同名"（防止新发布落进永远打不开的名字），
+	// 那一条不能套在存量行上 —— 否则本来正常服务的应用会在升级后变成 404（第二十四轮复审）。
+	if aerr := registry.ValidateAppIDForServing(appID, s.opt.AppIDExtraReserved); aerr != nil {
 		edge.WriteAppNotFound(w, r, appID, s.selfOrigin(r))
 		return
 	}

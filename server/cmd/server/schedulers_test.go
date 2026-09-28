@@ -301,10 +301,10 @@ func TestStartupCallsReportsAndBalanceSchedulers(t *testing.T) {
 		{"startBalanceScheduler(ctx, db, balanceSchedulerTick)",
 			"月度余额发放（唯一自动发放路径）在稳态下没有执行者 —— 余额只减不增，全员 429 BALANCE_EXHAUSTED"},
 	} {
+		// R21C-04（审计 2026-09-26，P3）：每一条都按 AST 判"落在 main() 的静态可达
+		// 路径上" —— 旧的 `strings.Index` 存在性判据挡不住"整行包进 `if false { … }`"。
+		requireAssemblyOnMainPath(t, tc.call, tc.why)
 		idx := strings.Index(text, tc.call)
-		if idx < 0 {
-			t.Fatalf("main() 未调用 %s —— %s", tc.call, tc.why)
-		}
 		if idx < ctxIdx {
 			t.Fatalf("%s 排在 signal ctx 之前（拿不到关停信号/编译不过）", tc.call)
 		}

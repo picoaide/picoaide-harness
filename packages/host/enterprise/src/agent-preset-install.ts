@@ -2,8 +2,25 @@
  * Agent-preset archive installation for the shared-agent store: upload-side
  * packing of a locally authored preset directory (what the 创造模式 creates
  * under `<dshHome>/.agent-presets/<id>`), and download-side verification and
- * safe unpacking back into that same root so the upstream
- * `@deepseek-ai/dsh-agent-presets` roster discovers it as a `user` preset.
+ * safe unpacking back into that same root.
+ *
+ * ## 本地存储格式与"谁能看见它"是两件事（0.1.7 收口）
+ *
+ * 这个目录**仍然**是共享智能体的本地安装格式（上传/打包/校验/落盘/溯源/面板整条
+ * 链路都在用它），但上游 0.1.7 **删掉了目录式 roster**：
+ * `@deepseek-ai/dsh-agent-preset` 的 `editing-cordis-compositions` 技能逐字 ——
+ * "Before declaration rows, a user preset was a directory `$DSH_HOME/.agent-presets/<id>/`
+ * … Nothing reads that directory any more."
+ *
+ * 现在让预设出现在花名册上的机制是**声明行**：profile 里一条
+ * `- id: preset-<id> / name: '@deepseek-ai/dsh-agent-preset' / config: {id, order?, name?,
+ * description?, plugins}`，`plugins` 就是 `agent.cordis.yml` 的 entry list 逐字
+ * （`@deepseek-ai/dsh-web-app` 的 `presets/<id>.patch.yml` 是上游自己的样例）。
+ * 那条声明行由**桌面组装期**从本目录物化出来（`dsh-plugin-desktop/profile.ts` 的
+ * `materializeLegacyAgentPresets`）—— 插件侧不再自己读这个目录，桌面包也不能
+ * import 本模块（enterprise 已依赖 `dsh-plugin-desktop`，反向 import 会成环），
+ * 两边的格式常量因此靠 `packages/host/desktop/tests/legacy-agent-presets.spec.ts`
+ * 的跨包源码对拍判据钉住一致。
  *
  * Security posture mirrors the skill installer:
  * - directory and archive bytes are bounded before any work;
@@ -33,17 +50,23 @@ import {
 } from './skill-install.ts'
 import { dshHomeSafe } from 'dsh-plugin-desktop/desktop-home'
 
-/** Agent preset ids mirror the upstream PRESET_ID: lower-case id, directory name. */
-const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
+/**
+ * Agent preset ids mirror the upstream `PRESET_ID`: lower-case id, directory name.
+ *
+ * 导出给**跨包对拍判据**用（桌面包在组装期物化声明行，但 `dsh-plugin-desktop`
+ * 不能 import 本模块 —— enterprise 已依赖它，反向 import 会构成构建环）：
+ * `packages/host/desktop/tests/legacy-agent-presets.spec.ts` 逐条比对两侧字面量。
+ */
+export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
 
 /** The composition file that makes a directory a preset (upstream constant). */
-const COMPOSITION_FILE = 'agent.cordis.yml'
+export const COMPOSITION_FILE = 'agent.cordis.yml'
 
 /** Optional display-metadata file beside the composition (upstream constant). */
-const METADATA_FILE = 'preset.yml'
+export const METADATA_FILE = 'preset.yml'
 
 /** Bound on display metadata: the gateway refuses descriptions over 500 chars. */
-const MAX_PRESET_META_LEN = 500
+export const MAX_PRESET_META_LEN = 500
 
 /** Display metadata read from `preset.yml` (name/description only). */
 interface PresetMeta {

@@ -137,7 +137,7 @@ func (h *Handlers) appProofIssue(c *gin.Context) {
 		return
 	}
 	appID := strings.ToLower(strings.TrimSpace(body.AppID))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		writeErr(c, aerr)
 		return
 	}

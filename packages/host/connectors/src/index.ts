@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
-import { ConnectorStore, sameCredential } from './store.ts'
+import { ConnectorStore, CredentialReadError, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
@@ -397,10 +397,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // Per-(account, server) store. Rebuilt when the session changes; the old
   // user's MCP registrations are disconnected first (server-side tokens stay on
   // disk per account AND per server, never shared across either).
+  /**
+   * 读失败的日志出口（2026-09-26 FIX-31）：凭据文件的读失败绝不能只在面板上留下
+   * 一行「未连接」—— "读错误被当成空状态"正是这样悄悄发生的。store 是纯存储类、
+   * 没有 logger，所以装配期把它接到插件日志上（与 `unscoped-credentials` 那行同形：
+   * 稳定的 ASCII tag + 原因 + 连接器 id）。
+   */
+  const credentialReadFault = (id: string, error: CredentialReadError): void => {
+    ctx.logger?.warn?.(`pico-connectors: read-fault id=${id} kind=${error.fault.kind} — ${error.message}`)
+  }
+
   let store = new ConnectorStore(
     options.storeBaseDir
-      ? { baseDir: options.storeBaseDir }
-      : { username: currentUser(), serverURL: currentServerURL() },
+      ? { baseDir: options.storeBaseDir, onReadFault: credentialReadFault }
+      : { username: currentUser(), serverURL: currentServerURL(), onReadFault: credentialReadFault },
   )
   // Local-approval ledger for server-issued stdio commands (FIX-02), scoped the
   // same way: the commands it vouches for come from ONE tenant's catalog.
@@ -1334,20 +1344,53 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
-   * Serialize the two lifecycle entry points (P2-23): the boot restore and
-   * every session change used to run concurrently, so an in-flight restore for
-   * the previous user could register MCP servers AFTER the new user's
-   * teardown — leaking connections and duplicating tools. Tasks run strictly
-   * in order and only the NEWEST enqueued task survives: an older queued task
-   * is superseded (its epoch no longer matches) because the newest transition
-   * already carries the full desired state.
+   * Serialize the lifecycle entry points, in TWO classes (P2-23 / FIX-31).
+   *
+   *  - `transition` — the boot restore and every session change. Each carries
+   *    the full desired state (teardown → def sync → credential scope →
+   *    restore), so tasks run strictly in order and only the NEWEST transition
+   *    survives: an older queued one is superseded because the newest already
+   *    carries the whole state. That is why the queue exists at all — an
+   *    in-flight restore for the previous user must not register MCP servers
+   *    after the new user's teardown.
+   *  - `background` — the 60 s token sweep and the credentials-changed rebuild.
+   *    They carry a LOCAL action, not a desired state.
+   *
+   * The defect this split fixes: background tasks used to advance the same
+   * epoch, so a sweep tick landing between "session task enqueued" and "session
+   * task starts" silently dropped the session task. The only
+   * `reconfigureUser()` call site went with it — and that is the ONLY place the
+   * credential scope moves, hence the only way
+   * `credentialScopeSwitching()` ever clears. The store stayed on the previous
+   * account (whose MCP tools stayed live), every connector write answered 409
+   * ("正在切换账号…"), and nothing in the product could recover short of another
+   * login or a restart.
+   *
+   * So a background task (a) never invalidates a queued transition and (b) is
+   * still dropped when a NEWER transition was enqueued after it — the old
+   * "do not work for a session that is moving on" semantics, which is what keeps
+   * a stale sweep from refreshing the previous account's tokens.
    */
-  let lifecycleEpoch = 0
+  let transitionEpoch = 0
   let lifecycleQueue: Promise<void> = Promise.resolve()
-  const runLifecycle = (task: () => Promise<void>): Promise<void> => {
-    const epoch = ++lifecycleEpoch
+  const runLifecycle = (kind: 'transition' | 'background', task: () => Promise<void>): Promise<void> => {
+    // Only a transition opens a new generation. A background task adopts the
+    // current one, so it is superseded by a later transition but supersedes
+    // nothing.
+    const epoch = kind === 'transition' ? ++transitionEpoch : transitionEpoch
     const run = lifecycleQueue.then(async () => {
-      if (epoch !== lifecycleEpoch) return
+      if (epoch !== transitionEpoch) {
+        // 可诊断性（FIX-31）：被更新换代顶掉的**状态转换**必须留痕 —— "会话切换
+        // 被静默丢弃"之所以曾经查不出来，就是因为这里什么都不说。后台任务被后续
+        // 转换顶掉是常规收敛（它只是局部动作，下一次扫掠/重建还会来），不记。
+        if (kind === 'transition') {
+          ctx.logger?.warn?.(
+            `pico-connectors: session transition superseded before it ran `
+            + `(epoch ${String(epoch)} < ${String(transitionEpoch)}); the newest transition carries the state`,
+          )
+        }
+        return
+      }
       await task()
     })
     // Keep the chain alive after a failure; the caller still sees the error.
@@ -1369,7 +1412,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // "no evidence of the new server yet" must not silently keep the old
       // server's directory.
       const serverURL = currentServerURL() ?? eventServerURL ?? null
-      store = new ConnectorStore({ username, serverURL })
+      store = new ConnectorStore({ username, serverURL, onReadFault: credentialReadFault })
       approvals = new ConnectorApprovalStore({ username, serverURL })
     }
   }
@@ -1379,16 +1422,26 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // catalog is synced from bootstrap FIRST so the restore registers the
   // current server directory (defs are server-issued now).
   ctx.on('pico/session-changed', (next: unknown) => {
+    const eventServerURL = (next as { serverURL?: string } | null)?.serverURL ?? null
     // R16B-04：闸门必须在**会话事件一开始**就落下（同步、早于任何 await）——
     // 生命周期任务里的 `reconfigureUser()` 要等一次网络往返，这段窗口里 `store`
     // 还是上一个账号的目录。判定只看目标键，所以这里置位、`reconfigureUser()`
     // 落地即自动解除（见 `credentialScopeSwitching` 的注释）。
-    beginCredentialScopeSwitch((next as { serverURL?: string } | null)?.serverURL ?? null)
-    void runLifecycle(async () => {
-      const epoch = lifecycleEpoch
-      await teardownAll()
-      await syncServerDefs()
-      reconfigureUser((next as { serverURL?: string } | null)?.serverURL ?? null)
+    beginCredentialScopeSwitch(eventServerURL)
+    void runLifecycle('transition', async () => {
+      const epoch = transitionEpoch
+      try {
+        await teardownAll()
+        await syncServerDefs()
+      } finally {
+        // FIX-31（恢复路径）：作用域**无论上面成败都必须落地**。
+        // `reconfigureUser()` 是唯一移动 `store` 的地方，因而也是
+        // `credentialScopeSwitching()` 唯一的解除点；把它留在 happy path 上意味着
+        // 任何一次 bootstrap 往返失败（30 s 预算内的网络错误）都会让闸门**永久**
+        // 关着 —— 连接/断开/审批/刷新全 409，产品内没有任何动作能自愈。落地之后
+        // 最坏情况只是"连接器显示未连接、可手动重连"，而不是"全部操作被拒"。
+        reconfigureUser(eventServerURL)
+      }
       if (next !== null) await restoreAll(epoch)
     }).catch((cause: unknown) => {
       ctx.logger?.error('pico-connectors: session change handling failed', cause)
@@ -3049,7 +3102,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    */
   const restoreAll = async (epoch: number): Promise<void> => {
     /** True once a NEWER lifecycle transition superseded this task. */
-    const stale = (): boolean => epoch !== lifecycleEpoch
+    const stale = (): boolean => epoch !== transitionEpoch
     // R6-B-2: report the credentials this build REFUSES to adopt (they were
     // written before credentials carried a server dimension) ONCE per restore
     // pass, as one line with the ids and the directory. The files stay where
@@ -3164,7 +3217,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     return () => {
       // Supersede any queued/running lifecycle task: a restore that resolves
       // after teardown must not re-register MCP servers (P2-23).
-      lifecycleEpoch++
+      transitionEpoch++
       // conn-1: …and a registration already awaiting must stop spawning.
       teardownController.abort(new Error(copy('flow.pluginUnloadRegistration')))
       liveProviders.clear()
@@ -3224,14 +3277,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * @returns 扫掠完成的 Promise。
    */
   async function runRefreshSweep(): Promise<void> {
-    return runLifecycle(async () => {
+    return runLifecycle('background', async () => {
       for (const def of defs) {
         const state = states.get(def.id)
         if (state?.status !== 'connected' && state?.status !== 'unauthorized' && state?.status !== 'error') continue
         // 作用域与凭据取自同一个 store 实例（见 {@link deadGrantKey}）。
         const target = store
         const scope = target.dir
-        const credential = await target.readCredential(def.id)
+        let credential
+        try {
+          credential = await target.readCredential(def.id)
+        } catch {
+          // 读失败（EACCES / 超限 / 畸形文档）是**这一个连接器**的事，不是整轮
+          // 扫掠的事（2026-09-26 FIX-31）：store 已在 onReadFault 里记过一条日志，
+          // 这里只需跳过它并继续扫其余的 —— 扫掠是只读动作，跳过不会抹掉任何东西；
+          // 会抹掉令牌的是写路径，那条路径在读失败时 fail-closed 抛出（见 store.ts）。
+          continue
+        }
         if (!credential || !tokenNeedsRefresh(credential)) continue
         // 终态：同一账号同一代凭据已经证明授权被吊销/请求被永久拒绝 ⇒ 停止心跳
         // （不静默、行状态仍是「需要重新授权」，只是不再拿死 token 去打 IdP）。
@@ -3292,7 +3354,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // stale declared header (the exact shape this fix removes), and the update
     // itself is a pure in-memory write that needs no serialization.
     void handOffLiveHeaders(announced)
-    void runLifecycle(async () => {
+    void runLifecycle('background', async () => {
       const def = announced
       /**
        * Does this server's live transport need a rebuild to see the new token?
@@ -3719,8 +3781,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   // changes; this covers the startup path. P2-23: it goes through the same
   // serialized lifecycle queue so a login that lands during boot supersedes
   // this restore instead of racing it.
-  void runLifecycle(async () => {
-    const epoch = lifecycleEpoch
+  void runLifecycle('transition', async () => {
+    const epoch = transitionEpoch
     await syncServerDefs()
     await restoreAll(epoch)
   }).catch((cause: unknown) => {

@@ -115,6 +115,15 @@ func Register(r *gin.Engine, deps Deps) {
 
 	// ================= WASM 应用平台操作面（§8）=================
 	registerWasm(r, deps)
+
+	// app_id 保留字收口（X4-1）：`app_id` 与 WASM 操作面的**路由静态段**同名
+	// 时，`/apps/wasm/<static>/…` 会遮蔽 `/apps/wasm/:app_id/…`（`uploads` 是
+	// 现场：应用能发布出去，但 open/request/publish/rows… 全部 404，建完即废
+	// 且归属与版本号永久占位）。清单**从刚注册完的真实路由表派生**（不是手抄），
+	// 注入 registry 的写侧校验；`wasm_appid_route_test.go` 断言"派生集合 == 生效
+	// 集合"「每个静态段都被写侧拒」「写侧接受的名字必须真的可达」，三者任一被
+	// 拆掉都会红。
+	publishRouteReservedAppIDs(r.Routes())
 }
 
 // registerWasm 挂载 WASM 应用平台的全部端点（设计基线 §8 操作面全表）。
@@ -303,6 +312,22 @@ func bodyLimitMiddleware() gin.HandlerFunc {
 	}
 }
 
+// publicMethodsHandler 取"登录方式发现"的唯一 handler(两条路由共用:客户端
+// 面 /api/client/v2/auth/methods 与管理端公开面 /api/server/admin/auth/methods)。
+//
+// R24-X4-B2:优先用**客户端认证 API** 的 handler —— 它带运行期视图,`configured`
+// 与 `/auth/{oidc,openid}/login` 解析 provider 的那张表同源;管理端 handler 只在
+// 最小装配(d.Auth 缺失,仅测试自建路由树)里兜底,那时按 settings 判定。
+//
+// 这里**只做一次选择**,两条路由都调本函数:两处各写一次判断就是"同一台服务端
+// 两个说法"的温床。
+func publicMethodsHandler(d Deps) gin.HandlerFunc {
+	if d.Auth != nil && d.Auth.PublicMethods != nil {
+		return d.Auth.PublicMethods
+	}
+	return d.Admin.PublicMethods
+}
+
 // registerClientV2 客户端员工面全部端点。
 func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	// 认证面
@@ -313,8 +338,14 @@ func registerClientV2(cli *gin.RouterGroup, d Deps) {
 	ag.GET("/usage", serverauth.BearerAuth(d.DB), d.Auth.Usage)
 	// 0057 员工自助改密(本地认证用户; 改密后全部令牌吊销, 客户端重新登录)。
 	ag.POST("/password", serverauth.BearerAuth(d.DB), d.Auth.ChangePassword)
-	// 公开发现: 登录方式(客户端登录页未登录时探测; 与 /api/server/admin 同 handler)。
-	ag.GET("/methods", d.Admin.PublicMethods)
+	// 公开发现: 登录方式(客户端登录页未登录时探测; 与管理端公开面同一实现)。
+	//
+	// R24-X4-B2: 判定必须带**运行期视图** —— settings 只决定"启用了哪些候选",
+	// "此刻哪个真的可用"以客户端认证 API 的 provider 注册表为准(与
+	// `/auth/{oidc,openid}/login` 自己解析 provider 的那张表同源)。旧接线用的是
+	// 管理端 handler(只看 settings) ⇒ IdP discovery 失败时登录页照样渲染一颗
+	// 点到 404 的 SSO 按钮。
+	ag.GET("/methods", publicMethodsHandler(d))
 	// F2(审计 2026-09-11): 固定注册 oidc/openid 两条路由,provider 在**请求时**
 	// 从当前认证配置动态解析 —— webadmin 保存认证配置后立即生效,不再需要
 	// 重启(旧实现把启动时快照的 provider 闭包写死在路由表里)。
@@ -442,7 +473,9 @@ func registerServer(srv *gin.RouterGroup, d Deps) {
 	// 公开: 管理登录(含 0057 两步验证第二步) + 登录方式发现
 	sg.POST("/login", d.Admin.Login)
 	sg.POST("/login/mfa", d.Admin.LoginMFA)
-	sg.GET("/auth/methods", d.Admin.PublicMethods)
+	// 与客户端面同一条判定(R24-X4-B2):两条 methods 路由必须给出同一个
+	// `configured`,否则同一台服务端在登录页与管理面公开面上说法不一致。
+	sg.GET("/auth/methods", publicMethodsHandler(d))
 
 	// 会话内(AdminAuth + RBAC)
 	authed := sg.Group("", serverauth.AdminAuth(d.DB))

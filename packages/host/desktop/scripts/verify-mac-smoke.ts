@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MACOS_ARM64_NATIVE_ENTRIES, resolveNativeEntry } from './mac-runtime.ts'
-import { packagedProductName } from './channel-build.ts'
+import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
+import { packagedAppId, packagedProductName } from './channel-build.ts'
 import { isDirectInvocation } from './direct-invocation.mjs'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
@@ -15,6 +16,17 @@ export interface MacSmokeVerificationOptions {
   readonly distDir: string
   /** Installed application name inside the mounted image. */
   readonly productName: string
+  /**
+   * 期望的 `CFBundleIdentifier` = "本次构建声明的身份"。
+   *
+   * **必填**（与 `productName` 同形，2026-09-26 复审 B-3）：早先它在函数体里内联成
+   * `packagedAppId()`，于是这条判据**不可注入**，单测只能去读工作树里那份 gitignored 的
+   * `build/channel.json` —— 工作树残留一次渠道构建就会让 mac 单测红 4 条，而文案把它说成
+   * "产物声称了另一个身份"（错误分类：其实是"用了工作树里的残留声明"）。做成必填注入项后，
+   * 单测显式给出期望值，**不再依赖工作树**；生产路径由 {@link defaultOptions} 继续喂
+   * `packagedAppId()`，行为逐字不变。
+   */
+  readonly expectedIdentifier: string
   /** Return regular DMG files in the distribution directory. */
   readonly listDmgs: (distDir: string) => readonly string[]
   /** Create a private empty mount point. */
@@ -59,6 +71,9 @@ function defaultOptions(): MacSmokeVerificationOptions {
       ? join(packageRoot, 'dist', 'mac-smoke')
       : resolve(process.argv[2]),
     productName,
+    // 身份与产品名同源（都在随包 build/channel.json 里）；生产路径在这里读一次，
+    // 单测则显式注入自己的期望值（B-3）。
+    expectedIdentifier: packagedAppId(),
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-smoke-')),
     run,
@@ -156,6 +171,17 @@ export function verifyMacSmoke(
       }
       options.run('lipo', [nativePath, '-verify_arch', entry.arch])
     }
+
+    // 包内一致性（图标键 ↔ .icns、可执行文件、asar 布局与 ElectronAsarIntegrity 指纹、
+    // **产物身份**）：结构检查全过也可能是一份"图标指不到文件 / asar offset 表错乱 /
+    // bundle id 回落别的身份"的包，那种包双击之后才暴露（图标变问号、
+    // `Invalid package config`、装上去与官方版互相覆盖），必须在 DMG 验证阶段拦住。
+    const bundle = assertMacBundleConsistency(appPath, undefined, {
+      expectedIdentifier: options.expectedIdentifier,
+    })
+    // 归档布局摘要进日志（B-5）：`linkEntries` 的存在理由就是"这份归档里有链接、
+    // 判据没有建模它的字节账"这件事**在日志里可见**，而这里此前丢弃了返回值。
+    if (bundle.asar !== undefined) console.log(asarLayoutLogLine(appAsarPath, bundle.asar))
   } catch (cause) {
     failure = cause
   }

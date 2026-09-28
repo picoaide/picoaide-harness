@@ -42,7 +42,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -114,7 +114,13 @@ function lineNumbersOf(text, needle) {
 }
 
 /**
- * 造一个合成渠道仓：`<root>/channels/<id>/channel.json`。
+ * 造一个合成渠道仓：`<root>/channels/<id>/{channel.json,logo.svg,app-icon.png}`。
+ *
+ * 夹具必须与**规则**一体（2026-09-26 审计 Z3-3 后的规则）：品牌渠道（official/beta 之外）
+ * 缺 `assets.logo` 或 `app-icon.png` 时 `ci-channels.sh` 会 fail-loud —— 不补素材的话，
+ * 这里"只想测渠道集/scheme"的用例会先被素材规则拦下（断言看似通过、测到的东西与它声称的
+ * 无关；2026-09-12 的 home_dir 那次踩过同一个坑）。素材内容取仓库里的官方几何：
+ * 渠道用官方几何是合法的（几何权威只有一份，见 AGENTS.md）。
  * @param specs - `{ id, appOriginScheme?, deepLinkScheme?, extraDesktop? }` 列表；
  *   `appOriginScheme === null` 表示**刻意不写**该字段（负例用）。
  * @returns 仓库根目录（含 channels/）。
@@ -144,9 +150,15 @@ function fakeChannelRepo(specs) {
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
-      assets: { _note: '注解:渠道素材说明,不是文件名/路径' },
+      assets: publicChannel
+        ? { _note: '注解:渠道素材说明,不是文件名/路径' }
+        : { _note: '注解:渠道素材说明,不是文件名/路径', logo: 'logo.svg' },
       desktop,
     }, null, 2))
+    if (!publicChannel) {
+      copyFileSync(join(ROOT, 'brands', 'official', 'logo.svg'), join(dir, 'channels', id, 'logo.svg'))
+      copyFileSync(join(ROOT, 'brands', 'official', 'app-icon.png'), join(dir, 'channels', id, 'app-icon.png'))
+    }
   }
   return dir
 }

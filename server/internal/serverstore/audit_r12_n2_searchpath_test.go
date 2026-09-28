@@ -415,6 +415,7 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	"recordUsageKindAtCached":              r13gePinned,    // usage.go
 	"updateUsageTokensAtCached":            r13gePinned,    // usage.go
 	"usageMonthHasDetail":                  r13gePinned,    // usage_ledger.go
+	"usageMonthDetailAhead":                r13gePinned,    // usage_ledger.go —— R24-X4 B4：可比事实上界探测（newUsageReadConn）
 	"usageTreeDescendants":                 r13gePinned,    // partitions.go
 	// —— 由调用方事务钉住（每个都必须在 r13geViaCallerOwners 里有点名）——
 	"AddExcludedModelTx":                r13geViaCaller, // gateway.go
@@ -452,7 +453,13 @@ var r13geSearchPathInventory = map[string]r13gePinMode{
 	// —— 只读 pg_catalog / to_regclass('public.'||…)（shadow 顶不掉，无动作面）——
 	"scanUsageMonthTables":      r13geCatalogOnly, // usage_ledger.go
 	"usageReclaimEstimatedRows": r13geCatalogOnly, // usage_ledger.go
-	"verifyAuditChainOn":        r13geViaCaller,   // audit.go —— VerifyAuditChain（withUsageSearchPathRead）
+	// R27-FIX39：迁移执行器的锁窗口采样器。它读的是 `pg_locks` / `pg_class` /
+	// `pg_stat_activity` / `pg_blocking_pids()` —— **只读 catalog 事实**，对任何族内
+	// 关系都没有动作面，因此不需要 pin search_path（`pg_catalog` 恒在 search_path
+	// 最前，shadow 顶不掉它）。登记进来是为了让这个读面**可见**：采样器决定"这次
+	// 迁移锁了哪张表、被谁挡住"，是新增的可观测面，必须被评审过一次。
+	"sampleLockState":    r13geCatalogOnly, // migrate.go —— migrationWatch 的采样查询
+	"verifyAuditChainOn": r13geViaCaller,   // audit.go —— VerifyAuditChain（withUsageSearchPathRead）
 }
 
 // r13geViaCallerOwners 给每一个 via-caller 登记"谁钉的"，避免"以为有人钉"。

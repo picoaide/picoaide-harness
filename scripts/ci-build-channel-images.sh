@@ -51,6 +51,37 @@ done < "$LIST"
 TOTAL="${#CHANNELS[@]}"
 [ "$TOTAL" -gt 0 ] || { echo "::error::渠道列表为空" >&2; exit 2; }
 
+# 客户端三平台交付面（清单键 / 产物通配 / 人读标签）的**唯一来源**：
+# `packages/host/desktop/scripts/channel-build.ts` 的 `CLIENT_PLATFORM_ASSETS`。
+# 不在 shell 里再抄一份 —— 两处各写一遍就是两个口径（2026-09-26 审计 Z3-2 的形态：
+# 旧实现逐个 `[ -f … ] || return 0`，少一个平台的产物时**什么都不输出**，
+# CLIENT-RELEASE.json 只是少一个键，流水线全绿）。同一份清单还被 R2 中转的
+# "三平台齐全"判据与根守卫（与 ci.yml 三个平台 job 的 `--patterns` 对拍）消费。
+#
+# 路径取**本脚本所在仓库**，不是 `CI_IMAGE_BUILD_ROOT`：后者是给本地回归门禁用的
+# 构建上下文覆盖（`client-assets`/`channels-context`/`image.tar` 的落点），平台清单
+# 属于**正在执行的这份代码**，跟着构建上下文走会让清单随夹具目录消失（实测）。
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+platform_table() {
+  node -e '
+    import(require("node:url").pathToFileURL(process.argv[1]).href).then((mod) => {
+      const assets = mod.CLIENT_PLATFORM_ASSETS
+      if (!Array.isArray(assets) || assets.length === 0) throw new Error("CLIENT_PLATFORM_ASSETS 为空")
+      for (const asset of assets) process.stdout.write(`${asset.key}\t${asset.glob}\t${asset.label}\n`)
+    }).catch((error) => {
+      console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
+      process.exit(1)
+    })
+  ' "$SCRIPT_ROOT/packages/host/desktop/scripts/channel-build.ts"
+}
+if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
+  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-build.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
+  echo "::error::镜像清单的「逐平台必需」判据靠它派生,读不到就不能假装三平台齐全" >&2
+  exit 1
+fi
+# 供镜像内断言用:键列表(空格分隔),作为 sh -c 的位置参数传进去,内层脚本零插值。
+PLATFORM_KEYS="$(printf '%s\n' "$PLATFORM_TABLE" | cut -f1 | tr '\n' ' ')"
+
 INDEX=0
 for channel in "${CHANNELS[@]}"; do
   INDEX=$((INDEX + 1))
@@ -81,6 +112,11 @@ for channel in "${CHANNELS[@]}"; do
   #    (packages/host/desktop/src/desktop-release.ts)只认这一种形状,
   #    且强制 url 绝对 https、sha256 为 64 位小写 hex。
   #    url 用发布基址占位;服务端对外下发时按自身地址重写。
+  #
+  #    **逐平台必需**(2026-09-26 审计 Z3-2):按 CLIENT_PLATFORM_ASSETS 逐个平台找产物,
+  #    缺任一即 fail-loud 并点名平台 —— 旧实现是 `[ -f … ] || return 0`,缺平台时
+  #    生成的清单只是少一个键:更新清单少一个平台、门户少一个下载入口、
+  #    `/updates/client/<安装包名>` 404,而流水线全绿、镜像内校验也绿。
   BASE="https://release.picoaide.com/${channel}/releases/${VER}"
   {
     echo '{'
@@ -99,9 +135,22 @@ for channel in "${CHANNELS[@]}"; do
         "$(sha256sum "client-assets/client/$2" | cut -d' ' -f1)" \
         "$(stat -c%s "client-assets/client/$2")"
     }
-    add mac-universal "$(basename "$(ls client-assets/client/*.dmg 2>/dev/null | head -1)" 2>/dev/null || echo -)"
-    add win-x64       "$(basename "$(ls client-assets/client/*.exe 2>/dev/null | head -1)" 2>/dev/null || echo -)"
-    add linux-x64     "$(basename "$(ls client-assets/client/*.AppImage 2>/dev/null | head -1)" 2>/dev/null || echo -)"
+    while IFS=$'\t' read -r key glob label; do
+      [ -n "$key" ] || continue
+      # 通配在**目录不存在**时会原样返回模式串,所以先判 -f(而不是判字符串非空)。
+      platform_file=""
+      for candidate in client-assets/client/$glob; do
+        if [ -f "$candidate" ]; then platform_file="$(basename "$candidate")"; break; fi
+      done
+      if [ -z "$platform_file" ]; then
+        # 报错只报序号 + 平台标签 + 通配,不回显渠道 id 与文件名(公开日志纪律)。
+        echo "::error::渠道 ${INDEX}/${TOTAL} 缺少 ${label} 的客户端安装包(通配 ${glob})。" >&2
+        echo "::error::客户端交付面是三平台各一份安装包;缺平台的清单会让更新面/门户静默少一个平台," >&2
+        echo "::error::必须核对三个 desktop job 的产物是否都归集到了本渠道的 artifacts 目录。" >&2
+        exit 1
+      fi
+      add "$key" "$platform_file"
+    done <<< "$PLATFORM_TABLE"
     echo
     echo '    }'
     echo '  }'
@@ -161,10 +210,14 @@ for channel in "${CHANNELS[@]}"; do
     ( cd "$OUT/$channel" && sha256sum "$ARCHIVE" | sed 's# .*/# #' > SHA256SUMS ) || return 1
   }
 
-  # 5) 构建后**在镜像内**断言服务端契约:清单必须落在服务端读取的位置。
+  # 5) 构建后**在镜像内**断言服务端契约:清单必须落在服务端读取的位置,且清单里的
+  #    平台键**逐平台齐全**。
   #    2026-09-10 实测踩到:清单被 COPY 到上一级目录,LoadInfo 永远返回 nil,
   #    更新清单里没有 client 段、门户下载区全空 —— 链路整个死掉且零报错。
   #    这类"路径对不上"的错误只有真去镜像里看才能发现。
+  #    2026-09-26 审计 Z3-2 的另一半:镜像内的判据只是 `ls | grep -q .`(目录非空),
+  #    于是少平台的 CLIENT-RELEASE.json 照样绿。平台键从**同一份** PLATFORM_TABLE
+  #    派生,作为 sh -c 的位置参数传进容器(内层脚本不插值)。
   verify_image() {
     docker run --rm --entrypoint sh "${IMAGE}:v${VER}" -c '
       set -e
@@ -175,8 +228,13 @@ for channel in "${CHANNELS[@]}"; do
       test -s /opt/picoaide/skills/app-builder/SKILL.md || { echo "MISSING /opt/picoaide/skills/app-builder/SKILL.md" >&2; exit 1; }
       test -s /opt/picoaide/skills/app-builder/references/publishing.md || { echo "MISSING builtin skill references/" >&2; exit 1; }
       test -s "/opt/picoaide/CHANNEL" || { echo "MISSING /opt/picoaide/CHANNEL" >&2; exit 1; }
+      # 平台键齐全是硬判据:服务端只按这个清单下发更新地址,少一个键 = 该平台
+      # 永远拿不到客户端(门户同样少一个下载入口),而镜像"看起来"是好的。
+      for key in "$@"; do
+        grep -q "\"$key\"" /opt/picoaide/client/CLIENT-RELEASE.json || { echo "MISSING client asset key $key in CLIENT-RELEASE.json" >&2; exit 1; }
+      done
       ls /opt/picoaide/client/ | grep -q . || { echo "client dir empty" >&2; exit 1; }
-    '
+    ' picoaide-platform-check $PLATFORM_KEYS
   }
 
   if [ "$channel" = "official" ]; then

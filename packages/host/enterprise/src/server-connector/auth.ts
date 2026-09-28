@@ -5,6 +5,24 @@ import { DEFAULT_HOST_LOCALE, hostCopy, type HostLocale } from 'dsh-plugin-deskt
 export type AuthErrorKind = 'invalid_credentials' | 'auth_expired' | 'network' | 'server_error'
 
 /**
+ * "这个 401 **就是**令牌无效/缺令牌"的码集合（R21-A2-01，客户端一半）。
+ *
+ * 服务端（`serverauth`）在 401 上共用三个码，语义并不相同：
+ *  - `AUTH_REQUIRED`（没带令牌）、`AUTH_FAILED`（令牌无效/已过期/被吊销）—— 只有这两个
+ *    是"重新登录能解决"；
+ *  - `AUDITOR_NOT_ALLOWED`（审计账号不可登录客户端）—— **账号类型被拒**，凭据本身没问题
+ *    （登录面由 `login()` 单独分流给"请用管理后台"的文案）。
+ *
+ * 为什么必须按码分流：`AuthError('auth_expired')` 在 auth-gate 的 13 处调用点会
+ * `ctx.picoSession.clearIfCurrent(该次请求用的令牌)`（R22-V1-N3：只在"当前会话仍是
+ * 发起这次请求时那一个"时才清），而 `clear()` 会**删掉磁盘上的 `$DSH_HOME/session.json`**
+ * —— 把"账号/动作被禁"或"服务端读不了认证存储（500）"误判成"令牌无效"，等于一次存储
+ * 抖动、或一次不该发生的 401，就把全体在线员工登出并抹掉本机令牌（LDAP/OIDC 还要重走
+ * IdP）。服务端那一半（存储故障回 500）见 R21-A2-01 的 FIX-2 泳道。
+ */
+const AUTH_EXPIRED_CODES: readonly string[] = ['AUTH_REQUIRED', 'AUTH_FAILED']
+
+/**
  * 服务端"先改密"守卫的稳定错误码（`serverauth/handler.go` 对
  * `password_must_change` 用户白名单外的一切接口回 `403 {error:{code}}`）。
  *
@@ -266,7 +284,15 @@ export async function fetchJSON(
     const env = data?.error
     const code = (env?.code as string) ?? `HTTP_${res.status}`
     const message = (env?.message as string) ?? `HTTP ${res.status}`
-    if (res.status === 401 || code === 'AUTH_REQUIRED' || code === 'AUTH_FAILED') {
+    // R21-A2-01：只有 **401 + "令牌无效"形状** 才算 `auth_expired`（= 清会话 + 删
+    // 本机令牌）。两条都必须判：
+    //  - 状态码必须是 401：服务端存储故障会回 500（FIX-2 定义），旧实现只看码，
+    //    于是一个带 `AUTH_FAILED`/`AUTH_REQUIRED` 码的 5xx 也会把用户登出；
+    //  - 码必须是 `AUTH_REQUIRED`/`AUTH_FAILED`（或服务端没给码的老形态
+    //    `HTTP_401`）：`AUDITOR_NOT_ALLOWED` 这类 401 的凭据是好的，登出无意义
+    //    且会连带删掉本机令牌 —— 按普通 `ApiError` 上报即可。
+    const tokenInvalid = res.status === 401 && (code === 'HTTP_401' || AUTH_EXPIRED_CODES.includes(code))
+    if (tokenInvalid) {
       throw new AuthError('auth_expired', message)
     }
     throw new ApiError(code, message, res.status)

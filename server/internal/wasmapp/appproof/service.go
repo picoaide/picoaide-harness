@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/clientrelease"
 	"github.com/picoaide/picoaide/internal/wasmapp/edge"
 )
 
@@ -302,11 +303,23 @@ func decodeInstallSignature(raw string) ([]byte, error) {
 // 默认端口省略、主机小写 —— 与客户端实际打的那个地址逐字符一致（配置里写什么，
 // 客户端并不知道，所以绑定值不能来自配置）。
 //
-// ⚠️ 归一化复用 `edge.NormalizeOrigin`（小写 / 去尾斜杠 / 默认端口省略 / 丢路径），
-// 只有"scheme 从请求怎么判定"这一处是三行本地逻辑。**不要**把它换成任何
-// "按主机名推导自身源"的东西：`edge.SelfOrigin` 与整套主机名门控已随 W4 删除
-// （总纲 §8.4），本函数是唯一还需要的"服务端自身地址"实现，它只认请求本身携带的
-// 事实（Host + TLS/XFP），不查任何配置、不猜任何域名。
+// ⚠️ 归一化复用 `edge.NormalizeOrigin`（小写 / 去尾斜杠 / 默认端口省略 / 丢路径）。
+// **不要**把它换成任何"按主机名推导自身源"的东西：`edge.SelfOrigin` 与整套主机名
+// 门控已随 W4 删除（总纲 §8.4），本函数是唯一还需要的"服务端自身地址"实现，它只认
+// 请求本身携带的事实（Host + TLS/XFP），不查任何配置、不猜任何域名。
+//
+// XFP 的判定**只有一份实现**：`clientrelease.ForwardedProtoIsHTTPS`（第二十七轮
+// AA2-02 的收口，第二十八轮把本函数从"第二份实现"改成消费点）。修前这里是**独立的
+// 三行解析**（TrimSpace → IndexByte(',') → ToLower），与 clientrelease/serverauth 的
+// 口径同结论但各写一份；一旦代理形态变化（大小写、列表、空白），三份实现就会分叉，
+// 而 proof 的绑定值一旦算错，客户端**所有**应用请求都 401 且原因只在服务端一行日志里。
+//
+// ⚠️ 取舍（第二十八轮 FIX-40 登记的行为变更）：判定收敛成"是不是声明了 https"之后，
+// 头里出现**既不是 http 也不是 https** 的取值（`wss` / `on` / 畸形 `, https`）时，
+// scheme 落到 http 而不是像修前那样让 `NormalizeOrigin` 拒绝整串地址。理由：共享判定
+// 的语义就是"判不出 https 即 false"（fail-closed），而 scheme 的取值域只有 http/https
+// 两个 —— 修前那种"代理多写一段垃圾 ⇒ 地址算不出来 ⇒ 应用打不开"的形态没有任何调用方
+// 能补救。正常代理只会写 http/https，因此这条差异在真实部署上不可达。
 //
 // 空串 = 连 Host 都没有（异常请求），调用方按校验失败处理。
 func ServerURL(r *http.Request) string {
@@ -314,14 +327,9 @@ func ServerURL(r *http.Request) string {
 		return ""
 	}
 	scheme := "http"
-	if r.TLS != nil {
+	// 顺序与修前逐字一致：TLS 优先于 XFP（TLS 是请求自身的既成事实，头是代理的声明）。
+	if r.TLS != nil || clientrelease.ForwardedProtoIsHTTPS(r.Header.Get("X-Forwarded-Proto")) {
 		scheme = "https"
-	} else if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
-		// 只取第一个值（逗号分隔的链里第一个是客户端侧协议）。
-		if i := strings.IndexByte(p, ','); i >= 0 {
-			p = p[:i]
-		}
-		scheme = strings.ToLower(strings.TrimSpace(p))
 	}
 	return edge.NormalizeOrigin(scheme + "://" + r.Host)
 }

@@ -56,11 +56,28 @@ func main() {
 	pgDSN := flag.String("pg-dsn", "", "PostgreSQL connection string (required, e.g. postgres://user:pass@host:5432/db)")
 	bootstrapAdmin := flag.String("bootstrap-admin", "", "username of the initial admin (password from PICOAI_ADMIN_PASSWORD)")
 	resetMFA := flag.String("reset-mfa", "", "clear MFA for an admin username and revoke all their sessions (operation mode, no server started)")
+	opensRepair := flag.String("opens-rollup-repair-plan", "",
+		"print the offline SQL plan that rebuilds wasm_app_opens_daily from the details table, using this deployment's timezone (R20A-S-02); FROM,TO as YYYY-MM-DD, TO exclusive (operation mode, no DB and no server started)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+
+	// --opens-rollup-repair-plan: 纯计算（不连库、不起服务）—— 历史坏行的修复计划。
+	// 之所以要有这个出口：R19 报告里那段修复 SQL 把时区硬编码成 Asia/Shanghai，
+	// 部署 TZ 不同时照抄会写出 day 键错位的汇总行（不可逆）。这个模式把口径钉在
+	// serverstore.BuildOpensDailyRebuildPlan 上（时区来自部署 TZ 的唯一真源）。
+	if *opensRepair != "" {
+		from, to, perr := parseOpensRepairRange(*opensRepair, time.Now())
+		if perr != nil {
+			log.Fatalf("opens-rollup-repair-plan: %v", perr)
+		}
+		if perr := printOpensRollupRepairPlan(os.Stdout, from, to); perr != nil {
+			log.Fatalf("opens-rollup-repair-plan: %v", perr)
+		}
 		return
 	}
 
@@ -183,18 +200,19 @@ func main() {
 
 	// 认证 provider 按 ConfigureProviders 注册:local 恒注册(admin 回退),
 	// ldap/oidc/openid 按配置启用;多套 browser(oidc/openid)独立路由
+	// R21C-02(审计 2026-09-26,P2):注册循环收进 auth_assembly.go 的具名接缝 ——
+	// `NewConfiguredAPI` 只把 browser provider 放进 ConfiguredAPI.Browsers,**不**自己
+	// 注册到 API 上,漏掉这一步 ⇒ 启动期 API.browsers 恒空 ⇒
+	// /api/client/v2/auth/{oidc,openid}/login|callback 恒 404(全组织 SSO 不可用)。
 	authCfg := serverauth.NewConfiguredAPI(db)
-	auth := authCfg.API
-	for _, b := range authCfg.Browsers {
-		auth.RegisterBrowser(b)
-	}
+	auth := assembleAuthAPI(authCfg)
 	// 工程化重构(2026-09): 全部 API 路由集中在 internal/router 包声明——
 	// /api/server(管理面) + /api/client/v2(员工面),旧命名空间(/api、/v1、
 	// /v2/api、/v2/v1)迁移后不再注册。
 	// F2(审计 2026-09-11):认证配置保存后热重建运行中的 provider 集合
 	// (启用 LDAP 立即生效、禁用 LDAP 立即失效,无需重启)。
 	adminAPI := &serverauth.AdminAPI{DB: db}
-	adminAPI.ReloadAuth = func() error { return auth.ReloadProviders(db) }
+	wireAuthReload(adminAPI, auth)
 
 	// WASM 应用平台（设计基线 docs/planning/2026-09-17-wasm-app-platform.md）。
 	// 装配期自检失败一律 log.Fatalf（见 setupWasmPlatform 的注释：fail-closed

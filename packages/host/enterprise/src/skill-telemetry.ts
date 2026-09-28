@@ -172,6 +172,21 @@ async function installedVersion(name: string): Promise<string | undefined> {
  * - `tools/result`:模型 `skill` 工具成功返回 → 上报。
  * - `session/event`:skill-invocation 用户消息(用户 `/name` 手势注入内容)
  *   → 上报。
+ *
+ * ⚠️ **会话必须在观察点同步取**（第二十八轮 FIX-40 ③ 收口；第二十九轮 FIX-44 ② 已从
+ * `KNOWN_UNGUARDED_ENTRIES` 迁到 `ENTRY_EXEMPTIONS` —— 它是**等价机制**而不是
+ * "没装代际"，见该表的登记理由）。被修的形态是"在 await 之后才读会话"：修前两个观察点都是
+ * `void installedVersion(name).then(() => reportSkillCall(ctx.picoSession.getSession(), …))`
+ * —— 会话是在 `installedVersion` 的 **await 续体里**才读的，于是"读版本文件期间用户换了
+ * 账号/服务端"这条普通时序会把**上一账号**的技能调用记到**新账号**名下（作用域与令牌
+ * 全指向新账号，`reportScope` 的去重键也随之错位）。版本读取是本地文件 IO，窗口很窄但
+ * 真实存在，而且这条错记既不可观测也不可回溯。
+ *
+ * 为什么这里用"作用域取自调用时刻"而不是 `createSessionEpoch`（本仓代际守卫的通用形态）：
+ * 上报是**事件归属**，不是"当前会话的投影"—— 事件发生在哪一代，就应当记在哪一代名下。
+ * 代际守卫在这里反而会**丢掉**一条真实调用（换代窗口里的那条被整份丢弃），而"取调用时刻
+ * 的会话"既不错记也不丢。同族先例：`account-card` 的 `owns(s)`（键 = 服务端 + 账号 +
+ * 令牌，逐次判定归属）、`memory-evolve` 的按 sessionId 分目录。
  */
 export function apply(ctx: Context): void {
   ctx.on('tools/result', (exec: ToolExecution, result: ToolExecutionResult) => {
@@ -180,8 +195,10 @@ export function apply(ctx: Context): void {
     const args = exec.arguments as { name?: unknown } | null
     const skillName = typeof args?.name === 'string' ? args.name : ''
     if (skillName === '') return
+    // 同步取会话（见 apply 的注释）：这一笔调用属于**此刻**这一代。
+    const session = ctx.picoSession.getSession()
     void installedVersion(skillName)
-      .then((version) => reportSkillCall(ctx.picoSession.getSession(), skillName, version, callIdOf(exec.callId)))
+      .then((version) => reportSkillCall(session, skillName, version, callIdOf(exec.callId)))
   })
 
   ctx.on('session/event', (_session, event: SessionEvent) => {
@@ -190,8 +207,11 @@ export function apply(ctx: Context): void {
     if (source?.kind !== 'skill-invocation') return
     const skillName = typeof source.name === 'string' ? source.name : ''
     if (skillName === '') return
+    // 同上：`_session` 是上游会话对象（不携带服务端/令牌），所以作用域仍从 `picoSession`
+    // 取 —— 但取的是**事件发生的此刻**，不是 await 之后的某一代。
+    const session = ctx.picoSession.getSession()
     void installedVersion(skillName)
-      .then((version) => reportSkillCall(ctx.picoSession.getSession(), skillName, version, callIdOf(event.data.id)))
+      .then((version) => reportSkillCall(session, skillName, version, callIdOf(event.data.id)))
   })
 
   // picoSession 声明依赖 + 会话变更时无需重挂监听(会话在调用时惰性读取)。

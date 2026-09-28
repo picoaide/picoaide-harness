@@ -221,6 +221,10 @@ func TestBackgroundLoopStatusExposesRealRunEvidence(t *testing.T) {
 
 // TestStartupCallsModelAndDirectorySyncSchedulers 是源码级判据：整行删掉/挪进不执行
 // 的分支时，执行级用例可能仍然绿（构造点还在），这一条兜住。
+//
+// R21C-04（审计 2026-09-26，P3）：判据从"文本存在性"升级为 **AST 可达性** ——
+// `requireAssemblyOnMainPath` 会拒绝"包进 `if false { … }` / 恒假循环 / 未装配的闭包"
+// 这些形态（此前的 `strings.Index` 版本对它们照样绿，而注释却自称挡得住）。
 func TestStartupCallsModelAndDirectorySyncSchedulers(t *testing.T) {
 	text := mainGoCodeOnly(t)
 	ctxIdx := strings.Index(text, "ctx, stop := signal.NotifyContext(")
@@ -250,10 +254,10 @@ func TestStartupCallsModelAndDirectorySyncSchedulers(t *testing.T) {
 		{"startDirectorySyncScheduler(ctx, db, directorySyncTick)",
 			"LDAP 目录同步在稳态下没有执行者（离职账号不自动停用、入职不开通）"},
 	} {
+		// R21C-04（审计 2026-09-26，P3）：每一条都按 AST 判"落在 main() 的静态可达
+		// 路径上" —— 旧的 `strings.Index` 存在性判据挡不住"整行包进 `if false { … }`"。
+		requireAssemblyOnMainPath(t, tc.call, tc.why)
 		idx := strings.Index(text, tc.call)
-		if idx < 0 {
-			t.Fatalf("main() 未调用 %s —— %s", tc.call, tc.why)
-		}
 		if idx < ctxIdx {
 			t.Fatalf("%s 排在 signal ctx 之前（拿不到关停信号）", tc.call)
 		}

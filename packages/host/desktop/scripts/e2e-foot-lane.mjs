@@ -14,7 +14,8 @@
  * 产物：packages/host/desktop/.e2e-foot-lane/{shots/*.png,report.md,home/}
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,12 +35,18 @@ const PASS = arg('--pass', process.env.REAL_PASS ?? 'admin')
 const GATEWAY_PORT = 34567
 const OUT = join(PKG, '.e2e-foot-lane')
 const SHOTS = join(OUT, 'shots')
-const HOME_DIR = join(OUT, 'home')
+// 证据（截图/报告）留在包目录里供 CI 收集，但**运行期数据根必须在包目录之外**
+// （2026-09-28 实测）：`$DSH_HOME` 落在桌面包目录内时，宿主算出的客户端插件列表会
+// **丢掉桌面自己的 client bundle**（实测 entries 69→68，缺 `dsh-plugin-desktop`）
+// ⇒ 登录后整页 `Failed to load plugins / waiting for service: layout`。
+// `e2e:client` 一直把 workDir 放系统临时目录所以从没撞上；这三个探针原来放在 `<pkg>/.e2e-*`。
+const RUN_DIR = mkdtempSync(join(tmpdir(), 'dsh-e2e-foot-lane-'))
+const HOME_DIR = join(RUN_DIR, 'home')
 const DISPLAY = process.env.DISPLAY ?? ':99'
 
 if (!existsSync(APP)) { console.error(`[probe] app not found: ${APP}`); process.exit(2) }
 rmSync(OUT, { recursive: true, force: true })
-for (const dir of [HOME_DIR, join(OUT, 'cfg'), join(OUT, 'cache'), SHOTS]) mkdirSync(dir, { recursive: true })
+for (const dir of [HOME_DIR, join(RUN_DIR, 'cfg'), join(RUN_DIR, 'cache'), SHOTS]) mkdirSync(dir, { recursive: true })
 
 const wait = ms => new Promise(r => { setTimeout(r, ms) })
 /**
@@ -84,10 +91,11 @@ if (!ATTACH) {
   child = spawn(APP, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(PORT)}`], {
     env: {
       ...process.env,
+      PICOAI_ALLOW_DEBUG_SWITCHES: '1',
       HOME: HOME_DIR,
       DSH_HOME: HOME_DIR,
-      XDG_CONFIG_HOME: join(OUT, 'cfg'),
-      XDG_CACHE_HOME: join(OUT, 'cache'),
+      XDG_CONFIG_HOME: join(RUN_DIR, 'cfg'),
+      XDG_CACHE_HOME: join(RUN_DIR, 'cache'),
       DISPLAY,
     },
     stdio: 'ignore',
@@ -440,6 +448,6 @@ try {
   try { child?.kill('SIGKILL') } catch { /* ignore */ }
   try { gateway?.kill('SIGKILL') } catch { /* ignore */ }
   dropSingletonLinks(HOME_DIR)
-  dropSingletonLinks(join(OUT, 'cfg'))
+  dropSingletonLinks(join(RUN_DIR, 'cfg'))
   process.exit(failed.length === 0 ? 0 : 1)
 }

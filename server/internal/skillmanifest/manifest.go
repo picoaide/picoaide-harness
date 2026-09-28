@@ -20,6 +20,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
@@ -364,11 +365,29 @@ func newErr(code, field, format string, args ...any) *Error {
 }
 
 // IsAppID reports whether s is a valid app id (= upstream skill name grammar).
+//
+// 除上游的形态规则外，还必须**不是 Win32 保留设备名**（R21F-06，审计 2026-09-26，
+// P2）：名字面与归档条目面同形 —— `con` / `prn` / `aux` / `nul` / `com1`… 在
+// Windows 上连目录都建不出来，而客户端**写侧两处都硬拒**（`skill-name-rules.ts`
+// 的 `validateSkillName` 与 archive-util/manifest-precheck 的条目面）。服务端此前
+// 只要求 kebab-case ⇒ 管理员可以登记并上架一个名为 `con` 的技能/应用，客户端
+// 永远装不上：又一次「审核通过 = 可安装」为假（与 R21F-04 的条目面同族）。
+//
+// 判定原语**复用** `archiveutil.IsWindowsReservedDeviceNameSegment`（表只有一份，
+// 见 archiveutil 的 `windowsReservedDeviceNames`；那张表另有"读客户端 TS 源码"的
+// 跨端对拍判据钉住），这里不再抄第二张表。谓词自身已处理大小写与"第一个 `.`
+// 之前的段首"（`CON` / `con.txt` / `con ` 都命中）；形态规则本来也容不下点与大写，
+// 两种口径同时成立，不构成第二处判断。
+//
+// 这是**名字面的唯一判据**：全部写侧闸门（员工上传 / 管理端登记 / 发布内核 /
+// 锁定 / 规范化重打包 / 包内 name 校验）都经它，调用点表由
+// `app_id_call_sites_test.go` 逐点钉住 —— 新增调用点即红，因为**读侧路径
+// （列表/详情/下载/加载）一律不得收紧**：那会让存量库里已存在的这类名字突然失效。
 func IsAppID(s string) bool {
-	if len(s) < MinAppIDLen || len(s) > MaxAppIDLen {
+	if len(s) < MinAppIDLen || len(s) > MaxAppIDLen || !appIDRe.MatchString(s) {
 		return false
 	}
-	return appIDRe.MatchString(s)
+	return !archiveutil.IsWindowsReservedDeviceNameSegment(s)
 }
 
 // IsVersion reports whether s is a strict semver string.

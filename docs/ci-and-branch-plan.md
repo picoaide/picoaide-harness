@@ -70,13 +70,13 @@ master（唯一常绿主干，合并即发布候选）
 └─────────────────────────────────────────────────────────────┘
 ┌─ server (ubuntu, 与 gate 并行) ─────────────────────────────┐
 │ PG18 容器(500 连接) → gofmt → go vet → go test ./... -p1    │
-│ → webadmin npm test(109) → make build-server(含 webadmin)   │
+│ → webadmin npm test(全量) → make build-server(含 webadmin)   │
 │ → 部署脚本语法检查 → 上传 picoaide-server-linux-amd64        │
 └─────────────────────────────────────────────────────────────┘
         needs: gate（构建产物已就绪，平台只管打包）
 ┌─ desktop-linux   ├─ desktop-windows   └─ desktop-macos ─────┐
 │ 恢复 workspace-build → 打包(+平台验证) → 上传安装包          │
-│ linux 额外: e2e:client（13 断言）→ e2e-report                │
+│ linux 额外: e2e:client → e2e-report（条数见报告首行）         │
 │ mac 正式 tag: 签名(--pack) + 公证(--notarize)；否则未签名冒烟│
 └─────────────────────────────────────────────────────────────┘
 ┌─ release (仅 tag) ── needs 四 job ──────────────────────────┐
@@ -99,7 +99,7 @@ master（唯一常绿主干，合并即发布候选）
 - `dsh-better-sidebar check`（build + typecheck + consumer-types 声明面检查）；
 - 六业务包 check（connectors/enterprise/account-card/branding/browser/cron：build+typecheck+test）；
 - `community-fabric`（文档一致性校验）；
-- `desktop-linux` 内 **E2E**（mock 网关 + Xvfb + CDP 驱动打包应用，13 项断言：登录/侧栏/连接器/能力中心/设置/定时任务/聊天/高级模式/工作区/账号页）。
+- `desktop-linux` 内 **E2E**（mock 网关 + Xvfb + CDP 驱动打包应用；覆盖登录/侧栏/连接器/能力中心/设置/定时任务/聊天/高级模式/工作区/账号页）。**断言条数不在这里写死**（2026-09-29 第三十轮 FIX-45 ⑤）：真源是脚本里的 `reportStep(` 调用点（`packages/host/desktop/scripts/e2e-client.mjs`），且其中若干条在 `for (const item of pagePanels)` 的面板循环里 ⇒ **运行期条数不是静态常量**，写死的数字（此处曾写"13 项"、`AGENTS.md` 曾写"25 assertions"）只会随脚本演进而漂移。要看当前条数：`grep -c "reportStep(" packages/host/desktop/scripts/e2e-client.mjs`（调用点数量），运行期实际条数以 `.e2e-report.md` 为准。
 
 **服务端**——`server`：
 

@@ -772,6 +772,22 @@ export class HostCronLedger {
     return { revision: this.current.revision, scheduler: { ...this.current.scheduler } }
   }
 
+  /**
+   * Owner facts of every stored job — `id` + `owner` only, without the deep
+   * clone {@link state} performs.
+   *
+   * The account-visibility filter needs the owner of the job a scheduler **skip
+   * record** belongs to (that record carries the job's name, and the name must
+   * not reach another account — 2026-09-26 FIX-31), and it runs inside the SSE
+   * push path, where cloning up to 100 execution rows per job would be pure
+   * waste. The returned objects are fresh copies; the records themselves stay
+   * private to the ledger.
+   * @returns one entry per stored job, in ledger order.
+   */
+  jobScopes(): Array<Pick<JobRecord, 'id' | 'owner'>> {
+    return this.current.jobs.map(job => (job.owner === undefined ? { id: job.id } : { id: job.id, owner: job.owner }))
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }

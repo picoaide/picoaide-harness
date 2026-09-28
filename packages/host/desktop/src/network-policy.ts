@@ -211,3 +211,71 @@ async function loadUndici(): Promise<NodeDispatcherModule> {
   // 动态 import：纯 Node 单测不加载它，且打包后按 node_modules 解析。
   return await import('undici') as unknown as NodeDispatcherModule
 }
+
+/**
+ * {@link enforceDirectTransport} 的注入接缝（**只给测试用**；生产调用点必须省略它，
+ * 由 AST 判据要求实参个数恰好为 2）。
+ */
+export interface DirectTransportEnforcementDeps {
+  /** 撤销 Node 的 env-proxy dispatcher（缺省 {@link enforceDirectNodeTransport}）。 */
+  readonly enforceNodeTransport?: (env: NodeJS.ProcessEnv) => Promise<NodeTransportOutcome>
+  /** 删除代理环境变量（缺省 {@link stripProxyEnvironment}）。 */
+  readonly stripEnvironment?: (env: NodeJS.ProcessEnv) => readonly string[]
+}
+
+/** {@link enforceDirectTransport} 的执行结论（调用方据此打启动日志）。 */
+export interface DirectTransportEnforcement {
+  /** 策略是否**禁止**代理。false 时没有任何副作用（调用方只记一行"允许代理"）。 */
+  readonly enforced: boolean
+  /** Node dispatcher 的处置结果（未强制执行时为 undefined）。 */
+  readonly transport: NodeTransportOutcome | undefined
+  /** 实际被删掉的代理环境变量名（按删除顺序）。 */
+  readonly cleared: readonly string[]
+  /** `.env` 分层里那个"太晚"的排障开关说明（没有这种情况时为 undefined）。 */
+  readonly lateWarning: string | undefined
+}
+
+/**
+ * **强制执行"默认禁止代理"**：把策略落到 Node 栈与子进程两侧。
+ *
+ * 这是 `main.ts` 的 `start()` 里那一段控制流的**唯一实现**（2026-09-25 审计 B1-03）：
+ * 早先它是内联在 `start()` 里的一个 `if (!SYSTEM_PROXY_POLICY.allow) { … }` 块，而"这段
+ * 真的会跑"当时只有**源码文本位置**判据（`indexOf` 比较），把它掏成 `if (false && …)`
+ * 后 18/18 全绿、真机探针也不经过这段控制流 ⇒ Node 栈与子进程侧的代理剥离可以静默失效。
+ * 抽成可调用函数后，"执行过一次 ⇒ 副作用真的发生"变成注入假 deps 就能断言的行为判据。
+ *
+ * `deps` 是**测试接缝**，不是生产参数（2026-09-26 复审 B-1）：判据全部注入 deps 时，
+ * "缺省值是不是真实现"在单测里完全不可见 —— 把两个 `??` 的右侧换成 no-op、或在
+ * `main.ts` 的调用点上多喂一个 no-op 第三实参，都会让生产**静默空转**（三个代理环境
+ * 变量一个没删、dispatcher 没换、启动日志一行不打）而门禁全绿。现在的两道闸：
+ *   * 缺省路径本身有一条**不注入 deps** 的行为判据（`tests/network-policy.spec.ts`
+ *     直接断言 dispatcher 的对象身份变了、环境变量真被删了）；
+ *   * 生产调用点的 AST 判据要求**实参个数恰好为 2**。
+ *
+ * 顺序有语义（每一步都依赖**删除前**的环境）：
+ *  1. {@link enforceDirectNodeTransport}：Node 在**启动时**按 `NODE_USE_ENV_PROXY` 装好了
+ *     走代理的全局 dispatcher，只能是换掉它（旧行为的判据也要在这个变量被删之前读）；
+ *  2. {@link lateAllowSystemProxyWarning}：看的是 `.env` 分层注入的排障开关（同样不能被
+ *     第 3 步影响）；
+ *  3. {@link stripProxyEnvironment}：子进程（agent 的 curl/git/MCP stdio）由
+ *     `scrubbedParentEnv()` 从 `process.env` 派生，删掉代理名它们才真正直连。
+ * @param env - 通常是 `process.env`（第 3 步**原地修改**它）。
+ * @param policy - {@link resolveSystemProxyPolicy} 的结果。
+ * @param deps - 注入接缝（**只给测试用**；生产调用点不得传第三个实参，见函数头）。
+ * @returns 执行结论；**策略允许代理时一个副作用都不产生**（`enforced: false`）。
+ */
+export async function enforceDirectTransport(
+  env: NodeJS.ProcessEnv,
+  policy: SystemProxyPolicy,
+  deps: DirectTransportEnforcementDeps = {},
+): Promise<DirectTransportEnforcement> {
+  if (policy.allow) {
+    return { enforced: false, transport: undefined, cleared: [], lateWarning: undefined }
+  }
+  const enforceNodeTransport = deps.enforceNodeTransport ?? (target => enforceDirectNodeTransport(target))
+  const stripEnvironment = deps.stripEnvironment ?? stripProxyEnvironment
+  const transport = await enforceNodeTransport(env)
+  const lateWarning = lateAllowSystemProxyWarning(env, policy)
+  const cleared = stripEnvironment(env)
+  return { enforced: true, transport, cleared, lateWarning }
+}

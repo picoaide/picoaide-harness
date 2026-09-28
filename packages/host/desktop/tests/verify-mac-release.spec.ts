@@ -1,10 +1,19 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   verifyMacRelease,
   type MacReleaseVerificationOptions,
 } from '../scripts/verify-mac-release.ts'
 import { MACOS_ARM64_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
+import { MAC_BUNDLE_FIXTURE_IDENTIFIER, writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
+
+const temporaryRoots: string[] = []
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
 
 function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const calls: Array<{ command: string; args: readonly string[] }> = []
@@ -12,6 +21,9 @@ function options(overrides: Partial<MacReleaseVerificationOptions> = {}) {
   const value: MacReleaseVerificationOptions = {
     distDir: '/release/dist',
     productName: 'PicoAide Harness',
+    // 期望身份**显式注入**（B-3）：缺省实现会去读工作树里那份 gitignored 的
+    // `build/channel.json`，一次渠道构建残留就让本文件红，且被说成"产物声称了另一个身份"。
+    expectedIdentifier: MAC_BUNDLE_FIXTURE_IDENTIFIER,
     listDmgs: () => ['/release/dist/PicoAide Harness-2.0.0-arm64.dmg'],
     makeMountPoint: () => '/private/tmp/dsh-desktop-dmg-test',
     run: (command, args) => { calls.push({ command, args: [...args] }) },
@@ -99,5 +111,78 @@ describe('macOS release artifact verification', () => {
     expect(caught).toBeInstanceOf(AggregateError)
     expect((caught as AggregateError).errors).toEqual([verifyFailure, detachFailure])
     expect(harness.removeMountPoint).toHaveBeenCalledOnce()
+  })
+
+  // 签名/Gatekeeper/票据全过之后，包内一致性判据仍必须在**真实挂载点形态**下跑到
+  // （2026-09-25：macOS「图标变问号 + 打不开」的现场反馈里，前三条命令都可能全绿）。
+  it('accepts a real, self-consistent bundle on a real mount point', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+    const harness = options({ makeMountPoint: () => root })
+    expect(verifyMacRelease(harness.value).appPath).toBe(join(root, 'PicoAide Harness.app'))
+  })
+
+  it('rejects a real bundle whose declared icon is missing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+    rmSync(join(root, 'PicoAide Harness.app', 'Contents', 'Resources', 'icon.icns'))
+    const harness = options({ makeMountPoint: () => root })
+
+    let caught: unknown
+    try {
+      verifyMacRelease(harness.value)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors
+      .map(inner => (inner instanceof Error ? inner.message : String(inner)))
+      .join('\n')).toContain('CFBundleIconFile=icon.icns')
+  })
+
+  // 产物身份（B1-02/B-3）：签名/公证/Gatekeeper 全绿也不代表包声称的身份是本次构建声明的那个。
+  // 变异：发布路径的调用点退回 `assertMacBundleConsistency(appPath)`、或退回内联
+  // `packagedAppId()`（= 忽略注入项、去读工作树）⇒ 本用例红。
+  it('rejects a real bundle whose CFBundleIdentifier is not the identity this build declares', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness', {
+      identifier: 'com.example-vendor.other',
+    })
+    const harness = options({ makeMountPoint: () => root })
+
+    let caught: unknown
+    try {
+      verifyMacRelease(harness.value)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors
+      .map(inner => (inner instanceof Error ? inner.message : String(inner)))
+      .join('\n')).toContain('but this build declares')
+  })
+
+  it('期望身份是注入项：注入值与产物不同即红（可注入性判据，B-3）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-mac-release-'))
+    temporaryRoots.push(root)
+    writeValidMacBundle(join(root, 'PicoAide Harness.app'), 'PicoAide Harness')
+    const harness = options({
+      makeMountPoint: () => root,
+      expectedIdentifier: 'com.example-vendor.harness',
+    })
+
+    let caught: unknown
+    try {
+      verifyMacRelease(harness.value)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught).toBeInstanceOf(AggregateError)
+    expect((caught as AggregateError).errors
+      .map(inner => (inner instanceof Error ? inner.message : String(inner)))
+      .join('\n')).toContain('but this build declares com.example-vendor.harness')
   })
 })

@@ -1,9 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { subscribeSession } from './session-service.ts'
+import { createSessionEpoch } from './session-epoch.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
-import { TOKEN_ENV } from './gateway-model.ts'
+import { GATEWAY_LLM_ROW_ID, TOKEN_ENV } from './gateway-contract.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** Stable Cordis plugin name. */
@@ -12,7 +13,7 @@ export const name = 'bootstrap'
 /** Services consumed: settings writes and the session being synced. */
 export const inject = ['settings', 'picoSession']
 
-const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
+const GATEWAY_LLM_NS = GATEWAY_LLM_ROW_ID as SettingsNamespace
 const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
 const WEB_SEARCH_DEEPSEEK_NS = 'web-search-deepseek' as SettingsNamespace
 
@@ -59,20 +60,33 @@ export function resolveInputModalities(raw: unknown): string[] | undefined {
  * defaults.
  */
 export function apply(ctx: Context): void {
+  // Z2-01：会话代际守卫（唯一实现见 session-epoch.ts）。
+  //
+  // `sync` 的第一次 await 是 `getBootstrap`（fetchJSON 缺省 15s 超时）。期间用户可能
+  // 已经登出、甚至登录到**另一台**服务端 —— 迟到的响应会把上一台的模型目录/默认模型/
+  // 搜索地址写进当前会话，而 `PICOAI_GATEWAY_TOKEN` 已经是新服务端的令牌
+  // （`gateway-model.ts` 先落地）⇒ 一次 web 搜索就把新会话的 bearer 发到旧服务端的
+  // `/v1/messages`。所以每个 await 之后都要重新问一次"我还是最新那一代吗"。
+  const epochs = createSessionEpoch()
+
   const sync = async (session: Session | null): Promise<void> => {
+    const epoch = epochs.begin()
     if (session === null) {
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {})
-      await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
+      if (!epochs.isCurrent(epoch)) return
+      await ctx.settings.replace(GATEWAY_LLM_NS, {})
+      if (!epochs.isCurrent(epoch)) return
       await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_NS, {})
       return
     }
     try {
       const { config: cfg } = await getBootstrap(session)
+      if (!epochs.isCurrent(epoch)) return
       // 服务端下发的思考强度(2026-08):llm-deepseek 适配器的
       // connection.defaults.reasoningEffort 来自 settings(off|low|high|max),
       // 这是实际生效点;同时写 agent-default-model 保持 UI 展示一致。
       const reasoningEffort = cfg.web?.default_thinking_level
-      await ctx.settings.update(LLM_DEEPSEEK_NS, {
+      await ctx.settings.update(GATEWAY_LLM_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)
           const inputModalities = resolveInputModalities(m.input_modalities)
@@ -87,26 +101,48 @@ export function apply(ctx: Context): void {
         }),
         ...reasoningEffort ? { reasoningEffort } : {},
       })
+      if (!epochs.isCurrent(epoch)) return
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {
         provider: DEEPSEEK_PROVIDER,
         model: cfg.default_model,
         ...reasoningEffort ? { reasoningEffort } : {},
       })
+      if (!epochs.isCurrent(epoch)) return
       // web_search 服务端代理(0043):搜索也走网关 /v1/messages,官方 key
       // 不下发客户端。apiKeyEnv 指向网关 token(与 chat 同一凭据),baseURL
       // 指向网关路由前缀(provider 追加 /messages 即 /v1/messages),model 与
       // chat 同用服务端 default_model(该模型名由服务端 anthropic 协议
       // provider 承载,与 openai 协议 provider 可同名共存)。
+      //
+      // 0.1.7 复核（这条链路是**第二处**，历史上与 chat 一起踩过 401）：
+      // `web-search-deepseek` **没有** `protocol`（0.1.6/0.1.7 都没有，删除面只涉及
+      // `llm-deepseek`），`apiKeyEnv`/`baseURL`/`model` 三个键在 0.1.7 仍存在且都是
+      // volatile（`web-search-deepseek/src/index.ts`），而它的请求头本来就**同时**发
+      // `x-api-key` 与 `authorization: Bearer`（`provider.ts:228-231`）⇒ 网关的
+      // BearerAuth 能通过，无需改动。组装期 `cordis.patch.yml` 把 `apiKeyEnv` 从
+      // base bundle 的 `DEEPSEEK_API_KEY` 覆盖成同一个网关令牌引用，那条仍然有效。
       await ctx.settings.update(WEB_SEARCH_DEEPSEEK_NS, {
         apiKeyEnv: TOKEN_ENV,
         baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,
         model: cfg.default_model,
       })
     } catch (cause) {
+      // 迟到的失败同样不能落地（否则一次早已作废的 bootstrap 失败会把当前会话的
+      // 状态改掉，甚至清掉别人的会话）。
+      if (!epochs.isCurrent(epoch)) return
       // M2: a revoked/expired/disabled session must not linger. Clear it so
       // the auth-gate tripwire reloads the window into the login page.
+      //
+      // R22-V1-N3（同族收口）：`session` 是**订阅那一刻**的那一份，而 `sync` 里有
+      // await —— 期间用户可能已经重新登录。无条件 `clear()` 会把新登录一起清掉
+      // （与 auth-gate 的迟到 401 同一签名）⇒ 由会话服务判定"还是不是同一位"。
+      //
+      // Z2-01：这里的两把尺子量的是**同一件事**（这次响应属于哪一代会话），只是
+      // 判据不同 —— 代际（上一行）判"期间是否又开始了新的一次同步"，令牌判"当前
+      // 会话是否就是发起这次请求的那一个"。两者都要过：代际挡住"同令牌重登"，
+      // 令牌挡住"代际看不出的一次换人"。代际的唯一实现见 session-epoch.ts。
       if (cause instanceof AuthError && cause.kind === 'auth_expired') {
-        ctx.picoSession.clear()
+        ctx.picoSession.clearIfCurrent(session.token)
         return
       }
       ctx.logger.error('pico bootstrap sync failed')

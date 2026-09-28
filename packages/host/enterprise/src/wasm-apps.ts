@@ -52,6 +52,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { gatewayFetch, normalizeServerURL } from './server-connector/auth.ts'
 import type { Session } from './server-connector/config.ts'
 import type { AiRowsConsentStore } from './wasm-apps-ai-rows-consent.ts'
+import { isAiRowsConsentScopeError } from './wasm-apps-ai-rows-consent.ts'
 
 /** 本地路由前缀（唯一入口；管理面只在主站，§4.7 的 F-52e）。 */
 export const WASM_APPS_PREFIX = '/api/pico/apps/wasm'
@@ -537,15 +538,21 @@ async function upstreamResponse(upstream: Response): Promise<WasmResponse> {
 /**
  * 透传上游响应，并在 401 时清掉本地会话（渲染层的 tripwire 会回登录页）。
  *
- * `ctx.picoSession.clear()` 放在这里而不是调用方：**每一条**出站路径都要这一条
+ * 清会话这件事放在这里而不是调用方：**每一条**出站路径都要这一条
  * （直传/分片/续传/代理），分开放迟早漏一条 —— 而漏掉的表现是"令牌过期后界面
  * 一直停在错误页"，很难与业务错误区分。
+ *
+ * R22-V1-N3（同族收口）：401 必须走 `clearIfCurrent(本次请求用的令牌)` ——
+ * 一次**迟到**的 401（旧令牌的在途请求在用户重新登录之后才失败）不得把刚建立的
+ * 新会话与刚写下的新令牌一起清掉。`session` 因此是**必填**参数（就是发起这次请求
+ * 的那一份），漏传在类型上不成立。
  * @param ctx - Host 上下文（只用到 `picoSession`）。
  * @param upstream - 上游响应。
+ * @param session - 发起这次请求用的会话（令牌 = "这次失败属于哪一代"的唯一身份）。
  * @returns 信封。
  */
-async function forwardAuthAware(ctx: Context, upstream: Response): Promise<WasmResponse> {
-  if (upstream.status === 401) ctx.picoSession.clear()
+async function forwardAuthAware(ctx: Context, upstream: Response, session: Session): Promise<WasmResponse> {
+  if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
   return await upstreamResponse(upstream)
 }
 
@@ -1067,7 +1074,7 @@ async function publishInline(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 /** 从上游错误响应里取出可读文本（分片失败时用于回给调用方）。 */
@@ -1176,7 +1183,7 @@ async function publishChunked(
     }
     if (!upstream.ok) {
       // 会话过期/被回收：把服务端的原话回给调用方（它可能带 RETRY 类 hints）。
-      return { kind: 'response', response: await forwardAuthAware(ctx, upstream) }
+      return { kind: 'response', response: await forwardAuthAware(ctx, upstream, session) }
     }
     received = parseReceived(await upstream.json().catch(() => null))
     return { kind: 'ok' }
@@ -1202,7 +1209,7 @@ async function publishChunked(
     } catch (cause) {
       return gatewayFailure(cause)
     }
-    if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+    if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
     const opened = (await upstream.json().catch(() => null)) as Record<string, unknown> | null
     const id = opened?.upload_id ?? opened?.id
     if (typeof id !== 'string' || id.trim() === '') {
@@ -1239,7 +1246,7 @@ async function publishChunked(
     }
     if (upstream.ok || upstream.status === 204) return null
     const detail = await readUpstreamError(upstream)
-    if (upstream.status === 401) ctx.picoSession.clear()
+    if (upstream.status === 401) ctx.picoSession.clearIfCurrent(session.token)
     return { kind: 'upstream', status: detail.status, text: detail.text }
   }
 
@@ -1350,7 +1357,7 @@ async function publishChunked(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 /**
@@ -1439,7 +1446,7 @@ export async function validateApp(ctx: Context, session: Session, input: Validat
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,7 +1473,7 @@ export async function listCatalog(ctx: Context, session: Session, signal?: Abort
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   // 原样透传（含 content-type）：解析再序列化只对"改写字段"有意义，而现在没有任何
   // 改写 —— 透传还顺带保住了服务端返回的非 JSON 字节（门户 HTML / 代理劫持）与其
   // 真实 content-type，让上层看见的就是上游的字节。
@@ -1500,7 +1507,7 @@ export async function readAppSchema(ctx: Context, session: Session, appId: strin
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1535,7 +1542,7 @@ export async function readAppDiagnostics(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1574,7 +1581,7 @@ export async function readAppRows(
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  if (!upstream.ok) return await forwardAuthAware(ctx, upstream)
+  if (!upstream.ok) return await forwardAuthAware(ctx, upstream, session)
   return {
     status: upstream.status,
     text: await upstream.text().catch(() => ''),
@@ -1621,7 +1628,7 @@ export async function proxyApp(ctx: Context, session: Session, input: ProxyInput
   } catch (cause) {
     return gatewayFailure(cause)
   }
-  return await forwardAuthAware(ctx, upstream)
+  return await forwardAuthAware(ctx, upstream, session)
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,7 +1782,13 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
     //
     // 为什么是一条**本机**路由而不是平台调用：闸门在宿主工具（`wasm_app_rows`）里，
     // 而授权动作发生在渲染进程的面板上 —— 这条路由是两端唯一的连接点（与 app AI
-    // 的 `…/wasm-apps/ai/consent` 同一形态，只是授权维度按 app 而不是按用户×app）。
+    // 的 `…/wasm-apps/ai/consent` 同一形态）。
+    //
+    // 授权维度是 **用户 ⊕ 服务端 ⊕ 应用**（第十九轮审计 R19B-03）：作用域由 store 自己
+    // 从当前会话解析（`auth-gate.ts` 装配处注入的 `scope` 提供者），本路由**不传**任何
+    // 作用域 —— 传参就等于给了"路由与工具各构造一份键"的机会。拿不到用户名/服务端地址时
+    // 写面被 store 拒绝，这里把它映射成 401 `AUTH_REQUIRED`（与兄弟闸门
+    // `wasm-apps-host` 的"拿不到用户名 ⇒ 401"同形），绝不落一条陌生记录。
     //
     // 读与写都要**持有性证明**（含 GET）：这个布尔值就是"AI 能不能读这个应用的数据"
     // 的开关，与 `rows` 同口径 —— `guard()` 自述的边界正是"伪造 Origin 的 curl 也能过"。
@@ -1817,6 +1830,17 @@ export function createWasmAppsRoute(ctx: Context, fence: WasmAppsFence): WasmApp
       try {
         await fence.aiRowsConsent.setEnabled(appID, row.enabled)
       } catch (cause) {
+        // 作用域缺失（未登录 / 会话缺用户名或服务端地址）：**不是**磁盘故障，回 401 ——
+        // 与兄弟闸门 `wasm-apps-host` 的"拿不到用户名 ⇒ 401 AUTH_REQUIRED"同形。
+        // 写面 fail-closed 保证这里不会落一条"谁都不是"的记录给下一个账号继承。
+        if (isAiRowsConsentScopeError(cause)) {
+          return fail(res, {
+            code: 'AUTH_REQUIRED',
+            message: hostCopy(locale, '未登录', 'not logged in'),
+            status: 401,
+            hints: ['授权按「账号 + 服务端 + 应用」记录：先登录，再在数据面板里打开这个开关'],
+          })
+        }
         // 写失败**必须**让用户看见：静默成功会让面板显示"已允许"而工具仍然拒绝
         //（下一次调用回 AI_ROWS_NOT_AUTHORIZED），而那看起来像 AI 坏了。
         ctx.logger?.warn?.(`pico-wasm-apps: persisting the AI rows consent failed (${cause instanceof Error ? cause.message : String(cause)})`)

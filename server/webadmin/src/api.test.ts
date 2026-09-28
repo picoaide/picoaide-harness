@@ -41,6 +41,28 @@ describe('api 请求层(审计 A5-M3/L5/L6)', () => {
     await expect(request('/api/server/admin/x')).rejects.toMatchObject({ message: '服务暂时不可用,请稍后再试' })
   })
 
+  // 第二十二轮复审 V2-B2 的**客户端一半**：服务端把管理面的依赖故障从 401 改成
+  // 500 之后，这一层必须保证 500 **不**被当作登录失效 —— 否则修了服务端分类、
+  // 前端仍会把一次 PG 抖动渲染成"你没登录"（原地切未登录态）。
+  //
+  // 变异（必须变红）：把 `if (res.status === 401)` 放宽成 `if (res.status >= 401)`。
+  it('500 不触发登录失效回调(依赖故障不得被当成会话过期)', async () => {
+    const { request, setOnUnauthorized } = await loadApi()
+    const handler = vi.fn()
+    setOnUnauthorized(handler)
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: async () => ({ error: { code: 'INTERNAL', message: '认证服务暂时不可用，请稍后重试' } }),
+    })
+    const err = await request('/api/server/admin/server-info').catch((e: any) => e)
+    expect(err.status).toBe(500)
+    expect(err.code).toBe('INTERNAL')
+    expect(err.message).toBe('认证服务暂时不可用，请稍后重试')
+    expect(handler).not.toHaveBeenCalled()
+  })
+
   it('成功响应返回解析后的 JSON', async () => {
     const { request } = await loadApi()
     fetchMock.mockResolvedValue({

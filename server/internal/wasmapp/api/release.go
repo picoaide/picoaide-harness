@@ -249,7 +249,7 @@ func (h *Handlers) ownedApp(c *gin.Context, appID string, allowDeleted bool) (*s
 	if appID == "" {
 		return nil, nil, apperr.New(apperr.CodeMissingField, "缺少 app_id").WithDetail("field", "app_id")
 	}
-	if verr := h.validateAppID(appID); verr != nil {
+	if verr := h.validateAppIDServing(appID); verr != nil {
 		return nil, nil, verr
 	}
 	app, err := serverstore.GetWasmApp(c.Request.Context(), h.opt.DB, appID)

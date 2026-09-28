@@ -9,27 +9,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   apply,
   Config,
+  DESKTOP_SETTINGS_ENTRY_ID,
   DESKTOP_SETTINGS_NAMESPACE,
   desktopRendererUrl,
   DesktopSettingsSchema,
   inject,
   type Config as DesktopConfig,
-  type DesktopSettings,
+  type DesktopSettingsDocument,
+  type DesktopShellConfigDocument,
 } from '../src/index.ts'
+import { resolvedDesktopConfig } from './helpers/desktop-config.ts'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from '../src/directory-picker-contract.ts'
 import { DESKTOP_LOOP_NOTIFY_SESSION_PATH } from '../src/loop-notify-contract.ts'
 import type { DesktopRuntime, DesktopShellSpec } from '../src/runtime.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
 
-const config: DesktopConfig = {
-  productName: 'PicoAide Harness',
-  windowTitle: 'PicoAide Harness',
-  port: 0,
-  width: 1280,
-  height: 840,
-  minWidth: 900,
-  minHeight: 640,
-}
+const config: DesktopConfig = resolvedDesktopConfig()
 
 /** R4-RV3a：写路由要一份 BrowserAuth cookie；合法 renderer 持有它。 */
 const PROOF_COOKIE = 'dsh-auth-127.0.0.1:43120=v1.signature'
@@ -48,7 +43,10 @@ interface PluginHarness {
   rendererBoot: ReturnType<typeof vi.fn<(report: RendererBootReport) => void>>
   pickDirectory: ReturnType<typeof vi.fn<() => Promise<string | null>>>
   route(path: string): WebRoute | undefined
-  notify(next: DesktopSettings, prev: DesktopSettings): Promise<void>
+  /** Emit one `settings/document-updated` revision for a profile entry id. */
+  publish(namespace: string): Promise<void>
+  /** Publish a desktop-shell revision whose form now reports `port`. */
+  publishDesktopPort(port: number): Promise<void>
   notifyLocale(preference: LocaleId | undefined): void
   notifyTheme(preference: ThemePreference): void
   deepLinkHandler(): ((url: string) => void) | undefined
@@ -57,7 +55,6 @@ interface PluginHarness {
 
 function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginHarness {
   let shell: DesktopShellSpec | undefined
-  let watcher: ((next: DesktopSettings, prev: DesktopSettings) => void | Promise<void>) | undefined
   const update = vi.fn(async (_patch: object) => {})
   const restart = vi.fn(async () => {})
   const setLocalePreference = vi.fn<(locale: LocaleId | undefined) => void>()
@@ -71,9 +68,12 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     requestRejection: (request: { headers: Record<string, unknown> }): 401 | undefined =>
       request.headers['cookie'] === PROOF_COOKIE ? undefined : 401,
   }
-  const settingsUpdated = new Set<(namespace: unknown, next: unknown) => void>()
+  const settingsUpdated = new Set<(namespace: unknown) => void>()
   let localePreference: LocaleId | undefined
   let themePreference: ThemePreference = 'system'
+  // Live value the desktop-shell settings form reports; the restart watcher
+  // compares it against the port this generation was composed with.
+  let desktopFormPort = config.port.get()
   let deepLinkHandler: ((url: string) => void) | undefined = undefined
   let sessionOpenHandler: ((sessionId: string) => void) | undefined = undefined
   const runtime: DesktopRuntime = {
@@ -116,21 +116,17 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       sessionOpenHandler = handler
     },
   }
+  // Upstream 0.1.7: the settings service is a **form projection over profile
+  // entries** — the namespace is the entry id and the live value is read through
+  // `describe()`. Live changes arrive as `settings/document-updated`.
   const settings = {
-    get: vi.fn((namespace: unknown) => {
-      if (String(namespace) === 'ui-theme') return { preference: themePreference }
-      if (String(namespace) === 'locale') return { preference: localePreference }
-      return undefined
-    }),
-    register: vi.fn(() => ({
-      get: () => ({ port: config.port, logLevel: 'info' }),
-      watch: (callback: typeof watcher) => {
-        watcher = callback
-        return () => { watcher = undefined }
-      },
-      update,
-      replace: vi.fn(async () => {}),
-    })),
+    describe: vi.fn(() => [
+      { ns: 'desktop-shell', value: { port: desktopFormPort, logLevel: 'info' }, revision: 0 },
+      { ns: 'ui-theme', value: { preference: themePreference }, revision: 0 },
+      { ns: 'locale', value: { preference: localePreference }, revision: 0 },
+    ]),
+    update,
+    replace: vi.fn(async () => {}),
   }
   const ctx = {
     desktopRuntime: runtime,
@@ -151,8 +147,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
       return () => {}
     }),
     effect: vi.fn((register: () => unknown) => register()),
-    on: vi.fn((event: string, listener: (namespace: unknown, next: unknown) => void) => {
-      if (event === 'settings/updated') settingsUpdated.add(listener)
+    on: vi.fn((event: string, listener: (namespace: unknown) => void) => {
+      if (event === 'settings/document-updated') settingsUpdated.add(listener)
       return () => { settingsUpdated.delete(listener) }
     }),
     emit,
@@ -173,14 +169,20 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
     rendererBoot,
     pickDirectory,
     route: path => routes.get(path),
-    notify: async (next, prev) => { await watcher?.(next, prev) },
+    publish: async (namespace) => {
+      for (const listener of settingsUpdated) listener(namespace)
+    },
+    publishDesktopPort: async (port) => {
+      desktopFormPort = port
+      for (const listener of settingsUpdated) listener('desktop-shell' as SettingsNamespace)
+    },
     notifyLocale: (preference) => {
       localePreference = preference
-      for (const listener of settingsUpdated) listener('locale' as SettingsNamespace, { preference })
+      for (const listener of settingsUpdated) listener('locale' as SettingsNamespace)
     },
     notifyTheme: (preference) => {
       themePreference = preference
-      for (const listener of settingsUpdated) listener('ui-theme' as SettingsNamespace, { preference })
+      for (const listener of settingsUpdated) listener('ui-theme' as SettingsNamespace)
     },
     deepLinkHandler: () => deepLinkHandler,
     sessionOpenHandler: () => sessionOpenHandler,
@@ -189,7 +191,15 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
 
 describe('desktop Host plugin', () => {
   it('validates schemas without a presentation mode knob', () => {
-    expect(Config({} as DesktopConfig)).toEqual({
+    const validated = Config({} as DesktopShellConfigDocument)
+    expect({
+      ...validated,
+      // Volatile fields are references in the resolved config; the document
+      // values (what the settings form projects) are what the defaults test
+      // compares.
+      port: validated.port.get(),
+      logLevel: validated.logLevel.get(),
+    }).toEqual({
       productName: 'PicoAide Harness',
       windowTitle: 'PicoAide Harness',
       port: 0,
@@ -197,12 +207,15 @@ describe('desktop Host plugin', () => {
       height: 840,
       minWidth: 900,
       minHeight: 640,
+      logLevel: 'info',
     })
-    expect(DesktopSettingsSchema({} as DesktopSettings)).toEqual({ port: 0, logLevel: 'info' })
-    expect(() => DesktopSettingsSchema({ port: -1 } as DesktopSettings)).toThrow()
-    expect(() => DesktopSettingsSchema({ port: 1.5 } as DesktopSettings)).toThrow()
-    expect(() => DesktopSettingsSchema({ port: 65_536 } as DesktopSettings)).toThrow()
+    expect(DesktopSettingsSchema({} as DesktopSettingsDocument)).toEqual({ port: 0, logLevel: 'info' })
+    expect(() => DesktopSettingsSchema({ port: -1 } as DesktopSettingsDocument)).toThrow()
+    expect(() => DesktopSettingsSchema({ port: 1.5 } as DesktopSettingsDocument)).toThrow()
+    expect(() => DesktopSettingsSchema({ port: 65_536 } as DesktopSettingsDocument)).toThrow()
     expect(String(DESKTOP_SETTINGS_NAMESPACE)).toBe('dsh-desktop')
+    // 0.1.7: the live namespace is the profile entry id this plugin's row owns.
+    expect(String(DESKTOP_SETTINGS_ENTRY_ID)).toBe('desktop-shell')
   })
 
   it('prints a launcher reminder and registers nothing without desktopRuntime', () => {
@@ -212,9 +225,7 @@ describe('desktop Host plugin', () => {
       webServer: { host: '127.0.0.1', port: 43120, register: registerRoute },
       connection: { authenticatedUrl: (url: string) => url },
       settings: {
-        register: vi.fn(),
-        get: vi.fn(() => undefined),
-        watch: vi.fn(() => () => {}),
+        describe: vi.fn(() => []),
         update: vi.fn(async () => {}),
       },
       logger: { warn: vi.fn(), error: vi.fn() },
@@ -227,7 +238,9 @@ describe('desktop Host plugin', () => {
 
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('desktop launcher'))
     expect(registerRoute).not.toHaveBeenCalled()
-    expect(vi.mocked(ctx.settings.register)).not.toHaveBeenCalled()
+    // 0.1.7: nothing is registered with the settings service any more — the
+    // desktop's own form is this plugin's profile entry.
+    expect(vi.mocked(ctx.settings.describe)).not.toHaveBeenCalled()
     stderr.mockRestore()
   })
 
@@ -241,18 +254,19 @@ describe('desktop Host plugin', () => {
     })
   })
 
-  it('registers settings and the active Web port without re-entering Loader settlement', async () => {
+  it('projects the active Web port without re-entering Loader settlement', async () => {
     const harness = createHarness()
     const loaderAwait = vi.fn(() => new Promise<void>(() => {}))
     Object.assign(harness.ctx, { loader: { await: loaderAwait } })
 
     apply(harness.ctx, config)
 
+    // `settings` stays injected: the shell reads the theme/locale/desktop forms
+    // through it. It must NOT await the loader during activation (the settings
+    // service's own `describe()` waits for settlement; a Host row that awaited
+    // it here would deadlock against its own activation).
     expect(inject).toContain('settings')
     expect(inject).not.toContain('loader')
-    const register = vi.mocked(harness.ctx.settings.register)
-    expect(register.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ applies: 'restart' }))
-    expect(register.mock.calls[0]?.[2]).not.toHaveProperty('base')
     expect(loaderAwait).not.toHaveBeenCalled()
     expect(harness.shell()).toEqual(expect.objectContaining({
       url: 'http://127.0.0.1:43120/?dsh-desktop-mode=advanced&dsh-desktop-platform=darwin',
@@ -342,17 +356,15 @@ describe('desktop Host plugin', () => {
     const harness = createHarness()
     apply(harness.ctx, config)
 
-    await harness.notify(
-      { port: 0, logLevel: 'debug' },
-      { port: 0, logLevel: 'info' },
-    )
+    // A revision that keeps the composed port must not restart anything, and a
+    // revision of an unrelated namespace must not either.
+    await harness.publishDesktopPort(0)
+    await harness.publish('ui-theme')
+    await vi.runAllTimersAsync()
     expect(harness.restart).not.toHaveBeenCalled()
 
     harness.restart.mockImplementation(() => new Promise<void>(() => {}))
-    await harness.notify(
-      { port: 43_189, logLevel: 'debug' },
-      { port: 0, logLevel: 'debug' },
-    )
+    await harness.publishDesktopPort(43_189)
     await vi.runAllTimersAsync()
     expect(harness.restart).toHaveBeenCalledOnce()
   })
@@ -421,7 +433,9 @@ describe('desktop Host plugin', () => {
     }))
     const req = {
       method: 'GET',
-      headers: { origin: 'http://127.0.0.1:43120' },
+      // FIX-36：消费是写，走真实注册的处理器也要带 BrowserAuth 证明；
+      // 渲染层的同源轮询由 Chromium 自动带上这个 cookie。
+      headers: { origin: 'http://127.0.0.1:43120', cookie: PROOF_COOKIE },
     } as unknown as IncomingMessage
     let body = ''
     const res = {
@@ -449,7 +463,7 @@ describe('desktop Host plugin', () => {
     expect(JSON.parse(secondBody)).toEqual({ sessionId: null, requestedAt: 0 })
   })
 
-  it('rejects cross-origin session-open route requests', async () => {
+  it('rejects cross-origin and proof-less session-open route requests', async () => {
     const harness = createHarness()
     apply(harness.ctx, config)
     const route = harness.route(DESKTOP_LOOP_NOTIFY_SESSION_PATH)
@@ -466,5 +480,21 @@ describe('desktop Host plugin', () => {
     await route?.handler(req, res)
     expect(res.statusCode).toBe(403)
     expect(JSON.parse(body)).toEqual({ error: 'forbidden' })
+
+    // FIX-36：伪造同源头（Origin 就是渲染层 origin）但没有 BrowserAuth cookie
+    // ⇒ 消费被拒，且 404/403 的响应里没有待跳转会话。
+    const forged = {
+      method: 'GET',
+      headers: { origin: 'http://127.0.0.1:43120' },
+    } as unknown as IncomingMessage
+    let forgedBody = ''
+    const forgedRes = {
+      statusCode: 200,
+      setHeader: vi.fn(),
+      end: vi.fn((value?: string) => { forgedBody = value ?? '' }),
+    } as unknown as ServerResponse
+    await route?.handler(forged, forgedRes)
+    expect(forgedRes.statusCode).toBe(403)
+    expect(JSON.parse(forgedBody)).toEqual(expect.objectContaining({ error: 'browser session proof required' }))
   })
 })

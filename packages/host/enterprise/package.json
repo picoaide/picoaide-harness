@@ -23,6 +23,10 @@
       "types": "./lib/types/gateway-model.d.ts",
       "default": "./lib/gateway-model.js"
     },
+    "./gateway-llm": {
+      "types": "./lib/types/gateway-llm.d.ts",
+      "default": "./lib/gateway-llm.js"
+    },
     "./bootstrap": {
       "types": "./lib/types/bootstrap.d.ts",
       "default": "./lib/bootstrap.js"
@@ -67,7 +71,10 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "../../../cordis.patch.yml",
+        "./cordis.patch.yml"
+      ]
     },
     "client": {
       "inject": [
@@ -91,14 +98,20 @@
     "check": "yarn run build && yarn run test"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-credentials": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-session": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-settings": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-skill": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-skill-filesystem": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-tool-skill": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-tools": "0.1.6-alpha.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm-deepseek": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tool-skill": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "@picoaide/dsh-host-locale": "workspace:*",
     "@sentry/node": "^7.120.0",
     "adm-zip": "^0.6.0",
@@ -106,30 +119,34 @@
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.2"
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-include": "1.0.9",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-brand": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-locale": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-store": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-host-webserver": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-invariants": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-sandbox": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-scope": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-util-values": "0.1.6-alpha.2",
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis-plugin-include": "1.0.9",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
+    "@deepseek-ai/dsh-brand": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-scope": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.1.7-rc.2",
     "@picoaide/dsh-foot-menu": "workspace:*",
     "@picoaide/dsh-panel-surface": "workspace:*",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "dsh-plugin-desktop": "workspace:*",
-    "electron": "44.4.3",
+    "electron": "45.0.0-alpha.7",
     "react": "18.3.1",
     "tsdown": "0.22.2",
     "typescript": "6.0.3",

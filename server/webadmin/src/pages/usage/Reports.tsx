@@ -19,6 +19,36 @@ interface Subscription {
   hook_url: string
   last_run_at?: string
   last_error: string
+  /**
+   * 欠投期号（`YYYY-MM`；空 = 没有欠投）—— R21C-01/R21C-03（审计 2026-09-26）:
+   * 这是"最早未投递的那一期"的**游标**。R21C-01 之前它只在"被钉住的那一期"上
+   * 有意义，跨月失败期间到期的中间各期既不进列也不留痕 ⇒ 管理员在界面上看不出
+   * 欠了几期，也不知道"为什么补完一期还有一期"。
+   */
+  pending_period?: string
+  /** 连续失败次数（成功后清零）；退避窗口的输入。 */
+  fail_streak?: number
+  /**
+   * 最早何时可以再试（退避窗口；空 = 立即可试）——
+   * R21C-03：退避**不再是隐形状态**。修前管理员改好 webhook 后界面显示
+   * 「最近错误 = —」像是已恢复，实际最长还要干等 24 小时（旧地址算出的窗口），
+   * "改好了但没反应"与"一切正常"同形。
+   */
+  next_attempt_at?: string
+}
+
+/** 退避窗口是否仍未到期（服务端会在该时刻之前拒绝重试）。 */
+function inBackoff(s: Subscription): boolean {
+  if (!s.next_attempt_at) return false
+  const at = Date.parse(s.next_attempt_at)
+  return Number.isFinite(at) && at > Date.now()
+}
+
+/** 「下次重试」列的展示文案：退避中显示到点时刻，未退避显示立即可投。 */
+function retryLabel(s: Subscription): string {
+  if (!s.next_attempt_at) return s.fail_streak && s.fail_streak > 0 ? '立即可重试' : '—'
+  const at = s.next_attempt_at.replace('T', ' ').slice(0, 16)
+  return inBackoff(s) ? `退避中 · ${at}` : at
 }
 
 // 报表订阅:月度用量报表(上月:总费用/请求/模型TOP/用户TOP/部门汇总)推送到企业 webhook
@@ -126,7 +156,7 @@ export default function UsageReports() {
     <div className="space-y-6">
       <PageHeader
         title="报表订阅"
-        desc="每月自动生成上月用量汇总(总费用/请求数/模型TOP/用户TOP/部门汇总)并推送到企业 webhook(钉钉/企微/飞书机器人等);补跑规则:推送失败不记为已推送,自动重试「同一期」直到成功(首次 1 小时后、之后每天一轮;失败跨月也继续补那一期,不会跳期)"
+        desc="每月自动生成上月用量汇总(总费用/请求数/模型TOP/用户TOP/部门汇总)并推送到企业 webhook(钉钉/企微/飞书机器人等);补跑规则:推送失败不记为已推送,自动重试欠投的期号(首次 1 小时后、之后每天一轮);失败跨月期间到期的每一期都会被逐期补齐(每个调度轮次补一期,不跳期、不重投);改了推送地址即视为配置变更,退避窗口会立刻清零(最长 1 小时内补投)"
       />
       {error && <div className="text-sm text-destructive">{error}</div>}
       {resultMsg && <div className="text-sm text-emerald-600">{resultMsg}</div>}
@@ -145,6 +175,8 @@ export default function UsageReports() {
                   <TableHead>推送地址</TableHead>
                   <TableHead className="w-16">启用</TableHead>
                   <TableHead>上次推送</TableHead>
+                  <TableHead>欠投期号</TableHead>
+                  <TableHead>下次重试</TableHead>
                   <TableHead>最近错误</TableHead>
                   <TableHead className="w-40">操作</TableHead>
                 </TableRow>
@@ -173,6 +205,8 @@ export default function UsageReports() {
                       />
                     </TableCell>
                     <TableCell className="tabular-nums text-muted-foreground">{s.last_run_at ? s.last_run_at.replace('T', ' ').slice(0, 16) : '—'}</TableCell>
+                    <TableCell className="tabular-nums text-muted-foreground">{s.pending_period || '—'}</TableCell>
+                    <TableCell className="tabular-nums text-muted-foreground">{retryLabel(s)}</TableCell>
                     <TableCell className="max-w-48 truncate text-xs text-destructive" title={s.last_error}>{s.last_error || '—'}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1.5">
@@ -185,13 +219,13 @@ export default function UsageReports() {
                     </TableCell>
                   </TableRow>
                 ))}
-                {subs.length === 0 && <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground">暂无订阅,点击右上角「新建订阅」</TableCell></TableRow>}
+                {subs.length === 0 && <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground">暂无订阅,点击右上角「新建订阅」</TableCell></TableRow>}
               </TableBody>
             </Table>
           )}
           <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
             <RefreshCw className="h-3 w-3" />
-            每月 1 日起自动生成上月报表并推送;推送失败会计入「最近错误」并自动重试同一期(首次 1 小时后、之后每天一轮;成功才更新「上次推送」,失败跨月也不跳期)
+            每月 1 日起自动生成上月报表并推送;推送失败会计入「最近错误」并自动重试欠投期号(首次 1 小时后、之后每天一轮;成功才更新「上次推送」);「欠投期号」是尚未投出的最早一期,失败跨月时它会被逐期推进(补完一期才会前进到下一期,不跳期、不重投);「下次重试」在退避窗口内会显示「退避中」
           </div>
         </CardContent>
       </Card>

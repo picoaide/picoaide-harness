@@ -91,14 +91,15 @@ function harness(options: { pluginsPage?: boolean } = {}): Harness {
   const provided: string[] = []
   const tabs: RegisteredTab[] = []
 
-  // The settings service face the Host half publishes; the card only binds a
-  // namespace scope over it.
-  const settingsScope = {
-    bind: (spec: { namespace: string }) => ({
-      ...spec,
+  // The settings face the Host half publishes (0.1.7: `ctx.configForms`, whose
+  // namespace is the owning profile entry id — the card only asks for one form).
+  const configForms = {
+    get: (namespace: string) => ({
+      namespace,
       getSnapshot: () => ({ value: {} }),
       subscribe: () => () => {},
-      set: async () => {},
+      set: async () => true,
+      mutate: async () => true,
     }),
   }
 
@@ -118,7 +119,7 @@ function harness(options: { pluginsPage?: boolean } = {}): Harness {
       effectRuns.push({ label, run: callback })
       return () => {}
     },
-    get: (name: string) => (name === 'settingsScope' ? settingsScope : undefined),
+    get: (name: string) => (name === 'configForms' ? configForms : undefined),
     provide: (name: string) => { provided.push(name) },
     inject: (deps: string[], run: (inner: ClientContext) => void) => {
       serviceWaits.push({ deps, run })
@@ -186,7 +187,7 @@ describe('cron client surfaces', () => {
     // `picoFootMenu` is the same hazard (its row can be disabled by a channel
     // overlay / the machine-wide patch): it is waited on from a CHILD scope, so
     // its absence costs only the popover entry.
-    expect(inject).toEqual(['slots', 'settingsScope', 'locale', 'workspaces', 'connection', 'sessions'])
+    expect(inject).toEqual(['slots', 'configForms', 'locale', 'workspaces', 'connection', 'sessions'])
   })
 
   it('registers the foot-lane entry from a child scope (the rest does not wait on it)', () => {

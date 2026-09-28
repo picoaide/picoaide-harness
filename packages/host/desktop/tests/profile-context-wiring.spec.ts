@@ -207,11 +207,14 @@ describe('desktop profileContext wiring (issue #130)', () => {
     // 构造函数只允许一份实现：main.ts 必须从 profile.ts 引入，且同一函数被冒烟用于自己的
     // provide（两处调用**同一个**构造函数，否则冒烟测的就不是生产路径）。
     expect(importedFrom(main, 'main.ts', 'desktopProfileContext')).toEqual(['./profile.ts'])
-    const smoke = readFileSync(join(packageRoot, 'scripts', 'verify-profile-boot.mjs'), 'utf8')
-    expect(importedFrom(smoke, 'verify-profile-boot.mjs', 'desktopProfileContext')).toEqual(['../lib/profile.js'])
+    // 2026-09-28：两个 headless 冒烟的五个必备接线（含 `profileContext`）收进了**唯一**实现
+    // `scripts/boot-desktop-profile.mjs`（`tests/boot-wiring.spec.ts` 守住"不得绕过它"），
+    // 所以"冒烟自己 provide 同一份 profileContext"这条判据的落点搬到 helper 上。
+    const helper = readFileSync(join(packageRoot, 'scripts', 'boot-desktop-profile.mjs'), 'utf8')
+    expect(importedFrom(helper, 'boot-desktop-profile.mjs', 'desktopProfileContext')).toEqual(['../lib/profile.js'])
     expect(
-      findProfileContextPublishes(smoke, 'verify-profile-boot.mjs'),
-      '冒烟必须自己用同一个 desktopProfileContext 发布 profileContext（它 boot 的就是生产形态）',
+      findProfileContextPublishes(helper, 'boot-desktop-profile.mjs'),
+      '共享 helper 必须用同一个 desktopProfileContext 发布 profileContext（它 boot 的就是生产形态）',
     ).toHaveLength(1)
   })
 
@@ -293,7 +296,23 @@ describe('desktop profileContext wiring (issue #130)', () => {
     // ③ plugin-manager 的真实重算路径：readProfilePatches(profileContext) 必须无重复 id。
     const context = desktopProfileContext(prepared)
     const recomputed = readProfilePatches('dsh', context, prepared.profile)
-    expect(recomputed.length).toBeLessThan(patches.length + 1)
+    // 2026-09-28 改口径：`<` 变成 `===`。
+    // 旧写法（"重算严格少于装配"）登记的是当时的**缺陷**：十个自有层只存在于 `prepared.patches`
+    // 里，`readProfilePatches` 复算不到它们，于是上游 `config-editor.edit()` 每次设置写入前的
+    // `reconcileProfilePatches(readProfilePatches(...))` 会把桌面壳与九个自研面**从运行树上摘掉**
+    // （`verify:profile` 的 `desktop shell was not registered`）。现在十层是真正的 bundle 层，
+    // 复算必须**逐层等于**装配 —— 那是这条判据真正的牙齿。
+    // 层数上允许恰好 +1：`readProfilePatches` 会在遥测行存在且 `telemetryDisabledEnv` 非空时
+    // 追加**同一个** `session-telemetry-otel` 关闭补丁（`resolveTelemetryPatch`），而
+    // `prepareDesktopProfile` 把它折进了 pin 层。多出 2 层以上就说明复算路径真的多算了东西。
+    expect(
+      recomputed.length,
+      'readProfilePatches(profileContext) 与装配的层数差超过 1（只允许遥测补丁那一层）：'
+      + '短一截 = 有层只在 prepared.patches 里（设置写入会把它们从运行树上摘掉）',
+    ).toBeLessThanOrEqual(patches.length + 1)
+    expect(recomputed.length, '复算层数不得少于装配').toBeGreaterThanOrEqual(patches.length)
+    expect(composeEntries([recomputed]).map(row => row.id))
+      .toEqual(composeEntries([patches]).map(row => row.id))
     const counts = new Map<string, number>()
     for (const row of composeEntries([recomputed])) {
       if (typeof row.id !== 'string') continue

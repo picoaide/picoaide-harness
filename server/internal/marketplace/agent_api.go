@@ -15,6 +15,7 @@ import (
 	"github.com/picoaide/picoaide/internal/archiveutil"
 	"github.com/picoaide/picoaide/internal/serverauth"
 	"github.com/picoaide/picoaide/internal/serverstore"
+	"github.com/picoaide/picoaide/internal/sharedskills"
 	"github.com/picoaide/picoaide/internal/skillmanifest"
 	"github.com/picoaide/picoaide/internal/util"
 )
@@ -264,27 +265,36 @@ func updateAgentAdmin(c *gin.Context, db *sql.DB) {
 }
 
 // deleteAgentAdmin 下架(保留数据,可重新上架)。
+//
+// 写失败必须分类返回（R23-V3-B2，复审 2026-09-27，P2）：修前这里 `_ = SetAppEnabled(...)`
+// 之后**无条件**回 `200 {"ok":true}` —— 真 PG + BEFORE UPDATE 触发器实测（UPDATE 被拒，
+// SQLSTATE P0001）仍回 200 ⇒ 管理员看到"下架成功"而 `apps.enabled` 一字未改，员工侧仍可
+// 继续安装（`enabled=0` 才是下架判据）。分类口径见 writeMarketAppWriteFailure。
 func deleteAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := marketAgentApp(db, name); err == nil {
-		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, false)
-		_ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	if requireMarketAdminApp(c, db, serverstore.AppKindAgent, name, "智能体不存在") == nil {
 		return
 	}
-	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, false); err != nil {
+		writeMarketAppWriteFailure(c, err, "智能体不存在", "下架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "agent_disable", name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// enableAgentAdmin 重新上架。
+// enableAgentAdmin 重新上架（写失败分类同上）。
 func enableAgentAdmin(c *gin.Context, db *sql.DB) {
 	name := c.Param("name")
-	if _, err := marketAgentApp(db, name); err == nil {
-		_ = serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, true)
-		_ = serverstore.AuditLog(db, adminUsername(c), "agent_enable", name)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	if requireMarketAdminApp(c, db, serverstore.AppKindAgent, name, "智能体不存在") == nil {
 		return
 	}
-	serverauth.WriteError(c, http.StatusNotFound, "NOT_FOUND", "智能体不存在")
+	if err := serverstore.SetAppEnabled(db, serverstore.AppKindAgent, name, true); err != nil {
+		writeMarketAppWriteFailure(c, err, "智能体不存在", "上架失败")
+		return
+	}
+	_ = serverstore.AuditLog(db, adminUsername(c), "agent_enable", name)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // previewAgentAdmin 返回展示版本归档的文件清单与主文件内容。
@@ -372,7 +382,11 @@ func downloadAgentArchiveAdmin(c *gin.Context, db *sql.DB) {
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", dispName))
 	c.Header("X-Preset-Version", r.Version)
-	c.Header("X-Preset-Checksum", r.Checksum)
+	// 与组织面 `agentshare.serveArchive` 共用 `sharedskills.ArchiveChecksum`（唯一实现，
+	// 第二十二轮复审 V2-B1）：空 `checksum` 必须**现算**归档字节的 sha256，
+	// 直发 `r.Checksum` 会下发空头 ⇒ 客户端 fail-closed（`checksum mismatch; refused`）
+	// ⇒ 存量行永久装不上。跨面同一性判据见 `agent_checksum_parity_test.go`。
+	c.Header("X-Preset-Checksum", sharedskills.ArchiveChecksum(r.Checksum, r.Archive))
 	_, _ = serverstore.IncrementAgentPresetDownload(db, name, r.Version)
 	c.Data(http.StatusOK, contentType, r.Archive)
 }

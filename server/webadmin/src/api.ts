@@ -101,6 +101,27 @@ async function refreshCsrf(): Promise<void> {
   return csrfRefreshing
 }
 
+// ---------------------------------------------------------------------------
+// 类型面现状的**如实登记**（第二十二轮复审 V2-B5，P3 —— 必须显式，不得读作"已收口"）
+//
+// `request` 的**缺省泛型仍然是 `any`**：调用方不写 `<T>` 时拿到的是 `any`，
+// 类型检查对它恒通过（`setInfo(d)` 对 `useState<SysInfo|null>` 永远合法，
+// 响应字段改名/缺失在 TS 侧**不会**报错）。
+//
+// 计数基线（第二十二轮复审实测，与本文件同目录执行）：
+//   grep -rn 'await request(' src | wc -l   → 89   （无泛型）
+//   grep -rn 'await request<' src | wc -l   → 38   （有泛型）
+// 与审计 F-design 报告的 89/38 逐数相同 —— 即**这一轮没有收敛它**。
+//
+// 本轮选的是审计给出的另一支（把 `SysInfo` 变成对拍真源：见
+// `pages/server-info-health-contract.test.ts` 读 Go json tag 的对拍），那支只保证
+// "接口里声明了这些键"，**不保证**"这次响应是按这个接口被消费的" —— 后者的兜底是
+// 渲染级用例（`pages/ServerInfo.health.test.tsx`）。
+//
+// 收敛路径（未做，工作量与风险都在"逐个消费点补类型"上）：把缺省泛型改成
+// `unknown` 会让 89 处要么显式补 `<T>`、要么当场编译失败 —— 必须分批做并逐批给
+// 编译证据（`npm run typecheck`）。在那之前，任何"泛型问题已收口"的读法都不成立。
+// ---------------------------------------------------------------------------
 export async function request<T = any>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers: Record<string, string> = { ...(init.headers as Record<string, string>) }
   if (!(init.body instanceof FormData)) {
@@ -140,6 +161,12 @@ export async function request<T = any>(path: string, init: RequestInit = {}, ret
       /* keep the Chinese fallback */
     }
     if (res.status === 401) {
+      // **只有 401** 才代表登录态失效（第二十二轮复审 V2-B2 的客户端一半）。
+      // 401 的语义被服务端收窄为"会话真的无效/过期/被吊销"：依赖故障
+      // （缺表 / 缺列 / 驱动错误 / 连接被拒）现在回 500 `INTERNAL`，走下面的
+      // `throw new ApiError` —— 页面如实报错并保留会话，**不会**被切成未登录态
+      // （否则一次 PG 抖动会把「服务端不可用」显示成「你没登录」）。
+      // 判据：`api.test.ts` 的「500 不触发登录失效回调」。
       // 审计 A5-L5: 任何页面(含 /admin/)收到 401 都走同一回调回登录态,
       // 不再区分 pathname —— 行为一致,由 App 决定如何呈现
       unauthorizedHandler?.()

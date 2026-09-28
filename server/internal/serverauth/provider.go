@@ -9,6 +9,11 @@ type UserInfo struct {
 	// GroupsPresent 表示本次认证**确实拿到了组声明**(哪怕为空数组)。
 	// 用于区分"IdP 说该用户不属于任何组"(要回收)与"这次没下发组 claim"
 	// (不能回收 —— 否则会清掉另一套 IdP/LDAP 同步来的组,审计 2026-09-13 P2-9)。
+	//
+	// ⚠️ "确实拿到了"必须是**真的查询过**,不得按提供方恒真:LDAP 的判据是
+	// LDAPProvider.syncsGroups()(未配 group_filter ⇒ 目录不接管组,R24-X4-B1)。
+	// GroupsPresent=true 而 Groups=nil 会被 SyncUserGroups 当成"该用户没有组"
+	// 做全量替换(清空全部组归属),且同步侧有守卫时不可自愈。
 	GroupsPresent bool
 	// ExternalID 是 IdP 侧的主体标识(OIDC 的 sub;LDAP 的 entry DN)。
 	// 外部身份按 (ExternalID) 绑定到本地行,而不是只按用户名 —— 否则同名

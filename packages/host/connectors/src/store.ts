@@ -27,6 +27,53 @@ const FILE_MODE = 0o600
 const MAX_CREDENTIAL_BYTES = 64 * 1024
 
 /**
+ * 一次读凭据失败的**分类**（2026-09-26 FIX-31）。
+ *
+ * - `unreadable`：文件系统拒绝了 stat/read（EACCES、EIO、EMFILE、ELOOP…），
+ *   或者文件在 stat 与 read 之间消失了之外的一切 errno；
+ * - `too-large`：文件超过读上限 {@link MAX_CREDENTIAL_BYTES} —— 本 store 从不
+ *   相信这么大的凭据文档（写面同一条上限，见 `writeCredentialUnlocked`）；
+ * - `malformed`：字节拿得到、但不是一个凭据文档（非法 JSON / 不是对象 /
+ *   没有数值 `updatedAt` / 不是普通文件）。
+ *
+ * 三者的共同点：**这一次读没有得到"这份凭据的当前状态"这一事实**，因此调用方
+ * 不得把它当成"没有凭据"。
+ */
+export interface CredentialReadFault {
+  readonly kind: 'unreadable' | 'too-large' | 'malformed'
+  /** `too-large` 时的实际字节数（能测到时）。 */
+  readonly bytes?: number
+  /** `unreadable` 时的底层文件系统错误。 */
+  readonly cause?: unknown
+}
+
+/** 读失败（**不是** ENOENT）时抛出的错误；调用方必须 fail-closed。 */
+export class CredentialReadError extends Error {
+  /** 凭据所属连接器 id。 */
+  readonly connectorId: string
+  /** 失败分类。 */
+  readonly fault: CredentialReadFault
+
+  constructor(connectorId: string, fault: CredentialReadFault) {
+    super(credentialReadMessage(connectorId, fault))
+    this.name = 'CredentialReadError'
+    this.connectorId = connectorId
+    this.fault = fault
+  }
+}
+
+/** 人类可读的失败原因（同时是面板/日志里那一行）。 */
+function credentialReadMessage(connectorId: string, fault: CredentialReadFault): string {
+  const detail = fault.kind === 'too-large'
+    ? `${String(fault.bytes ?? 0)} bytes exceeds the ${String(MAX_CREDENTIAL_BYTES)}-byte read limit`
+    : fault.kind === 'malformed'
+      ? 'the file is not a connector credential document'
+      : `the filesystem refused the read (${(fault.cause as NodeJS.ErrnoException | undefined)?.code ?? 'unknown error'})`
+  return `connector credential "${connectorId}" could not be read: ${detail}; `
+    + 'refusing to overwrite it (fix the file, or disconnect the connector to start over)'
+}
+
+/**
  * 凭据结构比对（唯一实现）：写后补偿用它判断"盘上还是不是我写的那一份"。
  * 逐字段比，不做 JSON 字符串比较——那会受键序影响而漏判。
  */
@@ -169,6 +216,15 @@ export interface ConnectorStoreOptions {
    * exactly the path that handed tenant A's secret to tenant B's endpoint.
    */
   serverURL?: string | null
+  /**
+   * 读失败（{@link CredentialReadError}，即"文件在那儿却读不出凭据"）的日志出口
+   * （2026-09-26 FIX-31）。
+   *
+   * store 自己没有 logger（它是一个纯存储类，装配方才持有 `ctx.logger`），而
+   * "读失败被静默降级成空状态"正是本缺陷不可诊断的原因。回调在**读失败的唯一
+   * 构造点**被调用一次，内容与抛给调用方的错误逐字同源；它抛错不影响读语义。
+   */
+  onReadFault?: (connectorId: string, error: CredentialReadError) => void
 }
 
 function assertConnectorId(id: string): string {
@@ -241,6 +297,9 @@ export class ConnectorStore {
    */
   readonly unscopedDir: string | null
 
+  /** 读失败的日志出口（装配方注入，见 {@link ConnectorStoreOptions.onReadFault}）。 */
+  private readonly onReadFault: ((connectorId: string, error: CredentialReadError) => void) | undefined
+
   constructor(options: ConnectorStoreOptions = {}) {
     // Default root: `<dshHome>/users/<encoded-user>/servers/<server-hash>/connectors`;
     // a real user (enterprise session) scopes credentials per account AND per
@@ -251,6 +310,7 @@ export class ConnectorStore {
     this.unscopedDir = options.baseDir === undefined || options.baseDir === null
       ? unscopedConnectorPath(options.username)
       : null
+    this.onReadFault = options.onReadFault
   }
 
   private path(id: string): string {
@@ -262,37 +322,99 @@ export class ConnectorStore {
     return resolved
   }
 
+  /**
+   * 读一份凭据。两种结局**严格分开**（2026-09-26 FIX-31）：
+   *
+   *  - `null` **只**表示 ENOENT：这个作用域本来就没有这份凭据（首次使用、断开之后）；
+   *  - 其余一切（stat/read 被拒、超过读上限、内容不是凭据文档）抛
+   *    {@link CredentialReadError}，并先经 {@link onReadFault} 记一条日志。
+   *
+   * 为什么必须分开：读失败被降级成"没有凭据"之后，`updateCredential` 会从
+   * `{updatedAt: 0}` 起把这次 patch **整份覆盖写**回去 —— accessToken /
+   * refreshToken / clientId / clientSecret 连同 fields 一起消失，无异常、无日志、
+   * 不可恢复（与 cron 账本 CR-1 同一形态：读错误先被当成空状态，再由写路径固化）。
+   *
+   * @param id - connector id（先过 {@link CONNECTOR_ID_PATTERN} 才碰文件系统）。
+   * @returns 凭据，或 `null`（只有"文件不存在"会走到这里）。
+   * @throws CredentialReadError 读失败/不可信。
+   */
   async readCredential(id: string): Promise<ConnectorCredential | null> {
     const file = this.path(id)
+    let stat: Awaited<ReturnType<typeof fs.lstat>>
     try {
-      const stat = await fs.lstat(file)
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CREDENTIAL_BYTES) return null
-      const content = await fs.readFile(file, 'utf8')
-      if (Buffer.byteLength(content, 'utf8') > MAX_CREDENTIAL_BYTES) return null
-      const value: unknown = JSON.parse(content)
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
-      if (typeof (value as { updatedAt?: unknown }).updatedAt !== 'number') return null
-      // A hand-edited (or truncated) timestamp must not poison the refresh
-      // cadence: only a finite positive number is a usable `expiresAt`.
-      const record = value as ConnectorCredential
-      if (!Number.isSafeInteger(record.updatedAt) || record.updatedAt < 0) {
-        // A hand-edited 1e999 parses to Infinity and JSON.stringify writes null
-        // on the next save, after which the credential becomes unreadable. A
-        // value above 2^53 also breaks `+1` monotonicity. Treat it as "no
-        // timestamp": writes start from 0 and repair the file.
-        record.updatedAt = 0
-      }
-      if (record.expiresAt !== undefined && (!Number.isFinite(record.expiresAt) || record.expiresAt <= 0)) {
-        delete record.expiresAt
-      }
-      if (record.refreshedAt !== undefined && !Number.isFinite(record.refreshedAt)) {
-        delete record.refreshedAt
-      }
-      normalizeFieldValues(record)
-      return record
-    } catch {
-      return null
+      stat = await fs.lstat(file)
+    } catch (cause) {
+      return this.absentOrFault(id, cause)
     }
+    // 符号链接/非普通文件不是凭据：写入是 temp + rename（会替换掉链接本身），
+    // 于是"照着链接读、再覆盖写"等于静默丢掉链接目标里的凭据。
+    if (!stat.isFile() || stat.isSymbolicLink()) throw this.readFault(id, { kind: 'malformed' })
+    if (stat.size > MAX_CREDENTIAL_BYTES) throw this.readFault(id, { kind: 'too-large', bytes: stat.size })
+    let content: string
+    try {
+      content = await fs.readFile(file, 'utf8')
+    } catch (cause) {
+      // 文件在我们 stat 之后被删掉 ⇒ 仍然是"没有凭据"。
+      return this.absentOrFault(id, cause)
+    }
+    const bytes = Buffer.byteLength(content, 'utf8')
+    if (bytes > MAX_CREDENTIAL_BYTES) throw this.readFault(id, { kind: 'too-large', bytes })
+    let value: unknown
+    try {
+      value = JSON.parse(content)
+    } catch {
+      throw this.readFault(id, { kind: 'malformed' })
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw this.readFault(id, { kind: 'malformed' })
+    if (typeof (value as { updatedAt?: unknown }).updatedAt !== 'number') throw this.readFault(id, { kind: 'malformed' })
+    // A hand-edited (or truncated) timestamp must not poison the refresh
+    // cadence: only a finite positive number is a usable `expiresAt`.
+    const record = value as ConnectorCredential
+    if (!Number.isSafeInteger(record.updatedAt) || record.updatedAt < 0) {
+      // A hand-edited 1e999 parses to Infinity and JSON.stringify writes null
+      // on the next save, after which the credential becomes unreadable. A
+      // value above 2^53 also breaks `+1` monotonicity. Treat it as "no
+      // timestamp": writes start from 0 and repair the file.
+      record.updatedAt = 0
+    }
+    if (record.expiresAt !== undefined && (!Number.isFinite(record.expiresAt) || record.expiresAt <= 0)) {
+      delete record.expiresAt
+    }
+    if (record.refreshedAt !== undefined && !Number.isFinite(record.refreshedAt)) {
+      delete record.refreshedAt
+    }
+    normalizeFieldValues(record)
+    return record
+  }
+
+  /**
+   * ENOENT 的**唯一**出口：真的没有这份凭据。任何其它 errno 都是读失败
+   * （fail-closed），绝不在这里降级成 `null`。
+   * @param id - connector id。
+   * @param cause - `lstat`/`readFile` 抛出的原因。
+   * @returns `null`（仅 ENOENT）。
+   * @throws CredentialReadError 其余 errno。
+   */
+  private absentOrFault(id: string, cause: unknown): null {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw this.readFault(id, { kind: 'unreadable', cause })
+  }
+
+  /**
+   * 读失败的**唯一构造点**：先记日志（`onReadFault`，若装配方给了），再抛出。
+   *
+   * 判定、记账、清账三处共用这一个出口 —— 每个读失败都恰好一条日志，且日志的
+   * 内容与抛给调用方的错误逐字同源。日志回调自身抛错不得改变读语义。
+   * @param id - connector id。
+   * @param fault - 失败分类。
+   * @returns 可直接抛出的错误。
+   */
+  private readFault(id: string, fault: CredentialReadFault): CredentialReadError {
+    const error = new CredentialReadError(id, fault)
+    try {
+      this.onReadFault?.(id, error)
+    } catch { /* 日志不属于读语义 */ }
+    return error
   }
 
   async writeCredential(id: string, credential: ConnectorCredential): Promise<void> {
@@ -303,10 +425,21 @@ export class ConnectorStore {
     await ensurePrivateDirectory(this.dir)
     const file = this.path(id)
     const temporary = join(this.dir, `.${basename(file)}.${process.pid}.${randomUUID()}.tmp`)
+    // 写面与读面共用同一条上限（2026-09-26 FIX-31 / Z2-3）：写出一个自己读不回来
+    // 的凭据文档，等于给下一次 `updateCredential` 准备好"静默抹掉它"的前置条件，
+    // 而 `credentialIds()` 还会继续列出它 —— 两处读法互相矛盾。超限就**拒写**。
+    const document = `${JSON.stringify(credential, null, 2)}\n`
+    const bytes = Buffer.byteLength(document, 'utf8')
+    if (bytes > MAX_CREDENTIAL_BYTES) {
+      throw new Error(
+        `connector credential "${id}" is ${String(bytes)} bytes, above the `
+        + `${String(MAX_CREDENTIAL_BYTES)}-byte limit: refusing to write it (the read path would not return it)`,
+      )
+    }
     try {
       const handle = await fs.open(temporary, 'wx', FILE_MODE)
       try {
-        await handle.writeFile(`${JSON.stringify(credential, null, 2)}\n`, 'utf8')
+        await handle.writeFile(document, 'utf8')
         await handle.sync()
       } finally {
         await handle.close()
@@ -324,6 +457,9 @@ export class ConnectorStore {
     // 读-改-写必须在同一段独占区里：否则两个并发 update 会互相覆盖（写后补偿的
     // 复核把这条竞态也一并暴露出来）。
     return await this.exclusive(async () => {
+      // 读失败会**抛出**（只有 ENOENT 才是 `null`，见 `readCredential`）：这里
+      // 绝不能把"读不出来"当成"没有凭据"、从 `{updatedAt: 0}` 起重建整份文档 ——
+      // 那正是把 accessToken/refreshToken/clientId/clientSecret 静默抹掉的路径。
       const current = (await this.readCredential(id)) ?? { updatedAt: 0 }
       // Strictly increasing per id: two writes inside one millisecond must still
       // be ordered, because `adoptLatestRefresh` compares this value to decide

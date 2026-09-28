@@ -500,12 +500,116 @@ while IFS= read -r channel; do
   #    旧实现只断言 `aws s3 ls <键>` 有输出,截断的对象照样放行。
   verify_remote_object "$zip_key" "$zip" "版本资产(写指针前复检)"
 
+  # 3b) **单调守卫**(R28 审计 AB2-A-01):写指针前先读回现有指针的版本,倒退即拒绝写。
+  #
+  #     现场:`<channel>/latest.json` 是**跨版本共享、可变、最后写者赢**的对象,而本脚本
+  #     此前从不读回旧指针做比较 —— 两个 tag 的 run 并发跑 `release` 时(顶层
+  #     `concurrency.group` 只按 `github.ref` 分组,不同 tag 永不互斥),慢的那个发布完
+  #     就把指针写回**更旧**的版本。客户端更新链的**第一步**就是读这份清单 ⇒ 用户侧
+  #     表现为"检查更新永远说已是最新"(静默降级),而流水线全绿。
+  #
+  #     版本序**不在这里写第二份**:与上面保留策略用同一个真源(`sort -V`;GNU version
+  #     sort 的字面序里 `2.10.0` < `2.9.0`,所以不能按字符串比)。
+  #
+  #     读法分两步,理由都是"把不可靠的面缩到最小":①`head-object` 判"指针在不在"用
+  #     本脚本**已有判据**过的 404 谓词(verify_remote_object_absent 同一形态),而不是
+  #     去猜 `s3 cp` 对缺失对象的措辞;②真在才用 `aws s3 cp <s3 url> -` 读回正文
+  #     (真 CLI 支持 `-` = stdout)。**aws 的输出必须先捕获**(脚本头纪律:它的失败信息
+  #     自身会回显含渠道 id 的对象键),所以这里与 `s3 ls` 那处一样:捕获 + 只在失败时
+  #     `brand_sanitize` 后打印。
+  #
+  #     三种结局:①指针不存在(该渠道第一次发布)⇒ 照写;②现有版本不晚于本次 ⇒ 照写
+  #     (重发同一版本是允许的);③现有版本**更新** ⇒ **拒绝写 + `::warning::`**,但
+  #     不中止整个发布 —— 本次的版本目录与 GitHub Release 已经产出且互不影响,只有指针
+  #     保持不动(让"慢的那个 tag"退回不去,而不是让整条发布链变红)。
+  #     读不回 / 正文解析不出可比的版本 ⇒ **fail-loud**(无法证明不倒退就不能写:指针是
+  #     客户端唯一入口,宁可让运维看一眼,也不接受一次静默降级)。
+  pointer_key="${channel}/latest.json"
+  # CAS 基准:空 = 该渠道还没有指针(首次发布 ⇒ 用 `--if-none-match '*'`)。
+  pointer_etag=''
+  set +e
+  pointer_head="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$pointer_key" 2>&1)"
+  pointer_head_status=$?
+  set -e
+  pointer_regressed=0
+  if [ "$pointer_head_status" -ne 0 ]; then
+    if printf '%s\n' "$pointer_head" | grep -qE '\((404|NoSuchKey)\)[[:space:]]+when calling the HeadObject operation'; then
+      : # 该渠道还没有指针(第一次发布)⇒ 没有可比对象,照写。
+    else
+      printf '%s\n' "$pointer_head" | brand_sanitize >&2
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:无法确认现有版本指针的状态(head-object 既不是 404 也不是成功))—— 拒绝在无法证明「不会倒退」的情况下写指针;上方输出已脱敏" >&2
+      exit 1
+    fi
+  else
+    # **CAS 的基准**:现有指针的 ETag —— 写正式键时用它做条件写(`--if-match`)。
+    #
+    # 为什么必须有它(R29-AC1-01 = P1):上面那次"读回版本 → 判不倒退"与下面那次写之间
+    # 隔着临时键 PUT + 两次 head-object 校验(真实 R2 上是数次网络往返),而两个 tag 的
+    # run 本来就会落在同一分钟。AC1 用**两个真发布进程**实测:无条件写(`copy-object`)
+    # 时 natural 3/8、barrier 4/12 轮指针被写回更旧的版本,其中 2 轮两个进程都 exit 0
+    # 且零告警(silent 模式 5/5)。条件写把"判据"与"写入"放进同一次请求,由存储侧原子
+    # 完成 —— 输的那一方拿 412,重读-重判-有界重试(见下面第 4 步的 CAS 循环)。
+    set +e
+    pointer_etag_raw="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$pointer_key" --query ETag --output text 2>&1)"
+    pointer_etag_status=$?
+    set -e
+    if [ "$pointer_etag_status" -ne 0 ]; then
+      printf '%s\n' "$pointer_etag_raw" | brand_sanitize >&2
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:读不回现有版本指针的 ETag)—— 条件写的基准拿不到就无法证明「不会倒退」;上方输出已脱敏" >&2
+      exit 1
+    fi
+    pointer_etag="$(printf '%s' "$pointer_etag_raw" | tr -d '"' | tr -d '\r\n')"
+    # 形状判据:真 CLI 的 `--query ETag --output text` 回带引号的十六进制(多段上传是
+    # `<hex>-<n>`)。空值 / `None` / 含空白 ⇒ 拿到的不是 ETag ⇒ fail-loud(猜一个值去
+    # 做条件写比不写更糟:412 会被误读成"并发冲突")。
+    if [ -z "$pointer_etag" ] || [ "$pointer_etag" = "None" ] \
+      || printf '%s' "$pointer_etag" | grep -qE '[^A-Za-z0-9+/=_-]'; then
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:head-object 回的 ETag 形状不可用)—— 拒绝在拿不到条件写基准的情况下写指针" >&2
+      exit 1
+    fi
+    # stdout 与 stderr **分开**:这里要的是对象正文,若把 stderr 混进来(aws 的进度条在
+    # 非 TTY 下不打印,但错误信息会),sed 抽出的"版本号"就可能被别的文本污染 —— 那是
+    # 静默错判的方向。stderr 落临时文件,只在失败时脱敏后打印(脚本头纪律)。
+    pointer_err="$(mktemp)"
+    set +e
+    pointer_body="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_key}" - 2>"$pointer_err")"
+    pointer_body_status=$?
+    set -e
+    if [ "$pointer_body_status" -ne 0 ]; then
+      brand_sanitize < "$pointer_err" >&2
+      rm -f "$pointer_err"
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:读不回现有版本指针的正文)—— 拒绝在无法证明「不会倒退」的情况下写指针;上方输出已脱敏" >&2
+      exit 1
+    fi
+    rm -f "$pointer_err"
+    # 只认本脚本自己写出的清单形状(`server.version`;schema 1 起未变过)。解析不出
+    # 可比的版本 = 这个指针不是本流水线写的 ⇒ 同上 fail-loud,不猜。
+    pointer_ver="$(printf '%s\n' "$pointer_body" \
+      | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1)"
+    if ! printf '%s\n' "$pointer_ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+      echo "::error::更新服务器发布失败(渠道 ${INDEX}:现有版本指针的正文里解析不出可比的版本号(形状不是本流水线写的 schema 1 清单))—— 拒绝写指针,请人工核对 ${pointer_key}" >&2
+      exit 1
+    fi
+    if [ "$pointer_ver" != "$VER" ] \
+      && [ "$(printf '%s\n%s\n' "$pointer_ver" "$VER" | sort -V | head -n1)" = "$VER" ]; then
+      pointer_regressed=1
+      echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:现有指针是 ${pointer_ver}、本次发布的是 ${VER} —— 写下去会把更新指针倒退;并发的另一个 tag 已经发过更新的版本)。本次的版本目录与 GitHub Release 不受影响,指针保持 ${pointer_ver} 不动。"
+    fi
+  fi
+
   # 4) 版本指针**最后**写:先资产后指针,读者永远不会看到指向空目录的清单。
   #
   #    指针本身也要证明字节完整(2026-09-23 第六轮审计 R6-C-3):客户端更新链路的第一步
   #    就是读这份清单 —— 它被截断/写坏时连版本号都读不到,而 `aws s3 cp` 的退出码同样
   #    只表示"请求成功"。所以这里与资产走**同一条**单请求 PUT + 存储侧校验和的路径,
   #    写完再由 verify_remote_object 对拍大小与 SHA256。
+  #
+  #    被 3b) 的单调守卫拒绝时**整段跳过**(指针一个字节都不动):`continue` 前先把本渠道
+  #    计进 TOTAL,保持收尾计数与其它渠道一致。
+  if [ "$pointer_regressed" = "1" ]; then
+    TOTAL=$((TOTAL + 1))
+    continue
+  fi
   manifest="$(mktemp)"
   cat > "$manifest" <<JSON
 {
@@ -530,9 +634,10 @@ JSON
   # 没有这个问题(它们在写指针之前校验),只有指针自身的校验天然是"写后校验"。
   #
   # 现在:临时键(`.latest-next-<rand>`,与探测对象同一命名纪律 ⇒ 不进任何版本目录)
-  # → `verify_remote_object` 对拍大小+SHA256 → `s3api copy-object` 服务端**原子替换**
-  # 正式键(元数据走 COPY,缓存头/内容类型随临时对象继承,仍是 no-cache) → 再对拍正式键。
+  # → `verify_remote_object` 对拍大小+SHA256(**证明"这份字节能被存储原样收下"**)
+  # → 用同一个 `--checksum-sha256` 把同样的字**条件写**(CAS)进正式键,写完再对拍正式键。
   # 任一步失败,正式指针**一个字节都没动**;临时键由 EXIT trap 收尾。
+  # (为什么要 CAS 而不是无条件替换,见下面那段注释 —— R29-AC1-01 的 P1。)
   manifest_tmp_key="${channel}/.latest-next-${RANDOM}${RANDOM}-$$.json"
   manifest_tmp_key_live="$manifest_tmp_key"
   if ! brand_run_checked aws s3api put-object \
@@ -544,20 +649,119 @@ JSON
     exit 1
   fi
   verify_remote_object "$manifest_tmp_key" "$manifest" "版本指针(临时键)"
-  # 服务端 copy = 单对象原子替换(不经过本地字节,R2 侧同一个 PUT 语义)。
-  # 元数据用 `REPLACE` **显式重述**缓存头与内容类型:**不依赖"继承"** —— 否则临时对象的
-  # 缓存头一旦被改错(或将来有人把它换成别的前缀/别的写法),正式指针会静默继承一个错值,
-  # 而"逐对象缓存头断言"看到的仍是临时对象那一行。REPLACE + 逐字段重述让正式键的
-  # 缓存头**在写它的那一行**上可被判据读到(判据见 verify-ci-scripts 的 6b 节)。
-  if ! brand_run_checked aws s3api copy-object \
-    --bucket "$R2_BUCKET" --key "${channel}/latest.json" \
-    --copy-source "${R2_BUCKET}/${manifest_tmp_key}" \
-    --metadata-directive REPLACE --content-type application/json --cache-control "$NO_CACHE"; then
-    echo "::error::更新服务器发布失败(渠道 ${INDEX}:用临时键替换版本指针;上方输出已脱敏)" >&2
+  # **条件写(CAS)替换正式键** —— 这是"无论谁来写都不会倒退"的唯一成立方式
+  # (R29-AC1-01 = P1;改之前这里是无条件 `copy-object`)。
+  #
+  # 为什么不是 `copy-object`:它的条件参数(`--copy-source-if-*`)作用在**源对象**上,
+  # 对**目标键**没有任何前置条件 —— 于是"用临时键替换正式键"这一步天然是
+  # check-then-act:两个 tag 的 run 各自读到同一个旧指针、各自判"不倒退"、各自写,
+  # 后写者赢。AC1 用两个真发布进程实测:natural 3/8、barrier 4/12 轮指针被写回更旧的
+  # 版本,barrier 的 2 轮与 silent 的 5/5 **两个进程都 exit 0 且零告警**。
+  #
+  # 现在:写正式键用 `put-object --if-match <3b 读到的 ETag>`,前置条件与写入在同一次
+  # 请求里由存储侧原子判定 ⇒ 输的那一方拿 412,重读-重判-有界重试;首次发布(还没有
+  # 指针)用 `--if-none-match '*'`,同样是原子判定(两个 run 同时首发只有一个建得出来)。
+  #
+  # 临时键**不是多余的**:它已经证明"这份字节能被存储原样收下";正式键这次 PUT 带
+  # 同一个 `--checksum-sha256`,内容被截断/改写时存储侧直接拒绝(不会留下半截指针,
+  # 见上面 C2-B-01 那段历史),写完再 `verify_remote_object` 对拍大小与 SHA256。
+  # 缓存头/内容类型这次是**逐字段显式重述**(不再依赖从临时对象继承)。
+  cas_attempt=0
+  cas_max=3
+  cas_written=0
+  while [ "$cas_attempt" -lt "$cas_max" ]; do
+    cas_attempt=$((cas_attempt + 1))
+    if [ -n "$pointer_etag" ]; then
+      cas_condition=(--if-match "$pointer_etag")
+    else
+      cas_condition=(--if-none-match '*')
+    fi
+    # 捕获输出(而不是走 brand_run_checked):412 是**预期**的一种结局,要按报文分流;
+    # 其余失败一律脱敏后 fail-loud(脚本头纪律:aws 的失败信息自身会回显对象键)。
+    set +e
+    cas_output="$(aws s3api put-object \
+      --bucket "$R2_BUCKET" --key "${channel}/latest.json" --body "$manifest_body" \
+      --content-type application/json --cache-control "$NO_CACHE" \
+      --checksum-sha256 "$(sha256_b64 "$manifest")" "${cas_condition[@]}" 2>&1)"
+    cas_status=$?
+    set -e
+    if [ "$cas_status" -eq 0 ]; then
+      cas_written=1
+      break
+    fi
+    if printf '%s\n' "$cas_output" | grep -qE '\((412|PreconditionFailed)\)[[:space:]]+when calling the PutObject operation'; then
+      # 别人先写了(或另一个 run 抢到了首次发布)⇒ 重读指针、**重新判一次单调性**。
+      #
+      # 三条出口,与 3b 的口径一致:①现有版本比本次新 ⇒ warning + 不写(让慢的那个 tag
+      # 退回,而不是让整条发布链变红);②现有版本不晚于本次 ⇒ 用新的 ETag 再试一次;
+      # ③读不回/解析不出 ⇒ fail-loud(不能证明不倒退就不写)。
+      set +e
+      cas_head="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$pointer_key" --query ETag --output text 2>&1)"
+      cas_head_status=$?
+      set -e
+      if [ "$cas_head_status" -ne 0 ]; then
+        printf '%s\n' "$cas_head" | brand_sanitize >&2
+        echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写被拒后读不回指针的 ETag)—— 拒绝在无法证明「不会倒退」的情况下继续;上方输出已脱敏" >&2
+        rm -f "$manifest"
+        exit 1
+      fi
+      pointer_etag="$(printf '%s' "$cas_head" | tr -d '"' | tr -d '\r\n')"
+      if [ -z "$pointer_etag" ] || [ "$pointer_etag" = "None" ] \
+        || printf '%s' "$pointer_etag" | grep -qE '[^A-Za-z0-9+/=_-]'; then
+        echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写被拒后拿到的 ETag 形状不可用)" >&2
+        rm -f "$manifest"
+        exit 1
+      fi
+      cas_body="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_key}" - 2>/dev/null || true)"
+      cas_ver="$(printf '%s\n' "$cas_body" \
+        | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1)"
+      if ! printf '%s\n' "$cas_ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+        echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写被拒后,现有指针的正文里解析不出可比的版本号)—— 拒绝写指针,请人工核对 ${pointer_key}" >&2
+        rm -f "$manifest"
+        exit 1
+      fi
+      if [ "$cas_ver" != "$VER" ] \
+        && [ "$(printf '%s\n%s\n' "$cas_ver" "$VER" | sort -V | head -n1)" = "$VER" ]; then
+        pointer_regressed=1
+        echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:条件写被拒后发现现有指针是 ${cas_ver}、本次发布的是 ${VER} —— 并发的另一个 tag 已经发过更新的版本)。本次的版本目录与 GitHub Release 不受影响,指针保持 ${cas_ver} 不动。"
+        break
+      fi
+      # 现有版本不晚于本次 ⇒ 拿新基准重试(有界:cas_max 次,间隔 1s 让并发的另一方写完)。
+      sleep 1
+      continue
+    fi
+    printf '%s\n' "$cas_output" | brand_sanitize >&2
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写版本指针失败,且不是可重试的 412)—— 若这是首次出现,先确认对象存储支持条件写(PutObject 的 If-Match / If-None-Match);上方输出已脱敏" >&2
+    rm -f "$manifest"
+    exit 1
+  done
+  if [ "$cas_written" != "1" ] && [ "$pointer_regressed" != "1" ]; then
+    echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写连续 ${cas_max} 次被 412 拒绝,而现有指针并不比本次新)—— 拒绝在无法证明「指针已指向本次版本」的情况下继续" >&2
     rm -f "$manifest"
     exit 1
   fi
-  verify_remote_object "${channel}/latest.json" "$manifest" "版本指针"
+  if [ "$cas_written" = "1" ]; then
+    # 写后校验。**并发下有一个已知无害的竞态**:我们的条件写成功之后、这次校验之前,
+    # 另一个 tag 的 run 完全可能已经写上了**更新的**版本 ⇒ 远端字节与本地清单必然对不上,
+    # 而指针其实是**对的**（"更新"这件事本身不是缺陷）。所以校验失败时先重读一次现有版本:
+    #   · 现有版本比本次**更新** ⇒ `::warning::` + 退让（与 3b 的倒退路径同一口径）;
+    #   · 其余（读不回 / 与本次同版 / 更旧）⇒ 真损坏 ⇒ fail-loud。
+    # （verify_remote_object 自己会 exit 1，所以这里放在子壳里跑，把退出码收成条件。）
+    if ! ( verify_remote_object "${channel}/latest.json" "$manifest" "版本指针" ); then
+      superseded_body="$(aws s3 cp "s3://${R2_BUCKET}/${pointer_key}" - 2>/dev/null || true)"
+      superseded_ver="$(printf '%s\n' "$superseded_body" \
+        | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1)"
+      if [ -n "$superseded_ver" ] && [ "$superseded_ver" != "$VER" ] \
+        && [ "$(printf '%s\n%s\n' "$superseded_ver" "$VER" | sort -V | tail -n1)" = "$superseded_ver" ]; then
+        pointer_regressed=1
+        echo "::warning::更新服务器跳过写版本指针(渠道 ${INDEX}:本次条件写成功后,并发的另一个 tag 已经把指针更新到 ${superseded_ver}(本次 ${VER})—— 指针保持更新的那个版本)。本次的版本目录与 GitHub Release 不受影响。"
+      else
+        echo "::error::更新服务器发布失败(渠道 ${INDEX}:条件写成功后,正式指针的字节与本次清单不一致,而现有版本也不比本次新)—— 拒绝留下一个来路不明的指针" >&2
+        rm -f "$manifest"
+        exit 1
+      fi
+    fi
+  fi
   # 正式键已就位 ⇒ 临时键的收尾职责从 trap 手里取走,并立刻收干净。
   manifest_tmp_key_live=''
   if ! verify_remote_object_absent "$manifest_tmp_key" "版本指针(临时键)"; then

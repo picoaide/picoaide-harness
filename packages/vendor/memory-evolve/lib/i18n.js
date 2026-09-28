@@ -530,6 +530,13 @@ export const SKILL_DICT = {
     '技能 "{name}" 已被禁用（modelInvocable: false），不执行写入',
     'Skill "{name}" is disabled (modelInvocable: false); no write performed',
   ],
+  // AB2-04（FIX-42③）：注册表**查询失败**不等于"没有禁用影子"。从前 `catch`
+  // 一律 `return undefined` ⇒ 一次瞬时 IO 失败被写路径固化成一次"成功"的写入。
+  // （"运行时压根没有 skills 服务"是**结论**：没有注册表就不可能有影子，放行。）
+  'skill.registryQueryFailed': [
+    '查询技能注册表失败（{reason}），无法确认 "{name}" 是否被禁用 —— 本次不写入，请稍后重试',
+    'Querying the skill registry failed ({reason}), so whether "{name}" is disabled cannot be confirmed — nothing was written; retry later',
+  ],
 }
 
 /** Snapshot injection strings (renderSnapshot / buildMemoryContext in lib/index.js). */

@@ -4,7 +4,7 @@
     "submoduleSource": "deepseek-harness/packages/skill/skill-filesystem/src/index.ts",
     "installedLib": "packages/host/desktop/node_modules/@deepseek-ai/dsh-skill-filesystem/lib/index.js"
   },
-  "submoduleSourceSha256": "0eaa88f6055fa4809afc3325110fa0ddfca714e5fd96553ecd2cd89a2b99f382",
+  "submoduleSourceSha256": "a3fcfefcc6500f4bd7c19ba48dfa80efad312034f196f81a40d33d0d0098d315",
   "installedLibSha256": "244e92e032ef15e96cb60c9e2cfddf5d89e167eb171fcbfd83e9415b0455a0d7",
   "acceptedStringLiterals": [
     "0",

@@ -37,13 +37,17 @@ function fakeCtx() {
   return ctx
 }
 
-/** 构造一个极简 IncomingMessage/ServerResponse 双胞胎，捕获写出的响应。 */
+/** 构造一个极简 IncomingMessage/ServerResponse 双胞胎，捕获写出的响应。
+ *
+ * R24 B3：注册点先过共享守卫的 **Host 栅栏**（Host 必须是本机可信托管名），
+ * 而真实的 node:http 请求必然带 Host（HTTP/1.1 强制）⇒ 桩按真实请求形状补上
+ * `host`（与 FIX-04 给 bookmarks 桩补 Origin/content-type 同一口径）。 */
 function fakeReqRes(method, url) {
   const res = { status: 0, body: '', ended: false }
   res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
   res.end = (text) => { res.body = text; res.ended = true }
   return {
-    req: { method, url, on: () => {} },
+    req: { method, url, headers: { host: 'localhost' }, on: () => {} },
     res,
   }
 }

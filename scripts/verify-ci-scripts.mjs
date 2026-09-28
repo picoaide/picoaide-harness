@@ -27,13 +27,14 @@
  * 退出码:0 全部通过;1 有断言失败。
  */
 
-import { execFileSync, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { createHash, createHmac } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 
 // 复用门禁自己的 run 块解析器:下面 1c 要**真跑** ci.yml 里的 shell 步骤(不是文本对拍)。
 import { extractRunBlocks } from './check-workflows.mjs'
@@ -48,6 +49,20 @@ const packageScript = join(root, 'scripts', 'ci-package-clients.sh')
 const publishScript = join(root, 'scripts', 'ci-publish-update-server.sh')
 const transferScript = join(root, 'scripts', 'ci-channel-transfer.sh')
 const imagesScript = join(root, 'scripts', 'ci-build-channel-images.sh')
+/**
+ * 中转/发布相关用例的**两组凭据**夹具：aws CLI 只认 `AWS_*`，`R2_*` 是端点/桶名/
+ * HMAC 种子（2026-09-11 v2.7.0 真实事故：夹具只给 R2_* 时脚本"本地全绿"，正式 tag 上
+ * 三个平台 job 全部以 aws 的 "Unable to locate credentials" 失败、品牌渠道零交付）。
+ */
+const R2_CREDENTIALS = {
+  R2_ACCOUNT_ID: 'acct',
+  R2_BUCKET: 'bucket',
+  R2_SECRET_ACCESS_KEY: 'secret',
+  AWS_ACCESS_KEY_ID: 'keyid',
+  AWS_SECRET_ACCESS_KEY: 'secret',
+  AWS_DEFAULT_REGION: 'auto',
+}
+
 const failures = []
 const scratch = []
 
@@ -69,6 +84,17 @@ process.on('uncaughtException', error => {
  * `s3api put-object` / `s3api head-object`(2026-09-23 审计 K-01 起,上传走单请求
  * PUT + 存储侧校验和 —— 假 aws 必须同形,否则"上传成功但对象损坏"这类场景在本地
  * 根本构造不出来)。
+ *
+ * **条件写(compare-and-swap)也必须同形**（R29-AC1-01）:发布脚本写 `<channel>/latest.json`
+ * 用的是 `put-object --if-match <现有 ETag>`(首发 `--if-none-match '*'`),它是"两个 tag
+ * 并发时指针不倒退"的**唯一**成立方式。假 aws 因此实现了:
+ *   · `head-object --query ETag --output text` ⇒ 带双引号的 MD5 十六进制(单请求 PUT 的
+ *     ETag 语义,与真 S3/R2 一致);
+ *   · `put-object --if-match` / `--if-none-match '*'` ⇒ 不满足前置条件时回
+ *     `(PreconditionFailed) when calling the PutObject operation` + 退出码 254 且
+ *     **不创建/不覆盖**对象,并在日志里记一行 `precondition-failed <条件> <键>`
+ *     (6g 的并发用例靠它证明"条件写真的被拒过" —— 没有这条,用例可能是空转的假绿)。
+ *   · `copy-object` 走同一份内容 ⇒ ETag 由内容派生,不需要额外维护。
  *
  * `--body` 的**契约**同样必须与真 CLI 同形(2026-09-24 发布链阻断事故):只接受纯
  * 路径,`file://` / `fileb://` 前缀与"路径不存在"都报同一条 ParamValidation 并非零
@@ -145,6 +171,11 @@ inject_scope() {
   [ -z "\${2:-}" ] && return 0
   case "$1" in *"\${2}"*) return 0 ;; *) return 1 ;; esac
 }
+
+# 对象的 ETag:与真 S3/R2 同形 —— 单请求 PUT(非多段)的 ETag = 内容的 MD5 十六进制,
+# head-object 的 --query ETag --output text 回**带双引号**的形态。条件写
+# (--if-match)的基准就是它(R29-AC1-01)。
+etag_of() { md5sum "$1" | cut -d' ' -f1; }
 
 # ---- 参数校验层:与真 CLI 2.37.1 同形(2026-09-24 审计 C-20)----
 #
@@ -265,6 +296,24 @@ case "$cmd" in
     # 这种"参数写在路径前面"的形态 —— 按 args[2]/args[3] 取会把开关当成路径)。
     src="\${SCAN_POSITIONAL_ITEMS[0]}"; dst="\${SCAN_POSITIONAL_ITEMS[1]}"
     record "cp $src $dst"
+    # 目标 "-" = stdout(真 CLI 的 "aws s3 cp s3://bucket/key -",用于读回远端对象正文;
+    # R28 审计 AB2-A-01 的单调守卫就是这么读现有 latest.json 的)。**与真 CLI 同形**:
+    # 对象不存在时打 "download failed: … An error occurred (404) when calling the
+    # HeadObject operation: Not Found" 并退出 1;成功时把对象字节写到 stdout,不落盘。
+    # (本段是 JS 模板字符串的一部分:注释里不得出现反引号,美元加大括号必须转义。)
+    if [ "$dst" = "-" ]; then
+      case "$src" in
+        s3://*) ;;
+        *) param_error "Invalid argument type: only s3:// sources can be downloaded to stdout" ;;
+      esac
+      src_key="\${src#s3://*/}"
+      if [ ! -f "$store/$src_key" ]; then
+        echo "download failed: $src to - An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+        exit 1
+      fi
+      cat "$store/$src_key"
+      exit 0
+    fi
     extra=()
     i=2
     while [ "$i" -lt "\${#args[@]}" ]; do
@@ -321,6 +370,33 @@ case "$cmd" in
     record "\${args[*]}"
     dest="$store/$key"
     mkdir -p "$(dirname "$dest")"
+    # ---- 条件写(compare-and-swap)的前置条件:与真 S3/R2 **同形** ----
+    #
+    # 发布脚本用 --if-match <现有 ETag>(或首发 --if-none-match '*')把"判据"与
+    # "写入"绑进同一次请求 —— 这是 R29-AC1-01 的修法。假 aws 必须真的实现它,否则
+    # "两个 tag 并发时指针不倒退"这条断言在本地根本咬不到东西(mock 掩盖契约)。
+    #
+    # 真 CLI 2.37.1 的形态(实测,全文见本节用例的断言文案):不满足前置条件 ⇒
+    #   An error occurred (PreconditionFailed) when calling the PutObject operation:
+    #   At least one of the pre-conditions you specified did not hold
+    # 加退出码 254,且**对象不被创建/覆盖**。
+    if [ -n "\${SCAN_FLAG_VALUE[--if-match]+given}" ]; then
+      if [ ! -f "$dest" ] || [ "$(etag_of "$dest")" != "\$(printf '%s' "\${SCAN_FLAG_VALUE[--if-match]}" | tr -d '"')" ]; then
+        record "precondition-failed if-match $key"
+        echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+        exit 254
+      fi
+    fi
+    if [ -n "\${SCAN_FLAG_VALUE[--if-none-match]+given}" ]; then
+      case "\${SCAN_FLAG_VALUE[--if-none-match]}" in
+        '*')
+          if [ -f "$dest" ]; then
+            record "precondition-failed if-none-match $key"
+            echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+            exit 254
+          fi ;;
+      esac
+    fi
     if [ -z "\${SCAN_FLAG_VALUE[--body]+given}" ]; then
       : > "$dest"
     elif [ "\${FAKE_AWS_TRUNCATE_BYTES:-0}" -gt 0 ] && inject_scope "$key" "\${FAKE_AWS_TRUNCATE_KEY:-}"; then
@@ -331,7 +407,6 @@ case "$cmd" in
     printf '%s' "$sum" > "$dest.checksum"
     ;;
   "s3api copy-object")
-    declare -A SCAN_FLAG_VALUE=()
     scan_flags "$COPY_OBJECT_VALUE_FLAGS" "$COPY_OBJECT_BOOL_FLAGS"
     unknown="$(join_unknown ", ")"
     [ -z "$unknown" ] || usage_error "$unknown"
@@ -410,6 +485,9 @@ case "$cmd" in
       else
         stat -c%s "$target"
       fi
+    elif [ "$query" = "ETag" ]; then
+      # 条件写的基准(带引号 —— 真 CLI 的 --output text 就是带引号的形态)。
+      printf '"%s"\\n' "$(etag_of "$target")"
     else
       if [ -n "\${FAKE_AWS_SHA:-}" ] && inject_scope "$key" "\${FAKE_AWS_SHA_KEY:-}"; then
         echo "\${FAKE_AWS_SHA}"
@@ -498,6 +576,21 @@ function check(condition, message) {
 function tempDir(prefix) {  const dir = mkdtempSync(join(tmpdir(), prefix))
   scratch.push(dir)
   return dir
+}
+
+/**
+ * 解析 JSON,失败返回 `undefined`。
+ *
+ * 用途:断言里要报"实际的版本号是多少"时**不能**直接 `JSON.parse` —— 被测对象坏了
+ * (空文件/半截字节)时,断言会因为解析抛异常而崩掉,把"对象是坏的"这条信息换成一条
+ * 栈迹(而它恰恰是最需要看清楚的现场)。失败时如实返回 undefined,由断言自己报出来。
+ */
+function safeJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -620,6 +713,55 @@ function orderedChannelIds(root) {
 }
 
 /**
+ * 给渠道目录就位**打包管线要求的两件素材**（`logo.svg` + `app-icon.png`）。
+ *
+ * 为什么夹具必须带它们（2026-09-26 审计 Z3-3）：品牌渠道缺 `assets.logo` 或
+ * `app-icon.png` 时，构建期判据（`ci-channels.sh`）与打包期判据（`brand-prepare.mjs`）
+ * 都会 fail-loud —— 不补的话，那些"只想测某个字段"的用例会先被素材规则拦下，
+ * 断言看似通过、测到的东西却与它声称的无关（2026-09-12 的 home_dir 那次踩过同一个坑）。
+ *
+ * 素材内容用仓库里的官方文件：`logo.svg` 必须是能过脚本特征检查的图形 SVG，
+ * `app-icon.png` 必须是 1024×1024 / 16 位 RGBA / 内嵌 ICC 的真 PNG（判据逐条校验形状）。
+ * 渠道用官方几何是**合法**的（几何权威只有一份，见 AGENTS.md），所以这不会掩盖什么。
+ * @param root - 渠道仓根目录。
+ * @param id - 渠道 id。
+ */
+function writeChannelAssetFiles(channelRepoRoot, id) {
+  const dir = join(channelRepoRoot, 'channels', id)
+  mkdirSync(dir, { recursive: true })
+  // 注意：素材从**真实仓库**的 brands/official 复制（夹具的临时仓里没有 brands/），
+  // 而参数名刻意不叫 `root` —— 那会遮蔽模块级的仓库根常量（本文件的 `root`）。
+  copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(dir, 'logo.svg'))
+  copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(dir, 'app-icon.png'))
+}
+
+/**
+ * 就地补齐合成渠道仓里**品牌渠道**的素材必需集（`assets.logo` + 两件素材文件）。
+ *
+ * clone / pin 面的夹具是**真 git 仓**（内容取自提交，不是工作树），逐站手写素材既
+ * 啰嗦又容易漏 —— 漏了就让那组用例先被素材规则拦下（断言看似通过、测到的东西与它
+ * 声称的无关）。公共渠道（official/beta）不动：它们本来就不要求素材。
+ * @param repo - 渠道仓根目录。
+ */
+function completeChannelRepo(repo) {
+  const dir = join(repo, 'channels')
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const id = entry.name
+    if (id === 'official' || id === 'beta') continue
+    const manifest = join(dir, id, 'channel.json')
+    if (!existsSync(manifest)) continue
+    const config = JSON.parse(readFileSync(manifest, 'utf8'))
+    if (config?.assets?.logo === undefined) {
+      config.assets = { ...(config.assets ?? {}), logo: 'logo.svg' }
+      writeFileSync(manifest, JSON.stringify(config))
+    }
+    writeChannelAssetFiles(repo, id)
+  }
+}
+
+/**
  * 往渠道仓根目录补足到下限的"填充渠道"（中性名字、合法配置、scheme 互不相同）。
  *
  * 为什么每个"稳定 tag + 枚举渠道"的夹具都要补（R8-C-7）：真实渠道仓的目录数 ≥ 下限，
@@ -639,6 +781,8 @@ function padChannelRepo(root, min = channelFloor()) {
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      // 品牌渠道必填的 logo 声明（2026-09-26 审计 Z3-3）：缺它构建期中止。
+      assets: { logo: 'logo.svg' },
       desktop: {
         product_name: `${id} AI`,
         slug: `${id}-AI`,
@@ -648,6 +792,7 @@ function padChannelRepo(root, min = channelFloor()) {
         app_origin_scheme: `${id.replaceAll('-', '')}-app`,
       },
     }))
+    writeChannelAssetFiles(root, id)
     added.push(id)
   }
   return added
@@ -676,7 +821,11 @@ function fakeChannelRepo(ids, options = {}) {
       identity: { display_name: `${id} AI`, short_name: id },
       // 私有仓的渠道包里真实存在这样的注解字段:校验必须忽略 `_` 前缀的键,
       // 否则整条发布会被一条注释拦下(2026-09-10 CI 实测)。
-      assets: { _note: '注解:渠道素材说明,不是文件名/路径' },
+      // `logo` 是**品牌渠道必填**的素材声明(2026-09-26 审计 Z3-3):随包内联 logo 与
+      // 打包期派生(托盘位图/随包 favicon)都以它为准,缺了构建期中止。
+      assets: publicChannel
+        ? { _note: '注解:渠道素材说明,不是文件名/路径' }
+        : { _note: '注解:渠道素材说明,不是文件名/路径', logo: 'logo.svg' },
       ...(publicChannel
         ? // beta 必须显式声明**与官方正式版一致**的数据根（2026-09-12 用户定案）：
           // 预发版是正式版的前置验证，登录态/设置/会话要与正式版延续；写成自己的
@@ -695,6 +844,11 @@ function fakeChannelRepo(ids, options = {}) {
             },
           }),
     }))
+  }
+  // 品牌渠道的素材文件(logo.svg + app-icon.png):判据会逐条校验它们的存在与形状。
+  for (const id of ids) {
+    if (id === 'official' || id === 'beta') continue
+    writeChannelAssetFiles(dir, id)
   }
   for (const extra of options.extraDirectories ?? []) {
     mkdirSync(join(dir, 'channels', extra), { recursive: true })
@@ -1339,6 +1493,9 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: id,
       identity: { display_name: `${id} AI`, short_name: id },
+      // 品牌渠道必填的素材声明(2026-09-26 审计 Z3-3):缺它逐渠道校验会中止构建,
+      // pin/克隆面这组用例就测不到它声称的东西了。
+      ...(publicChannel ? {} : { assets: { logo: 'logo.svg' } }),
       desktop: publicChannel
         ? { app_origin_scheme: 'picoaide-app', ...(id === 'beta' ? { home_dir: '.picoaide-harness' } : {}) }
         : {
@@ -1350,6 +1507,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             app_origin_scheme: `${id.replaceAll('-', '')}-app`,
           },
     }))
+    // 素材文件也要**进这个 git 仓**(clone 路径取的是提交内容,不是工作树)。
+    if (!publicChannel) {
+      copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(repo, 'channels', id, 'logo.svg'))
+      copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(repo, 'channels', id, 'app-icon.png'))
+    }
     fixtureCommit(repo, file, `add ${id}`, '2026-09-01T10:00:00+08:00')
   }
   const firstRevIds = []
@@ -2198,6 +2360,8 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             },
       }))
     }
+    completeChannelRepo(repo)
+    completeChannelRepo(repo)
     fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
     const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
     // 先删一个目录并提交，再 pin 到那个 revision（生产路径的实际形态：pin 指向的树里少一个渠道）
@@ -2249,6 +2413,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
             },
       }))
     }
+    completeChannelRepo(moreRepo)
     fixtureCommit(moreRepo, 'channels/official/README.md', 'one more channel', '2026-09-01T10:00:00+08:00')
     const moreRev = fixtureMustGit(moreRepo, ['rev-parse', 'HEAD'])
     const moreRun = runChannels({
@@ -2380,6 +2545,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       }))
     }
     check(orderedChannelIds(repo).length === channelFloor(), '夹具前置：克隆用例的目录数应正好等于下限')
+    completeChannelRepo(repo)
     fixtureCommit(repo, 'channels/official/README.md', 'full inventory', '2026-09-01T10:00:00+08:00')
     const fullRev = fixtureMustGit(repo, ['rev-parse', 'HEAD'])
     const url = `file://${repo}`
@@ -3112,6 +3278,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: 'example-brand',
       identity: { display_name: 'Example', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
       desktop: {
         slug: 'Example-AI',
         app_id: 'com.example.brand',
@@ -3120,6 +3287,9 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         ...(homeDirValue === undefined ? {} : { home_dir: homeDirValue }),
       },
     }))
+    // 素材给全：这一组用例只测 desktop.home_dir 一条规则（素材缺失会是**另一个**
+    // 失败原因，断言看似通过、测到的东西却与它声称的无关）。
+    writeChannelAssetFiles(root, 'example-brand')
     padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'p.list' })
   }
@@ -3158,6 +3328,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
       schema: 1,
       channel_id: 'example-brand',
       identity: { display_name: 'Example Brand', short_name: 'Example' },
+      assets: { logo: 'logo.svg' },
       desktop: {
         product_name: productName,
         slug: 'Example-AI',
@@ -3167,6 +3338,7 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         app_origin_scheme: 'examplebrand-app',
       },
     }))
+    writeChannelAssetFiles(root, 'example-brand') // 品牌素材必需集（见 writeChannelAssetFiles）
     padChannelRepo(root) // 下限补位（同上）
     return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'pn.list' })
   }
@@ -3228,6 +3400,95 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   writeFileSync(join(betaShared, 'channels', 'beta', 'channel.json'), betaChannel(undefined))
   const betaMissingRun = runChannels({ source: betaShared, refName: 'v2.7.0-beta.3', dest: 'channels', list: 'q.list' })
   check(betaMissingRun.status !== 0, 'beta 缺 desktop.home_dir 必须失败（非 official 渠道一律必填）')
+
+  // ---- 品牌渠道的**素材必需集**（2026-09-26 审计 Z3-3）----
+  //
+  // 三个触发形态都实测过（旧代码全部 EXIT=0，且交付物带厂商品牌）：
+  //   ① 渠道目录没有 app-icon.png ⇒ 安装器/Dock/任务栏回落**厂商图标**；
+  //   ② channel.json 没有 assets.logo ⇒ 随包没有 logo_inline，服务端不可达时登录页
+  //      回落**厂商 mark**；
+  //   ③ assets.logo 指向别的文件名 ⇒ 登录页（按声明内联）与托盘位图/随包 favicon
+  //      （打包侧只按 logo.svg 派生）是**两套品牌**。
+  // 判据必须按**渠道来源**分档：official/beta 的品牌就是厂商自己的，缺素材回落官方
+  // 是预期行为（真实渠道仓的 channels/beta 就没有 app-icon.png），必须继续绿。
+  // 注意：局部变量**不叫 `root`** —— 那会遮蔽模块级的仓库根常量（本文件多处踩过；
+  // 素材要从**真实仓库**的 brands/official 复制，临时夹具仓里没有 brands/）。
+  const brandAssetRepo = ({ assets, logoFile, appIcon }) => {
+    const repoRoot = tempDir('ci-channels-assets-')
+    mkdirSync(join(repoRoot, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(repoRoot, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'official',
+      identity: { display_name: 'Official', short_name: 'Official' },
+      desktop: { app_origin_scheme: 'picoaide-app' },
+    }))
+    const dir = join(repoRoot, 'channels', 'example-brand')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'channel.json'), JSON.stringify({
+      schema: 1,
+      channel_id: 'example-brand',
+      identity: { display_name: 'Example', short_name: 'Example' },
+      ...(assets === undefined ? {} : { assets }),
+      desktop: {
+        slug: 'Example-AI',
+        app_id: 'com.example.brand',
+        deep_link_scheme: 'examplebrand',
+        home_dir: '.example-harness',
+        app_origin_scheme: 'examplebrand-app',
+      },
+    }))
+    // 素材**逐件**就位（不能用 writeChannelAssetFiles：那会把两件都写上，
+    // 于是"缺 app-icon.png"这条用例根本构造不出来）。内容取官方几何 —— 渠道用官方
+    // 几何是合法的（AGENTS.md：几何权威只有一份），不会掩盖任何东西。
+    if (logoFile !== undefined) {
+      copyFileSync(join(root, 'brands', 'official', 'logo.svg'), join(dir, logoFile))
+    }
+    if (appIcon) {
+      copyFileSync(join(root, 'brands', 'official', 'app-icon.png'), join(dir, 'app-icon.png'))
+    }
+    padChannelRepo(repoRoot) // 下限补位（同所有稳定 tag 夹具）
+    return repoRoot
+  }
+  const runBrandAssets = options => runChannels({
+    source: brandAssetRepo(options), refName: 'v2.7.0', dest: 'channels', list: 'ba.list',
+  })
+
+  const noAppIcon = runBrandAssets({ assets: { logo: 'logo.svg' }, logoFile: 'logo.svg' })
+  check(noAppIcon.status !== 0, '品牌渠道缺 app-icon.png 时必须失败（否则安装器/Dock/任务栏是厂商图标）')
+  check(noAppIcon.stderr.includes('app-icon.png'), '失败信息应点名 app-icon.png')
+
+  const noLogoDecl = runBrandAssets({ assets: undefined, logoFile: 'logo.svg', appIcon: true })
+  check(noLogoDecl.status !== 0, '品牌渠道没声明 assets.logo 时必须失败（否则包里没有 logo_inline）')
+  check(noLogoDecl.stderr.includes('assets.logo'), '失败信息应点名 assets.logo')
+
+  const otherLogoName = runBrandAssets({ assets: { logo: 'acme-mark.svg' }, logoFile: 'acme-mark.svg', appIcon: true })
+  check(otherLogoName.status !== 0, '品牌渠道的 assets.logo 指向别的文件名时必须失败（同一个包会出现两套品牌）')
+  check(otherLogoName.stderr.includes('assets.logo'), '声明名不一致的失败信息应点名 assets.logo')
+  check(!`${otherLogoName.stdout}${otherLogoName.stderr}`.includes('acme-mark.svg'),
+    '声明名不一致的失败信息不得回显文件名取值（与其余字段同一条纪律）')
+
+  const completeAssets = runBrandAssets({ assets: { logo: 'logo.svg' }, logoFile: 'logo.svg', appIcon: true })
+  check(completeAssets.status === 0,
+    `素材齐全的品牌渠道必须通过,实际退出 ${String(completeAssets.status)}: ${completeAssets.stderr.slice(0, 200)}`)
+
+  // 公共渠道（official/beta）缺这两件素材 ⇒ **必须继续绿**：品牌即厂商，回落官方正当
+  // （真实渠道仓的 channels/beta 就没有 app-icon.png；把这条判成红会让预发布线整条发不出去）。
+  const publicNoAssets = (() => {
+    const root = tempDir('ci-channels-public-assets-')
+    for (const id of ['official', 'beta']) {
+      mkdirSync(join(root, 'channels', id), { recursive: true })
+      writeFileSync(join(root, 'channels', id, 'channel.json'), JSON.stringify({
+        schema: 1,
+        channel_id: id,
+        identity: { display_name: `${id} AI`, short_name: id },
+        desktop: { app_origin_scheme: 'picoaide-app', ...(id === 'beta' ? { home_dir: '.picoaide-harness' } : {}) },
+      }))
+    }
+    padChannelRepo(root)
+    return runChannels({ source: root, refName: 'v2.7.0', dest: 'channels', list: 'ba2.list' })
+  })()
+  check(publicNoAssets.status === 0,
+    `official/beta 缺这些素材必须继续通过（回落官方是预期行为），实际退出 ${String(publicNoAssets.status)}: ${publicNoAssets.stderr.slice(0, 300)}`)
 }
 
 // ---- 3b. desktop.app_origin_scheme:必填 / 形状 / 保留字 / 跨渠道唯一 ----
@@ -3262,8 +3523,12 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
         schema: 1,
         channel_id: id,
         identity: { display_name: `${id} AI`, short_name: id },
+        // 品牌渠道必填的 logo 声明 + 素材文件（2026-09-26 审计 Z3-3）：不给的话
+        // 这一组"只想测 app_origin_scheme"的用例会先被素材规则拦下。
+        ...(publicChannel ? {} : { assets: { logo: 'logo.svg' } }),
         desktop: { ...base, ...desktop },
       }))
+      if (!publicChannel) writeChannelAssetFiles(dir, id)
     }
     padChannelRepo(dir) // 下限补位（同上）：负例只测被测的那条规则
     return dir
@@ -3421,6 +3686,11 @@ function runChannels({ source, refName = '', ref, dest, list, env = {}, args = [
   check(existsSync(join(stage, 'example-brand', 'App-example-brand.deb')), '渠道产物应归集到自己的目录')
   check((ok.stdout ?? '').includes('verify stub: official'), '官方渠道必须跑白标门禁')
   check(!(ok.stdout ?? '').includes('verify stub: example-brand'), '渠道的白标门禁输出也必须被抑制')
+  // 没给 `--verify-app-dir` 时（mac 冒烟没有这种布局），通过行必须**如实说明**
+  // app.asar 那组断言没有参与 —— "门禁看起来在跑其实没跑"正是 2026-09-26 审计
+  // Y4-02 的形态，所以这一句本身也是判据。
+  check((ok.stdout ?? '').includes('app.asar assertions skipped'),
+    '未传 --verify-app-dir 时通过行必须如实说明 app.asar 断言被跳过')
 
   // 白标门禁失败 → 报中性信息(不回显渠道名/门禁输出),且不许把产物当成功归集
   const verifyFail = join(runDir, 'verify-fail.mjs')
@@ -3483,6 +3753,149 @@ echo x > "${distDir}/App.AppImage"
   rmSync(sentinel, { force: true })
 }
 
+// ---- 5b. 白标门禁的 `--verify-app-dir`:按真实布局解析 + 缺目录 fail-loud + 断言真的跑 ----
+//
+// 2026-09-26 第二十五轮审计 Y4-02:CI 的两处调用点写 `--verify-app-dir dist/linux-unpacked`
+// (真实布局是 `packages/host/desktop/dist/linux-unpacked`),而被测脚本只按**仓库根**解析
+// ⇒ `[ -d ]` 不成立就把参数静默丢掉 ⇒ `verify-channel-package.ts:195-234` 的整组 app.asar
+// 断言(包内 `channel_id` / 图标逐字节一致 / 官方包不得残留渠道配置)**在 CI 里从未执行过**,
+// 而文档与通过行都在宣称它生效。本节把三件事变成红灯:
+//   ① CI 的逐字调用形态必须被解析到(相对 `--dist` 的父目录 = 打包产物真实布局);
+//   ② 解析不到必须失败(不许降级成"跑了一半的门禁");
+//   ③ 通过行必须如实说明这组断言本轮跑没跑,且**断言本身**真的在跑(篡改夹具必须红)。
+{
+  const runDir = tempDir('ci-package-appdir-')
+  const list = join(runDir, 'ch.list')
+  const distDir = join(runDir, 'dist')
+  const unpackedDir = join(distDir, 'linux-unpacked')
+  // 真实布局:`<桌面包根>/dist/<platform>-unpacked/resources/app.asar`。这里的 `--dist`
+  // 就是那个 `dist/`,所以下面的 `--verify-app-dir dist/linux-unpacked` 与 CI 逐字同形。
+  mkdirSync(join(unpackedDir, 'resources'), { recursive: true })
+  writeFileSync(list, 'official\nexample-brand\n')
+
+  // 哨兵法(与上一节同策):下面的每一轮都必须带 `--dist` 指到这个临时目录,否则被测脚本
+  // 会 `rm -rf` **仓库里真实的** packages/host/desktop/dist。
+  const sentinel = join(root, 'packages', 'host', 'desktop', 'dist', '.verify-ci-scripts-appdir-sentinel')
+  mkdirSync(dirname(sentinel), { recursive: true })
+  writeFileSync(sentinel, 'keep')
+
+  const desktopPackageJson = join(root, 'packages', 'host', 'desktop', 'package.json')
+
+  // 假打包器:产出**真 asar**(包内 `build/channel.json` 带本渠道 id)+ 一个安装包。
+  // `PACK_STUB_TAMPER=<渠道>` 把那一轮的包内 channel_id 写成别的值 —— 用来证明
+  // "app.asar 断言真的在跑"(而不是只证明参数被传下去了)。
+  const packStub = join(runDir, 'pack-stub.mjs')
+  writeFileSync(packStub, `import { createRequire } from 'node:module'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const require = createRequire(${JSON.stringify(desktopPackageJson)})
+const { createPackage } = require('@electron/asar')
+const dist = ${JSON.stringify(distDir)}
+const channel = process.env.DSH_BUILD_CHANNEL
+const packedChannel = process.env.PACK_STUB_TAMPER === channel ? 'tampered-channel' : channel
+const staging = join(dist, '..', 'staging-' + channel)
+rmSync(staging, { recursive: true, force: true })
+mkdirSync(join(staging, 'build'), { recursive: true })
+writeFileSync(join(staging, 'build', 'channel.json'), JSON.stringify({ channel_id: packedChannel }))
+writeFileSync(join(staging, 'build', 'app-icon.png'), 'icon-' + channel)
+writeFileSync(join(staging, 'build', 'tray-icon-blue.png'), 'tray-' + channel)
+mkdirSync(join(dist, 'linux-unpacked', 'resources'), { recursive: true })
+createPackage(staging, join(dist, 'linux-unpacked', 'resources', 'app.asar'))
+writeFileSync(join(dist, 'App-' + channel + '.AppImage'), 'x')
+`)
+
+  // 假白标门禁:契约与真脚本的 app-dir 分支同形(@electron/asar 读包内 build/ 条目;
+  // 归档内路径走 `scripts/asar-entry-path.ts` 的**同一个**适配实现)。
+  const verifyStub = join(runDir, 'verify-appdir.mjs')
+  writeFileSync(verifyStub, `import { createRequire } from 'node:module'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const require = createRequire(${JSON.stringify(desktopPackageJson)})
+const { listPackage, extractFile } = require('@electron/asar')
+const { toAsarEntryPath, normalizeAsarEntry } = await import(
+  pathToFileURL(${JSON.stringify(join(root, 'packages', 'host', 'desktop', 'scripts', 'asar-entry-path.ts'))}).href)
+const args = process.argv.slice(2)
+const at = args.indexOf('--app-dir')
+if (at === -1) {
+  console.log('VERIFY-ARGV=(none)')
+  process.exit(3)
+}
+const appDir = args[at + 1]
+console.log('VERIFY-ARGV=(--app-dir ' + appDir + ')')
+const asarPath = join(appDir, 'resources', 'app.asar')
+// 与真脚本同形:先看文件在不在(真脚本这里是 existsSync 断言),再读包内条目。
+if (!existsSync(asarPath)) {
+  console.log('VERIFY-MISSING resources/app.asar at ' + asarPath)
+  process.exit(4)
+}
+const listed = new Set(listPackage(asarPath, { isPack: false }).map(normalizeAsarEntry))
+if (!listed.has('build/channel.json')) {
+  console.log('VERIFY-MISSING build/channel.json in ' + asarPath)
+  process.exit(4)
+}
+const packed = JSON.parse(extractFile(asarPath, toAsarEntryPath('build/channel.json')).toString('utf8'))
+if (packed.channel_id !== process.env.DSH_BUILD_CHANNEL) {
+  console.log('VERIFY-MISMATCH asar=' + String(packed.channel_id))
+  process.exit(5)
+}
+if (!listed.has('build/app-icon.png')) {
+  console.log('VERIFY-MISSING build/app-icon.png')
+  process.exit(6)
+}
+console.log('VERIFY-OK ' + process.env.DSH_BUILD_CHANNEL)
+`)
+
+  /** 跑一轮;`extra` 覆盖 env(故障注入用)。 */
+  const runPackage = (stage, verifyAppDir, extra = {}) => spawnSync('bash', [
+    packageScript, '--list', list, '--stage-dir', stage, '--dist', distDir,
+    '--patterns', '*.AppImage', '--verify-app-dir', verifyAppDir,
+    '--', process.execPath, packStub,
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, CI_CHANNEL_VERIFY_SCRIPT: verifyStub, ...extra },
+  })
+
+  // ① CI 的逐字形态:`--verify-app-dir dist/linux-unpacked` + `--dist <桌面包根>/dist`。
+  const okRun = runPackage(join(runDir, 'stage-ok'), 'dist/linux-unpacked')
+  check(okRun.status === 0, `--verify-app-dir 指向真实解包目录时应成功,实际退出 ${String(okRun.status)}:${okRun.stderr ?? ''}`)
+  const okOut = okRun.stdout ?? ''
+  check(okOut.includes(`VERIFY-ARGV=(--app-dir ${unpackedDir})`),
+    '`dist/linux-unpacked` 必须按 dist 的父目录解析到打包产物真实布局(修前这里解析成 <repoRoot>/dist/… 并被静默丢弃)')
+  check(!okOut.includes('VERIFY-ARGV=(none)'), 'app-dir 绝不允许被静默丢弃')
+  check(okOut.includes('white-label gate: app.asar assertions included'),
+    '传了 --verify-app-dir 时通过行必须说明 app.asar 断言已参与')
+  check(existsSync(join(runDir, 'stage-ok', 'official', 'App-official.AppImage')), '正常轮的产物应照常归集')
+
+  // ② 断言真的在跑:把官方轮的包内 channel_id 写成别的值 ⇒ 必须红在"包内 channel_id"上。
+  //    (修前参数被丢弃时,同一夹具是**绿**的 —— 这正是"门禁看起来在跑其实没跑"。)
+  const tampered = runPackage(join(runDir, 'stage-tampered'), 'dist/linux-unpacked', { PACK_STUB_TAMPER: 'official' })
+  check(tampered.status !== 0, '包内 channel_id 与构建渠道不一致时必须失败(证明 app-dir 断言真的在跑)')
+  check((tampered.stdout ?? '').includes('VERIFY-MISMATCH'),
+    '失败必须来自"包内 channel_id 比对"这一条,而不是打包/归集等别的环节')
+  check((tampered.stderr ?? '').includes('官方渠道的白标门禁未通过'), '该失败应报成白标门禁失败')
+
+  // ③ 解析不到 ⇒ fail-loud(绝不降级),且**不得**再调白标门禁装作跑过。
+  const missing = runPackage(join(runDir, 'stage-missing'), 'dist/does-not-exist')
+  check(missing.status !== 0, '--verify-app-dir 指向不存在的目录时必须失败')
+  const missingOut = `${missing.stdout ?? ''}${missing.stderr ?? ''}`
+  check(missingOut.includes('--verify-app-dir 指向的目录不存在'), '失败信息必须点名 --verify-app-dir')
+  check(!(missing.stdout ?? '').includes('VERIFY-ARGV'), '解析不到时不得调用白标门禁(那又会变成"看起来在跑")')
+
+  // ④ 历史语义仍在:仓库根相对路径照样解析(用 `scripts/` 这个存在但没有 app.asar 的目录)。
+  //    它必须由**门禁自己**报"缺 resources/app.asar",而不是被脚本静默跳过。
+  const rootRelative = runPackage(join(runDir, 'stage-rootrelative'), 'scripts')
+  check(rootRelative.status !== 0, '仓库根基线解析到没有 app.asar 的目录时也必须失败')
+  check((rootRelative.stdout ?? '').includes(`VERIFY-ARGV=(--app-dir ${join(root, 'scripts')})`),
+    '仓库根相对路径(历史语义)必须仍然生效')
+  check((rootRelative.stdout ?? '').includes('VERIFY-MISSING'),
+    '缺 resources/app.asar 必须由门禁自己报出来(而不是脚本替它跳过)')
+
+  check(existsSync(sentinel), 'app-dir 用例不得删除仓库里真实的 packages/host/desktop/dist(漏传 --dist)')
+  rmSync(sentinel, { force: true })
+}
+
 // ---- 6. 所有 CI shell 脚本必须能通过 bash -n ----
 // 2026-09-10 的教训:两处未闭合引号让整个 release job 跑不起来,而 YAML 本身
 // 完全合法 —— 只有 bash 解析整段脚本时才会发现。这里把 scripts/ 下的 shell
@@ -3494,6 +3907,24 @@ echo x > "${distDir}/App.AppImage"
   for (const name of shells) {
     const result = spawnSync('bash', ['-n', join(scriptDir, name)], { encoding: 'utf8' })
     check(result.status === 0, `scripts/${name} 未通过 bash -n: ${(result.stderr ?? '').trim()}`)
+  }
+  // 动态 import 的实参必须是 **file:// URL**，不能是裸文件系统路径。
+  // 2026-09-28 实测（Windows CI 红）：`import(process.argv[1])` 在 POSIX 上能跑，
+  // 而 Windows 上 `C:\…\channel-build.ts` 被当成 scheme `c:` ⇒
+  // 「Only URLs with a scheme in: file, data, and node are supported by the default
+  // ESM loader. On Windows, absolute paths must be valid file:// URLs」⇒
+  // 渠道构建整条中止（三处脚本同形：ci-channels / ci-channel-transfer /
+  // ci-build-channel-images）。**这是"本地绿、Windows 红"的固定形态**，
+  // 所以判据在这里静态钉住：任何 `import(process.argv[…]` 都要被 pathToFileURL 包住。
+  for (const name of shells) {
+    const text = readFileSync(join(scriptDir, name), 'utf8')
+    const offenders = [...text.matchAll(/import\(\s*process\.argv\[\d+\]\s*\)/gu)]
+      .filter(match => !text.slice(Math.max(0, match.index - 40), match.index).includes('pathToFileURL'))
+    check(
+      offenders.length === 0,
+      `scripts/${name} 用裸路径做动态 import（Windows 上必然失败）—— 必须写成 `
+      + "import(require('node:url').pathToFileURL(process.argv[1]).href)",
+    )
   }
 }
 
@@ -3598,20 +4029,24 @@ echo x > "${distDir}/App.AppImage"
       check(cacheOf(key) === 'public, max-age=31536000, immutable',
         `${channel} 的${label}必须带 immutable 长缓存(逐对象断言,不看"别的对象对不对"),实际 ${String(cacheOf(key))}`)
     }
-    // latest.json 现在**不再直接 PUT**:先写临时键(校验大小+SHA256),再用服务端
-    // `copy-object` 原子替换正式键(第十一轮审计 C2-B-01)⇒ 缓存头断言必须打在
-    // **替换那一行**上(临时键的 no-cache 另有一条断言)。
-    const copies = awsLog.split('\n').filter(line => line.startsWith(`copy-object ${channel}/latest.json `))
-    check(copies.length === 1,
-      `${channel} 的 latest.json 必须恰好由一次 copy-object 替换(实际 ${copies.length} 次)`
-        + ':直接 PUT 正式键会让"校验失败"留下损坏的指针,覆盖上一版可用指针')
-    check(copies[0]?.includes('cache=no-cache'),
-      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${String(copies[0])}`)
-    check(copies[0]?.includes('directive=REPLACE'),
-      `${channel} 的 latest.json 替换必须用 --metadata-directive REPLACE **显式重述**缓存头`
-        + `(COPY 会让正式指针"继承"临时对象的元数据 ⇒ 缓存头不再在写它的那一行上可判),实际 ${String(copies[0])}`)
-    check(copies[0]?.includes(`<== test-bucket/${channel}/.latest-next-`),
-      `${channel} 的 latest.json 必须由**本次的临时键**替换而来(源对象可追溯),实际 ${String(copies[0])}`)
+    // latest.json 现在**不再直接 PUT 临时键后就完事**:先写临时键(校验大小+SHA256),
+    // 再用**条件写(CAS)**把同样的字节写进正式键(R29-AC1-01:第十一轮 C2-B-01 之后是
+    // 无条件 `copy-object`,而 copy-object 的条件参数作用在**源对象**上 ⇒ 目标键没有
+    // 任何前置条件,两个 tag 并发时后写者赢、指针可以倒退)。
+    // ⇒ 缓存头断言打在**写正式键那一行**上(临时键的 no-cache 另有一条断言),
+    //   并要求那一行带条件参数(否则"判据 + 写入"又分散成两次请求)。
+    const formalPointerPuts = putObjects.filter(entry => entry.key === `${channel}/latest.json`)
+    check(formalPointerPuts.length === 1,
+      `${channel} 的 latest.json 必须恰好由一次 put-object 写入(实际 ${formalPointerPuts.length} 次)`)
+    const formalPointerLine = awsLog.split('\n')
+      .find(line => line.startsWith('s3api put-object ') && parsePut(line).key === `${channel}/latest.json`) ?? ''
+    check(formalPointerLine.includes('--cache-control no-cache'),
+      `${channel} 的 latest.json 必须 no-cache(否则客户端拿不到新版本),实际 ${formalPointerLine}`)
+    check(formalPointerLine.includes('--if-match ') || formalPointerLine.includes('--if-none-match '),
+      `${channel} 的 latest.json 必须是**条件写**(--if-match <现有 ETag> / 首发 --if-none-match '*');`
+        + `无条件 PUT 会把"读-判-写"退回 check-then-act(R29-AC1-01),实际 ${formalPointerLine}`)
+    check(formalPointerLine.includes('--checksum-sha256 '),
+      `${channel} 的 latest.json 条件写必须带 --checksum-sha256(内容被截断时存储侧直接拒绝)`)
     const tmpCache = putObjects
       .filter(entry => entry.key.startsWith(`${channel}/.latest-next-`))
       .map(entry => entry.cacheControl)
@@ -4572,6 +5007,234 @@ echo x > "${distDir}/App.AppImage"
     '不得退回裸 `grep -q \'404\'`:aws 的失败信息会回显对象键,键里的 $RANDOM 数字出现 404 时会把"端点不可达"误判成"对象已消失"(约 1% 偶发红灯)')
 }
 
+// ---- 6g. 版本指针的单调守卫:绝不把 latest.json 写回更旧的版本（R28 审计 AB2-A-01）----
+//
+// 现场:`<channel>/latest.json` 跨版本共享、可变、最后写者赢,而发布脚本**从不读回旧指针
+// 做比较**;顶层 `concurrency.group = ci-${{ github.ref }}` 只实现"同 ref 互斥"⇒ 两个
+// **不同 tag** 的 run 会并发跑 release,慢的那个把指针写回**更旧**的版本。客户端更新链
+// 第一步就是读这份清单 ⇒ 用户侧表现为"检查更新永远说已是最新"(静默降级),流水线全绿。
+//
+// 判据 = **先写 vX.Y.Z+1 的指针,再让 vX.Y.Z 的发布尝试写**(真跑发布脚本 + 假 aws):
+//   ① 指针必须**逐字节未变**(拒绝写 = 一个字节都不动,不是"写坏了再回滚");
+//   ② 必须给出可检索的 `::warning::`(点名两个版本号);
+//   ③ 本次的**版本目录与 SHA256SUMS 仍然照发**(拒绝的只是指针 —— 让慢的 tag 退回不写,
+//      而不是让整条发布链变红);
+//   ④ 反向对照:更新的版本(vX.Y.Z+1)必须照常写指针,重发**同一版本**也允许
+//      —— 证明守卫不是"永不写指针"的恒真桩;
+//   ⑤ 读不回 / 解析不出可比的版本 ⇒ fail-loud(不能证明不倒退就不写)。
+{
+  const work = tempDir('ci-manifest-monotonic-')
+  const bundle = join(work, 'release-bundle')
+  const list = join(work, 'channels.list')
+  const store = join(work, 'store')
+  writeFileSync(list, 'official\n')
+  const log = join(work, 'aws.log')
+  writeFileSync(log, '')
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, fakeAwsScript({ store, log }))
+  execFileSync('chmod', ['+x', fakeAws])
+
+  /** 造一份"已构建"的渠道产物(与第 6 节同一布局;SHA256SUMS 必须真的写着该包的 sha256)。 */
+  const stageBundle = version => {
+    rmSync(bundle, { recursive: true, force: true })
+    mkdirSync(join(bundle, 'official'), { recursive: true })
+    const content = `zip-official-${version}`
+    writeFileSync(join(bundle, 'official', `picoaide-server-${version}-amd64.zip`), content)
+    const digest = createHash('sha256').update(content).digest('hex')
+    writeFileSync(join(bundle, 'official', 'SHA256SUMS'), `${digest}  picoaide-server-${version}-amd64.zip\n`)
+  }
+  const publish = version => spawnSync('bash', [publishScript, '--list', list, '--bundle', bundle], {
+    cwd: work,
+    encoding: 'utf8',
+    env: {
+      PATH: `${work}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_BUCKET: 'test-bucket',
+      VERSION: `v${version}`,
+    },
+  })
+  const pointerPath = join(store, 'official', 'latest.json')
+
+  // 先落到 v2.8.2(模拟"另一个 tag 已经发完、写了指针")。
+  stageBundle('2.8.2')
+  const first = publish('2.8.2')
+  check(first.status === 0, `第一次发布(v2.8.2)应成功,实际退出 ${String(first.status)}: ${first.stderr ?? ''}`)
+  check(existsSync(pointerPath), '第一次发布后必须写出 official/latest.json（否则后面的对照没有基准）')
+  const pointerBefore = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(JSON.parse(pointerBefore).server.version === '2.8.2', '基准指针的 server.version 应为 2.8.2')
+
+  // ① 慢的那个 tag:同一渠道发一个**更旧**的版本 ⇒ 指针必须拒绝写且逐字节不变。
+  stageBundle('2.8.1')
+  const older = publish('2.8.1')
+  check(older.status === 0, `更旧版本的发布不应整体失败(只有指针要拒写),实际退出 ${String(older.status)}: ${older.stderr ?? ''}`)
+  const pointerAfterOlder = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(pointerAfterOlder === pointerBefore,
+    '版本倒退时 latest.json 必须**逐字节未变**(拒绝写 = 一个字节都不动);'
+    + `实际指针版本 ${String(safeJson(pointerAfterOlder)?.server?.version)}`)
+  const olderOutput = `${older.stdout ?? ''}${older.stderr ?? ''}`
+  check(olderOutput.includes('::warning::') && olderOutput.includes('2.8.2') && olderOutput.includes('2.8.1'),
+    '拒绝写指针时必须给出可检索的 ::warning:: 并点名两个版本号（静默跳过 = 下一次没人知道为什么没更新）')
+  // ③ 被拒的只是指针:本次的版本化资产照发(它是 immutable 的,且 GitHub Release 也引它)。
+  check(existsSync(join(store, 'official', 'releases', '2.8.1', 'picoaide-server-2.8.1-amd64.zip')),
+    '版本倒退时本次的版本目录仍必须照发（拒绝的只有指针）')
+  check(existsSync(join(store, 'official', 'releases', '2.8.1', 'SHA256SUMS')),
+    '版本倒退时本次的 SHA256SUMS 仍必须照发')
+
+  // ④ 反向对照(证明守卫不是"永不写指针"的恒真桩):
+  //    (a) 更新的版本照写;
+  stageBundle('2.8.3')
+  const newer = publish('2.8.3')
+  check(newer.status === 0, `更新的版本应成功发布,实际退出 ${String(newer.status)}: ${newer.stderr ?? ''}`)
+  const pointerAfterNewer = existsSync(pointerPath) ? readFileSync(pointerPath, 'utf8') : ''
+  check(safeJson(pointerAfterNewer)?.server?.version === '2.8.3',
+    `更新的版本(2.8.3)必须照常写指针,实际 ${String(safeJson(pointerAfterNewer)?.server?.version)}`)
+  //    (b) 重发**同一版本**也允许(重跑同一个 tag 是常见动作)。
+  const again = publish('2.8.3')
+  check(again.status === 0, `重发同一版本应成功,实际退出 ${String(again.status)}: ${again.stderr ?? ''}`)
+  check(!`${again.stdout ?? ''}`.includes('::warning::'), '重发同一版本不应触发倒退告警')
+
+  // ⑤ 现有指针读不回 / 解析不出可比的版本 ⇒ fail-loud(不能证明不倒退就不写)。
+  writeFileSync(pointerPath, '<html>not our manifest</html>\n')
+  stageBundle('2.8.4')
+  const garbled = publish('2.8.4')
+  check(garbled.status !== 0, '现有指针的正文解析不出可比版本时必须 fail-loud（不猜、不写）')
+  check(`${garbled.stderr ?? ''}`.includes('解析不出'), '失败信息应说明"解析不出可比的版本号"')
+  check(readFileSync(pointerPath, 'utf8') === '<html>not our manifest</html>\n',
+    'fail-loud 路径同样不得改动现有指针')
+
+  // ⑥ **并发**：两个不同 tag 的发布进程同时跑，指针**不得**倒退（R29-AC1-01 = P1）。
+  //
+  // 上面 ①–⑤ 全是**串行**的 —— 而线上是并发（`concurrency.group` 只按 `github.ref` 分组，
+  // 两个不同 tag 的 push 会各跑一条 release）。AC1 用两个真发布进程实测：无条件写时
+  // natural 3/8、barrier 4/12 轮指针被写回更旧的版本，其中 2 轮**两个进程都 exit 0 且
+  // 零告警**（silent 模式 5/5）⇒ 光有串行判据时这棵树是"绿着倒退"。
+  //
+  // 确定性构造（不靠赢竞态、不靠 sleep 运气）：
+  //   · **读屏障**：两个进程都必须先读到**同一个旧指针**，才允许任一方继续；
+  //   · **写闸门**：发布**旧版本**的那个进程在"写正式键"那一跳被扣住，直到发布新版本的
+  //     进程**完全退出**才放行 ⇒ 旧进程必然拿着**过期**的判定去写。
+  // CAS 生效 ⇒ 它拿 412、重读、发现更新的版本 ⇒ `::warning::` + 不写（响亮地退让）；
+  // CAS 被拆回无条件写 ⇒ 指针倒退且两个进程都 exit 0、零告警 ⇒ 本用例红。
+  {
+    const conc = join(work, 'conc')
+    const concStore = join(conc, 'store')
+    const concWork = join(conc, 'work')
+    const gate = join(conc, 'gate')
+    mkdirSync(concWork, { recursive: true })
+    mkdirSync(gate, { recursive: true })
+    const concLog = join(concWork, 'aws.log')
+    writeFileSync(concLog, '')
+    const concFakeAws = join(concWork, 'aws-real')
+    writeFileSync(concFakeAws, fakeAwsScript({ store: concStore, log: concLog }))
+    execFileSync('chmod', ['+x', concFakeAws])
+    // 包装器：`CONC_ROLE` 为空时（种子那一步）完全透传，不引入任何时序改写。
+    const concAws = join(concWork, 'aws')
+    writeFileSync(concAws, `#!/usr/bin/env bash
+set -uo pipefail
+role="\${CONC_ROLE:-}"
+if [ -z "$role" ]; then exec "${concFakeAws}" "$@"; fi
+joined=" $* "
+if [[ "$joined" == *"s3 cp s3://test-bucket/official/latest.json -"* ]]; then
+  : > "${gate}/read-$$"
+  for _ in $(seq 1 600); do
+    n=$(ls "${gate}" 2>/dev/null | grep -c '^read-' || true)
+    [ "$n" -ge 2 ] && break
+    sleep 0.05
+  done
+fi
+if [ "$role" = "old" ] && [[ "$joined" == *"s3api put-object"* || "$joined" == *"s3api copy-object"* ]] \\
+  && [[ "$joined" == *"--key official/latest.json"* ]]; then
+  for _ in $(seq 1 1200); do
+    [ -f "${gate}/release" ] && break
+    sleep 0.05
+  done
+fi
+exec "${concFakeAws}" "$@"
+`)
+    execFileSync('chmod', ['+x', concAws])
+
+    const concList = join(concWork, 'channels.list')
+    writeFileSync(concList, 'official\n')
+    /** 每个进程一份**自己的** bundle 目录（它们同时在跑，不能共用）。 */
+    const stageInto = (dir, version) => {
+      rmSync(dir, { recursive: true, force: true })
+      mkdirSync(join(dir, 'official'), { recursive: true })
+      const content = `zip-official-${version}`
+      writeFileSync(join(dir, 'official', `picoaide-server-${version}-amd64.zip`), content)
+      const digest = createHash('sha256').update(content).digest('hex')
+      writeFileSync(join(dir, 'official', 'SHA256SUMS'), `${digest}  picoaide-server-${version}-amd64.zip\n`)
+    }
+    const spawnPublish = (version, role) => spawn('bash', [publishScript, '--list', concList, '--bundle', join(conc, `bundle-${version}`)], {
+      cwd: concWork,
+      env: {
+        PATH: `${concWork}:${process.env.PATH ?? ''}`,
+        HOME: process.env.HOME ?? '',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_BUCKET: 'test-bucket',
+        VERSION: `v${version}`,
+        CONC_ROLE: role,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const waitFor = (child, timeoutMs) => new Promise(resolve => {
+      let out = ''
+      let err = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      child.stderr.on('data', chunk => { err += chunk })
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve({ status: 'timeout', out, err }) }, timeoutMs)
+      child.on('close', code => { clearTimeout(timer); resolve({ status: code, out, err }) })
+    })
+
+    // 先把指针落到 2.8.0（串行、无栅栏）。
+    stageInto(join(conc, 'bundle-2.8.0'), '2.8.0')
+    const seed = spawnSync('bash', [publishScript, '--list', concList, '--bundle', join(conc, 'bundle-2.8.0')], {
+      cwd: concWork,
+      encoding: 'utf8',
+      env: {
+        PATH: `${concWork}:${process.env.PATH ?? ''}`,
+        HOME: process.env.HOME ?? '',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_BUCKET: 'test-bucket',
+        VERSION: 'v2.8.0',
+      },
+    })
+    check(seed.status === 0, `并发用例的种子发布(v2.8.0)应成功，实际 ${String(seed.status)}: ${seed.stderr ?? ''}`)
+    check(safeJson(readFileSync(join(concStore, 'official', 'latest.json'), 'utf8'))?.server?.version === '2.8.0',
+      '并发用例的种子指针应为 2.8.0（否则后面两个进程读到的不是同一个旧指针）')
+
+    stageInto(join(conc, 'bundle-2.8.2'), '2.8.2')
+    stageInto(join(conc, 'bundle-2.8.1'), '2.8.1')
+    const newer = spawnPublish('2.8.2', 'new')
+    const older = spawnPublish('2.8.1', 'old')
+    const newerResult = await waitFor(newer, 180000)
+    // 新版本那个进程已经退出（它的指针写与校验都完成了）⇒ 放行旧进程去写。
+    writeFileSync(join(gate, 'release'), '')
+    const olderResult = await waitFor(older, 180000)
+
+    check(newerResult.status === 0,
+      `并发用例里**新版本**的发布应成功，实际 ${String(newerResult.status)}: ${newerResult.err}`)
+    check(olderResult.status === 0,
+      `并发用例里**旧版本**的发布不应整体失败（只应拒绝写指针），实际 ${String(olderResult.status)}: ${olderResult.err}`)
+    const pointerFinal = readFileSync(join(concStore, 'official', 'latest.json'), 'utf8')
+    check(safeJson(pointerFinal)?.server?.version === '2.8.2',
+      '两个 tag 并发时指针**不得倒退**：最终必须指向更新的那个版本（2.8.2），'
+        + `实际 ${String(safeJson(pointerFinal)?.server?.version)}`
+        + '（无条件写 = check-then-act：旧进程拿着过期判定照样能写，且两个进程都 exit 0）')
+    // "响亮"这一半：退让的那一方必须留下可检索的告警（否则运维看不到"为什么没更新"）。
+    const olderOutput = `${olderResult.out}${olderResult.err}`
+    check(olderOutput.includes('::warning::') && olderOutput.includes('2.8.2'),
+      '被并发抢先的那个进程必须给出可检索的 ::warning::（点名抢先的版本号），实际输出里没有')
+    // 正向前置：这次"不倒退"必须真的来自条件写被拒 —— 而不是"旧进程压根没尝试写"。
+    // （没有这条，用例在"旧进程提前退出/跳过指针"时也会绿：《假绿》形态。）
+    const concAwsLog = readFileSync(concLog, 'utf8')
+    check(concAwsLog.includes('precondition-failed if-match official/latest.json'),
+      '并发用例必须真的走到"条件写被 412 拒绝"那一跳（否则本用例可能是空转的假绿）')
+    check(existsSync(join(concStore, 'official', 'releases', '2.8.1', 'picoaide-server-2.8.1-amd64.zip')),
+      '被拒的只是指针：旧版本本次的版本化资产仍必须照发')
+  }
+}
+
 // ---- 7. 品牌渠道产物私密中转(不经公开 artifact) ----
 {
   const work = tempDir('ci-transfer-')
@@ -4651,6 +5314,19 @@ case "$cmd" in
     record "rm $prefix"
     rm -rf "$store/$key"
     ;;
+  "s3 ls")
+    # 前缀枚举形态:真实 aws 对 <前缀>/ 打印一行 PRE <名字>/。
+    # clean 的旧格式清扫靠它找 <run>-<attempt>-<token> 形态的残留(2026-09-26 审计 Z3-1)。
+    # 前缀以斜杠结尾 = 列它的子前缀:保留尾斜杠再拼通配,否则通配会匹配到 _transfer 自己。
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    record "ls $prefix"
+    case "$key" in
+      */) for entry in "$store/\${key}"*/; do
+            [ -d "$entry" ] || continue
+            printf '                           PRE %s\\n' "$(basename "$entry")"
+          done ;;
+    esac
+    ;;
 esac
 `)
   execFileSync('chmod', ['+x', fakeAws])
@@ -4667,25 +5343,26 @@ esac
       ...env,
     },
   })
-  // 两组凭据都要:aws CLI 只认 AWS_*(R2_* 是端点/桶名/HMAC 种子)。
-  // 2026-09-11 v2.7.0 真实事故:夹具只给 R2_* 时脚本"本地全绿",正式 tag 上
-  // 三个平台 job 全部以 aws 的 "Unable to locate credentials" 失败、品牌渠道零交付。
-  const r2 = {
-    R2_ACCOUNT_ID: 'acct',
-    R2_BUCKET: 'bucket',
-    R2_SECRET_ACCESS_KEY: 'secret',
-    AWS_ACCESS_KEY_ID: 'keyid',
-    AWS_SECRET_ACCESS_KEY: 'secret',
-    AWS_DEFAULT_REGION: 'auto',
-  }
 
   // 造三平台产物:官方/beta 留 artifact,品牌渠道必须被中转走并从暂存目录删除。
+  //
+  // **三平台**而不是一个文件(2026-09-26 审计 Z3-1):`pull` 侧现在逐平台判"齐全",
+  // 只放一个平台会让合法的 pull 变红 —— 夹具必须与判据一体。三个文件名由渠道包的
+  // slug 派生(与真实安装包同形:`<slug>-<ver>-mac.dmg` / `-x64-Setup.exe` / `-x86_64.AppImage`)。
+  const brandArtifacts = [
+    brandArtifact,                                  // win-x64(Setup.exe)
+    'Example-Brand-2.7.0-mac.dmg',                   // mac-universal
+    'Example-Brand-2.7.0-x86_64.AppImage',           // linux-x64
+  ]
   for (const id of ['official', 'beta', 'example-brand']) {
     mkdirSync(join(stage, id), { recursive: true })
-    // 品牌渠道的产物名由 slug 派生(与真实安装包一致:<slug>-2.7.0-x64-Setup.exe)。
-    writeFileSync(join(stage, id, id === 'example-brand' ? brandArtifact : `App-${id}.AppImage`), 'x')
+    if (id !== 'example-brand') {
+      writeFileSync(join(stage, id, `App-${id}.AppImage`), 'x')
+      continue
+    }
+    for (const name of brandArtifacts) writeFileSync(join(stage, id, name), 'x')
   }
-  const pushed = transfer('push', ['--stage', stage], r2)
+  const pushed = transfer('push', ['--stage', stage], R2_CREDENTIALS)
   check(pushed.status === 0, `品牌渠道中转 push 应成功,实际退出 ${String(pushed.status)}`)
   check(existsSync(join(stage, 'official')), '官方产物必须留在公开 artifact 暂存目录里')
   check(existsSync(join(stage, 'beta')), 'beta 产物必须留在公开 artifact 暂存目录里')
@@ -4701,8 +5378,12 @@ esac
   check(!transferLog.includes('/.'), '中转命令里不得出现 prefix/. 形态(真实 CLI 匹配不到对象)')
   const keys = readdirSync(join(store, '_transfer')).sort()
   check(keys.length === 1 && !keys[0].includes('example-brand'), '中转前缀不得含渠道 id')
-  check(keys[0].startsWith('4242-1-'), '中转前缀应按 run 派生')
-  const token = keys[0].replace(/^4242-1-/, '')
+  // 前缀 = `<run id>-<token>`，**不含 attempt**（2026-09-26 审计 Z3-1）：attempt 编进
+  // 前缀会让早先 attempt 的对象没人删（公开读桶里的永久残留），并让 `gh run rerun
+  // --failed` 之后的前缀里只有失败平台的产物（半套交付）。下面的用例直接跑两个
+  // attempt 比对前缀，这条只钉形态。
+  check(/^4242-[0-9a-f]{16}$/u.test(keys[0]), `中转前缀应是 <run id>-<token> 形态(不含 attempt)，实际 ${keys[0]}`)
+  const token = keys[0].replace(/^4242-/, '')
   check(token.length === 16 && /^[0-9a-f]{16}$/u.test(token), '前缀 token 应是 HMAC 派生(不可猜测)')
   check(
     existsSync(join(store, '_transfer', keys[0], 'ch-3', brandArtifact)),
@@ -4741,15 +5422,18 @@ esac
   check(publicRun.status === 0, '只有官方/beta 时不应要求 R2 凭据')
 
   // pull:release job 取回自己的品牌产物
-  const pulled = transfer('pull', ['--to', out], r2)
+  const pulled = transfer('pull', ['--to', out], R2_CREDENTIALS)
   check(pulled.status === 0, `品牌渠道中转 pull 应成功,实际退出 ${String(pulled.status)}`)
   check(existsSync(join(out, 'example-brand', brandArtifact)), 'pull 应把品牌产物还原到 release-artifacts/<channel>/')
+  for (const name of brandArtifacts) {
+    check(existsSync(join(out, 'example-brand', name)), `pull 应还原三平台产物之一:${name}`)
+  }
 
   // 失败输出脱敏(2026-09-11 v2.7.0 真实泄漏):aws 的失败信息会回显对象键,
   // 而文件名由 slug 派生 —— 只掩渠道 id 掩不到它,于是客户品牌进了公开日志。
   mkdirSync(join(stage, 'example-brand'), { recursive: true })
   writeFileSync(join(stage, 'example-brand', brandArtifact), 'x')
-  const failedPush = transfer('push', ['--stage', stage], { ...r2, FAKE_AWS_FAIL: '1' })
+  const failedPush = transfer('push', ['--stage', stage], { ...R2_CREDENTIALS, FAKE_AWS_FAIL: '1' })
   const failedRaw = `${failedPush.stdout ?? ''}${failedPush.stderr ?? ''}`
   // 只看**公开日志**部分:剔掉 ::add-mask:: 指令行(GitHub 不展示其取值,
   // 与上面"公开日志里不得出现渠道名"的既有口径一致)。
@@ -4765,9 +5449,308 @@ esac
   check(failedRaw.includes('add-mask::Example-Brand'), 'slug 也必须登记进 GitHub 掩码')
 
   // clean:取回后立即销毁中转对象
-  const cleaned = transfer('clean', [], r2)
+  const cleaned = transfer('clean', [], R2_CREDENTIALS)
   check(cleaned.status === 0, 'clean 应成功')
   check(!existsSync(join(store, '_transfer', keys[0], 'ch-3')), 'clean 必须删掉中转对象')
+}
+
+// ---- 7a. 同一个 run 的两次 attempt 必须共用前缀 + pull 的「三平台齐全」判据 ----
+//
+// 2026-09-26 审计 Z3-1 的两个后果都是静默的:
+//   ① 前缀含 attempt ⇒ 早先 attempt 的客户安装包**永久**留在公开读的桶里
+//      (销毁步只按**当前** attempt 计算前缀,没有任何代码路径或桶生命周期规则会删它);
+//   ② `gh run rerun --failed` **不重跑已成功的 job**(本仓的标准处置)⇒ attempt 2 的
+//      前缀里只有失败平台的产物,而 `pull` 的判据只是"目录非空" ⇒ 三平台缺两个也全绿。
+// 这一节把两件事都钉成红灯:attempt 1/2 的前缀必须**逐字相同**;pull 必须逐平台判齐。
+{
+  const attemptWork = tempDir('ci-transfer-attempt-')
+  const attemptStage = join(attemptWork, 'client-assets')
+  const attemptStore = join(attemptWork, 'store')
+  const attemptOut = join(attemptWork, 'release-artifacts')
+  const attemptList = join(attemptWork, 'channels.list')
+  writeFileSync(attemptList, 'official\nexample-brand\n')
+  mkdirSync(join(attemptWork, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(attemptWork, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+  // 假 aws:`s3 ls` 支持前缀枚举(clean 的旧格式清扫要用),其余与上一节同形。
+  const attemptAws = join(attemptWork, 'aws')
+  writeFileSync(attemptAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${attemptStore}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    if [[ "$src" == s3://* ]]; then
+      key="\${src#s3://*/}"; key="\${key%/}"
+      mkdir -p "$dst"; [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
+    else
+      key="\${dst#s3://*/}"; key="\${key%/}"
+      mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    fi
+    ;;
+  "s3 rm")
+    prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}"
+    ;;
+  "s3 ls")
+    # 前缀以斜杠结尾 = 列它的子前缀(真实 aws 语义):保留尾斜杠再拼通配,
+    # 否则通配会匹配到 _transfer 自己而不是它的孩子(2026-09-26 实现时踩过)。
+    prefix="\${args[2]}"; key="\${prefix#s3://*/}"
+    case "$key" in
+      */) for entry in "$store/\${key}"*/; do
+            [ -d "$entry" ] || continue
+            printf '                           PRE %s\\n' "$(basename "$entry")"
+          done ;;
+    esac
+    ;;
+esac
+`)
+  execFileSync('chmod', ['+x', attemptAws])
+  const brandFiles = [
+    'Example-Brand-2.7.0-mac.dmg',
+    'Example-Brand-2.7.0-x64-Setup.exe',
+    'Example-Brand-2.7.0-x86_64.AppImage',
+  ]
+  const stageFiles = names => {
+    mkdirSync(join(attemptStage, 'example-brand'), { recursive: true })
+    for (const name of names) writeFileSync(join(attemptStage, 'example-brand', name), 'x')
+  }
+  const runTransfer = (mode, attempt, extra = []) => spawnSync('bash', [
+    transferScript, mode, '--list', attemptList, ...extra,
+  ], {
+    cwd: attemptWork,
+    encoding: 'utf8',
+    env: {
+      PATH: `${attemptWork}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ID: '777',
+      GITHUB_RUN_ATTEMPT: attempt,
+      ...R2_CREDENTIALS,
+    },
+  })
+  const transferPrefixes = () => existsSync(join(attemptStore, '_transfer'))
+    ? readdirSync(join(attemptStore, '_transfer')).sort()
+    : []
+
+  // attempt 1:三个平台都产出(正常成功的一次跑)。
+  stageFiles(brandFiles)
+  const firstAttempt = runTransfer('push', '1')
+  check(firstAttempt.status === 0, `attempt 1 的 push 应成功,实际退出 ${String(firstAttempt.status)}`)
+  const prefixesAfterFirst = transferPrefixes()
+  check(prefixesAfterFirst.length === 1,
+    `attempt 1 后应恰好有一个中转前缀,实际 ${JSON.stringify(prefixesAfterFirst)}`)
+  check(/^777-[0-9a-f]{16}$/u.test(prefixesAfterFirst[0] ?? ''),
+    `中转前缀不得含 attempt(应是 <run id>-<token>),实际 ${prefixesAfterFirst[0]}`)
+
+  // attempt 2:只有失败的那个平台重跑(`gh run rerun --failed` 的真实形态)——
+  // 它推的产物必须落在**同一个**前缀里,于是 attempt 1 的另外两个平台仍然可见。
+  stageFiles(['Example-Brand-2.7.0-mac.dmg'])
+  const secondAttempt = runTransfer('push', '2')
+  check(secondAttempt.status === 0, `attempt 2 的 push 应成功,实际退出 ${String(secondAttempt.status)}`)
+  const prefixesAfterSecond = transferPrefixes()
+  check(prefixesAfterSecond.length === 1,
+    `同一 run 的两次 attempt 必须共用前缀(否则 attempt 1 的产物永久留在公开读的桶里),实际 ${JSON.stringify(prefixesAfterSecond)}`)
+  check(prefixesAfterSecond[0] === prefixesAfterFirst[0], '两次 attempt 的中转前缀必须逐字相同')
+
+  // attempt 2 之后 pull:三个平台都必须取回(旧实现只有 attempt 2 推的那一个)。
+  const attemptPulled = runTransfer('pull', '2', ['--to', attemptOut])
+  check(attemptPulled.status === 0, `attempt 2 的 pull 应成功,实际退出 ${String(attemptPulled.status)}`)
+  for (const name of brandFiles) {
+    check(existsSync(join(attemptOut, 'example-brand', name)),
+      `attempt 2 的 pull 必须取回 attempt 1 推上去的产物:${name}(这正是 rerun --failed 的形态)`)
+  }
+
+  // ---- 7b. clean 必须清掉**旧格式**(`<run>-<attempt>-<token>`)的本 run 前缀 ----
+  //
+  // 2026-09-26 之前前缀含 attempt ⇒ 早先 attempt 的对象没有人删。新代码只认
+  // `<run>-<token>`,所以 clean 还要按 run id 前缀把旧格式残留一并删掉;同时
+  // **不得**碰别的 run 的前缀(前缀匹配是这条判据最容易错的地方:run `777` 不能
+  // 命中 `7770-...`)。
+  const legacyPrefix = join(attemptStore, '_transfer', '777-1-deadbeefdeadbeef')
+  const otherRunPrefix = join(attemptStore, '_transfer', '7770-1-deadbeefdeadbeef')
+  mkdirSync(join(legacyPrefix, 'ch-3'), { recursive: true })
+  writeFileSync(join(legacyPrefix, 'ch-3', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  mkdirSync(join(otherRunPrefix, 'ch-3'), { recursive: true })
+  writeFileSync(join(otherRunPrefix, 'ch-3', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  const swept = runTransfer('clean', '1')
+  check(swept.status === 0, `clean 应成功(尽力而为),实际退出 ${String(swept.status)}`)
+  check(!existsSync(legacyPrefix), 'clean 必须删掉本 run 的**旧格式**(<run>-<attempt>-<token>)残留前缀')
+  check(existsSync(otherRunPrefix), 'clean 不得碰别的 run 的前缀(run id 前缀必须按 `<run>-` 锚定)')
+  // 当前前缀下的对象也必须被删掉（假 aws 把 S3 前缀物化成目录，所以断言的是
+  // `<前缀>/ch-<index>/` 这棵子树 —— 真实 S3 里"前缀"本身不是对象，删完对象即空）。
+  check(!existsSync(join(attemptStore, '_transfer', prefixesAfterFirst[0] ?? 'missing', 'ch-3')),
+    'clean 仍必须删掉本 run 的当前前缀下的中转对象')
+
+  // ---- 7b-2. clean 的前缀清扫:缺 GITHUB_RUN_ID 时**不得**退化成"删掉所有 local-*" ----
+  //
+  // 2026-09-27 第二十七轮审计 AA1 §证伪-3(假 aws 真跑):`RUN` 的回退值 `local` **不是一个 run**
+  // (它只是"没有 run id 时也能算出稳定前缀"的占位,让本机 push/pull 自洽),而清扫唯一的锚就是
+  // `RUN` ⇒ 缺变量时 `clean` 会把**别的本地调用**留下的 `local-*` 前缀一起删掉。修法是"显式跳过
+  // 并打一行"(clean 是尽力而为的收尾步,不因缺一个 CI 变量让发布链变红,但不许静默)。
+  //
+  // 这一节把四件事一起钉死(逐条都是行为断言,不看脚本源码):
+  //   ① 别人的 `local-*` 与不在本 run 锚定面内的前缀:任何 run id 下都不得被删;
+  //   ② 缺 GITHUB_RUN_ID(未设 / 空串)⇒ 清扫不删 `local-*`,且**必须打印显式跳过**;
+  //   ③ 本 run 的当前前缀(`<run>-<HMAC 前 16 位>`)照常删 —— 证明 clean 仍在干活,
+  //      跳过只罩"按前缀枚举"的清扫,不罩 clean 本身;
+  //   ④ 前缀碰撞矩阵(run id 是别人前缀 / 别人是本 run 前缀 / 裸 run id)逐字不变。
+  const transferToken = run => createHmac('sha256', R2_CREDENTIALS.R2_SECRET_ACCESS_KEY)
+    .update(run).digest('hex').slice(0, 16)
+  const transferDir = prefix => join(attemptStore, '_transfer', prefix)
+  // `ch-<index>` 的 index = 渠道在 channels.list 里的**行号**:本夹具是 `official\nexample-brand`
+  // ⇒ 品牌渠道的产物落在 `ch-2/`(clean 的主循环只删自己那个 index,清扫才按前缀整片删)。
+  const seedPrefix = (prefix, channelIndex = 3) => {
+    mkdirSync(join(transferDir(prefix), `ch-${String(channelIndex)}`), { recursive: true })
+    writeFileSync(join(transferDir(prefix), `ch-${String(channelIndex)}`, 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  }
+  /** `clean` 只换环境里的 GITHUB_RUN_ID(其余与上面的 runTransfer 同形)。 */
+  const runClean = runId => {
+    const env = {
+      PATH: `${attemptWork}:${process.env.PATH ?? ''}`,
+      HOME: process.env.HOME ?? '',
+      GITHUB_RUN_ATTEMPT: '1',
+      ...R2_CREDENTIALS,
+    }
+    // `undefined` = 变量**不在环境里**;`''` = 在但为空(GitHub 上两种都会出现,`${VAR:-}` 都算缺)。
+    if (runId !== undefined) env.GITHUB_RUN_ID = runId
+    return spawnSync('bash', [transferScript, 'clean', '--list', attemptList], {
+      cwd: attemptWork, encoding: 'utf8', env,
+    })
+  }
+  const reseed = () => {
+    seedPrefix('777-1-deadbeefdeadbeef')                 // 本 run 的旧格式残留
+    seedPrefix(`777-${transferToken('777')}`, 2)         // 本 run 的当前前缀(产物在 ch-2)
+    seedPrefix(`local-${transferToken('local')}`, 2)     // 缺变量时的当前前缀(RUN 退化成 local)
+    seedPrefix('7770-cafe')                              // run id 是它的前缀
+    seedPrefix('77-1-aaaa')                              // 它是 run id 的前缀
+    seedPrefix('777')                                    // 裸 run id(无横线)
+    seedPrefix('local-1-old')                            // 别的本地调用留下的
+    seedPrefix('local-2-old')
+    seedPrefix('localother')                             // 连横线都没有
+  }
+
+  // ④+①(run id 已设):清扫照常删本 run 的,谁都不许多删。
+  reseed()
+  const runAnchored = runClean('777')
+  check(runAnchored.status === 0, `clean 应成功,实际退出 ${String(runAnchored.status)}`)
+  check(!existsSync(transferDir('777-1-deadbeefdeadbeef')),
+    'clean 必须删掉本 run 的旧格式(<run>-<attempt>-<token>)前缀')
+  check(!existsSync(join(transferDir(`777-${transferToken('777')}`), 'ch-2')),
+    'clean 必须删掉本 run 当前前缀下的对象')
+  for (const decoy of ['7770-cafe', '77-1-aaaa', '777', 'local-1-old', 'local-2-old', 'localother']) {
+    check(existsSync(transferDir(decoy)),
+      `clean 不得删 \`${decoy}\`:它不在"本 run 前缀"的锚定面内(\`<run>-\` 锚定)`)
+  }
+
+  // 前置(防假绿):显式把 GITHUB_RUN_ID 设成字面量 `local` 时,清扫**确实**按 `local-` 删。
+  // 没有这条,"缺变量 ⇒ 不删"可能只是因为夹具里清扫压根不工作 —— 那时下面几条全是假绿。
+  // 注意口径:这条钉的是**显式给了 run id** 时的既有锚定语义(prefix 匹配的固有含义),
+  // 修法针对的是**变量缺席**,不是把 `local` 这个名字特殊化。
+  seedPrefix('local-control-probe')
+  const literalLocal = runClean('local')
+  check(literalLocal.status === 0, `GITHUB_RUN_ID=local 时 clean 应成功,实际退出 ${String(literalLocal.status)}`)
+  check(!existsSync(transferDir('local-control-probe')),
+    '前置失效:GITHUB_RUN_ID 显式设为 local 时清扫应删除 local- 前缀(否则下面的用例咬不到东西)')
+
+  // ②+③(缺变量):清扫整段跳过 + clean 的其余部分照常。
+  for (const missing of [undefined, '']) {
+    reseed()
+    const label = missing === undefined ? '未设' : '空串'
+    const noRun = runClean(missing)
+    const output = `${noRun.stdout ?? ''}${noRun.stderr ?? ''}`
+    check(noRun.status === 0,
+      `GITHUB_RUN_ID ${label} 时 clean 仍应成功(尽力而为的收尾步:不因缺一个 CI 变量让发布链变红),实际退出 ${String(noRun.status)}`)
+    check(output.includes('skipped: no GITHUB_RUN_ID'),
+      `GITHUB_RUN_ID ${label} 时必须**显式**说清扫被跳过(静默跳过 == 以为清干净了),实际输出:${output.trim().slice(0, 200)}`)
+    for (const name of ['local-1-old', 'local-2-old', '7770-cafe', '77-1-aaaa', '777', 'localother']) {
+      check(existsSync(transferDir(name)),
+        `GITHUB_RUN_ID ${label} 时 clean 不得删 \`${name}\`:RUN 退化成占位值 \`local\` 后它会被误判成本 run 的前缀`)
+    }
+    check(!existsSync(join(transferDir(`local-${transferToken('local')}`), 'ch-2')),
+      `GITHUB_RUN_ID ${label} 时 clean 仍必须删掉当前前缀(local-<token>)下的对象 —— 跳过只罩前缀清扫,不罩 clean 本身`)
+  }
+}
+
+// ---- 7c. pull 的「三平台齐全」判据:少一个平台必须红且点名(独立夹具) ----
+//
+// 只判"目录非空"的形态会让"少平台"以全绿出厂 —— 清单少一个 assets 键、门户少一个
+// 下载入口、`/updates/client/<安装包名>` 404,而流水线全绿(2026-09-26 审计 Z3-1/Z3-2)。
+{
+  const work = tempDir('ci-transfer-partial-')
+  const stage = join(work, 'client-assets')
+  const store = join(work, 'store')
+  const list = join(work, 'channels.list')
+  writeFileSync(list, 'example-brand\n')
+  mkdirSync(join(work, 'channels', 'example-brand'), { recursive: true })
+  writeFileSync(join(work, 'channels', 'example-brand', 'channel.json'), JSON.stringify({
+    schema: 1,
+    channel_id: 'example-brand',
+    identity: { display_name: 'Example Brand', short_name: 'Example' },
+    desktop: { product_name: 'Example Brand', slug: 'Example-Brand' },
+  }))
+  const fakeAws = join(work, 'aws')
+  writeFileSync(fakeAws, `#!/usr/bin/env bash
+set -euo pipefail
+store="${store}"
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --endpoint-url) shift 2 ;;
+    --only-show-errors) shift ;;
+    --recursive) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "s3 cp")
+    src="\${args[2]}"; dst="\${args[3]}"
+    if [[ "$src" == s3://* ]]; then
+      key="\${src#s3://*/}"; key="\${key%/}"
+      mkdir -p "$dst"; [ -d "$store/$key" ] && cp -a "$store/$key/." "$dst/"
+    else
+      key="\${dst#s3://*/}"; key="\${key%/}"
+      mkdir -p "$store/$key"; cp -a "$src/." "$store/$key/"
+    fi
+    ;;
+  "s3 rm") prefix="\${args[2]}"; rm -rf "$store/\${prefix#s3://*/}" ;;
+esac
+`)
+  execFileSync('chmod', ['+x', fakeAws])
+  // 只有 mac 的 dmg —— 另外两个平台的 job 没有产出(或产物没进中转前缀)。
+  mkdirSync(join(stage, 'example-brand'), { recursive: true })
+  writeFileSync(join(stage, 'example-brand', 'Example-Brand-2.7.0-mac.dmg'), 'x')
+  const env = {
+    PATH: `${work}:${process.env.PATH ?? ''}`,
+    HOME: process.env.HOME ?? '',
+    GITHUB_RUN_ID: '778',
+    GITHUB_RUN_ATTEMPT: '1',
+    ...R2_CREDENTIALS,
+  }
+  const pushed = spawnSync('bash', [transferScript, 'push', '--list', list, '--stage', stage], {
+    cwd: work, encoding: 'utf8', env,
+  })
+  check(pushed.status === 0, '只推一个平台时 push 本身应成功(各平台 job 只推自己的产物)')
+  const partialPull = spawnSync('bash', [
+    transferScript, 'pull', '--list', list, '--to', join(work, 'release-artifacts'),
+  ], { cwd: work, encoding: 'utf8', env })
+  check(partialPull.status !== 0, '中转产物少一个平台时 pull 必须失败(不得只判「目录非空」)')
+  check((partialPull.stderr ?? '').includes('缺少平台'), '失败信息应说明「缺少平台」')
+  check((partialPull.stderr ?? '').includes('Windows') && (partialPull.stderr ?? '').includes('Linux'),
+    `失败信息应点名缺的平台(已有 macOS,缺 Windows/Linux),实际:${(partialPull.stderr ?? '').trim().slice(0, 200)}`)
+  check(!(partialPull.stderr ?? '').includes('macOS('),
+    '失败信息不得把已取回的平台也算成缺失(点名必须精确)')
 }
 
 // ---- 8. 敏感路径不得入库(忽略规则是唯一防线,补一条硬守卫) ----
@@ -4809,9 +5792,11 @@ esac
     writeFileSync(join(work, 'channels', id, 'channel.json'), JSON.stringify({
       schema: 1, channel_id: id, identity: { display_name: `${id} AI`, short_name: id },
     }))
-    // 三平台安装包:Linux 侧刻意同时给 AppImage 与 deb(镜像只该带走前者)
+    // 三平台安装包:Linux 侧刻意同时给 AppImage 与 deb(镜像只该带走前者)。
+    // Windows 用真实产物名形态(`<slug>-<ver>-x64-Setup.exe`):清单的 win 通配与
+    // ci.yml 打包 job 的 `--patterns '*Setup*.exe'` 同源(2026-09-26 审计 Z3-2)。
     mkdirSync(join(artifacts, id), { recursive: true })
-    for (const name of ['App.AppImage', 'App.deb', 'App.dmg', 'App.exe']) {
+    for (const name of ['App.AppImage', 'App.deb', 'App.dmg', 'App-Setup.exe']) {
       writeFileSync(join(artifacts, id, name), 'x')
     }
   }
@@ -4853,10 +5838,19 @@ exit 0
   const clientDir = join(work, 'client-assets', 'client')
   check(existsSync(join(clientDir, 'App.AppImage')), '镜像应带 Linux AppImage')
   check(!existsSync(join(clientDir, 'App.deb')), 'Linux deb 不得进镜像(已定案:镜像只放 AppImage)')
-  const manifest = JSON.parse(readFileSync(join(work, 'client-assets', 'CLIENT-RELEASE.json'), 'utf8'))
-  check(manifest.client.assets['linux-x64'].file.endsWith('.AppImage'), '清单 linux-x64 必须指向 AppImage')
-  check(!JSON.stringify(manifest).includes('.deb'), '清单里不得出现 deb')
-  check(manifest.channel_id === 'beta' || manifest.channel_id === 'official', '清单须声明本渠道')
+  // 装配失败时这个文件是**半成品**（重定向先建文件、平台判据中途 exit）⇒ 解析要能容错，
+  // 否则一条断言失败会被一个 JSON 异常掩盖（诊断信息全丢）。
+  const manifestPath = join(work, 'client-assets', 'CLIENT-RELEASE.json')
+  const manifestRaw = existsSync(manifestPath) ? readFileSync(manifestPath, 'utf8') : ''
+  let manifest = null
+  try { manifest = JSON.parse(manifestRaw) } catch { manifest = null }
+  check(manifest !== null, `镜像清单必须是合法 JSON（装配失败时它是半成品）:${manifestRaw.slice(0, 160)}`)
+  const clientAssets = manifest?.client?.assets ?? {}
+  check(Object.keys(clientAssets).length === 3,
+    `清单必须逐平台齐全（mac-universal/win-x64/linux-x64），实际 ${JSON.stringify(Object.keys(clientAssets))}`)
+  check(clientAssets['linux-x64']?.file?.endsWith('.AppImage') === true, '清单 linux-x64 必须指向 AppImage')
+  check(!JSON.stringify(manifest ?? {}).includes('.deb'), '清单里不得出现 deb')
+  check(manifest?.channel_id === 'beta' || manifest?.channel_id === 'official', '清单须声明本渠道')
 
   const dockerLog = readFileSync(log, 'utf8')
   check(
@@ -4883,6 +5877,86 @@ exit 0
     )
   }
   check(existsSync(join(out, 'official', 'picoaide-server-9.9.9-amd64.zip')), '产物名应中性(不含渠道 id)')
+
+  // ---- 9a. 逐平台必需:少一个平台的产物必须 fail-loud 并点名（2026-09-26 审计 Z3-2）----
+  //
+  // 旧实现是 `[ -f … ] || return 0`：缺平台时清单**只是少一个键**，构建全绿 ——
+  // 更新清单少一个平台、门户少一个下载入口、`/updates/client/<安装包名>` 404。
+  // 判据的最小反例就是"少一个平台"，所以这里用独立夹具跑三个变体（缺 mac / 缺 win /
+  // 缺 linux），每个都必须非零退出且点名缺的那个平台标签。
+  {
+    const partialWork = tempDir('ci-images-partial-')
+    const partialList = join(partialWork, 'channels.list')
+    const partialArtifacts = join(partialWork, 'release-artifacts')
+    writeFileSync(partialList, 'official\n')
+    mkdirSync(join(partialWork, 'channels', 'official'), { recursive: true })
+    writeFileSync(join(partialWork, 'channels', 'official', 'channel.json'), JSON.stringify({
+      schema: 1, channel_id: 'official', identity: { display_name: 'Official', short_name: 'Official' },
+    }))
+    const fakeDocker = join(partialWork, 'docker')
+    writeFileSync(fakeDocker, '#!/usr/bin/env bash\nexit 0\n')
+    execFileSync('chmod', ['+x', fakeDocker])
+    const all = { 'mac-universal': 'App.dmg', 'win-x64': 'App-Setup.exe', 'linux-x64': 'App.AppImage' }
+    const runPartial = omit => {
+      rmSync(join(partialWork, 'client-assets'), { recursive: true, force: true })
+      rmSync(partialArtifacts, { recursive: true, force: true })
+      mkdirSync(join(partialArtifacts, 'official'), { recursive: true })
+      for (const [key, name] of Object.entries(all)) {
+        if (key === omit) continue
+        writeFileSync(join(partialArtifacts, 'official', name), 'x')
+      }
+      return spawnSync('bash', [
+        imagesScript, '--list', partialList, '--artifacts', partialArtifacts, '--out', join(partialWork, 'release-bundle'),
+      ], {
+        cwd: partialWork,
+        encoding: 'utf8',
+        env: {
+          PATH: `${partialWork}:${process.env.PATH ?? ''}`,
+          HOME: process.env.HOME ?? '',
+          CI_IMAGE_BUILD_ROOT: partialWork,
+          VERSION: 'v9.9.9',
+        },
+      })
+    }
+    for (const [key, label] of [['mac-universal', 'macOS'], ['win-x64', 'Windows'], ['linux-x64', 'Linux']]) {
+      const partial = runPartial(key)
+      check(partial.status !== 0, `缺 ${key} 的产物时镜像装配必须失败(旧实现只生成少一个键的清单并全绿)`)
+      check((partial.stderr ?? '').includes('缺少') && (partial.stderr ?? '').includes(label),
+        `缺 ${key} 的失败信息应点名平台 ${label},实际:${(partial.stderr ?? '').trim().slice(0, 200)}`)
+      // 半成品清单不得留在工作区被下游当成"已生成"。
+      const manifest = join(partialWork, 'client-assets', 'CLIENT-RELEASE.json')
+      if (existsSync(manifest)) {
+        let parsed = null
+        try { parsed = JSON.parse(readFileSync(manifest, 'utf8')) } catch { parsed = null }
+        check(parsed === null, `缺平台时不得产出**合法**的 CLIENT-RELEASE.json(它是半成品被下游当真的形态)`)
+      }
+    }
+  }
+
+  // ---- 9b. 三平台清单只有**一处真源**：与 ci.yml 三个打包 job 的 --patterns 对拍 ----
+  //
+  // 键名/通配抄成两份就会漂移：镜像清单与 R2 中转的"齐全"判据都从
+  // `CLIENT_PLATFORM_ASSETS` 派生，而**产物实际由 ci.yml 的三个 job 归集** ——
+  // 两边的通配必须逐字一致（2026-09-26 审计 Z3-2 的"与客户端交付面同源"）。
+  {
+    const workflowText = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8')
+    const patterns = [...workflowText.matchAll(/--patterns\s+'([^']+)'/gu)].map(match => match[1].trim())
+    check(patterns.length === 3, `ci.yml 应有三处 --patterns(三个平台 job),实际 ${patterns.length}: ${JSON.stringify(patterns)}`)
+    const platformAssets = await import(join(root, 'packages', 'host', 'desktop', 'scripts', 'channel-build.ts'))
+    const globs = platformAssets.CLIENT_PLATFORM_ASSETS.map(asset => asset.glob)
+    const keys = platformAssets.CLIENT_PLATFORM_ASSETS.map(asset => asset.key)
+    check(JSON.stringify([...patterns].sort()) === JSON.stringify([...globs].sort()),
+      `镜像清单的平台通配必须与 ci.yml 三个 job 的 --patterns 完全一致(各写一份必然漂移):`
+        + ` ci.yml=${JSON.stringify(patterns)} CLIENT_PLATFORM_ASSETS=${JSON.stringify(globs)}`)
+    check(JSON.stringify(keys) === JSON.stringify(['mac-universal', 'win-x64', 'linux-x64']),
+      `清单键必须与客户端读清单的契约(src/desktop-release.ts 的 PLATFORM_ASSET_KEYS)一致,实际 ${JSON.stringify(keys)}`)
+    // 客户端交付面的键名真源在 src/desktop-release.ts：读源码对拍（不是再抄一份字面量）。
+    const releaseSource = readFileSync(join(root, 'packages', 'host', 'desktop', 'src', 'desktop-release.ts'), 'utf8')
+    for (const key of keys) {
+      check(releaseSource.includes("'" + key + "'"),
+        `清单键 ${key} 必须出现在 src/desktop-release.ts(客户端读清单的唯一契约)`)
+    }
+  }
 }
 
 // ---- 10. 保留策略:本次刚发布的版本**永不**参与淘汰(2026-09-12 审计 P1-2) ----
@@ -5115,8 +6189,249 @@ exit 0
   }
 }
 
-for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
+// ---- 15. 文档承诺的触发方式必须与 ci.yml 的 `on:` 逐字对拍（2026-09-26 审计 Z3-4；扫描根 2026-09-27 R28 AB2-A-04）----
+//
+// 2026-09-26 审计的 ④：`site/src/content/docs/{,en/}deployment/channels.md` 把
+// `workflow_dispatch` 写成"预发 tag 只出 beta 时提前出品牌渠道包"的**唯一**途径，
+// 而 ci.yml 的 `on:` 只有 `pull_request` / `push` —— 承诺了一个不存在的入口（读者按它
+// 操作会得到"工作流菜单里没有这一项"）。定案是**改承诺**（零风险且立刻可验证），
+// 这条守卫把"文档又漂回去"变成红灯。
+//
+// **R28 审计 AB2-A-04 证伪了第一版的覆盖面**：`docFiles` 是**两份 site 文件的硬编码
+// 白名单**，而 §7.61.2-4 的原始发现面含第三处（`docs/decisions/2026-09-20-dsh-0.1.6-upgrade.md`
+// 的一句"待做（推 tag 或 workflow_dispatch）"）—— 同一句 payload 只换落点：写进白名单
+// 里的文件 ⇒ EXIT=1 点名；写进 `docs/**` ⇒ EXIT=0。这正是本仓"**判据的扫描根决定它
+// 能看见什么**"的第 4 次实例，所以修法是**换扫描根**（目录扫描），不是"再补一个文件名"。
+//
+// 现在的扫描根 = `docs/**` + `site/**` 下**所有** `.md`（每次运行现场遍历，新增文件自动
+// 进面）。判据分两档，差别在**文档的职责**而不是文件名：
+//   · `site/**` = 对外发布/运维文档面（整篇在讲这条流水线）⇒ **裸提及就是承诺**：
+//     提到 workflow_dispatch 的每一行都必须是否定表述。
+//   · `docs/**` = 混杂着历史规划 / 决策记录 / 审计报告 / **别的工作流**的说明
+//     ⇒ 裸提及不等于承诺（现存 8 处这样的行逐条核过：它们描述的是已删除的
+//     `docker.yml`、`notary-probe.yml` 这类**别的** workflow，或当时的规划文本，
+//     改写它们等于改写历史）⇒ 只判**承诺形态**（`或/用/通过/只能` + workflow_dispatch，
+//     或 `workflow_dispatch (手工|手动)?触发`）。
+// 唯一豁免 = **已发布**的 `docs/releases/**`（公开的冻结记录：发布说明里"引用过去的
+// 错误说法"必须能原样引用，改写已发布正文等于改写当时告诉客户的事实）。豁免**不许
+// 静默**：命中它的行数进断言消息，且扫描面有文件数地板（下面两条 `_FLOOR`）。
+{
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  // YAML 1.1 把 `on` 读成布尔真值，1.2（本仓用的 `yaml` 包）读成字符串 —— 两种都认，
+  // 解析不出任何触发键即 fail-loud（不许静默变成"文档没有承诺"）。
+  const triggerTable = workflow?.on ?? workflow?.true
+  const triggers = triggerTable !== null && typeof triggerTable === 'object' ? Object.keys(triggerTable) : []
+  check(triggers.length > 0, `ci.yml 的 on: 必须能解析出触发键（实际 ${JSON.stringify(triggers)}）`)
 
+  /** 去掉 markdown 强调符后的逐行文本（判定"否定"不能被 `**`/反引号打断）。 */
+  const plainLines = text => text.split('\n').map(line => line.replace(/[*`]/gu, ''))
+  /** 递归收集目录下的 `.md`（跳过依赖/构建/隐藏目录；现场遍历 ⇒ 新文件自动进面）。 */
+  const collectDocs = dir => {
+    const found = []
+    const walk = current => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build') continue
+        if (entry.name.startsWith('.')) continue
+        const path = join(current, entry.name)
+        if (entry.isDirectory()) walk(path)
+        else if (entry.name.endsWith('.md')) found.push(path)
+      }
+    }
+    walk(dir)
+    return found
+  }
+  const NEGATED = /(没有|无)\s*workflow_dispatch|(no|not)\s+workflow_dispatch/u
+  /** 承诺形态：把 workflow_dispatch 写成"做某件事的手段"（而不是在描述别的工作流）。 */
+  const PROMISE = /(或|用|通过|只能|可以)\s*workflow_dispatch|workflow_dispatch\s*(?:手工|手动)?触发/u
+  /**
+   * 已发布 release notes = 公开的冻结记录（`/releases/` 目录下的版本说明已经挂到
+   * GitHub Release 上）。豁免必须**可数**：命中行数会被记下来，不许静默吞掉漂移。
+   */
+  const RELEASE_NOTES = /^docs\/releases\//u
+  const SCAN_FILES_FLOOR = 150
+  const SCANNED_NON_RECORD_FLOOR = 40
+
+  const scanned = [...collectDocs(join(root, 'docs')), ...collectDocs(join(root, 'site'))]
+    .map(path => path.slice(root.length + 1))
+  check(scanned.length >= SCAN_FILES_FLOOR,
+    `文档扫描面只有 ${scanned.length} 个 .md（地板 ${SCAN_FILES_FLOOR}）—— 扫描根被搬空/被排除规则吃掉了，`
+    + '拒绝以"没扫到就没有承诺"的方式通过')
+  const guarded = scanned.filter(file => !RELEASE_NOTES.test(file))
+  check(guarded.length >= SCANNED_NON_RECORD_FLOOR,
+    `非记录面文档只有 ${guarded.length} 个（地板 ${SCANNED_NON_RECORD_FLOOR}）—— 扫描面静默缩水`)
+  // 两份 site 发布文档必须仍在面内（它们承载下面第 ② 条"必须如实说明没有该入口"）。
+  const siteReleaseDocs = [
+    'site/src/content/docs/deployment/channels.md',
+    'site/src/content/docs/en/deployment/channels.md',
+  ]
+  for (const file of siteReleaseDocs) {
+    check(scanned.includes(file), `${file} 必须落在文档扫描面内（发布面文档是这条判据的正向锚点）`)
+  }
+
+  let exemptHits = 0
+  for (const file of guarded) {
+    const plain = plainLines(readFileSync(join(root, file), 'utf8'))
+    if (!triggers.includes('workflow_dispatch')) {
+      // ① 文档不得**承诺**流水线没有的入口（当前 ci.yml 只有 pull_request / push）。
+      //    site 面按"裸提及即承诺"判；docs 面按"承诺形态"判（见文件头两档说明）。
+      const strict = file.startsWith('site/')
+      const promises = plain.filter(line => line.includes('workflow_dispatch')
+        && !NEGATED.test(line) && (strict || PROMISE.test(line)))
+      check(promises.length === 0,
+        `${file} 把 workflow_dispatch 写成了可用入口，而 ci.yml 的 on: 只有 ${JSON.stringify(triggers)}`
+        + ` —— 文档不得承诺不存在的发布入口。命中行：${JSON.stringify(promises.slice(0, 2))}`)
+    }
+  }
+  // 反向：既然没有手工入口，两条语言版本都必须**如实写明**这一点（防止只删掉承诺、
+  // 不留事实，读者仍以为可以手工触发）。
+  if (!triggers.includes('workflow_dispatch')) {
+    for (const file of siteReleaseDocs) {
+      const plain = plainLines(readFileSync(join(root, file), 'utf8'))
+      check(plain.some(line => NEGATED.test(line)),
+        `${file} 必须如实说明发布工作流没有 workflow_dispatch（docs ↔ ci.yml 的 on: 逐字对拍）`)
+    }
+  }
+  // 豁免面的**可数性**：命中 release notes 的承诺行必须能被看见（哪怕只打印进断言消息）。
+  for (const file of scanned.filter(name => RELEASE_NOTES.test(name))) {
+    const plain = plainLines(readFileSync(join(root, file), 'utf8'))
+    exemptHits += plain.filter(line => line.includes('workflow_dispatch') && !NEGATED.test(line)
+      && PROMISE.test(line)).length
+  }
+  // 这条不是"必须为 0"：它只要求**说得出来**豁免了多少行。发布说明引用旧说法是正当的，
+  // 数量变化（有人把新漂移写进 release notes）会在这里留下可读的数字。
+  check(exemptHits <= 5,
+    `docs/releases/** 被豁免的承诺行有 ${exemptHits} 行（上限 5）—— 发布说明里出现新的`
+    + `"workflow_dispatch 可用"式表述时，请连同这条上限一起复核（豁免不是垃圾桶）`)
+}
+
+// ---- 16. `pr-summary` 的 PR 评论必须由 `needs.*.result` 派生（R28 审计 AB2-A-02）----
+//
+// 现场：这个 job 的 `if` 含 `always()`（docs-only 的 PR 也要有评论，所以它**会**在
+// 上游失败时运行），正文却**无条件**写「本次提交的门禁（gate + server + 三平台打包）
+// 全部通过，可下载产物」—— 门禁红的 PR 上机器人发的是假绿评论，还列出根本不存在的
+// artifact；而 `needs` 里**没有 `gate`**，即便想按结果修正措辞也读不到那个结论。
+//
+// 判据 = **真跑**那段 github-script（不是文本对拍）：YAML 解析出 `script` 正文 →
+// 按伪造的 `needs` 渲染 `${{ … }}` → 在**只有 github/context/process/console** 的
+// 沙箱里执行 → 抓它真正 submit 的评论正文。文本对拍在这里必然假绿（"正文里出现过
+// needs." 与"正文按 needs 分叉"是两回事），所以必须真跑。
+//
+// 同时钉住一条**结构性**不变式：脚本读的每个 `needs.<job>.result` 都必须在
+// `needs:` 列表里 —— 否则表达式渲染成空串，`!== 'success'` 恒真，判据会以
+// 「列出 `gate` — ``」这种形状"通过"而语义错误。
+{
+  const workflow = parseYaml(readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const job = workflow?.jobs?.['pr-summary']
+  check(job !== null && typeof job === 'object', 'ci.yml 应有 pr-summary job（判据锚点）')
+  const needs = Array.isArray(job?.needs) ? job.needs : []
+  const step = (job?.steps ?? []).find(entry => String(entry?.uses ?? '').startsWith('actions/github-script'))
+  check(step !== undefined,
+    'pr-summary 应有 actions/github-script 步骤（判据锚点漂移必须响亮失败：没有判据对象时不许静默通过）')
+  const script = String(step?.with?.script ?? '')
+  check(script.includes('needs.'), 'pr-summary 的评论正文必须引用 needs.*（无条件断言的形态即本条的缺陷）')
+
+  // 渲染 `${{ … }}`：只认 needs.*（本 job 的输入面就是 needs 与事件名）。未知表达式
+  // 记一条失败并渲染成空串 —— 判据不许因为"多了个读不到的量"而崩掉或静默放过。
+  const render = (results, code) => script.replace(/\$\{\{\s*([^}]*?)\s*\}\}/gu, (_, expr) => {
+    if (expr === 'needs.changes.outputs.code') return code
+    const matched = /^needs\.([\w-]+)\.result$/u.exec(expr)
+    if (matched !== null) return results[matched[1]] ?? ''
+    check(false, `pr-summary 的 script 出现本判据不认识的表达式 <${expr}> —— `
+      + '请同步这条判据（否则它会以"渲染成空串"的方式给出错误结论）')
+    return ''
+  })
+
+  const runScript = async body => {
+    const posted = []
+    const github = {
+      rest: {
+        issues: {
+          listComments: async () => ({ data: [] }),
+          deleteComment: async () => ({}),
+          createComment: async args => { posted.push(args.body); return {} },
+        },
+      },
+    }
+    // 沙箱只有这四个全局：github / context / process / console。**不注入**别的，
+    // 于是"正文依赖了别的上下文"会当场 ReferenceError（fail-loud，不是静默空值）。
+    const sandbox = {
+      github,
+      context: { repo: { owner: 'owner', repo: 'repo' }, issue: { number: 1 }, runId: 1 },
+      process: { env: { GITHUB_SERVER_URL: 'https://github.example' } },
+      console,
+    }
+    await vm.runInNewContext(`(async () => {\n${body}\n})()`, sandbox)
+    return posted
+  }
+
+  const ARTIFACTS = ['desktop-Linux', 'desktop-Windows-installer', 'desktop-macOS', 'picoaide-server-linux-amd64']
+  const GREEN = {
+    gate: 'success',
+    server: 'success',
+    'desktop-linux': 'success',
+    'desktop-windows': 'success',
+    'desktop-macos': 'success',
+  }
+  const commentOf = async (results, code) => {
+    const posted = await runScript(render(results, code))
+    check(posted.length === 1, `pr-summary 应恰好提交一条评论，实际 ${posted.length} 条`)
+    return posted[0] ?? ''
+  }
+
+  // ① 全绿：允许（也应当）说"全部通过"，且四个 artifact 名齐全。
+  const green = await commentOf(GREEN, 'true')
+  check(green.includes('全部通过'), '全绿时正文应如实说"全部通过"（三态里的"绿"这一态）')
+  for (const name of ARTIFACTS) check(green.includes(name), `全绿时正文应列出 ${name}`)
+
+  // ② 门禁红：**不得**出现"全部通过"，必须点名每个未成功的 job 与它的 result，
+  //    且**不得**列出未成功 job 的 artifact（那正是"列出不存在的产物"的现场）。
+  const redGate = await commentOf({ ...GREEN, gate: 'failure', 'desktop-windows': 'skipped' }, 'true')
+  check(!redGate.includes('全部通过'),
+    '有任何 job 的 result != success 时，正文**不得**出现"全部通过"（门禁红还发假绿评论正是本条的缺陷形态）')
+  check(/`gate`\s*—\s*`failure`/u.test(redGate), `正文必须点名失败的 job 与它的 result，实际：${JSON.stringify(redGate)}`)
+  check(/`desktop-windows`\s*—\s*`skipped`/u.test(redGate), '被跳过的 job 同样必须如实列出（skip 不是 success）')
+  check(!redGate.includes('desktop-Windows-installer'),
+    '未成功 job 的 artifact 不得出现在正文里（它根本不存在 —— 这正是"列出不存在的产物"）')
+  check(redGate.includes('desktop-Linux') && redGate.includes('picoaide-server-linux-amd64'),
+    '成功的 job 仍应列出它的 artifact（失败信息要完整：既说清什么没成，也说清什么能下载）')
+
+  // ③ 单个 job 被跳过（不是失败）也必须算作"未全绿"。
+  const redSkipped = await commentOf({ ...GREEN, server: 'skipped' }, 'true')
+  check(!redSkipped.includes('全部通过'), '任一 job 被跳过（skipped）时同样不得说"全部通过"')
+  check(/`server`\s*—\s*`skipped`/u.test(redSkipped), '被跳过的 job 必须被点名')
+
+  // ④ 全失败：不得崩（正文仍要给出运行页入口），且不能谎称有产物。
+  const allRed = await commentOf({
+    gate: 'failure',
+    server: 'failure',
+    'desktop-linux': 'failure',
+    'desktop-windows': 'failure',
+    'desktop-macos': 'failure',
+  }, 'true')
+  check(!allRed.includes('全部通过'), '全失败时不得说"全部通过"')
+  for (const name of ARTIFACTS) {
+    check(!allRed.includes(name), `全失败时不得列出 ${name}（没有 job 产出它）`)
+  }
+  check(allRed.includes('github.example'), '全失败时正文仍应给出 Actions 运行页入口（可诊断性）')
+
+  // ⑤ docs-only 分支不受影响（它不是三态的一部分：那些 job 本来就该被跳过）。
+  const docsOnly = await commentOf({}, 'false')
+  check(docsOnly.includes('本次只改文档'), 'docs-only 的 PR 仍要走"只改文档"那一段文案')
+
+  // ⑥ 结构性不变式：脚本读的每个 needs.<job>.result 都必须在 needs: 列表里。
+  const readJobs = [...new Set([...script.matchAll(/needs\.([\w-]+)\.result/gu)].map(m => m[1]))]
+  for (const name of readJobs) {
+    check(needs.includes(name),
+      `pr-summary 的正文读了 needs.${name}.result，但 needs: 列表里没有 ${name}`
+      + '（表达式会渲染成空串 ⇒ 判定恒真/恒假，判据以错误的形状"通过"）')
+  }
+  // 反向：三平台 + server + gate 都必须能读到（漏一个就等于"红 PR 的评论里看不到它"）。
+  for (const name of ['gate', 'server', 'desktop-linux', 'desktop-windows', 'desktop-macos']) {
+    check(needs.includes(name), `pr-summary 的 needs: 必须包含 ${name}（否则评论读不到它的结果）`)
+  }
+}
+
+for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
   process.exit(1)
@@ -5124,7 +6439,7 @@ if (failures.length > 0) {
 process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag→渠道集/是否发布 + 静态对拍)/'
   + '策展发布说明的两道检查(真跑)/WASM 门禁接线(W-4 用例级报告参数 + --scope 真过滤、W-5 探针参数、W-8 结论绑 HEAD 静态+动态)/'
   + 'gofmt 扫描面同源(CI ↔ server/Makefile)/'
-  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁/产物归集/'
+  + '渠道发现(掩码,取值不回显)/策略/品牌必填/日志抑制/白标门禁(app-dir 按真实布局解析 + 缺目录 fail-loud + 断言真跑)/产物归集/'
   + '渠道仓 revision 解析的 stdout/stderr 分流(SSH deploy key 形态 + 失败分类 + 脱敏 + 唯一 EXIT trap)/'
   + '镜像装配(无 deb + 三 tag 含渠道专属)/R2 中转/R2 发布(本次版本必留 + **三个对象**的上传后大小/哈希完整性校验:版本资产/SHA256SUMS/指针,含写指针前复检)/'
   + '本地镜像构建入口的命名构建上下文/公开 artifact 守卫/'
@@ -5133,4 +6448,7 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + '探测对象生命周期(删除后必须 404,失败即 fail-loud;EXIT trap 保证校验失败路径也删除;'
   + '故障注入按**调用点**生效并被逐条断言:上传阶段读不回 / 删除后缺席检查读不回 各有用例;'
   + 'PROBE_PAYLOAD/PROBE_BYTES/注释三者一致)/'
-  + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期\n')
+  + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期/'
+  + 'pr-summary 的 PR 评论按 needs.*.result 派生(真跑 github-script 的三态:全绿/有 job 未成功/全失败;'
+  + '未成功 job 的 artifact 不得出现 + needs 列表与正文读取面双向对拍)/'
+  + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)\n')

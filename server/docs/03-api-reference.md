@@ -317,7 +317,7 @@ DeepSeek Files API 直通。**用途**:桌面客户端默认把会话里的图�
   "models": [{ "id": "deepseek-chat", "display_name": "DeepSeek Chat", "input_modalities": ["text"] }],
   "skills": [{ "name": "invoice-helper", "version": "1.0.0", "description": "..." }],
   "web": { "default_thinking_level": "max" },
-  "connectors": [{ "id": "example-org", "name": "示例企业 HR 智能体", "auth_mode": "oauth", "definition": { ... } }]
+  "connectors": [{ "id": "example-mcp", "name": "示例 MCP 智能体", "auth_mode": "oauth", "definition": { ... } }]
 }
 ```
 

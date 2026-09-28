@@ -118,9 +118,10 @@ export function installApi(ctx, deps) {
     const path = url.pathname
     const segments = path.split('/').filter(Boolean)
     try {
-      // 统一前置守卫（P1-11）：先于任何路由判定执行——非 GET/HEAD 一律
-      // 要求同源 + JSON，GET/HEAD 放行但拒绝浏览器标注的跨站请求。
-      const denied = await guardRequest(req)
+      // 统一前置守卫（P1-11 + R24 B3）：先于任何路由判定执行——Host 必须是
+      // 本机可信托管名（读+写共同前置）；非 GET/HEAD 另要求同源 + JSON，
+      // GET/HEAD 放行但拒绝浏览器标注的跨站请求。
+      const denied = await guardRequest(req, 64 * 1024, ctx)
       if (denied !== null) {
         sendJson(res, denied.status, denied.body)
         return

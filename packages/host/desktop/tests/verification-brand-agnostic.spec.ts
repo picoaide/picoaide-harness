@@ -64,7 +64,10 @@ describe('verification gates are brand-agnostic', () => {
 
   it('reads the product name the build actually declares', () => {
     // 官方/本地(没有渠道包):官方默认值 —— 与改造前一致。
-    expect(packagedProductName()).toBe('PicoAide Harness')
+    // 用**空临时目录**而不是工作树的 `build/`（2026-09-26 复审 B-3 同族):那里可能躺着
+    // 上一次渠道构建的残留（`.gitignore:32` 忽略、只有官方构建才清),断言会随工作树状态
+    // 飘成"渠道构建后 mac 单测红一片",而真正的原因只是工作树脏。
+    expect(packagedProductName(mkdtempEmptyDir())).toBe('PicoAide Harness')
   })
 
   it('lets a channel build declare its own product name', () => {
@@ -101,4 +104,9 @@ function mkdtempChannelBuildDir(manifest: unknown): string {
   writeFileSync(join(dir, 'channel.json'),
     typeof manifest === 'string' ? manifest : JSON.stringify(manifest))
   return dir
+}
+
+/** 造一个**空**目录(没有 channel.json) = "官方/本地构建"的 build/ 形态。 */
+function mkdtempEmptyDir(): string {
+  return mkdtempSync(join(tmpdir(), 'packaged-brand-official-'))
 }

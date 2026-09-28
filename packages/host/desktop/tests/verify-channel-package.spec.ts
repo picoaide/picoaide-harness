@@ -42,6 +42,10 @@ async function channelRepo(): Promise<string> {
     schema: 1,
     channel_id: CHANNEL,
     identity: { display_name: 'Example Brand', short_name: 'Example' },
+    // 品牌渠道必须声明 assets.logo（2026-09-26 审计 Z3-3）：它是随包内联 logo
+    // 与打包期派生（托盘位图/随包 favicon）共同的取值来源 —— 夹具缺它就会先被
+    // brand-prepare 的输入侧判据拦下，后续白标断言测的就不是它声称的东西。
+    assets: { logo: 'logo.svg' },
     desktop: {
       product_name: 'Example Brand',
       slug: 'Example-Brand',
@@ -108,6 +112,35 @@ describe('verifyChannelPackage', () => {
     await expect(
       verifyChannelPackage({ env: {}, buildDir: appDir }),
     ).rejects.toThrow(/不该存在/u)
+  })
+
+  // 产物身份（2026-09-26 复审 B-6）：这条白标门禁比 channel_id/home_dir/素材，**不比
+  // desktop.app_id**（当时 `grep -c app_id` = 0）。Windows 上 appId 进 AppUserModelId
+  // （任务栏分组/通知归属/快捷方式身份），配错就是"装上去才发现身份不对"。
+  it('随包 desktop.app_id 与本次构建的 appId 不一致时失败（Windows AppUserModelId 形态）', async () => {
+    const { repo, appDir } = await stagedChannelBuild()
+    const stagedPath = join(appDir, 'channel.json')
+    const staged = JSON.parse(readFileSync(stagedPath, 'utf8')) as { desktop: Record<string, unknown> }
+    staged.desktop.app_id = 'com.example.other'
+    writeFileSync(stagedPath, JSON.stringify(staged))
+    await expect(
+      verifyChannelPackage({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, buildDir: appDir }),
+    ).rejects.toThrow(/desktop\.app_id=com\.example\.other/u)
+  })
+
+  it('随包未声明 desktop.app_id 时按官方身份回落（判据不把"未声明"当成"不一致"）', async () => {
+    // 反向对照：判据用 `packagedAppId(buildDir)`（与 mac/afterPack 同一个解析器），
+    // 它的回落链是判据的一部分 —— 裸 `===` 会先把"没声明 app_id"判红，而公共渠道
+    // （beta）正是这种形态。这里删掉随包声明：期望值回落成官方身份，而构建上下文仍
+    // 声明渠道身份 ⇒ 仍然红，但**文案必须点出回落后的官方值**（证明走的是同一条回落链）。
+    const { repo, appDir } = await stagedChannelBuild()
+    const stagedPath = join(appDir, 'channel.json')
+    const staged = JSON.parse(readFileSync(stagedPath, 'utf8')) as { desktop: Record<string, unknown> }
+    delete staged.desktop.app_id
+    writeFileSync(stagedPath, JSON.stringify(staged))
+    await expect(
+      verifyChannelPackage({ env: { DSH_BUILD_CHANNEL: CHANNEL }, repoRoot: repo, buildDir: appDir }),
+    ).rejects.toThrow(/desktop\.app_id=ai\.deepseek\.dsh\.desktop/u)
   })
 
   it('官方构建的 build/ 干净时通过', async () => {

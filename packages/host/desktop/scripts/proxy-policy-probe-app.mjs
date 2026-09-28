@@ -29,8 +29,11 @@ app.whenReady().then(async () => {
 
   const defaults = session.defaultSession
   const partition = session.fromPartition('persist:proxy-probe')
-  out.resolveDefault = await defaults.resolveProxy(TARGET)
-  out.resolvePartition = await partition.resolveProxy(TARGET)
+  // `resolveProxy` 的**首次**读数没有判别力（2026-09-26 复审 B-2）：Chromium 还没解析代理
+  // 配置时它返回初始化的 DIRECT 默认值 —— 把开关改名成 Chromium 不认的名字后，这里**仍然**
+  // 读回 DIRECT。所以请求前的那次读数只留作诊断，判据用请求**之后**的那一次。
+  out.resolveDefaultBefore = await defaults.resolveProxy(TARGET)
+  out.resolvePartitionBefore = await partition.resolveProxy(TARGET)
   for (const [label, target] of [['http', defaults], ['partition', partition]]) {
     try {
       const response = await target.fetch(TARGET)
@@ -39,6 +42,9 @@ app.whenReady().then(async () => {
       out[label] = { error: String(error?.message ?? error) }
     }
   }
+  // 至少一次真实请求之后：Chromium 已经解析过代理配置，读数才代表这条 session 的实际出口。
+  out.resolveDefault = await defaults.resolveProxy(TARGET)
+  out.resolvePartition = await partition.resolveProxy(TARGET)
   try {
     const response = await fetch(TARGET)
     out.nodeFetch = { status: response.status, body: await response.text() }

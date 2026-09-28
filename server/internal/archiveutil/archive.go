@@ -79,6 +79,12 @@ var (
 	// ErrPathConflict: 同一(归一化、大小写不敏感)路径既是文件又是目录
 	// (SKILL.md 与 SKILL.md/child) —— 客户端解包必抛 EISDIR。
 	ErrPathConflict = errors.New("archive path is both a file and a directory")
+	// ErrReservedName: 条目名里有 **Win32 保留设备名**的路径段（`aux.txt`/`nul`/
+	// `con/…`）。客户端在**上传前预检**与**安装前扫描**两处都硬拒（R17B-05，
+	// packages/host/enterprise/src/skill-name-rules.ts），而服务端审核期此前没有
+	// 这一条 ⇒ 管理员能上架一个"人人都装不上"的包（R21F-04，审计 2026-09-26）:
+	// 「审核通过 = 可安装」在这类包上为假。见 ReservedDeviceNameSegment。
+	ErrReservedName = errors.New("archive entry name is a reserved Windows device name")
 )
 
 // dupEntrySet 记录已见条目名(按 installerKey 归一:大小写/尾随点空格/
@@ -150,6 +156,12 @@ var ntfsDangerousFold = map[rune]rune{
 // 完整的 NTFS $UpCase 表与真实 Win32 行为未建(本容器无法执行验证,见
 // TASKS.md 记录),但服务端**宁严勿宽**:凡在安装端可能等价的路径一律拒绝,
 // 客户端侧的同款防线(archive-util.ts assertNoDuplicateEntry)需要同一份口径。
+//
+// 注意本函数只管**等价/冲突**（两个名字落到同一个文件），不管"这个名字在安装端
+// 能不能建出来"（`con`/`nul`/`aux.txt` 这类 Win32 保留设备名照样是合法的等价键）。
+// 后者的判据是 checkReservedDeviceName（R21F-04），两者合起来才是完整的审核期
+// 「安装端可用性」闸门 —— 客户端就是这两条（assertNoDuplicateEntry +
+// assertNoReservedDeviceName）。
 func installerKey(name string) string {
 	lowered := strings.ToLower(name)
 	parts := strings.Split(lowered, "/")
@@ -168,6 +180,104 @@ func installerKey(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// windowsReservedDeviceNames 是 Microsoft 文档列出的 **Win32 保留设备名**（单一真源）。
+//
+// 与客户端 `packages/host/enterprise/src/skill-name-rules.ts` 的
+// `WINDOWS_RESERVED_DEVICE_NAMES` **必须是同一张表**：跨端对拍判据
+// （`reserved_device_name_parity_test.go`）会读那份 TS 源码抽出集合并要求**集合相等**，
+// 任一侧增删即红 —— 单边维护的表正是本仓登记的"两端各钉自己的字面量"假绿形态。
+//
+// 表里只放 Microsoft 文档明确列出的那一组：`COM0`/`LPT0`、上标写法（`COM¹`）、
+// `CONIN$`/`CONOUT$`、`\\?\` 前缀形态都**不在**内 —— 宁可少判也不误杀合法名字
+// （与客户端同一取舍，见 skill-name-rules.ts 的"文档边界"）。
+var windowsReservedDeviceNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// IsWindowsReservedDeviceNameSegment 判断**单个路径段**是不是 Win32 保留设备名。
+//
+// 语义（与客户端 `isWindowsReservedDeviceNameSegment` 逐条对齐）：
+//   - 扩展名不豁免：只看**第一个 `.` 之前**的段首（`con.txt` 的段首是 `con`）；
+//   - 结尾空格不豁免（Windows 会忽略；点已在上面切掉）⇒ `con.` / `con ` 也命中；
+//   - 大小写不敏感。
+//
+// 导出是为了让**同类闸门复用同一份实现**（技能/应用**名字**面的写侧闸门同样需要
+// 这一条：名字 `con` 在 Windows 上连目录都建不出来），不要在别处再抄一份表。
+func IsWindowsReservedDeviceNameSegment(segment string) bool {
+	head, _, _ := strings.Cut(segment, ".")
+	return windowsReservedDeviceNames[strings.ToLower(strings.TrimRight(head, " "))]
+}
+
+// ReservedDeviceNameSegment 返回 path 里**第一个**命中 Win32 保留设备名的路径段
+// （没有命中时为 ""）—— 与客户端 `reservedDeviceNameInArchivePath` 同一口径：
+// `\` 也当分隔符（zip 里两种都出现过），跳过空段与 `.`/`..`。
+//
+// 为什么这是**审核期**判据（R21F-04，审计 2026-09-26）：这类条目在 Windows 上解包
+// 必失败（Win32 设备名语义），而客户端在**上传前预检**（manifest-precheck.ts）与
+// **安装前扫描**（archive-util.ts）两处都硬拒 —— 服务端审核期缺这一条时，
+// 管理员可以上架一个"人人都装不上"的包，而市场/能力中心显示"已上架"。
+func ReservedDeviceNameSegment(path string) string {
+	for _, segment := range strings.Split(strings.ReplaceAll(path, "\\", "/"), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			continue
+		}
+		if IsWindowsReservedDeviceNameSegment(segment) {
+			return segment
+		}
+	}
+	return ""
+}
+
+// ReservedDeviceNameError 指出归档里第一个命中保留设备名的条目（与
+// DuplicateEntryError 同形：错误里带上名字，HTTP 层能回显给上传者 ——
+// 只说「归档非法」的话，作者根本不知道该改哪个文件）。
+type ReservedDeviceNameError struct {
+	// Segment 是命中的路径段（如 `aux.txt`）。
+	Segment string
+	// Path 是归一化后的完整条目名（如 `assets/aux.txt`）。
+	Path string
+}
+
+func (e *ReservedDeviceNameError) Error() string {
+	return fmt.Sprintf("archive entry %q contains the reserved Windows device name %q "+
+		"(unpacking fails on Windows)", e.Path, e.Segment)
+}
+
+// Unwrap 让 errors.Is(err, ErrReservedName) 成立（调用方的错误分类不变）。
+func (e *ReservedDeviceNameError) Unwrap() error { return ErrReservedName }
+
+// ReservedDeviceName 从错误链里取出命中的路径段与完整条目名（供 HTTP 层回显）。
+func ReservedDeviceName(err error) (segment, path string, ok bool) {
+	var re *ReservedDeviceNameError
+	if errors.As(err, &re) {
+		return re.Segment, re.Path, true
+	}
+	return "", "", false
+}
+
+// checkReservedDeviceName 是**归档条目名闸门**的唯一实现点：命中即返回带名字的错误。
+//
+// 在哪里被调用（以及为什么**只在审核/校验期**）：
+//   - `validateZip` / `validateTar`（`Validate` 的两个分支）—— 上传/上架/规范化重打包
+//     这些**写侧**闸门；五个调用点一次收口：技能上传（sharedskills 员工上传 +
+//     marketplace 管理端上传）、智能体上传（agentshare + marketplace 的 agent_api）、
+//     市场"规范化"重打包（对**重建后**的归档再校验），以及内置技能自举（skillseed）。
+//     `capabilities` 是聚合读面（走 ListContents），不属于这一组。
+//   - **不**加在 `NormalizePath` 或各读入口（ListContents / ExtractFileContent /
+//     ReadAll）：那样会让**存量已上架**的这类包在管理端"查看文件/预览"处从可用变成
+//     422（存量破坏），而它本来就装不上 —— 本次只保证"新上传/新版本不再可能通过审核"，
+//     存量行保持现状（不改状态、不清退，见报告 §④ 的存量论证）。
+func checkReservedDeviceName(name string) error {
+	if segment := ReservedDeviceNameSegment(name); segment != "" {
+		return &ReservedDeviceNameError{Segment: segment, Path: name}
+	}
+	return nil
 }
 
 // pathKinds 记录每个(小写归一)路径的角色:显式目录条目、普通文件条目,
@@ -368,6 +478,11 @@ func validateZip(data []byte, lim Limits) error {
 		// 预览/解包拒绝」。四个入口必须给出一致结论。
 		if mode&fs.ModeSymlink != 0 {
 			return false, ErrUnsafe
+		}
+		// R21F-04:Win32 保留设备名（`aux.txt` / `nul` / `con/…`）在**目录条目**上
+		// 同样致命（Windows 上连目录都建不出来）⇒ 必须排在 isDir 之前。
+		if rerr := checkReservedDeviceName(name); rerr != nil {
+			return false, rerr
 		}
 		if isDir {
 			return true, nil
@@ -646,6 +761,11 @@ func validateTar(data []byte, lim Limits) error {
 			}
 			return ErrUnsafe
 		}
+		// R21F-04:与 zip 侧 `validateZip` 同一条闸门（保留设备名在目录条目上同样
+		// 致命）—— 两个格式的审核期判据必须给出同一结论。
+		if rerr := checkReservedDeviceName(name); rerr != nil {
+			return rerr
+		}
 		// archupd-3:与 zip 侧同口径 —— 同一路径既是文件又是目录即拒。
 		if err := kinds.add(name, isDir); err != nil {
 			return err
@@ -874,6 +994,11 @@ func isASCIILetter(b byte) bool {
 // ErrorText maps sentinels to the human-facing (Chinese) description used by
 // both stores' archiveErrorMessage.
 func ErrorText(err error, requiredName string, maxArchiveMB int) string {
+	// R21F-04:保留设备名要**点名文件**（只说"不安全"的话作者无从改名）。
+	if segment, path, ok := ReservedDeviceName(err); ok {
+		return fmt.Sprintf("归档条目 %s 里的名字 %q 是 Windows 保留设备名（Windows 上无法解包/建目录），请改名后重新打包",
+			path, segment)
+	}
 	switch {
 	case errors.Is(err, ErrNoRequired):
 		return fmt.Sprintf("归档缺少 %s", requiredName)

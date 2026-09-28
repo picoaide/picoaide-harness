@@ -12,6 +12,8 @@
  *      等于所选渠道；官方构建**必须没有**（残留会把客户品牌染进官方包）；
  *      随包配置解析出的**数据目录**必须是本渠道专属（不得回落官方目录，
  *      2026-09-11 加：共用一个数据根 = 跨渠道共享登录态/会话）；
+ *      随包配置声明（或回落）的 **`desktop.app_id`** 必须等于本次构建的 appId
+ *      （2026-09-26 B-6：Windows 的 AppUserModelId 此前零判据）；
  *   2. 位图确实是按**本次渠道**派生的 —— 现场重新派生到临时目录逐字节比对
  *      （`app-icon.png` / `app-icon-mac.png` / 托盘位图）。比对的是"与渠道自洽"，
  *      而不是某个具体品牌，因此官方与渠道共用同一条门禁；
@@ -33,7 +35,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { prepareBrandAssets } from './brand-prepare.mjs'
 import { defaultChannelAppDir } from './channel-prepare.ts'
-import { resolveChannelBuildContext } from './channel-build.ts'
+import { resolveChannelBuildContext, packagedAppId } from './channel-build.ts'
 import { AppOriginSchemeError, parseDesktopChannelProfile } from '../src/desktop-channel.ts'
 import { PRODUCT_DSH_HOME_DIR } from '../src/desktop-home.ts'
 import { isDirectInvocation } from './direct-invocation.mjs'
@@ -144,6 +146,21 @@ export async function verifyChannelPackage(options: {
       stagedProfile.homeDir === context.homeDir,
       `${stagedPath} 的数据目录 ${stagedProfile.homeDir} 与本次构建的 ${context.homeDir} 不一致`
       + '（构建期与运行期必须同源，否则升级一次就换数据根）',
+    )
+    // 产物身份（2026-09-26 复审 B-6）：随包声明的 `desktop.app_id` 必须逐字等于本次构建
+    // 交给 electron-builder 的那个 appId。此前这条门禁比 `channel_id`/`home_dir`/素材，**不比
+    // app_id** —— Windows 上 appId 进 AppUserModelId（任务栏分组/通知归属/快捷方式身份），
+    // 配错就是"装上去才发现身份不对"，而跨平台白标门禁当时对这条零判据。
+    // 判据用 `packagedAppId(buildDir)`（与 mac 侧 / afterPack 侧**同一个解析器**）而不是
+    // 直接读 `stagedProfile.appId`：公共渠道（beta/official）按设计**不声明** app_id、
+    // 回落官方身份，裸 `===` 会把这种合法形态判红。三者覆盖"声明 / 配置 / 产物"三个面。
+    const declaredAppId = packagedAppId(buildDir)
+    assert(
+      declaredAppId === context.appId,
+      `${stagedPath} 声明（或回落）的 desktop.app_id=${declaredAppId} 与本次构建的 ${context.appId} 不一致`
+      + '（Windows 上它是 AppUserModelId：与官方客户端互相顶掉通知归属/任务栏身份）。'
+      + `修法：让随包配置与打包时喂给 electron-builder 的 appId 同源（${stagedPath} 由打包路径生成，不要手改，`
+      + '也不要把上一次渠道构建的残留留在 build/ 里）。',
     )
     // 品牌渠道不得与官方共用一个数据根（跨渠道共享登录态/会话）；公共渠道
     // （official/beta）显式声明官方目录是**刻意**的（beta 必须与正式版一致：

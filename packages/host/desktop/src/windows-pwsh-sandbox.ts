@@ -3,7 +3,8 @@
 import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import { win32 } from 'node:path'
-import type { ShellExecSpec, ShellProcess, ShellRunResult } from '@deepseek-ai/dsh-shell'
+import type { ShellExecSpec, ShellExecution } from '@deepseek-ai/dsh-shell'
+import { createVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
 import { SandboxPwshExecutor } from '@deepseek-ai/dsh-pwsh-sandbox'
 import type { Config as PwshConfig } from '@deepseek-ai/dsh-pwsh-local'
 
@@ -49,16 +50,32 @@ export function desktopWindowsPwshPath(
   return candidates.find(candidate => exists(candidate))
 }
 
-/** Keep explicit user config, otherwise avoid PATH-resolved portable pwsh in the Windows ACL sandbox. */
+/**
+ * Keep explicit user config, otherwise avoid PATH-resolved portable pwsh in the Windows ACL sandbox.
+ *
+ * Upstream 0.1.7 made `pwshPath` a **volatile** config reference, so the default
+ * is written *through* the loader-owned reference (`updateVolatile`) instead of
+ * substituting a detached config object: a copy would freeze the value at
+ * construction time and silently ignore a `pwshPath` the user later saves in
+ * the settings form.
+ * @param config - resolved pwsh executor config (its `pwshPath` reference is seeded in place).
+ * @param env - process environment consulted for the well-known install roots.
+ * @param platform - host platform; non-Windows hosts keep the config untouched.
+ * @param exists - executable probe, injectable for deterministic tests.
+ * @returns the same config instance, with the Windows default seeded when absent.
+ */
 export function desktopWindowsPwshConfig(
   config: PwshConfig,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
   exists: (path: string) => boolean = existsSync,
 ): PwshConfig {
-  if (config.pwshPath !== undefined && config.pwshPath.length > 0) return config
+  const declared = config.pwshPath.get()
+  if (declared !== undefined && declared.length > 0) return config
   const pwshPath = desktopWindowsPwshPath(env, platform, exists)
-  return pwshPath === undefined ? config : { ...config, pwshPath }
+  if (pwshPath === undefined) return config
+  updateVolatile(config.pwshPath, createVolatile(pwshPath))
+  return config
 }
 
 /**
@@ -129,29 +146,31 @@ export class DesktopWindowsPwshSandbox extends SandboxPwshExecutor {
   }
 
   /**
-   * Upstream 0.1.6-alpha.2 changed this seam twice: the second parameter is now
-   * `argv | (signal) => Promise<argv>` (the sandbox subclass passes the function
-   * form, because ACL confinement must run under the same foreground deadline as
-   * the spawn), and the return is `{ result, spawnRequested }` instead of a bare
-   * result. Adapting inside the callback keeps the upstream deadline authoritative
-   * for confinement — resolving the callback ourselves would have re-implemented it.
+   * Upstream 0.1.7 renamed this seam (`runArgv`/`startArgv` → a single
+   * `executeArgv` that both the foreground and the background path go through)
+   * and returns the live {@link ShellExecution} handle instead of a bare
+   * `{ result, spawnRequested }`. The shape that matters is unchanged: the
+   * second parameter is `argv | (signal) => Promise<argv>` — the sandbox
+   * subclass passes the function form, because ACL confinement must run under
+   * the same foreground deadline as the spawn — so adapting inside the callback
+   * keeps the upstream deadline authoritative for confinement. Resolving the
+   * callback ourselves would re-implement that deadline. The `onStarted`
+   * callback is forwarded untouched: the sandbox subclass installs per-process
+   * facts in it, and dropping it would silently remove denial classification.
    * @param spec - resolved execution settings.
    * @param argvOrPrepare - exact argv, or preparation cancelled by the same deadline as execution.
-   * @returns the foreground result and whether argv reached the subprocess provider.
+   * @param onStarted - hook the upstream sandbox uses to attach per-process facts.
+   * @returns the live execution handle.
    */
-  protected override async runArgv(
+  protected override async executeArgv(
     spec: ShellExecSpec,
     argvOrPrepare: readonly string[] | ((signal: AbortSignal) => Promise<readonly string[]>),
-  ): Promise<{ result: ShellRunResult, spawnRequested: boolean }> {
+    onStarted?: (process: ShellExecution) => void,
+  ): Promise<ShellExecution> {
     if (typeof argvOrPrepare === 'function') {
-      return await super.runArgv(spec, async signal => this.adaptInPlace(spec, await argvOrPrepare(signal)))
+      return await super.executeArgv(spec, async signal => this.adaptInPlace(spec, await argvOrPrepare(signal)), onStarted)
     }
-    return await super.runArgv(spec, this.adaptInPlace(spec, argvOrPrepare))
-  }
-
-  protected override startArgv(spec: ShellExecSpec, argv: readonly string[]): ShellProcess {
-    const adapted = this.adapt(spec, argv)
-    return super.startArgv(adapted.spec, adapted.argv)
+    return await super.executeArgv(spec, this.adaptInPlace(spec, argvOrPrepare), onStarted)
   }
 }
 

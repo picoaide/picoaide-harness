@@ -42,6 +42,16 @@ export const PERM_CAP_WRITE = 'capability:write'
 export const PERM_CONNECTOR_READ = 'connector:read'
 export const PERM_SERVERINFO_READ = 'server-info:read'
 export const PERM_AUDIT_READ = 'audit:read'
+/**
+ * 审计保留策略的写面（`PUT /api/server/admin/audit/settings`，与服务端
+ * `serverauth.PermAuditRetention` 对齐）。
+ *
+ * 2026-09-29（第三十轮 FIX-45 ④）：此前这一个点**就地声明在 `pages/Audit.tsx:24`**，
+ * 落在四向对拍的**扫描根之外** —— 打错一个字符时整套 webadmin 用例（50 files / 721 tests）
+ * 全绿，而保留策略保存按钮对**所有人（含超管）永久禁用**。现在这里是**唯一声明处**，
+ * `lib/nav.test.ts` 的前向守卫会拒绝任何 `PERM_*` 在 `rbac.ts` 之外再声明一份。
+ */
+export const PERM_AUDIT_RETENTION_WRITE = 'audit:retention:write'
 /** 报表订阅列表(hook_url 是凭据本体;服务端**刻意**不发给 auditor,见 rbac.go)。 */
 export const PERM_REPORT_READ = 'report:read'
 

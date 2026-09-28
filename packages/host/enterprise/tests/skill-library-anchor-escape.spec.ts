@@ -197,6 +197,9 @@ describe('R19A-S2-02：`.skill-tmp` 是库外链接 ⇒ 安装拒收，库外零
       skillsDir: skills,
       version: '1.0.0',
       channel: 'market',
+      // R19B-09：拒绝文案按调用解析出的宿主语言取（缺省中文）—— 本用例钉的是**判据**
+      // 与库外零字节，英文面由显式 `en` 取（中文面见 audit-r20-skill-library.spec.ts）。
+      locale: 'en',
     }).then(() => undefined, (cause: unknown) => cause as Error)
     console.log('[S2-02] 拒绝 =', refusal?.message)
     expect(refusal).toBeInstanceOf(ArchiveInstallRefusal)

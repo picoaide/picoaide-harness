@@ -59,6 +59,7 @@ mkdirSync(HOME_DIR, { recursive: true })
 const child = spawn(appBinary, ['--no-sandbox', `--remote-debugging-port=${String(PORT)}`], {
   env: {
     ...process.env,
+    PICOAI_ALLOW_DEBUG_SWITCHES: '1',
     HOME: HOME_DIR,
     DSH_HOME: HOME_DIR,
     XDG_CONFIG_HOME: join(workDir, 'cfg'),

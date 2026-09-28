@@ -12,7 +12,9 @@ package registry
 
 import (
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/picoaide/picoaide/internal/util"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -67,10 +69,92 @@ func CheckAppIDShape(id string) *apperr.Error {
 	return nil
 }
 
+// routeReserved 是**平台路由静态段**的保留集合（X4-1，第二十四轮审计）。
+//
+// 为什么需要它：`app_id` 不只是域名标签，它同时是**路由标识**
+// （设计基线 §4.1 原话："app_id 是 URL host 段与路由标识"）。而
+// `limits.ReservedAppIDs` 是**旧的子域模型**留下的 DNS label 清单，
+// 里面没有 WASM 操作面自己的静态段 —— 于是 `uploads` 这种名字能通过校验、
+// 还能被分片上传链路发布出去，但发布之后
+// `/api/client/v2/apps/wasm/uploads/{open,request,publish,rows,…}` 全部落到
+// NoRoute 或被 `/uploads/:upload_id` 吃掉 ⇒ 应用建完即废、归属与版本号永久占位，
+// 而作者看到的是"接口不存在"而不是"这个标识符不可用"。
+//
+// 这份集合**不在这里手抄**：由 `internal/router` 在装配生产路由表时从
+// `gin.Engine.Routes()` 派生后注入（见 `router.publishRouteReservedAppIDs`）。
+// 手抄清单在下次新增静态路由时必然漂移，而漂移的表现正是本条缺陷本身。
+//
+// 注入点唯一（`router.Register`），接线判据在 `internal/router` 的
+// `wasm_appid_route_test.go`：派生集合 == 生效集合、每个静态段都被写侧拒、
+// 写侧接受的名字必须真的可达。
+var (
+	routeReservedMu  sync.RWMutex
+	routeReservedSet map[string]struct{}
+)
+
+// SetRouteReservedAppIDs 由 `internal/router` 在注册完生产路由表后调用一次
+// （进程启动期；重复调用以最后一次为准）。
+//
+// 传空集合是合法语义（该进程没挂 WASM 操作面 ⇒ 没有静态段可撞）；
+// 但"本该有路由却注入了空集合"会被路由侧的接线判据抓住。
+func SetRouteReservedAppIDs(ids []string) {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	routeReservedMu.Lock()
+	routeReservedSet = set
+	routeReservedMu.Unlock()
+}
+
+// RouteReservedAppIDs 返回当前生效的路由静态段集合（只读快照，排序后的副本）。
+// 判据用它做"派生集合 == 生效集合"的对账。
+func RouteReservedAppIDs() []string {
+	routeReservedMu.RLock()
+	out := make([]string, 0, len(routeReservedSet))
+	for id := range routeReservedSet {
+		out = append(out, id)
+	}
+	routeReservedMu.RUnlock()
+	sort.Strings(out)
+	return out
+}
+
+// routeReserved 判定 id 是否与当前生效的路由静态段同名。
+func routeReserved(id string) bool {
+	routeReservedMu.RLock()
+	_, ok := routeReservedSet[id]
+	routeReservedMu.RUnlock()
+	return ok
+}
+
 // ValidateAppID 校验 app_id（§4.1 + §10.5 第 52/53/53b 项）。
 //
 // extraReserved 是**部署期注入的企业已知主机名**（基域是平台资产，不能占）。
 func ValidateAppID(id string, extraReserved []string) *apperr.Error {
+	return validateAppID(id, extraReserved, true)
+}
+
+// ValidateAppIDForServing 是**服务侧**判据（第二十四轮复审把"服务侧套用写侧路由保留字"
+// 判成修复引入的回归，见下）。
+//
+// 与 {@link ValidateAppID} **同源**（同一个实现，只差一个开关），但**不含**"与平台路由
+// 静态段同名"这一条：那一条是**写侧**规则，目的是不让新发布的应用落进"建得成、永远打不开"
+// 的名字（X4-1）。存量库里可能已经有这类名字的行（例如 `rows`），而**应用子域的访问路径与
+// 那些 API 静态段无关** —— 服务侧套用它会把这些**本来正常服务**的应用在升级后直接变成 404。
+//
+// 服务侧仍然保留：形态、纯数字、`xn--`、平台保留字（`limits.ReservedAppIDs`，域名资产语义）
+// 与企业既有主机名（`extraReserved`）—— 这些都与"路由遮蔽"无关，且是"占名 = 占企业域名资产"
+// 这条既有语义。
+func ValidateAppIDForServing(id string, extraReserved []string) *apperr.Error {
+	return validateAppID(id, extraReserved, false)
+}
+
+// validateAppID 是 app_id 规则的**唯一实现**（写侧与服务侧共用；`routeStatic` 决定是否套用
+// "与平台路由静态段同名"这条写侧规则）。
+func validateAppID(id string, extraReserved []string, routeStatic bool) *apperr.Error {
 	if aerr := CheckAppIDShape(id); aerr != nil {
 		return aerr
 	}
@@ -86,6 +170,16 @@ func ValidateAppID(id string, extraReserved []string) *apperr.Error {
 		return apperr.New(apperr.CodeInvalidAppID, "app_id 是平台保留字").
 			WithDetail("reserved", id).
 			WithHint("该名字是平台/企业既有主机名，请换一个名字")
+	}
+	// X4-1：与平台路由静态段同名（如 `uploads` / `validate` / `catalog`）。
+	// 必须在**写侧**就 fail-loud —— 放过去就等于"应用建得成、但永远打不开"，
+	// 且名字与版本号永久占位、作者无从自查。
+	if routeStatic && routeReserved(id) {
+		return apperr.New(apperr.CodeInvalidAppID, "app_id 与平台路由的静态段同名").
+			WithDetail("reserved", id).
+			WithDetail("reason", "route_static_segment").
+			WithHint("该名字被应用平台的路由占用（例如 /apps/wasm/uploads）：用它发布出来的应用" +
+				"无法打开、无法请求、也无法更新，请换一个名字")
 	}
 	for _, r := range extraReserved {
 		if strings.EqualFold(strings.TrimSpace(r), id) {

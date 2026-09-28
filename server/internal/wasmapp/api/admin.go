@@ -1255,7 +1255,7 @@ func (h *Handlers) loadAdminApp(c *gin.Context, appID string, allowDeleted bool)
 	if appID == "" {
 		return nil, apperr.New(apperr.CodeMissingField, "缺少 app_id").WithDetail("field", "app_id")
 	}
-	if verr := h.validateAppID(appID); verr != nil {
+	if verr := h.validateAppIDServing(appID); verr != nil {
 		return nil, verr
 	}
 	app, err := serverstore.GetWasmApp(c.Request.Context(), h.opt.DB, appID)

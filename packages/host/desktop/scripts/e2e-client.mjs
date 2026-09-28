@@ -58,9 +58,15 @@ const reportShots = !args.includes('--no-screenshot')
 // 审计 2026-08-25 B-04:原固定 /tmp 路径会让并行 e2e/真实实例互相踩踏,
 // 且 9223 被残留实例占用时复用错误目标卡死。改为唯一目录(pid+时间戳),
 // 仍保证跨 spawn 边界可见(先试 /tmp,失败回退工作区 temp)。
+//
+// 2026-09-28（审计 §8.9.12）：回退基座原本是 **`./temp`（相对 cwd）** —— `yarn e2e:client`
+// 的 cwd 是包目录，于是回退时 `$DSH_HOME` 会落在**桌面包目录之内**，而那个位置会让宿主
+// 下发的客户端条目列表**静默丢掉 `dsh-plugin-desktop`**（`layout` 的唯一提供者 ⇒ 整页
+// `Failed to load plugins`）。回退基座改为**仓根下的 temp/**（在包目录之外，且 gitignored）。
+const REPO_ROOT = dirname(dirname(dirname(PACKAGE_ROOT)))
 let workDir = ''
 let HOME_DIR = ''
-for (const base of ['/tmp', './temp']) {
+for (const base of ['/tmp', join(REPO_ROOT, 'temp')]) {
   try {
     const candidate = `${base}/dsh-e2e-${process.pid}-${Date.now()}`
     mkdirSync(candidate, { recursive: true })
@@ -344,6 +350,7 @@ async function main() {
     child = spawn(appBinary, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(cdpPort)}`], {
       env: {
         ...process.env,
+        PICOAI_ALLOW_DEBUG_SWITCHES: '1',
         HOME: HOME_DIR,
         DSH_HOME: HOME_DIR,
         XDG_CONFIG_HOME: join(workDir, 'cfg'),
@@ -431,8 +438,15 @@ async function main() {
     if (!b || !Array.isArray(b.entries)) return { entries: -1, ids: [] }
     return { entries: b.entries.length, ids: b.entries.map(e => e.id) }
   })()`)
-  reportStep('客户端插件图已装载（__DSH_BOOT__ 非空）', (boot?.entries ?? 0) > 0,
-    `entries=${boot?.entries} ids=${(boot?.ids ?? []).slice(0, 6).join(',')}`)
+  // 2026-09-28（审计 §8.9.12）：「非空」单独**不咬这一类**。实测 `$DSH_HOME` 落在桌面包
+  // 目录之内时列表是 **68** 条（> 0 ⇒ 旧断言照绿），而**唯独缺 `dsh-plugin-desktop`** ——
+  // 它是客户端 `layout` 服务的唯一提供者，缺它则 19 条上游客户端 UI 全部
+  // `pending (waiting for service: layout)`，用户看到整页 `Failed to load plugins`。
+  // 所以这里点名"桌面自己的客户端 bundle 在列表里"，把"数据根放错位置"这类
+  // 静默丢条目变成一句可行动的红。
+  const desktopEntry = (boot?.ids ?? []).includes('dsh-plugin-desktop')
+  reportStep('客户端插件图已装载（非空且含桌面自身 bundle）', (boot?.entries ?? 0) > 0 && desktopEntry,
+    `entries=${boot?.entries} hasDesktop=${desktopEntry} ids=${(boot?.ids ?? []).slice(0, 6).join(',')}`)
 
   // 4.6 错误监控链路真实激活（P1-6，2026-09-16）。
   //

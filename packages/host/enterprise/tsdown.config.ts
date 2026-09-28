@@ -20,6 +20,10 @@ export default defineConfig([
       'auth-gate': 'src/auth-gate.ts',
       'channel-sync': 'src/channel-sync.ts',
       'gateway-model': 'src/gateway-model.ts',
+      // 网关模型 provider（0.1.7 的注册面）：与 gateway-model 分开成独立入口，因为
+      // 它必须解析到**上游** `dsh-llm-deepseek`（见 external 表）——`LlmError` 之类的
+      // 类身份跨副本不成立，打包进来会让适配器的错误分类静默失效。
+      'gateway-llm': 'src/gateway-llm.ts',
       'error-reporting': 'src/error-reporting.ts',
       'skill-telemetry': 'src/skill-telemetry.ts',
       bootstrap: 'src/bootstrap.ts',
@@ -48,6 +52,12 @@ export default defineConfig([
       '@deepseek-ai/dsh-host-webserver',
       '@deepseek-ai/dsh-settings',
       '@deepseek-ai/dsh-credentials',
+      // `gateway-llm` 用上游的 provider 注册面与 Messages 配置解析。**必须 external**：
+      // 内联一份副本会造出第二个 `LlmError`/`DeepSeekAdapter` 类身份，适配器里的
+      // `instanceof LlmError` 分类与 `ctx.llm.registerAdapter` 的同一性都会被破坏。
+      '@deepseek-ai/dsh-launch-environment',
+      '@deepseek-ai/dsh-llm',
+      '@deepseek-ai/dsh-llm-deepseek',
       '@sentry/node',
       '@sentry/core',
       '@sentry/utils',

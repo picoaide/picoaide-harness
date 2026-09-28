@@ -111,7 +111,7 @@ async function awaitStatus(h: ReturnType<typeof createHarness>, id: string, want
  * **production construction**.
  *
  * This is exactly what `@deepseek-ai/dsh-mcp-client`'s `createTransport` builds
- * (`patches/dsh-mcp-client@0.1.6-alpha.2.patch`):
+ * (`patches/dsh-mcp-client@0.1.7-rc.2.patch`):
  *
  *     new StreamableHTTPClientTransport(new URL(config.url), {
  *       requestInit: { headers: config.headers },

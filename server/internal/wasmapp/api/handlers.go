@@ -688,9 +688,29 @@ func (h *Handlers) validateRawAppID(raw string) (string, *apperr.Error) {
 	return raw, nil
 }
 
-// validateAppID 用 registry 规则校验 app_id（§4.1 / §10.5 第 52/53/53b 项）。
+// validateAppID 用 registry **写侧**规则校验 app_id（§4.1 / §10.5 第 52/53/53b 项）。
+//
+// 写侧 = "这个名字将进入库"：除形态/保留字/企业主机名之外，还包含"与平台路由静态段
+// 同名"这一条（X4-1）—— 放过去就是"应用建得成、但永远打不开"。唯一消费方是
+// {@link validateRawAppID}（发布链路与标识查重），**服务侧入口不得调用它**。
 func (h *Handlers) validateAppID(appID string) *apperr.Error {
 	return registry.ValidateAppID(appID, h.opt.AppIDExtraReserved)
+}
+
+// validateAppIDServing 是**服务侧** app_id 校验的**唯一入口**：作用于"库里可能已经
+// 有这一行"的名字（路径参数里的 `:app_id`、请求体里指向既有应用的 `app_id`）。
+//
+// 与 {@link validateAppID} 的唯一差别是**不套用路由静态段保留字**：那条是写侧规则，
+// 目的是不让**新**名字落进"建得成、永远打不开"（X4-1）。存量库里可能已经有这类名字的
+// 行（`open` / `rows` / `releases` … 它们在 X4-1 的写侧封口之前就能经普通发布链路
+// 建出来），而应用子域的访问路径与那些 API 静态段无关 —— 服务侧继续套用写侧规则会
+// 把这些**本来正常服务**的应用在升级后直接变成 400 INVALID_APP_ID。
+//
+// 收口在**一个方法**里（而不是各 handler 直接调 registry.ValidateAppIDForServing）：
+// 调用点判据（audit_r25_serving_appid_callsite_test.go）钉的就是"服务侧 handler 解析
+// 到的是哪个方法"，多一个直连 registry 的入口就多一个判据看不见的分叉点。
+func (h *Handlers) validateAppIDServing(appID string) *apperr.Error {
+	return registry.ValidateAppIDForServing(appID, h.opt.AppIDExtraReserved)
 }
 
 // reviewSwitchResult 是审核开关的**三态读结果**（R3-A A-3）。

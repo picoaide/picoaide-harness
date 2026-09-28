@@ -58,7 +58,8 @@ export function installMermaid(ctx) {
       handler: async (req, res) => {
         // FIX-04：统一前置守卫。本端点只有 GET（静态 vendor 资源）⇒ 守卫
         // 只拒绝浏览器标注的跨站读取，匿名加载语义不变。
-        if (await applyRequestGuard(req, res)) return
+        // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+        if (await applyRequestGuard(req, res, 64 * 1024, webCtx)) return
         const url = new URL(req.url ?? '/', 'http://localhost')
         if (req.method === 'GET' && url.pathname === '/memory-evolve/mermaid/mermaid.min.js') {
           try {

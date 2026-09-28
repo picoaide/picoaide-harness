@@ -20,7 +20,8 @@
  * `hiddenSessionId` 里删掉 ⇒ 第一条/第二条必红；把 JSON 的 `scope_separator` 改了而
  * 客户端不改 ⇒ 同样红。
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
@@ -33,8 +34,33 @@ import {
 } from './ai-chat.ts'
 
 const CONTRACT = fileURLToPath(new URL('../../../../server/internal/llmgateway/app-session-id.json', import.meta.url))
-const UPSTREAM_ADAPTER = fileURLToPath(new URL('../../../../deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/adapter.ts', import.meta.url))
+/**
+ * 上游适配器的**包目录**（0.1.7 起不再钉具体文件路径）。
+ *
+ * 0.1.6 的 `llm-deepseek` 有 `src/protocols/<protocol>/adapter.ts` 多个协议目录；
+ * 0.1.7 删掉协议选择、只剩一条 Messages 路径 ⇒ 适配器变成 `src/adapter.ts`，
+ * 旧路径直接 ENOENT（升级时实测）。**判据的意图是"这个头名仍被上游真的发出"，
+ * 不是"文件在这条路径上"** —— 钉死路径会在每次上游重排布局时把判据变成假红，
+ * 所以这里改成在下游 `src/` 里搜那一行字面量，并额外要求命中文件里有一份
+ * `adapter.ts`（头是从适配器发的这条事实仍然被钉住）。
+ */
+const UPSTREAM_ADAPTER_DIR = fileURLToPath(new URL('../../../../deepseek-harness/packages/llm/llm-deepseek/src', import.meta.url))
 const CLIENT_APPCFG = fileURLToPath(new URL('../../../../packages/client/wasm-apps/src/client/appcfg-contract.ts', import.meta.url))
+
+/**
+ * 递归列出目录下所有 `.ts` 文件（不跟随目录符号链接）。
+ * @param dir - 起始目录。
+ * @returns 绝对路径列表。
+ */
+function walkTsFiles(dir: string): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...walkTsFiles(full))
+    else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(full)
+  }
+  return out
+}
 
 /** 契约结构（只声明本用例消费的字段）。 */
 interface AppSessionIDContract {
@@ -116,9 +142,22 @@ describe('隐藏会话 id 的账号作用域：与服务端契约逐字对拍（
   })
 
   it('与上游绑定：出站头名仍是 llm-deepseek 适配器真的在发的那个头', () => {
-    const adapter = readFileSync(UPSTREAM_ADAPTER, 'utf8')
-    // 适配器里那一行是 `{ 'x-deepseek-harness-session-id': String(options.sessionId) }`。
-    expect(adapter).toContain(`'${AI_SESSION_ID_HEADER}': String(options.sessionId)`)
+    // 适配器里那一行是 `{ 'x-deepseek-harness-session-id': String(options.sessionId) }`
+    // （0.1.7 在 `src/adapter.ts`，外面还包了一层 `options.sessionId === undefined ? {} : …`）。
+    const needle = `'${AI_SESSION_ID_HEADER}': String(options.sessionId)`
+    const hits: string[] = []
+    for (const file of walkTsFiles(UPSTREAM_ADAPTER_DIR)) {
+      if (readFileSync(file, 'utf8').includes(needle)) hits.push(file)
+    }
+    expect(
+      hits.length,
+      `上游 llm-deepseek 的 src/ 里应**恰好一个**文件发出 ${needle}（实际 ${hits.length} 个：${hits.join(', ')}）`
+      + ' —— 0 个 = 头被改名/改形或适配器换了实现；多于 1 个 = 上游把出站头复制到了别处',
+    ).toBe(1)
+    expect(
+      basename(hits[0] ?? ''),
+      `发出该头的文件应当是适配器本身（实际 ${hits[0] ?? '（无）'}）`,
+    ).toBe('adapter.ts')
     expect(contract().session_id_header).toBe(AI_SESSION_ID_HEADER)
   })
 

@@ -9,6 +9,13 @@
  * 同一脚本还跑一个**反向对照**（跳过 `applySystemProxyPolicy`）：它**必须**看到代理命中 ——
  * 否则说明探针本身测不出问题（假绿）。
  *
+ * 2026-09-26 复审 B-2 的修订：两条 `resolveProxy === 'DIRECT'` 断言必须读**完成至少一次
+ * 真实请求之后**的值。请求前的读数是 Chromium 代理配置解析之前的初始化值（恒 DIRECT），
+ * 把开关改名成 Chromium 不认的 `no-proxy-servers` 后它**照旧通过** ⇒ 那条覆盖声明是假的。
+ * 现在请求前的读数由 `proxy-policy-probe-app.mjs` 单独记为 `*Before`（诊断用），判据只看
+ * 请求后的读数；对照侧那条同时充当**自校准**（对照已证明请求到了代理，读数若仍为 DIRECT
+ * 就说明这个读数不可用，探针当场判失效，而不是挂着一条恒真的断言）。
+ *
  * 用法（必须有 DISPLAY；无头机器用 xvfb-run）：
  *   cd packages/host/desktop && yarn build && xvfb-run -a node scripts/proxy-policy-probe.mjs
  * 退出码：0 = 全部符合预期，1 = 有判据不符。
@@ -96,8 +103,12 @@ if (appliedResult === undefined) {
   process.stdout.write(applied.stderr.slice(-2000))
   throw new Error('Electron 探针没有产出 PROBE_RESULT')
 }
-check('resolveProxy(defaultSession) === DIRECT', appliedResult.resolveDefault === 'DIRECT', appliedResult.resolveDefault)
-check('resolveProxy(partition) === DIRECT', appliedResult.resolvePartition === 'DIRECT', appliedResult.resolvePartition)
+// 判据的读法（2026-09-26 复审 B-2）：`resolveProxy` 必须在**至少一次真实请求之后**读。
+// 请求前的读数是 Chromium 代理配置解析前的初始化值（恒 DIRECT），把开关改名成
+// `no-proxy-servers` 后它**照旧通过** —— 那样的判据没有判别力（假绿）。
+// 请求**之后**的读数才代表这条 session 实际解析出来的出口。
+check('resolveProxy(defaultSession) === DIRECT（完成真实请求后读）', appliedResult.resolveDefault === 'DIRECT', appliedResult.resolveDefault)
+check('resolveProxy(partition) === DIRECT（完成真实请求后读）', appliedResult.resolvePartition === 'DIRECT', appliedResult.resolvePartition)
 check('http 直连（域名不可解析）', String(appliedResult.http?.error ?? '').includes('ERR_NAME_NOT_RESOLVED'), JSON.stringify(appliedResult.http))
 check('partition 直连', String(appliedResult.partition?.error ?? '').includes('ERR_NAME_NOT_RESOLVED'), JSON.stringify(appliedResult.partition))
 check('Node fetch 直连（NODE_USE_ENV_PROXY 被撤销）', appliedResult.nodeFetch?.cause === 'ENOTFOUND', JSON.stringify(appliedResult.nodeFetch))
@@ -114,8 +125,14 @@ const control = await runElectron(
 const controlResult = parseResult(control.stdout)
 if (controlResult === undefined) throw new Error('反向对照没有产出 PROBE_RESULT')
 const controlHits = hits.slice(beforeControl)
-check('对照 resolveProxy 是 PROXY', controlResult.resolveDefault !== 'DIRECT', controlResult.resolveDefault)
-check('对照请求真的到了代理', controlHits.some(hit => hit.kind === 'proxy-request'), JSON.stringify(controlHits))
+const controlSawProxy = controlHits.some(hit => hit.kind === 'proxy-request')
+check('对照请求真的到了代理', controlSawProxy, JSON.stringify(controlHits))
+// 自校准（B-2 的另一半）：对照路径**已经证明**请求走了代理，那么"请求后读数仍是 DIRECT"
+// 只能说明这个读数在当前 Chromium 上不可用 —— 必须当场判探针失效，而不是让上面那两条
+// 正向 DIRECT 断言继续以"恒真"的形态挂着（那正是改名后仍然 ok 的原因）。
+check('对照 resolveProxy 是 PROXY（完成真实请求后读；读不到即判探针无判别力）',
+  controlResult.resolveDefault !== 'DIRECT',
+  `${String(controlResult.resolveDefault)}（请求前读数 ${String(controlResult.resolveDefaultBefore)}；代理命中 ${String(controlHits.length)} 次）`)
 
 proxy.close()
 process.stdout.write(failures.length === 0

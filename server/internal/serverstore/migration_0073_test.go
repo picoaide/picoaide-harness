@@ -142,9 +142,20 @@ func countUserTables(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// hasLockTimeoutPragma 判定迁移 SQL 里是否设置了 lock_timeout。
+// hasLockTimeoutPragma 判定迁移 SQL 里是否设置了**正预算**的 lock_timeout。
+//
+// R27-FIX39：旧实现只做 `strings.Contains(lower(sql), "lock_timeout")` —— 把本文件的
+// `SET LOCAL lock_timeout = '5s'` 改成 `'0'`（Postgres 语义 = **关闭**预算）之后本用例
+// **仍然 ok**（R27 审计 S1 实测 `ok … 1.515s`），是"只钉字符串不钉能力"的假绿。
+// 取值域判据（含单位/小数/负值三种"关掉预算"的写法）统一实现在
+// migrate_lock_budget_test.go 的 migrationLockTimeoutValues / lockTimeoutValueIsPositive。
 func hasLockTimeoutPragma(sqlText string) bool {
-	return strings.Contains(strings.ToLower(sqlText), "lock_timeout")
+	for _, v := range migrationLockTimeoutValues(sqlText) {
+		if lockTimeoutValueIsPositive(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasCascade 判定迁移 SQL 里是否出现了 CASCADE（大小写不敏感）。

@@ -22,7 +22,7 @@
 # Enterprise model governance: models come from the gateway after login only.
 # The upstream models settings page lets users define custom providers, so it
 # is disabled from the composition. bootstrap.ts keeps the gateway catalog in
-# llm-deepseek and clears it on logout.
+# the `picoaide-gateway-llm` row and clears it on logout.
 - id: ui-settings-models
   disabled: true
 # web_search 服务端代理(0043):官方 key 不得以任何形式出现在客户端直连配置中。
@@ -34,24 +34,32 @@
 - id: web-search-deepseek
   config:
     apiKeyEnv: PICOAI_GATEWAY_TOKEN
-# 网关鉴权协议:上游 0.1.6 起 `llm-deepseek` 新增 `protocol`,**缺省值是
-# `messages`**;该协议路径只发 `x-api-key`、**不发 `Authorization`**
-# (`protocols/messages/adapter.ts`),而我们的网关 `/v1/*` 挂在 serverauth 的
-# `BearerAuth` 下、只认 `Authorization: Bearer …` ⇒ 每个模型请求都是
-# 401 `AUTH_REQUIRED`「缺少认证令牌」,整条模型链路报废。网关只实现 Bearer
-# 这一种鉴权,所以这里**组装期**钉死 chat-completions。
-# 为什么不能只靠 `gateway-model` 运行期往 settings 里写:那条写入依赖
-# settings 落盘成功,而落盘会被任何一次写锁异常永久挡住(见下面的孤儿锁回收),
-# 于是"本该修好链路的这一行"恰恰写不进去 —— 现场事故(2026-09-22)的完整链条。
-# 组装层是 base,缺这个键的 user 层不会覆盖它。要改协议:未登录时可由 settings 覆盖;
-# 一旦有会话,`gateway-model` 的 sync 会把 user 层的 protocol 写回 chat-completions
-# (user 层压 base),所以"改协议"只在未登录/离线场景持久。
-# 注意 `config` 是**整键替换**:更晚的层(`$DSH_HOME/cordis.patch.yml`)若覆盖本行
-# config,**必须重述 `protocol: chat-completions`** —— 只写别的键(如 models)会把这条
-# pin 一起换掉、静默回落 `messages`(判据 tests/llm-gateway-protocol-pin.spec.ts)。
+# 网关鉴权：**0.1.7-rc.2 里 `protocol` 已从 `llm-deepseek` 删除，配了直接抛错**
+# （`llm-deepseek/src/config.ts:207` → `llm-deepseek: protocol is not configurable;
+# remove it and use a Messages-compatible baseURL`）；适配器只剩 Messages 一条路径，
+# 端点固定 `<baseURL>/messages` ⇒ `baseURL=<server>/v1` 就是网关的 `/v1/messages`。
+#
+# 0.1.6 线这里钉的 `protocol: chat-completions` 是当时绕开「messages 适配器只发
+# `x-api-key`、不发 `Authorization` ⇒ 网关 BearerAuth 401」的组装期修法（2026-09-22
+# 现场事故）。0.1.7 把这个选择搬到了**提供方注册面**：请求头由注册该 provider 的插件
+# 用 `registerDeepSeekProvider(..., { resolveAuth })` 决定。上游的
+# `@deepseek-ai/dsh-llm-deepseek-api-key` 硬编码 `x-api-key`（对只认 Bearer 的网关
+# 必然 401，且没有换头的接缝），所以本组合**禁用它那一行**，改插自研的
+# `@picoaide/dsh-enterprise/gateway-llm`（同 Config 形状、同 provider 路由
+# `deepseek-official`，令牌取自 credentials 服务并作为 `Authorization: Bearer` 发出）。
+#
+# 这两行必须成对：只禁用不插入 ⇒ 没有任何插件注册 `deepseek-official` ⇒ bootstrap 的
+# `agent-default-model` 指向不存在的路由，模型面全灭；只插入不禁用 ⇒ 两个适配器抢同一个
+# provider 路由。行 id `picoaide-gateway-llm` 就是设置命名空间（0.1.7 起
+# `SettingsForms` 按 profile 条目 id 找表单），`gateway-model.ts`/`bootstrap.ts` 按同一
+# 常量写入 —— 唯一真源在 `packages/host/enterprise/src/gateway-contract.ts`。
+# `gateway-llm.ts` 在装载时校验行 id，对不上直接抛错。
 - id: llm-deepseek
-  config:
-    protocol: chat-completions
+  disabled: true
+- insert:
+    - id: picoaide-gateway-llm
+      name: '@picoaide/dsh-enterprise/gateway-llm'
+      config: {}
 # Local skill discovery: the web-app bundle disables the host skill
 # provider rows (presets own local discovery), but the desktop has no
 # presets. Mount the filesystem provider (scans `<dshHome>/skills`, which

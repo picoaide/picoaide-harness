@@ -1,0 +1,14 @@
+diff --git a/lib/client.js b/lib/client.js
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -6858,7 +6858,9 @@
+ 			apply$6(ctx);
+ 			apply$5(ctx);
+ 			apply$4(ctx);
+-			apply$2(ctx, config.office);
++			/* PicoAide: the desktop host ships no LibreOffice engine, so the Office
++			   renderer stays unregistered. Binary documents then fall back to the built-in
++			   unsupported empty state instead of a converter that can only fail. */
+ 			apply$1(ctx, config.excel);
+ 			apply$3(ctx);
+ 		}

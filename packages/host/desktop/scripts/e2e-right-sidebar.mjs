@@ -15,7 +15,8 @@
  * 产物：packages/host/desktop/.e2e-sidebar/{shots/*.png,home/}
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const args = process.argv.slice(2)
@@ -35,12 +36,18 @@ const PASS = arg('--pass', process.env.REAL_PASS ?? 'admin')
 const GATEWAY_PORT = 34567
 const OUT = join(PKG, '.e2e-sidebar')
 const SHOTS = join(OUT, 'shots')
-const HOME_DIR = join(OUT, 'home')
+// 证据（截图/报告）留在包目录里供 CI 收集，但**运行期数据根必须在包目录之外**
+// （2026-09-28 实测）：`$DSH_HOME` 落在桌面包目录内时，宿主算出的客户端插件列表会
+// **丢掉桌面自己的 client bundle**（实测 entries 69→68，缺 `dsh-plugin-desktop`）
+// ⇒ 登录后整页 `Failed to load plugins / waiting for service: layout`。
+// `e2e:client` 一直把 workDir 放系统临时目录所以从没撞上；这三个探针原来放在 `<pkg>/.e2e-*`。
+const RUN_DIR = mkdtempSync(join(tmpdir(), 'dsh-e2e-sidebar-'))
+const HOME_DIR = join(RUN_DIR, 'home')
 const DISPLAY = process.env.DISPLAY ?? ':99'
 
 if (!existsSync(APP)) { console.error(`[probe] app not found: ${APP}`); process.exit(2) }
 rmSync(OUT, { recursive: true, force: true })
-for (const dir of [HOME_DIR, join(OUT, 'cfg'), join(OUT, 'cache'), SHOTS]) mkdirSync(dir, { recursive: true })
+for (const dir of [HOME_DIR, join(RUN_DIR, 'cfg'), join(RUN_DIR, 'cache'), SHOTS]) mkdirSync(dir, { recursive: true })
 
 const wait = ms => new Promise(r => { setTimeout(r, ms) })
 const checks = []
@@ -72,7 +79,7 @@ if (!ATTACH && SERVER === '') {
 let child
 if (!ATTACH) {
   child = spawn(APP, ['--no-sandbox', '--lang=zh-CN', `--remote-debugging-port=${String(PORT)}`], {
-    env: { ...process.env, HOME: HOME_DIR, DSH_HOME: HOME_DIR, XDG_CONFIG_HOME: join(OUT, 'cfg'), XDG_CACHE_HOME: join(OUT, 'cache'), DISPLAY },
+    env: { ...process.env, PICOAI_ALLOW_DEBUG_SWITCHES: '1', HOME: HOME_DIR, DSH_HOME: HOME_DIR, XDG_CONFIG_HOME: join(RUN_DIR, 'cfg'), XDG_CACHE_HOME: join(RUN_DIR, 'cache'), DISPLAY },
     stdio: 'ignore',
     detached: true,
   })
@@ -174,6 +181,26 @@ try {
   const shellReady = await waitFor(`!!document.querySelector('.dshDesktopConversationSurface')`, 40000)
   check('进入桌面外壳（已登录）', shellReady)
   await shoot('01-shell')
+
+  // 1a. 桌面自己的客户端 bundle 必须在宿主下发的条目列表里（2026-09-28，审计 §8.9.12）。
+  //
+  // 它是客户端 `layout` 服务的唯一提供者：缺这一条 ⇒ 19 条上游客户端 UI 全部
+  // `pending (waiting for service: layout)` ⇒ 整页 `Failed to load plugins`，
+  // 而"进入桌面外壳"以外的失败现场**指不到病根**（本次排查花了一整轮）。
+  // 已实测的触发条件：`$DSH_HOME` 落在**桌面包目录之内**（entries 69→68，缺的恰好是这条；
+  // 数据根搬到系统临时目录即恢复）—— 所以这条判据把"运行期数据根放错位置"从整页白屏
+  // 变成一句点名。列表本身只判"非空"是假绿（68 条照样 > 0）。
+  const bootExpr = `(() => {
+    const boot = globalThis.__DSH_BOOT__
+    const ids = boot === undefined || boot === null ? [] : (boot.entries ?? []).map(e => e.id)
+    return { count: ids.length, hasDesktop: ids.includes('dsh-plugin-desktop') }
+  })()`
+  const bootOk = await waitFor(`(() => { const r = ${bootExpr}; return r.hasDesktop === true })()`, 15000, 300)
+  const boot = await evaluate(bootExpr)
+  check('桌面客户端 bundle 进入宿主条目列表（layout 的提供者）',
+    bootOk && boot.hasDesktop === true,
+    `entries=${boot.count} hasDesktop=${boot.hasDesktop}`
+    + (boot.hasDesktop === true ? '' : '（缺 dsh-plugin-desktop：检查 $DSH_HOME 是否落在桌面包目录内，见审计 §8.9.12）'))
 
   // 1b. 品牌槽位归属：单占位槽必须由**我们的品牌层**占用，而不是上游厂商 mark。
   //

@@ -87,6 +87,11 @@ let bootstrapResult: { config: unknown; fellBack: boolean } | Error = {
   config: { default_model: 'm', models: [], skills: [], mcp: [], web: {} },
   fellBack: false,
 }
+/**
+ * 非 null 时**挂起下一次** bootstrap 调用（Z2-01 的"慢服务端"用例：会话在
+ * `getBootstrap` 在飞期间换代）。只挡第一次，后续调用照常立即返回。
+ */
+let bootstrapGate: Promise<void> | null = null
 // 只替换 getBootstrap,保留真实的 validateBootstrap —— 回退种类(empty vs
 // default_model_substituted)本身就是被测契约,不能被替身抹平。
 vi.mock('../src/server-connector/bootstrap.ts', async (importOriginal) => {
@@ -94,8 +99,16 @@ vi.mock('../src/server-connector/bootstrap.ts', async (importOriginal) => {
   return {
     ...actual,
     getBootstrap: vi.fn(async () => {
-      if (bootstrapResult instanceof Error) throw bootstrapResult
-      return bootstrapResult
+      // **调用时刻**的快照：迟到的响应必须带当时那份配置（若在 resolve 时才读全局，
+      // 测出来的就不是"上一台服务端的内容"了）。
+      const snapshot = bootstrapResult
+      if (bootstrapGate !== null) {
+        const gate = bootstrapGate
+        bootstrapGate = null
+        await gate
+      }
+      if (snapshot instanceof Error) throw snapshot
+      return snapshot
     }),
   }
 })
@@ -159,6 +172,7 @@ beforeEach(async () => {
   attempts.length = 0
   fetchShouldFail = false
   fetchGate = null
+  bootstrapGate = null
   sessionListener = null
   bootstrapResult = { config: { default_model: 'm', models: [], skills: [], mcp: [], web: {} }, fellBack: false, fallback: 'ok' }
 })
@@ -839,5 +853,127 @@ describe('退出冲刷的 disposer 契约(F-05)', () => {
     apply(ctx)
     expect(() => disposers[0]!()).not.toThrow()
     expect(disposers[0]!()).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 会话代际守卫（Z2-01）：迟到 bootstrap 响应不得改写上报目标/状态
+// ---------------------------------------------------------------------------
+
+describe('会话代际守卫（Z2-01）', () => {
+  const SESSION_A: Session = { serverURL: 'https://server-a.example.com', username: 'alice', token: 'tok-a' }
+  const SESSION_B: Session = { serverURL: 'https://server-b.example.com', username: 'bob', token: 'tok-b' }
+  const DSN_A = `https://${PUBLIC_KEY}@collector-a.example.com/1`
+  const DSN_B = `https://${PUBLIC_KEY}@collector-b.example.com/2`
+
+  const flush = async (n = 8): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+  }
+
+  /** 一份"上报已启用 + 指定 DSN"的 bootstrap 载荷。 */
+  function reportingConfig(dsn: string): { config: unknown; fellBack: boolean } {
+    return {
+      config: {
+        default_model: 'm',
+        models: [{ id: 'm' }],
+        skills: [],
+        mcp: [],
+        web: { error_reporting_enabled: true, error_reporting_dsn: dsn, error_reporting_level: 'error' },
+      },
+      fellBack: false,
+    }
+  }
+
+  it('慢服务端的迟到响应不得把当前会话的 DSN 改回（换服务端）', async () => {
+    // 场景：A 的 bootstrap 在飞 → 用户登出并登录 B → B 先回（Sentry 指向 B）→ A 才回。
+    // 没有守卫时 A 的 DSN 会把 Sentry 改回**上一台租户**的采集端，之后的未捕获异常
+    // （栈/URL/用户名）就上报到旧租户那里。
+    let releaseGate: (() => void) | undefined
+    bootstrapGate = new Promise<void>((resolve) => { releaseGate = resolve })
+    bootstrapResult = reportingConfig(DSN_A)
+    const { ctx } = stubCtx()
+    apply(ctx)
+    expect(sessionListener).not.toBeNull()
+
+    sessionListener!(SESSION_A)
+    await flush()
+
+    bootstrapResult = reportingConfig(DSN_B)
+    sessionListener!(SESSION_B)
+    await flush()
+    expect(lastInit().dsn, 'B 的响应应先落地').toBe(DSN_B)
+    expect(getErrorReportingStatus()).toMatchObject({ state: 'ready', dsnHost: 'collector-b.example.com' })
+
+    releaseGate?.()
+    await flush()
+
+    expect(
+      {
+        dsn: lastInit().dsn,
+        status: getErrorReportingStatus(),
+        reportedToA: attempts.some((a) => a.server.includes('server-a')),
+      },
+      '迟到响应改写了当前会话（B）的上报目标',
+    ).toEqual({
+      dsn: DSN_B,
+      status: { state: 'ready', dsnHost: 'collector-b.example.com', level: 'error' },
+      reportedToA: false,
+    })
+  })
+
+  it('会话在 initSentry 的冲刷窗口里换代 ⇒ 迟到的 DSN 不得落地（谓词是承重的）', async () => {
+    // 这一条打的是**外层比对拦不住**的那段窗口：`initSentry` 自己在 await
+    // （close 最长 1.5s 的冲刷）之后才写模块级 sentry/status。所以它必须收到
+    // 代际谓词，而不是只靠调用点外面的 `if (!epochs.isCurrent(epoch)) return`。
+    const DSN_PRE = `https://${PUBLIC_KEY}@collector-pre.example.com/9`
+    await initSentry(DSN_PRE, 'r1') // 先有一个实例，才会走 close(1500) 这条 await
+    expect(getErrorReportingStatus()).toMatchObject({ state: 'ready', dsnHost: 'collector-pre.example.com' })
+
+    let releaseClose: (() => void) | undefined
+    sentryMock.close.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      releaseClose = () => resolve(true)
+    }))
+
+    bootstrapResult = reportingConfig(DSN_A)
+    const { ctx } = stubCtx()
+    apply(ctx)
+    sessionListener!(SESSION_A)
+    await flush() // A 的 bootstrap 已回来，initSentry 卡在 close 上
+
+    sessionListener!(null) // 会话在冲刷窗口里换代（登出）
+    await flush()
+    const afterLogout = getErrorReportingStatus()
+    expect(afterLogout).toEqual({ state: 'disabled' })
+
+    releaseClose?.() // A 的那次 init 现在才继续
+    await flush()
+
+    expect(
+      { status: getErrorReportingStatus(), dsn: lastInit().dsn },
+      '迟到的 DSN 在冲刷窗口之后落地了（initSentry 没有收到代际谓词）',
+    ).toEqual({ status: afterLogout, dsn: DSN_PRE })
+  })
+
+  it('登出之后到达的旧响应不得把上报重新打开（状态保持 disabled）', async () => {
+    let releaseGate: (() => void) | undefined
+    bootstrapGate = new Promise<void>((resolve) => { releaseGate = resolve })
+    bootstrapResult = reportingConfig(DSN_A)
+    const { ctx } = stubCtx()
+    apply(ctx)
+
+    sessionListener!(SESSION_A)
+    await flush()
+    sessionListener!(null) // 登出：状态回落 disabled
+    await flush()
+    expect(getErrorReportingStatus()).toEqual({ state: 'disabled' })
+    const initAfterLogout = initCalls()
+
+    releaseGate?.()
+    await flush()
+
+    expect(
+      { status: getErrorReportingStatus(), freshInit: initCalls() - initAfterLogout },
+      '登出之后迟到的旧响应把上报重新打开了',
+    ).toEqual({ status: { state: 'disabled' }, freshInit: 0 })
   })
 })

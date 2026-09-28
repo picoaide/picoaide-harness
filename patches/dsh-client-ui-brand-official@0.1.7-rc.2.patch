@@ -1,0 +1,18 @@
+diff --git a/lib/client.js b/lib/client.js
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -32,11 +32,9 @@
+ 		* so the official build registers nothing there.
+ 		* @param ctx - Client root context.
+ 		*/
+-		function apply(ctx) {
+-			ctx.slots.inject("sidebar.brand.mark", () => ctx.slots.inject("sidebar.brand.name", function* () {
+-				yield ctx.slots.register({ name: "sidebar.brand.mark" }, OfficialBrandMark);
+-				yield ctx.slots.register({ name: "sidebar.brand.name" }, OfficialBrandName);
+-			}));
++		function apply() {
++			/* Desktop-owned branding (dsh-enterprise / picoaide-branding client) occupies
++			   the sidebar brand slots instead of the official mark. */
+ 		}
+ 		//#endregion
+ 		exports.apply = apply;

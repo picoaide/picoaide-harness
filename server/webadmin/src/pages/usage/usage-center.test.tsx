@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { request } from '../../api'
+import { setCurrentAdmin } from '../../lib/rbac'
 import { rangePreset, monthRange } from '../../lib/format'
 import Overview from './Overview'
 import Departments from './Departments'
@@ -86,6 +87,10 @@ function renderAt(path: string, ui: React.ReactNode, routePath?: string) {
   )
 }
 
+// 权限快照是 lib/rbac 的模块级状态：本文件里凡显式 setCurrentAdmin 的用例都必须复位，
+// 否则会渗到同文件后面的用例（渲染成"另一个角色"的视角）。
+afterEach(() => setCurrentAdmin(null))
+
 describe('用量中心 · 总览', () => {
   it('渲染渠道余额卡、KPI 行、趋势与模型 TOP', async () => {
     renderAt('/usage', <Overview />)
@@ -152,6 +157,27 @@ describe('用量中心 · 总览', () => {
 })
 
 describe('用量中心 · 部门用量', () => {
+  it('持有 dept:read 时必须请求组织树并渲染成员列(正向夹具)', async () => {
+    // 第三十二轮 FIX-47 子泳道 B：本用例是 auditor-access.test.tsx 那条负例
+    //（「不请求需要 dept:read 的组织树」）的**另一半**。
+    //
+    // 为什么必须有这一半：`hasPermission` 在实参匹配不上任何权限点（例如把
+    // `PERM_DEPT_READ` 就地写成行内字面量 `'dept:raed'`）时对**所有角色**恒 false，
+    // 而负例在 `canReadDepts === false` 时照样通过 —— "取值在夹具里不存在"与
+    // "实现正确"无法区分（第三十一轮 AD2 真跑：变异后 pages/usage 5 files / 28 tests
+    // 全绿）。这里**显式授予 dept:read**，断言请求真的发出、且只有组织树才有的
+    // 「成员」列真的渲染 —— 实参写错任何一处，本用例当场红。
+    setCurrentAdmin({ role: 'super_admin', permissions: ['dept:read', 'usage:read'] })
+    renderAt('/usage', <Departments />)
+    await screen.findByText('研发部')
+
+    const paths = mockRequest.mock.calls.map(([p]) => String(p))
+    expect(paths).toContain('/api/server/admin/departments')
+    expect(screen.getAllByRole('columnheader', { name: '成员' }).length).toBeGreaterThan(0)
+    // 也不该出现"没有 dept:read"的说明（那是没权限时的文案）。
+    expect(screen.queryByText(/没有组织架构读取权限/)).toBeNull()
+  })
+
   it('渲染部门表与部门详情下钻', async () => {
     renderAt('/usage', <Departments />)
     expect(await screen.findByText('研发部')).toBeInTheDocument()

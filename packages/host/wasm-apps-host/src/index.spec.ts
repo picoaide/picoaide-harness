@@ -4,7 +4,7 @@
  * 这一层刻意不 import electron —— 上面的 import 本身就在证明"插件主体可在纯
  * Node 下加载"（profile 冒烟与单测都走这条路）。
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1099,6 +1099,26 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     expect(calls).toHaveLength(1)
   })
 
+  it('记录文件损坏 ⇒ 授权路由回 500 CONSENT_NOT_PERSISTED，且原文件一字不动（FIX-17）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-corrupt-'))
+    const file = join(dir, AI_CONSENT_FILE_NAME)
+    // 一条合法记录 + 一条坏记录：修前这一次 grant 会以"空集合 + 本次一条"整份覆盖，
+    // 把 alice 的那条静默销毁，而路由回 200（面板显示"已允许"）。
+    const damaged = JSON.stringify({
+      version: 2,
+      grants: [{ user: 'alice', server: ALICE.serverURL, app: 'demo' }, 42],
+    })
+    writeFileSync(file, damaged, { mode: 0o600 })
+
+    const h = fakeContext({ session: ALICE, aiRunner: runnerOf().runner })
+    apply(h.ctx, { userDataDir: dir })
+    const response = await consent(h, await proofHeaderOf(h), { app_id: 'demo', granted: true })
+
+    expect(response.status).toBe(500)
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'CONSENT_NOT_PERSISTED' } })
+    expect(readFileSync(file, 'utf8')).toBe(damaged)
+  })
+
   it('授权按用户维度隔离：另一个用户名下的授权不生效', async () => {
     const { calls, runner } = runnerOf()
     const h = fakeContext({ session: ALICE, aiRunner: runner })
@@ -1146,6 +1166,55 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
     expect(elsewhere.status).toBe(200)
     expect(calls[2]?.sessionId).toBe(`app:demo#bob@${serverPartitionHash('https://second.example.com')!}`)
     expect(calls[2]?.sessionId).not.toBe(bobId)
+  })
+
+  /**
+   * R21 B2-R21-01：授权（而不只是隐藏会话）也必须按服务端分域。
+   *
+   * 这是**A/B 对照**：同一个 `alice`、同一个应用，只把会话切到第二台服务端 ——
+   * 修前 `isGranted` 只看 `user\0app`，于是租户 B 上一次授权动作都没有就能继续花这个
+   * 账号的 token（403 变 200）；修后必须 403，且在 B 上重新授权后 A 的记录仍在。
+   */
+  it('授权按服务端分域（B2-R21-01）：同名账号换租户 ⇒ 403，重新授权后两条记录并存', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-scope-'))
+    const { calls, runner } = runnerOf()
+    const h = fakeContext({ session: ALICE, aiRunner: runner })
+    apply(h.ctx, { userDataDir: dir })
+    const proof = await proofHeaderOf(h)
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    expect((await chat(h, { messages: [{ role: 'user', content: 'a' }], stream: false })).status).toBe(200)
+
+    // ① 同一台机器、同一个账号名，只换服务端（= 换租户）。
+    h.setSession({ serverURL: 'https://second.example.com', token: 'tok2', username: 'alice' })
+    h.fireSessionChanged()
+    const inherited = await chat(h, { messages: [{ role: 'user', content: 'b' }], stream: false })
+    expect(inherited.status).toBe(403)
+    expect(await inherited.json()).toMatchObject({ error: { code: 'app_ai_denied' } })
+    // 零 token：被拒的那一轮一次模型调用都没有。
+    expect(calls).toHaveLength(1)
+
+    // ② 在租户 B 上授权 ⇒ 记录并存（A 的那条不被抹掉）。
+    await consent(h, proof, { app_id: 'demo', granted: true })
+    expect((await chat(h, { messages: [{ role: 'user', content: 'c' }], stream: false })).status).toBe(200)
+    const document = JSON.parse(readFileSync(join(dir, AI_CONSENT_FILE_NAME), 'utf8')) as { grants: unknown[] }
+    expect(document.grants).toHaveLength(2)
+
+    // ③ 回到租户 A：A 的授权仍在（换租户只影响自己那一段作用域）。
+    h.setSession({ serverURL: ALICE.serverURL, token: 'tok', username: 'alice' })
+    h.fireSessionChanged()
+    expect((await chat(h, { messages: [{ role: 'user', content: 'd' }], stream: false })).status).toBe(200)
+  })
+
+  it('写面拿不到用户名 ⇒ 401 AUTH_REQUIRED 且一个字都不落盘（fail-closed）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-wasm-apps-consent-nouser-'))
+    const h = fakeContext({ session: { serverURL: ALICE.serverURL, token: 'tok' } })
+    apply(h.ctx, { userDataDir: dir })
+    const proof = await proofHeaderOf(h)
+    const response = await consent(h, proof, { app_id: 'demo', granted: true })
+    expect(response.status).toBe(401)
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: 'AUTH_REQUIRED' } })
+    // 拒绝**不是**"写了一条空作用域的记录"。
+    expect(existsSync(join(dir, AI_CONSENT_FILE_NAME))).toBe(false)
   })
 
   it('授权路由要求持有性证明 / 已登录 / 合法 app_id / 布尔 granted', async () => {

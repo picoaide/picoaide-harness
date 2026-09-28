@@ -299,6 +299,39 @@ const KEEP_SOURCE = 'scripts/ci-publish-update-server.sh'
 const UPDATE_CADENCE_SOURCE = 'packages/host/desktop/src/updates.ts'
 /** 真源 5：客户端平台数（桌面打包配置里声明了安装包产物名的平台段）。 */
 const DESKTOP_MANIFEST_SOURCE = 'packages/host/desktop/package.json'
+/**
+ * `yarn prebuild` 构建的 workspace 包数真源（第三十轮 FIX-45 ⑤，2026-09-29）。
+ *
+ * 现场：`AGENTS.md:47` 写「`yarn prebuild` 一键构建全部 8 个 workspace 包」，真值 13；
+ * 变异 `8 → 999` 时本守卫**两个方向都无感**（EXIT=0 且照打「全部与真源一致 ✅」）——
+ * 这道守卫此前只覆盖它自己登记过的那几类硬数字。
+ */
+const PREBUILD_DEPS_SOURCE = 'packages/host/desktop/scripts/prebuild-workspace-deps.ts'
+/**
+ * **真源 6：官网 locale 的落地页源文件**（第三十二轮 FIX-47 ④e）。
+ *
+ * 现场（审计方 AD2 真跑的 AD2-07）：`site/astro.config.mjs` 声明 `locales: { root, en }`，
+ * 英文内容树 `site/src/content/docs/en/**` 有 17 篇文档，**却没有英文落地页** ——
+ * 中文首页来自自定义 `src/pages/index.astro`，`src/pages/en/` 不存在、Starlight 也不会替它
+ * 生成 ⇒ `/en/` 404，而 Starlight 给**每一页**渲染的页头站点标题 logo 都链到 `/<locale>/`
+ * ⇒ 英文站 **17 页全部**带一条死链，`astro build` 对这类**生成型**链接**零报告**
+ * （源码面一个 `](/en)` 都搜不到）。
+ *
+ * ## 这条判据**属于哪一类**（别把它读成产物面判据）
+ *
+ * 它是**源码面的近似判据**：证明"落地页**源文件**在"（存在才**可能**产出 `/<loc>/`），
+ * **不**证明产物里那 1417 条站内链接都落盘 —— 产物面由 `scripts/check-site-links.mjs` 负责
+ * （它自己跑 `astro build` 再扫 `site/dist/**\/*.html`）。
+ *
+ * 为什么产物面那一半进不了**本守卫**（门禁）：`site/` **不是** root yarn workspace
+ * （根 `package.json` 的 `workspaces` 只有 `packages/<scope>/<pkg>` 与 `community/<name>`），
+ * CI 的 gate job 里没有 `site/node_modules` ⇒ 跑不了 `astro build`。而"缺落地页源文件"恰好是
+ * 这条缺陷在**源码面唯一能确定性判定**的一格，所以它留在这里、产物面那半留给独立脚本。
+ *
+ * locale 清单**只从 `astro.config.mjs` 解析**（唯一真源）：本守卫**不**另抄一份 locale 列表
+ * ——抄一份就会在"加/删 locale"时静默漂移，那正是本文件存在的理由。解析不出 ⇒ fail-loud。
+ */
+const ASTRO_CONFIG_SOURCE = 'site/astro.config.mjs'
 
 /**
  * 解析 `KEEP=3` 形态的保留版本数。
@@ -365,6 +398,116 @@ function installerPlatformsFrom(source) {
     return typeof section === 'object' && section !== null && typeof section.artifactName === 'string'
   })
   return platforms.length === 0 ? undefined : platforms
+}
+
+/**
+ * 把源码里的**注释**逐字符替换成空格（换行保留）—— 输出与输入**等长**，于是后续所有
+ * `indexOf` / 行号计算都仍然对得上原文。
+ *
+ * 为什么需要它：`locales:` 的锚点判据是"命中必须唯一"，而注释掉的 `// locales: { … }`
+ * 不该算一个锚点（否则一句注释就能让判据 fail-loud）；同理块注释里的花括号不该被当成对象边界。
+ * @param text - 源码全文。
+ * @returns 等长的掩码文本。
+ */
+function maskComments(text) {
+  const chars = text.split('')
+  let quote = null
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index]
+    if (quote !== null) {
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '/' && chars[index + 1] === '/') {
+      while (index < chars.length && chars[index] !== '\n') {
+        chars[index] = ' '
+        index += 1
+      }
+      continue
+    }
+    if (char === '/' && chars[index + 1] === '*') {
+      while (index < chars.length && !(chars[index] === '*' && chars[index + 1] === '/')) {
+        if (chars[index] !== '\n') chars[index] = ' '
+        index += 1
+      }
+      if (index < chars.length) {
+        chars[index] = ' '
+        chars[index + 1] = ' '
+        index += 1
+      }
+    }
+  }
+  return chars.join('')
+}
+
+/**
+ * 从 `site/astro.config.mjs` 的源码里解析 starlight 的 `locales` 对象**键与声明行号**
+ * （真源 6；见 {@link ASTRO_CONFIG_SOURCE}）。
+ *
+ * 与仓内其它守卫同一纪律：只**解析源码文本**，不 import 被审对象（`astro.config.mjs` 会拉
+ * `astro/config` 与 `@astrojs/starlight`，且 `defineConfig` 之外还有副作用面）。
+ * fail-loud 口径与 {@link keepVersionsFrom} 同源：找不到 `locales:` / 命中不唯一（有歧义）/
+ * 花括号不闭合 / 一个键都取不到，一律返回 `undefined`，由调用方判红 —— **绝不回落默认清单**。
+ * @param source - `site/astro.config.mjs` 全文。
+ * @returns `[{ key, line }]`（声明顺序；`line` 为 1 起行号）；解析失败返回 `undefined`。
+ */
+function starlightLocalesFrom(source) {
+  // 注释先掩码（等长替换）⇒ 锚点唯一性与花括号配对都只看**真的代码**，
+  // 而行号/偏移仍与原文逐字对应（finding 要落在 `astro.config.mjs` 的真实行上）。
+  const text = maskComments(String(source))
+  const anchors = [...text.matchAll(/(?:^|[\s,{])locales\s*:\s*\{/gmu)]
+  if (anchors.length !== 1) return undefined
+  const open = text.indexOf('{', anchors[0].index)
+  if (open < 0) return undefined
+  const lineOf = offset => text.slice(0, offset).split('\n').length
+  const keys = []
+  let depth = 0
+  let quote = null
+  let pending = ''
+  let pendingAt = -1
+  for (let index = open; index < text.length; index += 1) {
+    const char = text[index]
+    if (quote !== null) {
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      pending = ''
+      continue
+    }
+    if (char === '{') {
+      depth += 1
+      pending = ''
+      continue
+    }
+    if (char === '}') {
+      depth -= 1
+      pending = ''
+      if (depth === 0) break
+      continue
+    }
+    if (depth !== 1) continue
+    if (/[A-Za-z0-9_$]/u.test(char)) {
+      if (pending === '') pendingAt = index
+      pending += char
+      continue
+    }
+    if (char === ':' && pending !== '') {
+      keys.push({ key: pending, line: lineOf(pendingAt) })
+      pending = ''
+      continue
+    }
+    pending = ''
+  }
+  if (depth !== 0) return undefined
+  return keys.length > 0 ? keys : undefined
 }
 
 /** 中文数字（本仓文档面只用到 1–10；`两` 与 `二` 同义）。 */
@@ -503,6 +646,27 @@ const NUMBER_CLAIM_RULES = [
       { pattern: /([0-9]+|[一二三四五六七八九十两]+)\s*层/gu },
     ],
   },
+  {
+    id: 'prebuild-workspace-packages',
+    label: '`yarn prebuild` 构建的 workspace 包数',
+    // 真源 = `prebuild-workspace-deps.ts` 的 `WORKSPACE_PACKAGES` 数组条数（进 diff、可评审）。
+    source: PREBUILD_DEPS_SOURCE,
+    read: source => workspacePackagesFrom(source),
+    min: 1,
+    // 上下文锚（同 E-04 的纪律）：只有"`yarn prebuild` 构建的包数"才是这条 claim。
+    // 同形的「N 个 workspace 包」若讲的是别的口径（例如验收判据行 `planned=32` 里的
+    // "15 个包 + 17 条守卫"，那里刻意不写"workspace 包"以免与这条同源混淆）会被排除；
+    // 被排除的条数照样打印（不静默吞）。
+    anchor: /prebuild|WORKSPACE_PACKAGES/u,
+    window: 0,
+    required: [
+      { file: 'AGENTS.md', note: '门禁自述：`yarn prebuild` 一键构建的 workspace 包数（FIX-45 ⑤ 的现场）' },
+    ],
+    forms: [
+      // markdown 着重号（`**13 个** workspace 包`）不算差异。
+      { pattern: /\*{0,2}([0-9]+)\s*个\*{0,2}\s*workspace\s*包/gu },
+    ],
+  },
 ]
 
 /**
@@ -517,6 +681,41 @@ function integrationCoveredLayersFrom(source) {
   const matches = [...String(source).matchAll(/^const EXPECTED_COVERED_LAYERS = (\d+)$/gmu)]
   if (matches.length !== 1) return undefined
   return Number(matches[0][1])
+}
+
+/**
+ * 从 `prebuild-workspace-deps.ts` 抽 `WORKSPACE_PACKAGES` 的**条数**（FIX-45 ⑤ 的真源）。
+ *
+ * fail-loud 口径与 {@link keepVersionsFrom} / {@link integrationCoveredLayersFrom} 同源：
+ * 找不到数组、括号不闭合、剥不出元素都返回 `undefined`，由调用方判红 ——
+ * 拒绝把"解析失败"当通过。
+ * @param source - `packages/host/desktop/scripts/prebuild-workspace-deps.ts` 源码。
+ * @returns 包数；解析失败返回 undefined。
+ */
+function workspacePackagesFrom(source) {
+  const start = String(source).indexOf('export const WORKSPACE_PACKAGES')
+  if (start < 0) return undefined
+  // ⚠️ 先跳掉**类型标注**里的 `[`（`readonly WorkspacePackage[]`）——直接找第一个 `[`
+  // 会命中类型方括号，剥出来是个空体（实测：解析出 0 条）。
+  const assign = String(source).indexOf('=', start)
+  if (assign < 0) return undefined
+  const open = String(source).indexOf('[', assign)
+  if (open < 0) return undefined
+  let depth = 0
+  let end = -1
+  for (let i = open; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '[') depth += 1
+    else if (ch === ']') {
+      depth -= 1
+      if (depth === 0) { end = i; break }
+    }
+  }
+  if (end < 0) return undefined
+  // 条目是**单行对象**（`{ workspace: '…', dir: '…', deps: [] },`）⇒ `dir:` 不在行首，
+  // 不能用 `^\s*dir:`（实测只数到 6/13）。按出现次数计。
+  const count = [...String(source).slice(open, end).matchAll(/\bdir:\s*'[^']+'/gu)].length
+  return count > 0 ? count : undefined
 }
 
 /**
@@ -560,6 +759,56 @@ function* walk(target) {
     yield* walk(join(target, entry.name))
   }
 }
+
+/**
+ * **禁止写死的条数**（FIX-47④d）—— "写不出真源"的那类数字要反过来判。
+ *
+ * ## 现场（第三十一轮 AD2-06，真跑）
+ *
+ * `AGENTS.md:82` 写着 E2E「**25** assertions」，而同一轮真跑 `e2e:client` 得到的
+ * `.e2e-report.md` 自述是 **41/41 通过**；`docs/ci-and-branch-plan.md:79` 的 ASCII 图还写着
+ * 「e2e:client（**13** 断言）」、`:75` 写着「webadmin npm test(**109**)」（实测 50 files /
+ * 723 tests）。第三十轮 FIX-45⑤ 已经把 `ci-and-branch-plan.md` 的同一句话改成"不写死"，
+ * **但 `AGENTS.md` 与同文件的 ASCII 图漏了** —— 同族只收口了一条。
+ *
+ * ## 为什么这三条不能进 {@link NUMBER_CLAIM_RULES}
+ *
+ * 硬数字规则要一份**静态真源**（读一个文件算出一个数）。E2E 断言条数**结构上不是静态
+ * 常量**：`reportStep(` 调用点里 7 个在 `for (const item of pagePanels)`（3 项）循环里，
+ * 运行期真值 = 41 ≠ 调用点数 36 ≠ 字面量出现次数 37 —— 写死任何一个都会漂。这类数字的
+ * 唯一真源是**运行期产物** `packages/host/desktop/.e2e-report.md` 的「结果：N/N 通过」，
+ * 而它不入库。webadmin 用例条数同理（每加一条测试就漂）。
+ *
+ * ⇒ 判据是**禁止形态**：文档里出现这些句式即红；指着真源写（"条数见 …"）就绿。
+ * `files` 白名单只列**权威口径文档**（AGENTS.md 与 CI 计划图），避免误伤历史记录面。
+ */
+const FORBIDDEN_DOC_NUMBERS = [
+  {
+    id: 'e2e-assertion-count',
+    label: 'E2E 断言条数不得写死',
+    truthSource: '运行期 `packages/host/desktop/.e2e-report.md` 的「结果：N/N 通过」'
+      + '（`reportStep(` 调用点 36 个、其中 7 个在 3 次迭代的循环里 ⇒ 不是静态常量）',
+    files: ['AGENTS.md', 'docs/ci-and-branch-plan.md'],
+    // 负向前视排除**引号/反引号里被引述的**数字（`曾写"25 assertions"` 这类"记录当时事实"
+    // 的引述不该被这条判据抓住 —— 本仓已经有一处这样的引述，判据误伤它就会逼人加 allow 标记，
+    // 反而把痕迹抹掉）。
+    patterns: [
+      /(?<![\d.'"\u2018\u2019\u201c\u201d`])([0-9]+)\s*assertions?\b/giu,
+      /e2e(?::client)?[^\n]{0,40}?(?<![\d.'"\u2018\u2019\u201c\u201d`])([0-9]+)\s*断言/giu,
+      /(?<![\d.'"\u2018\u2019\u201c\u201d`])([0-9]+)\s*断言[^\n]{0,40}?e2e/giu,
+    ],
+  },
+  {
+    id: 'webadmin-test-count',
+    label: 'webadmin 用例条数不得写死',
+    truthSource: '`cd server/webadmin && npm test` 的输出（每加一条用例就漂）',
+    files: ['AGENTS.md', 'docs/ci-and-branch-plan.md'],
+    patterns: [
+      /webadmin\s+npm\s+test\s*\(\s*([0-9]+)\s*\)/giu,
+      /webadmin\s+npm\s+test\s*\(\s*([0-9]+)\s*(?:files?|tests?)\s*\)/giu,
+    ],
+  },
+].map(rule => ({ ...rule, hits: 0 }))
 
 /**
  * **通过行（`✅`）的登记表 —— 唯一真源**（R13-GF 的第二条修法）。
@@ -734,6 +983,37 @@ function selfTest() {
    */
   const platformRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'client-platforms')
   const integrationLayersRule = NUMBER_CLAIM_RULES.find(rule => rule.id === 'integration-covered-layers')
+  /**
+   * 真源 6 的样本（FIX-47 ④e）。用 `typeof` 取解析器：判据表里没有这个名字时**不抛**，
+   * 而是落成 `undefined` ⇒ 下面第一条具名报红（与 `platformRule ?? {}` 同一口径）。
+   */
+  const localeParser = typeof starlightLocalesFrom === 'function' ? starlightLocalesFrom : undefined
+  /** `locales:` 在第 5 行、`root` 在第 6 行、`en` 在第 7 行（断言行号用）。 */
+  const LOCALE_SAMPLE = [
+    'export default defineConfig({',
+    "  site: 'https://example.com',",
+    '  integrations: [',
+    '    starlight({',
+    '      locales: {',
+    "        root: { label: '简体中文', lang: 'zh-CN' },",
+    "        en: { label: 'English', lang: 'en' },",
+    '      },',
+    '    }),',
+    '  ],',
+    '})',
+  ].join('\n')
+  /** 注释里的假锚点 + 字符串里的花括号：都不得影响解析（掩码后才做锚点与配对）。 */
+  const LOCALE_SAMPLE_COMMENTED = [
+    '// 曾经写过 locales: { fake: { label: "x" } }',
+    '/* 块注释里也有一个 locales: { fake2: {} } 与不配对的花括号 { */',
+    'export default defineConfig({',
+    "  site: 'https://example.com',",
+    '  locales: {',
+    "    root: { label: 'a' },",
+    "    en: { label: 'b' },",
+    '  },',
+    '})',
+  ].join('\n')
   const cases = [
     [platformRule !== undefined && integrationLayersRule !== undefined,
       'selftest: 判据表里必须有 client-platforms 与 integration-covered-layers 两条规则'],
@@ -830,6 +1110,25 @@ function selfTest() {
       'selftest: 主入口下不得自称探测子进程（入口判定必须来自加载器/进程内标记，不是 env/argv）'],
     [spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--verdict-probe'], { encoding: 'utf8' }).status === 2,
       'selftest: `--verdict-probe` 必须是未知参数（exit 2）—— 本入口不再有任何"探测模式"开关'],
+    // ---- 真源 6（FIX-47 ④e）：官网 locale 落地页判据的**解析器**正反例 ----------------
+    // 断言的是"解析器能不能区分"，不是"当前这份 astro.config.mjs 恰好解析对了"：
+    // 把 `locales` 的解析拆掉 ⇒ 下面第一条立刻红（具名）。
+    // `localeParser` 用 `typeof` 取（判据表里没有这个名字时**不抛**，而是落成 undefined
+    // ⇒ 具名报红，与上面 `platformRule ?? {}` 的口径一致）。
+    [localeParser !== undefined,
+      'selftest: 判据表里必须有 starlightLocalesFrom（官网 locale 落地页判据的解析器）'],
+    [localeParser?.(LOCALE_SAMPLE)?.map(entry => entry.key).join(',') === 'root,en',
+      'selftest: 应解析出 locales 的键（root,en，按声明顺序）'],
+    [localeParser?.(LOCALE_SAMPLE)?.[1]?.line === 7,
+      'selftest: 应解析出 locale 键的**声明行号**（finding 要落在那一行）'],
+    [localeParser?.(LOCALE_SAMPLE_COMMENTED)?.map(entry => entry.key).join(',') === 'root,en',
+      'selftest: 行注释/块注释里的 `locales:` 与花括号不得被当成真锚点'],
+    [localeParser?.('export default { site: "https://example.com" }') === undefined,
+      'selftest: 没有 locales 必须返回 undefined（调用方 fail-loud）'],
+    [localeParser?.('locales: { root: { label: "a" }, en: { label: "b" }') === undefined,
+      'selftest: 花括号不闭合必须返回 undefined（拒绝把残缺形态当解析成功）'],
+    [localeParser?.(`${LOCALE_SAMPLE}\n${LOCALE_SAMPLE}`) === undefined,
+      'selftest: `locales:` 出现两处（有歧义）必须 fail-loud（返回 undefined）'],
   ]
   const failed = cases.filter(([ok]) => !ok).map(([, name]) => name)
   if (failed.length > 0) {
@@ -930,6 +1229,23 @@ for (const target of SCAN_PATHS) {
           })
         }
       }
+      // ---- 禁止写死的条数（FIX-47④d；见 FORBIDDEN_DOC_NUMBERS）----
+      for (const rule of FORBIDDEN_DOC_NUMBERS) {
+        if (!rule.files.includes(file)) continue
+        for (const pattern of rule.patterns) {
+          for (const match of line.matchAll(pattern)) {
+            rule.hits += 1
+            hits.push({
+              kind: 'HARD-COUNT',
+              file,
+              line: index + 1,
+              reason: `${rule.label}：文档里不得写死这个数字（真源 = ${rule.truthSource}）—— `
+                + '指着真源写（"条数见 …"）即可，写死必然漂',
+              text: line.trim().slice(0, 200),
+            })
+          }
+        }
+      }
       // ---- 硬数字断言（真源见 NUMBER_CLAIM_RULES）----
       for (const rule of numericRules) {
         if (rule.truth === undefined) continue
@@ -1003,6 +1319,65 @@ for (const file of MODULE_DOCS) {
       reason: `文档写「${declaredCount} 项」，真源是 ${expectedModules.length} 项`,
       text: lines[anchor].trim().slice(0, 200),
     })
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 判据 7：官网每个 locale 的**落地页源文件**必须存在（第三十二轮 FIX-47 ④e）
+//
+// 判据面：`ASTRO_CONFIG_SOURCE`（唯一真源）里 `locales` 的每个非 `root` 键 `<loc>`，
+// 必须有 `site/src/pages/<loc>/index.astro`（存在才**可能**产出 `/<loc>/`）。
+//
+// 为什么缺它 = 真缺陷（现场见 `ASTRO_CONFIG_SOURCE` 的注释）：Starlight 给**每一页**渲染的
+// 页头站点标题 logo 都链到 `/<locale>/`，缺落地页 ⇒ 该 locale **全部**页面带死链，
+// `astro build` 零报告，源码面探针（扫 `](/…)`）也看不见（那是生成型链接）。
+//
+// 通道选择（照本文件既有口径）：这是一条**真实缺陷的 finding**（有确切落点 file:line），
+// 走 `hits` —— 与 `PIN` / `NUMBER` / `MODULES` 同一打印与退出码通道（主入口与独立子入口
+// 都按 `hits.length > 0` 判 exit 1）。"解析不出真源"才是 `failures`（同真源 1/2 的口径）。
+//
+// 覆盖面口径（认账）：本判据**不登记**进 `COVERAGE_ITEMS` —— 登记要同时改
+// `passLineProblems` 的对齐断言与 `strictSurface` 的"每项都产出过断言"那一段（三处），
+// 超出"只加这一条判据"的授权。影响面是**声明的范围窄于判据**（绿时通过行不声称它），
+// 而不是声称了没判过的东西 —— 安全方向；红了照走 `hits` 通道 exit 1。
+// ─────────────────────────────────────────────────────────────────────────────
+const astroConfigPath = join(root, ASTRO_CONFIG_SOURCE)
+if (!existsSync(astroConfigPath)) {
+  // 自证/合成夹具树（`--root` 指到临时树）没有官网配置属正常 —— 那里根本不该红。
+  // **真仓形态**缺它则是"判据的真源没了"（同 `upstream.json` / `platform-modules.mjs` 的口径）。
+  if (strictSurface) {
+    failures.push(`${ASTRO_CONFIG_SOURCE}: 找不到官网配置 —— locale 清单的唯一真源就是它`
+      + '（另抄一份必然漂移），拒绝把"读不到真源"当通过')
+  }
+} else {
+  const astroConfigSource = readFileSync(astroConfigPath, 'utf8')
+  const astroConfigLines = astroConfigSource.split('\n')
+  const locales = starlightLocalesFrom(astroConfigSource)
+  if (locales === undefined) {
+    failures.push(`${ASTRO_CONFIG_SOURCE}: 解析不出 starlight 的 locales —— 拒绝把"解析失败"当通过`
+      + '（请修回 `locales: { … }` 形态，或同步本守卫的解析器；本守卫**不**回落默认 locale 清单）')
+  } else {
+    for (const locale of locales) {
+      // `root` 是 Starlight 的缺省 locale 键：它的落地页是自定义首页 `src/pages/index.astro`，
+      // 不在本判据面内（缺了它整站首页都没了，那是产物面判据抓得到的另一种形态）。
+      if (locale.key === 'root') continue
+      const landing = `site/src/pages/${locale.key}/index.astro`
+      if (existsSync(join(root, landing))) continue
+      const declared = astroConfigLines[locale.line - 1] ?? ''
+      hits.push({
+        kind: 'SITE-LOCALE',
+        file: ASTRO_CONFIG_SOURCE,
+        line: locale.line,
+        reason: `声明了 locale \`${locale.key}\`，却没有落地页源文件 ${landing} ——`
+          + ` Starlight 给**每一页**渲染的页头站点标题 logo（「回首页」）都链到 \`/${locale.key}/\`，`
+          + `缺这个文件 ⇒ 该 locale 的**全部**页面都会出现死链（本次缺陷：英文站 17 页全是 \`-> /en\`），`
+          + '而 `astro build` 对这类**生成型**链接**零报告**（Astro/Starlight 默认不做链接完整性检查）。'
+          + ` 修法：新增 ${landing}（真实可用的落地页，不是占位页）。`
+          + ' 产物面（链接是否真的落盘）由 scripts/check-site-links.mjs 判定 —— 它要跑 astro build，'
+          + '而 site/ 不是 root yarn workspace，CI 的 gate job 里没有 site/node_modules。',
+        text: declared.trim().slice(0, 200),
+      })
+    }
   }
 }
 
@@ -1223,6 +1598,7 @@ if (isEntryModule()) {
     const truthLines = numericRules.filter(rule => rule.truth !== undefined)
       .map(rule => `${rule.label} ${rule.truth}（${rule.source}）`)
     console.log(`  数字真源：${truthLines.length > 0 ? truthLines.join('；') : '（夹具树：无硬数字真源，对应项不计入覆盖面）'}`)
+    console.log(`  禁止写死的条数：${FORBIDDEN_DOC_NUMBERS.map(rule => `${rule.label} ${rule.hits} 处`).join(' / ')}`)
     console.log(`  数字断言：${numericRules.map(rule => `${rule.label} ${rule.hits} 条`).join(' / ')}`
       + `${numericRules.some(rule => rule.excluded > 0)
         ? `（另有 ${numericRules.map(rule => rule.excluded).reduce((a, b) => a + b, 0)} 条同形语句因上下文锚不符被排除，不计入本项）` : ''}`)

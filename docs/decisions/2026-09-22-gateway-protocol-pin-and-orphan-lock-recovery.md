@@ -159,3 +159,35 @@ settings 的解析顺序是 schema 缺省 → **组装 base** → user 层，缺
   解析加进 `document-lock-recovery.ts` 并补用例。
 - 上游若改 `withFileLock` 的建锁序列（例如先写 PID 再原子改名），年龄门槛可以放宽，
   但**不要**在没有新证据的情况下去掉它。
+
+## 5. 取代：§2.1 的组装期协议 pin 在 DSH 0.1.7-rc.2 上作废（2026-09-28）
+
+**§2.1 只适用于 0.1.6 线，不要再照它改。** 0.1.7-rc.2 把 `llm-deepseek` 的 `protocol`
+**删掉了**（`llm-deepseek/src/config.ts:207` → `protocol is not configurable; remove it and
+use a Messages-compatible baseURL`），配了这个键的行**激活即抛错**；适配器只剩 Messages
+一条路径，端点固定 `<baseURL>/messages`（即本产品网关的 `/v1/messages`）。鉴权搬到
+**提供方注册面**：注册该 provider 的插件用
+`registerDeepSeekProvider(ctx, provider, { resolveAuth })` 决定请求头。
+
+本产品的落地形态（取代 §2.1）：
+
+- 组装期**禁用**上游那一行 `llm-deepseek`（它是 `@deepseek-ai/dsh-llm-deepseek-api-key`，
+  `resolveAuth` 硬编码 `x-api-key`，没有换头的接缝 ⇒ 对只认 `Authorization: Bearer` 的
+  网关必然 401），并插入自研行 `picoaide-gateway-llm`
+  （`@picoaide/dsh-enterprise/gateway-llm`）：同一份 Config 形状、同一个 provider 路由
+  `deepseek-official`，令牌在**每次请求前**从 `credentials` 服务解析，作为
+  `Authorization: Bearer` 发出；缺令牌时抛 `MISSING_CREDENTIAL` 且**一个请求都不发**。
+- `gateway-model.ts` 只写 `baseURL`（不再写 `protocol`，也不再写 `apiKeyEnv` —— 后者在本行的
+  Config 里不存在，`SettingsForms.write` 会以 `Config field "apiKeyEnv" is not volatile` 抛错）。
+  行 id 就是设置命名空间，唯一真源
+  `packages/host/enterprise/src/gateway-contract.ts`。
+- `web-search-deepseek` 那一行**不需要改**：它从来没有 `protocol`，0.1.7 里 `apiKeyEnv`/
+  `baseURL`/`model` 仍然存在且都是 volatile，而它的请求头本来就同时发 `x-api-key` 与
+  `authorization: Bearer`（`web-search-deepseek/src/provider.ts:228-231`）。
+- §2.2 的孤儿写锁回收**不受影响**，仍然有效且建议保留（settings 静默只读是独立故障）。
+
+判据：`packages/host/enterprise/tests/gateway-llm-auth-header.spec.ts`（真 Cordis + 真
+`LlmRuntime` + 真适配器 + 本进程内的记录型假网关：请求上必须是 `Authorization: Bearer`、
+且 `x-api-key` 为空）+ `packages/host/desktop/tests/llm-gateway-protocol-pin.spec.ts`
+（组装真桌面 profile：两行都不带 `protocol`、上游行被禁用、网关行被插入，且"配了就红"
+由上游真实 schema 驱动）。

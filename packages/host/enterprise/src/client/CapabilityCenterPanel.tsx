@@ -708,6 +708,30 @@ export type SectionCard =
   | { type: 'item'; item: CapabilityItem }
 
 /**
+ * 内置技能**清单**读失败时的提示（`null` ⇒ 不渲染任何东西）——R21 FIX-7 ②。
+ *
+ * 为什么必须有：`useBuiltinSkills` 已经把"读失败"（5xx / 网络 / 超时）与"这台服务端
+ * 确实没有这条路由"分开（`builtinSkillsLoadOutcome` 的 `ok`/`absent`/`failed` 三态），
+ * 但面板此前只读 `rows/installed/versions/busy/failed/install` —— 新增的 `error` 态
+ * **没有消费者**，于是 500 与"平台没有内置技能"在界面上同形（FIX-1 的 D1 残项：
+ * 用户与运维都看不到任何痕迹）。
+ *
+ * 文案一律走字典（`capability.builtinLoadFailed` / `capability.builtinRetry`；
+ * 本文件不出现任何字面文案）。抽成纯函数是为了让"**把 error 当 ok**"这条回退能被
+ * 单测直接打坏 —— 本包的测试环境是 node（没有 jsdom），React 节点不能渲染，
+ * 所以这里返回的是**判定 + 取值**，渲染留在调用点。
+ *
+ * 变异验证：`if (error === null) return null` 改成恒 `null`（= 回到不渲染）⇒
+ * `tests/capability-builtin-load-error.spec.ts` 的「读失败必须给出提示」红。
+ * @param error - `useBuiltinSkills` 的清单级错误；`null` = 没失败（可用 / 404 的 absent）。
+ * @returns 提示与重试按钮的文案；没失败 ⇒ `null`。
+ */
+export function builtinLoadNotice(error: string | null): { message: string, retry: string } | null {
+  if (error === null) return null
+  return { message: t('capability.builtinLoadFailed', { error }), retry: t('capability.builtinRetry') }
+}
+
+/**
  * 「我的」分区最终渲染的卡片清单（**唯一真源**：渲染层只做 map，不再自己拼数组）。
  *
  * 去重口径（R2-SK-6）：内置入口已经为某个技能出卡（「安装」或「更新到 vX」）时，
@@ -1774,6 +1798,27 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     </div>
   )
 
+  /**
+   * 内置技能清单读失败的提示条（判定见 {@link builtinLoadNotice}）：`null` ⇒ 不渲染。
+   *
+   * 两处渲染口径：
+   *  - `builtin.error !== null` 时**必须**出现（`builtinSkillsLoadOutcome` 的 `failed`）；
+   *  - 404（旧版服务端没有这条路由）= `absent` ⇒ hook 不置错误 ⇒ 这里什么都不渲染
+   *    （与既有口径一致：那块区域整块隐藏）。
+   * 重试按钮接的是 `builtin.reload()`（重新拉一次清单），不是分区目录的 `loadAll()`。
+   */
+  const builtinNotice = builtinLoadNotice(builtin.error)
+  const builtinErrorStrip = builtinNotice === null ? null : (
+    <div style={{ gridColumn: '1 / -1' }} data-role="capability-builtin-error">
+      <EmptyState
+        icon={<icons.IconAlert size={22} />}
+        tone="danger"
+        title={builtinNotice.message}
+        action={<PanelButton variant="secondary" size="md" onClick={() => { builtin.reload() }}>{builtinNotice.retry}</PanelButton>}
+      />
+    </div>
+  )
+
   const renderSection = (key: 'mine' | 'market', emptyText: string): React.ReactNode => {
     const st = sectionStatus(key)
     // idle = 尚未发起加载(初始态),与 loading 同样显示 spinner;
@@ -1818,12 +1863,19 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
       failed: builtin.failed,
     }), key)
     const cards = planSectionCards({ rows, builtinCards })
+    // 内置清单读失败 ⇒ 这一条**必须**出现：列表为空时它就是分区内容（否则空分区里
+    // 错误与"什么都没有"同形），列表非空时挂在卡片前面（提示这份列表不完整）。
     if (cards.length === 0) {
-      return renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
+      return builtinErrorStrip ?? renderEmpty(filter === 'all' ? emptyText : t('capability.emptyFilter'))
     }
     // 内置技能排在前面（数量少且是平台自带），其余按既有排序；同名技能的重复卡
     // 已在 planSectionCards 里去掉（R2-SK-6）——这里只做渲染，不再自己拼数组。
-    return cards.map(card => (card.type === 'builtin' ? renderBuiltinCard(card.card) : renderCard(card.item)))
+    return (
+      <>
+        {builtinErrorStrip}
+        {cards.map(card => (card.type === 'builtin' ? renderBuiltinCard(card.card) : renderCard(card.item)))}
+      </>
+    )
   }
 
   // 分区状态驱动内容;全局 loading 已移除(旧实现 setLoading(true) 后同步置

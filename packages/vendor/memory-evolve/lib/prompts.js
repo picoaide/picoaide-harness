@@ -1141,7 +1141,8 @@ export function installPrompts(ctx, config) {
     const handler = async (req, res) => {
       // FIX-04：统一前置守卫（读放行、写要求同源 + JSON 体）。此前跨站简单
       // 请求能把持久化提示词写进库里（下一轮注入面）。
-      if (await applyRequestGuard(req, res, 256 * 1024)) return
+      // R24 B3：Host 栅栏（本机可信托管名）是读写的共同前置。
+      if (await applyRequestGuard(req, res, 256 * 1024, webCtx)) return
       const url = new URL(req.url ?? '/', 'http://localhost')
       const path = url.pathname
       const base = '/memory-evolve/api/prompts'

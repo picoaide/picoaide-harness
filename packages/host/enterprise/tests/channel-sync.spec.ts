@@ -177,3 +177,113 @@ describe('channel-sync built-in brand (未登录/服务端不可达时的显示�
     expect(out.client?.short_name).toBe('Acme')
   })
 })
+
+describe('会话代际守卫（Z2-01）：迟到的渠道内容不得改写当前会话的品牌', () => {
+  const SESSION_A: Session = { serverURL: 'https://server-a.example.com', username: 'alice', token: 'tok-a' }
+  const SESSION_B: Session = { serverURL: 'https://server-b.example.com', username: 'bob', token: 'tok-b' }
+
+  type Deferred = { resolve: (v: unknown) => void; reject: (e: unknown) => void }
+  let pending: Map<'A' | 'B', Deferred[]>
+
+  function installDeferredFetch(): () => void {
+    pending = new Map()
+    const original = globalThis.fetch
+    globalThis.fetch = vi.fn((input: unknown) => {
+      const key: 'A' | 'B' = String(input).startsWith('https://server-a') ? 'A' : 'B'
+      return new Promise<unknown>((resolve, reject) => {
+        const queue = pending.get(key) ?? []
+        queue.push({ resolve, reject })
+        pending.set(key, queue)
+      })
+    }) as unknown as typeof fetch
+    return () => { globalThis.fetch = original }
+  }
+
+  function respond(key: 'A' | 'B', tenant: string): void {
+    const next = (pending.get(key) ?? []).shift()
+    if (next === undefined) throw new Error(`没有在飞的请求：${key}`)
+    next.resolve(new Response(JSON.stringify({ client: { display_name: tenant }, title: tenant }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+  }
+
+  function fail(key: 'A' | 'B'): void {
+    const next = (pending.get(key) ?? []).shift()
+    if (next === undefined) throw new Error(`没有在飞的请求：${key}`)
+    next.reject(new Error('network down'))
+  }
+
+  const flush = async (n = 12): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+  }
+
+  function fixture(): { ctx: Context; emitted: unknown[]; emitSession: (s: Session | null) => void } {
+    const listeners = new Set<(s: Session | null) => void>()
+    const emitted: unknown[] = []
+    const ctx = {
+      on: (event: string, listener: (s: Session | null) => void) => {
+        expect(event).toBe(SESSION_CHANGED_EVENT)
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      emit: (event: string, payload: unknown) => {
+        expect(event).toBe('pico/channel-changed')
+        emitted.push(payload)
+      },
+      picoSession: { isRestored: () => false, getSession: () => null },
+    } as unknown as Context
+    return { ctx, emitted, emitSession: (s) => { for (const l of [...listeners]) l(s) } }
+  }
+
+  it('换服务端后到达的旧渠道内容必须被丢弃（界面不能停在上一台租户的品牌）', async () => {
+    const restore = installDeferredFetch()
+    try {
+      const { ctx, emitted, emitSession } = fixture()
+      apply(ctx)
+
+      emitSession(SESSION_A)
+      await flush()
+      emitSession(null)
+      emitSession(SESSION_B)
+      await flush()
+
+      respond('B', 'Tenant-B')
+      await flush()
+      respond('A', 'Tenant-A')
+      await flush()
+
+      const last = emitted.at(-1) as { client?: { display_name?: string } }
+      expect(
+        last?.client?.display_name,
+        `当前会话是 ${SESSION_B.serverURL}，但界面品牌停在上一台服务端的内容上`,
+      ).toBe('Tenant-B')
+    } finally {
+      restore()
+    }
+  })
+
+  it('旧请求的**失败**同样不得把当前会话的品牌重置成随包品牌（catch 分支也要判代际）', async () => {
+    const restore = installDeferredFetch()
+    try {
+      const { ctx, emitted, emitSession } = fixture()
+      apply(ctx)
+
+      emitSession(SESSION_A)
+      await flush()
+      emitSession(null)
+      emitSession(SESSION_B)
+      await flush()
+
+      respond('B', 'Tenant-B')
+      await flush()
+      fail('A') // 上一台服务端的请求在新会话建立之后才失败
+      await flush()
+
+      const last = emitted.at(-1) as { client?: { display_name?: string } }
+      expect(last?.client?.display_name, '旧请求的迟到失败把品牌重置了').toBe('Tenant-B')
+    } finally {
+      restore()
+    }
+  })
+})

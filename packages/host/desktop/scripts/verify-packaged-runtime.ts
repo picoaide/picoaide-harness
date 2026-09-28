@@ -16,8 +16,11 @@ import { dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { extractFile, listPackage } from '@electron/asar'
+import { FuseVersion, FuseV1Options, flipFuses, getCurrentFuseWire } from '@electron/fuses'
 import AdmZip from 'adm-zip'
 import { normalizeAsarEntry, toAsarEntryPath } from './asar-entry-path.ts'
+import { asarLayoutLogLine, assertMacBundleConsistency } from './mac-bundle-consistency.ts'
+import { packagedAppId } from './channel-build.ts'
 import {
   FORBIDDEN_MACOS_NATIVE_ENTRIES,
   MACOS_ARM64_NATIVE_ENTRIES,
@@ -36,6 +39,14 @@ export interface PackagedRuntimeContext {
   readonly packager: {
     readonly appInfo: {
       readonly productFilename: string
+      /**
+       * Electron Builder 实际收到的 `appId`（`AppInfo.get id()`）。
+       *
+       * 平台无关的产物身份判据读它（2026-09-26 复审 B-6）：mac 那一条读的是**产物**
+       * （`Info.plist` 的 `CFBundleIdentifier`），而 Windows 的 AppUserModelId /
+       * Linux 的安装标识此前**零判据**；这条读的是**配置**，两边合起来才覆盖三个平台。
+       */
+      readonly id: string
     }
     /** Launcher file name LinuxPackager pins (`dsh-plugin-desktop`); mac/win use `productFilename`. */
     readonly executableName?: string
@@ -101,11 +112,19 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 打包态就没有兜底 —— 标签页直接回落到上游厂商图形。
   'build/web-brand/official.svg',
   'node_modules/@deepseek-ai/dsh/package.json',
-  // Upstream 0.1.2: shipped presets moved from @deepseek-ai/dsh/config to
-  // the agent-presets package root `presets/` directory.
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
+  // Upstream 0.1.7: the directory roster (`dsh-agent-presets/presets/<id>/agent.cordis.yml`)
+  // is gone. Each shipped preset is a **profile patch file** of the Web bundle,
+  // listed in that bundle's own `dsh.bundle.patch`, and the `cordis` preset's
+  // skills moved to the `dsh-agent-preset` plugin (`customSkillDirs`). Missing
+  // any of these leaves the roster empty or the preset's authoring guides gone —
+  // both silent in a packaged app.
+  'node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/ptc.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/minimal.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-agent-preset/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills/cordis-plugin-development/SKILL.md',
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills/editing-cordis-compositions/SKILL.md',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   // G-2（2026-09-23 审计）：前端 dist 的**稳定名入口文档**必须随包。`index.html`
   // 之外的这两份是固定路径（不是内容哈希 chunk）—— 它们被 `/favicon.svg`、
@@ -116,6 +135,9 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/manifest.webmanifest',
+  // 0.1.7 新增的暗色 favicon（上游前端 dist 的稳定固定名）。目录 oracle 要求
+  // "dist 里每个真实文件都在清单里"，所以新增固定名必须同步登记。
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon-dark.svg',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   // 宿主行 `plugin-manager` 自 2026-09-23（issue #130）起在桌面里真的会被激活：它发布
   // `pluginManager` 服务，而 cordis preset 的 `tool-plugin-manager` 行注入该服务 ——
@@ -399,7 +421,7 @@ export function assertNoPackagedSourceLeaks(
  */
 export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
   /^node_modules\/dsh-memory-evolve\/skills\/[^/]+\/SKILL\.md$/u,
-  /^node_modules\/@deepseek-ai\/dsh-agent-presets\/presets\/cordis\/skills\/[^/]+\/SKILL\.md$/u,
+  /^node_modules\/@deepseek-ai\/dsh-agent-preset\/skills\/[^/]+\/SKILL\.md$/u,
 ]
 
 /**
@@ -409,7 +431,7 @@ export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
  * （例如「排除全部 `.md`」）会把随包运行期内容一起删掉，而产物"没有任何泄漏"、
  * 反例门禁全绿 —— 这正是本项目已登记过的"假绿"形态（只钉一侧）。
  * 本轮**实测踩到**：一条「排除全部 .md」的过宽规则把随包技能 SKILL.md 一起排掉
- * （`dsh-memory-evolve/skills/<技能>/SKILL.md` 与 agent-presets 的 presets 技能树），
+ * （`dsh-memory-evolve/skills/<技能>/SKILL.md` 与 dsh-agent-preset 的技能树），
  * COI 技能同步会全部 `missing`。
  *
  * 与 `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 的分工：那张表钉**具体文件存在**；
@@ -796,7 +818,7 @@ function contextForUnpackedRoot(unpackedRoot: string): PackagedRuntimeContext {
     appOutDir = dirname(resources)
     electronPlatformName = 'linux'
   }
-  return { appOutDir, electronPlatformName, packager: { appInfo: { productFilename: '' } } }
+  return { appOutDir, electronPlatformName, packager: { appInfo: { productFilename: '', id: packagedAppId() } } }
 }
 
 /** Exercise the physical Worker emitted beside app.asar with a minimal archive. */
@@ -1139,10 +1161,11 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
   // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
   { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
-  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 14 条 + 锚点表的 `cordis.patch.yml`。
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 15 条 + 锚点表的 `cordis.patch.yml`。
   // 14 条（原 13 条 + R16B-01 新增的 `session-identity`）：account-card 的余额快照要盖
   // 会话身份章，而身份口径的唯一实现在 enterprise ⇒ 多一条真实的跨包 specifier。
-  { package: 'dsh-enterprise', flattened: 0, effective: 15, library: 13 },
+  // 15 条（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增 `gateway-llm`（自研 provider 行）。
+  { package: 'dsh-enterprise', flattened: 0, effective: 16, library: 14 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
   { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
@@ -1154,22 +1177,38 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 116
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 122
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
 // 114 → 116（R16B-01）：新增 `@picoaide/dsh-enterprise/session-identity`（account-card
 // 的余额快照身份章，跨包 specifier 真实存在）+ 它在 ASAR 导出表里的一条落点。
+// 116 → 121（2026-09-28，DSH 0.1.7-rc.2 升级）：预置面从 `dsh-agent-presets/presets/`
+// 搬到 `dsh-web-app/presets/*.patch.yml` + `dsh-agent-preset/{lib,skills}`，净增 4 条
+// （-3 旧条目 / +7 新条目）；同一次升级另加 `dsh-web-frontend/dist/favicon-dark.svg`
+// 一条（目录 oracle 的固定名清单要求）。棘轮语义是"贴住下限、只允许上调"。
+// 121 → 122（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增自研 provider 行入口
+// `@picoaide/dsh-enterprise/gateway-llm`（它取代被禁用的上游 `llm-deepseek` 行）。
 
 /**
- * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
+ * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调，下调必须写明理由）。
  *
- * 实测：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
- * `needs` 闭包先生成 `lib/`）21 条 —— 取 20 是为了让这条"防空转"的前置判据在两种
- * 树状态下都成立。**它不是删条目的保证**（那个由 `assertWorkspacePackageCoverage`
- * 的每包棘轮负责，与构建无关）。
+ * 它的用途**只有一个**：防空转 —— 产物根本没构建时这个计数会掉到 ≈0，
+ * 于是整条"反向覆盖"判据会静默变成恒真。**它不是删条目的保证**
+ * （那个由 `assertWorkspacePackageCoverage` 的每包棘轮负责，与构建无关）。
+ *
+ * 实测历史：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
+ * `needs` 闭包先生成 `lib/`）21 条 ⇒ 曾取 20。
+ *
+ * **2026-09-28 下调到 17（DSH 0.1.7-rc.2 升级）**：十个自研补丁层不再用
+ * `createRequire(…).resolve('@picoaide/<pkg>/package.json')` 在 `profile.ts` 里解析
+ * （那个写法在 0.1.7 上会让"组合复算 ≠ 真实装配"，是升级引入的 P0，见
+ * `docs/AUDIT-2026-09-23-FULL.md` §8.9.5 U1），改成各包 `package.json` 的
+ * `dsh.bundle.patch` 清单项 ⇒ 桌面产物里的 `@picoaide/*` specifier 随之减少：
+ * **CI 干净检出实测 18**（本地完整树 ≥20）。取 17 = 给 CI 留 1 条余量，
+ * 仍远高于"完全没构建"这一真正要抓的形态。
  */
-const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 20
+const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 17
 
 /**
  * 递归列出产物目录下的普通文件（相对路径，`/` 分隔）。
@@ -1588,6 +1627,10 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/session-service', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js' },
   { specifier: '@picoaide/dsh-enterprise/auth-gate', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/auth-gate.js' },
   { specifier: '@picoaide/dsh-enterprise/gateway-model', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/gateway-model.js' },
+  // DSH 0.1.7 起网关 provider 由自研行注册（上游 `llm-deepseek-api-key` 硬编码 `x-api-key`，
+  // 对只认 Bearer 的网关必然 401）。这个入口掉出 asar ⇒ 组合里 `picoaide-gateway-llm` 行
+  // 加载失败，`deepseek-official` 没有适配器，模型面全灭。
+  { specifier: '@picoaide/dsh-enterprise/gateway-llm', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/gateway-llm.js' },
   { specifier: '@picoaide/dsh-enterprise/bootstrap', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js' },
   { specifier: '@picoaide/dsh-enterprise/client', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/client.js' },
   // P1-1(2026-09-16):error-reporting 静态 import `@sentry/node`(enterprise 的 tsdown 把它
@@ -1731,6 +1774,20 @@ export function verifyPackagedRuntime(
   exists: FileProbe = existsSync,
   readEntry: PackageEntryReader = readPackagedEntry,
 ): void {
+  // 平台无关的产物身份判据（2026-09-26 复审 B-6）：electron-builder 实际收到的 `appId`
+  // 必须逐字等于**本次构建声明的身份**（随包 channel.json 的 `desktop.app_id`，公共渠道
+  // 回落官方默认值）。mac 侧另有一条读**产物** `Info.plist` 的判据，而 Windows 的
+  // AppUserModelId / Linux 的安装标识此前零判据 —— 这条读**配置**，三平台都跑。
+  // 放在最前面：身份错配时先报身份，而不是让"归档里缺某个条目"掩盖真正的病根。
+  const declaredAppId = packagedAppId()
+  if (context.packager.appInfo.id !== declaredAppId) {
+    throw new Error(
+      `dsh-plugin-desktop: afterPack received appId ${JSON.stringify(context.packager.appInfo.id)} `
+      + `but this build declares ${JSON.stringify(declaredAppId)} — the packaged application would claim another `
+      + 'identity (Windows AppUserModelId / macOS LaunchServices / Linux install id); the build did not go through '
+      + 'prepareChannelPackaging() (or build/channel.json drifted from the electron-builder configuration)',
+    )
+  }
   const asarPath = resolvePackagedAsarPath(context)
   if (packagedRuntimeLayoutIsPhysical()) {
     // Explicit opt-in (`asar: false` build): the runtime is a real file tree.
@@ -1865,6 +1922,24 @@ export function verifyPackagedRuntime(
       throw new Error(
         `dsh-plugin-desktop: universal macOS runtime at ${unpackedRoot} contains host-architecture build output: ${forbidden.join(', ')}`,
       )
+    }
+  }
+  // macOS 包内一致性（2026-09-25，针对「图标变问号 + 打不开」的现场反馈）：
+  // `Info.plist` 的图标键必须指向包内真实的 `.icns`，主可执行文件必须在，
+  // `app.asar` 的 offset 表必须自洽、且与 `ElectronAsarIntegrity` 记录的头部摘要一致
+  // （macOS 上 Electron 用后者做嵌入式完整性校验，asar 被改写而 plist 未同步 = 启动即被拒）；
+  // `CFBundleIdentifier` 必须逐字等于本次构建声明的应用 id（`packagedAppId()`：随包
+  // channel.json 的 `desktop.app_id`，官方/公共渠道回落官方默认值）—— 身份错配的包
+  // 装上去才发现（与官方版抢 LaunchServices 身份/SSO 回调/安装覆盖）。同一条声明在
+  // **配置侧**还有一条平台无关的判据（本函数开头读 `packager.appInfo.id`，B-6）。
+  // 真实 afterPack 的 appOutDir 一定存在于磁盘；单测用注入探针 + 伪路径，因此不受影响。
+  if (context.electronPlatformName === 'darwin') {
+    const bundleRoot = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
+    if (existsSync(bundleRoot)) {
+      const bundle = assertMacBundleConsistency(bundleRoot, undefined, { expectedIdentifier: packagedAppId() })
+      // 归档布局摘要进日志（B-5）：`linkEntries` 的存在理由就是让"这份归档里有链接、
+      // 判据没有建模它的字节账"**在日志里可见**，而这里此前丢弃了返回值。
+      if (bundle.asar !== undefined) console.log(asarLayoutLogLine(asarPath, bundle.asar))
     }
   }
   verifyUnpackedPackageResolution(asarPath, asarEntries)
@@ -2421,14 +2496,14 @@ const ASAR_BIGINT_SMOKE_OK = 'ASAR-BIGINT-SMOKE-OK'
 /**
  * The `cordis` preset's bundled skill directory inside the package.
  *
- * `presets/cordis/agent.cordis.yml` is the pinned upstream's only
- * `customSkillDirs` consumer, and it hands exactly this directory to the
- * filesystem skill provider. `@deepseek-ai/dsh-agent-presets` is **not** in
- * `asarUnpack`, so every `stat`/`readdir` on it goes through Electron's ASAR fs
- * shim — which is what issue #130 was about.
+ * Upstream 0.1.7 wires it through the preset's `customSkillDirs` expression,
+ * which resolves `@deepseek-ai/dsh-agent-preset/package.json` and hands its
+ * `skills/` directory to the filesystem skill provider. That package is **not**
+ * in `asarUnpack`, so every `stat`/`readdir` on it goes through Electron's ASAR
+ * fs shim — which is what issue #130 was about.
  */
 export const PACKAGED_CORDIS_SKILL_DIR =
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills'
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills'
 
 /**
  * Preset skill names the package must ship, **derived from**
@@ -2551,7 +2626,7 @@ const assertExactSkillListing = ${assertExactSkillListing.toString()}
 
 const appRoot = process.argv[2]
 const expected = JSON.parse(process.argv[3])
-const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills')
+const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-preset/skills')
 
 // (1) Engine semantics on an app.asar path: the packaged Electron must honour { bigint: true }.
 const info = await stat(skillsDir, { bigint: true })
@@ -2720,6 +2795,259 @@ export function smokePackagedAsarBigintSemantics(
 }
 
 /**
+ * 打包版 **`--inspect*` 家族**的结构性收口：在 afterPack 里翻 Electron 的
+ * `EnableNodeCliInspectArguments` fuse（2026-09-26 第二十七轮 FIX-33，P1 发版前必修）。
+ *
+ * ## 为什么必须是 fuse，而不是（也不只是）`src/debug-switches.ts` 的 JS 闸门
+ *
+ * 那条 JS 闸门写在 `src/main.ts` 的**模块作用域**，而它要拦的东西比它更早：
+ *
+ *  - `--inspect-brk=<port>`：V8 在**应用主脚本执行之前**挂起（package.json 的 `main`
+ *    一行都没跑）⇒ 闸门那一行**永远执行不到**，进程无限期存活、主进程 inspector 已监听；
+ *  - `--inspect=<port>`：inspector 先于 JS 就绪，而应用自身的 ESM 模块图是**异步**装载的
+ *    ⇒ 闸门执行前存在一个可被赢下的窗口。
+ *
+ * 真机反例（第二十六轮 Z1 复审，`temp/r26/Z1-verify/REPORT.md` §B.1；真 Electron 44.4.3 +
+ * 真 `lib/main.js` + 改名二进制复刻打包态，`app.isPackaged` 实测 true）：attach 之后
+ * `Runtime.evaluate("process.getBuiltinModule('node:child_process').execSync('id -un')")`
+ * 拿到 `"root"`，**之后**才打印「拒绝启动」并 exit 1。主进程内存里就是企业会话 bearer
+ * 与 safeStorage 解密能力 ⇒ 这是与写面围栏（`write-proof.ts`）同级的边界缺口。
+ *
+ * fuse 是唯一能在**这些参数生效之前**生效的层次：它由 Electron 在解析 argv 时读取，
+ * 关掉之后整个 `--inspect` / `--inspect-brk` / `--inspect-port` 家族被丢弃，inspector
+ * 根本不会启动（不是"启动了再拒绝"）。JS 闸门继续保留，作为纵深防御 + 可读日志：
+ * 它仍然拦住 `--remote-debugging-port|pipe` / `--js-flags`，也仍然让排障者看到一行说明。
+ *
+ * ## 顺序（实测证据，不是假设）
+ *
+ * `app-builder-lib/out/platformPackager.js` 的 `doPack()` 顺序是：
+ * `emitAfterPack(本钩子)` → `sanityCheckPackage` → `doAddElectronFuses`（package.json 的
+ * `electronFuses`）→ `doSignAfterPack`（签名），源码里那句注释即断言：
+ * `// the fuses MUST be flipped right before signing`。
+ * ⇒ 本钩子**在签名之前**，翻 fuse 是安全的（mac 上翻 fuse 会改变二进制 ⇒ 必须早于签名，
+ * 否则签名失效、公证失败）。这里再翻转一次也是幂等的：`@electron/fuses` 对**未指定**的
+ * fuse 写 `INHERIT`（不改动），所以紧跟着的 electron-builder 那一步（只指定 runAsNode /
+ * onlyLoadAppFromAsar）不会把这里关掉的 inspect fuse 打开。
+ *
+ * ## 三条硬约束（每条都有判据，见 `tests/packaged-inspect-fuse.spec.ts`）
+ *
+ * 1. **绝不关 `RunAsNode`**：上游 `dsh-subprocess-local` 补丁在运行期注入
+ *    `ELECTRON_RUN_AS_NODE=1` 起 runner（Windows/Linux 命令执行依赖它），关掉会让已修的
+ *    P0（`Windows Job runner exited with exit code 0 before proving its managed range empty`）
+ *    复发；本文件自己的 flock / error-reporting / asar-bigint 冒烟也在用该变量。所以这里
+ *    不仅"不动它"，而是**显式写成 true 并回读断言**（防后人加一行把它关掉）。
+ * 2. **`--remote-debugging-port|pipe` 与 `--js-flags` 不受影响**：前者是 Chromium 侧开关、
+ *    后者走 V8 启动参数，都与这颗 fuse 无关 ⇒ 六个靠 CDP 驱动打包产物的 E2E 脚本照常工作
+ *    （真机对照见 REPORT）。
+ * 3. **开发态不受影响**：fuse 只写在**打包产物**的二进制上；`node_modules/electron` 里那
+ *    份 stock 二进制不被本次构建触碰，`yarn dev` 的 `--inspect` 照旧可用。
+ *
+ * ## 可选项（本轮**不做**，理由）
+ *
+ * `EnableNodeOptionsEnvironmentVariable=false` 能顺带挡 `NODE_OPTIONS`，但打包态 Electron
+ * 自己就会拒绝它（真机实测：`NODE_OPTIONS=--inspect=<port>` ⇒
+ * `Most NODE_OPTIONs are not supported in packaged apps`，inspector 不监听，第二十六轮 Z1
+ * 亦独立实测 `process.env.NODE_OPTIONS === ""`）⇒ 收益为零，而关掉它会失去"NODE_OPTIONS
+ * 调排障参数"这一正常手段。故**有意保留**，见 REPORT 的「未做项」。
+ * @module dsh-plugin-desktop/packaged-inspect-fuse
+ */
+
+/**
+ * `@electron/fuses` 的 fuse-wire 状态字节（`dist/constants.js` 的 `FuseState`）。
+ *
+ * 包根只 re-export `./config`（`FuseVersion` / `FuseV1Options`），状态枚举没有出口，
+ * 所以这里按**真实写进二进制 sentinel 后面的字节**取值：`'0'` = DISABLE、`'1'` = ENABLE。
+ */
+const FUSE_STATE_DISABLE = 48
+const FUSE_STATE_ENABLE = 49
+
+/**
+ * 打包产物必须满足的 fuse 组合（`[线序, 期望状态]`；顺序无关）。
+ *
+ * 三条都是**回读断言**的期望值：翻完不是"应该可以了"，而是要真的从二进制里读回来。
+ */
+export const REQUIRED_PACKAGED_FUSES: ReadonlyArray<readonly [FuseV1Options, number]> = [
+  // ① dsh-subprocess-local 的运行期 runner 依赖它（Windows/Linux 命令执行）；绝不关。
+  [FuseV1Options.RunAsNode, FUSE_STATE_ENABLE],
+  // ② 本轮修复本体：argv 解析期丢弃整个 `--inspect*` 家族。
+  [FuseV1Options.EnableNodeCliInspectArguments, FUSE_STATE_DISABLE],
+  // ③ 保持 electron-builder 既有配置里的姿态（只从 app.asar 加载应用）。
+  [FuseV1Options.OnlyLoadAppFromAsar, FUSE_STATE_ENABLE],
+]
+
+/** {@link applyPackagedInspectFuseHardening} 的回读结果（进日志，也供判据读取）。 */
+export interface PackagedInspectFuseReport {
+  /** 实际被读写的二进制路径（@electron/fuses 会把它解析到真正的 fuse 载体）。 */
+  readonly target: string
+  /** 翻转前的整条 fuse wire（键是线序；`48`=DISABLE、`49`=ENABLE）。 */
+  readonly before: Readonly<Record<number, number>>
+  /** 翻转后的整条 fuse wire。 */
+  readonly after: Readonly<Record<number, number>>
+  /** 本次是否真的写了文件（已是目标状态时为 false ⇒ 幂等）。 */
+  readonly changed: boolean
+}
+
+/**
+ * 候选 fuse 载体路径（顺序即优先级），镜像 electron-builder 的
+ * `PlatformPackager#addElectronFuses` 解析：
+ *  - darwin / mas：`<appOutDir>/<product>.app`（@electron/fuses 内部再定位 framework 二进制），
+ *    另把真实 Mach-O（`Contents/MacOS/<product>` 等）列为回落候选 —— 框架目录名在生产
+ *    产物里不一定等于 `Electron Framework.framework`（那是 @electron/fuses 的硬编码假设）；
+ *  - win32：`<appOutDir>/<product>.exe`；
+ *  - linux：`<appOutDir>/<executableName>`（LinuxPackager 的 `dsh-plugin-desktop`），
+ *    再按 {@link resolvePackagedLauncherCandidates} 的扫描序兜底。
+ *
+ * 候选顺序里出现"不是 Electron 的普通文件"（`LICENSE` / `version`）是无害的：真正决定用
+ * 哪一个的是"能否从它读出 fuse wire"（见 {@link applyPackagedInspectFuseHardening}）。
+ * @param context - Electron Builder's afterPack context.
+ * @returns 候选路径（去重后的绝对路径列表）。
+ */
+export function packagedFuseTargetCandidates(context: PackagedRuntimeContext): string[] {
+  const product = context.packager.appInfo.productFilename
+  const launchers = resolvePackagedLauncherCandidates(context)
+  if (context.electronPlatformName === 'darwin' || context.electronPlatformName === 'mas') {
+    return [...new Set([join(context.appOutDir, `${product}.app`), ...launchers])]
+  }
+  if (context.electronPlatformName === 'win32') {
+    return [...new Set(launchers.filter(candidate => candidate.endsWith('.exe')))]
+  }
+  return [...new Set(launchers)]
+}
+
+/** 候选路径是否"像被打包的启动器"（真实文件，或 mac 的 `.app` 目录）。 */
+function isPackagedLauncherCandidate(candidate: string): boolean {
+  try {
+    const stat = statSync(candidate)
+    return stat.isFile() || (stat.isDirectory() && candidate.endsWith('.app'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 候选是不是**原生可执行映像**（ELF / Mach-O / PE）。
+ *
+ * 这一步只为区分两种"读不出 fuse wire"的形状：
+ *  - **原生二进制但没有 fuse sentinel** ⇒ 产物被掉包（或换了非 Electron 的 Electron 位置）
+ *    ⇒ **硬失败**；
+ *  - **非原生文件**（`tests/**` 里那种 `#!/bin/sh exec <真 electron>` 的包装脚本夹具）⇒
+ *    fuse 不归它管 ⇒ 跳过（并留一行日志）。
+ * 生产产物里启动器**恒为**原生 Electron 二进制（electron-builder 就是复制那份二进制再改名），
+ * 所以这条区分不会削弱生产判据。
+ */
+function isNativeExecutableImage(candidate: string): boolean {
+  try {
+    if (statSync(candidate).isDirectory()) return false
+    const head = readFileSync(candidate, { flag: 'r' }).subarray(0, 4)
+    if (head.length < 2) return false
+    const magic = head.readUInt32BE(0)
+    return head.subarray(0, 2).toString('latin1') === 'MZ' // PE / DOS
+      || head.subarray(0, 4).toString('latin1') === '\x7fELF' // ELF
+      || [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe].includes(magic) // Mach-O（含 universal）
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 翻转并**回读** {@link REQUIRED_PACKAGED_FUSES}（生产接线：`afterPack` 的最后一步）。
+ *
+ * 为什么放在最后：它改的是**二进制本体**，而前面几步（静态门禁 + 三个冒烟）都要按真实
+ * 产物跑（`ELECTRON_RUN_AS_NODE=1` 起打包启动器等）—— 改完再跑只会让"冒烟跑的是哪一份
+ * 二进制"变得含糊。放在最后也恰好落在 electron-builder 自己的 fuse 步与签名步之前，
+ * 与它源码里那句 `the fuses MUST be flipped right before signing` 同义。
+ *
+ * **缺席即跳过**只对两种"这一步无事可做"的形状成立：这个 appOutDir 里根本没有被打包的
+ * 启动器（`tests/**` 里用合成 `app.asar` 的临时目录），或启动器是**非原生**的包装脚本夹具。
+ * 生产路径上走不到这两条分支：同一次 afterPack 里更早的 flock / error-reporting /
+ * asar-bigint 冒烟在找不到启动器时各自 fail-loud，而真实产物里的启动器恒为原生二进制。
+ * 反过来，**原生启动器在但读不出 fuse wire**（被掉包 / 不是 Electron 构建）是**硬失败**：
+ * 那正是"产物不对"的形状，绝不能静默放过。
+ * @param context - Electron Builder's afterPack context.
+ * @returns 回读报告；这一步无事可做时返回 undefined（不写盘）。
+ */
+export async function applyPackagedInspectFuseHardening(
+  context: PackagedRuntimeContext,
+): Promise<PackagedInspectFuseReport | undefined> {
+  const candidates = packagedFuseTargetCandidates(context)
+  const present = candidates.filter(isPackagedLauncherCandidate)
+  if (present.length === 0) {
+    console.log(
+      `dsh-plugin-desktop: inspect fuse hardening skipped — ${context.appOutDir} carries no packaged launcher `
+      + `(checked ${String(candidates.length)} candidate path(s); unit fixtures have no Electron binary)`,
+    )
+    return undefined
+  }
+  let target: string | undefined
+  let before: Readonly<Record<number, number>> | undefined
+  const failures: string[] = []
+  for (const candidate of present) {
+    try {
+      before = await getCurrentFuseWire(candidate) as unknown as Readonly<Record<number, number>>
+      target = candidate
+      break
+    } catch (cause) {
+      failures.push(`${candidate} (${cause instanceof Error ? cause.message : String(cause)})`)
+    }
+  }
+  if (target === undefined || before === undefined) {
+    const native = present.filter(isNativeExecutableImage)
+    if (native.length === 0) {
+      console.log(
+        `dsh-plugin-desktop: inspect fuse hardening skipped — no candidate under ${context.appOutDir} carries a fuse wire `
+        + `and none is a native executable image (wrapper-script fixture): ${present.join(', ')}`,
+      )
+      return undefined
+    }
+    throw new Error(
+      `dsh-plugin-desktop: packaged launcher exists at ${context.appOutDir} but carries no Electron fuse wire — `
+      + `refusing to ship a binary whose --inspect* family cannot be switched off: ${failures.join('; ')}`,
+    )
+  }
+  const pending = REQUIRED_PACKAGED_FUSES.some(([option, state]) => before?.[option] !== state)
+  if (pending) {
+    await flipFuses(target, {
+      version: FuseVersion.V1,
+      [FuseV1Options.RunAsNode]: true,
+      [FuseV1Options.EnableNodeCliInspectArguments]: false,
+      [FuseV1Options.OnlyLoadAppFromAsar]: true,
+      // macOS 必须补一次 ad-hoc 重签（2026-09-26 第二十七轮复核）：
+      // 翻 fuse 是**改 Mach-O 字节**，会作废 Electron 官方二进制自带的 ad-hoc 签名。
+      // 已签名路径无妨（electron-builder 的签名步在本钩子**之后**，会把真签名盖上去）；
+      // 但 **未签名路径**（`scripts/package-mac.ts` 的 `CSC_IDENTITY_AUTO_DISCOVERY=false`
+      // 冒烟构建）事后没有任何东西重签，而 **arm64 上签名无效/缺失的二进制不会执行**
+      // （表现为 "Killed: 9"），偏偏 `verify-mac-smoke.ts` 明确不做签名检查 ⇒ **CI 看不见**，
+      // 只是那份冒烟产物从此打不开。本机是 Linux、无法验证 macOS 行为 —— 这一条是
+      // 「按 fuse 的官方语义取最稳的写法」，**不是实测结论**。
+      // `@electron/fuses` 只在 `pathToElectron.includes('.app')` 时生效，且用
+      // `--preserve-metadata=entitlements,requirements,flags,runtime` 重签 ⇒
+      // Linux/Windows 上是 no-op，签名路径上也无副作用（签名步在后）。
+      resetAdHocDarwinSignature: true,
+    })
+  }
+  const after = await getCurrentFuseWire(target) as unknown as Readonly<Record<number, number>>
+  for (const [index, state] of REQUIRED_PACKAGED_FUSES) {
+    if (after[index] !== state) {
+      throw new Error(
+        `dsh-plugin-desktop: fuse ${FuseV1Options[index] ?? String(index)} is ${String(after[index])} in ${target} `
+        + `after hardening but must be ${String(state)} (${index === FuseV1Options.EnableNodeCliInspectArguments
+          ? 'a packaged app that honours --inspect* hands local processes main-process RCE'
+          : index === FuseV1Options.RunAsNode
+            ? 'ELECTRON_RUN_AS_NODE is how dsh-subprocess-local starts its runner on Windows/Linux'
+            : 'only-load-app-from-asar is the existing packaging posture'})`,
+      )
+    }
+  }
+  console.log(
+    `dsh-plugin-desktop: inspect fuse hardening ${pending ? 'applied' : 'already in place'} — `
+    + `${target} nodeCliInspectArguments=${String(after[FuseV1Options.EnableNodeCliInspectArguments])} `
+    + `runAsNode=${String(after[FuseV1Options.RunAsNode])} `
+    + `onlyLoadAppFromAsar=${String(after[FuseV1Options.OnlyLoadAppFromAsar])}`,
+  )
+  return { target, before, after, changed: pending }
+}
+
+/**
 /**
  * `afterPack` 的五个验证接缝（**唯一生产接线**）。
  *
@@ -2807,9 +3135,16 @@ export async function runAfterPackSeams(
  * **不**加任何可注入的缺省实现 —— 那正是 R4-A-9 记录的空转形态（"缺省值即生产接线"）。
  * 要替换接缝请用 {@link runAfterPackSeams}，要观察生产序列请临时 spy
  * {@link AFTER_PACK_SEAMS}。
+ *
+ * 最后一步是 {@link applyPackagedInspectFuseHardening}（2026-09-26 FIX-33）：它翻的是
+ * **二进制本体**（`--inspect*` 家族的 argv 级收口），必须在所有"按真实产物跑"的冒烟之后、
+ * 签名之前完成 —— 见该函数的注释与 `app-builder-lib/out/platformPackager.js` 的
+ * `doPack()` 顺序（afterPack → sanityCheck → electronFuses → sign）。它同样是生产接线，
+ * 只是不需要替身（判据在 `tests/packaged-inspect-fuse.spec.ts` 用真 Electron 二进制驱动）。
  * @param context - Electron Builder's afterPack context.
  * @returns A promise that rejects before signing when the runtime is incomplete.
  */
 export async function afterPack(context: PackagedRuntimeContext): Promise<void> {
   await runAfterPackSeams(context, AFTER_PACK_SEAMS)
+  await applyPackagedInspectFuseHardening(context)
 }

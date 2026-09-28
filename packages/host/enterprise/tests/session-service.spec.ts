@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import SessionService, { Config, SESSION_CHANGED_EVENT } from '../src/session-service.ts'
@@ -127,6 +127,31 @@ describe('maxOutputFromDefaultParams', () => {
   })
 })
 
+
+describe('R21-A2-01 clear() 只删属于自己的那份令牌', () => {
+  it('没有会话可清时 clear() **不得**删盘上的令牌（迟到的 401 / 重复登出）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-keep-'))
+    const file = join(dir, 'session.json')
+    writeFileSync(file, JSON.stringify(SAMPLE_SESSION), { mode: 0o600 })
+    const { ctx } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    // 还没有会话（restore 在非 Electron 环境里必然是 null）⇒ 清会话不该动盘上文件。
+    service.clear()
+    expect(existsSync(file), '没有会话可清 ⇒ 盘上那份令牌不属于这次清理，不许删').toBe(true)
+    expect(service.isLoggedIn()).toBe(false)
+  })
+
+  it('正向对照：确实在清一个会话时，令牌文件照旧被删（登出/令牌失效路径不退化）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pico-session-drop-'))
+    const file = join(dir, 'session.json')
+    writeFileSync(file, JSON.stringify(SAMPLE_SESSION), { mode: 0o600 })
+    const { ctx } = stubCtx()
+    const service = new SessionService(ctx, { tokenFile: file })
+    service.setSession(SAMPLE_SESSION)
+    service.clear()
+    expect(existsSync(file), '有会话时的 clear 必须把持久化令牌一起删掉').toBe(false)
+  })
+})
 
 describe('session persist 竞态 (F7 复核)', () => {
   it('clear() 之后在途的异步 persist 不得复活 token 文件', async () => {

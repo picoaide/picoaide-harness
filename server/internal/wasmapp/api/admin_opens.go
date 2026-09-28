@@ -23,12 +23,14 @@ import (
 // 响应里的 `detail_retention_days` 让调用方知道"多久以前的明细已经不在"。
 func (h *Handlers) adminAppOpens(c *gin.Context) {
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
 	now := h.now()
-	from, aerr := parseDayParam(c.Query("from"), now.AddDate(0, 0, -6))
+	// 缺省窗口按**日历日**回退（`serverstore.AddLocalDays`）：`AddDate` 在"本地零点不存在"
+	// 的 DST 缺口日会落到前一天 23:00，窗口边界因此漂一天（R20A-S-01 同族）。
+	from, aerr := parseDayParam(c.Query("from"), serverstore.AddLocalDays(now, -6))
 	if aerr != nil {
 		writeErr(c, aerr.WithDetail("field", "from"))
 		return
@@ -69,13 +71,22 @@ func (h *Handlers) adminAppOpens(c *gin.Context) {
 // 为什么**严格**只认这一种格式：看板与导出会把它当区间边界用，容忍
 // `2006-1-2`/`06-01-02` 这类变体意味着"同一天有两种字符串表示"，而排障时要靠
 // 肉眼比对 URL 与日志 —— 形状唯一才比得动。
+//
+// 为什么解析必须走 `serverstore.ParseLocalDay`（**不是** `time.Parse`，也不是裸的
+// `time.ParseInLocation(…, time.Local)`）：入参是"调用方眼里的日历日"，而 day 列与
+// `opens.today` 都按**服务端本地日**分桶。`time.Parse` 按 UTC 解释墙钟 ⇒ 负 UTC 偏移
+// 的部署（`America/*`、`Atlantic/*`）上 `2026-09-20` 的本地日期已经是 09-19，整个窗口
+// 左移一天、"今天"被挤出窗口，而同一响应里的 `today{}` 仍是真今天（R21-D-01）；
+// 裸的 `ParseInLocation` 在 DST 缺口日上同样差一天（见 ParseLocalDay 的注释）。
 func parseDayParam(raw string, def time.Time) (time.Time, *apperr.Error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return dayStart(def), nil
 	}
-	t, err := time.Parse("2006-01-02", raw)
+	t, err := serverstore.ParseLocalDay(raw)
 	if err != nil {
+		// 两种失败共用一条消息：形态不对（`2026-1-2`）与"本部署时区没有这一天"
+		// （整日被跳过的时区）。后者极端罕见，不值得为它单独造一个错误码。
 		return time.Time{}, apperr.New(apperr.CodeValidation, "日期格式应为 YYYY-MM-DD").
 			WithDetail("value", clip(raw)).
 			WithHint("例：from=2026-09-01&to=2026-09-19")
@@ -147,7 +158,7 @@ func (h *Handlers) adminOpensSummary(c *gin.Context) {
 	if top > opensSummaryMaxTop {
 		top = opensSummaryMaxTop
 	}
-	from := now.AddDate(0, 0, -(days - 1))
+	from := serverstore.AddLocalDays(now, -(days - 1))
 
 	sum, err := serverstore.SummarizeWasmAppOpens(c.Request.Context(), h.opt.DB, from, now, now)
 	if err != nil {
@@ -223,7 +234,7 @@ const (
 // 但含义相反，不得合并渲染）。
 func (h *Handlers) adminAppAIUsage(c *gin.Context) {
 	appID := strings.ToLower(strings.TrimSpace(c.Param("app_id")))
-	if aerr := h.validateAppID(appID); aerr != nil {
+	if aerr := h.validateAppIDServing(appID); aerr != nil {
 		writeErr(c, aerr)
 		return
 	}
@@ -234,10 +245,10 @@ func (h *Handlers) adminAppAIUsage(c *gin.Context) {
 	//
 	// 为什么要支持它：一个"文档里有、实现里被静默忽略"的参数，与 R2-L6-3 的
 	// "静默窗口"是同一类缺陷（调用方以为窗口变了，数字其实没变）。
-	defFrom := now.AddDate(0, 0, -6)
+	defFrom := serverstore.AddLocalDays(now, -6)
 	if strings.TrimSpace(c.Query("from")) == "" {
 		if days := atoiDefault(c.Query("days"), 0); days > 0 {
-			defFrom = now.AddDate(0, 0, -(days - 1))
+			defFrom = serverstore.AddLocalDays(now, -(days - 1))
 		}
 	}
 	from, aerr := parseDayParam(c.Query("from"), defFrom)

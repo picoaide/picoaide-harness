@@ -27,6 +27,12 @@ type ClientHandlers struct {
 	// 在请求时从当前配置读取);OIDC 快照仅保留给旧调用方。
 	BrowserLogin    func(name string) gin.HandlerFunc
 	BrowserCallback func(name string) gin.HandlerFunc
+	// PublicMethods 是登录方式发现(公开、未登录可访问)。与管理端共用同一份
+	// 判定实现(publicAuthMethods),区别是这里带**运行期视图**(R24-X4-B2):
+	// `configured` 以本 API 实例的 provider 注册表为真源,settings 只决定
+	// "启用了哪些候选"。生产路由树的客户端/管理端两条 methods 路由都指向它
+	// (见 internal/router 的 publicMethodsHandler)。
+	PublicMethods gin.HandlerFunc
 }
 
 // OIDCRoute 一套 browser provider 的 login/callback handler 对。
@@ -63,6 +69,18 @@ func (a *API) Handlers() *ClientHandlers {
 		OIDC:            oidc,
 		BrowserLogin:    a.browserLoginHandler,
 		BrowserCallback: a.browserCallbackHandler,
+		PublicMethods:   a.publicMethodsHandler(),
+	}
+}
+
+// publicMethodsHandler 是登录方式发现的客户端面 handler:候选来自 settings,
+// 可用性来自**运行期注册表**(R24-X4-B2,唯一实现见 publicAuthMethods)。
+//
+// 每次请求都重新取一次视图(runtimeMethodCheck):窗口期 = provider 集合被
+// ReloadProviders 替换的那一刻,不能把启动期的快照焊死在闭包里。
+func (a *API) publicMethodsHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		publicAuthMethods(c, a.DB, a.runtimeMethodCheck())
 	}
 }
 

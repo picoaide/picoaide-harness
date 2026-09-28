@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apply as applyBootstrap, maxOutputFromDefaultParams, resolveInputModalities } from '../src/bootstrap.ts'
+import { GATEWAY_LLM_ROW_ID } from '../src/gateway-contract.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 
@@ -173,5 +174,119 @@ describe('resolveInputModalities', () => {
     expect(resolveInputModalities([])).toBeUndefined()
     expect(resolveInputModalities(['audio'])).toBeUndefined()
     expect(resolveInputModalities('text' as unknown as string[])).toBeUndefined()
+  })
+})
+
+describe('会话代际守卫（Z2-01）：迟到的 bootstrap 响应不得落地', () => {
+  // 场景：`getBootstrap` 缺省 15s 超时，期间用户登出并登录到**另一台**服务端。
+  // 没有守卫时，迟到的旧响应会把上一台的模型目录/默认模型/搜索地址写进当前会话，
+  // 而 `PICOAI_GATEWAY_TOKEN` 已经是新服务端的令牌 ⇒ 一次 web 搜索就把新会话的
+  // bearer 发到旧服务端的 `/v1/messages`（跨租户凭据外泄）。
+  const SESSION_A: Session = { serverURL: 'https://server-a.example.com', username: 'alice', token: 'tok-a' }
+  const SESSION_B: Session = { serverURL: 'https://server-b.example.com', username: 'bob', token: 'tok-b' }
+
+  type Deferred = { resolve: (r: Response) => void }
+  let pending: Map<'A' | 'B', Deferred[]>
+
+  /** 受控 fetch：每个服务端一个队列，由用例决定响应到达顺序。 */
+  function installDeferredFetch(): () => void {
+    pending = new Map()
+    const original = globalThis.fetch
+    globalThis.fetch = vi.fn((input: unknown) => {
+      const url = String(input)
+      const key: 'A' | 'B' = url.startsWith('https://server-a') ? 'A' : 'B'
+      return new Promise<Response>((resolve) => {
+        const queue = pending.get(key) ?? []
+        queue.push({ resolve })
+        pending.set(key, queue)
+      })
+    }) as unknown as typeof fetch
+    return () => { globalThis.fetch = original }
+  }
+
+  function respond(key: 'A' | 'B', model: string): void {
+    const next = (pending.get(key) ?? []).shift()
+    if (next === undefined) throw new Error(`没有在飞的请求：${key}`)
+    next.resolve(new Response(JSON.stringify({
+      default_model: model,
+      models: [{ id: model, display_name: model }],
+      skills: [],
+      mcp: [],
+      web: {},
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  }
+
+  const flush = async (n = 12): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+  }
+
+  /** 取某个 namespace 最后一次写入的值（update/replace 合并看）。 */
+  function lastWrite(settings: { update: ReturnType<typeof vi.fn>; replace: ReturnType<typeof vi.fn> }, ns: string): Record<string, unknown> | undefined {
+    const calls = [...settings.update.mock.calls, ...settings.replace.mock.calls]
+      .filter((call) => String(call[0]) === ns)
+    return calls.at(-1)?.[1] as Record<string, unknown> | undefined
+  }
+
+  it('换服务端后到达的旧响应必须被丢弃（模型目录 / 默认模型 / 搜索地址）', async () => {
+    const restore = installDeferredFetch()
+    try {
+      const { ctx, settings, onHandler } = stubCtx()
+      applyBootstrap(ctx)
+
+      onHandler(SESSION_A) // A 的 bootstrap 挂住
+      await flush()
+      expect(pending.get('A')).toHaveLength(1)
+
+      onHandler(null) // 登出
+      onHandler(SESSION_B) // 立刻登录到另一台
+      await flush()
+
+      respond('B', 'model-of-B') // B 先回
+      await flush()
+      expect(lastWrite(settings, 'web-search-deepseek')?.baseURL).toBe('https://server-b.example.com/v1')
+
+      respond('A', 'model-of-A') // A 现在才回 —— 必须被整份丢弃
+      await flush()
+
+      expect(
+        {
+          search: lastWrite(settings, 'web-search-deepseek'),
+          catalog: lastWrite(settings, GATEWAY_LLM_ROW_ID),
+          defaultModel: lastWrite(settings, 'agent-default-model'),
+        },
+        '迟到响应改写了当前会话（B）的模型配置：凭据是新服务端的令牌，baseURL/模型目录却是旧服务端的',
+      ).toEqual({
+        search: { apiKeyEnv: 'PICOAI_GATEWAY_TOKEN', baseURL: 'https://server-b.example.com/v1', model: 'model-of-B' },
+        catalog: { models: [{ id: 'model-of-B', name: 'model-of-B' }] },
+        defaultModel: { provider: 'deepseek-official', model: 'model-of-B' },
+      })
+    } finally {
+      restore()
+    }
+  })
+
+  it('登出之后到达的旧响应不得把 settings 重新写回（登出态保持清空）', async () => {
+    const restore = installDeferredFetch()
+    try {
+      const { ctx, settings, onHandler } = stubCtx()
+      applyBootstrap(ctx)
+
+      onHandler(SESSION_A)
+      await flush()
+      onHandler(null)
+      await flush()
+      const writesAfterLogout = settings.update.mock.calls.length + settings.replace.mock.calls.length
+      expect(writesAfterLogout, '登出必须把三个 namespace 清空').toBe(3)
+
+      respond('A', 'model-of-A')
+      await flush()
+
+      expect(
+        settings.update.mock.calls.length + settings.replace.mock.calls.length,
+        '登出之后迟到的旧响应把 settings 重新写回了',
+      ).toBe(writesAfterLogout)
+    } finally {
+      restore()
+    }
   })
 })

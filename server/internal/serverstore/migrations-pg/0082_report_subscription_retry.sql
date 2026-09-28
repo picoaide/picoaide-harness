@@ -18,11 +18,20 @@
 --   pending_period = ''（⇒ 按"当前月的上一期"投递，与修前相同）、
 --   fail_streak = 0 / next_attempt_at NULL（⇒ 立即可投，不引入冷启动延迟）。
 --
--- 回滚口径：这三列只被 `internal/reports` 的投递策略读取。回滚到旧二进制时旧代码
--- 不读它们（DDL 是纯加列，回滚**不需要**恢复库）；确认不再需要时执行
+-- 回滚口径（R20A-S-05，审计 2026-09-25：原话"回滚不需要恢复库"**漏了一个必做动作**）：
+-- 这三列只被 `internal/reports` 的投递策略读取，旧二进制不读它们 ⇒ 数据层不需要恢复库；
+-- **但旧二进制对"库比二进制新"是 fail-loud 的**：`ApplyMigrations` 两向对账，见到
+-- `schema_migrations` 里有本二进制没有的版本就抛 `SchemaMismatchError`，`cmd/server`
+-- 直接 `log.Fatalf` ⇒ 只把镜像换回旧版**根本起不来**。所以真正的回滚步骤是两步：
+--   ① 删掉本版本那一行（DDL 与列都留着，旧代码不读 ⇒ 安全）：
+--        DELETE FROM schema_migrations WHERE version = 82;
+--   ② 换回旧镜像（`SERVER_IMAGE` + `docker compose up -d server`）。
+-- 确认不再需要这三列时再执行：
 --   ALTER TABLE report_subscriptions DROP COLUMN pending_period, DROP COLUMN fail_streak,
 --   DROP COLUMN next_attempt_at;
 -- 即可回到修前状态（代价：进行中的补投期号与退避计数丢失）。
+-- 前滚（重新升回本版本）同样需要把那一行写回去 —— 直接用 `INSERT INTO schema_migrations
+-- (version) VALUES (82) ON CONFLICT DO NOTHING`（DDL 是幂等的 IF NOT EXISTS 形态）。
 ALTER TABLE report_subscriptions ADD COLUMN IF NOT EXISTS pending_period TEXT NOT NULL DEFAULT '';
 ALTER TABLE report_subscriptions ADD COLUMN IF NOT EXISTS fail_streak INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE report_subscriptions ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;

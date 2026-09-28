@@ -78,7 +78,7 @@ export const zh = {
   // 应用窗口 chrome 也由它渲染。本包删掉了先前的 `external-link.tsx`（零消费者），
   // 避免同一句冻结文案在两处各有一份实现。
 
-  // ---- 应用 AI 前端桥（§21：仅对话、无工具、按用户×应用授权一次）----
+  // ---- 应用 AI 前端桥（§21：仅对话、无工具、按 用户×服务端×应用 授权一次）----
   // R36：这一页的字典里**不许**出现额度/用量/余额/计费这些词（守卫用例逐字查），
   // 所以下面的说明刻意不用它们。
   'appCenter.ai.title': '应用 AI',
@@ -94,7 +94,7 @@ export const zh = {
   // 且与「允许」失败分开 —— 拿「这次不能放行」描述撤销失败是反的。
   'appCenter.ai.revokeFailed': '撤销没有生效：闸门仍然允许这个应用使用 AI，请重试。',
   'appCenter.ai.denyFailed': '拒绝没有生效：没能关掉本机的 AI 闸门，请重试。',
-  'appCenter.ai.identityPending': '正在确认登录身份，确认后即可授权（授权按 用户×应用 记录）。',
+  'appCenter.ai.identityPending': '正在确认登录身份，确认后即可授权（授权按 账号×服务端×应用 记录）。',
   'appCenter.ai.placeholder': '给应用 AI 发一条消息',
   'appCenter.ai.send': '发送',
   'appCenter.ai.cancel': '停止',
@@ -463,7 +463,7 @@ export const en: Record<keyof typeof zh, string> = {
   // and must not reuse the allow direction's copy.
   'appCenter.ai.revokeFailed': 'The revocation did not take effect: the gate still lets this app use AI. Try again.',
   'appCenter.ai.denyFailed': 'The denial did not take effect: the local AI gate could not be closed. Try again.',
-  'appCenter.ai.identityPending': 'Confirming your sign-in identity; you can grant consent once it is ready (consent is recorded per user and app).',
+  'appCenter.ai.identityPending': 'Confirming your sign-in identity; you can grant consent once it is ready (consent is recorded per account, server and app).',
   'appCenter.ai.placeholder': 'Send a message to the app AI',
   'appCenter.ai.send': 'Send',
   'appCenter.ai.cancel': 'Stop',
