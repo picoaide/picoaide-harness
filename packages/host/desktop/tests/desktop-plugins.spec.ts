@@ -365,12 +365,23 @@ describe('desktop direct bundle management', () => {
     await harness.service.executeDisable(harness.service.previewDisable(target.bundleId).previewId)
     writeFileSync(join(packageDir, 'cordis.patch.yml'), 'not: a-list\n')
 
-    await expect(prepareDesktopProfile(
+    // Upstream 0.1.7 changed the failure mode: a bundle whose patch cannot be
+    // loaded is **skipped and reported** (`profile.skippedBundles`) instead of
+    // aborting the whole generation. Disabling the bundle therefore still cannot
+    // silently absorb a malformed patch — the reason has to be visible — and the
+    // rest of the profile stays bootable (which is what the upstream change is
+    // for: one broken third-party bundle must not brick the app).
+    const prepared = await prepareDesktopProfile(
       undefined,
       options.homeDir,
       'darwin',
       options.statePath,
-    )).rejects.toThrow('must be a top-level YAML array')
+    )
+    const skipped = prepared.profile.skippedBundles.find(entry => entry.packageName === 'third-party-plugin')
+    expect(skipped, '被禁用的坏 bundle 必须出现在 skippedBundles 里，不能静默消失').toBeDefined()
+    expect(skipped?.reason).toMatch(/must be a top-level YAML array/u)
+    // 反向对照：清单里其他 bundle 照常装配（不是"整棵树都没了"）。
+    expect(prepared.profile.layers.map(layer => layer.packageName)).toContain('@deepseek-ai/dsh-web-app')
     await harness.dispose()
   })
 })

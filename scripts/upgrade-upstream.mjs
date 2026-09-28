@@ -19,6 +19,13 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs'
+import {
+  declaredUpstreamPackages,
+  diffUpstreamPackageSet,
+  gitReader,
+  registryFailures,
+  renameMapFailures,
+} from './upstream-package-checks.mjs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -326,6 +333,53 @@ ${fmt(preload[1])}
   return false
 }
 
+/**
+ * Run the three pre-bump guards and abort the upgrade when any of them fails.
+ *
+ * ① 改名映射表：仍声明着上游新版已改名/删除的包 ⇒ 中止（点名新去向与受影响文件）；
+ * ② 上游包清单 diff：打印 removed/added/pathMoved（`removed` 里出现我们**声明过**的
+ *    包同样中止 —— 那是"新旧名都在、但语义搬走"之外的另一种漏网形态）；
+ * ③ registry 存在性：声明的每个 `@deepseek-ai/*` 都要查得到，`to` 版本也要存在；
+ *    离线/查询失败一律按中止处理（验证不了就不许 bump）。
+ * @param context - `{from, to, targetTag}`。
+ */
+async function runUpgradeGuards({ from, to, targetTag }) {
+  const workspace = readJson('package.json')
+  const declared = declaredUpstreamPackages(root, workspace)
+  log(`guard: ${declared.size} 个 @deepseek-ai/* 声明，逐个查 registry…`)
+
+  const renameFailures = renameMapFailures(declared)
+  if (renameFailures.length > 0) {
+    fail(`改名映射表命中（上游已改名/删除，仍被我们声明）：\n  - ${renameFailures.join('\n  - ')}\n`
+      + '处理：把声明换成映射表里的新名（并同步 import/行 id/补丁/必需条目），再重跑本脚本。')
+  }
+
+  try {
+    const git = gitReader(upstreamDir)
+    const diff = diffUpstreamPackageSet(git, from, targetTag)
+    log(`上游包清单 diff ${from} → ${targetTag}: -${diff.removed.length} +${diff.added.length}`
+      + `（路径变化 ${diff.pathMoved.length}）`)
+    for (const name of diff.removed) {
+      log(`  - 上游删除: ${name}${declared.has(name) ? '  ← 我们仍在声明（下面会中止）' : ''}`)
+    }
+    for (const name of diff.added) log(`  + 上游新增: ${name}`)
+    for (const move of diff.pathMoved) log(`  ~ 路径变化: ${move.name} ${move.from} -> ${move.to}`)
+    const declaredRemoved = diff.removed.filter(name => declared.has(name))
+    if (declaredRemoved.length > 0) {
+      fail(`上游新版删除了我们仍声明的包：${declaredRemoved.join(', ')}\n`
+        + '处理：按上面的 diff 找新名/去处，改声明与引用；改名映射表也应补上这一条。')
+    }
+  } catch (error) {
+    fail(`上游包清单 diff 失败（${error.message}）——无法验证清单，按中止处理`)
+  }
+
+  const problems = await registryFailures(declared, { from, to, registry: process.env.NPM_REGISTRY })
+  if (problems.length > 0) {
+    fail(`registry 存在性检查未通过：\n  - ${problems.join('\n  - ')}`)
+  }
+  log(`guard: registry 检查通过（${declared.size} 个包名 + 目标版本）`)
+}
+
 async function main() {
   const upstream = readJson('upstream.json')
   const workspace = readJson('package.json')
@@ -379,6 +433,13 @@ async function main() {
   if (!dryRun && syncPlatformModules()) {
     log('scripts/platform-modules.mjs re-extracted from the new pin')
   }
+
+  // 3c. Fail-loud guards BEFORE any rewrite (2026-09-28 事故的直接根因):
+  //     a rename map, an upstream package-set diff, and a registry existence check.
+  //     `bumpManifest` is a mechanical version replace — without these three it
+  //     silently "upgrades" a dependency whose upstream name no longer exists, and
+  //     the failure only surfaces later as `yarn install` YN0082.
+  await runUpgradeGuards({ from, to, targetTag })
 
   // 4. Bump manifests.
   const changed = []

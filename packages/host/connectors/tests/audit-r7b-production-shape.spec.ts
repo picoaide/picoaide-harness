@@ -9,7 +9,7 @@
  *       ...config.authProvider === undefined ? {} : { authProvider: config.authProvider },
  *     })
  *
- * (`patches/dsh-mcp-client@0.1.6-alpha.2.patch`). The pinned SDK's
+ * (`patches/dsh-mcp-client@0.1.7-rc.2.patch`). The pinned SDK's
  * `_commonHeaders()` writes the provider's LIVE token first and then spreads
  * `requestInit.headers` over it, so any `Authorization` the connector baked
  * into that object WINS over the token a 401 refresh just obtained: the refresh

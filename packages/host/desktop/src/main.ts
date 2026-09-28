@@ -7,6 +7,7 @@ import {
   boot,
   installFailLoud,
   loadLayeredEnv,
+  PluginPackages,
   type FailLoudProcess,
 } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -64,7 +65,8 @@ import {
 } from './crash-evidence.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import { FileExporter } from './file-exporter.ts'
-import { DESKTOP_SETTINGS_NAMESPACE, type DesktopSettings } from './index.ts'
+import { DESKTOP_SETTINGS_ENTRY_ID, type DesktopLogLevel, type DesktopSettingsDocument } from './index.ts'
+import { readSettingsNamespace } from './settings-forms.ts'
 import { LogFileSink } from './log-files.ts'
 import { maskSecrets } from './mask-secrets.ts'
 import { reclaimOrphanedDocumentLocks, documentLockRecoveryLogLines } from './document-lock-recovery.ts'
@@ -76,7 +78,9 @@ import {
   DESKTOP_PROFILE_NAME,
   desktopInstallAnchor,
   desktopProfileContext,
+  legacyAgentPresetLogLine,
   prepareDesktopProfile,
+  type LegacyAgentPresetDiagnostic,
   type SkippedOptionalEntry,
 } from './profile.ts'
 import {
@@ -206,6 +210,47 @@ function notifySkippedOptionalEntries(
   } catch (cause) {
     logger.error(`${BIN_NAME}: failed to show skipped plugin notification: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
+}
+
+/**
+ * Log every profile bundle the loader skipped, and warn the user when any exist.
+ *
+ * Loading itself never prints (upstream keeps it quiet so the CLI can decide);
+ * the Electron launcher has no stderr its user will ever read, so this must go
+ * through the file/error logger and the native notification surface.
+ * @param skipped - bundles dropped during profile loading, with their reasons.
+ * @param logger - desktop logger writing to the user-data log directory.
+ */
+function reportSkippedProfileBundles(
+  skipped: readonly { packageName: string, reason: string }[],
+  logger: DesktopLogger,
+): void {
+  for (const entry of skipped) {
+    logger.error(`${BIN_NAME}: skipping profile bundle ${JSON.stringify(entry.packageName)}: ${entry.reason}`)
+  }
+}
+
+/**
+ * Report the outcome of materializing legacy shared-agent presets
+ * (`$DSH_HOME/.agent-presets/<id>/`) into `preset-<id>` rows.
+ *
+ * Upstream 0.1.7 stopped reading that directory ("Nothing reads that directory
+ * any more"), so `src/profile.ts` reads it during composition and injects the
+ * equivalent declaration rows. Diagnostics are produced only for abnormal
+ * shapes — a directory that cannot be read, a missing or unparsable
+ * `agent.cordis.yml`, or an id already declared by a shipped/edited preset —
+ * and **every one of them means a preset the user installed is not on the
+ * roster**. The composition path also writes them to stderr, which a packaged
+ * GUI may never show; routing them through the desktop logger puts them in the
+ * user-data log next to the rest of the startup record.
+ * @param diagnostics - one entry per legacy preset directory that needs telling.
+ * @param logger - desktop logger writing to the user-data log directory.
+ */
+function reportLegacyAgentPresetDiagnostics(
+  diagnostics: readonly LegacyAgentPresetDiagnostic[],
+  logger: DesktopLogger,
+): void {
+  for (const diagnostic of diagnostics) logger.error(`${BIN_NAME}: ${legacyAgentPresetLogLine(diagnostic)}`)
 }
 
 /** Surface path/volume risks that otherwise become obscure sandbox or pnpm failures later. */
@@ -612,6 +657,13 @@ async function start(): Promise<void> {
           fileExporter = new FileExporter(logSink)
           hostCtx.logger.exporter(fileExporter)
         }
+        // Upstream 0.1.7 replaced the materialized `profiles/node_modules`
+        // closure with this in-process resolution. It MUST be plugged before any
+        // config-tree entry mounts (same position as the CLI's
+        // `apps/cli/src/profile-boot.ts`): without it the Loader cannot resolve
+        // a single bare specifier from the profile directory and every plugin
+        // fails to import.
+        await hostCtx.plugin(PluginPackages, { resolution: prepared.resolution })
         provideCmdline(hostCtx, {
           args: ['--host', '127.0.0.1', '--port', String(prepared.port)],
           exit: requestQuit,
@@ -627,13 +679,27 @@ async function start(): Promise<void> {
     // 只 warn（Windows GUI 无 stderr ⇒ 彻底静默）。这里补上我方必需行的激活断言，
     // 失败走桌面自己的致命路径。见 src/startup-rows.ts 的模块注释。
     assertRequiredRowsActive(ctx)
-    fileExporter?.setThreshold((ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopSettings | undefined)?.logLevel ?? 'info')
-    ctx.on('settings/updated', (namespace, next) => {
-      if (namespace !== DESKTOP_SETTINGS_NAMESPACE) return
-      fileExporter?.setThreshold((next as DesktopSettings).logLevel)
+    // 0.1.7: the desktop's own settings live in this plugin's profile entry
+    // (`desktop-shell`) and are read through the settings form projection; the
+    // live-change signal is `settings/document-updated`.
+    const readLogLevel = (): DesktopLogLevel => {
+      const next = readSettingsNamespace<DesktopSettingsDocument>(ctx.settings, DESKTOP_SETTINGS_ENTRY_ID)
+      return next?.logLevel ?? 'info'
+    }
+    fileExporter?.setThreshold(readLogLevel())
+    ctx.on('settings/document-updated', (namespace) => {
+      if (namespace !== DESKTOP_SETTINGS_ENTRY_ID) return
+      fileExporter?.setThreshold(readLogLevel())
     })
     await runtime.mountScheduled()
     notifySkippedOptionalEntries(runtime, electronLogger, prepared.skippedOptionalEntries)
+    reportLegacyAgentPresetDiagnostics(prepared.presetDiagnostics, electronLogger)
+    // Upstream 0.1.7 reports a bundle whose manifest/patch cannot be loaded by
+    // **skipping** it (`profile.skippedBundles`) instead of aborting the whole
+    // generation. That is the right failure mode for one broken third-party
+    // bundle, but it is silent unless the launcher says so — and a skipped
+    // bundle can be a whole feature (or the channel overlay) disappearing.
+    reportSkippedProfileBundles(prepared.profile.skippedBundles, electronLogger)
     notifyWindowsVolumeConcerns(runtime, electronLogger, windowsVolumeConcerns)
   } catch (cause) {
     electronLogger.errorCause(cause)

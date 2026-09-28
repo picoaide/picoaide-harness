@@ -363,7 +363,7 @@ const REGISTERED_INSTALL_INTEGRITY_BODIES = [
     // （`scripts/check-ci-parity.mjs` / `scripts/ci-parity-classifier.mjs`）⇒ 本件内容变了，
     // 摘要同步进 diff。**注意 `--print-digests` 在有未提交改动时打印的是 HEAD 那份**，
     // 登记值必须取**工作树**（= 提交后的 HEAD）那份：`sha256sum scripts/check-install-integrity.mjs`。
-    sha256: 'c85ef19f8617e3e866ed0294900e4d9bd6ab4c019e0ed558172823ae90e05f7b',
+    sha256: '442d57ecf73441fa1aefe6ad5ccaf47617ac9d964154de76f420e19e7cc6420d',
     methods: [
       'judge-body-bytes-equal-head',
       'yarnrc-forbidden-keys',

@@ -1,20 +1,21 @@
+diff --git a/lib/index.js b/lib/index.js
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -32,10 +32,38 @@
- * @param input - textual IPv4 or IPv6 address.
- * @returns true only for a public unicast destination.
- */
--function isPublicIpAddress(input) {
-+/**
+@@ -25,17 +25,37 @@
+ const IPV4ONLY_DISCOVERY_HOST = "ipv4only.arpa";
+ const IPV4ONLY_SENTINELS = new Set(["192.0.0.170", "192.0.0.171"]);
+ /**
 +* Desktop patch(PicoAide Harness):地址守卫总开关。置 true 时**不拦截任何目标地址**
 +* （2026-09-12 产品决策,见下方 isPublicIpAddress 的长注释）。
 +*/
 +const ADDRESS_POLICY_ALLOWS_ALL = true;
 +/**
-+* Return whether an address is globally reachable unicast. IPv4-mapped IPv6 is
-+* classified by its embedded IPv4 address; transition and translation prefixes
-+* remain blocked because their eventual IPv4 destination cannot be pinned here.
-+*
+ * Return whether an address is globally reachable unicast. IPv4-mapped IPv6 is
+ * classified by its embedded IPv4 address; transition and translation prefixes
+ * remain blocked because their eventual IPv4 destination cannot be pinned here.
+ *
+-* @param input - textual IPv4 or IPv6 address.
+-* @returns true only for a public unicast destination.
 +* Desktop patch(PicoAide Harness):**桌面客户端不做地址拦截**（2026-09-12 产品决策）。
 +*
 +* 上游用 `ipaddr.js` 的 `range() === "unicast"` 做 SSRF 守卫,并把解析结果钉死给传输层
@@ -31,7 +32,8 @@
 +*
 +* @param _input - 目标地址(文本 IPv4 / IPv6,可能带方括号)。
 +* @returns 恒为 true(放行)。
-+*/
+ */
+-function isPublicIpAddress(input) {
 +function isPublicIpAddress(_input) {
 +	if (ADDRESS_POLICY_ALLOWS_ALL) return true;
  	let parsed;
@@ -41,7 +43,7 @@
  	} catch {
  		return false;
  	}
-@@ -678,4 +706,4 @@
+@@ -678,4 +698,4 @@
  	ctx.web.registerFetchProvider(new HttpFetchProvider(limits));
  }
  //#endregion

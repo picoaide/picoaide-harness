@@ -4,7 +4,7 @@ import { subscribeSession } from './session-service.ts'
 import { createSessionEpoch } from './session-epoch.ts'
 import { getBootstrap } from './server-connector/bootstrap.ts'
 import { AuthError } from './server-connector/auth.ts'
-import { TOKEN_ENV } from './gateway-model.ts'
+import { GATEWAY_LLM_ROW_ID, TOKEN_ENV } from './gateway-contract.ts'
 import type { Session } from './server-connector/config.ts'
 
 /** Stable Cordis plugin name. */
@@ -13,7 +13,7 @@ export const name = 'bootstrap'
 /** Services consumed: settings writes and the session being synced. */
 export const inject = ['settings', 'picoSession']
 
-const LLM_DEEPSEEK_NS = 'llm-deepseek' as SettingsNamespace
+const GATEWAY_LLM_NS = GATEWAY_LLM_ROW_ID as SettingsNamespace
 const AGENT_DEFAULT_MODEL_NS = 'agent-default-model' as SettingsNamespace
 const WEB_SEARCH_DEEPSEEK_NS = 'web-search-deepseek' as SettingsNamespace
 
@@ -74,7 +74,7 @@ export function apply(ctx: Context): void {
     if (session === null) {
       await ctx.settings.replace(AGENT_DEFAULT_MODEL_NS, {})
       if (!epochs.isCurrent(epoch)) return
-      await ctx.settings.replace(LLM_DEEPSEEK_NS, {})
+      await ctx.settings.replace(GATEWAY_LLM_NS, {})
       if (!epochs.isCurrent(epoch)) return
       await ctx.settings.replace(WEB_SEARCH_DEEPSEEK_NS, {})
       return
@@ -86,7 +86,7 @@ export function apply(ctx: Context): void {
       // connection.defaults.reasoningEffort 来自 settings(off|low|high|max),
       // 这是实际生效点;同时写 agent-default-model 保持 UI 展示一致。
       const reasoningEffort = cfg.web?.default_thinking_level
-      await ctx.settings.update(LLM_DEEPSEEK_NS, {
+      await ctx.settings.update(GATEWAY_LLM_NS, {
         models: cfg.models.map((m) => {
           const maxTokens = maxOutputFromDefaultParams(m.default_params)
           const inputModalities = resolveInputModalities(m.input_modalities)
@@ -113,6 +113,14 @@ export function apply(ctx: Context): void {
       // 指向网关路由前缀(provider 追加 /messages 即 /v1/messages),model 与
       // chat 同用服务端 default_model(该模型名由服务端 anthropic 协议
       // provider 承载,与 openai 协议 provider 可同名共存)。
+      //
+      // 0.1.7 复核（这条链路是**第二处**，历史上与 chat 一起踩过 401）：
+      // `web-search-deepseek` **没有** `protocol`（0.1.6/0.1.7 都没有，删除面只涉及
+      // `llm-deepseek`），`apiKeyEnv`/`baseURL`/`model` 三个键在 0.1.7 仍存在且都是
+      // volatile（`web-search-deepseek/src/index.ts`），而它的请求头本来就**同时**发
+      // `x-api-key` 与 `authorization: Bearer`（`provider.ts:228-231`）⇒ 网关的
+      // BearerAuth 能通过，无需改动。组装期 `cordis.patch.yml` 把 `apiKeyEnv` 从
+      // base bundle 的 `DEEPSEEK_API_KEY` 覆盖成同一个网关令牌引用，那条仍然有效。
       await ctx.settings.update(WEB_SEARCH_DEEPSEEK_NS, {
         apiKeyEnv: TOKEN_ENV,
         baseURL: `${session.serverURL.replace(/\/+$/, '')}/v1`,

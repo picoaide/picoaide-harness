@@ -114,3 +114,15 @@
 # app.asar 内无法 spawn，且没有任何门禁会看到。桌面不需要 Office 转换，关闭。
 - id: office-to-pdf
   disabled: true
+
+# DeepSeek 账号面（0.1.7 新增）：`deepseek-account`（平台行）与 `account-controller`
+# （管理面）都 peer 依赖 `@deepseek-ai/dsh-deepseek-account`，而该包**只有 peer 声明**
+# ——上游 base/web bundle 的 dependencies 里没有它，产品必须自己选一条账号路线
+# （`dsh-llm-deepseek-account` 账号鉴权 / `dsh-llm-deepseek-api-key` 密钥鉴权）。
+# 我们两条都不用：模型走企业网关（会话令牌 + 网关 Bearer），账号/余额面是自有
+# enterprise 面板。留着这两行就是"169 个插件里固定红 2 个"：peer 缺席 ⇒ 行
+# `failed to import`，且升级审计里会被当成别的问题。
+- id: deepseek-account
+  disabled: true
+- id: account-controller
+  disabled: true

@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
-import { verifyRuntimeClosure } from './runtime-closure.mjs'
+import { parse as parseYaml } from 'yaml'
+
+import {
+  peerExemptionViolations,
+  UNMOUNTED_PEER_EXEMPTIONS,
+  verifyRuntimeClosure,
+} from './runtime-closure.mjs'
 
 const manifests = {
   '@deepseek-ai/root': {
@@ -90,4 +97,53 @@ test('upgrades an optional path when another package requires the same dependenc
 
   assert.deepEqual(result.failures, [])
   assert.equal(result.packageCount, 4)
+})
+
+// ---- 未挂载 peer 的豁免（2026-09-28，0.1.7 收尾）--------------------------------
+// 判据必须**双向**：豁免生效（不再报缺 peer）**且**豁免可被打坏（点名的行被重新启用时
+// 必须报"豁免失效"）。只写前一半，等于给 closure 判据开了一个无法回收的白名单。
+
+test('an exempted peer is not reported as a missing root declaration', async () => {
+  const result = await verifyRuntimeClosure({
+    name: 'runtime',
+    dependencies: { '@deepseek-ai/root': '1.0.0' },
+  }, loadPackage, '/virtual/runtime/package.json', {
+    exemptPeers: new Set(['@deepseek-ai/service']),
+  })
+
+  assert.deepEqual(result.failures, [])
+  assert.deepEqual(result.exempted, ['@deepseek-ai/service'])
+})
+
+test('反向对照：同一份输入不加豁免时必须仍然报缺 peer', async () => {
+  const result = await verifyRuntimeClosure({
+    name: 'runtime',
+    dependencies: { '@deepseek-ai/root': '1.0.0' },
+  }, loadPackage, '/virtual/runtime/package.json')
+
+  assert.deepEqual(result.failures, ['runtime -> @deepseek-ai/root -> @deepseek-ai/service'])
+  assert.deepEqual(result.exempted, [])
+})
+
+test('每条豁免点名的组合行都必须真的 disabled（重新启用即失效）', () => {
+  const exemptions = [{ peer: '@deepseek-ai/x', rows: ['row-a', 'row-b'], reason: 'fixture' }]
+  assert.deepEqual(peerExemptionViolations(exemptions, ['row-a', 'row-b']), [])
+  // 只重新启用其中一行也必须报（豁免是"这些行都没挂载"，不是"至少一行没挂载"）。
+  assert.deepEqual(peerExemptionViolations(exemptions, ['row-a']), [
+    '@deepseek-ai/x: 豁免点名的行 row-b 已不再 disabled ⇒ '
+    + '要么把该 peer 声明到部署根，要么重新禁用这些行（豁免不能陈旧）',
+  ])
+  assert.deepEqual(peerExemptionViolations(exemptions, []), [
+    '@deepseek-ai/x: 豁免点名的行 row-a, row-b 已不再 disabled ⇒ '
+    + '要么把该 peer 声明到部署根，要么重新禁用这些行（豁免不能陈旧）',
+  ])
+})
+
+test('仓库里的豁免表本身成立（对当前 cordis.patch.yml）', () => {
+  const disabled = new Set(
+    (parseYaml(readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')) ?? [])
+      .filter(row => row?.disabled === true)
+      .map(row => row.id),
+  )
+  assert.deepEqual(peerExemptionViolations(UNMOUNTED_PEER_EXEMPTIONS, disabled), [])
 })

@@ -112,11 +112,19 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   // 打包态就没有兜底 —— 标签页直接回落到上游厂商图形。
   'build/web-brand/official.svg',
   'node_modules/@deepseek-ai/dsh/package.json',
-  // Upstream 0.1.2: shipped presets moved from @deepseek-ai/dsh/config to
-  // the agent-presets package root `presets/` directory.
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/agent.cordis.yml',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/cordis-plugin-development/SKILL.md',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills/editing-cordis-compositions/SKILL.md',
+  // Upstream 0.1.7: the directory roster (`dsh-agent-presets/presets/<id>/agent.cordis.yml`)
+  // is gone. Each shipped preset is a **profile patch file** of the Web bundle,
+  // listed in that bundle's own `dsh.bundle.patch`, and the `cordis` preset's
+  // skills moved to the `dsh-agent-preset` plugin (`customSkillDirs`). Missing
+  // any of these leaves the roster empty or the preset's authoring guides gone —
+  // both silent in a packaged app.
+  'node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/ptc.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/minimal.patch.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-agent-preset/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills/cordis-plugin-development/SKILL.md',
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills/editing-cordis-compositions/SKILL.md',
   'node_modules/@deepseek-ai/dsh/lib/bin.js',
   // G-2（2026-09-23 审计）：前端 dist 的**稳定名入口文档**必须随包。`index.html`
   // 之外的这两份是固定路径（不是内容哈希 chunk）—— 它们被 `/favicon.svg`、
@@ -127,6 +135,9 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg',
   'node_modules/@deepseek-ai/dsh-web-frontend/dist/manifest.webmanifest',
+  // 0.1.7 新增的暗色 favicon（上游前端 dist 的稳定固定名）。目录 oracle 要求
+  // "dist 里每个真实文件都在清单里"，所以新增固定名必须同步登记。
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon-dark.svg',
   'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
   // 宿主行 `plugin-manager` 自 2026-09-23（issue #130）起在桌面里真的会被激活：它发布
   // `pluginManager` 服务，而 cordis preset 的 `tool-plugin-manager` 行注入该服务 ——
@@ -410,7 +421,7 @@ export function assertNoPackagedSourceLeaks(
  */
 export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
   /^node_modules\/dsh-memory-evolve\/skills\/[^/]+\/SKILL\.md$/u,
-  /^node_modules\/@deepseek-ai\/dsh-agent-presets\/presets\/cordis\/skills\/[^/]+\/SKILL\.md$/u,
+  /^node_modules\/@deepseek-ai\/dsh-agent-preset\/skills\/[^/]+\/SKILL\.md$/u,
 ]
 
 /**
@@ -420,7 +431,7 @@ export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
  * （例如「排除全部 `.md`」）会把随包运行期内容一起删掉，而产物"没有任何泄漏"、
  * 反例门禁全绿 —— 这正是本项目已登记过的"假绿"形态（只钉一侧）。
  * 本轮**实测踩到**：一条「排除全部 .md」的过宽规则把随包技能 SKILL.md 一起排掉
- * （`dsh-memory-evolve/skills/<技能>/SKILL.md` 与 agent-presets 的 presets 技能树），
+ * （`dsh-memory-evolve/skills/<技能>/SKILL.md` 与 dsh-agent-preset 的技能树），
  * COI 技能同步会全部 `missing`。
  *
  * 与 `REQUIRED_PACKAGED_RUNTIME_ENTRIES` 的分工：那张表钉**具体文件存在**；
@@ -1150,10 +1161,11 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
   { package: 'dsh-connectors', flattened: 0, effective: 7, library: 5 },
   // cron 的 `cordis.patch.yml` 只有 profile 锚点表覆盖（扁平清单 4 条 ⇒ 生效 5 条）。
   { package: 'dsh-cron', flattened: 4, effective: 5, library: 3 },
-  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 14 条 + 锚点表的 `cordis.patch.yml`。
+  // enterprise 在 `REQUIRED_ASAR_EXPORTS` 里有 15 条 + 锚点表的 `cordis.patch.yml`。
   // 14 条（原 13 条 + R16B-01 新增的 `session-identity`）：account-card 的余额快照要盖
   // 会话身份章，而身份口径的唯一实现在 enterprise ⇒ 多一条真实的跨包 specifier。
-  { package: 'dsh-enterprise', flattened: 0, effective: 15, library: 13 },
+  // 15 条（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增 `gateway-llm`（自研 provider 行）。
+  { package: 'dsh-enterprise', flattened: 0, effective: 16, library: 14 },
   { package: 'dsh-foot-menu', flattened: 4, effective: 4, library: 2 },
   { package: 'dsh-host-home', flattened: 2, effective: 2, library: 1 },
   { package: 'dsh-host-locale', flattened: 4, effective: 4, library: 3 },
@@ -1165,12 +1177,18 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
  * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 116
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 122
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
 // 114 → 116（R16B-01）：新增 `@picoaide/dsh-enterprise/session-identity`（account-card
 // 的余额快照身份章，跨包 specifier 真实存在）+ 它在 ASAR 导出表里的一条落点。
+// 116 → 121（2026-09-28，DSH 0.1.7-rc.2 升级）：预置面从 `dsh-agent-presets/presets/`
+// 搬到 `dsh-web-app/presets/*.patch.yml` + `dsh-agent-preset/{lib,skills}`，净增 4 条
+// （-3 旧条目 / +7 新条目）；同一次升级另加 `dsh-web-frontend/dist/favicon-dark.svg`
+// 一条（目录 oracle 的固定名清单要求）。棘轮语义是"贴住下限、只允许上调"。
+// 121 → 122（2026-09-28，DSH 0.1.7-rc.2 网关鉴权迁移）：新增自研 provider 行入口
+// `@picoaide/dsh-enterprise/gateway-llm`（它取代被禁用的上游 `llm-deepseek` 行）。
 
 /**
  * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
@@ -1599,6 +1617,10 @@ export const REQUIRED_ASAR_EXPORTS: readonly RequiredExport[] = [
   { specifier: '@picoaide/dsh-enterprise/session-service', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/session-service.js' },
   { specifier: '@picoaide/dsh-enterprise/auth-gate', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/auth-gate.js' },
   { specifier: '@picoaide/dsh-enterprise/gateway-model', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/gateway-model.js' },
+  // DSH 0.1.7 起网关 provider 由自研行注册（上游 `llm-deepseek-api-key` 硬编码 `x-api-key`，
+  // 对只认 Bearer 的网关必然 401）。这个入口掉出 asar ⇒ 组合里 `picoaide-gateway-llm` 行
+  // 加载失败，`deepseek-official` 没有适配器，模型面全灭。
+  { specifier: '@picoaide/dsh-enterprise/gateway-llm', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/gateway-llm.js' },
   { specifier: '@picoaide/dsh-enterprise/bootstrap', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/bootstrap.js' },
   { specifier: '@picoaide/dsh-enterprise/client', archivePath: 'node_modules/@picoaide/dsh-enterprise/lib/client.js' },
   // P1-1(2026-09-16):error-reporting 静态 import `@sentry/node`(enterprise 的 tsdown 把它
@@ -2464,14 +2486,14 @@ const ASAR_BIGINT_SMOKE_OK = 'ASAR-BIGINT-SMOKE-OK'
 /**
  * The `cordis` preset's bundled skill directory inside the package.
  *
- * `presets/cordis/agent.cordis.yml` is the pinned upstream's only
- * `customSkillDirs` consumer, and it hands exactly this directory to the
- * filesystem skill provider. `@deepseek-ai/dsh-agent-presets` is **not** in
- * `asarUnpack`, so every `stat`/`readdir` on it goes through Electron's ASAR fs
- * shim — which is what issue #130 was about.
+ * Upstream 0.1.7 wires it through the preset's `customSkillDirs` expression,
+ * which resolves `@deepseek-ai/dsh-agent-preset/package.json` and hands its
+ * `skills/` directory to the filesystem skill provider. That package is **not**
+ * in `asarUnpack`, so every `stat`/`readdir` on it goes through Electron's ASAR
+ * fs shim — which is what issue #130 was about.
  */
 export const PACKAGED_CORDIS_SKILL_DIR =
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills'
+  'node_modules/@deepseek-ai/dsh-agent-preset/skills'
 
 /**
  * Preset skill names the package must ship, **derived from**
@@ -2594,7 +2616,7 @@ const assertExactSkillListing = ${assertExactSkillListing.toString()}
 
 const appRoot = process.argv[2]
 const expected = JSON.parse(process.argv[3])
-const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-presets/presets/cordis/skills')
+const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-preset/skills')
 
 // (1) Engine semantics on an app.asar path: the packaged Electron must honour { bigint: true }.
 const info = await stat(skillsDir, { bigint: true })

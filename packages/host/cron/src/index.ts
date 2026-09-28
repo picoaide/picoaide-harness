@@ -1,6 +1,6 @@
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-api-workspace-controller'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-settings'
 /**
@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-settings'
  * default export, schema-validated config, and all side effects wrapped in
  * `ctx.effect` so HMR/unload unwinds them.
  */
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 
@@ -55,22 +55,34 @@ export const CRON_GUIDANCE = '本机已安装 dsh-cron 插件（PicoAide Harness
 /** Settings namespace of the cron plugin (spelled here and in the browser half). */
 export const CRON_SETTINGS_NAMESPACE = 'cron' as SettingsNamespace
 
+/**
+ * Profile entry id owning this plugin's user-editable config.
+ *
+ * Up to 0.1.6 the settings namespace was an arbitrary string (`cron`) in a
+ * separate document; 0.1.7 makes it the profile entry id, which for a launcher
+ * patch row is the row id from `cordis.patch.yml`.
+ */
+export const CRON_SETTINGS_ROW_ID = 'pico-cron'
+
 export interface Config {
   /** Master switch for the scheduler (host + browser surfaces). */
-  enabled?: boolean
+  enabled: Volatile<boolean>
   /** When true (default), a system-prompt section announces the plugin. */
-  announceToAgent?: boolean
+  announceToAgent: Volatile<boolean>
   /**
    * When true, a restart or long suspension fires the single most recent
    * missed occurrence per due job instead of skipping it. Default: skip.
    */
-  catchUpMissed?: boolean
+  catchUpMissed: Volatile<boolean>
 }
 
-export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(true),
-  announceToAgent: z.boolean().default(true),
-  catchUpMissed: z.boolean().default(false),
+export const Config = z.object({
+  // Volatile: upstream 0.1.7 stores settings as **this row's own config** in the
+  // profile patch (the settings namespace is the profile entry id), and the form
+  // edits volatile fields without remounting the row.
+  enabled: z.boolean().default(true).volatile(),
+  announceToAgent: z.boolean().default(true).volatile(),
+  catchUpMissed: z.boolean().default(false).volatile(),
 })
 
 /**
@@ -98,7 +110,7 @@ export function apply(ctx: Context, config: Config): void {
     permissionPresets: permissionRoster,
     sessions,
   }, {})
-  host.setConfiguration(config.enabled ?? true, config.catchUpMissed ?? false)
+  host.setConfiguration(config.enabled.get() ?? true, config.catchUpMissed.get() ?? false)
   host.start()
 
   // Current account: stamp new jobs and scope reads. The enterprise session
@@ -177,10 +189,10 @@ export function apply(ctx: Context, config: Config): void {
       disposeSection()
       disposeSection = undefined
     }
-    const active = current().enabled ?? true
-    host.setConfiguration(active, current().catchUpMissed ?? false)
+    const active = current().enabled.get() ?? true
+    host.setConfiguration(active, current().catchUpMissed.get() ?? false)
     if (!active) return
-    if ((current().announceToAgent ?? true) === false) return
+    if ((current().announceToAgent.get() ?? true) === false) return
     disposeSection = ctx.systemPrompt.section({
       name: 'plugin:dsh-cron',
       order: SECTION_ORDER,
@@ -192,14 +204,14 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
-  // Live settings section: registered lazily through the optional settings
-  // provider (upstream 0.1.2 API); edits arrive on settings/updated.
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.register(CRON_SETTINGS_NAMESPACE, Config, { base: config ?? {} })
-  })
-  ctx.on('settings/updated', (namespace, next) => {
-    if (namespace !== CRON_SETTINGS_NAMESPACE) return
-    current = () => next as Config
+  // Live config: upstream 0.1.7 removed the settings provider API
+  // (`register`/`get` on a separate document). The settings namespace **is** a
+  // profile entry id, and this plugin's own row is that entry: its volatile
+  // fields are the form, and a save republishes `settings/document-updated`.
+  // The values therefore come from the resolved `config` references themselves.
+  current = () => config ?? {}
+  ctx.on('settings/document-updated', (namespace) => {
+    if (namespace !== CRON_SETTINGS_ROW_ID) return
     sync()
   })
 

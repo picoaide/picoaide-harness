@@ -13,7 +13,7 @@
  */
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller'
-import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPresetRegistry } from '@deepseek-ai/dsh-agent-preset-registry'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { JobRecord } from './jobs.ts'
@@ -49,7 +49,7 @@ export interface CronExecutorDeps {
   /** Workspace registry holding the canonical workspace rows (host service). */
   readonly workspaceRegistry: WorkspaceRegistry
   /** Agent preset roster (the desktop installs the Windows-guarded subclass). */
-  readonly agentPresets: AgentPresets
+  readonly agentPresets: AgentPresetRegistry
   /**
    * Resolve the permission-preset service (FIX-17). Resolved lazily so a
    * service composed after this plugin still applies; a missing service makes

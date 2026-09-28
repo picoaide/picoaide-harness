@@ -1,7 +1,7 @@
 /** Compatibility profile composition over the official Web bundle and user plugins. */
 
-import { createRequire, findPackageJSON } from 'node:module'
-import { existsSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { findPackageJSON } from 'node:module'
+import { existsSync, readFileSync, readdirSync, readlinkSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluate, isJsExpr, type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -15,10 +15,9 @@ import {
 } from './desktop-channel.ts'
 import {
   composeEntries,
-  healProfilesModuleFallback,
+  createRuntimeResolution,
   initProfile,
   loadOptionalPatches,
-  loadOverlayPatches,
   loadProfile,
   PROFILE_PATCH_FILENAME,
   PROFILE_TEMPLATES,
@@ -28,12 +27,9 @@ import {
   type Profile,
   type ProfileContext,
   type ProfileManifest,
+  type RuntimeResolution,
 } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from './desktop-home.ts'
-import FileSettingsProvider, {
-  resolveSpec as resolveSettingsFileSpec,
-  type Config as SettingsFileConfig,
-} from '@deepseek-ai/dsh-settings-file'
 import { parseDocument } from 'yaml'
 import type { DesktopShellMode } from './runtime.ts'
 import {
@@ -59,37 +55,56 @@ export const DESKTOP_PACKAGE_NAME = 'dsh-plugin-desktop'
 export const DESKTOP_PROFILE_ROOT = 'cordis.yml'
 
 const BIN_NAME = DESKTOP_PACKAGE_NAME
-const REQUIRED_BUNDLES = requiredWebBundles()
+// 桌面自己的包同时是 profile 的**最后一个 bundle 层**（`dsh.bundle.patch` 列出
+// `./cordis.patch.yml` 与九个自有包的组装补丁）。它必须排在 `@deepseek-ai/dsh-web-app`
+// 之后，因为那十层是"晚于上游 bundle、早于 profile 自有层与 home 层"的层。
+//
+// 为什么必须是**真的 bundle 层**（2026-09-28 的 `verify:profile` P0）：
+// 上游 `readProfilePatches`（= `config-editor.edit()` 每次设置写入前的复算来源、
+// `plugin-manager` 读面、`ProfileContext` 自述）只读 `profile.layers` + `patchPath`
+// + home 补丁 + `context.overlays`。把十层塞进 `context.overlays` 也不行：`overlays`
+// 追加在**最后**，于是 `- insert:` 的行会晚于设置文档建立，`config-editor.edit()` 收尾的
+// 断言 `Configuration for "<id>" is overridden by a home patch or command-line overlay`
+// 会直接抛错（模型网关行 `picoaide-gateway-llm` 每次登录都要写 baseURL ⇒ 模型面全灭）。
+// 放进 `profile.layers` 是唯一同时满足"复算得到"与"早于设置文档"的位置。
+const REQUIRED_BUNDLES = [
+  ...requiredWebBundles(),
+  // 十个自有组装补丁层（本包的 `cordis.patch.yml` + 下列九个包各自的
+  // `cordis.patch.yml`）以 **bundle 层**身份进入组合，顺序 = 这里列出的顺序。
+  // 本包自己的那一层由 `@picoaide/dsh-enterprise` 的 `dsh.bundle.patch` 首项
+  // `../../../cordis.patch.yml` 携带 —— `resolveBundleDir` 用 `resolve.paths()` 找包，
+  // **不含包自身目录**，所以 `dsh-plugin-desktop` 无法把自己解析成 bundle；企业包是
+  // 这十层里第一个、且它的层本来就依赖桌面层先落地（它 patch `desktop-shell` 行）。
+  '@picoaide/dsh-enterprise',
+  '@picoaide/dsh-account-card',
+  '@picoaide/dsh-wasm-apps',
+  '@picoaide/dsh-foot-menu',
+  '@picoaide/dsh-wasm-apps-host',
+  '@picoaide/dsh-connectors',
+  '@picoaide/dsh-browser',
+  'dsh-memory-evolve',
+  '@picoaide/dsh-cron',
+]
+/** 携带桌面自身组装补丁层的 bundle（见 `REQUIRED_BUNDLES` 的说明）。 */
+const DESKTOP_LAYER_CARRIER_BUNDLE = '@picoaide/dsh-enterprise'
 const REQUIRED_BUNDLE_SET = new Set(REQUIRED_BUNDLES)
 const OBSOLETE_DESKTOP_BUNDLE_SET = new Set(['@deepseek-ai/dsh-desktop-app'])
 const INSTALL_ANCHOR = fileURLToPath(new URL('../package.json', import.meta.url))
-const DESKTOP_PATCH_PATH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
-const ENTERPRISE_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-enterprise/package.json')), 'cordis.patch.yml')
-const ACCOUNT_CARD_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-account-card/package.json')), 'cordis.patch.yml')
-// WASM 应用中心（客户端半边）：与 account-card 同构 —— 由桌面包通过 profile 组装期
-// 注入，插件自己不解析随包路径（跨包路径在 tsdown 内联后会指向不存在的目录）。
-const WASM_APPS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps/package.json')), 'cordis.patch.yml')
-// 侧边栏底部「更多」行（客户端服务 `picoFootMenu` + 向上浮层）：与 wasm-apps 同层。
-// 五个面板插件把自己的底部条目登记进它提供的服务（各自在**子 fiber** 里等，见各包
-// client/index.ts），所以这一行与它们之间没有装配顺序敏感度。
+// 十个自有组装补丁层（本包的 `cordis.patch.yml` + enterprise / account-card / wasm-apps /
+// foot-menu / wasm-apps-host / connectors / browser / memory-evolve / cron）**不再在这里
+// 逐个解析路径**：它们是 `dsh-plugin-desktop` 这个 profile bundle 层自己的
+// `dsh.bundle.patch` 列表（见 `package.json` 的 `dsh.bundle`），由上游 `loadProfileDirectory`
+// 逐层读进来。理由见 `REQUIRED_BUNDLES` 上方的长注释。
 //
-// ⚠️ **禁用危害（2026-09-21 对抗审计）**：这一行是**五个面板入口的唯一承载行**。
-// 渠道覆盖层或 `$DSH_HOME/cordis.patch.yml` 把它 `disabled: true` 时不会有任何报错 ——
-// 消费者等的服务永远不出现，于是底部功能区**安静地**少掉定时任务 / 能力中心 / 连接器 /
-// 浏览器 / 应用中心。因此它进了 `REQUIRED_DESKTOP_ROWS`（boot 后断言 ACTIVE，缺席即
-// 抛错并走桌面的致命路径），而不是"少一行也无所谓"。
-const FOOT_MENU_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-foot-menu/package.json')), 'cordis.patch.yml')
-const CONNECTORS_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-connectors/package.json')), 'cordis.patch.yml')
-const BROWSER_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-browser/package.json')), 'cordis.patch.yml')
-// 客户端专属 WASM 应用 origin（`picoaide-app://` 协议 handler + 本机打开路由）：
-// 与其余自有插件同构 —— 桌面包通过 profile 组装期注入，插件自己不解析随包路径。
-const WASM_APPS_HOST_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-wasm-apps-host/package.json')), 'cordis.patch.yml')
+// ⚠️ **禁用危害（2026-09-21 对抗审计，仍然有效）**：`picoaide-foot-menu` 那一行是
+// **五个面板入口的唯一承载行**。渠道覆盖层或 `$DSH_HOME/cordis.patch.yml` 把它
+// `disabled: true` 时不会有任何报错 —— 消费者等的服务永远不出现，于是底部功能区
+// **安静地**少掉定时任务 / 能力中心 / 连接器 / 浏览器 / 应用中心。因此它进了
+// `REQUIRED_DESKTOP_ROWS`（boot 后断言 ACTIVE，缺席即抛错并走桌面的致命路径）。
 /** 宿主行 id：scheme / 产品名注入点（见 prepareDesktopProfile 末尾）。 */
 const WASM_APPS_HOST_ROW_ID = 'pico-wasm-apps-host'
 /** 浏览器行 id：应用源 scheme 注入点（导航闸门按 surface 分流要用它）。 */
 const BROWSER_ROW_ID = 'pico-browser'
-const MEMORY_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('dsh-memory-evolve/package.json')), 'cordis.patch.yml')
-const CRON_PATCH_PATH = join(dirname(createRequire(import.meta.url).resolve('@picoaide/dsh-cron/package.json')), 'cordis.patch.yml')
 const DIRECTORY_PICKER_ROW_ID = 'directory-picker'
 const AUTO_PICKER_PACKAGE = '@deepseek-ai/dsh-host-directory-picker-auto'
 const BROWSE_PICKER_BACKEND = '@deepseek-ai/dsh-host-directory-picker-browse'
@@ -98,13 +113,25 @@ const PWSH_SANDBOX_ROW_ID = 'pwsh-sandbox'
 const UPSTREAM_PWSH_SANDBOX_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = 'dsh-plugin-desktop/windows-pwsh-sandbox'
-const AGENT_PRESETS_ROW_ID = 'agent-presets'
-const UPSTREAM_AGENT_PRESETS_PACKAGE = '@deepseek-ai/dsh-agent-presets'
-const DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID = 'desktop-windows-agent-presets'
-const DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE = 'dsh-plugin-desktop/windows-agent-presets'
+const AGENT_PRESET_REGISTRY_ROW_ID = 'agent-preset-registry'
+const UPSTREAM_AGENT_PRESET_REGISTRY_PACKAGE = '@deepseek-ai/dsh-agent-preset-registry'
+const DESKTOP_WINDOWS_AGENT_PRESET_REGISTRY_ROW_ID = 'desktop-windows-agent-preset-registry'
+const DESKTOP_WINDOWS_AGENT_PRESET_REGISTRY_PACKAGE = 'dsh-plugin-desktop/windows-agent-presets'
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
 const DEFAULT_DESKTOP_PORT = 0
-const SETTINGS_FILE_PACKAGE = '@deepseek-ai/dsh-settings-file'
+/**
+ * Upstream 0.1.7 replaced the file-backed settings provider
+ * (`@deepseek-ai/dsh-settings-file`, whose `FileSettingsProvider`/
+ * `resolveSpec`/`Config` are gone from the registry) with the profile-backed
+ * [`SettingsForms`](https://github.com/deepseek-ai/deepseek-harness) service:
+ * one plugin `Config` is the storage, and a **profile entry id** is the
+ * settings namespace. The `settings` row therefore names this package.
+ */
+const SETTINGS_PACKAGE = '@deepseek-ai/dsh-settings'
+/** Profile entry id whose Config carries the desktop's own user settings. */
+const DESKTOP_SHELL_ROW_ID = 'desktop-shell'
+/** Legacy settings document retired by upstream 0.1.7 (imported once, then renamed). */
+const LEGACY_SETTINGS_FILENAME = 'settings.yaml'
 const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
 const UI_LAYOUT_PACKAGE = '@deepseek-ai/dsh-client-ui-layout'
 const UI_SIDEBAR_PACKAGE = '@deepseek-ai/dsh-client-ui-sidebar'
@@ -178,6 +205,308 @@ export function channelProfilePatches(
   return out
 }
 
+/**
+ * 旧目录式智能体预设的**本地存储格式**常量。
+ *
+ * 格式权威在 `@picoaide/dsh-enterprise` 的 `agent-preset-install.ts`
+ * （`resolvePresetsDir()` / `PRESET_ID_PATTERN` / `COMPOSITION_FILE` /
+ * `METADATA_FILE` / `MAX_PRESET_META_LEN`）。**这里只镜像字面量、不能 import 它**：
+ * enterprise 已经依赖 `dsh-plugin-desktop`（`@picoaide/dsh-enterprise` 的
+ * `needs: ['dsh-plugin-desktop', …]`），反向 import 会构成**构建环**，
+ * `scripts/check-workspaces.mjs` 与 `temp/wasm-client-only/cycle-check.mjs`
+ * 会当场判红（"实测边不在声明表里 / 实测边有环"）。
+ * 两侧一致由 `tests/legacy-agent-presets.spec.ts` 的**跨包源码对拍判据**钉住：
+ * 任何一侧改了 id 形状、文件名或长度上限，那条用例必红。
+ */
+
+/** 旧预设根目录名（`<home>/.agent-presets`）。 */
+export const LEGACY_PRESET_DIR_NAME = '.agent-presets'
+
+/** 让一个目录成为预设的组合文件。 */
+export const LEGACY_PRESET_COMPOSITION_FILE = 'agent.cordis.yml'
+
+/** 可选的展示元数据文件。 */
+export const LEGACY_PRESET_METADATA_FILE = 'preset.yml'
+
+/** 预设 id 形状（同上游 `PRESET_ID` 与 enterprise 的 `PRESET_ID_PATTERN`）。 */
+export const LEGACY_PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
+
+/** 展示元数据长度上限（网关拒收 >500 字符，与 enterprise 同值）。 */
+export const LEGACY_PRESET_META_MAX_LENGTH = 500
+
+/** 声明行的 Loader id 前缀：上游 0.1.7 的既有形状（`preset-standard`、`preset-cordis`…）。 */
+export const LEGACY_PRESET_ROW_ID_PREFIX = 'preset-'
+
+/** 声明行的插件包名（把一条声明注册进 `ctx.agentPresets`）。 */
+export const LEGACY_PRESET_DECLARATION_PACKAGE = '@deepseek-ai/dsh-agent-preset'
+
+/** 一条旧预设目录没能变成声明行的原因（每一种都必须可见，不许静默丢弃）。 */
+export type LegacyAgentPresetProblem =
+  /** `.agent-presets` 根存在但读不出来（权限/不是目录…）。 */
+  | 'unreadable-presets-root'
+  /** 目录名不合预设 id 形状（上游 `PRESET_ID` 与 enterprise 安装器都会拒绝它）。 */
+  | 'invalid-id'
+  /** 目录里没有可用的 `agent.cordis.yml`（缺失/读不出/非法 YAML/不是顶层列表）。 */
+  | 'unusable-composition'
+  /** `preset.yml` 存在但读不出/不是映射（声明行照插，只是没有展示元数据）。 */
+  | 'invalid-metadata'
+  /** `preset-<id>` 已被别的层声明（随包预设或用户在设置表单里改过的那一份）。 */
+  | 'shadowed-row'
+  /** 本次组合里没有可用的 `agentPresets` 提供者，声明行只会永远 PENDING。 */
+  | 'no-preset-registry'
+
+/** 一条旧预设的装配期诊断（`detail` 直接进启动日志，必须点名该预设）。 */
+export interface LegacyAgentPresetDiagnostic {
+  /** 目录名（或 root 自身，见 `unreadable-presets-root`）。 */
+  readonly preset: string
+  /** 机器可读的原因。 */
+  readonly problem: LegacyAgentPresetProblem
+  /** 一句话，含预设名与具体原因。 */
+  readonly detail: string
+}
+
+/** 一次物化的结果：可用的声明行补丁 + 必须可见的诊断。 */
+export interface LegacyAgentPresetMaterialization {
+  /** 每个可用预设一条 `insert` 补丁（顺序 = 目录名字典序）。 */
+  readonly patches: PatchOptions[]
+  /** 诊断（空数组 = 全部目录都物化成功）。 */
+  readonly diagnostics: LegacyAgentPresetDiagnostic[]
+}
+
+/**
+ * 一条诊断的启动日志行（唯一实现：装配期与判据共用同一份格式，所以"点名了预设"
+ * 这件事本身是可判的）。
+ * @param diagnostic - 物化器给出的一条诊断。
+ * @returns 一行日志。
+ */
+export function legacyAgentPresetLogLine(diagnostic: LegacyAgentPresetDiagnostic): string {
+  return `${BIN_NAME}: legacy agent preset ${JSON.stringify(diagnostic.preset)}: ${diagnostic.detail}`
+}
+
+/** 从 `preset.yml` 读出的展示元数据（都是可选字段）。 */
+interface LegacyPresetMeta {
+  name?: string
+  description?: string
+  order?: number
+}
+
+/** 展示元数据的读取结果：值 + 必须上报的问题（可选文件缺失不算问题）。 */
+interface LegacyPresetMetaRead {
+  meta: LegacyPresetMeta
+  problem?: string
+}
+
+/** 文本字段：非空字符串才取值（与 enterprise 的 `readPresetMeta` 同口径），并截到格式上限。 */
+function legacyPresetText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (trimmed === '') return undefined
+  return trimmed.slice(0, LEGACY_PRESET_META_MAX_LENGTH)
+}
+
+/**
+ * 读一个旧预设目录的展示元数据。
+ *
+ * `preset.yml` 是**可选**文件（上游迁移说明里它是 `name`/`description`/`order` 的来源，
+ * 但不是"是不是预设"的判据 —— 那个判据只有 `agent.cordis.yml`）。缺失返回空元数据；
+ * 存在但坏掉返回问题描述，调用方照插声明行、只把元数据丢掉。
+ * @param dir - 预设目录。
+ * @returns 元数据与可选的问题描述。
+ */
+function readLegacyPresetMeta(dir: string): LegacyPresetMetaRead {
+  const filename = join(dir, LEGACY_PRESET_METADATA_FILE)
+  let raw: string
+  try {
+    raw = readFileSync(filename, 'utf8')
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return { meta: {} }
+    return { meta: {}, problem: `${LEGACY_PRESET_METADATA_FILE} could not be read: ${String(cause)}` }
+  }
+  if (raw.trim() === '') return { meta: {} }
+  const document = parseDocument(raw, { prettyErrors: true })
+  if (document.errors.length > 0) {
+    return {
+      meta: {},
+      problem: `${LEGACY_PRESET_METADATA_FILE} is not valid YAML: ${document.errors.map(error => error.message).join('; ')}`,
+    }
+  }
+  const value: unknown = document.toJS()
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { meta: {}, problem: `${LEGACY_PRESET_METADATA_FILE} must be a map of display fields` }
+  }
+  const record = value as Record<string, unknown>
+  const meta: LegacyPresetMeta = {}
+  const name = legacyPresetText(record.name)
+  if (name !== undefined) meta.name = name
+  const description = legacyPresetText(record.description)
+  if (description !== undefined) meta.description = description
+  if (record.order !== undefined) {
+    if (typeof record.order === 'number' && Number.isFinite(record.order)) {
+      meta.order = record.order
+    } else {
+      // `order` 在上游 Config 里是 `z.number()`：非数字传进去会让整行**配置校验失败**
+      // ⇒ 声明行永远不会注册到 roster（= 预设彻底消失），所以这里只丢字段、不丢预设。
+      return { meta, problem: `${LEGACY_PRESET_METADATA_FILE} order must be a finite number` }
+    }
+  }
+  return { meta }
+}
+
+/**
+ * 把组合里的相对/绝对插件名锚定成**以该预设目录为基准**的 file URL。
+ *
+ * 为什么必须自己锚：`mountPreset` 挂载子树时的 `baseUrl` 是**声明方**（桌面 profile
+ * 目录）的，相对名会去 profile 目录里找 —— 那不是旧目录式预设的语义（0.1.7 之前
+ * 组合文件与它引用的东西同处一个目录）。上游给 patch list 的 `anchorInsertedPluginNames`
+ * 只走 `insert` 列表，够不到这里的 entry list，所以这一步归物化器自己做。
+ * @param entries - 待锚定的 entry list（原地改写，调用方刚 parse 出来的私有副本）。
+ * @param dir - 该预设目录的绝对路径。
+ */
+function anchorPresetEntryNames(entries: EntryOptions[], dir: string): void {
+  for (const entry of entries) {
+    if (typeof entry.name === 'string' && (isAbsolute(entry.name) || entry.name.startsWith('./') || entry.name.startsWith('../'))) {
+      entry.name = pathToFileURL(isAbsolute(entry.name) ? entry.name : resolve(dir, entry.name)).href
+    }
+    if (entry.group === true && Array.isArray(entry.config)) {
+      anchorPresetEntryNames(entry.config as EntryOptions[], dir)
+    }
+  }
+}
+
+/**
+ * 读一个旧预设目录的插件列表（`agent.cordis.yml`）。
+ *
+ * 走 `@deepseek-ai/dsh-app-boot` 的 `loadOptionalPatches`，**不是**自己再 parse 一遍：
+ * 上游两种文件（`cordis.yml` 的 entry list 与 `cordis.patch.yml` 的 patch list）用的是
+ * **同一个 YAML dialect**（`cordis-plugin-include` 的 `entryListSchema`，含 `!!js`
+ * 表达式标量），只有 `loadOptionalPatches` 用的是那一份；而 `js-yaml` 并不是本包的
+ * 依赖（`package.json` 只声明了 `yaml`），自己写 `!!js` 标签会与 Loader 的方言漂移。
+ * 它顺带把相对/绝对插件名锚定成 file URL（**以该预设目录为基准**）——
+ * `mountPreset` 的 `baseUrl` 是声明方的 profile 目录，拿不到这个基准。
+ * @param dir - 预设目录。
+ * @returns 插件列表，或一句点名的拒绝原因。
+ */
+function readLegacyPresetComposition(dir: string): { plugins: EntryOptions[] } | { problem: string } {
+  const filename = join(dir, LEGACY_PRESET_COMPOSITION_FILE)
+  let parsed: PatchOptions[] | undefined
+  try {
+    parsed = loadOptionalPatches(BIN_NAME, filename)
+  } catch (cause) {
+    return { problem: `${LEGACY_PRESET_COMPOSITION_FILE} could not be parsed: ${cause instanceof Error ? cause.message : String(cause)}` }
+  }
+  if (parsed === undefined) return { problem: `no ${LEGACY_PRESET_COMPOSITION_FILE} in the preset directory` }
+  // `PatchOptions` 与 entry list 行在运行期是同一批对象（同一个 schema、同一份 Loader
+  // 条目形状）；这里的文件按契约是 entry list，所以只做一次结构性转换。
+  const plugins = parsed as unknown as EntryOptions[]
+  anchorPresetEntryNames(plugins, dir)
+  return { plugins }
+}
+
+/**
+ * 把 `$DSH_HOME/.agent-presets/<id>/` 下的旧格式预设**材料化**成 0.1.7 的声明行。
+ *
+ * 背景：上游 0.1.7 删掉了这条目录读取路径（`@deepseek-ai/dsh-agent-preset` 的
+ * `editing-cordis-compositions` 技能逐字："Nothing reads that directory any more."），
+ * 而企业「共享智能体」的安装格式**保持目录式不变**（上传/校验/落盘/归属/面板整条链路
+ * 都在用它）。于是"上游会读这个目录"这层语义收回组装期：每个可用目录生成一条
+ * `preset-<id>` 声明行（`id`/`name`/`description`/`order` 来自 `preset.yml`，
+ * `plugins` 来自 `agent.cordis.yml` 逐字），并入交给 `boot()` 的补丁列表。
+ *
+ * 三条口径：
+ *  1. **只解析，不执行** —— 组装期不做任何预设内容求值（`!!js` 保持为表达式节点，
+ *     由 Loader 在自己的上下文中求值）；
+ *  2. **不许静默丢弃** —— 每个没变成声明行的目录都带一条点名诊断（见
+ *     {@link LegacyAgentPresetProblem}），`preset.yml` 坏掉不连累预设本身；
+ *  3. **不制造重复行** —— `preset-<id>` 已被随包预设或用户在设置表单里的编辑声明时
+ *     整条跳过（重复 Loader id 会让 `assertUniqueEntryIds` 直接抛错、整个应用起不来），
+ *     而跳过是**可见的**（`shadowed-row`）且语义正确：那一层本来就该赢。
+ * @param home - 本次装配的数据根（`prepareDesktopProfile` 的 `home` 入参）。
+ * @param declaredRows - 已组合的行 id 集合（`prepareDesktopProfile` 的 `rows`）。
+ * @returns 声明行补丁与诊断。
+ */
+export function materializeLegacyAgentPresets(
+  home: string = resolveDshHome(),
+  declaredRows: ReadonlySet<string> | ReadonlyMap<string, unknown> = new Set<string>(),
+): LegacyAgentPresetMaterialization {
+  const patches: PatchOptions[] = []
+  const diagnostics: LegacyAgentPresetDiagnostic[] = []
+  const root = join(home, LEGACY_PRESET_DIR_NAME)
+  const report = (preset: string, problem: LegacyAgentPresetProblem, detail: string): void => {
+    diagnostics.push({ preset, problem, detail })
+  }
+
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch (cause) {
+    // 没有这个根 = 这台机器没有装过共享智能体，是**正常**状态（不是问题）。
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return { patches, diagnostics }
+    report(LEGACY_PRESET_DIR_NAME, 'unreadable-presets-root', `preset root could not be listed: ${String(cause)}`)
+    return { patches, diagnostics }
+  }
+
+  for (const entry of [...entries].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+    const name = entry.name
+    // 点开头 = 本产品自己的东西（`installPresetArchive` 的 `.install-<id>-XXXX` staging
+    // 目录、`.picoaide` 溯源标记的命名空间…）。它们不是用户预设，也不该被点名。
+    if (name.startsWith('.')) continue
+    // 只认目录（`statSync` 跟随符号链接：用户用软链指到别处的预设目录是合法用法，
+    // 上游 `listInstalledPresets` 用 `entry.isDirectory()` 会漏掉它）。
+    let isDirectory = entry.isDirectory()
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = statSync(join(root, name)).isDirectory()
+      } catch (cause) {
+        report(name, 'invalid-id', `preset directory could not be inspected: ${String(cause)}`)
+        continue
+      }
+    }
+    // 普通文件不是预设（既没有组合文件也不可能是目录）—— 与面板的列表面同口径。
+    if (!isDirectory) continue
+    if (!LEGACY_PRESET_ID_PATTERN.test(name)) {
+      report(
+        name,
+        'invalid-id',
+        `directory "${name}" is not a usable preset id (expected ${String(LEGACY_PRESET_ID_PATTERN)}); skipped`,
+      )
+      continue
+    }
+    const rowId = `${LEGACY_PRESET_ROW_ID_PREFIX}${name}`
+    if (declaredRows.has(rowId)) {
+      report(
+        name,
+        'shadowed-row',
+        `loader row "${rowId}" is already declared by another layer (a shipped preset, or an edit saved from `
+        + 'the settings form); that declaration stays authoritative, this directory contributes no row',
+      )
+      continue
+    }
+    const composition = readLegacyPresetComposition(join(root, name))
+    if ('problem' in composition) {
+      report(name, 'unusable-composition', `${composition.problem}; preset "${name}" was not declared`)
+      continue
+    }
+    const metadata = readLegacyPresetMeta(join(root, name))
+    if (metadata.problem !== undefined) {
+      report(name, 'invalid-metadata', `${metadata.problem}; the preset is declared without display metadata`)
+    }
+    patches.push({
+      insert: [{
+        id: rowId,
+        name: LEGACY_PRESET_DECLARATION_PACKAGE,
+        config: {
+          id: name,
+          ...metadata.meta.order === undefined ? {} : { order: metadata.meta.order },
+          ...metadata.meta.name === undefined ? {} : { name: metadata.meta.name },
+          ...metadata.meta.description === undefined ? {} : { description: metadata.meta.description },
+          plugins: composition.plugins,
+        },
+      }],
+    })
+  }
+  return { patches, diagnostics }
+}
+
 export function parseDesktopShellMode(value: unknown): DesktopShellMode {
   if (value === undefined) return DEFAULT_DESKTOP_SHELL_MODE
   if (value === 'advanced' || value === 'compatibility') return 'advanced'
@@ -226,37 +555,65 @@ export function desktopShellModeFromSettings(document: unknown): DesktopShellMod
 }
 
 /**
- * Read startup settings from the same file resolved by the settings provider.
- * @param config - validated settings-file row config.
+ * Read startup settings from the composed `desktop-shell` row.
+ *
+ * Upstream 0.1.7 removed the file-backed settings provider: a plugin `Config`
+ * inside the profile patch **is** the settings document, addressed by profile
+ * entry id. The launcher must still know the port *before* boot (it binds the
+ * loopback server and builds the renderer URL), so the effective value is read
+ * from the already-composed profile rows — the same composition the Loader is
+ * about to mount — and re-pinned onto the launcher overlay. A user edit made
+ * through the settings form lands in the profile patch, is composed here on the
+ * next generation, and therefore round-trips.
+ *
+ * A pre-0.1.7 `settings.yaml` still counts **once**, as the migration fallback:
+ * upstream's `SettingsForms` imports legacy sections by entry id and retires the
+ * document, and our own section id (`dsh-desktop`) is not an entry id, so its
+ * values would otherwise be dropped. The profile row always wins.
+ * @param row - composed `desktop-shell` row config (may be empty).
+ * @param home - harness home holding a legacy `settings.yaml`, if any.
  * @returns the values projected into the startup Loader graph.
  */
-export function readDesktopStartupSettings(config: SettingsFileConfig): DesktopStartupSettings {
-  const spec = resolveSettingsFileSpec(config)
-  let text: string
-  try {
-    text = readFileSync(spec.filename, 'utf8')
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { mode: DEFAULT_DESKTOP_SHELL_MODE, port: DEFAULT_DESKTOP_PORT }
-    }
-    throw cause
+export function readDesktopStartupSettings(
+  row: Record<string, unknown> = {},
+  home: string = resolveDshHome(),
+): DesktopStartupSettings {
+  if (row.port !== undefined) {
+    return { mode: parseDesktopShellMode(row.mode), port: parseDesktopPort(row.port) }
   }
-  let document: unknown
-  if (spec.format === 'yaml') {
-    const parsed = parseDocument(text, { prettyErrors: true })
-    if (parsed.errors.length > 0) {
-      throw new Error(`${BIN_NAME}: invalid settings document at ${spec.filename}: ${parsed.errors.map(error => error.message).join('; ')}`)
-    }
-    document = parsed.toJS() ?? {}
-  } else {
-    document = text.trim().length === 0 ? {} : JSON.parse(text)
-  }
-  return desktopStartupSettingsFromSettings(document)
+  return desktopStartupSettingsFromSettings(readLegacySettingsDocument(home))
 }
 
-/** Read only the shell mode from the settings provider's resolved file. */
-export function readDesktopShellMode(config: SettingsFileConfig): DesktopShellMode {
-  return readDesktopStartupSettings(config).mode
+/**
+ * Parse a retired `settings.yaml` into an untrusted document, or `{}` when the
+ * file is absent. Corrupt YAML stays fatal: silently defaulting a document the
+ * user wrote is worse than refusing the generation.
+ * @param home - harness home possibly holding the legacy document.
+ * @returns the parsed document root.
+ */
+export function readLegacySettingsDocument(home: string = resolveDshHome()): unknown {
+  const filename = join(home, LEGACY_SETTINGS_FILENAME)
+  let text: string
+  try {
+    text = readFileSync(filename, 'utf8')
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw cause
+  }
+  if (text.trim().length === 0) return {}
+  const parsed = parseDocument(text, { prettyErrors: true })
+  if (parsed.errors.length > 0) {
+    throw new Error(`${BIN_NAME}: invalid settings document at ${filename}: ${parsed.errors.map(error => error.message).join('; ')}`)
+  }
+  return parsed.toJS() ?? {}
+}
+
+/** Read only the shell mode for one generation. */
+export function readDesktopShellMode(
+  row: Record<string, unknown> = {},
+  home: string = resolveDshHome(),
+): DesktopShellMode {
+  return readDesktopStartupSettings(row, home).mode
 }
 
 /** Resolve the public Web template once and reject an incompatible DSH release. */
@@ -292,10 +649,28 @@ export interface PreparedDesktopProfile {
   overlays: PatchOptions[]
   /** Installation manifest path used as the first module-resolution anchor. */
   installAnchor: string
+  /**
+   * Runtime package resolution for this generation.
+   *
+   * Upstream 0.1.7 removed `healProfilesModuleFallback` (the materialized
+   * `profiles/node_modules` closure) in favour of an in-process interception:
+   * the launcher computes this value and plugs it in **before any config-tree
+   * entry mounts** (`PluginPackages`, exactly as `apps/cli/src/profile-boot.ts`
+   * does). Without it the Loader cannot resolve a single bare specifier from the
+   * profile directory — every plugin fails to import.
+   */
+  resolution: RuntimeResolution
   /** Launch-time telemetry opt-out this generation was composed with. */
   telemetryDisabledEnv: string | undefined
   /** Optional Client UI entries skipped because this profile cannot resolve them. */
   skippedOptionalEntries: SkippedOptionalEntry[]
+  /**
+   * 旧目录式智能体预设（`$DSH_HOME/.agent-presets/<id>/`）在本次装配里的诊断。
+   *
+   * 空数组 = 每个目录都物化成了声明行。非空 = 有一个目录没进 roster，`detail`
+   * 点名了预设与原因（同一条也写进 stderr，见 `prepareDesktopProfile` 的说明）。
+   */
+  presetDiagnostics: LegacyAgentPresetDiagnostic[]
   /** Persisted shell mode applied after every user-owned patch. */
   mode: DesktopShellMode
   /** Persisted loopback Web port applied to every startup consumer. */
@@ -356,35 +731,6 @@ export function ensureDesktopProfile(home: string = resolveDshHome()): string {
     })
   }
   return dir
-}
-
-/**
- * Resolve the shipped agent-preset root the profile pins as a `system` root.
- *
- * The presets travel inside `@deepseek-ai/dsh-agent-presets` (`presets/`, in its
- * published `files`): this roster prepends that directory itself
- * (`includeShippedRoot`), and the CLI package ships `lib/*.js` only — it has no
- * `config/` directory, so the former `@deepseek-ai/dsh/config/agent-presets`
- * anchor resolved to a path that never existed. The lookup is anchored on the
- * preset package's manifest, resolved from the same module-graph base the rest
- * of the profile uses. It falls back to that historical anchor only when the
- * preset package or its `presets/` directory cannot be resolved at all, so
- * profile composition never throws over a redundant root: the roster's own
- * shipped root still lists the presets.
- * @param moduleUrl - module whose resolution base anchors the lookup.
- * @returns absolute path of the shipped preset root.
- */
-export function shippedPresetRoot(moduleUrl: string = import.meta.url): string {
-  const require = createRequire(moduleUrl)
-  try {
-    const shipped = join(dirname(require.resolve('@deepseek-ai/dsh-agent-presets/package.json')), 'presets')
-    if (existsSync(shipped)) return shipped
-  } catch {
-    // Swallows MODULE_NOT_FOUND and export-map rejections for the preset
-    // package: both mean this install cannot offer the root, and the fallback
-    // below still leaves profile composition working.
-  }
-  return join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'config', 'agent-presets')
 }
 
 /**
@@ -547,8 +893,13 @@ export async function prepareDesktopProfile(
   const profileName = DESKTOP_PROFILE_NAME
   const profileDir = ensureDesktopProfile(home)
   removeStaleAsarFallbackLinks(home)
-  await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, home })
+  // Upstream 0.1.7 folded the profile module-fallback healing into
+  // `loadProfile` itself (`removeLinkProjections(dir)` + `normalizeShippedProfile`
+  // run inside it); the standalone `healProfilesModuleFallback` export is gone, so
+  // calling it here would only re-do — with a symbol that no longer exists — what
+  // the loader already does.
   const profile = loadProfile(BIN_NAME, profileName, INSTALL_ANCHOR, home)
+  const resolution = await createRuntimeResolution({ installAnchor: INSTALL_ANCHOR, profile, home })
   const disabledBundles = pluginStatePath === undefined
     ? new Set<string>()
     : readDesktopDisabledBundles(pluginStatePath, profileName)
@@ -556,46 +907,43 @@ export async function prepareDesktopProfile(
   const bareModuleBaseUrl = pathToFileURL(join(profile.dir, 'package.json')).href
   writeFileSync(rootConfig, '[]\n')
 
-  const desktopPatches = loadOverlayPatches(BIN_NAME, DESKTOP_PATCH_PATH)
-  const enterprisePatches = loadOverlayPatches(BIN_NAME, ENTERPRISE_PATCH_PATH)
-  const accountCardPatches = loadOverlayPatches(BIN_NAME, ACCOUNT_CARD_PATCH_PATH)
-  const wasmAppsPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_PATCH_PATH)
-  const footMenuPatches = loadOverlayPatches(BIN_NAME, FOOT_MENU_PATCH_PATH)
-  const connectorsPatches = loadOverlayPatches(BIN_NAME, CONNECTORS_PATCH_PATH)
-  const browserPatches = loadOverlayPatches(BIN_NAME, BROWSER_PATCH_PATH)
-  const wasmAppsHostPatches = loadOverlayPatches(BIN_NAME, WASM_APPS_HOST_PATCH_PATH)
-  const memoryPatches = loadOverlayPatches(BIN_NAME, MEMORY_PATCH_PATH)
-  const cronPatches = loadOverlayPatches(BIN_NAME, CRON_PATCH_PATH)
   const bundlePatches: PatchOptions[] = []
-  let desktopLayerInserted = false
+  let webAppLayerSeen = false
+  let desktopLayerSeen = false
   for (const layer of activeDesktopProfileLayers(profile, disabledBundles)) {
     bundlePatches.push(...layer.patches)
-    if (layer.packageName !== '@deepseek-ai/dsh-web-app') continue
-    bundlePatches.push(...desktopPatches)
-    bundlePatches.push(...enterprisePatches)
-    // Account card right after the enterprise rows: it injects the
-    // `picoSession` service and the enterprise shared gateway helpers.
-    bundlePatches.push(...accountCardPatches)
-    // WASM 应用中心（客户端半边）：与 account-card 同层，晚于 enterprise
-    // （它读 enterprise 提供的本地路由与会话）。
-    bundlePatches.push(...wasmAppsPatches)
-    // 侧边栏底部「更多」行：五个面板插件的底部条目都登记进它提供的
-    // `picoFootMenu` 服务（消费者用 `inject` 等服务到位，与它们的装配顺序无关）。
-    bundlePatches.push(...footMenuPatches)
-    // 客户端专属 WASM 应用 origin：与 wasm-apps（应用中心客户端半边）同层，
-    // 它读 enterprise 提供的 `picoSession` 与本机 webServer。
-    bundlePatches.push(...wasmAppsHostPatches)
-    bundlePatches.push(...connectorsPatches)
-    bundlePatches.push(...browserPatches)
-    bundlePatches.push(...memoryPatches)
-    // Workbench: cron (scheduled jobs, now the single workbench surface).
-    // The right column is the official right Sidebar (ui-sidebar-right), which
-    // the web bundle already mounts; the vendored third-party sidebar is gone.
-    bundlePatches.push(...cronPatches)
-    desktopLayerInserted = true
+    // 十层自有组装补丁来自 `dsh-plugin-desktop` 这个 **bundle 层自己的**
+    // `dsh.bundle.patch` 列表（见 `package.json` 的 `dsh.bundle` 与 `REQUIRED_BUNDLES`），
+    // 不再由本文件手工 push —— 手工 push 的层在 `readProfilePatches` 里复算不到，
+    // 而每次设置写入都会用复算结果替换整棵树（`config-editor.edit()`）。
+    if (layer.packageName === '@deepseek-ai/dsh-web-app') webAppLayerSeen = true
+    if (layer.packageName === DESKTOP_LAYER_CARRIER_BUNDLE) desktopLayerSeen = true
   }
-  if (!desktopLayerInserted) {
+  if (!webAppLayerSeen) {
     throw new Error(`${BIN_NAME}: desktop profile is missing @deepseek-ai/dsh-web-app`)
+  }
+  if (!desktopLayerSeen) {
+    throw new Error(
+      `${BIN_NAME}: desktop profile is missing the ${DESKTOP_LAYER_CARRIER_BUNDLE} bundle layer `
+      + '(its `dsh.bundle.patch` list carries the desktop launcher-owned composition layer)',
+    )
+  }
+  // 被跳过的**必须层**是静默的（`loadProfileDirectory` 只把它们列进 `skippedBundles`）——
+  // 十个自有层里任何一个解析不到/`dsh.bundle` 缺失，都会让那一层从组合里消失，而
+  // `readProfilePatches` 也就复算不出来（= 设置写入把那些行从运行树上摘掉，2026-09-28 的 P0）。
+  // 所以必须层一律 fail-loud。
+  //
+  // 范围只到**必须层**：第三方 bundle 的补丁坏掉时上游是"跳过并报告"（这是 0.1.7 的既定
+  // 语义 —— 一个坏的三方 bundle 不该让整个应用起不来，见
+  // `tests/desktop-plugins.spec.ts` 的坏补丁用例），那里继续由 `skippedBundles` 如实上报，
+  // 不升级成致命错误。
+  const skippedRequiredBundles = profile.skippedBundles
+    .filter(bundle => REQUIRED_BUNDLE_SET.has(bundle.packageName))
+  if (skippedRequiredBundles.length > 0) {
+    throw new Error(
+      `${BIN_NAME}: required profile bundles were skipped: `
+      + skippedRequiredBundles.map(bundle => `${bundle.packageName} (${bundle.reason})`).join('; '),
+    )
   }
 
   const loadedHomePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
@@ -620,18 +968,19 @@ export async function prepareDesktopProfile(
     if (typeof row.id === 'string') rows.set(row.id, row)
   }
   const settings = rows.get('settings')
-  if (settings?.name !== SETTINGS_FILE_PACKAGE) {
-    throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_FILE_PACKAGE} in the settings row`)
+  if (settings?.name !== SETTINGS_PACKAGE) {
+    throw new Error(`${BIN_NAME}: desktop profile must use ${SETTINGS_PACKAGE} in the settings row`)
   }
-  const settingsConfig = FileSettingsProvider.Config({
-    dshHome: home,
-    ...rowConfig(settings),
-  } as SettingsFileConfig)
-  const { port } = readDesktopStartupSettings(settingsConfig)
-  patches.push({
-    id: 'settings',
-    config: settingsConfig,
-  })
+  // Upstream 0.1.7: the settings row needs no launcher config — `SettingsForms`
+  // persists into the profile patch and reads the harness home from the
+  // `profileContext` this launcher provides. The port still has to be known
+  // before boot, so it is read from the **composed** `desktop-shell` row (the
+  // profile patch the user's form edits land in) and re-pinned below.
+  const desktopShellRow = rows.get(DESKTOP_SHELL_ROW_ID)
+  const { port } = readDesktopStartupSettings(
+    desktopShellRow === undefined ? {} : rowConfig(desktopShellRow),
+    home,
+  )
   const mode: DesktopShellMode = ADVANCED_DESKTOP_SHELL_MODE
   {
     for (const [id, packageName] of [
@@ -655,32 +1004,73 @@ export async function prepareDesktopProfile(
       { id: 'ui-conversation', disabled: false },
     )
   }
-  const presets = rows.get(AGENT_PRESETS_ROW_ID)
+  // Agent presets (upstream 0.1.7): the declarative registry replaced the
+  // directory roster. `@deepseek-ai/dsh-agent-preset-registry` provides
+  // `ctx.agentPresets`, and each shipped preset is its own row
+  // (`preset-<id>`, package `@deepseek-ai/dsh-agent-preset`) contributed by the
+  // Web bundle's own `dsh.bundle.patch` list
+  // (`@deepseek-ai/dsh-web-app` → `presets/<id>.patch.yml`). There is nothing to
+  // pin here: no `roots` key exists on the new Config (an injected one would be
+  // stripped), and the shipped presets no longer live on disk under the roster
+  // package. Windows still swaps the registry implementation, because the
+  // `minimal` preset needs a PTY the platform cannot provide.
+  const presets = rows.get(AGENT_PRESET_REGISTRY_ROW_ID)
+  // `agentPresets` 在本次组合里到底有没有提供者 —— 旧目录式预设的声明行只在有它时才
+  // 有意义（没有它，那些行会永远停在 PENDING，而"永远 PENDING"是最难查的静默形态）。
+  let presetRegistryAvailable = false
   if (presets !== undefined) {
-    const config = {
-      ...rowConfig(presets),
-      roots: [{ path: shippedPresetRoot(), trust: 'system' }],
-    }
+    const config = rowConfig(presets)
     if (platform === 'win32'
-      && presets.name === UPSTREAM_AGENT_PRESETS_PACKAGE
+      && presets.name === UPSTREAM_AGENT_PRESET_REGISTRY_PACKAGE
       && !rowDisabledOnPlatform(presets, platform)) {
       patches.push(
         {
-          id: AGENT_PRESETS_ROW_ID,
-          name: UPSTREAM_AGENT_PRESETS_PACKAGE,
+          id: AGENT_PRESET_REGISTRY_ROW_ID,
+          name: UPSTREAM_AGENT_PRESET_REGISTRY_PACKAGE,
           disabled: true,
         },
         {
           insert: [{
-            id: DESKTOP_WINDOWS_AGENT_PRESETS_ROW_ID,
-            name: DESKTOP_WINDOWS_AGENT_PRESETS_PACKAGE,
+            id: DESKTOP_WINDOWS_AGENT_PRESET_REGISTRY_ROW_ID,
+            name: DESKTOP_WINDOWS_AGENT_PRESET_REGISTRY_PACKAGE,
             config,
           }],
         },
       )
+      presetRegistryAvailable = true
     } else {
-      patches.push({ id: AGENT_PRESETS_ROW_ID, config })
+      patches.push({ id: AGENT_PRESET_REGISTRY_ROW_ID, config })
+      presetRegistryAvailable = presets.name === DESKTOP_WINDOWS_AGENT_PRESET_REGISTRY_PACKAGE
+        || !rowDisabledOnPlatform(presets, platform)
     }
+  }
+  // 旧目录式智能体预设的材料化（0.1.7 收口，见 `materializeLegacyAgentPresets`）。
+  // 补丁推在 `overlayStart` **之后**：它们必须落在 `overlays` 里，否则
+  // `readProfilePatches`（每一次设置写入都会用它复算整棵树）看不到这些行，用户改一次
+  // 设置就会把它们从运行树上摘掉（与 `REQUIRED_BUNDLES` 上方记录的那次 P0 同族）。
+  const legacyPresets = materializeLegacyAgentPresets(home, rows)
+  if (presetRegistryAvailable) {
+    patches.push(...legacyPresets.patches)
+  } else if (legacyPresets.patches.length > 0) {
+    const ids = legacyPresets.patches
+      .map(patch => patch.insert?.[0]?.config)
+      .map(config => (typeof config === 'object' && config !== null && !Array.isArray(config)
+        ? (config as { id?: unknown }).id
+        : undefined))
+      .filter((id): id is string => typeof id === 'string')
+    legacyPresets.diagnostics.push({
+      preset: LEGACY_PRESET_DIR_NAME,
+      problem: 'no-preset-registry',
+      detail: `this composition declares no usable ${AGENT_PRESET_REGISTRY_ROW_ID} row, so `
+        + `${String(ids.length)} legacy preset director${ids.length === 1 ? 'y' : 'ies'} `
+        + `[${ids.join(', ')}] contributed no declaration row`,
+    })
+  }
+  // 诊断必须可见（不许静默丢弃）：装配期唯一的输出面就是 stderr（`main.ts` 的
+  // electronLogger 在 prepare 之后才拿到 prepared）。诊断本身也随
+  // `prepared.presetDiagnostics` 回给调用方，供启动日志/自检消费。
+  for (const diagnostic of legacyPresets.diagnostics) {
+    console.warn(legacyAgentPresetLogLine(diagnostic))
   }
   if (!rows.has('webserver')) {
     throw new Error(`${BIN_NAME}: desktop profile has no webserver row`)
@@ -739,16 +1129,19 @@ export async function prepareDesktopProfile(
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {
     patches.push({ id: 'session-telemetry-otel', disabled: true })
   }
-  const desktopShell = rows.get('desktop-shell')
+  const desktopShell = rows.get(DESKTOP_SHELL_ROW_ID)
   if (desktopShell === undefined) {
-    throw new Error(`${BIN_NAME}: desktop profile has no desktop-shell row`)
+    throw new Error(`${BIN_NAME}: desktop profile has no ${DESKTOP_SHELL_ROW_ID} row`)
   }
   // 渠道包（随包分发的 channels/<id>/channel.json）在**组装期**生效：
   // 产品名/窗口标题在登录页出现时就已经可见，服务端地址更是登录前就要用
   // （问服务端要它自己是鸡生蛋），所以两者都必须来自包内配置而非运行时下发。
+  // `port` 与 `logLevel` 同为该行的 **volatile** 字段（0.1.7 起 settings 表单就是
+  // profile patch 本身，条目 id = 命名空间）：先铺开已组合的用户值，再钉死本次
+  // 生效的端口，其余字段（含 `logLevel`）逐字保留。
   const channelProfile = readDesktopChannelProfile()
   patches.push({
-    id: 'desktop-shell',
+    id: DESKTOP_SHELL_ROW_ID,
     disabled: false,
     config: {
       ...rowConfig(desktopShell),
@@ -797,8 +1190,10 @@ export async function prepareDesktopProfile(
     patches: structuredClone(patches),
     overlays: structuredClone(patches.slice(overlayStart)),
     installAnchor: INSTALL_ANCHOR,
+    resolution,
     telemetryDisabledEnv: telemetryDisabled,
     skippedOptionalEntries,
+    presetDiagnostics: legacyPresets.diagnostics,
     mode,
     port,
   }
@@ -826,7 +1221,7 @@ export async function prepareDesktopProfile(
  * 但每个取值都来自**本次真实装配**（`prepareDesktopProfile` 的返回值），这里不另猜路径：
  *   · `name`/`dir`/`patchPath` —— 本次装配的 profile（`$DSH_HOME/profiles/desktop`）；
  *   · `installAnchor` —— 首次模块解析锚点（桌面包自己的 `package.json`，与
- *     `loadProfile`/`healProfilesModuleFallback` 用的是同一个值；`plugin-manager` 的
+ *     `loadProfile` 用的是同一个值；`plugin-manager` 的
  *     `listBundles()` 会把它当 JSON 读，所以必须是文件而不是目录）；
  *   · `home` —— 本次装配用的 Harness home（`$DSH_HOME`，或渠道派生的数据根）；
  *   · `startedBundles` —— 本次 profile 清单解析出的 bundle 层顺序（与上游 CLI 的

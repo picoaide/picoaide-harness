@@ -13,7 +13,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { styles } from './styles.ts'
 import { t } from './locales.ts'
 
@@ -23,7 +23,7 @@ export interface CronSettings {
   catchUpMissed?: boolean
 }
 
-type CronSettingsSnapshot = SettingsScopeSnapshot<CronSettings>
+type CronSettingsSnapshot = ConfigFormSnapshot<CronSettings>
 
 /** The registration-side face the card's slot entry injects (plain data + callbacks). */
 export interface CronSettingsCardFace {
@@ -39,14 +39,14 @@ export class CronSettingsCardController {
   private readonly listeners = new Set<() => void>()
   private error: string | undefined
 
-  constructor(private readonly scope: SettingsScope<CronSettings>) {}
+  constructor(private readonly form: ConfigForm<CronSettings>) {}
 
   getSnapshot(): CronSettingsSnapshot {
-    return this.scope.getSnapshot()
+    return this.form.getSnapshot()
   }
 
   subscribe(listener: () => void): () => void {
-    const off = this.scope.subscribe(listener)
+    const off = this.form.subscribe(listener)
     this.listeners.add(listener)
     return () => {
       off()
@@ -59,11 +59,12 @@ export class CronSettingsCardController {
   }
 
   set(field: keyof CronSettings, value: boolean): void {
-    // 失败必须有人接住（2026-09-21 审计）：`SettingsScope.set` 在失败时会回滚并重读宿主
-    // 状态，原来 `void` 掉 promise ⇒ 开关静默弹回旧值、界面零解释，同时留下一条未处理的
-    // rejection（渲染进程控制台/错误上报里的噪声）。现在记下原因并通知界面。
-    void Promise.resolve(this.scope.set(field, value)).then(
-      () => { this.publishError(undefined) },
+    // 失败必须有人接住（2026-09-21 审计，0.1.7 起有**两种**失败形态）：
+    // `ConfigForm.set` 拒绝时 reject，**被宿主拒绝或跳过时 resolve(false)** ——
+    // 只接 rejection 会把 `false` 当成保存成功，而界面已经乐观地翻了开关
+    // （静默弹回旧值 + 零解释）。两种都要记原因并通知界面。
+    void Promise.resolve(this.form.set(field, value)).then(
+      (accepted: boolean) => { this.publishError(accepted ? undefined : t('settings.rejected')) },
       (cause: unknown) => { this.publishError(cause instanceof Error ? cause.message : String(cause)) },
     )
   }

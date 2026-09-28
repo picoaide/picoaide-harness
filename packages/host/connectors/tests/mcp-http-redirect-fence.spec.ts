@@ -13,7 +13,7 @@
  * Everything below is real: real HTTP front/attack servers on real sockets, the
  * real `@modelcontextprotocol/client` (v2) client +
  * `StreamableHTTPClientTransport` — the package and class
- * `dsh-mcp-client@0.1.6-alpha.2` constructs — and the real plugin driven through
+ * `dsh-mcp-client@0.1.7-rc.2` constructs — and the real plugin driven through
  * its own `apply()`/restore path, so the transport is built from the exact
  * config the plugin registered. (The fixture MCP SERVER stays on the 1.x SDK: it
  * is a peer, not the fenced side, and keeping it also proves the v2 client still

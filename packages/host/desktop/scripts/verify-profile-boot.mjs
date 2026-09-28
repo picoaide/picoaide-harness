@@ -4,17 +4,11 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utime
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { boot } from '@deepseek-ai/dsh-app-boot'
-import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import {
-  createLaunchEnvironmentSnapshot,
-  DSH_LAUNCH_ENVIRONMENT_KEY,
-} from '@deepseek-ai/dsh-launch-environment'
-import { DESKTOP_SETTINGS_NAMESPACE } from '../lib/index.js'
+import { DESKTOP_SETTINGS_ENTRY_ID, readSettingsNamespace } from '../lib/index.js'
 import { parse as parseYaml } from 'yaml'
 import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/document-lock-recovery.js'
-import { installProfilePackageResolver } from '../lib/module-resolution.js'
+import { bootDesktopProfile } from './boot-desktop-profile.mjs'
 import { prepareDesktopProfile, desktopProfileContext } from '../lib/profile.js'
 import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
 
@@ -130,7 +124,6 @@ try {
     },
     ...prepared.patches,
   ]
-  releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = {
     platform: 'win32',
     locale: 'en',
@@ -171,25 +164,15 @@ try {
     prepareToQuit() {},
     setDeepLinkHandler() {},
   }
-  ctx = await boot(
-    BIN_NAME,
-    prepared.rootConfig,
+  // 五个必备接线（launch env / desktopRuntime / profileContext / PluginPackages /
+  // cmdline）只有一份实现：`scripts/boot-desktop-profile.mjs`。三个 boot 站点同源，
+  // `tests/boot-wiring.spec.ts` 守住"不得绕过它自己手写"。
+  ;({ ctx, releasePackageResolver } = await bootDesktopProfile({
+    binName: BIN_NAME,
+    prepared,
     patches,
-    async (host) => {
-      host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
-      host.provide('desktopRuntime', runtime)
-      // 与 src/main.ts 用**同一个函数**（`lib/profile.js` 的 desktopProfileContext）：
-      // 生产路径与门禁路径必须同源，否则冒烟测的就不是真实启动形态 —— 这正是本
-      // 冒烟此前"恰好复刻 main.ts 的缺省行为"（也不 provide）却全绿的原因。
-      host.provide('profileContext', desktopProfileContext(prepared))
-      provideCmdline(host, {
-        args: ['--host', '127.0.0.1', '--port', '0'],
-        exit: () => {},
-      })
-    },
-    prepared.bareModuleBaseUrl,
-  )
-  await runtime.mountScheduled()
+    runtime,
+  }))
 
   // P0-9（2026-09-20 升级审计）：这是**唯一**挂载完整桌面组合树的地方，所以
   // 「我方必需行真的活了」只能在这里端到端证明。上游 0.1.6 的
@@ -214,6 +197,23 @@ try {
     .map(entry => entry.options.id)
   if (failedRows.length > 0) {
     throw new Error(`assembled desktop profile has failed Loader rows: ${failedRows.join(', ')}`)
+  }
+  // 同一条不变量的另一半：**已启用行也不该连 fiber 都没有**。
+  // `fiber === undefined` 只有一个原因 —— 该行的包 import 不进来（模块不存在/peer 缺失）。
+  // 上游的激活审计（`auditStartupEntries` → `inactiveEntries`）会把这类行报成
+  // `failed to import`，但**只 warn**（0.1.7 实测：两条仅 peer 声明、永不安装的行让日志
+  // 多两行 `failed to import` 而启动照常成功）。上面那条 `FIBER_FAILED` 判据抓不到它
+  // （没有 fiber ⇒ `entry.fiber?.state` 是 `undefined`，不等于 FAILED），于是"组合里
+  // 误启用一条装不上的行"整类缺陷在门禁上是**静默**的。本判据把它变成红的：
+  // 已禁用行（产品闸门）不算 —— 那正是 0.1.7 那两条噪音行的正确处置方式。
+  const unimportable = [...ctx.loader.entries()]
+    .filter(entry => entry.disabled !== true && entry.fiber === undefined)
+    .map(entry => entry.options.id)
+  if (unimportable.length > 0) {
+    throw new Error(
+      `assembled desktop profile has enabled rows whose package could not be imported: ${unimportable.join(', ')}\n`
+      + '（模块解析不到 ⇒ 该行没有 fiber。要么把它禁掉并在 `mustStayDisabled` 里登记理由，要么把它的依赖装齐。）',
+    )
   }
 
   // ── P0（issue #130「创造模式」会话全部不可用）────────────────────────────────
@@ -284,6 +284,31 @@ try {
   // 缺口**钉死**：行集差异与读面行集都必须**恰好等于**登记值，变大变小都红；
   // 将来组合实现真的改了（例如把注入层落进 profile 自己的 `cordis.patch.yml`），
   // 这条会红，届时按新事实更新登记即可 —— 但那时要同时想清楚"是否真的要让模型能改这些行"。
+  // ---- 读面事实：`readProfilePatches` 必须**复算得出**真实装配 -------------------
+  //
+  // 这条判据在 2026-09-28 从"登记残留"翻转成"必须为空"，原因是查清了那个残留**不是只影响
+  // 自述**：
+  //
+  // 桌面把 desktop/enterprise/account-card/wasm-apps/foot-menu/wasm-apps-host/connectors/
+  // browser/memory-evolve/cron 十个包的 `cordis.patch.yml` 注入在 bundle 层。若这些层不在
+  // `ProfileContext.overlays` 里，`readProfilePatches`（只读 layers + patchPath + home 补丁
+  // + overlays）就复算不出它们 —— 而上游 `@deepseek-ai/dsh-config-editor` 的 `edit()` 在
+  // **每一次设置写入之前**都会：
+  //     await reconcileProfilePatches(root, readProfilePatches('dsh', profileContext), 'dsh')
+  // 也就是把**运行中的整棵 Loader 树**换成复算结果。于是升级机上 `settings.yaml` 的
+  // 一次性导入（`@deepseek-ai/dsh-settings` 的 `importLegacyDocument`）、登录时
+  // `gateway-model` 写 baseURL、用户在设置里改任何一项，都会把 `desktop-shell` 与九个自研面
+  // 从树上摘掉 —— 本冒烟此前的症状就是 `desktop shell was not registered`（该行的 `apply()`
+  // 再没跑过、`nativeRuntime.schedule()` 从未被调用），而后半段（能力判据）**从未执行**。
+  // 真实产品的症状同形：窗口还在（webserver/connection 来自 bundle），企业面/连接器/浏览器/
+  // 定时任务/应用中心/记忆面全部消失。
+  //
+  // 所以现在判两条，缺一不可：
+  //   ① 复算的行集必须与装配**逐 id 相等**（missing/extra 都为空）；
+  //   ② `disabled` 取值也必须逐行相等（此前 `fs-sandbox`/`hmr`/`office-to-pdf`/
+  //      `session-log-deepseek`/`tool-web`/`ui-plugin-manager`/`ui-settings-models`/
+  //      `ui-settings-plugins`/`ui-sidebar-browser` 九行在复算里回落成上游缺省 ——
+  //      那正是"我们的层没被复算到"的指纹）。
   const { composeEntries, readProfilePatches } = await import('@deepseek-ai/dsh-app-boot')
   /** `true`/`false` for real booleans, `undefined` for absent, `!!js` source otherwise. */
   const disabledToken = value => value === undefined
@@ -294,74 +319,36 @@ try {
     .filter(row => typeof row.id === 'string')
   const assembledById = new Map(assembledIds.map(row => [row.id, row]))
   const readBackById = new Map(readBackIds.map(row => [row.id, row]))
-  // 登记 ①：重算路径**看不到**的行 —— 全部来自十个「包内 patch 注入在 bundle 层」的包
-  // （desktop-* = 桌面包自己的 cordis.patch.yml；picoaide-*/pico-*/dsh-memory-evolve =
-  // enterprise / account-card / wasm-apps / foot-menu / wasm-apps-host / connectors /
-  // browser / memory-evolve / cron）。24 行，按来源包分组登记：
-  const KNOWN_READBACK_MISSING = [
-    // 桌面包 cordis.patch.yml（bundle 层插入）
-    'desktop-shell', 'desktop-diagnostics', 'desktop-updates', 'desktop-loop-notify',
-    'desktop-asar-fs', 'desktop-asar-guidance',
-    // enterprise
-    'picoaide-enterprise', 'picoaide-session', 'picoaide-gateway-model', 'picoaide-bootstrap',
-    'picoaide-error-reporting', 'picoaide-skill-telemetry', 'picoaide-auth-gate',
-    'picoaide-channel-sync', 'pico-skill-filesystem', 'pico-tool-skill',
-    // account-card / wasm-apps / foot-menu / wasm-apps-host
-    'picoaide-account-card', 'picoaide-wasm-apps', 'picoaide-foot-menu', 'pico-wasm-apps-host',
-    // connectors / browser
-    'pico-connectors', 'pico-browser',
-    // memory-evolve / cron
-    'dsh-memory-evolve', 'pico-cron',
-  ].sort()
-  // 登记 ②：两侧都看得到、但 `disabled` 取值不同的行（`assembled → readBack`）。
-  // `fs-sandbox`/`office-to-pdf`/`session-log-deepseek`/`ui-plugin-manager`/
-  // `ui-settings-models`/`ui-settings-plugins`/`ui-sidebar-browser` 的"关"由我们的
-  // bundle 层补丁声明，重算路径看不到 ⇒ 回落成 `undefined`（未声明）；`hmr` 同理回落成
-  // 上游 base bundle 的 `!!js` 开关；`tool-web` 反向：重算路径只看到上游缺省 `disabled: true`，
-  // 而我们的 bundle 层补丁把它打开成 `false`。**这不是本 P0 的成因**：这些行在真实 boot
-  // 的树上全部按组合生效（上面 (d)/(e) 已逐条判），差异只存在于"重算自述"里。
-  const KNOWN_READBACK_DISABLED_DIFFERENCES = new Map([
-    ['fs-sandbox', ['true', 'undefined']],
-    ['hmr', ['true', "<js:!ctx.get('profileContext')>"]],
-    ['office-to-pdf', ['true', 'undefined']],
-    ['session-log-deepseek', ['true', 'undefined']],
-    ['tool-web', ['false', 'true']],
-    ['ui-plugin-manager', ['true', 'undefined']],
-    ['ui-settings-models', ['true', 'undefined']],
-    ['ui-settings-plugins', ['true', 'undefined']],
-    ['ui-sidebar-browser', ['true', 'undefined']],
-  ])
   const readBackMissing = [...assembledById.keys()].filter(id => !readBackById.has(id)).sort()
   const readBackExtra = [...readBackById.keys()].filter(id => !assembledById.has(id)).sort()
   const readBackDisabledDiff = [...assembledById.keys()]
     .filter(id => readBackById.has(id)
       && disabledToken(assembledById.get(id).disabled) !== disabledToken(readBackById.get(id).disabled))
     .sort()
-  const registeredDisabledDiff = [...KNOWN_READBACK_DISABLED_DIFFERENCES.keys()].sort()
-  if (JSON.stringify(readBackMissing) !== JSON.stringify(KNOWN_READBACK_MISSING)
-    || readBackExtra.length > 0
-    || JSON.stringify(readBackDisabledDiff) !== JSON.stringify(registeredDisabledDiff)
-    || readBackDisabledDiff.some(id => {
-      const [assembled, readBack] = KNOWN_READBACK_DISABLED_DIFFERENCES.get(id)
-      return disabledToken(assembledById.get(id).disabled) !== assembled
-        || disabledToken(readBackById.get(id).disabled) !== readBack
-    })) {
+  if (readBackMissing.length > 0 || readBackExtra.length > 0 || readBackDisabledDiff.length > 0) {
     throw new Error(
-      'readProfilePatches(desktopProfileContext) 与真实装配的行集差异与登记不一致 —— '
-      + '「重算 ≠ 装配」是本轮**故意保留**的残留（包内 patch 注入在 bundle 层，重算路径看不到；'
-      + '见本判据上方的裁决说明），但它必须**恰好**是登记的那一份，变大变小都要按新事实更新登记：\n'
-      + `  missing  actual=${JSON.stringify(readBackMissing)}\n`
-      + `  missing  registered=${JSON.stringify(KNOWN_READBACK_MISSING)}\n`
-      + `  extra    actual=${JSON.stringify(readBackExtra)} (registered=[])\n`
-      + `  disabled actual=${JSON.stringify(readBackDisabledDiff.map(id => `${id}:${disabledToken(assembledById.get(id)?.disabled)}->${disabledToken(readBackById.get(id)?.disabled)}`))}\n`
-      + `  disabled registered=${JSON.stringify([...KNOWN_READBACK_DISABLED_DIFFERENCES].map(([id, pair]) => `${id}:${pair[0]}->${pair[1]}`))}`,
+      'readProfilePatches(desktopProfileContext) 复算不出真实装配 —— 这会让上游 config-editor 的'
+      + '每次设置写入（reconcileProfilePatches(readProfilePatches(...))）把桌面壳与自研行从运行树里摘掉：\n'
+      + `  missing  =${JSON.stringify(readBackMissing)}\n`
+      + `  extra    =${JSON.stringify(readBackExtra)}\n`
+      + '  disabled ='
+      + JSON.stringify(readBackDisabledDiff.map(id => `${id}:${disabledToken(assembledById.get(id)?.disabled)}->${disabledToken(readBackById.get(id)?.disabled)}`))
+      + '\n  修法只有一个方向：让启动器拥有的层出现在 `ProfileContext.overlays` 里'
+      + '（见 `src/profile.ts` 的 `launcherOverlayPatches` 注释），**不要**放宽本判据。',
     )
   }
 
   // 读面事实：真实 boot 的树上 `pluginManager.listPlugins()` 的 `unaddressable` 行。
-  // 上面那条判据证的是"重算能算出什么"，这条证的是"读面真的给出了什么"（同一个缺口的
-  // 两个观测点：一个在数据层、一个在服务层）。防止缺口无声扩大 —— 例如某天新增一个
-  // 自研包、或有人把 `readProfilePatches` 换成另一份实现。
+  // 上面那条判据证的是"重算能算出什么"，这条证的是"读面真的给出了什么"（同一件事的
+  // 两个观测点：一个在数据层、一个在服务层）。
+  //
+  // ⚠️ 2026-09-28 行为变更（主控需知）：这份名单从 26 条收缩到 **1 条**（只剩树根 `include`）。
+  // 原因与上面那条判据同源，而且**不可分开**：`plugin_manager` 判定"可寻址"的唯一依据就是
+  // `readProfilePatches` 里有没有同 id/同 name 的行（`plugin-manager/src/index.ts:268`）。
+  // 也就是说 "重算看得到它们" 与 "模型能 set_plugin 改它们" 是**同一个事实** —— 保留
+  // 2026-09-23 那次裁决想要的"不可寻址"，就等于保留 `config-editor` 每次设置写入都会把
+  // 桌面壳与九个自研面从运行树上摘掉的 P0。两者只能选一个，本次选**不丢功能**。
+  // 治理影响与备选缓解见 `temp/upg/r5/REPORT.md`（④「行为变更」与「未做项」）。
   const pluginManager = ctx.get('pluginManager')
   if (pluginManager === undefined) {
     throw new Error('assembled desktop profile is missing the pluginManager service (issue #130 regressed)')
@@ -370,25 +357,16 @@ try {
     .filter(row => row.readOnlyReason === 'unaddressable')
     .map(row => row.entryId)
     .sort()
-  // 登记：26 条 —— 我们十个包的行（`include:<包名>` 形态）+ 本冒烟自己注入的夹具行 + 树根。
-  const KNOWN_UNADDRESSABLE_ROWS = [
-    // Loader 树的**根** include 行（没有包名、父节点不是 include ⇒ 天生不可寻址，不是插件行）
-    'include',
-    'include:desktop-shell', 'include:desktop-diagnostics', 'include:desktop-updates',
-    'include:desktop-loop-notify', 'include:desktop-asar-fs', 'include:desktop-asar-guidance',
-    'include:picoaide-enterprise', 'include:picoaide-session', 'include:picoaide-gateway-model',
-    'include:picoaide-bootstrap', 'include:picoaide-error-reporting', 'include:picoaide-skill-telemetry',
-    'include:picoaide-auth-gate', 'include:picoaide-channel-sync', 'include:pico-skill-filesystem',
-    'include:pico-tool-skill', 'include:picoaide-account-card', 'include:picoaide-wasm-apps',
-    'include:picoaide-foot-menu', 'include:pico-wasm-apps-host', 'include:pico-connectors',
-    'include:pico-browser', 'include:dsh-memory-evolve', 'include:pico-cron',
-    // 冒烟自己的宿主服务夹具行（`tests/fixtures/desktop-host-services-smoke-plugin/`）
-    'include:desktop-host-services-smoke-plugin',
-  ].sort()
+  // 登记：1 条 —— Loader 树的**根** include 行（没有包名、父节点不是 include
+  // ⇒ 天生不可寻址，不是插件行）。行集变大变小都红：
+  //   · 变大 ⇒ 又有行掉出 `readProfilePatches`（= 设置写入会把它们摘掉，P0 复发）；
+  //   · 变小 ⇒ 树根都变成可寻址了（Loader 语义变了，要重新审 `set_plugin` 的边界）。
+  const KNOWN_UNADDRESSABLE_ROWS = ['include']
   if (JSON.stringify(unaddressable) !== JSON.stringify(KNOWN_UNADDRESSABLE_ROWS)) {
     throw new Error(
-      'pluginManager.listPlugins() 的 unaddressable 行集合与登记不一致 —— 这是 issue #130 的**已知能力缺口**'
-      + '（创造模式里 set_plugin 改不了这些行，属故意保留），缺口扩大或缩小都必须按新事实更新登记：\n'
+      'pluginManager.listPlugins() 的 unaddressable 行集合与登记不一致 —— '
+      + '登记值 `["include"]` 是 2026-09-28 修复"设置写入把启动器行从运行树上摘掉"之后的**新事实**'
+      + '（见本判据上方注释：可寻址性与 readProfilePatches 的完整性是同一个事实，不能只保一个）：\n'
       + `  actual  =${JSON.stringify(unaddressable)}\n`
       + `  registered=${JSON.stringify(KNOWN_UNADDRESSABLE_ROWS)}`,
     )
@@ -481,6 +459,14 @@ try {
     ['office-to-pdf', 'libreoffice-kit 引擎不在四张打包清单覆盖内 + macOS 签名'],
     ['ui-settings-plugins', '桌面隐藏「插件」设置选项卡（2026-09 产品决策）'],
     ['hmr', '与 plugin-manager 共用 profileContext 开关，但没有 CLI 专属的 appReady 会炸整棵树'],
+    // 0.1.7 新增的两条上游行：它们的包只被 **peer 声明**、永不随包安装
+    // （`@deepseek-ai/dsh-deepseek-account` / `@deepseek-ai/dsh-api-account-controller`
+    // 的 peer 在 base/web bundle 的 dependencies 里都没有），激活即 `failed to import`。
+    // 这是 0.1.7 审计噪音里**仅剩的两条**（UPG-2 把 169 条降到 2 条）；重开它们会让
+    // app-boot 的激活审计报出 enabled-but-unimportable 行 —— 本冒烟的「已启用行不得
+    // 导入失败」判据（见 `unimportable`）会红，所以它们必须留在闸门里。
+    ['deepseek-account', '0.1.7 新行：包只有 peer 声明、永不安装，激活即 failed to import'],
+    ['account-controller', '0.1.7 新行：包只有 peer 声明、永不安装，激活即 failed to import'],
   ]
   const declaredDisabled = (parseYaml(readFileSync(join(packageRoot, 'cordis.patch.yml'), 'utf8')))
     .filter(row => row?.disabled === true)
@@ -544,7 +530,8 @@ try {
   if (agentPresets === undefined) {
     throw new Error('assembled Windows profile is missing the agent preset roster')
   }
-  const presetIds = (await agentPresets.list()).map(preset => preset.id)
+  const presetRoster = await agentPresets.list()
+  const presetIds = presetRoster.map(preset => preset.id)
   if (presetIds.includes('minimal') || !presetIds.includes('standard')) {
     throw new Error(`assembled Windows profile exposes unexpected presets: ${presetIds.join(', ')}`)
   }
@@ -556,19 +543,18 @@ try {
     throw new Error(`assembled Windows profile remapped legacy preset to ${legacyPreset.id}`)
   }
   // **每个随包 preset 都真的 mount 一次**（issue #130 的正面判据，与上面三条互补）：
-  // `list()` 只列 roster 里的文件，能不能用取决于它的行是否都能拿到服务。行等不到
-  // 服务时 `standingKeyFor` 抛的错里逐行写着"哪个包在等哪个服务"，原样带进失败信息
-  // ——这正是 issue #130 的报错形态（`tool-plugin-manager … waiting for pluginManager`）。
+  // 0.1.7 的 `agent-preset-registry` 把"这个 preset 挂不起来"做成 roster 行上的
+  // `broken` 诊断（`list()` → `diagnostic()`）：它**真的 mount 一遍**该 preset 的行树，
+  // 再对那棵树跑 activation 审计，把 `waiting for <service>` / `failed` 逐行写进
+  // `broken`（上游 `agent-preset-registry/src/index.ts:131-153`）。
+  // 这正是 issue #130 的报错形态（`tool-plugin-manager … waiting for pluginManager`）。
+  // 旧写法调的是 0.1.6 的 `standingKeyFor(id)` —— 该方法在 0.1.7 已不存在（`is not a
+  // function`），是本段在 ① 修好之前**从未被执行**才没被发现的一处陈旧断言。
   // 遍历 roster **实际返回的集合**（Windows 上 `minimal` 被 windows-agent-presets 隐藏，
   // 见 src/windows-agent-presets.ts），不硬编码 preset 列表。
-  const unmountablePresets = []
-  for (const id of presetIds) {
-    try {
-      await agentPresets.standingKeyFor(id)
-    } catch (error) {
-      unmountablePresets.push(`${id}: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const unmountablePresets = presetRoster
+    .filter(preset => preset.broken !== undefined)
+    .map(preset => `${preset.id}: ${preset.broken}`)
   if (unmountablePresets.length > 0) {
     throw new Error(
       `assembled desktop profile cannot mount ${String(unmountablePresets.length)} of ${String(presetIds.length)} shipped agent presets (${presetIds.join(', ')}):\n`
@@ -576,6 +562,13 @@ try {
     )
   }
 
+  // ── 能力判据段（**必须有"它跑了"的证据**）────────────────────────────────────
+  // UPG-4（2026-09-28）指出：脚本 exit 0 ≠ 每一段都跑了 —— 本段此前从未被执行过
+  // （更早的 `desktop shell was not registered` 就把它挡在门外），因此里面那些对着
+  // 0.1.6 API 写的陈旧断言（`mountedSpec.mode`、`ctx.settings.get`、`standingKeyFor`）
+  // 一直没被发现。下面这条打印就是"它真的跑到这里"的**可检索证据**，与本段末尾的完成行
+  // 成对使用：只有两行都在日志里，才说明整段执行完毕（而不是中途抛错）。
+  process.stdout.write('[verify-profile] capability section: entered (real composition tree mounted)\n')
   const picker = ctx.directoryPicker.capability()
   if (picker.kind !== 'browse') {
     throw new Error(`assembled Windows profile selected ${picker.kind} directory picker`)
@@ -608,46 +601,68 @@ try {
   if (mountedSpec?.url !== expectedRendererUrl) {
     throw new Error(`desktop plugin produced an unexpected renderer URL: ${String(mountedSpec?.url)}`)
   }
-  if (mountedSpec?.mode !== 'advanced') {
-    throw new Error(`desktop plugin produced an unexpected shell mode: ${String(mountedSpec?.mode)}`)
+  // `prepared.mode` 是启动器本次装配的模式（`ADVANCED_DESKTOP_SHELL_MODE`），它同时决定
+  // 上面那个 `dsh-desktop-mode=advanced` 渲染标记、`ui-layout` 行的禁用、以及 desktop-shell
+  // 行的 pin。**不要**去读 `mountedSpec.mode`：`DesktopShellSpec`（src/runtime.ts:234-251）
+  // 从来没有 `mode` 字段（模式经 URL 标记与 Config 传递），旧断言 `mountedSpec?.mode`
+  // 恒为 `undefined` —— 它之所以长期没红，正是因为本段在 ① 修好之前从未被执行过。
+  if (prepared.mode !== 'advanced') {
+    throw new Error(`desktop profile prepared an unexpected shell mode: ${String(prepared.mode)}`)
   }
   if (nativeThemeSource !== 'system') {
     throw new Error(`desktop plugin produced an unexpected native theme source: ${nativeThemeSource}`)
   }
-  const desktopSettings = ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE)
-  if (desktopSettings?.mode !== 'advanced') {
-    throw new Error('assembled Host settings are missing the advanced dsh-desktop mode')
+  // 0.1.7：设置命名空间 = **profile 条目 id**，`ctx.settings.get(ns)` 已不存在（读取入口是
+  // `describe()`，见 `src/settings-forms.ts` 的模块头）。这里必须**分成两个观测点**，
+  // 因为 settings 表单只投影 **volatile** 字段：
+  //   ① `mode` 是**非** volatile 的 Config 字段 ⇒ 只能从**运行中那行**的 `config` 读
+  //      （`describe()` 的表单里根本没有它 —— 旧断言读的就是一个不存在的字段）；
+  //   ② `port` / `logLevel` 是 volatile ⇒ 用与插件**同一个**读取器读表单，证明它们真的
+  //      被投影出来了（不是"行存在"这种存在性断言）。
+  const desktopShellEntry = [...ctx.loader.entries()].find(entry => entry.options.id === DESKTOP_SETTINGS_ENTRY_ID)
+  if (desktopShellEntry?.options.config?.mode !== 'advanced') {
+    throw new Error(
+      `assembled desktop-shell row is missing the advanced mode (got ${JSON.stringify(desktopShellEntry?.options.config?.mode)}); `
+      + 'the launcher pin layer must land on the running tree',
+    )
   }
-  // 网关协议（2026-09-22）：`ctx.settings.get` 读的就是 llm-deepseek 适配器读的那份
-  // 解析值（schema 缺省 → 组装 base → user 层）。上游 0.1.6 的缺省是 `messages`，
-  // 而 messages 适配器只发 `x-api-key`、不发 `Authorization`，我们的网关只认
-  // `Authorization: Bearer` ⇒ 这个值不是"配置偏好"，是"每个模型请求是否 401"。
-  // 组装期 pin 丢了（行改名/补丁被静默跳过/后续层整键替换）时这条会红。
-  const deepSeekSection = ctx.settings.get('llm-deepseek')
-  if (deepSeekSection === undefined) {
-    throw new Error('assembled desktop profile has no llm-deepseek settings namespace')
+  const desktopForm = readSettingsNamespace(ctx.settings, DESKTOP_SETTINGS_ENTRY_ID)
+  if (typeof desktopForm?.port !== 'number') {
+    throw new Error(
+      `the desktop-shell settings form is missing the volatile port projection (got ${JSON.stringify(desktopForm?.port)}); `
+      + 'the settings form is how the user edits that row',
+    )
   }
-  if (deepSeekSection.protocol !== 'chat-completions') {
-    throw new Error(`assembled desktop profile resolves llm-deepseek protocol=${String(deepSeekSection.protocol)} instead of chat-completions`)
+  // 网关模型 provider（2026-09-28，DSH 0.1.7-rc.2）：同一份 `describe()` 解析值就是适配器读的
+  // 那份（schema 缺省 → 组装 base → user 层），而命名空间 = profile 条目 id。
+  // 0.1.7 删除了 `protocol`（配了抛错）、把鉴权搬到 provider 注册面，所以这里判两件事：
+  //  ① 组装期**存在**自研 provider 行 `picoaide-gateway-llm`（上游 `llm-deepseek` 行被禁用，
+  //     否则没有任何插件注册 `deepseek-official`，模型面全灭）；
+  //  ② 它解析出的值里 **没有** `protocol` 键 —— 任何一层加回这个已删除的键都会让
+  //     `resolveAdapterOptions` 在装载时抛错（`protocol is not configurable`），本判据是
+  //     那个抛错之前在组装期的观测点。
+  const gatewayLlmSection = readSettingsNamespace(ctx.settings, 'picoaide-gateway-llm')
+  if (gatewayLlmSection === undefined) {
+    throw new Error('assembled desktop profile has no picoaide-gateway-llm settings namespace')
   }
-  // **现场形态**：事故机的 `llm-deepseek` 段由旧版（0.1.5 线）写入，只有
-  // baseURL/apiKeyEnv/models、**没有 protocol**。这里在 user 层原样复刻它（无会话的
-  // 启动会被 bootstrap/gateway-model 清空该段，所以只能在 boot 之后用 settings 写入）：
-  // 缺这个键的 user 段**不得**盖掉组装期的 pin，其它键也必须原样保留。
-  await ctx.settings.replace('llm-deepseek', {
+  if (Object.hasOwn(gatewayLlmSection, 'protocol')) {
+    throw new Error(`assembled desktop profile resolves picoaide-gateway-llm protocol=${String(gatewayLlmSection.protocol)}; the key was removed upstream and now fails the row at load`)
+  }
+  // 用户层形态：现场机的段由旧版客户端写入（只有 baseURL/models）——它必须原样落进**同一个**
+  // 命名空间，且不能带回 `protocol`。
+  await ctx.settings.replace('picoaide-gateway-llm', {
     baseURL: 'https://harness.example.com/v1',
-    apiKeyEnv: 'PICOAI_GATEWAY_TOKEN',
     models: [{ id: 'smoke-model', name: 'smoke-model', maxTokens: 4096, inputModalities: ['text'] }],
   })
-  const fieldShaped = ctx.settings.get('llm-deepseek')
-  if (fieldShaped.protocol !== 'chat-completions') {
-    throw new Error(`a user llm-deepseek section without protocol shadowed the composition pin: protocol=${String(fieldShaped.protocol)}`)
+  const fieldShaped = readSettingsNamespace(ctx.settings, 'picoaide-gateway-llm')
+  if (Object.hasOwn(fieldShaped, 'protocol')) {
+    throw new Error('a user picoaide-gateway-llm section brought back the removed protocol key')
   }
-  if (fieldShaped.baseURL !== 'https://harness.example.com/v1' || fieldShaped.apiKeyEnv !== 'PICOAI_GATEWAY_TOKEN') {
-    throw new Error(`the user llm-deepseek section lost fields: baseURL=${String(fieldShaped.baseURL)} apiKeyEnv=${String(fieldShaped.apiKeyEnv)}`)
+  if (fieldShaped.baseURL !== 'https://harness.example.com/v1') {
+    throw new Error(`the user picoaide-gateway-llm section lost fields: baseURL=${String(fieldShaped.baseURL)}`)
   }
   if (fieldShaped.models?.[0]?.id !== 'smoke-model') {
-    throw new Error(`the user llm-deepseek section lost its model catalog: ${JSON.stringify(fieldShaped.models)}`)
+    throw new Error(`the user picoaide-gateway-llm section lost its model catalog: ${JSON.stringify(fieldShaped.models)}`)
   }
   if (!trayItems.some(item => item.label() === 'Check for Updates…')) {
     throw new Error('assembled desktop profile is missing the update tray command')
@@ -711,6 +726,12 @@ try {
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }
+  process.stdout.write(
+    '[verify-profile] capability section: passed'
+    + ' (required rows active; readback == assembly; unaddressable == [include];'
+    + ' presets mount; directory picker; update tray; settings round-trip through'
+    + ' config-editor reconcile; authenticated Web root + boot graph)\n',
+  )
 } finally {
   await ctx?.fiber.dispose()
   releasePackageResolver?.()

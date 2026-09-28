@@ -58,15 +58,36 @@ const PVOID = koffi.pointer('void')
  * 纯桩 binding 表：只跑通 withPathLock → readCurrentDacl → mergeAndApply 这条路径
  * 需要的调用，`setNamedSecurityInfoW` 的返回值由用例决定。指针一律用真实分配地址
  * 编码（`koffi.address`），不 dereference —— 与本包上游的 failure-path 测试同形。
+ *
+ * ⚠️ **桩必须覆盖 `AclWriteGrant.create` 的整条建表路径**（2026-09-28，0.1.7-rc.2 升级实测）。
+ * 0.1.7 的 `create()` 除了 `convertStringSidToSidW`，还要为 Low integrity 标签与世界 SID
+ * 各建一个 well-known SID（`makeWellKnownSid` → `createWellKnownSid` + `isValidSid`）。
+ * 0.1.6 的桩没有这两个绑定，于是升级后 `create()` 直接
+ * `TypeError: api.createWellKnownSid is not a function` —— **两条用例红在"桩缺绑定"上，
+ * 而不是红在"补丁没生效"上**（假红：判据的 subject 根本没跑到）。
+ * 桩里 `sid` 本身由上游 `allocBytes(68)` 分配，这里只需让两次调用成功返回非 0。
  */
 function aclApi(applyResult: () => number): Record<string, unknown> {
   const sid = koffi.alloc('uint8', 8)
   const merged = koffi.alloc('uint8', 64)
+  // `localAlloc` 的返回值会被当作 ACL 指针继续传给 initializeAcl/addMandatoryAce
+  // 并最终交给 SetEntriesInAclW；桩只需给一个**非空**的真实地址。
+  const labelAcl = koffi.alloc('uint8', 128)
   return {
     convertStringSidToSidW: vi.fn((_sid: string, slot: unknown) => {
       koffi.encode(slot as never, PVOID, koffi.address(sid))
       return 1
     }),
+    // CreateWellKnownSid(type, domainSid, sid, sizeSlot)：上游自己分配 sid 与 sizeSlot，
+    // 失败路径只由返回值决定 ⇒ 桩只需"成功"。
+    createWellKnownSid: vi.fn(() => 1),
+    isValidSid: vi.fn(() => 1),
+    // Low mandatory label ACL 的建表路径（buildLowLabelAcl）：长度查询、分配、初始化、
+    // 加 ACE —— 四步都有 `=== 0` 的 fail-closed 分支，桩必须逐个成功返回。
+    getLengthSid: vi.fn(() => 8),
+    localAlloc: vi.fn(() => koffi.address(labelAcl)),
+    initializeAcl: vi.fn(() => 1),
+    addMandatoryAce: vi.fn(() => 1),
     getTempPathW: vi.fn((_length: number, buffer: Buffer) => {
       const temp = tmpdir().replace(/[\\/]$/u, '')
       buffer.write(temp, 'utf16le')

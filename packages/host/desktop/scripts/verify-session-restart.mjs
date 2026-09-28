@@ -37,14 +37,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { constants, zstdCompressSync } from 'node:zlib'
-import { boot } from '@deepseek-ai/dsh-app-boot'
-import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
-import {
-  createLaunchEnvironmentSnapshot,
-  DSH_LAUNCH_ENVIRONMENT_KEY,
-} from '@deepseek-ai/dsh-launch-environment'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { installProfilePackageResolver } from '../lib/module-resolution.js'
+import { bootDesktopProfile } from './boot-desktop-profile.mjs'
 import { prepareDesktopProfile } from '../lib/profile.js'
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -56,12 +50,16 @@ const HOST_SERVICE_PLUGIN_NAME = 'dsh-desktop-host-services-smoke-plugin'
 const SESSION_ID = 'session-restart-smoke'
 const MIGRATION_SESSION_ID = 'session-v0-migration-smoke'
 const V0_LOG_NAME = 'session.jsonl.zstd'
-const V3_LOG_NAME = 'session.v3.jsonl.zstd'
+// 当前世代的文件名由**唯一真源** `SESSION_FORMAT_VERSION` 派生 —— 硬编码
+// `session.v3.jsonl.zstd` 是 0.1.5-rc.2 线的事实，0.1.7-rc.2 起世代是 **v4**
+// （新增包 `@deepseek-ai/dsh-session-format-v3-to-v4`），本脚本因此红在
+// `the created session uses the current v3 generation file name`。
+const CURRENT_LOG_NAME = `session.v${SESSION_FORMAT_VERSION}.jsonl.zstd`
 const home = mkdtempSync(join(tmpdir(), 'dsh-desktop-session-'))
 const previousDshHome = process.env.DSH_HOME
 process.env.DSH_HOME = home
 
-/** Canonical generation file names at or below v3 (v0 is untagged). */
+/** Canonical generation file names for every tagged generation (v0 is untagged). */
 const GENERATION_FILE = /^session(?:\.v[1-9][0-9]*)?\.jsonl(?:\.zstd)?$/u
 
 /** Locate the session's directory under the profile-owned session root. */
@@ -181,21 +179,12 @@ async function bootProfile() {
     { insert: [{ id: 'desktop-host-services-smoke-plugin', name: HOST_SERVICE_PLUGIN_NAME }] },
     ...prepared.patches,
   ]
-  const releasePackageResolver = installProfilePackageResolver(prepared.bareModuleBaseUrl)
   const runtime = createRuntime()
-  const ctx = await boot(
-    BIN_NAME,
-    prepared.rootConfig,
-    patches,
-    async (host) => {
-      host.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([]))
-      host.provide('desktopRuntime', runtime)
-      provideCmdline(host, { args: ['--host', '127.0.0.1', '--port', '0'], exit: () => {} })
-    },
-    prepared.bareModuleBaseUrl,
-  )
-  await runtime.mountScheduled()
-  return { ctx, releasePackageResolver }
+  // 五个必备接线只有一份实现（`scripts/boot-desktop-profile.mjs`）：本脚本此前**只**装了
+  // 0.1.6 那层的 `installProfilePackageResolver`，漏了 0.1.7 的 `PluginPackages` 进程内
+  // 拦截与 `profileContext` ⇒ 一条 bare specifier 都解析不了，4 个 required 插件 + 163 个
+  // 条目全部 `failed to import`（2026-09-28 主控实测；`tests/boot-wiring.spec.ts` 守此形态）。
+  return await bootDesktopProfile({ binName: BIN_NAME, prepared, patches, runtime })
 }
 
 const checks = []
@@ -239,11 +228,11 @@ try {
   if (sessionDir === undefined) throw new Error('cannot plant the v0 fixture without a project directory')
   const createdFiles = generationFiles(sessionDir)
   check(
-    'the created session uses the current v3 generation file name',
-    createdFiles.includes(V3_LOG_NAME),
+    'the created session uses the current generation file name',
+    createdFiles.includes(CURRENT_LOG_NAME),
     `files=${createdFiles.join(',') || '(none)'}`,
   )
-  const sizeBefore = statSync(join(sessionDir, V3_LOG_NAME)).size
+  const sizeBefore = statSync(join(sessionDir, CURRENT_LOG_NAME)).size
   const projectDir = dirname(sessionDir)
   await first.ctx.fiber.dispose()
   first.releasePackageResolver()
@@ -275,10 +264,10 @@ try {
     `id=${header.id} formatVersion=${String(header.version)} events=${body.events.length}`,
   )
 
-  const sizeAfter = statSync(join(sessionDir, V3_LOG_NAME)).size
+  const sizeAfter = statSync(join(sessionDir, CURRENT_LOG_NAME)).size
   check('reopening does not rewrite the stored log', sizeAfter === sizeBefore, `${sizeBefore} → ${sizeAfter} bytes`)
 
-  // v0 → v3 migration path (P1-13).
+  // v0 → 当前世代迁移路径（P1-13）。
   const previewed = await persistence2.open(MIGRATION_SESSION_ID, 'read')
   const previewHeader = previewed.header
   const previewBody = await previewed.read()
@@ -290,7 +279,7 @@ try {
   )
   check(
     'read open publishes no successor generation',
-    !existsSync(join(dirname(v0Path), V3_LOG_NAME)),
+    !existsSync(join(dirname(v0Path), CURRENT_LOG_NAME)),
     `files=${generationFiles(dirname(v0Path)).join(',') || '(none)'}`,
   )
   check('read open leaves the v0 log byte-identical', readFileSync(v0Path).equals(v0Before))
@@ -305,8 +294,8 @@ try {
 
   const migratedFiles = generationFiles(dirname(v0Path))
   check(
-    'write open publishes the v3 generation in the same directory',
-    migratedFiles.includes(V3_LOG_NAME),
+    'write open publishes the current generation in the same directory',
+    migratedFiles.includes(CURRENT_LOG_NAME),
     `files=${migratedFiles.join(',') || '(none)'}`,
   )
   check('write open leaves the v0 source byte-identical', readFileSync(v0Path).equals(v0Before))

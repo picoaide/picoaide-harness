@@ -21,7 +21,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
-import { apply, type Config as DesktopConfig } from '../src/index.ts'
+import { apply } from '../src/index.ts'
+import { resolvedDesktopConfig } from './helpers/desktop-config.ts'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from '../src/directory-picker-contract.ts'
 import { DESKTOP_LOOP_NOTIFY_SESSION_PATH } from '../src/loop-notify-contract.ts'
 import { DESKTOP_UPDATE_CHECK_PATH, DESKTOP_UPDATE_INSTALL_PATH, DESKTOP_UPDATE_PATH } from '../src/desktop-update-contract.ts'
@@ -169,15 +170,13 @@ function harness(withFence = true, platform: 'darwin' | 'win32' = 'darwin'): Har
     effect: (callback: () => unknown) => { const dispose = callback(); return () => { if (typeof dispose === 'function') dispose() } },
     on: () => () => {},
   }
-  apply(ctx as unknown as Context, {
-    productName: 'PicoAide Harness',
-    windowTitle: 'PicoAide Harness',
+  apply(ctx as unknown as Context, resolvedDesktopConfig({
     port: PORT,
     width: 1280,
     height: 840,
     minWidth: 900,
     minHeight: 640,
-  } satisfies DesktopConfig)
+  }))
   return { routes, fence, installNow, checkNow, rendererBoot, pickDirectory }
 }
 

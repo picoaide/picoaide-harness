@@ -367,6 +367,7 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/patch-targets.mjs',
   'scripts/platform-modules.mjs',
   'scripts/upgrade-upstream.mjs',
+  'scripts/upstream-package-checks.mjs',
   'scripts/verify-check-workspaces.mjs',
   'scripts/verify-ci-scripts.mjs',
   'scripts/verify-glitchtip-ops-check.mjs',

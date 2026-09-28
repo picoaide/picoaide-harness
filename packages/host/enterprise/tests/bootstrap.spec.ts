@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { apply as applyBootstrap, maxOutputFromDefaultParams, resolveInputModalities } from '../src/bootstrap.ts'
+import { GATEWAY_LLM_ROW_ID } from '../src/gateway-contract.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session } from '../src/server-connector/config.ts'
 
@@ -250,7 +251,7 @@ describe('会话代际守卫（Z2-01）：迟到的 bootstrap 响应不得落地
       expect(
         {
           search: lastWrite(settings, 'web-search-deepseek'),
-          catalog: lastWrite(settings, 'llm-deepseek'),
+          catalog: lastWrite(settings, GATEWAY_LLM_ROW_ID),
           defaultModel: lastWrite(settings, 'agent-default-model'),
         },
         '迟到响应改写了当前会话（B）的模型配置：凭据是新服务端的令牌，baseURL/模型目录却是旧服务端的',

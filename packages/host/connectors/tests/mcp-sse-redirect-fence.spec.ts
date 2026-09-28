@@ -26,7 +26,7 @@
  *
  * Everything here is real: real `node:http` front/attacker servers on real
  * sockets, the real `@modelcontextprotocol/client` (v2, the package
- * `dsh-mcp-client@0.1.6-alpha.2` imports) `Client` +
+ * `dsh-mcp-client@0.1.7-rc.2` imports) `Client` +
  * `StreamableHTTPClientTransport`, and the transport built from the exact
  * `{ url, headers }` config the real plugin registered (the same
  * `new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } })`

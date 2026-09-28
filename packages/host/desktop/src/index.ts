@@ -2,7 +2,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 /** PicoAide Harness Host plugin: owns the selected native shell generation. */
 
 import { fileURLToPath } from 'node:url'
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import {
@@ -51,6 +51,7 @@ import { readDesktopChannelProfile } from './desktop-channel.ts'
 import type { ConnectionTrustFence, WriteProofDeps } from './write-proof.ts'
 import type { DesktopLocale, DesktopShellMode } from './runtime.ts'
 import { desktopLocaleFromPreference } from './desktop-locale.ts'
+import { readSettingsNamespace } from './settings-forms.ts'
 import type {} from './runtime.ts'
 
 /** Stable Cordis plugin name. */
@@ -76,22 +77,81 @@ declare module '@deepseek-ai/cordis' {
 /** Services required by the desktop shell; `desktopRuntime` is probed, not required. */
 export const inject = ['webServer', 'webRuntime', 'appExit', 'settings', 'connection']
 
-/** Standard settings namespace shared by tray and configuration surfaces. */
+/**
+ * Retired settings namespace.
+ *
+ * Up to DSH 0.1.6 this was the section of `$DSH_HOME/settings.yaml` carrying the
+ * desktop's own settings. Upstream 0.1.7 removed that document and made a
+ * profile **entry id** the settings namespace, so the live namespace is
+ * {@link DESKTOP_SETTINGS_ENTRY_ID}; this constant survives only as the legacy
+ * section name the launcher still reads once as a migration fallback.
+ */
 export const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop' as SettingsNamespace
+
+/**
+ * Profile entry id that owns the desktop's user-editable settings.
+ *
+ * The entry is this plugin's own row (`name`, i.e. `desktop-shell`), which is
+ * why the fields below are declared `volatile`: the settings form projects a
+ * volatile field into the profile patch and edits it without remounting the
+ * row.
+ */
+export const DESKTOP_SETTINGS_ENTRY_ID = name
 
 const UI_THEME_SETTINGS_NAMESPACE = THEME_SETTINGS_NAMESPACE as SettingsNamespace
 const UI_LOCALE_SETTINGS_NAMESPACE = LOCALE_SETTINGS_NAMESPACE as SettingsNamespace
 
-/** Desktop settings presented by the standard settings service. */
+/** File-logger verbosity thresholds the desktop settings form offers. */
+export type DesktopLogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+/** Desktop settings in the resolved config the plugin receives (volatile references). */
 export interface DesktopSettings {
+  /** Loopback Web port; zero requests a random port. */
+  port: Volatile<number>
+  /** File-logger verbosity threshold. */
+  logLevel: Volatile<DesktopLogLevel>
+}
+
+/**
+ * Plain (document) shape of {@link Config}: what a config document holds, and
+ * therefore what the schema validates.
+ */
+export interface DesktopShellConfigDocument {
+  /** Product name shown in the tray, menus, and update notifications. */
+  productName: string
+  /** BrowserWindow title shown while the Web surface is connected. */
+  windowTitle: string
+  /** Configured loopback Web port. */
+  port: number
+  /** Initial window width in CSS pixels. */
+  width: number
+  /** Initial window height in CSS pixels. */
+  height: number
+  /** Minimum window width in CSS pixels. */
+  minWidth: number
+  /** Minimum window height in CSS pixels. */
+  minHeight: number
+  /** File-logger verbosity threshold. */
+  logLevel: DesktopLogLevel
+}
+
+/**
+ * Desktop settings **as the settings form reports them**.
+ *
+ * The form projection resolves every volatile reference before handing the
+ * value out (`SettingsForms.describe()` → `plainConfig`), so readers see plain
+ * data; the `Volatile` wrappers exist only in the config the plugin itself
+ * receives.
+ */
+export interface DesktopSettingsDocument {
   /** Loopback Web port selected for the next application generation; zero requests a random port. */
   port: number
   /** Log verbosity threshold applied to the file logger. */
-  logLevel: 'debug' | 'info' | 'warn' | 'error'
+  logLevel: DesktopLogLevel
 }
 
-/** Schema registered with the standard settings service. */
-export const DesktopSettingsSchema: z<DesktopSettings> = z.object({
+/** Volatile subset of {@link Config} the settings form edits and persists. */
+export const DesktopSettingsSchema = z.object({
   port: z.number().step(1).min(0).max(65_535).default(0),
   logLevel: z.union(['debug', 'info', 'warn', 'error'] as const).default('info'),
 })
@@ -102,8 +162,14 @@ export interface Config {
   productName: string
   /** BrowserWindow title shown while the Web surface is connected. */
   windowTitle: string
-  /** Configured loopback Web port used to detect restart-applied settings changes. */
-  port: number
+  /**
+   * Configured loopback Web port used to detect restart-applied settings changes.
+   *
+   * Volatile: the Web server binds it **before** this row mounts, so a live
+   * change cannot take effect in the running generation — the host watches the
+   * form for a new value and requests one orderly restart instead.
+   */
+  port: Volatile<number>
   /** Initial window width in CSS pixels. */
   width: number
   /** Initial window height in CSS pixels. */
@@ -112,17 +178,29 @@ export interface Config {
   minWidth: number
   /** Minimum window height in CSS pixels. */
   minHeight: number
+  /** File-logger verbosity threshold; volatile so the settings form can edit it. */
+  logLevel: Volatile<DesktopLogLevel>
 }
 
-/** Validated native window configuration. */
-export const Config: z<Config> = z.object({
+/**
+ * Validated native window configuration.
+ *
+ * Deliberately **unannotated** (upstream's volatile-bearing plugins do the
+ * same): `z<T>`'s first type parameter is the *input* shape, so annotating it
+ * with {@link Config} — whose volatile fields hold references — contradicts the
+ * plain defaults the schema declares. The inferred type is nameable from this
+ * file because the workspace resolves exactly one schemastery copy (the version
+ * the pinned upstream vendors); a second copy is what made TS2883 fire here.
+ */
+export const Config = z.object({
   productName: z.string().default('PicoAide Harness'),
   windowTitle: z.string().default('PicoAide Harness'),
-  port: z.number().step(1).min(0).max(65_535).default(0),
+  port: z.number().step(1).min(0).max(65_535).default(0).volatile(),
   width: z.number().step(1).min(800).default(1280),
   height: z.number().step(1).min(600).default(840),
   minWidth: z.number().step(1).min(640).default(900),
   minHeight: z.number().step(1).min(480).default(640),
+  logLevel: z.union(['debug', 'info', 'warn', 'error'] as const).default('info').volatile(),
 })
 
 /**
@@ -185,13 +263,10 @@ export function apply(ctx: Context, config: Config): void {
     templatePath: fileURLToPath(new URL('../build/tray-iconTemplate.png', import.meta.url)),
     bluePath: fileURLToPath(new URL('../build/tray-icon-blue.png', import.meta.url)),
   }
-  const settings = ctx.settings.register(
-    DESKTOP_SETTINGS_NAMESPACE,
-    DesktopSettingsSchema,
-    {
-      applies: 'restart',
-    },
-  )
+  // The settings document **is** this row's `config` (upstream 0.1.7): the
+  // volatile `port`/`logLevel` fields above are the form, and persistence goes
+  // through the profile patch. Nothing is registered here any more; reads below
+  // go through `readSettingsNamespace`.
   const rendererOrigin = `http://127.0.0.1:${String(ctx.webServer.port)}`
   let desktopUpdateState: DesktopUpdateStateResponse = {
     ...emptyDesktopUpdateState(),
@@ -370,8 +445,14 @@ export function apply(ctx: Context, config: Config): void {
   }
   ctx.effect(() => {
     let pending: ReturnType<typeof setImmediate> | undefined
-    const stopWatching = settings.watch((next) => {
-      if (next.port === config.port) {
+    // Restart-applied setting: the Web server already bound the port this
+    // generation was composed with, so a form edit that changes it can only take
+    // effect after one orderly relaunch. Revisions of *other* namespaces
+    // (`ui-theme`, `locale`, …) arrive on the same event and are ignored.
+    const onDocumentUpdated = (namespace: string): void => {
+      if (namespace !== DESKTOP_SETTINGS_ENTRY_ID) return
+      const next = readSettingsNamespace<DesktopSettingsDocument>(ctx.settings, DESKTOP_SETTINGS_ENTRY_ID)
+      if (next?.port === config.port.get()) {
         if (pending !== undefined) clearImmediate(pending)
         pending = undefined
         return
@@ -383,20 +464,25 @@ export function apply(ctx: Context, config: Config): void {
           ctx.logger.error(cause)
         })
       })
-    })
+    }
+    // Registered inside this effect: Cordis unwinds the listener with the effect,
+    // so no manual `off` is needed (and `Context` has none).
+    ctx.on('settings/document-updated', onDocumentUpdated)
     return () => {
-      stopWatching()
       if (pending !== undefined) clearImmediate(pending)
     }
   }, 'dsh-plugin-desktop: restart after startup setting change')
-  ctx.on('settings/updated', (namespace, next) => {
+  ctx.on('settings/document-updated', (namespace) => {
     if (namespace !== UI_THEME_SETTINGS_NAMESPACE) return
-    runtime.setThemeSource((next as ThemeSettings).preference)
+    const theme = readSettingsNamespace<ThemeSettings>(ctx.settings, UI_THEME_SETTINGS_NAMESPACE)
+    if (theme !== undefined) runtime.setThemeSource(theme.preference)
   })
-  ctx.on('settings/updated', (namespace, next) => {
+  ctx.on('settings/document-updated', (namespace) => {
     if (namespace !== UI_LOCALE_SETTINGS_NAMESPACE) return
+    const next = readSettingsNamespace<LocaleSettings>(ctx.settings, UI_LOCALE_SETTINGS_NAMESPACE)
+    if (next === undefined) return
     const before = runtime.locale
-    runtime.setLocalePreference(desktopLocaleFromPreference((next as LocaleSettings).preference))
+    runtime.setLocalePreference(desktopLocaleFromPreference(next.preference))
     // Tell Host surfaces that render per request but are already open (the
     // embedded browser's chrome) to re-serve in the new language. Only on a real
     // change: a settings write that keeps the same preference must not reload
@@ -411,7 +497,13 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.effect(
     () => runtime.schedule({
-      ...config,
+      // Only the durable window geometry travels into the native spec: the
+      // volatile `port`/`logLevel` fields are settings-form state and must not
+      // leak a `Volatile` wrapper into the shell spec.
+      width: config.width,
+      height: config.height,
+      minWidth: config.minWidth,
+      minHeight: config.minHeight,
       // Upstream 0.1.2: the Web index requires a process launch-token exchange
       // (`authorizeIndex`); the shell must load the token-bearing URL so the
       // renderer gets index bytes instead of a 401. The connection service is
@@ -423,10 +515,11 @@ export function apply(ctx: Context, config: Config): void {
       iconPath,
       trayIcons,
       readLocalePreference: () => {
-        return desktopLocaleFromPreference((ctx.settings.get(UI_LOCALE_SETTINGS_NAMESPACE) as LocaleSettings | undefined)?.preference)
+        const locale = readSettingsNamespace<LocaleSettings>(ctx.settings, UI_LOCALE_SETTINGS_NAMESPACE)
+        return desktopLocaleFromPreference(locale?.preference)
       },
       readThemeSource: () => {
-        const theme = ctx.settings.get(UI_THEME_SETTINGS_NAMESPACE) as ThemeSettings | undefined
+        const theme = readSettingsNamespace<ThemeSettings>(ctx.settings, UI_THEME_SETTINGS_NAMESPACE)
         if (theme === undefined) {
           throw new Error('dsh-plugin-desktop: advanced shell requires the ui-theme settings namespace')
         }
@@ -437,3 +530,9 @@ export function apply(ctx: Context, config: Config): void {
     'dsh-plugin-desktop: native shell generation',
   )
 }
+
+// 冒烟脚本（`scripts/verify-profile-boot.mjs` / `scripts/verify-session-restart.mjs`）读设置
+// 走的就是这里导出的**同一个**读取器 —— 0.1.7 起 settings 的命名空间是 **profile 条目 id**
+// 且读取入口是 `describe()`（`ctx.settings.get(ns)` 已不存在）。把实现重写一遍会让
+// "门禁读的值"与"插件读的值"分叉，所以直接复用。
+export { readSettingsNamespace, type SettingsFormDescriptor, type SettingsFormsReader } from './settings-forms.ts'

@@ -38,7 +38,6 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
-import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -47,7 +46,8 @@ import { fetchLoopNotifySession } from '../src/client/loop-notify.tsx'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from '../src/directory-picker-contract.ts'
 import { DESKTOP_UPDATE_CHECK_PATH, DESKTOP_UPDATE_INSTALL_PATH, DESKTOP_UPDATE_PATH } from '../src/desktop-update-contract.ts'
 import { DESKTOP_TITLEBAR_DOUBLE_CLICK_PATH } from '../src/desktop-window-contract.ts'
-import { apply, type Config as DesktopConfig } from '../src/index.ts'
+import { apply } from '../src/index.ts'
+import { resolvedDesktopConfig } from './helpers/desktop-config.ts'
 import { DESKTOP_LOOP_NOTIFY_SESSION_PATH, type DesktopLoopNotifySessionResponse } from '../src/loop-notify-contract.ts'
 import { handleDesktopLoopNotifySessionRequest } from '../src/loop-notify-route.ts'
 import { RENDERER_BOOT_REPORT_PATH, type RendererBootReport } from '../src/renderer-boot-contract.ts'
@@ -487,15 +487,13 @@ function routeHarness(platform: 'darwin' | 'win32'): RouteHarness {
     effect: (callback: () => unknown) => { const dispose = callback(); return () => { if (typeof dispose === 'function') dispose() } },
     on: () => () => {},
   }
-  apply(ctx as unknown as CordisContext, {
-    productName: 'PicoAide Harness',
-    windowTitle: 'PicoAide Harness',
+  apply(ctx as unknown as Context, resolvedDesktopConfig({
     port: HARNESS_PORT,
     width: 1280,
     height: 840,
     minWidth: 900,
     minHeight: 640,
-  } satisfies DesktopConfig)
+  }))
   return {
     routes,
     route: path => routes.find(candidate => candidate.kind === 'exact' && candidate.path === path),

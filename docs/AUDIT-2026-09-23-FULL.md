@@ -3368,3 +3368,160 @@ Go 侧 56 包 ok）、`e7baf42f80`（R33 批，**首次空载 + 有对照**）�
 **本会话共修 3 条"只在 CI 上会红"的缺陷**（`yarn.lock` 脱同步 / 三个 compose env 未接线 /
 `bootstrap` 守卫自 R21 起就红），其中**两条是靠三件套发现的**——而这套纪律本身，
 是从"被咬一口补一条"里长出来的。
+
+---
+
+## §8.9 上游固定点升级到 `0.1.7-rc.2`（2026-09-28，独立于审计轮次的一条交付线）
+
+§8.6–§8.8 之后，工作转入"把上游固定点升到最新发布版"这条线。本节是它的**唯一权威记录**；
+发布说明（`docs/releases/v2.8.2-beta.2.md`）面向用户，本节面向接手人。
+泳道报告在 `temp/upg/r1` … `temp/upg/r7`。
+
+### §8.9.1 版本面的事实（先钉住口径）
+
+| 项 | 值 |
+|---|---|
+| 旧 pin | `dsh-v0.1.6-alpha.2` = `ddefc45fbc7f` |
+| **新 pin** | **`dsh-v0.1.7-rc.2` = `477b4f420553e8a52c2fbccc464d7561b239c443`** |
+| npm 真源 | `npm view @deepseek-ai/dsh dist-tags` ⇒ `latest=0.1.7-rc.2`、`next=0.1.7-rc.2`、`alpha=0.1.7-alpha.2`（升级前后各查一次，一致） |
+| 硬规则 | **submodule 的 tag 必须等于 npm 上真实发布的版本**；二者脱节会让"源码里有的能力"与"实际装到的包"不是同一份 |
+| 声明面 | `upstream.json` 的 `commit`/`sourceVersion`/`runtimePackageVersion` 三处同步；submodule **索引 gitlink** 要单独 `git add`（工作树先变、索引后变，`verify-layout` 抓的就是这条） |
+
+### §8.9.2 上游的四处结构性变化
+
+1. **会话格式 v3 → v4**（唯一需要提前告知使用者的变更，结论见 §8.9.2a）。
+2. **模型链路**：上游**删除**了 `llm-deepseek.protocol`（配了直接抛），路径固定
+   `<baseURL>/messages`；我们网关只认 `Authorization: Bearer` ⇒ 新增自研行
+   `@picoaide/dsh-enterprise/gateway-llm`（Bearer `resolveAuth`，**每请求**解析，
+   缺令牌直接抛且一个请求都不发），组装期禁用上游 api-key 行；设置命名空间
+   `llm-deepseek` → `picoaide-gateway-llm`（唯一真源 `gateway-contract.ts`）。
+3. **设置模型换代**：`@deepseek-ai/dsh-settings-file` 并入 `@deepseek-ai/dsh-settings`，
+   命名空间 = profile 条目 id；桌面启动设置改读组合后的 `desktop-shell` 行。
+4. **包结构**：`dsh-agent-presets` 拆成 `agent-preset` + `agent-preset-registry`。
+
+#### §8.9.2a 会话格式 v4 的实测结论（报告 `temp/upg/r3/REPORT.md`，全部真跑）
+
+- **副本式**：写打开才在同目录新增 `session.v4.jsonl[.zstd]`；源 `session.v3.*`
+  **逐字节不变**（前后 sha256 相同）；重开不重复发布。
+- **旧端行为**：会话**从列表静默消失**，显式打开报 `SessionFormatUnsupportedError`
+  （"upgrade the harness"）；**不会追加、不会分叉** —— 跨进程 flock 租约把并发写
+  拦成 `SessionAlreadyOwnedError`。
+- **"装回旧客户端"不是回滚**：旧端按"最高世代"挑选文件 ⇒ 选到 v4 再拒绝，
+  **不会回落到完好的 v3**。回滚 = 停写 + 整目录恢复 `DSH_HOME`。
+- **磁盘 ≈2.01–2.14×**（不是 v0→v3 那次的 ≈4×）；第一次写打开同步完成
+  （1.8 万事件 ≈950 ms）⇒ 预留与 `sessions/` 等量的空间。
+- **可能被拒绝**（源不动、无新世代，但新客户端也打不开）——**无处理通道**，已登记。
+- 服务端**零**会话格式契约（860 个 Go 文件 + 编译产物层零命中）。
+
+### §8.9.3 补丁面（8 个，逐个重切 + 逐个重验）
+
+`subprocess-local`（目标哈希名 `lib/runner-launch-B2zsQ1Dz.js`）、`client-ui-brand-official`、
+`client-ui-sidebar-documentpreview`、`mcp-client`（**两处**：transport 透传 + schema 声明，
+Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sandbox-windows-acl`
+（目标 `lib/types-DxezulnA.js`）、`web-fetch-http`、`app-builder-lib@26.15.3`。
+`dsh-agent-presets` 补丁**随上游拆包删除**（0.1.6 线 9 个 → 现在 8 个）。
+
+**verify-patches 的判据面**（`temp/upg/verify-patches.log`，EXIT=0）：仓库**之外**的 pristine
+树上逐个干净应用（无 fuzz / 无反向 / 每段都有 hunk）+ 与 yarn 封存副本逐段对拍 +
+**产物侧安装副本逐字节一致**（9 份）+ 10 个合成夹具（零字节 / 丢段 / 多余段 / 截断 hunk /
+无段头 / 完好 / 交付副本未打 / 半打）驱动同一套判据。
+
+**升级脚本的加固**（本轮事故的直接产物）：`scripts/upgrade-upstream.mjs` 原来是
+**纯机械版本替换**（无改名映射、无 registry 检查）⇒ 三个不存在的包名被写进 11 个
+`package.json`，`yarn install` 在 Resolution 步直接 `YN0082`。现新增
+`scripts/upstream-package-checks.mjs`（改名映射 + registry 存在性前置检查：404 即中止，
+查询失败也中止）并在 bump **之前**调用；已做变异验证。
+**副作用（已认账）**：`upgrade-upstream.mjs` **没有 `--help` 语义** —— 传 `--help`
+会真的执行升级（本轮就是这么发现并顺势完成迁移的）。这是 CLI 设计缺陷，未修
+（改动面比收益大），接手人须知。
+
+### §8.9.4 `origin/master` 归并的证据链（`-s ours`，质疑前先看这一节）
+
+升级分支 `fix/round13-batch` 与 `origin/master` 是**同一条审计线的两种历史形态**：
+
+- master 上 6 个 squash 提交（PR #149–#154）与本地账本 §7.48–§7.54 **逐条同题**：
+  `判据的执行与定义` / `修复批自身成了新的缺陷源` / `判据面同族补集 + 浏览器错目标` /
+  `判据面闭包语义反转 + 两条钱的洞` / `判据面第三次被打穿 + 上一轮修复的两条回归` /
+  `不可逆长期汇总 + 月报重推回归 + embeddings 零计费` ⇔ §7.48/§7.49/§7.50/§7.51/§7.53/§7.54。
+- master 的账本 blob **逐字节等于**本地 `b12afea08d`（第十九轮记录）那一份 ⇒ master 的
+  §7.x 是本地账本的**真子集**（`comm -23` 为空）。
+- `git diff 95af47e45e origin/master` = 38 文件 / +370 / −4560 ⇒ master 相对本地**只少不多**。
+- **机械合并是错的（实测）**：在一次性 worktree 里 `git merge origin/master`（默认策略）
+  ⇒ 52 个冲突，且**自动合并把 `server/internal/serverstore/wasm_app_opens_summary.go` 的
+  `rd, err := newUsageReadConnContext(ctx, db)` 复制成两份**（两个父各 1 份、合并结果 2 份）
+  —— 那是编译不过的树。这同时证明"逐冲突取 ours"也不安全（非冲突区仍会注入坏 hunk）。
+- ⇒ **结论：`git merge -s ours origin/master`**（记录父提交、树**逐字节等于本地**）。
+  这不是"丢掉别人的工作"，而是把**同一条线的 squash 形态**标记为已归并；
+  合并提交信息里必须写明这一点。
+
+### §8.9.5 升级**引入**、并在本轮当场收口的缺陷
+
+| # | 现象 | 级别 | 真因 / 判据 |
+|---|---|---|---|
+| U1 | 覆盖层补丁**只出现在组合结果里、没进 Loader 真正挂载的树** ⇒ 桌面外壳与全部自研行整片缺失 | **P0** | **真因（UPG-5 定位，比初判更严重）**：桌面把十层补丁**手工 push 进 `bundlePatches`**（既不在 `profile.layers`、也不在 `ProfileContext.overlays`），而上游 `dsh-config-editor` 的 `edit()` 在**每一次设置写入之前**都跑 `reconcileProfilePatches(root, readProfilePatches(profileContext))`，后者只读 `layers + patchPath + home + overlays` ⇒ 复算少 **25 行**，把 `desktop-shell` 与九个自研面**从运行树上摘掉**（该行 `apply` 从未跑过 = `desktop shell was not registered`）。**触发点是生产同形的**：升级机的 `settings.yaml` 一次性导入、登录时 `gateway-model` 写 baseURL、用户改任何设置项。修法 = 十层提升为**真正的 profile bundle 层**（`REQUIRED_BUNDLES`；桌面自己那层由企业包 `dsh.bundle.patch` 首项 `../../../cordis.patch.yml` 携带，因为 `resolveBundleDir` 的 `resolve.paths()` 不含包自身目录）。**放进 `overlays` 不行**（overlays 追加在最后 ⇒ insert 晚于设置文档 ⇒ `Configuration for "picoaide-gateway-llm" is overridden` 断言炸）——这条反证也记在报告里 |
+| U2 | 两个 boot 冒烟**没接 0.1.7 的进程内包解析**（`PluginPackages` + `createRuntimeResolution`）⇒ 163–169 个 bare specifier 解析失败 | **P0** | 0.1.6 那层 `installProfilePackageResolver` 在 0.1.7 不够用；`main.ts` 接了、两个冒烟没接 |
+| U3 | `verify:closure`：10 条 0.1.7 **新包的必填一方 peer** 没在部署根声明 | P1 | 上游拆包后依赖图变大 |
+| U4 | 文档 pin 漂移 6 处（`site/` 中英 + 桌面包 README 中英） | P1 | 升级后 `upstream.json` 变了、文档没跟 |
+| U5 | 自研判据**硬钉上游文件路径**（`src/protocols/chat-completions/adapter.ts`）⇒ 0.1.7 重排布局后 ENOENT | P1 | 判据意图是"这个头名仍被上游真的发出"，不是"文件在这条路径上"。已改为在包 `src/` 里搜那一行字面量（`hits === 1` 且命中文件是 `adapter.ts`）；**变异①（换成不存在的头名）实测变红** |
+| U6 | 企业「共享智能体 preset」安装链路**静默失效** | P1 | 上游逐字：`$DSH_HOME/.agent-presets/<id>/` 的读取路径 "Nothing reads that directory any more"。旧格式装进去 = 面板列出、roster 永不出现 |
+| U7 | `scripts/upstream-package-checks.mjs` 是新的**判据执行体**却没登记进 `EXECUTION_FACE_REGISTRY` ⇒ `check:ci-parity` 的 install-integrity 步红 | P2 | 登记制守卫的全部意义就是"新增执行体必须登记"；已登记并同步两级摘要（`check-guard-parser-integrity` → `check-root-guards`） |
+
+**U1 的连带行为变更（主控已裁决，接手人须知）**：`verify-profile-boot.mjs` 的
+`KNOWN_UNADDRESSABLE_ROWS` 从 **26 条收缩到 `['include']`**。原因是结构性的、不可分割：
+`plugin_manager` 判定"可寻址"的**唯一依据**就是 `readProfilePatches` 里有没有那一行
+（`plugin-manager/src/index.ts:268`）⇒ "复算看得见它们"与"模型能用 `set_plugin` 改它们"
+是同一个事实；保留 2026-09-23 那次裁决想要的"不可寻址"就等于保留"每次设置写入摘掉桌面行"
+这个 P0。**本次选不丢功能**。代价：创造模式里 `plugin_manager` 现在可以禁用
+`desktop-*`/`picoaide-*`/`pico-*` 行，而其中 **19 条是 `REQUIRED_DESKTOP_ROWS`**
+（禁用后下次启动会被 `assertRequiredRowsActive` 判致命 —— **响亮地失败，不是静默**），
+恢复需要编辑/删除用户 profile 补丁。缓解（未做，需拍板）：给上游 `plugin-manager` 加
+`protectedModules` 注入点，或在桌面侧不给 `cordis` preset 暴露 `plugin_manager` 工具。
+
+**U1/U2 的方法论教训**：升级后**"组合函数返回的行集"与"树里真的挂上去的行集"是两个面**
+——只断言前者会得到假绿。本仓已有 `inactiveRequiredRows` 这类能力判据，但它跑在"树挂载完成"
+之后；U1 让那段判据**根本没被执行到**（脚本在更早的地方抛）。
+⇒ **能力判据的前置步骤失败时，"判据未执行"本身必须成为失败**。
+
+### §8.9.6 本轮新登记的判据缺口（未修，接手清单）
+
+1. **`node_modules` 里的埋点无从发现**：为诊断给
+   `packages/host/desktop/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js` 注入了 4 行
+   `[R5AB]` 调试打印。`.yarn/cache` 有 pristine 副本，但**没有任何守卫**比对"未被补丁触碰的
+   `node_modules` 包 == cache 里的 pristine 内容"。发布产物不受影响（CI 从干净检出
+   `yarn install` 重新物化），但本地打包会带上。判据形状建议：对**除 8 个补丁目标包之外**的
+   `node_modules/@deepseek-ai/*` 与 `@picoaide/*` 做一次目录摘要对拍。
+   **排查提示**：`grep -rl '<标记>'` 会在 base64 资源里误命中（本轮先误判了两处），
+   判据要按"代码行形态"而不是纯子串。
+   **本轮事后核对（一次性脚本，未落成守卫）**：把 `packages/*/…/node_modules` 下**每一个**
+   非补丁包与 `.yarn/cache` 对应 zip 的逐文件 sha256 对拍 ⇒ **0 处不一致**；
+   被污染的 `dsh-app-boot/lib/index.js` 已由泳道自行还原，与 cache 副本 sha256 逐字节相同
+   （`43dccddf285e7a02…`）。这条判据因此是"补上就再也不会漏"的形态，值得独立立项。
+2. **`ci-release-policy.sh` 只传 `--ref` 不传 `--ref-name` 时静默给
+   `release_kind=none` / `publish_release=false`**。CI 两处调用点都传了两个参数所以打不中，
+   但这是"名字像发布 tag 却判成不发布"的同一失效族（K-04 / R5-C-1）。
+   建议：`--ref` 是 `refs/tags/v…` 而 `--ref-name` 缺失时 fail-loud，或从 `--ref` 派生。
+3. `verify-profile-boot.mjs` 的"重算行集 ≠ 真实装配行集"本轮**保留为登记残留**
+   （包内 patch 注入在 bundle 层，重算路径看不到）：登记表必须与实测差集**逐条相等**，
+   差集变大变小都要更新登记 —— 形态上仍是"登记即接受"，但比之前的静默不一致强。
+4. **网关端点硬边界没有"合法异址"入口**（UPG-5 的 D-1）。`resolveAuth` 现在
+   **先判端点再读凭据**，只允许发给当前会话推导出的 `<serverURL>/v1`（归一化容忍尾斜杠；
+   非 http(s) / 带 userinfo / 不可解析一律拒，码 `ENDPOINT_MISMATCH`，错误点名两端、不含令牌，
+   判据 11/11）。**当前所有部署都不受影响**（渠道的 `defaults.server_url` 天然就是 `serverURL`），
+   但"网关放在另一个 origin"这种形态目前**没有正当入口**。精确改法：给
+   `picoaide-gateway-llm` 行 Config 增加**非 volatile** 的 `gatewayBaseURL`
+   （组装期/渠道注入；非 volatile ⇒ 表单写入被 `Config field … is not volatile` 拒绝），
+   并在 `allowedGatewayEndpoint` 里并入允许集、拒绝信息里点名来源。
+5. **U1 的治理面暴露**（见 §8.9.5 末段）：自研行现在对 `plugin_manager` 可寻址，
+   其中 19 条为必需行；禁用后启动响亮失败。缓解需上游 `protectedModules` 注入点。
+6. **④ 的真机复跑（D-2）与打包版"设置写入后桌面行仍在"（D-4）**：D-2 需要真 Go 网关
+   + scratch PG（`node temp/r4/gateway-real-probe.mjs`，期望 12/12）；D-4 的实质控制由
+   打包版 `e2e:client` 覆盖（它登录会触发一次设置写入，而它断言的面板正是这些行）。
+
+### §8.9.7 验收与交付
+
+（本轮验收的原始输出与退出码在 `temp/upg/freeze/`；产物面与真机 E2E 见
+`docs/releases/v2.8.2-beta.2.md` §四；独立证伪报告在 `temp/upg/r7/REPORT.md`。）
+
+**发布面**：tag `v2.8.2-beta.2`（预发 ⇒ 只构建 `beta` 渠道；`ci-release-policy.sh` 已核
+`release_kind=prerelease / channel_set=beta / publish_release=true`，
+且 `v2.8.2-beta.1` 是本 tag 的祖先）。
