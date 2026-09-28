@@ -441,7 +441,15 @@ describe('published package surface', () => {
     // 另一个字段」正是这类门禁最容易出现的假绿。
     const pinned = manifest.devDependencies?.electron as string | undefined
     expect(typeof pinned).toBe('string')
-    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/u)
+    // 这条断言守的是「**精确 pin**，不是 range」—— 不是「必须是稳定版」。
+    // 2026-09-28 修正取值域：原来是 `^\d+\.\d+\.\d+$`，它把**预发布版**一并判红，而
+    // 预发布版同样可以是精确 pin。0.1.7 的原生插件按 V8 指纹只认三个精确的 Electron
+    // 版本，唯一同时满足「插件指纹」与「asar bigint 语义」的解就是 `45.0.0-alpha.7`
+    // （证据链见 docs/AUDIT-2026-09-23-FULL.md §8.9.9）⇒ 旧正则把唯一可用的解判死。
+    // 这正是本项目反复出现的「判据的取值域窄于被守护面」：断言必须表达它声称的语义。
+    expect(pinned, 'Electron 必须是精确 pin（含预发布版，但不得是 range）')
+      .toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u)
+    expect(pinned, 'Electron pin 不得包含 range 运算符').not.toMatch(/[\^~><=|\s]/u)
     expect(manifest.peerDependencies?.electron).toBe(pinned)
     // 必须与桌面壳实际使用的主版本一致（peer 面写着旧版本而 devDep 是新的，
     // 会让第三方插件在 Electron 43 上编译、在 44 上运行）。

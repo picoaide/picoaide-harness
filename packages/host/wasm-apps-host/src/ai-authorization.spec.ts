@@ -316,6 +316,13 @@ describe('读不动的记录文件：读面 fail-closed，写面拒绝覆盖', (
       if (blocked) {
         expect(await store.isGranted('alice', 'keep-me', SERVER)).toBe(false)
         await expect(store.grant('alice', 'brand-new', SERVER)).rejects.toBeInstanceOf(AiConsentReadError)
+        // **先恢复读权限再对字节**：`blocked === true` 说明本环境的读确实被挡，
+        // 此时直接 `readFileSync` 会以 EACCES 抛错 —— 那不是被测行为的问题，而是
+        // **观测手段**的问题（恢复权限只改变"怎么验"，不改变"验什么"：判据仍然是
+        // "写面拒绝覆盖后原字节不变"）。2026-09-28 修 "本地绿、CI 红"：本地以 root
+        // 跑（CAP_DAC_OVERRIDE ⇒ 走 else 支），CI runner 是非 root ⇒ 走这一支，
+        // 于是这条断言在 CI 上必然以 EACCES 失败。
+        await chmodSync(file, 0o600)
         expect(readFileSync(file).equals(before)).toBe(true)
       } else {
         // root/CAP_DAC_OVERRIDE（容器与 CI 常见）：读得到就照常工作，**不因环境变红**，

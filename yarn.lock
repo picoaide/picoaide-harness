@@ -6373,7 +6373,7 @@ __metadata:
     "@types/node": "npm:^22.20.0"
     "@types/react": "npm:^18"
     dsh-plugin-desktop: "workspace:*"
-    electron: "npm:44.4.3"
+    electron: "npm:45.0.0-alpha.7"
     jsdom: "npm:^25.0.0"
     react: "npm:18.3.1"
     tsdown: "npm:0.22.2"
@@ -6383,7 +6383,7 @@ __metadata:
     "@deepseek-ai/cordis": 4.0.4
     "@deepseek-ai/cordis-plugin-include": 1.0.9
     "@deepseek-ai/cordis-plugin-loader": 1.0.5
-    electron: 44.4.3
+    electron: 45.0.0-alpha.7
   languageName: unknown
   linkType: soft
 
@@ -6529,7 +6529,7 @@ __metadata:
     "@types/react": "npm:^18"
     adm-zip: "npm:^0.6.0"
     dsh-plugin-desktop: "workspace:*"
-    electron: "npm:44.4.3"
+    electron: "npm:45.0.0-alpha.7"
     react: "npm:18.3.1"
     tar: "npm:^7.5.0"
     tsdown: "npm:0.22.2"
@@ -6626,7 +6626,7 @@ __metadata:
     "@picoaide/dsh-browser": "workspace:*"
     "@picoaide/dsh-host-locale": "workspace:*"
     "@types/node": "npm:^22.20.0"
-    electron: "npm:44.4.3"
+    electron: "npm:45.0.0-alpha.7"
     tsdown: "npm:0.22.2"
     typescript: "npm:6.0.3"
     vitest: "npm:4.1.8"
@@ -6634,7 +6634,7 @@ __metadata:
     "@deepseek-ai/cordis": 4.0.4
     "@deepseek-ai/cordis-plugin-include": 1.0.9
     "@deepseek-ai/cordis-plugin-loader": 1.0.5
-    electron: 44.4.3
+    electron: 45.0.0-alpha.7
   languageName: unknown
   linkType: soft
 
@@ -8995,7 +8995,7 @@ __metadata:
     "@types/react": "npm:^18"
     adm-zip: "npm:^0.6.0"
     dsh-memory-evolve: "workspace:*"
-    electron: "npm:44.4.3"
+    electron: "npm:45.0.0-alpha.7"
     electron-builder: "npm:26.15.3"
     koffi: "npm:3.1.5"
     node-addon-require-builtin: "npm:^0.1.6"
@@ -9011,7 +9011,7 @@ __metadata:
   peerDependencies:
     "@deepseek-ai/cordis-plugin-include": 1.0.9
     "@deepseek-ai/cordis-plugin-loader": 1.0.5
-    electron: 44.4.3
+    electron: 45.0.0-alpha.7
   bin:
     dsh-desktop: lib/bin.js
     dsh-plugin-desktop: lib/bin.js
@@ -9115,9 +9115,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"electron@npm:44.4.3":
-  version: 44.4.3
-  resolution: "electron@npm:44.4.3"
+"electron@npm:45.0.0-alpha.7":
+  version: 45.0.0-alpha.7
+  resolution: "electron@npm:45.0.0-alpha.7"
   dependencies:
     "@electron-internal/extract-zip": "npm:^1.0.1"
     "@electron/get": "npm:^5.0.0"
@@ -9125,7 +9125,7 @@ __metadata:
   bin:
     electron: cli.js
     install-electron: install.js
-  checksum: 10c0/6c26e1d9c4351ebee7a4e3ceff189a7112f408600ff21f37ac345e42fe643b366f60d44fce0b4ebf4c5bdd9b1923e98298340b1263036c9e29565bf9e713b6c9
+  checksum: 10c0/bc19e9c249499613d249cc4287e7f86633ef1171535cb5766e23f08344311ab876487b3fdd6f854c953a6248196227adee7aa95735bfe32f80046cee8276a860
   languageName: node
   linkType: hard
 

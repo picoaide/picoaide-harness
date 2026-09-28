@@ -3465,6 +3465,7 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 | U5 | 自研判据**硬钉上游文件路径**（`src/protocols/chat-completions/adapter.ts`）⇒ 0.1.7 重排布局后 ENOENT | P1 | 判据意图是"这个头名仍被上游真的发出"，不是"文件在这条路径上"。已改为在包 `src/` 里搜那一行字面量（`hits === 1` 且命中文件是 `adapter.ts`）；**变异①（换成不存在的头名）实测变红** |
 | U6 | 企业「共享智能体 preset」安装链路**静默失效** | P1 | 上游逐字：`$DSH_HOME/.agent-presets/<id>/` 的读取路径 "Nothing reads that directory any more"。旧格式装进去 = 面板列出、roster 永不出现 |
 | U7 | `scripts/upstream-package-checks.mjs` 是新的**判据执行体**却没登记进 `EXECUTION_FACE_REGISTRY` ⇒ `check:ci-parity` 的 install-integrity 步红 | P2 | 登记制守卫的全部意义就是"新增执行体必须登记"；已登记并同步两级摘要（`check-guard-parser-integrity` → `check-root-guards`） |
+| U8 | **打包版客户端根本起不来**（P0，只有真机 E2E 能发现）：`host preparation failed: node-addon-require-builtin unsupported: Unsupported/no-context`（Electron 44.4.3 / V8 15.2.124.28） | **P0** | 0.1.7 的包解析改用原生插件 `node-addon-require-builtin` 去够 Node 内部 loader（`app-boot/lib/index.js:1574`），而该插件的原生二进制里**硬编码了 3 个精确的 Electron 指纹**（`15.0.245.13`→43、`15.2.124.13`→44、`15.4.80`→45-alpha，`strings` 实测），**按 V8 补丁号精确匹配**；上游 pnpm-lock 钉的正是 `electron@44.0.0`（= `15.2.124.13`），而我们自 v2.8.1 起钉 `44.4.3`（= `15.2.124.28`）⇒ 拒绝。详见 §8.9.9 |
 
 **U1 的连带行为变更（主控已裁决，接手人须知）**：`verify-profile-boot.mjs` 的
 `KNOWN_UNADDRESSABLE_ROWS` 从 **26 条收缩到 `['include']`**。原因是结构性的、不可分割：
@@ -3517,14 +3518,145 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
    + scratch PG（`node temp/r4/gateway-real-probe.mjs`，期望 12/12）；D-4 的实质控制由
    打包版 `e2e:client` 覆盖（它登录会触发一次设置写入，而它断言的面板正是这些行）。
 
-### §8.9.7 验收与交付
+### §8.9.7 验收与交付（最终）
 
-（本轮验收的原始输出与退出码在 `temp/upg/freeze/`；产物面与真机 E2E 见
-`docs/releases/v2.8.2-beta.2.md` §四；独立证伪报告在 `temp/upg/r7/REPORT.md`。）
+**冻结锚 `9574ce8e86`（升级迁移提交）上的三件套**（空载、串行、原始输出落
+`temp/upg/freeze/`，判定行与退出码**从文件里读**）：
+
+| 件 | 命令 | 结果 |
+|---|---|---|
+| ① | `corepack yarn check` | **EXIT=0**，`planned=32 executed=32`（15 包 + 17 根守卫） |
+| ② | `corepack yarn install --immutable` | **EXIT=0** |
+| ③ | `cd server && gofmt -l . && go vet ./... && go test ./cmd/server ./internal/... -count=1 -p 1 -timeout 30m` | `gofmt` EXIT=0（唯一一行是**别的泳道的 gitignored 草稿** `server/temp/laneD/poolwait/main.go`）、`vet` EXIT=0、`go test` **EXIT=0（56 包 ok / 0 FAIL）** |
+
+**冻结证据**：`0-snapshot.txt` 的前后两次 `git status --porcelain` **逐行相同**
+（只有四个与本仓无关的历史未跟踪文件）⇒ 整轮验收期间树零写入，"冻结"不是自称。
+
+**引擎 pin 变更（§8.9.9）之后的复跑**：`yarn check` **EXIT=0 / 32 executed**
+（`12-yarn-check-e45c.log`）、`yarn install --immutable` **EXIT=0**；
+③ 未复跑，理由是**字节同一**：`git diff --name-only 9574ce8e86 HEAD -- server/` 为空
+（`server/` 一个字节都没动，Go 结论由同一性继承）。
+
+**产物面与真机（Electron `45.0.0-alpha.7`）**：
+
+| 判据 | 结果 |
+|---|---|
+| `yarn package:dir`（真实 unpacked 产物 + afterPack 门禁 + fuse 加固） | **EXIT=0**，`packaged ASAR bigint smoke OK` |
+| 打包版真机启动 | **1 秒内暴露 CDP**，日志显示组合树挂载完成（`7-package-dir-e45a7.log` / 手工复现） |
+| `e2e:client`（Xvfb + 打包产物，覆盖登录 → 侧栏 → 连接器 → 技能 → 设置 → cron → 任务板 → 聊天 → 高级模式 → 工作区 → 账号页） | **41/41 通过**（`packages/host/desktop/.e2e-report.md`） |
+| 其中对 U1（覆盖层补丁被设置写入摘掉）的实质控制 | **构成**：E2E 的登录会触发一次设置写入，而它断言的品牌槽位/根槽位/各面板正是那些行 |
 
 **发布面**：tag `v2.8.2-beta.2`（预发 ⇒ 只构建 `beta` 渠道；`ci-release-policy.sh` 已核
 `release_kind=prerelease / channel_set=beta / publish_release=true`，
 且 `v2.8.2-beta.1` 是本 tag 的祖先）。
+
+**独立证伪**：`temp/upg/r7/REPORT.md`（锚 `3595ddf835`，对抗性——默认假设这套升级有问题）。
+
+### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
+
+**现象**：CI 的 `Gate (tests + workspace build)` 在 `@picoaide/dsh-wasm-apps-host` 上红：
+
+```
+FAIL src/ai-authorization.spec.ts > 读不动的记录文件… > 真 EACCES（自校准）：记录不被吞 + 写面拒绝覆盖
+Error: EACCES: permission denied, open '/tmp/pico-app-ai-consent-XXXX/wasm-apps-ai-consent.json'
+```
+
+**真因（判据自身的缺陷，不是被测行为）**：两条"真 EACCES（自校准）"用例在
+`blocked === true` 分支里，为了证明"写面拒绝覆盖后原字节不变"，**直接 `readFileSync(file)`**
+—— 而这一支的前提正是"本环境的读被挡住"⇒ 观测手段自己先撞墙。本地以 **root** 跑
+（`CAP_DAC_OVERRIDE` ⇒ 走 `else` 支）所以永远看不见，CI runner 是**非 root** ⇒ 必然红。
+
+**修法**：在断言字节**之前**恢复读权限（`chmodSync(file, 0o600)`）—— 恢复权限只改变
+"怎么验"，不改变"验什么"（判据仍是"原字节不变"），`finally` 里本来就有的 chmod 保持不变。
+两处：`packages/host/wasm-apps-host/src/ai-authorization.spec.ts`、
+`packages/host/enterprise/tests/wasm-app-ai-rows-consent-failure-modes.spec.ts`。
+
+**方法论（可复用，本轮最有价值的一条）**：本机是 root，**"本地全绿"与 CI 的权限模型不是同一件事**。
+补跑方式（已实测有效）：
+
+```bash
+capsh --drop=cap_dac_override,cap_dac_read_search -- -c "cd /data/picoaide-harness && corepack yarn check"
+```
+
+正控：`chmod 000` 的文件在 root 下读得到、在该命令下 `权限不够`
+（`temp/upg/ai-auth-nodac.log` / `ent-eacces-nodac.log` 两支都是 29/29 与 15/15 全过；
+不过这一层的全量 `yarn check` 抓到**第二条**同族 —— 若只修 CI 报的那一条就还会再红一次）。
+⇒ **纪律：凡是要在 CI 上跑的权限类判据，本地必须至少用这一条命令跑一遍；"我有 CAP_DAC_OVERRIDE"
+不能当成"CI 也会绿"。**
+
+**同批的另外两条 CI-only 红（都是"128 个提交从未跑过 CI"的直接后果，同一批修掉）**：
+
+1. **`app-ai-release-gate.spec.ts` 的自校准判据依赖调度顺序**：VB-N2 那两条用例要把
+   "被放弃那一轮的 `finally` 落得比闸门晚"造出来，做法是给 `whenIdle` 的**第 1 次**调用
+   加一个宏任务；而 `whenIdle` 有两个调用者（`runTurn` 的等待 = 要推迟的那一个；
+   `dispose()` 内部的等待 = **不能**推迟）。**"第 1 次是谁"在 CI 上不可靠** —— 实测 CI 上
+   首次落在 `dispose()` 上，于是自校准响亮地报「加宽打到了错误的 whenIdle 调用者」，
+   而本地第 1 次恰好命中 `runTurn` ⇒ 恒绿。
+   **修法不是放宽判据**（那正是自校准要防的"判据空转"），而是把**序号变成参数**：
+   `instrument(…, widenCallIndex)` + 用例逐个试 `[1, 2, 3]`，**任一次序打开窗口就算命中**，
+   一次都没打开仍然是响亮的红。本地连跑 3 次 6/6 全过。
+   教训：**"造出一个时序窗口"的判据必须把"哪个调用者是哪一个"变成可枚举的输入，
+   而不是靠调用序号猜。**
+2. **产物 specifier 空转下限过期**：`verify-packaged-runtime.ts` 的
+   `MIN_RESOLVED_WORKSPACE_SPECIFIERS` 由 20 下调到 17 —— 十层自研补丁不再用
+   `createRequire(…).resolve('@picoaide/<pkg>/package.json')` 解析（U1 的修法），
+   产物里的 `@picoaide/*` specifier 随之减少，**CI 干净检出实测 18**（本地完整树 ≥20）。
+   该常数的用途**只有"防空转"**（产物没构建时会掉到 ≈0），17 仍远高于那个形态；
+   注释里写明了历史值与下调理由。**教训：本地完整树的计数会掩盖"干净检出"的计数** ——
+   凡是拿"产物里有多少条 X"当下限的判据，都要在**干净检出**上实测一次。
+
+### §8.9.11 独立证伪（UPG-7，锚 `1f878b864a`）结果与由此产生的更正
+
+报告 `temp/upg/r7/REPORT.md`。**REFUTED 3 / SURVIVED 15 / UNVERIFIED 5 ⇒ 0 P0 / 2 P1 / 3 P2**。
+锚自证：`git diff --stat <任一锚> 1f878b864a -- ':!docs'` 为空（三个锚的**代码树逐字节相同**）。
+
+**它打中的（对抗性证据，说明这套升级的主体是真的）**：
+- **8/8 补丁都有"运行期正向 + 反向对照"**（反向 = 换成 `.yarn/cache` 的 pristine 影子树、同一份探针
+  代码）：`subprocess-local` 的 `ELECTRON_RUN_AS_NODE`（"1" vs `null`）、`brand-official` 的
+  `apply()` 0 次 vs 4 次 slots 调用、`documentpreview` 68 vs 86（pristine 多 7 项 office 注册）、
+  **mcp transport** 用记录型 SDK 影子看 `optionKeys`（含 `authProvider` vs 不含）、inventory 返回 `[]`
+  vs 抛错、sandbox-acl Win32 5 有提示 vs 无、app-builder-lib 的
+  `set-key-partition-list -k <生成的 keychainPassword>` vs `<证书密码>`。
+- 8/8 `patch -p1 -F0` **零 fuzz**，`pristine+patch` == yarn 封存 zip == 9 份安装副本，**三方哈希相等**。
+- **`web_fetch` 取舍的表态准确**：真 fetch `http://127.0.0.1:<port>/` 取到内容，pristine 同 URL 报
+  `WEB_BLOCKED_URL`；真值表 12/12。
+- 真 `boot()` 树 212 条、**19/19 必需行 `state==2`**、enabled-但-import-不进来 **= 0**；
+  真实 asar 的 `exports` 子路径**零缺失**；afterPack/泄漏/资源族门禁在真实产物上重放全 PASS；
+  **provenance 106/106 逐字节**。
+- 变异咬到：把补丁头的哈希名改坏 ⇒ 仓库守卫 EXIT 0→1 并点名。
+
+**两条 P1（都已按事实更正，而不是"解释过去"）**：
+
+1. **C22 真机网关 L1 复跑 9/12**（此前登记"期望 12/12"）。根因：本轮新加的 `ENDPOINT_MISMATCH`
+   硬边界把**探针自己的客户端栈**拒了（探针段 B 没有登录态 ⇒ 无 `picoSession.serverURL`），
+   后三段"全链路 pong / 网关侧 Bearer 观测 / 上游 key 对照"**结构上不可能 PASS**。
+   **准确口径**：不是"真实用户必然坏"（边界 fail-closed，登录后即有 `serverURL`），
+   而是"**登记的那条验收判据在锚上已过期**，且上一轮唯一的端到端证据不再可复现"。
+   由此暴露的**真实待办**：`ENDPOINT_MISMATCH` 不在 `DEFAULT_RETRYABLE_CODES`
+   （实测常量 `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`）⇒
+   **会话未就绪窗口内的模型请求从"带令牌照发"变成"不可重试的硬失败"**。已写进发布说明（§一.2 末条）。
+   待办：① 把该探针改成"带登录态的 12/12"并补"session 未就绪 / 端点不符"两档判据；
+   ② 确认 `picoSession` 就绪时序覆盖 **cron 与应用 AI** 两个入口（它们可能先于交互式登录发请求）。
+2. **D13 发布说明漏报**：上游 `spill-policy` 由 `maxInlineBytes: 50000` 换成
+   `maxInlineTokens: 12500`（schema 只认 token），我方零引用 ⇒ 桌面直接吃新默认，
+   而**长工具结果的落盘时机是用户可感的**。已补进发布说明（§一.3），等价性仍标 UNVERIFIED。
+
+**三条 P2**：
+- **N3** `dsh-mcp-client` 补丁的 **schema 半在 0.1.7-rc.2 上冗余**（pristine 的 `Config()` 不剥未声明键，
+  实测连随意塞的键都活着）⇒ 发布说明原写"两处缺一不可：Schemastery 会剥掉未声明字段"**理由不成立**，
+  已更正为"承重的是 transport 半；schema 声明是为上游后续版本更保守"。补丁本身保留。
+- **N4** 桌面包两份 README 仍写**已不存在**的 asar 探针路径
+  （`dsh-agent-presets/presets/cordis/skills`，真实产物里 0 条），已改为
+  `dsh-agent-preset/skills`；§8.9.5 U4 的"6 处文档漂移"没覆盖这类**路径引用**，属判据面缺口。
+- **N6** `enterprise/src/client/index.ts:81-84` 的品牌 CSS 靠**上游 CSS-module 类名后缀**匹配
+  （`_headlineText` / `_titleGroup` / `_previewBadge` / `_footerActions`），而**没有任何测试会因失配变红**
+  （`channel-vars.spec.ts` 只断言 CSS 变量值）⇒ 与 2026-09-12 那次"上游改名 ⇒ 品牌样式静默空匹配"同族。
+  本版靠人肉加双选择器，**下次改名仍然只有人肉能发现**。待办：补一条"注入的选择器必须在真实
+  DOM/CSS 里命中"的归属判据（形态参照 2026-09-11 浏览器控制权那次的能力判据）。
+
+**它明确标 UNVERIFIED 的**（不许当通过）：会话格式 v3→v4 矩阵（未重建 0.1.6 旧二进制）、
+三件套数字（未重跑，由本节的实测承担）、Windows/macOS 原生面、以及"从锚重新打包"
+（副本无 `node_modules`；用"门禁重放 + provenance 106/106"替代，口径已写明）。
 
 ### §8.9.8 CI 首轮红与 CodeQL 面板处置（PR #155）
 
@@ -3550,3 +3682,35 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 **认账**：dismiss 的 13 条是"仅测试 / 夹具"这一类的**判断**，不是"代码没有问题"的证明；
 判据是**告警对象全是夹具字面量**（逐条看过代码），且这 13 条不改变任何产品或判据语义。
 按仓内惯例，处置理由逐条写在 GitHub 的 dismissal comment 里（可检索）。
+
+### §8.9.9 客户端引擎 pin：Electron 44.4.3 → **45.0.0-alpha.7**（U8 的收口）
+
+**这是本轮唯一一处"两条硬约束正面冲突"的地方**，两条都必须满足，而 44 线里没有交集：
+
+| 约束 | 来源 | 要求 |
+|---|---|---|
+| 原生插件的运行时指纹 | 0.1.7 的 `node-addon-require-builtin`（够 Node 内部 loader 做包解析） | Electron 的 **V8 补丁号精确等于**表里三条之一：`15.0.245.13`(43) / `15.2.124.13`(44.0.0) / `15.4.80`(45-alpha) —— 表在**原生二进制**里，没有环境开关（`strings` 实测） |
+| ASAR 的 `bigint` 语义 | v2.8.1 修的 P0（`dsh-skill-filesystem` 在 asar 根上拿 Number Stats ⇒ 整个文件系统技能 provider 被跳过） | Electron **≥ 44.4.3**（43.4.0 与 44.0.0 **实测都不满足**） |
+
+- **Electron 44.4.3**：asar ✓、插件 ✗ ⇒ 打包版**启动即失败**（实测栈见 §8.9.5 U8）。
+- **Electron 44.0.0**（= 上游 pin）：插件 ✓、asar ✗ ⇒ 打包被自己的 afterPack 门禁拒包
+  （`packaged ASAR bigint smoke failed`，日志 `temp/upg/freeze/6-package-dir-e44.log`）。
+- **Electron 45.0.0-alpha.7**（V8 `15.4.80`，与表里的 45-alpha 项同指纹，且晚于 44.4.3）：
+  **两条都满足**——afterPack 的 asar bigint 冒烟 OK（`temp/upg/freeze/7-package-dir-e45a7.log`，
+  `PACKAGE_DIR_EXIT=0`），打包版真机启动并暴露 CDP（1 秒内），`e2e:client` **41/41 全过**
+  （`packages/host/desktop/.e2e-report.md`）。
+
+**认账（必须随发布说明一起给出）**：45.0.0-alpha.7 是 Electron 的 **alpha 通道**。
+选它的理由不是"更新更好"，而是**它是唯一同时满足上述两条硬约束的版本**：
+上游的表把 45-alpha 显式列为受支持运行时，而 44 线里唯一的受支持版本恰好是没有 asar 修复的那个。
+替代方案（自行编译该原生插件 / 去掉 ASAR / 放弃 asar 技能同步）代价都更大且更危险。
+**复核入口**：升级 Electron 时必须重新跑 `yarn package:dir`（asar 冒烟）+ 打包版启动
++ `e2e:client`；只跑 `yarn check` 会放过这一类（U8 就是被真机 E2E 抓到的，不是被单元测试）。
+
+**连带修掉的一条判据取值域缺陷（本项目的老毛病，第 10 次复发）**：
+`packages/host/desktop/tests/package.spec.ts` 的「Electron 必须精确 pin」用的是
+`/^\d+\.\d+\.\d+$/u` —— 它把**预发布版**一起判红，而该断言声称的语义是
+「**不是 range**」。于是它把唯一同时满足两条硬约束的解（`45.0.0-alpha.7`）判死。
+修法 = 让断言表达它声称的语义：精确 semver（允许预发布/构建元数据）+ **显式**禁止
+range 运算符（`[\^~><=|\s]`）。**判据是**：把 pin 改成 `^45.0.0` 仍必须红（range），
+把 pin 改成 `45.0.0-alpha.7` 必须绿。

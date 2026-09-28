@@ -323,7 +323,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
     "@deepseek-ai/cordis-plugin-loader": "1.0.5",
-    "electron": "44.4.3"
+    "electron": "45.0.0-alpha.7"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
@@ -335,7 +335,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
-    "electron": "44.4.3",
+    "electron": "45.0.0-alpha.7",
     "electron-builder": "26.15.3",
     "sharp": "0.35.3",
     "tsdown": "0.22.2",

@@ -193,6 +193,13 @@ describe('读不动的记录文件：记录不被吞 + 写面如实报错 + 原�
       if (blocked) {
         expect(await store.isEnabled('keep-me')).toBe(false)
         await expect(store.setEnabled('brand-new', true)).rejects.toBeInstanceOf(AiRowsConsentReadError)
+        // **先恢复读权限再对字节**：`blocked === true` 说明本环境的读确实被挡，
+        // 直接 `readFileSync` 会以 EACCES 抛错 —— 那是**观测手段**的问题，不是被测
+        // 行为的问题（恢复权限只改变"怎么验"，不改变"验什么"：判据仍是"原文件一字未改"）。
+        // 2026-09-28 修 "本地绿、CI 红"：本地 root（CAP_DAC_OVERRIDE ⇒ 走 else 支）、
+        // CI runner 非 root ⇒ 走这一支。同族第二处，第一处见
+        // `docs/AUDIT-2026-09-23-FULL.md` §8.9.10。
+        await chmodSync(file, 0o600)
         expect(readFileSync(file).equals(before)).toBe(true)
       } else {
         // root/CAP_DAC_OVERRIDE（容器与 CI 常见）：读得到就照常工作，**不因环境变红**，

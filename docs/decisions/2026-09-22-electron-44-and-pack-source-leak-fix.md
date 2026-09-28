@@ -291,3 +291,39 @@ cordis.patch.yml}），在 asar 与物理两种布局里都断言；另有**对�
    electron-builder 行为。
 5. `temp/` 下那两个 squashfs 试验件仍在工作树里（gitignored，275 MiB）。现在不会
    进包，**建议删掉**；但删完需要重跑一次 `yarn build`（它们在同一次构建里被读过）。
+
+---
+
+## 四、2026-09-28 追补：pin 从 `44.4.3` 改为 **`45.0.0-alpha.7`**（DSH 0.1.7 升级夹出来的）
+
+**触发**：上游 0.1.7 的包解析改用原生插件 `node-addon-require-builtin` 去够 Node 内部
+module loader（`dsh-app-boot/lib/index.js:1574` 的 `requireBuiltin("internal/modules/esm/loader")`）。
+该插件的原生二进制**硬编码了三个精确的 Electron 运行时指纹**（`strings` 实测）：
+
+| 表项 | V8 指纹 | 对应 Electron |
+|---|---|---|
+| electron-43 | `15.0.245.13-electron.0` | 43.0.0 / 43.1.0 |
+| electron-44 | `15.2.124.13-electron.0` | **44.0.0** |
+| electron-45-alpha | `15.4.80-electron.0` | 45.0.0-alpha.5/6/7 |
+
+按 V8 **补丁号**精确匹配，且**没有环境开关**（二进制里没有任何 override 形式的变量名）。
+我们当时的 pin `44.4.3` 是 V8 `15.2.124.28` ⇒ 打包版启动即
+`host preparation failed: … unsupported Electron runtime fingerprint`。
+（上游 pnpm-lock 钉的是 `electron@44.0.0`，正好落在表里 —— 这就是它的"受支持版本"。）
+
+**与本文档 §一 的冲突**：44.0.0 虽然满足插件，但**没有**本文明所记录的 asar `bigint` 修复
+（实测被 afterPack 的 `packaged ASAR bigint smoke` 拒包）。两条硬约束在 44 线上没有交集。
+
+**定案**：pin 改为 `45.0.0-alpha.7`（V8 `15.4.80`，与表里的 45-alpha 项同指纹，
+且晚于 44.4.3，asar 修复在）。实测两条都满足：
+
+```
+yarn package:dir        → EXIT=0，packaged ASAR bigint smoke OK   (temp/upg/freeze/7-package-dir-e45a7.log)
+打包版真机启动            → 1 秒内暴露 CDP（无 host preparation failed）
+e2e:client              → 41/41 全过                              (packages/host/desktop/.e2e-report.md)
+```
+
+**认账**：`45.0.0-alpha.7` 是 alpha 通道。选它不是版本偏好，而是**唯一同时满足上述两条
+硬约束**的版本；上游把 45-alpha 显式列为受支持运行时。**复核纪律**：以后动 Electron
+必须跑 `yarn package:dir` + 打包版启动 + `e2e:client`，只跑 `yarn check` 会放过这一类
+（本次就是被真机 E2E 抓到的）。完整证据链见 `docs/AUDIT-2026-09-23-FULL.md` §8.9.9。

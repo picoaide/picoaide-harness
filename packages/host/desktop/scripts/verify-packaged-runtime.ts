@@ -1191,14 +1191,24 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 122
 // `@picoaide/dsh-enterprise/gateway-llm`（它取代被禁用的上游 `llm-deepseek` 行）。
 
 /**
- * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调）。
+ * 反向 oracle 至少要解析出的 `@picoaide/*` specifier 条数（只允许上调，下调必须写明理由）。
  *
- * 实测：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
- * `needs` 闭包先生成 `lib/`）21 条 —— 取 20 是为了让这条"防空转"的前置判据在两种
- * 树状态下都成立。**它不是删条目的保证**（那个由 `assertWorkspacePackageCoverage`
- * 的每包棘轮负责，与构建无关）。
+ * 它的用途**只有一个**：防空转 —— 产物根本没构建时这个计数会掉到 ≈0，
+ * 于是整条"反向覆盖"判据会静默变成恒真。**它不是删条目的保证**
+ * （那个由 `assertWorkspacePackageCoverage` 的每包棘轮负责，与构建无关）。
+ *
+ * 实测历史：完整树 27 条；CI `gate` job 的干净检出（只有 `dsh-plugin-desktop` 的
+ * `needs` 闭包先生成 `lib/`）21 条 ⇒ 曾取 20。
+ *
+ * **2026-09-28 下调到 17（DSH 0.1.7-rc.2 升级）**：十个自研补丁层不再用
+ * `createRequire(…).resolve('@picoaide/<pkg>/package.json')` 在 `profile.ts` 里解析
+ * （那个写法在 0.1.7 上会让"组合复算 ≠ 真实装配"，是升级引入的 P0，见
+ * `docs/AUDIT-2026-09-23-FULL.md` §8.9.5 U1），改成各包 `package.json` 的
+ * `dsh.bundle.patch` 清单项 ⇒ 桌面产物里的 `@picoaide/*` specifier 随之减少：
+ * **CI 干净检出实测 18**（本地完整树 ≥20）。取 17 = 给 CI 留 1 条余量，
+ * 仍远高于"完全没构建"这一真正要抓的形态。
  */
-const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 20
+const MIN_RESOLVED_WORKSPACE_SPECIFIERS = 17
 
 /**
  * 递归列出产物目录下的普通文件（相对路径，`/` 分隔）。
