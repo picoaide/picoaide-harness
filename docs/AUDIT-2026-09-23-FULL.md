@@ -3552,9 +3552,9 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 
 **独立证伪**：`temp/upg/r7/REPORT.md`（锚 `3595ddf835`，对抗性——默认假设这套升级有问题）。
 
-### §8.9.12 发布阻塞项：`e2e:sidebar` 红（**发布到此为止，tag 未打**）
+### §8.9.12 发布阻塞项：`e2e:sidebar` 红（**已定案并修复**；根因=探针把 `$DSH_HOME` 放进了包目录）
 
-**状态：未修，未定性完成。发布链停在这里。**
+**状态：已修 + 已复验（2026-09-28）。发布链可以继续。**
 
 CI 的 `Desktop (Linux)` job 在同一个 step 里先跑 `e2e:client` 再跑 `e2e:sidebar`：
 
@@ -3581,19 +3581,74 @@ CI 的 `Desktop (Linux)` job 在同一个 step 里先跑 `e2e:client` 再跑 `e2
 
 **为什么它是发布阻塞项**：同一二进制在 `e2e:client` 里客户端插件是齐的（否则 41 项里的槽位/面板断言不可能过），
 所以这是**同一二进制在不同运行下的不一致**，且失败形态是"员工登录后看到一页 Failed to load plugins"。
-合理怀疑方向（**未证实**）：客户端插件列表在页面被服务时的**竞态**（登录过快 ⇒ 列表未就绪且不重试）；
-`e2e:sidebar` 的登录比 `e2e:client` 快得多（前者 400ms 点击节奏，后者先做 gateway/sentry 基线等准备）。
 
-**已排除**：CDP 选错 target（探针过滤了 browser-shell/browser-overlay，且 dump 的 href 就是应用页）、
-陈旧进程占端口（9226 空闲时仍然复现）、工作树脏（同一 dist 重复跑结果一致）。
+**已排除（都不是原因）**：CI 特有（本机同一 dist 复现逐条一致）、CDP 选错 target（探针过滤了
+browser-shell/browser-overlay，且 dump 的 href 就是应用页）、陈旧进程占端口（9226 空闲时仍然复现）、
+工作树脏（同一 dist 重复跑结果一致）、`e2e:sidebar` 的登录节奏竞态（**原来的主怀疑方向，实测否**）。
 
-**下一步（接手顺序）**：
-1. 先判**基线**：在 `origin/master`（`5a27ba3b3f`）上打一份同构产物跑同一探针 —— master 的 CI 是绿的，
-   所以预期它通过；若通过，则本分支 144 个提交里有一处引入了该竞态（升级面优先怀疑：
-   UPG-5 把十层补丁改成 bundle 层后，客户端 bundle 列表的**就绪时机**是否变了）。
-2. 在探针登录后立刻 dump 客户端 boot 数据（`window.__DSH_*` / 客户端 bundle 清单）与
-   **宿主侧**"客户端插件列表"的生成点，确认是"列表短"还是"列表没到"。
-3. 判据形态：拿"登录后客户端 `layout` 必须可达"当能力判据（而不是看页面标题/存在性）。
+**根因（2026-09-28 定案）：探针把 `$DSH_HOME` 放进了桌面包自己的目录树。**
+
+诊断探针 `temp/upg/diag-sidebar.mjs`（与两个 E2E 同形：同一 mock 网关、同一份 `dist/linux-unpacked`、
+同一登录脚本、同一 `__DSH_BOOT__` 读取点），**只改 `DSH_HOME` 一个变量**，得到：
+
+| `DSH_HOME` | `__DSH_BOOT__.entries` | 页面 |
+|---|---|---|
+| `/tmp/<mkdtemp>`（包目录之外） | **69** 条 | 正常（侧边栏/右栏都在） |
+| `<repo>/temp/<dir>`（包目录之外） | **69** 条 | 正常 |
+| `packages/host/desktop/.e2e-sidebar/home`（**包目录之内**） | **68** 条 | `Failed to load plugins` |
+
+两条 entries 列表的**差集恰好一条**：`dsh-plugin-desktop`
+（`temp/upg/dump-fail.json` / `temp/upg/dump-pass.json`，逐条 diff 只有这一项）。
+
+⇒ 宿主把**桌面自己的客户端 bundle** 从客户端插件列表里丢了，而 `layout` 服务正是它提供的
+⇒ 19 条上游客户端 UI 全部 `pending (waiting for service: layout)` ⇒ 整页 Failed to load plugins。
+`e2e:client` 一直没撞上，是因为它的 workDir 从来就在系统临时目录；而这**三个探针**（sidebar/terminal/foot-lane）
+把运行期数据根写在 `<pkg>/.e2e-*/` 里。**这是探针的运行期布局缺陷，不是打包产物缺陷**
+（同一份产物换个 `DSH_HOME` 就 15/15 全过）。
+
+**修法**：三个探针把**运行期数据根搬出包目录**（`mkdtempSync(join(tmpdir(), 'dsh-e2e-<name>-'))`
+→ `HOME`/`DSH_HOME` = `<run>/home`、`XDG_CONFIG_HOME`/`XDG_CACHE_HOME` = `<run>/cfg|cache`，
+`e2e-terminal.mjs` 的失败日志目录跟着走），**证据（截图 + report）仍留在 `<pkg>/.e2e-*/`** 供 CI 收集。
+三处都写了注释说明这条实测事实（含 entries 69→68 的数字），避免以后有人"顺手"把 home 挪回包里。
+
+**验证**：`xvfb-run -a corepack yarn e2e:sidebar` ⇒ `probe-right-sidebar: 16 passed, 0 failed, 0 skipped`、
+`SIDEBAR_EXIT=0`（日志 `temp/upg/e2e-sidebar-recheck.log`，含右栏面板/chips、官方右栏里的 cron 页、
+全屏与分栏、标题栏保留带 32px/20px 两档、收起释放列宽）；`e2e:client` 重跑 **41/41 通过、EXIT=0**。
+
+**同批把"假绿判据"升级为能力判据（这才是让这一类不再复发的那一半）**：
+`e2e-client.mjs` 的第 3 步原来只断言 `__DSH_BOOT__.entries.length > 0` —— 而本次故障现场是
+**68 条**（> 0 ⇒ **旧断言照绿**），可见"非空"对"静默丢条目"这一类结构上不咬。现三处都点名
+**桌面自己的客户端 bundle 必须在列表里**（`ids.includes('dsh-plugin-desktop')`）：
+`e2e-client.mjs`（CI 的 gate 面）、`real-env-verify.mjs`（真服务端验收）、
+`e2e-right-sidebar.mjs`（新增第 1a 条，失败文案直接写出"检查 `$DSH_HOME` 是否落在桌面包目录内"）。
+README 的覆盖点表同步。
+
+**变异验证（负控，实跑）**：把探针副本的 `RUN_DIR` 改回**包目录之内**（其余一字不改，
+`temp/upg/neg/sidebar-neg.mjs`）⇒
+
+```
+FAIL  进入桌面外壳（已登录）
+FAIL  桌面客户端 bundle 进入宿主条目列表（layout 的提供者） — entries=68 hasDesktop=false
+      （缺 dsh-plugin-desktop：检查 $DSH_HOME 是否落在桌面包目录内，见审计 §8.9.12）
+probe-right-sidebar: 2 passed, 6 failed, 1 skipped    NEG_EXIT=1
+```
+
+⇒ 新判据**有牙**（同时复现了 CI 原来的 `2 passed / failed / 1 skipped` 形态），
+且失败信息从"整页白屏 + 19 条 pending"变成一句点名的可行动原因。
+
+**顺带的产物卫生收益**：把数据根留在包目录里还会往**打包输入**里写垃圾
+（`dist` 之外的 `<pkg>/.e2e-*` 与 userData 里的 `SingletonSocket` 悬空符号链接 —— 后者曾让
+`electron-builder --dir` 报指向随机路径的 `ENOENT`）。搬出去后这条路径整体消失。
+
+**未闭环（登记为残留，不阻塞发布）**：**"`$DSH_HOME` 落在包目录之内 ⇒ 宿主算出的客户端条目列表少一条"
+这件事本身的上游判定点没有追到代码行**：条目由上游 `@deepseek-ai/dsh-client-modules` 从 loader 树上收集
+（`processOne` → `resolveSource` → `resolveMeta`，**`resolveMeta` 返回 `null` 即静默跳过**，
+`deepseek-harness/packages/client/modules/src/index.ts`），而 `resolveMeta` 的解析基点 `baseUrl` 与
+`createRuntimeResolution({installAnchor, profile, home})` 的 `home`/`linkedProfileRoots` 有关
+⇒ 现有的证据只能证明"**与 home 位置相关**"，不能证明"上游哪一行判的"。
+接手判据：换 `$DSH_HOME` 位置跑同一探针（等价性已经由 68/69 两条 dump 固定），
+再用一次性插桩定位 `resolveMeta` 返回 `null` 的那一次解析；真用户可撞性另判
+（安装目录一般不可写、AppImage 挂载只读，倾向"仅在自建/开发布局下可达"）。
 
 ### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
 

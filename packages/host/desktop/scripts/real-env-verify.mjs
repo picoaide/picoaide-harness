@@ -228,7 +228,12 @@ try {
   const boot = bootUp
     ? await ev(`({ entries: window.__DSH_BOOT__.entries.length, ids: window.__DSH_BOOT__.entries.map(e => e.id) })`)
     : { entries: -1, ids: [] }
-  reportStep('客户端插件图已装载', (boot?.entries ?? 0) > 0, `entries=${boot?.entries}`)
+  // 「非空」单独不咬"静默丢条目"这一类：`$DSH_HOME` 落在桌面包目录之内时列表是 68 条
+  // （> 0 ⇒ 旧断言照绿）而**唯独缺 `dsh-plugin-desktop`**（客户端 `layout` 的唯一提供者，
+  // 缺它则整页 `Failed to load plugins`）。见审计 §8.9.12。
+  const desktopEntry = (boot?.ids ?? []).includes('dsh-plugin-desktop')
+  reportStep('客户端插件图已装载（非空且含桌面自身 bundle）', (boot?.entries ?? 0) > 0 && desktopEntry,
+    `entries=${boot?.entries} hasDesktop=${desktopEntry}`)
   await wait(3000)
 
   // 4. Main sidebar. 2026-09-21 并道改造：底部只剩「更多」一行（+ 设置 + 账户行），
