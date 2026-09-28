@@ -3679,6 +3679,59 @@ probe-right-sidebar: 2 passed, 6 failed, 1 skipped    NEG_EXIT=1
 **上游侧不自行打补丁**：`selfReferenceName` 的起始点属上游语义（`dirname(parent)` 是否有意为之无官方依据），
 自造补丁要跟着每次升级重切且可能改掉别人的解析行为 —— 登记为上游问题，只保留我们这侧的 fail-loud。
 
+### §8.9.13 发布阻塞项之二：`Release (server image archive)` 红（tag 已推、**零上传**，随后重新打在同一版本上）
+
+**现象**：`v2.8.2-beta.2` 的 tag 流水线（run `36422443757`）里 Gate / Go server / 三平台 **全绿**
+（`Desktop (Linux)` 已从 §8.9.12 恢复），但 `Release` job 红在 **step 7 "Fetch channel packages"**：
+
+```
+channel-asset-files: Cannot find package '@picoaide/dsh-host-home' imported from
+  /home/runner/work/picoaide-harness/picoaide-harness/packages/host/desktop/src/desktop-home.ts
+##[error]读不到渠道素材文件名清单(.../scripts/channel-build.ts 的 CHANNEL_ASSET_FILES)
+```
+
+**根因（本批第 26 轮引入的回归）**：三个 shell 侧探针
+（`scripts/ci-channels.sh`、`scripts/ci-channel-transfer.sh`、`scripts/ci-build-channel-images.sh`）
+用 `import(file://…/channel-build.ts)` 读 `CHANNEL_ASSET_FILES` / `CLIENT_PLATFORM_ASSETS`
+（第 26 轮 Z3-2/Z3-3 加的"单一真源"判据），而 `channel-build.ts` **顶端** import
+`../src/desktop-home.ts`（后者 `export * from '@picoaide/dsh-host-home'`）
+⇒ 这三处读取需要一个**装了依赖、且工作区已构建**的环境。
+Gate 与三个打包 job 都是这种环境，所以分支/PR CI（含本批 152 个提交的全部检查）全绿；
+而 **release job 只 `checkout` + `setup-node`**（不 install、不 build，它只做 docker 构建与发布）
+⇒ 必然解析失败。**tag 之前没有任何 CI 能看到这一格**——`release` job 的 `if` 只在 `refs/tags/v*` 上成立。
+
+**修法（结构性的，不是给 release job 加装依赖）**：把两份常量搬进
+**零依赖模块 `packages/host/desktop/scripts/channel-constants.ts`**（该文件**不允许有任何 import**，
+包括相对 import —— 相对 import 一样会把依赖树/构建产物拉回来），`channel-build.ts`
+`export { … } from './channel-constants.ts'`（十几个既有调用点的 import 面不变），
+三个探针改指该模块。**没有选择"给 release job 补 `yarn install` + 构建产物"**：
+常量只需要文件系统，把发布链的正确性绑到"依赖装得上、工作区构建得出"上是更大的失败面
+（而且 tag 时段的网络/构建抖动会直接变成发布失败）。
+
+**判据（三层，缺任一层这一类都会复发）**：
+1. **能力判据（新增，`scripts/verify-ci-scripts.mjs` 第 17 节）**：`git archive HEAD` 造一份
+   **裸检出**（断言其中没有 `node_modules`）→ 从三个探针里各自**抽出它自己那段
+   `node -e` 代码与目标路径**（"探针指向了哪个模块"因此是被执行的事实，不是文本对拍）→
+   在裸检出里真跑，要求 EXIT=0 且输出非空。**负控（自校准）**：同一段代码指向
+   `channel-build.ts` 必须失败 —— 否则说明这份"裸检出"其实带有依赖树，本节全绿是假绿。
+2. **单元判据（新增 `tests/channel-constants.spec.ts`）**：常量模块零 `import`/`require`；
+   `channel-build.ts` 必须 re-export 且**不得**再自己定义这两份清单（第二个真源）；
+   三个探针必须指向常量模块、且不得再出现 `channel-build.ts`。
+3. **登记制**：新文件进 `check-install-integrity.mjs` 的 `EXECUTION_FACE_REGISTRY`（双向对拍：
+   未登记与死条目都红），并同步 `check-root-guards.mjs` 的摘要登记值。
+
+**验证**：桌面包 **118 文件 / 1433 用例**全绿；`yarn typecheck`（四个 tsconfig）全绿；
+`verify-ci-scripts` 第 17 节在**修前**红（三条各报"读不到常量"）**修后**绿（负控同时绿）；
+`check-install-integrity` 与 `check-root-guards` 全绿。
+
+**tag 的处置（有证据的决策，不是惯例）**：本次发布**零上传** —— release job 的
+step 8/9/10/11（取回中转产物 / 构建镜像 / 上传 R2 / `gh release create`）**全部 skipped**，
+实测远端 `beta/latest.json` 仍指向 `2.8.2-beta.1`（`published_at 2026-09-24T07:42:13Z`）、
+`gh release view v2.8.2-beta.2` = `release not found`。因此把 `v2.8.2-beta.2` **重新打在修复后的
+master 头**上是"这次发布从未发生"的更正，而不是覆盖一个已发布的版本；R2 的不可变长缓存也没有
+被污染（同版本目录从未创建）。**判据式口径**：只有在"该 tag 的上传步骤全部 skipped + 远端指针
+未变 + 无 GitHub Release"三条同时成立时才允许移动 tag。
+
 ### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
 
 **现象**：CI 的 `Gate (tests + workspace build)` 在 `@picoaide/dsh-wasm-apps-host` 上红：

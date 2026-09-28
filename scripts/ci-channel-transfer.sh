@@ -141,7 +141,7 @@ BASE="s3://${R2_BUCKET}/_transfer/${RUN}-${TOKEN}"
 aws_cmd() { aws --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" "$@"; }
 
 # 客户端三平台交付面(清单键 / 产物通配 / 人读标签)的**唯一来源**:
-# `packages/host/desktop/scripts/channel-build.ts` 的 `CLIENT_PLATFORM_ASSETS`。
+# `packages/host/desktop/scripts/channel-constants.ts` 的 `CLIENT_PLATFORM_ASSETS`。
 # 不在 shell 里再抄一份 —— 两处各写一遍就是两个口径,一边少一个平台就会静默少发
 # (`pull` 侧正是靠它判"三平台齐全")。清单键与运行期读清单的
 # `src/desktop-release.ts` 同源,通配与 ci.yml 三个平台 job 的 `--patterns` 同形。
@@ -155,10 +155,10 @@ platform_table() {
       console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
       process.exit(1)
     })
-  ' "$REPO_ROOT/packages/host/desktop/scripts/channel-build.ts"
+  ' "$REPO_ROOT/packages/host/desktop/scripts/channel-constants.ts"
 }
 if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
-  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-build.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
+  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-constants.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
   echo "::error::中转的「三平台齐全」判据靠它派生,读不到就不能假装产物齐全" >&2
   exit 1
 fi

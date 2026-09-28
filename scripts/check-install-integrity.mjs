@@ -283,6 +283,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/boot-desktop-profile.mjs',
   'packages/host/desktop/scripts/brand-prepare.mjs',
   'packages/host/desktop/scripts/channel-build.ts',
+  // 零依赖常量模块（2026-09-28 tag 事故的收口）：三个 shell 侧探针在**没有
+  // node_modules、没有构建产物**的 release job 里 import 它 —— 这条登记同时是
+  // "它属于执行面"的声明（内容被 install 期改写要让判据看得见）。
+  'packages/host/desktop/scripts/channel-constants.ts',
   'packages/host/desktop/scripts/channel-prepare.ts',
   'packages/host/desktop/scripts/clean.mjs',
   'packages/host/desktop/scripts/direct-invocation.mjs',

@@ -6431,6 +6431,62 @@ exit 0
   }
 }
 
+// ---- 17. release job 的「零依赖」前提:三个探针必须在**没有 node_modules、没有构建产物**的检出里读到常量 ----
+//
+// 现场（2026-09-28，`v2.8.2-beta.2` 的 tag 流水线）:`ci-channels.sh` /
+// `ci-channel-transfer.sh` / `ci-build-channel-images.sh` 都用
+// `import(file://…<模块>.ts)` 读 `CHANNEL_ASSET_FILES` / `CLIENT_PLATFORM_ASSETS`。
+// 这些常量当时写在 `channel-build.ts` 里,而它顶端 import `../src/desktop-home.ts`
+// （`export * from '@picoaide/dsh-host-home'`）⇒ 解析需要一个**装了依赖且已构建**的工作区。
+// Gate 与三个打包 job 都是那种环境,所以分支/PR CI 全绿;而 **release job 只 checkout**
+// （不 install、不 build）⇒ tag 流水线红在 "Fetch channel packages":
+// `Cannot find package '@picoaide/dsh-host-home' imported from …/src/desktop-home.ts`。
+// **tag 之前没有任何 CI 能看到这一格** —— 判据必须自己造出"裸检出"这个条件。
+//
+// 判据形态是**真跑**:从每个探针里抽出它自己那段 `node -e` 代码与目标路径,在
+// `git archive HEAD` 出来的裸检出里执行 —— "探针指向了哪个模块"不是文本对拍,
+// 而是被执行的那个事实。负控:同一段代码指向 `channel-build.ts` 必须**失败**
+// （否则说明这份裸检出并非真的没有依赖树,绿是假的）。
+{
+  const bare = tempDir('ci-bare-checkout-')
+  const archived = spawnSync('bash', ['-c', `git -C ${JSON.stringify(root)} archive HEAD | tar -x -C ${JSON.stringify(bare)}`], { encoding: 'utf8' })
+  check(archived.status === 0, `git archive HEAD 失败(裸检出的造法本身要可靠): ${archived.stderr ?? ''}`)
+  check(!existsSync(join(bare, 'node_modules')), '裸检出里不得有 node_modules（否则这一节测不到 release job 的真实条件）')
+
+  // 抽 `node -e '<body>' "$REPO_ROOT/<relative .ts>"`（两个脚本用 REPO_ROOT/SCRIPT_ROOT）。
+  const invocation = /node -e '([\s\S]*?)'\s+"\$\{?(?:REPO_ROOT|SCRIPT_ROOT)\}?\/(packages\/[^"]+\.ts)"/gu
+  const runBody = (body, target) => spawnSync('node', ['-e', body, target], { cwd: bare, encoding: 'utf8' })
+  const probes = ['scripts/ci-channels.sh', 'scripts/ci-channel-transfer.sh', 'scripts/ci-build-channel-images.sh']
+  let seen = 0
+  for (const probe of probes) {
+    const source = readFileSync(join(root, probe), 'utf8')
+    const found = [...source.matchAll(invocation)]
+    check(found.length === 1,
+      `${probe} 应恰好一处「node -e … <常量模块>.ts」取常量调用（实际 ${found.length} 处）。`
+      + '多于一处会让本判据只覆盖其中一个;为零说明它不再从模块取常量（那多半是把清单又抄了一份）。')
+    for (const match of found) {
+      seen += 1
+      const target = join(bare, match[2])
+      check(existsSync(target), `${probe} 引用的常量模块 ${match[2]} 在 HEAD 里不存在`)
+      const result = runBody(match[1], target)
+      check(result.status === 0,
+        `${probe} 在**没有 node_modules 的检出**里读不到常量（release job 的真实条件）: `
+        + `${(result.stderr ?? '').trim().split('\n').slice(-3).join(' | ')}`)
+      check((result.stdout ?? '').trim().length > 0, `${probe} 的取常量调用没有输出（判据不许被空格子满足）`)
+    }
+  }
+  check(seen === probes.length, `三个探针都要被这一节覆盖（实际抽到 ${seen} 处调用）`)
+
+  // 负控(自校准):指向 channel-build.ts（依赖工作区包）必须失败 —— 证明这份裸检出真的没有依赖树。
+  const controlTarget = join(bare, 'packages/host/desktop/scripts/channel-build.ts')
+  if (check(existsSync(controlTarget), '负控目标 channel-build.ts 必须在裸检出里（否则负控无意义）')) {
+    const control = runBody('import(require("node:url").pathToFileURL(process.argv[1]).href).then(() => process.exit(0)).catch(() => process.exit(3))', controlTarget)
+    check(control.status !== 0,
+      '负控失败:裸检出里 channel-build.ts 居然能 import 成功 ⇒ 这份"裸检出"实际带有依赖树,'
+      + '本节对三个探针的通过结论无效（必须先修裸检出的造法）')
+  }
+}
+
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)

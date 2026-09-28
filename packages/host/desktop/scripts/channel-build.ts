@@ -60,45 +60,19 @@ export interface ChannelArtifactNames {
 }
 
 /**
- * 客户端**三平台交付面**（清单键 → 产物通配 → 人读标签）——唯一真源。
+ * 客户端**三平台交付面**与渠道素材文件名 —— 定义在 `./channel-constants.ts`。
  *
- * 三个消费方必须从这一份派生（各写一遍就是三个口径，一边少一个平台就会**静默少发**）：
- *   - `scripts/ci-build-channel-images.sh`：镜像内的 `CLIENT-RELEASE.json` 逐平台必需；
- *   - `scripts/ci-channel-transfer.sh`：R2 中转取回后逐平台判「齐全」；
- *   - `scripts/verify-ci-scripts.mjs`：与 `.github/workflows/ci.yml` 三个平台 job 的
- *     `--patterns` 对拍（发布链与交付面必须同形）。
+ * 那个模块**零 import**，这不是风格问题：三个 shell 侧探针
+ * （`ci-channels.sh` / `ci-channel-transfer.sh` / `ci-build-channel-images.sh`）
+ * 用 `import(file://…/channel-constants.ts)` 读这两份清单，而它们要在
+ * **只 checkout、不 install 也不 build** 的 release job 里跑（2026-09-28 的 tag 事故：
+ * 常量曾经写在本模块里，而本模块顶端 import `../src/desktop-home.ts`
+ * ⇒ `Cannot find package '@picoaide/dsh-host-home'` ⇒ 整个 tag 发布链在取渠道包那一步红，
+ * 而 PR/分支 CI 看不见，因为 release job 只在 tag 上跑）。细节见该文件头注释。
  *
- * 键名的权威源是运行期读清单的 `src/desktop-release.ts`（`PLATFORM_ASSET_KEYS`：
- * `darwin/win32/linux → mac-universal/win-x64/linux-x64`）；通配逐字等于 CI 三个
- * 平台 job 归集产物用的 `--patterns`（mac = `*.dmg`、win = `*Setup*.exe`、
- * linux = `*.AppImage`）。2026-09-26 审计 Z3-2 的形态正是「少一个平台没有任何信号」：
- * 旧实现逐个 `[ -f … ] || return 0`，缺平台时生成的清单只是少一个键。
+ * 这里 re-export，打包链路的既有 import 面不变。
  */
-export const CLIENT_PLATFORM_ASSETS = [
-  { key: 'mac-universal', glob: '*.dmg', label: 'macOS(.dmg)' },
-  { key: 'win-x64', glob: '*Setup*.exe', label: 'Windows(Setup.exe)' },
-  { key: 'linux-x64', glob: '*.AppImage', label: 'Linux(AppImage)' },
-] as const
-
-/**
- * 渠道目录里打包管线**按文件名**消费的两件素材 —— 唯一真源。
- *
- * 三个消费方必须同名：
- *   - `brand-prepare.mjs`：托盘位图与随包 `web-brand/favicon.svg` 的输入；
- *   - `scripts/ci-channels.sh`：品牌渠道的素材必需集（输入侧独立判一次）；
- *   - `inlineChannelAssets()`：`assets.logo` 声明的名字必须与它一致，否则随包内联的
- *     logo 与派生出的托盘位图是两个文件 ⇒ **同一个包里两套品牌**（登录页是声明的那个、
- *     托盘与 favicon 是另一个；2026-09-26 审计 Z3-3 的第 3 个触发形态）。
- *
- * 安装器/Dock/任务栏图标由 `appIcon` 派生（mac 图标管线要求 1024² RGBA16 + ICC，
- * 见 `generate-mac-app-icon.mjs`）。改这两个名字要同时改上面三个消费方。
- */
-export const CHANNEL_ASSET_FILES = {
-  /** 品牌几何源（托盘位图 + 随包 favicon 的输入）。 */
-  logo: 'logo.svg',
-  /** 安装器 / Dock / 任务栏图标（mac 图标管线的输入）。 */
-  appIcon: 'app-icon.png',
-} as const
+export { CHANNEL_ASSET_FILES, CLIENT_PLATFORM_ASSETS } from './channel-constants.ts'
 
 function artifactNames(slug: string): ChannelArtifactNames {
   return {
