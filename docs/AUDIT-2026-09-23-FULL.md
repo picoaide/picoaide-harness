@@ -3552,6 +3552,49 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 
 **独立证伪**：`temp/upg/r7/REPORT.md`（锚 `3595ddf835`，对抗性——默认假设这套升级有问题）。
 
+### §8.9.12 发布阻塞项：`e2e:sidebar` 红（**发布到此为止，tag 未打**）
+
+**状态：未修，未定性完成。发布链停在这里。**
+
+CI 的 `Desktop (Linux)` job 在同一个 step 里先跑 `e2e:client` 再跑 `e2e:sidebar`：
+
+- `e2e:client` **41/41 通过**（`packages/host/desktop/.e2e-report.md`，含品牌槽位归属、rc.2 根槽位、
+  各面板、账户卡余额链路、会话输入区）——**打包产物本身是好的**；
+- `e2e:sidebar`（官方右侧栏探针，`scripts/e2e-right-sidebar.mjs`）**2 passed / 5 failed / 1 skipped**，
+  第一条就红：`FAIL 进入桌面外壳（已登录）`。
+
+**本机复现（不是 CI 特有）**：同一份 `dist/linux-unpacked` 上单跑该探针，结果与 CI 逐条一致。
+
+**现场取证（探针现场插桩 dump，日志 `temp/upg/sb-debug.log`）**：
+
+```
+[DEBUG] href=http://127.0.0.1:40979/          ← 就是应用页（不是别的 target）
+[DEBUG] title=PicoAide Harness                ← 宿主/品牌面正常
+[DEBUG] text="HARNESS\nFailed to load plugins\nweb boot: 19 entries did not activate\n
+        @deepseek-ai/dsh-client-ui-open-in-app: pending (waiting for service: layout)\n
+        @deepseek-ai/dsh-client-ui-sidebar: pending (waiting for services: layout, uiWorkspace)\n
+        … 19 条全部 pending on layout …"
+```
+
+⇒ 宿主面完好、**客户端插件全部 pending 在 `layout` 上**（`layout` 由我们桌面外壳的**客户端半边**提供）
+⇒ 该实例里**桌面客户端 bundle 没有进客户端插件列表**。
+
+**为什么它是发布阻塞项**：同一二进制在 `e2e:client` 里客户端插件是齐的（否则 41 项里的槽位/面板断言不可能过），
+所以这是**同一二进制在不同运行下的不一致**，且失败形态是"员工登录后看到一页 Failed to load plugins"。
+合理怀疑方向（**未证实**）：客户端插件列表在页面被服务时的**竞态**（登录过快 ⇒ 列表未就绪且不重试）；
+`e2e:sidebar` 的登录比 `e2e:client` 快得多（前者 400ms 点击节奏，后者先做 gateway/sentry 基线等准备）。
+
+**已排除**：CDP 选错 target（探针过滤了 browser-shell/browser-overlay，且 dump 的 href 就是应用页）、
+陈旧进程占端口（9226 空闲时仍然复现）、工作树脏（同一 dist 重复跑结果一致）。
+
+**下一步（接手顺序）**：
+1. 先判**基线**：在 `origin/master`（`5a27ba3b3f`）上打一份同构产物跑同一探针 —— master 的 CI 是绿的，
+   所以预期它通过；若通过，则本分支 144 个提交里有一处引入了该竞态（升级面优先怀疑：
+   UPG-5 把十层补丁改成 bundle 层后，客户端 bundle 列表的**就绪时机**是否变了）。
+2. 在探针登录后立刻 dump 客户端 boot 数据（`window.__DSH_*` / 客户端 bundle 清单）与
+   **宿主侧**"客户端插件列表"的生成点，确认是"列表短"还是"列表没到"。
+3. 判据形态：拿"登录后客户端 `layout` 必须可达"当能力判据（而不是看页面标题/存在性）。
+
 ### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
 
 **现象**：CI 的 `Gate (tests + workspace build)` 在 `@picoaide/dsh-wasm-apps-host` 上红：
