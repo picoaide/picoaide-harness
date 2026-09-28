@@ -3644,15 +3644,40 @@ probe-right-sidebar: 2 passed, 6 failed, 1 skipped    NEG_EXIT=1
 而 `yarn e2e:client` 的 cwd 就是包目录 ⇒ `/tmp` 不可写时回退会正好落进包目录之内（同一个触发条件）。
 基座改为**仓根下的 `temp/`**（`REPO_ROOT = dirname×3(PACKAGE_ROOT)`）。
 
-**未闭环（登记为残留，不阻塞发布）**：**"`$DSH_HOME` 落在包目录之内 ⇒ 宿主算出的客户端条目列表少一条"
-这件事本身的上游判定点没有追到代码行**：条目由上游 `@deepseek-ai/dsh-client-modules` 从 loader 树上收集
-（`processOne` → `resolveSource` → `resolveMeta`，**`resolveMeta` 返回 `null` 即静默跳过**，
-`deepseek-harness/packages/client/modules/src/index.ts`），而 `resolveMeta` 的解析基点 `baseUrl` 与
-`createRuntimeResolution({installAnchor, profile, home})` 的 `home`/`linkedProfileRoots` 有关
-⇒ 现有的证据只能证明"**与 home 位置相关**"，不能证明"上游哪一行判的"。
-接手判据：换 `$DSH_HOME` 位置跑同一探针（等价性已经由 68/69 两条 dump 固定），
-再用一次性插桩定位 `resolveMeta` 返回 `null` 的那一次解析；真用户可撞性另判
-（安装目录一般不可写、AppImage 挂载只读，倾向"仅在自建/开发布局下可达"）。
+**上游判定点已追到代码行（2026-09-28，报告 `temp/upg/trace/REPORT.md`）**：不是"baseUrl 变了"，
+而是上游 profile 解析的拦截层把这一行**误判成 Node 的包自引用（self-reference）**：
+
+1. `deepseek-harness/packages/boot/app-boot/src/profile-resolution/resolver.ts:445` 的 `routeScoped()`，
+   判定句 **:458-463** 调 `selfReferenceName(parent)`（**:261-283**，逐级向上找 `package.json`）；
+   命中一个 `name` 恰等于该行包名、**且声明了 `exports`** 的 manifest ⇒ 判成 `route={kind:'native'}`，
+   **跳过 :466 之后"用 `resolution.entries` 指向 asar"的那条分支**（它自己的表里明明有这个包）。
+2. 交回 Node 原生解析后，Node 的 scope 规则（目录 URL 先看该目录自己的 `package.json`）**不认**这个自引用
+   ⇒ `ERR_MODULE_NOT_FOUND`（最小复现 `temp/upg/trace/repro/`：只要 `$DSH_HOME` 的**祖先链**上有一个
+   带 `exports` 的同名 manifest 就复现；**只有 `name` 没有 `exports` 不触发** —— 实测三组对照 A/B/C）。
+3. 上游 `client/modules/src/index.ts:871` 的 `locatePkgJson()` 在 **:900-902 `catch { return undefined }`**
+   把失败**静默吞掉**（它的注释前提"解析不出⇒这行没导入成功"在这里不成立：该行的 import 走桌面包自己的
+   resolver 钩子、其实成功了）⇒ `:823 resolveMeta` 返回 null ⇒ `:1010-1017 resolveSource` 返回 undefined
+   ⇒ 这一行永远不进 `sources/table` ⇒ `__DSH_BOOT__.entries` 少一条。
+
+**触发条件（精确形状）**：`$DSH_HOME` 的祖先链（从 `<home>/profiles` 起到 `/`）上存在 `package.json`，
+其 `name` 恰等于某一插件行的包名**且声明了 `exports`** —— "包目录之内"只是天然满足前两条的一种布局。
+**同机制对任意插件行通用、且全程静默**。
+
+**可撞性**：装机形态撞不上（交付包是 asar，`dist/linux-unpacked` 里除 asar 外零 `package.json`；
+默认 `~/.picoaide-harness` 的台阶上也没有同名 manifest）。**撞得上**的是：源码检出 + 打包产物混用
+（本次探针现场）、`asar:false` 的便携/解包布局（数据根放进应用夹）、以及任何人把包目录放在数据根之上。
+
+**已落地的加固（不在本 beta 内，随下一个版本发布）**：把"可观测结果"做成启动断言 ——
+`packages/host/desktop/src/startup-rows.ts` 新增 `REQUIRED_CLIENT_ENTRIES = ['dsh-plugin-desktop']`
+与 `assertRequiredClientEntries(ctx)`（读上游 `ctx.clientModules.graph().entries`），
+`main.ts` 在 `assertRequiredRowsActive(ctx)` 之后接线；缺失即走既有的致命启动路径
+（原生错误面 + 日志），**点名缺了哪一条并把"祖先链上的同名 `exports` manifest"写进错误文案**。
+判据在 `tests/startup-rows.spec.ts`：存在=通过 / 缺失=抛错并点名 / **面不存在时返回 `undefined`
+而不是空数组**（"没有可判的面"与"判过且通过"必须可区分）/ `main.ts` 的接线位置在行断言之后。
+**变异实跑**：删 `main.ts` 的调用 ⇒ 接线用例红；把判定掏成恒真 ⇒ 两条用例红；两处还原后 10/10 绿
+（sha256 前后一致，脚本与证据在 `temp/upg/mut/`）。
+**上游侧不自行打补丁**：`selfReferenceName` 的起始点属上游语义（`dirname(parent)` 是否有意为之无官方依据），
+自造补丁要跟着每次升级重切且可能改掉别人的解析行为 —— 登记为上游问题，只保留我们这侧的 fail-loud。
 
 ### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
 
