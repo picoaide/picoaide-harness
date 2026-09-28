@@ -3640,6 +3640,10 @@ probe-right-sidebar: 2 passed, 6 failed, 1 skipped    NEG_EXIT=1
 （`dist` 之外的 `<pkg>/.e2e-*` 与 userData 里的 `SingletonSocket` 悬空符号链接 —— 后者曾让
 `electron-builder --dir` 报指向随机路径的 `ENOENT`）。搬出去后这条路径整体消失。
 
+**同族触发点一并堵掉**：`e2e-client.mjs` 的 workDir 回退基座原本是 **`./temp`（相对 cwd）**，
+而 `yarn e2e:client` 的 cwd 就是包目录 ⇒ `/tmp` 不可写时回退会正好落进包目录之内（同一个触发条件）。
+基座改为**仓根下的 `temp/`**（`REPO_ROOT = dirname×3(PACKAGE_ROOT)`）。
+
 **未闭环（登记为残留，不阻塞发布）**：**"`$DSH_HOME` 落在包目录之内 ⇒ 宿主算出的客户端条目列表少一条"
 这件事本身的上游判定点没有追到代码行**：条目由上游 `@deepseek-ai/dsh-client-modules` 从 loader 树上收集
 （`processOne` → `resolveSource` → `resolveMeta`，**`resolveMeta` 返回 `null` 即静默跳过**，

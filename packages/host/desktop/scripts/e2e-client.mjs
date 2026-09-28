@@ -58,9 +58,15 @@ const reportShots = !args.includes('--no-screenshot')
 // 审计 2026-08-25 B-04:原固定 /tmp 路径会让并行 e2e/真实实例互相踩踏,
 // 且 9223 被残留实例占用时复用错误目标卡死。改为唯一目录(pid+时间戳),
 // 仍保证跨 spawn 边界可见(先试 /tmp,失败回退工作区 temp)。
+//
+// 2026-09-28（审计 §8.9.12）：回退基座原本是 **`./temp`（相对 cwd）** —— `yarn e2e:client`
+// 的 cwd 是包目录，于是回退时 `$DSH_HOME` 会落在**桌面包目录之内**，而那个位置会让宿主
+// 下发的客户端条目列表**静默丢掉 `dsh-plugin-desktop`**（`layout` 的唯一提供者 ⇒ 整页
+// `Failed to load plugins`）。回退基座改为**仓根下的 temp/**（在包目录之外，且 gitignored）。
+const REPO_ROOT = dirname(dirname(dirname(PACKAGE_ROOT)))
 let workDir = ''
 let HOME_DIR = ''
-for (const base of ['/tmp', './temp']) {
+for (const base of ['/tmp', join(REPO_ROOT, 'temp')]) {
   try {
     const candidate = `${base}/dsh-e2e-${process.pid}-${Date.now()}`
     mkdirSync(candidate, { recursive: true })
