@@ -3525,3 +3525,28 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 **发布面**：tag `v2.8.2-beta.2`（预发 ⇒ 只构建 `beta` 渠道；`ci-release-policy.sh` 已核
 `release_kind=prerelease / channel_set=beta / publish_release=true`，
 且 `v2.8.2-beta.1` 是本 tag 的祖先）。
+
+### §8.9.8 CI 首轮红与 CodeQL 面板处置（PR #155）
+
+首轮 CI 里 `Gate (root guards)` 与 `Gate (tests + workspace build)` **都在 3 秒内红** ——
+两者的首步都是 `scripts/check-install-integrity.mjs`（"判据本体在 install 期有没有被改写"
+的前置校验），它点名两条**未登记的新执行体**：
+
+- `packages/host/desktop/scripts/boot-desktop-profile.mjs`（UPG-5 新增的 boot 接线唯一实现）；
+- `packages/host/desktop/tests/fixtures/legacy-preset-probe-plugin/package.json`（UPG-6 的夹具 npm 工程）。
+
+**这两条正是登记制守卫存在的理由**：它们不产生任何测试失败、也不在任何 `yarn check` 判据里
+（`check-install-integrity` 只在 `check:ci-parity` 与 CI 的 install 前置步跑），
+只有"新增执行体必须登记"这一条会抓到。已登记并同步两级摘要
+（`check-guard-parser-integrity` 的前置校验件摘要 → `check-root-guards` 的守卫摘要）。
+
+**CodeQL 15 条新告警的处置**（逐条定性，与 2026-09-20 那次"10 条 → 0"同口径）：
+
+| 处置 | 条数 | 内容 |
+|---|---|---|
+| **代码修掉** | 2 | `scripts/upstream-package-checks.mjs` 的 `js/incomplete-sanitization`：`name.replace('/', '%2F')` → `replaceAll`（npm scope 名只有一个 `/`，行为等价、语义更硬；该脚本自检 EXIT=0） |
+| **dismiss（`used in tests`）** | 13 | 9 条 `js/incomplete-hostname-regexp` + 3 条 `js/incomplete-url-substring-sanitization` 全部落在**测试夹具的假主机名/假 URL 字面量**上（公开仓纪律一律 `example.com` 保留域），只作子串断言、不参与主机名或 URL 校验；1 条 `js/reflected-xss` 落在 `scripts/check-integration-tests.mjs` 的**本地回环夹具服务器**（只回固定夹具、无外部输入到达 `res.end`） |
+
+**认账**：dismiss 的 13 条是"仅测试 / 夹具"这一类的**判断**，不是"代码没有问题"的证明；
+判据是**告警对象全是夹具字面量**（逐条看过代码），且这 13 条不改变任何产品或判据语义。
+按仓内惯例，处置理由逐条写在 GitHub 的 dismissal comment 里（可检索）。

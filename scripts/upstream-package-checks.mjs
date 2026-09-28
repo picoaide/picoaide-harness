@@ -197,7 +197,7 @@ export async function registryFailures(declared, options) {
   const failures = []
   const names = [...declared.keys()].sort()
   const results = await Promise.all(names.map(async (name) => {
-    const spec = `${registry}/${name.replace('/', '%2F')}`
+    const spec = `${registry}/${name.replaceAll('/', '%2F')}`
     try {
       const response = await fetchImpl(spec, { signal: AbortSignal.timeout(timeoutMs) })
       return { name, status: response.status }
@@ -220,7 +220,7 @@ export async function registryFailures(declared, options) {
     const versioned = await Promise.all(names
       .filter(name => (declared.get(name) ?? []).some(site => String(site.range).includes(options.from ?? options.to)))
       .map(async (name) => {
-        const spec = `${registry}/${name.replace('/', '%2F')}/${options.to}`
+        const spec = `${registry}/${name.replaceAll('/', '%2F')}/${options.to}`
         try {
           const response = await fetchImpl(spec, { signal: AbortSignal.timeout(timeoutMs) })
           return { name, status: response.status }

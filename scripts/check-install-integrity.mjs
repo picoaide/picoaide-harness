@@ -280,6 +280,7 @@ export function isExecutionFacePath(path) {
 export const EXECUTION_FACE_REGISTRY = [
   'packages/host/desktop/scripts/asar-bigint-probe.mjs',
   'packages/host/desktop/scripts/asar-entry-path.ts',
+  'packages/host/desktop/scripts/boot-desktop-profile.mjs',
   'packages/host/desktop/scripts/brand-prepare.mjs',
   'packages/host/desktop/scripts/channel-build.ts',
   'packages/host/desktop/scripts/channel-prepare.ts',
@@ -453,6 +454,7 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
 export const NPM_PROJECT_MANIFEST_REGISTRY = [
   // 桌面宿主服务的 smoke 夹具包（`yarn check` 之外的 afterPack/冒烟面）。
   'packages/host/desktop/tests/fixtures/desktop-host-services-smoke-plugin/package.json',
+  'packages/host/desktop/tests/fixtures/legacy-preset-probe-plugin/package.json',
   // CI `server` job 的 `npm ci` / `npm test` 就在这个目录里跑：webadmin 的 668 个用例。
   'server/webadmin/package.json',
   // 官网（Astro/Starlight）：本地与部署侧都按 npm 项目装依赖。
