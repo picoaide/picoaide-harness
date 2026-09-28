@@ -44,7 +44,7 @@ import {
 } from '@picoaide/dsh-wasm-apps-host'
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
 import { provideAppAiRunner } from './app-ai-runner.ts'
-import { assertRequiredRowsActive } from './startup-rows.ts'
+import { assertRequiredClientEntries, assertRequiredRowsActive } from './startup-rows.ts'
 import { reportFatalBootFailure, type FatalBootChoice } from './fatal-boot.ts'
 import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
@@ -679,6 +679,12 @@ async function start(): Promise<void> {
     // 只 warn（Windows GUI 无 stderr ⇒ 彻底静默）。这里补上我方必需行的激活断言，
     // 失败走桌面自己的致命路径。见 src/startup-rows.ts 的模块注释。
     assertRequiredRowsActive(ctx)
+    // 第二张面（2026-09-28，审计 §8.9.12）：行 ACTIVE ≠ 客户端 bundle 进了宿主下发的
+    // 条目列表 —— 上游按包名逐个解析、**解析不出来就静默跳过那一条**，实测能让
+    // `dsh-plugin-desktop`（客户端 layout 的唯一提供者）消失，症状是登录后整页
+    // "Failed to load plugins"而宿主启动成功。判据取可观测结果（条目列表），
+    // 见 src/startup-rows.ts 的 REQUIRED_CLIENT_ENTRIES。
+    assertRequiredClientEntries(ctx)
     // 0.1.7: the desktop's own settings live in this plugin's profile entry
     // (`desktop-shell`) and are read through the settings form projection; the
     // live-change signal is `settings/document-updated`.

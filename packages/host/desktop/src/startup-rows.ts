@@ -147,6 +147,90 @@ export interface StartupAuditContext {
 }
 
 /**
+ * 客户端条目（`window.__DSH_BOOT__.entries`）里必须出现的包名。
+ *
+ * 为什么需要（2026-09-28，审计 §8.9.12 —— 一次**静默降级**的完整取证）：
+ * 宿主下发的客户端条目列表由上游 `@deepseek-ai/dsh-client-modules` 从 Loader 树上
+ * **按包名逐个解析**得到，解析不出来就**静默跳过那一条**（`locatePkgJson` 的
+ * `catch { return undefined }` ⇒ `resolveMeta` 返回 null ⇒ 该行永不进 table）。
+ * 实测的完整链路（真交付产物、单变量 A/B/C）：
+ * `$DSH_HOME` 的祖先链上出现一个 `name` **恰等于某个插件行包名**、且声明了 `exports`
+ * 的 `package.json` ⇒ 上游 `profile-resolution` 把它误判成"包自引用" ⇒ 走 Node 原生
+ * 解析而不是 asar 拦截表 ⇒ `ERR_MODULE_NOT_FOUND` ⇒ 那一条从列表里消失。
+ *
+ * 故障形态：宿主启动**成功**、`__DSH_BOOT__.entries` 68 条（> 0 ⇒ 只看"非空"的判据照绿），
+ * 缺的是 `dsh-plugin-desktop` —— 客户端 `layout` 服务的唯一提供者 ⇒ 19 条上游客户端 UI
+ * 全部 `pending (waiting for service: layout)` ⇒ 员工登录后整页 `Failed to load plugins`。
+ *
+ * 这里断言的是**可观测结果**（条目列表），不是上游的解析规则：规则会随版本变，
+ * "我自己的客户端 bundle 到底有没有进列表"不会 —— 所以这是**能力判据**，
+ * 上游修好之后它自动变成一条恒真但仍有意义的不变量（而不是需要跟着改的镜像规则）。
+ *
+ * 只列"缺了它这个产品就不可用"的那一个。扩充时先问"缺了它是白屏还是少个面板"：
+ * 白屏才入表（少面板由行断言与 E2E 覆盖），否则会把"可选面被有意精简"变成启动失败。
+ */
+export const REQUIRED_CLIENT_ENTRIES = ['dsh-plugin-desktop'] as const
+
+/** Loader 之外本模块读取的第二张面：客户端条目图。 */
+export interface ClientEntryGraphLike {
+  graph(): { entries: readonly { id?: string }[] }
+}
+
+/** Minimal context surface the client-entry assertion reads. */
+export interface ClientEntryAuditContext {
+  /** Cordis 服务查找（`clientModules` 是上游 `@deepseek-ai/dsh-client-modules` 注册的）。 */
+  get(name: string): unknown
+}
+
+/**
+ * Collect required client entries missing from the composed boot graph.
+ *
+ * 返回 `undefined` 表示**这张面根本不存在**（组合里没有客户端模块系统，
+ * 例如只挂宿主面的 headless 组合）—— 调用方据此决定是记录还是静默跳过，
+ * 本函数不替它决定（"没有可判的面"与"判过且通过"是两件事）。
+ * @param ctx - settled Cordis root context.
+ * @param required - required client entry ids.
+ * @returns missing ids, or undefined when the client module registry is unavailable.
+ */
+export function missingRequiredClientEntries(
+  ctx: ClientEntryAuditContext,
+  required: readonly string[] = REQUIRED_CLIENT_ENTRIES,
+): string[] | undefined {
+  const registry = ctx.get('clientModules') as ClientEntryGraphLike | undefined
+  if (registry === undefined || typeof registry.graph !== 'function') return undefined
+  const present = new Set<string>()
+  for (const entry of registry.graph().entries) {
+    if (typeof entry.id === 'string') present.add(entry.id)
+  }
+  return required.filter(id => !present.has(id))
+}
+
+/**
+ * Throw when a required client entry is missing from the host's composed graph.
+ *
+ * 抛错（而不是 warn）与 `assertRequiredRowsActive` 同一理由：这一类的现场是
+ * "启动成功 + 整页 Failed to load plugins"，只 warn 在 Windows GUI 上等于无声。
+ * 抛出的错误走 `src/main.ts` 的 `reportFatalStartupFailure`（原生错误面 + 日志文件）。
+ * @param ctx - settled Cordis root context.
+ * @param required - required client entry ids (defaults to this shell's list).
+ */
+export function assertRequiredClientEntries(
+  ctx: ClientEntryAuditContext,
+  required: readonly string[] = REQUIRED_CLIENT_ENTRIES,
+): void {
+  const missing = missingRequiredClientEntries(ctx, required)
+  if (missing === undefined || missing.length === 0) return
+  throw new Error(
+    `dsh-plugin-desktop: ${String(missing.length)} required client entry(ies) are missing from the boot graph.\n`
+    + missing.map(id => `  - ${id}`).join('\n')
+    + '\n客户端条目是宿主按包名逐个解析出来的，解析不出来会被上游**静默跳过**：'
+    + '实测触发条件 = `$DSH_HOME` 的祖先链上有一个 `name` 恰好等于该包名、且声明了 `exports` 的 '
+    + 'package.json（上游把它误判成"包自引用"）。缺 dsh-plugin-desktop 的症状是登录后整页 '
+    + '"Failed to load plugins"（客户端 layout 服务没有提供者）。',
+  )
+}
+
+/**
  * Throw when any required row failed to activate.
  *
  * 抛错（而不是 warn）是刻意的：`auditStartupEntries` 已经替上游警告过一遍，

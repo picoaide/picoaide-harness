@@ -159,7 +159,7 @@ const MINIMUM_REQUIRED_GUARDS = [
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '7f5f2073b0eec7fd0ea9ff47d86ba0b1e85bdbc3673544ed5680a20da6dd5cdc' }],
   ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'ad8fb4bbfc6ec9d0865c28ba361f4bbe8c2e39c8a3e30b98e08f335ddb27c71b' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '825c53ab5819ca50c4b9b1ddf69d194fa49bb3c95369b38f8903f1e8d0825ec4' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '2eec1717099b71d66d04b5424f6541c5e6c174dc5391bd4450847c0f2c9cbc1a' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
@@ -179,7 +179,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'd8001025b06fd9f761fca58d4038438cf75c841f01d88920affa2ea6c9a99e22' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'a5ba650819effcdada193674aab67a79813e70939808e27cf28f6c85262aa340' }],
 ])
 
 /**

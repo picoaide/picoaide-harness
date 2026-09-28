@@ -52,7 +52,7 @@ TOTAL="${#CHANNELS[@]}"
 [ "$TOTAL" -gt 0 ] || { echo "::error::渠道列表为空" >&2; exit 2; }
 
 # 客户端三平台交付面（清单键 / 产物通配 / 人读标签）的**唯一来源**：
-# `packages/host/desktop/scripts/channel-build.ts` 的 `CLIENT_PLATFORM_ASSETS`。
+# `packages/host/desktop/scripts/channel-constants.ts` 的 `CLIENT_PLATFORM_ASSETS`。
 # 不在 shell 里再抄一份 —— 两处各写一遍就是两个口径（2026-09-26 审计 Z3-2 的形态：
 # 旧实现逐个 `[ -f … ] || return 0`，少一个平台的产物时**什么都不输出**，
 # CLIENT-RELEASE.json 只是少一个键，流水线全绿）。同一份清单还被 R2 中转的
@@ -72,10 +72,10 @@ platform_table() {
       console.error(`platform_table: ${error instanceof Error ? error.message : String(error)}`)
       process.exit(1)
     })
-  ' "$SCRIPT_ROOT/packages/host/desktop/scripts/channel-build.ts"
+  ' "$SCRIPT_ROOT/packages/host/desktop/scripts/channel-constants.ts"
 }
 if ! PLATFORM_TABLE="$(platform_table)" || [ -z "$PLATFORM_TABLE" ]; then
-  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-build.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
+  echo "::error::读不到客户端平台清单(packages/host/desktop/scripts/channel-constants.ts 的 CLIENT_PLATFORM_ASSETS)" >&2
   echo "::error::镜像清单的「逐平台必需」判据靠它派生,读不到就不能假装三平台齐全" >&2
   exit 1
 fi

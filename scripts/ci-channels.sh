@@ -640,7 +640,7 @@ fi
 # 再发现就晚了。缺字段的报错刻意不回显渠道名(渠道 CI 不输出渠道信息)。
 #
 # 打包管线**按文件名**消费的两件素材(渠道 logo 与安装器图标)的唯一来源是
-# `packages/host/desktop/scripts/channel-build.ts` 的 `CHANNEL_ASSET_FILES` ——
+# `packages/host/desktop/scripts/channel-constants.ts` 的 `CHANNEL_ASSET_FILES` ——
 # 这里读它而不是再写一份字面量:输入侧(本脚本)与打包侧(brand-prepare.mjs)必须
 # 同名,否则托盘位图与随包内联 logo 会取**两个**文件(同一个包里两套品牌,
 # 2026-09-26 审计 Z3-3 的第 3 个触发形态)。
@@ -656,8 +656,8 @@ if ! CHANNEL_ASSET_FILES="$(node -e '
     console.error(`channel-asset-files: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
   })
-' "$REPO_ROOT/packages/host/desktop/scripts/channel-build.ts")"; then
-  echo "::error::读不到渠道素材文件名清单(packages/host/desktop/scripts/channel-build.ts 的 CHANNEL_ASSET_FILES)" >&2
+' "$REPO_ROOT/packages/host/desktop/scripts/channel-constants.ts")"; then
+  echo "::error::读不到渠道素材文件名清单(packages/host/desktop/scripts/channel-constants.ts 的 CHANNEL_ASSET_FILES)" >&2
   exit 1
 fi
 LOGO_FILE_NAME="${CHANNEL_ASSET_FILES%%$'\t'*}"
@@ -899,7 +899,7 @@ for id in "${SELECTED[@]}"; do
       return buf.toString("utf8")
     }
     const KNOWN_ASSET_KEYS = ["logo", "logo_dark", "favicon"]
-    // 打包管线消费的两件素材的文件名（唯一真源 = channel-build.ts 的 CHANNEL_ASSET_FILES，
+    // 打包管线消费的两件素材的文件名（唯一真源 = channel-constants.ts 的 CHANNEL_ASSET_FILES，
     // 由外层 shell 读出来传进来；读不到时脚本已经在上游 fail-loud）。
     const LOGO_FILE_NAME = process.env.CHANNEL_LOGO_FILE
     const APP_ICON_FILE_NAME = process.env.CHANNEL_APP_ICON_FILE

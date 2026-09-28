@@ -14,14 +14,18 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { composeEntries } from '@deepseek-ai/dsh-app-boot'
 import { prepareDesktopProfile } from '../src/profile.ts'
 import {
+  assertRequiredClientEntries,
   assertRequiredRowsActive,
   FIBER_ACTIVE,
   FIBER_FAILED,
   inactiveRequiredRows,
+  missingRequiredClientEntries,
+  REQUIRED_CLIENT_ENTRIES,
   REQUIRED_DESKTOP_ROWS,
 } from '../src/startup-rows.ts'
 
@@ -106,5 +110,55 @@ describe('desktop required startup rows', () => {
   it('fails loudly when the Loader surface is unavailable', () => {
     // 拿不到 loader 时不能"就当通过"——那正是要修的静默形态。
     expect(() => { assertRequiredRowsActive({}) }).toThrow(/ctx\.loader is unavailable/)
+  })
+})
+
+/**
+ * 第二张面（2026-09-28，审计 §8.9.12）：客户端条目列表里的必需包。
+ *
+ * 这一组判据守的是**可观测结果**：宿主下发的 `__DSH_BOOT__.entries` 里必须有
+ * `dsh-plugin-desktop`（客户端 layout 的唯一提供者）。上游把"解析不出来的行"静默跳过，
+ * 实测能让它消失而宿主启动成功 ⇒ 登录后整页 Failed to load plugins。
+ */
+describe('desktop required client entries', () => {
+  const ctxWith = (ids: readonly string[]) => ({
+    get: (name: string) => name === 'clientModules'
+      ? { graph: () => ({ entries: ids.map(id => ({ id })) }) }
+      : undefined,
+  })
+
+  it('the required list names this package, and the name is the packaged one', () => {
+    const manifest = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')) as { name?: string }
+    // 包改名而清单没跟着改时，断言会变成对另一个 id 的恒假检查 —— 这里先红。
+    expect(REQUIRED_CLIENT_ENTRIES).toContain(manifest.name)
+  })
+
+  it('is quiet when the entry is present, and names it when missing', () => {
+    expect(missingRequiredClientEntries(ctxWith(['dsh-plugin-desktop', '@deepseek-ai/dsh-client-ui-sidebar'])))
+      .toEqual([])
+    // 现场形态：条目数 > 0（68 条）但少了桌面自己那一条 ⇒ 只看"非空"的判据是假绿。
+    expect(missingRequiredClientEntries(ctxWith(['@deepseek-ai/dsh-client-ui-sidebar'])))
+      .toEqual(['dsh-plugin-desktop'])
+    expect(() => { assertRequiredClientEntries(ctxWith(['@deepseek-ai/dsh-client-ui-sidebar'])) })
+      .toThrow(/dsh-plugin-desktop/)
+    expect(() => { assertRequiredClientEntries(ctxWith(['dsh-plugin-desktop'])) }).not.toThrow()
+  })
+
+  it('reports "not audited" (undefined) instead of "passed" when the surface is absent', () => {
+    // 组合里没有客户端模块系统时，这是"没有可判的面"，不是"判过且通过"：
+    // 返回值必须与"空数组"区分开（真挂宿主面的组合不该被静默放过）。
+    expect(missingRequiredClientEntries({ get: () => undefined })).toBeUndefined()
+    expect(missingRequiredClientEntries({ get: () => ({}) })).toBeUndefined()
+    expect(() => { assertRequiredClientEntries({ get: () => undefined }) }).not.toThrow()
+  })
+
+  it('main.ts wires the assertion into the boot path', () => {
+    // 判据本体有牙、但没接线 = 静默通过（本仓记录过的形态）。这里钉住调用点，
+    // 且必须出现在 `assertRequiredRowsActive` 之后（同一段 boot 收尾）。
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main.ts'), 'utf8')
+    const rowsAt = source.indexOf('assertRequiredRowsActive(ctx)')
+    const entriesAt = source.indexOf('assertRequiredClientEntries(ctx)')
+    expect(rowsAt, 'main.ts 里找不到 assertRequiredRowsActive(ctx)').toBeGreaterThan(-1)
+    expect(entriesAt, 'main.ts 里找不到 assertRequiredClientEntries(ctx)').toBeGreaterThan(rowsAt)
   })
 })
