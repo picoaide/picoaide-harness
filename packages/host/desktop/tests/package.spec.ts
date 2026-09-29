@@ -20,6 +20,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
     appId?: unknown
     asarUnpack?: unknown
     asar?: { smartUnpack?: unknown } | boolean
+    compression?: unknown
     afterPack?: unknown
     electronFuses?: unknown
     files?: unknown
@@ -65,6 +66,25 @@ describe('published package surface', () => {
       'dsh-plugin-desktop': 'lib/bin.js',
       'dsh-desktop': 'lib/bin.js',
     })
+  })
+
+  /**
+   * 分发体积：`compression` 必须显式是 `maximum`（2026-09-29 定案）。
+   *
+   * 三个平台的映射（读自仓内 `app-builder-lib`，不是猜的）：
+   *   · Linux AppImage —— 顶层 `compression: "maximum"` ⇒ `mksquashfs -comp xz`；
+   *     **不设时 `appImageUtil` 连 `-comp` 都不传，mksquashfs 缺省就是 gzip**。
+   *   · macOS DMG —— `dmg-builder` 的 `format = maximum ? 'UDBZ' : 'UDZO'`（bzip2 vs zlib）。
+   *   · Windows NSIS —— 7z 的 `-mx` 对 7z 格式恒为 9（`archive.js`），故本项对 Windows 无影响。
+   *
+   * 实测（v2.8.2-beta.2 的真实 AppDir，构建链同一个 mksquashfs、同一组参数）：
+   * gzip 191,963,136 B → xz 164,229,120 B（**−26.5 MB / −14.4%**）。交付件实测
+   * 192,354,510 B ⇒ 预期 ≈148 MB 量级；这是**零内容改动**的纯压缩收益。
+   *
+   * 这一行删掉不会报任何错、只会让交付件悄悄胖回去（缺省是 gzip），所以钉在这里。
+   */
+  it('packs the installers with maximum compression (AppImage xz / DMG UDBZ)', () => {
+    expect(manifest.build?.compression).toBe('maximum')
   })
 
   it('exposes the Host plugin and desktop-owned client face', () => {

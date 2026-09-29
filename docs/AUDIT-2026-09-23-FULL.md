@@ -3732,6 +3732,60 @@ master 头**上是"这次发布从未发生"的更正，而不是覆盖一个已
 被污染（同版本目录从未创建）。**判据式口径**：只有在"该 tag 的上传步骤全部 skipped + 远端指针
 未变 + 无 GitHub Release"三条同时成立时才允许移动 tag。
 
+### §8.9.14 分发体积：实测构成 + 纯压缩设置（`compression: "maximum"`，Linux −43.2 MB / −22.5%）
+
+**触发**：用户反馈"客户端体积太大"。按仓内既定口径取证 —— **以部署后的实际交付文件为准**
+（Linux 交付件取自 CI 产物 `desktop-Linux`，与域名 manifest 的 `sha256`/`size` 逐字一致）。
+
+**构成（v2.8.2-beta.2，AppDir 491 MB = 解包后）**：
+
+| 组成 | 大小 |
+|---|---|
+| `dsh-plugin-desktop`（Electron 二进制） | 222 MB |
+| `resources/app.asar` | 127 MB（132,906,284 B；13,139 文件，解压后 219.8 MiB） |
+| `resources/app.asar.unpacked` | **97 MB**（v2.8.1 时代是 27 MB） |
+| `resources.pak` / `icudtl.dat` / `LICENSES.chromium.html` | 13 / 11 / 8.6 MB |
+| `libvk_swiftshader.so`+`libffmpeg.so`+`libvulkan.so.1` | 9.5 MB |
+| `locales`（只剩 2 个） | 188 KB |
+
+**本次升级为何 +32 MB（unpacked 27→97 MB）**：全部来自**语音输入（experimental voice-input）的原生库**——
+`sherpa-onnx-linux-arm64` 38.44 MiB + `sherpa-onnx-linux-x64` 31.83 MiB = **70.33 MiB，两个架构都进包**；
+而 `grep -rn "dsh-experimental"` 在桌面/企业/bundle 组合里**零命中** ⇒ 纯死重（上游 0.1.7 新增的依赖树，
+我们的 `files` 排除清单还停在 0.1.6 时代）。其余可裁剪桶（未压缩字节）：休眠/禁用行依赖树
+（`@opentelemetry` + `@earendil-works/pi-ai` + `@google/genai`/`openai`/`@anthropic-ai/sdk`）20.31 MiB、
+`documentpreview` PDF/Excel 13.80 MiB、`sharp/libvips` 17.81 MiB（在用）、vendored `mermaid.min.js` 3.40 MiB、
+`domino` 内夹带的 `.yarn/plugins` 1.02 MiB、react-dom dev/umd ~2 MiB。
+
+**纯压缩实测**（构建链同一个 `mksquashfs`，与 `appImageUtil` 同参数，只换 `-comp`）：
+
+| 变体 | squashfs |
+|---|---|
+| gzip（**改动前的实际值**：`compression` 未设 ⇒ `appImageUtil` 不传 `-comp` ⇒ mksquashfs 缺省 gzip） | 191,963,136 B |
+| `xz` | 164,229,120 B |
+| `xz -Xbcj x86` | 161,447,936 B |
+| `xz -Xbcj x86 -b 1M` | 146,055,168 B |
+
+**改动**：`packages/host/desktop/package.json` 的 `build.compression = "maximum"`（一行）。
+各平台映射（读自仓内 `app-builder-lib`，非推测）：AppImage → `-comp xz`（legacy FUSE2 分支还会补
+`-Xdict-size 100% -b 1048576`）；DMG → `UDBZ`（bzip2，缺省 UDZO=zlib）；**NSIS 不变**（7z 恒 `-mx=9`，
+只有 `store` 会把内置压缩换成 zlib）。**没有**改成"给 release job / 打包机补依赖"或裁剪内容 —— 本轮只做零内容风险的压缩。
+
+**真机实测（本地重建的真实交付件，不是估算）**：
+`PicoAide-Harness-2.8.2-beta.2-x86_64.AppImage` **192,354,510 B → 149,119,491 B**
+（−43,235,019 B = **−22.5%**）；squashfs 超级块实测 `block_size=1048576, compression_id=4 (xz)`（offset 188,392）。
+功能验证：`--appimage-extract` 成功；用 `--appimage-extract-and-run` 起打包版走 CDP 探针（`temp/upg/diag-sidebar.mjs`），
+桌面外壳正常渲染、`__DSH_BOOT__.entries` = **69 且含 `dsh-plugin-desktop`**（§8.9.12 加的那条不变量）。
+
+**判据**：`tests/package.spec.ts` 新增「packs the installers with maximum compression」——
+`build.compression === 'maximum'`，注释里写清三个平台映射与实测数字。这一行删掉**不会报任何错**、
+只会让交付件悄悄胖回去（缺省 gzip），所以必须钉住。桌面包全量 118 文件 / 1434 用例全绿。
+
+**残留（认账）**：①mac 的 `UDBZ` 只在 CI 的 macOS job 里验 DMG 结构；**签名+公证+staple 的那条路径
+要到下一个正式 tag 才会重验**（UDBZ 是 hdiutil 标准格式，风险低但未在本轮实测）；
+②`-Xbcj x86` 与 `-b 1M` 是 electron-builder 之外的额外旋钮（要改我们那份 app-builder-lib 补丁），
+本轮**未采用**；③内容瘦身（死重 70 MiB / 可选能力按需下载）本轮按用户决定**不做**，清单与数字留在
+`temp/size-282/REPORT.md` 供后续排期。
+
 ### §8.9.10 「本地绿、CI 红」的权限模型缺口：两条自校准 EACCES 用例（CI 抓到，本地补跑抓到第二条）
 
 **现象**：CI 的 `Gate (tests + workspace build)` 在 `@picoaide/dsh-wasm-apps-host` 上红：

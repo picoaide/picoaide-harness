@@ -362,6 +362,7 @@
     "asar": {
       "smartUnpack": false
     },
+    "compression": "maximum",
     "asarUnpack": [
       "**/*.node",
       "**/*.dll",
