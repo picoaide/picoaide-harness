@@ -42,6 +42,13 @@ import {
 } from './loop-notify-contract.ts'
 import { handleDesktopLoopNotifySessionRequest } from './loop-notify-route.ts'
 import {
+  handleVoiceMicRequest,
+  handleVoiceMicStatusRequest,
+  VOICE_MIC_REQUEST_PATH,
+  VOICE_MIC_STATUS_PATH,
+  type VoiceMicDeps,
+} from './voice-mic-route.ts'
+import {
   BRAND_FAVICON_PATH,
   BRAND_MANIFEST_PATH,
   buildBrandWebAssets,
@@ -319,6 +326,35 @@ export function apply(ctx: Context, config: Config): void {
       ),
     }),
     'dsh-plugin-desktop: loop-notify session jump route',
+  )
+  // 麦克风系统授权（2026-09-30）：渲染层拿不到"TCC 被拒"这件事（设备列表同样为空），
+  // 只能由宿主给出；POST 会弹系统对话框 ⇒ 过写面证明。
+  const voiceMicDeps: VoiceMicDeps = {
+    platform: runtime.platform,
+    // 宿主插件不直接 import Electron（无头冒烟里根本没有 electron 模块）：
+    // TCC 那两步由 `desktopRuntime` 适配器提供，缺席就是"这台平台没有这一步"。
+    ...(runtime.microphone === undefined
+      ? {}
+      : {
+          getMediaAccessStatus: () => runtime.microphone!.permission(),
+          askForMediaAccess: () => runtime.microphone!.request(),
+        }),
+  }
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: VOICE_MIC_STATUS_PATH,
+      handler: (req, res) => handleVoiceMicStatusRequest(req, res, voiceMicDeps),
+    }),
+    'dsh-plugin-desktop: voice mic status route',
+  )
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: VOICE_MIC_REQUEST_PATH,
+      handler: (req, res) => handleVoiceMicRequest(req, res, { ...voiceMicDeps, ...proofDeps }),
+    }),
+    'dsh-plugin-desktop: voice mic permission request route',
   )
   ctx.effect(
     () => ctx.webServer.register({

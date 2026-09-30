@@ -251,9 +251,32 @@ export interface DesktopShellSpec extends DesktopWindowConfig {
 }
 
 /** Electron bootstrap capability supplied before the profile tree mounts. */
+/** macOS 的麦克风系统授权（TCC）：读状态 + 触发系统询问。 */
+export interface DesktopMicrophoneAdapter {
+  /**
+   * 读系统授权状态。
+   * @returns `granted` / `denied` / `restricted` / `not-determined`（未知取值回落 `unknown`）。
+   */
+  readonly permission: () => 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown'
+  /**
+   * 触发系统授权询问（macOS 只在 `not-determined` 时会弹窗；已拒之后不再弹）。
+   * @returns 询问流程结束后 resolve（结果由 {@link DesktopMicrophoneAdapter.permission} 读回）。
+   */
+  readonly request: () => Promise<void>
+}
+
 export interface DesktopRuntime {
   /** Current Electron platform. */
   readonly platform: DesktopPlatform
+
+  /**
+   * 麦克风系统授权适配器（只有 macOS 提供；其它平台没有"应用级授权询问"这一步）。
+   *
+   * 为什么放在 runtime 里而不是宿主插件直接读：宿主插件不得 import Electron
+   * （无头 loader 冒烟里没有 electron 模块），而 TCC 是 Electron API。
+   * 缺席 = 这台平台没有这一步（渲染层据此不显示"申请授权"按钮）。
+   */
+  readonly microphone: DesktopMicrophoneAdapter | undefined
 
   /** Locale currently used for native tray contributions. */
   readonly locale: DesktopLocale

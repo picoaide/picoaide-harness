@@ -78,6 +78,8 @@ function createHarness(platform: DesktopRuntime['platform'] = 'darwin'): PluginH
   let sessionOpenHandler: ((sessionId: string) => void) | undefined = undefined
   const runtime: DesktopRuntime = {
     platform,
+    // 无头冒烟没有 Electron：麦克风授权适配器缺席（= 这台平台没有这一步）。
+    microphone: undefined,
     locale: 'en',
     // native 文案(托盘/通知)的产品名:渠道构建下由 profile 组装成渠道名。
     productName: 'PicoAide Harness',

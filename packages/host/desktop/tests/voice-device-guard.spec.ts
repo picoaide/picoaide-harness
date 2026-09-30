@@ -43,12 +43,16 @@ function devices(options: {
   return target
 }
 
-const message = (): string => zh['voice.noDevice']
+/** 预检要的两句文案（与生产同源：都来自字典，抛出那一刻求值）。 */
+const copy = (): { noDevice: () => string, denied: () => string } => ({
+  noDevice: () => zh['voice.noDevice'],
+  denied: () => zh['voice.micDenied'],
+})
 
 describe('voice device preflight', () => {
   it('throws a localized NotFoundError when no audio input exists', async () => {
     const target = devices({ inputs: 0 })
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     await expect(target.getUserMedia!({ audio: true, video: false })).rejects.toMatchObject({
       name: 'NotFoundError',
       message: zh['voice.noDevice'],
@@ -60,14 +64,14 @@ describe('voice device preflight', () => {
 
   it('passes through when at least one audio input exists', async () => {
     const target = devices({ inputs: 1 })
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     await expect(target.getUserMedia!({ audio: { echoCancellation: true }, video: false })).resolves.toEqual({ kind: 'fake-stream' })
     expect(target.calls).toHaveLength(1)
   })
 
   it('never intercepts requests that include video or are not audio-only', async () => {
     const target = devices({ inputs: 0 })
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     await expect(target.getUserMedia!({ audio: true, video: true })).resolves.toEqual({ kind: 'fake-stream' })
     await expect(target.getUserMedia!({ video: true })).resolves.toEqual({ kind: 'fake-stream' })
     await expect(target.getUserMedia!(undefined)).resolves.toEqual({ kind: 'fake-stream' })
@@ -77,41 +81,72 @@ describe('voice device preflight', () => {
 
   it('falls through when the preflight itself cannot enumerate', async () => {
     const failing = devices({ inputs: 0, enumerateFails: true })
-    installVoiceDevicePreflight({ mediaDevices: failing }, message)
+    installVoiceDevicePreflight({ mediaDevices: failing }, copy())
     await expect(failing.getUserMedia!({ audio: true })).resolves.toEqual({ kind: 'fake-stream' })
     const missing = devices({ inputs: 0, noEnumerate: true })
-    installVoiceDevicePreflight({ mediaDevices: missing }, message)
+    installVoiceDevicePreflight({ mediaDevices: missing }, copy())
     await expect(missing.getUserMedia!({ audio: true })).resolves.toEqual({ kind: 'fake-stream' })
     // 没有 mediaDevices（非安全上下文）时安装是 no-op，不得抛。
-    expect(() => installVoiceDevicePreflight({ mediaDevices: undefined }, message)).not.toThrow()
+    expect(() => installVoiceDevicePreflight({ mediaDevices: undefined }, copy())).not.toThrow()
   })
 
   it('evaluates the copy at throw time so a locale switch takes effect', async () => {
     const target = devices({ inputs: 0 })
-    installVoiceDevicePreflight({ mediaDevices: target }, () => '切换后的文案')
+    installVoiceDevicePreflight({ mediaDevices: target }, { noDevice: () => '切换后的文案', denied: () => '拒绝文案' })
     await expect(target.getUserMedia!({ audio: true })).rejects.toMatchObject({ message: '切换后的文案' })
+  })
+
+  it('tells "system denied" apart from "no device" (macOS TCC 被拒后设备列表同样为空)', async () => {
+    // 这是现场那条 bug 的核心：两种情形在渲染层看起来一模一样（都没有 audioinput），
+    // 只有宿主知道系统授权状态 —— 文案必须分开，否则用户拿着"找不到设备"去查硬件。
+    const deniedTarget = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: deniedTarget }, copy(), async () => ({ permission: 'denied' }))
+    await expect(deniedTarget.getUserMedia!({ audio: true })).rejects.toMatchObject({
+      name: 'NotFoundError',
+      message: zh['voice.micDenied'],
+    })
+    const restricted = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: restricted }, copy(), async () => ({ permission: 'restricted' }))
+    await expect(restricted.getUserMedia!({ audio: true })).rejects.toMatchObject({ message: zh['voice.micDenied'] })
+
+    // `not-determined`：**不拦** —— 宿主会在真实请求里触发系统弹窗（用户此刻就该看到它）。
+    const undetermined = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: undetermined }, copy(), async () => ({ permission: 'not-determined' }))
+    await expect(undetermined.getUserMedia!({ audio: true })).resolves.toEqual({ kind: 'fake-stream' })
+
+    // 非 macOS（`not-applicable`）与查不到状态：维持"没有设备"的文案。
+    const plain = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: plain }, copy(), async () => ({ permission: 'not-applicable' }))
+    await expect(plain.getUserMedia!({ audio: true })).rejects.toMatchObject({ message: zh['voice.noDevice'] })
+    const unknown = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: unknown }, copy(), async () => undefined)
+    await expect(unknown.getUserMedia!({ audio: true })).rejects.toMatchObject({ message: zh['voice.noDevice'] })
+    // 查状态本身抛错也不得改变行为（回落"没有设备"）。
+    const failing = devices({ inputs: 0 })
+    installVoiceDevicePreflight({ mediaDevices: failing }, copy(), async () => { throw new Error('route down') })
+    await expect(failing.getUserMedia!({ audio: true })).rejects.toMatchObject({ message: zh['voice.noDevice'] })
   })
 
   it('restores the original implementation and stays idempotent', async () => {
     const target = devices({ inputs: 1 })
     const original = target.getUserMedia
-    const restore = installVoiceDevicePreflight({ mediaDevices: target }, message)
+    const restore = installVoiceDevicePreflight({ mediaDevices: target }, copy())
     const wrapped = target.getUserMedia
     expect(wrapped).not.toBe(original)
     // 幂等：第二次安装不改变包装（避免叠加多层预检）。
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     expect(target.getUserMedia).toBe(wrapped)
     restore()
     expect(target.getUserMedia).toBe(original)
     // 卸载后再装一次仍然可用（disposer 不被状态污染）。
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     expect(target.getUserMedia).not.toBe(original)
   })
 
   it('keeps the preflight cheap: no enumeration for a non-audio request', async () => {
     const enumerate = vi.fn(async () => [{ kind: 'audioinput' }])
     const target: VoiceMediaDevicesLike = { getUserMedia: async () => ({}), enumerateDevices: enumerate }
-    installVoiceDevicePreflight({ mediaDevices: target }, message)
+    installVoiceDevicePreflight({ mediaDevices: target }, copy())
     await target.getUserMedia!({ video: true })
     expect(enumerate).not.toHaveBeenCalled()
   })

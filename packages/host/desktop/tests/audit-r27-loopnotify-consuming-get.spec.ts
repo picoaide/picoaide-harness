@@ -43,6 +43,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BRAND_FAVICON_PATH, BRAND_MANIFEST_PATH } from '../src/brand-web-route.ts'
 import { fetchLoopNotifySession } from '../src/client/loop-notify.tsx'
+import { VOICE_MIC_REQUEST_PATH, VOICE_MIC_STATUS_PATH } from '../src/voice-mic-route.ts'
 import { DESKTOP_DIRECTORY_PICKER_PATH } from '../src/directory-picker-contract.ts'
 import { DESKTOP_UPDATE_CHECK_PATH, DESKTOP_UPDATE_INSTALL_PATH, DESKTOP_UPDATE_PATH } from '../src/desktop-update-contract.ts'
 import { DESKTOP_TITLEBAR_DOUBLE_CLICK_PATH } from '../src/desktop-window-contract.ts'
@@ -415,6 +416,17 @@ const EXACT_ROUTE_POLICY: ReadonlyMap<string, ExactRoutePolicy> = new Map<string
     forgedMethod: 'POST',
     reason: '打开原生对话框并回吐所选路径（写）。',
     conditional: true,
+  }],
+  // 麦克风系统授权（2026-09-30）：状态只读；"申请"会弹系统对话框 ⇒ 伪造请求必须被拒。
+  [VOICE_MIC_STATUS_PATH, {
+    proof: false,
+    forgedMethod: 'GET',
+    reason: '纯读：回吐一枚枚举值（平台 + TCC 状态），无状态变更、无用户可见动作。',
+  }],
+  [VOICE_MIC_REQUEST_PATH, {
+    proof: true,
+    forgedMethod: 'POST',
+    reason: '拉起系统授权对话框（写；本机任意进程不得替用户弹窗）。',
   }],
 ])
 
