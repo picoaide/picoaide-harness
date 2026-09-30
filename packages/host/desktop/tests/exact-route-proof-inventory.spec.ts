@@ -129,6 +129,15 @@ const REPO_EXACT_ROUTE_POLICY: ReadonlyMap<string, ExactRouteRow> = new Map<stri
     proof: 'none',
     reason: '纯读：随包静态资源的字节（no-store），无状态变更。',
   }],
+  // 麦克风系统授权（2026-09-30）：状态只读；"申请"会弹系统对话框 ⇒ 过写面证明。
+  ['packages/host/desktop/src/index.ts#VOICE_MIC_STATUS_PATH', {
+    proof: 'none',
+    reason: '纯读：回吐一枚枚举值（平台 + TCC 状态），无状态变更、无用户可见动作。',
+  }],
+  ['packages/host/desktop/src/index.ts#VOICE_MIC_REQUEST_PATH', {
+    proof: 'all',
+    gate: 'packages/host/desktop/src/write-proof.ts#acceptWriteProof',
+  }],
   ['packages/host/desktop/src/index.ts#DESKTOP_DIRECTORY_PICKER_PATH', {
     proof: 'all',
     gate: 'packages/host/desktop/src/write-proof.ts#acceptWriteProof',

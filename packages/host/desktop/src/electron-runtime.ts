@@ -27,8 +27,9 @@ import { chmod } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
-  DesktopNotification,
   DesktopLocale,
+  DesktopMicrophoneAdapter,
+  DesktopNotification,
   DesktopPlatform,
   DesktopRuntime,
   DesktopShellSpec,
@@ -163,6 +164,30 @@ function isZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | undefin
 /** Native adapter used by the PicoAide Harness launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
+  /**
+   * 麦克风系统授权（macOS TCC）。其它平台没有"应用级授权询问"这一步 ⇒ 不提供，
+   * 渲染层据此不显示"申请授权"按钮（Windows 的麦克风隐私开关在系统设置里）。
+   */
+  readonly microphone: DesktopMicrophoneAdapter | undefined = process.platform === 'darwin'
+    ? {
+        permission: () => {
+          try {
+            const status = systemPreferences.getMediaAccessStatus('microphone')
+            return status === 'granted' || status === 'denied' || status === 'restricted' || status === 'not-determined'
+              ? status
+              : 'unknown'
+          } catch {
+            // 读不到状态不是终态：交给渲染层显示"可申请"，用户点一下会走真实流程。
+            return 'unknown'
+          }
+        },
+        request: async () => {
+          // `denied`/`restricted` 之后系统**不再弹窗**（只能用户自己去系统设置改），
+          // 所以这里不把它当错误：调用照发，结果由 `permission()` 读回。
+          await systemPreferences.askForMediaAccess('microphone')
+        },
+      }
+    : undefined
   readonly updates: DesktopUpdateAdapter = {
     get isPackaged() { return app.isPackaged },
     get canDownload() { return app.isPackaged },
