@@ -28,6 +28,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { useEffect, useState, type ReactElement } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { t } from './locales.ts'
+import { installVoiceDevicePreflight } from './voice-device-guard.ts'
 
 /** 语音输入 bundle 的包名（`pluginNavigation.openBundle` 的入参，也是 profile 行来源）。 */
 export const VOICE_INPUT_BUNDLE = '@deepseek-ai/dsh-experimental-voice-input-bundle'
@@ -340,6 +341,12 @@ function describeRemoteFailure(error: unknown): string {
 export function applyVoiceSetup(ctx: ClientContext): VoiceSetupStore {
   const store = createVoiceSetupStore(() => speechRemoteOf(ctx))
   setVoiceSetupOverlayStore(store)
+  // 设备预检（2026-09-30）：本机没有麦克风时，上游原样透出的英文
+  // `Requested device not found` 换成本地化的可执行文案（语义不变，仍是 NotFoundError）。
+  ctx.effect(
+    () => installVoiceDevicePreflight(undefined, () => t('voice.noDevice')),
+    'desktop: voice device preflight',
+  )
   ctx.effect(() => {
     // 我们禁用 `ui-plugin-manager`（见 `cordis.patch.yml`），所以 `pluginNavigation`
     // 没有正主、必须由桌面补位；但**一旦它被渠道覆盖层或上游默认变化重新启用**，

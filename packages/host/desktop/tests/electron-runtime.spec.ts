@@ -1432,8 +1432,18 @@ describe('Electron compatibility runtime', () => {
     expect(grantedByCheck(primary, 'https://evil.example/', { isMainFrame: true, mediaType: 'audio' })).toBe(false)
     expect(grantedByCheck(primary, appUrl, { isMainFrame: false, mediaType: 'audio' })).toBe(false)
     expect(grantedByCheck(primary, appUrl, { isMainFrame: true, mediaType: 'video' })).toBe(false)
-    expect(grantedByCheck(primary, appUrl, { isMainFrame: true })).toBe(false)
     expect(grantedByCheck({}, appUrl, { isMainFrame: true, mediaType: 'audio' })).toBe(false)
+    // **缺 `mediaType` 必须放行**（2026-09-30 真 Electron 45.0.0-alpha.7 探针实测：
+    // check 通道的 details 只有 { embeddingOrigin, isMainFrame, requestingUrl }，没有
+    // `mediaType`）—— 严格等值会恒假，而 Chromium 在设备选择阶段被拒时报给用户的是
+    // `NotFoundError: Requested device not found`（看起来像"没有麦克风"）。真正的
+    // 放行闸门在 request 通道：那里仍然要求 `mediaTypes === ['audio']`，摄像头一律拒。
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: true })).toBe(true)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: true, embeddingOrigin: appUrl })).toBe(true)
+    // …但"没带 mediaType"不能变成无条件放行：身份 / 框架 / 来源三道闸照旧。
+    expect(grantedByCheck({}, appUrl, { isMainFrame: true })).toBe(false)
+    expect(grantedByCheck(primary, 'https://evil.example/', { isMainFrame: true })).toBe(false)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: false })).toBe(false)
 
     // macOS：系统授权是最后一道闸 —— 未授权时 check 必须拒，request 走 TCC 并按其答案回执。
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')

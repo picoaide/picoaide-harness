@@ -35,6 +35,8 @@ export const zh = {
   'voice.unavailable': '语音服务尚未就绪：语音插件未装配或正在启动。',
   /** catalog 里没有任何提供者。 */
   'voice.noProvider': '当前没有可用的语音识别提供者。',
+  /** 本机没有可用的录音设备（上游会把这句话拼在"语音识别失败："后面）。 */
+  'voice.noDevice': '未检测到麦克风设备。请检查系统声音设置里的输入设备；虚拟机或远程桌面需开启音频/麦克风重定向。',
   /** 未准备时的下载量与磁盘占用提示（`{download}` = 实际下载，`{disk}` = 上游预留建议）。 */
   'voice.estimate': '首次下载约 {download}（建议预留磁盘 {disk}；模型常驻磁盘，之后可离线使用）。',
   /** 主按钮：下载并启用。 */
@@ -77,6 +79,7 @@ export const en: Record<keyof typeof zh, string> = {
   'voice.privacy': 'The model and recognition stay on this machine. A transcript is inserted into the draft only — it is never sent automatically.',
   'voice.unavailable': 'Speech is not ready yet: the voice plugin is not installed or still starting.',
   'voice.noProvider': 'No speech recognition provider is available.',
+  'voice.noDevice': 'No microphone device was found. Check the input devices in your system sound settings; virtual machines and remote desktops need audio/microphone redirection.',
   'voice.estimate': 'The first download is about {download} (reserve about {disk} on disk; the model stays on disk and then works offline).',
   'voice.download': 'Download and enable',
   'voice.retry': 'Retry download',
