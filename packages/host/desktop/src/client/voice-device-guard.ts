@@ -15,10 +15,19 @@
  * 就抛一个**同样类型**（`NotFoundError`）但**文案可执行**的异常 —— 语义不变（仍是"设备
  * 找不到"），只是把不可读的英文换成"该做什么"。
  *
+ * **为什么要问宿主**（2026-09-30 现场）：macOS 的 TCC **被拒之后不再弹窗**，此时
+ * `enumerateDevices()` 里同样没有 `audioinput` —— 只靠渲染层无法把"没插麦克风"与
+ * "系统没允许"分开，用户会拿着"找不到设备"去查硬件。宿主侧的
+ * `GET /api/pico/voice/mic` 给出真实授权状态，于是文案能分开：
+ *   · `denied` / `restricted` ⇒ 告诉用户去「系统设置 → 隐私与安全性 → 麦克风」打开；
+ *   · `not-determined` ⇒ **不拦**：让原请求走过去，宿主会触发系统弹窗（用户此刻就该看到它）；
+ *   · 其它（含非 macOS）⇒ "未检测到麦克风设备"（真的没有设备）。
+ *
  * 边界（刻意的）：
  *   · 只在**音频且不含视频**的请求上生效；其余请求一律原样交给原实现；
  *   · `enumerateDevices` 不可用、或它自己抛错 ⇒ **不拦**（回落原本的错误，绝不因为
  *     预检本身坏掉而改变行为）；
+ *   · 状态查询失败 ⇒ 按"没有设备"的既有文案（不因为查询坏掉而放行或换错话术）；
  *   · 设备列表里只要有一个 `audioinput` 就放行 —— 设备能否真正打开仍由 Chromium 判断；
  *   · 包装与还原都在 `ctx.effect` 里（插件卸载即恢复原实现，不污染页面）。
  *
@@ -37,6 +46,20 @@ export interface VoiceDeviceTarget {
   readonly mediaDevices?: VoiceMediaDevicesLike | undefined
 }
 
+/** 宿主给出的麦克风授权状态（`GET /api/pico/voice/mic` 的载荷子集）。 */
+export interface VoiceMicStatusView {
+  /** 系统层面的授权状态；非 macOS 是 `not-applicable`。 */
+  readonly permission?: string
+}
+
+/** 预检需要的文案（在**抛出那一刻**求值，语言切换即时生效）。 */
+export interface VoiceDeviceCopy {
+  /** 有权限但一个录音设备都没有。 */
+  readonly noDevice: () => string
+  /** 系统层面没有授权（macOS 已拒/受限，系统不再弹窗）。 */
+  readonly denied: () => string
+}
+
 /** 判断约束是不是"只要音频"（含 `audio: true`/对象，且没有 `video`）。 */
 function wantsAudioOnly(constraints: unknown): boolean {
   if (typeof constraints !== 'object' || constraints === null) return false
@@ -53,7 +76,8 @@ function wantsAudioOnly(constraints: unknown): boolean {
  */
 export function installVoiceDevicePreflight(
   target: VoiceDeviceTarget = { mediaDevices: (globalThis.navigator as { mediaDevices?: VoiceMediaDevicesLike } | undefined)?.mediaDevices },
-  message: () => string,
+  copy: VoiceDeviceCopy,
+  readStatus?: () => Promise<VoiceMicStatusView | undefined>,
 ): () => void {
   const devices = target.mediaDevices
   const original = devices?.getUserMedia
@@ -70,7 +94,20 @@ export function installVoiceDevicePreflight(
         inputs = undefined
       }
       if (inputs !== undefined && !inputs.some(device => device?.kind === 'audioinput')) {
-        throw new DOMException(message(), 'NotFoundError')
+        let permission: string | undefined
+        if (readStatus !== undefined) {
+          try {
+            permission = (await readStatus())?.permission
+          } catch {
+            // 查状态失败 ⇒ 回落"没有设备"的既有文案（不因为查询坏掉而换错话术）。
+            permission = undefined
+          }
+        }
+        // `not-determined`：**不拦** —— 宿主会在真实请求里触发系统弹窗，用户此刻就该看到它。
+        if (permission !== 'not-determined') {
+          const denied = permission === 'denied' || permission === 'restricted'
+          throw new DOMException(denied ? copy.denied() : copy.noDevice(), 'NotFoundError')
+        }
       }
     }
     return await original.call(devices, constraints)
