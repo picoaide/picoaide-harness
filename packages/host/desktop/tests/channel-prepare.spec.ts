@@ -8,13 +8,48 @@
  *     把客户品牌染进官方包）。
  */
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
-import { prepareChannelPackaging } from '../scripts/channel-prepare.ts'
+import {
+  prepareChannelPackaging as prepareChannelPackagingReal,
+  resolveSpeechModelPayloadAction,
+  type ChannelPrepareOptions,
+} from '../scripts/channel-prepare.ts'
+import type { SpeechModelPayloadDeps } from '../scripts/channel-prepare.ts'
+
+/**
+ * 载荷读写的**替身**：所有用例都经 {@link prepareChannelPackaging} 注入它。
+ *
+ * 2026-09-29 起"随包语音模型"对**所有渠道默认开启**，真实现会联网拉 230MiB ——
+ * 单测既不能依赖公网也不能花这个时间。替身只记录调用（并可按需产出/清掉目录），
+ * 真实的下载与校验由 `fetch-speech-model.mjs` 自己的实测与 afterPack 门禁负责。
+ */
+function speechModelStub(): SpeechModelPayloadDeps & { materialized: string[], cleared: string[] } {
+  const materialized: string[] = []
+  const cleared: string[] = []
+  return {
+    materialized,
+    cleared,
+    materializeSpeechModel: async (options) => {
+      materialized.push(options?.out ?? '')
+      return { out: options?.out ?? '', status: [] }
+    },
+    removeSpeechModel: (out) => {
+      cleared.push(out ?? '')
+      rmSync(out ?? '', { recursive: true, force: true })
+    },
+  }
+}
+
+/** 打包准备（测试入口）：自动注入载荷替身。 */
+function prepareChannelPackaging(options: ChannelPrepareOptions = {}) {
+  return prepareChannelPackagingReal({ speechModel: speechModelStub(), ...options })
+}
+import { SPEECH_MODEL_PAYLOAD_DIR } from '../scripts/verify-packaged-runtime.ts'
 import { generateTrayIcons } from '../scripts/generate-tray-icons.mjs'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -99,6 +134,54 @@ function publicChannel(channelId: string): Record<string, unknown> {
     desktop: { home_dir: '.picoaide-harness', app_origin_scheme: 'picoaide-app' },
   }
 }
+
+describe('speech model payload staging', () => {
+  // 2026-09-29 用户定案：**所有渠道默认随包**（含 official/beta）—— 装上客户端语音就能用，
+  // 零网络、零下载；只有渠道显式写 `desktop.speech_bundle_model: false` 才关闭（回到下载）。
+  it('材料化 is the default for every channel (no flag needed)', async () => {
+    const repo = await channelRepo({ channelId: 'example-brand', channel: brandChannel('example-brand') })
+    const appDir = tempDir('dsh-app-')
+    const speechModel = speechModelStub()
+    await prepareChannelPackagingReal({
+      env: { DSH_BUILD_CHANNEL: 'example-brand' },
+      repoRoot: repo,
+      appDir,
+      speechModel,
+    })
+    expect(speechModel.materialized).toEqual([join(appDir, SPEECH_MODEL_PAYLOAD_DIR)])
+    expect(speechModel.cleared).toEqual([])
+  })
+
+  it('clears a stale payload only when the channel opts out explicitly', async () => {
+    // 显式关闭 = 产物不带模型。残留必须清掉：客户端只看载荷在不在，而
+    // electron-builder 的 extraResources 会把它照单打进产物（"官方包悄悄带上模型"）。
+    const base = brandChannel('example-brand')
+    const channel = { ...base, desktop: { ...(base.desktop as Record<string, unknown>), speech_bundle_model: false } }
+    const repo = await channelRepo({ channelId: 'example-brand', channel })
+    const appDir = tempDir('dsh-app-')
+    const payload = join(appDir, SPEECH_MODEL_PAYLOAD_DIR)
+    mkdirSync(payload, { recursive: true })
+    writeFileSync(join(payload, 'manifest.json'), '{}\n')
+    writeFileSync(join(payload, 'stale.onnx'), 'x')
+    const speechModel = speechModelStub()
+    await prepareChannelPackagingReal({
+      env: { DSH_BUILD_CHANNEL: 'example-brand' },
+      repoRoot: repo,
+      appDir,
+      speechModel,
+    })
+    expect(speechModel.cleared).toEqual([payload])
+    expect(existsSync(payload)).toBe(false)
+  })
+
+  it('decides materialize vs clear from the channel flag alone (default = materialize)', () => {
+    // 决策是纯函数：`materialize` 那半要联网拉 230MiB，真判据是 afterPack 在**真产物**上的
+    // 断言（`assertBundledSpeechModelPackaged`）与 `fetch-speech-model.mjs` 自己的实测。
+    const base = { channelId: 'example-brand' } as Parameters<typeof resolveSpeechModelPayloadAction>[0]
+    expect(resolveSpeechModelPayloadAction({ ...base, speechBundleModel: true })).toBe('materialize')
+    expect(resolveSpeechModelPayloadAction({ ...base, speechBundleModel: false })).toBe('clear')
+  })
+})
 
 describe('prepareChannelPackaging', () => {
   it('渠道构建:按渠道派生图标,并把随包 channel.json 就位', async () => {

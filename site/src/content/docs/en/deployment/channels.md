@@ -55,6 +55,35 @@ the portal page** — configured in one place, consistent across the product.
 When the server is unreachable or running an older version, the client shows branding from the copy shipped with
 the package and does not fall back to the vendor mark.
 
+### Getting the speech model into a customer network (`desktop.speech_*`, since 2026-09-29)
+
+Voice input recognizes speech on the machine, but **the model weights (int8, about 228MB) are downloaded on
+first use by default**, and that download goes **direct** (the client forbids proxies by default). So in a network
+where only an authenticated proxy reaches the internet, preparation never succeeds. Four **optional** fields
+(configuring none of them keeps today's behaviour: a direct public download):
+
+| Field | Effect | Value |
+|---|---|---|
+| `desktop.speech_bundle_model` | **Ship the weights with the client** (**on by default**: every channel's installer carries the model, so voice works right after install with zero network) | Boolean; default `true`. Set `false` to opt out (back to "download on first use"). When on, **the installer grows by ~230MiB** |
+| `desktop.speech_model_dir` | Pre-placed model directory (**zero download**) | An absolute path, or `{default, darwin, linux, win32}` (one config serves all three platforms) |
+| `desktop.speech_vad_path` | Pre-placed Silero VAD file (1.8MB; still downloaded when only the model directory is pre-placed) | Same as above |
+| `desktop.speech_model_origin` | Internal mirror (HuggingFace-compatible; model paths and file names unchanged) | `https://host[:port]` only — **no path** |
+
+What you must know:
+
+- **`speech_bundle_model` is a build-time switch that defaults to on**: the build pulls the weights into the
+  artifact (sizes and sha256 verified against the upstream manifest), and the client points the plugin's own
+  `modelDirectory`/`vadModelPath` at the copy inside the client directory — the official config path, with no
+  "release on first run" step and no extra 230MiB in the data root. A build that cannot fetch the weights
+  **fails** rather than shipping a package that only pretends to carry them.
+- **A bundled payload wins over pre-placed/mirror configuration** (what is installed locally beats network config).
+- **Pre-placed files are not hash-verified** (upstream only checks that they exist), so version matching is the
+  deployment's responsibility; a wrong file shows up as an explicit `Speech model verification failed` rather than
+  a silent downgrade.
+- **Configuring `modelOrigin` removes the public fallback**: a mirror that is down means the download fails.
+- A malformed value (relative path, unknown platform key, mirror with a path, the string `"true"`) falls back to
+  downloading in the client, but **CI stops that channel at build time**.
+
 ## Release matrix (which tags build which channels)
 
 | Trigger | Channels built | Notes |

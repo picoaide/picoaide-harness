@@ -864,19 +864,79 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         return false
       }
     }
+    const firstNonEmptyUrl = (...candidates: unknown[]): string | undefined => {
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.length > 0) return candidate
+      }
+      return undefined
+    }
     const clipboardForAppUi = (details: { isMainFrame?: boolean, requestingUrl?: string, embeddingOrigin?: string } | undefined): boolean => {
       if (details?.isMainFrame !== true) return false
       // 请求路径给 requestingUrl；检查路径给 embeddingOrigin（实测 requestingUrl 为空）。
-      const candidate = typeof details.requestingUrl === 'string' && details.requestingUrl.length > 0
-        ? details.requestingUrl
-        : details.embeddingOrigin
-      return isAppDocument(candidate)
+      return isAppDocument(firstNonEmptyUrl(details.requestingUrl, details.embeddingOrigin))
     }
-    window.webContents.session.setPermissionRequestHandler((_wc, permission, callback, details) => {
+
+    // 语音输入（2026-09-29 产品决策：默认开启）需要麦克风。放行范围沿用剪贴板那套
+    // 来源/框架层级判据（**本安装回环源的顶层文档**），并**再加三道闸**：
+    //   · `contents` 必须就是本窗口 —— 默认 session 里只有本应用窗口，多一道
+    //     身份判据比"看 URL"更难被同源子框架糊弄；
+    //   · 只放行**纯 audio** 的 media 请求（camera 与 video+audio 混合一律拒绝）；
+    //     Electron 的 request 通道给 `details.mediaTypes`（数组），check 通道给
+    //     `details.mediaType`（单值），两者形状不同，分别判；
+    //   · macOS 必须由系统授权兜底：check 通道要求
+    //     `getMediaAccessStatus('microphone') === 'granted'`；request 通道先
+    //     `askForMediaAccess('microphone')`（TCC 弹窗）再回答案，用户拒绝或调用
+    //     失败都按拒绝处理。
+    // 内嵌浏览器与应用窗口跑在各自的 partition（有自己的 guard），不受这里影响。
+    //
+    // 两条通道的 details 是 Electron 的**判别联合**（PermissionRequest /
+    // MediaAccessPermissionRequest / …），字段并不都在每个分支上（`mediaTypes` /
+    // `securityOrigin` 只在 Media 分支），所以这里统一按 unknown + 具名取字段读，
+    // 不做窄化断言 —— 形状由 Electron 版本决定，取不到就是拒绝。
+    const detailField = (details: unknown, key: string): unknown =>
+      typeof details === 'object' && details !== null
+        ? (details as Record<string, unknown>)[key]
+        : undefined
+    const isMicrophoneRequest = (details: unknown): boolean => {
+      const mediaTypes = detailField(details, 'mediaTypes')
+      return Array.isArray(mediaTypes) && mediaTypes.length === 1 && mediaTypes[0] === 'audio'
+    }
+    const isMicrophoneCheck = (details: unknown): boolean => detailField(details, 'mediaType') === 'audio'
+    const microphoneAllowedFor = (contents: unknown, details: unknown, ...urls: unknown[]): boolean =>
+      contents === window.webContents
+      && detailField(details, 'isMainFrame') === true
+      && isAppDocument(firstNonEmptyUrl(...urls))
+    const systemMicrophoneGranted = (): boolean =>
+      process.platform !== 'darwin' || systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+    const answerMicrophoneRequest = (allowed: boolean, callback: (granted: boolean) => void): void => {
+      if (!allowed) { callback(false); return }
+      if (process.platform !== 'darwin') { callback(true); return }
+      // TCC 弹窗：拒绝 / 抛错都按拒绝处理（绝不静默放行）。
+      void systemPreferences.askForMediaAccess('microphone').then(callback, () => { callback(false) })
+    }
+    window.webContents.session.setPermissionRequestHandler((wc, permission, callback, details) => {
+      if (permission === 'media') {
+        answerMicrophoneRequest(
+          isMicrophoneRequest(details)
+          && microphoneAllowedFor(
+            wc, details, detailField(details, 'requestingUrl'), detailField(details, 'securityOrigin'),
+          ),
+          callback,
+        )
+        return
+      }
       callback(APP_CLIPBOARD_PERMISSIONS.has(permission) && clipboardForAppUi(details))
     })
-    window.webContents.session.setPermissionCheckHandler((_wc, permission, _origin, details) =>
-      APP_CLIPBOARD_PERMISSIONS.has(permission) && clipboardForAppUi(details))
+    window.webContents.session.setPermissionCheckHandler((wc, permission, origin, details) => {
+      if (permission === 'media') {
+        return isMicrophoneCheck(details)
+          && microphoneAllowedFor(
+            wc, details, detailField(details, 'securityOrigin'), origin, detailField(details, 'requestingUrl'),
+          )
+          && systemMicrophoneGranted()
+      }
+      return APP_CLIPBOARD_PERMISSIONS.has(permission) && clipboardForAppUi(details)
+    })
     // P1-4: a Content-Security-Policy for the app surface. The DSH web bundle
     // is fully local (no CDN/external scripts); the strict policy keeps any
     // injected content from reaching out. The embedded browser partition is

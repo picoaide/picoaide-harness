@@ -39,6 +39,8 @@ describe('desktop channel profile', () => {
       deepLinkName: 'Acme AI',
       // 出口策略缺省=禁止代理（渠道没配 desktop.allow_system_proxy）。
       allowSystemProxy: false,
+      // 语音模型部署面缺省=空（渠道没配 speech_* 三项 ⇒ 公网直连下载）。
+      speech: { modelDirectory: undefined, vadModelPath: undefined, modelOrigin: undefined },
       // 只配了 identity.display_name:没有 short_name,登录页名字按服务端同序
       // 回落中性占位(CI 强制每个渠道必须写 short_name,交付构建到不了这里);
       // 短名是提示字段,缺失留空,由消费方回落到显示名。
@@ -65,6 +67,7 @@ describe('desktop channel profile', () => {
       appOriginScheme: 'acme-app',
       deepLinkName: 'Acme Assistant',
       allowSystemProxy: false,
+      speech: { modelDirectory: undefined, vadModelPath: undefined, modelOrigin: undefined },
       brand: {
         channelId: 'acme',
         title: 'Acme AI',

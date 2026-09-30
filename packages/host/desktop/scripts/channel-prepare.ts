@@ -33,11 +33,20 @@ import {
   type ChannelBuildContext,
   type ChannelBuildOptions,
 } from './channel-build.ts'
+import { SPEECH_MODEL_PAYLOAD_DIR } from './verify-packaged-runtime.ts'
 
 /** `prepareChannelPackaging()` 的可覆盖输入（测试用）。 */
 export interface ChannelPrepareOptions extends ChannelBuildOptions {
   /** 应用资源目录（`build/`）；缺省为 desktop 包根的 `build/`。 */
   readonly appDir?: string
+  /**
+   * 随包语音模型的载荷读写（测试接缝；缺省 = `fetch-speech-model.mjs`）。
+   *
+   * 为什么需要接缝：真实现要联网拉 230MiB（缺省所有渠道都会走这条路），单测里
+   * 既慢又依赖公网 —— 决策逻辑由 `resolveSpeechModelPayloadAction()` 纯函数与
+   * `speech-model-bundle.spec.ts` 覆盖，这里只让"调用链真的通"。
+   */
+  readonly speechModel?: SpeechModelPayloadDeps
 }
 
 /**
@@ -67,5 +76,59 @@ export async function prepareChannelPackaging(
   // "打包照常进行"的中间态。
   stageChannelProfile(context, appDir)
   await prepareBrandAssets({ context, outputDir: appDir })
+  await prepareSpeechModelPayload(context, appDir, options.speechModel)
   return context
+}
+
+/**
+ * 随包语音模型载荷（`build/speech-model/`）—— 打包输入的**唯一**就位点。
+ *
+ * 两个方向都必须走这里（与 `stageChannelProfile` 同一姿势）：
+ *   · **缺省（所有渠道，含 official/beta）** ⇒ 拉取 + 按上游清单校验
+ *     （`scripts/fetch-speech-model.mjs`，幂等；已就位的文件不重下）；
+ *   · 渠道显式 `desktop.speech_bundle_model: false` ⇒ **清掉**载荷目录 —— 残留比
+ *     "没生效"更糟：上一次构建留下的 230MiB 会被打进这一次的产物，而客户端只看
+ *     载荷在不在。
+ *
+ * `deps` 是**测试接缝**（真实现要联网拉 230MiB）：单测传替身，生产不传。
+ * @param context - 渠道上下文（`speechBundleModel` 是唯一判据）。
+ * @param appDir - `build/` 目录。
+ * @param deps - 载荷读写实现（缺省 = `fetch-speech-model.mjs`）。
+ * @returns 载荷状态（`absent` = 本次产物不带模型）。
+ */
+export async function prepareSpeechModelPayload(
+  context: ChannelBuildContext,
+  appDir: string = defaultChannelAppDir(),
+  deps?: SpeechModelPayloadDeps,
+): Promise<'absent' | 'materialized'> {
+  const { materializeSpeechModel, removeSpeechModel } = deps ?? await import('./fetch-speech-model.mjs')
+  const out = join(appDir, SPEECH_MODEL_PAYLOAD_DIR)
+  if (resolveSpeechModelPayloadAction(context) === 'clear') {
+    removeSpeechModel(out)
+    return 'absent'
+  }
+  const { status } = await materializeSpeechModel({ out })
+  const summary = status.map(entry => `${entry.relative}=${entry.state}`).join(' ')
+  console.log(`channel-prepare: 随包语音模型已就位（渠道 ${context.channelId}）→ build/${SPEECH_MODEL_PAYLOAD_DIR}\n  ${summary}`)
+  return 'materialized'
+}
+
+/** `prepareSpeechModelPayload()` 的载荷读写面（与 `fetch-speech-model.mjs` 的导出同形）。 */
+export interface SpeechModelPayloadDeps {
+  /** 就位载荷（拉取缺失文件 + 校验 + 写清单）。 */
+  readonly materializeSpeechModel: (options?: { readonly out?: string }) => Promise<{
+    readonly out: string
+    readonly status: readonly { readonly relative: string, readonly state: string }[]
+  }>
+  /** 清掉载荷目录。 */
+  readonly removeSpeechModel: (out?: string) => void
+}
+
+/**
+ * 本次打包对载荷的动作（**纯函数**：决策与 IO 分开，纯的那半由单测穷举）。
+ * @param context - 渠道上下文。
+ * @returns `materialize` = 拉取并随包（缺省）；`clear` = 清掉残留、不随包（显式关闭）。
+ */
+export function resolveSpeechModelPayloadAction(context: ChannelBuildContext): 'materialize' | 'clear' {
+  return context.speechBundleModel ? 'materialize' : 'clear'
 }

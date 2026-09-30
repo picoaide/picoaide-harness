@@ -298,6 +298,9 @@ export const EXECUTION_FACE_REGISTRY = [
   // 递归形状族新增的那一条（E-01）：`packages/<scope>/<pkg>/scripts/**` 任意深度。
   // 它是 `scripts/verify-renderer-error-capture.mjs` 的 **Electron 主脚本**，那条门禁的
   // 全部观察（`RENDERER_CAPTURE_SMOKE_RESULT` 行）都由它打印 —— 改写它 = 改写判据的观察端。
+  // 随包语音模型的载荷就位（2026-09-29）：它按上游清单校验大小+sha256 并写清单，
+  // 而客户端装配期与 afterPack 门禁都以那份清单为准 —— 改写它 = 改写"载荷可信"这个前提。
+  'packages/host/desktop/scripts/fetch-speech-model.mjs',
   'packages/host/desktop/scripts/fixtures/renderer-error-capture-main.mjs',
   'packages/host/desktop/scripts/generate-mac-app-icon.mjs',
   'packages/host/desktop/scripts/generate-tray-icons.mjs',

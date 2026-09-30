@@ -16,6 +16,7 @@ import { installDesktopDirectoryPickerBridge } from './directory-picker.ts'
 import { parseDesktopClientEnvironment } from './environment.ts'
 import { applyLoopNotifyClient } from './loop-notify.tsx'
 import { applyLegacyThemeTokens } from './legacy-theme-tokens.ts'
+import { applyVoiceSetup } from './voice-setup.tsx'
 import { setActiveLocale } from './locales.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
@@ -48,6 +49,30 @@ export type {
   DesktopUpdateService,
 } from './desktop-update.tsx'
 export type { DesktopClientEnvironment, DesktopClientMode, DesktopClientPlatform } from './environment.ts'
+export {
+  applyVoiceSetup,
+  createVoiceSetupStore,
+  formatVoiceBytes,
+  selectVoiceProvider,
+  setVoiceSetupOverlayStore,
+  speechRemoteOf,
+  VOICE_INPUT_BUNDLE,
+  VOICE_LOCAL_PROVIDER_ID,
+  VOICE_SETUP_POLL_MS,
+  voiceFailureDetail,
+  voicePhaseKey,
+  VoiceSetupDialog,
+  VoiceSetupOverlay,
+} from './voice-setup.tsx'
+export type {
+  SpeechRemoteLike,
+  VoiceCatalogView,
+  VoicePreparationPhase,
+  VoiceProviderView,
+  VoiceRemoteResult,
+  VoiceSetupSnapshot,
+  VoiceSetupStore,
+} from './voice-setup.tsx'
 
 /** Services required by advanced presentation. */
 export const inject = [
@@ -91,6 +116,11 @@ export function apply(ctx: ClientContext): void {
     )
   }
   applyLoopNotifyClient(ctx)
+  // 语音输入（2026-09-29 默认开启）：补 `pluginNavigation` 服务（语音 UI 插件 inject
+  // 它，而唯一提供者 ui-plugin-manager 被禁用）并把模型准备面挂到 shell.overlay。
+  // 与 shell 模式无关：标准模式下槽位不存在时只是不渲染，服务仍在（高级模式才有
+  // 输入框麦克风按钮）。
+  applyVoiceSetup(ctx)
   // vendored memory-evolve 的旧色板适配层（见 legacy-theme-tokens.ts 的模块注释）：
   // 41 个上游不存在的 `--dsw-*` 名字在这里获得真实取值 —— 否则它们永远走 fallback
   // （37 条声明直接失效、其余颜色不随主题变化）。层是 effect 作用域：卸载即摘掉。

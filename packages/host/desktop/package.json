@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.8.2-beta.2",
+  "version": "2.8.2-beta.3",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -218,8 +218,11 @@
     "@deepseek-ai/dsh-experimental-agent-team": "0.1.7-rc.2",
     "@deepseek-ai/dsh-experimental-api-speech-to-text": "0.1.7-rc.2",
     "@deepseek-ai/dsh-experimental-client-ui-agent-team": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-experimental-client-ui-voice-input": "0.1.7-rc.2",
     "@deepseek-ai/dsh-experimental-speech-to-text": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-experimental-speech-to-text-sensevoice": "0.1.7-rc.2",
     "@deepseek-ai/dsh-experimental-tool-agent-team": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-experimental-voice-input-bundle": "0.1.7-rc.2",
     "@deepseek-ai/dsh-file-reference": "0.1.7-rc.2",
     "@deepseek-ai/dsh-fs": "0.1.7-rc.2",
     "@deepseek-ai/dsh-fs-local": "0.1.7-rc.2",
@@ -377,7 +380,12 @@
       "**/prebuilds/**/*.conpty_console_list*"
     ],
     "afterPack": "./scripts/verify-packaged-runtime.ts",
-    "extraResources": [],
+    "extraResources": [
+      {
+        "from": "build/speech-model",
+        "to": "speech-model"
+      }
+    ],
     "electronFuses": {
       "runAsNode": true,
       "onlyLoadAppFromAsar": true
@@ -483,7 +491,12 @@
       "hardenedRuntime": true,
       "icon": "build/app-icon-mac.png",
       "artifactName": "PicoAide-Harness-${version}-mac.${ext}",
-      "notarize": true
+      "notarize": true,
+      "entitlements": "scripts/macos-entitlements.plist",
+      "entitlementsInherit": "scripts/macos-entitlements.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "PicoAide Harness 使用麦克风把你的语音转写为输入框里的文字；录音只在本机识别，不会上传。"
+      }
     },
     "win": {
       "target": [

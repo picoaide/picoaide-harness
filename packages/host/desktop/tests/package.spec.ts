@@ -31,6 +31,9 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
       notarize?: unknown
       target?: unknown
       x64ArchFiles?: unknown
+      entitlements?: unknown
+      entitlementsInherit?: unknown
+      extendInfo?: Record<string, unknown>
     }
     win?: { icon?: unknown; target?: unknown; artifactName?: unknown }
     nsis?: Record<string, unknown>
@@ -347,7 +350,27 @@ describe('published package surface', () => {
       notarize: true,
       target: [{ target: 'dmg', arch: ['arm64'] }],
       artifactName: 'PicoAide-Harness-${version}-mac.${ext}',
+      // 2026-09-29 语音输入默认开启 ⇒ macOS 必须有麦克风用途说明 + 签名 entitlement
+      // （缺任一项，getUserMedia({audio}) 连系统弹窗都不会出现）。
+      entitlements: 'scripts/macos-entitlements.plist',
+      entitlementsInherit: 'scripts/macos-entitlements.plist',
     }))
+    expect(manifest.build?.mac?.extendInfo?.NSMicrophoneUsageDescription)
+      .toEqual(expect.stringMatching(/麦克风|microphone/u))
+    // entitlement 文件本身要存在且真的带 audio-input；hardened runtime 的三条缺省
+    // 集必须同时保留（显式 entitlements 会替换 electron-builder 的缺省集，少一条
+    // V8 的 JIT 就被硬运行时挡下）。
+    const entitlementsPath = new URL('scripts/macos-entitlements.plist', packageRoot)
+    expect(existsSync(entitlementsPath)).toBe(true)
+    const entitlements = readFileSync(entitlementsPath, 'utf8')
+    for (const key of [
+      'com.apple.security.device.audio-input',
+      'com.apple.security.cs.allow-jit',
+      'com.apple.security.cs.allow-unsigned-executable-memory',
+      'com.apple.security.cs.disable-library-validation',
+    ]) {
+      expect(entitlements, `macOS entitlements 缺少 ${key}`).toContain(`<key>${key}</key>`)
+    }
     expect(manifest.devDependencies?.['@electron/asar']).toBe('3.4.1')
   })
 

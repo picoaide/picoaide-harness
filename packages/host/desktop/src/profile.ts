@@ -32,6 +32,7 @@ import {
 import { resolveDshHome } from './desktop-home.ts'
 import { parseDocument } from 'yaml'
 import type { DesktopShellMode } from './runtime.ts'
+import { resolveBundledSpeechModel } from './speech-model-bundle.ts'
 import {
   activeDesktopProfileLayers,
   readDesktopDisabledBundles,
@@ -84,6 +85,24 @@ const REQUIRED_BUNDLES = [
   '@picoaide/dsh-browser',
   'dsh-memory-evolve',
   '@picoaide/dsh-cron',
+  // 语音输入（2026-09-29 产品决策：**默认开启**）。上游从 0.1.7 起把
+  // `@deepseek-ai/dsh-experimental-voice-input-bundle` 作为 `@deepseek-ai/dsh`
+  // 的依赖随包分发，但默认不装配；这里把它列进桌面 profile 的 bundle 层，
+  // 由它插入四条行：`speech-to-text` / `speech-to-text-sensevoice` /
+  // `api-speech-to-text`（宿主）与 `ui-voice-input`（浏览器：输入框麦克风按钮）。
+  //
+  // 桌面侧必须同时补齐三件事，否则这一行只会在启动期抛错、或者按钮点了没反应：
+  //   1. `ctx.pluginNavigation` 由 `client/voice-setup.tsx` 补位 —— 语音 UI 插件
+  //      `inject` 该服务，而唯一的提供者 `ui-plugin-manager` 被我们禁用
+  //      （见 `cordis.patch.yml`）；缺了它整个 client fiber 永久 pending，
+  //      麦克风按钮根本不出现；
+  //   2. 麦克风权限（`electron-runtime.ts` 的 permission request/check 处理器：
+  //      只放行**本应用主框架**的 audio 请求；macOS 还要 usage description +
+  //      `com.apple.security.device.audio-input`，见 `package.json` 的 `build.mac`）；
+  //   3. 模型准备面：上游的准备/进度卡片挂在 `plugins.bundle.activation|config`
+  //      槽位（属 ui-plugin-manager），我们提供自己的等价面，
+  //      经 `pluginNavigation.openBundle(...)` 打开。
+  '@deepseek-ai/dsh-experimental-voice-input-bundle',
 ]
 /** 携带桌面自身组装补丁层的 bundle（见 `REQUIRED_BUNDLES` 的说明）。 */
 const DESKTOP_LAYER_CARRIER_BUNDLE = '@picoaide/dsh-enterprise'
@@ -132,6 +151,11 @@ const SETTINGS_PACKAGE = '@deepseek-ai/dsh-settings'
 const DESKTOP_SHELL_ROW_ID = 'desktop-shell'
 /** Legacy settings document retired by upstream 0.1.7 (imported once, then renamed). */
 const LEGACY_SETTINGS_FILENAME = 'settings.yaml'
+/**
+ * 语音识别提供者行 id（上游 `@deepseek-ai/dsh-experimental-voice-input-bundle` 的
+ * `cordis.patch.yml` 插入的四行之一）。渠道的模型部署面就注入这一行的 config。
+ */
+const SPEECH_SENSEVOICE_ROW_ID = 'speech-to-text-sensevoice'
 const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
 const UI_LAYOUT_PACKAGE = '@deepseek-ai/dsh-client-ui-layout'
 const UI_SIDEBAR_PACKAGE = '@deepseek-ai/dsh-client-ui-sidebar'
@@ -156,11 +180,13 @@ const ADVANCED_DESKTOP_SHELL_MODE: DesktopShellMode = 'advanced'
  * 官方构建（没有渠道包）返回空数组 —— 行为与渠道化改造前逐字节一致。
  * @param channelProfile - 随包分发的渠道内容（缺失=未渠道化）。
  * @param rows - 已被前面的 patch 触及的行 id 集合（只注入确实存在的行）。
+ * @param home - 本次启动解析出的 DSH 数据根（语音识别模型的 `dataRoot` 要用它算成字面量）。
  * @returns 追加到组合结果尾部的 patch 列表。
  */
 export function channelProfilePatches(
   channelProfile: DesktopChannelProfile | undefined,
   rows: ReadonlySet<string> | ReadonlyMap<string, unknown>,
+  home: string,
 ): Array<Record<string, unknown>> {
   if (channelProfile === undefined) return []
   const out: Array<Record<string, unknown>> = []
@@ -200,6 +226,29 @@ export function channelProfilePatches(
     out.push({
       id: 'picoaide-session',
       config: { deepLinkScheme: channelProfile.deepLinkScheme },
+    })
+  }
+  // 语音识别模型的部署面（2026-09-29 默认开启语音之后的第一个运维缺口）：模型是
+  // 运行期按需下载的 228MB 权重，走宿主 Node **直连**（客户端默认禁代理），而客户网
+  // 常常"只有认证代理能出公网"——那种网络里语音永远准备不好。渠道包可以给预置目录
+  // （零下载）或内网镜像（`modelOrigin`，路径仍用上游钉死的），两者都只在这行存在时注入。
+  //
+  // 为什么在这里重述 `dataRoot`：patch 的 `config` 是**整键替换**，而该行原本的
+  // `dataRoot` 是上游 bundle 自己算的 `dshHomePath('speech-to-text','sensevoice')`
+  // ——我们按同一个 home 算成字面量，漏了它这一行会因为 `dataRoot` 必填而加载失败
+  // （语音整个消失）。上游给该行新增必填键时，`tests/channel-speech-patch.spec.ts`
+  // 的"超集"判据会当场变红。
+  const speech = channelProfile.speech
+  if (rows.has(SPEECH_SENSEVOICE_ROW_ID)
+    && (speech.modelDirectory !== undefined || speech.vadModelPath !== undefined || speech.modelOrigin !== undefined)) {
+    out.push({
+      id: SPEECH_SENSEVOICE_ROW_ID,
+      config: {
+        dataRoot: join(home, 'speech-to-text', 'sensevoice'),
+        ...(speech.modelDirectory === undefined ? {} : { modelDirectory: speech.modelDirectory }),
+        ...(speech.vadModelPath === undefined ? {} : { vadModelPath: speech.vadModelPath }),
+        ...(speech.modelOrigin === undefined ? {} : { modelOrigin: speech.modelOrigin }),
+      },
     })
   }
   return out
@@ -1151,7 +1200,7 @@ export async function prepareDesktopProfile(
       ...(channelProfile?.windowTitle === undefined ? {} : { windowTitle: channelProfile.windowTitle }),
     },
   })
-  patches.push(...channelProfilePatches(channelProfile, rows))
+  patches.push(...channelProfilePatches(channelProfile, rows, home))
   // 深链 scheme 必须**注入**应用协议插件行，不能让插件自己去读随包 channel.json
   // （enterprise 的 same 教训：tsdown 内联后 `../build/channel.json` 指向不存在的
   // 目录，渠道客户端的深链会被官方 scheme 的严格闸门丢掉）。官方构建没有渠道包，
@@ -1180,6 +1229,26 @@ export async function prepareDesktopProfile(
     patches.push({
       id: BROWSER_ROW_ID,
       config: { appOriginScheme: channelProfile?.appOriginScheme ?? DEFAULT_APP_ORIGIN_SCHEME },
+    })
+  }
+  // 随包语音模型（2026-09-29）：渠道构建可以把权重打进产物（`extraResources` →
+  // `<resources>/speech-model/`），这里按**上游官方配置项**把那一行指过去
+  // （`modelDirectory` + `vadModelPath`，语义就是"文件已存在 ⇒ 不下载"）。
+  // 只在这两项的文件齐、大小对时注入：显式来源会**关掉**这一行的下载，指过去而文件不在
+  // 就是硬故障；不注入则回落"从公网/渠道镜像下载"的既有路径（见 speech-model-bundle.ts）。
+  const bundledSpeech = rows.has(SPEECH_SENSEVOICE_ROW_ID) ? resolveBundledSpeechModel() : undefined
+  if (bundledSpeech !== undefined) {
+    patches.push({
+      id: SPEECH_SENSEVOICE_ROW_ID,
+      // `config` 是整键替换：渠道那三个字段（`speech_model_dir` 等）与本项都由
+      // `channelProfilePatches` 负责，两者都碰这一行时**后写者胜** —— 顺序上本项在
+      // 渠道 patch 之后，所以"产物里带了载荷"优先于"渠道配了预置目录/镜像"
+      // （本机装的东西比网络配置更确定；渠道要覆盖它就把 `speech_bundle_model` 关掉）。
+      config: {
+        dataRoot: join(home, 'speech-to-text', 'sensevoice'),
+        modelDirectory: bundledSpeech.modelDirectory,
+        vadModelPath: bundledSpeech.vadPath,
+      },
     })
   }
   return {

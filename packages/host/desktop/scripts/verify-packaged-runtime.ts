@@ -174,6 +174,23 @@ export const REQUIRED_PACKAGED_RUNTIME_ENTRIES = [
   'node_modules/@deepseek-ai/dsh-subprocess/lib/control.js',
   'node_modules/@deepseek-ai/dsh-lazy-require/package.json',
   'node_modules/@deepseek-ai/dsh-lazy-require/lib/index.js',
+  // 语音输入（2026-09-29 默认开启）的四条行 + bundle 本身。
+  //
+  // 为什么逐条钉在这里：`REQUIRED_BUNDLES` 里的 bundle 层靠**读它的
+  // `cordis.patch.yml`** 才拿到四条行 —— 补丁文件一旦没随包（打包排除规则、
+  // 上游改 layout），整个 bundle **静默贡献 0 行**：麦克风按钮消失，而 profile
+  // 校验、闭合校验、构建全绿（这正是本清单存在的理由）。其余五条是四条行各自的
+  // 入口与客户端 bundle：`ui-voice-input` 的 `lib/client.js` 缺了会被
+  // `dsh-client-modules` 判成"declares dsh.client but exports no ./client bundle"。
+  // 原生面（sherpa / onnxruntime）走 asarUnpack 的 `*.node`/`*.so*` glob，
+  // 已在真实产物里核对过（2026-09-29，dist/linux-unpacked）。
+  'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/package.json',
+  'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/cordis.patch.yml',
+  'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-speech-to-text/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js',
+  'node_modules/@deepseek-ai/dsh-experimental-api-speech-to-text/lib/typert.host.js',
+  'node_modules/@deepseek-ai/dsh-experimental-client-ui-voice-input/lib/client.js',
   // 平台内置技能（作者手册，2026-09-19 起叫 `app-builder`）**不在本清单里**，也不在包里：
   // 它的源目录已从本 vendored 包搬到服务端仓库的 `server/skills/app-builder/`，随服务端
   // 镜像发布、由员工在能力中心按需安装（`server/Dockerfile` 直接 COPY，客户端产物里
@@ -423,6 +440,85 @@ export const RUNTIME_ASSET_FAMILIES: ReadonlyArray<RegExp> = [
   /^node_modules\/dsh-memory-evolve\/skills\/[^/]+\/SKILL\.md$/u,
   /^node_modules\/@deepseek-ai\/dsh-agent-preset\/skills\/[^/]+\/SKILL\.md$/u,
 ]
+
+/** 随包语音模型载荷的目录名（源树 `build/` 下与产物 `resources/` 下同名）。 */
+export const SPEECH_MODEL_PAYLOAD_DIR = 'speech-model'
+
+/** 载荷清单里的一条文件记录（形状与 `fetch-speech-model.mjs` 写出的那份一致）。 */
+interface BundledSpeechModelFile {
+  readonly path: string
+  readonly bytes: number
+}
+
+/** 源树里随包语音模型的载荷目录（打包输入）。 */
+export function speechModelBuildDir(packageRoot: string): string {
+  return join(packageRoot, 'build', SPEECH_MODEL_PAYLOAD_DIR)
+}
+
+/**
+ * 正例侧：**声明了随包语音模型的构建，产物里必须真的有那三个文件**。
+ *
+ * 为什么需要它：载荷经 electron-builder 的 `extraResources` 随包（不进 app.asar），
+ * 而 `extraResources` 的源目录**不存在时 electron-builder 只打一行 warning**
+ * （`file source doesn't exist`）—— 于是"渠道开了随包模型但 CI 忘了拉取"、
+ * "`extraResources` 路径写错"、"构造机上被清掉"这三种形态都会得到一个**空手**的
+ * 安装包：客户端照常能跑（回落公网下载），但在只有认证代理能出网的客户网里就是
+ * "语音永远准备不好"，而门禁全绿。
+ *
+ * 判据方向：**源树声明 → 产物必须齐**（源树没有载荷 = 本次构建不含该能力 = 跳过，
+ * 官方构建与本地打包因此不受影响）。逐条对拍**大小**：240MB 的载荷在打包途中最可能的
+ * 损坏形态是截断；内容级（sha256）校验在客户端释放端做（那里也是唯一能对用户负责的
+ * 位置：字节不对就不写标记、回落下载）。
+ * @param resourcesRoot - 产物的 `resources/` 目录（`app.asar` 的父目录）。
+ * @param packageRoot - desktop 包根（`packages/host/desktop`）。
+ * @param exists - 物理文件探针（测试注入）。
+ * @param fileSize - 文件大小探针（测试注入）。
+ * @returns `absent`（本次构建不含随包模型）或 `verified`。
+ * @throws 源树声明了载荷而产物里缺文件/大小不符。
+ */
+export function assertBundledSpeechModelPackaged(
+  resourcesRoot: string,
+  packageRoot: string,
+  exists: FileProbe = existsSync,
+  fileSize: (path: string) => number | undefined = (path) => {
+    try {
+      return statSync(path).size
+    } catch {
+      return undefined
+    }
+  },
+): 'absent' | 'verified' {
+  const manifestPath = join(speechModelBuildDir(packageRoot), 'manifest.json')
+  if (!exists(manifestPath)) return 'absent'
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files?: readonly BundledSpeechModelFile[] }
+  const files = manifest.files ?? []
+  if (files.length === 0) {
+    throw new Error(
+      `dsh-plugin-desktop: ${manifestPath} declares no files — a payload without files would ship an empty `
+      + `${SPEECH_MODEL_PAYLOAD_DIR}/ directory (run scripts/fetch-speech-model.mjs again)`,
+    )
+  }
+  const missing: string[] = []
+  const wrongSize: string[] = []
+  for (const file of files) {
+    const packaged = join(resourcesRoot, SPEECH_MODEL_PAYLOAD_DIR, file.path)
+    if (!exists(packaged)) {
+      missing.push(file.path)
+      continue
+    }
+    const size = fileSize(packaged)
+    if (size !== file.bytes) wrongSize.push(`${file.path} (expected ${String(file.bytes)}, got ${String(size)})`)
+  }
+  if (missing.length > 0 || wrongSize.length > 0) {
+    throw new Error(
+      `dsh-plugin-desktop: packaged runtime at ${resourcesRoot} is missing the bundled speech model declared by `
+      + `${manifestPath}: ${[...missing, ...wrongSize].join(', ')} `
+      + '(see build.extraResources / scripts/fetch-speech-model.mjs — without the payload, clients in networks that '
+      + 'cannot reach the public internet can never prepare voice input)',
+    )
+  }
+  return 'verified'
+}
 
 /**
  * 正例侧：**内容级**运行期资产不得被排除规则整体抹掉。
@@ -1176,8 +1272,10 @@ export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE: readonly WorkspacePackageCover
 /**
  * 生效清单的总条数下限（只允许上调）—— 兜"整段删除"这类批量形态，
  * 以及 `@picoaide/*` 之外的条目（build/、lib/preload/、上游 node_modules）。
+ *
+ * 2026-09-29：122 → 129（语音输入默认开启，+7 条 voice-input 链）。
  */
-export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 122
+export const REQUIRED_WORKSPACE_PACKAGE_COVERAGE_MANIFEST_FLOOR = 129
 // 111 → 114（2026-09-23 合并 origin/master 的 #138）：那条线给必需清单加了
 // `@deepseek-ai/dsh-plugin-manager` 的 3 个 `lib/**` 条目，生效清单随之增长 3 条。
 // 棘轮语义是"贴住下限、只允许上调" ⇒ 合并后同步上调（删条目仍会打破等式）。
@@ -1773,6 +1871,7 @@ export function verifyPackagedRuntime(
   list: ArchiveLister = listPackage,
   exists: FileProbe = existsSync,
   readEntry: PackageEntryReader = readPackagedEntry,
+  speechModelPackageRoot: string | null = desktopProductRoot(),
 ): void {
   // 平台无关的产物身份判据（2026-09-26 复审 B-6）：electron-builder 实际收到的 `appId`
   // 必须逐字等于**本次构建声明的身份**（随包 channel.json 的 `desktop.app_id`，公共渠道
@@ -1914,6 +2013,15 @@ export function verifyPackagedRuntime(
     throw new Error(
       `dsh-plugin-desktop: packaged runtime at ${unpackedRoot} leaked JS into app.asar.unpacked: ${unpackedJs.join(', ')}`,
     )
+  }
+  // 随包语音模型（2026-09-29）：`extraResources` 的源目录缺失时 electron-builder
+  // **只打 warning**，所以"开了随包模型但产物里没有"必须由这里判红（见该函数注释）。
+  // 期望的**来源树是显式实参**（缺省 = 本包根，即 afterPack 的真实输入）：自建临时树的
+  // 单测传 `null` 表示"本次不声明载荷" —— 否则"开发机碰巧拉过载荷"会让整套单测变红。
+  // 用 `null` 而不是 `undefined`：缺省参数在显式传 `undefined` 时**仍会生效**（踩过）。
+  if (speechModelPackageRoot !== null && existsSync(dirname(asarPath))) {
+    const speechModel = assertBundledSpeechModelPackaged(dirname(asarPath), speechModelPackageRoot)
+    if (speechModel === 'verified') console.log(`dsh-plugin-desktop: bundled speech model verified at ${join(dirname(asarPath), SPEECH_MODEL_PAYLOAD_DIR)}`)
   }
   if (context.electronPlatformName === 'darwin' && context.arch === 4) {
     const forbidden = FORBIDDEN_MACOS_NATIVE_ENTRIES

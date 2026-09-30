@@ -111,6 +111,13 @@ export interface ChannelBuildContext {
    */
   readonly homeDir: string
   readonly artifactNames: ChannelArtifactNames
+  /**
+   * 是否把语音识别模型随包分发（`desktop.speech_bundle_model`，**缺省 true**）。
+   *
+   * 消费点唯一 = `prepareChannelPackaging()`：true 就拉取载荷进 `build/speech-model/`，
+   * 显式 false 就把它清掉（残留比没生效更糟：上一个渠道构建的载荷会被打进下一个产物）。
+   */
+  readonly speechBundleModel: boolean
 }
 
 /** 取非空字符串，否则 undefined。 */
@@ -154,6 +161,19 @@ export interface ChannelDesktopBranding {
   readonly deepLinkName?: string
   /** 数据目录名（`desktop.home_dir`）；畸形值在 `resolveChannelBuildContext` 抛错。 */
   readonly homeDir?: string
+  /**
+   * 是否把语音识别模型**随客户端分发**（渠道包 `desktop.speech_bundle_model`）。
+   *
+   * **缺省 true —— 所有渠道（含 official/beta）默认随包**（2026-09-29 产品决策）：
+   * 装上客户端语音就能用，零网络、零下载，客户网里不需要任何出口。代价是安装包
+   * 大约 +230MiB。
+   *
+   * 只有**显式布尔 `false`** 才关闭（关掉后客户端回到"首次使用从公网/渠道镜像下载"，
+   * 适合确实在意安装包体积的部署）。其余取值（含字符串 `"false"`/`0`）一律按缺省
+   * 处理 —— 渠道包是不可信输入，误读的方向是"随包"（可用优先），而构建期
+   * `scripts/ci-channels.sh` 会把非布尔值判红，让拼写错误在发版前现形。
+   */
+  readonly speechBundleModel?: boolean
 }
 
 /**
@@ -193,6 +213,7 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
     deepLinkScheme?: string
     deepLinkName?: string
     homeDir?: string
+    speechBundleModel?: boolean
   } = {}
   if (productName !== undefined) result.productName = productName
   if (slug !== undefined) result.slug = slug
@@ -219,6 +240,10 @@ export function readChannelDesktopBranding(channelDir: string): ChannelDesktopBr
   if (deepLinkScheme !== undefined) result.deepLinkScheme = deepLinkScheme
   const deepLinkName = text(desktop.deep_link_name)
   if (deepLinkName !== undefined) result.deepLinkName = deepLinkName
+  // 随包语音模型：**缺省随包，只有显式布尔 false 才关闭**（2026-09-29 用户定案：所有渠道
+  // 默认打开）。非布尔取值按缺省（随包）处理 —— 误读方向是"可用优先"，而构建期
+  // `ci-channels.sh` 会把非布尔值判红，拼写错误不会静默变成关。
+  if (typeof desktop.speech_bundle_model === 'boolean') result.speechBundleModel = desktop.speech_bundle_model
   return result
 }
 
@@ -302,6 +327,7 @@ export function resolveChannelBuildContext(
       slug: branding.slug,
     }),
     artifactNames: artifactNames(slug),
+    speechBundleModel: branding.speechBundleModel !== false,
   }
 }
 
