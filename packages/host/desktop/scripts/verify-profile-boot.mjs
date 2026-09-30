@@ -10,6 +10,7 @@ import { parse as parseYaml } from 'yaml'
 import { NO_OWNER_LOCK_MIN_AGE_MS, reclaimOrphanedDocumentLocks } from '../lib/document-lock-recovery.js'
 import { bootDesktopProfile } from './boot-desktop-profile.mjs'
 import { prepareDesktopProfile, desktopProfileContext } from '../lib/profile.js'
+import { readDesktopChannelProfile } from '../lib/desktop-channel.js'
 import { inactiveRequiredRows, FIBER_FAILED } from '../lib/startup-rows.js'
 
 // 产物清理(2026-09): 依赖包 lib/ 不再入库, fresh checkout 下 profile smoke
@@ -214,6 +215,38 @@ try {
       `assembled desktop profile has enabled rows whose package could not be imported: ${unimportable.join(', ')}\n`
       + '（模块解析不到 ⇒ 该行没有 fiber。要么把它禁掉并在 `mustStayDisabled` 里登记理由，要么把它的依赖装齐。）',
     )
+  }
+
+  // ── 渠道语音模型部署面（2026-09-29）─────────────────────────────────────────
+  // 渠道包可以用 `desktop.speech_model_dir` / `speech_vad_path` / `speech_model_origin`
+  // 把语音模型的获取从"公网直连下载"改成"预置文件"或"内网镜像"。这三个字段经
+  // `profile.ts` 的 `channelProfilePatches` 注入 `speech-to-text-sensevoice` 行的 config
+  // —— 而 patch 的 `config` 是**整键替换**，所以"注入落地了"必须看**运行中那一行**，
+  // 不能只看叠加层（叠加层对了但没落到树上，正是本文件其余 readback 判据在抓的那类缺陷）。
+  // 官方构建（没有渠道包）整段跳过，行为不变。
+  const channelSpeech = readDesktopChannelProfile()?.speech
+  if (channelSpeech !== undefined
+    && (channelSpeech.modelDirectory !== undefined || channelSpeech.vadModelPath !== undefined || channelSpeech.modelOrigin !== undefined)) {
+    const declared = ['modelDirectory', 'vadModelPath', 'modelOrigin']
+      .filter(key => channelSpeech[key] !== undefined)
+    const speechRow = [...ctx.loader.entries()].find(entry => entry.options.id === 'speech-to-text-sensevoice')
+    if (speechRow === undefined) {
+      throw new Error('渠道包声明了 speech_* 部署面，但组合里没有 speech-to-text-sensevoice 行（voice bundle 未装配？）')
+    }
+    const speechConfig = speechRow.options.config ?? {}
+    // `dataRoot` 必须还在：它是上游那一行的必填键，而我们的 patch 会整键替换 config。
+    if (typeof speechConfig.dataRoot !== 'string' || !speechConfig.dataRoot.endsWith('speech-to-text/sensevoice')) {
+      throw new Error(
+        `渠道语音 patch 丢了上游的 dataRoot（现值 ${JSON.stringify(speechConfig.dataRoot)}）—— `
+        + 'config 是整键替换，注入时必须重述它，否则该行因为必填键缺失而加载失败（语音整个消失）',
+      )
+    }
+    for (const key of declared) {
+      if (speechConfig[key] !== channelSpeech[key]) {
+        throw new Error(`渠道声明的 desktop.speech_* 没有落到运行中的行上：${key} 期望 ${key === 'modelOrigin' ? String(channelSpeech[key]) : '<路径>'}，实得 ${speechConfig[key] === undefined ? 'undefined' : '<其它值>'}`)
+      }
+    }
+    process.stdout.write(`[verify-profile] channel speech deployment: passed (fields=${declared.join(',')})\n`)
   }
 
   // ── P0（issue #130「创造模式」会话全部不可用）────────────────────────────────

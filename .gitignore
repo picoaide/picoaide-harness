@@ -33,6 +33,11 @@ packages/host/desktop/build/channel.json
 # 渠道构建专用的 electron-builder 配置(同样由打包脚本生成,含渠道名/appId/
 # 协议 scheme)。
 packages/host/desktop/build/channel-electron-builder.cjs
+# 随包语音模型的载荷(2026-09-29):渠道包声明 desktop.speech_bundle_model 时由
+# scripts/fetch-speech-model.mjs 按上游清单拉取(约 230 MiB 的 ONNX/tokens 权重)。
+# 它是**第三方权重而不是本仓源码** —— 公开仓里 `git add -A` 会把 230 MiB 二进制连同
+# 再分发许可问题一起提交。产物侧经 extraResources 进 resources/speech-model/。
+packages/host/desktop/build/speech-model/
 # 第三方厂商 CLI 二进制(旧 prefetch-cli.mjs 的预取产物,每个约 10 MB × 8 个):
 # 预取脚本已在 90463530be 移除、`build/cli` 不再生成,但历史工作树里仍会残留
 # 这 96 MB —— 公开仓里 `git add -A` 会把它们连同再分发许可风险一起提交。

@@ -148,6 +148,29 @@ describe('channel build context', () => {
     expect(withoutSlug.homeDir).toBe(`${PRODUCT_DSH_HOME_DIR}-acme`)
   })
 
+  it('bundles the speech model for every channel unless a channel opts out explicitly', () => {
+    // `desktop.speech_bundle_model`（2026-09-29 用户定案）：**缺省所有渠道随包**（含
+    // official/beta）—— 装上客户端语音就能用，零网络、零下载；只有**显式布尔 false**
+    // 才关闭（回到"首次使用下载"）。非布尔取值按缺省（随包）处理：误读方向是"可用优先"，
+    // 而 ci-channels.sh 会把非布尔值判红，拼写错误不会静默变成"关"。
+    const withFlag = (value: unknown): boolean => {
+      const root = channelRepo('acme', {
+        ...acmeChannel(),
+        desktop: { ...(acmeChannel().desktop as Record<string, unknown>), speech_bundle_model: value },
+      })
+      return resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root }).speechBundleModel
+    }
+    expect(withFlag(undefined)).toBe(true)
+    expect(withFlag(true)).toBe(true)
+    expect(withFlag(false)).toBe(false)
+    expect(withFlag('false')).toBe(true)
+    expect(withFlag(0)).toBe(true)
+    // 官方渠道（没有渠道包）同样随包：这是"所有渠道默认打开"的直接含义。
+    expect(resolveChannelBuildContext({ env: {}, repoRoot: channelRepo('acme', acmeChannel()) }).speechBundleModel)
+      .toBe(true)
+    expect(readChannelDesktopBranding(channelRepo('acme', acmeChannel())).speechBundleModel).toBeUndefined()
+  })
+
   it('turns a channel package into electron-builder overrides', () => {
     const root = channelRepo('acme', acmeChannel())
     const context = resolveChannelBuildContext({ env: { [CHANNEL_ENV]: 'acme' }, repoRoot: root })

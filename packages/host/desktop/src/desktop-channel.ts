@@ -32,6 +32,7 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { channelDshHomeDir } from './desktop-home.ts'
 
 /** 渠道包在应用资源里的位置（随包分发，构建时由 CI 从渠道仓复制）。 */
@@ -204,6 +205,48 @@ export interface ChannelBrand {
  */
 const DEEP_LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]{1,31}$/u
 
+/**
+ * 语音识别模型的下载源形状：**必须与上游 `speech-to-text-sensevoice` 的 Config
+ * schema 逐字一致**（`speech-to-text-sensevoice/src/config.ts` 的
+ * `/^https?:\/\/[^/\s?#@]+\/?$/`）—— 只有 scheme + host（可带端口）可配，路径由上游
+ * 钉死（模型文件名与仓库路径带版本）。形状不符时**不注入**：一个非法值会让那一行
+ * 加载失败 ⇒ 语音整个消失，比"回落公网下载"更糟。
+ */
+const SPEECH_ORIGIN_PATTERN = /^https?:\/\/[^/\s?#@]+\/?$/u
+
+/**
+ * 语音识别模型的部署面（渠道包 `desktop.speech_model_dir` /
+ * `desktop.speech_vad_path` / `desktop.speech_model_origin`）。
+ *
+ * 为什么必须有这一组开关：模型是**运行期按需下载**的权重（int8 228MB），下载走宿主
+ * Node **直连**（客户端默认禁代理，见 `network-policy.ts`），而企业网常常"只有认证
+ * 代理能出公网"—— 那种网络里语音永远准备不好。两个出口：
+ *
+ *   · {@link modelDirectory} + {@link vadModelPath}：部署方把文件预置在机器上，
+ *     **零下载**（离线可用）。上游此时**不校验**这两个来源的哈希（只查可访问性），
+ *     版本匹配由部署方负责 —— 配错的表现是准备阶段明确报
+ *     `Speech model verification failed`，不会静默降级。
+ *   · {@link modelOrigin}：指向**内网镜像**（HuggingFace 兼容，路径与文件名不变），
+ *     下载仍走压缩包内同一套大小/哈希校验与原子发布；显式配了就**不再回落**公网源。
+ *
+ * 三个都未配置 = 现状（公网直连下载），官方构建逐字节不变。
+ */
+export interface DesktopSpeechDeployment {
+  /**
+   * 预置的模型目录（**绝对路径**）：目录里要有当前精度对应的模型文件与
+   * `tokens.txt`（int8 时是 `model.int8.onnx`）。
+   *
+   * 也可给按平台分的取值 `{ default, darwin, linux, win32 }`（一份 channel.json 要服务
+   * 三平台构建；取 `[process.platform] ?? default`）。非绝对路径或形状不符时忽略该
+   * 字段，回落下载。
+   */
+  readonly modelDirectory: string | undefined
+  /** 预置的 Silero VAD 文件（**绝对路径**，含文件名）；平台取值同上。 */
+  readonly vadModelPath: string | undefined
+  /** 内网镜像源（`https?://host[:port]`）；形状不符时忽略。 */
+  readonly modelOrigin: string | undefined
+}
+
 /** 渠道包在客户端侧生效的那部分内容。 */
 export interface DesktopChannelProfile {
   /** 渠道 id（与镜像、R2 目录、服务端渠道内容同源）。 */
@@ -263,6 +306,14 @@ export interface DesktopChannelProfile {
    * 处理 —— 这个方向的误读只会更严，不会更松。
    */
   readonly allowSystemProxy: boolean
+  /**
+   * 语音识别模型的部署面（预置路径 / 内网镜像）。
+   *
+   * 与 `allowSystemProxy` 同一类：**部署级**选择，必须随包 —— 客户端在"只有认证
+   * 代理能出公网"的网里准备语音时，正是需要它生效的那一刻，问不到服务端。三项都
+   * 未配置时是现状（公网下载），见 {@link DesktopSpeechDeployment}。
+   */
+  readonly speech: DesktopSpeechDeployment
   /**
    * 随包分发的品牌文案（登录页/客户端界面用）。
    *
@@ -324,6 +375,39 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * 取一个**绝对路径**（渠道包字段），支持按平台给值。
+ *
+ * 两种写法：字符串（三平台同值），或 `{ default, darwin, linux, win32 }`（一份
+ * channel.json 服务三平台构建时用；先取本平台，再取 `default`）。
+ *
+ * 只接受**绝对路径**：上游 `speech-to-text-sensevoice/src/index.ts` 对
+ * `modelDirectory`/`vadModelPath` 就是这条要求（非绝对路径直接抛），而相对路径的基准
+ * （客户端 cwd、家目录）在不同启动方式下并不一样。形状不符 → undefined（该字段不注入，
+ * 回落下载），不 fail-loud：渠道包写错一个可选字段不该让语音整个不可用。
+ * @param value - 渠道包里的取值（字符串或平台映射）。
+ * @param platform - 当前平台（`process.platform`）。
+ * @returns 绝对路径，或 undefined。
+ */
+function platformAbsolutePath(value: unknown, platform: string): string | undefined {
+  const raw = typeof value === 'string'
+    ? nonEmptyString(value)
+    : nonEmptyString(asRecord(value)[platform]) ?? nonEmptyString(asRecord(value).default)
+  if (raw === undefined) return undefined
+  return isAbsolute(raw) ? raw : undefined
+}
+
+/**
+ * 取语音模型镜像源（形状必须与上游 Config schema 逐字一致，见
+ * {@link SPEECH_ORIGIN_PATTERN}）。
+ * @param value - 渠道包 `desktop.speech_model_origin`。
+ * @returns 合法的 `scheme://host`，或 undefined。
+ */
+function speechOrigin(value: unknown): string | undefined {
+  const raw = nonEmptyString(value)
+  return raw !== undefined && SPEECH_ORIGIN_PATTERN.test(raw) ? raw : undefined
+}
+
+/**
  * 严格解析渠道包内容。任何结构不符都返回 undefined（调用方沿用默认行为）。
  * @param input - `JSON.parse` 之后的对象。
  * @returns 客户端需要的渠道内容，或 undefined。
@@ -377,6 +461,14 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
   // 出口策略（2026-09-22）：只认严格布尔 true。渠道包写 "true"/"1" 一律按**禁止代理**
   // 处理（误读只会更严）；缺省即禁止，官方构建与渠道化改造前行为一致。
   const allowSystemProxy = desktopRecord.allow_system_proxy === true
+  // 语音识别模型的部署面（2026-09-29）：预置路径与内网镜像。三者互相独立，缺省全
+  // undefined = 公网直连下载（渠道化改造前的行为）。**不**因为形状不符而拒绝启动：
+  // 这是可选优化，写错一个字段最差也只是回到下载。
+  const speech: DesktopSpeechDeployment = {
+    modelDirectory: platformAbsolutePath(desktopRecord.speech_model_dir, process.platform),
+    vadModelPath: platformAbsolutePath(desktopRecord.speech_vad_path, process.platform),
+    modelOrigin: speechOrigin(desktopRecord.speech_model_origin),
+  }
 
   // 品牌文案的取值链必须与服务端 channel.go 的 applyDefaults **同序**：
   // 同一个渠道包在客户端自带兜底与服务端下发之间不能给出不同名字，否则
@@ -424,6 +516,7 @@ export function parseDesktopChannelProfile(input: unknown): DesktopChannelProfil
     appOriginScheme,
     deepLinkName,
     allowSystemProxy,
+    speech,
     brand,
   }
 }

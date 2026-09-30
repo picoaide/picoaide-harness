@@ -63,6 +63,7 @@ import {
   type PackagedDiagnosticWorkerLauncher,
   type SentrySmokeLauncher,
 } from '../scripts/verify-packaged-runtime.ts'
+import { assertBundledSpeechModelPackaged, SPEECH_MODEL_PAYLOAD_DIR } from '../scripts/verify-packaged-runtime.ts'
 import { FORBIDDEN_MACOS_NATIVE_ENTRIES } from '../scripts/mac-runtime.ts'
 import { writeValidMacBundle } from './helpers/mac-bundle-fixture.ts'
 import { TEST_BUDGETS } from './wait-budgets.ts'
@@ -205,7 +206,7 @@ function verifyWithBrandStub(
   list: ArchiveLister,
   exists: FileProbe = existsSync,
 ): void {
-  verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG)
+  verifyPackagedRuntime(runtimeContext, list, exists, () => BRAND_SVG, null)
 }
 
 describe('平台无关的产物身份判据（B-6）', () => {
@@ -239,6 +240,61 @@ describe('平台无关的产物身份判据（B-6）', () => {
     }
     expect(caught).toBeInstanceOf(Error)
     expect((caught as Error).message).not.toContain('would claim another identity')
+  })
+})
+
+describe('随包语音模型的产物断言（2026-09-29）', () => {
+  // 载荷经 electron-builder 的 extraResources 随包，而**源目录不存在时 electron-builder
+  // 只打一行 warning**：于是"渠道开了随包模型但 CI 忘了拉取"/"路径写错"会得到一个空手
+  // 安装包，客户端在"只有认证代理出网"的客户网里就是语音永远准备不好，而门禁全绿。
+  // 判据方向：**源树声明 → 产物必须齐**；源树没有载荷 = 本次构建不含该能力 = 跳过。
+  const packageRootWith = (payload: { files: { path: string, bytes: number }[] } | undefined): string => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-speech-gate-'))
+    if (payload !== undefined) {
+      const dir = join(root, 'build', SPEECH_MODEL_PAYLOAD_DIR)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'manifest.json'), `${JSON.stringify({ schema: 1, precision: 'int8', files: payload.files }, null, 2)}\n`)
+    }
+    return root
+  }
+
+  it('源树没有载荷时跳过（官方构建与本地打包不受影响）', () => {
+    const root = packageRootWith(undefined)
+    expect(assertBundledSpeechModelPackaged('/build/resources', root)).toBe('absent')
+  })
+
+  it('声明了载荷而产物里缺文件 ⇒ 拒包（点名缺的那条）', () => {
+    const root = packageRootWith({ files: [{ path: 'sensevoice-onnx/model.int8.onnx', bytes: 4096 }, { path: 'silero/silero_vad.onnx', bytes: 256 }] })
+    const resources = mkdtempSync(join(tmpdir(), 'dsh-speech-res-'))
+    mkdirSync(join(resources, SPEECH_MODEL_PAYLOAD_DIR, 'sensevoice-onnx'), { recursive: true })
+    writeFileSync(join(resources, SPEECH_MODEL_PAYLOAD_DIR, 'sensevoice-onnx', 'model.int8.onnx'), Buffer.alloc(4096))
+    expect(() => assertBundledSpeechModelPackaged(resources, root))
+      .toThrow(/silero\/silero_vad\.onnx/u)
+  })
+
+  it('大小不符（截断）⇒ 拒包，且把两侧大小都写进错误里', () => {
+    const root = packageRootWith({ files: [{ path: 'sensevoice-onnx/model.int8.onnx', bytes: 4096 }] })
+    const resources = mkdtempSync(join(tmpdir(), 'dsh-speech-res-'))
+    mkdirSync(join(resources, SPEECH_MODEL_PAYLOAD_DIR, 'sensevoice-onnx'), { recursive: true })
+    writeFileSync(join(resources, SPEECH_MODEL_PAYLOAD_DIR, 'sensevoice-onnx', 'model.int8.onnx'), Buffer.alloc(2048))
+    expect(() => assertBundledSpeechModelPackaged(resources, root))
+      .toThrow(/expected 4096, got 2048/u)
+  })
+
+  it('三条都齐时通过', () => {
+    const files = [
+      { path: 'sensevoice-onnx/model.int8.onnx', bytes: 4096 },
+      { path: 'sensevoice-onnx/tokens.txt', bytes: 128 },
+      { path: 'silero/silero_vad.onnx', bytes: 256 },
+    ]
+    const root = packageRootWith({ files })
+    const resources = mkdtempSync(join(tmpdir(), 'dsh-speech-res-'))
+    for (const file of files) {
+      const target = join(resources, SPEECH_MODEL_PAYLOAD_DIR, file.path)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, Buffer.alloc(file.bytes))
+    }
+    expect(assertBundledSpeechModelPackaged(resources, root)).toBe('verified')
   })
 })
 
@@ -450,6 +506,29 @@ describe('上游补丁目标的静态 import 必须在打包必需清单里（G-
       expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), '..', entry)), `${entry} 在磁盘上不存在`).toBe(true)
     }
   })
+
+  it('pins the voice-input chain the 2026-09-29 default-on decision depends on', () => {
+    // 语音输入默认开启（`REQUIRED_BUNDLES` 里的 voice-input-bundle）之后，这七条一旦
+    // 掉出产物，失效方式**全部是静默的**：bundle 补丁缺失 ⇒ 四条行一行都不插；客户端
+    // bundle 缺失 ⇒ client-modules 报"declares dsh.client but exports no ./client bundle"；
+    // 宿主入口缺失 ⇒ 该行 failed to import 而麦克风按钮只是不出现。
+    const voiceEntries = [
+      'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/package.json',
+      'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/cordis.patch.yml',
+      'node_modules/@deepseek-ai/dsh-experimental-voice-input-bundle/lib/index.js',
+      'node_modules/@deepseek-ai/dsh-experimental-speech-to-text/lib/index.js',
+      'node_modules/@deepseek-ai/dsh-experimental-speech-to-text-sensevoice/lib/index.js',
+      'node_modules/@deepseek-ai/dsh-experimental-api-speech-to-text/lib/typert.host.js',
+      'node_modules/@deepseek-ai/dsh-experimental-client-ui-voice-input/lib/client.js',
+    ]
+    expect([...REQUIRED_PACKAGED_RUNTIME_ENTRIES]).toEqual(expect.arrayContaining(voiceEntries))
+    for (const entry of voiceEntries) {
+      expect(existsSync(join(dirname(fileURLToPath(import.meta.url)), '..', entry)), `${entry} 在磁盘上不存在`).toBe(true)
+    }
+    // 装配面与产物面必须同源：bundle 真的在 profile 的必需清单里（否则这七条是死条目）。
+    const profileSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'profile.ts'), 'utf8')
+    expect(profileSource).toContain("'@deepseek-ai/dsh-experimental-voice-input-bundle'")
+  })
 })
 
 describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）', () => {
@@ -478,8 +557,10 @@ describe('打包必需清单的可枚举目录 oracle（G-2，2026-09-23 补）'
     {
       label: 'build/（brand-prepare 的构建期产物）',
       dir: 'build',
-      exclude: [/^channel\.json$/u],
-      why: 'channel.json 只有渠道构建产出，官方构建里不存在；它的随包断言在 verify-channel-package.ts',
+      exclude: [/^channel\.json$/u, /^speech-model\//u],
+      why: 'channel.json 只有渠道构建产出，官方构建里不存在（其随包断言在 verify-channel-package.ts）；'
+        + 'speech-model/ 是随包语音模型载荷（2026-09-29），它经 extraResources 进 resources/ 而**不进 app.asar**'
+        + '（230MiB 塞进归档会拖慢每次读取），由 assertBundledSpeechModelPackaged 单独断言',
     },
     {
       label: 'lib/preload/（沙箱预加载脚本）',

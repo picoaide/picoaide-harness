@@ -144,6 +144,12 @@ body[data-ds-dark-theme] .dshDesktopUpdateBadge[data-state="ready"] {
   50% { opacity: 0.35; }
 }
 @media (prefers-reduced-motion: reduce) { .dshDesktopFrame { transition: none !important; } }
+/* 语音输入准备面（2026-09-29 默认开启）。模态外壳由 ui-primitives 的 Modal 提供，
+   这里只给正文排版：进度数字用等宽数字，避免下载中百分比跳动时整行抖动。 */
+.dshDesktopVoiceSetup { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
+.dshDesktopVoiceSetup p { margin: 0; line-height: 1.6; }
+.dshDesktopVoiceState { color: var(--dsw-alias-label-secondary, #616267); font-variant-numeric: tabular-nums; }
+.dshDesktopVoicePrivacy { color: var(--dsw-alias-label-tertiary, #8a8f98); font-size: 12px; }
 `
 
 /** Install and remove the advanced shell's global native-window styles. @returns the style disposer. */
