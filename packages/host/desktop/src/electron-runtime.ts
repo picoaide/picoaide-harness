@@ -901,7 +901,17 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       const mediaTypes = detailField(details, 'mediaTypes')
       return Array.isArray(mediaTypes) && mediaTypes.length === 1 && mediaTypes[0] === 'audio'
     }
-    const isMicrophoneCheck = (details: unknown): boolean => detailField(details, 'mediaType') === 'audio'
+    // check 通道的细节字段形状与 request 通道**不一样**：2026-09-30 用真 Electron
+    // （45.0.0-alpha.7）探针实测，check 的 details 只有 `{ embeddingOrigin, isMainFrame,
+    // requestingUrl }` —— **没有 `mediaType`**。所以这里**不能**要求它等于 'audio'：
+    // 那会让校验恒假（静默拒），而 Chromium 在设备选择阶段被权限拒掉时给用户看到的是
+    // `NotFoundError: Requested device not found`（看起来像"没有麦克风"，不是"被拒"）。
+    // 判据改成**只在明确是别的媒体类型时拒绝**（例如 'video'），缺字段按 audio 处理；
+    // 真正的放行闸门仍在 request 通道（那里要求 `mediaTypes === ['audio']`，摄像头一律拒）。
+    const isMicrophoneCheck = (details: unknown): boolean => {
+      const mediaType = detailField(details, 'mediaType')
+      return mediaType === undefined || mediaType === 'audio'
+    }
     const microphoneAllowedFor = (contents: unknown, details: unknown, ...urls: unknown[]): boolean =>
       contents === window.webContents
       && detailField(details, 'isMainFrame') === true
