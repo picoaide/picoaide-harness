@@ -66,6 +66,31 @@ macOS 追加 `NSMicrophoneUsageDescription` 与 `com.apple.security.device.audio
   虚拟机或远程桌面需开启音频/麦克风重定向。」。语义不变（仍是"设备找不到"），预检自己
   失败/不可用时一律不拦。
 
+### 2.5 自检面与"申请权限"入口（2026-09-30 追加）
+
+现场追问"权限到底申请了吗、升级之后还在吗"。这两件事**渲染层看不见**（macOS 被拒之后
+`enumerateDevices()` 同样为空），所以状态必须由宿主给出，界面必须摊开：
+
+| 面 | 位置 | 内容 |
+|---|---|---|
+| 状态（只读） | `GET /api/pico/voice/mic` | `{ platform, permission, canRequest }`；非 macOS 恒 `not-applicable` |
+| 申请 | `POST /api/pico/voice/mic/request` | 过写面证明（本机任意进程不得替用户弹窗）→ macOS `askForMediaAccess` → **回读**状态 |
+| 适配器 | `desktopRuntime.microphone`（`electron-runtime.ts` 实现） | 宿主插件不 import Electron：无头冒烟里没有 electron 模块 |
+| 界面 | 准备面「麦克风自检」 | 设备数 + 授权状态（含"已被拒绝，需到系统设置里打开"）+ 刷新；**只有 `not-determined` 才显示申请按钮**（已拒之后点了也不弹，死按钮更糟） |
+
+设备预检据此把"系统拒绝"与"没设备"分开（`denied`/`restricted` → 指引系统设置；
+`not-determined` → **不拦**，让真实请求去触发系统弹窗）。两条路由都登记进 FIX-36 的
+exact 路由证明表（伪造请求必须被拒 / 纯读面必须照常服务）。
+
+**授权与升级的关系（macOS）**：TCC 授权按 **bundle id + 代码签名身份**记忆，所以同一渠道
+的应用升级（同一个 appId、同一个签名团队）**保留**既有授权，不需要再点一次；换渠道
+（appId 变了）＝ 另一个应用，首次使用会重新弹窗。真正的前提是**装的是带 entitlement 的
+构建**：旧包（未带 `com.apple.security.device.audio-input`）连申请的资格都没有，
+表现为设备列表为空 + `NotFoundError`。交付的 `v2.8.2-beta.3` mac 包已实测带
+`NSMicrophoneUsageDescription` 与 `audio-input`（主程序与 Helper 都有）且已公证 ——
+判定脚本 `temp/macverify-282b3/read-entitlements.mjs`（Linux 上直接读 Mach-O 代码签名，
+不需要 codesign）。
+
 ### 2.4 check 通道的 details **没有** `mediaType`（同一次实测，已收口）
 
 真 Electron（45.0.0-alpha.7）探针实测：`setPermissionCheckHandler` 收到的 details 只有
