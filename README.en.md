@@ -98,6 +98,7 @@ Client upgrades and first-time installs can also fetch packages straight from **
 - **Connector hub**: built-in SalesEasy (NeoCRM) and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
 - **Scheduled tasks**: cron-triggered runs with a chosen agent, prompt, workspace, and permissions; execution detail (session, result, error) is always inspectable, with session jump; driven by the Host scheduler;
 - **Embedded browser**: the agent can take over the browser to act, with multi-tab, address bar, permission approval, and download control;
+- **Voice input**: the composer microphone turns speech into draft text; recognition runs on the machine (audio never leaves it, works offline) with the model downloaded on demand;
 - **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and git branch, with confirmation-first writes.
 
 ### Security and compliance

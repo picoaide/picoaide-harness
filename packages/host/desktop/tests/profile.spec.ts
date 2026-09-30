@@ -117,6 +117,7 @@ describe('desktop profile composition', {
       '@picoaide/dsh-browser',
       'dsh-memory-evolve',
       '@picoaide/dsh-cron',
+      '@deepseek-ai/dsh-experimental-voice-input-bundle',
       'third-party-one',
       'third-party-two',
     ])
@@ -152,6 +153,7 @@ describe('desktop profile composition', {
       '@picoaide/dsh-browser',
       'dsh-memory-evolve',
       '@picoaide/dsh-cron',
+      '@deepseek-ai/dsh-experimental-voice-input-bundle',
       'third-party-plugin',
     ])
     expect(repaired.dependencies).toEqual({ 'third-party-plugin': '^1.2.3' })
@@ -192,6 +194,7 @@ describe('desktop profile composition', {
       '@picoaide/dsh-browser',
       'dsh-memory-evolve',
       '@picoaide/dsh-cron',
+      '@deepseek-ai/dsh-experimental-voice-input-bundle',
     ])
   })
 

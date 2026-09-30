@@ -213,8 +213,11 @@ const electron = vi.hoisted(() => {
       showItemInFolder: vi.fn(),
     },
     // 2026-09-16 标题栏双击：系统偏好读数（缺省 = macOS 默认的"缩放"）。
+    // 2026-09-29 语音输入：麦克风的 TCC 读数/申请（仅 darwin 分支会走到）。
     systemPreferences: {
       getUserDefault: vi.fn((_key: string, _type: string) => 'Maximize'),
+      getMediaAccessStatus: vi.fn((_media: string) => 'granted'),
+      askForMediaAccess: vi.fn(async (_media: string) => true),
     },
     templateIcon,
     Tray,
@@ -1365,11 +1368,99 @@ describe('Electron compatibility runtime', () => {
       expect(grantedByRequest(permission, {})).toBe(false)
       expect(grantedByRequest(permission, undefined)).toBe(false)
     }
+    // 非剪贴板的权限一律拒绝；`media` 的**非麦克风形态**（无 mediaTypes / 非本窗口）
+    // 同样走拒绝 —— 麦克风形态见下一条用例。
     expect(grantedByRequest('media', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(grantedByRequest('geolocation', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(grantedByRequest('display-capture', { isMainFrame: true, requestingUrl: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(check!(undefined, 'media', '', { isMainFrame: true, embeddingOrigin: 'http://127.0.0.1:43120/' })).toBe(false)
     expect(check!(undefined, 'clipboard-read', '', { isMainFrame: true, embeddingOrigin: 'https://evil.example/' })).toBe(false)
+
+    await release()
+  })
+
+  it('grants the microphone to the app UI main frame only (2026-09-29 语音输入默认开启)', async () => {
+    // 语音输入（上游 voice-input-bundle）在输入框放麦克风按钮，走 `getUserMedia({audio})`。
+    // 放行口径与剪贴板同源（本安装回环源的顶层文档），但额外三道闸：
+    // contents 必须是本窗口、media 必须是**纯 audio**、macOS 必须系统已授权。
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const release = runtime.schedule(spec)
+    await runtime.mountScheduled()
+
+    const request = electron.webContents.session.setPermissionRequestHandler.mock.calls[0]?.[0] as
+      | ((wc: unknown, permission: string, cb: (granted: boolean) => void, details?: unknown) => void)
+      | undefined
+    const check = electron.webContents.session.setPermissionCheckHandler.mock.calls[0]?.[0] as
+      | ((wc: unknown, permission: string, origin: string, details?: unknown) => boolean)
+      | undefined
+    expect(request).toBeDefined()
+    expect(check).toBeDefined()
+
+    const appUrl = 'http://127.0.0.1:43120/'
+    const primary = electron.webContents as unknown
+    const grantedByRequest = (wc: unknown, details: unknown): boolean => {
+      let granted: boolean | undefined
+      request!(wc, 'media', (value) => { granted = value }, details)
+      return granted === true
+    }
+    const grantedByRequestAsync = async (wc: unknown, details: unknown): Promise<boolean> => {
+      let granted: boolean | undefined
+      request!(wc, 'media', (value) => { granted = value }, details)
+      // macOS 分支先 await askForMediaAccess 再回调：排空微任务/定时器队列。
+      await new Promise(resolve => setTimeout(resolve, 0))
+      return granted === true
+    }
+    const grantedByCheck = (wc: unknown, origin: string, details: unknown): boolean =>
+      check!(wc, 'media', origin, details)
+
+    // 正向：本窗口 + 主框架 + 本安装源 + 纯 audio（request 与 check 两条通道）。
+    expect(grantedByRequest(primary, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).toBe(true)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: true, mediaType: 'audio' })).toBe(true)
+    // check 通道实测给 securityOrigin（requestingUrl 可能为空）：两个都要认。
+    expect(grantedByCheck(primary, '', { isMainFrame: true, mediaType: 'audio', securityOrigin: appUrl })).toBe(true)
+
+    // 收紧面：每一条都必须独立成立（来源 / 框架层级 / 窗口身份 / 媒体类型）。
+    expect(grantedByRequest(primary, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: 'https://evil.example/' })).toBe(false)
+    expect(grantedByRequest(primary, { isMainFrame: false, mediaTypes: ['audio'], requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest({}, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest(undefined, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest(primary, { isMainFrame: true, mediaTypes: ['audio', 'video'], requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest(primary, { isMainFrame: true, mediaTypes: ['video'], requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest(primary, { isMainFrame: true, requestingUrl: appUrl })).toBe(false)
+    expect(grantedByRequest(primary, undefined)).toBe(false)
+    expect(grantedByCheck(primary, 'https://evil.example/', { isMainFrame: true, mediaType: 'audio' })).toBe(false)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: false, mediaType: 'audio' })).toBe(false)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: true, mediaType: 'video' })).toBe(false)
+    expect(grantedByCheck(primary, appUrl, { isMainFrame: true })).toBe(false)
+    expect(grantedByCheck({}, appUrl, { isMainFrame: true, mediaType: 'audio' })).toBe(false)
+
+    // macOS：系统授权是最后一道闸 —— 未授权时 check 必须拒，request 走 TCC 并按其答案回执。
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    try {
+      electron.systemPreferences.getMediaAccessStatus.mockReturnValue('denied')
+      expect(grantedByCheck(primary, appUrl, { isMainFrame: true, mediaType: 'audio' })).toBe(false)
+      electron.systemPreferences.getMediaAccessStatus.mockReturnValue('granted')
+      expect(grantedByCheck(primary, appUrl, { isMainFrame: true, mediaType: 'audio' })).toBe(true)
+
+      electron.systemPreferences.askForMediaAccess.mockResolvedValueOnce(false)
+      await expect(grantedByRequestAsync(primary, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).resolves.toBe(false)
+      electron.systemPreferences.askForMediaAccess.mockResolvedValueOnce(true)
+      await expect(grantedByRequestAsync(primary, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).resolves.toBe(true)
+      // TCC 调用抛错按拒绝处理（绝不静默放行）。
+      electron.systemPreferences.askForMediaAccess.mockRejectedValueOnce(new Error('tcc unavailable'))
+      await expect(grantedByRequestAsync(primary, { isMainFrame: true, mediaTypes: ['audio'], requestingUrl: appUrl })).resolves.toBe(false)
+      // 未过前置闸门时**不得**弹 TCC：调用次数保持上面那三次。
+      const asked = electron.systemPreferences.askForMediaAccess.mock.calls.length
+      expect(grantedByRequest(primary, { isMainFrame: false, mediaTypes: ['audio'], requestingUrl: appUrl })).toBe(false)
+      expect(grantedByRequest(primary, { isMainFrame: true, mediaTypes: ['video'], requestingUrl: appUrl })).toBe(false)
+      expect(electron.systemPreferences.askForMediaAccess.mock.calls.length).toBe(asked)
+    } finally {
+      if (platform !== undefined) Object.defineProperty(process, 'platform', platform)
+      electron.systemPreferences.getMediaAccessStatus.mockReturnValue('granted')
+      electron.systemPreferences.askForMediaAccess.mockResolvedValue(true)
+    }
 
     await release()
   })

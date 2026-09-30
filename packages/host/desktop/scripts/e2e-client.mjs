@@ -798,6 +798,34 @@ async function main() {
   reportStep('聊天输入区可用（限会话列）', !!chatOk, `hasComposer=${Boolean(chatOk)}`)
   await screenshot(cdp, '08-chat')
 
+  // 8b. 语音输入默认开启（2026-09-29 产品决策）。
+  //
+  // 为什么要有这条：语音 UI 行 inject `pluginNavigation`，而该服务的唯一上游提供者
+  // `ui-plugin-manager` 被我们禁用 —— 桌面用 `voice-setup.tsx` 补位；补位一旦失效，
+  // 整条 client fiber 停在 PENDING，**麦克风按钮静默消失**（没有 console 错误、
+  // 构建与 profile 校验全绿）。
+  //
+  // 这一条能证明什么、不能证明什么（口径必须写清楚，别让它变成存在性假绿）：
+  //   · 能证明：客户端插件图里有语音 bundle，且它的 **factory 真的执行过** ——
+  //     模块物化会注入它自己的 CSS module（`<style data-plugin-css=…/VoiceInput.module.css>`）。
+  //     「在图里」只说明 host 组装对了；「样式已注入」才说明代码到达并跑起来了。
+  //   · 不能证明：麦克风按钮渲染出来。活动槽只在**会话内**的输入栏渲染
+  //     （上游 InputBar 的 `input === undefined || sessionId === undefined ? null`），
+  //     而本脚本全程不建会话（已知盲区，见 docs/decisions 里的 2026-09-29 决策文档）。
+  //     按钮真机验证 = `temp/voice-mic-probe.mjs`（预填工作区 → 新会话 → 断言
+  //     aria-label「打开语音输入引导」与 conversation.input.activity 槽存在）。
+  const voiceBundle = (boot?.ids ?? []).some(id => id.includes('voice-input'))
+  reportStep('语音客户端 bundle 在插件图里', voiceBundle,
+    `entries=${boot?.entries} ids=${(boot?.ids ?? []).length}`)
+  const voiceMaterialized = await evalSafe(cdp, `(() => {
+    const styles = [...document.querySelectorAll('style[data-plugin-css]')]
+      .map(el => el.getAttribute('data-plugin-css') || '')
+    return styles.filter(id => id.includes('voice-input'))
+  })()`)
+  reportStep('语音客户端 bundle 已物化（代码真的执行过）',
+    Array.isArray(voiceMaterialized) && voiceMaterialized.length > 0,
+    `styles=${JSON.stringify(voiceMaterialized ?? [])}`)
+
   // 9. Advanced mode marker.
   const mode = await evalSafe(cdp, `document.body.dataset.dshDesktopMode ?? ''`)
   reportStep('高级模式固定生效', mode === 'advanced', `mode=${mode}`)

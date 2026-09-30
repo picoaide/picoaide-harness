@@ -797,6 +797,52 @@ for id in "${SELECTED[@]}"; do
         if (!loopback) invalid.push("defaults.server_url(必须 https,只有回环地址允许 http)")
       }
     }
+    // 语音识别模型的部署面(2026-09-29):模型是运行期按需下载的 228MB 权重,走宿主 Node
+    // **直连**(客户端默认禁代理),而客户网常常"只有认证代理能出公网"。渠道包可以给
+    // 预置目录(零下载)或内网镜像。三项形状**在这里拦**:客户端运行期对形状不符只是
+    // "不注入、回落公网下载",于是配错的表现是"语音在客户网里准备不好"—— 而那时
+    // 客户端已经发出去了。只报字段名,不回显取值(路径与镜像主机名都属部署身份)。
+    const speechModelDir = cfg?.desktop?.speech_model_dir
+    const speechVadPath = cfg?.desktop?.speech_vad_path
+    const speechOrigin = str(cfg?.desktop?.speech_model_origin)
+    // 允许两种写法:字符串(三平台同值)或 {default,darwin,linux,win32} 平台映射。
+    const speechPathEntries = (value, field) => {
+      if (value === undefined) return []
+      if (typeof value === "string") return [[field, value]]
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        invalid.push(field + "(须为绝对路径字符串,或 {default,darwin,linux,win32} 平台映射)")
+        return []
+      }
+      for (const key of Object.keys(value)) {
+        if (!["default", "darwin", "linux", "win32"].includes(key)) {
+          invalid.push(field + "(平台键只能是 default/darwin/linux/win32)")
+          return []
+        }
+      }
+      return Object.entries(value).map(([key, path]) => [field + "." + key, path])
+    }
+    const speechPaths = [
+      ...speechPathEntries(speechModelDir, "desktop.speech_model_dir"),
+      ...speechPathEntries(speechVadPath, "desktop.speech_vad_path"),
+    ]
+    for (const [field, value] of speechPaths) {
+      // 绝对路径:上游对 modelDirectory/vadModelPath 就是这条要求(非绝对直接抛),
+      // 而相对路径的基准(客户端 cwd、家目录)在不同启动方式下并不一样 —— 构建期
+      // 按 POSIX 与 Windows 两种形态都认(一份 channel.json 服务三平台)。
+      const absolute = typeof value === "string" && (/^\//.test(value) || /^[A-Za-z]:[\\/]/.test(value))
+      if (!absolute) invalid.push(field + "(须为绝对路径,如 /opt/... 或 C:\\...)")
+    }
+    if (speechOrigin !== undefined && !/^https?:\/\/[^/\s?#@]+\/?$/.test(speechOrigin)) {
+      invalid.push("desktop.speech_model_origin(只允许 scheme://host[:port];模型路径由客户端钉死,不能带路径/查询)")
+    }
+    // 随包语音模型(2026-09-29):**所有渠道默认随包**(230MiB 权重进客户端目录,语音零网络
+    // 可用);只有**显式布尔 false** 才关闭(回到"首次使用下载")。字段只认布尔 —— 字符串
+    // "false" 在客户端会按缺省(随包)处理,即"以为关了其实没关";在构建期判红才能让拼写错误
+    // 现形,而不是让一个渠道的安装包平白多 230MiB(或反过来以为带了其实没带)。只报字段名。
+    const speechBundleModel = cfg?.desktop?.speech_bundle_model
+    if (speechBundleModel !== undefined && typeof speechBundleModel !== "boolean") {
+      invalid.push("desktop.speech_bundle_model(须为布尔;缺省=true 随包,显式 false 关闭)")
+    }
     // 声明的素材文件必须存在(否则客户端/服务端会拿到死链或被忽略的配置)。
     //
     // 只校验**已知的素材字段**:渠道包里允许写 `_note` 这类注解(私有仓实际就这么

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS 签名 entitlements（hardened runtime）。
+
+  2026-09-29 新增本文件的原因：语音输入默认开启后，主窗口要能拿到麦克风。macOS 把
+  麦克风归 TCC 管，硬运行时的进程**必须**在签名里带 `com.apple.security.device.audio-input`，
+  且 Info.plist 要有 `NSMicrophoneUsageDescription`（见 package.json 的 `build.mac.extendInfo`），
+  否则 `getUserMedia({audio})` 直接被拒、连系统弹窗都不会出现。
+
+  这份文件同时用于 `mac.entitlements`（主程序）与 `mac.entitlementsInherit`（Helper /
+  Renderer 等嵌套可执行体）—— 麦克风权限必须同时在两者里，只给主程序会让渲染进程
+  拿不到设备。
+
+  前三条是 electron-builder 在 hardened runtime 下的缺省集（JIT / 可执行内存 /
+  库校验豁免）。**一旦显式提供 entitlements，缺省集就不再自动合并** —— 少一条
+  V8 的 JIT 会被硬运行时挡下。改这个文件时先把这三条抄回来。
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+  </dict>
+</plist>

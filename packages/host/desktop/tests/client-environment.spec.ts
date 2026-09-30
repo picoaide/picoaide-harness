@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+
+// `src/client/index.ts` 现在还会装配语音准备面（voice-setup），它 import 了平台模块
+// `@deepseek-ai/dsh-client-ui-primitives`。该模块在运行期由 shell 的冻结模块表提供、
+// 它自己的运行时依赖（clsx 等）并不在 node_modules 里，所以 node 侧测试必须替身
+// （与 account-card spec 同一姿势）。本 spec 只测环境解析与布局契约，不渲染组件。
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  Button: () => null,
+  Modal: () => null,
+}))
+
 import { apply } from '../src/client/index.ts'
 import { parseDesktopClientEnvironment } from '../src/client/environment.ts'
 import {

@@ -132,10 +132,18 @@ const ALLOWED_DOMAINS = {
     'xiaoshouyi.com', 'feishu.cn', 'qq.com', 'dingtalk.com', 'glitchtip.com',
     'deepwiki.com', 'cloud.google.com', 'mcp.cloudflare.com', 'cloudflarestorage.com',
   ],
+  // 模型权重分发（随包语音模型的官方源与公开镜像）。这两条是**上游 provider 自己的缺省源**
+  // （`speech-to-text-sensevoice/src/config.ts` 的 `modelOrigins` 缺省值），我们的
+  // `scripts/fetch-speech-model.mjs` 按同一份清单拉取；与任何客户/部署身份无关。
+  '模型权重分发': [
+    'huggingface.co', 'hf-mirror.com',
+  ],
   // 第三方公开标准命名空间（文件格式的元数据里必然出现，不是任何客户/部署身份）。
   // `ns.adobe.com` = PNG/JPEG 的 XMP 元数据命名空间（Adobe 公开规范，截图文件里天然带）。
+  // `apple.com` = XML plist 的 DOCTYPE（`…/DTDs/PropertyList-1.0.dtd`，每个 `.plist`
+  // 文件的标准头，如 `packages/host/desktop/scripts/macos-entitlements.plist`）。
   '公开标准命名空间（文件格式元数据）': [
-    'adobe.com',
+    'adobe.com', 'apple.com',
   ],
   // 主机解析 / SSRF 测试语料里的 token（对抗输入被拆碎后的残片，不是任何人的域名）。
   '畸形语料与占位主机（对抗输入残片）': [

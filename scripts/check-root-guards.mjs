@@ -170,7 +170,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [], digest: 'c1a84c22a47bea2c1368bfba32f33b20feca66deb30abcbbc0eb40318f807285' }],
   ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: '8fa99a48c3439006545303cd5965c32768b450871eaaec71c50ca2d85693475e' }],
   ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '7bf93bda612dc031504cbb3b62ad4e7fc61171978c130d5283f4b02f0ab27948' }],
-  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'b6b4011f3f0be476a2800821c06e35fc4e749331e947326bb569acf2e5725244' }],
+  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'debac95a09ba059181589cea63660dd1c2c1cf24337db5f6f1129402dfc6d6b2' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
   // FIX-48③ 起：本脚本 run-id 化（证据目录 `temp/wasm-client-only/runs/<run-id>/`），
   // 摘要在同一个 PR 里同步（可评审的 diff）。
@@ -179,7 +179,7 @@ const REGISTERED_GUARD_ENTRIES = new Map([
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'a5ba650819effcdada193674aab67a79813e70939808e27cf28f6c85262aa340' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '4f11d5cc420991325f4dd3387f1e99804371860174753765611f2cc2d9236365' }],
 ])
 
 /**
