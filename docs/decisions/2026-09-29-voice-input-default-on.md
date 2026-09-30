@@ -51,6 +51,34 @@ macOS 追加 `NSMicrophoneUsageDescription` 与 `com.apple.security.device.audio
 `94.9 MB / 228 MB` → `228 MB / 228 MB` → **已就绪**（约 30 秒，模型落在
 `$DSH_HOME/speech-to-text/sensevoice/models/`，三个文件字节数与上游清单逐字相同）。
 
+### 2.3 设备不存在时的那句话（2026-09-30 现场反馈）
+
+用户报「语音识别失败：Requested device not found」。实测结论（打包版 + 真 Electron 探针）：
+
+- **不是权限问题**：同一个包在带**假设备**（`--use-fake-device-for-media-stream`）启动时，
+  点麦克风后按钮变「停止并识别」、无任何错误 —— 说明权限处理器与模型路径都通；
+  那句错误是 Chromium 的 `NotFoundError`（设备枚举为空），上游只对 `NotAllowedError`
+  做分类，其余 `DOMException` **原样透出英文 message**（`VoiceInput.tsx` 的
+  `t('failed', { message })`）。
+- 因此桌面插件加了一层**纯预检**（`src/client/voice-device-guard.ts`）：只要音频、且
+  `enumerateDevices()` 里没有 `audioinput`，就抛**同样类型**（`NotFoundError`）但文案可执行的
+  异常 ⇒ 用户看到的是「语音识别失败：未检测到麦克风设备。请检查系统声音设置里的输入设备；
+  虚拟机或远程桌面需开启音频/麦克风重定向。」。语义不变（仍是"设备找不到"），预检自己
+  失败/不可用时一律不拦。
+
+### 2.4 check 通道的 details **没有** `mediaType`（同一次实测，已收口）
+
+真 Electron（45.0.0-alpha.7）探针实测：`setPermissionCheckHandler` 收到的 details 只有
+`{ embeddingOrigin, isMainFrame, requestingUrl }` —— **没有 `mediaType`**。原实现要求
+`mediaType === 'audio'`，在这台机器上**恒假**。危险之处不是"拒绝"而是**拒绝的样子**：
+Chromium 在设备选择阶段被权限拒掉时报给用户的是 `NotFoundError: Requested device not found`
+（看起来像"没有麦克风"），排查方向会被带偏。
+
+收口：check 通道改成"**只在明确是别的媒体类型时才拒**（如 `video`），缺字段按 audio 处理"，
+身份/框架/来源三道闸不变；真正的放行闸门仍在 **request** 通道（那里要求
+`mediaTypes === ['audio']`，摄像头与混合请求一律拒）。判据见 `tests/electron-runtime.spec.ts`
+（缺 `mediaType` 必须放行 + 三道闸仍各自成立）。
+
 ## 3. 麦克风放行的判据（收紧面，逐条有测试）
 
 放行需要**同时**满足（`tests/electron-runtime.spec.ts` 的「grants the microphone to the app UI main frame only」）：
@@ -140,6 +168,7 @@ vadModelPath   = <客户端目录>/speech-model/silero/silero_vad.onnx
 
 | 判据 | 抓什么 |
 |---|---|
+| `tests/voice-device-guard.spec.ts`（7 例） | 设备预检：无 `audioinput` ⇒ 抛 `NotFoundError` 且文案来自字典；有设备/带视频/非音频/枚举不可用或抛错 ⇒ 一律放行原实现；文案在**抛出那一刻**求值（切语言即时生效）；包装可还原且幂等 |
 | `tests/voice-setup.spec.ts`（17 例） | 上游 bundle 行 id/提供者 id/Remote 方法名契约；**下载量 vs 预留磁盘量两个数**（对着随包 `runtime/assets.json` 对拍，上游换模型即红）；store 轮询/准备/取消/失败分级（`error` 与 `actionError` 分开）/Remote 缺席降级/解析抛错必须可见；`pluginNavigation` 只对语音 bundle 开面；**真 Cordis 拓扑**一组用真框架搭"provider / mount / 消费者三棵兄弟 fiber"，把 `speechRemoteOf` 改回属性读法即红（实测：`cannot get property "remote" without inject`） |
 | `tests/electron-runtime.spec.ts`（+1 例，含 darwin 分支） | 麦克风五道闸 + TCC 三个分支 + "前置不过不弹 TCC" |
 | `tests/profile.spec.ts` / `tests/package.spec.ts` / `tests/verify-packaged-runtime.spec.ts` | bundle 进 profile 必需清单；mac entitlements + usage description；voice 链七条在打包必需清单里且有磁盘证据 |
