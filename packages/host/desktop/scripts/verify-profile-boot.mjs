@@ -104,7 +104,14 @@ try {
   }
   rmSync(`${settingsPath}.lock`)
 
-  const prepared = await prepareDesktopProfile('1', home, 'win32')
+  // 遥测入参**不传**（= 生产形态）：这里此前传的是 `'1'`，于是 `src/profile.ts` 那条
+  // "`DSH_TELEMETRY_DISABLED` 非空 ⇒ 禁用 `session-telemetry-otel`" 的运行期补丁
+  // **在冒烟里永远生效**，把"生产运行期没有任何地方设置该变量"这个事实挡住了 ——
+  // 2026-10-01 实测：把该行从 `cordis.patch.yml` 里删掉，冒烟仍然 EXIT=0
+  // （探针显示 `row=true fiber=none`），即这条产品闸门在门禁上是无牙的。冒烟要判的
+  // 恰恰是**生产形态**，所以传 `undefined`；该行的关闭现在只由 `cordis.patch.yml` 的
+  // 静态声明承担，下面的行为判据（`sessionTelemetry` 服务不得存在）才能咬到它。
+  const prepared = await prepareDesktopProfile(undefined, home, 'win32')
   const hostServicePluginDir = join(
     prepared.profile.dir,
     'node_modules',
@@ -508,6 +515,11 @@ try {
     // 出境到模型厂商。理由全文见 `cordis.patch.yml` 的对应注释块。
     ['desktop-product-telemetry', '0.2.0 新行：DSH_CLIENT_VERSION 缺失即无 fiber，且上报端点是厂商收集器'],
     ['product-analytics', '0.2.0 新行：客户端事件采集，与上一行成对；交付不做厂商侧产品分析'],
+    // 该行此前**只由环境变量门控**，而 `DSH_TELEMETRY_DISABLED` 在本仓只由 CI 与
+    // 测试设置、运行期无人设 ⇒ 生产客户端一直挂着它，且缺省 FEEDBACK_ONLY 会在
+    // 用户显式反馈时把完整会话前缀导出到 OTLP 采集端（与已关闭的
+    // `session-log-deepseek` 同类数据出境）。2026-10-01 产品决策改为静态关闭。
+    ['session-telemetry-otel', '反馈式会话正文出境：此前仅环境变量门控而运行期无人设 ⇒ 实际挂载'],
   ]
   const declaredDisabled = (parseYaml(readFileSync(join(packageRoot, 'cordis.patch.yml'), 'utf8')))
     .filter(row => row?.disabled === true)
@@ -564,6 +576,24 @@ try {
     throw new Error(
       'office-to-pdf is ACTIVE: the officeToPdf service exists although the LibreOffice engine is outside every '
       + 'packaging manifest and cannot run from the signed macOS bundle。cordis.patch.yml 必须保持该行 disabled: true',
+    )
+  }
+
+  // `session-telemetry-otel`：该行是 `sessionTelemetry` 服务的**唯一**提供方
+  // （`@deepseek-ai/dsh-session-telemetry` 的 `super(ctx, 'sessionTelemetry')`；
+  // 全仓只有这一个 `super(ctx, 'sessionTelemetry')`），所以"服务不存在"就是"这一行
+  // 没生效"的行为判据 —— 与上面 `office-to-pdf` 同形，删名单项或改名单都不影响它。
+  //
+  // 为什么必须关：该行缺省 `FEEDBACK_ONLY`，用户显式反馈时把完整会话前缀（消息正文、
+  // 工具参数与结果、工作区路径）导出到 OTLP 采集端 —— 与已关闭的
+  // `session-log-deepseek` 同类数据出境。它此前**只由环境变量门控**
+  // （`src/profile.ts` 认 `DSH_TELEMETRY_DISABLED`），而该变量在本仓只由 CI 与测试
+  // 设置，运行期无人设 ⇒ 生产客户端实际一直挂载着它。2026-10-01 产品决策改静态关闭。
+  if (ctx.get('sessionTelemetry') !== undefined) {
+    throw new Error(
+      'session-telemetry-otel is ACTIVE: the sessionTelemetry service exists, so explicit user feedback would '
+      + 'upload the complete canonical Session prefix (message text, tool arguments and results, workspace paths) '
+      + 'to the OTLP collector。cordis.patch.yml 必须保持该行 disabled: true',
     )
   }
 

@@ -559,3 +559,14 @@ the package names, versions, and licenses for transparency.
 | yoctocolors | 2.2.0 | MIT |
 | zod | 4.4.3 | MIT |
 > Notice-required licenses in use: LGPL-3.0-or-later. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.
+## Bundled speech-recognition model weights
+The installers also ship speech-recognition model weights. They are not npm packages, so
+the table above does not cover them; these are their names, sources, and licenses.
+### SenseVoiceSmall (int8 ONNX)，随 sherpa-onnx 导出分发
+- Source: https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+- License: FunASR Model Open Source License Agreement v1.1 (Alibaba Group)
+- Terms: 允许使用、复制、修改与分享；§2.2 要求署名来源与作者信息并保留模型名。
+### Silero VAD (silero_vad.onnx)
+- Source: https://huggingface.co/csukuangfj/vad
+- License: MIT (Silero Team)
+- Terms: 标准 MIT 条款。
