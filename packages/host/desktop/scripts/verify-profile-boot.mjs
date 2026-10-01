@@ -500,6 +500,14 @@ try {
     // 导入失败」判据（见 `unimportable`）会红，所以它们必须留在闸门里。
     ['deepseek-account', '0.1.7 新行：包只有 peer 声明、永不安装，激活即 failed to import'],
     ['account-controller', '0.1.7 新行：包只有 peer 声明、永不安装，激活即 failed to import'],
+    // 0.2.0-rc.2 新增的两行桌面产品分析/遥测：`disabled` 判据是"非 desktop"，
+    // 而桌面正是 desktop ⇒ 默认启用。`desktop-product-telemetry` 的
+    // `serviceVersion` 是 `.required()` 而 `DSH_CLIENT_VERSION` 我们从不设置
+    // （只有上游 Electron 壳会设）⇒ 该行没有 fiber、unimportable 判据红；
+    // 且两者的上报端点缺省指向上游厂商收集器，自托管交付不接受客户端使用数据
+    // 出境到模型厂商。理由全文见 `cordis.patch.yml` 的对应注释块。
+    ['desktop-product-telemetry', '0.2.0 新行：DSH_CLIENT_VERSION 缺失即无 fiber，且上报端点是厂商收集器'],
+    ['product-analytics', '0.2.0 新行：客户端事件采集，与上一行成对；交付不做厂商侧产品分析'],
   ]
   const declaredDisabled = (parseYaml(readFileSync(join(packageRoot, 'cordis.patch.yml'), 'utf8')))
     .filter(row => row?.disabled === true)
