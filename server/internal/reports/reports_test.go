@@ -25,6 +25,40 @@ func bjAt(y int, m time.Month, d, hour int) time.Time {
 	return serverstore.BeijingDayAt(time.Date(y, m, d, 0, 0, 0, 0, time.UTC), hour)
 }
 
+// pinSubscriptionCreatedAt 把订阅的 `created_at` 钉到指定时刻。
+//
+// 为什么用例必须做这一步（R23-V3-B1 新增的游标下界带来的**夹具约束**）：
+// `pending_period` 的下界是 `CurrentPeriod(created_at)`（见 delivery_policy.go 的
+// `pendingPeriodFloor`）。用例用**注入时钟**把"部署时间"拨到过去，而
+// `CreateReportSubscription` 写的是**真实墙钟**的 created_at ⇒ 产品在注入时钟下写出的
+// 合法游标（如 2026-06）反而"早于订阅创建"，那是**夹具的人造偏差**：真实部署里订阅不可能
+// 在未来创建却欠着过去的期。与 `alignLastRunToClock` 同一处置（让库里的时间与注入时钟
+// 一致），不是对产品行为的放宽。
+func pinSubscriptionCreatedAt(t *testing.T, db *sql.DB, id int64, at any) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE report_subscriptions SET created_at=$1 WHERE id=$2`, at, id); err != nil {
+		t.Fatalf("对齐订阅 %d 的 created_at: %v", id, err)
+	}
+}
+
+// createSubscriptionAt 建一条启用订阅，并把 `created_at` 钉到注入时钟所在的那一刻。
+//
+// 凡是用**注入时钟**驱动调度器 / DispatchAll 的用例都必须经它建订阅，不要直接调
+// `serverstore.CreateReportSubscription` —— 后者写真实墙钟，而游标下界是
+// `CurrentPeriod(created_at)`，两者的月份一旦错开，夹具就随真实日历漂移。
+// 这不是理论风险：2026-10-01（月初）实测本包 8 条用例集体变红，形态全部是
+// "pending_period 2026-08 早于本订阅可追认的最早期号 2026-09" —— 注入时钟停在 2026-09，
+// 而 created_at 是真实的 2026-10，下界随真实月份前移了一格。
+func createSubscriptionAt(t *testing.T, db *sql.DB, name, hookURL string, at time.Time) int64 {
+	t.Helper()
+	id, err := serverstore.CreateReportSubscription(db, name, hookURL, true)
+	if err != nil {
+		t.Fatalf("建订阅 %s: %v", name, err)
+	}
+	pinSubscriptionCreatedAt(t, db, id, at)
+	return id
+}
+
 func TestShouldRunMonthly(t *testing.T) {
 	now := bjAt(2026, 9, 2, 10)
 	cases := []struct {

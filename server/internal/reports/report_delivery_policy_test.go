@@ -40,11 +40,10 @@ func TestPermanentWebhookFailureIsBackedOff(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway) // 永久坏的 webhook
 	}))
 	defer srv.Close()
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
-
 	base := bjAt(2026, 9, 15, 0)
+	// created_at 必须与注入时钟同月：游标下界是 `CurrentPeriod(created_at)`，
+	// 用真实墙钟建行会让下界随真实日历漂移（见 reports_test.go 的 createSubscriptionAt）。
+	createSubscriptionAt(t, db, "ops", srv.URL, base)
 	for h := 0; h < 24; h++ {
 		now := base.Add(time.Duration(h) * time.Hour)
 		s := NewScheduler(db, time.Hour, func() time.Time { return now })
@@ -96,11 +95,8 @@ func TestTransientWebhookFailureRecoversOnFirstRetry(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
-
 	base := bjAt(2026, 9, 15, 0)
+	createSubscriptionAt(t, db, "ops", srv.URL, base)
 	clock := base
 	for h := 0; h < 3; h++ {
 		s := NewScheduler(db, time.Hour, func() time.Time { return clock })
@@ -148,11 +144,8 @@ func TestTwoInstancesDoNotDuplicateDelivery(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
-
 	now := bjAt(2026, 9, 15, 10)
+	createSubscriptionAt(t, db, "ops", srv.URL, now)
 	s1 := NewScheduler(db, time.Hour, func() time.Time { return now })
 	s2 := NewScheduler(db, time.Hour, func() time.Time { return now })
 	done := make(chan struct{}, 2)
@@ -208,11 +201,9 @@ func TestCrossMonthFailureKeepsPendingPeriod(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
 	// 9/30 23:00（北京）：这一轮应当投 8 月报表，推送失败。
 	sep := bjAt(2026, 9, 30, 23)
+	createSubscriptionAt(t, db, "ops", srv.URL, sep)
 	_ = NewScheduler(db, time.Hour, func() time.Time { return sep }).tryRun()
 	// 10/1 00:00（北京）：webhook 恢复 —— 跨过月界，仍必须补投 8 月那一期。
 	oct := bjAt(2026, 10, 1, 0)

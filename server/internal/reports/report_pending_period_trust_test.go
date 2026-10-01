@@ -97,12 +97,8 @@ func newReportLedgerServer(t *testing.T) (*httptest.Server, *deliveryLedger) {
 // 时钟下写出的合法游标（如 2026-06）反而"早于订阅创建"，那是**夹具的人造偏差**：
 // 真实部署里订阅不可能在未来创建却欠着过去的期。与 `alignLastRunToClock` 同一处置
 // （让库里的时间与注入时钟一致），不是对产品行为的放宽。
-func pinSubscriptionCreatedAt(t *testing.T, db *sql.DB, id int64, at any) {
-	t.Helper()
-	if _, err := db.Exec(`UPDATE report_subscriptions SET created_at=$1 WHERE id=$2`, at, id); err != nil {
-		t.Fatalf("对齐订阅 %d 的 created_at: %v", id, err)
-	}
-}
+//
+// 实现已提到 `reports_test.go`（与 `createSubscriptionAt` 同处，本包共用）。
 
 // setPendingAndReset 把订阅置成"启用 + 欠 period 这一期 + 从未成功投递 + 无退避"。
 //
