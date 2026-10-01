@@ -62,12 +62,9 @@ func TestFixingHookURLResetsBackoffSoCatchUpIsImmediate(t *testing.T) {
 	badURL, badHits := countingWebhook(t, http.StatusInternalServerError)
 	goodURL, goodHits := countingWebhook(t, http.StatusOK)
 
-	id, err := serverstore.CreateReportSubscription(db, "ops", badURL, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	base := bjAt(2026, 9, 15, 0)
+	// created_at 与注入时钟同月（游标下界 = CurrentPeriod(created_at)，见 reports_test.go）。
+	id := createSubscriptionAt(t, db, "ops", badURL, base)
 	// 连续失败两次：第 1 次 ⇒ 退避 1 小时；第 2 次 ⇒ 退避 24 小时。
 	_ = NewScheduler(db, time.Hour, func() time.Time { return base }).tryRun()
 	_ = NewScheduler(db, time.Hour, func() time.Time { return base.Add(time.Hour) }).tryRun()
@@ -123,11 +120,8 @@ func TestRenamingWithoutURLChangeKeepsBackoff(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	badURL, badHits := countingWebhook(t, http.StatusInternalServerError)
-	id, err := serverstore.CreateReportSubscription(db, "ops", badURL, true)
-	if err != nil {
-		t.Fatal(err)
-	}
 	base := bjAt(2026, 9, 15, 0)
+	id := createSubscriptionAt(t, db, "ops", badURL, base)
 	_ = NewScheduler(db, time.Hour, func() time.Time { return base }).tryRun()
 	_ = NewScheduler(db, time.Hour, func() time.Time { return base.Add(time.Hour) }).tryRun()
 

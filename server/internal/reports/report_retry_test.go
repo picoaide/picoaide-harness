@@ -58,11 +58,10 @@ func TestFailedMonthlyReportIsRetriedByNextSchedulerRound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
 	// 2026-09-15（北京）：本轮的期号 = 2026-08。
 	clock := bjAt(2026, 9, 15, 10)
+	// created_at 与注入时钟同月（游标下界 = CurrentPeriod(created_at)，见 reports_test.go）。
+	createSubscriptionAt(t, db, "ops", srv.URL, clock)
 	sched := NewScheduler(db, time.Hour, func() time.Time { return clock })
 
 	// ① 第一次尝试：推送失败 ⇒ 必须如实返回错误，且**不**推进 last_run_at。
@@ -181,10 +180,9 @@ func TestRetrySurvivesAcrossSchedulerRoundsUntilSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := serverstore.CreateReportSubscription(db, "ops", srv.URL, true); err != nil {
-		t.Fatal(err)
-	}
 	clock := bjAt(2026, 9, 20, 10)
+	// created_at 与注入时钟同月（游标下界 = CurrentPeriod(created_at)，见 reports_test.go）。
+	createSubscriptionAt(t, db, "ops", srv.URL, clock)
 	sched := NewScheduler(db, time.Hour, func() time.Time { return clock })
 	subID := int64(0)
 	for round := 1; round <= 4; round++ {
