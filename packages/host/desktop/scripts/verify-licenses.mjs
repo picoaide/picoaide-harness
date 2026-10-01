@@ -192,6 +192,36 @@ if (failures.length > 0) {
 const noticeOnly = manifests.filter(entry => NOTICE_LICENSES.has(entry.license))
 
 /**
+ * 随包分发的**非 npm 第三方产物**（模型权重）。
+ *
+ * 这些文件不进依赖树，所以上面的包表覆盖不到它们，但它们是**客户交付物的一部分**
+ * （随安装包分发，约 230 MB）。清单是静态的：升级模型时改这里并重跑
+ * `verify:notices:write`，生成器与比对基准仍是同一份实现。
+ *
+ * 两条许可是**不同**的，不能合并成"开源"一句：
+ *  · SenseVoiceSmall 权重走 FunASR 模型开源协议（不是代码仓的 MIT）：允许使用、
+ *    复制、修改、分享，但 §2.2 要求**署名来源与作者并保留模型名** —— 所以下面
+ *    逐字写出模型名与导出仓。
+ *  · Silero VAD 是 MIT。
+ * @see `deepseek-harness/packages/experimental/speech-to-text-sensevoice/runtime/assets.json`
+ *   上游钉死的三个文件的 URL 与 sha256（本仓随包的是同一份字节）。
+ */
+const BUNDLED_MODEL_NOTICES = [
+  {
+    name: 'SenseVoiceSmall (int8 ONNX)，随 sherpa-onnx 导出分发',
+    source: 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17',
+    license: 'FunASR Model Open Source License Agreement v1.1 (Alibaba Group)',
+    terms: '允许使用、复制、修改与分享；§2.2 要求署名来源与作者信息并保留模型名。',
+  },
+  {
+    name: 'Silero VAD (silero_vad.onnx)',
+    source: 'https://huggingface.co/csukuangfj/vad',
+    license: 'MIT (Silero Team)',
+    terms: '标准 MIT 条款。',
+  },
+]
+
+/**
  * Render the shipped third-party notice list.
  *
  * `--notices`(覆盖写)与 `--check-notices`(比对)共用这一份渲染:生成器与比对
@@ -221,6 +251,19 @@ function renderNotices(entries) {
       ? ''
       : `> Notice-required licenses in use: ${[...new Set(noticeEntries.map(entry => entry.license))].join(', ')}. Their license texts ship inside node_modules; see the package LICENSE files for the full terms.`,
     '',
+    '## Bundled speech-recognition model weights',
+    '',
+    'The installers also ship speech-recognition model weights. They are not npm packages, so',
+    'the table above does not cover them; these are their names, sources, and licenses.',
+    '',
+    ...BUNDLED_MODEL_NOTICES.flatMap(notice => [
+      `### ${notice.name}`,
+      '',
+      `- Source: ${notice.source}`,
+      `- License: ${notice.license}`,
+      `- Terms: ${notice.terms}`,
+      '',
+    ]),
   ].filter(line => line !== '')
   return lines.join('\n')
 }

@@ -147,3 +147,20 @@
   disabled: true
 - id: product-analytics
   disabled: true
+
+# OTel 会话日志上报（产品决策 2026-10-01）：该行**此前只由环境变量门控** ——
+# `src/profile.ts` 的补丁只在 `DSH_TELEMETRY_DISABLED` 非空时把它 disable，而该变量
+# 在本仓只由 CI 与测试设置，**运行期没有任何地方设它**（`main.ts` 只是把它读进去传给
+# 组装层）⇒ 生产客户端这一行实际一直是挂载的，且上游 0.2.0 把它的默认采集端换成了
+# 新域名。它缺省是 `FEEDBACK_ONLY`：用户点反馈/评分、编辑或撤回时，把**截至该事件的
+# 完整会话规范前缀**（消息正文、工具参数与结果、工作区路径）导出到 OTLP 采集端。
+#
+# 与 `session-log-deepseek` 是**同一类数据出境**（会话正文离开客户环境），差别只在
+# 触发条件（显式反馈 vs 每个带 sessionId 的请求）。本产品是企业自托管 + 白标交付，
+# 两条都必须在桌面组合里关闭，否则交付口径会自相矛盾。
+#
+# 关闭不影响本地功能：反馈本身照常记录在会话日志里（`message-feedback` 行未动），
+# 只是不再走出 OTLP 这条通道。环境变量门控保留（`profile.ts`），作为已禁用行上的
+# 幂等补丁，双保险。
+- id: session-telemetry-otel
+  disabled: true
