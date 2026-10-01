@@ -508,11 +508,19 @@ describe('published package surface', () => {
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
 
     expect(manifest.dependencies?.koffi).toBe('3.1.5')
-    expect(workspaceManifest.resolutions).toMatchObject({
-      'koffi@npm:^3.1.0': '3.1.5',
-    })
-    expect(lockfile).toContain('"koffi@npm:3.1.5":')
-    expect(lockfile).toContain('@koromix/koffi-win32-x64@npm:3.1.5')
+    // 只钉"某个 range 被重定向到 3.1.5"是不够的：上游 0.2.0-rc.2 把 7 个包的
+    // `koffi` 声明从 `^3.1.0` 改成**精确的 3.1.1**，`koffi@npm:^3.1.0` 这条
+    // resolution 于是不再匹配任何声明 —— 锁定被静默绕过，树里同时出现
+    // 3.1.1（嵌套副本，其 `@koromix/koffi-*` 平台包缺席）与 3.1.5（顶层），
+    // 而只查 key 存在的断言仍然全绿。所以判据改成**对锁文件本身**判：
+    // 整个 workspace 只允许存在一代 koffi，且必须是 3.1.5。
+    const koffiDescriptors = [...lockfile.matchAll(/^"(koffi|@koromix\/koffi-[\w-]+)@npm:([^"]+)":/gmu)]
+      .map(match => ({ name: match[1], range: match[2] }))
+    expect(koffiDescriptors.length).toBeGreaterThan(0)
+    expect([...new Set(koffiDescriptors.map(descriptor => descriptor.range))]).toEqual(['3.1.5'])
+    // 3.1.4 是交叉编译的 Windows 二进制（上升沿崩溃，issue #145/#149）；
+    // 3.1.1 是上游当前的精确声明值，同样不得进入交付树。
+    expect(lockfile).not.toContain('"koffi@npm:3.1.1":')
     expect(lockfile).not.toContain('"koffi@npm:3.1.4":')
     expect(lockfile).not.toContain('@koromix/koffi-win32-x64@npm:3.1.4')
   })

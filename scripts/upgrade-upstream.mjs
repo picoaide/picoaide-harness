@@ -343,7 +343,7 @@ ${fmt(preload[1])}
  *    离线/查询失败一律按中止处理（验证不了就不许 bump）。
  * @param context - `{from, to, targetTag}`。
  */
-async function runUpgradeGuards({ from, to, targetTag }) {
+async function runUpgradeGuards({ from, fromRef, to, targetTag }) {
   const workspace = readJson('package.json')
   const declared = declaredUpstreamPackages(root, workspace)
   log(`guard: ${declared.size} 个 @deepseek-ai/* 声明，逐个查 registry…`)
@@ -356,8 +356,8 @@ async function runUpgradeGuards({ from, to, targetTag }) {
 
   try {
     const git = gitReader(upstreamDir)
-    const diff = diffUpstreamPackageSet(git, from, targetTag)
-    log(`上游包清单 diff ${from} → ${targetTag}: -${diff.removed.length} +${diff.added.length}`
+    const diff = diffUpstreamPackageSet(git, fromRef, targetTag)
+    log(`上游包清单 diff ${fromRef.slice(0, 12)}(${from}) → ${targetTag}: -${diff.removed.length} +${diff.added.length}`
       + `（路径变化 ${diff.pathMoved.length}）`)
     for (const name of diff.removed) {
       log(`  - 上游删除: ${name}${declared.has(name) ? '  ← 我们仍在声明（下面会中止）' : ''}`)
@@ -384,6 +384,10 @@ async function main() {
   const upstream = readJson('upstream.json')
   const workspace = readJson('package.json')
   const from = upstream.runtimePackageVersion
+  // 包清单 diff 的 `from` 用**pin 的提交**而不是版本字符串：上游 tag 是 `dsh-v…`
+  // 形态，`git ls-tree 0.1.7-rc.2` 会以 "Not a valid object name" 中止整个升级
+  // （2026-10-01 实测：dry-run 直接死在 guard 上）。提交哈希永远是有效对象。
+  const fromRef = upstream.commit
   log(`current pin: ${upstream.commit.slice(0, 12)} (${from})`)
   log('升级会自动重抽 platform-modules 并跑完整门禁;以下清单必须人工核对:')
   printManualChecklist()
@@ -439,7 +443,7 @@ async function main() {
   //     `bumpManifest` is a mechanical version replace — without these three it
   //     silently "upgrades" a dependency whose upstream name no longer exists, and
   //     the failure only surfaces later as `yarn install` YN0082.
-  await runUpgradeGuards({ from, to, targetTag })
+  await runUpgradeGuards({ from, fromRef, to, targetTag })
 
   // 4. Bump manifests.
   const changed = []
