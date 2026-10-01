@@ -28,6 +28,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { useEffect, useState, type ReactElement } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { t } from './locales.ts'
+import { installVoiceDevicePreflight, type VoiceMicStatusView } from './voice-device-guard.ts'
 
 /** 语音输入 bundle 的包名（`pluginNavigation.openBundle` 的入参，也是 profile 行来源）。 */
 export const VOICE_INPUT_BUNDLE = '@deepseek-ai/dsh-experimental-voice-input-bundle'
@@ -152,6 +153,18 @@ export interface VoiceSetupSnapshot {
   readonly catalog: VoiceCatalogView | null
   /** 正在执行的用户动作（按钮禁用用）。 */
   readonly pending: 'prepare' | 'cancel' | null
+  /** 麦克风自检（设备数 + 系统授权）；`null` = 还没查过。 */
+  readonly mic: VoiceMicCheck | null
+  /** 自检/申请正在执行（按钮禁用用）。 */
+  readonly micPending: boolean
+}
+
+/** 麦克风自检快照（渲染层只读它）。 */
+export interface VoiceMicCheck {
+  /** 渲染层 `enumerateDevices()` 报告的音录音设备数（查不到为 null）。 */
+  readonly inputs: number | null
+  /** 宿主给出的系统授权状态（查不到为 null）。 */
+  readonly status: VoiceMicStatusView | null
 }
 
 /** 语音设置面的最小 store（无框架依赖，便于单测）。 */
@@ -163,6 +176,10 @@ export interface VoiceSetupStore {
   refresh: () => Promise<void>
   prepare: () => Promise<void>
   cancel: () => Promise<void>
+  /** 重查麦克风自检（设备数 + 系统授权）。 */
+  checkMic: () => Promise<void>
+  /** 申请系统授权（macOS 弹窗；其它平台是无副作用的读回）。 */
+  requestMic: () => Promise<void>
   dispose: () => void
 }
 
@@ -222,9 +239,13 @@ export function voiceFailureDetail(
 }
 
 /** 构造 store；`resolveRemote` 每次调用重新解析（Remote 随 fiber 存活，不能缓存句柄）。 */
-export function createVoiceSetupStore(resolveRemote: () => SpeechRemoteLike | undefined): VoiceSetupStore {
+export function createVoiceSetupStore(
+  resolveRemote: () => SpeechRemoteLike | undefined,
+  resolveMicStatus: () => Promise<VoiceMicStatusView | undefined> = readVoiceMicStatus,
+): VoiceSetupStore {
   let snapshot: VoiceSetupSnapshot = {
     open: false, connected: false, error: null, actionError: null, catalog: null, pending: null,
+    mic: null, micPending: false,
   }
   const listeners = new Set<() => void>()
   let timer: ReturnType<typeof setInterval> | undefined
@@ -290,6 +311,31 @@ export function createVoiceSetupStore(resolveRemote: () => SpeechRemoteLike | un
     await refresh()
   }
 
+  const readInputs = async (): Promise<number | null> => {
+    try {
+      const devices = await navigator.mediaDevices?.enumerateDevices?.()
+      if (devices === undefined) return null
+      return devices.filter(device => device.kind === 'audioinput').length
+    } catch {
+      return null
+    }
+  }
+  const checkMic = async (): Promise<void> => {
+    publish({ micPending: true })
+    const [inputs, status] = await Promise.all([readInputs(), resolveMicStatus()])
+    if (disposed) return
+    publish({ mic: { inputs, status: status ?? null }, micPending: false })
+  }
+  const requestMic = async (): Promise<void> => {
+    publish({ micPending: true })
+    try {
+      await requestVoiceMicPermission()
+    } finally {
+      if (!disposed) publish({ micPending: false })
+    }
+    await checkMic()
+  }
+
   return {
     snapshot: () => snapshot,
     subscribe(listener) {
@@ -299,6 +345,8 @@ export function createVoiceSetupStore(resolveRemote: () => SpeechRemoteLike | un
     open() {
       publish({ open: true, actionError: null })
       void refresh()
+      // 打开准备面就顺手做一次麦克风自检：用户点进来通常正是因为"点了没反应/说没设备"。
+      void checkMic()
       // 准备任务归 Host：对话框开着就持续跟随进度。
       stopPolling()
       timer = setInterval(() => { void refresh() }, VOICE_SETUP_POLL_MS)
@@ -310,12 +358,43 @@ export function createVoiceSetupStore(resolveRemote: () => SpeechRemoteLike | un
     refresh,
     prepare: () => runAction('prepare'),
     cancel: () => runAction('cancel'),
+    checkMic,
+    requestMic,
     dispose() {
       disposed = true
       stopPolling()
       listeners.clear()
     },
   }
+}
+
+/**
+ * 授权状态 → 文案键（未知/缺席一律 `unknown`）。
+ * @param permission - 宿主给的授权状态字符串。
+ * @returns `locales.ts` 里的键。
+ */
+export function micPermissionKey(permission: string | undefined): Parameters<typeof t>[0] {
+  switch (permission) {
+    case 'granted': return 'voice.check.permission.granted'
+    case 'denied': return 'voice.check.permission.denied'
+    case 'restricted': return 'voice.check.permission.restricted'
+    case 'not-determined': return 'voice.check.permission.not-determined'
+    case 'not-applicable': return 'voice.check.permission.not-applicable'
+    default: return 'voice.check.permission.unknown'
+  }
+}
+
+/**
+ * 是否显示"申请麦克风权限"按钮。
+ *
+ * 只在**系统还能弹窗**时显示（macOS `not-determined`）。已经拒绝之后
+ * `askForMediaAccess` 不再弹任何东西 —— 给一个点了没反应的按钮比不给更糟，
+ * 那种情形交给文案指引去系统设置。
+ * @param status - 宿主给的授权状态（缺席 = 这台平台没有这一步）。
+ * @returns 是否显示按钮。
+ */
+export function canRequestMic(status: VoiceMicStatusView | null | undefined): boolean {
+  return status?.permission === 'not-determined'
 }
 
 /** `RemoteFailure` / 任意异常 → 一行可读文案。 */
@@ -332,6 +411,45 @@ function describeRemoteFailure(error: unknown): string {
 }
 
 /**
+ * 申请系统麦克风授权（POST 到宿主路由；宿主在 macOS 上调 `askForMediaAccess`）。
+ *
+ * 失败**不抛**：申请只是"帮用户把系统弹窗叫出来"，结果由随后的状态读回反映；
+ * 弹不出来（例如已被拒、系统不再弹）时界面显示的是状态与去系统设置的指引。
+ * @returns 是否收到了成功响应。
+ */
+export async function requestVoiceMicPermission(): Promise<boolean> {
+  try {
+    const response = await fetch(VOICE_MIC_REQUEST_PATH, { method: 'POST', headers: { accept: 'application/json' } })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+/** 本机只读路由：宿主给出的麦克风系统授权状态（macOS TCC；见 `voice-mic-route.ts`）。 */
+export const VOICE_MIC_STATUS_PATH = '/api/pico/voice/mic'
+/** 触发系统授权询问（POST，宿主侧过写面证明）。 */
+export const VOICE_MIC_REQUEST_PATH = '/api/pico/voice/mic/request'
+
+/**
+ * 读宿主的麦克风授权状态。
+ *
+ * 同源 GET（Chromium 自动带上持有性 cookie）；**任何失败都返回 undefined**：
+ * 状态查不到只该让文案回落到"没有设备"，不该让录音路径本身失败。
+ * @returns 状态载荷，或 undefined。
+ */
+export async function readVoiceMicStatus(): Promise<VoiceMicStatusView | undefined> {
+  try {
+    const response = await fetch(VOICE_MIC_STATUS_PATH, { headers: { accept: 'application/json' } })
+    if (!response.ok) return undefined
+    const payload = await response.json() as VoiceMicStatusView
+    return typeof payload === 'object' && payload !== null ? payload : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * 在桌面 client face 里补 `pluginNavigation`（语音 UI 插件 inject 它）并把
  * 语音准备面挂到 `shell.overlay`。
  * @param ctx - 浏览器侧 Cordis 上下文。
@@ -340,6 +458,15 @@ function describeRemoteFailure(error: unknown): string {
 export function applyVoiceSetup(ctx: ClientContext): VoiceSetupStore {
   const store = createVoiceSetupStore(() => speechRemoteOf(ctx))
   setVoiceSetupOverlayStore(store)
+  // 设备预检（2026-09-30）：本机没有麦克风时，上游原样透出的英文
+  // `Requested device not found` 换成本地化的可执行文案（语义不变，仍是 NotFoundError）。
+  ctx.effect(
+    () => installVoiceDevicePreflight(undefined, {
+      noDevice: () => t('voice.noDevice'),
+      denied: () => t('voice.micDenied'),
+    }, readVoiceMicStatus),
+    'desktop: voice device preflight',
+  )
   ctx.effect(() => {
     // 我们禁用 `ui-plugin-manager`（见 `cordis.patch.yml`），所以 `pluginNavigation`
     // 没有正主、必须由桌面补位；但**一旦它被渠道覆盖层或上游默认变化重新启用**，
@@ -450,6 +577,28 @@ export function VoiceSetupDialog({ store, state }: {
       <div className="dshDesktopVoiceSetup">
         <p>{t('voice.intro')}</p>
         {lines.map((line, index) => <p key={`${index}-${line}`} className="dshDesktopVoiceState">{line}</p>)}
+        {/* 麦克风自检（2026-09-30）：用户点进来最常见的原因就是"点了没反应/说没设备"，
+            这里把"系统报告的录音设备数"与"系统授权状态"摊开 —— macOS 被拒之后设备列表
+            同样是空的，两句话合起来才能区分"没插麦克风"与"系统没允许"。 */}
+        <div className="dshDesktopVoiceCheck">
+          <p className="dshDesktopVoiceCheckTitle">{t('voice.check.title')}</p>
+          <p className="dshDesktopVoiceState">
+            {t('voice.check.devices', { count: state.mic?.inputs === null || state.mic === null ? '—' : String(state.mic.inputs) })}
+          </p>
+          <p className="dshDesktopVoiceState">
+            {t('voice.check.permission', { state: t(micPermissionKey(state.mic?.status?.permission)) })}
+          </p>
+          <div className="dshDesktopVoiceCheckActions">
+            <Button variant="ghost" disabled={state.micPending} onClick={() => { void store.checkMic() }}>
+              {t('voice.check.refresh')}
+            </Button>
+            {canRequestMic(state.mic?.status) && (
+              <Button variant="primary" disabled={state.micPending} onClick={() => { void store.requestMic() }}>
+                {t('voice.check.request')}
+              </Button>
+            )}
+          </div>
+        </div>
         <p className="dshDesktopVoicePrivacy">{t('voice.privacy')}</p>
       </div>
     </Modal>

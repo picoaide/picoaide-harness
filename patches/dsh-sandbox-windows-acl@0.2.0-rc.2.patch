@@ -1,7 +1,7 @@
-diff --git a/lib/types-DxezulnA.js b/lib/types-DxezulnA.js
---- a/lib/types-DxezulnA.js
-+++ b/lib/types-DxezulnA.js
-@@ -447,6 +447,18 @@
+diff --git a/lib/types-Cl_DXjhk.js b/lib/types-Cl_DXjhk.js
+--- a/lib/types-Cl_DXjhk.js
++++ b/lib/types-Cl_DXjhk.js
+@@ -452,6 +452,18 @@
  	return hasExactEntry(labelAcl, 17, 3, 1, lowLabelSidPtr);
  }
  /**
@@ -20,7 +20,7 @@ diff --git a/lib/types-DxezulnA.js b/lib/types-DxezulnA.js
  * Shared tail of grantWrite and revokeWrite: merge `entries` into `oldAcl`
  * (null = no explicit DACL yet; SetEntriesInAclW builds one from scratch),
  * free the descriptor before applying the merged ACL, apply the merged DACL
-@@ -480,7 +492,7 @@
+@@ -485,7 +497,7 @@
  	const applyResult = api.setNamedSecurityInfoW(path, 1, labelEdit.kind === "keep" ? 4 : 20, null, null, newAcl, labelEdit.kind === "apply" ? labelEdit.acl : null);
  	const freedNew = api.localFree(newAcl);
  	const freedLabel = labelEdit.kind === "apply" ? api.localFree(labelEdit.acl) : null;

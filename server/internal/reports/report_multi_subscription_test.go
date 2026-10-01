@@ -49,17 +49,15 @@ func TestHealthySubscriptionNotRepushedWhenSiblingFails(t *testing.T) {
 	}))
 	defer broken.Close()
 
-	if _, err := serverstore.CreateReportSubscription(db, "finance-ok", healthy.URL, true); err != nil {
-		t.Fatal(err)
-	}
-	brokenID, err := serverstore.CreateReportSubscription(db, "compliance-broken", broken.URL, true)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// 2026-09-15（北京）⇒ 本期 = 2026-08。三轮 = 三个 1 小时 tick（R19A-S1-06 之后
 	// 失败有指数退避：首轮失败 ⇒ 1 小时后才允许重试，所以必须推进时钟，否则第 2/3 轮
 	// 被退避窗口挡住 —— 那是退避在起作用，不是"不报错"）。
 	clock := bjAt(2026, 9, 15, 10)
+	// created_at 必须与注入时钟同月（游标下界 = CurrentPeriod(created_at)，见 reports_test.go
+	// 的 createSubscriptionAt）：两条订阅都要钉，否则真实月份前移后失败订阅那一期会被
+	// 判成"早于订阅创建"而 fail-closed，推送次数停在 1。
+	createSubscriptionAt(t, db, "finance-ok", healthy.URL, clock)
+	brokenID := createSubscriptionAt(t, db, "compliance-broken", broken.URL, clock)
 	sched := NewScheduler(db, time.Hour, func() time.Time { return clock })
 
 	for round := 1; round <= 3; round++ {

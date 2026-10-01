@@ -35,6 +35,27 @@ export const zh = {
   'voice.unavailable': '语音服务尚未就绪：语音插件未装配或正在启动。',
   /** catalog 里没有任何提供者。 */
   'voice.noProvider': '当前没有可用的语音识别提供者。',
+  /** 本机没有可用的录音设备（上游会把这句话拼在"语音识别失败："后面）。 */
+  'voice.noDevice': '未检测到麦克风设备。请检查系统声音设置里的输入设备；虚拟机或远程桌面需开启音频/麦克风重定向。',
+  /** 系统层面没有麦克风授权（macOS 已拒绝后系统不再弹窗，只能去系统设置里打开）。 */
+  'voice.micDenied': '系统没有授予麦克风权限。请到「系统设置 → 隐私与安全性 → 麦克风」里允许本应用，然后重新点麦克风。',
+  /** 自检区标题。 */
+  'voice.check.title': '麦克风自检',
+  /** 自检：输入设备数量（{count} 个）。 */
+  'voice.check.devices': '系统报告的录音设备：{count} 个',
+  /** 自检：系统授权状态。 */
+  'voice.check.permission': '系统授权：{state}',
+  /** 自检：授权状态取值。 */
+  'voice.check.permission.granted': '已允许',
+  'voice.check.permission.denied': '已被拒绝（需到系统设置里打开）',
+  'voice.check.permission.restricted': '受系统策略限制',
+  'voice.check.permission.not-determined': '尚未询问（首次点麦克风时会弹窗）',
+  'voice.check.permission.unknown': '读不到授权状态',
+  'voice.check.permission.not-applicable': '该平台没有应用级授权询问',
+  /** 自检按钮：触发系统授权询问。 */
+  'voice.check.request': '申请麦克风权限',
+  /** 自检按钮：刷新。 */
+  'voice.check.refresh': '刷新',
   /** 未准备时的下载量与磁盘占用提示（`{download}` = 实际下载，`{disk}` = 上游预留建议）。 */
   'voice.estimate': '首次下载约 {download}（建议预留磁盘 {disk}；模型常驻磁盘，之后可离线使用）。',
   /** 主按钮：下载并启用。 */
@@ -77,6 +98,19 @@ export const en: Record<keyof typeof zh, string> = {
   'voice.privacy': 'The model and recognition stay on this machine. A transcript is inserted into the draft only — it is never sent automatically.',
   'voice.unavailable': 'Speech is not ready yet: the voice plugin is not installed or still starting.',
   'voice.noProvider': 'No speech recognition provider is available.',
+  'voice.noDevice': 'No microphone device was found. Check the input devices in your system sound settings; virtual machines and remote desktops need audio/microphone redirection.',
+  'voice.micDenied': 'The system has not granted microphone access. Allow this app under System Settings → Privacy & Security → Microphone, then click the microphone again.',
+  'voice.check.title': 'Microphone check',
+  'voice.check.devices': 'Recording devices reported by the system: {count}',
+  'voice.check.permission': 'System permission: {state}',
+  'voice.check.permission.granted': 'granted',
+  'voice.check.permission.denied': 'denied (enable it in System Settings)',
+  'voice.check.permission.restricted': 'restricted by system policy',
+  'voice.check.permission.not-determined': 'not asked yet (the prompt appears on the first click)',
+  'voice.check.permission.unknown': 'unavailable',
+  'voice.check.permission.not-applicable': 'this platform has no per-app prompt',
+  'voice.check.request': 'Request microphone permission',
+  'voice.check.refresh': 'Refresh',
   'voice.estimate': 'The first download is about {download} (reserve about {disk} on disk; the model stays on disk and then works offline).',
   'voice.download': 'Download and enable',
   'voice.retry': 'Retry download',

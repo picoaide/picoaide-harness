@@ -126,3 +126,41 @@
   disabled: true
 - id: account-controller
   disabled: true
+
+# 桌面产品分析/遥测（0.2.0-rc.2 新增两行，默认对 desktop 开启）：`product-analytics`
+# （客户端事件采集）与 `desktop-product-telemetry`（OTLP 上报），其 `disabled`
+# 判据是 `ctx.get('profileContext')?.name !== 'desktop'`，而桌面**必须** provide
+# `profileContext`（见 src/main.ts 的 provide 注释）⇒ 两行在桌面组合里默认启用。
+# 关闭有两层理由，任一层都足够：
+#   1. **不关就起不来**：`desktop-product-telemetry` 的 `serviceVersion:
+#      !!js process.env.DSH_CLIENT_VERSION` 在 schema 里是 `.required()`，而
+#      `DSH_CLIENT_VERSION` 只有上游 Electron 壳（apps/desktop 的
+#      client-metadata.ts）会设，我们的启动器不设 ⇒ 该行构造抛错、没有 fiber ⇒
+#      `verify-profile-boot.mjs` 的 unimportable 判据红、整次 `yarn check` 红。
+#   2. **产品口径**：上报端点的 schema 缺省是上游厂商自建的收集器（见
+#      `packages/host/product-telemetry-otel/src/index.ts` 的 `endpoint` 默认值），
+#      事件含 device_id / user_id / os_version 与使用行为。本产品是自托管 + 白标
+#      交付，客户端使用数据出境到模型厂商不在交付承诺内；我们自己的错误上报走
+#      `error_reporting_enabled` + 客户自建的 GlitchTip 兼容端点。
+# 两行必须成对关闭：客户端那半在没有宿主消费服务时只会积压队列。
+- id: desktop-product-telemetry
+  disabled: true
+- id: product-analytics
+  disabled: true
+
+# OTel 会话日志上报（产品决策 2026-10-01）：该行**此前只由环境变量门控** ——
+# `src/profile.ts` 的补丁只在 `DSH_TELEMETRY_DISABLED` 非空时把它 disable，而该变量
+# 在本仓只由 CI 与测试设置，**运行期没有任何地方设它**（`main.ts` 只是把它读进去传给
+# 组装层）⇒ 生产客户端这一行实际一直是挂载的，且上游 0.2.0 把它的默认采集端换成了
+# 新域名。它缺省是 `FEEDBACK_ONLY`：用户点反馈/评分、编辑或撤回时，把**截至该事件的
+# 完整会话规范前缀**（消息正文、工具参数与结果、工作区路径）导出到 OTLP 采集端。
+#
+# 与 `session-log-deepseek` 是**同一类数据出境**（会话正文离开客户环境），差别只在
+# 触发条件（显式反馈 vs 每个带 sessionId 的请求）。本产品是企业自托管 + 白标交付，
+# 两条都必须在桌面组合里关闭，否则交付口径会自相矛盾。
+#
+# 关闭不影响本地功能：反馈本身照常记录在会话日志里（`message-feedback` 行未动），
+# 只是不再走出 OTLP 这条通道。环境变量门控保留（`profile.ts`），作为已禁用行上的
+# 幂等补丁，双保险。
+- id: session-telemetry-otel
+  disabled: true
