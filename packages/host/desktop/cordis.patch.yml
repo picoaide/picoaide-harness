@@ -126,3 +126,24 @@
   disabled: true
 - id: account-controller
   disabled: true
+
+# 桌面产品分析/遥测（0.2.0-rc.2 新增两行，默认对 desktop 开启）：`product-analytics`
+# （客户端事件采集）与 `desktop-product-telemetry`（OTLP 上报），其 `disabled`
+# 判据是 `ctx.get('profileContext')?.name !== 'desktop'`，而桌面**必须** provide
+# `profileContext`（见 src/main.ts 的 provide 注释）⇒ 两行在桌面组合里默认启用。
+# 关闭有两层理由，任一层都足够：
+#   1. **不关就起不来**：`desktop-product-telemetry` 的 `serviceVersion:
+#      !!js process.env.DSH_CLIENT_VERSION` 在 schema 里是 `.required()`，而
+#      `DSH_CLIENT_VERSION` 只有上游 Electron 壳（apps/desktop 的
+#      client-metadata.ts）会设，我们的启动器不设 ⇒ 该行构造抛错、没有 fiber ⇒
+#      `verify-profile-boot.mjs` 的 unimportable 判据红、整次 `yarn check` 红。
+#   2. **产品口径**：上报端点的 schema 缺省是上游厂商自建的收集器（见
+#      `packages/host/product-telemetry-otel/src/index.ts` 的 `endpoint` 默认值），
+#      事件含 device_id / user_id / os_version 与使用行为。本产品是自托管 + 白标
+#      交付，客户端使用数据出境到模型厂商不在交付承诺内；我们自己的错误上报走
+#      `error_reporting_enabled` + 客户自建的 GlitchTip 兼容端点。
+# 两行必须成对关闭：客户端那半在没有宿主消费服务时只会积压队列。
+- id: desktop-product-telemetry
+  disabled: true
+- id: product-analytics
+  disabled: true
