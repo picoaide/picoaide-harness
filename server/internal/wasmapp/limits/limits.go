@@ -67,10 +67,19 @@ const (
 	// 与"声明体积"混成一条判据：超出这个长度只可能是走样输入（粘贴了整行/整段），
 	// 而它永远不会匹配到任何一列。
 	AppConfigSensitiveColumnMaxBytes = 64
-	// CompileTimeout 是单次编译超时（§4.2/§4.3）：60 s。
+	// CompileTimeout 是单次编译超时（§4.2/§4.3）的**默认值**：60 s。
+	// 控制台 `compile_timeout_seconds` 可覆盖；保存时校验它不得超过服务端
+	// ReadTimeout（§10.5 第 58 项那条序关系的运行时版本）。
 	CompileTimeout = 60 * time.Second
-	// DryRunBudget 是上传期合成帧干跑预算（§4.2）：2 s。
-	DryRunBudget = 2 * time.Second
+	// DryRunBudget 是上传期合成帧干跑预算（§4.2）的**默认值**：30 s。
+	//
+	// 2026-10-01 由 2 s 放宽到 30 s（= `GuestBudget`）：干跑要回答的问题是
+	// "这次运行到底能不能跑起来"，预算比真实执行更短就会出现"预检拒绝了一个
+	// 线上其实跑得动的应用"——现场那个「PDF 打水印」应用启动阶段就要十几秒，
+	// 2 s 的干跑把它判死，而它在 30 s 的 guest 预算下完全正常。
+	// 控制台 `dry_run_budget_seconds` 可覆盖；保存时校验它**不得大于**
+	// `guest_budget_seconds`（干跑不得比真实执行更宽松）。
+	DryRunBudget = 30 * time.Second
 	// CompileQueueDepth 是编译队列深度（§4.3，R31）：64，满则 429。
 	CompileQueueDepth = 64
 	// CompileConcurrency 是编译进程并发度（§4.3，R31）：恒为 1（单进程串行）。
@@ -259,7 +268,8 @@ const (
 	// 超出仍是既有语义：**只截断 + `QueryResult.Truncated=true`**（分页读取，见
 	// appdb/stmt.go 的取舍说明）；只有"单行/列名本身就超帧"才回结构化 `DB_LIMIT`。
 	SQLMaxResultBytes = MaxDeliverablePayloadBytes
-	// SQLStatementBudget 是单语句硬超时（R13/§4.5）：5 s（独立于 guest 超时）。
+	// SQLStatementBudget 是单语句硬超时（R13/§4.5）的**默认值**：5 s（独立于 guest 超时）。
+	// 控制台 `sql_statement_budget_seconds` 可覆盖；保存时校验它不得超过端到端墙钟。
 	SQLStatementBudget = 5 * time.Second
 
 	// AppDBHandleMax 是进程内**同时持有**的应用库句柄上限。
@@ -332,11 +342,22 @@ const (
 	//   - `abi.MaxResponseBodyBytes`：应用响应体的"保证可交付"数（§4.6 对外契约）；
 	//   - `SQLMaxResultBytes`：`db.query` 结果的预算（超出只截断 + Truncated）。
 	MaxDeliverablePayloadBytes = (ProtocolLineMaxBytes - FrameEnvelopeReserveBytes) / MaxJSONEscapeExpansion
-	// GuestBudget 是 guest 执行预算（§4.6）：10 s（进入宿主调用时暂停计时）。
-	GuestBudget = 10 * time.Second
+	// GuestBudget 是 guest 执行预算（§4.6）的**编译期默认值**：30 s
+	//（进入宿主调用时暂停计时）。
+	//
+	// 2026-10-01 由 10 s 放宽到 30 s：现场有一个「PDF 打水印」类应用，单次请求既要
+	// 解析又要重新编码整份文档，10 s 会把正常请求按超时杀掉。它与
+	// `RequestWallClock`（60 s，含排队）仍留有一倍余量 ⇒ 序关系不变。
+	//
+	// ⚠️ 这不是"唯一真源"，而是**默认值**：控制台「运维 → 应用平台」的
+	// `guest_budget_seconds` 可以覆盖它（applimits：控制台 > 部署档位 > 本常量）。
+	// 本包仍是默认值的唯一来源（§5.5），改默认值只改这里。
+	GuestBudget = 30 * time.Second
 	// ⚠️ W4 删除（总纲 §21.3）：服务端宿主 AI 调用的 30 s 预算随该能力一起消失；
 	// 其余宿主调用（db.* / log / assets.read）一律走 HostCallBudgetDefault。
 	// RequestWallClock 是请求端到端墙钟（含排队，§4.6）：60 s，到点即拒。
+	// 同样是**默认值**，控制台 `request_wall_clock_seconds` 可覆盖；保存时校验
+	// 它必须**严格大于** `guest_budget_seconds`（否则 guest 还没跑完就被墙钟拒）。
 	RequestWallClock = 60 * time.Second
 	// AppQueueDepth 是每应用队列长度（§4.6）：32，超出 429 + Retry-After。
 	AppQueueDepth = 32
@@ -469,7 +490,8 @@ const (
 	LogMaxLineBytes = 4 << 10
 	// LogMaxPerRequest 是每请求日志条数上限（§5.1）：100，超出丢弃并计数。
 	LogMaxPerRequest = 100
-	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算。
+	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算的**默认值**：5 s。
+	// 控制台 `host_call_budget_seconds` 可覆盖；保存时校验它不得超过 guest 预算。
 	HostCallBudgetDefault = 5 * time.Second
 
 	// AIBridgeMaxMessages 与 AIBridgeMessageMaxBytes 是**客户端 AI 桥**的载荷形状

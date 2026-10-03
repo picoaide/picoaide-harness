@@ -1,8 +1,10 @@
 package applimits_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/appdb"
 	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
@@ -400,5 +402,170 @@ func TestRangesCoverEveryField(t *testing.T) {
 		if !strings.Contains(enc, `"`+f+`"`) {
 			t.Fatalf("JSON 里缺少字段 %s：%s", f, enc)
 		}
+	}
+}
+
+// ===== 时间预算（2026-10-01：从编译期常量收进控制台）=====
+
+// TestBudgetDefaultsMatchCompileTimeConstants 钉住"不配置任何东西"的部署行为与
+// limits 包逐值一致（尤其是现场要求的两个放宽：guest 30 s / 干跑与它同值）。
+func TestBudgetDefaultsMatchCompileTimeConstants(t *testing.T) {
+	d := applimits.Defaults()
+	if d.GuestBudget() != limits.GuestBudget {
+		t.Errorf("guest_budget_seconds 默认值 = %s，limits.GuestBudget = %s", d.GuestBudget(), limits.GuestBudget)
+	}
+	if d.GuestBudget() != 30*time.Second {
+		t.Errorf("guest 预算默认值必须是 30 s（2026-10-01 现场要求：PDF 类应用单请求要重新编码整份文档），实得 %s", d.GuestBudget())
+	}
+	if d.DryRunBudget() != d.GuestBudget() {
+		t.Errorf("干跑预算默认值（%s）必须等于 guest 预算（%s）：预检不得比真实执行更严",
+			d.DryRunBudget(), d.GuestBudget())
+	}
+	if d.HostCallBudget() != limits.HostCallBudgetDefault {
+		t.Errorf("host_call_budget_seconds 默认值 = %s，limits 常量 = %s", d.HostCallBudget(), limits.HostCallBudgetDefault)
+	}
+	if d.WallClock() != limits.RequestWallClock {
+		t.Errorf("request_wall_clock_seconds 默认值 = %s，limits 常量 = %s", d.WallClock(), limits.RequestWallClock)
+	}
+	if d.SQLStatementBudget() != limits.SQLStatementBudget {
+		t.Errorf("sql_statement_budget_seconds 默认值 = %s，limits 常量 = %s", d.SQLStatementBudget(), limits.SQLStatementBudget)
+	}
+	if d.CompileTimeout() != limits.CompileTimeout {
+		t.Errorf("compile_timeout_seconds 默认值 = %s，limits 常量 = %s", d.CompileTimeout(), limits.CompileTimeout)
+	}
+}
+
+// TestBudgetValidateRejectsBrokenOrdering 是本次新增的**保存期序关系**判据。
+//
+// 为什么必须在保存路径上再判一遍：这五条序关系过去只写在 limits 包的编译期测试里
+// （limits_gen_test.go 的 TestCriticalValuesAndOrdering）。数值一旦可由控制台改，
+// 编译期断言就管不到线上组合 —— 控制台可以把 guest 调到 120 s 而墙钟留在 60 s，
+// 于是每个慢应用都被墙钟先拒，界面上却一切正常。
+//
+// 变异方式（实测每条都能红）：把 Validate 里对应的 case 删掉 ⇒ 该子用例必红。
+func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
+	cases := []struct {
+		name  string
+		mut   func(*applimits.Limits)
+		field string
+	}{
+		{"墙钟不大于 guest", func(l *applimits.Limits) { l.RequestWallClockSeconds = l.GuestBudgetSeconds }, "request_wall_clock_seconds"},
+		{"墙钟小于 guest", func(l *applimits.Limits) { l.RequestWallClockSeconds = l.GuestBudgetSeconds - 1 }, "request_wall_clock_seconds"},
+		{"干跑大于 guest", func(l *applimits.Limits) { l.DryRunBudgetSeconds = l.GuestBudgetSeconds + 1 }, "dry_run_budget_seconds"},
+		{"宿主调用大于 guest", func(l *applimits.Limits) { l.HostCallBudgetSeconds = l.GuestBudgetSeconds + 1 }, "host_call_budget_seconds"},
+		{"单条 SQL 大于墙钟", func(l *applimits.Limits) { l.SQLStatementBudgetSeconds = l.RequestWallClockSeconds + 1 }, "sql_statement_budget_seconds"},
+		{"编译超时大于 ReadTimeout", func(l *applimits.Limits) {
+			l.CompileTimeoutSeconds = int(limits.ServerReadTimeout/time.Second) + 1
+		}, "compile_timeout_seconds"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := applimits.Defaults()
+			c.mut(&l)
+			err := l.Validate()
+			if err == nil {
+				t.Fatalf("这一组必须被拒（否则界面上一切正常、线上被另一条闸门先拒）")
+			}
+			if got := fmt.Sprint(err.Details["field"]); got != c.field {
+				t.Fatalf("拒绝理由必须点名出错的字段：want %s，got %s（%s）", c.field, got, err.Message)
+			}
+		})
+	}
+
+	// 正控：默认值必须通过（否则上表全绿也可能只是"Validate 恒拒"）。
+	if err := applimits.Defaults().Validate(); err != nil {
+		t.Fatalf("默认值必须合法：%v", err.Message)
+	}
+}
+
+// TestBudgetValidateRejectsOutOfRange 钉住六项的取值区间（含 guest 的单独上限）。
+func TestBudgetValidateRejectsOutOfRange(t *testing.T) {
+	cases := []struct {
+		name  string
+		mut   func(*applimits.Limits)
+		field string
+	}{
+		{"guest 低于下限", func(l *applimits.Limits) { l.GuestBudgetSeconds = 0 }, "guest_budget_seconds"},
+		{"guest 超过独立上限", func(l *applimits.Limits) {
+			l.GuestBudgetSeconds = applimits.MaxGuestBudgetSeconds + 1
+			l.RequestWallClockSeconds = l.GuestBudgetSeconds + 1
+		}, "guest_budget_seconds"},
+		{"干跑低于下限", func(l *applimits.Limits) { l.DryRunBudgetSeconds = 0 }, "dry_run_budget_seconds"},
+		{"墙钟超过通用上限", func(l *applimits.Limits) { l.RequestWallClockSeconds = applimits.MaxBudgetSeconds + 1 }, "request_wall_clock_seconds"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l := applimits.Defaults()
+			c.mut(&l)
+			err := l.Validate()
+			if err == nil {
+				t.Fatal("必须被拒")
+			}
+			if got := fmt.Sprint(err.Details["field"]); got != c.field {
+				t.Fatalf("want %s, got %s（%s）", c.field, got, err.Message)
+			}
+		})
+	}
+}
+
+// TestBudgetRoundTripsThroughParse 钉住"控制台改过的预算能存能读"：
+// 这是跨语言契约（webadmin 表单 ↔ 落库 JSON ↔ 运行期取值），任何一环丢字段
+// 都会表现为"保存成功但没生效"。
+func TestBudgetRoundTripsThroughParse(t *testing.T) {
+	l := applimits.Defaults()
+	l.GuestBudgetSeconds = 45
+	l.DryRunBudgetSeconds = 45
+	l.RequestWallClockSeconds = 90
+	l.SQLStatementBudgetSeconds = 10
+	l.HostCallBudgetSeconds = 8
+	l.CompileTimeoutSeconds = 50
+	raw := l.Encode()
+	back, err := applimits.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err.Message)
+	}
+	if back != l {
+		t.Fatalf("往返后不一致：\n got %+v\nwant %+v", back, l)
+	}
+	if back.GuestBudget() != 45*time.Second || back.WallClock() != 90*time.Second {
+		t.Fatalf("往返后生效值不对：guest=%s wall=%s", back.GuestBudget(), back.WallClock())
+	}
+}
+
+// TestBudgetFieldsAreClampedNotWidened：clampCrossField 只向下取小，绝不放宽。
+//
+// 它是"内部折算结果合法化"的入口（ParseStored 补默认值/档位折算都会经过），
+// 如果在这里把用户设的 guest 放大，就会绕过 Validate 的上限。
+func TestBudgetFieldsAreClampedNotWidened(t *testing.T) {
+	l := applimits.Limits{
+		MaxInstances: 3, AppRunning: 3, AppQueue: 32,
+		UserGlobalRunning: 3, UserPerAppRunning: 1, UserPerAppQueued: 4,
+		InstanceMemoryMB: 64, ModuleCacheMB: 64, ModuleCacheIdleMin: 10,
+		AppDBIdleMin: 3, AppDBCacheKiB: 1024, AppDBReaders: 4,
+		GuestBudgetSeconds: 30, DryRunBudgetSeconds: 90, HostCallBudgetSeconds: 60,
+		RequestWallClockSeconds: 20, SQLStatementBudgetSeconds: 300, CompileTimeoutSeconds: 300,
+	}
+	got := l.ClampForTest()
+	if got.DryRunBudgetSeconds > got.GuestBudgetSeconds {
+		t.Errorf("干跑(%d) 不得大于 guest(%d)", got.DryRunBudgetSeconds, got.GuestBudgetSeconds)
+	}
+	if got.HostCallBudgetSeconds > got.GuestBudgetSeconds {
+		t.Errorf("宿主调用(%d) 不得大于 guest(%d)", got.HostCallBudgetSeconds, got.GuestBudgetSeconds)
+	}
+	if got.RequestWallClockSeconds <= got.GuestBudgetSeconds {
+		t.Errorf("墙钟(%d) 必须严格大于 guest(%d)", got.RequestWallClockSeconds, got.GuestBudgetSeconds)
+	}
+	if got.SQLStatementBudgetSeconds > got.RequestWallClockSeconds {
+		t.Errorf("单条 SQL(%d) 不得大于墙钟(%d)", got.SQLStatementBudgetSeconds, got.RequestWallClockSeconds)
+	}
+	if got.CompileTimeoutSeconds > int(limits.ServerReadTimeout/time.Second) {
+		t.Errorf("编译超时(%d) 不得超过 ReadTimeout(%d s)", got.CompileTimeoutSeconds, int(limits.ServerReadTimeout/time.Second))
+	}
+	// 放宽方向绝不允许：用户的 guest=30 不能被改大。
+	if got.GuestBudgetSeconds != 30 {
+		t.Errorf("guest 被改动了：%d", got.GuestBudgetSeconds)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("钳位后的结果必须合法：%v", err.Message)
 	}
 }

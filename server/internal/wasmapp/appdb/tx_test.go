@@ -165,9 +165,9 @@ func TestCommitOrRollbackWithoutTransaction(t *testing.T) {
 //
 // 变异方式：去掉 Begin 里的看门狗（time.AfterFunc）⇒ 超时后事务不会回滚，本用例变红。
 func TestTransactionHardTimeoutRollsBack(t *testing.T) {
-	old := defaultStmtBudget
-	defaultStmtBudget = 200 * time.Millisecond
-	t.Cleanup(func() { defaultStmtBudget = old })
+	SetStatementBudget(200 * time.Millisecond)
+
+	t.Cleanup(func() { SetStatementBudget(0) })
 
 	root := t.TempDir()
 	d := newTestDBIn(t, root, "txtimeout-app")
@@ -190,8 +190,11 @@ func TestTransactionHardTimeoutRollsBack(t *testing.T) {
 	err = d.Commit(ctx, abi.TxParams{TxID: tx.TxID})
 	e := requireAppErr(t, err, apperr.CodeDBDenied)
 	requireReason(t, e, "transaction_timeout")
-	if e.Details["budget_ms"] != limits.SQLStatementBudget.Milliseconds() {
-		t.Fatalf("details.budget_ms 应为 %d，实际 %v", limits.SQLStatementBudget.Milliseconds(), e.Details["budget_ms"])
+	// budget_ms 必须是**该句柄自己的预算**（本用例注入 200 ms），不是编译期常量：
+	// 预算自 2026-10-01 起可由控制台配置（sql_statement_budget_seconds），
+	// 报一个没生效的数字会让运维按错的预算去排查。
+	if e.Details["budget_ms"] != int64(200) {
+		t.Fatalf("details.budget_ms 应为 200（本用例注入的事务预算），实际 %v", e.Details["budget_ms"])
 	}
 
 	// 独立 DB 对象确认：超时事务里的写入没有落盘。
@@ -272,9 +275,9 @@ func TestCloseRollsBackOpenTransaction(t *testing.T) {
 // 变异方式：把 ensureReadyLocked 里的 deadTx 判定去掉 ⇒ 超时后的写会以自动提交模式成功，
 // 本用例的"写必须被拒"变红。
 func TestTransactionTimeoutWriteGateAndRecovery(t *testing.T) {
-	old := defaultStmtBudget
-	defaultStmtBudget = 200 * time.Millisecond
-	t.Cleanup(func() { defaultStmtBudget = old })
+	SetStatementBudget(200 * time.Millisecond)
+
+	t.Cleanup(func() { SetStatementBudget(0) })
 
 	root := t.TempDir()
 	d := newTestDBIn(t, root, "txgate-app")
@@ -282,7 +285,7 @@ func TestTransactionTimeoutWriteGateAndRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	// reason 常量是 appdb 与句柄池（appserver）之间的唯一真源：这里钉住生产侧用的值。
-	if got := reasonOf(txTimeoutError()); got != ReasonTransactionTimeout {
+	if got := reasonOf(txTimeoutError(limits.SQLStatementBudget)); got != ReasonTransactionTimeout {
 		t.Fatalf("事务超时的 reason 应为常量 %q，实际 %q", ReasonTransactionTimeout, got)
 	}
 	if got := reasonOf(mapStmtErrorLockedErrorForTest(d)); got != ReasonStatementTimeout {

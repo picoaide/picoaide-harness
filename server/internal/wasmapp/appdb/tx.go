@@ -7,7 +7,6 @@ import (
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
-	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
 // 本文件实现 §5.1 的 `db.tx`：ABI 层是 tx_begin / tx_commit / tx_rollback。
@@ -15,7 +14,8 @@ import (
 // 语义（§5.1、§4.4）：
 //   - 同时最多一个事务（应用并发恒为 1，事务挂在读写连接上）；
 //   - 事务内只允许 db.query/db.exec（其他宿主调用由 runtime 拒绝，`InTx()` 必须准确）；
-//   - **硬超时 5 s 强制回滚**（limits.SQLStatementBudget），到点由看门狗回滚并打污染标记，
+//   - **硬超时强制回滚**（句柄自己的预算：控制台 `sql_statement_budget_seconds` >
+//     limits.SQLStatementBudget 默认），到点由看门狗回滚并打污染标记，
 //     绝不允许「超时后继续以自动提交模式写」把原子性悄悄破坏掉；
 //   - Commit/Rollback 的 p.TxID 非零时必须与当前事务一致（防串号）。
 
@@ -111,7 +111,7 @@ func (d *DB) finishTx(ctx context.Context, p abi.TxParams, commit bool) error {
 	}
 	if tx.timedOut || time.Now().After(tx.deadline) {
 		d.rollbackLocked(tx)
-		return txTimeoutError()
+		return txTimeoutError(d.budget)
 	}
 	stmt := "ROLLBACK"
 	if commit {
@@ -144,7 +144,7 @@ func (d *DB) expireTx(tx *txSession) {
 	}
 	tx.timedOut = true
 	d.rollbackLocked(tx)
-	d.poisonLocked(txTimeoutError())
+	d.poisonLocked(txTimeoutError(d.budget))
 }
 
 // rollbackLocked 尽最大努力回滚并清理事务状态。调用方必须持有 writeMu。
@@ -195,11 +195,11 @@ func (d *DB) currentTx() *txSession {
 // reason 用**导出常量**而不是字面量：句柄池（appserver）按同一个常量识别"该回收句柄"。
 // 审计 P0-2 的根因就是两端各写一个字符串（生产者 transaction_timeout、消费者 tx_timeout），
 // 于是这次超时永远不被回收 ⇒ 该应用直到进程重启都不可用。
-func txTimeoutError() *apperr.Error {
+func txTimeoutError(budget time.Duration) *apperr.Error {
 	return apperr.Newf(apperr.CodeDBDenied,
-		"事务超过 %s 硬预算，已强制回滚（事务内所有写入均未生效）", limits.SQLStatementBudget).
+		"事务超过 %s 硬预算，已强制回滚（事务内所有写入均未生效）", budget).
 		WithDetail("reason", ReasonTransactionTimeout).
-		WithDetail("budget_ms", limits.SQLStatementBudget.Milliseconds()).
+		WithDetail("budget_ms", budget.Milliseconds()).
 		WithHint(fmt.Sprintf("请把事务体缩小到 %s 内：只包必要的写，把查询与日志（log / assets.read）放到事务外",
-			limits.SQLStatementBudget))
+			budget))
 }

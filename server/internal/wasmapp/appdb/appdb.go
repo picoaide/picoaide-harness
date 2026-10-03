@@ -137,11 +137,38 @@ const canaryDBName = "picoaide_canary"
 const canaryAttachErrFragment = "too many attached databases"
 
 // Open 的默认值。唯一真源仍是 limits 包；声明为变量只为让测试注入更小的上限
-// （§10.3 第 30 项不必真写 100 MB；§10.3 第 31 项不必真等 5 s），生产路径不得改写。
-var (
-	defaultMaxPageCount = limits.AppDBMaxPageCount
-	defaultStmtBudget   = limits.SQLStatementBudget
-)
+// （§10.3 第 30 项不必真写 100 MB），生产路径不得改写。
+var defaultMaxPageCount = limits.AppDBMaxPageCount
+
+// stmtBudgetNanos 是**当前**单语句硬超时（纳秒；0 = 用 limits.SQLStatementBudget）。
+//
+// 2026-10-01 从"测试专用变量"升为**控制台可配置项**（applimits 的
+// `sql_statement_budget_seconds`）：管理端保存请求的 goroutine 会写它，而每个
+// **新建**应用库句柄在 Open 时读它 ⇒ 必须用原子量，否则是一次数据竞争
+// （与 connCacheKiB 同一处置与同一理由）。
+var stmtBudgetNanos atomic.Int64
+
+// SetStatementBudget 设置单语句硬超时；<=0 表示回到编译期默认。
+//
+// 生效范围：**之后新建的应用库句柄**（预算在 Open 时固化进句柄，与 connCacheKiB
+// 的"下一个新建连接"同档）。已有句柄在空闲回收（appdb_idle_min）或污染回收重建时
+// 自然拿到新值 ⇒ 控制台保存不需要重启，也不打断在途事务（在途事务用的是它开始时
+// 的那份预算）。
+func SetStatementBudget(d time.Duration) {
+	if d <= 0 {
+		stmtBudgetNanos.Store(0)
+		return
+	}
+	stmtBudgetNanos.Store(int64(d))
+}
+
+// StatementBudget 返回当前生效的单语句硬超时（诊断/控制台回读用）。
+func StatementBudget() time.Duration {
+	if v := stmtBudgetNanos.Load(); v > 0 {
+		return time.Duration(v)
+	}
+	return limits.SQLStatementBudget
+}
 
 // Options 是 Open 的入参。
 type Options struct {
@@ -393,7 +420,7 @@ func Open(ctx context.Context, opt Options) (*DB, error) {
 		dir:          dir,
 		path:         path,
 		maxPageCount: defaultMaxPageCount,
-		budget:       defaultStmtBudget,
+		budget:       StatementBudget(),
 		readers:      normalizeReaders(opt.Readers),
 		roSlots:      newReadSlots(normalizeReaders(opt.Readers)),
 		genClosed:    make(chan struct{}),
@@ -1465,9 +1492,9 @@ func (d *DB) mapStmtError(ctx context.Context, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
 		errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
 		e := apperr.Newf(apperr.CodeDBDenied,
-			"SQL 语句超时：单语句硬预算 %s，已中断该语句", limits.SQLStatementBudget).
+			"SQL 语句超时：单语句硬预算 %s，已中断该语句", d.budget).
 			WithDetail("reason", ReasonStatementTimeout).
-			WithDetail("budget_ms", limits.SQLStatementBudget.Milliseconds()).
+			WithDetail("budget_ms", d.budget.Milliseconds()).
 			WithCause(err).
 			WithHint("请缩小查询范围（加条件/加 LIMIT）、避免无界递归，或把大查询拆成多次调用")
 		d.poisonLocked(e)

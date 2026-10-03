@@ -132,7 +132,7 @@
     },
     {
       "Key": "dry_run_budget",
-      "Value": "2",
+      "Value": "30",
       "Unit": "seconds",
       "Section": "§4.2",
       "Title": "合成帧干跑预算",
@@ -652,7 +652,7 @@
     },
     {
       "Key": "guest_budget",
-      "Value": "10",
+      "Value": "30",
       "Unit": "seconds",
       "Section": "§4.6",
       "Title": "guest 执行预算",

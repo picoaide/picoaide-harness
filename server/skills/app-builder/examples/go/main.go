@@ -896,7 +896,7 @@ func isAgain(err error) bool {
 }
 
 // readRetryBudget / readRetryInterval 是本示例对"非阻塞 stdin"的容忍度：
-// 平台的 guest 预算只有 10 秒，所以等待上限必须远小于它。
+// 平台的 guest 预算默认 30 秒（控制台 guest_budget_seconds 可调），等待上限必须远小于它。
 const (
 	readRetryBudget   = 2 * time.Second
 	readRetryInterval = time.Millisecond

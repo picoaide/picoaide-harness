@@ -22,7 +22,7 @@
 | `app_config_sensitive_columns_max` | 100 | count | §4.2 | 作者声明敏感列上限 | sensitive_columns：默认启发式之外**由作者补充**的脱敏列；条目去重按大小写不敏感 |
 | `app_config_sensitive_column_max_bytes` | 64 | bytes | §4.2 | 声明敏感列名单项字节上限 | 单条列名超过它只可能是走样输入（整行/整段被粘进来），且永远匹配不到任何一列 |
 | `compile_timeout` | 60 | seconds | §4.2 | 编译超时 | 同步 publish 在 60 s 预算内完成 |
-| `dry_run_budget` | 2 | seconds | §4.2 | 合成帧干跑预算 | 编译通过 ≠ 能跑（签名不匹配编译期全绿） |
+| `dry_run_budget` | 30 | seconds | §4.2 | 合成帧干跑预算 | 编译通过 ≠ 能跑（签名不匹配编译期全绿） |
 | `compile_queue_depth` | 64 | count | §4.3 | 编译队列深度 | 满则拒绝 |
 | `compile_concurrency` | 1 | count | §4.3 | 编译并发 | 单进程串行 |
 | `upload_chunk_max_bytes` | 8388608 | bytes | §4.2 | 分片上传单片上限 | 载荷超过它就走分片 + 续传 |
@@ -87,7 +87,7 @@
 | `app_response_body_max_bytes` | 8388608 | bytes | §4.6 | 应用响应体总输出上限 | guest 写出多少字节就算超（RUNTIME_OUTPUT_OVERRUN）；**不是**能交付多少，见下一条 |
 | `app_response_body_deliverable_bytes` | 172032 | bytes | §4.6 | 响应体保证可交付上限 | = (protocol_line_max_bytes − frame_envelope_reserve_bytes) / max_json_escape_expansion；最坏 JSON 转义下仍装得进一个帧（abi.MaxResponseBodyBytes 同源） |
 | `protocol_line_max_bytes` | 1048576 | bytes | §4.6 | 协议帧单行上限 | 超限 RUNTIME_OUTPUT_OVERRUN |
-| `guest_budget` | 10 | seconds | §4.6 | guest 执行预算 | 进入宿主调用时暂停计时 |
+| `guest_budget` | 30 | seconds | §4.6 | guest 执行预算 | 进入宿主调用时暂停计时 |
 | `request_wall_clock` | 60 | seconds | §4.6 | 请求端到端墙钟 | 含排队等待，到点即拒 |
 | `app_queue_depth` | 32 | count | §4.6 | 每应用队列长度 | 超出 429 + Retry-After |
 | `user_per_app_running` | 1 | count | §4.6 | 单用户同应用在跑 |  |

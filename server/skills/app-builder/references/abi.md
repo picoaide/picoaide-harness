@@ -278,7 +278,7 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 
 ```
 请求到达 ── 端到端墙钟 60 秒（含排队）
-  进入 guest ── guest 预算 10 秒
+  进入 guest ── guest 预算（默认 30 秒，可配）
       调宿主函数 ── 【暂停 guest 计时】+ 宿主预算（单条 SQL 5 秒）
       宿主返回   ── 恢复 guest 计时
   写完响应 ── 结束
@@ -288,7 +288,7 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 
 推论（写代码时直接照做）：
 
-- **长活儿拆分**：单请求里做整批计算必然撞 10 秒；分成多次请求，每次一小步。
+- **长活儿拆分**：单请求里做整批计算必然撞 guest 预算（默认 30 秒，控制台 `guest_budget_seconds` 可调）；分成多次请求，每次一小步。
 - **慢查询改写**：一条语句 5 秒是硬超时，加索引不存在，请用 `WHERE` 收窄 + `LIMIT` 分页。
 - **AI 不在宿主计时里**：AI 由应用前端经客户端 AI loop 调客户端（见 §3.5），不占 guest
   预算，也不该在 wasm 里等它；wasm 只负责回 JSON 与把结果落库。
@@ -300,7 +300,7 @@ node scripts/pack-assets.mjs --in app.wasm --out dist/app-packed.wasm \
 
 | 码 | HTTP | 触发条件 | 应用该怎么做（hints） |
 | --- | --- | --- | --- |
-| `RUNTIME_TIMEOUT` | 504 | guest 预算（10 秒）耗尽 | 拆小请求；检查有没有不收敛的循环/重试 |
+| `RUNTIME_TIMEOUT` | 504 | guest 预算（默认 30 秒，可配）耗尽 | 拆小请求；检查有没有不收敛的循环/重试 |
 | `RUNTIME_TRAP` | 500 | wasm trap（越界/除零/`unreachable`） | 先 `recover` 再写错误响应；看 stderr 尾巴 |
 | `RUNTIME_MEMORY` | 500 | 线性内存超过 64 MiB | 别把大结果集一次读进内存；用分页 |
 | `RUNTIME_OUTPUT_OVERRUN` | 500 | 单帧/总输出超限（1 MiB 级） | 响应分页；不要把大对象塞进一帧 |
@@ -377,7 +377,7 @@ if err := report.Execute(&buf, map[string]string{"User": user}); err != nil { /*
 
 但**不要把整页 UI 拼在 wasm 里**：页面与逻辑耦合会让"改一个按钮"变成重新编译 + 重新发布；
 加载/空/错三态、表单校验、二次确认在 JS 里是几行，在 Go 里要手写一堆拼接；而宿主直出的
-静态资源可以走 ETag / 304，wasm 每次现拼则要跑一遍 guest（guest 预算只有 10 秒，
+静态资源可以走 ETag / 304，wasm 每次现拼则要跑一遍 guest（guest 预算默认 30 秒，
 且每个请求都要新建实例）。
 
 同时可用（同属"应用真的会写的代码"，白名单同样覆盖）：

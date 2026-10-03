@@ -81,7 +81,7 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	// R2-DG-2 的加固：`h.instanceMemoryPages()` 取的是**已保存值**（控制台设置），
 	// 而单实例上限要重启才生效 ⇒ 在"保存了但没重启"的窗口里它仍然不是生效值。
 	// 这里统一走 effectiveMemoryPages()（运行时优先，见它的注释）。
-	summary, err := diag.SummaryWithMemoryPages(ctx, h.opt.DB, appID, since, h.effectiveMemoryPages())
+	summary, err := diag.SummaryWithLimits(ctx, h.opt.DB, appID, since, h.effectiveMemoryPages(), h.budgets())
 	if err != nil {
 		return nil, internalErr("查询失败", err)
 	}
@@ -91,7 +91,7 @@ func (h *Handlers) diagnosticsPayload(c *gin.Context, appID string, app *servers
 	// 合并后保序去重（同一个 hint 不重复刷屏）。
 	hints := append([]string{}, summary.Hints...)
 	for _, f := range failures {
-		hints = append(hints, diag.HintsForMemoryPages(f.ReasonCode, h.effectiveMemoryPages())...)
+		hints = append(hints, diag.HintsForLimits(f.ReasonCode, h.effectiveMemoryPages(), h.budgets())...)
 	}
 	return gin.H{
 		"app_id":         appID,
