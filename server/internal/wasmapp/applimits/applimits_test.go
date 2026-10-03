@@ -457,6 +457,9 @@ func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
 		{"编译超时大于 ReadTimeout", func(l *applimits.Limits) {
 			l.CompileTimeoutSeconds = int(limits.ServerReadTimeout/time.Second) + 1
 		}, "compile_timeout_seconds"},
+		{"单条 SQL 不大于 busy timeout", func(l *applimits.Limits) {
+			l.SQLStatementBudgetSeconds = int(limits.AppDBBusyTimeout / time.Second)
+		}, "sql_statement_budget_seconds"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -367,6 +367,14 @@ func (l Limits) Validate() *apperr.Error {
 		return bad("sql_statement_budget_seconds",
 			"单条 SQL 硬超时不得大于端到端墙钟：超了这条闸门永远不会触发").
 			WithHint(fmt.Sprintf("当前墙钟=%d s", l.RequestWallClockSeconds))
+	case l.SQLStatementBudgetSeconds <= int(limits.AppDBBusyTimeout/time.Second):
+		// 与 limits 里那条 Note 同源（app_db_busy_timeout 必须小于单语句预算）：
+		// 否则"等库不忙"的忙等会吃掉整条语句的预算，应用看到的是 statement_timeout，
+		// 而真实原因是"库忙"—— 两者对作者的可操作结论完全不同（改 SQL vs 重试）。
+		return bad("sql_statement_budget_seconds",
+			fmt.Sprintf("单条 SQL 硬超时必须大于 SQLite 的 busy timeout（%d s，连接级不可配置）",
+				int(limits.AppDBBusyTimeout/time.Second))).
+			WithHint("否则忙等会吃掉整条语句的预算，应用看到的是语句超时而真实原因是库忙")
 	case l.CompileTimeoutSeconds > int(limits.ServerReadTimeout/time.Second):
 		// 上界取 limits.ServerReadTimeout（传输层常量，**不可配置**）：同步 publish 要在
 		// HTTP ReadTimeout 之前返回，这是 §10.5 第 58 项那条编译期断言的可配置版本。
