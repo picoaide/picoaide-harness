@@ -201,7 +201,7 @@ const FIELDS: FieldRow[] = [
   { key: 'guest_budget_seconds', label: 'guest 执行预算', group: '时间预算', hint: '应用单次请求里真正执行的时长上限；等数据库/等宿主调用时暂停计时。调大等于允许更长的单次计算，端到端墙钟仍然封顶' },
   { key: 'dry_run_budget_seconds', label: '发布干跑预算', group: '时间预算', hint: '发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，调得比它短会把线上跑得动的应用挡在发布门外' },
   { key: 'host_call_budget_seconds', label: '宿主调用预算', group: '时间预算', hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立' },
-  { key: 'request_wall_clock_seconds', label: '请求端到端墙钟', group: '时间预算', hint: '含排队等待；到点即拒。必须严格大于 guest 预算' },
+  { key: 'request_wall_clock_seconds', label: '请求端到端墙钟', group: '时间预算', hint: '含排队等待；到点即拒。必须严格大于 guest 预算。注意：客户端应用请求的出站预算是随包固定的 75 秒（必须晚于本值，否则员工只会看到网络错误）' },
   { key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', group: '时间预算', hint: '到点由看门狗回滚并打污染标记；不得超过端到端墙钟' },
   { key: 'compile_timeout_seconds', label: '编译超时', group: '时间预算', hint: '单次编译（含执行侧装载模块）的超时；不得超过服务端 ReadTimeout（60 秒，传输层常量不可配置）' },
 ]

@@ -101,6 +101,33 @@
   并注明"默认值、控制台可调"；技能内容变 ⇒ `SKILL.md` version 2.10.0 → **2.11.0**
   + `seededSkillDigests` / `seededSkillVersion` 同步（R1-pm-8，四处缺一即红）。
 
+## 裁决五：客户端出站预算必须跟着抬（**CI 抓到的跨端契约**）
+
+本地 `make check` 全绿之后，PR CI 在 `packages/host/wasm-apps-host/src/budget-parity.spec.ts`
+上报红：
+
+```
+AssertionError: 客户端出站超时 30s 必须严格大于 guest_budget 30s: expected 30 to be greater than 30
+```
+
+这条判据（§13.2 ①）的意思是：**任何平台侧超时都必须先于客户端出站超时发生**，否则平台
+还没来得及返回带 code/hints 的结构化错误，员工只看到"网络错误"。把 guest 提到 30 s 的
+同一刻，客户端那个 30 s 就不再严格大于它 —— 这正是"改一侧的预算必须来对齐"的现场。
+
+**修法**：`APP_REQUEST_TIMEOUT_MS` 30 s → **75 s**。判据的最外层同时从 `guest_budget`
+换成 **`request_wall_clock`（60 s，含排队）** —— 只要求"大于 guest"会漏掉"排队把请求拖过
+客户端预算"那条路径（服务端此刻返回的是 `APP_QUEUE_FULL` + Retry-After，同样是可读错误）。
+
+链条现在是 **客户端 75 s > 墙钟 60 s > guest 30 s > SQL 5 s > busy 3 s**（全部由
+`limits.json` 生成物驱动，不写死；变异：把 `request_wall_clock` 改成 90 ⇒ 判据红，
+已实测并还原）。
+
+**认账的边界**：平台预算可由控制台配置，而客户端常量**随包固定**。运维把
+`request_wall_clock_seconds` 调到 75 s 以上时，超出部分会退化成"网络错误"。
+处置：① 该字段的说明（服务端字段文档 + webadmin hint）已写明这个上限与后果；
+② 部署侧可用该客户端的 `requestTimeoutMs` 配置同步抬高。
+**不做**"服务端把生效预算下发给客户端"——那是新增一条跨端握手，超出本次范围。
+
 ## 未做（明确认账）
 
 - **不做每应用覆盖**（见裁决二）。

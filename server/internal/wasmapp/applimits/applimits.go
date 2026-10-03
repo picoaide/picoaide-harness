@@ -103,6 +103,13 @@ type Limits struct {
 	HostCallBudgetSeconds int `json:"host_call_budget_seconds"`
 	// RequestWallClockSeconds 是请求端到端墙钟（秒，**含排队**）：到点即拒。
 	// 默认 60。必须严格大于 guest 预算，否则 guest 还没跑完就被墙钟拒掉。
+	//
+	// ⚠️ 与客户端出站预算的关系（2026-10-01）：桌面客户端的应用请求出站预算是
+	// **随包固定**的 `APP_REQUEST_TIMEOUT_MS`（75 s，见
+	// `packages/host/wasm-apps-host/src/app-protocol.ts`）。它必须严格晚于本值 ——
+	// 否则平台还没来得及返回带 code/hints 的结构化错误，客户端就先放弃，员工只看到
+	// "网络错误"。把本值调到 **75 s 以上**时，超出部分会退化成那个症状；
+	// 部署侧可用该客户端的 `requestTimeoutMs` 配置同步抬高。
 	RequestWallClockSeconds int `json:"request_wall_clock_seconds"`
 	// SQLStatementBudgetSeconds 是单条 SQL 语句的硬超时（秒）：到点由看门狗回滚并
 	// 打污染标记。默认 5。不得超过端到端墙钟（超了等于这条闸门永不触发）。
