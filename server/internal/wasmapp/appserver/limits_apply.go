@@ -38,6 +38,9 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 		qopt.PerUserGlobalRunning = l.UserGlobalRunning
 		qopt.PerUserPerAppRunning = l.UserPerAppRunning
 		qopt.PerUserPerAppQueued = l.UserPerAppQueued
+		// 墙钟只影响 wall_clock_exceeded 的明细（deadline 由 appserver 在入口处用
+		// 同一个值建造）—— 但明细必须跟随控制台，否则报出来的预算与生效值不符。
+		qopt.WallClock = l.WallClock()
 		s.scheduler.SetOptions(qopt)
 	}
 	// ② 进程内编译模块缓存：即时生效（收紧时立刻按 LRU 淘汰到新上限）。
@@ -60,6 +63,8 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 	}
 	// ④ SQLite 每连接页缓存：**下一个新建连接**生效（连接级 PRAGMA）。
 	appdb.SetConnCacheKiB(l.AppDBCacheKiB)
+	// ④b 单语句硬超时：**即时生效**（每个事务开始时读当前值）。
+	appdb.SetStatementBudget(l.SQLStatementBudget())
 
 	// ⑤ 单实例内存上限：runtime 级 ⇒ 需重启。判定用"生效值 vs 目标值"，
 	// 而不是"本次请求里改没改"，这样重复保存同一份配置不会误报要重启。
@@ -71,8 +76,9 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 	s.mu.Lock()
 	s.limits = l
 	s.mu.Unlock()
-	s.logf("appserver: 限制项已下发 max_instances=%d app_running=%d instance_memory=%dMiB module_cache=%dMiB idle=%dmin appdb_idle=%dmin appdb_readers=%d restart=%v",
-		l.MaxInstances, l.AppRunning, l.InstanceMemoryMB, l.ModuleCacheMB, l.ModuleCacheIdleMin, l.AppDBIdleMin, l.AppDBReaders, restart)
+	s.logf("appserver: 限制项已下发 max_instances=%d app_running=%d instance_memory=%dMiB module_cache=%dMiB idle=%dmin appdb_idle=%dmin appdb_readers=%d budgets(guest=%ds dry_run=%ds host_call=%ds wall=%ds sql=%ds compile=%ds) restart=%v",
+		l.MaxInstances, l.AppRunning, l.InstanceMemoryMB, l.ModuleCacheMB, l.ModuleCacheIdleMin, l.AppDBIdleMin, l.AppDBReaders,
+		l.GuestBudgetSeconds, l.DryRunBudgetSeconds, l.HostCallBudgetSeconds, l.RequestWallClockSeconds, l.SQLStatementBudgetSeconds, l.CompileTimeoutSeconds, restart)
 	return restart
 }
 

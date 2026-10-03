@@ -10,6 +10,23 @@ import { setCurrentAdmin, type MeUser } from '../lib/rbac'
 const mockRequest = vi.mocked(request)
 
 /**
+ * 时间预算（2026-10-01 服务端新增的六项）。
+ *
+ * 值取服务端的**默认值**，且满足服务端保存时校验的序关系
+ * （guest 30 < 端到端墙钟 60；干跑 30 / 宿主调用 5 ≤ guest；SQL 5 ≤ 墙钟；
+ * 编译 60 = 服务端 ReadTimeout）。单独抽出来是因为下面有**两处**（夹具与
+ * 断言）要用同一份数字 —— 抄两份必然漂移。
+ */
+const TIME_BUDGETS = {
+  guest_budget_seconds: 30,
+  dry_run_budget_seconds: 30,
+  host_call_budget_seconds: 5,
+  request_wall_clock_seconds: 60,
+  sql_statement_budget_seconds: 5,
+  compile_timeout_seconds: 60,
+}
+
+/**
  * 夹具与后端 applimits/applimits.go 的 JSON 形状逐字对齐（跨语言契约）：
  * 视图 = { limits, source, profile, source_label, defaults, presets, ranges, budget,
  *          guard_percent, restart_fields, restart_pending, setting_key }。
@@ -27,6 +44,8 @@ const LIMITS = {
   appdb_idle_min: 3,
   appdb_cache_kib: 1024,
   app_db_readers: 4,
+  // 时间预算必须排在最后：表单分组顺序 = 服务端下发的字段顺序，新组要落在「内存」之后。
+  ...TIME_BUDGETS,
 }
 
 const VIEW = {
@@ -41,8 +60,30 @@ const VIEW = {
     large: { ...LIMITS, max_instances: 64, module_cache_mb: 256 },
   },
   ranges: {
+    // 与 applimits.Ranges() **全字段**对齐（键集由下面的门禁用例对拍 Go 源码）：
+    // 少一项 ⇒ 「这一格的区间/单位/重启标记」就没有任何渲染判据。
+    // 上下限是对 Go 常量的逐字转写（MinInstances/MaxInstances/MaxAppQueue/…）。
     max_instances: { min: 1, max: 256, unit: '个', restart: false },
+    app_running: { min: 1, max: 256, unit: '个', restart: false },
+    app_queue: { min: 1, max: 4096, unit: '个', restart: false },
+    user_global_running: { min: 1, max: 256, unit: '个', restart: false },
+    user_per_app_running: { min: 1, max: 256, unit: '个', restart: false },
+    user_per_app_queued: { min: 1, max: 4096, unit: '个', restart: false },
     instance_memory_mb: { min: 16, max: 1024, unit: 'MiB', restart: true },
+    module_cache_mb: { min: 8, max: 4096, unit: 'MiB', restart: false },
+    module_cache_idle_min: { min: 1, max: 1440, unit: '分钟', restart: false },
+    appdb_idle_min: { min: 1, max: 1440, unit: '分钟', restart: false },
+    appdb_cache_kib: { min: 128, max: 65536, unit: 'KiB', restart: false },
+    app_db_readers: { min: 1, max: 16, unit: '个', restart: false },
+    // 六个时间预算：下限 MinBudgetSeconds(1)；guest 上限 MaxGuestBudgetSeconds(120)，
+    // 其余 MaxBudgetSeconds(300)。**restart 全 false** —— 这六项在每个请求/每次编译的
+    // 入口处读当前值（只有单实例内存上限住在 wazero 的 RuntimeConfig 里）。
+    guest_budget_seconds: { min: 1, max: 120, unit: '秒', restart: false },
+    dry_run_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
+    host_call_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
+    request_wall_clock_seconds: { min: 1, max: 300, unit: '秒', restart: false },
+    sql_statement_budget_seconds: { min: 1, max: 300, unit: '秒', restart: false },
+    compile_timeout_seconds: { min: 1, max: 300, unit: '秒', restart: false },
   },
   budget: {
     // 服务端 P0-2 起 budget.profile 是 limits/setting 或 limits/profile:<name>，
@@ -136,6 +177,43 @@ const GO_BUDGET_SOURCE = process.env.PICOAI_GO_BUDGET_SRC ?? '../../../internal/
 /** 服务端 Limits 的 wire 字段集(= 前端表单必须覆盖的那个集合)。 */
 function goLimitFields(): string[] {
   return goStructJSONTags(GO_FIELD_SOURCE, 'Limits')
+}
+
+/**
+ * 取出 Go 源码里某个函数的**函数体**（从签名起到下一个顶层 `}` 为止）。
+ *
+ * 只用来读**带引号的 map 键**，不求值任何表达式 —— 数字仍由 Go 持有（前端抄常量
+ * 就是第二份真源）。取不到签名/结尾一律 throw（夹具早就漂了，静默返回空数组会让
+ * 下游门禁变成空转）。
+ */
+function goFuncBody(relPath: string, signature: string): string {
+  const src = readFileSync(new URL(relPath, import.meta.url), 'utf8')
+  const start = src.indexOf(signature)
+  if (start < 0) throw new Error(`未在 ${relPath} 找到 ${signature}`)
+  const end = src.indexOf('\n}', start)
+  if (end < 0) throw new Error(`未在 ${relPath} 找到 ${signature} 的结尾`)
+  return src.slice(start, end)
+}
+
+/**
+ * `applimits.Ranges()` 里的字段集 = 控制台必须能渲染「区间/单位/重启标记」的字段集。
+ *
+ * 按行取键（Go 的 map 字面量一行一项），比正则扫全文稳。
+ *
+ * ⚠️ 双引号写成 `\x22` 是**刻意的**，不是炫技：`src/lib/nav.test.ts` 的掩码器
+ * （maskSource）按字符扫描引号维持状态机，正则字面量里的**裸引号**会让它错进字符串态，
+ * 于是它扫不到后面的用例体、把那条守卫判成「登记的测试名不存在」。本文件里已有的
+ * 那个 json tag 正则就是这种形态（三个引号、奇数），基线只是靠「很快又遇到下一个引号」
+ * 侥幸重新同步。这里一个裸引号都不放，别让它再被带偏。
+ */
+function goRangeFields(): string[] {
+  const body = goFuncBody(GO_FIELD_SOURCE, 'func Ranges() map[string]Range {')
+  const keys: string[] = []
+  for (const line of body.split('\n')) {
+    const m = /^\s*\x22([a-z0-9_]+)\x22\s*:/.exec(line)
+    if (m !== null) keys.push(m[1]!)
+  }
+  return keys
 }
 
 /** 预算里"不是账目项"的三个 `*_bytes`:入参 available、派生上限 limit、合计 total。 */
@@ -704,6 +782,23 @@ describe('应用中心 · 限制项 · 字段集覆盖门禁(R1-uxw-10)', () => 
     expect(uncoveredFields(goFields, row)).toEqual([])
   })
 
+  it('applimits.Ranges() 的每个字段都有区间/单位/重启标记(夹具键集与 Go 逐字一致)', async () => {
+    const goRanges = goRangeFields()
+    expect(goRanges.length, '解析 Go Ranges() 失败 ⇒ 本用例失去意义').toBeGreaterThanOrEqual(12)
+    // 三方对链:Go 的 Ranges() 键集 == 夹具的 ranges 键集 == 字段集(Go 的 json tag/LIMITS)。
+    // 服务端加一个带区间的旋钮而夹具没跟上 ⇒ 这条**先**红;否则那一格的
+    // 区间/单位/重启标记就成了没有任何渲染判据的死角(2026-10-01 的六个时间预算
+    // 正是这么进来的:页面渲染的是服务端下发的 ranges,夹具不补就测不到)。
+    expect(Object.keys(VIEW.ranges).sort()).toEqual([...goRanges].sort())
+    expect([...goRanges].sort()).toEqual(Object.keys(LIMITS).sort())
+
+    render(<Limits />)
+    await screen.findByTestId('lim-max_instances')
+    for (const f of goRanges) {
+      expect(screen.queryByTestId(`lim-${f}`), `${f} 没有表单格`).not.toBeNull()
+    }
+  })
+
   it('门禁不是空转:同一个判定对"服务端多出来的字段"会当场点名', async () => {
     mockRequest.mockImplementation(async (path: string) => {
       if (path === '/api/server/admin/wasm-apps/limits') {
@@ -767,6 +862,144 @@ describe('应用中心 · 限制项 · 字段集覆盖门禁(R1-uxw-10)', () => 
     render(<Limits />)
     const box = await screen.findByTestId('budget-unknown-accounts')
     expect(box.textContent).toContain('future_account_bytes')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 时间预算（2026-10-01 服务端新增的六项）：过去是 limits 包的编译期常量，
+// 「某个应用就是慢」只能重建镜像；现在收进控制台。这一组在**服务端保存时**按序关系
+// fail-loud（applimits.Validate），页面只做两件事：
+//   1. 如实渲染服务端下发的值/区间/单位（不自己写第二份判据）；
+//   2. 把服务端的拒绝（400 + details.field）原样转达给操作员。
+// ---------------------------------------------------------------------------
+
+describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
+  /**
+   * 本页给这六项的元数据（标签/单位/上下限/语义提示）。
+   *
+   * 提示必须**逐字**是页面渲染的那份：这六项只有「服务端 ranges + 本页 hint」
+   * 两处解释，说错一句运维就会把预算调反（例如把干跑调得比 guest 短 = 发布被误拒）。
+   */
+  const ROWS: { key: string; label: string; unit: string; min: number; max: number; hint: string }[] = [
+    {
+      key: 'guest_budget_seconds', label: 'guest 执行预算', unit: '秒', min: 1, max: 120,
+      hint: '应用单次请求里真正执行的时长上限；等数据库/等宿主调用时暂停计时。调大等于允许更长的单次计算，端到端墙钟仍然封顶',
+    },
+    {
+      key: 'dry_run_budget_seconds', label: '发布干跑预算', unit: '秒', min: 1, max: 300,
+      hint: '发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，调得比它短会把线上跑得动的应用挡在发布门外',
+    },
+    {
+      key: 'host_call_budget_seconds', label: '宿主调用预算', unit: '秒', min: 1, max: 300,
+      hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立',
+    },
+    {
+      key: 'request_wall_clock_seconds', label: '请求端到端墙钟', unit: '秒', min: 1, max: 300,
+      hint: '含排队等待；到点即拒。必须严格大于 guest 预算。注意：客户端应用请求的出站预算是随包固定的 75 秒（必须晚于本值，否则员工只会看到网络错误）',
+    },
+    {
+      key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', unit: '秒', min: 1, max: 300,
+      hint: '到点由看门狗回滚并打污染标记；不得超过端到端墙钟',
+    },
+    {
+      key: 'compile_timeout_seconds', label: '编译超时', unit: '秒', min: 1, max: 300,
+      hint: '单次编译（含执行侧装载模块）的超时；不得超过服务端 ReadTimeout（60 秒，传输层常量不可配置）',
+    },
+  ]
+
+  it('六个字段按服务端下发值渲染(值/标签/单位/区间/语义,且都不需要重启)', async () => {
+    // 表与夹具必须同集合：漏一项就等于「这一格没有被断言过」。
+    expect(ROWS.map((r) => r.key).sort()).toEqual(Object.keys(TIME_BUDGETS).sort())
+
+    render(<Limits />)
+    await screen.findByTestId('lim-max_instances')
+
+    for (const row of ROWS) {
+      const input = screen.getByTestId(`lim-${row.key}`)
+      // 值来自**服务端下发的 limits**（页面不自己算默认值）
+      expect(input, `${row.key} 没有渲染`).toHaveProperty('value', String(TIME_BUDGETS[row.key as keyof typeof TIME_BUDGETS]))
+      // 区间也要落到 input 的 min/max 上（浏览器侧校验与提示同源）
+      expect(input).toHaveAttribute('min', String(row.min))
+      expect(input).toHaveAttribute('max', String(row.max))
+      // 标签 + 即时生效：六项 restart 全 false ⇒ 不得挂「需重启」徽标
+      const label = screen.getByTestId(`lim-label-${row.key}`)
+      expect(label.textContent).toContain(row.label)
+      expect(label.textContent).not.toContain('需重启')
+      // 单位（秒）、区间文本与语义提示都在同一格里（管理员要能看出能填多大、填了会怎样）
+      const cell = input.parentElement!.parentElement!
+      expect(cell.textContent, `${row.key} 缺单位`).toContain(row.unit)
+      expect(cell.textContent, `${row.key} 缺区间`).toContain(`（${row.min}–${row.max}）`)
+      expect(cell.textContent, `${row.key} 的语义提示不是本页写的那份`).toContain(row.hint)
+    }
+    // 六项都归「时间预算」分组（新组落在「内存」之后），因此默认夹具下不该出现兜底分组
+    expect(screen.getByText('时间预算')).toBeTruthy()
+    expect(screen.queryByText('服务端新增')).toBeNull()
+    // 分组顺序 = 服务端下发的字段顺序：新组必须落在最后（不是插在并发/内存中间）
+    const [g1, g2, g3] = ['并发', '内存', '时间预算'].map((g) => screen.getByText(g))
+    expect(g1!.compareDocumentPosition(g2!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(g2!.compareDocumentPosition(g3!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('PUT 提交的是完整对象(服务端拒收片段):六个时间预算字段一个都不少', async () => {
+    let putBody: { limits: Record<string, number> } | null = null
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        putBody = JSON.parse(String((init as RequestInit).body)) as { limits: Record<string, number> }
+        return { ...VIEW, limits: { ...LIMITS, max_instances: 8 } } as any
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    render(<Limits />)
+    fireEvent.change(await screen.findByTestId('lim-max_instances'), { target: { value: '8' } })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    await waitFor(() => { expect(putBody).not.toBeNull() })
+    // 字段集必须与 Go 的 wire 契约逐字一致：少一个服务端就 400「限制项缺少字段」
+    // （applimits.Parse 要求**完整对象**）。body 是按「重读的服务端对象」拼的，
+    // 不是按 FIELDS 拼的 —— 这条就是那个不变量的判据。
+    expect(Object.keys(putBody!.limits).sort()).toEqual([...goLimitFields()].sort())
+    expect(putBody!.limits.max_instances).toBe(8) // 我改的那一格
+    for (const row of ROWS) {
+      // 没改过的六个时间预算必须原样带上服务端的当前值（不是缺省、不是 0、不是 null）
+      expect(putBody!.limits[row.key], `${row.key} 在 PUT body 里丢了`).toBe(TIME_BUDGETS[row.key as keyof typeof TIME_BUDGETS])
+    }
+  })
+
+  it('序关系被服务端拒绝(400 + details.field)⇒ message/字段/hints 原样转达给操作员', async () => {
+    render(<Limits />)
+    const wall = await screen.findByTestId('lim-request_wall_clock_seconds')
+    // 墙钟改到 ≤ guest 预算：前端**不**自己拦（判据只有服务端一份），照常发 PUT
+    fireEvent.change(wall, { target: { value: '20' } })
+
+    mockRequest.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/api/server/admin/wasm-apps/limits' && (init as RequestInit | undefined)?.method === 'PUT') {
+        // 真实信封（applimits.Validate 的 details.field + hints）
+        throw new ApiError(
+          400, 'VALIDATION',
+          '端到端墙钟必须严格大于 guest 预算：否则应用还没跑完就被墙钟拒掉',
+          undefined,
+          ['当前 guest=30 s ⇒ 墙钟至少要 31 s'],
+          { field: 'request_wall_clock_seconds' },
+        )
+      }
+      if (path === '/api/server/admin/wasm-apps/limits') return VIEW as any
+      if (path === '/api/server/admin/wasm-apps/runtime') return { runtime: RUNTIME } as any
+      return {} as any
+    })
+    fireEvent.click(screen.getByTestId('save-limits'))
+
+    // 走的是**既有那条错误通道**（页内错误块/role=alert），没有第二套提示
+    const err = await screen.findByTestId('limits-error')
+    expect(err).toHaveAttribute('role', 'alert')
+    expect(err.textContent).toContain('必须严格大于 guest 预算') // 结论
+    expect(err.textContent).toContain('字段 request_wall_clock_seconds') // 是**哪一项**越界
+    expect(err.textContent).toContain('至少要 31 s') // 下一步改什么
+    // 被拒的值不留在表单里（失败即回拉服务端真值，R2-2 的既有语义）
+    await waitFor(() => {
+      expect(screen.getByTestId('lim-request_wall_clock_seconds')).toHaveProperty('value', '60')
+    })
   })
 })
 

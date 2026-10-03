@@ -94,8 +94,12 @@ type Options struct {
 	MemoryPages uint32
 	// MaxQueue 是队列深度（缺省 limits.CompileQueueDepth = 64，满则 429）。
 	MaxQueue int
-	// Timeout 是单次编译超时（缺省 limits.CompileTimeout = 60 s）。
+	// Timeout 是单次编译超时（缺省 limits.CompileTimeout = 60 s）的**启动初值**。
 	// 到点 ⇒ 杀子进程 + COMPILE_TIMEOUT(504)，下一次请求重启子进程。
+	//
+	// ⚠️ 运行期可经 SetTimeout 热改（控制台 `compile_timeout_seconds`）：这个值会被
+	// 当作 `-timeout` 传给编译子进程的 argv，只在构造期固化的话，控制台把它调大之后
+	// 子进程仍按旧值自杀 —— 界面上是新值、实际按旧值跑，正是"旋钮静默失效"的形态。
 	Timeout time.Duration
 	// CacheMaxBytes / CacheMaxEntries 是缓存回收的两个维度（缺省取自 limits，
 	// §10.3 第 35 项要求**同时**满足两者）。
@@ -283,6 +287,9 @@ type Compiler struct {
 	loopOnce    sync.Once
 	loopWG      sync.WaitGroup
 	loopStarted atomic.Bool
+	// timeoutNanos 是**当前**单次编译超时（纳秒；0 = 用构造期 opt.Timeout）。
+	// 原子量：写它的是管理端保存限制项的 goroutine，读它的是每次编译（argv 与等待）。
+	timeoutNanos atomic.Int64
 
 	mu           sync.Mutex
 	childProc    *childProcess
@@ -294,6 +301,34 @@ type Compiler struct {
 
 	uploadMu sync.Mutex
 	uploads  map[int64]*uploadState
+}
+
+// SetTimeout 热替换单次编译超时；<=0 表示回到构造期初值。
+//
+// 生效范围：**之后开始的每一次编译**（值进子进程 argv 与父侧等待预算）。
+// 已经在跑的那次编译不受影响 —— 它用的是开始时读到的那份预算。
+func (c *Compiler) SetTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	if d <= 0 {
+		c.timeoutNanos.Store(0)
+		return
+	}
+	c.timeoutNanos.Store(int64(d))
+}
+
+// Timeout 返回当前生效的单次编译超时。
+func (c *Compiler) Timeout() time.Duration {
+	if c != nil {
+		if v := c.timeoutNanos.Load(); v > 0 {
+			return time.Duration(v)
+		}
+	}
+	if c != nil && c.opt.Timeout > 0 {
+		return c.opt.Timeout
+	}
+	return limits.CompileTimeout
 }
 
 // uploadState 是单用户的上传频率/并发状态（R20 允许进程内存态：单实例部署）。
@@ -749,7 +784,7 @@ func (c *Compiler) compileOne(modulePath string) (*Result, *apperr.Error) {
 	beforeMtime, beforeEntries := c.newestCacheMtime()
 
 	req := Request{Op: OpCompile, ModulePath: modulePath, CacheDir: c.childCacheDir}
-	resp, rerr := proc.request(req, c.opt.Timeout)
+	resp, rerr := proc.request(req, c.Timeout())
 	if rerr != nil {
 		return nil, c.explainMemoryDeclaration(rerr)
 	}
@@ -881,7 +916,7 @@ func (c *Compiler) spawnChild(moduleDir string) (*childProcess, error) {
 	// **每一次真实编译都失败**（而只断言结构体的用例完全看不出来）。
 	args := append([]string{
 		"-listen",
-		"-timeout", c.opt.Timeout.String(),
+		"-timeout", c.Timeout().String(),
 		"-cache-dir", c.childCacheDir,
 	}, c.opt.ChildArgs...)
 	proc, err := startChild(c.child, args, env, c.iso, isolationTargets{

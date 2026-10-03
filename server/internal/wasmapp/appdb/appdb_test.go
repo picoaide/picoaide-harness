@@ -35,7 +35,7 @@ package appdb
 // （TestUnhardenedConnectionToAppDBIsRefused 第 3 段），以及每条语句前对即将使用的
 // 连接复检限额（verifyConnLocked —— 由全部真跑用例共同覆盖）。
 //
-// 只依赖包内私有默认值注入（defaultMaxPageCount / defaultStmtBudget），不改 limits 常量。
+// 只依赖包内私有默认值注入（defaultMaxPageCount / SetStatementBudget），不改 limits 常量。
 
 import (
 	"context"

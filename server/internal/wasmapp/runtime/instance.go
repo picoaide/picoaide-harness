@@ -21,9 +21,12 @@ type InstanceLimits struct {
 	// 构造 Runtime 时用的 Options.MemoryPages 一致；不一致时 Serve 直接报错
 	// （fail-loud：绝不假装限制了内存，也绝不静默用另一个值）。
 	MemoryPages uint32
-	// GuestBudget 是 guest 执行预算（进入宿主调用时暂停计时）；0 ⇒ limits.GuestBudget（10 s）。
+	// GuestBudget 是 guest 执行预算（进入宿主调用时暂停计时）；0 ⇒ limits.GuestBudget
+	//（编译期默认，30 s）。生产调用方一律显式给值：控制台 `guest_budget_seconds` 改过之后，
+	// 回落到常量就是一条静默的旧行为。
 	GuestBudget time.Duration
-	// HostBudgets 是「方法名 → 宿主调用预算」；缺省 limits.HostCallBudgetDefault。
+	// HostBudgets 是「方法名 → 宿主调用预算」；缺省 limits.HostCallBudgetDefault
+	//（编译期默认；控制台 `host_call_budget_seconds` 可覆盖，由调用方显式传入）。
 	// 非正值视为"未设置"，回落到缺省（防一次笔误把预算设成 0 导致所有宿主调用立刻超时）。
 	HostBudgets map[string]time.Duration
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/picoaide/picoaide/internal/serverstore"
 	wasmapi "github.com/picoaide/picoaide/internal/wasmapp/api"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/appproof"
 	"github.com/picoaide/picoaide/internal/wasmapp/appserver"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
@@ -338,8 +339,21 @@ func setupWasmPlatform(ctx context.Context, db *sql.DB, dataDir string) *wasmPla
 	//（界面显示"无需重启"），而实际生效值可能仍与设置值不一致 —— 于是重启也修不好，
 	// 且 nobody 看得见。回写之后：重启后 restart 为空是**被断言过的事实**，
 	// 不为空则如实显示在控制台上。
-	limitsHolder.SetApplier(appSrv.ApplyLimits)
-	restart := appSrv.ApplyLimits(limitsHolder.Get())
+	// 编译超时也要跟着限制项走（2026-10-01）：它进的是编译子进程的 argv（`-timeout`），
+	// 只在构造期固化的话，控制台 `compile_timeout_seconds` 调大之后子进程仍按旧值
+	// 自杀 —— 界面上是新值、实际按旧值跑。编译器与 appserver 是两个组件，
+	// 所以这里包一层：**一份 Limits 同时下发给两者**，不给"只改了其中一处"留缝。
+	//
+	// ⚠️ 顺序：编译器必须在 appserver 之前收到值（同一次保存里两处只差微秒，
+	// 但先编译器后执行侧更符合"发布期编译先于执行侧装载"的因果）。
+	applyAll := func(l applimits.Limits) []string {
+		if compiler != nil {
+			compiler.SetTimeout(l.CompileTimeout())
+		}
+		return appSrv.ApplyLimits(l)
+	}
+	limitsHolder.SetApplier(applyAll)
+	restart := applyAll(limitsHolder.Get())
 	limitsHolder.ApplyStartup(restart)
 	if len(restart) > 0 {
 		log.Printf("wasm: ⚠️ 平台限制项里有需重启才生效的字段：%v（当前进程仍按启动时的值跑）", restart)

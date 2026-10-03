@@ -95,8 +95,12 @@ type Server struct {
 
 	scheduler *queue.Scheduler
 
-	// guestBudget 是 guest 执行预算的测试注入点（0 = limits.GuestBudget）。
-	// 生产路径不得设置它：数值唯一真源在 limits（§4.6）。
+	// guestBudget 是 guest 执行预算的**测试注入点**（0 = 用当前生效的限制项）。
+	//
+	// 生产路径不得设置它（2026-10-01 起语义收紧）：生产值来自 applimits
+	// （控制台 `guest_budget_seconds` > 部署档位 > limits.GuestBudget 默认），
+	// 由 CurrentLimits() 读出。保留这个字段只是为了让用例能钉一个更小的预算去
+	// 触发超时分支，而不必改全局设置。
 	guestBudget time.Duration
 	// drainTimeout 是关闭前排空等待的测试注入点（0 = shutdownDrainTimeout）。
 	drainTimeout time.Duration

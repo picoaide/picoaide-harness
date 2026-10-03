@@ -120,8 +120,22 @@ export const APP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OP
 /** 白名单里的一个方法。 */
 export type AppMethod = (typeof APP_METHODS)[number]
 
-/** 出站预算：一次应用请求的默认墙钟上限（毫秒）。 */
-export const APP_REQUEST_TIMEOUT_MS = 30_000
+/**
+ * 出站预算：一次应用请求的默认墙钟上限（毫秒）。
+ *
+ * 它必须**严格晚于**平台侧的每一个请求预算 —— 否则平台还没来得及返回带 code/hints 的
+ * 结构化错误，客户端就先放弃了，员工只看到"网络错误"（§13.2 ① / §5.1）。
+ *
+ * 2026-10-01 由 30 s 提到 75 s：平台把时间预算收进控制台后，默认值变成
+ * guest 30 s / 端到端墙钟 60 s —— 原来的 30 s 连 guest 都不再严格大于
+ * （`budget-parity.spec.ts` 当场变红）。现在的最外层约束是**端到端墙钟 60 s**
+ * （含排队），75 s 给传输与本地代理留 15 s 余量。
+ *
+ * ⚠️ 已知边界：平台预算可由控制台配置，而这个常量是**随包固定**的 —— 运维把
+ * `request_wall_clock_seconds` 调到 60 s 以上时，超出部分会退化成"网络错误"。
+ * 部署侧可用 `Config.requestTimeoutMs` 同步抬高（见 `src/index.ts`）。
+ */
+export const APP_REQUEST_TIMEOUT_MS = 75_000
 
 /**
  * 逐跳头（RFC 9110 §7.6.1）+ 本模型自己管理的传输头。

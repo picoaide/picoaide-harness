@@ -331,9 +331,9 @@ func TestDatabaseFullMapsToDBLimit(t *testing.T) {
 //   - 去掉 stmtContextLocked 的 WithTimeout ⇒ 超时那条断言红；
 //   - 把 recoverPoisonedLocked 改回"直接返回污染错误" ⇒ "下一次调用已恢复"红。
 func TestSQLStatementTimeoutOnSlowQuery(t *testing.T) {
-	old := defaultStmtBudget
-	defaultStmtBudget = 250 * time.Millisecond
-	t.Cleanup(func() { defaultStmtBudget = old })
+	SetStatementBudget(250 * time.Millisecond)
+
+	t.Cleanup(func() { SetStatementBudget(0) })
 
 	d := newTestDB(t, "slow-app")
 	defineTable(t, d, "nums", col("v", "int"))
