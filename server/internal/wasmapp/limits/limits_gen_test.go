@@ -268,7 +268,7 @@ func TestCriticalValuesAndOrdering(t *testing.T) {
 		why  string
 	}{
 		{"CompileTimeout==60s", limits.CompileTimeout.Milliseconds(), 60_000, "§4.2：同步 publish 在 60 s 预算内完成"},
-		{"GuestBudget==10s", limits.GuestBudget.Milliseconds(), 10_000, "§4.6：guest 执行预算"},
+		{"GuestBudget==30s", limits.GuestBudget.Milliseconds(), 30_000, "§4.6：guest 执行预算（2026-10-01 由 10 s 放宽：PDF 类应用单请求要重新编码整份文档）"},
 		{"SQLStatementBudget==5s", limits.SQLStatementBudget.Milliseconds(), 5_000, "R13：单语句硬超时"},
 		{"RequestWallClock==60s", limits.RequestWallClock.Milliseconds(), 60_000, "§4.6：端到端墙钟（含排队）"},
 		{"AIBridgeMaxMessages 与文档一致", int64(limits.AIBridgeMaxMessages) * 1000, 64_000, "§21.2：AI 桥 messages ≤64 条（跨端冻结契约）"},
@@ -290,6 +290,14 @@ func TestCriticalValuesAndOrdering(t *testing.T) {
 	if !(limits.ServerReadTimeout >= limits.CompileTimeout) {
 		t.Errorf("序关系被破坏：服务端 ReadTimeout(%s) 必须 >= 编译超时(%s)（同步 publish 在 ReadTimeout 预算内返回）",
 			limits.ServerReadTimeout, limits.CompileTimeout)
+	}
+	// 干跑预算必须**恰好等于** guest 预算（2026-10-01）：干跑回答的是"这次运行能不能
+	// 跑起来"，比真实执行更短就会出现"预检拒绝了一个线上跑得动的应用"
+	//（现场形态：PDF 打水印应用启动要十几秒，2 s 干跑把它判死）。两者都是控制台
+	// 可配置的默认值，这条断言钉的是**默认值**这一对。
+	if limits.DryRunBudget != limits.GuestBudget {
+		t.Errorf("默认值不一致：干跑预算(%s) 必须等于 guest 预算(%s)——预检不得比真实执行更严",
+			limits.DryRunBudget, limits.GuestBudget)
 	}
 	if !(limits.RequestWallClock > limits.GuestBudget) {
 		t.Errorf("序关系被破坏：端到端墙钟(%s) 必须 > guest 预算(%s)（留给排队与宿主调用）",

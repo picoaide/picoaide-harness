@@ -406,7 +406,7 @@ func runtimeHints(code apperr.Code, pages uint32) []string {
 	case apperr.CodeHostCallOverBudget:
 		return []string{
 			"宿主调用超过了它的预算：不要在一次调用里做无界的工作",
-			"预算按方法给出（limits.HostCallBudgetDefault，5 s）",
+			"预算按方法给出（缺省取 host_call_budget_seconds，当前默认 5 s）",
 		}
 	}
 	return nil

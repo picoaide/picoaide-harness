@@ -280,6 +280,16 @@ var appBuilderSkillDigests = map[string]string{
 	// `packages/client/wasm-apps/src/client/freeze-author-face-parity.spec.ts`
 	// （手册 ↔ 客户端文案 ↔ 服务端目录条件三面对拍）。
 	"bdb5e7c71299e2938e52f72b4972edd88869f6b9c9ca0b559e698d9151edf375": "2.10.0",
+	// 2.11.0 = **时间预算改为后台可配置**（2026-10-01）：平台把「应用能跑多久」这一组
+	// 数值从编译期常量收进控制台（运维 → 应用平台）：guest 预算默认 10 s → **30 s**、
+	// 发布/预检干跑 2 s → **30 s**（与 guest 一致）、宿主调用 5 s、端到端墙钟 60 s、
+	// 单条 SQL 5 s、编译 60 s 均可调。
+	//
+	// 手册里凡是引用这几个数字的地方都跟着改了（`SKILL.md`、`references/abi.md`、
+	// `references/diagnostics.md`、`examples/go/main.go`），并且都注明"默认值、可在
+	// 控制台调整" —— 数字与 limits 表的一致性由 `limits_test` 的 TestSkillDiscipline
+	// 守着，这里只负责版本纪律（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
+	"f1f35b28f7978b25bde3496790d04100ab57a15d74180c9355c7434e9554c364": "2.11.0",
 }
 
 // seededSkillDigests 是「**技能目录 → 内容摘要 → version**」的两级登记表：

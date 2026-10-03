@@ -21,6 +21,7 @@ import (
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/appcfg"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/assets"
 	"github.com/picoaide/picoaide/internal/wasmapp/compile"
 	"github.com/picoaide/picoaide/internal/wasmapp/hostcap"
@@ -248,7 +249,7 @@ func (h *Handlers) compileModule(c *gin.Context, appID string, wasm []byte) (*co
 	if err := f.Close(); err != nil {
 		return nil, internalErr("上传临时文件关闭失败", err)
 	}
-	ctx, cancel := budgetCtx(c.Request.Context(), limits.CompileTimeout)
+	ctx, cancel := budgetCtx(c.Request.Context(), h.budgets().CompileTimeout())
 	defer cancel()
 	res, cerr := h.opt.Compiler.Compile(ctx, name)
 	if cerr != nil {
@@ -389,7 +390,8 @@ func assetOversize(section string, size int64) *apperr.Error {
 		WithHint("单文件与段总量同源 limits.SectionTotalMaxBytes（§4.2）")
 }
 
-// dryRun 用合成帧跑一次真实实例化（§4.2：「一次真实编译 + 合成帧干跑」，2 s 预算）。
+// dryRun 用合成帧跑一次真实实例化（§4.2：「一次真实编译 + 合成帧干跑」，
+// guest 预算取 `dry_run_budget_seconds`，默认 30 s = guest 预算）。
 //
 // 判据只有一条：应用**能实例化、能读请求帧、能写出合法响应帧**。它不校验业务逻辑
 // （合成帧是匿名 `GET /`，宿主能力面为空 ⇒ 任何 db/ai/assets 调用都会拿到"能力
@@ -419,13 +421,18 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	defer func() { _ = rt.Close(context.WithoutCancel(c.Request.Context())) }()
 
 	// 预算分层（**不要**把整段干跑压进 DryRunBudget）：
-	//   - 外层 ctx 覆盖"执行侧装载模块"，与编译同预算（limits.CompileTimeout）——
+	//   - 外层 ctx 覆盖"执行侧装载模块"，与编译同预算（`compile_timeout_seconds`）——
 	//     首次装载 3.6 MiB 模块在冷缓存下要 1–2 s，把它算进 2 s 的干跑预算会让
 	//     Serve 一开始就贴在超时边缘（实测：请求帧写入直接 context deadline exceeded，
 	//     错误表现成 MODULE_KILLED，读者会误以为是应用的问题）；
-	//   - guest 执行预算由 InstanceLimits.GuestBudget 单独给 limits.DryRunBudget，
-	//     那才是 §4.2 的"2 s 预算跑 Instantiate → _start → 响应帧"。
-	ctx, cancel := budgetCtx(c.Request.Context(), limits.CompileTimeout)
+	//   - guest 执行预算由 InstanceLimits.GuestBudget 单独给 `dry_run_budget_seconds`，
+	//     那才是跑 Instantiate → _start → 响应帧 的那一段。
+	//
+	// 两个值都取自**当前生效的限制项**（控制台 > 档位 > 编译期默认）。干跑预算与
+	// guest 预算默认同值（都是 30 s）：干跑要回答的是"这次运行能不能跑起来"，
+	// 比真实执行更短就会出现"预检拒绝了一个线上跑得动的应用"。
+	dryRun := h.budgets()
+	ctx, cancel := budgetCtx(c.Request.Context(), dryRun.CompileTimeout())
 	defer cancel()
 
 	mod, cerr := rt.CompileModule(ctx, wasm)
@@ -452,7 +459,7 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	res, serr := rt.Serve(ctx, mod, runtime.Request{
 		Envelope: env,
 		Funcs:    caps,
-		Budgets:  runtime.InstanceLimits{GuestBudget: limits.DryRunBudget},
+		Budgets:  runtime.InstanceLimits{GuestBudget: dryRun.DryRunBudget()},
 	})
 	if serr != nil {
 		return internalErr("干跑装配错误", serr)
@@ -492,6 +499,20 @@ func (h *Handlers) instanceMemoryPages() uint32 {
 		return 0
 	}
 	return h.opt.Limits().InstanceMemoryPages()
+}
+
+// budgets 返回本次发布/预检应当使用的时间预算（控制台 > 部署档位 > 编译期默认）。
+//
+// 与 instanceMemoryPages 同一纪律：**不在调用点直接读 limits 包的常量**。
+// 读常量在"控制台已改"之后就是一条静默的旧行为 —— 控制台显示干跑 30 s、实际按 2 s
+// 判，正是 2026-10-01 现场那个"预检拒绝了一个线上跑得动的应用"的形态。
+// `h.opt.Limits` 为 nil（最小装配/单测）时回落到 applimits.Defaults()，那本身就是
+// 由 limits 包折算出来的编译期默认，所以这里不需要第二份兜底数字。
+func (h *Handlers) budgets() applimits.Limits {
+	if h.opt.Limits == nil {
+		return applimits.Defaults()
+	}
+	return h.opt.Limits()
 }
 
 // clipForDetail 把诊断文本裁到错误明细里能放下的长度（数值来源 = limits）。

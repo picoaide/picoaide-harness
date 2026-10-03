@@ -14,7 +14,7 @@ import { errorText } from '../../lib/api-error'
 import { AlertTriangle, RotateCcw, RefreshCw, Save } from 'lucide-react'
 
 /**
- * 应用中心 · 限制项(2026-09-19 页面合并):并发与内存限制。
+ * 应用中心 · 限制项(2026-09-19 页面合并):并发、内存与时间预算限制。
  *
  * 主体是原「应用平台」页(`pages/AppPlatform.tsx`,`/app-platform`)原样搬入
  * (2026-09-19 用户要求「应用平台并入应用中心」);**服务端与全部 data-testid 未动**,
@@ -29,6 +29,9 @@ import { AlertTriangle, RotateCcw, RefreshCw, Save } from 'lucide-react'
  *
  * 服务端是唯一权威：本页的实时预览只是编辑期的估算（用服务端下发的
  * available/guard 与三个常量），保存成功与否一律以 PUT 的应答为准。
+ * 同一句话对**时间预算**那六项同样成立：序关系（guest < 墙钟、干跑/宿主调用 ≤ guest、
+ * SQL ≤ 墙钟、编译 ≤ ReadTimeout）只在服务端校验，页面照实渲染服务端下发的
+ * ranges/hints —— 前端不另写一份判据，否则两份判据必然漂移。
  */
 interface Limits {
   max_instances: number
@@ -50,6 +53,27 @@ interface Limits {
    * 已有句柄要等空闲回收后重建才拿到新值 —— 与 appdb_cache_kib 同一档语义。
    */
   app_db_readers: number
+  /**
+   * ---- 时间预算（2026-10-01 服务端新增的六项）----
+   *
+   * 单位一律是**秒**，且六项全部**即时生效**（每个请求/每次编译在入口处读当前值）——
+   * 与 instance_memory_mb 不同：那一项住在 wazero 的 RuntimeConfig 里，进程内建好
+   * 之后不可变，所以只有它需要重启（Ranges() 的 restart 标记是唯一判据）。
+   *
+   * 为什么值得单独一组：过去它们是 limits 包的编译期常量，"某个应用就是慢"只能重新
+   * 构建镜像（现场那个「PDF 打水印」应用单次请求十几秒就是这么撞上的）。收进控制台
+   * 之后，**服务端保存时会按序关系 fail-loud**（applimits.Validate），顺序读作：
+   * guest 预算 < 请求端到端墙钟、干跑/宿主调用 ≤ guest 预算、单条 SQL ≤ 端到端墙钟、
+   * 编译超时 ≤ 服务端 ReadTimeout（60 秒，传输层常量不可配置）。
+   * 服务端返回 400 时用 details.field 点名是**哪一项**越界（见 errorText 的渲染），
+   * 所以这里不需要前端再判一遍序关系 —— 判据只有服务端一份。
+   */
+  guest_budget_seconds: number
+  dry_run_budget_seconds: number
+  host_call_budget_seconds: number
+  request_wall_clock_seconds: number
+  sql_statement_budget_seconds: number
+  compile_timeout_seconds: number
   /**
    * 服务端**新加**的旋钮也走这里。
    *
@@ -143,8 +167,8 @@ interface RuntimeView {
 
 type FieldKey = string
 
-/** 表单分组：两组已知字段 + 一组"服务端新加、本页还没有描述"的兜底分组。 */
-type FieldGroup = '并发' | '内存' | '服务端新增'
+/** 表单分组：三组已知字段 + 一组"服务端新加、本页还没有描述"的兜底分组。 */
+type FieldGroup = '并发' | '内存' | '时间预算' | '服务端新增'
 
 interface FieldRow {
   key: FieldKey
@@ -172,6 +196,14 @@ const FIELDS: FieldRow[] = [
   { key: 'appdb_idle_min', label: '应用库空闲回收', group: '内存', hint: '应用数据库句柄（1 条写连接 + N 条只读连接）空闲多久后关闭' },
   { key: 'appdb_cache_kib', label: 'SQLite 页缓存/连接', group: '内存', hint: '每条应用库连接的页缓存上限；下一个新建连接生效' },
   { key: 'app_db_readers', label: '应用库只读连接数', group: '内存', hint: '每个应用库句柄的只读连接数：库已开启 WAL，多个读请求可真正并发（写仍串行）。值越大并发读越高，代价是每句柄多占 (1+N) 份页缓存与文件描述符；**下一个应用库句柄生效**（不是立即）' },
+  // 时间预算（2026-10-01 服务端新增）。四组顺序关系写在服务端 applimits.Validate 里：
+  // 这一页只如实显示取值范围（range 由服务端下发）与语义，不做第二遍判据（见接口注释）。
+  { key: 'guest_budget_seconds', label: 'guest 执行预算', group: '时间预算', hint: '应用单次请求里真正执行的时长上限；等数据库/等宿主调用时暂停计时。调大等于允许更长的单次计算，端到端墙钟仍然封顶' },
+  { key: 'dry_run_budget_seconds', label: '发布干跑预算', group: '时间预算', hint: '发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，调得比它短会把线上跑得动的应用挡在发布门外' },
+  { key: 'host_call_budget_seconds', label: '宿主调用预算', group: '时间预算', hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立' },
+  { key: 'request_wall_clock_seconds', label: '请求端到端墙钟', group: '时间预算', hint: '含排队等待；到点即拒。必须严格大于 guest 预算' },
+  { key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', group: '时间预算', hint: '到点由看门狗回滚并打污染标记；不得超过端到端墙钟' },
+  { key: 'compile_timeout_seconds', label: '编译超时', group: '时间预算', hint: '单次编译（含执行侧装载模块）的超时；不得超过服务端 ReadTimeout（60 秒，传输层常量不可配置）' },
 ]
 
 /** 按 key 索引的元数据（未知 key ⇒ 用兜底行，见 fieldRows）。 */
@@ -388,6 +420,11 @@ export default function Limits() {
         for (const key of Object.keys(form)) {
           if (form[key] !== view.limits[key]) mine[key] = form[key]
         }
+        // `mine` 只装"我实际改过"的字段，其余一律取**刚重读的服务端对象**。
+        // 这一句同时是"服务端新加的旋钮不会在这一页被丢掉"的唯一保障：PUT 是整份覆盖，
+        // 服务端 applimits.Parse 要求**完整对象**（少一个字段就 400 报"限制项缺少字段"），
+        // 所以 body 绝不能按 FIELDS 拼 —— 那样 2026-10-01 新增的六个时间预算字段会被
+        // 静默丢掉，管理员下一次点保存就撞 400。字段集真源永远是服务端下发的 limits。
         next = { ...fresh.limits, ...mine }
         // 我也改过、且服务端当前值与我打开页面时不同 ⇒ 同一字段被别人改过。
         // 仍然以我输入的值提交（那是我明确的意图），但必须在反馈里说出来。
@@ -461,7 +498,7 @@ export default function Limits() {
       <div className="space-y-4 p-6">
         <PageHeader
           title="限制项"
-          desc="员工自建 WASM 应用的并发与内存限制"
+          desc="员工自建 WASM 应用的并发、内存与时间预算限制"
         />
         {/* F4：与页内保存失败共用同一个错误块（role/aria-live 不会只在一条出口上）。 */}
         <LimitsErrorBlock text={err} />
@@ -487,7 +524,7 @@ export default function Limits() {
     <div className="space-y-4 p-6">
       <PageHeader
         title="限制项"
-        desc="员工自建 WASM 应用的并发与内存限制。改动即时下发（单实例内存上限需重启），保存时会按可用内存做四笔账自检。"
+        desc="员工自建 WASM 应用的并发、内存与时间预算限制。改动即时下发（单实例内存上限需重启），保存时会按可用内存做四笔账自检。"
         actions={
           <Button variant="outline" size="sm" onClick={() => { void load(); void loadRuntime() }} data-testid="limits-refresh">
             <RefreshCw className="mr-1 h-4 w-4" />刷新

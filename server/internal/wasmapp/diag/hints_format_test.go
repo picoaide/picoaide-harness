@@ -192,3 +192,21 @@ func TestMemoryHintFollowsEffectivePages(t *testing.T) {
 		t.Fatal("HintsForMemoryPages 必须返回副本（否则调用方会污染整张表）")
 	}
 }
+
+// TestBudgetTokensAppearInTable 钉住"占位符 ↔ 表里的字面量"这一对连接点。
+//
+// 为什么需要它：预算占位符是**两处字面量**（渲染器的常量 + hintTable 里的
+// `{guest_budget}` 之类）。只改一处时替换静默无效 —— 作者会在提示里看到一个原样的
+// `{sql_budget}`，而所有既有断言（格式动词、可操作建议非空）全绿。
+func TestBudgetTokensAppearInTable(t *testing.T) {
+	blob := ""
+	for _, hints := range hintTable {
+		blob += strings.Join(hints, "\n") + "\n"
+	}
+	for _, token := range BudgetTokens() {
+		if !strings.Contains(blob, token) {
+			t.Errorf("预算占位符 %q 没有出现在 hintTable 的任何一条提示里 —— "+
+				"渲染器替换它，但表里没有 ⇒ 要么补进表、要么删掉这个常量", token)
+		}
+	}
+}

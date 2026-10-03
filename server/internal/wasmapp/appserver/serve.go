@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
@@ -301,6 +302,18 @@ func loadAppConfig(set *assets.Set) (appcfg.Config, *apperr.Error) {
 // ===== wasm 执行（步骤 ⑩）=====
 
 // serveWasm 把请求交给 wasm 实例（§6.1 ⑤ / §4.6 / §7）。
+// guestBudgetOrCurrent 返回本次请求的 guest 执行预算。
+//
+// 优先级：测试注入（s.guestBudget，仅用例用）> 当前生效的限制项
+// （控制台 `guest_budget_seconds` > 部署档位 > limits.GuestBudget 编译期默认）。
+// 生产路径永远走第二条 —— 数值真源在 applimits/limits，不在 appserver。
+func (s *Server) guestBudgetOrCurrent() time.Duration {
+	if s.guestBudget > 0 {
+		return s.guestBudget
+	}
+	return s.CurrentLimits().GuestBudget()
+}
+
 func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	rel *serverstore.WasmRelease, cfg appcfg.Config, set *assets.Set, user *abi.User, sessionKey string) {
 
@@ -324,9 +337,12 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 		return
 	}
 
-	// 端到端墙钟 60 s（含排队等待）由本 ctx 承载；queue 只观察它，不自己造 deadline
+	// 端到端墙钟（含排队等待）由本 ctx 承载；queue 只观察它，不自己造 deadline
 	//（§4.6 / queue 包注释：两处各造一个 deadline 会让错误归属无法区分）。
-	ctx, cancel := context.WithTimeout(r.Context(), limits.RequestWallClock)
+	//
+	// 预算值取**当前生效的限制项**（控制台 `request_wall_clock_seconds` > 部署档位 >
+	// limits 编译期默认）：它必须是每次请求在入口处读，才能"保存即生效"。
+	ctx, cancel := context.WithTimeout(r.Context(), s.CurrentLimits().WallClock())
 	defer cancel()
 
 	ticket, aerr := s.scheduler.Acquire(ctx, appID, userIDOf(user))
@@ -429,9 +445,10 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	started := s.now()
 	res, serr := s.rt.Serve(ctx, mod, runtime.Request{
 		Envelope: env,
-		// 预算：内存页上限是 RuntimeConfig 项（0 = 与运行时一致），guest 预算默认 limits.GuestBudget
-		//（数值唯一真源），仅测试注入更小的值。
-		Budgets: runtime.InstanceLimits{GuestBudget: s.guestBudget},
+		// 预算：内存页上限是 RuntimeConfig 项（0 = 与运行时一致）；guest 预算取当前生效的
+		// 限制项（控制台 `guest_budget_seconds` > 部署档位 > limits 编译期默认），
+		// 仅测试用 s.guestBudget 注入更小的值。
+		Budgets: runtime.InstanceLimits{GuestBudget: s.guestBudgetOrCurrent()},
 		Funcs:   caps,
 	})
 	if serr != nil {

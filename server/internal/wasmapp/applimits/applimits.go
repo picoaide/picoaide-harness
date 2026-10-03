@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
@@ -76,6 +77,40 @@ type Limits struct {
 	// 它决定"同一应用能同时跑多少条 SELECT"（WAL 下真正并发），写仍由 appdb 的
 	// writeMu 串行 ⇒ 加的是读者，不是写者。
 	AppDBReaders int `json:"app_db_readers"`
+
+	// ---- 时间预算（2026-10-01 新增）----
+	//
+	// 为什么要有这一组：现场有一个「PDF 打水印」类应用，单次请求要解析并重新编码
+	// 整份文档、启动阶段本身就要十几秒。预算过去全是 limits 包的编译期常量 ⇒
+	// 线上遇到"某个应用就是慢"只能重新构建镜像。这与并发/内存当初的问题同形
+	// （见包注释），所以按同一条路收进控制台。
+	//
+	// 六项的默认值仍然来自 limits 包（§5.5 数值单一真源），这里只做覆盖；
+	// 它们全部**即时生效**（每次请求/每次编译在入口处读当前值），不要求重启。
+
+	// GuestBudgetSeconds 是 guest 执行预算（秒）：应用单次请求里真正执行的时长上限，
+	// 进入宿主调用时**暂停计时**（所以"等数据库"不计入）。默认 30。
+	GuestBudgetSeconds int `json:"guest_budget_seconds"`
+	// DryRunBudgetSeconds 是发布/预检期合成帧干跑的 guest 预算（秒）。默认 30。
+	//
+	// 语义上它应当**与 guest 预算一致**：干跑回答的是"这次运行能不能跑起来"，
+	// 比真实执行更短会把线上跑得动的应用挡在发布门外（现场就是这么撞上的）。
+	// 校验只要求"不得大于 guest 预算"，允许调小用于快速失败。
+	DryRunBudgetSeconds int `json:"dry_run_budget_seconds"`
+	// HostCallBudgetSeconds 是未单列预算的宿主调用（db.* / log / assets.read）的
+	// 兜底预算（秒）。默认 5。它**不**被 guest 预算暂停机制覆盖：宿主调用自己
+	// 有硬超时，两者独立（一个慢查询不会靠"暂停计时"绕过它）。
+	HostCallBudgetSeconds int `json:"host_call_budget_seconds"`
+	// RequestWallClockSeconds 是请求端到端墙钟（秒，**含排队**）：到点即拒。
+	// 默认 60。必须严格大于 guest 预算，否则 guest 还没跑完就被墙钟拒掉。
+	RequestWallClockSeconds int `json:"request_wall_clock_seconds"`
+	// SQLStatementBudgetSeconds 是单条 SQL 语句的硬超时（秒）：到点由看门狗回滚并
+	// 打污染标记。默认 5。不得超过端到端墙钟（超了等于这条闸门永不触发）。
+	SQLStatementBudgetSeconds int `json:"sql_statement_budget_seconds"`
+	// CompileTimeoutSeconds 是单次编译（含执行侧装载模块）的超时（秒）。默认 60。
+	// 不得超过服务端 HTTP ReadTimeout（`limits.ServerReadTimeout`，不可配置的传输层
+	// 常量 60 s）—— 同步 publish 要在那之前返回。
+	CompileTimeoutSeconds int `json:"compile_timeout_seconds"`
 }
 
 // defaultAppDBCacheKiB 是**每条 SQLite 连接**页缓存的默认值（KiB）。
@@ -101,7 +136,44 @@ func Defaults() Limits {
 		AppDBIdleMin:       3,
 		AppDBCacheKiB:      defaultAppDBCacheKiB,
 		AppDBReaders:       limits.AppDBReaders,
+
+		GuestBudgetSeconds:        int(limits.GuestBudget / time.Second),
+		DryRunBudgetSeconds:       int(limits.DryRunBudget / time.Second),
+		HostCallBudgetSeconds:     int(limits.HostCallBudgetDefault / time.Second),
+		RequestWallClockSeconds:   int(limits.RequestWallClock / time.Second),
+		SQLStatementBudgetSeconds: int(limits.SQLStatementBudget / time.Second),
+		CompileTimeoutSeconds:     int(limits.CompileTimeout / time.Second),
 	}
+}
+
+// GuestBudget 返回生效的 guest 执行预算。
+func (l Limits) GuestBudget() time.Duration {
+	return time.Duration(l.GuestBudgetSeconds) * time.Second
+}
+
+// DryRunBudget 返回生效的发布/预检干跑预算。
+func (l Limits) DryRunBudget() time.Duration {
+	return time.Duration(l.DryRunBudgetSeconds) * time.Second
+}
+
+// HostCallBudget 返回生效的宿主调用兜底预算。
+func (l Limits) HostCallBudget() time.Duration {
+	return time.Duration(l.HostCallBudgetSeconds) * time.Second
+}
+
+// WallClock 返回生效的请求端到端墙钟预算。
+func (l Limits) WallClock() time.Duration {
+	return time.Duration(l.RequestWallClockSeconds) * time.Second
+}
+
+// SQLStatementBudget 返回生效的单条 SQL 硬超时。
+func (l Limits) SQLStatementBudget() time.Duration {
+	return time.Duration(l.SQLStatementBudgetSeconds) * time.Second
+}
+
+// CompileTimeout 返回生效的单次编译超时。
+func (l Limits) CompileTimeout() time.Duration {
+	return time.Duration(l.CompileTimeoutSeconds) * time.Second
 }
 
 // FromProfile 把部署档位（memprofile）折算成限制项：并发、单实例上限、模块缓存随档位，
@@ -146,8 +218,32 @@ func (l Limits) clampCrossField() Limits {
 	if l.UserPerAppQueued > l.AppQueue {
 		l.UserPerAppQueued = l.AppQueue
 	}
+	// 时间预算的序关系（与 Validate 同一批判据，见那里的注释）：档位折算不会动这六项，
+	// 但 clampCrossField 是"内部折算结果的合法化入口"，直接构造的 Limits 也会经过它
+	// （例如旧版本落库的设置缺这几个字段、由 ParseStored 补默认值之后再钳）。
+	// 这里的动作是**向下取小**（不会把用户设的值放大），保证折算结果自身可过 Validate。
+	if l.GuestBudgetSeconds > 0 {
+		if l.DryRunBudgetSeconds > l.GuestBudgetSeconds {
+			l.DryRunBudgetSeconds = l.GuestBudgetSeconds
+		}
+		if l.HostCallBudgetSeconds > l.GuestBudgetSeconds {
+			l.HostCallBudgetSeconds = l.GuestBudgetSeconds
+		}
+		if l.RequestWallClockSeconds <= l.GuestBudgetSeconds {
+			l.RequestWallClockSeconds = l.GuestBudgetSeconds + 1
+		}
+	}
+	if l.SQLStatementBudgetSeconds > l.RequestWallClockSeconds {
+		l.SQLStatementBudgetSeconds = l.RequestWallClockSeconds
+	}
+	if maxCompile := int(limits.ServerReadTimeout / time.Second); l.CompileTimeoutSeconds > maxCompile {
+		l.CompileTimeoutSeconds = maxCompile
+	}
 	return l
 }
+
+// ClampForTest 暴露内部钳位结果（仅测试用：生产路径经 FromProfile/ParseStored 自动经过它）。
+func (l Limits) ClampForTest() Limits { return l.clampCrossField() }
 
 // 取值范围（**保存路径的硬边界**）。上下限都取"能跑起来"的保守值：
 // 下限防止把平台调到不可用（0 并发、1 MiB 实例内存），上限防止一个手滑把机器打爆。
@@ -162,6 +258,25 @@ const (
 	MaxIdleMin          = 24 * 60
 	MinAppDBCacheKiB    = 128
 	MaxAppDBCacheKiB    = 64 << 10
+
+	// ---- 时间预算（秒）----
+	//
+	// MinBudgetSeconds 是**所有**预算项的下限：1 秒。低于它等于"什么都跑不完"，
+	// 而 0 会被各消费点的"非正值回落默认"逻辑吃掉 ⇒ 用户以为设了 0、实际拿到默认值，
+	// 是最难查的一类配置事故，所以直接拒。
+	MinBudgetSeconds = 1
+	// MaxBudgetSeconds 是通用上限：300 秒（5 分钟）。
+	//
+	// 上限的理由是**槽位占用**：单次请求最长就是这个数，而全局并发是有限的
+	// （max_instances，小机器 3）⇒ 5 分钟已经能让 3 个慢请求把平台占满。
+	// 再往上应当改应用设计（拆成多次请求），而不是把闸门继续放宽。
+	MaxBudgetSeconds = 300
+	// MaxGuestBudgetSeconds 单独给 guest 预算一个更紧的上限：120 秒（2 分钟）。
+	//
+	// 与 MaxBudgetSeconds 的差别是刻意的：guest 预算是"CPU 真正在算"的时长，
+	// 它直接对应"一个请求占着执行槽多久"；120 s 已经比任何合理的单次计算长得多。
+	// 端到端墙钟、编译、SQL 这些允许配到 300 s（它们包含等待，不全是占用）。
+	MaxGuestBudgetSeconds = 120
 )
 
 // Validate 校验取值范围与内部一致性（fail-loud；返回可直接回控制台的错误信封）。
@@ -202,6 +317,56 @@ func (l Limits) Validate() *apperr.Error {
 		return bad("app_db_readers", fmt.Sprintf("每应用只读连接数必须在 1–%d 之间", limits.AppDBReadersMax)).
 			WithHint("它决定同一应用能同时跑多少条 SELECT（WAL 下真正并发），写仍串行；" +
 				"每个只读连接各占一份页缓存（appdb_cache_kib）与一个 fd ⇒ 调大会线性抬高常驻，且**下一个应用库句柄**才生效")
+
+	// ---- 时间预算：范围 ----
+	case l.GuestBudgetSeconds < MinBudgetSeconds || l.GuestBudgetSeconds > MaxGuestBudgetSeconds:
+		return bad("guest_budget_seconds", fmt.Sprintf("guest 执行预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxGuestBudgetSeconds)).
+			WithHint("应用单次请求里真正执行的时长上限（等数据库/等宿主调用时**暂停计时**）；" +
+				"调大等于允许更长的单次计算，而端到端墙钟仍然封顶")
+	case l.DryRunBudgetSeconds < MinBudgetSeconds || l.DryRunBudgetSeconds > MaxBudgetSeconds:
+		return bad("dry_run_budget_seconds", fmt.Sprintf("干跑预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
+			WithHint("发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，" +
+				"调得比它短会把线上跑得动的应用挡在发布门外")
+	case l.HostCallBudgetSeconds < MinBudgetSeconds || l.HostCallBudgetSeconds > MaxBudgetSeconds:
+		return bad("host_call_budget_seconds", fmt.Sprintf("宿主调用预算必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
+			WithHint("db.* / log / assets.read 等宿主调用的硬超时；它**不**被 guest 的暂停计时覆盖，两者独立")
+	case l.RequestWallClockSeconds < MinBudgetSeconds || l.RequestWallClockSeconds > MaxBudgetSeconds:
+		return bad("request_wall_clock_seconds", fmt.Sprintf("端到端墙钟必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds)).
+			WithHint("含排队；到点即拒。必须严格大于 guest 预算")
+	case l.SQLStatementBudgetSeconds < MinBudgetSeconds || l.SQLStatementBudgetSeconds > MaxBudgetSeconds:
+		return bad("sql_statement_budget_seconds", fmt.Sprintf("单条 SQL 硬超时必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds))
+	case l.CompileTimeoutSeconds < MinBudgetSeconds || l.CompileTimeoutSeconds > MaxBudgetSeconds:
+		return bad("compile_timeout_seconds", fmt.Sprintf("编译超时必须在 %d–%d 秒之间", MinBudgetSeconds, MaxBudgetSeconds))
+
+	// ---- 时间预算：序关系（保存时 fail-loud，不留给运行期）----
+	//
+	// 这些序关系过去只写在 limits 包的编译期断言里（limits_gen_test.go）。数值一旦
+	// 可由控制台改，编译期断言就管不到线上组合了 ⇒ 必须在保存路径上重判一遍；
+	// 两处的**判据同源**（都读 limits 包的常量），不是两份独立规则。
+	case l.RequestWallClockSeconds <= l.GuestBudgetSeconds:
+		return bad("request_wall_clock_seconds",
+			"端到端墙钟必须严格大于 guest 预算：否则应用还没跑完就被墙钟拒掉").
+			WithHint(fmt.Sprintf("当前 guest=%d s ⇒ 墙钟至少要 %d s",
+				l.GuestBudgetSeconds, l.GuestBudgetSeconds+1))
+	case l.DryRunBudgetSeconds > l.GuestBudgetSeconds:
+		return bad("dry_run_budget_seconds",
+			"干跑预算不得大于 guest 预算：预检不得比真实执行更宽松").
+			WithHint(fmt.Sprintf("当前 guest=%d s；干跑建议与它一致", l.GuestBudgetSeconds))
+	case l.HostCallBudgetSeconds > l.GuestBudgetSeconds:
+		return bad("host_call_budget_seconds",
+			"宿主调用预算不得大于 guest 预算：单次宿主调用比整个请求的执行预算还长没有意义").
+			WithHint(fmt.Sprintf("当前 guest=%d s", l.GuestBudgetSeconds))
+	case l.SQLStatementBudgetSeconds > l.RequestWallClockSeconds:
+		return bad("sql_statement_budget_seconds",
+			"单条 SQL 硬超时不得大于端到端墙钟：超了这条闸门永远不会触发").
+			WithHint(fmt.Sprintf("当前墙钟=%d s", l.RequestWallClockSeconds))
+	case l.CompileTimeoutSeconds > int(limits.ServerReadTimeout/time.Second):
+		// 上界取 limits.ServerReadTimeout（传输层常量，**不可配置**）：同步 publish 要在
+		// HTTP ReadTimeout 之前返回，这是 §10.5 第 58 项那条编译期断言的可配置版本。
+		return bad("compile_timeout_seconds",
+			fmt.Sprintf("编译超时不得超过服务端 ReadTimeout（%d s，传输层常量不可配置）",
+				int(limits.ServerReadTimeout/time.Second))).
+			WithHint("同步 publish 必须在 ReadTimeout 预算内返回")
 	}
 	return nil
 }
@@ -403,6 +568,17 @@ func Ranges() map[string]Range {
 		"appdb_idle_min":        {1, MaxIdleMin, "分钟", false},
 		"appdb_cache_kib":       {MinAppDBCacheKiB, MaxAppDBCacheKiB, "KiB", false},
 		"app_db_readers":        {1, limits.AppDBReadersMax, "个", false},
+
+		// 时间预算（秒）。restart 全部为 false：这六项在每个请求/每次编译的入口处
+		// 读当前值（appserver 的 s.limits / api 的 limits 闭包 / appdb 的注入值），
+		// 与 instance_memory_mb 不同 —— 那一项住在 wazero 的 RuntimeConfig 里，
+		// 进程内建好之后不可变。
+		"guest_budget_seconds":         {MinBudgetSeconds, MaxGuestBudgetSeconds, "秒", false},
+		"dry_run_budget_seconds":       {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
+		"host_call_budget_seconds":     {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
+		"request_wall_clock_seconds":   {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
+		"sql_statement_budget_seconds": {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
+		"compile_timeout_seconds":      {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
 	}
 }
 
@@ -413,5 +589,7 @@ func FieldNames() []string {
 		"user_global_running", "user_per_app_running", "user_per_app_queued",
 		"instance_memory_mb", "module_cache_mb", "module_cache_idle_min",
 		"appdb_idle_min", "appdb_cache_kib", "app_db_readers",
+		"guest_budget_seconds", "dry_run_budget_seconds", "host_call_budget_seconds",
+		"request_wall_clock_seconds", "sql_statement_budget_seconds", "compile_timeout_seconds",
 	}
 }

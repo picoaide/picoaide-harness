@@ -12,10 +12,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/picoaide/picoaide/internal/wasmapp/abi"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
+	"github.com/picoaide/picoaide/internal/wasmapp/applimits"
 	"github.com/picoaide/picoaide/internal/wasmapp/limits"
 )
 
@@ -142,6 +144,12 @@ func Summary(ctx context.Context, db *sql.DB, appID string, since time.Time) (Ap
 // （memoryPages=0 ⇒ 编译期默认 limits.InstanceMemoryPages；见 HintsForMemoryPages）。
 func SummaryWithMemoryPages(ctx context.Context, db *sql.DB, appID string, since time.Time,
 	memoryPages uint32) (AppSummary, error) {
+	return SummaryWithLimits(ctx, db, appID, since, memoryPages, applimits.Defaults())
+}
+
+// SummaryWithLimits 与 SummaryWithMemoryPages 同义，但时间预算也按**生效**的限制项渲染。
+func SummaryWithLimits(ctx context.Context, db *sql.DB, appID string, since time.Time,
+	memoryPages uint32, lim applimits.Limits) (AppSummary, error) {
 	out := AppSummary{AppID: appID, Since: since, Reasons: []ReasonCount{}, Hints: []string{}}
 	if err := requireAppID(appID); err != nil {
 		return out, err
@@ -204,7 +212,7 @@ func SummaryWithMemoryPages(ctx context.Context, db *sql.DB, appID string, since
 	}
 	for code, b := range perReason {
 		out.Reasons = append(out.Reasons, ReasonCount{
-			ReasonCode: code, Count: b.count, Hints: HintsForMemoryPages(code, memoryPages)})
+			ReasonCode: code, Count: b.count, Hints: HintsForLimits(code, memoryPages, lim)})
 	}
 	// 次数降序、同次数按错误码升序:输出稳定,便于 AI 与页面直接对比两次诊断。
 	sortReasons(out.Reasons)
@@ -240,6 +248,39 @@ func sortReasons(rs []ReasonCount) {
 	}
 }
 
+// 可配置时间预算在提示文本里的**占位符**（2026-10-01）。
+//
+// 为什么用占位符而不是在表里直接 fmt.Sprintf 一个值：这三项现在是控制台可配置的
+// （applimits 的 guest_budget_seconds / host_call_budget_seconds /
+// sql_statement_budget_seconds），而表是包级初始化一次 ⇒ 把值烤进文本就会在
+// "控制台改过"之后说谎，作者会按过期的数字去优化 —— 与 R1-rt-25 那条内存提示
+// 是同一个缺陷形态。占位符在大括号里，不会与 fmt 的 `%` 动词混淆
+// （hints_format_test 会扫残留的 `%<字母>`）。
+// ⚠️ 这三对常量是"表里写的 token"与"渲染器替换的 token"的**唯一连接点**：
+// 改常量必须同时改表里的字面量（`TestBudgetTokensAppearInTable` 会把漏改判红，
+// 否则替换静默无效 —— 提示里留一个花括号 token 给作者看）。
+const (
+	hintGuestBudget    = "{guest_budget}"
+	hintHostCallBudget = "{host_call_budget}"
+	hintSQLBudget      = "{sql_budget}"
+)
+
+// BudgetTokens 返回全部预算占位符（自检用）。
+func BudgetTokens() []string { return []string{hintGuestBudget, hintHostCallBudget, hintSQLBudget} }
+
+// renderBudgetHints 把占位符替换成**当前生效**的预算值。
+func renderBudgetHints(hints []string, lim applimits.Limits) []string {
+	replacer := strings.NewReplacer(
+		hintGuestBudget, lim.GuestBudget().String(),
+		hintHostCallBudget, lim.HostCallBudget().String(),
+		hintSQLBudget, lim.SQLStatementBudget().String(),
+	)
+	for i, h := range hints {
+		hints[i] = replacer.Replace(h)
+	}
+	return hints
+}
+
 // HintsFor 返回某个失败码的可操作提示(§4.9「结构化错误码 + hints」)。
 // 未覆盖的码返回 nil(Summary 会补一条通用建议),不返回空串占位。
 //
@@ -247,12 +288,19 @@ func sortReasons(rs []ReasonCount) {
 // HintsForMemoryPages —— 否则控制台把上限改成 16 MiB 后，提示里还写 64 MiB，
 // 作者会按过期的数字去优化（R1-rt-25）。
 func HintsFor(reasonCode string) []string {
-	return HintsForMemoryPages(reasonCode, 0)
+	return HintsForLimits(reasonCode, 0, applimits.Defaults())
 }
 
 // HintsForMemoryPages 与 HintsFor 同义，但按**生效**的单实例内存页数渲染内存类提示
-// （memoryPages=0 ⇒ 编译期默认 limits.InstanceMemoryPages）。
+// （memoryPages=0 ⇒ 编译期默认 limits.InstanceMemoryPages）；时间预算按编译期默认渲染。
 func HintsForMemoryPages(reasonCode string, memoryPages uint32) []string {
+	return HintsForLimits(reasonCode, memoryPages, applimits.Defaults())
+}
+
+// HintsForLimits 按**生效**的内存与时间预算渲染提示（内存 memoryPages=0 / 预算零值 ⇒
+// 各自的编译期默认）。装配侧拿得到当前限制项时必须走它：控制台改过预算之后，
+// 提示里还写旧数字就是让作者按过期值调优（R1-rt-25 的同一形态，2026-10-01 扩到时间预算）。
+func HintsForLimits(reasonCode string, memoryPages uint32, lim applimits.Limits) []string {
 	hints, ok := hintTable[apperr.Code(reasonCode)]
 	if !ok {
 		return nil
@@ -262,7 +310,10 @@ func HintsForMemoryPages(reasonCode string, memoryPages uint32) []string {
 	if apperr.Code(reasonCode) == apperr.CodeRuntimeMemory {
 		out[0] = memoryLimitHint(memoryPages)
 	}
-	return out
+	if lim.GuestBudgetSeconds <= 0 && lim.HostCallBudgetSeconds <= 0 && lim.SQLStatementBudgetSeconds <= 0 {
+		lim = applimits.Defaults()
+	}
+	return renderBudgetHints(out, lim)
 }
 
 // memoryLimitHintFormat 是"单实例线性内存上限"这条提示的**唯一**文案真源：
@@ -281,7 +332,7 @@ func memoryLimitHint(memoryPages uint32) string {
 // 而不是复述错误码含义;涉及上限的数值一律由 limits 求值(§5.5 数值单一真源)。
 var hintTable = map[apperr.Code][]string{
 	apperr.CodeRuntimeTimeout: {
-		fmt.Sprintf("guest 执行预算是 %s:把长任务拆成多次请求,不要在单次请求里做整批计算", limits.GuestBudget),
+		"guest 执行预算是 {guest_budget}:把长任务拆成多次请求,不要在单次请求里做整批计算",
 		"宿主调用(db.* / log / assets.read)期间不计入 guest 计时 ⇒ 超时基本都是应用自己的循环没有收敛",
 		"检查有没有无退出的重试循环;请求超时后实例被销毁,内存里的中间状态不会保留",
 	},
@@ -298,7 +349,7 @@ var hintTable = map[apperr.Code][]string{
 		"响应必须由应用写到 stdout 的协议帧里 —— 只 exit 不写帧等于把失败报成空响应",
 	},
 	apperr.CodeDBLimit: {
-		fmt.Sprintf("触到 SQL 硬限(单语句 %s / %d 行 / %d KiB):先加 WHERE 与 LIMIT,再考虑分页", limits.SQLStatementBudget, limits.SQLMaxRows, limits.SQLMaxResultBytes>>10),
+		fmt.Sprintf("触到 SQL 硬限(单语句 {sql_budget} / %d 行 / %d KiB):先加 WHERE 与 LIMIT,再考虑分页", limits.SQLMaxRows, limits.SQLMaxResultBytes>>10),
 		fmt.Sprintf("应用库体积上限 %d MB:平台不提供扩容旋钮,需要自己删旧数据或做汇总表", limits.AppDBMaxBytes>>20),
 		"一次只发一条语句(多语句一定被拒),复杂查询拆成多次 db.query",
 	},
@@ -337,7 +388,7 @@ var hintTable = map[apperr.Code][]string{
 			abi.MaxFrameBytes>>20, abi.MaxResponseBodyBytes>>10),
 	},
 	apperr.CodeHostCallOverBudget: {
-		fmt.Sprintf("宿主调用超过预算(%s):缩小输入或拆成多次调用", limits.HostCallBudgetDefault),
+		"宿主调用超过预算({host_call_budget}):缩小输入或拆成多次调用",
 		"宿主调用必须带 ctx,超时后平台按失败处理且不会返回部分结果",
 	},
 	// ⚠️ `apperr.CodeAIRateLimited` 的提示已随 W4 删除（总纲 §21.3）：平台不再有

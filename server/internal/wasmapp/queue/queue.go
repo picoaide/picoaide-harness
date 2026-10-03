@@ -49,6 +49,13 @@ type Options struct {
 	PerUserPerAppQueued int
 	// PerUserGlobalRunning 是单用户跨应用全局在跑上限（§4.6：4）。
 	PerUserGlobalRunning int
+	// WallClock 是请求端到端墙钟（含排队）。
+	//
+	// 队列**不自己造 deadline**（§4.6：两个 deadline 会让错误归属无法区分）——
+	// 它只观察调用方传进来的 ctx。这个字段唯一的作用是把"当时的预算是多少"
+	// 如实写进 wall_clock_exceeded 的错误明细：预算自 2026-10-01 起可由控制台配置
+	// （`request_wall_clock_seconds`），明细里再写编译期常量就会说谎。
+	WallClock time.Duration
 }
 
 // DefaultOptions 返回与 limits 包一致的缺省上限。
@@ -60,6 +67,7 @@ func DefaultOptions() Options {
 		PerUserPerAppRunning: limits.UserPerAppRunning,
 		PerUserPerAppQueued:  limits.UserPerAppQueued,
 		PerUserGlobalRunning: limits.UserGlobalRunning,
+		WallClock:            limits.RequestWallClock,
 	}
 }
 
@@ -82,6 +90,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.PerUserGlobalRunning <= 0 {
 		o.PerUserGlobalRunning = d.PerUserGlobalRunning
+	}
+	if o.WallClock <= 0 {
+		o.WallClock = d.WallClock
 	}
 	return o
 }
@@ -235,7 +246,7 @@ func (s *Scheduler) Acquire(ctx context.Context, appID string, userID int64) (*T
 		}
 		return nil, apperr.New(apperr.CodeAppQueueFull, "请求超时（含排队等待超过端到端墙钟）").
 			WithDetail("reason", "wall_clock_exceeded").
-			WithDetail("wall_clock_ms", limits.RequestWallClock.Milliseconds()).
+			WithDetail("wall_clock_ms", s.Options().WallClock.Milliseconds()).
 			WithHint("应用当前繁忙，请稍后重试")
 	}
 }

@@ -41,7 +41,7 @@
 
 | `reason_code` | 先看什么 | 通常怎么改 |
 | --- | --- | --- |
-| `RUNTIME_TIMEOUT` | `cpu_ms` 是否贴近 guest 预算（10 秒） | 拆成多次请求；检查不收敛的循环/重试；`db.query` 是分页而非全量 |
+| `RUNTIME_TIMEOUT` | `cpu_ms` 是否贴近 guest 预算（默认 30 秒，控制台 `guest_budget_seconds` 可调） | 拆成多次请求；检查不收敛的循环/重试；`db.query` 是分页而非全量 |
 | `RUNTIME_MEMORY` | `peak_memory_bytes` 是否贴近 64 MiB | 别把大结果集一次读进内存；先 `WHERE` 收窄再聚合 |
 | `RUNTIME_GUEST_EXIT` | `guest_exit_code` 与 `stderr_tail` | Go 里 `panic` 先 `recover` 再写错误响应；`os.Exit(非零)` 前必须已经写过响应帧 |
 | `RUNTIME_OUTPUT_OVERRUN` | 单次响应字节数 | 单帧不超过 1 MiB，而**保证可交付**的响应体只有 168 KiB（最坏 JSON 转义下仍要装进一帧；见 `references/abi.md` §4）；大列表要分页 |

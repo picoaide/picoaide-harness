@@ -139,6 +139,9 @@ func limitsPutBody() map[string]any {
 		"user_global_running": 5, "user_per_app_running": 2, "user_per_app_queued": 6,
 		"instance_memory_mb": 64, "module_cache_mb": 96, "module_cache_idle_min": 12,
 		"appdb_idle_min": 5, "appdb_cache_kib": 2048, "app_db_readers": 6,
+		// 时间预算（2026-10-01 新增；"必须提交完整对象"⇒ 夹具也要带齐）。
+		"guest_budget_seconds": 30, "dry_run_budget_seconds": 30, "host_call_budget_seconds": 5,
+		"request_wall_clock_seconds": 60, "sql_statement_budget_seconds": 5, "compile_timeout_seconds": 60,
 	}
 }
 

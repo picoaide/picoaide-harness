@@ -574,7 +574,8 @@ func (s *Server) loadReleaseWasm(ctx context.Context, rel *serverstore.WasmRelea
 // 为什么执行进程也允许编译（而不是"只读编译子进程的缓存、编不出来就报错"）：
 // 设计 §4.3.1-a 明确把"发布期编译暖不到执行进程时，进程重启后每个应用首个请求
 // 付一次冷编译（约 1.9 s）"当作**已知且可接受**的后果 —— 编译缓存命中是优化，
-// 不是前提。因此这里按 limits.CompileTimeout 预算就地编译，成功后进模块缓存。
+// 不是前提。因此这里按**当前生效的编译预算**（控制台 `compile_timeout_seconds` >
+// limits.CompileTimeout 默认）就地编译，成功后进模块缓存。
 //
 // 预算与失败语义（§7.4）：到点 ⇒ COMPILE_TIMEOUT(504)；其余失败 ⇒ INTERNAL
 // （发布期 validate 已经真编译过一次，走到这里失败说明平台状态异常；细节只进日志）。
@@ -589,13 +590,14 @@ func (s *Server) compileRelease(ctx context.Context, rel *serverstore.WasmReleas
 			WithDetail("size", len(rel.Wasm)).
 			WithDetail("max", limits.WasmMaxBytes)
 	}
-	cctx, cancel := context.WithTimeout(ctx, limits.CompileTimeout)
+	compileBudget := s.CurrentLimits().CompileTimeout()
+	cctx, cancel := context.WithTimeout(ctx, compileBudget)
 	defer cancel()
 	mod, err := s.rt.CompileModule(cctx, rel.Wasm)
 	if err != nil {
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
 			return compiledResult{}, apperr.New(apperr.CodeCompileTimeout, "编译应用模块超过预算").
-				WithDetail("budget_ms", limits.CompileTimeout.Milliseconds())
+				WithDetail("budget_ms", compileBudget.Milliseconds())
 		}
 		return compiledResult{}, apperr.New(apperr.CodeInternal, "编译应用模块失败（平台故障）").
 			WithCause(err).
