@@ -895,7 +895,7 @@ describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
     },
     {
       key: 'request_wall_clock_seconds', label: '请求端到端墙钟', unit: '秒', min: 1, max: 300,
-      hint: '含排队等待；到点即拒。必须严格大于 guest 预算',
+      hint: '含排队等待；到点即拒。必须严格大于 guest 预算。注意：客户端应用请求的出站预算是随包固定的 75 秒（必须晚于本值，否则员工只会看到网络错误）',
     },
     {
       key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', unit: '秒', min: 1, max: 300,

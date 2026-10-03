@@ -1,16 +1,22 @@
 /**
  * 超时预算序关系的跨包对拍（§13.2 判据①；台账 R1-L2-3）。
  *
- * 判据原文：**客户端出站超时（30 s）> `GuestBudget`（10 s）> `SQLStatementBudget`（5 s）>
- * `AppDBBusyTimeout`（3 s）**。为什么是硬要求（§5.1）：任何平台侧超时都必须**先于**客户端
- * 超时发生，否则员工只会看到"网络错误"，拿不到带 code/hints 的可读错误。
+ * 判据（2026-10-01 更新）：**客户端出站超时 > `RequestWallClock`（60 s，平台最外层，
+ * 含排队）> `GuestBudget`（30 s）> `SQLStatementBudget`（5 s）> `AppDBBusyTimeout`（3 s）**。
+ * 为什么是硬要求（§5.1）：任何平台侧超时都必须**先于**客户端超时发生，否则员工只会看到
+ * "网络错误"，拿不到带 code/hints 的可读错误。
+ *
+ * 最外层为什么是 `request_wall_clock` 而不是 `guest_budget`：墙钟把**排队**也算在内，
+ * 是"平台最晚什么时候一定给出结论"的那个数；只要求"大于 guest"会漏掉排队把请求拖过
+ * 客户端预算的那条路径（服务端此刻返回的是 APP_QUEUE_FULL + Retry-After，照样是可读错误）。
  *
  * 数值**不在这里硬编码**：真源 = 服务端生成物
  * `server/internal/wasmapp/limits/limits.json`（`go generate ./internal/wasmapp/limits`）。
  * 本用例只断言"存在 + 单位 + 严格递减" —— 改任一侧的预算都会让它红。
  *
  * 变异验证（实跑）：
- *  - `guest_budget` 10 → 60 ⇒ 必红（客户端 30 s 不再严格大于平台侧）；
+ *  - `guest_budget` 30 → 90 ⇒ 必红（guest 不再小于墙钟）；
+ *  - `request_wall_clock` 60 → 90 ⇒ 必红（客户端 75 s 不再严格大于平台最外层）；
  *  - `APP_REQUEST_TIMEOUT_MS` 30_000 → 5_000 ⇒ 必红。
  */
 import { readFileSync } from 'node:fs'
@@ -49,14 +55,16 @@ function secondsOf(key: string): number {
 }
 
 describe('超时预算序关系：客户端出站 > 平台侧全部预算（§13.2 ① / §5.1）', () => {
-  it('客户端出站超时严格大于 guest / SQL / busy 三个平台预算', () => {
+  it('客户端出站超时严格大于平台侧全部请求预算', () => {
+    const wall = secondsOf('request_wall_clock')
     const guest = secondsOf('guest_budget')
     const sql = secondsOf('sql_statement_budget')
     const busy = secondsOf('app_db_busy_timeout')
     const client = APP_REQUEST_TIMEOUT_MS / 1000
 
-    // 严格递减：30 > 10 > 5 > 3（数值全部来自真源，不写死）。
-    expect(client, `客户端出站超时 ${String(client)}s 必须严格大于 guest_budget ${String(guest)}s`).toBeGreaterThan(guest)
+    // 严格递减：75 > 60 > 30 > 5 > 3（数值全部来自真源，不写死）。
+    expect(client, `客户端出站超时 ${String(client)}s 必须严格大于 request_wall_clock ${String(wall)}s（平台最外层预算，含排队）`).toBeGreaterThan(wall)
+    expect(wall, `request_wall_clock ${String(wall)}s 必须严格大于 guest_budget ${String(guest)}s`).toBeGreaterThan(guest)
     expect(guest, `guest_budget ${String(guest)}s 必须严格大于 sql_statement_budget ${String(sql)}s`).toBeGreaterThan(sql)
     expect(sql, `sql_statement_budget ${String(sql)}s 必须严格大于 app_db_busy_timeout ${String(busy)}s`).toBeGreaterThan(busy)
   })
