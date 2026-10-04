@@ -44,12 +44,14 @@ describe('browser control contract: the pill button is the only entry', () => {
   it('胶囊锚在视图底部（宿主放大提示矩形时不许把胶囊一起拉大）', () => {
     // 2026-09-21（缺陷 #7）：胶囊态弹失败 toast 时宿主会把 overlay 视图临时放大到
     // 300×116。胶囊若继续 `height: 100%` 就会被拉成一整块盖住页面的大药丸 ——
-    // 所以它必须自己钉在视图底部、高度恒为 34px（紧凑态下与原来逐像素等价）。
+    // 所以它必须自己钉在视图底部、高度恒定（2026-10-04 P1 起是 44px，与
+    // runtime.overlayBounds('capsule') 的 CAPSULE_HEIGHT 逐像素一致；跨文件对拍见
+    // audit-1004-handback-visibility.spec.ts）。
     // 注意必须锚在行首：`body[data-mode="capsule"] .surface.s-capsule { display:flex }`
     // 里也含 `.s-capsule {`，不锚定就会断言到那条 display 规则上（本测试第一版踩过）。
     const rule = /^[ \t]*\.s-capsule \{([^}]*)\}/mu.exec(BROWSER_OVERLAY_HTML)?.[1] ?? ''
     expect(rule, '.s-capsule 基础规则').toContain('bottom: 0')
-    expect(rule).toContain('height: 34px')
+    expect(rule).toContain('height: 44px')
     expect(rule).not.toContain('height: 100%')
   })
 

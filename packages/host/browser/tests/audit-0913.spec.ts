@@ -23,7 +23,7 @@ import { BrowserRuntime } from '../src/runtime.ts'
 import { BrowserStore, stripSensitiveText, stripSensitiveUrl } from '../src/store.ts'
 import { applyBrowserTools } from '../src/tools.ts'
 import { orderFramesByDom, isFrameOrderProblem, type FrameCandidate } from '../src/frames.ts'
-import { wrapEvalExpression, EVAL_EGRESS_BLOCKED_MARKER, assertCredentialTabExpression, validateEvalExpression } from '../src/eval-policy.ts'
+import { wrapEvalExpression, EVAL_EGRESS_BLOCKED_MARKER, assertCredentialTabExpression, validateEvalExpression, serializeEvalResult } from '../src/eval-policy.ts'
 import type { ElectronAdapter, NativeBounds, NativeSession, NativeView } from '../src/electron-adapter.ts'
 import type { CdpTransport } from '../src/cdp.ts'
 
@@ -285,9 +285,20 @@ describe('R-1 出口统一脱敏', () => {
     const h = track(makeHarness(async () => ({ password: LONG_SECRET })))
     await h.runtime.open('https://app.example/login')
     await injectCredentials(h, 'corp', LONG_SECRET)
-    h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: `your password ${LONG_SECRET} is weak` } } : {})
+    const pageText = `your password ${LONG_SECRET} is weak`
+    h.adapter.lastView().transport.handler = (method) => (method === 'Runtime.evaluate' ? { result: { value: pageText } } : {})
     const text = await h.call('browser_get_text', { tab: 1 })
-    expect(text.text).toBe('your password **** is weak')
+    // C3-09（2026-10-04）：这条断言原先钉的是 `'your password **** is weak'` —— 那是
+    // **值级擦除**（整串 `S3cr3t-Passw0rd!` 逐字换 `****`）的读数，而同一段文本在
+    // `browser_eval` 侧一直是 `'your password ****! is weak'`（结构片段规则先吃掉不含
+    // 尾标点的那一段，剩下的 `!` 留着）。**同一份页面文本两个出口两个答案就是 C3-09 的
+    // 缺陷本身**，所以这里按共用漏斗的读数更新，并**加上**跨出口一致性断言 —— 判据比
+    // 改前更严（多钉了"两个出口必须同口径"与"明文不出窗"两条），不是放宽。
+    expect(text.text).not.toContain(LONG_SECRET)
+    expect(text.text).toBe('your password ****! is weak')
+    const viaEval = JSON.parse(serializeEvalResult(pageText)) as string
+    expect(viaEval).not.toContain(LONG_SECRET)
+    expect(text.text, 'get_text 与 eval 必须给同一个答案（共用漏斗）').toBe(viaEval)
   })
 })
 

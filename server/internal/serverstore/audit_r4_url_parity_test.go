@@ -124,6 +124,19 @@ var r4URLCorpus = []r4URLCase{
 	{"https://239.255.255.255/x", false, false, ""},
 	{"https://255.255.255.255/x", false, false, ""},
 	{"https://[64:ff9b::8.8.8.8]/x", false, false, ""},
+	// IPv6 过渡/翻译前缀的同族补齐(2026-10-04 审计 C3-06/C3-07 在客户端
+	// buildBlockedList() 补的 4 条;Go 镜像表同步,语料必须一起覆盖 ——
+	// 否则镜像表里这 4 条没有任何语料证据,判据就有洞)。口径与 `64:ff9b::/96`
+	// 同形:「整段拒」——这 4 个前缀存在的意义就是**包裹**一个 IPv4 地址
+	// (6to4 包网关、Teredo 包服务端/客户端、local-use NAT64 包译文地址),
+	// 「能到哪」由内嵌字段而非前缀决定,不去解包。
+	{"https://[2002:7f00:1::]/x", false, false, ""}, // 6to4 包裹 127.0.0.1
+	{"https://[2001::1]/x", false, false, ""},       // Teredo
+	{"https://[64:ff9b:1::1]/x", false, false, ""},  // local-use NAT64(RFC 8215)
+	{"https://[fec0::1]/x", false, false, ""},       // 站点本地(RFC 3879 弃用)
+	// 「整段拒」不得扩成「整段邻域拒」:紧邻这 4 段之外的同族地址照常放行。
+	{"https://[2003::1]/x", true, true, ""},      // 2002::/16 之外
+	{"https://[64:ff9b:2::1]/x", true, true, ""}, // 64:ff9b::/96 与 64:ff9b:1::/48 之外
 	{"https://[2001:db8:1234::1]/x", false, false, ""},
 	{"https://[2001:db9::1]/x", true, true, ""},
 	{"https://169.254.0.1/x", false, false, ""},

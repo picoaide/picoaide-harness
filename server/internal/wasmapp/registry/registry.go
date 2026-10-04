@@ -84,9 +84,19 @@ func CheckAppIDShape(id string) *apperr.Error {
 // `gin.Engine.Routes()` 派生后注入（见 `router.publishRouteReservedAppIDs`）。
 // 手抄清单在下次新增静态路由时必然漂移，而漂移的表现正是本条缺陷本身。
 //
+// **集合口径 = "在真实匹配树上真的会遮蔽 `:app_id` 的静态段"**（S7-2，v2.8.1→HEAD
+// 回归审计）：要抢走 `/apps/wasm/<app_id>/…` 的命名空间，静态段必须**能把下降领走**
+// —— 同层且它之下还有可匹配的子节点（现场只有 `uploads`：它下面有
+// `/uploads/:upload_id`，参数子节点会把下一段吞掉）。叶子形态的同层静态段
+// （`catalog` / `proof` / `validate`）与更深层的段（`open` / `rows` / `releases` …）
+// 都抢不走：gin 在静态分支找不到子节点时会退回参数分支，那些名字实测 169/169 可达。
+// 第一版收了**任意深度**的段，于是这些可达名字被一律拒 ⇒ X4-1 封口前建出来的存量
+// 应用永远发不出新版本（本规则挂在**每一次发布**上，不只是首版）。判据用真实匹配树
+// 双向对拍，多一个或少一个都红；因此不要在这里加"保守余量"。
+//
 // 注入点唯一（`router.Register`），接线判据在 `internal/router` 的
-// `wasm_appid_route_test.go`：派生集合 == 生效集合、每个静态段都被写侧拒、
-// 写侧接受的名字必须真的可达。
+// `wasm_appid_route_test.go`：派生集合 == 真实匹配树上会遮蔽的集合、每个静态段都被
+// 写侧拒、写侧接受的名字必须真的可达。
 var (
 	routeReservedMu  sync.RWMutex
 	routeReservedSet map[string]struct{}
@@ -171,7 +181,9 @@ func validateAppID(id string, extraReserved []string, routeStatic bool) *apperr.
 			WithDetail("reserved", id).
 			WithHint("该名字是平台/企业既有主机名，请换一个名字")
 	}
-	// X4-1：与平台路由静态段同名（如 `uploads` / `validate` / `catalog`）。
+	// X4-1：与平台路由静态段同名 —— 今天集合里只有 `uploads` 这类**真的会把
+	// `:app_id` 的下降领走**的段（叶子同层段与更深层的段都可达，不进集合；
+	// 口径见 routeReserved）。
 	// 必须在**写侧**就 fail-loud —— 放过去就等于"应用建得成、但永远打不开"，
 	// 且名字与版本号永久占位、作者无从自查。
 	if routeStatic && routeReserved(id) {

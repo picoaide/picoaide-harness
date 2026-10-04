@@ -59,19 +59,54 @@ var pushClient = &http.Client{
 // allowPrivateHookHosts 允许 webhook 指向回环/私网地址(仅测试注入;生产恒 false)。
 var allowPrivateHookHosts = false
 
-// blockedHookCIDRs 不得作为 webhook 目标的内网/保留网段(SSRF 防护)。
+// blockedHookCIDRList 不得作为 webhook 目标的内网/保留网段(SSRF 防护)。
 // 覆盖:未指定/回环/私网/链路本地/CGNAT/文档与基准测试网段/组播/保留。
+//
+// 2026-10-04 审计(C3-07 同族补集,webhook 面):这张表比连接器侧
+// (server/internal/serverstore/connectors.go 的 connectorBlockedNetworks)更早、
+// 更窄 —— `64:ff9b::/96`(NAT64)、`100::/64`(discard)、`2001:db8::/32`(文档段)
+// 连接器表 2026-09-13 就补了,这里一直没有;`2002::/16`(6to4)、`2001::/32`
+// (Teredo)、`64:ff9b:1::/48`(local-use NAT64)、`fec0::/10`(弃用站点本地)
+// 则是 C3-07 给连接器表补齐的四个兄弟。缺口的后果是真实的:`hookHostAllowed`
+// 不只是提示 —— `validateHookURL`(建单/推送前)与 `safeHookDialContext` /
+// `safeHookProxyFromEnvironment`(连接/选代理前)都据它拒绝,少一段就是真的
+// 能让 webhook 打到 NAT64/6to4 包着的私网地址、或让运维把月报 POST 到文档段。
+// 故按连接器侧**同一口径**补齐(错的是"更宽",不会收紧到误拒公网目标)。
+//
+// 清单是常量:解析失败即编程错误 ⇒ panic(与连接器侧
+// serverstore.connectorMustParseCIDRs 同口径)。**不要**改回 `if err == nil`
+// 静默跳过 —— 一个拼错的网段会让整段防护无声消失,而服务照常启动、判据照常绿。
+var blockedHookCIDRList = []string{
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16",
+	"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+	"::/128", "::1/128",
+	// IPv6 过渡/翻译机制与文档段:每个过渡前缀都把 IPv4 地址藏在位域里
+	// (6to4 = 网关地址,Teredo = 服务端/客户端地址,NAT64 = 被翻译地址),
+	// 而 `net.IP` 的 IsPrivate/IsLinkLocal* 对这些全局单播字面量全部为假 ——
+	// 只有整段拒绝才拦得住(理由与连接器侧同一份,见 outbound.ts 的
+	// buildBlockedList)。
+	"2001::/32",      // Teredo(RFC 4380)
+	"2002::/16",      // 6to4(RFC 3056;RFC 7526 弃用)
+	"64:ff9b::/96",   // NAT64(RFC 6052)
+	"64:ff9b:1::/48", // local-use NAT64(RFC 8215)
+	"100::/64",       // 丢弃前缀(RFC 6666)
+	"2001:db8::/32",  // 文档段(RFC 3849)
+	"fc00::/7",       // 唯一本地
+	"fe80::/10",      // 链路本地
+	"fec0::/10",      // 站点本地(RFC 3879 弃用),fc00::/7 的定址祖先
+	"ff00::/8",       // 组播
+}
+
+// blockedHookCIDRs 是 blockedHookCIDRList 的解析结果(初始化期 fail-loud)。
 var blockedHookCIDRs = func() []*net.IPNet {
-	var out []*net.IPNet
-	for _, c := range []string{
-		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
-		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16",
-		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-		"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
-	} {
-		if _, n, err := net.ParseCIDR(c); err == nil {
-			out = append(out, n)
+	out := make([]*net.IPNet, 0, len(blockedHookCIDRList))
+	for _, c := range blockedHookCIDRList {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("reports: 非法 webhook 出站防护网段 " + c + ": " + err.Error())
 		}
+		out = append(out, n)
 	}
 	return out
 }()

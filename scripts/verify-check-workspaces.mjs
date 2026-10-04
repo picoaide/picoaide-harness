@@ -145,6 +145,7 @@ const SELF_CHECKS = [
   { id: 'registry-reconciled', label: '自检登记表双向对拍(跑到的 == 登记的)' },
   { id: 'domain-root-anchor', label: '域名守卫的扫描根断言可被 --selftest 打坏(R4-A N4)' },
   { id: 'doc-claims-selftest-wired', label: '文档数字守卫的 --selftest 有调用方且可被打坏(R15A-02)' },
+  { id: 'selftest-floor-ratchet', label: '两个守卫的**内部**自检地板不得低于这里的外部棘轮(V-P10P11 §2.3)' },
   { id: 'channel-events', label: '检测通道与计票通道一致(数组长度 == 事件计数)' },
   { id: 'exit-channel', label: '任一通道有失败事件 ⇒ 退出码必须为 1(检测 ≠ 退出)' },
   { id: 'verdict-witness-independent', label: 'VERDICT_LINE 形态的见证来自独立文件(第十三轮 V1 §4.2)' },
@@ -155,9 +156,36 @@ const SELFTEST_MIN_SELF_CHECKS = SELF_CHECKS.length
  * `check-doc-claims.mjs --selftest` 的**断言条数下限**（棘轮，R15A-02 的接线）。
  *
  * 为什么是"下限"而不是"等于"：加样本是好事（只允许被越过），删样本必须同时改这里并进 diff
- * —— 否则"把 47 条掏成 1 条"之后，那条守卫照旧打 `自检 1/1 项通过 ✅` 而没人看得出来。
+ * —— 否则"把 91 条掏成 1 条"之后，那条守卫照旧打 `自检 1/1 项通过 ✅` 而没人看得出来。
+ *
+ * 2026-10-05 收口轮③（独立核验 V-P10P11 §2.3）：**47 → 91**，与守卫内部
+ * `SELFTEST_MIN_CASES`（同样是 91）对齐。修前这里低于内部 ⇒ 把内部地板降下来
+ * （实测 91→60 并清空 needle 表）之后本文件照旧 EXIT=0，**外部这道闸门形同虚设**。
+ * 现在两条腿一起用：① 本条硬棘轮（改小必须进 diff）；② 下面
+ * `selftest-floor-ratchet` 直接**读守卫源码里的内部地板常量**做交叉对拍。
  */
-const DOC_CLAIMS_SELFTEST_FLOOR = 47
+const DOC_CLAIMS_SELFTEST_FLOOR = 91
+/**
+ * `check-workflows.mjs` 的**定向自检样本条数下限**（外部棘轮，同款，收口轮③）。
+ *
+ * 对应守卫内部的 `SELFTEST_MIN_REQUIRED_SAMPLES`（当前 166）。V-P10P11 的 `G5e` 实测
+ * "删一格具名样本 + 把内部地板 166→165" ⇒ 守卫 EXIT=0（那条地板是唯一锚）。本文件把
+ * 外部值也钉住之后，**改小内部地板而不同步这里**就会当场红（进 diff 才能改）。
+ */
+const CHECK_WORKFLOWS_REQUIRED_SAMPLES_FLOOR = 168
+/**
+ * 从守卫源码里读一个 `const <NAME> = <整数>` 常量（交叉对拍用）。
+ *
+ * 读不出（改名/改成表达式/被注释掉）返回 `undefined` ⇒ 调用方 fail-loud —— 交叉对拍
+ * **绝不**因为"锚点没了"就静默放行。
+ * @param source - 守卫源码。
+ * @param name - 常量名。
+ * @returns 数值；读不出返回 undefined。
+ */
+function internalFloorFrom(source, name) {
+  const match = new RegExp(`^const ${name} = (\\d+)$`, 'mu').exec(source)
+  return match === null ? undefined : Number(match[1])
+}
 /** 红色副本的子进程标记：副本只做"必假断言"这一件事，不再递归生成副本。 */
 const RED_PROBE_CHILD_ARG = '--selfcheck-red-probe-child'
 /** 注入给红色副本的恒假断言文本（探针按它断言"具名失败"确实到达 stderr）。 */
@@ -2174,6 +2202,41 @@ if (!redProbeChild && !selfCheckProbeChild) {
       `文档数字守卫 --selftest 只剩 ${summary[1]} 条（下限 ${DOC_CLAIMS_SELFTEST_FLOOR}）——`
         + ' 样本表被掏空/判据被删时它仍然是绿的，所以这条下限是"自证网还在不在"的棘轮。')
   }
+  // ---- 收口轮③（V-P10P11 §2.3）：外部棘轮 vs **守卫内部地板** 的交叉对拍 --------------
+  //
+  // 现场：内部 `SELFTEST_MIN_CASES` 从 91 降到 60（并清空 needle 表）之后，守卫的
+  // `--selftest` 照旧 `96/96 通过`，而本文件的外部地板 47 也照旧通过 ⇒ 两条闸门一起失效。
+  // 判据（两个方向都咬）：
+  //   ① 内部地板**不得低于**这里的外部棘轮（改小必须同步改本文件的常量并进 diff）；
+  //   ② 内部地板常量读不出（改名/被注释）⇒ 前置失败，不静默放行。
+  {
+    const problems = []
+    const docClaimsInternal = internalFloorFrom(docClaimsSource, 'SELFTEST_MIN_CASES')
+    if (docClaimsInternal === undefined) {
+      problems.push('读不到 `check-doc-claims.mjs` 的 `SELFTEST_MIN_CASES` —— 交叉对拍的锚点失效'
+        + '（改名/改成表达式/被注释掉都会落到这里；本文件不猜）')
+    } else if (docClaimsInternal < DOC_CLAIMS_SELFTEST_FLOOR) {
+      problems.push(`\`check-doc-claims.mjs\` 的内部地板 SELFTEST_MIN_CASES=${docClaimsInternal} `
+        + `低于本文件的外部棘轮 ${DOC_CLAIMS_SELFTEST_FLOOR} —— 内部地板被悄悄改小，而外部这道闸门`
+        + '（以及它盯着的"自检 N/N"打印）都不会报；改小内部地板必须同时改这里并进 diff')
+    }
+    const workflowsPath = join(root, 'scripts', 'check-workflows.mjs')
+    const workflowsSource = readFileSync(workflowsPath, 'utf8')
+    const workflowsInternal = internalFloorFrom(workflowsSource, 'SELFTEST_MIN_REQUIRED_SAMPLES')
+    if (workflowsInternal === undefined) {
+      problems.push('读不到 `check-workflows.mjs` 的 `SELFTEST_MIN_REQUIRED_SAMPLES` —— 交叉对拍的锚点失效')
+    } else if (workflowsInternal < CHECK_WORKFLOWS_REQUIRED_SAMPLES_FLOOR) {
+      problems.push(`\`check-workflows.mjs\` 的内部地板 SELFTEST_MIN_REQUIRED_SAMPLES=${workflowsInternal} `
+        + `低于本文件的外部棘轮 ${CHECK_WORKFLOWS_REQUIRED_SAMPLES_FLOOR} —— 同上的弱化面`
+        + '（V-P10P11 的 G5e：删一格具名样本 + 降内部地板 ⇒ 守卫 EXIT=0）')
+    }
+    if (problems.length > 0) {
+      for (const problem of problems) selfCheckFail('selftest-floor-ratchet', problem)
+    } else {
+      selfCheckPass('selftest-floor-ratchet')
+    }
+  }
+
   const ruleNeedle = 'const COVERAGE_ITEMS = ['
   const ruleSplice = `const __docClaimsSelftestProofIndex = NUMBER_CLAIM_RULES.findIndex(rule => rule.id === 'client-platforms')
 if (__docClaimsSelftestProofIndex >= 0) NUMBER_CLAIM_RULES.splice(__docClaimsSelftestProofIndex, 1)

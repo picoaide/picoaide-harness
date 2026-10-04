@@ -158,28 +158,28 @@ const MINIMUM_REQUIRED_GUARDS = [
  */
 const REGISTERED_GUARD_ENTRIES = new Map([
   ['check:layout', { script: 'node scripts/verify-layout.mjs', argvTail: [], digest: '7f5f2073b0eec7fd0ea9ff47d86ba0b1e85bdbc3673544ed5680a20da6dd5cdc' }],
-  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: 'ad8fb4bbfc6ec9d0865c28ba361f4bbe8c2e39c8a3e30b98e08f335ddb27c71b' }],
-  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: '2eec1717099b71d66d04b5424f6541c5e6c174dc5391bd4450847c0f2c9cbc1a' }],
+  ['check:workflows', { script: 'node scripts/check-workflows.mjs', argvTail: [], digest: '5230c49bb5de3d7d1bd94208f22e8b51dbeffe96f3a143401ff0fe64cb1c804e' }],
+  ['check:ci-scripts', { script: 'node scripts/verify-ci-scripts.mjs', argvTail: [], digest: 'bf3a302fb1b7c5bd5282c3dbce9bf0990745068a0e818f08e66b6c21ea837159' }],
   ['check:patch-resolutions', { script: 'node scripts/verify-patch-resolutions.mjs', argvTail: [], digest: '6dcde2281311235a57722608d91e6a1fa59734411ad65cda76ea2bdc43145c83' }],
   ['check:patch-pin', { script: 'node scripts/check-patch-pin.mjs', argvTail: [], digest: 'a8fe5b45df5dfadd7a87332b31f9e14c4a6722a41f21cf0f0d9afa6450a3ba84' }],
   ['check:patches', { script: 'node scripts/verify-patches.mjs', argvTail: [], digest: '22131d86472ff930f22687192b07216c5cf74ab594d0091a6766e661a2c24683' }],
   ['check:inventories', { script: 'node scripts/verify-inventories.mjs', argvTail: [], digest: '39528c7984ee7baf0cad92faaa3b421f7f64e4d08b524d63417e896abb57267d' }],
   ['check:theme-tokens', { script: 'node scripts/check-theme-tokens.mjs', argvTail: [], digest: '1523cdf07984516d5696ee76aaa87cdb12cf5c94c69908b27ac4ec7e210bc5e4' }],
   ['check:glitchtip', { script: 'node scripts/verify-glitchtip-ops-check.mjs', argvTail: [], digest: 'f73f2ebcecbfeaaa57c069ca2e662dc1842b9d37d53eb413fc36bb85a987be3e' }],
-  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: '7db5a2078ca7bba40c5fb5cb9c3ccc7269342691b9fe0d08527a1a24591ceb9a' }],
+  ['check:check-workspaces', { script: 'node scripts/verify-check-workspaces.mjs', argvTail: [], digest: '47a5a51ff14d7b96a474730c93588314411c442329732fb71c8ac68af215636c' }],
   ['check:no-leftover-mutants', { script: 'node scripts/check-no-leftover-mutants.mjs', argvTail: [], digest: 'c1a84c22a47bea2c1368bfba32f33b20feca66deb30abcbbc0eb40318f807285' }],
-  ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: '8fa99a48c3439006545303cd5965c32768b450871eaaec71c50ca2d85693475e' }],
-  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '7bf93bda612dc031504cbb3b62ad4e7fc61171978c130d5283f4b02f0ab27948' }],
-  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'debac95a09ba059181589cea63660dd1c2c1cf24337db5f6f1129402dfc6d6b2' }],
+  ['check:migration-range', { script: 'node scripts/check-migration-range.mjs', argvTail: [], digest: 'e7e8ac6306652f0bd114a7c91d53abb4ad0e2d7f7adf3286036a7ad847d76217' }],
+  ['check:doc-claims', { script: 'node scripts/check-doc-claims.mjs', argvTail: [], digest: '772bbe9c8d76182370c928e0c4395ecb24d55b7dd135f235f5fd4fb07b7190c0' }],
+  ['check:no-real-domains', { script: 'node scripts/check-no-real-domains.mjs', argvTail: [], digest: 'ecc5252c76e5e4a20e25bf609504c6fad0188de1e346a442bdb9b50c0769319b' }],
   // `--portable`：只跑便携子集（需要真 PG / 显示器的组归 server job 与 W6 三平台）。
   // FIX-48③ 起：本脚本 run-id 化（证据目录 `temp/wasm-client-only/runs/<run-id>/`），
   // 摘要在同一个 PR 里同步（可评审的 diff）。
   ['check:wasm-client-only', { script: 'bash scripts/verify-wasm-client-only.sh', argvTail: ['--portable'], digest: '2ac17dcebf24a358bea66f7f9c3015610fb0b9ab8fcaaeeeec12007f704bd8a5' }],
-  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: 'ef2fe65c42a0a580655aef57e23ee880d818a2115a38ddf835902f6df1844431' }],
+  ['check:integration-tests', { script: 'node scripts/check-integration-tests.mjs', argvTail: [], digest: 'c6029fd691e100751130186fc0a3d1c57a05d2c00a665684df66d1bd7bf250f8' }],
   // 守卫脚本**内容**的判据（第十轮审计 C-06/C-17）。它的判据面里同时包含:
   //   · 本表每条 `digest` ↔ 该守卫脚本的 sha256(内容替换/符号链接替换都红);
   //   · 门禁自己依赖的解析器(`node_modules/yaml`)的**文件集** sha256 ↔ 登记值。
-  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: '4f11d5cc420991325f4dd3387f1e99804371860174753765611f2cc2d9236365' }],
+  ['check:guard-parser-integrity', { script: 'node scripts/check-guard-parser-integrity.mjs', argvTail: [], digest: 'e71d10bdb1c9d4b25f4966956696f7c74bb1d156e900fd882618d64c80a2e98a' }],
 ])
 
 /**

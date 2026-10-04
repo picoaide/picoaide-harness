@@ -45,7 +45,11 @@
  *
  * 用法：node scripts/check-no-real-domains.mjs [--root <dir>] [--unmasked] [--json]
  *                                            [--selftest] [--no-commit-range]
- * 退出码：0 = 零命中；1 = 有命中（含自证失败）；2 = 用法错误；
+ * 退出码：0 = 零命中；1 = 有命中（含自证失败）；
+ *         2 = 用法错误 / **白名单理由链登记面错误** —— 前置失败，不是"范围内发现了域名"。
+ *             五向判据 + 两条下限中任一条不成立都落这里：登记路径不存在 / 注释与登记不一致 /
+ *             **注释区里出现了未登记的仓内路径引用**（反向覆盖）/ 登记表低于条数下限 /
+ *             豁免表超上限或含死豁免（见 `rationalePathFindings`）；
  *         3 = **判据没能完成**（提交信息区间看不到历史，或**扫描面为 0 个文件**）——
  *             这不是"零命中"，处置见 `commitRangeFindings` 与主流程的 emptySurface 分支。
  *
@@ -133,8 +137,10 @@ const ALLOWED_DOMAINS = {
     'deepwiki.com', 'cloud.google.com', 'mcp.cloudflare.com', 'cloudflarestorage.com',
   ],
   // 模型权重分发（随包语音模型的官方源与公开镜像）。这两条是**上游 provider 自己的缺省源**
-  // （`speech-to-text-sensevoice/src/config.ts` 的 `modelOrigins` 缺省值），我们的
-  // `scripts/fetch-speech-model.mjs` 按同一份清单拉取；与任何客户/部署身份无关。
+  // （上游 `speech-to-text-sensevoice` 包的 `src/config.ts` 里 `modelOrigins` 的缺省值），我们的
+  // `packages/host/desktop/scripts/fetch-speech-model.mjs` 按同一份清单拉取；与任何客户/部署身份无关。
+  // （2026-10-04 D-03：这里曾写 `scripts/fetch-speech-model.mjs` —— 该路径**不存在**，
+  //  理由链于是不可复核。仓内路径的登记与对账见 `REGISTERED_WHITELIST_RATIONALE_PATHS`。）
   '模型权重分发': [
     'huggingface.co', 'hf-mirror.com',
   ],
@@ -163,6 +169,326 @@ const ALLOWED_DOMAINS = {
     'evil.com', 'evil.net', 'real.com', 'self.com', 'localhost.com', 'mycompany.com',
     'placeholder.com', 'x.com', 'baidu.com', 'gvt1.com',
   ],
+}
+
+/**
+ * `ALLOWED_DOMAINS` 块在**本文件源码**里的起始标记（理由链判据靠它切出"白名单注释区"，
+ * 见 {@link rationalePathFindings}）。写成常量而不是散落的字面量：改名/改形态时这条判据
+ * 会 fail-loud 而不是静默失锚。
+ */
+const ALLOWED_DOMAINS_SOURCE_MARKER = 'const ALLOWED_DOMAINS = {'
+
+/**
+ * 白名单**理由链**引用的仓内路径登记表（2026-10-04 D-03）。
+ *
+ * ## 为什么需要它
+ *
+ * `ALLOWED_DOMAINS` 是登记式白名单，**分组名即理由**；其中几组的理由又指向"这些域名到底被
+ * 谁消费"的仓内文件。审计实测：`模型权重分发` 的注释引用 `scripts/fetch-speech-model.mjs`，
+ * 而该路径**不存在**（真身在 `packages/host/desktop/scripts/`）—— 理由链于是从"可复核"
+ * 退化成"看起来有理由"：下一个人按图索骥会直接撞空。
+ *
+ * ## 判据（五向 + 两条下限，任意一条不成立 = 登记面错误）
+ *
+ *   ① 登记项挂的**分组名**必须真的在 `ALLOWED_DOMAINS` 里（分组被改名/删除 ⇒ 登记悬空）；
+ *   ② `path` 必须在本文件**白名单注释区**里以 `` `path` `` 形态逐字出现 —— 登记与注释是
+ *      同一份事实：只改注释不改登记（或反之）都红，这条就是"死条目"那一侧；
+ *   ③ `path` 必须**存在于磁盘**，且给了 `mentions` 时该文件内容里必须真的出现这个串 ——
+ *      指针不仅要解析得到，还要指向**消费这些域名的那个文件**（`hf-mirror.com` 之于
+ *      `fetch-speech-model.mjs`），这才叫"可复核"；
+ *   ④ **反向覆盖**（2026-10-04 D-03 复审 N2）：注释区里以反引号引用的、形如仓内相对路径的
+ *      token **必须**都能在本登记表（或 {@link RATIONALE_PATH_EXEMPTIONS}）里找到对应项。
+ *      旧实现只有 ①②③ 的单向判据（"登记 → 注释/磁盘"），于是四条实测形态全部门禁全绿：
+ *      注释掉一条登记 / 清空登记表 / 在注释区新增一行悬空路径 / 把注释路径改回不存在的旧值
+ *      —— 最后一格正是 D-03 原缺陷**逐字复现**而守卫一声不响。这一向就是为它补的。
+ *   ⑤ 豁免表的纪律（{@link RATIONALE_PATH_EXEMPTIONS}）：逐条写理由、条数不超上限、
+ *      每条都真的出现在注释区（凭空预置 = 死豁免 ⇒ 红）、不得与登记表重叠。
+ *
+ * 两条**下限**（ratchet，只许显式提高，理由见常量注释）：登记表条数 ≥
+ * {@link MIN_REGISTERED_RATIONALE_PATHS}、豁免条数 ≤ {@link MAX_RATIONALE_PATH_EXEMPTIONS}。
+ * 没有下限时"清空登记表"或"把待判路径全加进豁免"就能把红翻绿（复审实测清空 ⇒ EXIT=0）。
+ *
+ * ## 只在扫本仓根时判
+ *
+ * `--root <合成夹具>` 的扫描面里当然没有这些文件（与 `BINARY_SCAN_ACCEPTED` 的死条目对账
+ * 同一取向：特判必须**可见**，不能静默降级）。这种降级在 `--json` 里读作
+ * `whitelistRationale: "skipped"`（**不**报 `"checked"` —— 见主流程的 rationaleVerdict）。
+ *
+ * 新增一条理由链引用时的动作：把路径写进注释（反引号包裹）**并且**在这里登记一项；
+ * 两者缺一即红，所以不存在"只在注释里写一句就完事"的空间。**历史/说明性**引用
+ * （如"这里曾写 X —— 该路径不存在"）与**别的包内部**的相对路径走
+ * {@link RATIONALE_PATH_EXEMPTIONS}，并逐条写明理由。
+ */
+const REGISTERED_WHITELIST_RATIONALE_PATHS = [
+  {
+    group: '模型权重分发',
+    path: 'packages/host/desktop/scripts/fetch-speech-model.mjs',
+    mentions: 'hf-mirror.com',
+    why: '随包语音模型的拉取脚本：它按上游 provider 的同一份清单从这两个源取权重（D-03 修复点）',
+  },
+  {
+    group: '公开标准命名空间（文件格式元数据）',
+    path: 'packages/host/desktop/scripts/macos-entitlements.plist',
+    mentions: 'apple.com',
+    why: 'XML plist 的 DOCTYPE 指向 apple.com 的公开 DTD（文件格式自带，不是任何客户身份）',
+  },
+  {
+    group: '代码标识符假阳性（非主机名）',
+    path: 'scripts/glitchtip-ops-check.mjs',
+    mentions: 'cfg.org',
+    why: '本仓唯一一处 `.org` 命中：它是配置对象属性 `cfg.org`，不是主机名',
+  },
+]
+
+/**
+ * 理由链登记表的**条数下限**（2026-10-04 D-03 复审 N2）。
+ *
+ * 只允许**提高**。旧实现没有下限：`REGISTERED_WHITELIST_RATIONALE_PATHS = []` 时三条判据
+ * 全部空跑（0 条 ⇒ 循环体一次都不进）而门禁照打 `零命中 ✅` + EXIT=0（复审实测 M5 格）。
+ * 降低它必须是一次显式决定 —— 会出现在 diff 里，评审者能问"为什么这条理由链不再需要登记"。
+ */
+const MIN_REGISTERED_RATIONALE_PATHS = 3
+
+/**
+ * 白名单注释区里**允许出现、但不必登记为"当前消费方路径"**的路径 token（2026-10-04 D-03 复审 N2）。
+ *
+ * 为什么需要豁免：注释区里除了"消费方指针"，还有两类**真实存在但不是指针**的路径引用 ——
+ *   · `historical`：说明"这里曾写 X、X 不存在"的历史注记（X 按定义不存在，登记成 current 会红）；
+ *   · `package-relative`：指向**别的包内部**的相对路径（相对该包根，不是仓库根），
+ *     按仓库根解析必然撞空。
+ *
+ * 豁免是 ratchet 的一部分，受三条对拍约束（缺任一条，"加豁免"就变成把红翻绿的后门）：
+ *   1. 条数 ≤ {@link MAX_RATIONALE_PATH_EXEMPTIONS}（提高上限 = 一次显式、进 diff 的决定）；
+ *   2. 该 token 必须真的出现在白名单注释区（凭空预置的豁免 = **死豁免** ⇒ 红）；
+ *   3. `historical` 的 token 在仓库根**不得存在**（真存在了 ⇒ 历史注记过期 ⇒ 红）。
+ */
+const RATIONALE_PATH_EXEMPTIONS = [
+  {
+    token: 'scripts/fetch-speech-model.mjs',
+    kind: 'historical',
+    why: 'D-03 原来写错的旧值：注释里作为"这里曾写 X —— 该路径不存在"的历史注记出现。'
+      + '它按定义不存在，也不得再作为 current 指针（真身在 packages/host/desktop/scripts/）。',
+  },
+  {
+    token: 'src/config.ts',
+    kind: 'package-relative',
+    why: '上游 provider 包（speech-to-text-sensevoice）**包内**的相对路径，用来解释这两个'
+      + '域名是该包 `modelOrigins` 的缺省值；按仓库根解析必然撞空，属"说明性引用"，'
+      + '不是本仓的消费方指针。',
+  },
+]
+
+/**
+ * 豁免条数上限（ratchet，只允许显式提高）—— 与 {@link MIN_REGISTERED_RATIONALE_PATHS} 同一取向：
+ * 没有它就能靠"给每条待判路径加一条豁免"把红翻绿，而那正是本仓登记过的假绿模式之一。
+ */
+const MAX_RATIONALE_PATH_EXEMPTIONS = 2
+
+/**
+ * 从**本文件源码**里切出 `ALLOWED_DOMAINS` 的块（含其注释）。
+ *
+ * @param {string} source - 本文件源码。
+ * @returns {string|null} 块文本；定位不到时 null（调用方 fail-loud）。
+ */
+function allowedDomainsSourceRegion(source) {
+  const start = source.indexOf(ALLOWED_DOMAINS_SOURCE_MARKER)
+  if (start < 0) return null
+  const end = source.indexOf('\n}\n', start)
+  if (end < 0) return null
+  // 不额外做"标记必须唯一"的断言：标记字面量就写在常量定义那一行里，点名它自己会被算成
+  // 第二次出现（自指）。切错块的后果由调用方的第②条判据兜住 —— 切出来的区域里没有登记
+  // 的路径时它当场红，不会静默放行。
+  return source.slice(start, end + 2)
+}
+
+/**
+ * 被 {@link looksLikeRepoRelativePath} 认作"源码/配置文件"的扩展名。
+ * 只列本仓真的会出现的种类；宁窄勿宽（宽一分就多一分把正文词卷进判据面的风险）。
+ */
+const RATIONALE_PATH_EXTENSIONS = [
+  'mjs', 'cjs', 'js', 'mts', 'cts', 'ts', 'tsx', 'jsx', 'json', 'yaml', 'yml',
+  'md', 'sh', 'bash', 'plist', 'go', 'py', 'css', 'html', 'svg', 'toml',
+]
+
+/**
+ * 注释区里的反引号 token **是不是"形如仓内相对路径"**（2026-10-04 D-03 复审 N2）。
+ *
+ * 为什么需要形状判据、而不是"所有反引号 token 都要有登记项"：注释区里绝大多数反引号 token
+ * 是域名、包名、常量名、属性名（`example.com`、`cfg.org`、`modelOrigins`…），把它们也卷进
+ * 来等于要求给每个反引号 token 配一条理由 —— 那是把白名单养肥，本仓已登记的假绿模式之一。
+ *
+ * **认账的边界**：非反引号形态的路径引用不在判据里（与判据②同口径）。理由是"路径"与
+ * "正文里的普通词"在这一层没有可判别的形状，放宽到任意 token 会产生大片假红；反引号
+ * 是本文件引用仓内路径的既有约定（D-03 那个缺陷也是这个形态）。
+ *
+ * @param {string} token - 反引号里的原始 token（已 trim）。
+ * @returns {boolean} 形如仓内相对路径 ⇒ true。
+ */
+function looksLikeRepoRelativePath(token) {
+  if (token.length === 0 || token.length > 200) return false
+  if (token.includes('://')) return false // URL 不是仓内路径
+  if (token.startsWith('/') || token.startsWith('~') || token.startsWith('.')) return false // 绝对/家目录/相对写法
+  if (!token.includes('/')) return false // 单段 token：域名、包名、属性名、扩展名
+  if (/[\s*?<>|"'`\\]/u.test(token)) return false // 通配/引号/反斜杠 ⇒ 不是确定性路径
+  if (token.includes('…') || token.includes('...')) return false // 省略写法（`…/DTDs/x.dtd`）
+  return RATIONALE_PATH_EXTENSIONS.some(extension => token.endsWith(`.${extension}`))
+}
+
+/**
+ * 从白名单注释区里枚举"形如仓内相对路径"的反引号 token（去重、排序）。
+ *
+ * @param {string} region - {@link allowedDomainsSourceRegion} 切出的块。
+ * @returns {string[]} token 列表。
+ */
+function rationalePathTokens(region) {
+  const tokens = new Set()
+  for (const match of region.matchAll(/`([^`\n]+)`/gu)) {
+    const token = match[1].trim()
+    if (looksLikeRepoRelativePath(token)) tokens.add(token)
+  }
+  return [...tokens].sort()
+}
+
+/**
+ * 白名单理由链判据（判据说明见 {@link REGISTERED_WHITELIST_RATIONALE_PATHS}）。
+ *
+ * @param {string} root - 扫描根。
+ * @param {object} [options] - 测试缝（自证用）：`isRepoScan` / `entries` / `exemptions` /
+ *   `source` / `minRegistered` / `maxExemptions`。
+ * @returns {{ failures: string[], skipped: boolean, registered: number, exemptions: number,
+ *   pathTokens: string[] }} 失败原因；`skipped` = 本次未生效（**不得**读作"判过且通过"）。
+ */
+function rationalePathFindings(root, options = {}) {
+  const isRepoScan = options.isRepoScan ?? true
+  const entries = options.entries ?? REGISTERED_WHITELIST_RATIONALE_PATHS
+  const exemptions = options.exemptions ?? RATIONALE_PATH_EXEMPTIONS
+  const minRegistered = options.minRegistered ?? MIN_REGISTERED_RATIONALE_PATHS
+  const maxExemptions = options.maxExemptions ?? MAX_RATIONALE_PATH_EXEMPTIONS
+  const base = { registered: entries.length, exemptions: exemptions.length, pathTokens: [] }
+  if (!isRepoScan) return { failures: [], skipped: true, ...base }
+  const failures = []
+  let source = options.source
+  if (source === undefined) {
+    try {
+      source = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+    } catch (error) {
+      // 读不到自己的源码 ⇒ 判据没有输入。拒绝当通过（本守卫的两条铁律之一：不许静默缩小面）。
+      return {
+        failures: [`读不到守卫自身源码（${error?.code ?? error?.message ?? '未知原因'}）`
+          + '⇒ 白名单理由链判据没有输入，拒绝当作通过'],
+        skipped: false,
+        ...base,
+      }
+    }
+  }
+  const region = allowedDomainsSourceRegion(source)
+  if (region === null) {
+    return {
+      failures: [`在本文件源码里定位不到 ${ALLOWED_DOMAINS_SOURCE_MARKER}（改名/改形态）`
+        + '⇒ 理由链判据的锚点失效，拒绝当作通过'],
+      skipped: false,
+      ...base,
+    }
+  }
+  const pathTokens = rationalePathTokens(region)
+
+  // ⑤-a 两条下限（ratchet）。**先判下限**：登记表被清空时下面几向会因为"没有条目"而整体
+  // 空跑，只有这一条能把它判红；豁免表同理（靠加豁免把红翻绿）。
+  if (entries.length < minRegistered) {
+    failures.push(`白名单理由链**登记表低于下限**：${entries.length} 条 < ${minRegistered} 条`
+      + '（登记表被清空/裁剪后本条判据会整体空跑 ⇒ 拒绝当作通过；确属不再需要的理由链，'
+      + '要在同一次 diff 里显式降低 MIN_REGISTERED_RATIONALE_PATHS 并说明原因）')
+  }
+  if (exemptions.length > maxExemptions) {
+    failures.push(`白名单理由链**豁免超上限**：${exemptions.length} 条 > ${maxExemptions} 条`
+      + '（豁免是 ratchet：提高上限必须是一次显式、进 diff 的决定，不能靠加豁免把红翻绿）')
+  }
+
+  const registeredPaths = new Set(entries.map(entry => entry.path))
+  const exemptedPaths = new Set()
+  for (const exemption of exemptions) {
+    const where = `白名单理由链豁免 \`${exemption.token}\``
+    if (typeof exemption.why !== 'string' || exemption.why.trim().length === 0) {
+      failures.push(`${where}：没有写理由（豁免必须逐条可复核，否则它就是一条无名豁免洞）`)
+    }
+    if (exemptedPaths.has(exemption.token)) {
+      failures.push(`${where}：同一条豁免登记了两次（重复条目 = 悄悄扩大豁免面的空间）`)
+    }
+    exemptedPaths.add(exemption.token)
+    if (registeredPaths.has(exemption.token)) {
+      failures.push(`${where}：它同时又是登记表里的 current 指针 ⇒ 两处判据互相抵消，`
+        + '删掉这条豁免（要留指针就登记为 current，要留说明就摘掉登记）')
+    }
+    if (!pathTokens.includes(exemption.token)) {
+      failures.push(`${where}：**死豁免** —— 该 token 没有在白名单注释区里以反引号形态出现`
+        + '（凭空预置的豁免 = 可以先把豁免加好、再往注释区写悬空路径）⇒ 删掉它，或把注释补回来')
+    }
+    if (exemption.kind === 'historical') {
+      let exists = false
+      try {
+        exists = lstatSync(resolve(root, exemption.token)).isFile()
+      } catch {
+        exists = false
+      }
+      if (exists) {
+        failures.push(`${where}：标成 historical 的路径**现在真的存在**了（历史注记过期）'
+          + '⇒ 要么按 current 指针登记进 REGISTERED_WHITELIST_RATIONALE_PATHS，要么删掉这条豁免`)
+      }
+    }
+  }
+
+  // ④ 反向覆盖：注释区里的路径 token 必须都能在登记表或豁免表里找到对应项。
+  for (const token of pathTokens) {
+    if (registeredPaths.has(token) || exemptedPaths.has(token)) continue
+    failures.push(`白名单理由链**反向覆盖**：注释区引用了 \`${token}\`，`
+      + '但它既不在 `REGISTERED_WHITELIST_RATIONALE_PATHS` 里、也不在豁免表里 ⇒ '
+      + '这条路经不可复核（D-03 的形态：注释里的路径没人对账）。'
+      + '处置：把注释改成真实路径并登记一项；确属历史/包内说明性引用，则加一条**写明理由**的豁免。')
+  }
+
+  for (const entry of entries) {
+    const where = `白名单理由链「${entry.group}」→ ${entry.path}`
+    if (!Object.hasOwn(ALLOWED_DOMAINS, entry.group)) {
+      failures.push(`${where}：分组不在 \`ALLOWED_DOMAINS\` 里（分组被改名/删除 ⇒ 登记悬空，`
+        + '要么把分组改回来，要么把这条登记删掉）')
+      continue
+    }
+    // ② 注释与登记同一份事实（死条目那一侧）。
+    if (!region.includes('`' + entry.path + '`')) {
+      failures.push(`${where}：该路径没有在白名单注释区里以反引号形态逐字出现`
+        + '（注释改了路径而登记没跟，或登记的是没人引用的死条目）')
+    }
+    // ③ 路径必须真的存在，并且真的是消费方。
+    const absolute = resolve(root, entry.path)
+    let stats
+    try {
+      stats = lstatSync(absolute)
+    } catch {
+      stats = null
+    }
+    if (stats === null || !stats.isFile()) {
+      failures.push(`${where}：**理由引用的路径不存在**`
+        + `（${stats === null ? '磁盘上没有这个文件' : '不是常规文件'}）`
+        + '⇒ 理由链不可复核（下一个评审者按图索骥会撞空）。'
+        + '处置：把注释与这里的登记一起改成真实路径。')
+      continue
+    }
+    if (entry.mentions !== undefined) {
+      let text
+      try {
+        text = readFileSync(absolute, 'utf8')
+      } catch (error) {
+        failures.push(`${where}：读不出内容（${error?.code ?? error?.message ?? '未知原因'}）`
+          + '⇒ 无法核对它是否真的是这些域名的消费方')
+        continue
+      }
+      if (!text.includes(entry.mentions)) {
+        failures.push(`${where}：该文件里没有 \`${entry.mentions}\``
+          + '⇒ 它已不再是这些域名的消费方（指针解析得到，但指的已经不是那个文件了）')
+      }
+    }
+  }
+  return { failures, skipped: false, ...base, pathTokens }
 }
 
 /**
@@ -447,6 +773,35 @@ function syntheticPublicIpv4() {
 }
 
 /**
+ * 自证样本的扫描根：**与主流程同源**（脚本位置上溯出的仓库根），**绝不吃调用者的 cwd**。
+ *
+ * 2026-10-04 FF-1（独立核验，见 `temp/audit-v282/verify/fresh-fixes.md`）：四个理由链自证
+ * 样本此前把 `process.cwd()` 当 root 传给 {@link rationalePathFindings}。其中"historical 豁免
+ * 过期"那一条要用 `lstatSync(resolve(root, 'scripts/check-no-real-domains.mjs'))` 找一个
+ * **真的存在**的文件 ⇒ cwd≠仓库根时它判不出红 ⇒ `selfTest()` 返回失败 ⇒ 守卫打印
+ * 「守卫自证失败 ⇒ 守卫本身不可信（可能已被改坏或白名单被滥用）」并 EXIT=1。
+ * 那是**与事实相反**的诊断：判据体没坏，坏的是调用姿势（`--root` 指对了仓库根，只是 cwd 在
+ * 别处）—— 而主流程的根**本来**就取自脚本位置（见 CLI 段
+ * `root = gitToplevel(scriptDir) ?? resolve(scriptDir, '..')`）。自证样本必须用同一份来源，
+ * 否则"自证"自己会随调用者的 cwd 漂，并把这个漂当作"判据被篡改"报出来。
+ *
+ * 复现（修前）：`cd /tmp && node <repo>/scripts/check-no-real-domains.mjs --root <repo>` ⇒ EXIT=1
+ * （还会连带 29 条自证失败：子进程继承 cwd，于是端到端样本全部以 EXIT=1 收场）；
+ * 同一命令在仓库根跑 ⇒ EXIT=0。修后的判据 = {@link selfTestRootAssertion} 的"仓库外 cwd"样本。
+ *
+ * 边界（如实认账）：脚本被复制到**任何 git 工作树之外**时，这里回落成 `<脚本目录>/..`，
+ * 与主流程的回落**同一个值** —— 那种姿势下主流程的扫描根本身也不对（`git ls-files` 会
+ * fail-loud，退出码 2），所以不是本判据要救的形态。仓库内副本（如 `temp/.../mut/x.mjs`）
+ * 仍能上溯到真正的仓库根，与主流程一致。
+ *
+ * @returns {string} 扫描根（绝对路径）。
+ */
+function selfTestRoot() {
+  const scriptDir = dirname(fileURLToPath(import.meta.url))
+  return gitToplevel(scriptDir) ?? resolve(scriptDir, '..')
+}
+
+/**
  * 自证走的是**与扫描完全同一套** candidatesInLine/isAllowedCandidate，
  * 不是另写一份"看起来对"的判断 —— 否则自证绿了、守卫本身坏了也看不出来。
  *
@@ -454,6 +809,8 @@ function syntheticPublicIpv4() {
  */
 function selfTest() {
   const failures = []
+  // 四个理由链样本的 root：与主流程同源，**不是** process.cwd()（FF-1 的修复点）。
+  const sampleRoot = selfTestRoot()
   const syntheticHost = syntheticHostname()
   const syntheticUrl = `https://${syntheticHost}/updates/manifest`
   const syntheticIp = syntheticPublicIpv4()
@@ -547,6 +904,89 @@ function selfTest() {
   expect(!masked.includes(syntheticFirstLabel), `脱敏输出仍含原始标签：${masked}`)
   expect(masked !== syntheticHost, `脱敏输出与原始 host 相同：${masked}`)
   expect(masked.endsWith('.com'), `脱敏输出应保留 TLD：${masked}`)
+
+  // ── 理由链自证样本的 root：**同族四点全部逐条核过**（2026-10-04 FF-1 同族补集）──
+  // 四点过去都写 `process.cwd()`，但它们对 cwd 的**敏感度不同**，逐条说明（判据是
+  // `rationalePathFindings` 的哪一支用到了 root）：
+  //   ① 登记了一个不存在的随机路径（下面 rationaleNegative）—— 断言只要求"这条失败出现"，
+  //      随机路径在任何 root 下都不存在 ⇒ **当时不吃 cwd**（仍然一并改成同源，免后患）；
+  //   ② 反向覆盖（reverseNegative，`entries: []` + 合成 `source`）—— 没有任何
+  //      `lstatSync(resolve(root, …))` 调用 ⇒ **不吃 cwd**；
+  //   ③ 豁免上限 + 死豁免（exemptionNegative）—— 合成豁免 token 在任何 root 下都不存在，
+  //      断言取的是"豁免超上限/死豁免"两条；不过它会**额外**拿到一批"理由引用的路径不存在"
+  //      噪声（真登记表按 cwd 找不到）⇒ 结果面吃 cwd、断言面不吃；
+  //   ④ historical 豁免过期（staleHistorical）—— **真正炸掉的那一条**：它要求
+  //      `resolve(root, 'scripts/check-no-real-domains.mjs')` 真的存在，cwd≠仓库根 ⇒ 判不出红。
+  // 四点现在统一用 `sampleRoot`（= 脚本位置上溯的仓库根，与主流程 `root` 同源）。
+  // 白名单**理由链**判据的自证（2026-10-04 D-03）：**登记了一个不存在的路径 ⇒ 必须红**。
+  // 负例用随机路径 ⇒ 必然不存在、必然没写在白名单注释区（不依赖任何环境事实）；
+  // 真登记表的判定在主流程里做一次（不在这里重复判，同一事实只留一处判决）。
+  const syntheticRationalePath = `scripts/${syntheticLabel()}.mjs`
+  const rationaleNegative = rationalePathFindings(sampleRoot, {
+    entries: [{ group: '模型权重分发', path: syntheticRationalePath }],
+  })
+  expect(
+    rationaleNegative.failures.some(failure => failure.includes(syntheticRationalePath)),
+    `白名单理由链负例未被判红（登记了一个不存在的路径）：${syntheticRationalePath}`,
+  )
+
+  // 白名单理由链判据的**反向覆盖 + 两条下限**自证（2026-10-04 D-03 复审 N2）。修前的判据是
+  // **单向**的（登记 → 注释/磁盘），复审实测四种形态门禁全绿（注释掉一条登记 / 清空登记表 /
+  // 注释区新增悬空路径 / 注释路径改回不存在的旧值 = D-03 逐字复现）。下面四条分别钉住补上的
+  // 那几向。**合成源码喂 `source` 接缝**：不依赖本文件当前的注释内容 ⇒ 以后改注释不会假红。
+  const syntheticUnregistered = `scripts/${syntheticLabel()}-unregistered.mjs`
+  const syntheticRegionSource = [
+    'const ALLOWED_DOMAINS = {',
+    `  // 合成夹具：注释区引用了一个既未登记、也未豁免的仓内路径 \`${syntheticUnregistered}\``,
+    "  '合成分组': ['example.com'],",
+    '}',
+    '', // 结尾换行：`allowedDomainsSourceRegion` 按 `\n}\n` 收口，缺它会被判成"锚点失效"
+  ].join('\n')
+
+  // ① 反向覆盖：注释区里的路径 token 不在登记表（也不在豁免表）⇒ 必须红。
+  const reverseNegative = rationalePathFindings(sampleRoot, {
+    entries: [],
+    exemptions: [],
+    source: syntheticRegionSource,
+  })
+  expect(
+    reverseNegative.failures.some(failure => failure.includes('反向覆盖')
+      && failure.includes(syntheticUnregistered)),
+    `白名单理由链**反向覆盖**负例未被判红（注释区引用了未登记的路径）：${syntheticUnregistered}`,
+  )
+  // ② 下限：登记表清空 ⇒ 必须红（修前实测 EXIT=0：0 条时三向判据整体空跑）。
+  expect(
+    reverseNegative.failures.some(failure => failure.includes('登记表低于下限')),
+    '白名单理由链**登记表下限**未被判红（清空登记表后判据整体空跑却通过）',
+  )
+  // ③ 豁免纪律：凭空预置（注释区里没有它）+ 超上限 ⇒ 必须红
+  //    （否则"给待判路径加一条豁免"就是把红翻绿的后门）。
+  const syntheticExemptions = [1, 2, 3].map(index => ({
+    token: `scripts/${syntheticLabel()}-exempt-${index}.mjs`,
+    kind: 'historical',
+    why: '自证用合成豁免',
+  }))
+  const exemptionNegative = rationalePathFindings(sampleRoot, {
+    entries: REGISTERED_WHITELIST_RATIONALE_PATHS,
+    exemptions: syntheticExemptions,
+  })
+  expect(
+    exemptionNegative.failures.some(failure => failure.includes('豁免超上限')),
+    '白名单理由链**豁免上限**未被判红（可以靠加豁免把红翻绿）',
+  )
+  expect(
+    exemptionNegative.failures.some(failure => failure.includes('死豁免')),
+    '白名单理由链**死豁免**未被判红（豁免可以凭空预置、与注释区无关）',
+  )
+  // ④ historical 豁免不得指着一个**真的存在**的路径（否则豁免变成长期遮罩、历史注记撒谎）。
+  const staleHistorical = rationalePathFindings(sampleRoot, {
+    entries: REGISTERED_WHITELIST_RATIONALE_PATHS,
+    exemptions: [{ token: 'scripts/check-no-real-domains.mjs', kind: 'historical', why: '自证用' }],
+  })
+  expect(
+    staleHistorical.failures.some(failure => failure.includes('历史注记过期')),
+    '白名单理由链**historical 豁免过期**未被判红（把存在的路径标成了历史豁免）',
+  )
   return failures
 }
 
@@ -736,6 +1176,14 @@ function selfTestScanSurface() {
  *   ② 负例：`--root` 指向工作树的**子目录**        → EXIT=2 且点名"指向了工作树的子目录"；
  *   ③ 正例：在仓库根跑                              → EXIT=0 且打印"自证通过"（不误伤正常调用）。
  *
+ * 2026-10-04 FF-1 追加**第四、五两个样本**：调用者的 cwd 在**仓库之外**时，
+ *   · ④ 默认根（无 `--root`）必须仍解析成**脚本位置上溯出的仓库根**（用 `--selftest` 打印的
+ *     `root=` 当判据）—— 把默认根退回 `resolve(process.cwd())` 就在这一条上红；
+ *   · ⑤ `--root <仓库根>` 必须 EXIT=0 —— 吃 cwd 的**自证样本**（`process.cwd()` 当 root 传给
+ *     `rationalePathFindings`）会在这一条上红：子进程的 cwd 在仓库外，historical 样本按那个
+ *     root 找不到 `scripts/check-no-real-domains.mjs` ⇒ 自证失败 ⇒ EXIT=1。
+ *     ⑤ 是 FF-1 本体的回归判据（修前实测 EXIT=1，且连带 29 条自证失败）。
+ *
  * 子进程带 `SELFTEST_CHILD_ENV=1` + `ROOT_SELFTEST_CHILD_ENV=1`（后者防正例子进程递归）。
  * @returns 自证失败项列表（空 = 通过）。
  */
@@ -784,6 +1232,35 @@ function selfTestRootAssertion() {
     + `\n    stderr: ${(atRoot.stderr ?? '').trim().split('\n').slice(-2).join(' | ')}`)
   expect((atRoot.stdout ?? '').includes('自证通过'),
     '根断言正例 必须打印"自证通过"（否则它没走到收尾）')
+
+  // ④⑤ 调用者 cwd 在**仓库之外**（FF-1）：默认根与显式 `--root` 都必须与"从仓库根跑"同结论。
+  // 夹具用系统临时目录（不是仓库内的 temp/，那又会被判成"子目录里跑"）。
+  const foreignCwd = mkdtempSync(join(tmpdir(), 'cnrd-foreign-'))
+  try {
+    const outsideDefaultRoot = run(foreignCwd, ['--selftest'])
+    expect(outsideDefaultRoot.status === 0,
+      `根断言样本④（仓库外 cwd + 默认根）应为 EXIT=0，实得 ${outsideDefaultRoot.status}`
+      + `\n    stderr: ${(outsideDefaultRoot.stderr ?? '').trim().split('\n').slice(0, 2).join(' | ')}`)
+    expect((outsideDefaultRoot.stdout ?? '').includes(`root=${repoTop}`),
+      `根断言样本④ 必须把扫描根打印成脚本位置上溯出的仓库根 root=${repoTop}`
+      + `（实际 stdout: ${(outsideDefaultRoot.stdout ?? '').trim().split('\n').slice(0, 1).join('')}）`
+      + '—— 默认根退回 process.cwd() 时这里会打印仓库外的目录')
+
+    const outsideExplicitRoot = run(foreignCwd, ['--root', repoTop, '--selftest'])
+    expect(outsideExplicitRoot.status === 0,
+      `根断言样本⑤（仓库外 cwd + --root 仓库根，= FF-1 的复现命令）应为 EXIT=0，实得 ${outsideExplicitRoot.status}`
+      + `\n    stderr: ${(outsideExplicitRoot.stderr ?? '').trim().split('\n').slice(0, 3).join(' | ')}`
+      + '（自证样本若把 process.cwd() 当扫描根，这里必然红：historical 样本按 cwd 找不到'
+      + ' scripts/check-no-real-domains.mjs）')
+    expect((outsideExplicitRoot.stdout ?? '').includes('自证通过'),
+      '根断言样本⑤ 必须打印"自证通过"（否则它没走到收尾）')
+  } finally {
+    try {
+      rmSync(foreignCwd, { recursive: true, force: true })
+    } catch {
+      // 清理失败不影响判据结论
+    }
+  }
   return failures
 }
 
@@ -1258,12 +1735,17 @@ if (selfTestFailures.length > 0) {
   process.exit(1)
 }
 if (selftestOnly) {
+  // 扫描根必须可见：`--selftest` 不做文件扫描，但**根的解析结果**本身是判据的一部分
+  // （FF-1：仓库外 cwd 调用时，默认根仍须是脚本位置上溯出的仓库根 —— 见
+  // `selfTestRootAssertion()` 的样本④）。打印成 `root=<绝对路径>` 便于自证与人工核对。
+  console.log(`check-no-real-domains: 扫描根 root=${root}`
+    + `（来源：${explicitRoot ? '--root 显式指定' : '脚本位置上溯得到的仓库根'}）`)
   console.log('check-no-real-domains: 自证通过（合成负例被判红、白名单域与保留网段判绿、'
     + '扫描面八样本（含软链两个方向与含 NUL 的二进制）、'
     + `${selftestChild ? '区间判据自证因 ' + SELFTEST_CHILD_ENV + '=1 跳过' : '提交信息区间判据五样本'}、`
     + `${selftestChild || rootSelftestChild
       ? '扫描根断言自证因 ' + SELFTEST_CHILD_ENV + '/' + ROOT_SELFTEST_CHILD_ENV + '=1 跳过'
-      : '扫描根断言三样本（子目录两负例 + 仓库根正例）'}）✅`)
+      : '扫描根断言三样本（子目录两负例 + 仓库根正例；FF-1 另加仓库外 cwd 两样本 ⇒ 共五个）'}）✅`)
   process.exit(0)
 }
 
@@ -1363,6 +1845,17 @@ if (binaryAcceptedHits.size > 0) {
   notes.push(`二进制扫描面：${binaryAcceptedHits.size} 条**已登记**的已知噪声命中被放行`
     + '（BINARY_SCAN_ACCEPTED，逐条写明理由；未登记的一律判红）')
 }
+/** 白名单**理由链**判据的失败项（登记面错误 ⇒ EXIT=2，见 `rationalePathFindings`）。 */
+let rationaleFailures = []
+/**
+ * 理由链判据的**三态**结论：`checked`（判过且通过）/ `invalid`（判过且有登记面错误）/
+ * `skipped`（本次未生效 —— 例如 `--root <合成夹具>`）。**降级不得读作 `checked`**
+ * （2026-10-04 D-03 复审 N3：human 输出当时已明说"本次未生效"，但 `--json` 仍报
+ * `whitelistRationale: "checked"`，字段名与事实不符）。
+ */
+let rationaleVerdict = 'skipped'
+/** 理由链判据的输入面计数（登记条数 / 豁免条数 / 注释区路径 token 数），随 `--json` 出。 */
+let rationaleCounts = { registered: 0, exemptions: 0, pathTokens: 0 }
 {
   // 只在**扫的就是本仓根**时对账：`--root <合成夹具>` 的扫描面里当然没有这些文件，
   // 那不是"死条目"（自证夹具的七/五个样本都走 --root）。特判必须可见。
@@ -1372,6 +1865,26 @@ if (binaryAcceptedHits.size > 0) {
   if (!isRepoScan) {
     notes.push('扫描根不是本仓根 ⇒ BINARY_SCAN_ACCEPTED 的**死条目对账**本次未生效'
       + '（它按仓库相对路径登记，只在扫本仓时有意义）')
+  }
+  // 白名单理由链（2026-10-04 D-03）：与上面同一取向 —— 夹具扫描时显式说明未生效。
+  const rationale = rationalePathFindings(root, { isRepoScan })
+  rationaleFailures = rationale.failures
+  rationaleCounts = {
+    registered: rationale.registered,
+    exemptions: rationale.exemptions,
+    pathTokens: rationale.pathTokens.length,
+  }
+  rationaleVerdict = rationale.skipped ? 'skipped' : (rationaleFailures.length === 0 ? 'checked' : 'invalid')
+  if (rationale.skipped) {
+    notes.push('扫描根不是本仓根 ⇒ 白名单**理由链路径**判据本次未生效'
+      + '（它按仓库相对路径登记，只在扫本仓时有意义；`--json` 里读作 whitelistRationale="skipped"）')
+  } else if (rationaleFailures.length > 0) {
+    console.error('\ncheck-no-real-domains: 白名单**理由链**有 '
+      + `${rationaleFailures.length} 项登记面错误：\n`
+      + rationaleFailures.map(failure => `  - ${failure}`).join('\n')
+      + '\n  处置：注释与 `REGISTERED_WHITELIST_RATIONALE_PATHS` 是同一份事实，'
+      + '两处一起改成真实路径；确属误登记的整条删掉；注释区里的历史/包内说明性引用走 '
+      + '`RATIONALE_PATH_EXEMPTIONS`（逐条写明理由，条数有上限）。')
   }
   if (dead.length > 0) {
     console.error('\ncheck-no-real-domains: BINARY_SCAN_ACCEPTED 有 '
@@ -1413,6 +1926,14 @@ if (json) {
     commitRange: commitFatal === null ? 'checked' : 'incomplete',
     scanSurface: scanned === 0 ? 'empty' : 'checked',
     binaryScanned,
+    // 三态（2026-10-04 D-03 复审 N3）：降级 = "skipped"，**不**报 "checked"。
+    whitelistRationale: rationaleVerdict,
+    whitelistRationaleFailures: rationaleFailures,
+    // 判据输入面的计数（纯增量字段）：登记条数与豁免条数各有 ratchet 下限/上限，
+    // token 数是"注释区里被反向覆盖判据枚举到的路径条数"。
+    whitelistRationaleRegisteredPaths: rationaleCounts.registered,
+    whitelistRationaleExemptions: rationaleCounts.exemptions,
+    whitelistRationalePathTokens: rationaleCounts.pathTokens,
   }, null, 2))
 } else {
   console.log(`check-no-real-domains: 扫描 ${scanned} 个文件`
@@ -1453,6 +1974,9 @@ if (emptySurface) {
 }
 
 if (findings.length > 0) process.exit(1)
+// 白名单理由链的登记面错误（引用的路径不存在 / 注释与登记不一致）：与"有命中"同为红，
+// 但语义不同（判据的输入面坏了）。放在 commitFatal 之前：它不能被 exit(3) 吞掉。
+if (rationaleFailures.length > 0) process.exit(2)
 // 判据没跑完 ⇒ 不许打印"零命中 ✅"（C-4 的失效形态就是这一句 + exit 0）。
 if (commitFatal !== null) process.exit(3)
 if (emptySurface) process.exit(3)

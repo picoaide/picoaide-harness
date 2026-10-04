@@ -27,8 +27,10 @@ export const zh = {
   // 所以这一面（对话框标题/状态/按钮）由桌面自己提供。
   /** 对话框标题。 */
   'voice.title': '语音输入',
-  /** 对话框说明（做什么、音频去哪）。 */
-  'voice.intro': '语音输入使用本机运行的识别模型：录音只在本机转写，音频不上传。首次使用需要先下载识别模型，之后可离线使用。',
+  /** 对话框说明（做什么、音频去哪、模型从哪来）。模型**默认随客户端分发**（见
+   * `channel-build.ts` 的 `speechBundleModel`：缺省 true，只有渠道显式写 `false` 才关闭），
+   * 所以这句话对"随包"与"关掉随包"两种渠道都必须成立 —— 不要写回"首次使用需要先下载"。 */
+  'voice.intro': '语音输入使用本机运行的识别模型：录音只在本机转写，音频不上传。识别模型默认随客户端附带，装上即可用、无需下载；只有关掉随包的渠道才需要首次下载，之后可离线使用。',
   /** 数据边界说明。 */
   'voice.privacy': '模型与识别都在本机；转写结果只作为草稿插入输入框，不会自动发送。',
   /** speech Remote 不可达（bundle 未装配或还没挂载）。 */
@@ -94,7 +96,7 @@ export const en: Record<keyof typeof zh, string> = {
   'update.retryingIn': 'Retrying download (attempt {attempt}) in {seconds}s…',
   'update.retryingNow': 'Downloading (attempt {attempt})…',
   'voice.title': 'Voice input',
-  'voice.intro': 'Voice input runs a speech model on this machine: recordings are transcribed locally and audio is never uploaded. The first use downloads the recognition model once, after which it works offline.',
+  'voice.intro': 'Voice input runs a speech model on this machine: recordings are transcribed locally and audio is never uploaded. The recognition model ships with the client, so it works right away with no download; only channels that opt out of bundling need a one-time download, after which it works offline.',
   'voice.privacy': 'The model and recognition stay on this machine. A transcript is inserted into the draft only — it is never sent automatically.',
   'voice.unavailable': 'Speech is not ready yet: the voice plugin is not installed or still starting.',
   'voice.noProvider': 'No speech recognition provider is available.',

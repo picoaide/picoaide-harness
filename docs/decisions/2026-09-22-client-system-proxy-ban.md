@@ -92,3 +92,35 @@ Harness home 的 `.env` 分层结构上赶不上）。
   Linux desktop job，可直接复用 `scripts/proxy-policy-probe.mjs` 的装置。
 - 若客户部署确需代理：在渠道包配 `desktop.allow_system_proxy: true`，并考虑只对内置浏览器放行
   （按 partition 逐会话设置，实现更复杂）。
+
+## 8. 连接器出站：复刻 Node 的 env-proxy 判定，代理模式下没有地址钉扎（2026-10-04 补充）
+
+本节补充的是**连接器出站路由**这一面的口径，**不改上面的任何结论**：客户端的代理策略仍是"默认禁止"，
+`no-proxy-server` 仍是唯一那一刀。下面说的是"宿主机确实开了逃生门"时，连接器该跟随还是该静默直连 ——
+选的是**跟随**（不跟随 = 逃生门部署里连接器连不通；2026-10-04 之前那版就是静默直连）。
+
+- **路由 = 复刻 Node 的 env-proxy 判定，不新造开关。** 唯一判定点是
+  `packages/host/connectors/src/proxy-route.ts` 的 `resolveConnectorProxyRoute()`，读的正是桌面壳那几个名字
+  （`PICOAI_ALLOW_SYSTEM_PROXY`、`NODE_USE_ENV_PROXY`、`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`、`NO_PROXY`），
+  取值语义与 `packages/host/desktop/src/network-policy.ts` 之间有**源码级 parity 判据**（文件缺失即 fail-loud）。
+  判定只做一次：`resolveOutboundTarget()` 把路由放在 target 上，`sendPinned()` 照用 ——
+  不存在"判定直连、出门却走代理"的窗口。
+- **直连（缺省）= 地址钉扎。** 解析 → 按策略校验地址 → 用**被校验的那个地址**建连，请求行 / `Host` / SNI 仍是
+  域名（证书校验保持普通主机名校验）。实现与理由见 `packages/host/connectors/src/pinned-http.ts`。
+  还有一条容易被"顺手清理"的**安全不变量**：直连请求必须**永远显式携带 agent**（生产是真 agent，TLS 测试缝是
+  `false`）—— 少了这个键，Node 会退回**进程级** `http(s).globalAgent`，而 `NODE_USE_ENV_PROXY=1` 时那个
+  agent 就是环境代理，代理会自己解析域名，钉扎被静默作废。
+- **代理模式（逃生门开）= 没有地址钉扎，这是明确认账的取舍。** `Host` 与 SNI 仍是域名，但**域名由代理解析**；
+  本地那次解析的答案不是建连地址，钉它等于钉一个假地址。所以本模式**不做本地解析、不做钉扎**，本地保证只剩：
+  协议/凭据规则、受限**字面量**、元数据主机名、保留名（`*.localhost`）。⇒ **经代理的 SSRF 由代理自身的 ACL
+  承担**：一个恶意定义仍可让代理去连"代理自己解析出来的"内网地址，这是"使用部署自己的代理"这一决定的固有代价。
+  降级本身**不静默**：每进程恰好一行可 grep 的日志（地址钉扎不可达、域名由代理解析）。
+- **三种失败一律 fail-closed**：策略读不出来（代理 URL 不可解析 / scheme 不支持）、代理不可达、
+  代理拒绝 CONNECT ⇒ 报错，**不静默直连、也不静默换路由**。
+- **判据（改这两条路径时必须保持绿）**：
+  `packages/host/connectors/tests/audit-1004-proxy-connect.spec.ts`（路由判定真值表、真实假 CONNECT 代理 + 真实
+  HTTPS 源站、跨包 parity、三种 fail-closed）、
+  `packages/host/connectors/tests/audit-1004-pinned-address.spec.ts`（直连模式的钉扎：DNS-rebinding 夹具、
+  `auth.ts` OAuth 漏斗的毒丸覆盖、以及上面那条"永远显式传 agent"的不变量）。
+- 一句话给下一轮审计：**"连接器出站已钉扎"只在直连模式成立**；代理模式下它不是"已闭合"，
+  而是"已认账、由代理 ACL 承担"。

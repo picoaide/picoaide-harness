@@ -314,6 +314,22 @@ func (s *Server) guestBudgetOrCurrent() time.Duration {
 	return s.CurrentLimits().GuestBudget()
 }
 
+// requestBudgets 返回**本次请求**的预算集合（执行路径的唯一构造点）。
+//
+// 每一项都必须在这里读 `CurrentLimits()`（不在构造期固化）：控制台保存之后
+// "每一次请求读到的就是控制台值"才是可判定的行为，构造期快照会让改动静默失效。
+//
+// ⚠️ `host_call_budget_seconds` 曾经**零消费者**（S4-01）：管理端能填、能存、能审计、
+// 能回显，还把它渲染进诊断提示，而运行时永远按 limits.HostCallBudgetDefault 跑。
+// 从这里显式传入 `InstanceLimits.HostCallBudget` 之后，界面/日志/hints 里的数字
+// 与真正到点的那个数才是同一个（判据：TestServe_ConsoleHostCallBudgetReachesRuntime）。
+func (s *Server) requestBudgets() runtime.InstanceLimits {
+	return runtime.InstanceLimits{
+		GuestBudget:    s.guestBudgetOrCurrent(),
+		HostCallBudget: s.CurrentLimits().HostCallBudget(),
+	}
+}
+
 func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	rel *serverstore.WasmRelease, cfg appcfg.Config, set *assets.Set, user *abi.User, sessionKey string) {
 
@@ -445,10 +461,11 @@ func (s *Server) serveWasm(w http.ResponseWriter, r *http.Request, appID string,
 	started := s.now()
 	res, serr := s.rt.Serve(ctx, mod, runtime.Request{
 		Envelope: env,
-		// 预算：内存页上限是 RuntimeConfig 项（0 = 与运行时一致）；guest 预算取当前生效的
-		// 限制项（控制台 `guest_budget_seconds` > 部署档位 > limits 编译期默认），
-		// 仅测试用 s.guestBudget 注入更小的值。
-		Budgets: runtime.InstanceLimits{GuestBudget: s.guestBudgetOrCurrent()},
+		// 预算：内存页上限是 RuntimeConfig 项（0 = 与运行时一致）；guest / 宿主调用预算
+		// 都在 requestBudgets 里按**当前生效的限制项**读（控制台 `guest_budget_seconds` /
+		// `host_call_budget_seconds` > 部署档位 > limits 编译期默认），
+		// guest 另可用仅测试的 s.guestBudget 注入更小的值。
+		Budgets: s.requestBudgets(),
 		Funcs:   caps,
 	})
 	if serr != nil {

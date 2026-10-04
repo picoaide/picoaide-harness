@@ -111,6 +111,11 @@ function gateRefusalWith(locale: HostLocale, reasonZh: string, reasonEn: string)
   return hostCopy(locale, `${gateRefusal('zh')}${reasonZh}`, `${gateRefusal('en')}${reasonEn}`)
 }
 
+/** 一处等待预算的可读写法（C3-03）：整秒用 `5s`，不足 1s 用 `420ms`。 */
+function formatWaitBudget(ms: number): string {
+  return ms >= 1_000 ? `${String(Math.round(ms / 1_000))}s` : `${String(Math.max(0, Math.round(ms)))}ms`
+}
+
 interface QueueTicket {
   resolve: () => void
   reject: (error: unknown) => void
@@ -375,11 +380,20 @@ export class TabPool {
     return this.tabs.size - pending
   }
 
-  /** Reserve a tab slot (flat cap; waits FIFO, cancellable, timed). */
-  async reserveTab(signal?: AbortSignal): Promise<TabReservation> {
+  /** Reserve a tab slot (flat cap; waits FIFO, cancellable, timed).
+   *
+   * @param signal - caller cancellation.
+   * @param budgetMs - 本次调用**还剩多少额度**（ms，C3-03，2026-10-04）。给定且小于
+   *   `waitTimeoutMs` 时按它收紧：固定 5s 的等待在"排队 26s 后池子满"时会让
+   *   `browser_open` 合计越过 30s 注册预算，池子自己的可执行文案（"timed out
+   *   waiting for a tab slot … close a tab first"）就被上游 timeout-policy 换成
+   *   笼统超时。缺席（用户路径 / 直接调用）时行为不变。
+   */
+  async reserveTab(signal?: AbortSignal, budgetMs?: number): Promise<TabReservation> {
     if (this.liveTabs() + this.reserved < this.options.maxTabs) {
       return this.grantReservation()
     }
+    const waitMs = Math.max(0, Math.min(this.options.waitTimeoutMs, budgetMs ?? this.options.waitTimeoutMs))
     await new Promise<void>((resolve, reject) => {
       const ticket: QueueTicket = { resolve, reject, signal, onAbort: undefined, settled: false }
       if (signal !== undefined && signal.aborted) {
@@ -400,9 +414,10 @@ export class TabPool {
         const idx = this.tabWaiters.indexOf(ticket)
         if (idx >= 0) this.tabWaiters.splice(idx, 1)
         // 文案必须**可执行**：只报 "timed out waiting for a tab slot" 会像一次
-        // 普通超时，模型不知道要关标签（2026-09-17 审计 S01-1）。
-        reject(browserError('quota', `browser: timed out waiting for a tab slot (${Math.round(this.options.waitTimeoutMs / 1000)}s, ${this.options.maxTabs} tabs open) — close a tab first`))
-      }, this.options.waitTimeoutMs)
+        // 普通超时，模型不知道要关标签（2026-09-17 审计 S01-1）。报的是**实际**
+        // 等待上限（被剩余额度收紧时可能不足 1s），否则文案会说谎。
+        reject(browserError('quota', `browser: timed out waiting for a tab slot (${formatWaitBudget(waitMs)}, ${this.options.maxTabs} tabs open) — close a tab first`))
+      }, waitMs)
       timer.unref?.()
       ticket.timer = timer
       this.tabWaiters.push(ticket)

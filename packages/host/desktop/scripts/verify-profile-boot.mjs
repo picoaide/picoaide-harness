@@ -487,6 +487,8 @@ try {
   //   · `hmr`                  → `hmr` 服务是否存在（见上文）；
   //   · `fs-sandbox`           → 它与桌面 asar 后端**提供同一个 `fs` 服务**，
   //                              重开即双向 provide ⇒ 整棵树挂不起来（既有行为面兜底）；
+  //   · `llm-deepseek-account` → 该行唯一的能力就是注册 `deepseek-account` provider 路由，
+  //                              所以判据直接读 `ctx.llm.listConfigurableProviders()`（见下文）；
   //   · `ui-sidebar-browser` / `ui-plugin-manager` / `ui-settings-plugins`
   //                            → 客户端行，见文末 Web graph 的排除名单。
   // 范围说明：只对拍桌面包自己的 `cordis.patch.yml`（桌面产品闸门的唯一落点）；
@@ -520,6 +522,13 @@ try {
     // 用户显式反馈时把完整会话前缀导出到 OTLP 采集端（与已关闭的
     // `session-log-deepseek` 同类数据出境）。2026-10-01 产品决策改为静态关闭。
     ['session-telemetry-otel', '反馈式会话正文出境：此前仅环境变量门控而运行期无人设 ⇒ 实际挂载'],
+    // 0.2.0-rc.2 新增的第三条默认启用行（2026-10-04 C1-03 补处置）：它是账号鉴权路线的
+    // **适配器**，鉴权取自被我们显式关闭的 `deepseek-account` 行提供的 `deepseekAccount`
+    // 服务（该包的 peer 全仓不存在）⇒ 注册出来的 `deepseek-account` provider 路由恒
+    // `ACCOUNT_SIGN_IN_REQUIRED`、`discoverModels` 恒空。当前无用户可见危害（客户端过滤
+    // 空 provider 组），但它是"靠下游过滤兜住"的装配漏处置。理由全文见 `cordis.patch.yml`
+    // 的对应注释块；判据是下文的 provider 目录探针。
+    ['llm-deepseek-account', '0.2.0 新行：注册的 deepseek-account provider 恒不可鉴权（鉴权行被关闭）'],
   ]
   const declaredDisabled = (parseYaml(readFileSync(join(packageRoot, 'cordis.patch.yml'), 'utf8')))
     .filter(row => row?.disabled === true)
@@ -594,6 +603,29 @@ try {
       'session-telemetry-otel is ACTIVE: the sessionTelemetry service exists, so explicit user feedback would '
       + 'upload the complete canonical Session prefix (message text, tool arguments and results, workspace paths) '
       + 'to the OTLP collector。cordis.patch.yml 必须保持该行 disabled: true',
+    )
+  }
+
+  // `llm-deepseek-account`（0.2.0-rc.2 新行，2026-10-04 C1-03 补处置）：该行唯一的
+  // 作用是向 `ctx.llm` 注册一条 provider 路由（`registerConfigurableProviders([{ provider:
+  // 'deepseek-account', … }])` + `registerDeepSeekProvider(ctx, 'deepseek-account', …)`），
+  // 而它的鉴权来自 `ctx.get('deepseekAccount')` —— 那由被我们关闭的 `deepseek-account`
+  // 行提供（其 peer 包全仓不存在）⇒ 这条路由恒 `ACCOUNT_SIGN_IN_REQUIRED`、
+  // `discoverModels` 恒返回空。**判据观测的就是"注册"这件事本身**：provider 目录是
+  // 这一行生效后的后果，与 mustStayDisabled 名单无关（删名单项 / 改名单 / 删整段名单
+  // 都不影响它）。`listConfigurableProviders()` 是上游 `llm` 服务的公开读面
+  // （`@deepseek-ai/dsh-llm` 的 `listConfigurableProviders`），不是我们造的口径。
+  const llm = ctx.get('llm')
+  if (llm === undefined) {
+    throw new Error('assembled desktop profile is missing the llm service')
+  }
+  const accountProvider = llm.listConfigurableProviders().find(entry => entry.provider === 'deepseek-account')
+  if (accountProvider !== undefined) {
+    throw new Error(
+      'llm-deepseek-account is ACTIVE: the `deepseek-account` provider route is registered '
+      + `(settingsNs=${String(accountProvider.settingsNs)}) although the \`deepseek-account\` row it authenticates `
+      + 'against is disabled — the route can never authenticate and never yields a model。'
+      + 'cordis.patch.yml 必须保持该行 disabled: true',
     )
   }
 
@@ -787,13 +819,20 @@ try {
     // 桌面隐藏「插件」设置选项卡(2026-09 产品决策,与 ui-settings-models
     // 同机制:desktop/cordis.patch.yml 同 id 覆盖行 disabled)。
     '@deepseek-ai/dsh-client-ui-settings-plugins',
-    // 与名单无关的**行为**闸门（2026-09-23 加固）：这三行是客户端行，被打开时它们的
+    // 与名单无关的**行为**闸门（2026-09-23 加固）：这几行是客户端行，被打开时它们的
     // client bundle 会出现在真实 Renderer 的模块图里 —— 这条断言观测的就是"图里有没有
     // 它们"，因此删掉 (d) 的名单项、把名单改短都不影响它。
     //   · ui-sidebar-browser → 窗口 CSP 无 frame-src，iframe 浏览器必然白屏；
     //   · ui-plugin-manager  → 侧栏插件页与桌面自研面板的 DOM 接管不互通（P0-8）。
     '@deepseek-ai/dsh-client-ui-sidebar-browser',
     '@deepseek-ai/dsh-client-ui-plugin-manager',
+    // 2026-10-04 C1-04 补：`product-analytics` 也是 `dsh.client` 行
+    // （`@deepseek-ai/dsh-client-product-analytics` 的 `dsh.client = { platform: 'web' }`），
+    // 启用后同样会进 `__DSH_BOOT__.entries` —— 它的姊妹行 `desktop-product-telemetry`
+    // 早有 unimportable/必需行两条判据兜住，这一半此前只有 mustStayDisabled 那条
+    // **自证式**名单（删名单项 + 重开闸门 ⇒ 全绿）。补上这条后，"删名单项 + 重开闸门"
+    // 会被本断言咬住（观测的是 Renderer 真实模块图，与名单无关）。
+    '@deepseek-ai/dsh-client-product-analytics',
   ]) {
     if (ids.has(id)) throw new Error(`assembled advanced Web graph unexpectedly includes ${id}`)
   }

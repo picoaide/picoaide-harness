@@ -396,6 +396,20 @@ func TestR8Fix3LedgerRebuildIsolatesBadMonth(t *testing.T) {
 	}
 }
 
+// r8Fix3bFixtureMonths 是 TestR8Fix3bLedgerRebuildPreparesLaterMonths 夹具年月的
+// **唯一派生点**（S6-01）。
+//
+// 固定常量而不是 `bjMonth(10)`/`bjMonth(2)`：后者随真实日历漂移，且在"两个派生月
+// 同年"时（每年 1/2/11/12 月，120 天）夹具会以 `t.Skipf` 静默关掉整条判据。
+// 形参 `now` 保留是为了让反退化判据（TestFixtureCalendarSeamsCoverEveryCalendarDay）
+// 能用 2026–2028 的**每一天**驱动同一条代码路径，并断言返回值与日期无关。
+func r8Fix3bFixtureMonths(now time.Time) (mBad, mOk time.Time) {
+	// 坏月在前（窄覆盖分区 ⇒ 写路径 fail-loud）、健康月在后（只有逐月隔离才轮到它），
+	// 两者跨年 —— 这正是旧夹具只在跨年时才成立的那个前提。
+	return time.Date(2025, time.November, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+}
+
 // TestR8Fix3bLedgerRebuildPreparesLaterMonths 是 R8-A-5 的另一半：**逐月隔离**。
 //
 // 为什么单独一条：即使 `RebuildUsageLedger` 改成"聚合无条件执行"，只要
@@ -406,6 +420,13 @@ func TestR8Fix3LedgerRebuildIsolatesBadMonth(t *testing.T) {
 // 夹具：坏月在前（2025-11，窄覆盖分区 ⇒ 写路径 fail-loud），健康月在后（2026-07）；
 // 两个年分区（usage_daily_2025/2026）在夹具里先删掉 —— 让"建年分区"成为这一轮
 // 真的要做的事（真实形态：新库/历史清理后年分区缺失）。
+//
+// **夹具年月是固定常量，不再由 `time.Now()` 派生**（S6-01，2026-10-04 修）：
+// 旧形态 `mBad := bjMonth(10)` / `mOk := bjMonth(2)` 在两者**同年**时
+// `t.Skipf` ⇒ 当前月 ∈ {1,2,11,12} 的整月里（120 天/年）这条判据一条断言都不跑，
+// 而且它是**绿**的（静默），永远不会被发现。派生点收在 `r8Fix3bFixtureMonths`
+// 一处，`TestFixtureCalendarSeamsCoverEveryCalendarDay` 对 2026–2028 的每一天
+// 驱动它并断言年月恒定、跨年、坏月在前 —— 改回"随日期派生"会在语料里当场变红。
 func TestR8Fix3bLedgerRebuildPreparesLaterMonths(t *testing.T) {
 	const costOk = 5.25
 	db, cleanup := NewTestDB(t)
@@ -414,14 +435,16 @@ func TestR8Fix3bLedgerRebuildPreparesLaterMonths(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid := mustUserID(t, db)
-	if _, err := db.Exec("DROP TABLE IF EXISTS usage_daily_2025, usage_daily_2026"); err != nil {
-		t.Fatalf("清掉年分区（让这一轮必须自己建）: %v", err)
-	}
 
-	mBad := bjMonth(10) // 2025-11（更早 ⇒ 迭代在前）
-	mOk := bjMonth(2)   // 2026-07（更晚 ⇒ 只有逐月隔离才能轮到它）
-	if mBad.Year() == mOk.Year() {
-		t.Skipf("夹具依赖跨年窗口（当前 %s / %s 同年）", monthKey(mBad), monthKey(mOk))
+	mBad, mOk := r8Fix3bFixtureMonths(time.Now())
+	// 夹具前提：跨年 + 坏月在前。由常量保证（表驱动判据对每一天都断言过），
+	// 这里 fail-loud 而不是 skip —— 静默跳过等于"这条判据在某些日期不存在"。
+	if mBad.Year() == mOk.Year() || !mBad.Before(mOk) {
+		t.Fatalf("夹具前提不成立：mBad=%s mOk=%s 必须是跨年且坏月在前", monthKey(mBad), monthKey(mOk))
+	}
+	if _, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS usage_daily_%s, usage_daily_%s",
+		yearKey(mBad), yearKey(mOk))); err != nil {
+		t.Fatalf("清掉年分区（让这一轮必须自己建）: %v", err)
 	}
 	r6DropMonthPartitions(t, db, mBad, mBad)
 	badRel := "usage_" + monthKey(mBad)

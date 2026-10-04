@@ -109,11 +109,11 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_HOST_LOCALE, hostT, stepLabel, type HostLocale } from './host-copy.ts'
 import {
   allowedOutboundOriginsOf,
-  assertOutboundUrlAllowed,
-  assertResolvedOutboundAddressAllowed,
   originOfUrl,
   OutboundUrlBlockedError,
+  resolveOutboundTarget,
 } from './outbound.ts'
+import { sendPinned } from './pinned-http.ts'
 import type { FetchLike } from '@modelcontextprotocol/client'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 
@@ -978,13 +978,17 @@ function hardenTransport(transport: object, locale: () => HostLocale = () => DEF
   const existingOwner = fields[ACTIVITY_OWNER]
   const owner: object = typeof existingOwner === 'object' && existingOwner !== null ? existingOwner : {}
   Object.defineProperty(fields, ACTIVITY_OWNER, { value: owner, enumerable: false, configurable: true })
-  // Where the SDK's requests really go: the caller-supplied fetch when there is
-  // one (tests inject a recorder; a foreign build may inject a proxy), else the
-  // global fetch read lazily at request time. The SDK's own `_fetchWithInit`
-  // closure is deliberately NOT reused: it bakes the credential headers in, and
-  // a wrapper cannot take them back out again.
+  // Where the SDK's requests really go. A caller-supplied fetch (tests inject a
+  // recorder; a foreign build may inject a proxy) is passed through — it IS the
+  // transport's own base by construction. With none (the production shape,
+  // because `dsh-mcp-client` builds the transport without a `fetch`), the
+  // wrapper performs the request ITSELF through `sendPinned`, against the
+  // addresses the policy verified: the SDK's own `_fetchWithInit` closure is
+  // deliberately NOT reused (it bakes the credential headers in), and neither is
+  // the global fetch (it would resolve the name a second time and reach an
+  // address nothing judged).
   const provided = fields[FETCH_FIELD]
-  const base: FetchLike = typeof provided === 'function' ? provided as FetchLike : globalFetch
+  const base: FetchLike | undefined = typeof provided === 'function' ? provided as FetchLike : undefined
   fields[FETCH_WITH_INIT_FIELD] = createMcpOutboundFetch({
     base,
     ownUrl,
@@ -1028,9 +1032,6 @@ function forceManual(init: RequestInit | undefined): RequestInit {
   // mcp-client build) cannot ask for redirects to be followed.
   return { ...(init ?? {}), redirect: 'manual' }
 }
-
-/** The global fetch, behind one indirection so the wrapper never relies on `this`. */
-const globalFetch: FetchLike = (input, init) => globalThis.fetch(input, init)
 
 /** Step label the wrapper names in its policy errors (translated by `stepLabel`). */
 function transportStep(locale: HostLocale): string {
@@ -1089,8 +1090,17 @@ function mergeHeaders(baked: HeadersInit | undefined, given: HeadersInit | undef
 
 /** Options of {@link createMcpOutboundFetch}. */
 export interface McpOutboundFetchOptions {
-  /** The fetch to delegate to once the request passed the fence. */
-  base: FetchLike
+  /**
+   * The fetch to delegate to once the request passed the fence.
+   *
+   * Omitted by the production construction ({@link hardenTransport} passes it
+   * only when the transport was built with its own `fetch`): the wrapper then
+   * performs the request through {@link sendPinned}, against the addresses the
+   * policy verified. Whatever is passed here still goes through every policy
+   * gate — only the connection itself is not pinned, which is why the plugin
+   * never supplies one for a connector definition.
+   */
+  base?: FetchLike | undefined
   /** Live read of the transport's own URL (`_url`), for the same-origin rule. */
   ownUrl?: (() => unknown) | undefined
   /** Object carrying the attached allowed origins (the OAuth provider). */
@@ -1114,16 +1124,17 @@ export interface McpOutboundFetchOptions {
  * Four rules, each of which the 2026-09-23 audit found missing from the
  * redirect-only wrapper this replaces (`CN-1`):
  *
- * 1. **Outbound URL policy** — the same `assertOutboundUrlAllowed` the OAuth
- *    discovery chain uses (`auth.ts`), applied to the URL the SDK is about to
- *    fetch. Without it, a 401 carrying
- *    `WWW-Authenticate: Bearer resource_metadata="<any URL>"` made the SDK
- *    really GET that URL — while `outbound.ts` refused the very same URL when
- *    we resolved it ourselves. A refusal throws
+ * 1. **Outbound URL policy** — the same syntax rule the OAuth discovery chain
+ *    uses (`auth.ts`), applied to the URL the SDK is about to fetch. Without it,
+ *    a 401 carrying `WWW-Authenticate: Bearer resource_metadata="<any URL>"`
+ *    made the SDK really GET that URL — while `outbound.ts` refused the very
+ *    same URL when we resolved it ourselves. A refusal throws
  *    {@link OutboundUrlBlockedError}; nothing is fetched, so nothing leaks.
- * 2. **Resolution gate** — {@link assertResolvedOutboundAddressAllowed}, so a
- *    NAME that resolves into a private / link-local / loopback range is refused
- *    like its literal spelling (`CN-9`).
+ * 2. **Resolution gate + address pin** — {@link resolveOutboundTarget} decides
+ *    what a NAME resolves to (`CN-9`), and its answer is what the request dials:
+ *    the wrapper performs the request through the pinned transport
+ *    (`pinned-http.ts`) when no `base` was injected, so there is no second
+ *    resolution between the verdict and the connection (DNS rebinding TOCTOU).
  * 3. **Registered-origin scope** — a request to an origin other than the
  *    transport's own is allowed only when the connector registered that origin
  *    (`createOAuthProvider` attaches the policy-checked authorization-server
@@ -1150,18 +1161,20 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     const locale = options.locale?.() ?? DEFAULT_HOST_LOCALE
     const step = transportStep(locale)
     const raw = requestUrlOf(input)
-    const target = assertOutboundUrlAllowed(raw, step, locale)
+    // Syntax + resolution in ONE call: the returned target carries the verified
+    // addresses, which is what the pinned transport dials (the verdict is used,
+    // not merely stated — see the module header of `pinned-http.ts`).
+    const target = await resolveOutboundTarget(raw, step, locale)
     const ownOrigin = ownOriginOf(options.ownUrl)
     const allowed = allowedOutboundOriginsOf(options.scope)
-    const crossOrigin = ownOrigin === null || target.origin !== ownOrigin
-    if (crossOrigin && allowed !== null && !allowed.has(target.origin)) {
+    const crossOrigin = ownOrigin === null || target.url.origin !== ownOrigin
+    if (crossOrigin && allowed !== null && !allowed.has(target.url.origin)) {
       throw new OutboundUrlBlockedError(hostT(locale, 'outbound.mcpFenceOrigin', {
         what: stepLabel(locale, step),
-        target: target.href,
+        target: target.url.href,
         allowed: [...allowed].join(', ') || hostT(locale, 'outbound.mcpFenceOriginNone'),
       }))
     }
-    await assertResolvedOutboundAddressAllowed(target, step, locale)
     const headers = crossOrigin
       ? (init?.headers === undefined ? undefined : headerRecord(init.headers))
       : mergeHeaders(options.bakedHeaders, init?.headers)
@@ -1178,11 +1191,12 @@ export function createMcpOutboundFetch(options: McpOutboundFetchOptions): FetchL
     const ownHref = ownHrefOf(options.ownUrl)
     const activityKey = ownHref === null ? null : mcpActivityKey(ownHref)
     const counted = activityKey !== null
-      && activityKey === mcpActivityKey(target)
+      && activityKey === mcpActivityKey(target.url)
       && (init?.method ?? 'GET').toUpperCase() !== 'GET'
     const ticket = counted && activityKey !== null ? beginOutboundActivity(activityKey, owner) : null
     try {
-      return await options.base(input, next)
+      // No base = the production shape: dial the addresses the policy verified.
+      return await (options.base === undefined ? sendPinned(target, next) : options.base(input, next))
     } finally {
       if (ticket !== null && activityKey !== null) endOutboundActivity(activityKey, owner, ticket)
     }

@@ -30,7 +30,7 @@ import { join } from 'node:path'
 import { translate, getLocale, COI2_DICT } from '../i18n.js'
 import { applyRequestGuard, readBody as sharedReadBody } from '../http-guard.js'
 import { writeFileAtomicSafeAt } from '../sync/filesets.js'
-import { isSafeSkillName } from './skills-sync.js'
+import { isSafeSkillName, acquireSkillDirLock } from './skills-sync.js'
 
 /** Translate through COI2_DICT in the active host locale. */
 const cap2 = (key, params) => translate(COI2_DICT, key, params, getLocale())
@@ -88,18 +88,34 @@ export function installCoiApi(ctx, svc) {
         } else if (skillName && typeof body.skillContent === 'string' && body.skillContent.trim() !== '') {
           const skillDir = svc.config.skillDir ?? ''
           const file = join(skillDir, skillName, 'SKILL.md')
-          if (existsSync(file)) {
-            skillMessage = cap2('coi2.skillExistsUnchanged', { skill: skillName })
+          // C4-01（2026-10-04 审计）：per-name 锁。本路由的"文件不存在就自动建"
+          // 恰恰是**换入窗口**的形态（`syncSkillDirSafe` 把旧目录旁置之后、
+          // 暂存目录就位之前，`<技能库>/<name>/SKILL.md` 正是"不存在"）⇒ 不取锁
+          // 就会把落点重新建出来，让换入与回滚双双 ENOTEMPTY。整段
+          // 「判存在 + 写」都在锁内（判据与写盘之间不得有窗口）。
+          const lock = skillDir === ''
+            ? { ok: false, message: '技能库目录未配置（config.skillDir 为空）—— 不写' }
+            : acquireSkillDirLock(skillDir, skillName)
+          if (lock.ok !== true) {
+            skillMessage = cap2('coi2.skillCreateFailed', { detail: lock.message })
           } else {
             try {
-              const { normalizeSkillText } = await import('./skills-sync.js')
-              const text = normalizeSkillText(body.skillContent, skillName, adapter.name)
-              // 落点断言（同 skills-sync）：预置的文件/目录符号链接不得把技能
-              // 正文写到技能库之外，被拒时如实报失败（第一轮这里是裸写 + 报成功）。
-              writeFileAtomicSafeAt(file, text, { anchorDir: skillDir })
-              skillMessage = cap2('coi2.skillAutoCreated', { skill: skillName })
-            } catch (error) {
-              skillMessage = cap2('coi2.skillCreateFailed', { detail: error.message })
+              if (existsSync(file)) {
+                skillMessage = cap2('coi2.skillExistsUnchanged', { skill: skillName })
+              } else {
+                try {
+                  const { normalizeSkillText } = await import('./skills-sync.js')
+                  const text = normalizeSkillText(body.skillContent, skillName, adapter.name)
+                  // 落点断言（同 skills-sync）：预置的文件/目录符号链接不得把技能
+                  // 正文写到技能库之外，被拒时如实报失败（第一轮这里是裸写 + 报成功）。
+                  writeFileAtomicSafeAt(file, text, { anchorDir: skillDir })
+                  skillMessage = cap2('coi2.skillAutoCreated', { skill: skillName })
+                } catch (error) {
+                  skillMessage = cap2('coi2.skillCreateFailed', { detail: error.message })
+                }
+              }
+            } finally {
+              lock.release()
             }
           }
         }

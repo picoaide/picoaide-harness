@@ -142,7 +142,8 @@ master（唯一常绿主干，合并即发布候选）
 ### 2.7 运维与后续
 
 - 运维 workflow：`ghcr-cleanup.yml`（手动删预发镜像 tag）、`notary-probe.yml`（Apple 公证诊断）；
-- **边界（未纳入）**：CodeQL 安全审计、官网 site 构建、artifact 保留期（默认 90 天；如存储压力大可给各 Artifact 加 `retention-days`）、better-sidebar 的 plugin-mount E2E（其上游仓库 CI 职责）。
+- **边界（未纳入）**：官网 site 构建、artifact 保留期（默认 90 天；如存储压力大可给各 Artifact 加 `retention-days`）、better-sidebar 的 plugin-mount E2E（其上游仓库 CI 职责）。
+- **CodeQL（2026-10-04 更新）**：2026-09-22 起已从 GitHub 默认设置迁到仓库自持的 `.github/workflows/codeql.yml`，**不在本节的命名/编排规划内**，但有两条实时事实要记住：① `Analyze (…)` **不在 master 的必需检查里**（2026-10-04 实时采样：必需检查共 5 条 = Gate / Go server / Desktop×3；`rulesets` 与 `rules/branches/master` 均为空）；② 因此 fork PR 上 4 个 `Analyze (…)` 被 job 级 `if` 跳过时，**不存在"必需检查被记成成功"这条机制** —— 风险是**覆盖缺口本身**：fork PR 在合并前零 CodeQL 查询，覆盖只被推迟到合并之后的 `push`。风险登记、采样命令与接受理由见 [决策文档](decisions/2026-10-04-codeql-fork-pr-coverage.md)。
 
 ### 2.8 Workflow 命名规范（2026-09-06）
 
@@ -159,9 +160,9 @@ master（唯一常绿主干，合并即发布候选）
 | `docker.yml` | `Publish server image` | 服务端镜像发布（GHCR） |
 | `ghcr-cleanup.yml` | `Ops · GHCR cleanup` | 运维手动 |
 | `notary-probe.yml` | `Ops · Notary probe` | 运维手动 |
-| CodeQL（无文件） | `CodeQL` | GitHub Code security → **CodeQL default setup** 托管条目，命名不可改；如需纳入统一命名，改为仓库内自定义 workflow（`Security · CodeQL`） |
+| `codeql.yml` | `CodeQL` | 仓库自持的 CodeQL 高级配置（2026-09-22 从 GitHub default setup 迁入）；`name:` 仍是官方写法 `CodeQL`。迁移原因与逐项对齐口径见文件头注释 |
 
-> 侧边栏出现 `CodeQL` 但仓库 `.github/workflows/` 中无对应文件 = 走的是 GitHub 的 **CodeQL default setup**（Settings → Code security 启用，工作流托管在 GitHub 侧）。它命名固定、无法像普通 workflow 一样改名——要么接受默认名，要么改成 advanced/自定义工作流（提交 `codeql.yml` 到仓库）以纳入这里的命名规划。
+> 2026-09-22 之前侧边栏的 `CodeQL` 对应的是 GitHub 的 **CodeQL default setup**（Settings → Code security 启用、工作流托管在 GitHub 侧、命名固定）；本仓已改为 advanced/自定义工作流（提交 `.github/workflows/codeql.yml`），所以它现在是一个**普通仓库文件**，改名与触发面都要走评审。**迁入仓库并没有让它成为合入门槛** —— 两条实时事实见 §2.7 的 CodeQL 条目。
 
 ---
 
@@ -188,7 +189,7 @@ master（唯一常绿主干，合并即发布候选）
 | server 门禁补齐 | ✅ gofmt + webadmin 109 测试 |
 | 预发发布链路 | ✅ beta/rc = 打 tag + Pre-release（Release 页面可见、资产可下载）+ 客户端升级源排除；release job 幂等（已存在则更新，2026-09-06 修复） |
 | mac 预发签名 | ✅ 预发 = Developer ID 签名（不公证，`--sign-only` + `dist:mac:dmg`）；正式 = 签名+公证（**含品牌渠道**，2026-09-11 修复）；PR/分支 = 未签名冒烟 |
-| Workflow 命名规范 | ✅ 已实施（§2.8）：CI / Publish server image / Ops · GHCR cleanup / Ops · Notary probe；CodeQL 为 GitHub Default setup 托管条目（命名固定） |
-| master 分支保护 | ⚠️ **未开启**（当前可直推；建议按 §1.3 开 PR+必填检查保护） |
+| Workflow 命名规范 | ✅ 已实施（§2.8）：CI / Publish server image / Ops · GHCR cleanup / Ops · Notary probe / CodeQL（2026-09-22 起为仓库文件 `codeql.yml`） |
+| master 分支保护 | ✅ 已开启（2026-10-04 实时采样：必需检查 5 条 = Gate / Go server / Desktop×3，`strict` 与 `enforce_admins` 均为真；**不含** CodeQL 的 `Analyze (…)`） |
 | 常用 tag 规范 | ✅ 已有（`vX.Y.Z` 正式 / `-rc`/`-beta` 预发），`version.mjs` 强校验 |
-| CodeQL / site / retention | ⏳ 规划中，未纳入 |
+| CodeQL | ✅ 已纳入（2026-09-22 迁入仓库文件 `codeql.yml`；`Analyze (…)` 不在必需检查里，fork PR 合并前零覆盖，见 §2.7）。site / retention 仍 ⏳ 规划中，未纳入 |

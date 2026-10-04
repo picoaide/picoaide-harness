@@ -406,7 +406,11 @@ func runtimeHints(code apperr.Code, pages uint32) []string {
 	case apperr.CodeHostCallOverBudget:
 		return []string{
 			"宿主调用超过了它的预算：不要在一次调用里做无界的工作",
-			"预算按方法给出（缺省取 host_call_budget_seconds，当前默认 5 s）",
+			// 不写死数字（S4-01）：预算是控制台可配置的（`host_call_budget_seconds`），
+			// 写一个"当前默认 5 s"会在控制台改过之后说谎 —— 本次生效值就在上面的消息里。
+			"预算按方法给出（缺省取控制台 `host_call_budget_seconds` 的当前生效值；本条消息里的数字就是本次生效值）",
+			"db.query 另有单条 SQL 硬超时（`sql_statement_budget_seconds`，必须严格小于宿主调用预算）：" +
+				"看到本码说明是宿主调用整体超预算，而不是某条语句超时",
 		}
 	}
 	return nil

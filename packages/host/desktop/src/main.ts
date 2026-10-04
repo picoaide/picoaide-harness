@@ -45,13 +45,13 @@ import {
 import { createInstallKeyStore } from '@picoaide/dsh-wasm-apps-host/app-proof'
 import { provideAppAiRunner } from './app-ai-runner.ts'
 import { assertRequiredClientEntries, assertRequiredRowsActive } from './startup-rows.ts'
-import { reportFatalBootFailure, type FatalBootChoice } from './fatal-boot.ts'
+import { fatalBootIdentity, reportFatalBootFailure, type FatalBootChoice } from './fatal-boot.ts'
 import { provideWasmAppsWindows } from './wasm-apps-windows.ts'
 import { applyInstallDshHome, isSystemWorkingDirectory } from './desktop-home.ts'
 import { desktopUserDataDirectoryName } from './desktop-user-data.ts'
 import { desktopProductVersion, ElectronDesktopRuntime } from './electron-runtime.ts'
 import { desktopStartupCopy } from './tray-locale.ts'
-import { hostCopy } from './host-locale.ts'
+import { DEFAULT_HOST_LOCALE, hostCopy } from './host-locale.ts'
 import {
   ElectronStderrLogger,
   installDesktopChildProcessLogging,
@@ -270,18 +270,26 @@ function warnWindowsVolumeConcerns(logger: DesktopLogger, concerns: readonly Win
  *
  * 详情先过 `maskSecrets`：错误串里可能出现带凭据的 URL（启动期的服务端地址、
  * 渠道配置），原生弹窗是渠道客户可见面，不能比日志更"诚实"。
+ *
+ * **`runtime` 是可选的**（2026-10-04 C1-02）：致命窗口覆盖构造器本身、协议注册、
+ * `app.whenReady()` 与数据根推导，所以这条路径可能在 runtime 还没构造出来时执行。
+ * 那时只能用不依赖启动期状态的值兜底（`PRODUCT_NAME` + 默认语言）—— 致命路径自己
+ * 抛 TypeError 就等于"双击之后什么都没有"，正是本函数要消灭的形态。
  * @param cause - the failure that aborted startup.
- * @param runtime - mounted runtime (product name + active locale).
+ * @param runtime - mounted runtime (product name + active locale), or undefined in the fatal window.
  * @param logger - stderr/file sink used when the native surface is unavailable.
  * @returns the user's exit: relaunch the process, or quit non-zero.
  */
 async function reportFatalStartupFailure(
   cause: unknown,
-  runtime: ElectronDesktopRuntime,
+  runtime: ElectronDesktopRuntime | undefined,
   logger: DesktopLogger,
 ): Promise<FatalBootChoice> {
-  const copy = desktopStartupCopy(runtime.locale)
-  const product = runtime.productName
+  // 身份取值走 `fatalBootIdentity`（可注入 runtime 的纯函数）：窗口内 `runtime`
+  // 还是 undefined，直接解引用就会在这里抛 TypeError（那是本条修复要消灭的形态）。
+  const identity = fatalBootIdentity(runtime, { locale: DEFAULT_HOST_LOCALE, productName: PRODUCT_NAME })
+  const copy = desktopStartupCopy(identity.locale)
+  const product = identity.productName
   const logDirectory = join(app.getPath('userData'), 'logs')
   const reason = maskSecrets(
     cause instanceof Error ? (cause.stack ?? cause.message) : String(cause),
@@ -340,6 +348,19 @@ async function start(): Promise<void> {
   let removeChildProcessLogging: (() => void) | undefined
   let fileExporter: FileExporter | undefined
   let runtime!: ElectronDesktopRuntime
+  /**
+   * 与 `runtime` **同一个对象**，但类型上承认"还没就位"。
+   *
+   * 为什么需要第二个视图（2026-10-04 C1-02）：`runtime` 的构造器对不支持的平台
+   * 直接抛错（`electron-runtime.ts` 的 `unsupported Electron platform`），而
+   * `installDesktopChildProcessLogging`、`registerAppScheme`、`app.whenReady()`、
+   * `applyInstallDshHome` 也都可能失败 —— 这些语句现在都在下面那个 `try` 里，所以
+   * **致命路径**可能在 `runtime` 还是 undefined 时执行。`let runtime!`
+   * 的定值断言只服务于"装配完成之后"的闭包，读到的是装配事实而不是运行期事实：
+   * 窗口内的两处读点（致命文案的 locale/productName、退出前的 `prepareToQuit()`）
+   * 必须走这个视图，否则致命路径自己会抛 TypeError —— 那就退化成"双击之后什么都没有"。
+   */
+  let mountedRuntime: ElectronDesktopRuntime | undefined
   let logSink: LogFileSink | undefined
   try {
     logSink = new LogFileSink(join(app.getPath('userData'), 'logs'), {
@@ -389,15 +410,20 @@ async function start(): Promise<void> {
   } catch (cause) {
     electronLogger.error(`${BIN_NAME}: active run tracking unavailable: ${cause instanceof Error ? cause.message : String(cause)}`)
   }
-  removeChildProcessLogging = installDesktopChildProcessLogging(app, electronLogger)
-  // 客户端专属 WASM 应用 origin（`picoaide-app://`）：协议特权注册是**启动期**
-  // API，必须在 `app.whenReady()` 之前执行（晚于 ready 会静默无效/抛错），所以
-  // 它在装配层接线，而不是由插件自己在 apply 里做。权限位与实测约束见契约
-  // `docs/decisions/2026-09-19-wasm-client-internal-origin.md` §2/§3。
-  registerAppScheme(APP_ORIGIN_SCHEME)
+  // ---- 致命窗口的构件（必须在任何可能失败的装配语句**之前**就位）------------------
+  // 2026-10-04 C1-02：下面那个 `try` 覆盖的不只是"业务装配"，还包括构造器、协议注册、
+  // `app.whenReady()`、数据根推导 —— 任一条失败都必须落到同一个致命出口（原生错误面 +
+  // 受控退出码），否则就是 B-02 要消灭的"双击之后什么都没有"（早先这些语句在 try
+  // **之外**，失败会逸出 `start()` 变成 unhandled rejection，连日志都只有 stderr）。
+  //
+  // 退出协调器与关停协调器都只是**对象构造**（无 I/O、无 Electron 调用、不碰 `runtime`），
+  // 所以它们先就位：致命 catch 里的 `nativeExit.requestRelaunch()` 与
+  // `await shutdown.request(...)` 因此永远有对象可用，不需要在 catch 里再加一层判空。
+  // `prepareToQuit` 走的是可选视图（`mountedRuntime`）：窗口内退出时 `runtime` 可能
+  // 还没构造出来，直接解引用就又是同一个 TypeError。
   const nativeExit = createDesktopExitCoordinator(
     {
-      prepareToQuit: () => { runtime.prepareToQuit() },
+      prepareToQuit: () => { mountedRuntime?.prepareToQuit() },
       relaunch: () => { app.relaunch() },
       exit: code => { app.exit(code) },
     },
@@ -412,16 +438,6 @@ async function start(): Promise<void> {
       }
     },
   )
-  let restartRequested = false
-  runtime = new ElectronDesktopRuntime(async () => {
-    if (shutdown === undefined) {
-      throw new Error('dsh-plugin-desktop: shutdown coordinator is not ready')
-    }
-    if (restartRequested) return
-    restartRequested = true
-    nativeExit.requestRelaunch()
-    await shutdown.request(0)
-  }, () => {}, electronLogger, DEEP_LINK_SCHEME)
   const finalExit = (code: number): void => { nativeExit.finish(code) }
   shutdown = createDesktopShutdown(
     async () => {
@@ -429,21 +445,38 @@ async function start(): Promise<void> {
     },
     finalExit,
   )
-  const requestQuit = (code: number): void => { void shutdown.request(code) }
-  removeUncaughtExceptionLogging = installDesktopUncaughtExceptionLogging(
-    process,
-    electronLogger,
-    requestQuit,
-  )
-  removeShutdownRequests = installShutdownRequests(process, app, requestQuit)
 
-  app.on('second-instance', (_event, argv) => {
-    runtime.show()
-    // Windows/Linux: the second instance carries the deep link in argv.
-    for (const arg of argv) {
-      if (arg.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(arg)
-    }
-  })
+  try {
+    removeChildProcessLogging = installDesktopChildProcessLogging(app, electronLogger)
+    // 客户端专属 WASM 应用 origin（`picoaide-app://`）：协议特权注册是**启动期**
+    // API，必须在 `app.whenReady()` 之前执行（晚于 ready 会静默无效/抛错），所以
+    // 它在装配层接线，而不是由插件自己在 apply 里做。权限位与实测约束见契约
+    // `docs/decisions/2026-09-19-wasm-client-internal-origin.md` §2/§3。
+    registerAppScheme(APP_ORIGIN_SCHEME)
+    let restartRequested = false
+    runtime = new ElectronDesktopRuntime(async () => {
+      if (restartRequested) return
+      restartRequested = true
+      nativeExit.requestRelaunch()
+      await shutdown.request(0)
+    }, () => {}, electronLogger, DEEP_LINK_SCHEME)
+    // 构造成功即"就位"：从这里开始两条视图指向同一个对象。
+    mountedRuntime = runtime
+    const requestQuit = (code: number): void => { void shutdown.request(code) }
+    removeUncaughtExceptionLogging = installDesktopUncaughtExceptionLogging(
+      process,
+      electronLogger,
+      requestQuit,
+    )
+    removeShutdownRequests = installShutdownRequests(process, app, requestQuit)
+
+    app.on('second-instance', (_event, argv) => {
+      runtime.show()
+      // Windows/Linux: the second instance carries the deep link in argv.
+      for (const arg of argv) {
+        if (arg.startsWith(`${DEEP_LINK_SCHEME}://`)) runtime.receiveDeepLink(arg)
+      }
+    })
   // macOS: deep links are delivered through open-url (may fire before ready).
   app.on('open-url', (event, url) => {
     event.preventDefault()
@@ -527,7 +560,10 @@ async function start(): Promise<void> {
     await current?.fiber.dispose()
   })
 
-  try {
+  // 装配与挂载的主体。它与上面的引导段共用**同一个** `try`（致命出口只有一个），
+  // 这里保留块作用域只是让内部的局部量（environment/ctx/prepared…）不泄漏到 catch
+  // 之后 —— 与改造前逐字相同的可见性。
+  {
     const environment = loadLayeredEnv(BIN_NAME, process.cwd())
     // 出口策略的第二刀（第一刀是模块作用域的 no-proxy-server，只管 Chromium）：
     // Node 栈换直连 dispatcher + 删掉子进程会继承的代理环境变量。**逻辑在
@@ -707,6 +743,7 @@ async function start(): Promise<void> {
     // bundle can be a whole feature (or the channel overlay) disappearing.
     reportSkippedProfileBundles(prepared.profile.skippedBundles, electronLogger)
     notifyWindowsVolumeConcerns(runtime, electronLogger, windowsVolumeConcerns)
+  } // ← 装配主体块结束；下面那个 `}` 关闭覆盖**整个致命窗口**（引导 + 装配）的 `try`。
   } catch (cause) {
     electronLogger.errorCause(cause)
     // B-02（2026-09-23 审计 P1）：这里**必须**有用户可见出口。此前只有
@@ -717,7 +754,13 @@ async function start(): Promise<void> {
     // 现在弹原生错误面，并保证退出语义只有两种：用户选「重试」→ 走既有的
     // relaunch 通道（`createDesktopExitCoordinator` 只在 code 0 时真重启）；其余
     // 一律非零码退出 —— 绝不静默退出，绝不以 0 码假装成功。
-    const action = await reportFatalStartupFailure(cause, runtime, electronLogger)
+    //
+    // 这个 `try` 覆盖的不只是业务装配，还包括构造器、协议注册、`app.whenReady()`
+    // 与数据根推导（2026-10-04 C1-02）：那些语句原先在 try **之外**，失败会逸出
+    // `start()` 变成 unhandled rejection —— 用户仍然什么都看不到。因此这里传的是
+    // **可选视图** `mountedRuntime`（窗口内是 undefined），而 `nativeExit`/`shutdown`
+    // 在窗口之前就已构造，两条退出语句因此永远有对象可用。
+    const action = await reportFatalStartupFailure(cause, mountedRuntime, electronLogger)
     if (action === 'retry') nativeExit.requestRelaunch()
     await shutdown.request(action === 'retry' ? 0 : 1)
   }

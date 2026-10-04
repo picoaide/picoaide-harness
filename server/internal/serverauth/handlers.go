@@ -156,9 +156,13 @@ type AdminHandlers struct {
 // AdminHandlers 返回服务端管理面 handler 集合(供 router 包集中声明路由)。
 //
 // R15C-R-01 ②(审计 2026-09-25,P1):ListUserTokens 绑的是**分页**实现
-// (token_page.go;缺省 50/最大 200/越界 400)。旧的无分页实现(admin.go 的
-// listUserTokens,单请求 130 MiB)仅供 serverauth 包内测试镜像树使用 ——
-// 它的 DAO 也已改成有界(serverstore.ListTokensByUser 带 LIMIT)。
+// (token_page.go;缺省 50/最大 200/越界 400)。
+//
+// S3-04(审计 2026-10-04,P2):旧的无分页实现(admin.go 的 listUserTokens)已**删除** ——
+// 它此前被测试镜像树 `RegisterAdminRoutes` 绑着,于是同一条路径在生产树与镜像树里
+// 有两套响应契约,而镜像对拍只比 (method,path) ⇒ 恒绿。现在生产与镜像都绑这一个
+// 实现(同一读取面只允许一套契约);`serverstore.ListTokensByUser`(固定上限的单页视图)
+// 仍被存储面判据使用,故保留。
 func (a *AdminAPI) Handlers() *AdminHandlers {
 	return &AdminHandlers{
 		Login:             a.handleLogin,

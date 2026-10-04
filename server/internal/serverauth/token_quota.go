@@ -4,7 +4,8 @@ package serverauth
 //
 // 缺陷形态：客户端登录（`POST /api/client/v2/auth/login`）与 OIDC 回调每次成功都
 // `IssueToken` ⇒ 插一条 90 天有效令牌，**不去重、不轮换旧的、不按用户限额**；而
-// 失败预算在成功时被 `loginSucceeded` 清空 ⇒ 成功登录不消耗任何预算。实测单账号
+// 失败预算在成功时被 `loginSucceeded` 清掉**账号维度**（S3-03 起 IP 桶只归还本次
+// 尝试那一格，不再整键清空）⇒ 成功登录不消耗账号维度的预算。实测单账号
 // 32 线程 30 s 拿到 279 次成功登录（9.0 次/秒，上限是本地 argon2 校验闸而非限流），
 // 折算 **77.6 万行/天 / ≈99 MiB/天响应体增长**。行数没有上界 ⇒ 任何持证员工都能
 // 单方面把管理端列表（修复前无分页）放大成全站 OOM。
@@ -95,17 +96,15 @@ func (a *API) tokenIssueAllowed(userID int64) bool {
 	return sharedTokenIssueQuotaLimiter().allow(tokenIssueBudgetKey(a.DB, userID))
 }
 
-// resetTokenIssueQuotaForTest 清空进程级签发配额桶（**仅测试**：包级单例跨用例
-// 存活，与 resetSharedLimitersForTest 同口径 —— 只清内容、不替换实例，因为已构造
-// 的 API 句柄持有旧指针）。由本包的测试入口调用。
-func resetTokenIssueQuotaForTest() {
-	l := sharedTokenIssueQuotaLimiter()
-	l.mu.Lock()
-	l.attempts = map[string][]time.Time{}
-	l.lastSweep = time.Time{}
-	l.mu.Unlock()
-}
-
+// 本单例的复位入口**只有一处**：`resetSharedLimitersForTest`
+// （ratelimit_isolation_test.go，由 newTestAPI / mustDB 等测试入口调用）。
+//
+// S3-06（审计 2026-10-04，P2）：这里此前还有一份 `resetTokenIssueQuotaForTest`
+// —— 生产文件里的测试钩子、注释自称"由本包的测试入口调用"，而全仓**零调用点**；
+// 真正生效的复位是 resetSharedLimitersForTest（它按 *loginLimiter 列表统一清空，
+// 签发配额桶就在那份列表里）。两份独立实现同时存在时，"新增状态该改哪一份"没有
+// 确定答案 —— 现已删除，复位口径回到唯一实现。判据见
+// audit_s3_06_reset_discipline_test.go。
 // issueTokenForLogin 是**员工自助登录**路径唯一的签发入口：先过配额，再签发。
 //
 // 返回 errTokenIssueQuota 时调用方必须回 429 RATE_LIMITED（不要混进 500）。

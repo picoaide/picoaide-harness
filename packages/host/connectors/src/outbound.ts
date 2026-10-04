@@ -22,6 +22,34 @@
  * answer instead of delivering the body (code + PKCE verifier) to a host the
  * policy would have refused as an initial URL.
  *
+ * CN-9 adds the third: a NAME has to be resolved before it can be judged
+ * ({@link resolveOutboundTarget}), and since C3-06 (2026-10-04) a name whose
+ * resolution cannot be VERIFIED (resolver error, resolution deadline, empty
+ * answer) is refused exactly like a name that resolves into a non-public range
+ * — the two are reported apart, but neither is a pass.
+ *
+ * The fourth is the one that closes the TOCTOU the third left open: the verdict
+ * is not an opinion about an answer somebody else will fetch again — it IS the
+ * connection's input. {@link resolveOutboundTarget} returns the verified
+ * addresses with the URL, and {@link sendPinned} dials exactly those, with the
+ * NAME kept for the request line, the `Host` header and TLS (`servername`), so
+ * certificate verification stays an ordinary hostname check. There is no second
+ * resolution on any connector outbound path, and no path that falls back to the
+ * system resolver: an empty or unusable pin is a refusal.
+ *
+ * The fifth (P8, 2026-10-04) is the deployment's proxy escape hatch. The client
+ * bans proxies by default but lets a deployment enable them
+ * (`docs/decisions/2026-09-22-client-system-proxy-ban.md`); pinning replaced the
+ * global `fetch`, which had silently turned that hatch off for connectors. The
+ * route is therefore decided in the SAME judgement ({@link resolveOutboundTarget}
+ * calls `resolveConnectorProxyRoute` and carries the verdict on the target):
+ *  - **direct** (the default) — unchanged: resolve, verify, pin, fail-closed;
+ *  - **proxy** — the local resolution is SKIPPED (the proxy resolves the name,
+ *    so a local lookup would decide nothing) and the syntax verdict is all this
+ *    layer guarantees; the transport tunnels via HTTP CONNECT and says so once
+ *    in the log. An unreadable proxy configuration is a refusal, never a silent
+ *    choice of route.
+ *
  * Cross-package note: the enterprise guard is owned by another workstream and
  * lives in a package this one must not depend on (the dependency direction
  * would be new and the file is out of scope). The semantics above are therefore
@@ -35,6 +63,10 @@ import { lookup as lookupHostname } from 'node:dns/promises'
 import { BlockList, isIP } from 'node:net'
 import { hostname as osHostname } from 'node:os'
 import { DEFAULT_HOST_LOCALE, hostT, stepLabel, type HostLocale } from './host-copy.ts'
+import { sendPinned, type OutboundTarget } from './pinned-http.ts'
+import { resolveConnectorProxyRoute } from './proxy-route.ts'
+
+export type { OutboundTarget }
 
 /** Thrown when a connector-controlled URL is outside the allowed outbound set. */
 export class OutboundUrlBlockedError extends Error {
@@ -58,6 +90,67 @@ export class OutboundTimeoutError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'OutboundTimeoutError'
+  }
+}
+
+/**
+ * Stable, locale-independent reasons of
+ * {@link OutboundResolutionUnverifiedError} (audit C3-06).
+ *
+ * `resolution-failed` = the resolver answered with an error; `resolution-timeout`
+ * = it did not answer inside {@link OUTBOUND_RESOLUTION_TIMEOUT_MS};
+ * `resolution-empty` = it answered without a single address;
+ * `resolution-malformed` = it answered with something that is not a readable list
+ * of address literals (not a list at all, a non-string entry, or a string that
+ * is not an IP). All four mean the same thing to the policy (the address class
+ * is UNKNOWN) but a different thing to whoever has to fix the deployment, so the
+ * code travels with the error.
+ *
+ * `resolution-malformed` deliberately gets its own code instead of reusing
+ * `resolution-failed`: nothing FAILED — an answer arrived and the gate could not
+ * read it — and instead of the closest existing code (`resolution-empty`, "the
+ * answer carried no usable entry") it stays separate because the two have
+ * different owners (an empty answer is a DNS/deployment answer, a malformed one
+ * is the seam contract being broken). It must never be reported as a BLOCKED
+ * ADDRESS either: the pre-fix gate fed unreadable entries to
+ * {@link isBlockedResolvedAddress}, whose fail-closed `isIP === 0 ⇒ true` turned
+ * `['not-an-ip']` into "你的域名解析到内网地址" — a verdict about the target that
+ * the policy never actually reached (audit C3-06 gap ②, 2026-10-04).
+ */
+export const OUTBOUND_RESOLUTION_CODES = [
+  'resolution-failed',
+  'resolution-timeout',
+  'resolution-empty',
+  'resolution-malformed',
+] as const
+
+/** One stable reason code of {@link OutboundResolutionUnverifiedError}. */
+export type OutboundResolutionCode = (typeof OUTBOUND_RESOLUTION_CODES)[number]
+
+/**
+ * Thrown when the resolution gate could **not verify** what a NAME resolves to
+ * (audit C3-06, 2026-10-04).
+ *
+ * Deliberately NOT an {@link OutboundUrlBlockedError}: that one is a verdict
+ * about the target ("this address is non-public"), while this one is a failure
+ * to OBTAIN the facts. Both refuse the request — since C3-06 "could not verify"
+ * is never a pass — but they must stay tellable apart:
+ *  - the messages name different causes (`outbound.blockedResolved` vs
+ *    `outbound.resolutionFailed|Timeout|Empty`), so a user reading the connector
+ *    row knows whether to fix their DNS or their URL;
+ *  - `auth.ts`'s `isClassifiedStepFailure` deliberately classifies only the
+ *    former as "authorize again". Clearing a DNS hiccup by telling the user to
+ *    re-authorize is the exact misdiagnosis that rule was narrowed for
+ *    (2026-09-16 R2 audit), so an unverified NAME must not ride in on it.
+ */
+export class OutboundResolutionUnverifiedError extends Error {
+  /** Stable, locale-independent reason this verification failed. */
+  readonly code: OutboundResolutionCode
+
+  constructor(code: OutboundResolutionCode, message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'OutboundResolutionUnverifiedError'
+    this.code = code
   }
 }
 
@@ -126,13 +219,41 @@ function buildBlockedList(): BlockList {
   }
   // IPv6: unspecified, IPv4-mapped (re-checked as IPv4 below), NAT64,
   // discard-only, documentation, unique-local, link-local, multicast.
+  //
+  // C3-07 (2026-10-04 audit) added the four siblings of `64:ff9b::/96` that the
+  // v2.8.1 list missed — every one of them carries or reaches a non-public
+  // address while looking like an ordinary global unicast literal:
+  //   - `2002::/16` (6to4, RFC 3056) wraps the IPv4 GATEWAY in bits 16–47, so
+  //     `2002:7f00:1::` reaches 127.0.0.1 and `2002:a9fe:a9fe::` reaches
+  //     169.254.169.254; deprecated by RFC 7526.
+  //   - `2001::/32` (Teredo, RFC 4380) wraps the Teredo server IPv4 at bits
+  //     32–63 and the client IPv4 (bitwise-complemented) in the last 32 bits.
+  //   - `64:ff9b:1::/48` (local-use NAT64, RFC 8215) is the private sibling of
+  //     the well-known `64:ff9b::/96` already refused above.
+  //   - `fec0::/10` (site-local, deprecated by RFC 3879) is the fixed-address
+  //     ancestor of `fc00::/7`.
+  // Verdict口径 for all four is "refuse the whole prefix", i.e. exactly what
+  // `64:ff9b::/96` has done since v2.8.1, and for the same reason: the prefix
+  // exists to WRAP an IPv4 address, so "which address does this reach" is
+  // decided by an embedded field, not by the prefix. Decoding that field would
+  // let `2002:0808:0808::` through (a public IPv4) while the gate's real answer
+  // — "this name reaches a host only through a transition mechanism the policy
+  // cannot observe" — stays unknown; it would also add an IPv6 bit-parser to a
+  // security verdict. The availability cost is nil in this product's surface:
+  // 6to4/Teredo are deprecated transition mechanisms (Windows 10 removed 6to4),
+  // `fec0::/10` is deprecated, and DNS64/NAT64 networks already have every
+  // translated name refused by `64:ff9b::/96`.
   for (const [network, prefix] of [
     ['::', 128],
+    ['2001::', 32],
+    ['2002::', 16],
     ['64:ff9b::', 96],
+    ['64:ff9b:1::', 48],
     ['100::', 64],
     ['2001:db8::', 32],
     ['fc00::', 7],
     ['fe80::', 10],
+    ['fec0::', 10],
     ['ff00::', 8],
   ] as const) {
     list.addSubnet(network, prefix, 'ipv6')
@@ -163,6 +284,14 @@ const LOOPBACK_ADDRESSES = buildLoopbackList()
  * while the syntax rule for a literal in that range stays in force. Everything
  * that can reach a real non-public service (loopback, unspecified, private,
  * link-local/metadata, CGNAT, multicast, reserved) is refused.
+ *
+ * C3-07: the IPv6 transition/translation siblings added to
+ * {@link buildBlockedList} are refused here too — a NAME resolving into
+ * `2002::/16`, `2001::/32`, `64:ff9b:1::/48` or `fec0::/10` reaches the same
+ * wrapped non-public address as its literal spelling, and whichever of the two
+ * spellings a hostile definition uses is not a distinction the policy may make.
+ * The口径 (why the whole prefix instead of decoding the embedded IPv4) is
+ * written once, on `buildBlockedList`.
  */
 function buildResolvedNameBlockedList(): BlockList {
   const list = new BlockList()
@@ -183,10 +312,14 @@ function buildResolvedNameBlockedList(): BlockList {
   for (const [network, prefix] of [
     ['::', 128],
     ['::1', 128],
+    ['2001::', 32],
+    ['2002::', 16],
     ['64:ff9b::', 96],
+    ['64:ff9b:1::', 48],
     ['100::', 64],
     ['fc00::', 7],
     ['fe80::', 10],
+    ['fec0::', 10],
     ['ff00::', 8],
   ] as const) {
     list.addSubnet(network, prefix, 'ipv6')
@@ -201,6 +334,12 @@ const RESOLVED_NAME_BLOCKED = buildResolvedNameBlockedList()
  *
  * IPv4-mapped IPv6 (`::ffff:a.b.c.d`) reaches the IPv4 stack, so the embedded
  * address is re-checked exactly like {@link classifyHost} does for literals.
+ *
+ * A value that is not an IP literal at all is `true` (fail-CLOSED) for direct
+ * callers. The gate does not lean on that default for its verdict: it classifies
+ * an unreadable answer shape as `resolution-malformed` BEFORE calling this, so
+ * the refusal names the real cause instead of pretending the target resolved
+ * into a non-public range.
  * @param address - one address as the resolver returned it.
  * @returns true when the address is non-public enough to refuse.
  */
@@ -344,7 +483,20 @@ export function isOutboundUrlAllowed(rawUrl: string): boolean {
  *
  * A resolver that never answers must not park the request: the request keeps
  * its own deadline ({@link OUTBOUND_REQUEST_TIMEOUT_MS}) and reports a timeout
- * from there. A breach of THIS budget means "could not verify", not "refused".
+ * from there. A breach of THIS budget means "could not verify" — which since
+ * C3-06 is a REFUSAL ({@link OutboundResolutionUnverifiedError}), not a pass.
+ *
+ * Magnitude is part of the contract (audit C3-06 gap ①, 2026-10-04): the gate
+ * runs BEFORE the request's own deadline starts (`outboundFetch` resolves the
+ * name first, then arms `AbortSignal.timeout`), and it runs on the same serial
+ * plugin lifecycle chain (boot restore / logout / user switch) that conn-1 was
+ * about — so this budget cannot be allowed to converge with, let alone exceed,
+ * one request deadline. Concretely: at most half of
+ * `OUTBOUND_REQUEST_TIMEOUT_MS` and at most 10 s. Widening it to "an hour"
+ * would park exactly the chain this deadline exists to protect, which is why
+ * `tests/audit-1004-outbound-resolution-gate.spec.ts` pins both the ratio and
+ * the ceiling against the constants themselves (and proves the DEFAULT budget
+ * really fires without any `timeoutMs` override).
  */
 export const OUTBOUND_RESOLUTION_TIMEOUT_MS = 5_000
 
@@ -356,13 +508,44 @@ const defaultHostResolver: OutboundHostResolver = async (hostname) => {
   return answers.map(answer => answer.address)
 }
 
+/**
+ * Whether one entry of a resolver answer is an address literal the policy can
+ * judge: a string that `isIP` accepts once trimmed (the same normalization
+ * {@link isBlockedResolvedAddress} applies).
+ *
+ * Deliberately NOT "anything {@link isBlockedResolvedAddress} can survive":
+ * that predicate answers fail-closed `true` for unreadable input, so a shape
+ * gate built on it could only report "blocked", never "unreadable".
+ */
+function isAddressLiteralEntry(entry: unknown): entry is string {
+  return typeof entry === 'string' && isIP(entry.trim()) !== 0
+}
+
+/**
+ * Bounded, throw-free description of a resolver answer (or one entry of it) for
+ * the `resolution-malformed` message. Never echoes more than a few characters
+ * of caller-controlled data, and never calls a method that may not exist.
+ */
+function describeResolutionAnswer(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return `array(${value.length})`
+  if (typeof value === 'string') return `string "${value.slice(0, 60)}"`
+  return typeof value
+}
+
+/** Internal sentinel: the gate's own resolution deadline fired (not a resolver error). */
+class ResolutionDeadlineExceededError extends Error {}
+
 async function withResolutionDeadline<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
       task,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('outbound resolution deadline exceeded')), timeoutMs)
+        timer = setTimeout(
+          () => reject(new ResolutionDeadlineExceededError('outbound resolution deadline exceeded')),
+          timeoutMs,
+        )
       }),
     ])
   } finally {
@@ -371,34 +554,164 @@ async function withResolutionDeadline<T>(task: Promise<T>, timeoutMs: number): P
 }
 
 /**
- * Resolve one connector-controlled URL and refuse it when the name maps onto a
- * non-public address (CN-9, audit 2026-09-23).
+ * Addresses a loopback NAME (`localhost`, `*.localhost`) is pinned to.
+ *
+ * The policy classifies these names as loopback by the RFC 6761 reservation
+ * without resolving them (the enterprise guard does the same), which used to
+ * mean the CONNECTION could still resolve them — and `*.localhost` is only
+ * loopback if the resolver says so: with `hosts: files dns` and nothing in
+ * `/etc/hosts`, a hostile or intercepted resolver answers `evil.localhost` with
+ * anything, including `169.254.169.254`. Pinning the reserved names to loopback
+ * makes the syntax verdict true by construction. Both families are offered so a
+ * local server listening on either one is still reached.
+ */
+const LOOPBACK_PIN_ADDRESSES: readonly string[] = ['127.0.0.1', '::1']
+
+/**
+ * Resolve one connector-controlled URL and return the addresses it may connect
+ * to — the single judgement point of the outbound policy.
  *
  * {@link assertOutboundUrlAllowed} is a pure-syntax verdict: a DNS name is
  * `name` and an `https` name is allowed, so `https://attacker.example/` that
- * resolves to `169.254.169.254`, to a `10/8` service or to loopback passed
- * every rule above. This is the resolution half of the policy, called by
+ * resolves to `169.254.169.254`, to a `10/8` service or to loopback passed every
+ * rule above. This is the resolution half of the policy, called by
  * {@link outboundFetch} and by the MCP transport fence before a request leaves
  * the process.
  *
- * Residual (documented, NOT closed): the connection is not pinned to the
- * verified address, so a name that is re-pointed between this lookup and the
- * connection's own resolution still reaches the second address (DNS rebinding
- * TOCTOU). Closing it needs a custom `undici` dispatcher (`Agent({connect:
- * {lookup}})`) pinned per request; the deliberate trade-off here is the short
- * window against a new outbound dependency, and the residual is reported with
- * the finding.
+ * The returned addresses are the pin: the callers hand the whole
+ * {@link OutboundTarget} to `sendPinned`, so the connection cannot resolve the
+ * name a second time (DNS rebinding TOCTOU, closed 2026-10-04; the previous
+ * revision resolved for the verdict and then let `fetch`/undici resolve again).
  *
- * Fail-open cases (both deliberate): IP literals and `localhost` are already
- * classified by the syntax rule; a resolver error or the resolution deadline
- * means "could not verify" and leaves the verdict to the connection itself
- * (which then has its own deadline and reports its own failure).
+ * Fail-CLOSED (C3-06, 2026-10-04 audit): "could not verify" is a refusal.
+ * Nothing downstream re-checks the address class, so the pre-fix `catch { return }`
+ * let a hostile name through exactly when its DNS made THIS query fail or run
+ * late (the attacker's own resolver decides). The four unverifiable shapes
+ * (resolver error, resolution deadline, empty answer, unreadable answer shape)
+ * now throw {@link OutboundResolutionUnverifiedError} with a stable `code`,
+ * which is a different error class from the "resolution succeeded and the
+ * address is non-public" verdict ({@link OutboundUrlBlockedError}) so the two
+ * are distinguishable by message, by class and by code.
+ *
+ * Fast paths kept (they are verdicts, not "could not verify"): an IP literal is
+ * pinned to itself, and `localhost`/`*.localhost` is pinned to loopback — see
+ * {@link LOOPBACK_PIN_ADDRESSES}. Every other name is resolved on every call —
+ * there is no positive cache, and this change does not add one.
+ * @param rawUrl - the URL as the remote side supplied it.
+ * @param what - the flow step naming the URL in the error (e.g. `MCP 端点`).
+ * @param locale - locale for the error text (defaults to the product default).
+ * @param options - resolution seam and deadline (tests inject a resolver so the
+ *   verdict never depends on the runner's DNS).
+ * @returns the parsed, policy-approved URL, the addresses it may connect to
+ *   (never empty in direct mode, always IP literals; deliberately empty in proxy
+ *   mode, where the proxy resolves the name) and the route the transport must
+ *   take.
+ * @throws {OutboundUrlBlockedError} when the URL is malformed, outside the
+ *   syntax policy or resolving onto a non-public address.
+ * @throws {OutboundResolutionUnverifiedError} when the name's addresses could
+ *   not be established (resolver error, deadline, empty answer) or the answer
+ *   could not be read as a list of address literals (`resolution-malformed`).
+ */
+export async function resolveOutboundTarget(
+  rawUrl: string,
+  what: string,
+  locale: HostLocale = DEFAULT_HOST_LOCALE,
+  options: { resolve?: OutboundHostResolver | undefined; timeoutMs?: number | undefined } = {},
+): Promise<OutboundTarget> {
+  const url = assertOutboundUrlAllowed(rawUrl, what, locale)
+  const bare = bareHostname(url.hostname).toLowerCase().replace(/\.$/u, '')
+  // The route is part of the judgement, not a transport detail: it is decided
+  // here, carried on the target, and used by `sendPinned` — so a request cannot
+  // be judged direct and then leave through a proxy (or the other way round).
+  // `classifyHost` already knows the loopback verdict; pass it in rather than
+  // re-deriving it.
+  const route = resolveConnectorProxyRoute(process.env, url, { loopback: classifyHost(url.hostname) === 'loopback' })
+  if (route.kind === 'proxy') {
+    // Proxy mode: the proxy resolves the name, so a local answer would not be
+    // the address the connection uses and pinning it would be a fiction. The
+    // syntax verdict above (protocol, credentials, blocked literals, metadata
+    // hostnames, reserved names) is what remains — stated once in the log by the
+    // transport, and in the residual section of temp/audit-v282/fixes/P8.md.
+    return { url, addresses: [], route }
+  }
+  if (isIP(bare) !== 0) return { url, addresses: [bare], route }
+  if (isLoopbackLiteral(bare)) return { url, addresses: LOOPBACK_PIN_ADDRESSES, route }
+  const resolve = options.resolve ?? defaultHostResolver
+  const budgetMs = options.timeoutMs ?? OUTBOUND_RESOLUTION_TIMEOUT_MS
+  const label = stepLabel(locale, what)
+  let addresses: readonly string[]
+  try {
+    addresses = await withResolutionDeadline(Promise.resolve(resolve(bare)), budgetMs)
+  } catch (cause) {
+    if (cause instanceof ResolutionDeadlineExceededError) {
+      throw new OutboundResolutionUnverifiedError('resolution-timeout', hostT(locale, 'outbound.resolutionTimeout', {
+        what: label,
+        target: url.host,
+        timeoutMs: String(budgetMs),
+      }), { cause })
+    }
+    throw new OutboundResolutionUnverifiedError('resolution-failed', hostT(locale, 'outbound.resolutionFailed', {
+      what: label,
+      target: url.host,
+      reason: (cause instanceof Error ? cause.message : String(cause)).slice(0, 200),
+    }), { cause })
+  }
+  // Shape gate (C3-06 gap ②, 2026-10-04). The seam is TYPED `readonly string[]`
+  // but a runtime answer can be anything, and before this gate the two illegal
+  // shapes had no semantics of their own: a non-string entry (`[undefined]`,
+  // `[123]`, `[{address,family}]`) crashed out of `isBlockedResolvedAddress` as a
+  // bare `TypeError` (`address.trim is not a function`), and a string that is not
+  // an IP (`['not-an-ip']`) rode the predicate's fail-closed default into the
+  // "resolves to a non-public address" verdict — a target verdict for facts the
+  // policy never obtained. Both are "could not verify", so both are refused here
+  // with their own code, in the same family as empty/failed. Nothing is fetched.
+  //
+  // The "is it even a list" half comes FIRST: `addresses.length` below is the
+  // first thing that would throw on `undefined`/`null`.
+  const answer: unknown = addresses
+  if (!Array.isArray(answer)) {
+    throw new OutboundResolutionUnverifiedError('resolution-malformed', hostT(locale, 'outbound.resolutionMalformed', {
+      what: label,
+      target: url.host,
+      detail: describeResolutionAnswer(answer),
+    }))
+  }
+  if (addresses.length === 0) {
+    // An answer with no address verifies nothing; treat it like a failure to
+    // answer rather than like "no non-public address was found".
+    throw new OutboundResolutionUnverifiedError('resolution-empty', hostT(locale, 'outbound.resolutionEmpty', {
+      what: label,
+      target: url.host,
+    }))
+  }
+  const malformedIndex = answer.findIndex((entry: unknown) => !isAddressLiteralEntry(entry))
+  if (malformedIndex >= 0) {
+    throw new OutboundResolutionUnverifiedError('resolution-malformed', hostT(locale, 'outbound.resolutionMalformed', {
+      what: label,
+      target: url.host,
+      detail: `[${malformedIndex}] ${describeResolutionAnswer(answer[malformedIndex])}`,
+    }))
+  }
+  const blocked = addresses.find(address => isBlockedResolvedAddress(address))
+  if (blocked === undefined) return { url, addresses, route }
+  throw new OutboundUrlBlockedError(hostT(locale, 'outbound.blockedResolved', {
+    what: label,
+    target: url.host,
+    address: blocked,
+  }))
+}
+
+/**
+ * Verdict-only form of {@link resolveOutboundTarget}: same gate, same refusals,
+ * pin discarded.
+ *
+ * Kept for call sites and criteria that only need "is this URL allowed" (the
+ * address pin matters to whoever performs the request, and every such caller
+ * uses {@link resolveOutboundTarget} so it can hand the pin to `sendPinned`).
  * @param url - the parsed, syntax-approved URL.
  * @param what - the flow step naming the URL in the error.
  * @param locale - locale for the error text.
- * @param options - resolution seam and deadline (tests inject a resolver so the
- *   verdict never depends on the runner's DNS).
- * @throws {OutboundUrlBlockedError} when any returned address is non-public.
+ * @param options - resolution seam and deadline.
  */
 export async function assertResolvedOutboundAddressAllowed(
   url: URL,
@@ -406,26 +719,7 @@ export async function assertResolvedOutboundAddressAllowed(
   locale: HostLocale = DEFAULT_HOST_LOCALE,
   options: { resolve?: OutboundHostResolver | undefined; timeoutMs?: number | undefined } = {},
 ): Promise<void> {
-  const bare = bareHostname(url.hostname).toLowerCase().replace(/\.$/u, '')
-  if (isIP(bare) !== 0) return
-  if (isLoopbackLiteral(bare)) return
-  const resolve = options.resolve ?? defaultHostResolver
-  let addresses: readonly string[]
-  try {
-    addresses = await withResolutionDeadline(
-      Promise.resolve(resolve(bare)),
-      options.timeoutMs ?? OUTBOUND_RESOLUTION_TIMEOUT_MS,
-    )
-  } catch {
-    return
-  }
-  const blocked = addresses.find(address => isBlockedResolvedAddress(address))
-  if (blocked === undefined) return
-  throw new OutboundUrlBlockedError(hostT(locale, 'outbound.blockedResolved', {
-    what: stepLabel(locale, what),
-    target: url.host,
-    address: blocked,
-  }))
+  await resolveOutboundTarget(url.href, what, locale, options)
 }
 
 /**
@@ -532,6 +826,13 @@ export function allowedOutboundOriginsOf(value: unknown): ReadonlySet<string> | 
  * fence applied in one place, so no call site can perform one without the
  * other.
  *
+ * The request is performed by {@link sendPinned} against the addresses
+ * {@link resolveOutboundTarget} verified — the same judgement, used, instead of
+ * a verdict something else re-resolves. `redirect: 'manual'` stays part of the
+ * contract even though the pinned transport has no redirect logic: the policy
+ * is stated in one place, and a future transport change cannot silently
+ * reintroduce following.
+ *
  * Every request also carries a deadline (conn-1): `init.signal` can only
  * SHORTEN it (the abort fires when either the caller's signal or the deadline
  * fires), never extend it, so a hung endpoint cannot park the caller's serial
@@ -555,11 +856,11 @@ export async function outboundFetch(
 ): Promise<Response> {
   const locale = options.locale ?? DEFAULT_HOST_LOCALE
   const label = stepLabel(locale, what)
-  const target = assertOutboundUrlAllowed(rawUrl, what, locale)
-  // CN-9: the syntax verdict above cannot see what a NAME resolves to, so the
-  // resolution gate runs before any byte of the request leaves the process.
-  await assertResolvedOutboundAddressAllowed(
-    target,
+  // CN-9 + pinning: the syntax verdict cannot see what a NAME resolves to, so
+  // the resolution gate runs before any byte of the request leaves the process —
+  // and its answer is what the connection uses.
+  const target = await resolveOutboundTarget(
+    rawUrl,
     what,
     locale,
     options.resolve === undefined ? {} : { resolve: options.resolve },
@@ -574,7 +875,7 @@ export async function outboundFetch(
   const caller = init.signal ?? null
   let response: Response
   try {
-    response = await fetch(target, {
+    response = await sendPinned(target, {
       ...init,
       redirect: OUTBOUND_REDIRECT_POLICY,
       signal: caller === null ? deadline : AbortSignal.any([caller, deadline]),
@@ -586,14 +887,14 @@ export async function outboundFetch(
       throw new OutboundTimeoutError(hostT(locale, 'outbound.timeout', {
         what: label,
         timeoutMs: String(deadlineMs),
-        host: target.host,
+        host: target.url.host,
       }))
     }
     throw cause
   }
   if (isRedirectResponse(response)) {
     throw new OutboundUrlBlockedError(
-      hostT(locale, 'outbound.redirect', { what: label, detail: describeRedirect(response), host: target.host }),
+      hostT(locale, 'outbound.redirect', { what: label, detail: describeRedirect(response), host: target.url.host }),
     )
   }
   return response

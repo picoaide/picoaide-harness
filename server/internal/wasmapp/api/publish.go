@@ -119,6 +119,288 @@ type staged struct {
 	compile   *compile.Result
 }
 
+// ===== 发布链路的**单一总预算**（2026-10-04，审计 S4-06 / CTRL-01）=====
+//
+// 现场：publish/validate 在**同一个 HTTP 请求**里顺序做「编译（B）→ 抽取（C）→ 干跑（D）」，
+// 而 B 与 D 原先各自从 request ctx 派生预算（`budgetCtx(c.Request.Context(), CompileTimeout)`
+// 各一次）⇒ 平台侧"最晚给结论"的时刻 = 两段上限之和（默认 60 + 60 = 120 s）。客户端对这条
+// 请求的出站预算只有 90 s（`limits.ClientUploadTimeout`）⇒ 员工/AI 先拿到笼统的网络错误，
+// 而平台其实正准备返回带 `code`/`hints` 的结构化错误。
+//
+// 修法：**从请求到达平台那一刻起只有一个 deadline**（`limits.PublishTotalBudget`），
+// 所有阶段都从它派生 ⇒ 阶段实际可用 = min(阶段上限, 总预算剩余)，两段之和恒 ≤ 总预算。
+// deadline 在**读请求体之前**挂上，所以上传体读取的时间也吃这份总预算（否则"最晚给结论"
+// 会随上传耗时漂移）。
+//
+// 为什么用 request ctx 里的值而不是再传一个参数：`prepare` 有两个入口
+// （`publish` / `upload complete`），而入口到 `prepare` 之间还隔着请求体读取
+// （`bindJSONLimited`）—— 只有把 deadline 挂在 request ctx 上，读体那一段才在预算之内，
+// 且 `publishFromBytes` / `prepare` 的签名都不用改。
+
+// ===== 客户端声明的剩余预算（2026-10-04，审计 FW-2）=====
+//
+// 现场：分片链的客户端预算（`packages/host/enterprise/src/wasm-apps.ts` 的
+// `CHUNKED_PUBLISH_BUDGET_MS`）是**整条链共用**的 90 s —— 开会话、N 片 PUT、续传刷新、
+// complete 每一跳只用"剩余额度"。而平台侧为 `complete` 这一跳**新开**一份
+// `PublishTotalBudget`（75 s）⇒ 上传阶段花掉 >15 s 之后，客户端在这一跳只剩
+// `90 s − 已用 < 75 s`：平台允许的结论时刻落在客户端放弃**之后**，员工/AI 拿到的是
+// 笼统的网关错误，而平台正准备返回带 `code`/`hints` 的结构化错误
+// （= S4-06 / CTRL-01 要消灭的形态，只是搬到了分片路径）。
+//
+// 修法（跨端传递剩余预算）：客户端在**这一跳**的请求头 `ClientBudgetHeader` 里声明
+// "我还会等多少毫秒"（值 = 它为这一跳设置的出站计时器），平台把这一跳的总预算缩到
+//
+//	effective = min(PublishTotalBudget, max(0, declared − PublishTransferReserve))
+//
+// 于是"平台侧在这一跳的预算严格小于客户端在这一跳的剩余额度"这条序关系**恒成立**
+// （declared 与 effective 的差恒为传输余量 ≥ 0）。
+//
+// 严格校验（三态，缺一不可）：
+//   - 缺头 / 空串 / 纯空白 / 非十进制整数 / ≤0 / > `ClientUploadTimeout`（含溢出）
+//     ⇒ 回落到 `PublishTotalBudget`（老客户端与第三方客户端行为不变）；
+//   - 合法值 ⇒ **只许缩小**，永不放大（`min` 保证 ≤ `PublishTotalBudget`）；
+//   - `declared − PublishTransferReserve ≤ 0` ⇒ 有效预算为 0 ⇒ 入口立刻给出结构化结论
+//     （见 publishBudgetRefusal）：客户端已经等不到任何结论，继续做只会白烧一次编译。
+
+// ClientBudgetHeader 是客户端声明"本条请求我还会等多少毫秒"的请求头。
+//
+// 跨端契约：客户端侧的同一个字面量在
+// `packages/host/enterprise/src/wasm-apps.ts` 的 `CLIENT_BUDGET_HEADER`，由
+// `tests/wasm-apps.spec.ts` 的一条**读本文件**的对拍用例钉住（缺任一侧即失败）。
+const ClientBudgetHeader = "X-Pico-Client-Budget-Ms"
+
+// parseClientBudgetHint 解析 `ClientBudgetHeader`；`ok=false` = "没有可用声明"（回落总预算）。
+//
+// 为什么不接受别的写法：这条头的语义是"客户端计时器的毫秒数"，唯一合法形态就是十进制
+// 整数（`String(ms)`）。`+5` / `5.5` / ` 5 000` / `1e3` / `0x10` 在别的读法下各有含义，
+// 收进来只会制造第二套解释 —— 一律当非法（回落总预算，永不放大）。
+func parseClientBudgetHint(raw string) (time.Duration, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, false
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	ms, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil { // 溢出（ErrRange）也走这里
+		return 0, false
+	}
+	// 上界 = 客户端出站预算本身：比它更大的声明没有意义（平台不会因此给更多时间），
+	// 同时挡住 `* time.Millisecond` 的 int64 纳秒溢出。
+	if ms <= 0 || ms > int64(limits.ClientUploadTimeout/time.Millisecond) {
+		return 0, false
+	}
+	return time.Duration(ms) * time.Millisecond, true
+}
+
+// publishBudget 是一次发布/预检请求的预算计划。
+type publishBudget struct {
+	// total 是平台侧在这一跳的总预算（`limits.PublishTotalBudget`，或被客户端声明缩小后的值；
+	// 只用于文案与诊断明细）。
+	total time.Duration
+	// deadline 是从请求到达时刻起算的绝对截止时刻（**唯一权威**）。
+	deadline time.Time
+	// declared 是客户端在本跳声明的剩余预算（0 = 没声明/声明非法 ⇒ 用平台默认总预算）。
+	// 非零时说明 `total` 是被客户端**缩小**过的，诊断文案据此给出补救路径。
+	declared time.Duration
+}
+
+// publishBudgetCarrier 是预算计划在 request ctx 里的载体键。
+type publishBudgetCarrier struct{}
+
+// publishBudgetFor 是三个请求入口共用的构造：读客户端声明的剩余预算 → 钳位 → 挂 deadline。
+func (h *Handlers) publishBudgetFor(c *gin.Context) (context.Context, publishBudget, context.CancelFunc) {
+	declared, _ := parseClientBudgetHint(c.GetHeader(ClientBudgetHeader))
+	return h.publishBudgetCtx(c.Request.Context(), declared)
+}
+
+// publishBudgetCtx 给 request ctx 挂上"本次发布的总 deadline"。
+//
+// 位置纪律：必须在**读请求体之前**调用（`publish` / `validate` / `uploadComplete` 的入口），
+// 否则上传耗时不在观测窗口内，"平台最晚给结论的时刻"就会随上传时长漂移。
+//
+// `declared` = 客户端声明的剩余预算（0 = 没声明）。只许**缩小**平台侧总预算：声明的语义是
+// "客户端还会等多久"，平台必须把结论给在它之前（见文件头部的 FW-2 段）。
+//
+// 幂等：已经挂过（分片 `complete` 路径经 `publishFromBytes` 再进 `prepare`）就直接复用，
+// 不会因为多包一层而把 deadline 推后；也因此**入口必须先挂**（否则先挂的那一份决定一切）。
+func (h *Handlers) publishBudgetCtx(parent context.Context, declared time.Duration) (context.Context, publishBudget, context.CancelFunc) {
+	if pb, ok := parent.Value(publishBudgetCarrier{}).(publishBudget); ok {
+		return parent, pb, func() {}
+	}
+	total := limits.PublishTotalBudget
+	if declared > 0 {
+		if hint := declared - limits.PublishTransferReserve; hint < total {
+			total = hint
+			if total < 0 {
+				total = 0
+			}
+		}
+	}
+	// 起算点用注入时钟（`Options.Now`）：生产等于 `time.Now()`；单测可以用它把
+	// "这次请求已经用掉了大部分总预算"造出来（默认 75 s 的总预算下，否则这条路径要跑
+	// 十几秒才咬得到）。
+	pb := publishBudget{total: total, deadline: h.now().Add(total), declared: declared}
+	ctx, cancel := context.WithDeadline(parent, pb.deadline)
+	return context.WithValue(ctx, publishBudgetCarrier{}, pb), pb, cancel
+}
+
+// lookupPublishBudget 取出 ctx 上的预算计划（`publishBudgetCtx` 挂的）。
+//
+// 第二个返回值是"挂上了没有"：**生产链路的完整性由它守** —— `prepare` 在缺失时
+// fail-loud（等于回到"两段各自从零起算"的旧形态），而 `dryRun` / `compileModule`
+// 只需要秒数用于文案，缺失时走 `publishBudgetOf` 的兜底。
+func lookupPublishBudget(ctx context.Context) (publishBudget, bool) {
+	pb, ok := ctx.Value(publishBudgetCarrier{}).(publishBudget)
+	return pb, ok
+}
+
+// publishBudgetOf 取出预算计划；缺失时回落到**编译期默认总预算**。
+//
+// 兜底只服务于"直接调用阶段函数"的单测（那时 ctx 上本来就没有 deadline，
+// `publishBudgetFailure` 只认 `DeadlineExceeded` ⇒ 不会命中），预算计划只用于文案里的秒数。
+func publishBudgetOf(ctx context.Context) publishBudget {
+	if pb, ok := lookupPublishBudget(ctx); ok {
+		return pb
+	}
+	return publishBudget{total: limits.PublishTotalBudget}
+}
+
+// publishBudgetFailure 报告"平台侧**总预算**（而不是阶段自己的上限）"是不是这次失败的原因。
+//
+// 判定只看父 ctx（= 带总 deadline 的那个）：阶段 ctx 的 deadline 是
+// min(阶段上限, 总预算) ⇒ 阶段超时**同时**可能由两者造成，而父 ctx 只在总预算到点时
+// 才 `DeadlineExceeded` ⇒ 这个判据正好把两者分开。客户端断开走的是 `Canceled`，
+// 不会被误判成"总预算用尽"。
+func publishBudgetFailure(ctx context.Context, pb publishBudget, stage string) *apperr.Error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil
+	}
+	return budgetExceeded(pb, stage)
+}
+
+// publishBudgetRefusal 报告"客户端声明的剩余预算连传输余量都不够"（有效预算 = 0）。
+//
+// 这时**任何**工作都会越过客户端的出站预算（它已经贴在放弃边缘），所以入口立刻给结构化
+// 结论：不占编译槽、不烧上传额度、不读请求体、不落行；分片仍在服务端，重发即可续传。
+// 只可能由客户端声明触发（平台默认总预算恒 > 0），所以 `declared == 0` 时恒为 nil。
+func (h *Handlers) publishBudgetRefusal(pb publishBudget) *apperr.Error {
+	if pb.declared == 0 || h.now().Before(pb.deadline) {
+		return nil
+	}
+	return budgetExceeded(pb, "请求入口")
+}
+
+// publishErrorOutcome 在 **handler 出口**把"总预算到点导致的失败"归一成结构化结论
+// （审计 S4-06 对抗验证 N1）。
+//
+// 现场：总预算原先只在两个阶段（编译 B / 干跑 D）**之内**被 `publishBudgetFailure` 识别；
+// 若它在**前置读**（`loadForPublish` / `artifactUsed` / `GetWasmApp` 复读 / `inheritBase`）
+// 或**落库**（`commitRelease`）期间到点，失败走的是 `internalErr("查询失败" / "版本保存失败")`
+// ⇒ 实测形态（验证方 `commit-window.log`）：
+//
+//	slack=900ms  status=500 code=INTERNAL phase=<nil>  msg=版本保存失败
+//	slack=300ms  status=500 code=INTERNAL phase=<nil>  msg=查询失败
+//
+// 而客户端此刻（很可能）已经在超时边缘 —— 它拿到的却是"平台内部错误 + 无重试指引"，
+// 与本次修复承诺的"平台先给出结构化结论"正好相反。
+//
+// 归一规则（四条，顺序即优先级）：
+//  1. 请求上没有总预算载体（不属发布链路）或 `err == nil` ⇒ 原样；
+//  2. 总预算 ctx **没到点** ⇒ 原样（不是超时引起的失败，一个字都不改）；
+//  3. 已经是预算结论（`details.phase == "publish_budget"`）⇒ 原样（幂等，不二次包装）；
+//  4. 到点了，且失败**确实是**上下文到点引起的（cause 链里有 `DeadlineExceeded`）**或**
+//     是平台内部错误（`INTERNAL`：DB/落库这类 I/O 失败，含服务端把查询取消成
+//     `57014 query_canceled` 的情形）⇒ 改判 `budgetExceeded`（原错误挂成 cause，供服务端
+//     日志排障；响应信封只出 code/message/details/hints）。
+//
+// 为什么第 4 条要看错误的形态而不是"ctx 到点就改判"：业务拒绝（越权 / 版本不新 /
+// 配置不合法…）也走同一条出口，而它们在**毫秒级**窗口里可能与到点同时发生。只按 ctx 判
+// 会把一次真实的"版本不新"报成"预算用尽"，让作者去重发同一个版本号 —— 那正是本仓
+// 反复登记的"错误指不到病根"。
+func (h *Handlers) publishErrorOutcome(c *gin.Context, err *apperr.Error, stage string) *apperr.Error {
+	pb, ok := lookupPublishBudget(c.Request.Context())
+	if !ok || err == nil {
+		return err
+	}
+	if !errors.Is(c.Request.Context().Err(), context.DeadlineExceeded) {
+		return err
+	}
+	if err.Details["phase"] == "publish_budget" {
+		return err
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && err.Code != apperr.CodeInternal {
+		return err
+	}
+	return budgetExceeded(pb, stage).WithCause(err)
+}
+
+// budgetExceeded 构造"平台侧总预算用尽"的结构化结论（`publishBudgetFailure` /
+// `publishBudgetRefusal` 共用，保证两条路径的信封逐字同形）。
+//
+// 客户端声明过剩余预算时额外带一条 detail 与一条**可执行**的 hints：这一跳的预算不是
+// 部署档位的怪值，而是"分片链的上传阶段用掉了大部分链上预算"的必然结果，补救是带同一个
+// `upload_id` 重发（新的一次调用有完整预算、且分片不会重传）。
+func budgetExceeded(pb publishBudget, stage string) *apperr.Error {
+	e := apperr.New(apperr.CodeRuntimeTimeout, fmt.Sprintf(
+		"本次发布没有在平台侧总预算内给出结论（%s，平台侧总预算 %s）",
+		stage, pb.total)).
+		WithDetail("phase", "publish_budget").
+		WithDetail("stage", stage).
+		WithDetail("publish_total_budget_seconds", int(pb.total/time.Second)).
+		WithDetail("client_upload_timeout_seconds", int(limits.ClientUploadTimeout/time.Second)).
+		WithHint("编译与干跑在同一个请求里顺序执行，两者**共用**这个总预算（= 客户端出站预算 " +
+			humanSeconds(limits.ClientUploadTimeout) + " 减去传输余量）；" +
+			"越过它客户端只会看到网络错误，所以平台先给出这条结论").
+		WithHint("通常是编译太慢（包体积大 / 冷缓存）或应用 `_start` 启动太慢：" +
+			"先按这两条排查，再考虑让管理员调大 compile_timeout_seconds / dry_run_budget_seconds" +
+			"（两者各自都不能超过总预算）")
+	if pb.declared > 0 {
+		e = e.WithDetail("client_declared_budget_seconds", int(pb.declared/time.Second)).
+			WithHint("这一跳的预算来自客户端声明的剩余额度（分片链的 90 s 是**整条链**共用的，" +
+				"上传阶段已经用掉大部分）：**重发同一条 publish** 即可 —— 带上同一个 upload_id，" +
+				"续传只补缺失片，而新的一次调用有完整的预算")
+	}
+	return e
+}
+
+// budgetConclusionWithUploadID 给 `complete` 这一跳的**预算结论**补上续传把手 `upload_id`。
+//
+// 缺陷形态（审计 V-P2P7 的 F-A，P1）：`complete` 的预算结论（504 `RUNTIME_TIMEOUT` /
+// `phase=publish_budget`）原先只在**静态 hints 文案**里出现 "upload_id" 这个词，信封的
+// `details` 里**没有真实会话 id**。而这条路径上唯一的调用方是 AI 的 `wasm_app_publish`
+// 分片链 —— 工具面（`UPLOAD_ID_DESCRIPTION`）逐字要求模型"把它从 `error.details.upload_id`
+// 原样填回来" ⇒ **模型拿不到 id ⇒ 只能重开一次会话 ⇒ 分片全部重传**（"白传一遍几百 MB"，
+// 与 P7 修掉的"客户端 complete 跳传输失败不带 upload_id"是同一个后果）。
+//
+// 只加一个 `details` 字段：状态码 / code / message / hints / fail-closed 语义**一字不改**。
+// 只加给**预算结论**（`phase=publish_budget`）：业务拒绝、水位闸门、限流等错误原样透出 ——
+// 那些路径上"用同一个 upload_id 重发"并不是正确的下一步，把 id 撒到所有错误上只会误导模型。
+//
+// 调用点只在 `uploadComplete`（另外两条入口手里没有会话 id 可言：`publish` 是单发、
+// `validate` 无会话）；且入口拒绝发生在 `uploadIDParam` **之前** —— 路由参数已在手，
+// 这里只做"回显给客户端"这一件事（形态闸门仍在 `uploadIDParam`，见 completeUploadID）。
+func budgetConclusionWithUploadID(err *apperr.Error, uploadID string) *apperr.Error {
+	if err == nil || uploadID == "" {
+		return err
+	}
+	if err.Details["phase"] != "publish_budget" {
+		return err
+	}
+	if _, exists := err.Details["upload_id"]; exists {
+		return err
+	}
+	return err.WithDetail("upload_id", uploadID)
+}
+
+// humanSeconds 把时长渲染成"90 秒"这样的文案（错误 hints 用）。
+func humanSeconds(d time.Duration) string {
+	return strconv.FormatInt(int64(d/time.Second), 10) + " 秒"
+}
+
 // prepare 跑完 A–D（**零磁盘副作用**：不写库、不落盘；唯一的文件系统痕迹是 B 步的
 // 编译临时文件，函数返回前已删除）。
 //
@@ -136,7 +418,25 @@ type staged struct {
 // inheritBaseForApp 的结果（同一份基线）—— 预检与发布必须对同一份载荷给出同一个
 // 结论，否则 AI 会看到"预检通过、发布被拒"。基线不可用时调用方**在进来之前**就已
 // 拒绝（两个入口都先过 inheritBase*），因此这里的 byte 一定可用。
+//
+// ⚠️ 预算：B（编译）与 D（干跑）**共用**同一个总 deadline（见本文件头部的
+// `publishBudgetCtx` 段）—— 每个阶段仍然有自己的上限，但实际可用 = min(阶段上限, 总预算剩余)。
 func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig json.RawMessage, version string, needConfig, requireDeclarations bool, prevConfigJSON string) (*staged, *apperr.Error) {
+	// 总预算由**请求入口**挂上（publish/validate 在读请求体之前；分片 complete 经
+	// publishFromBytes），这里只**取用**，绝不自行创建 ——
+	//
+	// ⚠️ cancel 的所有权（踩过）：本函数返回之后，调用方 publishFromBytes 还要写版本行、
+	// apps 投影与审计（commitRelease 用的是 `c.Request.Context()`）。若在这里
+	// `defer cancelBudget()`，那些写库调用拿到的就是**已取消**的 ctx —— 实测症状是
+	// 分片 complete 回 500 INTERNAL「应用元数据保存失败」，底层 `context canceled`
+	// （只有走 prepare 的兜底创建路径才会中招，而分片 complete 正是那一条）。
+	sharedCtx := c.Request.Context()
+	if _, ok := lookupPublishBudget(sharedCtx); !ok {
+		return nil, internalErr("发布链路缺少总预算上下文", errors.New("request ctx 上没有 publishBudget 载体")).
+			WithHint("这是平台装配缺陷：请求入口（publish / validate）或 publishFromBytes 必须先用 publishBudgetCtx 挂上总预算").
+			WithHint("缺了它就等于回到「两段各自从零起算」的旧形态：发布链路会越过客户端出站预算")
+	}
+
 	st := &staged{appID: appID, wasm: wasm, wasmBytes: int64(len(wasm))}
 	sum := sha256.Sum256(wasm)
 	st.checksum = hex.EncodeToString(sum[:])
@@ -230,6 +530,11 @@ func (h *Handlers) prepare(c *gin.Context, appID string, wasm []byte, rawConfig 
 // 目录**（isolate_linux.go），放数据根下既保证同一文件系统（创建/删除都快），
 // 也避免把 `os.TempDir()` 暴露给编译进程。`_tmp` 不是合法 app_id（规则要求首字符
 // 是字母或数字），所以不会与任何应用目录撞名。
+//
+// 预算：阶段上限 `compile_timeout_seconds`，但**不越过** sharedCtx 上的总 deadline
+// （阶段实际可用 = min(阶段上限, 总预算剩余)）。总预算先到点时把结论换成
+// `publishBudgetFailure`（"平台侧总预算用尽"）—— 那才是真实原因，原始的
+// COMPILE_TIMEOUT 只是症状。
 func (h *Handlers) compileModule(c *gin.Context, appID string, wasm []byte) (*compile.Result, *apperr.Error) {
 	dir := filepath.Join(h.opt.DataRoot, limits.AppsDirName, "_tmp")
 	if err := os.MkdirAll(dir, os.FileMode(limits.DataDirMode)); err != nil {
@@ -249,10 +554,14 @@ func (h *Handlers) compileModule(c *gin.Context, appID string, wasm []byte) (*co
 	if err := f.Close(); err != nil {
 		return nil, internalErr("上传临时文件关闭失败", err)
 	}
-	ctx, cancel := budgetCtx(c.Request.Context(), h.budgets().CompileTimeout())
+	sharedCtx := c.Request.Context()
+	ctx, cancel := budgetCtx(sharedCtx, h.budgets().CompileTimeout())
 	defer cancel()
 	res, cerr := h.opt.Compiler.Compile(ctx, name)
 	if cerr != nil {
+		if budgetErr := publishBudgetFailure(sharedCtx, publishBudgetOf(sharedCtx), "compile"); budgetErr != nil {
+			return nil, budgetErr.WithCause(cerr)
+		}
 		return nil, cerr
 	}
 	return res, nil
@@ -396,7 +705,12 @@ func assetOversize(section string, size int64) *apperr.Error {
 // 判据只有一条：应用**能实例化、能读请求帧、能写出合法响应帧**。它不校验业务逻辑
 // （合成帧是匿名 `GET /`，宿主能力面为空 ⇒ 任何 db/ai/assets 调用都会拿到"能力
 // 不可用"，应用应当容忍；容忍不了说明它在启动路径上硬依赖这些能力）。
+//
+// 预算：外层 ctx 覆盖"执行侧装载模块"（阶段上限同 `compile_timeout_seconds`），
+// guest 执行预算给 `dry_run_budget_seconds`；两者都**不越过** sharedCtx 上的总 deadline。
 func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cfg appcfg.Config) *apperr.Error {
+	sharedCtx := c.Request.Context()
+	pb := publishBudgetOf(sharedCtx)
 	// 干跑与执行进程共用同一份磁盘编译缓存 ⇒ 这里命中的就是发布期编译过的那一条
 	// （§4.3.1-a：两侧 RuntimeConfig 必须一致，由 runtime/compile 各自的自检保证）。
 	//
@@ -411,14 +725,14 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	// 几十上百 MiB（实测：已保存 32 MiB / 实际按 128 MiB 跑）。干跑要回答的是"这次运行
 	// 到底能不能跑起来"，所以取生效值；已保存值只有"运行时钩子没接线"时才兜底
 	// （见 read.go 的 effectiveMemoryPages：运行时优先、已保存值兜底，只有这一份实现）。
-	rt, err := runtime.New(c.Request.Context(), runtime.Options{
+	rt, err := runtime.New(sharedCtx, runtime.Options{
 		DataRoot:    h.cacheRoot(),
 		MemoryPages: h.effectiveMemoryPages(),
 	})
 	if err != nil {
 		return internalErr("执行侧运行时装配失败", err).WithHint("这是平台装配问题，请联系平台管理员")
 	}
-	defer func() { _ = rt.Close(context.WithoutCancel(c.Request.Context())) }()
+	defer func() { _ = rt.Close(context.WithoutCancel(sharedCtx)) }()
 
 	// 预算分层（**不要**把整段干跑压进 DryRunBudget）：
 	//   - 外层 ctx 覆盖"执行侧装载模块"，与编译同预算（`compile_timeout_seconds`）——
@@ -431,12 +745,19 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	// 两个值都取自**当前生效的限制项**（控制台 > 档位 > 编译期默认）。干跑预算与
 	// guest 预算默认同值（都是 30 s）：干跑要回答的是"这次运行能不能跑起来"，
 	// 比真实执行更短就会出现"预检拒绝了一个线上跑得动的应用"。
+	//
+	// ⚠️ 外层 ctx 从 sharedCtx 派生（**不是**再从 request ctx 起算）：阶段上限仍然与编译
+	// 同预算，但总预算剩余更少时以剩余为准 —— 这条链路上"编译 + 干跑"两段之和因此
+	// 恒 ≤ limits.PublishTotalBudget（见本文件头部的 publishBudgetCtx 段）。
 	dryRun := h.budgets()
-	ctx, cancel := budgetCtx(c.Request.Context(), dryRun.CompileTimeout())
+	ctx, cancel := budgetCtx(sharedCtx, dryRun.CompileTimeout())
 	defer cancel()
 
 	mod, cerr := rt.CompileModule(ctx, wasm)
 	if cerr != nil {
+		if budgetErr := publishBudgetFailure(sharedCtx, pb, "dry_run"); budgetErr != nil {
+			return budgetErr.WithCause(cerr)
+		}
 		return apperr.New(apperr.CodeValidateFailed, "模块无法被运行时装载").
 			WithCause(cerr).
 			WithDetail("phase", "dry_run").
@@ -459,15 +780,26 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 	res, serr := rt.Serve(ctx, mod, runtime.Request{
 		Envelope: env,
 		Funcs:    caps,
-		Budgets:  runtime.InstanceLimits{GuestBudget: dryRun.DryRunBudget()},
+		Budgets:  dryRunBudgets(dryRun),
 	})
 	if serr != nil {
+		if budgetErr := publishBudgetFailure(sharedCtx, pb, "dry_run"); budgetErr != nil {
+			return budgetErr.WithCause(serr)
+		}
 		return internalErr("干跑装配错误", serr)
 	}
 	if res == nil {
 		return apperr.New(apperr.CodeRuntimeNoResponse, "干跑没有拿到结论")
 	}
 	if !res.OK() {
+		// 总预算先到点时**不要**回 MODULE_KILLED（"请求已取消（客户端断开或服务关停）"）——
+		// 那句话会把作者引向"网络问题"，而真实原因是平台侧总预算用尽（§4.2 的发布链路）。
+		if budgetErr := publishBudgetFailure(sharedCtx, pb, "dry_run"); budgetErr != nil {
+			return budgetErr.
+				WithCause(res.KillReason).
+				WithDetail("guest_exit_code", res.Metrics.GuestExitCode).
+				WithDetail("stderr_tail", clipForDetail(res.Metrics.StderrTail))
+		}
 		kill := res.KillReason
 		if kill == nil {
 			kill = apperr.New(apperr.CodeRuntimeNoResponse, "干跑失败但没有任何错误码（平台缺陷）")
@@ -479,6 +811,25 @@ func (h *Handlers) dryRun(c *gin.Context, appID, version string, wasm []byte, cf
 			WithHint("干跑用的是匿名 GET / 的合成帧、宿主能力面为空：应用应当在没有 db/ai/assets 的情况下也能应答")
 	}
 	return nil
+}
+
+// dryRunBudgets 返回**干跑那一次** runtime.Serve 的预算集合。
+//
+// 与执行路径（appserver.requestBudgets）同源同语义：两个预算都取**当前生效的限制项**
+// （控制台 `guest_budget_seconds` / `host_call_budget_seconds`），不在任何地方固化。
+//
+// 为什么要把宿主调用预算也传进来（S4-01）：干跑的能力面今天是空的（只有 abi.ping），
+// 所以这一项不会被触发 —— 但"能力有、某一条调用路径没接线"正是那条 finding 的形态，
+// 而干跑与执行回答的是同一个问题（"这次运行能不能跑起来"）。两条路径的预算一旦分叉，
+// 干跑放行的运行形态与线上就不是同一个。
+//
+// 接线判据：TestDryRunBudgetsCarryEffectiveBudgets（api 包）—— 值必须等于当前 Limits
+// 的折算值，且必须能被 runtime 的 HostBudget 取到。
+func dryRunBudgets(l applimits.Limits) runtime.InstanceLimits {
+	return runtime.InstanceLimits{
+		GuestBudget:    l.DryRunBudget(),
+		HostCallBudget: l.HostCallBudget(),
+	}
 }
 
 // instanceMemoryPages 返回**已保存**的单实例线性内存页数（装配侧注入的 applimits 闭包；
@@ -532,6 +883,14 @@ func clipForDetail(s string) string {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) validate(c *gin.Context) {
+	// 本次发布链路的**总 deadline** 在**读请求体之前**挂上（下面的 bindJSONLimited）：
+	// 上传 48 MiB 的 base64 请求体也算在平台侧预算里，否则"平台最晚给结论的时刻"会随
+	// 上传耗时漂移（见 publishBudgetCtx 的位置纪律）。下面的 prepare 直接复用它。
+	// 客户端可以声明更小的剩余预算（`ClientBudgetHeader`，见文件头部的 FW-2 段）。
+	validateCtx, validateBudgetPlan, cancelValidateBudget := h.publishBudgetFor(c)
+	defer cancelValidateBudget()
+	c.Request = c.Request.WithContext(validateCtx)
+
 	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
@@ -552,6 +911,11 @@ func (h *Handlers) validate(c *gin.Context) {
 	u, aerr := h.currentUser(c)
 	if aerr != nil {
 		writeErr(c, aerr)
+		return
+	}
+	// 客户端声明的剩余预算连传输余量都不够 ⇒ 立刻给结构化结论（不烧额度、不读 48 MiB 体）。
+	if rerr := h.publishBudgetRefusal(validateBudgetPlan); rerr != nil {
+		writeErr(c, rerr)
 		return
 	}
 	// 上传频率闸门（§4.3）：validate 与 publish **合计** 30 次/小时。
@@ -583,7 +947,7 @@ func (h *Handlers) validate(c *gin.Context) {
 	// 之前 —— 非归属人不触发任何配置读取、不进编译池、不落任何行。
 	existing, oerr := h.checkValidateOwner(c.Request.Context(), u, appID)
 	if oerr != nil {
-		writeErr(c, oerr)
+		writeErr(c, h.publishErrorOutcome(c, oerr, "前置读"))
 		return
 	}
 	// 终态闸门（冻结 / 退役）：**与 publish 共用同一个 `publishBlockOf`**（R3-A A-4 的
@@ -614,7 +978,7 @@ func (h *Handlers) validate(c *gin.Context) {
 	// validate 不做任何写入（§4.2：不落版本号、不进审计）。
 	first, verr := h.isFirstRelease(c.Request.Context(), appID)
 	if verr != nil {
-		writeErr(c, verr)
+		writeErr(c, h.publishErrorOutcome(c, verr, "前置读"))
 		return
 	}
 	// 解码位置与重构前逐字一致（在 creationAppID 与首版判定之后）：错误优先级是
@@ -628,7 +992,7 @@ func (h *Handlers) validate(c *gin.Context) {
 	// （否则 AI 会看到"预检通过、发布被拒"）。
 	base, berr := h.inheritBaseForApp(c.Request.Context(), appID)
 	if berr != nil {
-		writeErr(c, berr)
+		writeErr(c, h.publishErrorOutcome(c, berr, "前置读"))
 		return
 	}
 	st, perr := h.prepare(c, appID, wasm, p.Config, releaseVersion(p.Version), false, first, base)
@@ -714,6 +1078,14 @@ type publishInput struct {
 }
 
 func (h *Handlers) publish(c *gin.Context) {
+	// 同 validate：总 deadline 必须在**读请求体之前**挂上（下面的 bindJSONLimited 要读
+	// 最多 48 MiB 的 base64 体），这样"编译 + 干跑"两段之和恒 ≤ limits.PublishTotalBudget，
+	// 而总预算本身严格小于客户端出站预算（见 publishBudgetCtx 的位置纪律）。
+	// 客户端可以声明更小的剩余预算（`ClientBudgetHeader`，见文件头部的 FW-2 段）。
+	publishCtx, publishBudgetPlan, cancelPublishBudget := h.publishBudgetFor(c)
+	defer cancelPublishBudget()
+	c.Request = c.Request.WithContext(publishCtx)
+
 	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
@@ -727,6 +1099,11 @@ func (h *Handlers) publish(c *gin.Context) {
 	u, uerr := h.currentUser(c)
 	if uerr != nil {
 		writeErr(c, uerr)
+		return
+	}
+	// 客户端声明的剩余预算连传输余量都不够 ⇒ 立刻给结构化结论（不烧额度、不读 48 MiB 体）。
+	if rerr := h.publishBudgetRefusal(publishBudgetPlan); rerr != nil {
+		writeErr(c, rerr)
 		return
 	}
 	if after, rerr := h.acquireUpload(u); rerr != nil {
@@ -770,7 +1147,30 @@ func (h *Handlers) publish(c *gin.Context) {
 //
 // 返回 `[]byte` 而不是直接写响应：分片路径要把这一份**逐字缓存**起来做幂等重放
 // （重复 complete 回放同一个 201 体），而"先序列化再写"与 gin 的 c.JSON 逐字节等价。
+//
+// 结构：**总预算的挂载/归一在外层**，A–H 在 `publishCore` 里 —— 见 publishErrorOutcome
+// 关于"阶段之外到点"的说明（审计 S4-06 对抗验证 N1）。
 func (h *Handlers) publishFromBytes(c *gin.Context, u *serverstore.User, in publishInput) ([]byte, *apperr.Error) {
+	// 总 deadline（幂等）：入口挂过就复用那一份（publish/validate/uploadComplete 都在
+	// **任何实际工作之前**挂，于是请求体的读取时间也在预算内）；这里是兜底，服务
+	// "入口忘了挂"或"单测直接调 publishFromBytes"两种情形 —— 它同样读
+	// `ClientBudgetHeader`，所以兜底路径也不会把客户端声明的剩余预算丢掉。
+	//
+	// ⚠️ cancel 的所有权：**必须在本函数返回时才触发**（那时 commitRelease 的落库、审计、
+	// 版本 GC 都已做完）；放到 prepare 里会在写库之前就取消 ctx（实测 = 500 INTERNAL
+	// 「应用元数据保存失败」/`context canceled`）。
+	budgetCtx, _, cancelBudget := h.publishBudgetFor(c)
+	defer cancelBudget()
+	c.Request = c.Request.WithContext(budgetCtx)
+
+	body, err := h.publishCore(c, u, in)
+	// 出口归一（N1）：前置读 / 落库这些**阶段之外**的窗口里，总预算到点导致的失败
+	// 同样必须是"平台侧总预算用尽"这条结构化结论，而不是 500 INTERNAL。
+	return body, h.publishErrorOutcome(c, err, "落库/前置读")
+}
+
+// publishCore 是发布链路的 A–H（顺序见本文件头部注释；预算已由调用方挂好）。
+func (h *Handlers) publishCore(c *gin.Context, u *serverstore.User, in publishInput) ([]byte, *apperr.Error) {
 	appID := in.appID
 	version := in.version
 

@@ -526,6 +526,41 @@ func TestServe_HostCallOverBudgetIgnoringCtx(t *testing.T) {
 	t.Logf("宿主忽略 ctx 阻塞 1.5s、预算 200ms：实测 %s 返回 %s", elapsed, res.KillReason.Code)
 }
 
+// TestServe_GeneralHostCallBudgetIsEnforced 是 S4-01 的**能力侧**判据：
+// `InstanceLimits.HostCallBudget`（控制台 `host_call_budget_seconds` 的载体）必须真的
+// 约束宿主调用，而不只是 `HostBudgets` 那条逐方法覆盖路径有效。
+//
+// 为什么单列一条：接线判据（appserver 那条）证明"控制台值被传进来了"，这一条证明
+// "传进来之后真的按它到点" —— 少了任何一半，删掉 HostBudget() 里的通用分支都能全绿。
+//
+// 变异验证（实跑）：把 HostBudget() 里的 `if l.HostCallBudget > 0` 分支删掉 ⇒ 回落到
+// limits.HostCallBudgetDefault（10 s），1.5 s 的阻塞被完整等到 ⇒ 不再被杀 ⇒ 本用例红。
+func TestServe_GeneralHostCallBudgetIsEnforced(t *testing.T) {
+	host := newFakeHost()
+	host.blockFor[abi.MethodDBQuery] = 1500 * time.Millisecond // 故意不看 ctx
+
+	req := testRequest("/hostblock", host) // 应用会**无视**宿主错误继续写 200 响应
+	req.Budgets = InstanceLimits{
+		GuestBudget: 5 * time.Second,
+		// 只用通用字段（不给 HostBudgets map）：这正是生产装配的形态。
+		HostCallBudget: 200 * time.Millisecond,
+	}
+	start := time.Now()
+	res := serveCompiled(t, sharedRuntime(t), appModule(t), req)
+	elapsed := time.Since(start)
+
+	requireKill(t, res, apperr.CodeHostCallOverBudget)
+	if !strings.Contains(res.KillReason.Message, "200ms") {
+		t.Fatalf("生效预算必须来自 InstanceLimits.HostCallBudget（消息里应出现 200ms）：%q", res.KillReason.Message)
+	}
+	if elapsed > 1200*time.Millisecond {
+		t.Fatalf("耗时 %s：通用宿主预算没有生效（宿主阻塞 1.5s 被完整等到）", elapsed)
+	}
+	if strings.Contains(res.Response.Body, "ignored_host_error") {
+		t.Fatal("宿主超预算后仍接受了应用写的响应帧（失败被报成成功）")
+	}
+}
+
 // §7.3：进入宿主调用时**暂停** guest 计时（否则一次慢宿主调用会被 10 s 的 guest 预算误杀）。
 func TestServe_HostCallPausesGuestClock(t *testing.T) {
 	host := newFakeHost()

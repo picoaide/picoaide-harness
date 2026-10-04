@@ -2052,6 +2052,43 @@ export function apply(ctx: Context, config: Config): void {
            * 是纯死面（R2-SK-5 记录在案）；这一个两端都必须读/写。
            */
           const overwrite = url.searchParams.get('overwrite') === '1'
+          /**
+           * **归属证明**这一个事实（2026-10 审计 C2-1；取值面 2026-10-04 收口）。
+           *
+           * 归属（`localOwnership`）是**本路由算不出来的**：技能库是机器作用域的
+           * （`<DSH_HOME>/skills`，不按账号分目录），而"这一份算不算当前账号的"要靠
+           * 聚合面那次 `/api/client/v2/capabilities?source=own` 的匹配（见
+           * `/api/pico/capabilities` 里 `localOwnership` 的注释）—— 卸载是纯本地操作，
+           * 不出网，所以由面板把那个事实带过来（与 `?overwrite=1` 同一条既有模式：
+           * 面板给"宿主单独判不出的那个事实"）。
+           *
+           * **取值契约（三种，且只有三种）**：
+           *  - `unknown` —— 面板明确报告"证明不了归属"（`localOwnership !== 'mine'`）⇒
+           *    本次卸载**不写机器级墓碑**：删除照常生效，只是不再对"随包同步把所有
+           *    账号都装回来"下永久判词（安全的失败模式）；
+           *  - `mine` 与**缺省** —— 都表示"是当前账号的" ⇒ 照写墓碑。这两者**故意同义**，
+           *    不是遗漏：`mine` 是本轮新加的可读写法，缺省是面板在 `localOwnership ===
+           *    'mine'` 时与**旧客户端/工具面**共用的既有形态。"缺省 ⇒ 写墓碑"是
+           *    R4-B-4（「卸载随包技能是持久终态」）的**已 spec 化承诺**，由
+           *    `tests/skill-tombstone-ownership.spec.ts` 用例 ②/③ 与
+           *    `tests/skill-overwrite-dirty.spec.ts` 的 R4-B-4 组钉住；
+           *    **要把它翻成"缺省不写"必须先改产品口径**（那会反转上述承诺），
+           *    不是本路由可以自行决定的事。
+           *
+           * **无法识别的取值必须 fail-loud**（400），不再静默当成缺省：静默接受拼错的
+           * 提示（`?ownership=unkown`、大写、空串、未来版本的新值）会让调用方以为
+           * "归属门生效了"，而宿主按最宽松的那一档执行 —— 一个拼写错误就静默变成
+           * "写机器级墓碑"。只拒绝**非法值**：`mine`/`unknown`/缺省三种既有形态的
+           * 语义一字未改。
+           */
+          const ownershipHint = url.searchParams.get('ownership')
+          if (ownershipHint !== null && ownershipHint !== 'unknown' && ownershipHint !== 'mine') {
+            return json(res, 400, {
+              error: `unrecognized ownership hint: ${JSON.stringify(ownershipHint)} (want 'mine' or 'unknown')`,
+              code: 'INVALID_OWNERSHIP',
+            })
+          }
+          const localOwnership = ownershipHint === 'unknown' ? 'unknown' as const : undefined
           if (pathname === '/api/pico/skills' && req.method === 'GET') {
             try {
               const data = await fetchJSON(s.serverURL, '/api/client/v2/marketplace/skills', { token: s.token, locale: hostLocale(req) })
@@ -2184,6 +2221,7 @@ export function apply(ctx: Context, config: Config): void {
               await uninstallSkill(resolveSkillsDir(), name, {
                 overwrite,
                 serverURL: s.serverURL,
+                localOwnership,
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),
                 log: skillInstallLogForHost(ctx),
                 // R19B-09：拒绝文案按**本次请求**的语言取中英。
@@ -2279,6 +2317,7 @@ export function apply(ctx: Context, config: Config): void {
               await uninstallSkill(resolveSkillsDir(), name, {
                 overwrite,
                 serverURL: s.serverURL,
+                localOwnership,
                 // R18B-01：卸载的"成功"必须等于"运行时不再加载"——项目根（rank 100/200）
                 // 也在已知根里；R18B-04：清理/自愈日志走 ctx.logger。
                 runtimeRoots: skillRuntimeRootsForHost(ctx, resolveSkillsDir()),

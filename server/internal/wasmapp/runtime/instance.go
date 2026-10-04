@@ -25,9 +25,20 @@ type InstanceLimits struct {
 	//（编译期默认，30 s）。生产调用方一律显式给值：控制台 `guest_budget_seconds` 改过之后，
 	// 回落到常量就是一条静默的旧行为。
 	GuestBudget time.Duration
-	// HostBudgets 是「方法名 → 宿主调用预算」；缺省 limits.HostCallBudgetDefault
-	//（编译期默认；控制台 `host_call_budget_seconds` 可覆盖，由调用方显式传入）。
-	// 非正值视为"未设置"，回落到缺省（防一次笔误把预算设成 0 导致所有宿主调用立刻超时）。
+	// HostCallBudget 是**通用**宿主调用预算：所有没在 HostBudgets 里单列的方法都取它。
+	// 它是控制台 `host_call_budget_seconds` 的生效值，由调用方在**每个请求**的入口读
+	// 当前值传入（不许在构造期固化）。0 ⇒ limits.HostCallBudgetDefault（编译期默认）。
+	// 生产调用方一律显式给值：控制台改过之后回落到常量就是一条静默的旧行为
+	//（界面上写 2 s、实际按 10 s 执行 —— 正是这条字段要消灭的缺陷形态）。
+	HostCallBudget time.Duration
+	// HostBudgets 是「方法名 → 宿主调用预算」的**逐方法覆盖**（>0 时优先于 HostCallBudget）；
+	// nil / 缺项 / 非正值都回落到 HostCallBudget，再回落到 limits.HostCallBudgetDefault
+	//（非正值视为"未设置"，防一次笔误把预算设成 0 导致所有宿主调用立刻超时）。
+	//
+	// 为什么通用预算是**字段**而不是"给每个方法填一份 map"：宿主方法清单的唯一真源是
+	// hostcap 的封闭表，在这里再枚举一遍就多出一份会漂移的清单 —— 新增一个宿主方法时
+	// 漏填 map ⇒ 那条调用静默拿到编译期常量。map 保留为逐方法覆盖（用例注入短预算、
+	// 将来某个方法确实需要独立预算）。
 	HostBudgets map[string]time.Duration
 }
 
@@ -49,14 +60,23 @@ func (l InstanceLimits) EffectiveGuestBudget() time.Duration {
 
 // HostBudget 返回某个宿主方法的生效预算。
 //
-// 顺序：显式配置（>0）→ 通用缺省（§4.4/§4.6）。
+// 顺序：逐方法覆盖（HostBudgets[method] > 0）→ 通用预算（HostCallBudget，控制台
+// `host_call_budget_seconds` 的生效值）→ 编译期缺省（limits.HostCallBudgetDefault）。
 //
 // ⚠️ W4：原"`ai.chat` 专属缺省 = limits.HostAIChatBudget（30 s）"这一支已随
 // 服务端 ai.chat 删除（总纲 §21.3）—— 其余宿主调用（db.* / log / assets.read）
-// 都走通用缺省，没有例外项。
+// 都走通用预算，没有例外项。
+//
+// ⚠️ 序关系（保存期判据在 applimits.Validate）：通用预算必须**严格大于**
+// `sql_statement_budget_seconds` —— db.* 的宿主调用里套着 appdb 的语句 deadline，
+// 外层先到点会让应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)，
+// 错误归属与作者可操作方向全错（见 dbpool_test.go 的跨模块断言）。
 func (l InstanceLimits) HostBudget(method string) time.Duration {
 	if d, ok := l.HostBudgets[method]; ok && d > 0 {
 		return d
+	}
+	if l.HostCallBudget > 0 {
+		return l.HostCallBudget
 	}
 	return limits.HostCallBudgetDefault
 }

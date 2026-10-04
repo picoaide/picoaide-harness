@@ -26,7 +26,7 @@ description: 10 分钟上手 PicoAide Harness：拿到客户端、首次启动�
    [GitHub Release](https://github.com/picoaide/picoaide-harness/releases) 取官方镜像包，解出安装包：
 
 ```bash
-VER=2.7.0        # 以 latest.json 里的 server.version 为准
+VER=<版本>        # 以 latest.json 里的 server.version 为准
 # 正式渠道是 official，预发布渠道是 beta，按需替换
 curl -fL -O "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"

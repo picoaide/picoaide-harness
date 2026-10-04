@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -86,7 +87,12 @@ type Limits struct {
 	// （见包注释），所以按同一条路收进控制台。
 	//
 	// 六项的默认值仍然来自 limits 包（§5.5 数值单一真源），这里只做覆盖；
-	// 它们全部**即时生效**（每次请求/每次编译在入口处读当前值），不要求重启。
+	// 它们的生效范围**不都是"即时"**，逐项如下（如实登记，控制台文案与 Ranges 的
+	// restart 标记必须与之一致，见 limits_apply.go 与 webadmin 的 Limits 页）：
+	//   - guest / host_call / wall / dry_run / compile：即时（每次请求、每次编译在入口处
+	//     读当前值）；
+	//   - sql_statement_budget：**下一个新建的应用库句柄**生效（预算在 appdb 建库时
+	//     固化进句柄；空闲回收或污染回收重建时自然拿到新值）。
 
 	// GuestBudgetSeconds 是 guest 执行预算（秒）：应用单次请求里真正执行的时长上限，
 	// 进入宿主调用时**暂停计时**（所以"等数据库"不计入）。默认 30。
@@ -98,8 +104,11 @@ type Limits struct {
 	// 校验只要求"不得大于 guest 预算"，允许调小用于快速失败。
 	DryRunBudgetSeconds int `json:"dry_run_budget_seconds"`
 	// HostCallBudgetSeconds 是未单列预算的宿主调用（db.* / log / assets.read）的
-	// 兜底预算（秒）。默认 5。它**不**被 guest 预算暂停机制覆盖：宿主调用自己
-	// 有硬超时，两者独立（一个慢查询不会靠"暂停计时"绕过它）。
+	// 兜底预算（秒）。默认 10（**必须严格大于 SQLStatementBudgetSeconds**，见下面那条
+	// 序关系）。它**不**被 guest 预算暂停机制覆盖：宿主调用自己有硬超时，两者独立
+	//（一个慢查询不会靠"暂停计时"绕过它）。
+	//
+	// 生效范围：每次请求在入口处读当前值（appserver.requestBudgets）⇒ 即时生效。
 	HostCallBudgetSeconds int `json:"host_call_budget_seconds"`
 	// RequestWallClockSeconds 是请求端到端墙钟（秒，**含排队**）：到点即拒。
 	// 默认 60。必须严格大于 guest 预算，否则 guest 还没跑完就被墙钟拒掉。
@@ -112,7 +121,13 @@ type Limits struct {
 	// 部署侧可用该客户端的 `requestTimeoutMs` 配置同步抬高。
 	RequestWallClockSeconds int `json:"request_wall_clock_seconds"`
 	// SQLStatementBudgetSeconds 是单条 SQL 语句的硬超时（秒）：到点由看门狗回滚并
-	// 打污染标记。默认 5。不得超过端到端墙钟（超了等于这条闸门永不触发）。
+	// 打污染标记。默认 5。不得超过端到端墙钟（超了等于这条闸门永不触发），且必须
+	// **严格小于**宿主调用预算 —— db.query 是宿主调用，语句 deadline 套在宿主调用的
+	// deadline 里面；内层 ≥ 外层时外层必然先到点，应用拿到的是 HOST_CALL_OVER_BUDGET
+	// 而不是 DB_DENIED(statement_timeout)，错误归属与作者可操作方向全错。
+	//
+	// 生效范围：**下一个新建的应用库句柄**（appdb 在建库时把预算固化进句柄；
+	// 空闲回收/污染回收重建时自然拿到新值），与 appdb_cache_kib / app_db_readers 同档。
 	SQLStatementBudgetSeconds int `json:"sql_statement_budget_seconds"`
 	// CompileTimeoutSeconds 是单次编译（含执行侧装载模块）的超时（秒）。默认 60。
 	// 不得超过服务端 HTTP ReadTimeout（`limits.ServerReadTimeout`，不可配置的传输层
@@ -206,24 +221,66 @@ func FromProfile(p memprofile.Profile) Limits {
 	return l.clampCrossField()
 }
 
+// adjustment 记录一次**合法化**动作（字段、原值、生效值）。
+//
+// 它只服务一件事：存储读取路径把"保存时合法、现在按新规则不合法"的值调整到最近的合法点时，
+// 必须留下可检索的痕迹（见 ParseStored 的日志）。钳位本身可接受，静默不可接受 ——
+// 否则运维在控制台看到的值与库里存的值不一致，而没有任何地方说明为什么。
+type adjustment struct {
+	field string
+	from  int
+	to    int
+}
+
+// String 渲染成稳定的、可 grep 的形态：`字段 原值→生效值`。
+func (a adjustment) String() string { return fmt.Sprintf("%s %d→%d", a.field, a.from, a.to) }
+
+// describeAdjustments 把明细拼成一行（多项用「、」分隔，顺序即钳位顺序）。
+func describeAdjustments(adj []adjustment) string {
+	parts := make([]string, 0, len(adj))
+	for _, a := range adj {
+		parts = append(parts, a.String())
+	}
+	return strings.Join(parts, "、")
+}
+
 // clampCrossField 把"相对上限"的字段钳进它们各自的宿主上限（只向下，不改默认语义）。
 //
 // 与 Validate 是同一批序关系：Validate 负责"拒绝非法输入"，这里负责"让内部折算结果合法"。
 // 两者共用同一组判据顺序（先全局、再应用内、最后用户级）。
 func (l Limits) clampCrossField() Limits {
+	out, _ := l.clampCrossFieldReport()
+	return out
+}
+
+// clampCrossFieldReport 与 clampCrossField 是**同一份实现**：返回钳位后的值，以及逐字段的
+// 改动明细（谁被从多少改成了多少）。明细只服务"存储读取路径的留痕"（ParseStored）。
+//
+// 为什么不各写一份：钳位规则一旦有两份实现就会漂移，而"哪条规则把哪个值改成了什么"
+// 正是留痕必须如实回答的问题。
+func (l Limits) clampCrossFieldReport() (Limits, []adjustment) {
+	var adj []adjustment
+	// set 记录一次真的发生的改动（值没变就不记：明细里只应有被改过的字段）。
+	set := func(field string, dst *int, v int) {
+		if *dst == v {
+			return
+		}
+		adj = append(adj, adjustment{field: field, from: *dst, to: v})
+		*dst = v
+	}
 	if l.MaxInstances > 0 {
 		if l.AppRunning > l.MaxInstances {
-			l.AppRunning = l.MaxInstances
+			set("app_running", &l.AppRunning, l.MaxInstances)
 		}
 		if l.UserGlobalRunning > l.MaxInstances {
-			l.UserGlobalRunning = l.MaxInstances
+			set("user_global_running", &l.UserGlobalRunning, l.MaxInstances)
 		}
 	}
 	if l.UserPerAppRunning > l.AppRunning {
-		l.UserPerAppRunning = l.AppRunning
+		set("user_per_app_running", &l.UserPerAppRunning, l.AppRunning)
 	}
 	if l.UserPerAppQueued > l.AppQueue {
-		l.UserPerAppQueued = l.AppQueue
+		set("user_per_app_queued", &l.UserPerAppQueued, l.AppQueue)
 	}
 	// 时间预算的序关系（与 Validate 同一批判据，见那里的注释）：档位折算不会动这六项，
 	// 但 clampCrossField 是"内部折算结果的合法化入口"，直接构造的 Limits 也会经过它
@@ -231,25 +288,73 @@ func (l Limits) clampCrossField() Limits {
 	// 这里的动作是**向下取小**（不会把用户设的值放大），保证折算结果自身可过 Validate。
 	if l.GuestBudgetSeconds > 0 {
 		if l.DryRunBudgetSeconds > l.GuestBudgetSeconds {
-			l.DryRunBudgetSeconds = l.GuestBudgetSeconds
+			set("dry_run_budget_seconds", &l.DryRunBudgetSeconds, l.GuestBudgetSeconds)
 		}
 		if l.HostCallBudgetSeconds > l.GuestBudgetSeconds {
-			l.HostCallBudgetSeconds = l.GuestBudgetSeconds
+			set("host_call_budget_seconds", &l.HostCallBudgetSeconds, l.GuestBudgetSeconds)
 		}
 		if l.RequestWallClockSeconds <= l.GuestBudgetSeconds {
-			l.RequestWallClockSeconds = l.GuestBudgetSeconds + 1
+			set("request_wall_clock_seconds", &l.RequestWallClockSeconds, l.GuestBudgetSeconds+1)
 		}
 	}
 	if l.SQLStatementBudgetSeconds > l.RequestWallClockSeconds {
-		l.SQLStatementBudgetSeconds = l.RequestWallClockSeconds
+		set("sql_statement_budget_seconds", &l.SQLStatementBudgetSeconds, l.RequestWallClockSeconds)
+	}
+	// 内层严格小于外层（S4-02，与 Validate 里那条同源）：只**向下**钳内层的 SQL 预算，
+	// 从不放大宿主调用预算 —— 与上面几条同一个方向，也不会悄悄放宽任何执行期闸门。
+	//
+	// 为什么必须有这一条而不是只靠 Validate：这里是"折算/落库值的合法化入口"
+	// （FromProfile、旧版本落库设置补默认值），一条折算结果若违反序关系，
+	// 线上就会回到"外层先到点、错误码指错方向"的旧行为。
+	if l.HostCallBudgetSeconds > MinBudgetSeconds && l.SQLStatementBudgetSeconds >= l.HostCallBudgetSeconds {
+		set("sql_statement_budget_seconds", &l.SQLStatementBudgetSeconds, l.HostCallBudgetSeconds-1)
 	}
 	if maxCompile := int(limits.ServerReadTimeout / time.Second); l.CompileTimeoutSeconds > maxCompile {
-		l.CompileTimeoutSeconds = maxCompile
+		set("compile_timeout_seconds", &l.CompileTimeoutSeconds, maxCompile)
 	}
-	return l
+	return l, adj
 }
 
-// ClampForTest 暴露内部钳位结果（仅测试用：生产路径经 FromProfile/ParseStored 自动经过它）。
+// minSQLStatementBudgetSeconds 是单条 SQL 硬超时的**下界**（秒）：严格大于 SQLite 的
+// busy timeout。与 Validate 里那条判据同源（都读 limits.AppDBBusyTimeout），不另写数字。
+func minSQLStatementBudgetSeconds() int {
+	return int(limits.AppDBBusyTimeout/time.Second) + 1
+}
+
+// legalizeStored 是**存储读取路径**的合法化入口：先按 clampCrossField 的规则向下钳，
+// 再把"新版本才加了下限"的字段抬到最小可行值，返回逐字段的改动明细。
+//
+// 为什么不直接用 clampCrossField（这正是 FW-1 那条 P1 的修法，2026-10-04）：
+// clampCrossField 的语义是"**只向下**钳"（它服务的是档位折算与缺字段补默认），而存储读取
+// 会遇到**新版本才有的规则**，那些规则不是"往下钳"能满足的：
+//
+//   - `sql_statement_budget_seconds` 必须**严格小于** `host_call_budget_seconds`
+//     —— 本轮（S4-02）才加，而在此之前两个默认值都是 5 s：控制台"什么都不改、直接保存"
+//     落库的就是 5/5，升级后 5>=5 命中新分支 ⇒ 整份设置被判非法；
+//   - `sql_statement_budget_seconds` 必须**严格大于** SQLite 的 busy timeout（3 s）
+//     —— 26e67ce908 才加，而在此之前它的范围校验只有 1–300 ⇒ sql ∈ {1,2,3} 是能存进库的。
+//
+// 这两条都**不能**靠向下钳满足（往下只会更小）：要么把整份设置丢掉、要么把该字段抬到下限。
+// 抬一个字段是唯一能保住其余字段的方向，且必须留痕（见 ParseStored）。
+//
+// 只抬 SQL 预算：它是这两个版本里**唯一**新增了下限的字段；其余字段的新规则都是"上限"
+// 或"不得大于"，向下钳已经覆盖。抬升放在钳位之后 —— 若钳位把 sql 压到低于下限，说明这条
+// 设置本身已无解（host_call ≤ busy timeout+1），那种组合在不放宽**外层**闸门的前提下无法
+// 合法化，交由 Validate 拒（错误点名 sql_statement_budget_seconds，见 ParseStored 注释）。
+//
+// 方向性总结：钳位只会**收紧**执行期闸门；唯一可能放宽的是"把 sql 抬到 busy timeout+1"
+// 这一条，而它放宽的是**内层**、且只发生在"存进去的值按新规则根本不可用"时。
+func (l Limits) legalizeStored() (Limits, []adjustment) {
+	out, adj := l.clampCrossFieldReport()
+	if floor := minSQLStatementBudgetSeconds(); out.SQLStatementBudgetSeconds < floor {
+		adj = append(adj, adjustment{field: "sql_statement_budget_seconds", from: out.SQLStatementBudgetSeconds, to: floor})
+		out.SQLStatementBudgetSeconds = floor
+	}
+	return out, adj
+}
+
+// ClampForTest 暴露内部钳位结果（仅测试用：FromProfile 经 clampCrossField，
+// 存储读取经 legalizeStored —— 后者在同一条钳位规则之上多一条"下限抬升"）。
 func (l Limits) ClampForTest() Limits { return l.clampCrossField() }
 
 // 取值范围（**保存路径的硬边界**）。上下限都取"能跑起来"的保守值：
@@ -367,6 +472,21 @@ func (l Limits) Validate() *apperr.Error {
 		return bad("sql_statement_budget_seconds",
 			"单条 SQL 硬超时不得大于端到端墙钟：超了这条闸门永远不会触发").
 			WithHint(fmt.Sprintf("当前墙钟=%d s", l.RequestWallClockSeconds))
+	case l.SQLStatementBudgetSeconds >= l.HostCallBudgetSeconds:
+		// 内层必须**严格小于**外层（S4-02）：db.query 是宿主调用，appdb 的语句 deadline
+		// 是套在宿主调用 deadline 里的子 ctx —— 两者相等或内层更长时，父 ctx 必然先到点
+		// （context 取较早的 deadline），应用拿到的是 HOST_CALL_OVER_BUDGET(504)，
+		// appdb 的语句超时分支结构上不可达。后果不只是预算不可配：作者会按
+		// DB_DENIED(statement_timeout) 的方向去优化 SQL，而线上永远看不到那个码。
+		//
+		// 判据归属 sql_statement_budget_seconds：可行的收口动作是把内层调小（下限见下一条
+		// 的 busy timeout），所以点名内层；hint 同时给出"调大外层"这条出路。
+		return bad("sql_statement_budget_seconds",
+			"单条 SQL 硬超时必须严格小于宿主调用预算：否则语句超时会先被外层的宿主预算收掉，"+
+				"应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)").
+			WithHint(fmt.Sprintf("当前 sql=%d s、host_call=%d s ⇒ 把 sql 调到 ≤%d s，或把宿主调用预算调到 ≥%d s",
+				l.SQLStatementBudgetSeconds, l.HostCallBudgetSeconds,
+				l.HostCallBudgetSeconds-1, l.SQLStatementBudgetSeconds+1))
 	case l.SQLStatementBudgetSeconds <= int(limits.AppDBBusyTimeout/time.Second):
 		// 与 limits 里那条 Note 同源（app_db_busy_timeout 必须小于单语句预算）：
 		// 否则"等库不忙"的忙等会吃掉整条语句的预算，应用看到的是 statement_timeout，
@@ -532,11 +652,18 @@ func Parse(raw string) (Limits, *apperr.Error) {
 //
 //   - **缺失字段 ⇒ 用默认值补齐**（新版本新增的字段在老设置里必然缺失）；
 //   - **未知字段 ⇒ 忽略**（回滚场景：新版本写入的字段在老二进制里不认识，
-//     但已知字段仍应生效，而不是整份设置作废）。
+//     但已知字段仍应生效，而不是整份设置作废）；
+//   - **新版本才加的校验 ⇒ 先合法化、再校验**（2026-10-04，FW-1）：旧版本控制台保存过的
+//     组合可能命中**当时还不存在**的规则（典型：两个默认值都是 5 s 时"原样保存"落库的
+//     `sql=5 / host_call=5`，在 S4-02 的"sql 必须严格小于 host_call"之下非法）。
+//     这类值不能整份丢弃 —— 那正是本函数存在要防的形态 —— 而是按 legalizeStored 调到最近的
+//     合法点，并**留下一条可检索日志**（钳位可接受、静默不可接受）。
 //
-// 校验**不打折**：补齐后的整份值仍走 Validate()（范围 + 序关系），非法即报错。
-// 严格模式（Parse）保持原样并继续只服务控制台 PUT："提交片段"与"拼错字段名"必须在
-// 写入侧就被挡住，那是它的职责。
+// **让给读取路径的只有"新规则"这一件事**，不是"校验打折"：范围照判
+// （`max_instances=0` 一律拒）、合法化之后仍走**完整**的 Validate（序关系仍在那里把关，
+// 钳不到合法点的组合照样拒）。控制台 PUT 走的是 Parse，它**不做任何合法化**：
+// 新写入的非法组合必须在写入侧被挡住，不能靠"读的时候帮你改"来掩盖 ——
+// 这是两个入口的职责分界（写入 = 严格拒绝，读取 = 保住已有数据），不是两套标准。
 //
 // 代价（认账）：如果有人手工改库写进拼错的字段名，读取路径会静默用默认值补齐该字段
 // （写入侧不存在这条路径 —— 控制台 PUT 走的是 Parse）。
@@ -553,10 +680,17 @@ func ParseStored(raw string) (Limits, *apperr.Error) {
 			WithDetail("reason", err.Error()).
 			WithHint("这条设置由控制台写入；解析失败通常意味着有人手工改过库，重新保存一次即可")
 	}
-	if err := l.Validate(); err != nil {
+	legal, adj := l.legalizeStored()
+	if err := legal.Validate(); err != nil {
 		return Limits{}, err
 	}
-	return l, nil
+	if len(adj) > 0 {
+		// 留痕（必须，且只在真的改了东西时打）：这是运维唯一能看出"库里存的值 ≠ 现在生效的
+		// 值"的地方。文案稳定、可 grep（`合法化`），并逐字段给出原值与生效值。
+		log.Printf("wasm/applimits: 已保存的平台限制项按新版校验规则合法化（整份设置仍生效，未回落部署档位）：%s",
+			describeAdjustments(adj))
+	}
+	return legal, nil
 }
 
 // Range 是一个字段的取值区间（控制台表单用它做即时校验与提示）。
@@ -584,10 +718,14 @@ func Ranges() map[string]Range {
 		"appdb_cache_kib":       {MinAppDBCacheKiB, MaxAppDBCacheKiB, "KiB", false},
 		"app_db_readers":        {1, limits.AppDBReadersMax, "个", false},
 
-		// 时间预算（秒）。restart 全部为 false：这六项在每个请求/每次编译的入口处
-		// 读当前值（appserver 的 s.limits / api 的 limits 闭包 / appdb 的注入值），
+		// 时间预算（秒）。restart 全部为 false —— 但**生效范围分两档**（控制台文案必须
+		// 与之一致，见 webadmin 的 Limits 页）：
+		//   - guest / host_call / wall / dry_run / compile：每个请求、每次编译在入口处
+		//     读当前值（appserver 的 requestBudgets / api 的 budgets() 闭包）；
+		//   - sql_statement_budget：**下一个新建的应用库句柄**生效（appdb 在建库时把
+		//     预算固化进句柄）。
 		// 与 instance_memory_mb 不同 —— 那一项住在 wazero 的 RuntimeConfig 里，
-		// 进程内建好之后不可变。
+		// 进程内建好之后不可变，所以只有它需要重启。
 		"guest_budget_seconds":         {MinBudgetSeconds, MaxGuestBudgetSeconds, "秒", false},
 		"dry_run_budget_seconds":       {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},
 		"host_call_budget_seconds":     {MinBudgetSeconds, MaxBudgetSeconds, "秒", false},

@@ -91,13 +91,19 @@ for (let index = 0; index < args.length; index += 1) {
 const MIGRATION_DIR = 'server/internal/serverstore/migrations-pg'
 // `site/src/content/docs`（官网 wiki，中英各一份）必须在内：它是**面向用户**的同一批
 // 数字，漏扫 = 同一处漂移在 docs/ 里被拦住、在官网上照旧发布（2026-09-23 D-6）。
-const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs']
+//
+// `server/README.md`（2026-10-05 补，收口轮分区 C 的 E-09）：它是**服务端文档索引**，
+// 每个后端开发者第一眼看到的就是它 —— 它写着「迁移（0001–0082）」，此前**不在任何守卫的
+// 扫描面内**（E-09 实测：改成 `0001–0060` 后 `check-migration-range` 与
+// `check-doc-claims` 都 EXIT=0）。加进扫描面后，本守卫既有的区间判据（上限必须 == MAX）
+// 直接覆盖它 —— 没有新增判据逻辑，只是把"该判的文件"接进已有的那份口径。
+const SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'server/README.md']
 /**
  * 缩面判据①（登记值）：`SCAN_PATHS` 必须**全覆盖**这份登记清单 —— 删掉任一项
  * （例如把 `site/src/content/docs` 去掉）都让"文档区间都有判据"变成假话，而"扫描面为 0"
  * 这道地板是零点，部分缩面永远触发不到。改扫描面必须同时改这里（进 diff、可评审）。
  */
-const REQUIRED_SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs']
+const REQUIRED_SCAN_PATHS = ['server/docs', 'server/AGENTS.md', 'AGENTS.md', 'docs', 'site/src/content/docs', 'server/README.md']
 /**
  * 缩面判据②（派生真源）：本守卫**直接判定**的文件（AGENTS.md 的迁移号判据）必须落在
  * 扫描面内 —— "判什么"与"扫什么"脱节时当场红，与①互相独立（同时改两份清单也躲不过）。

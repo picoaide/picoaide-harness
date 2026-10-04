@@ -295,6 +295,35 @@ func (l *loginLimiter) reset(key string) {
 	delete(l.attempts, key)
 }
 
+// refund 归还该键**本次尝试**占用的那一格(移除最近一条时间戳),**不清空**历史。
+//
+// 为什么需要它(S3-03,审计 2026-10-04,P2):IP 桶是 `allow` **判定即记账**的桶 ——
+// 每次尝试(含成功)都占一格。成功登录若整键清空,持**任一**有效凭证的人就能用
+// "59 次随机用户名错密 + 1 次自己的成功登录"反复把 IP 维度的 argon2 放大防护洗掉
+// (同一出口 IP/NAT 下所有人共用一个键,一名员工的正常登录也会洗掉同网段所有人的
+// 失败预算)。
+//
+// 归还一格同时满足两个目标:
+//   - 正常用户不被误伤:成功的那次尝试不消耗预算 ⇒ 同 NAT 的持续正常登录不会把
+//     60/5min 的 IP 预算堆满(这是原先"成功即清空"想解决的问题);
+//   - 洗预算失效:成功**只抵消自己这一格**,先前累积的失败仍在 ⇒ "失败×59 + 成功×1"
+//     的循环不再回到 0,IP 维度的总量上限重新生效。
+//
+// 归还的是**最近**一条(allow 刚追加的那条):它代表的就是本次尝试。
+func (l *loginLimiter) refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	times := l.attempts[key]
+	switch len(times) {
+	case 0:
+		return
+	case 1:
+		delete(l.attempts, key)
+	default:
+		l.attempts[key] = times[:len(times)-1]
+	}
+}
+
 // loginHost 返回连接来源主机(RemoteAddr 的 host 部分,不含端口)。
 func loginHost(c *gin.Context) string {
 	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
@@ -406,14 +435,23 @@ func (a *API) loginAllowed(c *gin.Context, username string) bool {
 	return true
 }
 
-// loginSucceeded clears the buckets after a successful authentication
-// (a legitimate login must not consume the failure budget). IP 桶同样清空:
-// 成功即证明该来源不是爆破流量,避免误伤同 NAT 的正常用户。
+// loginSucceeded 在**本次登录确实成功**之后处理三个桶(S3-03,审计 2026-10-04,P2):
+//
+//   - `ip|username` 与 `u:username` 整键清空:密码正确已经证明"这个账号的失败不是
+//     攻击该账号的爆破流量"。这两桶是**按账号**的,只有真的知道该账号口令才可能清,
+//     不构成洗预算的入口;
+//   - IP 桶**只归还本次尝试那一格**(refund),**不清空**:它是 `allow` 判定即记账的
+//     尝试桶,且键是全出口/NAT 共用的。整键清空会让"59 次随机用户名错密 + 1 次成功
+//     登录"的循环把 IP 维度的 argon2 放大防护(P1-2)反复洗掉 —— 见 refund 的注释。
+//
+// ⚠️ 调用点必须落在"账号确实可用且登录真的完成"之后(handler.go 的 token 签发成功
+// 之后):密码对但账号被禁用/是审计账号/身份冲突/签发失败的分支都是**被拒的登录**,
+// 不得清任何桶(S3-03 的原缺陷形态:清空发生在状态与角色判定之前)。
 func (a *API) loginSucceeded(c *gin.Context, username string) {
 	scope := dbLimiterScope(a.DB)
 	a.limiter.reset(scope + loginKey(c, username))
 	a.limiter.reset(scope + "u:" + username)
-	a.loginIPLimiter.reset(loginIPBudgetKey(a.DB, c))
+	a.loginIPLimiter.refund(loginIPBudgetKey(a.DB, c))
 }
 
 // oidcCallbackAllowed guards one OIDC callback through a dedicated IP-only

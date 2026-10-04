@@ -21,6 +21,25 @@ vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 import { callRoute, createHarness } from './helpers/connector-harness.ts'
 import type { ConnectorDef } from '../src/types.ts'
 
+/**
+ * This suite observes connector outbound traffic through a `globalThis.fetch`
+ * stub — the shape it always had. Since the DNS-rebinding fix (2026-10-04) the
+ * production transport dials the policy's verified addresses itself
+ * (`src/pinned-http.ts`) instead of handing the URL to the global fetch, so the
+ * stub is installed as THAT transport's seam: the same observation, one level
+ * lower. Every policy gate still runs here — the mock replaces the connection,
+ * not the judgement — and the real transport is covered end to end by
+ * `tests/audit-1004-pinned-address.spec.ts`, which does not mock it.
+ */
+vi.mock('../src/pinned-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/pinned-http.ts')>()
+  return {
+    ...actual,
+    sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
+  }
+})
+
+
 const realFetch = globalThis.fetch
 
 afterEach(() => { globalThis.fetch = realFetch })

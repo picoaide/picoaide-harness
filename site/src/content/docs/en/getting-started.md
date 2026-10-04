@@ -26,7 +26,7 @@ Client installers **ship with the server image** (rather than being posted on a 
    [GitHub Releases](https://github.com/picoaide/picoaide-harness/releases), then unpack the installers:
 
 ```bash
-VER=2.7.0        # use server.version from latest.json as the authority
+VER=<version>        # use server.version from latest.json as the authority
 # the official channel is `official`, the pre-release channel is `beta` — swap as needed
 curl -fL -O "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"

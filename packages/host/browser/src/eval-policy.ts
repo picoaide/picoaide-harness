@@ -973,7 +973,8 @@ function maskAuthHeaderValue(value: string): string {
 const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\-^|~]{1,64}=[^\s;,]+(?:\s*;\s*[A-Za-z0-9_.#$%&*+\-^|~]{1,64}=[^\s;,]+)*)/giu
 
 /**
- * 片段级凭据打码（2026-09-23 审计 EV-1）。
+ * 片段级凭据打码（2026-09-23 审计 EV-1）——**三个内容出口的唯一共用漏斗**
+ * （C3-09，2026-10-04）。
  *
  * 旧实现：`SECRET_VALUE.test(value) && value.length >= 6` ⇒ **整串** `****`。
  * `SECRET_VALUE` 是无词边界的子串正则，于是任何"提到"这些词的普通正文都变成零信息
@@ -982,11 +983,18 @@ const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\
  * `****`；而**同一段文本**经 `browser_get_text` 是正常可读的 ⇒ 两个工具对同一数据
  * 自相矛盾。
  *
- * 现在的口径（与 `browser_get_text`/op log 同族：先形态、再片段）：
+ * **导出**：`runtime.ts` 的 `redactSecretsText`（`browser_get_text` /
+ * `browser_get_snapshot` / `browser_eval` 的出口都走它）调用本函数。R23 N2 只把
+ * "内嵌 URL"那一趟接进了那条漏斗，另外三趟仍只在 eval 侧生效 —— 同一份页面文本
+ * 经两个出口给出不同答案（`browser_get_text` 原样交出 `password=…` /
+ * `Authorization: Bearer …`）。现在四趟只有这一份实现，两处都调它。
+ *
+ * 现在的口径（与 `/op log`/store 同族：先形态、再片段）：
  *  1. 整串**就是** cookie 头/会话 cookie/带 cookie 属性（{@link looksLikeCookieString}）
  *     或是凭据形态 ⇒ 整串打码（cookie 值本身无键可依，键名匹配永远指不到它，
  *     这条是 P1-18 的回归面）—— R23 N3 起"≥2 个 `k=v` 且含 `;`"不再算 cookie 串，
- *     普通键值列表交给片段级规则；
+ *     普通键值列表交给片段级规则；`looksLikeCookieString` 那一半只在
+ *     {@link maskString}（单个**值**）里跑，页面**正文**出口不做整串判定；
  *  2. 否则只擦片段，**四趟顺序固定为：内嵌 URL（{@link maskCredentialUrlsInText}）
  *     → 认证/cookie 头取值 → 关键词 + opaque 片段 → `key=value`/`key: value`
  *     的敏感值**（最后一趟复用 store 的唯一实现
@@ -1003,8 +1011,24 @@ const COOKIE_HEADER_VALUE = /(\b(?:set-)?cookie\b\s*[:=]\s*)([A-Za-z0-9_.#$%&*+\
  *
  * 顺序不变（F-5）：**先掩码后截断**，`project` 仍然在 4 KB 上限之前跑 —— 跨截断点
  * 的凭据只会以 `****` 的形式出现。
+ *
+ * **窗外的形态（认账的边界，C3-09 残余④；2026-10-04 复审用 28 个形态 × 3 个出口实测）**：
+ * 这三条规则都是**形态匹配**，不是"值级"识别 —— 值被变换过就看不见它。出窗的整类有：
+ *
+ *  - **全角/非 ASCII 分隔符**：`password：hunter2xyz`（全角冒号）不命中 ——
+ *    {@link KEYWORD_SPAN} 的分隔符与 {@link AUTH_HEADER_VALUE} / `key=value` 那两趟
+ *    都只认 ASCII 的 `:`/`=`；
+ *  - **非 ASCII 关键词**：`密码=` / `密码：` / `口令=` 整类不命中（关键词表是 ASCII
+ *    英文词表，中文输入法下最常见的写法正好在窗外）；
+ *  - 以及值/关键词的**变换形态**：整段 base64、关键词反转、逐字母加空格、
+ *    零宽字符、西里尔同形字、跨行拆分、percent-encoded 值。
+ *
+ * 边界的方向是**诚实**而不是**更松**：三个出口（`browser_get_text` /
+ * `browser_get_snapshot` / `browser_eval`）走的是同一份实现，同一个形态在三个出口
+ * **一致地命中或一致地不命中**（不变量：没有任何出口比另一个更松）。上面每一类都
+ * 需要"值级/语义级"识别才能关闭，属产品决策，不在本函数的形态口径内。
  */
-function maskCredentialFragments(value: string): string {
+export function maskContentText(value: string): string {
   // R23 N2: 内嵌 URL 的 userinfo/查询串先擦（与标题/摘要面同一份实现
   // `store.maskCredentialUrlsInText`）。userinfo 没有键、也不含关键词，只有 URL
   // 结构能看见它；跑在最前面是因为 URL 是最具体的结构，之后的片段级规则只会
@@ -1025,7 +1049,7 @@ function maskString(value: string, project?: EvalValueProjection): string {
   // response body) used to be sliced and returned with its credential in the
   // clear — the P1-18 cookie-shape detector never ran (2026-09-11 audit).
   if (looksLikeCookieString(value) || CREDENTIAL_VALUE_SHAPES.some((shape) => shape.test(value))) return MASK
-  const masked = maskCredentialFragments(value)
+  const masked = maskContentText(value)
   // F-5 (2026-09-13 round 2): the caller's value-level projection runs BEFORE
   // the cap. The other order (slice, then let `runtime.eval` redact the
   // serialized text) left the head of a credential that straddled the cut in

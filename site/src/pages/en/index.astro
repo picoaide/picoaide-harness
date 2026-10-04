@@ -15,6 +15,9 @@ import mainShot from '../../assets/screenshots/desktop-main.png'
 // 本页是**真实可用的英文落地页**（不是占位页）：Hero + 功能卡片 + 英文文档入口 + 页脚。
 //
 // 站内链接**一律绝对路径 + 结尾斜杠**（本仓硬约定；相对链接不会被 Astro 重写）。
+// 顶栏/页脚必须传 `locale="en"`：两个组件按 locale 取导航表（`src/components/site-nav.mjs`），
+// 不传就是中文站的表 ⇒ 英文落地页上的导航全部把访客送回中文站（判据见
+// `site/scripts/check-en-landing-nav.mjs`）。
 // 视觉语言沿用中文首页（同一套 global.css 变量与 .container/.section/.btn/.feature 类）。
 // 品牌素材只用 `brands/official/logo.svg`（几何真源），产品截图复用既有 assets。
 
@@ -81,7 +84,7 @@ const steps = [
   title="PicoAide Harness — enterprise AI platform, privately deployed"
   description="PicoAide Harness combines a desktop client, a local agent engine and an enterprise server. Deploy one image on your own network; clients ship with the server and employees stay off the public internet."
 >
-  <Header />
+  <Header locale="en" />
 
   <!-- Hero -->
   <section class="hero">
@@ -171,7 +174,7 @@ const steps = [
     </div>
   </section>
 
-  <Footer />
+  <Footer locale="en" />
 
   <style>
     .hero {

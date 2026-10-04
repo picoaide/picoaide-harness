@@ -13,14 +13,14 @@ const mockRequest = vi.mocked(request)
  * 时间预算（2026-10-01 服务端新增的六项）。
  *
  * 值取服务端的**默认值**，且满足服务端保存时校验的序关系
- * （guest 30 < 端到端墙钟 60；干跑 30 / 宿主调用 5 ≤ guest；SQL 5 ≤ 墙钟；
- * 编译 60 = 服务端 ReadTimeout）。单独抽出来是因为下面有**两处**（夹具与
- * 断言）要用同一份数字 —— 抄两份必然漂移。
+ * （guest 30 < 端到端墙钟 60；干跑 30 / 宿主调用 10 ≤ guest；宿主调用 10 > SQL 5，
+ *  SQL 5 > busy timeout 3 且 ≤ 墙钟；编译 60 = 服务端 ReadTimeout）。单独抽出来是因为
+ * 下面有**两处**（夹具与断言）要用同一份数字 —— 抄两份必然漂移。
  */
 const TIME_BUDGETS = {
   guest_budget_seconds: 30,
   dry_run_budget_seconds: 30,
-  host_call_budget_seconds: 5,
+  host_call_budget_seconds: 10,
   request_wall_clock_seconds: 60,
   sql_statement_budget_seconds: 5,
   compile_timeout_seconds: 60,
@@ -891,7 +891,7 @@ describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
     },
     {
       key: 'host_call_budget_seconds', label: '宿主调用预算', unit: '秒', min: 1, max: 300,
-      hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立',
+      hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立。必须严格大于单条 SQL 硬超时（语句 deadline 套在它里面：内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED）。每次请求即时生效',
     },
     {
       key: 'request_wall_clock_seconds', label: '请求端到端墙钟', unit: '秒', min: 1, max: 300,
@@ -899,7 +899,7 @@ describe('应用中心 · 限制项 · 时间预算(2026-10-01 新增)', () => {
     },
     {
       key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', unit: '秒', min: 1, max: 300,
-      hint: '到点由看门狗回滚并打污染标记；不得超过端到端墙钟',
+      hint: '到点由看门狗回滚并打污染标记；必须严格小于宿主调用预算，也不得超过端到端墙钟。**下一个应用库句柄生效**（不是立即）',
     },
     {
       key: 'compile_timeout_seconds', label: '编译超时', unit: '秒', min: 1, max: 300,

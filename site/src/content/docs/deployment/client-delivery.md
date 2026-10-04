@@ -37,13 +37,13 @@ PicoAide Harness 的客户端**不单独发布**：三平台安装包打进服�
 {
   "schema": 1,
   "channel_id": "official",
-  "server": { "version": "2.7.0" },
+  "server": { "version": "<版本>" },
   "client": {
-    "version": "2.7.0",
+    "version": "<版本>",
     "assets": {
-      "win-x64":       { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-x64-Setup.exe", "sha256": "…", "size": 123456789 },
-      "mac-universal": { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-mac.dmg",        "sha256": "…", "size": 123456789 },
-      "linux-x64":     { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-x86_64.AppImage", "sha256": "…", "size": 123456789 }
+      "win-x64":       { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<版本>-x64-Setup.exe", "sha256": "…", "size": 123456789 },
+      "mac-universal": { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<版本>-mac.dmg",        "sha256": "…", "size": 123456789 },
+      "linux-x64":     { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<版本>-x86_64.AppImage", "sha256": "…", "size": 123456789 }
     }
   }
 }
@@ -74,7 +74,7 @@ PicoAide Harness 的客户端**不单独发布**：三平台安装包打进服�
 以上都拿不到时，清单会**按设计拒发** `client` 段，并给出原因：
 
 ```json
-{ "schema": 1, "channel_id": "official", "server": { "version": "2.7.0" },
+{ "schema": 1, "channel_id": "official", "server": { "version": "<版本>" },
   "client_unavailable": "server origin is not https; set PICOAI_PUBLIC_BASE_URL" }
 ```
 

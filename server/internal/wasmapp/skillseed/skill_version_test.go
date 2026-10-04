@@ -290,6 +290,18 @@ var appBuilderSkillDigests = map[string]string{
 	// 控制台调整" —— 数字与 limits 表的一致性由 `limits_test` 的 TestSkillDiscipline
 	// 守着，这里只负责版本纪律（R1-pm-8：内容变 ⇒ 版本必须跟着变）。
 	"f1f35b28f7978b25bde3496790d04100ab57a15d74180c9355c7434e9554c364": "2.11.0",
+	// 2.11.1 = **宿主调用预算默认值 5 s → 10 s**（2026-10-02，审计 S4-01/S4-02）：
+	// 生成物 `references/limits.md` 跟着 `limits` 表走（它是 `go generate` 的产物，
+	// 由 limits_gen_test 逐字节对拍）。数值本身改的是**外层**宿主调用预算 ——
+	// 它必须严格大于单条 SQL 硬超时（5 s），否则 db.query 的语句超时先被外层收掉、
+	// 应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)。
+	//
+	// 同一条 2.11.1 摘要里还包含**同批另一处生成物变化**：`publish_total_budget`
+	//（发布链路总预算 75 s，随 S4-06 进 limits 表 ⇒ 同一份 `references/limits.md` 多一行）。
+	// 2.11.1 **从未随任何 tag 下发**（上一个已发布的内置技能版本是 2.11.0），所以按本表的
+	// 就地替换规则改写这一条，而不是为一个没出过门的内容再提一个版本号。
+	// ⚠️ 谁再动 `limits` 表并重新 `go generate`，整目录摘要就会再变一次 —— 必须同步改这里。
+	"b0f6228e87c8ff2633a735e278e03740001b21a6d1f8b36cabec6982f79b9fb3": "2.11.1",
 }
 
 // seededSkillDigests 是「**技能目录 → 内容摘要 → version**」的两级登记表：

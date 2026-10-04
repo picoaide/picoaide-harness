@@ -70,9 +70,25 @@ function probeSession(ctx) {
 *
 *  - 探测到的服务**已完成恢复**（`isRestored() === true`）⇒ 立即用当前会话回调一次；
 *  - 服务**不存在**或没有 `isRestored`（纯桌面冒烟、还没装配 enterprise 面）⇒ 也回调一次
-*    并给出 `undefined`/"未登录" —— 消费方必须知道"现在没有会话"，而不是永远等一个
+*    并给出 `null`/"未登录" —— 消费方必须知道"现在没有会话"，而不是永远等一个
 *    不会来的事件；
 *  - 否则（恢复仍在飞行）⇒ **不**回调：那次事件还没发，订阅已经就位。
+*
+* ## "没有会话"的哨兵只有一个：`null`（2026-10 审计 C2-2）
+*
+* 本函数有**两条投递通道**：`pico/session-changed` 事件，以及上面那次补发。事件通道
+* 由 `SessionService` 投递，它一直用 `null`（`subscribeSession` 里的事件签名就是
+* `(session: Session | null) => void`）；补发通道此前把"探测不到服务"投成
+* `undefined` ⇒ **同一个订阅按到达方式给出两种哨兵**，而消费方只认一种：
+* enterprise 的三处（`bootstrap` / `channel-sync` / `error-reporting`）只判
+* `=== null`，收到 `undefined` 会走进"已登录"分支、在字段读取上抛错
+* （`channel-sync` 的同步失败还会被它自己的 `.catch` 吞掉）。
+*
+* 归一收口在**唯一实现**里（`?? null`），而不是在每个包装层/每个消费方各补一次：
+* 这里是"会话什么时候变"的唯一读数，多一个消费方就多一处可漏的地方。
+* 判据 `packages/host/host-locale/tests/session-events.spec.ts` 的
+* 「服务缺席 ⇒ 补发 null，不是 undefined」＋ enterprise 侧的
+* `tests/session-sentinel.spec.ts`（真 `apply()` 的行为面）。
 *
 * @param ctx - 上下文（只需 `on`，外加 `get` 或 `picoSession` 之一）。
 * @param listener - 收到会话（或未登录状态）时的回调。**必须幂等**：它可能被立即调用一次。
@@ -83,7 +99,7 @@ function probeSession(ctx) {
 function subscribeSessionChanges(ctx, listener, probe = () => probeSession(ctx)) {
 	const off = ctx.on(SESSION_CHANGED_EVENT, listener);
 	const service = probe();
-	if (service?.isRestored === void 0 || service.isRestored()) listener(service?.getSession?.());
+	if (service?.isRestored === void 0 || service.isRestored()) listener(service?.getSession?.() ?? null);
 	return off;
 }
 /**

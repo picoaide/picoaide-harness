@@ -256,6 +256,33 @@ export function sanitizeArchiveErrorText(raw: string): string {
 }
 
 /**
+ * 系统级错误（errno）判定：**先判错误类型，再判关键词兜底**（2026-10 审计 C2-3）。
+ *
+ * 为什么必须有这一档：{@link REFUSAL_HINT} 是**文本关键词**，而安装器自己的 tar 通道
+ * 就把归档写在 `<staging>/archive.tar.gz`（`join(staging, 'archive.tar.gz')`）
+ * 且技能名本身可以是 `archive`（kebab-case 合法取值）⇒ 任何**系统级**失败
+ * （`EROFS`/`EACCES`/`ENOSPC`…）只要提到那个路径就命中 `archive`，被判成
+ * "你的归档有问题"（422）—— 面板于是让用户去改内容/重试同一发，而真因是"这台机器
+ * 现在写不进去"（同族先例：`session-service.ts` 的 `$DSH_HOME` 只读/ENOSPC/ROFS）。
+ * 422 同时意味着走了**不过脱敏**的那条分支，本机家目录/用户名/staging 结构原样回 UI。
+ *
+ * 两种形态都认（Node 的 fs 错误两种都常见，探针用的是后者）：
+ *  - 错误对象上的 `code`：libuv 的 `E*` errno 家族，以及 Node 内部的 `ERR_*` 码
+ *    （两者都不是"请求有问题"，用户改归档改不掉）；
+ *  - 文案前缀：`E[A-Z0-9]+:`（`sanitizeArchiveErrorText` 认 errno 用的是同一形状）。
+ *    **刻意不认** `[A-Z]+:` 的宽形状 —— `ARCHIVE:`/`SKILL:` 这类开头会是我们自己的
+ *    拒绝文案，误判成系统级会把 422 翻成 502。
+ * @param cause - the thrown value.
+ * @param raw - 它的文案（`cause instanceof Error ? cause.message : String(cause)`）。
+ * @returns errno/错误码；不是系统级错误时为 undefined。
+ */
+function systemErrorCode(cause: unknown, raw: string): string | undefined {
+  const code = (cause as NodeJS.ErrnoException | null | undefined)?.code
+  if (typeof code === 'string' && /^(?:E[A-Z0-9]+|ERR_[A-Z0-9_]+)$/u.test(code)) return code
+  return /^(E[A-Z0-9]+):/u.exec(raw)?.[1]
+}
+
+/**
  * 把归档安装/卸载的失败翻译成 HTTP 信封（分类 + 脱敏 + 状态码）。
  *
  * **唯一实现**：技能（`/api/pico/skills*`、`/api/pico/shared-skills*`）与共享智能体
@@ -265,27 +292,42 @@ export function sanitizeArchiveErrorText(raw: string): string {
  * （裸分类 + 原文）⇒ 系统级错误（如
  * `ENOTDIR: not a directory, mkdir '/home/<user>/.picoaide-harness/agent-presets'`）
  * 会把**本机绝对路径**透给 UI。
+ *
+ * ## 文本出口只有一条（2026-10 审计 C2-3）
+ *
+ * 回给 UI 的文案在**这里**一次算定：除了 {@link ArchiveInstallRefusal} /
+ * {@link SkillLockedError} 这两类**我们自己写的**文案（类注释：面向用户、且 RESIDUE
+ * 那几条**有意**点名用户自己的文件，脱敏会把可操作信息抹掉），其余一律过
+ * {@link sanitizeArchiveErrorText}（A12 的唯一实现）。此前只有 502 那一支脱敏，
+ * 于是"系统级错误命中关键词"这条路径把原文连本机路径一起回了 UI。
  * @param cause - the thrown value.
  * @returns status / message / code / refusal。
  */
 export function describeArchiveFailure(cause: unknown): ArchiveFailureDescription {
   const raw = cause instanceof Error ? cause.message : String(cause)
   const typed = cause instanceof ArchiveInstallRefusal ? cause : undefined
-  if (typed?.code === 'NOT_INSTALLED') return { status: 404, message: raw, code: typed.code, refusal: true }
-  if (typed?.code === 'LOCAL_CONTENT') return { status: 409, message: raw, code: typed.code, refusal: true }
-  if (typed?.code === 'ARCHIVE_TOO_LARGE') return { status: 413, message: raw, code: typed.code, refusal: true }
+  const authored = typed !== undefined || cause instanceof SkillLockedError
+  const message = authored ? raw : sanitizeArchiveErrorText(raw)
+  if (typed?.code === 'NOT_INSTALLED') return { status: 404, message, code: typed.code, refusal: true }
+  if (typed?.code === 'LOCAL_CONTENT') return { status: 409, message, code: typed.code, refusal: true }
+  if (typed?.code === 'ARCHIVE_TOO_LARGE') return { status: 413, message, code: typed.code, refusal: true }
   // per-name 锁竞争（F3 修复）：**可重试**的瞬时状态，不是"请求有问题"——报 503，
   // 面板按错误文案提示稍后重试（不要报 422 让用户以为要改请求）。
-  if (cause instanceof SkillLockedError) return { status: 503, message: raw, code: cause.code, refusal: true }
+  if (cause instanceof SkillLockedError) return { status: 503, message, code: cause.code, refusal: true }
+  // 系统级错误**先于**关键词兜底（C2-3）：errno 的成因在机器上（只读根/磁盘满/权限），
+  // 不在归档里；把它判成 422 会让用户改一个改不动的东西。
+  if (typed === undefined && systemErrorCode(cause, raw) !== undefined) {
+    return { status: 502, message, refusal: false }
+  }
   if (typed !== undefined || REFUSAL_HINT.test(raw)) {
     return {
       status: 422,
-      message: raw,
+      message,
       ...typed === undefined ? {} : { code: typed.code },
       refusal: true,
     }
   }
-  return { status: 502, message: sanitizeArchiveErrorText(raw), refusal: false }
+  return { status: 502, message, refusal: false }
 }
 
 /**
@@ -911,7 +953,33 @@ async function runInstallSkillArchive(options: InstallSkillArchiveOptions): Prom
   // 别的名字的崩溃遗留：只在**副本足够旧**时才动（不与正在跑的换入抢，见
   // {@link INTERRUPTED_SWAP_MIN_AGE_MS}）。安装是所有客户端都会走的路径，
   // 因此它就是"下次安装顺手自愈"的那个钩子。
-  await recoverInterruptedSkillSwaps(skillsDir, { minAgeMs: INTERRUPTED_SWAP_MIN_AGE_MS, log })
+  //
+  // C4-01（2026-10 对抗审计）：这次**整库清扫会写别人的落点**，而本调用点只持有
+  // "当前正在装的那个名字"的锁 —— 那把锁护不住别的名字。缺的互斥是实测出来的：
+  // 随包插件（memory-evolve）整树换入的窗口里落点是**缺失**的，这里把该名字的
+  // `backup-<name>-<ts>` 搬回落点 ⇒ 对方第二次 `rename` ENOTEMPTY、回滚也 ENOTEMPTY
+  // （`SKILL_SWAP_RECOVERY_FAILED`），旧内容的唯一副本随后被同步器清扫收掉 ⇒
+  // 该随包技能永久 `SKILL_LOCAL_CONTENT` / `SKILL_CHANNEL_CONFLICT` 拒收、不会自愈。
+  // 所以逐个名字取**它自己的**锁（零等待；拿不到就跳过并留痕）。
+  //
+  // 为什么当前这个名字**不再取**：上面那次 `onlyName` 恢复已经在它的锁内跑过一遍
+  // （且不受年龄闸门约束），这里再取会自己等自己 —— 直接交回一个空释放闭包，
+  // 那一段仍在"我们持锁"的状态下执行。
+  await recoverInterruptedSkillSwaps(skillsDir, {
+    minAgeMs: INTERRUPTED_SWAP_MIN_AGE_MS,
+    log,
+    acquireNameLock: async (candidate) => {
+      if (candidate === name) return async () => { /* 本调用点已持有（withSkillLock 统一释放） */ }
+      try {
+        // 零等待：一次尝试 + 一次陈旧抢占，绝不排队（排队才可能死锁）。
+        return await acquireSkillDirLock(skillsDir, candidate, 0, log)
+      } catch (cause) {
+        // 被别的写者持有 = 预期状态 ⇒ 跳过这个名字（`underNameLock` 留痕），不是失败。
+        if (cause instanceof SkillLockedError) return undefined
+        throw cause
+      }
+    },
+  })
 
   // 陈旧 staging 清扫（审计 A12）：SIGKILL/断电会留下 `.install-*`（旧布局）或
   // `.skill-tmp/install-*`（新布局），此前没有任何清扫者，会一直堆积
@@ -1890,16 +1958,67 @@ async function ensureLibraryTempRoot(
  * @param skillsDir - the user skill root.
  * @param options - `onlyName` = 只恢复这个名字（安装/卸载路径**持 per-name 锁**时的口径，
  *   无需年龄闸门）；`minAgeMs` = 只处理足够旧的副本（全量扫描用，避开正在跑的换入，
- *   见 {@link INTERRUPTED_SWAP_MIN_AGE_MS}）；`log` = 日志出口（R18B-04，缺省 `console`）。
+ *   见 {@link INTERRUPTED_SWAP_MIN_AGE_MS}）；`log` = 日志出口（R18B-04，缺省 `console`）；
+ *   `acquireNameLock` = **每个会被写入的技能名**都要先取它自己的 per-name 锁（C4-01：
+ *   整库清扫会写**别人的**落点，调用方持有的那把锁护不住 ⇒ 必须逐个名字取锁）。
  * @returns 每个被动过的副本一条记录（含 `restored` 与 `discarded`）。
  */
 export async function recoverInterruptedSkillSwaps(
   skillsDir: string,
-  options: { onlyName?: string | undefined, minAgeMs?: number | undefined, log?: SkillInstallLog | undefined } = {},
+  options: {
+    onlyName?: string | undefined
+    minAgeMs?: number | undefined
+    log?: SkillInstallLog | undefined
+    /**
+     * 取**这个名字**的 per-name 锁（C4-01）；返回释放闭包，拿不到时返回 `undefined`。
+     *
+     * 为什么是注入的：本函数在整库清扫形态下会写**任意名字**的落点，而调用方
+     * （`runInstallSkillArchive`）只持有"当前正在装的那个名字"的锁 —— 两者不是同一把，
+     * 于是随包插件（memory-evolve）的整树换入窗口与这里的落点写入可以交错：对方刚把旧
+     * 目录旁置（落点缺失），这边就把 `backup-<name>-<ts>` 搬回落点 ⇒ 对方的第二次
+     * `rename` 与回滚**双双 ENOTEMPTY**（`SKILL_SWAP_RECOVERY_FAILED`），旧内容的唯一副本
+     * 随后被同步器的清扫收掉，该技能此后永久拒收（对抗审计 C4-01 实测终态）。
+     *
+     * 契约（调用方保证）：**零等待**、拿不到就返回 `undefined`（本函数随即跳过这个名字
+     * 并留痕，一个字都不动）。绝不在这里等待 —— 零等待是"不会死锁"的全部依据，
+     * 而"顺手自愈别的名字"不值得让一次无关的安装失败（副本在 `backup-*` 里不会丢，
+     * 它是清扫面之外的；同名那条路径（`onlyName`）不受影响，仍由调用方在锁内跑）。
+     *
+     * 省略（`onlyName` 形态、工具脚本与测试直接调用）= 不做这一层（保持老行为）。
+     */
+    acquireNameLock?: ((name: string) => Promise<(() => Promise<void>) | undefined>) | undefined
+  } = {},
 ): Promise<RecoveredSkillSwap[]> {
-  const { onlyName, minAgeMs } = options
+  const { onlyName, minAgeMs, acquireNameLock } = options
   const sink = skillLog(options.log)
   const out: RecoveredSkillSwap[] = []
+  /**
+   * 在**该名字自己的** per-name 锁内执行一次落点写入（C4-01）。
+   *
+   * 拿不到锁时**一个字都不动**并留痕（不是静默降级：锁被别人持有是**预期**状态 ——
+   * 插件同步/另一次安装正在动这个名字 —— 而这份副本不会丢，`backup-*` / `orphan-*`
+   * 都不在清扫面内，下一次取得到锁的自愈会收它）。
+   * @param name - 会被写入的技能名。
+   * @param task - 真正动盘的那一段（`settle`）。
+   * @returns `task` 的结果；被跳过时为 `undefined`。
+   */
+  const underNameLock = async (name: string, task: () => Promise<boolean>): Promise<boolean | undefined> => {
+    if (acquireNameLock === undefined) return await task()
+    const release = await acquireNameLock(name)
+    if (release === undefined) {
+      sink.warn(
+        `[skill-install] skipped the interrupted-swap recovery of "${name}": another writer holds its per-name lock `
+        + `(${SKILL_LOCK_DIR}/${name}${SKILL_LOCK_SUFFIX}) — nothing was moved; the copy stays in ${SKILL_TEMP_DIR} `
+        + 'and is recovered by the next install/uninstall of that name (or by the next sweep once the lock is free)',
+      )
+      return undefined
+    }
+    try {
+      return await task()
+    } finally {
+      await release()
+    }
+  }
   // 锚：库根的 realpath（库根本身是链接是合法布局）。所有落点都从它拼出来。
   const anchorRoot = await realpath(skillsDir).catch(() => undefined)
   if (anchorRoot === undefined) {
@@ -2063,7 +2182,8 @@ export async function recoverInterruptedSkillSwaps(
       if (!await oldEnough(join(tempRoot, entry.name))) continue
       const source = await anchored(relPath, 'the interrupted-swap copy of')
       if (source === undefined) continue
-      await settle(name, source, join(anchorRoot, name))
+      // C4-01：写的是**这个名字**的落点 ⇒ 必须持有它自己的 per-name 锁。
+      await underNameLock(name, () => settle(name, source, join(anchorRoot, name)))
       continue
     }
     // 回滚失败分支：orphan-<ts>-<name>（落点存在时**绝不删** —— 既有契约）。
@@ -2076,7 +2196,8 @@ export async function recoverInterruptedSkillSwaps(
       if (landing !== undefined) continue
       const source = await anchored(relPath, 'the orphaned copy of')
       if (source === undefined) continue
-      await settle(name, source, join(anchorRoot, name))
+      // C4-01：与上面那条同口径 —— 写谁的名字，就取谁的锁。
+      await underNameLock(name, () => settle(name, source, join(anchorRoot, name)))
       continue
     }
     // 升级前的旧崩溃形态：install-*/backup/（名字不在目录名里，只能读 frontmatter）。
@@ -2102,7 +2223,7 @@ export async function recoverInterruptedSkillSwaps(
     if (meta === undefined) continue
     if (onlyName !== undefined && meta.name !== onlyName) continue
     if (!await oldEnough(staged.path)) continue
-    if (!await settle(meta.name, legacyBackup, join(anchorRoot, meta.name))) continue
+    if (!await underNameLock(meta.name, () => settle(meta.name, legacyBackup, join(anchorRoot, meta.name)))) continue
     // 抢救/作废之后，这一份 staging 残骸一并清掉：里面只剩安装器自己的构件
     // （`unpacked/`、`archive.tar.gz`），而 `rename` 会刷新**父目录** mtime ⇒
     // 不清它就还得再等一个 24h 阈值才被清扫器看到（年龄闸门已保证没有在跑的安装）。
@@ -3101,6 +3222,15 @@ export async function uninstallSkill(
      */
     serverURL?: string | undefined
     /**
+     * 这一份**算不算当前账号的**（2026-10 审计 C2-1）：`'unknown'` = 证明不了
+     * （面板从聚合面的 `localOwnership` 带下来，见 `auth-gate.ts` 的
+     * `/api/pico/skills` 分支）。它只影响**随包技能的机器级墓碑**要不要写：
+     * 证明不了归属时**不写** —— 删除照常生效，但"随包同步对所有账号都不再装回"
+     * 这个**不可逆**的机器级决定不下（安全的失败模式：删了下次同步还会回来）。
+     * 省略（老调用方/工具面/测试）保持原行为：写墓碑。
+     */
+    localOwnership?: 'mine' | 'unknown' | undefined
+    /**
      * 宿主语言（R19B-09）：`RESIDUE` 拒绝文案按它取中英。调用方（tool/route）
      * **按每次调用**解析后传入（`dsh-plugin-desktop/host-locale`）；缺省回落
      * {@link DEFAULT_HOST_LOCALE}（中文，与客户端字典一致）。**不在模块级冻结语言表**。
@@ -3178,7 +3308,14 @@ export async function uninstallSkill(
     // （market/org/builtin 没有自动重装路径 —— 给它们也写墓碑只会留下永久的陈旧
     // 记录，还会在用户日后重新安装同名技能时干扰判断）。写失败不致命：最坏情况
     // 退回升级前的行为（下次开机会装回来），而删除本身已经成功。
-    if (prov?.channel === 'plugin') await writeSkillTombstone(skillsDir, name, prov, log)
+    //
+    // C2-1（2026-10 审计）：墓碑是**机器作用域**的（`<skills>/.skill-removed/<name>.json`
+    // 被随包同步按名字读，与账号无关）⇒ 一旦写下，"这个随包技能在这台机器上永久不再
+    // 安装"就落定了，而面板没有"重新安装随包技能"的入口（不可逆）。所以它只在**能证明
+    // 这一份是当前账号的时候**才写：`localOwnership === 'unknown'` ⇒ 这次删除只生效到
+    // 下一次随包同步（安全的失败模式："删了还会回来"），而不是替**其他账号**下一个永久的
+    // 机器级决定。缺省（未传/工具面/测试）保持原行为：写墓碑。
+    if (prov?.channel === 'plugin' && options.localOwnership !== 'unknown') await writeSkillTombstone(skillsDir, name, prov, log)
 
     // R13-B P1-2：**"卸载成功"必须等于"运行时不再加载"**。删掉规范落点之后：
     //  1. 先清掉安装器自己的同名影子（旧备份/旧暂存 —— 它们排在同名真目录之前，

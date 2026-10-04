@@ -83,6 +83,14 @@
       "Note": "48 MiB 需约 6.7 Mbps 保底"
     },
     {
+      "Key": "publish_total_budget",
+      "Value": "75",
+      "Unit": "seconds",
+      "Section": "§4.2",
+      "Title": "单次发布/预检的平台侧总预算",
+      "Note": "编译 + 抽取 + 干跑**共用**一个 deadline（从请求到达起算，含请求体读取）：必须小于 client_upload_timeout，且严格大于 compile_timeout（否则控制台配的编译预算不可达）"
+    },
+    {
       "Key": "section_total_max_bytes",
       "Value": "4194304",
       "Unit": "bytes",
@@ -356,11 +364,11 @@
     },
     {
       "Key": "host_call_budget_default",
-      "Value": "5",
+      "Value": "10",
       "Unit": "seconds",
       "Section": "§4.4",
       "Title": "宿主调用兜底预算",
-      "Note": ""
+      "Note": "必须严格大于 sql_statement_budget：db.* 的语句 deadline 套在它里面，内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)"
     },
     {
       "Key": "ai_bridge_max_messages",

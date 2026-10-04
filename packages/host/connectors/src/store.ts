@@ -107,6 +107,33 @@ export function sameCredential(a: ConnectorCredential, b: ConnectorCredential): 
 }
 
 /**
+ * 关于「某账号凭据文件某代次」的事实，**唯一**的键构造点：账号作用域 + 连接器 id。
+ *
+ * 每个把「这份凭据」记在内存里的登记簿都必须用同一个拼法 —— 死 grant 标记
+ * （`deadGrants`）、面板的「可续期」投影（`refreshable`）、注册期追赶用的最近一次
+ * 刷新结果（`latestRefresh`）、刷新引擎的单飞槽位（`TokenRefresher.inflight`）、
+ * 活传输句柄与「已挂载未发布」的头记录（`liveProviders` / `pendingLiveHeaders`）。
+ * 判定 / 记账 / 清账 / 复用只要有一处换了键，这一类后果就会跟着出现：
+ *
+ *  - 一个账号的终态被另一个账号**继承**（A 的吊销让 B 被要求重新授权）；
+ *  - 一个账号的刷新结果被另一个账号**采用**（A 的 access token 走进 B 的端点或
+ *    子进程环境）—— 2026-10-04 审计 C3-04 / C3-05 / C3-08 的同一族缺陷。
+ *
+ * 作用域是**凭据 store 的解析目录**（`ConnectorStore.dir`），与 `TokenRefresher`
+ * 快照的 `scopeAtStart` 同源；调用方必须让「作用域与凭据」取自**同一个 store
+ * 实例**，不要在调用点各取一次（两次取值之间可以插进一次会话切换）。
+ *
+ * NUL 把两半分隔开：文件系统路径不可能含它，连接器 id 又已被校验为
+ * `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`，因此不存在两个 (scope, id) 拼出同一个键。
+ * @param scope - 该事实所属的账号作用域（`ConnectorStore.dir`）。
+ * @param id - 连接器 id。
+ * @returns 登记簿键。
+ */
+export function credentialScopeKey(scope: string, id: string): string {
+  return `${scope}\u0000${id}`
+}
+
+/**
  * Connector ids come from marketplace-derived definitions, so they are
  * validated before crossing into the filesystem (no separators, no dot
  * segments, no NUL, bounded length).

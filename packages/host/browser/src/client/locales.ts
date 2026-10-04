@@ -6,11 +6,20 @@
  * 不认识浏览器插件）。通用那句（`footMenu.attention`＝"AI 正在等待你的操作"）是
  * 兜底：只说"在等"，不告诉用户下一步点哪里 —— 这正是审计要求补回来的信息。
  *
- * 占位符沿用兄弟包的 `{name}` 约定（`panel.waiting` 用 `{button}` 引用按钮文案，
- * 于是英文句子里的按钮名也是英文）。
+ * 2026-10-04（P1 三档化）：提示有两档文案，都指向浏览器窗口里同一个「交给 AI」按钮：
+ *   - `panel.holding*`：用户持控制权、AI 还没被拒过（AI 交权后停下等人走的就是这条）
+ *     ⇒ 信息级；
+ *   - `panel.waiting*`：AI 已经被用户闸拒过 ⇒ 报警级（既有语义，一字不改）。
+ *
+ * 占位符沿用兄弟包的 `{name}` 约定（`panel.waiting` / `panel.holding` 用 `{button}`
+ * 引用按钮文案，于是英文句子里的按钮名也是英文）。
  */
 export const zh = {
   'panel.title': '浏览器',
+  /** 用户持控制权时的短标签（浮层条目上的短句 + 「更多」行上的圆点）。 */
+  'panel.holdingShort': '控制权在你手里',
+  /** 信息级 tooltip：说清"控制权在谁手里 + 下一步在哪点"。 */
+  'panel.holding': '控制权在你手里：操作完成后在浏览器窗口点「{button}」交还，AI 才能继续',
   /** 用户持有控制权、AI 被挡住时的提示（浮层条目上的短句 + 「更多」行上的圆点）。 */
   'panel.waitingShort': 'AI 等待交还',
   /** 警示 tooltip / 无障碍文案：必须说清"下一步做什么"。 */
@@ -21,6 +30,8 @@ export const zh = {
 
 export const en: Record<keyof typeof zh, string> = {
   'panel.title': 'Browser',
+  'panel.holdingShort': 'You have control',
+  'panel.holding': 'You have browser control: click {button} in the browser window when you are done so the AI can continue',
   'panel.waitingShort': 'AI waiting',
   'panel.waiting': 'The AI is waiting for you to hand back browser control: open the browser window and click {button} to continue',
   'button.handBack': 'Hand back to AI',

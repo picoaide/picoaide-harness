@@ -140,12 +140,28 @@ export const ATTRIBUTION_SESSION_HEADER = 'x-deepseek-harness-session-id'
 /** 隐藏会话 id 前缀（服务端按它派生 `app_id`；契约 `server/internal/llmgateway/app-session-id.json`）。 */
 export const ATTRIBUTION_SESSION_PREFIX = 'app:'
 
-/** 归因链路三段锚点（每段一个文件；对拍用例逐个读并断言锚点，缺一段即判链路未接）。 */
+/**
+ * 归因链路三段锚点（①②③ 各一处真源；对拍用例逐个读并断言锚点，缺一段即判链路未接）。
+ *
+ * ② 是**目录 + 期望文件名**（不是一条文件路径）：见下面 `senderDir` 的注释。
+ */
 export const ATTRIBUTION_CHAIN_ANCHORS = {
   /** ① 客户端构造：隐藏会话 id 的前缀常量。 */
   client: 'packages/host/wasm-apps-host/src/ai-chat.ts',
-  /** ② 传输：pinned 上游适配器里发这个头的那一行。 */
-  sender: 'deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/adapter.ts',
+  /**
+   * ② 传输：pinned 上游适配器**所在包的 `src/` 目录**（**目录，不是文件**）。
+   *
+   * 为什么不钉文件路径（S5-01，2026-10-04）：这条锚点曾经钉的是
+   * `…/llm-deepseek/src/protocols/chat-completions/adapter.ts` —— 一条**根本不存在**的路径
+   * （真实文件是 `…/llm-deepseek/src/adapter.ts`），于是"文件不存在 ⇒ 回落冻结件"的兜底
+   * **必然**命中，判据退化成"拿冻结常量测它自己"（恒真），同一分支里真正有牙的那半
+   * （活上游必须逐字含冻结行）**结构上不可达**。现在改成**在目录下逐字搜那一行**：
+   * 上游把适配器搬进子目录/换文件名时判据仍然成立，而"搜不到 / 搜到多处 / 搜到别的文件"
+   * 一律判红（判定器 `probeUpstreamSenderAnchor` 在 `upstream-anchor-freeze.ts`）。
+   */
+  senderDir: 'deepseek-harness/packages/llm/llm-deepseek/src',
+  /** ② 命中文件必须是这个基名（那一行**只能**出现在它里面，且恰好命中 1 个文件）。 */
+  senderFile: 'adapter.ts',
   /** ③ 服务端解析：契约（前缀 + app_id 正则）与它的解析实现。 */
   contract: 'server/internal/llmgateway/app-session-id.json',
   reader: 'server/internal/llmgateway/app_session_id.go',

@@ -1,7 +1,9 @@
 package applimits_test
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -278,6 +280,165 @@ func TestParseStoredIsForwardCompatible(t *testing.T) {
 	}
 }
 
+// ===== FW-1（2026-10-04）：存储读取路径不得因**新加的校验**丢掉整份已保存设置 =====
+
+// oldLibraryWith 造一份"旧版本控制台保存过"的对象：六个时间预算按**当时**的默认值
+// （host_call = sql = 5 s，见 limits 的历史值）落库，其余字段用当前默认。
+func oldLibraryWith(mut func(*applimits.Limits)) applimits.Limits {
+	l := applimits.Defaults()
+	l.HostCallBudgetSeconds = 5
+	l.SQLStatementBudgetSeconds = 5
+	if mut != nil {
+		mut(&l)
+	}
+	return l
+}
+
+// TestParseStoredLegalizesOldLibraryCombos 是 FW-1 的核心判据（"旧库形态"）。
+//
+// 现场形态：本轮给 SQL 预算加了"必须**严格小于**宿主调用预算"（S4-02），而在此之前两个
+// 默认值都是 5 s ⇒ 任何在那条规则之前点过「保存」的部署，库里存的都是 `host_call=5 / sql=5`
+// （webadmin 的 PUT 是整份覆盖）。读取路径若照旧"只 Validate"，5>=5 命中新分支 ⇒ 整份设置
+// 被判非法 ⇒ 上层（newWasmLimitsHolder）回落到部署档位：管理员保存过的
+// max_instances / module_cache_mb / instance_memory_mb / 全部时间预算一次性失效，
+// 而且回落方向不可控（管理员为小内存机调小的并发会被档位放大）。
+//
+// 选定口径：**只收紧内层** —— host_call 保持管理员存的值 5 s 不动，sql 钳到
+// host_call−1 = 4 s（同时满足"严格小于外层"与"严格大于 busy timeout 3 s"）。
+// 为什么不把 host_call 抬到新默认 10 s：那是**放宽**一条执行期闸门（宿主调用 5 s → 10 s），
+// 而"钳位只往下、从不放大外层"是本包已经写死的方向（见 clampCrossField 的注释与
+// TestBudgetFieldsAreClampedNotWidened）；sql 5→4 是唯一既保住管理员存值、又不放大任何
+// 闸门的方向。
+func TestParseStoredLegalizesOldLibraryCombos(t *testing.T) {
+	// ① 最典型的旧库形态：原样保存（两个默认值相等）。
+	old := oldLibraryWith(nil)
+	l, err := applimits.ParseStored(old.Encode())
+	if err != nil {
+		t.Fatalf("旧库形态（sql=5, host_call=5）必须仍能读出，否则整份设置回落档位：%v（%s）", err, err.JSON())
+	}
+	want := old
+	want.SQLStatementBudgetSeconds = 4
+	if l != want {
+		t.Fatalf("合法化结果不符：\n got %s\nwant %s", l.Encode(), want.Encode())
+	}
+	// "整份设置不被丢弃"的含义：除被钳的那一项外，管理员存的值逐字保留。
+	if l.MaxInstances != old.MaxInstances || l.InstanceMemoryMB != old.InstanceMemoryMB ||
+		l.ModuleCacheMB != old.ModuleCacheMB || l.HostCallBudgetSeconds != old.HostCallBudgetSeconds {
+		t.Fatalf("除被钳的 sql 外，其余字段必须逐字保留：%s", l.Encode())
+	}
+	// 结果必须自身合法，且**控制台 GET→PUT 的往返**必须成立（否则管理员连别的字段都改不动，
+	// 因为表单提交的是整份对象）。
+	if verr := l.Validate(); verr != nil {
+		t.Fatalf("合法化结果必须自身合法：%v（%s）", verr, verr.JSON())
+	}
+	if back, perr := applimits.Parse(l.Encode()); perr != nil || back != l {
+		t.Fatalf("合法化结果必须能被控制台原样保存回去（GET→PUT）：%v", perr)
+	}
+
+	// ② 另一个"新规则"形态：`sql` 必须严格大于 SQLite 的 busy timeout（3 s）——
+	//    这条规则之前它的范围校验只有 1–300 ⇒ sql ∈ {1,2,3} 是能存进库的。
+	for _, storedSQL := range []int{1, 2, 3} {
+		raw := oldLibraryWith(func(l *applimits.Limits) { l.SQLStatementBudgetSeconds = storedSQL }).Encode()
+		got, aerr := applimits.ParseStored(raw)
+		if aerr != nil {
+			t.Fatalf("旧库形态（sql=%d）必须仍能读出：%v", storedSQL, aerr)
+		}
+		if floor := 4; got.SQLStatementBudgetSeconds != floor {
+			t.Fatalf("sql=%d 应抬到下限 %d（busy timeout 3 s 之上），得到 %d",
+				storedSQL, floor, got.SQLStatementBudgetSeconds)
+		}
+		if got.HostCallBudgetSeconds != 5 {
+			t.Fatalf("sql=%d：不得为了合法化而改动外层 host_call，得到 %d", storedSQL, got.HostCallBudgetSeconds)
+		}
+		if verr := got.Validate(); verr != nil {
+			t.Fatalf("sql=%d 合法化后必须合法：%v", storedSQL, verr.Message)
+		}
+	}
+
+	// ③ 边界（如实登记）：host_call ≤ busy timeout+1(=4) 时，"sql > 3"与"sql < host_call"
+	//    没有整数解 —— 唯一出路是把**外层**闸门放大，而那是本包明确拒绝的方向。
+	//    这种组合只能靠管理员刻意填出（默认值不会产生），因此仍判非法并点名 sql 字段；
+	//    上层会回落到档位并打出那条 warning —— 不是静默。
+	bad := oldLibraryWith(func(l *applimits.Limits) {
+		l.HostCallBudgetSeconds = 4
+		l.SQLStatementBudgetSeconds = 3
+	})
+	if _, aerr := applimits.ParseStored(bad.Encode()); aerr == nil {
+		t.Fatal("无合法解的旧组合（sql=3 / host_call=4）必须仍被判非法：合法化不得靠放大外层闸门")
+	} else if got := fmt.Sprint(aerr.Details["field"]); got != "sql_statement_budget_seconds" {
+		t.Fatalf("拒绝理由必须点名 sql_statement_budget_seconds，得到 %q（%s）", got, aerr.Message)
+	}
+}
+
+// TestConsolePutStaysStrictOnOldLibraryCombos：**写入路径不许跟着放宽**（FW-1 的另一半）。
+//
+// 读取路径为了不丢配置会把 5/5 合法化成 4/5，但控制台 PUT 走的是 Parse ——
+// 同一份 JSON 必须被**拒**，且点名 sql_statement_budget_seconds。否则"新写入的非法组合仍被
+// 挡住"这条承诺就没了：管理员可以再存一次 5/5，之后每次升级都靠读取路径的钳位兜着，
+// 而库里那条非法组合永远不会被纠正。
+//
+// 变异验证：把 Parse 改成也走 legalizeStored ⇒ 本用例前两个断言必红。
+func TestConsolePutStaysStrictOnOldLibraryCombos(t *testing.T) {
+	old := oldLibraryWith(nil) // host_call=5, sql=5
+	_, err := applimits.Parse(old.Encode())
+	if err == nil {
+		t.Fatal("控制台 PUT 必须仍拒绝 sql == host_call（写入路径不得合法化）")
+	}
+	if got := fmt.Sprint(err.Details["field"]); got != "sql_statement_budget_seconds" {
+		t.Fatalf("拒绝理由必须点名 sql_statement_budget_seconds，得到 %q（%s）", got, err.Message)
+	}
+	// 同一个"新规则"的另一半：sql 不大于 busy timeout 也必须被写入路径拒。
+	low := oldLibraryWith(func(l *applimits.Limits) { l.SQLStatementBudgetSeconds = 3 })
+	if _, err := applimits.Parse(low.Encode()); err == nil {
+		t.Fatal("控制台 PUT 必须仍拒绝 sql ≤ busy timeout(3 s)")
+	}
+	// 正控（有路可走）：只把 sql 调到 host_call−1，同一份对象必须能存 ——
+	// 证明拒的是那条序关系，不是"凡是旧对象一律拒"这种让管理员无路可走的更粗行为。
+	ok := oldLibraryWith(func(l *applimits.Limits) { l.SQLStatementBudgetSeconds = 4 })
+	if _, err := applimits.Parse(ok.Encode()); err != nil {
+		t.Fatalf("把 sql 调到 4（host_call−1）之后必须能保存：%v", err)
+	}
+}
+
+// TestParseStoredLogsLegalization：合法化必须留痕（钳位可接受，**静默**不可接受）。
+//
+// 为什么这条是判据而不是"日志锦上添花"：合法化之后，控制台显示的值（生效值）与
+// settings 表里存的值不再相同；没有这一行，运维只能看到"我设的 5 s 怎么变成 4 s 了"
+// 而无处可查。判据同时钉住字段名与原值→生效值（可检索），并带**负控** ——
+// 无需合法化时不得打这条日志（否则留痕退化成噪音，真出事时没人看）。
+func TestParseStoredLogsLegalization(t *testing.T) {
+	out := captureStdLog(t, func() {
+		if _, err := applimits.ParseStored(oldLibraryWith(nil).Encode()); err != nil {
+			t.Fatalf("旧库形态必须能读出：%v", err)
+		}
+	})
+	if !strings.Contains(out, "合法化") || !strings.Contains(out, "sql_statement_budget_seconds 5→4") {
+		t.Fatalf("必须留下可检索的合法化日志（含字段与原值→生效值），实得：%q", out)
+	}
+	quiet := captureStdLog(t, func() {
+		if _, err := applimits.ParseStored(applimits.Defaults().Encode()); err != nil {
+			t.Fatalf("默认值必须能读出：%v", err)
+		}
+	})
+	if strings.Contains(quiet, "合法化") {
+		t.Fatalf("无需合法化时不得打这条日志（否则留痕变成噪音）：%q", quiet)
+	}
+}
+
+// captureStdLog 抓取标准 logger 在 fn 期间写出的内容（fn 返回或 t.Fatal 退出都会还原）。
+//
+// 本文件的用例都不并行（没有 t.Parallel），所以临时替换标准 logger 的输出是安全的；
+// 每个包在独立进程里跑，也不会波及其它包。
+func captureStdLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	fn()
+	return buf.String()
+}
+
 // TestBudgetFollowsLimits：四笔账随限制项变化（不是常量）。
 func TestBudgetFollowsLimits(t *testing.T) {
 	const available = 992 << 20
@@ -454,6 +615,20 @@ func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
 		{"干跑大于 guest", func(l *applimits.Limits) { l.DryRunBudgetSeconds = l.GuestBudgetSeconds + 1 }, "dry_run_budget_seconds"},
 		{"宿主调用大于 guest", func(l *applimits.Limits) { l.HostCallBudgetSeconds = l.GuestBudgetSeconds + 1 }, "host_call_budget_seconds"},
 		{"单条 SQL 大于墙钟", func(l *applimits.Limits) { l.SQLStatementBudgetSeconds = l.RequestWallClockSeconds + 1 }, "sql_statement_budget_seconds"},
+		// S4-02：内层（单条 SQL）必须**严格小于**外层（宿主调用）。两条都列：
+		// 相等是最容易发生的形态（两个默认值曾经都是 5 s），大于则是"内层更长"。
+		{"单条 SQL 等于宿主调用", func(l *applimits.Limits) {
+			l.SQLStatementBudgetSeconds = l.HostCallBudgetSeconds
+		}, "sql_statement_budget_seconds"},
+		{"单条 SQL 大于宿主调用", func(l *applimits.Limits) {
+			l.SQLStatementBudgetSeconds = l.HostCallBudgetSeconds - 1
+			l.HostCallBudgetSeconds = l.SQLStatementBudgetSeconds - 1
+		}, "sql_statement_budget_seconds"},
+		{"宿主调用小于等于单条 SQL（只动外层）", func(l *applimits.Limits) {
+			// 反向改法：管理员只把宿主调用调小（SQL 保持默认 5 s）—— 同样必须被拒，
+			// 否则外层先到点、应用拿到 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED。
+			l.HostCallBudgetSeconds = l.SQLStatementBudgetSeconds
+		}, "sql_statement_budget_seconds"},
 		{"编译超时大于 ReadTimeout", func(l *applimits.Limits) {
 			l.CompileTimeoutSeconds = int(limits.ServerReadTimeout/time.Second) + 1
 		}, "compile_timeout_seconds"},
@@ -476,7 +651,19 @@ func TestBudgetValidateRejectsBrokenOrdering(t *testing.T) {
 	}
 
 	// 正控：默认值必须通过（否则上表全绿也可能只是"Validate 恒拒"）。
-	if err := applimits.Defaults().Validate(); err != nil {
+	//
+	// 再加一条**具体关系**的正控：默认组合必须满足内层严格小于外层（S4-02）。
+	// 只有"默认值合法"这一句时，把两个默认值都改回 5 s 也是绿的 —— 而那正是本次
+	// 要修的形态（相等 ⇒ 父 ctx 先到点、错误码指错方向）。
+	d := applimits.Defaults()
+	if d.SQLStatementBudgetSeconds >= d.HostCallBudgetSeconds {
+		t.Fatalf("默认组合必须满足 sql(%d s) < host_call(%d s)：内层不小于外层时语句超时永远被外层遮住",
+			d.SQLStatementBudgetSeconds, d.HostCallBudgetSeconds)
+	}
+	if d.HostCallBudgetSeconds > d.GuestBudgetSeconds {
+		t.Fatalf("默认 host_call(%d s) 不得大于 guest(%d s)", d.HostCallBudgetSeconds, d.GuestBudgetSeconds)
+	}
+	if err := d.Validate(); err != nil {
 		t.Fatalf("默认值必须合法：%v", err.Message)
 	}
 }
@@ -520,7 +707,9 @@ func TestBudgetRoundTripsThroughParse(t *testing.T) {
 	l.DryRunBudgetSeconds = 45
 	l.RequestWallClockSeconds = 90
 	l.SQLStatementBudgetSeconds = 10
-	l.HostCallBudgetSeconds = 8
+	// host_call 必须严格大于 sql（S4-02）⇒ 这条夹具用 12 而不是 8：8 < 10 会被
+	// Parse 直接拒（本用例断言的是"能存能读"，不是"非法组合也能存"）。
+	l.HostCallBudgetSeconds = 12
 	l.CompileTimeoutSeconds = 50
 	raw := l.Encode()
 	back, err := applimits.Parse(raw)
@@ -560,6 +749,16 @@ func TestBudgetFieldsAreClampedNotWidened(t *testing.T) {
 	}
 	if got.SQLStatementBudgetSeconds > got.RequestWallClockSeconds {
 		t.Errorf("单条 SQL(%d) 不得大于墙钟(%d)", got.SQLStatementBudgetSeconds, got.RequestWallClockSeconds)
+	}
+	// S4-02：内层严格小于外层，且**只向下钳内层**（不放宽宿主调用预算）。
+	if got.SQLStatementBudgetSeconds >= got.HostCallBudgetSeconds {
+		t.Errorf("单条 SQL(%d) 必须严格小于宿主调用(%d)：相等时父 ctx 先到点，应用拿不到 DB_DENIED",
+			got.SQLStatementBudgetSeconds, got.HostCallBudgetSeconds)
+	}
+	if got.HostCallBudgetSeconds != 30 {
+		// 60 → 30 是**既有**那条"宿主调用不得大于 guest"钳出来的（不是新规则放大的）：
+		// 新规则只允许向下收内层，不得为了满足序关系把外层抬上去。
+		t.Errorf("宿主调用预算被改动了（%d）：钳位只允许向下收内层，不得放宽外层", got.HostCallBudgetSeconds)
 	}
 	if got.CompileTimeoutSeconds > int(limits.ServerReadTimeout/time.Second) {
 		t.Errorf("编译超时(%d) 不得超过 ReadTimeout(%d s)", got.CompileTimeoutSeconds, int(limits.ServerReadTimeout/time.Second))

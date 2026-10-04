@@ -895,6 +895,12 @@ func UsageAggregate(db *sql.DB, from, to time.Time, group string, opts ...UsageA
 // 与北京差 8 小时,「今日/昨日」会整体错位;统一走 BeijingDay(唯一真源,
 // 见 beijing.go),不再依赖进程 TZ。边界用绝对瞬时参数(显式 UTC 偏移),
 // 也不再依赖 PG 会话时区(2026-09-10 时区缺陷修复)。
+//
+// day 允许是**北京日期值**(BeijingDay 的产物),也允许是**原始瞬时**
+// (如 time.Now(),Location = time.Local):两端各自由 dayStartArg /
+// dayEndArgInclusive 归一到北京日,窗口恒为 [北京日 00:00, 次日 00:00) 的 24h
+// (S1-A1:右边界此前在**接收者 Location** 的墙钟空间里 +1 天,DST 部署上会
+// 塌成 0h 或展成 48h)。
 func UserDayUsageCost(db *sql.DB, userID int64, day time.Time) (usage int64, cost float64, err error) {
 	rd, err := newUsageReadConn(db)
 	if err != nil {
@@ -947,6 +953,14 @@ func UserUsageSummary(db *sql.DB, userID int64) (*UsageSummary, error) {
 // userUsageSummaryAt 是 UserUsageSummary 的**可注入时刻**形态（判据要在指定时刻上跑：
 // 下面这处时区缺陷只在一年约 2 小时的窗口里出现，不可等待真实时钟）。
 //
+// 「今日」/「昨日」口径（两者同形，S1-A1 + R21F-03）：都先归一到**北京日**
+// 再交给 `UserDayUsageCost`。S1-A1（审计 2026-10，P1）修的是"同族只修了一半"：
+// 昨日已归一（R21F-03），今日却直传原始瞬时 `now`（`time.Now()`，Location =
+// `time.Local`），于是 `dayEndArgInclusive` 的墙钟 `AddDate` 在 DST 部署上把
+// 今日窗口压成空集（读 0）或展成 48h（翻倍）—— 右边界本体的修复在
+// `beijing.go` 的 `dayEndArgInclusive`，这里补的是调用点的口径对称（纵深防御：
+// 即使右边界实现回退，归一后的入参也不会踩到墙钟位移）。
+//
 // 「昨日」口径（R21F-03，审计 2026-09-26，P2）：先归一到**北京日**再减一天。
 //
 // 为什么不能写 `now.AddDate(0,0,-1)`（修前形态）：`AddDate` 加/减的是 **time.Local 的
@@ -979,7 +993,7 @@ func userUsageSummaryAt(db *sql.DB, userID int64, now time.Time) (*UsageSummary,
 	if s.MonthlyCost, err = UserMonthlyCost(db, userID); err != nil {
 		return nil, err
 	}
-	if s.TodayUsage, s.TodayCost, err = UserDayUsageCost(db, userID, now); err != nil {
+	if s.TodayUsage, s.TodayCost, err = UserDayUsageCost(db, userID, BeijingDay(now)); err != nil {
 		return nil, err
 	}
 	yesterday := BeijingDay(now).AddDate(0, 0, -1)

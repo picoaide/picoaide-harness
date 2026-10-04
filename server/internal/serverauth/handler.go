@@ -54,15 +54,6 @@ type API struct {
 	// loginIPLimiter + loginIPMaxAttempts)。每 API 实例专属,因此键里不需要
 	// dbLimiterScope(见 oidcFlowBudgetKeyForHost)。
 	oidcFlowLimiter *loginLimiter
-	// oidcFlowCapacity 是**因平台自身容量被拒**的流程启动计数(2026-09-23 R6-A-4)。
-	//
-	// 与 oidcFlowLimiter 的分工:那个桶记的是**真实失败**(凭证/协议/配置错误),
-	// 这个计数记的是"平台自己的闸门说不"(在途流程表满 / 单来源 IP 在途配额满)。
-	// 两者必须分开:容量拒绝不是攻击证据,把它算进失败预算会让一个 NAT 出口在
-	// 登录潮里自我强化成 5 分钟全组织 SSO 封锁 —— 详见 oidc.go 的
-	// recordFlowCapacityRejection。计数经 OIDCFlowCapacityRejections() 读,
-	// 供探针/运维区分"被限流"与"平台容量到顶"这两种完全不同的处置。
-	oidcFlowCapacity atomic.Int64
 
 	mu               sync.RWMutex
 	providers        map[string]PasswordProvider
@@ -129,17 +120,40 @@ func New(db *sql.DB) *API {
 	}
 }
 
-// OIDCFlowCapacityRejections 返回**因平台自身容量**被拒的 OIDC 流程启动次数
-// (在途流程表满 + 单来源 IP 在途配额满,2026-09-23 R6-A-4)。
+// oidcFlowCapacityRejections 是**因平台自身容量被拒**的流程启动计数
+// (2026-09-23 R6-A-4；S3-05 起是**进程级**单例)。
 //
-// 它**不是**失败预算的一部分(失败预算见 oidcFlowLimiter):两个数放在一起看,
-// 才能区分"这个出口在暴力尝试"(失败预算涨)与"这个出口的合法登录潮把平台容量
-// 打满"(本计数涨)。处置完全不同:前者要拦,后者要扩容或提示稍后重试。
+// 与 oidcFlowLimiter 的分工:那个桶记的是**真实失败**(凭证/协议/配置错误),
+// 这个计数记的是"平台自己的闸门说不"(在途流程表满 / 单来源 IP 在途配额满)。
+// 两者必须分开:容量拒绝不是攻击证据,把它算进失败预算会让一个 NAT 出口在
+// 登录潮里自我强化成 5 分钟全组织 SSO 封锁 —— 详见 oidc.go 的
+// recordFlowCapacityRejection。
+//
+// 为什么是进程级而不是每 API 实例一个字段(S3-05,审计 2026-10-04,P2):
+// 它是**运维读数**(与 `serverstore.BalanceAdmissionStats()` 同类),生产只有一个
+// API 实例,而"每实例一个计数"会让读它的运维面必须持有那个实例 —— 这正是修前
+// 的缺陷形态:计数有、`OIDCFlowCapacityRejections()` 也有,但**没有任何生产读者**
+// (注释却写着"供运维/探针读")。现在唯一读者是 `handleServerInfo`(见 sysinfo.go
+// 的 `oidc.capacity_rejections`),判据见
+// audit_s3_05_oidc_capacity_ops_surface_test.go。
+//
+// 新增包级单例的纪律(见 ratelimit_isolation_test.go):必须挂进
+// resetSharedLimitersForTest —— 否则跨用例累积会让判据假红。
+var oidcFlowCapacityRejections atomic.Int64
+
+// OIDCFlowCapacityRejections 返回进程级的容量拒绝计数(唯一真源)。
+//
+// 生产读者:`GET /api/server/admin/server-info` 的 `oidc.capacity_rejections`
+// (与失败预算并排看,才能区分"这个出口在暴力尝试"与"它的合法登录潮把平台容量
+// 打满"—— 处置分别是拦截与扩容)。
+func OIDCFlowCapacityRejections() int64 {
+	return oidcFlowCapacityRejections.Load()
+}
+
+// OIDCFlowCapacityRejections 是**包级函数的薄委托**(语义完全相同,只提供一个
+// 实例句柄形态的调用点,包内的 OIDC 流程判据用它)。
 func (a *API) OIDCFlowCapacityRejections() int64 {
-	if a == nil {
-		return 0
-	}
-	return a.oidcFlowCapacity.Load()
+	return OIDCFlowCapacityRejections()
 }
 
 // SetEnabledProviders records the client-facing provider set (auth.enabled).
@@ -506,9 +520,10 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误")
 		return
 	}
-	// 认证成功即清空该账号的失败预算。
-	a.loginSucceeded(c, req.Username)
-
+	// S3-03(审计 2026-10-04,P2):这里**不得**清桶。此前 `loginSucceeded` 就放在这一行,
+	// 而"账号已禁用 / 审计账号 / 身份冲突 / 签发失败"四个拒绝分支都在它**之后** ——
+	// 于是一个密码正确但根本登不进来的凭证也能把该来源 IP 的失败预算洗掉。清桶统一
+	// 挪到下方"登录真的完成"之后(唯一调用点)。
 	user, err := a.provisionUser(ui)
 	if errors.Is(err, serverstore.ErrIdentityConflict) {
 		// P2-9:同名但 IdP 主体不同 —— 明确的认证失败(不泄露对方身份细节),
@@ -539,6 +554,10 @@ func (a *API) handleLogin(c *gin.Context) {
 		writeTokenIssueError(c, err)
 		return
 	}
+	// S3-03:到这里"本次登录确实成功且账号可用"才成立 —— 清该账号的失败预算,并把
+	// 本次尝试占用的那一格 IP 预算归还(整键清空会让人用"59 次错密 + 1 次成功"洗掉
+	// IP 维度的 argon2 放大防护;见 ratelimit.go 的 loginSucceeded / refund)。
+	a.loginSucceeded(c, user.Username)
 	// v3b 审计: 登录成功留痕。
 	_ = serverstore.AuditLog(a.DB, user.Username, "login_success", "ip="+c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{

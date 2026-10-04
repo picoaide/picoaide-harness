@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/wasmapp/apperr"
@@ -140,7 +141,10 @@ func limitsPutBody() map[string]any {
 		"instance_memory_mb": 64, "module_cache_mb": 96, "module_cache_idle_min": 12,
 		"appdb_idle_min": 5, "appdb_cache_kib": 2048, "app_db_readers": 6,
 		// 时间预算（2026-10-01 新增；"必须提交完整对象"⇒ 夹具也要带齐）。
-		"guest_budget_seconds": 30, "dry_run_budget_seconds": 30, "host_call_budget_seconds": 5,
+		// host_call 必须**严格大于** sql（S4-02 的保存期序关系），所以这里写 10 而不是
+		// 与 sql 同值的 5 —— 夹具一旦写成非法组合，整个 PUT 会被 400 拒掉，
+		// 而下面那些用例会以"看不出跟预算有关"的形态失败。
+		"guest_budget_seconds": 30, "dry_run_budget_seconds": 30, "host_call_budget_seconds": 10,
 		"request_wall_clock_seconds": 60, "sql_statement_budget_seconds": 5, "compile_timeout_seconds": 60,
 	}
 }
@@ -433,5 +437,40 @@ func TestAdminLimitsPutEnvelopeFieldIsDeterministic(t *testing.T) {
 	}
 	if _, ok := seen["alpha"]; !ok {
 		t.Fatalf("field 应为排序后的第一个未知键 alpha，得到 %v", seen)
+	}
+}
+
+// TestDryRunBudgetsCarryEffectiveBudgets 是 S4-01 在**干跑路径**上的接线判据。
+//
+// 为什么需要（而不是靠 appserver 那条）：发布链路与执行链路是两处独立的
+// runtime.Request 构造点，只接一条就正是 S4-01 的缺陷形态（"能力有、调用路径没接线"）。
+// 干跑的能力面为空 ⇒ 宿主调用预算今天不会被触发，所以这里只能钉"传进去的就是当前
+// 生效值"（值 + 能被 runtime 的 HostBudget 取到），运行期那一半由 runtime 包的
+// TestServe_GeneralHostCallBudgetIsEnforced 覆盖。
+//
+// 变异验证（实跑）：把 dryRunBudgets 的 HostCallBudget 一行删掉 ⇒ 本用例红。
+func TestDryRunBudgetsCarryEffectiveBudgets(t *testing.T) {
+	l := applimits.Defaults()
+	// 取一组**非默认**的合法组合：宿主调用必须严格大于单条 SQL（S4-02）。
+	l.HostCallBudgetSeconds = 7
+	l.SQLStatementBudgetSeconds = 4
+	if aerr := l.Validate(); aerr != nil {
+		t.Fatalf("这组必须是合法组合：%v", aerr.Message)
+	}
+
+	got := dryRunBudgets(l)
+	if got.HostCallBudget != l.HostCallBudget() {
+		t.Fatalf("干跑的宿主调用预算必须是当前生效值 %s，得到 %s", l.HostCallBudget(), got.HostCallBudget)
+	}
+	if got.GuestBudget != l.DryRunBudget() {
+		t.Fatalf("干跑的 guest 预算必须是当次生效值 %s，得到 %s", l.DryRunBudget(), got.GuestBudget)
+	}
+	// 真取一次（不是只看字段）：值必须落到 runtime 的预算解析里。
+	if budget := got.HostBudget("db.query"); budget != 7*time.Second {
+		t.Fatalf("db.query 的生效宿主预算应为 7s，得到 %s", budget)
+	}
+	// 默认组合也要走同一条路（否则"默认值下干跑与执行分叉"会静默）。
+	if d := dryRunBudgets(applimits.Defaults()); d.HostBudget("db.query") != applimits.Defaults().HostCallBudget() {
+		t.Fatalf("默认组合下干跑的宿主预算与生效值不一致：%s", d.HostBudget("db.query"))
 	}
 }

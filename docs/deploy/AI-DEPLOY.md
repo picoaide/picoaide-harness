@@ -235,7 +235,7 @@ unzip -p /tmp/pa.zip image.tar | docker load
 照本文档敲 `docker run ${IMAGE}:${VER}` 会去 docker.io 拉取而在隔离网/镜像代理下 403）。
 
 > **同一台机器上跑多个渠道栈时**：上面两个 tag 在**所有渠道的包**里都相同，后 `docker load`
-> 的会覆盖先前的。2026-09-23 起每个渠道的归档里还带一个渠道专属 tag
+> 的会覆盖先前的。`v2.8.2-beta.1`（2026-09-24）起每个渠道的归档里还带一个渠道专属 tag
 > `picoaide-harness-server:<channel-id>-<VER>` —— 多栈宿主机必须按它隔离，步骤见 §6.5.1。
 
 > **下载慢（跨境）**：实测单流 75–260 KB/s（616MB ≈ 40–90 分钟），**8 路并行分块可到
@@ -519,52 +519,80 @@ docker compose up -d
 - 服务端启动时会校验「镜像内渠道 vs 进程渠道」，**不一致会拒绝启动**；但若两栈的渠道
   覆盖都没写，就可能"起得来、内容却是错的"。
 
-CI（2026-09-23 起）为每个渠道**额外**打一个渠道专属 tag
+CI（`v2.8.2-beta.1` 起，2026-09-24）为每个渠道**额外**打一个渠道专属 tag
 `picoaide-harness-server:<channel-id>-<VER>` 并一并 `docker save`（official / beta /
-各定制渠道都有）。导入本渠道的包之后：
+各定制渠道都有）。**归档里三个 tag 都指向新镜像，`docker load` 会一并恢复** —— 所以升级
+**不需要重打任何 tag**，把 `.env` 指向渠道 tag 再重建容器即可：
 
 ```bash
 VER=<本次版本,不带 v>
+OLD=<升级前版本,不带 v>
 IMAGE=picoaide-harness-server
+CHANNEL=<本栈渠道 id>          # ← 与镜像内烘焙的渠道标记一致
 STACK=/opt/picoaide            # ← 本栈部署目录
 CT=picoaide-server             # ← 本栈 server 容器名
+
+# 0) 把**升级前正在跑的**镜像固化成回滚锚点 —— 这是"运行中容器"唯一正当的用途：
+#    它此刻代表的是**旧版本**，所以只能记成**旧版本**的渠道 tag。
+#    ⚠️ 变量名不要用 GID / UID —— 远端 shell 是 zsh 时它们是只读特殊变量，
+#    赋值会报 "bad math expression"。
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # 先确认这一栈此刻跑的确实是本渠道
+ROLLBACK_IMAGE_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$ROLLBACK_IMAGE_ID" "${IMAGE}:${CHANNEL}-${OLD}"
 
 # 1) 导入本渠道的包（两栈各 load 自己渠道的包）
 unzip -p /tmp/pa.zip image.tar | docker load
 
-# 2) 按**本栈正在运行的容器**取 image id，重打成渠道专属 tag。
-#    「正在运行的容器」是权威判据：它拿到的就是这一栈此刻真正在用的那份镜像。
-#    ⚠️ 变量名不要用 GID / UID —— 远端 shell 是 zsh 时它们是只读特殊变量，
-#    赋值会报 "bad math expression"。
-IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
-docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+# 2) 取**刚导入的新镜像**的 id：只认渠道 tag（它带渠道+版本，只有本渠道的归档会写它）
+NEW_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}:${CHANNEL}-${VER}")"
+test -n "$NEW_IMAGE_ID"
+test "$NEW_IMAGE_ID" != "$ROLLBACK_IMAGE_ID"       # 新旧必须是两份不同的镜像
+# 再确认这个 tag 指向的确实是"本渠道 + 本次版本"的镜像
+docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+  "${IMAGE}:${CHANNEL}-${VER}"                     # 应等于 ${VER}
+docker run --rm --entrypoint cat "${IMAGE}:${CHANNEL}-${VER}" /opt/picoaide/CHANNEL   # 应等于 ${CHANNEL}
 
 # 3) 把本栈 .env 指向**渠道 tag**（不要留裸 `v<VER>`：同机两栈时它随时可能指向隔壁）
 cd "$STACK"
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
-grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}" >> .env
 docker compose up -d server
 
-# 4) 核对"这一栈跑的确实是本渠道"（三项一致才算过）
-docker exec "$CT" cat /opt/picoaide/CHANNEL          # 镜像内置的渠道标记
-docker exec "$CT" /app/picoaide-server --version     # 运行版本 == 目标版本
-curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 应与上面一致
+# 4) 断言"这一栈跑的确实是本渠道的新版本"（五项全过才算过）
+ENV_TAG="$(sed -n 's/^SERVER_IMAGE=//p' .env)"
+test "$(docker image inspect --format '{{.Id}}' "$ENV_TAG")" = "$NEW_IMAGE_ID"   # .env 的 tag 指向新镜像
+docker inspect "$CT" --format '{{.Image}}'           # == $NEW_IMAGE_ID ← 最关键的一条
+docker exec "$CT" /app/picoaide-server --version     # == 目标版本（看二进制自报，不看 tag）
+docker exec "$CT" cat /opt/picoaide/CHANNEL          # == $CHANNEL
+curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 与上面一致
 ```
 
-**首次部署（还没有运行中的容器）**：`docker load` 之后**立刻**按刚导入的 tag 取 id 再重打，
-不要等另一栈先动手：
+> **为什么不能按"运行中的容器"取 id 去贴新版本 tag**（2026-09-23 之前的文档这么写，是静默故障）：
+> 切换容器的动作在第 3 步，所以第 2 步 `docker inspect "$CT"` 拿到的是**升级前**那份镜像的 id。
+> 拿它 `docker tag` 到 `${IMAGE}:${CHANNEL}-${VER}`，等于把**旧镜像**改名为"新版本的渠道 tag"，
+> 并**覆盖掉归档刚恢复的正确 tag**；随后 `.env` 指向该 tag、`docker compose up -d` 又从同一个
+> image id 重建 ⇒ 容器还是升级前那份，而 tag 与 `.env` 都声称新版本，**且回滚锚点被污染**
+> （"新版本"标签落在旧镜像上）。全过程零报错，只有第 4 步的 image id / `--version` 断言能发现。
 
-```bash
-docker load -i image.tar                        # 或 unzip -p /tmp/pa.zip image.tar | docker load
-IMG_ID="$(docker inspect --format '{{.Id}}' ${IMAGE}:${VER})"
-docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
-# 然后 .env 写 ${IMAGE}:<channel-id>-${VER}
-```
+> **裸 tag `${IMAGE}:${VER}` 与 `${IMAGE}:v${VER}` 不能用来判定"我刚导入的是哪个镜像"**：
+> 它们在所有渠道的归档里**完全相同**，同机第二个渠道栈 `docker load` 会**覆盖**它们（实测：
+> 覆盖后 `docker image inspect` 不报错，只是给出**别渠道**镜像的 id）。刚 load 完的那一瞬间它们
+> 确实指向新镜像，但"另一栈随后 load"就足以让这个等式失效 —— 只有 `<channel-id>-<VER>` 是
+> 每个渠道独有的名字。
 
-**回滚同理**：回滚锚点要留**渠道 tag**（`<channel-id>-<旧版本>`），回滚 = 改 `.env` +
-`docker compose up -d server`。若曾经按裸 `v<旧版本>` 留过锚点，同机多栈时它可能已经
-指向另一个渠道的镜像 —— 回滚前先 `docker image inspect` 核对，必要时从更新服务器重新
-`docker load` 该渠道包再重打渠道 tag。
+**旧包退路（`v2.8.2-beta.1` 之前的归档，即 2026-09-24 之前，内部不带渠道 tag）**：`docker load` 之后**立刻**用裸 tag 取 id
+（`NEW_IMAGE_ID="$(docker image inspect --format '{{.Id}}' ${IMAGE}:${VER})"`），并当场核对镜像里
+烘焙的渠道（`docker run --rm --entrypoint cat ${IMAGE}:${VER} /opt/picoaide/CHANNEL` 应等于
+`${CHANNEL}`；2026-09-10 起的镜像都有这个文件），核对通过再
+`docker tag "$NEW_IMAGE_ID" "${IMAGE}:${CHANNEL}-${VER}"`。**不要**等别的栈先动手 —— 裸 tag
+随时可能被它覆盖。
+
+**首次部署（还没有运行中的容器）**：没有第 0 步（没有旧镜像要固化），第 1–4 步照做即可。
+
+**回滚同理**：回滚锚点按第 0 步固化成**渠道 tag**（`${IMAGE}:${CHANNEL}-${OLD}`）之后，回滚 =
+改 `.env` + `docker compose up -d server`。若曾经按裸 `v<旧版本>` 留过锚点，同机多栈时它可能已经
+指向另一个渠道的镜像 —— 回滚前先 `docker image inspect` 核对 id / `RepoTags`，必要时从更新服务器
+重新 `docker load` 该渠道包再固化渠道 tag。
 
 
 ### 6.6 升级后验证（三项全过才算成功）
@@ -614,8 +642,26 @@ docker compose ps                           # 三容器 Up
 
 ### 7.1 一般迁移（只加列 / 只建表）
 
-回滚镜像后数据库结构仍是新的，但旧二进制不引用新列，通常可以只换镜像。
-按下面 §7.2 的脚本执行即可（第 3/4 步只在数据被破坏时才做）。
+**同代**回滚（新旧二进制可见的迁移集合完全相同）可以只换镜像：库结构仍是新的，但旧二进制
+不引用新列。按下面 §7.2 的脚本执行即可（第 3/4 步只在数据被破坏时才做）。
+
+**跨代**回滚（库比二进制**新**）**不能只换镜像** —— 见紧随其后的行为变更：启动期会 fail-loud
+（`SchemaMismatchError`），此时要么按 §7.2 的四步顺序（**先停服 → 恢复 `pg_dump` → 再回退镜像**），
+要么走下面那条更轻的同等路径（本节这一类迁移适用时）。
+
+> **只加列 / 只建表这一类迁移还有一条更轻的同等路径**（各迁移文件的头部记的就是它）：把
+> `schema_migrations` 里那一行删掉，库与二进制就重新"同代"，再换镜像即可 —— **不恢复 `pg_dump`、
+> 不丢升级后写入的数据**。适用条件两条：① 该迁移**可回滚**（只加列/只建表；删除表或改写存量数据的
+> 迁移不适用，例如 §7.2 的 `0073`/`0074`）；② 你接受"库结构保留新列"。连接上下文（容器名/用户名/
+> 库名用**你自己部署里的取值**，下面是占位符）：
+>
+> ```bash
+> docker exec -i <pg-container> psql -U <db-user> -d <db-name> \
+>   -c 'DELETE FROM schema_migrations WHERE version = <NNNN>;'
+> ```
+>
+> 走哪条路由你按本节判断；**两条路都不允许"只改 `SERVER_IMAGE` 就重启"**（那正是上面那句"不能
+> 只换镜像"要拦的形态）。前滚（重新升回新版本）时那一行会被自动补回并回填内容摘要。
 
 > **2026-09-25（第十三轮审计）起的行为变更：迁移集合现在是「双向」判据。**
 > `ApplyMigrations` 除了「目录里的迁移都应用了」，还要求**库里没有目录中不存在的版本**
@@ -631,15 +677,19 @@ docker compose ps                           # 三容器 Up
 本线含 **`0073`（`DROP TABLE app_sessions, employee_sessions` —— 这两张表已删除，不可恢复）** 与
 **`0074`（把存量 `access='public'` 改写为 `login`）**，这两条**不可逆**。正确回滚顺序：
 
+> **下面这四步（连编号顺序）就是 §7.1 引用的"四步顺序"，对任何跨代回滚都适用**；本节标题里这条
+> 版本线只是最早需要它的那一批（含不可逆迁移）。逐版的发布说明指向 §7 时，指的就是这四步。
+
 1. **停服**（先让客户端停止写入，再 `docker compose stop server`）；
 2. **恢复升级前的 `pg_dump`**（§6.3 的 `deploy-backup/pg-data-<TS>.dump`）；
 3. **回退镜像**（改回上一版 `SERVER_IMAGE` tag）；
 4. **客户端重装/回退到与镜像同版本的客户端**（旧客户端打不开应用）。
 
-⚠️ **只回退镜像会坏**：旧二进制会继续按旧路径查询两张已被删除的表，逐请求报
-**`42P01`（`undefined_table`）**；而迁移器只跳过"已应用"的版本号，**启动期不报错** ——
-症状是服务能起来、健康检查通过，但应用相关请求运行期 500。只有 `v2.7.5` 线（不含本版迁移）
-才允许只回退镜像。
+⚠️ **只回退镜像会坏**：**没有双向对账判据的旧二进制**（`v2.8.1` 及更早）会继续按旧路径查询
+两张已被删除的表，逐请求报 **`42P01`（`undefined_table`）**；而迁移器只跳过"已应用"的版本号，
+**启动期不报错** —— 症状是服务能起来、健康检查通过，但应用相关请求运行期 500。
+（2026-09-25 起带双向对账的二进制反过来：跨代回滚在**启动期**就被拒，见 §7.1 上方的行为变更。）
+只有 `v2.7.5` 线（不含本版迁移）才允许只回退镜像。
 
 > **无降级通道**：本版不提供"新旧访问模型并存"的开关，也不支持把服务端降回旧访问模型；
 > 回滚到旧版本必须连同数据库备份与客户端一起回退。
@@ -648,15 +698,20 @@ docker compose ps                           # 三容器 Up
 cd /opt/picoaide
 OLD=<升级前的版本>
 IMAGE=picoaide-harness-server
+CHANNEL=<本栈渠道 id>          # ← 与镜像内烘焙的渠道标记一致（见 §6.5.1）
 
-# 1) 切回旧镜像
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${OLD}|" .env
+# 1) 切回旧镜像 —— 用 §6.5.1 第 0 步固化出来的**渠道 tag**（回滚锚点就是那一个）
+#    ⚠️ 不要写裸 `${IMAGE}:${OLD}`：同机两栈时那个裸 tag 可能已被别渠道的 `docker load`
+#    覆盖，而 compose 的 PICOAI_CHANNEL 缺省为空 ⇒ 这一栈会以**别渠道**的品牌静默起来。
+docker image inspect --format '{{.Id}} {{.RepoTags}}' "${IMAGE}:${CHANNEL}-${OLD}"   # 锚点必须存在
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${OLD}|" .env
 docker compose up -d
 
-# 2) 验证旧版本健康
+# 2) 验证旧版本健康（版本 + 渠道两面）
 DOMAIN=$(grep '^DOMAIN=' .env | cut -d= -f2-)
 curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/healthz"
 docker exec picoaide-server /app/picoaide-server --version      # 应等于 OLD
+docker exec picoaide-server cat /opt/picoaide/CHANNEL           # 应等于 $CHANNEL（防静默换品牌）
 echo "$OLD" > VERSION
 
 # 3) 仅当应用数据被破坏时才恢复（会丢数据，需用户确认）
@@ -670,6 +725,12 @@ echo "$OLD" > VERSION
 #   < deploy-backup/pg-data-<TS>.dump
 # docker compose start server
 ```
+
+> **回滚锚点只有渠道 tag 是安全的。** 裸 `${IMAGE}:${OLD}` 只在**单栈**机器上可用（没有别的渠道会
+> `docker load` 去覆盖它）。若当初没在第 0 步固化渠道 tag（例如从 `v2.8.2-beta.1` 之前的归档升级），
+> 同机还有别的渠道栈时先 `docker image inspect` 核对它的 `RepoTags` 与镜像内烘焙的
+> `/opt/picoaide/CHANNEL`，必要时从更新服务器重新 `docker load` 该渠道的旧包再固化渠道 tag
+> （见 §6.5.1 的「旧包退路」）。
 
 **回滚 3)/4) 会让升级后产生的数据丢失，执行前必须获得用户明确同意。**
 
