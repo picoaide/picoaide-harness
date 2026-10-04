@@ -26,7 +26,7 @@
  */
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createOAuthProvider } from '../src/mcp-oauth-provider.ts'
 import { createMcpOutboundFetch, ensureMcpTransportRedirectFence } from '../src/mcp-transport-fence.ts'
@@ -50,6 +50,43 @@ vi.mock('../src/pinned-http.ts', async (importOriginal) => {
     sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
   }
 })
+
+/**
+ * RESOLUTION seam (`node:dns/promises`) — the sibling of the connection seam
+ * above, and the same shape as `tests/oauth-outbound.spec.ts`.
+ *
+ * The CN-2 case drives the real SDK into `executeTokenRequest` for the
+ * definition's `tokenUrl` (`https://idp.example.com/token`), and our transport
+ * fence runs the outbound resolution gate on the way out. Without a seam the
+ * gate judges whatever the RUNNER's resolver answers for that name — and the two
+ * environments disagree: CI answers `getaddrinfo ENOTFOUND`, so the gate refuses
+ * fail-closed, while this repo's fake-IP dev box answers `198.18.x`, which the
+ * gate ALLOWS, so the request with the victim refresh token would really leave
+ * the process. The case's own assertions are about the LOCAL hostile server, so
+ * neither outcome was asserted and the dependency stayed invisible.
+ *
+ * The injected answer is RFC 1918: the gate refuses it by POLICY, before a byte
+ * leaves the process, in every environment (this is the CN-9 rule applied to a
+ * name this file reaches indirectly). Per-call `resolve` options — the CN-9 case
+ * in this file — still take precedence over this module default.
+ */
+const dnsSeam = vi.hoisted(() => ({ resolutions: [] as string[] }))
+
+vi.mock('node:dns/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns/promises')>()
+  return {
+    ...actual,
+    lookup: async (hostname: string, options?: { all?: boolean }) => {
+      dnsSeam.resolutions.push(String(hostname))
+      return options?.all === true
+        ? [{ address: '10.0.0.5', family: 4 }]
+        : { address: '10.0.0.5', family: 4 }
+    },
+  }
+})
+
+/** Per-case accounting: the count below must describe THIS case, not the file. */
+beforeEach(() => { dnsSeam.resolutions.length = 0 })
 
 
 interface Hit {
@@ -356,6 +393,11 @@ describe('CN-2 (provider invariant): no discovery facts ⇒ no refresh token is 
     await drive(transport)
     expect(hits.filter(hit => hit.url === '/token'), 'the MCP-named token endpoint must receive nothing').toHaveLength(0)
     expect(hits.filter(hit => hit.body.includes('VICTIM-REFRESH'))).toHaveLength(0)
+    // The SDK really did reach the token endpoint, and it was the injected
+    // resolver (not the runner's) that the fence judged: without this the
+    // deterministic seam can rot into dead code and the case silently goes back
+    // to depending on the machine's DNS.
+    expect(dnsSeam.resolutions, 'the fence must have resolved the definition token endpoint').toContain('idp.example.com')
   })
 })
 
