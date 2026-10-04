@@ -663,6 +663,31 @@ jobs:
             exit 1
           }
           echo "OK: docs/releases/${GITHUB_REF_NAME}.md"
+      # 发布说明的**迁移清单判据**(2026-10-05 接线;E-01/E-02 的防再犯判据)。
+      #
+      # 现场:`v2.8.2-beta.2.md` 逐字写着"本版无新增迁移"+“回滚只需要换回上一版镜像”，
+      # 而 `0082_report_subscription_retry.sql` 恰恰是**那一版**引入的;`beta.1.md` 把两条
+      # 迁移写成一条。`docs/releases/**` 是 `check-migration-range.mjs` 的记录面豁免 ⇒
+      # 这件事在结构上落在所有既有守卫的判据面之外,所以它单独立一条判据。
+      #
+      # **为什么只在 tag 上跑**(两层理由,**第二层才是真障碍**):
+      #   ① 判据的输入是"区间两端的 tag",分支/PR 上没有语义(不是 tag 时脚本打印跳过理由并
+      #      exit 0,不是 exit 2);
+      #   ② 链尾那一版的 tag 要到**发版提交之后**才存在 ⇒ 放进 PR 期的根守卫会在发布 PR 上
+      #      因"取不到 tag"而红。(`fetch-depth` 不是障碍:本 job 的 checkout 已是 depth 0,
+      #      同 job 的 `ci-release-topology.sh` 就靠本地 `refs/tags/` 枚举。)
+      # 「是不是发布 tag」与上一步同源(`ci-release-policy.sh` 的 `release_kind`),不写第二份
+      # 名字形状判据;脚本内部另按 `GITHUB_REF` 的形态(`refs/tags/*`)做最终判定。
+      # 先 `--self-test`(分类器 + 三条正文判据的固定样本),再真判 —— 判据本体被改坏时整步红。
+      # 静态接线判据:`scripts/check-workflows.mjs` 的 REGISTERED_RELEASE_STEPS([SK-15]:
+      # 步骤被删/改名、`if:` 被改、continue-on-error、命令位不再真的执行本脚本,都会红)。
+      - name: Release notes declare the migrations this tag introduces
+        if: steps.release_policy.outputs.release_kind != 'none'
+        run: |
+          set -euo pipefail
+          export PATH="${{ steps.frozen-launchers.outputs.path }}"
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-release-notes-migrations.mjs --self-test
+          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-release-notes-migrations.mjs
       # 顺序约束(2026-09-06 实测):setup-node@v7 默认 enable-corepack: false
       # 且会重排 PATH——corepack enable 必须在 setup-node 之后执行,否则
       # Windows 上 yarn shim 被覆盖,install 落到全局 Yarn 1.22(实测报错)。

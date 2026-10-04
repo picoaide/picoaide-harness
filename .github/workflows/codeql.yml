@@ -15,8 +15,25 @@
 #   - 触发：master 的 push、所有 PR、每周一次（原为 weekly）。
 #
 # 注意：package 分析需要 `security-events: write`；fork PR 的 token 只有只读权限，
-# 因此分析结果不上传（与 GitHub 官方模板同样的处理：给 analyze 步骤加 continue-on-error
-# 会把真实失败也吞掉，所以这里用 job 级 if 明确跳过 fork，而不是吞错）。
+# 因此分析结果无法上传。
+#
+# **fork PR 上的覆盖是零 —— 这里据实写明（2026-10-04 审计 D-01）**：
+# 下面 `analyze` 的 job 级 `if` 会让 **4 个 `Analyze (<lang>)` 在 fork PR 上全部被跳过**，
+# 于是 fork PR 可以在**零 CodeQL 查询**的情况下合并 —— 覆盖不是"被保留"，只是被**推迟到
+# 合并之后**：合并进 master 的那次 `push` 才会扫到它，告警出现时代码已经在主线上了。
+#
+# **机制别写错（2026-10-04 实时 API 采样）**：`Analyze (…)` **不在** master 分支保护的
+# 必需检查里 —— 必需检查只有 5 条（Gate (tests + workspace build) / Go server /
+# Desktop (Linux) / Desktop (Windows installer) / Desktop (macOS)），`rulesets` 与
+# `rules/branches/master` 都是空。所以本仓**不存在**"skipped 的必需检查被记成成功"这条
+# 机制（那是别的仓库可能踩的坑）：风险就是**覆盖缺口本身**，与合入门槛无关。
+# 采样命令见 `docs/decisions/2026-10-04-codeql-fork-pr-coverage.md` 的「复核方式」。
+#
+# 这是**有意的成本取舍**（不在 fork PR 上跑分析器），不是"不静默吞错"就等价于"覆盖还在"。
+# 风险与接受理由登记在 `docs/decisions/2026-10-04-codeql-fork-pr-coverage.md`。
+# 要真正恢复 fork PR 的覆盖只有一条路：改成两段式（`pull_request` 段只做分析并把 SARIF
+# 落 artifact，`workflow_run` 段用 base 仓的写权限上传）——那是另一笔成本，本文件不承担。
+# 给 analyze 步骤加 `continue-on-error` 会把真实失败也吞掉，所以这里用 job 级 `if` 明确跳过。
 name: CodeQL
 
 on:
@@ -33,8 +50,12 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    # fork PR：GITHUB_TOKEN 不带 security-events: write，上传必然失败 —— 明确跳过，
-    # 由合并到 master 后的 push 分析覆盖（不静默吞错）。
+    # fork PR：GITHUB_TOKEN 不带 security-events: write，上传必然失败 ⇒ 明确跳过。
+    # **代价（不要读成"覆盖还在"）**：fork PR 上这 4 个 Analyze 全部 skipped ⇒ fork PR 可在
+    # 零 CodeQL 覆盖下合并，只有合并后的 master push 会补扫（事后）。**本 job 名不在 master
+    # 的必需检查里**（2026-10-04 实时采样：必需检查 5 条，不含 Analyze）⇒ 风险是**覆盖缺口
+    # 本身**，不是"skipped 被当成成功"。取舍与接受理由见文件头与
+    # `docs/decisions/2026-10-04-codeql-fork-pr-coverage.md`。
     if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-24.04
     timeout-minutes: 45

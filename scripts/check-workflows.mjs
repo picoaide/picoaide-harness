@@ -456,9 +456,41 @@ const BLOCK_ERREXIT_ALLOWLIST = [
   },
 ]
 
-const SELFTEST_MIN_SAMPLES = 30
+const SELFTEST_MIN_SAMPLES = 43
 /** 必须被策略报出来的红样本下限(与上一条同口径)。 */
-const SELFTEST_MIN_RED_SAMPLES = 20
+const SELFTEST_MIN_RED_SAMPLES = 29
+/**
+ * `SELFTEST_REQUIRED_SAMPLES`（定向样本存在性登记）的**条数下限**（2026-10-05，收口轮
+ * 独立核验代理 final-A §4 的 P3-1）。
+ *
+ * 现场：那张表此前只有"**声明 ⇒ 观测**"这**一个方向**的对账（`missingRequired`）。于是
+ * **只删声明**（样本定义还在、还在跑、期望也没变）时 `missingRequired` 为空 ⇒ 守卫
+ * EXIT=0 —— 被删掉的恰恰是"这批样本必须一直在"这条断言本身（实测：删掉 `y1`–`y6`
+ * 六行声明，`guard-drop-required-sample-ids` 格 `MUTATION-LANDED=True` / `GUARD-EXIT=0`）。
+ *
+ * 与 `SELFTEST_MIN_SAMPLES` / `SELFTEST_MIN_RED_SAMPLES` 同一手法：取值 = 当前实测条数的
+ * **ratchet**，只允许被"变多"越过 —— 删表 / 清空 / 删掉任意几行都当场红（`>=` 判据写在
+ * `selfTestPoliciesCoverage()` 里，与对账本体**分开**，掏空对账不能顺手掏空这条地板）。
+ *
+ * 2026-10-05 收口轮（G9/G6 独立核验）：161 → **166**（新增 `z8`–`z12` 五格：
+ * 内层 shell 载荷、读不懂的载荷、兜底形状与两格反向对照）。
+ * 2026-10-05 收口轮②（V-P10P11 的 W11/W12）：166 → **168**（新增 `z13`/`z14`：
+ * **包装词** `timeout`/`nice`/… 前缀下的载荷跟进与"不带 `-c` 的正当写法"反向对照）。
+ * 2026-10-05 收口轮③（V-P15P1 的 G2）：168 → **175**（新增 `z15`–`z18` 四格"吃光剩余词"的
+ * 红样本：裸包装词 + 位置实参吃掉最后一个词；`z19`–`z21` 三格反向对照：`nice -n 5` /
+ * `taskset -c 0` / 冻结启动器表达式后面的真命令必须仍然绿）。
+ */
+const SELFTEST_MIN_REQUIRED_SAMPLES = 175
+/**
+ * 发布链步骤 **argv 白名单**的覆盖下限（FF-B 残留 R1，2026-10-05）。
+ *
+ * `REGISTERED_RELEASE_STEPS` 里声明了 `argv`（= 该步骤允许的命令位 argv 形态）的登记项
+ * 不得少于这个数：当前 18 条登记项里 15 条含 `scripts/**` 的命令位调用（另外三条 ——
+ * gate 的策展说明门、release 的 Create GitHub Release、desktop-macos 的公证步 —— 步骤体里
+ * 没有 `scripts/**` 调用，因此没有可白名单化的 argv）。删掉 `argv` 字段、把整张表的开关
+ * （`REGISTRY_DEFAULT.stepArgv`）关掉、或删掉若干登记项，都会让这条红。
+ */
+const SELFTEST_MIN_RELEASE_STEP_ARGV = 15
 /**
  * 红样本必须覆盖的策略标签(精确匹配,不能靠 `includes` —— `[SK-7]` 是 `[SK-7a]` 的
  * 前缀,子串匹配会把"某条策略没有样本盯着"放过去)。`[SK-7]` = 块级 errexit 策略。
@@ -483,7 +515,7 @@ const SELFTEST_RUNS_ON_REGISTRY = {
   // 都会被"存在却没登记"判红 —— 那是与样本意图无关的假红。
   requiredSteps: false,
 }
-const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-22', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
+const SELFTEST_EXPECTED_POLICIES = ['SK-10', 'SK-11', 'SK-12', 'SK-13', 'SK-14', 'SK-15', 'SK-16', 'SK-17', 'SK-18', 'SK-19', 'SK-22', 'SK-24', 'SK-7', 'SK-7a', 'SK-7b', 'SK-7c', 'SK-8', 'SK-8b', 'SK-9']
 
 /**
  * **定向样本存在性登记**(2026-09-24 第七轮独立复审 V2 §1.2/§2.2 之后补)。
@@ -577,6 +609,22 @@ const SELFTEST_REQUIRED_SAMPLES = [
   { id: 'p17-notes-cat-curated-green', policy: null },
   { id: 'p18-gh-api-release-body', policy: '[SK-11]' },
   { id: 'p19-gh-release-command-in-array', policy: '[SK-11]' },
+  // ---- R26 FIX-X-01/X-02:Release 名必须**恰好**是 tag;策展说明门必须检验**由 tag 派生的**那一份 ----
+  { id: 'p20-title-product-prefix', policy: '[SK-11]' },
+  { id: 'p21-title-suffix', policy: '[SK-11]' },
+  { id: 'p22-title-padded', policy: '[SK-11]' },
+  { id: 'p23-title-github-ref-name-green', policy: null },
+  { id: 'p24-title-unbraced-ref-name-green', policy: null },
+  { id: 'p25-notes-gate-template-path', policy: '[SK-11]' },
+  { id: 'p26-notes-gate-wrong-dir', policy: '[SK-11]' },
+  { id: 'p27-notes-gate-version-prefixed', policy: '[SK-11]' },
+  { id: 'p28-notes-gate-nested', policy: '[SK-11]' },
+  { id: 'p29-notes-gate-tag-var-green', policy: null },
+  { id: 'p30-notes-gate-indirect-var-green', policy: null },
+  // R26 FIX-X-02 第二版：`-o` / `||` 析取并列 ⇒ 整行恒真 ⇒ 必红；`|| { fail-loud }` 仍绿。
+  { id: 'p31-notes-gate-disjunction', policy: '[SK-11]' },
+  { id: 'p32-notes-gate-or-chained-tests', policy: '[SK-11]' },
+  { id: 'p33-notes-gate-or-block-green', policy: null },
   // ---- 第十一轮审计 P1-3 / P2-1:`with:` 输入与 `runs-on`(8 条 with 变异 + 取值 + 非映射 + 3 条 runs-on + 2 绿样本)
   { id: 'wa1-with-checkout-repository', policy: '[SK-17]' },
   { id: 'wa2-with-checkout-ref', policy: '[SK-17]' },
@@ -649,6 +697,58 @@ const SELFTEST_REQUIRED_SAMPLES = [
   // "整类算术算子都必须红 + 合法的负号形态必须绿"钉成**显式判据**，而不是顺带成立。
   { id: 'w42-expression-arithmetic-class-red', policy: '[SK-22]' },
   { id: 'w43-expression-negative-number-green', policy: null },
+  // R26 FIX-J1-4：`*` 与顶层 `,`（词法能过、解析期必失败）⇒ 红；实参位的 `,` 与字面量里的 `*` ⇒ 绿。
+  { id: 'w44-expression-multiplication', policy: '[SK-22]' },
+  { id: 'w45-expression-top-level-comma', policy: '[SK-22]' },
+  { id: 'w46-expression-argument-comma-green', policy: null },
+  // ---- [SK-24] job 的**执行向量**（`strategy.matrix`）不得让 job 一个实例都不产生 ----
+  // 审计 J1-3：`strategy`/`matrix` 此前零判据（给 `gate` 加 `matrix: {shard: []}` 守卫 EXIT=0）。
+  // 三轮红样本（空向量 / 表达式矩阵 / exclude 排空）+ 一轮绿样本（正常矩阵与 include 形态）。
+  { id: 'w47-empty-matrix-vector', policy: '[SK-24]' },
+  { id: 'w48-matrix-expression', policy: '[SK-24]' },
+  { id: 'w49-matrix-exclude-everything', policy: '[SK-24]' },
+  { id: 'w50-matrix-nonempty-green', policy: null },
+  // ---- FF-2（2026-10-05，独立核验代理 FF-2 + 主控三态复现）：接线判据的"真判形态" ----
+  // `--self-test`（只跑脚本内部的纯函数固定样本）与真判两行并列时，"命令位执行过本脚本"
+  // 把两次调用一视同仁 ⇒ 删掉真判那一行，`require` 与 `REQUIRED_WIRED_CRITERIA` 一起绿。
+  // 反例格 = 只剩自检 / 只剩 `echo` / **只钉接线路径** / **只钉 require 路径**（后两格是必须的：
+  // 两条判据共享同一个盲区，只钉一端时"删掉另一端的那颗牙"会被掩盖 —— FF-B 实测过）。
+  { id: 'y1-wired-selftest-only', policy: '[SK-15]' },
+  { id: 'y2-wired-real-judge-only-green', policy: null },
+  { id: 'y3-wired-both-green', policy: null },
+  { id: 'y4-wired-echo-only', policy: '[SK-15]' },
+  { id: 'y5-wired-only-selftest', policy: '[SK-15]' },
+  { id: 'y6-require-only-selftest', policy: '[SK-15]' },
+  // ---- FF-B 残留 R1（2026-10-05）：发布链步骤的 **argv 白名单** ----
+  // `require` 只有"附加词必须出现"一种表达力 ⇒ `--resolve-only` / `--no-mainline` /
+  // `--dry-run` 这类**功能子模式**削弱此前完全不可见（FF-B §5-R1）。
+  // 五个反例格 = 白名单外 argv（三种形态：子模式 / 未知旗标 / topology）+ 死条目 + 未声明调用；
+  // 两个正例格 = 形状逐字命中（含 `*` 通配的取值型参数与多行载荷那一种形状）。
+  { id: 'z1-release-step-resolve-only', policy: '[SK-15]' },
+  { id: 'z2-topology-no-mainline', policy: '[SK-15]' },
+  { id: 'z3-release-step-dry-run', policy: '[SK-15]' },
+  { id: 'z4-argv-dead-entry', policy: '[SK-15]' },
+  { id: 'z5-argv-undeclared-script', policy: '[SK-15]' },
+  { id: 'z6-argv-exact-shape-green', policy: null },
+  { id: 'z7-argv-payload-shape-green', policy: null },
+  // 收口轮（2026-10-05 G9/G6 独立核验）：内层 shell 载荷与兜底形状。
+  { id: 'z8-nested-shell-payload-argv', policy: '[SK-15]' },
+  { id: 'z9-nested-payload-unreadable', policy: '[SK-15]' },
+  { id: 'z10-argv-blanket-shape', policy: '[SK-15]' },
+  { id: 'z11-nested-payload-registered-green', policy: null },
+  { id: 'z12-argv-leading-wildcard-shape', policy: '[SK-15]' },
+  // 收口轮②（V-P10P11 的 W11/W12）：包装词（`timeout`/`nice`/…）前缀。
+  { id: 'z13-wrapper-prefixed-payload', policy: '[SK-15]' },
+  { id: 'z14-wrapper-without-payload-green', policy: null },
+  // 收口轮③（V-P15P1 的 G2）：包装词**吃光剩余词**（`nice` / `command` / `taskset 5` / `chrt 10`）
+  // —— 旧实现把这些 entry 整条丢弃（连同 `wrapperProblem`）⇒ 静默绿；三格反向对照不许误伤正当写法。
+  { id: 'z15-wrapper-eats-all-bare-nice', policy: '[SK-15]' },
+  { id: 'z16-wrapper-eats-all-bare-command', policy: '[SK-15]' },
+  { id: 'z17-wrapper-eats-all-taskset-operand', policy: '[SK-15]' },
+  { id: 'z18-wrapper-eats-all-chrt-priority', policy: '[SK-15]' },
+  { id: 'z19-wrapper-real-command-nice-green', policy: null },
+  { id: 'z20-wrapper-real-command-taskset-green', policy: null },
+  { id: 'z21-wrapper-real-command-interp-green', policy: null },
 ]
 
 /** `selfTestScanner()` 至少执行的断言条数(供 main() 对账"自检没被掏空")。 */
@@ -663,6 +763,8 @@ const SELFTEST_PINNED_STEP_COVERAGE_ASSERTIONS = 1 + 8
 const SELFTEST_REQUIRED_CI_STEPS_ASSERTIONS = 7
 /** `selfTestPinnedEnvLayers()` 至少执行的断言条数(正向集合相等 + 反向未登记层 + 变异打坏)。 */
 const SELFTEST_PINNED_ENV_LAYER_ASSERTIONS = 3
+/** `selfTestPinnedJobPermissions()` 至少执行的断言条数（R26 FIX-D-02：绿 + 4 条变异 + 双向对账 2 条）。 */
+const SELFTEST_JOB_PERMISSIONS_ASSERTIONS = 7
 /** `selfTestCompositeActions()` 至少执行的断言条数(5 类正反样本 + 接线 + 变异)。 */
 const SELFTEST_COMPOSITE_ACTION_ASSERTIONS = 9
 
@@ -936,6 +1038,9 @@ export function checkWorkflowText(name, text, options = {}) {
   failures.push(...checkJobExecutability(name, document, notes, registries))
   // 策略 11(R5-D-2 / R5-C-6 / R5-C-8):发布链步骤的可执行性 + 效果判据 + 远端写入面。
   failures.push(...checkReleaseChainSteps(name, document, notes, registries))
+  // 策略 11b（2026-10-05，E-01 的 F1）：**必须接线的判据**必须真的被某个已登记的步骤执行
+  // —— "步骤与登记项一起删掉"会静默摘掉一条判据，这一条从"判据"那一侧反向对账。
+  failures.push(...checkWiredCriteria(name, document, notes, registries))
   failures.push(...checkRemoteWriteCapabilities(name, document, notes, registries))
   // 策略 9(R4-A-3):触发面(`on:`)的业务契约 —— 删掉 `push:` 就等于关掉整条发布链。
   failures.push(...checkTriggerSurface(name, document, text, notes))
@@ -956,6 +1061,9 @@ export function checkWorkflowText(name, text, options = {}) {
   failures.push(...checkFrozenLaunchers(name, document, notes, options))
   // 策略 10d（第十三轮 C 泳道 C-05，P3）：**永不跳过的守卫 job 的权限面**逐字登记。
   failures.push(...checkPinnedJobPermissions(name, document, notes, options))
+  // 策略 10e（R26 FIX-J1-3）：job 的**执行向量**（`strategy.matrix`）不得让 job 一个实例都不产生
+  // —— 空向量在 GitHub 上是硬错误，而"这个 job 不跑"与 `if: false` 同一后果类。
+  failures.push(...checkJobExecutionVector(name, document, notes))
   // 策略 13(2026-09-25 第九轮审计 D 泳道 P1;2026-09-24 第十轮审计 C-01/C-02/C-03/D-03 加强):
   // 被钉步骤/守卫 job 的**进程环境层** —— 白名单式的四层 `env:` + 前序步骤的 `$GITHUB_ENV`
   // 写入 + 被钉步骤自己步骤体里的 `export`/前缀赋值 + 被钉单元里的 `uses:` 委派目标。
@@ -2189,11 +2297,39 @@ function checkFrozenLaunchers(file, document, notes, options = {}) {
 // 同族的 `strategy` / `timeout-minutes` 取值面也是同样的"未被管"，但它们的失败方向是
 // fail-safe（矩阵任一腿红则 job 红、超时只会更容易失败），所以只登记**权限**这一条
 // （能改变"这一步能做什么"的那一条）。
+//
+// ## R26 FIX-D-02：登记面从 1 个 job 扩到**全部 job**（同族只修了一半）
+//
+// 现场（审计 D 泳道实测）：`[SK-21]` 只登记了 `gate-guards` —— 给 `changes` 加
+// `{contents: write, id-token: write}`、把 `gate` 的 `contents: read` 升成 `write`，
+// `check-workflows` **都 EXIT=0**。而 `ci.yml` 是"判据的定义面"，`permissions:` 决定
+// **这一段被判据守护的代码能拿到什么令牌**（`contents: write` 可改仓库内容、
+// `id-token: write` 可换 OIDC 云凭据）：这些改动在 code review 里极易被当成噪音跳过，
+// 而门禁一句不提 —— 典型"判据只钉文本、不钉能力"。
+// 现在：**每个 job**（以及 workflow 顶层）的 `permissions` 都逐字登记 + **双向对账**
+// （登记了却不在 ⇒ 红；在却没登记 ⇒ 红）。新增/删除 job、或改动任何一处权限面，
+// 都必须同步改这张表（进 diff、可评审）。
 /**
- * 「永不跳过的守卫 job」的权限面登记表（逐字相等；缺省/多键/取值不同都红）。
+ * workflow **顶层** `permissions` 的登记值（逐字相等；这是没有声明 `permissions:` 的
+ * job 继承到的那一份 —— 不登记它，"改顶层就能给所有未声明的 job 扩权"是一条静默通道）。
+ */
+const WORKFLOW_PERMISSIONS_REGISTRY = {
+  permissions: { contents: 'read' },
+  why: '顶层权限是**未声明 `permissions:` 的 job 继承到的那一份**；`changes` 与 `server` 就是'
+    + '靠它拿 `contents: read`。改这里等于同时改这两个 job 的权限面。',
+}
+/**
+ * **每个 job** 的权限面登记表（逐字相等；缺省/多键/取值不同都红）。
  * 加一条 = 显式的、可评审的决定（并写清那个 job 为什么需要它）。
  */
 const PINNED_JOB_PERMISSIONS_REGISTRY = [
+  {
+    job: 'changes',
+    // docs-only 分类器：只 `git diff` + 写 `$GITHUB_OUTPUT`，一次 checkout 都不用。
+    permissions: null,
+    why: 'docs-only 分类器只读仓 + 写步骤输出，**不需要任何写面**；它继承顶层 `contents: read`。'
+      + '给它 `contents: write` / `id-token: write` 没有任何用途（D-02 实测这种扩权门禁看不见）。',
+  },
   {
     job: 'gate-guards',
     // 只读：它取仓、跑根守卫、跑两个 install 期锚与行为探针 —— 没有任何一步需要写仓库。
@@ -2201,10 +2337,49 @@ const PINNED_JOB_PERMISSIONS_REGISTRY = [
     why: '永不跳过的守卫 job：它只读仓（检出 + 判据），写权限对它没有任何用途；'
       + '给它 `contents: write` 等于让"永不跳过"的那条链带上仓库写面（第三轮 C-05 实测 EXIT=0）。',
   },
+  {
+    job: 'gate',
+    permissions: { contents: 'read', actions: 'write' },
+    why: '全量门禁 job：`contents: read` 检出即可；`actions: write` 是 `workspace-build` 制品'
+      + '（上传/下载）这一段的**已认账**声明 —— 它不需要写仓库内容，也不该拿到 `id-token`。',
+  },
+  {
+    job: 'server',
+    permissions: null,
+    why: 'Go 侧门禁 + webadmin 测试：只检出与跑测试，**没有任何写面**；继承顶层 `contents: read`。',
+  },
+  {
+    job: 'desktop-linux',
+    permissions: { contents: 'read', actions: 'write' },
+    why: '平台打包 job：检出 + 下载 `workspace-build` 制品 + 上传安装包制品（`actions: write`）；'
+      + '不写仓库内容。',
+  },
+  {
+    job: 'desktop-windows',
+    permissions: { contents: 'read', actions: 'write' },
+    why: '同上（Windows 打包）。',
+  },
+  {
+    job: 'desktop-macos',
+    permissions: { contents: 'read', actions: 'write' },
+    why: '同上（macOS 打包/冒烟）。',
+  },
+  {
+    job: 'release',
+    permissions: { contents: 'write' },
+    why: '发布 job：`gh release create/edit` 要写仓库的 Release 面（`contents: write` 是它的'
+      + '**唯一**用途）；它同时能写远端对象存储，但那是脚本级凭据（R2 的 secrets），'
+      + '与 GITHUB_TOKEN 的权限面无关。',
+  },
+  {
+    job: 'pr-summary',
+    permissions: { contents: 'read', 'pull-requests': 'write' },
+    why: 'PR 评论汇总：`pull-requests: write` 只用于在自己的 PR 上发一条评论；不需要仓库写面。',
+  },
 ]
 
 /**
- * [SK-21] 「永不跳过的守卫 job」的权限面判据。
+ * [SK-21] 每个 job 的权限面判据（R26 FIX-D-02 起罩全部 job，双向对账）。
  * @param file - workflow 文件名。
  * @param document - parseYaml 的结果。
  * @param notes - 提示收集器。
@@ -2215,6 +2390,40 @@ function checkPinnedJobPermissions(file, document, notes, options = {}) {
   const failures = []
   if (options?.scannedFile !== VERDICT_WORKFLOW_FILE) return failures
   const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const normalize = value => (typeof value === 'object' && value !== null
+    ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, String(item)]).sort())
+    : value ?? null)
+  const compare = (label, registered, actual, why) => {
+    if (JSON.stringify(normalize(actual)) === JSON.stringify(normalize(registered))) {
+      notes.push(`[SK-21] ${label} 的权限面逐字等于登记值（${JSON.stringify(registered)}）`)
+      return
+    }
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-21] ${label} 的 \`permissions\` 与登记值不一致：\n`
+        + `      登记：${JSON.stringify(registered)}\n      实际：${JSON.stringify(actual ?? null)}\n`
+        + `  ⇒ ${why}\n`
+        + '  ⇒ 要改权限面必须同步改 `PINNED_JOB_PERMISSIONS_REGISTRY`（进 diff、可评审）。',
+    })
+  }
+  // ① workflow 顶层：未声明 `permissions:` 的 job 继承到的那一份。
+  compare('workflow 顶层', WORKFLOW_PERMISSIONS_REGISTRY.permissions, document?.permissions,
+    WORKFLOW_PERMISSIONS_REGISTRY.why)
+  // ② 双向对账：**在却没登记**（新增 job / 改名）与**登记了却不在**都红。
+  const registered = new Set(PINNED_JOB_PERMISSIONS_REGISTRY.map(entry => entry.job))
+  for (const jobId of Object.keys(jobs)) {
+    if (registered.has(jobId)) continue
+    failures.push({
+      name: file,
+      line: 0,
+      detail: `[SK-21] job \`${jobId}\` **没有登记权限面** —— \`ci.yml\` 是判据的定义面，`
+        + '`permissions:` 决定这一段被判据守护的代码能拿到什么令牌（`contents: write` 可改仓库内容、'
+        + '`id-token: write` 可换 OIDC 云凭据）。\n'
+        + '  ⇒ 登记进 `PINNED_JOB_PERMISSIONS_REGISTRY`（写明这个 job 为什么需要这些权限），'
+        + '或把它的权限面收窄到登记值。**新增 job 必须显式回答"它需要什么令牌"**（R26 FIX-D-02）。',
+    })
+  }
   for (const entry of PINNED_JOB_PERMISSIONS_REGISTRY) {
     const job = jobs[entry.job]
     if (job === undefined || job === null) {
@@ -2222,28 +2431,221 @@ function checkPinnedJobPermissions(file, document, notes, options = {}) {
         name: file,
         line: 0,
         detail: `[SK-21] 登记的 job \`${entry.job}\` 不在本 workflow 里 —— `
-          + '`PINNED_JOB_PERMISSIONS_REGISTRY` 的每一条都是"这个 job 的权限面被钉死"的登记。',
+          + '`PINNED_JOB_PERMISSIONS_REGISTRY` 的每一条都是"这个 job 的权限面被钉死"的登记；'
+          + '死条目会让这张表看起来比实际宽（job 被改名/删除时同步删掉或改名这条登记）。',
       })
       continue
     }
-    const actual = job.permissions
-    const expected = entry.permissions
-    const normalize = value => (typeof value === 'object' && value !== null
-      ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, String(item)]).sort())
-      : value ?? null)
-    const same = JSON.stringify(normalize(actual)) === JSON.stringify(normalize(expected))
-    if (!same) {
-      failures.push({
-        name: file,
-        line: 0,
-        detail: `[SK-21] job \`${entry.job}\` 的 \`permissions\` 与登记值不一致：\n`
-          + `      登记：${JSON.stringify(expected)}\n      实际：${JSON.stringify(actual ?? null)}\n`
-          + `  ⇒ ${entry.why}\n`
-          + '  ⇒ 要改权限面必须同步改 `PINNED_JOB_PERMISSIONS_REGISTRY`（进 diff、可评审）。',
-      })
-    } else {
-      notes.push(`[SK-21] job \`${entry.job}\` 的权限面逐字等于登记值（${JSON.stringify(expected)}）`)
+    compare(`job \`${entry.job}\``, entry.permissions, job.permissions, entry.why)
+  }
+  return failures
+}
+
+/**
+ * `[SK-21]` 的自证（R26 FIX-D-02）：把**合成 document** 喂给同一个判据函数，
+ * 断言"登记值原样 ⇒ 绿"以及四类变异 ⇒ 红（扩权 / 收窄 / 新增未登记 job / 删掉已登记 job）。
+ *
+ * 为什么必须有这一格：`checkPinnedJobPermissions` 只在 `scannedFile === ci.yml` 时开口，
+ * 所以它的判别力此前**只被真实 ci.yml 的变异验证**证明过（那是一次性的、不在回归网里）。
+ * 合成样本把它变成每次 `yarn check` 都会跑的判据 —— 判据本身被打坏时当场红。
+ * @returns `{ failures, assertions }`（与其它自检同形，由 main() 对账断言条数）。
+ */
+function selfTestPinnedJobPermissions() {
+  const failures = []
+  let assertions = 0
+  const documentWith = (overrides = {}, extraJobs = {}) => ({
+    permissions: { ...WORKFLOW_PERMISSIONS_REGISTRY.permissions },
+    jobs: {
+      ...Object.fromEntries(PINNED_JOB_PERMISSIONS_REGISTRY.map(entry => [entry.job, {
+        permissions: entry.permissions === null ? undefined : { ...entry.permissions },
+      }])),
+      ...extraJobs,
+    },
+  })
+  const run = document => checkPinnedJobPermissions('selftest.yml', document, [], { scannedFile: VERDICT_WORKFLOW_FILE })
+  const reddens = (document, needle) => {
+    const problems = run(document)
+    return problems.some(problem => String(problem.detail ?? '').includes(needle))
+  }
+  // ① 登记值原样 ⇒ 必须绿（否则判据是"见谁都红"的一刀切）。
+  assertions += 1
+  const clean = run(documentWith())
+  if (clean.length !== 0) {
+    failures.push(`[SK-21] 自证：权限面原样等于登记值时判据却报红（${clean.length} 条）——`
+      + `第一条：${clean[0]?.detail ?? '(无)'}`)
+  }
+  // ② 扩权（D-02 的原始变异①）：给 `changes` 加 `contents: write` + `id-token: write`。
+  assertions += 1
+  const widenedChanges = documentWith()
+  widenedChanges.jobs.changes = { permissions: { contents: 'write', 'id-token': 'write' } }
+  if (!reddens(widenedChanges, '`changes`')) {
+    failures.push('[SK-21] 自证：`changes` 被扩权成 `{contents: write, id-token: write}` 时判据**没有报红**'
+      + ' —— 这正是 D-02 的原始缺口（其余 8 个 job 的权限面曾经无人看）。')
+  }
+  // ③ 扩权（D-02 的原始变异②）：`gate` 的 `contents: read → write` + 加 `id-token: write`。
+  assertions += 1
+  const widenedGate = documentWith()
+  widenedGate.jobs.gate = { permissions: { contents: 'write', 'id-token': 'write' } }
+  if (!reddens(widenedGate, '`gate`')) {
+    failures.push('[SK-21] 自证：`gate` 的 `contents: read → write`（并加 `id-token: write`）时判据**没有报红**。')
+  }
+  // ④ 顶层扩权：未声明 `permissions:` 的 job（`changes`/`server`）继承的那一份被改宽。
+  assertions += 1
+  const widenedTop = documentWith()
+  widenedTop.permissions = { contents: 'write' }
+  if (run(widenedTop).length === 0) {
+    failures.push('[SK-21] 自证：workflow 顶层 `permissions` 被改成 `contents: write` 时判据**没有报红**'
+      + '（`changes`/`server` 靠继承拿权限，改顶层等于同时改它们）。')
+  }
+  // ⑤ 双向对账之一：新增一个**未登记**的 job。
+  assertions += 1
+  if (!reddens(documentWith({}, { 'brand-new-job': { permissions: { contents: 'write' } } }), 'brand-new-job')) {
+    failures.push('[SK-21] 自证：新增一个未登记的 job 时判据**没有报红** —— 登记面又会退回"只覆盖当初点名的那些"。')
+  }
+  // ⑥ 双向对账之二：登记表里的 job 在 document 里**不存在**（死条目）。
+  assertions += 1
+  const missing = documentWith()
+  delete missing.jobs[PINNED_JOB_PERMISSIONS_REGISTRY[0].job]
+  if (!reddens(missing, PINNED_JOB_PERMISSIONS_REGISTRY[0].job)) {
+    failures.push('[SK-21] 自证：登记表里的 job 在 workflow 里不存在时判据**没有报红**（死条目）。')
+  }
+  // ⑦ 收窄也要红（不是"只看写权限"）：`pr-summary` 少掉 `pull-requests: write`。
+  assertions += 1
+  const narrowed = documentWith()
+  narrowed.jobs['pr-summary'] = { permissions: { contents: 'read' } }
+  if (!reddens(narrowed, '`pr-summary`')) {
+    failures.push('[SK-21] 自证：登记值被**收窄**（用不了它该有的能力）时判据没有报红'
+      + ' —— 逐字相等必须是双向的，不能只拦扩权。')
+  }
+  return { failures, assertions }
+}
+
+// ===== SK-24:job 的**执行向量**（`strategy.matrix`）不得让 job 一个实例都不产生 =====
+//
+// 现场（审计 J1 的 J1-3）：`strategy` / `matrix` 在 `check-workflows.mjs` 里**零判据**
+// （`strategy` 一词只出现在 [SK-21] 上面那段认账注释里，给的理由是"失败方向 fail-safe：
+// 矩阵任一腿红则 job 红、超时只会更容易失败"）。那条理由**不覆盖"一个腿都不产生"**：
+// 那时不是"任一腿红"而是 **job 根本不跑** —— 与 `if: false` 同一后果类（本仓的威胁模型
+// 逐字写着"job 被跳过 ⇒ 分支保护把 skipped 的必需检查记成成功"，见 SK-15 附近）。
+// 审计实测：给 `gate` 加
+//
+// ```yaml
+//     strategy:
+//       matrix:
+//         shard: []
+// ```
+//
+// 守卫 **EXIT=0**（变异确实落地：before/after sha256 不同）。
+//
+// ## 判据（"这个 job 到底会产生几个实例"必须可证明 ≥ 1）
+//
+//   · `strategy` 必须是**映射**（写成表达式 ⇒ 求值后可能为空 ⇒ fail-closed）；
+//   · `strategy.matrix` 的每个**向量**必须是**字面量数组**且**非空**；
+//   · `matrix` 非映射（`matrix: ${{ fromJSON(...) }}`）⇒ fail-closed；
+//   · `exclude` 必须能证明**排除不完**：向量都是字面量数组时按笛卡尔积算一遍，
+//     逐条应用字面量 `exclude` 之后必须还剩 ≥ 1 个组合（全被排掉 = 0 实例）；
+//   · 只有 `exclude` 没有向量、也没有 `include` ⇒ 组不出任何实例 ⇒ 红。
+//
+// 范围：**所有 workflow**（不限 `ci.yml`）—— 空矩阵在哪个 workflow 上都是"这个 job 不跑"。
+/**
+ * `strategy.matrix` 的**实例数下界**判定（R26 FIX-J1-3）。
+ * @param file - workflow 文件名。
+ * @param jobId - job 名（诊断用）。
+ * @param strategy - `job.strategy` 的原始取值。
+ * @returns 人读的问题描述数组（空 = 可证明至少产生一个实例，或没有 matrix）。
+ */
+function strategyMatrixProblems(file, jobId, strategy) {
+  const problems = []
+  if (strategy === undefined || strategy === null) return problems
+  if (typeof strategy !== 'object' || Array.isArray(strategy)) {
+    problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy\` 不是映射（${JSON.stringify(strategy)}）—— `
+      + '`strategy` 写成表达式时"这一 job 会产生几个实例"在静态上不可证明，求值结果可能是空 ⇒ fail-closed。')
+    return problems
+  }
+  const matrix = strategy.matrix
+  if (matrix === undefined || matrix === null) return problems
+  if (typeof matrix !== 'object' || Array.isArray(matrix)) {
+    problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy.matrix\` 不是映射（${JSON.stringify(matrix)}）—— `
+      + '`matrix: ${{ fromJSON(…) }}` 这类形态求值后可能是空向量，而**空向量 = 这个 job 一个实例都不产生**'
+      + '（GitHub 对空向量是硬错误），与 `if: false` 同一后果类。要用表达式就先把它展开成字面量。')
+    return problems
+  }
+  const vectors = Object.entries(matrix).filter(([key]) => key !== 'include' && key !== 'exclude')
+  const include = matrix.include
+  if (include !== undefined && include !== null && !Array.isArray(include)) {
+    problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy.matrix.include\` 不是字面量数组`
+      + `（${JSON.stringify(include)}）⇒ 无法证明它至少补进一个实例。`)
+  }
+  for (const [key, value] of vectors) {
+    if (!Array.isArray(value)) {
+      problems.push(`[SK-24] job \`${jobId}\` 的矩阵向量 \`${key}\` 不是字面量数组（${JSON.stringify(value)}）`
+        + '—— 求值后可能是空向量 ⇒ 这个 job 可能一个实例都不产生。')
+      continue
     }
+    if (value.length === 0) {
+      problems.push(`[SK-24] job \`${jobId}\` 的矩阵向量 \`${key}\` 是**空数组** —— `
+        + 'GitHub 对空向量是硬错误（`Matrix vector \'…\' does not contain any values`），'
+        + '而"job 一个实例都不产生"与 `if: false` 同一后果类：必需检查会被记成跳过。'
+        + '要么给它至少一个取值，要么删掉整个 `strategy`。')
+    }
+  }
+  const exclude = matrix.exclude
+  if (exclude !== undefined && exclude !== null) {
+    if (!Array.isArray(exclude)) {
+      problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy.matrix.exclude\` 不是字面量数组（${JSON.stringify(exclude)}）`
+        + '⇒ 无法证明它没有把全部组合排掉。')
+    } else if (vectors.length === 0 && !(Array.isArray(include) && include.length > 0)) {
+      problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy.matrix\` 只有 \`exclude\`，既没有向量也没有 \`include\` —— `
+        + '组不出任何实例 ⇒ 这个 job 不跑（[SK-24] 的存在理由就是这个后果类）。')
+    } else if (vectors.length > 0 && vectors.every(([, value]) => Array.isArray(value) && value.length > 0)) {
+      // 字面量笛卡尔积（规模闸门：超过 4096 个组合就不再逐个算 —— 那时"非空向量"已经足够）。
+      let combinations = [{}]
+      let explosive = false
+      for (const [key, value] of vectors) {
+        const next = []
+        for (const base of combinations) {
+          for (const item of value) {
+            next.push({ ...base, [key]: item })
+            if (next.length > 4096) { explosive = true; break }
+          }
+          if (explosive) break
+        }
+        combinations = next
+        if (explosive) break
+      }
+      if (!explosive) {
+        const literalExcludes = exclude.filter(entry => typeof entry === 'object' && entry !== null && !Array.isArray(entry))
+        const survives = combinations.some(combination => !literalExcludes.some(entry =>
+          Object.entries(entry).every(([key, value]) => JSON.stringify(combination[key]) === JSON.stringify(value))))
+        if (!survives) {
+          problems.push(`[SK-24] job \`${jobId}\` 的 \`strategy.matrix.exclude\` 把**全部 ${combinations.length} 个组合**`
+            + '都排掉了 —— 这个 job 一个实例都不产生（与 `if: false` 同一后果类：必需的 job 静默不跑，'
+            + '而分支保护把 skipped 记成成功）。')
+        }
+      }
+    }
+  }
+  return problems
+}
+
+/**
+ * `[SK-24]` 的判据入口（逐 job 判"执行向量非空"）。
+ * @param file - workflow 文件名。
+ * @param document - parseYaml 的结果。
+ * @param notes - 提示收集器。
+ * @returns 失败项列表。
+ */
+function checkJobExecutionVector(file, document, notes) {
+  const failures = []
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  let declared = 0
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (job?.strategy === undefined || job?.strategy === null) continue
+    declared += 1
+    for (const detail of strategyMatrixProblems(file, jobId, job.strategy)) failures.push({ name: file, line: 0, detail })
+  }
+  if (declared > 0 && failures.length === 0) {
+    notes.push(`[SK-24] 执行向量:${declared} 个 job 声明了 \`strategy\`，逐条可证明至少产生一个实例`)
   }
   return failures
 }
@@ -2285,6 +2687,32 @@ function checkPinnedJobPermissions(file, document, notes, options = {}) {
  */
 const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!', '<', '>', '=', '&', '|', '*', ','])
 /**
+ * **词法通过、但解析期必然失败**的字符（R26 FIX-J1-4）。
+ *
+ * ## 现场（同一个后果类只被覆盖了一部分）
+ *
+ * [SK-22] 存在的唯一理由是"这一类错误在 GitHub 上是**整条 workflow 解析失败 ⇒ 0 job**"。
+ * 而修前本判据只建模**词法器**：`*` 与 `,` 在 actionlint 的期望字符集里（因此被放行），
+ * 但 GitHub 的表达式语法**没有算术算子、也没有逗号算子** —— `${{ github.run_number * 2 }}`
+ * 在真实解析器上是解析期失败（actionlint 1.7.7 对同一形态报 `parser did not reach end of
+ * input`，本文件 :2336 的表格逐字记着这一行），后果与 `+`/`-`/`/` **完全相同**（0 job），
+ * 而修前 `+`/`-`/`/` 判红、`*` 判绿 —— 同一后果类按"字符集"建模只覆盖了一部分。
+ * 审计 J1 实测：把 `# ${{ github.run_number * 2 }}` 写进 `run:` 标量的 shell 注释里，
+ * 本守卫 **EXIT=0**（而 `-`/`+`/`/` 三个同族形态都 EXIT=1）。
+ *
+ * ## 判据（位置，而不是字符集）
+ *
+ *   · `*`：GitHub 表达式里**任何位置都不合法**（算子表里没有它）⇒ 一律红；
+ *   · `,`：只允许出现在**函数调用的实参位**（即该位置处有未闭合的 `(`）——
+ *     `format('{0}-{1}', a, b)` 绿；`${{ a, b }}` / `${{ github.ref, github.sha }}` 红。
+ *
+ * 与 `-`（{@link isAllowedExpressionDash}）同一取向：**位置判据**，不是"整类放行"。
+ * 判据仍是"表达式可解析"的**必要条件**而非充分条件（语法错误类如 `${{ 1 2 }}` 仍是认账边界）。
+ */
+const EXPRESSION_NEVER_ALLOWED = new Set(['*'])
+/** 只在"函数调用实参位"合法的标点（见 {@link EXPRESSION_NEVER_ALLOWED}）。 */
+const EXPRESSION_ARGUMENT_ONLY = new Set([','])
+/**
  * `-` **单独处理**（第十四轮 V14-A 的 VA-01-F2，P2）：它只在**负数字面量的起始位**合法。
  *
  * 现场：旧实现把 `-` 放进 {@link EXPRESSION_ALLOWED_PUNCTUATION} 整体放行，于是
@@ -2318,7 +2746,7 @@ const EXPRESSION_ALLOWED_PUNCTUATION = new Set(['_', '.', '(', ')', '[', ']', '!
  *   | `github.run_number - 1 > 0` | `got unexpected character ' ' while lexing integer part of number` | 红 |
  *   | `github.run_number + 1 > 0` | `got unexpected character '+'` | 红 |
  *   | `github.run_number / 2 > 0` | `got unexpected character '/'` | 红 |
- *   | `github.run_number * 2 > 0` | 词法通过、**解析期** `parser did not reach end of input` | 绿（词法面的认账边界） |
+ *   | `github.run_number * 2 > 0` | 词法通过、**解析期** `parser did not reach end of input` | 红（R26 FIX-J1-4：与上面三行**同一后果类**（整条 workflow 0 job），词法面放行等于把这一类只覆盖一部分） |
  *
  * 所以"把 `-` 在两侧都有操作数时放行"会让本地绿、GitHub 解析期失败 ⇒ **0 job** ——
  * 那正是 [SK-22] 存在的那个 P0 类。要写"递减/算术"，出路是 `fromJSON`、上一步的 `outputs`，
@@ -2526,6 +2954,8 @@ function checkExpressionCharacterSet(file, text, notes) {
     let inLiteral = false
     let literalStart = -1
     let close = -1
+    // **R26 FIX-J1-4**：`(`/`)` 的配对深度（字面量内部不计数）——`,` 只在实参位合法。
+    let parenDepth = 0
     while (index < text.length) {
       const character = text[index]
       if (inLiteral) {
@@ -2560,6 +2990,21 @@ function checkExpressionCharacterSet(file, text, notes) {
         index += 1
         continue
       }
+      // **R26 FIX-J1-4**：`*` 任何位置都不合法；`,` 只在函数调用实参位（`(` 未闭合）合法。
+      // 两者词法上都"看起来能过"，但 GitHub 的解析器都会失败 ⇒ 整个 workflow 0 job，
+      // 与 `+`/`-`/`/` 是**同一个后果类** ⇒ 必须与它们同判。
+      if (EXPRESSION_NEVER_ALLOWED.has(character)) {
+        pending.push({ kind: 'parse-error', index, character })
+        index += 1
+        continue
+      }
+      if (EXPRESSION_ARGUMENT_ONLY.has(character)) {
+        if (parenDepth === 0) pending.push({ kind: 'argument-punctuation', index, character })
+        index += 1
+        continue
+      }
+      if (character === '(') parenDepth += 1
+      else if (character === ')') parenDepth = Math.max(0, parenDepth - 1)
       if (!isAllowedExpressionCharacter(character)) {
         pending.push({ kind: 'character', index, character })
       }
@@ -2626,6 +3071,26 @@ function checkExpressionCharacterSet(file, text, notes) {
         })
         return
       }
+      if (entry.kind === 'parse-error' || entry.kind === 'argument-punctuation') {
+        const multiplication = entry.kind === 'parse-error'
+        failures.push({
+          name: file,
+          line,
+          detail: `[SK-22] 表达式体里的 \`${entry.character}\` 在这里**词法能过、解析期必然失败**,位置 ${at}\n`
+            + `      该表达式:\`\${{ ${truncateForDiagnostic(entry.snippet ?? '')} }}\`\n`
+            + (multiplication
+              ? '  ⇒ GitHub 的表达式语法**没有算术算子**(官方算子表只有 `( ) [ ] . ! < <= > >= == != && ||`),'
+                + '所以 `*` 在任何位置都不合法;actionlint 1.7.7 对 `github.run_number * 2 > 0` 报的是'
+                + '解析期错 `parser did not reach end of input`。\n'
+              : '  ⇒ `,` 只在**函数调用的实参位**合法(`format(\'{0}-{1}\', a, b)`),'
+                + '顶层/表达式根位置的 `,` 是解析期错(`${{ a, b }}`)。\n')
+            + '     后果与 `+ - /` 完全同类:**整个 workflow 解析失败** —— run 起来是 0 秒 / 0 个 job'
+            + '(startup_failure),`pull_request` 事件下连 run 都不会创建,PR 永远等不到检查。\n'
+            + '  ⇒ 出路:`fromJSON` / 上一步的 `outputs` / 现成字段(如 `github.run_attempt`);'
+            + '要传多个值就用函数调用或 `format(...)`。',
+        })
+        return
+      }
       failures.push({
         name: file,
         line,
@@ -2635,8 +3100,9 @@ function checkExpressionCharacterSet(file, text, notes) {
           + '(含 `#` 注释行、heredoc、字符串内部)都会开始一个表达式,且必须在**解析期**合法。\n'
           + '     这个字符让**整个 workflow 解析失败** —— run 起来是 0 秒 / 0 个 job(startup_failure),'
           + '`pull_request` 事件下连 run 都不会创建,PR 永远等不到检查(第十四轮现场)。\n'
-          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * ,` 与空白,`-` 另按'
-          + '"一元负号 / 标识符内部"**逐位**判定(表达式语法里**没有算术算子**);'
+          + '  ⇒ 合法字符集:`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & |` 与空白,`-` 另按'
+          + '"一元负号 / 标识符内部"**逐位**判定,`,` 另按"函数实参位"**逐位**判定,`*` **任何位置**都不合法'
+          + '(表达式语法里**没有算术算子**);'
           + "单引号字面量(`'…'`,`''` 表示一个字面单引号)内部的字符不参与词法。\n"
           + (entry.character === '-' || entry.character === '+'
             ? '  ⇒ 这一位是**二元算术**:GitHub 表达式没有 `+ - * /`(官方算子表只有 '
@@ -4741,6 +5207,19 @@ const REGISTERED_JOBS = [
  *   · 登记项的两侧都红:登记了却找不到 / 找到却没登记。
  * `require`:该步骤的可执行文本里必须出现的子串(**效果**判据,不只是"文本在不在"的
  * 存在性判据 —— 例如说明门必须真的从 `ci-release-policy.sh` 取 `release_kind`)。
+ *
+ * `argv`（FF-B 残留 R1，2026-10-05）:**该步骤允许的 argv 白名单**。`require` 只有"附加词
+ * 必须出现"这一种表达力 —— 把 release job 的取包步换成 `ci-channels.sh --resolve-only`
+ * （只解析 pin、不落盘渠道包）、把 topology 步换成 `--no-mainline`，`require` 与
+ * `REQUIRED_WIRED_CRITERIA` 两条接线判据**都保持绿**（FF-B §5-R1 的现场）。这里给每条
+ * `scripts/**` 的命令位调用逐条声明"允许的 argv 形态"（`*` = 任意单个词，用于取值型参数）：
+ *   · **白名单外**：某次调用的 argv 不匹配任何声明形态 ⇒ 红（多一个 `--dry-run` /
+ *     `--resolve-only` / `--no-mainline` 之类的"只做一半"旗标即命中）；
+ *   · **死条目**：声明的 `script` 在该步骤里一次都没被命令位调用 ⇒ 红；
+ *   · **未声明**：步骤里出现 `scripts/**` 的命令位调用却没有对应声明 ⇒ 红（新增调用必须进 diff）。
+ * 作用域（认账，与 FF-B §5-R3 同一口径）：只覆盖**命令位执行的 `scripts/**` 路径**；
+ * `gh release create …` / `yarn dist:mac:*` 这类带变量展开或嵌套载荷的调用不在本表内
+ * —— 它们由各自的 `require` 子串判据（`gh release`、`dist:mac:notarize`）负责。
  */
 const REGISTERED_RELEASE_STEPS = [
   {
@@ -4749,6 +5228,9 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Classify the release tag (single source of truth)',
     ifPolicy: 'never',
     require: ['scripts/ci-release-policy.sh', 'GITHUB_OUTPUT'],
+    // argv 白名单（FF-B 残留 R1）：形态判定**没有**功能子模式 —— 唯一的合法形态是裸调用
+    // （输出重定向 `>> "$GITHUB_OUTPUT"` 由 `stripShellRedirections` 剥掉，不算 argv）。
+    argv: [{ script: 'scripts/ci-release-policy.sh', allow: [[]] }],
     why: '形态→渠道集/是否发布的唯一真源:它不跑,后面的说明门与渠道集全部失去依据',
   },
   {
@@ -4764,10 +5246,31 @@ const REGISTERED_RELEASE_STEPS = [
   {
     file: 'ci.yml',
     job: 'gate',
+    step: 'Release notes declare the migrations this tag introduces',
+    ifPolicy: 'exact',
+    ifValue: "steps.release_policy.outputs.release_kind != 'none'",
+    require: ['scripts/check-release-notes-migrations.mjs'],
+    // argv 白名单（FF-B 残留 R1）：本仓合法形态是"先 `--self-test`（纯函数固定样本）、
+    // 再真判"两行 —— 两种 argv 都放行；**真判那一次必须在**由 [SK-15] 的
+    // `NON_JUDGING_ARGV_FLAGS` 判据单独保证（两条判据互补，不是重复）。
+    argv: [{ script: 'scripts/check-release-notes-migrations.mjs', allow: [[], ['--self-test']] }],
+    why: '发布说明声明的迁移必须与 tag 区间**实际引入**的迁移逐条对上'
+      + '(2026-10-05 E-01/E-02 的防再犯判据:beta.2 写"本版无新增迁移"而它自己引入了 0082、'
+      + 'beta.1 把两条写成一条)。只允许在**发布 tag**上跑:判据要对拍区间两端的 tag,'
+      + '而链尾那一版的 tag 到发版提交之后才存在 ⇒ 放进 PR 期的根守卫必然"取不到 tag";'
+      + '条件与上一条同源(release_kind,不写第二份名字形状判据)。'
+      + '这一条按**命令位**判 —— 它是"这条判据到底接没接上"的唯一自动判据(此前是死判据)',
+  },
+  {
+    file: 'ci.yml',
+    job: 'gate',
     step: 'Resolve the channel packages revision (once per run)',
     ifPolicy: 'exact',
     ifValue: "startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-channels.sh --resolve-only', 'GITHUB_OUTPUT'],
+    // argv 白名单（FF-B 残留 R1）：这一步**只允许** `--resolve-only`（只解析 pin、不落盘渠道
+    // 包）；反向的削弱（把 release job 的取包步换成这个子模式）由下面 release 那条的 `[[]]` 拦。
+    argv: [{ script: 'scripts/ci-channels.sh', allow: [['--resolve-only']] }],
     why: '渠道仓 revision **一处解析、全链复用**(2026-09-23 另一泳道的修复):'
       + '它不跑 ⇒ 下游拿不到 pin,同一 tag 的交付物不再同源/可复现',
   },
@@ -4778,6 +5281,9 @@ const REGISTERED_RELEASE_STEPS = [
     ifPolicy: 'exact',
     ifValue: "startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-release-topology.sh'],
+    // argv 白名单（FF-B 残留 R1 的现场形态之一）：`--no-mainline` 这类**功能子模式**此前
+    // 完全不可见（`require` 只要求脚本路径出现在命令位）。`*` = 任意单个词（取值型参数）。
+    argv: [{ script: 'scripts/ci-release-topology.sh', allow: [['--ref', '*', '--exclude-tag', '*']] }],
     why: 'tag 必须打在主线且包含上一个 tag(旁支拓扑会静默丢掉上一版的修复);'
       + '判据本体在 ci-release-topology.sh(R5-C-4),这一步必须仍然调用它',
   },
@@ -4787,6 +5293,7 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Require curated release notes before any upload',
     ifPolicy: 'never',
     require: ['scripts/ci-release-policy.sh', 'docs/releases/', 'test -f', 'exit 1'],
+    argv: [{ script: 'scripts/ci-release-policy.sh', allow: [[]] }],
     why: '任何对外上传之前的第二道说明门,必须无条件运行(它自己在脚本里按 release_kind 分支)',
   },
   {
@@ -4795,6 +5302,9 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Verify tag matches package versions',
     ifPolicy: 'never',
     require: ['scripts/version.mjs check'],
+    // argv 白名单（FF-B 残留 R1）：只放行 `check <tag>` 子命令；`version.mjs manifests`
+    // 等只读子命令**不在本步**（它们若被搬进这一步会当场红 —— 那正是"用功能子模式换掉真判"）。
+    argv: [{ script: 'scripts/version.mjs', allow: [['check', '*']] }],
     why: 'tag 与两处 package.json 版本必须逐字一致(不一致会让升级源永久对不上)',
   },
   {
@@ -4803,6 +5313,9 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Fetch channel packages (private repo)',
     ifPolicy: 'never',
     require: ['scripts/ci-channels.sh'],
+    // argv 白名单（FF-B 残留 R1 的**现场形态**）：这一步必须做**全量取包**；
+    // 换成 `ci-channels.sh --resolve-only`（只解析 pin、不落盘渠道包）此前两条接线判据全绿。
+    argv: [{ script: 'scripts/ci-channels.sh', allow: [[]] }],
     why: '渠道发现:发布面按渠道逐个构建,跳过后官方之外的渠道零交付',
   },
   {
@@ -4811,6 +5324,7 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Fetch brand-channel installers from the R2 transfer prefix',
     ifPolicy: 'never',
     require: ['scripts/ci-channel-transfer.sh pull'],
+    argv: [{ script: 'scripts/ci-channel-transfer.sh', allow: [['pull', '--list', '*', '--to', '*']] }],
     why: '取回品牌渠道客户端产物(它们要打进各渠道镜像)',
   },
   {
@@ -4819,6 +5333,7 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Build one server image per channel',
     ifPolicy: 'never',
     require: ['scripts/ci-build-channel-images.sh'],
+    argv: [{ script: 'scripts/ci-build-channel-images.sh', allow: [['--list', '*', '--artifacts', '*', '--out', '*']] }],
     why: '逐渠道镜像构建:发布物的本体',
   },
   {
@@ -4827,6 +5342,9 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Upload every channel image to the update server (R2)',
     ifPolicy: 'never',
     require: ['scripts/ci-publish-update-server.sh'],
+    // argv 白名单（FF-B 残留 R1）：这一步必须**真上传** —— 多一个 `--dry-run` 之类的
+    // "只做一半"旗标即红（`--list` 是取值型输入，本仓的真实形态就带它）。
+    argv: [{ script: 'scripts/ci-publish-update-server.sh', allow: [['--list', '*']] }],
     why: 'R2 是**客户侧更新面的唯一来源**;它被静默跳过 = 客户端永远停在上一版',
   },
   {
@@ -4843,6 +5361,10 @@ const REGISTERED_RELEASE_STEPS = [
     step: 'Destroy the R2 transfer prefix',
     ifPolicy: 'exact',
     ifValue: 'always()',
+    // 这一条此前**没有 `require`**：步骤体被换成 `echo`（中转对象永不销毁）也照样绿。
+    // 现在补上"必须真的执行 clean 子命令"+ 同一份 argv 白名单（2026-10-05，与 FF-B R1 同批）。
+    require: ['scripts/ci-channel-transfer.sh clean'],
+    argv: [{ script: 'scripts/ci-channel-transfer.sh', allow: [['clean', '--list', '*']] }],
     why: '无论前面成功失败都要销毁 run 级中转前缀(否则品牌产物长期留在 R2)',
   },
   {
@@ -4852,6 +5374,7 @@ const REGISTERED_RELEASE_STEPS = [
     ifPolicy: 'exact',
     ifValue: "!github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-channel-transfer.sh push'],
+    argv: [{ script: 'scripts/ci-channel-transfer.sh', allow: [['push', '--list', '*', '--stage', '*']] }],
     why: '品牌渠道安装包只经 R2 中转(不进公开 artifact);条件 = 非 fork PR 且是 tag',
   },
   {
@@ -4861,6 +5384,7 @@ const REGISTERED_RELEASE_STEPS = [
     ifPolicy: 'exact',
     ifValue: "!github.event.pull_request.head.repo.fork && startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-channel-transfer.sh push'],
+    argv: [{ script: 'scripts/ci-channel-transfer.sh', allow: [['push', '--list', '*', '--stage', '*']] }],
     why: '同上(Windows 侧)',
   },
   {
@@ -4879,6 +5403,13 @@ const REGISTERED_RELEASE_STEPS = [
     ifPolicy: 'exact',
     ifValue: "startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-package-clients.sh', 'dist:mac:notarize'],
+    // argv 白名单（FF-B 残留 R1）：旗标**逐个列出**（`*` = 取值型参数的值）；末尾那段
+    // `-- bash -c '<内层脚本>'` 是**一个**词（引号内的多行载荷），所以形状是固定的 12 词。
+    // 把 `--skip-official` 换成 `--skip-official --dry-run` 之类的削弱即红。
+    argv: [{
+      script: 'scripts/ci-package-clients.sh',
+      allow: [['--skip-official', '--dist', '*', '--list', '*', '--stage-dir', '*', '--patterns', '*', '--', 'bash', '-c', '*']],
+    }],
     why: '渠道 DMG 是客户交付物:正式 tag 上与官方同链签名+公证(2026-09-11 现场)',
   },
   {
@@ -4888,7 +5419,32 @@ const REGISTERED_RELEASE_STEPS = [
     ifPolicy: 'exact',
     ifValue: "startsWith(github.ref, 'refs/tags/v')",
     require: ['scripts/ci-channel-transfer.sh push'],
+    argv: [{ script: 'scripts/ci-channel-transfer.sh', allow: [['push', '--list', '*', '--stage', '*']] }],
     why: '渠道 DMG 只经 R2 中转',
+  },
+]
+/**
+ * 「**必须接线的判据**」登记表（2026-10-05，E-01 复审的 F1；契约仍挂在 `[SK-15]` 名下）。
+ *
+ * 现场：`scripts/check-release-notes-migrations.mjs` 落地时只登记进
+ * `scripts/check-install-integrity.mjs` 的 `EXECUTION_FACE_REGISTRY` —— 那张表管的是
+ * "**内容不可被改写**"，**不是**"会被运行"。它既不在 `check-workspaces.mjs` 的 `GUARDS`、
+ * 也不在任何 workflow 步骤里 ⇒ **死判据**：存在、有牙（9 类变异实跑非零）、永不执行。
+ *
+ * `REGISTERED_RELEASE_STEPS` 能钉住"步骤被删/改名/改 `if:`/打开 continue-on-error"，
+ * 但"步骤与登记项**一起**删掉"仍然静默（那个步骤不再存在，也就没有登记项会报"找不到"）。
+ * 所以这里再加一条**正向**判据：下面这些脚本必须在指定 workflow 里被某个步骤在**命令位**
+ * 真的执行，且那个步骤必须在 `REGISTERED_RELEASE_STEPS` 里 —— 两个方向都红。
+ *
+ * 新增一条时写清"它为什么必须接线"；确实不打算接线的判据不要进本表（那等于宣布它是死判据）。
+ */
+const REQUIRED_WIRED_CRITERIA = [
+  {
+    file: 'ci.yml',
+    script: 'scripts/check-release-notes-migrations.mjs',
+    why: '发布说明声明的迁移必须与 tag 区间实际引入的迁移逐条对上（E-01/E-02 的防再犯判据）——'
+      + '它只在发布 tag 期有意义（区间两端的 tag），所以接线点是 gate job 里那条 tag 专属步骤；'
+      + '"登记进执行面"（内容不可改写）不等于"会被运行"，这一条就是那句话的判据',
   },
 ]
 /**
@@ -4907,6 +5463,13 @@ const REGISTRY_DEFAULT = {
   containerImages: PINNED_JOB_CONTAINER_REGISTRY,
   // [SK-23]（R21 fix-6 / E-03）：真实仓的"必须存在的判据步骤"登记表 —— 只给**真 ci.yml** 用。
   requiredSteps: REQUIRED_CI_STEPS,
+  // 正向判据：这些脚本必须真的被某个**已登记**的步骤执行（"必须接线"的那一半）。
+  wiredCriteria: REQUIRED_WIRED_CRITERIA,
+  // 发布链步骤的 **argv 白名单**（FF-B 残留 R1）：`true` = 对账 `REGISTERED_RELEASE_STEPS[].argv`。
+  // **只有真登记表开它** —— 合成登记表（自检样本）的步骤与真实发布链无关。这个开关不是
+  // "可以悄悄关掉"的豁免：关掉它会让 `selfTestPoliciesCoverage` 的
+  // `SELFTEST_MIN_RELEASE_STEP_ARGV` 地板当场红（那条断言直接在**真表**上数声明条数）。
+  stepArgv: true,
 }
 /**
  * **空登记表**:内置自检的合成样本默认用它 —— 否则每个合成了 `ci.yml` 形状的样本
@@ -4917,6 +5480,8 @@ const REGISTRY_NONE = {
   files: [], jobs: [], steps: [], remoteWrites: [], containerImages: [],
   // [SK-23]：空登记表同样要**显式关闭**这一层（`[]` 与 `false` 在这里同义：没有要对的账）。
   requiredSteps: false,
+  // "必须接线"那一层同理：合成样本的 ci.yml 里当然没有真实 ci.yml 的那个步骤。
+  wiredCriteria: [],
   // 自检合成样本的 `runs-on` 登记项(见 `SELFTEST_RUNS_ON_REGISTRY`):缺了它,凡是被钉单元
   // 出现在合成 job(`verify`)里的样本都会被 `runs-on` 判据判红 —— 那是与样本意图无关的假红。
   ...SELFTEST_RUNS_ON_REGISTRY,
@@ -4946,6 +5511,51 @@ const SK15_SELFTEST_REGISTRY = {
   ],
   remoteWrites: [],
 }
+/**
+ * FF-2（2026-10-05）自检用的**合成登记表工厂**：`require` 与 `wiredCriteria` **分别可关**。
+ *
+ * 为什么要能分开：这两条判据（`REGISTERED_RELEASE_STEPS[].require` 的满足判定与
+ * `REQUIRED_WIRED_CRITERIA` 的接线判定）共享**同一个**"命令位执行过本脚本就算"的口径 ——
+ * 只钉其中一条时，另一条会把变异**掩盖掉**（FF-B 实测：单独删掉 `commandRequireState` 里的
+ * 真判过滤、或单独删掉 `checkWiredCriteria` 里的真判过滤，端到端样本 `y1` 都**仍然红**
+ * ⇒ 两道变异都静默通过）。所以三条反例各钉一条路径：
+ *   · `y1`：两条都开（= 真 ci.yml 的形态，端到端）；
+ *   · `y5`：只开 `wiredCriteria`（`require` 由另一条**真的执行了**的脚本满足）；
+ *   · `y6`：只开 `require`（`wiredCriteria` 对本文件不适用）。
+ *
+ * 另一条边界：`SK15_SELFTEST_REGISTRY` 的 `require` 是 `scripts/ci-release-policy.sh`
+ * （没有自检旗标），把它改成带旗标的脚本会让**既有 12 格样本**（v1–v10 / x8）的期望全部漂移
+ * ——那些格子钉的是别的形态（`if:` 收窄 / 效果子串 / 远端写入能力），不该被本行的样本连坐。
+ */
+const SK15_WIRED_SELFTEST_SCRIPT = 'scripts/check-release-notes-migrations.mjs'
+const ff2SelftestRegistry = ({ wired = true, required = true } = {}) => ({
+  files: ['selftest.yml'],
+  ...SELFTEST_RUNS_ON_REGISTRY,
+  jobs: [
+    { file: 'selftest.yml', job: 'verify', ifPolicy: 'exact', ifValue: 'true', why: '合成样本:允许的 if 形态只有 `true`' },
+  ],
+  steps: [
+    {
+      file: 'selftest.yml',
+      job: 'verify',
+      step: 'Gate',
+      ifPolicy: 'exact',
+      ifValue: 'true',
+      require: [required ? SK15_WIRED_SELFTEST_SCRIPT : 'scripts/ci-release-policy.sh'],
+      why: '合成样本(FF-2):发布链步骤必须真的执行那条判据(**真判形态**),只跑 `--self-test` 不算',
+    },
+  ],
+  remoteWrites: [],
+  ...(wired ? {
+    wiredCriteria: [
+      {
+        file: 'selftest.yml',
+        script: SK15_WIRED_SELFTEST_SCRIPT,
+        why: '合成样本(FF-2):`REQUIRED_WIRED_CRITERIA` 的"必须接线"判定同样必须区分"只跑自检"与真判',
+      },
+    ],
+  } : {}),
+})
 /** `if:` 形态登记:每个 job / 步骤的 `if:` 必须逐字匹配登记值(或按策略必须缺失)。 */
 const JOB_IF_POLICIES = {
   never: {
@@ -5313,6 +5923,99 @@ function checkJobExecutability(file, document, notes, registry = REGISTRY_DEFAUL
 }
 
 /**
+ * 「**必须接线的判据**」的正向判据（2026-10-05，E-01 复审的 F1；契约仍是 `[SK-15]` 那一份）。
+ *
+ * 与 {@link checkReleaseChainSteps} 的分工：那一条从"步骤"出发（存在的步骤必须登记），
+ * 这一条从"判据"出发（登记的判据必须真被某个**已登记**的步骤执行）。缺了后者，"步骤与
+ * 登记项一起删掉"就把一条判据静默摘除了 —— 而那正是本仓 2026-10-05 的现场形态：
+ * `scripts/check-release-notes-migrations.mjs` 只登记进 `check-install-integrity.mjs` 的
+ * `EXECUTION_FACE_REGISTRY`（= 内容不可改写），**没有任何地方会跑它**。
+ * @param file - workflow 文件名。
+ * @param document - 解析后的 YAML。
+ * @param notes - 证据行收集器。
+ * @param registry - SK-15 的登记表（自检经该测试缝注入，`wiredCriteria: []` = 显式关闭）。
+ * @returns 失败项数组。
+ */
+function checkWiredCriteria(file, document, notes, registry = REGISTRY_DEFAULT) {
+  const failures = []
+  const table = Array.isArray(registry.wiredCriteria) ? registry.wiredCriteria : REQUIRED_WIRED_CRITERIA
+  const entries = table.filter(entry => entry.file === file)
+  if (entries.length === 0) return failures
+  const jobs = typeof document?.jobs === 'object' && document.jobs !== null ? document.jobs : {}
+  const steps = []
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const list = Array.isArray(job?.steps) ? job.steps : []
+    list.forEach((step, index) => {
+      if (typeof step?.run !== 'string') return
+      steps.push({
+        jobId,
+        index,
+        name: stepName(step, index),
+        // **命令位**判据（与 SK-20 的 `nodeHits` 同一口径）：`echo "…<脚本>…"` /
+        // `test -f <脚本>` 只是**提到**它，不算执行。
+        script: executableScript(step.run),
+      })
+    })
+  }
+  const registered = registry.steps.filter(item => item.file === file)
+  for (const entry of entries) {
+    // **命令位**判据（与 SK-20 的 `nodeHits` 同一口径）：`echo "…<脚本>…"` /
+    // `test -f <脚本>` 只是**提到**它，不算执行。
+    //
+    // 每个命中点连它的 argv 一起留下：下面要判两件**独立**的事 ——
+    //   ①"至少有一次**真判形态**"（FF-2，2026-10-05：`--self-test` 那种"只跑自检"的调用
+    //     不算，否则真判被删掉之后这条判据照样绿）；
+    //   ②"每个命中步骤都登记过"（按**全部**命中判 —— 这一条不因 ① 的过滤而放宽）。
+    const hits = steps
+      .map(item => ({ item, argvs: commandPositionArgvs(item.script, entry.script) }))
+      .filter(hit => hit.argvs.length > 0)
+    if (hits.length === 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] 登记的"必须接线的判据" \`${entry.script}\` 在 ${file} 里**没有任何步骤**`
+          + '在命令位执行它\n'
+          + `  ⇒ 这是一条**死判据**：它存在、有牙，但没有任何自动路径会跑它（${entry.why}）。\n`
+          + '  修法：把它接到一个真的会执行的步骤上（并把那个步骤登记进 `REGISTERED_RELEASE_STEPS`），'
+          + '或者从 `REQUIRED_WIRED_CRITERIA` 里删掉它并说明为什么不接。',
+      })
+      continue
+    }
+    const judgingHits = hits.filter(hit => hit.argvs.some(argv => !argvIsNonJudging(entry.script, argv)))
+    if (judgingHits.length === 0) {
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] 登记的"必须接线的判据" \`${entry.script}\` 在 ${file} 里**只以自检/清单形态**`
+          + `被命令位执行过（argv 里带了 ${nonJudgingFlagsOf(entry.script).map(flag => `\`${flag}\``).join(' / ')}）\n`
+          + '  ⇒ 真判（不带那个旗标的那次调用）没有任何自动路径会跑它。FF-2（2026-10-05）实测的形态：'
+          + '该脚本的 `--self-test` 只跑**纯函数固定样本**（之后直接 `process.exit`，不读发布说明、'
+          + '不对拍 tag 区间），所以"只跑自检"的命中让这条判据在**看起来仍被钉住**的状态下永久不执行。\n'
+          + `  修法：让那个步骤真的执行一次**不带该旗标**的调用（${entry.why}）。`,
+      })
+    }
+    let allRegistered = true
+    for (const { item: hit } of hits) {
+      if (registered.some(item => item.job === hit.jobId && item.step === hit.name)) continue
+      allRegistered = false
+      failures.push({
+        name: file,
+        line: 0,
+        detail: `[SK-15] job \`${hit.jobId}\` 的步骤「${hit.name}」在命令位执行了 \`${entry.script}\`，`
+          + '但它**没有登记**进 `REGISTERED_RELEASE_STEPS`\n'
+          + '  ⇒ 这一步的 `if:` / `continue-on-error` / 命令载荷没有任何判据读它'
+          + '（给它加一行 `if: false` 就等于把这条判据静默摘掉）。',
+      })
+    }
+    if (allRegistered && judgingHits.length > 0) {
+      notes.push(`[SK-15] 必须接线的判据:\`${entry.script}\` 在 ${file} 的命令位被 `
+        + `${judgingHits.length} 个(已登记的)步骤执行`)
+    }
+  }
+  return failures
+}
+
+/**
  * 发布链步骤的"不可静默跳过 + 效果"判据(2026-09-23 第五轮审计 R5-D-2 / R5-C-6/C-8)。
  *
  * 强制面对(必须登记):
@@ -5413,23 +6116,141 @@ function checkReleaseChainSteps(file, document, notes, registry = REGISTRY_DEFAU
       // **命令位**判据(第九轮审计 B 泳道 P1-4):`require` 里的脚本路径必须是**被执行的**
       // 那条命令。子串匹配下,把 R2 上传步改成 `run: echo "scripts/ci-publish-update-server.sh …"`
       // 就能让"零上传"通过登记(step 名 / if / continue-on-error / env 全部不动)。
-      const satisfied = isCommandRequire(needle)
-        ? commandRequireSatisfied(item.script, needle)
-        : item.script.includes(needle)
-      if (satisfied) continue
+      //
+      // **真判形态**判据(FF-2,2026-10-05):命令位命中还要**至少有一次不带**"只跑自检/只列清单"
+      // 的旗标 —— 否则 `"$node" <脚本> --self-test` 这一行就足以让真判被删掉后仍然满足登记。
+      const commandRequire = isCommandRequire(needle)
+      const state = commandRequire ? commandRequireState(item.script, needle) : null
+      if (commandRequire ? state === 'satisfied' : item.script.includes(needle)) continue
       failures.push({
         name: file,
         line: 0,
-        detail: `[SK-15] ${label} 的可执行文本里缺少 \`${needle}\``
-          + (isCommandRequire(needle)
-            ? '\n  ⇒ 这一条按**命令位**判:登记脚本必须出现在被真的执行的命令上'
-              + `(\`bash ${needle.split(/\s+/u)[0]}\` 这类形态),`
-              + '`echo "…"` / `: …` / `test -f …` 只是**提到**它,不算执行。'
-            : '')
-          + `\n  登记依据:${entry.why}`
-          + '\n  ⇒ "步骤还在"不等于"它还在做那件事"(R5-C-8:把 release_kind 判据换成永不匹配的'
-          + '常量、或把命令换成空转,存在性判据都看不出来)。',
+        detail: state === 'non-judging-only'
+          ? `[SK-15] ${label} 只在命令位执行了 \`${needle}\` 的**自检/清单形态**`
+            + `(argv 里带了 ${nonJudgingFlagsOf(needle).map(flag => `\`${flag}\``).join(' / ')})\n`
+            + '  ⇒ 这一次调用**不做真判**(只跑脚本内部的固定样本/只打印清单)，'
+            + '而真判那次调用一次都没有 ⇒ 把真判那一行删掉之后这条登记照样"命中"。\n'
+            + `  登记依据:${entry.why}`
+          : `[SK-15] ${label} 的可执行文本里缺少 \`${needle}\``
+            + (commandRequire
+              ? '\n  ⇒ 这一条按**命令位**判:登记脚本必须出现在被真的执行的命令上'
+                + `(\`bash ${needle.split(/\s+/u)[0]}\` 这类形态),`
+                + '`echo "…"` / `: …` / `test -f …` 只是**提到**它,不算执行。'
+              : '')
+            + `\n  登记依据:${entry.why}`
+            + '\n  ⇒ "步骤还在"不等于"它还在做那件事"(R5-C-8:把 release_kind 判据换成永不匹配的'
+            + '常量、或把命令换成空转,存在性判据都看不出来)。',
       })
+    }
+    // ---- argv 白名单（FF-B 残留 R1，2026-10-05）------------------------------------
+    //
+    // 只在**真登记表**上启用（`REGISTRY_DEFAULT.stepArgv === true`）：自检的合成登记表
+    // （SK15_SELFTEST_REGISTRY / ff2SelftestRegistry …）与真实发布链无关，强行对账会给
+    // 十几格既有样本制造与样本意图无关的假红 —— 与 `requiredSteps: false` 同一手法。
+    // **开关本身由自检的地板 + 显式断言钉住**（见 `selfTestPoliciesCoverage`），
+    // 关掉它不能静默：整张表会被判"覆盖不足"。
+    if (registry.stepArgv === true) {
+      const declared = (Array.isArray(entry.argv) ? entry.argv : []).map(item => ({
+        script: normalizeScriptTarget(item.script),
+        allow: Array.isArray(item.allow) ? item.allow : [],
+      }))
+      const declaredScripts = new Set(declared.map(item => item.script))
+      // 调用点**只算一次**（两个方向 + 读不懂的载荷共用同一份观测；旧实现每轮各算一次）。
+      const invocations = scriptPathInvocations(item.script)
+      // 方向⓪：内层 shell 载荷 / 包装词实参**读不懂** ⇒ fail-loud（G9 的同族：看不见 ≠ 没有调用）。
+      //
+      // 两种形态的修法不同，所以文案分开（G2，2026-10-05 最终核验 P15-P1）：
+      //   · `readKind === 'wrapper'`：包装词（`nice` / `taskset 5` / `timeout 120` …）的实参
+      //     形状读不懂、没解析出命令头 —— 修法是"把被包装的命令写全"（文案由
+      //     `wrapperProblemHint()` 给出）；
+      //   · 其余：`bash -c` / `eval` 的内层载荷读不懂（变量代换 / 拼接 / 嵌套过深）——
+      //     修法是"把载荷写成单个静态字符串"。
+      for (const invocation of invocations) {
+        if (invocation.unreadable === undefined) continue
+        if (invocation.readKind === 'wrapper') {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-15] ${label} 的命令位**读不懂**（${invocation.via}）：${invocation.unreadable}\n`
+              + `  登记依据:${entry.why}`,
+          })
+          continue
+        }
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] ${label} 把命令交给了另一个 shell(${invocation.via})，但内层载荷**读不懂**：`
+            + `${invocation.unreadable}\n`
+            + '  ⇒ 静态门禁看不见它执行了什么 —— 内层里可能就是被换掉的 `--resolve-only` / `--dry-run` '
+            + '子模式（白名单对载荷形态失效）。请把载荷写成**单个静态字符串**'
+            + '（例:`bash -c \'bash scripts/x.sh --flag\'`),或把命令直接写在 run 块里。\n'
+            + `  登记依据:${entry.why}`,
+        })
+      }
+      // 方向⓪b：白名单**兜底形状**（`['*']` / 首词 `*`）⇒ 红（它让整条判据形同不存在）。
+      for (const decl of declared) {
+        for (const shape of decl.allow) {
+          if (!argvShapeIsBlanket(shape)) continue
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-15] ${label} 的 argv 白名单给 \`${decl.script}\` 登记了**兜底形状** `
+              + `\`${JSON.stringify(shape)}\`\n`
+              + '  ⇒ 它匹配任意单个词/任意子命令，`--resolve-only` / `--dry-run` 这类"只做一半"的'
+              + '子模式会重新变成不可见（这条判据的强度**完全等于**登记表内容）。\n'
+              + '  修法:把逐字形态写全（取值型参数的值位可以用 `*`，但旗标/子命令名必须逐字），'
+              + '例如 `[\'--ref\', \'*\', \'--exclude-tag\', \'*\']`。\n'
+              + `  登记依据:${entry.why}`,
+          })
+        }
+      }
+      // 方向①：**未声明**的 `scripts/**` 命令位调用（新增调用必须进登记表）。
+      for (const invocation of invocations) {
+        if (invocation.script === null) continue
+        if (declaredScripts.has(invocation.script)) continue
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-15] ${label} 在命令位执行了 \`${invocation.script}\`，`
+            + '但这个步骤的 `argv` 白名单里**没有它的形态登记**\n'
+            + '  ⇒ 发布链步骤里新增/替换一条脚本调用必须写进登记表（否则它的 argv 没有任何判据读它，'
+            + '`--dry-run` 这类"只做一半"的子模式可以静默挂上去）。\n'
+            + `  登记依据:${entry.why}`,
+        })
+      }
+      // 方向②：声明的形态必须逐条对上（白名单外的 argv / 死条目都红）。
+      for (const decl of declared) {
+        const hitsAt = []
+        for (const invocation of invocations) {
+          if (invocation.script !== decl.script) continue
+          hitsAt.push(invocation)
+        }
+        if (hitsAt.length === 0) {
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-15] ${label} 的 argv 白名单登记了 \`${decl.script}\`，`
+              + '但这一步**一次都没有**在命令位执行它\n'
+              + '  ⇒ 死条目：脚本被换掉/搬走了（白名单只剩"看起来还在钉"的假象）。'
+              + '删掉这条登记，或把命令改回来。',
+          })
+          continue
+        }
+        for (const invocation of hitsAt) {
+          if (decl.allow.some(shape => argvMatchesShape(invocation.argv, shape))) continue
+          failures.push({
+            name: file,
+            line: 0,
+            detail: `[SK-15] ${label} 调用 \`${decl.script}\` 的 argv **不在白名单里**：`
+              + `\`${[decl.script, ...invocation.argv].join(' ')}\`（${invocation.via}）\n`
+              + `  允许的形态：${decl.allow.map(shape => `\`${[decl.script, ...shape].join(' ')}\``).join(' / ') || '（空）'}\n`
+              + '  ⇒ `require` 只保证"脚本被命令位执行"，**不保证它做的是那件完整的事** ——'
+              + '`--resolve-only` / `--no-mainline` / `--dry-run` 这类功能子模式此前完全不可见'
+              + '（FF-B §5-R1）。确属有意变更请改这里的登记形状（进 diff、可评审）。\n'
+              + `  登记依据:${entry.why}`,
+          })
+        }
+      }
     }
   }
   const unregistered = [...mandatory.entries()].filter(([key]) => !matched.has(key))
@@ -6992,6 +7813,98 @@ function curatedNotesPathProblem(value) {
 }
 
 /**
+ * 可执行文本里**每一处** `test -f` / `[ -f` 的简单命令解析（R26 FIX-X-02）。
+ *
+ * 返回 `{ head, exact, operand, variables }`：`head` 是那一条**简单命令**的原文
+ * （到 `||`/`&&`/`;`/`|`/行尾为止），`exact` = 它是否**恰好**是 `test -f <取值>`
+ * （或 `[ -f <取值> ]`），`operand` 是取值 token。
+ * @param script - 可执行文本（注释已剥）。
+ * @returns 条目数组（按出现顺序）。
+ */
+function curatedNotesFileTests(script) {
+  const text = joinContinuations(String(script ?? ''))
+  const variables = shellStaticVariables(text)
+  const tests = []
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/#.*$/u, '')
+    for (const match of line.matchAll(/(?:test\s+-f|\[\s+-f)\s+/gu)) {
+      // 取这一行里那条**简单命令**：到 `||` / `&&` / `;` / `|` / 行尾为止。
+      // 于是 `test -f A -o -f B` 会把整串取下来（形状判据当场失败），
+      // 而 `test -f A || { … }` 只取到 `test -f A`（这是本仓的正当写法）。
+      const rest = line.slice(match.index)
+      const cut = rest.search(/\|\||&&|;|\|/u)
+      const head = (cut < 0 ? rest : rest.slice(0, cut)).trim()
+      const shape = /^(?:test\s+-f|\[\s+-f)\s+("([^"]*)"|'([^']*)'|(\S+))\s*\]?$/u.exec(head)
+      tests.push({
+        head,
+        exact: shape !== null,
+        operand: shape === null ? '' : (shape[2] ?? shape[3] ?? shape[4] ?? ''),
+        variables,
+      })
+    }
+  }
+  return tests
+}
+
+/**
+ * 一处文件测试解析出的路径文本（解析不出 = `null`）。
+ * @param entry - {@link curatedNotesFileTests} 的条目。
+ * @returns 取值文本；`null` = 读不懂。
+ */
+function curatedNotesTestOperandText(entry) {
+  if (!entry.exact) return null
+  const resolved = resolveShellToken(entry.operand, entry.variables)
+  return resolved.resolvable ? resolved.text : null
+}
+
+/**
+ * 一处文件测试是不是**由 tag 派生且恰好等于** `docs/releases/<tag>.md`。
+ * @param entry - {@link curatedNotesFileTests} 的条目。
+ * @returns `true` = 正是那一份。
+ */
+function isCuratedNotesTagDerivedTest(entry) {
+  const text = curatedNotesTestOperandText(entry)
+  if (text === null) return false
+  return text.replace(/\$\{?(?:TAG|GITHUB_REF_NAME)\}?/gu, '${TAG}') === 'docs/releases/${TAG}.md'
+}
+
+/**
+ * **策展说明门检验的到底是哪个文件**（R26 FIX-X-02）。
+ *
+ * ## 现场（第一版、只判"文本里有没有那一份"）
+ *
+ * `SK-11` 的策展说明门此前只判"可执行文本里同时出现 `docs/releases/`、`test -f`、`exit 1`"
+ * —— 把 `test -f "docs/releases/${GITHUB_REF_NAME}.md"` 改成**恒真**的
+ * `test -f "docs/releases/TEMPLATE.md"` 之后判据**照旧 EXIT=0**（审计 D 泳道实测两处：
+ * `ci.yml` 的 gate 早检与 release job 首步）。而 release job 首步是**承重**的：它排在
+ * "Upload every channel image to the update server (R2)"**之前**，唯一排在其后的第三道检查
+ * （`gh release` 步骤里的 `test -f "${NOTES}"`）在 R2 上传**之后** ⇒ 门被改成恒真 =
+ * 缺说明时客户端更新面先被挂上新版本（不可变长缓存）才轮到红，即"半发布"。
+ *
+ * ## 现场（第二版补的补集：**析取**）
+ *
+ * 第一版是"**存在性**"判据（"文本里至少有一处归一化后等于 `docs/releases/${TAG}.md` 即通过"）
+ * ⇒ `test -f "docs/releases/${GITHUB_REF_NAME}.md" -o -f "docs/releases/TEMPLATE.md" || { … exit 1 }`
+ * 仍然 **EXIT=0**（`-o` 是逻辑或：整行恒真 —— 独立反驳代理实测，bash 实跑证明它恒真）。
+ * 根因同上：判据没有看"**失败路径的守卫条件**到底是不是那一个 test"。
+ *
+ * ## 判据（路径必须**派生自 tag 且恰好等于** `docs/releases/<tag>.md`，且那一处必须是**独立的简单命令**）
+ *
+ * 逐行取 `test -f` / `[ -f` 那一条**简单命令**（到 `||` / `&&` / `;` / `|` / 行尾为止），
+ * 要求它**恰好**是 `test -f <取值>`（或 `[ -f <取值> ]`）—— 多一个 token（`-o`、`-a`、
+ * 第二个 test）就不是"那一处守卫条件"。取值再按同一段可执行文本里的简单赋值展开
+ * （`NOTES=…` + `test -f "${NOTES}"` 照常解析），把
+ * `$TAG`/`${TAG}`/`$GITHUB_REF_NAME`/`${GITHUB_REF_NAME}` 归一成 `${TAG}`，
+ * 断言结果**逐字等于** `docs/releases/${TAG}.md`。
+ * 析取/合取形态由 {@link notesGateLookalikeProblem} 以**具名诊断**判红（不是"没看见"）。
+ * @param script - 步骤的**可执行文本**（注释已剥、续行已合）。
+ * @returns `true` = 至少有一处独立的 `test -f` 检验的正是 `docs/releases/<tag>.md`。
+ */
+function curatedNotesTagDerivedFileTest(script) {
+  return curatedNotesFileTests(script).some(entry => isCuratedNotesTagDerivedTest(entry))
+}
+
+/**
  * 把一个 shell 取值 token 解析成"可静态证明的文本"（变量按脚本内的赋值链展开，深度 ≤ 4）。
  * @param raw - 原始 token（可能带引号、可能是 `$VAR` / `${VAR}`）。
  * @param variables - {@link shellStaticVariables} 的结果。
@@ -8301,10 +9214,195 @@ function normalizeScriptTarget(word) {
   return FROZEN_LAUNCHER_TARGET_ALIASES.get(normalized.trim()) ?? normalized
 }
 
+/**
+ * 「**只跑自检 / 只列清单**」的旗标表（FF-2，2026-10-05）。
+ *
+ * 现场（独立核验代理 FF-2 报告 + 主控三态复现，本文件同一 sha 上复跑一致）：CI 的
+ * `Release notes declare the migrations this tag introduces` 步先跑 `… --self-test`
+ * （只跑脚本内部的纯函数固定样本，`runSelfTest()` 之后直接 `process.exit`）再跑真判。
+ * 而 `commandPositionArgvs` 把**两次**调用都算成"命令位执行了本脚本" ⇒ 把真判那一行删掉、
+ * 只留 `--self-test` 时，`REGISTERED_RELEASE_STEPS` 的 `require` 与
+ * `REQUIRED_WIRED_CRITERIA` **两条接线判据一起保持绿**（实测 `MUT_EXIT=0`）：
+ * 这条判据可以在"看起来仍被钉住"的状态下**永久不执行** —— 正是
+ * `REQUIRED_WIRED_CRITERIA` 自己声称要消灭的那条"死判据"，只是换成了"只跑自检"。
+ *
+ * 判据（**存在性断言**，不是"所有命中都不许带旗标"）：目标脚本的命令位命中里必须
+ * **至少有一次** argv 不含本表的旗标（即一次"真判形态"）。消费者两处：
+ * `commandRequireState()`（`REGISTERED_RELEASE_STEPS[].require`）与
+ * `checkWiredCriteria()`（`REQUIRED_WIRED_CRITERIA`）。合法形态不受影响：`--self-test`
+ * 那行可以留着（本仓 ci.yml 就是"先自检、再真判"两行），只要真判那行还在就是绿。
+ *
+ * 为什么做成**按目标脚本的全局表**、而不是逐条登记项上的字段：逐条登记的默认值是"不检查"，
+ * 下一条登记项一写就又露出同一个盲区（FF-2 的形态本身就是"两条判据共享同一个盲区"）。
+ * 新增一行 = 某个仓内判据脚本多了一个"只跑自检 / 只列清单、不做真判"的旗标；本表的
+ * 行**由样本逐格钉住**（`y1`–`y4`，见 `SELFTEST_REQUIRED_SAMPLES`），删掉任意一行即红。
+ *
+ * 认账边界：本仓另有三个同类旗标 —— `scripts/check-root-guards.mjs --list`（打印清单后
+ * `process.exit(0)`，一个守卫都不跑）、`scripts/check-guard-parser-integrity.mjs
+ * --print-digests`（维护通道，跳过运行级判据）、`scripts/check-install-integrity.mjs
+ * --print-execution-face`（打印登记表后 `return 0`）。它们**已经**由 `[SK-14⑦]` 的
+ * `PINNED_STEP_ARGV_POLICIES` 与 `[SK-14⑩]` 的凭据断言逐字钉住（FF-B 实测：三种变异
+ * 都 EXIT=1，诊断分别落在 `[SK-14]` 与 `[SK-14⑩]`）⇒ 不在这里重复登记（本表的职责是
+ * 给 SK-15 那两处"满足判定"补牙，不是重建一份 argv 白名单）。
+ */
+const NON_JUDGING_ARGV_FLAGS = new Map([
+  ['scripts/check-release-notes-migrations.mjs', ['--self-test']],
+])
+
+/** 目标脚本在"只跑自检/只列清单"那次调用里带的旗标（没登记 = 没有这种旗标）。 */
+function nonJudgingFlagsOf(target) {
+  return NON_JUDGING_ARGV_FLAGS.get(normalizeScriptTarget(target)) ?? []
+}
+
+/**
+ * 这一次命令位命中是不是"只跑自检/只列清单"的形态（argv 里带了本表登记的旗标）。
+ *
+ * 两个消费者：`commandRequireState()`（require 的满足判定 —— 逐个命中的 argv）与
+ * `checkWiredCriteria()`（接线判定 —— 每个命中步骤的每个 argv）。
+ *
+ * @param target - 目标脚本路径。
+ * @param argv - 该命中点**目标之后**的 argv（`commandPositionArgvs` 的取值）。
+ * @returns 是"只跑自检/只列清单"的形态。
+ */
+function argvIsNonJudging(target, argv) {
+  const flags = nonJudgingFlagsOf(target)
+  if (flags.length === 0) return false
+  return argv.some(word => flags.includes(word))
+}
+
 /** 解释器名比较用:取路径最后一段(`/usr/bin/node` 与 `node` 等价)。 */
 function commandHead(word) {
   const parts = word.split('/')
   return parts[parts.length - 1] ?? word
+}
+
+/**
+ * **包装词**（wrapper）—— 命令头前面那些"自己不改变谁被执行、但会吃掉实参"的词。
+ *
+ * 为什么必须建表（收口轮②，独立核验 V-P10P11 的 W11/W12）：
+ * `timeout 120 bash -c 'bash scripts/ci-channels.sh --resolve-only'` 的命令头被判成 `timeout`
+ * （不在解释器词表）⇒ 内层载荷**一次都不被跟进**、argv 白名单静默失效；`nice -n 5 …` 同形。
+ * 这与 V-P4 的 G9 是**同一类**（"两个同样的 token，换个写法就全绿"），而 `timeout 120 …`
+ * 在 CI 里是比 `eval` 更正当的写法。
+ *
+ * 每条登记**实参形状**（哪些选项吃一个取值、吃几个位置实参）：
+ *   · `value` —— 吃一个取值的选项（`timeout -k 5`、`nice -n 5`、`taskset -c 0`、`env -u NAME`）；
+ *   · `operands` —— 位置实参个数（`timeout` 的 DURATION、`taskset`/`chrt` 的 MASK/PRIORITY）；
+ *   · `operandOptional` —— 该位置实参**已经被取值型选项表达过**时可以不吃（`taskset -c 0 bash …`
+ *     里的 `bash` 是**命令头**、不是 MASK）；
+ *   · `assignments` —— 额外吃掉 `NAME=VALUE` 前缀（`env FOO=1 cmd`、`sudo FOO=1 cmd`）；
+ *   · `payloadOption` —— 该选项的值是**另一段 shell 文本**（`env -S '…'`）⇒ 交给调用方递归跟进。
+ *
+ * **读不懂就 fail-loud**（`consumeWrapperArgs` 返回 `unreadable`）：包装词后面没有命令 /
+ * 取值缺失 / 命令头以 `-` 开头（说明形状认错了）都判红 —— 绝不静默把包装词当命令头放过。
+ *
+ * 2026-10-05 最终核验 P15-P1 的 G2 补的是这条规则的**记账面**：包装词把这一段剩下的词
+ * **全部吃光**（`nice` / `command` / `taskset 5` / `chrt 10` / `timeout 120` …）时，
+ * `executedCommands` 里 `command === undefined` 的旧分支会把整条 entry（含 `wrapperProblem`）
+ * 丢掉 ⇒ 上面那句"判红"对十一种形态都不成立（实测全 EXIT=0）。现在该 entry 会被留下，
+ * 由**唯一**消费者 `scriptPathInvocations()` 报出来（调用点在 `checkReleaseChainSteps()` 的
+ * `registry.stepArgv === true` 分支 ⇒ 覆盖面 = **注册了 argv 白名单的发布链步骤**）。
+ *
+ * 认账的边界（本轮实测过、**刻意没有扩面**）：非注册步骤里的同一形态仍不报 —— 把这一面
+ * 推广到"每个 shell 步骤"会把 `exec 2>&1` 这类**重定向-only 的合法写法**（由绿样本 `u49`
+ * 钉住）一起判红，而"吃光"与"只有重定向"在当前词表里分不开。
+ */
+const COMMAND_WRAPPERS = new Map([
+  ['timeout', { value: ['-s', '--signal', '-k', '--kill-after'], operands: 1, operandLabel: 'DURATION' }],
+  ['nice', { value: ['-n', '--adjustment'], operands: 0 }],
+  ['ionice', { value: ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'], operands: 0 }],
+  ['taskset', { value: ['-c', '--cpu-list', '-p', '--pid'], operands: 1, operandOptional: true, operandLabel: 'MASK' }],
+  ['chrt', {
+    value: ['-p', '--pid', '-T', '--sched-runtime', '-P', '--sched-period', '-D', '--sched-deadline'],
+    operands: 1,
+    operandOptional: true,
+    operandLabel: 'PRIORITY',
+  }],
+  ['stdbuf', { value: ['-i', '--input', '-o', '--output', '-e', '--error'], operands: 0 }],
+  ['env', {
+    value: ['-u', '--unset', '-C', '--chdir'],
+    operands: 0,
+    assignments: true,
+    payloadOption: ['-S', '--split-string'],
+  }],
+  ['nohup', { value: [], operands: 0 }],
+  ['setsid', { value: [], operands: 0 }],
+  ['time', { value: ['-o', '--output', '-f', '--format'], operands: 0 }],
+  // `command -v node` 的 `-v` 是**布尔**旗标（吃值会把它后面的 `node` 当命令头吃掉，
+  // 冻结启动器的 `command -v node` 判据会因此失效）—— 这一行刻意留空。
+  ['command', { value: [], operands: 0 }],
+  ['builtin', { value: [], operands: 0 }],
+  ['exec', { value: ['-a'], operands: 0 }],
+  ['sudo', {
+    value: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from',
+      '-T', '--command-timeout', '-r', '--role', '-t', '--type', '-U', '--other-user', '-D', '--chdir',
+      '-R', '--chroot'],
+    operands: 0,
+    assignments: true,
+  }],
+])
+
+/**
+ * 从 `start` 起按 {@link COMMAND_WRAPPERS} 的形状吃掉一个包装词的实参，返回**真正命令头**的位置。
+ *
+ * @param words - 该段的词（`splitShellWords` 的 `.text` 数组）。
+ * @param start - 包装词**之后**的第一个词下标。
+ * @param wrapper - 该包装词的形状。
+ * @returns `{kind:'ok', index, payload?}`（`index` = 命令头下标；`payload` = `env -S` 那种
+ *   内层 shell 文本）| `{kind:'unreadable', reason}`（读不懂 ⇒ 调用方 fail-loud）。
+ */
+function consumeWrapperArgs(words, start, wrapper) {
+  let index = start
+  while (index < words.length && words[index].startsWith('-') && words[index] !== '-') {
+    const option = words[index]
+    index += 1
+    if ((wrapper.payloadOption ?? []).includes(option)) {
+      const text = words[index]
+      if (text === undefined) return { kind: 'unreadable', reason: `\`${option}\` 后面缺少内层脚本文本` }
+      return { kind: 'ok', index: words.length, payload: { label: `${option}`, text } }
+    }
+    if (wrapper.value.includes(option)) {
+      if (index >= words.length) return { kind: 'unreadable', reason: `\`${option}\` 后面缺少取值` }
+      index += 1
+    }
+  }
+  if (wrapper.assignments === true) {
+    while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[index])) index += 1
+  }
+  if (wrapper.operands > 0) {
+    const present = index < words.length && !words[index].startsWith('-')
+    if (!present) {
+      if (wrapper.operandOptional !== true) {
+        return { kind: 'unreadable', reason: `缺少 \`${wrapper.operandLabel}\` 位置实参` }
+      }
+    } else if (wrapper.operandOptional === true) {
+      // 可选位置实参：只有"它后面还跟着一个**非选项词**"时才吃掉它 ——
+      // `taskset -c 0 bash -c '…'` 里的 `bash` 是命令头，不是 MASK。
+      const after = index + 1
+      if (after >= words.length) {
+        // G2（2026-10-05 最终核验 P15-P1 的 G2）：位置实参**吃掉了这一段最后一个词** ⇒ 后面没命令。
+        // 旧实现走下面那条 `return {kind:'ok', index}`，把 MASK/PRIORITY（`taskset 5` / `chrt 10`）
+        // 当成命令头 ⇒ 判据静默绿，而设计意图是"读不懂就 fail-loud"。
+        return {
+          kind: 'unreadable',
+          reason: `\`${words[index]}\` 被当作 \`${wrapper.operandLabel}\` 位置实参吃掉之后，后面没有命令了`,
+        }
+      }
+      if (words[after].startsWith('-')) return { kind: 'ok', index }
+      index += 1
+    } else {
+      index += 1
+    }
+  }
+  // 走到这里 = 包装词把这一段剩下的词**全部吃光**（`timeout 120` / `nice` / `taskset 5` …）
+  // 仍然没找到命令头。G2 的现场就是这条路径：调用方必须 fail-loud，不能当"没有调用"放过。
+  if (index >= words.length) {
+    return { kind: 'unreadable', reason: '包装词的实参吃光了这一段剩下的全部词，后面没有命令' }
+  }
+  if (words[index].startsWith('-')) {
+    return { kind: 'unreadable', reason: `包装词后面的命令头以 \`-\` 开头（${words[index]}）` }
+  }
+  return { kind: 'ok', index }
 }
 
 /**
@@ -8336,23 +9434,34 @@ function executedCommands(script) {
     const words = splitShellWords(cleaned)
     if (words === null) continue
     let index = 0
+    // 被吃掉的前缀词（`env` / `time` / `eval` / …）。`eval` 需要它：
+    // `eval '<内层脚本>'` 里内层文本才是被执行的东西，而前缀词循环会把它抹掉
+    // （见 `scriptPathInvocations`）。
+    const prefixWords = []
+    /** 包装词（`env -S '…'`）带来的内层脚本文本 —— 交给 `scriptPathInvocations` 递归跟进。 */
+    let wrapperPayload
+    /** 包装词实参**读不懂**的原因 —— 调用方据此 fail-loud（绝不静默把包装词当命令头）。 */
+    let wrapperProblem
     while (index < words.length) {
       const word = words[index].text
-      // 前缀词(`env`/`sudo`/`time`/…)、它们的选项、以及 `FOO=bar` 赋值前缀都不改"命令词是谁"。
-      if (EXIT_PREFIX_WORDS.includes(word)) {
-        // **`env` 的"带取值选项"**（第十一轮复审 J1 的 N2 同族）：`-u NAME` / `--unset NAME`
-        // 各自**吃掉一个词**。通用规则只看"以 `-` 开头就跳过"，于是
-        // `env -u CI -u GITHUB_ACTIONS node scripts/…` 的命令词被判成 `CI` ——
-        // 这一步于是**不算执行过那个脚本**，`[SK-14]` 的"命令位"识别与 `[SK-17]` 的步骤体判据
-        // 整条不适用（审计方实测：该形态既不报"没在命令位"，也不报 `unset` 面）。
-        if (word === 'env') {
-          let lookahead = index + 1
-          while (lookahead < words.length && words[lookahead].text.startsWith('-')) {
-            lookahead += (words[lookahead].text === '-u' || words[lookahead].text === '--unset') ? 2 : 1
-          }
-          index = lookahead
-          continue
+      // **包装词**（`timeout`/`nice`/`env`/…）按**实参形状**吃掉自己的实参，再继续找命令头。
+      const wrapper = COMMAND_WRAPPERS.get(word)
+      if (wrapper !== undefined) {
+        prefixWords.push(word)
+        const consumed = consumeWrapperArgs(words.map(item => item.text), index + 1, wrapper)
+        if (consumed.kind === 'unreadable') {
+          wrapperProblem = `\`${word}\` 的实参形状读不懂：${consumed.reason}`
+          // 退回"把包装词当命令头"的旧行为，但**带上问题**（`scriptPathInvocations` 会 fail-loud）。
+          index += 1
+          break
         }
+        if (consumed.payload !== undefined) wrapperPayload = { ...consumed.payload, wrapper: word }
+        index = consumed.payload === undefined ? consumed.index : words.length
+        continue
+      }
+      // 其余前缀词（`eval` 等）：不改"命令词是谁"，但会被记进 `prefixWords`（`eval` 载荷要用）。
+      if (EXIT_PREFIX_WORDS.includes(word)) {
+        prefixWords.push(word)
         index += 1
         continue
       }
@@ -8361,8 +9470,29 @@ function executedCommands(script) {
       break
     }
     const command = words[index]
-    if (command === undefined) continue
-    commands.push({ command: command.text, argv: words.slice(index + 1).map(word => word.text) })
+    if (command === undefined) {
+      // G2（2026-10-05 最终核验 P15-P1）：包装词把这一段剩下的词**吃光**之后（`nice` / `nohup` /
+      // `command` / `exec` / `builtin` / `time` / `stdbuf` / `sudo` / `taskset 5` / `chrt 10` …），
+      // `command` 是 undefined。旧实现在这里无条件 `continue` ⇒ 连同 `wrapperProblem` 一起
+      // **整条 entry 被丢弃** ⇒ 调用方（`scriptPathInvocations` / `checkWrapperReading`）再也
+      // 看不到"读不懂" ⇒ 静默绿。现在必须把这条 entry 留下来：
+      //   · 有内层壳文本（`env -S '…'`）⇒ 留下它让递归跟进（`wrapperProblem` 保持空）；
+      //   · 否则把 `wrapperProblem` 带出去（命令词是**空串**，不会被任何命令位判据误当成目标脚本）。
+      if (wrapperPayload !== undefined) {
+        commands.push({ command: '', argv: [], prefix: prefixWords, wrapperPayload, wrapperProblem: undefined })
+        continue
+      }
+      if (wrapperProblem === undefined) continue
+      commands.push({ command: '', argv: [], prefix: prefixWords, wrapperPayload: undefined, wrapperProblem })
+      continue
+    }
+    commands.push({
+      command: command.text,
+      argv: words.slice(index + 1).map(word => word.text),
+      prefix: prefixWords,
+      wrapperPayload,
+      wrapperProblem,
+    })
   }
   return commands
 }
@@ -8432,22 +9562,276 @@ function rawCommandPositionArgvs(script, target) {
  * @returns 是否满足。
  */
 function commandRequireSatisfied(script, require) {
+  return commandRequireState(script, require) === 'satisfied'
+}
+
+/**
+ * 同上，但返回**三态**（FF-2，2026-10-05）：`require` 被"只跑自检"的调用满足时，报错必须
+ * 说清"不是没接上，而是只跑了自检" —— 否则诊断会把人指向"这一行被删了"的错误方向。
+ *
+ * @param script - 去注释后的可执行文本。
+ * @param require - 登记项（`<脚本> [附加词 …]`）。
+ * @returns `'satisfied'`（至少一次**真判形态**的命中满足附加词）|
+ *   `'non-judging-only'`（命中里只有"只跑自检/只列清单"的形态）|
+ *   `'missing'`（命令位一次都没有，或附加词不匹配）。
+ */
+function commandRequireState(script, require) {
   const words = splitShellWords(require)
-  if (words === null || words.length === 0) return false
+  if (words === null || words.length === 0) return 'missing'
   const [head, ...rest] = words.map(word => word.text)
-  return commandPositionArgvs(script, head).some(argv => {
+  const hits = commandPositionArgvs(script, head)
+  if (hits.length === 0) return 'missing'
+  const matches = argv => {
     let cursor = 0
     for (const word of argv) {
       if (word === rest[cursor]) cursor += 1
       if (cursor === rest.length) break
     }
     return cursor === rest.length
-  })
+  }
+  // 真判形态的命中里至少有一次满足附加词 ⇒ 满足。否则只要**有**命中满足附加词，
+  // 就说明"接是接上了，只是接的是自检那一次"（诊断据此分流）。
+  if (hits.some(argv => matches(argv) && !argvIsNonJudging(head, argv))) return 'satisfied'
+  return hits.some(matches) ? 'non-judging-only' : 'missing'
 }
 
 /** 一个 `require` 是否是"调用某个脚本"那一类(走命令位判据)。 */
 function isCommandRequire(require) {
   return /^\S*scripts\/[\w./-]+\.(?:mjs|sh|ts|js)$/u.test(splitShellWords(require)?.[0]?.text ?? '')
+}
+
+/**
+ * argv 白名单（`REGISTERED_RELEASE_STEPS[].argv`，FF-B 残留 R1，2026-10-05）的两个原语。
+ *
+ * `allow` 里每个**形状**是一个逐词的数组：`*`（{@link ARGV_ANY}）匹配任意**单个**词
+ * （取值型参数的值、`${GITHUB_REF_NAME}` 这类表达式、引号里的多行载荷都算一个词），
+ * 其余必须逐字相等；**词数也必须相等** —— 白名单是"逐字允许的形态"，多一个旗标就不匹配
+ * （这正是"功能子模式"能被看见的原因）。
+ *
+ * 为什么不用"允许旗标集合"那种更松的写法：`ci-channels.sh --list X` 里的 `--list` 与
+ * `--resolve-only` 都是旗标，按集合判就得把前者放行、后者拉黑 —— 那需要维护第二份
+ * "危险旗标清单"，而它必然随脚本演进而漂移。逐词形态不需要知道哪个旗标"危险"。
+ */
+
+/** 白名单形状里的通配词（匹配任意单个词）。 */
+const ARGV_ANY = '*'
+
+/**
+ * 内层 shell 载荷的**最大跟踪深度**（`bash -c 'bash -c "…"'`）。超过即 fail-loud。
+ *
+ * 3 层足够覆盖"打包脚本里再套一层 shell"的现实形态；再深就是刻意堆叠，静态判据宁可
+ * 报"读不懂"也不静默停（停 = 白名单对更深处失效）。
+ */
+const NESTED_SHELL_MAX_DEPTH = 3
+
+/** 会把**内层脚本文本**交给另一个 shell 执行的解释器（`bash -c '…'`）。**不含 `node`**。 */
+const SHELL_PAYLOAD_COMMANDS = ['bash', 'sh', 'dash', 'zsh', 'ksh']
+
+/** 解释器选项里**吃掉一个取值词**的那些（`bash -o pipefail -c '…'` 的 `-o`）。 */
+const SHELL_VALUE_OPTIONS = new Set(['-o', '+o', '--init-file', '--rcfile'])
+
+/** "直接执行**代码载荷**"的选项（`node -e` / `python -c` 家族）：认识但跟不上 ⇒ fail-loud。 */
+const CODE_EVAL_OPTIONS = new Set(['-e', '--eval', '-p', '--print'])
+
+/**
+ * 解释器命令的**内层脚本文本**（见 {@link scriptPathInvocations}）。
+ *
+ * 只认**选项位**上的 `-c`：`bash scripts/x.sh -- bash -c '…'` 里那个 `-c` 是**参数**（
+ * 第一个位置参数已经是脚本），不是选项 —— 这是本仓 `ci-package-clients.sh` 的真实形态，
+ * 把它当成载荷会读出错误结论（那段载荷里含 `${CHANNEL_NOTARIZE}`，会被判"读不懂"）。
+ *
+ * @param argv - 解释器命令词**之后的**词。
+ * @param options - `shell: true` 时才把 `-c`/`--command` 当"执行内层脚本"（`node -c` 是语法检查）。
+ * @returns `{kind:'none'}` | `{kind:'payload', text}` | `{kind:'unreadable', reason}`。
+ */
+function interpreterPayload(argv, { shell }) {
+  let cursor = 0
+  while (cursor < argv.length && argv[cursor].startsWith('-') && argv[cursor] !== '-') {
+    const option = argv[cursor]
+    cursor += 1
+    if (SHELL_VALUE_OPTIONS.has(option)) {
+      cursor += 1
+      continue
+    }
+    // `-c` / `--command` / `-ec` 这类选项簇（簇里出现 `c` 即"下一个词是内层脚本"）。
+    if (shell && (option === '--command' || /^-[A-Za-z]*c[A-Za-z]*$/u.test(option))) {
+      const payload = argv[cursor]
+      if (payload === undefined) return { kind: 'unreadable', reason: `\`${option}\` 后面没有内层脚本文本` }
+      if (/\$\{|\$[A-Za-z_(]|`/u.test(payload)) {
+        return {
+          kind: 'unreadable',
+          reason: `内层脚本文本含未展开的变量/命令替换(\`${payload.trim().slice(0, 60)}\`)，`
+            + '静态无法确定它实际执行什么',
+        }
+      }
+      return { kind: 'payload', text: payload }
+    }
+    if (CODE_EVAL_OPTIONS.has(option)) {
+      return {
+        kind: 'unreadable',
+        reason: `\`${option}\` 是"直接执行**代码载荷**"的形态(JS/Python 载荷按 shell 解析会给出错误结论)`,
+      }
+    }
+  }
+  return { kind: 'none' }
+}
+
+/**
+ * 一个白名单**形状**是不是"兜底放行"（出现即红，见 `checkReleaseChainSteps`）。
+ *
+ * 为什么需要它（独立核验 V-P4 的 G6）：白名单的强度**完全等于登记表内容** —— 把某条
+ * `allow: [[]]` 改成 `allow: [['*']]` 之后，`--resolve-only` 这类功能子模式就落进"任意
+ * 单个词"里，整条判据只剩摘要链在拦（自检当时不查 `allow` 内容）。
+ *
+ * 判据（两条，任一成立即兜底）：
+ *   · **全是通配**（`['*']` / `['*','*']`）：这个形状不约束任何词；
+ *   · **首词是通配**（`['*','--check']`）：子命令/旗标名本身不受约束 ⇒ 同样是"任意子模式都放行"。
+ * 取值**值位**上的通配仍然合法（`['--ref','*','--exclude-tag','*']` 是逐字旗标 + 值通配）。
+ *
+ * @param shape - 登记的形状（元素为字面词或 {@link ARGV_ANY}）。
+ * @returns 是否是兜底形状。
+ */
+function argvShapeIsBlanket(shape) {
+  if (!Array.isArray(shape) || shape.length === 0) return false
+  if (shape.every(word => word === ARGV_ANY)) return true
+  return shape[0] === ARGV_ANY
+}
+
+/**
+ * 一次命令位调用的 argv 是否匹配某个白名单形状。
+ * @param argv - 该次调用**目标脚本之后**的全部词。
+ * @param shape - 登记的形状（元素为字面词或 {@link ARGV_ANY}）。
+ * @returns 是否匹配。
+ */
+function argvMatchesShape(argv, shape) {
+  if (!Array.isArray(argv) || !Array.isArray(shape)) return false
+  if (argv.length !== shape.length) return false
+  return shape.every((word, index) => word === ARGV_ANY || word === argv[index])
+}
+
+/**
+ * 一段脚本里**命令位执行的 `scripts/**` 路径**的全部调用点。
+ *
+ * 与 `commandPositionArgvs(script, 某个目标)` 的分工：那个是"某个已知目标被调了几次"，
+ * 这个是"**有哪些**仓内脚本被调了" —— 用来判"出现了未声明的调用"（白名单的另一个方向）。
+ * 解释器前缀（`bash <脚本>` / `node <脚本>` / 冻结启动器表达式归一成的 `node|bash`）
+ * 与直接命令位（`./scripts/x.sh`）都算；`echo "…scripts/x.sh…"` 不算（不是命令位）。
+ *
+ * ## 内层 shell 载荷（G9，2026-10-05 收口轮）
+ *
+ * 修前的盲区（独立核验 V-P4 的 G9 实测）：`bash -c "bash scripts/ci-channels.sh --resolve-only"`
+ * 里的**命令词是 `bash`、`argv[0]` 是 `-c`** ⇒ 旧实现既看不见内层脚本、也不判它的 argv，
+ * 而同一步里**字面**写第二次调用（G9c）会被白名单咬住 ⇒ "同样的两个 token，换个写法就全绿"。
+ *
+ * 现在按**位置**跟进（不是按模式）：解释器命令的选项位上真的出现 `-c`/`--command`（含
+ * `-ec` 这类簇）时，把紧随其后的那个词当**内层脚本文本**递归解析 —— 内层里再出现的
+ * 命令位调用照样进这张表（深度上限 {@link NESTED_SHELL_MAX_DEPTH} 层，超了 fail-loud）。
+ * `env -S` / `eval` 同族：`eval` 会被 `executedCommands` 当前缀词吃掉，所以按登记的
+ * 前缀词还原出内层文本再递归。
+ *
+ * **读不懂就红**（与 `payloadFromWords` 同口径）：内层文本含未展开的变量/命令替换
+ * （`bash -c "$CMD"`）时静态看不出它执行什么 ⇒ 返回一条 `unreadable` 记录，调用方
+ * fail-loud —— 绝不静默当成"没有调用"。
+ *
+ * 不跟进的两类（**认账的残余面**，写在这里以免被读成"已覆盖"）：
+ *   · `node -e` / `--eval`（JS 载荷）与 `python -c`：它们执行的是**另一种语言**的代码，
+ *     按 shell 解析会给出错误结论 ⇒ 见到即 fail-loud（`CODE_EVAL_OPTIONS`），不假装读懂了；
+ *   · 命令替换 `$(bash scripts/x.sh …)` 与 heredoc 里的调用：不是命令位，本判据面内不判。
+ *
+ * @param script - 去注释后的可执行文本。
+ * @returns `{ script, argv, via, unreadable? }[]`
+ *   （`argv` = 目标脚本之后的词；`via` = 这条命中是经哪条路径看到的；`unreadable` 存在时
+ *   这是一条"读不懂的内层载荷"记录，`script` 为 null）。
+ */
+function scriptPathInvocations(script) {
+  const found = []
+  const walk = (text, via, depth) => {
+    if (depth > NESTED_SHELL_MAX_DEPTH) {
+      found.push({
+        script: null,
+        argv: [],
+        via,
+        unreadable: `内层 shell 载荷嵌套超过 ${NESTED_SHELL_MAX_DEPTH} 层`,
+      })
+      return
+    }
+    for (const entry of executedCommands(text)) {
+      // 包装词实参**读不懂** ⇒ fail-loud（`timeout`/`nice`/… 的实参形状认不出时，
+      // 到底跑什么静态判不了 —— 绝不静默当成"没有调用"）。
+      //
+      // G2（2026-10-05 最终核验 P15-P1）：这一支同时覆盖"包装词把这一段剩下的词**吃光**"的
+      // 那一族（`nice` / `command` / `taskset 5` / `chrt 10` …）—— 修前那些 entry 会在
+      // `executedCommands` 的 `command === undefined` 分支被整条丢弃，这里一次都到不了。
+      // 文案统一走 `wrapperProblemHint()`（含可行动修法），并用 `readKind` 让调用方
+      // 区分"包装词读不懂"与"内层 `-c` 载荷读不懂"（两者的修法不同）。
+      if (entry.wrapperProblem !== undefined) {
+        const wrapperWord = entry.prefix[entry.prefix.length - 1] ?? entry.command
+        found.push({
+          script: null,
+          argv: [],
+          via: `${via} > ${wrapperWord}`,
+          unreadable: wrapperProblemHint(entry),
+          readKind: 'wrapper',
+        })
+        continue
+      }
+      // 包装词带来的内层 shell 文本（`env -S '…'`）：按 shell 文本递归跟进。
+      if (entry.wrapperPayload !== undefined) {
+        walk(entry.wrapperPayload.text, `${via} > ${entry.wrapperPayload.wrapper} ${entry.wrapperPayload.label}`, depth + 1)
+        continue
+      }
+      const direct = normalizeScriptTarget(entry.command)
+      if (isCommandRequire(direct)) {
+        found.push({ script: direct, argv: entry.argv, via })
+        continue
+      }
+      // `eval '<内层脚本>'`：`eval` 是前缀词（`EXIT_PREFIX_WORDS`）⇒ 命令词已经是内层文本的
+      // 第一个词。把"命令词 + 其余词"拼回文本再递归（引号串形态下命令词就是整段文本）。
+      if ((entry.prefix ?? []).includes('eval')) {
+        walk([entry.command, ...entry.argv].join(' '), `${via} > eval`, depth + 1)
+        continue
+      }
+      if (!SHELL_INTERPRETER_COMMANDS.includes(commandHead(direct))) continue
+      const payload = interpreterPayload(entry.argv, {
+        shell: SHELL_PAYLOAD_COMMANDS.includes(commandHead(direct)),
+      })
+      if (payload.kind === 'unreadable') {
+        found.push({ script: null, argv: [], via: `${via} > ${commandHead(direct)}`, unreadable: payload.reason })
+        continue
+      }
+      if (payload.kind === 'payload') {
+        walk(payload.text, `${via} > ${commandHead(direct)} -c`, depth + 1)
+        continue
+      }
+      const target = normalizeScriptTarget(entry.argv[0] ?? '')
+      if (!isCommandRequire(target)) continue
+      found.push({ script: target, argv: entry.argv.slice(1), via })
+    }
+  }
+  walk(script, '命令位', 0)
+  return found
+}
+
+/**
+ * 包装词实参**读不懂**时的可行动文案（G2，2026-10-05 最终核验 P15-P1）。
+ *
+ * 这一族形态（`nice` / `command` / `taskset 5` / `chrt 10` / `timeout` 后面没有命令…）的共同点：
+ * 包装词把这一段剩下的词吃光/吃错之后，`executedCommands` **没有解析出命令头**。
+ * 它既可能什么都不跑，也可能把真实命令藏在一个没被认出来的形态里 —— 两种都不该静默放过。
+ *
+ * @param entry - `executedCommands()` 的一条记录（`wrapperProblem` 必须存在）。
+ * @returns 可行动的多行文案（调用方负责加上"哪个文件/job/步骤"的定位前缀）。
+ */
+function wrapperProblemHint(entry) {
+  const word = entry.prefix[entry.prefix.length - 1] ?? '包装词'
+  return `${entry.wrapperProblem}\n`
+    + `  ⇒ 静态门禁读不出这一段到底执行了什么：\`${word}\` 的实参形状没有被识别，`
+    + '`executedCommands` 因此**没有解析出命令头** —— 按"没有调用"放过就是静默绿（G2 实测：'
+    + '`nice` / `nohup` / `setsid` / `command` / `exec` / `builtin` / `time` / `stdbuf` / `sudo` / '
+    + '`taskset 5` / `chrt 10` 十一种形态全部 EXIT=0）。\n'
+    + '  修法：把被包装的真实命令写在包装词后面（例：`nice -n 5 bash scripts/x.sh --flag`、'
+    + '`taskset -c 0 bash scripts/x.sh`），或去掉这个不需要的包装词；'
+    + '确实是新的包装词形态时，把它连**实参形状**一起登记进 `COMMAND_WRAPPERS`。'
 }
 
 /** 根守卫运行脚本是否出现在命令位;返回未命中的原因(命中返回 null)。 */
@@ -9995,13 +11379,52 @@ function checkReleaseSurface(file, document, text, notes) {
   if (!/gh\s+release\s+(?:create|edit|upload)|ci-release-policy\.sh/u.test(text) && !writesReleaseViaApi) {
     return failures
   }
-  /** 策展发布说明的 fail-loud:判据必须落在**可执行文本**上(注释不算)。 */
+  /**
+   * 策展发布说明的 fail-loud:判据必须落在**可执行文本**上(注释不算),
+   * 且它检验的**必须是由 tag 派生的那一份** `docs/releases/<tag>.md`(R26 FIX-X-02:
+   * 只判"文本里有 `docs/releases/` + `test -f` + `exit 1`"时,把路径换成恒真的
+   * `docs/releases/TEMPLATE.md` 仍 EXIT=0 —— 那道门就消失了)。
+   */
   const isNotesGate = step => {
     if (typeof step?.run !== 'string') return false
     const script = executableScript(step.run)
-    return /docs\/releases\//u.test(script)
-      && /(?:test\s+-f|\[\s+-f)/u.test(script)
-      && /exit\s+1/u.test(script)
+    return curatedNotesTagDerivedFileTest(script) && /exit\s+1/u.test(script)
+  }
+  /**
+   * **"长得像策展说明门、但检验的不是那一份文件"**的具名诊断（R26 FIX-X-02 的第二半）。
+   *
+   * 为什么单独一条：只靠 {@link isNotesGate} 变成 `false`，"路径被换掉"这件事会退化成
+   * **位置关系的下游后果**（"策展说明检查排在上传之后"），诊断指不到病根；而且当被换掉的
+   * 是门本身、位置关系恰好不违反时（例如两处都换、或合成树里只有一段），它可能整格不开口。
+   * 这条判据只看"形态像门 + 取值不是 tag 派生的" ⇒ 无论换到哪个 job、哪一步都当场红。
+   * @param step - workflow 步骤。
+   * @returns `null` = 不是"像门但检验别的文件"；否则是人读的原因。
+   */
+  const notesGateLookalikeProblem = step => {
+    if (typeof step?.run !== 'string') return null
+    const script = executableScript(step.run)
+    if (!/docs\/releases\//u.test(script)) return null
+    if (!/exit\s+1/u.test(script)) return null
+    const tests = curatedNotesFileTests(script)
+    if (tests.length === 0) return null
+    // 只看**与策展说明有关**的那些文件测试：取值（或那一行）提到 `docs/releases/`。
+    // 其它文件测试（`test -f "release-bundle/…"` 这类）不在这条判据的面内。
+    const curated = tests.filter(entry => entry.head.includes('docs/releases/')
+      || (curatedNotesTestOperandText(entry) ?? '').includes('docs/releases/'))
+    if (curated.length === 0) return null
+    const offenders = curated.filter(entry => !isCuratedNotesTagDerivedTest(entry))
+    if (offenders.length === 0) return null
+    return '文本里有 `docs/releases/`、文件测试与 `exit 1`（**长得像**策展说明门），'
+      + '但下面这几处文件测试**不是**"由 tag 派生且恰好等于 `docs/releases/<tag>.md`"的独立简单命令：\n'
+      + offenders.map(entry => `        \`${entry.head}\``).join('\n')
+      + '\n  ⇒ R26 FIX-X-02：换成永远存在的 `docs/releases/TEMPLATE.md`、或者用 `-o`/`||` 把'
+      + ' tag 那份与一个恒真条件**并列**（`test -f "docs/releases/${GITHUB_REF_NAME}.md" -o -f '
+      + '"docs/releases/TEMPLATE.md"`）之后，这道门就恒真了 ——'
+      + '缺说明时不会红，而这正是"半发布"要拦的形态：release job 首步一旦恒真，'
+      + '客户侧更新面会先被挂上新版本。\n'
+      + '  ⇒ 判据要求那一处守卫条件**恰好**是 `test -f "docs/releases/<tag>.md"`'
+      + '（允许多一层同脚本内的变量间接，如 `NOTES="docs/releases/${TAG}.md"` + `test -f "${NOTES}"`），'
+      + '不接受析取/合取并列。'
   }
   // 能力级(2026-09-23 第五轮审计 R5-C-6):不再是"4 条登记命令",而是
   // "任何真的能写远端对象存储/发布面的步骤"(见 REMOTE_WRITE_CAPABILITIES)。
@@ -10021,6 +11444,18 @@ function checkReleaseSurface(file, document, text, notes) {
     const fullGateIndexes = position(steps, step => typeof step?.run === 'string'
       && /(?:^|[;&|(\n]|\$\()\s*(?:corepack\s+yarn|yarn)\s+check(?![\w:-])/u.test(executableScript(step.run)))
 
+    // ⓪ "像门但不是门"（R26 FIX-X-02 的第二半）：先把"长得像策展说明门、检验的却是别的文件"
+    //    这一步直接点名，再去判位置关系 —— 否则诊断会退化成下游后果（见该函数的注释）。
+    steps.forEach((step, index) => {
+      const lookalike = notesGateLookalikeProblem(step)
+      if (lookalike !== null) {
+        failures.push({
+          name: file,
+          line: 0,
+          detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」${lookalike}`,
+        })
+      }
+    })
     // ① 对外上传之前必须有一道 fail-loud(C-CI-2 的半发布窗口)。
     if (uploadIndexes.length > 0) {
       if (notesIndexes.length === 0) {
@@ -10088,7 +11523,15 @@ function checkReleaseSurface(file, document, text, notes) {
 
   // ③ `gh release create|edit` 的参数语义(C-CI-3:旧实现是整段 YAML 子串匹配,
   //    把关键行注释掉仍 EXIT=0;等价的 `--title "$TAG"` 反而被判红)。
-  const TAG_REF = /\$\{?(?:TAG|GITHUB_REF_NAME)\b\}?/u
+  //
+  //    **R26 FIX-X-01**:取值必须**恰好**是 tag 引用 —— 修前这里是**无锚**正则的 `.test()`,
+  //    于是 `--title "PicoAide Harness ${TAG}"`(正是 2026-09-11 定案要消灭的前缀回归)
+  //    静默通过(审计 D 泳道实测:两处 create/edit 都改掉仍 EXIT=0)。v2.8.1 的同一处是
+  //    **字面量**判定(`!step.run.includes('--title "${TAG}"')`),那时的前缀形态是红的
+  //    ⇒ 这是本段引入的 IN-RANGE 回归:修好了"注释里写一行就绿",顺手放进了"值里加前缀"。
+  //    允许的等价写法只有四种(带/不带花括号 × `TAG`/`GITHUB_REF_NAME`);前后任何字符
+  //    (前缀、后缀、空白)都不是"tag 本身" ⇒ 红。
+  const TAG_REF = /^\$\{?(?:TAG|GITHUB_REF_NAME)\}?$/u
   for (const [jobId, job] of Object.entries(jobs)) {
     const steps = Array.isArray(job?.steps) ? job.steps : []
     steps.forEach((step, index) => {
@@ -10138,7 +11581,9 @@ function checkReleaseSurface(file, document, text, notes) {
             detail: `[SK-11] job ${jobId} 的 step「${stepName(step, index)}」里 \`gh release ${match[1]}\` 的 Release 名不是 tag 本身`
               + `(实际 --title 取值:${titleValue === undefined ? '缺失' : titleValue})`
               + '\n  ⇒ Releases 页左侧列表宽度固定,长名会被截断成 "PicoAide Harness v2.6…",同页版本号全部不可见。'
-              + '必须 `--title` 且取值引用 tag 变量(`${TAG}` / `$TAG` / `${GITHUB_REF_NAME}` 都接受)。',
+              + '必须 `--title` 且取值**恰好**是 tag 变量本身(`${TAG}` / `$TAG` / '
+              + '`${GITHUB_REF_NAME}` / `$GITHUB_REF_NAME`;前后不得有别的内容 —— '
+              + '`"PicoAide Harness ${TAG}"` 这种前缀形态在旧实现下会静默通过,R26 FIX-X-01 收口)。',
           })
         }
         if (!/exit\s+[1-9]/u.test(script)) {
@@ -12074,6 +13519,7 @@ export function selfTestPolicies() {
     stepIf = 'true',
     stepContinueOnError = false,
     stepRun = 'bash scripts/ci-release-policy.sh',
+    stepRunBlock = null,
     extraJob = false,
     dropStep = false,
     extraSteps = [],
@@ -12092,7 +13538,10 @@ export function selfTestPolicies() {
       '      - name: Gate',
       ...(stepIf === null ? [] : [`        if: ${stepIf}`]),
       ...(stepContinueOnError ? ['        continue-on-error: true'] : []),
-      `        run: ${stepRun}`,
+      // `stepRunBlock` = 多行 `run: |`（FF-2 的样本要"先自检、再真判"两行并列）。
+      ...(stepRunBlock === null
+        ? [`        run: ${stepRun}`]
+        : ['        run: |', ...stepRunBlock.map(line => `          ${line}`)]),
     ]),
     ...extraSteps.map(line => `      ${line}`),
     ...(extraJob ? [
@@ -12129,6 +13578,179 @@ export function selfTestPolicies() {
   sk15Sample('x8b-release-require-command-green', sk15Workflow({
     stepRun: 'bash scripts/ci-release-policy.sh --list channels.list',
   }), null)
+
+  // ---- FF-2(2026-10-05,独立核验代理 FF-2 + 主控三态复现)----
+  //
+  // 现场:ci.yml 的 `Release notes declare the migrations this tag introduces` 步先跑
+  // `… --self-test`(只跑脚本内部的纯函数固定样本,之后直接 `process.exit`)再跑真判。而
+  // `commandPositionArgvs` 把**两次**调用都算成"命令位执行了本脚本" ⇒ 把真判那一行删掉、
+  // 只留 `--self-test` 时,`REGISTERED_RELEASE_STEPS` 的 `require` 与 `REQUIRED_WIRED_CRITERIA`
+  // **一起保持绿**(主控复现:BASE=0 / 删真判=0 / 两个正控=1 / 反过来只删自检=0)。
+  // 下面四格把"真判形态"钉成显式判据 —— 修前 y1 与 y4 的期望都不成立(前者绿、后者本就是红)。
+  const FF2_SCRIPT = SK15_WIRED_SELFTEST_SCRIPT
+  expect(REQUIRED_WIRED_CRITERIA.some(entry => entry.script === FF2_SCRIPT),
+    `自检:FF-2 的样本钉的是真实登记项 \`${FF2_SCRIPT}\`,但它已经不在 REQUIRED_WIRED_CRITERIA 里了`
+      + ' ⇒ 要么把样本改到新的登记项上,要么这条"必须接线"的判据被静默摘掉了(那正是 FF-2 要防的形态)。')
+  const ff2Sample = (id, lines, expectation = '[SK-15]', registry = ff2SelftestRegistry()) => {
+    // 块标量必须在块首声明退出语义（[SK-7]）—— 与 ci.yml 的真实形态一致。
+    const raw = sk15Workflow({ stepRunBlock: ['set -euo pipefail', ...lines] })
+    return expectation === null
+      ? expectGreen(id, [], { file: 'selftest.yml', raw, registries: registry })
+      : expectRed(id, expectation, [], { file: 'selftest.yml', raw, registries: registry })
+  }
+  // 红:只剩自检形态(真判那一行被删掉)—— **修前这一格是绿的**(FF-2 的盲区)。
+  ff2Sample('y1-wired-selftest-only', [`node ${FF2_SCRIPT} --self-test`])
+  // 绿(反向对照):只留真判 —— 不许"一刀切成必须两行都在"把合法形态判红。
+  ff2Sample('y2-wired-real-judge-only-green', [`node ${FF2_SCRIPT}`], null)
+  // 绿:两行都在(本仓 ci.yml 的真实形态:`--self-test` 当额外样本,真判是判据本体)。
+  ff2Sample('y3-wired-both-green', [`node ${FF2_SCRIPT} --self-test`, `node ${FF2_SCRIPT}`], null)
+  // 红:`echo` 形态(连命令位都不算)—— 与"真判形态"正交的那一半,防止新断言把旧的命令位判据换掉。
+  ff2Sample('y4-wired-echo-only', [`echo "${FF2_SCRIPT}"`])
+  // 红(只钉**接线**路径):`require` 由另一条真的执行了的脚本满足,所以只有
+  // `checkWiredCriteria` 的真判过滤能报出来 —— 单独删掉那一半 = 这一格转绿 = 自检红。
+  ff2Sample('y5-wired-only-selftest', [
+    'bash scripts/ci-release-policy.sh',
+    `node ${FF2_SCRIPT} --self-test`,
+  ], '[SK-15]', ff2SelftestRegistry({ wired: true, required: false }))
+  // 红(只钉**require**路径):本文件不适用 `wiredCriteria`,只有 `commandRequireState` 能报出来。
+  ff2Sample('y6-require-only-selftest', [`node ${FF2_SCRIPT} --self-test`],
+    '[SK-15]', ff2SelftestRegistry({ wired: false, required: true }))
+
+  // ---- FF-B 残留 R1(2026-10-05):发布链步骤的 **argv 白名单** ----
+  //
+  // 现场(FF-B §5-R1):`require` 只有"附加词**必须出现**"这一种表达力,没有"**禁止**功能性
+  // 旗标"的表达力 ⇒ 把 release job 的取包步换成 `bash scripts/ci-channels.sh --resolve-only`
+  // (只解析 pin、不落盘渠道包)、把 topology 步换成 `--no-mainline`,两条接线判据**一起保持绿**。
+  // 下面五个反例格钉三条失败面(白名单外 argv / 死条目 / 未声明调用),两个正例格防过度收紧。
+  const argvSample = (id, lines, expectation, registry) => {
+    const raw = sk15Workflow({ stepRunBlock: ['set -euo pipefail', ...lines] })
+    return expectation === null
+      ? expectGreen(id, [], { file: 'selftest.yml', raw, registries: registry })
+      : expectRed(id, expectation, [], { file: 'selftest.yml', raw, registries: registry })
+  }
+  /**
+   * 合成登记表:一个 job `verify` + 一个步骤 `Gate`,带 `argv` 白名单与**对账开关**
+   * (`stepArgv: true` —— 真登记表用同一个开关,见 `REGISTRY_DEFAULT`)。
+   * `withArgv: false` 用来构造"这一步没有 argv 声明"(方向①的现场)。
+   */
+  const argvRegistry = (allow, { script = 'scripts/ci-channels.sh', withArgv = true } = {}) => ({
+    files: ['selftest.yml'],
+    ...SELFTEST_RUNS_ON_REGISTRY,
+    jobs: [{
+      file: 'selftest.yml', job: 'verify', ifPolicy: 'exact', ifValue: 'true', why: '合成样本:argv 白名单',
+    }],
+    steps: [{
+      file: 'selftest.yml',
+      job: 'verify',
+      step: 'Gate',
+      ifPolicy: 'exact',
+      ifValue: 'true',
+      require: [script],
+      ...(withArgv ? { argv: [{ script, allow }] } : {}),
+      why: '合成样本(FF-B R1):发布链步骤的 argv 必须落在登记形状里',
+    }],
+    remoteWrites: [],
+    stepArgv: true,
+  })
+  // 红:FF-B R1 的**原始形态** —— 取包步被换成 `--resolve-only`(白名单只允许裸调用)。
+  argvSample('z1-release-step-resolve-only', ['bash scripts/ci-channels.sh --resolve-only'],
+    '[SK-15]', argvRegistry([[]]))
+  // 红:同族第二种 —— topology 步被换成 `--no-mainline`(真实形状之外的功能子模式)。
+  argvSample('z2-topology-no-mainline', ['bash scripts/ci-release-topology.sh --no-mainline'],
+    '[SK-15]', argvRegistry([['--ref', '*', '--exclude-tag', '*']], { script: 'scripts/ci-release-topology.sh' }))
+  // 红:"只做一半"的未知旗标(真实形状逐字正确,只多一个 `--dry-run`)。
+  argvSample('z3-release-step-dry-run', ['bash scripts/ci-publish-update-server.sh --list channels.list --dry-run'],
+    '[SK-15]', argvRegistry([['--list', '*']], { script: 'scripts/ci-publish-update-server.sh' }))
+  // 红:死条目 —— 登记了 `ci-channels.sh`,但这一步一次都没在命令位调它。
+  argvSample('z4-argv-dead-entry', ['bash scripts/ci-release-policy.sh'],
+    '[SK-15]', argvRegistry([[]]))
+  // 红:未声明的脚本调用(步骤里多调了一个仓内脚本)—— 没有它,"新增一条脚本调用"是静默的。
+  argvSample('z5-argv-undeclared-script',
+    ['bash scripts/ci-channels.sh', 'bash scripts/ci-release-policy.sh'],
+    '[SK-15]', argvRegistry([[]]))
+  // 绿(反向对照):形状逐字命中(取值型参数用 `*` 通配)—— 不许把本仓的真实形态判红。
+  argvSample('z6-argv-exact-shape-green', ['bash scripts/ci-publish-update-server.sh --list channels.list'],
+    null, argvRegistry([['--list', '*']], { script: 'scripts/ci-publish-update-server.sh' }))
+  // 绿(反向对照):多行引号载荷那一种形状(它是**一个**词,所以形状长度固定为 12)。
+  // 脚本名用**合成**路径:本格只验形状匹配,而真实路径 `ci-package-clients.sh` + `*.dmg`
+  // 会连带触发"渠道 DMG 必须带公证三元组"那条**另一条**策略(与本格意图无关的假红)。
+  argvSample('z7-argv-payload-shape-green',
+    ["bash scripts/example-pack-clients.sh --skip-official --dist d --list l --stage-dir s --patterns '*.dmg' -- bash -c 'x'"],
+    null,
+    argvRegistry(
+      [['--skip-official', '--dist', '*', '--list', '*', '--stage-dir', '*', '--patterns', '*', '--', 'bash', '-c', '*']],
+      { script: 'scripts/example-pack-clients.sh' },
+    ))
+  // ---- 收口轮（2026-10-05 G9 独立核验 P1）：**内层 shell 载荷**与**兜底形状** ----
+  //
+  // 现场（V-P4 的 G9/G9b/G9c）：同一步里 `bash scripts/ci-channels.sh`（合法）+
+  // `bash -c "bash scripts/ci-channels.sh --resolve-only"`（削弱）⇒ 旧实现 EXIT=0，
+  // 而**字面**写第二次调用（G9c）会被咬住 —— 差别只在"命令词是 `bash`、`argv[0]` 是 `-c`"。
+  // 下面三格：①载荷里的调用必须与字面调用同判；②载荷**读不懂**必须 fail-loud；
+  // ③兜底形状 `['*']`（G6：把某条 allow 放宽成通配 ⇒ 白名单形同不存在）必须红；
+  // ④反向对照：载荷形态**逐字登记正确**时不许判红（防"一刀切禁掉载荷"）。
+  argvSample('z8-nested-shell-payload-argv',
+    ['bash scripts/ci-channels.sh', 'bash -c "bash scripts/ci-channels.sh --resolve-only"'],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z9-nested-payload-unreadable',
+    ['bash scripts/ci-channels.sh', 'bash -c "${SPLIT_MODE}"'],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z10-argv-blanket-shape',
+    ['bash scripts/ci-channels.sh --resolve-only'],
+    '[SK-15]', argvRegistry([['*']]))
+  argvSample('z11-nested-payload-registered-green',
+    ['bash scripts/ci-channels.sh', 'bash -c "bash scripts/ci-channels.sh --resolve-only"'],
+    null, argvRegistry([[], ['--resolve-only']]))
+  argvSample('z12-argv-leading-wildcard-shape',
+    ['bash scripts/ci-channels.sh check --resolve-only'],
+    '[SK-15]', argvRegistry([['*', '--resolve-only']]))
+  // ---- 收口轮②（V-P10P11 的 W11/W12）：**包装词**（`timeout`/`nice`/…）前缀 ----
+  //
+  // 现场：`timeout 120 bash -c '…--resolve-only'` 的命令头被判成 `timeout` ⇒ 内层载荷一次都不被
+  // 跟进、白名单静默失效（`nice -n 5 …` 同形）。下面两格：①包装词后的载荷必须与字面调用同判；
+  // ②反向对照 —— **不带 `-c`** 的正当包装写法（`timeout 120 bash <脚本>`）不许判红。
+  argvSample('z13-wrapper-prefixed-payload',
+    ['bash scripts/ci-channels.sh', "timeout 120 bash -c 'bash scripts/ci-channels.sh --resolve-only'"],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z14-wrapper-without-payload-green',
+    ['timeout 120 bash scripts/ci-channels.sh'],
+    null, argvRegistry([[]]))
+  // ---- 收口轮③（2026-10-05 最终核验 P15-P1 的 G2）：包装词**吃光剩余词** ⇒ 必须 fail-loud ----
+  //
+  // 现场：报告写着"包装词后面没有命令 ⇒ fail-loud"，但 `executedCommands` 的
+  // `const command = words[index]; if (command === undefined) continue` 把这类 entry
+  // **连同 `wrapperProblem` 整条丢弃** ⇒ 十一种形态（`nice` / `nohup` / `setsid` / `command` /
+  // `exec` / `builtin` / `time` / `stdbuf` / `sudo` 单独出现，`taskset 5`、`chrt 10`）**全部 EXIT=0**；
+  // 只有"后面还剩词"的 `timeout 120` 会红。下面四格把"吃光"的两条路径都钉住：
+  //   ① 裸包装词（`nice` / `command`）—— 包装词就是这一步的最后一个词；
+  //   ② 位置实参吃掉最后一个词（`taskset 5` / `chrt 10`）—— `consumeWrapperArgs` 的
+  //      `operandOptional` 分支曾把 MASK/PRIORITY 当成命令头。
+  // 变异验证：把 `command === undefined` 分支改回无条件 `continue` ⇒ 这四格一起转绿 ⇒ 自检红。
+  argvSample('z15-wrapper-eats-all-bare-nice',
+    ['bash scripts/ci-channels.sh', 'nice'],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z16-wrapper-eats-all-bare-command',
+    ['bash scripts/ci-channels.sh', 'command'],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z17-wrapper-eats-all-taskset-operand',
+    ['bash scripts/ci-channels.sh', 'taskset 5'],
+    '[SK-15]', argvRegistry([[]]))
+  argvSample('z18-wrapper-eats-all-chrt-priority',
+    ['bash scripts/ci-channels.sh', 'chrt 10'],
+    '[SK-15]', argvRegistry([[]]))
+  // 绿样本（反向对照）：正当的"包装词 + 真命令"必须仍然放行 —— 修 G2 不许把包装词一刀切禁掉。
+  // `nice -n 5` 吃一个取值、`taskset -c 0` 走"可选位置实参"的**正常**分支（后面跟着命令头）。
+  argvSample('z19-wrapper-real-command-nice-green',
+    ['nice -n 5 bash scripts/ci-channels.sh'],
+    null, argvRegistry([[]]))
+  argvSample('z20-wrapper-real-command-taskset-green',
+    ['taskset -c 0 bash scripts/ci-channels.sh'],
+    null, argvRegistry([[]]))
+  // 绿样本：包装词后面跟**冻结启动器表达式**的正当形态（V-P15P1 §1.1 的反向对照里点名的写法）
+  // —— 归一化后命令头是解释器、argv 白名单照常命中，不许因为"命令词长得不像路径"误伤。
+  argvSample('z21-wrapper-real-command-interp-green',
+    ['nice -n 5 "${{ steps.frozen-launchers.outputs.interp }}" scripts/ci-channels.sh'],
+    null, argvRegistry([[]]))
 
   // ---- 策略 6([SK-10]):docs-only 分类器的规则逐条钉死 ----
   const CLASSIFIER_SHAPE = ({ cases, failsafes = 3, jobIf = '' } = {}) => [
@@ -12205,13 +13827,27 @@ export function selfTestPolicies() {
     gateFirst = true,
     titleFlag = '--title "${TAG}"',
     notesFlag = '${NOTES_FLAG}',
+    // R26 FIX-X-02:策展说明门**检验的是哪个文件**。缺省 = 由 tag 派生的那一份;
+    // 样本用 `docs/releases/TEMPLATE.md` 等形态证明"换路径"必红。
+    notesPath = 'docs/releases/${GITHUB_REF_NAME}.md',
+    // 间接形态样本用:在 `test -f` 之前插入一行变量赋值(`NOTES_PATH="docs/releases/${TAG}.md"`)。
+    notesAssignment = '',
     // 第十一轮审计 C2-A-01/A-02 的样本入口:`with:` 之外还要能改"写 Release 的那一行/那一段"
     // （命令替换来源、`gh api` 写正文、把命令名藏进数组）。
     releaseWrite = null,
     // 2026-09-23 第五轮审计 R5-C-3:策展说明判据不得被"只对正式版"的条件收窄。
     gateNotesIf = '',
     triggers = ['pull_request', 'push'],
-  } = {}) => [
+  } = {}) => {
+    /** 策展说明门的三行（赋值(可选) + `test -f` + fail-loud）。 */
+    const notesGateLines = [
+      ...(notesAssignment === '' ? [] : [`          ${notesAssignment}`]),
+      `          test -f "${notesPath}" || {`,
+      '            echo "::error::missing curated notes"',
+      '            exit 1',
+      '          }',
+    ]
+    return [
     'name: selftest',
     'on:',
     ...triggers.map(trigger => `  ${trigger}:`),
@@ -12228,10 +13864,7 @@ export function selfTestPolicies() {
       ...(gateNotesIf === '' ? [] : [`        if: ${gateNotesIf}`]),
       '        run: |',
       '          set -euo pipefail',
-      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
-      '            echo "::error::missing curated notes"',
-      '            exit 1',
-      '          }',
+      ...notesGateLines,
     ] : []),
     '      - run: yarn check',
     ...wasmProbeLines('full'),
@@ -12239,10 +13872,7 @@ export function selfTestPolicies() {
       '      - name: Require curated release notes for release tags',
       '        run: |',
       '          set -euo pipefail',
-      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
-      '            echo "::error::missing curated notes"',
-      '            exit 1',
-      '          }',
+      ...notesGateLines,
     ] : []),
     '  release:',
     '    runs-on: ubuntu-latest',
@@ -12255,10 +13885,7 @@ export function selfTestPolicies() {
       '      - name: Require curated release notes before any upload',
       '        run: |',
       '          set -euo pipefail',
-      '          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {',
-      '            echo "::error::missing curated notes"',
-      '            exit 1',
-      '          }',
+      ...notesGateLines,
     ] : []),
     '      - name: Upload every channel image to the update server (R2)',
     '        run: bash scripts/ci-publish-update-server.sh --list channels.list',
@@ -12278,6 +13905,7 @@ export function selfTestPolicies() {
     ...wasmCaseGateLines('full'),
     '',
   ].join('\n')
+  }
   const releaseSample = (id, expectation, options) => {
     const entry = { raw: RELEASE_SHAPE(options), file: 'selftest.yml' }
     return expectation === null ? expectGreen(id, [], entry) : expectRed(id, expectation, [], entry)
@@ -12336,6 +13964,44 @@ export function selfTestPolicies() {
       '          "${GH_CREATE[@]}" "${TAG}" --title "${TAG}" ${NOTES_FLAG}',
     ],
   })
+  // **R26 FIX-X-01**:Release 名的取值必须**恰好**是 tag 引用 —— 前缀/后缀形态必红。
+  // 修前这一格是白的:无锚 `TAG_REF.test(titleValue)` 只要取值里**出现** tag 变量就放行,
+  // 而 `"PicoAide Harness ${TAG}"` 正是 2026-09-11 定案要消灭的那条前缀回归
+  // (Releases 页左侧列表被截断成 `PicoAide Harness v2.6…`)。
+  releaseSample('p20-title-product-prefix', '[SK-11]', { titleFlag: '--title "PicoAide Harness ${TAG}"' })
+  // 同族补格:后缀、只加空格、以及"引用套引用"的取值都不是"tag 本身"。
+  releaseSample('p21-title-suffix', '[SK-11]', { titleFlag: '--title "${TAG} (curated)"' })
+  releaseSample('p22-title-padded', '[SK-11]', { titleFlag: '--title " ${TAG}"' })
+  // 反向对照:四种**等价**写法必须仍然放行(`GITHUB_REF_NAME` 与 `TAG` 同义)。
+  releaseSample('p23-title-github-ref-name-green', null, { titleFlag: '--title "${GITHUB_REF_NAME}"' })
+  releaseSample('p24-title-unbraced-ref-name-green', null, { titleFlag: '--title "$GITHUB_REF_NAME"' })
+  // **R26 FIX-X-02**:策展说明门必须检验**由 tag 派生的那一份**文件 ——
+  // 把它换成永远存在的 `docs/releases/TEMPLATE.md` 之后,那道门(以及 release job 首步
+  // 的"半发布"保护)就整格消失,而修前判据照旧 EXIT=0(审计 D 泳道实测)。
+  releaseSample('p25-notes-gate-template-path', '[SK-11]', { notesPath: 'docs/releases/TEMPLATE.md' })
+  // 同族补格:换目录 / 加前后缀 / 多段路径都不是"派生自 tag"。
+  releaseSample('p26-notes-gate-wrong-dir', '[SK-11]', { notesPath: 'docs/notes/${GITHUB_REF_NAME}.md' })
+  releaseSample('p27-notes-gate-version-prefixed', '[SK-11]', { notesPath: 'docs/releases/v${GITHUB_REF_NAME}.md' })
+  releaseSample('p28-notes-gate-nested', '[SK-11]', { notesPath: 'docs/releases/${GITHUB_REF_NAME}/index.md' })
+  // 反向对照:`${TAG}` 与变量间接(`NOTES=…` + `test -f "${NOTES}"`)两种**等价**写法必须放行。
+  releaseSample('p29-notes-gate-tag-var-green', null, { notesPath: 'docs/releases/${TAG}.md' })
+  releaseSample('p30-notes-gate-indirect-var-green', null, {
+    notesPath: '${NOTES_PATH}',
+    notesAssignment: 'NOTES_PATH="docs/releases/${TAG}.md"',
+  })
+  // **R26 FIX-X-02 的补集（第二版）**：`-o` / `||` 把 tag 那份与恒真条件**并列** ⇒ 整行恒真。
+  // 独立反驳代理实测：修前（存在性判据）这一形态 EXIT=0，而 bash 实跑证明该行恒真 ⇒
+  // "半发布"保护整格消失。现在按"那一处必须是**独立的简单命令**"判红。
+  releaseSample('p31-notes-gate-disjunction', '[SK-11]', {
+    notesPath: 'docs/releases/${GITHUB_REF_NAME}.md" -o -f "docs/releases/TEMPLATE.md',
+  })
+  // 同族补格：`[ … ] || [ … ]`（两个独立测试用 `||` 串起来）与 `&&` 并列。
+  releaseSample('p32-notes-gate-or-chained-tests', '[SK-11]', {
+    notesPath: 'docs/releases/${GITHUB_REF_NAME}.md" ] || [ -f "docs/releases/TEMPLATE.md',
+  })
+  // 反向对照：`|| {` 后面接 fail-loud（本仓的真实写法）必须**仍然放行** ——
+  // 一刀切"见到 `||` 就红"会把正当写法误伤成红。
+  releaseSample('p33-notes-gate-or-block-green', null, {})
   // ---- 策略 14([SK-22]):表达式的**词法字符集**(2026-09-25 第十四轮现场) ----
   //
   // 现场:一个 `run: |` 块的 **shell 注释**里写了 `${{ …outputs.interp }}`(U+2026)——
@@ -12459,6 +14125,80 @@ export function selfTestPolicies() {
     '          echo "${{ -2.99e-2 < 0 }}"',
     '          echo "${{ steps.frozen-launchers.outputs.git }}"',
   ])
+  // 红样本⑤(R26 FIX-J1-4):`*` 与顶层 `,` —— **词法能过、解析期必然失败**的同一后果类。
+  // 修前 `*` 落在 actionlint 的期望字符集里被整体放行,于是 `${{ github.run_number * 2 }}`
+  // 把整条 CI 打成 0 job 而门禁绿(审计 J1 实测 EXIT=0,而同族的 `-`/`+`/`/` 都 EXIT=1)。
+  // 现在两个字符都按**位置**判:`*` 任何位置都不合法;`,` 只在函数调用的实参位合法。
+  expectRed('w44-expression-multiplication', '[SK-22]', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          # ${{ github.run_number * 2 }}',
+    '          echo ok',
+  ])
+  expectRed('w45-expression-top-level-comma', '[SK-22]', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ github.ref, github.sha }}"',
+  ])
+  // 绿样本⑫:函数调用实参位上的 `,` 与单引号字面量里的 `*` 都必须放行 —— 否则这一格会变成
+  // "见到 `,`/`*` 就红"的一刀切(把正当写法误伤成红,判据照样是坏的)。
+  expectGreen('w46-expression-argument-comma-green', [
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo "${{ format(\'{0}-{1}\', github.ref, github.sha) }}"',
+    '          echo "${{ contains(\'a*b\', \'*\') }}"',
+  ])
+  // ---- [SK-24] 执行向量（`strategy.matrix`）不得让 job 一个实例都不产生（R26 FIX-J1-3）----
+  // 直接给 fixture 一个 `strategy:` 块（`selftestWorkflow` 不建它 ⇒ 用 `raw` 覆盖整份文本）。
+  const matrixFixture = strategyLines => [
+    'name: selftest',
+    'on:',
+    '  push:',
+    'jobs:',
+    '  verify:',
+    `    runs-on: ${GATE_SELFTEST_RUNS_ON}`,
+    '    timeout-minutes: 45',
+    ...strategyLines,
+    '    steps:',
+    '      - run: |',
+    '          set -euo pipefail',
+    '          echo ok',
+    '',
+  ].join('\n')
+  // 红样本⑬：审计 J1-3 的原始形态（空向量）。
+  expectRed('w47-empty-matrix-vector', '[SK-24]', [], {
+    raw: matrixFixture(['    strategy:', '      matrix:', '        shard: []']),
+  })
+  // 红样本⑭：矩阵是表达式 ⇒ "会产生几个实例"静态不可证明（求值后可能是空）。
+  expectRed('w48-matrix-expression', '[SK-24]', [], {
+    raw: matrixFixture(['    strategy:', '      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}']),
+  })
+  // 红样本⑮：向量非空但 `exclude` 把唯一的组合也排掉 ⇒ 0 实例。
+  expectRed('w49-matrix-exclude-everything', '[SK-24]', [], {
+    raw: matrixFixture([
+      '    strategy:',
+      '      matrix:',
+      '        os: [ubuntu-24.04]',
+      '        exclude:',
+      '          - os: ubuntu-24.04',
+    ]),
+  })
+  // 绿样本⑯：正常矩阵（含 `include` 补充项与未排空的 `exclude`）必须放行 —— 否则这一格
+  // 会变成"见到 matrix 就红"，把正当写法误伤（收紧过度同样是缺陷）。
+  expectGreen('w50-matrix-nonempty-green', [], {
+    raw: matrixFixture([
+      '    strategy:',
+      '      fail-fast: false',
+      '      matrix:',
+      "        os: [ubuntu-24.04, ubuntu-22.04]",
+      '        node: [24]',
+      '        exclude:',
+      '          - os: ubuntu-22.04',
+      '        include:',
+      '          - os: ubuntu-24.04',
+      '            node: 22',
+    ]),
+  })
   // 绿样本⑩(VA-01-F1 的收口):`${{ … }}` 落在 **YAML 层注释**里 —— YAML 解析器整行丢弃,
   // GitHub 的模板展开看不到它。**注意与 w31 的分界**:w31 是 `run:` 标量**内部**的 shell
   // 注释,那是标量内容,必须继续判红(把这一格当成"注释都放行"就会把 R14-01 的现场放回去)。
@@ -12493,6 +14233,34 @@ export function selfTestPoliciesCoverage(observed) {
   const expect = (ok, message) => {
     if (!ok) failures.push(message)
   }
+  // ---- 定向样本登记表自身的**条数地板**（收口轮 final-A §4 的 P3-1）----------------
+  //
+  // 下面那条 `missingRequired` 对账是"**声明 ⇒ 观测**"单向的：只删声明（样本定义还在、
+  // 还在跑）时它为空 ⇒ 守卫 EXIT=0。这条地板把"删声明"这一步变成红 —— 与
+  // `SELFTEST_MIN_SAMPLES` / `SELFTEST_MIN_RED_SAMPLES` 同一手法（ratchet，只能变多）。
+  expect(SELFTEST_REQUIRED_SAMPLES.length >= SELFTEST_MIN_REQUIRED_SAMPLES,
+    `[self-test] 定向样本登记表（SELFTEST_REQUIRED_SAMPLES）只剩 ${SELFTEST_REQUIRED_SAMPLES.length} 条，`
+      + `至少要有 ${SELFTEST_MIN_REQUIRED_SAMPLES} 条\n`
+      + '  ⇒ 只删**声明**（样本本体还在）时，下面那条"声明⇒观测"对账为空、守卫照样 EXIT=0'
+      + '（2026-10-05 收口轮 final-A 的 P3-1 实测）。删样本必须连声明一起删，而删声明现在会红。')
+  // ---- 发布链 argv 白名单的**双向地板**（FF-B 残留 R1）-----------------------------
+  //
+  // 两条**互相独立**的绕过路径，所以两条断言各自成牙：
+  //   ① 逐条摘掉 `REGISTERED_RELEASE_STEPS[].argv` 字段（表还在，只是没人声明）⇒ 条数不足；
+  //   ② 把 `REGISTRY_DEFAULT.stepArgv` 关掉（对账整块不跑）⇒ 显式断言 `=== true` 红。
+  // 断言直接读**真表常量**，不经 `checkReleaseChainSteps` —— 掏空那个函数不影响这里。
+  const argvDeclared = REGISTERED_RELEASE_STEPS.filter(
+    entry => Array.isArray(entry.argv) && entry.argv.length > 0)
+  expect(argvDeclared.length >= SELFTEST_MIN_RELEASE_STEP_ARGV,
+    `[self-test] 发布链步骤的 argv 白名单只剩 ${argvDeclared.length} 条声明，`
+      + `至少要有 ${SELFTEST_MIN_RELEASE_STEP_ARGV} 条\n`
+      + '  ⇒ `require` 只有"附加词必须出现"的表达力：没有 argv 白名单，'
+      + '`ci-channels.sh --resolve-only` / `ci-release-topology.sh --no-mainline` 这类'
+      + '**功能子模式**削弱会完全不可见（FF-B §5-R1 实测：两条接线判据一起保持绿）。')
+  expect(REGISTRY_DEFAULT.stepArgv === true,
+    '[self-test] REGISTRY_DEFAULT.stepArgv 被关掉了 —— 真 ci.yml 的 argv 白名单对账整块不跑\n'
+      + '  ⇒ 这条开关只允许在**合成登记表**（自检样本）上缺省，真登记表必须为 true；'
+      + '要关掉它就得同时解释"谁替代它判功能子模式"。')
   expect(samples.length >= SELFTEST_MIN_SAMPLES,
     `[self-test] 自检样本被掏空:实际只剩 ${observed.length} 个,至少要有 ${SELFTEST_MIN_SAMPLES} 个\n`
       + '  ⇒ 这道对账就是"看守守门人"的闸:没有它,把 selfTestPolicies 与 selfTestScanner '
@@ -12564,7 +14332,9 @@ export function selfTestPoliciesCoverage(observed) {
       + '\n  ⇒ 这批样本钉的是两批**实跑出来的绕过形态**:'
       + '①2026-09-24 第七轮独立复审 V2(步骤体退出语义的词法形态 + workflow 级 `env:`/`$GITHUB_ENV` 的静音开关通道);'
       + '②2026-09-25 第九轮审计 D 泳道与 B 泳道(进程环境层 `env:` 的三层键面 / 命令位判据 / `shell:` 整串 / '
-      + '`trap` 动态动作 / 发布链 `require` 的命令位 / 三条第八轮新引入的假红)。'
+      + '`trap` 动态动作 / 发布链 `require` 的命令位 / 三条第八轮新引入的假红);'
+      + '③2026-10-05 FF-2 的 `y1`–`y4`(接线判据必须区分"只跑自检 `--self-test`"与真判 —— '
+      + '删掉真判那一行、只留自检时,`require` 与 `REQUIRED_WIRED_CRITERIA` 曾一起保持绿)。'
       + '删样本 = 把这些形态重新放回"静默摘除唯一链路"的状态。')
   return failures
 }
@@ -12919,6 +14689,27 @@ function main() {
     }
   }
   // [SK-17] 层清单的自证(C-02):判据面声明的层必须与代码里的枚举**同源**。
+  const jobPermissionsSelftest = selfTestPinnedJobPermissions()
+  if (!Array.isArray(jobPermissionsSelftest?.failures) || typeof jobPermissionsSelftest?.assertions !== 'number') {
+    failures.push({
+      name: '[job-permissions-selftest]',
+      line: 0,
+      detail: 'selfTestPinnedJobPermissions() 的返回形状不对(需要 {failures, assertions}) —— 自检被改坏了',
+    })
+  } else {
+    for (const detail of jobPermissionsSelftest.failures) {
+      failures.push({ name: '[job-permissions-selftest]', line: 0, detail })
+    }
+    if (jobPermissionsSelftest.assertions < SELFTEST_JOB_PERMISSIONS_ASSERTIONS) {
+      failures.push({
+        name: '[job-permissions-selftest]',
+        line: 0,
+        detail: `权限面登记自检只执行了 ${jobPermissionsSelftest.assertions} 条断言`
+          + `(期望 ≥ ${SELFTEST_JOB_PERMISSIONS_ASSERTIONS}) ⇒ 自检被掏空。`,
+      })
+    }
+  }
+  // [SK-17] 层清单的自证(C-02):判据面声明的层必须与代码里的枚举**同源**。
   const pinnedEnvLayerSelftest = selfTestPinnedEnvLayers()
   if (!Array.isArray(pinnedEnvLayerSelftest?.failures) || typeof pinnedEnvLayerSelftest?.assertions !== 'number') {
     failures.push({
@@ -13142,11 +14933,12 @@ function main() {
     + '步骤级 `working-directory` 走**逐字登记制** —— 命令在另一个目录里解析,argv 看不出来)\n'
     + '    + SK-19 策略(YAML **合并键** `<<`:解析器不展开而 Actions 会 ⇒ 出现即红'
     + '(fail-closed);否则 `env:` 各层 / `container:` / `steps:` / `with:` 都能被它藏掉)\n'
-    + `    + SK-22 策略(表达式**词法字符集**:全文 ${expressionBodyCount} 处 \`\${{ … }}\` —— 含 `
+    + `    + SK-22 策略(表达式**词法字符集 + 解析期必要性**:全文 ${expressionBodyCount} 处 \`\${{ … }}\` —— 含 `
     + '`run:` 的 `#` 注释行 / heredoc(模板解析不看上下文);剥掉 `\'…\'` 单引号字面量后剩字符必须落在 '
-    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & | * ,` 与空白里,`-` 另按"一元负号 / 标识符内部"'
-    + '**逐位**判定(表达式语法**没有算术算子** ⇒ `a - 1` / `a + 1` / `a / 2` 全部判红,'
-    + '依据是官方算子表与 actionlint 1.7.7 的逐例对拍,见 `[SK-22]` 常量区);'
+    + '`A-Z a-z 0-9 _ . ( ) [ ] ! < > = & |` 与空白里,`-` 另按"一元负号 / 标识符内部"、'
+    + '`,` 另按"函数调用实参位"**逐位**判定,`*` **任何位置**都不合法(表达式语法**没有算术算子** ⇒ '
+    + '`a * 2` / `a - 1` / `a + 1` / `a / 2` 全部判红,依据是官方算子表与 actionlint 1.7.7 的逐例对拍,'
+    + '见 `[SK-22]` 常量区);'
     + '未闭合 / 空表达式 / 未闭合字面量同样红)\n'
     + '    + SK-15 策略(交付物 job 与发布链步骤的**登记式不可静默跳过**:两侧对拍 / if 形态逐字 / '
     + 'continue-on-error / 效果子串(命令位) / 能力级远端写入面;`.github/workflows/*.yml` 与登记集合**双向**对拍)\n'

@@ -57,17 +57,21 @@ the package and does not fall back to the vendor mark.
 
 ### Getting the speech model into a customer network (`desktop.speech_*`, since 2026-09-29)
 
-Voice input recognizes speech on the machine, but **the model weights (int8, about 228MB) are downloaded on
-first use by default**, and that download goes **direct** (the client forbids proxies by default). So in a network
-where only an authenticated proxy reaches the internet, preparation never succeeds. Four **optional** fields
-(configuring none of them keeps today's behaviour: a direct public download):
+Voice input recognizes speech on the machine, and **the model weights ship inside the client by default**
+(`desktop.speech_bundle_model` defaults to `true`): the build packs the int8 weights into the product and the
+desktop assembly points the upstream config items at them (`modelDirectory` / `vadModelPath`) — **zero network,
+zero download**. Only a channel that explicitly opts out (writes `false`) falls back to "download on first use",
+and that download goes **direct** (the client forbids proxies by default), so in a network where only an
+authenticated proxy reaches the internet an opted-out channel never gets past preparation. Of the four fields
+below, `speech_bundle_model` picks the path; the other three apply only **after** opting out (the bundled payload
+wins over a channel-configured directory or mirror — turn bundling off to override it):
 
 | Field | Effect | Value |
 |---|---|---|
-| `desktop.speech_bundle_model` | **Ship the weights with the client** (**on by default**: every channel's installer carries the model, so voice works right after install with zero network) | Boolean; default `true`. Set `false` to opt out (back to "download on first use"). When on, **the installer grows by ~230MiB** |
+| `desktop.speech_bundle_model` | **Ship the weights with the client** (**on by default**: every channel's installer carries the model, so voice works right after install with zero network) | Boolean; default `true`. Set `false` to opt out (back to "download on first use"). When on, the installer grows by about **+140–250 MiB** (the weights are about 230MiB; the increase depends on how well the platform's package format compresses them) |
 | `desktop.speech_model_dir` | Pre-placed model directory (**zero download**) | An absolute path, or `{default, darwin, linux, win32}` (one config serves all three platforms) |
 | `desktop.speech_vad_path` | Pre-placed Silero VAD file (1.8MB; still downloaded when only the model directory is pre-placed) | Same as above |
-| `desktop.speech_model_origin` | Internal mirror (HuggingFace-compatible; model paths and file names unchanged) | `https://host[:port]` only — **no path** |
+| `desktop.speech_model_origin` | Internal mirror (HuggingFace-compatible; model paths and file names unchanged) | `http(s)://host[:port]` only (plain **`http://` is accepted too** — the shape matches the upstream Config schema verbatim) — **no path** |
 
 What you must know:
 

@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/picoaide/picoaide/internal/serverstore"
 	"github.com/picoaide/picoaide/internal/usageretention"
 )
 
@@ -31,12 +32,51 @@ var newUsageRetentionScheduler = func(db *sql.DB, tick time.Duration) schedulerS
 	return usageretention.NewScheduler(db, tick)
 }
 
+// schedulerUsageRetention 是状态表里的登记名（日志与断言共用同一份字面量）。
+const schedulerUsageRetention = "usage_retention"
+
+// usageRetentionObservation 是 usage 保留调度器在状态表里的可读面：
+// "已启动 + 启动时刻"由 startOnlyScheduler 直接观测，运行读数则取 **serverstore 自己
+// 记的账**（`CurrentUsageRetentionStatus()`，与 `/readyz` 的 usage_retention 字段同一份）
+// —— 装配层不另记一份，也不推断。
+type usageRetentionObservation struct {
+	*startOnlyScheduler
+}
+
+func newUsageRetentionObservation() *usageRetentionObservation {
+	return &usageRetentionObservation{startOnlyScheduler: newStartOnlyScheduler(schedulerSourceUsageRetention)}
+}
+
+func (o *usageRetentionObservation) Source() string { return schedulerSourceUsageRetention }
+
+func (o *usageRetentionObservation) Readings() schedulerReadings {
+	st := serverstore.CurrentUsageRetentionStatus()
+	r := schedulerReadings{
+		Available: true, // 子系统确实发布读数（哪怕此刻还是 0 轮，那也是观测到的 0）
+		Runs:      st.RoundNumber,
+		Errors:    st.FailedRounds,
+		LastError: st.LastError,
+	}
+	if ts, err := time.Parse(time.RFC3339, st.LastRoundAt); err == nil {
+		r.LastRunAt = ts
+	}
+	return r
+}
+
 // startUsageRetentionScheduler 启动 usage 明细保留策略调度器：启动先跑一轮
 // （覆盖停机期间到期的分区，同时取代原先"启动时清理一次"的那次调用），之后每
 // tick 一次；ctx 取消即退出（调度器内部自行处理）。
+//
+// S3-02（审计 2026-10-04，P2）：这条**也**要进调度器状态表 —— 启动/关停日志此前只
+// 覆盖 6 条却声称"全部"，而 usage 保留是保留期清理的唯一周期执行者（稳态下没有它
+// = 明细随经过的月份单调增长）。三条清理类里只有它发布了运行读数（serverstore 的
+// 保留清理账），所以状态表对它报的是**真读数**而不是"仅已启动"。
 func startUsageRetentionScheduler(ctx context.Context, db *sql.DB, tick time.Duration) {
 	if db == nil {
 		return
 	}
+	obs := newUsageRetentionObservation()
+	registerSchedulerObservation(schedulerUsageRetention, tick, obs)
 	newUsageRetentionScheduler(db, tick).Start(ctx)
+	obs.markStarted()
 }

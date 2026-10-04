@@ -115,8 +115,16 @@ async function fetchAsset(asset, destination, origins) {
         } finally {
           await handle.close()
         }
-        if (bytes !== asset.bytes || digest.digest('hex') !== asset.sha256) {
-          failures.push(`${origin} → 大小或 sha256 与上游清单不符（实得 ${bytes}/${digest.digest('hex')}）`)
+        // 摘要**只算一次**：`Hash#digest()` 是终结操作，第二次调用抛
+        // `ERR_CRYPTO_HASH_FINALIZED`（"Digest already called"）。而上面 `||` 的短路
+        // 恰好只在"大小相同、哈希不同"时才走到这里 —— 那正是最需要期望/实得哈希的
+        // 形态（镜像站给了同名不同版本的权重、传输位翻转），旧写法会把诊断换成一句
+        // 与现场无关的 `Digest already called`，两条源都试过之后运维只看到两遍这句话。
+        // 口径与 `src/update-download.ts` 的 `const digest = digestStream.digest('hex')`
+        // 一致：先落局部量，再参与比较与文案。
+        const actual = digest.digest('hex')
+        if (bytes !== asset.bytes || actual !== asset.sha256) {
+          failures.push(`${origin} → 大小或 sha256 与上游清单不符（期望 ${asset.bytes}/${asset.sha256}，实得 ${bytes}/${actual}）`)
           continue
         }
         renameSync(partial, destination)
@@ -135,12 +143,18 @@ async function fetchAsset(asset, destination, origins) {
 
 /**
  * 就位随包载荷（下载缺失文件、写清单）。
- * @param options - 目标目录、源列表与是否只校验。
+ *
+ * `manifestPath` 是**测试接缝**（缺省即唯一真源 = 上游 `runtime/assets.json`）：真清单
+ * 声明的是 239MiB 权重，单测不可能为了钉住一条报错文案去搬这份字节；
+ * `tests/speech-model-fetch.spec.ts` 用它配一份几十字节的等价清单，对**同一个**下载/
+ * 校验实现跑真实 HTTP。
+ * @param options - 目标目录、源列表、清单路径与是否只校验。
  * @returns 每个文件的最终状态（`ready` / `downloaded`）。
  */
-export async function materializeSpeechModel({ out = DEFAULT_OUT, origins = DEFAULT_ORIGINS, check = false } = {}) {
-  const assets = readPinnedAssets()
-  const manifestPath = join(out, SPEECH_MODEL_MANIFEST_FILE)
+export async function materializeSpeechModel({ out = DEFAULT_OUT, origins = DEFAULT_ORIGINS, check = false, manifestPath = UPSTREAM_MANIFEST } = {}) {
+  const assets = readPinnedAssets(manifestPath)
+  // 载荷清单（写到目标目录里的那一份），与上面 `manifestPath` 指的上游清单是两份东西。
+  const payloadManifestPath = join(out, SPEECH_MODEL_MANIFEST_FILE)
   const status = []
   for (const asset of assets) {
     const destination = join(out, asset.relative)
@@ -161,10 +175,10 @@ export async function materializeSpeechModel({ out = DEFAULT_OUT, origins = DEFA
       files: assets.map(asset => ({ path: asset.relative, bytes: asset.bytes, sha256: asset.sha256 })),
     }
     const serialized = `${JSON.stringify(manifest, null, 2)}\n`
-    if (!existsSync(manifestPath) || readFileSync(manifestPath, 'utf8') !== serialized) {
-      const partial = `${manifestPath}.${process.pid}.part`
+    if (!existsSync(payloadManifestPath) || readFileSync(payloadManifestPath, 'utf8') !== serialized) {
+      const partial = `${payloadManifestPath}.${process.pid}.part`
       writeFileSync(partial, serialized)
-      renameSync(partial, manifestPath)
+      renameSync(partial, payloadManifestPath)
     }
   }
   return { out, status }

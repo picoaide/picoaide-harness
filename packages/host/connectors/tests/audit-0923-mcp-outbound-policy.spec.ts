@@ -30,8 +30,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createOAuthProvider } from '../src/mcp-oauth-provider.ts'
 import { createMcpOutboundFetch, ensureMcpTransportRedirectFence } from '../src/mcp-transport-fence.ts'
-import { assertOutboundUrlAllowed, outboundFetch, OutboundUrlBlockedError } from '../src/outbound.ts'
+import { assertOutboundUrlAllowed, outboundFetch, OutboundResolutionUnverifiedError, OutboundUrlBlockedError } from '../src/outbound.ts'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
+
+/**
+ * This suite observes connector outbound traffic through a `globalThis.fetch`
+ * stub — the shape it always had. Since the DNS-rebinding fix (2026-10-04) the
+ * production transport dials the policy's verified addresses itself
+ * (`src/pinned-http.ts`) instead of handing the URL to the global fetch, so the
+ * stub is installed as THAT transport's seam: the same observation, one level
+ * lower. Every policy gate still runs here — the mock replaces the connection,
+ * not the judgement — and the real transport is covered end to end by
+ * `tests/audit-1004-pinned-address.spec.ts`, which does not mock it.
+ */
+vi.mock('../src/pinned-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/pinned-http.ts')>()
+  return {
+    ...actual,
+    sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
+  }
+})
+
 
 interface Hit {
   server: 'mcp' | 'idp' | 'refused'
@@ -362,12 +381,19 @@ describe('CN-9: a NAME that resolves into a non-public range is refused like its
     ).resolves.toBeInstanceOf(Response)
     expect(fetched).toHaveLength(1)
 
-    // A resolver that cannot answer keeps the connection's own verdict (and its
-    // own deadline) — the gate must not turn "could not verify" into a refusal.
-    await expect(
-      outboundFetch('https://idp.example.com/token', 'OAuth token 端点', {}, {
-        resolve: async () => { throw new Error('ENOTFOUND') },
-      }),
-    ).resolves.toBeInstanceOf(Response)
+    // A resolver that cannot answer is NOT a pass any more: "could not verify"
+    // refuses like a non-public answer does, and reports itself as an
+    // unverified NAME (its own error class/code) instead of as a blocked
+    // address — audit C3-06 (2026-10-04). The full matrix of the three
+    // unverifiable shapes and the kept fast paths lives in
+    // `tests/audit-1004-outbound-resolution-gate.spec.ts`; this case is the one
+    // the pre-C3-06 version of this file asserted backwards (it required the
+    // request to proceed), which is why it is the only assertion that changed.
+    const unverified = await outboundFetch('https://idp.example.com/token', 'OAuth token 端点', {}, {
+      resolve: async () => { throw new Error('ENOTFOUND') },
+    }).catch((error: unknown) => error)
+    expect(unverified).toBeInstanceOf(OutboundResolutionUnverifiedError)
+    expect((unverified as OutboundResolutionUnverifiedError).code).toBe('resolution-failed')
+    expect(fetched, 'an unverifiable name must not reach the network (only the public one did)').toHaveLength(1)
   })
 })

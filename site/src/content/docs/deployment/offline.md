@@ -24,7 +24,7 @@ description: 服务器或员工机器不能访问外网时的 PicoAide Harness �
 curl -fsS https://release.picoaide.com/<渠道>/latest.json
 
 # 2) 下载镜像包与校验文件
-VER=2.7.0
+VER=<版本>
 curl -fL -o picoaide-server-${VER}-amd64.zip \
   "https://release.picoaide.com/<渠道>/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 curl -fL -O "https://release.picoaide.com/<渠道>/releases/${VER}/SHA256SUMS"

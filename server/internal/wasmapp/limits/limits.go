@@ -48,6 +48,42 @@ const (
 	ClientUploadTimeout = 90 * time.Second
 	// ServerReadTimeout 是服务端 http.Server.ReadTimeout：60 s。
 	ServerReadTimeout = 60 * time.Second
+	// PublishTransferReserve 是客户端出站预算里**留给平台观测窗口之外**的余量：15 s。
+	//
+	// 为什么需要它（2026-10-04，审计 S4-06 / CTRL-01）：publish/validate 在**同一个 HTTP
+	// 请求**里顺序做「编译 → 抽取 → 干跑」，两段原先各自从 request ctx 派生预算 ⇒
+	// 平台侧"最晚给结论"的时刻 = 两段上限之和（默认 60 + 60 = 120 s），而客户端对这条
+	// 请求的出站预算是 `ClientUploadTimeout`（90 s）。一旦越过它，员工/AI 看到的是笼统的
+	// 网络错误，平台其实正准备返回带 `code`/`hints` 的结构化错误 ——
+	// 「客户端出站预算 > 平台侧每一个请求预算」这条序关系必须靠 PublishTotalBudget 恢复。
+	//
+	// 余量覆盖的是**平台观测窗口之外**的两段：
+	//   - 客户端建连 + TLS + 请求头发送（正常网络 ≤2 s）；
+	//   - 响应传输（几 KB 的 JSON 信封，≪1 s）与客户端定时器/事件循环抖动。
+	// **不**包含请求体上传时间：deadline 在**读请求体之前**挂上（见 api 包的
+	// publishBudgetCtx），所以上传耗时发生在平台观测窗口**之内**，会自然吃掉总预算。
+	PublishTransferReserve = 15 * time.Second
+	// PublishTotalBudget 是**一次 publish/validate 请求**在平台侧的总预算：75 s
+	//（= `ClientUploadTimeout` − `PublishTransferReserve`）。
+	//
+	// 语义：从请求到达平台（handler 入口，早于读请求体）到写回响应，整条链路
+	// —— 编译（B）+ 抽取（C）+ 干跑（D）—— **共用这一个 deadline**；每个阶段仍然各有
+	// 自己的上限（`CompileTimeout` / 控制台 `dry_run_budget_seconds`），阶段实际可用
+	// = min(阶段上限, 总预算剩余)（由 context 的 deadline 语义实现，见 api 包的 stageCtx）。
+	//
+	// 序关系（limits_gen_test.go 的 TestCriticalValuesAndOrdering 钉住）：
+	//
+	//	ClientUploadTimeout (90 s) > PublishTotalBudget (75 s) > CompileTimeout (60 s)
+	//
+	// 右侧那条（总预算严格大于单次编译上限）保证控制台配的 `compile_timeout_seconds`
+	// 仍然**可达**：控制台保存时又把 compile_timeout 钳在 `ServerReadTimeout`（60 s）以内，
+	// 因此任何合法配置下"编译用满自己的预算"都不会被总预算截断。
+	//
+	// 认账的代价（最坏情况）：编译真的吃掉 60 s 时，干跑只剩 15 s（默认干跑预算是 30 s）。
+	// 这不是新增的拒绝面，而是把"平台越过客户端预算 ⇒ 员工看到网络错误"换成
+	// "平台在自己的预算内给出结构化结论"；丢掉的那部分干跑时间只在"编译接近 60 s"的
+	// 病态组合下才出现（正常编译 70 ms–2 s，干跑仍能拿满 `CompileTimeout`）。
+	PublishTotalBudget = ClientUploadTimeout - PublishTransferReserve
 	// SectionTotalMaxBytes 是 wasm 自定义段总量上限（§4.2）：4 MiB。
 	SectionTotalMaxBytes = 4 << 20
 	// AppConfigMaxBytes 是 picoaide.app.json 上限（§4.2）：64 KiB（不计入 wasm 上限）。
@@ -269,7 +305,8 @@ const (
 	// appdb/stmt.go 的取舍说明）；只有"单行/列名本身就超帧"才回结构化 `DB_LIMIT`。
 	SQLMaxResultBytes = MaxDeliverablePayloadBytes
 	// SQLStatementBudget 是单语句硬超时（R13/§4.5）的**默认值**：5 s（独立于 guest 超时）。
-	// 控制台 `sql_statement_budget_seconds` 可覆盖；保存时校验它不得超过端到端墙钟。
+	// 控制台 `sql_statement_budget_seconds` 可覆盖；保存时校验它不得超过端到端墙钟，
+	// 且必须**严格小于** HostCallBudgetDefault（见那里）。
 	SQLStatementBudget = 5 * time.Second
 
 	// AppDBHandleMax 是进程内**同时持有**的应用库句柄上限。
@@ -490,9 +527,26 @@ const (
 	LogMaxLineBytes = 4 << 10
 	// LogMaxPerRequest 是每请求日志条数上限（§5.1）：100，超出丢弃并计数。
 	LogMaxPerRequest = 100
-	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算的**默认值**：5 s。
-	// 控制台 `host_call_budget_seconds` 可覆盖；保存时校验它不得超过 guest 预算。
-	HostCallBudgetDefault = 5 * time.Second
+	// HostCallBudgetDefault 是未单列预算的宿主调用的兜底预算的**默认值**：10 s。
+	//
+	// 为什么必须是**严格大于** SQLStatementBudget（5 s）而不是与它相等（2026-10-02，
+	// S4-01/S4-02）：
+	//   - db.* 是宿主调用，appdb 的单语句 deadline 是套在宿主调用 deadline 里的子 ctx
+	//     ⇒ 内层 ≥ 外层时父 ctx 必然先到点（context 取较早者），应用拿到的是
+	//     HOST_CALL_OVER_BUDGET(504)，appdb 的语句超时分支结构上不可达；
+	//   - 相等（旧默认 5 s = 5 s）连"谁先到点"都不确定，两个错误码会随微秒级时序漂移；
+	//   - 取 2×（10 s）是为了让内层有一整个语句预算的余量去完成"到点 → 回滚 →
+	//     映射成 DB_DENIED(reason=statement_timeout)"这段收尾，而不是贴着一个调度抖动
+	//     的窗口。
+	//
+	// 为什么不反过来把 SQL 默认降到 <5 s：那会**收紧**既有生效上限（今天被 5 s 宿主预算
+	// 挡住的查询里，4~5 s 的那些是能跑完的），并吃掉与 SQLite busy timeout(3 s) 之间的
+	// 余量。抬外层不动任何既有闸门 —— 慢 SQL 仍由它自己的 5 s 预算先收掉，只是错误码
+	// 从"宿主超预算"回到"语句超时"。
+	//
+	// 控制台 `host_call_budget_seconds` 可覆盖；保存时校验它不得大于 guest 预算，
+	// 且必须严格大于 `sql_statement_budget_seconds`。
+	HostCallBudgetDefault = 10 * time.Second
 
 	// AIBridgeMaxMessages 与 AIBridgeMessageMaxBytes 是**客户端 AI 桥**的载荷形状
 	// （总纲 §21.2 的冻结契约：`messages` ≤64 条、单条 ≤16 KiB）。

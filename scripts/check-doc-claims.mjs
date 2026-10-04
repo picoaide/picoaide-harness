@@ -124,7 +124,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -332,6 +333,432 @@ const PREBUILD_DEPS_SOURCE = 'packages/host/desktop/scripts/prebuild-workspace-d
  * ——抄一份就会在"加/删 locale"时静默漂移，那正是本文件存在的理由。解析不出 ⇒ fail-loud。
  */
 const ASTRO_CONFIG_SOURCE = 'site/astro.config.mjs'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 真源 7–10（2026-10-05 收口轮，分区 C 的 E-09/E-10/E-12/E-13 + `voice.intro` 前提 +
+// README 体积数字）。这六条此前的共同形态是**事实已改对、仓内没有任何判据**
+// （E-P2-verify §4.2 如实登记；分区 C 用三条变异 EXIT=0 复现了"改坏不会红"）。
+//
+// 纪律与上面几条一致：只**解析源码/配置文本**，不 import、不执行被读文件；
+// 解析不出真源 = fail-loud（真仓形态下 EXIT=1），绝不回落成"那就别判了"。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 真源 7：迁移文件数（E-10 的 `server/AGENTS.md:112`「重放 74 个迁移」）。
+ *
+ * 真源是**目录里的实际文件**（`server/internal/serverstore/migrations-pg/*.sql`），
+ * 不是任何守卫里再抄一份常量 —— `check-migration-range.mjs` 也从同一批文件算区间，
+ * 两边同源。这条判据此前不存在：`52 → 74` 那次修复只改了数字，没有任何东西盯着它
+ * （E-P2-batch §E-10 登记为"本条无判据"；区间判据只判**区间**与"提到的迁移号存在"）。
+ */
+const MIGRATION_COUNT_SOURCE = 'server/internal/serverstore/migrations-pg'
+/** 迁移文件名的形状（与 `check-migration-range.mjs` 的 `SQL_NAME` 同源口径）。 */
+const MIGRATION_FILE_NAME = /^(\d{4})_.*\.sql$/u
+
+/**
+ * 数出 `migrations-pg/` 下的迁移文件数。
+ * @param root - 仓库根。
+ * @returns 文件数；目录不存在返回 undefined（调用方 fail-loud）。
+ */
+function migrationCountFrom(root) {
+  const directory = join(root, MIGRATION_COUNT_SOURCE)
+  if (!existsSync(directory)) return undefined
+  const names = readdirSync(directory).filter(name => MIGRATION_FILE_NAME.test(name))
+  return names.length === 0 ? undefined : names.length
+}
+
+/**
+ * 真源 8：语音识别模型的**随包载荷**（README 的「权重本身约 230MiB」）。
+ *
+ * 真源 = 上游钉死的 `runtime/assets.json`（`int8` 权重 + `tokens.txt` + `silero_vad`
+ * 三个文件的 `bytes` 相加）。`docs/releases/v2.8.2-beta.3.md` 的实测增量表（+139.7～252.5
+ * MiB，随平台压缩率）说明 **载荷 ≠ 安装包增量** —— 这条真源的用途正是把"载荷数字"
+ * 钉住，同时由 `readme-installer-increment` 判据禁止把载荷冒充成增量。
+ */
+const VOICE_ASSETS_SOURCE = 'deepseek-harness/packages/experimental/speech-to-text-sensevoice/runtime/assets.json'
+
+/**
+ * 从 assets.json 算随包载荷（MiB，四舍五入到整数）。
+ *
+ * 形态（2026-10-05 实测）：`{ models: { int8: {bytes}, fp32: {bytes} }, tokens: {bytes},
+ * vad: {bytes} }` —— **随包的是 int8 那份**（fp32 不随包），加上 `tokens.txt` 与
+ * `silero_vad.onnx`：239233841 + 315894 + 1807522 = 241357257 B = **230.2 MiB**。
+ * @param source - `runtime/assets.json` 的文本。
+ * @returns MiB；形态变了/字段缺失返回 undefined（fail-loud）。
+ */
+function voiceModelPayloadMiBFrom(source) {
+  let manifest
+  try {
+    manifest = JSON.parse(source)
+  } catch {
+    return undefined
+  }
+  if (typeof manifest !== 'object' || manifest === null) return undefined
+  const parts = [manifest.models?.int8?.bytes, manifest.tokens?.bytes, manifest.vad?.bytes]
+  if (parts.some(value => typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) return undefined
+  return Math.round(parts.reduce((sum, value) => sum + value, 0) / (1024 * 1024))
+}
+
+/**
+ * 真源 9：语音模型下载源允许的 scheme 形状（E-12）。
+ *
+ * 真源 = `packages/host/desktop/src/desktop-channel.ts` 的 `SPEECH_ORIGIN_PATTERN`
+ * （它与上游 `speech-to-text-sensevoice` 的 Config schema、`scripts/ci-channels.sh`
+ * 的构建期校验、`docs/decisions/2026-09-29-voice-input-default-on.md` 四处同源）。
+ * 判据只问一件事：**代码接不接受明文 `http://`** —— 文档必须与它同向。
+ */
+const SPEECH_ORIGIN_SOURCE = 'packages/host/desktop/src/desktop-channel.ts'
+
+/**
+ * 把正则体按**顶层** `|` 切成候选项（字符类 `[…]` 与分组 `(…)` 里的 `|` 不是分隔符）。
+ *
+ * 为什么必须字符感知（收口轮 P1，V-P4 的 T10c）：修前的判据是
+ * `body.startsWith('^https?://')` —— 把正则改写成**语义等价**的
+ * `/^https:\/\/…$|^http:\/\/…$/` 之后，`startsWith` 只看第一个候选，
+ * 于是"接受明文 http"被判成"https-only"，结论与事实相反（两页文档都写 https-only 时全绿）。
+ *
+ * @param body - 正则体（已把 `\/` 还原成 `/`）。
+ * @returns 候选项数组；括号/字符类不配对时返回 undefined（fail-loud，不猜）。
+ */
+function splitRegexAlternatives(body) {
+  const parts = []
+  let buffer = ''
+  let inClass = false
+  let depth = 0
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]
+    if (char === '\\') {
+      buffer += char + (body[index + 1] ?? '')
+      index += 1
+      continue
+    }
+    if (inClass) {
+      buffer += char
+      if (char === ']') inClass = false
+      continue
+    }
+    if (char === '[') { inClass = true; buffer += char; continue }
+    if (char === '(') { depth += 1; buffer += char; continue }
+    if (char === ')') {
+      depth -= 1
+      if (depth < 0) return undefined
+      buffer += char
+      continue
+    }
+    if (char === '|' && depth === 0) { parts.push(buffer); buffer = ''; continue }
+    buffer += char
+  }
+  if (inClass || depth !== 0) return undefined
+  parts.push(buffer)
+  return parts
+}
+
+/**
+ * 从一个候选项里解析出它**允许的 scheme 集合**（结构化判定，E-12 收口轮）。
+ *
+ * 只认这几种可判读的形状（其余一律 undefined ⇒ fail-loud，"形态不认识"绝不静默当通过）：
+ *   · `^https://…`   → `https`
+ *   · `^https?://…`  → `https` + 末字符可选 ⇒ `http`
+ *   · `^http(s)?://…` → 同上（**单字符**可选分组）
+ *   · `^http://…`    → `http`
+ * 字符类（`^http[s]?://`）、"整个前缀可选"（`^(?:https)?://`）、括号不配对
+ * 一律判"不认识"。
+ *
+ * @param alternative - 一个顶层候选项。
+ * @returns scheme 数组；读不懂返回 undefined。
+ */
+function originSchemesFromAlternative(alternative) {
+  const trimmed = alternative.trim()
+  if (trimmed === '') return []
+  const body = trimmed.startsWith('^') ? trimmed.slice(1) : trimmed
+  const separator = body.indexOf('://')
+  if (separator <= 0) return undefined
+  const prefix = body.slice(0, separator)
+  // `https?`：末字符可选（`https` → `http` + `https`）。
+  const optionalTail = /^([A-Za-z][A-Za-z0-9+.\-]*)\?$/u.exec(prefix)
+  if (optionalTail !== null) return [optionalTail[1], optionalTail[1].slice(0, -1)]
+  // `http(s)?`：前缀里带一个**单字符**可选分组（展开成"有/无"两种）。
+  //   刻意不认 `(?:https)?` / `(https)?` 这类"整个前缀可选"的形态：它连 scheme 本身都能省
+  //   （`://host`），语义与"http/https 二选一"不是一回事 ⇒ 返回 undefined（fail-loud，不猜）。
+  const inlineGroup = /^([A-Za-z0-9+.\-]*)\(([^()]*)\)\?$/u.exec(prefix)
+  if (inlineGroup !== null) {
+    const base = inlineGroup[1]
+    const inner = inlineGroup[2].startsWith('?:') ? inlineGroup[2].slice(2) : inlineGroup[2]
+    if (!/^[A-Za-z]$/u.test(inner) || !/^[A-Za-z][A-Za-z0-9+.\-]*$/u.test(base)) return undefined
+    return [base, `${base}${inner}`]
+  }
+  if (!/^[A-Za-z][A-Za-z0-9+.\-]*$/u.test(prefix)) return undefined
+  return [prefix]
+}
+
+/**
+ * 取出 `SPEECH_ORIGIN_PATTERN = /…/` 的**正则体**（收口轮：换成字符类感知的扫描）。
+ *
+ * 为什么不能用 `/((?:\\.|[^/\\\n])*)/`（修前的写法）：那个字符类**在 `[` 里遇到 `/` 就停**
+ * （`[^/\\\n]` 排除 `/`）⇒ `[^/]+` 这种**没转义斜杠**的字符类会让捕获在类中间断掉、
+ * 把类里的 `/` 当成正则的收尾斜杠。实测：`/^https:\/\/[^/]+$/` 被截成 `^https:\/\/[^`
+ * ⇒ 结构化解析判"形态不认识"（安全方向，但结论变成了误报）。
+ * 现在按 JS 词法扫：转义、字符类、行尾都按规则走；扫不到收尾 `/` ⇒ undefined（fail-loud）。
+ *
+ * @param source - `desktop-channel.ts` 的文本。
+ * @returns 正则体（`\/` 已还原成 `/`）；读不出返回 undefined。
+ */
+function speechOriginPatternBody(source) {
+  const masked = maskComments(source)
+  const anchor = /const\s+SPEECH_ORIGIN_PATTERN\s*=\s*/u.exec(masked)
+  if (anchor === null) return undefined
+  let index = anchor.index + anchor[0].length
+  if (masked[index] !== '/') return undefined
+  index += 1
+  let body = ''
+  let inClass = false
+  for (; index < masked.length; index += 1) {
+    const char = masked[index]
+    if (char === '\n') return undefined
+    if (char === '\\') {
+      body += char + (masked[index + 1] ?? '')
+      index += 1
+      continue
+    }
+    if (inClass) {
+      body += char
+      if (char === ']') inClass = false
+      continue
+    }
+    if (char === '[') { inClass = true; body += char; continue }
+    if (char === '/') return body.replace(/\\\//gu, '/')
+    body += char
+  }
+  return undefined
+}
+
+/**
+ * 从 `desktop-channel.ts` 解析"是否接受明文 http"。
+ *
+ * 收口轮（2026-10-05，独立核验 V-P4 的 T10/T10c）：**判据从"字符串前缀"改成"结构化 scheme 集合"**
+ * —— 先把正则体按顶层 `|` 拆开、逐个候选解析出 scheme 集合、再与文档声明逐项对拍。
+ * 解析不出（形态不认识 / 括号不配对）返回 undefined，调用方按**前置失败**（EXIT=2）拒绝出结论。
+ *
+ * @param source - 该文件的文本。
+ * @returns `{ allowsPlainHttp, schemes }`；形态读不懂返回 undefined（fail-loud）。
+ */
+function speechOriginAcceptsPlainHttp(source) {
+  const body = speechOriginPatternBody(source)
+  if (body === undefined) return undefined
+  const alternatives = splitRegexAlternatives(body)
+  if (alternatives === undefined) return undefined
+  const schemes = new Set()
+  for (const alternative of alternatives) {
+    const found = originSchemesFromAlternative(alternative)
+    if (found === undefined) return undefined
+    for (const scheme of found) schemes.add(scheme)
+  }
+  if (schemes.size === 0) return undefined
+  return { allowsPlainHttp: schemes.has('http'), schemes: [...schemes] }
+}
+
+/**
+ * 从**文档行**里解析出它声明的 scheme 集合（`http(s)://` → `{http, https}`、`https://` → `{https}`、
+ * `wss://` → `{wss}`）。
+ *
+ * 为什么需要它（收口轮②，独立核验 V-P10P11 的 D6）：修前的判词只问两件事
+ * （"文档是否比实现宽" / "实现是否 https-only"），**不判"实现比文档多一个 scheme"** ——
+ * 实测 `^https?:\/\/…|^wss:\/\/…`（实现多一个 `wss`）+ 文档只写 `http(s)://` ⇒ **EXIT=0**。
+ * 现在按**集合相等**判：文档声明的 scheme 集合必须与真源解析出的集合逐项相同。
+ *
+ * @param line - 文档行。
+ * @returns scheme 集合（小写；`X(s)://` 展开成 `{x, xs}`）；一个都没写时返回空集合。
+ */
+function docSchemeSet(line) {
+  const schemes = new Set()
+  for (const match of line.matchAll(/([A-Za-z][A-Za-z0-9+.-]*)(\(s\))?:\/\//gu)) {
+    const base = match[1].toLowerCase()
+    schemes.add(base)
+    if (match[2] !== undefined) schemes.add(`${base}s`)
+  }
+  return schemes
+}
+
+/**
+ * 真源 10：语音模型**默认是否随包**（`voice.intro` 前提面的真源）。
+ *
+ * 真源 = `packages/host/desktop/scripts/channel-build.ts` 的
+ * `speechBundleModel: branding.speechBundleModel !== false` —— 即**缺省 true（随包）**，
+ * 只有渠道包显式写布尔 `false` 才回到"首次使用下载"。`voice-setup.tsx` 无条件渲染
+ * `voice.intro`（不分 phase）⇒ 这句话对两种渠道都必须成立。
+ */
+const VOICE_BUNDLE_SOURCE = 'packages/host/desktop/scripts/channel-build.ts'
+/** `voice.intro` 的两处文案（zh / en），格式面由 desktop 的 i18n spec 守着，**前提面**在这里。 */
+const VOICE_LOCALE_SOURCE = 'packages/host/desktop/src/client/locales.ts'
+
+/**
+ * 从 `channel-build.ts` 解析"随包是不是缺省"。
+ * @param source - 该文件的文本。
+ * @returns `{ bundledByDefault }`；形态变了返回 undefined（fail-loud）。
+ */
+function voiceBundleDefaultFrom(source) {
+  const masked = maskComments(source)
+  const match = /speechBundleModel\s*:\s*branding\.speechBundleModel\s*!==\s*(false|true)/u.exec(masked)
+  if (match === null) return undefined
+  return { bundledByDefault: match[1] === 'false' }
+}
+
+/**
+ * 真源 11（E-13）：官网源码里**不得硬编码发布版本号**。
+ *
+ * 这条没有"外部真源文件"——它判的是"官网不写死版本号"这条**形态契约**（写死必然漂；
+ * E-13 的现场是 `site/src/pages/index.astro` 的 `2.7.0` 三处，读者复制即 404）。
+ *
+ * 扫描面 = `site/src/**` 的 `.md` + `.astro`，**排除 `content/blog/**`**（发布公告写的是
+ * "当时"的版本号，属记录面 —— 与 `docs/releases/**` 同一口径）。
+ *
+ * ## 判据面（收口轮 2026-10-05 收紧：发布版本号 vs 第三方/依赖版本号）
+ *
+ * 修前是**形状判据**（见到 `2.x.y` 就红），两个方向都错（独立核验 V-P4 的 T1/T3）：
+ *   · 假红：正当的第三方组件版本（`需要 Caddy 2.7.6 及以上`）被判成"硬编码发布版本号"；
+ *   · 假阴：下一个大版本（`3.0.0`）不在 `2.` 形状里 ⇒ 完全不可见。
+ * 现在一个裸号要满足**三条之一**才进判据面：
+ *   ① 形状 + **行级发布语境**（本行命中 {@link RELEASE_CONTEXT_MARKERS} 之一 —— `latest.json`、
+ *      `server.version|image_tag`、中文「发布版本」、`release version`、`tag`）；
+ *   ② 形状 + **发布面的号邻接**（{@link RELEASE_NUMBER_AFFIXES} 之一**紧挨着这个号** ——
+ *      `releases/<号>/…`、`picoaide-server-<号>`、`picoaide-harness-server:<号>`、
+ *      `PicoAide-Harness-<号>`、`SERVER_IMAGE=<号>`）；
+ *   ③ 形状 + **落在本项目发布线上**（major.minor 与 root `package.json` 的版本真源一致 ——
+ *      真源读不到时这一条自动关闭）。
+ * `Caddy 2.7.6`（无行级语境、号也不挨着发布面 token、不在本项目发布线上）⇒ **不再误伤**；
+ * `当前发布版本 3.0.0`（「发布版本」是行级语境）⇒ **红**（V-P4 的 T1 从假阴变红）。
+ *
+ * ## 收口轮②（2026-10-05，独立核验 V-P10P11 的 E7/E10）：语境内标记拆成两类
+ *
+ * 修前把 `releases/` / `picoaide-server-` 这类**发布面 token** 当成"行级标记" ⇒ 只要同一行
+ * 提到它们，行里**任何**裸号都红。实测两种散文被误伤：
+ *   · `说明写在 releases/ 目录，内容涉及 Caddy 2.7.6 的升级。` ⇒ **假红**（号与发布面无关）。
+ *     收口后：`releases/` 只按**号邻接**算（`releases/2.7.0/picoaide-server-2.7.0-…` 仍然红），
+ *     这一句 ⇒ **绿**（本轮修掉的假红）。
+ *   · `自发布版本 2.7.0 起，镜像内已内置 Caddy。` ⇒ **仍然红** —— 判为**正当收紧**
+ *     （行级语境 = 这句话讲的就是发布版本；本仓既有约定是历史版本一律写 `vX.Y.Z`，
+ *     全站 28 处如此）。修法见命中信息：写成 `v2.7.0`，或对记录面加行内 `doc-claim:allow`。
+ *     这条边界由 `siteVersionSelftestCases()` 的两格**逐字钉住**（免得下次又被当新发现）。
+ */
+const SITE_VERSION_SOURCE_ROOT = 'site/src'
+const SITE_VERSION_WALK_EXCLUDE = [/^site\/src\/content\/blog\//u]
+/**
+ * 发布版本号字面量（**裸号** `X.Y.Z`）。
+ *
+ * 边界（认账）：**只认裸号**，不认 `vX.Y.Z`（带 `v` 的串在站点里是历史引用/页脚徽标，
+ * 全站 28 处，纳入会要求改写十几处正文，而本单只授权改 `scripts/**`）。
+ * 词界用 `(?<![\w.])` / `(?![\w.])`：`dsh-v0.1.5-rc.2`（上游 pin）与 `172.28.0.1`（IP）
+ * 都不命中 —— 判据误伤这两类会把"收紧过度"变成新的假红源。**形状本身不再是判据**
+ * （任何大版本都在面内），判不判由下面的"发布语境"决定。
+ */
+const RELEASE_VERSION_LITERAL = /(?<![\w.])\d+\.\d+\.\d+(?![\w.])/gu
+/**
+ * **行级发布语境**标记：本行命中任一即"这一行的版本号讲的是发布版本"（与号的位置无关）。
+ *
+ * 只收**语义上就在讲版本**的词：更新清单与其字段 / 中英"发布版本" / `tag`。
+ * **刻意不收**「镜像」「版本」这类泛词（`需要 Caddy 2.7.6 及以上（官方镜像已内置）`
+ * 正是被泛词误伤的现场形态），也**不再收** `releases/` / `picoaide-server-` 这类
+ * **发布面 token** —— 它们改成"必须紧挨着号"才作数（见 {@link RELEASE_NUMBER_AFFIXES}），
+ * 否则 `说明写在 releases/ 目录，内容涉及 Caddy 2.7.6 的升级。` 这类散文会被误判（V-P10P11 的 E10）。
+ */
+const RELEASE_CONTEXT_MARKERS = [
+  /latest\.json/u,
+  /server\.(?:version|image_tag)/u,
+  /发布版本/u,
+  /release version/iu,
+  /\btag\b/iu,
+]
+/**
+ * **发布面 token**：出现在号**紧邻处**（同一个"词"，见 {@link releaseTokenAround}）才算发布版本号。
+ *
+ * 这些 token 的语义正是"发布物/发布路径 + 版本号"：R2 对象路径 / 服务端镜像与归档名 /
+ * 客户端安装包名 / `.env` 的镜像键。E-13 的现场形态
+ * （`…/releases/2.7.0/picoaide-server-2.7.0-amd64.zip` 与 `picoaide-harness-server:2.7.0`）
+ * 三条都在这一类里，故收紧后**真牙不变**。
+ */
+const RELEASE_NUMBER_AFFIXES = [
+  /releases?\//u,
+  /picoaide-server-/u,
+  /picoaide-harness-server[:/]/u,
+  /PicoAide-Harness-/u,
+  /\bSERVER_IMAGE[=:]?/u,
+]
+/** 号周围"词"的字符集（用来把号扩成一个 token 再判发布面 token 是否邻接）。 */
+const RELEASE_TOKEN_CHARS = /[A-Za-z0-9._/:\-]/u
+
+/**
+ * 把某个号在行内扩成**一个 token**（左右都吃 {@link RELEASE_TOKEN_CHARS}）——
+ * 用来判"发布面 token 是否紧挨着这个号"（`releases/2.7.0/…` 里的 `releases/` 邻接，
+ * 而 `说明写在 releases/ 目录 … Caddy 2.7.6` 里的 `releases/` 不邻接）。
+ *
+ * @param line - 整行文本。
+ * @param start - 号在该行里的起始下标。
+ * @param length - 号的长度。
+ * @returns 该号所在的 token（含号本身）。
+ */
+function releaseTokenAround(line, start, length) {
+  let left = start
+  while (left > 0 && RELEASE_TOKEN_CHARS.test(line[left - 1])) left -= 1
+  let right = start + length
+  while (right < line.length && RELEASE_TOKEN_CHARS.test(line[right])) right += 1
+  return line.slice(left, right)
+}
+/**
+ * 官网里**允许**保留发布版本号字面量的文件（逐条登记 + **逐字面量**登记 + 死条目红）。
+ *
+ * 当前两处都是 `deployment/upgrade.md` 的 **shell 注释**里的示例值/形状说明
+ * （`# 镜像里 2.7.0 与 v2.7.0 两个 tag 都在…`），**不是可复制命令**（可执行的两条
+ * `sed`/`grep` 与 `docker run` 用的都是 `${IMAGE}:${VER}`）—— 分区 C 的勘误 §勘误 3
+ * 逐处判定为"无害、只需登记"。这两处归 E-03-R 泳道所有（本单只改 `scripts/**`，
+ * 不动站点正文），所以在守卫里登记而不是直接改掉。
+ *
+ * ## 三个方向（收口轮：修前是"整文件豁免 + 零余量死条目"）
+ *
+ *   ① 允准面里**没登记**的字面量 ⇒ 红（修前整文件豁免：往 `upgrade.md` 里塞 `2.9.9` 全绿）；
+ *   ② **死条目**：登记的号在该文件里**连"带 v 的写法"都找不到** ⇒ EXIT=2（豁免必须随事实收缩）；
+ *   ③ **正当余量**：把裸号改写成 `v` 号（语义不变）**不再**触发死条目 —— 判"还在不在讲这个号"
+ *      时接受 `v?` 前缀，于是正当文案改动不会被"拒绝出结论"（V-P4 的 T5 现场）。
+ */
+const SITE_VERSION_ALLOW = [
+  {
+    file: 'site/src/content/docs/deployment/upgrade.md',
+    literals: ['2.7.0'],
+    why: '回滚/多栈段的 shell 注释里用 `2.7.0 与 v2.7.0` 说明"镜像里裸号与 v 号两个 tag 都在"'
+      + '（讲的是 tag **形状**，与具体版本无关；命令本身用的是 `${IMAGE}:${VER}`）',
+  },
+  {
+    file: 'site/src/content/docs/en/deployment/upgrade.md',
+    literals: ['2.7.0'],
+    why: '中文页的英文对照（同一句话、同一判定）',
+  },
+]
+/** 官网版本号扫描面的**绝对下限**（真仓形态）：文件被搬空/排除规则吃空 ⇒ EXIT=2。 */
+const SITE_VERSION_MIN_FILES = 25
+/** 本项目发布线（`major.minor`）的真源：root `package.json` 的 `version`（读不到则该分支关闭）。 */
+const PROJECT_VERSION_SOURCE = 'package.json'
+/**
+ * 从 `package.json` 解析本项目的**发布线前缀**（`2.8.2-beta.3` → `2.8.`）。
+ * @param source - 该文件的文本。
+ * @returns 前缀（含结尾点）；解析不出返回 undefined（此时只按发布语境判，不 fail-loud ——
+ *   本判据的主判据是语境，"与真源同线"只是**加严**的那一半）。
+ */
+function projectReleaseLinePrefix(source) {
+  let manifest
+  try {
+    manifest = JSON.parse(source)
+  } catch {
+    return undefined
+  }
+  const version = manifest?.version
+  if (typeof version !== 'string') return undefined
+  const match = /^(\d+)\.(\d+)\./u.exec(version)
+  return match === null ? undefined : `${match[1]}.${match[2]}.`
+}
+/**
+ * E-13 的官网版本号判据在「已覆盖」登记表里的身份（**形态契约**：没有"外部真源文件"，
+ * 见 {@link SITE_VERSION_ALLOW}）。它照样进登记表 —— 通过行声称的覆盖面必须等于真判过的项。
+ */
+const SITE_VERSION_RULE = { id: 'site-release-versions', label: '官网源码不得硬编码发布版本号' }
 
 /**
  * 解析 `KEEP=3` 形态的保留版本数。
@@ -667,6 +1094,45 @@ const NUMBER_CLAIM_RULES = [
       { pattern: /\*{0,2}([0-9]+)\s*个\*{0,2}\s*workspace\s*包/gu },
     ],
   },
+  {
+    id: 'migration-count',
+    label: '迁移文件数（`server/AGENTS.md` 的「重放 N 个迁移」）',
+    // 真源 = `migrations-pg/` 目录里的实际文件数（`readRoot`：真源不是**一个文件**）。
+    source: MIGRATION_COUNT_SOURCE,
+    readRoot: root => migrationCountFrom(root),
+    min: 1,
+    // 上下文锚（同 E-04 的纪律）：只有"重放 N 个迁移"这句测试库提速自述才是这条 claim。
+    // 同形的「N 个迁移」若讲的是别的口径（`docs/planning` 里的历史记录、`server/docs`
+    // 的预算旋钮）会被排除；被排除的条数照样打印（不静默吞）。
+    anchor: /重放/u,
+    window: 0,
+    required: [
+      { file: 'server/AGENTS.md', note: '测试库自述：「不再逐用例重放 N 个迁移」（E-10 的现场）' },
+    ],
+    forms: [
+      { pattern: /重放\s*([0-9]+)\s*个迁移/gu },
+      { pattern: /\breplays?\s+([0-9]+)\s+migrations?\b/giu },
+    ],
+  },
+  {
+    id: 'voice-model-payload',
+    label: '语音模型随包载荷（MiB）',
+    // 真源 = 上游钉死的 `runtime/assets.json`（三个随包文件 bytes 之和）。
+    // 用途：把 README 的「权重本身约 230MiB」钉住 —— **载荷**数字。
+    // "安装包增量"是另一件事（随平台压缩率，+139.7～252.5 MiB），由
+    // `readme-installer-increment` 判据禁止把前者冒充成后者。
+    source: VOICE_ASSETS_SOURCE,
+    read: source => voiceModelPayloadMiBFrom(source),
+    min: 2,
+    required: [
+      { file: 'README.md', note: '语音输入一节：随包载荷数字（E-P2 item 1 的现场）' },
+      { file: 'README.en.md', note: '同上（英文）' },
+    ],
+    forms: [
+      { pattern: /权重(?:本身)?约\s*([0-9]+)\s*MiB/gu },
+      { pattern: /weights are about\s*([0-9]+)\s*MiB/giu },
+    ],
+  },
 ]
 
 /**
@@ -761,6 +1227,185 @@ function* walk(target) {
 }
 
 /**
+ * 与 {@link walk} 同形的**宽扩展名**遍历（官网版本号判据要连 `.astro` 一起扫，
+ * 而 `walk()` 只 yield `.md` —— E-13 的现场正是 `site/src/pages/index.astro`）。
+ * @param root - 仓库根。
+ * @param target - 仓库相对目录/文件。
+ * @param extensions - 允许的扩展名（如 `['.md', '.astro']`）。
+ * @returns 相对路径列表（跳过 node_modules 与隐藏目录）。
+ */
+function walkWithExtensions(root, target, extensions) {
+  const found = []
+  const visit = relativePath => {
+    const absolute = join(root, relativePath)
+    if (!existsSync(absolute)) return
+    if (statSync(absolute).isFile()) {
+      if (extensions.some(extension => absolute.endsWith(extension))) found.push(relativePath)
+      return
+    }
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      visit(join(relativePath, entry.name))
+    }
+  }
+  visit(target)
+  return found
+}
+
+/**
+ * **文本 claim 判据表**（2026-10-05 收口轮，分区 C 的 E-12 / `voice.intro` 前提 /
+ * README 体积数字）。
+ *
+ * 与 {@link NUMBER_CLAIM_RULES} 的分工：那张表判"文档里的数字 == 真源里的数字"；
+ * 这张表判"**一句断言**与真源同向"（例如"这个字段接受明文 http" ↔ 代码里的 scheme 正则、
+ * "模型随客户端附带" ↔ 构建期缺省、以及**不得**把载荷数字冒充成安装包增量）。
+ *
+ * 共同纪律（与前一张表逐条一致）：
+ *   · 真源只**解析文本**，不 import / 不执行被审对象；解析不出 ⇒ `failures`（fail-loud）；
+ *   · `sites` 是**逐条登记的落点**（claim 定位点）—— 文件缺失 = 前置失败，不是"没判"；
+ *   · `hits` = 命中的**断言行数**（含被判红的那一行）用于「已覆盖」自我陈述与 `min` 地板；
+ *     违规行另走 `hits`（全局）通道 ⇒ EXIT=1；
+ *   · 行内 `doc-claim:allow` 标记同样适用（记录面例外）。
+ */
+const TEXT_CLAIM_RULES = [
+  {
+    id: 'speech-origin-scheme',
+    label: '语音模型源允许的 scheme（文档 ↔ 代码常量）',
+    source: SPEECH_ORIGIN_SOURCE,
+    read: source => speechOriginAcceptsPlainHttp(source),
+    // 两个站点页面各一行（zh / en）—— 定位点必须都在（E-04 的 `required` 同一口径）。
+    min: 2,
+    sites: [
+      { file: 'site/src/content/docs/deployment/channels.md', note: '渠道包字段表（中文）' },
+      { file: 'site/src/content/docs/en/deployment/channels.md', note: '渠道包字段表（英文）' },
+    ],
+    /** claim = 提到 `speech_model_origin` 的那一行（字段的取值形状声明）。 */
+    claim: line => line.includes('speech_model_origin'),
+    /**
+     * E-12：`desktop.speech_model_origin` 的取值形状必须与代码常量同向。
+     * 修前文档写「只写 `https://host[:port]`」，而代码/上游 schema/构建期校验三处都是 `https?`
+     * ⇒ 明文 `http://` 其实可用，文档却说不可用（分区 C 实测：改回旧句后三条桌面包用例 67/67 全绿）。
+     */
+    judge: (line, index, context) => {
+      if (!line.includes('speech_model_origin')) return null
+      const implSchemes = Array.isArray(context.truth.schemes) ? [...context.truth.schemes].sort() : undefined
+      if (implSchemes === undefined) {
+        // 防御性分支：真源解析器形态变了（正常路径上 `read()` 会先返回 undefined ⇒ EXIT=2）。
+        return { reason: `真源没有给出 scheme 集合（解析器形态变了？真源 ${SPEECH_ORIGIN_SOURCE}）` }
+      }
+      const docSchemes = docSchemeSet(line)
+      if (docSchemes.size === 0) {
+        return {
+          reason: '这一行是 `desktop.speech_model_origin` 的取值形状声明，但没有写出任何 scheme '
+            + '⇒ claim 定位不到、读者无从判断（真源 '
+            + `${SPEECH_ORIGIN_SOURCE} 的 \`SPEECH_ORIGIN_PATTERN\`：${implSchemes.join(' / ')}）`,
+        }
+      }
+      // **集合相等**（收口轮②）：既要判"文档比实现宽"（extra），也要判"实现比文档多"（missing）。
+      const missing = implSchemes.filter(scheme => !docSchemes.has(scheme))
+      const extra = [...docSchemes].sort().filter(scheme => !implSchemes.includes(scheme))
+      if (missing.length === 0 && extra.length === 0) return null
+      const shape = `\`${implSchemes.map(scheme => `${scheme}://`).join(' | ')}\``
+      const docShape = `\`${[...docSchemes].sort().map(scheme => `${scheme}://`).join(' | ')}\``
+      return {
+        reason: `文档声明的 scheme 集合与代码常量**不一致**：文档 ${docShape}，真源 ${shape}`
+          + `${missing.length > 0 ? `；**实现还接受** ${missing.join('、')}（文档没写 ⇒ 读者会以为不可用）` : ''}`
+          + `${extra.length > 0 ? `；**文档多写了** ${extra.join('、')}（实现不接受 ⇒ 照文档写会被拒）` : ''}`
+          + `（真源 ${SPEECH_ORIGIN_SOURCE} 的 \`SPEECH_ORIGIN_PATTERN\`）`,
+      }
+    },
+  },
+  {
+    id: 'voice-intro-copy',
+    label: '语音输入引导语的前提（随包 vs 首次下载）',
+    source: VOICE_BUNDLE_SOURCE,
+    read: source => voiceBundleDefaultFrom(source),
+    min: 2,
+    sites: [{ file: VOICE_LOCALE_SOURCE, note: '`voice.intro` 的中英两条（`voice-setup.tsx` 无条件渲染）' }],
+    /** claim = `voice.intro` 的两条文案本身（`voice.privacy` 等同族键不算）。 */
+    claim: line => line.includes("'voice.intro'"),
+    /**
+     * `voice.intro` 在任何 phase 下都渲染 ⇒ 它必须对"随包渠道"与"关掉随包的渠道"**都**成立。
+     * 修前两种语言都写"首次使用需要先下载识别模型"，而构建期缺省是**随包**
+     * （`speechBundleModel !== false`），分区 C 实测：改回旧话术 ⇒ 三条桌面包用例 67/67 全绿。
+     */
+    judge: (line, index, context) => {
+      if (!line.includes("'voice.intro'")) return null
+      const chinese = /[\u4e00-\u9fff]/u.test(line)
+      const oldPremise = chinese
+        ? /首次使用需要先下载|首次使用时下载|首次使用下载|需要先下载/u.test(line)
+        : /download(?:ed|s)? on first use|first[- ]use download|on-demand download/iu.test(line)
+      const bundledClaim = chinese
+        ? /随客户端|随包/u.test(line)
+        : /ships with the client|bundl/iu.test(line)
+      const downloadClaim = chinese ? /首次使用/u.test(line) : /first use/iu.test(line)
+      if (context.truth.bundledByDefault === true) {
+        if (oldPremise) {
+          return {
+            reason: '文案断言"首次使用需要先下载识别模型"，而构建期缺省是**随包**'
+              + '（`speechBundleModel: branding.speechBundleModel !== false`）⇒ 对官方渠道是错的前提；'
+              + '这句话由 `voice-setup.tsx` **无条件渲染**（不分 phase）'
+              + `（真源 ${VOICE_BUNDLE_SOURCE}）`,
+          }
+        }
+        if (!bundledClaim) {
+          return {
+            reason: '文案没有说明"模型随客户端附带"（缺省形态），而 `voice.intro` 对随包渠道'
+              + '是唯一的前提说明 ⇒ 读者会以为必须下载'
+              + `（真源 ${VOICE_BUNDLE_SOURCE}：缺省 true，只有显式布尔 false 才回到下载）`,
+          }
+        }
+        return null
+      }
+      if (!downloadClaim) {
+        return {
+          reason: '构建期缺省已是**不随包**（`speechBundleModel` 缺省翻成 false），'
+            + '而这条文案没有说明"首次使用需要下载" ⇒ 与现默认相反'
+            + `（真源 ${VOICE_BUNDLE_SOURCE}）`,
+        }
+      }
+      return null
+    },
+  },
+  {
+    id: 'readme-installer-increment',
+    label: 'README 不得把随包载荷冒充成安装包增量',
+    source: VOICE_ASSETS_SOURCE,
+    read: source => voiceModelPayloadMiBFrom(source),
+    min: 2,
+    sites: [
+      { file: 'README.md', note: '语音输入一节（中文）' },
+      { file: 'README.en.md', note: '语音输入一节（英文）' },
+    ],
+    /**
+     * claim = 写出**随包载荷**的那一行（`权重约 230MiB` / `weights are about 230MiB`）。
+     *
+     * 判据刻意**不把载荷数字本身**当 claim 的一部分：数字写错由
+     * `voice-model-payload` 那条**硬数字**规则判（它有自己的真源与容差），
+     * 这条只判"载荷数字被当成了什么" —— 两者分工，互不掩盖。
+     */
+    claim: line => /权重|weights/iu.test(line) && /\d+\s*(?:MiB|MB)/u.test(line),
+    /**
+     * E-P2 item 1：`+230MiB` 是**载荷**，不是安装包增量（实测三平台 +139.7～252.5 MiB）。
+     * 修前 README 写「代价是安装包约 +230MiB」——单值表述对 macOS 高估约 90MiB。
+     * 判据：出现"安装包 + <载荷数字> MiB"这种**把载荷当增量**的写法即红（区间/分平台写法放行）。
+     */
+    judge: (line, index, context) => {
+      const payload = Number(context.truth)
+      if (!new RegExp(`(?<![\\d.])${payload}(?![\\d.])`, 'u').test(line)) return null
+      const zh = new RegExp(`安装包[^。\\n]{0,12}?${payload}\\s*(?:MiB|MB)`, 'u')
+      const en = new RegExp(`installer[^.\\n]{0,24}?${payload}\\s*(?:MiB|MB)`, 'iu')
+      if (!zh.test(line) && !en.test(line)) return null
+      return {
+        reason: `把**随包载荷**（约 ${payload}MiB 的权重）写成了**安装包增量**`
+          + '（实测三平台增量 +139.7～252.5 MiB，随各打包格式的压缩率而变）'
+          + `（真源 ${VOICE_ASSETS_SOURCE} 的 bytes 之和；分平台数据见 docs/releases 的实测表）`,
+      }
+    },
+  },
+]
+
+/**
  * **禁止写死的条数**（FIX-47④d）—— "写不出真源"的那类数字要反过来判。
  *
  * ## 现场（第三十一轮 AD2-06，真跑）
@@ -821,6 +1466,8 @@ const COVERAGE_ITEMS = [
   { id: 'pin', label: '上游 pin' },
   { id: 'platform-modules', label: '平台模块表' },
   ...NUMBER_CLAIM_RULES.map(rule => ({ id: rule.id, label: rule.label })),
+  ...TEXT_CLAIM_RULES.map(rule => ({ id: rule.id, label: rule.label })),
+  SITE_VERSION_RULE,
 ]
 const PASS_LINE_PREFIX = 'check-doc-claims: 已覆盖 '
 const PASS_LINE_SUFFIX = ' —— 全部与真源一致 ✅'
@@ -964,9 +1611,267 @@ function ruleHitsInFile(rule, file) {
   return rule.hitsByFile instanceof Map ? (rule.hitsByFile.get(file) ?? 0) : 0
 }
 
+/**
+ * 文本 claim 判据的**自检用例**（2026-10-05 收口轮）。
+ *
+ * 单独成函数是刻意的：`selfTest()` 里那批用例只做"取值比较"，而这个函数把三条规则的
+ * **解析器**与**判词**各跑正反两态 —— 判词被写成恒真/恒假时这里当场红（不再需要靠
+ * 端到端变异才能发现）。
+ * @returns `[ok, message]` 二元组数组（与 `selfTest()` 的 `cases` 同形）。
+ */
+function textClaimSelftestCases() {
+  const rule = id => TEXT_CLAIM_RULES.find(entry => entry.id === id)
+  const judge = (id, line, truth) => {
+    const found = rule(id)
+    if (found === undefined) return undefined
+    return found.judge(line, 0, { truth, file: 'selftest.md', lines: [line] })
+  }
+  return [
+    [rule('speech-origin-scheme') !== undefined && rule('voice-intro-copy') !== undefined
+      && rule('readme-installer-increment') !== undefined,
+      'selftest: 文本 claim 判据表里必须有 speech-origin-scheme / voice-intro-copy / '
+      + 'readme-installer-increment 三条规则（删掉它们 = 三条 NO-TEETH 又回来了）'],
+    // E-12：真源解析（两种形态 + fail-loud）
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^https?:\\/\\/[^/\\s?#@]+\\/?$/u')
+      ?.allowsPlainHttp === true,
+      'selftest: `https?` 常量必须解析成"接受明文 http"'],
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^https:\\/\\/[^/]+$/u')
+      ?.allowsPlainHttp === false,
+      'selftest: https-only 常量必须解析成"不接受明文 http"'],
+    [speechOriginAcceptsPlainHttp('const OTHER_PATTERN = /^ftp:/u') === undefined,
+      'selftest: 常量被改名/删掉必须 fail-loud（返回 undefined）'],
+    // E-12 收口轮（V-P4 的 T10/T10c）：**等价改写**不能翻转结论，**形态不认识**必须 fail-loud。
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^https:\\/\\/[^/\\s?#@]+\\/?$|^http:\\/\\/[^/\\s?#@]+\\/?$/u')
+      ?.allowsPlainHttp === true,
+      'selftest: 顶层 `|` 的等价改写（`^https://…$|^http://…$`）必须仍解析成"接受明文 http"'
+      + '（修前按 `startsWith` 只看第一个候选 ⇒ 结论与事实相反，T10c 假阴性）'],
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^http:\\/\\/[^/]+$/u')
+      ?.allowsPlainHttp === true,
+      'selftest: 只有 `http://` 一个候选时也必须解析出"接受明文 http"'],
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^http(s)?:\\/\\/[^/]+$/u')
+      ?.allowsPlainHttp === true,
+      'selftest: 可选**分组** `(s)?` 形态必须解析成 http + https'],
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^http[s]?:\\/\\/[^/]+$/u') === undefined,
+      'selftest: 字符类 `[s]?` 这类**形态不认识**的写法必须 fail-loud（返回 undefined ⇒ EXIT=2）'],
+    [speechOriginAcceptsPlainHttp('const SPEECH_ORIGIN_PATTERN = /^(?:https?:\\/\\/[^/]+$/u') === undefined,
+      'selftest: 括号不配对的残缺正则必须 fail-loud（不猜）'],
+    // E-12：判词正反（现场句 = 修前那句）
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | 只写 `https://host[:port]`，**不能带路径** |',
+      { allowsPlainHttp: true, schemes: ['http', 'https'] }) !== null,
+      'selftest: 「只写 `https://host[:port]`」在代码接受 http 时必须判红（E-12 的现场形态）'],
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | `http(s)://host[:port]` only（明文 `http://` 也接受） |',
+      { allowsPlainHttp: true, schemes: ['http', 'https'] }) === null,
+      'selftest: `http(s)://` 形态必须放行（防"一刀切成见到 https 就红"）'],
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | `http(s)://host[:port]` only |',
+      { allowsPlainHttp: false, schemes: ['https'] }) !== null,
+      'selftest: 代码改成 https-only 后，文档里的 `http(s)://` 必须跟着红（双向）'],
+    // 收口轮②（V-P10P11 的 D6）：**实现比文档多一个 scheme** 也必须红（集合相等，不是"文档 ⊆ 实现"）。
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | `http(s)://host[:port]` only |',
+      { allowsPlainHttp: true, schemes: ['http', 'https', 'wss'] }) !== null,
+      'selftest: 实现多出一个 scheme（`wss`）而文档只写 `http(s)://` 时必须判红（集合相等）'],
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | `http(s)://` 与 `wss://` 都接受 |',
+      { allowsPlainHttp: true, schemes: ['http', 'https', 'wss'] }) === null,
+      'selftest: 文档把三个 scheme 都写全时必须放行（防过度收紧）'],
+    [judge('speech-origin-scheme', '| `desktop.speech_model_origin` | 内网镜像源 | 只写 `https://host[:port]`，**不能带路径** |',
+      { allowsPlainHttp: true, schemes: ['http', 'https', 'wss'] }) !== null,
+      'selftest: 文档少写 scheme 时也必须红（`only` 不等于"写全"）'],
+    [judge('speech-origin-scheme', '| 无关的字段 | x | `https://example.com` |', { allowsPlainHttp: true, schemes: ['http', 'https'] }) === null,
+      'selftest: 不含 `speech_model_origin` 的行不是这条规则的 claim'],
+    // `voice.intro` 前提面：真源解析 + 判词正反
+    [voiceBundleDefaultFrom('    speechBundleModel: branding.speechBundleModel !== false,')
+      ?.bundledByDefault === true,
+      'selftest: `!== false` 必须解析成"缺省随包"'],
+    [voiceBundleDefaultFrom('    speechBundleModel: branding.speechBundleModel !== true,')
+      ?.bundledByDefault === false,
+      'selftest: `!== true` 必须解析成"缺省不随包"'],
+    [voiceBundleDefaultFrom('const unrelated = 1') === undefined,
+      'selftest: 缺 `speechBundleModel` 必须 fail-loud（返回 undefined）'],
+    [judge('voice-intro-copy', "  'voice.intro': '识别模型首次使用需要先下载识别模型，之后可离线使用。',",
+      { bundledByDefault: true }) !== null,
+      'selftest: 旧前提（"首次使用需要先下载"）在缺省随包时必须判红'],
+    [judge('voice-intro-copy', "  'voice.intro': '识别模型默认随客户端附带，装上即可用、无需下载；只有关掉随包的渠道才需要首次下载。',",
+      { bundledByDefault: true }) === null,
+      'selftest: "随客户端附带 + 关掉随包才下载"必须放行（本仓现文案）'],
+    [judge('voice-intro-copy', "  'voice.intro': 'The recognition model ships with the client, so it works right away with no download; only channels that opt out of bundling need a one-time download.',",
+      { bundledByDefault: true }) === null,
+      'selftest: 英文现文案必须放行'],
+    [judge('voice-intro-copy', "  'voice.intro': 'The model ships with the client.',",
+      { bundledByDefault: false }) !== null,
+      'selftest: 缺省不随包时，"只说随包"的文案必须判红（双向）'],
+    // README 体积数字：载荷 ≠ 安装包增量
+    [judge('readme-installer-increment', '- **语音输入**：…代价是安装包约 +230MiB；', 230) !== null,
+      'selftest: 「安装包约 +230MiB」必须判红（把载荷冒充成增量 —— E-P2 item 1 的现场）'],
+    [judge('readme-installer-increment', '- **语音输入**：…权重本身约 230MiB，安装包增幅视平台打包格式的压缩率而定，约 +140～250 MiB）；',
+      230) === null,
+      'selftest: 现文案（载荷 + 区间增量）必须放行'],
+    [judge('readme-installer-increment', '- **Voice input**: the weights are about 230MiB and the installer grows by roughly +140–250 MiB depending on compression);',
+      230) === null,
+      'selftest: 英文现文案必须放行'],
+    // E-13：版本字面量正则（含"不该命中的两种"）
+    ['发布 2.7.0 与 2.8.0 两个版本'.match(RELEASE_VERSION_LITERAL)?.length === 2,
+      'selftest: 裸版本号（`2.7.0`）都应命中'],
+    ['dsh-v0.1.5-rc.2 与 172.28.0.1'.match(RELEASE_VERSION_LITERAL) === null,
+      'selftest: 上游 pin `0.1.5` 与 IP `172.28.0.1` 都不得命中（否则判据会误伤）'],
+    [SITE_VERSION_ALLOW.length >= 1 && SITE_VERSION_ALLOW.every(entry => typeof entry.why === 'string' && entry.why !== ''),
+      'selftest: 官网版本号允准面必须逐条写明理由（空理由 = 任意豁免）'],
+  ]
+}
+
+/**
+ * E-13 判据的**命中路径**自检（收口轮 P1，独立核验 V-P4 的 G1）。
+ *
+ * 现场：掏空这段扫描里的 `hits.push`（计数还在、正则还在、死条目与覆盖面全绿）之后，
+ * 站点写回 `2.9.9` 不再被咬，而 `--selftest` **一格都不走这条路径** ⇒ 掏空完全静默。
+ * 修法：把扫描抽成 {@link scanSiteReleaseVersions}，在这里对**合成站点树**断言：
+ *   · 发布语境的裸号 ⇒ 必须产出命中（`hits.push` 的路径真的通）；
+ *   · 允准面里登记的字面量 ⇒ 不算命中；
+ *   · 允准面文件里**未登记**的字面量 ⇒ 算命中（修前整文件豁免，V-P4 的 T4）；
+ *   · 第三方组件版本（无发布语境、非本项目发布线）⇒ **不得**命中（V-P4 的 T3 假红）；
+ *   · 登记的字面量被改写成 `v` 号 ⇒ **不算死条目**（正当余量，V-P4 的 T5）；
+ *   · 什么都没讲 ⇒ 死条目。
+ * @returns `[ok, message]` 二元组数组（与 `selfTest()` 的 `cases` 同形）。
+ */
+function siteVersionSelftestCases() {
+  const tree = mkdtempSync(join(tmpdir(), 'doc-claims-e13-'))
+  const write = (relativePath, content) => {
+    const absolute = join(tree, relativePath)
+    mkdirSync(join(absolute, '..'), { recursive: true })
+    writeFileSync(absolute, content)
+  }
+  try {
+    write('site/src/pages/index.astro', [
+      'curl -fL -O https://release.picoaide.com/official/releases/9.9.9/picoaide-server-9.9.9-amd64.zip',
+      '<p>当前发布版本 3.0.0</p>',
+      '<p>需要 Caddy 2.7.6 及以上（官方镜像已内置）。</p>',
+      '<p>上游自 0.1.5 起保留该 profile 名。</p>',
+      '<p>最新发布线 2.8.7 的说明</p>',
+      // 收口轮②（V-P10P11 的 E10/E7）：两条"发布语境 + 号"的边界散文，逐字钉住。
+      '<p>说明写在 releases/ 目录，内容涉及 Caddy 2.7.6 的升级。</p>',
+      '<p>自发布版本 2.7.0 起，镜像内已内置 Caddy。</p>',
+    ].join('\n'))
+    write('site/src/content/docs/deployment/upgrade.md', [
+      '# 镜像里 2.7.0 与 v2.7.0 两个 tag 都在',
+      '# 另一处 tag 语境里写着没登记的 2.9.9',
+    ].join('\n'))
+    const scanned = scanSiteReleaseVersions(tree, {
+      allowEntries: SITE_VERSION_ALLOW,
+      releaseLinePrefix: '2.8.',
+    })
+    const literals = scanned.entries.map(entry => `${entry.file.split('/').pop()}:${entry.literal}`)
+    const inIndex = scanned.entries.filter(entry => entry.file.endsWith('index.astro')).map(entry => entry.literal)
+    const inUpgrade = scanned.entries.filter(entry => entry.file.endsWith('upgrade.md'))
+    // 死条目：把文件里那句 `2.7.0 … v2.7.0` 整个删掉（登记的事实没了 ⇒ 必须报死条目）。
+    write('site/src/content/docs/deployment/upgrade.md', '# 这里不再讲任何版本号\n')
+    const dead = scanSiteReleaseVersions(tree, { releaseLinePrefix: '2.8.' })
+    // 正当余量：裸号 → `v` 号（语义不变）⇒ **不是**死条目。
+    write('site/src/content/docs/deployment/upgrade.md', '# 镜像里 v2.7.0 与 v2.8.0 两个 tag 都在\n')
+    const rewritten = scanSiteReleaseVersions(tree, { releaseLinePrefix: '2.8.' })
+    return [
+      [scanned.files === 2, `selftest: E-13 合成树应扫到 2 个 .md/.astro（实际 ${scanned.files}）`],
+      [inIndex.includes('9.9.9') && inIndex.includes('3.0.0'),
+        'selftest: E-13 的**命中路径**必须有牙 —— 发布语境里的裸号（`releases/9.9.9/…` 与'
+        + `「当前发布版本 3.0.0」）都必须产出命中（实际 ${JSON.stringify(inIndex)}）`],
+      [scanned.hitCount > 0 && literals.length > 0,
+        `selftest: E-13 扫描必须产出命中记录（实际 ${JSON.stringify(literals)}）`],
+      // **命中路径**（报告投影）本身：它必须把命中变成 `hits` 通道的对象。
+      // 掏空这一层（例如 `return []`）= 判据形同不存在，而计数/覆盖面仍全绿（V-P4 的 G1）。
+      [(reports => reports.length >= 3
+        && reports.length === scanned.entries.filter(entry => !entry.allowed).length
+        && reports.every(report => report.kind === 'SITE-VERSION'
+          && scanned.entries.some(entry => entry.file === report.file && entry.line === report.line
+            && report.reason.includes(`\`${entry.literal}\``))))(siteVersionHitReports(scanned)),
+        `selftest: E-13 的**命中路径必须有牙** —— 发布语境里的裸号（\`releases/9.9.9/…\` 与`
+        + `「当前发布版本 3.0.0」）都必须产出命中（实际 ${JSON.stringify(inIndex)}）`],
+      [siteVersionHitReports(scanned).every(report => !report.reason.includes('undefined')),
+        'selftest: E-13 的报告对象必须带可读的理由（不得出现 undefined 占位）'],
+      // 主路径的**接线**：投影出来的命中必须真的进 `hits`（否则上面那格只是"函数有牙、
+      // 主路径不接"）。needle 由**分段拼接**得到，避免这条断言自己命中自己。
+      [(() => {
+        const needle = ['hits.push(...siteVersion', 'HitReports(siteVersionScan))'].join('')
+        const source = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+        const lines = source.split('\n').filter(line => line.includes(needle))
+        return lines.length === 1 && !lines[0].trim().startsWith('//')
+      })(),
+        'selftest: E-13 的命中必须在主路径上被接进 `hits`（`hits.push(...siteVersionHitReports(...))` '
+        + '缺失/被注释 = 判据形同不存在，而自检与覆盖面仍会全绿）'],
+      [inIndex.includes('2.8.7'),
+        'selftest: 落在本项目发布线（`2.8.`，来自 root package.json）上的裸号即使没有语境标记也必须命中'],
+      [!inIndex.includes('2.7.6') && !inIndex.includes('0.1.5'),
+        `selftest: 第三方组件版本（\`Caddy 2.7.6\`）与上游 pin（\`0.1.5\`）都**不得**命中`
+        + `（实际 ${JSON.stringify(inIndex)}）`],
+      // ---- 收口轮②（V-P10P11 的 E10）：**行里提到 `releases/` 但号与发布面无关**的散文 ⇒ 不得误伤 ----
+      [inIndex.filter(entry => entry === '2.7.6').length === 0
+        && scanned.entries.every(entry => !entry.text.includes('内容涉及')),
+        'selftest: 「说明写在 releases/ 目录，内容涉及 Caddy 2.7.6 的升级。」这类散文**不得**判红'
+        + '（`releases/` 只在**紧挨着号**时才算发布面 token —— V-P10P11 的 E10 假红）'],
+      // ---- 收口轮②（V-P10P11 的 E7）：**行级发布语境 + 历史裸号** ⇒ 判为正当收紧，逐字钉住 ----
+      [scanned.entries.some(entry => entry.literal === '2.7.0' && entry.text.includes('自发布版本')),
+        'selftest: 「自发布版本 2.7.0 起…」**判红是正当收紧**（行级语境「发布版本」+ 历史裸号）——'
+        + '修法是写成 `v2.7.0`（本仓既有约定）或加行内 `doc-claim:allow`；这条边界不得再被当成新发现'],
+      [inUpgrade.some(entry => entry.literal === '2.7.0' && entry.allowed)
+        && inUpgrade.some(entry => entry.literal === '2.9.9' && !entry.allowed),
+        'selftest: 允准面必须**按字面量**判 —— 登记的 `2.7.0` 放行，同文件里的 `2.9.9` 照样命中'],
+      [dead.deadEntries.some(entry => entry.file === SITE_VERSION_ALLOW[0].file),
+        `selftest: 允准面文件不再讲登记的号时必须报死条目（实际 ${JSON.stringify(dead.deadEntries)}）`],
+      [!rewritten.deadEntries.some(entry => entry.file === SITE_VERSION_ALLOW[0].file),
+        'selftest: 裸号正当改写成 `v` 号**不得**触发死条目（允准面余量，V-P4 的 T5 假红）'],
+    ]
+  } finally {
+    rmSync(tree, { recursive: true, force: true })
+  }
+}
+
+/**
+ * `--selftest` 用例**条数地板**（棘轮，收口轮 2026-10-05）。
+ *
+ * 现场（独立核验 V-P4 的 G3）：`--selftest` 打印的 `自检 N/N 项通过` 里 N = `cases.length`
+ * ⇒ 删掉 21 条用例之后它照旧打印「自检 54/54 项通过 ✅」并 EXIT=0。取值 = 当前实测条数的
+ * ratchet（只允许被"变多"越过）：成批删除 / 清空当场红。
+ *
+ * ⚠️ 与 `check-workflows.mjs` 的 `SELFTEST_MIN_SAMPLES` 同一手法：**地板本身不写在用例表里**
+ * —— 它由 `selfTest()` 里那个独立的 `if` 判，掏空 `cases` 数组不能顺手掏空它。
+ */
+const SELFTEST_MIN_CASES = 91
+/**
+ * **定向用例点名对账**（与 `check-workflows.mjs` 的 `SELFTEST_REQUIRED_SAMPLES` 同形）：
+ * 每条 `needle` 必须在某一格用例的说明文字里出现 —— 只删"这一格样本"（条数地板可能还过得去）
+ * 也会具名报红。收口轮补的是三条本轮新加的牙 + 既有牙的关键格。
+ */
+const SELFTEST_REQUIRED_CASES = [
+  { needle: '文本 claim 判据表里必须有 speech-origin-scheme', why: '三条文本 claim 规则的存在性（删规则 = NO-TEETH 回来）' },
+  { needle: '`https?` 常量必须解析成"接受明文 http"', why: 'E-12 真源解析：`https?` 形态' },
+  { needle: 'https-only 常量必须解析成"不接受明文 http"', why: 'E-12 真源解析：https-only 形态' },
+  { needle: '常量被改名/删掉必须 fail-loud', why: 'E-12 真源解析：形态不认识 ⇒ undefined' },
+  { needle: '顶层 `|` 的等价改写', why: 'E-12 收口轮：等价改写不得翻转结论（V-P4 T10c 假阴性）' },
+  { needle: '字符类 `[s]?` 这类**形态不认识**的写法必须 fail-loud', why: 'E-12 收口轮：读不懂 ⇒ EXIT=2' },
+  { needle: '「只写 `https://host[:port]`」在代码接受 http 时必须判红', why: 'E-12 判词（现场句）' },
+  { needle: '`http(s)://` 形态必须放行', why: 'E-12 判词（防一刀切）' },
+  { needle: '代码改成 https-only 后，文档里的 `http(s)://` 必须跟着红', why: 'E-12 判词双向' },
+  { needle: '旧前提（"首次使用需要先下载"）在缺省随包时必须判红', why: '`voice.intro` 前提面判词' },
+  { needle: '`!== true` 必须解析成"缺省不随包"', why: '`voice.intro` 真源解析（双向）' },
+  { needle: '「安装包约 +230MiB」必须判红', why: 'README 载荷 ≠ 安装包增量' },
+  { needle: '英文现文案必须放行', why: 'README 判词反向对照' },
+  { needle: '上游 pin `0.1.5` 与 IP `172.28.0.1` 都不得命中', why: 'E-13 正则词界（防误伤）' },
+  { needle: '官网版本号允准面必须逐条写明理由', why: 'E-13 允准面理由非空' },
+  { needle: 'E-13 的**命中路径必须有牙', why: 'E-13 收口轮：掏空命中投影必须被自检咬住（V-P4 G1）' },
+  { needle: '第三方组件版本（`Caddy 2.7.6`）与上游 pin（`0.1.5`）都**不得**命中', why: 'E-13 收紧：第三方版本不误伤（V-P4 T3）' },
+  { needle: '允准面必须**按字面量**判', why: 'E-13 收紧：允准面文件里未登记的号照样红（V-P4 T4）' },
+  { needle: '裸号正当改写成 `v` 号**不得**触发死条目', why: 'E-13 允准面余量（V-P4 T5 假红）' },
+  { needle: '实现多出一个 scheme（`wss`）而文档只写', why: 'E-12 集合相等（收口轮② V-P10P11 的 D6）' },
+  { needle: '文档把三个 scheme 都写全时必须放行', why: 'E-12 集合相等的反向对照（防过度收紧）' },
+  { needle: '这类散文**不得**判红', why: 'E-13 发布面 token 必须与号**邻接**（收口轮② V-P10P11 的 E10 假红）' },
+  { needle: '判红是正当收紧', why: 'E-13 行级语境 + 历史裸号 = 正当收紧，边界逐字钉住（V-P10P11 的 E7）' },
+  { needle: '通过行张冠李戴必须被拒', why: '通过行反解断言' },
+  { needle: '真 stdout 里的自洽通过行必须被接受', why: '打印路径判据（真 stdout）' },
+  { needle: '通过行探测的独立子入口必须存在', why: '探测入口形态（独立入口，不是开关）' },
+  { needle: '判据表里必须有 starlightLocalesFrom', why: '真源 6 的解析器存在性' },
+  { needle: '花括号不闭合必须返回 undefined', why: '真源 6 fail-loud' },
+]
+/** `SELFTEST_REQUIRED_CASES` 自身的条数地板（棘轮：拆点名对账必须同时改这里并进 diff）。 */
+const SELFTEST_MIN_REQUIRED_CASES = 28
+
 /** 自检：解析器与判据本身的正反用例（防"扫描器悄悄失效 ⇒ 恒绿"）。 */
-function selfTest() {
-  const good = '平台模块表（`PLATFORM_MODULES`，共 2 项：`react`、`react-dom`）与 `scripts/platform-modules.mjs`'
+function selfTest() {  const good = '平台模块表（`PLATFORM_MODULES`，共 2 项：`react`、`react-dom`）与 `scripts/platform-modules.mjs`'
   const bad = '平台模块表（`PLATFORM_MODULES`，共 3 项：`react`、`react-dom`）与 `react-dom/client`'
   const noAnchor = '无关的一行 `react`'
   const cadenceSample = '  initialDelayMs: z.number().step(1).max(X).default(60_000),\n'
@@ -1068,6 +1973,13 @@ function selfTest() {
       'selftest: 「通过行逐项枚举…N 层」必须落在集成层数规则的锚内'],
     [!anchorAccepts(integrationLayersRule ?? {}, ['三层覆盖：单测、verify 脚本、E2E 自动化'], 0),
       'selftest: COVERAGE-MATRIX 的「三层覆盖」是另一件事，必须被锚排除'],
+    // ---- 文本 claim 的真源解析 + 判词（2026-10-05 收口轮：E-12 / voice.intro / README 体积）----
+    //
+    // 每条都钉"解析器/判词本身有没有牙"：真源形态变了必须 fail-loud（返回 undefined），
+    // 正反两态各一格（否则"把判词写成恒真"这类掏空会静默通过）。
+    ...textClaimSelftestCases(),
+    // ---- E-13 判据的**命中路径**（收口轮 P1，V-P4 的 G1：掏空 `hits.push` 曾全绿）----
+    ...siteVersionSelftestCases(),
     // 通过行反解断言（自我陈述与覆盖面必须一致）
     [passLineProblems(passLineFor(coveredSample), coveredSample).length === 0, 'selftest: 生成的通过行必须自洽'],
     [passLineProblems('check-doc-claims: 已覆盖 9 项：上游 pin、平台模块表 —— 全部与真源一致 ✅', coveredSample).length > 0,
@@ -1131,12 +2043,41 @@ function selfTest() {
       'selftest: `locales:` 出现两处（有歧义）必须 fail-loud（返回 undefined）'],
   ]
   const failed = cases.filter(([ok]) => !ok).map(([, name]) => name)
+  // ───────────────────────────────────────────────────────────────────────────
+  // 自检**自身**的下限与逐条点名对账（收口轮 P1，独立核验 V-P4 的 G3）。
+  //
+  // 现场：`--selftest` 打印的 `自检 N/N 项通过` 里 N 就是 `cases.length` —— 删掉 21 条用例
+  // 之后它照旧打印「自检 54/54 项通过 ✅」（自洽、EXIT=0）。修法照 `check-workflows.mjs`
+  // 的两条既有手法：
+  //   ① **条数地板**（棘轮，只允许被"变多"越过）：取值 = 当前实测条数；
+  //   ② **逐条点名对账**：{@link SELFTEST_REQUIRED_CASES} 里每条 needle 必须在某一格用例的
+  //      文案里出现（删掉那一格 ⇒ 具名报红），且该表自身也有条数地板。
+  //
+  // ⚠️ 这三条失败必须走**不经过 `failed` 数组**的通道（否则"掏空断言"会连自检一起吞掉）：
+  // 它们直接追加进 `failed` 之后仍由同一段打印，但**判定自己**也在 `cases` 之外，
+  // 所以删用例 / 删 needle 都不可能让它们消失。
+  // ───────────────────────────────────────────────────────────────────────────
+  const names = cases.map(([, name]) => name)
+  if (cases.length < SELFTEST_MIN_CASES) {
+    failed.push(`自检用例只剩 ${cases.length} 条，至少要有 ${SELFTEST_MIN_CASES} 条`
+      + ' —— 用例表被成批删除（本仓第四轮 R4-A 已登记的形态："回归网自身无下限"）')
+  }
+  if (SELFTEST_REQUIRED_CASES.length < SELFTEST_MIN_REQUIRED_CASES) {
+    failed.push(`定向用例登记表只剩 ${SELFTEST_REQUIRED_CASES.length} 条，`
+      + `至少要有 ${SELFTEST_MIN_REQUIRED_CASES} 条 —— 点名对账被拆掉`)
+  }
+  for (const required of SELFTEST_REQUIRED_CASES) {
+    if (names.some(name => name.includes(required.needle))) continue
+    failed.push(`定向用例登记表里的「${required.needle}」没有任何用例带着它 ——`
+      + ` 那一格样本被删/被改写（${required.why}）`)
+  }
   if (failed.length > 0) {
     for (const name of failed) console.error(`  [SELFTEST] ${name}`)
     console.error(`check-doc-claims: 自检 ${failed.length}/${cases.length} 项失败 —— 守卫自身失效`)
     process.exit(1)
   }
-  console.log(`check-doc-claims: 自检 ${cases.length}/${cases.length} 项通过 ✅`)
+  console.log(`check-doc-claims: 自检 ${cases.length}/${cases.length} 项通过 ✅`
+    + `（定向用例 ${SELFTEST_REQUIRED_CASES.length} 条逐条点名对账）`)
   process.exit(0)
 }
 
@@ -1147,6 +2088,15 @@ if (selftest) selfTest()
 
 const failures = []
 const hits = []
+/**
+ * **真源解析失败**（"形态不认识"）的收集面 —— 与 `failures`（扫描面问题，EXIT=1）分开：
+ * 读不懂真源 = **前置失败**（EXIT=2，"没判"不是"一致"），与"有漂移"（EXIT=1）区分开。
+ *
+ * 收口轮（2026-10-05，独立核验 V-P4 的 T10c）：E-12 的真源解析从"字符串前缀"改成结构化
+ * scheme 集合之后，"形态不认识"必须有**明确的出口**，而不是回落成"某一边更宽"的假结论。
+ * 本数组在打印前并入 `surfaceProblems`（那里是 EXIT=2 的唯一通道）。
+ */
+const truthProblems = []
 
 /**
  * 真仓形态 = 根上同时有 `upstream.json` 与 `package.json`（既有语义，2026-09-23 缩面判据）。
@@ -1181,21 +2131,31 @@ if (expectedModules === undefined || expectedModules.length === 0) {
 }
 
 // ---- 真源 3/4/5：硬数字（R13-GF）。真源是**代码里的量**，不是守卫里的副本 ----
+//
+// 两种真源形态：`read(source 文本)`（真源是**一个文件**）与 `readRoot(root)`（真源是
+// **一批文件/一个目录**，例如 `migrations-pg/` 的文件数 —— 见 `migration-count`）。
 const numericRules = NUMBER_CLAIM_RULES.map(rule => ({
   ...rule, truth: undefined, hits: 0, excluded: 0, hitsByFile: new Map(),
 }))
 for (const rule of numericRules) {
-  const path = join(root, rule.source)
-  if (!existsSync(path)) {
-    if (strictSurface) {
-      failures.push(`${rule.source}: 找不到硬数字真源（${rule.label}）—— 拒绝把"读不到真源"当通过`)
+  let value
+  if (typeof rule.readRoot === 'function') {
+    value = rule.readRoot(root)
+  } else {
+    const path = join(root, rule.source)
+    if (!existsSync(path)) {
+      if (strictSurface) {
+        failures.push(`${rule.source}: 找不到硬数字真源（${rule.label}）—— 拒绝把"读不到真源"当通过`)
+      }
+      continue
     }
-    continue
+    value = rule.read(readFileSync(path, 'utf8'))
   }
-  const value = rule.read(readFileSync(path, 'utf8'))
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-    failures.push(`${rule.source}: 解析不出 ${rule.label} 的真源（该文件的形态变了？）`
-      + ' —— 拒绝把"解析失败"当通过，请同步本守卫的解析器')
+    if (typeof rule.readRoot !== 'function' || strictSurface) {
+      failures.push(`${rule.source}: 解析不出 ${rule.label} 的真源（该文件的形态变了？）`
+        + ' —— 拒绝把"解析失败"当通过，请同步本守卫的解析器')
+    }
     continue
   }
   rule.truth = value
@@ -1277,6 +2237,199 @@ for (const target of SCAN_PATHS) {
     }
   }
 }
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 判据 7bis：**文本 claim**（E-12 / `voice.intro` 前提 / README 体积数字）。
+ *
+ * 与上面"硬数字"那一段同形：先解真源（失败 = fail-loud），再在**逐条登记的落点**上判；
+ * `hits` = 命中的断言行数（用于「已覆盖」与 `min` 地板），违规行走全局 `hits`（EXIT=1）。
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const textRules = TEXT_CLAIM_RULES.map(rule => ({
+  ...rule, truth: undefined, hits: 0, hitsByFile: new Map(),
+}))
+for (const rule of textRules) {
+  const path = join(root, rule.source)
+  if (!existsSync(path)) {
+    if (strictSurface) {
+      failures.push(`${rule.source}: 找不到文本 claim 的真源（${rule.label}）—— 拒绝把"读不到真源"当通过`)
+    }
+    continue
+  }
+  const value = rule.read(readFileSync(path, 'utf8'))
+  if (value === undefined) {
+    truthProblems.push(`${rule.source}: 解析不出 ${rule.label} 的真源（该文件的形态变了？）`
+      + ' —— 拒绝把"解析失败"当通过（**前置失败**：读不懂真源就不出结论，'
+      + '既不算一致、也不算"某一边更宽"），请同步本守卫的解析器')
+    continue
+  }
+  rule.truth = value
+}
+for (const rule of textRules) {
+  if (rule.truth === undefined) continue
+  for (const site of rule.sites) {
+    const absolute = join(root, site.file)
+    if (!existsSync(absolute)) {
+      failures.push(`${site.file}: 文件不存在（${rule.label} 的 claim 定位点：${site.note}）`
+        + ' —— 扫描面写错或文档被移动（守卫必须跟着改）')
+      continue
+    }
+    const lines = readFileSync(absolute, 'utf8').split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      if (line.includes(ALLOW_MARKER)) continue
+      // `claim()` 与 `judge()` 分开是**刻意**的：命中数（`hits`，用于「已覆盖」与 `min`
+      // 地板）必须数"这一行是不是本规则的 claim"，而 `judge()` 返回 null 既可能是
+      // "不是 claim"也可能是"是 claim 且合规" —— 两者混用会让地板在合规时归零。
+      if (!rule.claim(line, index, rule.truth)) continue
+      rule.hits += 1
+      rule.hitsByFile.set(site.file, (rule.hitsByFile.get(site.file) ?? 0) + 1)
+      const verdict = rule.judge(line, index, { truth: rule.truth, file: site.file, lines })
+      if (verdict === null || verdict === undefined) continue
+      hits.push({
+        kind: 'TEXT',
+        file: site.file,
+        line: index + 1,
+        reason: verdict.reason,
+        text: line.trim().slice(0, 200),
+      })
+    }
+  }
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 判据 8：官网源码里**不得硬编码发布版本号**（E-13，2026-10-05 收口轮）。
+ *
+ * 现场（E-P2-batch §E-13）：`site/src/pages/index.astro` 的部署块写死 `2.7.0` 三处，
+ * 而同一段注释自己写着"版本以 latest.json 的 server.version 为准" ⇒ 读者复制即 404，
+ * 且**不在任何判据面内**（分区 C 实测：把占位符改回 `2.7.0` 后
+ * `check-doc-claims` / `verify-layout` / `check-no-real-domains` 全绿）。
+ *
+ * 判据面 = `site/src/**` 的 `.md` + `.astro`（排除 `content/blog/**` 这条记录面）：
+ * **发布语境**（或本项目发布线）上的裸号，在 {@link SITE_VERSION_ALLOW} 里没登记 ⇒ 红；
+ * 允准面按**字面量**登记、**死条目红**、且对"裸号 → `v` 号"的正当改写留余量。
+ * 全部口径见 {@link RELEASE_CONTEXT_MARKERS} / {@link SITE_VERSION_ALLOW} 的注释。
+ *
+ * **抽成函数是为了让 `--selftest` 能在合成站点树上断言"命中路径有牙"**（收口轮 P1：
+ * 独立核验 V-P4 的 G1 实测 —— 掏空这段里的 `hits.push` 之后，自检与面判据**全绿**）：
+ * 自检直接调它，命中路径一被掏空那条样本当场红。
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/**
+ * 扫一遍站点源码，返回命中事实（本函数**不**打印、不退出 —— 判定在调用方）。
+ *
+ * @param scanRoot - 扫描根（真仓 = root；自检 = 合成临时树）。
+ * @param options - `{ allowEntries, releaseLinePrefix }`。
+ * @returns `{ files, entries, hitCount, allowedHits, deadEntries, unlisted }`：
+ *   · `entries` —— 每条命中 `{ file, line, literal, allowed, text }`（`allowed` = 该字面量在允准面里）；
+ *   · `hitCount` —— 命中总数（含允准面）；`allowedHits` —— 每个允准文件的命中数；
+ *   · `unlisted` —— **允准文件里未登记**的字面量命中（那是判红项，不是豁免）；
+ *   · `deadEntries` —— 登记的号在该文件里连"带 v 的写法"都找不到了。
+ */
+function scanSiteReleaseVersions(scanRoot, { allowEntries = SITE_VERSION_ALLOW, releaseLinePrefix } = {}) {
+  const allowByFile = new Map(allowEntries.map(entry => [entry.file, entry]))
+  const allowedHits = new Map(allowEntries.map(entry => [entry.file, 0]))
+  /** 每个允准文件里"还在被讲"的登记字面量（`v` 前缀也算 —— 正当余量，见 SITE_VERSION_ALLOW）。 */
+  const mentioned = new Map(allowEntries.map(entry => [entry.file, new Set()]))
+  const entries = []
+  let files = 0
+  for (const file of walkWithExtensions(scanRoot, SITE_VERSION_SOURCE_ROOT, ['.md', '.astro'])) {
+    if (SITE_VERSION_WALK_EXCLUDE.some(pattern => pattern.test(file))) continue
+    files += 1
+    const text = readFileSync(join(scanRoot, file), 'utf8')
+    const allow = allowByFile.get(file)
+    const lines = text.split('\n')
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      if (line.includes(ALLOW_MARKER)) continue
+      // 两类语境分开判：**行级**标记与号在哪无关；**发布面 token** 必须紧挨着号（见常量注释）。
+      const inReleaseContext = RELEASE_CONTEXT_MARKERS.some(pattern => pattern.test(line))
+      RELEASE_VERSION_LITERAL.lastIndex = 0
+      for (const match of line.matchAll(RELEASE_VERSION_LITERAL)) {
+        const literal = match[0]
+        const onReleaseToken = RELEASE_NUMBER_AFFIXES
+          .some(pattern => pattern.test(releaseTokenAround(line, match.index, literal.length)))
+        const onProjectLine = releaseLinePrefix !== undefined && literal.startsWith(releaseLinePrefix)
+        if (!inReleaseContext && !onReleaseToken && !onProjectLine) continue
+        entries.push({
+          file,
+          line: index + 1,
+          literal,
+          // 允准面按**字面量**判：登记了 `2.7.0` 不等于"这个文件里写什么都行"。
+          allowed: allow !== undefined && allow.literals.includes(literal),
+          text: line.trim().slice(0, 200),
+        })
+        if (allow !== undefined && allow.literals.includes(literal)) {
+          allowedHits.set(file, (allowedHits.get(file) ?? 0) + 1)
+        }
+      }
+    }
+    if (allow !== undefined) {
+      for (const literal of allow.literals) {
+        // `v` 前缀也算"还在讲这个号" ⇒ 把裸号正当改写成 `v` 号不会让豁免变死条目（余量）。
+        // 词界与 `RELEASE_VERSION_LITERAL` 同源（`(?<![\w.])` / `(?![\w.])`）——
+        // 否则 `12.7.0` / `x2.7.0` 这类**别的号**会替这条豁免"续命"（那是假活）。
+        const escaped = literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+        const pattern = new RegExp(`(?<![\\w.])v?${escaped}(?![\\w.])`, 'u')
+        if (pattern.test(text)) mentioned.get(file).add(literal)
+      }
+    }
+  }
+  const deadEntries = allowEntries.filter(entry => (mentioned.get(entry.file)?.size ?? 0) === 0)
+  const unlisted = entries.filter(entry => !entry.allowed
+    && allowByFile.has(entry.file))
+  return { files, entries, hitCount: entries.length, allowedHits, deadEntries, unlisted }
+}
+
+const projectVersionPath = join(root, PROJECT_VERSION_SOURCE)
+const siteVersionScan = scanSiteReleaseVersions(root, {
+  releaseLinePrefix: existsSync(projectVersionPath)
+    ? projectReleaseLinePrefix(readFileSync(projectVersionPath, 'utf8'))
+    : undefined,
+})
+const siteVersionFiles = siteVersionScan.files
+/** 命中的版本字面量**总数**（含允准面）—— 「已覆盖」与地板按它算。 */
+const siteVersionHits = siteVersionScan.hitCount
+const siteVersionAllowedHits = siteVersionScan.allowedHits
+/**
+ * E-13 的命中 → **报告对象**（唯一投影点；收口轮把 `hits.push` 的载荷搬进函数里，
+ * 让 `--selftest` 能在合成树上**功能性**地断言"这条路径真的产出命中"）。
+ *
+ * 为什么必须抽出来（V-P4 的 G1）：修前 `hits.push({kind:'SITE-VERSION'…})` 是主路径里的
+ * 内联代码 —— 自检一格都不走它 ⇒ 把 `hits.push` 掏空（计数仍在）之后，自检与面判据全绿，
+ * 站点写回 `2.9.9` 不再被咬。现在投影在本函数里（自检直接调它断言产出），
+ * 主路径的接线另有**源码级 needle** 盯着（见 `siteVersionSelftestCases` 的最后两格）。
+ *
+ * @param scan - {@link scanSiteReleaseVersions} 的结果。
+ * @returns `hits` 通道的报告对象数组。
+ */
+function siteVersionHitReports(scan) {
+  return scan.entries.filter(entry => !entry.allowed).map(entry => {
+    const unlistedInAllowFile = scan.unlisted.includes(entry)
+    return {
+      kind: 'SITE-VERSION',
+      file: entry.file,
+      line: entry.line,
+      reason: `官网源码里硬编码了发布版本号 \`${entry.literal}\`（真源是发布时的 `
+        + '`release.picoaide.com/<渠道>/latest.json` 的 `server.version`）\n'
+        + '          ⇒ 读者复制这段命令就会拿到已下架的版本（E-13 的现场）。'
+        + '修法：换成站内既有占位符（zh `<版本>` / en `<version>`）；'
+        + '**历史版本引用**写成 `v` 号（本仓既有约定，全站 28 处如此）；'
+        + `确属记录面（讲"当时"的版本、且改不得）请加行内 \`${ALLOW_MARKER}\` 标记。`
+        + (unlistedInAllowFile
+          ? '\n          ⚠️ 这个文件在允准面里，但允准面**按字面量**登记：'
+            + `登记的只有 ${JSON.stringify(SITE_VERSION_ALLOW.find(item => item.file === entry.file)?.literals ?? [])}，`
+            + '未登记的号照样红（修前是"整文件豁免"，往里面塞任何版本号都不可见）。'
+          : ''),
+      text: entry.text,
+    }
+  })
+}
+
+hits.push(...siteVersionHitReports(siteVersionScan))
 
 /** 模块表断言：两篇插件开发页（中英）各一行。 */
 const moduleHits = []
@@ -1387,7 +2540,12 @@ if (!existsSync(astroConfigPath)) {
 // 由登记表生成，打印前再反解断言一遍；真仓形态下另要求"判过的项数 == 登记项数"。
 // ─────────────────────────────────────────────────────────────────────────────
 const declaredCoverageIds = COVERAGE_ITEMS.map(item => item.id)
-const judgedCoverageIds = ['pin', 'platform-modules', ...NUMBER_CLAIM_RULES.map(rule => rule.id)]
+const judgedCoverageIds = [
+  'pin', 'platform-modules',
+  ...NUMBER_CLAIM_RULES.map(rule => rule.id),
+  ...TEXT_CLAIM_RULES.map(rule => rule.id),
+  SITE_VERSION_RULE.id,
+]
 if (declaredCoverageIds.join(' | ') !== judgedCoverageIds.join(' | ')) {
   failures.push(`通过行登记表（COVERAGE_ITEMS）与判据面不对齐：`
     + `[${declaredCoverageIds.join(', ')}] vs [${judgedCoverageIds.join(', ')}]`
@@ -1405,6 +2563,14 @@ for (const rule of NUMBER_CLAIM_RULES) {
   const state = numericRules.find(entry => entry.id === rule.id)
   if (state.truth !== undefined && state.hits > 0) coverItem(rule.id)
 }
+// 文本 claim（E-12 / `voice.intro` / README 体积数字）：判过 ≥1 条断言行才算覆盖。
+for (const rule of TEXT_CLAIM_RULES) {
+  const state = textRules.find(entry => entry.id === rule.id)
+  if (state.truth !== undefined && state.hits > 0) coverItem(rule.id)
+}
+// 官网版本号（E-13）：扫到 ≥1 处版本字面量才算"这条判据真的在判东西"
+// （一处都没有时下面的"死条目"与地板会另外报出来，不靠「已覆盖」兜）。
+if (siteVersionHits > 0) coverItem(SITE_VERSION_RULE.id)
 const summaryLine = passLineFor(coveredItems)
 for (const message of passLineProblems(summaryLine, coveredItems)) {
   failures.push(`通过行自证失败：${message}`)
@@ -1502,6 +2668,10 @@ if (pinClaims === 0) failures.push(`扫描到 0 条 \`${expectedPin}\` pin 断�
 // ─────────────────────────────────────────────────────────────────────────────
 const surfaceProblems = []
 
+// 真源解析失败（"形态不认识"）在**任何形态的根**上都算前置失败（EXIT=2）：
+// 它既不是"扫描面缩水"、也不是"有漂移"，而是"这条判据本轮根本没判" —— 见 `truthProblems`。
+surfaceProblems.push(...truthProblems)
+
 for (const required of REQUIRED_SCAN_PATHS) {
   if (!SCAN_PATHS.includes(required)) {
     surfaceProblems.push(`SCAN_PATHS 缺少登记项 ${required}（REQUIRED_SCAN_PATHS）—— 判据静默缩水，拒绝出结论`)
@@ -1562,6 +2732,38 @@ if (strictSurface) {
           + '新的落点并说明理由（改定位点要进 diff）。')
       }
     }
+  }
+  // 文本 claim 素材下限 + 定位点（E-12 / `voice.intro` / README 体积数字）：
+  // 与上面硬数字同一套对账 —— 真源还在、但落点被删/改写 ⇒ 这条"已覆盖"是空话。
+  for (const rule of textRules) {
+    if (rule.truth === undefined) continue
+    if (rule.hits < rule.min) {
+      surfaceProblems.push(`${rule.label}：全仓只命中 ${rule.hits} 条断言（下限 ${rule.min}）——`
+        + ' 判据素材被摘掉/规则判据失效，这条"已覆盖"是空话')
+    }
+    for (const site of rule.sites) {
+      if (ruleHitsInFile(rule, site.file) > 0) continue
+      surfaceProblems.push(`${rule.label}：${site.file}（${site.note}）里一条 claim 都没有 ——`
+        + ' 这条 claim 已经**不可定位**（被删 / 被改写 / 字段名换了）。'
+        + ` 该文件必须仍然明写这条 claim（真源 ${rule.source}），或把 \`sites\` 定位点改到`
+        + '新的落点并说明理由（改定位点要进 diff）。')
+    }
+  }
+  // 官网版本号判据（E-13）：三个方向 —— 扫描面够不够、判据素材在不在、允准面是不是死条目。
+  if (siteVersionFiles < SITE_VERSION_MIN_FILES) {
+    surfaceProblems.push(`官网版本号判据只扫到 ${siteVersionFiles} 个 .md/.astro（下限 `
+      + `${SITE_VERSION_MIN_FILES}）—— 扫描面被搬空/排除规则吃空（下限只允许被"变多"越过）`)
+  }
+  if (siteVersionHits === 0) {
+    surfaceProblems.push('官网源码里一处发布版本号字面量都没有 —— 该判据的"素材"整个消失'
+      + '（文件被移走/正则失效）。要么把扫描面修回来，要么解释这条判据还在判什么。')
+  }
+  for (const entry of siteVersionScan.deadEntries) {
+    surfaceProblems.push(`官网版本号允准面的**死条目**：${entry.file} 里已经找不到 `
+      + `${entry.literals.map(literal => `\`${literal}\``).join('、')} 了（连 \`v\` 前缀的写法都没有）——`
+      + ` 请把这条登记删掉（理由：${entry.why}）`
+      + '。豁免必须逐条登记且随事实收缩，否则它会腐化成"整个文件随便写版本号"。'
+      + '（注：把裸号正当改写成 `v` 号**不会**触发本条 —— 判据接受 `v?` 前缀，余量是有意的。）')
   }
   if (coveredItems.length !== COVERAGE_ITEMS.length) {
     const missing = COVERAGE_ITEMS.filter(item => !coveredItems.includes(item)).map(item => item.label)

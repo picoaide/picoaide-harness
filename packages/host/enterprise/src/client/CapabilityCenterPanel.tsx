@@ -440,6 +440,31 @@ export function withOverwrite(url: string, overwrite: boolean): string {
 }
 
 /**
+ * 一次**卸载**请求的 URL（唯一拼装入口，与 {@link installRequestUrl} 同档）。
+ *
+ * 第二半的 `?ownership=unknown`（C2-1）只在归并后的行**证明不了归属**时出现
+ * （{@link CapabilityItem.localOwnership} ≠ `'mine'`）——宿主据此**不写**随包技能的
+ * 机器级墓碑（`<skills>/.skill-removed/<name>.json`），即"删了还会回来"的安全失败模式。
+ *
+ * 为什么这个事实必须由面板带过去：归属是聚合面用服务端 `?source=own` 匹配算出来的
+ * （技能库是机器作用域的，卸载路由不出网、自己判不出）。与 `?overwrite=1` 同一条既有
+ * 模式：面板给"宿主单独判不出的那个事实"，宿主仍是权威（只认字面值 `unknown`）。
+ *
+ * ⚠️ 它**不改变**"plugin 行是否给卸载"这个 UI 承诺（{@link planCardAction} 的输出逐字
+ * 不变，端点串也不变）：只影响"这次删除要不要成为机器级永久偏好"。
+ * @param item - 能力中心的一行（归并后的行，`localOwnership` 由 {@link mergeItems} 归一）。
+ * @param opts - `overwrite: true` = 用户已在第二段确认里点过。
+ * @returns 请求 URL。
+ */
+export function uninstallRequestUrl(item: CapabilityItem, opts?: { overwrite?: boolean | undefined }): string {
+  const base = withOverwrite(uninstallEndpoint(item, item.version), opts?.overwrite === true)
+  if (item.localOwnership === 'mine') return base
+  // 证明不了归属（含字段缺失 ⇒ `mergeItems` 已归一成 'unknown'）⇒ 带上提示。
+  // market/org 行宿主不写墓碑，多带一个参数是惰性的；本机 plugin 行才是它的作用面。
+  return `${base}${base.includes('?') ? '&' : '?'}ownership=unknown`
+}
+
+/**
  * 这一发安装是否必须先弹确认条（**唯一判定入口**）。
  *
  * 抽成纯函数是为了让"确认条可达"这条契约可被单测打坏（审计 A15：旧实现里
@@ -1474,8 +1499,9 @@ export function CapabilityCenterPanel({ onClose }: { onClose: () => void }) {
     try {
       // 第二步（用户已确认）才带 `?overwrite=1`：本机自制内容没有它宿主会 409 拒绝
       // （审计 A3）。商店来源不需要它，多带一个显式确认也无害。
-      const base = uninstallEndpoint(item, item.version)
-      const res = await fetch(withOverwrite(base, true), { method: 'POST' })
+      // C2-1：归属证明不了时同时带上 `?ownership=unknown`（宿主据此不写随包技能的
+      // 机器级墓碑）—— 端点串与页脚动作本身都由 {@link uninstallRequestUrl} 一处决定。
+      const res = await fetch(uninstallRequestUrl(item, { overwrite: true }), { method: 'POST' })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         throw new Error((data as { error?: string }).error ?? `HTTP ${String(res.status)}`)

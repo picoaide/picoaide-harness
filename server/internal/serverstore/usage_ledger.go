@@ -423,6 +423,30 @@ type usageMonthTables struct {
 	// 翻倍）。判据已经过传递祖先，落桶之后还在 cleanupDetachedUsageTable 入口
 	// 再按 catalog 事实复检一次（assertDetachedFromUsage，双保险）。
 	Orphans []string
+	// Unmanaged 是**扫描面里认出、但不进动作面**的关系（S1-RET-02 / RENAME 收口）。
+	//
+	// 为什么必须有这一桶：本函数此前对"不进候选面"的关系一律 `continue`
+	// （零计数、零日志）⇒ 审计实测的 `usage_2020h1`（异名 + 非北京月对齐的 attached
+	// 叶子）`in_shapes=false`、整轮 `err=nil failures=0 skipped=0 unreclaimed=[]`，
+	// 而关系与三行明细都在盘上：**没有任何读数面**能回答"是不是有一块明细永远不会
+	// 被保留期回收"（违反 R4-C-8 的"洞要看得见"）。同族的一半是 RENAME 出
+	// `usage_%` 命名族的 DETACH 残留（身份标记还在，SQL 按名字过滤够不到它）。
+	//
+	// 口径（与候选面**互斥**）：这里收的是"扫描面里认出、但保留期不会去动"的关系。
+	// 其中"该回收却因形态领不回而不动"的两类（misaligned-attached / bound-unreadable）
+	// 语义上是 skip，走 noteSkip（skipped_by_reason + needs_manual_months），
+	// **不**重复进这一桶 —— 见 usageUnmanagedReasonIsSkipFace。
+	Unmanaged []usageUnmanagedRelation
+	// Months 是关系名 → 它被保留期管辖的**最早北京月**（YYYYMM），对**每一条**
+	// 被本函数检查过的关系都尽量填（唯一实现是 usageRelationShape.reclaimMonths：
+	// 声明边界 → 我们自己写的 DETACH 标记 → 名字）。填不出来的关系不出现在这里
+	// —— 那正是"未知"，由 UsageRetentionStatus.ReclaimMonthUnknown* 显式计数
+	// （S1-RET-03：不得静默当成"没有月份"）。
+	//
+	// 它随 round 一起进状态面：状态文件的月份折算此前只认名字，与清理侧的归属推导
+	// 是两份实现（异名宽分区在清理侧有归属、在状态侧折算不出 ⇒ 它的真失败进不了
+	// 跨重启的停摆面）。
+	Months map[string]string
 	// Shapes 是关系名 → 形态。**清理按形态分流**（R6-A-1 复审 V1 的修法）：
 	// 判据是 catalog 的**事实**（relkind / pg_inherits 父子 / 子关系数），
 	// 不是名字，也不是"能不能 DROP TABLE"这一条。
@@ -432,6 +456,16 @@ type usageMonthTables struct {
 	// 视图形态另有 DROP VIEW 动词 —— PG 42809 `"x" is not a table` 正是旧实现
 	// 一律硬发 DROP TABLE 的后果），两份投影会分叉，只留这一份。
 	Shapes map[string]usageRelationShape
+}
+
+// usageUnmanagedRelation 是一条"在扫描面里、但保留期不动它"的关系（S1-RET-02 的观测面）。
+//
+// Reason 是**封闭取值**（见 usage_retention_status.go 的 usageUnmanaged* / usageSkip*
+// 常量）：读面要能被告警规则分流，所以不允许自由文本。
+type usageUnmanagedRelation struct {
+	Rel    string // 关系名
+	Reason string // 封闭取值
+	Detail string // 给人看的一句话（形态事实：边界原文 / relkind / children）
 }
 
 // usageRelationShape 是一个名为 usage_<YYYYMM> 的关系的形态事实。
@@ -476,6 +510,18 @@ type usageRelationShape struct {
 	// 名字只在边界读不懂时兜底。与 probeUsagePartition 读的是**同一个表达式**，
 	// 两处不会分叉。
 	Bound string
+	// OwnedDetach 报告该关系带**我们写的**"它是从 usage 上摘下来的"标记
+	// （pg_description 里**以 usageRetentionOwnedComment 的规范头开头**的注释 —— 运维可以在
+	// 规范头之后追加说明，读取口径与方向表见 parseUsageRetentionOwnedComment，不要按"整串相等"判）；
+	// OwnedFrom/OwnedTo 是标记里记下的、摘之前声明的北京日窗口。
+	//
+	// S1-RET-01（第二十八轮审计 P1）：DETACH 提交之后 PG 把 relpartbound 清成
+	// NULL、relispartition 置 false ⇒ 名字与边界两条入选路径都认不出异名宽分区
+	// （`usage_2020q1`），它此后**永远**不再被任何一轮枚举（既不补账、也不 DROP、
+	// 也不进 unreclaimed/skip_reasons/失败计数）。标记是 DETACH 之后唯一还存在的
+	// 身份证据，也是"我们摘的"与"别人建的同名关系"之间**唯一可判定的**区别。
+	OwnedDetach        bool
+	OwnedFrom, OwnedTo time.Time
 }
 
 // attachedToUsage 报告该关系是不是 usage 的**后代分区**（传递祖先：直接分区、
@@ -721,33 +767,51 @@ func usageLedgerRelation(rel string) bool {
 // 但 parsePartitionBoundLiteral 按**绝对瞬时**解析，两种渲染等价；
 // DateStyle 非 ISO 的部署会让解析失败 ⇒ 回落到名字（保守，不会误删）。
 func scanUsageMonthTables(db *sql.DB) (usageMonthTables, error) {
-	rows, err := db.Query(`SELECT c.relname, COALESCE(p.relname, ''), c.relispartition, c.relkind,
+	rows, err := db.Query(`SELECT c.relname, n.nspname, COALESCE(p.relname, ''), c.relispartition, c.relkind,
        (SELECT count(*) FROM pg_inherits ch WHERE ch.inhparent = c.oid),
        CASE WHEN c.relispartition THEN COALESCE(root.relname, '') ELSE '' END,
        COALESCE(c.relispartition AND pg_partition_root(c.oid) = to_regclass('public.usage'), false),
        COALESCE(p.oid = to_regclass('public.usage'), false),
-       CASE WHEN c.relispartition THEN COALESCE(pg_get_expr(c.relpartbound, 0), '') ELSE '' END
+       CASE WHEN c.relispartition THEN COALESCE(pg_get_expr(c.relpartbound, 0), '') ELSE '' END,
+       COALESCE(obj_description(c.oid, 'pg_class'), '')
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid
 LEFT JOIN pg_class p ON p.oid = i.inhparent
 LEFT JOIN pg_class root ON root.oid = pg_partition_root(c.oid)
-WHERE n.nspname = 'public' AND c.relname LIKE 'usage\_%'
-ORDER BY c.relname`)
+WHERE ((n.nspname = 'public' AND c.relname LIKE 'usage\_%')
+       OR COALESCE(obj_description(c.oid, 'pg_class'), '') LIKE '` + usageRetentionOwnedCommentPrefix + `%')
+ORDER BY n.nspname, c.relname`)
 	if err != nil {
 		return usageMonthTables{}, err
 	}
 	defer rows.Close()
-	out := usageMonthTables{Shapes: map[string]usageRelationShape{}}
+	out := usageMonthTables{
+		Shapes: map[string]usageRelationShape{},
+		Months: map[string]string{},
+	}
 	for rows.Next() {
-		var rel, parent, kind, root, bound string
+		var rel, schema, parent, kind, root, bound, ownedComment string
 		var isPartition, attached, directParent sql.NullBool
 		var children int
-		if err := rows.Scan(&rel, &parent, &isPartition, &kind, &children, &root, &attached, &directParent, &bound); err != nil {
+		if err := rows.Scan(&rel, &schema, &parent, &isPartition, &kind, &children, &root, &attached, &directParent, &bound, &ownedComment); err != nil {
 			return usageMonthTables{}, err
 		}
-		if usageLedgerRelation(rel) {
-			continue // 永久账本（usage_daily* / usage_monthly）：不在保留期的对象之内
+		// 两条**并集**的准入（SQL 的 WHERE 已做过同样的预筛；Go 侧再算一遍是为了让
+		// "为什么这条关系在面内"可判定 —— 分类要区分"名字族"与"带我们的标记"）：
+		//   ① **public 模式**里的名字族（`usage_%`）：保留期的**既定管辖范围**
+		//      （存量口径，一字未改；名字族仍然只认 public —— 别的模式里的 `usage_%`
+		//      是别人的命名空间）；
+		//   ② **任意模式**里带我们 DETACH 标记前缀的关系：**身份证据**（RENAME 出名字族、
+		//      或 `SET SCHEMA` 把残留搬出 public 之后，唯一还能认出"这是我们自己摘的"
+		//      的东西）。SQL 侧只做前缀匹配（**比解析器宽**），真正的身份判据仍是下面的
+		//      严格解析器 —— 预筛宽于判据 ⇒ 不会漏掉解析器会接受的关系；预筛命中而
+		//      解析器不认的，进 census 面（marker-unparsed）。
+		inPublic := schema == "public"
+		nameMatched := inPublic && strings.HasPrefix(rel, "usage_")
+		markerPrefixed := strings.HasPrefix(ownedComment, usageRetentionOwnedCommentPrefix)
+		if !nameMatched && !markerPrefixed {
+			continue // 结构上不可达（SQL 的 WHERE 已过滤）；保留以防两份判据漂移
 		}
 		shape := usageRelationShape{
 			Kind:      kind,
@@ -765,8 +829,77 @@ ORDER BY c.relname`)
 			// 见函数头注释：`…, c.oid)` 会打开关系、让整轮无界等锁）。
 			Bound: bound,
 		}
+		// S1-RET-01:DETACH 残留的身份证据（唯一来源是我们自己在冻结段写的标记，
+		// 见 usageRetentionOwnedCommentPrefix）。读不懂的注释一律当作**没有**标记。
+		if ownedFrom, ownedTo, okOwned := parseUsageRetentionOwnedComment(ownedComment); okOwned {
+			shape.OwnedDetach = true
+			shape.OwnedFrom, shape.OwnedTo = ownedFrom, ownedTo
+		}
+		// 跨模式展示名：同名关系可能同时存在于 public 与其他模式，census 与日志必须能
+		// 指到具体那一只（裸 relname 会歧义）。
+		display := rel
+		if !inPublic {
+			display = schema + "." + rel
+		}
+		// 结构上**不在动作面**的两类（核验后收口 §1）—— 它们必须"看得见但绝不动"：
+		//
+		//   · 不在 public：整条 DDL/补账/搬行链路都按 `public.` 解析
+		//     （quoteRelationIdent、probeUsagePartition 的 to_regclass('public.usage')、
+		//     foldAdjacentMonthsIntoUsage 的落点…）。把别的模式里的关系放进候选面，
+		//     意味着让 DROP/搬行落到 search_path 解析出来的**另一个同名对象**上 ——
+		//     破坏性动作一律 fail-closed：**不动作，但必须出声**（census + 一行日志）。
+		//   · 名字落进**永久账本族**（`usage_daily*` / `usage_monthly`）：全仓不存在
+		//     账本的回收路径（见 usageLedgerRelation 的既有裁决），对该族动手同样是
+		//     破坏性动作 ⇒ 不动作，但带我们标记的必须出声。
+		//
+		// 无标记的账本族关系是**正常的永久账本**（设计排除），照旧静默跳过 —— 它不是洞。
+		if !inPublic || usageLedgerRelation(rel) {
+			if !markerPrefixed {
+				continue
+			}
+			reason := shape.usageUnmanagedReason(display, markerPrefixed, inPublic, usageLedgerRelation(rel))
+			out.Unmanaged = append(out.Unmanaged, usageUnmanagedRelation{
+				Rel:    display,
+				Reason: reason,
+				Detail: usageUnmanagedReasonDetail(shape, display, reason),
+			})
+			continue
+		}
+		// S1-RET-03：把清理侧**已经算得出来**的归属事实随扫描一起带走（状态面的
+		// 月份折算只读不算）。算不出来的关系**不进**这张表 = "未知"，由
+		// UsageRetentionStatus.ReclaimMonthUnknown* 显式计数（不得静默当成没有月份）。
+		//
+		// 只对 **public 面**的关系记录：Months 的键是裸 relname，跨模式同名会撞键。
+		if first, _, okMonths := shape.reclaimMonths(rel); okMonths {
+			out.Months[rel] = monthKey(first)
+		}
 		if !shape.candidateForRetention(rel) {
-			continue // 不属于保留期的对象面（见 candidateForRetention 的两条入选路径）
+			// 索引与序列是**别的关系的组成部分**（PG 把它们也记在 pg_class 里，
+			// 名字通常是 `<表>_pkey` / `<表>_idx*` / `<表>_id_seq`），不是独立管理的
+			// 对象：既不持有可回收的明细，也不占"当月分区名"。实测单库就有 60+ 条
+			// 这样的关系命中 `usage\_%`，全算进 census 只会把真正的洞（异名不对齐
+			// 叶子 / RENAME 残留）淹掉。
+			//
+			// 位置在**候选判据之后**是刻意的：候选面（名字族）的既有行为一字不改
+			// —— 万一真有一条叫 `usage_<YYYYMM>` 的索引，它照旧进候选面（存量口径）。
+			if kind == "i" || kind == "I" || kind == "S" {
+				continue
+			}
+			// S1-RET-02：**不得**再静默 continue —— 每一条被认出的关系都要有落面。
+			//
+			// 这一支此前是零计数、零日志的 `continue`，于是审计实测的
+			// `usage_2020h1`（异名 + 非北京月对齐的 attached 叶子）在任何读数面上
+			// 都不存在，而它持有的明细永远不会被保留期回收。现在每一类都有**封闭
+			// 取值**的原因，由 CleanupUsageRetention 落到两个面之一：
+			// skip 面（该回收却按设计不动 → skipped_by_reason + needs_manual_months）
+			// 或 census 面（unmanaged_*，见 usageUnmanagedReason）。
+			reason := shape.usageUnmanagedReason(display, markerPrefixed, inPublic, usageLedgerRelation(rel))
+			out.Unmanaged = append(out.Unmanaged, usageUnmanagedRelation{
+				Rel:    display,
+				Reason: reason,
+				Detail: usageUnmanagedReasonDetail(shape, display, reason),
+			})
+			continue
 		}
 		out.Shapes[rel] = shape
 		if shape.attachedToUsage() {
@@ -832,18 +965,152 @@ func usageBoundAlignedToBeijingMonths(bound string) bool {
 		atTo.Equal(BeijingDayInstant(dayKey(BeijingMonth(atTo))))
 }
 
+// usageRetentionOwnedCommentPrefix 是"这条关系是我们自己从 usage 上摘下来的"
+// 这条事实的**唯一持久证据**（写在 pg_description，随 DETACH 存活、随 pg_dump 存活）。
+//
+// 为什么必须有它（S1-RET-01，第二十八轮审计 P1，已实证静默少计）：
+//   - DETACH 提交之后 PG 会把 `relpartbound` 清成 NULL、`relispartition` 置 false，
+//     于是异名宽分区（DBA 预建的 `usage_2020q1`）在"冻结已提交、结算段失败"之后
+//     三条入选路径全不命中：它从**所有**轮次的枚举面消失（既不补账、也不 DROP、
+//     也不进 unreclaimed / skip_reasons / 失败计数），而它持有的金额只被补过
+//     判据月那一部分 ⇒ 其余月份从所有读数面消失且永不自愈；
+//   - **名字形态不能**当这条判据：孤儿路径会 `DROP TABLE`，把"别人手工建的同名表"
+//     或"别人那棵树的分区"当成我们的残留就是删别人的数据；
+//   - 所以身份证据必须由**我们自己**在摘之前写下。
+//
+// 不变量（改这里之前先读）：**唯一**的写入点是 reclaimUsagePartitionAtomically 的
+// 冻结段（DETACH 之前、与 DETACH **同一个事务** —— 两者要么都在、要么都不在）；
+// 读取方只在"关系此刻不是**任何**分区树的分区（relispartition=false）+ 叶子表 +
+// 标记可解析"时才按我们自己的残留处理（见 ownedDetachedLeftover）。任何别的
+// 调用点都不得写这个标记：写错一个标记就是把别人的表列进 DROP 名单。
+const usageRetentionOwnedCommentPrefix = "picoaide:usage-retention:owned"
+
+// usageRetentionOwnedComment 渲染标记原文：版本号 + 摘之前声明的北京日窗口。
+// 窗口取"判据窗口 ∪ 声明边界"（retentionWindowUnion）—— 前者在边界读不懂时兜底，
+// 后者是"该关系可能持有的全部行"的上界（PG 强制分区约束）。标记里的窗口是 DETACH
+// 之后**唯一**还能给出月份的东西（reclaimMonths 的第三条分支）。
+func usageRetentionOwnedComment(from, to time.Time) string {
+	return fmt.Sprintf("%s v1 from=%s to=%s",
+		usageRetentionOwnedCommentPrefix, from.Format(dateFmt), to.Format(dateFmt))
+}
+
+// parseUsageRetentionOwnedComment 解析标记（写入侧与读取侧共用的**唯一**实现）。
+//
+// 判据分两段，纪律不同：
+//
+//   - **规范头**必须逐字成立：`<前缀> v1 from=<YYYY-MM-DD>`、至少一个 ASCII 空白、
+//     然后是 `to=<YYYY-MM-DD>`。前缀与版本号大小写敏感、前导/中间不得有别的字节；
+//     字段名逐字；日期必须**恰好**是 dateFmt 的 10 个字符并按同一份 layout 严格解析
+//     （time.Parse 对多余字符返回 extra text ⇒ 不接受）。
+//   - **规范头之后的一切都是尾部注解**：任意字节、任意长度、可含换行、可含看起来
+//     像字段的文本 —— 一律忽略，不参与任何判定。
+//
+// 为什么要容忍尾部注解（S1-RET-01 复审 §3.3，红队实测的 P2）：在 PostgreSQL 里
+// `COMMENT ON TABLE` **正是**给已摘下来的表写运维说明的工具 ⇒「运维会在标记后面追加
+// 一句话」不是假想。整串 exact 的解析器只要遇到 `… to=2020-03-31 [ops:已确认可以清理]`
+// 就整条读不懂 ⇒ 关系重新跌出枚举面 ⇒ 关系与磁盘**永久漏收**（金额安全：①的窗口已把
+// 声明边界补进账本）。容忍尾部把这一类回退消掉。
+// （末尾粘着写 `…to=2020-03-31[ops]` 同样认：日期本身仍必须是严格的 10 字符 dateFmt，
+// 尾部只可能出现在**最后一个**规范字段的值之后。）
+//
+// 为什么容忍尾部**不会**放宽身份判据：身份 = 规范头逐字成立，尾部根本不进判定；
+// 尾部能影响的只有"读不读得出窗口"，而读不出窗口时调用方一律按"没有标记"处理
+// （fail-closed）。方向表与逐条夹具见
+// audit_s1ret01_wide_detached_leftover_test.go 的 TestAuditS1Ret01OwnedCommentDirections。
+//
+// 版本号不是 v1 / 前缀大小写不符 / 前导空白或 BOM / 字段缺失或顺序颠倒 / 两个规范
+// 字段之间夹了别的东西 / 日期读不懂 / 区间倒置 —— 一律 ok=false，与"边界读不懂
+// ⇒ 不回收"同一条纪律：判据不建立在对文本的猜测上（宁可不动它，也不猜）。
+func parseUsageRetentionOwnedComment(comment string) (from, to time.Time, ok bool) {
+	rest, matched := strings.CutPrefix(comment, usageRetentionOwnedCommentPrefix+" v1 ")
+	if !matched {
+		return time.Time{}, time.Time{}, false
+	}
+	from, rest, ok = cutUsageRetentionOwnedDateField(rest, "from=")
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	// 两个规范字段之间**必须是 ASCII 空白**：`from=2020-01-01to=2020-03-31`（粘连）
+	// 与 `from=2020-01-01[ops]to=…`（字段之间塞注解）都是畸形 —— 尾部注解只允许
+	// 出现在最后一个规范字段之后。Unicode 空白（NBSP / 全角空格）同样不认。
+	if rest == "" || !isUsageRetentionSpace(rest[0]) {
+		return time.Time{}, time.Time{}, false
+	}
+	rest = strings.TrimLeft(rest, " \t\n\v\f\r")
+	to, _, ok = cutUsageRetentionOwnedDateField(rest, "to=")
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	if from.IsZero() || to.IsZero() || to.Before(from) {
+		return time.Time{}, time.Time{}, false
+	}
+	// 第二个规范字段**之后**的字节（尾部注解）到此为止：原样忽略。
+	return from, to, true
+}
+
+// cutUsageRetentionOwnedDateField 从 s 的开头切出 `<name>=<YYYY-MM-DD>`：字段名逐字、
+// 日期**恰好** len(dateFmt) 个字节且用与写入侧同一份 layout 严格解析。返回的 rest 是
+// 日期之后的剩余字节（尾部注解或下一个字段），由调用方决定它该是什么。
+//
+// 只按"长度切片"取日期而不是 `strings.Fields`：这样"日期后面直接粘着注解"也能读，
+// 而日期本身仍是逐字严格解析的（多一个字符就切到注解里去了，不会把 `2020-03-31x`
+// 当成不合法的日期而整条不认）。
+func cutUsageRetentionOwnedDateField(s, name string) (at time.Time, rest string, ok bool) {
+	body, matched := strings.CutPrefix(s, name)
+	if !matched || len(body) < len(dateFmt) {
+		return time.Time{}, s, false
+	}
+	raw := body[:len(dateFmt)]
+	parsed, err := time.Parse(dateFmt, raw)
+	if err != nil || parsed.IsZero() {
+		return time.Time{}, s, false
+	}
+	return parsed, body[len(dateFmt):], true
+}
+
+// isUsageRetentionSpace 报告 b 是否 ASCII 空白（与 strings.TrimLeft 的 cutset 同集）。
+// 只认 ASCII：Unicode 空白出现在规范字段之间按畸形处理 —— 写入侧渲染的一定是单个
+// 半角空格，多认一种空白只会给"字段逐字"这条判据多一个解释口。
+func isUsageRetentionSpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
+}
+
+// ownedDetachedLeftover 报告该关系是不是**我们自己摘下来的残留**（S1-RET-01 的
+// 第三条入选路径）。三个限定缺一不可：
+//
+//   - **OwnedDetach**：带我们写的标记（见 usageRetentionOwnedCommentPrefix）。
+//     这是与"别人手工建的同名表"之间唯一可判定的区别 —— 名字形态不是判据
+//     （孤儿路径会 DROP 表）；
+//   - **!Partition**：此刻不是**任何**分区树的分区。真 DETACH 之后 PG 就是这么记的
+//     （relispartition=false）；若管理员又把它挂到别的父表下，它就不再是"我们的
+//     残留"而是别人的**活分区**，不碰（标记还在，但不是判据的唯一一项）；
+//   - **leafTable()**：叶子表（relkind='r' 且无子关系）。`DROP TABLE` 会连子关系
+//     一起删，非叶子留给人工处置（与孤儿桶的既有闸门同形）。
+func (s usageRelationShape) ownedDetachedLeftover() bool {
+	return s.OwnedDetach && !s.Partition && s.leafTable()
+}
+
 // candidateForRetention 报告该关系是否进入保留期的**候选面**（R25-F27）。
 //
-// 两条入选路径（并集）：
+// 三条入选路径（并集）：
 //  1. 名字就是我们的月分区名（`usage_<YYYYMM>`）—— **存量口径，一字未改**；
 //  2. **整月对齐 + usage 的叶子后代分区** —— R25-F27 新增的这一类：DBA 预建的
 //     季度（`usage_2026q3`）/ 整年（`usage_2026`）**叶子**分区，名字不是六位数字月，
 //     却确实是 usage 明细的来源（R24-X4 B4 之后读路径按**边界**认它们），保留期
 //     必须管它们，否则它们永不回收（本条的缺陷本体）。
+//  3. **我们自己 DETACH 过的残留** —— S1-RET-01 新增的这一类：路径 2 的前提是
+//     "仍挂在 usage 下"，而"冻结已提交、结算段失败"之后关系已经摘下来了，
+//     relpartbound 被清空 ⇒ 路径 2 也认不出它，于是它**永不再被枚举**（既不重试
+//     补账、也不回收、也不进任何观测面）。判据只能是**我们写的标记**，见
+//     ownedDetachedLeftover。
 //
-// 三个限定缺一不可（本文件顶部的 R6-A-1 / R7-A / R8-A-4 族既有判据逐条钉住 ——
-// 第一版没有这三个限定，`go test ./internal/serverstore/` 有 4 条既有用例变红，
-// 已被主控 676aa2bddd 撤回；本版按这三个限定重做）：
+// 路径 2 的三个限定缺一不可（本文件顶部的 R6-A-1 / R7-A / R8-A-4 族既有判据逐条
+// 钉住 —— 第一版没有这三个限定，`go test ./internal/serverstore/` 有 4 条既有用例
+// 变红，已被主控 676aa2bddd 撤回；本版按这三个限定重做）：
 //   - **usage 的后代**（传递根 = public.usage）：不是后代却带可读分区边界的关系，
 //     只能是**另一棵树的分区** —— 真 DETACH 残留的 relpartbound 会被 PG 清成 NULL
 //     （实测：DETACH 后 relispartition=false / relpartbound IS NULL）。那种关系属于
@@ -861,7 +1128,128 @@ func (s usageRelationShape) candidateForRetention(rel string) bool {
 	if _, ok := usageMonthRelationOf(rel); ok {
 		return true
 	}
-	return s.attachedToUsage() && s.leafTable() && usageBoundAlignedToBeijingMonths(s.Bound)
+	if s.attachedToUsage() && s.leafTable() && usageBoundAlignedToBeijingMonths(s.Bound) {
+		return true
+	}
+	return s.ownedDetachedLeftover()
+}
+
+// usageUnmanagedReason 给"扫描面里认出、但不进候选面"的关系分类（S1-RET-02 的
+// 观测面 + RENAME 收口）。返回值是**封闭取值**，两种落面由
+// usageUnmanagedReasonIsSkipFace 决定（唯一实现，不许第二处各判一遍）：
+//
+//	skip 面（skipped_by_reason + needs_manual_months）
+//	  misaligned-attached  attached 叶子，边界可读但**不**对齐北京月界
+//	                       （审计实测的 `usage_2020h1`：UTC 手写边界）。
+//	                       形态上没有名字锚点 ⇒ 相邻月并入领不回那些行 ⇒ 服务端
+//	                       按设计不动它（candidateForRetention 的第二条限定，
+//	                       由 TestAuditR25ReclaimCandidateAndMonthAttribution 钉住）。
+//	                       但"永远不回收"这件事**必须**看得见。
+//	  bound-unreadable     attached 叶子，边界读不懂（DEFAULT / MINVALUE..MAXVALUE /
+//	                       LIST / 非 RANGE）。判据不建立在对边界的猜测上（不动它），
+//	                       可它可能持有**任意月份**的行 ⇒ 同样进人工处置面。
+//
+//	census 面（unmanaged_*）
+//	  alias-non-leaf        挂 usage 下、名字不是六位月、且**非叶子**：多级布局
+//	                        `usage → usage_<YYYY> → usage_<YYYYMM>` 的年份父表。
+//	                        合法容器，服务端不替管理员拆树（R7-A/R8-A-4）。
+//	  unmarked-orphan       名字在 `usage_` 族里、此刻**不挂在 usage 树下**、也没有
+//	                        我们的标记：不是我们摘的（别人手工建的同名对象、或
+//	                        S1-RET-01 之前摘下来的旧残留）。**不得**当候选（孤儿
+//	                        路径会 DROP 表 ⇒ 删别人的数据），但必须看得见。
+//	  marker-on-live-partition / marker-non-leaf
+//	                        带我们写的标记、但此刻是**别人**分区树里的活分区 /
+//	                        非叶子：ownedDetachedLeftover 的两个限定（!Partition、
+//	                        leafTable）正是为它们设的（不碰），但"我们的标记挂在
+//	                        面外"这件事要看得见。
+//	  marker-unparsed       注释以我们的规范头开头、却读不懂（版本/字段/日期不合法）：
+//	                        fail-closed 不认（parseUsageRetentionOwnedComment 是身份
+//	                        判据的唯一实现），但同样要看得见 —— 否则"我们的残留因为
+//	                        注释被改坏而跌出面外"就回到静默态（S1-RET-R 的 P2）。
+//
+// 为什么 RENAME 形态要靠**标记**而不是名字：名字形态不是 identity（见
+// usageRetentionOwnedCommentPrefix 的注释），而扫描面的 SQL 若只按名字过滤，
+// 把自己 DETACH 下来的残留改名（运维完全可能这么干）就会让它从所有面消失
+// —— 金额安全（预补账已提交），但磁盘永远不回收、观测面零命中。所以 SQL 改成
+// **名字族 ∪ 我们的标记前缀**（前者是存量管辖范围，后者是身份证据），
+// 身份仍由 Go 侧的严格解析器定（SQL 的前缀匹配只是**更宽**的预筛，不会漏掉
+// 解析器会接受的关系）。
+func (s usageRelationShape) usageUnmanagedReason(rel string, markerPrefixed, inPublic, ledgerNamed bool) string {
+	// 顺序即语义优先级：**身份成不成立**先于"它在不在 public / 在不在账本族"。
+	// 核验方 V-P12 §P3-4 实测：把 `!inPublic` 排在前面时，跨模式下"前缀命中但解析器
+	// 不认"的第三方注释会被归成 `marker-outside-public`（Detail 文案说"带我们的标记"，
+	// 而那种形态**身份并不成立**）—— `marker-unparsed` 因此不可达。
+	switch {
+	case markerPrefixed && !s.OwnedDetach:
+		// 注释**像**我们的、解析器却不认（版本/字段/日期不合法）⇒ fail-closed：
+		// 不认作我们的残留（不 DROP、不补账），但**必须看得见**（census + 日志）。
+		// 它优先于模式/账本族判定：身份不成立时，"它在哪个模式/叫什么名字"都不是结论。
+		return usageUnmanagedMarkerUnparsed
+	case !inPublic:
+		// 带我们**可解析的**标记、但**不在 public 模式**（核验后收口 §1-S1：`SET SCHEMA`
+		// 搬走）。身份成立，但整条 DDL/补账/搬行链路都按 `public.` 解析 ⇒ 结构上不在
+		// 动作面。fail-closed：不动作（免得 DROP/搬行落到 search_path 解析出的同名对象
+		// 上），但**必须看得见**（census + 日志点名 `模式.关系`）。
+		return usageUnmanagedMarkerOutsidePublic
+	case ledgerNamed:
+		// 带我们**可解析的**标记、但名字落进**永久账本族**（核验后收口 §1-S2：改名成
+		// `usage_daily_*`）。账本族全仓没有回收路径（既有裁决），对该族动手是破坏性
+		// 动作 ⇒ 不动作，但身份成立 ⇒ 必须看得见。
+		// （**无**标记的账本族关系是正常的永久账本，在调用点就静默跳过了。）
+		return usageUnmanagedLedgerNamedOwned
+	case s.OwnedDetach && s.Partition:
+		return usageUnmanagedMarkerLivePartition
+	case s.OwnedDetach && !s.leafTable():
+		return usageUnmanagedMarkerNonLeaf
+	case s.attachedToUsage() && !s.leafTable():
+		return usageUnmanagedAliasNonLeaf
+	case s.attachedToUsage():
+		// 到这里只剩"attached 叶子、却不对齐/读不懂边界"——两类都进 skip 面。
+		if _, _, okBound := usageBoundMonths(s.Bound); !okBound {
+			return usageSkipBoundUnreadable
+		}
+		return usageSkipMisalignedAttached
+	default:
+		return usageUnmanagedUnmarkedOrphan
+	}
+}
+
+// usageUnmanagedReasonDetail 渲染分类结果里那句给人看的形态事实（日志与状态抽样
+// 共用，避免两处各拼一遍）。
+func usageUnmanagedReasonDetail(s usageRelationShape, rel string, reason string) string {
+	base := fmt.Sprintf("relkind=%q children=%d partition=%v attached_usage=%v",
+		s.Kind, s.Children, s.Partition, s.attachedToUsage())
+	if s.Bound != "" {
+		base += " bound=" + s.Bound
+	}
+	switch reason {
+	case usageSkipMisalignedAttached:
+		return base + "：异名 + 边界不对齐北京月界 ⇒ 没有名字锚点就领不回相邻月的行," +
+			"服务端按设计不动它（该关系持有的明细永远不会被保留期回收 ⇒ 需人工处置）"
+	case usageSkipBoundUnreadable:
+		return base + "：边界读不懂（DEFAULT/MINVALUE/LIST/非 RANGE）⇒ 判据不建立在对边界的" +
+			"猜测上（不动它），但它可能持有**任意月份**的明细 ⇒ 需人工处置"
+	case usageUnmanagedAliasNonLeaf:
+		return base + "：名字不是六位月且非叶子（多级布局的年份/季度父表）⇒ 合法容器," +
+			"服务端不替管理员拆分区树（只登记，不动作）"
+	case usageUnmanagedUnmarkedOrphan:
+		return base + "：名字在 usage_ 族里、但既不在 usage 分区树下、也没有我们的 DETACH 标记" +
+			"⇒ 不是我们摘的（别人手工建的同名对象 / 标记机制之前的旧残留），不动作"
+	case usageUnmanagedMarkerUnparsed:
+		return base + "：注释以我们的规范头开头但读不懂（版本/字段/日期不合法）⇒ fail-closed" +
+			"不认作我们的残留，需人工核对"
+	case usageUnmanagedMarkerLivePartition:
+		return base + "：带我们的标记、但此刻是**别人**分区树里的活分区 ⇒ 不动它（!Partition 限定）"
+	case usageUnmanagedMarkerNonLeaf:
+		return base + "：带我们的标记、但非叶子（DROP 会连子关系一起删）⇒ 留给人工（VM4 的边界）"
+	case usageUnmanagedMarkerOutsidePublic:
+		return base + "：带我们**可解析的**标记、但**不在 public 模式**里 ⇒ 身份成立、结构上不在动作面" +
+			"（DDL/补账/搬行全按 public. 解析）⇒ 服务端不动它，需人工决定搬回 public 还是就地归档"
+	case usageUnmanagedLedgerNamedOwned:
+		return base + "：带我们**可解析的**标记、但名字落进**永久账本族**（`usage_daily*` / `usage_monthly`）⇒ " +
+			"账本族没有回收路径（既有裁决）⇒ 服务端不动它，需人工确认这条关系是不是被误改名"
+	}
+	return base
 }
 
 // reclaimMonths 返回该关系"被保留期管辖的北京月区间" [first, last]（R25-F27）。
@@ -875,6 +1263,8 @@ func (s usageRelationShape) candidateForRetention(rel string) bool {
 //  3. 边界读不懂（普通表 / DEFAULT / MINVALUE..MAXVALUE / 非 RANGE）⇒ 回落到**名字**
 //     解析的存量语义：名字恰是六位数字月 ⇒ 该月；否则该关系不参与保留期管辖
 //     （`usage_monthly` 这类永久账本、人工建的非分区同名对象都走这一支）。
+//  4. 我们自己 DETACH 过的残留（S1-RET-01）⇒ 边界已被 PG 清空、名字又不是六位月，
+//     唯一还能给出月份的就是标记里记下的声明窗口。
 func (s usageRelationShape) reclaimMonths(rel string) (first, last time.Time, ok bool) {
 	if m, okName := usageMonthRelationOf(rel); okName {
 		// 存量口径**一字未改**：名字就是锚点。错界分区由 fold-adjacent 兜底；
@@ -888,6 +1278,11 @@ func (s usageRelationShape) reclaimMonths(rel string) (first, last time.Time, ok
 		if first, last, okBound := usageBoundMonths(s.Bound); okBound {
 			return first, last, true
 		}
+	}
+	// 只有候选判据的**第三**条入选路径会走到这里（DETACH 残留）：声明边界已经
+	// 被 PG 清掉，区间 = 标记里那次声明窗口覆盖的北京月（判据月同样取末月）。
+	if s.ownedDetachedLeftover() {
+		return BeijingMonth(s.OwnedFrom), BeijingMonth(s.OwnedTo), true
 	}
 	return time.Time{}, time.Time{}, false
 }
@@ -1775,6 +2170,30 @@ type retentionWindow struct {
 	boundFrom, boundTo time.Time
 }
 
+// retentionWindowUnion 返回 win 与它记录的**声明边界**的并集（某一侧为零值时取
+// 另一侧；两侧都零值 ⇒ 零值 ⇒ 调用方按既有语义跳过）。
+//
+// 声明边界是"该关系可能持有的全部行"的上界（PG 强制分区约束 ⇒ 行必然整月落在
+// 边界内），所以并集同样是上界。两个调用点都必须用它，不能只用 win.from/win.to：
+//
+//   - **预补账**（S1-RET-01 ①，第二十八轮审计 P1）：整月对齐的**宽**分区
+//     （季度/整年）在 retentionLedgerWindow 里 `exact=true` 且提前返回 ⇒ win 只有
+//     **判据月**（区间末月）。DETACH 之前唯一的保险丝就是预补账这一步，只按它补账
+//     的话，冻结段一提交、结算段再失败，判据月以外的金额就从所有读数面消失
+//     （DETACH 之后该关系连枚举面都进不去，见 candidateForRetention 的第三条路径）；
+//   - **DETACH 标记**（S1-RET-01 ②）：标记是那条关系在摘下来之后唯一的身份证据，
+//     它记的窗口必须覆盖"该关系可能持有的全部行"，否则恢复时又会少补月。
+func retentionWindowUnion(win retentionWindow) (from, to time.Time) {
+	from, to = win.from, win.to
+	if !win.boundFrom.IsZero() && (from.IsZero() || win.boundFrom.Before(from)) {
+		from = win.boundFrom
+	}
+	if !win.boundTo.IsZero() && (to.IsZero() || win.boundTo.After(to)) {
+		to = win.boundTo
+	}
+	return from, to
+}
+
 // retentionLedgerWindow 返回"清理某个到期月关系之前必须补算的账本窗口",并在
 // 同一次 catalog 探测里给出该关系的**形态判定**(R5-A-9,审计 2026-09-23)。
 //
@@ -2058,6 +2477,31 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		}
 		log.Printf("usage retention: SKIP %s %s reason=%s: %s", kind, rel, reason, msg)
 	}
+	// S1-RET-02 的 census 面（扫描面里"认出但不动"的关系）：**逐条计数 + 一行日志**，
+	// 再汇总进 round/状态（/readyz 的 `unmanaged_*`）。它此前是零计数、零日志的
+	// `continue` —— "有一块明细永远不会被保留期回收"因此没有任何读数面（R4-C-8）。
+	unmanagedByReason := map[string]int{}
+	unmanagedRels := make([]string, 0, 4)
+	noteUnmanaged := func(rel, reason, detail string) {
+		unmanagedByReason[reason]++
+		unmanagedRels = append(unmanagedRels, rel+"("+reason+")")
+		log.Printf("usage retention: UNMANAGED %s reason=%s: %s", rel, reason, detail)
+	}
+	// 落面：skip 面（"该回收却因形态领不回"）与 census 面**互斥**，由唯一实现
+	// usageUnmanagedReasonIsSkipFace 决定 —— 两边各判一遍就会分叉（本仓登记过的形态）。
+	for _, u := range tables.Unmanaged {
+		if usageUnmanagedReasonIsSkipFace(u.Reason) {
+			noteSkip("unmanaged relation", u.Rel, u.Reason, u.Detail)
+			continue
+		}
+		noteUnmanaged(u.Rel, u.Reason, u.Detail)
+	}
+	round.UnmanagedCount = len(unmanagedRels)
+	round.UnmanagedByReason = unmanagedByReason
+	round.UnmanagedRelations = unmanagedRels
+	// S1-RET-03：把扫描侧算出的"关系 → 最早北京月"事实交给状态面（唯一实现；
+	// 状态文件不再自己按名字解析一遍）。
+	round.RelationMonths = tables.Months
 	noteFailure := func(rel, op string, err error) {
 		// R9C-2（审计 2026-09-24，P2）：良性竞态必须走**同一个出口**。
 		// R8-A-2/R8-D-1 的"关系已被并发轮次回收 ⇒ 良性"只补了 5 个窗口里的 2 个
@@ -2119,6 +2563,15 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		// 永远不回收。判据月与 attached 路径同源（见 reclaimMonths 的说明）。
 		first, last, ok := shape.reclaimMonths(rel)
 		if !ok {
+			// S1-RET-02 的另一半：这里此前是零计数的 `continue`。候选判据蕴含"归属
+			// 可推导"，所以这一支**当前结构下不可达** —— 保留它作为判据回归的哨兵：
+			// 一旦有人把候选面收进一条我们折算不出月份的关系，它必须以**点名 + 计数**
+			// 的方式出现（skipped_by_reason[unclassified-orphan] + needs_manual_months
+			// + unreclaimed），而不是静默不动。
+			noteSkip("orphan relation", rel, usageSkipUnclassifiedOrphan,
+				fmt.Sprintf("进了候选面却折算不出月份（relkind=%q children=%d bound=%q）—— "+
+					"候选判据与归属推导必须同源；这条关系本轮一行未动，请核对候选面",
+					shape.Kind, shape.Children, shape.Bound))
 			continue
 		}
 		// 判据月（R25-F27）：名字合法的关系 first==last（= 名字月，存量口径）；
@@ -2356,6 +2809,17 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 		//     两个既有闸门处理"区间里还有保留期月份"的情形。
 		first, last, ok := shape.reclaimMonths(rel)
 		if !ok {
+			// 核验后收口（V-P5 §1-S3）：**attached 桶也要有同款哨兵**。
+			//
+			// 这一支与孤儿桶的那一支是同一个纪律的两半：候选判据蕴含"归属可推导"，
+			// 所以它在当前结构下**不可达** —— 但只给一个循环设哨兵，等于把同一个
+			// 不变量拆成"一半有牙、一半没有"（核验方用变异实证：同一次
+			// `reclaimMonths → !ok` 变异下，孤儿桶有面、attached 桶零落面）。
+			// 判据面因此必须**两个循环都有**（见 TestAuditS1Ret02ReclaimLoopsHaveNoSilentContinue）。
+			noteSkip("attached relation", rel, usageSkipUnclassifiedOrphan,
+				fmt.Sprintf("进了候选面却折算不出月份（relkind=%q children=%d bound=%q attached_usage=%v）—— "+
+					"候选判据与归属推导必须同源；这条关系本轮一行未动，请核对候选面",
+					shape.Kind, shape.Children, shape.Bound, shape.attachedToUsage()))
 			continue
 		}
 		// 判据月（R25-F27）：名字合法的关系 first==last（= 名字月，存量口径）；
@@ -2597,8 +3061,9 @@ func CleanupUsageRetention(db *sql.DB) (err error) {
 	// R10-G3（N2②/N3）：延后关系的**累积**面 —— "连续 N 轮延后"由
 	// recordUsageRetentionRound 按这份清单推进、按"本轮没延后就清零"收敛。
 	round.DeferredRelations = deferredRels
-	log.Printf("usage retention: round summary cleared_partitions=%d cleared_detached=%d skipped=%d failures=%d cutoff=%s retention_months=%d skip_reasons=%s",
-		dropped, clearedDetached, skipped, failed, monthKey(cutoffMonth), n, formatSkipReasons(skipReasons))
+	log.Printf("usage retention: round summary cleared_partitions=%d cleared_detached=%d skipped=%d failures=%d cutoff=%s retention_months=%d skip_reasons=%s unmanaged=%d unmanaged_reasons=%s",
+		dropped, clearedDetached, skipped, failed, monthKey(cutoffMonth), n, formatSkipReasons(skipReasons),
+		len(unmanagedRels), formatSkipReasons(unmanagedByReason))
 	if len(failures) > 0 {
 		return fmt.Errorf("usage retention: %d relation(s) could not be cleaned this round (其余到期关系已清理,下一轮会重试;失败关系:%s): %s",
 			failed, strings.Join(failedRels, ","), strings.Join(failures, " | "))
@@ -3400,7 +3865,15 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 		win = retentionWindow{from: dayKey(m), to: dayKey(m).AddDate(0, 1, -1)}
 	}
 	// 第 0 步：预补账（池上、无锁、可长）—— N1 的保险丝，见 usageReclaimPreBackfill。
-	if err := usageReclaimPreBackfill(db, rel, win.from, win.to); err != nil {
+	//
+	// S1-RET-01 ①（第二十八轮审计 P1）：窗口取 **win ∪ 该关系的声明边界**，不能只用
+	// win。整月对齐的**宽**分区（季度/整年）在 retentionLedgerWindow 里 `exact=true`
+	// 且提前 return ⇒ win 只有**判据月**（区间末月），而这一步是 DETACH 之前唯一的
+	// 保险丝：只按它补账的话，冻结段（DETACH）一提交、结算段再失败，判据月以外的
+	// 金额就从所有读数面消失（该关系此时已不是分区、名字又不是六位月 ⇒ 连枚举面
+	// 都进不去，永不自愈）。声明边界在 retentionLedgerWindow 里已经算好。
+	backfillFrom, backfillTo := retentionWindowUnion(win)
+	if err := usageReclaimPreBackfill(db, rel, backfillFrom, backfillTo); err != nil {
 		return preBackfillFailure(rel, err)
 	}
 	// 账本**自己的**关系（usage_daily 年分区）必须在进入冻结段之前备好：冻结段持有
@@ -3510,6 +3983,24 @@ func reclaimUsagePartitionAtomically(db *sql.DB, rel string, shape usageRelation
 	}
 	// 冻结：这一提交之后 rel 的行集合**不可能**再增加（见函数注释），父表 AEX
 	// 随本事务结束立刻释放 —— 补账与 DROP 都在**只锁 rel** 的结算段里做。
+	//
+	// S1-RET-01 ②（第二十八轮审计 P1）：DETACH **之前**、**同一个事务里**写下
+	// "这条关系是我们摘的 + 它那时声明的窗口"标记。
+	//
+	// 为什么必须在这一刻写：DETACH 提交之后 PG 清掉 relpartbound/relispartition，
+	// 这条关系此后再没有任何身份证据 —— 异名宽分区于是永远不再被枚举（既不补账、
+	// 也不 DROP、也不进任何观测面）。与 DETACH 同事务 ⇒ "关系是孤儿"与"它自称是
+	// 我们的残留"两件事要么都在、要么都不在（冻结失败时不会留下一个戴着我们标记、
+	// 却还挂在 usage 下的关系）。
+	//
+	// 写标记失败 ⇒ 不 DETACH（fail-loud）：把一个没有身份证据的孤儿留在盘上，
+	// 等于把本条的缺陷重新造出来。失败时关系原样挂着、金额照常可读、下一轮重试
+	// （与 detach-partition 失败同一条语义，走同一个 failBound 通道）。
+	if _, err := tx.Exec("COMMENT ON TABLE " + quoteRelationIdent(rel) + " IS '" +
+		quoteSQLLiteral(usageRetentionOwnedComment(backfillFrom, backfillTo)) + "'"); err != nil {
+		rollback()
+		return failBound("mark-ownership", err)
+	}
 	if _, err := tx.Exec("ALTER TABLE usage DETACH PARTITION " + quoteRelationIdent(rel)); err != nil {
 		rollback()
 		return failBound("detach-partition", err)

@@ -45,6 +45,14 @@ type sysinfoResponse struct {
 	// (non_positive | learned_floor | min_billable | unpriced_model | unbillable_price)、
 	// 差多少钱"可检索。
 	Balance balanceHealth `json:"balance"`
+	// OIDC 是 OIDC 流程启动面的**平台容量**拒绝证据(S3-05,审计 2026-10-04,P2)。
+	//
+	// 修前:`OIDCFlowCapacityRejections()` 有定义、有自增点、注释写着"供运维/探针读",
+	// 但**唯一读者是包内判据** —— 生产上运维拿不到这个数,而它恰恰是区分
+	// "这个出口在暴力尝试"(失败预算涨,要拦)与"它的合法登录潮把平台容量打满"
+	// (本计数涨,要扩容/提示稍后重试)的唯一读数。同一次拒绝虽然也写一条审计
+	// (`oidc_flow_capacity`),但审计是**事后检索**面,不是探针面。
+	OIDC oidcFlowHealth `json:"oidc"`
 	// Audit 是审计链与审计写入的健康状态(FIX-12,审计 2026-09-12 P1)。
 	//
 	// 为什么挂在这里而不是新开一个 admin 端点:审计写入失败以前**完全不可
@@ -102,6 +110,15 @@ type balanceHealth struct {
 	AdmissionRejections int64 `json:"admission_rejections"`
 	// LastRejection 是最近一条拒绝的形状(用户/端点/模型/依据/要求金额/当时余额)。
 	LastRejection *serverstore.BalanceAdmissionRejection `json:"last_rejection,omitempty"`
+}
+
+// oidcFlowHealth 是 OIDC 流程启动面的平台容量读数(与 balanceHealth 同款:
+// 子系统自己记账、装配层只读)。
+type oidcFlowHealth struct {
+	// CapacityRejections 是**因平台自身容量**被拒的流程启动次数(在途流程表满 /
+	// 单来源 IP 在途配额满)。它**不**计入失败预算 —— 见 oidc.go 的
+	// recordFlowCapacityRejection(容量拒绝不是攻击证据)。
+	CapacityRejections int64 `json:"capacity_rejections"`
 }
 
 type memInfo struct {
@@ -195,6 +212,11 @@ func (a *AdminAPI) handleServerInfo(c *gin.Context) {
 	if n, last, ok := serverstore.BalanceAdmissionStats(); ok {
 		resp.Balance = balanceHealth{AdmissionRejections: n, LastRejection: &last}
 	}
+
+	// S3-05(审计 2026-10-04,P2):OIDC 流程启动面的**平台容量**拒绝计数。
+	// 读的是 serverauth 自己的进程级计数(唯一真源,OIDCFlowCapacityRejections),
+	// 不是在这里另记一份 —— 与 Balance 同款"子系统记账、这里只读"。
+	resp.OIDC = oidcFlowHealth{CapacityRejections: OIDCFlowCapacityRejections()}
 
 	// 实时版本检查(2026-08-31):查询 GitHub Releases latest,对比当前版本。
 	// 结果失败时留 nil(JSON null),前端静默降级——版本提示是增强体验,

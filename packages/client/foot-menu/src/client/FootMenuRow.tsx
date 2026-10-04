@@ -327,9 +327,28 @@ export function FootMenuRow(props: PropsRuntime<'sidebar.footer.action'>): JSX.E
   // 自己给的可操作文案（`attentionTitle`），没有才退回通用那句（2026-09-21 对抗审计）。
   const waitingEntry = entries.find(entry => entry.attention?.() === true)
   const attention = waitingEntry !== undefined
-  const attentionTitle = waitingEntry?.attentionTitle?.() ?? t('footMenu.attention')
+  const entryAttentionTitle = waitingEntry?.attentionTitle?.()
+  const attentionTitle = entryAttentionTitle ?? t('footMenu.attention')
   const label = activeEntry === undefined ? t('footMenu.more') : `${t('footMenu.more')} · ${activeEntry.title()}`
-  const accessibleLabel = attention ? t('footMenu.labelAttention') : t('footMenu.label')
+  /**
+   * 行级可访问名：**必须与条目自己给出的那句话一致**（2026-10-04 核验 P1-②）。
+   *
+   * 旧实现只看 `attention` 布尔 ⇒ 无论条目说什么，读屏都把这一行念成
+   * 「更多功能（有等待处理的事项）」；而浏览器那条在"用户持控制权"（holding）档下
+   * 可见 tooltip 是「控制权在你手里…」——同一个元素上读屏与视觉说的是两件事。
+   * `attention` 布尔**无法**区分档位（holding/waiting 都为真），所以级别只能由条目
+   * 自己的 `attentionTitle()` 表达，读屏优先念它。
+   *
+   * 回退链是**两级**的（2026-10-04 §12 收口门禁）：
+   *   ① 条目没给 `attentionTitle` ⇒ 用通用的 `footMenu.labelAttention`
+   *      （「更多功能（有等待处理的事项）」）——对"声明了 attention"的条目这是**准确**的
+   *      通用警示，而且这条文案必须有人引用（desktop 包的 i18n 守卫要求零死键）；
+   *   ② 压根没有 attention ⇒ 中性的 `footMenu.label`。
+   * 两档都不会再出现"holding 被念成有事项在等"：holding 的条目自带那句文案。
+   */
+  const accessibleLabel = attention
+    ? (entryAttentionTitle ?? t('footMenu.labelAttention'))
+    : t('footMenu.label')
   const placement = box ?? CLOSED_BOX
 
   return (

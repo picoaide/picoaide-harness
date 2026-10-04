@@ -28,6 +28,9 @@
  *   - 把前端 `OpensSummary.today` 删掉、或把 `gin.H` 的 `totals` 删掉 ⇒ 第 1/2 条红；
  *   - 解析器自己坏掉（找不到结构体/接口）⇒ 直接抛错（**不静默零命中**），
  *     第 7 条另有"锚点必须命中"的非空自证。
+ *   - 锚点②（上游出站头名）：把 `ATTRIBUTION_CHAIN_ANCHORS.senderDir` 指回不存在的路径，
+ *     或把上游适配器那一行改掉 ⇒ "三段锚点齐备"条红（**不得**静默回落冻结件）。
+ *     判定器自身的正/负形态在 `upstream-anchor-freeze.spec.ts` 用合成夹具自证。
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
@@ -42,7 +45,7 @@ import {
   ATTRIBUTION_SESSION_PREFIX,
   OPENS_DETAIL_RETENTION_DAYS,
 } from './opens-contract'
-import { UPSTREAM_SESSION_HEADER_LINE } from './upstream-anchor-freeze'
+import { probeUpstreamSenderAnchor, UPSTREAM_SESSION_HEADER_LINE } from './upstream-anchor-freeze'
 
 // ---------------------------------------------------------------------------
 // 定位两侧真源（路径不写死：从 cwd 向上找服务端标记，与 Audit.test.tsx 同款）
@@ -458,41 +461,68 @@ describe('跨端对拍 · D 应用 AI 归因通道（R4-D-4 / R13-GB）', () => 
     // 这条替代原先"从自报头发送方登记表派生接线状态"的判据：真实链路是**会话 id 本身**
     // （§21.7⑤ 的替代路径），发送方在 pinned 上游 submodule 里、不在本仓扫描面内，
     // 所以改用**三段锚点机械对拍** —— 任何一段缺失或漂移都判红。
+    //
+    // 锚点②（上游出站头名）**不钉文件路径**：在 `senderDir` 目录下逐字搜冻结行，要求恰好
+    // 命中 1 个文件、且命中文件是 `senderFile`（判定器 = `probeUpstreamSenderAnchor`）。
+    // S5-01（2026-10-04）的教训：旧锚点钉的是 `…/src/protocols/chat-completions/adapter.ts`
+    // —— 一条**不存在**的路径 ⇒ `existsSync` 兜底**必然**命中 ⇒ 判据退化成"拿冻结常量测
+    // 它自己"（恒真），而同一分支里真正有牙的那半（活上游必须逐字含冻结行）**结构上不可达**。
+    // 现在三件事分开：① submodule 在场（判据 = `deepseek-harness/.git` 真检出标记**或**目录
+    // 非空 —— 与上游布局无关，见 `classifyUpstreamPresence`）⇒ 只认活文件，解析不到命中即红，
+    // **并且**命中文件里必须有由契约常量 `ATTRIBUTION_SESSION_HEADER` 派生的头名形状；
+    // ② 真缺席（目录不存在 / 空目录且无 `.git`，即 `Go server` job 的形态）⇒ 才允许冻结件
+    // 兜底；③ 兜底自身有牙（冻结件必须与契约常量一致），且来源写进 `sources`。判定器的正/负
+    // 形态由 `upstream-anchor-freeze.spec.ts` 用合成夹具自证 —— "解析不到真实命中 ⇒ 红"
+    // 与"契约常量漂移 ⇒ 红"这两条假绿都不可回归。
+    const sender = probeUpstreamSenderAnchor({
+      repoRoot: REPO_ROOT,
+      senderDir: ATTRIBUTION_CHAIN_ANCHORS.senderDir,
+      senderFile: ATTRIBUTION_CHAIN_ANCHORS.senderFile,
+      header: ATTRIBUTION_SESSION_HEADER,
+      line: UPSTREAM_SESSION_HEADER_LINE,
+    })
     const anchors = [
       ['客户端前缀常量', ATTRIBUTION_CHAIN_ANCHORS.client, new RegExp(`AI_HIDDEN_SESSION_PREFIX\\s*=\\s*'${ATTRIBUTION_SESSION_PREFIX}'`, 'u')],
-      ['上游出站头名', ATTRIBUTION_CHAIN_ANCHORS.sender, new RegExp(`'${ATTRIBUTION_SESSION_HEADER}':\\s*String\\(options\\.sessionId\\)`, 'u')],
       ['服务端契约前缀', ATTRIBUTION_CHAIN_ANCHORS.contract, new RegExp(`"prefix":\\s*"${ATTRIBUTION_SESSION_PREFIX}"`, 'u')],
       ['服务端解析实现', ATTRIBUTION_CHAIN_ANCHORS.reader, /func AppIDFromSessionID\(sessionID string\) string/u],
     ] as const
-    const missing: string[] = []
-    const sources: string[] = []
+    const missing: string[] = [...sender.missing]
+    const sources: string[] = [sender.source]
     for (const [label, rel, pattern] of anchors) {
       const path = join(REPO_ROOT, rel)
       if (!existsSync(path)) {
-        // 只有**锚点②**（上游出站头名）会走到这里：`Go server` job 不检 submodule。
-        // 用冻结件判（见 upstream-anchor-freeze.ts 的头注释），**不静默 skip**。
-        if (label !== '上游出站头名') { missing.push(`${label}: 文件不存在 ${rel}`); continue }
-        if (!pattern.test(UPSTREAM_SESSION_HEADER_LINE)) {
-          // 先记来源再报错：否则先触发的是下面那条"sources 少一条"的断言，
-          // 看不到本条真正想说的话（V13-B 复审实测）。
-          sources.push(`${label}: submodule 缺席 ⇒ 按冻结件判定（但冻结件不含锚点）`)
-          missing.push(`${label}: 冻结件本身不含锚点（upstream-anchor-freeze.ts 与锚点模式不一致）`)
-          continue
-        }
-        sources.push(`${label}: submodule 缺席 ⇒ 按冻结件判定（Go server job 不检 submodule）`)
+        missing.push(`${label}: 文件不存在 ${rel}`)
         continue
       }
       const text = readFileSync(path, 'utf8')
       if (!pattern.test(text)) missing.push(`${label}: ${rel} 里找不到锚点`)
-      // submodule 在场 ⇒ 多判一半：活上游必须逐字包含冻结行（上游漂移必须同步冻结件）。
-      if (label === '上游出站头名' && !text.includes(UPSTREAM_SESSION_HEADER_LINE)) {
-        missing.push(`${label}: 活上游与冻结件**不一致**（pin/适配器变了？请同步 `
-          + '`upstream-anchor-freeze.ts` 的 `UPSTREAM_SESSION_HEADER_LINE`）')
-      }
       sources.push(`${label}: 活文件`)
     }
-    // 来源必须可见（否则"用了冻结件"这件事会变成静默降级）。
-    expect(sources.length, `每条锚点都要记录判定来源：${sources.join('；')}`).toBe(anchors.length)
+    // 锚点②的"U5 形态"显式写出来：活上游必须**恰好命中 1 个文件**且命中文件就是适配器。
+    // `hits` 为空只可能是"submodule 真的缺席 ⇒ 冻结件兜底"，那条路径的牙在判定器里
+    // （`upstream-anchor-freeze.spec.ts` 用合成夹具自证），这里不重复判它。
+    if (sender.hits.length > 0) {
+      expect(sender.hits, `锚点②必须恰好命中 1 处：${sender.source}`).toHaveLength(1)
+      expect(sender.hits[0], '锚点②的命中文件必须是上游适配器').toMatch(
+        new RegExp(`/${ATTRIBUTION_CHAIN_ANCHORS.senderFile}$`, 'u'),
+      )
+    }
+    // 来源必须可见（否则"用了冻结件"这件事会变成静默降级）。两种环境各自如实：
+    // 活文件分支不许声称"缺席"、缺席分支不许声称"活文件"（S5-01 复审 A2 的假陈述形态）。
+    if (sender.hits.length > 0) {
+      expect(sender.source, 'submodule 在场 ⇒ 来源必须是活文件判定').toContain('活文件')
+      expect(sender.source, '在场时**不得**说成"submodule 缺席"').not.toContain('缺席')
+      expect(sender.source).not.toContain('冻结件')
+    } else {
+      expect(sender.source, '真的缺席 ⇒ 来源必须写明用了冻结件').toContain('冻结件')
+      expect(sender.source, '缺席分支必须写明判定的证据（目录不存在 / 空目录 + 无 .git）').toMatch(
+        /不存在|空目录/u,
+      )
+      // 缺席分支必须**在输出里可见**：断言消息只在失败时打印，绿的时候没人看得见 ——
+      // 那就成了"静默降级"（S5-01 复审 A2 的形态之一）。这里把判定来源打出来。
+      console.info(`[归因锚点②] 未读活文件（submodule 缺席）⇒ 判定来源：${sender.source}`)
+    }
+    expect(sources.length, `每条锚点都要记录判定来源：${sources.join('；')}`).toBe(anchors.length + 1)
     expect(
       missing,
       `归因链路的三段锚点必须齐备（缺一段 ⇒ 归因不会产生，面板文案必须改回"尚未接线"）：${missing.join('；')}`,

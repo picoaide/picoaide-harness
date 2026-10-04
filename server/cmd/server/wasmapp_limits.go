@@ -59,9 +59,12 @@ func newWasmLimitsHolder(db *sql.DB, profile memprofile.Profile) *wasmLimitsHold
 		case err != nil:
 			log.Printf("wasm: 读平台限制项设置失败（回落部署档位 %s）：%v", profile.Name, err)
 		case ok && strings.TrimSpace(raw) != "":
-			// 读取用 ParseStored（前向兼容：缺字段补默认、未知字段忽略）——
-			// 严格 Parse 只服务控制台 PUT。理由见 applimits.ParseStored 的注释：
-			// 用严格模式读旧设置会让"升级 = 管理员已保存的整份设置被判非法并回落档位"。
+			// 读取用 ParseStored（前向兼容：缺字段补默认、未知字段忽略、**新版本才加的
+			// 校验先合法化再校验**）——严格 Parse 只服务控制台 PUT。理由见
+			// applimits.ParseStored 的注释：用严格模式读旧设置会让"升级 = 管理员已保存的
+			// 整份设置被判非法并回落档位"；而"保存时合法、现在按新规则不合法"的组合
+			// （例如 S4-02 之前两个默认值都是 5 s 时落库的 sql=5/host_call=5）同样不能整份
+			// 丢弃 —— 它被钳到最近合法点，并由 applimits 打出一行可检索的合法化日志。
 			if l, aerr := applimits.ParseStored(raw); aerr != nil {
 				// 坏设置**不阻塞启动**（与"设置读不出来"同一条降级路径），但必须点名。
 				log.Printf("wasm: ⚠️ 已保存的平台限制项不合法，已回落到部署档位 %s：%v", profile.Name, aerr)

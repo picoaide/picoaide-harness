@@ -114,38 +114,70 @@ machine, the later `docker load` **overwrites** that tag, and from then on any s
 `docker compose up -d server` may be rebuilt from **another channel's** image — wrong branding and
 wrong bundled installers, while that stack's `SERVER_IMAGE` in `.env` still looks perfectly correct.
 
-Since 2026-09-23 every channel archive additionally carries a channel-scoped tag
-`picoaide-harness-server:<channel-id>-<version>`. Correct order on a multi-stack host:
+Since `v2.8.2-beta.1` (2026-09-24) every channel archive additionally carries a channel-scoped tag
+`picoaide-harness-server:<channel-id>-<version>`; all three tags in the archive point at the **new**
+image and `docker load` restores them together, so **no tag needs to be re-created**. Correct order
+on a multi-stack host:
 
 ```bash
 VER=<target version, without the v>
+OLD=<version before the upgrade, without the v>
 IMAGE=picoaide-harness-server
+CHANNEL=<this stack's channel id>   # <- must match the channel marker baked into the image
 STACK=/opt/picoaide            # <- this stack's deployment directory
 CT=picoaide-server             # <- this stack's server container name
+
+# 0) Freeze the PRE-UPGRADE running image as the rollback anchor - the only legitimate use of
+#    "the running container": it represents the OLD version, so it may only get an OLD channel tag.
+#    (do not name the variable GID/UID: they are read-only specials in zsh on some hosts)
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # first confirm this stack really runs this channel
+ROLLBACK_IMAGE_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$ROLLBACK_IMAGE_ID" "${IMAGE}:${CHANNEL}-${OLD}"
 
 # 1) Import this channel's package (each stack loads its own channel package)
 unzip -p /tmp/pa.zip image.tar | docker load
 
-# 2) Read the image id from THIS stack's running container and re-tag it with the channel tag
-#    (do not name the variable GID/UID: they are read-only specials in zsh on some hosts)
-IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
-docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+# 2) Read the id of the image you JUST imported: only from the channel tag (bare tags get
+#    overwritten by another stack - see below)
+NEW_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}:${CHANNEL}-${VER}")"
+test -n "$NEW_IMAGE_ID"
+test "$NEW_IMAGE_ID" != "$ROLLBACK_IMAGE_ID"       # old and new must be two different images
+docker run --rm --entrypoint cat "${IMAGE}:${CHANNEL}-${VER}" /opt/picoaide/CHANNEL   # == ${CHANNEL}
 
 # 3) Point this stack's .env at the channel tag (never leave a bare `v<version>`)
 cd "$STACK"
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
-grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}" >> .env
 docker compose up -d server
 
-# 4) Verify that this stack really runs this channel
-docker exec "$CT" cat /opt/picoaide/CHANNEL        # channel marker baked into the image
+# 4) Assert that this stack really runs THIS channel's NEW version (all five must pass)
+ENV_TAG="$(sed -n 's/^SERVER_IMAGE=//p' .env)"
+test "$(docker image inspect --format '{{.Id}}' "$ENV_TAG")" = "$NEW_IMAGE_ID"   # the .env tag resolves to the new image
+docker inspect "$CT" --format '{{.Image}}'         # == $NEW_IMAGE_ID <- the decisive one
+docker exec "$CT" /app/picoaide-server --version   # == target version (the binary's own report, not the tag)
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # == $CHANNEL
 curl -sk "https://<this-stack-domain>/api/client/v2/channel" | head -c 300   # channel_id must match
 ```
 
-For a first-time deployment (no running container yet), re-tag **immediately** after `docker load`
-using the tag you just imported (`docker inspect --format '{{.Id}}' ${IMAGE}:${VER}`) instead of
-waiting for another stack to act. Rollback anchors must be **channel tags** too: on a multi-stack
-host a bare `v<old-version>` may already point at another channel's image. See
+> **Never read the image id from the running container and tag it as the NEW channel tag**: the
+> container switch happens in step 3, so the `docker inspect "$CT"` in step 2 returns the
+> **pre-upgrade** image. Tagging it as `${IMAGE}:${CHANNEL}-${VER}` overwrites the correct tag that
+> `docker load` just restored, and `docker compose up -d` then rebuilds from that same image id ⇒
+> **the upgrade silently does nothing** while both the tag and `.env` claim the new version (and the
+> rollback anchor is poisoned).
+>
+> **The bare tags `${IMAGE}:${VER}` / `${IMAGE}:v${VER}` can never tell you which image you just
+> imported**: they are identical in every channel archive, so a second stack's `docker load`
+> silently overwrites them. Only `<channel-id>-<version>` is unique to one channel.
+
+For packages built before `v2.8.2-beta.1` (that is, before 2026-09-24; archives without the channel
+tag) the only fallback is the bare
+tag: **immediately** after `docker load` take
+`docker image inspect --format '{{.Id}}' ${IMAGE}:${VER}`, verify the baked channel right there with
+`docker run --rm --entrypoint cat ${IMAGE}:${VER} /opt/picoaide/CHANNEL`, and only then
+`docker tag` it as the channel tag. A first-time deployment (no running container yet) simply skips
+step 0 and does steps 1-4. Rollback anchors must be **channel tags** too: on a multi-stack host a bare
+`v<old-version>` may already point at another channel's image. See
 [Channels and white-labelling](/en/deployment/channels/) for the channel consistency checks.
 
 ## 6. Post-upgrade verification (all three must pass)
@@ -184,12 +216,22 @@ The manifest's `client.version` should change with this upgrade, and the install
 
 Prerequisite: **first decide which kind of migration the new version introduced**; the two cases are handled differently.
 
-- **Ordinary migrations (add a column / add a table)**: the schema stays new after rolling the image back, but the old
-  binary does not reference the new columns, so switching the image back is usually enough.
+- **Same-generation rollback (the old and the new binary see exactly the same set of migrations)**: the schema
+  stays new after rolling the image back, but the old binary does not reference the new columns, so switching the
+  image back is enough.
+- **Cross-generation rollback (the database is newer than the binary)**: switching the image back is **not enough** -
+  since 2026-09-25 the binary performs a **two-way** migration reconciliation at startup and **refuses to start**
+  (`SchemaMismatchError`, naming the versions and giving two actionable options) as soon as `schema_migrations`
+  contains a version it does not know. Use the order below: **stop the service → restore the pre-upgrade
+  `pg_dump` → roll the image back → reinstall/roll back the client**. (Binaries from `v2.8.1` and earlier do not
+  have that check: a cross-generation rollback does not fail at startup but hits the removed/rewritten tables at
+  runtime - e.g. the `42P01` below. It is still "roll the database back too"; only the failure moves from startup
+  to runtime.)
 - **`v2.7.6-beta.5` and the `v2.7.6` line after it (includes `0073` `DROP TABLE` and `0074` config rewrite)**: those two
   are **irreversible**, so **rollback is NOT just swapping the image**. The correct order is
   **stop the service → restore the pre-upgrade `pg_dump` → roll the image back → reinstall/roll back the client**.
-  Rolling back the image alone makes the old binary hit **`42P01` (`undefined_table`)** on every request, while the
+  Rolling back the image alone makes an **old binary without the two-way check** (`v2.8.1` and earlier) hit
+  **`42P01` (`undefined_table`)** on every request, while the
   migrator only skips versions already applied and **does not fail at startup** (symptom: the service comes up and
   health checks pass, but app-related requests return 500 at runtime).
   **There is no downgrade path**: the old and new access models cannot coexist, and the server cannot be downgraded to
@@ -199,15 +241,23 @@ Prerequisite: **first decide which kind of migration the new version introduced*
 cd /opt/picoaide
 OLD=<version before the upgrade>
 IMAGE=picoaide-harness-server
+CHANNEL=<this stack's channel id>   # <- must match the channel marker baked into the image
+                                    #    (see "Running multiple channel stacks on one server")
 
-# 1) switch back to the old image
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${OLD}|" .env
+# 1) switch back to the old image - use the channel tag frozen in step 0 of the multi-stack section
+#    (that tag IS the rollback anchor).
+#    NEVER write the bare `${IMAGE}:${OLD}`: on a multi-stack host another channel's `docker load`
+#    may already have overwritten that bare tag, and compose's PICOAI_CHANNEL defaults to empty
+#    => this stack comes up under ANOTHER channel's branding, silently.
+docker image inspect --format '{{.Id}} {{.RepoTags}}' "${IMAGE}:${CHANNEL}-${OLD}"   # the anchor must exist
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${OLD}|" .env
 docker compose up -d
 
-# 2) verify the old version is healthy
+# 2) verify the old version is healthy (both version and channel)
 DOMAIN=$(grep '^DOMAIN=' .env | cut -d= -f2-)
 curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/healthz"
 docker exec picoaide-server /app/picoaide-server --version      # should equal OLD
+docker exec picoaide-server cat /opt/picoaide/CHANNEL           # should equal $CHANNEL (no silent rebranding)
 echo "$OLD" > VERSION
 
 # 3) restore only if the application data was damaged (loses data; explicit consent required)
@@ -221,6 +271,14 @@ echo "$OLD" > VERSION
 #   < deploy-backup/pg-data-<TS>.dump
 # docker compose start server
 ```
+
+> **Only a channel tag is a safe rollback anchor.** The bare `${IMAGE}:${OLD}` is usable on a
+> **single-stack** machine only (nothing else runs `docker load` to overwrite it). If the channel tag
+> was never frozen in step 0 of the multi-stack section (for instance when upgrading from an archive
+> older than `v2.8.2-beta.1`), then on a host that also runs another channel stack, check its
+> `RepoTags` and the `/opt/picoaide/CHANNEL` baked into the image with `docker image inspect` first,
+> and if needed `docker load` that channel's old package again from the update server and freeze the
+> channel tag.
 
 **Rollback steps 3) / 4) lose the data created after the upgrade**, so explicit consent is required before running them.
 

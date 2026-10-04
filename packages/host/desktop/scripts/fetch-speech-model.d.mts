@@ -32,6 +32,13 @@ export interface SpeechModelMaterializeOptions {
   readonly origins?: readonly string[]
   /** 只校验不下载（缺失/大小/哈希不符即抛）。 */
   readonly check?: boolean
+  /**
+   * 上游清单路径（缺省 = 随包的 `…-speech-to-text-sensevoice/runtime/assets.json`）。
+   *
+   * 生产只有那一个真源；这是**测试接缝** —— 真清单声明的是 239MiB 权重，单测钉不住
+   * "大小相同、哈希不同"那条报错分支（见 `tests/speech-model-fetch.spec.ts`）。
+   */
+  readonly manifestPath?: string
 }
 
 /**

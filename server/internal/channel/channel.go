@@ -16,10 +16,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 )
 
 // DirEnv 渠道目录在镜像内的位置(可由 Dockerfile 覆盖)。
@@ -169,6 +172,9 @@ func ValidAppOriginScheme(s string) bool {
 //   - **渠道目录/文件缺失** ⇒ 中性 fallback `DefaultAppOriginScheme`,不报错。
 //     渠道配置缺失只意味着"镜像没带渠道配置"(本地开发构建),此时服务端仍应可用
 //     —— 与 Load() 的既有约定完全一致。
+//   - **配置存在但读不出来**(非普通文件/读失败/超限/JSON 非法/缺 channel_id) ⇒
+//     返回错误(2026-10 审计:旧实现把它与"目录缺失"混成同一件事,于是坏配置静默
+//     回落默认 scheme)。见 manifestState 的三态说明。
 //   - **配置存在但字段缺失或非法** ⇒ 返回错误,由启动期调用方拒绝启动。
 //     发行镜像里这是交付事故:放行等于"服务端猜一个 scheme",而客户端注册的是渠道
 //     自己配的那个 ⇒ 全部非幂等请求 403,且故障现象与配置毫无关系(排障会跑偏)。
@@ -178,10 +184,21 @@ func ValidAppOriginScheme(s string) bool {
 // 用 **(值, error)** 而不是"直接返回兜底值":唯一的调用方是启动装配,
 // 它必须能区分"没有配置"与"配置写错了"。
 func AppOriginScheme() (string, error) {
-	cfg, present := loadPresent()
-	if !present {
+	m := loadPresent()
+	if m.state == manifestAbsent {
 		return DefaultAppOriginScheme, nil
 	}
+	if m.state == manifestBroken {
+		// 2026-10 审计(本泳道):"存在但读不出来"在**发行镜像**里是交付事故,必须
+		// fail-loud —— 旧实现与"没有配置"同语义(回落默认 scheme),于是镜像里的
+		// channel.json 变成符号链接/坏 JSON 时,服务端会带着**猜出来的** scheme 起来,
+		// 而客户端注册的是渠道自己配的那一个 ⇒ 全部非幂等应用请求 403,且故障现象
+		// 与配置毫无关系。这里把病根(路径 + 具体原因)原样交给启动装配。
+		reportManifestProblem(m.err)
+		return "", fmt.Errorf("渠道配置存在但不可用（%s）；"+
+			"发行镜像里的渠道配置必须可读 —— 请修渠道包里的 channel.json 后重新构建镜像", m.err)
+	}
+	cfg := m.cfg
 	scheme := strings.TrimSpace(cfg.Desktop.AppOriginScheme)
 	if scheme == "" {
 		return "", fmt.Errorf("渠道配置 %s 缺少 desktop.app_origin_scheme（全部渠道必填；"+
@@ -206,41 +223,160 @@ var Dir = func() string {
 
 // Load 读取渠道配置。
 //
-// 配置缺失或损坏时返回**中性**兜底值(不含任何厂商品牌),而不是报错:渠道目录
-// 缺失意味着"镜像没带渠道配置"(本地开发构建),此时服务端仍应可用。
-// 兜底值刻意不带厂商名 —— 仓库里不留任何品牌描述,一切对外文案必须来自渠道包;
-// 缺配置的**发行镜像**属交付事故,由 CI 在构建期强制该文件存在(见 ci.yml),
-// 启动期另有一致性校验(见 cmd/server 的 resolveStartupChannel)。
+// 配置**不存在**时返回**中性**兜底值(不含任何厂商品牌),不报错:渠道目录缺失
+// 意味着"镜像没带渠道配置"(本地开发构建),此时服务端仍应可用。兜底值刻意不带
+// 厂商名 —— 仓库里不留任何品牌描述,一切对外文案必须来自渠道包。
+//
+// 配置**存在但读不出来**(非普通文件/读失败/超限/解析失败)是**另一件事**,不再与
+// "没有配置"共用同一语义:返回值仍是中性兜底值(Load 没有 error 出口,调用点遍布
+// 门户/登录页/客户端下发面),但会打一行结构化 ERROR 点名**路径与病根**(见
+// reportManifestProblem),需要 fail-loud 的启动期路径见 AppOriginScheme。
+// 缺配置的**发行镜像**属交付事故,由 CI 在构建期强制该文件存在(见 ci.yml)。
 func Load() Config {
-	cfg, _ := loadPresent()
-	return cfg
+	m := loadPresent()
+	if m.state == manifestBroken {
+		reportManifestProblem(m.err)
+	}
+	return m.cfg
 }
 
-// loadPresent 与 Load 同源,但额外报告"渠道配置文件是否**存在且可解析**"。
+// manifestState 是渠道配置文件的三态(2026-10 审计 FW-1 泳道登记的一条)。
 //
-// 存在的意义只有一个:让 fail-loud 的边界能落在"配置写错了"而不是"没有配置"
-// (见 AppOriginScheme 的注释)。解析失败按"不存在"处理 —— Load 的既有约定是
-// 坏配置回落中性值,这里不改变它。
-func loadPresent() (Config, bool) {
+// 为什么要三态:旧实现只有"可用 / 不可用"两态(loadPresent 的 bool),于是
+//
+//	① **文件不存在** = 正常(本地开发构建没带渠道配置)⇒ 中性占位;
+//	② **文件存在但非普通文件 / 读不了 / 超限 / 解析失败** = 交付事故 ⇒ 也走中性占位,
+//	   而且**一个字都不打**。品牌渠道因此静默变回占位 "Harness"、素材静默 404,
+//	   现场没有任何线索指向 channel.json(排查会先去查渠道包的构建与部署)。
+//
+// ② 与 ① 的区别是本次修复的全部内容:行为(回落中性值)保持,但**出声**,
+// 并且启动期路径(AppOriginScheme,cmd/server 的 resolveStartupChannel 会调)
+// 对 ② fail-loud。
+type manifestState int
+
+const (
+	// manifestAbsent 渠道目录里没有 channel.json —— 正常(本地开发构建)。
+	manifestAbsent manifestState = iota
+	// manifestOK 普通文件、读得到、体量合规、解析成功且带 channel_id。
+	manifestOK
+	// manifestBroken **存在但不可用**:符号链接/目录/设备/FIFO、Lstat 失败(非
+	// ENOENT)、读失败、超过 maxConfigBytes、JSON 非法、缺 channel_id。
+	manifestBroken
+)
+
+// manifestRead 是 loadPresent 的读取结论:配置 + 三态 + 病根。
+type manifestRead struct {
+	cfg   Config
+	state manifestState
+	// err 只在 manifestBroken 时非空,文案里带**绝对路径 + 具体原因**(指到病根)。
+	err error
+}
+
+// loadPresent 与 Load 同源,但额外报告"渠道配置文件的三种情形"(见 manifestState)。
+//
+// 存在性的意义:让 fail-loud 的边界能落在"配置写错了"而不是"没有配置"
+// (见 AppOriginScheme 的注释)。
+func loadPresent() manifestRead {
 	// channel.json 与素材同一条规则(见 assetRegular):必须是渠道目录内的**普通
 	// 文件**。渠道目录里的东西由 CI 从私有渠道仓注入,而 `cp -a` 与 `docker COPY`
 	// 都保留符号链接 ⇒ 跟随链接读配置,等于让渠道包指定"读容器内哪个文件当配置",
-	// 而配置字段会经**未认证**的 /api/client/v2/channel 回显出去(弱读取面)。
-	// 非普通文件按"没有配置"处理(与读不到同一语义:回落中性占位)。
-	manifest := filepath.Join(Dir, "channel.json")
-	if st, err := os.Lstat(manifest); err != nil || !st.Mode().IsRegular() {
-		return fallback(), false
+	// 而配置字段会经**未认证**的/api/client/v2/channel 回显出去(弱读取面)。
+	// 这一条判据**不放宽**;变的是它命中之后的行为:从"当作没有配置"改成"出声"。
+	path := filepath.Join(Dir, "channel.json")
+	st, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return manifestRead{cfg: fallback(), state: manifestAbsent}
+		}
+		// 目录/文件存在但连属性都读不到(权限、EIO…)—— 不是"没有配置"。
+		return brokenManifest(path, fmt.Errorf("渠道配置无法读取:%w", err))
 	}
-	raw, err := os.ReadFile(manifest)
-	if err != nil || len(raw) > maxConfigBytes {
-		return fallback(), false
+	if !st.Mode().IsRegular() {
+		return brokenManifest(path, fmt.Errorf(
+			"渠道配置不是普通文件(%s)。`cp -a` 与 `docker COPY` 会把渠道包里的链接/目录"+
+				"原样带进镜像,所以这通常是渠道仓里放了符号链接或目录;"+
+				"服务端不跟随它读配置(配置字段会经未认证的 /api/client/v2/channel 回显);"+
+				"实际形态 = %s",
+			path, modeKind(path, st.Mode())))
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return brokenManifest(path, fmt.Errorf("渠道配置读取失败(%s):%w", path, err))
+	}
+	if len(raw) > maxConfigBytes {
+		return brokenManifest(path, fmt.Errorf("渠道配置超过体积上限(%s:%d > %d 字节)",
+			path, len(raw), maxConfigBytes))
 	}
 	var cfg Config
-	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.ChannelID == "" {
-		return fallback(), false
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return brokenManifest(path, fmt.Errorf("渠道配置不是合法 JSON(%s):%w", path, err))
+	}
+	if cfg.ChannelID == "" {
+		return brokenManifest(path, fmt.Errorf("渠道配置缺少 channel_id(%s)", path))
 	}
 	applyDefaults(&cfg)
-	return cfg, true
+	return manifestRead{cfg: cfg, state: manifestOK}
+}
+
+// brokenManifest 构造 manifestBroken 结论:配置回落中性值 + 病根待出声。
+func brokenManifest(path string, err error) manifestRead {
+	return manifestRead{cfg: fallback(), state: manifestBroken, err: fmt.Errorf("%s:%w", path, err)}
+}
+
+// modeKind 把文件模式翻译成一句人话(符号链接还带上目标),让日志直接指到形态。
+func modeKind(path string, mode os.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		if target, err := os.Readlink(path); err == nil {
+			return "符号链接 → " + target
+		}
+		return "符号链接"
+	case mode.IsDir():
+		return "目录"
+	case mode&os.ModeNamedPipe != 0:
+		return "FIFO"
+	case mode&os.ModeSocket != 0:
+		return "socket"
+	case mode&os.ModeDevice != 0:
+		return "设备文件"
+	default:
+		return mode.Type().String()
+	}
+}
+
+// lastManifestProblem 保存上一次已经出过声的病根文案。
+//
+// 为什么需要去重:Load() 在每个请求上都会被调用(门户、登录页、三个素材端点),
+// 而"渠道配置坏了"是**进程级的一次性事实** —— 每次请求打一行会把日志刷爆,
+// 真正的病根反而被淹没。判据取"文案变了才再打一行":同一个病根只出声一次,
+// 病根换了(例如从"符号链接"变成"JSON 非法")会再出声。素材路径共用同一个去重位。
+var lastManifestProblem atomic.Pointer[string]
+
+// reportManifestProblem 把"渠道配置存在但不可用"打出去(结构化、可 grep、指到病根)。
+func reportManifestProblem(err error) {
+	reportProblem("渠道配置文件存在但不可用,已回落中性占位(品牌会变成占位名、素材会 404)", err)
+}
+
+// reportAssetProblem 把"素材存在但不可用"打出去(端点仍是 404,但不再静默)。
+//
+// 素材与配置的区别:素材缺失(未配置 logo/favicon)是**正常**的,不出声;素材
+// **在盘上但不是普通文件**(符号链接/目录/FIFO)是渠道包的问题,现场表现只有
+// "登录页少了一张图",没有任何线索 —— 所以出声,并把形态(含链接目标)写出来。
+func reportAssetProblem(err error) {
+	reportProblem("渠道素材存在但不可用,端点按未配置返回 404(界面会缺图)", err)
+}
+
+// reportProblem 是上面两条的公共实现:同一个病根只出声一次(见 lastManifestProblem)。
+func reportProblem(what string, err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	if prev := lastManifestProblem.Load(); prev != nil && *prev == msg {
+		return
+	}
+	lastManifestProblem.Store(&msg)
+	log.Printf("ERROR channel: %s:%s", what, msg)
 }
 
 // fallbackBrandName 渠道配置缺失时的中性占位(刻意不含厂商品牌)。
@@ -355,16 +491,32 @@ var errNotRegularAsset = errors.New("channel: asset is not a regular file")
 // cachetrust 全都拒符号链接;构建期同判在 scripts/ci-channels.sh(lstatSync().isFile(),
 // 因为 `cp -a` 与 `docker COPY` 都不 dereference —— 只在服务端拦是"只拦一半")。
 //
+// **"未配置"与"配了但形态不对"必须分开出声**(2026-10 审计本泳道):
+//   - 名字为空 / 配置里根本没写这个素材 ⇒ 静默返回"没有素材"(正常,端点 404 是产品语义);
+//   - 盘上**存在但不是普通文件**、或 Lstat 报了非 ENOENT 的错(权限/EIO/ENOTDIR) ⇒
+//     同样按"没有素材"处理(HTTP 语义不变,仍然 404 —— 匿名的三个素材端点不新增响应
+//     形态),但打一行结构化 ERROR 点名路径与形态。旧实现这两种情形都静默,现场表现
+//     只有"登录页少了一张图",没有任何线索指向渠道包。
+//
 // 名字形状(必须单段、非空)也在这里收口:渠道配置被写成 `../x` 时不得越出 Dir。
 func assetRegular(name string) (os.FileInfo, error) {
 	if name == "" || strings.ContainsAny(name, `/\`) {
+		// "没配置这个素材" / 配置里的名字非法 —— 都不是"盘上有问题",不出声。
 		return nil, errNotRegularAsset
 	}
-	st, err := os.Lstat(filepath.Join(Dir, name))
+	path := filepath.Join(Dir, name)
+	st, err := os.Lstat(path)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			reportAssetProblem(fmt.Errorf("渠道素材无法读取(%s):%w", path, err))
+		}
 		return nil, err
 	}
 	if !st.Mode().IsRegular() {
+		reportAssetProblem(fmt.Errorf(
+			"渠道素材不是普通文件(%s,实际形态 = %s);服务端不跟随符号链接下发素材"+
+				"(三个素材端点未认证,跟随链接等于把容器内任意可读文件挂出去)",
+			path, modeKind(path, st.Mode())))
 		return nil, errNotRegularAsset
 	}
 	return st, nil

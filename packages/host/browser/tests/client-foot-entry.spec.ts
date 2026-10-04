@@ -1,7 +1,11 @@
 /**
- * 浏览器客户端半边的装配契约：条目登记进 `picoFootMenu`，"AI 在等你"仍然是
+ * 浏览器客户端半边的装配契约：条目登记进 `picoFootMenu`，控制权提示仍然是
  * 条目的 attention + 文案（并道之后底部唯一的一行「更多」由
  * `@picoaide/dsh-foot-menu` 拥有）。
+ *
+ * 2026-10-04（P1）：提示判据从"只有被拒过"改成"控制权在谁手里"（三档，见
+ * `control-hint.ts`）—— AI 交权后停下等人的那条路径此前零提示。下面三条用例分别钉
+ * holding / waiting / none 三档，且 holding 的文案不得谎报"AI 在等你"。
  *
  * ---- 变异验证 ----
  *   - 把 `ctx.picoFootMenu.add(…)` 删掉 ⇒「登记条目」红（界面上浏览器入口消失）；
@@ -9,6 +13,8 @@
  *     ⇒「id 不是 PanelId」红（否则「更多」行会谎称浏览器面板是当前面板）；
  *   - 去掉 `attention` 或让它恒 false ⇒「等待时 attention 为真」红（2026-09-16 用户闸
  *     事故的回归点：窗口外的可见提示不能丢）；
+ *   - `attention` 退回只看 `awaitingRelease` ⇒「controlled 但还没被拒」红（2026-10-04
+ *     用户报告的路径）；
  *   - 把 `activate` 里的 POST 换掉 ⇒「activate 打写面路由」红。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -165,6 +171,36 @@ describe('浏览器客户端半边：foot menu 条目', () => {
     const entry = f.footEntries[0]!
     expect(entry.attention?.()).toBe(true)
     expect(entry.title()).toBe('AI 等待交还')
+  })
+
+  it('AI 交权后停下等人（controlled 但还没被拒）也立刻提示：attention 为真 + 可操作文案', async () => {
+    // 2026-10-04 P1：旧实现只认 awaitingRelease ⇒ 这条路径（引导式登录：AI 交权 →
+    // 等用户登录 → 用户回到聊天窗口）界面上零提示，用户报告"控制按钮不见了"。
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ controlled: true, awaitingRelease: false }), { status: 200 })))
+    const f = fixture()
+    const { apply } = await freshPlugin()
+    apply(f.ctx)
+    await settle()
+    const entry = f.footEntries[0]!
+    expect(entry.attention?.()).toBe(true)
+    expect(entry.title()).toBe('控制权在你手里')
+    const title = entry.attentionTitle?.()
+    expect(typeof title).toBe('string')
+    expect(title).toContain('交给 AI')
+    expect(title).toContain('浏览器窗口')
+    // 信息级文案不得谎报"AI 在等你"（那要等真的被拒过）。
+    expect(title).not.toContain('正在等你')
+  })
+
+  it('没有控制权争议时条目回到中性：attention 为假（防噪音底线）', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ controlled: false, awaitingRelease: false }), { status: 200 })))
+    const f = fixture()
+    const { apply } = await freshPlugin()
+    apply(f.ctx)
+    await settle()
+    const entry = f.footEntries[0]!
+    expect(entry.attention?.()).toBe(false)
+    expect(entry.title()).toBe('浏览器')
   })
 
   it('attentionTitle 给出**可操作**的那句话（用户不是只看到一个圆点）', async () => {

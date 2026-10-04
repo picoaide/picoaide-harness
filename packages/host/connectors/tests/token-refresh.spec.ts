@@ -253,6 +253,9 @@ describe('TokenRefresher', () => {
     return new TokenRefresher({
       read: (id) => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
+      // The account scope every fact of this refresher is keyed by; one store
+      // instance means one scope for the whole case.
+      scope: () => store.dir,
       target: () => discoveryTarget(server.origin),
     })
   }
@@ -294,7 +297,9 @@ describe('TokenRefresher', () => {
       writeIfUnchanged: async () => { scope = 'user-b'; return null },
       scope: () => scope,
       target: () => discoveryTarget(server.origin),
-      onRefreshed: (id) => { announced.push(id) },
+      // `onRefreshed(scope, id, tokens, persisted)`: the account the result
+      // belongs to comes first, so a fake that reports ids names the position.
+      onRefreshed: (_scope, id) => { announced.push(id) },
     })
     const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(false)
@@ -315,14 +320,17 @@ describe('TokenRefresher', () => {
       // An interactive re-authorization (or SDK self-heal) won the write order
       // while the refresh was on the wire: the refresh must not overwrite it,
       // but the winning credential should be mirrored into live providers.
-      writeIfUnchanged: async (id) => {
+      // `scope` is the account scope the refresh READ from (first argument);
+      // this fake answers for the same store it hands the engine.
+      writeIfUnchanged: async (_scope, id) => {
         await store.updateCredential(id, {
           accessToken: 'at-newer', refreshToken: 'rt-newer', expiresAt: Date.now() + 3_600_000,
         })
         return null
       },
+      scope: () => store.dir,
       target: () => discoveryTarget(server.origin),
-      onRefreshed: (id, tokens) => { announced.push({ id, token: tokens.accessToken }) },
+      onRefreshed: (_scope, id, tokens) => { announced.push({ id, token: tokens.accessToken }) },
     })
     const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(true)
@@ -340,9 +348,10 @@ describe('TokenRefresher', () => {
     const refresher = new TokenRefresher({
       read: (id) => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
-      writeIfUnchanged: async (id) => { await store.clearCredential(id); return null },
+      writeIfUnchanged: async (_scope, id) => { await store.clearCredential(id); return null },
+      scope: () => store.dir,
       target: () => discoveryTarget(server.origin),
-      onRefreshed: (id) => { announced.push(id) },
+      onRefreshed: (_scope, id) => { announced.push(id) },
     })
     const outcome = await refresher.refresh('example-mcp', { force: true })
     expect(outcome.ok).toBe(false)
@@ -390,12 +399,13 @@ describe('TokenRefresher', () => {
         return await store.readCredential(id)
       },
       write: (id, patch) => store.updateCredential(id, patch),
+      scope: () => store.dir,
       target: () => discoveryTarget(server.origin),
     })
 
     const clockPath = refresher.refresh('example-mcp')
     await readEntered
-    expect(refresher.isRefreshing('example-mcp'), '前置：时钟路径必须真的在飞').toBe(true)
+    expect(refresher.isRefreshing(store.dir, 'example-mcp'), '前置：时钟路径必须真的在飞').toBe(true)
     const forced = refresher.refresh('example-mcp', { force: true })
     releaseRead()
 
@@ -433,6 +443,7 @@ describe('TokenRefresher', () => {
         }
         return await store.updateCredential(id, patch)
       },
+      scope: () => store.dir,
       target: () => discoveryTarget(server.origin),
     })
 

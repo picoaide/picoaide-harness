@@ -98,7 +98,7 @@ Client upgrades and first-time installs can also fetch packages straight from **
 - **Connector hub**: built-in SalesEasy (NeoCRM) and other MCP connectors with OAuth + PKCE, locally encrypted credential storage, and dynamic MCP registration;
 - **Scheduled tasks**: cron-triggered runs with a chosen agent, prompt, workspace, and permissions; execution detail (session, result, error) is always inspectable, with session jump; driven by the Host scheduler;
 - **Embedded browser**: the agent can take over the browser to act, with multi-tab, address bar, permission approval, and download control;
-- **Voice input**: the composer microphone turns speech into draft text; recognition runs on the machine (audio never leaves it, works offline) with the model downloaded on demand;
+- **Voice input**: the composer microphone turns speech into draft text; recognition runs on the machine (audio never leaves it, works offline) with the model **shipped inside the client** (works right after install, zero download; the weights are about 230MiB and the installer grows by roughly +140–250 MiB depending on how well each platform's package format compresses them); only a channel package that explicitly sets `desktop.speech_bundle_model: false` falls back to downloading it on first use;
 - **Five-track memory**: user profile, global facts, project key memory, project logs, and daily logs, isolated per directory and git branch, with confirmation-first writes.
 
 ### Security and compliance

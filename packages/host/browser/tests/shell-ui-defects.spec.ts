@@ -238,9 +238,13 @@ describe('活动面板不得盖住工具栏（缺陷 #3）', () => {
 // ------------------------------------------------------------------ #7
 
 describe('胶囊态的失败提示矩形（缺陷 #7）', () => {
-  /** 紧凑胶囊的精确 bounds（右下角 16px 边距、172×34）。 */
-  const COMPACT = { x: CONTENT.width - 188, y: CONTENT.height - 50, width: 172, height: 34 }
-  /** 提示矩形：同一个右下角锚点，放大到放得下 3 行 toast。 */
+  /**
+   * 用户持控制权时的常驻胶囊（2026-10-04 P1 把 172×34 放大到 300×44：它是交权之后
+   * 窗口里唯一可点的东西，旧尺寸下那个 24px 高的「交给 AI」按钮就是用户报的
+   * "控制按钮不见了"）。锚点与边距不变：右/下各 16px。
+   */
+  const COMPACT = { x: CONTENT.width - 16 - 300, y: CONTENT.height - 16 - 44, width: 300, height: 44 }
+  /** 提示矩形：同一个右下角锚点、**同一个宽度**，上方多出放 3 行 toast 的区域。 */
   const NOTICE = { x: CONTENT.width - 16 - 300, y: CONTENT.height - 16 - 116, width: 300, height: 116 }
 
   it('提示期间临时放大，收起后精确还原（右下角锚点与边距不变）', async () => {
@@ -252,12 +256,15 @@ describe('胶囊态的失败提示矩形（缺陷 #7）', () => {
     runtime.setUserControl(true, 'user')
     expect(overlay.bounds).toEqual(COMPACT)
 
-    // 页面弹失败 toast ⇒ 请求放大（172×34 的视图装不下 position:fixed 的 toast）。
+    // 页面弹失败 toast ⇒ 请求放大（胶囊视图装不下 position:fixed 的 toast）。
     runtime.setOverlayNotice(true)
     expect(overlay.bounds).toEqual(NOTICE)
     // 锚点不变：右下角仍在同一像素上 ⇒ 胶囊（由页面 CSS 锚在视图底部）不动。
     expect(NOTICE.x + NOTICE.width).toBe(COMPACT.x + COMPACT.width)
     expect(NOTICE.y + NOTICE.height).toBe(COMPACT.y + COMPACT.height)
+    // 宽度也一致（2026-10-04）：弹 toast 的那几秒里胶囊不许被横向压扁。
+    expect(NOTICE.width).toBe(COMPACT.width)
+    expect(NOTICE.x).toBe(COMPACT.x)
 
     runtime.setOverlayNotice(false)
     expect(overlay.bounds).toEqual(COMPACT)

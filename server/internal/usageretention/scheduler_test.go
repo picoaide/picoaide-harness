@@ -143,13 +143,24 @@ func TestSchedulerDropsExpiredPartitionsIdempotentlyAndStops(t *testing.T) {
 	}
 
 	// ③ 关闭退出：ctx 取消后后台循环退出，且不再跑新的一轮。
-	roundsAtStop, _ := rec.snapshot()
+	//
+	// 基线必须取在 `<-s.Stopped()` **之后**（S7-1，v2.8.1→HEAD 回归审计）：
+	// `Start` 的 select 在 Done 与 tick 同时就绪时**随机**选一个，而一轮清理在真 PG 上
+	// 要 ~1s、tick 只有 20ms（tick 通道容量 1 ⇒ 每轮结束后立刻还有一个待处理 tick）
+	// ⇒ cancel 生效前完全可能再完成 1~3 轮。基线取在 `cancel()` 之前，测的就不是
+	// "退出后不得再有新一轮"，而是"快照到断言之间不得有任何一轮完成" —— 那是判据自身的
+	// 竞态（实测 `-count=10` 有 1/10 假红，形状 `6 → 9`），CI 负载更高时窗口更宽。
+	//
+	// 为什么 `Stopped()` 之后取基线就是确定的：`TryRun` 只在 `Start` 起的那个 goroutine
+	// 里被调用，而 `Stopped()` 由该 goroutine 的 `defer close` 关闭 ⇒ 等到它就等于
+	// "循环已返回，不可能再有新一轮"（与 auditretention 的同名用例同形）。
 	cancel()
 	select {
 	case <-s.Stopped():
 	case <-time.After(10 * time.Second):
 		t.Fatal("ctx 取消后调度器没有退出（Stopped 未关闭）")
 	}
+	roundsAtStop, _ := rec.snapshot()
 	time.Sleep(100 * time.Millisecond) // ≥5 个 tick
 	if after, _ := rec.snapshot(); after != roundsAtStop {
 		t.Fatalf("调度器退出后仍跑了新的一轮：%d → %d", roundsAtStop, after)

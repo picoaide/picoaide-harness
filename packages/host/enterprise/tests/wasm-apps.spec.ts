@@ -54,6 +54,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type Config as AuthGateConfig } from '../src/auth-gate.ts'
 import {
   base64Length,
+  CLIENT_BUDGET_HEADER,
   CLIENT_UPLOAD_LIMITS,
   CHUNKED_PUBLISH_BUDGET_MS,
   CLIENT_UPLOAD_TIMEOUT_MS,
@@ -156,6 +157,8 @@ interface Outbound {
   url: string
   body: string
   contentType: string
+  /** 全部出站头（键名逐字，未归一化）：`CLIENT_BUDGET_HEADER` 这类跨端契约要断言它。 */
+  headers: Record<string, string>
   signal: AbortSignal | undefined
 }
 
@@ -237,6 +240,7 @@ function harness(
       url: href,
       body,
       contentType: headers['Content-Type'] ?? '',
+      headers: { ...headers },
       signal: init?.signal ?? undefined,
     })
     return await respond(method, href, { body, contentType, signal: init?.signal ?? undefined })
@@ -293,6 +297,26 @@ afterEach(async () => {
 // 1. 客户端常量与服务端/设计文档同源（§10.5 第 58 项）
 // ---------------------------------------------------------------------------
 
+/**
+ * 服务端上限真源（生成物）的 Key→Value 表。
+ *
+ * 与 `wasm-app-tools.spec.ts` 的 `readLimits()` 同一读法：平台侧的全部上限数值都从这份
+ * 生成物来（`go generate ./internal/wasmapp/limits`），客户端只做对拍、不另立字面量。
+ * 文件必须在（缺失 ⇒ 抛，判据失败 —— 静默跳过等于把跨端对拍关掉）。
+ */
+function readServerLimits(): Map<string, string> {
+  const raw = readFileSync(
+    fileURLToPath(new URL('../../../../server/internal/wasmapp/limits/limits.json', import.meta.url)),
+    'utf8',
+  )
+  const parsed = JSON.parse(raw) as { items?: Array<Record<string, string>> }
+  const out = new Map<string, string>()
+  for (const item of parsed.items ?? []) {
+    if (typeof item.Key === 'string' && typeof item.Value === 'string') out.set(item.Key, item.Value)
+  }
+  return out
+}
+
 describe('客户端上限常量与设计基线同源（§4.2 / §10.5 第 58 项）', () => {
   /** 设计文档是唯一权威：数值必须逐字出现在文档里（文档改了这里没改 ⇒ 红）。 */
   const designDoc = readFileSync(
@@ -318,6 +342,50 @@ describe('客户端上限常量与设计基线同源（§4.2 / §10.5 第 58 项
   it('客户端超时必须大于服务端读取超时（§4.2 的配置断言）', () => {
     expect(SERVER_READ_TIMEOUT_MS).toBe(60_000)
     expect(CLIENT_UPLOAD_TIMEOUT_MS).toBeGreaterThan(SERVER_READ_TIMEOUT_MS)
+  })
+
+  /**
+   * 发布链路的**聚合**预算序关系（审计 S4-06 / CTRL-01）。
+   *
+   * 缺陷形态：publish/validate 在同一个 HTTP 请求里顺序做「编译 → 抽取 → 干跑」，两段原先
+   * 各自从 request ctx 派生预算 ⇒ 平台侧最晚给结论的时刻 = 两段上限之和（默认 60 + 60 =
+   * 120 s；只算内层 guest 也是 60 + 30 = 90 s），而客户端对这条请求的出站预算就是 90 s
+   * ⇒ 员工/AI 先拿到笼统的网络错误，而平台其实正准备返回带 `code`/`hints` 的结构化错误。
+   *
+   * 判据的数值**全部来自真源**：服务端生成物
+   * `server/internal/wasmapp/limits/limits.json`（`publish_total_budget` = 编译 + 抽取 +
+   * 干跑**共用**的那一个 deadline）+ 本包的客户端常量。任何一侧漂移都会红。
+   *
+   * 变异验证（实跑）：
+   *   - 删掉 limits.json 的 `publish_total_budget` ⇒ 红（缺项即失败，不静默跳过）；
+   *   - 把 `publish_total_budget` 抬到 ≥ `client_upload_timeout` ⇒ 红；
+   *   - 把客户端 `CLIENT_UPLOAD_TIMEOUT_MS` 改成与 limits.json 的 90 s 不一致 ⇒ 红。
+   * 反面（**不**会红，如实登记）：把服务端 `dry_run_budget` 调回 2 s 不会让本用例红 ——
+   * 本判据守护的是"平台侧总预算 < 客户端预算"这条**聚合**关系，由总 deadline 保证、与单个
+   * 阶段取值无关；干跑默认值与 guest 预算的一致由服务端 `limits_gen_test.go` 的
+   * TestCriticalValuesAndOrdering 守（那条会红）。
+   */
+  it('发布链路：平台侧总预算严格小于客户端上传预算（编译 + 干跑共用一个 deadline）', () => {
+    const limits = readServerLimits()
+    const clientSeconds = CLIENT_UPLOAD_TIMEOUT_MS / 1000
+    // 两侧的"客户端预算"必须同值：客户端常量 ↔ 服务端 limits.json（两份字面量，改一处即红）。
+    expect(limits.get('client_upload_timeout'), '服务端 limits.json 必须声明 client_upload_timeout').toBeDefined()
+    expect(Number(limits.get('client_upload_timeout'))).toBe(clientSeconds)
+    // 平台侧总预算：必须存在，且必须严格小于客户端出站预算。
+    const total = limits.get('publish_total_budget')
+    expect(total, 'limits.json 缺少 publish_total_budget（平台侧总预算 ⇒ 本判据失效，必须来对齐）').toBeDefined()
+    expect(Number(total)).toBeGreaterThan(0)
+    expect(
+      Number(total),
+      `平台侧总预算 ${String(total)}s 必须严格小于客户端上传预算 ${String(clientSeconds)}s：` +
+        '否则平台会把结论给在客户端预算之外（员工看到网络错误，而平台正准备返回结构化错误）',
+    ).toBeLessThan(clientSeconds)
+    // 另一侧：总预算必须严格大于单次编译上限，否则控制台配的 compile_timeout_seconds 不可达。
+    const compile = Number(limits.get('compile_timeout'))
+    expect(Number.isFinite(compile)).toBe(true)
+    expect(Number(total), `总预算 ${String(total)}s 必须严格大于编译超时 ${String(compile)}s`).toBeGreaterThan(compile)
+    // 分片链路的聚合预算不得小于单次出站预算（它就是同一个 90 s 分摊到多跳）。
+    expect(CHUNKED_PUBLISH_BUDGET_MS).toBe(CLIENT_UPLOAD_TIMEOUT_MS)
   })
 
   it('分片下限来自 limits.go，且均分策略不会产生低于下限的片', () => {
@@ -1014,7 +1082,7 @@ describe('wasm_path：只允许会话工作区与 <数据根>/apps（FIX-39）',
       webServer: { tapIndex: () => () => {}, register: (route: Route) => { routes.push(route); return () => {} } },
     }
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
-      outbound.push({ method: 'POST', url: String(url), body: '', contentType: '', signal: undefined })
+      outbound.push({ method: 'POST', url: String(url), body: '', contentType: '', headers: {}, signal: undefined })
       return respond()
     }))
     apply(ctx as never, {} as AuthGateConfig)
@@ -1424,6 +1492,9 @@ describe('分片上传字段契约：与服务端 upload.go 逐字对拍（FIX-4
     expect(res.body.error.code).toBe('UPLOAD_INCOMPLETE')
     // 续传的唯一凭据必须在（这条断言就是审计发现的判据本身）。
     expect(res.body.error.details.upload_id).toBe('UP-BUDGET')
+    // 是哪一段断的：分片段（`chunks`）—— 与 complete 跳（`complete`）靠同一个字段区分，
+    // 两者的续传提示不同（补缺失片 vs 只重跑最后一跳）。
+    expect(res.body.error.details.stage).toBe('chunks')
     expect(res.body.error.details.received).toEqual([])
     expect(res.body.error.details.chunks).toBeGreaterThan(1)
     // 传输层的真实 code 带出来（模型据此区分"网络/超时"与"服务端拒了某一片"）。
@@ -1461,6 +1532,278 @@ describe('分片上传字段契约：与服务端 upload.go 逐字对拍（FIX-4
     expect(res.code).toBe(400)
     expect(res.body.error.code).toBe('MISSING_FIELD')
     expect(h.outbound).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7c. `complete` 跳的传输失败也必须**可续传**（P7 / FW-2 的客户端残余）
+// ---------------------------------------------------------------------------
+
+/**
+ * 缺陷形态（审计 FW-2 的客户端残余，审计 P7 修）：分片都传完了，**最后一跳 `complete`**
+ * 遇到真断网/极端抖动时，客户端回的是通用 `gatewayFailure`（`GATEWAY_TIMEOUT` /
+ * `GATEWAY_UNAVAILABLE`）—— 信封里**没有** `upload_id`，hints 还是那句通用的"重发同一条
+ * publish（会从 received[] 之后接着传）"。
+ *
+ * 后果不是"多试一次"：会话 TTL 内分片本来一个都不用重传，但模型/AI 拿不到续传把手，
+ * 只能从头再开一次会话 ⇒ 用户侧表现为"白传一遍几百 MB"。
+ *
+ * 判据（**端到端**，不是源码形态）：注入**一次**传输失败 ⇒ ①错误码是可续传的
+ * `UPLOAD_INCOMPLETE`、`details.upload_id` 在、`details.stage === 'complete'`、
+ * 原网关码经 `details.transport_code` 保留（分类没丢）；②用**同一个** `upload_id`
+ * 重发 ⇒ 201，且**零片重传**（第二步一次 PUT 都没有）。
+ *
+ * 复跑（单条）：
+ *   cd packages/host/enterprise && ./node_modules/.bin/vitest run tests/wasm-apps.spec.ts -t 'P7 端到端'
+ *
+ * 变异验证（实跑见 temp/audit-v282/fixes/P7.md）：
+ *  - ① 把新信封里的 `upload_id: uploadId` 删掉 ⇒ 本条红（`details.upload_id` 变 undefined）；
+ *  - ② 把可续传码换回通用 `GATEWAY_TIMEOUT` ⇒ 本条红（`code` 与 `stage` 两处都变）。
+ */
+describe('P7：complete 跳传输失败 ⇒ 带 upload_id 的可续传信封，用同一个 id 重试不重传分片', () => {
+  /** 17 MiB ⇒ 3 片（`planChunks` 的确定性切法）。 */
+  const payload = Buffer.alloc(17 * 1024 * 1024, 7)
+
+  it('P7 端到端：注入一次 complete 跳传输失败 ⇒ 信封带 upload_id；同一个 id 重发 ⇒ 201 且零片重传', async () => {
+    let completeAttempts = 0
+    const h = harness((method, url) => {
+      if (method === 'POST' && url.endsWith('/uploads')) {
+        return json(201, { upload_id: 'UP-P7', received: [], chunk_bytes: 5_949_057, expires_at: 'x' })
+      }
+      if (method === 'GET' && url.endsWith('/uploads/UP-P7')) {
+        // 分片**全都**在服务端 —— 这是"续传不该重传分片"的事实来源（也是服务端的唯一真源）。
+        return json(200, {
+          received: [0, 1, 2], received_bytes: payload.byteLength, total_bytes: payload.byteLength, expires_at: 'x',
+        })
+      }
+      if (method === 'PUT') return json(200, { received: [0], received_bytes: 1 })
+      if (method === 'POST' && url.endsWith('/uploads/UP-P7/complete')) {
+        completeAttempts += 1
+        // 第 1 次：**传输层**失败（真断网形态，不是服务端返回的错误）。
+        if (completeAttempts === 1) throw new TypeError('fetch failed: ECONNRESET')
+        return json(201, { ok: true, version: '1.0.0', status: 'approved' })
+      }
+      throw new Error(`unexpected ${method} ${url}`)
+    })
+    const request = JSON.stringify({ app_id: 'demo-p7', version: '1.0.0', wasm_base64: payload.toString('base64') })
+
+    // ① 第一次：3 片全部 PUT 成功，最后一跳断在传输层。
+    const first = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', request)
+    // 前置自检：这条判据测的确实是**最后一跳**（否则它测的是分片段，等于假绿）。
+    expect(h.outbound.filter(o => o.method === 'PUT')).toHaveLength(3)
+    expect(h.outbound.filter(o => o.url.endsWith('/complete'))).toHaveLength(1)
+    expect(first.body.error.code).toBe('UPLOAD_INCOMPLETE')
+    expect(first.body.error.details.stage).toBe('complete')
+    const uploadId = first.body.error.details.upload_id as string
+    expect(uploadId).toBe('UP-P7')
+    // 分片确实都在服务端（这就是"不该重传"的依据）；分类没丢（传输失败的原网关码仍在）。
+    expect(first.body.error.details.received).toEqual([0, 1, 2])
+    expect(first.body.error.details.transport_code).toBe('GATEWAY_UNAVAILABLE')
+    expect(String(first.body.error.hints.join(' '))).toContain('upload_id')
+    // 状态码沿用旧行为（502），只有信封的 code/details 变了 —— 不放松任何既有语义。
+    expect(first.code).toBe(502)
+
+    const afterFirst = h.outbound.length
+
+    // ② 用同一个 upload_id 重发：分片一个都不重传，只重跑最后一跳。
+    const second = await h.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({
+      app_id: 'demo-p7', version: '1.0.0', wasm_base64: payload.toString('base64'), upload_id: uploadId,
+    }))
+    expect(second.code).toBe(201)
+    const secondHops = h.outbound.slice(afterFirst)
+    expect(secondHops.filter(o => o.method === 'PUT'), '续传不得重传任何分片').toHaveLength(0)
+    expect(secondHops.filter(o => o.url.endsWith('/complete'))).toHaveLength(1)
+    expect(completeAttempts).toBe(2)
+
+    // 探针输出（可复跑时的现场证据，不参与断言）。
+    process.stdout.write(
+      `[P7-probe] hops=1st{${h.outbound.slice(0, afterFirst).map(o => o.method).join(',')}}` +
+      ` 2nd{${secondHops.map(o => o.method).join(',')}} upload_id=${uploadId}` +
+      ` first_code=${first.body.error.code}/${String(first.body.error.details.transport_code)} second_status=${String(second.code)}\n`,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7b. 分片链的**每跳预算序关系**：complete 跳声明自己的剩余额度（FW-2）
+// ---------------------------------------------------------------------------
+
+/**
+ * 缺陷形态（审计 FW-2，S4-06 / CTRL-01 的续集）：{@link CHUNKED_PUBLISH_BUDGET_MS} 是
+ * **整条链**共用的 90 s（开会话 / N 片 PUT / 续传刷新 / complete 每一跳只用剩余额度），
+ * 而平台侧为 `complete` 这一跳**新开**一份 `publish_total_budget`（75 s）。
+ * 上传阶段花掉 >15 s 之后，客户端在这一跳只剩 `90 s − 已用 < 75 s` ⇒ **平台允许的结论
+ * 时刻落在客户端放弃之后**：员工/AI 拿到笼统的网关错误，而平台正准备返回带
+ * `code`/`hints` 的结构化错误（正是 S4-06 要消灭的形态，只是搬到了分片路径）。
+ *
+ * 修法 = 跨端传递剩余预算：客户端在 complete 上带 {@link CLIENT_BUDGET_HEADER}
+ * （值 = **这一跳真正会等**的毫秒数），平台把这一跳的总预算缩到
+ * `min(publish_total_budget, 该值 − 传输余量)`，只许缩小、永不放大；缺省/非法回落总预算。
+ *
+ * 本组把这条序关系拆成两半，各自能被打坏：
+ *  - **客户端一半**（行为级，用例 1/2）：complete 请求真的带"这一跳的剩余额度"，
+ *    而且出站计时器用的就是同一个数（不是 `perCallBudget` 的 1 s 下界、也不是整条链的 90 s）；
+ *  - **跨端一半**（数值级，用例 3）：把真源（`limits.json` 的 `client_upload_timeout` /
+ *    `publish_total_budget` ⇒ 传输余量 = 两者之差）代进平台的钳位公式，对**最坏分配**
+ *    （上传阶段吃掉整条链 ⇒ 这一跳只剩 1 s 下界）仍严格小于声明值。
+ *    平台那一半（钳位公式与三态校验本身）由 Go 的
+ *    `TestClientDeclaredBudgetClampsServerBudget` / `TestParseClientBudgetHint` 逐值钉住。
+ *
+ * 变异验证（实跑）：
+ *  - 客户端不带这个头（或改发整条链的 90 s）⇒ 用例 1 红；
+ *  - 客户端把声明值与计时器拆成两次 `perCallBudget()` 调用 ⇒ 用例 2 红（计时器落回 1 s 下界）；
+ *  - 平台的钳位去掉传输余量（`min(total, 声明)`）⇒ 用例 3 的"严格小于"红；
+ *  - 两侧头名字面量漂移 ⇒ 用例 4 红。
+ */
+describe('分片链每跳预算：complete 跳声明剩余额度（FW-2）', () => {
+  /** 17 MiB ⇒ 3 片（`planChunks` 的确定性切法）。 */
+  const payload = Buffer.alloc(17 * 1024 * 1024, 7)
+
+  /** 上游阶段的墙钟消耗（毫秒）：开会话 + 3 片 PUT 依次扣减链上预算。 */
+  interface Burn {
+    create: number
+    puts: readonly number[]
+  }
+
+  /**
+   * 受控时钟 + 分片链夹具。
+   *
+   * `Date.now` 换成可推进的假时钟；出站 abort 计时器仍走真实 `setTimeout`（用例不会等它们到点）。
+   * 每一跳在假网关上消耗固定墙钟，模拟"弱网上传阶段用掉大部分链上预算"。
+   * @param burn - 各跳消耗的毫秒数。
+   * @param hangComplete - true = complete 这一跳永不返回（只对 abort 作出反应），用于量计时器。
+   */
+  function chainWithClock(burn: Burn, hangComplete = false): {
+    harness: Harness
+    /** 每一跳发起时刻（相对链起点，毫秒）。 */
+    hops: Array<{ method: string, at: number }>
+    /** 恢复真实时钟。 */
+    restore: () => void
+  } {
+    let now = 1_800_000_000_000
+    const t0 = now
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const hops: Array<{ method: string, at: number }> = []
+    let putIndex = 0
+    const h = harness((method, url, init) => {
+      hops.push({ method, at: now - t0 })
+      if (method === 'POST' && url.endsWith('/uploads')) {
+        now += burn.create
+        return json(201, { upload_id: 'UP-BUDGET', received: [], chunk_bytes: 5_949_057, expires_at: 'x' })
+      }
+      if (method === 'PUT') {
+        now += burn.puts[putIndex] ?? 0
+        putIndex += 1
+        return json(200, { received: [0], received_bytes: 1 })
+      }
+      if (method === 'POST' && url.endsWith('/complete')) {
+        if (!hangComplete) return json(201, { ok: true, version: '1.0.0' })
+        // 模仿真实 fetch 的 abort 语义：signal 一 abort 就以 AbortError 拒绝，否则永不结束。
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
+          })
+        })
+      }
+      throw new Error(`unexpected ${method} ${url}`)
+    })
+    return { harness: h, hops, restore: () => { clock.mockRestore() } }
+  }
+
+  /** 跑一次分片发布（17 MiB ⇒ 3 片；complete 是否挂起由夹具决定）。 */
+  async function runChain(burn: Burn, hangComplete = false): Promise<{
+    harness: Harness
+    hops: Array<{ method: string, at: number }>
+    result: Captured
+    elapsedMs: number
+  }> {
+    const chain = chainWithClock(burn, hangComplete)
+    const started = performance.now()
+    try {
+      const result = await chain.harness.call(`${WASM_APPS_PREFIX}/publish`, 'POST', JSON.stringify({
+        app_id: 'demo-budget', version: '1.0.0', wasm_base64: payload.toString('base64'),
+      }))
+      return { harness: chain.harness, hops: chain.hops, result, elapsedMs: performance.now() - started }
+    } finally {
+      chain.restore()
+    }
+  }
+
+  it('1. complete 跳带 x-pico-client-budget-ms = 这一跳的剩余额度（不是整条链的 90 s）', async () => {
+    // 上传阶段 5 s + 3×10 s = 35 s（弱网量级：17 MiB 二进制 ≈ 23 MiB base64，5 Mbps ≈ 37 s）。
+    const { harness: h, result, hops } = await runChain({ create: 5_000, puts: [10_000, 10_000, 10_000] })
+    expect(result.code).toBe(201)
+    const complete = h.outbound.find(o => o.url.endsWith('/complete'))!
+    const declared = Number(complete.headers[CLIENT_BUDGET_HEADER])
+    // 这一跳真正会等的毫秒数 = 链总预算 − 上传阶段已用 = 55 s（**逐字**相等，不是"差不多"）。
+    expect(declared).toBe(CHUNKED_PUBLISH_BUDGET_MS - 35_000)
+    // 关键对照：它不是整条链的 90 s —— 那正是缺陷形态（平台按 75 s 安排工作，客户端 55 s 就放弃）。
+    expect(declared).toBeLessThan(CHUNKED_PUBLISH_BUDGET_MS)
+    expect(declared).toBeLessThan(75_000)
+    // 上传阶段确实按夹具的墙钟走（判据的前提，不是"时钟没生效"的假绿）。
+    expect(hops.filter(hop => hop.method === 'PUT')).toHaveLength(3)
+    expect(hops.at(-1)!.at).toBe(35_000)
+  })
+
+  it('2. complete 跳的**出站计时器**用的就是声明出去的那个数（不是 perCallBudget 的 1 s 下界）', async () => {
+    // 上传阶段 2 s + 30 s + 30 s + 25 s = 87 s ⇒ 这一跳只剩 3 s（远高于 1 s 下界）。
+    // complete 永不返回 ⇒ 唯一能结束它的是客户端自己的 abort 计时器。
+    const { harness: h, result, elapsedMs } = await runChain(
+      { create: 2_000, puts: [30_000, 30_000, 25_000] },
+      true,
+    )
+    const declared = Number(h.outbound.find(o => o.url.endsWith('/complete'))!.headers[CLIENT_BUDGET_HEADER])
+    expect(declared).toBe(3_000)
+    // 计时器按声明值到点（真实墙钟）：下界是判据（若计时器落回 1 s 下界，这里 ~1 s 就返回），
+    // 上界给足余量以免在高负载机器上假红。
+    expect(elapsedMs).toBeGreaterThanOrEqual(2_600)
+    expect(elapsedMs).toBeLessThan(9_000)
+    // **挂起 = 传输层失败**（P7 之后的语义）：与分片段同一结论 —— 带同一个 upload_id
+    // 重发（只重跑最后一跳，不重传分片）。超时分类没丢：原网关码经 `transport_code`
+    // 原样带出来，只是外层码统一成可续传的那一个。
+    // 变异验证：把 complete 跳的 `catch` 改回 `return gatewayFailure(cause)` ⇒ 本条红。
+    expect(result.body.error.code).toBe('UPLOAD_INCOMPLETE')
+    expect(result.body.error.details.stage).toBe('complete')
+    expect(result.body.error.details.upload_id).toBe('UP-BUDGET')
+    expect(result.body.error.details.transport_code).toBe('GATEWAY_TIMEOUT')
+  })
+
+  it('3. 跨端序关系：平台侧在这一跳的预算严格小于客户端在这一跳的剩余额度（含最坏分配）', () => {
+    const limits = readServerLimits()
+    const totalMs = Number(limits.get('publish_total_budget')) * 1000
+    const clientMs = Number(limits.get('client_upload_timeout')) * 1000
+    // 两侧的"客户端预算"必须同值（客户端常量 ↔ 服务端生成物）。
+    expect(clientMs).toBe(CLIENT_UPLOAD_TIMEOUT_MS)
+    // 传输余量**不是新字面量**：它就是"客户端出站预算 − 平台侧总预算"
+    //（limits.go: PublishTotalBudget = ClientUploadTimeout − PublishTransferReserve）。
+    const reserveMs = clientMs - totalMs
+    expect(reserveMs).toBeGreaterThan(0)
+    // 平台的钳位（Go 的 publishBudgetCtx 声明分支）：只许往下、永不放大、下界 0。
+    const serverBudget = (declaredMs: number): number => Math.min(totalMs, Math.max(0, declaredMs - reserveMs))
+    // 不得放大：满额声明（甚至越界的超大值）都只能拿到平台默认总预算。
+    expect(serverBudget(clientMs)).toBe(totalMs)
+    expect(serverBudget(clientMs * 1_000)).toBe(totalMs)
+    // 最坏分配：上传阶段吃掉整条链 ⇒ 这一跳只剩 perCallBudget 的 1 s 下界；
+    // 平台侧因此拿到 0（入口立刻给结构化结论，见 Go 的 publishBudgetRefusal）。
+    expect(serverBudget(1_000)).toBe(0)
+    // 全取值域扫描：`perCallBudget()` 能返回的每一个值（1 s 下界 .. 整条链预算）。
+    for (let declared = 1_000; declared <= clientMs; declared += 1_000) {
+      expect(
+        serverBudget(declared),
+        `声明 ${String(declared)}ms ⇒ 平台侧 ${String(serverBudget(declared))}ms：` +
+          '平台预算必须严格小于客户端在这一跳的剩余额度，否则平台会把结论给在客户端放弃之后（FW-2）',
+      ).toBeLessThan(declared)
+    }
+  })
+
+  it('4. 头名与 Go 真源逐字一致（读 publish.go；缺任一侧即失败）', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../../../server/internal/wasmapp/api/publish.go', import.meta.url)),
+      'utf8',
+    )
+    const matched = /ClientBudgetHeader\s*=\s*"([^"]+)"/u.exec(source)
+    expect(matched, 'publish.go 里找不到 ClientBudgetHeader 的字面量（改名/搬家时同步改这条）').not.toBeNull()
+    expect(matched![1]).toBe(CLIENT_BUDGET_HEADER)
   })
 })
 

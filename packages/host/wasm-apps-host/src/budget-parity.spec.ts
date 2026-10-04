@@ -83,4 +83,35 @@ describe('超时预算序关系：客户端出站 > 平台侧全部预算（§13
     expect(APP_REQUEST_TIMEOUT_MS).toBeGreaterThan(0)
     expect(APP_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(120_000)
   })
+
+  /**
+   * **发布链路**是另一条预算链（与应用请求链并列，审计 S4-06 / CTRL-01）：
+   * publish/validate 在同一个 HTTP 请求里顺序做「编译 → 抽取 → 干跑」，三段
+   * **共用**一个平台侧 deadline（`publish_total_budget`）。
+   *
+   * 数值全部来自同一份真源（`limits.json`），不在这里写死：客户端出站预算
+   * （`client_upload_timeout`，90 s）必须严格大于平台侧总预算（75 s），而总预算又必须
+   * 严格大于单次编译上限（`compile_timeout`，60 s）—— 最后这条保证控制台配的
+   * `compile_timeout_seconds` 仍然**可达**（不会被总预算静默截断）。
+   *
+   * 变异验证：把 `publish_total_budget` 抬到 ≥ `client_upload_timeout` ⇒ 红；
+   * 把 `compile_timeout` 抬到 ≥ `publish_total_budget` ⇒ 红；删掉任一条目 ⇒ 红（缺项即失败）。
+   * 同一组关系在服务端侧另有一条判据（`limits_gen_test.go` 的 TestCriticalValuesAndOrdering）：
+   * 两端各一条，任一端漂移都能被打坏。
+   */
+  it('发布链路的聚合序关系：客户端出站 > 平台侧总预算 > 单次编译上限（数值来自 limits.json）', () => {
+    const client = secondsOf('client_upload_timeout')
+    const total = secondsOf('publish_total_budget')
+    const compile = secondsOf('compile_timeout')
+    expect(
+      total,
+      `平台侧总预算 ${String(total)}s 必须严格小于客户端出站预算 ${String(client)}s` +
+        '（否则平台会把结论给在客户端预算之外：员工看到网络错误而不是结构化错误）',
+    ).toBeLessThan(client)
+    expect(
+      total,
+      `平台侧总预算 ${String(total)}s 必须严格大于编译上限 ${String(compile)}s` +
+        '（否则控制台配的 compile_timeout_seconds 不可达，是一项看不见的缩水）',
+    ).toBeGreaterThan(compile)
+  })
 })

@@ -32,13 +32,18 @@
  * the TUI) and without the skills service.
  */
 import { realpath, readdir, readFile, stat } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, isAbsolute, relative, sep, dirname } from 'node:path'
+import { join, isAbsolute, relative, resolve, sep, dirname, basename } from 'node:path'
 import { localTrustFence } from './http-guard.js'
 import { hasDisableFlag, toggleDisableFlag } from './skill-manifest.js'
 import { resolveSkillLanding } from './skills.js'
 import { writeFileAtomicSafeAt } from './sync/filesets.js'
+// C4-01（2026-10-04 审计）：技能内容落点的 per-name 锁。协议实现只有一份
+// （`<技能库>/.skill-locks/<name>.lock`，见 coi/skills-sync.js 的头注释）——
+// 本模块的两处技能内容写入（禁用标记落地 + `PUT /api/write`）此前完全不参与，
+// 而它们与随包同步器/能力中心安装器写的是同一个落点。
+import { acquireSkillDirLock } from './coi/skills-sync.js'
 
 /** Cap on a single readable text file (bytes). */
 const MAX_READ_BYTES = 512 * 1024
@@ -356,6 +361,41 @@ function anchoredSkillWrite(file) {
     }
   }
   return { ok: true, anchorDir }
+}
+
+/**
+ * C4-01（2026-10-04 审计）：`PUT /api/write` 的 per-name 锁身份。
+ *
+ * 本路由是**通用技能文件写面**（面板里的「编辑 → 保存」），目标可以正是
+ * `<技能库>/<name>/SKILL.md` —— 与随包同步器的整目录换入逐字重合。它此前不取锁：
+ * `resolveInsideWithRoot`/`stat` 之后、真正写盘之前若落进换入窗口，原子写原语会
+ * `mkdirSync(父目录, { recursive: true })` 把落点重新建出来 ⇒ 换入与回滚双双
+ * ENOTEMPTY（与 C4-01 点名的三个写者同一终态）。
+ *
+ * 锁名 = 目标所在**技能目录**名（自 `dirname(file)` 起向上找第一个含 `SKILL.md`
+ * 的祖先，最深到命中的受管根），锁根 = 该技能目录的父目录 —— 与
+ * {@link anchoredSkillWrite} 的库根、`coi/skills-sync.js` 的 `basename(destDir)`
+ * 是同一口径（同一个落点只允许一把锁）。
+ *
+ * 名字不是合法 kebab-case 时返回 null：那种目录不可能是技能落点（发现器只认
+ * `SKILL_NAME_RE` 的名字），按"没有 per-name 锁身份"处理，绝不按猜出来的名字造一把假锁。
+ * @param {string} file - 目标文件 realpath。
+ * @param {string} root - 目标命中的受管根（realpath）。
+ * @returns {{anchorDir: string, name: string} | null} 锁身份；目标不在技能目录里时 null。
+ */
+function skillLandingLockFor(file, root) {
+  const boundary = resolve(root)
+  let dir = dirname(file)
+  for (;;) {
+    if (existsSync(join(dir, 'SKILL.md'))) {
+      const name = basename(dir)
+      return SKILL_NAME_RE.test(name) ? { anchorDir: dirname(dir), name } : null
+    }
+    if (dir === boundary) return null
+    const parent = dirname(dir)
+    if (parent === dir || !isInsideRoot(boundary, parent)) return null
+    dir = parent
+  }
 }
 
 /**
@@ -835,10 +875,27 @@ export function installSkillsManager(ctx, options = {}) {
       // AB2-03（FIX-42③）：落点先过**库根锚定**断言，写盘时把同一个根当 anchorDir。
       const anchored = anchoredSkillWrite(file)
       if (!anchored.ok) return { ok: false, error: anchored.error }
+      // C4-01（2026-10-04 审计）：本函数写的是 `<技能库>/<name>/SKILL.md` ——
+      // 与随包同步器的整目录换入、能力中心安装器、`skill_manage` 是**同一个落点**。
+      // 此前它不取 per-name 锁：面板开关与**自动投影**（`projectDisableFlags`，
+      // 目录变化后 500ms 防抖、不需要用户动作）都能落进换入窗口，把落点重新建出来
+      // ⇒ 换入与回滚双双 ENOTEMPTY。锁名 = 落点目录名（与 skills-sync 的
+      // `basename(destDir)` 同一口径），锁根 = `anchoredSkillWrite` 解析出的库根。
+      //
+      // 只对**这个**落点取锁：单文件技能（`<库>/<name>.md`）不是 per-name 协议的落点，
+      // 此时 `basename(dirname(file))` 是库目录名而不是技能名 —— 按它造锁只会在库的
+      // 上一层多出一个 `.skill-locks`。名字不是合法 kebab-case 时同理不猜锁名。
+      const landingName = basename(file) === 'SKILL.md' ? basename(dirname(file)) : null
+      const lock = landingName !== null && SKILL_NAME_RE.test(landingName)
+        ? acquireSkillDirLock(anchored.anchorDir, landingName)
+        : null
+      if (lock !== null && lock.ok !== true) return { ok: false, error: lock.message }
       try {
         writeSkillFile(file, next, anchored.anchorDir)
       } catch (error) {
         return { ok: false, error: `failed to write skill file: ${error?.message ?? error}` }
+      } finally {
+        lock?.release()
       }
       return { ok: true }
     }
@@ -1188,9 +1245,23 @@ export function installSkillsManager(ctx, options = {}) {
               sendJson(res, 403, { error: 'refusing to write: the target path is a symlink or escapes the skill library' })
               return
             }
-            writeFileAtomicSafeAt(file, buffer, { anchorDir: hit.root, followFileSymlink: false })
-            const after = await stat(file)
-            sendJson(res, 200, { ok: true, path: file, size: after.size, mtime: after.mtimeMs })
+            // C4-01（2026-10-04 审计）：目标落在技能目录里时，与随包同步器/能力中心
+            // 安装器/模型面写入共用**同一把** per-name 锁 —— 本路由的写盘原语会在
+            // 父目录缺失时把它建回来，正是换入窗口里制造 ENOTEMPTY 的那一步。
+            // 拿不到锁就 403（零等待、fail-loud，与其它写者同一口径）。
+            const lockTarget = skillLandingLockFor(file, hit.root)
+            const lock = lockTarget === null ? null : acquireSkillDirLock(lockTarget.anchorDir, lockTarget.name)
+            if (lock !== null && lock.ok !== true) {
+              sendJson(res, 403, { error: `refusing to write: ${lock.message}` })
+              return
+            }
+            try {
+              writeFileAtomicSafeAt(file, buffer, { anchorDir: hit.root, followFileSymlink: false })
+              const after = await stat(file)
+              sendJson(res, 200, { ok: true, path: file, size: after.size, mtime: after.mtimeMs })
+            } finally {
+              lock?.release()
+            }
           } catch (error) {
             sendJson(res, 500, { error: `write failed: ${String(error?.message ?? error)}` })
           }

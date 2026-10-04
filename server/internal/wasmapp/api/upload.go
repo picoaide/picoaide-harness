@@ -282,6 +282,17 @@ func (h *Handlers) uploadStatus(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 func (h *Handlers) uploadComplete(c *gin.Context) {
+	// 总预算必须在**这一跳的入口**挂上（幂等）：complete 走 `publishFromBytes` 的兜底
+	// 路径，若在那里才挂，前面的几段（重放缓存、complete 租约、闸门、读体）都不在预算
+	// 之内 —— 其中租约可能等待前一次 complete 跑完整整一份总预算（审计 FW-2 的同一族：
+	// "平台侧还有一段不在预算里的工作"）。
+	//
+	// 客户端在分片链的最后一跳声明"我还会等多久"（`ClientBudgetHeader`）：平台据此把这一跳
+	// 的总预算缩到 `min(PublishTotalBudget, 声明 − 传输余量)`，保证结论落在客户端放弃之前。
+	completeCtx, completeBudgetPlan, cancelCompleteBudget := h.publishBudgetFor(c)
+	defer cancelCompleteBudget()
+	c.Request = c.Request.WithContext(completeCtx)
+
 	if err := h.requireCompiler(); err != nil {
 		writeErr(c, err)
 		return
@@ -289,6 +300,17 @@ func (h *Handlers) uploadComplete(c *gin.Context) {
 	u, aerr := h.currentUser(c)
 	if aerr != nil {
 		writeErr(c, aerr)
+		return
+	}
+	// 客户端声明的剩余预算连传输余量都不够 ⇒ 立刻给结构化结论（不占租约/额度/编译槽，
+	// 分片仍在服务端 ⇒ 重发即可续传）。见 publishBudgetRefusal。
+	//
+	// `upload_id` 必须进 `details`（审计 V-P2P7 的 F-A）：这条路径上唯一的调用方是 AI 的
+	// 分片链，而模型只能从 `error.details.upload_id` 取续传把手（工具面逐字如此）——
+	// 只把 id 写在 hints 文案里等于没给。拒绝发生在 `uploadIDParam` 之前，但路由参数已在手
+	// （`completeUploadID` 只回显、不做形态判定；状态码/文案/fail-closed 语义一字不改）。
+	if rerr := h.publishBudgetRefusal(completeBudgetPlan); rerr != nil {
+		writeErr(c, budgetConclusionWithUploadID(rerr, completeUploadID(c)))
 		return
 	}
 	id, ierr := h.uploadIDParam(c)
@@ -374,10 +396,26 @@ func (h *Handlers) uploadComplete(c *gin.Context) {
 			})
 		})
 	if cerr != nil {
-		writeErr(c, cerr)
+		// 同一族出口（审计 V-P2P7 的 F-A）：**阶段之内**到点的预算结论（编译/干跑用尽总预算、
+		// 或落库窗口到点被 `publishErrorOutcome` 归一）同样必须带续传把手 —— 分片都还在。
+		// 非预算结论（业务拒绝 / 水位 / 限流）由 `budgetConclusionWithUploadID` 原样透出。
+		writeErr(c, budgetConclusionWithUploadID(cerr, completeUploadID(c)))
 		return
 	}
 	c.Data(http.StatusCreated, jsonContentType, body)
+}
+
+// completeUploadID 取 `complete` 路由上的 upload_id，**只用于给预算结论补续传把手**。
+//
+// 为什么不做形态判定/不返回错误：形态闸门是 `uploadIDParam`（它回 404 且位置在拒绝闸门
+// **之后**，那是"拒绝必须更靠前"这条位置纪律的一部分）；这里若把非法 id 回显进 `details`
+// 只会把路径输入反射给调用方，没有价值。所以：形态不合法 ⇒ 返回 ""（= 不补字段）。
+func completeUploadID(c *gin.Context) string {
+	id := strings.TrimSpace(c.Param("upload_id"))
+	if !upload.ValidID(id) {
+		return ""
+	}
+	return id
 }
 
 // completeBodyTooLarge 是 complete 体的 413（**有指向性**：最可能的误用是把

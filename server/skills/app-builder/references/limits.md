@@ -16,6 +16,7 @@
 | `upload_body_max_bytes` | 50331648 | bytes | §4.2 | 上传请求体上限 | base64 JSON；必须进 largeBodyRoutes 且 handler 自套 MaxBytesReader |
 | `client_upload_timeout` | 90 | seconds | §4.2 | 客户端上传超时 | 必须大于服务端 ReadTimeout（§10.5 第 58 项是配置断言） |
 | `server_read_timeout` | 60 | seconds | §4.2 | 服务端 ReadTimeout | 48 MiB 需约 6.7 Mbps 保底 |
+| `publish_total_budget` | 75 | seconds | §4.2 | 单次发布/预检的平台侧总预算 | 编译 + 抽取 + 干跑**共用**一个 deadline（从请求到达起算，含请求体读取）：必须小于 client_upload_timeout，且严格大于 compile_timeout（否则控制台配的编译预算不可达） |
 | `section_total_max_bytes` | 4194304 | bytes | §4.2 | 自定义段总量上限 | 超限 SECTION_OVERRIDE_OVERSIZE |
 | `app_config_max_bytes` | 65536 | bytes | §4.2 | 应用配置文件上限 | picoaide.app.json，不计入 wasm 上限 |
 | `app_config_whitelist_max` | 2000 | count | §4.2 | 白名单条目上限 | 平台不校验账号是否存在（否则等于账号枚举接口） |
@@ -50,7 +51,7 @@
 | `release_cache_max_releases` | 256 | count | §4.3 | 静态资源缓存条目上限 | 按 (app_id, release_id) 计数；下架/冻结/删除/逐出与换版本都失效 |
 | `memory_peak_guard_percent` | 70 | percent | §4.3 | 启动自检内存水位 | 理论峰值超过可用内存该比例即拒绝启动 |
 | `upload_peak_per_upload_bytes` | 123731968 | bytes | §4.3 | 单次上传峰值内存账 | base64 单次 ≈ 32+43+43 MB |
-| `host_call_budget_default` | 5 | seconds | §4.4 | 宿主调用兜底预算 |  |
+| `host_call_budget_default` | 10 | seconds | §4.4 | 宿主调用兜底预算 | 必须严格大于 sql_statement_budget：db.* 的语句 deadline 套在它里面，内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout) |
 | `ai_bridge_max_messages` | 64 | count | §21.2 | AI 桥消息条数上限 | 应用前端 fetch('/__picoaide/ai/chat') 的 messages 数组长度 |
 | `ai_bridge_message_max_bytes` | 16384 | bytes | §21.2 | AI 桥单条消息上限 | 单条 message.content 的字节上限（应用侧据此截断/切分） |
 | `app_db_page_size` | 4096 | bytes | §4.5 | 应用库页大小 |  |

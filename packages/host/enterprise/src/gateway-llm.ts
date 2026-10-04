@@ -1,16 +1,19 @@
 /**
- * 网关模型 provider（DSH 0.1.7 的注册面）。
+ * 网关模型 provider（DSH 0.1.7 引入、**0.2.0-rc.2 复核仍成立**的注册面）。
  *
  * 背景（两层，缺一不可）：
  *  · **0.1.6**：上游给 `llm-deepseek` 加了 `protocol`（缺省 `messages`），messages 适配器
  *    只发 `x-api-key`、不发 `Authorization`，而本仓网关 `/v1/*` 挂在 `serverauth.BearerAuth`
  *    下（只认 `Authorization: Bearer`）⇒ 每个模型请求 401「缺少认证令牌」（2026-09-22 现场
  *    事故）。当时的修法是在组装期钉死 `protocol: chat-completions`。
- *  · **0.1.7-rc.2**：`protocol` **被删除**（`llm-deepseek/src/config.ts:207`，配了直接抛错），
- *    适配器只剩 Messages 一条路径（端点固定 `<baseURL>/messages` → 网关 `/v1/messages`）。
- *    鉴权搬到**注册 provider 的一方**：`registerDeepSeekProvider(ctx, provider, { resolveAuth })`
- *    返回的 `headers` 会被原样加到 Messages 请求上（`adapter.ts:82` 每次请求调一次，
- *    契约见 `DeepSeekRequestAuth`）。
+ *  · **0.1.7-rc.2 引入、0.2.0-rc.2 复核仍成立**：`protocol` **被删除**
+ *    （`llm-deepseek/src/config.ts:207`，配了直接抛错），适配器只剩 Messages 一条路径
+ *    （端点固定 `<baseURL>/messages` → 网关 `/v1/messages`）。鉴权搬到**注册 provider 的一方**：
+ *    `registerDeepSeekProvider(ctx, provider, { resolveAuth })` 返回的 `headers` 会被原样加到
+ *    Messages 请求上（`adapter.ts:82` 每次请求调一次，契约见 `DeepSeekRequestAuth`，
+ *    `types.ts:105`）。
+ *    ⚠️ 这两条 claim 的锚点是**行为**不是版本号：升级上游时按"守卫是否仍在 / 请求头是否仍由
+ *    `resolveAuth` 决定"复核（当前 pin `dsh-v0.2.0-rc.2` = 639ed0153，三条都还在原位）。
  *
  * 所以本插件取代上游的 `@deepseek-ai/dsh-llm-deepseek-api-key`（它的 `resolveAuth` 硬编码
  * `x-api-key`，对只认 Bearer 的网关必然 401，且没有任何换头的接缝），用同一份 Config 形状
@@ -18,8 +21,9 @@
  * 组装期 `cordis.patch.yml` 把上游那一行 `disabled` 掉并插入本行（id `picoaide-gateway-llm`）。
  *
  * 令牌来源是 `credentials` 服务（`gateway-model.ts` 在会话变化时写入 `TOKEN_ENV`），
- * **不再**经过 `apiKeyEnv`：0.1.7 的 base `llm-deepseek` Config 里没有这个键，而
- * `SettingsForms.write` 对非 volatile 字段会直接抛 `Config field "apiKeyEnv" is not volatile`。
+ * **不再**经过 `apiKeyEnv`：0.1.7 起 base `llm-deepseek` Config 里没有这个键（0.2.0-rc.2
+ * 复核：`src/config.ts` 零命中 `apiKeyEnv`），而 `SettingsForms.write` 对非 volatile 字段
+ * 会直接抛 `Config field "apiKeyEnv" is not volatile`。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'

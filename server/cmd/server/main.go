@@ -372,9 +372,17 @@ func main() {
 	// cmd/server 的装配级用例会红(与审计/usage/token 保留调度器同款判据)。
 	startAuditChainScheduler(ctx, db, auditchain.DefaultTick)
 	// R6-A-2(审计 2026-09-23,P1):调度器可观测出口 —— 全部后台调度器装配完后
-	// 打一行/台 `scheduler status (startup): name=… started=… runs=… last_error=…`
+	// 打一行/台 `scheduler status (startup): name=… started=… readings=… runs=… last_error=…`
 	// (scheduler_status.go)。两个此前裸调的调度器(reports/balance)死掉时不再
 	// 零可观测:启动日志直接给出"是否已启动",关停日志再给出 runs/errors/上次错误。
+	//
+	// S3-02(审计 2026-10-04,P2):这里的"全部"此前只是**声称** —— 9 条周期执行者里只有
+	// 6 条进了状态表,漏掉的正是三条"死了只有沉默"的清理者(网关文件回收 / 审计保留 /
+	// usage 保留)。现在 9 条全部登记,且"启动路径上的装配调用集合 == 状态表登记集合"由
+	// scheduler_registry_reconcile_test.go 双向对账(缺项/死条目都红)。读数可得性如实登记:
+	// `readings=scheduler` 四项齐全;`readings=serverstore.usage_retention` 取 serverstore
+	// 的保留清理账;`readings=assembly.start_only` 表示该子系统不发布运行读数
+	// (runs/errors 渲染成 unavailable,不填 0 冒充)。
 	logSchedulerStatuses("startup")
 	// F9 启动自检:历史大小写重复用户名会让 NOCASE 唯一约束无法建立,
 	// 这里显式告警(不阻断启动),提示管理员人工合并。

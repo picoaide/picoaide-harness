@@ -6,6 +6,15 @@
  */
 export const zh = {
   'footMenu.label': '更多功能',
+  /**
+   * 通用「有等待处理的事项」文案：`attention` 为真、但条目**没给** `attentionTitle`
+   * 时的行级可访问名（2026-10-04 核验 P1-② 的回退链第二级）。
+   *
+   * 档位（holding / waiting）只能由条目自己的 `attentionTitle()` 表达 —— 浏览器那条
+   * 两档各有一句，所以 holding 不会被念成"有事项在等"。这条通用文案对"声明了 attention"
+   * 的条目仍然准确，且**必须保持有引用点**：desktop 包的 i18n 守卫要求零死键
+   * （2026-10-04 §12 收口门禁正是被这条打的）。
+   */
   'footMenu.labelAttention': '更多功能（有等待处理的事项）',
   'footMenu.attention': 'AI 正在等待你的操作',
   'footMenu.more': '更多',

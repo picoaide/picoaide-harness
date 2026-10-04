@@ -27,8 +27,33 @@ package api_test
 //   C. 自校准：保留集合非空 + 与独立复算一致 + 每个候选名字确实被写侧拒
 //      （否则这条用例会退化成"对一个不存在的集合做断言"）。
 //
-// 变异（把任一处 h.validateAppIDServing 改回 h.validateAppID）⇒ A 红；
-// 把写侧闸门改成服务侧变体 ⇒ B 红。红/绿对照见 temp/r21/fix-27/REPORT.md。
+// ## 变异覆盖矩阵（S7-R N3 更正：旧版逐字宣称"把任一处 h.validateAppIDServing 改回
+// ## h.validateAppID ⇒ A 红"，实测**不成立** —— 它把管理面入口也一起跳过了）
+//
+// 一处回退能不能被**本文件**咬住，取决于**该入口的路径对保留名是否可达**。保留集合收窄后
+// 只剩 `uploads`（真遮蔽段），而它在客户端前缀 `/:app_id/…` 上**结构性不可达**：
+//
+//	入口（api 包）                    路由模板                                      本文件  由谁负责
+//	h.openApp                        POST /apps/wasm/:app_id/open                  ✗      C=调用点判据
+//	h.clientRequest                  POST /apps/wasm/:app_id/request               ✗      C=调用点判据
+//	h.ownedApp                       GET  /apps/wasm/:app_id/releases              ✗      C=调用点判据
+//	h.appProofIssue                  POST /apps/wasm/proof（app_id 在**体内**）    ✓ A    —
+//	h.loadAdminApp                   GET  /api/server/admin/wasm-apps/:app_id/releases  ✓ A    —
+//	h.adminAppOpens                  GET  /api/server/admin/wasm-apps/:app_id/opens     ✓ A    —
+//	h.adminAppAIUsage                GET  /api/server/admin/wasm-apps/:app_id/ai-usage  ✓ A    —
+//	（**包外**）appserver/serve.go:60  registry.ValidateAppIDForServing              ✗      **无判据**（见报告"未覆盖"节）
+//
+//	C = `audit_r25_serving_appid_callsite_test.go` 的
+//	    `TestAuditR25ServingAppIDCallSitesAreBoundToServing`（go/ast 反向可达闭包：
+//	    serving 闭包必须**恰好**等于登记表 ⇒ 任一处回退都会让该节点落进写侧闭包 ⇒ 红）。
+//	    它的解析面是**本包**（`os.ReadDir(".")`）⇒ 包外节点（appserver）不在其中。
+//
+// 旧版的问题是**宣称 > 实际覆盖**：跳过条件写成 `pathReach && reserved[appID]`，于是
+// `GET /api/server/admin/wasm-apps/uploads/releases` 这类**真实可达**的管理面入口也被跳过
+//（红队 m12 实测：`admin.go` 单点回退 ⇒ 本文件 EXIT=0）。现在跳过条件改为
+// "**路径落在被遮蔽的客户端前缀模板上**"（见 {@link reservedShadowedClientPath}），
+// 管理面入口与体内携带 app_id 的入口始终参与断言，并加三条自校准（保留名必须有入口被跳过、
+// 管理面一个都不许被跳过、每个名字至少要检查到一个入口）。
 
 import (
 	"context"
@@ -40,6 +65,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -275,57 +301,64 @@ func r25IndependentSegments(routes gin.RoutesInfo) (segs, firstSegment map[strin
 	return segs, firstSegment
 }
 
-// r25ReservedCandidates 返回 registry 里**生效**的保留集合，并附"哪些名字是首段
-// 静态路由"（`/apps/wasm/<name>/…` 结构上到不了 `:app_id` handler —— `uploads` /
-// `validate` / `catalog` 属这一类；它们的 `:app_id` 路由在 X4-1 里就是被遮蔽的那些）。
-func r25ReservedCandidates(t *testing.T, r *gin.Engine) ([]string, map[string]bool) {
+// r25StaticSegments 返回真实路由表里 WASM 客户端面的**全部**字面量段（`all`，
+// 含深层与叶子）与"首段静态段"（`first`），并对齐 registry 里**生效**的保留集合
+// （`reserved`）。
+//
+// S7-2（v2.8.1→HEAD 回归审计）之后，生效集合不再等于"首段静态段"，而是它的子集
+// ——只有那些**能把 `:app_id` 的下降领走**的静态段（真遮蔽：`uploads`，它之下有
+// `/uploads/:upload_id`）。本函数把这条口径钉住：收宽了（把 `rows` / `catalog` 这类
+// 可达名字也收进来）就是 S7-2 本身，收窄了（漏掉 `uploads`）就是 X4-1。
+func r25StaticSegments(t *testing.T, r *gin.Engine) (all, reserved map[string]bool) {
 	t.Helper()
-	effective := wasmregistry.RouteReservedAppIDs()
-	if len(effective) < 8 {
-		t.Fatalf("registry 里生效的保留集合只有 %d 条（%v）—— router.Register 的注入被拆掉，"+
-			"本用例会退化成空转", len(effective), effective)
-	}
 	indep, first := r25IndependentSegments(r.Routes())
 	if len(indep) < 8 {
 		t.Fatalf("从真实路由表独立复算只有 %d 个静态段（%v）—— 路由表或前缀常量写错了", len(indep), indep)
 	}
+	effective := wasmregistry.RouteReservedAppIDs()
+	if len(effective) == 0 {
+		t.Fatalf("registry 里生效的保留集合是空的 —— router.Register 的注入被拆掉，" +
+			"本用例会退化成空转")
+	}
 	eff := map[string]bool{}
 	for _, s := range effective {
 		eff[s] = true
-	}
-	for s := range indep {
-		if !eff[s] {
-			t.Errorf("路由表里的静态段 %q 没被注入 registry（写侧封口漏了它）", s)
-		}
 	}
 	for s := range eff {
 		if !indep[s] {
 			t.Errorf("registry 生效集合里的 %q 不在真实路由表里（死条目）", s)
 		}
 	}
-	reachable := 0
-	for _, s := range effective {
-		if !first[s] {
-			reachable++
+	// S7-2 的现场哨兵（双向）：
+	//   - `uploads` 必须在（它之下有参数子节点，12/13 条 :app_id 模板打不开）；
+	//   - 深层静态段（rows / open / releases / request / schema）与**叶子**首段静态段
+	//     （catalog / proof / validate）都不许在 —— 它们实测全可达（gin 在静态分支找
+	//     不到子节点时退回参数分支），收进来 = 拒了可达的名字 ⇒ 存量应用发不出新版本。
+	if !eff["uploads"] {
+		t.Fatalf("现场名 uploads 不在保留集合里（X4-1 的现场会复发）：%v", effective)
+	}
+	for _, want := range []string{"rows", "open", "releases", "request", "schema", "catalog", "proof", "validate"} {
+		if eff[want] {
+			t.Fatalf("现场名 %q 在保留集合里（S7-2 复发：可达的名字被写侧拒，存量应用发不出新版本）：%v",
+				want, effective)
 		}
 	}
-	if reachable < 8 {
-		t.Fatalf("可达的保留字只有 %d 条（%v）—— 自校准失败", reachable, effective)
+	// 首段判定自校准：uploads 是首段静态路由，rows 不是。
+	if !first["uploads"] || first["rows"] {
+		t.Fatalf("r25IndependentSegments 的首段判定不对：first[uploads]=%v first[rows]=%v",
+			first["uploads"], first["rows"])
 	}
-	// 现场哨兵：Y3-1 点名的名字必须在集合里（否则用例可能"恰好"绕开了现场）。
-	// `proof` 是**首段静态**路由（`POST /apps/wasm/proof`，app_id 在请求体里），
-	// 因此它的可达性由"固定路径 + 体内 app_id"那条入口单独覆盖。
-	for _, want := range []string{"open", "rows", "releases", "request", "proof", "schema", "uploads"} {
-		if !eff[want] {
-			t.Fatalf("现场名 %q 不在保留集合里（%v）—— 用例失去对象", want, effective)
-		}
+	return indep, eff
+}
+
+// sortedKeys 把集合转成稳定顺序的切片（日志与遍历用）。
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
 	}
-	for _, want := range []string{"open", "rows", "releases", "request", "schema"} {
-		if first[want] {
-			t.Fatalf("现场名 %q 被判成首段静态路由（%v）—— 可达性判据写错了", want, effective)
-		}
-	}
-	return effective, first
+	sort.Strings(out)
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -354,57 +387,71 @@ func isRouteStaticRejection(w *httptest.ResponseRecorder) (bool, string) {
 	return true, fmt.Sprintf("%d %s: %s", w.Code, env.Error.Code, env.Error.Message)
 }
 
+// reservedShadowedClientPath 判定"这条入口的路径是否落在**被遮蔽的客户端前缀模板**上"。
+//
+// 只有这类入口对保留名（今天 = `uploads`）结构上不可达：`/apps/wasm/<保留名>/<后缀>` 会被
+// 首段静态路由领走（`/uploads/:upload_id` 吃掉下一段，或整条落 NoRoute）。**管理面**走的是
+// `/api/server/admin/wasm-apps/…`（另一棵树，不受 WASM 前缀静态段遮蔽）⇒ 对 `uploads`
+// **真实可达**，不能被跳过（S7-R N3：旧版按 `reserved[appID]` 一刀切，把管理面也跳过了）。
+func reservedShadowedClientPath(path, appID string) bool {
+	prefix := router.WasmClientRouteBase + "/" + appID
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
+
 func TestAuditR25ServingEntriesAcceptLegacyRouteStaticAppIDs(t *testing.T) {
 	env := newR25RouteEnv(t)
-	candidates, firstSegment := r25ReservedCandidates(t, env.r)
-	t.Logf("真实路由表派生的保留集合 %d 个：%v", len(candidates), candidates)
-	reachable := 0
-	for _, c := range candidates {
-		if !firstSegment[c] {
-			reachable++
-		}
-	}
-	t.Logf("其中 :app_id 路径可达 %d 个（首段静态路由 %d 个结构上被遮蔽，由写侧封口负责）",
-		reachable, len(candidates)-reachable)
+	all, reserved := r25StaticSegments(t, env.r)
+	candidates := sortedKeys(all)
+	t.Logf("真实路由表的 WASM 字面量段 %d 个：%v；其中写侧保留（真遮蔽）%d 个：%v",
+		len(candidates), candidates, len(reserved), sortedKeys(reserved))
 
 	for _, appID := range candidates {
-		// C（自校准）：这个名字今天**不可能**被发布出来（写侧拒）—— 这正是"存量行"
-		// 的前提；若写侧放行了它，本用例的前提不成立（应当由写侧用例变红）。
-		if aerr := wasmregistry.ValidateAppID(appID, nil); aerr == nil {
-			t.Fatalf("前提不成立：app_id=%q 在写侧被接受 ⇒ 它不再是「存量行」形态", appID)
+		// C（自校准，双向）：这个名字在写侧的状态必须与保留集合一致 ——
+		// 保留段（真遮蔽）必须被拒；其余（深层/叶子静态段，实测全可达）必须被接受
+		// （S7-2 的修复目标：它们不再被"名字非法"挡住）。任一方向不符 ⇒ 本用例的
+		// 前提（"库里可能已经有这样的行，而这个名字本身合法/不合法"）与实现不符。
+		writeRejects := wasmregistry.ValidateAppID(appID, nil) != nil
+		if writeRejects != reserved[appID] {
+			t.Fatalf("app_id=%q 写侧拒=%v，但保留集合 membership=%v —— 两侧口径相反（S7-2/X4-1 的形态）",
+				appID, writeRejects, reserved[appID])
 		}
 		env.seedLegacyApp(appID)
 
 		// 七个服务侧入口（与 api 包的调用点清单一一对应）。
-		// pathReach=false 的入口只在 app_id 不在路径首段时才有对象（首段静态路由
-		// 会遮蔽 `:app_id`）—— `proof` 的 app_id 在**请求体**里，所以它恒可达。
+		// 只有**路径落在被遮蔽的客户端前缀模板上**的入口对保留名不可达（首段静态路由会
+		// 遮蔽 `:app_id`）—— 见 {@link reservedShadowedClientPath} 与文件头的覆盖矩阵；
+		// `proof` 的 app_id 在**请求体**里、管理面走 `/api/server/admin/**`，两者恒可达。
 		cases := []struct {
-			name      string
-			method    string
-			path      string
-			body      string
-			admin     bool
-			pathReach bool
+			name   string
+			method string
+			path   string
+			body   string
+			admin  bool
 			// wantStatus/wantCode 非零值 = 期望的**业务态**（证明 handler 真的跑到了
 			// 校验之后），零值 = 只断言"不是名字非法"。
 			wantStatus int
 			wantCode   string
 		}{
-			{"open", http.MethodPost, router.WasmClientRouteBase + "/" + appID + "/open", `{}`, false, true, 401, "proof_required"},
+			{"open", http.MethodPost, router.WasmClientRouteBase + "/" + appID + "/open", `{}`, false, 401, "proof_required"},
 			{"request", http.MethodPost, router.WasmClientRouteBase + "/" + appID + "/request",
-				`{"method":"GET","path":"/"}`, false, true, 401, "proof_required"},
+				`{"method":"GET","path":"/"}`, false, 401, "proof_required"},
 			{"proof", http.MethodPost, router.WasmClientRouteBase + "/proof",
 				fmt.Sprintf(`{"install_id":"i1","public_key":"AA==","nonce":"n1","ts":%d,"signature":"AA==","app_id":%q}`,
-					time.Now().Unix(), appID), false, false, 0, ""},
-			{"ownedApp", http.MethodGet, router.WasmClientRouteBase + "/" + appID + "/releases", "", false, true, 200, ""},
-			{"loadAdminApp", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/releases", "", true, true, 200, ""},
-			{"adminAppOpens", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/opens", "", true, true, 200, ""},
-			{"adminAppAIUsage", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/ai-usage", "", true, true, 200, ""},
+					time.Now().Unix(), appID), false, 0, ""},
+			{"ownedApp", http.MethodGet, router.WasmClientRouteBase + "/" + appID + "/releases", "", false, 200, ""},
+			{"loadAdminApp", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/releases", "", true, 200, ""},
+			{"adminAppOpens", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/opens", "", true, 200, ""},
+			{"adminAppAIUsage", http.MethodGet, "/api/server/admin/wasm-apps/" + appID + "/ai-usage", "", true, 200, ""},
 		}
-		checked := 0
+		checked, skipped, adminSkipped := 0, 0, 0
 		for _, tc := range cases {
-			if tc.pathReach && firstSegment[appID] {
-				continue // 结构上不可达（首段静态路由遮蔽）—— 由写侧那条封口负责
+			if reserved[appID] && reservedShadowedClientPath(tc.path, appID) {
+				// 结构上不可达（被遮蔽的客户端前缀模板）—— 由写侧那条封口负责。
+				skipped++
+				if tc.admin {
+					adminSkipped++
+				}
+				continue
 			}
 			checked++
 			w := env.do(tc.method, tc.path, tc.body, tc.admin)
@@ -436,6 +483,24 @@ func TestAuditR25ServingEntriesAcceptLegacyRouteStaticAppIDs(t *testing.T) {
 		}
 		if checked == 0 {
 			t.Fatalf("app_id=%q 一个入口都没检查到 —— 判据空转", appID)
+		}
+		// 自校准（S7-R N3，三条互相独立）：
+		//   ① 管理面入口**一个都不许**被跳过 —— 它走 /api/server/admin/**，对保留名真实可达
+		//      （跳过它们 = 那三个入口的单点回退在本文件上失去判别力，正是 N3 的缺口形态）；
+		//   ② 保留名必须**至少有一个**入口被跳过（否则"遮蔽判定"失效，断言会打在结构上
+		//      不可达的路径上，红的是环境不是实现）；
+		//   ③ 非保留名不得有任何入口被跳过（它们全可达，跳过即判据静默缩面）。
+		if adminSkipped > 0 {
+			t.Fatalf("app_id=%q：%d 个**管理面**入口被跳过 —— 管理面走 /api/server/admin/**，"+
+				"不受 WASM 前缀静态段遮蔽（对 uploads 真实可达）⇒ 跳过它 = 该入口的单点回退"+
+				"在本文件上无牙（S7-R N3）", appID, adminSkipped)
+		}
+		if reserved[appID] && skipped == 0 {
+			t.Fatalf("app_id=%q 是保留名（真遮蔽段），却没有任何入口被跳过 —— "+
+				"遮蔽判定失效，断言会打在结构上不可达的路径上", appID)
+		}
+		if !reserved[appID] && skipped != 0 {
+			t.Fatalf("app_id=%q 不是保留名，却有 %d 个入口被跳过 —— 判据静默缩面", appID, skipped)
 		}
 	}
 }
@@ -493,13 +558,15 @@ func TestAuditR25ServingEntriesControlNameIsStillAccepted(t *testing.T) {
 
 func TestAuditR25WriteSideStillRejectsRouteStaticAppIDs(t *testing.T) {
 	env := newR25RouteEnv(t)
-	candidates, firstSegment := r25ReservedCandidates(t, env.r)
+	all, reserved := r25StaticSegments(t, env.r)
 
-	for _, appID := range candidates {
-		// ① 发布链路（POST /:app_id/releases，body 里的 app_id 也参与校验）。
-		// 首段静态路由的名字在这里结构上不可达（由 ② 覆盖 —— X4-1 的现场 `uploads`
-		// 正是经分片上传链路建出来的）。
-		if !firstSegment[appID] {
+	// ① 真遮蔽名（保留集合，今天 = `uploads`）：发布链路与分片上传开会话都必须拒，
+	// 且点名 route_static_segment。
+	for _, appID := range sortedKeys(reserved) {
+		// 发布链路（POST /:app_id/releases，body 里的 app_id 也参与校验）。
+		// 首段静态路由的名字在这里结构上不可达（由下面的 ② 覆盖 —— X4-1 的现场
+		// `uploads` 正是经分片上传链路建出来的）。
+		if !firstSegmentName(env.r, appID) {
 			pub := fmt.Sprintf(
 				`{"app_id":%q,"version":"1.0.0","title":"t","changelog":"c","wasm_base64":"AGFzbQEAAAA=","config":{"access":"login"}}`,
 				appID)
@@ -509,13 +576,44 @@ func TestAuditR25WriteSideStillRejectsRouteStaticAppIDs(t *testing.T) {
 					"（放松它 = 应用建得成、但永远打不开：X4-1 复发）", appID, w.Code, w.Body.String(), detail)
 			}
 		}
-
-		// ② 分片上传开会话（固定路径，body 里带 app_id；建立会话 = 这个名字即将进库）。
 		up := fmt.Sprintf(`{"app_id":%q,"version":"1.0.0","total_bytes":1048576,"chunk_bytes":1048576}`, appID)
 		wu := env.do(http.MethodPost, router.WasmClientRouteBase+"/uploads", up, false)
 		if bad, detail := isRouteStaticRejection(wu); !bad {
 			t.Errorf("[uploads] app_id=%q 未被写侧以 route_static_segment 拒绝（status=%d，body=%s；%s）",
 				appID, wu.Code, wu.Body.String(), detail)
+		}
+	}
+
+	// ② 反方向（S7-2 的判据面）：其它静态段名字（深层 + 叶子）实测全可达，写侧的
+	// **每一次发布**入口都不得再把它们判成"名字非法" —— 那正是"存量应用发不出新版本"
+	// 的成因。这里用分片上传开会话（固定路径，app_id 在请求体里，覆盖全部静态段名字）
+	// 作为写侧代表：必须 201；随即主动放弃会话（每用户未完成会话上限 4 个，不回收会
+	// 把后续名字挡在 429 上 —— 那是判据自身的环境限制，不是被测行为）。
+	for _, appID := range sortedKeys(all) {
+		if reserved[appID] {
+			continue
+		}
+		up := fmt.Sprintf(`{"app_id":%q,"version":"1.0.0","total_bytes":1048576,"chunk_bytes":1048576}`, appID)
+		w := env.do(http.MethodPost, router.WasmClientRouteBase+"/uploads", up, false)
+		if bad, detail := isRouteStaticRejection(w); bad {
+			t.Errorf("[uploads] app_id=%q 被写侧判成「与路由静态段同名」（%s；body=%s）—— "+
+				"它在真实匹配树上可达（实测 169/169），拒了它就是 S7-2：存量应用发不出新版本",
+				appID, detail, w.Body.String())
+			continue
+		}
+		if w.Code != http.StatusCreated {
+			t.Errorf("[uploads] app_id=%q status=%d，want 201；body=%s", appID, w.Code, w.Body.String())
+			continue
+		}
+		var created struct {
+			UploadID string `json:"upload_id"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.UploadID == "" {
+			t.Fatalf("[uploads] app_id=%q 的 201 体里没有 upload_id（err=%v body=%s）",
+				appID, err, w.Body.String())
+		}
+		if del := env.do(http.MethodDelete, router.WasmClientRouteBase+"/uploads/"+created.UploadID, "", false); del.Code != http.StatusNoContent && del.Code != http.StatusOK {
+			t.Fatalf("[uploads] 放弃会话 %s 失败：status=%d body=%s", created.UploadID, del.Code, del.Body.String())
 		}
 	}
 
@@ -529,4 +627,11 @@ func TestAuditR25WriteSideStillRejectsRouteStaticAppIDs(t *testing.T) {
 	if bad, detail := isRouteStaticRejection(w); bad {
 		t.Fatalf("对照名 %q 被误拒：%s", ok, detail)
 	}
+}
+
+// firstSegmentName 报告某个名字是不是真实路由表的**首段**静态段
+// （首段静态名在 `/:app_id/…` 路径上结构不可达，只能经"固定路径 + 体内 app_id"的入口测）。
+func firstSegmentName(r *gin.Engine, name string) bool {
+	_, first := r25IndependentSegments(r.Routes())
+	return first[name]
 }

@@ -196,13 +196,13 @@ const FIELDS: FieldRow[] = [
   { key: 'appdb_idle_min', label: '应用库空闲回收', group: '内存', hint: '应用数据库句柄（1 条写连接 + N 条只读连接）空闲多久后关闭' },
   { key: 'appdb_cache_kib', label: 'SQLite 页缓存/连接', group: '内存', hint: '每条应用库连接的页缓存上限；下一个新建连接生效' },
   { key: 'app_db_readers', label: '应用库只读连接数', group: '内存', hint: '每个应用库句柄的只读连接数：库已开启 WAL，多个读请求可真正并发（写仍串行）。值越大并发读越高，代价是每句柄多占 (1+N) 份页缓存与文件描述符；**下一个应用库句柄生效**（不是立即）' },
-  // 时间预算（2026-10-01 服务端新增）。四组顺序关系写在服务端 applimits.Validate 里：
+  // 时间预算（2026-10-01 服务端新增）。五组顺序关系写在服务端 applimits.Validate 里：
   // 这一页只如实显示取值范围（range 由服务端下发）与语义，不做第二遍判据（见接口注释）。
   { key: 'guest_budget_seconds', label: 'guest 执行预算', group: '时间预算', hint: '应用单次请求里真正执行的时长上限；等数据库/等宿主调用时暂停计时。调大等于允许更长的单次计算，端到端墙钟仍然封顶' },
   { key: 'dry_run_budget_seconds', label: '发布干跑预算', group: '时间预算', hint: '发布/预检时用合成帧跑一次真实实例化的预算；建议与 guest 预算一致，调得比它短会把线上跑得动的应用挡在发布门外' },
-  { key: 'host_call_budget_seconds', label: '宿主调用预算', group: '时间预算', hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立' },
+  { key: 'host_call_budget_seconds', label: '宿主调用预算', group: '时间预算', hint: 'db.* / log / assets.read 等宿主调用的硬超时；它不被 guest 的暂停计时覆盖，两者独立。必须严格大于单条 SQL 硬超时（语句 deadline 套在它里面：内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED）。每次请求即时生效' },
   { key: 'request_wall_clock_seconds', label: '请求端到端墙钟', group: '时间预算', hint: '含排队等待；到点即拒。必须严格大于 guest 预算。注意：客户端应用请求的出站预算是随包固定的 75 秒（必须晚于本值，否则员工只会看到网络错误）' },
-  { key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', group: '时间预算', hint: '到点由看门狗回滚并打污染标记；不得超过端到端墙钟' },
+  { key: 'sql_statement_budget_seconds', label: '单条 SQL 硬超时', group: '时间预算', hint: '到点由看门狗回滚并打污染标记；必须严格小于宿主调用预算，也不得超过端到端墙钟。**下一个应用库句柄生效**（不是立即）' },
   { key: 'compile_timeout_seconds', label: '编译超时', group: '时间预算', hint: '单次编译（含执行侧装载模块）的超时；不得超过服务端 ReadTimeout（60 秒，传输层常量不可配置）' },
 ]
 

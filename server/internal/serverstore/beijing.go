@@ -115,8 +115,24 @@ func dayStartArg(t time.Time) string { return pgInstantArg(BeijingDayInstant(t))
 
 // dayEndArgInclusive 返回"截止日含当天"的半开区间右边界瞬时参数
 // (北京日 to 的次日 00:00)。
+//
+// **必须先归一到北京日再 +1 天**（审计 S1-A1，2026-10）—— 与左边界
+// `dayStartArg` 保持**同一个口径**：修前形态是 `BeijingDayInstant(to.AddDate(0,0,1))`，
+// 而 `AddDate` 加的是**接收者的 Location** 的墙钟，生产调用点却直传 `time.Now()`
+// （接收者 = `time.Local`）。跨本地夏令时切换那一步是 23h/25h：
+//
+//	DST 开始（23h）：`BeijingDay(to) == BeijingDay(to.AddDate(0,0,1))`
+//	  ⇒ 半开区间塌成**空集** ⇒ `today_usage/today_cost` 读 0；
+//	DST 结束（25h）：两者相差 **2 天** ⇒ 窗口展成 **48h** ⇒ 今日量翻倍。
+//
+// `BeijingDay` 的产物是 Location=UTC 的日期值，对它 `AddDate` 是纯日历算术、
+// 无 DST 缺口 ⇒ 右边界恒等于"左边界 + 24h"（`BeijingDayInstant` 自身幂等，
+// 所以对**已经是北京日期值**的入参结果与修前逐字相同）。
+// 触发前提：进程 TZ 带 DST 且 now 在切换前 24h 内，且该瞬时的**北京墙钟**落在
+// 病态带（方向相关：23h 方向 = [00:00,01:00)，25h 方向 = (23:00,24:00)）——
+// 部署缺省 `TZ=Asia/Shanghai`/UTC 不触发。判据 `usage_today_tz_test.go`。
 func dayEndArgInclusive(to time.Time) string {
-	return pgInstantArg(BeijingDayInstant(to.AddDate(0, 0, 1)))
+	return pgInstantArg(BeijingDayInstant(BeijingDay(to).AddDate(0, 0, 1)))
 }
 
 // normalizeDayRange 把调用方的 from/to 归一到北京日期值(允许传入瞬时,

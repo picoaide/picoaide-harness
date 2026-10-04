@@ -171,6 +171,21 @@ func TestCleanupNotBlockedByMisboundedOldPartition(t *testing.T) {
 	assertMonthEqualsMonthlyLedger(t, db, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), "R5-A-9 清理后")
 }
 
+// r5aFixtureWindow 是 TestRebuildLedgerDoesNotRegrowEmptyDetailPartition 的
+// **唯一日期派生点**（S6-01）：夹具月 = 生产启动窗口起点所在的月，两者同源。
+//
+// 为什么必须是同一个值：旧夹具把两者写成两条不同公式 —— 夹具月 `bjMonth(6)`
+// （先归一到月初，永不溢出），启动窗口 `BeijingDay(time.Now()).AddDate(0, -6, 0)`
+// （**会在"目标月没有该日"时归一化到下一个月**：8/31−6 月 ⇒ 2/31 ⇒ 3/3）。
+// 于是每年 3/5/10/12 月 31 日与 8 月 29–31 日（2026–2028 实测 7/7/6 天）窗口起点
+// 晚于夹具月，用例用 `t.Skipf` 把这 20 天静默跳过 —— 与生产 `cmd/server/main.go`
+// 早已改用的 `RetentionWindowStart`（beijing.go:97）**也不同形**。
+// 现在两者出自同一实现，"窗口没覆盖夹具月"在**任何一天**都不可能出现。
+func r5aFixtureWindow(now time.Time) (fixtureMonth, windowFrom time.Time) {
+	start := RetentionWindowStart(now, 6)
+	return start, start
+}
+
 // TestRebuildLedgerDoesNotRegrowEmptyDetailPartition 是 R5-A-10 的根因判据
 // （钉**产生点**：无明细的月份不得被建出空分区）。
 //
@@ -189,7 +204,8 @@ func TestRebuildLedgerDoesNotRegrowEmptyDetailPartition(t *testing.T) {
 	uid := mustUserID(t, db)
 
 	// 6 个月前：既在启动补算窗口（now-6m..now）里，又早于 retention=1 的 cutoff。
-	m := bjMonth(6)
+	// 夹具月与启动窗口起点同源（见 r5aFixtureWindow）⇒ 不存在"窗口未覆盖夹具月"的日期。
+	m, windowFrom := r5aFixtureWindow(time.Now())
 	rel := "usage_" + monthKey(m)
 	if !relationExists(t, db, rel) {
 		t.Fatalf("夹具无效：%s 不存在（测试库预建分区窗口变了？）", rel)
@@ -218,17 +234,13 @@ func TestRebuildLedgerDoesNotRegrowEmptyDetailPartition(t *testing.T) {
 		t.Fatalf("分区被 DROP 后应回落账本得 3.0000，实际 %.4f", got)
 	}
 
-	// ② 保留期放大到 6 个月 + 启动补算（与 cmd/server/main.go 同形）。
+	// ② 保留期放大到 6 个月 + 启动补算（与 cmd/server/main.go 同形：唯一实现
+	//    RetentionWindowStart，先归一到月初再 AddDate ⇒ 不会月溢出）。
 	if err := SetSetting(db, RetentionMonthsSetting, "6"); err != nil {
 		t.Fatal(err)
 	}
-	windowFrom := BeijingDay(time.Now()).AddDate(0, -6, 0)
 	if err := RebuildUsageLedger(db, windowFrom, time.Now()); err != nil {
 		t.Fatalf("startup-style rebuild: %v", err)
-	}
-	winStart, _ := monthWindow(m)
-	if BeijingMonth(windowFrom).After(winStart) {
-		t.Skipf("启动窗口（%s 起）未覆盖 %s，本次判据不适用", windowFrom.Format(dateFmt), monthKey(m))
 	}
 	if relationExists(t, db, rel) {
 		t.Fatalf("启动补算为**没有明细**的月份 %s 建出了空分区（R5-A-10 的根因："+

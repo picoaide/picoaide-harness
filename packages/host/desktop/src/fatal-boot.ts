@@ -31,6 +31,33 @@
  */
 export type FatalBootChoice = 'retry' | 'quit'
 
+/**
+ * 致命路径的"身份取值"：产品名 + 当前语言。
+ *
+ * 为什么是一个可注入 `runtime` 的纯函数（2026-10-04 C1-02）：致命窗口覆盖
+ * **构造器本身**（`electron-runtime.ts` 对不支持的平台抛 `unsupported Electron
+ * platform`）、协议注册、`app.whenReady()` 与数据根推导 —— 所以致命路径可能在
+ * launcher 的 runtime 对象**还没构造出来**时执行。旧写法直接读
+ * `runtime.locale` / `runtime.productName`，在那个窗口里自己抛 TypeError，于是
+ * "双击之后什么都没有"（原生错误面弹不出来、日志里也只有一句 TypeError）。
+ *
+ * 这里只做一件事：`runtime` 缺席时回落到不依赖任何启动期状态的常量。判据是
+ * 行为级的（`tests/fatal-boot.spec.ts`：传 undefined 不得抛错，且文案仍是产品名
+ * + 默认语言）—— 变异回 `runtime.locale` 即红。
+ * @param runtime - launcher runtime（`locale`/`productName`），窗口内为 undefined。
+ * @param fallback - 两个字段的回退值（`PRODUCT_NAME` + `DEFAULT_HOST_LOCALE`）。
+ * @returns 供对话框文案使用的身份。
+ */
+export function fatalBootIdentity<Locale extends string>(
+  runtime: { readonly locale: Locale, readonly productName: string } | undefined,
+  fallback: { readonly locale: Locale, readonly productName: string },
+): { readonly locale: Locale, readonly productName: string } {
+  return {
+    locale: runtime?.locale ?? fallback.locale,
+    productName: runtime?.productName ?? fallback.productName,
+  }
+}
+
 /** 致命启动对话框的全部文案（由 `tray-locale.ts` 按当前语言给出）。 */
 export interface FatalBootDialogCopy {
   /** 原生对话框标题（任务栏/窗口管理器可见）。 */

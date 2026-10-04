@@ -16,11 +16,13 @@ import (
 // 校验 → 落库"；本文件负责把一份 Limits 推给队列、模块缓存、库句柄池与 SQLite
 // 连接参数，并回答"哪些改动要重启才生效"。
 //
-// 为什么每一条都写清楚"生效范围"：运营改完最怕的是"以为生效了"。四类里三类是
-// 即时生效（队列上限、模块缓存与空闲 TTL、库句柄池与空闲回收），两类是**下一次
-// 建连/下一个句柄**生效（SQLite 页缓存 appdb_cache_kib；只读连接数 app_db_readers），
-// 一类必须**重启**（单实例内存上限，wazero RuntimeConfig 的字段，进程内 runtime
-// 建好后不可变）。
+// 为什么每一条都写清楚"生效范围"：运营改完最怕的是"以为生效了"。即时生效的有：
+// 队列上限、模块缓存与空闲 TTL、库句柄池与空闲回收、以及**时间预算五项**
+//（guest / host_call / wall / dry_run / compile —— 在每个请求、每次编译的入口处读当前值，
+// 见 requestBudgets 与 api 的 budgets()）；**下一次建连/下一个句柄**生效的有三项
+//（SQLite 页缓存 appdb_cache_kib、只读连接数 app_db_readers、单语句硬超时
+// sql_statement_budget_seconds）；一类必须**重启**（单实例内存上限，wazero
+// RuntimeConfig 的字段，进程内 runtime 建好后不可变）。
 
 // ApplyLimits 把限制项下发到运行中的组件，返回**需要重启才生效**的字段名。
 //
@@ -63,7 +65,10 @@ func (s *Server) ApplyLimits(l applimits.Limits) []string {
 	}
 	// ④ SQLite 每连接页缓存：**下一个新建连接**生效（连接级 PRAGMA）。
 	appdb.SetConnCacheKiB(l.AppDBCacheKiB)
-	// ④b 单语句硬超时：**即时生效**（每个事务开始时读当前值）。
+	// ④b 单语句硬超时：**下一个新建的应用库句柄**生效（预算在 appdb.Open 时固化进句柄；
+	// 已有句柄在空闲回收或污染回收重建时自然拿到新值 —— 与 appdb_cache_kib / readers
+	// 同档）。旧注释写的是"即时生效（每个事务开始时读当前值）"，与 appdb 的实现相反：
+	// 保存后立刻打一条慢查询，用的仍是旧预算（判据：dbpool_test 的冻结句柄用例）。
 	appdb.SetStatementBudget(l.SQLStatementBudget())
 
 	// ⑤ 单实例内存上限：runtime 级 ⇒ 需重启。判定用"生效值 vs 目标值"，

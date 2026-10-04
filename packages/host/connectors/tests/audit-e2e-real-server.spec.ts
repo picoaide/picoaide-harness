@@ -335,6 +335,7 @@ describe('end-to-end against a real OAuth-protected MCP server', () => {
     const refresher = new TokenRefresher({
       read: id => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
+      scope: () => store.dir,
       target: () => ({ discoveryUrl: `${server.origin}/mcp`, resourceUrl: `${server.origin}/mcp` }),
     })
     const outcome = await refresher.refresh('real-mcp', { force: true })
@@ -498,6 +499,7 @@ describe('concurrency against the real authorization server', () => {
     const refresher = new TokenRefresher({
       read: id => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
+      scope: () => store.dir,
       target: () => ({ discoveryUrl: `${server.origin}/mcp`, resourceUrl: `${server.origin}/mcp` }),
     })
     const grantsBefore = server.stats.grants.filter(g => g === 'refresh_token').length

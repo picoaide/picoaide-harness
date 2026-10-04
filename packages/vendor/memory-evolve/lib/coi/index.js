@@ -31,7 +31,7 @@ import { BroadcastStore, messageToolDefinition } from './broadcast.js'
 import { installBroadcastApi } from './broadcast-api.js'
 import { PresenceTracker } from './presence.js'
 import { readAliases } from '../aliases.js'
-import { normalizeSkillText, isSafeSkillName, syncBuiltinSkills } from './skills-sync.js'
+import { normalizeSkillText, isSafeSkillName, syncBuiltinSkills, acquireSkillDirLock } from './skills-sync.js'
 
 /** 插件包内 skills/ 目录（内置技能源头）。 */
 const PLUGIN_SKILLS_DIR = fileURLToPath(new URL('../../skills/', import.meta.url))
@@ -337,6 +337,14 @@ export function installCoi(ctx, config, deps) {
      * 落点（NF-1）：改为自锚定安全原子写 + `anchorDir=技能库根`——预置的
      * 符号链接（文件或目录）不得把技能正文写到技能库之外，落点被拒时如实
      * 返回 ok:false（第一轮这里是裸 writeFileSync，写穿且报成功）。
+     *
+     * per-name 锁（C4-01，2026-10-04 审计）：本写者的落点与随包同步器的
+     * **整目录换入**逐字相同（内置适配器的 `skillName` 默认就是
+     * {@link BUILTIN_SKILLS} 里的名字），此前它不参与
+     * `<技能库>/.skill-locks/<name>.lock` 协议 ⇒ 能落进 `syncSkillDirSafe` 的
+     * 两处 `rename` 之间把落点重新建出来：换入与回滚双双 ENOTEMPTY（旧内容
+     * 不可找回、该技能永久 refused）。现在与其它写者共用**同一把**锁
+     * （协议实现在 coi/skills-sync.js，不复制常量）；拿不到就零等待拒收。
      * @param {string} adapterId
      * @param {string} content
      * @returns {{ok:boolean, message?:string}}
@@ -356,11 +364,18 @@ export function installCoi(ctx, config, deps) {
         return { ok: false, message: error.message }
       }
       const file = join(config.skillDir, skillName, 'SKILL.md')
+      // C4-01：取 per-name 锁（与能力中心安装器 / 随包同步器 / skill_manage 同一把）。
+      const lock = acquireSkillDirLock(config.skillDir, skillName)
+      if (lock.ok !== true) {
+        return { ok: false, message: cix2('coi2.skillSaveFailed', { detail: lock.message }) }
+      }
       try {
         writeFileAtomicSafeAt(file, text, { anchorDir: config.skillDir })
         return { ok: true, message: cix2('coi2.skillSaved', { skill: skillName }) }
       } catch (error) {
         return { ok: false, message: cix2('coi2.skillSaveFailed', { detail: error.message }) }
+      } finally {
+        lock.release()
       }
     },
     updateRuntimeConfig: (patch) => {

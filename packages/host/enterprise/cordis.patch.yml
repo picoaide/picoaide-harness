@@ -34,10 +34,13 @@
 - id: web-search-deepseek
   config:
     apiKeyEnv: PICOAI_GATEWAY_TOKEN
-# 网关鉴权：**0.1.7-rc.2 里 `protocol` 已从 `llm-deepseek` 删除，配了直接抛错**
+# 网关鉴权：**0.1.7-rc.2 引入、0.2.0-rc.2 复核仍成立** —— `protocol` 已从
+# `llm-deepseek` 删除，配了直接抛错
 # （`llm-deepseek/src/config.ts:207` → `llm-deepseek: protocol is not configurable;
 # remove it and use a Messages-compatible baseURL`）；适配器只剩 Messages 一条路径，
 # 端点固定 `<baseURL>/messages` ⇒ `baseURL=<server>/v1` 就是网关的 `/v1/messages`。
+# 锚点是**行为**不是版本号：升级上游时按"守卫是否仍在 / 请求头是否仍由 `resolveAuth`
+# 决定"复核（当前 pin `dsh-v0.2.0-rc.2`：守卫行号与 `gateway-llm.ts` 的注册面都还在原位）。
 #
 # 0.1.6 线这里钉的 `protocol: chat-completions` 是当时绕开「messages 适配器只发
 # `x-api-key`、不发 `Authorization` ⇒ 网关 BearerAuth 401」的组装期修法（2026-09-22
