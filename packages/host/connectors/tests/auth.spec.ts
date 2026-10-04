@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,48 @@ vi.mock('../src/pinned-http.ts', async (importOriginal) => {
     sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
   }
 })
+
+/**
+ * RESOLUTION seam (`node:dns/promises`) — the sibling of the connection seam
+ * above, and the same shape as `tests/oauth-outbound.spec.ts`.
+ *
+ * Every `*.example` name in this suite is judged by the outbound resolution
+ * gate, and the gate judges what the RUNNER's resolver answers. On a box behind
+ * a wildcard / fake-IP resolver (this repo's dev box answers `198.18.x` for any
+ * name) that is green; on a runner with an ordinary resolver the same name is
+ * `getaddrinfo ENOTFOUND`, and since C3-06 the gate is fail-closed
+ * (`OutboundResolutionUnverifiedError`) — so these cases silently required the
+ * machine's DNS and went red only in CI (`Gate (tests + workspace build)`).
+ * Injecting the resolver removes that dependency. The answer is RFC 5737
+ * TEST-NET-2, which `buildResolvedNameBlockedList()` deliberately allows
+ * ("a NAME that resolves into them is a legitimate deployment shape").
+ */
+const dnsSeam = vi.hoisted(() => ({ resolutions: [] as string[], address: '198.51.100.9' }))
+
+vi.mock('node:dns/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns/promises')>()
+  return {
+    ...actual,
+    lookup: async (hostname: string, options?: { all?: boolean }) => {
+      dnsSeam.resolutions.push(String(hostname))
+      return options?.all === true
+        ? [{ address: dnsSeam.address, family: 4 }]
+        : { address: dnsSeam.address, family: 4 }
+    },
+  }
+})
+
+/**
+ * The seam must have been ASKED. Without this the injected resolver can rot
+ * into dead code and the suite quietly goes back to depending on the runner's
+ * DNS — green here, red in CI. Called from every case that reaches the gate.
+ */
+function expectResolverConsulted(): void {
+  expect(dnsSeam.resolutions.length).toBeGreaterThan(0)
+}
+
+/** Per-case accounting: the count above must describe THIS case, not the file. */
+beforeEach(() => { dnsSeam.resolutions.length = 0 })
 
 
 function oauthDef(): ConnectorDef {
@@ -95,6 +137,7 @@ describe('connector auth', () => {
       expect(tokenBody).toContain('grant_type=authorization_code')
       expect(tokenBody).toContain('code_verifier=')
       expect(tokenBody).toContain('code=auth-code-1')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -187,6 +230,7 @@ describe('connector auth', () => {
       const patch = await flow
       expect(responseHead).toContain('200 OK')
       expect(patch.accessToken).toBe('at-2')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -205,6 +249,7 @@ describe('connector auth', () => {
       const patch = await refreshOAuthToken(def, { accessToken: 'stale', refreshToken: 'rt-1', clientId: 'dyn-client-1', updatedAt: 0 })
       expect(patch?.accessToken).toBe('at-2')
       expect(patch?.refreshToken).toBe('rt-2')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -270,6 +315,7 @@ describe('connector auth', () => {
       })
       expect(patch.updatedAt).toBeTruthy()
       expect(calls).toEqual(['https://mcp.example/mcp'])
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -342,6 +388,7 @@ describe('connector auth', () => {
       expect(authorize.searchParams.get('state')).toBeTruthy()
       expect(patch.accessToken).toBe('at-1')
       expect(patch.clientId).toBe('dyn-1')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -372,6 +419,7 @@ describe('connector auth', () => {
         mcp: [],
       }
       await expect(runAuth(def, { onRequest: () => {}, signal: new AbortController().signal })).rejects.toThrow('MCP OAuth 发现失败')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -420,6 +468,7 @@ describe('connector auth', () => {
       expect(tokenBody).toContain('grant_type=refresh_token')
       expect(tokenBody).toContain('resource=https%3A%2F%2Fmcp.example%2Fmcp')
       expect(tokenBody).toContain('client_id=dyn-1')
+      expectResolverConsulted()
     } finally {
       globalThis.fetch = originalFetch
     }

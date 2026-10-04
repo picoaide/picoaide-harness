@@ -14,7 +14,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
@@ -38,6 +38,50 @@ vi.mock('../src/pinned-http.ts', async (importOriginal) => {
     sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
   }
 })
+
+/**
+ * RESOLUTION seam (`node:dns/promises`) — the sibling of the connection seam
+ * above, and the same shape as `tests/oauth-outbound.spec.ts`.
+ *
+ * Every `*.example` name in this suite is judged by the outbound resolution
+ * gate, and the gate judges what the RUNNER's resolver answers. On a box behind
+ * a wildcard / fake-IP resolver (this repo's dev box answers `198.18.x` for any
+ * name) that is green; on a runner with an ordinary resolver — and for BOTH
+ * hops this file uses (`mcp.example` via `discoverMcpOAuth`, `as.example` via
+ * the discovery document) — the name is `getaddrinfo ENOTFOUND`, and since
+ * C3-06 the gate is fail-closed (`OutboundResolutionUnverifiedError`). The
+ * suite therefore silently required the machine's DNS and went red only in CI
+ * (`Gate (tests + workspace build)`). Injecting the resolver removes that
+ * dependency. The answer is RFC 5737 TEST-NET-2, which
+ * `buildResolvedNameBlockedList()` deliberately allows ("a NAME that resolves
+ * into them is a legitimate deployment shape").
+ */
+const dnsSeam = vi.hoisted(() => ({ resolutions: [] as string[], address: '198.51.100.9' }))
+
+vi.mock('node:dns/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns/promises')>()
+  return {
+    ...actual,
+    lookup: async (hostname: string, options?: { all?: boolean }) => {
+      dnsSeam.resolutions.push(String(hostname))
+      return options?.all === true
+        ? [{ address: dnsSeam.address, family: 4 }]
+        : { address: dnsSeam.address, family: 4 }
+    },
+  }
+})
+
+/**
+ * The seam must have been ASKED. Without this the injected resolver can rot
+ * into dead code and the suite quietly goes back to depending on the runner's
+ * DNS — green here, red in CI. Called from every case that reaches the gate.
+ */
+function expectResolverConsulted(): void {
+  expect(dnsSeam.resolutions.length).toBeGreaterThan(0)
+}
+
+/** Per-case accounting: the count above must describe THIS case, not the file. */
+beforeEach(() => { dnsSeam.resolutions.length = 0 })
 
 
 const realFetch = globalThis.fetch
@@ -121,6 +165,10 @@ async function authRequiredRow(def = stickyDef()): Promise<{ harness: ReturnType
   const harness = createHarness([def], dir)
   await callRoute(harness, '/api/pico/connectors/sticky-mcp/connect', 'POST')
   const row = await waitForRow(harness, 'sticky-mcp', candidate => candidate.status === 'unauthorized')
+  // Every case in this file starts here, so this is where the file's outbound
+  // dependency is pinned: `auth-required` can only be reached after the
+  // discovery hop resolved through the injected resolver.
+  expectResolverConsulted()
   return { harness, row }
 }
 
