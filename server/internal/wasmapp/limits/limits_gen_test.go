@@ -226,6 +226,7 @@ var exemptDecls = map[string]exemption{
 	"DataDirMode":               {reason: "应用数据目录权限位（os.FileMode 0700，安全基线而非上限）", wantKind: "const"},
 	"MaxJSONEscapeExpansion":    {reason: "Go encoding/json 默认转义的最坏膨胀倍数（规范/实现固定的**换算常量**，不是可调上限）：真上限是由它推导出的 app_response_body_deliverable_bytes / sql_max_result_bytes", wantKind: "const"},
 	"FrameEnvelopeReserveBytes": {reason: "单帧里除载荷以外的余量（推导参数，不是可调上限）：它只参与 app_response_body_deliverable_bytes 的推导，真上限见该表项", wantKind: "const"},
+	"PublishTransferReserve":    {reason: "客户端出站预算里留给平台观测窗口之外的余量（推导参数，不是可调上限）：它只参与 publish_total_budget 的推导，真上限见该表项", wantKind: "const"},
 	"CompileCacheRevision":      {reason: "编译缓存分代的**回落常量**（字符串，不是数值也不是上限）：分代的唯一实现是 runtime.cacheNamespace()/compile.cacheNamespaceFor()（优先 wazero 真实版本，拿不到版本时才回落到本常量）；实测更正（2026-09-18）：GetWazeroVersion() 只在 **test 二进制**里返回 dev，生产 main 二进制里返回真实版本（v1.12.0）", wantKind: "const"},
 }
 
@@ -286,6 +287,24 @@ func TestCriticalValuesAndOrdering(t *testing.T) {
 	if !(limits.ClientUploadTimeout > limits.ServerReadTimeout) {
 		t.Errorf("序关系被破坏：客户端上传超时(%s) 必须 > 服务端 ReadTimeout(%s)（§4.2 / §10.5 第 58 项）",
 			limits.ClientUploadTimeout, limits.ServerReadTimeout)
+	}
+	// 发布链路的**聚合**序关系（2026-10-04，审计 S4-06 / CTRL-01）：publish/validate 在
+	// 同一个 HTTP 请求里顺序做「编译 + 干跑」，两段各自派生预算时平台侧最晚给结论的时刻
+	// = 两段上限之和（默认 60 + 60 = 120 s），会越过客户端 90 s 的出站预算 ——
+	// 员工/AI 看到的是网络错误而不是带 code/hints 的结构化错误。总预算
+	// （PublishTotalBudget）是这条关系的载体：它必须严格小于客户端预算。
+	if !(limits.PublishTotalBudget < limits.ClientUploadTimeout) {
+		t.Errorf("序关系被破坏：平台侧总预算(%s) 必须严格小于客户端上传超时(%s)——"+
+			"否则平台会把结论给在客户端预算之外（员工看到的是网络错误，而平台正准备返回结构化错误）",
+			limits.PublishTotalBudget, limits.ClientUploadTimeout)
+	}
+	// 另一侧：总预算必须严格大于单次编译上限，否则控制台配的 compile_timeout_seconds
+	// 是一条**不可达**的设置（控制台又把它钳在 ServerReadTimeout=60 s 以内 ⇒ 任何合法
+	// 配置都不会被总预算截断编译阶段）。
+	if !(limits.PublishTotalBudget > limits.CompileTimeout) {
+		t.Errorf("序关系被破坏：平台侧总预算(%s) 必须严格大于编译超时(%s)——"+
+			"否则控制台的 compile_timeout_seconds 配了也用不满，是一项看不见的缩水",
+			limits.PublishTotalBudget, limits.CompileTimeout)
 	}
 	if !(limits.ServerReadTimeout >= limits.CompileTimeout) {
 		t.Errorf("序关系被破坏：服务端 ReadTimeout(%s) 必须 >= 编译超时(%s)（同步 publish 在 ReadTimeout 预算内返回）",

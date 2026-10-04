@@ -109,7 +109,7 @@ make docker-image      # 本地构建服务端镜像(发布镜像走更新服务
 make check             # gofmt + go vet + test-server + webadmin 测试与构建(发布门禁)
 make check-fast        # 开发循环:gofmt + vet + test-server-fast + webadmin 单测(不建 webadmin 产物,实测 15.6s)
 # 测试库:每个 DB 用例从模板库 picoaide_tmpl_<迁移哈希> 克隆(见 internal/serverstore/dbtest.go),
-#   不再逐用例重放 52 个迁移(单用例固定开销 1.5s → ~0.1s);换迁移/跨月会自动生成新模板库,
+#   不再逐用例重放 74 个迁移(单用例固定开销 1.5s → ~0.1s);换迁移/跨月会自动生成新模板库,
 #   模板不可用时自动回落到"空库 + 全量迁移"。提速实测见 ../../docs/decisions/2026-09-10-verification-speedup.md。
 PICOAI_ADMIN_PASSWORD=x bin/picoaide-server -addr :8080 -data ./data --bootstrap-admin admin
 go run scripts/mock-upstream.go 起假上游  # 无外网/无 key 环境验证网关

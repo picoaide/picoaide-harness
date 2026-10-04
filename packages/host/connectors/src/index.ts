@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { browserSameOriginMarker, isLoopbackRequest } from './loopback.ts'
-import { ConnectorStore, CredentialReadError, sameCredential } from './store.ts'
+import { ConnectorStore, credentialScopeKey, CredentialReadError, sameCredential } from './store.ts'
 import { ConnectorError, connectorErrorCodeOf } from './connector-error.ts'
 import { hostLocaleOf, hostT, type HostCopyKey, type HostLocale } from './host-copy.ts'
 import { runAuth } from './auth.ts'
@@ -38,6 +38,7 @@ import {
   mcpTransportFenceTargetWarning,
   whenMcpOutboundIdle,
 } from './mcp-transport-fence.ts'
+import { setConnectorOutboundNoticeSink } from './pinned-http.ts'
 import type {
   ConnectorAuthRequest,
   ConnectorDef,
@@ -335,6 +336,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     ctx.logger?.error('pico-connectors: MCP streamable-http 重定向栅栏安装失败，将拒绝注册此类连接器', error)
   })
 
+  // P8: the outbound transport may have to announce a degraded posture ONCE
+  // (proxy mode ⇒ the address pin is unreachable, because the proxy resolves the
+  // name). The transport has no `ctx`, so the plugin hands it the host logger
+  // here — this is the wiring that puts the line in the app log file instead of
+  // a bare stderr write. Registered at apply time, i.e. before any connector
+  // request can exist.
+  setConnectorOutboundNoticeSink(message => ctx.logger?.warn(`pico-connectors: ${message}`))
+
   // 连接器目录(0042):服务端为准——bootstrap 下发 connectors[](定义 JSON),
   // 客户端无内置定义,仅保留 options.connectors 作为开发/测试注入。
   let defs: ConnectorDef[] = [...(options.connectors ?? [])]
@@ -484,17 +493,10 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * and answers `not-applicable` (R13-B-P2-4).
    */
   const refreshable = new Set<string>()
-  /**
-   * ONE key constructor for the write and the read of {@link refreshable}.
-   *
-   * Split ownership is this repository's recurring defect shape (the judgement,
-   * the bookkeeping and the cleanup must agree on the key): `\u0000` cannot occur
-   * in a directory path, so scope and id can never be re-split ambiguously.
-   * @param scope - credential scope (`ConnectorStore.dir`) the credential came from.
-   * @param id - connector id.
-   * @returns the set key.
-   */
-  const refreshableKey = (scope: string, id: string): string => `${scope}\u0000${id}`
+  // The key of `refreshable` (and of every other registry below) is built by
+  // `credentialScopeKey` in `./store.ts` — ONE constructor for the judgement,
+  // the bookkeeping and the cleanup of "this account's credential file at this
+  // generation" (2026-10-04 audit C3-04 / C3-05 / C3-08).
 
   /**
    * The refresh target of one connector: only the OAuth facts a refresh needs.
@@ -547,7 +549,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const mcpAuthProvider = async (
     def: ConnectorDef,
     credential: ConnectorCredential | null,
-  ): Promise<{ authProvider?: McpTransportAuthProvider; handle?: LiveProviderHandle }> => {
+  ): Promise<{ authProvider?: McpTransportAuthProvider; handle?: Omit<LiveProviderHandle, 'scope'> }> => {
     const target = oauthTargetOf(def)
     if (target === null || credential?.accessToken === undefined) return {}
     // The provider (and any SDK 401 self-heal it drives) belongs to the ACCOUNT
@@ -614,7 +616,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
-      const handle: LiveProviderHandle = {
+      const handle: Omit<LiveProviderHandle, 'scope'> = {
         adopt: (tokens) => created.adopt(tokens),
         syncBaseline: (next) => { baseline.current = next },
       }
@@ -664,7 +666,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
             })
         },
       })
-      const handle: LiveProviderHandle = {
+      const handle: Omit<LiveProviderHandle, 'scope'> = {
         adopt: (tokens) => created.adopt(tokens),
         syncBaseline: (next) => { baseline.current = next },
       }
@@ -686,6 +688,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * `adopt` is the SDK-facing in-memory token mirror (`createOAuthProvider`).
    */
   interface LiveProviderHandle {
+    /**
+     * The account scope this handle's transport was registered under
+     * (`ConnectorStore.dir`).
+     *
+     * A refresh result is fed only to handles of ITS OWN scope: the callback
+     * can run after the session moved on, and a transport that belongs to the
+     * next account must never be handed the previous account's access token
+     * (2026-10-04 audit C3-04).
+     */
+    scope: string
     adopt: (tokens: RefreshedTokens) => void
     /**
      * Advance the provider's CAS baseline after tokens are adopted from a
@@ -707,13 +719,18 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * only AFTER their transport actually loaded, so a registration that was
    * superseded — or whose plugin failed to load — can never displace the handle
    * of the transport that is really in use.
+   *
+   * The outer key stays the connector id (the map is cleared wholesale on a
+   * session change and one serverName belongs to one transport), while the
+   * ACCOUNT is carried on each handle — the fan-out below is what must not
+   * cross scopes, and it reads the scope off the handle it is about to feed.
    */
   const liveProviders = new Map<string, Map<string, LiveProviderHandle>>()
 
   /** Install (or replace) the live handle of one registered server. */
-  function installLiveProvider(id: string, serverName: string, handle: LiveProviderHandle): void {
+  function installLiveProvider(scope: string, id: string, serverName: string, handle: Omit<LiveProviderHandle, 'scope'>): void {
     const byServer = liveProviders.get(id) ?? new Map<string, LiveProviderHandle>()
-    byServer.set(mcpServerKey(id, serverName), handle)
+    byServer.set(mcpServerKey(id, serverName), { ...handle, scope })
     liveProviders.set(id, byServer)
   }
 
@@ -725,13 +742,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     if (byServer.size === 0) liveProviders.delete(id)
   }
 
-  /** Every live handle of one connector (an out-of-band refresh fans out to all). */
-  function liveHandlesOf(id: string): Iterable<LiveProviderHandle> {
-    return liveProviders.get(id)?.values() ?? []
+  /**
+   * Every live handle of one connector **in one account scope** (an out-of-band
+   * refresh fans out to all of them, and to none of another account's).
+   * @param scope - account scope the refreshed credential belongs to.
+   * @param id - connector id.
+   */
+  function liveHandlesOf(scope: string, id: string): Iterable<LiveProviderHandle> {
+    return [...(liveProviders.get(id)?.values() ?? [])].filter(handle => handle.scope === scope)
   }
 
   /**
-   * The most recent credential **our own** refresher produced, per connector.
+   * The most recent credential **our own** refresher produced, per (account
+   * scope, connector).
    *
    * `registerMcp` reads the credential once and builds the provider from that
    * snapshot only later (after discovery / the outbound fence), so a refresh
@@ -742,6 +765,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * `updatedAt` against the snapshot's: a later interactive re-authorization
    * (or manual credential replacement) has a larger `updatedAt` and is never
    * overwritten, while a refresh that landed mid-registration is adopted.
+   *
+   * The key carries the account scope, unlike before the 2026-10-04 audit
+   * (C3-04): the session-change sequence is `teardownAll()` (which clears this
+   * map) → `await syncServerDefs()` (a real bootstrap round trip) →
+   * `reconfigureUser()`, and a refresh that completes inside that window
+   * REPOPULATES the map for the account being left. Keyed by the connector id
+   * alone, the next account's registration found that entry, saw a newer
+   * `updatedAt` than its own credential and adopted the previous account's
+   * tokens — into its provider, its handshake and, for a stdio connector, the
+   * child's environment.
    */
   const latestRefresh = new Map<string, { tokens: RefreshedTokens; updatedAt: number; credential: ConnectorCredential }>()
 
@@ -755,16 +788,19 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * landed while this registration was still building the provider must be
    * adopted. `updatedAt` orders both correctly because every credential write
    * goes through the store's exclusive read-modify-write (see ConnectorStore).
+   * @param scope - account scope the registration's credential came from
+   *   (`store.dir`), which is the only scope whose refresh result may be adopted.
    * @param id - connector id the provider belongs to.
    * @param handle - the provider created for the current registration.
    * @param snapshot - the credential the provider was built from.
    */
   function adoptLatestRefresh(
+    scope: string,
     id: string,
-    handle: LiveProviderHandle,
+    handle: Omit<LiveProviderHandle, 'scope'>,
     snapshot: ConnectorCredential | null | undefined,
   ): void {
-    const latest = latestRefresh.get(id)
+    const latest = latestRefresh.get(credentialScopeKey(scope, id))
     if (latest === undefined) return
     if (latest.updatedAt <= (snapshot?.updatedAt ?? 0)) return
     handle.adopt(latest.tokens)
@@ -786,7 +822,23 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // Refresh writes are compare-and-update against the credential the refresh
     // read: a disconnect, a newer interactive re-authorization, or a user
     // switch must make the stale result a no-op (2026-09-16 audit E5/E6).
-    writeIfUnchanged: (id, expected, patch) => store.updateCredentialIfUnchanged(id, expected, patch),
+    //
+    // `scope` is the scope the refresh READ from, passed back by the engine —
+    // never "the scope that happens to be current when the write runs". The
+    // store closure used to be resolved at write time, i.e. after the token
+    // endpoint round trip, so a session switch during that round trip pointed
+    // the compare at the NEXT account's file; when that file was a
+    // field-for-field copy of the credential the refresh started from — a
+    // provisioned/copied credential file, which this plugin's own dead-grant
+    // note calls a real scenario — the compare HIT and one account's tokens were
+    // written into the other's store (2026-10-04 audit C3-08). The instance is
+    // resolved ONCE and the guard reads THAT instance's directory, so the write
+    // can never land anywhere but the store the refresh read from.
+    writeIfUnchanged: (scope, id, expected, patch) => {
+      const target = store
+      if (target.dir !== scope) return Promise.resolve(null)
+      return target.updateCredentialIfUnchanged(id, expected, patch)
+    },
     scope: () => store.dir,
     target: (id) => {
       const def = defs.find(entry => entry.id === id)
@@ -795,9 +847,15 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // Resolved per refresh call (a language switch must not need a restart) and
     // used for the failure text of the sweep's own refreshes.
     locale: () => locale(),
-    onRefreshed: (id, tokens, persisted) => {
+    onRefreshed: (scope, id, tokens, persisted) => {
       // The engine just wrote the credential; mirror it so the panel shows the
       // new expiry without a disk read, then tell the rest of the host.
+      //
+      // `scope` is the account the refreshed credential belongs to — the write
+      // already landed in THAT account's own file, and everything below must be
+      // keyed or filtered by it: this callback can run after the session moved
+      // on (a switch landing during the CAS), and the next account's transports
+      // must never be handed this account's token (2026-10-04 audit C3-04).
       setState(id, { expiresAt: tokens.expiresAt, refreshedAt: Date.now(), refreshToken: true })
       // The in-memory mirror is NOT the store: a transport that outlives this
       // refresh keeps the **consumed** refresh token and would present it on its
@@ -808,8 +866,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // tests/token-refresh-live-provider.spec.ts.
       // The persisted write's `updatedAt` is what makes the catch-up in
       // adoptLatestRefresh decide correctly against a later re-authorization.
-      latestRefresh.set(id, { tokens, updatedAt: persisted.updatedAt, credential: persisted })
-      for (const handle of liveHandlesOf(id)) {
+      latestRefresh.set(credentialScopeKey(scope, id), { tokens, updatedAt: persisted.updatedAt, credential: persisted })
+      for (const handle of liveHandlesOf(scope, id)) {
         handle.adopt(tokens)
         handle.syncBaseline(persisted)
       }
@@ -842,7 +900,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // one names the connector, so the failure stays searchable in the host
         // log while the refresh chain keeps working.
         try {
-          refreshLiveHeaders(announced, persisted)
+          refreshLiveHeaders(announced, persisted, scope)
         } catch (cause: unknown) {
           ctx.logger?.warn(`pico-connectors: ${id} 同步刷活头失败（已跳过；事件与重注册继续）`, cause)
         }
@@ -958,23 +1016,20 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * Key of one dead-grant marker: account scope + connector id, built in ONE
    * place so every read, write and delete agrees on it (a marker judged under a
    * different key than it was recorded under would silently re-arm, or never
-   * arm, the automatic recovery).
-   *
-   * NUL separates the halves: no filesystem path can contain it, and connector
-   * ids are already validated to `[A-Za-z0-9._-]`, so no two scope/id pairs can
-   * collide by concatenation.
+   * arm, the automatic recovery). That place is {@link credentialScopeKey}
+   * (`./store.ts`), shared with the refresh engine's single-flight slot and the
+   * registries that describe the same fact.
    */
-  const deadGrantKey = (scope: string, id: string): string => `${scope}\u0000${id}`
   /** Is the credential just read from THIS account's store the generation already proven dead? */
   const isDeadGrant = (scope: string, id: string, credential: ConnectorCredential): boolean =>
-    deadGrants.get(deadGrantKey(scope, id)) === credential.updatedAt
+    deadGrants.get(credentialScopeKey(scope, id)) === credential.updatedAt
   /** Record the generation whose grant the authorization server revoked, under ITS OWN account. */
   const markDeadGrant = (scope: string, id: string, credential: ConnectorCredential): void => {
-    deadGrants.set(deadGrantKey(scope, id), credential.updatedAt)
+    deadGrants.set(credentialScopeKey(scope, id), credential.updatedAt)
   }
   /** Re-arm automatic recovery for one account's connector (fresh generation / disconnect). */
   const clearDeadGrant = (scope: string, id: string): void => {
-    deadGrants.delete(deadGrantKey(scope, id))
+    deadGrants.delete(credentialScopeKey(scope, id))
   }
   /**
    * 一次刷新失败 ⇒ 行状态 + 终态标记。**唯一实现**：恢复、后台扫掠、面板按钮三条
@@ -994,7 +1049,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * @param credential - the credential generation the failing attempt used, or
    * `null` when the attempt had none (then no marker can be keyed to a generation).
    * @param outcome - the classified failure.
-   * @returns true when the failure was terminal (marker armed + row flipped).
+   * @returns true when the failure was terminal (marker armed; the row is
+   * flipped too, unless the session has moved to another account since — the
+   * caller's own decision, e.g. "skip registering this def" / "answer
+   * `auth-required`", is about the scope it asked about and stays true either
+   * way).
    */
   const applyRefreshFailure = (
     scope: string,
@@ -1004,7 +1063,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   ): boolean => {
     if (!isTerminalRefreshReason(outcome.reason)) return false
     if (credential !== null) markDeadGrant(scope, id, credential)
-    setState(id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
+    // The verdict belongs to `scope`, the row belongs to whoever is current:
+    // a forced refresh still on the wire when the session moves on reaches this
+    // line with the PREVIOUS account's scope, and writing it would leave the new
+    // account's healthy connector demanding a re-authorization that nothing
+    // undoes (see {@link setStateForScope}). The marker above is scope-keyed and
+    // keeps the terminal fact for the account it is about.
+    setStateForScope(scope, id, { status: 'unauthorized', everConnected: true, error: outcome.message, errorCode: 'auth-required' })
     return true
   }
   /**
@@ -1027,6 +1092,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   interface McpRegistration {
     /** Connector that owns the live registration. */
     id: string
+    /**
+     * Account scope (`ConnectorStore.dir`) this transport was registered under.
+     *
+     * A live transport is not just "this connector's" — it is this ACCOUNT's:
+     * a credential sweep can run after a session switch, and rendering the
+     * previous account's bearer onto the next account's transport is the leak
+     * `refreshLiveHeaders` filters on this field to prevent (2026-10-04 audit
+     * C3-04).
+     */
+    scope: string
     /**
      * The MCP endpoint this registration's transport talks to, for
      * streamable-http registrations only (stdio has no URL).
@@ -1080,12 +1155,16 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    *
    * Keyed by `serverName` exactly like {@link mcpRegistrations} (that map holds at
    * most one registration per name — upstream reserves the name per live
-   * instance), and the owner id travels with the record so a refresh of one
-   * connector can never write into another's record. The record is handed over
-   * (removed here) when its registration publishes, and dropped when that
-   * registration is superseded, fails to load, or is retired.
+   * instance), and **both the owner id and the account scope** travel with the
+   * record: the owner id keeps one connector's refresh out of another
+   * connector's record, and the scope keeps one ACCOUNT's credential out of the
+   * next account's transport (2026-10-04 audit C3-04 — a refresh that completes
+   * after a session switch would otherwise render the previous account's access
+   * token onto whatever record currently holds that serverName). The record is
+   * handed over (removed here) when its registration publishes, and dropped when
+   * that registration is superseded, fails to load, or is retired.
    */
-  const pendingLiveHeaders = new Map<string, { id: string, headers: Record<string, string> }>()
+  const pendingLiveHeaders = new Map<string, { id: string, scope: string, headers: Record<string, string> }>()
 
   /** Forget an attached-but-unpublished record, unless it belongs to another owner. */
   const dropPendingLiveHeaders = (serverName: string, ownerId?: string): void => {
@@ -1307,6 +1386,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const teardownAll = async (): Promise<void> => {
     teardownController.abort(new Error(copy('flow.userSwitchedRegistration')))
     liveProviders.clear()
+    // Bounded-memory hygiene, NOT the scope barrier: both maps are keyed/filtered
+    // by the account scope, and a refresh completing later in this very switch
+    // (between the teardown and `reconfigureUser()`, across `syncServerDefs`'
+    // bootstrap round trip) repopulates them under the account being LEFT — which
+    // the next account can no longer reach (2026-10-04 audit C3-04).
     latestRefresh.clear()
     for (const registration of mcpRegistrations.values()) {
       try { registration.dispose() } catch { /* teardown never throws */ }
@@ -1454,6 +1538,33 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   }
 
   /**
+   * Row write for a fact that belongs to ONE account scope.
+   *
+   * `states` is the panel's projection of the **current** account's row (the
+   * list route merges it with the credentials of `store.dir`), so a fact
+   * derived under another scope must not be written into it: the row would then
+   * report account A's verdict while account B is the one on screen — and
+   * nothing would correct it, because the list route is a read-only projection,
+   * the failing refresh route has no re-projecting tail, and the sweep skips a
+   * credential that does not need renewal (2026-10-04 audit C3-04 residual).
+   *
+   * Same comparison, and the same discipline, as `writeIfUnchanged` above:
+   * REFUSE the write instead of letting it land in whatever store is current.
+   * The durable half of a terminal failure — the dead-grant marker, keyed by
+   * {@link credentialScopeKey} — is still recorded by
+   * {@link applyRefreshFailure}, so the scope that owns the fact shows it as
+   * soon as a restore pass runs under that account again; for the CURRENT
+   * account this write is what makes the row say it immediately.
+   * @param scope - account scope (`ConnectorStore.dir`) the fact belongs to.
+   * @param id - connector id.
+   * @param patch - row fields to write, when the scope is still current.
+   */
+  const setStateForScope = (scope: string, id: string, patch: Partial<ConnectorState>): void => {
+    if (scope !== store.dir) return
+    setState(id, patch)
+  }
+
+  /**
    * Mirror a credential's token facts onto the row state. Called wherever a
    * credential is read or written, so the panel's poll never touches the disk
    * and still shows "valid until …" / the manual-refresh affordance.
@@ -1517,7 +1628,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
   const noteCredential = (scope: string, id: string, credential: ConnectorCredential | null): void => {
     // Live set, so the list route can still report the manual-refresh
     // affordance while the row is idle (state is only written on transitions).
-    const key = refreshableKey(scope, id)
+    const key = credentialScopeKey(scope, id)
     if (credential?.refreshToken === undefined) refreshable.delete(key)
     else refreshable.add(key)
     setState(id, {
@@ -1924,7 +2035,9 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     try {
       const credential = await target.readCredential(def.id)
       if (target.dir !== store.dir) return
-      refreshLiveHeaders(def, credential)
+      // The scope this credential belongs to is the one the store it was read
+      // from resolved — never re-derived after the await.
+      refreshLiveHeaders(def, credential, target.dir)
     } catch (cause: unknown) {
       // The serialized rebuild below re-reads the credential and reports its own
       // failures; a failed hand-off must not take the event listener down.
@@ -1966,9 +2079,14 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
    * `connected`.
    * @param def - the connector whose credential changed.
    * @param credential - the credential as it is on disk now.
+   * @param scope - account scope that credential belongs to (`store.dir` of the
+   *   store it was read from). A record belonging to another scope is not this
+   *   credential's transport, so it is never written: the sweep can run after a
+   *   session switch, and the next account's record must not receive the
+   *   previous account's bearer (2026-10-04 audit C3-04).
    * @returns how many live transports were refreshed.
    */
-  const refreshLiveHeaders = (def: ConnectorDef, credential: ConnectorCredential | null): number => {
+  const refreshLiveHeaders = (def: ConnectorDef, credential: ConnectorCredential | null, scope: string): number => {
     let refreshed = 0
     /** Apply one rendered credential to one live record. THE one sweep. */
     const applyTo = (server: ConnectorMcp, live: Record<string, string>): void => {
@@ -1997,20 +2115,25 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // registration the refresh was supposed to protect still went to the wire
       // with a dead bearer and failed with `Server returned 401 after
       // re-authentication` (round-11 review J2-N2). Ownership is still the only
-      // criterion (`def.id`): another connector's record is never written, in
-      // either source.
+      // criterion (`def.id` AND the account scope): another connector's — or
+      // another account's — record is never written, in either source.
       const registration = mcpRegistrations.get(server.serverName)
-      if (registration !== undefined && registration.id === def.id && registration.liveHeaders !== undefined) {
+      if (
+        registration !== undefined
+        && registration.id === def.id
+        && registration.scope === scope
+        && registration.liveHeaders !== undefined
+      ) {
         // A published registration is the record source for this name; when it
-        // belongs to another connector the name was taken over and this refresh is
-        // not about that transport (CN-4).
+        // belongs to another connector (or another account) the name was taken
+        // over and this refresh is not about that transport (CN-4).
         applyTo(server, registration.liveHeaders)
       }
       const pending = pendingLiveHeaders.get(server.serverName)
       // The pending record is the one this connector's in-flight registration
       // will read; it exists only between attach and publication, so an owner
       // match here is always the NEWER of the two.
-      if (pending !== undefined && pending.id === def.id) applyTo(server, pending.headers)
+      if (pending !== undefined && pending.id === def.id && pending.scope === scope) applyTo(server, pending.headers)
     }
     return refreshed
   }
@@ -2404,10 +2527,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
      *
      * Deliberately synchronous: this closes the window rather than moving it, and
      * `latestRefresh` is the same source `adoptLatestRefresh` uses, so "which
-     * generation is newest" has one answer on both paths.
+     * generation is newest" has one answer on both paths. The lookup is keyed by
+     * the scope captured next to THIS registration's entry credential, so a
+     * result another account's in-flight refresh left behind is unreachable
+     * rather than merely cleared (2026-10-04 audit C3-04).
      */
     const catchUpEntryCredential = (): void => {
-      const latest = latestRefresh.get(def.id)
+      const latest = latestRefresh.get(credentialScopeKey(credentialScope, def.id))
       if (latest === undefined || latest.updatedAt <= credentialGeneration) return
       effectiveCredential = latest.credential
       credentialGeneration = latest.updatedAt
@@ -2504,7 +2630,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // `unregisterMcp`, which drops the records of the servers it retires, and the
       // retry is the SAME registration whose record object the transport will read.
       const publishPendingLiveHeaders = (): void => {
-        pendingLiveHeaders.set(server.serverName, { id: def.id, headers: renderedHeaders.headers })
+        pendingLiveHeaders.set(server.serverName, { id: def.id, scope: credentialScope, headers: renderedHeaders.headers })
       }
       if (providerSuppliesAuthorization && auth.authProvider !== undefined) {
         attachMcpLiveHeaders(auth.authProvider, renderedHeaders.headers)
@@ -2635,8 +2761,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       // in the same synchronous block, so a refresh that landed while the
       // plugin was loading cannot slip between install and adopt.
       if (auth.handle !== undefined) {
-        installLiveProvider(def.id, server.serverName, auth.handle)
-        adoptLatestRefresh(def.id, auth.handle, effectiveCredential)
+        // The scope recorded here (and used by the catch-up right below) is the
+        // one captured at THIS registration's entry read, next to the credential
+        // itself — not `store.dir` re-read after the handshake awaits.
+        installLiveProvider(credentialScope, def.id, server.serverName, auth.handle)
+        adoptLatestRefresh(credentialScope, def.id, auth.handle, effectiveCredential)
       }
       // P2-23 kept: the map holds at most one registration per server key, so
       // the fiber recorded here is the only live instance for that name — and
@@ -2653,6 +2782,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       dropPendingLiveHeaders(server.serverName, def.id)
       mcpRegistrations.set(server.serverName, {
         id: def.id,
+        scope: credentialScope,
         // Only the http shape has an endpoint; stdio registrations leave it out,
         // so they can never make an http rebuild think it is not alone.
         ...(server.transport === 'streamable-http' ? { endpoint: streamableHttpUrl(server, locale()).toString() } : {}),
@@ -3072,12 +3202,13 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
     // The card renders "有效期至 …" from these facts: a disconnected connector
     // must not keep advertising the token it no longer has. Keyed the same way
     // the entry was written: the credential just removed came from THIS store.
-    refreshable.delete(refreshableKey(store.dir, id))
+    refreshable.delete(credentialScopeKey(store.dir, id))
     lastAnnouncedToken.delete(id)
     // No credential and no live transports remain (unregisterMcp dropped their
     // handles): the cached refresh result must not be adopted by a later
-    // re-registration under a NEW authorization.
-    latestRefresh.delete(id)
+    // re-registration under a NEW authorization. Keyed like every other write of
+    // this fact — the credential just removed came from THIS account's store.
+    latestRefresh.delete(credentialScopeKey(store.dir, id))
     // The marker belongs to the account whose credential was just removed.
     clearDeadGrant(store.dir, id)
     liveProviders.delete(id)
@@ -3281,7 +3412,7 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
       for (const def of defs) {
         const state = states.get(def.id)
         if (state?.status !== 'connected' && state?.status !== 'unauthorized' && state?.status !== 'error') continue
-        // 作用域与凭据取自同一个 store 实例（见 {@link deadGrantKey}）。
+        // 作用域与凭据取自同一个 store 实例（见 {@link credentialScopeKey}）。
         const target = store
         const scope = target.dir
         let credential
@@ -3406,8 +3537,8 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
           // so a slow disk never delays the panel's 2s poll.
           expiresAt: state.expiresAt ?? null,
           refreshedAt: state.refreshedAt ?? null,
-          canRefresh: (refreshable.has(refreshableKey(scope, def.id)) || state.refreshToken === true) && oauthTargetOf(def) !== null,
-          refreshing: tokenRefresher.isRefreshing(def.id),
+          canRefresh: (refreshable.has(credentialScopeKey(scope, def.id)) || state.refreshToken === true) && oauthTargetOf(def) !== null,
+          refreshing: tokenRefresher.isRefreshing(scope, def.id),
           ...state,
         }
       })
@@ -3456,7 +3587,11 @@ export function apply(ctx: Context, options: ConnectorsOptions = {}): void {
         // (the message itself is translatable).
         const terminal = applyRefreshFailure(scope, id, credential, outcome)
         if (!terminal && outcome.reason === 'transient') {
-          setState(id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
+          // Same scope gate as the terminal verdict above: a 5xx that belongs to
+          // the account this request started under must not paint the row of the
+          // account the user has since switched to (the sweep never revisits a
+          // credential that is still fresh, so that message would stay there).
+          setStateForScope(scope, id, { status: 'error', everConnected: Boolean(states.get(id)?.everConnected), error: outcome.message, errorCode: undefined })
         }
         return json(res, outcome.reason === 'not-applicable' ? 400 : 409, {
           error: outcome.message,

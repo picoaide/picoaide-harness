@@ -9,7 +9,14 @@
  * @module @picoaide/dsh-browser
  */
 
-import { NAVIGATE_LOAD_BOUND_MS, QUEUE_MIN_WORK_MS, TOOL_DEADLINE_MARGIN_MS } from './budgets.ts'
+import {
+  BROWSER_TOOL_TIMEOUT_MS,
+  FRAME_CONTEXT_WAIT_MS,
+  FRAME_INDEX_SETTLE_MS,
+  NAVIGATE_LOAD_BOUND_MS,
+  QUEUE_MIN_WORK_MS,
+  TOOL_DEADLINE_MARGIN_MS,
+} from './budgets.ts'
 import { CdpSession } from './cdp.ts'
 import { BROWSER_PARTITION, BROWSER_SHELL_TOOLBAR_HEIGHT, type ElectronAdapter, type NativeBrowserWindow, type NativeSession, type NativeView } from './electron-adapter.ts'
 import { BrowserGuard, ensureSessionGuard, isLocalHostname, looksLikeAbsoluteUrl } from './guard.ts'
@@ -17,8 +24,8 @@ import { extractSnapshotWithMeta, extractTextWithMeta, type SnapshotExtractionMe
 import { captureScreenshot, captureScreenshotViaCdp } from './shots.ts'
 import { appSurfaceAllowsUrl, asSurfaceWebContents, surfaceLabel, type BrowserSurface, type SurfaceControlOwner, type SurfaceRegistry, type SurfaceWebContents } from './surface.ts'
 import { TabPool, gateRefusal, type TabReservation } from './pool.ts'
-import { BrowserStore, maskCredentialUrlsInText, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
-import { validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
+import { BrowserStore, stripSensitiveText, stripSensitiveUrl, type DownloadEntry, type HistoryEntry, type RecordActor } from './store.ts'
+import { maskContentText, validateEvalExpression, wrapEvalExpression, serializeEvalResult } from './eval-policy.ts'
 import { SENSITIVE_KEY_PATTERN, isExactProseSensitiveKey } from './sensitive.ts'
 import { browserError, BrowserError, type BrowserErrorCode } from './errors.ts'
 import { httpOriginOf } from './credential-site.ts'
@@ -69,6 +76,28 @@ const SCREENSHOT_PRIMARY_BUDGET_MS = 8_000
 const SCREENSHOT_FALLBACK_RESERVE_MS = 5_000
 /** Margin kept between the two bounded capture attempts and the tool deadline (ms). */
 const SCREENSHOT_DEADLINE_MARGIN_MS = 1_000
+/**
+ * Floor for one capture leg (ms) (C3-02, 2026-10-04).
+ *
+ * 语义在 C3-02 残段（2026-10-05）里收窄：它**不再是两条腿的钳位下限**，而是
+ * "这次调用还剩多少额度才值得尝试抓帧"的门槛（见
+ * {@link BrowserRuntime.screenshotBudgetViable}）。曾经的"额度不足就回落常量
+ * 8s + 5s"是一条结构断崖：合法排队 26.0s↔26.5s 之间两腿之和从 ≤ 剩余额度跳到
+ * 13s，生产 30s 配置实测 35.2s > 注册预算（上游 timeout-policy 把工具自己的诊断
+ * 换成笼统的 `tool call timed out after 30000ms`）。
+ */
+const SCREENSHOT_MIN_LEG_BUDGET_MS = 1_000
+/**
+ * Smallest configured call budget (ms) whose derivation can still hand ONE leg its
+ * full floor（`配置 − 余量 − 余量 ≥ 下限`）。
+ *
+ * 低于它的配置推导不出任何可用额度（`Config.timeoutMs` 比两倍余量还小），只可能
+ * 出现在用缩放预算的单测里；这种调用**排不了队**（queue budget < 1s），仍按收紧前
+ * 的缩放常量走两条腿（≤ 2s ≪ 注册预算 30s），见
+ * {@link BrowserRuntime.screenshotLegsBudgetMs}。生产配置是 30s，永远落在这条线
+ * 之上 —— 所以"剩余额度不足"再也不会把两腿弹回常量。
+ */
+const SCREENSHOT_MIN_CALL_BUDGET_MS = SCREENSHOT_MIN_LEG_BUDGET_MS + 2 * SCREENSHOT_DEADLINE_MARGIN_MS
 /** Op-log ring size. */
 const OP_LOG_LIMIT = 200
 /**
@@ -112,13 +141,32 @@ function hitSuffix(hit: BrowserInteractionHit | undefined): string {
 }
 
 /**
+ * 胶囊（= 用户持控制权时**唯一**可见的交还入口）的视图矩形（2026-10-04 P1）。
+ *
+ * 视图矩形**就是**它的布局：页面里 `.s-capsule` 只有 `left/right: 0; bottom: 0` 与一个
+ * 显式高度，其余尺寸全部来自这里 —— 所以这两个数必须与 `shell-pages.ts` 的
+ * `.s-capsule { height: … }` 逐像素一致（判据：`audit-1004-handback-visibility.spec.ts`
+ * 的跨文件对拍，改一侧不改另一侧即红）。
+ *
+ * 为什么从 172×34 放大（用户报告「AI 把浏览器交给我之后，我的控制按钮就不见了」）：
+ * 交权之后整个窗口里只剩这一块可点，172×34 里那个 24px 高的按钮在网页内容上方几乎
+ * 不可见；放大到 300×44 并把按钮加高到 30px 之后，「控制权在你手里 + 点这里交还」
+ * 才是一眼可读的。宽度**必须 ≤ CAPSULE_NOTICE_WIDTH**：失败提示要临时把视图放大到
+ * 提示矩形，若提示矩形比胶囊窄，胶囊会在弹 toast 的那几秒里被横向压扁。
+ */
+const CAPSULE_WIDTH = 300
+const CAPSULE_HEIGHT = 44
+/** 胶囊与提示矩形共用的右下角边距（改一处必须两处一起改）。 */
+const CAPSULE_MARGIN = 16
+/**
  * 胶囊态「提示可见」时临时放大的 overlay 矩形（2026-09-21 壳层缺陷 #7）。
  *
- * 胶囊视图只有 172×34，而 overlay 页的失败 toast 是 `position: fixed` 的**页面级**
- * 提示 —— 它只能在视图矩形内渲染，超出部分被原生视图裁掉：胶囊态下失败文案只剩
- * 顶部一条、还压在胶囊上（把 2026-09-15「失败必须可见」的修复抵消掉）。
- * 放大矩形与胶囊共用**右下角锚点**（右/下各留 16px），胶囊本体由页面 CSS 锚在视图
- * 底部，所以视觉上胶囊一动不动，只是它上方多出一块能放 toast 的区域。
+ * 胶囊视图装不下 overlay 页里 `position: fixed` 的**页面级**失败 toast —— 它只能在
+ * 视图矩形内渲染，超出部分被原生视图裁掉：胶囊态下失败文案只剩顶部一条、还压在胶囊
+ * 上（把 2026-09-15「失败必须可见」的修复抵消掉）。
+ * 放大矩形与胶囊共用**右下角锚点**（右/下各留 CAPSULE_MARGIN），胶囊本体由页面 CSS
+ * 锚在视图底部，所以视觉上胶囊一动不动，只是它上方多出一块能放 toast 的区域。
+ * 宽度与胶囊**相同**（300）：两个状态下胶囊横向尺寸逐像素一致，弹 toast 不横跳。
  */
 const CAPSULE_NOTICE_WIDTH = 300
 const CAPSULE_NOTICE_HEIGHT = 116
@@ -542,14 +590,35 @@ export class BrowserRuntime {
   private shellOrigin: string | undefined
   private lastAgentId = ''
   /**
+   * Deadline **ownership stack**: one entry per agent operation currently inside
+   * the pool's critical section (epoch ms), innermost last — R4-B-15, C3-01.
+   *
+   * 为什么是"所有权栈"而不是一个共享槽（2026-10-04 审计 C3-01）：池子是**串行
+   * 互斥**，排队者会先完成自己的登记、前一个操作随后才 unwind —— 单个可变槽 +
+   * `finally` 还原时，前一个操作把它自己捕获的 `undefined` 写回槽，**抹掉排队者
+   * 的 deadline**，之后排队者的每条 CDP 命令都拿到完整工具预算（生产 30s）而不是
+   * 「deadline − now」，R4-B-15 专门修的收紧在**任何两个操作重叠时整段失效**。
+   *
+   * 三条不变量：
+   *  ① 入栈/出栈都发生在**临界区内**（{@link withAgentAttribution} 里包住 body 的
+   *     try/finally），所以栈里只会有"真正持有互斥"的操作 —— 排队中的操作不会把
+   *     自己的 deadline 暴露给正在跑的前一个操作（后者预算更长时那会是一次放松）；
+   *  ② 出栈按**身份**移除自己那一条，绝不"还原进入前的快照"、也绝不弹栈顶 ——
+   *     前一个操作的 unwind 不可能碰到后来者的条目；
+   *  ③ 同一个操作内部若有嵌套调用，内层在外层之上，{@link cdpCallBudgetMs} 取的是
+   *     最内层（当前正在执行的那一个）。
+   */
+  private readonly activeOperationDeadlines: Array<{ at: number }> = []
+  /**
    * Absolute deadline of the agent operation currently inside the critical
    * section (epoch ms), or undefined outside one — R4-B-15.
    *
-   * Set by {@link withAgentAttribution} before the pool is entered and cleared
-   * when the operation ends. It is the reference both the CDP budget provider
-   * ({@link cdpCallBudgetMs}) and the pool queue budget are derived from.
+   * 这是 {@link activeOperationDeadlines} 的**只读投影**（栈顶 = 最内层活动操作）；
+   * {@link cdpCallBudgetMs} 与审计探针读的都是它。
    */
-  private activeOperationDeadlineAt: number | undefined
+  private get activeOperationDeadlineAt(): number | undefined {
+    return this.activeOperationDeadlines.at(-1)?.at
+  }
   readonly pool: TabPool
   store: BrowserStore
 
@@ -1054,7 +1123,11 @@ export class BrowserRuntime {
       }
     }
     return await this.withAgentAttribution('browser_open', async () => {
-      const reservation = await this.pool.reserveTab(signal)
+      // C3-03（2026-10-04）：槽位等待也必须按**剩余额度**收紧 —— 它是固定 5s 时，
+      // 排队 26s 后的 browser_open 仍然会等到 26 + 5 + 加载 > 30s 工具预算，池子
+      // 自己那句可执行的 "timed out waiting for a tab slot … close a tab first"
+      // 就会被上游 timeout-policy 换成笼统超时（审计实测 30.9s）。
+      const reservation = await this.pool.reserveTab(signal, this.operationRemainingMs())
       try {
         return await this.createTabReal(url, signal, undefined, 'ai', inheritSecretsFrom, reservation, deadlineAt)
       } catch (error) {
@@ -1392,20 +1465,26 @@ export class BrowserRuntime {
         return { x: Math.max(0, w - 240), y: BROWSER_SHELL_TOOLBAR_HEIGHT, width: 224, height: 244 }
       case 'capsule':
       default:
-        // Compact capsule: right-aligned inside its own view, 16px from the
-        // window edges; kept narrow so it blocks as little page as possible.
+        // 用户持控制权时的常驻胶囊：右下角锚点（边距 CAPSULE_MARGIN），尺寸见
+        // CAPSULE_WIDTH/HEIGHT 的说明 —— 它是这一状态下**唯一**的控制入口，所以
+        // 按"一眼看得见"取值，而不是按"少挡页面"取值。
         // 2026-09-21（壳层缺陷 #7）：有失败提示要显示时临时放大到能放下 toast 的
-        // 矩形 —— 同一个右下角锚点（右/下各 16px），胶囊本体由页面 CSS 锚在视图
+        // 矩形 —— 同一个右下角锚点、同一个宽度，胶囊本体由页面 CSS 锚在视图
         // 底部，因此视觉位置不变，只是上方多出一块 toast 区域。
         if (this.overlayNotice) {
           return {
-            x: Math.max(0, w - 16 - CAPSULE_NOTICE_WIDTH),
-            y: Math.max(0, h - 16 - CAPSULE_NOTICE_HEIGHT),
+            x: Math.max(0, w - CAPSULE_MARGIN - CAPSULE_NOTICE_WIDTH),
+            y: Math.max(0, h - CAPSULE_MARGIN - CAPSULE_NOTICE_HEIGHT),
             width: CAPSULE_NOTICE_WIDTH,
             height: CAPSULE_NOTICE_HEIGHT,
           }
         }
-        return { x: Math.max(0, w - 188), y: Math.max(0, h - 50), width: 172, height: 34 }
+        return {
+          x: Math.max(0, w - CAPSULE_MARGIN - CAPSULE_WIDTH),
+          y: Math.max(0, h - CAPSULE_MARGIN - CAPSULE_HEIGHT),
+          width: CAPSULE_WIDTH,
+          height: CAPSULE_HEIGHT,
+        }
     }
   }
 
@@ -2132,9 +2211,7 @@ export class BrowserRuntime {
     budget: { deadlineAt?: number | undefined } = {},
   ): Promise<T> {
     const callerAgent = this.lastAgentId
-    const deadlineAt = budget.deadlineAt ?? Date.now() + this.options.timeoutMs - TOOL_DEADLINE_MARGIN_MS
-    const previousDeadline = this.activeOperationDeadlineAt
-    this.activeOperationDeadlineAt = deadlineAt
+    const deadlineAt = budget.deadlineAt ?? Date.now() + this.toolBudgetMs() - TOOL_DEADLINE_MARGIN_MS
     // The queue budget is what is left of the deadline once room is kept for the
     // operation itself: a caller that would blow its own deadline while merely
     // waiting now fails with a readable error instead of a generic timeout.
@@ -2143,9 +2220,11 @@ export class BrowserRuntime {
       return await this.pool.withOperation(tool, async () => {
         const previous = this.lastAgentId
         this.lastAgentId = callerAgent
+        const owned = this.claimOperationDeadline(deadlineAt)
         try {
           return await body()
         } finally {
+          this.releaseOperationDeadline(owned)
           this.lastAgentId = previous
         }
       }, signal, queueBudgetMs)
@@ -2155,9 +2234,26 @@ export class BrowserRuntime {
       // 25 分钟而界面上没有任何提示）。
       if (cause instanceof BrowserError && cause.code === 'window-controlled') this.noteControlBlock(tool)
       throw cause
-    } finally {
-      this.activeOperationDeadlineAt = previousDeadline
     }
+  }
+
+  /**
+   * 登记本操作对 deadline 槽的所有权（C3-01）。**必须**在临界区内调用，配对
+   * {@link releaseOperationDeadline}；返回的令牌就是所有权的唯一凭据。
+   */
+  private claimOperationDeadline(deadlineAt: number): { at: number } {
+    const owned = { at: deadlineAt }
+    this.activeOperationDeadlines.push(owned)
+    return owned
+  }
+
+  /**
+   * 释放本操作**自己**那条 deadline —— 按身份移除，不是"还原进入前的快照"、也不是
+   * 弹栈顶（C3-01：前一个操作的 unwind 不得抹掉后来者的 deadline）。
+   */
+  private releaseOperationDeadline(owned: { at: number }): void {
+    const index = this.activeOperationDeadlines.indexOf(owned)
+    if (index >= 0) this.activeOperationDeadlines.splice(index, 1)
   }
 
   /**
@@ -2219,9 +2315,42 @@ export class BrowserRuntime {
     return Math.max(0, Math.min(this.options.loadTimeoutMs, NAVIGATE_LOAD_BOUND_MS, remaining))
   }
 
+  /**
+   * 当前活动操作还剩多少额度（ms）—— 「按剩余额度收紧」的**唯一入口**
+   * （C3-01/C3-02/C3-03，2026-10-04）。
+   *
+   * 定义 = `操作 deadline − now − {@link TOOL_DEADLINE_MARGIN_MS}`，下限 0；没有
+   * 活动操作（用户路径 / 预热 / 恢复）时是 `+∞`（只有各腿自己的常量上限生效，行为
+   * 与收紧前逐字节一致）。
+   *
+   * 排队、等用户闸、等槽位已经花掉的时间都在里面扣掉了，所以每一条等待腿都按它
+   * 收紧之后，「内部等待之和」才真的落在注册预算内 —— 上游 timeout-policy 不会把
+   * 工具自己的、可执行的诊断换成笼统的 `tool call timed out after 30000ms`。
+   */
+  private operationRemainingMs(): number {
+    const deadlineAt = this.activeOperationDeadlineAt
+    if (deadlineAt === undefined) return Number.POSITIVE_INFINITY
+    return Math.max(0, deadlineAt - Date.now() - TOOL_DEADLINE_MARGIN_MS)
+  }
+
+  /**
+   * 本工具**注册在工具面上**的预算（ms）—— C3-02 残余③（2026-10-05）的唯一实现。
+   *
+   * `browser_*` 全部注册在 {@link BROWSER_TOOL_TIMEOUT_MS}（只有 `browser_wait_for`
+   * 自己带更长的 `deadlineAt`，不走这条推导），而 `Config.timeoutMs` 在配置面上是
+   * 可调的：**它只能把内部预算调小，不能把推导出的 deadline 调大**。否则
+   * deadline 跟着 60s 走、上游 timeout-policy 却在注册的 30s 到点时就替换整条结果
+   * —— 工具自己的诊断更晚才产生，模型只看到笼统的
+   * `tool call timed out after 30000ms`（复审实测：`timeoutMs = 60s` 时排队抓帧
+   * 37917/37922/37929ms > 注册 30000ms，与常量下限段是两个独立出口）。
+   */
+  private toolBudgetMs(): number {
+    return Math.min(this.options.timeoutMs, BROWSER_TOOL_TIMEOUT_MS)
+  }
+
   /** 本次调用还剩多少工具预算（ms）：超时预算与调用方 deadline 取小。 */
   private remainingToolBudgetMs(deadlineAt: number | undefined, startedAt: number): number {
-    const byTimeout = Math.max(0, this.options.timeoutMs - (Date.now() - startedAt))
+    const byTimeout = Math.max(0, this.toolBudgetMs() - (Date.now() - startedAt))
     if (deadlineAt === undefined) return byTimeout
     return Math.min(byTimeout, Math.max(0, deadlineAt - Date.now() - TOOL_DEADLINE_MARGIN_MS))
   }
@@ -2237,12 +2366,12 @@ export class BrowserRuntime {
    *
    * 现在的上限 = `min(工具预算, 当前操作的 deadline − now)`：操作 deadline 由
    * {@link withAgentAttribution} 在进入临界区前算出（工具层给了 `deadlineAt` 就用
-   * 它，否则按注册预算推导），所以排队/等闸花掉的时间不会被 CDP 腿重复花掉。
-   * 下限取 `min(250ms, 工具预算)`：额度只剩几毫秒时不该把一次正常的命令判死，
-   * 极小预算（测试里的 60ms）行为与改前逐字节一致。
+   * 它，否则按 {@link toolBudgetMs} 推导），所以排队/等闸花掉的时间不会被 CDP 腿
+   * 重复花掉。下限取 `min(250ms, 工具预算)`：额度只剩几毫秒时不该把一次正常的命令
+   * 判死，极小预算（测试里的 60ms）行为与改前逐字节一致。
    */
   private cdpCallBudgetMs(): number {
-    const toolBudget = this.options.timeoutMs
+    const toolBudget = this.toolBudgetMs()
     const deadlineAt = this.activeOperationDeadlineAt
     if (deadlineAt === undefined) return toolBudget
     const remaining = deadlineAt - Date.now()
@@ -2773,6 +2902,16 @@ export class BrowserRuntime {
         // BUG-05：接管检查与凭证窗口同一临界区（队列之后、真正的捕获之前），
         // 用户在这张图排队/渲染期间接管时不该把图交给模型。
         this.assertAgentStillAllowed('browser_screenshot')
+        // C3-02 残段：额度已经被排队/等闸吃到一条腿的下限以下时**直接结构化失败**
+        // （code `timeout`），不尝试任何抓帧。这一段的旧行为是回落到常量 8s + 5s，
+        // 合法排队 26–28s 的调用因此实测 35.2s > 注册 30s —— 上游 timeout-policy 把
+        // 工具自己的诊断换成笼统的 `tool call timed out after 30000ms`。快速失败时
+        // 本次调用只花掉排队那一段，仍落在注册预算内，且模型看到的是可执行的文案。
+        if (!this.screenshotBudgetViable()) {
+          const left = this.screenshotTotalBudgetMs()
+          this.record('browser_screenshot', resolved, `skipped: only ${String(left)}ms of the tool budget left when this call got its turn`, true)
+          throw browserError('timeout', `browser: screenshot skipped — the browser was busy and only ${String(left)}ms of the tool budget was left when this call got its turn (a capture needs at least ${String(SCREENSHOT_MIN_LEG_BUDGET_MS)}ms), so no frame was attempted; retry the screenshot now that the browser is idle`)
+        }
         let captured: string
         let primary: string
         try {
@@ -2820,7 +2959,12 @@ export class BrowserRuntime {
       // rewriting both into the generic "screenshot failed" wrapper (R7).
       // `window-controlled`（BUG-05 的接管检查点）同理：把"用户接管了"包装成
       // "截图失败"会让模型以为重试就能拿到图。
-      if (cause instanceof BrowserError && (cause.code === 'policy' || cause.code === 'window-controlled')) throw cause
+      // `timeout`（C3-02 残段的"额度不够，没抓"）第三条同理：它的原因不是"页面渲染
+      // 不了"，被 "the tab must be able to render …" 包起来会把模型指向错误的方向
+      // —— 这段文案本身也要能被模型直接执行（等浏览器空闲后重试）。
+      // 抓帧腿自己抛的 `timeout` 不会走到这里：它们在下面的 `catch (cause2)` 里已经
+      // 被合成成普通 Error（两条腿的原因都在文案里）。
+      if (cause instanceof BrowserError && (cause.code === 'policy' || cause.code === 'window-controlled' || cause.code === 'timeout')) throw cause
       // An empty capture (hidden window / background tab / zero-sized view)
       // must be a visible failure, never a silent 0-byte "screenshot" (P2-31).
       const message = cause instanceof Error ? cause.message : String(cause)
@@ -2839,20 +2983,82 @@ export class BrowserRuntime {
   }
 
   /**
-   * Budget for the native capture attempt. The renderer-side fallback needs a
-   * real share of the call budget, so a deployment that shortens `timeoutMs`
+   * 两条抓帧腿的预算（ms）—— C3-02（2026-10-04）的**唯一实现**。
+   *
+   * 序关系（`budgets.ts` 的硬约束）：**两条腿之和 ≤ 本次抓帧总额度 ≤ 本次操作剩余
+   * 额度**（{@link screenshotTotalBudgetMs} / {@link operationRemainingMs}），于是
+   * 「排队 + 用户闸 + 抓帧」之和落在注册预算内，上游 timeout-policy 不会把工具自己的
+   * 诊断（`capture did not settle within …ms`）换成笼统的
+   * `tool call timed out after 30000ms`。
+   *
+   * 收紧前这两条腿**只由 `options.timeoutMs` 推导**（常量 8s + 5s），从不看已耗时：
+   * 排在 25s 的前一个操作后面时 `排队(≤28s) + 8s + 5s` 结构上必然越界 —— 审计探针
+   * 实测 37.9s / 38.9s（工具预算 30s），与 navigate / CDP / 队列都已收紧的三条腿
+   * 不同族。
+   *
+   * 取值：总额度 `total` 按两条腿的**常量比例**（8s : 5s）分开 —— 额度充足（≥ 13s）
+   * 时逐值等于收紧前的 `8s + 5s`，不足时两条腿**同比例缩小**。比例 ≠ 常量，所以
+   * `primary + fallback = min(total, 13s) ≤ total` 在任何取值下都成立：C3-02 残段
+   * （2026-10-05）里那条「`total < 2 × 下限` 就回落常量 8s + 5s」的断崖被取消 ——
+   * 它让合法排队的 26.0s↔26.5s 之间两腿之和从 ≤ 剩余额度跳到 13s（生产实测 35.2s >
+   * 注册 30s）。额度真的不够时由 {@link screenshotBudgetViable} 在尝试任何抓帧之前
+   * 结构化失败，而不是先把额度花光。
+   *
+   * 唯一例外是**配置本身**小于 {@link SCREENSHOT_MIN_CALL_BUDGET_MS}（推导不出任何
+   * 可用额度，只有单测会用缩放预算落在这里，见该常量的注释）：保持收紧前的缩放常量，
+   * 此时调用排不了队、耗时 ≤ 2s ≪ 注册预算。
+   */
+  private screenshotLegsBudgetMs(): { primary: number; fallback: number } {
+    if (this.toolBudgetMs() < SCREENSHOT_MIN_CALL_BUDGET_MS) return scaledScreenshotLegs(this.toolBudgetMs())
+    return shareScreenshotBudget(this.screenshotTotalBudgetMs())
+  }
+
+  /**
+   * 本次抓帧的总额度（ms）—— 两条腿（与"够不够抓一帧"的判定）共用的唯一入口。
+   *
+   * `min(配置预算 − 余量, 本次操作剩余额度)`，下限 0；配置预算取
+   * {@link toolBudgetMs}（`Config.timeoutMs` 不得把推导 deadline 顶到注册预算之外）。
+   * 无活动操作时只有配置那一项生效（用户路径 / 事件回调腿行为不变）。
+   */
+  private screenshotTotalBudgetMs(): number {
+    return Math.max(0, Math.min(
+      Math.max(0, this.toolBudgetMs() - SCREENSHOT_DEADLINE_MARGIN_MS),
+      this.operationRemainingMs(),
+    ))
+  }
+
+  /**
+   * 这次调用还剩不剩得下**一条腿的下限**额度（C3-02 残段）。
+   *
+   * `false` ⇒ {@link screenshot} 在尝试任何抓帧之前抛结构化错误（code `timeout`），
+   * 而不是先花掉注定失败的额度：等前一个操作/等用户闸已经把额度吃到 1s 以下时，
+   * 两条腿无论如何都跑不完，硬跑只会让上游 timeout-policy 把工具自己的诊断换成
+   * 笼统的 `tool call timed out after 30000ms`（正是这条 finding 要消灭的形态）。
+   *
+   * 极小配置（{@link SCREENSHOT_MIN_CALL_BUDGET_MS} 以下）不在此列：那不是"等掉
+   * 的额度"，而是配置维度上的缩放预算，走历史常量。
+   */
+  private screenshotBudgetViable(): boolean {
+    if (this.toolBudgetMs() < SCREENSHOT_MIN_CALL_BUDGET_MS) return true
+    return this.screenshotTotalBudgetMs() >= SCREENSHOT_MIN_LEG_BUDGET_MS
+  }
+
+  /**
+   * Budget for the native capture attempt (`capturePage`), clamped by what is
+   * left of the operation deadline. The renderer-side fallback needs a real
+   * share of the call budget, so a deployment that shortens `timeoutMs`
    * shortens this bound with it instead of letting the native path overrun.
    */
   private screenshotPrimaryBudgetMs(): number {
-    return Math.min(
-      SCREENSHOT_PRIMARY_BUDGET_MS,
-      Math.max(1_000, this.options.timeoutMs - SCREENSHOT_FALLBACK_RESERVE_MS),
-    )
+    return this.screenshotLegsBudgetMs().primary
   }
 
   /**
    * Budget for the renderer-side (CDP) capture attempt: the reserve share of
-   * the call budget, never more than what the primary attempt left behind.
+   * the call budget, never more than what the primary attempt left behind — and
+   * never more than what is left of the operation deadline at the moment this
+   * leg starts (the two legs are re-derived per leg, so a primary that consumed
+   * its whole budget shrinks the fallback instead of the tool deadline).
    *
    * 2026-09-17 (real-device report, Windows client 2.7.5-beta.4): the primary
    * `capturePage()` attempt was bounded, but this fallback was awaited
@@ -2866,8 +3072,7 @@ export class BrowserRuntime {
    * upstream timeout policy.
    */
   private screenshotFallbackBudgetMs(): number {
-    const remaining = this.options.timeoutMs - this.screenshotPrimaryBudgetMs() - SCREENSHOT_DEADLINE_MARGIN_MS
-    return Math.max(1_000, Math.min(SCREENSHOT_FALLBACK_RESERVE_MS, remaining))
+    return this.screenshotLegsBudgetMs().fallback
   }
 
   /**
@@ -4375,6 +4580,44 @@ async function pageGlobalObjectId(tab: BrowserTab): Promise<string> {
 const NETWORK_IDLE_TICK_MS = 800
 
 /**
+ * 把一次抓帧的总额度按两条腿的**常量比例**（8s : 5s）分开（ms）。
+ *
+ * 不变量：`primary + fallback = min(total, 8s + 5s) ≤ total` —— 没有常量下限段，
+ * 所以"剩余额度不足时两腿之和反而变成 13s"这条断崖（C3-02 残段）结构上不可能再出现。
+ * 额度充足（≥ 13s）时逐值等于收紧前的 `8s + 5s`。
+ *
+ * @param total - 本次抓帧的总额度（{@link BrowserRuntime.screenshotTotalBudgetMs}）。
+ * @returns 原生腿与渲染器回落腿各自的预算。
+ */
+function shareScreenshotBudget(total: number): { primary: number; fallback: number } {
+  const safe = Math.max(0, total)
+  const full = SCREENSHOT_PRIMARY_BUDGET_MS + SCREENSHOT_FALLBACK_RESERVE_MS
+  const fallback = Math.min(SCREENSHOT_FALLBACK_RESERVE_MS, Math.round(safe * SCREENSHOT_FALLBACK_RESERVE_MS / full))
+  const primary = Math.min(SCREENSHOT_PRIMARY_BUDGET_MS, safe - fallback)
+  return { primary, fallback }
+}
+
+/**
+ * 收紧前的**缩放常量腿**（ms）—— 只在配置预算小于
+ * {@link SCREENSHOT_MIN_CALL_BUDGET_MS} 时使用（见
+ * {@link BrowserRuntime.screenshotLegsBudgetMs}）。
+ *
+ * 这是历史取值本身，不是"额度不足就回落"：它只由**配置**决定，与排队/等闸花掉多少
+ * 无关，所以它不会把任何生产配置的调用推出注册预算（两条腿合计 ≤ 2s）。
+ */
+function scaledScreenshotLegs(toolBudgetMs: number): { primary: number; fallback: number } {
+  const primary = Math.min(
+    SCREENSHOT_PRIMARY_BUDGET_MS,
+    Math.max(SCREENSHOT_MIN_LEG_BUDGET_MS, toolBudgetMs - SCREENSHOT_FALLBACK_RESERVE_MS),
+  )
+  const fallback = Math.max(
+    SCREENSHOT_MIN_LEG_BUDGET_MS,
+    Math.min(SCREENSHOT_FALLBACK_RESERVE_MS, toolBudgetMs - primary - SCREENSHOT_DEADLINE_MARGIN_MS),
+  )
+  return { primary, fallback }
+}
+
+/**
  * Resolve `attempt`, or reject once `budgetMs` elapses without it settling.
  *
  * `webContents.capturePage()` can stay pending forever on a window with no viz
@@ -4758,10 +5001,16 @@ function truncatedHeadLength(text: string, secret: string): number {
  *
  * R23 N2（2026-09-26）：这条漏斗同时是**内容出口**（`browser_get_text` 的页面正文、
  * `browser_get_snapshot` 的元素文本、`browser_eval` 的值级投影）的唯一共用点，所以
- * 结构脱敏（内嵌 URL 的 userinfo / 敏感查询串 / fragment，实现仍是 store 的
- * `maskCredentialUrlsInText`）挂在这里、并**先于** `secrets.length === 0` 的早退 ——
- * 注入凭据窗口之外 `filledSecrets` 为空，如果放在早退之后，URL 结构脱敏就只在
+ * 结构脱敏（{@link maskContentText} —— 内嵌 URL 的 userinfo / 敏感查询串 / fragment、
+ * 认证与 cookie 头取值、`<关键词> <opaque 串>`、`key=value` 敏感值，四趟只有
+ * `eval-policy.ts` 那一份实现）挂在这里、并**先于** `secrets.length === 0` 的早退
+ * —— 注入凭据窗口之外 `filledSecrets` 为空，如果放在早退之后，结构脱敏就只在
  * "本 tab 注入过凭据"时生效，同一段页面文本在 eval 与 get_text 两个出口又会分叉。
+ *
+ * C3-09（2026-10-04）：R23 N2 当时只把**四趟里的第一趟**（内嵌 URL）接了过来，
+ * `browser_get_text`/`browser_get_snapshot` 仍原样交出 `password=…` /
+ * `Authorization: Bearer …` / `api_key=…`，而 `browser_eval` 侧四趟齐全 —— 同一份
+ * 页面文本两个出口两个答案。现在两处调的是同一个 {@link maskContentText}。
  *
  * R24 N2（2026-09-26）：这一趟走 store 的 `content` 档（**整键判定**）。默认的 `url`
  * 档用 URL 面的**子串**词表（含 `key`/`code`/`sid`/`auth`），接进内容出口后把页面正文
@@ -4769,7 +5018,7 @@ function truncatedHeadLength(text: string, secret: string): number {
  * `?key=` → `****`）—— 与 R23 N3 刚修掉的"普通正文被改坏"是同一种损失，只是换了位置。
  * 落盘面（`stripSensitiveText`/`stripSensitiveUrl`）仍用 `url` 档，逐字节不变。 */
 function redactSecretsText(secrets: readonly string[], text: string, options: RedactOptions = {}): string {
-  let out = maskCredentialUrlsInText(text, 'content')
+  let out = maskContentText(text)
   if (secrets.length === 0) return out
   for (const secret of secrets) {
     if (secret === '') continue
@@ -4816,16 +5065,13 @@ function redactFilledSecrets(tab: BrowserTab, elements: BrowserSnapshotElement[]
   })
 }
 
-/** How long to wait for `Runtime.enable` to re-report existing execution
- * contexts, and the re-check interval (the enable response and the
- * `executionContextCreated` notifications race on the wire; Chromium reports
- * them alongside the reply, but a slow renderer can lag). */
-const FRAME_CONTEXT_WAIT_MS = 500
+/** Re-check interval while waiting for `Runtime.enable` to re-report existing
+ * execution contexts (the enable response and the `executionContextCreated`
+ * notifications race on the wire; Chromium reports them alongside the reply, but
+ * a slow renderer can lag). The wait itself, and the frame-index settle time, are
+ * `FRAME_CONTEXT_WAIT_MS` / `FRAME_INDEX_SETTLE_MS` in `budgets.ts` — they are
+ * legs of the `browser_eval` budget, so they live with the other budgets. */
 const FRAME_CONTEXT_POLL_MS = 10
-
-/** Extra settle time before refusing an index a dynamic page may still be
- * committing (a frame owner inserted a tick before its frame exists). */
-const FRAME_INDEX_SETTLE_MS = 150
 
 /** One entry of the DOM-ordered frame index (`frame: N`). */
 interface ResolvedFrame {

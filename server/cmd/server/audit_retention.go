@@ -35,12 +35,22 @@ var newAuditRetentionScheduler = func(db *sql.DB, tick time.Duration, nowFn func
 	return auditretention.NewScheduler(db, tick, nowFn)
 }
 
+// schedulerAuditRetention 是状态表里的登记名（日志与断言共用同一份字面量）。
+const schedulerAuditRetention = "audit_retention"
+
 // startAuditRetentionScheduler 启动审计保留策略调度器：启动先跑一轮（覆盖停机期间
 // 到期的条目），之后每 tick 一次；ctx 取消即退出（调度器内部自行处理）。
+//
+// S3-02（审计 2026-10-04，P2）：这条**也**要进调度器状态表（scheduler_status.go）——
+// 启动/关停日志此前只覆盖 6 条却声称"全部"，而审计保留正是"死了只有沉默"的清理者
+// （审计表随运行时长单调增长，与"本来就没变化"在运维面上同形）。读数按子系统如实
+// 登记：`auditretention.Scheduler` 只有 `Stopped()`（没有 Started/Runs/Errors 面），
+// 所以状态表只报"已启动 + 启动时刻"，计数一律 `unavailable`，**不填 0 冒充读数**。
 func startAuditRetentionScheduler(ctx context.Context, db *sql.DB, tick time.Duration) {
 	if db == nil {
 		return
 	}
-	s := newAuditRetentionScheduler(db, tick, nil)
-	s.Start(ctx)
+	obs := registerStartOnlyScheduler(schedulerAuditRetention, tick, schedulerSourceStartOnly)
+	newAuditRetentionScheduler(db, tick, nil).Start(ctx)
+	obs.markStarted()
 }

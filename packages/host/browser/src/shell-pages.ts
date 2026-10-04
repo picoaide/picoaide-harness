@@ -564,7 +564,11 @@ interface BrowserOverlayCopy extends BrowserFailureCopy {
   readonly handBackHint: string
   /** Tooltip of the toggle while an agent action is running. */
   readonly pauseHint: string
-  /** Capsule label while the user holds control. */
+  /**
+   * Capsule label while the user holds control. 2026-10-04: it states the
+   * *state* ("控制权在你手里"), while the button next to it states the
+   * *action* (交给 AI) — the pair is the one visible hand-back entry.
+   */
   readonly youInControl: string
   /** Busy-mask pill text (also the pill's initial markup). */
   readonly aiBusy: string
@@ -640,9 +644,9 @@ const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
     takeOver: '我来操作',
     handBack: '交给 AI',
     takeOverHint: '自己操作浏览器',
-    handBackHint: '交回给 AI 继续操作',
+    handBackHint: '控制权在你手里：点这里交还给 AI，AI 才能继续操作',
     pauseHint: '暂停 AI，自己操作',
-    youInControl: '你正在操作',
+    youInControl: '控制权在你手里',
     aiBusy: 'AI 正在操作',
     aiBusyPrefix: 'AI 正在操作 · ',
     aiWorkingPrefix: 'AI 操作中 · ',
@@ -719,9 +723,9 @@ const OVERLAY_COPY: Readonly<Record<HostLocale, BrowserOverlayCopy>> = {
     takeOver: 'Take over',
     handBack: 'Hand back to AI',
     takeOverHint: 'Take over the browser yourself',
-    handBackHint: 'Hand control back to the AI',
+    handBackHint: 'You have control: click here to hand it back so the AI can continue',
     pauseHint: 'Pause the AI and take over',
-    youInControl: 'You are in control',
+    youInControl: 'You have control',
     aiBusy: 'AI is working',
     aiBusyPrefix: 'AI is working · ',
     aiWorkingPrefix: 'AI is working · ',
@@ -863,19 +867,26 @@ export function browserOverlayHtml(locale: HostLocale): string {
   body[data-mode="mask"] .surface.s-mask { display: flex; }
 
   /* ---------- capsule (AI 指示) ---------- */
-  /* 2026-09-21（壳层缺陷 #7）：胶囊**钉在视图底部**、高度恒为 34px，而不是撑满视图。
+  /* 2026-09-21（壳层缺陷 #7）：胶囊**钉在视图底部**、高度恒定，而不是撑满视图。
      宿主在弹失败 toast 时会把 overlay 视图临时放大到 300×116（同一个右下角锚点），
      如果胶囊继续 height:100% 就会被拉成一整块 300×116 的大药丸盖住页面；
      锚到底部后视觉位置/尺寸与紧凑态逐像素一致，放大的只是它上方那块 toast 区域。
-     紧凑态（视图就是 172×34）下 left/right/bottom/height 与原来的 100%/100% 等价。 */
-  .s-capsule { position: absolute; left: 0; right: 0; bottom: 0; height: 34px; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); box-shadow: 0 4px 16px rgba(0,0,0,.12); cursor: pointer; overflow: hidden; }
-  .s-capsule .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+     2026-10-04（P1 交还入口）：胶囊**只在用户持控制权时可见**（宿主把蒙版设成默认
+     态，非受控时 ui.mode === 'mask'），所以这一块就是那唯一一个交还入口的载体，
+     按"一眼看得见"取值：视图矩形由 runtime.overlayBounds('capsule') 给出
+     （300×44、右/下各 16px），这里的高度必须与 CAPSULE_HEIGHT 逐像素一致
+     （跨文件对拍见 tests/audit-1004-handback-visibility.spec.ts）—— left/right/bottom
+     撑满视图宽度，height 固定 44px。 */
+  .s-capsule { position: absolute; left: 0; right: 0; bottom: 0; height: 44px; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 999px; background: var(--surface-raised); box-shadow: 0 6px 20px rgba(0,0,0,.18); cursor: pointer; overflow: hidden; }
+  .s-capsule .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); flex: none; }
   .s-capsule .dot.busy { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
   .s-capsule .dot.paused { background: var(--warning); }
-  .s-capsule .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-capsule .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   /* The toggle is ALWAYS visible (never hover-revealed): 我来操作 / 交给 AI is
-     the single control for handing the browser over and taking it back. */
-  .s-capsule .take { flex: none; display: inline-flex; align-items: center; height: 24px; padding: 0 10px; font-size: 12px; background: var(--warning); border-color: var(--warning); color: var(--on-warning); }
+     the single control for handing the browser over and taking it back.
+     2026-10-04：30px 高 + 13px 粗体 —— 交权之后这是整个窗口里唯一可点的东西，
+     24px 的小按钮在网页内容上几乎看不见（用户报告"控制按钮不见了"）。 */
+  .s-capsule .take { flex: none; display: inline-flex; align-items: center; height: 30px; padding: 0 14px; font-size: 13px; font-weight: 600; background: var(--warning); border-color: var(--warning); color: var(--on-warning); }
 
   /* ---------- panel (AI 活动) ---------- */
   .s-panel { flex-direction: column; background: var(--surface-raised); border-left: 1px solid var(--border); box-shadow: -8px 0 28px rgba(0,0,0,.10); }
@@ -1042,8 +1053,8 @@ export function browserOverlayHtml(locale: HostLocale): string {
   /**
    * 胶囊态下请求宿主临时放大 overlay 视图（2026-09-21 壳层缺陷 #7）。
    *
-   * 胶囊视图只有 172×34，而 #otoast 是 position:fixed 的页面级提示 —— 它只能在
-   * 视图矩形内渲染，超出部分被原生视图裁掉（失败文案只剩顶部一条还压在胶囊上）。
+   * 胶囊视图装不下 #otoast（position:fixed 的页面级提示）—— 它只能在视图矩形内
+   * 渲染，超出部分被原生视图裁掉（失败文案只剩顶部一条还压在胶囊上）。
    * 刻意**不走 post()**：post 失败会弹 toast，而 toast 又回到这里 ⇒ 自激循环。这条
    * 信号只是"提示能不能看清"的优化，失败静默（最坏情况退化成旧的被裁行为）。
    * 非胶囊态不发（面板/查看器/蒙版的视图本来就装得下 toast）。

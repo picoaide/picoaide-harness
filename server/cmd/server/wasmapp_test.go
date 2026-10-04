@@ -486,6 +486,76 @@ func TestWasmSavedLimitsFromOlderBuildStillApplies(t *testing.T) {
 	}
 }
 
+// TestWasmSavedLimitsFromOlderBuildWithOldBudgetDefaultsStillApplies：FW-1 的**装配级**判据
+// （2026-10-04）。
+//
+// 现场（本次要防的）：本轮给 SQL 预算加了"必须**严格小于**宿主调用预算"（S4-02），而在此之前
+// 两个默认值都是 5 s ⇒ 那之前点过「保存」的部署，settings 里存的就是 `host_call=5 / sql=5`。
+// 读取路径若照旧只 Validate，升级后这条设置被判非法 → 回落部署档位 → **管理员保存过的整份
+// 设置**（并发 / 实例内存 / 模块缓存 / 全部时间预算）一次性失效，日志只有一条 warning；
+// 更重的一面是回落方向不可控：管理员为小内存机调小的并发会被档位**放大**。
+//
+// 判据走完整条链（与上一条同一个装配入口）：塞一份 5/5 的旧设置进库 → 真装配 →
+// ①来源仍是 setting（没有回落档位）；②管理员存的值逐字生效（max_instances=4 / 128 MiB
+// 都不同于 small 档的 3 / 64 MiB，所以断言能区分"设置生效"与"回落档位"）；
+// ③与新规则冲突的那一项落在选定口径上（host_call 保持 5 s、sql 钳到 4 s）；
+// ④不产生"待重启"残留。
+//
+// 变异验证：把 ParseStored 的 legalizeStored 去掉（改回"只 Validate"）⇒ ①立刻变红
+// （source 退化成 profile，instance_memory_mb 回到 64、max_instances 回到 3）。
+func TestWasmSavedLimitsFromOlderBuildWithOldBudgetDefaultsStillApplies(t *testing.T) {
+	t.Setenv(memprofile.EnvMemoryProfile, "small")
+	db := requireRealDB(t)
+	ensureCompileChildNextToTestBinary(t)
+
+	// 旧版本"什么都不改、直接保存"落库的形态：六个时间预算取当时默认（两个 5 s），
+	// 并发/内存是管理员自己调过的（故意与 small 档不同，用来区分"设置生效"与"回落档位"）。
+	const oldSetting = `{"max_instances":4,"app_running":2,"app_queue":16,` +
+		`"user_global_running":2,"user_per_app_running":1,"user_per_app_queued":2,` +
+		`"instance_memory_mb":128,"module_cache_mb":64,"module_cache_idle_min":10,` +
+		`"appdb_idle_min":3,"appdb_cache_kib":512,"app_db_readers":4,` +
+		`"guest_budget_seconds":30,"dry_run_budget_seconds":30,"host_call_budget_seconds":5,` +
+		`"request_wall_clock_seconds":60,"sql_statement_budget_seconds":5,"compile_timeout_seconds":60}`
+	if err := serverstore.SetSetting(db, SettingWasmLimits, oldSetting); err != nil {
+		t.Fatalf("写入旧版限制项设置失败: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := setupWasmPlatform(ctx, db, t.TempDir())
+	if p == nil {
+		t.Fatal("setupWasmPlatform 返回 nil")
+	}
+	defer p.Close()
+
+	if got := p.Limits.Source(); got != "setting" {
+		t.Fatalf("设置来源 = %q，want setting —— 旧库里的时间预算组合被判非法并回落档位了"+
+			"（读取路径必须把「保存时合法、现在按新规则不合法」的值合法化，见 applimits.ParseStored）", got)
+	}
+	l := p.Limits.Get()
+	if l.MaxInstances != 4 || l.InstanceMemoryMB != 128 {
+		t.Fatalf("管理员保存过的并发/实例内存必须逐字生效（4 / 128 MiB，small 档是 3 / 64 MiB），得到 %s", l.Encode())
+	}
+	if l.HostCallBudgetSeconds != 5 {
+		t.Fatalf("宿主调用预算必须保持管理员存的值 5 s（不得为了满足序关系把外层闸门放大），得到 %d",
+			l.HostCallBudgetSeconds)
+	}
+	if l.SQLStatementBudgetSeconds != 4 {
+		t.Fatalf("旧库的 sql=5 应被钳到 host_call−1 = 4 s，得到 %d", l.SQLStatementBudgetSeconds)
+	}
+	if err := l.Validate(); err != nil {
+		t.Fatalf("装配后生效的限制项必须自身合法：%v（%s）", err, err.JSON())
+	}
+	// 128 MiB / 64 KiB = 2048 页：证明生效值真的进了执行侧 runtime，不是只读了个数。
+	wantPages := uint32(128) * 1024 * 1024 / 65536
+	if got := p.AppServer.InstanceMemoryPages(); got != wantPages {
+		t.Fatalf("runtime 单实例内存页 = %d，want %d（旧库设置应照常生效）", got, wantPages)
+	}
+	if pending := p.Limits.RestartPending(); len(pending) != 0 {
+		t.Fatalf("旧库设置装配后不该有「待重启」残留，得到 %v", pending)
+	}
+}
+
 // ===== P1-8：管理端下架/冻结 → 逐出进程内驻留（装配级行为断言）=====
 //
 // 为什么不再用源码 grep：旧门禁只断言 `OnAppEvict: func(appID string) {...}` 这行

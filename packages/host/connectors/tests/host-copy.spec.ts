@@ -25,6 +25,56 @@ import { mcpServerProblem } from '../src/policy.ts'
 import type { ConnectorDef } from '../src/types.ts'
 import { callRoute, createHarness, type Harness } from './helpers/connector-harness.ts'
 
+/**
+ * This suite observes connector outbound traffic through a `globalThis.fetch`
+ * stub — the shape it always had. Since the DNS-rebinding fix (2026-10-04) the
+ * production transport dials the policy's verified addresses itself
+ * (`src/pinned-http.ts`) instead of handing the URL to the global fetch, so the
+ * stub is installed as THAT transport's seam: the same observation, one level
+ * lower. Every policy gate still runs here — the mock replaces the connection,
+ * not the judgement — and the real transport is covered end to end by
+ * `tests/audit-1004-pinned-address.spec.ts`, which does not mock it.
+ */
+vi.mock('../src/pinned-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/pinned-http.ts')>()
+  return {
+    ...actual,
+    sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
+  }
+})
+
+/**
+ * RESOLUTION seam (`node:dns/promises`) — the sibling of the connection seam
+ * above, and the same shape as `tests/oauth-outbound.spec.ts`.
+ *
+ * The callback-page case drives a real `runAuth` against `auth.example`, which
+ * the outbound resolution gate must resolve before it will dial. The gate
+ * judges what the RUNNER's resolver answers: on a box behind a wildcard /
+ * fake-IP resolver (this repo's dev box answers `198.18.x` for any name) that
+ * is green; on a runner with an ordinary resolver the name is
+ * `getaddrinfo ENOTFOUND`, and since C3-06 the gate is fail-closed
+ * (`OutboundResolutionUnverifiedError`) — so the case silently required the
+ * machine's DNS and went red only in CI (`Gate (tests + workspace build)`).
+ * Injecting the resolver removes that dependency. The answer is RFC 5737
+ * TEST-NET-2, which `buildResolvedNameBlockedList()` deliberately allows
+ * ("a NAME that resolves into them is a legitimate deployment shape").
+ */
+const dnsSeam = vi.hoisted(() => ({ resolutions: [] as string[], address: '198.51.100.9' }))
+
+vi.mock('node:dns/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns/promises')>()
+  return {
+    ...actual,
+    lookup: async (hostname: string, options?: { all?: boolean }) => {
+      dnsSeam.resolutions.push(String(hostname))
+      return options?.all === true
+        ? [{ address: dnsSeam.address, family: 4 }]
+        : { address: dnsSeam.address, family: 4 }
+    },
+  }
+})
+
+
 let dir: string
 let harness: Harness | null = null
 
@@ -150,6 +200,10 @@ describe('OAuth 回环回调页跟随语言（用户浏览器里真正看到的�
   }
 
   async function callbackPage(locale: 'zh' | 'en'): Promise<string> {
+    // Per-call accounting: the injected resolver must have been asked for
+    // THIS page. Otherwise the injected seam has rotted into dead code and the
+    // case is quietly back on the runner's DNS — green here, red in CI.
+    dnsSeam.resolutions.length = 0
     const originalFetch = globalThis.fetch
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input)
@@ -183,6 +237,7 @@ describe('OAuth 回环回调页跟随语言（用户浏览器里真正看到的�
     } finally {
       globalThis.fetch = originalFetch
     }
+    expect(dnsSeam.resolutions.length).toBeGreaterThan(0)
     return await (page ?? Promise.resolve(''))
   }
 

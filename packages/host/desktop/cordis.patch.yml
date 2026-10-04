@@ -127,6 +127,33 @@
 - id: account-controller
   disabled: true
 
+# DeepSeek 账号鉴权的**适配器**行（0.2.0-rc.2 新增，与上面两条同批；已在随包闭包内：
+# `@deepseek-ai/dsh-base` 的 dependencies 里有 `@deepseek-ai/dsh-llm-deepseek-account`）。
+# 上游该行**没有** `disabled`，能力是向 `ctx.llm` 注册一条 provider 路由
+# `deepseek-account`（`registerConfigurableProviders` + `registerDeepSeekProvider`），
+# 而它的鉴权取自 `ctx.get('deepseekAccount')` —— 那个服务由上面被我们关掉的
+# `deepseek-account` 行提供（其 peer 包全仓不存在，激活即 failed to import）⇒
+# 这条路由**恒**抛 `ACCOUNT_SIGN_IN_REQUIRED`、`discoverModels` 恒返回空数组。
+# 此前没有任何一层处置它（名单里没有、注释里没有），属装配漏处置。
+#
+# 显式关闭的理由（2026-10-04 C1-03）：
+#   1. **与已登记的产品决策一致**：上面那段已写明"我们两条都不用：模型走企业网关
+#      （会话令牌 + 网关 Bearer）"，本行就是"账号鉴权"那条路线的适配器；
+#   2. **fail-closed**：它今天不可见，只是因为客户端过滤了空 provider 组
+#      （`ui-model-selection` 的 `filter(group => group.models.length > 0)`）——
+#      属"靠下游过滤兜住"。上游一旦给这条路由挂上模型发现、或某个消费面不再过滤空组，
+#      缺陷直接出现在用户面；
+#   3. **不触碰兼容模式约束**：AGENTS.md 的"兼容模式 = 运行上游默认客户端"约束针对
+#      **客户端呈现面**；本行是宿主侧 provider 路由，桌面包已按同一口径处置了 12 行
+#      （含同批的 `desktop-product-telemetry` / `product-analytics`）。关掉它不改变
+#      客户端任何界面，只是让"永远无法鉴权的 provider 注册"不存在。
+#
+# 判据：`verify-profile-boot.mjs` 的 mustStayDisabled（三面绑定）+ 一条**与名单无关的
+# 行为判据**（直接读 `ctx.llm.listConfigurableProviders()`，断言目录里没有
+# `deepseek-account`；删名单项、改名单、删整段名单都不影响它）。
+- id: llm-deepseek-account
+  disabled: true
+
 # 桌面产品分析/遥测（0.2.0-rc.2 新增两行，默认对 desktop 开启）：`product-analytics`
 # （客户端事件采集）与 `desktop-product-telemetry`（OTLP 上报），其 `disabled`
 # 判据是 `ctx.get('profileContext')?.name !== 'desktop'`，而桌面**必须** provide

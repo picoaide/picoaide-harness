@@ -54,7 +54,7 @@ Read the version from the update server and download the image archive (this is 
 
 ```bash
 curl -fsS https://release.picoaide.com/official/latest.json | grep -E '"(version|image_tag)"'
-VER=2.7.0            # ← use server.version from the manifest (without v)
+VER=<version>            # ← use server.version from the manifest (without v)
 curl -fL -o /tmp/pa.zip \
   "https://release.picoaide.com/official/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 curl -fL -O "https://release.picoaide.com/official/releases/${VER}/SHA256SUMS"
@@ -71,7 +71,7 @@ unzip -p /tmp/pa.zip image.tar | docker load
 
 ```bash
 IMAGE=picoaide-harness-server
-VER=2.7.0
+VER=<version>
 mkdir -p /opt/picoaide
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out ${IMAGE}:${VER}
 ls -1 /opt/picoaide        # docker-compose.yml / Caddyfile.* / .env.example / VERSION / client/

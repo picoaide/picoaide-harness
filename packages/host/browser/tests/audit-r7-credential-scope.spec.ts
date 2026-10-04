@@ -471,12 +471,19 @@ describe('r7c-4 擦除必须先于截断（快照 80 字符 / get_text 32KiB）'
     // op log、地址栏全线；F-2，2026-09-13 第二轮复核）。启发式已删除，改为让每个
     // 出口**先擦后截**（本文件前两条用例 + `audit-r7-credential-scope-round2.spec.ts`
     // 的 F-5 用例），因此这里锁定两件事：
-    //   1) 上游已经切断的文本按逐字出现判定——`Authorization: Bearer ` 之后的
-    //      60 字符残片与页面自己写的普通散文形状相同，值级擦除无法识别（声明过的
-    //      HONEST BOUNDARY，与 `browser_get_snapshot` 的 tool 描述同款口径）；
+    //   1) 上游已经切断的文本按逐字出现判定——残片与页面自己写的普通散文形状相同，
+    //      值级擦除无法识别（声明过的 HONEST BOUNDARY，与 `browser_get_snapshot` 的
+    //      tool 描述同款口径）；
     //   2) 这种文本**不会**被启发式改写成 `****`（信息不再是错的）。
+    //
+    // C3-09（2026-10-04）：`Authorization: Bearer …` **本身是声明过的凭据形态**，
+    // 现在按共用漏斗的认证头条规则整体抹掉取值（`Authorization: ****`）—— 那不是
+    // F-2 的启发式（启发式会保留 `Bearer ` 前缀、只把残片尾巴换成 `****`）。所以这条
+    // 用例拆成两支：声明形态走认证头规则，非声明形态（同样是被切断的注入值残片）
+    // 才是 F-2 的判据面。
     const token = 'AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555FFFF6666GGGG7777HHHH8888IIII9999JJJJ0000KKKK1111LLLL2222MMMM'
     const alreadyCut = `Authorization: Bearer ${token}`.slice(0, 80)
+    const plainCut = `report id ${token.slice(0, 60)}` // 同一个值的已切断残片，但**不是**声明形态
     expect(alreadyCut).not.toContain(token) // 前提：交进来的文本确实已被切断
     const h = track(makeHarness(async () => ({ username: 'alice', password: token })))
     await h.runtime.open('https://login.example/form')
@@ -485,14 +492,26 @@ describe('r7c-4 擦除必须先于截断（快照 80 字符 / get_text 32KiB）'
       const expression = String(params?.['expression'] ?? '')
       if (expression.includes('passField')) return { result: { value: { filled: 2, username: true, password: true } } }
       if (expression.includes('kindOf')) {
-        return { result: { value: [{ kind: 'link', text: alreadyCut, selector: '#a', visible: true, disabled: false }] } }
+        return {
+          result: {
+            value: [
+              { kind: 'link', text: alreadyCut, selector: '#a', visible: true, disabled: false },
+              { kind: 'link', text: plainCut, selector: '#b', visible: true, disabled: false },
+            ],
+          },
+        }
       }
       return { result: { value: '' } }
     }
     await h.runtime.fillCredentials(1, 'connector-x')
 
     const snapshot = await h.call('browser_get_snapshot', {}) as { elements: Array<{ text: string }> }
-    expect(snapshot.elements[0]!.text).toBe(alreadyCut)
+    // 声明过的认证头形态：取值被共用漏斗抹掉，键名保留（C3-09）；启发式的形状
+    // （保留 `Bearer `、只擦尾部）不得出现。
+    expect(snapshot.elements[0]!.text).toBe('Authorization: ****')
+    // F-2 的诚实边界：非声明形态的已切断残片逐字节不动（值级擦除无法识别它，
+    // 也不许用启发式去猜）。
+    expect(snapshot.elements[1]!.text).toBe(plainCut)
     // 对照：同一个值只要**逐字完整**出现，就仍被整串擦除（前两条用例的完整口径）。
   })
 })

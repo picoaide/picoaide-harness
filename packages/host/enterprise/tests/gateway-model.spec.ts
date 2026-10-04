@@ -111,12 +111,13 @@ describe('gateway-model', () => {
     await vi.waitFor(() => expect(f.ctx.logger.error).toHaveBeenCalled(), { timeout: 10_000 })
   })
 
-  // 2026-09-28（DSH 0.1.7-rc.2）：0.1.6 那条「组装期钉死 protocol: chat-completions」的
+  // 2026-09-28（DSH 0.1.7-rc.2 引入、**0.2.0-rc.2 复核仍成立**）：0.1.6 那条
+  // 「组装期钉死 protocol: chat-completions」的
   // 修法整体作废 —— 上游把这个键**删掉了**，配了直接抛错；鉴权搬到 provider 注册面
   // （`gateway-llm.ts` 的 `resolveAuth` 发 `Authorization: Bearer`）。
   // 这条判据驱动的是**上游真实 schema + 解析一步**（不是字符串 grep）：写进网关行的键
   // 必须全部能被那一行自己的 Config 吃下，而 0.1.6 的两个键现在一个抛错、一个不存在。
-  it('写入网关行的段必须能被 provider 行自己的 schema 吃下（0.1.7 已无 protocol/apiKeyEnv）', async () => {
+  it('写入网关行的段必须能被 provider 行自己的 schema 吃下（0.1.7 起已无 protocol/apiKeyEnv）', async () => {
     const f = ctxFixture()
     apply(f.ctx)
     f.emit(SESSION)

@@ -25,7 +25,7 @@ On **any machine with internet access**, download the image archive and the chec
 curl -fsS https://release.picoaide.com/<channel>/latest.json
 
 # 2) Download the image archive and the checksum file
-VER=2.7.0
+VER=<version>
 curl -fL -o picoaide-server-${VER}-amd64.zip \
   "https://release.picoaide.com/<channel>/releases/${VER}/picoaide-server-${VER}-amd64.zip"
 curl -fL -O "https://release.picoaide.com/<channel>/releases/${VER}/SHA256SUMS"

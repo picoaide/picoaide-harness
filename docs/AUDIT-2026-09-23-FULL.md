@@ -1909,7 +1909,7 @@ E-01 写面是"调用名清单"（`os.open+os.write`/`fs.copyFileSync`/`subproce
 #### 交付状态（截至第二十五轮修复批）
 
 - **已完成**：5 轮审计（21–25，共 27 条审计泳道）+ 16 条修复泳道；所有 P0/P1 均有"修复 + 能杀死回退的
-  判据 + 变异证据"；整仓门禁绿；审计记录（§7.56–§7.60）与行为变更登记（`docs/releases/v2.8.2-beta.1.md` §十二）落库。
+  判据 + 变异证据"；整仓门禁绿；审计记录（§7.56–§7.60）与行为变更登记（`docs/releases/v2.8.2-beta.2.md` §六.5）落库。
 - **未达成**：**"连续两轮零新增 P0/P1"这一收敛条件**。当前已知未闭环项（按价值）：
   ① 本机同用户攻击者经 CDP 的 cookie 窃取（需结构性修法，非本批范围）；
   ② 名字落在**路径首段**的保留字（`uploads`/`validate`/`catalog`）的**存量**行仍打不开
@@ -3467,6 +3467,45 @@ Schemastery 会剥未声明字段）、`plugin-package-inventory-deepseek`、`sa
 | U7 | `scripts/upstream-package-checks.mjs` 是新的**判据执行体**却没登记进 `EXECUTION_FACE_REGISTRY` ⇒ `check:ci-parity` 的 install-integrity 步红 | P2 | 登记制守卫的全部意义就是"新增执行体必须登记"；已登记并同步两级摘要（`check-guard-parser-integrity` → `check-root-guards`） |
 | U8 | **打包版客户端根本起不来**（P0，只有真机 E2E 能发现）：`host preparation failed: node-addon-require-builtin unsupported: Unsupported/no-context`（Electron 44.4.3 / V8 15.2.124.28） | **P0** | 0.1.7 的包解析改用原生插件 `node-addon-require-builtin` 去够 Node 内部 loader（`app-boot/lib/index.js:1574`），而该插件的原生二进制里**硬编码了 3 个精确的 Electron 指纹**（`15.0.245.13`→43、`15.2.124.13`→44、`15.4.80`→45-alpha，`strings` 实测），**按 V8 补丁号精确匹配**；上游 pnpm-lock 钉的正是 `electron@44.0.0`（= `15.2.124.13`），而我们自 v2.8.1 起钉 `44.4.3`（= `15.2.124.28`）⇒ 拒绝。详见 §8.9.9 |
 
+> **勘误（2026-10-04，修复代理 FF-A；原句保留，见本仓对审计记录的惯例）**：上表 **U5 行**的处置声明
+> ——「已改为在包 `src/` 里搜那一行字面量（`hits === 1` 且命中文件是 `adapter.ts`）；**变异①（换成不存在的
+> 头名）实测变红**」——**当时不成立**：该实现**在 `26e67ce908` 这棵树里全仓不存在**（`temp/audit-v282/`
+> 的 S5 报告、S5-01 与独立复审三处都实测过）。当时判据仍**硬钉一条不存在的上游路径**
+> （`src/protocols/chat-completions/adapter.ts`）⇒ 必然走"冻结件兜底"⇒ **拿冻结常量测它自己（恒真）**，
+> 因此"变异①实测变红"也无从谈起（复审的源码级探针逐字：`frozen line self-match: true (自指 ⇒ 恒真)`）。
+> 注意当时那条"证据"还有一层方法缺陷：S5 的探针把 5 个事实**写死在脚本里**、不读被测源码，所以修复落地后
+> 重跑仍打印同样的 5 行（复审报告 §1.1 记录）。
+>
+> **本轮（第二十八至三十三轮的 S5-01 单 + 其后针对复审缺口的补丁）才真正实现**。判据现在的形态
+> （本勘误写作时逐条读码 + 实跑核对，不是照抄报告）：
+>
+> · 判定器**唯一实现** = `server/webadmin/src/pages/app-center/upstream-anchor-freeze.ts::probeUpstreamSenderAnchor`（`:209`）；
+> · **在场性三态** = `classifyUpstreamPresence`（`:104`，`live` / `absent` / `unknown`）：`deepseek-harness/.git`
+>   存在 ⇒ `live`；目录不存在或**空目录且无 `.git`** ⇒ `absent`；目录**非空** ⇒ `live`（与上游布局无关）；
+>   读不出 ⇒ `unknown` ⇒ **fail-loud**。**判据里不含任何上游布局路径**（旧实现用 `deepseek-harness/packages`，
+>   被复审 A2 打掉：上游改布局它就消失、判据静默退回冻结件并谎称"submodule 缺席"）；
+> · `live` ⇒ 在锚点目录下递归**逐字**搜冻结行 `UPSTREAM_SESSION_HEADER_LINE`（`:133`，与活文件
+>   `deepseek-harness/packages/llm/llm-deepseek/src/adapter.ts:129` **逐字一致**，含行首缩进与行尾逗号）：
+>   `hits !== 1`（`:289`）或命中文件**基名不是 `adapter.ts`**（`:295`）⇒ 红；命中文件里还必须能由契约常量
+>   `ATTRIBUTION_SESSION_HEADER` 派生出那个头名（`:304-318`，A1 的绑定）⇒ 否则红；
+> · **只有 `absent`** 才允许冻结件兜底，且兜底由契约常量派生的形状正则判定并把依据行原文打进 `source`
+>   （不再自指）；
+> · 判据 = `server/webadmin/src/pages/app-center/opens-contract-parity.spec.ts::归因链路三段锚点齐备（客户端前缀 / 上游头名 / 服务端契约），且与接线状态双向一致`（用例只做 `expect(missing).toEqual([])`）；
+> · 自证 = `server/webadmin/src/pages/app-center/upstream-anchor-freeze.spec.ts`（5 组 describe：活上游 / 缺席兜底 /
+>   A2 在场判据 / A1 契约绑定 / 真实仓库；`it(` 实测 21 处；S5-01 首版报告记 12 例，差额来自 A1+A2 两组）。
+>
+> **它咬得住什么**：上游那一行被改掉或换头名（命中 0 处 ⇒ 红）、锚点目录指回不存在的路径（红，且失败消息里
+> **没有**"冻结件"字样 = 没有静默兜底）、命中 2 处、命中别的文件、冻结件过期、在场性判不出（`unknown` ⇒ 红）。
+> **咬不住什么**（照抄 S5-01 §7 的认账，不夸大）：① submodule 真 `absent` 时只能判"冻结件与契约常量一致"，
+> **无法验证活上游**（缓解：`gate` 是必需检查且始终检 submodule ⇒ 真实漂移必然在 gate 打红）；
+> ② 判据要求**整行逐字**，上游纯格式化改动（reindent / 换行）也会红，需要同步一次冻结件（有意语义）；
+> ③ `senderFile` 钉的是**基名** `adapter.ts`，那一行被搬进同包另一个文件同样红（有意 fail-loud，不是放宽成
+> "任意文件命中即通过"）。
+> 依据：`temp/audit-v282/fixes/S5-01.md`（首版：§3 判据 / §4 变异①②③ + `Go server` 反向对照 / §7 未覆盖）、
+> `temp/audit-v282/verify/S5-01.md`（**独立复审 VERDICT: PARTIAL** —— 原机制已确实修好，但另打两条同族 P2：
+> A2 在场标记硬钉上游路径、A1 契约常量在活分支未绑真源）、`temp/audit-v282/fixes/S5-01-verify.md`
+> （针对 A1/A2 的补丁，判定 FIXED）。
+
 **U1 的连带行为变更（主控已裁决，接手人须知）**：`verify-profile-boot.mjs` 的
 `KNOWN_UNADDRESSABLE_ROWS` 从 **26 条收缩到 `['include']`**。原因是结构性的、不可分割：
 `plugin_manager` 判定"可寻址"的**唯一依据**就是 `readProfilePatches` 里有没有那一行
@@ -3769,6 +3808,29 @@ master 头**上是"这次发布从未发生"的更正，而不是覆盖一个已
 各平台映射（读自仓内 `app-builder-lib`，非推测）：AppImage → `-comp xz`（legacy FUSE2 分支还会补
 `-Xdict-size 100% -b 1048576`）；DMG → `UDBZ`（bzip2，缺省 UDZO=zlib）；**NSIS 不变**（7z 恒 `-mx=9`，
 只有 `store` 会把内置压缩换成 zlib）。**没有**改成"给 release job / 打包机补依赖"或裁剪内容 —— 本轮只做零内容风险的压缩。
+
+> **勘误（2026-10-04，修复代理 FF-A；原句保留，见本仓对审计记录的惯例）**：上面那句
+> 「**NSIS 不变**（7z 恒 `-mx=9`，只有 `store` 会把内置压缩换成 zlib）」**当时不成立** —— 两处都错。
+> 正确的映射（全部读自仓内依赖 `packages/host/desktop/node_modules/app-builder-lib/out/`，非推测）：
+>
+> ① **格式**：NSIS 的载荷归档格式由 `nsis.useZip` 决定，不是恒为 7z。我们的
+> `packages/host/desktop/package.json` 逐字写着 `"useZip": true`（且 `"differentialPackage": false`）
+> ⇒ `targets/nsis/NsisTarget.js:78` 取 `format = !isBuildDifferentialAware && options.useZip ? "zip" : "7z"`
+> = **`zip`**；② 于是 `targets/archive.js:67` 的分支判的是 **`format === "zip"`**：
+> `args.push("-mx=" + (isZip && options.compression !== "maximum" ? "7" : "9"))`
+> ⇒ **改动前 `-mx=7`、`compression: "maximum"` 之后 `-mx=9`**，并在 `:68-70` 追加
+> `-mfb=258 -mpass=15` ⇒ **NSIS 载荷的压缩参数确实变了**，"不变"是错的；③ **内置压缩器**（makensis 侧）
+> 与 `maximum` 无关：`NsisTarget.js:260-269` 只在 `compression === "store"` 时 `SetCompress off`，
+> 其余（缺省与 `maximum` 两档）都是 `SetCompressor zlib` + `COMPRESS auto` ⇒ "只有 `store` 会把内置压缩
+> 换成 zlib"这句也不准确（`store` 是**关掉**内置压缩，非 store 的档位本来就是 zlib）。
+>
+> 发布面口径本来就是对的：`docs/releases/v2.8.2-beta.3.md:47-48` 逐字写着「Windows 安装器的 zip 载荷
+> 由 `-mx=7` 提到 `-mx=9`」—— 本勘误只是让审计记录与它对齐（该发布说明未改）。
+> **未实测（认账）**：本节只有 Linux AppImage 的真实交付件前后字节数，没有 Windows 安装包的前后口径，
+> 所以这里只钉"压缩参数变了"这一条事实，**不对 Windows 体积变化量下结论**。
+> 同一说法在仓内的唯一第二处是 `packages/host/desktop/tests/package.spec.ts:81-82` 的注释
+> （"7z 的 `-mx` 对 7z 格式恒为 9，故本项对 Windows 无影响"）—— 那是**活注释**不是历史记录，
+> 已按同一事实直接改正（断言未动，只改注释）。
 
 **真机实测（本地重建的真实交付件，不是估算）**：
 `PicoAide-Harness-2.8.2-beta.2-x86_64.AppImage` **192,354,510 B → 149,119,491 B**

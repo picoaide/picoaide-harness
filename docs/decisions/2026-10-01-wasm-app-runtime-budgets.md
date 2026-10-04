@@ -141,3 +141,20 @@ AssertionError: 客户端出站超时 30s 必须严格大于 guest_budget 30s: e
   改不动这条关系。
 - **预算不随部署档位（memprofile）缩放**：档位管的是内存四笔账，与时间无关；
   `FromProfile` 不动这六项。
+
+## 2026-10-02 勘误（回归审计 S4-01 / S4-02，两处与本文冲突）
+
+1. **`host_call_budget_seconds` 的默认值由 5 s 改为 10 s**（裁决二的表里写的是 5）。
+   原因：`db.query` 是宿主调用，appdb 的单语句 deadline 是套在宿主调用 deadline **里面**的
+   子 ctx —— 两个默认值相等时父 ctx 必然先到点，应用拿到的是 `HOST_CALL_OVER_BUDGET`
+   而不是 `DB_DENIED(statement_timeout)`，语句超时分支结构上不可达。
+   改为 2×（10 s）给内层留出一整个语句预算的收尾余量；反过来把 SQL 默认降到 <5 s
+   会**收紧**既有生效上限（并吃掉与 SQLite busy timeout 3 s 的余量），所以抬外层。
+2. **裁决三的序关系清单补一条：`单条 SQL < 宿主调用预算`（内层严格小于外层）**。
+   它已进 `applimits.Validate` 与 `clampCrossField`（只向下钳内层），并由
+   `applimits_test.go` 的拒绝用例 + 默认值正控 + `appserver` 的运行期用例守着。
+
+配套（同批）：`host_call_budget_seconds` 从"零消费者"改为真的接线到运行时
+（`appserver.requestBudgets` 每请求读 `CurrentLimits()`；干跑路径
+`api.dryRunBudgets` 同源），`sql_statement_budget_seconds` 的生效范围如实标注为
+**下一个新建的应用库句柄**（不是"即时生效"）。

@@ -20,6 +20,7 @@ import {
   planCardAction,
   planSectionCards,
   uninstallEndpoint,
+  uninstallRequestUrl,
   versionInstallSupported,
   withOverwrite,
   confirmStripAction,
@@ -638,7 +639,22 @@ describe('A2/A3/A11/A15 接线判据（源码级）', () => {
   })
 
   it('A3：卸载的第二段（用户已确认）才带 overwrite', () => {
-    expect(source).toContain('withOverwrite(base, true)')
+    // C2-1（2026-10 审计）起卸载的 URL 也收口到**唯一拼装入口**（与 installRequestUrl
+    // 对称）：`uninstallRequestUrl(item, { overwrite: true })`。判据因此钉这两跳而不是
+    // 某一行的字符串形态：① 第一次点击只出确认条、不发请求；② 确认后那一发才带
+    // `overwrite: true`（并且带上 C2-1 的归属提示 —— 归属证明不了时宿主不写机器级墓碑）。
+    const uninstallBody = /const uninstall = async \([\s\S]*?\n  \}/u.exec(source)
+    expect(uninstallBody, 'uninstall() 必须存在').not.toBeNull()
+    expect(uninstallBody![0]).toContain('if (uninstallConfirmKey !== key) { setUninstallConfirmKey(key); return }')
+    expect(uninstallBody![0]).toContain('fetch(uninstallRequestUrl(item, { overwrite: true }), { method: \'POST\' })')
+    // 归属提示只在"证明不了"时出现（逐字钉住纯函数行为，见 C2-1 那条用例）。
+    expect(uninstallRequestUrl(
+      {
+        kind: 'skill', source: 'local', name: 'x', displayName: 'x', version: '1.0.0', description: '', author: '',
+        versions: [], installedOrigin: 'store', originChannel: 'plugin', localOwnership: 'unknown',
+      },
+      { overwrite: true },
+    )).toBe('/api/pico/skills/x/uninstall?overwrite=1&ownership=unknown')
   })
 
   it('内置技能入口卡的安装/更新也走同一条确认条（否则「更新到 vX」绕过确认被宿主 409）', () => {

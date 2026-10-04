@@ -1,6 +1,7 @@
 package router
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -37,6 +38,94 @@ func adminRouteSet(e *gin.Engine) map[string]bool {
 		}
 	}
 	return out
+}
+
+// adminRouteHandlers 枚举管理面命名空间下每条路由**最终绑定的 handler 函数名**。
+//
+// gin 的 RouteInfo.Handler 是路由链末端 handler 的名字（例如
+// `github.com/picoaide/picoaide/internal/serverauth.(*AdminAPI).listUserTokensPaged-fm`），
+// 正是"这条路径到底挂了哪个实现"的运行时事实。
+func adminRouteHandlers(e *gin.Engine) map[string]string {
+	out := map[string]string{}
+	for _, r := range e.Routes() {
+		if serverauth.InServerNamespace(r.Path) {
+			out[r.Method+" "+r.Path] = r.Handler
+		}
+	}
+	return out
+}
+
+// TestAdminRouteMirrorsBindProductionHandlers：同一 (method, path) 在两棵树里必须绑
+// **同一个 handler 实现**（S3-04，审计 2026-10-04，P2）。
+//
+// 缺陷现场：`GET /api/server/admin/users/:id/tokens` 在生产树绑分页实现
+// （`listUserTokensPaged`：`{tokens,page,size,total,has_more}` / `?page=&size=` 越界 400），
+// 而测试镜像树绑的是旧的无分页实现（固定 500 + `{tokens,total,truncated}`）。
+// `TestAdminRouteMirrorIsSubsetOfProduction` **只比 (method, path)**，而两条树的路径
+// 逐字相同 ⇒ 恒绿 —— 镜像树里的用例测的根本不是生产契约，且两套契约可以无限漂移。
+//
+// 判据面取**运行时 handler 名**（不是源码文本）：只要有人把任一侧换成另一个实现
+// （改名/新函数/内联闭包）就红。镜像独有的路径不在此判据面内（由上面那条负责）。
+func TestAdminRouteMirrorsBindProductionHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	prod := gin.New()
+	Register(prod, productionTestDeps(t))
+
+	mirror := gin.New()
+	serverauth.RegisterAdminRoutes(mirror, nil)
+	agentshare.RegisterAdminRoutes(mirror, nil, t.TempDir())
+	connectors.RegisterAdminRoutes(mirror, nil)
+	marketplace.RegisterAdminRoutes(mirror, nil, t.TempDir())
+	capabilities.RegisterAdminRoutes(mirror, nil, t.TempDir())
+	llmgateway.RegisterAdminRoutes(mirror, nil)
+	sharedskills.RegisterAdminRoutes(mirror, nil, t.TempDir())
+
+	prodHandlers := adminRouteHandlers(prod)
+	mirrorHandlers := adminRouteHandlers(mirror)
+	if len(mirrorHandlers) == 0 || len(prodHandlers) == 0 {
+		t.Fatal("判据的扫描面为空（两棵树里至少有一棵没扫到管理面路由）—— 不得静默通过")
+	}
+
+	var compared, skipped int
+	var mismatched []string
+	for route, mh := range mirrorHandlers {
+		ph, ok := prodHandlers[route]
+		if !ok {
+			continue // 镜像独有的路径由 TestAdminRouteMirrorIsSubsetOfProduction 负责
+		}
+		if !handlerNameComparable(mh) || !handlerNameComparable(ph) {
+			// 内联闭包：gin 的名字只给定义位置（`….funcN`），两侧各自包一层时名字天然
+			// 不同、且名字里不含被包住的实现 —— 不可判定，如实跳过并计数（不假装覆盖）。
+			skipped++
+			continue
+		}
+		compared++
+		if ph != mh {
+			mismatched = append(mismatched, "  "+route+"\n      生产: "+ph+"\n      镜像: "+mh)
+		}
+	}
+	sort.Strings(mismatched)
+	if len(mismatched) > 0 {
+		t.Fatalf("同一路径在生产树与测试镜像树里绑了**不同的 handler**（%d 处）—— "+
+			"镜像对拍只比 (method, path) 时这种漂移恒绿，镜像用例测的不是生产契约：\n%s\n"+
+			"  处置：让两侧绑同一个实现（同一读取面只允许一套契约）；确属有意差异的必须在这里逐条登记理由。",
+			len(mismatched), strings.Join(mismatched, "\n"))
+	}
+	t.Logf("镜像↔生产 handler 身份对拍：可判定 %d 条共同管理面路由、0 处不一致；"+
+		"内联闭包 %d 条（名字不可判定，跳过）", compared, skipped)
+}
+
+// closureHandlerName 匹配 gin 为**内联闭包**生成的名字（`pkg.Func.func1`）。
+var closureHandlerName = regexp.MustCompile(`\.func\d+(\.|$)`)
+
+// handlerNameComparable 判定一个 handler 名是否"能证明绑的是同一个实现"。
+//
+// 方法值/普通函数在 gin 里是 `….Method-fm` / `….Func`，两棵树绑同一实现时逐字相同；
+// 内联闭包是 `….funcN`，N 是**定义顺序** —— 两个注册点各自包一层的闭包名字必然不同，
+// 且名字里不含真正干活的实现，因此不可判定（见上面的 skipped 计数）。
+func handlerNameComparable(name string) bool {
+	return name != "" && !closureHandlerName.MatchString(name)
 }
 
 // productionOnlyAdminRoutes 登记**生产路由表里有、测试镜像没有**的管理面路由。

@@ -33,8 +33,10 @@ import (
 
 // listUserTokensPaged 是分页后的令牌列表 handler。
 //
-// 与旧实现（`AdminAPI.listUserTokens`）字段逐个对齐（tokens[] 的形状不变），只多出
-// page/size/total/has_more 四个元数据字段 ⇒ 既有前端无需改动即可继续渲染。
+// 本实现是这条路径的**唯一实现**（S3-04，审计 2026-10-04，P2：旧的无分页
+// `AdminAPI.listUserTokens` 已删除，测试镜像树 `RegisterAdminRoutes` 也绑到这里）。
+// tokens[] 的形状与旧实现逐字段一致，只多出 page/size/total/has_more 四个元数据字段
+// ⇒ 既有前端无需改动即可继续渲染。
 func (a *AdminAPI) listUserTokensPaged(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {

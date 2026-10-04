@@ -356,6 +356,10 @@ export const EXECUTION_FACE_REGISTRY = [
   'scripts/check-no-leftover-mutants.mjs',
   'scripts/check-no-real-domains.mjs',
   'scripts/check-patch-pin.mjs',
+  // 「发布说明的迁移清单 ↔ git diff」判据（2026-10-05，E-01/E-02）：它是按需执行的只读判据
+  // （需要区间两端的 tag，CI 的缺省 checkout 取不到 ⇒ 不进 `yarn check`），但**内容被改写
+  // 就等于改写判据本体** ⇒ 形状族枚举到它，这里显式登记。
+  'scripts/check-release-notes-migrations.mjs',
   'scripts/check-root-guards.mjs',
   'scripts/check-site-links.mjs',
   'scripts/check-theme-tokens.mjs',
@@ -409,6 +413,7 @@ export const CI_REFERENCED_EXECUTION_REGISTRY = [
   'scripts/check-frozen-launchers.mjs',
   'scripts/check-guard-parser-integrity.mjs',
   'scripts/check-install-integrity.mjs',
+  'scripts/check-release-notes-migrations.mjs',
   'scripts/check-root-guards.mjs',
   'scripts/check-verdict-credential.mjs',
   'scripts/check-workflows.mjs',

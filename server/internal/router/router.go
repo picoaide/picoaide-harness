@@ -120,9 +120,12 @@ func Register(r *gin.Engine, deps Deps) {
 	// 时，`/apps/wasm/<static>/…` 会遮蔽 `/apps/wasm/:app_id/…`（`uploads` 是
 	// 现场：应用能发布出去，但 open/request/publish/rows… 全部 404，建完即废
 	// 且归属与版本号永久占位）。清单**从刚注册完的真实路由表派生**（不是手抄），
-	// 注入 registry 的写侧校验；`wasm_appid_route_test.go` 断言"派生集合 == 生效
-	// 集合"「每个静态段都被写侧拒」「写侧接受的名字必须真的可达」，三者任一被
-	// 拆掉都会红。
+	// 且只收**真的会遮蔽** `:app_id` 的静态段（S7-2：同层但领不走下降的叶子段 ——
+	// 例如 `catalog` / `proof` / `validate` —— 与更深层的 `rows` / `open` 都不是遮蔽段，
+	// 收进来会把完全可用的名字判成不可用 ⇒ 存量应用永远发不出新版本）。
+	// 注入 registry 的写侧校验；`wasm_appid_route_test.go` 断言"派生集合 == 真实
+	// 匹配树上会遮蔽的集合（双向）"「派生集合 == 生效集合」「每个静态段都被写侧拒」
+	// 「写侧接受的名字必须真的可达」，任一被拆掉都会红。
 	publishRouteReservedAppIDs(r.Routes())
 }
 
@@ -190,8 +193,23 @@ func registerWasm(r *gin.Engine, d Deps) {
 
 	// ---- 分片上传与续传（§4.2 / §7.3）----
 	//
-	// 为什么必须分片：客户端上传超时 90 s > 服务端 ReadTimeout 60 s > 编译 60 s，
-	// 32 MiB 一次 POST 必然撞 60 s 的 ReadTimeout（§10.5 第 58 项）。
+	// 为什么必须分片：服务端 `http.Server.ReadTimeout` 是 `limits.ServerReadTimeout`
+	// （60 s）—— **与请求体大小无关的硬上限**。而 `.wasm` 上限 `limits.WasmMaxBytes`
+	// 是 32 MiB（base64 JSON 后请求体 ≤ `limits.UploadBodyMaxBytes` = 48 MiB），
+	// 一次 POST 在慢链路上必然撞这 60 s（§10.5 第 58 项；48 MiB 需约 6.7 Mbps 保底）。
+	//
+	// 预算链的**真实序关系**（唯一真源 `server/internal/wasmapp/limits/limits.go`，
+	// 清单 `limits.json`；数字一律从那里读，不要凭记忆抄；
+	// `limits_gen_test.go` 的 `TestCriticalValuesAndOrdering` 把这条序关系钉住）：
+	//
+	//	ClientUploadTimeout (90 s) > PublishTotalBudget (75 s) > CompileTimeout (60 s)
+	//	                             = ClientUploadTimeout − PublishTransferReserve (15 s)
+	//	ServerReadTimeout (60 s)  == CompileTimeout (60 s)     ← 相等，**不是** "服务端 > 编译"
+	//
+	// 夹在"客户端出站预算"与"单次编译上限"之间的那一档是 `PublishTotalBudget`
+	// （一次 publish/validate 在平台侧的总预算：编译 + 抽取 + 干跑**共用**一个 deadline，
+	// 见 wasmapp/api/publish.go 的 publishBudgetCtx），不是 ReadTimeout；
+	// ReadTimeout 与编译预算同为 60 s，两者是**上限**关系而非严格大小关系。
 	// 端点语义（实现见 wasmapp/api/upload.go，存储见 wasmapp/upload）：
 	//
 	//	POST   /uploads                          开会话（小 JSON，**不**豁免）

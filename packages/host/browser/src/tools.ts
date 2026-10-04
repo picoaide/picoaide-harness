@@ -1302,7 +1302,20 @@ export function applyBrowserTools(ctx: Context, runtime: BrowserRuntime, enabled
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' } } },
-      render: () => [{ type: 'text', text: 'Control handed to the user.' }],
+      // 2026-10-04（核验订正）：`output.render` 是**模型面**内容 —— 上游契约
+      // `deepseek-harness/packages/core/tools/src/index.ts:216`（render = "Native/model
+      // content"）与 `:303`（`ToolResult.content` = "final model-facing content"），
+      // 真实接线 `packages/core/agent-loop/src/tool-calls.ts:277` 把它作为
+      // `tool/result` 落进会话。所以这里与 description / 系统提示词同语言（英文），
+      // 也**不得**出现任何本地化控件名；用户可见的本地化指引在已经本地化的面上
+      // （浏览器窗口胶囊 + 侧边栏条目，见 src/client 目录），不在这里。
+      // 上一版误以为"render 是给用户看的"而写成中文 ⇒ 中文界面下的模型会读到中文
+      // （守卫：tests/shell-pages-locale.spec.ts 的「tools.ts 零中文」）。
+      // 注意：本段注释里**不能**出现"斜杠加星号"的字面量（连 glob 写法也不行）——
+      // 守卫剥注释用的是朴素正则：`//` 行注释里一旦出现那个两字符序列，它会被当成
+      // 块注释起点，把它到下一个"星号斜杠"之间的代码整段吞掉（实测：本文件第一次
+      // 改完时，守卫对下面这行里的中文视而不见）。
+      render: () => [{ type: 'text', text: 'Control is now with the user. They hand it back only via the hand-back control in the browser window; until then every browser action waits.' }],
     },
     timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
     isConcurrencySafe: () => false,

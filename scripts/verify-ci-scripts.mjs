@@ -22,6 +22,13 @@
  *      被 ParamValidation 拒绝,Release job 直到上传大件才失败):假 aws 与真 CLI
  *      **同形**地拒绝两个前缀与不存在的路径,另加静态判据扫 scripts/*.sh ——
  *      "改回 fileb://"必须在本地就红
+ *   8. 多栈部署文档的镜像 tag 语义(第 18 节):禁止「按运行中容器取 id → 贴成新版本渠道 tag」
+ *      (升级静默不生效 + 回滚锚点被污染),要求新 id 取自渠道 tag、部署后 image id / `--version`
+ *      对拍,并与 `ci-build-channel-images.sh` 的归档真值、`serverstore/migrate.go` 的
+ *      同代/跨代回滚判据对拍。E-03-R 加固:判据收在**纯函数分析器**里并带**自检样本下限**
+ *      (变量转手 / `docker container inspect` 拼写 / 按多栈那一节判 `--version` /
+ *      跨代那段必须自给可执行顺序 / 反向对账必须真的驱动 fail-loud / 回滚段不得写裸 tag /
+ *      归档边界版本对拍 git 真值)——掏空分析器时样本当场红
  *
  * 用法:node scripts/verify-ci-scripts.mjs
  * 退出码:0 全部通过;1 有断言失败。
@@ -6491,6 +6498,561 @@ exit 0
   }
 }
 
+// ---- 18. 多渠道部署文档的镜像 tag 语义必须与归档的真值对拍（E-03 / E-08 同族）----
+//
+// 现场（E-03，`docs/deploy/AI-DEPLOY.md` §6.5.1 与官网中英《升级》页的多渠道栈步骤）：
+// 文档写着「按**本栈正在运行的容器**取 image id，重打成渠道专属 tag」。而 CI 的归档**本来就带**
+// 正确的 `<channel>-<VER>` tag（`scripts/ci-build-channel-images.sh` 的 `docker save` 三个 tag
+// 都指向**新**镜像，`docker load` 会一并恢复）⇒ 那一步把**升级前**那份镜像的 id 贴成"新版本的
+// 渠道 tag"，覆盖掉刚恢复的正确 tag；随后 `.env` 指向该 tag、`docker compose up -d` 又从同一个
+// image id 重建 —— **升级静默不生效**，且回滚锚点被污染（"新版本"标签落在旧镜像上）。全程零报错。
+//
+// 判据**不是"文档里出现过某个词"**，而是解析代码块/段落后的**组合**（词表对拍挡不住换一种写法）：
+//   ① 禁止：`docker tag <容器 inspection 得到的 id> <带新版本标记的 tag>`。E-03-R3 的两条等价写法
+//      也必须在判据面内：id 经**变量转手**（`SRC="$ROLLBACK_IMAGE_ID"; docker tag "$SRC" …`）与
+//      `docker container inspect` 这种拼写 —— 变量按"纯搬运"传播一层以上，两种拼写都认。
+//   ② 必须：新镜像 id 来自 `docker image inspect --format '{{.Id}}' <渠道+版本 tag>`
+//      （裸 `v<VER>`/`<VER>` 在同机第二个渠道栈 `docker load` 后会被静默覆盖，不能当作
+//      "我刚导入的是哪个镜像"的判据）；
+//   ③ 必须：部署后把容器的 image id 与那个新 id 对拍 + `--version` 核对
+//      （否则"静默不生效"没有任何出口）。**这两条按"多栈那一节"判，不按全文件判** ——
+//      文件别处（§6.6 升级后验证）也有一句 `--version`，全文件词面判据会在多栈段被掏空时假绿；
+//   ④ 必须：保留"运行中容器"的**正当用途** —— 把旧镜像固化成**旧版本**渠道 tag（回滚锚点），
+//      不是简单删掉这一步；回滚段写 `SERVER_IMAGE=` 时**不得**用裸 `${OLD}`（E-03-R1：同机多栈时
+//      它可能已被别渠道的 load 覆盖，而 compose 的 `PICOAI_CHANNEL` 缺省为空 ⇒ 会以别渠道品牌静默起来）；
+//   ⑤ E-08 同族：回滚段落必须区分**同代/跨代**，且"跨代会被拒绝启动"必须与代码真源
+//      （`serverstore/migrate.go` 的双向对账 + 启动期 fail-loud）对拍；**说跨代的那一段必须自己
+//      给出可执行顺序**（停服 → 恢复 `pg_dump` → 回退镜像）—— 只留"跨代 + SchemaMismatchError"
+//      两个关键词、把顺序删掉（或扔到别的段落）不算；
+//   ⑥ E-03-R2：介绍渠道专属 tag 的那一段必须点明**归档从哪个版本起**带它，且该版本与 git 历史
+//      推出的真值一致（`v2.8.1` 的归档里就没有渠道 tag）。
+// 三份文档缺一份即红 —— 扫描面缩水等于判据静默失效（本仓第 4 次同类教训）。
+//
+// **量具自身也有下限**：上面这些规则收在一个纯函数 `analyzeDeployDoc` 里，然后
+// ①跑三份真文档（必须零问题）②跑一批**合成自检样本**（每条已知退化形态必须报出对应 code）。
+// 掏空分析器或删掉某条规则，自检样本会当场红 —— 判据面不能被"改成恒真"骗过。
+{
+  // 真值取自 CI 脚本本身（不是在这里再抄一份结论）：save 行必须带渠道 tag。
+  const build = readFileSync(imagesScript, 'utf8')
+  check(/docker\s+save\s+[^\n]*\$\{IMAGE\}:\$\{channel\}-\$\{VER\}/u.test(build),
+    'ci-build-channel-images.sh 的 docker save 必须带渠道专属 tag —— 部署文档「归档自带正确 tag」'
+    + '这条结论依赖它；它变了这节判据必须跟着复核')
+
+  const DEPLOY_DOCS = [
+    'docs/deploy/AI-DEPLOY.md',
+    'site/src/content/docs/deployment/upgrade.md',
+    'site/src/content/docs/en/deployment/upgrade.md',
+  ]
+  /** 新版本标记（tag 名里出现它 = 这条 tag 声称指向**本次**版本）。 */
+  const NEW_MARK = /(?:\$\{?VER\}?|<VER>|<版本>|<-?version>|<\$\{VER\}>)/u
+  /** 旧版本标记（只有回滚锚点该用它）。 */
+  const OLD_MARK = /(?:\$\{?OLD\}?|<OLD>|<旧版本>|<old-version>|<\$\{OLD\}>)/u
+  /** 渠道标记（渠道专属 tag 的必要成分）。 */
+  const CHANNEL_MARK = /(?:\$\{?CHANNEL\}?|<channel-id>)/u
+
+  /** 代码块（``` 围栏）内容：词面判据一律在它上面做，免得被散文里的反例带偏。 */
+  const fenceBlocks = source => [...source.matchAll(/```[a-zA-Z]*\n([\s\S]*?)```/gu)].map(match => match[1])
+  /**
+   * 逐行标注"是否在 ``` 围栏内"。
+   *
+   * **必须**区分：fence 里的 shell 注释（`# 2) 取刚导入的新镜像的 id…`）在 markdown 里不是标题，
+   * 按 `/^#/` 切会把代码块切成一小节一小节 —— 那样"多栈那一节"会縮成一行注释，③ 的按节判据
+   * 立刻变成假红（本仓的"量具自己坏了"形态）。
+   */
+  const markdownLines = source => {
+    const out = []
+    let inFence = false
+    for (const line of source.split('\n')) {
+      if (/^\s*```/u.test(line)) { out.push({ line, inFence: true }); inFence = !inFence; continue }
+      out.push({ line, inFence })
+    }
+    return out
+  }
+  /**
+   * 段落 / 列表项块：空行、列表项、标题各自起新块。
+   *
+   * 为什么要拆列表项：把"跨代回滚"那一 bullet 掏空之后，同一条列表里**另一条** bullet 若还留着
+   * 可执行顺序，按"整段"判就会假绿（E-03-R3 的 m9/m14 就是这么漏的）。
+   */
+  const proseBlocks = source => {
+    const blocks = []
+    let current = []
+    const flush = () => { if (current.length > 0) { blocks.push(current.join('\n')); current = [] } }
+    for (const { line, inFence } of markdownLines(source)) {
+      if (line.trim() === '') { flush(); continue }
+      if (!inFence && (/^\s*(?:[-*+]|\d+\.)\s/u.test(line) || /^#{1,6}\s/u.test(line))) flush()
+      current.push(line)
+    }
+    flush()
+    return blocks
+  }
+  /** markdown 小节（标题 → 下一个同级或更高级标题），用于"按节判"而不是"按全文件判"。 */
+  const markdownSections = source => {
+    const sections = []
+    let current = null
+    for (const { line, inFence } of markdownLines(source)) {
+      const heading = inFence ? null : /^(#{1,6})\s+(.*)$/u.exec(line)
+      if (heading !== null || current === null) {
+        current = { level: heading === null ? 0 : heading[1].length, text: '' }
+        sections.push(current)
+      }
+      current.text += `${line}\n`
+    }
+    return sections
+  }
+  /** 变量引用（`$X` / `${X}`）。 */
+  const varRefs = text => [...text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/gu)].map(match => match[1])
+  /** 容器 inspection 的两种拼写（`docker inspect` / `docker container inspect`）取 `{{.Image}}`。 */
+  const containerImageInspect = text =>
+    /\bdocker\s+(?:container\s+)?inspect\b/u.test(text) && /\{\{\s*\.Image\s*\}\}/u.test(text)
+  /** 行首变量赋值（允许 `export `）。 */
+  const assignmentOf = line => {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/u.exec(line)
+    return match === null ? null : { name: match[1], rhs: match[2].trim() }
+  }
+  /**
+   * 「纯搬运」判据（E-03-R3 ①② 的变量追踪）：把变量引用、引号、命令替换外壳与 `echo`/`printf`
+   * 这类不改值的包装去掉后，右侧不应剩下任何东西。
+   * `SRC="$ROLLBACK_IMAGE_ID"` / `SRC=${ROLLBACK_IMAGE_ID}` /
+   * `SRC="$(printf '%s' "$ROLLBACK_IMAGE_ID")"` 都算搬运；`SRC="$(docker inspect …)"` 不算
+   * （它自己就是容器 inspection，由 {@link containerImageInspect} 单独判）。
+   */
+  const isPurePassthrough = (rhs, tainted) => {
+    const refs = varRefs(rhs)
+    if (refs.length === 0 || !refs.some(name => tainted.has(name))) return false
+    return rhs.replace(/(\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$\(|\)|["'`]|\becho\b|\bprintf\b|%s|%b|\\n|\s)/gu, '') === ''
+  }
+  /** 跨代回滚的**可执行顺序**（停服 → 恢复 `pg_dump` → 回退镜像）；三步之间不得隔太远。 */
+  const CROSS_GENERATION_ORDER = [
+    /(?:停服|停止服务|先停|stop the service|stop the server|docker compose stop server)/u,
+    /(?:pg_dump|pg_restore|恢复[^\n]{0,16}(?:备份|dump)|restore[^\n]{0,24}(?:pg_dump|backup))/u,
+    /(?:回退镜像|回滚镜像|换回旧镜像|roll[^\n]{0,24}image back|switch[^\n]{0,24}image back)/u,
+  ]
+  const statesCrossGenerationOrder = text => {
+    let cursor = 0
+    let previousEnd = null
+    for (const pattern of CROSS_GENERATION_ORDER) {
+      const match = pattern.exec(text.slice(cursor))
+      if (match === null) return false
+      const start = cursor + match.index
+      if (previousEnd !== null && start - previousEnd > 240) return false
+      cursor = start + match[0].length
+      previousEnd = cursor
+    }
+    return true
+  }
+
+  /**
+   * 三份部署文档共用的分析器（纯函数，第 18 节自检样本也跑它）。返回 `{ code, message }[]`。
+   *
+   * @param source 文档全文
+   * @param options.en 英文页（"跨代"取 `cross-generation`）
+   * @param options.boundary 归档开始带渠道 tag 的版本号（git 真值）；`null` = 本层不判
+   */
+  const analyzeDeployDoc = (source, { en, boundary = null } = {}) => {
+    const problems = []
+    const blocks = fenceBlocks(source)
+    const lines = blocks.flatMap(block => block.split('\n'))
+
+    // ① 变量追踪：哪些变量的值最终来自**运行中容器**的 `{{.Image}}`（= 升级前那份镜像的 id）。
+    //    「间接」也算：右侧只是把已污染的变量搬运一次（含 echo/printf 外壳）时继续传播。
+    const tainted = new Set()
+    const assignments = lines.map(assignmentOf).filter(entry => entry !== null)
+    for (const entry of assignments) {
+      if (containerImageInspect(entry.rhs)) tainted.add(entry.name)
+    }
+    for (let round = 0; round <= assignments.length; round += 1) {
+      let grew = false
+      for (const entry of assignments) {
+        if (tainted.has(entry.name)) continue
+        if (!isPurePassthrough(entry.rhs, tainted)) continue
+        tainted.add(entry.name)
+        grew = true
+      }
+      if (!grew) break
+    }
+
+    let anchorTags = 0
+    for (const line of lines) {
+      const tagCmd = /docker\s+tag\b/u.exec(line)
+      if (tagCmd === null) continue
+      const afterCmd = line.slice(tagCmd.index + tagCmd[0].length)
+      const tag = /^\s+("[^"]*"|'[^']*'|\S+)\s+("[^"]*"|'[^']*'|\S+)/u.exec(afterCmd)
+      const unquote = token => token.replace(/^["']|["']$/gu, '')
+      const src = tag === null ? '' : unquote(tag[1])
+      // 引号里再套引号（`docker tag "$(docker inspect "$CT" --format '{{.Image}}')" dst`）会让上面的
+      // 取词在第二个 `"` 处截断：这时退回"整行"口径 —— 只要 `docker tag` 之后出现过容器 inspection，
+      // 就看它**之后**那一段里有没有新版本标记（E-03-R3 ①的内联形态）。
+      const nestedInspect = /docker\s+(?:container\s+)?inspect\b[^\n]*\{\{\s*\.Image\s*\}\}/u.exec(afterCmd)
+      const dst = nestedInspect === null
+        ? (tag === null ? afterCmd : unquote(tag[2]))
+        : afterCmd.slice(nestedInspect.index + nestedInspect[0].length)
+      const fromContainer = nestedInspect !== null
+        || containerImageInspect(src) || varRefs(src).some(name => tainted.has(name))
+      if (!fromContainer) continue
+      if (NEW_MARK.test(dst)) {
+        problems.push({
+          code: 'deploy/container-id-to-new-tag',
+          message: `出现「按运行中容器取 id → 贴成新版本渠道 tag」的组合：${line.trim()}\n`
+            + '      ⇒ 运行中的容器是**升级前**那份镜像：这会覆盖归档刚恢复的正确 tag、'
+            + '让 `docker compose up -d` 从同一个 id 重建（升级静默不生效），并污染回滚锚点。\n'
+            + '      新镜像的 id 只能从 `<channel-id>-<VER>` 这个渠道 tag 上取'
+            + "（docker image inspect --format '{{.Id}}'）。",
+        })
+      } else if (OLD_MARK.test(dst)) {
+        anchorTags += 1
+      }
+    }
+    if (anchorTags < 1) {
+      problems.push({
+        code: 'deploy/missing-rollback-anchor',
+        message: '运行中容器的 image id 只能用于**固化旧版本回滚锚点**'
+          + '（docker tag 到带旧版本标记的渠道 tag）；当前文档里没有这样一步，或它的目标写成了新版本 tag',
+      })
+    }
+
+    // ② 新镜像 id 的来源：image inspect + 渠道 tag + 版本标记，三者同一条命令。
+    const isChannelTagIdLine = line => /docker\s+image\s+inspect\b/u.test(line)
+      && /\{\{\s*\.Id\s*\}\}/u.test(line) && CHANNEL_MARK.test(line) && NEW_MARK.test(line)
+    if (!lines.some(isChannelTagIdLine)) {
+      problems.push({
+        code: 'deploy/missing-channel-tag-id-source',
+        message: '必须写明「新镜像 id 从渠道 tag 取」——'
+          + "`docker image inspect --format '{{.Id}}' <IMAGE>:<channel-id>-<VER>`。\n"
+          + '      裸 `v<VER>`/`<VER>` 会被同机第二个渠道栈的 docker load 静默覆盖'
+          + '（不报错，只是给出别渠道的 id），不能用来判定"我刚导入的是哪个镜像"',
+      })
+    }
+
+    // ③ 部署后对拍 —— **按"多栈那一节"判**，不按全文件判：
+    //    多栈那一节 = 含「渠道 tag 取新 id」那句的小节（连同它更深层的子节）。
+    //    文件别处（§6.6 升级后验证）也有一句 `--version`，全文件判据在它被掏空时会假绿（m6/m13）。
+    const sections = markdownSections(source)
+    const multiStackIndex = sections.findIndex(section => section.text.split('\n').some(isChannelTagIdLine))
+    if (multiStackIndex >= 0) {
+      let scope = sections[multiStackIndex].text
+      for (let i = multiStackIndex + 1; i < sections.length && sections[i].level > sections[multiStackIndex].level; i += 1) {
+        scope += sections[i].text
+      }
+      const scopeLines = scope.split('\n')
+      const compareWithNewId = scopeLines.some((line, index) =>
+        /\bdocker\s+(?:container\s+)?inspect\s+[^\n]*\{\{\s*\.Image\s*\}\}/u.test(line)
+        && !/=\s*["']?\$\(/u.test(line)
+        && scopeLines.slice(index, index + 2).some(near => /NEW_IMAGE_ID/u.test(near)))
+      if (!compareWithNewId) {
+        problems.push({
+          code: 'deploy/missing-post-deploy-image-id-compare',
+          message: '多栈部署段必须把容器的 image id 与刚导入的新镜像 id 对拍'
+            + "（`docker inspect \"$CT\" --format '{{.Image}}'` == `$NEW_IMAGE_ID`）—— "
+            + '这是"升级静默不生效"唯一能暴露的地方（tag 与 .env 都会被写对）',
+        })
+      }
+      if (!scopeLines.some(line => /picoaide-server\s+--version/u.test(line))) {
+        problems.push({
+          code: 'deploy/missing-version-in-multistack',
+          message: '多栈部署段必须有 `--version` 核对（看二进制自报，不看 tag）——'
+            + '文件别处的「升级后验证」段落**不能**替代它：这一段才是"这一栈换了没有"的判据面',
+        })
+      }
+    }
+
+    // ③b `.env` 里那条 tag 必须当场解一次 id 并与新镜像 id 相等：别栈 load 覆盖的是**裸 tag**，
+    //     而 `.env` 里若留着裸 tag，名字看着对、解析出来的却是别渠道的镜像。
+    const envTagVars = new Set()
+    for (const block of blocks) {
+      for (const match of block.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=["']?\$\(([^\n)]*)\)/gu)) {
+        if (/\.env/u.test(match[2]) && /SERVER_IMAGE/u.test(match[2])) envTagVars.add(match[1])
+      }
+    }
+    if (!(envTagVars.size >= 1 && lines.some(line => /docker\s+image\s+inspect\b/u.test(line)
+      && /\{\{\s*\.Id\s*\}\}/u.test(line) && /NEW_IMAGE_ID/u.test(line)
+      && [...envTagVars].some(name => new RegExp(`\\$\\{?${name}\\}?`, 'u').test(line))))) {
+      problems.push({
+        code: 'deploy/missing-env-tag-compare',
+        message: '必须把 `.env` 里的 `SERVER_IMAGE` tag 解一次 id 并与 `$NEW_IMAGE_ID` 对拍'
+          + "（`test \"$(docker image inspect --format '{{.Id}}' \"$ENV_TAG\")\" = \"$NEW_IMAGE_ID\"`）—— "
+          + '否则"名字看着对、实际指向别渠道镜像"没有任何出口',
+      })
+    }
+    if (!lines.some(line => /\$\{?NEW_IMAGE_ID\}?/u.test(line) && /\$\{?ROLLBACK_IMAGE_ID\}?/u.test(line)
+      && /!=/u.test(line))) {
+      problems.push({
+        code: 'deploy/missing-old-new-image-id-differs',
+        message: '必须断言新镜像 id 与回滚锚点 id **不同**（否则"贴错镜像"这类形态无从发现）',
+      })
+    }
+
+    // ④b 回滚段的 `SERVER_IMAGE=` 必须带渠道标记（E-03-R1）：裸 `${OLD}` 在同机多栈时可能已被
+    //     别渠道的 `docker load` 覆盖，而 compose 的 `PICOAI_CHANNEL` 缺省为空 ⇒ 会以别渠道品牌
+    //     静默起来（本节此前的判据只管升级方向，回滚方向没有出口）。
+    for (const line of lines) {
+      if (!/SERVER_IMAGE=/u.test(line) || !OLD_MARK.test(line)) continue
+      if (CHANNEL_MARK.test(line)) continue
+      problems.push({
+        code: 'deploy/rollback-bare-tag',
+        message: `回滚段把 \`SERVER_IMAGE\` 指到了**裸 tag**：${line.trim()}\n`
+          + '      ⇒ 同机多栈时那个裸 tag 可能已被别的渠道 `docker load` 覆盖，而 compose 的'
+          + ' `PICOAI_CHANNEL` 缺省为空 ⇒ 这一栈会以**别渠道**的品牌静默起来。\n'
+          + '      回滚锚点必须写成渠道 tag：`${IMAGE}:${CHANNEL}-${OLD}`。',
+      })
+    }
+
+    // ⑤ E-08 同族：跨代回滚的失败位置必须与代码真源一致，且**说跨代的那一段自己给出顺序**。
+    if (/通常可以只换镜像|is usually enough/u.test(source)) {
+      problems.push({
+        code: 'deploy/rollback-generic-image-only',
+        message: '回滚口径不得再写「（一般迁移）通常可以只换镜像 / switching the image back is usually enough」'
+          + '—— 库比二进制新时启动期会 fail-loud，回滚必须连库一起（见同节的跨代说明）',
+      })
+    }
+    const crossGeneration = en ? /cross-generation/iu : /跨代/u
+    if (!crossGeneration.test(source)) {
+      problems.push({
+        code: 'deploy/missing-generation-distinction',
+        message: '回滚段必须区分**同代 / 跨代**（同代可只换镜像；跨代会被拒绝启动，须停服 → 恢复 pg_dump → 回退镜像）',
+      })
+    }
+    if (!source.includes('SchemaMismatchError')) {
+      problems.push({
+        code: 'deploy/missing-schemamismatch-error',
+        message: '跨代回滚必须点名启动期的 `SchemaMismatchError`（与 serverstore/migrate.go 的判据同名，便于现场检索）',
+      })
+    }
+    if (!proseBlocks(source).some(block => crossGeneration.test(block) && statesCrossGenerationOrder(block))) {
+      problems.push({
+        code: 'deploy/missing-cross-generation-order',
+        message: '说"跨代回滚"的那一段必须自己给出**可执行顺序**（停服 → 恢复 `pg_dump` → 回退镜像）；'
+          + '只留「跨代」+「SchemaMismatchError」两个关键词、把顺序删掉或扔给别的段落都不算',
+      })
+    }
+
+    // ⑥ 归档边界版本（E-03-R2）：介绍渠道专属 tag 的那一段必须点明**归档从哪个版本起**带它。
+    //    版本号是唯一能与 git 历史机械对拍的身份；只写日期（`2026-09-23 起`）会让这条判据无从落地，
+    //    而写错的边界会把"旧包退路"用错地方（`v2.8.1` 的归档里就没有渠道 tag）。
+    if (boundary !== null) {
+      const stated = proseBlocks(source).some(block => CHANNEL_MARK.test(block) && NEW_MARK.test(block)
+        && /tag/iu.test(block) && block.includes(boundary))
+      if (!stated) {
+        problems.push({
+          code: 'deploy/missing-archive-boundary',
+          message: `介绍渠道专属 tag 的那一段必须点明归档从**哪个版本**起带它（git 真值 = ${boundary}）——`
+            + '别只写日期：日期无法与仓库历史对拍，写偏一天就会把"旧包退路"用错地方',
+        })
+      }
+    }
+
+    return problems
+  }
+
+  // ---- ⑧ 归档边界版本的 git 真值：渠道 tag 是哪个提交引入构建脚本的、最早含它的 `v*` tag 是哪个 ----
+  //
+  // 取不到 git 事实时**出声降级**（与 check-migration-range 的 baseline 同口径）：打印一行
+  // "本层判据未生效 + 原因"，绝不让"没跑成"看起来像"对拍过"。
+  const gitText = args => {
+    const done = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 30_000 })
+    return done.error === undefined && done.status === 0 && typeof done.stdout === 'string' ? done.stdout.trim() : null
+  }
+  let archiveBoundary = null
+  {
+    const introduced = gitText(['log', '--format=%H', '--max-count=1', '-S', '${IMAGE}:${channel}-${VER}',
+      '--', 'scripts/ci-build-channel-images.sh'])
+    let skipReason = ''
+    if (introduced === null) skipReason = 'git 历史不可读（不是仓库 / 历史被截断）'
+    else if (introduced === '') skipReason = 'git 历史里找不到引入渠道 tag 的提交（构建脚本被重写？）'
+    else {
+      const containing = gitText(['for-each-ref', '--sort=creatordate', '--format=%(refname:short)',
+        `--contains=${introduced}`, 'refs/tags'])
+      const first = containing === null
+        ? null
+        : (containing.split('\n').map(line => line.trim()).filter(line => /^v\d+\.\d+\.\d+/u.test(line))[0] ?? null)
+      if (first === null) {
+        skipReason = `tag 列表里找不到包含 ${introduced.slice(0, 12)} 的 v* tag（浅克隆 / tag 未 fetch？）`
+      } else archiveBoundary = first
+    }
+    if (archiveBoundary === null) {
+      process.stderr.write('⚠ verify-ci-scripts 第 18 节：归档边界版本的 git 对拍**本层未生效** —— '
+        + `${skipReason}\n`)
+    }
+  }
+
+  // ---- ⑨ 量具自检样本：喂给**同一个** analyzeDeployDoc，逐条断言 ----
+  //
+  // 为什么要这一节：上面所有规则都在一个纯函数里，掏空它（`return []`）、删掉某条规则、或把某条
+  // 正则放宽到恒真，都不会被三份真文档发现（真文档本来就是绿的）。样本给出下限；每条变异先断言
+  // "变异落地了"（否则替换目标漂移会让样本静默失效），再看它是否被报成期望的 code。
+  const SAMPLE_DOC = [
+    '## 5. 切换版本并重启',
+    '',
+    '```bash',
+    'cd /opt/picoaide',
+    'VER=<本次版本,不带 v>',
+    'OLD=<升级前版本,不带 v>',
+    'IMAGE=picoaide-harness-server',
+    'CHANNEL=<本栈渠道 id>',
+    'STACK=/opt/picoaide',
+    'CT=picoaide-server',
+    'ROLLBACK_IMAGE_ID="$(docker inspect "$CT" --format \'{{.Image}}\')"',
+    'docker tag "$ROLLBACK_IMAGE_ID" "${IMAGE}:${CHANNEL}-${OLD}"',
+    'unzip -p /tmp/pa.zip image.tar | docker load',
+    'NEW_IMAGE_ID="$(docker image inspect --format \'{{.Id}}\' "${IMAGE}:${CHANNEL}-${VER}")"',
+    'test -n "$NEW_IMAGE_ID"',
+    'test "$NEW_IMAGE_ID" != "$ROLLBACK_IMAGE_ID"',
+    'docker run --rm --entrypoint cat "${IMAGE}:${CHANNEL}-${VER}" /opt/picoaide/CHANNEL',
+    'sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}|" .env',
+    'docker compose up -d server',
+    'ENV_TAG="$(sed -n \'s/^SERVER_IMAGE=//p\' .env)"',
+    'test "$(docker image inspect --format \'{{.Id}}\' "$ENV_TAG")" = "$NEW_IMAGE_ID"',
+    'docker inspect "$CT" --format \'{{.Image}}\'          # == $NEW_IMAGE_ID',
+    'docker exec "$CT" /app/picoaide-server --version',
+    'docker exec "$CT" cat /opt/picoaide/CHANNEL',
+    '```',
+    '',
+    '归档从 `v2.8.2-beta.1`（2026-09-24）起带渠道专属 tag `picoaide-harness-server:<channel-id>-<VER>`。',
+    '',
+    '- **跨代回滚（库比二进制新）**：启动期拒绝启动（`SchemaMismatchError`），'
+      + '正确顺序 = **停服 → 恢复升级前的 `pg_dump` → 回退镜像**。',
+    '',
+    '## 7. 回滚',
+    '',
+    '```bash',
+    'CHANNEL=<本栈渠道 id>',
+    'sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${OLD}|" .env',
+    '```',
+    '',
+  ].join('\n')
+  const SAMPLE_BOUNDARY = 'v2.8.2-beta.1'
+  const SAMPLE_VERSION_LINE = 'docker exec "$CT" /app/picoaide-server --version'
+  const SAMPLE_POST_DEPLOY_LINE = 'docker inspect "$CT" --format \'{{.Image}}\'          # == $NEW_IMAGE_ID'
+  const SAMPLE_ANCHOR_LINE = 'docker tag "$ROLLBACK_IMAGE_ID" "${IMAGE}:${CHANNEL}-${OLD}"'
+  const SAMPLE_ROLLBACK_LINE = 'sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${OLD}|" .env'
+  /** 已知退化形态（E-03-R3 的覆盖边界 + E-03-R1/R2）。每条都必须被报成 `expect`。 */
+  const SAMPLE_MUTATIONS = [
+    {
+      // 覆盖边界 ①：id 经变量转手再贴成新版本 tag（"追加一张兜底步"的形态）
+      id: 'm-var-indirection',
+      mutate: source => source.replace(SAMPLE_ANCHOR_LINE,
+        `${SAMPLE_ANCHOR_LINE}\nSRC="$ROLLBACK_IMAGE_ID"\ndocker tag "$SRC" "\${IMAGE}:\${CHANNEL}-\${VER}"`),
+      expect: 'deploy/container-id-to-new-tag',
+    },
+    {
+      // 覆盖边界 ②：`docker container inspect` 拼写 + 追加兜底步（整段替换原本就被 ② 挡住）
+      id: 'm-container-inspect-spelling',
+      mutate: source => source.replace(SAMPLE_POST_DEPLOY_LINE,
+        'NEW2="$(docker container inspect "$CT" --format \'{{.Image}}\')"\n'
+        + 'docker tag "$NEW2" "\${IMAGE}:\${CHANNEL}-\${VER}"\n' + SAMPLE_POST_DEPLOY_LINE),
+      expect: 'deploy/container-id-to-new-tag',
+    },
+    {
+      // 覆盖边界 ①（内联形态）：命令替换直接进 docker tag，不经变量
+      id: 'm-inline-container-inspect',
+      mutate: source => source.replace(SAMPLE_VERSION_LINE,
+        'docker tag "$(docker inspect "$CT" --format \'{{.Image}}\')" "\${IMAGE}:\${CHANNEL}-\${VER}"\n'
+        + SAMPLE_VERSION_LINE),
+      expect: 'deploy/container-id-to-new-tag',
+    },
+    {
+      // 覆盖边界 ③：把 `--version` 挪出多栈段（文件别处仍有一句，全文件判据会假绿）
+      id: 'm-version-outside-multistack',
+      mutate: source => source.replace(`${SAMPLE_VERSION_LINE}\n`, '')
+        .replace('\n## 7. 回滚\n',
+          '\n## 6. 升级后验证\n\n```bash\ndocker exec picoaide-server /app/picoaide-server --version\n```\n\n## 7. 回滚\n'),
+      expect: 'deploy/missing-version-in-multistack',
+    },
+    {
+      // 覆盖边界 ④：跨代那条 bullet 只剩关键词（掏空可执行顺序）
+      id: 'm-cross-generation-hollowed',
+      mutate: source => source.replace(
+        '- **跨代回滚（库比二进制新）**：启动期拒绝启动（`SchemaMismatchError`），'
+        + '正确顺序 = **停服 → 恢复升级前的 `pg_dump` → 回退镜像**。',
+        '- **跨代回滚（库比二进制新）**：会命中 `SchemaMismatchError`（细节见发布说明）。'),
+      expect: 'deploy/missing-cross-generation-order',
+    },
+    {
+      // E-03-R1：回滚段写回裸 tag
+      id: 'm-rollback-bare-tag',
+      mutate: source => source.replace(SAMPLE_ROLLBACK_LINE,
+        'sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=\${IMAGE}:\${OLD}|" .env'),
+      expect: 'deploy/rollback-bare-tag',
+    },
+    {
+      // E-03-R2：归档边界只写日期、不写版本号
+      id: 'm-archive-boundary-date-only',
+      mutate: source => source.replace('`v2.8.2-beta.1`（2026-09-24）起带渠道专属 tag', '2026-09-24 起带渠道专属 tag'),
+      expect: 'deploy/missing-archive-boundary',
+    },
+    {
+      // E-08 第一层：把"通常可以只换镜像"写回去
+      id: 'm-generic-image-only',
+      mutate: source => source.replace('\n## 7. 回滚\n', '\n## 7. 回滚\n\n一般迁移通常可以只换镜像。\n'),
+      expect: 'deploy/rollback-generic-image-only',
+    },
+  ]
+  const sampleCodes = (source, boundary = SAMPLE_BOUNDARY) =>
+    analyzeDeployDoc(source, { en: false, boundary }).map(problem => problem.code)
+  check(sampleCodes(SAMPLE_DOC).length === 0,
+    '第 18 节自检样本：**基线**合成文档必须零问题（分析器被放宽到乱报即红）——'
+    + `实际：${sampleCodes(SAMPLE_DOC).join(' / ')}`)
+  check(SAMPLE_MUTATIONS.length >= 8,
+    `第 18 节自检样本：已知退化形态的样本不得少于 8 条（当前 ${SAMPLE_MUTATIONS.length}）——`
+    + '删样本等于把量具的下限拿掉')
+  for (const sample of SAMPLE_MUTATIONS) {
+    const result = sample.mutate(SAMPLE_DOC)
+    check(result !== SAMPLE_DOC,
+      `第 18 节自检样本 ${sample.id}：变异**没落地**（替换目标不在样本里）⇒ 这条样本无效，`
+      + '要么修样本、要么修分析器的取样面')
+    const codes = sampleCodes(result)
+    check(codes.includes(sample.expect),
+      `第 18 节自检样本 ${sample.id}：已知退化形态必须被报成 \`${sample.expect}\` —— `
+      + `实际：${codes.length === 0 ? '（无问题）' : codes.join(' / ')}`)
+  }
+
+  // ---- 真文档 ----
+  for (const file of DEPLOY_DOCS) {
+    const path = join(root, file)
+    if (!check(existsSync(path), `${file} 必须存在（多渠道部署步骤的判据锚点，缺文件即红）`)) continue
+    const source = readFileSync(path, 'utf8')
+    check(fenceBlocks(source).length > 0, `${file} 里应有代码块（本节判据的解析面）`)
+    for (const problem of analyzeDeployDoc(source, {
+      en: file.startsWith('site/src/content/docs/en/'),
+      boundary: archiveBoundary,
+    })) {
+      check(false, `${file}: ${problem.message}`)
+    }
+  }
+
+  // ⑤ 的代码真源：双向对账确实还在、且**真的驱动**那条 fail-loud 分支
+  //    （它被删掉时，上面三条文档要求要一起改，而不是文档单方面过期）。
+  //    只判"标识符存在"是不够的：把调用点换成 `[]int64(nil)`、函数体与错误类型原地保留
+  //    就能整体绕过（E-03-R3 覆盖边界 ⑤），所以这里判的是**结果被谁用**。
+  const migrate = readFileSync(join(root, 'server', 'internal', 'serverstore', 'migrate.go'), 'utf8')
+  const migrateLines = migrate.split('\n')
+  const reverseCallLines = []
+  migrateLines.forEach((line, index) => {
+    if (!/schemaUnknownVersions\s*\(/u.test(line)) return
+    if (/^\s*func\s+schemaUnknownVersions\s*\(/u.test(line)) return
+    reverseCallLines.push({ line, index })
+  })
+  check(reverseCallLines.length >= 1,
+    'server/internal/serverstore/migrate.go 的**反向对账必须在生产路径上被调用**（`schemaUnknownVersions(...)`）'
+    + '—— 只留函数定义不算：把调用点删成死代码（`[]int64(nil)`）而原地保留函数体与错误类型即红。'
+    + '它被移除时，文档里的跨代回滚说明必须同步改（改这条判据本身）')
+  const reverseWired = reverseCallLines.some(({ line, index }) => {
+    const bound = /([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*[^\n]*schemaUnknownVersions\s*\(/u.exec(line)
+    if (bound === null) return false
+    const window = migrateLines.slice(index, index + 12).join('\n')
+    return new RegExp(`len\\s*\\(\\s*${bound[1]}\\s*\\)\\s*>\\s*0`, 'u').test(window)
+      && /&SchemaMismatchError\{/u.test(window)
+  })
+  check(reverseWired,
+    '`schemaUnknownVersions(...)` 的结果必须**真的驱动**那条 fail-loud 分支'
+    + '（`if unknown := schemaUnknownVersions(...); len(unknown) > 0 {` 之后紧跟 `&SchemaMismatchError{…}`）'
+    + '—— 标识符存在 ≠ 判据生效（E-03-R3 覆盖边界 ⑤）')
+  check(/&SchemaMismatchError\{/u.test(migrate),
+    'server/internal/serverstore/migrate.go 里应有 `&SchemaMismatchError{…}`（启动期 fail-loud 的载体）')
+  check(/AppliedMax\s*>\s*e\.MaxFile/u.test(migrate),
+    '`SchemaMismatchError.Error()` 应保留「库比二进制**新**」那条分支（e.AppliedMax > e.MaxFile）'
+    + '—— 文档里"跨代回滚会被拒绝启动"正是它')
+}
 for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 if (failures.length > 0) {
   process.stderr.write(`\nverify-ci-scripts: ${failures.length} 项断言失败\n`)
@@ -6511,4 +7073,10 @@ process.stdout.write('verify-ci-scripts: OK — ref 形态判定唯一真源(tag
   + 's3 ls 失败 fail-loud 且输出脱敏/缓存头逐对象断言全部符合预期/'
   + 'pr-summary 的 PR 评论按 needs.*.result 派生(真跑 github-script 的三态:全绿/有 job 未成功/全失败;'
   + '未成功 job 的 artifact 不得出现 + needs 列表与正文读取面双向对拍)/'
+  + '多栈部署文档的镜像 tag 语义(纯函数分析器 + 自检样本下限:禁止「运行中容器 id → 新版本渠道 tag」'
+  + '(含**变量转手**与 `docker container inspect` 拼写)、新 id 必须取自渠道 tag、'
+  + '部署后 image id/`--version` 对拍**按多栈那一节判**、回滚锚点只用旧版本 tag、'
+  + '回滚段 `SERVER_IMAGE` 不得写裸 tag、跨代回滚那段必须自给可执行顺序、'
+  + '归档边界版本与 git 真值对拍;并锚到 ci-build-channel-images.sh 的三 tag 与'
+  + 'serverstore 反向对账**真的驱动 fail-loud 分支**)/'
   + 'clean 的旧格式前缀清扫(缺 GITHUB_RUN_ID ⇒ 显式跳过,绝不退化成删掉所有 local-* 前缀)\n')

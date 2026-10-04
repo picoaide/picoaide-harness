@@ -32,6 +32,20 @@ package main
 //   - 代价是：同包内**任何**直挂都必须登记 —— 这正是"直挂是例外、必须逐个申报"的语义
 //     （现有正当例外只有 /healthz、/readyz 两个探针，见 directRouteAllowList）。
 //
+// ⚠️ "整个包"必须**真的**是整个包（S3-01，审计 2026-10-04，P2）：修前这里只遍历
+// `*ast.FuncDecl`，于是**包级变量初始化器里的函数字面量**完全在扫描面外：
+//
+//	var mountExtra = func(r *gin.Engine) { r.GET("/api/client/v2/…", h) }
+//
+// 不需要任何函数调用它就能挂路由（`registerProductionRoutes` 里一行 `mountExtra(r)`
+// 即可），而四条方向（白名单双向、命名空间、扫描面为空）全部保持绿 —— 这正是本用例
+// 自己声称要关掉的那类盲区，只是换了个语法形态（`init()` 与包内方法本来就是
+// `*ast.FuncDecl`，修前已在面内；**包级函数值不在**）。现在扫描目标是
+// collectRouteScanTargets 收集的两类代码段：全部 `*ast.FuncDecl` 函数体 + 全部包级
+// `var`/`const` 初始化器里的函数字面量。负例（自校准）见
+// TestRouteDeclarationGuardCatchesPackageLevelFunctionValues —— 它用**同一份**扫描与
+// 判定实现喂一段合成了该形态的源码，断言判据真的报红。
+//
 // 判据的四个方向（缺任何一个都会退化成"标签"或空转）：
 //  1. **白名单 ⊆ 扫描面**：清单里的路径必须真的扫到（证明判据在看这段代码，不是空转）；
 //  2. **扫描面 ⊆ 白名单**：扫到的路径必须在清单里（新增直挂必须显式登记，逐个申报）；
@@ -47,9 +61,14 @@ package main
 //   - 路由组前缀只跟随**同函数内的赋值**（`g := r.Group(p)` 与链式
 //     `r.Group(p).GET(...)`）；经函数返回、结构体字段、跨函数传递拿到的组 ⇒ 落回
 //     上一条（无法判定 ⇒ 红）；
-//   - 别的包（internal/**）里的直挂不在扫描面内 —— 它们够不到引擎实例，路由表漂移由
-//     运行期装配守卫（TestRouteAssemblyMatchesProductionSource 等）负责；本判据只钉
-//     "引擎在 cmd/server 里被直接挂上了哪些路由"；
+//   - 别的包（internal/**）里的直挂不在扫描面内。**理由不是"它们够不到引擎实例"**
+//     （修前这里就是这么写的，与事实相反：internal/** 里的镜像装配函数正是把
+//     `*gin.Engine` 当形参收进去的，例如 `RegisterRoutes(r *gin.Engine)`，而
+//     `route_mirror_registry_test.go` 也只认那两个字面方法名）。真实边界是**本用例
+//     只解析 cmd/server 这一个包**；跨包装配当前由 route_mirror_registry_test.go 盯着
+//     （判据面 = 名字恰为 RegisterRoutes / RegisterAdminRoutes 的调用），换名
+//     （`MountAPIRoutes(r *gin.Engine)`）即同时躲开两条 —— 这是**已登记的残差**，
+//     不在本用例的判据面内（登记见 temp/audit-v282/fixes/S3-P2-batch.md）。
 //   - 覆盖的注册形态 = gin v1.12.0 `*gin.RouterGroup` 上**全部**带路径实参的方法
 //     （GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS/Any/Handle/Match/Static/StaticFS/
 //     StaticFile/StaticFileFS）+ `Group(...)` 组前缀；这份方法表由
@@ -136,12 +155,20 @@ const unresolvedGroupPrefix = "\x00unresolved"
 type directRouteCall struct {
 	file     string // 包内文件名
 	line     int    // 1 起
-	fn       string // 所在函数（便于人读"这是哪段装配代码"）
+	col      int    // 1 起（仅用于去重：同一段代码可能被两个扫描目标覆盖）
+	fn       string // 所在函数 / 包级初始化器（便于人读"这是哪段装配代码"）
 	src      string // 该行原文（红信息里可直接照抄）
 	group    string // 路由组前缀（"" = 直接挂在 engine 上）
 	path     string // 静态解析出的完整路径（仅 resolved 时有效）
 	resolved bool
 	why      string // 无法静态判定时的原因
+}
+
+// dedupeKey 是"同一次注册调用"的身份：扫描面从"每个函数体"扩到"包级函数字面量"之后，
+// 嵌套的函数字面量会被外层目标与自身目标各扫一遍 —— 它们是**同一次**调用，红信息里
+// 不能出现两遍（否则"扫到几次"会随写法漂移）。
+func (c directRouteCall) dedupeKey() string {
+	return fmt.Sprintf("%s:%d:%d", c.file, c.line, c.col)
 }
 
 // describe 输出一条可照抄的定位信息。
@@ -161,6 +188,47 @@ func inAPINamespace(path string) bool {
 	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
+// routeDeclarationReport 是一次扫描的**判定结果**。
+//
+// 判定（而不是扫描）是判据的判别力所在，所以它必须能被自校准用例用**合成源码**喂进去
+// 实跑 —— TestRouteDeclarationGuardCatchesPackageLevelFunctionValues 用的就是这一份
+// judgeDirectRouteCalls，与生产扫描逐字同源。只让"生产扫描"跑一遍真实包、再断言
+// "没报错"，证明不了判据咬得住任何一种违规形态（包恰好干净时它永远是绿的）。
+type routeDeclarationReport struct {
+	calls               []directRouteCall
+	namespaceViolations []directRouteCall
+	offList             []directRouteCall
+	unresolved          []directRouteCall
+	deadAllowList       []string
+	seen                map[string]bool // 扫描面里出现过的路径（白名单死条目的反面）
+}
+
+// judgeDirectRouteCalls 对一次扫描结果做四个方向的判定（方向定义见文件头）。
+func judgeDirectRouteCalls(calls []directRouteCall) routeDeclarationReport {
+	rep := routeDeclarationReport{calls: calls, seen: map[string]bool{}}
+	for _, c := range calls {
+		if !c.resolved {
+			rep.unresolved = append(rep.unresolved, c)
+			continue
+		}
+		rep.seen[c.path] = true
+		if inAPINamespace(c.path) {
+			rep.namespaceViolations = append(rep.namespaceViolations, c)
+			continue
+		}
+		if _, ok := directRouteAllowList[c.path]; !ok {
+			rep.offList = append(rep.offList, c)
+		}
+	}
+	// 方向 2 的反面：白名单不得留死条目（判据空转 / 探针被悄悄搬走都靠这条现形）。
+	for _, path := range sortedKeys(directRouteAllowList) {
+		if !rep.seen[path] {
+			rep.deadAllowList = append(rep.deadAllowList, path)
+		}
+	}
+	return rep
+}
+
 // TestRouteAssemblyDoesNotMountAPINamespaceDirectly：装配层直挂清单判据（详见文件头）。
 func TestRouteAssemblyDoesNotMountAPINamespaceDirectly(t *testing.T) {
 	// 前置自检：命名空间真源必须真的在 /api 之下。它一旦变化，本判据的判据面必须同步
@@ -178,24 +246,9 @@ func TestRouteAssemblyDoesNotMountAPINamespaceDirectly(t *testing.T) {
 			"（若确实把 /healthz、/readyz 移进了 internal/router，请同步更新本用例的扫描面与 directRouteAllowList）")
 	}
 
-	var namespaceViolations, offList, unresolved []directRouteCall
-	seen := map[string]bool{}
-	for _, c := range calls {
-		if !c.resolved {
-			unresolved = append(unresolved, c)
-			continue
-		}
-		seen[c.path] = true
-		if inAPINamespace(c.path) {
-			namespaceViolations = append(namespaceViolations, c)
-			continue
-		}
-		if _, ok := directRouteAllowList[c.path]; !ok {
-			offList = append(offList, c)
-		}
-	}
+	rep := judgeDirectRouteCalls(calls)
 
-	if len(namespaceViolations) > 0 {
+	if len(rep.namespaceViolations) > 0 {
 		t.Errorf("装配层直挂了 /api 命名空间的路由（%d 处）—— %s：\n%s\n"+
 			"  为什么必须红：直挂绕过了 internal/router 的集中声明；带鉴权时未认证仍回 401、与其它 API "+
 			"逐字同形，于是 TestAPISweepAllRoutesContract（只看未认证状态码）、TestRouteAssembly*"+
@@ -204,35 +257,32 @@ func TestRouteAssemblyDoesNotMountAPINamespaceDirectly(t *testing.T) {
 			"TestAdminRouterNoFallOpen 顺带抓住（变异对照见 temp/round3-2026-09-23/fix-route-declaration-blindspot.md）；"+
 			"员工面 /api/client/v2/*、非 admin 的 /api/server/*、经 AdminRoute 申报的直挂都是全绿盲区。\n"+
 			"  允许的直挂只有 directRouteAllowList 里那两个非 /api 探针。",
-			len(namespaceViolations), directRouteHint, joinDirectRouteCalls(namespaceViolations))
+			len(rep.namespaceViolations), directRouteHint, joinDirectRouteCalls(rep.namespaceViolations))
 	}
 
-	if len(offList) > 0 {
+	if len(rep.offList) > 0 {
 		t.Errorf("装配层直挂的路由不在直接挂载白名单里（%d 处）—— 直挂是例外，必须逐个申报：\n%s\n"+
 			"  若确属正当直挂（不属于 /api、/v1 命名空间，且必须比 router.Register 更早/更直接地"+
 			"挂上引擎），请登记进 directRouteAllowList 并写一句理由；否则 %s。",
-			len(offList), joinDirectRouteCalls(offList), directRouteHint)
+			len(rep.offList), joinDirectRouteCalls(rep.offList), directRouteHint)
 	}
 
-	if len(unresolved) > 0 {
+	if len(rep.unresolved) > 0 {
 		t.Errorf("装配层有 %d 处路由注册的路径/路由组前缀无法静态判定：\n%s\n"+
 			"  本判据只做常量折叠（字符串字面量 / 同包 const / `+` 拼接 / router.Namespace*）；"+
 			"无法判定就不能证明它不在 /api 下，按 fail-loud 处理。\n"+
 			"  处置：把路径改成字面量或同包 const（组前缀同理），或者 %s。",
-			len(unresolved), joinDirectRouteCalls(unresolved), directRouteHint)
+			len(rep.unresolved), joinDirectRouteCalls(rep.unresolved), directRouteHint)
 	}
 
-	// 方向 2 的反面：白名单不得留死条目（判据空转 / 探针被悄悄搬走都靠这条现形）。
-	for _, path := range sortedKeys(directRouteAllowList) {
-		if !seen[path] {
-			t.Errorf("directRouteAllowList 登记了 %s（%s），但扫描面里没有这个直挂 —— "+
-				"探针被移走/改名了？请同步更新本用例（死条目会让这条判据空转）",
-				path, directRouteAllowList[path])
-		}
+	for _, path := range rep.deadAllowList {
+		t.Errorf("directRouteAllowList 登记了 %s（%s），但扫描面里没有这个直挂 —— "+
+			"探针被移走/改名了？请同步更新本用例（死条目会让这条判据空转）",
+			path, directRouteAllowList[path])
 	}
 
 	var inventory []string
-	for _, c := range calls {
+	for _, c := range rep.calls {
 		state := strconv.Quote(c.path)
 		if !c.resolved {
 			state = "无法静态判定"
@@ -348,6 +398,68 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
+// routeScanTarget 是判据的一个扫描目标：一段**可能挂着路由**的代码。
+type routeScanTarget struct {
+	file string // 包内文件名
+	fn   string // 人读定位名：函数名 / `var <名字>` / 包级初始化器
+	body ast.Node
+}
+
+// collectRouteScanTargets 收集 cmd/server 包里**全部**可能挂路由的代码段。
+//
+// 两类，缺一不可（修前只有第 1 类，于是包级函数值整类落在面外 —— 审计 S3-01）：
+//
+//  1. 每个 `*ast.FuncDecl` 的函数体：覆盖 registerProductionRoutes 本身、同包 helper、
+//     `init()`（它本来就是一个 FuncDecl，修前已在面内）、包内方法（方法值/方法表达式
+//     最终都落到这些函数体上）；
+//  2. 每个包级 `var` / `const` 初始化器里的**函数字面量**：
+//     `var mountExtra = func(r *gin.Engine) { r.GET("/api/client/v2/…", h) }`。
+//     它不需要被任何函数定义调用就能挂路由（`registerProductionRoutes` 里一行
+//     `mountExtra(r)` 即可），所以"函数体遍历"给不出任何保护 —— 负例见
+//     TestRouteDeclarationGuardCatchesPackageLevelFunctionValues。
+//
+// 只扫这两类而不是"文件里所有 FuncLit"：函数体内的嵌套字面量已经由第 1 类覆盖，
+// 重复扫会让同一次调用在报告里出现两遍；扫描实现仍按 dedupeKey 去重兜底。
+func collectRouteScanTargets(files map[string]*ast.File, order []string) []routeScanTarget {
+	var out []routeScanTarget
+	for _, name := range order {
+		for _, decl := range files[name].Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue // 无函数体（外部实现），没有可扫的代码
+				}
+				out = append(out, routeScanTarget{file: name, fn: d.Name.Name, body: d.Body})
+			case *ast.GenDecl:
+				if d.Tok != token.VAR && d.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, val := range vs.Values {
+						label := "包级初始化器"
+						if i < len(vs.Names) && vs.Names[i].Name != "_" {
+							label = "var " + vs.Names[i].Name
+						}
+						ast.Inspect(val, func(n ast.Node) bool {
+							lit, ok := n.(*ast.FuncLit)
+							if !ok {
+								return true
+							}
+							out = append(out, routeScanTarget{file: name, fn: label, body: lit.Body})
+							return false // 嵌套字面量已由外层目标的遍历覆盖（去重再兜一层）
+						})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // scanDirectRouteRegistrations 解析 cmd/server 包的全部非测试 .go 文件，收集所有 gin
 // 路由注册调用（含路由组前缀的静态折叠）。
 //
@@ -380,10 +492,25 @@ func scanDirectRouteRegistrations(t *testing.T) []directRouteCall {
 		sources[name] = src
 		order = append(order, name)
 	}
+	sort.Strings(order)
+	return scanRouteRegistrationsInPackage(t, files, sources, order, fset)
+}
+
+// scanRouteRegistrationsInPackage 是判据的**唯一扫描实现**：给定一组已解析的包文件，
+// 收集全部路由注册调用。生产扫描（scanDirectRouteRegistrations）与自校准用例
+// （TestRouteDeclarationGuardCatchesPackageLevelFunctionValues）共用它 —— 否则负例
+// 验的是"另一份实现"，证明不了生产判据咬得住。
+func scanRouteRegistrationsInPackage(
+	t *testing.T,
+	files map[string]*ast.File,
+	sources map[string][]byte,
+	order []string,
+	fset *token.FileSet,
+) []directRouteCall {
+	t.Helper()
 	if len(order) == 0 {
 		t.Fatal("cmd/server 包里扫不到任何非测试 .go 文件 —— 扫描面为空，不得静默通过")
 	}
-	sort.Strings(order)
 	if !packageDeclaresFunc(files, "registerProductionRoutes") {
 		t.Fatalf("cmd/server 包（%s）里找不到 registerProductionRoutes 的函数体 —— "+
 			"生产装配入口不见了，本判据的扫描面依赖它存在，不得静默通过",
@@ -392,14 +519,16 @@ func scanDirectRouteRegistrations(t *testing.T) []directRouteCall {
 
 	res := directRouteResolver{consts: packageStringConstants(files)}
 	var calls []directRouteCall
-	for _, name := range order {
-		for _, decl := range files[name].Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
+	seen := map[string]bool{}
+	for _, target := range collectRouteScanTargets(files, order) {
+		groups := collectGroupPrefixes(target.body, res)
+		for _, c := range scanRouteCallsInTarget(target.file, sources[target.file], target.fn, target.body, groups, res, fset) {
+			if key := c.dedupeKey(); seen[key] {
 				continue
+			} else {
+				seen[key] = true
 			}
-			groups := collectGroupPrefixes(fd, res)
-			calls = append(calls, scanRouteCallsInFunc(name, sources[name], fd, groups, res, fset)...)
+			calls = append(calls, c)
 		}
 	}
 	sort.Slice(calls, func(i, j int) bool {
@@ -423,14 +552,15 @@ func packageDeclaresFunc(files map[string]*ast.File, name string) bool {
 	return false
 }
 
-// scanRouteCallsInFunc 扫一个函数体内（含嵌套闭包）的路由注册调用。
+// scanRouteCallsInTarget 扫一段代码（函数体或包级函数字面量的体，含嵌套闭包）里的
+// 路由注册调用。
 //
 // 两种形态：
 //   - `X.GET("/p", …)`（含链式 `r.Group("/g").GET("/p", …)`）= 路由注册，路径 = 组前缀 + 实参；
 //   - `X.Group("/g")` 本身不注册路由，但组前缀落在 /api 下时该组下所有路由都在 /api 里 ⇒ 同样红。
-func scanRouteCallsInFunc(file string, src []byte, fd *ast.FuncDecl, groups map[string]string, res directRouteResolver, fset *token.FileSet) []directRouteCall {
+func scanRouteCallsInTarget(file string, src []byte, fn string, body ast.Node, groups map[string]string, res directRouteResolver, fset *token.FileSet) []directRouteCall {
 	var out []directRouteCall
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -440,10 +570,10 @@ func scanRouteCallsInFunc(file string, src []byte, fd *ast.FuncDecl, groups map[
 			return true
 		}
 		mk := func(group string, resolved bool, path, why string) directRouteCall {
-			line := fset.Position(call.Pos()).Line
+			pos := fset.Position(call.Pos())
 			return directRouteCall{
-				file: file, line: line, fn: fd.Name.Name,
-				src: sourceLineAt(src, line), group: group,
+				file: file, line: pos.Line, col: pos.Column, fn: fn,
+				src: sourceLineAt(src, pos.Line), group: group,
 				path: path, resolved: resolved, why: why,
 			}
 		}
@@ -524,17 +654,17 @@ func receiverGroupPrefix(recv ast.Expr, res directRouteResolver, groups map[stri
 	return "", true, ""
 }
 
-// collectGroupPrefixes 折叠一个函数内 `x := X.Group(prefix)` 形成的组前缀表。
+// collectGroupPrefixes 折叠一段代码内 `x := X.Group(prefix)` 形成的组前缀表。
 //
 // 多轮迭代以支持 `g2 := g.Group(sub)` 这类链（每轮都从头扫，收敛即停）。前缀算不出来
 // 的记 unresolvedGroupPrefix 哨兵，让用到它的注册调用以"无法静态判定"红掉。
-func collectGroupPrefixes(fd *ast.FuncDecl, res directRouteResolver) map[string]string {
+func collectGroupPrefixes(body ast.Node, res directRouteResolver) map[string]string {
 	type assignment struct {
 		name string
 		expr ast.Expr
 	}
 	var assigns []assignment
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
 		if !ok || len(as.Lhs) != len(as.Rhs) {
 			return true
@@ -684,4 +814,126 @@ func sourceLineAt(src []byte, line int) string {
 		out = out[:maxLen] + " …"
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// 自校准：判据真的咬得住"包级函数值"这个形态吗（S3-01，审计 2026-10-04，P2）
+// ---------------------------------------------------------------------------
+
+// routeGuardFixture 把一组**合成源码**交给**生产扫描实现**跑一遍并判定。
+//
+// 为什么必须复用生产实现（scanRouteRegistrationsInPackage + judgeDirectRouteCalls）：
+// 负例若自己写一套"我认识的坏形态"匹配，证明的只是负例自己；这里跑的是与真实包
+// 逐字同源的扫描 + 判定，所以"负例变红"直接等价于"生产判据咬得住这个形态"。
+func routeGuardFixture(t *testing.T, files map[string]string) routeDeclarationReport {
+	t.Helper()
+	fset := token.NewFileSet()
+	parsed := map[string]*ast.File{}
+	sources := map[string][]byte{}
+	var order []string
+	for name, src := range files {
+		f, err := parser.ParseFile(fset, name, []byte(src), parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("解析合成源码 %s: %v", name, err)
+		}
+		parsed[name] = f
+		sources[name] = []byte(src)
+		order = append(order, name)
+	}
+	sort.Strings(order)
+	return judgeDirectRouteCalls(scanRouteRegistrationsInPackage(t, parsed, sources, order, fset))
+}
+
+// routeGuardFixtureShape 是合成包的公共骨架：只留两个探针（与生产一致）。
+//
+// 三个变体共用它，所以它们的差异**只有**路由注册那一段 —— 负例红、正例绿都只能归因
+// 到那一段，而不是夹具的整体形状。
+const routeGuardFixtureShape = `package main
+
+const clientNamespace = "/api/client/v2"
+
+type engine struct{}
+
+func (e *engine) GET(path string, handler func()) {}
+func (e *engine) POST(path string, handler func()) {}
+func (e *engine) Group(prefix string) *engine     { return e }
+
+func probe() {}
+
+func registerProductionRoutes(r *engine) {
+	r.GET("/healthz", probe)
+	r.GET("/readyz", probe)
+%s}
+
+%s`
+
+// TestRouteDeclarationGuardCatchesPackageLevelFunctionValues 是判据的自校准用例：
+// 用合成源码实跑生产扫描 + 生产判定，逐形态断言"该红的红、该绿的绿"。
+//
+// 背景（审计 S3-01）：修前扫描面只遍历 `*ast.FuncDecl`，下面第 ②③ 两种形态**完全不
+// 在面内** —— 一条已认证的员工面生产路由可以落进生产树而四条方向全部保持绿。
+// 本用例的判别力是双向的：
+//
+//	正向（必须红）：包级 `var` 里的函数字面量注册 /api 路由（②）、
+//	                结构体字段里的函数字面量注册 /api 路由（③）；
+//	反向（必须绿）：同一夹具只留 /healthz + /readyz 时零违规（④）——
+//	                否则"永远报红"的判据也能通过正向断言（假绿的另一面）。
+func TestRouteDeclarationGuardCatchesPackageLevelFunctionValues(t *testing.T) {
+	// ① 阳性对照：夹具本身必须被扫到（两个探针），否则后面的"红/绿"都没有意义
+	// （扫描面为空时任何形态都是绿的）。
+	clean := routeGuardFixture(t, map[string]string{
+		"route_assembly.go": fmt.Sprintf(routeGuardFixtureShape, "", ""),
+	})
+	if len(clean.calls) != 2 {
+		t.Fatalf("夹具扫描面 = %d 条调用，want 2（/healthz + /readyz）—— 夹具或扫描实现漂移，"+
+			"后面所有正向断言都会退化成恒真：%v", len(clean.calls), clean.calls)
+	}
+	if len(clean.namespaceViolations)+len(clean.offList)+len(clean.unresolved)+len(clean.deadAllowList) != 0 {
+		t.Fatalf("干净夹具被判违规（判据在夹具上恒红，正向断言就没有判别力了）：namespace=%v offList=%v unresolved=%v dead=%v",
+			clean.namespaceViolations, clean.offList, clean.unresolved, clean.deadAllowList)
+	}
+
+	// ② 缺陷形态本体：**包级函数值**注册一条已认证员工面生产路由，并由
+	// registerProductionRoutes 调用它（审计给出的正是这个可达形态）。
+	packageLevelValue := routeGuardFixture(t, map[string]string{
+		"route_assembly.go": fmt.Sprintf(routeGuardFixtureShape,
+			"\tmountExtraRoutes(r)\n",
+			"var mountExtraRoutes = func(r *engine) {\n\tr.GET(clientNamespace+\"/evil-package-level-func-value\", probe)\n}\n"),
+	})
+	if len(packageLevelValue.namespaceViolations) != 1 {
+		t.Fatalf("包级函数值注册的 /api 路由没有被判违规（namespaceViolations=%d）—— "+
+			"扫描面漏掉了包级变量初始化器里的函数字面量（S3-01 的原缺陷形态）：%v",
+			len(packageLevelValue.namespaceViolations), packageLevelValue.calls)
+	}
+	if got := packageLevelValue.namespaceViolations[0].fn; got != "var mountExtraRoutes" {
+		t.Errorf("违规归因到 %q，want %q —— 定位信息要能指回那个包级变量", got, "var mountExtraRoutes")
+	}
+	if got := packageLevelValue.namespaceViolations[0].path; got != "/api/client/v2/evil-package-level-func-value" {
+		t.Errorf("违规路径 = %q，want 拼接折叠后的完整路径（同包 const + `+` 必须照样折叠）",
+			got)
+	}
+
+	// ③ 同族写法：函数字面量挂在**结构体字段**里（包级复合字面量），同样是
+	// "初始化器里的函数值"，必须一并被咬住。
+	structField := routeGuardFixture(t, map[string]string{
+		"route_assembly.go": fmt.Sprintf(routeGuardFixtureShape,
+			"\textraRoutes.mount(r)\n",
+			"var extraRoutes = struct{ mount func(*engine) }{\n\tmount: func(r *engine) { r.POST(\"/api/server/evil-struct-field\", probe) },\n}\n"),
+	})
+	if len(structField.namespaceViolations) != 1 {
+		t.Fatalf("结构体字段里的函数字面量注册的 /api 路由没有被判违规（namespaceViolations=%d）：%v",
+			len(structField.namespaceViolations), structField.calls)
+	}
+
+	// ④ 反方向的判别力：非 /api 但**未登记**的直挂必须落进 offList（否则"只判命名空间"
+	// 会让白名单双向核对退化成单向）。
+	offList := routeGuardFixture(t, map[string]string{
+		"route_assembly.go": fmt.Sprintf(routeGuardFixtureShape,
+			"\textraRoutes.mount(r)\n",
+			"var extraRoutes = struct{ mount func(*engine) }{\n\tmount: func(r *engine) { r.GET(\"/metrics\", probe) },\n}\n"),
+	})
+	if len(offList.offList) != 1 || len(offList.namespaceViolations) != 0 {
+		t.Fatalf("未登记的直挂 /metrics 没有被判 offList（offList=%d namespace=%d）：%v",
+			len(offList.offList), len(offList.namespaceViolations), offList.calls)
+	}
 }

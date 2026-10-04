@@ -134,6 +134,7 @@
 | 上传请求体上限 | **48 MiB**（base64 JSON，R21） | 必须进 `largeBodyRoutes` 白名单；**白名单只是豁免** ⇒ handler 内必须自己再套 `http.MaxBytesReader(48<<20)`；先查 `Content-Length` 回 413 |
 | **客户端上传超时** | **90 s**（必须 > 服务端 `ReadTimeout 60 s`）；>8 MiB 走**分片 + 续传** | 客户端既有大上传是 `timeoutMs: 30000`（`packages/host/enterprise/src/auth-gate.ts` 两处，`grep -n "timeoutMs: 30000"` 取当前位置——**行号会随提交漂移，文档不写死**），32 MiB 必然超时 |
 | 上传时限（服务端） | `http.Server.ReadTimeout = 60 s` | 48 MiB 需 ≈6.7 Mbps 保底；部署文档须写明前置反代不得设更小的 body 上限/超时 |
+| **发布链路每跳预算序关系** | 对客户端会等待的**每一个**发布相关请求：平台侧在该跳的预算**严格小于**客户端在该跳的剩余出站预算 | 单发 `publish`/`validate`：平台侧总预算 `publish_total_budget = client_upload_timeout 90 s − 传输余量 15 s = 75 s < 90 s`（`limits.go` 的 `PublishTotalBudget`）。分片链不一样：`CHUNKED_PUBLISH_BUDGET_MS` 的 90 s 是**整条链**共用的（开会话 + N 片 PUT + 续传刷新各自扣掉一段），`complete` 那一跳的客户端剩余 = `90 s − 已用`，可以 < 75 s ⇒ 客户端在**这一跳**的请求头 `X-Pico-Client-Budget-Ms` 里声明"我还会等多少毫秒"（值 = 它为该跳设置的出站计时器），平台取 `min(publish_total_budget, max(0, 该值 − 传输余量))`；**缺省 / 非法 / 越界一律回落 `publish_total_budget`，且只许缩小、永不放大**（老客户端与第三方客户端行为不变）。该值不足传输余量时平台**在入口**就给结构化结论（`RUNTIME_TIMEOUT` + `phase=publish_budget`，不占编译槽/额度），hints 指引"带同一个 `upload_id` 重发（续传只补缺失片，新的一次调用有完整预算）"。跨端判据：`packages/host/enterprise/tests/wasm-apps.spec.ts`（客户端声明的值 + 序关系扫描 + 头名读 Go 源码对拍）与 `server/internal/wasmapp/api/publish_client_budget_test.go`（钳位表 + 三态校验 + complete 端到端） |
 | 静态资源 | **发布期从 wasm 自定义段抽出**到 `<data_root>/apps/<app_id>/assets/<release_id>/`，宿主直接服务 + 缓存；**抽完立即释放原始字节** | HTML/JS 也走这条（R8/R37）；抽出失败 = 发布失败；缓存键 `app_id + version + path` |
 | **自定义段总量上限** | **≤ 4 MiB**（超限 `SECTION_OVERRIDE_OVERSIZE` —— **以 §7.4 失败语义表为准**；本格旧写 `SECTION_OVERSIZE`，实现按 §7.4 用名） | 实测：自定义段零用途却整体进内存（2.48 MiB→32.48 MiB，RSS +34 MiB、编译 1.78 s） |
 | **导入面白名单** | **由参考实现构建期生成、不手写**：每语言一份"读帧 + 调全部宿主函数 + 写帧"的样例，CI 真编译后 dump 导入集写入 `limits.go`；**判据 = 符号 + 类型**（签名不匹配 ⇒ `IMPORT_SIGNATURE_MISMATCH`） | 必须含 `fd_read`（ABI 读 stdin 需要）；Go 实测 17 条 / 16 个不同名（`fd_write`×2） |
@@ -470,6 +471,14 @@
 | **应用中心** | `GET /api/client/v2/apps/wasm/catalog` | R34/R38：**不再按可见性过滤**——列出全部未删除、有生效版本、未冻结的应用（名称/一句话说明/负责人/**访问级别 `access`**/**是否下架 `enabled`**）；条目提供"打开"动作（本机路由 → `<渠道 app 源 scheme>://<app_id>/`，渠道参数化：§10/F15）与深链分享；**不做安装语义，也不显示额度/用量**（额度只在桌面客户端可见） |
 | 运维面 | （webadmin）应用列表 / 下架 / 转移归属 / 冻结 | R23；转移归属必须放开 kind 白名单（现硬写 skill/agent ⇒ 400） |
 
+**发布链路的跨端预算头（`X-Pico-Client-Budget-Ms`，2026-10-04 审计 FW-2）**：三条发布入口
+（`validate` / `:app_id/releases` / `uploads/:id/complete`）都接受这个可选请求头，语义是
+"客户端在**这一跳**还会等多少毫秒"（十进制整数毫秒）。平台据此把该跳的总预算钳成
+`min(publish_total_budget, max(0, 该值 − 传输余量))`：缺省 / 空 / 非法 / ≤0 / 大于
+`client_upload_timeout` 一律回落 `publish_total_budget`，**永不放大**。分片链必须带它
+（`complete` 是唯一在服务端真编译的一跳，而客户端的 90 s 是**整条链**共用的），
+单发 `publish`/`validate` 不需要（它们的客户端预算就是整份 90 s）。
+
 **审核开关（R17）**：管理后台可配，**默认关**（默认不审 + 事后抽检）。开启时发布进待审队列（线上仍旧版本），管理员在 webadmin 审批；开关变更写审计。
 
 **错误响应格式（第一消费者是 AI）**：
@@ -628,6 +637,9 @@
     深链直达仍可用（能否用由应用自己判，R24）。`visible` 字段与"按可见性过滤"作废（R38）
 56f. 改了配置但版本号没变                                  → 拒（改配置 = 发新版，R25）
 58. 客户端上传超时 < 服务端 ReadTimeout                → 配置断言（limits 单一真源）；>8 MiB 必走分片
+58b. 分片链 complete 跳：客户端剩余预算 < 平台侧总预算     → 跨端钳位（`X-Pico-Client-Budget-Ms`；缺省/非法/越界回落 `publish_total_budget`，不得放大）；
+    该值不足传输余量 ⇒ **入口**给结构化结论（不占编译槽/额度），hints 指引带同一个 upload_id 重发
+58c. 总预算在**阶段之外**（前置读 / 落库）到点                → 仍是结构化 `RUNTIME_TIMEOUT` + `phase=publish_budget`（**不得**退化成 500 INTERNAL「查询失败/版本保存失败」）
 59. 编译失败重发同一版本号                            → **成功**（失败不落行，R18）
 60. 员工 B 更新员工 A 的应用                          → 拒（owner 检查）
 61. 管理员未转移归属前，离职员工的应用                   → 冻结/转移提醒（§11 缺口）

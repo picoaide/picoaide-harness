@@ -73,6 +73,52 @@ const (
 	//
 	// 谁在推进它：人工（PG 禁止重叠 ⇒ 只有人能改边界/搬行；服务端不替管理员拆改分区树）。
 	usageSkipFoldMisbounded = "fold-misbounded"
+	// ---- S1-RET-02（第二十八轮审计 P2）与 RENAME 残留的收口 ----
+	//
+	// 缺陷形态：**异名 + 非北京月对齐**的 attached 叶子（`usage_2020h1`）三条入选路径
+	// 全不命中，而 `scanUsageMonthTables` 在 `!candidateForRetention` 处直接
+	// `continue`（**零计数、零日志**）⇒ 关系与它的明细永远不回收，而整轮读数逐字
+	// 是"什么都没发生"（`err=nil failures=0 skipped=0 unreclaimed=[]`）。同族的
+	// 另一半是"RENAME 出 `usage_%` 命名族"的 DETACH 残留：身份标记还在（我们写的），
+	// 但扫描面的 SQL 按名字过滤 ⇒ 它同样静默跌出面外。
+	//
+	// 两条口径（互斥、不重复计数）：
+	//
+	//	**skip 面**（前两个取值）——"该回收、却因形态领不回而不动"，与
+	//	fold-misbounded 同形：它们同时进 `skipped_by_reason` 与 `needs_manual_months`
+	//	（人工处置面），**不进** census；不进停摆位（见 usageSkipNeedsManual）。
+	//	**census 面**（后五个取值）——"扫描面里认出、但既不属于动作面、也不属于
+	//	'该回收却跳过'"（合法布局容器 / 不是我们的关系 / 标记读不懂）。
+	//	它们进 UsageRetentionStatus 的 `unmanaged_*`，**每轮逐条计数 + 一行日志**。
+	//
+	// 为什么 census 面必须存在（而不是把一切都塞进 skip）：多级布局
+	// `usage → usage_<YYYY> → usage_<YYYYMM>` 的年份父表是**合法**容器（服务端不替
+	// 管理员拆树，R7-A），把它算成"该回收却跳过"会让这类部署长期挂着假告警；
+	// 而"名字族里有一个我们永远不碰的关系"这件事又必须看得见（R4-C-8：洞要看得见）。
+	//
+	// 命名一律用**封闭取值**（不允许自由文本）：读面要能被告警规则分流。
+	usageSkipMisalignedAttached = "misaligned-attached"
+	usageSkipBoundUnreadable    = "bound-unreadable"
+	// usageSkipUnclassifiedOrphan：进入了候选面、却折算不出任何月份的孤儿（清理主循环
+	// 的 `reclaimMonths → !ok` 分支）。当前结构下**不可达**（候选判据蕴含归属），
+	// 保留它是为了让"判据回归"以**点名 + 计数**的方式出现，而不是静默 `continue`。
+	usageSkipUnclassifiedOrphan = "unclassified-orphan"
+	// census（unmanaged_*）面的取值。
+	usageUnmanagedUnmarkedOrphan      = "unmarked-orphan"
+	usageUnmanagedAliasNonLeaf        = "alias-non-leaf"
+	usageUnmanagedMarkerUnparsed      = "marker-unparsed"
+	usageUnmanagedMarkerLivePartition = "marker-on-live-partition"
+	usageUnmanagedMarkerNonLeaf       = "marker-non-leaf"
+	// 核验后收口（V-P5 §1-S1/S2）：两条**实跑**静默路径 —— 身份证据在、但结构上不在
+	// 动作面，而此前连"看得见"都没有：
+	//   · marker-outside-public：`ALTER TABLE … SET SCHEMA` 把带标记的残留搬出 public
+	//     （扫描面原来硬钉 `nspname = 'public'`）；
+	//   · ledger-named-owned：把带标记的残留改名成 `usage_daily_*`（扫描循环原来先按
+	//     账本族规则 `continue`，标记判定在它之后 ⇒ 永远走不到）。
+	// 两类都 fail-closed（不动作：DDL/补账/搬行链路全按 `public.` 解析，对账本族动手
+	// 也不存在回收路径），但**必须出声**：census 逐条计数 + 一行日志 + /readyz 载荷。
+	usageUnmanagedMarkerOutsidePublic = "marker-outside-public"
+	usageUnmanagedLedgerNamedOwned    = "ledger-named-owned"
 )
 
 // usageReclaimBlockedFailed 是"真停摆账"里**真失败**那一类的原因字面量（不是 skip
@@ -91,7 +137,27 @@ const usageReclaimBlockedFailed = "failed"
 func usageSkipNeedsManual(reason string) bool {
 	switch reason {
 	case usageSkipDescendant, usageSkipSubtreeRetained, usageSkipDetachedNonLeaf,
-		usageSkipNonTable, usageSkipOrphanRetained, usageSkipFoldMisbounded:
+		usageSkipNonTable, usageSkipOrphanRetained, usageSkipFoldMisbounded,
+		// S1-RET-02：这两类是"该回收、但形态上没有名字锚点/边界读不懂 ⇒ 服务端不
+		// 替管理员改写形态"。它们与 fold-misbounded 同形（金额不丢安全、磁盘漏收），
+		// 所以进 skipped_by_reason + needs_manual_months，**不进**停摆位。
+		usageSkipMisalignedAttached, usageSkipBoundUnreadable,
+		// 防御性取值：进候选面却折算不出月份是判据回归的形态，必须点名（见常量注释）。
+		usageSkipUnclassifiedOrphan:
+		return true
+	}
+	return false
+}
+
+// usageUnmanagedReasonIsSkipFace 报告某个"扫描面里不动它"的取值属于 **skip 面**
+// （skipped_by_reason + needs_manual_months）还是 **census 面**（unmanaged_*）。
+//
+// 唯一实现：分类点在 usage_ledger.go 的 usageUnmanagedReason，落面点（noteSkip /
+// noteUnmanaged）与这张表必须同源 —— 两处各写一遍就会出现"计数在 A 面、点名在 B 面"
+// 的分叉（本仓登记过的形态）。
+func usageUnmanagedReasonIsSkipFace(reason string) bool {
+	switch reason {
+	case usageSkipMisalignedAttached, usageSkipBoundUnreadable, usageSkipUnclassifiedOrphan:
 		return true
 	}
 	return false
@@ -242,6 +308,34 @@ type usageRetentionRound struct {
 	// `usage_<YYYYMM>` 不在这个集合里 ⟺ 该月的分区关系此刻不存在 ⟺ 当初那条
 	// "该月写不进去"的观测所描述的对象已经没了（被回收/被人工删除）。
 	ExistingMonths []string
+	// RelationMonths 是"本轮**枚举到**的关系名 → 它被保留期管辖的**最早北京月**"
+	// （S1-RET-03 的收口）。
+	//
+	// 为什么要有它：状态面的月份折算此前只有 `retentionMonthOfRelation`（**只认名字**：
+	// 六位月名 / 四位年名），而清理主循环的归属推导是 `usageRelationShape.reclaimMonths`
+	// （**边界优先 → 标记兜底 → 名字兜底**）。两份推导必然分叉：
+	// `usage_2020q1`（异名宽分区）在清理侧有明确归属，在状态侧却折算不出月份 ⇒
+	// 它的**真失败/真延后**进不了 `reclaim_blocked_*`（"保留策略停摆"这条跨重启的
+	// 告警面），只有进程内的 deferred_streak 看得见（重启即归零）。
+	//
+	// 现在把清理侧**已经算出来的事实**随轮次带过来，状态面只读不算（与"子系统记账、
+	// 装配层只读不推断"同一条纪律）。名字折算仍保留为**兜底**（见
+	// usageRetentionRound.reclaimMonthOfRelation）—— 新增的关系/旧轮次不必依赖它。
+	RelationMonths map[string]string
+	// UnmanagedRelations / UnmanagedByReason 是**扫描面里"认出但不动"**的关系
+	// （S1-RET-02 的观测面；语义与封闭取值见 usageUnmanaged* 常量）。
+	//
+	// 它回答的问题与 skipped_by_reason 不同：
+	//	skipped_by_reason —— "该回收、但本轮没能回收"（含按设计不动的一类）；
+	//	unmanaged_*       —— "在我们的扫描面里、保留期**根本不会去动**它"（合法容器 /
+	//	                     不是我们的关系 / 标记读不懂）。后者此前是**零计数、零日志**
+	//	                     的 `continue`，于是"有一块明细永远不会被保留期回收"在
+	//	                     任何读数面上都不存在（R4-C-8）。
+	UnmanagedRelations []string
+	UnmanagedByReason  map[string]int
+	// UnmanagedCount 是本面关系数（精确；= Σ UnmanagedByReason，冗余存一份是为了让
+	// "抽样被截断时计数仍可读"这件事不依赖读面的求和实现）。
+	UnmanagedCount int
 }
 
 // UsageRetentionStatus 是保留清理的**过程事实**快照（JSON 进 /readyz）。
@@ -449,6 +543,49 @@ type UsageRetentionStatus struct {
 	NeedsManualMonths []string `json:"needs_manual_months,omitempty"`
 	NeedsManualCount  int      `json:"needs_manual_count,omitempty"`
 
+	// ---- 扫描面里"认出但不动"的关系（S1-RET-02 / RENAME 残留收口）----
+	//
+	// 缺陷形态（第二十八轮审计 S1-RET-02，P2）：扫描面只有"进候选面"与
+	// "`continue`（零计数、零日志）"两条出路，于是**异名 + 非北京月对齐**的
+	// attached 叶子（`usage_2020h1`）既不回收、也不进任何观测面 —— 审计实测
+	// `in_shapes=false` + 整轮 `err=nil failures=0 skipped=0 unreclaimed=[]`，
+	// 而关系与它的明细都在盘上。同族的另一半：把关系 `RENAME` 出 `usage_%` 命名族
+	// 之后，连扫描面的 SQL 都够不到它（身份标记还在，名字不再匹配）。
+	//
+	//	unmanaged_count           本面关系数（精确；含下面每一类）
+	//	unmanaged_by_reason       按**封闭取值**分组计数（见 usageUnmanaged* 常量）
+	//	unmanaged_relations       关系名 + 原因（`rel(reason)`，有界抽样、升序）
+	//	unmanaged_truncated       抽样是否被上限截断（计数仍是全量）
+	//
+	// 读法：非零**不等于**故障 —— `alias-non-leaf`（多级布局的年份父表，合法容器）
+	// 与 `unmarked-orphan`（名字族里不是我们的关系）本来就会长期存在。它回答的是
+	// "保留期**管辖范围之外**还有哪些关系"，此前这个答案是"读代码才知道"。
+	// 与 `skipped_by_reason` 互斥（不重复计数）："该回收却按设计不动"的那两类
+	// （misaligned-attached / bound-unreadable）走 skip 面 + needs_manual_months。
+	UnmanagedCount     int            `json:"unmanaged_count,omitempty"`
+	UnmanagedByReason  map[string]int `json:"unmanaged_by_reason,omitempty"`
+	UnmanagedRelations []string       `json:"unmanaged_relations,omitempty"`
+	UnmanagedTruncated bool           `json:"unmanaged_truncated,omitempty"`
+
+	// ---- 折算不出月份的未回收关系（S1-RET-03 的"未知必须显式"那一半）----
+	//
+	// `reclaim_blocked_*`（跨重启的停摆位）的输入是"已到期的受阻月"，而它的前置是
+	// "关系 → 月份"的折算。旧实现的折算**只认名字**（六位月名 / 四位年名）⇒ 异名
+	// 宽分区（`usage_2020q1`）与 DETACH 残留的真失败/真延后折算不出月份，
+	// 于是它们**进不了停摆面**，而读数上"没有受阻月"与"折算不出月"逐字同形。
+	//
+	// 现在折算复用清理侧的归属事实（边界 → 标记 → 名字，见
+	// usageRetentionRound.reclaimMonthOfRelation）；**仍然折算不出来**的关系在这里
+	// 显式计数并点名 —— 不允许再静默当成"没有月份"。
+	//
+	//	reclaim_month_unknown             折算不出月份的未回收/失败关系数（精确）
+	//	reclaim_month_unknown_relations   关系名（有界抽样、升序）
+	//
+	// 正常部署应当是 0（连 `usage_2020q1` 这类都由边界给出月份）；非零请按
+	// usageReclaimMonthUnknowns 的注释逐条排查。
+	ReclaimMonthUnknown          int      `json:"reclaim_month_unknown,omitempty"`
+	ReclaimMonthUnknownRelations []string `json:"reclaim_month_unknown_relations,omitempty"`
+
 	// deferredStreakAt 是"上一次**计入** streak 的轮次"的结束时刻（W3-4 的节奏判据，
 	// 不进 JSON：它是内部账，对外只有 deferred_streak 的读数）。
 	deferredStreakAt time.Time
@@ -584,6 +721,43 @@ func recordUsageRetentionRound(round usageRetentionRound, roundErr error) {
 	}
 	if !round.EndedAt.IsZero() {
 		st.LastRoundAt = round.EndedAt.UTC().Format(time.RFC3339)
+	}
+	// S1-RET-02：扫描面里"认出但不动"的关系（census 面）—— 精确计数 + 有界抽样。
+	// 早退轮（!Scanned：保留期=0 / 读配置失败 / 扫描失败）必须**清空**而不是保留：
+	// 本面是"扫描时刻的事实"，与"上一轮看到过什么"无关（与 Unreclaimed 同口径）。
+	st.UnmanagedCount = round.UnmanagedCount
+	st.UnmanagedByReason = nil
+	if len(round.UnmanagedByReason) > 0 {
+		st.UnmanagedByReason = make(map[string]int, len(round.UnmanagedByReason))
+		for k, v := range round.UnmanagedByReason {
+			st.UnmanagedByReason[k] = v
+		}
+	}
+	st.UnmanagedRelations = nil
+	st.UnmanagedTruncated = false
+	if n := len(round.UnmanagedRelations); n > 0 {
+		limit := n
+		if limit > usageRetentionUnreclaimedMax {
+			limit = usageRetentionUnreclaimedMax
+			st.UnmanagedTruncated = true
+		}
+		st.UnmanagedRelations = append([]string(nil), round.UnmanagedRelations[:limit]...)
+	}
+	// S1-RET-03：折算不出月份的未回收/失败关系 —— **显式**计数 + 点名（不得静默）。
+	// 与停摆账同源判据面（Unreclaimed ∪ FailedRelations），所以只在有证据轮上有意义。
+	if unknown := usageReclaimMonthUnknowns(round); len(unknown) > 0 {
+		st.ReclaimMonthUnknown = len(unknown)
+		limit := len(unknown)
+		if limit > usageRetentionUnreclaimedMax {
+			limit = usageRetentionUnreclaimedMax
+		}
+		st.ReclaimMonthUnknownRelations = append([]string(nil), unknown[:limit]...)
+		log.Printf("usage retention: %d relation(s) in the unreclaimed/failed face have no derivable "+
+			"reclaim month (S1-RET-03: 按'未知'计数,不当作'没有月份'): %s",
+			len(unknown), strings.Join(unknown, ","))
+	} else {
+		st.ReclaimMonthUnknown = 0
+		st.ReclaimMonthUnknownRelations = nil
 	}
 	// R10-G3（N2②/N3）：推进/清零"连续延后"计数，并在达阈值时升级为可见告警。
 	// R10-H3（W3-3/W3-4）：只认**有证据**的轮次（早退轮不清零），且只有距上一次
@@ -851,7 +1025,10 @@ func usageReclaimMonthAge(month string, round usageRetentionRound) (int64, bool)
 func usageReclaimBlockedAllInRound(round usageRetentionRound) []usageReclaimBlocked {
 	byMonth := map[string]usageReclaimBlocked{}
 	consider := func(r, why string) {
-		m, mok := retentionMonthOfRelation(r)
+		// S1-RET-03：月份折算走**唯一实现**（清理侧的事实优先、名字兜底）。
+		// 这里读不出月份的关系**不进**停摆账（不靠猜），但它们的"读不出"由
+		// usageReclaimMonthUnknowns 显式计数并在 /readyz 上给出（不得静默）。
+		m, mok := round.reclaimMonthOfRelation(r)
 		if !mok || !usageMonthDueInRound(m, round) {
 			return
 		}
@@ -1015,7 +1192,7 @@ func needsManualMonthsInRound(round usageRetentionRound) ([]string, int) {
 		if !usageSkipNeedsManual(why) {
 			continue
 		}
-		if m, mok := retentionMonthOfRelation(r); mok {
+		if m, mok := round.reclaimMonthOfRelation(r); mok {
 			seen[m] = why
 		}
 	}
@@ -1079,7 +1256,7 @@ func advanceOldestUnreclaimed(prev usageOldestUnreclaimed, round usageRetentionR
 // oldestUnreclaimedInRound 从本轮的过程事实里取"最早未回收的到期月"（升序取首个）。
 func oldestUnreclaimedInRound(round usageRetentionRound) (month, reason string, ok bool) {
 	consider := func(rel, why string) {
-		m, mok := retentionMonthOfRelation(rel)
+		m, mok := round.reclaimMonthOfRelation(rel)
 		if !mok {
 			return
 		}
@@ -1100,11 +1277,16 @@ func oldestUnreclaimedInRound(round usageRetentionRound) (month, reason string, 
 	return month, reason, ok
 }
 
-// retentionMonthOfRelation 把关系名折算成"它覆盖的最早北京月"（YYYYMM）：
+// retentionMonthOfRelation 是"关系名 → 它覆盖的最早北京月"的**名字兜底**（存量口径）：
 //
 //	usage_202606   ⇒ 202606（月分区）
 //	usage_2026     ⇒ 202601（中间父表：它覆盖的最早月是 1 月）
-//	其它名字       ⇒ ok=false（不进"最早未回收月"的判据面）
+//	其它名字       ⇒ ok=false（**名字**折算不出月份）
+//
+// ⚠️ 自 S1-RET-03 起它**不是**状态面折算月份的唯一实现，也**不得**被单独当成
+// "这条关系没有月份"的判据 —— 唯一实现是 usageRetentionRound.reclaimMonthOfRelation
+// （清理侧算出的**事实**优先：声明边界 → DETACH 标记 → 名字）。本函数只作为那一层的
+// 兜底保留（名字族存量口径；也让"没有 RelationMonths 的调用点"行为不变）。
 func retentionMonthOfRelation(rel string) (string, bool) {
 	if m, ok := usageMonthRelationOf(rel); ok {
 		return monthKey(m), true
@@ -1123,6 +1305,67 @@ func retentionMonthOfRelation(rel string) (string, bool) {
 		}
 	}
 	return key + "01", true
+}
+
+// reclaimMonthOfRelation 是"关系 → 被保留期管辖的**最早北京月**"的**唯一实现**
+// （S1-RET-03：让受阻月折算复用 cleanup 侧那一份推导，而不是在状态文件里再写一份
+// 名字解析）。
+//
+// 顺序即优先级：
+//
+//  1. **本轮清理侧算出来的事实**（`RelationMonths`，来自
+//     `usageRelationShape.reclaimMonths`：整月对齐/可读的声明边界 → 我们自己写的
+//     DETACH 标记窗口 → 名字兜底）。对异名宽分区（`usage_2020q1`）、带标记的
+//     DETACH 残留、RENAME 出命名族的残留，这一支是**唯一**能得到月份的来源；
+//  2. 名字兜底（`retentionMonthOfRelation`）：RelationMonths 缺席时的存量口径；
+//  3. 两者都不成立 ⇒ ok=false —— 调用方**必须**按"**未知**"处理并显式计数
+//     （见 usageReclaimMonthUnknowns 与 UsageRetentionStatus.ReclaimMonthUnknown*），
+//     **不得**把它当成"这条关系没有月份"而静默丢掉：那正是 S1-RET-03 的缺陷本体
+//     （宽分区的真失败进不了跨重启的停摆面，而读数上"没有受阻月"与"折算不出月"
+//     逐字同形）。
+func (r usageRetentionRound) reclaimMonthOfRelation(rel string) (string, bool) {
+	if m, ok := r.RelationMonths[rel]; ok && m != "" {
+		return m, true
+	}
+	return retentionMonthOfRelation(rel)
+}
+
+// usageReclaimMonthUnknowns 返回本轮"进了未回收/失败面、但**折算不出月份**"的关系名
+// （升序、去重；S1-RET-03 的"未知必须显式"那一半）。
+//
+// 判据面与停摆账同源（Unreclaimed ∪ FailedRelations）—— 这两张清单就是"该回收却没
+// 回收成功"的全部输入；其中任何一条折算不出月份，都在这里点名并计数（状态字段
+// reclaim_month_unknown / reclaim_month_unknown_relations），不允许静默。
+//
+// 正常部署里它应当是 0（形如 `usage_2020q1` 的关系现在由清理侧的事实给出月份）；
+// 非 0 只有三种可能：①判据回归（候选面收进了一条归属推导不出来的关系）；
+// ②名字族之外、且没有可读边界/标记的关系被算进了未回收面；③有人新增了一种
+// 形态但没有同时给出归属。三种都值得人看一眼 —— 所以它进 /readyz 而不是日志深处。
+func usageReclaimMonthUnknowns(round usageRetentionRound) []string {
+	seen := map[string]bool{}
+	var out []string
+	consider := func(rel string) {
+		if rel == "" || seen[rel] {
+			return
+		}
+		if _, ok := round.reclaimMonthOfRelation(rel); ok {
+			return
+		}
+		seen[rel] = true
+		out = append(out, rel)
+	}
+	for _, item := range round.Unreclaimed {
+		rel := item
+		if i := strings.IndexByte(item, '('); i > 0 && strings.HasSuffix(item, ")") {
+			rel = item[:i]
+		}
+		consider(rel)
+	}
+	for _, rel := range round.FailedRelations {
+		consider(rel)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func maxDeferredStreak(streak map[string]int) int {
@@ -1235,6 +1478,19 @@ func noteUsagePartitionDDLContention(waited time.Duration, timedOut int, exhaust
 // 处置动作也不同（DDL vs 重试/看日志），混在一个字段里就是语义漂移。
 var usageWriteErrorVal atomic.Pointer[usageWriteStateTable]
 
+// usageWriteMonthKey 是写入面月份键（YYYYMM）的**唯一构造点**：键 = 该时刻所属的
+// 北京月（`monthKey(BeijingMonth(t))`）。
+//
+// 为什么必须唯一：这个键被三类面共同消费 —— 写路径记账、`/readyz` 的当月读、
+// 以及**清理轮的"保住当月"判据**（clearResolvedUsageWriteState）。三处各写一份
+// 日期/时区推导，迟早会漂移成两套"当月"（UTC 容器在月初 00:00-08:00 就会分叉），
+// 那时的症状与 R9D-00 同形：真实阻塞在健康面上读不到。
+func usageWriteMonthKey(t time.Time) string { return monthKey(BeijingMonth(t)) }
+
+// usageWriteCurrentMonth 是"此刻的当月"键 —— 消费面（`/readyz`）与清理轮的
+// **唯一取值点**（推导只有上面的 usageWriteMonthKey 一份）。
+func usageWriteCurrentMonth() string { return usageWriteMonthKey(time.Now()) }
+
 // noteUsagePartitionWriteFailure 记下"这一笔计量没能落账"（写路径唯一记账点）。
 //
 // 热路径成本：只在**失败**时进入（失败本身已经要打日志/返回 503），成功路径只做一次
@@ -1244,7 +1500,7 @@ var usageWriteErrorVal atomic.Pointer[usageWriteStateTable]
 // 可执行 action）才置 `write_blocked_*`；其余错误（连接/探测/DDL 的瞬时失败）进
 // `write_error_*`。判据是结构化的（errors.As 命中），不靠 kind 字符串比对。
 func noteUsagePartitionWriteFailure(month time.Time, err error) {
-	key := monthKey(BeijingMonth(month))
+	key := usageWriteMonthKey(month)
 	var le *partitionLayoutError
 	if !errors.As(err, &le) {
 		kind, _, msg := partitionLayoutFailure(err)
@@ -1280,7 +1536,7 @@ func evictOldestWriteState(table usageWriteStateTable, keep string) {
 	if len(table) <= usageWriteStateMonthsMax {
 		return
 	}
-	current := monthKey(BeijingMonth(time.Now()))
+	current := usageWriteCurrentMonth()
 	victim, victimSince := "", time.Time{}
 	for k, v := range table {
 		if k == keep || k == current {
@@ -1308,7 +1564,7 @@ func storeUsageWriteError(slot *atomic.Pointer[usageWriteStateTable], key, kind,
 // 这正是 W3-2 要的：当月恢复正常不得抹掉"到期月写不进去"这条事实，
 // 反之亦然）。
 func noteUsagePartitionWriteOK(month time.Time) {
-	key := monthKey(BeijingMonth(month))
+	key := usageWriteMonthKey(month)
 	clearUsageWriteState(&usageWriteBlockVal, key)
 	clearUsageWriteState(&usageWriteErrorVal, key)
 }
@@ -1327,20 +1583,29 @@ func noteUsagePartitionWriteOK(month time.Time) {
 // （关系没了 = 写不进去这件事没有载体了）⇒ 删掉它。反过来说，关系仍在的条目
 // **一律保留** —— 那正是"现在还有个月写不进去"的真实读数。
 //
+// **当月键永远不被这一轮删除**（S1-01 · P1）：当月条目的语义是"**现在**每一次计量
+// 写入都在失败"（用户面后果 = 该月每一次对话 503 METERING_FAILED），不是"某条历史
+// 观测所描述的关系还在不在"。而 R9D-00 的两种形态恰恰**没有** `usage_<当月>` 这个
+// 关系：kind=overlap（同名关系不存在、CREATE 吃 42P17，见 partitions.go 的
+// overlappingPartitionErr）与 default-partition-holds-window（DEFAULT 分区持有当月行）
+// ⇒ 当月键天然不在 ExistingMonths 里，按"关系不在就删"的口径会被这一轮清掉，于是
+// "当月全站不可用"从所有健康面上消失，且只要那个重叠分区还在就**不可自愈**（每次写入
+// 都失败、每轮清理都把观测删掉）。判据与 evictOldestWriteState 的 `k == current`
+// 逐字同源；当月恢复只由当月的**成功写入**证明（noteUsagePartitionWriteOK），
+// 清理轮不是那个证据。
+//
 // 只用**有证据轮**（round.Scanned）调用：早退轮（扫描失败/保留期读到 0）没有
 // "关系是否还在"的事实，不做任何猜测（与 advanceDeferredStreaks 的同一条纪律）。
 // 写时复制 + CAS（与 clearUsageWriteState 同形），成功路径不加锁。
 func clearResolvedUsageWriteState(slot *atomic.Pointer[usageWriteStateTable], round usageRetentionRound) {
-	if len(round.ExistingMonths) == 0 {
-		// 本轮一条月关系都没枚举到 ⇒ 所有非当月条目描述的对象都不在了。
-		// （当月条目不在本面里 —— 它在 write_blocked 的当月槽上。）
-		clearAllUsageWriteState(slot)
-		return
-	}
 	exists := make(map[string]bool, len(round.ExistingMonths))
 	for _, key := range round.ExistingMonths {
 		exists[key] = true
 	}
+	// `len(round.ExistingMonths)==0`（本轮一条月关系都没枚举到）是同一个判据的
+	// 退化情形：非当月条目一律删、当月条目照旧保留 —— 不再走"清空整张表"的近路
+	// （那条近路正是"当月全站 503 时把观测一并清掉"的第二个入口）。
+	current := usageWriteCurrentMonth()
 	for {
 		prev := slot.Load()
 		if prev == nil || len(*prev) == 0 {
@@ -1349,7 +1614,7 @@ func clearResolvedUsageWriteState(slot *atomic.Pointer[usageWriteStateTable], ro
 		next := make(usageWriteStateTable, len(*prev))
 		removed := false
 		for k, v := range *prev {
-			if exists[v.Month] {
+			if k == current || exists[v.Month] {
 				next[k] = v
 				continue
 			}
@@ -1363,19 +1628,6 @@ func clearResolvedUsageWriteState(slot *atomic.Pointer[usageWriteStateTable], ro
 			ptr = &next
 		}
 		if slot.CompareAndSwap(prev, ptr) {
-			return
-		}
-	}
-}
-
-// clearAllUsageWriteState 清空整张写入面状态表（写时复制 + CAS）。
-func clearAllUsageWriteState(slot *atomic.Pointer[usageWriteStateTable]) {
-	for {
-		prev := slot.Load()
-		if prev == nil || len(*prev) == 0 {
-			return
-		}
-		if slot.CompareAndSwap(prev, nil) {
 			return
 		}
 	}
@@ -1432,12 +1684,12 @@ type UsageWriteBlockOtherMonth struct {
 
 // usageWriteBlockForReadyz 返回**当月**的写入阻塞状态（别的月份的历史阻塞不冒充当月）。
 func usageWriteBlockForReadyz() *usageWriteBlockState {
-	return usageWriteStateForReadyz(&usageWriteBlockVal, monthKey(BeijingMonth(time.Now())))
+	return usageWriteStateForReadyz(&usageWriteBlockVal, usageWriteCurrentMonth())
 }
 
 // usageWriteErrorForReadyz 返回**当月**的瞬时写入失败状态。
 func usageWriteErrorForReadyz() *usageWriteBlockState {
-	return usageWriteStateForReadyz(&usageWriteErrorVal, monthKey(BeijingMonth(time.Now())))
+	return usageWriteStateForReadyz(&usageWriteErrorVal, usageWriteCurrentMonth())
 }
 
 // usageWriteOtherMonthsForReadyz 返回**非当月**的写入面读数（升序、有界；W3-2）。
@@ -1446,7 +1698,7 @@ func usageWriteOtherMonthsForReadyz(slot *atomic.Pointer[usageWriteStateTable]) 
 	if prev == nil || len(*prev) == 0 {
 		return nil, 0
 	}
-	current := monthKey(BeijingMonth(time.Now()))
+	current := usageWriteCurrentMonth()
 	out := make([]UsageWriteBlockOtherMonth, 0, len(*prev))
 	for k, v := range *prev {
 		if k == current {

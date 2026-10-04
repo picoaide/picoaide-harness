@@ -16,6 +16,14 @@
  *     原形态）⇒「activate 把焦点移走时浮层不抢回」红；
  *   - 点条目时不先把焦点交还锚点 ⇒ 组合用例
  *     `panel-focus-handoff.spec.tsx` 的「Esc 收起后焦点回到『更多』行」红。
+ *   - **可访问名只看 `attention` 布尔**（2026-10-04 核验 P1-② 的原形态：
+ *     `attention ? t('footMenu.labelAttention') : t('footMenu.label')`）⇒
+ *     「holding 档：读屏听到的是条目那句」红（读屏与可见 tooltip 互相矛盾）；
+ *   - 可访问名改成恒 `t('footMenu.label')`（拿中性文案顶掉 waiting 档）⇒
+ *     「waiting 档不退化」红；
+ *   - 回退链第二级从中性/删除（`entryAttentionTitle ?? t('footMenu.label')`，或干脆
+ *     删掉 `footMenu.labelAttention` 的引用）⇒「条目没给文案时退回通用那句」红，
+ *     同时 desktop 包的 i18n 零死键守卫红（2026-10-04 §12 收口门禁的原形态）。
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -131,17 +139,22 @@ describe('「更多」行：几何与无障碍', () => {
     // 窄轨只有一个 glyph（没有尾部 chevron）。
     expect(trigger.querySelectorAll('svg').length).toBe(1)
     expect(trigger.querySelector('[data-role="foot-menu-attention"]')).not.toBeNull()
+    // 2026-10-04 §12：条目没给 `attentionTitle` ⇒ 退回通用的「有等待处理的事项」那句。
+    // 对"声明了 attention"的条目这是准确文案，而且这条 key 必须保持有引用点
+    //（desktop 包的 i18n 守卫要求零死键）。holding 档不会走到这里：浏览器条目自带文案。
     expect(trigger.getAttribute('aria-label')).toBe('更多功能（有等待处理的事项）')
   })
 
-  it('有 attention 的条目 ⇒ 行上有琥珀色圆点、aria-label 换成"有等待"那句', async () => {
+  it('有 attention 的条目 ⇒ 行上有琥珀色圆点；可访问名跟条目文案走', async () => {
     add('browser', 1, { attention: () => false })
     await render(true)
     expect(row().querySelector('[data-role="foot-menu-attention"]')).toBeNull()
-    await act(async () => { add('cron', -10, { attention: () => true }) })
+    await act(async () => {
+      add('cron', -10, { attention: () => true, attentionTitle: () => 'AI 正在等待你的操作（cron）' })
+    })
     await render(true)
     expect(row().querySelector('[data-role="foot-menu-attention"]')).not.toBeNull()
-    expect(row().getAttribute('aria-label')).toBe('更多功能（有等待处理的事项）')
+    expect(row().getAttribute('aria-label')).toBe('AI 正在等待你的操作（cron）')
   })
 
   it('激活面板时行文案是「更多 · <面板名>」，面板关掉后回到「更多」', async () => {
@@ -161,6 +174,57 @@ describe('「更多」行：几何与无障碍', () => {
     await render(true)
     expect(row().textContent).toBe('More')
     expect(row().getAttribute('aria-label')).toBe('More')
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 2026-10-04 核验 P1-②：行级可访问名必须与条目自己的那句话一致
+   *（`attention` 布尔区分不了 holding / waiting，级别只能由条目文案表达）
+   * ---------------------------------------------------------------- */
+
+  describe('可访问名跟随条目的 attentionTitle（holding / waiting 两档）', () => {
+    /** 浏览器条目 holding 档的真实文案（dsh-browser 的 panel.holding）。 */
+    const HOLDING = '控制权在你手里：操作完成后在浏览器窗口点「交给 AI」交还，AI 才能继续'
+    /** 浏览器条目 waiting 档的真实文案（dsh-browser 的 panel.waiting）。 */
+    const WAITING = 'AI 正在等你交还浏览器控制权：打开浏览器窗口点「交给 AI」即可继续'
+
+    it('holding 档：读屏听到的是条目那句"控制权在你手里…"，不是"有等待处理的事项"', async () => {
+      add('browser', 1, { attention: () => true, attentionTitle: () => HOLDING })
+      await render(true)
+      const trigger = row()
+      expect(trigger.getAttribute('aria-label')).toBe(HOLDING)
+      // 与同一元素上的可见 tooltip 完全一致（旧实现这两者互相矛盾）。
+      expect(trigger.getAttribute('title')).toBe(HOLDING)
+      // 通用那句"有事项在等"绝不许出现在 holding 档。
+      expect(trigger.getAttribute('aria-label')).not.toContain('等待')
+      expect(trigger.getAttribute('aria-label')).not.toContain('等待处理的事项')
+    })
+
+    it('waiting 档不退化：读屏听到的是完整的等待句（不是中性「更多功能」）', async () => {
+      add('browser', 1, { attention: () => true, attentionTitle: () => WAITING })
+      await render(true)
+      const trigger = row()
+      expect(trigger.getAttribute('aria-label')).toBe(WAITING)
+      expect(trigger.getAttribute('aria-label')).toContain('正在等你交还浏览器控制权')
+      expect(trigger.getAttribute('aria-label')).not.toBe('更多功能')
+    })
+
+    it('条目没给文案时退回通用「有等待处理的事项」那句（该 key 不得变成死键），tooltip 回退亦不退化', async () => {
+      add('browser', 1, { attention: () => true })
+      await render(true)
+      const trigger = row()
+      // 2026-10-04 §12：回退链第二级是**通用 attention 文案**（不是中性 label）——
+      // 它必须被引用（desktop 包的 i18n 守卫要求零死键），且对"声明了 attention 的
+      // 条目"是准确文案；holding 档由条目自带的 attentionTitle 覆盖，不会被误念。
+      expect(trigger.getAttribute('aria-label')).toBe('更多功能（有等待处理的事项）')
+      expect(trigger.getAttribute('title')).toBe('AI 正在等待你的操作')
+    })
+
+    it('en 档同样跟条目文案走', async () => {
+      setActiveLocale('en')
+      add('browser', 1, { attention: () => true, attentionTitle: () => 'You have control: click Hand back to AI in the browser window' })
+      await render(true)
+      expect(row().getAttribute('aria-label')).toBe('You have control: click Hand back to AI in the browser window')
+    })
   })
 })
 

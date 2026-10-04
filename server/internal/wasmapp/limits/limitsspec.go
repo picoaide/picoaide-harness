@@ -44,6 +44,7 @@ func Table() []Entry {
 		{"upload_body_max_bytes", itoa(UploadBodyMaxBytes), "bytes", "§4.2", "上传请求体上限", "base64 JSON；必须进 largeBodyRoutes 且 handler 自套 MaxBytesReader"},
 		{"client_upload_timeout", secs(ClientUploadTimeout), "seconds", "§4.2", "客户端上传超时", "必须大于服务端 ReadTimeout（§10.5 第 58 项是配置断言）"},
 		{"server_read_timeout", secs(ServerReadTimeout), "seconds", "§4.2", "服务端 ReadTimeout", "48 MiB 需约 6.7 Mbps 保底"},
+		{"publish_total_budget", secs(PublishTotalBudget), "seconds", "§4.2", "单次发布/预检的平台侧总预算", "编译 + 抽取 + 干跑**共用**一个 deadline（从请求到达起算，含请求体读取）：必须小于 client_upload_timeout，且严格大于 compile_timeout（否则控制台配的编译预算不可达）"},
 		{"section_total_max_bytes", itoa(SectionTotalMaxBytes), "bytes", "§4.2", "自定义段总量上限", "超限 SECTION_OVERRIDE_OVERSIZE"},
 		{"app_config_max_bytes", itoa(AppConfigMaxBytes), "bytes", "§4.2", "应用配置文件上限", "picoaide.app.json，不计入 wasm 上限"},
 		{"app_config_whitelist_max", itoa(AppConfigWhitelistMax), "count", "§4.2", "白名单条目上限", "平台不校验账号是否存在（否则等于账号枚举接口）"},
@@ -82,7 +83,7 @@ func Table() []Entry {
 		{"upload_peak_per_upload_bytes", itoa(UploadPeakPerUploadBytes), "bytes", "§4.3", "单次上传峰值内存账", "base64 单次 ≈ 32+43+43 MB"},
 
 		// ===== §4.4 宿主能力 =====
-		{"host_call_budget_default", secs(HostCallBudgetDefault), "seconds", "§4.4", "宿主调用兜底预算", ""},
+		{"host_call_budget_default", secs(HostCallBudgetDefault), "seconds", "§4.4", "宿主调用兜底预算", "必须严格大于 sql_statement_budget：db.* 的语句 deadline 套在它里面，内层不小于外层时应用拿到的是 HOST_CALL_OVER_BUDGET 而不是 DB_DENIED(statement_timeout)"},
 
 		// ===== §21.2 客户端 AI 桥（跨端冻结契约）=====
 		// 桥由客户端协议 handler 实现，但形状是跨端契约；作者文档/技能的数字必须

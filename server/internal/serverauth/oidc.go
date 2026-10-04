@@ -337,14 +337,16 @@ func (a *API) handleOIDCLoginWith(p BrowserProvider) gin.HandlerFunc {
 		//
 		// 现在的口径:
 		//   · 失败预算只被**真实失败**(凭证/协议/配置错误)消耗;
-		//   · 容量拒绝单独计数(API.OIDCFlowCapacityRejections,供运维/探针读),
+		//   · 容量拒绝单独计数(serverauth.OIDCFlowCapacityRejections;生产读者 =
+		//     GET /api/server/admin/server-info 的 oidc.capacity_rejections —— S3-05
+		//     之前这个导出函数**一个生产读者都没有**,注释里的"供运维/探针读"是空头承诺),
 		//     并写一条**动作可区分**的审计(oidc_flow_capacity,不是 login_fail);
 		//   · HTTP 响应体刻意**不变**(仍是 429 RATE_LIMITED + 同一句文案):
 		//     对外区分"表满"与"你的 IP 超额"会泄露平台容量状态,且 429 的语义
 		//     ("稍后再试")对两种情形都成立。可区分性落在服务端日志与计数上,
 		//     不落在客户端可见面。
 		recordFlowCapacityRejection := func(reason string) {
-			a.oidcFlowCapacity.Add(1)
+			oidcFlowCapacityRejections.Add(1)
 			if a.DB != nil {
 				_ = serverstore.AuditLog(a.DB, "oidc-login", "oidc_flow_capacity",
 					"capacity_rejected reason="+reason+" ip="+c.ClientIP())

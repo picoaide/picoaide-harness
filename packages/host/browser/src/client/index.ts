@@ -5,7 +5,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // as a Cordis service — never as a module import.
 import type {} from '@picoaide/dsh-foot-menu/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import { showsWaitingHint } from './control-hint.ts'
+import { controlHintLevel, showsControlHint } from './control-hint.ts'
 import * as controlHint from './control-hint-store.ts'
 import { en, setActiveLocale, t, type BrowserKey, zh } from './locales.ts'
 
@@ -20,8 +20,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * Browser client half: registers the foot-lane entry that wakes the dedicated
  * browser window. The window (created by the host plugin on first agent open)
  * carries its own tab strip and controls; the popover entry shows it again
- * after a user close, and carries today's "AI 在等你" signal (amber dot on the
- * `更多` row, amber text + dot on the entry).
+ * after a user close, and carries the control-ownership signal (amber dot on
+ * the `更多` row, amber text + dot on the entry).
+ *
+ * 提示判据是**控制权在谁手里**（2026-10-04 三档化，见 `control-hint.ts`）：
+ * 用户一持控制权就提示（AI 交权后停下等人时 `awaitingRelease` 还是 false，
+ * 只认它 = 那条路径聊天窗口里零提示）；AI 真被拒过才升级成报警级文案。
  *
  * The control hint used to be polled inside the deleted `BrowserTrigger`
  * component; it now lives in a plugin-scope store started here, so collapsing
@@ -33,6 +37,13 @@ const LOCALE_NS = 'browser'
 
 /** Services required: locale for the entry copy. `picoFootMenu` is waited on from a child scope. */
 export const inject = ['locale']
+
+/** 条目文案的唯一分支点：档位 → 短标签 / 可操作长句（`none` 用中性文案，不会被展示）。 */
+function entryCopy(level: ReturnType<typeof controlHintLevel>): { short: BrowserKey; long: BrowserKey } {
+  if (level === 'waiting') return { short: 'panel.waitingShort', long: 'panel.waiting' }
+  if (level === 'holding') return { short: 'panel.holdingShort', long: 'panel.holding' }
+  return { short: 'panel.title', long: 'panel.holding' }
+}
 
 export function apply(ctx: ClientContext): void {
   // Browser client dictionaries (zh key source, en mirror).
@@ -90,7 +101,7 @@ export function apply(ctx: ClientContext): void {
     scope.effect(() => scope.picoFootMenu.add({
       id: 'browser',
       order: 1,
-      title: () => (showsWaitingHint(controlHint.current()) ? t('panel.waitingShort') : t('panel.title')),
+      title: () => t(entryCopy(controlHintLevel(controlHint.current())).short),
       activate: () => {
         // 2026-09-15 审计 F6：这是写面（需持有性证明 cookie）。失败时旧实现静默吞掉，
         // 用户看到的正是"点了按钮没反应"，而主机日志与客户端控制台都不留痕。
@@ -101,11 +112,14 @@ export function apply(ctx: ClientContext): void {
           (cause: unknown) => { console.warn('[pico-browser] show request failed', cause) },
         )
       },
-      attention: () => showsWaitingHint(controlHint.current()),
+      // 圆点 = "AI 现在不能操作浏览器"（用户持控制权）—— 2026-10-04 起 `controlled`
+      // 就点亮，不再只在 awaitingRelease 时点亮：AI 交权后停下等人的那条路径
+      // （引导式登录）此前完全没有可见提示。
+      attention: () => showsControlHint(controlHint.current()),
       // 警示 tooltip 的**可操作**文案（"打开浏览器窗口点「交给 AI」"）：条目自己的
       // 出口，`更多` 行与浮层条目优先用它，拿不到才退回通用的 `footMenu.attention`。
       // 2026-09-21 对抗审计：并道时这句一起丢了，用户只剩圆点与短标签、不知道下一步。
-      attentionTitle: () => t('panel.waiting', { button: t('button.handBack') }),
+      attentionTitle: () => t(entryCopy(controlHintLevel(controlHint.current())).long, { button: t('button.handBack') }),
     }), 'browser: foot menu entry')
   })
 }

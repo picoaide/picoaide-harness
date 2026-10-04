@@ -1,20 +1,24 @@
 ---
 import { Image } from 'astro:assets'
 import logo from '../../../brands/official/logo.svg'
+import { headerNav, homeHref } from './site-nav.mjs'
 
-const items = [
-  { label: '首页', href: '/' },
-  { label: '部署', href: '/deployment/' },
-  { label: '功能', href: '/#features' },
-  { label: '截图', href: '/#screenshots' },
-  { label: '博客', href: '/blog/' },
-  { label: 'Wiki', href: '/welcome/' },
-]
+/**
+ * `locale` 缺省 `root` = 中文站：不传参数的页面渲染结果与历史逐字节一致。
+ * 英文页（`src/pages/en/index.astro`）**必须**传 `locale="en"`，否则顶栏 6 条链接会把
+ * 访客送回中文站（回归审计 v2.8.1→HEAD 的 E-04）。判据：`site/scripts/check-en-landing-nav.mjs`。
+ */
+interface Props {
+  locale?: 'root' | 'en'
+}
+
+const { locale = 'root' } = Astro.props
+const items = headerNav(locale)
 ---
 
 <header class="nav">
   <div class="container nav__inner">
-    <a href="/" class="nav__brand">
+    <a href={homeHref(locale)} class="nav__brand">
       <Image src={logo} alt="PicoAide Harness" width={26} height={26} />
       <span>PicoAide Harness</span>
     </a>

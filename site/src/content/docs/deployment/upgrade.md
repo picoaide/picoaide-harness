@@ -113,37 +113,62 @@ docker compose up -d
 `docker compose up -d server` 都可能用**另一个渠道**的镜像重建 —— 品牌与随包安装包全错，
 而该栈 `.env` 里的 `SERVER_IMAGE` 看起来完全正确。
 
-每个渠道的归档从 2026-09-23 起**额外**带一个渠道专属 tag
-`picoaide-harness-server:<channel-id>-<版本>`。多栈宿主机的正确顺序：
+每个渠道的归档从 `v2.8.2-beta.1`（2026-09-24）起**额外**带一个渠道专属 tag
+`picoaide-harness-server:<channel-id>-<版本>`；归档里三个 tag 都指向**新**镜像，`docker load`
+会一并恢复，**不需要重打任何 tag**。多栈宿主机的正确顺序：
 
 ```bash
 VER=<本次版本，不带 v>
+OLD=<升级前版本，不带 v>
 IMAGE=picoaide-harness-server
+CHANNEL=<本栈渠道 id>          # ← 与镜像内烘焙的渠道标记一致
 STACK=/opt/picoaide            # ← 本栈部署目录
 CT=picoaide-server             # ← 本栈 server 容器名
+
+# 0) 把**升级前正在跑的**镜像固化成回滚锚点 —— "运行中容器"唯一正当的用途：它代表旧版本。
+#    （变量名别用 GID/UID：远端 zsh 里它们是只读特殊变量）
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # 先确认这一栈此刻跑的确实是本渠道
+ROLLBACK_IMAGE_ID="$(docker inspect "$CT" --format '{{.Image}}')"
+docker tag "$ROLLBACK_IMAGE_ID" "${IMAGE}:${CHANNEL}-${OLD}"
 
 # 1) 导入本渠道的包（两栈各 load 自己渠道的包）
 unzip -p /tmp/pa.zip image.tar | docker load
 
-# 2) 用**本栈正在运行的容器**取 image id，重打成渠道专属 tag
-#    （变量名别用 GID/UID：远端 zsh 里它们是只读特殊变量）
-IMG_ID="$(docker inspect "$CT" --format '{{.Image}}')"
-docker tag "$IMG_ID" "${IMAGE}:<channel-id>-${VER}"
+# 2) 取**刚导入的新镜像**的 id：只认渠道 tag（裸 tag 会被别栈覆盖，见下）
+NEW_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}:${CHANNEL}-${VER}")"
+test -n "$NEW_IMAGE_ID"
+test "$NEW_IMAGE_ID" != "$ROLLBACK_IMAGE_ID"       # 新旧必须是两份不同的镜像
+docker run --rm --entrypoint cat "${IMAGE}:${CHANNEL}-${VER}" /opt/picoaide/CHANNEL   # == ${CHANNEL}
 
 # 3) 本栈 .env 指向渠道 tag（不要留裸 `v<版本>`）
 cd "$STACK"
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}|" .env
-grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:<channel-id>-${VER}" >> .env
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}|" .env
+grep -q '^SERVER_IMAGE=' .env || echo "SERVER_IMAGE=${IMAGE}:${CHANNEL}-${VER}" >> .env
 docker compose up -d server
 
-# 4) 核对这一栈跑的确实是本渠道
-docker exec "$CT" cat /opt/picoaide/CHANNEL        # 镜像内置的渠道标记
-curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 应与之一致
+# 4) 断言这一栈跑的确实是本渠道的新版本（五项全过）
+ENV_TAG="$(sed -n 's/^SERVER_IMAGE=//p' .env)"
+test "$(docker image inspect --format '{{.Id}}' "$ENV_TAG")" = "$NEW_IMAGE_ID"   # .env 的 tag 指向新镜像
+docker inspect "$CT" --format '{{.Image}}'         # == $NEW_IMAGE_ID ← 最关键的一条
+docker exec "$CT" /app/picoaide-server --version   # == 目标版本（看二进制自报，不看 tag）
+docker exec "$CT" cat /opt/picoaide/CHANNEL        # == $CHANNEL
+curl -sk "https://<本栈域名>/api/client/v2/channel" | head -c 300   # channel_id 与之一致
 ```
 
-首次部署（还没有运行中的容器）时，`docker load` 之后**立刻**按刚导入的 tag 取 id 再重打
-（`docker inspect --format '{{.Id}}' ${IMAGE}:${VER}`），不要等另一栈先动手。回滚锚点同理要留
-**渠道 tag**：裸 `v<旧版本>` 在同机多栈时可能已指向别的渠道的镜像。渠道与部署的一致性判据见
+> **不要按"运行中的容器"取 id 去贴新版本渠道 tag**：切换容器的动作在第 3 步，所以第 2 步
+> `docker inspect "$CT"` 拿到的是**升级前**那份镜像 —— 把它贴成 `${IMAGE}:${CHANNEL}-${VER}`
+> 会覆盖归档刚恢复的正确 tag，`docker compose up -d` 又从同一个 image id 重建 ⇒
+> **升级静默不生效**，而 tag 与 `.env` 都声称新版本（回滚锚点同时被污染）。
+>
+> **裸 tag `${IMAGE}:${VER}` / `${IMAGE}:v${VER}` 不能用来判定"我刚导入的是哪个镜像"**：
+> 它们在所有渠道的归档里完全相同，同机第二栈 `docker load` 会静默覆盖它们，只有
+> `<channel-id>-<版本>` 是每个渠道独有的名字。
+
+旧包（`v2.8.2-beta.1` 之前的归档，即 2026-09-24 之前，内部不带渠道 tag）只能退回裸 tag：`docker load` 之后**立刻**用
+`docker image inspect --format '{{.Id}}' ${IMAGE}:${VER}` 取 id，并当场用
+`docker run --rm --entrypoint cat ${IMAGE}:${VER} /opt/picoaide/CHANNEL` 核对烘焙渠道，通过后再
+`docker tag` 成渠道 tag。首次部署（还没有运行中的容器）没有第 0 步，第 1–4 步照做。回滚锚点同理
+要留**渠道 tag**：裸 `v<旧版本>` 在同机多栈时可能已指向别的渠道的镜像。渠道与部署的一致性判据见
 [渠道与白标](/deployment/channels/)。
 
 
@@ -183,10 +208,18 @@ curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" \
 
 前提：**先判断新版本引入了哪一类迁移**，两种情形做法完全不同。
 
-- **一般迁移（只加列 / 只建表）**：回滚镜像后数据库结构仍是新的，但旧二进制不引用新列，通常可以只换镜像。
+- **同代回滚（新旧二进制可见的迁移集合完全相同）**：回滚镜像后数据库结构仍是新的，但旧二进制不引用
+  新列，可以只换镜像。
+- **跨代回滚（库比二进制新）**：**不能只换镜像** —— 2026-09-25 起的二进制在启动期做**双向**迁移对账，
+  只要 `schema_migrations` 里存在当前二进制不认识的版本号就**拒绝启动**（`SchemaMismatchError`，点名
+  版本号并给出两条可行动作）。必须按下面的顺序：**停服 → 恢复升级前的 `pg_dump` → 回退镜像 →
+  客户端重装/回退**。（`v2.8.1` 及更早的旧二进制没有这条判据：跨代回滚不会在启动期报错，而是在运行期
+  按旧路径访问已经被删/改的表 —— 例如下一条里的 `42P01`；同样是"必须连库一起回退"，差别只在失败出现
+  在启动期还是运行期。）
 - **`v2.7.6-beta.5` 及之后的 `v2.7.6` 线（含 `0073` `DROP TABLE` 与 `0074` 配置改写）**：这两条**不可逆**，
   **回滚 ≠ 只换镜像**。正确顺序 = **停服 → 恢复升级前的 `pg_dump` → 回退镜像 → 客户端重装/回退**。
-  只回退镜像会让旧二进制逐请求报 **`42P01`（`undefined_table`）**，而迁移器只跳过"已应用"的版本号、
+  只回退镜像会让**没有双向对账判据的旧二进制**（`v2.8.1` 及更早）逐请求报
+  **`42P01`（`undefined_table`）**，而迁移器只跳过"已应用"的版本号、
   **启动期不报错**（症状：服务能起来、健康检查通过，应用相关请求运行期 500）。
   **本版不提供降级通道**（不支持新旧访问模型并存，也不支持把服务端降回旧访问模型）。
 
@@ -194,15 +227,20 @@ curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" \
 cd /opt/picoaide
 OLD=<升级前的版本>
 IMAGE=picoaide-harness-server
+CHANNEL=<本栈渠道 id>          # ← 与镜像内烘焙的渠道标记一致（见「同一台服务器上跑多个渠道栈」）
 
-# 1) 切回旧镜像
-sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${OLD}|" .env
+# 1) 切回旧镜像 —— 用多栈章节第 0 步固化出来的**渠道 tag**（回滚锚点就是那一个）
+#    ⚠️ 不要写裸 `${IMAGE}:${OLD}`：同机多栈时那个裸 tag 可能已被别渠道的 `docker load`
+#    覆盖，而 compose 的 PICOAI_CHANNEL 缺省为空 ⇒ 这一栈会以别渠道的品牌静默起来。
+docker image inspect --format '{{.Id}} {{.RepoTags}}' "${IMAGE}:${CHANNEL}-${OLD}"   # 锚点必须存在
+sed -i "s|^SERVER_IMAGE=.*|SERVER_IMAGE=${IMAGE}:${CHANNEL}-${OLD}|" .env
 docker compose up -d
 
-# 2) 验证旧版本健康
+# 2) 验证旧版本健康（版本 + 渠道两面）
 DOMAIN=$(grep '^DOMAIN=' .env | cut -d= -f2-)
 curl -sk -o /dev/null -w '%{http_code}\n' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/healthz"
 docker exec picoaide-server /app/picoaide-server --version      # 应等于 OLD
+docker exec picoaide-server cat /opt/picoaide/CHANNEL           # 应等于 $CHANNEL（防静默换品牌）
 echo "$OLD" > VERSION
 
 # 3) 仅当应用数据被破坏时才恢复（会丢数据，需明确同意）
@@ -216,6 +254,11 @@ echo "$OLD" > VERSION
 #   < deploy-backup/pg-data-<TS>.dump
 # docker compose start server
 ```
+
+> **回滚锚点只有渠道 tag 是安全的。** 裸 `${IMAGE}:${OLD}` 只在**单栈**机器上可用（没有别的渠道会
+> `docker load` 去覆盖它）。若当初没在多栈章节第 0 步固化渠道 tag（例如从 `v2.8.2-beta.1` 之前的归档
+> 升级），同机还有别的渠道栈时先 `docker image inspect` 核对它的 `RepoTags` 与镜像内烘焙的
+> `/opt/picoaide/CHANNEL`，必要时从更新服务器重新 `docker load` 该渠道的旧包再固化渠道 tag。
 
 **回滚 3) / 4) 会让升级后产生的数据丢失**，执行前必须获得明确同意。
 

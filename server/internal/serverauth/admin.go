@@ -248,7 +248,14 @@ func RegisterAdminRoutes(r *gin.Engine, db *sql.DB) {
 	AdminRoute(authed, "POST", "/departments", PermDeptWrite, a.createDepartment)
 	AdminRoute(authed, "PUT", "/departments/:id", PermDeptWrite, a.updateDepartment)
 	AdminRoute(authed, "DELETE", "/departments/:id", PermDeptWrite, a.deleteDepartment)
-	AdminRoute(authed, "GET", "/users/:id/tokens", PermUserRead, a.listUserTokens)
+	// S3-04（审计 2026-10-04，P2）：这里**必须**与生产树绑同一个实现
+	// （`internal/router` 的 `d.Admin.ListUserTokens` = AdminHandlers 供给面 =
+	// `listUserTokensPaged`）。修前这里绑的是旧的无分页实现 `a.listUserTokens`
+	// （固定 500 + total/truncated），于是同一条路径在两棵树里有两套响应契约，而
+	// `internal/router/parity_test.go` 的镜像对拍只比 (method, path) ⇒ 恒绿。
+	// 旧实现已删除（同一读取面只允许一套契约）；两棵树的 handler 身份由
+	// internal/router 的 TestAdminRouteMirrorsBindProductionHandlers 逐路由对拍。
+	AdminRoute(authed, "GET", "/users/:id/tokens", PermUserRead, a.listUserTokensPaged)
 	AdminRoute(authed, "POST", "/tokens/:id/revoke", PermUserWrite, a.revokeToken)
 	// 0061 员工余额(与 router 包镜像,测试自建路由树同路径同权限)。
 	AdminRoute(authed, "POST", "/users/:id/balance", PermUserWrite, a.adjustUserBalance)
@@ -415,9 +422,14 @@ func (a *AdminAPI) handleLogin(c *gin.Context) {
 		writeError(c, http.StatusUnauthorized, "AUTH_FAILED", "用户名或密码错误或非管理员")
 		return
 	}
+	// S3-03(审计 2026-10-04,P2):账号桶(按账号,只有口令正确才可能走到这里)整键清空;
+	// IP 桶只**归还本次尝试那一格** —— 它是判定即记账的尝试桶,且键与客户端面共用
+	// (admin.go 的 ipLimiter() 与 handler.go 的 loginIPLimiter 都是 sharedLoginIPLimiter)。
+	// 整键清空会让"错密打满 + 一次成功登录"把全出口 IP 的 argon2 放大防护洗掉
+	// (见 ratelimit.go 的 loginSucceeded / refund)。
 	lim.reset(ipKey)
 	lim.reset(userKey)
-	a.ipLimiter().reset(srcIPKey)
+	a.ipLimiter().refund(srcIPKey)
 	// 0057: MFA 已开启 → 不建会话, 签发 5 分钟一次性挑战, 前端进入两步登录。
 	if u.TotpEnabled {
 		ticket, err := createMFAChallenge(a.DB, u.ID, "login", "", mfaTicketTTL)
@@ -1169,41 +1181,12 @@ type tokenJSON struct {
 	Revoked    int    `json:"revoked"`
 }
 
-func (a *AdminAPI) listUserTokens(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "VALIDATION", "非法用户 ID")
-		return
-	}
-	if _, err := serverstore.GetUserByID(a.DB, id); errors.Is(err, serverstore.ErrNotFound) {
-		writeError(c, http.StatusNotFound, "NOT_FOUND", "用户不存在")
-		return
-	} else if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	// R15C-R-01（审计 2026-09-25，P1）：列表**有界返回**（最近 TokenListMax 条）
-	// 并如实披露 total/truncated。此前 SQL 无 LIMIT、handler 全量 JSON、webadmin
-	// 整个数组进 state ⇒ 长期累积后单次加载实测 130 MiB 响应 / 在飞堆 +656 MB。
-	// 截断必须可见（truncated=true + total），绝不静默少给。
-	tokens, total, err := serverstore.ListTokensByUser(a.DB, id, serverstore.TokenListMax)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, "INTERNAL", "查询失败")
-		return
-	}
-	out := make([]tokenJSON, 0, len(tokens))
-	for _, tk := range tokens {
-		lastUsed := ""
-		if !tk.LastUsedAt.IsZero() {
-			lastUsed = tk.LastUsedAt.Format(time.RFC3339)
-		}
-		out = append(out, tokenJSON{
-			ID: tk.ID, Name: tk.Name, CreatedAt: tk.CreatedAt,
-			ExpiresAt: tk.ExpiresAt.Format(time.RFC3339), LastUsedAt: lastUsed, Revoked: tk.Revoked,
-		})
-	}
-	c.JSON(http.StatusOK, gin.H{"tokens": out, "total": total, "truncated": total > int64(len(out))})
-}
+// 旧的无分页实现 `AdminAPI.listUserTokens`（固定 500 + total/truncated）已删除
+// （S3-04，审计 2026-10-04，P2）：同一条路径 `/api/server/admin/users/:id/tokens`
+// 此前在生产树绑 `listUserTokensPaged`、在测试镜像树绑它，两套响应契约并存而
+// `internal/router/parity_test.go` 的镜像对拍只比 (method, path) ⇒ 恒绿。
+// 现在两棵树绑同一个实现（token_page.go），响应契约为 `{tokens, page, size, total,
+// has_more}`、`?page=&size=` 缺省 50 / 上限 200 / 越界 400。
 
 func (a *AdminAPI) revokeToken(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

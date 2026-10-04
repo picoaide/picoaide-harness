@@ -96,13 +96,13 @@ const updates = (await getCollection('blog', ({ data }) => !data.draft))
         <div class="codeblock__bar">
           <span>部署机上执行（详细步骤见 <a href="/deployment/compose/">容器化部署</a>）</span>
         </div>
-        <pre><code>{`# 1) 校验并导入镜像（版本以 latest.json 的 server.version 为准）
-curl -fL -O https://release.picoaide.com/official/releases/2.7.0/picoaide-server-2.7.0-amd64.zip
-unzip -p picoaide-server-2.7.0-amd64.zip image.tar | docker load
+        <pre><code>{`# 1) 校验并导入镜像（<版本> 从本渠道 latest.json 的 server.version 取，不带 v）
+curl -fL -O https://release.picoaide.com/official/releases/<版本>/picoaide-server-<版本>-amd64.zip
+unzip -p picoaide-server-<版本>-amd64.zip image.tar | docker load
 
 # 2) 把部署文件导出到部署目录（镜像自带 compose / Caddyfile / 客户端安装包）
 docker run --rm -v /opt/picoaide:/out -e PICOAI_UNPACK_STACK=/out \\
-  picoaide-harness-server:2.7.0
+  picoaide-harness-server:<版本>
 
 # 3) 写 .env 后启动，并确认健康检查通过
 cd /opt/picoaide && docker compose up -d

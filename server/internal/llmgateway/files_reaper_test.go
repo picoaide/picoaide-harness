@@ -1,6 +1,7 @@
 package llmgateway
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -379,30 +380,137 @@ func TestFilesReaperHooksAreRaceFree(t *testing.T) {
 
 // TestStartFileReaperReapsThenStops：启动时先跑一轮（进程停了几天的堆积不必再等一个
 // 间隔），ctx 取消后停止扫描。
+//
+// 判据去固定 sleep（S7 泳道登记的时序假设，本次放开后按同口径重做）：旧写法是
+// `cancel → Sleep(100ms) → 插行 → Sleep(300ms) → 断言行还在`。两个 sleep 都在赌
+// "到点了异步一定落地"——负载下会**假红**（已在飞的那一轮还没来得及跑完就插了行，
+// 它照样把新行回收掉，于是断言"行还在"失败），而把时长调大只是把假红换成更慢的假红。
+//
+// 现在等的是**可观测量**：回收器每一轮在"列出候选之后"都会调用 reapAfterListHook，
+// 用它当轮次计数器（`rounds`）。三段判据：
+//  1. 启动首轮真的跑过（行被回收 + 计数 ≥ 1）；
+//  2. cancel 之后**轮次计数停止增长**（waitReaperRoundsStop）—— 这一条就是"停止
+//     扫描"的观测量：协程还在跑的话计数会每 interval 涨一次，永远等不到静止，
+//     到 deadline 判红（变异"把 cancel 去掉"即命中这条路）；
+//  3. 静止之后再插入过期行，**再观察一段静止窗口**：这期间若有任何一轮跑过，它必然
+//     看到并回收这一行（第二段静止窗口因此同时是"这一行确实可被回收"的活体探针）。
+//  4. 正控：手工跑一轮必须真的把这一行回收掉 —— 否则第 3 条可能只是"行没写进去/
+//     没到期"造成的恒真。
 func TestStartFileReaperReapsThenStops(t *testing.T) {
 	resetBodyParseGate(t)
 	gw, _, _ := lane2Reaper(t, "deepseek-official")
 	lane2ExpiredRow(t, gw, "file-startup", gw.uidA, 10*24*time.Hour)
 
+	// 轮次计数：每一轮回收在"列出候选之后"都会过这个注入点（生产恒为空）。
+	var rounds atomic.Int64
+	reapAfterListHook.store(func([]string) { rounds.Add(1) })
+	t.Cleanup(func() { reapAfterListHook.store(nil) })
+
+	const interval = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	StartFileReaper(ctx, gw.db, 10*time.Millisecond)
+	StartFileReaper(ctx, gw.db, interval)
 	t.Cleanup(cancel)
 
 	deadline := time.Now().Add(5 * time.Second)
-	for lane2RowExists(t, gw, "file-startup") {
+	for lane2RowExists(t, gw, "file-startup") || rounds.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("StartFileReaper 启动时的首轮没有执行")
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(interval)
+	}
+	// 探针自校准：协程**在跑**的时候必须能被 reaperLoopAlive 看到 —— 否则下面
+	// "cancel 之后 alive=false"这条判据是恒真的（假绿），必须先在这里判红。
+	if !reaperLoopAlive() {
+		t.Fatal("自校准失败：回收协程在运行时栈里找不到（探针的匹配串与编译器命名的闭包帧不符）")
 	}
 
 	cancel()
-	time.Sleep(100 * time.Millisecond) // 让已在飞的一轮结束
+	// 等"不再产生新一轮"：判据取**轮次计数停止增长**（观测），不是"睡够多久"。
+	waitReaperStopped(t, &rounds, interval)
+
 	lane2ExpiredRow(t, gw, "file-after-cancel", gw.uidA, 10*24*time.Hour)
-	time.Sleep(300 * time.Millisecond)
+	// 第二段静止窗口：任何一轮只要跑过就会看到上面这一行并回收它 ⇒ 行还在 = 没跑。
+	waitReaperStopped(t, &rounds, interval)
 	if !lane2RowExists(t, gw, "file-after-cancel") {
-		t.Fatal("ctx 取消后回收器仍在扫描")
+		t.Fatal("ctx 取消后回收器仍在扫描（cancel 之后新写入的过期行被回收了）")
 	}
+
+	// 正控：这一行**确实**是可回收的（同一个 fixture、同一张表、同一份过期时间），
+	// 只是"回收器已经停了"才没被回收 —— 手工一轮必须把它删掉。
+	api := &API{DB: gw.db, client: &http.Client{}}
+	if deleted, failed := api.ReapExpiredGatewayFiles(0); deleted != 1 || failed != 0 {
+		t.Fatalf("正控：手工一轮的回收计数 = (deleted=%d, failed=%d), want (1, 0) —— "+
+			"否则上一条断言可能只是「行没写进去/没到期」造成的恒真", deleted, failed)
+	}
+	if lane2RowExists(t, gw, "file-after-cancel") {
+		t.Fatal("正控：手工一轮之后这一行仍在（回收路径没有覆盖它）")
+	}
+}
+
+// waitReaperStopped 等到"回收器确实停了"为止，两个**互相独立**的观测量都要成立：
+//
+//  1. 轮次计数不再增长（连续 stableSamples 次采样、每次间隔 sampleGap）；
+//  2. 常驻协程**已经不在**（`runtime.Stack(all=true)` 里找不到 StartFileReaper）。
+//
+// 为什么必须两条：只看计数会被"协程还在、但被调度饿死/在 ctx.Done 上空转"骗过 ——
+// 实测把 `case <-ctx.Done(): return` 删掉（变异 M6）之后，select 在已取消的 ctx 上
+// 空转，轮次计数会长时间不动（看起来"静止"），而协程仍在、仍会偶发回收。
+// goroutine 栈是"它还在不在"的 ground truth，不需要任何生产代码里的接缝。
+//
+// 为什么不是 `time.Sleep(固定值)`：那种写法把"异步到点了"当判据，负载下要么判早
+// （假红）要么判晚（更慢的假红）。这里等的是观测量本身；失败方向是响亮的 ——
+// 协程不退 ⇒ 两个观测量永远不满足 ⇒ 到 deadline 判红并打印当时的计数。
+func waitReaperStopped(t *testing.T, rounds *atomic.Int64, interval time.Duration) {
+	t.Helper()
+	const stableSamples = 5
+	// 采样间隔是 interval 的数倍：一次采样里回收器本该跑过好几轮，计数不变才有意义。
+	sampleGap := 4 * interval
+	deadline := time.Now().Add(10 * time.Second)
+	last := rounds.Load()
+	stable := 0
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("ctx 取消后回收器没有停下：rounds=%d alive=%v（cancel 必须让常驻协程退出）",
+				rounds.Load(), reaperLoopAlive())
+		}
+		time.Sleep(sampleGap) // 采样间隔（不是"等异步落地"的固定睡眠）：判据是观测量本身
+		now := rounds.Load()
+		if now != last {
+			last, stable = now, 0
+			continue
+		}
+		if stable++; stable < stableSamples {
+			continue
+		}
+		if reaperLoopAlive() {
+			// 计数静止但协程还在：重新数（它随时可能再跑一轮）。
+			stable = 0
+			continue
+		}
+		return
+	}
+}
+
+// reaperLoopAlive 报告本包的回收协程是否还在（goroutine 栈扫描，测试专用）。
+//
+// 本包内只有 TestStartFileReaperReapsThenStops 会起这个协程，且 Go 同包用例串行执行，
+// 所以"栈里有没有回收协程的闭包帧"就是它存在与否的确定答案。
+//
+// 匹配串必须是 `StartFileReaper.func1`（闭包帧），**不能**是 `StartFileReaper` ——
+// 后者会命中用例自身的名字（`TestStartFileReaperReapsThenStops` 的栈帧），
+// 于是"协程已退出"永远看起来像"还在"（实测踩过）。用例开头有**自校准**：
+// 协程在跑时必须被本探针看到，否则判据没有判别力，直接判红。
+func reaperLoopAlive() bool {
+	needle := []byte("StartFileReaper.func1")
+	buf := make([]byte, 1<<20)
+	for len(buf) <= 1<<26 {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return bytes.Contains(buf[:n], needle)
+		}
+		buf = make([]byte, len(buf)*2) // 截断了就加倍重来
+	}
+	return true // 读不全时按"还在"处理（宁可等到 deadline，也不误判成已停）
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,11 @@ func resetSharedLimitersForTest() {
 		l.lastSweep = time.Time{}
 		l.mu.Unlock()
 	}
+	// S3-05(审计 2026-10-04,P2):OIDC **容量拒绝计数**也是包级单例(进程级读数,
+	// 由 server-info 的 oidc.capacity_rejections 读)—— 跨用例累积会让"计数 = 本轮
+	// 触发的次数"这条判据假红。本仓纪律:新增"包级单例 + 进程级累积状态"必须挂进
+	// 本统一入口(先例:sharedTokenIssueQuotaLimiter)。
+	oidcFlowCapacityRejections.Store(0)
 }
 
 // ipBucketCount 白盒观测共享 IP 桶里某个键当前的失败次数。

@@ -1230,7 +1230,80 @@ function startGateway(scenario) {
 
 /** 场景表：每个场景断言"谁是主角、期望退出码、输出里必须/不得出现什么"。 */
 /** 主流程：语法闸门 → 判据自检 → 假网关正/反例。返回 0/1。 */
+/**
+ * 登记面**直接读取**的根路径（R26 FIX-J1-5）：`integration-tests/` 目录本身，
+ * 加上每个登记项的第一个路径段（去重排序）。
+ * @param entries - 登记项（缺省 = 真表；自证传合成表）。
+ * @returns 根路径（仓内相对）列表。
+ */
+function requiredIntegrationRoots(entries = INTEGRATION_ENTRIES) {
+  return [...new Set(['integration-tests', ...entries.map(entry => entry.path.split('/')[0])])].sort()
+}
+
+/**
+ * 上述根路径里**不存在**的那些（前置失败的输入）。
+ * @param root - 仓库根（绝对路径）。
+ * @param exists - 判定函数（注入以便自证：真跑传 `fs.existsSync`）。
+ * @param entries - 登记项（缺省 = 真表）。
+ * @returns 缺失的根（仓内相对）列表。
+ */
+function integrationRootProblems(root, exists, entries = INTEGRATION_ENTRIES) {
+  return requiredIntegrationRoots(entries).filter(relative => !exists(join(root, relative)))
+}
+
+/**
+ * `[FIX-J1-5]` 的**判别力自证**（每次跑守卫都执行，与 `aggregateParserSelfTest` 同一手法）。
+ *
+ * 三格：① 全在 ⇒ 无问题；② `integration-tests/` 不见 ⇒ 必须点名它；
+ * ③ 某个登记项的第一个路径段不见 ⇒ 必须点名那一段（用**合成**登记表 —— 真表当前
+ * 全部落在 `integration-tests/` 下，只靠真表这一格会退化成恒真的 `undefined` 断言）。
+ * 没有这一组，"前置判据恒返回空数组"（= 退回"扫到空即通过"）不会有任何反应。
+ */
+function integrationRootPrecheckSelfTest() {
+  const present = new Set(requiredIntegrationRoots())
+  check(integrationRootProblems('/repo', relative => present.has(relative.replace('/repo/', ''))).length === 0,
+    '前置判据自证: 全部根都在时必须**没有**问题项')
+  check(integrationRootProblems('/repo', relative => relative !== '/repo/integration-tests').includes('integration-tests'),
+    '前置判据自证: `integration-tests/` 不见时必须点名它 —— 否则 J1-5 会退回"扫描面静默取空 + Node ENOENT 栈"')
+  const synthetic = [{ path: 'integration-tests/a.sh' }, { path: 'probe-root/b.sh' }]
+  const missingSecondRoot = integrationRootProblems(
+    '/repo', relative => relative !== '/repo/probe-root', synthetic,
+  )
+  check(missingSecondRoot.length === 1 && missingSecondRoot[0] === 'probe-root',
+    '前置判据自证: 登记项的第一个路径段（合成表里的 `probe-root`）不见时必须点名它，'
+      + `且不得把还在的根也算成缺失 —— 实际 [${missingSecondRoot.join(', ')}]`)
+}
+
 async function main() {
+// ---------------------------------------------------------------------------
+// ⓪ **前置失败（exit 2）：登记面直接读取的根必须存在**（R26 FIX-J1-5）
+//
+// 现场（审计 J1 的 J1-5）：把 `integration-tests/` 整目录移走后，本守卫退出码是 1
+// （fail-loud 成立，所以不是 P1），但**诊断只剩 Node 栈** —— 崩在
+// `readFileSync(join(ROOT, entry.path), 'utf8')`（**没有 `existsSync` 前置**），
+// CI 上看到的是 `Error: ENOENT … at main (file:///…:1379:20)` 而不是"integration-tests 被删/改名"；
+// 同一文件里 `pythonFiles`/`moduleFiles` 的扫描面却又是 `existsSync(...) ? … : []` —— 静默取空。
+// 也就是说"扫描面缩窄"这件事本身没有判据，只有后面那次崩溃偶然兜住。
+//
+// 判据：判据**直接读取**的根（`integration-tests/` 与每个登记项的第一个路径段）缺一块即
+// **前置失败 exit 2**（与 `check-doc-claims` / `check-migration-range` 同口径：2 = 输入不可用，
+// 1 = 有漂移），并且**具名点名缺的是哪个根**。判别力自证见
+// {@link integrationRootPrecheckSelfTest}（每次跑守卫都执行）。
+// ---------------------------------------------------------------------------
+{
+  integrationRootPrecheckSelfTest()
+  const missingRoots = integrationRootProblems(ROOT, candidate => existsSync(candidate))
+  if (missingRoots.length > 0) {
+    process.stderr.write('check-integration-tests: **前置失败（exit 2）** —— 判据面所需的根路径不存在：\n'
+      + missingRoots.map(root => `  · ${root}/`).join('\n')
+      + `\n  工作目录（ROOT）：${ROOT}\n`
+      + '  ⇒ 判据的输入面缺一块时**不许**退化成"扫到空 ⇒ 通过"（`integration-tests/` 的扫描面正是'
+      + '按 `existsSync` 静默取空的），也不许只剩 Node 的 ENOENT 栈。\n'
+      + '  ⇒ 先确认本守卫是在**仓库根**上跑的（`git rev-parse --show-toplevel`），'
+      + '以及 `integration-tests/` 没有被误删/改名；补回目录后重跑。\n')
+    return 2
+  }
+}
 // ---------------------------------------------------------------------------
 // 0. 用例登记制 + 聚合层双向对账（第十三轮审计 F-02 / F-03，P1）
 //
@@ -1376,6 +1449,11 @@ async function main() {
 
   // ⑤ contract-test 的三个入口必须真的存在（登记角色 = 承诺）。
   for (const entry of INTEGRATION_ENTRIES.filter(item => item.role === 'contract-test')) {
+    // **R26 FIX-J1-5**：入口不存在时**不许**让它抛穿成 Node 栈（修前 `readFileSync` 没有
+    // `existsSync` 前置 ⇒ CI 上只看到 `file:///…:1379` 的 ENOENT）。这里跳过即可 ——
+    // 上面 ① 的 `registered-on-disk` 已经用**具名**诊断报了"登记了却不在"，
+    // 而且 ⓪ 的前置检查会先以 exit 2 拦住"整个根不见了"。
+    if (!existsSync(join(ROOT, entry.path))) continue
     const source = readFileSync(join(ROOT, entry.path), 'utf8')
     for (const [flag, why] of [
       ['--self-test', '判据本体自证（每条判据的正/负例夹具）'],
@@ -3077,12 +3155,17 @@ const CI_SURFACE_GENERATED_SCRIPT_ACK = []
  * 与 {@link CI_SURFACE_VARIABLE_COMMAND_ACK} 同款纪律：**死条目双向对账**（登记了却
  * 一次都没命中 ⇒ 红），所以这张表不会变成"看起来管得很宽"的摆设。
  *
- * 每条 = `{ file, word, why, approvedBy }`；`word` 是命令位首词**逐字**。
+ * 每条 = `{ file, word, scriptPositional, why, approvedBy }`；`word` 是命令位首词**逐字**，
+ * `scriptPositional` 是 **R26 FIX-J1-1/FIX-J1-2** 新增的**必填**字段：这一位是"启动一个程序"
+ * 的宿主（`node <脚本>` / `<解释器> <脚本>` ⇒ `true`）还是"子命令式"的外部命令
+ * （`git show …` / `git fetch …` ⇒ `false`，它后面第一位是**子命令**而不是脚本）。
+ * 缺这个字段即红（见形态⑨自证），所以新登记一条时**必须显式回答**"它后面那一位是不是脚本位"。
  */
 const CI_SURFACE_COMMAND_SHAPE_ACK = [
   {
     file: '.github/workflows/ci.yml',
     word: '${{ steps.frozen-launchers.outputs.node }}',
+    scriptPositional: true,
     why: '冻结启动器探针给的 **node 绝对路径**（`scripts/check-frozen-launchers.mjs` 的 step 输出）：'
       + '它的作用正是"此后的每一步都用冻结过的 node"，所以命令位上出现它是这条判据的**设计意图**，'
       + '而不是"把命令藏进变量"。闭包不解析 GitHub 表达式 ⇒ 逐处登记。',
@@ -3091,17 +3174,76 @@ const CI_SURFACE_COMMAND_SHAPE_ACK = [
   {
     file: '.github/workflows/ci.yml',
     word: '${{ steps.frozen-launchers.outputs.git }}',
-    why: '同上，冻结的 **git 绝对路径**（`git show HEAD:<文件>` / `git fetch` 两处）。',
+    scriptPositional: false,
+    why: '同上，冻结的 **git 绝对路径**（`git show HEAD:<文件>` / `git fetch` 两处）—— 后面第一位是'
+      + '**子命令**（`show`/`fetch`），不是"被执行的程序"，所以它**不**开"脚本位"那一格。',
     approvedBy: 'R17-X（本泳道）',
   },
   {
     file: '.github/workflows/ci.yml',
     word: '${{ steps.frozen-launchers.outputs.interp }}',
+    scriptPositional: true,
     why: '同上，冻结的 **shell 解释器绝对路径**（`<解释器> scripts/ci-release-*.sh` 三处 + '
       + '`scripts/verify-wasm-client-only.sh` 一处）。',
     approvedBy: 'R17-X（本泳道）',
   },
 ]
+/**
+ * 命令位首词对应的**已认账表达式登记项**（{@link CI_SURFACE_COMMAND_SHAPE_ACK}）。
+ *
+ * 判定与 `:6803` 的 `acked` 闭包**共用同一张表**（避免"两处各写一份口径"这条老毛病）：
+ * 登记项本来就按 `{ file, word }` 逐字匹配。
+ * @param file - 承载这条命令的仓内文件（`.github/workflows/ci.yml` 等）。
+ * @param word - 命令位首词。
+ * @returns 登记项；没有则 `undefined`。
+ */
+function ackedExpressionEntry(file, word) {
+  return CI_SURFACE_COMMAND_SHAPE_ACK.find(entry => entry.file === file && entry.word === word)
+}
+/**
+ * **表达式命令位之后的"脚本位"**（R26 FIX-J1-1 / FIX-J1-2 的核心，见 {@link scanCarrierPaths}）。
+ *
+ * ## 现场（为什么必须由"位置"判，而不是由"命令词是不是已知解释器"判）
+ *
+ * 修前脚本位只有一条识别路径：`COMMAND_SHELL_WORDS.has(command)` 或包装表的
+ * `scriptPositional === true`。命令词是 GitHub 表达式（`"${{ steps.frozen-launchers.outputs.interp }}"`，
+ * `ci.yml` 16 处、已在 {@link CI_SURFACE_COMMAND_SHAPE_ACK} 认账）时两条都不成立 ⇒
+ * `scriptHost === null` ⇒ 脚本词落进参数位的通用循环，那里**只有跟随、没有判红**。
+ * 后果（审计 J1 实测）：`printf … | openssl base64 -d -A > gen-probe.sh` 之后用表达式命令位执行它，
+ * `check-workflows` 与 `check-integration-tests` **都 EXIT=0**（A/B 对照：把执行位换成 `bash gen-probe.sh`
+ * 则 EXIT=1）；同理"写 `scripts/check-verdict-credential.mjs`、由既有被钉步骤的表达式命令位执行"也全绿。
+ * 也就是说：**通过行承诺的两格（"脚本位指向仓内不存在的路径 ⇒ 红"、"运行期被改写的路径 ⇒ 红"）
+ * 在 16 个冻结启动器调用点之后整格消失**。
+ *
+ * ## 现在的判据（位置判据）
+ *
+ * 表达式命令位（{@link ackedExpressionEntry}，且该登记项的 `scriptPositional === true`）之后的
+ * **第一个非旗标实参**同判为脚本位，与 shell 宿主 / `source` / 解释器共用同一份
+ * `reportGeneratedScript` / `reportRuntimeWrittenScript` —— 不是"多加一条字符串断言"，
+ * 而是把同一格判据接回同一条实现。
+ *
+ * 为什么"第一个非旗标实参"足够（而不是要一张旗标元数表）：`scriptPositional === true` 的
+ * 冻结表达式只有两个（`node` / `interp`），它们的旗标段最多一位（`node --version`），而
+ * **猜错位置只会把旗标当成脚本词** —— 旗标过不了 `isLiteralRepoRelativeScript`
+ * （以 `-` 开头 ⇒ 非仓内相对路径形态 ⇒ 不判红），所以这一格**不会因为表不全而假红**，
+ * 也**不会因为表不全而放行**：真正的脚本词是"字面、仓内相对"的形态，跳过前导旗标之后必然被取到。
+ *
+ * `git` 那一条**故意**登记成 `scriptPositional: false`：它后面第一位是**子命令**
+ * （`show` / `fetch`），不是"被执行的程序"—— 把子命令当脚本位会让 `git show …` 假红
+ * （本修的第一版就是这么把守卫自己打红的，实测证据见报告）。
+ * @param words - 一条命令的词数组（命令位起）；`words[0]` 是表达式命令词。
+ * @returns 与 {@link shellScriptWordIndex} **同形**的返回值：`{ scriptIndex, commandText, terminated }`。
+ */
+function expressionScriptWordIndex(words) {
+  for (let index = 1; index < words.length; index += 1) {
+    const word = words[index]
+    if (word === '--') continue
+    if (word.startsWith('-')) continue
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(word)) continue
+    return { scriptIndex: index, commandText: null, terminated: false }
+  }
+  return { scriptIndex: -1, commandText: null, terminated: false }
+}
 /**
  * **包运行器**（`npx` / `bunx` / `npm exec` / `yarn dlx` / `pnpm dlx` / `bun x`）的语义。
  *
@@ -7767,10 +7909,18 @@ function ciExecutionSurface(options) {
           // R21 fix-6 / E-01：它们的 head 由 `scriptPositional` 分支造成 `[解释器, 脚本, …]`）。
           // 这些解释器在包装表里已经没有旗标可跳（旗标段在入队前就被 `skipFlags` 吃掉了），
           // 所以与 shell 共用同一个取词函数不会取错位。
+          // **R26 FIX-J1-1 / FIX-J1-2**：命令词是**已认账的 GitHub 表达式**时（ci.yml 16 处），
+          // 上面两条识别路径都不成立 ⇒ 修前 `scriptHost === null` ⇒ 脚本词落进参数位循环
+          // （**只跟随、不判红**）⇒ "运行期生成物"与"运行期被改写"两格在表达式命令位之后整格消失。
+          // 现在按**位置**判：表达式命令位之后的第一个非旗标实参同判为脚本位，与 shell 宿主
+          // 共用同一份 `reportGeneratedScript` / `reportRuntimeWrittenScript`（见
+          // {@link expressionScriptWordIndex} 的机制说明与 A/B 实测）。
+          // `scriptPositional: false` 的登记项（`git`）子命令式 ⇒ 不开这一格。
+          const expressionEntry = ackedExpressionEntry(node.file, command)
           const scriptHost = (COMMAND_SHELL_WORDS.has(command) || command === 'source' || command === '.'
             || COMMAND_WRAPPER_SPECS.get(command)?.scriptPositional === true)
             ? shellScriptWordIndex(head, 0)
-            : null
+            : (expressionEntry?.scriptPositional === true ? expressionScriptWordIndex(head) : null)
           const scriptWord = scriptHost === null || scriptHost.commandText !== null || scriptHost.scriptIndex < 0
             ? undefined
             : head[scriptHost.scriptIndex]
@@ -8700,9 +8850,12 @@ function ciExecutionSurfaceSelfTest() {
       ['CI_SURFACE_VARIABLE_COMMAND_ACK', CI_SURFACE_VARIABLE_COMMAND_ACK],
     ]) {
       const bad = table.filter(entry => !entry.file || !entry.word || !entry.why
-        || (table === CI_SURFACE_COMMAND_SHAPE_ACK && !entry.approvedBy))
+        || (table === CI_SURFACE_COMMAND_SHAPE_ACK
+          && (!entry.approvedBy || typeof entry.scriptPositional !== 'boolean')))
       check(bad.length === 0,
-        `形态⑨自证: \`${label}\` 的每条都必须写明"哪一处 + 为什么合法 + 由谁批准"：`
+        `形态⑨自证: \`${label}\` 的每条都必须写明"哪一处 + 为什么合法 + 由谁批准"`
+          + `${table === CI_SURFACE_COMMAND_SHAPE_ACK ? ' + 它后面那一位是不是脚本位（`scriptPositional` 布尔，'
+            + 'R26 FIX-J1-1/J1-2：缺了它，"表达式命令位之后的脚本位判据"就会因为登记项没回答而整格消失）' : ''}：`
           + `${bad.map(entry => `${entry.file}:${entry.word}`).join(', ')}`)
     }
   }
@@ -8718,6 +8871,72 @@ function ciExecutionSurfaceSelfTest() {
       '形态⑨自证: 命令位上的**未登记可执行名**必须 fail-closed 记 problem ——'
         + ' 否则"枚举我认识的包装词"还是那个不闭合的黑名单（R16A-06/07/08/11 的根因）：'
         + ` 实际 problems=${JSON.stringify(unregisteredProbe.problems)}`)
+  }
+  // ---------------------------------------------------------------------
+  // **R26 FIX-J1-1 / J1-2 的自证：已认账的 GitHub 表达式命令位之后**也必须判脚本位
+  //
+  // 现场（审计 J1 的 p8c / p5）：脚本位此前只在"命令词是已知解释器/shell 词"时生效，
+  // 命令词是 `"${{ steps.frozen-launchers.outputs.interp }}"`（`ci.yml` 16 处、
+  // 已在 `CI_SURFACE_COMMAND_SHAPE_ACK` 认账）时 `scriptHost === null` ⇒ 脚本词落进
+  // 参数位循环（**只跟随、不判红**）⇒ `printf … | openssl base64 -d -A > gen-probe.sh`
+  // 之后用它执行**两条守卫都 EXIT=0**（A/B 对照：把执行位换成 `bash gen-probe.sh` 则 EXIT=1）。
+  // 三条夹具：① 生成物 ⇒ 必须红；② 仓内真实脚本 ⇒ 必须**不**红（别把正当写法误伤）；
+  // ③ `git` 那一条（`scriptPositional: false`）后面是**子命令** ⇒ 必须**不**红。
+  // ---------------------------------------------------------------------
+  {
+    const j1FixtureWorkflow = commandLines => [
+      'name: j1-fixture',
+      'jobs:',
+      '  gate:',
+      '    steps:',
+      '      - name: frozen expression command position',
+      '        run: |',
+      '          set -euo pipefail',
+      ...commandLines,
+      '',
+    ].join('\n')
+    const runFixture = (file, text, extra = new Map()) => {
+      const fixture = new Map([...extra, [file, text]])
+      return ciExecutionSurface({
+        workflowTexts: [[file, text]],
+        rootManifest: {}, rootManifestText: '{}', workspaceManifests: [],
+        exists: path => fixture.has(path), read: path => fixture.get(path) ?? '',
+      })
+    }
+    const generated = runFixture('.github/workflows/ci.yml', j1FixtureWorkflow([
+      "          printf '%s' 'YmFzaCBpbnRlZ3JhdGlvbi10ZXN0cy9ydW4tYWxsLnNoCg==' | openssl base64 -d -A > gen-probe.sh",
+      '          "${{ steps.frozen-launchers.outputs.interp }}" gen-probe.sh',
+    ]))
+    // 生成物与"先写后执行"是同一族（写 tracker 会把 `> gen-probe.sh` 也记成载体），
+    // 所以这里断言的是**语义结果**：表达式命令位后面那个脚本词必须产生一条 problem
+    // （`missing-script-carrier`：要么"仓内不存在"，要么"运行期被改写"）。两条诊断都是红。
+    check(generated.problems.some(message => message.includes('missing-script-carrier')
+      || message.includes('仓内不存在的路径') || message.includes('运行期被改写过的')),
+      '形态⑨自证（J1-1）：**表达式命令位**后面的运行期生成物必须 fail-closed 记 problem ——'
+        + ' 否则"运行期生成 + 不透明编码"整族在那 16 个冻结启动器调用点之后整格消失：'
+        + ` 实际 problems=${JSON.stringify(generated.problems).slice(0, 400)}`)
+    const existing = runFixture('.github/workflows/ci.yml', j1FixtureWorkflow([
+      '          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-root-guards.mjs',
+    ]), new Map([['scripts/check-root-guards.mjs', "process.exit(0)\n"]]))
+    check(!existing.problems.some(message => message.includes('missing-script-carrier')),
+      '形态⑨自证（J1-1 反向对照）：表达式命令位后面是**仓内真实存在**的脚本时必须跟随，'
+        + '不许被判成"仓内不存在的路径"（收紧过度会变成误报工厂）：'
+        + ` 实际 problems=${JSON.stringify(existing.problems).slice(0, 400)}`)
+    const gitSubcommand = runFixture('.github/workflows/ci.yml', j1FixtureWorkflow([
+      '          "${{ steps.frozen-launchers.outputs.git }}" show HEAD:scripts/check-root-guards.mjs > "$probe"',
+    ]))
+    check(!gitSubcommand.problems.some(message => message.includes('missing-script-carrier')),
+      '形态⑨自证（J1-1 反向对照）：`git` 那一条表达式登记成 `scriptPositional: false` —— '
+        + '它后面第一位是**子命令**（`show`），把它当脚本位会让 `git show …` 假红：'
+        + ` 实际 problems=${JSON.stringify(gitSubcommand.problems).slice(0, 400)}`)
+    const rewritten = runFixture('.github/workflows/ci.yml', j1FixtureWorkflow([
+      '          printf "process.exit(0)\\n" > scripts/check-verdict-credential.mjs',
+      '          "${{ steps.frozen-launchers.outputs.node }}" scripts/check-verdict-credential.mjs --dir "$d"',
+    ]), new Map([['scripts/check-verdict-credential.mjs', 'process.exit(1)\n']]))
+    check(rewritten.problems.some(message => message.includes('运行期被改写过的')),
+      '形态⑨自证（J1-2）：表达式命令位执行**同一段文本里先写过的仓内路径**必须 fail-closed ——'
+        + ' 否则"写→执行"配对在表达式命令位之后同样整格消失：'
+        + ` 实际 problems=${JSON.stringify(rewritten.problems).slice(0, 400)}`)
   }
   // ---------------------------------------------------------------------
   // **R16-W 的命令位语义自证**（第十六轮：`temp/r16/A/REPORT.md` 的 18 种形态）

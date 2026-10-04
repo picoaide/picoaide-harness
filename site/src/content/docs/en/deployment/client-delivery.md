@@ -40,13 +40,13 @@ Manifest structure (example):
 {
   "schema": 1,
   "channel_id": "official",
-  "server": { "version": "2.7.0" },
+  "server": { "version": "<version>" },
   "client": {
-    "version": "2.7.0",
+    "version": "<version>",
     "assets": {
-      "win-x64":       { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-x64-Setup.exe", "sha256": "…", "size": 123456789 },
-      "mac-universal": { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-mac.dmg",        "sha256": "…", "size": 123456789 },
-      "linux-x64":     { "url": "https://ai.example.com/updates/client/PicoAide-Harness-2.7.0-x86_64.AppImage", "sha256": "…", "size": 123456789 }
+      "win-x64":       { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<version>-x64-Setup.exe", "sha256": "…", "size": 123456789 },
+      "mac-universal": { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<version>-mac.dmg",        "sha256": "…", "size": 123456789 },
+      "linux-x64":     { "url": "https://ai.example.com/updates/client/PicoAide-Harness-<version>-x86_64.AppImage", "sha256": "…", "size": 123456789 }
     }
   }
 }
@@ -79,7 +79,7 @@ The server derives "the absolute URL reachable by clients" in this priority orde
 When none of these is available, the manifest **deliberately refuses to emit** the `client` section and states the reason:
 
 ```json
-{ "schema": 1, "channel_id": "official", "server": { "version": "2.7.0" },
+{ "schema": 1, "channel_id": "official", "server": { "version": "<version>" },
   "client_unavailable": "server origin is not https; set PICOAI_PUBLIC_BASE_URL" }
 ```
 

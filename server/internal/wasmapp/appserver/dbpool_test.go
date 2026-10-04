@@ -717,23 +717,37 @@ func TestAppDBPool_PoisonedHandleIsRecycled(t *testing.T) {
 
 	// 笛卡尔积自杀查询：20^7 = 12.8 亿行，远超单语句 5 s 硬预算（limits.SQLStatementBudget）。
 	//
-	// ⚠️ 观察到的行为（跨模块事实，已写进交付说明）：`db.query` 的**宿主调用预算**
-	// 也是 5 s（limits.HostCallBudgetDefault），而它比语句预算早几微秒开始计时 ⇒
-	// 外层先到点，请求以 HOST_CALL_OVER_BUDGET(504) 被运行时收掉，应用拿不到
-	// appdb 的 DB_DENIED(statement_timeout)（"合法但很慢的查询"因此无法在应用侧优雅降级）。
-	// 本用例因此断言"请求被杀 + 句柄被回收 + 下一个请求正常"，而不是断言 DB_DENIED。
+	// ⚠️ 错误归属（跨模块事实，2026-10-02 由 S4-01/S4-02 修正）：`db.query` 的宿主调用
+	// 预算默认 10 s（`limits.HostCallBudgetDefault`）**严格大于**语句预算 5 s ⇒ 内层先到点，
+	// 应用拿到 appdb 的 **DB_DENIED(reason=statement_timeout)**，"合法但很慢的查询"因此能在
+	// 应用侧优雅降级。
+	//
+	// 旧行为（已修，勿写回）：两个预算都是 5 s ⇒ 父 ctx 与子 ctx 同一时刻到点，父 ctx 先被
+	// 观察到 ⇒ 请求以 HOST_CALL_OVER_BUDGET(504) 被运行时收掉，appdb 的语句超时分支**结构上
+	// 不可达**，作者按 DB_DENIED 的方向优化 SQL 却永远看不到那个码。
+	// 两道闸守着它：保存期的 `sql < host_call`（applimits.Validate）+ 宿主预算真的接线
+	// （appserver.requestBudgets）。本用例是运行期的那一条。
 	heavy := "SELECT count(*) FROM t a, t b, t c, t d, t e, t f, t g"
 	rec := e.get(appID, "/api/q?sql="+urlQueryEscape(heavy))
-	if rec.Code != http.StatusGatewayTimeout {
-		t.Fatalf("慢查询应被预算收掉（504），得到 %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("慢查询应由内层的语句预算收掉并回结构化错误（200 + 应用信封），得到 %d body=%s",
+			rec.Code, rec.Body.String())
 	}
-	code := errorCodeOf(t, rec.Body)
-	if code != "HOST_CALL_OVER_BUDGET" && code != "RUNTIME_TIMEOUT" {
-		t.Fatalf("应为宿主调用超预算或 guest 超时，得到 %q", code)
+	body := decodeJSON(t, rec.Body)
+	if body["ok"] != false {
+		t.Fatalf("慢查询不得被报成成功，得到 %v", body)
+	}
+	if code, _ := body["code"].(string); code != "DB_DENIED" {
+		t.Fatalf("错误归属必须是内层（DB_DENIED / statement_timeout），得到 %q（body=%s）",
+			code, rec.Body.String())
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "单语句硬预算") {
+		t.Fatalf("文案必须点明是语句预算到点（否则作者分不清语句超时与宿主超预算）：%q", msg)
 	}
 
-	// 关键断言：句柄已被回收（请求被杀时 appdb 来不及返回错误，池侧按"可能被放弃语句"
-	// 主动标脏；这也是 §11「每应用最多 1 个僵尸查询 ⇒ 有界」的落地点）。
+	// 关键断言：句柄已被回收（appdb 的语句超时会打污染标记，appDBConn.notePoison 据此把
+	// 句柄标脏 ⇒ release 时关闭并从池中移除；这也是 §11「每应用最多 1 个僵尸查询 ⇒ 有界」
+	// 的落地点）。
 	if e.srv.appdbs.lookup(appID) != nil {
 		t.Fatal("语句被放弃的请求结束后必须回收句柄（dirty ⇒ release 时关闭并从池中移除）")
 	}
@@ -750,6 +764,83 @@ func TestAppDBPool_PoisonedHandleIsRecycled(t *testing.T) {
 	if got, _ := body2["row_count"].(float64); int(got) != 1 {
 		t.Fatalf("COUNT(*) 应返回 1 行，得到 %v", body2["row_count"])
 	}
+}
+
+// TestServe_ConsoleHostCallBudgetReachesRuntime 是 S4-01 的**接线判据**：
+// 控制台 `host_call_budget_seconds` 的生效值必须真的成为运行时到点的那个数。
+//
+// 为什么必须单独立一条（而不是靠上面那条 DB_DENIED 用例）：把接线删掉之后，
+// `HostBudget()` 会回落到编译期常量（10 s），而 10 s 恰好也满足 `sql(5) < host_call`
+// ⇒ 上面那条用例照样绿。只有"控制台值 ≠ 编译期常量"才能把"有能力没接线"打出来。
+//
+// 构造（无 sleep、无墙钟依赖）：先用控制台把语句预算推到 20 s，再**打开**应用库句柄
+// （appdb 在 Open 时把预算固化进句柄 —— 文档语义是"下一个新建句柄生效"），然后把
+// 控制台改成 host_call=5 / sql=4。于是：
+//   - 内层（冻结的 20 s）不可能先到点；
+//   - 唯一能收掉这条 12.8 亿行查询的就是**外层宿主调用预算**，而它现在是控制台的 5 s；
+//   - 运行时把生效值写进错误消息（"宿主调用 db.query 超过预算 5s"），据此判定：
+//     该数字等于控制台值 ⇒ 接线生效；等于编译期常量（10 s）⇒ 没接线。
+//
+// 变异验证（实跑）：删掉 requestBudgets 里的 HostCallBudget 一行 ⇒ 本用例红
+// （消息里的数字变成编译期默认 10s）。
+func TestServe_ConsoleHostCallBudgetReachesRuntime(t *testing.T) {
+	e := newEnv(t)
+	appID := e.appID("hostbudget")
+	e.publishApp(appSpec{appID: appID, wasm: appBinary(t, "dbapp")})
+	// appdb 的语句预算是**包级**值（生产由控制台保存路径写）⇒ 用完复位，别影响同包其它用例。
+	t.Cleanup(func() { appdb.SetStatementBudget(0) })
+
+	// ① 控制台先保存一份"宽"组合，让**新开的句柄**固化一个远大于外层的语句预算。
+	frozen := e.srv.CurrentLimits()
+	frozen.SQLStatementBudgetSeconds = 20
+	frozen.HostCallBudgetSeconds = 30
+	if aerr := frozen.Validate(); aerr != nil {
+		t.Fatalf("前置组合必须合法：%v", aerr.Message)
+	}
+	e.srv.ApplyLimits(frozen)
+
+	// ② 打开句柄（此刻它固化的语句预算是 20 s）。
+	if rec := e.get(appID, "/define?table=t"); rec.Code != http.StatusOK {
+		t.Fatalf("建表应 200，得到 %d", rec.Code)
+	}
+	if rec := e.get(appID, "/seed?n=20"); rec.Code != http.StatusOK {
+		t.Fatalf("灌数据应 200，得到 %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// ③ 控制台再保存：host_call=5（≠ 编译期默认 10）、sql=4（> busy 3 且 < 5 ⇒ 合法）。
+	lim := e.srv.CurrentLimits()
+	lim.HostCallBudgetSeconds = 5
+	lim.SQLStatementBudgetSeconds = 4
+	if aerr := lim.Validate(); aerr != nil {
+		t.Fatalf("这组必须是控制台能保存的合法组合（否则本用例构造不出场景）：%v", aerr.Message)
+	}
+	e.srv.ApplyLimits(lim)
+	if got := e.srv.CurrentLimits().HostCallBudget(); got != 5*time.Second {
+		t.Fatalf("前置：控制台生效值应为 5s，得到 %s", got)
+	}
+
+	// ④ 重查询：内层是已开句柄冻结的 20 s，外层是控制台的 5 s ⇒ 外层先到点。
+	heavy := "SELECT count(*) FROM t a, t b, t c, t d, t e, t f, t g"
+	start := time.Now()
+	rec := e.get(appID, "/api/q?sql="+urlQueryEscape(heavy))
+	elapsed := time.Since(start)
+	// 信封只能解析一次（bytes.Buffer 会被解码消费）⇒ 先取文本再判。
+	bodyText := rec.Body.String()
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("宿主调用超预算应 504，得到 %d body=%s", rec.Code, bodyText)
+	}
+	if code := errorCodeOf(t, strings.NewReader(bodyText)); code != "HOST_CALL_OVER_BUDGET" {
+		t.Fatalf("应为 HOST_CALL_OVER_BUDGET（外层到点），得到 %q（body=%s）", code, bodyText)
+	}
+	env := decodeJSON(t, strings.NewReader(bodyText))
+	errObj, _ := env["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "超过预算 5s") {
+		t.Fatalf("生效的宿主调用预算必须来自控制台（5s），而消息是 %q —— "+
+			"不含 5s 说明运行时用的是编译期常量（接线没生效）", msg)
+	}
+	t.Logf("控制台 host_call=5s（编译期默认 %s）、句柄冻结 sql=20s：实测 %s 返回 %q",
+		limits.HostCallBudgetDefault, elapsed, msg)
 }
 
 // ===== 应用日志（logbuf → 平台日志出口）=====

@@ -23,10 +23,12 @@
 > `wasm_app_opens_daily` 日汇总)、0076 `usage.app_id`(应用维度归因)、
 > 0077 网关 Files API 归属台账 `gateway_files`、0078 台账容量字段与清理索引、
 > 0079 回收标记 `gateway_files.reaping_at`(2026-09-22)、0080 模型目录缺失标记
-> `models.catalog_missing`、0081 回收世代号 `gateway_files.reap_gen`(2026-09-23,fencing token)** —— 前三条(0073-0076)随
+> `models.catalog_missing`、0081 回收世代号 `gateway_files.reap_gen`(2026-09-23,fencing token)、
+> 0082 月报订阅的待补期号与失败退避(`report_subscriptions.pending_period`/`fail_streak`/`next_attempt_at`,2026-09-25)** —— 前三条(0073-0076)随
 > 2026-09-19「WASM 应用客户端专属」改造落地(应用子域/换票/匿名面/服务端 `ai.chat`
 > 同批删除,见 03-api-reference.md §11b),0077-0079 随 2026-09-22 网关文件直通、归属隔离与「按员工看占用 + 清理」落地
-> (见下 `gateway_files`),0081 随第四轮审计 R4-C-1 的回收器 fencing 落地
+> (见下 `gateway_files`),0080 随审计 G-02 的上游目录抖动保护落地,0081 随第四轮审计 R4-C-1 的回收器 fencing 落地,
+> 0082 随审计 R19A-S1-06/S1-07 的跨月丢期与失败退避修复落地
 > ——以 `migrations-pg/` 目录实际文件为准)。
 
 ### 迁移框架的已知边界:`schema_migrations` 没有校验和 + 已发布迁移被就地改写(认账,2026-09-23;事实补记与门禁判据 2026-09-26)

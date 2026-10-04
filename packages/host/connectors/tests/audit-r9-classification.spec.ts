@@ -14,7 +14,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-mcp-client', () => ({ apply: () => {} }))
 
@@ -23,6 +23,68 @@ import { connectorErrorCodeOf } from '../src/connector-error.ts'
 import { friendlyConnectorError } from '../src/client/friendly-error.ts'
 import { callRoute, createHarness } from './helpers/connector-harness.ts'
 import type { ConnectorDef } from '../src/types.ts'
+
+/**
+ * This suite observes connector outbound traffic through a `globalThis.fetch`
+ * stub — the shape it always had. Since the DNS-rebinding fix (2026-10-04) the
+ * production transport dials the policy's verified addresses itself
+ * (`src/pinned-http.ts`) instead of handing the URL to the global fetch, so the
+ * stub is installed as THAT transport's seam: the same observation, one level
+ * lower. Every policy gate still runs here — the mock replaces the connection,
+ * not the judgement — and the real transport is covered end to end by
+ * `tests/audit-1004-pinned-address.spec.ts`, which does not mock it.
+ */
+vi.mock('../src/pinned-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/pinned-http.ts')>()
+  return {
+    ...actual,
+    sendPinned: async (target: { url: URL }, init: RequestInit) => globalThis.fetch(target.url.href, init),
+  }
+})
+
+/**
+ * RESOLUTION seam (`node:dns/promises`) — the sibling of the connection seam
+ * above, and the same shape as `tests/oauth-outbound.spec.ts`.
+ *
+ * Every `*.example` name in this suite is judged by the outbound resolution
+ * gate, and the gate judges what the RUNNER's resolver answers. On a box behind
+ * a wildcard / fake-IP resolver (this repo's dev box answers `198.18.x` for any
+ * name) that is green; on a runner with an ordinary resolver — and for BOTH
+ * hops used here (`mcp.example` discovery, `as.example` metadata) — the name is
+ * `getaddrinfo ENOTFOUND`, and since C3-06 the gate is fail-closed
+ * (`OutboundResolutionUnverifiedError`). The suite therefore silently required
+ * the machine's DNS and went red only in CI (`Gate (tests + workspace build)`).
+ * Injecting the resolver removes that dependency. The answer is RFC 5737
+ * TEST-NET-2, which `buildResolvedNameBlockedList()` deliberately allows
+ * ("a NAME that resolves into them is a legitimate deployment shape").
+ */
+const dnsSeam = vi.hoisted(() => ({ resolutions: [] as string[], address: '198.51.100.9' }))
+
+vi.mock('node:dns/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns/promises')>()
+  return {
+    ...actual,
+    lookup: async (hostname: string, options?: { all?: boolean }) => {
+      dnsSeam.resolutions.push(String(hostname))
+      return options?.all === true
+        ? [{ address: dnsSeam.address, family: 4 }]
+        : { address: dnsSeam.address, family: 4 }
+    },
+  }
+})
+
+/**
+ * The seam must have been ASKED. Without this the injected resolver can rot
+ * into dead code and the suite quietly goes back to depending on the runner's
+ * DNS — green here, red in CI. Called from every case that reaches the gate.
+ */
+function expectResolverConsulted(): void {
+  expect(dnsSeam.resolutions.length).toBeGreaterThan(0)
+}
+
+/** Per-case accounting: the count above must describe THIS case, not the file. */
+beforeEach(() => { dnsSeam.resolutions.length = 0 })
+
 
 const realFetch = globalThis.fetch
 
@@ -95,6 +157,7 @@ it('a policy-blocked authorize/token endpoint published by discovery stays `unau
   expect(row.status).toBe('unauthorized')
   expect(row.errorCode).toBe('auth-required')
   expect(String(row.error)).toMatch(/169\.254\.169\.254|内网|链路本地|元数据/u)
+  expectResolverConsulted()
 }, 20_000)
 
 it('a server-side definition without fetchToken is a configuration error, not `unauthorized`', async () => {
@@ -271,6 +334,9 @@ it('a NETWORK failure at the token exchange stays an ordinary error', async () =
     const rendered = friendlyConnectorError(message, connectorErrorCodeOf(error))
     expect(rendered).not.toBe(message)
     expect(rendered).not.toMatch(/重新授权|authoriz/iu)
+    // Reaching "the token exchange really failed" requires the discovery hops
+    // to have resolved first, so the injected resolver must have been asked.
+    expectResolverConsulted()
   } finally {
     globalThis.fetch = realFetch
   }

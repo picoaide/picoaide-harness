@@ -104,8 +104,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
+  // `sync` 自己已经收口了两条**预期**失败（服务端不可达、迟到响应），所以走到下面
+  // 这个 `.catch` 的一律是**非预期**失败（会话载荷畸形、`pico/channel-changed` 的消费方
+  // 抛错、`ctx.emit` 自身失败）。此前是 `.catch(() => undefined)`：整份吞掉 ——
+  // 界面停在随包品牌，而日志里**一个字都没有**，现场只能靠"品牌没更新"猜
+  // （2026-10 审计 C2-2 的第二半）。这里与兄弟投影同档（`error-reporting` 的
+  // `reportFailure`、`bootstrap` 的 `ctx.logger.error`）：留下可检索的一行，
+  // 且 logger 不可用时静默 —— 错误出口绝不把异常抛回宿主。
+  const reportFailure = (cause: unknown): void => {
+    try {
+      ctx.logger?.error?.('channel-sync: session sync failed', cause)
+    } catch {
+      // logger 不可用（极端环境/已关闭 context）时静默:品牌同步失败不阻断主机。
+    }
+  }
+
   // subscribeSession 而不是裸 ctx.on：恢复型启动（重启后带着有效会话）下首个
   // 会话事件可能早于本插件 apply，裸订阅会整个漏掉它 —— 服务端驱动的渠道内容
   // （绝对化的 logo、改过的名称/主题色）要等到下次登录才生效（2026-09-10 实测：
   // 侧边栏品牌图裂着，重新登录就好了）。
-  subscribeSession(ctx, (session) => { void sync(session).catch(() => undefined) })}
+  subscribeSession(ctx, (session) => { void sync(session).catch(reportFailure) })}

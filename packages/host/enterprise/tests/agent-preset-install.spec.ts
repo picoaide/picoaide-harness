@@ -37,10 +37,13 @@ const COMPOSITION = `- id: persona
  *
  * 解析路径必须走**真正声明它的包**：persona 不是任何 bundle 的 row
  * （各 bundle 的 `cordis.patch.yml` 零命中），它只是 `@deepseek-ai/dsh`
- * 自己的依赖。0.1.6-alpha.2 起 `nmHoistingLimits: workspaces` 把它放在
- * `@deepseek-ai/dsh/node_modules/` 下而不是桌面包顶层，因此按桌面包解析会
- * "Cannot find module '@deepseek-ai/dsh-persona'"（2026-09-20 升级实测）。
- * 跟随依赖边解析，与提升布局无关。
+ * 自己的依赖。0.1.6-alpha.2 曾因 `nmHoistingLimits: workspaces`
+ * （`.yarnrc.yml`，**0.2.0-rc.2 复核仍在**）把它放在
+ * `@deepseek-ai/dsh/node_modules/` 下而不是桌面包顶层，于是按桌面包解析会
+ * "Cannot find module '@deepseek-ai/dsh-persona'"（2026-09-20 升级实测）；
+ * 0.2.0-rc.2 复核：它现在又落在**桌面包顶层**
+ * （`packages/host/desktop/node_modules/@deepseek-ai/dsh-persona`）——
+ * 正因为布局会来回变，这里**永远跟随依赖边解析**，与提升布局无关。
  * @returns the Config validator (throws when a row omits `prefix`).
  */
 async function loadPersonaConfig(): Promise<(input: Record<string, unknown>) => { prefix: string }> {

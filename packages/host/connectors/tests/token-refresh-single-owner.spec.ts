@@ -168,7 +168,7 @@ describe('SDK 的 tokens() 与我们的刷新共用一个单飞（不允许二�
     const refresher = new TokenRefresher({
       read: (id) => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
-      writeIfUnchanged: (id, expected, patch) => store.updateCredentialIfUnchanged(id, expected, patch),
+      writeIfUnchanged: (_scope, id, expected, patch) => store.updateCredentialIfUnchanged(id, expected, patch),
       scope: () => store.dir,
       target: () => target,
     })

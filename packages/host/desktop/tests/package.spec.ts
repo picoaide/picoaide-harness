@@ -78,7 +78,13 @@ describe('published package surface', () => {
    *   · Linux AppImage —— 顶层 `compression: "maximum"` ⇒ `mksquashfs -comp xz`；
    *     **不设时 `appImageUtil` 连 `-comp` 都不传，mksquashfs 缺省就是 gzip**。
    *   · macOS DMG —— `dmg-builder` 的 `format = maximum ? 'UDBZ' : 'UDZO'`（bzip2 vs zlib）。
-   *   · Windows NSIS —— 7z 的 `-mx` 对 7z 格式恒为 9（`archive.js`），故本项对 Windows 无影响。
+   *   · Windows NSIS —— **载荷是 zip 不是 7z**：我们的 `nsis.useZip: true` ⇒
+   *     `NsisTarget.js:78` 取 `format = "zip"`；`archive.js:67` 的分支判的正是 `format === "zip"`
+   *     ⇒ 缺省 `-mx=7`、`maximum` 时 `-mx=9`（并在 `:68-70` 追加 `-mfb=258 -mpass=15`）。
+   *     即**本项对 Windows 也有影响**（2026-10-04 FF-A 勘误：此处原写"7z 恒为 9、故对 Windows
+   *     无影响"，那是读了错的分支；口径与依据见 `docs/AUDIT-2026-09-23-FULL.md` §8.9.14 的勘误块）。
+   *     NSIS 的**内置**压缩器（`NsisTarget.js:260-269`）与 `maximum` 无关：只有 `store` 会
+   *     `SetCompress off`，其余档位一律 `SetCompressor zlib` + `COMPRESS auto`。
    *
    * 实测（v2.8.2-beta.2 的真实 AppDir，构建链同一个 mksquashfs、同一组参数）：
    * gzip 191,963,136 B → xz 164,229,120 B（**−26.5 MB / −14.4%**）。交付件实测
@@ -200,6 +206,9 @@ describe('published package surface', () => {
     const beginRun = main.indexOf('beginDesktopRun(')
     const childLogging = main.indexOf('installDesktopChildProcessLogging(app')
     const exitCoordinator = main.indexOf('createDesktopExitCoordinator(')
+    const shutdownCoordinator = main.indexOf('createDesktopShutdown(')
+    const schemeRegistration = main.indexOf('registerAppScheme(')
+    const runtimeConstruction = main.indexOf('new ElectronDesktopRuntime(')
     const ready = main.indexOf('await app.whenReady()')
     const markClean = main.indexOf('desktopRun?.markClean()')
     // 锚点必须**从 `createDesktopExitCoordinator(` 之后**取：main.ts 里还有一处
@@ -209,10 +218,40 @@ describe('published package surface', () => {
     // 顺带把代理收紧成"真的在 coordinator 的 exit 回调里"。
     const nativeExit = main.indexOf('app.exit(code)', exitCoordinator)
 
-    expect(startCrashReporter).toBeGreaterThanOrEqual(0)
+    expect(startCrashReporter, 'main.ts 必须保留崩溃上报器接线').toBeGreaterThanOrEqual(0)
+    expect(exitCoordinator, 'main.ts 必须保留退出协调器').toBeGreaterThanOrEqual(0)
+    expect(shutdownCoordinator, 'main.ts 必须保留关停协调器').toBeGreaterThanOrEqual(0)
+
+    // ① 崩溃证据链的顺序（崩溃上报器 → active-run 标记 → 子进程日志）不变。
     expect(beginRun).toBeGreaterThan(startCrashReporter)
     expect(childLogging).toBeGreaterThan(beginRun)
-    expect(exitCoordinator).toBeGreaterThan(childLogging)
+
+    // ② 致命窗口的构件必须**先于任何可能抛错的引导语句**就位（C1-02，2026-10-04）。
+    //
+    // 为什么这一条从 `exitCoordinator > childLogging` **反转**成 `<`：旧断言编码的是
+    // **改造前的偶然顺序** —— 两个协调器原本在装配段里构造、排在子进程日志之后。
+    // C1-02 修复的本意正相反：`start()` 的致命 `try` 上移到引导段之前后，catch 里的
+    // `nativeExit.requestRelaunch()` / `await shutdown.request(...)` 必须**永远有对象可用**，
+    // 所以两个协调器被有意提到 try **之前**（见 `src/main.ts` 的"致命窗口的构件"注释块，
+    // 结构判据在 `tests/fatal-boot.spec.ts`：语句区间 + 绑定解析）。保住"协调器排在
+    // 任何会抛错的引导语句之前"才是这条判据的真不变量。
+    // 谁能打坏它：把任一协调器挪回装配段（或挪进 try）⇒ 本用例红，同时
+    // `fatal-boot.spec.ts` 的"协调器必须在致命 try 之前"与白名单活性判据一起红。
+    for (const [label, at] of [
+      ['installDesktopChildProcessLogging(app', childLogging],
+      ['registerAppScheme(', schemeRegistration],
+      ['new ElectronDesktopRuntime(', runtimeConstruction],
+    ] as const) {
+      expect(at, `main.ts 必须保留 ${label}`).toBeGreaterThanOrEqual(0)
+      expect(exitCoordinator, `退出协调器必须先于 ${label} 就位（否则致命 catch 里没有对象可用）`)
+        .toBeLessThan(at)
+      expect(shutdownCoordinator, `关停协调器必须先于 ${label} 就位（否则致命 catch 里没有对象可用）`)
+        .toBeLessThan(at)
+    }
+    // 原意保留：协调器必须在 Electron ready 之前就位（ready 之后 `app.exit` 的语义不同）。
+    expect(exitCoordinator, '退出协调器必须先于 app.whenReady()').toBeLessThan(ready)
+    expect(shutdownCoordinator, '关停协调器必须先于 app.whenReady()').toBeLessThan(ready)
+
     expect(main.slice(exitCoordinator, nativeExit), 'coordinator 必须自带 exit 回调（在它之后、markClean 之前）')
       .toContain('exit: code =>')
     expect(markClean).toBeGreaterThan(nativeExit)

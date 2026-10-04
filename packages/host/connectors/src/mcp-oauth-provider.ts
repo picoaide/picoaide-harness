@@ -66,7 +66,7 @@ import {
 import { createMcpOutboundFetch } from './mcp-transport-fence.ts'
 import { DEFAULT_TOKEN_LIFETIME_MS, REFRESH_LEAD_MS } from './token-lifetime.ts'
 import { DEFAULT_HOST_LOCALE, hostT, type HostLocale } from './host-copy.ts'
-import type { ConnectorCredential } from './store.ts'
+import { credentialScopeKey, type ConnectorCredential } from './store.ts'
 
 /** Persist helper shape (the real one is `ConnectorStore.updateCredential`). */
 export type CredentialWriter = (id: string, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential>
@@ -181,7 +181,7 @@ export interface McpTransportAuthProvider extends AuthProvider {
    * renewed before the request leaves.
    */
   token: () => Promise<string | undefined>
-  /** The 401 hook: refresh through our per-id single flight, then retry once. */
+  /** The 401 hook: refresh through our per-(account, id) single flight, then retry once. */
   onUnauthorized: (ctx: UnauthorizedContextLike) => Promise<void>
   /**
    * The live token view, mirrored onto the transport-facing object.
@@ -333,7 +333,7 @@ export function createOAuthProvider(
      */
     ensureFresh?: (() => Promise<RefreshedTokens | null>) | undefined
     /**
-     * The **401** refresh: our per-id single flight, run in its FORCED form, and
+     * The **401** refresh: our per-(account, id) single flight, run in its FORCED form, and
      * classified.
      *
      * A 401 is the server saying "this access token is dead", which no clock can
@@ -556,7 +556,7 @@ export function createOAuthProvider(
   }
 
   /**
-   * 401 的唯一收口：先走**我们的** per-id 单飞（强制），再让传输层重试一次。
+   * 401 的唯一收口：先走**我们的** per-(账号, id) 单飞（强制），再让传输层重试一次。
    *
    * 为什么必须强制：401 是服务器侧的失效事实，本地 `expiresAt` 常常还在未来
    * （CI 那条回归就是服务端 `expireAccessTokens()` + 本地一小时后到期），看时钟
@@ -617,7 +617,7 @@ export function createOAuthProvider(
     },
     /**
      * 交出令牌前先确保新鲜 —— 判据与实现见 {@link readTokens}：快过期/已过期时
-     * 走同一个 per-id 单飞，SDK 拿到的永远是当前世代。
+     * 走同一个 per-(账号, id) 单飞，SDK 拿到的永远是当前世代。
      *
      * 未注入 `ensureFresh`（没有 OAuth target / 无刷新材料）时保持原语义。
      * @returns 该 provider 当前持有的令牌（刷新失败时仍是旧的，交给 SDK 走原来的
@@ -955,11 +955,14 @@ export async function refreshCredentialTokens(
     // passed, which would put this request outside every fence in the package: a
     // redirect from the token endpoint (or a URL the resource server names, if
     // discovery state were ever missing) would be followed with the refresh
-    // token in its body. Hand it the same fenced fetch the MCP transport uses.
+    // token in its body. Hand it the same fenced fetch the MCP transport uses —
+    // and deliberately WITHOUT a `base`: the wrapper then performs the request
+    // through the pinned transport, so the token POST cannot land on an address
+    // this package's resolution gate never saw (the global fetch would resolve
+    // the name a second time).
     const result = await auth(provider, {
       serverUrl,
       fetchFn: createMcpOutboundFetch({
-        base: (input, init) => globalThis.fetch(input, init),
         ownUrl: () => serverUrl,
         scope: provider,
         locale: () => locale,
@@ -1028,12 +1031,22 @@ interface InflightRefresh {
 }
 
 /**
- * Serialized refresh per connector id (single flight).
+ * Serialized refresh per **(account scope, connector id)**.
  *
  * Races are routine — the background sweep fires while a tool call hits 401,
  * or two MCP servers of one connector call at once. A second refresh would
  * waste a round trip or, with a rotating refresh token, invalidate the token
  * the first one just stored.
+ *
+ * The key carries the ACCOUNT SCOPE because the store this engine reads and
+ * writes is replaced on every session change while an in-flight run keeps
+ * going: keyed by the connector id alone, the NEW account's forced (401)
+ * refresh found the OLD account's run, chained onto it and took its outcome as
+ * its own — and when that run had not asked the authorization server at all
+ * the new account was told "satisfied" while its own credential was never
+ * renewed (2026-10-04 audit C3-05). Scope and id are joined by
+ * {@link credentialScopeKey}, the same constructor every other registry about
+ * "this account's credential" uses.
  */
 export class TokenRefresher {
   private readonly inflight = new Map<string, InflightRefresh>()
@@ -1045,30 +1058,51 @@ export class TokenRefresher {
       /**
        * Compare-and-update used for the refresh result when provided.
        *
-       * Receives the credential this refresh read at the start and returns null
-       * when the store no longer matches it (disconnect / interactive
-       * re-authorization / another user's store). A null result means the
-       * refresh MUST NOT publish its tokens: they are stale or belong to an
-       * authorization that no longer exists.
+       * Receives — beside the credential this refresh read at the start — the
+       * ACCOUNT SCOPE that read came from. The implementation must refuse the
+       * write (return null) when the store it would write to is not that scope:
+       * the closure used to resolve "the store" at write time, i.e. after the
+       * token endpoint round trip, so a session switch during that round trip
+       * pointed the compare at the NEXT account's file. When that file happened
+       * to be a field-for-field copy of the credential the refresh started from
+       * — which is what a provisioned/copied credential file IS, and what this
+       * repository's own `deadGrants` note calls a real scenario — the compare
+       * HIT and one account's tokens were published into the other's store
+       * (2026-10-04 audit C3-08).
+       *
+       * A null result means the refresh MUST NOT publish its tokens: they are
+       * stale or belong to an authorization that no longer exists.
        */
-      writeIfUnchanged?: ((id: string, expected: ConnectorCredential, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential | null>) | undefined
+      writeIfUnchanged?: ((scope: string, id: string, expected: ConnectorCredential, patch: Partial<ConnectorCredential>) => Promise<ConnectorCredential | null>) | undefined
       /**
-       * Account scope the read/write pair currently points at (e.g. the store's
-       * resolved directory). Captured when the refresh starts: a CAS miss on
-       * another scope means a user switch, which must stay a silent no-op.
+       * Account scope of the store the read/write pair currently points at
+       * (e.g. the store's resolved directory).
+       *
+       * Required, and called at three points that must agree: when the run is
+       * keyed (before any await — this is what the single-flight slot is keyed
+       * by), right after the credential read (so the credential and the scope it
+       * is accounted under come from ONE store), and when the result is about to
+       * be published (a session switch makes the result unreachable rather than
+       * merely cleared).
        */
-      scope?: (() => string) | undefined
+      scope: () => string
       target: (id: string) => OAuthTarget | null
       /**
        * Called after a refresh actually changed the stored credential.
        *
-       * The third argument is the credential as **persisted** (with the store's
+       * The first argument is the ACCOUNT SCOPE the refreshed credential belongs
+       * to; every consumer must key or filter by it, because the callback can
+       * run after the session moved on (the write already belongs to that
+       * account's own file, but the mirror into live transports must not reach
+       * the next account's — C3-04).
+       *
+       * The last argument is the credential as **persisted** (with the store's
        * `updatedAt`), so callers that mirror the refresh into live providers can
        * tell "my refresh is newer than the snapshot this provider was built
        * from" apart from "an interactive re-authorization has since replaced
        * it" without guessing from `expiresAt`.
        */
-      onRefreshed?: ((id: string, tokens: RefreshedTokens, persisted: ConnectorCredential) => void) | undefined
+      onRefreshed?: ((scope: string, id: string, tokens: RefreshedTokens, persisted: ConnectorCredential) => void) | undefined
       timeoutMs?: number | undefined
       /**
        * Locale of the failure text, resolved by the caller for the request that
@@ -1081,14 +1115,20 @@ export class TokenRefresher {
     },
   ) {}
 
-  isRefreshing(id: string): boolean {
-    return this.inflight.has(id)
+  /** Is a refresh of THIS account's credential in flight right now? */
+  isRefreshing(scope: string, id: string): boolean {
+    return this.inflight.has(credentialScopeKey(scope, id))
   }
 
   /** Refresh `id` unless it is already fresh; `force` skips the freshness check. */
   async refresh(id: string, options: { force?: boolean; locale?: HostLocale } = {}): Promise<RefreshOutcome> {
     const force = options.force === true
-    const existing = this.inflight.get(id)
+    // The scope is resolved ONCE, synchronously, before the key exists: the
+    // single-flight slot must be decided before any await, and it must be keyed
+    // by the same scope the run below will read and write under.
+    const scopeAtStart = this.deps.scope()
+    const key = credentialScopeKey(scopeAtStart, id)
+    const existing = this.inflight.get(key)
     // Reuse judgement: the in-flight run's FORCE LEVEL is part of it.
     //  - we are the clock path (`!force`): any run answers our question;
     //  - the in-flight run is forced (>= our strength): reuse it;
@@ -1099,24 +1139,30 @@ export class TokenRefresher {
     //    start a second refresh beside it either — that would present the same
     //    single-use refresh token twice (RFC 6749 §10.4) — we CHAIN: wait for
     //    it, then do the forced refresh.
+    //
+    // Only runs of THIS scope are reachable here (the key carries it): another
+    // account's in-flight run is not a candidate for reuse, so a 401 in the new
+    // session starts the new session's own refresh instead of being answered
+    // with the previous account's outcome (C3-05).
     if (existing !== undefined && (existing.force || !force)) return await existing.run
     // Resolved at CALL time, like the pre-chaining code: a language switch while
     // a chained forced run waits must not retranslate the failure text.
     const locale = options.locale ?? this.deps.locale?.() ?? DEFAULT_HOST_LOCALE
-    const entry = this.start(id, force, locale, existing)
+    const entry = this.start(scopeAtStart, id, force, locale, existing)
     // Installed synchronously right after the read, so a third caller cannot
     // slip a second run in beside this one.
-    this.inflight.set(id, entry)
+    this.inflight.set(key, entry)
     try {
       return await entry.run
     } finally {
-      if (this.inflight.get(id) === entry) this.inflight.delete(id)
+      if (this.inflight.get(key) === entry) this.inflight.delete(key)
     }
   }
 
   /**
    * Build the run for one `refresh` request, chaining behind `previous` when a
    * weaker run is already in flight (see `refresh` for the reuse judgement).
+   * @param scopeAtStart - account scope the run is keyed by and pinned to.
    * @param id - connector id.
    * @param force - the forced form.
    * @param locale - locale resolved by the triggering caller.
@@ -1124,6 +1170,7 @@ export class TokenRefresher {
    * @returns the entry to register (its `run` is already started).
    */
   private start(
+    scopeAtStart: string,
     id: string,
     force: boolean,
     locale: HostLocale,
@@ -1138,24 +1185,29 @@ export class TokenRefresher {
         // the forced request is satisfied by it.
         if (previous.beyondClock.value) return prior
       }
-      return await this.perform(id, force, locale, beyondClock)
+      return await this.perform(scopeAtStart, id, force, locale, beyondClock)
     })()
     return { force, beyondClock, run }
   }
 
   private async perform(
+    scopeAtStart: string,
     id: string,
     force: boolean,
     locale: HostLocale,
     beyondClock: { value: boolean },
   ): Promise<RefreshOutcome> {
     const credential = await this.deps.read(id)
+    // The credential and the scope it is accounted under must come from ONE
+    // store instance: a session switch landing between "the key was computed"
+    // and "the credential was read" makes this run's single-flight slot, its
+    // CAS and its publish describe an account whose credential it never read.
+    // Nothing is written and nothing is published in that case — the caller
+    // retries under whatever scope is current then.
+    if (this.deps.scope() !== scopeAtStart) {
+      return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
+    }
     if (!credential) return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
-    // Snapshot the account scope at the SAME point as the credential read; the
-    // CAS below must compare against the scope this refresh started on, not the
-    // one current at write time (capturing it next to the CAS made the
-    // cross-account branch unreachable — 2026-09-16 audit R3-B).
-    const scopeAtStart = this.deps.scope?.()
     if (!force && !tokenNeedsRefresh(credential)) {
       return {
         ok: true,
@@ -1196,7 +1248,11 @@ export class TokenRefresher {
     }
     let persisted: ConnectorCredential
     if (this.deps.writeIfUnchanged !== undefined) {
-      const cas = await this.deps.writeIfUnchanged(id, credential, patch)
+      // The scope travels with the credential into the CAS: the implementation
+      // refuses a store that is no longer the one this refresh read from, so a
+      // byte-identical copy in another account's directory can never satisfy it
+      // (C3-08).
+      const cas = await this.deps.writeIfUnchanged(scopeAtStart, id, credential, patch)
       if (cas === null) {
         // The credential moved underfoot while the refresh was on the wire.
         // Never publish the stale result; but distinguish the benign cases so
@@ -1206,7 +1262,7 @@ export class TokenRefresher {
         //  - a NEWER credential on the same account (interactive re-auth or an
         //    SDK self-heal won the write order): mirror THAT credential into the
         //    live providers instead of the one this refresh obtained.
-        if (this.deps.scope !== undefined && scopeAtStart !== this.deps.scope()) {
+        if (scopeAtStart !== this.deps.scope()) {
           return { ok: false, reason: 'not-applicable', message: hostT(locale, 'refresh.notConnected', { id }) }
         }
         const current = await this.deps.read(id)
@@ -1218,14 +1274,14 @@ export class TokenRefresher {
           ...(current.refreshToken === undefined ? {} : { refreshToken: current.refreshToken }),
           expiresAt: current.expiresAt ?? Date.now() + DEFAULT_TOKEN_LIFETIME_MS,
         }
-        this.deps.onRefreshed?.(id, tokens, current)
+        this.deps.onRefreshed?.(scopeAtStart, id, tokens, current)
         return { ok: true, tokens }
       }
       persisted = cas
     } else {
       persisted = await this.deps.write(id, patch)
     }
-    this.deps.onRefreshed?.(id, outcome.tokens, persisted)
+    this.deps.onRefreshed?.(scopeAtStart, id, outcome.tokens, persisted)
     return outcome
   }
 }

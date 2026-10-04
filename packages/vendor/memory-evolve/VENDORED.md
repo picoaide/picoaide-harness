@@ -116,7 +116,8 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 2026-09-16 新增 5 个：`state-corruption-failsoft`、`advisor-lazy-dirs`、`tool-param-contract`、
 `client-locale-follow`、`advisor-prompt-locale`、`i18n-dictionary-integrity`
 （**注**：§A.9 的 `skills-fault` 与本清单重复登记，历史上造成了"17 vs 18"的口径差）；
-2026-09-23 新增 1 个：`coi-skills-sync-source-gate`（见 §I）。
+2026-09-23 新增 1 个：`coi-skills-sync-source-gate`（见 §I）；
+2026-10-04 新增 1 个：`coi-lock-fourth-writer`（+ `tests/fixtures/{register-swap-window,fs-swap-window-hook,child-swap-window-writer}.mjs`，见 §J 的 C4-01 更新）。
 
 ### D. 2026-09-16 本地修复批（P1 启动级 + 参数契约 + i18n，全部带回归）
 
@@ -236,6 +237,10 @@ node <repo>/scripts/verify-inventories.mjs && node <repo>/scripts/verify-layout.
 
 ### J. per-name 锁的第三个写者收口（2026-09-25，R18B-03；**合并上游后必须逐项复核**）
 
+> **勘误（2026-10-04，C4-01 审计）**：下面这份清单**不是全部**写者 —— 本节只收口了
+> `lib/skills.js` 的三条活落点写入，实测另有 3 个写点写的是**同一个落点**却不取锁。
+> 完整清单与后续收口见本节末尾「C4-01 更新」。
+
 **缺陷**：`lib/skills.js` 的三条**活落点**写入此前完全不参与 per-name 锁协议
 （`<技能库>/.skill-locks/<name>.lock`；参与者只有能力中心安装器与 `lib/coi/skills-sync.js`
 的随包同步）：`skill_manage action=create` 的直写分支、`action=patch`、以及
@@ -265,6 +270,54 @@ patch 持锁拒且内容一字未改、`approvePendingSkill` 持锁拒且待确�
 `grep -c "skillmsg.locked" lib/i18n.js lib/skills.js`（i18n 1 处、skills.js 2 处）。
 上游若把 `acquireSkillDirLock` 改名/挪位，按本节同步（企业侧的锁常量对拍在
 `packages/host/enterprise/tests/skill-channel-parity.spec.ts`，改协议常量那边会先红）。
+
+### J-2. C4-01 更新（2026-10-04，审计回归 · **写者清单已不止三个**）
+
+**事实更正**：上一节说"三个写者已收口"，那是**当时**的收口范围，不等于写者全集。
+2026-10-04 的 C4-01 审计把 `<技能库>/<name>/SKILL.md` 的写者逐条列全（grep 落点拼接 +
+`rename`/`writeFile` 调用），实测**另有 3 个写点**完全不参与 per-name 协议，其中
+`lib/coi/index.js` 的 `svc.writeSkill` 与随包技能**同名**（内置适配器的 `skillName` 默认
+就是 `BUILTIN_SKILLS` 里的名字）⇒ 它能落进 `syncSkillDirSafe` 的两处 `rename` 之间把落点
+重新建出来，终态是**换入与回滚双双 ENOTEMPTY**（`SKILL_SWAP_RECOVERY_FAILED`）+
+下一次开机的 `sweepStaleSwapDirs` 把 `.old-*`/`.staging-*` 一起清掉 ⇒ 旧内容不可找回 +
+该随包技能永久 `refused`/`SKILL_LOCAL_CONTENT`。
+
+**落点写者全表（收口后）**：写者 = **同一个落点** `<技能库>/<name>/SKILL.md`（或该目录的
+整目录换入）；锁 = `<技能库>/.skill-locks/<name>.lock`，协议实现唯一一份
+（`lib/coi/skills-sync.js` 的 `acquireSkillDirLock`）。
+
+| # | 写者 | 落点形态 | 取锁 | 判据 |
+|---|---|---|---|---|
+| 1 | `lib/skills.js` `commitSkillWrite`（skill_manage create/patch 直写） | SKILL.md | 有（R18B-03） | `tests/skills-landing-lock.test.js` |
+| 2 | `lib/skills.js` `approvePendingSkillLocked`（采纳：rename/跨卷逐文件拷贝） | 整目录 | 有（R18B-03） | 同上 |
+| 3 | `lib/coi/skills-sync.js` `syncSkillDirSafe`（随包同步换入） | 整目录 | 有（锁的持有者） | `tests/coi-skills-sync-name-lock.test.js` |
+| 4 | `lib/coi/index.js` `svc.writeSkill`（COI 适配器「AI 使用指南」编辑器） | SKILL.md | **本轮新增** | `tests/coi-lock-fourth-writer.test.js`（交错 + 换入窗口复演） |
+| 5 | `lib/coi/api.js` `POST /coi/adapters` 的"文件不存在就自动建" | SKILL.md | **本轮新增** | 同上 |
+| 6 | `lib/skills-manager.js` `applyDisableFlagToFile`（面板开关 + 自动投影 `projectDisableFlags`） | SKILL.md | **本轮新增** | 同上 |
+| 7 | `lib/skills-manager.js` `PUT /skills-manager/api/write`（面板「编辑 → 保存」） | 技能目录内任意文件 | **本轮新增**（审计报告漏列，本轮补） | 同上 |
+
+**口径（不许走样）**：① 所有写者用**同一把**锁、**同一份**协议实现，不得新造第二套；
+② 拿不到锁一律 **fail-loud 零等待**（COI 两项回落 `{ok:false, message}`/
+`skillMessage=失败`，面板禁用回落 500 + 原因，`PUT /api/write` 回落 403），绝不无锁写入；
+③ 锁名 = 落点目录名、锁根 = 技能库根（`basename(dirname(file))` / `dirname(dirname(file))`），
+与 `skills-sync` 的 `basename(destDir)` 同一口径；④ `create` 的**待确认队列**分支
+（`<memoryDir>/pending-skills/`）依旧不取锁 —— 那不是活落点。
+
+**判据**：`tests/coi-lock-fourth-writer.test.js`（9 例）= 4 条交错用例（持锁 ⇒ 拒 + 释放 ⇒ 成功
+的**对照腿**）+ 换入窗口复演（真同步器 + loader hook 在"旧目录旁置之后、暂存目录就位之前"
+调用真写者）+ 1 条 `raw` **阳性对照**（同窗口不取锁 ⇒ 必须复现双 ENOTEMPTY 与"旧内容不可
+找回"，证明判据在本环境咬得到）+ 3 条清单前向网（写者面双向登记、登记项必须带真实用例、
+扫描器自检）。**回退即红**（2026-10-04 实测，脚本
+`temp/audit-v282/evidence/C4-01-lock/mutate.sh`）：删掉 `svc.writeSkill` 的取锁 ⇒ 2 红
+（交错 + 窗口复演）；把禁用落地的锁名改成第二套 ⇒ 1 红；删掉 `PUT /api/write` 的取锁 ⇒ 1 红。
+每一次变异前后 sha256 已复算一致。
+
+**合并上游后自查**：`grep -rn "acquireSkillDirLock" lib/`（排除 `lib/client.js`）应命中
+**11 行 = 1 处定义 + 3 处 import + 7 处取锁调用**（`coi/skills-sync.js` 定义与同步器各 1、
+`skills.js` 2（`approvePendingSkill` 与 `withSkillDirLock`）、`coi/index.js` 1、
+`coi/api.js` 1、`skills-manager.js` 2）；跑
+`node scripts/run-tests.mjs tests/coi-lock-fourth-writer.test.js` —— 其中的"落点写者面双向登记"
+用例会把"新写者没接线"直接判红（上游若新增写技能内容的模块，这条会先响）。
 
 ## 本次升级（`b4994fa` → `c337dc1a`）拿到了什么
 

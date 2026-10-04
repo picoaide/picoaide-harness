@@ -1038,7 +1038,7 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
   })
 
   /* ---------------------------------------------------------------- *
-   * 缺陷 #7：胶囊态（172×34）的失败 toast 必须真的看得见
+   * 缺陷 #7：胶囊态的失败 toast 必须真的看得见（胶囊视图远小于 toast）
    * ---------------------------------------------------------------- */
 
   describe('胶囊态失败提示（缺陷 #7）', () => {
@@ -1055,7 +1055,7 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
       expect(notices(page)).toEqual([])
 
       // 用户持控制权时点「交给 AI」失败 —— 现场症状：按钮文字闪回、零提示
-      // （#otoast 是 position:fixed 的页面级提示，胶囊视图只有 172×34 ⇒ 只剩
+      // （#otoast 是 position:fixed 的页面级提示，胶囊视图装不下它 ⇒ 只剩
       // 顶部一条还压在胶囊上）。
       page.fire(page.$('ai-take'), 'click')
       await page.settle()
@@ -1132,6 +1132,52 @@ describe('浏览器本地页面：失败必须可见、状态必须真实（2026
       page.fire(page.$('ai-take'), 'click')
       await page.settle()
       expect(notices(page)).toEqual([{ visible: true }, { visible: true }])
+    })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 2026-10-04 P1：交权之后，窗口里那唯一一块可点的东西必须说清
+   * "控制权在你手里 + 点这里交还"（几何与 CSS 对齐见
+   * audit-1004-handback-visibility.spec.ts；这里钉的是**渲染出来的可见结果**）
+   * ---------------------------------------------------------------- */
+
+  describe('用户持控制权时的胶囊（P1 交还入口可见性）', () => {
+    it('可见文案 = 状态 + 动作：标签「控制权在你手里」、按钮「交给 AI」、tooltip 指向这个按钮', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        return undefined
+      })
+      await page.settle()
+
+      // 胶囊 surface 是这一状态下**唯一**可见的面（宿主把非受控态强制成 mask）。
+      expect(page.doc.body.dataset.mode).toBe('capsule')
+      expect(page.$('ai-label').textContent).toBe('控制权在你手里')
+      const button = page.$('ai-take')
+      expect(button.textContent).toBe('交给 AI')
+      // tooltip 必须说清"点这里交还"（不是只重复按钮名）。
+      expect(button.title).toContain('点这里交还给 AI')
+      expect(button.title).toContain('控制权在你手里')
+    })
+
+    it('点这个按钮仍然只走一次写面（同一个按钮双向切换，没有第二个入口）', async () => {
+      const page = openOverlay((call) => {
+        if (call.path === 'state') return { json: overlayState({ controlled: true }) }
+        if (call.path === 'ops') return { json: { ops: [] } }
+        if (call.path === 'takeover') return { json: { ok: true } }
+        return undefined
+      })
+      await page.settle()
+
+      page.fire(page.$('ai-take'), 'click')
+      await page.settle()
+      expect(page.calls.filter((c) => c.path === 'takeover')).toEqual([
+        expect.objectContaining({ method: 'POST', body: { active: false } }),
+      ])
+      // 蒙版空白处（#mask 本体）没有任何接管/交还绑定。
+      page.fire(page.$('mask'), 'click')
+      await page.settle()
+      expect(page.calls.filter((c) => c.path === 'takeover')).toHaveLength(1)
     })
   })
 })

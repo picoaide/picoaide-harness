@@ -9,11 +9,13 @@
  *  ② `isRestored() === true` ⇒ 立刻补发一次（错过的那次）；
  *  ③ `isRestored() === false` ⇒ **不**补发（那次 emit 还没发生，订阅已就位）；
  *  ④ 服务缺席 / 缺 `isRestored` ⇒ 补发一次"未登录"（消费方必须知道现在没有会话，
- *     而不是永远等一个不会来的事件）；
+ *     而不是永远等一个不会来的事件），且哨兵是 **`null`** —— 与事件通道同一个值
+ *     （C2-2：此前补发投 `undefined`，消费方只判 `=== null` 时会当成"已登录"）；
  *  ⑤ `probe` 覆盖（wasm-apps-host 的归一化读取）生效：补发的值取自它，而不是 `ctx.get`。
  *
  * 变异：把 `if (service?.isRestored === undefined || service.isRestored())` 改成恒真
- * （去掉判据）⇒ ③ 红；把订阅挪到补发之后 ⇒ ① 红。
+ * （去掉判据）⇒ ③ 红；把订阅挪到补发之后 ⇒ ① 红；把 `?? null` 去掉（补发投
+ * `undefined`）⇒ ④ 的三条与「两条通道同一个哨兵」红。
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -90,10 +92,34 @@ describe('pico/session-changed 订阅契约（宿主侧唯一实现）', () => {
   it('服务缺席 / 缺 isRestored ⇒ 补发一次"未登录"，而不是永远等事件', () => {
     const absent: unknown[] = []
     subscribeSessionChanges(contextOf(undefined), (session) => { absent.push(session) })
-    expect(absent).toEqual([undefined])
+    // C2-2：哨兵只有一个 —— `null`。此前这里投的是 `undefined`，而事件通道
+    // （`SessionService` 的 `pico/session-changed`）一直投 `null` ⇒ 同一个订阅按
+    // **到达方式**给出两种"没有会话"，而消费方（enterprise 三处）只判 `=== null`。
+    expect(absent, '未登录哨兵必须是 null，不是 undefined').toEqual([null])
+    expect(absent[0]).not.toBeUndefined()
     const partial: unknown[] = []
     subscribeSessionChanges(contextOf({ getSession: () => ({ username: 'x' }) }), (session) => { partial.push(session) })
     expect(partial).toEqual([{ username: 'x' }])
+  })
+
+  it('`getSession` 自身返回 undefined（防御档）也归一到 null', () => {
+    const seen: unknown[] = []
+    subscribeSessionChanges(contextOf({ isRestored: () => true, getSession: () => undefined }), (session) => { seen.push(session) })
+    expect(seen).toEqual([null])
+  })
+
+  it('两条投递通道给出同一个哨兵：事件 null 与补发 null 不可区分', () => {
+    // 判别力就在这里：把补发那一侧改回 `undefined`，下面第一条断言立刻红 ——
+    // 消费方无法只判 `=== null`（这正是 C2-2 的现场）。
+    const replayed: unknown[] = []
+    subscribeSessionChanges(contextOf({ isRestored: () => true, getSession: () => null }), (session) => { replayed.push(session) })
+    const ctx = contextOf({ isRestored: () => false })
+    const delivered: unknown[] = []
+    subscribeSessionChanges(ctx, (session) => { delivered.push(session) })
+    ctx.emit(null)
+    expect(replayed).toEqual([null])
+    expect(delivered).toEqual([null])
+    expect(replayed[0]).toStrictEqual(delivered[0])
   })
 
   it('probe 覆盖生效：补发的值取自它（wasm-apps-host 的归一化读取）', () => {

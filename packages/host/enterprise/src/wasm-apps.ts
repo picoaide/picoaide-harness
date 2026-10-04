@@ -129,8 +129,36 @@ export const UPLOAD_CHUNK_MIN_BYTES = 64 * 1024
  * 取值 = {@link CLIENT_UPLOAD_TIMEOUT_MS}：分片不是"更大包的额外额度"，它只是
  * 把同一个 90 s 预算分摊到多跳上；工具预算仍严格大于它（120 s > 90 s），
  * 所以先到点的永远是这里，模型拿到的是可续传的结构化错误。
+ *
+ * ⚠️ 正因为它是**整条链共用**的额度，"每一跳的客户端剩余额度"就各不相同
+ * （`90 s − 已用`），而平台侧为 `publish`/`validate`/`complete` 每一跳**各自**开一份
+ * `PublishTotalBudget`（75 s）。链上任何一跳的序关系都必须是
+ * 「平台侧在这一跳的预算 < 客户端在这一跳的剩余额度」，否则平台允许的结论时刻落在
+ * 客户端放弃之后 ⇒ 员工/AI 只看到笼统的网关错误（审计 FW-2 的形态）。
+ * 最后一跳（`complete`）靠 {@link CLIENT_BUDGET_HEADER} 把剩余额度告诉平台来闭合。
  */
 export const CHUNKED_PUBLISH_BUDGET_MS = CLIENT_UPLOAD_TIMEOUT_MS
+
+/**
+ * 客户端在**分片链最后一跳**（`.../uploads/:id/complete`）声明的"我还会等多少毫秒"
+ * —— 跨端契约，服务端真源 = `server/internal/wasmapp/api/publish.go` 的
+ * `ClientBudgetHeader`（两侧字面量由 `tests/wasm-apps.spec.ts` 的一条**读 Go 源码**的
+ * 对拍用例钉住：缺任一侧即失败，不静默跳过）。
+ *
+ * 为什么必须有它（审计 FW-2）：{@link CHUNKED_PUBLISH_BUDGET_MS} 是**整条链**共用的
+ * 90 s，上传阶段花掉 >15 s 之后，`complete` 这一跳客户端只剩 `90 s − 已用 < 75 s`，
+ * 而平台原先为这一跳**新开**一份 `PublishTotalBudget`（75 s）⇒ 平台允许的结论时刻
+ * 落在客户端放弃之后：员工/AI 拿到笼统网关错误，平台其实正准备返回带
+ * `code`/`hints` 的结构化错误（正是 S4-06/CTRL-01 要消灭的形态，只是搬到了分片路径）。
+ *
+ * 服务端读到它之后把这一跳的平台侧总预算缩到
+ * `min(PublishTotalBudget, 该值 − PublishTransferReserve)`，**只许缩小、永不放大**；
+ * 缺省/非法/越界一律回落到 `PublishTotalBudget`（老客户端因此行为不变）。
+ *
+ * 值必须**逐字**等于这一跳真正会等的毫秒数（就是传给 {@link gatewayRequest} 的那个数）：
+ * 声明得比实际等待大，等于让平台按一个客户端不会等待的额度安排工作 —— 序关系又断了。
+ */
+export const CLIENT_BUDGET_HEADER = 'X-Pico-Client-Budget-Ms'
 
 /**
  * 单片 PUT 的失败是否**可重试**（P2-8 的唯一判据，独立成函数以便单测钉住）。
@@ -1156,6 +1184,70 @@ async function publishChunked(
   }
 
   /**
+   * **可续传失败信封的唯一构造点**（审计 P7：`UPLOAD_INCOMPLETE` 的两个出口共用它）。
+   *
+   * 为什么必须收敛成一处：会话一开、`upload_id` 就在手里，此后**任何**传输层失败的正确
+   * 结论都是同一句话 —— "带同一个 upload_id 重发"。此前只有分片段这么说，而 `complete`
+   * 那一跳（分片**全部**已在服务端、只剩最后一步）走的是通用 `gatewayFailure`，信封里
+   * 没有 `upload_id` ⇒ 模型/AI 拿不到续传把手，只能整条重传几百 MB（审计 FW-2 的客户端
+   * 残余）。两处各写一份 = 迟早再漂一次，所以形状只在这里定义。
+   *
+   * 两个 stage 的差别只有"已收到几片"这句与续传提示：
+   *   - `chunks`：还缺片，重发会补缺失片；
+   *   - `complete`：片齐了，重发只会重跑最后一跳（**不会**重传分片）。
+   *
+   * 传输层的原网关码（`GATEWAY_TIMEOUT` / `GATEWAY_UNAVAILABLE`）**不丢**，经
+   * `details.transport_code` / `transport_message` 原样带出去 —— 外层码统一成可续传，
+   * 但"这是传输失败而不是服务端拒了某一跳"这条分类必须仍然可读（@see gatewayFailure）。
+   * @param stage - 失败发生在哪一段：`chunks` = 分片 PUT/刷新；`complete` = 最后一跳。
+   * @param transport - 传输失败信封（`gatewayFailure` 的产物）；`null` = 只有服务端业务错误。
+   * @param upstream - 服务端的业务错误原文（status + text）；`null` = 这一跳没走到服务端。
+   * @returns 可续传信封（带 `details.upload_id`）。
+   */
+  const uploadIncomplete = (
+    stage: 'chunks' | 'complete',
+    transport: WasmResponse | null,
+    upstream: { status: number, text: string } | null,
+  ): WasmResponse => {
+    const hop = transport === null ? null : errorEnvelopeOf(transport)
+    const got = [...received].sort((a, b) => a - b)
+    const last = stage === 'complete'
+    return wasmError({
+      code: 'UPLOAD_INCOMPLETE',
+      message: hostCopy(
+        locale,
+        last
+          ? `分片已全部收到（${String(got.length)}/${String(slices.length)}），最后一跳 complete 未完成`
+          : `分片上传未完成（已收到 ${String(got.length)}/${String(slices.length)} 片）`,
+        last
+          ? `all ${String(slices.length)} chunks received, but the final complete hop did not finish`
+          : `chunked upload incomplete (${String(got.length)}/${String(slices.length)} chunks received)`,
+      ),
+      // 状态码逐字沿用旧行为：传输失败用网关信封自己的 502，确定性失败用服务端的状态码。
+      status: transport?.status ?? upstream?.status ?? 502,
+      details: {
+        // 续传的唯一凭据：**任何一个** stage 都必须有它（判据在
+        // server/internal/wasmapp/api/publish_complete_client_transport_test.go）。
+        upload_id: uploadId,
+        stage,
+        received: got,
+        chunks: slices.length,
+        upstream: upstream?.text ?? null,
+        ...(hop === null ? {} : { transport_code: hop.code, transport_message: hop.message }),
+      },
+      hints: [
+        last
+          ? '带同一个 upload_id 重发 publish：分片都已收到，只会重跑最后一跳 complete（不会重传分片；会话 TTL 内有效）'
+          : '带同一个 upload_id 重发 publish：续传只会补缺失片（会话 TTL 内有效）',
+        ...(hop === null
+          ? []
+          : [`这一跳是传输失败（${hop.code}）：网络恢复后用**同一个** upload_id 重发即可，不要重开会话`]),
+        'upstream 字段是服务端的原话（含它自己的 code/hints）',
+      ],
+    })
+  }
+
+  /**
    * 刷新已收片。
    *
    * 三态而不是"信封或 null"（独立验证 2026-09-18 P2-1）：
@@ -1318,32 +1410,14 @@ async function publishChunked(
     // 传输层失败的**业务 code**（`GATEWAY_TIMEOUT` / `GATEWAY_UNAVAILABLE`）原样
     // 带进 details：模型据此区分"网络/超时"与"服务端拒了某一片"，但结论都是
     // 同一句可执行的话 —— 带同一个 upload_id 重发。
-    const transport = transportFailure === null ? null : errorEnvelopeOf(transportFailure)
-    return wasmError({
-      code: 'UPLOAD_INCOMPLETE',
-      message: hostCopy(
-        locale,
-        `分片上传未完成（已收到 ${String(received.size)}/${String(slices.length)} 片）`,
-        `chunked upload incomplete (${String(received.size)}/${String(slices.length)} chunks received)`,
-      ),
-      status: transportFailure?.status ?? error?.status ?? 502,
-      details: {
-        upload_id: uploadId,
-        received: [...received].sort((a, b) => a - b),
-        chunks: slices.length,
-        upstream: error?.text ?? null,
-        ...(transport === null ? {} : { transport_code: transport.code, transport_message: transport.message }),
-      },
-      hints: [
-        '带同一个 upload_id 重发 publish：续传只会补缺失片（会话 TTL 内有效）',
-        ...(transport === null
-          ? []
-          : [`这一跳是传输失败（${transport.code}）：网络恢复后用**同一个** upload_id 重发即可，不要重开会话`]),
-        'upstream 字段是服务端的原话（含它自己的 code/hints）',
-      ],
-    })
+    return uploadIncomplete('chunks', transportFailure, error)
   }
 
+  // `complete` 是分片链的**最后一跳**，也是唯一在服务端真编译的一跳（平台侧为它开一份
+  // `PublishTotalBudget`）。把本跳**真正会等**的毫秒数（= 下面传给 `gatewayRequest` 的
+  // 同一个值）作为 {@link CLIENT_BUDGET_HEADER} 声明出去：平台据此把这一跳的总预算缩到
+  // `min(PublishTotalBudget, 本值 − 传输余量)`，保证结论落在客户端放弃之前（审计 FW-2）。
+  const completeBudget = perCallBudget()
   let upstream: Response
   try {
     upstream = await gatewayRequest(session, `${base}/${encodeURIComponent(uploadId)}/complete`, {
@@ -1352,10 +1426,19 @@ async function publishChunked(
       // `uploadPayload` + :381-401 的 checkCompletePayload）：`app_id`/`version`
       // 在开会话时已经定死、从**会话元数据**取；带上它们只多一个可能与元数据
       // 不一致的自由度（带 `wasm_base64` 则直接被拒）。因此这里**只**发这三个字段。
+      headers: { [CLIENT_BUDGET_HEADER]: String(completeBudget) },
       body: jsonBody(completeManifestOf(input)),
-    }, perCallBudget(), input.signal)
+    }, completeBudget, input.signal)
   } catch (cause) {
-    return gatewayFailure(cause)
+    // 传输层失败（真断网 / 极端抖动，含本跳出站计时器到点）：**分片已经全部在服务端**、
+    // 会话还在 TTL 内，所以这一跳与分片段是同一类结论 —— 带同一个 upload_id 重发，
+    // 只重跑最后一步、一个分片都不重传（P7 之前这里回 `gatewayFailure(cause)`：
+    // 信封里没有 `upload_id`，用户侧表现就是"白传一遍几百 MB"）。
+    //
+    // `gatewayFailure` 本身**不动**（它仍是所有"没开会话就断"的通用出口，
+    // 函数体里也不该长出 `upload_id`）：它的超时/不可用分类经 `transport_code`
+    // 原样带进下面这个可续传信封。
+    return uploadIncomplete('complete', gatewayFailure(cause), null)
   }
   return await forwardAuthAware(ctx, upstream, session)
 }

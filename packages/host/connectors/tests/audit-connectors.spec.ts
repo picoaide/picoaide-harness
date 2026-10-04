@@ -258,6 +258,7 @@ describe('audit: concurrent credential writes', () => {
     const refresher = new TokenRefresher({
       read: id => store.readCredential(id),
       write: (id, patch) => store.updateCredential(id, patch),
+      scope: () => store.dir,
       target: () => ({ discoveryUrl: `${server.origin}/mcp`, resourceUrl: `${server.origin}/mcp` }),
     })
     // two independent writers race: the refresher and a provider-style save

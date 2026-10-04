@@ -804,6 +804,13 @@ function main(argv) {
         stdout: result.stdout ?? '',
         stderr: result.stderr ?? '',
         canaryRan: readFileSync(canaryLog, 'utf8').trim() !== '',
+        // **R26 FIX-J1-1②**：这一次跑**真的跑到了哪些仓内执行体**（金丝雀日志逐行
+        // `CANARY <路径>`，只统计**金丝雀仓内**的那些 —— `git show HEAD:<路径> > $probe`
+        // 之后跑的是 `$RUNNER_TEMP` 下的副本，那条日志不属于仓内路径）。
+        canaryTokens: new Set(readFileSync(canaryLog, 'utf8').split('\n')
+          .map(line => line.replace(/^CANARY\s+/u, '').trim())
+          .filter(line => line.startsWith(`${canaryDir}/`))
+          .map(line => line.slice(canaryDir.length + 1).replace(/^\.\//u, ''))),
         fakeUsed: existsSync(marker),
       }
     }
@@ -847,6 +854,51 @@ function main(argv) {
         failures.push(`${label} **冻结 PATH 没有生效**：仓内执行体里的裸 \`node\` 命中了被注入的假 `
           + `\`node\`（标记文件 ${join(scratch, `fake-green-${index}`)} 存在）\n`
           + '      ⇒ 这正是 R13-D-02 的载荷形态：一行 `echo … >> $GITHUB_PATH` 就能把判据换成攻击者的。')
+        return
+      }
+      // ②b **不许多跑步体没点名的仓内执行体**（R26 FIX-J1-1②，反驳代理的加固，取**可落地**的形态）。
+      //
+      // 修前这一格只问"有没有跑到过**任意**一个仓内执行体" ⇒ 载荷只要**先真跑一次**步体点名的
+      // 那个执行体，哪怕之后再接一段不透明载荷（反驳代理实测的三条守卫全绿形态：先跑
+      // `scripts/check-doc-claims.mjs`，再解码执行 base64 载荷），`canaryRan` 就为真、这一格给绿灯。
+      //
+      // **为什么不是"步体点名的 token 都必须跑到"**（反驳代理的原建议）：本仓 5 个判据步用
+      // `git show HEAD:scripts/check-install-integrity.mjs > "$probe"` 把判据体**取到临时目录再跑**
+      // —— 那个 token 出现在步体里但**不会按路径被执行**（跑的是 `$RUNNER_TEMP` 下的副本）。
+      // 实测"全部 token 都要跑到"会在这 5 步上假红（本文件的 `--root` 实跑：5 项未通过，
+      // 全部指向 `scripts/check-install-integrity.mjs`）。判据不许假红 ⇒ 换成**包含方向**：
+      // 跑到的仓内执行体必须**都在步体点名的 token 集合里**（跑到了没点名的东西 = 步体在执行
+      // 它没写的代码，正是"不透明载荷"的形态）。日志里只统计**仓内路径**的调用
+      // （`git show HEAD:<路径> > $probe` 之后跑的是临时目录里的副本，不在这个集合里）。
+      const referenced = new Set(repoPathTokens(step.run))
+      const extraTokens = [...green.canaryTokens].filter(token => !referenced.has(token))
+      if (extraTokens.length > 0) {
+        failures.push(`${label} 在金丝雀仓里跑到了**步体没有点名**的仓内执行体：`
+          + `${extraTokens.map(token => `\`${token}\``).join('、')}\n`
+          + `      步体点名的 token（${referenced.size} 个）：${[...referenced].map(token => `\`${token}\``).join('、') || '(无)'}\n`
+          + '  ⇒ 金丝雀仓里只有步体点名的路径被铺成桩 —— 跑到别的东西说明这一步执行了**它没写出来的代码**'
+          + '（运行期生成 / 解码出来的不透明载荷）。修前这一格只看"有没有跑到过任意一个执行体"，'
+          + '载荷先真跑一次点名脚本就能拿到绿灯。')
+        return
+      }
+      // ②c **不许在仓内撞上"这个路径不存在"**（同一条加固的另一半，127 = command/file not found）。
+      //
+      // 为什么需要它：金丝雀仓里只有"步体点名的那几个路径"被铺成桩，**其它任何仓内路径都不存在**
+      // —— 于是"运行期生成 / 解码出来的不透明载荷"在仓里跑必然撞上 `bash: …: No such file or
+      // directory`（**EXIT=127**），而修前这一格**完全不看退出码** ⇒ 载荷只要先真跑一次步体点名的
+      // 执行体就能拿到绿灯（反驳代理实测：`check-frozen-launchers` 对该形态 EXIT=0）。
+      //
+      // **为什么只判 127、不判"必须 exit 0"**（这条边界是实测出来的，不许放宽也不许收紧）：
+      // 判据步体在金丝雀仓里**本来就可能以 1 退出** —— 桩不产生真的通过凭据，步骤自己的断言块
+      // 会打印 `::error::本步的通过凭据不是恰好一行(实际 0 行)` 并 `exit 1`。实测"必须 exit 0"
+      // 会在这 5 个真步骤上假红（本文件的 `--root` 实跑：5 项未通过）。127 是**另一类**信号：
+      // 它说的是"这一步跑到一个仓内不存在的路径上去了"，那正是载荷走私的指纹。
+      if (green.status === 127) {
+        failures.push(`${label} 在金丝雀仓里**撞上了"仓内不存在"的执行体**（EXIT=127）——`
+          + '金丝雀仓里只有步体点名的仓内路径被铺成桩，其它仓内路径都不存在，\n'
+          + '      ⇒ 127 说明这一步执行了**它没写出来的东西**（典型：运行期生成/解码出来的不透明载荷）。\n'
+          + `      stdout: ${JSON.stringify(green.stdout.slice(0, 200))}\n`
+          + `      stderr: ${JSON.stringify(green.stderr.slice(0, 200))}`)
         return
       }
       // ③ 正控 B（R1 形态）：只删掉"复位 PATH"这一半、保留冻结表达式 ⇒ 假 node **必须**被调用。

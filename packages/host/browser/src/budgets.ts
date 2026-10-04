@@ -118,3 +118,23 @@ export const QUEUE_MIN_WORK_MS = 1_000
  */
 export const NAVIGATE_LOAD_BOUND_MS =
   BROWSER_TOOL_TIMEOUT_MS - USER_GATE_TIMEOUT_MS - TAB_SLOT_WAIT_TIMEOUT_MS - TOOL_DEADLINE_MARGIN_MS
+
+/** How long the frame index waits for Chromium to report out-of-process frames (ms). */
+export const FRAME_CONTEXT_WAIT_MS = 500
+
+/**
+ * Extra settle time before refusing an index a dynamic page may still be
+ * committing — a frame owner inserted a tick before its frame exists (ms).
+ */
+export const FRAME_INDEX_SETTLE_MS = 150
+
+/**
+ * The leg `browser_eval` pays when it addresses a sub-frame (`frame: N`), ms.
+ *
+ * 与 {@link NAVIGATE_LOAD_BOUND_MS} / {@link TAB_SLOT_WAIT_TIMEOUT_MS} 同类：**同一个
+ * 工具先后发生**的内部等待，必须和用户闸一起留在注册预算内。它此前只作为
+ * `runtime.ts` 的模块私有常量存在 ⇒ 逐工具预算序关系判据的登记面看不见它
+ * （2026-10-04 C3-02 复审：那张表对 31 个工具只登记了 8 个的腿）。定义搬到这里，
+ * 让"工具预算 + 内部等待预算"继续只有一份真源。
+ */
+export const FRAME_INDEX_LEG_MS = FRAME_CONTEXT_WAIT_MS + FRAME_INDEX_SETTLE_MS

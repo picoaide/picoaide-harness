@@ -1,38 +1,54 @@
 ---
+import { footerContent } from './site-nav.mjs'
+
+/**
+ * `locale` 缺省 `root` = 中文站：不传参数的页面渲染结果与历史逐字节一致。
+ * 英文页（`src/pages/en/index.astro`）**必须**传 `locale="en"`，否则页脚 9 条站内链接会把
+ * 访客送回中文站（回归审计 v2.8.1→HEAD 的 E-04）。判据：`site/scripts/check-en-landing-nav.mjs`。
+ */
+interface Props {
+  locale?: 'root' | 'en'
+}
+
+const { locale = 'root' } = Astro.props
+const content = footerContent(locale)
 const year = new Date().getFullYear()
+
+/*
+ * 下面模板里的空白是**契约**，不是排版：
+ *   · Astro 把模板中的换行 + 缩进折成**一个空格**（历史产物就是这个形态），而 `.map()`
+ *     相邻兄弟之间**不产生**任何空白 ⇒ 直接 map 会让中文站页脚少掉 11 个空格、渲染结果
+ *     不再与改动前逐字节一致。所以组与组、链接与链接之间显式补一个空格（`? null : ' '`）。
+ *   · 反过来，**模板里的 JSX 式注释块会带来两个空格**（注释前后各一个空白文本节点，
+ *     注释自身渲染为空）—— 实测把「品牌栏 → 产品栏」的分隔从 1 个空格变成 2 个。
+ *     所以这条说明放在 frontmatter 里，不放进模板。
+ * 校验：`site/scripts/check-en-landing-nav.mjs`（数据面 + 落点面 + 接线面）+ 构建产物对拍
+ * （同一构建位置的改动前后两棵树：44 个 HTML 里 43 个逐字节相同，唯一不同的就是本修复的
+ * 目标 `/en/` 落地页）。
+ */
 ---
 
 <footer class="footer">
   <div class="container footer__grid">
     <div class="footer__col">
       <strong>PicoAide Harness</strong>
-      <p>企业级 DeepSeek Harness 一体化平台，支持私有化部署。</p>
+      <p>{content.tagline}</p>
     </div>
-    <div class="footer__col">
-      <strong>产品</strong>
-      <a href="/#deployment">私有化部署</a>
-      <a href="/#delivery">客户端交付</a>
-      <a href="/#features">核心特性</a>
-      <a href="/#screenshots">界面截图</a>
-    </div>
-    <div class="footer__col">
-      <strong>资源</strong>
-      <a href="/getting-started/">快速开始</a>
-      <a href="/deployment/upgrade/">升级与回滚</a>
-      <a href="/blog/">博客</a>
-      <a href="/welcome/">Wiki 文档</a>
-      <a href="/about/">关于我们</a>
-    </div>
-    <div class="footer__col">
-      <strong>社区</strong>
-      <a href="https://github.com/picoaide/picoaide-harness">GitHub</a>
-      <a href="https://github.com/picoaide/picoaide-harness/releases" target="_blank" rel="noopener">版本归档</a>
-      <a href="https://github.com/picoaide/picoaide-harness/issues" target="_blank" rel="noopener">提交 Issue</a>
-    </div>
+    {content.groups.map((group, groupIndex) => (<Fragment>{groupIndex === 0 ? null : ' '}<div class="footer__col">
+        <strong>{group.title}</strong>
+        {group.links.map((link, linkIndex) => (
+          <Fragment>{linkIndex === 0 ? null : ' '}<a
+            href={link.href}
+            target={link.blank ? '_blank' : undefined}
+            rel={link.blank ? 'noopener' : undefined}
+          >{link.label}</a></Fragment>
+        ))}
+      </div></Fragment>
+    ))}
   </div>
   <div class="container footer__bottom">
     <span>© {year} PicoAide. All rights reserved.</span>
-    <span>基于 DeepSeek Harness 构建。</span>
+    <span>{content.note}</span>
   </div>
 </footer>
 

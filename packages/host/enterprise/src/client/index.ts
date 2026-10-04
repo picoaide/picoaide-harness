@@ -72,7 +72,9 @@ const brandCss = (tagline: string): string => `
 
 /* Hero headline + preview badge text (upstream locale not overridable).
  *
- * 0.1.5-rc.2 把首屏标题的 CSS 类从 \`headlineText\` 改名为 \`titleGroup\`，并在其中
+ * 0.1.5-rc.2 把首屏标题的 CSS 类从 \`headlineText\` 改名为 \`titleGroup\`（**0.2.0-rc.2 复核**：
+ * 上游 \`ui-conversation/src/client/skeleton/EmptyHero.tsx\` 仍是 \`css.titleGroup\` + \`css.previewBadge\`，
+ * 两个选择器都还命中），并在其中
  * 包了两层：\`<span class="_titleGroup_…"><span>{headline}</span><span class="_previewBadge_…">\`。
  * 只改类名不够 —— 必须命中的是**第一个内层 span**，否则 \`font-size: 0\` 会把
  * 「企业版」徽标一起吃掉（2026-09-12 打包版真机复现：规则空匹配时首屏显示上游

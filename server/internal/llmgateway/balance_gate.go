@@ -27,6 +27,12 @@ package llmgateway
 //	   UnpricedModelPolicyReject 注释：为什么默认必须是 reject、以及"兜底价"为什么
 //	   闭合不了这个洞）。
 //
+// ③③b④ 还有一条**参与前提**（S2-01，审计 2026-10-04，P1）：这次请求必须有候选
+// provider（`MatchModelsByProtocol` 非空）。空集 = 本端点不可路由（名字拼错 / 模型
+// 已删 / provider 停用或协议不匹配）⇒ handler 随后给 404 NOT_FOUND，闸门不得用取价
+// 结果把它顶替成 429 MODEL_NOT_PRICED；①② 与模型无关，仍逐字保留（理由见
+// `balanceAdmissionBlocked` 的早退注释）。
+//
 // R18C-01（审计 2026-09-25，P1）把 ③④ 的取价从**模型名**改到**候选 provider 维度**：
 // 名字口径（`ModelPrices` = ORDER BY provider_id LIMIT 1）与结算口径
 // （`ModelPricesForProvider(实际命中的 provider, name)`）在两个 provider 挂同名模型、
@@ -120,11 +126,15 @@ func resetBalanceRejectionLogForTest() {
 // ⇒ 余额一分不减、学到的下限永不置位（R17A-06 要闭合的洞被"名字口径"重新打开）。
 type admissionPricing struct {
 	// candidates 是本端点协议下可路由的 provider 数（0 = 该名字在本端点不可路由，
-	// 调用方会 404，不产生上游调用 ⇒ ③④ 都不需要参与）。
+	// 调用方会 404，不产生上游调用 ⇒ ③③b④ 都不参与；S2-01 起由
+	// balanceAdmissionBlocked 的早退实现）。
 	candidates int
-	// unpriced 是"取价/路由面读失败"（fail-closed：按未定价处置，与"取价失败曾经
-	// 等于 0 价"的既有方向一致）。**"某一家的价算不算未定价"不在这里判** ——
-	// 它与端点的计费面有关（有无补全侧），见 unpricedFor。
+	// unpriced 是"取价/路由面读失败"（fail-closed）。**"某一家的价算不算未定价"不在
+	// 这里判** —— 它与端点的计费面有关（有无补全侧），见 unpricedFor。
+	//
+	// S2-01 起，`lookupFailed` 在 balanceAdmissionBlocked 里**先**被一条独立判据拦下
+	// （`MODEL_ROUTING_UNAVAILABLE`）：它是"判不出来"，不是"未定价"，两者不能共用
+	// 同一个错误码/文案；unpricedFor 里那一支降级为纵深防御。
 	lookupFailed bool
 	// inputPer1M / outputPer1M 是各候选的生效（输入/输出）价，**顺序与路由候选一致**
 	// （[0] = 正常路径的那一家）。
@@ -156,6 +166,10 @@ type admissionPricing struct {
 //   - embeddings：没有补全侧 ⇒ 输入价 <= 0 就是无法计费。
 func (p admissionPricing) unpricedFor(hasOutput bool) bool {
 	if p.lookupFailed {
+		// 兜底（S2-01 验证报告 §2 的同族补集）：生产路径已经在上游用**独立错误码**
+		// （`MODEL_ROUTING_UNAVAILABLE`，见 balanceAdmissionBlocked）拦下"路由面读失败"
+		// ——"判不出来"不再被说成"未定价"。这一支保留为**纵深防御**：万一那条判据被删，
+		// 这里仍然 fail-closed，而不是把"读不出来"当成"已定价"放行。
 		return true
 	}
 	for i, in := range p.inputPer1M {
@@ -327,8 +341,10 @@ func minBillableMicro(db *sql.DB, model string, pricing admissionPricing, tokens
 	}
 	inputPer1M := pricing.servingInputPer1M()
 	if pricing.candidates == 0 {
-		// 不可路由的名字（随后 404）：没有候选可谈"最低价"，保留历史判据（按名字取一行），
-		// 不改变这条路径上的状态码与文案。
+		// 走到这里只剩"路由面读失败"（`lookupFailed`）一种：空候选集的**正常**形态
+		// （不可路由的名字 ⇒ handler 随后 404）已在 balanceAdmissionBlocked 的早退里
+		// 排除（S2-01，审计 2026-10-04）。这里保留历史判据（按名字取一行）与
+		// fail-closed 方向。
 		inputPer1M, _, _ = serverstore.ModelPrices(db, model)
 	}
 	need, ok := billableMicro(tokens, inputPer1M)
@@ -403,20 +419,61 @@ func (a *API) balanceAdmissionBlocked(user *serverstore.User, model string, prom
 	// （R18A-05：③b 与 ④ 都要"这次请求"的量级）。放在 ①② 之后：那两条不需要任何
 	// 取价（顺序与历史一致），且 policy=allow 时 ③ 不参与而 ④ 仍需要价。
 	pricing := a.admissionPricingFor(model, protocol)
+	// S2-01（审计 2026-10-04，P1）：**不可路由的模型名不参与 ③③b④**。
+	//
+	// `MatchModelsByProtocol` 查得到但返回空集（名字拼错 / 模型已删 / provider 停用或
+	// 不服务本端点协议）⇒ 这次请求没有候选 provider：既不存在"将被路由到的那一家"的价，
+	// 也不存在"该给它填价格"的对象。handler 在同一个位置用 `len(ups) == 0 ⇒ 404
+	// NOT_FOUND` 收口（v2.8.1 逐字如此）。修前这里落到 ③ 的"按名字取一行"回退
+	// （`serverstore.ModelPrices`：查不到行返回 0,0）⇒ 判成未定价 ⇒ **429
+	// MODEL_NOT_PRICED 顶替了 404**，文案还把管理员指向一个不存在的模型
+	//（审计探针：闸门关闭 = 404、闸门开启 = 429，两条路径上游命中都是 0）。
+	//
+	// ①② 层**逐字保留在本次判定之前**：它们是 v2.8.1 `quotaBlocked` 的既有契约，就
+	// 跑在同一个位置（同样在 `MatchModelsByProtocol` 之前），且只读**请求者本人**的账户
+	// 状态（分位余额 ≤ 0 / 上次结算学到的下限）—— 不读模型目录、不读定价、与这次请求
+	// 要花多少钱无关。所以"未知模型名"在这两条之上没有任何新的可探测信息：余额耗尽时
+	// **任何**模型名（含已定价的）都得到同一个 429 BALANCE_EXHAUSTED，而余额本身是该
+	// 用户自己就能从账户读面（`GET /api/client/v2/auth/usage`）看到的量，不是越权通道。
+	// 反过来，若把 ①② 也跳过，"余额 0 的账号请求不存在的模型"会从 v2.8.1 的 429 变成
+	// 404 —— 那是对外契约的另一处无谓变更，还会丢掉一个与本 finding 无关的正确判据。
+	//
+	// `lookupFailed`（路由面读失败）**不**走这条早退：那不是"不可路由"而是"判不出来"，
+	// 保持 fail-closed（见紧随其后的那条独立判据）。
+	if pricing.candidates == 0 && !pricing.lookupFailed {
+		return balanceAdmissionRefusal{}, false
+	}
+	// 路由面**读失败**（`MatchModelsByProtocol` / `ModelPricesForProviders` 返回 error）：
+	// 与"未定价"是两件事，必须给可区分的码与文案（S2-01 验证报告 §2 的同族补集）。
+	//
+	// 修前它落进 ③ 的 `unpricedFor`（对 lookupFailed 恒真）⇒ 客户端收到
+	// `429 MODEL_NOT_PRICED` + "该模型未配置价格…请联系管理员在网关的模型列表里为它
+	// 填写价格" —— 把一次**数据库读取故障**说成模型的定价问题（管理员照着提示去查定价
+	// 永远查不出问题），而同一个条件在闸门关闭时是 handler 的 `500 INTERNAL 模型路由
+	// 查询失败`；记账面的 `reason` 也被记成 `unpriced_model`（假归因）。
+	//
+	// 处置：**不放松 fail-closed** —— 仍然在转发之前拒绝、仍然 0 上游命中、余额一分不动；
+	// 只把**呈现**改成可区分（独立错误码 + 如实文案 + 独立 reason）。
+	//
+	// 位置：必须在上面那条早退**之后**。早退条件里的 `!pricing.lookupFailed` 是"不可路由
+	// ⇒ 交还 handler 的 404"这条判据的牙齿：把它（或本块）挪到早退之前，
+	// `TestBalanceAdmissionRouteLookupFailureStaysFailClosed` 的变异（丢掉 `!lookupFailed`
+	// ⇒ 本该落到 handler 的 500）就会失去判别力。
+	if pricing.lookupFailed {
+		return balanceAdmissionRefusal{
+			code: "MODEL_ROUTING_UNAVAILABLE",
+			// 文案对员工可读、对管理员可执行：这不是账户问题，也不是模型定价问题。
+			message: "模型路由暂不可用,请稍后重试(服务端读取模型目录失败,与你的账户余额无关)",
+			reason:  "routing_lookup_failed",
+		}, true
+	}
 	tokens := promptTokens
 	// 计费面的形状由端点决定：embeddings 没有补全侧（③③b 只看输入价）。
 	hasOutput := where != "embeddings"
 	// ③ 未定价模型:成本侧恒为 0 ⇒ ①② 与"余额 <= 0"同时失效（见文件头注释）。
 	// 默认策略 reject ⇒ 直接拒绝；allow 是显式逃生门（免费/内部模型）。
 	if serverstore.UnpricedModelPolicy(a.DB) != serverstore.UnpricedModelPolicyAllow {
-		unpriced := pricing.unpricedFor(hasOutput)
-		if pricing.candidates == 0 {
-			// 该名字在本端点不可路由（handler 随后 404、不产生上游调用）⇒ 没有"候选价"
-			// 可判，保留历史判据（按名字取一行）与它的状态码，不用 404 顶替 429。
-			in, out, _ := serverstore.ModelPrices(a.DB, model)
-			unpriced = in <= 0 && (!hasOutput || out <= 0)
-		}
-		if unpriced {
+		if pricing.unpricedFor(hasOutput) {
 			return balanceAdmissionRefusal{
 				code: "MODEL_NOT_PRICED",
 				// 文案对员工可读、对管理员可执行（唯一的修法是给模型定价）。
