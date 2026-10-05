@@ -203,6 +203,31 @@ function fakeResponse(): { res: ServerResponse, state: { status: number, body: s
 /** 等一次微任务链（路由 handler 是 fire-and-forget 的 async）。 */
 const flush = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
 
+/**
+ * 等一个**可观察结果**成立（fire-and-forget 路由 + 真实文件 I/O 的信号式等待）。
+ *
+ * 为什么不能睡固定时长：这些路径背后是真原子写（temp + rename + fsync）与
+ * `rm -rf` 缓存清理，耗时随机器与负载变化。旧写法
+ * `await new Promise(resolve => { setTimeout(resolve, 20) })` 在磁盘慢/负载高的 runner 上
+ * 会在写落地**之前**返回，紧随其后的断言读到中间态：2026-10-04 的 tag 门禁上实测到
+ * `expected 403 to be 200`（同一提交的 PR 门禁是绿的、本机 24/24 绿）。
+ * 判据必须等"效果可见"，不是等"大概够了"。
+ *
+ * 形态与文件后段的 `until()` / `openViaRoute()` 一致（那两处本来就是信号式等待）。
+ * @param check - 结果可见的判据（同步读，无副作用）。
+ * @param label - 超时文案里点名的**结果**（失败时直接看出在等什么）。
+ * @param budgetMs - 有界预算；到点即抛，绝不静默放过。
+ */
+const untilVisible = async (check: () => boolean, label: string, budgetMs = 5_000): Promise<void> => {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    if (check()) return
+    if (Date.now() > deadline) throw new Error(`等待「${label}」在 ${String(budgetMs)}ms 预算内没有成立`)
+    await flush()
+    await new Promise(resolve => { setTimeout(resolve, 5) })
+  }
+}
+
 const ALICE: AppSession = { serverURL: 'https://harness.example.com', token: 'tok', username: 'alice' }
 /**
  * alice 在 `https://harness.example.com` 上的分区名（§7.2 冻结：
@@ -849,9 +874,11 @@ describe('local open route', () => {
 
     const openOnce = async (appId: string): Promise<void> => {
       const { res } = fakeResponse()
+      const before = created.length
       routeOf(h).handler(fakeRequest('POST', JSON.stringify({ app_id: appId }), proof), res)
-      await flush()
-      await new Promise(resolve => { setTimeout(resolve, 20) })
+      // 建窗是这条 fire-and-forget 路由的**可观察结果**：等到窗口真的建出来，
+      // 而不是睡一段"大概够"的固定时长（换代清理链 + 版本探测都是真异步）。
+      await untilVisible(() => created.length > before, `打开 ${appId} 时建出窗口`)
     }
 
     await openOnce('my-notes')
@@ -887,8 +914,9 @@ describe('local open route', () => {
     const proof2 = await proofHeaderOf(h2)
     const r2 = fakeResponse()
     routeOf(h2).handler(fakeRequest('POST', '{"app_id":"my-notes"}', proof2), r2.res)
-    await flush()
-    await new Promise(resolve => { setTimeout(resolve, 20) })
+    // 同一条建窗路由：分区注册**早于**建窗，所以要等的是下面那条断言真正读的东西
+    // （窗口选项），不是分区表 —— 等错对象会在建窗之前就返回，反而变成新的假绿来源。
+    await untilVisible(() => createdCustom.length > 0, '自定义分区下建出窗口')
     expect(h2.partitions).toContain('persist:agent-browser-custom')
     expect(createdCustom[0]?.partition).toBe('persist:agent-browser-custom')
   })
@@ -1000,9 +1028,10 @@ describe('应用 AI 桥（§21）：授权路由 → 闸门 → SSE，且不转�
       fakeRequest('POST', JSON.stringify(body), headers, WASM_APP_AI_CONSENT_ROUTE),
       res,
     )
-    // 授权记录带真实文件 I/O（原子写）⇒ 只冲微任务不够。
-    await flush()
-    await new Promise(resolve => { setTimeout(resolve, 20) })
+    // 授权记录带真实文件 I/O（原子写）⇒ 只冲微任务不够；但**也不能睡固定时长**。
+    // 这条路由的最后一步是写响应，而它前面已经 `await grant/revoke`（授权落盘完成）
+    // ⇒「响应写完」就是「授权已落盘」的确定性信号（2026-10-04 tag 门禁红的那条断言）。
+    await untilVisible(() => state.status !== 0, '授权路由写完响应')
     return state
   }
 
