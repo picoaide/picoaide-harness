@@ -1,0 +1,61 @@
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -143,7 +143,38 @@
+ }
+ /** Opaque version token from high-resolution identity and freshness metadata. */
+ function versionOf(info) {
+-	return FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
++	return FsVersion(`${info.dev}:${info.ino}:${info.size}:${statNanoseconds(info, "mtime")}:${statNanoseconds(info, "ctime")}`);
++}
++/**
++* Read a whole path mask out of a `Stats` object of either shape.
++*
++* Electron < 44.4.0 patches `fs` for `app.asar` but ignores `{ bigint: true }` there and
++* answers with a Number `Stats` (upstream issue #130) — `info.mode & 511n` then throws
++* "Cannot mix BigInt and other types". This module only ever needs the permission bits,
++* so it accepts either shape instead of relying on the engine.
++* @param info - the `Stats`/`BigIntStats` object to read.
++* @returns the permission mask as a Number.
++*/
++function modeBits(info) {
++	return typeof info.mode === "bigint" ? Number(info.mode & 511n) : Number(info.mode) & 511;
++}
++/**
++* Read a nanosecond timestamp field that only bigint stats carry.
++*
++* The same shim that returns a Number `Stats` also leaves `mtimeNs`/`ctimeNs` undefined,
++* which would silently turn every version string into `…:undefined:undefined` (the version
++* is the optimistic-concurrency witness, so "undefined" is not an acceptable answer). The
++* millisecond field is the best resolution such a shim can report; derive from it.
++* @param info - the `Stats`/`BigIntStats` object to read.
++* @param field - base field name, `mtime` or `ctime`.
++* @returns the nanosecond value as a string.
++*/
++function statNanoseconds(info, field) {
++	const nanoseconds = info[`${field}Ns`];
++	if (nanoseconds !== undefined && nanoseconds !== null) return String(nanoseconds);
++	const milliseconds = info[`${field}Ms`];
++	if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds)) return "0";
++	return String(BigInt(Math.trunc(milliseconds)) * 1000000n);
+ }
+ /**
+ * Anchor a path using native drive semantics and POSIX physical parent traversal.
+@@ -240,7 +271,7 @@
+ 	if (!info) return null;
+ 	return {
+ 		version: versionOf(info),
+-		mode: Number(info.mode & 511n),
++		mode: modeBits(info),
+ 		type: pathType(info),
+ 		size: Number(info.size)
+ 	};
+@@ -255,7 +286,7 @@
+ 	if (!info) return null;
+ 	return {
+ 		version: versionOf(info),
+-		mode: Number(info.mode & 511n),
++		mode: modeBits(info),
+ 		type: pathLinkType(info),
+ 		size: Number(info.size)
+ 	};

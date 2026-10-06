@@ -526,8 +526,11 @@ describe('published package surface', () => {
     // 这条断言守的是「**精确 pin**，不是 range」—— 不是「必须是稳定版」。
     // 2026-09-28 修正取值域：原来是 `^\d+\.\d+\.\d+$`，它把**预发布版**一并判红，而
     // 预发布版同样可以是精确 pin。0.1.7 的原生插件按 V8 指纹只认三个精确的 Electron
-    // 版本，唯一同时满足「插件指纹」与「asar bigint 语义」的解就是 `45.0.0-alpha.7`
-    // （证据链见 docs/AUDIT-2026-09-23-FULL.md §8.9.9）⇒ 旧正则把唯一可用的解判死。
+    // 版本（43.0.0/43.1.0、44.0.0、45.0.0-alpha.4~7），所以取值域必须容纳预发布版。
+    // 2026-10-06 起 pin 是 `44.0.0`：45.0.0-alpha.7 上「透明 WebContentsView 叠在兄弟
+    // 视图上」失效 ⇒ 内置浏览器的蒙版/胶囊整层不渲染（真机像素判据与全部选项见
+    // docs/planning/2026-10-06-browser-mask-transparent-view-regression.md），而 asar
+    // 的 bigint 缺口改由 patches/dsh-fs-local@0.2.0-rc.2.patch + afterPack 的能力判据兜。
     // 这正是本项目反复出现的「判据的取值域窄于被守护面」：断言必须表达它声称的语义。
     expect(pinned, 'Electron 必须是精确 pin（含预发布版，但不得是 range）')
       .toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u)

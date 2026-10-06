@@ -27,6 +27,8 @@
     "@deepseek-ai/dsh-client-ui-brand-official@npm:^0.2.0-rc.2": "patch:@deepseek-ai/dsh-client-ui-brand-official@npm%3A0.2.0-rc.2#./patches/dsh-client-ui-brand-official@0.2.0-rc.2.patch",
     "@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm:0.2.0-rc.2": "patch:@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm%3A0.2.0-rc.2#./patches/dsh-client-ui-sidebar-documentpreview@0.2.0-rc.2.patch",
     "@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm:^0.2.0-rc.2": "patch:@deepseek-ai/dsh-client-ui-sidebar-documentpreview@npm%3A0.2.0-rc.2#./patches/dsh-client-ui-sidebar-documentpreview@0.2.0-rc.2.patch",
+    "@deepseek-ai/dsh-fs-local@npm:0.2.0-rc.2": "patch:@deepseek-ai/dsh-fs-local@npm%3A0.2.0-rc.2#./patches/dsh-fs-local@0.2.0-rc.2.patch",
+    "@deepseek-ai/dsh-fs-local@npm:^0.2.0-rc.2": "patch:@deepseek-ai/dsh-fs-local@npm%3A0.2.0-rc.2#./patches/dsh-fs-local@0.2.0-rc.2.patch",
     "@deepseek-ai/dsh-mcp-client@npm:0.2.0-rc.2": "patch:@deepseek-ai/dsh-mcp-client@npm%3A0.2.0-rc.2#./patches/dsh-mcp-client@0.2.0-rc.2.patch",
     "@deepseek-ai/dsh-mcp-client@npm:^0.2.0-rc.2": "patch:@deepseek-ai/dsh-mcp-client@npm%3A0.2.0-rc.2#./patches/dsh-mcp-client@0.2.0-rc.2.patch",
     "@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm:0.2.0-rc.2": "patch:@deepseek-ai/dsh-plugin-package-inventory-deepseek@npm%3A0.2.0-rc.2#./patches/dsh-plugin-package-inventory-deepseek@0.2.0-rc.2.patch",
