@@ -2598,8 +2598,16 @@ export function smokePackagedErrorReporting(
 /** Timeout for the packaged ASAR bigint smoke (a hung Electron must not hang afterPack). */
 export const PACKAGED_ASAR_BIGINT_SMOKE_TIMEOUT_MS = 20_000
 
-/** Success marker the embedded ASAR bigint script prints; a silent exit 0 is a failure. */
+/** Success marker the embedded ASAR filesystem script prints; a silent exit 0 is a failure. */
 const ASAR_BIGINT_SMOKE_OK = 'ASAR-BIGINT-SMOKE-OK'
+
+/**
+ * Prefix of the engine-regime line the embedded script prints (`bigint=<bool> mask=<n|threw:…>`).
+ * It is **evidence, not a judgment**: the capability under test is held by the fs-local
+ * patch, so an engine that answers `{ bigint: true }` with a Number `Stats` (44.0.0) is
+ * acceptable — the line is what makes that visible in the CI log.
+ */
+const ASAR_BIGINT_SMOKE_ENGINE = 'ASAR-BIGINT-SMOKE-ENGINE'
 
 /**
  * The `cordis` preset's bundled skill directory inside the package.
@@ -2727,7 +2735,7 @@ export const assertExactSkillListing: (
  */
 const ASAR_BIGINT_SMOKE_SCRIPT = `import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
 const assertExactSkillListing = ${assertExactSkillListing.toString()}
@@ -2736,22 +2744,27 @@ const appRoot = process.argv[2]
 const expected = JSON.parse(process.argv[3])
 const skillsDir = join(appRoot, 'node_modules/@deepseek-ai/dsh-agent-preset/skills')
 
-// (1) Engine semantics on an app.asar path: the packaged Electron must honour { bigint: true }.
-const info = await stat(skillsDir, { bigint: true })
-if (typeof info.mode !== 'bigint') {
-  throw new Error('stat(path, { bigint: true }) on an app.asar path returned ' + info.constructor.name
-    + ' with typeof mode=' + typeof info.mode
-    + ' — this Electron does not honour the bigint option, so the runtime permission mask throws')
-}
-let mask
+// (1) Engine behaviour on an app.asar path: REPORTED, not judged. Electron < 44.4.0
+// ignores { bigint: true } here and synthesizes a Number Stats; the product no longer
+// depends on either behaviour (the fs-local patch normalizes what the shim returns),
+// so this line is evidence for the CI log rather than a gate.
+let engineStats
 try {
-  mask = Number(info.mode & 0o777n)
+  const info = await stat(skillsDir, { bigint: true })
+  let mask = 'n/a'
+  try {
+    mask = String(Number(info.mode & 0o777n))
+  } catch (error) {
+    mask = 'threw:' + error.message
+  }
+  engineStats = 'bigint=' + String(typeof info.mode === 'bigint') + ' mask=' + mask
 } catch (error) {
-  throw new Error('the runtime permission-mask expression threw on an app.asar path: ' + error.message)
+  engineStats = 'stat-failed:' + error.message
 }
-if (!Number.isInteger(mask)) throw new Error('the permission mask produced ' + String(mask))
+process.stdout.write('${ASAR_BIGINT_SMOKE_ENGINE} ' + engineStats + '\\n')
 
-// (2) + (3) The provider path, checked against the artifact-derived expectation.
+// (2) + (3) The capability that actually matters: the packaged skill provider must
+// stat, list and READ through the archive, exactly as it does at runtime.
 const appRequire = createRequire(join(appRoot, 'package.json'))
 const { LocalFileSystem } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/dsh-fs-local')).href)
 const { Context } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/cordis')).href)
@@ -2761,6 +2774,15 @@ const names = listed.map(entry => entry.name).sort()
 const skills = listed.filter(entry => entry.type === 'directory').map(entry => entry.name).sort()
 assertExactSkillListing(names, expected.children, 'skill directory listing')
 assertExactSkillListing(skills, expected.skills, 'discoverable skills')
+// A listing alone could in principle be synthesized; the provider must also be able to
+// READ the body of the skill it just claimed to discover (that is what the session does
+// with every discovered skill). The expectation is never empty here — the caller refuses
+// to run against an empty one.
+const body = await readFile(join(skillsDir, expected.skills[0], 'SKILL.md'), 'utf8')
+if (typeof body !== 'string' || body.trim().length === 0) {
+  throw new Error('read ' + join(skillsDir, expected.skills[0], 'SKILL.md')
+    + ' through the archive and got an empty skill body')
+}
 process.stdout.write('${ASAR_BIGINT_SMOKE_OK}\\n')
 `
 
@@ -2801,12 +2823,12 @@ function runAsarBigintSmokeProcess(
 }
 
 /**
- * Smoke the packaged ASAR `{ bigint: true }` semantics and the filesystem skill
- * listing it gates (issue #130).
+ * Smoke the packaged ASAR filesystem capabilities the filesystem skill provider
+ * needs (issue #130; capability form since 2026-10-06).
  *
  * v2.8.0 shipped Electron 43.4.0, whose ASAR fs shim ignored `{ bigint: true }`
  * and synthesized a Number `Stats`. `@deepseek-ai/dsh-fs-local`'s
- * `listDirectory()` asserts the requested BigInt shape with
+ * `listDirectory()` asserted the requested BigInt shape with
  * `Number(info.mode & 0o777n)`, so **every** `stat`/`list` on an `app.asar` path
  * threw, `FsError('cannot list "<asar path>": Cannot mix BigInt and other
  * types…')` bubbled out of the skill provider's root loop, and cordis sessions
@@ -2815,11 +2837,20 @@ function runAsarBigintSmokeProcess(
  * `web-app` bundle disables the host `skill-filesystem` row, so nothing else
  * re-discovers them).
  *
+ * Judgement is **capability**, not engine mechanism: the packaged launcher must
+ * `stat`, `listDir` and read a `SKILL.md` **through app.asar** with the real
+ * `LocalFileSystem`, and the listing must equal the artifact-derived expectation
+ * exactly. The engine's `{ bigint: true }` behaviour is *reported* in the smoke
+ * stdout (`ASAR-BIGINT-SMOKE-ENGINE …`) so the CI log shows which regime the
+ * pinned engine is in, but it is no longer a gate — the contract is held on our
+ * side by `patches/dsh-fs-local@0.2.0-rc.2.patch`, which normalizes whatever
+ * `Stats` the shim returns (Number on Electron 44.0.0, bigint on >= 44.4.3).
+ * That is why the engine pin could move back to the stable `44.0.0` on
+ * 2026-10-06 (the alpha it replaced broke the browser mask compositing — see
+ * docs/planning/2026-10-06-browser-mask-transparent-view-regression.md).
+ *
  * The static entry checks only prove those `SKILL.md` files are *inside* the
- * archive; they say nothing about whether the packaged engine can read them, and
- * the upgrade that fixed this (PR #127, Electron 44.4.3) did so incidentally.
- * This is the executable half: ship an engine whose ASAR shim honours the
- * documented `fs` contract, or fail the package.
+ * archive; this is the executable half.
  * @param context - Electron Builder's afterPack context.
  * @param launch - process launcher (tests inject a stub).
  * @param list - ASAR listing implementation used to derive the expectation.
@@ -2876,26 +2907,31 @@ export function smokePackagedAsarBigintSemantics(
     }
     if (result.status !== 0) {
       throw new Error(
-        `dsh-plugin-desktop: packaged ASAR bigint smoke failed (exit ${String(result.status)}) — this Electron's `
-        + 'app.asar fs shim does not honour { bigint: true }, so the filesystem skill provider would be skipped '
-        + 'and cordis sessions would lose every filesystem skill (preset, project, $DSH_HOME and ~/.agents roots alike).\n'
-        + '  Ship an Electron whose ASAR shim returns BigIntStats (>= 44; verified with 44.4.3).\n'
+        `dsh-plugin-desktop: packaged ASAR filesystem smoke failed (exit ${String(result.status)}) — the packaged `
+        + 'client cannot stat/list/read the preset skills through app.asar, so the filesystem skill provider would be '
+        + 'skipped and cordis sessions would lose every filesystem skill (preset, project, $DSH_HOME and ~/.agents roots alike).\n'
+        + '  Two contracts feed this capability: the engine\'s app.asar fs shim (Electron >= 44.4.3 honours { bigint: true }; '
+        + '44.0.0 answers with a Number Stats) and patches/dsh-fs-local@0.2.0-rc.2.patch, which normalizes whichever Stats '
+        + 'the shim returns. Verify both before pinning another Electron.\n'
         + `  launcher: ${executable}\n  app root: ${appRoot}\n`
         + `${result.stdout.trimEnd()}\n${result.stderr.trimEnd()}`,
       )
     }
     if (!result.stdout.includes(ASAR_BIGINT_SMOKE_OK)) {
       throw new Error(
-        'dsh-plugin-desktop: packaged ASAR bigint smoke exited 0 without reporting '
+        'dsh-plugin-desktop: packaged ASAR filesystem smoke exited 0 without reporting '
         + `${ASAR_BIGINT_SMOKE_OK} — the smoke script did not run to completion`,
       )
     }
     // CI 可观测性:afterPack 是三个 desktop job 里唯一的拦截点(产物级用例只在 gate 之外
     // 有 dist 时才跑),而成功的 smoke 默认静默 —— 没有这行就无法从日志正面证明新门禁
-    // 真的执行过。只报耗时与技能数,不改判据语义。
+    // 真的执行过。除了耗时与技能数,把子进程报回来的**引擎形态**一并打出来:它不进判据,
+    // 但换引擎时这行是"当前处于哪个 regime"的第一手证据。
+    const engineLine = result.stdout.split('\n').find(line => line.startsWith(ASAR_BIGINT_SMOKE_ENGINE)) ?? ''
     console.log(
-      `dsh-plugin-desktop: packaged ASAR bigint smoke OK in ${String(Date.now() - startedAt)}ms `
-      + `(${String(expectation.skills.length)} preset skills, app root ${appRoot})`,
+      `dsh-plugin-desktop: packaged ASAR filesystem smoke OK in ${String(Date.now() - startedAt)}ms `
+      + `(${String(expectation.skills.length)} preset skills, app root ${appRoot}`
+      + `${engineLine === '' ? '' : `, ${engineLine.trim()}`})`,
     )
   } finally {
     rmSync(root, { recursive: true, force: true })

@@ -327,3 +327,41 @@ e2e:client              → 41/41 全过                              (packages/
 硬约束**的版本；上游把 45-alpha 显式列为受支持运行时。**复核纪律**：以后动 Electron
 必须跑 `yarn package:dir` + 打包版启动 + `e2e:client`，只跑 `yarn check` 会放过这一类
 （本次就是被真机 E2E 抓到的）。完整证据链见 `docs/AUDIT-2026-09-23-FULL.md` §8.9.9。
+
+---
+
+## 五、2026-10-06 追补：pin 回到 **`44.0.0`**（45-alpha 打坏了内置浏览器的蒙版合成）
+
+**触发**：用户报告「内置浏览器打开网页后蒙版不见了；整窗都点不动；关掉浏览器窗口重开也不恢复」。
+像素判读证明覆盖层**在**且**满窗吞输入**，但**什么都没画**（详见
+`docs/planning/2026-10-06-browser-mask-transparent-view-regression.md`）。
+
+**根因（真机像素级 A/B，同一探针只换引擎）**：`webPreferences.transparent: true` 的
+`WebContentsView` 在 45.0.0-alpha.7 上**不再叠在兄弟视图之上**——蒙版视图拿到不透明背板，
+被它盖住的 tab 页整层不可见（Linux/软件合成实测：红色页面 0 像素透出）。同一个探针在
+43/42.3.3、**44.0.0**、44.4.3 上都正常。加载/崩溃/隐藏窗口顺序都不是原因（三页
+`did-finish-load` 全到、`capturePage()` 非空、摘掉蒙版视图后页面照常渲染）；
+`--disable-gpu` / `--use-angle=swiftshader` 也治不好生产形态。
+
+**解 44 线死结的办法**：45-alpha 的 asar 修复不再依赖引擎 —— 新增
+`patches/dsh-fs-local@0.2.0-rc.2.patch`，在 `probeStats()` 里把引擎给的 Number `Stats`
+**原地**归一成 bigint 语义（补 `mode/size/…` 与 `mtimeNs/ctimeNs`，保留 `Stats` 原型方法）。
+于是三条约束第一次同时成立：
+
+| 引擎 | 插件指纹表 | 内置浏览器蒙版合成 | asar 上的文件系统技能 |
+|---|---|---|---|
+| 44.4.3 | ❌（V8 15.2.124.28 不在表里） | ✅ | ✅（引擎自带） |
+| 45.0.0-alpha.7 | ✅ | ❌（本次根因） | ✅（引擎自带） |
+| **44.0.0（现 pin）** | ✅（V8 15.2.124.13） | ✅ | ✅（**靠本补丁**） |
+
+**判据随之改形**：afterPack 的 `smokePackagedAsarBigintSemantics` 从「引擎的 fs shim 必须
+返回 BigIntStats」改成**能力判据**——打包版必须能用真 `LocalFileSystem` 在 `app.asar` 上
+stat / `listDir` / 读出 `SKILL.md`，且列举结果与产物反推的期望**逐元素相等**；引擎形态
+（`ASAR-BIGINT-SMOKE-ENGINE bigint=… mask=…`）只打印、不判红。判据的牙齿仍指向同一个
+用户可见后果：文件系统技能整片消失。
+
+**复核纪律（追加一条）**：动 Electron 除了 `yarn package:dir` + 打包版启动 + `e2e:client`，
+还必须跑**合成能力探针**（真 Electron + 生产形态的 `createMaskView()` webPreferences +
+被盖住的彩色页面，断言 scrim 之下颜色透得出来）。2026-10-04 那次视觉探针**没有带
+`transparent: true`**，所以它给了绿灯而缺陷仍在。
+

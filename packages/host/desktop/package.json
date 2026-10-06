@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop",
-  "version": "2.8.2-beta.6",
+  "version": "2.8.2-beta.7",
   "description": "PicoAide Harness: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "license": "MIT",
   "publishConfig": {
@@ -327,7 +327,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
     "@deepseek-ai/cordis-plugin-loader": "1.0.5",
-    "electron": "45.0.0-alpha.7"
+    "electron": "44.0.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
@@ -339,7 +339,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.20.0",
     "@types/react": "^18",
-    "electron": "45.0.0-alpha.7",
+    "electron": "44.0.0",
     "electron-builder": "26.15.3",
     "sharp": "0.35.3",
     "tsdown": "0.22.2",
