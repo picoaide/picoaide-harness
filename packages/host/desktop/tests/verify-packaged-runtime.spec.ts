@@ -2362,12 +2362,15 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
         skills: REQUIRED_CORDIS_PRESET_SKILLS,
       })
       // 脚本必须真的断言引擎语义与真实 provider 路径(而不是"打印 OK 就退出"):
-      // `{ bigint: true }` + `0o777n` 是 fsio.ts 的原始表达式,`listDir` 是 provider 的实际调用。
+      // `{ bigint: true }` + `0o777n` 是引擎形态的**观测**(打印出来供 CI 看),`listDir`
+      // 与 SKILL.md 读取是 provider 的实际调用 ⇒ 后者才是判据(2026-10-06 改成能力形态)。
       const script = readFileSync(args[0] as string, 'utf8')
       expect(script).toContain('{ bigint: true }')
       expect(script).toContain('0o777n')
+      expect(script).toContain('ASAR-BIGINT-SMOKE-ENGINE')
       expect(script).toContain('@deepseek-ai/dsh-fs-local')
       expect(script).toContain('listDir')
+      expect(script).toContain('SKILL.md')
       expect(script).toContain('ASAR-BIGINT-SMOKE-OK')
       // 比较语义不是脚本里的第二份实现:子进程用的是父进程这个函数对象的源码
       // (assertExactSkillListing.toString()),所以下面的单测测的就是它真正执行的东西。
@@ -2420,16 +2423,20 @@ describe('packaged ASAR bigint semantics smoke (issue #130)', () => {
     expect(launch).not.toHaveBeenCalled()
   })
 
-  it('rejects the package when the engine reports Number stats (issue #130 symptom)', () => {
+  it('rejects the package when the provider cannot stat/list/read through app.asar (issue #130 symptom)', () => {
+    // 2026-10-06：判据从「引擎是否返回 BigIntStats」改成**能力**（见
+    // docs/planning/2026-10-06-browser-mask-transparent-view-regression.md §4：引擎回 44.0.0
+    // 后 shim 仍返回 Number Stats，靠 patches/dsh-fs-local 归一化）。这条夹具就是
+    // 「补丁没生效 + 引擎返回 Number Stats」的真实形态：权限掩码表达式抛错 ⇒ provider 列不出来。
     const fixture = asarFixture('linux')
     const launch: AsarBigintSmokeLauncher = () => ({
       status: 1,
-      stdout: '',
-      stderr: 'Error: the runtime permission-mask expression threw on an app.asar path: '
-        + 'TypeError: Cannot mix BigInt and other types, use explicit conversions',
+      stdout: 'ASAR-BIGINT-SMOKE-ENGINE bigint=false mask=threw:TypeError: Cannot mix BigInt and other types\n',
+      stderr: 'Error: cannot list "…/app.asar/node_modules/@deepseek-ai/dsh-agent-preset/skills": '
+        + 'Cannot mix BigInt and other types, use explicit conversions',
     })
     expect(() => smokePackagedAsarBigintSemantics(fixture.runtimeContext, launch))
-      .toThrow(/does not honour \{ bigint: true \}[\s\S]*filesystem skill provider would be skipped[\s\S]*Cannot mix BigInt/u)
+      .toThrow(/cannot stat\/list\/read the preset skills through app\.asar[\s\S]*dsh-fs-local@0\.2\.0-rc\.2\.patch[\s\S]*Cannot mix BigInt/u)
   })
 
   it('fails loud on timeout, spawn failure and a vacuous exit 0', () => {

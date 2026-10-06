@@ -65,7 +65,7 @@
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/cordis-plugin-include": "1.0.9",
     "@deepseek-ai/cordis-plugin-loader": "1.0.5",
-    "electron": "45.0.0-alpha.7"
+    "electron": "44.0.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
@@ -95,7 +95,7 @@
     "@types/node": "^22.20.0",
     "@types/react": "^18",
     "dsh-plugin-desktop": "workspace:*",
-    "electron": "45.0.0-alpha.7",
+    "electron": "44.0.0",
     "jsdom": "^25.0.0",
     "react": "18.3.1",
     "tsdown": "0.22.2",
